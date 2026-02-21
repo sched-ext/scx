@@ -487,38 +487,76 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_cpuset_spread_inner(&self, make_random: bool) -> Vec<usize> {
-        let mut cores: Vec<usize> = Vec::new();
-        let mut cpuset_core_vecs: Vec<Vec<&usize>> = Vec::new();
-        let mut max_cpuset_cores: usize = 0;
+        let mut result = Vec::new();
+        for node_id in self.node_order() {
+            let node_cores: BTreeSet<usize> = self.node_core_seqs(node_id).into_iter().collect();
 
-        for cpuset in self.cpusets {
-            max_cpuset_cores = std::cmp::max(cpuset_core_vecs.len(), max_cpuset_cores);
-            let cpuset_core_vec: Vec<&usize> = cpuset.cores.iter().map(|x| x).collect();
-            cpuset_core_vecs.push(cpuset_core_vec);
-        }
+            // Filter each cpuset to cores within this node.
+            let mut cpuset_core_vecs: Vec<Vec<usize>> = self
+                .cpusets
+                .iter()
+                .map(|cs| {
+                    cs.cores
+                        .iter()
+                        .filter(|c| node_cores.contains(c))
+                        .copied()
+                        .collect()
+                })
+                .filter(|v: &Vec<usize>| !v.is_empty())
+                .collect();
 
-        if make_random {
-            for mut core_vec in &mut cpuset_core_vecs {
-                fastrand::shuffle(&mut core_vec);
+            if make_random {
+                for v in &mut cpuset_core_vecs {
+                    fastrand::shuffle(v);
+                }
             }
-        }
 
-        for i in 0..=max_cpuset_cores {
-            for sub_vec in cpuset_core_vecs.iter() {
-                if i < sub_vec.len() {
-                    cores.push(*sub_vec[i]);
+            // Interleave within this node's cpuset portions.
+            let max_len = cpuset_core_vecs.iter().map(|v| v.len()).max().unwrap_or(0);
+            for i in 0..max_len {
+                for sub_vec in cpuset_core_vecs.iter() {
+                    if i < sub_vec.len() {
+                        result.push(sub_vec[i]);
+                    }
                 }
             }
         }
-
-        self.rotate_layer_offset(&mut cores);
-        cores
+        self.rotate_node_layer_offset(&mut result);
+        result
     }
 
     fn grow_cpuset_spread_reverse(&self) -> Vec<usize> {
-        let mut cores = self.grow_cpuset_spread();
-        cores.reverse();
-        cores
+        let mut result = Vec::new();
+        for node_id in self.node_order() {
+            let node_cores: BTreeSet<usize> = self.node_core_seqs(node_id).into_iter().collect();
+
+            let cpuset_core_vecs: Vec<Vec<usize>> = self
+                .cpusets
+                .iter()
+                .map(|cs| {
+                    cs.cores
+                        .iter()
+                        .filter(|c| node_cores.contains(c))
+                        .copied()
+                        .collect()
+                })
+                .filter(|v: &Vec<usize>| !v.is_empty())
+                .collect();
+
+            let max_len = cpuset_core_vecs.iter().map(|v| v.len()).max().unwrap_or(0);
+            let mut node_result = Vec::new();
+            for i in 0..max_len {
+                for sub_vec in cpuset_core_vecs.iter() {
+                    if i < sub_vec.len() {
+                        node_result.push(sub_vec[i]);
+                    }
+                }
+            }
+            node_result.reverse();
+            result.extend(node_result);
+        }
+        self.rotate_node_layer_offset(&mut result);
+        result
     }
 
     fn grow_cpuset_spread(&self) -> Vec<usize> {
