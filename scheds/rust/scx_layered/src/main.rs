@@ -6,6 +6,7 @@ mod bpf_skel;
 mod stats;
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -2343,6 +2344,49 @@ impl<'a> Scheduler<'a> {
         } else {
             layer_specs.to_vec()
         };
+
+        // Validate that spec node/LLC references exist in the topology.
+        for spec in layer_specs.iter() {
+            let mut seen = BTreeSet::new();
+            for &node_id in spec.nodes().iter() {
+                if !topo.nodes.contains_key(&node_id) {
+                    bail!(
+                        "layer {:?}: nodes references node {} which does not \
+                         exist in the topology (available: {:?})",
+                        spec.name,
+                        node_id,
+                        topo.nodes.keys().collect::<Vec<_>>()
+                    );
+                }
+                if !seen.insert(node_id) {
+                    bail!(
+                        "layer {:?}: nodes contains duplicate node {}",
+                        spec.name,
+                        node_id
+                    );
+                }
+            }
+
+            seen.clear();
+            for &llc_id in spec.llcs().iter() {
+                if !topo.all_llcs.contains_key(&llc_id) {
+                    bail!(
+                        "layer {:?}: llcs references LLC {} which does not \
+                         exist in the topology (available: {:?})",
+                        spec.name,
+                        llc_id,
+                        topo.all_llcs.keys().collect::<Vec<_>>()
+                    );
+                }
+                if !seen.insert(llc_id) {
+                    bail!(
+                        "layer {:?}: llcs contains duplicate LLC {}",
+                        spec.name,
+                        llc_id
+                    );
+                }
+            }
+        }
 
         // Check kernel features
         init_libbpf_logging(None);
