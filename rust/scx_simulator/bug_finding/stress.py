@@ -39,6 +39,11 @@ SCHEDULERS = ["simple", "lavd", "cosmos", "tickless", "mitosis"]
 CPU_COUNTS = [1, 2, 4, 8]
 INTERLEAVE_MODES = ["off", "cooperative", "preemptive"]
 
+
+def get_available_workloads() -> list[Path]:
+    """Return sorted list of available workload files."""
+    return sorted(WORKLOADS_DIR.glob("*.json"))
+
 # Defaults for stall detection
 DEFAULT_WATCHDOG_TIMEOUT = "2s"
 DEFAULT_SIM_DURATION = "4s"
@@ -258,13 +263,10 @@ def run_one(config: TestConfig) -> Optional[Finding]:
         )
 
 
-def generate_configs(rng: random.Random, schedulers: list[str]) -> TestConfig:
+def generate_configs(
+    rng: random.Random, schedulers: list[str], workloads: list[Path]
+) -> TestConfig:
     """Generate a random test configuration."""
-    workloads = sorted(WORKLOADS_DIR.glob("*.json"))
-    if not workloads:
-        print(f"error: no workloads found in {WORKLOADS_DIR}", file=sys.stderr)
-        sys.exit(1)
-
     return TestConfig(
         scheduler=rng.choice(schedulers),
         workload=rng.choice(workloads),
@@ -316,6 +318,17 @@ def main():
         help=f"Comma-separated list of schedulers (default: all: {','.join(SCHEDULERS)})",
     )
     parser.add_argument(
+        "--workloads",
+        type=str,
+        default=None,
+        help="Comma-separated list of workload names (without .json). Use --list-workloads to see available.",
+    )
+    parser.add_argument(
+        "--list-workloads",
+        action="store_true",
+        help="List available workloads and exit",
+    )
+    parser.add_argument(
         "--sim-duration",
         type=str,
         default=DEFAULT_SIM_DURATION,
@@ -333,6 +346,14 @@ def main():
         help="Enable strict determinism checking: run each seed twice and verify identical behavior",
     )
     args = parser.parse_args()
+
+    # Handle --list-workloads early (before other setup)
+    all_workloads = get_available_workloads()
+    if args.list_workloads:
+        print("Available workloads:")
+        for wl in all_workloads:
+            print(f"  {wl.stem}")
+        sys.exit(0)
 
     # Set global config from CLI args
     global WATCHDOG_TIMEOUT, SIM_DURATION, DETERMINISM_MODE
@@ -353,6 +374,24 @@ def main():
     else:
         schedulers = SCHEDULERS
 
+    # Filter workloads
+    workload_names = [wl.stem for wl in all_workloads]
+    if args.workloads:
+        requested = [w.strip() for w in args.workloads.split(",")]
+        unknown = [w for w in requested if w not in workload_names]
+        if unknown:
+            print(f"error: unknown workload(s): {', '.join(unknown)}", file=sys.stderr)
+            print(f"available: {', '.join(workload_names)}", file=sys.stderr)
+            print("use --list-workloads to see all available workloads", file=sys.stderr)
+            sys.exit(1)
+        workloads = [wl for wl in all_workloads if wl.stem in requested]
+    else:
+        workloads = all_workloads
+
+    if not workloads:
+        print("error: no workloads found", file=sys.stderr)
+        sys.exit(1)
+
     if not SCXSIM.exists():
         print(f"error: {SCXSIM} not found; run 'cargo build --release' first",
               file=sys.stderr)
@@ -368,6 +407,7 @@ def main():
           f"master seed={master_seed}")
     print(f"Mode: {mode_str}")
     print(f"Schedulers: {', '.join(schedulers)}")
+    print(f"Workloads: {', '.join(wl.stem for wl in workloads)}")
     print(f"Watchdog: {WATCHDOG_TIMEOUT}, sim duration: {SIM_DURATION}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"Log: {log_path}")
@@ -381,6 +421,7 @@ def main():
     log.info(f"Master seed: {master_seed}")
     log.info(f"Mode: {mode_str}")
     log.info(f"Schedulers: {', '.join(schedulers)}")
+    log.info(f"Workloads: {', '.join(wl.stem for wl in workloads)}")
     log.info(f"Watchdog timeout: {WATCHDOG_TIMEOUT}")
     log.info(f"Sim duration: {SIM_DURATION}")
 
@@ -399,7 +440,7 @@ def main():
             while time.monotonic() < deadline or pending:
                 # Submit new work while under deadline
                 while len(pending) < batch_size and time.monotonic() < deadline:
-                    config = generate_configs(rng, schedulers)
+                    config = generate_configs(rng, schedulers, workloads)
                     config.iteration = iteration
                     iteration += 1
                     future = pool.submit(run_one, config)
