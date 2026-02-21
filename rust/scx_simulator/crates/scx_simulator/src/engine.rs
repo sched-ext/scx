@@ -584,20 +584,10 @@ impl<S: Scheduler> Simulator<S> {
         // Set CPU ID width for log formatting
         kfuncs::set_sim_cpu_width(nr_cpus);
 
-        // Initialize scheduler
-        unsafe {
-            let cpu = state.current_cpu;
-            kfuncs::enter_sim(&mut state, cpu);
-            start_rbc(&mut state);
-            let rc = self.scheduler.init();
-            charge_sched_time(&mut state, CpuId(0), "init");
-            kfuncs::exit_sim();
-            assert!(rc == 0, "scheduler init failed with rc={rc}");
-        }
-
-        // Build cgroup registry from scenario definitions and call cgroup_init
-        // for each cgroup (including root). In the kernel, cgroup_init is called
-        // for all existing cgroups when the scheduler is loaded.
+        // Build cgroup registry from scenario definitions. We create and
+        // install it before ops.init() so that bpf_for_each(css, ...) inside
+        // init can discover cgroups (e.g. mitosis with cpu_controller_disabled).
+        // In the real kernel the cgroup hierarchy already exists when init runs.
         let mut cgroup_registry = CgroupRegistry::new(nr_cpus, scenario.max_cgroups);
         for cg_def in &scenario.cgroups {
             let parent_cgid = match &cg_def.parent_name {
@@ -613,10 +603,28 @@ impl<S: Scheduler> Simulator<S> {
         }
         unsafe { install_cgroup_registry(&mut cgroup_registry) };
 
-        // Call cgroup_init for each cgroup (root first, then children in order)
+        // Initialize scheduler
         unsafe {
             let cpu = state.current_cpu;
             kfuncs::enter_sim(&mut state, cpu);
+            // Populate CSS iterator so bpf_for_each(css, ...) works in init.
+            cgroup_registry.prepare_css_iter_from_root();
+            start_rbc(&mut state);
+            let rc = self.scheduler.init();
+            charge_sched_time(&mut state, CpuId(0), "init");
+            kfuncs::exit_sim();
+            assert!(rc == 0, "scheduler init failed with rc={rc}");
+        }
+
+        // Call cgroup_init for each cgroup (root first, then children in order).
+        // In the kernel, cgroup_init is called for all existing cgroups when
+        // the scheduler is loaded.
+        unsafe {
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
+            // Refresh CSS iterator so cgroup_init callbacks can use
+            // bpf_for_each(css, ...) if needed.
+            cgroup_registry.prepare_css_iter_from_root();
             for cgid in cgroup_registry.all_cgids_preorder() {
                 if let Some(raw) = cgroup_registry.get_raw(cgid) {
                     start_rbc(&mut state);
@@ -1091,7 +1099,7 @@ impl<S: Scheduler> Simulator<S> {
                 self.handle_task_phase_complete(cpu, state, tasks, events, duration_ns, monitor);
             }
             EventKind::TimerFired => {
-                self.handle_timer_fired(state, tasks, events, monitor);
+                self.handle_timer_fired(state, tasks, events, cgroup_registry, monitor);
             }
             EventKind::Tick { cpu } => {
                 if let Some(timeout) = watchdog_timeout {
@@ -1174,6 +1182,7 @@ impl<S: Scheduler> Simulator<S> {
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut EventQueue,
+        cgroup_registry: &CgroupRegistry,
         monitor: &mut dyn Monitor,
     ) {
         unsafe {
@@ -1183,6 +1192,10 @@ impl<S: Scheduler> Simulator<S> {
             let cpu = CpuId(0);
             state.advance_cpu_clock(cpu);
             kfuncs::enter_sim(state, cpu);
+            // Populate the CSS iterator so bpf_for_each(css, ...) inside the
+            // timer callback can discover all cgroups (e.g. mitosis
+            // update_timer_cb configures cells from the cgroup tree).
+            cgroup_registry.prepare_css_iter_from_root();
             start_rbc(state);
             self.scheduler.fire_timer();
             charge_sched_time(state, CpuId(0), "fire_timer");
@@ -1581,11 +1594,13 @@ impl<S: Scheduler> Simulator<S> {
             "CGROUP CREATE"
         );
 
-        // Call cgroup_init
+        // Call cgroup_init (refresh CSS iterator so the callback can use
+        // bpf_for_each(css, ...) with the newly created cgroup included).
         unsafe {
             let cpu = state.current_cpu;
             let raw = cgroup_registry.get_raw(cgid).unwrap();
             kfuncs::enter_sim(state, cpu);
+            cgroup_registry.prepare_css_iter_from_root();
             start_rbc(state);
             let rc = self.scheduler.cgroup_init(raw, std::ptr::null_mut());
             charge_sched_time(state, cpu, "cgroup_init");
@@ -1677,6 +1692,7 @@ impl<S: Scheduler> Simulator<S> {
             unsafe {
                 let cpu = state.current_cpu;
                 kfuncs::enter_sim(state, cpu);
+                cgroup_registry.prepare_css_iter_from_root();
                 start_rbc(state);
                 self.scheduler.cgroup_init(raw, std::ptr::null_mut());
                 charge_sched_time(state, cpu, "cgroup_init");
@@ -1863,7 +1879,21 @@ impl<S: Scheduler> Simulator<S> {
             start_rbc(state);
 
             let selected_cpu_raw = self.scheduler.select_cpu(raw, prev_cpu.0 as i32, enq_flags);
-            let selected_cpu = CpuId(selected_cpu_raw as u32);
+            // Kernel clamping: if select_cpu returns >= nr_cpu_ids, the
+            // kernel falls back to prev_cpu (select_task_rq_scx semantics).
+            let nr_cpus = state.cpus.len() as u32;
+            let selected_cpu = if (selected_cpu_raw as u32) >= nr_cpus {
+                debug!(
+                    pid = pid.0,
+                    returned = selected_cpu_raw,
+                    nr_cpus,
+                    prev_cpu = prev_cpu.0,
+                    "select_cpu returned out-of-range CPU, falling back to prev_cpu"
+                );
+                prev_cpu
+            } else {
+                CpuId(selected_cpu_raw as u32)
+            };
             charge_sched_time(state, selected_cpu, "select_cpu");
             maybe_record_checkpoint(state, CheckpointEvent::SelectCpu, selected_cpu);
             state.ops_context = OpsContext::None;
