@@ -49,10 +49,13 @@ pub struct CpuPool {
     /// This is used to allocate resources when a task needs to be assigned to a core.
     pub fallback_cpu: usize,
 
-    /// A mapping of node IDs to last-level cache (LLC) IDs.
-    /// The map allows for the identification of which last-level cache
-    /// corresponds to each CPU based on its core topology.
-    core_topology_to_id: BTreeMap<(usize, usize, usize), usize>,
+    /// Dense sequential core index (0, 1, 2, ...) assigned by walking
+    /// topo.nodes → node.llcs → llc.cores in BTreeMap order. Hardware
+    /// core IDs can have gaps (e.g. Ryzen); this provides a contiguous
+    /// index space that preserves topological locality — all cores in
+    /// node 0 get the lowest indices, then node 1, etc. Growth
+    /// algorithms use these indices to define core allocation order.
+    core_seq: BTreeMap<(usize, usize, usize), usize>,
 
     allow_partial: bool,
 }
@@ -63,14 +66,14 @@ impl CpuPool {
             bail!("NR_CPU_IDS {} > MAX_CPUS {}", *NR_CPU_IDS, MAX_CPUS);
         }
 
-        // Build core_topology_to_id
-        let mut core_topology_to_id = BTreeMap::new();
-        let mut next_topo_id: usize = 0;
+        // Build core_seq
+        let mut core_seq = BTreeMap::new();
+        let mut next_seq: usize = 0;
         for node in topo.nodes.values() {
             for llc in node.llcs.values() {
                 for core in llc.cores.values() {
-                    core_topology_to_id.insert((core.node_id, core.llc_id, core.id), next_topo_id);
-                    next_topo_id += 1;
+                    core_seq.insert((core.node_id, core.llc_id, core.id), next_seq);
+                    next_seq += 1;
                 }
             }
         }
@@ -94,7 +97,7 @@ impl CpuPool {
             available_cpus,
             first_cpu,
             fallback_cpu: first_cpu,
-            core_topology_to_id,
+            core_seq,
             topo,
             allow_partial,
         };
@@ -236,9 +239,9 @@ impl CpuPool {
         self.available_cpus.clone()
     }
 
-    fn get_core_topological_id(&self, core: &Core) -> usize {
+    fn core_seq(&self, core: &Core) -> usize {
         *self
-            .core_topology_to_id
+            .core_seq
             .get(&(core.node_id, core.llc_id, core.id))
             .expect("unrecognised core")
     }
@@ -313,7 +316,7 @@ mod tests {
         // All cores should have unique topology IDs assigned sequentially.
         for (i, core_id) in topo.all_cores.keys().enumerate() {
             let core = &topo.all_cores[core_id];
-            assert_eq!(pool.get_core_topological_id(core), i);
+            assert_eq!(pool.core_seq(core), i);
         }
     }
 

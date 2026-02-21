@@ -350,7 +350,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                 })
                 .collect(),
         )
-        .map(|core| self.cpu_pool.get_core_topological_id(core))
+        .map(|core| self.cpu_pool.core_seq(core))
         .collect()
     }
 
@@ -366,7 +366,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
         cores
             .into_iter()
-            .map(|core| self.cpu_pool.get_core_topological_id(core))
+            .map(|core| self.cpu_pool.core_seq(core))
             .collect()
     }
 
@@ -544,7 +544,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                 fastrand::shuffle(&mut cores);
                 cores.into_iter()
             })
-            .map(|c| self.cpu_pool.get_core_topological_id(c))
+            .map(|c| self.cpu_pool.core_seq(c))
             .collect()
     }
 
