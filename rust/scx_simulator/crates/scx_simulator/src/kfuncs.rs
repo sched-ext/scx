@@ -1378,25 +1378,41 @@ pub extern "C" fn scx_bpf_kick_cpu(cpu: i32, flags: u64) {
 pub extern "C" fn scx_bpf_dump_bstr(_fmt: *const i8, _data: *const u64, _data_sz: u32) {}
 
 // ---------------------------------------------------------------------------
-// Cgroup kfuncs — stub implementations
+// Cgroup kfuncs
 // ---------------------------------------------------------------------------
 
-/// Get a task's cgroup. Returns NULL in the simulator (cgroups not yet modeled).
+/// Get a task's cgroup. Returns the cgroup the task belongs to, falling back
+/// to the root cgroup if no cgroup has been assigned.
 #[no_mangle]
-pub extern "C" fn scx_bpf_task_cgroup(_p: *mut c_void, _subsys_id: i32) -> *mut c_void {
-    ptr::null_mut()
+pub extern "C" fn scx_bpf_task_cgroup(p: *mut c_void, _subsys_id: i32) -> *mut c_void {
+    if p.is_null() {
+        return ptr::null_mut();
+    }
+    // Get the task's cgroup from the C-side task_struct
+    let cgrp = unsafe { ffi::sim_task_get_cgroup(p) };
+    if !cgrp.is_null() {
+        return cgrp;
+    }
+    // Fallback: return root cgroup (task not assigned to any cgroup)
+    unsafe { ffi::sim_get_root_cgroup() }
 }
 
-/// Look up a cgroup by ID. Returns NULL (cgroups not yet modeled).
+/// Look up a cgroup by its kernfs ID. Returns the cgroup pointer if found,
+/// or the root cgroup if no registry is installed.
 #[no_mangle]
-pub extern "C" fn bpf_cgroup_from_id(_id: u64) -> *mut c_void {
-    ptr::null_mut()
+pub extern "C" fn bpf_cgroup_from_id(id: u64) -> *mut c_void {
+    crate::cgroup::sim_cgroup_lookup_by_id(id)
 }
 
-/// Get ancestor cgroup at a given level. Returns NULL (cgroups not yet modeled).
+/// Get the ancestor cgroup at a given hierarchy level. Returns NULL if the
+/// cgroup pointer is null, the level is negative, or no ancestor exists at
+/// the requested level.
 #[no_mangle]
-pub extern "C" fn bpf_cgroup_ancestor(_cgrp: *mut c_void, _level: i32) -> *mut c_void {
-    ptr::null_mut()
+pub extern "C" fn bpf_cgroup_ancestor(cgrp: *mut c_void, level: i32) -> *mut c_void {
+    if cgrp.is_null() || level < 0 {
+        return ptr::null_mut();
+    }
+    crate::cgroup::sim_cgroup_lookup_ancestor(cgrp, level as u32)
 }
 
 /// Acquire a reference on a cgroup. No-op in the simulator.
@@ -2478,20 +2494,28 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Cgroup stubs return NULL
+    // Cgroup kfuncs
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_cgroup_stubs_return_null() {
+    fn test_cgroup_kfuncs() {
         let _lock = SIM_LOCK.lock().unwrap();
         let mut state = test_state(1);
 
         let cpu = state.current_cpu;
         unsafe { enter_sim(&mut state, cpu) };
 
+        // Null task pointer returns null
         assert!(scx_bpf_task_cgroup(ptr::null_mut(), 0).is_null());
-        assert!(bpf_cgroup_from_id(123).is_null());
+
+        // bpf_cgroup_from_id falls back to root cgroup when no registry is installed
+        assert!(!bpf_cgroup_from_id(123).is_null());
+
+        // Null cgroup pointer returns null
         assert!(bpf_cgroup_ancestor(ptr::null_mut(), 0).is_null());
+        // Negative level returns null
+        assert!(bpf_cgroup_ancestor(0x1234usize as *mut c_void, -1).is_null());
+
         assert!(
             bpf_cgrp_storage_get(ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), 0).is_null()
         );

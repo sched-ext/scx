@@ -20,7 +20,9 @@ use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::monitor::{Monitor, ProbeContext, ProbePoint};
 use crate::perf;
 use crate::preempt::{is_determinism_mode_enabled, record_checkpoint, CheckpointEvent};
-use crate::scenario::{CgroupCreateEvent, CgroupDestroyEvent, IrqType, Scenario};
+use crate::scenario::{
+    CgroupCpusetChangeEvent, CgroupCreateEvent, CgroupDestroyEvent, IrqType, Scenario,
+};
 use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
 use crate::trace::{DsqSampleTrigger, Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
@@ -227,6 +229,8 @@ enum EventKind {
     CgroupCreate(CgroupCreateEvent),
     /// A cgroup is destroyed at runtime.
     CgroupDestroy(CgroupDestroyEvent),
+    /// A cgroup's cpuset is changed at runtime.
+    CgroupCpusetChange(CgroupCpusetChangeEvent),
     /// An interrupt starts on a CPU (hardirq or softirq).
     IrqStart {
         cpu: CpuId,
@@ -260,7 +264,8 @@ impl EventKind {
             | EventKind::TimerFired
             | EventKind::CgroupMigrate { .. }
             | EventKind::CgroupCreate(_)
-            | EventKind::CgroupDestroy(_) => None,
+            | EventKind::CgroupDestroy(_)
+            | EventKind::CgroupCpusetChange(_) => None,
         }
     }
 }
@@ -787,6 +792,9 @@ impl<S: Scheduler> Simulator<S> {
         for de in &scenario.cgroup_destroy_events {
             events.push(de.at_ns, EventKind::CgroupDestroy(de.clone()));
         }
+        for cse in &scenario.cgroup_cpuset_change_events {
+            events.push(cse.at_ns, EventKind::CgroupCpusetChange(cse.clone()));
+        }
 
         // Seed IRQ events from the scenario
         for irq in &scenario.irq_events {
@@ -1074,7 +1082,8 @@ impl<S: Scheduler> Simulator<S> {
             }
             EventKind::CgroupMigrate { .. }
             | EventKind::CgroupCreate(_)
-            | EventKind::CgroupDestroy(_) => {
+            | EventKind::CgroupDestroy(_)
+            | EventKind::CgroupCpusetChange(_) => {
                 kfuncs::set_sim_clock(state.clock, None);
             }
         }
@@ -1135,6 +1144,9 @@ impl<S: Scheduler> Simulator<S> {
             }
             EventKind::CgroupDestroy(event) => {
                 self.handle_cgroup_destroy(&event, state, cgroup_registry);
+            }
+            EventKind::CgroupCpusetChange(event) => {
+                self.handle_cgroup_cpuset_change(&event, state, cgroup_registry);
             }
             EventKind::IrqStart {
                 cpu,
@@ -1639,6 +1651,45 @@ impl<S: Scheduler> Simulator<S> {
 
             // Free the C-side cgroup struct
             cgroup_registry.free_raw(raw);
+        }
+    }
+
+    /// Handle a runtime cgroup cpuset change.
+    ///
+    /// Updates the cgroup's cpuset in the registry and C-side struct,
+    /// then calls `cgroup_init` to notify the scheduler of the change
+    /// (mirroring what the kernel does when cpuset.cpus is modified).
+    fn handle_cgroup_cpuset_change(
+        &self,
+        event: &CgroupCpusetChangeEvent,
+        state: &mut SimulatorState,
+        cgroup_registry: &mut CgroupRegistry,
+    ) {
+        if !cgroup_registry.update_cpuset(&event.cgroup_name, event.new_cpuset.clone()) {
+            debug!(
+                name = %event.cgroup_name,
+                "cgroup not found for cpuset change"
+            );
+            return;
+        }
+
+        info!(
+            name = %event.cgroup_name,
+            new_cpuset = ?event.new_cpuset,
+            "CGROUP CPUSET CHANGE"
+        );
+
+        // Call cgroup_init to notify the scheduler of the cpuset change
+        if let Some(cgrp_info) = cgroup_registry.get_by_name(&event.cgroup_name) {
+            let raw = cgrp_info.raw();
+            unsafe {
+                let cpu = state.current_cpu;
+                kfuncs::enter_sim(state, cpu);
+                start_rbc(state);
+                self.scheduler.cgroup_init(raw, std::ptr::null_mut());
+                charge_sched_time(state, cpu, "cgroup_init");
+                kfuncs::exit_sim();
+            }
         }
     }
 

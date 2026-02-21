@@ -76,6 +76,21 @@ pub struct CgroupDestroyEvent {
     pub at_ns: TimeNs,
 }
 
+/// Cgroup cpuset change event: update a cgroup's allowed CPUs at runtime.
+///
+/// Simulates writing to cpuset.cpus for a cgroup (e.g., `echo "0-3" > cpuset.cpus`).
+/// The engine updates the C-side cpuset and calls `cgroup_init` with updated args
+/// so the scheduler can detect the change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CgroupCpusetChangeEvent {
+    /// Name of the cgroup whose cpuset is being changed.
+    pub cgroup_name: String,
+    /// New cpuset: list of allowed CPU IDs.
+    pub new_cpuset: Vec<CpuId>,
+    /// Simulation time at which the cpuset change occurs.
+    pub at_ns: TimeNs,
+}
+
 /// Type of interrupt to simulate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrqType {
@@ -441,6 +456,8 @@ pub struct Scenario {
     pub cgroup_create_events: Vec<CgroupCreateEvent>,
     /// Cgroup destruction events (cgroups destroyed at runtime).
     pub cgroup_destroy_events: Vec<CgroupDestroyEvent>,
+    /// Cgroup cpuset change events (cpuset.cpus modifications at runtime).
+    pub cgroup_cpuset_change_events: Vec<CgroupCpusetChangeEvent>,
     /// Enable concurrent callback interleaving at kfunc yield points.
     ///
     /// When true, dispatch callbacks for multiple idle CPUs run on
@@ -487,6 +504,7 @@ pub struct ScenarioBuilder {
     cgroup_migrate_events: Vec<CgroupMigrateEvent>,
     cgroup_create_events: Vec<CgroupCreateEvent>,
     cgroup_destroy_events: Vec<CgroupDestroyEvent>,
+    cgroup_cpuset_change_events: Vec<CgroupCpusetChangeEvent>,
     interleave: bool,
     preemptive: Option<PreemptiveConfig>,
     max_cgroups: u32,
@@ -514,6 +532,7 @@ impl Scenario {
             cgroup_migrate_events: Vec::new(),
             cgroup_create_events: Vec::new(),
             cgroup_destroy_events: Vec::new(),
+            cgroup_cpuset_change_events: Vec::new(),
             interleave: false,
             preemptive: None,
             max_cgroups: DEFAULT_MAX_CGROUPS,
@@ -873,6 +892,12 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Add a cpuset change event (modify a cgroup's allowed CPUs at runtime).
+    pub fn cgroup_cpuset_change(mut self, event: CgroupCpusetChangeEvent) -> Self {
+        self.cgroup_cpuset_change_events.push(event);
+        self
+    }
+
     /// Enable concurrent callback interleaving at kfunc yield points.
     pub fn interleave(mut self, enabled: bool) -> Self {
         self.interleave = enabled;
@@ -1007,6 +1032,7 @@ impl ScenarioBuilder {
             cgroup_migrate_events: self.cgroup_migrate_events,
             cgroup_create_events: self.cgroup_create_events,
             cgroup_destroy_events: self.cgroup_destroy_events,
+            cgroup_cpuset_change_events: self.cgroup_cpuset_change_events,
             interleave: self.interleave,
             preemptive: self.preemptive,
             max_cgroups: self.max_cgroups,

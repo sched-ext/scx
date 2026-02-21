@@ -86,33 +86,12 @@ static void *mitosis_task_storage_get(void *map, void *task, void *value,
 	mitosis_task_storage_get(map, task, value, flags)
 
 /* ---------------------------------------------------------------------------
- * Cgroup overrides
+ * Cgroup storage override
  *
- * Mitosis uses cgroups extensively. We provide minimal cgroup modeling:
- * all tasks belong to a single root cgroup (cell 0). The root cgroup
- * is allocated in sim_task.c and shared across all schedulers.
+ * bpf_cgroup_from_id, bpf_cgroup_ancestor, and scx_bpf_task_cgroup are
+ * now handled by the simulator's general kfuncs. Only per-cgroup local
+ * storage needs a scheduler-specific override.
  * ---------------------------------------------------------------------------*/
-
-/* bpf_cgroup_from_id: return root cgroup for root_cgid, NULL otherwise */
-static struct cgroup *mitosis_cgroup_from_id(u64 id);
-#undef bpf_cgroup_from_id
-#define bpf_cgroup_from_id(id) mitosis_cgroup_from_id(id)
-
-/* bpf_cgroup_ancestor: return root for level 0 */
-static struct cgroup *mitosis_cgroup_ancestor(struct cgroup *cgrp, int level);
-#undef bpf_cgroup_ancestor
-#define bpf_cgroup_ancestor(cgrp, level) mitosis_cgroup_ancestor(cgrp, level)
-
-/*
- * Override __COMPAT_scx_bpf_task_cgroup and scx_bpf_task_cgroup.
- * Since bpf_ksym_exists is (0), __COMPAT_scx_bpf_task_cgroup would
- * return NULL. Override both to return the root cgroup directly.
- */
-static struct cgroup *mitosis_sim_task_cgroup(struct task_struct *p);
-#undef scx_bpf_task_cgroup
-#define scx_bpf_task_cgroup(p) mitosis_sim_task_cgroup(p)
-#undef __COMPAT_scx_bpf_task_cgroup
-#define __COMPAT_scx_bpf_task_cgroup(p) mitosis_sim_task_cgroup(p)
 
 /*
  * bpf_cgrp_storage_get: per-cgroup local storage.
@@ -353,70 +332,6 @@ static void *mitosis_task_storage_get(void *map, void *task, void *value,
 	}
 
 	return NULL;
-}
-
-/* ---------------------------------------------------------------------------
- * Cgroup implementations
- *
- * These functions look up cgroups from the Rust CgroupRegistry.
- * The registry is installed before simulation starts and provides
- * full cgroup hierarchy support.
- * ---------------------------------------------------------------------------*/
-
-/* Rust-exported cgroup lookup functions */
-extern void *sim_cgroup_lookup_by_id(u64 id);
-extern void *sim_cgroup_lookup_ancestor(void *cgrp, u32 level);
-extern void *sim_task_get_cgroup(struct task_struct *p);
-
-static struct cgroup *mitosis_cgroup_from_id(u64 id)
-{
-	/* Look up cgroup by ID from the Rust registry */
-	void *cgrp = sim_cgroup_lookup_by_id(id);
-	if (cgrp)
-		return (struct cgroup *)cgrp;
-
-	/* Fallback: check if it's the root_cgid (for backwards compat) */
-	if (id == root_cgid)
-		return (struct cgroup *)sim_get_root_cgroup();
-
-	return NULL;
-}
-
-static struct cgroup *mitosis_cgroup_ancestor(struct cgroup *cgrp, int level)
-{
-	/*
-	 * Look up the ancestor at the given level from the Rust registry.
-	 * The registry walks the cgroup hierarchy to find the ancestor.
-	 */
-	if (level < 0)
-		return NULL;
-
-	void *ancestor = sim_cgroup_lookup_ancestor((void *)cgrp, (u32)level);
-	if (ancestor)
-		return (struct cgroup *)ancestor;
-
-	/* Fallback: if level 0 requested and no registry, return root */
-	if (level == 0)
-		return (struct cgroup *)sim_get_root_cgroup();
-
-	return NULL;
-}
-
-static struct cgroup *mitosis_sim_task_cgroup(struct task_struct *p)
-{
-	/*
-	 * Get the cgroup this task belongs to.
-	 * The task's cgroup is stored in task->cgroups->dfl_cgrp.
-	 */
-	if (!p)
-		return (struct cgroup *)sim_get_root_cgroup();
-
-	void *cgrp = sim_task_get_cgroup(p);
-	if (cgrp)
-		return (struct cgroup *)cgrp;
-
-	/* Fallback to root cgroup */
-	return (struct cgroup *)sim_get_root_cgroup();
 }
 
 /*

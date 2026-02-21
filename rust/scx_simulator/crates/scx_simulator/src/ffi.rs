@@ -83,6 +83,9 @@ extern "C" {
     pub fn sim_task_get_cgroup(p: *mut c_void) -> *mut c_void;
     pub fn sim_set_init_task_cgroup(cgrp: *mut c_void);
 
+    // Root cgroup accessor (implemented in sim_task.c)
+    pub fn sim_get_root_cgroup() -> *mut c_void;
+
     // CSS iterator (implemented in sim_cgroup.c)
     pub fn sim_css_iter_reset();
     pub fn sim_css_iter_add(cgrp: *mut c_void);

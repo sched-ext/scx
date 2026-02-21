@@ -299,6 +299,29 @@ impl CgroupRegistry {
         self.cgroups.is_empty()
     }
 
+    /// Update the cpuset for an existing cgroup.
+    ///
+    /// Updates both the Rust-side CgroupInfo and the C-side struct.
+    pub fn update_cpuset(&mut self, name: &str, new_cpuset: Vec<CpuId>) -> bool {
+        let cgid = match self.name_to_id.get(name) {
+            Some(&id) => id,
+            None => return false,
+        };
+
+        if let Some(info) = self.cgroups.get_mut(&cgid) {
+            // Update C-side
+            let cpu_ids: Vec<u32> = new_cpuset.iter().map(|c| c.0).collect();
+            unsafe {
+                sim_cgroup_set_cpuset(info.raw, cpu_ids.as_ptr(), cpu_ids.len() as u32);
+            }
+            // Update Rust-side
+            info.cpuset = Some(new_cpuset);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Destroy a cgroup by name.
     ///
     /// Returns the raw pointer to the destroyed cgroup (for calling cgroup_exit),
