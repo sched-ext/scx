@@ -3049,6 +3049,12 @@ impl<'a> Scheduler<'a> {
         }
         debug!(" free: after pass: free_llcs={:?}", self.cpu_pool.free_llcs);
 
+        let all_layer_nodes: Vec<&[usize]> = self
+            .layer_specs
+            .iter()
+            .map(|s| s.nodes().as_slice())
+            .collect();
+
         // Redistribute the freed LLCs to growing layers.
         // Use the layer's spec.nodes ordering (mirroring node_order()).
         for &(idx, target) in layer_targets.iter().rev() {
@@ -3061,8 +3067,12 @@ impl<'a> Scheduler<'a> {
             }
 
             let mut to_alloc = (new_tlc.0 as i32 - old_tlc.0 as i32).max(0) as usize;
-            let node_order =
-                layer_core_growth::node_order(self.layer_specs[idx].nodes(), &self.topo);
+            let node_order = layer_core_growth::node_order(
+                self.layer_specs[idx].nodes(),
+                &self.topo,
+                idx,
+                &all_layer_nodes,
+            );
 
             debug!(
                 " alloc: layer={} old_tlc={:?} new_tlc={:?} to_alloc={} assigned={} free={} node_order={:?}",
@@ -3111,8 +3121,12 @@ impl<'a> Scheduler<'a> {
             let cpus_per_core = self.topo.all_cores.first_key_value().unwrap().1.cpus.len();
             let cpus_per_llc = cores_per_llc * cpus_per_core;
 
-            let node_order =
-                layer_core_growth::node_order(self.layer_specs[idx].nodes(), &self.topo);
+            let node_order = layer_core_growth::node_order(
+                self.layer_specs[idx].nodes(),
+                &self.topo,
+                idx,
+                &all_layer_nodes,
+            );
 
             // Consume from front of each node's list since we pop from the back.
             'outer: for node_id in &node_order {

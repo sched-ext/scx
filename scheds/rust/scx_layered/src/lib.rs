@@ -1587,6 +1587,11 @@ mod tests {
             }
         }
 
+        let all_layer_nodes_owned: Vec<Vec<usize>> =
+            layers.iter().map(|l| l.spec_nodes.clone()).collect();
+        let all_layer_nodes: Vec<&[usize]> =
+            all_layer_nodes_owned.iter().map(|v| v.as_slice()).collect();
+
         // Phase 2: Redistribute freed LLCs to growing layers (iterate in reverse).
         // Use the layer's spec_nodes ordering (mirroring node_order()).
         for &(idx, target) in layer_targets.iter().rev() {
@@ -1594,7 +1599,12 @@ mod tests {
             let old_tlc = layer.target_llc_cpus;
             let new_tlc = compute_target_llcs(target, topo);
             let mut to_alloc = (new_tlc.0 as i32 - old_tlc.0 as i32).max(0) as usize;
-            let node_order = crate::layer_core_growth::node_order(&layer.spec_nodes, topo);
+            let node_order = crate::layer_core_growth::node_order(
+                &all_layer_nodes_owned[idx],
+                topo,
+                idx,
+                &all_layer_nodes,
+            );
             while to_alloc > 0 {
                 if let Some(llc) = pool.take_llc(&node_order) {
                     layer.assigned_llcs.push(llc);
@@ -1615,7 +1625,12 @@ mod tests {
         for &(idx, _) in layer_targets.iter() {
             let tlc = layers[idx].target_llc_cpus;
             let mut extra = tlc.1;
-            let node_order = crate::layer_core_growth::node_order(&layers[idx].spec_nodes, topo);
+            let node_order = crate::layer_core_growth::node_order(
+                &all_layer_nodes_owned[idx],
+                topo,
+                idx,
+                &all_layer_nodes,
+            );
             for node_id in &node_order {
                 if extra == 0 {
                     break;

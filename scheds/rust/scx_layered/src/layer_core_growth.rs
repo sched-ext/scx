@@ -257,11 +257,41 @@ impl Default for LayerGrowthAlgo {
 }
 
 /// Node iteration order: spec_nodes if set (hard limit), otherwise all topo
-/// nodes. Used by both growth algorithms and StickyDynamic's runtime LLC
-/// trading.
-pub fn node_order(spec_nodes: &[usize], topo: &Topology) -> Vec<usize> {
+/// nodes rotated by layer_idx so that different layers start from different
+/// nodes, with nodes claimed by other layers deprioritized. Used by both
+/// growth algorithms and StickyDynamic's runtime LLC trading.
+pub fn node_order(
+    spec_nodes: &[usize],
+    topo: &Topology,
+    layer_idx: usize,
+    all_layer_nodes: &[&[usize]],
+) -> Vec<usize> {
     if spec_nodes.is_empty() {
-        topo.nodes.keys().copied().collect()
+        let mut nodes: Vec<usize> = topo.nodes.keys().copied().collect();
+        let nr = nodes.len();
+        if nr > 1 {
+            nodes.rotate_left(layer_idx % nr);
+
+            // Build per-node claim-rank vector from other layers' spec_nodes.
+            // claim_rank[node] = [count at pos 0, count at pos 1, ...]
+            let max_rank = all_layer_nodes.iter().map(|ln| ln.len()).max().unwrap_or(0);
+            if max_rank > 0 {
+                let mut claim_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                for (i, ln) in all_layer_nodes.iter().enumerate() {
+                    if i == layer_idx {
+                        continue;
+                    }
+                    for (pos, &node_id) in ln.iter().enumerate() {
+                        claim_rank
+                            .entry(node_id)
+                            .or_insert_with(|| vec![0; max_rank])[pos] += 1;
+                    }
+                }
+                let zero = vec![0; max_rank];
+                nodes.sort_by_key(|n| claim_rank.get(n).unwrap_or(&zero).clone());
+            }
+        }
+        nodes
     } else {
         spec_nodes.to_vec()
     }
@@ -289,7 +319,12 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn node_order(&self) -> Vec<usize> {
-        node_order(self.spec.nodes(), self.topo)
+        let all: Vec<&[usize]> = self
+            .layer_specs
+            .iter()
+            .map(|s| s.nodes().as_slice())
+            .collect();
+        node_order(self.spec.nodes(), self.topo, self.layer_idx, &all)
     }
 
     /// Sequential core indices (core_seq) belonging to a given node.
@@ -810,6 +845,130 @@ mod tests {
         let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
 
         assert_eq!(gen.node_order(), vec![1]);
+    }
+
+    fn topo_4n() -> Arc<Topology> {
+        let (topo, _) = make_test_topo(4, 2, 4, 2);
+        Arc::new(topo)
+    }
+
+    #[test]
+    fn test_node_order_2n_rotated() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 1, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_4n_rotated() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 2, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![2, 3, 0, 1]);
+    }
+
+    #[test]
+    fn test_node_order_4n_wraps() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        // layer_idx=5, 5 % 4 = 1
+        let gen = make_generator(&pool, &specs, &specs[0], 5, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn test_node_order_spec_not_rotated() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1, 0])];
+        let cpusets = BTreeSet::new();
+        // Even with layer_idx=1, spec_nodes should be returned unchanged.
+        let gen = make_generator(&pool, &specs, &specs[0], 1, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_2n_deprioritize() {
+        // 2N: L0 pinned to [0], L1 unpinned (idx=1).
+        // Rotation: [1, 0]. N0 has 1st-choice claim → goes last.
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0]),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_4n_deprioritize_ranked() {
+        // 4N: L0 nodes=[0,1], L1 nodes=[2], L2 unpinned (idx=2).
+        // Rotation (idx=2): [2,3,0,1].
+        // Claim vectors: N0=[1,0], N1=[0,1], N2=[1,0], N3=[0,0].
+        // Stable sort: N3=[0,0] < N1=[0,1] < N2=[1,0], N0=[1,0].
+        // Rotation tiebreak: 2 before 0 in rotated order → result: [3, 1, 2, 0].
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0, 1]),
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![2]),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![3, 1, 2, 0]);
+    }
+
+    #[test]
+    fn test_node_order_4n_deprioritize_double_claim() {
+        // 4N: L0 nodes=[0], L1 nodes=[0], L2 unpinned (idx=2), L3 unpinned.
+        // N0 has two 1st-choice claims: [2]. Others: [0].
+        // Rotation (idx=2): [2,3,0,1].
+        // Stable sort: [0] < [0] < [0] < [2] → [2,3,1,0].
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0]),
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0]),
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![2, 3, 1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_no_claims_equals_rotation() {
+        // 4N: all unpinned. No claims → pure rotation.
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 2, 3, 0]);
     }
 
     // --- node_core_seqs ---
