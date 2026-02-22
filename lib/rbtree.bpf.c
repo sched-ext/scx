@@ -8,6 +8,7 @@
 
 #include <lib/sdt_task.h>
 #include <lib/rbtree.h>
+#include <lib/alloc/buddy.h>
 
 int rb_integrity_check(rbtree_t __arg_arena *rbtree);
 void rbnode_print(size_t depth, rbnode_t *rbn);
@@ -22,15 +23,17 @@ static int rbnode_replace(rbtree_t *rbtree, rbnode_t *existing, rbnode_t *replac
 	}									\
 } while (0)
 
+
+
+__weak
 u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 {
 	rbtree_t *rbtree;
 
-	rbtree = (rbtree_t *)scx_static_alloc(sizeof(*rbtree), 1);
+	rbtree = sys_buddy_zalloc(sizeof(*rbtree));
 	if (!rbtree)
 		return (u64)NULL;
 
-	rbtree->root = NULL;
 	rbtree->alloc = alloc;
 	rbtree->insert = insert;
 
@@ -40,6 +43,7 @@ u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 __weak
 int rb_destroy(rbtree_t __arg_arena *rbtree)
 {
+	rbnode_t *node, *next;
 	int ret;
 
 	while (rbtree->root && can_loop) {
@@ -48,6 +52,14 @@ int rb_destroy(rbtree_t __arg_arena *rbtree)
 			return ret;
 	}
 
+	node = rbtree->freelist;
+	while (node && can_loop) {
+		next = node->parent;
+		sys_buddy_free(node);
+		node = next;
+	}
+
+	sys_buddy_free(rbtree);
 	return 0;
 }
 
@@ -179,7 +191,7 @@ static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 k
 	} while (cmpxchg(&rbtree->freelist, rbnode, rbnode->parent) != rbnode && can_loop);
 
 	if (!rbnode)
-		rbnode = (rbnode_t *)scx_static_alloc(sizeof(*rbnode), 1);
+		rbnode = (rbnode_t *)sys_buddy_alloc(sizeof(*rbnode));
 	if (!rbnode)
 		return NULL;
 

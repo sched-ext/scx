@@ -4,6 +4,7 @@
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.bpf.h>
 #include <bpf_arena_spin_lock.h>
+#include <lib/alloc/buddy.h>
 #endif /* __BPF__ */
 
 #define RB_MAXLVL_PRINT (16)
@@ -31,7 +32,7 @@ struct rbnode {
 	bool is_red;
 };
 
-/* 
+/*
  * Does the rbtree allocate is own nodes, or do they get
  * allocated by the caller?
  */
