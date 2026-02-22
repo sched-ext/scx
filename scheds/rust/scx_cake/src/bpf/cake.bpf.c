@@ -13,7 +13,6 @@ char _license[] SEC("license") = "GPL";
 /* Scheduler RODATA config - JIT constant-folds these for ~200 cycle savings per decision */
 const u64  quantum_ns	     = CAKE_DEFAULT_QUANTUM_NS;
 const u64  new_flow_bonus_ns = CAKE_DEFAULT_NEW_FLOW_BONUS_NS;
-const u64  yield_bonus_ns    = CAKE_DEFAULT_YIELD_BONUS_NS;
 /* Note: enable_stats MUST remain false. scx_cargo parses this directly into 
  * rodata.enable_stats. If volatile is used, Rust bindings fail to generate it. */
 const bool enable_stats __attribute__((used)) = false;
@@ -445,6 +444,73 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 	}
 
+	/* ── GATE 1W: Waker-aware placement ──
+	 * Waker is running on tc_id. Place wakee near waker for
+	 * L2/LLC cache sharing in producer-consumer pairs (e.g.,
+	 * GPU submit → fence → render pipeline).
+	 *
+	 * Step 1: Try waker's SMT sibling (same core = L2 shared).
+	 *         Works on ALL topologies. ~15ns (1 kfunc).
+	 * Step 2: If waker and prev are on different LLCs, search
+	 *         for idle CPU near waker instead of prev_cpu.
+	 *         No-op on single-LLC (9800X3D): ~2ns comparison.
+	 *         Active on multi-LLC (7950X3D, Intel): ~40ns kfunc. */
+	{
+		/* Step 1: Waker's SMT sibling — L2 cache sharing */
+		if (nr_cpus > nr_phys_cpus) {
+			s32 waker_sib;
+			if (has_hybrid)
+				waker_sib = cpu_sibling_map[tc_id];
+			else
+				waker_sib = tc_id ^ nr_phys_cpus;
+
+			if (waker_sib != prev_cpu && (u32)waker_sib < nr_cpus &&
+			    (aff_mask & (1ULL << (u32)waker_sib)) &&
+			    scx_bpf_test_and_clear_cpu_idle(waker_sib)) {
+				u64 slice = p->scx.slice ?: quantum_ns;
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | waker_sib,
+						   slice, wake_flags);
+				if (CAKE_STATS_ENABLED) {
+					struct cake_task_ctx __arena *tctx = get_task_ctx(p);
+					if (tctx) {
+						tctx->telemetry.select_cpu_duration_ns = (u32)(scx_bpf_now() - start_time);
+						tctx->telemetry.gate_1w_hits++;
+						tctx->telemetry.direct_dispatch_count++;
+					}
+				}
+				return waker_sib;
+			}
+		}
+
+		/* Step 2: Waker LLC affinity — multi-LLC only */
+		u32 waker_llc = cpu_llc_id[tc_id];
+		u32 prev_llc = cpu_llc_id[prev_idx];
+
+		if (waker_llc != prev_llc) {
+			bool is_idle_1w = false;
+			s32 waker_near = scx_bpf_select_cpu_dfl(p, tc_id, 0,
+								&is_idle_1w);
+
+			if (is_idle_1w &&
+			    (aff_mask & (1ULL << (u32)waker_near))) {
+				u64 slice = p->scx.slice ?: quantum_ns;
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | waker_near,
+						   slice, wake_flags);
+				if (CAKE_STATS_ENABLED) {
+					struct cake_task_ctx __arena *tctx = get_task_ctx(p);
+					if (tctx) {
+						tctx->telemetry.select_cpu_duration_ns = (u32)(scx_bpf_now() - start_time);
+						tctx->telemetry.gate_1w_hits++;
+						tctx->telemetry.direct_dispatch_count++;
+						if (waker_near != prev_cpu)
+							tctx->telemetry.migration_count++;
+					}
+				}
+				return waker_near;
+			}
+		}
+	}
+
 	/* ── GATE 1P: Yielder-preempts-bulk ──
 	 * If incoming task is a yielder and prev_cpu runs a non-yielder
 	 * that has consumed ≥1ms, preempt it. This is a targeted priority
@@ -653,18 +719,18 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	/* Extract staged fields — zero bpf_task_storage_get */
 	u64 slice = p_reg->scx.slice ?: quantum_ns;
 
-	/* YIELD-GATED WEIGHTED VTIME (Phase 4.0):
+	/* PROPORTIONAL YIELDER PRIORITY (Phase 6.0):
 	 * weight_ns pre-computed in cake_stopping (zero MUL).
-	 * Short game threads (~10µs) sort ~10µs ahead of GPU submit (~5ms).
-	 * DRR++ new-flow bonus and yield bonus applied on top. */
+	 * Yielders advance vtime at half rate (>> 1 = 2× priority).
+	 * Self-scaling: heavier tasks get proportionally more boost.
+	 * No magic constants — priority is relative to the task's own EWMA. */
 	u8 new_flow = (staged >> 48) & 1;
 	u8 yielder  = (staged >> 49) & 1;
 	u32 weight_ns = (u32)(staged & 0xFFFFFFFF);
-	u64 vtime = now_cached + weight_ns;
+	u32 effective_weight = yielder ? (weight_ns >> 3) : weight_ns;
+	u64 vtime = now_cached + effective_weight;
 	if (new_flow)
 		vtime -= new_flow_bonus_ns;
-	if (yielder)
-		vtime -= yield_bonus_ns;
 
 	if (CAKE_STATS_ENABLED) {
 		struct cake_stats *s = get_local_stats();
@@ -825,14 +891,6 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 					tctx->telemetry.wait_hist_ge1ms++;
 			}
 
-			/* 3. PREEMPTION BLAME: tell the task we replaced who took its CPU.
-			 * Uses cached arena pointer from mailbox (written by cake_stopping). */
-			u64 prev_tctx_raw = mbox->last_stopped_tctx;
-			if (prev_tctx_raw) {
-				struct cake_task_ctx __arena *prev_tctx =
-					(struct cake_task_ctx __arena *)prev_tctx_raw;
-				prev_tctx->telemetry.preempted_by_pid = p->pid;
-			}
 
 			tctx->telemetry.running_duration_ns = (u32)(scx_bpf_now() - running_overhead_start);
 			struct cake_stats *s_run = get_local_stats();
@@ -879,8 +937,6 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	if (!tctx)
 		return;
 
-	/* Stash tctx in mailbox for running callback (avoids bpf_task_from_pid) */
-	mbox->last_stopped_tctx = (u64)tctx;
 
 	/* ── BenchLab trigger: run kfunc benchmark on demand ── */
 	if (unlikely(bench_request)) {
