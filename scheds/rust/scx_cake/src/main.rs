@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // scx_cake - sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling
 
-mod calibrate;
-mod stats;
 mod topology;
 mod tui;
 
@@ -64,119 +62,6 @@ impl Profile {
         }
     }
 
-    /// Per-tier starvation thresholds in nanoseconds (4 tiers + padding)
-    fn starvation_threshold(&self) -> [u64; 8] {
-        match self {
-            Profile::Esports => [
-                1_500_000,  // T0 Critical: 1.5ms
-                4_000_000,  // T1 Interactive: 4ms
-                20_000_000, // T2 Frame: 20ms
-                50_000_000, // T3 Bulk: 50ms
-                50_000_000, 50_000_000, 50_000_000, 50_000_000, // Padding
-            ],
-            Profile::Legacy => [
-                6_000_000,   // T0 Critical: 6ms
-                16_000_000,  // T1 Interactive: 16ms
-                80_000_000,  // T2 Frame: 80ms
-                200_000_000, // T3 Bulk: 200ms
-                200_000_000,
-                200_000_000,
-                200_000_000,
-                200_000_000, // Padding
-            ],
-            Profile::Gaming | Profile::Default => [
-                3_000_000,   // T0 Critical: 3ms
-                8_000_000,   // T1 Interactive: 8ms
-                40_000_000,  // T2 Frame: 40ms
-                100_000_000, // T3 Bulk: 100ms
-                100_000_000,
-                100_000_000,
-                100_000_000,
-                100_000_000, // Padding
-            ],
-            Profile::Battery => [
-                6_000_000,   // T0 Critical: 6ms (100% freq, relaxed runway)
-                16_000_000,  // T1 Interactive: 16ms (87.5% freq needs more time)
-                80_000_000,  // T2 Frame: 80ms (75% freq — longer per frame)
-                200_000_000, // T3 Bulk: 200ms (50% freq — let it finish)
-                200_000_000,
-                200_000_000,
-                200_000_000,
-                200_000_000, // Padding
-            ],
-        }
-    }
-
-    /// Tier quantum multipliers (fixed-point, 1024 = 1.0x) — 4 tiers + padding
-    fn tier_multiplier(&self) -> [u32; 8] {
-        match self {
-            Profile::Esports | Profile::Legacy | Profile::Gaming | Profile::Default => [
-                768,  // T0 Critical: 0.75x
-                1024, // T1 Interactive: 1.0x
-                1229, // T2 Frame: 1.2x
-                1434, // T3 Bulk: 1.4x
-                1434, 1434, 1434, 1434, // Padding
-            ],
-            Profile::Battery => [
-                512,  // T0 Critical: 0.5x = 2ms (fast release at full freq)
-                1024, // T1 Interactive: 1.0x = 4ms
-                1434, // T2 Frame: 1.4x = 5.6ms (longer slice at reduced freq)
-                2048, // T3 Bulk: 2.0x = 8ms (fewer switches = less power)
-                2048, 2048, 2048, 2048, // Padding
-            ],
-        }
-    }
-
-    /// Wait budget per tier in nanoseconds — 4 tiers + padding
-    fn wait_budget(&self) -> [u64; 8] {
-        match self {
-            Profile::Esports => [
-                50_000,    // T0 Critical: 50µs
-                1_000_000, // T1 Interactive: 1ms
-                4_000_000, // T2 Frame: 4ms
-                0,         // T3 Bulk: no limit
-                0, 0, 0, 0, // Padding
-            ],
-            Profile::Legacy => [
-                200_000,    // T0 Critical: 200µs
-                4_000_000,  // T1 Interactive: 4ms
-                16_000_000, // T2 Frame: 16ms
-                0,          // T3 Bulk: no limit
-                0, 0, 0, 0, // Padding
-            ],
-            Profile::Gaming | Profile::Default => [
-                100_000,   // T0 Critical: 100µs
-                2_000_000, // T1 Interactive: 2ms
-                8_000_000, // T2 Frame: 8ms
-                0,         // T3 Bulk: no limit
-                0, 0, 0, 0, // Padding
-            ],
-            Profile::Battery => [
-                200_000,    // T0 Critical: 200µs (reduce cross-LLC migration)
-                4_000_000,  // T1 Interactive: 4ms
-                16_000_000, // T2 Frame: 16ms
-                0,          // T3 Bulk: no limit
-                0, 0, 0, 0, // Padding
-            ],
-        }
-    }
-
-    /// Consolidated tier config - packs quantum/multiplier/budget/starvation into 64-bit per tier.
-    fn tier_configs(&self, quantum_us: u64) -> [u64; 8] {
-        let starvation = self.starvation_threshold();
-        let multiplier = self.tier_multiplier();
-        let budget = self.wait_budget();
-
-        let mut configs = [0u64; 8];
-        for i in 0..8 {
-            configs[i] = (multiplier[i] as u64 & 0xFFF)
-                | ((quantum_us & 0xFFFF) << 12)
-                | (((budget[i] >> 10) & 0xFFFF) << 28)
-                | (((starvation[i] >> 10) & 0xFFFFF) << 44);
-        }
-        configs
-    }
-
     /// DVFS enabled — only Battery profile activates frequency steering
     fn dvfs_enabled(&self) -> bool {
         matches!(self, Profile::Battery)
@@ -189,7 +74,7 @@ impl Profile {
             Profile::Battery => Some([
                 1024, // T0 Critical: 100% — IRQ, input, audio (never throttle)
                 896,  // T1 Interactive: 87.5% — compositor, physics
-                768,  // T2 Frame: 75% — game render (P ∝ V²f savings)
+                768,  // T2 Frame: 75% — game render (P ∘ V²f savings)
                 512,  // T3 Bulk: 50% — background tasks at half speed
                 512, 512, 512, 512, // Padding
             ]),
@@ -294,6 +179,13 @@ struct Args {
     /// Default: 1 second
     #[arg(long, default_value_t = 1, verbatim_doc_comment)]
     interval: u64,
+
+    /// Live in-kernel testing mode for automated benchmarking.
+    ///
+    /// Runs the scheduler for 10 seconds, collects BPF data points,
+    /// and prints a structured JSON output to stdout.
+    #[arg(long, verbatim_doc_comment)]
+    testing: bool,
 }
 
 impl Args {
@@ -338,40 +230,14 @@ impl<'a> Scheduler<'a> {
         // Get effective values (profile + CLI overrides)
         let (quantum, new_flow_bonus, _starvation) = args.effective_values();
 
-        // ETD: Empirical Topology Discovery — display-grade measurement
-        // Measures inter-core CAS latency for startup heatmap and TUI display.
-        // Skip in headless mode: latency_matrix is display-only (splash + TUI heatmap),
-        // never feeds into RODATA, BPF, or scheduling decisions.
-        let is_tty = std::io::stdout().is_terminal();
-        let latency_matrix = if is_tty {
-            info!("Starting ETD calibration...");
-            calibrate::calibrate_full_matrix(
-                topo.nr_cpus,
-                &calibrate::EtdConfig::default(),
-                |current, total, is_complete| {
-                    tui::render_calibration_progress(current, total, is_complete);
-                },
-            )
-        } else {
-            info!("Headless mode: skipping ETD calibration (display-only)");
-            vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus]
-        };
+        // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
+        let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
 
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
             rodata.quantum_ns = quantum * 1000;
             rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
-            rodata.enable_stats = args.verbose;
-            rodata.tier_configs = args.profile.tier_configs(quantum);
-
-            // P16: Pre-computed tier slices (single RODATA load vs multiply+shift)
-            let multipliers = args.profile.tier_multiplier();
-            let q_ns = quantum * 1000;
-            let mut slices = [0u64; 8];
-            for i in 0..8 {
-                slices[i] = (q_ns * multipliers[i] as u64) >> 10;
-            }
-            rodata.tier_slice_ns = slices;
+            rodata.enable_stats = args.verbose || args.testing;
 
             // DVFS: Battery profile enables per-tier CPU frequency steering
             rodata.enable_dvfs = args.profile.dvfs_enabled();
@@ -450,26 +316,61 @@ impl<'a> Scheduler<'a> {
             .attach_struct_ops()
             .context("Failed to attach scheduler")?;
 
-        // Detect headless: skip TUI/splash when no TTY (CI VMs, piped output)
-        let is_tty = std::io::stdout().is_terminal();
-        // Note: ETD calibration was already skipped in new() when !is_tty
+        // Standard startup: simple log message like other sched_ext schedulers
+        let version = env!("CARGO_PKG_VERSION");
+        info!(
+            "scx_cake v{} started ({} CPUs, {} LLCs, profile: {:?})",
+            version,
+            self.topology.nr_cpus,
+            self.topology
+                .llc_cpu_mask
+                .iter()
+                .filter(|&&m| m != 0)
+                .count()
+                .max(1),
+            self.args.profile
+        );
+        if self.args.testing {
+            info!("Running in benchmarking mode for 10 seconds...");
+            std::thread::sleep(std::time::Duration::from_secs(1)); // Warmup
 
-        if is_tty {
-            self.show_startup_splash()?;
-        } else {
-            info!("No terminal detected — running in headless mode");
-        }
+            let mut start_dispatches = 0u64;
+            for cpu in 0..self.topology.nr_cpus {
+                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
+                start_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
+            }
 
-        if self.args.verbose && is_tty {
+            let start_time = std::time::Instant::now();
+            let mut elapsed = 0;
+            while elapsed < 10 && !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                elapsed += 1;
+            }
+            let duration = start_time.elapsed().as_secs_f64();
+
+            let mut end_dispatches = 0u64;
+            for cpu in 0..self.topology.nr_cpus {
+                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
+                end_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
+            }
+
+            let delta = end_dispatches.saturating_sub(start_dispatches);
+            let throughput = delta as f64 / duration;
+            println!("{{\"duration_sec\": {:.2}, \"total_dispatches\": {}, \"dispatches_per_sec\": {:.2}}}", 
+                     duration, delta, throughput);
+
+            shutdown.store(true, Ordering::Relaxed);
+        } else if self.args.verbose && std::io::stdout().is_terminal() {
             // Run TUI mode
             tui::run_tui(
                 &mut self.skel,
                 shutdown.clone(),
                 self.args.interval,
                 self.topology.clone(),
+                self.latency_matrix.clone(),
             )?;
         } else {
-            if self.args.verbose && !is_tty {
+            if self.args.verbose && !std::io::stdout().is_terminal() {
                 warn!("TUI disabled: no terminal detected (headless mode)");
             }
             // Event-based silent mode - block on signalfd, poll with 60s timeout for UEI check
@@ -541,19 +442,6 @@ impl<'a> Scheduler<'a> {
 
         // Standard UEI exit report — produces "EXIT: unregistered from user space".
         scx_utils::uei_report!(&self.skel, uei).map(|_| ())
-    }
-
-    fn show_startup_splash(&self) -> Result<()> {
-        let (q, _nfb, starv) = self.args.effective_values();
-        let profile_str = format!("{:?}", self.args.profile).to_uppercase();
-
-        tui::render_startup_screen(tui::StartupParams {
-            topology: &self.topology,
-            latency_matrix: &self.latency_matrix,
-            profile: &profile_str,
-            quantum: q,
-            starvation: starv,
-        })
     }
 }
 

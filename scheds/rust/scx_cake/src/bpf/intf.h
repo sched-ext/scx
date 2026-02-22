@@ -41,27 +41,44 @@ enum cake_tier {
  * first. Eliminates 3 empty-DSQ probes vs old 4-tier split. */
 #define LLC_DSQ_BASE 200
 
-/* ── Confidence-based gate routing (Rule 40) ──
- * Gate IDs for the miss-path cascade in cake_select_cpu.
- * Gate 1 (prev_cpu) and WSC bypass always run — confidence only
- * applies to gates AFTER WSC miss. IDs are sequential for comparison. */
-enum cake_gate_id {
-	CAKE_GATE_1B  = 0, /* SMT sibling */
-	CAKE_GATE_1C  = 1, /* Nearby CCD half */
-	CAKE_GATE_2   = 2, /* Tier-matched snapshot */
-	CAKE_GATE_3   = 3, /* Kernel fallback */
-	CAKE_GATE_4   = 4, /* Lazy preempt */
-	CAKE_GATE_TUN = 5, /* Tunnel (all miss) */
+/* ── Kfunc BenchLab: extensible per-kfunc stopwatch ──
+ * Each kfunc gets a slot. Run N iterations, capture min/max/avg + return value.
+ * Triggered from TUI via bench_request BSS variable. */
+#define BENCH_ITERATIONS 8
+
+enum kfunc_bench_id {
+	BENCH_KTIME_GET_NS       = 0, /* bpf_ktime_get_ns() */
+	BENCH_SCX_BPF_NOW        = 1, /* scx_bpf_now() */
+	BENCH_GET_SMP_PROC_ID    = 2, /* bpf_get_smp_processor_id() */
+	BENCH_TASK_FROM_PID      = 3, /* bpf_task_from_pid() */
+	BENCH_TEST_CLEAR_IDLE    = 4, /* scx_bpf_test_and_clear_cpu_idle() */
+	BENCH_NR_CPU_IDS         = 5, /* scx_bpf_nr_cpu_ids() */
+	BENCH_GET_TASK_CTX       = 6, /* get_task_ctx() → bpf_task_storage_get */
+	BENCH_MAX_ENTRIES        = 7,
 };
 
-/* Consecutive-match threshold to activate gate skipping.
- * 8 matches = ~200ms at 40 wakeups/s — stable enough to predict. */
-#define CAKE_GATE_CONF_THRESH 8
-#define CAKE_GATE_CONF_MAX 8 /* 3-bit saturate */
+struct kfunc_bench_entry {
+	u64 min_ns;         /* Best-case cost */
+	u64 max_ns;         /* Worst-case cost */
+	u64 total_ns;       /* Sum for avg calc */
+	u64 last_value;     /* Last return value from the helper */
+};
 
-/* Flow state flags (only CAKE_FLOW_NEW currently used) */
+struct kfunc_bench_results {
+	struct kfunc_bench_entry entries[BENCH_MAX_ENTRIES];
+	u32 cpu;            /* CPU that ran the bench */
+	u32 iterations;     /* Iterations per helper */
+	u64 bench_timestamp; /* When bench completed (ktime_ns) */
+};
+
+/* Gate enum and confidence routing removed — scheduling uses only
+ * Gate 1 (prev_cpu idle), Gate 1b (SMT sibling), Gate 3 (kernel idle),
+ * and tunnel (DSQ fallback). No cross-CPU gate prediction state. */
+
+/* Flow state flags (packed_info bits 24-27) */
 enum cake_flow_flags {
-	CAKE_FLOW_NEW = 1 << 0, /* Task is newly created */
+	CAKE_FLOW_NEW     = 1 << 0, /* Task is newly created */
+	CAKE_FLOW_YIELDER = 1 << 1, /* Task voluntarily yielded since last stop */
 };
 
 /* Per-task flow state - 64B aligned, first 8B coalesced for cake_stopping writes */
@@ -97,8 +114,86 @@ struct cake_task_ctx {
      * Zero hot-path cost: no polling in cake_running or cake_stopping. */
 	u64 cached_cpumask; /* 8B: Cached p->cpus_ptr bitmask (max 64 CPUs) */
 
-	u8  __pad[40]; /* Pad to 64 bytes: 8+4+4+8+40 = 64 */
-} __attribute__((aligned(64)));
+	/* --- High Resolution Arena Telemetry (TUI Matrix) ---
+     * Zero-cost pointer access via BPF Arena. User-space sweeps memory 
+     * asynchronously to build 1% Lows and average runtimes. */
+	struct {
+		/* Timing Metrics */
+		u64 run_start_ns;
+		u64 run_duration_ns; /* Total runtime (end - begin) */
+		u64 enqueue_start_ns; /* Start of DSQ sorting */
+		u64 wait_duration_ns; /* Time spent in DSQ (run_start - enq_end) */
+		u32 select_cpu_duration_ns; /* Total routing overhead */
+		u32 enqueue_duration_ns; /* Time spent sorting DSQ */
+		u32 dfl_select_cpu_ns;   /* Kernel fallback overhead */
+		u32 dsq_insert_ns;       /* Insert/vtime overhead */
+
+		/* Topographic / Cache Data */
+		u32 gate_1_hits; /* Number of local cache hit wakeups */
+		u32 gate_2_hits; /* Snapshot matches */
+		u32 gate_3_hits; /* Kernel fallback hits */
+		u32 gate_4_hits; /* Lazy preempt hits */
+		u32 gate_tun_hits; /* Complete miss tunneling */
+		u64 jitter_accum_ns; /* Mathematical running variant vs AVG */
+		u32 total_runs; /* Total executions over lifetime */
+		u16 core_placement; /* Physical CPU task last executed on */
+		
+		/* State Change Counters */
+		u16 gate_confidence; /* Task Route Stability [0-8] */
+		u16 migration_count; /* Inter-cpu bounces inside select_cpu */
+		u16 preempt_count;   /* Task kicked/preempted */
+		u16 yield_count;     /* Task willingly gave up execution */
+
+		/* Lifecycle Counters */
+		u16 direct_dispatch_count; /* SCX_DSQ_LOCAL_ON bypasses (no DSQ) */
+		u16 enqueue_count;         /* Total enqueue calls */
+		u16 cpumask_change_count;  /* sched_setaffinity changes */
+		u16 dispatch_count;        /* Times dispatched from DSQ */
+
+		/* Callback Overhead (last-write-wins, ns) */
+		u32 stopping_duration_ns;  /* cake_stopping BPF overhead */
+		u32 running_duration_ns;   /* cake_running BPF overhead */
+
+		/* Worst-Case Tracking */
+		u32 max_runtime_us;        /* Max runtime in current TUI interval */
+
+		/* Tier Dynamics */
+		u16 tier_change_count;     /* Tier reclassifications over lifetime */
+
+		/* Scheduling Period (inter-dispatch gap) */
+		u64 dispatch_gap_ns;       /* Time since previous run start */
+		u64 max_dispatch_gap_ns;   /* Worst-case gap in current TUI interval */
+
+		/* Preemption Blame */
+		u32 preempted_by_pid;      /* PID of task that replaced us on CPU */
+
+		/* Wait Latency Histogram (bucket counts, lifetime) */
+		u32 wait_hist_lt10us;      /* wait < 10µs */
+		u32 wait_hist_lt100us;     /* 10µs <= wait < 100µs */
+		u32 wait_hist_lt1ms;       /* 100µs <= wait < 1ms */
+		u32 wait_hist_ge1ms;       /* wait >= 1ms */
+
+		/* Blind Spot Metrics (Phase B) */
+		u16 slice_util_pct;        /* (actual_run / slice) * 100 */
+		u16 llc_id;                /* LLC node this task last ran on */
+		u16 same_cpu_streak;       /* Consecutive runs on same CPU */
+		u16 __pad_align;           /* Alignment padding */
+		u32 wakeup_source_pid;     /* PID that woke this task */
+
+		/* Voluntary/involuntary context switch tracking (GPU detection) */
+		u64 nvcsw_snapshot;        /* Last read of p->nvcsw (for delta) */
+		u64 nivcsw_snapshot;       /* Last read of p->nivcsw (for delta) */
+		u32 nvcsw_delta;           /* nvcsw delta since last TUI interval */
+		u32 nivcsw_delta;          /* nivcsw delta since last TUI interval */
+
+		u32 pid;
+		u32 tgid;  /* Thread group ID (process) for TUI grouping */
+		char comm[16];
+		/* 208 bytes total (added 8 for nivcsw_snapshot) */
+	} telemetry;
+
+	u8  __pad[24]; /* Pad to 256 bytes: 256 - (24 + 208) = 24 bytes. */
+} __attribute__((aligned(256)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
  * [Stable:2][Tier:2][Flags:4][Rsvd:16][Rsvd:8]
@@ -149,7 +244,8 @@ struct mega_mailbox_entry {
 
 	/* --- Tick staging (bytes 0-15) --- */
 	u8 _reserved_cl0
-		[3]; /* Was: _pad_cl0, dsq_hint, tick_counter (tick/DVFS removed) */
+		[2]; /* Was: _pad_cl0, dsq_hint, tick_counter (tick/DVFS removed) */
+	u8  is_yielder; /* Gate 1P: true if currently-running task is a cooperating yielder */
 	u8  tick_tier; /* Tier of currently-running task (set by running) */
 	u32 tick_last_run_at; /* Timestamp when task started (set by running) */
 	u64 tick_slice; /* Slice of currently-running task (set by running) */
@@ -177,47 +273,31 @@ struct mega_mailbox_entry {
      * ALP prefetches this line for free on Zen 5 (128B pair).
      * Cross-CPU fields (wakeup_same_cpu, migration_cooldown) colocated here
      * to isolate waker RFOs from CL0's local-only tick/running/stopping. */
-
 	/* --- Psychic Cache Slot 2: LRU (bytes 64-83) --- */
 	u64 rc_task_ptr2; /* Slot 2 task pointer (8B-aligned) */
 	u64 rc_state_fused2; /* Slot 2 [63:32]=packed_info, [31:0]=deficit_avg */
 	u32 rc_counter2; /* Slot 2 reclass counter */
 
-	/* --- Cross-CPU fields (bytes 84-85): written by waker in select_cpu --- */
-	u8 migration_cooldown; /* NEAR_PREF: wakeups remaining in cooldown period.
-                            * Set to 4 on migration, decremented on Gate 1 hit.
-                            * While > 0, Gate 1c scans same-CCD-half idle CPUs
-                            * before falling to Gate 2 (far scan).
-                            * Sim: 8.5× jitter reduction for FF16, no-op for
-                            * Arc Raiders (already high Gate 1 hit rate). */
-	u8 wakeup_same_cpu; /* J1 V2: consecutive same-CPU wakeup counter (0-255).
-                            * Written cross-CPU by waker in cake_select_cpu.
-                            * Relocated from CL0→CL1 to eliminate false sharing
-                            * with tick/running/stopping (all local-CPU-only). */
-
-	/* --- Confidence routing (bytes 86-87): written by waker in select_cpu ---
-     * Extends WSC pattern (Rule 40) to all gates. When a task consistently
-     * exits through the same gate, skip intermediate gates on the miss path.
-     * Sim: +42µs/s (Arc), +16µs/s (FF16), +915µs/s (compilation). */
-	u8 predicted_gate; /* Last gate that handled prev_cpu's wakeup (0-7).
-                            * Updated on every Gate 1 miss exit.
-                            * Gate IDs: CAKE_GATE_1B=0, _1C=1, _2=2, _3=3, _4=4, _TUN=5 */
-	u8 gate_confidence; /* Consecutive matches for predicted_gate (0-31 sat).
-                            * >= CAKE_GATE_CONF_THRESH (8): skip to predicted gate. */
-
-	/* --- V3 Quantum Guard (bytes 88-91): LOCAL writes only ---
+	/* --- V3 Quantum Guard (bytes 84-87): LOCAL writes only ---
      * run_start_cl1: duplicate of tick_last_run_at for cross-CPU reads.
-     * Written by cake_running (LOCAL CPU, same CL1 already Modified).
-     * Read by Gate 4 quantum guard (remote CPU, rare ~1% of wakeups).
-     * Piggybacked on existing CL1 S↔M transitions from waker writes. */
-	u32 run_start_cl1; /* Duplicate of tick_last_run_at for cross-CPU read.
-                            * Avoids touching CL0 from remote CPUs, preserving
-                            * CL0 local-only isolation. Byte 88-91. */
-	u32 _reserved[9];
-} __attribute__((aligned(128)));
+     * Written by cake_running (LOCAL CPU, same CL1).
+     * Read by Gate 4 quantum guard (remote CPU). */
+	u32 run_start_cl1;
+
+	u32 last_stopped_pid;  /* TELEMETRY: PID of last task that stopped on this CPU */
+	u32 _pad_tctx;         /* padding for u64 alignment */
+	u64 last_stopped_tctx; /* TELEMETRY: arena tctx pointer of last stopped task (avoids bpf_task_from_pid) */
+	u32 _reserved_cl1[6]; /* Pad to end of CL1 (byte 127) */
+
+	/* ═══ CACHE LINE 2 (bytes 128-191): RESERVED ═══
+     * Previous cross-CPU fields (migration_cooldown, wakeup_same_cpu,
+     * predicted_gate, gate_confidence) removed — no longer used. */
+	u32 _reserved_cl2_header;
+	u32 _reserved_cl2[15]; /* Pad to byte 192 */
+} __attribute__((aligned(256)));
 _Static_assert(
-	sizeof(struct mega_mailbox_entry) == 128,
-	"mega_mailbox_entry must be exactly 128 bytes (2 cache lines — R2 3-slot)");
+	sizeof(struct mega_mailbox_entry) == 256,
+	"mega_mailbox_entry must be exactly 256 bytes (4 cache lines)");
 
 /* Statistics shared with userspace */
 struct cake_stats {
@@ -226,59 +306,51 @@ struct cake_stats {
 	u64 nr_tier_dispatches[CAKE_TIER_MAX]; /* Per-tier dispatch counts */
 	u64 nr_starvation_preempts_tier
 		[CAKE_TIER_MAX]; /* Per-tier starvation preempts */
-	u64 _pad[22]; /* Pad to 256 bytes: (2+4+4+22)*8 = 256 */
+	u64 total_gate1_latency_ns; /* Total time spent in Gate 1 */
+	u64 total_gate2_latency_ns; /* Total time spent in Gate 2 */
+	u64 total_enqueue_latency_ns; /* Total time spent in enqueue */
+	u64 nr_dropped_allocations; /* Count of failed scx_task_alloc requests */
+	u64 nr_local_dispatches;    /* Dispatched from local LLC DSQ */
+	u64 nr_stolen_dispatches;   /* Dispatched from remote LLC DSQ (steal) */
+	u64 nr_dispatch_misses;     /* dispatch() found no work (all DSQs empty) */
+	u64 nr_dsq_queued;          /* Per-LLC DSQ enqueue count (for depth calc) */
+	u64 nr_dsq_consumed;        /* Per-LLC DSQ consume count (dispatched from DSQ) */
+
+	/* Callback aggregate timing (cumulative ns, system-wide) */
+	u64 total_select_cpu_ns;     /* Total time in cake_select_cpu */
+	u64 total_stopping_ns;       /* Total time in cake_stopping */
+	u64 total_running_ns;        /* Total time in cake_running */
+
+	/* Callback max tracking (worst single invocation, ns) */
+	u64 max_select_cpu_ns;       /* Worst single cake_select_cpu */
+	u64 max_stopping_ns;         /* Worst single cake_stopping */
+	u64 max_running_ns;          /* Worst single cake_running */
+
+	/* Stopping path breakdown (invocation counts) */
+	u64 nr_stop_confidence_skip; /* Confidence EWMA skip (~4ns) */
+	u64 nr_stop_ewma;            /* EWMA+classify (~14ns) */
+	u64 nr_stop_ramp;            /* Stability ramp (stable < 3) */
+	u64 nr_stop_miss;            /* Cold/self-seed miss path (~30ns) */
+
+	u64 _pad[3]; /* Pad to 256 bytes: (2+4+4+3+4+2+3+3+3+4+3)*8 = 280... recalc */
 } __attribute__((aligned(64)));
 
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS (2 * 1000 * 1000) /* 2ms */
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS (8 * 1000 * 1000) /* 8ms */
+#define CAKE_DEFAULT_YIELD_BONUS_NS    (4 * 1000 * 1000) /* 4ms — yielder vtime boost */
 
-/* Default tier arrays (Gaming profile) — 4 tiers */
-
-/* Per-tier starvation thresholds (nanoseconds) */
-#define CAKE_DEFAULT_STARVATION_T0 3000000 /* Critical: 3ms */
-#define CAKE_DEFAULT_STARVATION_T1 8000000 /* Interact: 8ms */
-#define CAKE_DEFAULT_STARVATION_T2 40000000 /* Frame: 40ms */
-#define CAKE_DEFAULT_STARVATION_T3 100000000 /* Bulk: 100ms */
-
-/* Tier quantum multipliers (fixed-point, 1024 = 1.0x)
- * Power-of-4 progression: each tier gets 4x the quantum of the tier above.
- * T2 at 4ms lets 300fps+ render threads complete entire frames without preemption.
- * T0 at 0.5ms releases cores to game work faster (T0 runs <100µs anyway). */
-#define CAKE_DEFAULT_MULTIPLIER_T0 256 /* Critical: 0.25x = 0.5ms */
-#define CAKE_DEFAULT_MULTIPLIER_T1 1024 /* Interact: 1.0x  = 2.0ms */
-#define CAKE_DEFAULT_MULTIPLIER_T2 2048 /* Frame:    2.0x  = 4.0ms */
-#define CAKE_DEFAULT_MULTIPLIER_T3 \
-	4095 /* Bulk:     ~4.0x = 8.0ms (12-bit max = 4095) */
-
-/* Wait budget per tier (nanoseconds) */
-#define CAKE_DEFAULT_WAIT_BUDGET_T0 100000 /* Critical: 100µs */
-#define CAKE_DEFAULT_WAIT_BUDGET_T1 2000000 /* Interact: 2ms */
-#define CAKE_DEFAULT_WAIT_BUDGET_T2 8000000 /* Frame: 8ms */
-#define CAKE_DEFAULT_WAIT_BUDGET_T3 0 /* Bulk: no limit */
-
-/* Fused tier config - packs 4 params into 64-bit: [Mult:12][Quantum:16][Budget:16][Starve:20] */
-typedef u64 fused_config_t;
-
-#define CFG_SHIFT_MULTIPLIER 0
-#define CFG_SHIFT_QUANTUM 12
-#define CFG_SHIFT_BUDGET 28
-#define CFG_SHIFT_STARVATION 44
-
-#define CFG_MASK_MULTIPLIER 0x0FFFULL
-#define CFG_MASK_QUANTUM 0xFFFFULL
-#define CFG_MASK_BUDGET 0xFFFFULL
-#define CFG_MASK_STARVATION 0xFFFFFULL
-
-/* Extraction Macro (BPF Side) — only STARVATION used in hot path */
-/* Starvation: bits 44-63. SHR; SHL. (Mask redundant) */
-#define UNPACK_STARVATION_NS(cfg) (((cfg) >> CFG_SHIFT_STARVATION) << 10)
-
-/* Packing Macro (Userspace/Helper) */
-#define PACK_CONFIG(q_us, mult, budget_us, starv_us)                     \
-	((((u64)(mult) & CFG_MASK_MULTIPLIER) << CFG_SHIFT_MULTIPLIER) | \
-	 (((u64)(q_us) & CFG_MASK_QUANTUM) << CFG_SHIFT_QUANTUM) |       \
-	 (((u64)(budget_us) & CFG_MASK_BUDGET) << CFG_SHIFT_BUDGET) |    \
-	 (((u64)(starv_us) & CFG_MASK_STARVATION) << CFG_SHIFT_STARVATION))
+/* ═══ ADAPTIVE QUANTUM — YIELD-GATED (Phase 4.0) ═══
+ * Per-task runtime-proportional quantum modulated by voluntary yield signal.
+ * Yielders (nvcsw > 0 since last stop) get generous headroom + high ceiling.
+ * Non-yielders get tight headroom + low ceiling, forcing faster CPU release.
+ *
+ * Quantum = clamp(EWMA_avg × HEADROOM, MIN, MAX/CEILING)
+ * Yielders: game render, audio, input, network → 50ms ceiling (cooperators)
+ * Non-yielders: compilation, background tasks → EWMA × 1, capped 2ms */
+#define AQ_BULK_HEADROOM     1               /* 1× EWMA runtime for non-yielders */
+#define AQ_MIN_NS            (50 * 1000)     /* 50µs floor — below this overhead > work */
+#define AQ_YIELDER_CEILING_NS (50 * 1000000)  /* 50ms ceiling — yielders (covers 20fps+) */
+#define AQ_BULK_CEILING_NS   (2 * 1000000)   /* 2ms ceiling — non-yielders (forces release) */
 
 #endif /* __CAKE_INTF_H */
