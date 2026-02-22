@@ -307,6 +307,7 @@ struct LayerCoreOrderGenerator<'a> {
 }
 
 impl<'a> LayerCoreOrderGenerator<'a> {
+    #[allow(dead_code)]
     fn has_topology_preference(&self) -> bool {
         self.spec.nodes().len() > 0 || self.spec.llcs().len() > 0
     }
