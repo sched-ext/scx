@@ -130,7 +130,7 @@ pub struct TaskTelemetryRow {
     pub avg_runtime_us: u32,
     pub deficit_us: u32,
     pub wait_duration_ns: u64,
-    pub gate_hit_pcts: [f64; 5], // G1, G2, G3, G4, GTUN
+    pub gate_hit_pcts: [f64; 6], // G1, G2, G1W, G3, G4, GTUN
     pub select_cpu_ns: u32,
     pub enqueue_ns: u32,
     pub core_placement: u16,
@@ -183,7 +183,7 @@ impl Default for TaskTelemetryRow {
             avg_runtime_us: 0,
             deficit_us: 0,
             wait_duration_ns: 0,
-            gate_hit_pcts: [0.0; 5],
+            gate_hit_pcts: [0.0; 6],
             select_cpu_ns: 0,
             enqueue_ns: 0,
             core_placement: 0,
@@ -923,12 +923,13 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             ));
             // Extended diagnostics line (dump-only, not in TUI)
             output.push_str(&format!(
-                "{}         G2:{:.0}% G3:{:.0}% G4:{:.0}% G5:{:.0}%  CONF:{}/8  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  DISP_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DFL_SEL:{}ns  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}\n",
+                "{}         G2:{:.0}% G1W:{:.0}% G3:{:.0}% G4:{:.0}% G5:{:.0}%  CONF:{}/8  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  DISP_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DFL_SEL:{}ns  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}\n",
                 indent,
                 row.gate_hit_pcts[1],
                 row.gate_hit_pcts[2],
                 row.gate_hit_pcts[3],
                 row.gate_hit_pcts[4],
+                row.gate_hit_pcts[5],
                 row.gate_confidence,
                 row.direct_dispatch_count,
                 row.deficit_us,
@@ -2160,24 +2161,26 @@ pub fn run_tui(
                                     .avg_runtime_us as u32
                             };
 
-                            // Map all 5 gates from BPF telemetry
+                            // Map all 6 gates from BPF telemetry
                             let g1 = ctx.telemetry.gate_1_hits;
                             let g2 = ctx.telemetry.gate_2_hits;
+                            let g1w = ctx.telemetry.gate_1w_hits;
                             let g3 = ctx.telemetry.gate_3_hits;
                             let g4 = ctx.telemetry.gate_4_hits;
                             let g5 = ctx.telemetry.gate_tun_hits;
-                            let total_sel = g1 + g2 + g3 + g4 + g5;
+                            let total_sel = g1 + g2 + g1w + g3 + g4 + g5;
 
                             let gate_hit_pcts = if total_sel > 0 {
                                 [
                                     (g1 as f64 / total_sel as f64) * 100.0,
                                     (g2 as f64 / total_sel as f64) * 100.0,
+                                    (g1w as f64 / total_sel as f64) * 100.0,
                                     (g3 as f64 / total_sel as f64) * 100.0,
                                     (g4 as f64 / total_sel as f64) * 100.0,
                                     (g5 as f64 / total_sel as f64) * 100.0,
                                 ]
                             } else {
-                                [0.0, 0.0, 0.0, 0.0, 0.0]
+                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                             };
 
                             let total_runs = ctx.telemetry.total_runs;

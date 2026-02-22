@@ -130,7 +130,8 @@ struct cake_task_ctx {
 
 		/* Topographic / Cache Data */
 		u32 gate_1_hits; /* Number of local cache hit wakeups */
-		u32 gate_2_hits; /* Snapshot matches */
+		u32 gate_2_hits; /* SMT sibling hits */
+		u32 gate_1w_hits; /* Waker affinity hits (SMT sibling or LLC) */
 		u32 gate_3_hits; /* Kernel fallback hits */
 		u32 gate_4_hits; /* Lazy preempt hits */
 		u32 gate_tun_hits; /* Complete miss tunneling */
@@ -286,7 +287,6 @@ struct mega_mailbox_entry {
 
 	u32 last_stopped_pid;  /* TELEMETRY: PID of last task that stopped on this CPU */
 	u32 _pad_tctx;         /* padding for u64 alignment */
-	u64 last_stopped_tctx; /* TELEMETRY: arena tctx pointer of last stopped task (avoids bpf_task_from_pid) */
 	u32 _reserved_cl1[6]; /* Pad to end of CL1 (byte 127) */
 
 	/* ═══ CACHE LINE 2 (bytes 128-191): RESERVED ═══
@@ -338,7 +338,6 @@ struct cake_stats {
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS (2 * 1000 * 1000) /* 2ms */
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS (8 * 1000 * 1000) /* 8ms */
-#define CAKE_DEFAULT_YIELD_BONUS_NS    (4 * 1000 * 1000) /* 4ms — yielder vtime boost */
 
 /* ═══ ADAPTIVE QUANTUM — YIELD-GATED (Phase 4.0) ═══
  * Per-task runtime-proportional quantum modulated by voluntary yield signal.
