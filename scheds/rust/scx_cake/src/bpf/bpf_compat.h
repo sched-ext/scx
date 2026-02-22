@@ -34,21 +34,4 @@
 
 #endif
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * RQ ACCESS: Prefer scx_bpf_locked_rq() over deprecated scx_bpf_cpu_rq().
- *
- * scx_bpf_locked_rq(): ~3-5ns (no RCU, no bounds check, rq lock held)
- * scx_bpf_cpu_rq():    ~10-15ns (RCU + bounds check, deprecated)
- *
- * cake_tick holds the local rq lock, so locked_rq is both faster and correct.
- * Declared __weak: if kernel doesn't export it, falls back to cpu_rq.
- * ═══════════════════════════════════════════════════════════════════════════ */
-extern struct rq *scx_bpf_locked_rq(void) __weak __ksym;
-
-static __always_inline struct rq *cake_get_rq(s32 cpu) {
-    if (scx_bpf_locked_rq)
-        return scx_bpf_locked_rq();
-    return scx_bpf_cpu_rq(cpu);
-}
-
 #endif /* __CAKE_BPF_COMPAT_H */
