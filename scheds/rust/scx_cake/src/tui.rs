@@ -114,7 +114,7 @@ pub struct TuiApp {
     pub prev_task_rows: HashMap<u32, TaskTelemetryRow>, // Previous tick for delta mode
     pub _prev_stats: Option<cake_stats>, // Previous global stats for rate calc
     // BenchLab cached results
-    pub bench_entries: [(u64, u64, u64, u64); 7], // (min_ns, max_ns, total_ns, last_value)
+    pub bench_entries: [(u64, u64, u64, u64); 19], // (min_ns, max_ns, total_ns, last_value)
     pub bench_cpu: u32,
     pub bench_iterations: u32,
     pub bench_timestamp: u64,
@@ -134,33 +134,26 @@ pub struct TaskTelemetryRow {
     pub select_cpu_ns: u32,
     pub enqueue_ns: u32,
     pub core_placement: u16,
-    pub dfl_select_cpu_ns: u32,
     pub dsq_insert_ns: u32,
     pub migration_count: u16,
     pub preempt_count: u16,
     pub yield_count: u16,
-    pub gate_confidence: u16,
     pub total_runs: u32,
     pub jitter_accum_ns: u64,
     pub direct_dispatch_count: u16,
     pub enqueue_count: u16,
     pub cpumask_change_count: u16,
-    pub dispatch_count: u16,
     pub stopping_duration_ns: u32,
     pub running_duration_ns: u32,
     pub max_runtime_us: u32,
-    pub tier_change_count: u16,
     // Scheduling period (dispatch gap)
     pub dispatch_gap_us: u64,
     pub max_dispatch_gap_us: u64,
-    // Preemption blame
-    pub preempted_by_pid: u32,
     // Wait latency histogram
     pub wait_hist: [u32; 4], // <10µs, <100µs, <1ms, >=1ms
     // Delta mode: per-interval rates
     pub runs_per_sec: f64,
     pub migrations_per_sec: f64,
-    pub tier_changes_per_sec: f64,
     pub status: TaskStatus,
     pub is_bpf_tracked: bool,
     pub tgid: u32,
@@ -187,29 +180,23 @@ impl Default for TaskTelemetryRow {
             select_cpu_ns: 0,
             enqueue_ns: 0,
             core_placement: 0,
-            dfl_select_cpu_ns: 0,
             dsq_insert_ns: 0,
             migration_count: 0,
             preempt_count: 0,
             yield_count: 0,
-            gate_confidence: 0,
             total_runs: 0,
             jitter_accum_ns: 0,
             direct_dispatch_count: 0,
             enqueue_count: 0,
             cpumask_change_count: 0,
-            dispatch_count: 0,
             stopping_duration_ns: 0,
             running_duration_ns: 0,
             max_runtime_us: 0,
-            tier_change_count: 0,
             dispatch_gap_us: 0,
             max_dispatch_gap_us: 0,
-            preempted_by_pid: 0,
             wait_hist: [0; 4],
             runs_per_sec: 0.0,
             migrations_per_sec: 0.0,
-            tier_changes_per_sec: 0.0,
             status: TaskStatus::Idle,
             is_bpf_tracked: false,
             tgid: 0,
@@ -284,7 +271,7 @@ impl TuiApp {
             bpf_task_count: 0,
             prev_task_rows: HashMap::new(),
             _prev_stats: None,
-            bench_entries: [(0, 0, 0, 0); 7],
+            bench_entries: [(0, 0, 0, 0); 19],
             bench_cpu: 0,
             bench_iterations: 0,
             bench_timestamp: 0,
@@ -780,6 +767,18 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             "scx_bpf_test_and_clear_cpu_idle()",
             "scx_bpf_nr_cpu_ids()",
             "get_task_ctx() [storage+arena]",
+            "scx_bpf_dsq_nr_queued()",
+            "BSS global_stats[cpu] read",
+            "Arena per_cpu[cpu].mbox read",
+            "Timing harness (calibration)",
+            "Mbox CL0 cached CPU read",
+            "Mbox CL0 cached tctx+deref",
+            "bpf_ringbuf reserve+discard",
+            "task_struct p->scx+nvcsw",
+            "RODATA cpu_llc+tier_slice",
+            "Bitflag shift+mask+brless",
+            "compute_ewma() full call",
+            "CL0 ptr+fused+packed read",
         ];
         output.push_str(&format!(
             "\n=== BenchLab ({} runs, {} iterations/run, CPU {}) ===\n",
@@ -899,7 +898,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 format!("{}", wait_us)
             };
             output.push_str(&format!(
-                "{}{:<7} {:<3} {:<15} {:<4} {:<6} {:<6} {:<7} {:<7} {:<6} {:<7.1} C{:<3} {:<5} {:<5} {:<5} {:<5} {:<5.0} {:<7.1} {:<8} {}/{}/{}/{}\n",
+                "{}{:<7} {:<3} {:<15} {:<4} {:<6} {:<6} {:<7} {:<7} {:<6} {:<7.1} C{:<3} {:<5} {:<5} {:<5} {:<5} {:<5.0} {:<7.1} {}/{}/{}/{}\n",
                 indent,
                 row.pid,
                 status_str,
@@ -918,28 +917,23 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.running_duration_ns,
                 row.gate_hit_pcts[0],
                 row.migrations_per_sec,
-                row.preempted_by_pid,
                 row.wait_hist[0], row.wait_hist[1], row.wait_hist[2], row.wait_hist[3],
             ));
-            // Extended diagnostics line (dump-only, not in TUI)
             output.push_str(&format!(
-                "{}         G2:{:.0}% G1W:{:.0}% G3:{:.0}% G4:{:.0}% G5:{:.0}%  CONF:{}/8  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  DISP_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DFL_SEL:{}ns  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}\n",
+                "{}         G2:{:.0}% G1W:{:.0}% G3:{:.0}% G1P:{:.0}% G5:{:.0}%  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}\n",
                 indent,
                 row.gate_hit_pcts[1],
                 row.gate_hit_pcts[2],
                 row.gate_hit_pcts[3],
                 row.gate_hit_pcts[4],
                 row.gate_hit_pcts[5],
-                row.gate_confidence,
                 row.direct_dispatch_count,
                 row.deficit_us,
                 row.yield_count,
                 row.preempt_count,
                 row.enqueue_count,
-                row.dispatch_count,
                 row.cpumask_change_count,
                 row.max_dispatch_gap_us,
-                row.dfl_select_cpu_ns,
                 row.dsq_insert_ns,
                 row.total_runs,
                 row.slice_util_pct,
@@ -1547,6 +1541,18 @@ fn draw_bench_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
         "scx_bpf_test_and_clear_cpu_idle()",
         "scx_bpf_nr_cpu_ids()",
         "get_task_ctx() [storage+arena]",
+        "scx_bpf_dsq_nr_queued()",
+        "BSS global_stats[cpu] read",
+        "Arena per_cpu[cpu].mbox read",
+        "Timing harness (calibration)",
+        "Mbox CL0 cached CPU read",
+        "Mbox CL0 cached tctx+deref",
+        "bpf_ringbuf reserve+discard",
+        "task_struct p->scx+nvcsw",
+        "RODATA cpu_llc+tier_slice",
+        "Bitflag shift+mask+brless",
+        "compute_ewma() full call",
+        "CL0 ptr+fused+packed read",
     ];
 
     let mut lines: Vec<ratatui::text::Line> = Vec::new();
@@ -1776,16 +1782,6 @@ fn draw_inspector_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(
-                "  └─ Kernel Fallback (DFL): ",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                format!("{:>8} ns", row.dfl_select_cpu_ns),
-                Style::default().fg(Color::Gray),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
                 "  └─ DSQ Insert Overhead: ",
                 Style::default().fg(Color::DarkGray),
             ),
@@ -1902,7 +1898,7 @@ pub fn run_tui(
                 app.bench_cpu = br.cpu;
                 app.bench_run_count += 1;
                 app.bench_timestamp = br.bench_timestamp;
-                for i in 0..7 {
+                for i in 0..19 {
                     let new_min = br.entries[i].min_ns;
                     let new_max = br.entries[i].max_ns;
                     let new_total = br.entries[i].total_ns;
@@ -2166,9 +2162,9 @@ pub fn run_tui(
                             let g2 = ctx.telemetry.gate_2_hits;
                             let g1w = ctx.telemetry.gate_1w_hits;
                             let g3 = ctx.telemetry.gate_3_hits;
-                            let g4 = ctx.telemetry.gate_4_hits;
+                            let g1p = ctx.telemetry.gate_1p_hits;
                             let g5 = ctx.telemetry.gate_tun_hits;
-                            let total_sel = g1 + g2 + g1w + g3 + g4 + g5;
+                            let total_sel = g1 + g2 + g1w + g3 + g1p + g5;
 
                             let gate_hit_pcts = if total_sel > 0 {
                                 [
@@ -2176,7 +2172,7 @@ pub fn run_tui(
                                     (g2 as f64 / total_sel as f64) * 100.0,
                                     (g1w as f64 / total_sel as f64) * 100.0,
                                     (g3 as f64 / total_sel as f64) * 100.0,
-                                    (g4 as f64 / total_sel as f64) * 100.0,
+                                    (g1p as f64 / total_sel as f64) * 100.0,
                                     (g5 as f64 / total_sel as f64) * 100.0,
                                 ]
                             } else {
@@ -2201,26 +2197,21 @@ pub fn run_tui(
                                         enqueue_ns: ctx.telemetry.enqueue_duration_ns,
                                         gate_hit_pcts,
                                         core_placement: ctx.telemetry.core_placement,
-                                        dfl_select_cpu_ns: ctx.telemetry.dfl_select_cpu_ns,
                                         dsq_insert_ns: ctx.telemetry.dsq_insert_ns,
                                         migration_count: ctx.telemetry.migration_count,
                                         preempt_count: ctx.telemetry.preempt_count,
                                         yield_count: ctx.telemetry.yield_count,
-                                        gate_confidence: ctx.telemetry.gate_confidence,
                                         total_runs,
                                         jitter_accum_ns,
                                         direct_dispatch_count: ctx.telemetry.direct_dispatch_count,
                                         enqueue_count: ctx.telemetry.enqueue_count,
                                         cpumask_change_count: ctx.telemetry.cpumask_change_count,
-                                        dispatch_count: ctx.telemetry.dispatch_count,
                                         stopping_duration_ns: ctx.telemetry.stopping_duration_ns,
                                         running_duration_ns: ctx.telemetry.running_duration_ns,
                                         max_runtime_us: ctx.telemetry.max_runtime_us,
-                                        tier_change_count: ctx.telemetry.tier_change_count,
                                         dispatch_gap_us: ctx.telemetry.dispatch_gap_ns / 1000,
                                         max_dispatch_gap_us: ctx.telemetry.max_dispatch_gap_ns
                                             / 1000,
-                                        preempted_by_pid: ctx.telemetry.preempted_by_pid,
                                         wait_hist: [
                                             ctx.telemetry.wait_hist_lt10us,
                                             ctx.telemetry.wait_hist_lt100us,
@@ -2229,7 +2220,6 @@ pub fn run_tui(
                                         ],
                                         runs_per_sec: 0.0,
                                         migrations_per_sec: 0.0,
-                                        tier_changes_per_sec: 0.0,
                                         status: TaskStatus::Alive,
                                         is_bpf_tracked: true,
                                         tgid: ctx.telemetry.tgid,
@@ -2250,25 +2240,20 @@ pub fn run_tui(
                             row.enqueue_ns = ctx.telemetry.enqueue_duration_ns;
                             row.gate_hit_pcts = gate_hit_pcts;
                             row.core_placement = ctx.telemetry.core_placement;
-                            row.dfl_select_cpu_ns = ctx.telemetry.dfl_select_cpu_ns;
                             row.dsq_insert_ns = ctx.telemetry.dsq_insert_ns;
                             row.migration_count = ctx.telemetry.migration_count;
                             row.preempt_count = ctx.telemetry.preempt_count;
                             row.yield_count = ctx.telemetry.yield_count;
-                            row.gate_confidence = ctx.telemetry.gate_confidence;
                             row.total_runs = total_runs;
                             row.jitter_accum_ns = jitter_accum_ns;
                             row.direct_dispatch_count = ctx.telemetry.direct_dispatch_count;
                             row.enqueue_count = ctx.telemetry.enqueue_count;
                             row.cpumask_change_count = ctx.telemetry.cpumask_change_count;
-                            row.dispatch_count = ctx.telemetry.dispatch_count;
                             row.stopping_duration_ns = ctx.telemetry.stopping_duration_ns;
                             row.running_duration_ns = ctx.telemetry.running_duration_ns;
                             row.max_runtime_us = ctx.telemetry.max_runtime_us;
-                            row.tier_change_count = ctx.telemetry.tier_change_count;
                             row.dispatch_gap_us = ctx.telemetry.dispatch_gap_ns / 1000;
                             row.max_dispatch_gap_us = ctx.telemetry.max_dispatch_gap_ns / 1000;
-                            row.preempted_by_pid = ctx.telemetry.preempted_by_pid;
                             row.wait_hist = [
                                 ctx.telemetry.wait_hist_lt10us,
                                 ctx.telemetry.wait_hist_lt100us,
@@ -2325,10 +2310,8 @@ pub fn run_tui(
                     if let Some(prev) = app.prev_task_rows.get(pid) {
                         let d_runs = row.total_runs.saturating_sub(prev.total_runs);
                         let d_migr = row.migration_count.saturating_sub(prev.migration_count);
-                        let d_tier = row.tier_change_count.saturating_sub(prev.tier_change_count);
                         row.runs_per_sec = d_runs as f64 / actual_elapsed;
                         row.migrations_per_sec = d_migr as f64 / actual_elapsed;
-                        row.tier_changes_per_sec = d_tier as f64 / actual_elapsed;
                     }
                 }
                 // Store current as prev for next tick
