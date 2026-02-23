@@ -114,7 +114,7 @@ pub struct TuiApp {
     pub prev_task_rows: HashMap<u32, TaskTelemetryRow>, // Previous tick for delta mode
     pub _prev_stats: Option<cake_stats>, // Previous global stats for rate calc
     // BenchLab cached results
-    pub bench_entries: [(u64, u64, u64, u64); 19], // (min_ns, max_ns, total_ns, last_value)
+    pub bench_entries: [(u64, u64, u64, u64); 23], // (min_ns, max_ns, total_ns, last_value)
     pub bench_cpu: u32,
     pub bench_iterations: u32,
     pub bench_timestamp: u64,
@@ -271,7 +271,7 @@ impl TuiApp {
             bpf_task_count: 0,
             prev_task_rows: HashMap::new(),
             _prev_stats: None,
-            bench_entries: [(0, 0, 0, 0); 19],
+            bench_entries: [(0, 0, 0, 0); 23],
             bench_cpu: 0,
             bench_iterations: 0,
             bench_timestamp: 0,
@@ -779,6 +779,10 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             "Bitflag shift+mask+brless",
             "compute_ewma() full call",
             "CL0 ptr+fused+packed read",
+            "idle_probe(remote) MESI",
+            "smtmask read-only check",
+            "Disruptor CL0 full read",
+            "get_task_ctx+arena CL0",
         ];
         output.push_str(&format!(
             "\n=== BenchLab ({} runs, {} iterations/run, CPU {}) ===\n",
@@ -1553,6 +1557,10 @@ fn draw_bench_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
         "Bitflag shift+mask+brless",
         "compute_ewma() full call",
         "CL0 ptr+fused+packed read",
+        "idle_probe(remote) MESI",
+        "smtmask read-only check",
+        "Disruptor CL0 full read",
+        "get_task_ctx+arena CL0",
     ];
 
     let mut lines: Vec<ratatui::text::Line> = Vec::new();
@@ -1898,7 +1906,7 @@ pub fn run_tui(
                 app.bench_cpu = br.cpu;
                 app.bench_run_count += 1;
                 app.bench_timestamp = br.bench_timestamp;
-                for i in 0..19 {
+                for i in 0..23 {
                     let new_min = br.entries[i].min_ns;
                     let new_max = br.entries[i].max_ns;
                     let new_total = br.entries[i].total_ns;
