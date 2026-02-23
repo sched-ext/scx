@@ -15,6 +15,35 @@ enum {
 	BUDDY_POISONED = (s8)0xef,
 };
 
+private(SYS_BUDDY) struct buddy sys_buddy;
+u64 __arena sys_buddy_lock;
+
+__hidden int sys_buddy_init(void)
+{
+	return buddy_init(&sys_buddy,
+			  (arena_spinlock_t __arena *)&sys_buddy_lock);
+}
+
+__hidden void sys_buddy_alloc_out(size_t size, void __arena **out)
+{
+	*out = buddy_alloc(&sys_buddy, size);
+}
+
+__hidden void sys_buddy_zalloc_out(size_t size, void __arena **out)
+{
+	*out = buddy_zalloc(&sys_buddy, size);
+}
+
+__hidden void sys_buddy_free(void __arena *ptr)
+{
+	buddy_free(&sys_buddy, ptr);
+}
+
+__hidden u64 sys_buddy_get_arena_pages_used(void)
+{
+	return sys_buddy.arena_pages_used;
+}
+
 static inline int buddy_lock(struct buddy *buddy)
 {
 	return arena_spin_lock(buddy->lock);
@@ -361,6 +390,8 @@ static __always_inline buddy_chunk_t *buddy_chunk_get(struct buddy *buddy)
 		return NULL;
 	}
 
+	buddy->arena_pages_used += BUDDY_CHUNK_PAGES;
+
 	asan_poison(chunk, BUDDY_POISONED, BUDDY_CHUNK_PAGES * PAGE_SIZE);
 
 	/* Unpoison the chunk itself. */
@@ -538,6 +569,7 @@ __weak int buddy_destroy(struct buddy *buddy)
 		asan_poison(chunk, BUDDY_POISONED,
 			    BUDDY_CHUNK_PAGES * PAGE_SIZE);
 		bpf_arena_free_pages(&arena, chunk, BUDDY_CHUNK_PAGES);
+		buddy->arena_pages_used -= BUDDY_CHUNK_PAGES;
 	}
 
 	/* Clear all fields. */
