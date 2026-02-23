@@ -18,6 +18,11 @@ scx_cargo = { path = "../scx_cargo", version = "1.0.27" }
 [lib]
 name = "scx_rustland_core"
 path = "src/lib.rs"
+include = [
+    "assets/bpf/intf.h",
+    "assets/bpf/main.bpf.c",
+    "assets/bpf.rs",
+]
 
 [lints.clippy]
 not_unsafe_ptr_arg_deref = "allow"
