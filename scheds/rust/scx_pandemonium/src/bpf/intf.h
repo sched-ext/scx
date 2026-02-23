@@ -22,6 +22,7 @@ struct tuning_knobs {
 	u64 lat_cri_thresh_high; // CLASSIFIER: LAT_CRITICAL THRESHOLD (DEFAULT 32)
 	u64 lat_cri_thresh_low;  // CLASSIFIER: INTERACTIVE THRESHOLD (DEFAULT 8)
 	u64 affinity_mode;      // L2 PLACEMENT: 0=OFF, 1=WEAK, 2=STRONG
+	u64 sojourn_thresh_ns;  // BATCH DSQ RESCUE THRESHOLD (SET BY RUST)
 };
 
 // PER-CPU STATISTICS (BPF_MAP_TYPE_PERCPU_ARRAY VALUE)
@@ -43,7 +44,6 @@ struct pandemonium_stats {
 	u64 wake_lat_idle_cnt;  // LATENCY COUNT: IDLE FAST PATH
 	u64 wake_lat_kick_sum;  // LATENCY SUM: HARD-KICKED ENQUEUE (NS)
 	u64 wake_lat_kick_cnt;  // LATENCY COUNT: HARD-KICKED ENQUEUE
-	u64 nr_guard_clamps;    // INTERACTIVE GUARD: BATCH SLICE CLAMPED
 	u64 nr_procdb_hits;     // ENABLE: PRE-LEARNED CLASSIFICATION APPLIED
 	// L2 CACHE AFFINITY INSTRUMENTATION (PHASE 2: MEASURE)
 	// COUNTED IN select_cpu() IDLE PATH AND enqueue() TIER 1
@@ -53,11 +53,12 @@ struct pandemonium_stats {
 	u64 nr_l2_miss_interactive;
 	u64 nr_l2_hit_lat_crit;
 	u64 nr_l2_miss_lat_crit;
-	// CONTENTION: DSQ DEPTH AT TIER 3 ENQUEUE
-	u64 dsq_depth_sum;
-	u64 dsq_depth_samples;
 	// CPU RELEASE: TASKS RESCUED FROM LOCAL DSQ BY scx_bpf_reenqueue_local()
 	u64 nr_reenqueue;
+	// CODEL SOJOURN: CURRENT BATCH WAIT AGE (NS), WRITTEN BY tick()
+	u64 batch_sojourn_ns;
+	// CUSUM: 1 IF BURST MODE ACTIVE, 0 OTHERWISE, WRITTEN BY tick()
+	u64 burst_mode_active;
 };
 
 // PROCESS CLASSIFICATION: BPF OBSERVES, RUST LEARNS, BPF APPLIES

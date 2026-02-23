@@ -70,6 +70,7 @@ pub struct TuningKnobs {
     pub lat_cri_thresh_high: u64,
     pub lat_cri_thresh_low: u64,
     pub affinity_mode: u64,
+    pub sojourn_thresh_ns: u64,
 }
 
 impl Default for TuningKnobs {
@@ -83,6 +84,7 @@ impl Default for TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_OFF,
+            sojourn_thresh_ns: 5_000_000,
         }
     }
 }
@@ -128,6 +130,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
+            sojourn_thresh_ns: 5_000_000,
         },
         Regime::Mixed => TuningKnobs {
             slice_ns: MIXED_SLICE_NS,
@@ -138,6 +141,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_STRONG,
+            sojourn_thresh_ns: 5_000_000,
         },
         Regime::Heavy => TuningKnobs {
             slice_ns: HEAVY_SLICE_NS,
@@ -148,6 +152,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
+            sojourn_thresh_ns: 5_000_000,
         },
     }
 }
@@ -191,13 +196,11 @@ pub const STABILITY_THRESHOLD: u32 = 10; // CONSECUTIVE STABLE TICKS BEFORE HIBE
 pub fn compute_stability_score(
     prev_score: u32,
     regime_changed: bool,
-    guard_clamps: u64,
     reflex_events_delta: u64,
     p99_ns: u64,
     p99_ceiling_ns: u64,
 ) -> u32 {
-    if regime_changed || guard_clamps > 0 || reflex_events_delta > 0 || p99_ns > p99_ceiling_ns / 2
-    {
+    if regime_changed || reflex_events_delta > 0 || p99_ns > p99_ceiling_ns / 2 {
         return 0;
     }
     (prev_score + 1).min(STABILITY_THRESHOLD)
@@ -270,45 +273,5 @@ pub fn sleep_adjust_batch_ns(base_batch_ns: u64, io_pct: u64) -> u64 {
         (base_batch_ns * 3 / 4).max(base_batch_ns / 2)
     } else {
         base_batch_ns
-    }
-}
-
-// CONTENTION RESPONSE
-// DETECTS INTERACTIVE STARVATION FROM GUARD CLAMPS, KICK RATIOS, AND DSQ DEPTH.
-// CUTS BATCH SLICE TO REDUCE QUEUE PRESSURE WHEN CONTENTION PERSISTS.
-
-pub const GUARD_CLAMP_THRESH: u64 = 10;
-pub const KICK_RATIO_THRESH: u64 = 30;
-pub const DSQ_DEPTH_THRESH: u64 = 4;
-pub const CONTENTION_HOLD_TICKS: u32 = 3;
-pub const CONTENTION_BATCH_CUT_PCT: u64 = 75;
-
-pub fn detect_contention(
-    guard_clamps: u64,
-    hard_kicks: u64,
-    dispatches: u64,
-    avg_dsq_depth: u64,
-) -> bool {
-    let kick_pct = if dispatches > 0 {
-        hard_kicks * 100 / dispatches
-    } else {
-        0
-    };
-    guard_clamps > GUARD_CLAMP_THRESH
-        || kick_pct > KICK_RATIO_THRESH
-        || avg_dsq_depth > DSQ_DEPTH_THRESH
-}
-
-pub fn contention_adjust_batch_ns(
-    current_batch_ns: u64,
-    baseline_batch_ns: u64,
-    contention_ticks: u32,
-) -> (u64, u32) {
-    if contention_ticks >= CONTENTION_HOLD_TICKS {
-        let cut = current_batch_ns * CONTENTION_BATCH_CUT_PCT / 100;
-        let floor = baseline_batch_ns / 2;
-        (cut.max(floor), 0)
-    } else {
-        (current_batch_ns, contention_ticks)
     }
 }

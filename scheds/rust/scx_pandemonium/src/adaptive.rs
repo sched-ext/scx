@@ -58,7 +58,7 @@ pub fn monitor_loop(
     let mut tick_counter: u64 = 0;
     let mut tighten_events: u64 = 0;
     let mut prev_tighten_events: u64 = 0;
-    let mut contention_ticks: u32 = 0;
+    let mut sojourn_thresh_ns: u64 = 5_000_000; // 5MS INITIAL (CODEL UNIVERSAL TARGET)
 
     let mut procdb = match ProcessDb::new() {
         Ok(db) => Some(db),
@@ -109,7 +109,6 @@ pub fn monitor_loop(
         } else {
             0
         };
-        let delta_guard = stats.nr_guard_clamps.wrapping_sub(prev.nr_guard_clamps);
         let delta_reenq = stats.nr_reenqueue.wrapping_sub(prev.nr_reenqueue);
 
         // L2 CACHE AFFINITY DELTAS
@@ -269,33 +268,31 @@ pub fn monitor_loop(
         let baseline = regime_knobs(regime);
         let sleep_batch = tuning::sleep_adjust_batch_ns(baseline.batch_slice_ns, io_pct);
 
-        // CONTENTION RESPONSE: DETECT AND CUT BATCH WHEN QUEUES ARE DEEP
-        let delta_dsq_sum = stats.dsq_depth_sum.wrapping_sub(prev.dsq_depth_sum);
-        let delta_dsq_samples = stats.dsq_depth_samples.wrapping_sub(prev.dsq_depth_samples);
-        let avg_dsq = if delta_dsq_samples > 0 {
-            delta_dsq_sum / delta_dsq_samples
-        } else {
-            0
-        };
+        let final_batch = sleep_batch;
 
-        if tuning::detect_contention(delta_guard, delta_hard, delta_d, avg_dsq) {
-            contention_ticks += 1;
-        } else {
-            contention_ticks = 0;
+        // DISPATCH-RATE ADAPTIVE SOJOURN THRESHOLD
+        // MEASURE, DON'T ASSUME. DISPATCH RATE REFLECTS ACTUAL SYSTEM
+        // CAPACITY (PHYSICAL CORES, SMT, FREQUENCY, WORKLOAD INTENSITY).
+        const SOJOURN_FLOOR_NS: u64 = 5_000_000; // 5MS MINIMUM (CODEL TARGET)
+        const SOJOURN_CEIL_NS: u64 = 10_000_000; // 10MS MAXIMUM
+        const SOJOURN_MULTIPLIER: u64 = 4; // 4X DISPATCH INTERVAL
+
+        if delta_d > 0 {
+            let interval_ns = 1_000_000_000 / delta_d;
+            let target =
+                (interval_ns * SOJOURN_MULTIPLIER).clamp(SOJOURN_FLOOR_NS, SOJOURN_CEIL_NS);
+            // EWMA: 7/8 OLD + 1/8 NEW (SMOOTH, NO JITTER)
+            sojourn_thresh_ns = sojourn_thresh_ns - (sojourn_thresh_ns >> 3) + (target >> 3);
         }
-
-        let (final_batch, new_ct) = tuning::contention_adjust_batch_ns(
-            sleep_batch,
-            baseline.batch_slice_ns,
-            contention_ticks,
-        );
-        contention_ticks = new_ct;
 
         {
             let current = sched.read_tuning_knobs();
-            if current.batch_slice_ns != final_batch {
+            if current.batch_slice_ns != final_batch
+                || current.sojourn_thresh_ns != sojourn_thresh_ns
+            {
                 sched.write_tuning_knobs(&TuningKnobs {
                     batch_slice_ns: final_batch,
+                    sojourn_thresh_ns,
                     ..current
                 })?;
             }
@@ -307,7 +304,6 @@ pub fn monitor_loop(
         stability_score = tuning::compute_stability_score(
             stability_score,
             regime_changed_this_tick,
-            delta_guard,
             tighten_delta,
             p99_ns,
             regime.p99_ceiling(),
@@ -329,17 +325,25 @@ pub fn monitor_loop(
         let tp99_l = tp99_l_ns / 1000;
         let knobs = sched.read_tuning_knobs();
 
+        let sojourn_ms = stats.batch_sojourn_ns / 1_000_000;
+        let sojourn_thresh_ms = sojourn_thresh_ns / 1_000_000;
+        let burst_label = if stats.burst_mode_active > 0 {
+            " BURST"
+        } else {
+            ""
+        };
+
         if verbose && tuning::should_print_telemetry(tick_counter, stability_score) {
             println!(
-                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us procdb: {}/{} sleep: io={}% slice: {}us batch: {}us guard: {} reenq: {} l2: B={}% I={}% L={}% [{}]",
+                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us procdb: {}/{} sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms l2: B={}% I={}% L={}% [{}{}]",
                 delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
                 delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
                 wake_avg_us, p99_us, tp99_b, tp99_i, tp99_l,
                 lat_idle_us, lat_kick_us,
                 db_total, db_confident,
                 io_pct, knobs.slice_ns / 1000, knobs.batch_slice_ns / 1000,
-                delta_guard, delta_reenq,
-                l2_pct_b, l2_pct_i, l2_pct_l, regime.label(),
+                delta_reenq, sojourn_ms, sojourn_thresh_ms,
+                l2_pct_b, l2_pct_i, l2_pct_l, regime.label(), burst_label,
             );
         }
 
