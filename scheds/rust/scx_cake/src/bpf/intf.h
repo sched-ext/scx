@@ -66,7 +66,11 @@ enum kfunc_bench_id {
 	BENCH_BITFLAG_OPS        = 16, /* Shift+mask+branchless yielder pattern */
 	BENCH_EWMA_COMPUTE       = 17, /* compute_ewma() full call */
 	BENCH_PSYCHIC_HIT_SIM    = 18, /* Psychic cache pointer compare + fused read */
-	BENCH_MAX_ENTRIES        = 19,
+	BENCH_IDLE_REMOTE        = 19, /* scx_bpf_test_and_clear_cpu_idle(sibling) — cross-CPU */
+	BENCH_IDLE_SMTMASK       = 20, /* cpumask_test_cpu on smtmask — read-only, no atomic */
+	BENCH_DISRUPTOR_READ     = 21, /* Full CL0 Disruptor handoff read (cake_stopping sim) */
+	BENCH_TCTX_COLD_SIM      = 22, /* get_task_ctx + arena CL0 read (cake_running sim) */
+	BENCH_MAX_ENTRIES        = 23,
 };
 
 struct kfunc_bench_entry {
@@ -274,21 +278,25 @@ struct mega_mailbox_entry {
 	u32 rc_counter;        /* Reclass counter for confidence gating */
 	u32 rc_sync_counter;   /* Periodic tctx writeback counter */
 
-	/* --- Reserved CL0 (bytes 40-63): future handoff expansion --- */
-	u32 _reserved_cl0[6];  /* 24B pad to end of CL0 */
+	/* --- nvcsw pre-staging (bytes 40-47): Fix 3 --- */
+	u64 cached_nvcsw;      /* 8B — nvcsw_snapshot (eliminates arena read in stopping) */
+
+	/* --- Reserved CL0 (bytes 48-63): future handoff expansion --- */
+	u32 _reserved_cl0[4];  /* 16B pad to end of CL0 */
 
 	/* ═══ CACHE LINE 1 (bytes 64-127): CROSS-CPU + TELEMETRY (WARM) ═══
      * ALP prefetches this line for free on Zen 5 (128B pair).
      * Contains only cross-CPU readable fields and telemetry. */
 
 	/* --- Cross-CPU readable (bytes 64-67) --- */
-	u32 run_start_cl1;     /* Gate 1P cross-CPU elapsed check */
+	/* run_start_cl1 REMOVED: Gate 1P now uses tick_last_run_at (CL0) +
+	 * consolidated now_post_g1 timestamp. No cross-CPU CL1 reads needed. */
 
-	/* --- Telemetry (stats-gated, bytes 68-71) --- */
+	/* --- Telemetry (stats-gated, bytes 64-67) --- */
 	u32 last_stopped_pid;  /* PID of last task that stopped on this CPU */
 
-	/* --- Reserved CL1 (bytes 72-127) --- */
-	u32 _reserved_cl1[14]; /* 56B pad to end of CL1 */
+	/* --- Reserved CL1 (bytes 68-127) --- */
+	u32 _reserved_cl1[15]; /* 60B pad to end of CL1 */
 
 	/* ═══ CACHE LINE 2 (bytes 128-191): RESERVED ═══ */
 	u32 _reserved_cl2[16]; /* 64B pad */
