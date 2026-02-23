@@ -25,52 +25,59 @@ static inline void buddy_unlock(struct buddy *buddy)
 	arena_spin_unlock(buddy->lock);
 }
 
-/*
- * Reserve part of the arena address space for the allocator. We use
- * this to get aligned addresses for the chunks.
- */
+__weak int buddy_chunk_init_freelists(buddy_chunk_t __arg_arena *chunk)
+{
+	/*
+	 * Initialize all freelists to empty (BUDDY_CHUNK_ITEMS = no next item).
+	 * Must use constant indices to avoid variable-offset arena pointer
+	 * arithmetic, which the BPF verifier prohibits.
+	 */
+	_Static_assert(BUDDY_CHUNK_NUM_ORDERS == 16,
+		       "buddy_chunk_init_freelists must be updated for new BUDDY_CHUNK_NUM_ORDERS");
+	chunk->freelists[0]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[1]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[2]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[3]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[4]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[5]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[6]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[7]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[8]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[9]  = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[10] = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[11] = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[12] = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[13] = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[14] = BUDDY_CHUNK_ITEMS;
+	chunk->freelists[15] = BUDDY_CHUNK_ITEMS;
+	return 0;
+}
+
 static int buddy_reserve_arena_vaddr(struct buddy *buddy)
 {
-	buddy->vaddr = 0;
+	int i, ret;
+	void __arena *start_addr;
 
-	return bpf_arena_reserve_pages(&arena,
-				       (void __arena *)BUDDY_VADDR_OFFSET,
-				       BUDDY_VADDR_SIZE / PAGE_SIZE);
-}
+	/*
+	 * Scan 1 GiB-aligned virtual address slots until a free one is found,
+	 * then reserve it for exclusive buddy allocator use. Chunks allocated
+	 * within the reserved region are 1 MiB aligned, which enables the O(1)
+	 * chunk-finding trick in buddy_free_unlocked() via
+	 * addr & ~BUDDY_CHUNK_OFFSET_MASK.
+	 */
+	bpf_for(i, 0, BUDDY_VADDR_MAX_SLOTS) {
+		start_addr = (void __arena *)((u64)i * BUDDY_VADDR_SIZE);
+		ret = bpf_arena_reserve_pages(&arena, start_addr,
+					      BUDDY_VADDR_SIZE / PAGE_SIZE);
+		if (!ret) {
+			buddy->vaddr = (u64)start_addr;
+			return 0;
+		}
+		if (ret != -EBUSY)
+			return ret;
+	}
 
-/*
- * Free up any unused address space. Used only during teardown.
- */
-static void buddy_unreserve_arena_vaddr(struct buddy *buddy)
-{
-	bpf_arena_free_pages(
-		&arena, (void __arena *)(BUDDY_VADDR_OFFSET + buddy->vaddr),
-		(BUDDY_VADDR_SIZE - buddy->vaddr) / PAGE_SIZE);
-
-	buddy->vaddr = 0;
-}
-
-/* Carve out part of the reserved address space and allocate it to the */
-static int buddy_alloc_arena_vaddr(struct buddy *buddy, u64 *vaddrp)
-{
-	u64 vaddr, old, new;
-
-	do {
-		vaddr = buddy->vaddr;
-		new   = vaddr + BUDDY_CHUNK_BYTES;
-
-		if (new > BUDDY_VADDR_SIZE)
-			return -EINVAL;
-
-		old = __sync_val_compare_and_swap(&buddy->vaddr, vaddr, new);
-	} while (old != vaddr && can_loop);
-
-	if (old != vaddr)
-		return -EINVAL;
-
-	*vaddrp = BUDDY_VADDR_OFFSET + vaddr;
-
-	return 0;
+	return -ENOMEM;
 }
 
 static u64 arena_next_pow2(__u64 n)
@@ -319,35 +326,30 @@ int add_leftovers_to_freelist(buddy_chunk_t __arg_arena *chunk, u32 cur_idx,
 	return 0;
 }
 
-static buddy_chunk_t *buddy_chunk_get(struct buddy *buddy)
+static __always_inline buddy_chunk_t *buddy_chunk_get(struct buddy *buddy)
 {
-	u64 order, ord, min_order, max_order;
+	u64 order, min_order, max_order;
 	buddy_chunk_t  *chunk;
+	u64 chunk_vaddr;
 	size_t left;
 	int power2;
-	u64 vaddr;
 	u32 idx;
 	int ret;
 
+	/*
+	 * Advance the vaddr cursor while holding the lock so concurrent callers
+	 * each get a unique, 1 MiB-aligned chunk address within the reserved region.
+	 */
+	chunk_vaddr = buddy->vaddr;
+	buddy->vaddr += BUDDY_CHUNK_BYTES;
+
 	buddy_unlock(buddy);
 
-	ret = buddy_alloc_arena_vaddr(buddy, &vaddr);
-	if (ret) {
-		DIAG();
-		return NULL;
-	}
-
-	/* Addresses must be aligned to the chunk boundary. */
-	if (vaddr % BUDDY_CHUNK_BYTES) {
-		DIAG();
-		return NULL;
-	}
-
-	/* Unreserve the address space. */
-	bpf_arena_free_pages(&arena, (void __arena *)vaddr,
+	/* Unreserve the address space then allocate a chunk. */
+	bpf_arena_free_pages(&arena, (void __arena *)chunk_vaddr,
 			     BUDDY_CHUNK_PAGES);
 
-	chunk = bpf_arena_alloc_pages(&arena, (void __arena *)vaddr,
+	chunk = bpf_arena_alloc_pages(&arena, (void __arena *)chunk_vaddr,
 				      BUDDY_CHUNK_PAGES, NUMA_NO_NODE, 0);
 	if (!chunk) {
 		arena_stderr("[ALLOC FAILED]");
@@ -365,8 +367,7 @@ static buddy_chunk_t *buddy_chunk_get(struct buddy *buddy)
 	asan_unpoison(chunk, sizeof(*chunk));
 
 	/* Mark all freelists as empty. */
-	for (ord = zero; ord < BUDDY_CHUNK_NUM_ORDERS && can_loop; ord++)
-		chunk->freelists[ord] = BUDDY_CHUNK_ITEMS;
+	buddy_chunk_init_freelists(chunk);
 
 	/*
 	 * Initialize the chunk by carving out the first page to hold the metadata struct above,
@@ -483,16 +484,13 @@ __hidden int buddy_init(struct buddy			 *buddy,
 
 	buddy->lock = lock;
 
-	/* 
-	 * Reserve enough address space to ensure allocations are aligned.
-	 */
-	if ((ret = buddy_reserve_arena_vaddr(buddy))) {
-		DIAG();
-		return ret;
-	}
-
 	_Static_assert(BUDDY_CHUNK_PAGES > 0,
 		       "chunk must use one or more pages");
+
+	/* Reserve virtual address space for chunk allocations. */
+	ret = buddy_reserve_arena_vaddr(buddy);
+	if (ret)
+		return ret;
 
 	/* Chunk is already properly unpoisoned if allocated. */
 	if (buddy_lock(buddy)) {
@@ -541,9 +539,6 @@ __weak int buddy_destroy(struct buddy *buddy)
 			    BUDDY_CHUNK_PAGES * PAGE_SIZE);
 		bpf_arena_free_pages(&arena, chunk, BUDDY_CHUNK_PAGES);
 	}
-
-	/* Free up any part of the address space that did not get used. */
-	buddy_unreserve_arena_vaddr(buddy);
 
 	/* Clear all fields. */
 	buddy->first_chunk = NULL;
