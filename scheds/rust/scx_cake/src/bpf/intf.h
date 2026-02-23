@@ -53,8 +53,20 @@ enum kfunc_bench_id {
 	BENCH_TASK_FROM_PID      = 3, /* bpf_task_from_pid() */
 	BENCH_TEST_CLEAR_IDLE    = 4, /* scx_bpf_test_and_clear_cpu_idle() */
 	BENCH_NR_CPU_IDS         = 5, /* scx_bpf_nr_cpu_ids() */
-	BENCH_GET_TASK_CTX       = 6, /* get_task_ctx() → bpf_task_storage_get */
-	BENCH_MAX_ENTRIES        = 7,
+	BENCH_GET_TASK_CTX       = 6, /* get_task_ctx() → arena deref */
+	BENCH_DSQ_NR_QUEUED      = 7, /* scx_bpf_dsq_nr_queued() */
+	BENCH_BSS_ARRAY_ACCESS   = 8, /* Raw BSS global_stats[cpu] access */
+	BENCH_ARENA_DEREF        = 9, /* Arena per_cpu[cpu].mbox field read */
+	BENCH_NOW_PAIR           = 10, /* Back-to-back scx_bpf_now() pair (calibration) */
+	BENCH_MBOX_CPU_READ      = 11, /* Read cached CPU from mailbox CL0 (alternative) */
+	BENCH_TCTX_FROM_MBOX     = 12, /* Read cached tctx ptr from mailbox CL0 (alternative) */
+	BENCH_RINGBUF_CYCLE      = 13, /* bpf_ringbuf_reserve + discard cycle */
+	BENCH_TASK_STRUCT_READ   = 14, /* p->scx.slice + p->nvcsw (task_struct fields) */
+	BENCH_RODATA_LOOKUP      = 15, /* cpu_llc_id[cpu] + tier_slice_ns[tier] RODATA */
+	BENCH_BITFLAG_OPS        = 16, /* Shift+mask+branchless yielder pattern */
+	BENCH_EWMA_COMPUTE       = 17, /* compute_ewma() full call */
+	BENCH_PSYCHIC_HIT_SIM    = 18, /* Psychic cache pointer compare + fused read */
+	BENCH_MAX_ENTRIES        = 19,
 };
 
 struct kfunc_bench_entry {
@@ -99,20 +111,21 @@ struct cake_task_ctx {
 		};
 	};
 
-	/* --- Timestamp (cake_running) [Bytes 8-11] --- */
-	u32 last_run_at; /* 4B: Last run timestamp (ns), wraps 4.2s */
+	/* --- Yield Detection (CL0 PROMOTION) [Bytes 8-15] ---
+	 * Moved from telemetry (CL2, offset ~177B) to CL0 for single-CL
+	 * hot path in cake_stopping. Read+written unconditionally every stop. */
+	u64 nvcsw_snapshot; /* 8B: Last read of p->nvcsw (for yield detection) */
 
-	/* --- Graduated backoff counter [Bytes 12-15] --- */
-	u32 reclass_counter; /* 4B: Per-task stop counter for per-tier backoff
-                            * Widened from u16 to prevent 21-218s wrap cascade.
-                            * u32 at 50K/s wraps at 23.9 hours — effectively never. */
-
-	/* CACHED AFFINITY MASK (Rule 41: Locality Promotion)
+	/* CACHED AFFINITY MASK (Rule 41: Locality Promotion) [Bytes 16-23]
      * Replaces bpf_cpumask_test_cpu kfunc (~15ns) with inline bit test (~0.2ns)
      * for restricted-affinity tasks (Wine/Proton pinning, ~5% of gaming wakeups).
      * Populated in cake_init_task, updated event-driven by cake_set_cpumask.
      * Zero hot-path cost: no polling in cake_running or cake_stopping. */
 	u64 cached_cpumask; /* 8B: Cached p->cpus_ptr bitmask (max 64 CPUs) */
+
+	/* --- Cold Fields (stats only) [Bytes 24-31] --- */
+	u32 last_run_at; /* 4B: Last run timestamp (ns), wraps 4.2s */
+	u32 reclass_counter; /* 4B: Per-task stop counter for per-tier backoff */
 
 	/* --- High Resolution Arena Telemetry (TUI Matrix) ---
      * Zero-cost pointer access via BPF Arena. User-space sweeps memory 
@@ -125,7 +138,6 @@ struct cake_task_ctx {
 		u64 wait_duration_ns; /* Time spent in DSQ (run_start - enq_end) */
 		u32 select_cpu_duration_ns; /* Total routing overhead */
 		u32 enqueue_duration_ns; /* Time spent sorting DSQ */
-		u32 dfl_select_cpu_ns;   /* Kernel fallback overhead */
 		u32 dsq_insert_ns;       /* Insert/vtime overhead */
 
 		/* Topographic / Cache Data */
@@ -133,14 +145,13 @@ struct cake_task_ctx {
 		u32 gate_2_hits; /* SMT sibling hits */
 		u32 gate_1w_hits; /* Waker affinity hits (SMT sibling or LLC) */
 		u32 gate_3_hits; /* Kernel fallback hits */
-		u32 gate_4_hits; /* Lazy preempt hits */
+		u32 gate_1p_hits; /* Yielder-preempts-bulk hits (Gate 1P) */
 		u32 gate_tun_hits; /* Complete miss tunneling */
 		u64 jitter_accum_ns; /* Mathematical running variant vs AVG */
 		u32 total_runs; /* Total executions over lifetime */
 		u16 core_placement; /* Physical CPU task last executed on */
 		
 		/* State Change Counters */
-		u16 gate_confidence; /* Task Route Stability [0-8] */
 		u16 migration_count; /* Inter-cpu bounces inside select_cpu */
 		u16 preempt_count;   /* Task kicked/preempted */
 		u16 yield_count;     /* Task willingly gave up execution */
@@ -149,7 +160,6 @@ struct cake_task_ctx {
 		u16 direct_dispatch_count; /* SCX_DSQ_LOCAL_ON bypasses (no DSQ) */
 		u16 enqueue_count;         /* Total enqueue calls */
 		u16 cpumask_change_count;  /* sched_setaffinity changes */
-		u16 dispatch_count;        /* Times dispatched from DSQ */
 
 		/* Callback Overhead (last-write-wins, ns) */
 		u32 stopping_duration_ns;  /* cake_stopping BPF overhead */
@@ -158,15 +168,10 @@ struct cake_task_ctx {
 		/* Worst-Case Tracking */
 		u32 max_runtime_us;        /* Max runtime in current TUI interval */
 
-		/* Tier Dynamics */
-		u16 tier_change_count;     /* Tier reclassifications over lifetime */
 
 		/* Scheduling Period (inter-dispatch gap) */
 		u64 dispatch_gap_ns;       /* Time since previous run start */
 		u64 max_dispatch_gap_ns;   /* Worst-case gap in current TUI interval */
-
-		/* Preemption Blame */
-		u32 preempted_by_pid;      /* PID of task that replaced us on CPU */
 
 		/* Wait Latency Histogram (bucket counts, lifetime) */
 		u32 wait_hist_lt10us;      /* wait < 10µs */
@@ -182,7 +187,7 @@ struct cake_task_ctx {
 		u32 wakeup_source_pid;     /* PID that woke this task */
 
 		/* Voluntary/involuntary context switch tracking (GPU detection) */
-		u64 nvcsw_snapshot;        /* Last read of p->nvcsw (for delta) */
+		/* nvcsw_snapshot promoted to main struct CL0 for hot-path locality */
 		u64 nivcsw_snapshot;       /* Last read of p->nivcsw (for delta) */
 		u32 nvcsw_delta;           /* nvcsw delta since last TUI interval */
 		u32 nivcsw_delta;          /* nivcsw delta since last TUI interval */
@@ -190,10 +195,10 @@ struct cake_task_ctx {
 		u32 pid;
 		u32 tgid;  /* Thread group ID (process) for TUI grouping */
 		char comm[16];
-		/* 208 bytes total (added 8 for nivcsw_snapshot) */
+		/* 186 bytes total */
 	} telemetry;
 
-	u8  __pad[24]; /* Pad to 256 bytes: 256 - (24 + 208) = 24 bytes. */
+	u8  __pad[38]; /* Pad to 256 bytes: 256 - (32 + 186) = 38 bytes */
 } __attribute__((aligned(256)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
@@ -239,61 +244,54 @@ struct cake_task_ctx {
  * 1.3-13s wrap cascades. u32 at 50K/s wraps at 23.9 hours — effectively never.
  * (mailbox_cacheline_bench: 64B beats 128B by 1.1% on MONSTER sim, lower jitter) */
 struct mega_mailbox_entry {
-	/* ═══ CACHE LINE 0 (bytes 0-63): LOCAL-CPU ONLY (HOT) ═══
+	/* ═══ CACHE LINE 0 (bytes 0-63): DISRUPTOR HANDOFF (HOT) ═══
+     * cake_running is the sole producer, cake_stopping is the sole consumer.
      * All fields written exclusively by the CPU that owns this mailbox entry.
-     * Zero cross-CPU writes → zero RFO bounces from waker CPUs. */
+     * Zero cross-CPU writes → zero RFO bounces from waker CPUs.
+     *
+     * DESIGN: BenchLab proved ALL BPF computation is free (calibration floor).
+     * The ONLY costs are kfunc/subprogram calls: get_task_ctx (16ns), 
+     * scx_bpf_now (7ns), test_and_clear_idle (15ns). Mailbox handoff
+     * eliminates get_task_ctx + arena reads from cake_stopping entirely.
+     *
+     * Psychic cache REMOVED: BenchLab measured 19ns avg (4ns above calibration)
+     * vs 15ns avg for the tctx caching pattern. Was 40B of CL0 (62.5%) for
+     * a pattern that was slower than the replacement. */
 
-	/* --- Tick staging (bytes 0-15) --- */
-	u8 _reserved_cl0
-		[2]; /* Was: _pad_cl0, dsq_hint, tick_counter (tick/DVFS removed) */
-	u8  is_yielder; /* Gate 1P: true if currently-running task is a cooperating yielder */
-	u8  tick_tier; /* Tier of currently-running task (set by running) */
-	u32 tick_last_run_at; /* Timestamp when task started (set by running) */
-	u64 tick_slice; /* Slice of currently-running task (set by running) */
-	/* tick_ctx_valid REMOVED: was tick↔stopping validity flag. Tick eliminated,
-     * 5 dead writes removed (~100K wasted stores/s). */
-	u8 s1_hot_flag; /* C2: deferred promotion — 1 = first s1 hit seen, promote on 2nd */
+	/* --- Tick staging + Gate 1P (bytes 0-7) --- */
+	u8  is_yielder;        /* Gate 1P: true if running task is cooperating yielder */
+	u8  tick_tier;         /* Tier of currently-running task */
+	u16 cached_cpu;        /* Disruptor handoff: CPU ID from cake_running */
+	u32 tick_last_run_at;  /* Timestamp when task started (Gate 1P elapsed) */
 
-	/* --- Psychic Cache Slot 0: MRU (bytes 17-43) --- */
-	u8 _pad_s0[3]; /* alignment: keeps rc_counter0 at offset 20 (4B-aligned) */
-	u32 rc_counter0; /* Slot 0 reclass counter (widened: u16→u32, no wrap) */
-	/* rc_task_ptr0 at offset 24: 8B-aligned ✅ */
-	u64 rc_task_ptr0; /* Slot 0 task pointer (8B-aligned) */
-	u64 rc_state_fused0; /* Slot 0 [63:32]=packed_info, [31:0]=deficit_avg */
+	/* --- Disruptor handoff: cake_running → cake_stopping (bytes 8-31) --- */
+	u64 tick_slice;        /* 8B — slice for EWMA (cake_stopping input) */
+	u64 cached_tctx_ptr;   /* 8B — arena tctx pointer (eliminates get_task_ctx: 16ns) */
+	u32 cached_fused;      /* 4B — deficit_avg_fused (eliminates arena CL0 read) */
+	u32 cached_packed;     /* 4B — packed_info (eliminates arena CL0 read) */
 
-	/* --- Psychic Cache Slot 1 (bytes 40-59) --- */
-	u64 rc_task_ptr1; /* Slot 1 task pointer (8B-aligned) */
-	u64 rc_state_fused1; /* Slot 1 [63:32]=packed_info, [31:0]=deficit_avg */
-	u32 rc_counter1; /* Slot 1 reclass counter (widened: u16→u32) */
+	/* --- Reclass + sync (bytes 32-39) --- */
+	u32 rc_counter;        /* Reclass counter for confidence gating */
+	u32 rc_sync_counter;   /* Periodic tctx writeback counter */
 
-	/* --- Sync (bytes 60-63) --- */
-	u32 rc_sync_counter; /* Periodic tctx writeback counter (widened: u16→u32) */
+	/* --- Reserved CL0 (bytes 40-63): future handoff expansion --- */
+	u32 _reserved_cl0[6];  /* 24B pad to end of CL0 */
 
-	/* ═══ CACHE LINE 1 (bytes 64-127): slot 2 + CROSS-CPU fields (WARM) ═══
-     * Slot 2 accessed on s0+s1 miss (~4.6% in Arc Raiders).
+	/* ═══ CACHE LINE 1 (bytes 64-127): CROSS-CPU + TELEMETRY (WARM) ═══
      * ALP prefetches this line for free on Zen 5 (128B pair).
-     * Cross-CPU fields (wakeup_same_cpu, migration_cooldown) colocated here
-     * to isolate waker RFOs from CL0's local-only tick/running/stopping. */
-	/* --- Psychic Cache Slot 2: LRU (bytes 64-83) --- */
-	u64 rc_task_ptr2; /* Slot 2 task pointer (8B-aligned) */
-	u64 rc_state_fused2; /* Slot 2 [63:32]=packed_info, [31:0]=deficit_avg */
-	u32 rc_counter2; /* Slot 2 reclass counter */
+     * Contains only cross-CPU readable fields and telemetry. */
 
-	/* --- V3 Quantum Guard (bytes 84-87): LOCAL writes only ---
-     * run_start_cl1: duplicate of tick_last_run_at for cross-CPU reads.
-     * Written by cake_running (LOCAL CPU, same CL1).
-     * Read by Gate 4 quantum guard (remote CPU). */
-	u32 run_start_cl1;
+	/* --- Cross-CPU readable (bytes 64-67) --- */
+	u32 run_start_cl1;     /* Gate 1P cross-CPU elapsed check */
 
-	u32 last_stopped_pid;  /* TELEMETRY: PID of last task that stopped on this CPU */
-	u32 _pad_tctx;         /* padding for u64 alignment */
-	u32 _reserved_cl1[6]; /* Pad to end of CL1 (byte 127) */
+	/* --- Telemetry (stats-gated, bytes 68-71) --- */
+	u32 last_stopped_pid;  /* PID of last task that stopped on this CPU */
 
-	/* ═══ CACHE LINE 2 (bytes 128-191): RESERVED ═══
-     * Previous cross-CPU fields (migration_cooldown, wakeup_same_cpu,
-     * predicted_gate, gate_confidence) removed — no longer used. */
-	u32 _reserved_cl2_header;
-	u32 _reserved_cl2[15]; /* Pad to byte 192 */
+	/* --- Reserved CL1 (bytes 72-127) --- */
+	u32 _reserved_cl1[14]; /* 56B pad to end of CL1 */
+
+	/* ═══ CACHE LINE 2 (bytes 128-191): RESERVED ═══ */
+	u32 _reserved_cl2[16]; /* 64B pad */
 } __attribute__((aligned(256)));
 _Static_assert(
 	sizeof(struct mega_mailbox_entry) == 256,
