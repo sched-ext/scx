@@ -597,7 +597,8 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_node_mask;
 	struct cached_cpus	layered_cpus_unprotected;
 	struct bpf_cpumask __kptr *layered_unprotected_mask;
-	bool			all_cpuset_allowed;
+	bool			all_cpus_allowed;
+	bool			all_cpuset_cpus_allowed;
 	bool			cpus_node_aligned;
 	u32			pinned_node;
 	u64			runnable_at;
@@ -1333,7 +1334,7 @@ out:
 	if (cpu >= 0) {
 		if (READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, false);
-	} else if (taskc->all_cpuset_allowed) {
+	} else if (taskc->all_cpus_allowed) {
 		if (!READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, true);
 	}
@@ -1764,14 +1765,25 @@ skip_ddsp:
 	 * queued on it longer than lo_fb_wait_ns.
 	 *
 	 * When racing against layer CPU allocation updates, tasks with full
-	 * affninty may end up in the DSQs of an empty layer. They are handled
+	 * affinity may end up in the DSQs of an empty layer. They are handled
 	 * by the per-node fallback CPUs.
 	 *
-	 * FIXME: ->allow_node_aligned is a hack to support node-affine tasks
-	 * without making the whole scheduler node aware and should only be used
-	 * with open layers on non-saturated machines to avoid possible stalls.
+	 * A task is safe on a layer DSQ if any of the following hold:
+	 *
+	 * - all_cpus_allowed: The task can run on all CPUs, so it can always
+	 *   consume from any layer DSQ.
+	 *
+	 * - all_cpuset_cpus_allowed: The layer has a static cpuset and the
+	 *   task covers it. Since cpuset masks don't change, the task can
+	 *   always run on all CPUs the layer will ever use. Guaranteed to
+	 *   be false for non-cpuset layers by refresh_cpus_flags().
+	 *
+	 * - allow_node_aligned && cpus_node_aligned: The task's affinity
+	 *   covers whole NUMA nodes. With per-node allocation, the layer
+	 *   will always have CPUs on those nodes.
 	 */
-	if ((!taskc->all_cpuset_allowed &&
+	if ((!taskc->all_cpus_allowed &&
+	     !taskc->all_cpuset_cpus_allowed &&
 	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
 	    !layer->nr_cpus) {
 		// Special handle for thread that has affinity set, but need more CPU time.
@@ -1929,6 +1941,10 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 			 struct task_ctx *taskc, struct layer *layer)
 {
 	if (cpuc->yielding || !max_exec_ns)
+		goto no;
+
+	/* Confined tasks must not keep running on a non-layer CPU */
+	if (layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer->id)
 		goto no;
 
 	/* does it wanna? */
@@ -3277,16 +3293,39 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
+	struct layer *layer;
 	const struct cpumask *cpuset;
 	u32 node_id, nr_intersects = 0, nr_covered = 0, covered_node = MAX_NUMA_NODES;
 
-	cpuset = (const struct cpumask *)lookup_layer_cpuset(taskc->layer_id);
-	if (!cpuset) {
-		scx_bpf_error("no cpuset mask found");
+	if (!all_cpumask) {
+		scx_bpf_error("NULL all_cpumask");
 		return;
 	}
 
-	taskc->all_cpuset_allowed = bpf_cpumask_subset(cpuset, cpumask);
+	taskc->all_cpus_allowed =
+		bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
+
+	/*
+	 * For cpuset layers, check whether the task's affinity covers the
+	 * layer's cpuset. This is safe because cpuset masks are static - they
+	 * are configured at init time and never change. Non-cpuset layers have
+	 * dynamically changing CPU masks, so this check would go stale.
+	 */
+	layer = lookup_layer(taskc->layer_id);
+	if (!layer)
+		return;
+
+	if (layer->has_cpuset) {
+		cpuset = (const struct cpumask *)lookup_layer_cpuset(taskc->layer_id);
+		if (!cpuset) {
+			scx_bpf_error("no cpuset mask found");
+			return;
+		}
+		taskc->all_cpuset_cpus_allowed =
+			bpf_cpumask_subset(cpuset, cpumask);
+	} else {
+		taskc->all_cpuset_cpus_allowed = false;
+	}
 
 	/*
 	 * Help bpf_for() verification by making the following variables
