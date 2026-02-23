@@ -1917,11 +1917,13 @@ impl<'a> Scheduler<'a> {
             match &spec.cpuset {
                 Some(mask) => {
                     Self::update_cpumask(&mask, &mut layer.cpuset);
+                    layer.has_cpuset.write(true);
                 }
                 None => {
                     for i in 0..layer.cpuset.len() {
                         layer.cpuset[i] = u8::MAX;
                     }
+                    layer.has_cpuset.write(false);
                 }
             };
 
