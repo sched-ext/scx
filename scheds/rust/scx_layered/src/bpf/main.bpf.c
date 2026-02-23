@@ -1943,6 +1943,10 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 	if (cpuc->yielding || !max_exec_ns)
 		goto no;
 
+	/* Confined tasks must not keep running on a non-layer CPU */
+	if (layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer->id)
+		goto no;
+
 	/* does it wanna? */
 	if (!(p->scx.flags & SCX_TASK_QUEUED))
 		goto no;
