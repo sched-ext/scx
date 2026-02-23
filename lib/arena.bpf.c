@@ -10,6 +10,9 @@
 #include <lib/percpu.h>
 #include <lib/cpumask.h>
 #include <lib/topology.h>
+#include <lib/rbtree.h>
+#include <lib/atq.h>
+#include <lib/alloc/buddy.h>
 
 /*
  * "System-call" based API for arenas.
@@ -22,13 +25,21 @@ int arena_init(struct arena_init_args *args)
 {
 	int ret;
 
-	ret = scx_static_init(args->static_pages);
-	if (ret)
-		return ret;
-
 	if (nr_cpu_ids == NR_CPU_IDS_UNINIT) {
 		bpf_printk("uninitialized nr_cpu_ids variable");
 		return -ENODEV;
+	}
+
+	ret = sys_buddy_init();
+	if (ret) {
+		bpf_printk("sys_buddy_init failed with %d", ret);
+		return ret;
+	}
+
+	ret = scx_static_init(args->static_pages);
+	if (ret) {
+		bpf_printk("scx_static_init failed with %d", ret);
+		return ret;
 	}
 
 	/* How many types to store all CPU IDs? */

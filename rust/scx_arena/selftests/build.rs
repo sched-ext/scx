@@ -8,6 +8,7 @@ fn main() {
         .unwrap()
         .enable_skel("src/bpf/main.bpf.c", "main")
         .add_source("src/bpf/lib/arena.bpf.c")
+        .add_source("src/bpf/lib/alloc/buddy.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
         .add_source("src/bpf/lib/dhq.bpf.c")
         .add_source("src/bpf/lib/bitmap.bpf.c")

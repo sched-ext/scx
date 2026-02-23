@@ -14,6 +14,7 @@ fn main() {
         .add_source("src/bpf/placement.bpf.c")
         .add_source("src/bpf/deadline.bpf.c")
         .add_source("../../../lib/arena.bpf.c")
+        .add_source("../../../lib/alloc/buddy.bpf.c")
         .add_source("../../../lib/bitmap.bpf.c")
         .add_source("../../../lib/cpumask.bpf.c")
         .add_source("../../../lib/minheap.bpf.c")

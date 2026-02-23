@@ -9,6 +9,7 @@
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
 #include <lib/sdt_task.h>
+#include <lib/alloc/buddy.h>
 #include <scx/arena_userspace_interrop.bpf.h>
 
 struct scx_alloc_stack __arena *prealloc_stack;
@@ -683,7 +684,9 @@ int scx_static_init(size_t alloc_pages)
 __weak
 u64 scx_alloc_get_pages_used(void)
 {
-	return alloc_stats.arena_pages_used + scx_static.arena_pages_used;
+	return alloc_stats.arena_pages_used +
+	       scx_static.arena_pages_used +
+	       sys_buddy_get_arena_pages_used();
 }
 
 __hidden
