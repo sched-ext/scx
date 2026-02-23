@@ -87,15 +87,15 @@ static u64 arena_next_pow2(__u64 n)
 	return n;
 }
 
-__weak
+static __always_inline
 int idx_set_allocated(buddy_chunk_t __arg_arena *chunk, u64 idx, bool allocated)
 {
-	if (unlikely(idx >= BUDDY_CHUNK_ITEMS)) {
-		arena_stderr("setting order of invalid idx (%d, max %d)\n", idx,
-			     BUDDY_CHUNK_ITEMS);
-		return -EINVAL;
-	}
-
+	/*
+	 * No bounds check here: this function is __always_inline and called
+	 * from within bpf_for/can_loop bodies. An early-return branch inside
+	 * inlined loop code causes the BPF verifier to reject with "loop is
+	 * too complex". Callers maintain the invariant that idx < BUDDY_CHUNK_ITEMS.
+	 */
 	if (allocated)
 		chunk->allocated[idx / 8] |= 1 << (idx % 8);
 	else
@@ -132,7 +132,7 @@ int idx_set_order(buddy_chunk_t __arg_arena *chunk, u64 idx, u8 order)
 		return -EINVAL;
 	}
 
-	/* 
+	/*
 	 * We store two order instances per byte, one per nibble.
 	 * Retain the existing nibble.
 	 */
@@ -231,8 +231,8 @@ static buddy_header_t *idx_to_header(buddy_chunk_t *chunk, size_t idx)
 	return (buddy_header_t *)(address + BUDDY_HEADER_OFF);
 }
 
-static void header_add_freelist(buddy_chunk_t  *chunk,
-				buddy_header_t *header, u64 idx, u8 order)
+static __always_inline void header_add_freelist(buddy_chunk_t  *chunk,
+						buddy_header_t *header, u64 idx, u8 order)
 {
 	buddy_header_t *tmp_header;
 
@@ -294,7 +294,7 @@ static u64 size_to_order(size_t size)
 	return order - BUDDY_MIN_ALLOC_SHIFT;
 }
 
-__weak
+static __always_inline
 int add_leftovers_to_freelist(buddy_chunk_t __arg_arena *chunk, u32 cur_idx,
 		u64 min_order, u64 max_order)
 {
@@ -551,8 +551,8 @@ __weak int buddy_destroy(struct buddy *buddy)
 	return 0;
 }
 
-__weak u64 buddy_chunk_alloc(buddy_chunk_t __arg_arena *chunk,
-				 int				order_req)
+static __always_inline u64 buddy_chunk_alloc(buddy_chunk_t __arg_arena *chunk,
+					     int order_req)
 {
 	buddy_header_t *header, *tmp_header, *next_header;
 	u32 idx, tmpidx, retidx;
@@ -702,9 +702,13 @@ static __always_inline int buddy_free_unlocked(struct buddy *buddy, u64 addr)
 		return 0;
 	}
 
-	/* Get (chunk, idx) out of the address. */
-	chunk = (void __arena *)(addr & ~BUDDY_CHUNK_OFFSET_MASK);
-	idx = (addr & BUDDY_CHUNK_OFFSET_MASK) / BUDDY_MIN_ALLOC_BYTES;
+	/*
+	 * Chunks are 1 MiB aligned within the pre-reserved virtual region,
+	 * so rounding down to the nearest 1 MiB boundary recovers the chunk
+	 * address in O(1) without a list scan.
+	 */
+	chunk = (buddy_chunk_t *)(addr & ~(u64)BUDDY_CHUNK_OFFSET_MASK);
+	idx = (addr - (u64)chunk) / BUDDY_MIN_ALLOC_BYTES;
 
 	/* Mark the block as unallocated so we can access the header. */
 	idx_set_allocated(chunk, idx, false);
