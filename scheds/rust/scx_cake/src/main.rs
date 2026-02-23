@@ -237,7 +237,12 @@ impl<'a> Scheduler<'a> {
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
             rodata.quantum_ns = quantum * 1000;
             rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
-            rodata.enable_stats = args.verbose || args.testing;
+            // Stats/telemetry: only available in debug builds (CAKE_RELEASE omits the field).
+            // In release, --verbose is silently ignored — zero overhead for production gaming.
+            #[cfg(debug_assertions)]
+            {
+                rodata.enable_stats = args.verbose || args.testing;
+            }
 
             // DVFS: Battery profile enables per-tier CPU frequency steering
             rodata.enable_dvfs = args.profile.dvfs_enabled();
