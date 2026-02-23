@@ -4,9 +4,10 @@
  * Copyright (c) 2024-2025 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include <alloc/common.h>
-#include <alloc/asan.h>
-#include <alloc/buddy.h>
+#include <lib/alloc/common.h>
+#include <lib/alloc/asan.h>
+#include <lib/alloc/buddy.h>
+#include "buddy_internal.h"
 
 volatile int zero = 0;
 

@@ -1,11 +1,18 @@
 #pragma once
 
+/* Architecture-specific arena size. Must match max_entries in the arena map below. */
+#if defined(__TARGET_ARCH_arm64) || defined(__aarch64__)
+#define ARENA_MAX_PAGES	(1 << 16) /* 256 MiB */
+#else
+#define ARENA_MAX_PAGES	(1 << 20) /* 4 GiB */
+#endif
+
 #ifdef __BPF__
 
 #define BPF_NO_KFUNC_PROTOTYPES
 
 #include <bpf_experimental.h>
-#include <bpf_arena_common.h>
+#include "bpf_arena_common.h"
 #include <bpf_arena_spin_lock.h>
 #include "bpf_helpers_local.h"
 
@@ -52,11 +59,10 @@ extern volatile u64 asan_violated;
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
+	__uint(max_entries, ARENA_MAX_PAGES); /* number of pages */
 #if defined(__TARGET_ARCH_arm64) || defined(__aarch64__)
-	__uint(max_entries, 1 << 16); /* number of pages */
         __ulong(map_extra, (1ull << 32)); /* start of mmap() region */
 #else
-	__uint(max_entries, 1 << 20); /* number of pages */
         __ulong(map_extra, (1ull << 44)); /* start of mmap() region */
 #endif
 } arena __weak SEC(".maps");

@@ -10,6 +10,8 @@
 extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const void *args,
 				   __u32 len__sz, void *aux__prog) __weak __ksym;
 
+_Pragma("GCC diagnostic push")
+_Pragma("GCC diagnostic ignored \"-Wmacro-redefined\"")
 #define bpf_stream_printk(stream_id, fmt, args...)					\
 ({											\
 	static const char ___fmt[] = fmt;						\
@@ -22,5 +24,6 @@ extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const vo
 											\
 	bpf_stream_vprintk_impl(stream_id, ___fmt, ___param, sizeof(___param), NULL);	\
 })
+_Pragma("GCC diagnostic pop")
 
 #endif /* __BPF_HELPERS_LOCAL__ */
