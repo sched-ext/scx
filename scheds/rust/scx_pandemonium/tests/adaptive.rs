@@ -5,13 +5,11 @@
 // ZERO BPF DEPENDENCIES. RUN OFFLINE.
 
 use scx_pandemonium::tuning::{
-    compute_p99_from_histogram, compute_stability_score, contention_adjust_batch_ns,
-    detect_contention, detect_regime, regime_knobs, should_print_telemetry, should_reflex_tighten,
-    sleep_adjust_batch_ns, Regime, TuningKnobs, AFFINITY_OFF, AFFINITY_STRONG, AFFINITY_WEAK,
-    BATCH_MAX_NS, CONTENTION_BATCH_CUT_PCT, CONTENTION_HOLD_TICKS, DEFAULT_LAT_CRI_THRESH_HIGH,
-    DEFAULT_LAT_CRI_THRESH_LOW, DSQ_DEPTH_THRESH, GUARD_CLAMP_THRESH, HEAVY_DEMOTION_NS,
-    HEAVY_ENTER_PCT, HEAVY_EXIT_PCT, HIST_BUCKETS, LIGHT_DEMOTION_NS, LIGHT_ENTER_PCT,
-    LIGHT_EXIT_PCT, MIXED_DEMOTION_NS, STABILITY_THRESHOLD,
+    compute_p99_from_histogram, compute_stability_score, detect_regime, regime_knobs,
+    should_print_telemetry, should_reflex_tighten, sleep_adjust_batch_ns, Regime, TuningKnobs,
+    AFFINITY_OFF, AFFINITY_STRONG, AFFINITY_WEAK, BATCH_MAX_NS, DEFAULT_LAT_CRI_THRESH_HIGH,
+    DEFAULT_LAT_CRI_THRESH_LOW, HEAVY_DEMOTION_NS, HEAVY_ENTER_PCT, HEAVY_EXIT_PCT, HIST_BUCKETS,
+    LIGHT_DEMOTION_NS, LIGHT_ENTER_PCT, LIGHT_EXIT_PCT, MIXED_DEMOTION_NS, STABILITY_THRESHOLD,
 };
 
 // REGIME DETECTION (SCHMITT TRIGGER)
@@ -120,8 +118,8 @@ fn demotion_threshold_in_knobs() {
 
 #[test]
 fn tuning_knobs_size_is_8_u64() {
-    // MUST MATCH struct tuning_knobs IN intf.h (8 x u64 = 64 BYTES)
-    assert_eq!(std::mem::size_of::<TuningKnobs>(), 64);
+    // MUST MATCH struct tuning_knobs IN intf.h (9 x u64 = 72 BYTES)
+    assert_eq!(std::mem::size_of::<TuningKnobs>(), 72);
 }
 
 #[test]
@@ -141,38 +139,32 @@ fn tuning_knobs_default() {
 
 #[test]
 fn stability_score_increments_when_stable() {
-    let score = compute_stability_score(5, false, 0, 0, 0, 5_000_000);
+    let score = compute_stability_score(5, false, 0, 0, 5_000_000);
     assert_eq!(score, 6);
 }
 
 #[test]
 fn stability_score_caps_at_threshold() {
-    let score = compute_stability_score(STABILITY_THRESHOLD, false, 0, 0, 0, 5_000_000);
+    let score = compute_stability_score(STABILITY_THRESHOLD, false, 0, 0, 5_000_000);
     assert_eq!(score, STABILITY_THRESHOLD);
 }
 
 #[test]
 fn stability_score_resets_on_regime_change() {
-    let score = compute_stability_score(8, true, 0, 0, 0, 5_000_000);
-    assert_eq!(score, 0);
-}
-
-#[test]
-fn stability_score_resets_on_guard_clamps() {
-    let score = compute_stability_score(8, false, 1, 0, 0, 5_000_000);
+    let score = compute_stability_score(8, true, 0, 0, 5_000_000);
     assert_eq!(score, 0);
 }
 
 #[test]
 fn stability_score_resets_on_reflex_event() {
-    let score = compute_stability_score(8, false, 0, 1, 0, 5_000_000);
+    let score = compute_stability_score(8, false, 1, 0, 5_000_000);
     assert_eq!(score, 0);
 }
 
 #[test]
 fn stability_score_resets_on_p99_above_half_ceiling() {
     // CEILING=5MS, P99=2.6MS > 2.5MS (HALF CEILING) -> RESET
-    let score = compute_stability_score(8, false, 0, 0, 2_600_000, 5_000_000);
+    let score = compute_stability_score(8, false, 0, 2_600_000, 5_000_000);
     assert_eq!(score, 0);
 }
 
@@ -296,47 +288,4 @@ fn sleep_adjust_caps_at_max() {
     // EVEN WITH IO-HEAVY, CAN'T EXCEED BATCH_MAX_NS
     let result = sleep_adjust_batch_ns(22_000_000, 70);
     assert_eq!(result, BATCH_MAX_NS);
-}
-
-// CONTENTION RESPONSE
-
-#[test]
-fn detect_contention_guard_clamps() {
-    // HIGH GUARD CLAMPS ALONE TRIGGERS CONTENTION
-    assert!(detect_contention(GUARD_CLAMP_THRESH + 1, 0, 1000, 0));
-}
-
-#[test]
-fn detect_contention_kick_ratio() {
-    // HIGH KICK RATIO ALONE TRIGGERS CONTENTION
-    // 310 HARD KICKS / 1000 DISPATCHES = 31% > 30% THRESHOLD
-    assert!(detect_contention(0, 310, 1000, 0));
-}
-
-#[test]
-fn detect_contention_dsq_depth() {
-    // DEEP QUEUES ALONE TRIGGER CONTENTION
-    assert!(detect_contention(0, 0, 1000, DSQ_DEPTH_THRESH + 1));
-}
-
-#[test]
-fn detect_contention_all_clear() {
-    // BELOW ALL THRESHOLDS: NO CONTENTION
-    assert!(!detect_contention(5, 100, 1000, 2));
-}
-
-#[test]
-fn contention_adjust_cuts_at_threshold() {
-    // 3 TICKS OF CONTENTION -> 75% CUT
-    let (batch, ticks) = contention_adjust_batch_ns(20_000_000, 20_000_000, CONTENTION_HOLD_TICKS);
-    assert_eq!(batch, 20_000_000 * CONTENTION_BATCH_CUT_PCT / 100);
-    assert_eq!(ticks, 0); // RESET AFTER CUT
-}
-
-#[test]
-fn contention_adjust_floors_at_half_baseline() {
-    // CAN'T GO BELOW 50% OF BASELINE EVEN WITH AGGRESSIVE CUTS
-    let (batch, _) = contention_adjust_batch_ns(8_000_000, 20_000_000, CONTENTION_HOLD_TICKS);
-    // 8M * 75% = 6M, BUT FLOOR IS 20M / 2 = 10M
-    assert_eq!(batch, 10_000_000);
 }

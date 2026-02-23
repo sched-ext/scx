@@ -40,7 +40,6 @@ pub struct PandemoniumStats {
     pub wake_lat_idle_cnt: u64,
     pub wake_lat_kick_sum: u64,
     pub wake_lat_kick_cnt: u64,
-    pub nr_guard_clamps: u64,
     pub nr_procdb_hits: u64,
     pub nr_l2_hit_batch: u64,
     pub nr_l2_miss_batch: u64,
@@ -48,14 +47,14 @@ pub struct PandemoniumStats {
     pub nr_l2_miss_interactive: u64,
     pub nr_l2_hit_lat_crit: u64,
     pub nr_l2_miss_lat_crit: u64,
-    pub dsq_depth_sum: u64,
-    pub dsq_depth_samples: u64,
     pub nr_reenqueue: u64,
+    pub batch_sojourn_ns: u64,
+    pub burst_mode_active: u64,
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 216);
-const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 64);
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 208);
+const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 72);
 
 // TuningKnobs lives in tuning.rs (zero BPF dependencies, testable offline)
 
@@ -170,7 +169,6 @@ impl<'a> Scheduler<'a> {
                 total.wake_lat_idle_cnt += stats.wake_lat_idle_cnt;
                 total.wake_lat_kick_sum += stats.wake_lat_kick_sum;
                 total.wake_lat_kick_cnt += stats.wake_lat_kick_cnt;
-                total.nr_guard_clamps += stats.nr_guard_clamps;
                 total.nr_procdb_hits += stats.nr_procdb_hits;
                 total.nr_l2_hit_batch += stats.nr_l2_hit_batch;
                 total.nr_l2_miss_batch += stats.nr_l2_miss_batch;
@@ -178,9 +176,13 @@ impl<'a> Scheduler<'a> {
                 total.nr_l2_miss_interactive += stats.nr_l2_miss_interactive;
                 total.nr_l2_hit_lat_crit += stats.nr_l2_hit_lat_crit;
                 total.nr_l2_miss_lat_crit += stats.nr_l2_miss_lat_crit;
-                total.dsq_depth_sum += stats.dsq_depth_sum;
-                total.dsq_depth_samples += stats.dsq_depth_samples;
                 total.nr_reenqueue += stats.nr_reenqueue;
+                if stats.batch_sojourn_ns > total.batch_sojourn_ns {
+                    total.batch_sojourn_ns = stats.batch_sojourn_ns;
+                }
+                if stats.burst_mode_active > total.burst_mode_active {
+                    total.burst_mode_active = stats.burst_mode_active;
+                }
             }
         }
 
