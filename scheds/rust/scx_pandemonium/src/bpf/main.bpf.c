@@ -10,7 +10,7 @@
 //   ENQUEUE INTERACTIVE PREEMPT -> PER-CPU DSQ + HARD KICK
 //   ENQUEUE FALLBACK -> PER-NODE OVERFLOW DSQ (VTIME-ORDERED)
 //   DISPATCH -> PER-CPU DSQ, NODE OVERFLOW, CROSS-NODE STEAL, KEEP_RUNNING
-//   TICK + GUARD -> EVENT-DRIVEN BATCH PREEMPTION (ZERO POLLING)
+//   TICK -> EVENT-DRIVEN BATCH PREEMPTION (ZERO POLLING)
 //
 // BEHAVIORAL CLASSIFICATION (FROM v0.9.4):
 //   LAT_CRI SCORE = (WAKEUP_FREQ * CSW_RATE) / AVG_RUNTIME
@@ -62,10 +62,27 @@ static u64 preempt_thresh = 10;
 // CLEARED BY tick() AFTER PREEMPTING A BATCH TASK.
 static bool interactive_waiting;
 
-// INTERACTIVE GUARDRAIL: TIME-BASED BATCH SLICE CLAMP
-// SET IN enqueue() WHEN NON-BATCH TASK HITS OVERFLOW DSQ.
-// CHECKED IN task_slice() TO CLAMP BATCH SLICES DURING GUARD WINDOW.
-static u64 guard_until_ns;
+// CODEL-INSPIRED BATCH SOJOURN TRACKER
+// RECORDS WHEN THE BATCH DSQ TRANSITIONED FROM EMPTY TO NON-EMPTY.
+// DISPATCH CHECKS THIS TO RESCUE BATCH TASKS WAITING > SOJOURN THRESHOLD.
+static volatile u64 batch_enqueue_ns;
+
+// DEFICIT COUNTER: ANTI-STARVATION INTERLEAVE (DRR)
+// COUNTS DISPATCHES SINCE LAST BATCH SERVICE. WHEN interactive_run
+// EXCEEDS interactive_budget AND BATCH IS STARVING, FORCE ONE BATCH
+// DISPATCH. PROPORTIONAL: BUDGET = nr_cpu_ids * 4.
+static u64 interactive_run;
+static u64 interactive_budget;
+
+// CUSUM BURST DETECTION
+// MONITORS ENQUEUE RATE TO DETECT FORK/EXEC STORMS.
+// SAMPLES EVERY 64TH ENQUEUE: TRACKS TIME INTERVAL (SHORTER = BURST).
+// DURING BURST MODE, INTERACTIVE DSQ REQUIRES MORE EWMA EVIDENCE.
+static u64 cusum_enq_count;
+static u64 cusum_last_check_ns;
+static u64 cusum_interval_ewma;
+static u64 cusum_s;
+static bool burst_mode;
 
 // USER EXIT
 
@@ -434,7 +451,6 @@ static __always_inline u64 task_slice(const struct task_ctx *tctx,
 
 	// BATCH: DEDICATED CEILING FROM RUST ADAPTIVE LAYER.
 	// WEIGHT-SCALED: HIGHER BEHAVIORAL WEIGHT = LONGER SLICE.
-	// GUARD WINDOW: CLAMP DURING INTERACTIVE CONTENTION.
 	u64 batch_ceil = knobs ? knobs->batch_slice_ns : 20000000;
 	if (batch_ceil < SLICE_MIN_NS)
 		batch_ceil = SLICE_MIN_NS;
@@ -444,16 +460,6 @@ static __always_inline u64 task_slice(const struct task_ctx *tctx,
 		base = batch_ceil;
 	if (base < SLICE_MIN_NS)
 		base = SLICE_MIN_NS;
-
-	if (bpf_ktime_get_ns() < guard_until_ns) {
-		u64 guard_slice = SLICE_MIN_NS << 1; // 200US
-		if (base > guard_slice) {
-			base = guard_slice;
-			struct pandemonium_stats *s = get_stats();
-			if (s)
-				__sync_fetch_and_add(&s->nr_guard_clamps, 1);
-		}
-	}
 
 	return base;
 }
@@ -615,16 +621,29 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	}
 
 	// TIER 3: NODE OVERFLOW DSQ + SELECTIVE KICK
-	dl = tctx ? task_deadline(p, tctx, node_dsq, knobs) : vtime_now;
-	scx_bpf_dsq_insert_vtime(p, node_dsq, sl, dl, enq_flags);
+	// CLASSIFICATION-GATED ROUTING: INTERACTIVE DSQ IS A PRIVILEGE.
+	// IMMATURE TASKS ROUTE TO BATCH DSQ UNTIL EWMA CLASSIFIES THEM.
+	// THRESHOLD IS DYNAMIC: CUSUM BURST DETECTION RAISES THE BAR DURING
+	// FORK/EXEC STORMS (age_thresh 2 -> 4), REQUIRING MORE EVIDENCE.
+	// LAT_CRITICAL (COMPOSITORS) ARE NEVER REDIRECTED.
+	u32 age_thresh = burst_mode ? 4 : 2;
+	u64 target_dsq = (tctx && (tctx->tier == TIER_BATCH ||
+		(tctx->tier == TIER_INTERACTIVE && tctx->ewma_age < age_thresh)))
+		? (nr_cpu_ids + nr_nodes + (u64)node)
+		: node_dsq;
 
-	// ARM TICK SAFETY NET + INTERACTIVE GUARDRAIL
-	// 2MS GUARD: WIDER WINDOW COMPENSATES FOR TIMER ELIMINATION (v2.1.0).
-	// CLAMPS BATCH SLICES TO 200US WHILE INTERACTIVE TASKS WAIT IN OVERFLOW.
-	if (tctx && tctx->tier != TIER_BATCH) {
+	// SOJOURN TRACKING: RECORD WHEN BATCH DSQ TRANSITIONS FROM EMPTY.
+	// DISPATCH CHECKS THIS TO RESCUE BATCH TASKS WAITING > SOJOURN THRESHOLD.
+	if (target_dsq != node_dsq && scx_bpf_dsq_nr_queued(target_dsq) == 0)
+		batch_enqueue_ns = bpf_ktime_get_ns();
+
+	dl = tctx ? task_deadline(p, tctx, target_dsq, knobs) : vtime_now;
+	scx_bpf_dsq_insert_vtime(p, target_dsq, sl, dl, enq_flags);
+
+	// ARM TICK SAFETY NET: SIGNAL THAT INTERACTIVE TASKS ARE WAITING IN OVERFLOW.
+	// tick() CHECKS THIS FLAG TO PREEMPT BATCH TASKS VIA preempt_thresh_ns.
+	if (tctx && tctx->tier != TIER_BATCH)
 		interactive_waiting = true;
-		guard_until_ns = bpf_ktime_get_ns() + 2000000; // 2MS GUARD WINDOW
-	}
 
 	u64 kick_flags = is_wakeup ? SCX_KICK_PREEMPT : 0;
 	scx_bpf_kick_cpu(scx_bpf_task_cpu(p), kick_flags);
@@ -642,39 +661,51 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 			s->nr_enq_requeue += 1;
 			s->nr_soft_kicks += 1;
 		}
-		// DSQ DEPTH: CONTENTION SIGNAL FOR RUST ADAPTIVE LAYER
-		u64 nr_queued = scx_bpf_dsq_nr_queued(node_dsq);
-		s->dsq_depth_sum += nr_queued;
-		s->dsq_depth_samples += 1;
+	}
+
+	// CUSUM BURST DETECTION: SAMPLE EVERY 64TH ENQUEUE.
+	// TRACKS TIME INTERVAL PER 64 ENQUEUES (SHORTER = HIGHER RATE = BURST).
+	// EWMA BASELINE SELF-TUNES TO ACTUAL SYSTEM CAPACITY.
+	cusum_enq_count++;
+	if ((cusum_enq_count & 63) == 0) {
+		u64 now = bpf_ktime_get_ns();
+		u64 interval = now - cusum_last_check_ns;
+		cusum_last_check_ns = now;
+
+		if (cusum_interval_ewma == 0) {
+			cusum_interval_ewma = interval;
+		} else {
+			cusum_interval_ewma = cusum_interval_ewma
+				- (cusum_interval_ewma >> 3)
+				+ (interval >> 3);
+		}
+
+		u64 k = cusum_interval_ewma >> 2;
+		if (interval + k < cusum_interval_ewma) {
+			cusum_s += (cusum_interval_ewma - interval - k);
+		} else {
+			cusum_s >>= 1;
+		}
+
+		burst_mode = cusum_s > (cusum_interval_ewma << 1);
 	}
 }
 
 // DISPATCH: CPU IS IDLE AND NEEDS WORK
-// 1. ANTI-STARVATION: OVERFLOW FIRST EVERY 4TH DISPATCH (WHEN QUEUED)
-// 2. OWN PER-CPU DSQ (DIRECT PLACEMENT FROM ENQUEUE -- ZERO CONTENTION)
-// 3. NODE OVERFLOW DSQ (VTIME-ORDERED, RESPECTS BEHAVIORAL PRIORITY)
-// 4. CROSS-NODE STEAL (LAST RESORT)
-// 5. KEEP_RUNNING IF PREV STILL WANTS CPU AND NOTHING QUEUED
+// 1. OWN PER-CPU DSQ (DIRECT PLACEMENT FROM ENQUEUE -- ZERO CONTENTION)
+// 2. DEFICIT CHECK (DRR: FORCE BATCH RESCUE AFTER BUDGET EXHAUSTED)
+// 3. NODE INTERACTIVE OVERFLOW (LATCRIT + INTERACTIVE, VTIME-ORDERED)
+// 4. BATCH SOJOURN RESCUE (CODEL: RESCUE IF OLDEST BATCH TASK > THRESHOLD)
+// 5. NODE BATCH OVERFLOW (NORMAL FALLBACK FOR BATCH TASKS)
+// 6. CROSS-NODE STEAL (BOTH INTERACTIVE AND BATCH PER REMOTE NODE)
+// 7. KEEP_RUNNING IF PREV STILL WANTS CPU AND NOTHING QUEUED
 void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 {
 	s32 node = __COMPAT_scx_bpf_cpu_node(cpu);
 	if (node < 0 || (u32)node >= nr_nodes) node = 0;
 	u64 node_dsq = nr_cpu_ids + (u64)node;
+	u64 batch_dsq = nr_cpu_ids + nr_nodes + (u64)node;
 	struct pandemonium_stats *s;
-
-	// ANTI-STARVATION: PERIODICALLY DRAIN OVERFLOW BEFORE PER-CPU DSQ.
-	// WITHOUT THIS, BATCH TASKS IN THE OVERFLOW DSQ STARVE INDEFINITELY
-	// WHEN select_cpu AND enqueue TIER 1/2 CONTINUOUSLY FEED PER-CPU DSQs.
-	// EVERY 4TH DISPATCH (PER-CPU COUNTER, NO ATOMICS NEEDED): CHECK
-	// OVERFLOW FIRST. PRESERVES LOCALITY 75% OF THE TIME.
-	s = get_stats();
-	if (s && scx_bpf_dsq_nr_queued(node_dsq) > 0 &&
-	    (s->nr_dispatches & 3) == 0) {
-		if (scx_bpf_dsq_move_to_local(node_dsq)) {
-			s->nr_dispatches += 1;
-			return;
-		}
-	}
 
 	// PER-CPU DSQ: DIRECT PLACEMENT FROM ENQUEUE
 	if (scx_bpf_dsq_move_to_local((u64)cpu)) {
@@ -684,8 +715,69 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	// NODE OVERFLOW DSQ: VTIME-ORDERED CONSUME
+	// COMPUTE BATCH STARVATION STATE (SHARED BY DEFICIT CHECK + SOJOURN RESCUE)
+	struct tuning_knobs *knobs = get_knobs();
+	u64 sojourn_thresh = knobs ? knobs->sojourn_thresh_ns : 5000000;
+	u64 oldest = batch_enqueue_ns;
+	bool batch_starving = oldest > 0 &&
+		(bpf_ktime_get_ns() - oldest) > sojourn_thresh;
+
+	// DEFICIT COUNTER: ANTI-STARVATION INTERLEAVE (DRR)
+	// AFTER interactive_budget DISPATCHES WITHOUT BATCH SERVICE,
+	// FORCE ONE BATCH DISPATCH WHEN BATCH IS STARVING.
+	// PROPORTIONAL: BUDGET = nr_cpu_ids * 4 (SET IN init()).
+	// QUEUE GATE: ONLY FIRES WHEN INTERACTIVE QUEUE CAN SATURATE
+	// ALL CORES (CONCURRENT LOCKOUT). INVISIBLE DURING STEADY STATE.
+	if (interactive_run >= interactive_budget && batch_starving &&
+	    scx_bpf_dsq_nr_queued(node_dsq) >= nr_cpu_ids) {
+		if (scx_bpf_dsq_move_to_local(batch_dsq)) {
+			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0)
+				batch_enqueue_ns = 0;
+			else
+				batch_enqueue_ns = bpf_ktime_get_ns();
+			interactive_run = 0;
+			s = get_stats();
+			if (s)
+				s->nr_dispatches += 1;
+			return;
+		}
+		interactive_run = 0;
+	}
+
+	// NODE INTERACTIVE OVERFLOW: LATCRIT + INTERACTIVE TASKS
+	// INTERACTIVE FIRST WITHIN EACH BUDGET CYCLE. NO PRIORITY INVERSION.
 	if (scx_bpf_dsq_move_to_local(node_dsq)) {
+		interactive_run++;
+		s = get_stats();
+		if (s)
+			s->nr_dispatches += 1;
+		return;
+	}
+
+	// BATCH SOJOURN RESCUE: CODEL-INSPIRED STARVATION SAFETY NET.
+	// FIRES WHEN INTERACTIVE OVERFLOW IS EMPTY AND BATCH IS STARVING.
+	// THRESHOLD SET BY RUST ADAPTIVE LAYER FROM OBSERVED DISPATCH RATE.
+	if (batch_starving) {
+		if (scx_bpf_dsq_move_to_local(batch_dsq)) {
+			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0)
+				batch_enqueue_ns = 0;
+			else
+				batch_enqueue_ns = bpf_ktime_get_ns();
+			interactive_run = 0;
+			s = get_stats();
+			if (s)
+				s->nr_dispatches += 1;
+			return;
+		}
+	}
+
+	// NODE BATCH OVERFLOW: NORMAL FALLBACK FOR BATCH TASKS
+	if (scx_bpf_dsq_move_to_local(batch_dsq)) {
+		if (scx_bpf_dsq_nr_queued(batch_dsq) == 0)
+			batch_enqueue_ns = 0;
+		else
+			batch_enqueue_ns = bpf_ktime_get_ns();
+		interactive_run = 0;
 		s = get_stats();
 		if (s)
 			s->nr_dispatches += 1;
@@ -694,12 +786,20 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 
 	// CROSS-NODE STEAL
 	for (u32 n = 0; n < nr_nodes && n < MAX_NODES; n++) {
-		if (n != (u32)node &&
-		    scx_bpf_dsq_move_to_local(nr_cpu_ids + (u64)n)) {
-			s = get_stats();
-			if (s)
-				s->nr_dispatches += 1;
-			return;
+		if (n != (u32)node) {
+			if (scx_bpf_dsq_move_to_local(nr_cpu_ids + (u64)n)) {
+				s = get_stats();
+				if (s)
+					s->nr_dispatches += 1;
+				return;
+			}
+			if (scx_bpf_dsq_move_to_local(nr_cpu_ids + nr_nodes + (u64)n)) {
+				interactive_run = 0;
+				s = get_stats();
+				if (s)
+					s->nr_dispatches += 1;
+				return;
+			}
 		}
 	}
 
@@ -893,12 +993,48 @@ void BPF_STRUCT_OPS(pandemonium_stopping, struct task_struct *p,
 	tctx->awake_vtime += delta_vtime;
 }
 
-// TICK: EVENT-DRIVEN BATCH PREEMPTION
-// PRIMARY PREEMPTION MECHANISM (BPF TIMER ELIMINATED IN v2.1.0).
-// FIRES WHEN interactive_waiting IS SET BY enqueue() TIER 3.
-// USES preempt_thresh_ns KNOB FOR REGIME-AWARE THRESHOLD.
+// TICK: SOJOURN ENFORCEMENT + EVENT-DRIVEN BATCH PREEMPTION
+// FIRES ON EVERY KERNEL SCHEDULER TICK (HZ-DEPENDENT, 1-4MS) REGARDLESS
+// OF SLICE LENGTH. TWO RESPONSIBILITIES:
+// 1. SOJOURN: WRITE BATCH WAIT AGE TO STATS FOR RUST ADAPTIVE LAYER.
+//    IF BATCH STARVING PAST THRESHOLD AND CURRENT TASK IS BATCH, KICK
+//    CPU TO FORCE DISPATCH. THRESHOLD SET BY RUST FROM DISPATCH RATE.
+// 2. PREEMPTION: WHEN INTERACTIVE IS WAITING AND BATCH HAS RUN PAST
+//    THRESHOLD, PREEMPT TO MAINTAIN INTERACTIVE RESPONSIVENESS.
 void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 {
+	// SOJOURN: COMPUTE BATCH WAIT AGE AND WRITE TO STATS FOR RUST
+	struct pandemonium_stats *s = get_stats();
+	struct tuning_knobs *knobs = get_knobs();
+
+	// CUSUM BURST STATUS: WRITE TO STATS FOR RUST TELEMETRY
+	if (s)
+		s->burst_mode_active = burst_mode ? 1 : 0;
+
+	u64 bens = batch_enqueue_ns;
+	if (bens > 0) {
+		u64 now = bpf_ktime_get_ns();
+		u64 sojourn = now - bens;
+		if (s)
+			s->batch_sojourn_ns = sojourn;
+
+		// SOJOURN ENFORCEMENT: THRESHOLD SET BY RUST ADAPTIVE LAYER
+		// FROM OBSERVED DISPATCH RATE. IF BATCH STARVING PAST THRESHOLD
+		// AND CURRENT TASK IS BATCH, KICK THIS CPU TO FORCE DISPATCH.
+		// ONLY PREEMPT BATCH: INTERACTIVE/LATCRIT SLICES ARE ALREADY
+		// SHORT (CAPPED AT slice_ns) AND WILL YIELD QUICKLY ON THEIR OWN.
+		u64 sojourn_thresh = knobs ? knobs->sojourn_thresh_ns : 5000000;
+		if (sojourn > sojourn_thresh) {
+			struct task_ctx *tctx = lookup_task_ctx(p);
+			if (tctx && tctx->tier == TIER_BATCH) {
+				scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
+				return;
+			}
+		}
+	} else if (s) {
+		s->batch_sojourn_ns = 0;
+	}
+
 	if (!interactive_waiting)
 		return;
 
@@ -906,13 +1042,13 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 	if (!tctx)
 		return;
 
-	struct tuning_knobs *knobs = get_knobs();
 	u64 thresh = knobs ? knobs->preempt_thresh_ns : 1000000;
 
 	if (tctx->tier == TIER_BATCH && tctx->avg_runtime >= thresh) {
 		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
 		interactive_waiting = false;
-		struct pandemonium_stats *s = get_stats();
+		if (!s)
+			s = get_stats();
 		if (s)
 			__sync_fetch_and_add(&s->nr_preempt, 1);
 	}
@@ -972,9 +1108,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(pandemonium_init)
 	for (u32 i = 0; i < nr_cpu_ids && i < MAX_CPUS; i++)
 		scx_bpf_create_dsq(i, -1);
 
-	// CREATE PER-NODE OVERFLOW DSQs (DSQ ID = nr_cpu_ids + NODE ID)
+	// CREATE PER-NODE INTERACTIVE OVERFLOW DSQs (DSQ ID = nr_cpu_ids + NODE)
 	for (u32 i = 0; i < nr_nodes && i < MAX_NODES; i++)
 		scx_bpf_create_dsq(nr_cpu_ids + i, (s32)i);
+
+	// CREATE PER-NODE BATCH OVERFLOW DSQs (DSQ ID = nr_cpu_ids + nr_nodes + NODE)
+	for (u32 i = 0; i < nr_nodes && i < MAX_NODES; i++)
+		scx_bpf_create_dsq(nr_cpu_ids + nr_nodes + i, (s32)i);
 
 	// CORE-COUNT-SCALED PREEMPTION THRESHOLD
 	preempt_thresh = 60 / (nr_cpu_ids + 2);
@@ -982,6 +1122,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(pandemonium_init)
 		preempt_thresh = 3;
 	if (preempt_thresh > 20)
 		preempt_thresh = 20;
+
+	// ANTI-STARVATION BUDGET: PROPORTIONAL TO CORE COUNT
+	interactive_budget = nr_cpu_ids * 4;
+	if (interactive_budget < 8)
+		interactive_budget = 8;
+
+	// CUSUM BURST DETECTION: CALIBRATES ON FIRST 64 ENQUEUES
+	cusum_last_check_ns = bpf_ktime_get_ns();
+	cusum_interval_ewma = 0;
+	cusum_s = 0;
+	burst_mode = false;
 
 	// INITIALIZE DEFAULT TUNING KNOBS
 	struct tuning_knobs *knobs = bpf_map_lookup_elem(&tuning_knobs_map, &zero);
@@ -994,6 +1145,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(pandemonium_init)
 		knobs->lat_cri_thresh_high = LAT_CRI_THRESH_HIGH; // 32
 		knobs->lat_cri_thresh_low  = LAT_CRI_THRESH_LOW;  // 8
 		knobs->affinity_mode = 0;                // OFF BY DEFAULT (RUST SETS PER REGIME)
+		knobs->sojourn_thresh_ns = 5000000;      // 5MS DEFAULT (RUST OVERRIDES)
 	}
 
 	return 0;

@@ -505,6 +505,149 @@ def measure_latency(binary: Path, n_cpus: int, iterations: int = 1,
     return result
 
 
+# BURST MEASUREMENT
+
+def fire_burst(count: int, work_secs: float = 0.5) -> list[subprocess.Popen]:
+    """Spawn count short-lived CPU-bound processes as fast as possible.
+
+    Simulates application launch: fork/exec storm of processes that each
+    do CPU work for work_secs then exit. Python startup overhead (~50ms)
+    is intentional -- it mirrors real app initialization."""
+    script = (
+        "import time,hashlib\n"
+        f"end=time.monotonic()+{work_secs}\n"
+        "while time.monotonic()<end:\n"
+        " hashlib.sha256(b'x'*4096).hexdigest()\n"
+    )
+    procs = []
+    for _ in range(count):
+        p = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        procs.append(p)
+    return procs
+
+
+def measure_burst(binary: Path, n_cpus: int, burst_size: int,
+                  burst_work_secs: float = 0.5,
+                  baseline_secs: int = 5,
+                  burst_measure_secs: int = 10,
+                  warmup_secs: int = 2) -> dict:
+    """Measure scheduling latency before and during a process burst under load.
+
+    1. Stress workers saturate all CPUs
+    2. Baseline probe (steady-state latency reference)
+    3. Fire burst + measure through burst and settling
+    4. Compare baseline vs burst P99
+    """
+    if n_cpus < 1:
+        return {"survived": True, "baseline": {}, "burst": {}}
+
+    stress_cpus = list(range(n_cpus))
+    log_info(f"Burst test: {len(stress_cpus)} stress workers, "
+             f"{burst_size} burst processes ({burst_work_secs}s each)")
+
+    # Start stress workers on all CPUs
+    workers = []
+    for cpu in stress_cpus:
+        p = subprocess.Popen(
+            [str(binary), "stress-worker", "--cpu", str(cpu)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        workers.append(p)
+
+    # Warmup (discard output)
+    log_info(f"Warmup: {warmup_secs}s")
+    warmup = subprocess.Popen(
+        [str(binary), "probe"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    time.sleep(warmup_secs)
+    warmup.send_signal(signal.SIGINT)
+    try:
+        warmup.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        warmup.kill()
+        warmup.wait()
+
+    # Baseline measurement
+    log_info(f"Baseline: {baseline_secs}s")
+    baseline_probe = subprocess.Popen(
+        [str(binary), "probe"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    time.sleep(baseline_secs)
+    baseline_probe.send_signal(signal.SIGINT)
+    try:
+        baseline_out, _ = baseline_probe.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        baseline_probe.kill()
+        baseline_out, _ = baseline_probe.communicate()
+    baseline = parse_probe_output(baseline_out.decode(errors="replace"))
+    log_info(f"Baseline: {baseline['samples']} samples, "
+             f"median={baseline['median_us']}us, "
+             f"p99={baseline['p99_us']}us")
+
+    # Burst measurement: start probe, fire burst, measure during + after
+    burst_probe = subprocess.Popen(
+        [str(binary), "probe"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.5)
+
+    log_info(f"Firing burst: {burst_size} processes")
+    burst_start = time.monotonic()
+    burst_procs = fire_burst(burst_size, burst_work_secs)
+
+    # Wait for all burst processes to exit
+    for p in burst_procs:
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+    burst_duration = time.monotonic() - burst_start
+    log_info(f"Burst complete: {burst_duration:.1f}s")
+
+    # Continue measuring through settling period
+    remaining = burst_measure_secs - burst_duration
+    if remaining > 0:
+        log_info(f"Settling: {remaining:.0f}s")
+        time.sleep(remaining)
+
+    burst_probe.send_signal(signal.SIGINT)
+    try:
+        burst_out, _ = burst_probe.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        burst_probe.kill()
+        burst_out, _ = burst_probe.communicate()
+    burst_stats = parse_probe_output(burst_out.decode(errors="replace"))
+    log_info(f"Burst: {burst_stats['samples']} samples, "
+             f"median={burst_stats['median_us']}us, "
+             f"p99={burst_stats['p99_us']}us, "
+             f"worst={burst_stats['worst_us']}us")
+
+    # Stop stress workers
+    for w in workers:
+        w.send_signal(signal.SIGINT)
+    for w in workers:
+        try:
+            w.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            w.kill()
+            w.wait()
+
+    return {
+        "survived": True,
+        "burst_size": burst_size,
+        "burst_duration_s": round(burst_duration, 1),
+        "baseline": baseline,
+        "burst": burst_stats,
+    }
+
+
 # TELEMETRY PARSING
 
 def parse_tick_lines(stdout_text: str) -> list[dict]:
@@ -565,10 +708,6 @@ def parse_tick_lines(stdout_text: str) -> list[dict]:
             m = re.search(r"procdb:\s*(\d+)\s", line)
             if m:
                 tick["procdb_hits"] = int(m.group(1))
-            m = re.search(r"guard:\s*(\d+)", line)
-            if m:
-                tick["guard_clamps"] = int(m.group(1))
-
         # Adaptive specific
         elif re.search(r"\[(Light|Mixed|Heavy)\]", line, re.IGNORECASE):
             m = re.search(r"\[(Light|Mixed|Heavy)\]", line, re.IGNORECASE)
@@ -594,10 +733,6 @@ def parse_tick_lines(stdout_text: str) -> list[dict]:
             m = re.search(r"batch:\s*(\d+)us", line)
             if m:
                 tick["batch_us"] = int(m.group(1))
-            m = re.search(r"guard:\s*(\d+)", line)
-            if m:
-                tick["guard_clamps"] = int(m.group(1))
-
         if tick:
             ticks.append(tick)
 
@@ -810,7 +945,7 @@ def write_prometheus(data: dict, stamp: str) -> Path:
                               {**telem_labels, "tier": tier})
 
             if tick_agg:
-                for field in ["idle_pct", "preempt", "guard_clamps",
+                for field in ["idle_pct", "preempt",
                               "wake_avg_us", "p99_us"]:
                     if field in tick_agg:
                         stats = tick_agg[field]
@@ -846,7 +981,6 @@ _SYS_TICK_FIELDS = [
     ("wake_avg_us", "pandemonium_bench_wake_us"),
     ("lat_idle_us", "pandemonium_bench_lat_idle_us"),
     ("lat_kick_us", "pandemonium_bench_lat_kick_us"),
-    ("guard_clamps", "pandemonium_bench_guard_clamps"),
     ("p99_us", "pandemonium_bench_p99_us"),
     ("slice_us", "pandemonium_bench_slice_us"),
     ("batch_us", "pandemonium_bench_batch_us"),
@@ -884,7 +1018,6 @@ def prom_sys_create(path: Path, version: str, git: dict, max_cpus: int):
         ("pandemonium_bench_wake_us", "Mean wakeup latency us"),
         ("pandemonium_bench_lat_idle_us", "Idle path latency us"),
         ("pandemonium_bench_lat_kick_us", "Kick path latency us"),
-        ("pandemonium_bench_guard_clamps", "Guard clamp events"),
         ("pandemonium_bench_p99_us", "P99 wakeup latency us"),
         ("pandemonium_bench_slice_us", "Current time slice us"),
         ("pandemonium_bench_batch_us", "Current batch slice us"),
@@ -1041,6 +1174,34 @@ def format_report(data: dict) -> str:
                     f"{lat['median_us']:>9}us {lat['p99_us']:>9}us "
                     f"{lat['worst_us']:>9}us")
 
+        # Burst table
+        has_burst = any(
+            s.get("burst", {}).get("burst", {}).get("samples", 0) > 0
+            for s in schedulers.values())
+        if has_burst:
+            lines.append("")
+            lines.append(f"{'SCHEDULER':<28} {'STATUS':>8} "
+                        f"{'BASE P99':>10} {'BURST P99':>10} "
+                        f"{'WORST':>10} {'SAMPLES':>8}")
+            for sched_name, sched_data in schedulers.items():
+                br = sched_data.get("burst", {})
+                if not br:
+                    continue
+                status = "OK" if br.get("survived", True) else "CRASHED"
+                base = br.get("baseline", {})
+                burst = br.get("burst", {})
+                bp99 = (f"{base['p99_us']}us"
+                        if base.get("samples", 0) > 0 else "--")
+                brp99 = (f"{burst['p99_us']}us"
+                         if burst.get("samples", 0) > 0 else "--")
+                worst = (f"{burst['worst_us']}us"
+                         if burst.get("samples", 0) > 0 else "--")
+                samples = (str(burst.get("samples", 0))
+                           if burst.get("samples", 0) > 0 else "--")
+                lines.append(f"{sched_name:<28} {status:>8} "
+                             f"{bp99:>10} {brp99:>10} "
+                             f"{worst:>10} {samples:>8}")
+
         lines.append("")
 
     # Summary matrix: throughput delta vs EEVDF
@@ -1090,6 +1251,34 @@ def format_report(data: dict) -> str:
             lines.append(row)
 
         lines.append("")
+
+        # Burst summary matrix
+        has_any_burst = any(
+            results.get(c, {}).get(s, {}).get("burst", {})
+            .get("burst", {}).get("samples", 0) > 0
+            for c in sorted_cores for s in all_schedulers)
+        if has_any_burst:
+            lines.append("BURST P99 (us)")
+            header = f"{'SCHEDULER':<28}"
+            for c in sorted_cores:
+                header += f" {c + 'C':>8}"
+            lines.append(header)
+
+            for sched in all_schedulers:
+                row = f"{sched:<28}"
+                for c in sorted_cores:
+                    br = results.get(c, {}).get(sched, {}).get("burst", {})
+                    burst = br.get("burst", {})
+                    p99 = burst.get("p99_us")
+                    if p99 is not None and burst.get("samples", 0) > 0:
+                        survived = br.get("survived", True)
+                        tag = "" if survived else "*"
+                        row += f" {str(p99) + tag:>8}"
+                    else:
+                        row += f" {'--':>8}"
+                lines.append(row)
+
+            lines.append("")
 
     return "\n".join(lines)
 
@@ -1282,6 +1471,17 @@ def cmd_bench_scale(args) -> int:
                                  / eevdf_mean[cores_str]) * 100.0
                         tp["vs_eevdf_pct"] = round(delta, 1)
                     sched_result["throughput"] = tp
+
+                # Burst measurement (app launch under full load)
+                burst_size = n * 4
+                if burst_size < 8:
+                    burst_size = 8
+                burst_result = measure_burst(BINARY, n, burst_size)
+                if guard is not None and guard.proc.poll() is not None:
+                    burst_result["survived"] = False
+                    log_error(f"{sched_name} CRASHED during burst "
+                              f"(exit {guard.proc.returncode})")
+                sched_result["burst"] = burst_result
 
                 # Stop scheduler, capture telemetry
                 stdout = stop_and_wait(guard)
