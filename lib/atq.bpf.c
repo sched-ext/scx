@@ -3,6 +3,7 @@
 #include <lib/sdt_task.h>
 
 #include <lib/atq.h>
+#include <lib/alloc/buddy.h>
 
 /*
  * Arena task queue implementation.
@@ -13,17 +14,18 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 {
 	scx_atq_t *atq;
 
-	atq = scx_static_alloc(sizeof(*atq), 1);
+	atq = sys_buddy_zalloc(sizeof(*atq));
 	if (!atq)
 		return (u64)NULL;
 
 	atq->tree = rb_create(RB_NOALLOC, RB_DUPLICATE);
-	if (!atq->tree)
+	if (!atq->tree) {
+		sys_buddy_free(atq);
 		return (u64)NULL;
+	}
 
 	atq->fifo = fifo;
 	atq->capacity = capacity;
-	atq->size = 0;
 
 	return (u64)atq;
 }
@@ -37,6 +39,7 @@ int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 		/* Do nothing. Just drain all the queued tasks. */
 	}
 	rb_destroy(atq->tree);
+	sys_buddy_free(atq);
 
 	return 0;
 }
