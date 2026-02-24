@@ -70,7 +70,8 @@ enum kfunc_bench_id {
 	BENCH_IDLE_SMTMASK       = 20, /* cpumask_test_cpu on smtmask — read-only, no atomic */
 	BENCH_DISRUPTOR_READ     = 21, /* Full CL0 Disruptor handoff read (cake_stopping sim) */
 	BENCH_TCTX_COLD_SIM      = 22, /* get_task_ctx + arena CL0 read (cake_running sim) */
-	BENCH_MAX_ENTRIES        = 23,
+	BENCH_ARENA_STRIDE       = 23, /* Stride across arena per_cpu array to test TLB/hugepage */
+	BENCH_MAX_ENTRIES        = 24,
 };
 
 struct kfunc_bench_entry {
@@ -78,6 +79,7 @@ struct kfunc_bench_entry {
 	u64 max_ns;         /* Worst-case cost */
 	u64 total_ns;       /* Sum for avg calc */
 	u64 last_value;     /* Last return value from the helper */
+	u64 samples[BENCH_ITERATIONS]; /* Raw per-iteration ns for percentile calc */
 };
 
 struct kfunc_bench_results {
@@ -93,8 +95,9 @@ struct kfunc_bench_results {
 
 /* Flow state flags (packed_info bits 24-27) */
 enum cake_flow_flags {
-	CAKE_FLOW_NEW     = 1 << 0, /* Task is newly created */
-	CAKE_FLOW_YIELDER = 1 << 1, /* Task voluntarily yielded since last stop */
+	CAKE_FLOW_NEW          = 1 << 0, /* Task is newly created */
+	CAKE_FLOW_YIELDER      = 1 << 1, /* Task voluntarily yielded since last stop */
+	CAKE_FLOW_WAKER_BOOST  = 1 << 2, /* Waker was a yielder — propagate priority (1-cycle) */
 };
 
 /* Per-task flow state - 64B aligned, first 8B coalesced for cake_stopping writes */

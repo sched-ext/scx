@@ -28,7 +28,7 @@ use crate::bpf_skel::BpfSkel;
 
 use crate::topology::TopologyInfo;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TuiTab {
     Dashboard = 0,
     Topology = 1,
@@ -114,7 +114,8 @@ pub struct TuiApp {
     pub prev_task_rows: HashMap<u32, TaskTelemetryRow>, // Previous tick for delta mode
     pub _prev_stats: Option<cake_stats>, // Previous global stats for rate calc
     // BenchLab cached results
-    pub bench_entries: [(u64, u64, u64, u64); 23], // (min_ns, max_ns, total_ns, last_value)
+    pub bench_entries: [(u64, u64, u64, u64); 24], // (min_ns, max_ns, total_ns, last_value)
+    pub bench_samples: Vec<Vec<u64>>, // Per-entry accumulated raw samples for percentiles
     pub bench_cpu: u32,
     pub bench_iterations: u32,
     pub bench_timestamp: u64,
@@ -271,7 +272,8 @@ impl TuiApp {
             bpf_task_count: 0,
             prev_task_rows: HashMap::new(),
             _prev_stats: None,
-            bench_entries: [(0, 0, 0, 0); 23],
+            bench_entries: [(0, 0, 0, 0); 24],
+            bench_samples: vec![Vec::new(); 24],
             bench_cpu: 0,
             bench_iterations: 0,
             bench_timestamp: 0,
@@ -677,6 +679,88 @@ impl<'a> Widget for LatencyTable<'a> {
     }
 }
 
+/// Format BenchLab results as a copyable text string (tab-specific copy)
+fn format_bench_for_clipboard(app: &TuiApp) -> String {
+    let bench_items: &[(usize, &str, &str)] = &[
+        (0, "bpf_ktime_get_ns()", "Kfuncs"),
+        (1, "scx_bpf_now()", "Kfuncs"),
+        (2, "bpf_get_smp_proc_id()", "Kfuncs"),
+        (3, "bpf_task_from_pid()", "Kfuncs"),
+        (4, "test_and_clear_idle()", "Kfuncs"),
+        (5, "scx_bpf_nr_cpu_ids()", "Kfuncs"),
+        (6, "get_task_ctx() [arena]", "Kfuncs"),
+        (7, "scx_bpf_dsq_nr_queued()", "Kfuncs"),
+        (13, "ringbuf reserve+discard", "Kfuncs"),
+        (8, "BSS global_stats[cpu]", "Data Access"),
+        (9, "Arena per_cpu.mbox", "Data Access"),
+        (14, "task_struct p->scx+nvcsw", "Data Access"),
+        (15, "RODATA llc+tier_slice", "Data Access"),
+        (11, "Mbox CL0 cached CPU", "Mailbox CL0"),
+        (12, "Mbox CL0 tctx+deref", "Mailbox CL0"),
+        (18, "CL0 ptr+fused+packed", "Mailbox CL0"),
+        (21, "Disruptor CL0 full read", "Mailbox CL0"),
+        (10, "Timing harness (cal)", "Composite"),
+        (16, "Bitflag shift+mask+brless", "Composite"),
+        (17, "compute_ewma() full", "Composite"),
+        (22, "get_task_ctx+arena CL0", "Composite"),
+        (19, "idle_probe(remote) MESI", "Idle Probes"),
+        (20, "smtmask read-only check", "Idle Probes"),
+        (23, "Arena stride (TLB/hugepage)", "TLB/Memory"),
+    ];
+
+    let percentile = |samples: &[u64], pct: f64| -> u64 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    };
+
+    let baseline_avg = if app.bench_iterations > 0 {
+        app.bench_entries[0].2 / app.bench_iterations as u64
+    } else {
+        1
+    };
+
+    let mut output = String::new();
+    output.push_str(&format!(
+        "=== BenchLab ({} runs, {} samples, CPU {}) ===\n\n",
+        app.bench_run_count, app.bench_iterations, app.bench_cpu
+    ));
+    output.push_str(&format!(
+        "{:<30} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7}\n",
+        "HELPER", "MIN", "P1 LOW", "AVG", "P1 HIGH", "MAX", "SPEED"
+    ));
+    output.push_str(&format!("{}\n", "─".repeat(82)));
+
+    let mut last_cat = "";
+    for &(idx, name, cat) in bench_items {
+        if cat != last_cat {
+            last_cat = cat;
+            output.push_str(&format!("\n▸ {}\n", cat));
+        }
+        let (min_ns, max_ns, total_ns, _) = app.bench_entries[idx];
+        if app.bench_iterations > 0 && total_ns > 0 {
+            let avg_ns = total_ns / app.bench_iterations as u64;
+            let samples = &app.bench_samples[idx];
+            let p1 = percentile(samples, 1.0);
+            let p99 = percentile(samples, 99.0);
+            let speedup = if idx > 0 && avg_ns > 0 {
+                format!("{:.1}×", baseline_avg as f64 / avg_ns as f64)
+            } else {
+                "base".to_string()
+            };
+            output.push_str(&format!(
+                "  {:<28} {:>5}ns {:>5}ns {:>5}ns {:>6}ns {:>5}ns {:>5}\n",
+                name, min_ns, p1, avg_ns, p99, max_ns, speedup
+            ));
+        }
+    }
+    output
+}
+
 /// Format stats as a copyable text string
 fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     let total_dispatches = stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
@@ -783,6 +867,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             "smtmask read-only check",
             "Disruptor CL0 full read",
             "get_task_ctx+arena CL0",
+            "Arena stride (TLB/hugepage)",
         ];
         output.push_str(&format!(
             "\n=== BenchLab ({} runs, {} iterations/run, CPU {}) ===\n",
@@ -1537,163 +1622,186 @@ fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
 }
 
 fn draw_bench_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
-    let kfunc_names = [
-        "bpf_ktime_get_ns()",
-        "scx_bpf_now()",
-        "bpf_get_smp_processor_id()",
-        "bpf_task_from_pid()",
-        "scx_bpf_test_and_clear_cpu_idle()",
-        "scx_bpf_nr_cpu_ids()",
-        "get_task_ctx() [storage+arena]",
-        "scx_bpf_dsq_nr_queued()",
-        "BSS global_stats[cpu] read",
-        "Arena per_cpu[cpu].mbox read",
-        "Timing harness (calibration)",
-        "Mbox CL0 cached CPU read",
-        "Mbox CL0 cached tctx+deref",
-        "bpf_ringbuf reserve+discard",
-        "task_struct p->scx+nvcsw",
-        "RODATA cpu_llc+tier_slice",
-        "Bitflag shift+mask+brless",
-        "compute_ewma() full call",
-        "CL0 ptr+fused+packed read",
-        "idle_probe(remote) MESI",
-        "smtmask read-only check",
-        "Disruptor CL0 full read",
-        "get_task_ctx+arena CL0",
+    // (index, name, category)
+    let bench_items: &[(usize, &str, &str)] = &[
+        (0, "bpf_ktime_get_ns()", "Kfuncs"),
+        (1, "scx_bpf_now()", "Kfuncs"),
+        (2, "bpf_get_smp_proc_id()", "Kfuncs"),
+        (3, "bpf_task_from_pid()", "Kfuncs"),
+        (4, "test_and_clear_idle()", "Kfuncs"),
+        (5, "scx_bpf_nr_cpu_ids()", "Kfuncs"),
+        (6, "get_task_ctx() [arena]", "Kfuncs"),
+        (7, "scx_bpf_dsq_nr_queued()", "Kfuncs"),
+        (13, "ringbuf reserve+discard", "Kfuncs"),
+        (8, "BSS global_stats[cpu]", "Data Access"),
+        (9, "Arena per_cpu.mbox", "Data Access"),
+        (14, "task_struct p->scx+nvcsw", "Data Access"),
+        (15, "RODATA llc+tier_slice", "Data Access"),
+        (11, "Mbox CL0 cached CPU", "Mailbox CL0"),
+        (12, "Mbox CL0 tctx+deref", "Mailbox CL0"),
+        (18, "CL0 ptr+fused+packed", "Mailbox CL0"),
+        (21, "Disruptor CL0 full read", "Mailbox CL0"),
+        (10, "Timing harness (cal)", "Composite"),
+        (16, "Bitflag shift+mask+brless", "Composite"),
+        (17, "compute_ewma() full", "Composite"),
+        (22, "get_task_ctx+arena CL0", "Composite"),
+        (19, "idle_probe(remote) MESI", "Idle Probes"),
+        (20, "smtmask read-only check", "Idle Probes"),
+        (23, "Arena stride (TLB/hugepage)", "TLB/Memory"),
     ];
 
-    let mut lines: Vec<ratatui::text::Line> = Vec::new();
+    let percentile = |samples: &[u64], pct: f64| -> u64 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    };
 
-    // Header
     let age_s = if app.bench_timestamp > 0 {
         let uptime = app.start_time.elapsed().as_nanos() as u64;
-        if uptime > 0 {
-            format!(
-                "{:.1}s ago",
-                (uptime.saturating_sub(app.bench_timestamp)) as f64 / 1_000_000_000.0
-            )
-        } else {
-            "--".to_string()
-        }
+        format!(
+            "{:.1}s ago",
+            (uptime.saturating_sub(app.bench_timestamp)) as f64 / 1e9
+        )
     } else {
         "never".to_string()
     };
 
-    lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-        format!(
-            " ⚡ Kfunc BenchLab   [Press 'b' to run]   Runs: {}   Samples: {}   CPU: {}   Ran: {}",
-            app.bench_run_count, app.bench_iterations, app.bench_cpu, age_s
-        ),
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(ratatui::text::Line::from(""));
-
-    // Column headers
-    lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-        format!(
-            " {:<32} {:>8} {:>8} {:>8}  {:>20}",
-            "HELPER", "MIN", "MAX", "AVG", "LAST VALUE"
-        ),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-        format!(" {}", "─".repeat(86)),
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    // Data rows
     let baseline_avg = if app.bench_iterations > 0 {
         app.bench_entries[0].2 / app.bench_iterations as u64
     } else {
-        0
+        1
     };
 
-    for (i, name) in kfunc_names.iter().enumerate() {
-        let (min_ns, max_ns, total_ns, last_val) = app.bench_entries[i];
-        if app.bench_iterations == 0 || total_ns == 0 {
-            lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!(
-                    " {:<32} {:>8} {:>8} {:>8}  {:>20}",
-                    name, "--", "--", "--", "--"
-                ),
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
-            let avg_ns = total_ns / app.bench_iterations as u64;
-            let color = if i == 0 {
-                Color::Red
-            }
-            // baseline (slow)
-            else if avg_ns < baseline_avg / 2 {
-                Color::Green
-            }
-            // much faster
-            else if avg_ns < baseline_avg {
-                Color::Yellow
-            }
-            // somewhat faster
-            else {
-                Color::White
-            };
-            lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!(
-                    " {:<32} {:>5}ns {:>5}ns {:>5}ns  {:>20}",
-                    name, min_ns, max_ns, avg_ns, last_val
-                ),
-                Style::default().fg(color),
-            )));
-        }
-    }
-
-    // Speedup section
-    if app.bench_iterations > 0 && baseline_avg > 0 {
-        lines.push(ratatui::text::Line::from(""));
-        lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-            " SPEEDUP vs bpf_ktime_get_ns():",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for (i, name) in kfunc_names.iter().enumerate().skip(1) {
-            let avg_ns = if app.bench_entries[i].2 > 0 {
-                app.bench_entries[i].2 / app.bench_iterations as u64
-            } else {
-                0
-            };
-            if avg_ns > 0 {
-                let speedup = baseline_avg as f64 / avg_ns as f64;
-                let color = if speedup > 5.0 {
-                    Color::Green
-                } else if speedup > 2.0 {
-                    Color::Yellow
-                } else {
-                    Color::White
-                };
-                lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-                    format!("   {:<30} {:.1}× faster", name, speedup),
-                    Style::default().fg(color),
-                )));
-            }
-        }
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(ratatui::text::Span::styled(
-            " ⚡ BenchLab ",
+    let header = Row::new(vec![
+        Cell::from("HELPER").style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        ));
+        ),
+        Cell::from("MIN").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("P1 LOW").style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("AVG").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("P1 HIGH").style(
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("MAX").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Cell::from("SPEED").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+    .height(1);
 
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
+    let mut rows: Vec<Row> = Vec::new();
+    let mut last_cat = "";
+
+    for &(idx, name, cat) in bench_items {
+        if cat != last_cat {
+            last_cat = cat;
+            rows.push(
+                Row::new(vec![Cell::from(format!("▸ {}", cat)).style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                )])
+                .height(1),
+            );
+        }
+
+        let (min_ns, max_ns, total_ns, _last_val) = app.bench_entries[idx];
+        if app.bench_iterations == 0 || total_ns == 0 {
+            rows.push(Row::new(vec![
+                Cell::from(format!("  {}", name)).style(Style::default().fg(Color::DarkGray)),
+                Cell::from("--"),
+                Cell::from("--"),
+                Cell::from("--"),
+                Cell::from("--"),
+                Cell::from("--"),
+                Cell::from("--"),
+            ]));
+            continue;
+        }
+
+        let avg_ns = total_ns / app.bench_iterations as u64;
+        let samples = &app.bench_samples[idx];
+        let p1 = percentile(samples, 1.0);
+        let p99 = percentile(samples, 99.0);
+
+        let speedup = if idx > 0 && avg_ns > 0 {
+            format!("{:.1}×", baseline_avg as f64 / avg_ns as f64)
+        } else {
+            "base".to_string()
+        };
+
+        let color = if idx == 0 {
+            Color::Red
+        } else if avg_ns < baseline_avg / 2 {
+            Color::Green
+        } else if avg_ns < baseline_avg {
+            Color::Yellow
+        } else {
+            Color::White
+        };
+
+        rows.push(Row::new(vec![
+            Cell::from(format!("  {}", name)).style(Style::default().fg(color)),
+            Cell::from(format!("{}ns", min_ns)).style(Style::default().fg(Color::Cyan)),
+            Cell::from(format!("{}ns", p1)).style(Style::default().fg(Color::Green)),
+            Cell::from(format!("{}ns", avg_ns)).style(Style::default().fg(color)),
+            Cell::from(format!("{}ns", p99)).style(Style::default().fg(Color::LightRed)),
+            Cell::from(format!("{}ns", max_ns)).style(Style::default().fg(Color::Red)),
+            Cell::from(speedup).style(Style::default().fg(Color::White)),
+        ]));
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(30),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(8),
+            Constraint::Length(7),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .border_type(BorderType::Rounded)
+            .title(ratatui::text::Span::styled(
+                format!(
+                    " ⚡ BenchLab  [b=run]  Runs: {}  Samples: {}  CPU: {}  Ran: {} ",
+                    app.bench_run_count, app.bench_iterations, app.bench_cpu, age_s
+                ),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
+    frame.render_widget(table, area);
 }
 
 fn draw_inspector_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
@@ -1906,7 +2014,7 @@ pub fn run_tui(
                 app.bench_cpu = br.cpu;
                 app.bench_run_count += 1;
                 app.bench_timestamp = br.bench_timestamp;
-                for i in 0..23 {
+                for i in 0..24 {
                     let new_min = br.entries[i].min_ns;
                     let new_max = br.entries[i].max_ns;
                     let new_total = br.entries[i].total_ns;
@@ -1922,6 +2030,13 @@ pub fn run_tui(
                         old_total + new_total,
                         new_value,
                     );
+                    // Accumulate raw samples for percentile computation
+                    for s in 0..8 {
+                        let sample = br.entries[i].samples[s];
+                        if sample > 0 {
+                            app.bench_samples[i].push(sample);
+                        }
+                    }
                 }
                 app.bench_iterations += br.iterations;
             }
@@ -1972,11 +2087,17 @@ pub fn run_tui(
                             app.cycle_sort();
                         }
                         KeyCode::Char('c') => {
-                            // Copy stats to clipboard
-                            let text = format_stats_for_clipboard(&stats, &app);
+                            // Copy ACTIVE TAB data to clipboard (tab-aware)
+                            let text = match app.active_tab {
+                                TuiTab::BenchLab => format_bench_for_clipboard(&app),
+                                _ => format_stats_for_clipboard(&stats, &app),
+                            };
                             match &mut clipboard {
                                 Some(cb) => match cb.set_text(text) {
-                                    Ok(_) => app.set_status("✓ Copied to clipboard!"),
+                                    Ok(_) => app.set_status(&format!(
+                                        "✓ Copied {:?} tab to clipboard!",
+                                        app.active_tab
+                                    )),
                                     Err(_) => app.set_status("✗ Failed to copy"),
                                 },
                                 None => app.set_status("✗ Clipboard not available"),
