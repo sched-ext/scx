@@ -134,6 +134,13 @@ struct cake_task_ctx {
 	u32 last_run_at; /* 4B: Last run timestamp (ns), wraps 4.2s */
 	u32 reclass_counter; /* 4B: Per-task stop counter for per-tier backoff */
 
+	/* --- Warm CPU History (Gate 1c migration reduction) [Bytes 32-37] ---
+	 * Ring of last 3 CPUs task ran on. Updated in cake_stopping on migration.
+	 * Gate 1c probes these when prev_cpu+sibling are busy, before kernel scan.
+	 * Initialized to 0xFFFF (invalid sentinel) to prevent thundering herd. */
+	u16 warm_cpus[3]; /* [0]=current, [1]=prev (staged in dsq_vtime), [2]=oldest */
+	u16 __warm_pad;   /* Alignment to 8-byte boundary */
+
 	/* --- High Resolution Arena Telemetry (TUI Matrix) ---
      * Zero-cost pointer access via BPF Arena. User-space sweeps memory 
      * asynchronously to build 1% Lows and average runtimes. */
@@ -153,6 +160,7 @@ struct cake_task_ctx {
 		u32 gate_1w_hits; /* Waker affinity hits (SMT sibling or LLC) */
 		u32 gate_3_hits; /* Kernel fallback hits */
 		u32 gate_1p_hits; /* Yielder-preempts-bulk hits (Gate 1P) */
+		u32 gate_1c_hits; /* Home CPU warm set hits (Gate 1c) */
 		u32 gate_tun_hits; /* Complete miss tunneling */
 		u64 jitter_accum_ns; /* Mathematical running variant vs AVG */
 		u32 total_runs; /* Total executions over lifetime */
@@ -190,7 +198,7 @@ struct cake_task_ctx {
 		u16 slice_util_pct;        /* (actual_run / slice) * 100 */
 		u16 llc_id;                /* LLC node this task last ran on */
 		u16 same_cpu_streak;       /* Consecutive runs on same CPU */
-		u16 __pad_align;           /* Alignment padding */
+		u16 ewma_recomp_count;     /* Times EWMA was fully recomputed (confidence gate) */
 		u32 wakeup_source_pid;     /* PID that woke this task */
 
 		/* Voluntary/involuntary context switch tracking (GPU detection) */
@@ -202,10 +210,11 @@ struct cake_task_ctx {
 		u32 pid;
 		u32 tgid;  /* Thread group ID (process) for TUI grouping */
 		char comm[16];
-		/* 186 bytes total */
 	} telemetry;
 
-	u8  __pad[38]; /* Pad to 256 bytes: 256 - (32 + 186) = 38 bytes */
+	/* Compiler enforces 256-byte alignment via __attribute__((aligned(256))).
+	 * No explicit padding needed — aligned attribute handles it.
+	 * Pre-telemetry: 40B, telemetry: ~194B, total: ~234B → 22B implicit pad. */
 } __attribute__((aligned(256)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
@@ -291,15 +300,24 @@ struct mega_mailbox_entry {
      * ALP prefetches this line for free on Zen 5 (128B pair).
      * Contains only cross-CPU readable fields and telemetry. */
 
-	/* --- Cross-CPU readable (bytes 64-67) --- */
+	/* --- Cross-CPU readable (bytes 64-71) --- */
 	/* run_start_cl1 REMOVED: Gate 1P now uses tick_last_run_at (CL0) +
 	 * consolidated now_post_g1 timestamp. No cross-CPU CL1 reads needed. */
 
 	/* --- Telemetry (stats-gated, bytes 64-67) --- */
 	u32 last_stopped_pid;  /* PID of last task that stopped on this CPU */
 
-	/* --- Reserved CL1 (bytes 68-127) --- */
-	u32 _reserved_cl1[15]; /* 60B pad to end of CL1 */
+	/* --- Idle shadow hint (bytes 68-71) --- */
+	/* Written by local CPU only: set=1 in cake_dispatch (no work),
+	 * cleared=0 in cake_running (task starting). Zero false sharing
+	 * because each CPU writes ONLY its own per_cpu[cpu].mbox entry.
+	 * Read by remote CPUs in Gate 1c to skip expensive MESI atomic
+	 * idle probes when target CPU is known-busy. Hint may be stale
+	 * by ~1µs — Gate 3 catches any missed idle CPUs. */
+	u32 idle_hint;         /* 0=busy (default), 1=likely idle */
+
+	/* --- Reserved CL1 (bytes 72-127) --- */
+	u32 _reserved_cl1[14]; /* 56B pad to end of CL1 */
 
 	/* ═══ CACHE LINE 2 (bytes 128-191): RESERVED ═══ */
 	u32 _reserved_cl2[16]; /* 64B pad */
