@@ -3305,6 +3305,9 @@ impl<'a> Scheduler<'a> {
         let targets = self.calc_target_nr_cpus();
         let targets = self.weighted_target_nr_cpus(&targets);
 
+        // Snapshot per-layer CPU counts for ALLOC debug logging.
+        let prev_nr_cpus: Vec<usize> = self.layers.iter().map(|l| l.nr_cpus).collect();
+
         let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
         ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
@@ -3430,6 +3433,27 @@ impl<'a> Scheduler<'a> {
                 );
                 updated = true;
             }
+        }
+
+        // Log per-layer allocation changes.
+        if updated {
+            for (idx, layer) in self.layers.iter().enumerate() {
+                if layer_is_open(layer) {
+                    continue;
+                }
+                let prev = prev_nr_cpus[idx];
+                let cur = layer.nr_cpus;
+                if prev != cur {
+                    debug!(
+                        "ALLOC {} algo={:?} cpus:{}→{} mask={:x}",
+                        layer.name, layer.growth_algo, prev, cur, layer.cpus,
+                    );
+                }
+            }
+            debug!(
+                "ALLOC pool_available={}",
+                self.cpu_pool.available_cpus().weight()
+            );
         }
 
         // Give the rest to the open layers.
