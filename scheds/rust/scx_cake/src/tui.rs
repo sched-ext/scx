@@ -115,7 +115,7 @@ pub struct TuiApp {
     pub prev_task_rows: HashMap<u32, TaskTelemetryRow>, // Previous tick for delta mode
     pub _prev_stats: Option<cake_stats>, // Previous global stats for rate calc
     // BenchLab cached results
-    pub bench_entries: [(u64, u64, u64, u64); 26], // (min_ns, max_ns, total_ns, last_value)
+    pub bench_entries: [(u64, u64, u64, u64); 24], // (min_ns, max_ns, total_ns, last_value)
     pub bench_samples: Vec<Vec<u64>>, // Per-entry accumulated raw samples for percentiles
     pub bench_cpu: u32,
     pub bench_iterations: u32,
@@ -274,8 +274,8 @@ impl TuiApp {
             bpf_task_count: 0,
             prev_task_rows: HashMap::new(),
             _prev_stats: None,
-            bench_entries: [(0, 0, 0, 0); 26],
-            bench_samples: vec![Vec::new(); 26],
+            bench_entries: [(0, 0, 0, 0); 24],
+            bench_samples: vec![Vec::new(); 24],
             bench_cpu: 0,
             bench_iterations: 0,
             bench_timestamp: 0,
@@ -738,8 +738,6 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         (19, "idle_probe(remote) MESI", "Idle Probes"),
         (20, "smtmask read-only check", "Idle Probes"),
         (23, "Arena stride (TLB/hugepage)", "TLB/Memory"),
-        (24, "select_cpu_dfl() kernel", "Kfuncs"),
-        (25, "kick_cpu(IDLE) IPI", "Kfuncs"),
     ];
 
     let percentile = |samples: &[u64], pct: f64| -> u64 {
@@ -902,8 +900,6 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             "Disruptor CL0 full read",
             "get_task_ctx+arena CL0",
             "Arena stride (TLB/hugepage)",
-            "select_cpu_dfl() kernel",
-            "kick_cpu(IDLE) IPI",
         ];
         output.push_str(&format!(
             "\n=== BenchLab ({} runs, {} iterations/run, CPU {}) ===\n",
@@ -1684,8 +1680,6 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         (19, "idle_probe(remote) MESI", "Idle Probes"),
         (20, "smtmask read-only check", "Idle Probes"),
         (23, "Arena stride (TLB/hugepage)", "TLB/Memory"),
-        (24, "select_cpu_dfl() kernel", "Kfuncs"),
-        (25, "kick_cpu(IDLE) IPI", "Kfuncs"),
     ];
 
     let percentile = |samples: &[u64], pct: f64| -> u64 {
@@ -2054,7 +2048,7 @@ pub fn run_tui(
                 app.bench_cpu = br.cpu;
                 app.bench_run_count += 1;
                 app.bench_timestamp = br.bench_timestamp;
-                for i in 0..26 {
+                for i in 0..24 {
                     let new_min = br.entries[i].min_ns;
                     let new_max = br.entries[i].max_ns;
                     let new_total = br.entries[i].total_ns;
