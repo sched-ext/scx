@@ -1778,13 +1778,13 @@ skip_ddsp:
 	 *   always run on all CPUs the layer will ever use. Guaranteed to
 	 *   be false for non-cpuset layers by refresh_cpus_flags().
 	 *
-	 * - allow_node_aligned && cpus_node_aligned: The task's affinity
-	 *   covers whole NUMA nodes. With per-node allocation, the layer
-	 *   will always have CPUs on those nodes.
+	 * - cpus_node_aligned: The task's affinity covers whole NUMA nodes.
+	 *   With per-node allocation, the layer will always have CPUs on
+	 *   those nodes.
 	 */
 	if ((!taskc->all_cpus_allowed &&
 	     !taskc->all_cpuset_cpus_allowed &&
-	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
+	     !taskc->cpus_node_aligned) ||
 	    !layer->nr_cpus) {
 		// Special handle for thread that has affinity set, but need more CPU time.
 		// XXX: If we need to support more than one thread (which is probably bad from

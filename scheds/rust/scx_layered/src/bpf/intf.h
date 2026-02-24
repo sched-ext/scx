@@ -355,7 +355,6 @@ struct layer {
 	bool			preempt;
 	bool			preempt_first;
 	bool			excl;
-	bool			allow_node_aligned;
 	bool			has_cpuset;
 	bool			skip_remote_node;
 	bool			prev_over_idle_core;

@@ -119,8 +119,8 @@ pub struct LayerCommon {
     pub preempt_first: bool,
     #[serde(default)]
     pub exclusive: bool,
-    #[serde(default)]
-    pub allow_node_aligned: bool,
+    #[serde(default, skip_serializing)]
+    pub allow_node_aligned: Option<bool>,
     #[serde(default)]
     pub skip_remote_node: bool,
     #[serde(default)]

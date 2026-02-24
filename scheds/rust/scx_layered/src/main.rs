@@ -137,7 +137,7 @@ lazy_static! {
             "kind": {"Open": {
               "min_exec_us": 100, "yield_ignore": 0.25, "slice_us": 20000,
               "preempt": true, "exclusive": true,
-              "allow_node_aligned": true, "prev_over_idle_core": true,
+              "prev_over_idle_core": true,
               "weight": 100, "perf": 1024
             }}
           },
@@ -344,10 +344,8 @@ lazy_static! {
 ///   other logical CPUs sharing the same core will be kept idle. This isn't
 ///   a hard guarantee, so don't depend on it for security purposes.
 ///
-/// - allow_node_aligned: Put node aligned tasks on layer DSQs instead of lo
-///   fallback. This is a hack to support node-affine tasks without making
-///   the whole scheduler node aware and should only be used with open
-///   layers on non-saturated machines to avoid possible stalls.
+/// - allow_node_aligned: DEPRECATED. Node-aligned tasks are now always
+///   dispatched on layer DSQs. This field is ignored if specified.
 ///
 /// - prev_over_idle_core: On SMT enabled systems, prefer using the same CPU
 ///   when picking a CPU for tasks on this layer, even if that CPUs SMT
@@ -1805,7 +1803,6 @@ impl<'a> Scheduler<'a> {
                     preempt,
                     preempt_first,
                     exclusive,
-                    allow_node_aligned,
                     skip_remote_node,
                     prev_over_idle_core,
                     growth_algo,
@@ -1836,7 +1833,6 @@ impl<'a> Scheduler<'a> {
                 layer.preempt.write(*preempt);
                 layer.preempt_first.write(*preempt_first);
                 layer.excl.write(*exclusive);
-                layer.allow_node_aligned.write(*allow_node_aligned);
                 layer.skip_remote_node.write(*skip_remote_node);
                 layer.prev_over_idle_core.write(*prev_over_idle_core);
                 layer.growth_algo = growth_algo.as_bpf_enum();
@@ -4605,6 +4601,10 @@ fn main(opts: Opts) -> Result<()> {
 
         if common.idle_smt.is_some() {
             warn!("Layer {} has deprecated flag \"idle_smt\"", &spec.name);
+        }
+
+        if common.allow_node_aligned.is_some() {
+            warn!("Layer {} has deprecated flag \"allow_node_aligned\", node-aligned tasks are now always dispatched on layer DSQs", &spec.name);
         }
     }
 
