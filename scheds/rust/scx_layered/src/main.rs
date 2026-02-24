@@ -47,7 +47,7 @@ use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
 use regex::Regex;
 use scx_bpf_compat;
-use scx_layered::alloc::{unified_alloc, LayerDemand};
+use scx_layered::alloc::{unified_alloc, LayerAlloc, LayerDemand};
 use scx_layered::*;
 use scx_raw_pmu::PMUManager;
 use scx_stats::prelude::*;
@@ -1231,8 +1231,7 @@ struct Layer {
     growth_algo: LayerGrowthAlgo,
     core_order: Vec<usize>,
 
-    target_llc_cpus: (usize, usize),
-    assigned_llcs: Vec<usize>,
+    assigned_llcs: Vec<Vec<usize>>,
 
     nr_cpus: usize,
     nr_llc_cpus: Vec<usize>,
@@ -1374,8 +1373,7 @@ impl Layer {
             growth_algo: layer_growth_algo,
             core_order: core_order.clone(),
 
-            target_llc_cpus: (0, 0),
-            assigned_llcs: vec![],
+            assigned_llcs: vec![vec![]; topo.nodes.len()],
 
             nr_cpus: 0,
             nr_llc_cpus: vec![0; topo.all_llcs.len()],
@@ -3076,93 +3074,89 @@ impl<'a> Scheduler<'a> {
     }
 
     // Recalculate the core order for layers using StickyDynamic growth
-    // algorithm. Tuples from compute_target_llcs are used to decide how many
-    // LLCs and cores should be assigned to each layer, logic to alloc and free
-    // CPUs operates on that core order. This happens in three logical steps, we
-    // first free LLCs from layers that shrunk from last recomputation, then
-    // distribute freed LLCs to growing layers, and then spill over remaining
-    // cores in free LLCs.
-    fn recompute_layer_core_order(&mut self, layer_targets: &[(usize, usize)]) -> Result<bool> {
-        // Collect freed LLCs from shrinking layers.
+    // algorithm. Uses per-node targets from unified_alloc() to decide how
+    // many LLCs each layer gets on each node, then builds core_order and
+    // applies CPU changes.
+    fn recompute_layer_core_order(
+        &mut self,
+        layer_targets: &[(usize, usize)],
+        layer_allocs: &[LayerAlloc],
+        au: usize,
+    ) -> Result<bool> {
+        let nr_nodes = self.topo.nodes.len();
+
+        // Phase 1 — Free per-node: return excess LLCs to cpu_pool.
         debug!(
             " free: before pass: free_llcs={:?}",
             self.cpu_pool.free_llcs
         );
-        for &(idx, target) in layer_targets.iter().rev() {
+        for &(idx, _) in layer_targets.iter().rev() {
             let layer = &mut self.layers[idx];
-            let old_tlc = layer.target_llc_cpus;
-            let new_tlc = Self::compute_target_llcs(target, &self.topo);
 
             if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
-            let mut to_free = (old_tlc.0 as i32 - new_tlc.0 as i32).max(0) as usize;
+            let alloc = &layer_allocs[idx];
 
-            debug!(
-                " free: layer={} old_tlc={:?} new_tlc={:?} to_free={} assigned={} free={}",
-                layer.name,
-                old_tlc,
-                new_tlc,
-                to_free,
-                layer.assigned_llcs.len(),
-                self.cpu_pool.total_free_llcs()
-            );
+            for n in 0..nr_nodes {
+                let assigned_on_n = layer.assigned_llcs[n].len();
+                let target_full_n =
+                    Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).0;
+                let mut to_free = assigned_on_n.saturating_sub(target_full_n);
 
-            while to_free > 0 && layer.assigned_llcs.len() > 0 {
-                let llc = layer.assigned_llcs.pop().unwrap();
-                self.cpu_pool.return_llc(llc);
-                to_free -= 1;
+                debug!(
+                    " free: layer={} node={} assigned={} target_full={} to_free={}",
+                    layer.name, n, assigned_on_n, target_full_n, to_free,
+                );
 
-                debug!(" layer={} freed_llc={}", layer.name, llc);
+                while to_free > 0 {
+                    if let Some(llc) = layer.assigned_llcs[n].pop() {
+                        self.cpu_pool.return_llc(llc);
+                        to_free -= 1;
+                        debug!(" layer={} freed_llc={} from node={}", layer.name, llc, n);
+                    } else {
+                        break;
+                    }
+                }
             }
         }
         debug!(" free: after pass: free_llcs={:?}", self.cpu_pool.free_llcs);
 
-        let all_layer_nodes: Vec<&[usize]> = self
-            .layer_specs
-            .iter()
-            .map(|s| s.nodes().as_slice())
-            .collect();
-
-        // Redistribute the freed LLCs to growing layers.
-        // Use the layer's spec.nodes ordering (mirroring node_order()).
-        for &(idx, target) in layer_targets.iter().rev() {
+        // Phase 2 — Acquire per-node: claim LLCs from cpu_pool.
+        for &(idx, _) in layer_targets.iter().rev() {
             let layer = &mut self.layers[idx];
-            let old_tlc = layer.target_llc_cpus;
-            let new_tlc = Self::compute_target_llcs(target, &self.topo);
 
             if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
-            let mut to_alloc = (new_tlc.0 as i32 - old_tlc.0 as i32).max(0) as usize;
-            let node_order = layer_core_growth::node_order(
-                self.layer_specs[idx].nodes(),
-                &self.topo,
-                idx,
-                &all_layer_nodes,
-            );
+            let alloc = &layer_allocs[idx];
 
-            debug!(
-                " alloc: layer={} old_tlc={:?} new_tlc={:?} to_alloc={} assigned={} free={} node_order={:?}",
-                layer.name,
-                old_tlc,
-                new_tlc,
-                to_alloc,
-                layer.assigned_llcs.len(),
-                self.cpu_pool.total_free_llcs(),
-                node_order,
-            );
+            for n in 0..nr_nodes {
+                let cur_on_n = layer.assigned_llcs[n].len();
+                let target_full_n =
+                    Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).0;
+                let mut to_alloc = target_full_n.saturating_sub(cur_on_n);
 
-            while to_alloc > 0 {
-                if let Some(llc) = self.cpu_pool.take_llc(&node_order) {
-                    layer.assigned_llcs.push(llc);
-                    to_alloc -= 1;
+                debug!(
+                    " alloc: layer={} node={} cur={} target_full={} to_alloc={} free={}",
+                    layer.name,
+                    n,
+                    cur_on_n,
+                    target_full_n,
+                    to_alloc,
+                    self.cpu_pool.free_llcs.get(&n).map_or(0, |v| v.len()),
+                );
 
-                    debug!(" layer={} alloc_llc={}", layer.name, llc);
-                } else {
-                    break; // no more free LLCs on preferred node(s)
+                while to_alloc > 0 {
+                    if let Some(llc) = self.cpu_pool.take_llc_from_node(n) {
+                        layer.assigned_llcs[n].push(llc);
+                        to_alloc -= 1;
+                        debug!(" layer={} alloc_llc={} on node={}", layer.name, llc, n);
+                    } else {
+                        break;
+                    }
                 }
             }
 
@@ -3170,13 +3164,13 @@ impl<'a> Scheduler<'a> {
                 " alloc: layer={} assigned_llcs={:?}",
                 layer.name, layer.assigned_llcs
             );
-
-            // Update for next iteration.
-            layer.target_llc_cpus = new_tlc;
         }
 
-        // Spillover overflowing cores into free LLCs. Bigger layers get to take
-        // a chunk before smaller layers. Walk per-node using spec.nodes ordering.
+        // Phase 3 — Spillover per-node: consume extra cores from free LLCs.
+        let cores_per_llc = self.topo.all_cores.len() / self.topo.all_llcs.len();
+        let cpus_per_core = self.topo.all_cores.first_key_value().unwrap().1.cpus.len();
+        let cpus_per_llc = cores_per_llc * cpus_per_core;
+
         for &(idx, _) in layer_targets.iter() {
             let mut core_order = vec![];
             let layer = &mut self.layers[idx];
@@ -3185,28 +3179,15 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            let tlc = layer.target_llc_cpus;
-            let mut extra = tlc.1;
-            let cores_per_llc = self.topo.all_cores.len() / self.topo.all_llcs.len();
-            let cpus_per_core = self.topo.all_cores.first_key_value().unwrap().1.cpus.len();
-            let cpus_per_llc = cores_per_llc * cpus_per_core;
+            let alloc = &layer_allocs[idx];
 
-            let node_order = layer_core_growth::node_order(
-                self.layer_specs[idx].nodes(),
-                &self.topo,
-                idx,
-                &all_layer_nodes,
-            );
+            for n in 0..nr_nodes {
+                let mut extra = Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).1;
 
-            // Consume from front of each node's list since we pop from the back.
-            'outer: for node_id in &node_order {
-                if extra == 0 {
-                    break;
-                }
-                if let Some(node_llcs) = self.cpu_pool.free_llcs.get_mut(node_id) {
+                if let Some(node_llcs) = self.cpu_pool.free_llcs.get_mut(&n) {
                     for entry in node_llcs.iter_mut() {
                         if extra == 0 {
-                            break 'outer;
+                            break;
                         }
                         let avail = cpus_per_llc - entry.1;
                         let mut used = extra.min(avail);
@@ -3242,6 +3223,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // Phase 4 — Build core_order: append cores from assigned LLCs.
         for &(idx, _) in layer_targets.iter() {
             let layer = &mut self.layers[idx];
 
@@ -3249,13 +3231,15 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
+            let all_assigned: HashSet<usize> =
+                layer.assigned_llcs.iter().flatten().copied().collect();
+
             for core in self.topo.all_cores.iter() {
                 let llc_id = core.1.llc_id;
-                if layer.assigned_llcs.contains(&llc_id) {
+                if all_assigned.contains(&llc_id) {
                     layer.core_order.push(core.1.id);
                 }
             }
-            // Update core_order for the layer, but reverse to keep the start stable.
             layer.core_order.reverse();
 
             debug!(
@@ -3264,12 +3248,11 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        // Apply CPU changes directly for StickyDynamic layers
-        // Do this in two phases: first free all CPUs, then allocate all CPUs
-        // This ensures freed CPUs are available for reallocation
+        // Phase 5 — Apply CPU changes for StickyDynamic layers.
+        // Two phases: first free all CPUs, then allocate all CPUs.
         let mut updated = false;
 
-        // Calculate target CPUs for all layers and free excess CPUs
+        // Free excess CPUs
         for &(idx, _) in layer_targets.iter() {
             let layer = &mut self.layers[idx];
 
@@ -3277,18 +3260,14 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            // Calculate new cpumask based on core_order (which includes both assigned LLCs and spillover cores)
             let mut new_cpus = Cpumask::new();
             for &core_id in &layer.core_order {
                 if let Some(core) = self.topo.all_cores.get(&core_id) {
                     new_cpus |= &core.span;
                 }
             }
-
-            // Intersect with allowed_cpus
             new_cpus &= &layer.allowed_cpus;
 
-            // Determine CPUs to free (old cpus not in new cpus)
             let cpus_to_free = layer.cpus.clone().and(&new_cpus.clone().not());
 
             if cpus_to_free.weight() > 0 {
@@ -3296,7 +3275,6 @@ impl<'a> Scheduler<'a> {
                     " apply: layer={} freeing CPUs: {}",
                     layer.name, cpus_to_free
                 );
-                // Update layer state and free
                 layer.cpus &= &cpus_to_free.not();
                 layer.nr_cpus -= cpus_to_free.weight();
                 for cpu in cpus_to_free.iter() {
@@ -3308,7 +3286,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Allocate needed CPUs to all layers
+        // Allocate needed CPUs
         for &(idx, _) in layer_targets.iter() {
             let layer = &mut self.layers[idx];
 
@@ -3316,7 +3294,6 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            // Recalculate target CPUs
             let mut new_cpus = Cpumask::new();
             for &core_id in &layer.core_order {
                 if let Some(core) = self.topo.all_cores.get(&core_id) {
@@ -3325,7 +3302,6 @@ impl<'a> Scheduler<'a> {
             }
             new_cpus &= &layer.allowed_cpus;
 
-            // Determine CPUs to allocate (new cpus not in old cpus, and whether they are available)
             let available_cpus = self.cpu_pool.available_cpus();
             let desired_to_alloc = new_cpus.clone().and(&layer.cpus.clone().not());
             let cpus_to_alloc = desired_to_alloc.clone().and(&available_cpus);
@@ -3344,7 +3320,6 @@ impl<'a> Scheduler<'a> {
                     " apply: layer={} allocating CPUs: {}",
                     layer.name, cpus_to_alloc
                 );
-                // Update layer state and free
                 layer.cpus |= &cpus_to_alloc;
                 layer.nr_cpus += cpus_to_alloc.weight();
                 for cpu in cpus_to_alloc.iter() {
@@ -3439,7 +3414,8 @@ impl<'a> Scheduler<'a> {
         let mut ascending: Vec<(usize, usize)> = cpu_targets.iter().copied().enumerate().collect();
         ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
-        let sticky_dynamic_updated = self.recompute_layer_core_order(&ascending)?;
+        let sticky_dynamic_updated =
+            self.recompute_layer_core_order(&ascending, &layer_allocs, au)?;
         updated |= sticky_dynamic_updated;
 
         // Update BPF cpumasks for StickyDynamic layers if they were updated
