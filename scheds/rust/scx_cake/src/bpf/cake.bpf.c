@@ -651,6 +651,46 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			e->last_value = sum;
 		}
 	}
+	/* Bench: scx_bpf_select_cpu_dfl — kernel idle CPU search.
+	 * This is the Gate 3 / Gate 1W step2 kfunc. Measures the full
+	 * cost of the kernel scanning for an idle CPU. */
+	{
+		bool _is_idle = false;
+		#pragma unroll
+		for (int i = 0; i < BENCH_ITERATIONS; i++) {
+			u64 _s = bpf_ktime_get_ns();
+			s32 _cpu = scx_bpf_select_cpu_dfl(p, r->cpu, 0, &_is_idle);
+			u64 _e = bpf_ktime_get_ns();
+			u64 _d = _e - _s;
+			struct kfunc_bench_entry *e = &r->entries[BENCH_SELECT_CPU_DFL];
+			if (_d < e->min_ns) e->min_ns = _d;
+			if (_d > e->max_ns) e->max_ns = _d;
+			e->total_ns += _d;
+			e->samples[i] = _d;
+			e->last_value = (u64)_cpu | ((u64)_is_idle << 32);
+		}
+	}
+
+	/* Bench: scx_bpf_kick_cpu — IPI preemption cost.
+	 * Kicks SELF with SCX_KICK_IDLE (no-op since we're already running,
+	 * but measures the kfunc trampoline + idle-exit path cost).
+	 * This is the Gate 1P preemption mechanism. */
+	{
+		u32 self_cpu = bpf_get_smp_processor_id();
+		#pragma unroll
+		for (int i = 0; i < BENCH_ITERATIONS; i++) {
+			u64 _s = bpf_ktime_get_ns();
+			scx_bpf_kick_cpu(self_cpu, SCX_KICK_IDLE);
+			u64 _e = bpf_ktime_get_ns();
+			u64 _d = _e - _s;
+			struct kfunc_bench_entry *e = &r->entries[BENCH_KICK_CPU];
+			if (_d < e->min_ns) e->min_ns = _d;
+			if (_d > e->max_ns) e->max_ns = _d;
+			e->total_ns += _d;
+			e->samples[i] = _d;
+			e->last_value = self_cpu;
+		}
+	}
 
 	r->bench_timestamp = bpf_ktime_get_ns();
 }
