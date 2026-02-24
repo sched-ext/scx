@@ -28,6 +28,75 @@ use tracing::info;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
+/// Divide `total` into parts proportional to `quotas`, returning exact
+/// integers that sum to `total`. Uses the largest-remainder method
+/// (Hamilton's method) for fair rounding.
+pub fn largest_remainder(total: usize, quotas: &[f64]) -> Vec<usize> {
+    if quotas.is_empty() {
+        return vec![];
+    }
+
+    let sum: f64 = quotas.iter().sum();
+    if sum == 0.0 {
+        // No demand — distribute nothing.
+        return vec![0; quotas.len()];
+    }
+
+    // Scale quotas so they sum to `total`.
+    let scaled: Vec<f64> = quotas.iter().map(|q| q / sum * total as f64).collect();
+
+    // Floor each scaled value.
+    let floors: Vec<usize> = scaled.iter().map(|s| *s as usize).collect();
+    let floor_sum: usize = floors.iter().sum();
+    let mut remainder = total.saturating_sub(floor_sum);
+
+    // Sort indices by descending fractional part.
+    let mut indices: Vec<usize> = (0..quotas.len()).collect();
+    indices.sort_by(|&a, &b| {
+        let frac_a = scaled[a] - floors[a] as f64;
+        let frac_b = scaled[b] - floors[b] as f64;
+        frac_b
+            .partial_cmp(&frac_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut result = floors;
+    for &i in &indices {
+        if remainder == 0 {
+            break;
+        }
+        result[i] += 1;
+        remainder -= 1;
+    }
+
+    result
+}
+
+/// Round CPU targets up to alloc-unit multiples, capped at total_cpus.
+pub fn round_targets_to_alloc_units(
+    targets: &[(usize, usize)],
+    alloc_unit: usize,
+    total_cpus: usize,
+) -> Vec<(usize, usize)> {
+    if alloc_unit <= 1 {
+        return targets.to_vec();
+    }
+
+    targets
+        .iter()
+        .map(|&(target, min)| {
+            // Round target up to next alloc_unit multiple.
+            let aligned = (target + alloc_unit - 1) / alloc_unit * alloc_unit;
+            // Cap at total_cpus.
+            let aligned = aligned.min(total_cpus);
+            // Round min up similarly.
+            let min_aligned = (min + alloc_unit - 1) / alloc_unit * alloc_unit;
+            let min_aligned = min_aligned.min(total_cpus);
+            (aligned, min_aligned)
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 /// `CpuPool` represents the CPU core and logical CPU topology within the system.
 /// It manages the mapping and availability of physical and logical cores, including
@@ -256,6 +325,19 @@ impl CpuPool {
             .core_seq
             .get(&(core.node_id, core.llc_id, core.id))
             .expect("unrecognised core")
+    }
+
+    /// Allocation unit size: cpus_per_core when `!allow_partial`, 1 otherwise.
+    /// Budget targets should be multiples of this to avoid double-rounding.
+    pub fn alloc_unit(&self) -> usize {
+        if self.allow_partial {
+            1
+        } else {
+            self.topo
+                .all_cores
+                .first_key_value()
+                .map_or(1, |(_, c)| c.cpus.len())
+        }
     }
 
     /// Pop a free LLC from the given node. Returns the LLC ID if available.
@@ -2839,5 +2921,119 @@ mod tests {
             "unpinned can use all nodes"
         );
         assert_llc_conservation(&pool, &layers, 8);
+    }
+
+    // --- largest_remainder ---
+
+    #[test]
+    fn test_lr_exact_sum() {
+        let result = largest_remainder(10, &[3.0, 3.0, 4.0]);
+        assert_eq!(result.iter().sum::<usize>(), 10);
+    }
+
+    #[test]
+    fn test_lr_proportional() {
+        let result = largest_remainder(100, &[1.0, 2.0, 3.0]);
+        // ~17, ~33, ~50 — sum must be exactly 100.
+        assert_eq!(result.iter().sum::<usize>(), 100);
+        assert!(result[0] >= 16 && result[0] <= 17);
+        assert!(result[1] >= 33 && result[1] <= 34);
+        assert!(result[2] >= 49 && result[2] <= 50);
+    }
+
+    #[test]
+    fn test_lr_equal_quotas() {
+        let result = largest_remainder(10, &[1.0, 1.0, 1.0]);
+        assert_eq!(result.iter().sum::<usize>(), 10);
+        // 10/3 = 3.333... → two get 3, one gets 4.
+        assert!(result.iter().all(|&v| v == 3 || v == 4));
+        assert_eq!(result.iter().filter(|&&v| v == 4).count(), 1);
+    }
+
+    #[test]
+    fn test_lr_zero_quotas() {
+        let result = largest_remainder(10, &[0.0, 0.0, 0.0]);
+        assert_eq!(result, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_lr_single_entry() {
+        let result = largest_remainder(42, &[7.0]);
+        assert_eq!(result, vec![42]);
+    }
+
+    #[test]
+    fn test_lr_large_remainder() {
+        // 7/3 = 2.333... → floors = [2,2,2] = 6, remainder = 1.
+        let result = largest_remainder(7, &[1.0, 1.0, 1.0]);
+        assert_eq!(result.iter().sum::<usize>(), 7);
+        assert_eq!(result.iter().filter(|&&v| v == 3).count(), 1);
+        assert_eq!(result.iter().filter(|&&v| v == 2).count(), 2);
+    }
+
+    #[test]
+    fn test_lr_empty() {
+        let result = largest_remainder(10, &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_lr_one_zero_one_nonzero() {
+        let result = largest_remainder(10, &[0.0, 5.0]);
+        assert_eq!(result, vec![0, 10]);
+    }
+
+    #[test]
+    fn test_lr_total_zero() {
+        let result = largest_remainder(0, &[3.0, 7.0]);
+        assert_eq!(result, vec![0, 0]);
+    }
+
+    // --- round_targets_to_alloc_units ---
+
+    #[test]
+    fn test_rta_unit_1() {
+        let targets = vec![(10, 2), (15, 5)];
+        let result = round_targets_to_alloc_units(&targets, 1, 100);
+        assert_eq!(result, targets);
+    }
+
+    #[test]
+    fn test_rta_round_up() {
+        // alloc_unit=2: 3→4, 5→6
+        let targets = vec![(3, 1), (5, 0)];
+        let result = round_targets_to_alloc_units(&targets, 2, 100);
+        assert_eq!(result, vec![(4, 2), (6, 0)]);
+    }
+
+    #[test]
+    fn test_rta_already_aligned() {
+        let targets = vec![(4, 2), (6, 0)];
+        let result = round_targets_to_alloc_units(&targets, 2, 100);
+        assert_eq!(result, targets);
+    }
+
+    #[test]
+    fn test_rta_caps_at_total() {
+        let targets = vec![(99, 0)];
+        let result = round_targets_to_alloc_units(&targets, 2, 16);
+        assert_eq!(result, vec![(16, 0)]);
+    }
+
+    // --- alloc_unit ---
+
+    #[test]
+    fn test_alloc_unit_partial() {
+        let (topo, _) = topo_1n();
+        let pool = CpuPool::new(topo, true).unwrap();
+        assert_eq!(pool.alloc_unit(), 1);
+    }
+
+    #[test]
+    fn test_alloc_unit_full_core() {
+        let (topo, _) = topo_1n();
+        let pool = CpuPool::new(topo, false).unwrap();
+        // 2 HTs per core.
+        assert_eq!(pool.alloc_unit(), 2);
     }
 }

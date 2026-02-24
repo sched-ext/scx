@@ -2915,24 +2915,33 @@ impl<'a> Scheduler<'a> {
 
     /// Given (target, min) pair for each layer which was determined
     /// assuming infinite number of CPUs, distribute the actual CPUs
-    /// according to their weights.
+    /// according to their weights. Works in alloc units internally
+    /// (cores when !allow_partial, CPUs otherwise) to avoid
+    /// double-rounding, then converts back to CPU counts.
     fn weighted_target_nr_cpus(&self, targets: &[(usize, usize)]) -> Vec<usize> {
-        let mut nr_left = self.cpu_pool.topo.all_cpus.len();
+        let au = self.cpu_pool.alloc_unit();
+        let total_cpus = self.cpu_pool.topo.all_cpus.len();
+
+        // Align targets to alloc-unit multiples.
+        let aligned = round_targets_to_alloc_units(targets, au, total_cpus);
+
+        // Convert to alloc units.
+        let mut nr_left = total_cpus / au;
         let weights: Vec<usize> = self
             .layers
             .iter()
             .map(|layer| layer.kind.common().weight as usize)
             .collect();
-        let mut cands: BTreeMap<usize, (usize, usize, usize)> = targets
+        let mut cands: BTreeMap<usize, (usize, usize, usize)> = aligned
             .iter()
             .zip(&weights)
             .enumerate()
-            .map(|(i, ((target, min), weight))| (i, (*target, *min, *weight)))
+            .map(|(i, ((target, min), weight))| (i, (*target / au, *min / au, *weight)))
             .collect();
         let mut weight_sum: usize = weights.iter().sum();
         let mut weighted: Vec<usize> = vec![0; self.layers.len()];
 
-        trace!("cands: {:?}", &cands);
+        trace!("cands (alloc units): {:?}", &cands);
 
         // First, accept all layers that are <= min.
         cands.retain(|&i, &mut (target, min, weight)| {
@@ -2978,17 +2987,21 @@ impl<'a> Scheduler<'a> {
         trace!("cands after accepting under allotted: {:?}", &cands);
 
         // The remaining candidates are in contention with each other,
-        // distribute according to the shares.
-        let nr_to_share = nr_left;
-        for (i, (_target, _min, weight)) in cands.into_iter() {
-            let share = calc_share(nr_to_share, weight, weight_sum).min(nr_left);
-            weighted[i] = share;
-            nr_left -= share;
+        // distribute according to the shares using largest-remainder
+        // for exact integer distribution with no stranded units.
+        if !cands.is_empty() {
+            let quotas: Vec<f64> = cands.values().map(|(_, _, w)| *w as f64).collect();
+            let indices: Vec<usize> = cands.keys().copied().collect();
+            let shares = largest_remainder(nr_left, &quotas);
+            for (pos, &i) in indices.iter().enumerate() {
+                weighted[i] = shares[pos];
+            }
         }
 
-        trace!("weighted: {:?}", &weighted);
+        trace!("weighted (alloc units): {:?}", &weighted);
 
-        weighted
+        // Convert back to CPUs.
+        weighted.iter().map(|&u| u * au).collect()
     }
 
     // Figure out a tuple (LLCs, extra_cpus) in terms of the target CPUs
