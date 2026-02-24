@@ -3318,8 +3318,15 @@ impl<'a> Scheduler<'a> {
         let prev_node_cpus: Vec<Vec<usize>> =
             self.layers.iter().map(|l| l.nr_node_cpus.clone()).collect();
 
-        let sticky_dynamic_updated =
-            self.recompute_layer_core_order(&ascending, &layer_allocs, au)?;
+        // Per-node SD allocation requires multiple LLCs. On flat topologies
+        // (single LLC, e.g. VMs with topology disabled), SD layers fall through
+        // to the non-SD grow/shrink loops below.
+        let use_sd_alloc = self.topo.all_llcs.len() > 1;
+        let sticky_dynamic_updated = if use_sd_alloc {
+            self.recompute_layer_core_order(&ascending, &layer_allocs, au)?
+        } else {
+            false
+        };
         updated |= sticky_dynamic_updated;
 
         // Update BPF cpumasks for StickyDynamic layers if they were updated
@@ -3341,8 +3348,8 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            // Skip StickyDynamic layers as they are managed in recompute_layer_core_order
-            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
+            // Skip StickyDynamic layers when per-node SD allocation is active.
+            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic && use_sd_alloc {
                 continue;
             }
 
@@ -3402,8 +3409,8 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            // Skip StickyDynamic layers as they are managed in recompute_layer_core_order
-            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
+            // Skip StickyDynamic layers when per-node SD allocation is active.
+            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic && use_sd_alloc {
                 continue;
             }
 
@@ -3506,7 +3513,13 @@ impl<'a> Scheduler<'a> {
                     .join(" ");
                 debug!(
                     "ALLOC {} algo={:?} {} total:{}→{} target:[{}] mask={:x}",
-                    layer.name, layer.growth_algo, per_node, prev_total, cur_total, target, layer.cpus,
+                    layer.name,
+                    layer.growth_algo,
+                    per_node,
+                    prev_total,
+                    cur_total,
+                    target,
+                    layer.cpus,
                 );
             }
             debug!(
