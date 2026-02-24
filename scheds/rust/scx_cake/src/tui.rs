@@ -101,6 +101,7 @@ pub struct TuiApp {
     pub task_rows: HashMap<u32, TaskTelemetryRow>,
     pub sorted_pids: Vec<u32>,
     pub table_state: TableState,
+    pub bench_table_state: TableState,
     pub active_tab: TuiTab,
     pub sort_column: SortColumn,
     pub selected_pid: Option<u32>,
@@ -114,7 +115,7 @@ pub struct TuiApp {
     pub prev_task_rows: HashMap<u32, TaskTelemetryRow>, // Previous tick for delta mode
     pub _prev_stats: Option<cake_stats>, // Previous global stats for rate calc
     // BenchLab cached results
-    pub bench_entries: [(u64, u64, u64, u64); 24], // (min_ns, max_ns, total_ns, last_value)
+    pub bench_entries: [(u64, u64, u64, u64); 26], // (min_ns, max_ns, total_ns, last_value)
     pub bench_samples: Vec<Vec<u64>>, // Per-entry accumulated raw samples for percentiles
     pub bench_cpu: u32,
     pub bench_iterations: u32,
@@ -260,6 +261,7 @@ impl TuiApp {
             task_rows: HashMap::new(),
             sorted_pids: Vec::new(),
             table_state: TableState::default(),
+            bench_table_state: TableState::default(),
             active_tab: TuiTab::Dashboard,
             sort_column: SortColumn::RunDuration,
             selected_pid: None,
@@ -272,8 +274,8 @@ impl TuiApp {
             bpf_task_count: 0,
             prev_task_rows: HashMap::new(),
             _prev_stats: None,
-            bench_entries: [(0, 0, 0, 0); 24],
-            bench_samples: vec![Vec::new(); 24],
+            bench_entries: [(0, 0, 0, 0); 26],
+            bench_samples: vec![Vec::new(); 26],
             bench_cpu: 0,
             bench_iterations: 0,
             bench_timestamp: 0,
@@ -362,6 +364,36 @@ impl TuiApp {
             None => 0,
         };
         self.table_state.select(Some(i));
+    }
+
+    pub fn scroll_bench_down(&mut self) {
+        let max = 32; // bench rows + category headers
+        let i = match self.bench_table_state.selected() {
+            Some(i) => {
+                if i >= max {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.bench_table_state.select(Some(i));
+    }
+
+    pub fn scroll_bench_up(&mut self) {
+        let max = 32;
+        let i = match self.bench_table_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    max
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.bench_table_state.select(Some(i));
     }
 
     pub fn toggle_filter(&mut self) {
@@ -706,6 +738,8 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         (19, "idle_probe(remote) MESI", "Idle Probes"),
         (20, "smtmask read-only check", "Idle Probes"),
         (23, "Arena stride (TLB/hugepage)", "TLB/Memory"),
+        (24, "select_cpu_dfl() kernel", "Kfuncs"),
+        (25, "kick_cpu(IDLE) IPI", "Kfuncs"),
     ];
 
     let percentile = |samples: &[u64], pct: f64| -> u64 {
@@ -868,6 +902,8 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             "Disruptor CL0 full read",
             "get_task_ctx+arena CL0",
             "Arena stride (TLB/hugepage)",
+            "select_cpu_dfl() kernel",
+            "kick_cpu(IDLE) IPI",
         ];
         output.push_str(&format!(
             "\n=== BenchLab ({} runs, {} iterations/run, CPU {}) ===\n",
@@ -1621,7 +1657,7 @@ fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
     frame.render_widget(data_table, layout[2]);
 }
 
-fn draw_bench_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
+fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     // (index, name, category)
     let bench_items: &[(usize, &str, &str)] = &[
         (0, "bpf_ktime_get_ns()", "Kfuncs"),
@@ -1648,6 +1684,8 @@ fn draw_bench_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
         (19, "idle_probe(remote) MESI", "Idle Probes"),
         (20, "smtmask read-only check", "Idle Probes"),
         (23, "Arena stride (TLB/hugepage)", "TLB/Memory"),
+        (24, "select_cpu_dfl() kernel", "Kfuncs"),
+        (25, "kick_cpu(IDLE) IPI", "Kfuncs"),
     ];
 
     let percentile = |samples: &[u64], pct: f64| -> u64 {
@@ -1800,8 +1838,10 @@ fn draw_bench_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             )),
-    );
-    frame.render_widget(table, area);
+    )
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+    .highlight_symbol(">> ");
+    frame.render_stateful_widget(table, area, &mut app.bench_table_state);
 }
 
 fn draw_inspector_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
@@ -2014,7 +2054,7 @@ pub fn run_tui(
                 app.bench_cpu = br.cpu;
                 app.bench_run_count += 1;
                 app.bench_timestamp = br.bench_timestamp;
-                for i in 0..24 {
+                for i in 0..26 {
                     let new_min = br.entries[i].min_ns;
                     let new_max = br.entries[i].max_ns;
                     let new_total = br.entries[i].total_ns;
@@ -2077,12 +2117,14 @@ pub fn run_tui(
                         KeyCode::BackTab | KeyCode::Left => {
                             app.previous_tab();
                         }
-                        KeyCode::Down | KeyCode::PageDown => {
-                            app.scroll_table_down();
-                        }
-                        KeyCode::Up | KeyCode::PageUp => {
-                            app.scroll_table_up();
-                        }
+                        KeyCode::Down | KeyCode::PageDown => match app.active_tab {
+                            TuiTab::BenchLab => app.scroll_bench_down(),
+                            _ => app.scroll_table_down(),
+                        },
+                        KeyCode::Up | KeyCode::PageUp => match app.active_tab {
+                            TuiTab::BenchLab => app.scroll_bench_up(),
+                            _ => app.scroll_table_up(),
+                        },
                         KeyCode::Char('s') | KeyCode::Char('S') => {
                             app.cycle_sort();
                         }
