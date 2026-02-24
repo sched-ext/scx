@@ -3444,12 +3444,6 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 	cpuc->usage_at_idle = cpuc->usage;
 }
 
-void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
-		    struct scx_cpu_release_args *args)
-{
-	scx_bpf_reenqueue_local();
-}
-
 s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
@@ -4215,7 +4209,6 @@ SCX_OPS_DEFINE(layered,
 	       .set_weight		= (void *)layered_set_weight,
 	       .set_cpumask		= (void *)layered_set_cpumask,
 	       .update_idle		= (void *)layered_update_idle,
-	       .cpu_release		= (void *)layered_cpu_release,
 	       .init_task		= (void *)layered_init_task,
 	       .exit_task		= (void *)layered_exit_task,
 	       .disable			= (void *)layered_disable,
