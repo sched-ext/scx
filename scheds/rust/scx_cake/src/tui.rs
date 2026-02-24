@@ -132,7 +132,7 @@ pub struct TaskTelemetryRow {
     pub avg_runtime_us: u32,
     pub deficit_us: u32,
     pub wait_duration_ns: u64,
-    pub gate_hit_pcts: [f64; 6], // G1, G2, G1W, G3, G4, GTUN
+    pub gate_hit_pcts: [f64; 7], // G1, G2, G1W, G3, G1P, G1C, GTUN
     pub select_cpu_ns: u32,
     pub enqueue_ns: u32,
     pub core_placement: u16,
@@ -167,6 +167,7 @@ pub struct TaskTelemetryRow {
     // Voluntary/involuntary context switch tracking (GPU detection)
     pub nvcsw_delta: u32,
     pub nivcsw_delta: u32,
+    pub ewma_recomp_count: u16,
 }
 
 impl Default for TaskTelemetryRow {
@@ -178,7 +179,7 @@ impl Default for TaskTelemetryRow {
             avg_runtime_us: 0,
             deficit_us: 0,
             wait_duration_ns: 0,
-            gate_hit_pcts: [0.0; 6],
+            gate_hit_pcts: [0.0; 7],
             select_cpu_ns: 0,
             enqueue_ns: 0,
             core_placement: 0,
@@ -208,6 +209,7 @@ impl Default for TaskTelemetryRow {
             wakeup_source_pid: 0,
             nvcsw_delta: 0,
             nivcsw_delta: 0,
+            ewma_recomp_count: 0,
         }
     }
 }
@@ -1041,13 +1043,14 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.wait_hist[0], row.wait_hist[1], row.wait_hist[2], row.wait_hist[3],
             ));
             output.push_str(&format!(
-                "{}         G2:{:.0}% G1W:{:.0}% G3:{:.0}% G1P:{:.0}% G5:{:.0}%  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}\n",
+                "{}         G2:{:.0}% G1W:{:.0}% G3:{:.0}% G1P:{:.0}% G1C:{:.0}% G5:{:.0}%  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}  CONF:{}/{}\n",
                 indent,
                 row.gate_hit_pcts[1],
                 row.gate_hit_pcts[2],
                 row.gate_hit_pcts[3],
                 row.gate_hit_pcts[4],
                 row.gate_hit_pcts[5],
+                row.gate_hit_pcts[6],
                 row.direct_dispatch_count,
                 row.deficit_us,
                 row.yield_count,
@@ -1063,6 +1066,8 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.wakeup_source_pid,
                 row.nvcsw_delta,
                 row.nivcsw_delta,
+                row.ewma_recomp_count,
+                row.total_runs,
             ));
         }
     }
@@ -2328,8 +2333,9 @@ pub fn run_tui(
                             let g1w = ctx.telemetry.gate_1w_hits;
                             let g3 = ctx.telemetry.gate_3_hits;
                             let g1p = ctx.telemetry.gate_1p_hits;
+                            let g1c = ctx.telemetry.gate_1c_hits;
                             let g5 = ctx.telemetry.gate_tun_hits;
-                            let total_sel = g1 + g2 + g1w + g3 + g1p + g5;
+                            let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g5;
 
                             let gate_hit_pcts = if total_sel > 0 {
                                 [
@@ -2338,10 +2344,11 @@ pub fn run_tui(
                                     (g1w as f64 / total_sel as f64) * 100.0,
                                     (g3 as f64 / total_sel as f64) * 100.0,
                                     (g1p as f64 / total_sel as f64) * 100.0,
+                                    (g1c as f64 / total_sel as f64) * 100.0,
                                     (g5 as f64 / total_sel as f64) * 100.0,
                                 ]
                             } else {
-                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                             };
 
                             let total_runs = ctx.telemetry.total_runs;
@@ -2394,6 +2401,7 @@ pub fn run_tui(
                                         wakeup_source_pid: ctx.telemetry.wakeup_source_pid,
                                         nvcsw_delta: ctx.telemetry.nvcsw_delta,
                                         nivcsw_delta: ctx.telemetry.nivcsw_delta,
+                                        ewma_recomp_count: ctx.telemetry.ewma_recomp_count,
                                     });
 
                             // Update dynamic row elements
@@ -2430,6 +2438,7 @@ pub fn run_tui(
                             row.llc_id = ctx.telemetry.llc_id;
                             row.same_cpu_streak = ctx.telemetry.same_cpu_streak;
                             row.wakeup_source_pid = ctx.telemetry.wakeup_source_pid;
+                            row.ewma_recomp_count = ctx.telemetry.ewma_recomp_count;
                             // Status set below after sysinfo cross-reference
                         } // end loop iteration
                     } // end if bpf_fd >= 0
