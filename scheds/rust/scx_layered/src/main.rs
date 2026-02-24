@@ -47,6 +47,7 @@ use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
 use regex::Regex;
 use scx_bpf_compat;
+use scx_layered::alloc::{unified_alloc, LayerDemand};
 use scx_layered::*;
 use scx_raw_pmu::PMUManager;
 use scx_stats::prelude::*;
@@ -1238,6 +1239,9 @@ struct Layer {
     nr_node_cpus: Vec<usize>,
     cpus: Cpumask,
     allowed_cpus: Cpumask,
+
+    /// Per-node count of CPUs allocated for pinned demand.
+    nr_pinned_cpus: Vec<usize>,
 }
 
 fn get_kallsyms_addr(sym_name: &str) -> Result<u64> {
@@ -1378,6 +1382,8 @@ impl Layer {
             nr_node_cpus: vec![0; topo.nodes.len()],
             cpus: Cpumask::new(),
             allowed_cpus,
+
+            nr_pinned_cpus: vec![0; topo.nodes.len()],
         })
     }
 
@@ -2808,6 +2814,68 @@ impl<'a> Scheduler<'a> {
         return (membw_limit / last_membw_percpu) as usize;
     }
 
+    /// Decompose per-layer CPU targets into per-node pinned demand and
+    /// unpinned demand for unified_alloc(). Uses layer_node_pinned_utils
+    /// to split each layer's target. All outputs are in alloc units.
+    fn calc_raw_demands(&self, targets: &[(usize, usize)]) -> Vec<LayerDemand> {
+        let au = self.cpu_pool.alloc_unit();
+        let pinned_utils = &self.sched_stats.layer_node_pinned_utils;
+        let nr_nodes = self.topo.nodes.len();
+
+        targets
+            .iter()
+            .enumerate()
+            .map(|(idx, &(target, _min))| {
+                let layer = &self.layers[idx];
+                let weight = layer.kind.common().weight as usize;
+
+                // Open layers don't participate in allocation.
+                if matches!(layer.kind, LayerKind::Open { .. }) {
+                    return LayerDemand {
+                        raw_pinned: vec![0; nr_nodes],
+                        raw_unpinned: 0,
+                        weight,
+                    };
+                }
+
+                let util_high = match &layer.kind {
+                    LayerKind::Confined { util_range, .. }
+                    | LayerKind::Grouped { util_range, .. } => util_range.1,
+                    _ => 1.0,
+                };
+
+                // Convert per-node pinned utilization to CPU demand.
+                let mut raw_pinned = vec![0usize; nr_nodes];
+                for n in 0..nr_nodes {
+                    let pu = pinned_utils[idx][n];
+                    if pu < 0.01 {
+                        continue;
+                    }
+                    // Check this layer has allowed_cpus on this node.
+                    let node_span = &self.topo.nodes[&n].span;
+                    if layer.allowed_cpus.and(node_span).is_empty() {
+                        continue;
+                    }
+                    let cpus = (pu / util_high).ceil() as usize;
+                    // Round up to alloc units.
+                    let units = (cpus + au - 1) / au;
+                    raw_pinned[n] = units;
+                }
+
+                // Unpinned = remainder of the target.
+                let target_units = target.div_ceil(au);
+                let pinned_units: usize = raw_pinned.iter().sum();
+                let raw_unpinned = target_units.saturating_sub(pinned_units);
+
+                LayerDemand {
+                    raw_pinned,
+                    raw_unpinned,
+                    weight,
+                }
+            })
+            .collect()
+    }
+
     /// Calculate how many CPUs each layer would like to have if there were
     /// no competition. The CPU range is determined by applying the inverse
     /// of util_range and then capping by cpus_range. If the current
@@ -3315,8 +3383,22 @@ impl<'a> Scheduler<'a> {
         let layer_is_open = |layer: &Layer| matches!(layer.kind, LayerKind::Open { .. });
 
         let mut updated = false;
-        let targets = self.calc_target_nr_cpus();
-        let targets = self.weighted_target_nr_cpus(&targets);
+        let raw_targets = self.calc_target_nr_cpus();
+        let au = self.cpu_pool.alloc_unit();
+        let total_cpus = self.cpu_pool.topo.all_cpus.len();
+
+        // Build demands for unified_alloc and compute per-node allocations.
+        let demands = self.calc_raw_demands(&raw_targets);
+        let node_caps: Vec<usize> = self
+            .topo
+            .nodes
+            .values()
+            .map(|n| n.span.weight() / au)
+            .collect();
+        let layer_allocs = unified_alloc(total_cpus / au, &node_caps, &demands, &[], &[]);
+
+        // Convert LayerAlloc totals back to CPU targets.
+        let targets: Vec<usize> = layer_allocs.iter().map(|a| a.total() * au).collect();
 
         // Snapshot per-layer CPU counts for ALLOC debug logging.
         let prev_nr_cpus: Vec<usize> = self.layers.iter().map(|l| l.nr_cpus).collect();
