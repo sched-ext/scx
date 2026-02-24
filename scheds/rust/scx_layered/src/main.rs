@@ -3387,8 +3387,26 @@ impl<'a> Scheduler<'a> {
         let au = self.cpu_pool.alloc_unit();
         let total_cpus = self.cpu_pool.topo.all_cpus.len();
 
+        // Dampen shrink: only drop halfway per cycle to avoid unnecessary
+        // changes. There's some dampening built into util metrics but slow
+        // down freeing further. This is solely based on intuition. Drop or
+        // update according to real-world behavior.
+        let targets: Vec<(usize, usize)> = raw_targets
+            .iter()
+            .enumerate()
+            .map(|(idx, &(target, min))| {
+                let cur = self.layers[idx].nr_cpus;
+                if target < cur {
+                    let dampened = cur - (cur - target).div_ceil(2);
+                    (dampened.max(min), min)
+                } else {
+                    (target, min)
+                }
+            })
+            .collect();
+
         // Build demands for unified_alloc and compute per-node allocations.
-        let demands = self.calc_raw_demands(&raw_targets);
+        let demands = self.calc_raw_demands(&targets);
         let node_caps: Vec<usize> = self
             .topo
             .nodes
@@ -3397,13 +3415,14 @@ impl<'a> Scheduler<'a> {
             .collect();
         let layer_allocs = unified_alloc(total_cpus / au, &node_caps, &demands, &[], &[]);
 
-        // Convert LayerAlloc totals back to CPU targets.
-        let targets: Vec<usize> = layer_allocs.iter().map(|a| a.total() * au).collect();
+        // Convert allocations back to CPU counts. Shrink dampening is
+        // already applied to the targets fed into unified_alloc above.
+        let cpu_targets: Vec<usize> = layer_allocs.iter().map(|a| a.total() * au).collect();
 
         // Snapshot per-layer CPU counts for ALLOC debug logging.
         let prev_nr_cpus: Vec<usize> = self.layers.iter().map(|l| l.nr_cpus).collect();
 
-        let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
+        let mut ascending: Vec<(usize, usize)> = cpu_targets.iter().copied().enumerate().collect();
         ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
         let sticky_dynamic_updated = self.recompute_layer_core_order(&ascending)?;
@@ -3426,7 +3445,7 @@ impl<'a> Scheduler<'a> {
         let mut force_free = self
             .layers
             .iter()
-            .zip(targets.iter())
+            .zip(cpu_targets.iter())
             .any(|(layer, &target)| layer.nr_cpus < target);
 
         // Shrink all layers first so that CPUs are available for
@@ -3448,13 +3467,6 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
             let mut nr_to_free = nr_cur - target;
-
-            // There's some dampening built into util metrics but slow down
-            // freeing further to avoid unnecessary changes. This is solely
-            // based on intution. Drop or update according to real-world
-            // behavior.
-            let nr_to_break_at = nr_to_free / 2;
-
             let mut freed = false;
 
             while nr_to_free > 0 {
@@ -3472,10 +3484,6 @@ impl<'a> Scheduler<'a> {
 
                 nr_to_free = nr_to_free.saturating_sub(nr_freed);
                 freed = true;
-
-                if nr_to_free <= nr_to_break_at {
-                    break;
-                }
             }
 
             if freed {
