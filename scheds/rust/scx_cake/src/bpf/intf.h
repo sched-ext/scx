@@ -71,7 +71,9 @@ enum kfunc_bench_id {
 	BENCH_DISRUPTOR_READ     = 21, /* Full CL0 Disruptor handoff read (cake_stopping sim) */
 	BENCH_TCTX_COLD_SIM      = 22, /* get_task_ctx + arena CL0 read (cake_running sim) */
 	BENCH_ARENA_STRIDE       = 23, /* Stride across arena per_cpu array to test TLB/hugepage */
-	BENCH_MAX_ENTRIES        = 24,
+	BENCH_SELECT_CPU_DFL     = 24, /* scx_bpf_select_cpu_dfl() — kernel idle CPU search */
+	BENCH_KICK_CPU           = 25, /* scx_bpf_kick_cpu() — IPI preemption cost */
+	BENCH_MAX_ENTRIES        = 26,
 };
 
 struct kfunc_bench_entry {
