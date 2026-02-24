@@ -16,51 +16,67 @@ use crate::LayerSpec;
 
 #[derive(Clone, Debug, PartialEq, Parser, Serialize, Deserialize)]
 #[clap(rename_all = "snake_case")]
+/// Growth algorithms determine the order in which CPUs are allocated to a
+/// layer as it grows.
+///
+/// All algorithms are NUMA-aware. Each produces a per-node core ordering
+/// via `node_order()`, which determines the preferred NUMA node (based on
+/// `nodes` config and pinned task distribution) and the order of remaining
+/// nodes. Within each node, the algorithm determines core selection order.
+/// Cross-node budget distribution is handled by `unified_alloc`.
+///
+/// Algorithms fall into two categories:
+///
+/// **Locality algorithms** prefer the layer's home NUMA node(s) and only
+/// spill to remote nodes when local capacity is exhausted. Most algorithms
+/// are locality algorithms.
+///
+/// **NUMA-spread algorithms** (marked `[spread]` below) enforce equal CPU
+/// counts across all NUMA nodes via `unified_alloc`, capped at the least
+/// available node capacity. Use these when the workload should be balanced
+/// across nodes rather than concentrated on the preferred node. Their
+/// within-node core ordering degenerates to the non-spread equivalent
+/// (e.g. NodeSpread uses Linear ordering within each node) since the
+/// even-split budget handles cross-node distribution.
 pub enum LayerGrowthAlgo {
-    /// Sticky attempts to place layers evenly spaced across cores.
+    /// Evenly space layers across cores within each node.
     Sticky,
-    /// Linear starts with the lowest number CPU and grows towards the total
-    /// number of CPUs.
+    /// Lowest-numbered CPUs first within each node.
     Linear,
-    /// Reverse order of [`LayerGrowthAlgo::Linear`]. Starts with the highest number CPU and grows towards the total
-    /// number of CPUs.
+    /// Highest-numbered CPUs first within each node.
     Reverse,
-    /// Random core selection order.
+    /// Random core selection within each node.
     Random,
-    /// Topo uses the order of the nodes/llcs in the layer config to determine
-    /// the order of CPUs to select when growing a layer. It starts from the
-    /// llcs configuration and then the NUMA configuration for any CPUs not
-    /// specified.
+    /// Follow the `llcs`/`nodes` layer config to determine core order.
+    /// Preferred LLCs first, then remaining LLCs in node order.
     Topo,
-    /// Round Robin attempts to grow to a core in an unpopulated NUMA node else
-    /// an unpopulated LLC. It keeps the load balanced between NUMA and LLCs as
-    /// it continues to grow.
+    /// `[spread]` Interleave cores across LLCs within each node, with
+    /// equal per-node CPU budget.
     RoundRobin,
-    /// BigLittle attempts to first grow across all big cores and then allocates
-    /// onto little cores after all big cores are allocated.
+    /// Big cores first, then little cores within each node.
     BigLittle,
-    /// LittleBig attempts to first grow across all little cores and then
-    /// allocates onto big cores after all little cores are allocated.
+    /// Little cores first, then big cores within each node.
     LittleBig,
-    /// Grab CPUs from NUMA nodes, iteratively, in linear order.
+    /// `[spread]` Linear core order within each node, equal per-node budget.
     NodeSpread,
-    /// Grab CPUs from NUMA nodes, iteratively, in reverse order.
+    /// `[spread]` Reverse core order within each node, equal per-node budget.
     NodeSpreadReverse,
-    /// Grab CPUs from NUMA nodes, iteratively, in random order.
+    /// `[spread]` Random core order within each node, equal per-node budget.
     NodeSpreadRandom,
-    /// Grab CPUs from CpuSets, iteratively, in linear order.
+    /// Interleave cores across CpuSets (CPU affinity groups) in linear order
+    /// within each node. Balances across hardware domains (e.g. cache groups),
+    /// not NUMA nodes.
     CpuSetSpread,
-    /// Grab CPUs from CpuSets, iteratively, in reverse order.
+    /// Interleave cores across CpuSets in reverse order within each node.
     CpuSetSpreadReverse,
-    /// Grab CPUs from CpuSets, iteratively, in random order.
+    /// Interleave cores across CpuSets in random order within each node.
     CpuSetSpreadRandom,
-    /// RandomTopo is sticky to NUMA nodes/LLCs but randomises the order in which
-    /// it visits each. The layer will select a random NUMA node, then a random LLC
-    /// within it, then randomly iterate the cores in that LLC.
+    /// Pick a random NUMA node, then a random LLC within it, then randomly
+    /// iterate cores in that LLC.
     RandomTopo,
-    /// StickyDynamic attempts to assign cores to layers according to their
-    /// size, while remaining sticky to LLCs, and tries to place layers across
-    /// LLC boundary minimizing overlap.
+    /// Assign LLCs to layers proportionally by size, remaining sticky to
+    /// LLCs to preserve cache locality. Per-node LLC ordering ensures
+    /// sticky assignments respect NUMA node boundaries.
     StickyDynamic,
 }
 
