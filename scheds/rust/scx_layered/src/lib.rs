@@ -409,6 +409,15 @@ mod tests {
         topo.all_cores.keys().copied().collect()
     }
 
+    fn core_order_per_node(topo: &Topology) -> Vec<Vec<usize>> {
+        let nr_nodes = topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for (&core_id, core) in &topo.all_cores {
+            result[core.node_id].push(core_id);
+        }
+        result
+    }
+
     // --- new() ---
 
     #[test]
@@ -1033,6 +1042,26 @@ mod tests {
     fn get_core_order(topo: &Arc<Topology>, specs: &[LayerSpec], layer_idx: usize) -> Vec<usize> {
         let pool = CpuPool::new(topo.clone(), false).unwrap();
         let orders = LayerGrowthAlgo::layer_core_orders(&pool, specs, topo).unwrap();
+        let per_node = &orders[&layer_idx];
+        // Flatten per-node vecs in node_order sequence to reconstruct the
+        // same flat ordering that the old code produced.
+        let all_nodes: Vec<&[usize]> = specs.iter().map(|s| s.nodes().as_slice()).collect();
+        let norder =
+            layer_core_growth::node_order(specs[layer_idx].nodes(), topo, layer_idx, &all_nodes);
+        let mut flat = Vec::new();
+        for nid in norder {
+            flat.extend_from_slice(&per_node[nid]);
+        }
+        flat
+    }
+
+    fn get_core_order_per_node(
+        topo: &Arc<Topology>,
+        specs: &[LayerSpec],
+        layer_idx: usize,
+    ) -> Vec<Vec<usize>> {
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let orders = LayerGrowthAlgo::layer_core_orders(&pool, specs, topo).unwrap();
         orders[&layer_idx].clone()
     }
 
@@ -1411,7 +1440,7 @@ mod tests {
         // CpuSetSpread reads /sys/fs/cgroup, results are host-dependent.
         // Just verify no duplicates and all cores are valid.
         let mut seen = std::collections::HashSet::new();
-        for &core in order {
+        for &core in order.iter().flatten() {
             assert!(core < 8, "core {} out of range", core);
             assert!(seen.insert(core), "duplicate core {}", core);
         }
@@ -1425,7 +1454,7 @@ mod tests {
         let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo).unwrap();
         let order = &orders[&0];
         let mut seen = std::collections::HashSet::new();
-        for &core in order {
+        for &core in order.iter().flatten() {
             assert!(core < 8, "core {} out of range", core);
             assert!(seen.insert(core), "duplicate core {}", core);
         }
@@ -1439,7 +1468,7 @@ mod tests {
         let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo).unwrap();
         let order = &orders[&0];
         let mut seen = std::collections::HashSet::new();
-        for &core in order {
+        for &core in order.iter().flatten() {
             assert!(core < 8, "core {} out of range", core);
             assert!(seen.insert(core), "duplicate core {}", core);
         }
@@ -1513,8 +1542,8 @@ mod tests {
             let pool = CpuPool::new(topo.clone(), false).unwrap();
             let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo)
                 .unwrap_or_else(|e| panic!("{:?} failed: {}", algo, e));
-            let order = &orders[&0];
-            assert_valid_core_order(order, 16);
+            let order: Vec<usize> = orders[&0].iter().flatten().copied().collect();
+            assert_valid_core_order(&order, 16);
         }
     }
 
@@ -1543,8 +1572,8 @@ mod tests {
             let pool = CpuPool::new(topo.clone(), false).unwrap();
             let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo)
                 .unwrap_or_else(|e| panic!("{:?} failed: {}", algo, e));
-            let order = &orders[&0];
-            assert_valid_core_order(order, 16);
+            let order: Vec<usize> = orders[&0].iter().flatten().copied().collect();
+            assert_valid_core_order(&order, 16);
         }
     }
 
@@ -1607,12 +1636,17 @@ mod tests {
         cpus: Cpumask,
         nr_cpus: usize,
         nr_node_cpus: Vec<usize>,
-        core_order: Vec<usize>,
+        core_order: Vec<Vec<usize>>,
         allowed_cpus: Cpumask,
     }
 
     impl NonSdLayerState {
-        fn new(name: &str, nr_nodes: usize, total_cpus: usize, core_order: Vec<usize>) -> Self {
+        fn new(
+            name: &str,
+            nr_nodes: usize,
+            total_cpus: usize,
+            core_order: Vec<Vec<usize>>,
+        ) -> Self {
             let mut allowed = Cpumask::new();
             for cpu in 0..total_cpus {
                 allowed.set_cpu(cpu).unwrap();
@@ -1667,7 +1701,7 @@ mod tests {
                 while to_free > 0 {
                     let node_cands = layer.cpus.and(node_span);
                     let cpus_to_free =
-                        match pool.next_to_free(&node_cands, layer.core_order.iter().rev()) {
+                        match pool.next_to_free(&node_cands, layer.core_order[n].iter().rev()) {
                             Ok(Some(ret)) => ret,
                             _ => break,
                         };
@@ -1701,20 +1735,23 @@ mod tests {
                 let node_allowed = layer.allowed_cpus.and(node_span);
 
                 while nr_to_alloc > 0 {
-                    let nr_alloced =
-                        match pool.alloc_cpus(&node_allowed, &layer.core_order, nr_to_alloc) {
-                            Some(new_cpus) => {
-                                let nr = new_cpus.weight();
-                                layer.cpus |= &new_cpus;
-                                layer.nr_cpus += nr;
-                                for cpu in new_cpus.iter() {
-                                    let nid = topo.all_cpus[&cpu].node_id;
-                                    layer.nr_node_cpus[nid] += 1;
-                                }
-                                nr
+                    let nr_alloced = match pool.alloc_cpus(
+                        &node_allowed,
+                        &layer.core_order[node_id],
+                        nr_to_alloc,
+                    ) {
+                        Some(new_cpus) => {
+                            let nr = new_cpus.weight();
+                            layer.cpus |= &new_cpus;
+                            layer.nr_cpus += nr;
+                            for cpu in new_cpus.iter() {
+                                let nid = topo.all_cpus[&cpu].node_id;
+                                layer.nr_node_cpus[nid] += 1;
                             }
-                            None => 0,
-                        };
+                            nr
+                        }
+                        None => 0,
+                    };
                     if nr_alloced == 0 {
                         break;
                     }
@@ -1775,7 +1812,7 @@ mod tests {
         let (topo, total) = topo_1n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 1, total, core_order)];
         let allocs = vec![make_alloc(&[0], &[2])]; // 2 au unpinned on N0 = 4 CPUs
         let norders = vec![vec![0]];
@@ -1800,7 +1837,7 @@ mod tests {
         let (topo, total) = topo_1n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 1, total, core_order)];
         let allocs = vec![make_alloc(&[0], &[8])]; // 8 au = 16 CPUs
         let norders = vec![vec![0]];
@@ -1823,7 +1860,7 @@ mod tests {
         let (topo, total) = topo_1n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 1, total, core_order)];
         let norders = vec![vec![0]];
 
@@ -1863,7 +1900,7 @@ mod tests {
         let (topo, total) = topo_1n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 1, total, core_order)];
         let norders = vec![vec![0]];
 
@@ -1903,7 +1940,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, core_order)];
         let allocs = vec![make_alloc(&[0, 0], &[8, 0])]; // 8 au on N0 = 16 CPUs
         let norders = vec![vec![0, 1]];
@@ -1928,7 +1965,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, core_order)];
         let allocs = vec![make_alloc(&[0, 0], &[4, 4])]; // 4 au each = 8 CPUs each
         let norders = vec![vec![0, 1]];
@@ -1953,7 +1990,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, core_order)];
         let allocs = vec![make_alloc(&[0, 0], &[6, 2])]; // 12 on N0, 4 on N1
         let norders = vec![vec![0, 1]];
@@ -1978,7 +2015,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, core_order)];
         let norders = vec![vec![0, 1]];
 
@@ -2016,7 +2053,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, core_order)];
         let norders = vec![vec![0, 1]];
 
@@ -2057,7 +2094,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![
             NonSdLayerState::new("L0", 2, total, core_order.clone()),
             NonSdLayerState::new("L1", 2, total, core_order),
@@ -2092,7 +2129,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![
             NonSdLayerState::new("L0", 2, total, core_order.clone()),
             NonSdLayerState::new("L1", 2, total, core_order),
@@ -2126,7 +2163,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![
             NonSdLayerState::new("L0", 2, total, core_order.clone()),
             NonSdLayerState::new("L1", 2, total, core_order),
@@ -2174,7 +2211,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, core_order)];
         let norders = vec![vec![0, 1]];
 
@@ -2215,7 +2252,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![
             NonSdLayerState::new("L0", 2, total, core_order.clone()),
             NonSdLayerState::new("L1", 2, total, core_order.clone()),
@@ -2310,7 +2347,7 @@ mod tests {
         let (topo, total) = topo_2n();
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
-        let core_order = core_order_sequential(&topo);
+        let core_order = core_order_per_node(&topo);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, core_order)];
         let norders = vec![vec![0, 1]];
 
@@ -3277,7 +3314,7 @@ mod tests {
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
         let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::NodeSpread)];
-        let order = get_core_order(&topo, &specs, 0);
+        let order = get_core_order_per_node(&topo, &specs, 0);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, order)];
         let norders = vec![vec![0, 1]];
 
@@ -3306,9 +3343,9 @@ mod tests {
         let au = pool.alloc_unit();
 
         let spread_specs = vec![test_layer_spec("S", LayerGrowthAlgo::NodeSpread)];
-        let spread_order = get_core_order(&topo, &spread_specs, 0);
+        let spread_order = get_core_order_per_node(&topo, &spread_specs, 0);
         let linear_specs = vec![test_layer_spec("L", LayerGrowthAlgo::Linear)];
-        let linear_order = get_core_order(&topo, &linear_specs, 0);
+        let linear_order = get_core_order_per_node(&topo, &linear_specs, 0);
 
         let mut layers = vec![
             NonSdLayerState::new("S", 2, total, spread_order),
@@ -3343,7 +3380,7 @@ mod tests {
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
         let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::NodeSpread)];
-        let order = get_core_order(&topo, &specs, 0);
+        let order = get_core_order_per_node(&topo, &specs, 0);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, order)];
         let norders = vec![vec![0, 1]];
 
@@ -3399,7 +3436,7 @@ mod tests {
         let mut pool = CpuPool::new(topo.clone(), false).unwrap();
         let au = pool.alloc_unit();
         let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::RoundRobin)];
-        let order = get_core_order(&topo, &specs, 0);
+        let order = get_core_order_per_node(&topo, &specs, 0);
         let mut layers = vec![NonSdLayerState::new("L0", 2, total, order)];
         let norders = vec![vec![0, 1]];
 

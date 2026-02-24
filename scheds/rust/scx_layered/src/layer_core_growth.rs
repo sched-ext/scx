@@ -206,7 +206,7 @@ impl LayerGrowthAlgo {
         cpu_pool: &CpuPool,
         layer_specs: &[LayerSpec],
         topo: &Topology,
-    ) -> Result<BTreeMap<usize, Vec<usize>>> {
+    ) -> Result<BTreeMap<usize, Vec<Vec<usize>>>> {
         let mut core_orders = BTreeMap::new();
 
         for (idx, spec) in layer_specs.iter().enumerate() {
@@ -217,7 +217,12 @@ impl LayerGrowthAlgo {
             let core_order = match &spec.cpuset {
                 Some(mask) => core_order
                     .into_iter()
-                    .filter(|cpu| mask.test_cpu(*cpu))
+                    .map(|node_cores| {
+                        node_cores
+                            .into_iter()
+                            .filter(|cpu| mask.test_cpu(*cpu))
+                            .collect()
+                    })
                     .collect(),
                 None => core_order,
             };
@@ -235,7 +240,7 @@ impl LayerGrowthAlgo {
         spec: &LayerSpec,
         layer_idx: usize,
         topo: &Topology,
-    ) -> Result<Vec<usize>> {
+    ) -> Result<Vec<Vec<usize>>> {
         let generator = LayerCoreOrderGenerator {
             cpu_pool,
             layer_specs,
@@ -357,7 +362,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         vec.rotate_right((chunk * self.layer_idx).min(num_cores));
     }
 
-    fn grow_sticky(&self) -> Vec<usize> {
+    fn grow_sticky(&self) -> Vec<Vec<usize>> {
         let is_left = self.layer_idx % 2 == 0;
         let rot_by = |layer_idx, len| -> usize {
             if layer_idx <= len {
@@ -367,7 +372,8 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             }
         };
 
-        let mut result = Vec::new();
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let mut core_order = self.node_core_seqs(node_id);
             self.rotate_node_layer_offset(&mut core_order);
@@ -382,13 +388,14 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                     core_order.rotate_right(rot);
                 }
             }
-            result.extend(core_order);
+            result[node_id] = core_order;
         }
         result
     }
 
-    fn grow_linear(&self) -> Vec<usize> {
-        let mut result = Vec::new();
+    fn grow_linear(&self) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let mut order = self.node_core_seqs(node_id);
             // Rotate layers to different starting cores within each node so
@@ -399,13 +406,14 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             if self.spec.llcs().is_empty() {
                 self.rotate_node_layer_offset(&mut order);
             }
-            result.extend(order);
+            result[node_id] = order;
         }
         result
     }
 
-    fn grow_reverse(&self) -> Vec<usize> {
-        let mut result = Vec::new();
+    fn grow_reverse(&self) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let mut order = self.node_core_seqs(node_id);
             // See grow_linear() for why we skip rotation when LLCs are set.
@@ -413,7 +421,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                 self.rotate_node_layer_offset(&mut order);
             }
             order.reverse();
-            result.extend(order);
+            result[node_id] = order;
         }
         result
     }
@@ -421,9 +429,10 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     /// Per-node LLC interleaving: within each node (in node_order),
     /// interleave cores across the node's LLCs. Cross-node distribution
     /// is handled by the even-split budget from unified_alloc.
-    fn grow_round_robin(&self) -> Vec<usize> {
+    fn grow_round_robin(&self) -> Vec<Vec<usize>> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
-        let mut result = Vec::new();
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
 
         for node_id in self.node_order() {
             let node = &self.topo.nodes[&node_id];
@@ -441,29 +450,34 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             )
             .map(|core| self.cpu_pool.core_seq(core))
             .collect();
-            result.extend(interleaved);
+            result[node_id] = interleaved;
         }
         result
     }
 
-    fn grow_random(&self) -> Vec<usize> {
+    fn grow_random(&self) -> Vec<Vec<usize>> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
-        let mut result = Vec::new();
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let mut order = self.node_core_seqs(node_id);
             fastrand::shuffle(&mut order);
-            result.extend(order);
+            result[node_id] = order;
         }
         result
     }
 
-    fn grow_big_little(&self) -> Vec<usize> {
-        let mut result = Vec::new();
+    fn grow_big_little(&self) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let node = &self.topo.nodes[&node_id];
             let mut cores: Vec<&Arc<Core>> = node.all_cores.values().collect();
             cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
-            result.extend(cores.into_iter().map(|core| self.cpu_pool.core_seq(core)));
+            result[node_id] = cores
+                .into_iter()
+                .map(|core| self.cpu_pool.core_seq(core))
+                .collect();
         }
         result
     }
@@ -473,8 +487,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     /// is balanced across hardware domains (e.g., different cache groups).
     /// Rotation is per-node to match grow_linear — under per-node allocation,
     /// each node's cores are allocated independently.
-    fn grow_cpuset_spread_inner(&self, make_random: bool, reverse: bool) -> Vec<usize> {
-        let mut result = Vec::new();
+    fn grow_cpuset_spread_inner(&self, make_random: bool, reverse: bool) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let node_cores: BTreeSet<usize> = self.node_core_seqs(node_id).into_iter().collect();
 
@@ -512,26 +527,30 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                 node_result.reverse();
             }
             self.rotate_node_layer_offset(&mut node_result);
-            result.extend(node_result);
+            result[node_id] = node_result;
         }
         result
     }
 
-    fn grow_cpuset_spread(&self) -> Vec<usize> {
+    fn grow_cpuset_spread(&self) -> Vec<Vec<usize>> {
         self.grow_cpuset_spread_inner(false, false)
     }
 
-    fn grow_cpuset_spread_random(&self) -> Vec<usize> {
+    fn grow_cpuset_spread_random(&self) -> Vec<Vec<usize>> {
         self.grow_cpuset_spread_inner(true, false)
     }
 
-    fn grow_little_big(&self) -> Vec<usize> {
-        let mut result = Vec::new();
+    fn grow_little_big(&self) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let node = &self.topo.nodes[&node_id];
             let mut cores: Vec<&Arc<Core>> = node.all_cores.values().collect();
             cores.sort_by(|a, b| b.core_type.cmp(&a.core_type));
-            result.extend(cores.into_iter().map(|core| self.cpu_pool.core_seq(core)));
+            result[node_id] = cores
+                .into_iter()
+                .map(|core| self.cpu_pool.core_seq(core))
+                .collect();
         }
         result
     }
@@ -540,7 +559,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     /// first, then remaining cores. Cross-node prioritization is handled by
     /// node_order() and unified_alloc (spec_nodes feeds into node_order). With
     /// no spec_llcs or spec_nodes, falls back to RoundRobin.
-    fn grow_topo(&self) -> Vec<usize> {
+    fn grow_topo(&self) -> Vec<Vec<usize>> {
         let spec_llcs = self.spec.llcs();
 
         if spec_llcs.is_empty() && self.spec.nodes().is_empty() {
@@ -548,7 +567,8 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         }
 
         let spec_llc_set: BTreeSet<usize> = spec_llcs.iter().copied().collect();
-        let mut result = Vec::new();
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let node = &self.topo.nodes[&node_id];
             // Preferred LLC cores first, then the rest.
@@ -568,7 +588,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             }
             preferred.extend(rest);
             // No rotation — preserve explicit topology preference ordering.
-            result.extend(preferred);
+            result[node_id] = preferred;
         }
         result
     }
@@ -577,9 +597,10 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     /// then randomly shuffles cores within each LLC, keeping LLC-adjacent
     /// cores together for cache locality. Cross-node ordering is handled by
     /// node_order() and unified_alloc.
-    fn grow_random_topo(&self) -> Vec<usize> {
+    fn grow_random_topo(&self) -> Vec<Vec<usize>> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
-        let mut result = Vec::new();
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
         for node_id in self.node_order() {
             let node = &self.topo.nodes[&node_id];
             let mut llcs: Vec<_> = node.llcs.values().collect();
@@ -587,13 +608,13 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             for llc in llcs {
                 let mut cores: Vec<_> = llc.cores.values().collect();
                 fastrand::shuffle(&mut cores);
-                result.extend(cores.into_iter().map(|c| self.cpu_pool.core_seq(c)));
+                result[node_id].extend(cores.into_iter().map(|c| self.cpu_pool.core_seq(c)));
             }
         }
         result
     }
 
-    fn grow_sticky_dynamic(&self) -> Vec<usize> {
+    fn grow_sticky_dynamic(&self) -> Vec<Vec<usize>> {
         self.grow_sticky()
     }
 }

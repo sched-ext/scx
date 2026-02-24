@@ -1231,7 +1231,7 @@ struct Layer {
     name: String,
     kind: LayerKind,
     growth_algo: LayerGrowthAlgo,
-    core_order: Vec<usize>,
+    core_order: Vec<Vec<usize>>,
 
     assigned_llcs: Vec<Vec<usize>>,
 
@@ -1284,7 +1284,7 @@ fn resolve_cpus_pct_range(
 }
 
 impl Layer {
-    fn new(spec: &LayerSpec, topo: &Topology, core_order: &Vec<usize>) -> Result<Self> {
+    fn new(spec: &LayerSpec, topo: &Topology, core_order: &Vec<Vec<usize>>) -> Result<Self> {
         let name = &spec.name;
         let kind = spec.kind.clone();
         let mut allowed_cpus = Cpumask::new();
@@ -3061,13 +3061,13 @@ impl<'a> Scheduler<'a> {
         let cpus_per_llc = cores_per_llc * cpus_per_core;
 
         for &(idx, _) in layer_targets.iter() {
-            let mut core_order = vec![];
             let layer = &mut self.layers[idx];
 
             if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
+            layer.core_order = vec![Vec::new(); nr_nodes];
             let alloc = &layer_allocs[idx];
 
             for n in 0..nr_nodes {
@@ -3092,7 +3092,7 @@ impl<'a> Scheduler<'a> {
                             if used == 0 {
                                 break;
                             }
-                            core_order.push(core.1.id);
+                            layer.core_order[n].push(core.1.id);
                             used -= 1;
                         }
 
@@ -3101,8 +3101,9 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            core_order.reverse();
-            layer.core_order = core_order;
+            for node_cores in &mut layer.core_order {
+                node_cores.reverse();
+            }
         }
 
         // Reset consumed entries in free LLCs.
@@ -3126,10 +3127,13 @@ impl<'a> Scheduler<'a> {
             for core in self.topo.all_cores.iter() {
                 let llc_id = core.1.llc_id;
                 if all_assigned.contains(&llc_id) {
-                    layer.core_order.push(core.1.id);
+                    let nid = core.1.node_id;
+                    layer.core_order[nid].push(core.1.id);
                 }
             }
-            layer.core_order.reverse();
+            for node_cores in &mut layer.core_order {
+                node_cores.reverse();
+            }
 
             debug!(
                 " alloc: layer={} core_order={:?}",
@@ -3138,10 +3142,10 @@ impl<'a> Scheduler<'a> {
         }
 
         // Phase 5 — Apply CPU changes for StickyDynamic layers.
-        // Two phases: first free all CPUs, then allocate all CPUs.
+        // Two phases: first free per-node, then allocate per-node.
         let mut updated = false;
 
-        // Free excess CPUs
+        // Free excess CPUs per-node.
         for &(idx, _) in layer_targets.iter() {
             let layer = &mut self.layers[idx];
 
@@ -3149,33 +3153,37 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            let mut new_cpus = Cpumask::new();
-            for &core_id in &layer.core_order {
-                if let Some(core) = self.topo.all_cores.get(&core_id) {
-                    new_cpus |= &core.span;
+            for n in 0..nr_nodes {
+                let mut node_target = Cpumask::new();
+                for &core_id in &layer.core_order[n] {
+                    if let Some(core) = self.topo.all_cores.get(&core_id) {
+                        node_target |= &core.span;
+                    }
                 }
-            }
-            new_cpus &= &layer.allowed_cpus;
+                node_target &= &layer.allowed_cpus;
 
-            let cpus_to_free = layer.cpus.clone().and(&new_cpus.clone().not());
+                let node_span = &self.topo.nodes[&n].span;
+                let node_cur = layer.cpus.and(node_span);
+                let cpus_to_free = node_cur.and(&node_target.not());
 
-            if cpus_to_free.weight() > 0 {
-                debug!(
-                    " apply: layer={} freeing CPUs: {}",
-                    layer.name, cpus_to_free
-                );
-                layer.cpus &= &cpus_to_free.not();
-                layer.nr_cpus -= cpus_to_free.weight();
-                for cpu in cpus_to_free.iter() {
-                    layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
-                    layer.nr_node_cpus[self.cpu_pool.topo.all_cpus[&cpu].node_id] -= 1;
+                if cpus_to_free.weight() > 0 {
+                    debug!(
+                        " apply: layer={} freeing CPUs on node {}: {}",
+                        layer.name, n, cpus_to_free
+                    );
+                    layer.cpus &= &cpus_to_free.not();
+                    layer.nr_cpus -= cpus_to_free.weight();
+                    for cpu in cpus_to_free.iter() {
+                        layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+                        layer.nr_node_cpus[n] -= 1;
+                    }
+                    self.cpu_pool.free(&cpus_to_free)?;
+                    updated = true;
                 }
-                self.cpu_pool.free(&cpus_to_free)?;
-                updated = true;
             }
         }
 
-        // Allocate needed CPUs
+        // Allocate needed CPUs per-node.
         for &(idx, _) in layer_targets.iter() {
             let layer = &mut self.layers[idx];
 
@@ -3183,40 +3191,43 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            let mut new_cpus = Cpumask::new();
-            for &core_id in &layer.core_order {
-                if let Some(core) = self.topo.all_cores.get(&core_id) {
-                    new_cpus |= &core.span;
+            for n in 0..nr_nodes {
+                let mut node_target = Cpumask::new();
+                for &core_id in &layer.core_order[n] {
+                    if let Some(core) = self.topo.all_cores.get(&core_id) {
+                        node_target |= &core.span;
+                    }
                 }
-            }
-            new_cpus &= &layer.allowed_cpus;
+                node_target &= &layer.allowed_cpus;
 
-            let available_cpus = self.cpu_pool.available_cpus();
-            let desired_to_alloc = new_cpus.clone().and(&layer.cpus.clone().not());
-            let cpus_to_alloc = desired_to_alloc.clone().and(&available_cpus);
+                let available_cpus = self.cpu_pool.available_cpus();
+                let desired_to_alloc = node_target.and(&layer.cpus.clone().not());
+                let cpus_to_alloc = desired_to_alloc.clone().and(&available_cpus);
 
-            if desired_to_alloc.weight() > cpus_to_alloc.weight() {
-                debug!(
-                    " apply: layer={} wanted to alloc {} CPUs but only {} available",
-                    layer.name,
-                    desired_to_alloc.weight(),
-                    cpus_to_alloc.weight()
-                );
-            }
-
-            if cpus_to_alloc.weight() > 0 {
-                debug!(
-                    " apply: layer={} allocating CPUs: {}",
-                    layer.name, cpus_to_alloc
-                );
-                layer.cpus |= &cpus_to_alloc;
-                layer.nr_cpus += cpus_to_alloc.weight();
-                for cpu in cpus_to_alloc.iter() {
-                    layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
-                    layer.nr_node_cpus[self.cpu_pool.topo.all_cpus[&cpu].node_id] += 1;
+                if desired_to_alloc.weight() > cpus_to_alloc.weight() {
+                    debug!(
+                        " apply: layer={} node {} wanted to alloc {} CPUs but only {} available",
+                        layer.name,
+                        n,
+                        desired_to_alloc.weight(),
+                        cpus_to_alloc.weight()
+                    );
                 }
-                self.cpu_pool.mark_allocated(&cpus_to_alloc)?;
-                updated = true;
+
+                if cpus_to_alloc.weight() > 0 {
+                    debug!(
+                        " apply: layer={} allocating CPUs on node {}: {}",
+                        layer.name, n, cpus_to_alloc
+                    );
+                    layer.cpus |= &cpus_to_alloc;
+                    layer.nr_cpus += cpus_to_alloc.weight();
+                    for cpu in cpus_to_alloc.iter() {
+                        layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+                        layer.nr_node_cpus[n] += 1;
+                    }
+                    self.cpu_pool.mark_allocated(&cpus_to_alloc)?;
+                    updated = true;
+                }
             }
 
             debug!(
@@ -3347,7 +3358,7 @@ impl<'a> Scheduler<'a> {
                     let node_cands = layer.cpus.and(node_span);
                     let cpus_to_free = match self
                         .cpu_pool
-                        .next_to_free(&node_cands, layer.core_order.iter().rev())?
+                        .next_to_free(&node_cands, layer.core_order[n].iter().rev())?
                     {
                         Some(ret) => ret,
                         None => break,
@@ -3414,7 +3425,7 @@ impl<'a> Scheduler<'a> {
                 while nr_to_alloc > 0 {
                     let nr_alloced = match self.cpu_pool.alloc_cpus(
                         &node_allowed,
-                        &layer.core_order,
+                        &layer.core_order[node_id],
                         nr_to_alloc,
                     ) {
                         Some(new_cpus) => {
@@ -3494,8 +3505,8 @@ impl<'a> Scheduler<'a> {
                     .collect::<Vec<_>>()
                     .join(" ");
                 debug!(
-                    "ALLOC {} algo={:?} {} total:{}→{} target:[{}]",
-                    layer.name, layer.growth_algo, per_node, prev_total, cur_total, target,
+                    "ALLOC {} algo={:?} {} total:{}→{} target:[{}] mask={:x}",
+                    layer.name, layer.growth_algo, per_node, prev_total, cur_total, target, layer.cpus,
                 );
             }
             debug!(
