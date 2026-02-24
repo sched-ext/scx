@@ -78,7 +78,8 @@ struct cake_scratch {
 	/* P5-1: u64 first avoids 4B implicit alignment gap (Rule 10) */
 	u64 cached_now; /* scx_bpf_now() tunneled from select_cpu → enqueue (saves 1 kfunc) */
 	u32 cached_llc; /* LLC ID tunneled from select_cpu → enqueue (saves 1 kfunc) */
-	u8 _pad[116]; /* Pad to 128 bytes: 8(u64) + 4(u32) + 116 = 128 */
+	u8  waker_yielder; /* Waker Priority Inheritance: was waker a yielder? (L1-hot mailbox read) */
+	u8 _pad[115]; /* Pad to 128 bytes: 8(u64) + 4(u32) + 1(u8) + 115 = 128 */
 };
 _Static_assert(sizeof(struct cake_scratch) <= 128,
 	       "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
@@ -162,7 +163,7 @@ struct {
 
 /* Benchmark a single kfunc iteration: call twice, delta = cost.
  * Macro to avoid function pointer overhead (BPF doesn't support them). */
-#define BENCH_ONE(entry, call_expr) do {                          \
+#define BENCH_ONE(entry, call_expr, idx) do {                     \
 	u64 _s = bpf_ktime_get_ns();                                 \
 	u64 _v = (u64)(call_expr);                                    \
 	u64 _e = bpf_ktime_get_ns();                                 \
@@ -171,6 +172,7 @@ struct {
 	if (_d > (entry)->max_ns) (entry)->max_ns = _d;               \
 	(entry)->total_ns += _d;                                      \
 	(entry)->last_value = _v;                                     \
+	(entry)->samples[idx] = _d;                                   \
 } while (0)
 
 static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
@@ -198,17 +200,17 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 	/* Bench: bpf_ktime_get_ns() — legacy CLOCK_MONOTONIC */
 	#pragma unroll
 	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_KTIME_GET_NS], bpf_ktime_get_ns());
+		BENCH_ONE(&r->entries[BENCH_KTIME_GET_NS], bpf_ktime_get_ns(), i);
 
 	/* Bench: scx_bpf_now() — SCX cached clock */
 	#pragma unroll
 	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_SCX_BPF_NOW], scx_bpf_now());
+		BENCH_ONE(&r->entries[BENCH_SCX_BPF_NOW], scx_bpf_now(), i);
 
 	/* Bench: bpf_get_smp_processor_id() — CPU identification */
 	#pragma unroll
 	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_GET_SMP_PROC_ID], bpf_get_smp_processor_id());
+		BENCH_ONE(&r->entries[BENCH_GET_SMP_PROC_ID], bpf_get_smp_processor_id(), i);
 
 	/* Bench: bpf_task_from_pid() — PID lookup (kfunc) */
 	{
@@ -224,6 +226,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = (u64)(t != NULL);
 		}
 	}
@@ -241,6 +244,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = (u64)idle;
 		}
 	}
@@ -248,7 +252,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 	/* Bench: scx_bpf_nr_cpu_ids() — topology constant read */
 	#pragma unroll
 	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_NR_CPU_IDS], scx_bpf_nr_cpu_ids());
+		BENCH_ONE(&r->entries[BENCH_NR_CPU_IDS], scx_bpf_nr_cpu_ids(), i);
 
 	/* Bench: get_task_ctx() — bpf_task_storage_get + arena deref */
 	{
@@ -262,6 +266,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = (u64)(t != NULL);
 		}
 	}
@@ -279,6 +284,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = (u64)nr;
 		}
 	}
@@ -296,6 +302,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = v;
 		}
 	}
@@ -314,6 +321,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = v;
 		}
 	}
@@ -329,6 +337,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 		if (_d < e->min_ns) e->min_ns = _d;
 		if (_d > e->max_ns) e->max_ns = _d;
 		e->total_ns += _d;
+		e->samples[i] = _d;
 		e->last_value = _d; /* Shows raw overhead of timing harness */
 	}
 
@@ -348,6 +357,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = v;
 		}
 	}
@@ -373,6 +383,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 				if (_d < e->min_ns) e->min_ns = _d;
 				if (_d > e->max_ns) e->max_ns = _d;
 				e->total_ns += _d;
+				e->samples[i] = _d;
 				e->last_value = field + (u32)ptr_val;
 			}
 		}
@@ -394,6 +405,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = (u64)(slot != NULL);
 		}
 	}
@@ -411,6 +423,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = sl + nv;
 		}
 	}
@@ -429,6 +442,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = ts + llc;
 		}
 	}
@@ -454,6 +468,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 				if (_d < e->min_ns) e->min_ns = _d;
 				if (_d > e->max_ns) e->max_ns = _d;
 				e->total_ns += _d;
+				e->samples[i] = _d;
 				e->last_value = nf + yl + result;
 			}
 		}
@@ -485,6 +500,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 				if (_d < e->min_ns) e->min_ns = _d;
 				if (_d > e->max_ns) e->max_ns = _d;
 				e->total_ns += _d;
+				e->samples[i] = _d;
 				e->last_value = new_avg + new_def;
 			}
 		}
@@ -509,6 +525,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = ptr + fused + packed;
 		}
 	}
@@ -532,6 +549,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = (u64)idle;
 		}
 	}
@@ -556,6 +574,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = (u64)fully_idle;
 		}
 	}
@@ -580,6 +599,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = _ptr + _fused + _packed + _nvcsw + _slice;
 		}
 	}
@@ -602,7 +622,33 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 			if (_d < e->min_ns) e->min_ns = _d;
 			if (_d > e->max_ns) e->max_ns = _d;
 			e->total_ns += _d;
+			e->samples[i] = _d;
 			e->last_value = _packed + _fused + _nvcsw;
+		}
+	}
+
+	/* Bench: Arena stride — walk 16 per_cpu mailbox entries.
+	 * Forces TLB walks across arena pages. With 4KB pages, each per_cpu
+	 * block (256B) shares pages, but 16 blocks span ~4KB. With hugepages
+	 * (2MB), all 16 fit in one TLB entry. Delta vs BENCH_ARENA_DEREF
+	 * (single hot access) reveals the TLB miss tax. */
+	{
+		#pragma unroll
+		for (int i = 0; i < BENCH_ITERATIONS; i++) {
+			u64 _s = bpf_ktime_get_ns();
+			volatile u64 sum = 0;
+			#pragma unroll
+			for (int c = 0; c < 16; c++) {
+				sum += per_cpu[c & (CAKE_MAX_CPUS - 1)].mbox.tick_last_run_at;
+			}
+			u64 _e = bpf_ktime_get_ns();
+			u64 _d = _e - _s;
+			struct kfunc_bench_entry *e = &r->entries[BENCH_ARENA_STRIDE];
+			if (_d < e->min_ns) e->min_ns = _d;
+			if (_d > e->max_ns) e->max_ns = _d;
+			e->total_ns += _d;
+			e->samples[i] = _d;
+			e->last_value = sum;
 		}
 	}
 
@@ -970,6 +1016,11 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	u64 tunnel_now = now_post_g1;
 	scr->cached_llc = cpu_llc_id[tc_id];
 	scr->cached_now = tunnel_now;
+	/* WAKER PRIORITY INHERITANCE: Stash waker's yielder status.
+	 * Reads LOCAL CPU mailbox CL0 (L1-hot, ~0ns). Consumed by
+	 * cake_enqueue to boost non-yielding render pipeline threads
+	 * woken by yielding UE5 task workers. */
+	scr->waker_yielder = per_cpu[tc_id].mbox.is_yielder;
 
 	if (CAKE_STATS_ENABLED) {
 		struct cake_stats *s = get_local_stats();
@@ -1113,10 +1164,29 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	u8 new_flow = (staged >> 48) & 1;
 	u8 yielder  = (staged >> 49) & 1;
 	u32 weight_ns = (u32)(staged & 0xFFFFFFFF);
+
+	/* WAKER PRIORITY INHERITANCE: If waker is a yielder, boost wakee.
+	 * Covers non-yielding render pipeline threads (RHIThread, vkd3d-swapchain)
+	 * woken by yielding UE5 Foreground/Background Workers.
+	 * Cost: 1 scratch read (same CL as cached_llc, ~0ns). */
+	u8 waker_yl = scr->waker_yielder;
+	u8 effective_yl = yielder | (waker_yl ? 1 : 0);
+
 	/* P4-2: Branchless effective_weight (Rule 16) */
-	u32 shift = (u32)yielder * 3; /* 0 or 3 */
+	u32 shift = (u32)effective_yl * 3; /* 0 or 3 */
 	u32 effective_weight = weight_ns >> shift;
 	u64 vtime = now_cached + effective_weight;
+
+	/* CHAIN PROPAGATION: Set WAKER_BOOST in tctx packed_info so
+	 * cake_running reflects the boost in mbox->is_yielder. This enables
+	 * depth-N chains (yielder→RHIThread→RHISubmissionTh) to propagate
+	 * naturally through successive wakeup cycles.
+	 * Cost: 16ns get_task_ctx, ~1-2% of wakeups (tunnel + waker yielder + wakee non-yielder). */
+	if (waker_yl && !yielder) {
+		struct cake_task_ctx __arena *tctx_boost = get_task_ctx(p_reg);
+		if (tctx_boost)
+			tctx_boost->packed_info |= ((u32)CAKE_FLOW_WAKER_BOOST << SHIFT_FLAGS);
+	}
 	/* P4-5: Branchless new_flow vtime subtraction (Rule 16) */
 	vtime -= new_flow_bonus_ns & -(u64)new_flow;
 
@@ -1254,7 +1324,8 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * reads above have completed (overlapped with scx_bpf_now). */
 	mbox->tick_last_run_at = now;
 	mbox->tick_slice       = final_slice;
-	mbox->is_yielder = (raw_packed >> SHIFT_FLAGS) & (u32)CAKE_FLOW_YIELDER;
+	mbox->is_yielder = (raw_packed >> SHIFT_FLAGS) &
+			    (CAKE_FLOW_YIELDER | CAKE_FLOW_WAKER_BOOST);
 	mbox->cached_cpu = (u16)cpu;
 	mbox->cached_tctx_ptr = (u64)tctx;
 	mbox->cached_fused = raw_fused;
@@ -1390,6 +1461,10 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	if (er.deficit == 0 &&
 	    (packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS)))
 		packed &= ~((u32)CAKE_FLOW_NEW << SHIFT_FLAGS);
+
+	/* Clear WAKER_BOOST after one run-stop cycle.
+	 * The boost is re-applied on next wakeup if waker is still a yielder. */
+	packed &= ~((u32)CAKE_FLOW_WAKER_BOOST << SHIFT_FLAGS);
 
 	u8 nf = (packed >> SHIFT_FLAGS) & 1;
 	u8 yl = (u8)yielder; /* P3-7: bool is already 0/1, no ternary needed */
