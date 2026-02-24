@@ -92,6 +92,17 @@
 //! tasks absorb whatever is left, and no budget is wasted on layers that
 //! can't use it.
 //!
+//! ## Spread layers
+//!
+//! Spread layers (RoundRobin, NodeSpread) need equal CPU counts on every
+//! node.  After the global water-fill determines their total budget,
+//! `resolve_spread()` distributes it evenly across nodes — but caps each
+//! node at the least available capacity (after non-spread pinned
+//! allocations).  When a pinned layer consumes most of one node, spread
+//! layers can't use that node fully, so the excess is freed and
+//! redistributed to non-spread layers who CAN place it.  Multiple spread
+//! layers share the bottleneck capacity fairly via `water_fill`.
+//!
 //! # Terminology
 //!
 //! - **raw_pinned\[N\]**: layer's raw pinned CPU demand on node N (from
@@ -284,6 +295,11 @@ pub struct LayerDemand {
     pub raw_unpinned: usize,
     /// Layer weight.
     pub weight: usize,
+    /// Spread layer: distribute total budget evenly across nodes,
+    /// ignoring pinned/unpinned distinction. Used by cross-node
+    /// interleaving algos (NodeSpread, RoundRobin) whose core_order
+    /// expects even distribution.
+    pub spread: bool,
 }
 
 impl LayerDemand {
@@ -318,6 +334,7 @@ pub fn unified_alloc(
     norders: &[Vec<usize>],
 ) -> Vec<LayerAlloc> {
     let mut allocs = allocate_budgets(total_units, node_caps, demands);
+    resolve_spread(&mut allocs, demands, node_caps);
     place_unpinned(&mut allocs, demands, node_caps, cur_node_cpus, norders);
     allocs
 }
@@ -336,7 +353,7 @@ pub fn unified_alloc(
 /// Repeats until no new layers are locked.  Returns a `LayerAlloc` per
 /// layer with per-node `pinned` counts and `unpinned_budget` set.
 /// Per-node `unpinned` distribution is NOT resolved here — that's done
-/// by `place_unpinned`.
+/// by `resolve_spread` and `place_unpinned`.
 fn allocate_budgets(
     total_units: usize,
     node_caps: &[usize],
@@ -494,7 +511,124 @@ fn allocate_budgets(
     allocs
 }
 
-/// Phase 2: Place each layer's unpinned budget on specific nodes.
+/// Phase 2: Resolve spread layers' per-node placement.
+///
+/// Spread layers (e.g. RoundRobin, NodeSpread) must distribute evenly across
+/// nodes.  This creates a constraint: a congested node limits ALL nodes,
+/// because spread = equal per node.
+///
+/// 1. Compute `spread_avail[n]` — node capacity minus non-spread pinned.
+/// 2. `spread_pool = min(spread_avail)` — the bottleneck node.
+/// 3. `water_fill(spread_pool, ...)` divides the pool fairly among all spread
+///    layers by weight.  Each layer gets at most `total / nr_nodes` per node.
+/// 4. Freed capacity (from capping) is redistributed to non-spread layers
+///    proportionally via `water_fill`, increasing their `unpinned_budget`.
+fn resolve_spread(allocs: &mut [LayerAlloc], demands: &[LayerDemand], node_caps: &[usize]) {
+    if allocs.is_empty() {
+        return;
+    }
+    let nr_nodes = node_caps.len();
+    let nr_layers = allocs.len();
+
+    // Per-node available capacity after non-spread pinned allocations.
+    let mut spread_avail = node_caps.to_vec();
+    for (idx, alloc) in allocs.iter().enumerate() {
+        if demands[idx].spread {
+            continue; // spread pinned is about to be zeroed
+        }
+        for n in 0..nr_nodes {
+            spread_avail[n] = spread_avail[n].saturating_sub(alloc.pinned[n]);
+        }
+    }
+
+    // Collect spread layers, zero their pinned, compute totals.
+    let spread_indices: Vec<usize> = (0..nr_layers).filter(|&i| demands[i].spread).collect();
+
+    if spread_indices.is_empty() {
+        return;
+    }
+
+    let totals: Vec<usize> = spread_indices
+        .iter()
+        .map(|&idx| allocs[idx].pinned.iter().sum::<usize>() + allocs[idx].unpinned_budget)
+        .collect();
+
+    for &idx in &spread_indices {
+        allocs[idx].pinned = vec![0; nr_nodes];
+    }
+
+    // The bottleneck node limits all nodes.
+    let spread_pool = spread_avail.iter().copied().min().unwrap_or(0);
+
+    // Fairly divide the constrained pool among spread layers.
+    let entries: Vec<WaterFillEntry> = spread_indices
+        .iter()
+        .enumerate()
+        .map(|(pos, &idx)| WaterFillEntry {
+            weight: demands[idx].weight,
+            demand: totals[pos] / nr_nodes,
+        })
+        .collect();
+    let per_node_allocs = water_fill(spread_pool, &entries);
+
+    // Assign per-node allocations.
+    let mut freed = 0usize;
+    for (pos, &idx) in spread_indices.iter().enumerate() {
+        let per_node = per_node_allocs[pos];
+        let total = totals[pos];
+        let want_per_node = total / nr_nodes;
+
+        if per_node >= want_per_node {
+            // Uncapped — distribute remainder to nodes with room.
+            let remainder = total % nr_nodes;
+            let mut rem_left = remainder;
+            for n in 0..nr_nodes {
+                allocs[idx].unpinned[n] = per_node;
+                if rem_left > 0 && spread_avail[n] > per_node {
+                    allocs[idx].unpinned[n] += 1;
+                    rem_left -= 1;
+                }
+            }
+            allocs[idx].unpinned_budget = total - rem_left;
+            freed += rem_left;
+        } else {
+            // Capped — all nodes get exactly per_node.
+            for n in 0..nr_nodes {
+                allocs[idx].unpinned[n] = per_node;
+            }
+            let new_total = per_node * nr_nodes;
+            allocs[idx].unpinned_budget = new_total;
+            freed += total - new_total;
+        }
+    }
+
+    // Redistribute freed capacity to non-spread layers.
+    if freed > 0 {
+        let mut entries = Vec::new();
+        let mut indices = Vec::new();
+        for (idx, d) in demands.iter().enumerate() {
+            if d.spread {
+                continue;
+            }
+            let remaining_demand = d.raw_total().saturating_sub(allocs[idx].total());
+            if remaining_demand > 0 {
+                entries.push(WaterFillEntry {
+                    weight: d.weight,
+                    demand: remaining_demand,
+                });
+                indices.push(idx);
+            }
+        }
+        if !entries.is_empty() {
+            let shares = water_fill(freed, &entries);
+            for (pos, &idx) in indices.iter().enumerate() {
+                allocs[idx].unpinned_budget += shares[pos];
+            }
+        }
+    }
+}
+
+/// Phase 3: Place each layer's unpinned budget on specific nodes.
 ///
 /// Uses `cur_node_cpus` as the starting point so that pinned shifts
 /// between nodes are compensated and the per-node total stays stable.
@@ -522,6 +656,9 @@ fn place_unpinned(
 
     // Initialize unpinned from current minus pinned.
     for (idx, alloc) in allocs.iter_mut().enumerate() {
+        if demands[idx].spread {
+            continue;
+        }
         for n in 0..nr_nodes {
             alloc.unpinned[n] = cur_node_cpus[idx][n].saturating_sub(alloc.pinned[n]);
         }
@@ -529,6 +666,9 @@ fn place_unpinned(
 
     // Shrink: trim from least-preferred nodes first.
     for (idx, alloc) in allocs.iter_mut().enumerate() {
+        if demands[idx].spread {
+            continue;
+        }
         let cur_total: usize = alloc.unpinned.iter().sum();
         if cur_total > alloc.unpinned_budget {
             let mut excess = cur_total - alloc.unpinned_budget;
@@ -789,6 +929,7 @@ mod tests {
             raw_pinned: vec![p0, p1],
             raw_unpinned: u,
             weight: w,
+            spread: false,
         }
     }
 
@@ -1229,11 +1370,13 @@ mod tests {
                 raw_pinned: vec![0],
                 raw_unpinned: 20,
                 weight: 1,
+                spread: false,
             },
             LayerDemand {
                 raw_pinned: vec![0],
                 raw_unpinned: 20,
                 weight: 1,
+                spread: false,
             },
         ];
         let allocs = unified_alloc(16, &[16], &demands, &[], &[]);
@@ -1289,16 +1432,19 @@ mod tests {
                 raw_pinned: vec![0],
                 raw_unpinned: 100,
                 weight: 2,
+                spread: false,
             },
             LayerDemand {
                 raw_pinned: vec![0],
                 raw_unpinned: 100,
                 weight: 1,
+                spread: false,
             },
             LayerDemand {
                 raw_pinned: vec![0],
                 raw_unpinned: 100,
                 weight: 1,
+                spread: false,
             },
         ];
         let allocs = unified_alloc(32, &[32], &demands, &[], &[]);
@@ -1318,11 +1464,13 @@ mod tests {
                 raw_pinned: vec![0],
                 raw_unpinned: 5,
                 weight: 1,
+                spread: false,
             },
             LayerDemand {
                 raw_pinned: vec![0],
                 raw_unpinned: 100,
                 weight: 1,
+                spread: false,
             },
         ];
         let allocs = unified_alloc(32, &[32], &demands, &[], &[]);
@@ -1344,11 +1492,13 @@ mod tests {
                 raw_pinned: vec![0],
                 raw_unpinned: 50,
                 weight: 100,
+                spread: false,
             },
             LayerDemand {
                 raw_pinned: vec![0],
                 raw_unpinned: 10,
                 weight: 1,
+                spread: false,
             },
         ];
         let allocs = unified_alloc(4, &[4], &demands, &[], &[]);
@@ -1368,11 +1518,13 @@ mod tests {
                 raw_pinned: vec![0],
                 raw_unpinned: 50,
                 weight: 100,
+                spread: false,
             },
             LayerDemand {
                 raw_pinned: vec![0],
                 raw_unpinned: 0,
                 weight: 1,
+                spread: false,
             },
         ];
         let allocs = unified_alloc(4, &[4], &demands, &[], &[]);
@@ -1388,21 +1540,171 @@ mod tests {
                 raw_pinned: vec![0],
                 raw_unpinned: 50,
                 weight: 100,
+                spread: false,
             },
             LayerDemand {
                 raw_pinned: vec![0],
                 raw_unpinned: 5,
                 weight: 1,
+                spread: false,
             },
             LayerDemand {
                 raw_pinned: vec![0],
                 raw_unpinned: 5,
                 weight: 1,
+                spread: false,
             },
         ];
         let allocs = unified_alloc(6, &[6], &demands, &[], &[]);
         assert!(allocs[1].total() >= 1);
         assert!(allocs[2].total() >= 1);
         assert_eq!(total_alloc(&allocs), 6);
+    }
+
+    // =====================================================================
+    // Spread budget tests
+    //
+    // Spread layers: budget split evenly across nodes, pinned zeroed.
+    // Resolved before non-spread unpinned distribution.
+    // =====================================================================
+
+    fn demand_spread(w: usize, p0: usize, p1: usize, u: usize) -> LayerDemand {
+        LayerDemand {
+            raw_pinned: vec![p0, p1],
+            raw_unpinned: u,
+            weight: w,
+            spread: true,
+        }
+    }
+
+    // Single spread layer: budget=40, split 20/20. Pinned zeroed.
+    #[test]
+    fn test_ua_spread_even_split() {
+        let demands = vec![demand_spread(1, 10, 10, 20)];
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        assert_eq!(allocs[0].total(), 40);
+        assert_eq!(allocs[0].pinned, vec![0, 0]);
+        assert_eq!(allocs[0].unpinned[0], 20);
+        assert_eq!(allocs[0].unpinned[1], 20);
+    }
+
+    // Spread with odd budget: 41 → 21 + 20.
+    #[test]
+    fn test_ua_spread_odd_budget() {
+        let demands = vec![demand_spread(1, 10, 10, 21)];
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        assert_eq!(allocs[0].total(), 41);
+        assert_eq!(allocs[0].unpinned[0], 21);
+        assert_eq!(allocs[0].unpinned[1], 20);
+    }
+
+    // Spread + non-spread: spread takes first dips, non-spread water-fills rest.
+    #[test]
+    fn test_ua_spread_vs_nonspread() {
+        // Both layers need high enough demand to compete for half.
+        let demands = vec![
+            demand_spread(1, 20, 20, 50), // S: spread, raw_total=90
+            demand(1, 20, 0, 70),         // L: non-spread, pinned N0, raw_total=90
+        ];
+        let cur = vec![vec![20, 20], vec![20, 0]];
+        let norders = vec![vec![0, 1], vec![0, 1]];
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &cur, &norders);
+
+        // S: spread, equal weight → 48 total, split 24/24.
+        assert_eq!(allocs[0].total(), 48);
+        assert_eq!(allocs[0].unpinned[0], 24);
+        assert_eq!(allocs[0].unpinned[1], 24);
+
+        // L: non-spread gets the other 48.
+        assert_eq!(allocs[1].total(), 48);
+        assert_eq!(total_alloc(&allocs), 96);
+    }
+
+    // Spread demand-capped: small spread + large non-spread.
+    #[test]
+    fn test_ua_spread_demand_capped() {
+        let demands = vec![
+            demand_spread(1, 5, 5, 10), // S: raw_total=20
+            demand(1, 30, 10, 40),      // L: raw_total=80
+        ];
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+
+        // S: demand-capped at 20, split 10/10.
+        assert_eq!(allocs[0].total(), 20);
+        assert_eq!(allocs[0].unpinned[0], 10);
+        assert_eq!(allocs[0].unpinned[1], 10);
+
+        // L: gets 76.
+        assert_eq!(allocs[1].total(), 76);
+        assert_eq!(total_alloc(&allocs), 96);
+    }
+
+    // Per-node capacity respected: spread + non-spread don't exceed node caps.
+    #[test]
+    fn test_ua_spread_node_capacity() {
+        let demands = vec![
+            demand_spread(1, 20, 20, 20), // S: raw_total=60
+            demand(1, 30, 0, 30),         // L: pinned N0, raw_total=60
+        ];
+        let cur = vec![vec![24, 24], vec![24, 0]];
+        let norders = vec![vec![0, 1], vec![0, 1]];
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &cur, &norders);
+
+        assert_eq!(total_alloc(&allocs), 96);
+        // No node exceeds 48.
+        for n in 0..2 {
+            let node_total: usize = allocs.iter().map(|a| a.pinned[n] + a.unpinned[n]).sum();
+            assert!(node_total <= 48, "node {} has {} > 48", n, node_total);
+        }
+    }
+
+    // Spread capped by congested node. Freed capacity goes to non-spread.
+    //
+    // P(w=2, pinned N0 40) + S(w=1, spread 40) + L(w=1, unpinned 60).
+    // Water-fill: P=40 (capped), S=28, L=28.
+    // spread_avail = [48-40, 48-0] = [8, 48]. pool = 8.
+    // S per_node = min(14, 8) = 8. total = 16. freed = 12.
+    // L gets 12 freed → budget = 28+12 = 40.
+    #[test]
+    fn test_ua_spread_node_cap() {
+        let demands = vec![
+            demand(2, 40, 0, 0),        // P: pinned N0, weight 2
+            demand_spread(1, 0, 0, 40), // S: spread, weight 1
+            demand(1, 0, 0, 60),        // L: unpinned, weight 1
+        ];
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+
+        assert_eq!(allocs[0].total(), 40); // P: demand-capped
+        assert_eq!(allocs[1].unpinned[0], 8); // S: capped at min(avail)
+        assert_eq!(allocs[1].unpinned[1], 8);
+        assert_eq!(allocs[1].total(), 16); // S: 8*2
+        assert_eq!(allocs[2].total(), 40); // L: 28 + 12 freed
+        assert_eq!(total_alloc(&allocs), 96);
+    }
+
+    // Multiple spread layers fairly share bottleneck capacity.
+    //
+    // P(w=1, pinned N0 40) + S1(w=1, spread 20) + S2(w=1, spread 20).
+    // Water-fill: P=40 (capped). S1=28, S2=28.
+    // spread_avail = [8, 48]. pool = 8.
+    // water_fill(8, [S1(d=14), S2(d=14)]) → [4, 4].
+    // S1: 4/node = 8. S2: 4/node = 8. freed = 40 (nobody to absorb).
+    #[test]
+    fn test_ua_spread_multi_cap() {
+        let demands = vec![
+            demand(1, 40, 0, 0),        // P: pinned N0
+            demand_spread(1, 0, 0, 20), // S1: spread
+            demand_spread(1, 0, 0, 20), // S2: spread
+        ];
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+
+        assert_eq!(allocs[0].total(), 40); // P: demand-capped
+                                           // Both spread layers get equal share of bottleneck.
+        assert_eq!(allocs[1].unpinned[0], 4);
+        assert_eq!(allocs[1].unpinned[1], 4);
+        assert_eq!(allocs[1].total(), 8);
+        assert_eq!(allocs[2].unpinned[0], 4);
+        assert_eq!(allocs[2].unpinned[1], 4);
+        assert_eq!(allocs[2].total(), 8);
     }
 }
