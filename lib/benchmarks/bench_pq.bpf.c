@@ -15,18 +15,36 @@
  * bpf_prog_test_run(). The hot loop runs entirely in BPF with
  * bpf_ktime_get_ns() timing, eliminating userspace jitter.
  *
+ * All benchmarks use monotonically increasing vtimes with random
+ * deltas (vtime += random_delta), matching real scheduler workloads
+ * where each task's vtime advances by its consumed CPU time.
+ *
  * ATQ operations use __weak wrappers because the ATQ API functions
  * (scx_atq_pop, scx_atq_insert_vtime) are __hidden and call __weak
  * rbtree functions under the arena spinlock. The BPF verifier
  * forbids calling __weak globals from preempt-disabled context in
  * SEC("syscall") programs, but __weak wrappers are verified
- * independently with different rules.
+ * independently with different rules. The wrappers also prevent
+ * the verifier from hitting jump complexity limits when the __hidden
+ * ATQ functions are inlined into loops.
  */
 
 #include <scx/common.bpf.h>
 #include <lib/sdt_task.h>
 #include <lib/rpq.h>
 #include <lib/atq.h>
+
+/*
+ * Generate monotonically increasing vtime with random delta.
+ * Each call advances *vtime by a random amount in [1, 1024),
+ * simulating variable CPU time consumption between enqueues.
+ */
+static __always_inline u64
+bench_next_vtime(u64 *vtime)
+{
+	*vtime += (bpf_get_prandom_u32() & 1023) + 1;
+	return *vtime;
+}
 
 /* --- Global shared benchmark state (initialized once) --- */
 
@@ -54,73 +72,49 @@ struct bench_run_args {
 /*
  * ATQ __weak wrappers.
  *
- * ATQ functions (scx_atq_pop, scx_atq_insert_vtime) are __hidden
- * and internally acquire the arena spinlock + call __weak rbtree
- * functions. SEC("syscall") programs cannot call them directly
- * (the verifier inlines __hidden and sees the spinlock+global
- * pattern). Wrapping in __weak makes the verifier treat the call
- * as "assumed valid" from the SEC("syscall") perspective.
+ * Each wrapper is a single ATQ operation verified independently
+ * by the BPF verifier. This prevents the __hidden ATQ functions
+ * from being inlined into loops (which would blow the verifier's
+ * jump complexity limit).
  */
 
 __weak
-int bench_atq_init_internal(u64 prepopulate_count)
+int bench_atq_do_insert(scx_atq_t __arg_arena *atq,
+			scx_task_common __arg_arena *taskc, u64 vtime)
 {
-	volatile scx_task_common *taskc;
-	u64 key;
-	int ret, i;
-
-	bench_atq = (scx_atq_t *)scx_atq_create(false);
-	if (!bench_atq)
-		return -ENOMEM;
-
-	bpf_for(i, 0, prepopulate_count) {
-		taskc = scx_static_alloc(sizeof(*taskc), 8);
-		if (!taskc)
-			return -ENOMEM;
-
-		taskc->atq = NULL;
-		taskc->state = SCX_TSK_CANRUN;
-
-		key = bpf_get_prandom_u32();
-		ret = scx_atq_insert_vtime(bench_atq,
-					   (scx_task_common *)taskc, key);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
+	return scx_atq_insert_vtime(atq, taskc, vtime);
 }
 
 /*
  * Combined pop+insert for ATQ. Pops one element and re-inserts
- * it with a new random vtime. Each call = 2 operations.
+ * it with a new monotonically increasing vtime. Each call = 2
+ * operations.
  *
  * Returns 0 on success (both pop and insert succeeded),
  * 1 if pop failed (queue empty), negative errno on insert error.
  */
 __weak
-int bench_atq_pop_insert(scx_atq_t __arg_arena *atq)
+int bench_atq_pop_insert(scx_atq_t __arg_arena *atq, u64 vtime)
 {
 	scx_task_common *taskc;
-	u64 ptr, vtime;
+	u64 ptr;
 
 	ptr = scx_atq_pop(atq);
 	if (!ptr)
 		return 1;
 
 	taskc = (scx_task_common *)ptr;
-	vtime = bpf_get_prandom_u32();
 
 	return scx_atq_insert_vtime(atq, taskc, vtime);
 }
 
 /*
- * Initialize all benchmark data structures.
+ * Initialize RPQ benchmark data structures.
  */
 SEC("syscall")
 int bench_init(struct bench_init_args *args)
 {
-	u64 key;
+	u64 vtime = 0;
 	int ret, i;
 
 	/* Create multi-queue RPQ */
@@ -134,9 +128,9 @@ int bench_init(struct bench_init_args *args)
 	if (!bench_rpq_single)
 		return -ENOMEM;
 
-	/* Pre-populate RPQs with random elements */
+	/* Pre-populate RPQs with monotonically increasing vtimes */
 	bpf_for(i, 0, args->prepopulate_count) {
-		key = bpf_get_prandom_u32();
+		u64 key = bench_next_vtime(&vtime);
 
 		ret = rpq_insert(bench_rpq_multi, key, key);
 		if (ret && ret != -ENOSPC)
@@ -147,10 +141,42 @@ int bench_init(struct bench_init_args *args)
 			return ret;
 	}
 
-	/* Create and populate ATQ via __weak helper */
-	ret = bench_atq_init_internal(args->prepopulate_count);
-	if (ret)
-		return ret;
+	return 0;
+}
+
+/*
+ * Initialize ATQ benchmark data structure.
+ *
+ * Separate SEC("syscall") from bench_init to stay within the BPF
+ * verifier's jump complexity budget. Uses the __weak
+ * bench_atq_do_insert wrapper so the inlined __hidden ATQ code
+ * doesn't compound with the loop's branch count.
+ */
+SEC("syscall")
+int bench_init_atq(struct bench_init_args *args)
+{
+	volatile scx_task_common *taskc;
+	u64 vtime = 0;
+	int ret, i;
+
+	bench_atq = (scx_atq_t *)scx_atq_create(false);
+	if (!bench_atq)
+		return -ENOMEM;
+
+	bpf_for(i, 0, args->prepopulate_count) {
+		taskc = scx_static_alloc(sizeof(*taskc), 8);
+		if (!taskc)
+			return -ENOMEM;
+
+		taskc->atq = NULL;
+		taskc->state = SCX_TSK_CANRUN;
+
+		ret = bench_atq_do_insert(bench_atq,
+					  (scx_task_common *)taskc,
+					  bench_next_vtime(&vtime));
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
@@ -164,6 +190,7 @@ int bench_run_rpq(struct bench_run_args *args)
 	u64 nr_ops = args->nr_ops;
 	u64 inserts_ok = 0, inserts_fail = 0;
 	u64 pops_ok = 0, pops_fail = 0;
+	u64 vtime = 0;
 	u64 start, end;
 	u64 elem, key;
 	int ret, i;
@@ -181,7 +208,7 @@ int bench_run_rpq(struct bench_run_args *args)
 			else
 				pops_fail++;
 		} else {
-			key = bpf_get_prandom_u32();
+			key = bench_next_vtime(&vtime);
 			ret = rpq_insert(bench_rpq_multi, key, key);
 			if (ret == 0)
 				inserts_ok++;
@@ -210,6 +237,7 @@ int bench_run_single(struct bench_run_args *args)
 	u64 nr_ops = args->nr_ops;
 	u64 inserts_ok = 0, inserts_fail = 0;
 	u64 pops_ok = 0, pops_fail = 0;
+	u64 vtime = 0;
 	u64 start, end;
 	u64 elem, key;
 	int ret, i;
@@ -227,7 +255,7 @@ int bench_run_single(struct bench_run_args *args)
 			else
 				pops_fail++;
 		} else {
-			key = bpf_get_prandom_u32();
+			key = bench_next_vtime(&vtime);
 			ret = rpq_insert(bench_rpq_single, key, key);
 			if (ret == 0)
 				inserts_ok++;
@@ -251,8 +279,9 @@ int bench_run_single(struct bench_run_args *args)
  * ATQ throughput benchmark (single-lock rbtree baseline).
  *
  * Each iteration does a pop+insert cycle (2 operations) via the
- * __weak bench_atq_pop_insert wrapper. The reported nr_ops is
- * halved so total operation count matches the RPQ benchmarks.
+ * __weak bench_atq_pop_insert wrapper, using monotonically
+ * increasing vtimes. The nr_ops is halved so total operation
+ * count matches the RPQ benchmarks.
  */
 SEC("syscall")
 int bench_run_atq(struct bench_run_args *args)
@@ -260,6 +289,7 @@ int bench_run_atq(struct bench_run_args *args)
 	u64 nr_ops = args->nr_ops;
 	u64 inserts_ok = 0, inserts_fail = 0;
 	u64 pops_ok = 0, pops_fail = 0;
+	u64 vtime = 0;
 	u64 start, end;
 	int ret, i;
 
@@ -274,7 +304,8 @@ int bench_run_atq(struct bench_run_args *args)
 	start = bpf_ktime_get_ns();
 
 	bpf_for(i, 0, nr_ops / 2) {
-		ret = bench_atq_pop_insert(bench_atq);
+		ret = bench_atq_pop_insert(bench_atq,
+					   bench_next_vtime(&vtime));
 		if (ret == 0) {
 			pops_ok++;
 			inserts_ok++;

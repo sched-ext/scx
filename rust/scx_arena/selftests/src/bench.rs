@@ -294,7 +294,7 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Call bench_init SEC("syscall") to create RPQ + rbtree and prepopulate.
+/// Call bench_init SEC("syscall") to create RPQs and prepopulate.
 fn bench_init_bpf(skel: &mut BpfSkel<'_>, args: &Args) -> Result<()> {
     let nr_queues = args.queues.unwrap_or((2 * args.threads) as u32);
 
@@ -318,6 +318,32 @@ fn bench_init_bpf(skel: &mut BpfSkel<'_>, args: &Args) -> Result<()> {
     if output.return_value != 0 {
         bail!(
             "bench_init returned {} (BPF error)",
+            output.return_value as i32
+        );
+    }
+
+    // ATQ init is in a separate SEC("syscall") to avoid
+    // hitting the BPF verifier's jump complexity limit.
+    let mut atq_args = types::bench_init_args {
+        rpq_nr_queues: 0 as c_ulong,
+        rpq_per_queue_cap: 0 as c_ulong,
+        prepopulate_count: args.prepopulate as c_ulong,
+    };
+
+    let input = ProgramInput {
+        context_in: Some(unsafe {
+            std::slice::from_raw_parts_mut(
+                &mut atq_args as *mut _ as *mut u8,
+                std::mem::size_of_val(&atq_args),
+            )
+        }),
+        ..Default::default()
+    };
+
+    let output = skel.progs.bench_init_atq.test_run(input)?;
+    if output.return_value != 0 {
+        bail!(
+            "bench_init_atq returned {} (BPF error)",
             output.return_value as i32
         );
     }
