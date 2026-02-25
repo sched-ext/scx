@@ -118,12 +118,18 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 .performance_state()
                 .unwrap_or(PerformanceState::Unknown);
 
-            // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
-            // uppercase bus ID values and an extra four leading 0s.
-            let bus_id = pci_info.bus_id.to_lowercase();
-            let fixed_bus_id = bus_id.strip_prefix("0000").unwrap_or("");
-            let numa_path = format!("/sys/bus/pci/devices/{}/numa_node", fixed_bus_id);
-            let numa_node = read_from_file(Path::new(&numa_path)).unwrap_or(0_usize);
+            let numa_node = nvidia_gpu
+                .numa_node_id()
+                .map(|i| i as usize)
+                .unwrap_or_else(|_| {
+                    // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
+                    // uppercase bus ID values and an extra four leading 0s.
+                    // FIXME: is it necessarily always 4 leading 0s ?
+                    let bus_id = pci_info.bus_id.to_lowercase();
+                    let fixed_bus_id = bus_id.strip_prefix("0000").unwrap_or("");
+                    let numa_path = format!("/sys/bus/pci/devices/{}/numa_node", fixed_bus_id);
+                    read_from_file(Path::new(&numa_path)).unwrap_or(0_usize)
+                });
 
             let gpu = Gpu {
                 index: GpuIndex::Nvidia { nvml_id: index },
