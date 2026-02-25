@@ -58,7 +58,7 @@ u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 }
 
 __weak
-int rb_destroy(rbtree_t *rbtree)
+int rb_destroy(rbtree_t __arg_arena *rbtree)
 {
 	rbnode_t *node, *next;
 	int ret;
