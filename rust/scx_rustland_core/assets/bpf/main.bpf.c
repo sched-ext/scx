@@ -987,14 +987,12 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	 * more than USERSCHED_TIMER_NS.
 	 */
 	if (time_delta(scx_bpf_now(), usersched_last_run_at) >= USERSCHED_TIMER_NS) {
-		bpf_rcu_read_lock();
 		p = bpf_task_from_pid(usersched_pid);
 		if (p) {
 			set_usersched_needed();
 			scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
 			bpf_task_release(p);
 		}
-		bpf_rcu_read_unlock();
 	}
 
 	/* Re-arm the timer */
