@@ -41,6 +41,7 @@ pub fn monitor_loop(
     sched: &mut Scheduler,
     shutdown: &'static AtomicBool,
     verbose: bool,
+    nr_cpus: u64,
 ) -> Result<bool> {
     let mut prev = PandemoniumStats::default();
     let mut prev_hist = [[0u64; HIST_BUCKETS]; 3];
@@ -58,7 +59,9 @@ pub fn monitor_loop(
     let mut tick_counter: u64 = 0;
     let mut tighten_events: u64 = 0;
     let mut prev_tighten_events: u64 = 0;
-    let mut sojourn_thresh_ns: u64 = 5_000_000; // 5MS INITIAL (CODEL UNIVERSAL TARGET)
+    let sojourn_floor_ns: u64 = 5_000_000u64.max(1_000_000 * (nr_cpus / 2));
+    let sojourn_ceil_ns: u64 = sojourn_floor_ns * 2;
+    let mut sojourn_thresh_ns: u64 = sojourn_floor_ns;
 
     let mut procdb = match ProcessDb::new() {
         Ok(db) => Some(db),
@@ -72,7 +75,9 @@ pub fn monitor_loop(
     sched.write_tuning_knobs(&regime_knobs(regime))?;
 
     while !shutdown.load(Ordering::Relaxed) && !sched.exited() {
+        let tick_start = std::time::Instant::now();
         std::thread::sleep(Duration::from_secs(1));
+        let elapsed_ns = tick_start.elapsed().as_nanos() as u64;
 
         let stats = sched.read_stats();
 
@@ -88,6 +93,9 @@ pub fn monitor_loop(
         let delta_soft = stats.nr_soft_kicks.wrapping_sub(prev.nr_soft_kicks);
         let delta_enq_wake = stats.nr_enq_wakeup.wrapping_sub(prev.nr_enq_wakeup);
         let delta_enq_requeue = stats.nr_enq_requeue.wrapping_sub(prev.nr_enq_requeue);
+        let delta_rescue = stats
+            .nr_overflow_rescue
+            .wrapping_sub(prev.nr_overflow_rescue);
         let wake_avg_us = if delta_wake_samples > 0 {
             delta_wake_sum / delta_wake_samples / 1000
         } else {
@@ -266,21 +274,39 @@ pub fn monitor_loop(
 
         // SLEEP-INFORMED BATCH TUNING (EVERY TICK)
         let baseline = regime_knobs(regime);
-        let sleep_batch = tuning::sleep_adjust_batch_ns(baseline.batch_slice_ns, io_pct);
+        let longrun_active = stats.longrun_mode_active > 0;
 
-        let final_batch = sleep_batch;
+        // LONGRUN OVERRIDE: DURING SUSTAINED BATCH PRESSURE (>2S),
+        // USE BASE BATCH SLICE (SKIP SLEEP ADJUSTMENT -- LONG-RUNNERS ARE
+        // CPU-BOUND, NOT IO-BOUND) AND WEAKEN AFFINITY TO SPREAD BATCH
+        // TASKS ACROSS MORE CPUS INSTEAD OF CONCENTRATING ON HOTSPOTS.
+        // BURST IS OWNED ENTIRELY BY BPF (CUSUM + WAKEUP RATE IN TICK).
+        let final_batch = if longrun_active {
+            baseline.batch_slice_ns
+        } else {
+            tuning::sleep_adjust_batch_ns(baseline.batch_slice_ns, io_pct)
+        };
+        let final_affinity = if longrun_active {
+            tuning::AFFINITY_WEAK
+        } else {
+            baseline.affinity_mode
+        };
 
         // DISPATCH-RATE ADAPTIVE SOJOURN THRESHOLD
         // MEASURE, DON'T ASSUME. DISPATCH RATE REFLECTS ACTUAL SYSTEM
         // CAPACITY (PHYSICAL CORES, SMT, FREQUENCY, WORKLOAD INTENSITY).
-        const SOJOURN_FLOOR_NS: u64 = 5_000_000; // 5MS MINIMUM (CODEL TARGET)
-        const SOJOURN_CEIL_NS: u64 = 10_000_000; // 10MS MAXIMUM
+        // NORMALIZED TO ACTUAL ELAPSED TIME (SLEEP OVERSHOOTS UNDER LOAD).
         const SOJOURN_MULTIPLIER: u64 = 4; // 4X DISPATCH INTERVAL
 
-        if delta_d > 0 {
-            let interval_ns = 1_000_000_000 / delta_d;
+        if delta_d > 0 && elapsed_ns > 0 {
+            let dispatch_rate = delta_d * 1_000_000_000 / elapsed_ns;
+            let interval_ns = if dispatch_rate > 0 {
+                1_000_000_000 / dispatch_rate
+            } else {
+                0
+            };
             let target =
-                (interval_ns * SOJOURN_MULTIPLIER).clamp(SOJOURN_FLOOR_NS, SOJOURN_CEIL_NS);
+                (interval_ns * SOJOURN_MULTIPLIER).clamp(sojourn_floor_ns, sojourn_ceil_ns);
             // EWMA: 7/8 OLD + 1/8 NEW (SMOOTH, NO JITTER)
             sojourn_thresh_ns = sojourn_thresh_ns - (sojourn_thresh_ns >> 3) + (target >> 3);
         }
@@ -289,10 +315,12 @@ pub fn monitor_loop(
             let current = sched.read_tuning_knobs();
             if current.batch_slice_ns != final_batch
                 || current.sojourn_thresh_ns != sojourn_thresh_ns
+                || current.affinity_mode != final_affinity
             {
                 sched.write_tuning_knobs(&TuningKnobs {
                     batch_slice_ns: final_batch,
                     sojourn_thresh_ns,
+                    affinity_mode: final_affinity,
                     ..current
                 })?;
             }
@@ -327,15 +355,17 @@ pub fn monitor_loop(
 
         let sojourn_ms = stats.batch_sojourn_ns / 1_000_000;
         let sojourn_thresh_ms = sojourn_thresh_ns / 1_000_000;
-        let burst_label = if stats.burst_mode_active > 0 {
-            " BURST"
+        let delta_burst = stats.burst_mode_active.wrapping_sub(prev.burst_mode_active);
+        let burst_label = if delta_burst > 0 { " BURST" } else { "" };
+        let longrun_label = if stats.longrun_mode_active > 0 {
+            " LONGRUN"
         } else {
             ""
         };
 
         if verbose && tuning::should_print_telemetry(tick_counter, stability_score) {
             println!(
-                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us procdb: {}/{} sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms l2: B={}% I={}% L={}% [{}{}]",
+                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us procdb: {}/{} sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms rescue: {} l2: B={}% I={}% L={}% [{}{}{}]",
                 delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
                 delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
                 wake_avg_us, p99_us, tp99_b, tp99_i, tp99_l,
@@ -343,7 +373,8 @@ pub fn monitor_loop(
                 db_total, db_confident,
                 io_pct, knobs.slice_ns / 1000, knobs.batch_slice_ns / 1000,
                 delta_reenq, sojourn_ms, sojourn_thresh_ms,
-                l2_pct_b, l2_pct_i, l2_pct_l, regime.label(), burst_label,
+                delta_rescue,
+                l2_pct_b, l2_pct_i, l2_pct_l, regime.label(), burst_label, longrun_label,
             );
         }
 

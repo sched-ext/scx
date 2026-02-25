@@ -4,7 +4,9 @@ PANDEMONIUM build/run/install manager.
 
 Usage:
     ./pandemonium.py bench-scale  Unified throughput + latency benchmark
-    ./pandemonium.py bench-sys    Live system telemetry capture (Ctrl+C to stop)
+    ./pandemonium.py bench-trace       Crash-detection stress test with trace capture
+    ./pandemonium.py bench-contention  Contention stress test for v5.4.x features
+    ./pandemonium.py bench-sys         Live system telemetry capture (Ctrl+C to stop)
     ./pandemonium.py install      Build + install + activate systemd service
     ./pandemonium.py clean        Wipe build artifacts
     ./pandemonium.py status       Show build/install status
@@ -197,6 +199,18 @@ def main() -> int:
         return subprocess.run(
             [sys.executable, str(SCRIPT_DIR / "tests" / "pandemonium-tests.py"),
              "bench-scale"] + sys.argv[2:],
+            cwd=SCRIPT_DIR,
+        ).returncode
+    elif cmd == "bench-trace":
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "tests" / "pandemonium-tests.py"),
+             "bench-trace"] + sys.argv[2:],
+            cwd=SCRIPT_DIR,
+        ).returncode
+    elif cmd == "bench-contention":
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "tests" / "pandemonium-tests.py"),
+             "bench-contention"] + sys.argv[2:],
             cwd=SCRIPT_DIR,
         ).returncode
     elif cmd == "bench-sys":

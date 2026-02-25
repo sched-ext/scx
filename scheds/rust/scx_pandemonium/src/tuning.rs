@@ -71,6 +71,7 @@ pub struct TuningKnobs {
     pub lat_cri_thresh_low: u64,
     pub affinity_mode: u64,
     pub sojourn_thresh_ns: u64,
+    pub burst_slice_ns: u64,
 }
 
 impl Default for TuningKnobs {
@@ -85,6 +86,7 @@ impl Default for TuningKnobs {
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_OFF,
             sojourn_thresh_ns: 5_000_000,
+            burst_slice_ns: 1_000_000,
         }
     }
 }
@@ -131,6 +133,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
             sojourn_thresh_ns: 5_000_000,
+            burst_slice_ns: 1_000_000,
         },
         Regime::Mixed => TuningKnobs {
             slice_ns: MIXED_SLICE_NS,
@@ -142,6 +145,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_STRONG,
             sojourn_thresh_ns: 5_000_000,
+            burst_slice_ns: 1_000_000,
         },
         Regime::Heavy => TuningKnobs {
             slice_ns: HEAVY_SLICE_NS,
@@ -153,6 +157,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
             sojourn_thresh_ns: 5_000_000,
+            burst_slice_ns: 1_000_000,
         },
     }
 }
