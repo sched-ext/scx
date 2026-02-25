@@ -28,6 +28,129 @@ use crate::bpf_skel::BpfSkel;
 
 use crate::topology::TopologyInfo;
 
+/// System hardware and kernel information, collected once at startup.
+#[derive(Clone, Debug)]
+pub struct SystemInfo {
+    pub cpu_model: String,
+    pub cpu_arch: String,
+    pub phys_cores: usize,
+    pub logical_cpus: usize,
+    pub smt_enabled: bool,
+    pub dual_ccd: bool,
+    pub has_vcache: bool,
+    pub has_hybrid: bool,
+    pub total_ram_mb: u64,
+    pub kernel_version: String,
+}
+
+impl SystemInfo {
+    pub fn detect(topo: &TopologyInfo) -> Self {
+        // CPU model from /proc/cpuinfo
+        let cpu_model = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("model name"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|v| v.trim().to_string())
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        // Architecture from uname
+        let cpu_arch = std::fs::read_to_string("/proc/sys/kernel/arch")
+            .map(|s| s.trim().to_string())
+            .or_else(|_| {
+                // Fallback: parse from uname -m via /proc
+                std::process::Command::new("uname")
+                    .arg("-m")
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            })
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        // Total RAM from /proc/meminfo
+        let total_ram_mb = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("MemTotal:"))
+                    .and_then(|l| {
+                        l.split_whitespace()
+                            .nth(1)
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+            })
+            .map(|kb| kb / 1024)
+            .unwrap_or(0);
+
+        // Kernel version from /proc/version
+        let kernel_version = std::fs::read_to_string("/proc/version")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(2).map(|v| v.to_string()))
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        Self {
+            cpu_model,
+            cpu_arch,
+            phys_cores: topo.nr_phys_cpus,
+            logical_cpus: topo.nr_cpus,
+            smt_enabled: topo.smt_enabled,
+            dual_ccd: topo.has_dual_ccd,
+            has_vcache: topo.has_vcache,
+            has_hybrid: topo.has_hybrid_cores,
+            total_ram_mb,
+            kernel_version,
+        }
+    }
+
+    /// Format as a multi-line header for dump files and clipboard
+    pub fn format_header(&self) -> String {
+        let ram_display = if self.total_ram_mb >= 1024 {
+            format!("{:.1} GB", self.total_ram_mb as f64 / 1024.0)
+        } else {
+            format!("{} MB", self.total_ram_mb)
+        };
+        let smt_label = if self.smt_enabled {
+            "SMT ON"
+        } else {
+            "SMT OFF"
+        };
+
+        // Build topology tags
+        let mut topo_tags = Vec::new();
+        if self.dual_ccd {
+            topo_tags.push("Dual-CCD");
+        }
+        if self.has_vcache {
+            topo_tags.push("V-Cache");
+        }
+        if self.has_hybrid {
+            topo_tags.push("Hybrid P+E");
+        }
+        let topo_str = if topo_tags.is_empty() {
+            "Symmetric".to_string()
+        } else {
+            topo_tags.join(", ")
+        };
+
+        format!(
+            "=== System Info ===\n\
+             CPU:    {} ({})\n\
+             Cores:  {}P/{}T ({})  [{}]\n\
+             RAM:    {}\n\
+             Kernel: {}\n",
+            self.cpu_model,
+            self.cpu_arch,
+            self.phys_cores,
+            self.logical_cpus,
+            smt_label,
+            topo_str,
+            ram_display,
+            self.kernel_version,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TuiTab {
     Dashboard = 0,
@@ -90,6 +213,12 @@ pub enum SortColumn {
     Enqueue,
     Gate1Pct,
     Jitter,
+    Tier,
+    Ewma,
+    Vcsw,
+    Hog,
+    RunsPerSec,
+    Gap,
 }
 
 /// TUI Application state
@@ -104,24 +233,32 @@ pub struct TuiApp {
     pub bench_table_state: TableState,
     pub active_tab: TuiTab,
     pub sort_column: SortColumn,
+    pub sort_descending: bool,
     pub selected_pid: Option<u32>,
     pub sys: System,
     pub components: Components,
-    pub cpu_stats: Vec<(f32, f32)>, // (Load %, Temp C)
-    pub show_all_tasks: bool,       // false = BPF-tracked only, true = all
-    pub arena_active: usize,        // Arena slots with tid != 0
-    pub arena_max: usize,           // Arena pool max_elems
-    pub bpf_task_count: usize,      // Tasks with total_runs > 0
-    pub prev_task_rows: HashMap<u32, TaskTelemetryRow>, // Previous tick for delta mode
-    pub _prev_stats: Option<cake_stats>, // Previous global stats for rate calc
+    pub cpu_stats: Vec<(f32, f32)>,            // (Load %, Temp C)
+    pub show_all_tasks: bool,                  // false = BPF-tracked only, true = all
+    pub arena_active: usize,                   // Arena slots with tid != 0
+    pub arena_max: usize,                      // Arena pool max_elems
+    pub bpf_task_count: usize,                 // Tasks with total_runs > 0
+    pub prev_deltas: HashMap<u32, (u32, u16)>, // (total_runs, migration_count) — lightweight delta snapshot
+    pub active_pids_buf: std::collections::HashSet<u32>, // Reused per-tick to avoid alloc
+    pub collapsed_tgids: std::collections::HashSet<u32>, // Collapsed process groups
+    pub _prev_stats: Option<cake_stats>,       // Previous global stats for rate calc
     // BenchLab cached results
-    pub bench_entries: [(u64, u64, u64, u64); 24], // (min_ns, max_ns, total_ns, last_value)
+    pub bench_entries: [(u64, u64, u64, u64); 50], // (min_ns, max_ns, total_ns, last_value)
     pub bench_samples: Vec<Vec<u64>>, // Per-entry accumulated raw samples for percentiles
     pub bench_cpu: u32,
     pub bench_iterations: u32,
     pub bench_timestamp: u64,
     pub bench_run_count: u32,
     pub last_bench_timestamp: u64, // to detect new results
+    pub system_info: SystemInfo,
+    // Game TGID detection: process-level yielder promotion
+    pub tracked_game_tgid: u32, // currently detected game tgid (0 = none)
+    pub game_thread_count: usize, // thread count for detected game
+    pub game_name: String,      // process name from /proc/{tgid}/comm
 }
 
 #[derive(Clone, Debug)]
@@ -132,7 +269,7 @@ pub struct TaskTelemetryRow {
     pub avg_runtime_us: u32,
     pub deficit_us: u32,
     pub wait_duration_ns: u64,
-    pub gate_hit_pcts: [f64; 7], // G1, G2, G1W, G3, G1P, G1C, GTUN
+    pub gate_hit_pcts: [f64; 9], // G1, G2, G1W, G3, G1P, G1C, G1D, G1WC, GTUN
     pub select_cpu_ns: u32,
     pub enqueue_ns: u32,
     pub core_placement: u16,
@@ -168,6 +305,7 @@ pub struct TaskTelemetryRow {
     pub nvcsw_delta: u32,
     pub nivcsw_delta: u32,
     pub ewma_recomp_count: u16,
+    pub is_hog: bool, // Hog squeeze: BULK + non-yielder + deprioritized
 }
 
 impl Default for TaskTelemetryRow {
@@ -179,7 +317,7 @@ impl Default for TaskTelemetryRow {
             avg_runtime_us: 0,
             deficit_us: 0,
             wait_duration_ns: 0,
-            gate_hit_pcts: [0.0; 7],
+            gate_hit_pcts: [0.0; 9],
             select_cpu_ns: 0,
             enqueue_ns: 0,
             core_placement: 0,
@@ -210,6 +348,7 @@ impl Default for TaskTelemetryRow {
             nvcsw_delta: 0,
             nivcsw_delta: 0,
             ewma_recomp_count: 0,
+            is_hog: false,
         }
     }
 }
@@ -239,6 +378,14 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.nr_stop_ewma += s.nr_stop_ewma;
             total.nr_stop_ramp += s.nr_stop_ramp;
             total.nr_stop_miss += s.nr_stop_miss;
+
+            // Dispatch locality (cake_dispatch stats)
+            total.nr_local_dispatches += s.nr_local_dispatches;
+            total.nr_stolen_dispatches += s.nr_stolen_dispatches;
+            total.nr_dispatch_misses += s.nr_dispatch_misses;
+            total.nr_dispatch_hint_skip += s.nr_dispatch_hint_skip;
+            total.nr_dsq_queued += s.nr_dsq_queued;
+            total.nr_dsq_consumed += s.nr_dsq_consumed;
         }
     }
 
@@ -255,6 +402,9 @@ impl TuiApp {
 
         let components = Components::new_with_refreshed_list();
 
+        // Collect system info once at startup (cold path only)
+        let system_info = SystemInfo::detect(&topology);
+
         Self {
             start_time: Instant::now(),
             status_message: None,
@@ -266,6 +416,7 @@ impl TuiApp {
             bench_table_state: TableState::default(),
             active_tab: TuiTab::Dashboard,
             sort_column: SortColumn::RunDuration,
+            sort_descending: true,
             selected_pid: None,
             sys,
             components,
@@ -274,15 +425,21 @@ impl TuiApp {
             arena_active: 0,
             arena_max: 0,
             bpf_task_count: 0,
-            prev_task_rows: HashMap::new(),
+            prev_deltas: HashMap::new(),
+            active_pids_buf: std::collections::HashSet::new(),
+            collapsed_tgids: std::collections::HashSet::new(),
             _prev_stats: None,
-            bench_entries: [(0, 0, 0, 0); 24],
-            bench_samples: vec![Vec::new(); 24],
+            bench_entries: [(0, 0, 0, 0); 50],
+            bench_samples: vec![Vec::new(); 50],
             bench_cpu: 0,
             bench_iterations: 0,
             bench_timestamp: 0,
             bench_run_count: 0,
             last_bench_timestamp: 0,
+            system_info,
+            tracked_game_tgid: 0,
+            game_thread_count: 0,
+            game_name: String::new(),
         }
     }
 
@@ -334,7 +491,13 @@ impl TuiApp {
             SortColumn::Jitter => SortColumn::Gate1Pct,
             SortColumn::Gate1Pct => SortColumn::TargetCpu,
             SortColumn::TargetCpu => SortColumn::Pid,
-            SortColumn::Pid => SortColumn::SelectCpu,
+            SortColumn::Pid => SortColumn::Tier,
+            SortColumn::Tier => SortColumn::Ewma,
+            SortColumn::Ewma => SortColumn::Vcsw,
+            SortColumn::Vcsw => SortColumn::Hog,
+            SortColumn::Hog => SortColumn::RunsPerSec,
+            SortColumn::RunsPerSec => SortColumn::Gap,
+            SortColumn::Gap => SortColumn::SelectCpu,
             SortColumn::SelectCpu => SortColumn::Enqueue,
             SortColumn::Enqueue => SortColumn::RunDuration,
         };
@@ -715,31 +878,69 @@ impl<'a> Widget for LatencyTable<'a> {
 
 /// Format BenchLab results as a copyable text string (tab-specific copy)
 fn format_bench_for_clipboard(app: &TuiApp) -> String {
-    let bench_items: &[(usize, &str, &str)] = &[
-        (0, "bpf_ktime_get_ns()", "Kfuncs"),
-        (1, "scx_bpf_now()", "Kfuncs"),
-        (2, "bpf_get_smp_proc_id()", "Kfuncs"),
-        (3, "bpf_task_from_pid()", "Kfuncs"),
-        (4, "test_and_clear_idle()", "Kfuncs"),
-        (5, "scx_bpf_nr_cpu_ids()", "Kfuncs"),
-        (6, "get_task_ctx() [arena]", "Kfuncs"),
-        (7, "scx_bpf_dsq_nr_queued()", "Kfuncs"),
-        (13, "ringbuf reserve+discard", "Kfuncs"),
-        (8, "BSS global_stats[cpu]", "Data Access"),
-        (9, "Arena per_cpu.mbox", "Data Access"),
-        (14, "task_struct p->scx+nvcsw", "Data Access"),
-        (15, "RODATA llc+tier_slice", "Data Access"),
-        (11, "Mbox CL0 cached CPU", "Mailbox CL0"),
-        (12, "Mbox CL0 tctx+deref", "Mailbox CL0"),
-        (18, "CL0 ptr+fused+packed", "Mailbox CL0"),
-        (21, "Disruptor CL0 full read", "Mailbox CL0"),
-        (10, "Timing harness (cal)", "Composite"),
-        (16, "Bitflag shift+mask+brless", "Composite"),
-        (17, "compute_ewma() full", "Composite"),
-        (22, "get_task_ctx+arena CL0", "Composite"),
-        (19, "idle_probe(remote) MESI", "Idle Probes"),
-        (20, "smtmask read-only check", "Idle Probes"),
-        (23, "Arena stride (TLB/hugepage)", "TLB/Memory"),
+    // (index, name, category, source: K=kernel kfunc, C=cake custom code)
+    // Groups: kfunc baseline first, then cake replacements. SPEED is per-group.
+    let bench_items: &[(usize, &str, &str, &str)] = &[
+        // Timing: all available clock sources
+        (0, "bpf_ktime_get_ns()", "Timing", "K"),
+        (1, "scx_bpf_now()", "Timing", "K"),
+        (24, "bpf_ktime_get_boot_ns()", "Timing", "K"),
+        (10, "Timing harness (cal)", "Timing", "C"),
+        // Task Lookup: kfunc vs arena direct access
+        (3, "bpf_task_from_pid()", "Task Lookup", "K"),
+        (29, "bpf_get_current_task_btf()", "Task Lookup", "K"),
+        (36, "bpf_task_storage_get()", "Task Lookup", "K"),
+        (6, "get_task_ctx() [arena]", "Task Lookup", "C"),
+        (22, "get_task_ctx+arena CL0", "Task Lookup", "C"),
+        // Process Info: kfunc alternatives
+        (28, "bpf_get_current_pid_tgid()", "Process Info", "K"),
+        (30, "bpf_get_current_comm()", "Process Info", "K"),
+        (14, "task_struct p->scx+nvcsw", "Process Info", "K"),
+        (32, "scx_bpf_task_running(p)", "Process Info", "K"),
+        (33, "scx_bpf_task_cpu(p)", "Process Info", "K"),
+        (46, "Arena tctx.pid+tgid", "Process Info", "C"),
+        (47, "Mbox CL0 cached_cpu", "Process Info", "C"),
+        // CPU Identification: kfunc vs mailbox cached
+        (2, "bpf_get_smp_proc_id()", "CPU ID", "K"),
+        (31, "bpf_get_numa_node_id()", "CPU ID", "K"),
+        (11, "Mbox CL0 cached CPU", "CPU ID", "C"),
+        // Idle Probing: kfunc vs cake probes
+        (4, "test_and_clear_idle()", "Idle Probing", "K"),
+        (37, "scx_bpf_pick_idle_cpu()", "Idle Probing", "K"),
+        (38, "idle_cpumask get+put", "Idle Probing", "K"),
+        (19, "idle_probe(remote) MESI", "Idle Probing", "C"),
+        (20, "smtmask read-only check", "Idle Probing", "C"),
+        // Data Read: kernel struct vs cake data paths
+        (8, "BSS global_stats[cpu]", "Data Read", "C"),
+        (9, "Arena per_cpu.mbox", "Data Read", "C"),
+        (15, "RODATA llc+tier_slice", "Data Read", "C"),
+        // Mailbox CL0: cake's Disruptor handoff variants
+        (12, "Mbox CL0 tctx+deref", "Mailbox CL0", "C"),
+        (18, "CL0 ptr+fused+packed", "Mailbox CL0", "C"),
+        (21, "Disruptor CL0 full read", "Mailbox CL0", "C"),
+        // Composite: cake-only multi-step operations
+        (16, "Bitflag shift+mask+brless", "Composite Ops", "C"),
+        (17, "compute_ewma() full", "Composite Ops", "C"),
+        // DVFS / Performance: CPU frequency queries
+        (35, "scx_bpf_cpuperf_cur(cpu)", "DVFS / Perf", "K"),
+        (42, "scx_bpf_cpuperf_cap(cpu)", "DVFS / Perf", "K"),
+        (45, "RODATA cpuperf_cap[cpu]", "DVFS / Perf", "C"),
+        // Topology Constants: kfunc vs RODATA
+        (5, "scx_bpf_nr_cpu_ids()", "Topology", "K"),
+        (34, "scx_bpf_nr_node_ids()", "Topology", "K"),
+        (43, "RODATA nr_cpus const", "Topology", "C"),
+        (44, "RODATA nr_nodes const", "Topology", "C"),
+        // Standalone Kfuncs: reference costs
+        (7, "scx_bpf_dsq_nr_queued()", "Standalone Kfuncs", "K"),
+        (13, "ringbuf reserve+discard", "Standalone Kfuncs", "K"),
+        (39, "scx_bpf_kick_cpu(self)", "Standalone Kfuncs", "K"),
+        // Synchronization: lock/RNG costs
+        (41, "bpf_spin_lock+unlock", "Synchronization", "K"),
+        (40, "bpf_get_prandom_u32()", "Synchronization", "K"),
+        (48, "CL0 lock-free 3-field", "Synchronization", "C"),
+        (49, "BSS xorshift32 PRNG", "Synchronization", "C"),
+        // TLB/Memory: arena access pattern cost
+        (23, "Arena stride (TLB/hugepage)", "TLB/Memory", "C"),
     ];
 
     let percentile = |samples: &[u64], pct: f64| -> u64 {
@@ -752,27 +953,27 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         sorted[idx.min(sorted.len() - 1)]
     };
 
-    let baseline_avg = if app.bench_iterations > 0 {
-        app.bench_entries[0].2 / app.bench_iterations as u64
-    } else {
-        1
-    };
-
     let mut output = String::new();
+    // System hardware context header
+    output.push_str(&app.system_info.format_header());
+    output.push_str("\n");
     output.push_str(&format!(
         "=== BenchLab ({} runs, {} samples, CPU {}) ===\n\n",
         app.bench_run_count, app.bench_iterations, app.bench_cpu
     ));
     output.push_str(&format!(
-        "{:<30} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7}\n",
-        "HELPER", "MIN", "P1 LOW", "AVG", "P1 HIGH", "MAX", "SPEED"
+        "{:<30} {:>7} {:>7} {:>7} {:>7} {:>8} {:>7} {:>8} {:>7}\n",
+        "HELPER", "MIN", "P1 LOW", "P50", "AVG", "P1 HIGH", "MAX", "JITTER", "SPEED"
     ));
-    output.push_str(&format!("{}\n", "─".repeat(82)));
+    output.push_str(&format!("{}\n", "─".repeat(100)));
 
     let mut last_cat = "";
-    for &(idx, name, cat) in bench_items {
+    let mut cat_baseline: u64 = 1; // per-category baseline AVG
+    for &(idx, name, cat, src) in bench_items {
         if cat != last_cat {
             last_cat = cat;
+            // Reset baseline for new category — first entry with data becomes base
+            cat_baseline = 0;
             output.push_str(&format!("\n▸ {}\n", cat));
         }
         let (min_ns, max_ns, total_ns, _) = app.bench_entries[idx];
@@ -780,15 +981,21 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
             let avg_ns = total_ns / app.bench_iterations as u64;
             let samples = &app.bench_samples[idx];
             let p1 = percentile(samples, 1.0);
+            let p50 = percentile(samples, 50.0);
             let p99 = percentile(samples, 99.0);
-            let speedup = if idx > 0 && avg_ns > 0 {
-                format!("{:.1}×", baseline_avg as f64 / avg_ns as f64)
-            } else {
+            let jitter = max_ns.saturating_sub(min_ns);
+            let speedup = if cat_baseline == 0 {
+                cat_baseline = avg_ns.max(1);
                 "base".to_string()
+            } else if avg_ns > 0 {
+                format!("{:.1}×", cat_baseline as f64 / avg_ns as f64)
+            } else {
+                "--".to_string()
             };
+            let tagged = format!("[{}] {}", src, name);
             output.push_str(&format!(
-                "  {:<28} {:>5}ns {:>5}ns {:>5}ns {:>6}ns {:>5}ns {:>5}\n",
-                name, min_ns, p1, avg_ns, p99, max_ns, speedup
+                "  {:<30} {:>5}ns {:>5}ns {:>5}ns {:>5}ns {:>6}ns {:>5}ns {:>6}ns {:>5}\n",
+                tagged, min_ns, p1, p50, avg_ns, p99, max_ns, jitter, speedup
             ));
         }
     }
@@ -805,13 +1012,52 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     };
 
     let mut output = String::new();
+    // System hardware context header
+    output.push_str(&app.system_info.format_header());
+    output.push_str("\n");
     output.push_str(&format!(
-        "=== scx_cake Statistics (Uptime: {}) ===\n\n",
+        "=== scx_cake Statistics (Uptime: {}) ===\n",
         app.format_uptime()
     ));
+    // Game TGID detection status
+    if app.tracked_game_tgid > 0 {
+        output.push_str(&format!(
+            "Game:   {} (PID {}, {} threads boosted)\n\n",
+            if app.game_name.is_empty() {
+                "unknown"
+            } else {
+                &app.game_name
+            },
+            app.tracked_game_tgid,
+            app.game_thread_count
+        ));
+    } else {
+        output.push_str("Game:   none detected\n\n");
+    }
     output.push_str(&format!(
-        "Dispatches: {} total ({:.1}% new-flow)\n\n",
+        "Dispatches: {} total ({:.1}% new-flow)\n",
         total_dispatches, new_pct
+    ));
+
+    // Dispatch locality and DSQ hint health
+    let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
+    let total_dispatch_calls = stats.nr_dispatch_hint_skip
+        + stats.nr_dispatch_misses
+        + stats.nr_local_dispatches
+        + stats.nr_stolen_dispatches;
+    let hint_pct = if total_dispatch_calls > 0 {
+        (stats.nr_dispatch_hint_skip as f64 / total_dispatch_calls as f64) * 100.0
+    } else {
+        0.0
+    };
+    output.push_str(&format!(
+        "Dispatch: Local:{} Steal:{} Miss:{} HintSkip:{} ({:.0}%)  Queue:{}\n\n",
+        stats.nr_local_dispatches,
+        stats.nr_stolen_dispatches,
+        stats.nr_dispatch_misses,
+        stats.nr_dispatch_hint_skip,
+        hint_pct,
+        dsq_depth,
     ));
 
     // Callback Profile section
@@ -875,69 +1121,15 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         stats.total_gate2_latency_ns / 1000,
     ));
 
-    // BenchLab section
+    // BenchLab section — reuse the grouped clipboard format
     if app.bench_run_count > 0 {
-        let kfunc_names = [
-            "bpf_ktime_get_ns()",
-            "scx_bpf_now()",
-            "bpf_get_smp_processor_id()",
-            "bpf_task_from_pid()",
-            "scx_bpf_test_and_clear_cpu_idle()",
-            "scx_bpf_nr_cpu_ids()",
-            "get_task_ctx() [storage+arena]",
-            "scx_bpf_dsq_nr_queued()",
-            "BSS global_stats[cpu] read",
-            "Arena per_cpu[cpu].mbox read",
-            "Timing harness (calibration)",
-            "Mbox CL0 cached CPU read",
-            "Mbox CL0 cached tctx+deref",
-            "bpf_ringbuf reserve+discard",
-            "task_struct p->scx+nvcsw",
-            "RODATA cpu_llc+tier_slice",
-            "Bitflag shift+mask+brless",
-            "compute_ewma() full call",
-            "CL0 ptr+fused+packed read",
-            "idle_probe(remote) MESI",
-            "smtmask read-only check",
-            "Disruptor CL0 full read",
-            "get_task_ctx+arena CL0",
-            "Arena stride (TLB/hugepage)",
-        ];
-        output.push_str(&format!(
-            "\n=== BenchLab ({} runs, {} iterations/run, CPU {}) ===\n",
-            app.bench_run_count, 8, app.bench_cpu
-        ));
-        output.push_str(&format!(
-            "{:<32} {:>8} {:>8} {:>8}  {:>20}\n",
-            "HELPER", "MIN", "MAX", "AVG", "LAST VALUE"
-        ));
-        output.push_str(&format!("{}\n", "─".repeat(86)));
-        let baseline_avg = if app.bench_iterations > 0 {
-            app.bench_entries[0].2 / app.bench_iterations as u64
-        } else {
-            1
-        };
-        for (i, name) in kfunc_names.iter().enumerate() {
-            let (min_ns, max_ns, total_ns, last_val) = app.bench_entries[i];
-            if app.bench_iterations > 0 && total_ns > 0 {
-                let avg_ns = total_ns / app.bench_iterations as u64;
-                let speedup = if i > 0 && avg_ns > 0 {
-                    format!(" ({:.1}× vs ktime)", baseline_avg as f64 / avg_ns as f64)
-                } else {
-                    String::new()
-                };
-                output.push_str(&format!(
-                    "{:<32} {:>5}ns {:>5}ns {:>5}ns  {:>20}{}\n",
-                    name, min_ns, max_ns, avg_ns, last_val, speedup
-                ));
-            }
-        }
+        output.push_str(&format_bench_for_clipboard(app));
     }
 
     output.push_str(
         "\n=== Live Task Matrix (times: µs │ SEL/ENQ/STOP/RUN: ns) — ALL BPF-tracked tasks ===\n",
     );
-    output.push_str("PID     ST  COMM            EWMA  AVGRT  MAXRT  GAP     JITTER  WAIT   RUNS/s  CPU  SEL   ENQ   STOP  RUN   G1%   MIGR/s  PREEMPT  WHIST\n");
+    output.push_str("PID     ST  COMM            EWMA  AVGRT  MAXRT  GAP     JITTER  WAIT   RUNS/s  CPU  SEL   ENQ   STOP  RUN   G1%   G3%  G1C  G1D  MIGR/s  PREEMPT  WHIST\n");
     output.push_str("───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n");
 
     // Dump always captures ALL BPF-tracked tasks (not filtered by TUI view)
@@ -1009,6 +1201,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 0
             };
             let status_str = match row.status {
+                TaskStatus::Alive if row.is_hog => "●HOG",
                 TaskStatus::Alive => "●",
                 TaskStatus::Idle => "○",
                 TaskStatus::Dead => "✗",
@@ -1021,7 +1214,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 format!("{}", wait_us)
             };
             output.push_str(&format!(
-                "{}{:<7} {:<3} {:<15} {:<4} {:<6} {:<6} {:<7} {:<7} {:<6} {:<7.1} C{:<3} {:<5} {:<5} {:<5} {:<5} {:<5.0} {:<7.1} {}/{}/{}/{}\n",
+                "{}{:<7} {:<3} {:<15} {:<4} {:<6} {:<6} {:<7} {:<7} {:<6} {:<7.1} C{:<3} {:<5} {:<5} {:<5} {:<5} {:<5.0} {:<4.0} {:<4.0} {:<4.0} {:<7.1} {}/{}/{}/{}\n",
                 indent,
                 row.pid,
                 status_str,
@@ -1039,11 +1232,14 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.stopping_duration_ns,
                 row.running_duration_ns,
                 row.gate_hit_pcts[0],
+                row.gate_hit_pcts[3],  // G3%
+                row.gate_hit_pcts[5],  // G1C%
+                row.gate_hit_pcts[6],  // G1D%
                 row.migrations_per_sec,
                 row.wait_hist[0], row.wait_hist[1], row.wait_hist[2], row.wait_hist[3],
             ));
             output.push_str(&format!(
-                "{}         G2:{:.0}% G1W:{:.0}% G3:{:.0}% G1P:{:.0}% G1C:{:.0}% G5:{:.0}%  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}  CONF:{}/{}\n",
+                "{}         G2:{:.0}% G1W:{:.0}% G3:{:.0}% G1P:{:.0}% G1C:{:.0}% G1D:{:.0}% G1WC:{:.0}% G5:{:.0}%  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}  CONF:{}/{}\n",
                 indent,
                 row.gate_hit_pcts[1],
                 row.gate_hit_pcts[2],
@@ -1051,6 +1247,8 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.gate_hit_pcts[4],
                 row.gate_hit_pcts[5],
                 row.gate_hit_pcts[6],
+                row.gate_hit_pcts[7],
+                row.gate_hit_pcts[8],
                 row.direct_dispatch_count,
                 row.deficit_us,
                 row.yield_count,
@@ -1134,14 +1332,21 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
     }
 
     // --- Footer (key bindings + status) ---
+    let arrow = if app.sort_descending { "▼" } else { "▲" };
     let sort_label = match app.sort_column {
-        SortColumn::RunDuration => "[RunTM]",
-        SortColumn::Gate1Pct => "[G1%]",
-        SortColumn::TargetCpu => "[CPU]",
-        SortColumn::Pid => "[PID]",
-        SortColumn::SelectCpu => "[SEL_NS]",
-        SortColumn::Enqueue => "[ENQ_NS]",
-        SortColumn::Jitter => "[JITTER]",
+        SortColumn::RunDuration => format!("[RunTM]{}", arrow),
+        SortColumn::Gate1Pct => format!("[G1%]{}", arrow),
+        SortColumn::TargetCpu => format!("[CPU]{}", arrow),
+        SortColumn::Pid => format!("[PID]{}", arrow),
+        SortColumn::SelectCpu => format!("[SEL_NS]{}", arrow),
+        SortColumn::Enqueue => format!("[ENQ_NS]{}", arrow),
+        SortColumn::Jitter => format!("[JITTER]{}", arrow),
+        SortColumn::Tier => format!("[TIER]{}", arrow),
+        SortColumn::Ewma => format!("[EWMA]{}", arrow),
+        SortColumn::Vcsw => format!("[VCSW]{}", arrow),
+        SortColumn::Hog => format!("[HOG]{}", arrow),
+        SortColumn::RunsPerSec => format!("[RUN/s]{}", arrow),
+        SortColumn::Gap => format!("[GAP]{}", arrow),
     };
 
     let quit_label = if app.active_tab == TuiTab::TaskInspector {
@@ -1152,11 +1357,11 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
 
     let footer_text = match app.get_status() {
         Some(status) => format!(
-            " Sort:{}  [s] Cycle  [↑↓] Scroll  [Tab/←→] Views  [f] Filter  [c] Copy  [d] Dump  [r] Reset  {}  │  {}",
+            " Sort:{}  [s] Cycle  [S] Rev  [+/-] Rate  [↑↓] Scroll  [Tab] Views  [f] Filter  [c] Copy  [d] Dump  {}  │  {}",
             sort_label, quit_label, status
         ),
         None => format!(
-            " Sort:{}  [s] Cycle  [↑↓] Scroll  [Tab/←→] Views  [f] Filter  [c] Copy  [d] Dump  [r] Reset  {}",
+            " Sort:{}  [s] Cycle  [S] Rev  [+/-] Rate  [↑↓] Scroll  [Tab] Views  [f] Filter  [c] Copy  [d] Dump  {}",
             sort_label, quit_label
         ),
     };
@@ -1180,7 +1385,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     let outer_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Compact header (2 content lines + borders)
+            Constraint::Length(if app.tracked_game_tgid > 0 { 5 } else { 4 }), // Header: 2-3 content lines + borders
             Constraint::Length(8), // Tier performance panel (4 rows + header + borders)
             Constraint::Min(10),   // Full-width Task Matrix
         ])
@@ -1194,7 +1399,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         0.0
     };
 
-    // AQ EWMA-class summary: count tasks by EWMA bands
+    // EWMA tier summary: count tasks by runtime bands
     let (mut wc0, mut wc1, mut wc2, mut wc3) = (0u32, 0u32, 0u32, 0u32);
     for row in app.task_rows.values() {
         if !row.is_bpf_tracked || row.total_runs == 0 {
@@ -1207,10 +1412,6 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             _ => wc3 += 1,
         }
     }
-    let tier_summary = format!(
-        "AQ│ E0<50µs:{} E1<500µs:{} E2<5ms:{} E3≥5ms:{}",
-        wc0, wc1, wc2, wc3,
-    );
 
     let topo_flags = format!(
         "{}C{}{}{}",
@@ -1242,35 +1443,82 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             .map(|khz| format!(" {:.1}GHz", khz as f64 / 1_000_000.0))
             .unwrap_or_default();
 
-    let line1 = format!(
-        " {}{}  │  {} ({:.0}%new)  │  {}  │  Arena:{}/{}  BPF:{}  │  {}{}",
+    // Hog count for header visibility
+    let hog_count = app.task_rows.values().filter(|r| r.is_hog).count();
+    let hog_str = if hog_count > 0 {
+        format!("  HOG:{}", hog_count)
+    } else {
+        String::new()
+    };
+
+    // Line 1: CPU | Dispatches | Tier Distribution
+    let line1 =
+        format!(
+        " CPU: {}{}  │  Dispatches: {} ({:.0}% new)  │  Tiers: T0:{} T1:{} T2:{} T3:{}  │  {}{}{}",
         topo_flags,
         cpu_freq_str,
         total_dispatches,
         new_pct,
-        tier_summary,
-        app.arena_active,
-        app.arena_max,
-        app.bpf_task_count,
+        wc0, wc1, wc2, wc3,
         app.format_uptime(),
+        hog_str,
         drop_warn,
     );
 
+    // Line 2: Dispatch locality | Queue depth | Tasks | Filter
     let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
+    let filter_label = if app.show_all_tasks {
+        "ALL tasks"
+    } else {
+        "BPF-tracked only"
+    };
+
+    // Hint effectiveness: what % of dispatch calls skipped the kfunc
+    let total_dispatch_calls = stats.nr_dispatch_hint_skip
+        + stats.nr_dispatch_misses
+        + stats.nr_local_dispatches
+        + stats.nr_stolen_dispatches;
+    let hint_pct = if total_dispatch_calls > 0 {
+        (stats.nr_dispatch_hint_skip as f64 / total_dispatch_calls as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Queue depth warning: if tasks are piling up, the hint may be causing stalls
+    let queue_str = if dsq_depth > 10 {
+        format!("⚠ Queue:{}", dsq_depth)
+    } else {
+        format!("Queue:{}", dsq_depth)
+    };
+
     let line2 = format!(
-        " Disp L:{} S:{} M:{} │ DSQ:{} │ Filter: [f] {}",
+        " Dispatch: Local:{} Steal:{} Miss:{} HintSkip:{} ({:.0}%)  │  {}  │  Tasks: {} ({} arena)  │  [f] {}",
         stats.nr_local_dispatches,
         stats.nr_stolen_dispatches,
         stats.nr_dispatch_misses,
-        dsq_depth,
-        if app.show_all_tasks {
-            "ALL tasks"
-        } else {
-            "BPF-tracked only"
-        },
+        stats.nr_dispatch_hint_skip,
+        hint_pct,
+        queue_str,
+        app.bpf_task_count,
+        app.arena_active,
+        filter_label,
     );
 
-    let header_text = format!("{}\n{}", line1, line2);
+    let header_text = if app.tracked_game_tgid > 0 {
+        let line3 = format!(
+            " Game: {} (PID {}, {} threads)",
+            if app.game_name.is_empty() {
+                "unknown"
+            } else {
+                &app.game_name
+            },
+            app.tracked_game_tgid,
+            app.game_thread_count,
+        );
+        format!("{}\n{}\n{}", line1, line2, line3)
+    } else {
+        format!("{}\n{}", line1, line2)
+    };
 
     let header_border_color = if stats.nr_dropped_allocations > 0 {
         Color::Red
@@ -1500,6 +1748,21 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
+        Cell::from("G3%").style(
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("G1C").style(
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("G1D").style(
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Cell::from("MIGR/s").style(
             Style::default()
                 .fg(Color::LightMagenta)
@@ -1531,15 +1794,18 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         // Insert process group header when tgid changes
         if tgid != last_tgid {
             let thread_count = tgid_thread_counts.get(&tgid).copied().unwrap_or(1);
-            // Find process name: prefer comm of the tgid task itself, else first thread
             let proc_name = if let Some(tgid_row) = app.task_rows.get(&tgid) {
-                tgid_row.comm.clone()
+                tgid_row.comm.as_str()
             } else {
-                row.comm.clone()
+                row.comm.as_str()
             };
+            let is_collapsed = app.collapsed_tgids.contains(&tgid);
             if thread_count > 1 || tgid != *pid {
-                let header_text =
-                    format!("▼ {} (PID {}) — {} threads", proc_name, tgid, thread_count);
+                let arrow = if is_collapsed { "▶" } else { "▼" };
+                let header_text = format!(
+                    "{} {} (PID {}) — {} threads",
+                    arrow, proc_name, tgid, thread_count
+                );
                 let header_cells = vec![Cell::from(header_text).style(
                     Style::default()
                         .fg(Color::White)
@@ -1548,6 +1814,11 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 matrix_rows.push(Row::new(header_cells).height(1));
             }
             last_tgid = tgid;
+        }
+
+        // Skip child threads if their TGID is collapsed
+        if tgid != *pid && app.collapsed_tgids.contains(&tgid) {
+            continue;
         }
 
         // Voluntary context switch color: higher = more GPU/IO activity
@@ -1570,8 +1841,17 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         // All ns → µs conversions at render time
         let cells = vec![
             Cell::from(format!("{}{}", indent, row.pid)),
-            Cell::from(row.status.label()).style(Style::default().fg(row.status.color())),
-            Cell::from(row.comm.clone()),
+            Cell::from(if row.is_hog {
+                "●HOG"
+            } else {
+                row.status.label()
+            })
+            .style(Style::default().fg(if row.is_hog {
+                Color::LightRed
+            } else {
+                row.status.color()
+            })),
+            Cell::from(row.comm.as_str()),
             Cell::from(format!("{}", row.nvcsw_delta)).style(vcsw_style),
             Cell::from(format!("{}", row.avg_runtime_us)),
             Cell::from(format!("{}", row.max_runtime_us)),
@@ -1585,6 +1865,9 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Cell::from(format!("{}", row.stopping_duration_ns)),
             Cell::from(format!("{}", row.running_duration_ns)),
             Cell::from(format!("{:.0}%", row.gate_hit_pcts[0])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[3])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[5])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[6])),
             Cell::from(format!("{:.1}", row.migrations_per_sec)),
         ];
         matrix_rows.push(Row::new(cells).height(1));
@@ -1614,6 +1897,9 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Constraint::Length(5),  // STOP
             Constraint::Length(5),  // RUN
             Constraint::Length(4),  // G1%
+            Constraint::Length(4),  // G3%
+            Constraint::Length(4),  // G1C
+            Constraint::Length(4),  // G1D
             Constraint::Length(7),  // MIGR/s
             Constraint::Length(6),  // TIER∆
         ],
@@ -1659,42 +1945,84 @@ fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
 }
 
 fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
-    // (index, name, category)
-    let bench_items: &[(usize, &str, &str)] = &[
-        (0, "bpf_ktime_get_ns()", "Kfuncs"),
-        (1, "scx_bpf_now()", "Kfuncs"),
-        (2, "bpf_get_smp_proc_id()", "Kfuncs"),
-        (3, "bpf_task_from_pid()", "Kfuncs"),
-        (4, "test_and_clear_idle()", "Kfuncs"),
-        (5, "scx_bpf_nr_cpu_ids()", "Kfuncs"),
-        (6, "get_task_ctx() [arena]", "Kfuncs"),
-        (7, "scx_bpf_dsq_nr_queued()", "Kfuncs"),
-        (13, "ringbuf reserve+discard", "Kfuncs"),
-        (8, "BSS global_stats[cpu]", "Data Access"),
-        (9, "Arena per_cpu.mbox", "Data Access"),
-        (14, "task_struct p->scx+nvcsw", "Data Access"),
-        (15, "RODATA llc+tier_slice", "Data Access"),
-        (11, "Mbox CL0 cached CPU", "Mailbox CL0"),
-        (12, "Mbox CL0 tctx+deref", "Mailbox CL0"),
-        (18, "CL0 ptr+fused+packed", "Mailbox CL0"),
-        (21, "Disruptor CL0 full read", "Mailbox CL0"),
-        (10, "Timing harness (cal)", "Composite"),
-        (16, "Bitflag shift+mask+brless", "Composite"),
-        (17, "compute_ewma() full", "Composite"),
-        (22, "get_task_ctx+arena CL0", "Composite"),
-        (19, "idle_probe(remote) MESI", "Idle Probes"),
-        (20, "smtmask read-only check", "Idle Probes"),
-        (23, "Arena stride (TLB/hugepage)", "TLB/Memory"),
+    // (index, name, category, source: K=kernel kfunc, C=cake custom code)
+    // Groups: kfunc baseline first, then cake replacements. SPEED is per-group.
+    let bench_items: &[(usize, &str, &str, &str)] = &[
+        // Timing: all available clock sources
+        (0, "bpf_ktime_get_ns()", "Timing", "K"),
+        (1, "scx_bpf_now()", "Timing", "K"),
+        (24, "bpf_ktime_get_boot_ns()", "Timing", "K"),
+        (10, "Timing harness (cal)", "Timing", "C"),
+        // Task Lookup: kfunc vs arena direct access
+        (3, "bpf_task_from_pid()", "Task Lookup", "K"),
+        (29, "bpf_get_current_task_btf()", "Task Lookup", "K"),
+        (36, "bpf_task_storage_get()", "Task Lookup", "K"),
+        (6, "get_task_ctx() [arena]", "Task Lookup", "C"),
+        (22, "get_task_ctx+arena CL0", "Task Lookup", "C"),
+        // Process Info: kfunc alternatives
+        (28, "bpf_get_current_pid_tgid()", "Process Info", "K"),
+        (30, "bpf_get_current_comm()", "Process Info", "K"),
+        (14, "task_struct p->scx+nvcsw", "Process Info", "K"),
+        (32, "scx_bpf_task_running(p)", "Process Info", "K"),
+        (33, "scx_bpf_task_cpu(p)", "Process Info", "K"),
+        (46, "Arena tctx.pid+tgid", "Process Info", "C"),
+        (47, "Mbox CL0 cached_cpu", "Process Info", "C"),
+        // CPU Identification: kfunc vs mailbox cached
+        (2, "bpf_get_smp_proc_id()", "CPU ID", "K"),
+        (31, "bpf_get_numa_node_id()", "CPU ID", "K"),
+        (11, "Mbox CL0 cached CPU", "CPU ID", "C"),
+        // Idle Probing: kfunc vs cake probes
+        (4, "test_and_clear_idle()", "Idle Probing", "K"),
+        (37, "scx_bpf_pick_idle_cpu()", "Idle Probing", "K"),
+        (38, "idle_cpumask get+put", "Idle Probing", "K"),
+        (19, "idle_probe(remote) MESI", "Idle Probing", "C"),
+        (20, "smtmask read-only check", "Idle Probing", "C"),
+        // Data Read: kernel struct vs cake data paths
+        (8, "BSS global_stats[cpu]", "Data Read", "C"),
+        (9, "Arena per_cpu.mbox", "Data Read", "C"),
+        (15, "RODATA llc+tier_slice", "Data Read", "C"),
+        // Mailbox CL0: cake's Disruptor handoff variants
+        (12, "Mbox CL0 tctx+deref", "Mailbox CL0", "C"),
+        (18, "CL0 ptr+fused+packed", "Mailbox CL0", "C"),
+        (21, "Disruptor CL0 full read", "Mailbox CL0", "C"),
+        // Composite: cake-only multi-step operations
+        (16, "Bitflag shift+mask+brless", "Composite Ops", "C"),
+        (17, "compute_ewma() full", "Composite Ops", "C"),
+        // DVFS / Performance: CPU frequency queries
+        (35, "scx_bpf_cpuperf_cur(cpu)", "DVFS / Perf", "K"),
+        (42, "scx_bpf_cpuperf_cap(cpu)", "DVFS / Perf", "K"),
+        (45, "RODATA cpuperf_cap[cpu]", "DVFS / Perf", "C"),
+        // Topology Constants: kfunc vs RODATA
+        (5, "scx_bpf_nr_cpu_ids()", "Topology", "K"),
+        (34, "scx_bpf_nr_node_ids()", "Topology", "K"),
+        (43, "RODATA nr_cpus const", "Topology", "C"),
+        (44, "RODATA nr_nodes const", "Topology", "C"),
+        // Standalone Kfuncs: reference costs
+        (7, "scx_bpf_dsq_nr_queued()", "Standalone Kfuncs", "K"),
+        (13, "ringbuf reserve+discard", "Standalone Kfuncs", "K"),
+        (39, "scx_bpf_kick_cpu(self)", "Standalone Kfuncs", "K"),
+        // Synchronization: lock/RNG costs
+        (41, "bpf_spin_lock+unlock", "Synchronization", "K"),
+        (40, "bpf_get_prandom_u32()", "Synchronization", "K"),
+        (48, "CL0 lock-free 3-field", "Synchronization", "C"),
+        (49, "BSS xorshift32 PRNG", "Synchronization", "C"),
+        // TLB/Memory: arena access pattern cost
+        (23, "Arena stride (TLB/hugepage)", "TLB/Memory", "C"),
     ];
 
-    let percentile = |samples: &[u64], pct: f64| -> u64 {
+    // Pre-compute percentiles: sort once per entry, extract p1/p50/p99 together.
+    // Old approach sorted 3× per entry per frame (7200 sorts/sec at 60fps) — killed navigation.
+    let percentiles_for = |samples: &[u64]| -> (u64, u64, u64) {
         if samples.is_empty() {
-            return 0;
+            return (0, 0, 0);
         }
         let mut sorted = samples.to_vec();
         sorted.sort_unstable();
-        let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
-        sorted[idx.min(sorted.len() - 1)]
+        let len = sorted.len() as f64 - 1.0;
+        let p1 = sorted[((1.0 / 100.0 * len).round() as usize).min(sorted.len() - 1)];
+        let p50 = sorted[((50.0 / 100.0 * len).round() as usize).min(sorted.len() - 1)];
+        let p99 = sorted[((99.0 / 100.0 * len).round() as usize).min(sorted.len() - 1)];
+        (p1, p50, p99)
     };
 
     let age_s = if app.bench_timestamp > 0 {
@@ -1705,12 +2033,6 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         )
     } else {
         "never".to_string()
-    };
-
-    let baseline_avg = if app.bench_iterations > 0 {
-        app.bench_entries[0].2 / app.bench_iterations as u64
-    } else {
-        1
     };
 
     let header = Row::new(vec![
@@ -1729,6 +2051,11 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
+        Cell::from("P50 MED").style(
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Cell::from("AVG").style(
             Style::default()
                 .fg(Color::Cyan)
@@ -1740,6 +2067,11 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("MAX").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Cell::from("JITTER").style(
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Cell::from("SPEED").style(
             Style::default()
                 .fg(Color::White)
@@ -1750,10 +2082,12 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
 
     let mut rows: Vec<Row> = Vec::new();
     let mut last_cat = "";
+    let mut cat_baseline: u64 = 0; // per-category baseline AVG
 
-    for &(idx, name, cat) in bench_items {
+    for &(idx, name, cat, src) in bench_items {
         if cat != last_cat {
             last_cat = cat;
+            cat_baseline = 0; // reset for new category
             rows.push(
                 Row::new(vec![Cell::from(format!("▸ {}", cat)).style(
                     Style::default()
@@ -1767,7 +2101,10 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         let (min_ns, max_ns, total_ns, _last_val) = app.bench_entries[idx];
         if app.bench_iterations == 0 || total_ns == 0 {
             rows.push(Row::new(vec![
-                Cell::from(format!("  {}", name)).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(format!("  [{}] {}", src, name))
+                    .style(Style::default().fg(Color::DarkGray)),
+                Cell::from("--"),
+                Cell::from("--"),
                 Cell::from("--"),
                 Cell::from("--"),
                 Cell::from("--"),
@@ -1780,32 +2117,38 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
 
         let avg_ns = total_ns / app.bench_iterations as u64;
         let samples = &app.bench_samples[idx];
-        let p1 = percentile(samples, 1.0);
-        let p99 = percentile(samples, 99.0);
+        let (p1, p50, p99) = percentiles_for(samples);
+        let jitter = max_ns.saturating_sub(min_ns);
 
-        let speedup = if idx > 0 && avg_ns > 0 {
-            format!("{:.1}×", baseline_avg as f64 / avg_ns as f64)
-        } else {
+        let speedup = if cat_baseline == 0 {
+            cat_baseline = avg_ns.max(1);
             "base".to_string()
+        } else if avg_ns > 0 {
+            format!("{:.1}×", cat_baseline as f64 / avg_ns as f64)
+        } else {
+            "--".to_string()
         };
 
-        let color = if idx == 0 {
-            Color::Red
-        } else if avg_ns < baseline_avg / 2 {
-            Color::Green
-        } else if avg_ns < baseline_avg {
-            Color::Yellow
+        // Color: green if faster than baseline, yellow if comparable, white otherwise
+        let color = if cat_baseline == avg_ns || cat_baseline == 0 {
+            Color::Yellow // baseline entry
+        } else if avg_ns < cat_baseline / 2 {
+            Color::Green // >2× faster
+        } else if avg_ns < cat_baseline {
+            Color::Cyan // faster
         } else {
-            Color::White
+            Color::White // slower or same
         };
 
         rows.push(Row::new(vec![
-            Cell::from(format!("  {}", name)).style(Style::default().fg(color)),
+            Cell::from(format!("  [{}] {}", src, name)).style(Style::default().fg(color)),
             Cell::from(format!("{}ns", min_ns)).style(Style::default().fg(Color::Cyan)),
             Cell::from(format!("{}ns", p1)).style(Style::default().fg(Color::Green)),
+            Cell::from(format!("{}ns", p50)).style(Style::default().fg(Color::LightCyan)),
             Cell::from(format!("{}ns", avg_ns)).style(Style::default().fg(color)),
             Cell::from(format!("{}ns", p99)).style(Style::default().fg(Color::LightRed)),
             Cell::from(format!("{}ns", max_ns)).style(Style::default().fg(Color::Red)),
+            Cell::from(format!("{}ns", jitter)).style(Style::default().fg(Color::LightMagenta)),
             Cell::from(speedup).style(Style::default().fg(Color::White)),
         ]));
     }
@@ -1813,13 +2156,15 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(30),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(9),
-            Constraint::Length(8),
-            Constraint::Length(7),
+            Constraint::Length(34), // Name
+            Constraint::Length(8),  // MIN
+            Constraint::Length(8),  // P1 LOW
+            Constraint::Length(9),  // P50 MED
+            Constraint::Length(8),  // AVG
+            Constraint::Length(9),  // P1 HIGH
+            Constraint::Length(8),  // MAX
+            Constraint::Length(10), // JITTER
+            Constraint::Length(7),  // SPEED
         ],
     )
     .header(header)
@@ -1840,7 +2185,23 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     )
     .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
     .highlight_symbol(">> ");
-    frame.render_stateful_widget(table, area, &mut app.bench_table_state);
+
+    // Split area into header and table
+    let bench_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7), // System Info Header (6 lines + 1 padding)
+            Constraint::Min(0),    // Bench table
+        ])
+        .split(area);
+
+    let info_text = app.system_info.format_header();
+    let info_paragraph = Paragraph::new(info_text)
+        .style(Style::default().fg(Color::DarkGray))
+        .block(Block::default().padding(Padding::new(1, 1, 0, 1)));
+
+    frame.render_widget(info_paragraph, bench_layout[0]);
+    frame.render_stateful_widget(table, bench_layout[1], &mut app.bench_table_state);
 }
 
 fn draw_inspector_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
@@ -2021,7 +2382,7 @@ pub fn run_tui(
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let mut app = TuiApp::new(topology, latency_matrix);
-    let tick_rate = Duration::from_secs(interval_secs);
+    let mut tick_rate = Duration::from_secs(interval_secs);
     // Backdate last_tick so the first loop instantly populates the matrix
     let mut last_tick = Instant::now()
         .checked_sub(tick_rate)
@@ -2053,7 +2414,7 @@ pub fn run_tui(
                 app.bench_cpu = br.cpu;
                 app.bench_run_count += 1;
                 app.bench_timestamp = br.bench_timestamp;
-                for i in 0..24 {
+                for i in 0..50 {
                     let new_min = br.entries[i].min_ns;
                     let new_max = br.entries[i].max_ns;
                     let new_total = br.entries[i].total_ns;
@@ -2124,8 +2485,59 @@ pub fn run_tui(
                             TuiTab::BenchLab => app.scroll_bench_up(),
                             _ => app.scroll_table_up(),
                         },
-                        KeyCode::Char('s') | KeyCode::Char('S') => {
+                        KeyCode::Char('t') | KeyCode::Char('T')
+                            if key.modifiers.is_empty()
+                                || key.modifiers == crossterm::event::KeyModifiers::SHIFT =>
+                        {
+                            match app.active_tab {
+                                TuiTab::BenchLab => app.bench_table_state.select(Some(0)),
+                                _ => app.table_state.select(Some(0)),
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            // Toggle collapse/expand for selected row's TGID group
+                            if app.active_tab == TuiTab::Dashboard {
+                                if let Some(i) = app.table_state.selected() {
+                                    if let Some(pid) = app.sorted_pids.get(i) {
+                                        if let Some(row) = app.task_rows.get(pid) {
+                                            let tgid = if row.tgid > 0 { row.tgid } else { *pid };
+                                            if app.collapsed_tgids.contains(&tgid) {
+                                                app.collapsed_tgids.remove(&tgid);
+                                            } else {
+                                                app.collapsed_tgids.insert(tgid);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Char('s') => {
                             app.cycle_sort();
+                        }
+                        KeyCode::Char('S') => {
+                            app.sort_descending = !app.sort_descending;
+                            let dir = if app.sort_descending {
+                                "descending"
+                            } else {
+                                "ascending"
+                            };
+                            app.set_status(&format!("Sort: {}", dir));
+                        }
+                        KeyCode::Char('+') | KeyCode::Char('=') => {
+                            // Faster refresh: halve tick_rate (min 250ms)
+                            let current_ms = tick_rate.as_millis() as u64;
+                            if current_ms > 250 {
+                                tick_rate = Duration::from_millis(current_ms / 2);
+                                app.set_status(&format!("Refresh: {}ms", tick_rate.as_millis()));
+                            }
+                        }
+                        KeyCode::Char('-') => {
+                            // Slower refresh: double tick_rate (max 5s)
+                            let current_ms = tick_rate.as_millis() as u64;
+                            if current_ms < 5000 {
+                                tick_rate = Duration::from_millis(current_ms * 2);
+                                app.set_status(&format!("Refresh: {}ms", tick_rate.as_millis()));
+                            }
                         }
                         KeyCode::Char('c') => {
                             // Copy ACTIVE TAB data to clipboard (tab-aware)
@@ -2242,7 +2654,8 @@ pub fn run_tui(
                 let _elem_size = pool.elem_size as usize;
 
                 // Track currently active PIDs in this sweep to prune dead tasks
-                let mut active_pids = std::collections::HashSet::new();
+                // Reuse active_pids buffer to avoid per-tick allocation
+                app.active_pids_buf.clear();
 
                 // PRIMARY: Iterate pid_to_tctx BPF hash map for 100% task coverage.
                 // For each PID, lookup the arena tctx pointer and read telemetry directly.
@@ -2292,15 +2705,16 @@ pub fn run_tui(
                             let ctx = unsafe { std::ptr::read_unaligned(ctx_ptr) };
 
                             let pid = ctx.telemetry.pid;
-                            let tier = unsafe {
-                                (ctx.__bindgen_anon_1.__bindgen_anon_1.packed_info >> 28) & 0x03
-                            };
+                            let packed =
+                                unsafe { ctx.__bindgen_anon_1.__bindgen_anon_1.packed_info };
+                            let tier = (packed >> 28) & 0x03;
+                            let is_hog = (packed >> 27) & 1 != 0; /* CAKE_FLOW_HOG at bit 24+3 */
 
                             if pid == 0 || tier > 3 {
                                 continue;
                             }
 
-                            active_pids.insert(pid);
+                            app.active_pids_buf.insert(pid);
 
                             let comm_bytes: [u8; 16] =
                                 unsafe { std::mem::transmute(ctx.telemetry.comm) };
@@ -2334,8 +2748,10 @@ pub fn run_tui(
                             let g3 = ctx.telemetry.gate_3_hits;
                             let g1p = ctx.telemetry.gate_1p_hits;
                             let g1c = ctx.telemetry.gate_1c_hits;
+                            let g1d = ctx.telemetry.gate_1d_hits;
+                            let g1wc = ctx.telemetry.gate_1wc_hits;
                             let g5 = ctx.telemetry.gate_tun_hits;
-                            let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g5;
+                            let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g1d + g1wc + g5;
 
                             let gate_hit_pcts = if total_sel > 0 {
                                 [
@@ -2345,10 +2761,12 @@ pub fn run_tui(
                                     (g3 as f64 / total_sel as f64) * 100.0,
                                     (g1p as f64 / total_sel as f64) * 100.0,
                                     (g1c as f64 / total_sel as f64) * 100.0,
+                                    (g1d as f64 / total_sel as f64) * 100.0,
+                                    (g1wc as f64 / total_sel as f64) * 100.0,
                                     (g5 as f64 / total_sel as f64) * 100.0,
                                 ]
                             } else {
-                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                             };
 
                             let total_runs = ctx.telemetry.total_runs;
@@ -2402,6 +2820,7 @@ pub fn run_tui(
                                         nvcsw_delta: ctx.telemetry.nvcsw_delta,
                                         nivcsw_delta: ctx.telemetry.nivcsw_delta,
                                         ewma_recomp_count: ctx.telemetry.ewma_recomp_count,
+                                        is_hog,
                                     });
 
                             // Update dynamic row elements
@@ -2439,6 +2858,7 @@ pub fn run_tui(
                             row.same_cpu_streak = ctx.telemetry.same_cpu_streak;
                             row.wakeup_source_pid = ctx.telemetry.wakeup_source_pid;
                             row.ewma_recomp_count = ctx.telemetry.ewma_recomp_count;
+                            row.is_hog = is_hog;
                             // Status set below after sysinfo cross-reference
                         } // end loop iteration
                     } // end if bpf_fd >= 0
@@ -2478,22 +2898,118 @@ pub fn run_tui(
                 }
                 app.bpf_task_count = bpf_count;
 
+                // --- Game TGID Detection: aggregate yields per tgid, pick winner ---
+                // The tgid with highest total yield_count is the game process.
+                // Games produce 1000:1 more sched_yield() calls than anything else
+                // due to UE5/Unity/Godot work-stealing thread pools.
+                {
+                    let mut best_tgid: u32 = 0;
+                    let mut best_yields: u64 = 0;
+                    let mut best_thread_count: usize = 0;
+                    // Small inline aggregator: HashMap<tgid, (total_yields, thread_count)>
+                    let mut tgid_yields: std::collections::HashMap<u32, (u64, usize)> =
+                        std::collections::HashMap::new();
+                    for (_pid, row) in app.task_rows.iter() {
+                        if row.status == TaskStatus::Dead || row.yield_count == 0 {
+                            continue;
+                        }
+                        let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
+                        let entry = tgid_yields.entry(tgid).or_insert((0, 0));
+                        entry.0 += row.yield_count as u64;
+                        entry.1 += 1;
+                    }
+                    for (tgid, (total_yields, thread_count)) in &tgid_yields {
+                        if *total_yields > best_yields {
+                            best_yields = *total_yields;
+                            best_tgid = *tgid;
+                            best_thread_count = *thread_count;
+                        }
+                    }
+                    // Threshold: need at least 64 total yields to qualify as a game.
+                    // Game workers hit this in <100ms. Prevents false positives from
+                    // language servers or build tools with occasional yields.
+                    let new_game_tgid = if best_yields >= 64 { best_tgid } else { 0 };
+
+                    // Game exit detection: if current game_tgid is no longer in /proc, reset
+                    if app.tracked_game_tgid > 0 && new_game_tgid != app.tracked_game_tgid {
+                        let proc_path = format!("/proc/{}", app.tracked_game_tgid);
+                        if !std::path::Path::new(&proc_path).exists() {
+                            // Game exited, allow new detection
+                            app.tracked_game_tgid = 0;
+                            app.game_thread_count = 0;
+                            app.game_name.clear();
+                        }
+                    }
+
+                    if new_game_tgid > 0 && new_game_tgid != app.tracked_game_tgid {
+                        app.tracked_game_tgid = new_game_tgid;
+                        app.game_thread_count = best_thread_count;
+                        // Read game name from /proc (cold path, only on game switch)
+                        // Strategy: parse cmdline for .exe (Wine/Proton) → fall back to comm (native)
+                        app.game_name = {
+                            let mut name = String::from("unknown");
+                            // Try cmdline first — Wine games have the .exe path in args
+                            if let Ok(cmdline) =
+                                std::fs::read(format!("/proc/{}/cmdline", new_game_tgid))
+                            {
+                                // cmdline is null-separated: wine64-preloader\0wine64\0Z:\path\Game.exe\0...
+                                for arg in cmdline.split(|&b| b == 0) {
+                                    if let Ok(s) = std::str::from_utf8(arg) {
+                                        if s.to_lowercase().ends_with(".exe") {
+                                            // Extract basename: Z:\foo\bar\Game.exe → Game
+                                            let basename =
+                                                s.rsplit(['\\', '/']).next().unwrap_or(s);
+                                            name = basename
+                                                .trim_end_matches(".exe")
+                                                .trim_end_matches(".EXE")
+                                                .to_string();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            // Fallback to /proc/comm for native games
+                            if name == "unknown" {
+                                if let Ok(comm) =
+                                    std::fs::read_to_string(format!("/proc/{}/comm", new_game_tgid))
+                                {
+                                    name = comm.trim().to_string();
+                                }
+                            }
+                            name
+                        };
+                    } else if new_game_tgid == app.tracked_game_tgid {
+                        app.game_thread_count = best_thread_count;
+                    }
+                }
+
+                // Write game_tgid to BPF BSS — propagates detection to dispatch path.
+                // Only causes cache invalidation when tgid actually changes (~never in steady state).
+                if let Some(bss) = &mut skel.maps.bss_data {
+                    bss.game_tgid = app.tracked_game_tgid;
+                }
+
                 // --- Delta Mode: compute per-second rates ---
                 let actual_elapsed = last_tick.elapsed().as_secs_f64().max(0.1);
                 for (pid, row) in app.task_rows.iter_mut() {
-                    if let Some(prev) = app.prev_task_rows.get(pid) {
-                        let d_runs = row.total_runs.saturating_sub(prev.total_runs);
-                        let d_migr = row.migration_count.saturating_sub(prev.migration_count);
+                    if let Some(&(prev_runs, prev_migr)) = app.prev_deltas.get(pid) {
+                        let d_runs = row.total_runs.saturating_sub(prev_runs);
+                        let d_migr = row.migration_count.saturating_sub(prev_migr);
                         row.runs_per_sec = d_runs as f64 / actual_elapsed;
                         row.migrations_per_sec = d_migr as f64 / actual_elapsed;
                     }
                 }
-                // Store current as prev for next tick
-                app.prev_task_rows = app.task_rows.clone();
+                // Lightweight delta snapshot: only (total_runs, migration_count)
+                // Eliminates ~500 String allocs/drops per tick from deep-cloning task_rows
+                app.prev_deltas.clear();
+                for (pid, row) in app.task_rows.iter() {
+                    app.prev_deltas
+                        .insert(*pid, (row.total_runs, row.migration_count));
+                }
 
                 // --- Arena diagnostics ---
                 app.arena_max = max_elems;
-                app.arena_active = active_pids.len();
+                app.arena_active = app.active_pids_buf.len();
 
                 /* EXPLICITLY DISABLED: Dead Tasks are no longer removed so users can view
                  * the absolute hardware scheduling history of all tasks on the system.
@@ -2513,37 +3029,68 @@ pub fn run_tui(
                         .map(|(pid, _)| *pid)
                         .collect()
                 };
+                // Apply sort with direction support
+                let desc = app.sort_descending;
                 match app.sort_column {
                     SortColumn::RunDuration => sorted_pids.sort_by(|a, b| {
                         let r_a = app.task_rows.get(a).unwrap();
                         let r_b = app.task_rows.get(b).unwrap();
-                        r_b.avg_runtime_us
-                            .cmp(&r_a.avg_runtime_us)
-                            .then_with(|| r_b.select_cpu_ns.cmp(&r_a.select_cpu_ns))
-                            .then_with(|| r_b.enqueue_ns.cmp(&r_a.enqueue_ns))
+                        let cmp = r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
                     }),
                     SortColumn::Gate1Pct => sorted_pids.sort_by(|a, b| {
                         let r_a = app.task_rows.get(a).unwrap();
                         let r_b = app.task_rows.get(b).unwrap();
-                        r_b.gate_hit_pcts[0]
+                        let cmp = r_b.gate_hit_pcts[0]
                             .partial_cmp(&r_a.gate_hit_pcts[0])
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .unwrap_or(std::cmp::Ordering::Equal);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
                     }),
                     SortColumn::TargetCpu => sorted_pids.sort_by(|a, b| {
                         let r_a = app.task_rows.get(a).unwrap();
                         let r_b = app.task_rows.get(b).unwrap();
-                        r_a.core_placement.cmp(&r_b.core_placement)
+                        let cmp = r_a.core_placement.cmp(&r_b.core_placement);
+                        if desc {
+                            cmp.reverse()
+                        } else {
+                            cmp
+                        }
                     }),
-                    SortColumn::Pid => sorted_pids.sort_by(|a, b| a.cmp(b)),
+                    SortColumn::Pid => sorted_pids.sort_by(|a, b| {
+                        let cmp = a.cmp(b);
+                        if desc {
+                            cmp.reverse()
+                        } else {
+                            cmp
+                        }
+                    }),
                     SortColumn::SelectCpu => sorted_pids.sort_by(|a, b| {
                         let r_a = app.task_rows.get(a).unwrap();
                         let r_b = app.task_rows.get(b).unwrap();
-                        r_b.select_cpu_ns.cmp(&r_a.select_cpu_ns)
+                        let cmp = r_b.select_cpu_ns.cmp(&r_a.select_cpu_ns);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
                     }),
                     SortColumn::Enqueue => sorted_pids.sort_by(|a, b| {
                         let r_a = app.task_rows.get(a).unwrap();
                         let r_b = app.task_rows.get(b).unwrap();
-                        r_b.enqueue_ns.cmp(&r_a.enqueue_ns)
+                        let cmp = r_b.enqueue_ns.cmp(&r_a.enqueue_ns);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
                     }),
                     SortColumn::Jitter => sorted_pids.sort_by(|a, b| {
                         let r_a = app.task_rows.get(a).unwrap();
@@ -2558,7 +3105,76 @@ pub fn run_tui(
                         } else {
                             0
                         };
-                        j_b.cmp(&j_a)
+                        let cmp = j_b.cmp(&j_a);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Tier => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_a.tier.cmp(&r_b.tier);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Ewma => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Vcsw => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.nvcsw_delta.cmp(&r_a.nvcsw_delta);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Hog => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        // Hogs first when descending
+                        let cmp = (r_b.is_hog as u8).cmp(&(r_a.is_hog as u8));
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::RunsPerSec => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b
+                            .runs_per_sec
+                            .partial_cmp(&r_a.runs_per_sec)
+                            .unwrap_or(std::cmp::Ordering::Equal);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Gap => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.dispatch_gap_us.cmp(&r_a.dispatch_gap_us);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
                     }),
                 }
 
