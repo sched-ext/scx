@@ -298,7 +298,7 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * task that cannot be run on another CPU.
 	 */
 	if (!no_slice_boost && !cpuc->nr_pinned_tasks &&
-	    (taskc->avg_runtime_wall >= sys_stat.slice_wall)) {
+	    (taskc->lcd.avg_runtime >= sys_stat.slice_wall)) {
 		/*
 		 * When the system is not heavily loaded, so it can serve all
 		 * tasks within the targeted latency (slice_max_ns <=
@@ -318,7 +318,7 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 			 * Add a bit of bonus so that a task, which takes a
 			 * bit longer than average, can still finish the job.
 			 */
-			u64 s = taskc->avg_runtime_wall + LAVD_SLICE_BOOST_BONUS;
+			u64 s = taskc->lcd.avg_runtime + LAVD_SLICE_BOOST_BONUS;
 			taskc->slice_wall = clamp(s, slice_min_ns,
 					     LAVD_SLICE_BOOST_MAX);
 			set_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
@@ -332,12 +332,12 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 		 * proportionally to the latency criticality up to 2x the
 		 * regular time slice.
 		 */
-		if (taskc->lat_cri > sys_stat.avg_lat_cri) {
-			u64 b = (sys_stat.slice_wall * taskc->lat_cri) /
+		if (taskc->lcd.lat_cri > sys_stat.avg_lat_cri) {
+			u64 b = (sys_stat.slice_wall * taskc->lcd.lat_cri) /
 				(sys_stat.avg_lat_cri + 1);
 			u64 s = sys_stat.slice_wall + b;
 			taskc->slice_wall = clamp(s, slice_min_ns,
-					     min(taskc->avg_runtime_wall,
+					     min(taskc->lcd.avg_runtime,
 						 sys_stat.slice_wall * 2));
 
 			set_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
@@ -358,27 +358,29 @@ static void update_stat_for_running(struct task_struct *p,
 				    task_ctx *taskc,
 				    struct cpu_ctx *cpuc, u64 now)
 {
-	u64 wait_period, interval;
 	struct cpu_ctx *prev_cpuc;
+
+	/*
+	 * Collect additional information when the scheduler is monitored.
+	 * Must read last_running_clk before it's updated below.
+	 */
+	if (is_monitored) {
+		taskc->resched_interval_wall = time_delta(now,
+						     taskc->lcd.last_running_clk);
+	}
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
 	 */
 	if (have_scheduled(taskc)) {
-		wait_period = time_delta(now, taskc->last_quiescent_clk);
-		interval = taskc->avg_runtime_wall + wait_period;
+		u64 wait_period = time_delta(now, taskc->lcd.last_quiescent_clk);
+		u64 interval = taskc->lcd.avg_runtime + wait_period;
 		if (interval > 0)
-			taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
+			taskc->lcd.run_freq = lat_cri_calc_avg_freq(
+						taskc->lcd.run_freq, interval, 3);
 	}
 
-	/*
-	 * Collect additional information when the scheduler is monitored.
-	 */
-	if (is_monitored) {
-		taskc->resched_interval_wall = time_delta(now,
-						     taskc->last_running_clk);
-	}
 	taskc->prev_cpu_id = taskc->cpu_id;
 	taskc->cpu_id = cpuc->cpu_id;
 
@@ -387,7 +389,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 */
 	reset_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
 	reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
-	taskc->last_running_clk = now;
+	taskc->lcd.last_running_clk = now;
 	taskc->last_measured_clk = now;
 	taskc->last_sum_exec_clk = task_exec_time(p);
 
@@ -401,9 +403,9 @@ static void update_stat_for_running(struct task_struct *p,
 	 * Update per-CPU latency criticality information
 	 * for every-scheduled tasks.
 	 */
-	if (cpuc->max_lat_cri < taskc->lat_cri)
-		cpuc->max_lat_cri = taskc->lat_cri;
-	cpuc->sum_lat_cri += taskc->lat_cri;
+	if (cpuc->max_lat_cri < taskc->lcd.lat_cri)
+		cpuc->max_lat_cri = taskc->lcd.lat_cri;
+	cpuc->sum_lat_cri += taskc->lcd.lat_cri;
 	cpuc->nr_sched++;
 
 	/*
@@ -422,7 +424,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 * Update running task's information for preemption
 	 */
 	cpuc->flags = taskc->flags;
-	cpuc->lat_cri = taskc->lat_cri;
+	cpuc->lat_cri = taskc->lcd.lat_cri;
 	cpuc->running_clk = now;
 	cpuc->est_stopping_clk = get_est_stopping_clk(taskc, now);
 
@@ -486,7 +488,7 @@ static void account_task_runtime(struct task_struct *p,
 	WRITE_ONCE(cpuc->tot_task_time_wwgt, cpuc->tot_task_time_wwgt + task_time_wwgt);
 	WRITE_ONCE(cpuc->tot_task_time_invr, cpuc->tot_task_time_invr + task_time_invr);
 
-	taskc->acc_runtime_wall += runtime_wall;
+	taskc->lcd.acc_runtime += runtime_wall;
 	taskc->svc_time_wwgt += task_time_wwgt;
 	taskc->last_measured_clk = now;
 	taskc->last_sum_exec_clk = task_time_wall;
@@ -515,14 +517,14 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	account_task_runtime(p, taskc, cpuc, now);
 
-	taskc->avg_runtime_wall = calc_avg(taskc->avg_runtime_wall,
-					   taskc->acc_runtime_wall);
-	taskc->last_stopping_clk = now;
+	taskc->lcd.avg_runtime = calc_avg(taskc->lcd.avg_runtime,
+					   taskc->lcd.acc_runtime);
+	taskc->lcd.last_stopping_clk = now;
 
 	/*
 	 * Account for how much of the slice was used for this instance.
 	 */
-	taskc->last_slice_used_wall = time_delta(now, taskc->last_running_clk);
+	taskc->last_slice_used_wall = time_delta(now, taskc->lcd.last_running_clk);
 
 	/*
 	 * Update the current service time if necessary.
@@ -549,11 +551,11 @@ static void update_stat_for_refill(struct task_struct *p,
 	account_task_runtime(p, taskc, cpuc, now);
 
 	/*
-	 * We update avg_runtime_wall here
+	 * We update avg_runtime here
 	 * since it is used to boost time slice.
 	 */
-	taskc->avg_runtime_wall = calc_avg(taskc->avg_runtime_wall,
-					   taskc->acc_runtime_wall);
+	taskc->lcd.avg_runtime = calc_avg(taskc->lcd.avg_runtime,
+					   taskc->lcd.acc_runtime);
 }
 
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
@@ -1166,7 +1168,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		scx_bpf_error("Failed to lookup task_ctx for task %d", p->pid);
 		return;
 	}
-	p_taskc->acc_runtime_wall = 0;
+	p_taskc->lcd.acc_runtime = 0;
 
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
@@ -1230,11 +1232,11 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Update wake frequency.
 	 */
 	now = scx_bpf_now();
-	interval = time_delta(now, READ_ONCE(waker_taskc->last_runnable_clk));
+	interval = time_delta(now, READ_ONCE(waker_taskc->lcd.last_runnable_clk));
 	if (interval >= LAVD_LC_WAKE_INTERVAL_MIN) {
-		WRITE_ONCE(waker_taskc->wake_freq,
-			   calc_avg_freq(waker_taskc->wake_freq, interval));
-		WRITE_ONCE(waker_taskc->last_runnable_clk, now);
+		WRITE_ONCE(waker_taskc->lcd.wake_freq,
+			   lat_cri_calc_avg_freq(waker_taskc->lcd.wake_freq, interval, 3));
+		WRITE_ONCE(waker_taskc->lcd.last_runnable_clk, now);
 	}
 
 	/*
@@ -1250,9 +1252,9 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Note that task @p’s latency criticality (p_taskc->lat_cri) is
 	 * not up-to-date, but such a small imprecision is okay.
 	 */
-	p_taskc->lat_cri_waker = waker_taskc->lat_cri;
-	if (waker_taskc->lat_cri_wakee < p_taskc->lat_cri)
-		waker_taskc->lat_cri_wakee = p_taskc->lat_cri;
+	p_taskc->lcd.lat_cri_waker = waker_taskc->lcd.lat_cri;
+	if (waker_taskc->lcd.lat_cri_wakee < p_taskc->lcd.lat_cri)
+		waker_taskc->lcd.lat_cri_wakee = p_taskc->lcd.lat_cri;
 
 	/*
 	 * Collect additional information when the scheduler is monitored.
@@ -1410,10 +1412,10 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 */
 	now = scx_bpf_now();
-	interval = time_delta(now, taskc->last_quiescent_clk);
+	interval = time_delta(now, taskc->lcd.last_quiescent_clk);
 	if (interval > 0) {
-		taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
-		taskc->last_quiescent_clk = now;
+		taskc->lcd.wait_freq = lat_cri_calc_avg_freq(taskc->lcd.wait_freq, interval, 3);
+		taskc->lcd.last_quiescent_clk = now;
 	}
 }
 
@@ -1738,11 +1740,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 			((char __arena *)taskc)[i] = 0;
 	
 		now = scx_bpf_now();
-		taskc->last_runnable_clk = now;
-		taskc->last_running_clk = now; /* for avg_runtime_wall */
-		taskc->last_stopping_clk = now; /* for avg_runtime_wall */
-		taskc->last_quiescent_clk = now;
-		taskc->avg_runtime_wall = sys_stat.slice_wall;
+		taskc->lcd.last_runnable_clk = now;
+		taskc->lcd.last_running_clk = now; /* for avg_runtime */
+		taskc->lcd.last_stopping_clk = now; /* for avg_runtime */
+		taskc->lcd.last_quiescent_clk = now;
+		taskc->lcd.avg_runtime = sys_stat.slice_wall;
 		taskc->svc_time_wwgt = sys_stat.avg_svc_time_wwgt;
 	}
 

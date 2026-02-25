@@ -10,6 +10,7 @@
 #include <bpf_arena_common.bpf.h>
 #include <lib/sdt_task.h>
 #include <lib/atq.h>
+#include <lib/lat_cri.h>
 
 /*
  * common macros
@@ -156,33 +157,22 @@ struct task_ctx {
 	/* --- cacheline 1 boundary (64 bytes) --- */
 	volatile u64	flags;		/* LAVD_FLAG_* */
 	u64	slice_wall;		/* time slice (wall clock time) */
-	u64	wait_freq;		/* waiting frequency in a second */
-	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	last_measured_clk;	/* last time when running time was measured */
-	/*
-	 * - Accumulated runtime from runnable to quiescent state
-	 * - Used to calculate avg_runtime_wall and latency criticality
-	 */
-	u64	acc_runtime_wall;
-	/*
-	 * - Average runtime per schedule
-	 * - Used to calculate latency criticality
-	 */
-	u64	avg_runtime_wall;
 	/*
 	 * - Total CPU time consumed for this task scaled by task's weight
 	 * - Used to calculate avg_svc_time_wwgt
 	 */
 	u64	svc_time_wwgt;
 
-	/* --- cacheline 2 boundary (128 bytes) --- */
-	u64	last_runnable_clk;	/* last time when a task became runnable */
-	u64	last_running_clk;	/* last time when scheduled in */
-	u64	last_stopping_clk;	/* last time when scheduled out */
-	u64	run_freq;		/* scheduling frequency in a second */
-	u16	lat_cri;		/* final context-aware latency criticality */
-	u16	lat_cri_waker;		/* waker's latency criticality */
-	u16	lat_cri_wakee;		/* wakee's latency criticality */
+	/*
+	 * Latency criticality tracking data (shared library).
+	 * Contains: wait_freq, wake_freq, avg_runtime (was avg_runtime_wall),
+	 * acc_runtime (was acc_runtime_wall), run_freq, last_runnable_clk,
+	 * last_running_clk, last_stopping_clk, last_quiescent_clk,
+	 * lat_cri, lat_cri_waker, lat_cri_wakee.
+	 */
+	struct lat_cri_data lcd;
+
 	u16	perf_cri;		/* performance criticality of a task */
 	u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
 	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
@@ -190,8 +180,6 @@ struct task_ctx {
 	u32	prev_cpu_id;		/* where a task ran last time */
 	u32	cpu_id;			/* where a task is running now */
 
-	/* --- cacheline 3 boundary (192 bytes) --- */
-	u64	last_quiescent_clk;	/* last time when a task became asleep */
 	u64	last_sum_exec_clk;	/* last time when sum exec time was measured */
 	u64	cgrp_id;		/* cgroup id of this task */
 	u64	resched_interval_wall;	/* reschedule interval in ns: [last running, this running] */

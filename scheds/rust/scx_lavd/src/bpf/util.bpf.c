@@ -202,7 +202,7 @@ inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 __hidden
 bool is_lat_cri(task_ctx __arg_arena *taskc)
 {
-	return taskc->lat_cri >= sys_stat.avg_lat_cri;
+	return taskc->lcd.lat_cri >= sys_stat.avg_lat_cri;
 }
 
 __hidden

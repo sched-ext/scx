@@ -21,7 +21,7 @@ struct preemption_info {
 __hidden
 u64 get_est_stopping_clk(task_ctx *taskc, u64 now)
 {
-	return now + min(taskc->avg_runtime_wall, taskc->slice_wall);
+	return now + min(taskc->lcd.avg_runtime, taskc->slice_wall);
 }
 
 static bool can_x_kick_y(struct preemption_info *prm_x,
@@ -68,7 +68,7 @@ static void init_prm_by_task(struct preemption_info *prm_task,
 			     task_ctx *taskc, u64 now)
 {
 	prm_task->est_stopping_clk = get_est_stopping_clk(taskc, now);
-	prm_task->lat_cri = taskc->lat_cri;
+	prm_task->lat_cri = taskc->lcd.lat_cri;
 	prm_task->cpuc = NULL;
 }
 
@@ -79,7 +79,7 @@ static bool is_worth_kick_other_task(task_ctx *taskc)
 	 * etc. Hence, we first judiciously check whether it is worth trying to
 	 * victimize another CPU as the current task is urgent enough.
 	 */
-	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
+	return (taskc->lcd.lat_cri >= sys_stat.thr_lat_cri);
 }
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
