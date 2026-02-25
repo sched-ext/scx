@@ -15,6 +15,7 @@ fn main() {
         .add_source("src/bpf/lib/lvqueue.bpf.c")
         .add_source("src/bpf/lib/minheap.bpf.c")
         .add_source("src/bpf/lib/rbtree.bpf.c")
+        .add_source("src/bpf/lib/rpq.bpf.c")
         .add_source("src/bpf/lib/sdt_alloc.bpf.c")
         .add_source("src/bpf/lib/sdt_task.bpf.c")
         .add_source("src/bpf/lib/topology.bpf.c")
@@ -27,6 +28,7 @@ fn main() {
         .add_source("src/bpf/lib/selftests/st_lvqueue.bpf.c")
         .add_source("src/bpf/lib/selftests/st_minheap.bpf.c")
         .add_source("src/bpf/lib/selftests/st_rbtree.bpf.c")
+        .add_source("src/bpf/lib/selftests/st_rpq.bpf.c")
         .add_source("src/bpf/lib/selftests/st_topology.bpf.c")
         .compile_link_gen()
         .unwrap();

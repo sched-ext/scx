@@ -2,6 +2,7 @@
 
 #include <lib/atq.h>
 #include <lib/rbtree.h>
+#include <lib/rpq.h>
 
 #define SCX_SELFTEST(func, ...)		\
 	do {				\
@@ -31,6 +32,7 @@ int scx_selftest_btree(void);
 int scx_selftest_lvqueue(void);
 int scx_selftest_minheap(void);
 int scx_selftest_rbtree(void);
+int scx_selftest_rpq(void);
 int scx_selftest_topology(void);
 
 #ifndef __BPF__
