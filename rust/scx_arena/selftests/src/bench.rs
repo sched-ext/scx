@@ -43,7 +43,8 @@ use simplelog::{ColorChoice, Config as SimplelogConfig, LevelFilter, TermLogger,
 enum BenchMode {
     Rpq,
     Single,
-    Both,
+    Atq,
+    All,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -56,7 +57,7 @@ enum OutputFormat {
 #[command(name = "scx_arena_benchmarks", about = "BPF arena PQ throughput benchmark")]
 struct Args {
     /// Which data structure to benchmark
-    #[arg(long, default_value = "both")]
+    #[arg(long, default_value = "all")]
     bench: BenchMode,
 
     /// Number of concurrent threads
@@ -447,8 +448,9 @@ fn main() -> Result<()> {
         );
     }
 
-    let run_rpq = matches!(args.bench, BenchMode::Rpq | BenchMode::Both);
-    let run_single = matches!(args.bench, BenchMode::Single | BenchMode::Both);
+    let run_rpq = matches!(args.bench, BenchMode::Rpq | BenchMode::All);
+    let run_single = matches!(args.bench, BenchMode::Single | BenchMode::All);
+    let run_atq = matches!(args.bench, BenchMode::Atq | BenchMode::All);
 
     if run_rpq {
         let fd = skel.progs.bench_run_rpq.as_fd().as_raw_fd();
@@ -462,6 +464,15 @@ fn main() -> Result<()> {
     if run_single {
         let fd = skel.progs.bench_run_single.as_fd().as_raw_fd();
         let result = run_benchmark("single", fd, args.threads, args.ops, &cpus)?;
+        match args.output {
+            OutputFormat::Text => result.print_text(),
+            OutputFormat::Json => result.print_json(),
+        }
+    }
+
+    if run_atq {
+        let fd = skel.progs.bench_run_atq.as_fd().as_raw_fd();
+        let result = run_benchmark("atq", fd, args.threads, args.ops, &cpus)?;
         match args.output {
             OutputFormat::Text => result.print_text(),
             OutputFormat::Json => result.print_json(),
