@@ -130,6 +130,12 @@ rpq_heap_insert(rpq_heap_t __arg_arena *heap, u64 elem, u64 key)
 
 	rpq_sift_up(heap);
 
+	/*
+	 * Update min_key for lockless peek. After sift-up the
+	 * minimum is always at elems[0].
+	 */
+	WRITE_ONCE(heap->min_key, heap->elems[0].key);
+
 	return 0;
 }
 
@@ -152,6 +158,10 @@ rpq_heap_pop(rpq_heap_t __arg_arena *heap, u64 *elem, u64 *key)
 		heap->elems[0].elem = heap->elems[heap->size].elem;
 		heap->elems[0].key = heap->elems[heap->size].key;
 		rpq_sift_down(heap);
+
+		WRITE_ONCE(heap->min_key, heap->elems[0].key);
+	} else {
+		WRITE_ONCE(heap->min_key, (u64)-1);
 	}
 
 	return 0;
@@ -202,6 +212,7 @@ u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity)
 
 		queues[i].size = 0;
 		queues[i].capacity = per_queue_capacity;
+		queues[i].min_key = (u64)-1;
 		queues[i].elems = elems;
 		/*
 		 * Lock is zero-initialized by arena allocation,
@@ -299,16 +310,12 @@ int rpq_pop(rpq_t __arg_arena *pq, u64 *elem, u64 *key)
 		q2 = bpf_get_prandom_u32() % nq;
 
 		/*
-		 * Peek at minimums without locking. These reads may be
-		 * stale, but that is acceptable for the selection
-		 * heuristic. On x86, aligned u64 reads are atomic.
+		 * Lockless peek via cached min_key. This is a single
+		 * aligned u64 read per heap -- no TOCTOU with size.
+		 * Stale values are fine for the selection heuristic.
 		 */
-		key1 = (READ_ONCE(pq->queues[q1].size) > 0)
-			? READ_ONCE(pq->queues[q1].elems[0].key)
-			: (u64)-1;
-		key2 = (READ_ONCE(pq->queues[q2].size) > 0)
-			? READ_ONCE(pq->queues[q2].elems[0].key)
-			: (u64)-1;
+		key1 = READ_ONCE(pq->queues[q1].min_key);
+		key2 = READ_ONCE(pq->queues[q2].min_key);
 
 		/* Both samples empty, retry */
 		if (key1 == (u64)-1 && key2 == (u64)-1)
@@ -371,12 +378,14 @@ int rpq_peek(rpq_t __arg_arena *pq, u64 *elem, u64 *key)
 	for (i = 0; i < 4 && can_loop; i++) {
 		qi = bpf_get_prandom_u32() % nq;
 
-		if (READ_ONCE(pq->queues[qi].size) == 0)
-			continue;
-
-		cur_key = READ_ONCE(pq->queues[qi].elems[0].key);
+		cur_key = READ_ONCE(pq->queues[qi].min_key);
 		if (cur_key < best_key) {
 			best_key = cur_key;
+			/*
+			 * Read elem under the assumption min_key is
+			 * current. May be stale but that's acceptable
+			 * for a lockless peek.
+			 */
 			*elem = READ_ONCE(pq->queues[qi].elems[0].elem);
 			*key = cur_key;
 		}

@@ -33,12 +33,17 @@ struct rpq_elem {
 /*
  * Individual min-heap within the multiqueue.
  * Each heap has its own lock for independent, low-contention access.
+ *
+ * min_key is maintained under the lock and provides a single-word
+ * lockless peek target for the "power of two choices" heuristic.
+ * Set to (u64)-1 when the heap is empty.
  */
 struct rpq_heap;
 typedef struct rpq_heap __arena rpq_heap_t;
 
 struct rpq_heap {
 	arena_spinlock_t lock;
+	u64 min_key;		/* Lockless peek target, (u64)-1 = empty */
 	u64 size;
 	u64 capacity;
 	struct rpq_elem __arena *elems;
