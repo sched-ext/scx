@@ -5,10 +5,13 @@ Used by pandemonium.py (build manager) and tests/pandemonium-tests.py (test orch
 """
 
 import glob
+import math
 import os
 import platform
 import shutil
 import subprocess
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -17,8 +20,8 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 TARGET_DIR = Path("/tmp/pandemonium-build")
-LOG_DIR = Path("/tmp/pandemonium")
-ARCHIVE_DIR = Path.home() / ".cache" / "pandemonium"
+LOG_DIR = Path.home() / ".cache" / "pandemonium"
+ARCHIVE_DIR = LOG_DIR
 BINARY = TARGET_DIR / "release" / "pandemonium"
 VMLINUX_CACHE = ARCHIVE_DIR / "vmlinux.h"
 MIN_KERNEL = (6, 12)
@@ -61,9 +64,7 @@ def get_git_info() -> dict:
     return info
 
 
-# =============================================================================
 # LOGGING
-# =============================================================================
 
 def _timestamp() -> str:
     return datetime.now().strftime("[%H:%M:%S]")
@@ -97,9 +98,7 @@ def run_cmd_capture(cmd: list, cwd: Path | None = None,
     return result.returncode, result.stdout, result.stderr
 
 
-# =============================================================================
 # BUILD
-# =============================================================================
 
 def has_root_owned_files() -> bool:
     """Check if sudo left root-owned files anywhere in the build tree."""
@@ -216,3 +215,182 @@ def build(force: bool = False) -> bool:
         size = BINARY.stat().st_size // 1024
         log_info(f"Build complete: {BINARY} ({size} KB)")
     return True
+
+
+def check_root():
+    """Exit if not running as root."""
+    if os.geteuid() != 0:
+        print("ERROR: must run as root (sudo)")
+        sys.exit(1)
+
+
+def ensure_build():
+    """Build from source if needed, print version banner."""
+    if not build():
+        print("ERROR: build failed")
+        sys.exit(1)
+    ver = get_version()
+    git = get_git_info()
+    dirty = " (dirty)" if git["dirty"] else ""
+    log_info(f"PANDEMONIUM v{ver} [{git['commit']}{dirty}]")
+
+
+# STATISTICS
+
+def mean_stdev(values: list[float]) -> tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    n = len(values)
+    mean = sum(values) / n
+    if n < 2:
+        return mean, 0.0
+    variance = sum((x - mean) ** 2 for x in values) / (n - 1)
+    return mean, math.sqrt(variance)
+
+
+def percentile(values: list[float], pct: float) -> float:
+    """Compute percentile (0-100) using nearest-rank method."""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    k = max(0, min(int(math.ceil(pct / 100.0 * len(s))) - 1, len(s) - 1))
+    return s[k]
+
+
+# CPU MANAGEMENT
+
+def _parse_cpu_range(path: str) -> int:
+    try:
+        raw = Path(path).read_text().strip()
+    except (FileNotFoundError, PermissionError):
+        return os.cpu_count() or 1
+    count = 0
+    for r in raw.split(","):
+        parts = r.split("-")
+        if len(parts) == 1 and parts[0].strip().isdigit():
+            count += 1
+        elif len(parts) == 2:
+            try:
+                count += int(parts[1]) - int(parts[0]) + 1
+            except ValueError:
+                pass
+    return count
+
+
+def get_possible_cpus() -> int:
+    return _parse_cpu_range("/sys/devices/system/cpu/possible")
+
+
+def get_online_cpus() -> int:
+    return _parse_cpu_range("/sys/devices/system/cpu/online")
+
+
+def set_cpu_online(cpu: int, online: bool) -> bool:
+    if cpu == 0:
+        return True
+    path = f"/sys/devices/system/cpu/cpu{cpu}/online"
+    value = "1" if online else "0"
+    ret = subprocess.run(
+        ["sudo", "tee", path],
+        input=value, capture_output=True, text=True,
+    )
+    return ret.returncode == 0
+
+
+def restrict_cpus(count: int, max_cpus: int) -> bool:
+    for cpu in range(count, max_cpus):
+        if not set_cpu_online(cpu, False):
+            log_warn(f"Failed to offline CPU {cpu}")
+            return False
+    return True
+
+
+def restore_all_cpus(max_cpus: int):
+    for cpu in range(1, max_cpus):
+        set_cpu_online(cpu, True)
+
+
+class CpuGuard:
+    """Context manager that restores all CPUs on exit."""
+    def __init__(self, max_cpus: int):
+        self.max_cpus = max_cpus
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        restore_all_cpus(self.max_cpus)
+
+
+def compute_core_counts(max_cpus: int) -> list[int]:
+    points = [n for n in [2, 4, 8, 16, 32, 64] if n <= max_cpus]
+    if max_cpus not in points:
+        points.append(max_cpus)
+    return sorted(points)
+
+
+# SCHEDULER DETECTION
+
+SCX_OPS = Path("/sys/kernel/sched_ext/root/ops")
+
+
+def is_scx_active() -> bool:
+    try:
+        return bool(SCX_OPS.read_text().strip())
+    except (FileNotFoundError, PermissionError):
+        return False
+
+
+def scx_scheduler_name() -> str:
+    try:
+        return SCX_OPS.read_text().strip()
+    except (FileNotFoundError, PermissionError):
+        return ""
+
+
+def wait_for_activation(timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_scx_active():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def wait_for_deactivation(timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_scx_active():
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def wait_for_no_scheduler(timeout: float = 10.0) -> bool:
+    """Wait until no sched_ext scheduler is registered (stale struct_ops detection)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            name = SCX_OPS.read_text().strip()
+            if not name:
+                return True
+            log_info(f"  waiting for scheduler cleanup: '{name}' still registered")
+        except (FileNotFoundError, PermissionError):
+            return True
+        time.sleep(0.5)
+    log_warn("scheduler still registered after timeout")
+    return False
+
+
+# TRACEFS
+
+def find_trace_pipe() -> Path:
+    """Find trace_pipe in tracefs (location varies by kernel)."""
+    candidates = [
+        Path("/sys/kernel/tracing/trace_pipe"),
+        Path("/sys/kernel/debug/tracing/trace_pipe"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]

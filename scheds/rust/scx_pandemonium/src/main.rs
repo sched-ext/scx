@@ -196,8 +196,19 @@ fn main() -> Result<()> {
 }
 
 // DEFAULT COMPOSITORS: BOOSTED TO LAT_CRITICAL VIA BPF MAP LOOKUP
-const DEFAULT_COMPOSITORS: &[&str] =
-    &["kwin", "gnome-shell", "sway", "Hyprland", "picom", "weston"];
+const DEFAULT_COMPOSITORS: &[&str] = &[
+    "kwin",
+    "gnome-shell",
+    "mutter",
+    "sway",
+    "Hyprland",
+    "picom",
+    "weston",
+    "labwc",
+    "wayfire",
+    "niri",
+    "pandemonium",
+];
 
 fn run_scheduler(
     verbose: bool,
@@ -229,9 +240,16 @@ fn run_scheduler(
     );
     log_info!("VERBOSE: {}", verbose);
 
-    let mut open_object = MaybeUninit::uninit();
-
+    let mut is_restart = false;
     loop {
+        // ON RESTART, WAIT FOR KERNEL STRUCT_OPS CLEANUP.
+        // DETACH IS ASYNCHRONOUS -- UNDER HEAVY LOAD (12C SATURATED),
+        // THE KERNEL NEEDS TIME TO FULLY UNREGISTER THE OLD SCHEDULER.
+        if is_restart {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+
+        let mut open_object = MaybeUninit::uninit();
         let mut sched = Scheduler::init(&mut open_object, nr_cpus)?;
 
         // POPULATE CACHE TOPOLOGY MAP AT STARTUP
@@ -342,20 +360,22 @@ fn run_scheduler(
                 };
 
                 let sojourn_ms = stats.batch_sojourn_ns / 1_000_000;
-                let burst_label = if stats.burst_mode_active > 0 {
-                    " BURST"
+                let delta_burst = stats.burst_mode_active.wrapping_sub(prev.burst_mode_active);
+                let burst_label = if delta_burst > 0 { " BURST" } else { "" };
+                let longrun_label = if stats.longrun_mode_active > 0 {
+                    " LONGRUN"
                 } else {
                     ""
                 };
 
                 if verbose {
                     println!(
-                        "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us lat_idle: {}us lat_kick: {}us procdb: {} reenq: {} sjrn: {}ms l2: B={}% I={}% L={}% [BPF{}]",
+                        "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us lat_idle: {}us lat_kick: {}us procdb: {} reenq: {} sjrn: {}ms l2: B={}% I={}% L={}% [BPF{}{}]",
                         delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
                         delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
                         wake_avg_us, lat_idle_us, lat_kick_us, delta_procdb,
                         delta_reenq, sojourn_ms, l2_pct_b, l2_pct_i, l2_pct_l,
-                        burst_label,
+                        burst_label, longrun_label,
                     );
                 }
 
@@ -407,7 +427,7 @@ fn run_scheduler(
         } else {
             // ADAPTIVE MODE: BPF + SINGLE-THREAD MONITOR LOOP
             log_info!("PANDEMONIUM IS ACTIVE (CTRL+C TO EXIT)");
-            adaptive::monitor_loop(&mut sched, &SHUTDOWN, verbose)?
+            adaptive::monitor_loop(&mut sched, &SHUTDOWN, verbose, nr_cpus_display)?
         };
 
         log_info!("PANDEMONIUM IS SHUTTING DOWN");
@@ -424,6 +444,7 @@ fn run_scheduler(
         // RESET SHUTDOWN FOR RESTART
         SHUTDOWN.store(false, Ordering::Relaxed);
         log_info!("RESTARTING PANDEMONIUM...");
+        is_restart = true;
     }
 
     log_info!("Shutdown complete");

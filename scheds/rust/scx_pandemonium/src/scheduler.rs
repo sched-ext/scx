@@ -50,11 +50,13 @@ pub struct PandemoniumStats {
     pub nr_reenqueue: u64,
     pub batch_sojourn_ns: u64,
     pub burst_mode_active: u64,
+    pub longrun_mode_active: u64,
+    pub nr_overflow_rescue: u64,
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 208);
-const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 72);
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 224);
+const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 80);
 
 // TuningKnobs lives in tuning.rs (zero BPF dependencies, testable offline)
 
@@ -180,8 +182,9 @@ impl<'a> Scheduler<'a> {
                 if stats.batch_sojourn_ns > total.batch_sojourn_ns {
                     total.batch_sojourn_ns = stats.batch_sojourn_ns;
                 }
-                if stats.burst_mode_active > total.burst_mode_active {
-                    total.burst_mode_active = stats.burst_mode_active;
+                total.burst_mode_active += stats.burst_mode_active;
+                if stats.longrun_mode_active > total.longrun_mode_active {
+                    total.longrun_mode_active = stats.longrun_mode_active;
                 }
             }
         }

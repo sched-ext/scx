@@ -118,8 +118,8 @@ fn demotion_threshold_in_knobs() {
 
 #[test]
 fn tuning_knobs_size_is_8_u64() {
-    // MUST MATCH struct tuning_knobs IN intf.h (9 x u64 = 72 BYTES)
-    assert_eq!(std::mem::size_of::<TuningKnobs>(), 72);
+    // MUST MATCH struct tuning_knobs IN intf.h (10 x u64 = 80 BYTES)
+    assert_eq!(std::mem::size_of::<TuningKnobs>(), 80);
 }
 
 #[test]
