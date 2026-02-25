@@ -47,6 +47,7 @@ enum cake_tier {
 #define BENCH_ITERATIONS 8
 
 enum kfunc_bench_id {
+	/* ── Existing entries (0–23) ── */
 	BENCH_KTIME_GET_NS       = 0, /* bpf_ktime_get_ns() */
 	BENCH_SCX_BPF_NOW        = 1, /* scx_bpf_now() */
 	BENCH_GET_SMP_PROC_ID    = 2, /* bpf_get_smp_processor_id() */
@@ -71,7 +72,49 @@ enum kfunc_bench_id {
 	BENCH_DISRUPTOR_READ     = 21, /* Full CL0 Disruptor handoff read (cake_stopping sim) */
 	BENCH_TCTX_COLD_SIM      = 22, /* get_task_ctx + arena CL0 read (cake_running sim) */
 	BENCH_ARENA_STRIDE       = 23, /* Stride across arena per_cpu array to test TLB/hugepage */
-	BENCH_MAX_ENTRIES        = 24,
+
+	/* ── New entries (24–42): eBPF helpers + SCX kfuncs ── */
+	/* Timing variants */
+	BENCH_KTIME_BOOT_NS      = 24, /* bpf_ktime_get_boot_ns() — suspend-aware */
+	BENCH_KTIME_COARSE_NS    = 25, /* bpf_ktime_get_coarse_ns() — jiffies-based low-res */
+	BENCH_JIFFIES64           = 26, /* bpf_jiffies64() — raw jiffies */
+	BENCH_KTIME_TAI_NS       = 27, /* bpf_ktime_get_tai_ns() — TAI clock */
+
+	/* Process info */
+	BENCH_CURRENT_PID_TGID   = 28, /* bpf_get_current_pid_tgid() — PID+TGID in one */
+	BENCH_CURRENT_TASK_BTF   = 29, /* bpf_get_current_task_btf() — direct task ptr */
+	BENCH_CURRENT_COMM       = 30, /* bpf_get_current_comm() — task comm name */
+
+	/* CPU / topology info */
+	BENCH_NUMA_NODE_ID       = 31, /* bpf_get_numa_node_id() — NUMA node */
+	BENCH_SCX_TASK_RUNNING   = 32, /* scx_bpf_task_running(p) — task running check */
+	BENCH_SCX_TASK_CPU       = 33, /* scx_bpf_task_cpu(p) — task's current CPU */
+	BENCH_SCX_NR_NODE_IDS    = 34, /* scx_bpf_nr_node_ids() — NUMA node count */
+	BENCH_SCX_CPUPERF_CUR    = 35, /* scx_bpf_cpuperf_cur(cpu) — current perf level */
+
+	/* Task storage (what cake replaced with arena) */
+	BENCH_TASK_STORAGE_GET   = 36, /* bpf_task_storage_get() — standard per-task map */
+
+	/* Idle probing alternatives */
+	BENCH_SCX_PICK_IDLE_CPU  = 37, /* scx_bpf_pick_idle_cpu() — kernel idle scan */
+	BENCH_SCX_IDLE_CPUMASK   = 38, /* scx_bpf_get_idle_cpumask() + put cycle */
+	BENCH_SCX_KICK_CPU       = 39, /* scx_bpf_kick_cpu() — IPI preemption cost */
+
+	/* Utility */
+	BENCH_PRANDOM_U32        = 40, /* bpf_get_prandom_u32() — RNG cost */
+	BENCH_SPIN_LOCK          = 41, /* bpf_spin_lock + unlock cycle */
+	BENCH_SCX_CPUPERF_CAP    = 42, /* scx_bpf_cpuperf_cap(cpu) — max perf capacity */
+
+	/* ── Cake competitor entries (43–49) ── */
+	BENCH_RODATA_NR_CPUS     = 43, /* RODATA const nr_cpus read (vs nr_cpu_ids kfunc) */
+	BENCH_RODATA_NR_NODES    = 44, /* RODATA const nr_nodes read (vs nr_node_ids kfunc) */
+	BENCH_RODATA_CPUPERF_CAP = 45, /* RODATA cpuperf_cap[cpu] read (vs kfunc) */
+	BENCH_ARENA_PID_TGID     = 46, /* Arena tctx.pid+tgid read (vs current_pid_tgid kfunc) */
+	BENCH_MBOX_TASK_CPU      = 47, /* Mbox CL0 cached_cpu (vs scx_bpf_task_cpu kfunc) */
+	BENCH_CL0_LOCKFREE       = 48, /* CL0 lock-free atomic read (vs bpf_spin_lock cycle) */
+	BENCH_BSS_XORSHIFT       = 49, /* BSS xorshift32 PRNG (vs bpf_get_prandom_u32 kfunc) */
+
+	BENCH_MAX_ENTRIES        = 50,
 };
 
 struct kfunc_bench_entry {
@@ -98,6 +141,7 @@ enum cake_flow_flags {
 	CAKE_FLOW_NEW          = 1 << 0, /* Task is newly created */
 	CAKE_FLOW_YIELDER      = 1 << 1, /* Task voluntarily yielded since last stop */
 	CAKE_FLOW_WAKER_BOOST  = 1 << 2, /* Waker was a yielder — propagate priority (1-cycle) */
+	CAKE_FLOW_HOG          = 1 << 3, /* Background hog: BULK + non-yielder + deprioritized */
 };
 
 /* Per-task flow state - 64B aligned, first 8B coalesced for cake_stopping writes */
@@ -139,7 +183,7 @@ struct cake_task_ctx {
 	 * Gate 1c probes these when prev_cpu+sibling are busy, before kernel scan.
 	 * Initialized to 0xFFFF (invalid sentinel) to prevent thundering herd. */
 	u16 warm_cpus[3]; /* [0]=current, [1]=prev (staged in dsq_vtime), [2]=oldest */
-	u16 __warm_pad;   /* Alignment to 8-byte boundary */
+	u16 waker_cpu;    /* CPU where waker last ran — chain locality (Gate 1W-chain) */
 
 	/* --- High Resolution Arena Telemetry (TUI Matrix) ---
      * Zero-cost pointer access via BPF Arena. User-space sweeps memory 
@@ -161,6 +205,8 @@ struct cake_task_ctx {
 		u32 gate_3_hits; /* Kernel fallback hits */
 		u32 gate_1p_hits; /* Yielder-preempts-bulk hits (Gate 1P) */
 		u32 gate_1c_hits; /* Home CPU warm set hits (Gate 1c) */
+		u32 gate_1d_hits; /* Domestic: same-process cache affinity (Gate 1D) */
+		u32 gate_1wc_hits; /* Waker-chain: producer-consumer locality (Gate 1WC) */
 		u32 gate_tun_hits; /* Complete miss tunneling */
 		u64 jitter_accum_ns; /* Mathematical running variant vs AVG */
 		u32 total_runs; /* Total executions over lifetime */
@@ -293,8 +339,10 @@ struct mega_mailbox_entry {
 	/* --- nvcsw pre-staging (bytes 40-47): Fix 3 --- */
 	u64 cached_nvcsw;      /* 8B — nvcsw_snapshot (eliminates arena read in stopping) */
 
-	/* --- Reserved CL0 (bytes 48-63): future handoff expansion --- */
-	u32 _reserved_cl0[4];  /* 16B pad to end of CL0 */
+	/* --- DSQ generation hint (bytes 48-51): unidirectional flow --- */
+	u32 last_dsq_gen;      /* Last dsq_gen[llc] seen on dispatch miss (local-only write) */
+	/* --- Reserved CL0 (bytes 52-63): future handoff expansion --- */
+	u32 _reserved_cl0[3];  /* 12B pad to end of CL0 */
 
 	/* ═══ CACHE LINE 1 (bytes 64-127): CROSS-CPU + TELEMETRY (WARM) ═══
      * ALP prefetches this line for free on Zen 5 (128B pair).
@@ -316,8 +364,14 @@ struct mega_mailbox_entry {
 	 * by ~1µs — Gate 3 catches any missed idle CPUs. */
 	u32 idle_hint;         /* 0=busy (default), 1=likely idle */
 
-	/* --- Reserved CL1 (bytes 72-127) --- */
-	u32 _reserved_cl1[14]; /* 56B pad to end of CL1 */
+	/* --- Cluster hint (bytes 72-75): process-local cache affinity --- */
+	/* Written by local CPU in cake_running. Read by remote CPUs in Gate 1D
+	 * to prefer cores whose last task shared the same address space (tgid).
+	 * Same MESI pattern as idle_hint: local write, remote read, no RFO. */
+	u32 last_tgid;         /* tgid of last task that ran on this CPU */
+
+	/* --- Reserved CL1 (bytes 76-127) --- */
+	u32 _reserved_cl1[13]; /* 52B pad to end of CL1 */
 
 	/* ═══ CACHE LINE 2 (bytes 128-191): RESERVED ═══ */
 	u32 _reserved_cl2[16]; /* 64B pad */
@@ -339,7 +393,8 @@ struct cake_stats {
 	u64 nr_dropped_allocations; /* Count of failed scx_task_alloc requests */
 	u64 nr_local_dispatches;    /* Dispatched from local LLC DSQ */
 	u64 nr_stolen_dispatches;   /* Dispatched from remote LLC DSQ (steal) */
-	u64 nr_dispatch_misses;     /* dispatch() found no work (all DSQs empty) */
+	u64 nr_dispatch_misses;     /* dispatch() kfunc found no work (DSQ empty after probe) */
+	u64 nr_dispatch_hint_skip;  /* dispatch() skipped kfunc via dsq_pending hint (counter==0) */
 	u64 nr_dsq_queued;          /* Per-LLC DSQ enqueue count (for depth calc) */
 	u64 nr_dsq_consumed;        /* Per-LLC DSQ consume count (dispatched from DSQ) */
 
