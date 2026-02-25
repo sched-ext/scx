@@ -23,16 +23,9 @@ use compat::vmlinux::{scx_exit_info, task_struct};
 const SHARED_DSQ: u64 = 0;
 
 // ── Scheduler callbacks ────────────────────────────────────────────────
-//
-// These implement the scheduling policy. Each is called by a trampoline
-// in compat::struct_ops that handles the BPF struct_ops calling
-// convention (extracting arguments from the context pointer).
 
-/// Select a CPU for a waking task.
-///
-/// Returns the previous CPU as a simple default. A full implementation
-/// would call `scx_bpf_select_cpu_dfl` to find an idle CPU and fast-path
-/// the task directly to its local DSQ.
+/// Select a CPU for a waking task. Returns the previous CPU as a simple
+/// default. A full implementation would call `scx_bpf_select_cpu_dfl`.
 #[inline(always)]
 pub fn on_select_cpu(_p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i32 {
     prev_cpu
@@ -52,21 +45,15 @@ pub fn on_dispatch(_cpu: i32, _prev: *mut task_struct) {
 
 /// Running: called when a task starts executing on a CPU.
 #[inline(always)]
-pub fn on_running(_p: *mut task_struct) {
-    // vtime tracking: p->scx.dsq_vtime (needs CO-RE field access)
-}
+pub fn on_running(_p: *mut task_struct) {}
 
 /// Stopping: called when a task stops executing.
 #[inline(always)]
-pub fn on_stopping(_p: *mut task_struct, _runnable: bool) {
-    // vtime charging: p->scx.slice, p->scx.weight (needs CO-RE field access)
-}
+pub fn on_stopping(_p: *mut task_struct, _runnable: bool) {}
 
 /// Enable: called when a task joins the ext scheduler class.
 #[inline(always)]
-pub fn on_enable(_p: *mut task_struct) {
-    // vtime init: p->scx.dsq_vtime = vtime_now (needs CO-RE field access)
-}
+pub fn on_enable(_p: *mut task_struct) {}
 
 /// Init: create the shared dispatch queue.
 #[inline(always)]
@@ -77,3 +64,17 @@ pub fn on_init() -> i32 {
 /// Exit: scheduler teardown notification.
 #[inline(always)]
 pub fn on_exit(_ei: *mut scx_exit_info) {}
+
+// ── Registration ───────────────────────────────────────────────────────
+
+scx_ops_define! {
+    name: "purerust",
+    select_cpu: on_select_cpu,
+    enqueue: on_enqueue,
+    dispatch: on_dispatch,
+    running: on_running,
+    stopping: on_stopping,
+    enable: on_enable,
+    init: on_init,
+    exit: on_exit,
+}

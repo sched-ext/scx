@@ -23,18 +23,6 @@ use anyhow::{bail, Context, Result};
 /// Number of function pointer fields in `sched_ext_ops` (before data fields).
 const SCHED_EXT_OPS_NUM_FN_FIELDS: usize = 34;
 
-/// All struct_ops callback function names that need static linkage.
-const CALLBACK_NAMES: &[&[u8]] = &[
-    b"simple_select_cpu\0",
-    b"simple_enqueue\0",
-    b"simple_dispatch\0",
-    b"simple_running\0",
-    b"simple_stopping\0",
-    b"simple_enable\0",
-    b"simple_init\0",
-    b"simple_exit\0",
-];
-
 /// Patch the BPF ELF to fix all BTF issues. Returns a new ELF with a
 /// corrected `.BTF` section.
 pub fn patch_elf(elf: &[u8]) -> Result<Vec<u8>> {
@@ -300,7 +288,7 @@ fn patch_btf(old_btf_data: &[u8], btf_size: usize) -> Result<Vec<u8>> {
         libbpf_sys::btf__free(btf);
 
         patch_struct_ops_field_types(&mut data, dummy_ptr as u32)?;
-        patch_func_linkage_to_static(&mut data, CALLBACK_NAMES)?;
+        patch_all_funcs_to_static(&mut data)?;
 
         Ok(data)
     }
@@ -354,41 +342,31 @@ fn patch_struct_ops_field_types(btf_data: &mut [u8], ptr_type_id: u32) -> Result
     bail!("sched_ext_ops STRUCT type not found in BTF");
 }
 
-/// Change FUNC linkage from `global` to `static` for named functions.
+/// Change all FUNC entries from `global` to `static` linkage.
 ///
 /// The BPF verifier requires global functions to return scalars, but
 /// struct_ops callbacks may return void. Clang emits them as static.
-fn patch_func_linkage_to_static(btf_data: &mut [u8], names: &[&[u8]]) -> Result<()> {
+/// In a struct_ops BPF program, all functions can safely be static.
+fn patch_all_funcs_to_static(btf_data: &mut [u8]) -> Result<()> {
     let hdr_len = u32::from_le_bytes(btf_data[4..8].try_into().unwrap()) as usize;
     let type_off = u32::from_le_bytes(btf_data[8..12].try_into().unwrap()) as usize;
     let type_len = u32::from_le_bytes(btf_data[12..16].try_into().unwrap()) as usize;
-    let str_off = u32::from_le_bytes(btf_data[16..20].try_into().unwrap()) as usize;
 
     let type_start = hdr_len + type_off;
     let type_end = type_start + type_len;
-    let str_start = hdr_len + str_off;
 
     let mut pos = type_start;
     let mut patched = 0;
     while pos + 12 <= type_end {
-        let name_off = u32::from_le_bytes(btf_data[pos..pos + 4].try_into().unwrap()) as usize;
         let info = u32::from_le_bytes(btf_data[pos + 4..pos + 8].try_into().unwrap());
         let kind = (info >> 24) & 0x1f;
         let vlen = (info & 0xffff) as usize;
 
         // BTF_KIND_FUNC = 12, vlen encodes linkage (0=static, 1=global)
         if kind == 12 && vlen == 1 {
-            let ns = str_start + name_off;
-            for target in names {
-                if ns + target.len() <= btf_data.len()
-                    && &btf_data[ns..ns + target.len()] == *target
-                {
-                    let new_info = info & !0xffff;
-                    btf_data[pos + 4..pos + 8].copy_from_slice(&new_info.to_le_bytes());
-                    patched += 1;
-                    break;
-                }
-            }
+            let new_info = info & !0xffff;
+            btf_data[pos + 4..pos + 8].copy_from_slice(&new_info.to_le_bytes());
+            patched += 1;
         }
 
         pos += 12;
