@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [".", "scx_purerust-ebpf"]
+
+[package]
+name = "scx_purerust"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[dependencies]
+libbpf-rs = "0.26"
+libbpf-sys = "1.6"
+libc = "0.2"
+anyhow = "1.0"
+ctrlc = "3.4"
+
+[build-dependencies]
+aya-build = "0.1"

@@ -1,0 +1,8 @@
+[package]
+name = "scx_purerust-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "scx_purerust"
+path = "src/main.rs"
