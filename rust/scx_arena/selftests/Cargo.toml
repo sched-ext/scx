@@ -7,9 +7,19 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.65"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
 libbpf-rs = "=0.26.0"
 simplelog = "0.12"
 scx_utils = { path = "../../scx_utils", version = "1.0.26" }
 
 [build-dependencies]
 scx_cargo = { path = "../../scx_cargo", version = "1.0.27" }
+
+[[bin]]
+name = "scx_arena_selftests"
+path = "src/main.rs"
+
+[[bin]]
+name = "scx_arena_benchmarks"
+path = "src/bench.rs"

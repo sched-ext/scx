@@ -3664,7 +3664,9 @@ name = "scx_arena_selftests"
 version = "1.0.7"
 dependencies = [
  "anyhow",
+ "clap",
  "libbpf-rs",
+ "libc",
  "scx_cargo",
  "scx_utils",
  "simplelog",

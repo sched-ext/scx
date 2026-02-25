@@ -30,6 +30,7 @@ fn main() {
         .add_source("src/bpf/lib/selftests/st_rbtree.bpf.c")
         .add_source("src/bpf/lib/selftests/st_rpq.bpf.c")
         .add_source("src/bpf/lib/selftests/st_topology.bpf.c")
+        .add_source("src/bpf/lib/benchmarks/bench_pq.bpf.c")
         .compile_link_gen()
         .unwrap();
 }
