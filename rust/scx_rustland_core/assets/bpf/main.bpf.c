@@ -1034,16 +1034,10 @@ static int usersched_timer_init(void)
 static s32 get_nr_online_cpus(void)
 {
 	const struct cpumask *online_cpumask;
-	int i, cpus = 0;
+	s32 cpus = 0;
 
 	online_cpumask = scx_bpf_get_online_cpumask();
-
-	bpf_for(i, 0, nr_cpu_ids) {
-		if (!bpf_cpumask_test_cpu(i, online_cpumask))
-			continue;
-		cpus++;
-	}
-
+	cpus = bpf_cpumask_weight(online_cpumask);
 	scx_bpf_put_cpumask(online_cpumask);
 
 	return cpus;
