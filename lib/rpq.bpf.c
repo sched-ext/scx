@@ -168,16 +168,24 @@ rpq_heap_pop(rpq_heap_t __arg_arena *heap, u64 *elem, u64 *key)
 }
 
 /*
+ * Maximum pick-d value for the pop heuristic. Clamped to avoid
+ * excessive cache-line reads per pop.
+ */
+#define RPQ_MAX_D 8
+
+/*
  * Create a relaxed priority queue.
  *
  * @nr_queues: Number of internal heaps. For best results, use
  *             c * nr_cpus where c >= 2.
  * @per_queue_capacity: Maximum elements per internal heap.
+ * @d: Number of queues to sample during pop (pick-d heuristic).
+ *     Use 2 for the standard MultiQueue design.
  *
  * Returns a u64-encoded arena pointer, or 0 on failure.
  */
 __weak
-u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity)
+u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity, u32 d)
 {
 	/*
 	 * Marked as volatile because otherwise the array reference
@@ -200,6 +208,7 @@ u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity)
 		return (u64)NULL;
 
 	pq->nr_queues = nr_queues;
+	pq->d = (d >= 1 && d <= RPQ_MAX_D) ? d : 2;
 	pq->queues = (rpq_heap_t *)queues;
 
 	for (i = 0; i < nr_queues && can_loop; i++) {
@@ -294,8 +303,7 @@ __weak
 int rpq_pop(rpq_t __arg_arena *pq, u64 *elem, u64 *key)
 {
 	rpq_heap_t *heap;
-	u64 key1, key2;
-	u32 nq, q1, q2, best;
+	u32 nq;
 	int ret, i;
 
 	if (unlikely(!pq || !elem || !key))
@@ -306,23 +314,30 @@ int rpq_pop(rpq_t __arg_arena *pq, u64 *elem, u64 *key)
 		return -EINVAL;
 
 	for (i = 0; i < RPQ_MAX_RETRIES && can_loop; i++) {
-		q1 = bpf_get_prandom_u32() % nq;
-		q2 = bpf_get_prandom_u32() % nq;
+		u64 best_key = (u64)-1;
+		u32 best_q = 0;
+		int j;
 
 		/*
-		 * Lockless peek via cached min_key. This is a single
-		 * aligned u64 read per heap -- no TOCTOU with size.
+		 * Pick-d: sample d random heaps via cached min_key.
+		 * Each read is a single aligned u64 -- no TOCTOU.
 		 * Stale values are fine for the selection heuristic.
 		 */
-		key1 = READ_ONCE(pq->queues[q1].min_key);
-		key2 = READ_ONCE(pq->queues[q2].min_key);
+		bpf_for(j, 0, pq->d) {
+			u32 q = bpf_get_prandom_u32() % nq;
+			u64 k = READ_ONCE(pq->queues[q].min_key);
 
-		/* Both samples empty, retry */
-		if (key1 == (u64)-1 && key2 == (u64)-1)
+			if (k < best_key) {
+				best_key = k;
+				best_q = q;
+			}
+		}
+
+		/* All samples empty, retry */
+		if (best_key == (u64)-1)
 			continue;
 
-		best = (key1 <= key2) ? q1 : q2;
-		heap = &pq->queues[best];
+		heap = &pq->queues[best_q];
 
 		ret = arena_spin_lock(&heap->lock);
 		if (ret)
@@ -372,10 +387,10 @@ int rpq_peek(rpq_t __arg_arena *pq, u64 *elem, u64 *key)
 		return -EINVAL;
 
 	/*
-	 * Sample 4 random queues and return the best minimum seen.
-	 * More samples improve accuracy at the cost of more reads.
+	 * Sample d random queues (matching pop's pick-d heuristic)
+	 * and return the best minimum seen.
 	 */
-	for (i = 0; i < 4 && can_loop; i++) {
+	for (i = 0; i < pq->d && can_loop; i++) {
 		qi = bpf_get_prandom_u32() % nq;
 
 		cur_key = READ_ONCE(pq->queues[qi].min_key);

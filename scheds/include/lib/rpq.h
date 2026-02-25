@@ -56,20 +56,28 @@ struct rpq_heap {
  * Typical usage: nr_queues = c * nr_cpus, where c >= 2.
  * With c = 2 and 64 CPUs, there are 128 internal heaps and the
  * expected rank error of pop is O(128).
+ *
+ * The d parameter controls how many queues are sampled during pop
+ * ("pick-d" heuristic, generalizing power-of-two-choices).
+ * d=2 is the standard MultiQueue design. Higher d gives better
+ * rank quality at the cost of more cache-line reads per pop.
  */
 struct rpq;
 typedef struct rpq __arena rpq_t;
 
 struct rpq {
 	u32 nr_queues;
+	u32 d;			/* Pick-d choices for pop heuristic */
 	rpq_heap_t *queues;
 };
 
 #ifdef __BPF__
 
-u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity);
+u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity, u32 d);
 #define rpq_create(nr_queues, per_queue_cap) \
-	((rpq_t *)rpq_create_internal((nr_queues), (per_queue_cap)))
+	((rpq_t *)rpq_create_internal((nr_queues), (per_queue_cap), 2))
+#define rpq_create_d(nr_queues, per_queue_cap, d) \
+	((rpq_t *)rpq_create_internal((nr_queues), (per_queue_cap), (d)))
 
 int rpq_insert(rpq_t *pq, u64 elem, u64 key);
 int rpq_pop(rpq_t *pq, u64 *elem, u64 *key);
