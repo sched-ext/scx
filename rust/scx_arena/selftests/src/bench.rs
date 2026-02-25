@@ -5,9 +5,9 @@
 
 //! BPF Arena Priority Queue Throughput Benchmark
 //!
-//! Measures concurrent insert/pop throughput for RPQ (MultiQueue) vs
-//! single-lock rbtree. Each thread runs a SEC("syscall") BPF program
-//! with bpf_ktime_get_ns() timing for precise in-kernel measurement.
+//! Measures concurrent insert/pop throughput and per-op latency for
+//! RPQ (MultiQueue) with configurable (nr_queues, pick-d) parameters,
+//! plus ATQ (single-lock rbtree) as a baseline.
 
 mod bpf_skel;
 use bpf_skel::*;
@@ -40,14 +40,6 @@ use scx_utils::NR_CPU_IDS;
 use simplelog::{ColorChoice, Config as SimplelogConfig, LevelFilter, TermLogger, TerminalMode};
 
 #[derive(Debug, Clone, ValueEnum)]
-enum BenchMode {
-    Rpq,
-    Single,
-    Atq,
-    All,
-}
-
-#[derive(Debug, Clone, ValueEnum)]
 enum OutputFormat {
     Text,
     Json,
@@ -56,10 +48,6 @@ enum OutputFormat {
 #[derive(Parser, Debug)]
 #[command(name = "scx_arena_benchmarks", about = "BPF arena PQ throughput benchmark")]
 struct Args {
-    /// Which data structure to benchmark
-    #[arg(long, default_value = "all")]
-    bench: BenchMode,
-
     /// Number of concurrent threads
     #[arg(long, default_value_t = 1)]
     threads: usize,
@@ -67,10 +55,6 @@ struct Args {
     /// Operations per thread
     #[arg(long, default_value_t = 100000)]
     ops: u64,
-
-    /// RPQ internal heaps (default: 2 * threads)
-    #[arg(long)]
-    queues: Option<u32>,
 
     /// Per-heap capacity
     #[arg(long, default_value_t = 4096)]
@@ -85,8 +69,15 @@ struct Args {
     output: OutputFormat,
 
     /// Static arena allocation pages
-    #[arg(long, default_value_t = 2048)]
+    #[arg(long, default_value_t = 4096)]
     arena_pages: u64,
+
+    /// Benchmark configs to run (comma-separated).
+    /// Each config is "name:queues_multiplier:pick_d" e.g. "rpq-2t-k2:2:2".
+    /// Special names: "single" (1 queue, pick-2), "atq" (ATQ baseline).
+    /// Default runs a standard set of configs.
+    #[arg(long, value_delimiter = ',')]
+    configs: Option<Vec<String>>,
 }
 
 /// Per-thread benchmark results, matching struct bench_run_args in BPF.
@@ -94,11 +85,14 @@ struct Args {
 #[derive(Debug, Clone, Default)]
 struct BenchRunArgs {
     nr_ops: u64,
+    bench_id: u64,
     elapsed_ns: u64,
     inserts_ok: u64,
     inserts_fail: u64,
     pops_ok: u64,
     pops_fail: u64,
+    max_insert_ns: u64,
+    max_pop_ns: u64,
 }
 
 /// Aggregated results from all threads.
@@ -112,6 +106,8 @@ struct BenchResult {
     total_inserts_fail: u64,
     total_pops_ok: u64,
     total_pops_fail: u64,
+    max_insert_ns: u64,
+    max_pop_ns: u64,
 }
 
 impl BenchResult {
@@ -140,12 +136,20 @@ impl BenchResult {
         println!("  Inserts fail:    {}", self.total_inserts_fail);
         println!("  Pops OK:         {}", self.total_pops_ok);
         println!("  Pops fail:       {}", self.total_pops_fail);
+        println!(
+            "  Max insert lat:  {} ns",
+            self.max_insert_ns
+        );
+        println!(
+            "  Max pop lat:     {} ns",
+            self.max_pop_ns
+        );
         println!();
     }
 
     fn print_json(&self) {
         println!(
-            r#"{{"benchmark":"{}","threads":{},"ops_per_thread":{},"total_ops":{},"elapsed_ns":{},"mops_per_sec":{:.6},"inserts_ok":{},"inserts_fail":{},"pops_ok":{},"pops_fail":{}}}"#,
+            r#"{{"benchmark":"{}","threads":{},"ops_per_thread":{},"total_ops":{},"elapsed_ns":{},"mops_per_sec":{:.6},"inserts_ok":{},"inserts_fail":{},"pops_ok":{},"pops_fail":{},"max_insert_ns":{},"max_pop_ns":{}}}"#,
             self.name,
             self.threads,
             self.ops_per_thread,
@@ -156,8 +160,19 @@ impl BenchResult {
             self.total_inserts_fail,
             self.total_pops_ok,
             self.total_pops_fail,
+            self.max_insert_ns,
+            self.max_pop_ns,
         );
     }
+}
+
+/// A benchmark configuration: name + RPQ params + BPF slot.
+struct BenchConfig {
+    name: String,
+    slot: u64,          // bench_id slot in BPF
+    nr_queues: u32,     // 0 = ATQ
+    d: u32,             // pick-d (0 = ATQ)
+    is_atq: bool,
 }
 
 fn pin_to_cpu(cpu: usize) {
@@ -191,12 +206,8 @@ fn setup_arenas(skel: &mut BpfSkel<'_>, static_pages: u64) -> Result<()> {
 
     let output = skel.progs.arena_init.test_run(input)?;
     if output.return_value != 0 {
-        bail!(
-            "arena_init returned {}",
-            output.return_value as i32
-        );
+        bail!("arena_init returned {}", output.return_value as i32);
     }
-
     Ok(())
 }
 
@@ -204,7 +215,6 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
     let mut args = types::arena_alloc_mask_args {
         bitmap: 0 as c_ulong,
     };
-
     let input = ProgramInput {
         context_in: Some(unsafe {
             std::slice::from_raw_parts_mut(
@@ -214,19 +224,13 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
         }),
         ..Default::default()
     };
-
     let output = skel.progs.arena_alloc_mask.test_run(input)?;
     if output.return_value != 0 {
-        bail!(
-            "arena_alloc_mask returned {}",
-            output.return_value as i32
-        );
+        bail!("arena_alloc_mask returned {}", output.return_value as i32);
     }
-
     let ptr = unsafe {
         &mut *std::ptr::with_exposed_provenance_mut::<[u64; 10]>(args.bitmap.try_into().unwrap())
     };
-
     let (valid_mask, _) = ptr.split_at_mut(mask.len());
     valid_mask.clone_from_slice(mask);
 
@@ -235,7 +239,6 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
         data_size: 0 as c_ulong,
         id: 0 as c_ulong,
     };
-
     let input = ProgramInput {
         context_in: Some(unsafe {
             std::slice::from_raw_parts_mut(
@@ -245,44 +248,29 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
         }),
         ..Default::default()
     };
-
     let output = skel.progs.arena_topology_node_init.test_run(input)?;
     if output.return_value != 0 {
-        bail!(
-            "arena_topology_node_init returned {}",
-            output.return_value as i32
-        );
+        bail!("arena_topology_node_init returned {}", output.return_value as i32);
     }
-
     Ok(())
 }
 
 fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     let topo = Topology::new().expect("Failed to build host topology");
-
     setup_topology_node(skel, topo.span.as_raw_slice())?;
-
     for (_, node) in topo.nodes {
         setup_topology_node(skel, node.span.as_raw_slice())?;
     }
-
     for (_, llc) in topo.all_llcs {
         setup_topology_node(
             skel,
-            Arc::<Llc>::into_inner(llc)
-                .expect("missing llc")
-                .span
-                .as_raw_slice(),
+            Arc::<Llc>::into_inner(llc).expect("missing llc").span.as_raw_slice(),
         )?;
     }
-
     for (_, core) in topo.all_cores {
         setup_topology_node(
             skel,
-            Arc::<Core>::into_inner(core)
-                .expect("missing core")
-                .span
-                .as_raw_slice(),
+            Arc::<Core>::into_inner(core).expect("missing core").span.as_raw_slice(),
         )?;
     }
     for (_, cpu) in topo.all_cpus {
@@ -290,18 +278,24 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
         mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
         setup_topology_node(skel, &mask)?;
     }
-
     Ok(())
 }
 
-/// Call bench_init SEC("syscall") to create RPQs and prepopulate.
-fn bench_init_bpf(skel: &mut BpfSkel<'_>, args: &Args) -> Result<()> {
-    let nr_queues = args.queues.unwrap_or((2 * args.threads) as u32);
-
+/// Initialize an RPQ at the given slot.
+fn init_rpq_slot(
+    skel: &mut BpfSkel<'_>,
+    slot: u64,
+    nr_queues: u32,
+    queue_cap: u64,
+    d: u32,
+    prepopulate: u64,
+) -> Result<()> {
     let mut init_args = types::bench_init_args {
         rpq_nr_queues: nr_queues as c_ulong,
-        rpq_per_queue_cap: args.queue_cap as c_ulong,
-        prepopulate_count: args.prepopulate as c_ulong,
+        rpq_per_queue_cap: queue_cap as c_ulong,
+        rpq_d: d as c_ulong,
+        prepopulate_count: prepopulate as c_ulong,
+        bench_id: slot as c_ulong,
     };
 
     let input = ProgramInput {
@@ -317,17 +311,22 @@ fn bench_init_bpf(skel: &mut BpfSkel<'_>, args: &Args) -> Result<()> {
     let output = skel.progs.bench_init.test_run(input)?;
     if output.return_value != 0 {
         bail!(
-            "bench_init returned {} (BPF error)",
+            "bench_init slot {} returned {} (BPF error)",
+            slot,
             output.return_value as i32
         );
     }
+    Ok(())
+}
 
-    // ATQ init is in a separate SEC("syscall") to avoid
-    // hitting the BPF verifier's jump complexity limit.
+/// Initialize the ATQ.
+fn init_atq(skel: &mut BpfSkel<'_>, prepopulate: u64) -> Result<()> {
     let mut atq_args = types::bench_init_args {
         rpq_nr_queues: 0 as c_ulong,
         rpq_per_queue_cap: 0 as c_ulong,
-        prepopulate_count: args.prepopulate as c_ulong,
+        rpq_d: 0 as c_ulong,
+        prepopulate_count: prepopulate as c_ulong,
+        bench_id: 0 as c_ulong,
     };
 
     let input = ProgramInput {
@@ -347,11 +346,9 @@ fn bench_init_bpf(skel: &mut BpfSkel<'_>, args: &Args) -> Result<()> {
             output.return_value as i32
         );
     }
-
     Ok(())
 }
 
-/// Get online CPU IDs for thread pinning.
 fn get_online_cpus() -> Result<Vec<usize>> {
     let topo = Topology::new()?;
     let mut cpus: Vec<usize> = topo.all_cpus.keys().copied().collect();
@@ -363,6 +360,7 @@ fn get_online_cpus() -> Result<Vec<usize>> {
 fn run_benchmark(
     name: &str,
     prog_fd: i32,
+    bench_id: u64,
     threads: usize,
     ops_per_thread: u64,
     cpus: &[usize],
@@ -372,12 +370,14 @@ fn run_benchmark(
             let cpu = cpus[t % cpus.len()];
             let fd = prog_fd;
             let ops = ops_per_thread;
+            let bid = bench_id;
 
             thread::spawn(move || -> Result<BenchRunArgs> {
                 pin_to_cpu(cpu);
 
                 let mut args = BenchRunArgs {
                     nr_ops: ops,
+                    bench_id: bid,
                     ..Default::default()
                 };
 
@@ -412,6 +412,8 @@ fn run_benchmark(
     let mut total_inserts_fail = 0u64;
     let mut total_pops_ok = 0u64;
     let mut total_pops_fail = 0u64;
+    let mut max_insert_ns = 0u64;
+    let mut max_pop_ns = 0u64;
 
     for h in handles {
         let result = h.join().map_err(|_| anyhow::anyhow!("thread panicked"))??;
@@ -420,6 +422,8 @@ fn run_benchmark(
         total_inserts_fail += result.inserts_fail;
         total_pops_ok += result.pops_ok;
         total_pops_fail += result.pops_fail;
+        max_insert_ns = max_insert_ns.max(result.max_insert_ns);
+        max_pop_ns = max_pop_ns.max(result.max_pop_ns);
     }
 
     Ok(BenchResult {
@@ -431,7 +435,40 @@ fn run_benchmark(
         total_inserts_fail,
         total_pops_ok,
         total_pops_fail,
+        max_insert_ns,
+        max_pop_ns,
     })
+}
+
+/// Parse a config string like "rpq-2t-k3:2:3" into (name, queue_mult, d).
+/// Special: "single" -> (single, 0, 0), "atq" -> (atq, 0, 0).
+fn parse_config(s: &str, threads: usize) -> (String, u32, u32) {
+    if s == "single" {
+        return ("single".to_string(), 1, 2); // 1 queue, d=2
+    }
+    if s == "atq" {
+        return ("atq".to_string(), 0, 0);
+    }
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() == 3 {
+        let name = parts[0].to_string();
+        let mult: u32 = parts[1].parse().unwrap_or(2);
+        let d: u32 = parts[2].parse().unwrap_or(2);
+        (name, mult * threads as u32, d)
+    } else {
+        (s.to_string(), 2 * threads as u32, 2)
+    }
+}
+
+fn default_configs(threads: usize) -> Vec<String> {
+    vec![
+        format!("rpq-2t-k2:2:2"),
+        format!("rpq-2t-k3:2:3"),
+        format!("rpq-2t-k4:2:4"),
+        format!("rpq-1t-k2:1:2"),
+        format!("single"),
+        format!("atq"),
+    ]
 }
 
 fn main() -> Result<()> {
@@ -458,47 +495,78 @@ fn main() -> Result<()> {
 
     let mut skel = skel.load().context("Failed to load BPF program")?;
 
-    // Initialize arenas and topology
     setup_arenas(&mut skel, args.arena_pages)?;
     setup_topology(&mut skel)?;
-
-    // Initialize benchmark data structures
-    bench_init_bpf(&mut skel, &args)?;
 
     let cpus = get_online_cpus()?;
     if cpus.len() < args.threads {
         eprintln!(
-            "Warning: {} threads requested but only {} CPUs available, some CPUs will be shared",
+            "Warning: {} threads requested but only {} CPUs available",
             args.threads,
             cpus.len()
         );
     }
 
-    let run_rpq = matches!(args.bench, BenchMode::Rpq | BenchMode::All);
-    let run_single = matches!(args.bench, BenchMode::Single | BenchMode::All);
-    let run_atq = matches!(args.bench, BenchMode::Atq | BenchMode::All);
+    // Parse configs
+    let config_strs = args.configs.clone().unwrap_or_else(|| default_configs(args.threads));
 
-    if run_rpq {
-        let fd = skel.progs.bench_run_rpq.as_fd().as_raw_fd();
-        let result = run_benchmark("rpq", fd, args.threads, args.ops, &cpus)?;
-        match args.output {
-            OutputFormat::Text => result.print_text(),
-            OutputFormat::Json => result.print_json(),
+    let mut configs: Vec<BenchConfig> = Vec::new();
+    let mut rpq_slot = 0u64;
+
+    for cs in &config_strs {
+        let (name, nr_queues, d) = parse_config(cs, args.threads);
+        if name == "atq" {
+            configs.push(BenchConfig {
+                name,
+                slot: 0,
+                nr_queues: 0,
+                d: 0,
+                is_atq: true,
+            });
+        } else {
+            configs.push(BenchConfig {
+                name,
+                slot: rpq_slot,
+                nr_queues,
+                d,
+                is_atq: false,
+            });
+            rpq_slot += 1;
         }
     }
 
-    if run_single {
-        let fd = skel.progs.bench_run_single.as_fd().as_raw_fd();
-        let result = run_benchmark("single", fd, args.threads, args.ops, &cpus)?;
-        match args.output {
-            OutputFormat::Text => result.print_text(),
-            OutputFormat::Json => result.print_json(),
+    // Initialize all RPQ slots
+    for cfg in &configs {
+        if cfg.is_atq {
+            continue;
         }
+        init_rpq_slot(
+            &mut skel,
+            cfg.slot,
+            cfg.nr_queues,
+            args.queue_cap,
+            cfg.d,
+            args.prepopulate,
+        )?;
     }
 
-    if run_atq {
-        let fd = skel.progs.bench_run_atq.as_fd().as_raw_fd();
-        let result = run_benchmark("atq", fd, args.threads, args.ops, &cpus)?;
+    // Initialize ATQ if needed
+    if configs.iter().any(|c| c.is_atq) {
+        init_atq(&mut skel, args.prepopulate)?;
+    }
+
+    // Run benchmarks
+    let rpq_fd = skel.progs.bench_run_rpq.as_fd().as_raw_fd();
+    let atq_fd = skel.progs.bench_run_atq.as_fd().as_raw_fd();
+
+    for cfg in &configs {
+        let (fd, bid) = if cfg.is_atq {
+            (atq_fd, 0u64)
+        } else {
+            (rpq_fd, cfg.slot)
+        };
+
+        let result = run_benchmark(&cfg.name, fd, bid, args.threads, args.ops, &cpus)?;
         match args.output {
             OutputFormat::Text => result.print_text(),
             OutputFormat::Json => result.print_json(),

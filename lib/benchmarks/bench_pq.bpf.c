@@ -6,27 +6,16 @@
 /*
  * Priority Queue Throughput Benchmark
  *
- * Measures concurrent insert/pop throughput for:
- *   - RPQ with c*p queues (MultiQueue, scalable)
- *   - RPQ with 1 queue (single-lock heap baseline)
+ * Measures concurrent insert/pop throughput and per-op latency for:
+ *   - RPQ with configurable (nr_queues, pick-d) parameters
  *   - ATQ (single-lock rbtree baseline)
  *
- * Each benchmark thread calls a SEC("syscall") program via
- * bpf_prog_test_run(). The hot loop runs entirely in BPF with
- * bpf_ktime_get_ns() timing, eliminating userspace jitter.
+ * Multiple RPQ configurations can be initialized in parallel via
+ * bench_id slots (up to BENCH_RPQ_SLOTS). Each benchmark thread
+ * specifies which slot to use via bench_run_args.bench_id.
  *
  * All benchmarks use monotonically increasing vtimes with random
- * deltas (vtime += random_delta), matching real scheduler workloads
- * where each task's vtime advances by its consumed CPU time.
- *
- * ATQ operations use __weak wrappers because the ATQ API functions
- * (scx_atq_pop, scx_atq_insert_vtime) are __hidden and call __weak
- * rbtree functions under the arena spinlock. The BPF verifier
- * forbids calling __weak globals from preempt-disabled context in
- * SEC("syscall") programs, but __weak wrappers are verified
- * independently with different rules. The wrappers also prevent
- * the verifier from hitting jump complexity limits when the __hidden
- * ATQ functions are inlined into loops.
+ * deltas, matching real scheduler workloads.
  */
 
 #include <scx/common.bpf.h>
@@ -34,11 +23,6 @@
 #include <lib/rpq.h>
 #include <lib/atq.h>
 
-/*
- * Generate monotonically increasing vtime with random delta.
- * Each call advances *vtime by a random amount in [1, 1024),
- * simulating variable CPU time consumption between enqueues.
- */
 static __always_inline u64
 bench_next_vtime(u64 *vtime)
 {
@@ -46,37 +30,37 @@ bench_next_vtime(u64 *vtime)
 	return *vtime;
 }
 
-/* --- Global shared benchmark state (initialized once) --- */
+/* --- Global shared benchmark state --- */
 
-static rpq_t *bench_rpq_multi;		/* Multi-queue RPQ (scalable) */
-static rpq_t *bench_rpq_single;	/* Single-queue RPQ (baseline) */
-static scx_atq_t *bench_atq;		/* ATQ (single-lock rbtree) */
+#define BENCH_RPQ_SLOTS 8
+
+static rpq_t *bench_rpqs[BENCH_RPQ_SLOTS];
+static scx_atq_t *bench_atq;
 
 /* --- Argument structs for SEC("syscall") programs --- */
 
 struct bench_init_args {
 	u64 rpq_nr_queues;
 	u64 rpq_per_queue_cap;
+	u64 rpq_d;		/* pick-d choices for pop */
 	u64 prepopulate_count;
+	u64 bench_id;		/* slot index in bench_rpqs[] */
 };
 
 struct bench_run_args {
 	u64 nr_ops;		/* input: operations per thread */
-	u64 elapsed_ns;		/* output: wall time in ns */
-	u64 inserts_ok;		/* output */
-	u64 inserts_fail;	/* output */
-	u64 pops_ok;		/* output */
-	u64 pops_fail;		/* output */
+	u64 bench_id;		/* input: slot index */
+	/* outputs: */
+	u64 elapsed_ns;
+	u64 inserts_ok;
+	u64 inserts_fail;
+	u64 pops_ok;
+	u64 pops_fail;
+	u64 max_insert_ns;	/* max single-insert latency */
+	u64 max_pop_ns;		/* max single-pop latency */
 };
 
-/*
- * ATQ __weak wrappers.
- *
- * Each wrapper is a single ATQ operation verified independently
- * by the BPF verifier. This prevents the __hidden ATQ functions
- * from being inlined into loops (which would blow the verifier's
- * jump complexity limit).
- */
+/* --- ATQ __weak wrappers --- */
 
 __weak
 int bench_atq_do_insert(scx_atq_t __arg_arena *atq,
@@ -85,14 +69,6 @@ int bench_atq_do_insert(scx_atq_t __arg_arena *atq,
 	return scx_atq_insert_vtime(atq, taskc, vtime);
 }
 
-/*
- * Combined pop+insert for ATQ. Pops one element and re-inserts
- * it with a new monotonically increasing vtime. Each call = 2
- * operations.
- *
- * Returns 0 on success (both pop and insert succeeded),
- * 1 if pop failed (queue empty), negative errno on insert error.
- */
 __weak
 int bench_atq_pop_insert(scx_atq_t __arg_arena *atq, u64 vtime)
 {
@@ -104,40 +80,37 @@ int bench_atq_pop_insert(scx_atq_t __arg_arena *atq, u64 vtime)
 		return 1;
 
 	taskc = (scx_task_common *)ptr;
-
 	return scx_atq_insert_vtime(atq, taskc, vtime);
 }
 
 /*
- * Initialize RPQ benchmark data structures.
+ * Initialize an RPQ at the given bench_id slot.
+ * Called once per configuration from userspace.
  */
 SEC("syscall")
 int bench_init(struct bench_init_args *args)
 {
 	u64 vtime = 0;
+	u64 slot = args->bench_id;
+	u32 d = args->rpq_d;
 	int ret, i;
 
-	/* Create multi-queue RPQ */
-	bench_rpq_multi = rpq_create(args->rpq_nr_queues,
-				     args->rpq_per_queue_cap);
-	if (!bench_rpq_multi)
+	if (slot >= BENCH_RPQ_SLOTS)
+		return -EINVAL;
+
+	bench_rpqs[slot] = rpq_create_d(args->rpq_nr_queues,
+					args->rpq_per_queue_cap,
+					d ? d : 2);
+	if (!bench_rpqs[slot])
 		return -ENOMEM;
 
-	/* Create single-queue RPQ (baseline) */
-	bench_rpq_single = rpq_create(1, args->rpq_per_queue_cap);
-	if (!bench_rpq_single)
-		return -ENOMEM;
-
-	/* Pre-populate RPQs with monotonically increasing vtimes */
 	bpf_for(i, 0, args->prepopulate_count) {
 		u64 key = bench_next_vtime(&vtime);
 
-		ret = rpq_insert(bench_rpq_multi, key, key);
-		if (ret && ret != -ENOSPC)
-			return ret;
-
-		ret = rpq_insert(bench_rpq_single, key, key);
-		if (ret && ret != -ENOSPC)
+		ret = rpq_insert(bench_rpqs[slot], key, key);
+		if (ret == -ENOSPC)
+			continue;
+		if (ret)
 			return ret;
 	}
 
@@ -145,12 +118,7 @@ int bench_init(struct bench_init_args *args)
 }
 
 /*
- * Initialize ATQ benchmark data structure.
- *
- * Separate SEC("syscall") from bench_init to stay within the BPF
- * verifier's jump complexity budget. Uses the __weak
- * bench_atq_do_insert wrapper so the inlined __hidden ATQ code
- * doesn't compound with the loop's branch count.
+ * Initialize ATQ benchmark (separate to avoid verifier complexity).
  */
 SEC("syscall")
 int bench_init_atq(struct bench_init_args *args)
@@ -182,7 +150,10 @@ int bench_init_atq(struct bench_init_args *args)
 }
 
 /*
- * Multi-queue RPQ throughput benchmark.
+ * RPQ throughput + latency benchmark.
+ *
+ * Reads bench_id from args to select which RPQ slot to use.
+ * Tracks per-op max latency via bpf_ktime_get_ns().
  */
 SEC("syscall")
 int bench_run_rpq(struct bench_run_args *args)
@@ -190,30 +161,49 @@ int bench_run_rpq(struct bench_run_args *args)
 	u64 nr_ops = args->nr_ops;
 	u64 inserts_ok = 0, inserts_fail = 0;
 	u64 pops_ok = 0, pops_fail = 0;
+	u64 max_insert_ns = 0, max_pop_ns = 0;
 	u64 vtime = 0;
-	u64 start, end;
+	u64 start, end, t0, lat;
 	u64 elem, key;
+	rpq_t *pq;
 	int ret, i;
 
-	if (!bench_rpq_multi)
+	if (args->bench_id >= BENCH_RPQ_SLOTS)
+		return -EINVAL;
+
+	pq = bench_rpqs[args->bench_id];
+	if (!pq)
 		return -EINVAL;
 
 	start = bpf_ktime_get_ns();
 
 	bpf_for(i, 0, nr_ops) {
 		if (i & 1) {
-			ret = rpq_pop(bench_rpq_multi, &elem, &key);
+			t0 = bpf_ktime_get_ns();
+			ret = rpq_pop(pq, &elem, &key);
+			lat = bpf_ktime_get_ns() - t0;
+
 			if (ret == 0)
 				pops_ok++;
 			else
 				pops_fail++;
+
+			if (lat > max_pop_ns)
+				max_pop_ns = lat;
 		} else {
 			key = bench_next_vtime(&vtime);
-			ret = rpq_insert(bench_rpq_multi, key, key);
+
+			t0 = bpf_ktime_get_ns();
+			ret = rpq_insert(pq, key, key);
+			lat = bpf_ktime_get_ns() - t0;
+
 			if (ret == 0)
 				inserts_ok++;
 			else
 				inserts_fail++;
+
+			if (lat > max_insert_ns)
+				max_insert_ns = lat;
 		}
 	}
 
@@ -224,64 +214,14 @@ int bench_run_rpq(struct bench_run_args *args)
 	args->inserts_fail = inserts_fail;
 	args->pops_ok = pops_ok;
 	args->pops_fail = pops_fail;
+	args->max_insert_ns = max_insert_ns;
+	args->max_pop_ns = max_pop_ns;
 
 	return 0;
 }
 
 /*
- * Single-queue RPQ throughput benchmark (single-lock heap baseline).
- */
-SEC("syscall")
-int bench_run_single(struct bench_run_args *args)
-{
-	u64 nr_ops = args->nr_ops;
-	u64 inserts_ok = 0, inserts_fail = 0;
-	u64 pops_ok = 0, pops_fail = 0;
-	u64 vtime = 0;
-	u64 start, end;
-	u64 elem, key;
-	int ret, i;
-
-	if (!bench_rpq_single)
-		return -EINVAL;
-
-	start = bpf_ktime_get_ns();
-
-	bpf_for(i, 0, nr_ops) {
-		if (i & 1) {
-			ret = rpq_pop(bench_rpq_single, &elem, &key);
-			if (ret == 0)
-				pops_ok++;
-			else
-				pops_fail++;
-		} else {
-			key = bench_next_vtime(&vtime);
-			ret = rpq_insert(bench_rpq_single, key, key);
-			if (ret == 0)
-				inserts_ok++;
-			else
-				inserts_fail++;
-		}
-	}
-
-	end = bpf_ktime_get_ns();
-
-	args->elapsed_ns = end - start;
-	args->inserts_ok = inserts_ok;
-	args->inserts_fail = inserts_fail;
-	args->pops_ok = pops_ok;
-	args->pops_fail = pops_fail;
-
-	return 0;
-}
-
-/*
- * ATQ throughput benchmark (single-lock rbtree baseline).
- *
- * Each iteration does a pop+insert cycle (2 operations) via the
- * __weak bench_atq_pop_insert wrapper, using monotonically
- * increasing vtimes. The nr_ops is halved so total operation
- * count matches the RPQ benchmarks.
+ * ATQ throughput + latency benchmark (single-lock rbtree baseline).
  */
 SEC("syscall")
 int bench_run_atq(struct bench_run_args *args)
@@ -289,34 +229,34 @@ int bench_run_atq(struct bench_run_args *args)
 	u64 nr_ops = args->nr_ops;
 	u64 inserts_ok = 0, inserts_fail = 0;
 	u64 pops_ok = 0, pops_fail = 0;
+	u64 max_pop_insert_ns = 0;
 	u64 vtime = 0;
-	u64 start, end;
+	u64 start, end, t0, lat;
 	int ret, i;
 
 	if (!bench_atq)
 		return -EINVAL;
 
-	/*
-	 * Each bench_atq_pop_insert call does 1 pop + 1 insert.
-	 * Run nr_ops/2 iterations so the total operation count
-	 * (pops + inserts) equals nr_ops.
-	 */
 	start = bpf_ktime_get_ns();
 
 	bpf_for(i, 0, nr_ops / 2) {
+		t0 = bpf_ktime_get_ns();
 		ret = bench_atq_pop_insert(bench_atq,
 					   bench_next_vtime(&vtime));
+		lat = bpf_ktime_get_ns() - t0;
+
 		if (ret == 0) {
 			pops_ok++;
 			inserts_ok++;
 		} else if (ret == 1) {
-			/* Pop failed (empty queue) */
 			pops_fail++;
 		} else {
-			/* Insert failed */
 			pops_ok++;
 			inserts_fail++;
 		}
+
+		if (lat > max_pop_insert_ns)
+			max_pop_insert_ns = lat;
 	}
 
 	end = bpf_ktime_get_ns();
@@ -326,6 +266,9 @@ int bench_run_atq(struct bench_run_args *args)
 	args->inserts_fail = inserts_fail;
 	args->pops_ok = pops_ok;
 	args->pops_fail = pops_fail;
+	/* ATQ pop+insert is one combined op; report as both */
+	args->max_insert_ns = max_pop_insert_ns;
+	args->max_pop_ns = max_pop_insert_ns;
 
 	return 0;
 }
