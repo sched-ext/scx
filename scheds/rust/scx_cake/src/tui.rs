@@ -269,7 +269,7 @@ pub struct TaskTelemetryRow {
     pub avg_runtime_us: u32,
     pub deficit_us: u32,
     pub wait_duration_ns: u64,
-    pub gate_hit_pcts: [f64; 9], // G1, G2, G1W, G3, G1P, G1C, G1D, G1WC, GTUN
+    pub gate_hit_pcts: [f64; 10], // G1, G2, G1W, G3, G1P, G1C, G1CP, G1D, G1WC, GTUN
     pub select_cpu_ns: u32,
     pub enqueue_ns: u32,
     pub core_placement: u16,
@@ -306,6 +306,8 @@ pub struct TaskTelemetryRow {
     pub nivcsw_delta: u32,
     pub ewma_recomp_count: u16,
     pub is_hog: bool, // Hog squeeze: BULK + non-yielder + deprioritized
+    pub is_bg: bool,  // Background noise squeeze: non-game, non-wb, non-kernel
+    pub ppid: u32,    // Parent PID for game family detection
 }
 
 impl Default for TaskTelemetryRow {
@@ -317,7 +319,7 @@ impl Default for TaskTelemetryRow {
             avg_runtime_us: 0,
             deficit_us: 0,
             wait_duration_ns: 0,
-            gate_hit_pcts: [0.0; 9],
+            gate_hit_pcts: [0.0; 10],
             select_cpu_ns: 0,
             enqueue_ns: 0,
             core_placement: 0,
@@ -349,6 +351,8 @@ impl Default for TaskTelemetryRow {
             nivcsw_delta: 0,
             ewma_recomp_count: 0,
             is_hog: false,
+            is_bg: false,
+            ppid: 0,
         }
     }
 }
@@ -1129,8 +1133,8 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     output.push_str(
         "\n=== Live Task Matrix (times: µs │ SEL/ENQ/STOP/RUN: ns) — ALL BPF-tracked tasks ===\n",
     );
-    output.push_str("PID     ST  COMM            EWMA  AVGRT  MAXRT  GAP     JITTER  WAIT   RUNS/s  CPU  SEL   ENQ   STOP  RUN   G1%   G3%  G1C  G1D  MIGR/s  PREEMPT  WHIST\n");
-    output.push_str("───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n");
+    output.push_str("PID     ST  COMM            EWMA  AVGRT  MAXRT  GAP     JITTER  WAIT   RUNS/s  CPU  SEL   ENQ   STOP  RUN   G1   G2   G1W  G3   G1P  G1C  G1CP G1D  G1WC G5   MIGR/s  PREEMPT  WHIST\n");
+    output.push_str("──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n");
 
     // Dump always captures ALL BPF-tracked tasks (not filtered by TUI view)
     let mut dump_pids: Vec<u32> = app
@@ -1202,6 +1206,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             };
             let status_str = match row.status {
                 TaskStatus::Alive if row.is_hog => "●HOG",
+                TaskStatus::Alive if row.is_bg => "●BG",
                 TaskStatus::Alive => "●",
                 TaskStatus::Idle => "○",
                 TaskStatus::Dead => "✗",
@@ -1214,7 +1219,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 format!("{}", wait_us)
             };
             output.push_str(&format!(
-                "{}{:<7} {:<3} {:<15} {:<4} {:<6} {:<6} {:<7} {:<7} {:<6} {:<7.1} C{:<3} {:<5} {:<5} {:<5} {:<5} {:<5.0} {:<4.0} {:<4.0} {:<4.0} {:<7.1} {}/{}/{}/{}\n",
+                "{}{:<7} {:<3} {:<15} {:<4} {:<6} {:<6} {:<7} {:<7} {:<6} {:<7.1} C{:<3} {:<5} {:<5} {:<5} {:<5} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<7.1} {}/{}/{}/{}\n",
                 indent,
                 row.pid,
                 status_str,
@@ -1231,16 +1236,23 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.enqueue_ns,
                 row.stopping_duration_ns,
                 row.running_duration_ns,
-                row.gate_hit_pcts[0],
-                row.gate_hit_pcts[3],  // G3%
-                row.gate_hit_pcts[5],  // G1C%
-                row.gate_hit_pcts[6],  // G1D%
+                row.gate_hit_pcts[0],  // G1
+                row.gate_hit_pcts[1],  // G2
+                row.gate_hit_pcts[2],  // G1W
+                row.gate_hit_pcts[3],  // G3
+                row.gate_hit_pcts[4],  // G1P
+                row.gate_hit_pcts[5],  // G1C
+                row.gate_hit_pcts[6],  // G1CP
+                row.gate_hit_pcts[7],  // G1D
+                row.gate_hit_pcts[8],  // G1WC
+                row.gate_hit_pcts[9],  // G5
                 row.migrations_per_sec,
                 row.wait_hist[0], row.wait_hist[1], row.wait_hist[2], row.wait_hist[3],
             ));
             output.push_str(&format!(
-                "{}         G2:{:.0}% G1W:{:.0}% G3:{:.0}% G1P:{:.0}% G1C:{:.0}% G1D:{:.0}% G1WC:{:.0}% G5:{:.0}%  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}  CONF:{}/{}\n",
+                "{}         G1:{:.0}% G2:{:.0}% G1W:{:.0}% G3:{:.0}% G1P:{:.0}% G1C:{:.0}% G1CP:{:.0}% G1D:{:.0}% G1WC:{:.0}% G5:{:.0}%  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}  CONF:{}/{}  TGID:{}\n",
                 indent,
+                row.gate_hit_pcts[0],
                 row.gate_hit_pcts[1],
                 row.gate_hit_pcts[2],
                 row.gate_hit_pcts[3],
@@ -1249,6 +1261,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.gate_hit_pcts[6],
                 row.gate_hit_pcts[7],
                 row.gate_hit_pcts[8],
+                row.gate_hit_pcts[9],
                 row.direct_dispatch_count,
                 row.deficit_us,
                 row.yield_count,
@@ -1266,6 +1279,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.nivcsw_delta,
                 row.ewma_recomp_count,
                 row.total_runs,
+                row.tgid,
             ));
         }
     }
@@ -1445,10 +1459,12 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
 
     // Hog count for header visibility
     let hog_count = app.task_rows.values().filter(|r| r.is_hog).count();
-    let hog_str = if hog_count > 0 {
-        format!("  HOG:{}", hog_count)
-    } else {
-        String::new()
+    let bg_count = app.task_rows.values().filter(|r| r.is_bg).count();
+    let squeeze_str = match (hog_count > 0, bg_count > 0) {
+        (true, true) => format!("  HOG:{}  BG:{}", hog_count, bg_count),
+        (true, false) => format!("  HOG:{}", hog_count),
+        (false, true) => format!("  BG:{}", bg_count),
+        (false, false) => String::new(),
     };
 
     // Line 1: CPU | Dispatches | Tier Distribution
@@ -1461,7 +1477,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         new_pct,
         wc0, wc1, wc2, wc3,
         app.format_uptime(),
-        hog_str,
+        squeeze_str,
         drop_warn,
     );
 
@@ -1743,14 +1759,29 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("G1%").style(
+        Cell::from("G1").style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("G3%").style(
+        Cell::from("G2").style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("G1W").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("G3").style(
             Style::default()
                 .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("G1P").style(
+            Style::default()
+                .fg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("G1C").style(
@@ -1758,14 +1789,34 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD),
         ),
+        Cell::from("G1CP").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Cell::from("G1D").style(
             Style::default()
                 .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
+        Cell::from("G1WC").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("G5").style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
         Cell::from("MIGR/s").style(
             Style::default()
                 .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("TGID").style(
+            Style::default()
+                .fg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         ),
     ])
@@ -1843,11 +1894,15 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Cell::from(format!("{}{}", indent, row.pid)),
             Cell::from(if row.is_hog {
                 "●HOG"
+            } else if row.is_bg {
+                "●BG"
             } else {
                 row.status.label()
             })
             .style(Style::default().fg(if row.is_hog {
                 Color::LightRed
+            } else if row.is_bg {
+                Color::Rgb(255, 165, 0) // orange for bg_noise
             } else {
                 row.status.color()
             })),
@@ -1864,11 +1919,18 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Cell::from(format!("{}", row.enqueue_ns)),
             Cell::from(format!("{}", row.stopping_duration_ns)),
             Cell::from(format!("{}", row.running_duration_ns)),
-            Cell::from(format!("{:.0}%", row.gate_hit_pcts[0])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[0])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[1])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[2])),
             Cell::from(format!("{:.0}", row.gate_hit_pcts[3])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[4])),
             Cell::from(format!("{:.0}", row.gate_hit_pcts[5])),
             Cell::from(format!("{:.0}", row.gate_hit_pcts[6])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[7])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[8])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[9])),
             Cell::from(format!("{:.1}", row.migrations_per_sec)),
+            Cell::from(format!("{}", row.tgid)),
         ];
         matrix_rows.push(Row::new(cells).height(1));
     }
@@ -1896,11 +1958,18 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Constraint::Length(5),  // ENQ
             Constraint::Length(5),  // STOP
             Constraint::Length(5),  // RUN
-            Constraint::Length(4),  // G1%
-            Constraint::Length(4),  // G3%
+            Constraint::Length(3),  // G1
+            Constraint::Length(3),  // G2
+            Constraint::Length(4),  // G1W
+            Constraint::Length(3),  // G3
+            Constraint::Length(4),  // G1P
             Constraint::Length(4),  // G1C
+            Constraint::Length(5),  // G1CP
             Constraint::Length(4),  // G1D
+            Constraint::Length(5),  // G1WC
+            Constraint::Length(3),  // G5
             Constraint::Length(7),  // MIGR/s
+            Constraint::Length(7),  // TGID
             Constraint::Length(6),  // TIER∆
         ],
     )
@@ -2709,6 +2778,7 @@ pub fn run_tui(
                                 unsafe { ctx.__bindgen_anon_1.__bindgen_anon_1.packed_info };
                             let tier = (packed >> 28) & 0x03;
                             let is_hog = (packed >> 27) & 1 != 0; /* CAKE_FLOW_HOG at bit 24+3 */
+                            let is_bg = (packed >> 22) & 1 != 0; /* BIT_BG_NOISE at bit 22 */
 
                             if pid == 0 || tier > 3 {
                                 continue;
@@ -2748,10 +2818,11 @@ pub fn run_tui(
                             let g3 = ctx.telemetry.gate_3_hits;
                             let g1p = ctx.telemetry.gate_1p_hits;
                             let g1c = ctx.telemetry.gate_1c_hits;
+                            let g1cp = ctx.telemetry.gate_1cp_hits;
                             let g1d = ctx.telemetry.gate_1d_hits;
                             let g1wc = ctx.telemetry.gate_1wc_hits;
                             let g5 = ctx.telemetry.gate_tun_hits;
-                            let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g1d + g1wc + g5;
+                            let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g1cp + g1d + g1wc + g5;
 
                             let gate_hit_pcts = if total_sel > 0 {
                                 [
@@ -2761,12 +2832,13 @@ pub fn run_tui(
                                     (g3 as f64 / total_sel as f64) * 100.0,
                                     (g1p as f64 / total_sel as f64) * 100.0,
                                     (g1c as f64 / total_sel as f64) * 100.0,
+                                    (g1cp as f64 / total_sel as f64) * 100.0,
                                     (g1d as f64 / total_sel as f64) * 100.0,
                                     (g1wc as f64 / total_sel as f64) * 100.0,
                                     (g5 as f64 / total_sel as f64) * 100.0,
                                 ]
                             } else {
-                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                             };
 
                             let total_runs = ctx.telemetry.total_runs;
@@ -2821,6 +2893,8 @@ pub fn run_tui(
                                         nivcsw_delta: ctx.telemetry.nivcsw_delta,
                                         ewma_recomp_count: ctx.telemetry.ewma_recomp_count,
                                         is_hog,
+                                        is_bg,
+                                        ppid: ctx.telemetry.ppid,
                                     });
 
                             // Update dynamic row elements
@@ -2859,6 +2933,8 @@ pub fn run_tui(
                             row.wakeup_source_pid = ctx.telemetry.wakeup_source_pid;
                             row.ewma_recomp_count = ctx.telemetry.ewma_recomp_count;
                             row.is_hog = is_hog;
+                            row.is_bg = is_bg;
+                            row.ppid = ctx.telemetry.ppid;
                             // Status set below after sysinfo cross-reference
                         } // end loop iteration
                     } // end if bpf_fd >= 0
@@ -2898,40 +2974,41 @@ pub fn run_tui(
                 }
                 app.bpf_task_count = bpf_count;
 
-                // --- Game TGID Detection: aggregate yields per tgid, pick winner ---
-                // The tgid with highest total yield_count is the game process.
-                // Games produce 1000:1 more sched_yield() calls than anything else
-                // due to UE5/Unity/Godot work-stealing thread pools.
+                // --- Game Detection: aggregate yields per PPID, pick winner ---
+                // Proton/Wine: all siblings (wineserver, game.exe, winedevice)
+                // share the same parent (pv-adverb). Aggregating by PPID means
+                // wineserver's yields + game yields combine, giving a stronger
+                // signal and ensuring the entire Wine prefix is detected as a family.
                 {
-                    let mut best_tgid: u32 = 0;
+                    let mut best_ppid: u32 = 0;
                     let mut best_yields: u64 = 0;
                     let mut best_thread_count: usize = 0;
-                    // Small inline aggregator: HashMap<tgid, (total_yields, thread_count)>
-                    let mut tgid_yields: std::collections::HashMap<u32, (u64, usize)> =
+                    // Aggregate yields by PPID (parent process)
+                    let mut ppid_yields: std::collections::HashMap<u32, (u64, usize)> =
                         std::collections::HashMap::new();
                     for (_pid, row) in app.task_rows.iter() {
-                        if row.status == TaskStatus::Dead || row.yield_count == 0 {
+                        if row.status == TaskStatus::Dead || row.yield_count == 0 || row.ppid == 0 {
                             continue;
                         }
-                        let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
-                        let entry = tgid_yields.entry(tgid).or_insert((0, 0));
+                        let entry = ppid_yields.entry(row.ppid).or_insert((0, 0));
                         entry.0 += row.yield_count as u64;
                         entry.1 += 1;
                     }
-                    for (tgid, (total_yields, thread_count)) in &tgid_yields {
+                    for (ppid, (total_yields, thread_count)) in &ppid_yields {
                         if *total_yields > best_yields {
                             best_yields = *total_yields;
-                            best_tgid = *tgid;
+                            best_ppid = *ppid;
                             best_thread_count = *thread_count;
                         }
                     }
                     // Threshold: need at least 64 total yields to qualify as a game.
                     // Game workers hit this in <100ms. Prevents false positives from
                     // language servers or build tools with occasional yields.
-                    let new_game_tgid = if best_yields >= 64 { best_tgid } else { 0 };
+                    let new_game_ppid = if best_yields >= 64 { best_ppid } else { 0 };
 
-                    // Game exit detection: if current game_tgid is no longer in /proc, reset
-                    if app.tracked_game_tgid > 0 && new_game_tgid != app.tracked_game_tgid {
+                    // Game exit detection: if current game is no longer in /proc, reset
+                    // Check any task with matching ppid — if no alive tasks have this ppid, game exited
+                    if app.tracked_game_tgid > 0 && new_game_ppid != app.tracked_game_tgid {
                         let proc_path = format!("/proc/{}", app.tracked_game_tgid);
                         if !std::path::Path::new(&proc_path).exists() {
                             // Game exited, allow new detection
@@ -2941,22 +3018,39 @@ pub fn run_tui(
                         }
                     }
 
-                    if new_game_tgid > 0 && new_game_tgid != app.tracked_game_tgid {
-                        app.tracked_game_tgid = new_game_tgid;
+                    if new_game_ppid > 0 && new_game_ppid != app.tracked_game_tgid {
+                        // Find the TGID with the most yields under this PPID (for display)
+                        let mut best_tgid: u32 = 0;
+                        let mut best_tgid_yields: u64 = 0;
+                        let mut tgid_yields: std::collections::HashMap<u32, u64> =
+                            std::collections::HashMap::new();
+                        for (_pid, row) in app.task_rows.iter() {
+                            if row.ppid == new_game_ppid && row.yield_count > 0 {
+                                let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
+                                *tgid_yields.entry(tgid).or_insert(0) += row.yield_count as u64;
+                            }
+                        }
+                        for (tgid, yields) in &tgid_yields {
+                            if *yields > best_tgid_yields {
+                                best_tgid_yields = *yields;
+                                best_tgid = *tgid;
+                            }
+                        }
+                        app.tracked_game_tgid = if best_tgid > 0 {
+                            best_tgid
+                        } else {
+                            new_game_ppid
+                        };
                         app.game_thread_count = best_thread_count;
                         // Read game name from /proc (cold path, only on game switch)
-                        // Strategy: parse cmdline for .exe (Wine/Proton) → fall back to comm (native)
                         app.game_name = {
                             let mut name = String::from("unknown");
-                            // Try cmdline first — Wine games have the .exe path in args
                             if let Ok(cmdline) =
-                                std::fs::read(format!("/proc/{}/cmdline", new_game_tgid))
+                                std::fs::read(format!("/proc/{}/cmdline", app.tracked_game_tgid))
                             {
-                                // cmdline is null-separated: wine64-preloader\0wine64\0Z:\path\Game.exe\0...
                                 for arg in cmdline.split(|&b| b == 0) {
                                     if let Ok(s) = std::str::from_utf8(arg) {
                                         if s.to_lowercase().ends_with(".exe") {
-                                            // Extract basename: Z:\foo\bar\Game.exe → Game
                                             let basename =
                                                 s.rsplit(['\\', '/']).next().unwrap_or(s);
                                             name = basename
@@ -2968,25 +3062,36 @@ pub fn run_tui(
                                     }
                                 }
                             }
-                            // Fallback to /proc/comm for native games
                             if name == "unknown" {
-                                if let Ok(comm) =
-                                    std::fs::read_to_string(format!("/proc/{}/comm", new_game_tgid))
-                                {
+                                if let Ok(comm) = std::fs::read_to_string(format!(
+                                    "/proc/{}/comm",
+                                    app.tracked_game_tgid
+                                )) {
                                     name = comm.trim().to_string();
                                 }
                             }
                             name
                         };
-                    } else if new_game_tgid == app.tracked_game_tgid {
+                    } else if new_game_ppid > 0 {
                         app.game_thread_count = best_thread_count;
                     }
                 }
 
-                // Write game_tgid to BPF BSS — propagates detection to dispatch path.
-                // Only causes cache invalidation when tgid actually changes (~never in steady state).
+                // Write game_ppid to BPF BSS — drives all scheduling decisions.
+                // PPID sourced directly from arena (BPF caches p->real_parent->tgid).
+                // game_tgid still written for display/TUI purposes.
                 if let Some(bss) = &mut skel.maps.bss_data {
                     bss.game_tgid = app.tracked_game_tgid;
+                    bss.game_ppid = if app.tracked_game_tgid > 0 {
+                        // Look up ppid from task_rows — already extracted from BPF arena
+                        app.task_rows
+                            .values()
+                            .find(|r| r.tgid == app.tracked_game_tgid && r.ppid > 0)
+                            .map(|r| r.ppid)
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
                 }
 
                 // --- Delta Mode: compute per-second rates ---
