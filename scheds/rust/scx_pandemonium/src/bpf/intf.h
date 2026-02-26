@@ -4,6 +4,12 @@
 #ifndef __INTF_H
 #define __INTF_H
 
+// BINDGEN/SCX COMPATIBILITY: provide kernel types unconditionally.
+// vmlinux.h also typedefs these in BPF context; C11+ permits
+// duplicate compatible typedefs, so no conflict.
+typedef unsigned long long u64;
+typedef unsigned char u8;
+
 // BPF VERIFIER LOOP BOUNDS
 #define MAX_CPUS  1024
 #define MAX_NODES 32
