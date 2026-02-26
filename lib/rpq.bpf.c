@@ -233,6 +233,48 @@ u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity, u32 d)
 }
 
 /*
+ * Try to insert into a specific heap. Lock, insert, unlock.
+ * Returns 0 on success, -ENOSPC if full, other negative on error.
+ * Returns 1 if the lock could not be acquired (caller should retry).
+ */
+static inline int
+rpq_try_insert(rpq_heap_t __arg_arena *heap, u64 elem, u64 key)
+{
+	int ret;
+
+	ret = arena_spin_lock(&heap->lock);
+	if (ret)
+		return 1; /* lock failed, retry */
+
+	ret = rpq_heap_insert(heap, elem, key);
+	arena_spin_unlock(&heap->lock);
+
+	return ret;
+}
+
+/*
+ * Insert retry loop over random queues.
+ */
+static inline int
+rpq_insert_random(rpq_t __arg_arena *pq, u32 nq, u64 elem, u64 key)
+{
+	int ret, i;
+
+	for (i = 0; i < RPQ_MAX_RETRIES && can_loop; i++) {
+		u32 qi = bpf_get_prandom_u32() % nq;
+
+		ret = rpq_try_insert(&pq->queues[qi], elem, key);
+		if (ret == 0)
+			return 0;
+		if (ret == 1 || ret == -ENOSPC)
+			continue;
+		return ret;
+	}
+
+	return -ENOSPC;
+}
+
+/*
  * Insert an element into the relaxed priority queue.
  *
  * Picks a random internal heap, locks it, and inserts. If the
@@ -249,9 +291,7 @@ u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity, u32 d)
 __weak
 int rpq_insert(rpq_t __arg_arena *pq, u64 elem, u64 key)
 {
-	rpq_heap_t *heap;
-	u32 nq, qi;
-	int ret, i;
+	u32 nq;
 
 	if (unlikely(!pq))
 		return -EINVAL;
@@ -260,38 +300,73 @@ int rpq_insert(rpq_t __arg_arena *pq, u64 elem, u64 key)
 	if (unlikely(!nq))
 		return -EINVAL;
 
-	for (i = 0; i < RPQ_MAX_RETRIES && can_loop; i++) {
-		qi = bpf_get_prandom_u32() % nq;
-		heap = &pq->queues[qi];
+	return rpq_insert_random(pq, nq, elem, key);
+}
 
-		ret = arena_spin_lock(&heap->lock);
-		if (ret)
-			continue;
+/*
+ * Insert an element into the caller's home queue.
+ *
+ * Unlike rpq_insert which picks a random queue, this always targets
+ * the queue at index (home % nr_queues) first. Falls back to random
+ * queues on ENOSPC or lock failure. This gives each CPU a preferred
+ * queue, improving cache locality on insert.
+ *
+ * @pq: Pointer to the relaxed priority queue.
+ * @elem: Payload value to insert.
+ * @key: Priority key (lower = higher priority).
+ * @home: Home queue index (typically CPU ID).
+ *
+ * Returns 0 on success, -ENOSPC if all attempted queues are full,
+ * or another negative errno on failure.
+ */
+__weak
+int rpq_insert_home(rpq_t __arg_arena *pq, u64 elem, u64 key, u32 home)
+{
+	u32 nq;
+	int ret;
 
-		ret = rpq_heap_insert(heap, elem, key);
-		arena_spin_unlock(&heap->lock);
+	if (unlikely(!pq))
+		return -EINVAL;
 
-		if (ret == 0)
-			return 0;
+	nq = pq->nr_queues;
+	if (unlikely(!nq))
+		return -EINVAL;
 
-		/* -ENOSPC: this queue is full, try another */
-		if (ret != -ENOSPC)
-			return ret;
-	}
+	/* Try home queue first */
+	ret = rpq_try_insert(&pq->queues[home % nq], elem, key);
+	if (ret == 0)
+		return 0;
 
-	return -ENOSPC;
+	/* Fall back to random */
+	return rpq_insert_random(pq, nq, elem, key);
+}
+
+/*
+ * Pop retry body: given the best queue from sampling, lock and extract.
+ * Returns 0 on success, -ENOENT if empty (caller retries), or
+ * 1 if lock failed (caller retries).
+ */
+static inline int
+rpq_try_pop(rpq_heap_t __arg_arena *heap, u64 *elem, u64 *key)
+{
+	int ret;
+
+	ret = arena_spin_lock(&heap->lock);
+	if (ret)
+		return 1; /* lock failed */
+
+	ret = rpq_heap_pop(heap, elem, key);
+	arena_spin_unlock(&heap->lock);
+
+	return ret;
 }
 
 /*
  * Pop the approximate minimum element from the relaxed priority queue.
  *
- * Uses the "power of two choices" heuristic: peeks at two random heaps
- * (without locking -- reads may be stale but are sufficient for the
- * selection heuristic), selects the one with the smaller minimum key,
- * locks it, and extracts. If both sampled heaps are empty, retries.
- *
- * Provides O(nr_queues)-relaxed ordering: the returned element is
- * within the top O(nr_queues) elements with high probability.
+ * Uses the pick-d heuristic: peeks at d random heaps via cached
+ * min_key (without locking), selects the one with the smallest
+ * minimum, locks it, and extracts.
  *
  * @pq: Pointer to the relaxed priority queue.
  * @elem: Output parameter for the payload.
@@ -302,7 +377,6 @@ int rpq_insert(rpq_t __arg_arena *pq, u64 elem, u64 key)
 __weak
 int rpq_pop(rpq_t __arg_arena *pq, u64 *elem, u64 *key)
 {
-	rpq_heap_t *heap;
 	u32 nq;
 	int ret, i;
 
@@ -318,11 +392,6 @@ int rpq_pop(rpq_t __arg_arena *pq, u64 *elem, u64 *key)
 		u32 best_q = 0;
 		int j;
 
-		/*
-		 * Pick-d: sample d random heaps via cached min_key.
-		 * Each read is a single aligned u64 -- no TOCTOU.
-		 * Stale values are fine for the selection heuristic.
-		 */
 		bpf_for(j, 0, pq->d) {
 			u32 q = bpf_get_prandom_u32() % nq;
 			u64 k = READ_ONCE(pq->queues[q].min_key);
@@ -333,26 +402,73 @@ int rpq_pop(rpq_t __arg_arena *pq, u64 *elem, u64 *key)
 			}
 		}
 
-		/* All samples empty, retry */
 		if (best_key == (u64)-1)
 			continue;
 
-		heap = &pq->queues[best_q];
-
-		ret = arena_spin_lock(&heap->lock);
-		if (ret)
-			continue;
-
-		ret = rpq_heap_pop(heap, elem, key);
-		arena_spin_unlock(&heap->lock);
-
+		ret = rpq_try_pop(&pq->queues[best_q], elem, key);
 		if (ret == 0)
 			return 0;
+	}
 
-		/*
-		 * Queue was empty -- someone else popped between our
-		 * lockless peek and the locked pop. Retry.
-		 */
+	return -ENOENT;
+}
+
+/*
+ * Pop with home queue bias.
+ *
+ * Like rpq_pop, but the home queue is always included as one of
+ * the d sampled queues. The remaining d-1 samples are random.
+ * This biases pops toward the caller's local queue, improving
+ * cache locality when paired with rpq_insert_home.
+ *
+ * @pq: Pointer to the relaxed priority queue.
+ * @elem: Output parameter for the payload.
+ * @key: Output parameter for the priority key.
+ * @home: Home queue index (typically CPU ID).
+ *
+ * Returns 0 on success, -ENOENT if all queues are empty.
+ */
+__weak
+int rpq_pop_home(rpq_t __arg_arena *pq, u64 *elem, u64 *key, u32 home)
+{
+	u32 nq, home_q;
+	int ret, i;
+
+	if (unlikely(!pq || !elem || !key))
+		return -EINVAL;
+
+	nq = pq->nr_queues;
+	if (unlikely(!nq))
+		return -EINVAL;
+
+	home_q = home % nq;
+
+	for (i = 0; i < RPQ_MAX_RETRIES && can_loop; i++) {
+		u64 best_key = (u64)-1;
+		u32 best_q = 0;
+		int j;
+
+		/* Home queue is always the first sample */
+		best_key = READ_ONCE(pq->queues[home_q].min_key);
+		best_q = home_q;
+
+		/* Then d-1 random samples */
+		bpf_for(j, 1, pq->d) {
+			u32 q = bpf_get_prandom_u32() % nq;
+			u64 k = READ_ONCE(pq->queues[q].min_key);
+
+			if (k < best_key) {
+				best_key = k;
+				best_q = q;
+			}
+		}
+
+		if (best_key == (u64)-1)
+			continue;
+
+		ret = rpq_try_pop(&pq->queues[best_q], elem, key);
+		if (ret == 0)
+			return 0;
 	}
 
 	return -ENOENT;

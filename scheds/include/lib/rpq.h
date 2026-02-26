@@ -80,7 +80,9 @@ u64 rpq_create_internal(u32 nr_queues, u64 per_queue_capacity, u32 d);
 	((rpq_t *)rpq_create_internal((nr_queues), (per_queue_cap), (d)))
 
 int rpq_insert(rpq_t *pq, u64 elem, u64 key);
+int rpq_insert_home(rpq_t *pq, u64 elem, u64 key, u32 home);
 int rpq_pop(rpq_t *pq, u64 *elem, u64 *key);
+int rpq_pop_home(rpq_t *pq, u64 *elem, u64 *key, u32 home);
 int rpq_peek(rpq_t *pq, u64 *elem, u64 *key);
 int rpq_size(rpq_t *pq);
 int rpq_destroy(rpq_t *pq);
