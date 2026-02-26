@@ -16,4 +16,4 @@ regex = "1"
 libc = "0.2"
 
 [build-dependencies]
-libbpf-cargo = "0.26"
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }

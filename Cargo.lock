@@ -3961,10 +3961,10 @@ dependencies = [
  "clap",
  "ctrlc",
  "flate2",
- "libbpf-cargo",
  "libbpf-rs",
  "libc",
  "regex",
+ "scx_cargo",
 ]
 
 [[package]]
