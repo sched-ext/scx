@@ -842,7 +842,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 			__sync_val_compare_and_swap(&interactive_enqueue_ns, old_iens, 0);
 	}
 
-skip_interactive_rescue:
+skip_interactive_rescue:;
 
 	// BATCH OVERFLOW RESCUE
 	u64 bat_oldest = batch_enqueue_ns;
