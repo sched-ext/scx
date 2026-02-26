@@ -41,6 +41,26 @@ enum cake_tier {
  * first. Eliminates 3 empty-DSQ probes vs old 4-tier split. */
 #define LLC_DSQ_BASE 200
 
+/* ── dsq_vtime STAGED BIT LAYOUT (Rule 54: no magic positions) ──
+ * Written by cake_stopping, read by cake_running + cake_select_cpu.
+ *   [63]       = VALID (set once context exists)
+ *   [62:55]    = HOME_CPU (warm_cpus[1] & 0xFF, prev home)
+ *   [53]       = BG_NOISE (non-game, non-wb, non-kernel squeeze)
+ *   [52]       = WAKER_BOOST (propagated via waker chain)
+ *   [51]       = GAME_MEMBER (tgid match)
+ *   [50]       = HOG (BULK tier + non-boosted)
+ *   [49]       = WAKER_BOOST_DUP (Gate 1P — was VCSW yielder)
+ *   [48]       = NEW_FLOW (first enqueue after init)
+ *   [31:0]     = WEIGHT_NS (EWMA * 1000) */
+#define STAGED_BIT_VALID        63
+#define STAGED_SHIFT_HOME       55
+#define STAGED_BIT_BG_NOISE     53  /* Background noise squeeze */
+#define STAGED_BIT_WAKER_BOOST  52
+#define STAGED_BIT_GAME_MEMBER  51
+#define STAGED_BIT_HOG          50
+#define STAGED_BIT_WB_DUP       49  /* Gate 1P: waker_boost duplicate */
+#define STAGED_BIT_NEW_FLOW     48
+
 /* ── Kfunc BenchLab: extensible per-kfunc stopwatch ──
  * Each kfunc gets a slot. Run N iterations, capture min/max/avg + return value.
  * Triggered from TUI via bench_request BSS variable. */
@@ -132,9 +152,10 @@ struct kfunc_bench_results {
 	u64 bench_timestamp; /* When bench completed (ktime_ns) */
 };
 
-/* Gate enum and confidence routing removed — scheduling uses only
- * Gate 1 (prev_cpu idle), Gate 1b (SMT sibling), Gate 3 (kernel idle),
- * and tunnel (DSQ fallback). No cross-CPU gate prediction state. */
+/* Gate cascade: G1 (prev_cpu idle), G1b (SMT sibling), G1c (home CPU),
+ * G1cp (home preempt-hog), G1WC (waker-chain), G1D (domestic tgid),
+ * G1W (waker LLC), G1P (yielder preempts bulk), G3 (kernel idle),
+ * and tunnel (DSQ fallback). */
 
 /* Flow state flags (packed_info bits 24-27) */
 enum cake_flow_flags {
@@ -205,6 +226,7 @@ struct cake_task_ctx {
 		u32 gate_3_hits; /* Kernel fallback hits */
 		u32 gate_1p_hits; /* Yielder-preempts-bulk hits (Gate 1P) */
 		u32 gate_1c_hits; /* Home CPU warm set hits (Gate 1c) */
+		u32 gate_1cp_hits; /* Home CPU preempt-hog hits (Gate 1c-P) */
 		u32 gate_1d_hits; /* Domestic: same-process cache affinity (Gate 1D) */
 		u32 gate_1wc_hits; /* Waker-chain: producer-consumer locality (Gate 1WC) */
 		u32 gate_tun_hits; /* Complete miss tunneling */
@@ -255,6 +277,7 @@ struct cake_task_ctx {
 
 		u32 pid;
 		u32 tgid;  /* Thread group ID (process) for TUI grouping */
+		u32 ppid;  /* Parent PID — game family detection (Proton/Wine siblings) */
 		char comm[16];
 	} telemetry;
 
@@ -264,13 +287,16 @@ struct cake_task_ctx {
 } __attribute__((aligned(256)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
- * [Stable:2][Tier:2][Flags:4][Rsvd:16][Rsvd:8]
- *  31-30     29-28   27-24    23-8      7-0
+ * [Stable:2][Tier:2][Flags:4][KTH:1][BG:1][Rsvd:14][Rsvd:8]
+ *  31-30     29-28   27-24    23     22    21-8       7-0
  * TIER+STABLE adjacent → fused 4-bit clear/set in reclassify (2 ops vs 4)
- * Bits [15:0] reserved for future use (Kalman error + wait data removed). */
+ * KTH = cached PF_KTHREAD (set once in cake_init_task, Rule 41)
+ * BG  = background noise squeeze (toggled in cake_stopping) */
 #define SHIFT_FLAGS 24 /* 4 bits: flow flags */
 #define SHIFT_TIER 28 /* 2 bits: tier 0-3 (coalesced with STABLE) */
 #define SHIFT_STABLE 30 /* 2 bits: tier-stability counter (0-3) */
+#define BIT_KTHREAD 23 /* 1 bit: cached PF_KTHREAD (Rule 41: cold→init) */
+#define BIT_BG_NOISE 22 /* 1 bit: background noise squeeze active */
 
 #define MASK_TIER 0x03 /* 2 bits: 0-3 */
 #define MASK_FLAGS 0x0F /* 4 bits */
@@ -433,5 +459,11 @@ struct cake_stats {
 #define AQ_MIN_NS            (50 * 1000)     /* 50µs floor — below this overhead > work */
 #define AQ_YIELDER_CEILING_NS (50 * 1000000)  /* 50ms ceiling — yielders (covers 20fps+) */
 #define AQ_BULK_CEILING_NS   (2 * 1000000)   /* 2ms ceiling — non-yielders (forces release) */
+
+/* Gate 1P: yielder-preempts-non-yielder elapsed threshold.
+ * Below this, preemption cache cost (~1.5µs) exceeds benefit.
+ * Must be < hog_quantum_cap_ns (500µs) to allow yielder preemption of hogs.
+ * 100µs: hog has done meaningful work; audio/input gets fast preemption. */
+#define CAKE_PREEMPT_YIELDER_THRESHOLD_NS (100 * 1000) /* 100µs */
 
 #endif /* __CAKE_INTF_H */
