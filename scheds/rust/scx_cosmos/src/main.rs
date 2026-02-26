@@ -244,6 +244,13 @@ struct Opts {
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     no_deferred_wakeup: bool,
 
+    /// Disable tick-based preemption enforcement.
+    ///
+    /// By default, the scheduler preempts tasks that exceed their time slice when the system is
+    /// busy or SMT contention is detected. Use this flag to disable this behavior.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_tick_preempt: bool,
+
     /// Enable address space affinity.
     ///
     /// This option allows to keep tasks that share the same address space (e.g., threads of the
@@ -453,6 +460,7 @@ impl<'a> Scheduler<'a> {
         rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.avoid_smt = opts.avoid_smt;
+        rodata.tick_preempt = !opts.no_tick_preempt;
         rodata.mm_affinity = opts.mm_affinity;
 
         // Enable perf event scheduling settings.
