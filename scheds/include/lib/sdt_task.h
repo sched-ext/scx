@@ -58,8 +58,26 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 
 #define scx_alloc(alloc) ((struct sdt_data __arena *)scx_alloc_internal((alloc)))
 
+static __always_inline
+u64 scx_zalloc_internal(struct scx_allocator *alloc)
+{
+	struct sdt_data __arena *p = scx_alloc(alloc);
+
+	if (p) {
+		/* Poor man's memset to zero. */
+		char __arena *pc = (char __arena *)p->payload;
+		int pc_sz = alloc->pool.elem_size - sizeof(struct sdt_data);
+		for (int i = 0; i < pc_sz && can_loop; i++)
+			pc[i] = 0;
+	}
+
+	return (u64)p;
+}
+#define scx_zalloc(alloc) ((struct sdt_data __arena *)scx_zalloc_internal((alloc)))
+
 u64 scx_static_alloc_internal(size_t bytes, size_t alignment);
 #define scx_static_alloc(bytes, alignment) ((void __arena *)scx_static_alloc_internal((bytes), (alignment)))
+
 int scx_static_init(size_t max_alloc_pages);
 
 u64 scx_stk_alloc(struct scx_stk *stack);

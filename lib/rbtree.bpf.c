@@ -9,6 +9,9 @@
 #include <lib/sdt_task.h>
 #include <lib/rbtree.h>
 
+static struct scx_allocator scx_rbtree_allocator;
+static struct scx_allocator scx_rbnode_allocator;
+
 int rb_integrity_check(rbtree_t __arg_arena *rbtree);
 void rbnode_print(size_t depth, rbnode_t *rbn);
 static int rbnode_replace(rbtree_t *rbtree, rbnode_t *existing, rbnode_t *replacement);
@@ -22,15 +25,32 @@ static int rbnode_replace(rbtree_t *rbtree, rbnode_t *existing, rbnode_t *replac
 	}									\
 } while (0)
 
+__weak
+int scx_rb_init(void)
+{
+	int ret;
+
+	/* Initialize slab allocators for rbtree_t and rbnode_t. */
+	ret = scx_alloc_init(&scx_rbtree_allocator, sizeof(rbtree_t));
+	if (ret)
+		return ret;
+
+	/* Note that there is no destructor for the slab allocator. */
+	return scx_alloc_init(&scx_rbnode_allocator, sizeof(rbnode_t));
+}
+
 u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 {
+	struct sdt_data __arena *data;
 	rbtree_t *rbtree;
 
-	rbtree = (rbtree_t *)scx_static_alloc(sizeof(*rbtree), 1);
-	if (!rbtree)
-		return (u64)NULL;
+	data = scx_zalloc(&scx_rbtree_allocator);
+	if (unlikely(!data))
+		return (u64)(NULL);
 
-	rbtree->root = NULL;
+	rbtree = (rbtree_t *)data->payload;
+	rbtree->tid = data->tid;
+
 	rbtree->alloc = alloc;
 	rbtree->insert = insert;
 
@@ -38,9 +58,12 @@ u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 }
 
 __weak
-int rb_destroy(rbtree_t *rbtree)
+int rb_destroy(rbtree_t __arg_arena *rbtree)
 {
+	rbnode_t *node, *next;
 	int ret;
+
+	scx_arena_subprog_init();
 
 	while (rbtree->root && can_loop) {
 		ret = rb_remove(rbtree, rbtree->root->key);
@@ -48,6 +71,14 @@ int rb_destroy(rbtree_t *rbtree)
 			return ret;
 	}
 
+	node = rbtree->freelist;
+	while (node && can_loop) {
+		next = node->parent;
+		scx_alloc_free_idx(&scx_rbnode_allocator, node->tid.idx);
+		node = next;
+	}
+
+	scx_alloc_free_idx(&scx_rbtree_allocator, rbtree->tid.idx);
 	return 0;
 }
 
@@ -166,6 +197,7 @@ int rb_find(rbtree_t __arg_arena *rbtree, u64 key, u64 *value)
 
 static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 {
+	struct sdt_data __arena *data;
 	rbnode_t *rbnode;
 	volatile rbnode_t *node;
 
@@ -178,8 +210,15 @@ static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 k
 
 	} while (cmpxchg(&rbtree->freelist, rbnode, rbnode->parent) != rbnode && can_loop);
 
-	if (!rbnode)
-		rbnode = (rbnode_t *)scx_static_alloc(sizeof(*rbnode), 1);
+	if (!rbnode) {
+		data = scx_alloc(&scx_rbnode_allocator);
+		if (unlikely(!data))
+			return NULL;
+
+		rbnode = (rbnode_t *)data->payload;
+		rbnode->tid = data->tid;
+	}
+	
 	if (!rbnode)
 		return NULL;
 
@@ -197,7 +236,6 @@ static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 k
 	node->key = key;
 	node->value = value;
 	node->is_red = true;
-
 	return rbnode;
 }
 
