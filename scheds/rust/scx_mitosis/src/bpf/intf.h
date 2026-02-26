@@ -71,6 +71,7 @@ enum cell_stat_idx {
 	CSTAT_CPU_DSQ,
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
+	CSTAT_BORROWED,
 	CSTAT_STEAL,
 	NR_CSTATS,
 };
@@ -78,6 +79,7 @@ enum cell_stat_idx {
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
+	u64 running_ns[MAX_CELLS];
 	u64 vtime_now;
 	u32 cell;
 	u32 llc;
@@ -125,6 +127,8 @@ struct cell {
 	// This is a lock in the kernel and padding in userspace
 	CELL_LOCK_T lock;
 
+	// cgroup ID of the cell owner (0 for cell 0 or if no owner)
+	u64 owner_cgid;
 	// Whether or not the cell is used
 	u32 in_use;
 
@@ -152,12 +156,36 @@ _Static_assert(sizeof(((struct cell *)0)->lock) == 4,
 _Static_assert(_Alignof(CELL_LOCK_T) == 4,
 	       "lock/padding must be 4-byte aligned");
 
-_Static_assert(offsetof(struct cell, in_use) == 4,
-	       "in_use must follow 4-byte lock/padding");
-
 // Verify these are the same size in both BPF and Rust.
 _Static_assert(sizeof(struct cell) ==
 		       (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
 	       "struct cell size must be stable for Rust bindings");
+
+/* Cell assignment entry: maps a cgroup to a cell */
+struct cell_assignment {
+	u64 cgid; /* cgroup ID (from cgroup file inode) */
+	u32 cell_id; /* cell ID to assign */
+};
+
+/* Cell cpumask data for a single cell */
+struct cell_cpumask_data {
+	unsigned char mask[MAX_CPUS_U8];
+};
+
+/*
+ * cell_config: Complete cell configuration populated by userspace.
+ *
+ * Contains all data needed to apply a cell configuration in a single
+ * BPF program invocation:
+ * - Cell-to-cgroup assignments (which cgroups own which cells)
+ * - Cell cpumasks (which CPUs belong to each cell)
+ */
+struct cell_config {
+	u32			 num_cell_assignments;
+	u32			 num_cells;
+	struct cell_assignment	 assignments[MAX_CELLS];
+	struct cell_cpumask_data cpumasks[MAX_CELLS];
+	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
+};
 
 #endif /* __INTF_H */

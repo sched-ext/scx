@@ -28,6 +28,8 @@ pub struct CellMetrics {
     pub cpu_q_pct: f64,
     #[stat(desc = "Cell queue %")]
     pub cell_q_pct: f64,
+    #[stat(desc = "Borrowed CPU %")]
+    pub borrowed_pct: f64,
     #[stat(desc = "Affinity violations % of global")]
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
@@ -36,6 +38,14 @@ pub struct CellMetrics {
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
     total_decisions: u64,
+    #[stat(desc = "CPU utilization %")]
+    pub util_pct: f64,
+    #[stat(desc = "Borrowed CPU time % of running")]
+    pub demand_borrow_pct: f64,
+    #[stat(desc = "Lent CPU time %")]
+    pub lent_pct: f64,
+    #[stat(desc = "EWMA-smoothed utilization %")]
+    pub smoothed_util_pct: f64,
 }
 
 impl CellMetrics {
@@ -43,10 +53,17 @@ impl CellMetrics {
         self.local_q_pct = ds.local_q_pct;
         self.cpu_q_pct = ds.cpu_q_pct;
         self.cell_q_pct = ds.cell_q_pct;
+        self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
+    }
+
+    pub fn update_demand(&mut self, util_pct: f64, demand_borrow_pct: f64, lent_pct: f64) {
+        self.util_pct = util_pct;
+        self.demand_borrow_pct = demand_borrow_pct;
+        self.lent_pct = lent_pct;
     }
 }
 
@@ -62,6 +79,8 @@ pub struct Metrics {
     pub cpu_q_pct: f64,
     #[stat(desc = "Cell queue %")]
     pub cell_q_pct: f64,
+    #[stat(desc = "Borrowed CPU %")]
+    pub borrowed_pct: f64,
     #[stat(desc = "Affinity violations % of global")]
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
@@ -70,6 +89,14 @@ pub struct Metrics {
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
     total_decisions: u64,
+    #[stat(desc = "CPU utilization %")]
+    pub util_pct: f64,
+    #[stat(desc = "Borrowed CPU time % of running")]
+    pub demand_borrow_pct: f64,
+    #[stat(desc = "Lent CPU time %")]
+    pub lent_pct: f64,
+    #[stat(desc = "Number of rebalancing events")]
+    pub rebalance_count: u64,
     #[stat(desc = "Per-cell metrics")] // TODO: cell names
     pub cells: BTreeMap<u32, CellMetrics>,
 }
@@ -79,10 +106,17 @@ impl Metrics {
         self.local_q_pct = ds.local_q_pct;
         self.cpu_q_pct = ds.cpu_q_pct;
         self.cell_q_pct = ds.cell_q_pct;
+        self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
+    }
+
+    pub fn update_demand(&mut self, util_pct: f64, demand_borrow_pct: f64, lent_pct: f64) {
+        self.util_pct = util_pct;
+        self.demand_borrow_pct = demand_borrow_pct;
+        self.lent_pct = lent_pct;
     }
 
     fn delta(&self, _: &Self) -> Self {
