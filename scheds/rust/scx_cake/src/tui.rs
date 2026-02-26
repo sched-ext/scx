@@ -257,8 +257,12 @@ pub struct TuiApp {
     pub system_info: SystemInfo,
     // Game TGID detection: process-level yielder promotion
     pub tracked_game_tgid: u32, // currently detected game tgid (0 = none)
+    pub tracked_game_ppid: u32, // PPID of the locked game family (for hysteresis comparison)
     pub game_thread_count: usize, // thread count for detected game
     pub game_name: String,      // process name from /proc/{tgid}/comm
+    // Hysteresis: challenger must beat current game for 15s to take over
+    pub game_challenger_ppid: u32, // PPID contesting game slot (0 = none)
+    pub game_challenger_since: Option<Instant>, // When challenger first appeared
 }
 
 #[derive(Clone, Debug)]
@@ -442,8 +446,11 @@ impl TuiApp {
             last_bench_timestamp: 0,
             system_info,
             tracked_game_tgid: 0,
+            tracked_game_ppid: 0,
             game_thread_count: 0,
             game_name: String::new(),
+            game_challenger_ppid: 0,
+            game_challenger_since: None,
         }
     }
 
@@ -1521,7 +1528,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     );
 
     let header_text = if app.tracked_game_tgid > 0 {
-        let line3 = format!(
+        let mut game_line = format!(
             " Game: {} (PID {}, {} threads)",
             if app.game_name.is_empty() {
                 "unknown"
@@ -1531,7 +1538,14 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             app.tracked_game_tgid,
             app.game_thread_count,
         );
-        format!("{}\n{}\n{}", line1, line2, line3)
+        // Show challenger holdoff status if active
+        if app.game_challenger_ppid > 0 {
+            if let Some(since) = app.game_challenger_since {
+                let elapsed = since.elapsed().as_secs();
+                game_line.push_str(&format!(" [contender: {}s/15s]", elapsed));
+            }
+        }
+        format!("{}\n{}\n{}", line1, line2, game_line)
     } else {
         format!("{}\n{}", line1, line2)
     };
@@ -3006,74 +3020,117 @@ pub fn run_tui(
                     // language servers or build tools with occasional yields.
                     let new_game_ppid = if best_yields >= 64 { best_ppid } else { 0 };
 
-                    // Game exit detection: if current game is no longer in /proc, reset
-                    // Check any task with matching ppid — if no alive tasks have this ppid, game exited
-                    if app.tracked_game_tgid > 0 && new_game_ppid != app.tracked_game_tgid {
-                        let proc_path = format!("/proc/{}", app.tracked_game_tgid);
-                        if !std::path::Path::new(&proc_path).exists() {
-                            // Game exited, allow new detection
-                            app.tracked_game_tgid = 0;
-                            app.game_thread_count = 0;
-                            app.game_name.clear();
-                        }
-                    }
-
-                    if new_game_ppid > 0 && new_game_ppid != app.tracked_game_tgid {
-                        // Find the TGID with the most yields under this PPID (for display)
-                        let mut best_tgid: u32 = 0;
-                        let mut best_tgid_yields: u64 = 0;
-                        let mut tgid_yields: std::collections::HashMap<u32, u64> =
-                            std::collections::HashMap::new();
-                        for (_pid, row) in app.task_rows.iter() {
-                            if row.ppid == new_game_ppid && row.yield_count > 0 {
-                                let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
-                                *tgid_yields.entry(tgid).or_insert(0) += row.yield_count as u64;
+                    // Helper: resolve best TGID + name for a given PPID (cold path)
+                    let resolve_game =
+                        |ppid: u32, rows: &HashMap<u32, TaskTelemetryRow>| -> (u32, String) {
+                            let mut best_tgid: u32 = 0;
+                            let mut best_tgid_yields: u64 = 0;
+                            let mut tgid_yields: std::collections::HashMap<u32, u64> =
+                                std::collections::HashMap::new();
+                            for (_pid, row) in rows.iter() {
+                                if row.ppid == ppid && row.yield_count > 0 {
+                                    let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
+                                    *tgid_yields.entry(tgid).or_insert(0) += row.yield_count as u64;
+                                }
                             }
-                        }
-                        for (tgid, yields) in &tgid_yields {
-                            if *yields > best_tgid_yields {
-                                best_tgid_yields = *yields;
-                                best_tgid = *tgid;
+                            for (tgid, yields) in &tgid_yields {
+                                if *yields > best_tgid_yields {
+                                    best_tgid_yields = *yields;
+                                    best_tgid = *tgid;
+                                }
                             }
-                        }
-                        app.tracked_game_tgid = if best_tgid > 0 {
-                            best_tgid
-                        } else {
-                            new_game_ppid
-                        };
-                        app.game_thread_count = best_thread_count;
-                        // Read game name from /proc (cold path, only on game switch)
-                        app.game_name = {
-                            let mut name = String::from("unknown");
-                            if let Ok(cmdline) =
-                                std::fs::read(format!("/proc/{}/cmdline", app.tracked_game_tgid))
-                            {
-                                for arg in cmdline.split(|&b| b == 0) {
-                                    if let Ok(s) = std::str::from_utf8(arg) {
-                                        if s.to_lowercase().ends_with(".exe") {
-                                            let basename =
-                                                s.rsplit(['\\', '/']).next().unwrap_or(s);
-                                            name = basename
-                                                .trim_end_matches(".exe")
-                                                .trim_end_matches(".EXE")
-                                                .to_string();
-                                            break;
+                            let game_tgid = if best_tgid > 0 { best_tgid } else { ppid };
+                            // Read game name from /proc (cold path, only on game switch)
+                            let name = {
+                                let mut n = String::from("unknown");
+                                if let Ok(cmdline) =
+                                    std::fs::read(format!("/proc/{}/cmdline", game_tgid))
+                                {
+                                    for arg in cmdline.split(|&b| b == 0) {
+                                        if let Ok(s) = std::str::from_utf8(arg) {
+                                            if s.to_lowercase().ends_with(".exe") {
+                                                let basename =
+                                                    s.rsplit(['\\', '/']).next().unwrap_or(s);
+                                                n = basename
+                                                    .trim_end_matches(".exe")
+                                                    .trim_end_matches(".EXE")
+                                                    .to_string();
+                                                break;
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if name == "unknown" {
-                                if let Ok(comm) = std::fs::read_to_string(format!(
-                                    "/proc/{}/comm",
-                                    app.tracked_game_tgid
-                                )) {
-                                    name = comm.trim().to_string();
+                                if n == "unknown" {
+                                    if let Ok(comm) =
+                                        std::fs::read_to_string(format!("/proc/{}/comm", game_tgid))
+                                    {
+                                        n = comm.trim().to_string();
+                                    }
                                 }
-                            }
-                            name
+                                n
+                            };
+                            (game_tgid, name)
                         };
-                    } else if new_game_ppid > 0 {
+
+                    // Game exit detection: if current game process is gone, clear immediately
+                    if app.tracked_game_tgid > 0 {
+                        let proc_path = format!("/proc/{}", app.tracked_game_tgid);
+                        if !std::path::Path::new(&proc_path).exists() {
+                            app.tracked_game_tgid = 0;
+                            app.tracked_game_ppid = 0;
+                            app.game_thread_count = 0;
+                            app.game_name.clear();
+                            app.game_challenger_ppid = 0;
+                            app.game_challenger_since = None;
+                        }
+                    }
+
+                    // --- Hysteresis State Machine ---
+                    // Once a game is locked, a challenger must sustain the yield lead
+                    // for 15 consecutive seconds before the scheduler accepts the swap.
+                    // This prevents harsh alt-tab flips from transient yield spikes.
+                    const GAME_HOLDOFF_SECS: u64 = 15;
+
+                    if app.tracked_game_tgid == 0 {
+                        // No game locked — accept immediately (first detection, instant)
+                        if new_game_ppid > 0 {
+                            let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
+                            app.tracked_game_tgid = tgid;
+                            app.tracked_game_ppid = new_game_ppid;
+                            app.game_thread_count = best_thread_count;
+                            app.game_name = name;
+                            app.game_challenger_ppid = 0;
+                            app.game_challenger_since = None;
+                        }
+                    } else if new_game_ppid == app.tracked_game_ppid {
+                        // Same game family still winning — update thread count, reset challenger
                         app.game_thread_count = best_thread_count;
+                        app.game_challenger_ppid = 0;
+                        app.game_challenger_since = None;
+                    } else if new_game_ppid > 0 {
+                        // Different PPID is winning — challenger detected
+                        if app.game_challenger_ppid != new_game_ppid {
+                            // New challenger appeared, start the 15s timer
+                            app.game_challenger_ppid = new_game_ppid;
+                            app.game_challenger_since = Some(Instant::now());
+                        } else if let Some(since) = app.game_challenger_since {
+                            // Same challenger persisting — check if 15s holdoff expired
+                            if since.elapsed() >= Duration::from_secs(GAME_HOLDOFF_SECS) {
+                                // Challenger sustained the lead — swap game
+                                let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
+                                app.tracked_game_tgid = tgid;
+                                app.tracked_game_ppid = new_game_ppid;
+                                app.game_thread_count = best_thread_count;
+                                app.game_name = name;
+                                app.game_challenger_ppid = 0;
+                                app.game_challenger_since = None;
+                            }
+                            // else: keep waiting, don't switch yet
+                        }
+                    } else {
+                        // No qualifying PPID above threshold — challenger gone, but keep current game
+                        app.game_challenger_ppid = 0;
+                        app.game_challenger_since = None;
                     }
                 }
 
@@ -3082,16 +3139,8 @@ pub fn run_tui(
                 // game_tgid still written for display/TUI purposes.
                 if let Some(bss) = &mut skel.maps.bss_data {
                     bss.game_tgid = app.tracked_game_tgid;
-                    bss.game_ppid = if app.tracked_game_tgid > 0 {
-                        // Look up ppid from task_rows — already extracted from BPF arena
-                        app.task_rows
-                            .values()
-                            .find(|r| r.tgid == app.tracked_game_tgid && r.ppid > 0)
-                            .map(|r| r.ppid)
-                            .unwrap_or(0)
-                    } else {
-                        0
-                    };
+                    // Use tracked_game_ppid directly — already resolved by hysteresis FSM
+                    bss.game_ppid = app.tracked_game_ppid;
                 }
 
                 // --- Delta Mode: compute per-second rates ---
