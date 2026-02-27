@@ -20,7 +20,9 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 TARGET_DIR = Path("/tmp/pandemonium-build")
-LOG_DIR = Path.home() / ".cache" / "pandemonium"
+_sudo_user = os.environ.get("SUDO_USER")
+_real_home = Path(f"/home/{_sudo_user}") if _sudo_user else Path.home()
+LOG_DIR = _real_home / ".cache" / "pandemonium"
 ARCHIVE_DIR = LOG_DIR
 BINARY = TARGET_DIR / "release" / "pandemonium"
 VMLINUX_CACHE = ARCHIVE_DIR / "vmlinux.h"

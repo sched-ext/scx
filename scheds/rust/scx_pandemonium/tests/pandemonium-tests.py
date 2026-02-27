@@ -229,14 +229,53 @@ class TraceCapture:
 
 # BUILD HELPERS
 
+BPF_SRC = SCRIPT_DIR / "src" / "bpf" / "main.bpf.c"
+
+
+def patch_bpf_trace_filter(target: str) -> str | None:
+    """Patch is_sched_task() in main.bpf.c to trace `target` instead of 'pand'.
+    Returns the original content for restoration, or None on error."""
+    original = BPF_SRC.read_text()
+
+    # Match the exact two-line return statement in is_sched_task():
+    #   \treturn p->comm[0] == 'p' && p->comm[1] == 'a' &&
+    #   \t       p->comm[2] == 'n' && p->comm[3] == 'd';
+    old_body = ("\treturn p->comm[0] == 'p' && p->comm[1] == 'a' &&\n"
+                "\t       p->comm[2] == 'n' && p->comm[3] == 'd';")
+
+    if old_body not in original:
+        log_error("Could not find is_sched_task() trace filter in main.bpf.c")
+        return None
+
+    checks = [f"p->comm[{i}] == '{c}'" for i, c in enumerate(target)]
+    if len(checks) <= 2:
+        new_body = "\treturn " + " && ".join(checks) + ";"
+    else:
+        line1 = checks[:2]
+        line2 = checks[2:]
+        new_body = ("\treturn " + " && ".join(line1) + " &&\n"
+                    "\t       " + " && ".join(line2) + ";")
+
+    patched = original.replace(old_body, new_body, 1)
+    BPF_SRC.write_text(patched)
+    log_info(f"Patched trace filter: 'pand' -> '{target}'")
+    return original
+
+
+def restore_bpf_source(original: str):
+    """Restore main.bpf.c to its original content."""
+    BPF_SRC.write_text(original)
+    log_info("Restored main.bpf.c")
+
+
 def fix_ownership():
-    uid = os.getuid()
-    gid = os.getgid()
+    uid = os.environ.get("SUDO_UID", str(os.getuid()))
+    gid = os.environ.get("SUDO_GID", str(os.getgid()))
     log_info(f"Fixing ownership to {uid}:{gid}...")
     for d in [TARGET_DIR, LOG_DIR]:
         if d.exists():
             subprocess.run(
-                ["sudo", "chown", "-R", f"{uid}:{gid}", str(d)],
+                ["chown", "-R", f"{uid}:{gid}", str(d)],
                 capture_output=True,
             )
 
@@ -4256,6 +4295,411 @@ def cmd_bench_contention(args) -> int:
     return 0 if total_crashed == 0 else 1
 
 
+# BENCH-CS2: AUTOMATED GAME WORKLOAD DIAGNOSIS
+
+CS2_CAPTURE_S = 120     # DEFAULT CAPTURE DURATION
+CS2_LAUNCH_TIMEOUT = 120  # MAX WAIT FOR CS2 PROCESS TO APPEAR
+GAP_THRESH_MS = 50      # SCHEDULING GAPS ABOVE THIS ARE FLAGGED (1 FRAME @ 20FPS)
+
+
+def _find_process(name: str) -> int | None:
+    """Find PID of a running process by name. Returns None if not found."""
+    try:
+        r = subprocess.run(["pgrep", "-x", name],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            pids = r.stdout.strip().splitlines()
+            return int(pids[0]) if pids else None
+    except (ValueError, FileNotFoundError):
+        pass
+    return None
+
+
+def _wait_for_process(name: str, timeout: float) -> int | None:
+    """Poll until process appears. Returns PID or None on timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pid = _find_process(name)
+        if pid is not None:
+            return pid
+        time.sleep(0.5)
+    return None
+
+
+def _kill_process(name: str):
+    """Gracefully kill a process by name (SIGTERM, then SIGKILL)."""
+    pid = _find_process(name)
+    if pid is None:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if _find_process(name) is None:
+            return
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _cs2_parse_trace(trace_path: Path) -> dict:
+    """Parse a trace log into structured event data."""
+    events = []       # (timestamp_s, event_type, raw_line)
+    type_counts = {}  # event_type -> count
+
+    if not trace_path.exists():
+        return {"events": events, "type_counts": type_counts}
+
+    # trace_pipe: "<task>-<pid> [<cpu>] <flags> <timestamp>: ... PAND: <type> <rest>"
+    ts_pattern = re.compile(r"\s+([\d.]+):\s+.*PAND:\s+(.+)")
+
+    for line in trace_path.read_text().splitlines():
+        m = ts_pattern.search(line)
+        if m:
+            ts = float(m.group(1))
+            msg = m.group(2).strip()
+            # Full event type: "enq tier1 cpu=3" -> "enq tier1"
+            parts = msg.split()
+            if len(parts) >= 2 and parts[0] == "enq":
+                etype = f"{parts[0]} {parts[1]}"
+            else:
+                etype = parts[0] if parts else msg
+            events.append((ts, etype, msg))
+            type_counts[etype] = type_counts.get(etype, 0) + 1
+
+    events.sort(key=lambda e: e[0])
+    return {"events": events, "type_counts": type_counts}
+
+
+def _cs2_write_prometheus(version, git, stamp, target, elapsed,
+                          trace_data, latency_samples, crashed,
+                          crash_msg) -> Path:
+    """Write Prometheus .prom for bench-cs2."""
+    lines = []
+    emitted = set()
+
+    def gauge(name, help_text, value, labels=None):
+        if name not in emitted:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} gauge")
+            emitted.add(name)
+        if labels:
+            label_str = ",".join(f'{k}="{v}"' for k, v in labels.items())
+            lines.append(f"{name}{{{label_str}}} {value}")
+        else:
+            lines.append(f"{name} {value}")
+
+    dirty = "true" if git["dirty"] else "false"
+    gauge("pandemonium_cs2_info", "Build and run metadata", 1,
+          {"version": version, "git_commit": git["commit"],
+           "git_dirty": dirty, "target": target})
+    gauge("pandemonium_cs2_timestamp_seconds", "Test start time",
+          int(time.time()))
+    gauge("pandemonium_cs2_elapsed_seconds", "Total capture duration",
+          f"{elapsed:.1f}")
+    gauge("pandemonium_cs2_crashed", "Scheduler crashed (1=yes 0=no)",
+          1 if crashed else 0)
+
+    # Trace event counts
+    events = trace_data["events"]
+    type_counts = trace_data["type_counts"]
+    gauge("pandemonium_cs2_trace_total", "Total trace events", len(events))
+
+    for etype, count in sorted(type_counts.items()):
+        gauge("pandemonium_cs2_trace_by_type", "Trace events by type",
+              count, {"type": etype})
+
+    # Event rate
+    if len(events) >= 2:
+        t0 = events[0][0]
+        duration_s = events[-1][0] - t0
+        if duration_s > 0:
+            gauge("pandemonium_cs2_trace_rate_avg",
+                  "Average trace events per second",
+                  f"{len(events) / duration_s:.1f}")
+
+    # Gaps
+    gap_thresh = GAP_THRESH_MS / 1000.0
+    gaps = []
+    for i in range(1, len(events)):
+        dt = events[i][0] - events[i - 1][0]
+        if dt > gap_thresh:
+            gaps.append(dt)
+    gauge("pandemonium_cs2_gaps_total",
+          f"Scheduling gaps >{GAP_THRESH_MS}ms", len(gaps))
+    if gaps:
+        gauge("pandemonium_cs2_gap_max_ms", "Largest scheduling gap (ms)",
+              f"{max(gaps) * 1000:.1f}")
+        gauge("pandemonium_cs2_gap_median_ms", "Median scheduling gap (ms)",
+              f"{percentile(gaps, 50) * 1000:.1f}")
+
+    # Latency probe
+    if latency_samples:
+        p50 = percentile(latency_samples, 50)
+        p99 = percentile(latency_samples, 99)
+        worst = max(latency_samples)
+        gauge("pandemonium_cs2_latency_samples", "Wakeup latency samples",
+              len(latency_samples))
+        gauge("pandemonium_cs2_latency_p50_us", "Median wakeup latency (us)",
+              f"{p50:.0f}")
+        gauge("pandemonium_cs2_latency_p99_us", "P99 wakeup latency (us)",
+              f"{p99:.0f}")
+        gauge("pandemonium_cs2_latency_worst_us", "Worst wakeup latency (us)",
+              f"{worst:.0f}")
+
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    path = ARCHIVE_DIR / f"cs2-{version}-{stamp}.prom"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def cmd_bench_cs2(args) -> int:
+    """Automated game workload diagnosis.
+
+    Patches BPF trace filter at build time, waits for the game to launch,
+    captures trace + latency data, produces Prometheus + human-readable output.
+    """
+    subprocess.run(["sudo", "true"])
+    nuke_stale_build()
+
+    target = args.target
+    capture_duration = args.duration or CS2_CAPTURE_S
+
+    # ---- PHASE 1: PATCH + BUILD + RESTORE ----
+
+    original = patch_bpf_trace_filter(target)
+    if original is None:
+        return 1
+    try:
+        ok = build(force=True)
+    finally:
+        restore_bpf_source(original)
+    if not ok:
+        return 1
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    ver = get_version()
+    git = get_git_info()
+    dirty = " (dirty)" if git["dirty"] else ""
+    log_info(f"bench-cs2 v{ver} [{git['commit']}{dirty}]  "
+             f"target='{target}'  capture={capture_duration}s")
+    print()
+
+    # ---- PHASE 2: START SCHEDULER + MONITORING ----
+
+    dmesg = DmesgMonitor()
+    trace_path = LOG_DIR / f"cs2-trace-{stamp}.log"
+    sched_proc = None
+    trace = None
+    probe = None
+    crashed = False
+    game_exited = False
+    total_elapsed = 0
+    latency_samples = []
+
+    try:
+        sched_proc = _trace_start_scheduler()
+        if sched_proc is None:
+            return 1
+
+        trace = TraceCapture(trace_path)
+        if not trace.start():
+            log_warn("Trace capture failed, continuing without trace data")
+
+        # ---- PHASE 3: WAIT FOR GAME ----
+
+        already_running = _find_process(target) is not None
+        if already_running:
+            log_info(f"'{target}' already running")
+        else:
+            print()
+            log_info(f">>> Please launch '{target}' now. <<<")
+            log_info(f"Waiting for '{target}' process "
+                     f"(timeout {CS2_LAUNCH_TIMEOUT}s)...")
+            print()
+
+        pid = _wait_for_process(target, CS2_LAUNCH_TIMEOUT)
+        if pid is None:
+            log_error(f"'{target}' did not appear "
+                      f"within {CS2_LAUNCH_TIMEOUT}s")
+            return 1
+        log_info(f"'{target}' detected (PID {pid})")
+
+        # ---- PHASE 4: CAPTURE (STARTS IMMEDIATELY) ----
+
+        log_info(f"CAPTURING: {capture_duration}s with latency probe")
+        probe = _LatencyProbe(capture_duration)
+        probe.start()
+
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < capture_duration:
+            time.sleep(2)
+            elapsed = time.monotonic() - t0
+
+            if dmesg.check():
+                log_error(f"SCHEDULER CRASH at {elapsed:.0f}s: "
+                          f"{dmesg.crash_msg}")
+                crashed = True
+                break
+
+            if sched_proc.poll() is not None:
+                log_error(f"Scheduler exited at {elapsed:.0f}s "
+                          f"(code {sched_proc.returncode})")
+                crashed = True
+                break
+
+            if _find_process(target) is None:
+                log_warn(f"'{target}' exited at {elapsed:.0f}s")
+                game_exited = True
+                break
+
+            log_info(f"  [{elapsed:.0f}s] events={trace.count}")
+
+        total_elapsed = time.monotonic() - t0
+
+    except KeyboardInterrupt:
+        log_info("Interrupted by user")
+    finally:
+        # ---- CLEANUP (ALWAYS RUNS) ----
+
+        log_info("Stopping...")
+
+        if probe and probe.proc and probe.proc.poll() is None:
+            probe.proc.kill()
+        if probe:
+            latency_samples = probe.collect()
+
+        if trace:
+            trace.stop()
+        _trace_stop_scheduler(sched_proc)
+
+        if _find_process(target):
+            log_info(f"Killing '{target}'")
+            _kill_process(target)
+
+        # ---- REPORT (ALWAYS RUNS) ----
+
+        print()
+        trace_data = _cs2_parse_trace(trace_path)
+        events = trace_data["events"]
+        type_counts = trace_data["type_counts"]
+
+        report_lines = []
+        report_lines.append(f"bench-cs2 v{ver} [{git['commit']}{dirty}]")
+        if crashed:
+            report_lines.append(
+                f"SCHEDULER CRASHED at {total_elapsed:.1f}s")
+            if dmesg.crash_msg:
+                report_lines.append(f"  dmesg: {dmesg.crash_msg}")
+        elif game_exited:
+            report_lines.append(f"GAME EXITED at {total_elapsed:.1f}s")
+        else:
+            report_lines.append(
+                f"Completed: {total_elapsed:.1f}s capture")
+        report_lines.append("")
+
+        report_lines.append(f"Trace events: {len(events)}")
+        for etype in sorted(type_counts, key=type_counts.get,
+                            reverse=True):
+            report_lines.append(
+                f"  {etype:30s} {type_counts[etype]:>8d}")
+        report_lines.append("")
+
+        if len(events) >= 2:
+            t_start = events[0][0]
+            t_end = events[-1][0]
+            duration_s = t_end - t_start
+            if duration_s > 0:
+                buckets = {}
+                for ts, _, _ in events:
+                    sec = int(ts - t_start)
+                    buckets[sec] = buckets.get(sec, 0) + 1
+                rates = list(buckets.values())
+                report_lines.append(
+                    f"Event rate: avg={len(events)/duration_s:.1f}/s  "
+                    f"min={min(rates)}/s  max={max(rates)}/s  "
+                    f"over {duration_s:.1f}s")
+                total_secs = int(duration_s) + 1
+                dead = total_secs - len(buckets)
+                if dead > 0:
+                    report_lines.append(
+                        f"Dead seconds (0 events): {dead}/{total_secs}")
+                report_lines.append("")
+
+        gap_thresh = GAP_THRESH_MS / 1000.0
+        gaps = []
+        if len(events) >= 2:
+            t_start = events[0][0]
+            for i in range(1, len(events)):
+                dt = events[i][0] - events[i - 1][0]
+                if dt > gap_thresh:
+                    gaps.append((events[i - 1][0] - t_start,
+                                 events[i][0] - t_start, dt))
+
+        if gaps:
+            report_lines.append(
+                f"GAPS (>{GAP_THRESH_MS}ms): {len(gaps)} detected")
+            for start, end, dt in gaps[:30]:
+                report_lines.append(
+                    f"  {start:8.3f}s .. {end:8.3f}s  "
+                    f"gap={dt*1000:.0f}ms")
+            if len(gaps) > 30:
+                report_lines.append(
+                    f"  ... and {len(gaps) - 30} more")
+        else:
+            report_lines.append(
+                f"No gaps >{GAP_THRESH_MS}ms detected.")
+        report_lines.append("")
+
+        if latency_samples:
+            p50 = percentile(latency_samples, 50)
+            p99 = percentile(latency_samples, 99)
+            worst = max(latency_samples)
+            report_lines.append(
+                f"Wakeup latency: n={len(latency_samples)}  "
+                f"med={p50:.0f}us  P99={p99:.0f}us  "
+                f"worst={worst:.0f}us")
+        else:
+            report_lines.append(
+                "Wakeup latency: no samples collected")
+        report_lines.append("")
+
+        for line in report_lines:
+            log_info(line)
+
+        report_path = LOG_DIR / f"bench-cs2-{stamp}.log"
+        report_path.write_text("\n".join(report_lines) + "\n")
+        log_info(f"Report: {report_path}")
+        log_info(f"Raw trace: {trace_path}")
+
+        prom_path = _cs2_write_prometheus(
+            ver, git, stamp, target, total_elapsed,
+            trace_data, latency_samples, crashed,
+            dmesg.crash_msg if crashed else "")
+        log_info(f"Prometheus: {prom_path}")
+
+        dmesg.save(stamp)
+
+        if crashed:
+            status = "CRASH"
+        elif game_exited:
+            status = "GAME EXITED"
+        else:
+            status = "PASS"
+        print()
+        log_info(f"RESULT: {status}")
+
+        fix_ownership()
+
+    return 1 if crashed else 0
+
+
 # MAIN
 
 def main() -> int:
@@ -4333,6 +4777,14 @@ def main() -> int:
                            help="Additional compositor process names "
                                 "(PANDEMONIUM modes only)")
 
+    cs2_bench = sub.add_parser("bench-cs2",
+                                help="Automated game workload diagnosis")
+    cs2_bench.add_argument("--target", type=str, default="cs2",
+                           help="Process name to trace and detect (default: cs2)")
+    cs2_bench.add_argument("--duration", type=int, default=0,
+                           help="Capture duration in seconds (default: 120)")
+
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -4351,6 +4803,8 @@ def main() -> int:
         return cmd_bench_contention(args)
     if args.command == "bench-sys":
         return cmd_bench_sys(args)
+    if args.command == "bench-cs2":
+        return cmd_bench_cs2(args)
 
     log_error(f"Unknown command: {args.command}")
     return 1
