@@ -493,7 +493,7 @@ PANDEMONIUM is included in the sched-ext/scx monorepo. `export_scx.py` automates
 ./export_scx.py /path/to/scx
 ```
 
-The script copies source files into `scheds/rust/scx_pandemonium/`, renames the crate, strips `[profile.release]` (the workspace provides its own), registers the workspace member, and runs `cargo fmt`. It does not touch `build.rs` -- PANDEMONIUM's C23 keyword patching and BORE anonymous field renaming in vmlinux.h are specific to our build and not handled by `scx_cargo::BpfBuilder`.
+The script copies source files into `scheds/rust/scx_pandemonium/`, renames the crate, strips `[profile.release]` (the workspace provides its own), replaces `build.rs` with a `scx_cargo::BpfBuilder` version, swaps `libbpf-cargo` for `scx_cargo` in build dependencies, registers the workspace member, and runs `cargo fmt`.
 
 ## Attribution
 
