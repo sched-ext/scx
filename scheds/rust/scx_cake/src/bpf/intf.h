@@ -206,6 +206,13 @@ struct cake_task_ctx {
 	u16 warm_cpus[3]; /* [0]=current, [1]=prev (staged in dsq_vtime), [2]=oldest */
 	u16 waker_cpu;    /* CPU where waker last ran — chain locality (Gate 1W-chain) */
 
+	/* PROMOTED (Rule 42): ppid was in telemetry CL4+ (byte ~280, cold).
+	 * Game family detection reads this unconditionally in cake_stopping,
+	 * Gate 1WC, and tunnel staging. Promoting to CL0 eliminates a cold
+	 * cache line fetch on every game-detected stop/wakeup. */
+	u32 ppid;         /* Parent PID — game family detection (Proton/Wine siblings) */
+	u32 _pad_cl0;     /* Pad to 8-byte boundary for telemetry u64 fields */
+
 	/* --- High Resolution Arena Telemetry (TUI Matrix) ---
      * Zero-cost pointer access via BPF Arena. User-space sweeps memory 
      * asynchronously to build 1% Lows and average runtimes. */
@@ -277,13 +284,14 @@ struct cake_task_ctx {
 
 		u32 pid;
 		u32 tgid;  /* Thread group ID (process) for TUI grouping */
-		u32 ppid;  /* Parent PID — game family detection (Proton/Wine siblings) */
+		/* ppid promoted to main struct CL0 (Rule 42) — see above */
 		char comm[16];
 	} telemetry;
 
 	/* Compiler enforces 256-byte alignment via __attribute__((aligned(256))).
 	 * No explicit padding needed — aligned attribute handles it.
-	 * Pre-telemetry: 40B, telemetry: ~194B, total: ~234B → 22B implicit pad. */
+	 * Pre-telemetry: 48B (ppid promoted from telemetry), telemetry: ~186B,
+	 * total: ~234B → 22B implicit pad. */
 } __attribute__((aligned(256)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):

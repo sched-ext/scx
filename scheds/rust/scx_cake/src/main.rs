@@ -62,25 +62,8 @@ impl Profile {
         }
     }
 
-    /// DVFS enabled — only Battery profile activates frequency steering
-    fn dvfs_enabled(&self) -> bool {
-        matches!(self, Profile::Battery)
-    }
-
-    /// DVFS per-tier CPU performance targets (SCX_CPUPERF_ONE = 1024 = max)
-    /// Returns None for profiles that don't use DVFS.
-    fn dvfs_targets(&self) -> Option<[u32; 8]> {
-        match self {
-            Profile::Battery => Some([
-                1024, // T0 Critical: 100% — IRQ, input, audio (never throttle)
-                896,  // T1 Interactive: 87.5% — compositor, physics
-                768,  // T2 Frame: 75% — game render (P ∘ V²f savings)
-                512,  // T3 Bulk: 50% — background tasks at half speed
-                512, 512, 512, 512, // Padding
-            ]),
-            _ => None,
-        }
-    }
+    // DVFS — disabled (tick architecture removed, no runtime effect).
+    // RODATA symbols retained in BPF for loader compat; JIT eliminates.
 }
 
 /// 🍰 scx_cake: A sched_ext scheduler applying CAKE bufferbloat concepts
@@ -242,12 +225,6 @@ impl<'a> Scheduler<'a> {
             #[cfg(debug_assertions)]
             {
                 rodata.enable_stats = args.verbose || args.testing;
-            }
-
-            // DVFS: Battery profile enables per-tier CPU frequency steering
-            rodata.enable_dvfs = args.profile.dvfs_enabled();
-            if let Some(targets) = args.profile.dvfs_targets() {
-                rodata.tier_perf_target = targets;
             }
 
             // Topology: has_hybrid enables P/E-core DVFS scaling in cake_tick
