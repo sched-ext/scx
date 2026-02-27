@@ -29,7 +29,7 @@ enum consts {
 	MAX_CPUS_U8		= MAX_CPUS / 8,
 	MAX_TASKS		= 131072,
 	MAX_PATH		= 4096,
-	MAX_NUMA_NODES		= 64,
+	MAX_NUMA_NODES		= 8,
 	MAX_LLCS		= 64,
 	MAX_COMM		= 16,
 	MAX_LAYER_MATCH_ORS	= 32,
@@ -246,6 +246,18 @@ struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_llcs;
 	u32			nr_cpus;
+	u32			llcs[MAX_LLCS];
+	u32			empty_layer_ids[MAX_LAYERS];
+	u32			nr_empty_layer_ids;
+};
+
+struct refresh_node_ctx_arg {
+	u32			node_id;
+	u32			init;
+	u32			empty_layer_ids[MAX_LAYERS];
+	u32			nr_empty_layer_ids;
+	u32			llcs[MAX_LLCS];
+	u32			nr_llcs;
 };
 
 enum layer_match_kind {
@@ -361,7 +373,6 @@ struct layer {
 	int			growth_algo;
 
 	u64			nr_tasks;
-	u64			nr_node_pinned_tasks[MAX_NUMA_NODES];
 
 	u64			cpus_seq;
 	bool			check_no_idle;
@@ -371,10 +382,14 @@ struct layer {
 
 	u32			nr_cpus;
 	u32			nr_llc_cpus[MAX_LLCS];
-	u32			nr_node_cpus[MAX_NUMA_NODES];
 
-	u64			llcs_to_drain;
-	u32			llc_drain_cnt;
+	struct layer_node_ctx {
+		u32		nr_cpus;
+		u64		nr_pinned_tasks;
+		u64		llcs_to_drain;
+		u32		llc_drain_cnt;
+	}			node[MAX_NUMA_NODES];
+
 	enum layer_task_place   task_place;
 
 	char			name[MAX_LAYER_NAME];

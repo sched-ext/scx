@@ -90,9 +90,6 @@ struct layer layers[MAX_LAYERS];
 u32 fallback_cpus[MAX_NUMA_NODES];
 u32 layered_root_tgid = 0;
 
-u32 empty_layer_ids[MAX_LAYERS];
-u32 nr_empty_layer_ids;
-
 UEI_DEFINE(uei);
 
 struct task_hint {
@@ -365,6 +362,36 @@ struct {
 	__uint(map_flags, 0);
 } layer_cpumasks SEC(".maps");
 
+/*
+ * Per-layer per-node cpumasks (layer cpumask & node cpumask). Stored in a
+ * separate map because struct layer is in BSS which is mmapped and can't
+ * contain kptrs. Keyed by layer_id * MAX_NUMA_NODES + node_id.
+ */
+struct layer_node_cpumask_wrapper {
+	struct bpf_cpumask __kptr *cpumask;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct layer_node_cpumask_wrapper);
+	__uint(max_entries, MAX_LAYERS * MAX_NUMA_NODES);
+	__uint(map_flags, 0);
+} layer_node_cpumasks SEC(".maps");
+
+static struct cpumask *lookup_layer_node_cpumask(u32 layer_id, u32 node_id)
+{
+	struct layer_node_cpumask_wrapper *w;
+	u32 key = layer_id * MAX_NUMA_NODES + node_id;
+
+	if ((w = bpf_map_lookup_elem(&layer_node_cpumasks, &key)))
+		return (struct cpumask *)w->cpumask;
+
+	scx_bpf_error("no layer_node_cpumask for layer %d node %d",
+		       layer_id, node_id);
+	return NULL;
+}
+
 static struct cpumask *lookup_layer_cpumask(u32 layer_id)
 {
 	struct layer_cpumask_wrapper *cpumaskw;
@@ -391,12 +418,20 @@ static struct bpf_cpumask *lookup_layer_cpuset(u32 layer_id)
 
 static void layer_llc_drain_enable(struct layer *layer, u32 llc_id)
 {
-	__sync_or_and_fetch(&layer->llcs_to_drain, 1LLU << llc_id);
+	u32 nid = llc_node_id(llc_id);
+
+	if (nid >= MAX_NUMA_NODES)
+		return;
+	__sync_or_and_fetch(&layer->node[nid].llcs_to_drain, 1LLU << llc_id);
 }
 
 static void layer_llc_drain_disable(struct layer *layer, u32 llc_id)
 {
-	__sync_and_and_fetch(&layer->llcs_to_drain, ~(1LLU << llc_id));
+	u32 nid = llc_node_id(llc_id);
+
+	if (nid >= MAX_NUMA_NODES)
+		return;
+	__sync_and_and_fetch(&layer->node[nid].llcs_to_drain, ~(1LLU << llc_id));
 }
 
 static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
@@ -514,6 +549,33 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 		}
 	}
 
+	/* Update per-node layer cpumasks (layer cpumask & node cpumask). */
+	cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id);
+	scoped_guard(rcu) {
+		struct node_ctx *nodec;
+		u32 nid;
+
+		bpf_for(nid, 0, nr_nodes) {
+			struct layer_node_cpumask_wrapper *node_cpumaskw;
+			struct bpf_cpumask *layer_cpumask_ptr;
+			u32 key = layer_id * MAX_NUMA_NODES + nid;
+
+			node_cpumaskw = bpf_map_lookup_elem(&layer_node_cpumasks, &key);
+			nodec = lookup_node_ctx(nid);
+			if (!cpumaskw || !node_cpumaskw || !nodec)
+				continue;
+
+			layer_cpumask_ptr = cpumaskw->cpumask;
+			if (!layer_cpumask_ptr ||
+			    !node_cpumaskw->cpumask || !nodec->cpumask)
+				continue;
+
+			bpf_cpumask_and(node_cpumaskw->cpumask,
+					(const struct cpumask *)layer_cpumask_ptr,
+					(const struct cpumask *)nodec->cpumask);
+		}
+	}
+
 	if (protected_changed)
 		__sync_fetch_and_add(&unprotected_seq, 1);
 
@@ -571,6 +633,26 @@ int BPF_PROG(refresh_layer_cpumasks)
 
 	bpf_for(id, 0, nr_layers)
 		refresh_cpumasks(id);
+
+	return 0;
+}
+
+SEC("syscall")
+int refresh_node_ctx(struct refresh_node_ctx_arg *arg)
+{
+	struct node_ctx *nodec;
+
+	if (!(nodec = lookup_node_ctx(arg->node_id)))
+		return -ENOENT;
+
+	nodec->nr_empty_layer_ids = arg->nr_empty_layer_ids;
+	__builtin_memcpy(nodec->empty_layer_ids, arg->empty_layer_ids,
+			 sizeof(nodec->empty_layer_ids));
+
+	if (arg->init) {
+		nodec->nr_llcs = arg->nr_llcs;
+		__builtin_memcpy(nodec->llcs, arg->llcs, sizeof(nodec->llcs));
+	}
 
 	return 0;
 }
@@ -1546,19 +1628,20 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 	taskc->qrt_llc_id = MAX_LLCS;
 }
 
-static void layer_kick_idle_cpu(struct layer *layer)
+static void layer_kick_idle_node_cpu(struct layer *layer, u32 node_id)
 {
-	const struct cpumask *layer_cpumask;
+	const struct cpumask *node_cpumask;
 	s32 cpu;
 
-	if (!(layer_cpumask = lookup_layer_cpumask(layer->id)))
+	if (!(node_cpumask = lookup_layer_node_cpumask(layer->id, node_id)))
 		return;
 
 	const struct cpumask *idle_smtmask __free(idle_cpumask) = scx_bpf_get_idle_smtmask();
 	if (!idle_smtmask)
 		return;
 
-	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer)) >= 0)
+	if ((cpu = pick_idle_cpu_from(node_cpumask, 0,
+				      idle_smtmask, layer)) >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
@@ -1850,11 +1933,11 @@ skip_ddsp:
 	 * nr_llc_cpus.
 	 *
 	 * Also interlocked with opportunistic disabling in
-	 * try_drain_layer_llcs(). See there.
+	 * try_drain_layer_node_llcs(). See there.
 	 */
 	if (!layer->nr_llc_cpus[llc_id]) {
 		layer_llc_drain_enable(layer, llc_id);
-		layer_kick_idle_cpu(layer);
+		layer_kick_idle_node_cpu(layer, llc_node_id(llc_id));
 	}
 }
 
@@ -2120,10 +2203,23 @@ reset:
 	return consumed;
 }
 
-static bool try_drain_layer_llcs(struct layer *layer, struct cpu_ctx *cpuc)
+static bool try_drain_layer_node_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 {
-	u32 cnt = layer->llc_drain_cnt++;
-	u32 u;
+	u32 nid = cpuc->node_id;
+	struct node_ctx *nodec;
+	struct layer_node_ctx *lnc;
+	u32 cnt, nr, u;
+
+	if (nid >= MAX_NUMA_NODES)
+		return false;
+
+	nodec = lookup_node_ctx(nid);
+	if (!nodec)
+		return false;
+
+	lnc = &layer->node[nid];
+	cnt = lnc->llc_drain_cnt++;
+	nr = nodec->nr_llcs;
 
 	/* alternate between prioritizing draining and owned */
 	if (cnt & 1)
@@ -2131,13 +2227,20 @@ static bool try_drain_layer_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 
 	lstat_inc(LSTAT_LLC_DRAIN_TRY, layer, cpuc);
 
-	bpf_for(u, 0, nr_llcs) {
-		u32 llc_id = (u + cnt / 2) % nr_llcs;
-		u64 dsq_id = layer_dsq_id(layer->id, llc_id);
+	bpf_for(u, 0, nr) {
+		u32 idx = (u + cnt / 2) % nr;
+		u32 *llc_ptr = MEMBER_VPTR(nodec->llcs, [idx]);
+		u32 llc_id;
+		u64 dsq_id;
 		u32 *vptr;
 		bool disabled = false, consumed;
 
-		if (!(layer->llcs_to_drain & (1LLU << llc_id)))
+		if (!llc_ptr)
+			break;
+		llc_id = *llc_ptr;
+		dsq_id = layer_dsq_id(layer->id, llc_id);
+
+		if (!(lnc->llcs_to_drain & (1LLU << llc_id)))
 			continue;
 
 		if ((vptr = MEMBER_VPTR(layer->nr_llc_cpus, [llc_id])) && *vptr)
@@ -2342,15 +2445,19 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Prioritize empty layers on per-node fallback CPUs. empty_layer_ids
-	 * array can be resized asynchronously by userland. As unoccupied slots
-	 * are filled with MAX_LAYERS, excluding IDs matching MAX_LAYERS makes
-	 * it safe.
+	 * Per-node fallback: service layers that have no CPUs on this node.
+	 * Tasks can be stranded in this node's LLC DSQs for a layer that has
+	 * no local CPUs to service them.
 	 */
+	struct node_ctx *nodec;
 	if (cpuc->node_id < MAX_NUMA_NODES &&
 	    cpuc->cpu == fallback_cpus[cpuc->node_id] &&
-	    try_consume_layers(empty_layer_ids, nr_empty_layer_ids,
+	    (nodec = lookup_node_ctx(cpuc->node_id)) &&
+	    try_consume_layers(nodec->empty_layer_ids,
+			       nodec->nr_empty_layer_ids,
 			       MAX_LAYERS, cpuc, llcc)) {
+		trace("FALLBACK cpu=%d node=%d (node_cpus=0)",
+		      cpuc->cpu, cpuc->node_id);
 		cpuc->running_fallback = true;
 		return;
 	}
@@ -2442,8 +2549,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 		/* owner layer */
 		if (owner_layer) {
-			if (owner_layer->llcs_to_drain &&
-			    try_drain_layer_llcs(owner_layer, cpuc))
+			if (cpuc->node_id < MAX_NUMA_NODES &&
+			    owner_layer->node[cpuc->node_id].llcs_to_drain &&
+			    try_drain_layer_node_llcs(owner_layer, cpuc))
 				return;
 			if (try_consume_layer(owner_layer->id, cpuc, llcc))
 				return;
@@ -2812,7 +2920,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	if (old_lid < nr_layers) {
 		__sync_fetch_and_add(&layers[old_lid].nr_tasks, -1);
 		if (taskc->pinned_node < MAX_NUMA_NODES)
-			__sync_fetch_and_add(&layers[old_lid].nr_node_pinned_tasks[taskc->pinned_node], -1);
+			__sync_fetch_and_add(&layers[old_lid].node[taskc->pinned_node].nr_pinned_tasks, -1);
 	}
 
 	if (layer_id >= nr_layers)
@@ -2841,7 +2949,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 
 	refresh_cpus_flags(taskc, p->cpus_ptr);
 	if (taskc->pinned_node < MAX_NUMA_NODES)
-		__sync_fetch_and_add(&layer->nr_node_pinned_tasks[taskc->pinned_node], 1);
+		__sync_fetch_and_add(&layer->node[taskc->pinned_node].nr_pinned_tasks, 1);
 
 	/*
 	 * XXX - To be correct, we'd need to calculate the vtime
@@ -3417,9 +3525,9 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 
 			if (lid < nr_layers) {
 				if (old_pinned < MAX_NUMA_NODES)
-					__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[old_pinned], -1);
+					__sync_fetch_and_add(&layers[lid].node[old_pinned].nr_pinned_tasks, -1);
 				if (taskc->pinned_node < MAX_NUMA_NODES)
-					__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[taskc->pinned_node], 1);
+					__sync_fetch_and_add(&layers[lid].node[taskc->pinned_node].nr_pinned_tasks, 1);
 			}
 		}
 	}
@@ -3574,7 +3682,7 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	if (lid < nr_layers) {
 		__sync_fetch_and_add(&layers[lid].nr_tasks, -1);
 		if (taskc->pinned_node < MAX_NUMA_NODES)
-			__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[taskc->pinned_node], -1);
+			__sync_fetch_and_add(&layers[lid].node[taskc->pinned_node].nr_pinned_tasks, -1);
 	}
 
 	if (membw_event)
@@ -3842,6 +3950,23 @@ init_layer_cpumasks(int layer_id)
 	cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
+
+	struct bpf_cpumask *node_cpumask;
+	u32 nid;
+
+	bpf_for(nid, 0, nr_nodes) {
+		struct layer_node_cpumask_wrapper *node_cpumaskw;
+		u32 key = layer_id * MAX_NUMA_NODES + nid;
+
+		if (!(node_cpumaskw = bpf_map_lookup_elem(&layer_node_cpumasks, &key)))
+			return -ENOENT;
+		node_cpumask = bpf_cpumask_create();
+		if (!node_cpumask)
+			return -ENOMEM;
+		node_cpumask = bpf_kptr_xchg(&node_cpumaskw->cpumask, node_cpumask);
+		if (node_cpumask)
+			bpf_cpumask_release(node_cpumask);
+	}
 
 	layer_cpuset_bpfmask(layer_id);
 

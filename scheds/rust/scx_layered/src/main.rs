@@ -1033,9 +1033,9 @@ impl Stats {
             .iter()
             .take(self.nr_layers)
             .map(|layer| {
-                layer.nr_node_pinned_tasks[..self.topo.nodes.len()]
+                layer.node[..self.topo.nodes.len()]
                     .iter()
-                    .map(|&v| v)
+                    .map(|n| n.nr_pinned_tasks)
                     .collect()
             })
             .collect();
@@ -2217,6 +2217,14 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn init_node_ctx(skel: &mut BpfSkel, topo: &Topology, nr_layers: usize) -> Result<()> {
+        let all_layers: Vec<u32> = (0..nr_layers as u32).collect();
+        let node_empty_layers: Vec<Vec<u32>> =
+            (0..topo.nodes.len()).map(|_| all_layers.clone()).collect();
+        Self::refresh_node_ctx(skel, topo, &node_empty_layers, true);
+        Ok(())
+    }
+
     fn init(
         opts: &'a Opts,
         layer_specs: &[LayerSpec],
@@ -2514,12 +2522,6 @@ impl<'a> Scheduler<'a> {
             v => v,
         };
 
-        // Consider all layers empty at the beginning.
-        for i in 0..layer_specs.len() {
-            skel.maps.bss_data.as_mut().unwrap().empty_layer_ids[i] = i as u32;
-        }
-        skel.maps.bss_data.as_mut().unwrap().nr_empty_layer_ids = nr_layers as u32;
-
         // We set the pin path before loading the skeleton. This will ensure
         // libbpf creates and pins the map, or reuses the pinned map fd for us,
         // so that we can keep reusing the older map already pinned on scheduler
@@ -2596,6 +2598,7 @@ impl<'a> Scheduler<'a> {
 
         Self::init_cpus(&skel, &layer_specs, &topo)?;
         Self::init_llc_prox_map(&mut skel, &topo)?;
+        Self::init_node_ctx(&mut skel, &topo, nr_layers)?;
 
         // Other stuff.
         let proc_reader = fb_procfs::ProcReader::new();
@@ -2697,7 +2700,7 @@ impl<'a> Scheduler<'a> {
             bpf_layer.nr_llc_cpus[llc_id] = nr_llc_cpus as u32;
         }
         for (node_id, &nr_node_cpus) in layer.nr_node_cpus.iter().enumerate() {
-            bpf_layer.nr_node_cpus[node_id] = nr_node_cpus as u32;
+            bpf_layer.node[node_id].nr_cpus = nr_node_cpus as u32;
         }
 
         bpf_layer.refresh_cpus = 1;
@@ -3237,6 +3240,50 @@ impl<'a> Scheduler<'a> {
         Ok(updated)
     }
 
+    fn refresh_node_ctx(
+        skel: &mut BpfSkel,
+        topo: &Topology,
+        node_empty_layers: &[Vec<u32>],
+        init: bool,
+    ) {
+        for &nid in topo.nodes.keys() {
+            let mut arg: bpf_intf::refresh_node_ctx_arg =
+                unsafe { MaybeUninit::zeroed().assume_init() };
+            arg.node_id = nid as u32;
+            arg.init = init as u32;
+
+            let empty = &node_empty_layers[nid];
+            arg.nr_empty_layer_ids = empty.len() as u32;
+            for (i, &lid) in empty.iter().enumerate() {
+                arg.empty_layer_ids[i] = lid;
+            }
+            for i in empty.len()..MAX_LAYERS {
+                arg.empty_layer_ids[i] = MAX_LAYERS as u32;
+            }
+
+            if init {
+                // Per-node LLC list — static topology, only set during init.
+                let node = &topo.nodes[&nid];
+                let llcs: Vec<u32> = node.llcs.keys().map(|&id| id as u32).collect();
+                arg.nr_llcs = llcs.len() as u32;
+                for (i, &llc_id) in llcs.iter().enumerate() {
+                    arg.llcs[i] = llc_id;
+                }
+            }
+
+            let input = ProgramInput {
+                context_in: Some(unsafe {
+                    std::slice::from_raw_parts_mut(
+                        &mut arg as *mut _ as *mut u8,
+                        std::mem::size_of_val(&arg),
+                    )
+                }),
+                ..Default::default()
+            };
+            let _ = skel.progs.refresh_node_ctx.test_run(input);
+        }
+    }
+
     fn refresh_cpumasks(&mut self) -> Result<()> {
         let layer_is_open = |layer: &Layer| matches!(layer.kind, LayerKind::Open { .. });
 
@@ -3568,20 +3615,19 @@ impl<'a> Scheduler<'a> {
             let prog = &mut self.skel.progs.refresh_layer_cpumasks;
             let _ = prog.test_run(input);
 
-            // Update empty_layers.
-            let empty_layer_ids: Vec<u32> = self
-                .layers
-                .iter()
-                .enumerate()
-                .filter(|(_idx, layer)| layer.nr_cpus == 0)
-                .map(|(idx, _layer)| idx as u32)
+            // Update per-node empty layer IDs via BPF prog.
+            let nr_nodes = self.topo.nodes.len();
+            let node_empty_layers: Vec<Vec<u32>> = (0..nr_nodes)
+                .map(|nid| {
+                    self.layers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_lidx, layer)| layer.nr_node_cpus[nid] == 0)
+                        .map(|(lidx, _)| lidx as u32)
+                        .collect()
+                })
                 .collect();
-            for i in 0..self.layers.len() {
-                self.skel.maps.bss_data.as_mut().unwrap().empty_layer_ids[i] =
-                    empty_layer_ids.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-            }
-            self.skel.maps.bss_data.as_mut().unwrap().nr_empty_layer_ids =
-                empty_layer_ids.len() as u32;
+            Self::refresh_node_ctx(&mut self.skel, &self.topo, &node_empty_layers, false);
         }
 
         if let Err(e) = self.update_netdev_cpumasks() {
