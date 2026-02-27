@@ -90,9 +90,6 @@ struct layer layers[MAX_LAYERS];
 u32 fallback_cpus[MAX_NUMA_NODES];
 u32 layered_root_tgid = 0;
 
-u32 empty_layer_ids[MAX_LAYERS];
-u32 nr_empty_layer_ids;
-
 UEI_DEFINE(uei);
 
 struct task_hint {
@@ -571,6 +568,21 @@ int BPF_PROG(refresh_layer_cpumasks)
 
 	bpf_for(id, 0, nr_layers)
 		refresh_cpumasks(id);
+
+	return 0;
+}
+
+SEC("syscall")
+int refresh_node_ctx(struct refresh_node_ctx_arg *arg)
+{
+	struct node_ctx *nodec;
+
+	if (!(nodec = lookup_node_ctx(arg->node_id)))
+		return -ENOENT;
+
+	nodec->nr_empty_layer_ids = arg->nr_empty_layer_ids;
+	__builtin_memcpy(nodec->empty_layer_ids, arg->empty_layer_ids,
+			 sizeof(nodec->empty_layer_ids));
 
 	return 0;
 }
@@ -2342,15 +2354,19 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Prioritize empty layers on per-node fallback CPUs. empty_layer_ids
-	 * array can be resized asynchronously by userland. As unoccupied slots
-	 * are filled with MAX_LAYERS, excluding IDs matching MAX_LAYERS makes
-	 * it safe.
+	 * Per-node fallback: service layers that have no CPUs on this node.
+	 * Tasks can be stranded in this node's LLC DSQs for a layer that has
+	 * no local CPUs to service them.
 	 */
+	struct node_ctx *nodec;
 	if (cpuc->node_id < MAX_NUMA_NODES &&
 	    cpuc->cpu == fallback_cpus[cpuc->node_id] &&
-	    try_consume_layers(empty_layer_ids, nr_empty_layer_ids,
+	    (nodec = lookup_node_ctx(cpuc->node_id)) &&
+	    try_consume_layers(nodec->empty_layer_ids,
+			       nodec->nr_empty_layer_ids,
 			       MAX_LAYERS, cpuc, llcc)) {
+		trace("FALLBACK cpu=%d node=%d (node_cpus=0)",
+		      cpuc->cpu, cpuc->node_id);
 		cpuc->running_fallback = true;
 		return;
 	}

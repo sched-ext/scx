@@ -246,6 +246,14 @@ struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_llcs;
 	u32			nr_cpus;
+	u32			empty_layer_ids[MAX_LAYERS];
+	u32			nr_empty_layer_ids;
+};
+
+struct refresh_node_ctx_arg {
+	u32			node_id;
+	u32			empty_layer_ids[MAX_LAYERS];
+	u32			nr_empty_layer_ids;
 };
 
 enum layer_match_kind {
