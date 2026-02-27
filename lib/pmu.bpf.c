@@ -44,6 +44,7 @@ struct {
 	__type(value, struct scx_pmu_counters);
 } scx_pmu_tasks SEC(".maps");
 
+__weak
 int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 {
 	struct scx_pmu_counters *cntrs;

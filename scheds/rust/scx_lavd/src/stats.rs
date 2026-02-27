@@ -153,9 +153,9 @@ pub struct SchedSample {
     #[stat(desc = "Waker's task name")]
     pub waker_comm: String,
     #[stat(desc = "Assigned time slice")]
-    pub slice: u64,
+    pub slice_wall: u64,
     #[stat(desc = "Amount of time actually used by task in a slice")]
-    pub slice_used: u64,
+    pub slice_used_wall: u64,
     #[stat(desc = "Latency criticality of this task")]
     pub lat_cri: u32,
     #[stat(desc = "Average latency criticality in a system")]
@@ -163,13 +163,13 @@ pub struct SchedSample {
     #[stat(desc = "Static priority (20 == nice 0)")]
     pub static_prio: u16,
     #[stat(desc = "Time interval from the last quiescent time to this runnable time.")]
-    pub rerunnable_interval: u64,
+    pub rerunnable_interval_wall: u64,
     #[stat(desc = "Time interval from the last stopped time.")]
-    pub resched_interval: u64,
+    pub resched_interval_wall: u64,
     #[stat(desc = "How often this task is scheduled per second")]
     pub run_freq: u64,
     #[stat(desc = "Average runtime per schedule")]
-    pub avg_runtime: u64,
+    pub avg_runtime_wall: u64,
     #[stat(desc = "How frequently this task waits for other tasks")]
     pub wait_freq: u64,
     #[stat(desc = "How frequently this task wakes other tasks")]
@@ -181,9 +181,9 @@ pub struct SchedSample {
     #[stat(desc = "Target performance level of this CPU")]
     pub cpuperf_cur: u32,
     #[stat(desc = "CPU utilization of this CPU")]
-    pub cpu_util: u64,
-    #[stat(desc = "Scaled CPU utilization of this CPU")]
-    pub cpu_sutil: u64,
+    pub cpu_util_wall: u64,
+    #[stat(desc = "Invariant CPU utilization of this CPU scaled by CPU capacity and frequency")]
+    pub cpu_util_invr: u64,
     #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
     #[stat(desc = "DSQ ID where this task was dispatched from")]
@@ -246,22 +246,22 @@ impl SchedSample {
             self.suggested_cpu_id,
             self.waker_pid,
             self.waker_comm,
-            self.slice,
-            self.slice_used,
+            self.slice_wall,
+            self.slice_used_wall,
             self.lat_cri,
             self.avg_lat_cri,
             self.static_prio,
-            self.rerunnable_interval,
-            self.resched_interval,
+            self.rerunnable_interval_wall,
+            self.resched_interval_wall,
             self.run_freq,
-            self.avg_runtime,
+            self.avg_runtime_wall,
             self.wait_freq,
             self.wake_freq,
             self.perf_cri,
             self.thr_perf_cri,
             self.cpuperf_cur,
-            self.cpu_util,
-            self.cpu_sutil,
+            self.cpu_util_wall,
+            self.cpu_util_invr,
             self.nr_active,
             self.dsq_id,
             self.dsq_consume_lat,

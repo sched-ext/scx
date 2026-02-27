@@ -12,6 +12,7 @@ members = [
     "rust/scx_utils",
     "scheds/rust/scx_beerland",
     "scheds/rust/scx_bpfland",
+    "scheds/rust/scx_cake",
     "scheds/rust/scx_chaos",
     "scheds/rust/scx_cosmos",
     "scheds/rust/scx_flash",
@@ -36,12 +37,14 @@ lto = "thin"
 
 [profile.release-tiny]
 inherits = "release"
-lto = "thin"
-strip = true
-incremental = true
+opt-level = "z"
+lto = false
 codegen-units = 1
+strip = true
+panic = "abort"
 
 [profile.release-fast]
 inherits = "release"
 lto = false
-incremental = true
+codegen-units = 32
+panic = "abort"

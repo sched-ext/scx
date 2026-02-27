@@ -17,6 +17,7 @@ pub struct NetDev {
     node: usize,
     pub irqs: BTreeMap<usize, Cpumask>,
     irq_hints: BTreeMap<usize, Cpumask>,
+    original_irqs: BTreeMap<usize, Cpumask>,
 }
 
 impl NetDev {
@@ -42,6 +43,14 @@ impl NetDev {
         for (irq, cpumask) in self.irqs.iter() {
             let irq_path = format!("/proc/irq/{irq}/smp_affinity");
             fs::write(irq_path, format!("{cpumask:#x}"))?
+        }
+        Ok(())
+    }
+
+    pub fn restore_cpumasks(&self) -> Result<()> {
+        for (irq, cpumask) in self.original_irqs.iter() {
+            let irq_path = format!("/proc/irq/{irq}/smp_affinity");
+            fs::write(irq_path, format!("{cpumask:#x}"))?;
         }
         Ok(())
     }
@@ -103,6 +112,7 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
             NetDev {
                 iface,
                 node,
+                original_irqs: irqs.clone(),
                 irqs,
                 irq_hints,
             },

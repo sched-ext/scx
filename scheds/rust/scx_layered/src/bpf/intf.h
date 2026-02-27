@@ -51,7 +51,7 @@ enum consts {
 
 	DSQ_ID_LAYER_SHIFT	= 16,
 	DSQ_ID_LLC_MASK		= (1LLU << DSQ_ID_LAYER_SHIFT) - 1,		/* 0x0000ffff */
-	DSQ_ID_LAYER_MASK	= ~DSQ_ID_LAYER_SHIFT & ~DSQ_ID_SPECIAL_MASK,	/* 0x3fff0000 */
+	DSQ_ID_LAYER_MASK	= ~DSQ_ID_LLC_MASK & ~DSQ_ID_SPECIAL_MASK,	/* 0x3fff0000 */
 
 	/* XXX remove */
 	MAX_CGRP_PREFIXES	= 32,
@@ -138,7 +138,6 @@ enum layer_stat_id {
 	LSTAT_PREEMPT,
 	LSTAT_PREEMPT_FIRST,
 	LSTAT_PREEMPT_XLLC,
-	LSTAT_PREEMPT_XNUMA,
 	LSTAT_PREEMPT_IDLE,
 	LSTAT_PREEMPT_FAIL,
 	LSTAT_EXCL_COLLISION,
@@ -193,6 +192,7 @@ struct cpu_ctx {
 	bool			is_protected;
 
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
+	u64			node_pinned_usage[MAX_LAYERS];
 	u64			layer_membw_agg[MAX_LAYERS][NR_LAYER_USAGES];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
@@ -246,7 +246,6 @@ struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_llcs;
 	u32			nr_cpus;
-	u64			llc_mask;
 };
 
 enum layer_match_kind {
@@ -356,16 +355,15 @@ struct layer {
 	bool			preempt;
 	bool			preempt_first;
 	bool			excl;
-	bool			allow_node_aligned;
+	bool			has_cpuset;
 	bool			skip_remote_node;
 	bool			prev_over_idle_core;
 	int			growth_algo;
 
 	u64			nr_tasks;
+	u64			nr_node_pinned_tasks[MAX_NUMA_NODES];
 
 	u64			cpus_seq;
-	u64			node_mask;
-	u64			llc_mask;
 	bool			check_no_idle;
 	u32			perf;
 	u64			refresh_cpus;
@@ -373,6 +371,7 @@ struct layer {
 
 	u32			nr_cpus;
 	u32			nr_llc_cpus[MAX_LLCS];
+	u32			nr_node_cpus[MAX_NUMA_NODES];
 
 	u64			llcs_to_drain;
 	u32			llc_drain_cnt;

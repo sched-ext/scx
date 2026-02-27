@@ -9,7 +9,6 @@ use scx_utils::Core;
 use scx_utils::Topology;
 use serde::Deserialize;
 use serde::Serialize;
-use tracing::debug;
 
 use crate::bpf_intf;
 use crate::CpuPool;
@@ -17,51 +16,67 @@ use crate::LayerSpec;
 
 #[derive(Clone, Debug, PartialEq, Parser, Serialize, Deserialize)]
 #[clap(rename_all = "snake_case")]
+/// Growth algorithms determine the order in which CPUs are allocated to a
+/// layer as it grows.
+///
+/// All algorithms are NUMA-aware. Each produces a per-node core ordering
+/// via `node_order()`, which determines the preferred NUMA node (based on
+/// `nodes` config and pinned task distribution) and the order of remaining
+/// nodes. Within each node, the algorithm determines core selection order.
+/// Cross-node budget distribution is handled by `unified_alloc`.
+///
+/// Algorithms fall into two categories:
+///
+/// **Locality algorithms** prefer the layer's home NUMA node(s) and only
+/// spill to remote nodes when local capacity is exhausted. Most algorithms
+/// are locality algorithms.
+///
+/// **NUMA-spread algorithms** (marked `[spread]` below) enforce equal CPU
+/// counts across all NUMA nodes via `unified_alloc`, capped at the least
+/// available node capacity. Use these when the workload should be balanced
+/// across nodes rather than concentrated on the preferred node. Their
+/// within-node core ordering degenerates to the non-spread equivalent
+/// (e.g. NodeSpread uses Linear ordering within each node) since the
+/// even-split budget handles cross-node distribution.
 pub enum LayerGrowthAlgo {
-    /// Sticky attempts to place layers evenly spaced across cores.
+    /// Evenly space layers across cores within each node.
     Sticky,
-    /// Linear starts with the lowest number CPU and grows towards the total
-    /// number of CPUs.
+    /// Lowest-numbered CPUs first within each node.
     Linear,
-    /// Reverse order of [`LayerGrowthAlgo::Linear`]. Starts with the highest number CPU and grows towards the total
-    /// number of CPUs.
+    /// Highest-numbered CPUs first within each node.
     Reverse,
-    /// Random core selection order.
+    /// Random core selection within each node.
     Random,
-    /// Topo uses the order of the nodes/llcs in the layer config to determine
-    /// the order of CPUs to select when growing a layer. It starts from the
-    /// llcs configuration and then the NUMA configuration for any CPUs not
-    /// specified.
+    /// Follow the `llcs`/`nodes` layer config to determine core order.
+    /// Preferred LLCs first, then remaining LLCs in node order.
     Topo,
-    /// Round Robin attempts to grow to a core in an unpopulated NUMA node else
-    /// an unpopulated LLC. It keeps the load balanced between NUMA and LLCs as
-    /// it continues to grow.
+    /// `[spread]` Interleave cores across LLCs within each node, with
+    /// equal per-node CPU budget.
     RoundRobin,
-    /// BigLittle attempts to first grow across all big cores and then allocates
-    /// onto little cores after all big cores are allocated.
+    /// Big cores first, then little cores within each node.
     BigLittle,
-    /// LittleBig attempts to first grow across all little cores and then
-    /// allocates onto big cores after all little cores are allocated.
+    /// Little cores first, then big cores within each node.
     LittleBig,
-    /// Grab CPUs from NUMA nodes, iteratively, in linear order.
+    /// `[spread]` Linear core order within each node, equal per-node budget.
     NodeSpread,
-    /// Grab CPUs from NUMA nodes, iteratively, in reverse order.
+    /// `[spread]` Reverse core order within each node, equal per-node budget.
     NodeSpreadReverse,
-    /// Grab CPUs from NUMA nodes, iteratively, in random order.
+    /// `[spread]` Random core order within each node, equal per-node budget.
     NodeSpreadRandom,
-    /// Grab CPUs from CpuSets, iteratively, in linear order.
+    /// Interleave cores across CpuSets (CPU affinity groups) in linear order
+    /// within each node. Balances across hardware domains (e.g. cache groups),
+    /// not NUMA nodes.
     CpuSetSpread,
-    /// Grab CPUs from CpuSets, iteratively, in reverse order.
+    /// Interleave cores across CpuSets in reverse order within each node.
     CpuSetSpreadReverse,
-    /// Grab CPUs from CpuSets, iteratively, in random order.
+    /// Interleave cores across CpuSets in random order within each node.
     CpuSetSpreadRandom,
-    /// RandomTopo is sticky to NUMA nodes/LLCs but randomises the order in which
-    /// it visits each. The layer will select a random NUMA node, then a random LLC
-    /// within it, then randomly iterate the cores in that LLC.
+    /// Pick a random NUMA node, then a random LLC within it, then randomly
+    /// iterate cores in that LLC.
     RandomTopo,
-    /// StickyDynamic attempts to assign cores to layers according to their
-    /// size, while remaining sticky to LLCs, and tries to place layers across
-    /// LLC boundary minimizing overlap.
+    /// Assign LLCs to layers proportionally by size, remaining sticky to
+    /// LLCs to preserve cache locality. Per-node LLC ordering ensures
+    /// sticky assignments respect NUMA node boundaries.
     StickyDynamic,
 }
 
@@ -191,7 +206,7 @@ impl LayerGrowthAlgo {
         cpu_pool: &CpuPool,
         layer_specs: &[LayerSpec],
         topo: &Topology,
-    ) -> Result<BTreeMap<usize, Vec<usize>>> {
+    ) -> Result<BTreeMap<usize, Vec<Vec<usize>>>> {
         let mut core_orders = BTreeMap::new();
 
         for (idx, spec) in layer_specs.iter().enumerate() {
@@ -202,7 +217,12 @@ impl LayerGrowthAlgo {
             let core_order = match &spec.cpuset {
                 Some(mask) => core_order
                     .into_iter()
-                    .filter(|cpu| mask.test_cpu(*cpu))
+                    .map(|node_cores| {
+                        node_cores
+                            .into_iter()
+                            .filter(|cpu| mask.test_cpu(*cpu))
+                            .collect()
+                    })
                     .collect(),
                 None => core_order,
             };
@@ -220,7 +240,7 @@ impl LayerGrowthAlgo {
         spec: &LayerSpec,
         layer_idx: usize,
         topo: &Topology,
-    ) -> Result<Vec<usize>> {
+    ) -> Result<Vec<Vec<usize>>> {
         let generator = LayerCoreOrderGenerator {
             cpu_pool,
             layer_specs,
@@ -233,16 +253,19 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::Sticky => generator.grow_sticky(),
             LayerGrowthAlgo::Linear => generator.grow_linear(),
             LayerGrowthAlgo::Reverse => generator.grow_reverse(),
+            // Spread algos degenerate to their per-node equivalents: the
+            // even-split budget from unified_alloc handles cross-node
+            // distribution, so core_order just determines within-node ordering.
             LayerGrowthAlgo::RoundRobin => generator.grow_round_robin(),
             LayerGrowthAlgo::Random => generator.grow_random(),
             LayerGrowthAlgo::BigLittle => generator.grow_big_little(),
             LayerGrowthAlgo::LittleBig => generator.grow_little_big(),
             LayerGrowthAlgo::Topo => generator.grow_topo(),
-            LayerGrowthAlgo::NodeSpread => generator.grow_node_spread(),
-            LayerGrowthAlgo::NodeSpreadReverse => generator.grow_node_spread_reverse(),
-            LayerGrowthAlgo::NodeSpreadRandom => generator.grow_node_spread_random(),
+            LayerGrowthAlgo::NodeSpread => generator.grow_linear(),
+            LayerGrowthAlgo::NodeSpreadReverse => generator.grow_reverse(),
+            LayerGrowthAlgo::NodeSpreadRandom => generator.grow_random(),
             LayerGrowthAlgo::CpuSetSpread => generator.grow_cpuset_spread(),
-            LayerGrowthAlgo::CpuSetSpreadReverse => generator.grow_cpuset_spread_reverse(),
+            LayerGrowthAlgo::CpuSetSpreadReverse => generator.grow_cpuset_spread_inner(false, true),
             LayerGrowthAlgo::CpuSetSpreadRandom => generator.grow_cpuset_spread_random(),
             LayerGrowthAlgo::RandomTopo => generator.grow_random_topo(),
             LayerGrowthAlgo::StickyDynamic => generator.grow_sticky_dynamic(),
@@ -256,6 +279,47 @@ impl Default for LayerGrowthAlgo {
     }
 }
 
+/// Node iteration order: spec_nodes if set (hard limit), otherwise all topo
+/// nodes rotated by layer_idx so that different layers start from different
+/// nodes, with nodes claimed by other layers deprioritized. Used by both
+/// growth algorithms and StickyDynamic's runtime LLC trading.
+pub fn node_order(
+    spec_nodes: &[usize],
+    topo: &Topology,
+    layer_idx: usize,
+    all_layer_nodes: &[&[usize]],
+) -> Vec<usize> {
+    if spec_nodes.is_empty() {
+        let mut nodes: Vec<usize> = topo.nodes.keys().copied().collect();
+        let nr = nodes.len();
+        if nr > 1 {
+            nodes.rotate_left(layer_idx % nr);
+
+            // Build per-node claim-rank vector from other layers' spec_nodes.
+            // claim_rank[node] = [count at pos 0, count at pos 1, ...]
+            let max_rank = all_layer_nodes.iter().map(|ln| ln.len()).max().unwrap_or(0);
+            if max_rank > 0 {
+                let mut claim_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                for (i, ln) in all_layer_nodes.iter().enumerate() {
+                    if i == layer_idx {
+                        continue;
+                    }
+                    for (pos, &node_id) in ln.iter().enumerate() {
+                        claim_rank
+                            .entry(node_id)
+                            .or_insert_with(|| vec![0; max_rank])[pos] += 1;
+                    }
+                }
+                let zero = vec![0; max_rank];
+                nodes.sort_by_key(|n| claim_rank.get(n).unwrap_or(&zero).clone());
+            }
+        }
+        nodes
+    } else {
+        spec_nodes.to_vec()
+    }
+}
+
 struct LayerCoreOrderGenerator<'a> {
     cpu_pool: &'a CpuPool,
     layer_specs: &'a [LayerSpec],
@@ -266,20 +330,39 @@ struct LayerCoreOrderGenerator<'a> {
 }
 
 impl<'a> LayerCoreOrderGenerator<'a> {
-    fn has_topology_preference(&self) -> bool {
-        self.spec.nodes().len() > 0 || self.spec.llcs().len() > 0
+    #[allow(dead_code)]
+
+    fn node_order(&self) -> Vec<usize> {
+        let all: Vec<&[usize]> = self
+            .layer_specs
+            .iter()
+            .map(|s| s.nodes().as_slice())
+            .collect();
+        node_order(self.spec.nodes(), self.topo, self.layer_idx, &all)
     }
 
-    fn rotate_layer_offset(&self, vec: &'a mut Vec<usize>) -> &Vec<usize> {
-        let num_cores = self.topo.all_cores.len();
+    /// Sequential core indices (core_seq) belonging to a given node.
+    fn node_core_seqs(&self, node_id: usize) -> Vec<usize> {
+        let node = &self.topo.nodes[&node_id];
+        node.llcs
+            .values()
+            .flat_map(|llc| llc.cores.values().map(|core| self.cpu_pool.core_seq(core)))
+            .collect()
+    }
+
+    /// Per-node variant of rotate_layer_offset — rotates within a
+    /// node-scoped core vec using node_cores.len() instead of
+    /// all_cores.len().
+    fn rotate_node_layer_offset(&self, vec: &mut Vec<usize>) {
+        if vec.is_empty() {
+            return;
+        }
+        let num_cores = vec.len();
         let chunk = num_cores.div_ceil(self.layer_specs.len());
         vec.rotate_right((chunk * self.layer_idx).min(num_cores));
-        vec
     }
 
-    fn grow_sticky(&self) -> Vec<usize> {
-        let mut core_order = vec![];
-
+    fn grow_sticky(&self) -> Vec<Vec<usize>> {
         let is_left = self.layer_idx % 2 == 0;
         let rot_by = |layer_idx, len| -> usize {
             if layer_idx <= len {
@@ -289,12 +372,13 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             }
         };
 
-        for i in 0..self.topo.all_cores.len() {
-            core_order.push(i);
-        }
-        self.rotate_layer_offset(&mut core_order);
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let mut core_order = self.node_core_seqs(node_id);
+            self.rotate_node_layer_offset(&mut core_order);
 
-        for node in self.topo.nodes.values() {
+            let node = &self.topo.nodes[&node_id];
             for llc in node.llcs.values() {
                 let llc_cores = llc.cores.len();
                 let rot = rot_by(llc_cores + (self.layer_idx << 1), llc_cores);
@@ -304,251 +388,233 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                     core_order.rotate_right(rot);
                 }
             }
+            result[node_id] = core_order;
         }
-
-        core_order
+        result
     }
 
-    fn grow_linear(&self) -> Vec<usize> {
-        let mut order = (0..self.topo.all_cores.len()).collect::<Vec<usize>>();
-        // Only rotate if no LLC/node preferences - preserve topology order otherwise
-        if !self.has_topology_preference() {
-            self.rotate_layer_offset(&mut order);
+    fn grow_linear(&self) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let mut order = self.node_core_seqs(node_id);
+            // Rotate layers to different starting cores within each node so
+            // they don't all compete for the same cores first.  Skip when LLCs
+            // are explicitly specified — the user chose a particular intra-node
+            // ordering.  Node preferences are fine — node_order() already
+            // handles those and rotation is orthogonal.
+            if self.spec.llcs().is_empty() {
+                self.rotate_node_layer_offset(&mut order);
+            }
+            result[node_id] = order;
         }
-        order
+        result
     }
 
-    fn grow_reverse(&self) -> Vec<usize> {
-        let mut cores = self.grow_linear();
-        cores.reverse();
-        cores
+    fn grow_reverse(&self) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let mut order = self.node_core_seqs(node_id);
+            // See grow_linear() for why we skip rotation when LLCs are set.
+            if self.spec.llcs().is_empty() {
+                self.rotate_node_layer_offset(&mut order);
+            }
+            order.reverse();
+            result[node_id] = order;
+        }
+        result
     }
 
-    fn grow_round_robin(&self) -> Vec<usize> {
+    /// Per-node LLC interleaving: within each node (in node_order),
+    /// interleave cores across the node's LLCs. Cross-node distribution
+    /// is handled by the even-split budget from unified_alloc.
+    fn grow_round_robin(&self) -> Vec<Vec<usize>> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
 
-        let mut nodes: Vec<_> = self.topo.nodes.values().collect();
-        fastrand::shuffle(&mut nodes);
+        for node_id in self.node_order() {
+            let node = &self.topo.nodes[&node_id];
+            let mut llcs: Vec<_> = node.llcs.values().collect();
+            fastrand::shuffle(&mut llcs);
 
-        let interleaved_llcs = IteratorInterleaver::new(
-            nodes
-                .iter()
-                .map(|n| {
-                    let mut llcs: Vec<_> = n.llcs.values().collect();
-                    fastrand::shuffle(&mut llcs);
-                    llcs.into_iter()
-                })
-                .collect(),
-        );
-
-        IteratorInterleaver::new(
-            interleaved_llcs
-                .map(|llc| {
-                    let mut cores: Vec<_> = llc.cores.values().collect();
-                    fastrand::shuffle(&mut cores);
-                    cores.into_iter()
-                })
-                .collect(),
-        )
-        .map(|core| self.cpu_pool.get_core_topological_id(core))
-        .collect()
+            let interleaved: Vec<usize> = IteratorInterleaver::new(
+                llcs.iter()
+                    .map(|llc| {
+                        let mut cores: Vec<_> = llc.cores.values().collect();
+                        fastrand::shuffle(&mut cores);
+                        cores.into_iter()
+                    })
+                    .collect(),
+            )
+            .map(|core| self.cpu_pool.core_seq(core))
+            .collect();
+            result[node_id] = interleaved;
+        }
+        result
     }
 
-    fn grow_random(&self) -> Vec<usize> {
-        let mut core_order = self.grow_linear();
+    fn grow_random(&self) -> Vec<Vec<usize>> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
-        fastrand::shuffle(&mut core_order);
-        core_order
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let mut order = self.node_core_seqs(node_id);
+            fastrand::shuffle(&mut order);
+            result[node_id] = order;
+        }
+        result
     }
 
-    fn grow_big_little(&self) -> Vec<usize> {
-        let mut cores: Vec<&Arc<Core>> = self.topo.all_cores.values().collect();
-        cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
-        cores
-            .into_iter()
-            .map(|core| self.cpu_pool.get_core_topological_id(core))
-            .collect()
-    }
-
-    fn grow_node_spread_inner(&self, make_random: bool) -> Vec<usize> {
-        let mut cores: Vec<usize> = Vec::new();
-        let mut node_core_vecs: Vec<Vec<usize>> = Vec::new();
-        let mut max_node_cpus: usize = 0;
-
-        for (node_id, node) in self.topo.nodes.iter() {
-            let flat_node_vec: Vec<usize> = node
-                .llcs
-                .iter()
-                .flat_map(|(llc_id, llc)| {
-                    llc.cores
-                        .iter()
-                        .map(|(core_id, core)| {
-                            // this debug information is important.
-                            for (cpu_id, _) in core.cpus.iter() {
-                                debug!(
-                                    "NODE_ID: {} LLC_ID: {} CORE_ID: {} CPU_ID: {}",
-                                    node_id, llc_id, core_id, cpu_id
-                                );
-                            }
-                            core_id.clone()
-                        })
-                        .collect::<Vec<usize>>()
-                })
+    fn grow_big_little(&self) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let node = &self.topo.nodes[&node_id];
+            let mut cores: Vec<&Arc<Core>> = node.all_cores.values().collect();
+            cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
+            result[node_id] = cores
+                .into_iter()
+                .map(|core| self.cpu_pool.core_seq(core))
                 .collect();
-            max_node_cpus = std::cmp::max(flat_node_vec.len(), max_node_cpus);
-            node_core_vecs.push(flat_node_vec.clone());
         }
+        result
+    }
 
-        if make_random {
-            for mut core_vec in &mut node_core_vecs {
-                fastrand::shuffle(&mut core_vec);
-            }
-        }
+    /// Spread across cpusets (CPU affinity groups), not NUMA nodes. Interleaves
+    /// cores from different cpusets within each node so the layer's allocation
+    /// is balanced across hardware domains (e.g., different cache groups).
+    /// Rotation is per-node to match grow_linear — under per-node allocation,
+    /// each node's cores are allocated independently.
+    fn grow_cpuset_spread_inner(&self, make_random: bool, reverse: bool) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let node_cores: BTreeSet<usize> = self.node_core_seqs(node_id).into_iter().collect();
 
-        for i in 0..=max_node_cpus {
-            for sub_vec in node_core_vecs.iter() {
-                if i < sub_vec.len() {
-                    cores.push(sub_vec[i]);
+            // Filter each cpuset to cores within this node.
+            let mut cpuset_core_vecs: Vec<Vec<usize>> = self
+                .cpusets
+                .iter()
+                .map(|cs| {
+                    cs.cores
+                        .iter()
+                        .filter(|c| node_cores.contains(c))
+                        .copied()
+                        .collect()
+                })
+                .filter(|v: &Vec<usize>| !v.is_empty())
+                .collect();
+
+            if make_random {
+                for v in &mut cpuset_core_vecs {
+                    fastrand::shuffle(v);
                 }
             }
-        }
-        self.rotate_layer_offset(&mut cores);
-        cores
-    }
 
-    fn grow_node_spread_reverse(&self) -> Vec<usize> {
-        let mut cores = self.grow_node_spread();
-        cores.reverse();
-        cores
-    }
-
-    fn grow_node_spread(&self) -> Vec<usize> {
-        return self.grow_node_spread_inner(false);
-    }
-
-    fn grow_node_spread_random(&self) -> Vec<usize> {
-        return self.grow_node_spread_inner(true);
-    }
-
-    fn grow_cpuset_spread_inner(&self, make_random: bool) -> Vec<usize> {
-        let mut cores: Vec<usize> = Vec::new();
-        let mut cpuset_core_vecs: Vec<Vec<&usize>> = Vec::new();
-        let mut max_cpuset_cores: usize = 0;
-
-        for cpuset in self.cpusets {
-            max_cpuset_cores = std::cmp::max(cpuset_core_vecs.len(), max_cpuset_cores);
-            let cpuset_core_vec: Vec<&usize> = cpuset.cores.iter().map(|x| x).collect();
-            cpuset_core_vecs.push(cpuset_core_vec);
-        }
-
-        if make_random {
-            for mut core_vec in &mut cpuset_core_vecs {
-                fastrand::shuffle(&mut core_vec);
-            }
-        }
-
-        for i in 0..=max_cpuset_cores {
-            for sub_vec in cpuset_core_vecs.iter() {
-                if i < sub_vec.len() {
-                    cores.push(*sub_vec[i]);
-                }
-            }
-        }
-
-        self.rotate_layer_offset(&mut cores);
-        cores
-    }
-
-    fn grow_cpuset_spread_reverse(&self) -> Vec<usize> {
-        let mut cores = self.grow_cpuset_spread();
-        cores.reverse();
-        cores
-    }
-
-    fn grow_cpuset_spread(&self) -> Vec<usize> {
-        return self.grow_cpuset_spread_inner(false);
-    }
-
-    fn grow_cpuset_spread_random(&self) -> Vec<usize> {
-        return self.grow_cpuset_spread_inner(true);
-    }
-
-    fn grow_little_big(&self) -> Vec<usize> {
-        let mut cores = self.grow_big_little();
-        cores.reverse();
-        cores
-    }
-
-    fn grow_topo(&self) -> Vec<usize> {
-        let spec_nodes = self.spec.nodes();
-        let spec_llcs = self.spec.llcs();
-        let topo_nodes = &self.topo.nodes;
-
-        if spec_nodes.len() + spec_llcs.len() == 0 {
-            self.grow_round_robin()
-        } else {
-            let mut core_order = vec![];
-            let mut core_id = 0;
-            spec_llcs.iter().for_each(|spec_llc| {
-                core_id = 0;
-                topo_nodes.values().for_each(|topo_node| {
-                    topo_node.all_cores.values().for_each(|core| {
-                        if core.llc_id != *spec_llc {
-                            core_id += 1;
-                            return;
-                        }
-                        if !core_order.contains(&core_id) {
-                            core_order.push(core_id);
-                        }
-                        core_id += 1;
-                    });
-                });
-            });
-            spec_nodes.iter().for_each(|spec_node| {
-                core_id = 0;
-                topo_nodes.values().for_each(|topo_node| {
-                    if topo_node.id != *spec_node {
-                        core_id += topo_node.all_cores.len();
-                        return;
+            // Interleave within this node's cpuset portions.
+            let max_len = cpuset_core_vecs.iter().map(|v| v.len()).max().unwrap_or(0);
+            let mut node_result = Vec::new();
+            for i in 0..max_len {
+                for sub_vec in cpuset_core_vecs.iter() {
+                    if i < sub_vec.len() {
+                        node_result.push(sub_vec[i]);
                     }
-                    topo_node.all_cores.values().for_each(|_core| {
-                        if !core_order.contains(&core_id) {
-                            core_order.push(core_id);
-                        }
-                        core_id += 1;
-                    });
-                });
-            });
-            // Don't rotate when LLC/node preferences are specified - preserve the
-            // explicit topology order built above to respect LLC/node affinity
-            // self.rotate_layer_offset(&mut core_order);
-            core_order
+                }
+            }
+            if reverse {
+                node_result.reverse();
+            }
+            self.rotate_node_layer_offset(&mut node_result);
+            result[node_id] = node_result;
         }
+        result
     }
 
-    fn grow_random_topo(&self) -> Vec<usize> {
+    fn grow_cpuset_spread(&self) -> Vec<Vec<usize>> {
+        self.grow_cpuset_spread_inner(false, false)
+    }
+
+    fn grow_cpuset_spread_random(&self) -> Vec<Vec<usize>> {
+        self.grow_cpuset_spread_inner(true, false)
+    }
+
+    fn grow_little_big(&self) -> Vec<Vec<usize>> {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let node = &self.topo.nodes[&node_id];
+            let mut cores: Vec<&Arc<Core>> = node.all_cores.values().collect();
+            cores.sort_by(|a, b| b.core_type.cmp(&a.core_type));
+            result[node_id] = cores
+                .into_iter()
+                .map(|core| self.cpu_pool.core_seq(core))
+                .collect();
+        }
+        result
+    }
+
+    /// Linear with LLC preference: within each node, cores from spec_llcs come
+    /// first, then remaining cores. Cross-node prioritization is handled by
+    /// node_order() and unified_alloc (spec_nodes feeds into node_order). With
+    /// no spec_llcs or spec_nodes, falls back to RoundRobin.
+    fn grow_topo(&self) -> Vec<Vec<usize>> {
+        let spec_llcs = self.spec.llcs();
+
+        if spec_llcs.is_empty() && self.spec.nodes().is_empty() {
+            return self.grow_round_robin();
+        }
+
+        let spec_llc_set: BTreeSet<usize> = spec_llcs.iter().copied().collect();
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let node = &self.topo.nodes[&node_id];
+            // Preferred LLC cores first, then the rest.
+            let mut preferred = Vec::new();
+            let mut rest = Vec::new();
+            for llc in node.llcs.values() {
+                let cores: Vec<usize> = llc
+                    .cores
+                    .values()
+                    .map(|core| self.cpu_pool.core_seq(core))
+                    .collect();
+                if spec_llc_set.contains(&llc.id) {
+                    preferred.extend(cores);
+                } else {
+                    rest.extend(cores);
+                }
+            }
+            preferred.extend(rest);
+            // No rotation — preserve explicit topology preference ordering.
+            result[node_id] = preferred;
+        }
+        result
+    }
+
+    /// Random with LLC grouping: within each node, randomly shuffles LLCs
+    /// then randomly shuffles cores within each LLC, keeping LLC-adjacent
+    /// cores together for cache locality. Cross-node ordering is handled by
+    /// node_order() and unified_alloc.
+    fn grow_random_topo(&self) -> Vec<Vec<usize>> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
-
-        let mut nodes: Vec<_> = self.topo.nodes.values().collect();
-        fastrand::shuffle(&mut nodes);
-
-        nodes
-            .into_iter()
-            .flat_map(|node| {
-                let mut llcs: Vec<_> = node.llcs.values().collect();
-                fastrand::shuffle(&mut llcs);
-                llcs.into_iter()
-            })
-            .flat_map(|llc| {
+        let nr_nodes = self.topo.nodes.len();
+        let mut result = vec![Vec::new(); nr_nodes];
+        for node_id in self.node_order() {
+            let node = &self.topo.nodes[&node_id];
+            let mut llcs: Vec<_> = node.llcs.values().collect();
+            fastrand::shuffle(&mut llcs);
+            for llc in llcs {
                 let mut cores: Vec<_> = llc.cores.values().collect();
                 fastrand::shuffle(&mut cores);
-                cores.into_iter()
-            })
-            .map(|c| self.cpu_pool.get_core_topological_id(c))
-            .collect()
+                result[node_id].extend(cores.into_iter().map(|c| self.cpu_pool.core_seq(c)));
+            }
+        }
+        result
     }
 
-    fn grow_sticky_dynamic(&self) -> Vec<usize> {
+    fn grow_sticky_dynamic(&self) -> Vec<Vec<usize>> {
         self.grow_sticky()
     }
 }
@@ -599,5 +665,295 @@ where
                 self.next()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CpuPool;
+    use scx_utils::testutils::make_test_topo;
+    use std::sync::Arc;
+
+    fn topo_1n() -> Arc<Topology> {
+        let (topo, _) = make_test_topo(1, 2, 4, 2);
+        Arc::new(topo)
+    }
+
+    fn topo_2n() -> Arc<Topology> {
+        let (topo, _) = make_test_topo(2, 2, 4, 2);
+        Arc::new(topo)
+    }
+
+    fn test_spec(algo: LayerGrowthAlgo) -> LayerSpec {
+        let json = r#"{"name":"_","matches":[],"kind":{"Confined":{"util_range":[0.0,1.0]}}}"#;
+        let mut spec: LayerSpec = serde_json::from_str(json).unwrap();
+        spec.kind.common_mut().growth_algo = algo;
+        spec
+    }
+
+    fn test_spec_with_nodes(algo: LayerGrowthAlgo, nodes: Vec<usize>) -> LayerSpec {
+        let mut spec = test_spec(algo);
+        *spec.nodes_mut() = nodes;
+        spec
+    }
+
+    fn make_generator<'a>(
+        cpu_pool: &'a CpuPool,
+        specs: &'a [LayerSpec],
+        spec: &'a LayerSpec,
+        layer_idx: usize,
+        topo: &'a Topology,
+        cpusets: &'a BTreeSet<CpuSet>,
+    ) -> LayerCoreOrderGenerator<'a> {
+        LayerCoreOrderGenerator {
+            cpu_pool,
+            layer_specs: specs,
+            spec,
+            layer_idx,
+            topo,
+            cpusets,
+        }
+    }
+
+    // --- node_order ---
+
+    #[test]
+    fn test_node_order_1n_default() {
+        let topo = topo_1n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![0]);
+    }
+
+    #[test]
+    fn test_node_order_2n_default() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_node_order_2n_with_spec_reversed() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1, 0])];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_2n_with_spec_partial() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        // Spec only mentions node 1; hard limit, no appending.
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1])];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1]);
+    }
+
+    fn topo_4n() -> Arc<Topology> {
+        let (topo, _) = make_test_topo(4, 2, 4, 2);
+        Arc::new(topo)
+    }
+
+    #[test]
+    fn test_node_order_2n_rotated() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 1, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_4n_rotated() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 2, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![2, 3, 0, 1]);
+    }
+
+    #[test]
+    fn test_node_order_4n_wraps() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        // layer_idx=5, 5 % 4 = 1
+        let gen = make_generator(&pool, &specs, &specs[0], 5, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn test_node_order_spec_not_rotated() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1, 0])];
+        let cpusets = BTreeSet::new();
+        // Even with layer_idx=1, spec_nodes should be returned unchanged.
+        let gen = make_generator(&pool, &specs, &specs[0], 1, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_2n_deprioritize() {
+        // 2N: L0 pinned to [0], L1 unpinned (idx=1).
+        // Rotation: [1, 0]. N0 has 1st-choice claim → goes last.
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0]),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_4n_deprioritize_ranked() {
+        // 4N: L0 nodes=[0,1], L1 nodes=[2], L2 unpinned (idx=2).
+        // Rotation (idx=2): [2,3,0,1].
+        // Claim vectors: N0=[1,0], N1=[0,1], N2=[1,0], N3=[0,0].
+        // Stable sort: N3=[0,0] < N1=[0,1] < N2=[1,0], N0=[1,0].
+        // Rotation tiebreak: 2 before 0 in rotated order → result: [3, 1, 2, 0].
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0, 1]),
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![2]),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![3, 1, 2, 0]);
+    }
+
+    #[test]
+    fn test_node_order_4n_deprioritize_double_claim() {
+        // 4N: L0 nodes=[0], L1 nodes=[0], L2 unpinned (idx=2), L3 unpinned.
+        // N0 has two 1st-choice claims: [2]. Others: [0].
+        // Rotation (idx=2): [2,3,0,1].
+        // Stable sort: [0] < [0] < [0] < [2] → [2,3,1,0].
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0]),
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0]),
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![2, 3, 1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_no_claims_equals_rotation() {
+        // 4N: all unpinned. No claims → pure rotation.
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 2, 3, 0]);
+    }
+
+    // --- node_core_seqs ---
+
+    #[test]
+    fn test_node_core_seqs_1n() {
+        let topo = topo_1n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        // 1N has 8 cores: all in node 0.
+        let ids = gen.node_core_seqs(0);
+        assert_eq!(ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_node_core_seqs_2n_partitions() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        let node0 = gen.node_core_seqs(0);
+        let node1 = gen.node_core_seqs(1);
+
+        // Node 0: cores 0-7, Node 1: cores 8-15.
+        assert_eq!(node0, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(node1, vec![8, 9, 10, 11, 12, 13, 14, 15]);
+
+        // Together should be all 16 cores.
+        let mut all: Vec<usize> = node0.into_iter().chain(node1).collect();
+        all.sort();
+        assert_eq!(all, (0..16).collect::<Vec<_>>());
+    }
+
+    // --- rotate_node_layer_offset ---
+
+    #[test]
+    fn test_rotate_node_layer_offset_single_layer() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        // With 1 layer, chunk = 8, offset = 0 → no rotation.
+        let mut v = vec![0, 1, 2, 3, 4, 5, 6, 7];
+        gen.rotate_node_layer_offset(&mut v);
+        assert_eq!(v, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_rotate_node_layer_offset_multi_layer() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+
+        // Layer idx=1, 2 layers, 8 cores in node → chunk = ceil(8/2) = 4.
+        // rotate_right(4).
+        let mut v = vec![0, 1, 2, 3, 4, 5, 6, 7];
+        gen.rotate_node_layer_offset(&mut v);
+        assert_eq!(v, vec![4, 5, 6, 7, 0, 1, 2, 3]);
     }
 }

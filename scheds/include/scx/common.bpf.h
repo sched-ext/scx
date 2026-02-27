@@ -299,6 +299,50 @@ BPF_PROG(name, ##args)
 })
 #endif /* ARRAY_ELEM_PTR */
 
+/**
+ * __sink - Hide @expr's value from the compiler and BPF verifier
+ * @expr: The expression whose value should be opacified
+ *
+ * No-op at runtime. The empty inline assembly with a read-write constraint
+ * ("+g") has two effects at compile/verify time:
+ *
+ * 1. Compiler: treats @expr as both read and written, preventing dead-code
+ *    elimination and keeping @expr (and any side effects that produced it)
+ *    alive.
+ *
+ * 2. BPF verifier: forgets the precise value/range of @expr ("makes it
+ *    imprecise"). The verifier normally tracks exact ranges for every register
+ *    and stack slot. While useful, precision means each distinct value creates a
+ *    separate verifier state. Inside loops this leads to state explosion - each
+ *    iteration carries different precise values so states never merge and the
+ *    verifier explores every iteration individually.
+ *
+ * Example - preventing loop state explosion::
+ *
+ *     u32 nr_intersects = 0, nr_covered = 0;
+ *     __sink(nr_intersects);
+ *     __sink(nr_covered);
+ *     bpf_for(i, 0, nr_nodes) {
+ *         if (intersects(cpumask, node_mask[i]))
+ *             nr_intersects++;
+ *         if (covers(cpumask, node_mask[i]))
+ *             nr_covered++;
+ *     }
+ *
+ * Without __sink(), the verifier tracks every possible (nr_intersects,
+ * nr_covered) pair across iterations, causing "BPF program is too large". With
+ * __sink(), the values become unknown scalars so all iterations collapse into
+ * one reusable state.
+ *
+ * Example - keeping a reference alive::
+ *
+ *     struct task_struct *t = bpf_task_acquire(task);
+ *     __sink(t);
+ *
+ * Follows the convention from BPF selftests (bpf_misc.h).
+ */
+#define __sink(expr) asm volatile ("" : "+g"(expr))
+
 /*
  * BPF declarations and helpers
  */
@@ -756,10 +800,13 @@ static inline u64 __sqrt_u64(u64 x)
  */
 static inline int ctzll(u64 v)
 {
-#ifdef __SCX_TARGET_ARCH_x86
+#if (!defined(__BPF__) && defined(__SCX_TARGET_ARCH_x86)) || \
+	(defined(__BPF__) && defined(__clang_major__) && __clang_major__ >= 19)
 	/*
-	 * If the target architecture and tool chains support ctzll,
-	 * let's use a single instruction.
+	 * Use the ctz builtin when: (1) building for native x86, or
+	 * (2) building for BPF with clang >= 19 (BPF backend supports
+	 * the intrinsic from clang 19 onward; earlier versions hit
+	 * "unimplemented opcode" in the backend).
 	 */
 	return __builtin_ctzll(v);
 #else

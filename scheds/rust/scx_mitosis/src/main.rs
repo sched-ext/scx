@@ -5,6 +5,7 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+mod mitosis_topology_utils;
 mod stats;
 
 use std::cmp::max;
@@ -107,12 +108,6 @@ struct Opts {
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     exiting_task_workaround: bool,
 
-    /// Split vtime updates between running() and stopping() instead of unifying them in stopping().
-    /// Enabling this flag restores the legacy behavior of vtime updates, which we've observed to
-    /// cause "vtime too far ahead" errors.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    split_vtime_updates: bool,
-
     /// Disable SCX cgroup callbacks (for when CPU cgroup controller is disabled).
     /// Uses tracepoints and cgroup iteration instead.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -122,6 +117,15 @@ struct Opts {
     /// By default, these tasks are allowed but may have degraded performance.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     reject_multicpu_pinning: bool,
+
+    /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
+    /// to use LLC-aware scheduling.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_llc_awareness: bool,
+
+    /// Enable work stealing. This is only relevant when LLC-awareness is enabled.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_work_stealing: bool,
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
@@ -162,6 +166,7 @@ struct DistributionStats {
     cpu_q_pct: f64,
     cell_q_pct: f64,
     affn_viol_pct: f64,
+    steal_pct: f64,
 
     // for formatting
     global_queue_decisions: u64,
@@ -183,21 +188,34 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}% S:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
             self.cpu_q_pct,
             self.cell_q_pct,
             self.affn_viol_pct,
+            self.steal_pct,
             width = descisions_width,
         )
     }
 }
 
 impl<'a> Scheduler<'a> {
+    fn validate_args(opts: &Opts) -> Result<()> {
+        if opts.enable_work_stealing && !opts.enable_llc_awareness {
+            bail!("Work stealing requires LLC-aware mode (--enable-llc-awareness)");
+        }
+
+        Ok(())
+    }
+
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        Self::validate_args(opts)?;
+
         let topology = Topology::new()?;
+
+        let nr_llc = topology.all_llcs.len().max(1);
 
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
@@ -214,35 +232,41 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.maps.rodata_data.as_mut().unwrap().slice_ns = scx_enums.SCX_SLICE_DFL;
-        skel.maps.rodata_data.as_mut().unwrap().debug_events_enabled = opts.debug_events;
-        skel.maps
-            .rodata_data
-            .as_mut()
-            .unwrap()
-            .exiting_task_workaround_enabled = opts.exiting_task_workaround;
-        skel.maps.rodata_data.as_mut().unwrap().split_vtime_updates = opts.split_vtime_updates;
-        skel.maps
-            .rodata_data
-            .as_mut()
-            .unwrap()
-            .cpu_controller_disabled = opts.cpu_controller_disabled;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
 
-        skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
+        rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
+        rodata.debug_events_enabled = opts.debug_events;
+        rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
+        rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
+
+        rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
-            skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
+            rodata.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        skel.maps
-            .rodata_data
-            .as_mut()
-            .unwrap()
-            .reject_multicpu_pinning = opts.reject_multicpu_pinning;
+        rodata.reject_multicpu_pinning = opts.reject_multicpu_pinning;
+
+        // Set nr_llc in rodata
+        rodata.nr_llc = nr_llc as u32;
+        rodata.enable_llc_awareness = opts.enable_llc_awareness;
+        rodata.enable_work_stealing = opts.enable_work_stealing;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
             v => skel.struct_ops.mitosis_mut().flags |= v,
         }
+
+        // Populate LLC topology arrays before load (data section is only writable before load)
+        mitosis_topology_utils::populate_topology_maps(
+            &mut skel,
+            mitosis_topology_utils::MapKind::CpuToLLC,
+            None,
+        )?;
+        mitosis_topology_utils::populate_topology_maps(
+            &mut skel,
+            mitosis_topology_utils::MapKind::LLCToCpus,
+            None,
+        )?;
 
         let skel = scx_ops_load!(skel, mitosis, uei)?;
 
@@ -291,6 +315,7 @@ impl<'a> Scheduler<'a> {
         global_queue_decisions: u64,
         scope_queue_decisions: u64,
         scope_affn_viols: u64,
+        scope_steals: u64,
     ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
@@ -315,6 +340,12 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_affn_viols as f64) / (scope_queue_decisions as f64)
         };
 
+        let steal_pct = if scope_queue_decisions == 0 {
+            0.0
+        } else {
+            100.0 * (scope_steals as f64) / (scope_queue_decisions as f64)
+        };
+
         const EXPECTED_QUEUES: usize = 3;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
@@ -331,6 +362,7 @@ impl<'a> Scheduler<'a> {
             cpu_q_pct: queue_pct[1],
             cell_q_pct: queue_pct[2],
             affn_viol_pct: affinity_violations_percent,
+            steal_pct,
             global_queue_decisions,
         });
     }
@@ -357,12 +389,19 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize])
             .sum::<u64>();
 
+        // Sum steals over all cells
+        let scope_steals: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_STEAL as usize])
+            .sum::<u64>();
+
         // Special case where the number of scope decisions == number global decisions
         let stats = self.calculate_distribution_stats(
             &queue_counts,
             global_queue_decisions,
             global_queue_decisions,
             scope_affn_viols,
+            scope_steals,
         )?;
 
         self.metrics.update(&stats);
@@ -403,11 +442,16 @@ impl<'a> Scheduler<'a> {
             let scope_affn_viols: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
 
+            // Steals for this cell
+            let scope_steals: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_STEAL as usize];
+
             let stats = self.calculate_distribution_stats(
                 &queue_counts,
                 global_queue_decisions,
                 cell_queue_decisions,
                 scope_affn_viols,
+                scope_steals,
             )?;
 
             self.metrics

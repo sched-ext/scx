@@ -194,6 +194,12 @@ struct Opts {
     #[clap(long = "enable-cpu-bw", action = clap::ArgAction::SetTrue)]
     enable_cpu_bw: bool,
 
+    /// If specified, only tasks which have their scheduling policy set to
+    /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
+    /// tasks are switched.
+    #[clap(long = "partial", action = clap::ArgAction::SetTrue)]
+    partial: bool,
+
     ///
     /// Disable core compaction so the scheduler uses all the online CPUs.
     /// The core compaction attempts to minimize the number of actively used
@@ -655,6 +661,10 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
+
+        if opts.partial {
+            skel.struct_ops.lavd_ops_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+        }
     }
 
     fn get_msg_seq_id() -> u64 {
@@ -698,25 +708,25 @@ impl<'a> Scheduler<'a> {
             suggested_cpu_id: tx.suggested_cpu_id,
             waker_pid: tx.waker_pid,
             waker_comm: waker_comm.into(),
-            slice: tx.slice,
+            slice_wall: tx.slice_wall,
             lat_cri: tx.lat_cri,
             avg_lat_cri: tx.avg_lat_cri,
             static_prio: tx.static_prio,
-            rerunnable_interval: tx.rerunnable_interval,
-            resched_interval: tx.resched_interval,
+            rerunnable_interval_wall: tx.rerunnable_interval_wall,
+            resched_interval_wall: tx.resched_interval_wall,
             run_freq: tx.run_freq,
-            avg_runtime: tx.avg_runtime,
+            avg_runtime_wall: tx.avg_runtime_wall,
             wait_freq: tx.wait_freq,
             wake_freq: tx.wake_freq,
             perf_cri: tx.perf_cri,
             thr_perf_cri: tx.thr_perf_cri,
             cpuperf_cur: tx.cpuperf_cur,
-            cpu_util: tx.cpu_util,
-            cpu_sutil: tx.cpu_sutil,
+            cpu_util_wall: tx.cpu_util_wall,
+            cpu_util_invr: tx.cpu_util_invr,
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
-            slice_used: tx.last_slice_used,
+            slice_used_wall: tx.last_slice_used_wall,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,
             Err(e) => panic!("failed to send on intrspc_tx ({})", e),

@@ -21,7 +21,6 @@ extern u32			default_big_core_scale;
 
 int init_autopilot_caps(void);
 int update_autopilot_high_cap(void);
-u64 scale_cap_max_freq(u64 dur, s32 cpu);
 
 int reset_cpuperf_target(struct cpu_ctx *cpuc);
 int update_cpuperf_target(struct cpu_ctx *cpuc);
@@ -33,17 +32,19 @@ u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc);
 const volatile u16 *get_cpu_order(void);
 void update_effective_capacity(struct cpu_ctx *cpuc);
 
-static __inline u64 scale_cap_freq(u64 dur, struct cpu_ctx *cpuc)
+u64 conv_wall_to_invr_max_freq(u64 dur, s32 cpu);
+
+static __inline u64 conv_wall_to_invr(u64 duration_wall, struct cpu_ctx *cpuc)
 {
-	u64 cap, freq, scaled_dur;
+	u64 cap, freq, duration_invr;
 	s32 cpu;
 
 	if (!cpuc)
-		return dur;
+		return duration_wall;
 
 	cpu = cpuc->cpu_id;
 	if (cpu < 0 || cpu >= nr_cpu_ids)
-		return dur;
+		return duration_wall;
 
 	/*
 	 * Scale the duration by CPU capacity and frequency, so calculate
@@ -51,7 +52,7 @@ static __inline u64 scale_cap_freq(u64 dur, struct cpu_ctx *cpuc)
 	 */
 	cap = get_cpuperf_cap(cpu);
 	freq = scx_bpf_cpuperf_cur(cpu);
-	scaled_dur = (dur * cap * freq) >> (LAVD_SHIFT * 2);
+	duration_invr = (duration_wall * cap * freq) >> (LAVD_SHIFT * 2);
 
 	/*
 	 * Keep track of the maximum frequency observed on this CPU.
@@ -60,5 +61,5 @@ static __inline u64 scale_cap_freq(u64 dur, struct cpu_ctx *cpuc)
 	if (freq > READ_ONCE(cpuc->max_freq_observed))
 		WRITE_ONCE(cpuc->max_freq_observed, freq);
 
-	return scaled_dur;
+	return duration_invr;
 }

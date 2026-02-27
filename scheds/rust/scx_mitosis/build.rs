@@ -6,7 +6,7 @@
 fn main() {
     scx_cargo::BpfBuilder::new()
         .unwrap()
-        .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
+        .enable_intf("src/bpf/intf_rust.h", "bpf_intf.rs")
         .enable_skel("src/bpf/mitosis.bpf.c", "bpf")
         .build()
         .unwrap();

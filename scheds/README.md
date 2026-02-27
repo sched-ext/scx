@@ -20,16 +20,20 @@ of schedulers:
 
 - [`rust`](rust/README.md) describes all of the schedulers with `Rust`
   user space components.
-- [`c`](c/README.md) describes all of the schedulers with `C` user space
-  components.
 
-## Note on syncing
 
-Note that there is a [`sync-to-kernel.sh`](sync-to-kernel.sh) script in this
-directory. This is used to sync any changes to the specific schedulers
-with the Linux kernel tree. If you've made any changes to a scheduler in please
-use the script to synchronize with the `sched_ext` Linux kernel tree:
+# Note on C schedulers
 
-```shell
-$ ./sync-to-kernel.sh /path/to/kernel/tree
-```
+This directory previously also held C schedulers for illustration purposes. These
+schedulers are now found only in the Linux kernel repository in
+[`tools/sched_ext`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/sched_ext).
+Each C scheduler's purpose was to demonstrate a single technique for development,
+often BPF-related. The C schedulers were kept synced between upstream and this
+repository.
+
+As the ecosystem has matured these schedulers have been superseded by those in the
+`rust/` directory, many of which are production-ready. These schedulers better represent
+modern `sched_ext` codebases and are a more appropriate starting point for newcomers.
+The build system and surrouding crates ecosystem is also geared towards Rust schedulers.
+As a result, the C schedulers are no longer mirrored here and are only available
+from the kernel source.

@@ -987,14 +987,12 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	 * more than USERSCHED_TIMER_NS.
 	 */
 	if (time_delta(scx_bpf_now(), usersched_last_run_at) >= USERSCHED_TIMER_NS) {
-		bpf_rcu_read_lock();
 		p = bpf_task_from_pid(usersched_pid);
 		if (p) {
 			set_usersched_needed();
 			scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
 			bpf_task_release(p);
 		}
-		bpf_rcu_read_unlock();
 	}
 
 	/* Re-arm the timer */
@@ -1034,16 +1032,10 @@ static int usersched_timer_init(void)
 static s32 get_nr_online_cpus(void)
 {
 	const struct cpumask *online_cpumask;
-	int i, cpus = 0;
+	s32 cpus = 0;
 
 	online_cpumask = scx_bpf_get_online_cpumask();
-
-	bpf_for(i, 0, nr_cpu_ids) {
-		if (!bpf_cpumask_test_cpu(i, online_cpumask))
-			continue;
-		cpus++;
-	}
-
+	cpus = bpf_cpumask_weight(online_cpumask);
 	scx_bpf_put_cpumask(online_cpumask);
 
 	return cpus;
