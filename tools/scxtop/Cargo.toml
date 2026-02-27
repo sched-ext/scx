@@ -24,7 +24,7 @@ clap_complete = "4.5.45"
 crossterm = { version = "0.28.1", features = ["serde", "event-stream"] }
 futures = "0.3.31"
 glob = "0.3.2"
-libbpf-rs = "=0.26.0"
+libbpf-rs = "=0.26.1"
 libc = "0.2.175"
 log = "0.4.17"
 num-format = { version = "0.4.3", features = ["with-serde", "with-system-locale"] }

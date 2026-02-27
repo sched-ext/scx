@@ -7,7 +7,7 @@ license = "GPL-2.0-only"
 
 [dependencies]
 anyhow = "1.0.65"
-libbpf-rs = "=0.26.0"
+libbpf-rs = "=0.26.1"
 libbpf-sys = "=1.6.3"
 simplelog = "0.12"
 scx_utils = { path = "../../scx_utils", version = "1.0.26" }
