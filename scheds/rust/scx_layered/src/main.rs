@@ -1032,9 +1032,9 @@ impl Stats {
             .iter()
             .take(self.nr_layers)
             .map(|layer| {
-                layer.nr_node_pinned_tasks[..self.topo.nodes.len()]
+                layer.node[..self.topo.nodes.len()]
                     .iter()
-                    .map(|&v| v)
+                    .map(|n| n.nr_pinned_tasks)
                     .collect()
             })
             .collect();
@@ -2740,7 +2740,7 @@ impl<'a> Scheduler<'a> {
             bpf_layer.nr_llc_cpus[llc_id] = nr_llc_cpus as u32;
         }
         for (node_id, &nr_node_cpus) in layer.nr_node_cpus.iter().enumerate() {
-            bpf_layer.nr_node_cpus[node_id] = nr_node_cpus as u32;
+            bpf_layer.node[node_id].nr_cpus = nr_node_cpus as u32;
         }
 
         bpf_layer.refresh_cpus = 1;

@@ -2812,7 +2812,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	if (old_lid < nr_layers) {
 		__sync_fetch_and_add(&layers[old_lid].nr_tasks, -1);
 		if (taskc->pinned_node < MAX_NUMA_NODES)
-			__sync_fetch_and_add(&layers[old_lid].nr_node_pinned_tasks[taskc->pinned_node], -1);
+			__sync_fetch_and_add(&layers[old_lid].node[taskc->pinned_node].nr_pinned_tasks, -1);
 	}
 
 	if (layer_id >= nr_layers)
@@ -2841,7 +2841,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 
 	refresh_cpus_flags(taskc, p->cpus_ptr);
 	if (taskc->pinned_node < MAX_NUMA_NODES)
-		__sync_fetch_and_add(&layer->nr_node_pinned_tasks[taskc->pinned_node], 1);
+		__sync_fetch_and_add(&layer->node[taskc->pinned_node].nr_pinned_tasks, 1);
 
 	/*
 	 * XXX - To be correct, we'd need to calculate the vtime
@@ -3417,9 +3417,9 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 
 			if (lid < nr_layers) {
 				if (old_pinned < MAX_NUMA_NODES)
-					__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[old_pinned], -1);
+					__sync_fetch_and_add(&layers[lid].node[old_pinned].nr_pinned_tasks, -1);
 				if (taskc->pinned_node < MAX_NUMA_NODES)
-					__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[taskc->pinned_node], 1);
+					__sync_fetch_and_add(&layers[lid].node[taskc->pinned_node].nr_pinned_tasks, 1);
 			}
 		}
 	}
@@ -3574,7 +3574,7 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	if (lid < nr_layers) {
 		__sync_fetch_and_add(&layers[lid].nr_tasks, -1);
 		if (taskc->pinned_node < MAX_NUMA_NODES)
-			__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[taskc->pinned_node], -1);
+			__sync_fetch_and_add(&layers[lid].node[taskc->pinned_node].nr_pinned_tasks, -1);
 	}
 
 	if (membw_event)
