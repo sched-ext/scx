@@ -2264,7 +2264,7 @@ impl<'a> Scheduler<'a> {
         let all_layers: Vec<u32> = (0..nr_layers as u32).collect();
         let node_empty_layers: Vec<Vec<u32>> =
             (0..topo.nodes.len()).map(|_| all_layers.clone()).collect();
-        Self::refresh_node_ctx(skel, topo, &node_empty_layers);
+        Self::refresh_node_ctx(skel, topo, &node_empty_layers, true);
         Ok(())
     }
 
@@ -3301,11 +3301,17 @@ impl<'a> Scheduler<'a> {
         Ok(updated)
     }
 
-    fn refresh_node_ctx(skel: &mut BpfSkel, topo: &Topology, node_empty_layers: &[Vec<u32>]) {
+    fn refresh_node_ctx(
+        skel: &mut BpfSkel,
+        topo: &Topology,
+        node_empty_layers: &[Vec<u32>],
+        init: bool,
+    ) {
         for &nid in topo.nodes.keys() {
             let mut arg: bpf_intf::refresh_node_ctx_arg =
                 unsafe { MaybeUninit::zeroed().assume_init() };
             arg.node_id = nid as u32;
+            arg.init = init as u32;
 
             let empty = &node_empty_layers[nid];
             arg.nr_empty_layer_ids = empty.len() as u32;
@@ -3314,6 +3320,16 @@ impl<'a> Scheduler<'a> {
             }
             for i in empty.len()..MAX_LAYERS {
                 arg.empty_layer_ids[i] = MAX_LAYERS as u32;
+            }
+
+            if init {
+                // Per-node LLC list — static topology, only set during init.
+                let node = &topo.nodes[&nid];
+                let llcs: Vec<u32> = node.llcs.keys().map(|&id| id as u32).collect();
+                arg.nr_llcs = llcs.len() as u32;
+                for (i, &llc_id) in llcs.iter().enumerate() {
+                    arg.llcs[i] = llc_id;
+                }
             }
 
             let input = ProgramInput {
@@ -3518,7 +3534,7 @@ impl<'a> Scheduler<'a> {
                         .collect()
                 })
                 .collect();
-            Self::refresh_node_ctx(&mut self.skel, &self.topo, &node_empty_layers);
+            Self::refresh_node_ctx(&mut self.skel, &self.topo, &node_empty_layers, false);
         }
 
         if let Err(e) = self.update_netdev_cpumasks() {

@@ -584,6 +584,11 @@ int refresh_node_ctx(struct refresh_node_ctx_arg *arg)
 	__builtin_memcpy(nodec->empty_layer_ids, arg->empty_layer_ids,
 			 sizeof(nodec->empty_layer_ids));
 
+	if (arg->init) {
+		nodec->nr_llcs = arg->nr_llcs;
+		__builtin_memcpy(nodec->llcs, arg->llcs, sizeof(nodec->llcs));
+	}
+
 	return 0;
 }
 
