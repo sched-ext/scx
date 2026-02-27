@@ -384,12 +384,11 @@ struct layer {
 	u32			nr_cpus;
 	u32			nr_llc_cpus[MAX_LLCS];
 
-	u64			llcs_to_drain;
-	u32			llc_drain_cnt;
-
 	struct layer_node_ctx {
 		u32		nr_cpus;
 		u64		nr_pinned_tasks;
+		u64		llcs_to_drain;
+		u32		llc_drain_cnt;
 	}			node[MAX_NUMA_NODES];
 
 	enum layer_task_place   task_place;
