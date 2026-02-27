@@ -106,8 +106,9 @@ impl ProcData {
         let process = Process::new(self.tgid)?;
 
         for thread in process.tasks()?.flatten() {
-            let thread_data = ThreadData::new(thread, self.max_data_size)?;
-            self.threads.insert(thread_data.tid, thread_data);
+            if let Ok(thread_data) = ThreadData::new(thread, self.max_data_size) {
+                self.threads.insert(thread_data.tid, thread_data);
+            }
         }
 
         Ok(())
