@@ -2908,7 +2908,7 @@ pub fn run_tui(
                                         ewma_recomp_count: ctx.telemetry.ewma_recomp_count,
                                         is_hog,
                                         is_bg,
-                                        ppid: ctx.telemetry.ppid,
+                                        ppid: ctx.ppid,
                                     });
 
                             // Update dynamic row elements
@@ -2948,7 +2948,7 @@ pub fn run_tui(
                             row.ewma_recomp_count = ctx.telemetry.ewma_recomp_count;
                             row.is_hog = is_hog;
                             row.is_bg = is_bg;
-                            row.ppid = ctx.telemetry.ppid;
+                            row.ppid = ctx.ppid;
                             // Status set below after sysinfo cross-reference
                         } // end loop iteration
                     } // end if bpf_fd >= 0

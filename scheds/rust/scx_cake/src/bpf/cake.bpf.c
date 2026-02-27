@@ -1208,6 +1208,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * Fast path: nr_cpus_allowed == nr_cpus is RODATA-const, JIT folds
      * to single register cmp — zero kfunc cost for full-affinity tasks. */
 	u32 prev_idx = (u32)prev_cpu & (CAKE_MAX_CPUS - 1);
+
+	/* HOISTED SMT SIBLING (Rule 5: no duplicate work)
+	 * Computed once, shared by Gate 1b, Gate 1c skip, and Gate 1D skip.
+	 * On non-SMT (nr_cpus == nr_phys_cpus), all consumers are dead-coded
+	 * by JIT — this computation is eliminated entirely. */
+	s32 prev_sib = smt_sibling(prev_cpu);
+
 	if ((aff_mask & (1ULL << prev_idx)) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		u64 slice = p->scx.slice ?: quantum_ns;
@@ -1245,7 +1252,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * Skip duplicate: if waker_sib == prev_sib, already checked. */
 	if (nr_cpus > nr_phys_cpus) {
 		/* Gate 1b: prev_cpu's SMT sibling */
-		s32 sib = smt_sibling(prev_cpu);
+		s32 sib = prev_sib;
 
 		if (sib != prev_cpu && (u32)sib < nr_cpus &&
 		    (aff_mask & (1ULL << (u32)sib)) &&
@@ -1302,7 +1309,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 			/* Skip if home == SMT sibling (already tried in Gate 1b) */
 			u32 skip_sib = (nr_cpus > nr_phys_cpus) ?
-				(u32)smt_sibling(prev_cpu) : prev_idx;
+				(u32)prev_sib : prev_idx;
 
 			if (home != skip_sib &&
 			    (aff_mask & (1ULL << home)) &&
@@ -1351,6 +1358,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * Eliminates 2 redundant arena lookups (~16ns each) on miss path. */
 	struct cake_task_ctx __arena *tctx_shared = get_task_ctx(p);
 
+	/* GAME FAMILY PREDICATE (Rule 24: operation fusion)
+	 * Evaluated once, shared by Gate 1WC and tunnel waker_cpu staging.
+	 * Keeps game_tgid/game_ppid/tctx->ppid in registers for both consumers. */
+	bool is_game_family = game_tgid && tctx_shared &&
+		(p->tgid == game_tgid ||
+		 (game_ppid && tctx_shared->ppid == game_ppid));
+
 	/* ── GATE 1W-chain: Waker's CPU — chain producer-consumer locality ──
 	 * For game family: try the CPU where our waker last ran. In a
 	 * sequential chain (A→B→C), A's stopping released its CPU. B's
@@ -1361,9 +1375,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 *
 	 * Skip guards: already tried as prev (Gate 1), home (Gate 1c). */
 	{
-		if (game_tgid && tctx_shared &&
-		    (p->tgid == game_tgid ||
-		     (game_ppid && tctx_shared->telemetry.ppid == game_ppid))) {
+		if (is_game_family) {
 			u32 wcpu = (u32)tctx_shared->waker_cpu;
 			if (wcpu < nr_cpus &&
 			    wcpu != prev_idx &&
@@ -1406,7 +1418,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 					continue;
 				/* Skip if already tried as SMT sibling (Gate 1b) */
 				if (nr_cpus > nr_phys_cpus &&
-				    wcpu == (u32)smt_sibling(prev_cpu))
+				    wcpu == (u32)prev_sib)
 					continue;
 				/* Skip if already tried as home_cpu (Gate 1c) */
 				if (wcpu == home)
@@ -1523,9 +1535,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * and its L1/L2 holds the producer's output. Chain members
 	 * converge onto the same core over 2-3 frames.
 	 * Reuses tctx_shared — no extra get_task_ctx call. */
-	if (tctx_shared && game_tgid &&
-	    (p->tgid == game_tgid ||
-	     (game_ppid && tctx_shared->telemetry.ppid == game_ppid)))
+	if (is_game_family)
 		tctx_shared->waker_cpu = (u16)tc_id;
 
 	if (CAKE_STATS_ENABLED) {
@@ -2028,7 +2038,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	 *
 	 * nvcsw_delta kept for TUI telemetry under CAKE_STATS_ENABLED. */
 	bool is_game = (game_tgid && p->tgid == game_tgid)
-		    || (game_ppid && tctx->telemetry.ppid == game_ppid);
+		    || (game_ppid && tctx->ppid == game_ppid);
 	if (CAKE_STATS_ENABLED && !is_game) {
 		u64 cur_nv = p->nvcsw;
 		u64 prev_nv = tctx->nvcsw_snapshot;
@@ -2037,43 +2047,33 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		tctx->nvcsw_snapshot = cur_nv;
 	}
 
-	/* ── 3. DRR++ deficit exhaustion ── */
-	if (er.deficit == 0 &&
-	    (packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS)))
-		packed &= ~((u32)CAKE_FLOW_NEW << SHIFT_FLAGS);
-
-	/* Extract WAKER_BOOST before clearing — one-shot flag set by cake_enqueue.
-	 * Must read FIRST, then clear. Pre-Phase-7.0 bug: wb was read AFTER clear
-	 * → always 0. Masked by VCSW yielder; exposed when VCSW removed. */
+	/* ── 3. DRR++ deficit exhaustion + WAKER_BOOST extraction ──
+	 * FUSED MASK CLEAR (Rule 24): unconditional WAKER_BOOST clear +
+	 * conditional NEW clear combined into single AND operation.
+	 * Must extract wb BEFORE clearing — one-shot flag set by cake_enqueue.
+	 * Pre-Phase-7.0 bug: wb was read AFTER clear → always 0. */
 	u32 wb = (packed >> SHIFT_FLAGS) & CAKE_FLOW_WAKER_BOOST;
-	packed &= ~((u32)CAKE_FLOW_WAKER_BOOST << SHIFT_FLAGS);
+	u32 clear_mask = (u32)CAKE_FLOW_WAKER_BOOST << SHIFT_FLAGS;
+	/* Branchless: conditionally add NEW to clear mask (Rule 16) */
+	u32 nf_expired = (er.deficit == 0) & ((packed >> SHIFT_FLAGS) & 1);
+	clear_mask |= nf_expired << SHIFT_FLAGS;
+	packed &= ~clear_mask;
 
-	/* ── HOG SQUEEZE DETECTION (self-regulating dual gate) ──
-	 * Gate 0: not in game family (is_game includes PPID siblings)
-	 * Gate 1: not waker-boosted (game ecosystem threads protected)
-	 * Gate 2: BULK tier (EWMA ≥ 8ms — long-running CPU consumer)
-	 *
-	 * Self-regulating: vtime penalty only matters under contention.
-	 * Standalone compile → zero contention → zero impact.
-	 * Game + compile → compile squeezed (250µs quantum, 4× slower vtime). */
-	bool is_hog = !is_game && !wb
-		   && (er.new_avg >= 8000);  /* BULK tier: EWMA ≥ 8ms */
+	/* ── SQUEEZE PREDICATE FUSION (Rule 24) ──
+	 * Shared gate: !is_game && !wb used by both hog and bg_noise.
+	 * Single evaluation eliminates redundant branch. */
+	bool can_squeeze = !is_game && !wb;
+
+	/* HOG: BULK tier (EWMA ≥ 8ms) + not game + not boosted */
+	bool is_hog = can_squeeze && (er.new_avg >= 8000);
 
 	/* Branchless hog flag set/clear (Rule 16/37) */
 	u32 hog_mask = (u32)CAKE_FLOW_HOG << SHIFT_FLAGS;
 	packed = (packed & ~hog_mask) | (hog_mask & -(u32)is_hog);
 
-	/* ── BACKGROUND NOISE SQUEEZE (PPID-family gated) ──
-	 * When a game is active, any userspace task that:
-	 *   - is NOT in the game family (is_game: TGID match OR same PPID)
-	 *   - is NOT waker-boosted (game never wakes it)
-	 *   - is NOT a kernel thread (PF_KTHREAD, cached in init_task)
-	 *   - is NOT already a HOG (HOG penalty 4× is stronger)
-	 * gets a 2× vtime penalty + 500µs quantum cap.
-	 * Self-regulating: zero impact without game (game_tgid == 0).
-	 * is_kthread from packed_info (Rule 41: zero new loads). */
+	/* BG NOISE: game active + can_squeeze + not already HOG + not kthread */
 	u8 is_kthread = (packed >> BIT_KTHREAD) & 1;
-	bool bg_noise = game_tgid && !is_game && !wb && !is_hog && !is_kthread;
+	bool bg_noise = can_squeeze && game_tgid && !is_hog && !is_kthread;
 
 	/* Branchless bg_noise flag set/clear (Rule 16/37) */
 	packed = (packed & ~(1u << BIT_BG_NOISE))
@@ -2127,13 +2127,15 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	        : bg_noise ? (u64)bg_quantum_cap_ns
 	        : base_slice;  /* no cap — identity */
 	p->scx.slice     = base_slice < cap ? base_slice : cap;
+	/* wb precomputed once — used at two bit positions (Rule 24: mask fusion) */
+	u64 wb_val = (u64)!!wb;
 	p->scx.dsq_vtime = (1ULL << STAGED_BIT_VALID) |
 			    ((u64)home_cpu_staged << STAGED_SHIFT_HOME) |
-			    ((u64)!!wb << STAGED_BIT_WAKER_BOOST) |
+			    (wb_val << STAGED_BIT_WAKER_BOOST) |
 			    ((u64)is_game << STAGED_BIT_GAME_MEMBER) |
 			    ((u64)is_hog << STAGED_BIT_HOG) |
 			    ((u64)bg_noise << STAGED_BIT_BG_NOISE) |
-			    ((u64)!!wb << STAGED_BIT_WB_DUP) |
+			    (wb_val << STAGED_BIT_WB_DUP) |
 			    ((u64)nf << STAGED_BIT_NEW_FLOW) |
 			    (u64)weight_ns;
 
@@ -2265,12 +2267,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	tctx->warm_cpus[2] = 0xFFFF;
 	tctx->waker_cpu    = 0xFFFF;  /* Invalid until first wakeup-from-waker */
 
+	/* PPID: ALWAYS populated — game family detection (cake_stopping line 2031,
+	 * Gate 1WC, tunnel) reads tctx->ppid unconditionally. Must be outside
+	 * CAKE_STATS_ENABLED or PPID-based Wine/Proton sibling detection is
+	 * dead in release builds. */
+	tctx->ppid = p->real_parent ? p->real_parent->tgid : 0;
+
 	/* TUI telemetry: identity fields only needed with --verbose.
 	 * Gated to avoid unnecessary arena writes on task creation. */
 	if (CAKE_STATS_ENABLED) {
 		tctx->telemetry.pid = p->pid;
 		tctx->telemetry.tgid = p->tgid;
-		tctx->telemetry.ppid = p->real_parent ? p->real_parent->tgid : 0;
 		u64 *comm_src = (u64 *)p->comm;
 		u64 __arena *comm_dst = (u64 __arena *)tctx->telemetry.comm;
 		comm_dst[0] = comm_src[0];
@@ -2321,9 +2328,9 @@ void BPF_STRUCT_OPS(cake_set_cpumask, struct task_struct *p __arg_trusted,
 }
 
 /* Handle manual yields (e.g. sched_yield syscall).
- * yield_count ALWAYS accumulates (outside CAKE_STATS_ENABLED) because
- * game detection aggregates yield counts per ppid to identify the game family.
- * Cost: 1 get_task_ctx (~16ns) per yield — acceptable, yields are cooperative. */
+ * yield_count is TUI-only telemetry (stats-gated). Game family detection
+ * uses PPID matching in cake_stopping, not per-task yield counts.
+ * Cost in debug: 1 get_task_ctx (~16ns) per yield. Zero cost in release. */
 bool BPF_STRUCT_OPS(cake_yield, struct task_struct *p)
 {
 	/* F3: Gate behind CAKE_STATS_ENABLED — yield_count is TUI-only.
