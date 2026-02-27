@@ -4,7 +4,7 @@ version = "5.4.1"
 edition = "2021"
 
 [dependencies]
-libbpf-rs = { version = "0.26", default-features = false }
+libbpf-rs = { version = "0.26.1", default-features = false }
 libc = "0.2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
