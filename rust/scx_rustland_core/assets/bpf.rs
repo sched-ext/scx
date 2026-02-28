@@ -251,7 +251,7 @@ impl<'cb> BpfScheduler<'cb> {
         }
 
         // Check host topology to determine if we need to enable SMT capabilities.
-        let topo = Topology::new().unwrap();
+        let topo = Topology::new().expect("Failed to get topology");
         skel.maps.rodata_data.as_mut().unwrap().smt_enabled = topo.smt_enabled;
 
         // Enable scheduler flags.
@@ -491,7 +491,7 @@ impl<'cb> BpfScheduler<'cb> {
 
     // Pick an idle CPU for the target PID.
     #[allow(dead_code)]
-    pub fn select_cpu(&mut self, pid: i32, cpu: i32, flags: u64) -> i32 {
+    pub fn select_cpu(&mut self, pid: i32, cpu: i32, flags: u64) -> Result<i32> {
         let prog = &mut self.skel.progs.rs_select_cpu;
         let mut args = task_cpu_arg {
             pid: pid as c_int,
@@ -507,9 +507,11 @@ impl<'cb> BpfScheduler<'cb> {
             }),
             ..Default::default()
         };
-        let out = prog.test_run(input).unwrap();
+        let out = prog
+            .test_run(input)
+            .expect("Failed to select an idle CPU");
 
-        out.return_value as i32
+        Ok(out.return_value as i32)
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.
