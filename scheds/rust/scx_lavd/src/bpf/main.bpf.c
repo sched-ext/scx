@@ -219,6 +219,21 @@ const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
 const volatile u8	mig_delta_pct = 0;
 
 /*
+ * Skip periodic load balancing when average system utilization is below this
+ * threshold. The value is pre-scaled by userspace. 0 = disabled.
+ * Default: p2s(25) = 256.
+ */
+const volatile u64	lb_low_util = 0;
+
+/*
+ * Bypass deadline-based scheduling and dispatch directly to local DSQ
+ * when average system utilization is below this threshold.
+ * The value is pre-scaled by userspace. 0 = disabled.
+ * Default: p2s(10) = 102.
+ */
+const volatile u64	lb_local_dsq_util = 0;
+
+/*
  * Slice time for all tasks when pinned tasks are running on the CPU.
  * When this is set (non-zero), pinned tasks always use per-CPU DSQs and
  * the dispatch logic compares vtimes across DSQs.
@@ -782,7 +797,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
 	 */
-	if (is_idle && !queued_on_cpu(cpuc)) {
+	if ((is_idle && !queued_on_cpu(cpuc)) ||
+	    (lb_local_dsq_util > 0 &&
+	     sys_stat.avg_util_wall < lb_local_dsq_util)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 	} else {

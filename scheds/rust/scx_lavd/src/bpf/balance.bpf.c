@@ -18,6 +18,7 @@
 
 
 extern const volatile u8	mig_delta_pct;
+extern const volatile u64	lb_low_util;
 
 u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen)
 {
@@ -56,6 +57,13 @@ int plan_x_cpdom_migration(void)
 	 */
 
 	/*
+	 * When system utilization is low, periodic load balancing across
+	 * LLC domains is unnecessary since there is plenty of idle capacity.
+	 */
+	if (lb_low_util > 0 && sys_stat.avg_util_wall < lb_low_util)
+		goto reset_and_skip_lb;
+
+	/*
 	 * Calculate scaled load for each active compute domain.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
@@ -78,12 +86,9 @@ int plan_x_cpdom_migration(void)
 		}
 
 		/*
-		 * Use avg_util_sum when mig_delta_pct is set, otherwise use cur_util_sum.
+		 * Use avg_util_wall_sum for stable load balancing decisions.
 		 */
-		if (mig_delta_pct > 0)
-			util = (cpdomc->avg_util_wall_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
-		else
-			util = (cpdomc->cur_util_wall_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
+		util = (cpdomc->avg_util_wall_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
 		qlen = cpdomc->nr_queued_task;
 		qlen_invr = (qlen << (LAVD_SHIFT * 3)) / cpdomc->cap_sum_active_cpus;
 		cpdomc->load_invr = util + qlen_invr;
@@ -124,24 +129,8 @@ int plan_x_cpdom_migration(void)
 	 * [stealer_threshold ... avg_load_invr ... max_load_invr ... stealee_threshold]
 	 *            -------------------------------------->
 	 */
-	if ((stealee_threshold > max_load_invr) && !overflow_running) {
-		/*
-		 * To avoid the expensive reset loop, only reset if there exists
-		 * stealers/stealees in the previous round.
-		 */
-		if (sys_stat.nr_stealee > 0) {
-			bpf_for(cpdom_id, 0, nr_cpdoms) {
-				if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-					break;
-
-				cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-				WRITE_ONCE(cpdomc->is_stealer, false);
-				WRITE_ONCE(cpdomc->is_stealee, false);
-			}
-			sys_stat.nr_stealee = 0;
-		}
-		return 0;
-	}
+	if ((stealee_threshold > max_load_invr) && !overflow_running)
+		goto reset_and_skip_lb;
 
 	/*
 	 * At this point, there is at least one overloaded domain (stealee),
@@ -200,6 +189,24 @@ int plan_x_cpdom_migration(void)
 
 	sys_stat.nr_stealee = nr_stealee;
 
+	return 0;
+
+reset_and_skip_lb:
+	/*
+	 * To avoid the expensive reset loop, only reset if there exists
+	 * stealers/stealees in the previous round.
+	 */
+	if (sys_stat.nr_stealee > 0) {
+		bpf_for(cpdom_id, 0, nr_cpdoms) {
+			if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+				break;
+
+			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+			WRITE_ONCE(cpdomc->is_stealer, false);
+			WRITE_ONCE(cpdomc->is_stealee, false);
+		}
+		sys_stat.nr_stealee = 0;
+	}
 	return 0;
 }
 
