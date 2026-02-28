@@ -122,7 +122,7 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "10")]
+    #[clap(short = 's', long, default_value = "1000")]
     slice_us: u64,
 
     /// Maximum runtime (since last sleep) that can be charged to a task in microseconds.

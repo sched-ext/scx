@@ -141,7 +141,7 @@ const volatile bool no_wake_sync;
 /*
  * Default time slice.
  */
-const volatile u64 slice_ns = 10000ULL;
+const volatile u64 slice_ns = 1000000ULL;
 
 /*
  * Maximum runtime that can be charged to a task.
