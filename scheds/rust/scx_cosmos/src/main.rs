@@ -54,13 +54,145 @@ use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cosmos";
 
-/// Parse hexadecimal value from command line (requires "0x" prefix, e.g., "0x2")
-fn parse_hex(s: &str) -> Result<u64, String> {
-    if let Some(hex_str) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u64::from_str_radix(hex_str, 16).map_err(|e| format!("Invalid hexadecimal value: {}", e))
-    } else {
-        Err("Hexadecimal value must start with '0x' prefix (e.g., 0x2)".to_string())
+/// Perf event specification: either hex (0xN) or symbolic name (e.g. cache-misses).
+/// event_id is written to BPF rodata; type_ and config are used for perf_event_open.
+#[derive(Clone, Debug)]
+struct PerfEventSpec {
+    /// Opaque id for BPF (must match between install and read).
+    event_id: u64,
+    /// perf_event_attr.type (PERF_TYPE_RAW, PERF_TYPE_HARDWARE, etc.).
+    type_: u32,
+    /// perf_event_attr.config.
+    config: u64,
+    /// Original string for error messages.
+    display_name: String,
+}
+
+fn parse_hardware_event(s: &str) -> Option<u64> {
+    match s {
+        "cpu-cycles" | "cycles" => Some(0),
+        "instructions" => Some(1),
+        "cache-references" => Some(2),
+        "cache-misses" => Some(3),
+        "branch-instructions" | "branches" => Some(4),
+        "branch-misses" => Some(5),
+        "bus-cycles" => Some(6),
+        "stalled-cycles-frontend" | "idle-cycles-frontend" => Some(7),
+        "stalled-cycles-backend" | "idle-cycles-backend" => Some(8),
+        "ref-cycles" => Some(9),
+        _ => None,
     }
+}
+
+fn parse_software_event(s: &str) -> Option<u64> {
+    match s {
+        "cpu-clock" => Some(0),
+        "task-clock" => Some(1),
+        "page-faults" | "faults" => Some(2),
+        "context-switches" | "cs" => Some(3),
+        "cpu-migrations" | "migrations" => Some(4),
+        "minor-faults" => Some(5),
+        "major-faults" => Some(6),
+        "alignment-faults" => Some(7),
+        "emulation-faults" => Some(8),
+        "dummy" => Some(9),
+        "bpf-output" => Some(10),
+        _ => None,
+    }
+}
+
+fn parse_hw_cache_event(s: &str) -> Option<u64> {
+    let (cache_id, prefix_len) = if s.starts_with("L1-dcache-") {
+        (0, 10)
+    } else if s.starts_with("L1-icache-") {
+        (1, 10)
+    } else if s.starts_with("LLC-") {
+        (2, 4)
+    } else if s.starts_with("dTLB-") {
+        (3, 5)
+    } else if s.starts_with("iTLB-") {
+        (4, 5)
+    } else if s.starts_with("branch-") {
+        (5, 7)
+    } else if s.starts_with("node-") {
+        (6, 5)
+    } else {
+        return None;
+    };
+
+    let suffix = &s[prefix_len..];
+    let (op_id, result_id) = match suffix {
+        "loads" => (0, 0),
+        "load-misses" => (0, 1),
+        "stores" => (1, 0),
+        "store-misses" => (1, 1),
+        "prefetches" => (2, 0),
+        "prefetch-misses" => (2, 1),
+        _ => return None,
+    };
+
+    Some((result_id << 16) | (op_id << 8) | cache_id)
+}
+
+/// Parse -e / -y value: hex (0xN) or symbolic name (e.g. cache-misses, LLC-load-misses).
+fn parse_perf_event(s: &str) -> Result<PerfEventSpec, String> {
+    use perf_event_open_sys as sys;
+
+    let s = s.trim();
+    if s.is_empty() || s == "0" || s.eq_ignore_ascii_case("0x0") {
+        return Ok(PerfEventSpec {
+            event_id: 0,
+            type_: sys::bindings::PERF_TYPE_RAW,
+            config: 0,
+            display_name: s.to_string(),
+        });
+    }
+
+    if let Some(hex_str) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        if let Ok(config) = u64::from_str_radix(hex_str, 16) {
+            return Ok(PerfEventSpec {
+                event_id: config,
+                type_: sys::bindings::PERF_TYPE_RAW,
+                config,
+                display_name: s.to_string(),
+            });
+        }
+    }
+
+    if let Some(config) = parse_hardware_event(s) {
+        let event_id = (sys::bindings::PERF_TYPE_HARDWARE as u64) << 32 | config;
+        return Ok(PerfEventSpec {
+            event_id,
+            type_: sys::bindings::PERF_TYPE_HARDWARE,
+            config,
+            display_name: s.to_string(),
+        });
+    }
+
+    if let Some(config) = parse_software_event(s) {
+        let event_id = (sys::bindings::PERF_TYPE_SOFTWARE as u64) << 32 | config;
+        return Ok(PerfEventSpec {
+            event_id,
+            type_: sys::bindings::PERF_TYPE_SOFTWARE,
+            config,
+            display_name: s.to_string(),
+        });
+    }
+
+    if let Some(config) = parse_hw_cache_event(s) {
+        let event_id = (sys::bindings::PERF_TYPE_HW_CACHE as u64) << 32 | config;
+        return Ok(PerfEventSpec {
+            event_id,
+            type_: sys::bindings::PERF_TYPE_HW_CACHE,
+            config,
+            display_name: s.to_string(),
+        });
+    }
+
+    Err(format!(
+        "Invalid perf event '{}': use hex (0xN) or symbolic name (e.g. cache-misses, LLC-load-misses, page-faults)",
+        s
+    ))
 }
 
 /// Must match lib/pmu.bpf.c SCX_PMU_STRIDE for perf_events map key layout.
@@ -71,16 +203,20 @@ const PERF_MAP_STRIDE: u32 = 4096;
 fn setup_perf_events(
     skel: &mut BpfSkel,
     cpu: i32,
-    perf_config: u64,
+    spec: &PerfEventSpec,
     counter_idx: u32,
 ) -> Result<()> {
     use perf_event_open_sys as sys;
 
+    if spec.event_id == 0 {
+        return Ok(());
+    }
+
     let map = &skel.maps.scx_pmu_map;
 
     let mut attrs = sys::bindings::perf_event_attr::default();
-    attrs.type_ = sys::bindings::PERF_TYPE_RAW;
-    attrs.config = perf_config;
+    attrs.type_ = spec.type_;
+    attrs.config = spec.config;
     attrs.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
     attrs.set_disabled(0);
     attrs.set_inherit(0);
@@ -90,8 +226,8 @@ fn setup_perf_events(
     if fd < 0 {
         let err = std::io::Error::last_os_error();
         return Err(anyhow::anyhow!(
-            "Failed to open perf event 0x{:x} on CPU {}: {}",
-            perf_config,
+            "Failed to open perf event '{}' on CPU {}: {}",
+            spec.display_name,
             cpu,
             err
         ));
@@ -176,17 +312,19 @@ struct Opts {
     #[clap(short = 'm', long)]
     primary_domain: Option<String>,
 
-    /// Hardware perf event to monitor (0x0 = disabled).
-    #[clap(short = 'e', long, default_value = "0x0", value_parser = parse_hex)]
-    perf_config: u64,
+    /// Hardware perf event to monitor (0x0 = disabled). Accepts hex (0xN) or symbolic names
+    /// (e.g. cache-misses, LLC-load-misses, page-faults, branch-misses).
+    #[clap(short = 'e', long, default_value = "0x0", value_parser = parse_perf_event)]
+    perf_config: PerfEventSpec,
 
     /// Threshold (perf events/msec) to classify a task as event heavy; exceeding it triggers migration.
     #[clap(short = 'E', default_value = "0", long)]
     perf_threshold: u64,
 
     /// Sticky perf event (0x0 = disabled). When a task exceeds -Y for this event, keep it on the same CPU.
-    #[clap(short = 'y', long, default_value = "0x0", value_parser = parse_hex)]
-    perf_sticky: u64,
+    /// Accepts hex (0xN) or symbolic names (e.g. cache-misses, LLC-load-misses).
+    #[clap(short = 'y', long, default_value = "0x0", value_parser = parse_perf_event)]
+    perf_sticky: PerfEventSpec,
 
     /// Sticky perf threshold; task is kept on same CPU when its count for -y event exceeds this.
     #[clap(short = 'Y', default_value = "0", long)]
@@ -549,8 +687,8 @@ impl<'a> Scheduler<'a> {
         rodata.mm_affinity = opts.mm_affinity;
 
         // Enable perf event scheduling settings.
-        rodata.perf_config = opts.perf_config;
-        rodata.perf_sticky = opts.perf_sticky;
+        rodata.perf_config = opts.perf_config.event_id;
+        rodata.perf_sticky = opts.perf_sticky.event_id;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
@@ -628,14 +766,14 @@ impl<'a> Scheduler<'a> {
         // Initial perf thresholds in bss. When threshold is 0 we use dynamic logic; when user
         // specifies a value > 0 we use it as a static threshold.
         let bss = skel.maps.bss_data.as_mut().unwrap();
-        if opts.perf_config > 0 {
+        if opts.perf_config.event_id > 0 {
             bss.perf_threshold = if opts.perf_threshold == 0 {
                 DYNAMIC_THRESHOLD_INIT_VALUE
             } else {
                 opts.perf_threshold
             };
         }
-        if opts.perf_sticky > 0 {
+        if opts.perf_sticky.event_id > 0 {
             bss.perf_sticky_threshold = if opts.perf_sticky_threshold == 0 {
                 DYNAMIC_THRESHOLD_INIT_VALUE
             } else {
@@ -663,15 +801,15 @@ impl<'a> Scheduler<'a> {
         let nr_cpus = *NR_CPU_IDS;
         info!("Setting up performance counters for {} CPUs...", nr_cpus);
         let mut perf_available = true;
-        let sticky_counter_idx = if opts.perf_config > 0 { 1 } else { 0 };
+        let sticky_counter_idx = if opts.perf_config.event_id > 0 { 1 } else { 0 };
         for cpu in 0..nr_cpus {
-            if opts.perf_config > 0 {
-                if let Err(e) = setup_perf_events(&mut skel, cpu as i32, opts.perf_config, 0) {
+            if opts.perf_config.event_id > 0 {
+                if let Err(e) = setup_perf_events(&mut skel, cpu as i32, &opts.perf_config, 0) {
                     if cpu == 0 {
                         let err_str = e.to_string();
                         if err_str.contains("errno 2") || err_str.contains("os error 2") {
                             warn!("Performance counters not available on this CPU architecture");
-                            warn!("PMU event 0x{:x} not supported - scheduler will run without perf monitoring", opts.perf_config);
+                            warn!("PMU event '{}' not supported - scheduler will run without perf monitoring", opts.perf_config.display_name);
                         } else {
                             warn!("Failed to setup perf events: {}", e);
                         }
@@ -680,15 +818,15 @@ impl<'a> Scheduler<'a> {
                     }
                 }
             }
-            if opts.perf_sticky > 0 {
+            if opts.perf_sticky.event_id > 0 {
                 if let Err(e) =
-                    setup_perf_events(&mut skel, cpu as i32, opts.perf_sticky, sticky_counter_idx)
+                    setup_perf_events(&mut skel, cpu as i32, &opts.perf_sticky, sticky_counter_idx)
                 {
                     if cpu == 0 {
                         let err_str = e.to_string();
                         if err_str.contains("errno 2") || err_str.contains("os error 2") {
                             warn!("Performance counters not available on this CPU architecture");
-                            warn!("PMU event 0x{:x} not supported - scheduler will run without perf monitoring", opts.perf_sticky);
+                            warn!("PMU event '{}' not supported - scheduler will run without perf monitoring", opts.perf_sticky.display_name);
                         } else {
                             warn!("Failed to setup perf events: {}", e);
                         }
@@ -1015,7 +1153,7 @@ impl<'a> Scheduler<'a> {
 
                     let bss = self.skel.maps.bss_data.as_mut().unwrap();
                     // Dynamic threshold only when user did not specify a value (threshold == 0).
-                    if self.opts.perf_config > 0 && self.opts.perf_threshold == 0 {
+                    if self.opts.perf_config.event_id > 0 && self.opts.perf_threshold == 0 {
                         let base = 0u64; // dynamic mode: use 0 so clamp is [1, u64::MAX]
                         let current = bss.perf_threshold;
                         let new_thresh = adjust_dynamic_threshold(current, migration_rate, base);
@@ -1029,7 +1167,7 @@ impl<'a> Scheduler<'a> {
                             }
                         }
                     }
-                    if self.opts.perf_sticky > 0 && self.opts.perf_sticky_threshold == 0 {
+                    if self.opts.perf_sticky.event_id > 0 && self.opts.perf_sticky_threshold == 0 {
                         let base = 0u64;
                         let current = bss.perf_sticky_threshold;
                         let new_thresh = adjust_dynamic_threshold(current, sticky_rate, base);
