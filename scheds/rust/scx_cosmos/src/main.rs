@@ -545,6 +545,14 @@ const DYNAMIC_THRESHOLD_RATE_HIGH: f64 = 4000.0;
 /// Target event rate (per second) below which we consider migrations/sticky dispatches too low.
 const DYNAMIC_THRESHOLD_RATE_LOW: f64 = 2000.0;
 
+/// Hysteresis band: rate must move by this fraction beyond the target bounds before we act.
+/// This prevents oscillation when the rate hovers near the threshold boundaries.
+const DYNAMIC_THRESHOLD_HYSTERESIS: f64 = 0.1;
+
+/// EMA smoothing factor (alpha). Higher values give more weight to recent samples.
+/// 0.3 provides good balance between responsiveness and stability.
+const DYNAMIC_THRESHOLD_EMA_ALPHA: f64 = 0.3;
+
 /// Minimum scale factor when just outside the target band (slow convergence near optimal).
 const DYNAMIC_THRESHOLD_SCALE_MIN: f64 = 0.0001;
 
@@ -562,49 +570,158 @@ const DYNAMIC_THRESHOLD_SLOPE_LOW: f64 = 0.58;
 /// polling (e.g. 100 ms) does not trigger expensive NVML calls every tick.
 const GPU_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 
-fn dynamic_threshold_scale(rate_per_sec: f64, too_high: bool) -> f64 {
-    if too_high {
-        let excess = ((rate_per_sec / DYNAMIC_THRESHOLD_RATE_HIGH) - 1.0).max(0.0);
-        let scale = DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_HIGH * excess.min(4.0);
-        scale.min(DYNAMIC_THRESHOLD_SCALE_MAX)
-    } else {
-        if rate_per_sec <= 0.0 {
-            return DYNAMIC_THRESHOLD_SCALE_MAX;
-        }
-        let deficit = (DYNAMIC_THRESHOLD_RATE_LOW - rate_per_sec) / DYNAMIC_THRESHOLD_RATE_LOW;
-        let t = deficit.min(1.0).max(0.0);
-        DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_LOW * t
-    }
+/// State for EMA-based dynamic threshold adjustment with hysteresis.
+///
+/// This struct maintains the smoothed rate estimate and tracks whether we're
+/// currently in an adjustment state (raising or lowering threshold) to implement
+/// hysteresis and prevent oscillation.
+#[derive(Debug, Clone)]
+struct DynamicThresholdState {
+    /// Current threshold value.
+    threshold: u64,
+    /// EMA-smoothed rate estimate.
+    smoothed_rate: f64,
+    /// Previous raw counter value for delta calculation.
+    prev_counter: u64,
+    /// Whether the EMA has been initialized with a valid sample.
+    initialized: bool,
+    /// Current adjustment direction: None (stable), Some(true) = raising, Some(false) = lowering.
+    /// Used for hysteresis: once we start adjusting in a direction, we continue until
+    /// the rate crosses back into the stable band with hysteresis margin.
+    adjustment_direction: Option<bool>,
 }
 
-fn adjust_dynamic_threshold(current: u64, rate_per_sec: f64, base_threshold: u64) -> u64 {
-    let (scale_pct, raise_threshold) = if rate_per_sec > DYNAMIC_THRESHOLD_RATE_HIGH {
-        (dynamic_threshold_scale(rate_per_sec, true), true)
-    } else if rate_per_sec < DYNAMIC_THRESHOLD_RATE_LOW && rate_per_sec >= 0.0 {
-        (dynamic_threshold_scale(rate_per_sec, false), false)
-    } else {
-        return current;
-    };
+impl DynamicThresholdState {
+    /// Create a new dynamic threshold state with the given initial threshold.
+    fn new(initial_threshold: u64) -> Self {
+        Self {
+            threshold: initial_threshold,
+            smoothed_rate: 0.0,
+            prev_counter: 0,
+            initialized: false,
+            adjustment_direction: None,
+        }
+    }
 
-    let factor = if raise_threshold {
-        1.0 + scale_pct
-    } else {
-        1.0 - scale_pct
-    };
-    let new = ((current as f64) * factor).round() as u64;
+    /// Update the state with a new counter sample and elapsed time.
+    /// Returns the new threshold if it changed, or None if unchanged.
+    fn update(&mut self, counter: u64, elapsed_secs: f64, verbose: bool, name: &str) -> Option<u64> {
+        if elapsed_secs <= 0.0 {
+            return None;
+        }
 
-    let min_val = if base_threshold == 0 {
-        1
-    } else {
-        base_threshold / 100
-    };
-    let max_val = if base_threshold == 0 {
-        u64::MAX
-    } else {
-        base_threshold.saturating_mul(10000)
-    };
+        // Calculate instantaneous rate.
+        let delta = counter.saturating_sub(self.prev_counter);
+        self.prev_counter = counter;
+        let raw_rate = delta as f64 / elapsed_secs;
 
-    new.clamp(min_val.max(1), max_val)
+        // Update EMA.
+        if self.initialized {
+            self.smoothed_rate = DYNAMIC_THRESHOLD_EMA_ALPHA * raw_rate
+                + (1.0 - DYNAMIC_THRESHOLD_EMA_ALPHA) * self.smoothed_rate;
+        } else {
+            // First sample: initialize EMA directly.
+            self.smoothed_rate = raw_rate;
+            self.initialized = true;
+        }
+
+        // Determine if we should adjust the threshold using hysteresis.
+        let rate = self.smoothed_rate;
+        let old_threshold = self.threshold;
+
+        // Calculate hysteresis-adjusted bounds based on current state.
+        let (effective_high, effective_low) = match self.adjustment_direction {
+            Some(true) => {
+                // Currently raising threshold: need rate to drop below LOW - hysteresis to stop.
+                (
+                    DYNAMIC_THRESHOLD_RATE_HIGH,
+                    DYNAMIC_THRESHOLD_RATE_LOW * (1.0 - DYNAMIC_THRESHOLD_HYSTERESIS),
+                )
+            }
+            Some(false) => {
+                // Currently lowering threshold: need rate to rise above HIGH + hysteresis to stop.
+                (
+                    DYNAMIC_THRESHOLD_RATE_HIGH * (1.0 + DYNAMIC_THRESHOLD_HYSTERESIS),
+                    DYNAMIC_THRESHOLD_RATE_LOW,
+                )
+            }
+            None => {
+                // Stable state: need rate to exceed bounds + hysteresis to start adjusting.
+                (
+                    DYNAMIC_THRESHOLD_RATE_HIGH * (1.0 + DYNAMIC_THRESHOLD_HYSTERESIS),
+                    DYNAMIC_THRESHOLD_RATE_LOW * (1.0 - DYNAMIC_THRESHOLD_HYSTERESIS),
+                )
+            }
+        };
+
+        // Determine new adjustment direction.
+        let new_direction = if rate > effective_high {
+            Some(true) // Rate too high, raise threshold.
+        } else if rate < effective_low && rate >= 0.0 {
+            Some(false) // Rate too low, lower threshold.
+        } else {
+            // Rate in stable band (considering hysteresis).
+            if self.adjustment_direction.is_some() {
+                // We were adjusting; check if we should stop.
+                if rate >= DYNAMIC_THRESHOLD_RATE_LOW && rate <= DYNAMIC_THRESHOLD_RATE_HIGH {
+                    None // Back in target band, stop adjusting.
+                } else {
+                    self.adjustment_direction // Continue current direction.
+                }
+            } else {
+                None // Already stable.
+            }
+        };
+
+        // Apply adjustment if we have a direction.
+        if let Some(raising) = new_direction {
+            let scale = Self::compute_scale(rate, raising);
+            let factor = if raising {
+                1.0 + scale
+            } else {
+                1.0 - scale
+            };
+            let new_threshold = ((self.threshold as f64) * factor).round() as u64;
+            self.threshold = new_threshold.clamp(1, u64::MAX);
+        }
+
+        self.adjustment_direction = new_direction;
+
+        // Return new threshold only if it changed.
+        if self.threshold != old_threshold {
+            if verbose {
+                info!(
+                    "{}: {} -> {} (smoothed rate {:.1}/s, raw {:.1}/s, dir {:?})",
+                    name,
+                    old_threshold,
+                    self.threshold,
+                    self.smoothed_rate,
+                    raw_rate,
+                    self.adjustment_direction
+                );
+            }
+            Some(self.threshold)
+        } else {
+            None
+        }
+    }
+
+    /// Compute the scale factor for threshold adjustment based on how far the rate
+    /// is from the target band.
+    fn compute_scale(rate: f64, too_high: bool) -> f64 {
+        if too_high {
+            let excess = ((rate / DYNAMIC_THRESHOLD_RATE_HIGH) - 1.0).max(0.0);
+            let scale = DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_HIGH * excess.min(4.0);
+            scale.min(DYNAMIC_THRESHOLD_SCALE_MAX)
+        } else {
+            if rate <= 0.0 {
+                return DYNAMIC_THRESHOLD_SCALE_MAX;
+            }
+            let deficit = (DYNAMIC_THRESHOLD_RATE_LOW - rate) / DYNAMIC_THRESHOLD_RATE_LOW;
+            let t = deficit.clamp(0.0, 1.0);
+            DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_LOW * t
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -625,6 +742,10 @@ struct Scheduler<'a> {
     previous_gpu_pids: Option<HashMap<u32, u32>>,
     /// Reused NVML handle to avoid re-initializing on every sync (expensive).
     nvml: Option<Nvml>,
+    /// Dynamic threshold state for perf event migrations (when --perf-threshold is 0/dynamic).
+    perf_threshold_state: Option<DynamicThresholdState>,
+    /// Dynamic threshold state for sticky perf events (when --perf-sticky-threshold is 0/dynamic).
+    perf_sticky_threshold_state: Option<DynamicThresholdState>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -873,6 +994,19 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, cosmos_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        // Initialize dynamic threshold states for perf events (only when using dynamic mode).
+        let perf_threshold_state = if opts.perf_config.event_id > 0 && opts.perf_threshold == 0 {
+            Some(DynamicThresholdState::new(DYNAMIC_THRESHOLD_INIT_VALUE))
+        } else {
+            None
+        };
+        let perf_sticky_threshold_state =
+            if opts.perf_sticky.event_id > 0 && opts.perf_sticky_threshold == 0 {
+                Some(DynamicThresholdState::new(DYNAMIC_THRESHOLD_INIT_VALUE))
+            } else {
+                None
+            };
+
         Ok(Self {
             skel,
             opts,
@@ -881,6 +1015,8 @@ impl<'a> Scheduler<'a> {
             gpu_index_to_node,
             previous_gpu_pids,
             nvml,
+            perf_threshold_state,
+            perf_sticky_threshold_state,
         })
     }
 
@@ -1115,10 +1251,6 @@ impl<'a> Scheduler<'a> {
         let mut last_update = Instant::now();
         let mut last_gpu_sync = Instant::now();
 
-        // Dynamic perf thresholds: scale based on migration and sticky dispatch rates.
-        let mut prev_nr_event_dispatches: u64 = 0;
-        let mut prev_nr_ev_sticky_dispatches: u64 = 0;
-
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             // Update CPU utilization and GPU PID -> node map (NVML).
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
@@ -1128,62 +1260,42 @@ impl<'a> Scheduler<'a> {
                     prev_cputime = curr_cputime;
                 }
 
-                // Update dynamic perf thresholds based on event rates.
-                let nr_event = self
-                    .skel
-                    .maps
-                    .bss_data
-                    .as_ref()
-                    .unwrap()
-                    .nr_event_dispatches;
-                let nr_sticky = self
-                    .skel
-                    .maps
-                    .bss_data
-                    .as_ref()
-                    .unwrap()
-                    .nr_ev_sticky_dispatches;
+                // Update dynamic perf thresholds using EMA + hysteresis.
                 let elapsed_secs = last_update.elapsed().as_secs_f64();
-                if elapsed_secs > 0.0 {
-                    let migration_rate =
-                        (nr_event.saturating_sub(prev_nr_event_dispatches) as f64) / elapsed_secs;
-                    let sticky_rate = (nr_sticky.saturating_sub(prev_nr_ev_sticky_dispatches)
-                        as f64)
-                        / elapsed_secs;
 
-                    let bss = self.skel.maps.bss_data.as_mut().unwrap();
-                    // Dynamic threshold only when user did not specify a value (threshold == 0).
-                    if self.opts.perf_config.event_id > 0 && self.opts.perf_threshold == 0 {
-                        let base = 0u64; // dynamic mode: use 0 so clamp is [1, u64::MAX]
-                        let current = bss.perf_threshold;
-                        let new_thresh = adjust_dynamic_threshold(current, migration_rate, base);
-                        if new_thresh != current {
-                            bss.perf_threshold = new_thresh;
-                            if self.opts.verbose {
-                                info!(
-                                    "perf_threshold: {} (migration rate {:.1}/s)",
-                                    new_thresh, migration_rate
-                                );
-                            }
-                        }
+                // Update migration threshold state if dynamic mode is enabled.
+                if let Some(ref mut state) = self.perf_threshold_state {
+                    let nr_event = self
+                        .skel
+                        .maps
+                        .bss_data
+                        .as_ref()
+                        .unwrap()
+                        .nr_event_dispatches;
+                    if let Some(new_thresh) =
+                        state.update(nr_event, elapsed_secs, self.opts.verbose, "perf_threshold")
+                    {
+                        self.skel.maps.bss_data.as_mut().unwrap().perf_threshold = new_thresh;
                     }
-                    if self.opts.perf_sticky.event_id > 0 && self.opts.perf_sticky_threshold == 0 {
-                        let base = 0u64;
-                        let current = bss.perf_sticky_threshold;
-                        let new_thresh = adjust_dynamic_threshold(current, sticky_rate, base);
-                        if new_thresh != current {
-                            bss.perf_sticky_threshold = new_thresh;
-                            if self.opts.verbose {
-                                info!(
-                                    "perf_sticky_threshold: {} (sticky rate {:.1}/s)",
-                                    new_thresh, sticky_rate
-                                );
-                            }
-                        }
-                    }
+                }
 
-                    prev_nr_event_dispatches = nr_event;
-                    prev_nr_ev_sticky_dispatches = nr_sticky;
+                // Update sticky threshold state if dynamic mode is enabled.
+                if let Some(ref mut state) = self.perf_sticky_threshold_state {
+                    let nr_sticky = self
+                        .skel
+                        .maps
+                        .bss_data
+                        .as_ref()
+                        .unwrap()
+                        .nr_ev_sticky_dispatches;
+                    if let Some(new_thresh) = state.update(
+                        nr_sticky,
+                        elapsed_secs,
+                        self.opts.verbose,
+                        "perf_sticky_threshold",
+                    ) {
+                        self.skel.maps.bss_data.as_mut().unwrap().perf_sticky_threshold = new_thresh;
+                    }
                 }
 
                 // GPU PID sync is throttled to GPU_SYNC_INTERVAL (NVML is expensive).
