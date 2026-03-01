@@ -1,5 +1,5 @@
 use anyhow::Result;
-use procfs::{CpuTime, KernelStats};
+use procfs::{CpuTime, CurrentSI as _, KernelStats};
 use std::collections::BTreeMap;
 use sysinfo::System;
 
@@ -73,7 +73,7 @@ impl CpuStatTracker {
         self.prev = std::mem::take(&mut self.current);
         self.system_prev = std::mem::take(&mut self.system_current);
 
-        let kernel_stats = KernelStats::new()?;
+        let kernel_stats = KernelStats::current()?;
         let cpu_stat_data = kernel_stats.cpu_time;
 
         // Read CPU frequencies from sysinfo (should be refreshed by background thread)
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_convert_to_stat_snapshot_success() {
-        let kernel_stats = KernelStats::new().unwrap();
+        let kernel_stats = KernelStats::current().unwrap();
         let mut cpu_time = kernel_stats.total;
 
         // We'll just take over the cpu_time in order to test it
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "missing iowait")]
     fn test_convert_to_stat_snapshot_missing_iowait_panics() {
-        let kernel_stats = KernelStats::new().unwrap();
+        let kernel_stats = KernelStats::current().unwrap();
         let mut cpu_time = kernel_stats.total;
 
         // We'll just take over the cpu_time in order to test it
