@@ -110,7 +110,7 @@ const volatile u64 perf_config;
 /*
  * Performance counter threshold to classify a task as event heavy.
  */
-const volatile u64 perf_threshold;
+volatile u64 perf_threshold;
 
 /*
  * Enable deferred wakeup.
@@ -118,10 +118,15 @@ const volatile u64 perf_threshold;
 const volatile bool deferred_wakeups = true;
 
 /*
- * Do we want to keep the tasks sticky or distribute them on being event
- * heavy
+ * Sticky perf event (0x0 = disabled). When task's count for this event
+ * exceeds perf_sticky_threshold, keep it on the same CPU.
  */
-const volatile bool perf_sticky;
+const volatile u64 perf_sticky;
+
+/*
+ * Threshold for sticky event; task is kept on same CPU when exceeded.
+ */
+volatile u64 perf_sticky_threshold;
 
 /*
  * Enable tick-based preemption enforcement.
@@ -157,6 +162,7 @@ volatile u64 cpu_util;
  * Scheduler statistics.
  */
 volatile u64 nr_event_dispatches;
+volatile u64 nr_ev_sticky_dispatches;
 
 /*
  * Scheduler's exit status.
@@ -187,6 +193,7 @@ struct task_ctx {
 	u64 wakeup_freq;
 	u64 last_woke_at;
 	u64 perf_events;
+	u64 perf_sticky_events;
 };
 
 struct {
@@ -259,22 +266,38 @@ static void update_counters(struct task_struct *p, struct task_ctx *tctx, s32 cp
 {
 	struct cpu_ctx *cctx;
 	u64 delta = 0;
-
-	scx_pmu_read(p, perf_config, &delta, true);
+	u64 sticky_delta = 0;
 
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (cctx)
 		cctx->perf_events += delta;
 
-	tctx->perf_events = delta;
+	if (perf_config) {
+		scx_pmu_read(p, perf_config, &delta, true);
+		tctx->perf_events = delta;
+	}
+
+	if (perf_sticky) {
+		scx_pmu_read(p, perf_sticky, &sticky_delta, true);
+		tctx->perf_sticky_events = sticky_delta;
+	}
 }
 
 /*
- * Return true if the task is triggering too many PMU events.
+ * Return true if the task is triggering too many PMU events (migration event).
  */
 static inline bool is_event_heavy(const struct task_ctx *tctx)
 {
-	return tctx->perf_events > perf_threshold;
+	return perf_config && tctx->perf_events > perf_threshold;
+}
+
+/*
+ * Return true if the task exceeds the sticky event threshold and should
+ * stay on the same CPU.
+ */
+static inline bool is_sticky_event_heavy(const struct task_ctx *tctx)
+{
+	return perf_sticky && tctx->perf_sticky_events > perf_sticky_threshold;
 }
 
 /*
@@ -894,14 +917,12 @@ is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
  * same node as prev_cpu, otherwise this optimization becomes expensive on
  * large CPU numa systems
  */
-static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu)
+static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu,
+				     const struct task_ctx *tctx)
 {
 	struct cpu_ctx *cctx;
 	u64 min = ~0UL;
 	int cpu, ret_cpu = -EBUSY;
-
-	if (perf_sticky)
-		return prev_cpu;
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		if (cpu_node(cpu) != cpu_node(prev_cpu) ||
@@ -954,18 +975,30 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	}
 
 	/*
-	 * Pick an event free CPU?
+	 * Pick an event free CPU: if task exceeds sticky threshold, keep
+	 * on same CPU, if it exceeds migration threshold, move to least
+	 * event-busy CPU.
 	 */
-	if (perf_config) {
+	if (perf_config || perf_sticky) {
 		struct task_ctx *tctx;
 
 		tctx = try_lookup_task_ctx(p);
-		if (tctx && is_event_heavy(tctx)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
-			__sync_fetch_and_add(&nr_event_dispatches, 1);
-			new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
+		if (!tctx)
+			return prev_cpu;
 
-			return new_cpu < 0 ? prev_cpu : new_cpu;
+		if (is_sticky_event_heavy(tctx)) {
+			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+			return prev_cpu;
+		}
+
+		if (is_event_heavy(tctx)) {
+			__sync_fetch_and_add(&nr_event_dispatches, 1);
+			new_cpu = pick_least_busy_event_cpu(p, prev_cpu, tctx);
+			if (new_cpu >= 0) {
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+				return new_cpu;
+			}
 		}
 	}
 
@@ -1045,17 +1078,30 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Immediately dispatch perf event-heavy tasks to a new CPU.
+	 * Immediately dispatch sticky event-heavy tasks to the same CPU.
 	 */
-	if (perf_config && !is_migration_disabled(p) &&
-	    is_event_heavy(tctx)) {
-		new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
+	if (is_sticky_event_heavy(tctx)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
+
+		if (!scx_bpf_task_running(p))
+			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		return;
+	}
+
+	/*
+	 * Immediately dispatch migration event-heavy tasks to a new CPU
+	 * (if the task is allowed to migrate).
+	 */
+	if (!is_migration_disabled(p) && is_event_heavy(tctx)) {
+		new_cpu = pick_least_busy_event_cpu(p, prev_cpu, tctx);
 		if (new_cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | new_cpu, task_slice(p), 0);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | new_cpu,
+					   task_slice(p), enq_flags);
 			__sync_fetch_and_add(&nr_event_dispatches, 1);
 
 			if (new_cpu != prev_cpu || !scx_bpf_task_running(p))
-				wakeup_cpu(new_cpu);
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
@@ -1169,7 +1215,7 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	/*
 	 * Capture performance counter baseline when task starts running.
 	 */
-	if (perf_config)
+	if (perf_config || perf_sticky)
 		scx_pmu_event_start(p, false);
 }
 
@@ -1184,7 +1230,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	/* Update task's performance counters */
-	if (perf_config) {
+	if (perf_config || perf_sticky) {
 		scx_pmu_event_stop(p);
 		update_counters(p, tctx, cpu);
 	}
@@ -1300,6 +1346,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 			return err;
 	}
 
+	if (perf_sticky) {
+		err = scx_pmu_install(perf_sticky);
+		if (err)
+			return err;
+	}
+
 	return 0;
 }
 
@@ -1307,6 +1359,9 @@ void BPF_STRUCT_OPS(cosmos_exit, struct scx_exit_info *ei)
 {
 	if (perf_config)
 		scx_pmu_uninstall(perf_config);
+
+	if (perf_sticky)
+		scx_pmu_uninstall(perf_sticky);
 
 	UEI_RECORD(uei, ei);
 }

@@ -58,14 +58,21 @@ fn parse_hex(s: &str) -> Result<u64, String> {
     }
 }
 
-/// Setup performance counter events for a specific CPU using perf-event-open-sys crate
-fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<()> {
+/// Must match lib/pmu.bpf.c SCX_PMU_STRIDE for perf_events map key layout.
+const PERF_MAP_STRIDE: u32 = 4096;
+
+/// Setup performance counter events for a specific CPU and counter index.
+/// counter_idx 0 = migration event (-e), 1 = sticky event (-y).
+fn setup_perf_events(
+    skel: &mut BpfSkel,
+    cpu: i32,
+    perf_config: u64,
+    counter_idx: u32,
+) -> Result<()> {
     use perf_event_open_sys as sys;
 
-    // Get the perf_events map
     let map = &skel.maps.scx_pmu_map;
 
-    // Create a raw perf event for the perf counter.
     let mut attrs = sys::bindings::perf_event_attr::default();
     attrs.type_ = sys::bindings::PERF_TYPE_RAW;
     attrs.config = perf_config;
@@ -73,14 +80,7 @@ fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<(
     attrs.set_disabled(0);
     attrs.set_inherit(0);
 
-    // Open the perf event using the syscall wrapper from perf-event crate
-    let fd = unsafe {
-        sys::perf_event_open(
-            &mut attrs, -1, // pid: -1 for all processes
-            cpu, -1, // group_fd
-            0,  // flags
-        )
-    };
+    let fd = unsafe { sys::perf_event_open(&mut attrs, -1, cpu, -1, 0) };
 
     if fd < 0 {
         let err = std::io::Error::last_os_error();
@@ -92,8 +92,7 @@ fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<(
         ));
     }
 
-    // Update the BPF map with the file descriptor
-    let key = cpu as u32;
+    let key = cpu as u32 + counter_idx * PERF_MAP_STRIDE;
 
     map.update(
         &key.to_ne_bytes(),
@@ -101,9 +100,6 @@ fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<(
         libbpf_rs::MapFlags::ANY,
     )
     .with_context(|| "Failed to update perf_events map")?;
-
-    // Note: We're not closing the fd because it needs to stay open for BPF
-    // The kernel will close it when the program exits
 
     Ok(())
 }
@@ -179,17 +175,17 @@ struct Opts {
     #[clap(short = 'e', long, default_value = "0x0", value_parser = parse_hex)]
     perf_config: u64,
 
-    /// Threshold (perf events/msec) to classify a task as event heavy.
+    /// Threshold (perf events/msec) to classify a task as event heavy; exceeding it triggers migration.
     #[clap(short = 'E', default_value = "0", long)]
     perf_threshold: u64,
 
-    /// Enable sticky perf scheduling.
-    ///
-    /// When enabled, a task that generates a large number of perf events is forced to stay on the
-    /// same CPU. When disabled, the scheduler will move the task to the CPU with the smallest
-    /// amount of tracked perf events.
-    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
-    perf_sticky: bool,
+    /// Sticky perf event (0x0 = disabled). When a task exceeds -Y for this event, keep it on the same CPU.
+    #[clap(short = 'y', long, default_value = "0x0", value_parser = parse_hex)]
+    perf_sticky: u64,
+
+    /// Sticky perf threshold; task is kept on same CPU when its count for -y event exceeds this.
+    #[clap(short = 'Y', default_value = "0", long)]
+    perf_sticky_threshold: u64,
 
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
@@ -389,6 +385,73 @@ pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
     Ok(cpus)
 }
 
+/// Initial value for the dynamic threshold (in BPF units).
+const DYNAMIC_THRESHOLD_INIT_VALUE: u64 = 1000;
+
+/// Target event rate (per second) above which we consider migrations/sticky dispatches too high.
+const DYNAMIC_THRESHOLD_RATE_HIGH: f64 = 4000.0;
+
+/// Target event rate (per second) below which we consider migrations/sticky dispatches too low.
+const DYNAMIC_THRESHOLD_RATE_LOW: f64 = 2000.0;
+
+/// Minimum scale factor when just outside the target band (slow convergence near optimal).
+const DYNAMIC_THRESHOLD_SCALE_MIN: f64 = 0.0001;
+
+/// Maximum scale factor when far from target (fast convergence when initial threshold is way off).
+const DYNAMIC_THRESHOLD_SCALE_MAX: f64 = 1000.0;
+
+/// Slope for "too high" case: scale grows with (rate/HIGH - 1) so we step much harder when rate is
+/// many times over target.
+const DYNAMIC_THRESHOLD_SLOPE_HIGH: f64 = 0.35;
+
+/// Slope for "too low" case: scale grows with deficit so we step harder when rate is near zero.
+const DYNAMIC_THRESHOLD_SLOPE_LOW: f64 = 0.58;
+
+fn dynamic_threshold_scale(rate_per_sec: f64, too_high: bool) -> f64 {
+    if too_high {
+        let excess = ((rate_per_sec / DYNAMIC_THRESHOLD_RATE_HIGH) - 1.0).max(0.0);
+        let scale = DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_HIGH * excess.min(4.0);
+        scale.min(DYNAMIC_THRESHOLD_SCALE_MAX)
+    } else {
+        if rate_per_sec <= 0.0 {
+            return DYNAMIC_THRESHOLD_SCALE_MAX;
+        }
+        let deficit = (DYNAMIC_THRESHOLD_RATE_LOW - rate_per_sec) / DYNAMIC_THRESHOLD_RATE_LOW;
+        let t = deficit.min(1.0).max(0.0);
+        DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_LOW * t
+    }
+}
+
+fn adjust_dynamic_threshold(current: u64, rate_per_sec: f64, base_threshold: u64) -> u64 {
+    let (scale_pct, raise_threshold) = if rate_per_sec > DYNAMIC_THRESHOLD_RATE_HIGH {
+        (dynamic_threshold_scale(rate_per_sec, true), true)
+    } else if rate_per_sec < DYNAMIC_THRESHOLD_RATE_LOW && rate_per_sec >= 0.0 {
+        (dynamic_threshold_scale(rate_per_sec, false), false)
+    } else {
+        return current;
+    };
+
+    let factor = if raise_threshold {
+        1.0 + scale_pct
+    } else {
+        1.0 - scale_pct
+    };
+    let new = ((current as f64) * factor).round() as u64;
+
+    let min_val = if base_threshold == 0 {
+        1
+    } else {
+        base_threshold / 100
+    };
+    let max_val = if base_threshold == 0 {
+        u64::MAX
+    } else {
+        base_threshold.saturating_mul(10000)
+    };
+
+    new.clamp(min_val.max(1), max_val)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CpuTimes {
     user: u64,
@@ -465,10 +528,7 @@ impl<'a> Scheduler<'a> {
 
         // Enable perf event scheduling settings.
         rodata.perf_config = opts.perf_config;
-        if opts.perf_config > 0 {
-            rodata.perf_sticky = opts.perf_sticky;
-            rodata.perf_threshold = opts.perf_threshold;
-        }
+        rodata.perf_sticky = opts.perf_sticky;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
@@ -518,6 +578,24 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, cosmos_ops, uei)?;
 
+        // Initial perf thresholds in bss. When threshold is 0 we use dynamic logic; when user
+        // specifies a value > 0 we use it as a static threshold.
+        let bss = skel.maps.bss_data.as_mut().unwrap();
+        if opts.perf_config > 0 {
+            bss.perf_threshold = if opts.perf_threshold == 0 {
+                DYNAMIC_THRESHOLD_INIT_VALUE
+            } else {
+                opts.perf_threshold
+            };
+        }
+        if opts.perf_sticky > 0 {
+            bss.perf_sticky_threshold = if opts.perf_sticky_threshold == 0 {
+                DYNAMIC_THRESHOLD_INIT_VALUE
+            } else {
+                opts.perf_sticky_threshold
+            };
+        }
+
         // Configure CPU->node mapping (must be done after skeleton is loaded).
         for node in topo.nodes.values() {
             for cpu in node.all_cpus.values() {
@@ -532,15 +610,17 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Setup performance events for all CPUs
-        if opts.perf_config > 0 {
-            let nr_cpus = *NR_CPU_IDS;
-            info!("Setting up performance counters for {} CPUs...", nr_cpus);
-            let mut perf_available = true;
-            for cpu in 0..nr_cpus {
-                if let Err(e) = setup_perf_events(&mut skel, cpu as i32, opts.perf_config) {
+        // Setup performance events for all CPUs.
+        // Counter indices must match PMU library install order: migration first (0), then sticky (1).
+        // When only sticky is used, it gets index 0; when both are used, sticky gets index 1.
+        let nr_cpus = *NR_CPU_IDS;
+        info!("Setting up performance counters for {} CPUs...", nr_cpus);
+        let mut perf_available = true;
+        let sticky_counter_idx = if opts.perf_config > 0 { 1 } else { 0 };
+        for cpu in 0..nr_cpus {
+            if opts.perf_config > 0 {
+                if let Err(e) = setup_perf_events(&mut skel, cpu as i32, opts.perf_config, 0) {
                     if cpu == 0 {
-                        // Only warn once on first CPU failure
                         let err_str = e.to_string();
                         if err_str.contains("errno 2") || err_str.contains("os error 2") {
                             warn!("Performance counters not available on this CPU architecture");
@@ -553,9 +633,26 @@ impl<'a> Scheduler<'a> {
                     }
                 }
             }
-            if perf_available {
-                info!("Performance counters configured successfully for all CPUs");
+            if opts.perf_sticky > 0 {
+                if let Err(e) =
+                    setup_perf_events(&mut skel, cpu as i32, opts.perf_sticky, sticky_counter_idx)
+                {
+                    if cpu == 0 {
+                        let err_str = e.to_string();
+                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
+                            warn!("Performance counters not available on this CPU architecture");
+                            warn!("PMU event 0x{:x} not supported - scheduler will run without perf monitoring", opts.perf_sticky);
+                        } else {
+                            warn!("Failed to setup perf events: {}", e);
+                        }
+                        perf_available = false;
+                        break;
+                    }
+                }
             }
+        }
+        if perf_available {
+            info!("Performance counters configured successfully for all CPUs");
         }
 
         // Enable primary scheduling domain, if defined.
@@ -650,6 +747,7 @@ impl<'a> Scheduler<'a> {
             cpu_thresh: self.skel.maps.rodata_data.as_ref().unwrap().busy_threshold,
             cpu_util: self.skel.maps.bss_data.as_ref().unwrap().cpu_util,
             nr_event_dispatches: bss_data.nr_event_dispatches,
+            nr_ev_sticky_dispatches: bss_data.nr_ev_sticky_dispatches,
         }
     }
 
@@ -712,6 +810,10 @@ impl<'a> Scheduler<'a> {
         let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
         let mut last_update = Instant::now();
 
+        // Dynamic perf thresholds: scale based on migration and sticky dispatch rates.
+        let mut prev_nr_event_dispatches: u64 = 0;
+        let mut prev_nr_ev_sticky_dispatches: u64 = 0;
+
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             // Update CPU utilization.
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
@@ -720,6 +822,65 @@ impl<'a> Scheduler<'a> {
                         .map(|util| self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util);
                     prev_cputime = curr_cputime;
                 }
+
+                // Update dynamic perf thresholds based on event rates.
+                let nr_event = self
+                    .skel
+                    .maps
+                    .bss_data
+                    .as_ref()
+                    .unwrap()
+                    .nr_event_dispatches;
+                let nr_sticky = self
+                    .skel
+                    .maps
+                    .bss_data
+                    .as_ref()
+                    .unwrap()
+                    .nr_ev_sticky_dispatches;
+                let elapsed_secs = last_update.elapsed().as_secs_f64();
+                if elapsed_secs > 0.0 {
+                    let migration_rate =
+                        (nr_event.saturating_sub(prev_nr_event_dispatches) as f64) / elapsed_secs;
+                    let sticky_rate = (nr_sticky.saturating_sub(prev_nr_ev_sticky_dispatches)
+                        as f64)
+                        / elapsed_secs;
+
+                    let bss = self.skel.maps.bss_data.as_mut().unwrap();
+                    // Dynamic threshold only when user did not specify a value (threshold == 0).
+                    if self.opts.perf_config > 0 && self.opts.perf_threshold == 0 {
+                        let base = 0u64; // dynamic mode: use 0 so clamp is [1, u64::MAX]
+                        let current = bss.perf_threshold;
+                        let new_thresh = adjust_dynamic_threshold(current, migration_rate, base);
+                        if new_thresh != current {
+                            bss.perf_threshold = new_thresh;
+                            if self.opts.verbose {
+                                info!(
+                                    "perf_threshold: {} (migration rate {:.1}/s)",
+                                    new_thresh, migration_rate
+                                );
+                            }
+                        }
+                    }
+                    if self.opts.perf_sticky > 0 && self.opts.perf_sticky_threshold == 0 {
+                        let base = 0u64;
+                        let current = bss.perf_sticky_threshold;
+                        let new_thresh = adjust_dynamic_threshold(current, sticky_rate, base);
+                        if new_thresh != current {
+                            bss.perf_sticky_threshold = new_thresh;
+                            if self.opts.verbose {
+                                info!(
+                                    "perf_sticky_threshold: {} (sticky rate {:.1}/s)",
+                                    new_thresh, sticky_rate
+                                );
+                            }
+                        }
+                    }
+
+                    prev_nr_event_dispatches = nr_event;
+                    prev_nr_ev_sticky_dispatches = nr_sticky;
+                }
+
                 last_update = Instant::now();
             }
 
