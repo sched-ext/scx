@@ -124,6 +124,11 @@ const volatile bool deferred_wakeups = true;
 const volatile bool perf_sticky;
 
 /*
+ * Enable tick-based preemption enforcement.
+ */
+const volatile bool tick_preempt = true;
+
+/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
@@ -994,6 +999,37 @@ static inline void wakeup_cpu(s32 cpu)
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
+void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	if (!tick_preempt)
+		return;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Force preemption if the task has exceeded its time slice and
+	 * either:
+	 * - SMT contention has changed since we started running
+	 *   (sibling went busy or idle), triggering rescheduling so
+	 *   select_cpu can make a better placement decision, or
+	 * - the system is busy and there are tasks waiting in the
+	 *   local or shared DSQ.
+	 */
+	if (time_delta(scx_bpf_now(), tctx->last_run_at) > task_slice(p)) {
+		s32 cpu = scx_bpf_task_cpu(p);
+		bool smt_contention = avoid_smt && is_smt_contended(cpu);
+		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
+				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
+
+		if (smt_contention || (is_system_busy() && cpu_busy))
+			p->scx.slice = 0;
+	}
+}
+
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
@@ -1279,6 +1315,7 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .select_cpu		= (void *)cosmos_select_cpu,
 	       .enqueue			= (void *)cosmos_enqueue,
 	       .dispatch		= (void *)cosmos_dispatch,
+	       .tick                    = (void *)cosmos_tick,
 	       .runnable		= (void *)cosmos_runnable,
 	       .running			= (void *)cosmos_running,
 	       .stopping		= (void *)cosmos_stopping,
