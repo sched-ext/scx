@@ -71,6 +71,7 @@ enum consts_internal {
 	LAVD_SLICE_MAX_NS_DFL		= (5ULL * NSEC_PER_MSEC), /* max time slice */
 	LAVD_SLICE_BOOST_BONUS		= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_SLICE_BOOST_MAX		= (500ULL * NSEC_PER_MSEC),
+	LAVD_SLICE_BOOST_UTIL_WALL	= p2s(95), /* < 95%: cpu utilization threshold for slice boost */
 	LAVD_ACC_RUNTIME_MAX		= LAVD_SLICE_MAX_NS_DFL,
 	LAVD_TASK_LAG_MAX		= (500ULL * NSEC_PER_MSEC),
 	LAVD_DL_COMPETE_WINDOW		= ((300ULL * NSEC_PER_MSEC) >> 16), /* assuming task's latency
