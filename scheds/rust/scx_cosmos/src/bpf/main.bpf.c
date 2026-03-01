@@ -994,18 +994,18 @@ is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
 
 /*
  * Look for the least busy cpu based on perf_event count. Look within the
- * same node as prev_cpu, otherwise this optimization becomes expensive on
- * large CPU numa systems
+ * same LLC as prev_cpu, otherwise this optimization becomes too expensive
+ * due to the cost of cross-LLC cache misses.
  */
 static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu,
 				     const struct task_ctx *tctx)
 {
 	struct cpu_ctx *cctx;
 	u64 min = ~0UL;
-	int cpu, ret_cpu = -EBUSY;
+	s32 cpu, ret_cpu = -EBUSY;
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (cpu_node(cpu) != cpu_node(prev_cpu) ||
+		if (cpu_llc_id(cpu) != cpu_llc_id(prev_cpu) ||
 		    !is_cpu_idle(cpu) ||
 		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
