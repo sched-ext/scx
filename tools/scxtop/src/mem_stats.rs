@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
-use procfs::Meminfo;
+use procfs::{Current as _, Meminfo};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
@@ -75,7 +75,7 @@ pub struct MemStatSnapshot {
 
 impl MemStatSnapshot {
     pub fn update(&mut self) -> Result<()> {
-        let meminfo = Meminfo::new()?;
+        let meminfo = Meminfo::current()?;
 
         // Save previous values for delta calculation
         self.prev_swap_pages_in = self.swap_pages_in;

@@ -1,6 +1,7 @@
 use anyhow::bail;
 use csv::Reader;
 use procfs::CpuInfo;
+use procfs::Current as _;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -9,8 +10,6 @@ use std::env;
 use std::env::consts::ARCH;
 use std::ffi::OsString;
 use std::fs;
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 
 use crate::resources::ResourceDir;
@@ -140,10 +139,7 @@ impl PMUManager {
     /// Identify the architecture of the local machine and
     /// retrieve the paths to the relevant JSON files.
     fn identify_architecture() -> Result<String> {
-        let file = File::open("/proc/cpuinfo")?;
-        let bufreader = BufReader::new(file);
-
-        let cpuinfo = CpuInfo::from_reader(bufreader)?;
+        let cpuinfo = CpuInfo::current()?;
         Ok(format!(
             "{}-{}-{:X}",
             cpuinfo.fields["vendor_id"],
