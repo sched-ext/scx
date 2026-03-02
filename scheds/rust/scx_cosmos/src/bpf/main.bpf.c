@@ -1023,6 +1023,19 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu,
 	return ret_cpu;
 }
 
+/*
+ * Return true if @cpu is in the primary domain, false otherwise.
+ */
+static inline bool is_primary_cpu(s32 cpu)
+{
+	const struct cpumask *mask = cast_mask(primary_cpumask);
+
+	if (primary_all)
+		return true;
+
+	return mask && bpf_cpumask_test_cpu(cpu, mask);
+}
+
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
@@ -1073,24 +1086,25 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	}
 
 	/*
-	 * Pick an event free CPU: if task exceeds sticky threshold, keep
-	 * on same CPU, if it exceeds migration threshold, move to least
-	 * event-busy CPU.
+	 * If task exceeds the perf sticky threshold, dispatch it directly
+	 * on the same CPU if no other tasks are waiting.
 	 */
-	if (perf_config || perf_sticky) {
-		if (is_sticky_event_heavy(tctx)) {
-			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
-			return prev_cpu;
-		}
+	if (is_sticky_event_heavy(tctx) && is_primary_cpu(prev_cpu)) {
+		__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+		return prev_cpu;
+	}
 
-		if (is_event_heavy(tctx)) {
-			__sync_fetch_and_add(&nr_event_dispatches, 1);
-			new_cpu = pick_least_busy_event_cpu(p, prev_cpu, tctx);
-			if (new_cpu >= 0) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
-				return new_cpu;
-			}
+	/*
+	 * If the task exceeds the perf migration threshold, bounce it to
+	 * the least event-busy CPU.
+	 */
+	if (is_event_heavy(tctx)) {
+		__sync_fetch_and_add(&nr_event_dispatches, 1);
+		new_cpu = pick_least_busy_event_cpu(p, prev_cpu, tctx);
+		if (new_cpu >= 0) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+			return new_cpu;
 		}
 	}
 
@@ -1141,19 +1155,6 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	}
 }
 
-/*
- * Return true if @cpu is in the primary domain, false otherwise.
- */
-static inline bool is_primary_cpu(s32 cpu)
-{
-	const struct cpumask *mask = cast_mask(primary_cpumask);
-
-	if (primary_all)
-		return true;
-
-	return mask && bpf_cpumask_test_cpu(cpu, mask);
-}
-
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
@@ -1188,15 +1189,24 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Immediately dispatch sticky event-heavy tasks to the same CPU.
+	 * Attempt to immediately dispatch sticky event-heavy tasks to the
+	 * same CPU.
 	 */
 	if (is_sticky_event_heavy(tctx) && is_primary_cpu(prev_cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
-		__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
+		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(shared_dsq(prev_cpu));
 
-		if (!scx_bpf_task_running(p))
-			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
-		return;
+		/*
+		 * If a per-CPU task is waiting to acquire the CPU, skip
+		 * direct dispatch to prevent starvation.
+		 */
+		if (!q || q->nr_cpus_allowed > 1) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
+
+			if (!scx_bpf_task_running(p))
+				scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+			return;
+		}
 	}
 
 	/*
