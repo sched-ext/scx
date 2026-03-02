@@ -1212,7 +1212,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to immediately dispatch sticky event-heavy tasks to the
 	 * same CPU.
 	 */
-	if (is_sticky_event_heavy(tctx) && is_primary_cpu(prev_cpu)) {
+	if (is_sticky_event_heavy(tctx) &&
+	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
 		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(shared_dsq(prev_cpu));
 
 		/*
@@ -1233,7 +1234,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Immediately dispatch migration event-heavy tasks to a new CPU
 	 * (if the task is allowed to migrate).
 	 */
-	if (!is_migration_disabled(p) && is_event_heavy(tctx)) {
+	if (is_event_heavy(tctx) && !is_pcpu_task(p)) {
 		new_cpu = pick_least_busy_event_cpu(p, prev_cpu, tctx);
 		if (new_cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | new_cpu,
@@ -1250,7 +1251,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to dispatch directly to an idle CPU if the task can
 	 * migrate.
 	 */
-	if (task_should_migrate(p, enq_flags) || !is_primary_cpu(prev_cpu)) {
+	if (task_should_migrate(p, enq_flags) ||
+	    (!is_primary_cpu(prev_cpu) && !is_pcpu_task(p))) {
 		if (is_pcpu_task(p))
 			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
 		else
@@ -1266,7 +1268,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Keep using the same CPU if that CPU is not busy.
 	 */
-	if (!is_cpu_busy(prev_cpu) && is_primary_cpu(prev_cpu)) {
+	if (!is_cpu_busy(prev_cpu) &&
+	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 		if (task_should_migrate(p, enq_flags))
 			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
@@ -1297,7 +1300,8 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * wants to run on this CPU, give it another time slot if the CPU
 	 * is on the primary domain.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && is_primary_cpu(cpu))
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	    (is_primary_cpu(cpu) || prev->nr_cpus_allowed == 1))
 		prev->scx.slice = task_slice(prev);
 }
 
