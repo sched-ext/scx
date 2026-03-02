@@ -258,7 +258,7 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "1000")]
+    #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
 
     /// Maximum runtime (since last sleep) that can be charged to a task in microseconds.
@@ -282,7 +282,7 @@ struct Opts {
     ///
     /// A higher value is recommended for server-type workloads, while a lower value is recommended
     /// for interactive-type workloads.
-    #[clap(short = 'c', long, default_value = "75")]
+    #[clap(short = 'c', long, default_value = "0")]
     cpu_busy_thresh: u64,
 
     /// Polling time (ms) to refresh the CPU utilization.
@@ -295,7 +295,7 @@ struct Opts {
     /// Value is clamped to the range [10 .. 1000].
     ///
     /// 0 = disabled.
-    #[clap(short = 'p', long, default_value = "250")]
+    #[clap(short = 'p', long, default_value = "0")]
     polling_ms: u64,
 
     /// Specifies a list of CPUs to prioritize.
@@ -309,7 +309,7 @@ struct Opts {
     /// "all" = all CPUs assigned to the primary domain.
     ///
     /// By default "all" CPUs are used.
-    #[clap(short = 'm', long)]
+    #[clap(short = 'm', long, default_value = "performance")]
     primary_domain: Option<String>,
 
     /// Hardware perf event to monitor (0x0 = disabled). Accepts hex (0xN) or symbolic names
