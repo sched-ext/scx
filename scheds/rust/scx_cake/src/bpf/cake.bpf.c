@@ -39,6 +39,10 @@ const u32  bg_quantum_cap_ns  = 500 * 1000;  /* 500µs max slice for bg noise */
 const bool enable_stats __attribute__((used)) = false;
 #define CAKE_STATS_ENABLED (*(volatile const bool *)&enable_stats)
 #endif
+/* CAKE_STATS_ACTIVE: runtime-suppressible telemetry.
+ * False during BenchLab runs (bench_active=1) so kfunc measurements
+ * aren't polluted by ~15 extra scx_bpf_now() + arena writes per event. */
+#define CAKE_STATS_ACTIVE (CAKE_STATS_ENABLED && !bench_active)
 const bool enable_dvfs =
 	false; /* RODATA — loader-compat only (tick removed, DVFS dead) */
 
@@ -172,6 +176,7 @@ UEI_DEFINE(uei);
  * bench_request: TUI writes 1 → BPF runs bench on next stopping → clears to 0.
  * bench_results: populated by run_kfunc_bench(), read by TUI. */
 u32 bench_request = 0;
+u32 bench_active = 0;  /* 1 while benchmark is running — suppresses telemetry */
 struct kfunc_bench_results bench_results = {};
 
 /* ── Game Family Boost: PPID-based process-level yielder promotion ──
@@ -243,6 +248,8 @@ get_task_ctx(struct task_struct *p);
 static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 					     struct task_struct *p)
 {
+	/* Suppress CAKE_STATS_ACTIVE on all cores during benchmark */
+	*(volatile u32 *)&bench_active = 1;
 	r->cpu = bpf_get_smp_processor_id();
 	r->iterations = BENCH_ITERATIONS;
 
@@ -963,6 +970,7 @@ static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
 	}
 
 	r->bench_timestamp = bpf_ktime_get_ns();
+	*(volatile u32 *)&bench_active = 0;  /* Re-enable CAKE_STATS_ACTIVE */
 }
 
 
@@ -1057,17 +1065,19 @@ enum gate_id {
 
 static __always_inline s32
 direct_dispatch(struct task_struct *p, s32 cpu, u64 wake_flags,
-		u64 start_time, enum gate_id gid)
+		u64 start_time, enum gate_id gid, bool stats_on)
 {
 	u64 slice = p->scx.slice ?: quantum_ns;
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, wake_flags);
-	if (CAKE_STATS_ENABLED) {
+	if (stats_on) {
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 		if (tctx) {
 			/* Guard against clock-skew underflow (Rule F5) */
 			u64 sel_end = scx_bpf_now();
-			tctx->telemetry.select_cpu_duration_ns =
-				sel_end > start_time ? (u32)(sel_end - start_time) : 0;
+			u32 sel_dur = sel_end > start_time ? (u32)(sel_end - start_time) : 0;
+			tctx->telemetry.select_cpu_duration_ns = sel_dur;
+			/* Phase 8: gate cascade = full select_cpu time (same metric, explicit name) */
+			tctx->telemetry.gate_cascade_ns = sel_dur;
 			switch (gid) {
 			case GATE_1:  tctx->telemetry.gate_1_hits++;  break;
 			case GATE_1B: tctx->telemetry.gate_2_hits++;  break;
@@ -1090,7 +1100,7 @@ direct_dispatch(struct task_struct *p, s32 cpu, u64 wake_flags,
  * Records aggregate + per-task enqueue timing after DSQ insert. */
 static __always_inline void
 enqueue_telemetry(struct task_struct *p, u64 start_time, u64 pre_kfunc,
-		  u64 now_cached)
+		  u64 now_cached, bool stats_on)
 {
 	u64 post_kfunc = scx_bpf_now();
 	struct cake_stats *s = get_local_stats();
@@ -1104,6 +1114,10 @@ enqueue_telemetry(struct task_struct *p, u64 start_time, u64 pre_kfunc,
 			post_kfunc > start_time ? (u32)(post_kfunc - start_time) : 0;
 		tctx->telemetry.dsq_insert_ns =
 			post_kfunc > pre_kfunc ? (u32)(post_kfunc - pre_kfunc) : 0;
+		/* Phase 8: vtime compute = enqueue overhead minus DSQ insert kfunc cost */
+		u32 total_enq = post_kfunc > start_time ? (u32)(post_kfunc - start_time) : 0;
+		u32 insert_cost = post_kfunc > pre_kfunc ? (u32)(post_kfunc - pre_kfunc) : 0;
+		tctx->telemetry.vtime_compute_ns = total_enq > insert_cost ? total_enq - insert_cost : 0;
 	}
 }
 
@@ -1169,8 +1183,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	ARENA_ASSOC();
 
+	/* Snapshot once — eliminates TOCTOU race when bench_active
+	 * transitions mid-callback (Rule 45: oscillation avoidance). */
+	bool stats_on = CAKE_STATS_ACTIVE;
+
 	u64 start_time = 0;
-	if (CAKE_STATS_ENABLED)
+	if (stats_on)
 		start_time = scx_bpf_now();
 
 	/* ── SYNC STRIP: prevent waker-core migration ──
@@ -1220,7 +1238,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		u64 slice = p->scx.slice ?: quantum_ns;
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 				    slice, wake_flags);
-		if (CAKE_STATS_ENABLED) {
+		if (stats_on) {
 			struct cake_stats *s = get_local_stats();
 			s->total_gate1_latency_ns += scx_bpf_now() - start_time;
 			/* Per-task gate hit — lightweight: just counter increment,
@@ -1258,11 +1276,11 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		    (aff_mask & (1ULL << (u32)sib)) &&
 		    per_cpu[(u32)sib].mbox.idle_hint &&
 		    scx_bpf_test_and_clear_cpu_idle(sib)) {
-			if (CAKE_STATS_ENABLED) {
+			if (stats_on) {
 				struct cake_stats *s = get_local_stats();
 				s->total_gate1_latency_ns += scx_bpf_now() - start_time;
 			}
-			return direct_dispatch(p, sib, wake_flags, start_time, GATE_1B);
+			return direct_dispatch(p, sib, wake_flags, start_time, GATE_1B, stats_on);
 		}
 
 		/* Gate 1W-SMT: waker's SMT sibling — producer-consumer L2 sharing */
@@ -1273,7 +1291,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		    (aff_mask & (1ULL << (u32)waker_sib)) &&
 		    per_cpu[(u32)waker_sib].mbox.idle_hint &&
 		    scx_bpf_test_and_clear_cpu_idle(waker_sib)) {
-			return direct_dispatch(p, waker_sib, wake_flags, start_time, GATE_1W);
+			return direct_dispatch(p, waker_sib, wake_flags, start_time, GATE_1W, stats_on);
 		}
 	}
 
@@ -1318,7 +1336,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 				if (home_idle &&
 				    scx_bpf_test_and_clear_cpu_idle((s32)home)) {
 					return direct_dispatch(p, (s32)home, wake_flags,
-							       start_time, GATE_1C);
+							       start_time, GATE_1C, stats_on);
 				}
 
 				/* ── GATE 1c-P: Home CPU preempt-hog (migration dampening) ──
@@ -1344,7 +1362,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 					u32 elapsed = (u32)now_1cp - mbox_home->tick_last_run_at;
 					if (elapsed > CAKE_PREEMPT_YIELDER_THRESHOLD_NS) {
 						direct_dispatch(p, (s32)home, 0,
-								start_time, GATE_1CP);
+								start_time, GATE_1CP, stats_on);
 						scx_bpf_kick_cpu((s32)home,
 								 SCX_KICK_PREEMPT);
 						return (s32)home;
@@ -1386,7 +1404,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			    scx_bpf_test_and_clear_cpu_idle((s32)wcpu)) {
 				return direct_dispatch(p, (s32)wcpu,
 					wake_flags, start_time,
-					GATE_1WC);
+					GATE_1WC, stats_on);
 			}
 		}
 	}
@@ -1431,7 +1449,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 				    scx_bpf_test_and_clear_cpu_idle((s32)wcpu)) {
 					return direct_dispatch(p, (s32)wcpu,
 						wake_flags, start_time,
-						GATE_1D);
+						GATE_1D, stats_on);
 				}
 			}
 		}
@@ -1452,11 +1470,11 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 			if (is_idle_1w &&
 			    (aff_mask & (1ULL << (u32)waker_near))) {
-				if (CAKE_STATS_ENABLED) {
+				if (stats_on) {
 					if (tctx_shared && waker_near != prev_cpu)
 						tctx_shared->telemetry.migration_count++;
 				}
-				return direct_dispatch(p, waker_near, wake_flags, start_time, GATE_1W);
+				return direct_dispatch(p, waker_near, wake_flags, start_time, GATE_1W, stats_on);
 			}
 		}
 	}
@@ -1490,7 +1508,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			if (!mbox_prev->is_yielder) {
 				u32 elapsed = (u32)now_post_g1 - mbox_prev->tick_last_run_at;
 				if (elapsed > CAKE_PREEMPT_YIELDER_THRESHOLD_NS) {
-					direct_dispatch(p, prev_cpu, 0, start_time, GATE_1P);
+					direct_dispatch(p, prev_cpu, 0, start_time, GATE_1P, stats_on);
 					scx_bpf_kick_cpu(prev_cpu, SCX_KICK_PREEMPT);
 					return prev_cpu;
 				}
@@ -1503,13 +1521,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle_g3);
 
 	if (is_idle_g3 && (aff_mask & (1ULL << (u32)cpu))) {
-		if (CAKE_STATS_ENABLED) {
+		if (stats_on) {
 			struct cake_stats *s = get_local_stats();
 			s->total_gate2_latency_ns += scx_bpf_now() - start_time;
 			if (tctx_shared && cpu != prev_cpu)
 				tctx_shared->telemetry.migration_count++;
 		}
-		return direct_dispatch(p, cpu, wake_flags, start_time, GATE_3);
+		return direct_dispatch(p, cpu, wake_flags, start_time, GATE_3, stats_on);
 	}
 
 	/* ── TUNNEL: All CPUs busy — fall through to enqueue → DSQ ──
@@ -1538,7 +1556,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (is_game_family)
 		tctx_shared->waker_cpu = (u16)tc_id;
 
-	if (CAKE_STATS_ENABLED) {
+	if (stats_on) {
 		struct cake_stats *s = get_local_stats();
 		s->total_gate2_latency_ns += tunnel_now - start_time;
 		if (tctx_shared) {
@@ -1575,8 +1593,12 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	register struct task_struct *p_reg asm("r6") = p;
 	ARENA_ASSOC();
 
+	/* Snapshot once — eliminates TOCTOU race when bench_active
+	 * transitions mid-callback (Rule 45: oscillation avoidance). */
+	bool stats_on = CAKE_STATS_ACTIVE;
+
 	u64 start_time = 0;
-	if (CAKE_STATS_ENABLED) {
+	if (stats_on) {
 		start_time = scx_bpf_now();
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p_reg);
 		if (tctx)
@@ -1606,7 +1628,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	u32			     enq_llc	= scr->cached_llc;
 
 	/* Stale scratch guard: select_cpu is only called on WAKEUP.
-     * On PREEMPT or YIELD, the scratch cache contains ancient data from the last wakeup. 
+     * On PREEMPT or YIELD, the scratch cache contains ancient data from the last wakeup.
      * We MUST refresh now_cached, or preempted tasks will get a stale timestamp and
      * steal the queue (breaking DRR++ fairness). */
 	if (!(enq_flags & SCX_ENQ_WAKEUP)) {
@@ -1625,7 +1647,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		 * Full 64-bit range — no mask. */
 		u64 vtime = now_cached;
 		u64 pre_kfunc = 0;
-		if (CAKE_STATS_ENABLED) pre_kfunc = scx_bpf_now();
+		if (stats_on) pre_kfunc = scx_bpf_now();
 
 		/* Per-LLC DSQ with vtime ordering — priority system applies
 		 * to ALL tasks regardless of LLC count. dsq_gen bumped so
@@ -1634,8 +1656,8 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 					 quantum_ns, vtime, enq_flags);
 		dsq_gen[enq_llc & (CAKE_MAX_LLCS - 1)]++;
 
-		if (CAKE_STATS_ENABLED)
-			enqueue_telemetry(p_reg, start_time, pre_kfunc, now_cached);
+		if (stats_on)
+			enqueue_telemetry(p_reg, start_time, pre_kfunc, now_cached, stats_on);
 		return;
 	}
 
@@ -1660,7 +1682,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 		requeue_slice = lo + ((hi - lo) & -(u64)yl_flag);
 		requeue_slice += (200000 - requeue_slice) & -(requeue_slice < 200000);
 		u64 pre_kfunc = 0;
-		if (CAKE_STATS_ENABLED) pre_kfunc = scx_bpf_now();
+		if (stats_on) pre_kfunc = scx_bpf_now();
 
 		/* Per-LLC DSQ with vtime — re-enqueued tasks get priority
 		 * ordering (yielders sort before bulk). */
@@ -1668,8 +1690,8 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 					 requeue_slice, vtime, enq_flags);
 		dsq_gen[enq_llc & (CAKE_MAX_LLCS - 1)]++;
 
-		if (CAKE_STATS_ENABLED)
-			enqueue_telemetry(p_reg, start_time, pre_kfunc, now_cached);
+		if (stats_on)
+			enqueue_telemetry(p_reg, start_time, pre_kfunc, now_cached, stats_on);
 		return;
 	}
 
@@ -1725,7 +1747,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	/* P4-5: Branchless new_flow vtime subtraction (Rule 16) */
 	vtime -= new_flow_bonus_ns & -(u64)new_flow;
 
-	if (CAKE_STATS_ENABLED) {
+	if (stats_on) {
 		struct cake_stats *s = get_local_stats();
 		/* P4-3: Reuse new_flow (identical to nf_stat, saves 1 reg + 2 insns) */
 		if (new_flow)
@@ -1737,7 +1759,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	u64 pre_kfunc = 0;
-	if (CAKE_STATS_ENABLED) pre_kfunc = scx_bpf_now();
+	if (stats_on) pre_kfunc = scx_bpf_now();
 
 	/* Per-LLC DSQ with vtime — game/boosted tasks sort before bulk.
 	 * dsq_gen bumped so cake_dispatch picks up new work. */
@@ -1745,8 +1767,8 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 				 slice, vtime, enq_flags);
 	dsq_gen[enq_llc & (CAKE_MAX_LLCS - 1)]++;
 
-	if (CAKE_STATS_ENABLED)
-		enqueue_telemetry(p_reg, start_time, pre_kfunc, now_cached);
+	if (stats_on)
+		enqueue_telemetry(p_reg, start_time, pre_kfunc, now_cached, stats_on);
 }
 
 /* Dispatch: single DSQ per LLC + cross-LLC steal.
@@ -1761,6 +1783,13 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 {
 	ARENA_ASSOC();
 	u32 cpu_idx = raw_cpu & (CAKE_MAX_CPUS - 1);
+
+	/* Snapshot once — eliminates TOCTOU race when bench_active
+	 * transitions mid-callback (Rule 45: oscillation avoidance). */
+	bool stats_on = CAKE_STATS_ACTIVE;
+
+	/* Phase 8: dispatch callback timing (aggregate, CPU-scoped) */
+	u64 dispatch_start = stats_on ? scx_bpf_now() : 0;
 
 	/* All LLC counts use per-LLC DSQ with vtime ordering.
 	 * No early return — cake_dispatch always checks the DSQ. */
@@ -1777,7 +1806,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	u32 cur_gen = dsq_gen[llc_idx];
 	u32 my_gen = per_cpu[cpu_idx].mbox.last_dsq_gen;
 	if (cur_gen == my_gen) {
-		if (CAKE_STATS_ENABLED) {
+		if (stats_on) {
 			struct cake_stats *s = get_local_stats();
 			s->nr_dispatch_hint_skip++;
 		}
@@ -1789,10 +1818,14 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	/* Generation changed — new work was enqueued. Check the DSQ. */
 	if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE + my_llc)) {
 		/* Consumed — no shared write needed! */
-		if (CAKE_STATS_ENABLED) {
+		if (stats_on) {
 			struct cake_stats *s = get_local_stats();
 			s->nr_local_dispatches++;
 			s->nr_dsq_consumed++;
+			/* Phase 8: dispatch timing for consumed path */
+			u64 d_oh = scx_bpf_now() - dispatch_start;
+			s->total_dispatch_ns += d_oh;
+			s->max_dispatch_ns = s->max_dispatch_ns + ((d_oh - s->max_dispatch_ns) & -(d_oh > s->max_dispatch_ns));
 		}
 		return;
 	}
@@ -1809,22 +1842,34 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 		if (victim >= nr_llcs)
 			victim -= nr_llcs;
 		if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE + victim)) {
-			if (CAKE_STATS_ENABLED) {
+			if (stats_on) {
 				struct cake_stats *s = get_local_stats();
 				s->nr_stolen_dispatches++;
 				s->nr_dsq_consumed++;
+				/* Phase 8: dispatch timing for steal path */
+				u64 d_oh = scx_bpf_now() - dispatch_start;
+				s->total_dispatch_ns += d_oh;
+				s->max_dispatch_ns = s->max_dispatch_ns + ((d_oh - s->max_dispatch_ns) & -(d_oh > s->max_dispatch_ns));
 			}
 			return;
 		}
 	}
 
-	if (CAKE_STATS_ENABLED) {
+	if (stats_on) {
 		struct cake_stats *s = get_local_stats();
 		s->nr_dispatch_misses++;
 	}
 
 	/* Idle shadow hint: CPU has no work — going idle. */
 	per_cpu[cpu_idx].mbox.idle_hint = 1;
+
+	/* Phase 8: dispatch aggregate timing (fallthrough = miss path) */
+	if (stats_on) {
+		struct cake_stats *s_d = get_local_stats();
+		u64 d_oh = scx_bpf_now() - dispatch_start;
+		s_d->total_dispatch_ns += d_oh;
+		s_d->max_dispatch_ns = s_d->max_dispatch_ns + ((d_oh - s_d->max_dispatch_ns) & -(d_oh > s_d->max_dispatch_ns));
+	}
 }
 
 /* DVFS RODATA: unused by BPF (tick removed) but written by Rust loader.
@@ -1859,9 +1904,16 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	u64 slice = p->scx.slice;
 	u32 now = (u32)p->se.exec_start;
 
+	/* Snapshot once — eliminates TOCTOU race when bench_active
+	 * transitions mid-callback (Rule 45: oscillation avoidance). */
+	bool stats_on = CAKE_STATS_ACTIVE;
+
 	/* STATS-ONLY: scx_bpf_now + get_task_ctx for telemetry timing. */
-	u64 now_full = CAKE_STATS_ENABLED ? scx_bpf_now() : (u64)now;
-	u64 running_overhead_start = CAKE_STATS_ENABLED ? now_full : 0;
+	u64 now_full = stats_on ? scx_bpf_now() : (u64)now;
+	u64 running_overhead_start = stats_on ? now_full : 0;
+
+	/* Phase 8: mailbox staging stopwatch start */
+	u64 mbox_start = stats_on ? now_full : 0;
 
 	/* ── COMPUTE: final slice from staged data ── */
 	u64 final_slice = slice ?: quantum_ns;
@@ -1904,7 +1956,10 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 
 	/* ARENA TELEMETRY: Record run start time for task-level tracking.
      * Stored directly in BPF Arena for 0-syscall user-space sweeping. */
-	if (CAKE_STATS_ENABLED) {
+	if (stats_on) {
+		/* Phase 8: mailbox staging stopwatch end (before arena work) */
+		u64 mbox_end = scx_bpf_now();
+
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 		if (tctx) {
 			/* P4-4: Reuse now_full instead of extra scx_bpf_now() (~15ns saved) */
@@ -1949,6 +2004,9 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 				tctx->telemetry.running_duration_ns = (u32)oh_run;
 				s_run->total_running_ns += oh_run;
 				s_run->max_running_ns = s_run->max_running_ns + ((oh_run - s_run->max_running_ns) & -(oh_run > s_run->max_running_ns));
+
+				/* Phase 8: mailbox staging duration */
+				tctx->telemetry.mbox_staging_ns = (u32)(mbox_end - mbox_start);
 			}
 		}
 	}
@@ -1984,8 +2042,16 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	ARENA_ASSOC();
 	struct mega_mailbox_entry __arena *mbox = &per_cpu[cpu].mbox;
 
+	/* Snapshot once — eliminates TOCTOU race when bench_active
+	 * transitions mid-callback (Rule 45: oscillation avoidance).
+	 * This was the ROOT CAUSE of ~85T ns callback profile corruption:
+	 * bench_active transition 1→0 between start-timestamp (line A)
+	 * and accumulation (line B) left stopping_overhead_start=0,
+	 * making scx_bpf_now()-0 = raw system clock leaking into total. */
+	bool stats_on = CAKE_STATS_ACTIVE;
+
 	u64 stopping_overhead_start = 0;
-	if (CAKE_STATS_ENABLED) {
+	if (stats_on) {
 		stopping_overhead_start = scx_bpf_now();
 		mbox->last_stopped_pid = p->pid;
 	}
@@ -2013,17 +2079,25 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	 * The & 63 gate is the same one used by deferred STATS — zero extra cost.
 	 *
 	 * CRITICAL: counter MUST be incremented BEFORE the gate check and
-	 * OUTSIDE CAKE_STATS_ENABLED. Previous bug: counter only incremented
+	 * OUTSIDE CAKE_STATS_ACTIVE. Previous bug: counter only incremented
 	 * inside stats block → stayed 0 in release → EWMA ran every stop. */
 	u32 rc = tctx->reclass_counter++;
 	struct ewma_result er;
+
+	/* Phase 8: stopwatch checkpoint for EWMA computation */
+	u64 ewma_start = 0;
+	if (stats_on && (rc & 63) == 0)
+		ewma_start = scx_bpf_now();
+
 	if ((rc & 63) == 0) {
 		/* Full EWMA recomputation (every 64th stop) */
 		er = compute_ewma(
 			mbox->tick_slice, p->scx.slice,
 			EXTRACT_AVG_RT(fused), EXTRACT_DEFICIT(fused));
-		if (CAKE_STATS_ENABLED)
+		if (stats_on) {
 			tctx->telemetry.ewma_recomp_count++;
+			tctx->telemetry.ewma_compute_ns = (u32)(scx_bpf_now() - ewma_start);
+		}
 	} else {
 		/* Confidence skip: reuse previous values (98.4% of stops) */
 		er.new_avg = EXTRACT_AVG_RT(fused);
@@ -2036,10 +2110,10 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	 * Priority now uses ONLY game_member + waker_boost.
 	 * Game family = TGID match (game threads) OR PPID match (Wine siblings).
 	 *
-	 * nvcsw_delta kept for TUI telemetry under CAKE_STATS_ENABLED. */
+	 * nvcsw_delta kept for TUI telemetry under CAKE_STATS_ACTIVE. */
 	bool is_game = (game_tgid && p->tgid == game_tgid)
 		    || (game_ppid && tctx->ppid == game_ppid);
-	if (CAKE_STATS_ENABLED && !is_game) {
+	if (stats_on && !is_game) {
 		u64 cur_nv = p->nvcsw;
 		u64 prev_nv = tctx->nvcsw_snapshot;
 		if (prev_nv > 0)
@@ -2047,11 +2121,16 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		tctx->nvcsw_snapshot = cur_nv;
 	}
 
-	/* ── 3. DRR++ deficit exhaustion + WAKER_BOOST extraction ──
+	/* ═══ 3. DRR++ deficit exhaustion + WAKER_BOOST extraction ═══
 	 * FUSED MASK CLEAR (Rule 24): unconditional WAKER_BOOST clear +
 	 * conditional NEW clear combined into single AND operation.
 	 * Must extract wb BEFORE clearing — one-shot flag set by cake_enqueue.
 	 * Pre-Phase-7.0 bug: wb was read AFTER clear → always 0. */
+
+	/* Phase 8: classify stopwatch start */
+	u64 classify_start = 0;
+	if (stats_on && (rc & 63) == 0)
+		classify_start = scx_bpf_now();
 	u32 wb = (packed >> SHIFT_FLAGS) & CAKE_FLOW_WAKER_BOOST;
 	u32 clear_mask = (u32)CAKE_FLOW_WAKER_BOOST << SHIFT_FLAGS;
 	/* Branchless: conditionally add NEW to clear mask (Rule 16) */
@@ -2081,19 +2160,32 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 	u8 nf = (packed >> SHIFT_FLAGS) & 1;
 
-	/* ── 4. Write back to per-task arena ── */
+	/* ═══ 4. Write back to per-task arena ═══ */
 	tctx->deficit_avg_fused = PACK_DEFICIT_AVG(er.deficit, er.new_avg);
 	tctx->packed_info = packed;
 
-	/* ── 5. WARM CPU HISTORY — migration-gated ring shift ──
+	/* Phase 8: classify stopwatch end */
+	if (stats_on && classify_start)
+		tctx->telemetry.classify_ns = (u32)(scx_bpf_now() - classify_start);
+
+	/* ═══ 5. WARM CPU HISTORY — migration-gated ring shift ═══
 	 * Only fires on migration (cpu != warm_cpus[0]), ~9% of stops.
 	 * 91% fast path: single comparison, zero writes.
 	 * Feeds Gate 1c warm cache probes in cake_select_cpu. */
+
+	/* Phase 8: warm history stopwatch */
+	u64 warm_start = 0;
+	if (stats_on && (rc & 63) == 0)
+		warm_start = scx_bpf_now();
+
 	if (tctx->warm_cpus[0] != (u16)cpu) {
 		tctx->warm_cpus[2] = tctx->warm_cpus[1];
 		tctx->warm_cpus[1] = tctx->warm_cpus[0];
 		tctx->warm_cpus[0] = (u16)cpu;
 	}
+
+	if (stats_on && warm_start)
+		tctx->telemetry.warm_history_ns = (u32)(scx_bpf_now() - warm_start);
 
 	/* ── 6. YIELD-GATED QUANTUM + WEIGHTED VTIME (Phase 5.0) ──
 	 * Slice = runtime-proportional, modulated by yield signal.
@@ -2139,10 +2231,18 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 			    ((u64)nf << STAGED_BIT_NEW_FLOW) |
 			    (u64)weight_ns;
 
+	/* Phase 8: vtime staging stopwatch */
+	if (stats_on && (rc & 63) == 0) {
+		u64 vtime_end = scx_bpf_now();
+		/* warm_start repurposed: vtime staging started right after warm history */
+		if (warm_start)
+			tctx->telemetry.vtime_staging_ns = (u32)(vtime_end - (warm_start + tctx->telemetry.warm_history_ns));
+	}
+
 	/* ── Telemetry + aggregate profiling (verbose only) ──
 	 * Split into ALWAYS (lightweight CL0/BSS) + DEFERRED (heavy CL1-CL3).
 	 * Deferred block runs every 64th stop via reclass_counter gate. */
-	if (CAKE_STATS_ENABLED) {
+	if (stats_on) {
 		/* ALWAYS: lightweight counters (CL0 — same line as fused/packed) */
 		/* reclass_counter moved to pre-EWMA gate (line ~1920) — must
 		 * increment in release builds too for confidence skip to work. */
@@ -2195,6 +2295,18 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 			/* Per-task stopping overhead (deferred — TUI display only) */
 			u64 oh = scx_bpf_now() - stopping_overhead_start;
 			tctx->telemetry.stopping_duration_ns = (u32)oh;
+
+			/* Phase 8: quantum completion tracking */
+			u64 rem = p->scx.slice;
+			if (rem == 0)
+				tctx->telemetry.quantum_full_count++;
+			else if (!runnable)
+				tctx->telemetry.quantum_yield_count++;
+			else
+				tctx->telemetry.quantum_preempt_count++;
+
+			/* Phase 8: CPU core distribution histogram */
+			tctx->telemetry.cpu_run_count[cpu & (CAKE_MAX_CPUS - 1)]++;
 		}
 
 		/* ALWAYS: Aggregate overhead timing (per-CPU BSS, cheap)
@@ -2230,7 +2342,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 
 	tctx = (struct cake_task_ctx __arena *)scx_task_alloc(p);
 	if (!tctx) {
-		if (CAKE_STATS_ENABLED) {
+		if (CAKE_STATS_ACTIVE) {
 			struct cake_stats *s = get_local_stats();
 			s->nr_dropped_allocations++;
 		}
@@ -2238,7 +2350,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	}
 
 	/* Register in PID→tctx map for TUI visibility (100% task coverage) */
-	if (CAKE_STATS_ENABLED) {
+	if (CAKE_STATS_ACTIVE) {
 		u32 pid_key = p->pid;
 		u64 tctx_val = (u64)tctx;
 		bpf_map_update_elem(&pid_to_tctx, &pid_key, &tctx_val, BPF_ANY);
@@ -2269,13 +2381,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 
 	/* PPID: ALWAYS populated — game family detection (cake_stopping line 2031,
 	 * Gate 1WC, tunnel) reads tctx->ppid unconditionally. Must be outside
-	 * CAKE_STATS_ENABLED or PPID-based Wine/Proton sibling detection is
+	 * CAKE_STATS_ACTIVE or PPID-based Wine/Proton sibling detection is
 	 * dead in release builds. */
 	tctx->ppid = p->real_parent ? p->real_parent->tgid : 0;
 
 	/* TUI telemetry: identity fields only needed with --verbose.
 	 * Gated to avoid unnecessary arena writes on task creation. */
-	if (CAKE_STATS_ENABLED) {
+	if (CAKE_STATS_ACTIVE) {
 		tctx->telemetry.pid = p->pid;
 		tctx->telemetry.tgid = p->tgid;
 		u64 *comm_src = (u64 *)p->comm;
@@ -2321,7 +2433,7 @@ void BPF_STRUCT_OPS(cake_set_cpumask, struct task_struct *p __arg_trusted,
 	if (!tctx)
 		return;
 
-	if (CAKE_STATS_ENABLED)
+	if (CAKE_STATS_ACTIVE)
 		tctx->telemetry.cpumask_change_count++;
 
 	tctx->cached_cpumask = build_cached_cpumask(cpumask);
@@ -2335,7 +2447,7 @@ bool BPF_STRUCT_OPS(cake_yield, struct task_struct *p)
 {
 	/* F3: Gate behind CAKE_STATS_ENABLED — yield_count is TUI-only.
 	 * Saves ~16ns get_task_ctx per sched_yield() in release builds. */
-	if (CAKE_STATS_ENABLED) {
+	if (CAKE_STATS_ACTIVE) {
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 		if (tctx) tctx->telemetry.yield_count++;
 	}
@@ -2345,15 +2457,19 @@ bool BPF_STRUCT_OPS(cake_yield, struct task_struct *p)
 /* Handle preemption when a task is pushed off the CPU. */
 void BPF_STRUCT_OPS(cake_runnable, struct task_struct *p, u64 enq_flags)
 {
-	if (CAKE_STATS_ENABLED) {
+	if (CAKE_STATS_ACTIVE) {
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 		if (tctx) {
 			if (enq_flags & SCX_ENQ_PREEMPT)
 				tctx->telemetry.preempt_count++;
 			/* Wakeup source: the currently running task is the waker */
 			struct task_struct *waker = bpf_get_current_task_btf();
-			if (waker)
+			if (waker) {
 				tctx->telemetry.wakeup_source_pid = waker->pid;
+				/* Phase 8: wake chain enhancement */
+				tctx->telemetry.waker_cpu = (u16)bpf_get_smp_processor_id();
+				tctx->telemetry.waker_tgid = waker->tgid;
+			}
 		}
 	}
 }
@@ -2363,7 +2479,7 @@ void BPF_STRUCT_OPS(cake_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
 	/* Remove from PID→tctx map before freeing arena storage */
-	if (CAKE_STATS_ENABLED) {
+	if (CAKE_STATS_ACTIVE) {
 		u32 pid_key = p->pid;
 		bpf_map_delete_elem(&pid_to_tctx, &pid_key);
 	}

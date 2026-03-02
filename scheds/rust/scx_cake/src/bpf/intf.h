@@ -214,7 +214,7 @@ struct cake_task_ctx {
 	u32 _pad_cl0;     /* Pad to 8-byte boundary for telemetry u64 fields */
 
 	/* --- High Resolution Arena Telemetry (TUI Matrix) ---
-     * Zero-cost pointer access via BPF Arena. User-space sweeps memory 
+     * Zero-cost pointer access via BPF Arena. User-space sweeps memory
      * asynchronously to build 1% Lows and average runtimes. */
 	struct {
 		/* Timing Metrics */
@@ -240,7 +240,7 @@ struct cake_task_ctx {
 		u64 jitter_accum_ns; /* Mathematical running variant vs AVG */
 		u32 total_runs; /* Total executions over lifetime */
 		u16 core_placement; /* Physical CPU task last executed on */
-		
+
 		/* State Change Counters */
 		u16 migration_count; /* Inter-cpu bounces inside select_cpu */
 		u16 preempt_count;   /* Task kicked/preempted */
@@ -286,13 +286,48 @@ struct cake_task_ctx {
 		u32 tgid;  /* Thread group ID (process) for TUI grouping */
 		/* ppid promoted to main struct CL0 (Rule 42) — see above */
 		char comm[16];
+
+		/* ═══ PER-CALLBACK SUB-FUNCTION STOPWATCH (Phase 8: Verbose Health) ═══
+		 * Last-write-wins u32 ns fields. Written under deferred gate
+		 * (reclass_counter & 63 == 0). Zero cost on 98.4% of invocations. */
+		u32 gate_cascade_ns;       /* select_cpu: full gate cascade duration */
+		u32 idle_probe_ns;         /* select_cpu: winning gate idle probe cost */
+		u32 vtime_compute_ns;      /* enqueue: vtime calculation + tier weighting */
+		u32 mbox_staging_ns;       /* running: mailbox CL0 write burst */
+		u32 ewma_compute_ns;       /* stopping: compute_ewma() call */
+		u32 classify_ns;           /* stopping: tier classify + squeeze fusion */
+		u32 vtime_staging_ns;      /* stopping: dsq_vtime bit packing + slice/vtime write */
+		u32 warm_history_ns;       /* stopping: warm CPU ring shift (migration-gated) */
+
+		/* ═══ QUANTUM COMPLETION TRACKING (Phase 8) ═══
+		 * Tracks how tasks use their allocated slice.
+		 * Full = slice exhausted (preempted at expiry).
+		 * Yield = voluntary sleep/yield before slice expired.
+		 * Preempt = forcibly kicked mid-slice by higher priority. */
+		u16 quantum_full_count;    /* Task consumed entire slice */
+		u16 quantum_yield_count;   /* Task yielded before slice exhaustion */
+		u16 quantum_preempt_count; /* Task was kicked/preempted mid-slice */
+		u16 _pad_quantum;          /* Align to 4B boundary */
+
+		/* ═══ WAKE CHAIN ENHANCEMENT (Phase 8) ═══
+		 * Extends existing wakeup_source_pid with CPU and TGID of waker.
+		 * Enables wake train mapping: A→B→C producer-consumer chains. */
+		u16 waker_cpu;             /* CPU the waker was running on */
+		u16 _pad_waker;            /* Align to 4B */
+		u32 waker_tgid;            /* TGID of the waker (process group) */
+
+		/* ═══ CPU CORE DISTRIBUTION HISTOGRAM (Phase 8) ═══
+		 * Per-CPU run count for affinity distribution analysis.
+		 * Incremented in cake_stopping under deferred gate.
+		 * TUI normalizes to percentages per task. */
+		u16 cpu_run_count[CAKE_MAX_CPUS]; /* 128 bytes: per-CPU run count */
 	} telemetry;
 
-	/* Compiler enforces 256-byte alignment via __attribute__((aligned(256))).
-	 * No explicit padding needed — aligned attribute handles it.
-	 * Pre-telemetry: 48B (ppid promoted from telemetry), telemetry: ~186B,
-	 * total: ~234B → 22B implicit pad. */
-} __attribute__((aligned(256)));
+	/* Compiler enforces 512-byte alignment via __attribute__((aligned(512))).
+	 * Phase 8 growth: pre-telemetry 48B + telemetry ~350B = ~398B → 512B aligned.
+	 * New fields: stopwatch (8×4=32B), quantum (8B), wake chain (8B),
+	 * CPU histogram (128B) = 176B added. */
+} __attribute__((aligned(512)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
  * [Stable:2][Tier:2][Flags:4][KTH:1][BG:1][Rsvd:14][Rsvd:8]
@@ -346,7 +381,7 @@ struct mega_mailbox_entry {
      * Zero cross-CPU writes → zero RFO bounces from waker CPUs.
      *
      * DESIGN: BenchLab proved ALL BPF computation is free (calibration floor).
-     * The ONLY costs are kfunc/subprogram calls: get_task_ctx (16ns), 
+     * The ONLY costs are kfunc/subprogram calls: get_task_ctx (16ns),
      * scx_bpf_now (7ns), test_and_clear_idle (15ns). Mailbox handoff
      * eliminates get_task_ctx + arena reads from cake_stopping entirely.
      *
@@ -448,7 +483,11 @@ struct cake_stats {
 	u64 nr_stop_ramp;            /* Stability ramp (stable < 3) */
 	u64 nr_stop_miss;            /* Cold/self-seed miss path (~30ns) */
 
-	u64 _pad[3]; /* Pad to 256 bytes: (2+4+4+3+4+2+3+3+3+4+3)*8 = 280... recalc */
+	/* ═══ DISPATCH CALLBACK TIMING (Phase 8: Verbose Health) ═══ */
+	u64 total_dispatch_ns;       /* Total time in cake_dispatch */
+	u64 max_dispatch_ns;         /* Worst single cake_dispatch */
+
+	u64 _pad[1]; /* Pad to 64-byte alignment */
 } __attribute__((aligned(64)));
 
 /* Default values (Gaming profile) */
