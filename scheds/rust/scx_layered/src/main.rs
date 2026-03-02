@@ -2355,6 +2355,32 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        for spec in layer_specs.iter() {
+            let has_numa_node_match = spec
+                .matches
+                .iter()
+                .flatten()
+                .any(|m| matches!(m, LayerMatch::NumaNode(_)));
+            let has_node_spread_algo = matches!(
+                spec.kind.common().growth_algo,
+                LayerGrowthAlgo::NodeSpread
+                    | LayerGrowthAlgo::NodeSpreadReverse
+                    | LayerGrowthAlgo::NodeSpreadRandom
+            );
+            if has_numa_node_match && has_node_spread_algo {
+                bail!(
+                    "layer {:?}: NumaNode matcher cannot be combined with {:?} \
+                     growth algorithm. NodeSpread* allocates CPUs equally across \
+                     ALL NUMA nodes, but NumaNode restricts tasks to one node's \
+                     CPUs — CPUs on other nodes are wasted and utilization \
+                     will never exceed 1/numa_nodes. Use a non-spread algorithm \
+                     (e.g. Linear, Topo) instead.",
+                    spec.name,
+                    spec.kind.common().growth_algo
+                );
+            }
+        }
+
         // Check kernel features
         init_libbpf_logging(None);
         let kfuncs_in_syscall = scx_bpf_compat::kfuncs_supported_in_syscall()?;
