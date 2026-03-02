@@ -993,6 +993,19 @@ is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
 }
 
 /*
+ * Return true if @cpu is in the primary domain, false otherwise.
+ */
+static inline bool is_primary_cpu(s32 cpu)
+{
+	const struct cpumask *mask = cast_mask(primary_cpumask);
+
+	if (primary_all)
+		return true;
+
+	return mask && bpf_cpumask_test_cpu(cpu, mask);
+}
+
+/*
  * Look for the least busy cpu based on perf_event count. Look within the
  * same LLC as prev_cpu, otherwise this optimization becomes too expensive
  * due to the cost of cross-LLC cache misses.
@@ -1005,8 +1018,10 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu,
 	s32 cpu, ret_cpu = -EBUSY;
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (cpu_llc_id(cpu) != cpu_llc_id(prev_cpu) ||
+		if (cpu == prev_cpu ||
+		    cpu_llc_id(cpu) != cpu_llc_id(prev_cpu) ||
 		    !is_cpu_idle(cpu) ||
+		    !is_primary_cpu(cpu) ||
 		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
@@ -1021,19 +1036,6 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu,
 	}
 
 	return ret_cpu;
-}
-
-/*
- * Return true if @cpu is in the primary domain, false otherwise.
- */
-static inline bool is_primary_cpu(s32 cpu)
-{
-	const struct cpumask *mask = cast_mask(primary_cpumask);
-
-	if (primary_all)
-		return true;
-
-	return mask && bpf_cpumask_test_cpu(cpu, mask);
 }
 
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
