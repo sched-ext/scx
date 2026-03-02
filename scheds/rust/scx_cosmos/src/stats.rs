@@ -15,10 +15,6 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
-    #[stat(desc = "Average CPU utilization %")]
-    pub cpu_util: u64,
-    #[stat(desc = "Busy utilization threshold %")]
-    pub cpu_thresh: u64,
     #[stat(desc = "Direct dispatch due to high perf events (migration)")]
     pub nr_event_dispatches: u64,
     #[stat(desc = "Kept on same CPU due to perf sticky threshold")]
@@ -31,14 +27,8 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] CPUs {:>5.1}% {} ev_dispatches={} ev_sticky_dispatches={} gpu_dispatches={}",
+            "[{}] ev_dispatches={} ev_sticky_dispatches={} gpu_dispatches={}",
             crate::SCHEDULER_NAME,
-            (self.cpu_util as f64) * 100.0 / 1024.0,
-            if self.cpu_util >= self.cpu_thresh {
-                "[deadline]"
-            } else {
-                "[round-robin]"
-            },
             self.nr_event_dispatches,
             self.nr_ev_sticky_dispatches,
             self.nr_gpu_dispatches,
@@ -51,7 +41,6 @@ impl Metrics {
             nr_event_dispatches: self.nr_event_dispatches - rhs.nr_event_dispatches,
             nr_ev_sticky_dispatches: self.nr_ev_sticky_dispatches - rhs.nr_ev_sticky_dispatches,
             nr_gpu_dispatches: self.nr_gpu_dispatches - rhs.nr_gpu_dispatches,
-            ..self.clone()
         }
     }
 }

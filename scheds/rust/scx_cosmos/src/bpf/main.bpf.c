@@ -154,9 +154,15 @@ const volatile u64 slice_lag = 20000000ULL;
 const volatile u64 busy_threshold;
 
 /*
- * Current global CPU utilization percentage in the range [0 .. 1024].
+ * Per-CPU user utilization in the range [0 .. 1024], updated periodically
+ * from userspace. Indexed by CPU id.
  */
-volatile u64 cpu_util;
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CPUS);
+	__type(key, u32);
+	__type(value, u64);
+} cpu_util_map SEC(".maps");
 
 /*
  * Scheduler statistics.
@@ -534,15 +540,27 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 }
 
 /*
- * Return true if the system is busy, false otherwise.
+ * Return true if the given CPU is busy, false otherwise.
  *
- * This function determines when the scheduler needs to switch to
- * deadline-mode (using a shared DSQ) vs round-robin mode (using per-CPU
- * local DSQs).
+ * @cpu should be the CPU of interest: prev_cpu in select_cpu/enqueue, or
+ * scx_bpf_task_cpu(p) in tick.
+ *
+ * This determines when the scheduler needs to switch to deadline-mode
+ * (using a shared DSQ) vs round-robin mode (using per-CPU local DSQs).
  */
-static inline bool is_system_busy(void)
+static inline bool is_cpu_busy(s32 cpu)
 {
-	return cpu_util >= busy_threshold;
+	u64 *util;
+	u64 max_cpu = MIN(nr_cpu_ids, MAX_CPUS);
+
+	if (cpu < 0 || cpu >= max_cpu)
+		return false;
+
+	util = bpf_map_lookup_elem(&cpu_util_map, &cpu);
+	if (!util)
+		return false;
+
+	return *util >= busy_threshold;
 }
 
 /*
@@ -787,7 +805,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 	 * scan is enabled, unless the system is busy, in which case the
 	 * cpumask-based scanning is more efficient.
 	 */
-	if ((flat_idle_scan || preferred_idle_scan) && !is_system_busy())
+	if ((flat_idle_scan || preferred_idle_scan) && !is_cpu_busy(prev_cpu))
 		return pick_idle_cpu_flat(p, prev_cpu);
 
 	/*
@@ -1027,7 +1045,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
-	bool is_busy = is_system_busy();
+	bool is_busy = is_cpu_busy(prev_cpu);
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
 	int new_cpu;
@@ -1136,7 +1154,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
 				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
 
-		if (smt_contention || (is_system_busy() && cpu_busy))
+		if (smt_contention || (is_cpu_busy(cpu) && cpu_busy))
 			p->scx.slice = 0;
 	}
 }
@@ -1234,9 +1252,9 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Keep using the same CPU if the system is not busy.
+	 * Keep using the same CPU if that CPU is not busy.
 	 */
-	if (!is_system_busy() && is_primary_cpu(prev_cpu)) {
+	if (!is_cpu_busy(prev_cpu) && is_primary_cpu(prev_cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 		if (task_should_migrate(p, enq_flags))
 			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
