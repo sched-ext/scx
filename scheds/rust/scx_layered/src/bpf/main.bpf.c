@@ -1114,6 +1114,92 @@ static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct
 	}
 }
 
+static __always_inline bool xnuma_is_mig_src(u32 layer_id, u32 nid)
+{
+	bool *is_src = MEMBER_VPTR(layers, [layer_id].node[nid].xnuma_is_mig_src);
+	return is_src && *is_src;
+}
+
+static struct xnuma_bucket *xnuma_bucket_refill(u32 layer_id, u32 src_nid,
+						 u32 dst_nid)
+{
+	struct xnuma_bucket *bucket;
+	u64 now, elapsed;
+	s64 refill, max_tokens;
+
+	bucket = MEMBER_VPTR(layers, [layer_id].node[src_nid].xnuma[dst_nid]);
+	if (!bucket || !bucket->rate || bucket->rate == (u64)-1)
+		return NULL;
+
+	now = scx_bpf_now();
+	elapsed = now - bucket->last_refill_ts;
+	if (elapsed > 1000000000ULL)
+		elapsed = 1000000000ULL;
+
+	refill = (s64)(bucket->rate * elapsed / 1000000000ULL);
+	max_tokens = (s64)bucket->rate;	/* cap at 1 second worth */
+	bucket->tokens += refill;
+	if (bucket->tokens > max_tokens)
+		bucket->tokens = max_tokens;
+	bucket->last_refill_ts = now;
+
+	return bucket;
+}
+
+/*
+ * Check whether a cross-NUMA migration is allowed for this (layer, src, dst)
+ * direction. rate semantics: U64_MAX = infinite (gating off, always allow),
+ * 0 = zero budget (always deny), other = token bucket rate.
+ * Does NOT deduct budget — use xnuma_gate_charge() in layered_running()
+ * when the migration actually happens.
+ */
+static bool xnuma_gate(u32 layer_id, u32 src_nid, u32 dst_nid, s64 cost)
+{
+	struct xnuma_bucket *bucket;
+
+	if (src_nid == dst_nid || src_nid >= MAX_NUMA_NODES ||
+	    dst_nid >= MAX_NUMA_NODES)
+		return true;
+
+	bucket = MEMBER_VPTR(layers, [layer_id].node[src_nid].xnuma[dst_nid]);
+	if (!bucket)
+		return true;
+	if (bucket->rate == (u64)-1)
+		return true;	/* infinite budget → gating off */
+	if (!bucket->rate)
+		return false;	/* zero budget → deny */
+
+	/* Fast path: budget covers cost, skip refill */
+	if (bucket->tokens >= cost)
+		return true;
+
+	/* Slow path: refill and recheck */
+	xnuma_bucket_refill(layer_id, src_nid, dst_nid);
+	return bucket->tokens >= cost;
+}
+
+/*
+ * Charge a completed cross-NUMA migration against the token bucket.
+ * Called from layered_running() when a task actually starts running
+ * on a different node than its previous CPU. No refill here — the next
+ * xnuma_gate() call will refill if needed.
+ */
+static void xnuma_gate_charge(u32 layer_id, u32 src_nid, u32 dst_nid,
+			      u64 duty_cycle)
+{
+	struct xnuma_bucket *bucket;
+
+	if (src_nid == dst_nid || src_nid >= MAX_NUMA_NODES ||
+	    dst_nid >= MAX_NUMA_NODES)
+		return;
+
+	bucket = MEMBER_VPTR(layers, [layer_id].node[src_nid].xnuma[dst_nid]);
+	if (!bucket || !bucket->rate || bucket->rate == (u64)-1)
+		return;
+
+	bucket->tokens -= (s64)duty_cycle;
+}
+
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 			      const struct cpumask *idle_smtmask, const struct layer *layer)
 {
@@ -3267,8 +3353,16 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		if (!(nodec = lookup_node_ctx(cpuc->node_id)))
 			return;
 		if (nodec->cpumask &&
-		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(nodec->cpumask)))
+		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(nodec->cpumask))) {
+			struct cpu_ctx *last_cpuc;
+
 			lstat_inc(LSTAT_XNUMA_MIGRATION, layer, cpuc);
+			if ((last_cpuc = lookup_cpu_ctx(taskc->last_cpu)))
+				xnuma_gate_charge(layer_id,
+						  last_cpuc->node_id,
+						  cpuc->node_id,
+						  taskc->duty_cycle);
+		}
 		if (llcc->cpumask &&
 		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(llcc->cpumask)))
 			lstat_inc(LSTAT_XLLC_MIGRATION, layer, cpuc);
