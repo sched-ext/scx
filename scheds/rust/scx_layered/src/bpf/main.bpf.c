@@ -1612,6 +1612,8 @@ preempt:
 			lstat_inc(LSTAT_PREEMPT_FIRST, layer, cpuc);
 		if (cand_cpuc->llc_id != cpuc->llc_id)
 			lstat_inc(LSTAT_PREEMPT_XLLC, layer, cpuc);
+		if (cand_cpuc->node_id != cpuc->node_id)
+			lstat_inc(LSTAT_PREEMPT_XNUMA, layer, cpuc);
 	}
 
 	return true;
