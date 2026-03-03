@@ -244,6 +244,11 @@ struct llc_ctx {
 	struct llc_prox_map	prox_map;
 };
 
+struct node_prox_map {
+	u16			nodes[MAX_NUMA_NODES];
+	u32			sys_end;
+};
+
 struct node_ctx {
 	u32			id;
 	struct bpf_cpumask __kptr *cpumask;
@@ -252,6 +257,7 @@ struct node_ctx {
 	u32			llcs[MAX_LLCS];
 	u32			empty_layer_ids[MAX_LAYERS];
 	u32			nr_empty_layer_ids;
+	struct node_prox_map	prox_map;
 };
 
 struct refresh_node_ctx_arg {

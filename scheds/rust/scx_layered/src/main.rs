@@ -2394,6 +2394,50 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn init_node_prox_map(skel: &mut BpfSkel, topo: &Topology) -> Result<()> {
+        for (&node_id, node) in &topo.nodes {
+            let mut order: Vec<(usize, usize)> = node
+                .distance
+                .iter()
+                .enumerate()
+                .filter(|&(nid, _)| nid != node_id)
+                .map(|(nid, &dist)| (nid, dist))
+                .collect();
+            order.sort_by_key(|&(_, dist)| dist);
+
+            let key = (node_id as u32).to_ne_bytes();
+
+            // The map entry may not exist yet — create a zeroed one.
+            let v = skel.maps.node_data.lookup(&key, libbpf_rs::MapFlags::ANY);
+            let mut nodec: bpf_intf::node_ctx = match v {
+                Ok(Some(v)) => {
+                    *plain::from_bytes(v.as_slice()).expect("node_ctx: short or misaligned buffer")
+                }
+                _ => unsafe { MaybeUninit::zeroed().assume_init() },
+            };
+
+            let pmap = &mut nodec.prox_map;
+            for (i, &(nid, _)) in order.iter().enumerate() {
+                pmap.nodes[i] = nid as u16;
+            }
+            pmap.sys_end = order.len() as u32;
+
+            debug!(
+                "NODE[{}] prox_map[{}]: {:?}",
+                node_id,
+                pmap.sys_end,
+                &order.iter().map(|(n, d)| (*n, *d)).collect::<Vec<_>>()
+            );
+
+            skel.maps.node_data.update(
+                &key,
+                unsafe { plain::as_bytes(&nodec) },
+                libbpf_rs::MapFlags::ANY,
+            )?;
+        }
+        Ok(())
+    }
+
     fn init_node_ctx(skel: &mut BpfSkel, topo: &Topology, nr_layers: usize) -> Result<()> {
         let all_layers: Vec<u32> = (0..nr_layers as u32).collect();
         let node_empty_layers: Vec<Vec<u32>> =
@@ -2801,6 +2845,7 @@ impl<'a> Scheduler<'a> {
 
         Self::init_cpus(&skel, &layer_specs, &topo)?;
         Self::init_llc_prox_map(&mut skel, &topo)?;
+        Self::init_node_prox_map(&mut skel, &topo)?;
         Self::init_node_ctx(&mut skel, &topo, nr_layers)?;
 
         // Other stuff.
