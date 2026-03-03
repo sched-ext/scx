@@ -4024,7 +4024,14 @@ impl<'a> Scheduler<'a> {
         let mut sys_stats = SysStats::new(stats, bstats, &self.cpu_pool.fallback_cpus)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
-            let layer_stats = LayerStats::new(lidx, layer, stats, bstats, cpus_ranges[lidx]);
+            let layer_stats = LayerStats::new(
+                lidx,
+                layer,
+                stats,
+                bstats,
+                cpus_ranges[lidx],
+                self.xnuma_mig_src[lidx].iter().any(|&a| a),
+            );
             sys_stats.layers.insert(spec.name.to_string(), layer_stats);
             cpus_ranges[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }

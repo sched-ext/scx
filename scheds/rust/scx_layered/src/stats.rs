@@ -245,6 +245,10 @@ pub struct LayerStats {
     pub node_pinned_utils: Vec<f64>,
     #[stat(desc = "Per-node pinned task counts")]
     pub node_pinned_tasks: Vec<u64>,
+    #[stat(desc = "Per-node load (100% = one full CPU, from duty cycle sum)")]
+    pub node_loads: Vec<f64>,
+    #[stat(desc = "Whether xnuma gating is active for this layer (0/1)")]
+    pub xnuma_active: u32,
 }
 
 impl LayerStats {
@@ -254,6 +258,7 @@ impl LayerStats {
         stats: &Stats,
         bstats: &BpfStats,
         nr_cpus_range: (usize, usize),
+        xnuma_active: bool,
     ) -> Self {
         let lstat = |sidx| bstats.lstats[lidx][sidx];
         let ltotal = lstat(LSTAT_SEL_LOCAL)
@@ -372,6 +377,11 @@ impl LayerStats {
                 .map(|u| u * 100.0)
                 .collect(),
             node_pinned_tasks: stats.layer_nr_node_pinned_tasks[lidx].clone(),
+            node_loads: stats.layer_node_duty_sums[lidx]
+                .iter()
+                .map(|l| l * 100.0)
+                .collect(),
+            xnuma_active: if xnuma_active { 1 } else { 0 },
         }
     }
 
@@ -464,11 +474,16 @@ impl LayerStats {
             fmt_pct(self.skip_remote_node),
         )?;
 
-        // per-node utilization (multi-node only)
+        // per-node utilization and load (multi-node only)
         if self.node_utils.len() > 1 {
-            let prefix = "  node      util ";
-            // N99=99999.9 = 11 chars + 1 space = 12
-            let cell_width = 12;
+            let xnuma_tag = if self.xnuma_active != 0 {
+                " [xnuma]"
+            } else {
+                ""
+            };
+            let prefix = format!("  node util/load{xnuma_tag} ");
+            // N99=99999.9/99999.9 = 19 chars + 1 space = 20
+            let cell_width = 21;
             let usable = if max_width > prefix.len() {
                 max_width - prefix.len()
             } else {
@@ -478,6 +493,7 @@ impl LayerStats {
 
             for nid in 0..self.node_utils.len() {
                 let util = self.node_utils[nid];
+                let load = self.node_loads.get(nid).copied().unwrap_or(0.0);
                 if nid % cells_per_row == 0 {
                     if nid > 0 {
                         writeln!(w)?;
@@ -486,7 +502,7 @@ impl LayerStats {
                 } else {
                     write!(w, " ")?;
                 }
-                write!(w, "N{}={:7.1}", nid, util)?;
+                write!(w, "N{}={:7.1}/{:7.1}", nid, util, load)?;
             }
             writeln!(w)?;
         }
