@@ -349,6 +349,13 @@ enum layer_task_place {
 	PLACEMENT_FLOAT,
 };
 
+struct layer_node_ctx {
+	u32			nr_cpus;
+	u64			nr_pinned_tasks;
+	u64			llcs_to_drain;
+	u32			llc_drain_cnt;
+};
+
 struct layer {
 	struct layer_match_ands	matches[MAX_LAYER_MATCH_ORS];
 	unsigned int		nr_match_ors;
@@ -383,12 +390,7 @@ struct layer {
 	u32			nr_cpus;
 	u32			nr_llc_cpus[MAX_LLCS];
 
-	struct layer_node_ctx {
-		u32		nr_cpus;
-		u64		nr_pinned_tasks;
-		u64		llcs_to_drain;
-		u32		llc_drain_cnt;
-	}			node[MAX_NUMA_NODES];
+	struct layer_node_ctx	node[MAX_NUMA_NODES];
 
 	enum layer_task_place   task_place;
 
