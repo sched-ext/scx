@@ -294,6 +294,7 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each CPU (phase 3).
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		u64 cpu_compute_wall;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total_wall = 0;
@@ -320,9 +321,15 @@ static void collect_sys_stat(void)
 		 * cpuc->cur_stolen_est is only an estimate of the time stolen by
 		 * irq/steal during execution times. We extrapolate that ratio to
 		 * the rest of CPU time as an approximation.
+		 *
+		 * Note: compute_wall is calculated per-CPU (duration - idle)
+		 * and can be zero when the CPU is fully idle. Guard against
+		 * division by zero (BPF silently returns 0, but be explicit).
 		 */
+		cpu_compute_wall = time_delta(c->duration_wall,
+					      cpuc->idle_total_wall) ? : 1;
 		cpuc->cur_stolen_time_wall = (cpuc->stolen_time_wall <<
-						LAVD_SHIFT) / compute_wall;
+						LAVD_SHIFT) / cpu_compute_wall;
 		cpuc->avg_stolen_time_wall = calc_asym_avg(
 						cpuc->avg_stolen_time_wall,
 						cpuc->cur_stolen_time_wall);
@@ -346,7 +353,7 @@ static void calc_sys_stat(void)
 	 * Calculate the CPU utilization that includes everything
 	 * — scx tasks, non-scx tasks (e.g., RT/DL), IRQ, etc.
 	 */
-	c->duration_total_wall = c->duration_wall * nr_cpus_onln;
+	c->duration_total_wall = (c->duration_wall * nr_cpus_onln) ? : 1;
 	c->compute_total_wall = time_delta(c->duration_total_wall, c->idle_total_wall);
 	c->cur_util_wall = (c->compute_total_wall << LAVD_SHIFT) / c->duration_total_wall;
 
