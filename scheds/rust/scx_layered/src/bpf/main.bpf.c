@@ -2519,11 +2519,14 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 
 		if (u > 0) {
 			struct llc_ctx *remote_llcc;
+			u32 remote_nid;
 
 			if (!(remote_llcc = lookup_llc_ctx(*llc_idp)))
 				return false;
 
-			if (skip_remote_node && nid != llc_node_id(remote_llcc->id)) {
+			remote_nid = llc_node_id(remote_llcc->id);
+
+			if (skip_remote_node && nid != remote_nid) {
 				lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
 				continue;
 			}
@@ -2532,7 +2535,34 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 				xllc_mig_skipped = true;
 				continue;
 			}
+
+			/*
+			 * Gate cross-NUMA consumption. Budget is not
+			 * deducted here — layered_running() charges
+			 * the actual task's duty_cycle when the pulled
+			 * task starts running on this CPU.
+			 */
+			if (nid != remote_nid &&
+			    (!xnuma_is_mig_src(layer_id, remote_nid) ||
+			     !xnuma_gate(layer_id, remote_nid, nid, 0))) {
+				/*
+				 * On 2-node systems, there's only one
+				 * remote node — no point continuing.
+				 */
+				if (nr_nodes <= 2)
+					break;
+				continue;
+			}
 		}
+
+		/*
+		 * Re-verify layer_id range after xnuma_gate() subprog
+		 * call — verifiers before 6.19 lose scalar bounds
+		 * across non-inline function calls.  Can be removed
+		 * once the minimum supported kernel is >= 6.19.
+		 */
+		if (layer_id >= nr_layers)
+			return false;
 
 		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
 			return true;
