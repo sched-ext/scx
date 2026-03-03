@@ -1699,6 +1699,7 @@ struct Scheduler<'a> {
 }
 
 const DUTY_CYCLE_SCALE: f64 = (1u64 << 20) as f64;
+const XNUMA_RATE_DAMPEN: f64 = 0.5;
 
 /// Result of xnuma water-fill computation for a single layer.
 struct XnumaRates {
@@ -1806,7 +1807,9 @@ fn xnuma_compute_rates(duty_sums: &[f64], allocs: &[usize]) -> XnumaRates {
             if src == dst || total_deficit <= 0.0 || surpluses[src] <= 0.0 {
                 continue;
             }
-            let migration = surpluses[src] * deficits[dst] / total_deficit;
+            // Dampen: transfer half the surplus per cycle so convergence
+            // is gradual rather than a single-step overcorrection.
+            let migration = surpluses[src] * deficits[dst] / total_deficit * XNUMA_RATE_DAMPEN;
             rates[src][dst] = (migration * DUTY_CYCLE_SCALE) as u64;
         }
     }
@@ -5222,8 +5225,8 @@ mod xnuma_tests {
         assert_eq!(result.rates[0][0], 0);
         assert_eq!(result.rates[1][1], 0);
 
-        // Verify the rate magnitude: migration = 20.0, scaled
-        let expected_rate = (20.0 * DUTY_CYCLE_SCALE) as u64;
+        // Verify the rate magnitude: migration = 20.0 * DAMPEN, scaled
+        let expected_rate = (20.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
         assert_eq!(result.rates[0][1], expected_rate);
     }
 
@@ -5237,7 +5240,7 @@ mod xnuma_tests {
         let allocs = vec![48, 144];
         let result = xnuma_compute_rates(&duty, &allocs);
 
-        let expected_rate = (24.0 * DUTY_CYCLE_SCALE) as u64;
+        let expected_rate = (24.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
         assert_eq!(result.rates[0][1], expected_rate);
         assert_eq!(result.rates[1][0], 0);
     }
@@ -5259,10 +5262,10 @@ mod xnuma_tests {
         let result = xnuma_compute_rates(&duty, &allocs);
 
         // Total deficit = 60. N1 gets 30/60 = 50%, N2 gets 30/60 = 50%
-        // rate[0][1] = 60 * 30/60 = 30
-        // rate[0][2] = 60 * 30/60 = 30
-        let rate_01 = (30.0 * DUTY_CYCLE_SCALE) as u64;
-        let rate_02 = (30.0 * DUTY_CYCLE_SCALE) as u64;
+        // rate[0][1] = 60 * 30/60 * DAMPEN = 15
+        // rate[0][2] = 60 * 30/60 * DAMPEN = 15
+        let rate_01 = (30.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        let rate_02 = (30.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
         assert_eq!(result.rates[0][1], rate_01);
         assert_eq!(result.rates[0][2], rate_02);
 
@@ -5286,10 +5289,10 @@ mod xnuma_tests {
         let result = xnuma_compute_rates(&duty, &allocs);
 
         // Total deficit = 60. N1 share = 10/60, N2 share = 50/60
-        // rate[0][1] = 60 * 10/60 = 10
-        // rate[0][2] = 60 * 50/60 = 50
-        let rate_01 = (10.0 * DUTY_CYCLE_SCALE) as u64;
-        let rate_02 = (50.0 * DUTY_CYCLE_SCALE) as u64;
+        // rate[0][1] = 60 * 10/60 * DAMPEN = 5
+        // rate[0][2] = 60 * 50/60 * DAMPEN = 25
+        let rate_01 = (10.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        let rate_02 = (50.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
         assert_eq!(result.rates[0][1], rate_01);
         assert_eq!(result.rates[0][2], rate_02);
     }
@@ -5307,10 +5310,10 @@ mod xnuma_tests {
         let result = xnuma_compute_rates(&duty, &allocs);
 
         // Total deficit = 30. Only N2 is deficit, so deficit share = 1.0
-        // rate[0][2] = 20 * 30/30 = 20
-        // rate[1][2] = 10 * 30/30 = 10
-        let rate_02 = (20.0 * DUTY_CYCLE_SCALE) as u64;
-        let rate_12 = (10.0 * DUTY_CYCLE_SCALE) as u64;
+        // rate[0][2] = 20 * 1.0 * DAMPEN = 10
+        // rate[1][2] = 10 * 1.0 * DAMPEN = 5
+        let rate_02 = (20.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        let rate_12 = (10.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
         assert_eq!(result.rates[0][2], rate_02);
         assert_eq!(result.rates[1][2], rate_12);
 
@@ -5325,8 +5328,8 @@ mod xnuma_tests {
 
     #[test]
     fn test_conservation_per_source_outbound() {
-        // Each source's total outbound should equal its surplus (scaled).
-        // Total outbound from src = surplus[src] * DUTY_CYCLE_SCALE
+        // Each source's total outbound should equal its surplus * DAMPEN (scaled).
+        // Total outbound from src = surplus[src] * DAMPEN * DUTY_CYCLE_SCALE
         let duty = vec![100.0, 30.0, 50.0, 20.0];
         let allocs = vec![96, 96, 96, 96];
         let nr = 4;
@@ -5340,7 +5343,7 @@ mod xnuma_tests {
             let expected = eq_ratio * allocs[src] as f64;
             let surplus = (duty[src] - expected).max(0.0);
             let total_outbound: u64 = (0..nr).map(|dst| result.rates[src][dst]).sum();
-            let expected_rate = (surplus * DUTY_CYCLE_SCALE) as u64;
+            let expected_rate = (surplus * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
             assert_eq!(
                 total_outbound, expected_rate,
                 "node {} outbound mismatch",
@@ -5450,7 +5453,7 @@ mod xnuma_tests {
         let allocs = vec![96, 96];
         let result = xnuma_compute_rates(&duty, &allocs);
 
-        let expected_rate = (48.0 * DUTY_CYCLE_SCALE) as u64;
+        let expected_rate = (48.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
         assert_eq!(result.rates[0][1], expected_rate);
     }
 
@@ -5492,11 +5495,11 @@ mod xnuma_tests {
         let allocs = vec![96, 96];
         let result = xnuma_compute_rates(&duty, &allocs);
 
-        // surplus = 20, deficit = 20 → migration = 20
-        // rate = 20 * (1 << 20)
-        let expected = (20.0 * DUTY_CYCLE_SCALE) as u64;
+        // surplus = 20, deficit = 20 → migration = 20 * DAMPEN = 10
+        // rate = 10 * (1 << 20)
+        let expected = (20.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
         assert_eq!(result.rates[0][1], expected);
-        assert_eq!(expected, 20 * (1 << 20));
+        assert_eq!(expected, 10 * (1 << 20));
     }
 
     #[test]
@@ -5523,7 +5526,7 @@ mod xnuma_tests {
         assert!(result.rates[0][2] > 0); // N0 → N2 (deficit node)
         assert!(result.rates[1][2] > 0); // N1 → N2 (N1 also has surplus)
 
-        // Verify conservation: per-source outbound ≈ surplus (within
+        // Verify conservation: per-source outbound ≈ surplus * DAMPEN (within
         // truncation tolerance — each `as u64` can lose up to 1 per cell)
         let total_duty: f64 = duty.iter().sum();
         let total_alloc: f64 = allocs.iter().map(|&a| a as f64).sum();
@@ -5532,7 +5535,7 @@ mod xnuma_tests {
         for src in 0..nr {
             let surplus = (duty[src] - eq_ratio * allocs[src] as f64).max(0.0);
             let outbound: u64 = (0..nr).map(|dst| result.rates[src][dst]).sum();
-            let expected = (surplus * DUTY_CYCLE_SCALE) as u64;
+            let expected = (surplus * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
             let tolerance = nr as u64; // up to 1 per destination cell
             assert!(
                 outbound.abs_diff(expected) <= tolerance,
@@ -5621,15 +5624,27 @@ mod xnuma_tests {
         let allocs = vec![96, 96, 96, 96];
         let result = xnuma_compute_rates(&duty, &allocs);
 
-        // rate[0][1] = 120 * 40/120 = 40
-        // rate[0][2] = 120 * 20/120 = 20
-        // rate[0][3] = 120 * 60/120 = 60
-        assert_eq!(result.rates[0][1], (40.0 * DUTY_CYCLE_SCALE) as u64);
-        assert_eq!(result.rates[0][2], (20.0 * DUTY_CYCLE_SCALE) as u64);
-        assert_eq!(result.rates[0][3], (60.0 * DUTY_CYCLE_SCALE) as u64);
+        // rate[0][1] = 120 * 40/120 * DAMPEN = 20
+        // rate[0][2] = 120 * 20/120 * DAMPEN = 10
+        // rate[0][3] = 120 * 60/120 * DAMPEN = 30
+        assert_eq!(
+            result.rates[0][1],
+            (40.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
+        );
+        assert_eq!(
+            result.rates[0][2],
+            (20.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
+        );
+        assert_eq!(
+            result.rates[0][3],
+            (60.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
+        );
 
-        // Total outbound from N0 = 40 + 20 + 60 = 120 (matches surplus)
+        // Total outbound from N0 = 20 + 10 + 30 = 60 (half of surplus, dampened)
         let total_from_n0: u64 = (0..4).map(|dst| result.rates[0][dst]).sum();
-        assert_eq!(total_from_n0, (120.0 * DUTY_CYCLE_SCALE) as u64);
+        assert_eq!(
+            total_from_n0,
+            (120.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
+        );
     }
 }
