@@ -149,6 +149,18 @@ pub struct LayerCommon {
     pub placement: LayerPlacement,
     #[serde(default)]
     pub member_expire_ms: u64,
+    #[serde(default = "default_xnuma_threshold")]
+    pub xnuma_threshold: (f64, f64),
+    #[serde(default = "default_xnuma_threshold_delta")]
+    pub xnuma_threshold_delta: (f64, f64),
+}
+
+fn default_xnuma_threshold() -> (f64, f64) {
+    (0.6, 0.7)
+}
+
+fn default_xnuma_threshold_delta() -> (f64, f64) {
+    (0.2, 0.3)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

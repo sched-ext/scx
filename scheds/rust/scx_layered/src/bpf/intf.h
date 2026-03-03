@@ -352,11 +352,19 @@ enum layer_task_place {
 	PLACEMENT_FLOAT,
 };
 
+struct xnuma_bucket {
+	s64			tokens;
+	u64			last_refill_ts;
+	u64			rate;		/* duty_cycle units per second, set by userspace */
+};
+
 struct layer_node_ctx {
 	u32			nr_cpus;
 	u64			nr_pinned_tasks;
 	u64			llcs_to_drain;
 	u32			llc_drain_cnt;
+	bool			xnuma_is_mig_src;
+	struct xnuma_bucket xnuma[MAX_NUMA_NODES];
 };
 
 struct layer {
