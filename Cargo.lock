@@ -3766,12 +3766,13 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "nix 0.29.0",
+ "nix 0.30.1",
  "quanta",
  "ratatui 0.30.0",
  "scx_arena",
  "scx_cargo",
  "scx_utils",
+ "sysinfo",
  "tachyonfx",
 ]
 
