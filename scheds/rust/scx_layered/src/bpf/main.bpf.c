@@ -1610,6 +1610,8 @@ preempt:
 		lstat_inc(LSTAT_PREEMPT, layer, cpuc);
 		if (flags & PREEMPT_FIRST)
 			lstat_inc(LSTAT_PREEMPT_FIRST, layer, cpuc);
+		if (cand_cpuc->llc_id != cpuc->llc_id)
+			lstat_inc(LSTAT_PREEMPT_XLLC, layer, cpuc);
 	}
 
 	return true;
