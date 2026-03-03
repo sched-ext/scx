@@ -8,6 +8,13 @@ pub mod layer_core_growth;
 
 pub mod bpf_intf;
 
+use plain::Plain;
+
+unsafe impl Plain for bpf_intf::cpu_ctx {}
+unsafe impl Plain for bpf_intf::llc_ctx {}
+unsafe impl Plain for bpf_intf::node_ctx {}
+unsafe impl Plain for bpf_intf::refresh_node_ctx_arg {}
+
 use std::collections::BTreeMap;
 
 use anyhow::bail;

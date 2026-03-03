@@ -737,9 +737,10 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         .context("Failed to lookup cpu_ctx")?
         .unwrap();
     for cpu in 0..*NR_CPUS_POSSIBLE {
-        cpu_ctxs.push(*unsafe {
-            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
-        });
+        cpu_ctxs.push(
+            *plain::from_bytes(cpu_ctxs_vec[cpu].as_slice())
+                .expect("cpu_ctx: short or misaligned buffer"),
+        );
     }
     Ok(cpu_ctxs)
 }
@@ -784,16 +785,14 @@ impl BpfStats {
             // kernel >= v6.12 fails verification after such
             // conversion due to seemingly verifier bugs. Convert to
             // bss maps later.
-            let key = llc_id as u32;
-            let llc_id_slice =
-                unsafe { std::slice::from_raw_parts((&key as *const u32) as *const u8, 4) };
             let v = skel
                 .maps
                 .llc_data
-                .lookup(llc_id_slice, libbpf_rs::MapFlags::ANY)
+                .lookup(&(llc_id as u32).to_ne_bytes(), libbpf_rs::MapFlags::ANY)
                 .unwrap()
                 .unwrap();
-            let llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
+            let llcc: &bpf_intf::llc_ctx =
+                plain::from_bytes(v.as_slice()).expect("llc_ctx: short or misaligned buffer");
 
             for layer_id in 0..nr_layers {
                 for stat_id in 0..NR_LLC_LSTATS {
@@ -2018,16 +2017,8 @@ impl<'a> Scheduler<'a> {
 
     fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
         cpu_ctxs
-            .into_iter()
-            .map(|cpu_ctx| {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        &cpu_ctx as *const bpf_intf::cpu_ctx as *const u8,
-                        std::mem::size_of::<bpf_intf::cpu_ctx>(),
-                    )
-                };
-                bytes.to_vec()
-            })
+            .iter()
+            .map(|cpu_ctx| unsafe { plain::as_bytes(cpu_ctx) }.to_vec())
             .collect()
     }
 
@@ -2080,9 +2071,10 @@ impl<'a> Scheduler<'a> {
 
         // FIXME - this incorrectly assumes all possible CPUs are consecutive.
         for cpu in 0..*NR_CPUS_POSSIBLE {
-            cpu_ctxs.push(*unsafe {
-                &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
-            });
+            cpu_ctxs.push(
+                *plain::from_bytes(cpu_ctxs_vec[cpu].as_slice())
+                    .expect("cpu_ctx: short or misaligned buffer"),
+            );
 
             let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
             let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
@@ -2184,16 +2176,15 @@ impl<'a> Scheduler<'a> {
             //
             // XXX - This would be a lot easier if llc_ctx were in the bss.
             // See BpfStats::read().
-            let key = llc_id as u32;
-            let llc_id_slice =
-                unsafe { std::slice::from_raw_parts((&key as *const u32) as *const u8, 4) };
+            let key = (llc_id as u32).to_ne_bytes();
             let v = skel
                 .maps
                 .llc_data
-                .lookup(llc_id_slice, libbpf_rs::MapFlags::ANY)
+                .lookup(&key, libbpf_rs::MapFlags::ANY)
                 .unwrap()
                 .unwrap();
-            let mut llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
+            let mut llcc: bpf_intf::llc_ctx =
+                *plain::from_bytes(v.as_slice()).expect("llc_ctx: short or misaligned buffer");
 
             let pmap = &mut llcc.prox_map;
             for (i, &llc_id) in order.iter().enumerate() {
@@ -2202,16 +2193,11 @@ impl<'a> Scheduler<'a> {
             pmap.node_end = node_end as u32;
             pmap.sys_end = sys_end as u32;
 
-            let v = unsafe {
-                std::slice::from_raw_parts(
-                    &llcc as *const bpf_intf::llc_ctx as *const u8,
-                    std::mem::size_of::<bpf_intf::llc_ctx>(),
-                )
-            };
-
-            skel.maps
-                .llc_data
-                .update(llc_id_slice, v, libbpf_rs::MapFlags::ANY)?
+            skel.maps.llc_data.update(
+                &key,
+                unsafe { plain::as_bytes(&llcc) },
+                libbpf_rs::MapFlags::ANY,
+            )?
         }
 
         Ok(())
@@ -3298,12 +3284,7 @@ impl<'a> Scheduler<'a> {
             }
 
             let input = ProgramInput {
-                context_in: Some(unsafe {
-                    std::slice::from_raw_parts_mut(
-                        &mut arg as *mut _ as *mut u8,
-                        std::mem::size_of_val(&arg),
-                    )
-                }),
+                context_in: Some(unsafe { plain::as_mut_bytes(&mut arg) }),
                 ..Default::default()
             };
             let _ = skel.progs.refresh_node_ctx.test_run(input);
