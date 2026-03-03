@@ -32,6 +32,64 @@ enum cake_tier {
 	CAKE_TIER_MAX	   = 4,
 };
 
+/* ═══ TASK CLASS — Pre-stamped by userspace classifier (Phase 2) ═══
+ * Replaces per-stop is_game/is_hog/bg_noise computation in BPF stopping.
+ * Written by Rust classifier (60Hz), read by BPF stopping+enqueue.
+ * Eliminates BSS game_tgid/game_ppid MESI-S reads from hot path (~5ns). */
+enum cake_class {
+	CAKE_CLASS_NORMAL  = 0, /* Default: no squeeze, no boost */
+	CAKE_CLASS_GAME    = 1, /* Game family: tgid/ppid match + kthread(gaming) */
+	CAKE_CLASS_HOG     = 2, /* BULK + squeeze: 4× vtime penalty */
+	CAKE_CLASS_BG      = 3, /* Background noise: 2× vtime penalty */
+	CAKE_CLASS_MAX     = 4,
+};
+
+/* ═══ TASK HOT FIELDS — bpf_task_storage (Phase 6) ═══
+ * Mirrors Arena CL0 but lives in kernel task_storage (~10ns lookup
+ * vs 29ns arena TLB walk). All release-mode hot fields live here.
+ * Arena CL0 is only used for telemetry (stats_on gated, dead in release).
+ *
+ * Accessed by: cake_running, cake_stopping, cake_select_cpu, cake_enqueue.
+ * Allocated in: cake_init_task (BPF_NOEXIST → creates on first alloc). */
+struct cake_task_hot {
+	u64 staged_vtime_bits; /* 8B: VALID|HOME|WB|WB_DUP|NF|weight */
+	u32 deficit_avg_fused; /* 4B: deficit_us(16) + avg_runtime_us(16) */
+	u32 packed_info;       /* 4B: flags + tier + flow_id */
+	u32 ppid;              /* 4B: Parent PID (game family detection) */
+	u32 last_run_at;       /* 4B: (u32)scx_bpf_now() from stopping */
+	u32 reclass_counter;   /* 4B: Per-task stop counter */
+	u16 warm_cpus[3];      /* 6B: [0]=current, [1]=home, [2]=oldest */
+	u16 waker_cpu;         /* 2B: CPU where waker last ran */
+	u64 nvcsw_snapshot;    /* 8B: Last nvcsw for yield detection */
+	u8  task_class;        /* 1B: CAKE_CLASS_* enum */
+	u8  _pad[3];           /* 3B: align to 4B */
+	u64 cached_cpumask;    /* 8B: Affinity mask (select_cpu) */
+}; /* Total: 64B = 1 cache line */
+
+
+/* ═══ PER-CPU BSS — Arena-free running (Phase 5) ═══
+ * Written by cake_running (local CPU only), read by:
+ *   - cake_stopping (same CPU, L1 hit)
+ *   - Gate 1P/1C-P (remote CPU, MESI-S → L3 hit)
+ *
+ * 64-byte aligned — one cache line per CPU.
+ * SAFETY:
+ *   - No false sharing: each CPU owns its own 64B line.
+ *   - No atomics needed: single-writer (local running), multi-reader.
+ *   - MESI-S for remote reads: same cost as current arena mbox reads.
+ *   - stopping bridges BSS→arena mbox for consumers that still read mbox. */
+struct cake_cpu_bss {
+	u32 run_start;     /* 4B: (u32)scx_bpf_now() when task started */
+	u8  is_yielder;    /* 1B: task_class-derived yielder + waker_boost */
+	u8  idle_hint;     /* 1B: 0=busy, 1=idle */
+	u16 cached_cpu;    /* 2B: CPU id (bpf_get_smp_processor_id) */
+	u64 tick_slice;    /* 8B: p->scx.slice ?: quantum_ns */
+	u32 last_tgid;     /* 4B: p->tgid (COMPILATION only) */
+	u32 last_pid;      /* 4B: Fast path — skip get_task_hot if same task */
+	u64 cached_now;    /* 8B: scx_bpf_now() from select_cpu tunnel */
+	u8  _pad[32];      /* Pad to 64B cache line */
+} __attribute__((aligned(64)));
+
 #define CAKE_MAX_CPUS 64
 #define CAKE_MAX_LLCS 8
 
@@ -288,7 +346,7 @@ struct cake_task_ctx {
 	/* Game family detection — read unconditionally in cake_stopping,
 	 * Gate 1WC, and tunnel staging. */
 	u32 ppid;             /* 4B: Parent PID (Proton/Wine siblings) */
-	u32 enqueue_llc_hint; /* 4B: LLC ID set by select_cpu, read by enqueue */
+	u32 _pad_ppid;        /* 4B: Alignment (enqueue_llc_hint removed in Phase 1C) */
 
 	/* Anti-starvation + confidence gating */
 	u32 last_run_at;      /* 4B: Last run timestamp (ns), wraps 4.2s */
@@ -301,7 +359,11 @@ struct cake_task_ctx {
 	/* Yield detection — read+written unconditionally every stop */
 	u64 nvcsw_snapshot;   /* 8B: Last read of p->nvcsw */
 
-	/* ─── CL0 total: 8+8+8+4+4+4+4+6+2+8 = 56 bytes (8B headroom) ─── */
+	/* Phase 2: Userspace-stamped task class (replaces per-stop classification) */
+	u8  task_class;        /* 1B: CAKE_CLASS_* enum, written by reclassifier */
+	u8  _pad_class[7];    /* 7B: Alignment padding to 64B CL0 */
+
+	/* ─── CL0 total: 8+8+8+4+4+4+4+6+2+8+1+7 = 64 bytes (0B headroom) ─── */
 
 	/* --- High Resolution Arena Telemetry (TUI Matrix) ---
      * Zero-cost pointer access via BPF Arena. User-space sweeps memory
