@@ -455,6 +455,18 @@ static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
 	else
 		bpf_cpumask_set_cpu(cpuc->cpu, unprotected_cpumask);
 
+	/* Called under scoped_guard(rcu) from refresh_cpumasks() — don't nest */
+	struct node_ctx *nodec = lookup_node_ctx(cpuc->node_id);
+
+	if (nodec && nodec->unprotected_cpumask) {
+		if (cpuc->is_protected)
+			bpf_cpumask_clear_cpu(cpuc->cpu,
+					      nodec->unprotected_cpumask);
+		else
+			bpf_cpumask_set_cpu(cpuc->cpu,
+					    nodec->unprotected_cpumask);
+	}
+
 	return true;
 }
 
@@ -1461,35 +1473,135 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 
 no_locality:
 	/*
-	 * Next try a CPU in the current node
+	 * Multi-node idle CPU search with NUMA gating.
+	 *
+	 * Two mask types are available:
+	 *
+	 * - Per-node masks (node_ctx->cpumask, ->unprotected_cpumask,
+	 *   lookup_layer_node_cpumask()): raw topology masks, NOT
+	 *   intersected with p->cpus_ptr. Safe only for tasks with
+	 *   all_cpus_allowed. Used in the per-node prox walk.
+	 *
+	 * - Per-task cached masks (layered_mask, layered_node_mask,
+	 *   layered_unprotected_mask): intersected with p->cpus_ptr
+	 *   (layered_mask = layer_cpumask & cpus_ptr; others derived
+	 *   from it). Safe for all tasks. Used as fallback.
+	 *
+	 * For all_cpus_allowed tasks on multi-node:
+	 *  1. Layer CPUs on local node (per-task layered_node_mask)
+	 *  2. Open CPUs on local node (per-node unprotected_cpumask)
+	 *  3. Remote nodes in prox order, xnuma gated: layer then open
+	 *
+	 * Local open is cheaper than any NUMA crossing, so step 2 comes
+	 * before remote layer CPUs in step 3.
+	 *
+	 * For !all_cpus_allowed or single-node, use per-task cached
+	 * masks which respect p->cpus_ptr.
 	 */
-	if (nr_nodes > 1) {
+	if (nr_nodes > 1 && taskc->all_cpus_allowed) {
+		bool is_open = layer->kind != LAYER_KIND_CONFINED;
+		u32 src_nid = prev_cpuc->node_id;
+		struct node_ctx *src_nodec;
+		s32 i;
+
+		src_nodec = lookup_node_ctx(src_nid);
+		if (!src_nodec)
+			goto xnuma_done;
+
+		/* Layer CPUs on local node */
 		maybe_refresh_layered_cpus_node(p, taskc, layer_cpumask,
-						prev_cpuc->node_id, cpus_seq);
+						src_nid, cpus_seq);
 		if (!(cpumask = cast_mask(taskc->layered_node_mask))) {
 			cpu = -1;
 			goto out;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu,
+					     idle_smtmask, layer)) >= 0)
 			goto out;
-	}
 
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
-		goto out;
+		/* Open CPUs on local node */
+		if (is_open &&
+		    (unprot_mask = src_nodec->unprotected_cpumask) &&
+		    (cpu = pick_idle_cpu_from(cast_mask(unprot_mask),
+					     prev_cpu, idle_smtmask,
+					     layer)) >= 0) {
+			lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
+			goto out;
+		}
 
-	/*
-	 * If the layer is an open one, we can try the whole machine.
-	 */
-	if (layer->kind != LAYER_KIND_CONFINED) {
-	    maybe_refresh_layered_cpus_unprotected(p, taskc, layered_cpumask);
-	    unprot_mask = taskc->layered_unprotected_mask;
-	    if (!unprot_mask)
-		    unprot_mask = unprotected_cpumask;
+		/* Remote nodes in prox order, xnuma gated */
+		if (!xnuma_is_mig_src(layer->id, src_nid))
+			goto xnuma_done;
+		bpf_for(i, 0, src_nodec->prox_map.sys_end) {
+			const struct cpumask *node_cpumask;
+			struct node_ctx *dst_nodec;
+			u32 nid;
 
-	    if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask), prev_cpu, idle_smtmask, layer)) >= 0) {
-		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
-		goto out;
-	    }
+			if (i >= MAX_NUMA_NODES)
+				break;
+			nid = src_nodec->prox_map.nodes[i];
+
+			if (nid == src_nid)
+				continue;
+
+			if (!xnuma_gate(layer->id, src_nid, nid,
+					(s64)taskc->duty_cycle))
+				continue;
+
+			/* Layer CPUs on remote node */
+			if ((node_cpumask = lookup_layer_node_cpumask(layer->id, nid)) &&
+			    (cpu = pick_idle_cpu_from(node_cpumask, prev_cpu,
+						     idle_smtmask, layer)) >= 0)
+				goto out;
+
+			/* Open CPUs on remote node */
+			if (is_open &&
+			    (dst_nodec = lookup_node_ctx(nid)) &&
+			    (unprot_mask = dst_nodec->unprotected_cpumask) &&
+			    (cpu = pick_idle_cpu_from(cast_mask(unprot_mask),
+						     prev_cpu, idle_smtmask,
+						     layer)) >= 0) {
+				lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
+				goto out;
+			}
+		}
+xnuma_done: ;
+	} else {
+		/*
+		 * Single-node or restricted-affinity fallback. Uses per-task
+		 * cached masks (cpus_ptr-intersected) so safe for all tasks.
+		 */
+		if (nr_nodes > 1) {
+			maybe_refresh_layered_cpus_node(p, taskc, layer_cpumask,
+							prev_cpuc->node_id,
+							cpus_seq);
+			if (!(cpumask = cast_mask(taskc->layered_node_mask))) {
+				cpu = -1;
+				goto out;
+			}
+			if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu,
+						     idle_smtmask, layer)) >= 0)
+				goto out;
+		}
+
+		if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
+					     idle_smtmask, layer)) >= 0)
+			goto out;
+
+		if (layer->kind != LAYER_KIND_CONFINED) {
+			maybe_refresh_layered_cpus_unprotected(p, taskc,
+							       layered_cpumask);
+			unprot_mask = taskc->layered_unprotected_mask;
+			if (!unprot_mask)
+				unprot_mask = unprotected_cpumask;
+
+			if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask),
+						     prev_cpu, idle_smtmask,
+						     layer)) >= 0) {
+				lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
+				goto out;
+			}
+		}
 	}
 
 	cpu = -1;
@@ -3188,10 +3300,16 @@ static s32 create_node(u32 node_id)
 	ret = create_save_cpumask(&nodec->cpumask);
 	if (ret)
 		return ret;
+	ret = create_save_cpumask(&nodec->unprotected_cpumask);
+	if (ret)
+		return ret;
 
 	scoped_guard(rcu) {
+		struct bpf_cpumask *unprot;
+
 		cpumask = nodec->cpumask;
-		if (!cpumask) {
+		unprot = nodec->unprotected_cpumask;
+		if (!cpumask || !unprot) {
 			scx_bpf_error("Failed to lookup node cpumask");
 			return -ENOENT;
 		}
@@ -3208,6 +3326,8 @@ static s32 create_node(u32 node_id)
 
 			if (*nmask & (1LLU << (cpu % 64))) {
 				bpf_cpumask_set_cpu(cpu, cpumask);
+				/* All CPUs start unprotected */
+				bpf_cpumask_set_cpu(cpu, unprot);
 				if (!(cpuc = lookup_cpu_ctx(cpu))) {
 					scx_bpf_error("cpu ctx error");
 					ret = -ENOENT;

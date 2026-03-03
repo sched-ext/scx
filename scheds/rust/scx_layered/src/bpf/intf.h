@@ -252,6 +252,7 @@ struct node_prox_map {
 struct node_ctx {
 	u32			id;
 	struct bpf_cpumask __kptr *cpumask;
+	struct bpf_cpumask __kptr *unprotected_cpumask;
 	u32			nr_llcs;
 	u32			nr_cpus;
 	u32			llcs[MAX_LLCS];
