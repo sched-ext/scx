@@ -165,11 +165,113 @@ enum cake_flow_flags {
 	CAKE_FLOW_HOG          = 1 << 3, /* Background hog: BULK + non-yielder + deprioritized */
 };
 
-/* Per-task flow state - 64B aligned, first 8B coalesced for cake_stopping writes */
+/* Record emitted by SEC("iter/task") cake_task_iter program.
+ * One record per managed task. Userspace reads fixed-size records from the
+ * iter fd instead of walking the pid_to_tctx hash map.
+ * Replaces: pid_to_tctx BPF_MAP_TYPE_HASH (65536 entries, global bucket lock).
+ * Benefit: cake_init_task + cake_exit_task become fully lockless (no map ops). */
+struct cake_iter_record {
+	u32 pid;         /* pid of this task */
+	u32 ppid;        /* parent pid (promoted from tctx CL0) */
+	u32 packed_info; /* tier + flags — same field read in Rust telemetry loop */
+	u16 avg_runtime_us; /* EWMA runtime estimate (from tctx.deficit_avg_fused hi16) */
+	u16 deficit_us;     /* Vtime deficit in µs (from tctx.deficit_avg_fused lo16) */
+	/* telemetry block: everything the TUI currently reads from arena pointers */
+	struct {
+		u64 run_start_ns;
+		u64 run_duration_ns;
+		u64 enqueue_start_ns;
+		u64 wait_duration_ns;
+		u32 select_cpu_duration_ns;
+		u32 enqueue_duration_ns;
+		u32 dsq_insert_ns;
+		u32 gate_1_hits;
+		u32 gate_2_hits;
+		u32 gate_1w_hits;
+		u32 gate_3_hits;
+		u32 gate_1p_hits;
+		u32 gate_1c_hits;
+		u32 gate_1cp_hits;
+		u32 gate_1d_hits;
+		u32 gate_1wc_hits;
+		u32 gate_tun_hits;
+		u32 _pad2;
+		u64 jitter_accum_ns;
+		u32 total_runs;
+		u16 core_placement;
+		u16 migration_count;
+		u16 preempt_count;
+		u16 yield_count;
+		u16 direct_dispatch_count;
+		u16 enqueue_count;
+		u16 cpumask_change_count;
+		u16 _pad3;
+		u32 stopping_duration_ns;
+		u32 running_duration_ns;
+		u32 max_runtime_us;
+		u32 _pad4;
+		u64 dispatch_gap_ns;
+		u64 max_dispatch_gap_ns;
+		u32 wait_hist_lt10us;
+		u32 wait_hist_lt100us;
+		u32 wait_hist_lt1ms;
+		u32 wait_hist_ge1ms;
+		u16 slice_util_pct;
+		u16 llc_id;
+		u16 same_cpu_streak;
+		u16 ewma_recomp_count;
+		u32 wakeup_source_pid;
+		u64 nivcsw_snapshot;
+		u32 nvcsw_delta;
+		u32 nivcsw_delta;
+		u32 pid_inner;  /* matches telemetry.pid */
+		u32 tgid;
+		char comm[16];
+		u32 gate_cascade_ns;
+		u32 idle_probe_ns;
+		u32 vtime_compute_ns;
+		u32 mbox_staging_ns;
+		u32 ewma_compute_ns;
+		u32 classify_ns;
+		u32 vtime_staging_ns;
+		u32 warm_history_ns;
+		u16 quantum_full_count;
+		u16 quantum_yield_count;
+		u16 quantum_preempt_count;
+		u16 _pad_quantum;
+		u16 waker_cpu;
+		u16 _pad_waker;
+		u32 waker_tgid;
+		u16 cpu_run_count[CAKE_MAX_CPUS];
+	} telemetry;
+};
+
+/* Per-task flow state - 512B aligned, CL0 = release hot path, CL1+ = debug telemetry.
+ *
+ * CACHE LINE SEGREGATION (Ghost Struct):
+ *   CL0 (bytes 0-63): Every field needed for release-mode scheduling.
+ *     In --release, CAKE_STATS_ENABLED=0 → Clang dead-codes all telemetry.
+ *     The CPU prefetcher only ever loads CL0 — telemetry bytes stay in RAM.
+ *   CL1+ (bytes 64+): Debug-only telemetry for TUI analytics.
+ *
+ * staged_vtime_bits at offset 0: most-read field across all 4 callbacks
+ *   (select_cpu, enqueue, running, stopping). JIT emits [reg+0] instead
+ *   of [reg+48], saving one ADD instruction per access. */
 struct cake_task_ctx {
-	/* --- Hot Write Group (cake_stopping) [Bytes 0-7] ---
-     * Union: deficit_avg_fused (4B) + packed_info (4B) = 8B */
-	/* STATE FUSION: Union allows atomic u64 access to both state fields */
+	/* ═══ CACHE LINE 0 (bytes 0-63): HOT / RELEASE MODE ═══ */
+
+	/* STAGED VTIME BITS — offset 0 for JIT-optimal [reg+0] addressing.
+	 * Read by cake_select_cpu, cake_enqueue, cake_running.
+	 * Written by cake_stopping. The most-accessed field in the struct. */
+	u64 staged_vtime_bits; /* 8B: VALID|HOME|WB|GAME|HOG|BG|WB_DUP|NF|weight */
+
+	/* CACHED AFFINITY MASK (Rule 41: Locality Promotion)
+	 * Replaces bpf_cpumask_test_cpu kfunc (~15ns) with inline bit test (~0.2ns).
+	 * Populated in cake_init_task, updated event-driven by cake_set_cpumask. */
+	u64 cached_cpumask; /* 8B: Cached p->cpus_ptr bitmask (max 64 CPUs) */
+
+	/* STATE FUSION: deficit_avg_fused (4B) + packed_info (4B) = 8B.
+	 * Read+written every stop in cake_stopping. Union allows atomic u64 access. */
 	union {
 		struct {
 			union {
@@ -183,35 +285,23 @@ struct cake_task_ctx {
 		};
 	};
 
-	/* --- Yield Detection (CL0 PROMOTION) [Bytes 8-15] ---
-	 * Moved from telemetry (CL2, offset ~177B) to CL0 for single-CL
-	 * hot path in cake_stopping. Read+written unconditionally every stop. */
-	u64 nvcsw_snapshot; /* 8B: Last read of p->nvcsw (for yield detection) */
+	/* Game family detection — read unconditionally in cake_stopping,
+	 * Gate 1WC, and tunnel staging. */
+	u32 ppid;             /* 4B: Parent PID (Proton/Wine siblings) */
+	u32 enqueue_llc_hint; /* 4B: LLC ID set by select_cpu, read by enqueue */
 
-	/* CACHED AFFINITY MASK (Rule 41: Locality Promotion) [Bytes 16-23]
-     * Replaces bpf_cpumask_test_cpu kfunc (~15ns) with inline bit test (~0.2ns)
-     * for restricted-affinity tasks (Wine/Proton pinning, ~5% of gaming wakeups).
-     * Populated in cake_init_task, updated event-driven by cake_set_cpumask.
-     * Zero hot-path cost: no polling in cake_running or cake_stopping. */
-	u64 cached_cpumask; /* 8B: Cached p->cpus_ptr bitmask (max 64 CPUs) */
+	/* Anti-starvation + confidence gating */
+	u32 last_run_at;      /* 4B: Last run timestamp (ns), wraps 4.2s */
+	u32 reclass_counter;  /* 4B: Per-task stop counter for confidence backoff */
 
-	/* --- Cold Fields (stats only) [Bytes 24-31] --- */
-	u32 last_run_at; /* 4B: Last run timestamp (ns), wraps 4.2s */
-	u32 reclass_counter; /* 4B: Per-task stop counter for per-tier backoff */
+	/* Warm CPU history — Gate 1c (home CPU) + Gate 1D (tgid affinity) */
+	u16 warm_cpus[3];     /* 6B: [0]=current, [1]=prev (home), [2]=oldest */
+	u16 waker_cpu;        /* 2B: CPU where waker last ran (Gate 1W-chain) */
 
-	/* --- Warm CPU History (Gate 1c migration reduction) [Bytes 32-37] ---
-	 * Ring of last 3 CPUs task ran on. Updated in cake_stopping on migration.
-	 * Gate 1c probes these when prev_cpu+sibling are busy, before kernel scan.
-	 * Initialized to 0xFFFF (invalid sentinel) to prevent thundering herd. */
-	u16 warm_cpus[3]; /* [0]=current, [1]=prev (staged in dsq_vtime), [2]=oldest */
-	u16 waker_cpu;    /* CPU where waker last ran — chain locality (Gate 1W-chain) */
+	/* Yield detection — read+written unconditionally every stop */
+	u64 nvcsw_snapshot;   /* 8B: Last read of p->nvcsw */
 
-	/* PROMOTED (Rule 42): ppid was in telemetry CL4+ (byte ~280, cold).
-	 * Game family detection reads this unconditionally in cake_stopping,
-	 * Gate 1WC, and tunnel staging. Promoting to CL0 eliminates a cold
-	 * cache line fetch on every game-detected stop/wakeup. */
-	u32 ppid;         /* Parent PID — game family detection (Proton/Wine siblings) */
-	u32 _pad_cl0;     /* Pad to 8-byte boundary for telemetry u64 fields */
+	/* ─── CL0 total: 8+8+8+4+4+4+4+6+2+8 = 56 bytes (8B headroom) ─── */
 
 	/* --- High Resolution Arena Telemetry (TUI Matrix) ---
      * Zero-cost pointer access via BPF Arena. User-space sweeps memory
@@ -505,12 +595,26 @@ struct cake_stats {
 #define AQ_BULK_HEADROOM     1               /* 1× EWMA runtime for non-yielders */
 #define AQ_MIN_NS            (50 * 1000)     /* 50µs floor — below this overhead > work */
 #define AQ_YIELDER_CEILING_NS (50 * 1000000)  /* 50ms ceiling — yielders (covers 20fps+) */
-#define AQ_BULK_CEILING_NS   (2 * 1000000)   /* 2ms ceiling — non-yielders (forces release) */
+#define AQ_BULK_CEILING_NS        (2 * 1000000)   /* 2ms ceiling — non-yielders (forces release) */
+#define AQ_BULK_CEILING_COMPILE_NS (8 * 1000000)   /* 8ms ceiling — COMPILATION state only (reduce ctx-switch overhead) */
 
-/* Gate 1P: yielder-preempts-non-yielder elapsed threshold.
- * Below this, preemption cache cost (~1.5µs) exceeds benefit.
- * Must be < hog_quantum_cap_ns (500µs) to allow yielder preemption of hogs.
- * 100µs: hog has done meaningful work; audio/input gets fast preemption. */
-#define CAKE_PREEMPT_YIELDER_THRESHOLD_NS (100 * 1000) /* 100µs */
+/* Scheduler operating state — set by Rust TUI, read by BPF hot path.
+ * Priority: GAMING > COMPILATION > IDLE.
+ * Written to sched_state BSS u32 by userspace, read-only from BPF. */
+#define CAKE_STATE_IDLE        0  /* Fair, unthrottled — desktop/browsing */
+#define CAKE_STATE_COMPILATION 1  /* Compile jobs: 8ms bulk ceiling, no squeeze */
+#define CAKE_STATE_GAMING      2  /* Game mode: HOG+bg squeeze, Gate 1P active */
+
+/* Gate 1C-P / Gate 1P: adaptive preemption thresholds.
+ * STANDARD: 100µs — hog has done meaningful work before yielding to normal tasks.
+ *           Below this, preemption context-switch cost (~1.5µs) exceeds benefit.
+ * VIP:       50µs — game-family threads (wineserver, WoW workers) get aggressive
+ *           preemption to avoid cold-cache migration. WoW data showed wineserver
+ *           at 125 MIG/s because the standard threshold blocked reclaiming its home
+ *           CPU from hogs that ran <100µs. 50µs ensures the hog got a reasonable
+ *           quantum while the VIP avoids the ~10-40ns L3 penalty of migration.
+ *           Selected via STAGED_BIT_GAME_MEMBER (already in register, ~0ns). */
+#define CAKE_PREEMPT_YIELDER_THRESHOLD_NS (100 * 1000) /* 100µs — normal tasks */
+#define CAKE_PREEMPT_VIP_THRESHOLD_NS      (50 * 1000) /*  50µs — game family VIPs */
 
 #endif /* __CAKE_INTF_H */
