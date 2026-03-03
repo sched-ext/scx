@@ -859,6 +859,8 @@ struct Stats {
     prev_layer_usages: Vec<Vec<u64>>,
     layer_node_pinned_utils: Vec<Vec<f64>>,
     prev_layer_node_pinned_usages: Vec<Vec<u64>>,
+    layer_node_utils: Vec<Vec<f64>>,
+    prev_layer_node_usages: Vec<Vec<u64>>,
 
     layer_membws: Vec<Vec<f64>>, // Estimated memory bandsidth consumption
     prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
@@ -930,6 +932,26 @@ impl Stats {
         usages
     }
 
+    fn read_layer_node_usages(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+        nr_nodes: usize,
+    ) -> Vec<Vec<u64>> {
+        let mut usages = vec![vec![0u64; nr_nodes]; nr_layers];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let node = topo.all_cpus.get(&cpu).map_or(0, |c| c.node_id);
+            for layer in 0..nr_layers {
+                for usage in 0..=LAYER_USAGE_SUM_UPTO {
+                    usages[layer][node] += cpu_ctxs[cpu].layer_usages[layer][usage];
+                }
+            }
+        }
+
+        usages
+    }
+
     /// Use the membw reported by resctrl to normalize the values reported by hw counters.
     /// We have the following problem:
     /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
@@ -985,7 +1007,10 @@ impl Stats {
             prev_layer_node_pinned_usages: Self::read_layer_node_pinned_usages(
                 &cpu_ctxs, &topo, nr_layers, nr_nodes,
             ),
-
+            layer_node_utils: vec![vec![0.0; nr_nodes]; nr_layers],
+            prev_layer_node_usages: Self::read_layer_node_usages(
+                &cpu_ctxs, &topo, nr_layers, nr_nodes,
+            ),
             layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             // This is not normalized because we don't have enough history to do so.
             // It should not matter too much, since the value is dropped on the first
@@ -1046,6 +1071,12 @@ impl Stats {
 
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
         let cur_layer_node_pinned_usages = Self::read_layer_node_pinned_usages(
+            &cpu_ctxs,
+            &self.topo,
+            self.nr_layers,
+            self.topo.nodes.len(),
+        );
+        let cur_layer_node_usages = Self::read_layer_node_usages(
             &cpu_ctxs,
             &self.topo,
             self.nr_layers,
@@ -1137,6 +1168,10 @@ impl Stats {
             &self.layer_node_pinned_utils,
             *USAGE_DECAY,
         );
+        let cur_node_utils: Vec<Vec<f64>> =
+            compute_diff(&cur_layer_node_usages, &self.prev_layer_node_usages);
+        let layer_node_utils: Vec<Vec<f64>> =
+            metric_decay(cur_node_utils, &self.layer_node_utils, *USAGE_DECAY);
 
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
 
@@ -1198,6 +1233,8 @@ impl Stats {
             prev_layer_usages: cur_layer_usages,
             layer_node_pinned_utils,
             prev_layer_node_pinned_usages: cur_layer_node_pinned_usages,
+            layer_node_utils,
+            prev_layer_node_usages: cur_layer_node_usages,
 
             layer_membws,
             prev_layer_membw_agg: cur_layer_membw_agg,
