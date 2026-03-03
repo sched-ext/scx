@@ -105,48 +105,35 @@ impl SystemInfo {
         }
     }
 
-    /// Format as a multi-line header for dump files and clipboard
+    /// Format as compact one-line header for dump files (AI-optimized, all data)
     pub fn format_header(&self) -> String {
         let ram_display = if self.total_ram_mb >= 1024 {
-            format!("{:.1} GB", self.total_ram_mb as f64 / 1024.0)
+            format!("{:.1}GB", self.total_ram_mb as f64 / 1024.0)
         } else {
-            format!("{} MB", self.total_ram_mb)
+            format!("{}MB", self.total_ram_mb)
         };
-        let smt_label = if self.smt_enabled {
-            "SMT ON"
-        } else {
-            "SMT OFF"
-        };
-
-        // Build topology tags
+        let smt_label = if self.smt_enabled { "SMT" } else { "no-SMT" };
         let mut topo_tags = Vec::new();
         if self.dual_ccd {
-            topo_tags.push("Dual-CCD");
+            topo_tags.push("DualCCD");
         }
         if self.has_vcache {
-            topo_tags.push("V-Cache");
+            topo_tags.push("VCache");
         }
         if self.has_hybrid {
-            topo_tags.push("Hybrid P+E");
+            topo_tags.push("HybridPE");
         }
-        let topo_str = if topo_tags.is_empty() {
-            "Symmetric".to_string()
-        } else {
-            topo_tags.join(", ")
-        };
-
+        if topo_tags.is_empty() {
+            topo_tags.push("Sym");
+        }
         format!(
-            "=== System Info ===\n\
-             CPU:    {} ({})\n\
-             Cores:  {}P/{}T ({})  [{}]\n\
-             RAM:    {}\n\
-             Kernel: {}\n",
+            "sys: cpu={} arch={} cores={}P/{}T {} [{}] ram={} kernel={}\n",
             self.cpu_model,
             self.cpu_arch,
             self.phys_cores,
             self.logical_cpus,
             smt_label,
-            topo_str,
+            topo_tags.join(","),
             ram_display,
             self.kernel_version,
         )
@@ -267,6 +254,14 @@ pub struct TuiApp {
     // Hysteresis: challenger must beat current game for 15s to take over
     pub game_challenger_ppid: u32, // PPID contesting game slot (0 = none)
     pub game_challenger_since: Option<Instant>, // When challenger first appeared
+    // Confidence-based polling throttle (Rule 40)
+    pub game_stable_polls: u32, // consecutive polls with same PPID winner
+    pub game_skip_counter: u32, // how many polls we've skipped this interval
+    // Scheduler state machine (IDLE=0, COMPILATION=1, GAMING=2)
+    pub sched_state: u8,           // current operating state written to BPF BSS
+    pub compile_task_count: usize, // active compiler task count for display
+    // Game detection confidence tier (100=Steam, 90=Wine .exe, 0=none)
+    pub game_confidence: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -313,9 +308,10 @@ pub struct TaskTelemetryRow {
     pub nvcsw_delta: u32,
     pub nivcsw_delta: u32,
     pub ewma_recomp_count: u16,
-    pub is_hog: bool, // Hog squeeze: BULK + non-yielder + deprioritized
-    pub is_bg: bool,  // Background noise squeeze: non-game, non-wb, non-kernel
-    pub ppid: u32,    // Parent PID for game family detection
+    pub is_hog: bool,         // Hog squeeze: BULK + non-yielder + deprioritized
+    pub is_bg: bool,          // Background noise squeeze: non-game, non-wb, non-kernel
+    pub is_game_member: bool, // Task is in the game PPID family (tgid==game_tgid or ppid==game_ppid)
+    pub ppid: u32,            // Parent PID for game family detection
     // Phase 8: Per-callback sub-function stopwatch (ns)
     pub gate_cascade_ns: u32,  // select_cpu: full gate cascade duration
     pub idle_probe_ns: u32,    // select_cpu: winning gate idle probe cost
@@ -378,6 +374,7 @@ impl Default for TaskTelemetryRow {
             ewma_recomp_count: 0,
             is_hog: false,
             is_bg: false,
+            is_game_member: false,
             ppid: 0,
             // Phase 8
             gate_cascade_ns: 0,
@@ -494,6 +491,11 @@ impl TuiApp {
             game_name: String::new(),
             game_challenger_ppid: 0,
             game_challenger_since: None,
+            game_stable_polls: 0,
+            game_skip_counter: 0,
+            sched_state: 0,
+            compile_task_count: 0,
+            game_confidence: 0,
         }
     }
 
@@ -1061,34 +1063,40 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     };
 
     let mut output = String::new();
-    // System hardware context header
     output.push_str(&app.system_info.format_header());
-    output.push_str("\n");
+
+    // Compact state/game/uptime line
+    let state_str = match app.sched_state {
+        2 => {
+            let conf_label = match app.game_confidence {
+                100 => "Steam",
+                90 => "Wine",
+                _ => "?",
+            };
+            format!(
+                "GAMING game={} pid={} threads={} conf={}%[{}]",
+                if app.game_name.is_empty() {
+                    "?"
+                } else {
+                    &app.game_name
+                },
+                app.tracked_game_tgid,
+                app.game_thread_count,
+                app.game_confidence,
+                conf_label,
+            )
+        }
+
+        1 => format!("COMPILATION compile_tasks={}", app.compile_task_count),
+        _ => "IDLE".to_string(),
+    };
     output.push_str(&format!(
-        "=== scx_cake Statistics (Uptime: {}) ===\n",
-        app.format_uptime()
-    ));
-    // Game TGID detection status
-    if app.tracked_game_tgid > 0 {
-        output.push_str(&format!(
-            "Game:   {} (PID {}, {} threads boosted)\n\n",
-            if app.game_name.is_empty() {
-                "unknown"
-            } else {
-                &app.game_name
-            },
-            app.tracked_game_tgid,
-            app.game_thread_count
-        ));
-    } else {
-        output.push_str("Game:   none detected\n\n");
-    }
-    output.push_str(&format!(
-        "Dispatches: {} total ({:.1}% new-flow)\n",
-        total_dispatches, new_pct
+        "cake: uptime={} state={}\n",
+        app.format_uptime(),
+        state_str
     ));
 
-    // Dispatch locality and DSQ hint health
+    // Compact dispatch stats
     let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
     let total_dispatch_calls = stats.nr_dispatch_hint_skip
         + stats.nr_dispatch_misses
@@ -1100,7 +1108,9 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         0.0
     };
     output.push_str(&format!(
-        "Dispatch: Local:{} Steal:{} Miss:{} HintSkip:{} ({:.0}%)  Queue:{}\n\n",
+        "disp: total={} new={:.1}% local={} steal={} miss={} hint_skip={} hint%={:.0} queue={}\n",
+        total_dispatches,
+        new_pct,
         stats.nr_local_dispatches,
         stats.nr_stolen_dispatches,
         stats.nr_dispatch_misses,
@@ -1109,85 +1119,38 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         dsq_depth,
     ));
 
-    // Callback Profile section
-    output.push_str("\n=== Callback Profile (system-wide) ===\n");
-    output.push_str("CALLBACK       TOTAL_µs      MAX_ns    CALLS\n");
-    output.push_str("──────────────────────────────────────────────────────\n");
-
-    // Stopping breakdown
+    // Compact callback profile (all on 2 lines)
     let stop_total = stats.nr_stop_confidence_skip
         + stats.nr_stop_ewma
         + stats.nr_stop_ramp
         + stats.nr_stop_miss;
     let stop_total_f = (stop_total as f64).max(1.0);
     output.push_str(&format!(
-        "stopping       {:<13} {:<9} {}\n",
+        "cb.stop: tot_µs={} max_ns={} calls={} skip={:.1}% ewma={:.1}% ramp={:.1}% miss={:.1}%\n",
         stats.total_stopping_ns / 1000,
         stats.max_stopping_ns,
         stop_total,
-    ));
-    output.push_str(&format!(
-        "  ├─ conf_skip                         {} ({:.1}%)\n",
-        stats.nr_stop_confidence_skip,
         stats.nr_stop_confidence_skip as f64 / stop_total_f * 100.0,
-    ));
-    output.push_str(&format!(
-        "  ├─ ewma                              {} ({:.1}%)\n",
-        stats.nr_stop_ewma,
         stats.nr_stop_ewma as f64 / stop_total_f * 100.0,
-    ));
-    output.push_str(&format!(
-        "  ├─ ramp                              {} ({:.1}%)\n",
-        stats.nr_stop_ramp,
         stats.nr_stop_ramp as f64 / stop_total_f * 100.0,
-    ));
-    output.push_str(&format!(
-        "  └─ miss                              {} ({:.1}%)\n",
-        stats.nr_stop_miss,
         stats.nr_stop_miss as f64 / stop_total_f * 100.0,
     ));
-
-    // Running
-    let total_dispatches: u64 = stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
     output.push_str(&format!(
-        "running        {:<13} {:<9} {}\n",
-        stats.total_running_ns / 1000,
-        stats.max_running_ns,
-        total_dispatches,
+        "cb.run: tot_µs={} max_ns={} calls={}  cb.enq: tot_µs={} calls={}  sel: g1_µs={} g2_µs={}  cb.disp: tot_µs={} max_ns={} calls={}\n",
+        stats.total_running_ns / 1000, stats.max_running_ns, total_dispatches,
+        stats.total_enqueue_latency_ns / 1000, total_dispatches,
+        stats.total_gate1_latency_ns / 1000, stats.total_gate2_latency_ns / 1000,
+        stats.total_dispatch_ns / 1000, stats.max_dispatch_ns, total_dispatch_calls,
     ));
 
-    // Enqueue (already tracked)
-    output.push_str(&format!(
-        "enqueue        {:<13}           {}\n",
-        stats.total_enqueue_latency_ns / 1000,
-        total_dispatches,
-    ));
-
-    // Select CPU (gate latencies as proxy)
-    output.push_str(&format!(
-        "select_cpu     gate1:{:<8}µs  gate2:{}µs\n",
-        stats.total_gate1_latency_ns / 1000,
-        stats.total_gate2_latency_ns / 1000,
-    ));
-
-    // Phase 8: Dispatch callback timing
-    output.push_str(&format!(
-        "dispatch       {:<13} {:<9} {}\n",
-        stats.total_dispatch_ns / 1000,
-        stats.max_dispatch_ns,
-        total_dispatch_calls,
-    ));
-
-    // BenchLab section — reuse the grouped clipboard format
     if app.bench_run_count > 0 {
         output.push_str(&format_bench_for_clipboard(app));
     }
 
-    output.push_str(
-        "\n=== Live Task Matrix (times: µs │ SEL/ENQ/STOP/RUN: ns) — ALL BPF-tracked tasks ===\n",
-    );
-    output.push_str("PPID    PID     ST  COMM            EWMA  AVGRT  MAXRT  GAP     JITTER  WAIT   RUNS/s  CPU  SEL   ENQ   STOP  RUN   G1   G2   G1W  G3   G1P  G1C  G1CP G1D  G1WC G5   MIGR/s  PREEMPT  WHIST\n");
-    output.push_str("────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n");
+    // Task matrix header — compact column key
+    output.push_str("\ntasks: [PPID PID ST COMM EWMA AVG MAX GAP JIT WAIT R/s CPU SEL ENQ STOP RUN G1 G2 G1W G3 G1P G1C G1CP G1D G1WC G5 MIG/s WHIST]\n");
+    output.push_str("       [detail-A: gates% + DIRECT DEFI YIELD PRMPT ENQ MASK MAX_GAP DSQ_INS RUNS SUTIL LLC STREAK WAKER VCSW ICSW CONF TGID]\n");
+    output.push_str("       [detail-B: sw=cascade/probe/vtime/mbox/ewma/classify/vstg/warm(ns) qc=F%/Y%/P% wk=pid/tgid@cpu dist=C:pct,...]\n");
 
     // Dump always captures ALL BPF-tracked tasks (not filtered by TUI view)
     let mut dump_pids: Vec<u32> = app
@@ -1258,6 +1221,10 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 0
             };
             let status_str = match row.status {
+                // Game family member: show ●GAME badge to signal boost status.
+                // This takes priority over HOG/BG which are cosmetic EWMA labels.
+                // Note: BPF's can_squeeze = !is_game so game tasks are NEVER squeezed.
+                TaskStatus::Alive if row.is_game_member => "●GAME",
                 TaskStatus::Alive if row.is_hog => "●HOG",
                 TaskStatus::Alive if row.is_bg => "●BG",
                 TaskStatus::Alive => "●",
@@ -1303,52 +1270,22 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.migrations_per_sec,
                 row.wait_hist[0], row.wait_hist[1], row.wait_hist[2], row.wait_hist[3],
             ));
+            // detail-A: gate % (G1..G5) + all extended fields, compact labels
             output.push_str(&format!(
-                "{}         G1:{:.0}% G2:{:.0}% G1W:{:.0}% G3:{:.0}% G1P:{:.0}% G1C:{:.0}% G1CP:{:.0}% G1D:{:.0}% G1WC:{:.0}% G5:{:.0}%  DIRECT:{}  DEFICIT:{}µs  YIELD:{}  PRMPT_CNT:{}  ENQ_CNT:{}  MASK∆:{}  MAX_GAP:{}µs  DSQ_INS:{}ns  TOTAL_RUNS:{}  SUTIL:{}%  LLC:L{:02}  STREAK:{}  WAKER:{}  VCSW:{}  ICSW:{}  CONF:{}/{}  TGID:{}\n",
+                "{}  g={:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0} dir={} defi={}µs yld={} prmpt={} enq={} mask={} maxgap={}µs dsqins={}ns runs={} sutil={}% llc=L{:02} streak={} waker={} vcsw={} icsw={} conf={}/{} tgid={}\n",
                 indent,
-                row.gate_hit_pcts[0],
-                row.gate_hit_pcts[1],
-                row.gate_hit_pcts[2],
-                row.gate_hit_pcts[3],
-                row.gate_hit_pcts[4],
-                row.gate_hit_pcts[5],
-                row.gate_hit_pcts[6],
-                row.gate_hit_pcts[7],
-                row.gate_hit_pcts[8],
+                row.gate_hit_pcts[0], row.gate_hit_pcts[1], row.gate_hit_pcts[2],
+                row.gate_hit_pcts[3], row.gate_hit_pcts[4], row.gate_hit_pcts[5],
+                row.gate_hit_pcts[6], row.gate_hit_pcts[7], row.gate_hit_pcts[8],
                 row.gate_hit_pcts[9],
-                row.direct_dispatch_count,
-                row.deficit_us,
-                row.yield_count,
-                row.preempt_count,
-                row.enqueue_count,
-                row.cpumask_change_count,
-                row.max_dispatch_gap_us,
-                row.dsq_insert_ns,
-                row.total_runs,
-                row.slice_util_pct,
-                row.llc_id,
-                row.same_cpu_streak,
-                row.wakeup_source_pid,
-                row.nvcsw_delta,
-                row.nivcsw_delta,
-                row.ewma_recomp_count,
-                row.total_runs,
-                row.tgid,
+                row.direct_dispatch_count, row.deficit_us, row.yield_count,
+                row.preempt_count, row.enqueue_count, row.cpumask_change_count,
+                row.max_dispatch_gap_us, row.dsq_insert_ns, row.total_runs,
+                row.slice_util_pct, row.llc_id, row.same_cpu_streak,
+                row.wakeup_source_pid, row.nvcsw_delta, row.nivcsw_delta,
+                row.ewma_recomp_count, row.total_runs, row.tgid,
             ));
-            // Phase 8: per-task stopwatch breakdown
-            output.push_str(&format!(
-                "{}         STOPWATCH: gate_cascade:{}ns  idle_probe:{}ns  vtime_comp:{}ns  mbox:{}ns  ewma:{}ns  classify:{}ns  vtime_stg:{}ns  warm:{}ns\n",
-                indent,
-                row.gate_cascade_ns,
-                row.idle_probe_ns,
-                row.vtime_compute_ns,
-                row.mbox_staging_ns,
-                row.ewma_compute_ns,
-                row.classify_ns,
-                row.vtime_staging_ns,
-                row.warm_history_ns,
-            ));
-            // Phase 8: quantum completion rates
+            // detail-B: stopwatch(ns) + quantum completion % + waker + cpu dist — all one line
             let q_total = row.quantum_full_count as u32
                 + row.quantum_yield_count as u32
                 + row.quantum_preempt_count as u32;
@@ -1361,24 +1298,8 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             } else {
                 (0.0, 0.0, 0.0)
             };
-            output.push_str(&format!(
-                "{}         QCOMP: Full:{:.0}%({})  Yield:{:.0}%({})  Preempt:{:.0}%({})\n",
-                indent,
-                q_full_pct,
-                row.quantum_full_count,
-                q_yield_pct,
-                row.quantum_yield_count,
-                q_preempt_pct,
-                row.quantum_preempt_count,
-            ));
-            // Phase 8: wake chain
-            output.push_str(&format!(
-                "{}         WAKER: PID:{} TGID:{} @CPU{}  PPID:{}\n",
-                indent, row.wakeup_source_pid, row.waker_tgid, row.waker_cpu, row.ppid,
-            ));
-            // Phase 8: CPU distribution (top cores only)
             let total_cpu_runs: u32 = row.cpu_run_count.iter().map(|&c| c as u32).sum();
-            if total_cpu_runs > 0 {
+            let dist_str = if total_cpu_runs > 0 {
                 let mut cpu_pcts: Vec<(usize, f64)> = row
                     .cpu_run_count
                     .iter()
@@ -1387,17 +1308,25 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                     .map(|(i, &c)| (i, c as f64 / total_cpu_runs as f64 * 100.0))
                     .collect();
                 cpu_pcts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let dist_str: Vec<String> = cpu_pcts
+                cpu_pcts
                     .iter()
                     .take(8)
-                    .map(|(cpu, pct)| format!("C{}:{:.0}%", cpu, pct))
-                    .collect();
-                output.push_str(&format!(
-                    "{}         CPU_DIST: {}\n",
-                    indent,
-                    dist_str.join("  "),
-                ));
-            }
+                    .map(|(cpu, pct)| format!("C{}:{:.0}", cpu, pct))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            } else {
+                "-".to_string()
+            };
+            output.push_str(&format!(
+                "{}  sw={}/{}/{}/{}/{}/{}/{}/{} qc=F{:.0}/Y{:.0}/P{:.0} wk={}/{}@{} ppid={} dist={}\n",
+                indent,
+                row.gate_cascade_ns, row.idle_probe_ns, row.vtime_compute_ns,
+                row.mbox_staging_ns, row.ewma_compute_ns, row.classify_ns,
+                row.vtime_staging_ns, row.warm_history_ns,
+                q_full_pct, q_yield_pct, q_preempt_pct,
+                row.wakeup_source_pid, row.waker_tgid, row.waker_cpu,
+                row.ppid, dist_str,
+            ));
         }
     }
 
@@ -1512,7 +1441,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     let outer_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if app.tracked_game_tgid > 0 { 5 } else { 4 }), // Header: 2-3 content lines + borders
+            Constraint::Length(5), // Header: 3 content lines (stats + sched + state/game) + 2 borders
             Constraint::Length(8), // Tier performance panel (4 rows + header + borders)
             Constraint::Min(10),   // Full-width Task Matrix
         ])
@@ -1633,9 +1562,31 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         filter_label,
     );
 
+    // State label — shown in header for all three operating states
+    let state_line = match app.sched_state {
+        2 => String::new(), // GAMING: state shown inline in game_line below
+        1 => format!(
+            " State: COMPILATION | {} compiler task{} active",
+            app.compile_task_count,
+            if app.compile_task_count == 1 { "" } else { "s" }
+        ),
+        _ => " State: IDLE".to_string(),
+    };
+
     let header_text = if app.tracked_game_tgid > 0 {
+        // Confidence tag: shows detection tier + poll stability
+        let conf_label = match app.game_confidence {
+            100 => "Steam",
+            90 => "Wine/.exe",
+            _ => "unknown",
+        };
+        let stability = if app.game_stable_polls >= 20 {
+            "\u{1F512}".to_string()
+        } else {
+            format!("{}/20", app.game_stable_polls)
+        };
         let mut game_line = format!(
-            " Game: {} (PID {}, {} threads)",
+            " State: GAMING | Game: {} (PID {}, {} threads) [{}% {} {}]",
             if app.game_name.is_empty() {
                 "unknown"
             } else {
@@ -1643,6 +1594,9 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             },
             app.tracked_game_tgid,
             app.game_thread_count,
+            app.game_confidence,
+            conf_label,
+            stability,
         );
         // Show challenger holdoff status if active
         if app.game_challenger_ppid > 0 {
@@ -1652,6 +1606,8 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             }
         }
         format!("{}\n{}\n{}", line1, line2, game_line)
+    } else if !state_line.is_empty() {
+        format!("{}\n{}\n{}", line1, line2, state_line)
     } else {
         format!("{}\n{}", line1, line2)
     };
@@ -3667,669 +3623,886 @@ pub fn run_tui(
                 }
             }
 
-            // --- Arena Telemetry Sweep (via pid_to_tctx BPF hash map) ---
-            if let Some(bss) = &skel.maps.bss_data {
-                let pool = &bss.scx_task_allocator.pool;
-                let _slab_ptr = pool.slab as *const u8;
-                let max_elems = pool.max_elems as usize;
-                let _elem_size = pool.elem_size as usize;
-
-                // Track currently active PIDs in this sweep to prune dead tasks
-                // Reuse active_pids buffer to avoid per-tick allocation
-                app.active_pids_buf.clear();
-
-                // PRIMARY: Iterate pid_to_tctx BPF hash map for 100% task coverage.
-                // For each PID, lookup the arena tctx pointer and read telemetry directly.
-                // The arena is mmap'd so these pointers are valid userspace addresses.
-                {
-                    use std::os::fd::{AsFd, AsRawFd};
-                    let map = &skel.maps.pid_to_tctx;
-                    let bpf_fd = map.as_fd().as_raw_fd();
-                    if bpf_fd >= 0 {
-                        let mut key: u32 = 0;
-                        let mut next_key: u32 = 0;
-                        let mut first = true;
-
-                        loop {
-                            let ret = unsafe {
-                                libbpf_rs::libbpf_sys::bpf_map_get_next_key(
-                                    bpf_fd,
-                                    if first {
-                                        std::ptr::null()
-                                    } else {
-                                        &key as *const u32 as *const std::ffi::c_void
-                                    },
-                                    &mut next_key as *mut u32 as *mut std::ffi::c_void,
-                                )
-                            };
-                            if ret != 0 {
-                                break;
-                            }
-                            first = false;
-                            key = next_key;
-
-                            // Look up the arena tctx pointer
-                            let mut tctx_ptr_val: u64 = 0;
-                            let lookup_ret = unsafe {
-                                libbpf_rs::libbpf_sys::bpf_map_lookup_elem(
-                                    bpf_fd,
-                                    &key as *const u32 as *const std::ffi::c_void,
-                                    &mut tctx_ptr_val as *mut u64 as *mut std::ffi::c_void,
-                                )
-                            };
-                            if lookup_ret != 0 || tctx_ptr_val == 0 {
-                                continue;
-                            }
-
-                            // Read cake_task_ctx directly from the mmap'd arena pointer
-                            let ctx_ptr = tctx_ptr_val as *const crate::bpf_intf::cake_task_ctx;
-                            let ctx = unsafe { std::ptr::read_unaligned(ctx_ptr) };
-
-                            let pid = ctx.telemetry.pid;
-                            let packed =
-                                unsafe { ctx.__bindgen_anon_1.__bindgen_anon_1.packed_info };
-                            let tier = (packed >> 28) & 0x03;
-                            let is_hog = (packed >> 27) & 1 != 0; /* CAKE_FLOW_HOG at bit 24+3 */
-                            let is_bg = (packed >> 22) & 1 != 0; /* BIT_BG_NOISE at bit 22 */
-
-                            if pid == 0 || tier > 3 {
-                                continue;
-                            }
-
-                            app.active_pids_buf.insert(pid);
-
-                            let comm_bytes: [u8; 16] =
-                                unsafe { std::mem::transmute(ctx.telemetry.comm) };
-                            let comm = match std::ffi::CStr::from_bytes_until_nul(&comm_bytes) {
-                                Ok(c) => c.to_string_lossy().into_owned(),
-                                Err(_) => String::from_utf8_lossy(&comm_bytes)
-                                    .trim_end_matches('\0')
-                                    .to_string(),
-                            };
-
-                            // Extract deficit and avg runtime using the bindgen anonymous union paths
-                            let deficit_us = unsafe {
-                                ctx.__bindgen_anon_1
-                                    .__bindgen_anon_1
-                                    .__bindgen_anon_1
-                                    .__bindgen_anon_1
-                                    .deficit_us as u32
-                            };
-                            let avg_runtime_us = unsafe {
-                                ctx.__bindgen_anon_1
-                                    .__bindgen_anon_1
-                                    .__bindgen_anon_1
-                                    .__bindgen_anon_1
-                                    .avg_runtime_us as u32
-                            };
-
-                            // Map all 6 gates from BPF telemetry
-                            let g1 = ctx.telemetry.gate_1_hits;
-                            let g2 = ctx.telemetry.gate_2_hits;
-                            let g1w = ctx.telemetry.gate_1w_hits;
-                            let g3 = ctx.telemetry.gate_3_hits;
-                            let g1p = ctx.telemetry.gate_1p_hits;
-                            let g1c = ctx.telemetry.gate_1c_hits;
-                            let g1cp = ctx.telemetry.gate_1cp_hits;
-                            let g1d = ctx.telemetry.gate_1d_hits;
-                            let g1wc = ctx.telemetry.gate_1wc_hits;
-                            let g5 = ctx.telemetry.gate_tun_hits;
-                            let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g1cp + g1d + g1wc + g5;
-
-                            let gate_hit_pcts = if total_sel > 0 {
-                                [
-                                    (g1 as f64 / total_sel as f64) * 100.0,
-                                    (g2 as f64 / total_sel as f64) * 100.0,
-                                    (g1w as f64 / total_sel as f64) * 100.0,
-                                    (g3 as f64 / total_sel as f64) * 100.0,
-                                    (g1p as f64 / total_sel as f64) * 100.0,
-                                    (g1c as f64 / total_sel as f64) * 100.0,
-                                    (g1cp as f64 / total_sel as f64) * 100.0,
-                                    (g1d as f64 / total_sel as f64) * 100.0,
-                                    (g1wc as f64 / total_sel as f64) * 100.0,
-                                    (g5 as f64 / total_sel as f64) * 100.0,
-                                ]
-                            } else {
-                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-                            };
-
-                            let total_runs = ctx.telemetry.total_runs;
-                            let jitter_accum_ns = ctx.telemetry.jitter_accum_ns;
-
-                            // Use the HashMap to persist old data until overwritten cleanly
-                            let row =
-                                app.task_rows
-                                    .entry(pid)
-                                    .or_insert_with(|| TaskTelemetryRow {
-                                        pid,
-                                        comm: comm.clone(),
-                                        tier: tier as u8,
-                                        avg_runtime_us,
-                                        deficit_us,
-                                        wait_duration_ns: ctx.telemetry.wait_duration_ns,
-                                        select_cpu_ns: ctx.telemetry.select_cpu_duration_ns,
-                                        enqueue_ns: ctx.telemetry.enqueue_duration_ns,
-                                        gate_hit_pcts,
-                                        core_placement: ctx.telemetry.core_placement,
-                                        dsq_insert_ns: ctx.telemetry.dsq_insert_ns,
-                                        migration_count: ctx.telemetry.migration_count,
-                                        preempt_count: ctx.telemetry.preempt_count,
-                                        yield_count: ctx.telemetry.yield_count,
-                                        total_runs,
-                                        jitter_accum_ns,
-                                        direct_dispatch_count: ctx.telemetry.direct_dispatch_count,
-                                        enqueue_count: ctx.telemetry.enqueue_count,
-                                        cpumask_change_count: ctx.telemetry.cpumask_change_count,
-                                        stopping_duration_ns: ctx.telemetry.stopping_duration_ns,
-                                        running_duration_ns: ctx.telemetry.running_duration_ns,
-                                        max_runtime_us: ctx.telemetry.max_runtime_us,
-                                        dispatch_gap_us: ctx.telemetry.dispatch_gap_ns / 1000,
-                                        max_dispatch_gap_us: ctx.telemetry.max_dispatch_gap_ns
-                                            / 1000,
-                                        wait_hist: [
-                                            ctx.telemetry.wait_hist_lt10us,
-                                            ctx.telemetry.wait_hist_lt100us,
-                                            ctx.telemetry.wait_hist_lt1ms,
-                                            ctx.telemetry.wait_hist_ge1ms,
-                                        ],
-                                        runs_per_sec: 0.0,
-                                        migrations_per_sec: 0.0,
-                                        status: TaskStatus::Alive,
-                                        is_bpf_tracked: true,
-                                        tgid: ctx.telemetry.tgid,
-                                        slice_util_pct: ctx.telemetry.slice_util_pct,
-                                        llc_id: ctx.telemetry.llc_id,
-                                        same_cpu_streak: ctx.telemetry.same_cpu_streak,
-                                        wakeup_source_pid: ctx.telemetry.wakeup_source_pid,
-                                        nvcsw_delta: ctx.telemetry.nvcsw_delta,
-                                        nivcsw_delta: ctx.telemetry.nivcsw_delta,
-                                        ewma_recomp_count: ctx.telemetry.ewma_recomp_count,
-                                        is_hog,
-                                        is_bg,
-                                        ppid: ctx.ppid,
-                                        // Phase 8
-                                        gate_cascade_ns: ctx.telemetry.gate_cascade_ns,
-                                        idle_probe_ns: ctx.telemetry.idle_probe_ns,
-                                        vtime_compute_ns: ctx.telemetry.vtime_compute_ns,
-                                        mbox_staging_ns: ctx.telemetry.mbox_staging_ns,
-                                        ewma_compute_ns: ctx.telemetry.ewma_compute_ns,
-                                        classify_ns: ctx.telemetry.classify_ns,
-                                        vtime_staging_ns: ctx.telemetry.vtime_staging_ns,
-                                        warm_history_ns: ctx.telemetry.warm_history_ns,
-                                        quantum_full_count: ctx.telemetry.quantum_full_count,
-                                        quantum_yield_count: ctx.telemetry.quantum_yield_count,
-                                        quantum_preempt_count: ctx.telemetry.quantum_preempt_count,
-                                        waker_cpu: ctx.telemetry.waker_cpu,
-                                        waker_tgid: ctx.telemetry.waker_tgid,
-                                        cpu_run_count: ctx.telemetry.cpu_run_count,
-                                    });
-
-                            // Update dynamic row elements
-                            row.tier = tier as u8;
-                            row.avg_runtime_us = avg_runtime_us;
-                            row.deficit_us = deficit_us;
-                            row.wait_duration_ns = ctx.telemetry.wait_duration_ns;
-                            row.select_cpu_ns = ctx.telemetry.select_cpu_duration_ns;
-                            row.enqueue_ns = ctx.telemetry.enqueue_duration_ns;
-                            row.gate_hit_pcts = gate_hit_pcts;
-                            row.core_placement = ctx.telemetry.core_placement;
-                            row.dsq_insert_ns = ctx.telemetry.dsq_insert_ns;
-                            row.migration_count = ctx.telemetry.migration_count;
-                            row.preempt_count = ctx.telemetry.preempt_count;
-                            row.yield_count = ctx.telemetry.yield_count;
-                            row.total_runs = total_runs;
-                            row.jitter_accum_ns = jitter_accum_ns;
-                            row.direct_dispatch_count = ctx.telemetry.direct_dispatch_count;
-                            row.enqueue_count = ctx.telemetry.enqueue_count;
-                            row.cpumask_change_count = ctx.telemetry.cpumask_change_count;
-                            row.stopping_duration_ns = ctx.telemetry.stopping_duration_ns;
-                            row.running_duration_ns = ctx.telemetry.running_duration_ns;
-                            row.max_runtime_us = ctx.telemetry.max_runtime_us;
-                            row.dispatch_gap_us = ctx.telemetry.dispatch_gap_ns / 1000;
-                            row.max_dispatch_gap_us = ctx.telemetry.max_dispatch_gap_ns / 1000;
-                            row.wait_hist = [
-                                ctx.telemetry.wait_hist_lt10us,
-                                ctx.telemetry.wait_hist_lt100us,
-                                ctx.telemetry.wait_hist_lt1ms,
-                                ctx.telemetry.wait_hist_ge1ms,
-                            ];
-                            row.is_bpf_tracked = true;
-                            row.slice_util_pct = ctx.telemetry.slice_util_pct;
-                            row.llc_id = ctx.telemetry.llc_id;
-                            row.same_cpu_streak = ctx.telemetry.same_cpu_streak;
-                            row.wakeup_source_pid = ctx.telemetry.wakeup_source_pid;
-                            row.ewma_recomp_count = ctx.telemetry.ewma_recomp_count;
-                            row.is_hog = is_hog;
-                            row.is_bg = is_bg;
-                            row.ppid = ctx.ppid;
-                            // Phase 8: sub-function stopwatch
-                            row.gate_cascade_ns = ctx.telemetry.gate_cascade_ns;
-                            row.idle_probe_ns = ctx.telemetry.idle_probe_ns;
-                            row.vtime_compute_ns = ctx.telemetry.vtime_compute_ns;
-                            row.mbox_staging_ns = ctx.telemetry.mbox_staging_ns;
-                            row.ewma_compute_ns = ctx.telemetry.ewma_compute_ns;
-                            row.classify_ns = ctx.telemetry.classify_ns;
-                            row.vtime_staging_ns = ctx.telemetry.vtime_staging_ns;
-                            row.warm_history_ns = ctx.telemetry.warm_history_ns;
-                            // Phase 8: quantum completion
-                            row.quantum_full_count = ctx.telemetry.quantum_full_count;
-                            row.quantum_yield_count = ctx.telemetry.quantum_yield_count;
-                            row.quantum_preempt_count = ctx.telemetry.quantum_preempt_count;
-                            // Phase 8: wake chain
-                            row.waker_cpu = ctx.telemetry.waker_cpu;
-                            row.waker_tgid = ctx.telemetry.waker_tgid;
-                            // Phase 8: CPU distribution
-                            row.cpu_run_count = ctx.telemetry.cpu_run_count;
-                            // Status set below after sysinfo cross-reference
-                        } // end loop iteration
-                    } // end if bpf_fd >= 0
-                } // end outer block
-
-                // --- Inject ALL System PIDs (Fallback) ---
-                // Ensures visibility for PIDs that never triggered cake_init_task
-                let sysinfo_pids: std::collections::HashSet<u32> =
-                    app.sys.processes().keys().map(|p| p.as_u32()).collect();
-
-                for (pid, process) in app.sys.processes() {
-                    let pid_u32 = pid.as_u32();
-                    app.task_rows
-                        .entry(pid_u32)
-                        .or_insert_with(|| TaskTelemetryRow {
-                            pid: pid_u32,
-                            comm: process.name().to_string_lossy().to_string(),
-                            tier: 3,
-                            ..Default::default()
-                        });
-                }
-
-                // --- Liveness Detection: cross-reference arena with sysinfo ---
-                let mut bpf_count = 0usize;
-                for (pid, row) in app.task_rows.iter_mut() {
-                    let in_sysinfo = sysinfo_pids.contains(pid);
-                    row.status = if row.is_bpf_tracked && in_sysinfo {
-                        TaskStatus::Alive
-                    } else if in_sysinfo {
-                        TaskStatus::Idle
+            // --- Attach cake_task_iter BPF iterator (once, at first tick) ---
+            // cake_task_iter is SEC("iter/task") — no map_fd needed.
+            // We store the raw *mut bpf_link as usize in a static to avoid lifetime issues.
+            // bpf_program__attach_iter(prog, NULL) → *mut bpf_link (NULL = task iter, no map).
+            static mut TASK_ITER_LINK_RAW: usize = 0; // 0 = uninit, 1 = failed, else ptr
+            if unsafe { TASK_ITER_LINK_RAW } == 0 {
+                // AsRawLibbpf trait: as_libbpf_object() → NonNull<bpf_program> → .as_ptr()
+                use libbpf_rs::AsRawLibbpf;
+                let link_ptr = unsafe {
+                    libbpf_rs::libbpf_sys::bpf_program__attach_iter(
+                        skel.progs.cake_task_iter.as_libbpf_object().as_ptr(),
+                        std::ptr::null(),
+                    )
+                };
+                unsafe {
+                    TASK_ITER_LINK_RAW = if link_ptr.is_null() {
+                        1 // sentinel: attach failed, don't retry
                     } else {
-                        TaskStatus::Dead
+                        link_ptr as usize
                     };
-                    if row.is_bpf_tracked && row.total_runs > 0 {
-                        bpf_count += 1;
-                    }
                 }
-                app.bpf_task_count = bpf_count;
+            }
 
-                // --- Game Detection: aggregate yields per PPID, pick winner ---
-                // Proton/Wine: all siblings (wineserver, game.exe, winedevice)
-                // share the same parent (pv-adverb). Aggregating by PPID means
-                // wineserver's yields + game yields combine, giving a stronger
-                // signal and ensuring the entire Wine prefix is detected as a family.
-                {
-                    let mut best_ppid: u32 = 0;
-                    let mut best_yields: u64 = 0;
-                    let mut best_thread_count: usize = 0;
-                    // Aggregate yields by PPID (parent process)
-                    let mut ppid_yields: std::collections::HashMap<u32, (u64, usize)> =
-                        std::collections::HashMap::new();
-                    for (_pid, row) in app.task_rows.iter() {
-                        if row.status == TaskStatus::Dead || row.yield_count == 0 || row.ppid == 0 {
+            // --- Arena Telemetry Sweep (via cake_task_iter bpf_iter_task) ---
+            // Track currently active PIDs in this sweep to prune dead tasks
+            app.active_pids_buf.clear();
+
+            let link_raw = unsafe { TASK_ITER_LINK_RAW };
+            if link_raw > 1 {
+                // bpf_iter_create(link_fd: c_int) — get fd from the stored *mut bpf_link
+                let link_fd_c = unsafe {
+                    libbpf_rs::libbpf_sys::bpf_link__fd(
+                        link_raw as *mut libbpf_rs::libbpf_sys::bpf_link,
+                    )
+                };
+                let iter_fd = unsafe { libbpf_rs::libbpf_sys::bpf_iter_create(link_fd_c) };
+                if iter_fd >= 0 {
+                    // Read cake_iter_record structs sequentially from the iter fd
+                    use std::os::unix::io::FromRawFd;
+                    let mut f = unsafe { std::fs::File::from_raw_fd(iter_fd) };
+                    let rec_size = std::mem::size_of::<crate::bpf_intf::cake_iter_record>();
+                    let mut buf = vec![0u8; rec_size];
+                    use std::io::Read;
+                    loop {
+                        match f.read_exact(&mut buf) {
+                            Ok(()) => {}
+                            Err(_) => break, // EOF or error — all records read
+                        }
+                        let rec: crate::bpf_intf::cake_iter_record =
+                            unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const _) };
+
+                        let pid = rec.telemetry.pid_inner;
+                        let ppid = rec.ppid;
+                        let packed = rec.packed_info;
+                        let tier = (packed >> 28) & 0x03;
+                        let is_hog = (packed >> 27) & 1 != 0;
+                        let is_bg = (packed >> 22) & 1 != 0;
+
+                        if pid == 0 || tier > 3 {
                             continue;
                         }
-                        let entry = ppid_yields.entry(row.ppid).or_insert((0, 0));
-                        entry.0 += row.yield_count as u64;
-                        entry.1 += 1;
-                    }
-                    for (ppid, (total_yields, thread_count)) in &ppid_yields {
-                        if *total_yields > best_yields {
-                            best_yields = *total_yields;
-                            best_ppid = *ppid;
-                            best_thread_count = *thread_count;
-                        }
-                    }
-                    // Threshold: need at least 64 total yields to qualify as a game.
-                    // Game workers hit this in <100ms. Prevents false positives from
-                    // language servers or build tools with occasional yields.
-                    let new_game_ppid = if best_yields >= 64 { best_ppid } else { 0 };
 
-                    // Helper: resolve best TGID + name for a given PPID (cold path)
-                    let resolve_game =
-                        |ppid: u32, rows: &HashMap<u32, TaskTelemetryRow>| -> (u32, String) {
-                            let mut best_tgid: u32 = 0;
-                            let mut best_tgid_yields: u64 = 0;
-                            let mut tgid_yields: std::collections::HashMap<u32, u64> =
-                                std::collections::HashMap::new();
-                            for (_pid, row) in rows.iter() {
-                                if row.ppid == ppid && row.yield_count > 0 {
-                                    let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
-                                    *tgid_yields.entry(tgid).or_insert(0) += row.yield_count as u64;
-                                }
-                            }
-                            for (tgid, yields) in &tgid_yields {
-                                if *yields > best_tgid_yields {
-                                    best_tgid_yields = *yields;
-                                    best_tgid = *tgid;
-                                }
-                            }
-                            let game_tgid = if best_tgid > 0 { best_tgid } else { ppid };
-                            // Read game name from /proc (cold path, only on game switch)
-                            let name = {
-                                let mut n = String::from("unknown");
-                                if let Ok(cmdline) =
-                                    std::fs::read(format!("/proc/{}/cmdline", game_tgid))
-                                {
-                                    for arg in cmdline.split(|&b| b == 0) {
-                                        if let Ok(s) = std::str::from_utf8(arg) {
-                                            if s.to_lowercase().ends_with(".exe") {
-                                                let basename =
-                                                    s.rsplit(['\\', '/']).next().unwrap_or(s);
-                                                n = basename
-                                                    .trim_end_matches(".exe")
-                                                    .trim_end_matches(".EXE")
-                                                    .to_string();
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                if n == "unknown" {
-                                    if let Ok(comm) =
-                                        std::fs::read_to_string(format!("/proc/{}/comm", game_tgid))
-                                    {
-                                        n = comm.trim().to_string();
-                                    }
-                                }
-                                n
-                            };
-                            (game_tgid, name)
+                        app.active_pids_buf.insert(pid);
+
+                        let comm_bytes: [u8; 16] =
+                            unsafe { std::mem::transmute(rec.telemetry.comm) };
+                        let comm = match std::ffi::CStr::from_bytes_until_nul(&comm_bytes) {
+                            Ok(c) => c.to_string_lossy().into_owned(),
+                            Err(_) => String::from_utf8_lossy(&comm_bytes)
+                                .trim_end_matches('\0')
+                                .to_string(),
                         };
 
-                    // Game exit detection: if current game process is gone, clear immediately
-                    if app.tracked_game_tgid > 0 {
-                        let proc_path = format!("/proc/{}", app.tracked_game_tgid);
-                        if !std::path::Path::new(&proc_path).exists() {
-                            app.tracked_game_tgid = 0;
-                            app.tracked_game_ppid = 0;
-                            app.game_thread_count = 0;
-                            app.game_name.clear();
-                            app.game_challenger_ppid = 0;
-                            app.game_challenger_since = None;
+                        // avg_runtime_us and deficit_us now directly in cake_iter_record
+                        let avg_runtime_us = rec.avg_runtime_us as u32;
+                        let deficit_us: u32 = rec.deficit_us as u32;
+
+                        let g1 = rec.telemetry.gate_1_hits;
+                        let g2 = rec.telemetry.gate_2_hits;
+                        let g1w = rec.telemetry.gate_1w_hits;
+                        let g3 = rec.telemetry.gate_3_hits;
+                        let g1p = rec.telemetry.gate_1p_hits;
+                        let g1c = rec.telemetry.gate_1c_hits;
+                        let g1cp = rec.telemetry.gate_1cp_hits;
+                        let g1d = rec.telemetry.gate_1d_hits;
+                        let g1wc = rec.telemetry.gate_1wc_hits;
+                        let g5 = rec.telemetry.gate_tun_hits;
+                        let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g1cp + g1d + g1wc + g5;
+                        let gate_hit_pcts = if total_sel > 0 {
+                            [
+                                (g1 as f64 / total_sel as f64) * 100.0,
+                                (g2 as f64 / total_sel as f64) * 100.0,
+                                (g1w as f64 / total_sel as f64) * 100.0,
+                                (g3 as f64 / total_sel as f64) * 100.0,
+                                (g1p as f64 / total_sel as f64) * 100.0,
+                                (g1c as f64 / total_sel as f64) * 100.0,
+                                (g1cp as f64 / total_sel as f64) * 100.0,
+                                (g1d as f64 / total_sel as f64) * 100.0,
+                                (g1wc as f64 / total_sel as f64) * 100.0,
+                                (g5 as f64 / total_sel as f64) * 100.0,
+                            ]
+                        } else {
+                            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                        };
+                        let total_runs = rec.telemetry.total_runs;
+                        let jitter_accum_ns = rec.telemetry.jitter_accum_ns;
+
+                        let row = app
+                            .task_rows
+                            .entry(pid)
+                            .or_insert_with(|| TaskTelemetryRow {
+                                pid,
+                                comm: comm.clone(),
+                                tier: tier as u8,
+                                avg_runtime_us,
+                                deficit_us,
+                                wait_duration_ns: rec.telemetry.wait_duration_ns,
+                                select_cpu_ns: rec.telemetry.select_cpu_duration_ns,
+                                enqueue_ns: rec.telemetry.enqueue_duration_ns,
+                                gate_hit_pcts,
+                                core_placement: rec.telemetry.core_placement,
+                                dsq_insert_ns: rec.telemetry.dsq_insert_ns,
+                                migration_count: rec.telemetry.migration_count,
+                                preempt_count: rec.telemetry.preempt_count,
+                                yield_count: rec.telemetry.yield_count,
+                                total_runs,
+                                jitter_accum_ns,
+                                direct_dispatch_count: rec.telemetry.direct_dispatch_count,
+                                enqueue_count: rec.telemetry.enqueue_count,
+                                cpumask_change_count: rec.telemetry.cpumask_change_count,
+                                stopping_duration_ns: rec.telemetry.stopping_duration_ns,
+                                running_duration_ns: rec.telemetry.running_duration_ns,
+                                max_runtime_us: rec.telemetry.max_runtime_us,
+                                dispatch_gap_us: rec.telemetry.dispatch_gap_ns / 1000,
+                                max_dispatch_gap_us: rec.telemetry.max_dispatch_gap_ns / 1000,
+                                wait_hist: [
+                                    rec.telemetry.wait_hist_lt10us,
+                                    rec.telemetry.wait_hist_lt100us,
+                                    rec.telemetry.wait_hist_lt1ms,
+                                    rec.telemetry.wait_hist_ge1ms,
+                                ],
+                                runs_per_sec: 0.0,
+                                migrations_per_sec: 0.0,
+                                status: TaskStatus::Alive,
+                                is_bpf_tracked: true,
+                                tgid: rec.telemetry.tgid,
+                                slice_util_pct: rec.telemetry.slice_util_pct,
+                                llc_id: rec.telemetry.llc_id,
+                                same_cpu_streak: rec.telemetry.same_cpu_streak,
+                                wakeup_source_pid: rec.telemetry.wakeup_source_pid,
+                                nvcsw_delta: rec.telemetry.nvcsw_delta,
+                                nivcsw_delta: rec.telemetry.nivcsw_delta,
+                                ewma_recomp_count: rec.telemetry.ewma_recomp_count,
+                                is_hog,
+                                is_bg,
+                                ppid,
+                                gate_cascade_ns: rec.telemetry.gate_cascade_ns,
+                                idle_probe_ns: rec.telemetry.idle_probe_ns,
+                                vtime_compute_ns: rec.telemetry.vtime_compute_ns,
+                                mbox_staging_ns: rec.telemetry.mbox_staging_ns,
+                                ewma_compute_ns: rec.telemetry.ewma_compute_ns,
+                                classify_ns: rec.telemetry.classify_ns,
+                                vtime_staging_ns: rec.telemetry.vtime_staging_ns,
+                                warm_history_ns: rec.telemetry.warm_history_ns,
+                                quantum_full_count: rec.telemetry.quantum_full_count,
+                                quantum_yield_count: rec.telemetry.quantum_yield_count,
+                                quantum_preempt_count: rec.telemetry.quantum_preempt_count,
+                                waker_cpu: rec.telemetry.waker_cpu,
+                                waker_tgid: rec.telemetry.waker_tgid,
+                                cpu_run_count: rec.telemetry.cpu_run_count,
+                                is_game_member: false,
+                            });
+
+                        // Update dynamic row elements
+                        row.tier = tier as u8;
+                        row.avg_runtime_us = avg_runtime_us;
+                        row.deficit_us = deficit_us;
+                        row.wait_duration_ns = rec.telemetry.wait_duration_ns;
+                        row.select_cpu_ns = rec.telemetry.select_cpu_duration_ns;
+                        row.enqueue_ns = rec.telemetry.enqueue_duration_ns;
+                        row.gate_hit_pcts = gate_hit_pcts;
+                        row.core_placement = rec.telemetry.core_placement;
+                        row.dsq_insert_ns = rec.telemetry.dsq_insert_ns;
+                        row.migration_count = rec.telemetry.migration_count;
+                        row.preempt_count = rec.telemetry.preempt_count;
+                        row.yield_count = rec.telemetry.yield_count;
+                        row.total_runs = total_runs;
+                        row.jitter_accum_ns = jitter_accum_ns;
+                        row.direct_dispatch_count = rec.telemetry.direct_dispatch_count;
+                        row.enqueue_count = rec.telemetry.enqueue_count;
+                        row.cpumask_change_count = rec.telemetry.cpumask_change_count;
+                        row.stopping_duration_ns = rec.telemetry.stopping_duration_ns;
+                        row.running_duration_ns = rec.telemetry.running_duration_ns;
+                        row.max_runtime_us = rec.telemetry.max_runtime_us;
+                        row.dispatch_gap_us = rec.telemetry.dispatch_gap_ns / 1000;
+                        row.max_dispatch_gap_us = rec.telemetry.max_dispatch_gap_ns / 1000;
+                        row.wait_hist = [
+                            rec.telemetry.wait_hist_lt10us,
+                            rec.telemetry.wait_hist_lt100us,
+                            rec.telemetry.wait_hist_lt1ms,
+                            rec.telemetry.wait_hist_ge1ms,
+                        ];
+                        row.is_bpf_tracked = true;
+                        row.slice_util_pct = rec.telemetry.slice_util_pct;
+                        row.llc_id = rec.telemetry.llc_id;
+                        row.same_cpu_streak = rec.telemetry.same_cpu_streak;
+                        row.wakeup_source_pid = rec.telemetry.wakeup_source_pid;
+                        row.ewma_recomp_count = rec.telemetry.ewma_recomp_count;
+                        row.is_hog = is_hog;
+                        row.is_bg = is_bg;
+                        row.is_game_member = app.tracked_game_tgid > 0
+                            && (row.tgid == app.tracked_game_tgid
+                                || (row.ppid > 0 && row.ppid == app.tracked_game_ppid));
+                        row.ppid = ppid;
+                        row.gate_cascade_ns = rec.telemetry.gate_cascade_ns;
+                        row.idle_probe_ns = rec.telemetry.idle_probe_ns;
+                        row.vtime_compute_ns = rec.telemetry.vtime_compute_ns;
+                        row.mbox_staging_ns = rec.telemetry.mbox_staging_ns;
+                        row.ewma_compute_ns = rec.telemetry.ewma_compute_ns;
+                        row.classify_ns = rec.telemetry.classify_ns;
+                        row.vtime_staging_ns = rec.telemetry.vtime_staging_ns;
+                        row.warm_history_ns = rec.telemetry.warm_history_ns;
+                        row.quantum_full_count = rec.telemetry.quantum_full_count;
+                        row.quantum_yield_count = rec.telemetry.quantum_yield_count;
+                        row.quantum_preempt_count = rec.telemetry.quantum_preempt_count;
+                        row.waker_cpu = rec.telemetry.waker_cpu;
+                        row.waker_tgid = rec.telemetry.waker_tgid;
+                        row.cpu_run_count = rec.telemetry.cpu_run_count;
+                    } // end read loop
+                      // f drops here, closing the iter fd automatically
+                } // end if iter_fd >= 0
+            } // end if link_ptr > 0
+
+            // --- Inject ALL System PIDs (Fallback) ---
+            // Ensures visibility for PIDs that never triggered cake_init_task
+            let sysinfo_pids: std::collections::HashSet<u32> =
+                app.sys.processes().keys().map(|p| p.as_u32()).collect();
+
+            for (pid, process) in app.sys.processes() {
+                let pid_u32 = pid.as_u32();
+                app.task_rows
+                    .entry(pid_u32)
+                    .or_insert_with(|| TaskTelemetryRow {
+                        pid: pid_u32,
+                        comm: process.name().to_string_lossy().to_string(),
+                        tier: 3,
+                        ..Default::default()
+                    });
+            }
+
+            // --- Liveness Detection: cross-reference arena with sysinfo ---
+            let mut bpf_count = 0usize;
+            for (pid, row) in app.task_rows.iter_mut() {
+                let in_sysinfo = sysinfo_pids.contains(pid);
+                row.status = if row.is_bpf_tracked && in_sysinfo {
+                    TaskStatus::Alive
+                } else if in_sysinfo {
+                    TaskStatus::Idle
+                } else {
+                    TaskStatus::Dead
+                };
+                if row.is_bpf_tracked && row.total_runs > 0 {
+                    bpf_count += 1;
+                }
+            }
+            app.bpf_task_count = bpf_count;
+
+            // --- Game Detection: aggregate yields per PPID, pick winner ---
+            // Proton/Wine: all siblings (wineserver, game.exe, winedevice)
+            // share the same parent (pv-adverb). Aggregating by PPID means
+            // wineserver's yields + game yields combine, giving a stronger
+            // signal and ensuring the entire Wine prefix is detected as a family.
+            //
+            // GATE: Minimum 5 threads at PPID-family level.
+            //   Prevents idle browsers (1-3 yield-active threads) from qualifying.
+            //   Games under Proton easily satisfy: game.exe + wineserver +
+            //   winedevice + render workers = 5+ threads always.
+            //   Native Linux games also easily satisfy (main + audio + IO + render).
+            //
+            // CONFIDENCE THROTTLE (Rule 40): After GAME_CONFIDENCE_THRESHOLD
+            //   stable polls with the same PPID winning, reduce detection sweep
+            //   to every GAME_CONFIDENCE_SKIP-th poll (~2s effective instead of 500ms).
+            //   Resets immediately on game exit or PPID switch.
+            const GAME_MIN_THREADS: usize = 5;
+            const GAME_CONFIDENCE_THRESHOLD: u32 = 20; // 20 × 500ms = 10s stable
+            const GAME_CONFIDENCE_SKIP: u32 = 4; // check every 4th poll when confident
+
+            // Game exit detection fires before the throttle check so a dead game
+            // always clears on the very next poll, regardless of confidence state.
+            if app.tracked_game_tgid > 0 {
+                let proc_path = format!("/proc/{}", app.tracked_game_tgid);
+                if !std::path::Path::new(&proc_path).exists() {
+                    app.tracked_game_tgid = 0;
+                    app.tracked_game_ppid = 0;
+                    app.game_thread_count = 0;
+                    app.game_name.clear();
+                    app.game_challenger_ppid = 0;
+                    app.game_challenger_since = None;
+                    app.game_stable_polls = 0;
+                    app.game_skip_counter = 0;
+                }
+            }
+
+            // Confidence throttle: if we've been stable long enough, skip
+            // the full PPID aggregation sweep on most polls.
+            let should_skip_sweep = app.game_stable_polls >= GAME_CONFIDENCE_THRESHOLD
+                && app.game_skip_counter > 0
+                && app.game_skip_counter < GAME_CONFIDENCE_SKIP;
+
+            if should_skip_sweep {
+                // Confident path: reuse existing winner, just bump skip counter.
+                // BPF write still happens below unconditionally.
+                app.game_skip_counter += 1;
+            } else {
+                // Full detection sweep.
+                app.game_skip_counter = 0;
+
+                // --- Three-phase game detection ---
+                // Priority: Steam (100) → Wine .exe (90) → yield fallback (50)
+                //
+                // Phase 1 + 2 scan qualifying PPIDs (≥GAME_MIN_THREADS threads with
+                // any activity). No yield threshold required for Steam/.exe —
+                // the binary signal is definitive on its own.
+                //
+                // Phase 3 (yield fallback) retains the 64-yield + 5-thread dual gate
+                // for unrecognised native games: guards against browsers, IDEs, etc.
+
+                // Reusable Steam env probe (cold path, ~1 file read per PPID).
+                let has_steam_env = |pid: u32| -> bool {
+                    if let Ok(env) = std::fs::read(format!("/proc/{}/environ", pid)) {
+                        env.split(|&b| b == 0)
+                            .filter_map(|kv| std::str::from_utf8(kv).ok())
+                            .any(|s| s.starts_with("SteamGameId=") || s.starts_with("STEAM_GAME="))
+                    } else {
+                        false
+                    }
+                };
+
+                // Reusable .exe probe (cold path, ~1 file read per PPID).
+                let has_exe_cmdline = |pid: u32| -> bool {
+                    if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
+                        cmdline
+                            .split(|&b| b == 0)
+                            .filter_map(|arg| std::str::from_utf8(arg).ok())
+                            .any(|s| s.to_lowercase().ends_with(".exe"))
+                    } else {
+                        false
+                    }
+                };
+
+                // Aggregate thread counts by PPID for Phase 1 + 2 thread-count gate.
+                let mut ppid_data: std::collections::HashMap<u32, usize> =
+                    std::collections::HashMap::new(); // ppid → thread_count
+                for (_pid, row) in app.task_rows.iter() {
+                    if row.status == TaskStatus::Dead || row.ppid == 0 {
+                        continue;
+                    }
+                    *ppid_data.entry(row.ppid).or_insert(0) += 1;
+                }
+
+                // Phase 1: Steam scan — highest priority, no yield threshold.
+                // Covers: Proton games, native Linux Steam games, Battle.net/Epic via Steam.
+                let mut steam_ppid: u32 = 0;
+                for (&ppid, &thread_count) in &ppid_data {
+                    if thread_count >= GAME_MIN_THREADS && has_steam_env(ppid) {
+                        // Validate: skip the Steam launcher's own process group.
+                        // Find any thread under this PPID and check if its cmdline
+                        // is a real game binary (not "steam" or "steamwebhelper").
+                        // Inlined here because resolve_game closure is defined later.
+                        let has_game_binary = app.task_rows.values().any(|row| {
+                            row.ppid == ppid && {
+                                let comm_lc = row.comm.to_lowercase();
+                                let is_steam_infra = comm_lc.contains("steam")
+                                    || comm_lc.contains("steamwebhelper")
+                                    || comm_lc.contains("pressure-vessel");
+                                !is_steam_infra && (comm_lc.ends_with(".exe") || row.tgid == ppid)
+                            }
+                        });
+                        if has_game_binary {
+                            steam_ppid = ppid;
+                            break;
+                        }
+                        // Launcher group only — keep scanning.
+                    }
+                }
+
+                // Phase 2: .exe scan — Wine/Proton without Steam env (Heroic, Lutris, etc.).
+                let mut exe_ppid: u32 = 0;
+                if steam_ppid == 0 {
+                    for (&ppid, &thread_count) in &ppid_data {
+                        if thread_count >= GAME_MIN_THREADS && has_exe_cmdline(ppid) {
+                            exe_ppid = ppid;
+                            break;
+                        }
+                    }
+                }
+
+                // Resolve winning PPID: Steam wins → .exe wins → no game.
+                // Phase 3 (yield fallback) removed: yield-heavy non-games (Brave, Chrome,
+                // IDEs, Electron apps) too easily exceed the threshold and false-positive.
+                // If it has no Steam env and no .exe process, it is not a game.
+                let new_game_ppid = if steam_ppid > 0 {
+                    steam_ppid
+                } else if exe_ppid > 0 {
+                    exe_ppid
+                } else {
+                    0
+                };
+
+                // Helper: resolve best TGID + name for a given PPID (cold path only).
+                // Selects the TGID with the highest avg_runtime_us — the game's main/render
+                // loop runs for milliseconds; Windows service exes (Services.exe, pluginhost,
+                // winedevice) run for microseconds and are filtered by the blocklist.
+                let resolve_game = |ppid: u32,
+                                    rows: &HashMap<u32, TaskTelemetryRow>|
+                 -> (u32, String) {
+                    // Known Windows infrastructure exes that appear in Proton/Wine trees
+                    // but are never the actual game. Skip these when selecting game TGID.
+                    const WIN_INFRA_EXES: &[&str] = &[
+                        "services",
+                        "pluginhost",
+                        "winedevice",
+                        "rpcss",
+                        "svchost",
+                        "explorer",
+                        "wineboot",
+                        "start",
+                        "conhost",
+                        "dxvk-cache-me",
+                        "crashhandler",
+                        "unitycrashhandler64",
+                        "werfault",
+                        "ngen",
+                        "mscorsvw",
+                        "gamebarfullscreensession",
+                        "gamebarpresencewriter",
+                        "rundll32",
+                        "regsvr32",
+                        "winedbg",
+                        "cmd",
+                    ];
+
+                    // Build per-TGID max avg_runtime. The game thread always wins —
+                    // render frames take ms, infra processes take µs.
+                    let mut tgid_max_rt: std::collections::HashMap<u32, u32> =
+                        std::collections::HashMap::new();
+                    for (_pid, row) in rows.iter() {
+                        if row.ppid == ppid && row.avg_runtime_us > 0 {
+                            let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
+                            let entry = tgid_max_rt.entry(tgid).or_insert(0);
+                            if row.avg_runtime_us > *entry {
+                                *entry = row.avg_runtime_us;
+                            }
                         }
                     }
 
-                    // --- Hysteresis State Machine ---
-                    // Once a game is locked, a challenger must sustain the yield lead
-                    // for 15 consecutive seconds before the scheduler accepts the swap.
-                    // This prevents harsh alt-tab flips from transient yield spikes.
-                    const GAME_HOLDOFF_SECS: u64 = 15;
+                    // Sort TGIDs by max runtime descending; skip Windows infra exes.
+                    let mut ranked: Vec<(u32, u32)> = tgid_max_rt.into_iter().collect();
+                    ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-                    if app.tracked_game_tgid == 0 {
-                        // No game locked — accept immediately (first detection, instant)
-                        if new_game_ppid > 0 {
-                            let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
-                            app.tracked_game_tgid = tgid;
-                            app.tracked_game_ppid = new_game_ppid;
-                            app.game_thread_count = best_thread_count;
-                            app.game_name = name;
-                            app.game_challenger_ppid = 0;
-                            app.game_challenger_since = None;
+                    let mut game_tgid: u32 = ppid; // fallback
+                    'outer: for (tgid, _rt) in &ranked {
+                        // Read cmdline to get exe name (cold path).
+                        if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", tgid)) {
+                            for arg in cmdline.split(|&b| b == 0) {
+                                if let Ok(s) = std::str::from_utf8(arg) {
+                                    let low = s.to_lowercase();
+                                    if low.ends_with(".exe") {
+                                        let basename = s.rsplit(['\\', '/']).next().unwrap_or(s);
+                                        let bare = basename
+                                            .trim_end_matches(".exe")
+                                            .trim_end_matches(".EXE")
+                                            .to_lowercase();
+                                        if WIN_INFRA_EXES.iter().any(|&b| bare == b) {
+                                            continue 'outer; // skip infra exe
+                                        }
+                                        game_tgid = *tgid;
+                                        break 'outer;
+                                    }
+                                }
+                            }
                         }
-                    } else if new_game_ppid == app.tracked_game_ppid {
-                        // Same game family still winning — update thread count, reset challenger
-                        app.game_thread_count = best_thread_count;
-                        app.game_challenger_ppid = 0;
-                        app.game_challenger_since = None;
-                    } else if new_game_ppid > 0 {
-                        // Different PPID is winning — challenger detected
-                        if app.game_challenger_ppid != new_game_ppid {
-                            // New challenger appeared, start the 15s timer
-                            app.game_challenger_ppid = new_game_ppid;
-                            app.game_challenger_since = Some(Instant::now());
-                        } else if let Some(since) = app.game_challenger_since {
-                            // Same challenger persisting — check if 15s holdoff expired
-                            if since.elapsed() >= Duration::from_secs(GAME_HOLDOFF_SECS) {
-                                // Challenger sustained the lead — swap game
+                        // No .exe in cmdline — could be native, take it as fallback.
+                        if game_tgid == ppid {
+                            game_tgid = *tgid;
+                        }
+                    }
+
+                    // Read display name: prefer .exe basename, fall back to comm.
+                    let name = {
+                        let mut n = String::from("unknown");
+                        if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", game_tgid)) {
+                            for arg in cmdline.split(|&b| b == 0) {
+                                if let Ok(s) = std::str::from_utf8(arg) {
+                                    if s.to_lowercase().ends_with(".exe") {
+                                        let basename = s.rsplit(['\\', '/']).next().unwrap_or(s);
+                                        n = basename
+                                            .trim_end_matches(".exe")
+                                            .trim_end_matches(".EXE")
+                                            .to_string();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if n == "unknown" {
+                            if let Ok(comm) =
+                                std::fs::read_to_string(format!("/proc/{}/comm", game_tgid))
+                            {
+                                n = comm.trim().to_string();
+                            }
+                        }
+                        n
+                    };
+                    (game_tgid, name)
+                };
+
+                // Confidence for the candidate comes from the winning detection phase.
+                // Phase 1 (Steam) → 100, Phase 2 (.exe) → 90, no game → 0.
+                let new_game_confidence: u8 = if new_game_ppid == 0 {
+                    0
+                } else if new_game_ppid == steam_ppid {
+                    100
+                } else {
+                    90 // exe match
+                };
+
+                // Holdoff by confidence tier:
+                //   100 (Steam) → instant lock
+                //    90 (.exe)  → 5s holdoff (Wine apps nearly always games, but brief wait)
+                let holdoff_for_conf = |conf: u8| -> u64 {
+                    if conf >= 100 {
+                        0
+                    } else {
+                        5
+                    }
+                };
+
+                // --- Hysteresis State Machine ---
+                // Challenger can only displace a locked game if challenger_confidence >=
+                // locked_game_confidence. Steam (100) always beats .exe (90).
+
+                if app.tracked_game_tgid == 0 {
+                    // No game locked — try to lock now.
+                    if new_game_confidence > 0 {
+                        let holdoff = holdoff_for_conf(new_game_confidence);
+                        if holdoff == 0 || app.game_challenger_ppid == new_game_ppid {
+                            // Either instant (Steam) or challenger already waited enough.
+                            let accept = holdoff == 0
+                                || app
+                                    .game_challenger_since
+                                    .map_or(false, |s| s.elapsed() >= Duration::from_secs(holdoff));
+                            if accept {
                                 let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
                                 app.tracked_game_tgid = tgid;
                                 app.tracked_game_ppid = new_game_ppid;
-                                app.game_thread_count = best_thread_count;
+                                app.game_thread_count =
+                                    ppid_data.get(&new_game_ppid).copied().unwrap_or(0);
                                 app.game_name = name;
+                                app.game_confidence = new_game_confidence;
                                 app.game_challenger_ppid = 0;
                                 app.game_challenger_since = None;
+                                app.game_stable_polls = 1;
                             }
-                            // else: keep waiting, don't switch yet
+                        } else {
+                            // Start or continue holdoff timer.
+                            if app.game_challenger_ppid != new_game_ppid {
+                                app.game_challenger_ppid = new_game_ppid;
+                                app.game_challenger_since = Some(Instant::now());
+                            }
                         }
-                    } else {
-                        // No qualifying PPID above threshold — challenger gone, but keep current game
-                        app.game_challenger_ppid = 0;
-                        app.game_challenger_since = None;
                     }
-                }
-
-                // Write game_ppid to BPF BSS — drives all scheduling decisions.
-                // PPID sourced directly from arena (BPF caches p->real_parent->tgid).
-                // game_tgid still written for display/TUI purposes.
-                if let Some(bss) = &mut skel.maps.bss_data {
-                    bss.game_tgid = app.tracked_game_tgid;
-                    // Use tracked_game_ppid directly — already resolved by hysteresis FSM
-                    bss.game_ppid = app.tracked_game_ppid;
-                }
-
-                // --- Delta Mode: compute per-second rates ---
-                let actual_elapsed = last_tick.elapsed().as_secs_f64().max(0.1);
-                for (pid, row) in app.task_rows.iter_mut() {
-                    if let Some(&(prev_runs, prev_migr)) = app.prev_deltas.get(pid) {
-                        let d_runs = row.total_runs.saturating_sub(prev_runs);
-                        let d_migr = row.migration_count.saturating_sub(prev_migr);
-                        row.runs_per_sec = d_runs as f64 / actual_elapsed;
-                        row.migrations_per_sec = d_migr as f64 / actual_elapsed;
+                } else if new_game_ppid == app.tracked_game_ppid {
+                    // Same game family still winning — update thread count, reset challenger.
+                    app.game_thread_count = ppid_data.get(&new_game_ppid).copied().unwrap_or(0);
+                    app.game_challenger_ppid = 0;
+                    app.game_challenger_since = None;
+                    app.game_stable_polls = app.game_stable_polls.saturating_add(1);
+                } else if new_game_confidence > 0 && new_game_confidence > app.game_confidence {
+                    // Only strictly higher confidence can contest the incumbent.
+                    // Equal confidence (e.g. two Steam-env PPIDs) is irrelevant — the locked
+                    // game stays sticky until its /proc entry dies (checked above).
+                    // This prevents HashMap iteration non-determinism from resetting stable_polls
+                    // when the Steam launcher and game.exe both have SteamGameId in env.
+                    app.game_stable_polls = 0;
+                    if app.game_challenger_ppid != new_game_ppid {
+                        app.game_challenger_ppid = new_game_ppid;
+                        app.game_challenger_since = Some(Instant::now());
+                    } else if let Some(since) = app.game_challenger_since {
+                        let holdoff = holdoff_for_conf(new_game_confidence);
+                        if since.elapsed() >= Duration::from_secs(holdoff) {
+                            let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
+                            app.tracked_game_tgid = tgid;
+                            app.tracked_game_ppid = new_game_ppid;
+                            app.game_thread_count =
+                                ppid_data.get(&new_game_ppid).copied().unwrap_or(0);
+                            app.game_name = name;
+                            app.game_confidence = new_game_confidence;
+                            app.game_challenger_ppid = 0;
+                            app.game_challenger_since = None;
+                            app.game_stable_polls = 1;
+                        }
                     }
-                }
-                // Lightweight delta snapshot: only (total_runs, migration_count)
-                // Eliminates ~500 String allocs/drops per tick from deep-cloning task_rows
-                app.prev_deltas.clear();
-                for (pid, row) in app.task_rows.iter() {
-                    app.prev_deltas
-                        .insert(*pid, (row.total_runs, row.migration_count));
-                }
-
-                // --- Arena diagnostics ---
-                app.arena_max = max_elems;
-                app.arena_active = app.active_pids_buf.len();
-
-                /* EXPLICITLY DISABLED: Dead Tasks are no longer removed so users can view
-                 * the absolute hardware scheduling history of all tasks on the system.
-                 * app.task_rows.retain(|pid, _| active_pids.contains(pid)); */
-
-                // Re-sort with smart ordering:
-                //   - Primary: BPF-tracked (is_bpf_tracked) descending
-                //   - Secondary: current sort column
-                //   - Dead tasks always last
-                let mut sorted_pids: Vec<u32> = if app.show_all_tasks {
-                    app.task_rows.keys().copied().collect()
                 } else {
-                    // Filter: only BPF-tracked tasks with total_runs > 0
-                    app.task_rows
-                        .iter()
-                        .filter(|(_, row)| row.is_bpf_tracked && row.total_runs > 0)
-                        .map(|(pid, _)| *pid)
-                        .collect()
-                };
-                // Apply sort with direction support
-                let desc = app.sort_descending;
-                match app.sort_column {
-                    SortColumn::RunDuration => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::Gate1Pct => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_b.gate_hit_pcts[0]
-                            .partial_cmp(&r_a.gate_hit_pcts[0])
-                            .unwrap_or(std::cmp::Ordering::Equal);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::TargetCpu => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_a.core_placement.cmp(&r_b.core_placement);
-                        if desc {
-                            cmp.reverse()
-                        } else {
-                            cmp
-                        }
-                    }),
-                    SortColumn::Pid => sorted_pids.sort_by(|a, b| {
-                        let cmp = a.cmp(b);
-                        if desc {
-                            cmp.reverse()
-                        } else {
-                            cmp
-                        }
-                    }),
-                    SortColumn::SelectCpu => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_b.select_cpu_ns.cmp(&r_a.select_cpu_ns);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::Enqueue => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_b.enqueue_ns.cmp(&r_a.enqueue_ns);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::Jitter => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let j_a = if r_a.total_runs > 0 {
-                            r_a.jitter_accum_ns / r_a.total_runs as u64
-                        } else {
-                            0
-                        };
-                        let j_b = if r_b.total_runs > 0 {
-                            r_b.jitter_accum_ns / r_b.total_runs as u64
-                        } else {
-                            0
-                        };
-                        let cmp = j_b.cmp(&j_a);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::Tier => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_a.tier.cmp(&r_b.tier);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::Ewma => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::Vcsw => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_b.nvcsw_delta.cmp(&r_a.nvcsw_delta);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::Hog => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        // Hogs first when descending
-                        let cmp = (r_b.is_hog as u8).cmp(&(r_a.is_hog as u8));
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::RunsPerSec => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_b
-                            .runs_per_sec
-                            .partial_cmp(&r_a.runs_per_sec)
-                            .unwrap_or(std::cmp::Ordering::Equal);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
-                    SortColumn::Gap => sorted_pids.sort_by(|a, b| {
-                        let r_a = app.task_rows.get(a).unwrap();
-                        let r_b = app.task_rows.get(b).unwrap();
-                        let cmp = r_b.dispatch_gap_us.cmp(&r_a.dispatch_gap_us);
-                        if desc {
-                            cmp
-                        } else {
-                            cmp.reverse()
-                        }
-                    }),
+                    // No qualifying candidate or lower-confidence challenger — hold current.
+                    app.game_challenger_ppid = 0;
+                    app.game_challenger_since = None;
+                    app.game_stable_polls = 0;
                 }
+            }
 
-                // TGID grouping: stable-sort by tgid so threads of the
-                // same process stay adjacent. The first thread in each
-                // group (after the primary sort) defines the group rank,
-                // so processes with high-priority threads sort first.
-                let mut tgid_rank: std::collections::HashMap<u32, usize> =
-                    std::collections::HashMap::new();
-                for (i, pid) in sorted_pids.iter().enumerate() {
-                    if let Some(row) = app.task_rows.get(pid) {
-                        let tgid = if row.tgid > 0 { row.tgid } else { *pid };
-                        tgid_rank.entry(tgid).or_insert(i);
+            // Write game state to BPF BSS — drives all scheduling decisions.
+            // game_ppid is the primary family signal (includes wineserver + siblings).
+            // game_tgid written for display/existence checks.
+            // sched_state drives HOG/bg/Gate1P/quantum policy.
+            if let Some(bss) = &mut skel.maps.bss_data {
+                bss.game_tgid = app.tracked_game_tgid;
+                bss.game_ppid = app.tracked_game_ppid;
+                bss.game_confidence = app.game_confidence;
+                // --- State machine: GAMING > COMPILATION > IDLE ---
+                const CAKE_STATE_IDLE: u8 = 0;
+                const CAKE_STATE_COMPILATION: u8 = 1;
+                const CAKE_STATE_GAMING: u8 = 2;
+
+                let new_state = if app.tracked_game_tgid > 0 {
+                    CAKE_STATE_GAMING
+                } else {
+                    // Detect active compiler processes: avg_runtime >= 8ms AND
+                    // comm matches a known compiler binary. Require >=2 to avoid
+                    // false positives from a single transient ld/as invocation.
+                    const COMPILE_COMMS: &[&str] = &[
+                        "cc1", "rustc", "clang", "clang++", "ld", "ld.lld", "lld", "ninja",
+                        "cmake", "as", "gcc", "g++", "link",
+                    ];
+                    let compile_count = app
+                        .task_rows
+                        .values()
+                        .filter(|r| {
+                            r.status != TaskStatus::Dead
+                                && r.avg_runtime_us >= 8000
+                                && COMPILE_COMMS.iter().any(|&c| r.comm.contains(c))
+                        })
+                        .count();
+                    app.compile_task_count = compile_count;
+                    if compile_count >= 2 {
+                        CAKE_STATE_COMPILATION
+                    } else {
+                        CAKE_STATE_IDLE
                     }
+                };
+                app.sched_state = new_state;
+                bss.sched_state = new_state as u32;
+            }
+
+            // --- Delta Mode: compute per-second rates ---
+            let actual_elapsed = last_tick.elapsed().as_secs_f64().max(0.1);
+            for (pid, row) in app.task_rows.iter_mut() {
+                if let Some(&(prev_runs, prev_migr)) = app.prev_deltas.get(pid) {
+                    let d_runs = row.total_runs.saturating_sub(prev_runs);
+                    let d_migr = row.migration_count.saturating_sub(prev_migr);
+                    row.runs_per_sec = d_runs as f64 / actual_elapsed;
+                    row.migrations_per_sec = d_migr as f64 / actual_elapsed;
                 }
-                sorted_pids.sort_by(|a, b| {
+            }
+            // Lightweight delta snapshot: only (total_runs, migration_count)
+            // Eliminates ~500 String allocs/drops per tick from deep-cloning task_rows
+            app.prev_deltas.clear();
+            for (pid, row) in app.task_rows.iter() {
+                app.prev_deltas
+                    .insert(*pid, (row.total_runs, row.migration_count));
+            }
+
+            // --- Arena diagnostics ---
+            app.arena_max = 0; // arena max not tracked via iter path
+            app.arena_active = app.active_pids_buf.len();
+
+            /* EXPLICITLY DISABLED: Dead Tasks are no longer removed so users can view
+             * the absolute hardware scheduling history of all tasks on the system.
+             * app.task_rows.retain(|pid, _| active_pids.contains(pid)); */
+
+            // Re-sort with smart ordering:
+            //   - Primary: BPF-tracked (is_bpf_tracked) descending
+            //   - Secondary: current sort column
+            //   - Dead tasks always last
+            let mut sorted_pids: Vec<u32> = if app.show_all_tasks {
+                app.task_rows.keys().copied().collect()
+            } else {
+                // Filter: only BPF-tracked tasks with total_runs > 0
+                app.task_rows
+                    .iter()
+                    .filter(|(_, row)| row.is_bpf_tracked && row.total_runs > 0)
+                    .map(|(pid, _)| *pid)
+                    .collect()
+            };
+            // Apply sort with direction support
+            let desc = app.sort_descending;
+            match app.sort_column {
+                SortColumn::RunDuration => sorted_pids.sort_by(|a, b| {
                     let r_a = app.task_rows.get(a).unwrap();
                     let r_b = app.task_rows.get(b).unwrap();
-                    let tgid_a = if r_a.tgid > 0 { r_a.tgid } else { *a };
-                    let tgid_b = if r_b.tgid > 0 { r_b.tgid } else { *b };
-                    let rank_a = tgid_rank.get(&tgid_a).copied().unwrap_or(usize::MAX);
-                    let rank_b = tgid_rank.get(&tgid_b).copied().unwrap_or(usize::MAX);
-                    rank_a.cmp(&rank_b).then_with(|| {
-                        // Within same tgid group, keep original sort order
-                        r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us)
-                    })
-                });
-
-                app.sorted_pids = sorted_pids;
+                    let cmp = r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::Gate1Pct => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_b.gate_hit_pcts[0]
+                        .partial_cmp(&r_a.gate_hit_pcts[0])
+                        .unwrap_or(std::cmp::Ordering::Equal);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::TargetCpu => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_a.core_placement.cmp(&r_b.core_placement);
+                    if desc {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                }),
+                SortColumn::Pid => sorted_pids.sort_by(|a, b| {
+                    let cmp = a.cmp(b);
+                    if desc {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                }),
+                SortColumn::SelectCpu => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_b.select_cpu_ns.cmp(&r_a.select_cpu_ns);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::Enqueue => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_b.enqueue_ns.cmp(&r_a.enqueue_ns);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::Jitter => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let j_a = if r_a.total_runs > 0 {
+                        r_a.jitter_accum_ns / r_a.total_runs as u64
+                    } else {
+                        0
+                    };
+                    let j_b = if r_b.total_runs > 0 {
+                        r_b.jitter_accum_ns / r_b.total_runs as u64
+                    } else {
+                        0
+                    };
+                    let cmp = j_b.cmp(&j_a);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::Tier => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_a.tier.cmp(&r_b.tier);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::Ewma => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::Vcsw => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_b.nvcsw_delta.cmp(&r_a.nvcsw_delta);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::Hog => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    // Hogs first when descending
+                    let cmp = (r_b.is_hog as u8).cmp(&(r_a.is_hog as u8));
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::RunsPerSec => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_b
+                        .runs_per_sec
+                        .partial_cmp(&r_a.runs_per_sec)
+                        .unwrap_or(std::cmp::Ordering::Equal);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
+                SortColumn::Gap => sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let cmp = r_b.dispatch_gap_us.cmp(&r_a.dispatch_gap_us);
+                    if desc {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                }),
             }
+
+            // TGID grouping: stable-sort by tgid so threads of the
+            // same process stay adjacent. The first thread in each
+            // group (after the primary sort) defines the group rank,
+            // so processes with high-priority threads sort first.
+            let mut tgid_rank: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
+            for (i, pid) in sorted_pids.iter().enumerate() {
+                if let Some(row) = app.task_rows.get(pid) {
+                    let tgid = if row.tgid > 0 { row.tgid } else { *pid };
+                    tgid_rank.entry(tgid).or_insert(i);
+                }
+            }
+            // Pin game-family rows to the top, preserving the user's sort order within
+            // each group. Uses stable_sort so relative order is unchanged.
+            if app.tracked_game_tgid > 0 {
+                sorted_pids.sort_by(|a, b| {
+                    let gm_a = app.task_rows.get(a).map_or(false, |r| r.is_game_member);
+                    let gm_b = app.task_rows.get(b).map_or(false, |r| r.is_game_member);
+                    // true sorts before false (1 > 0), so game members come first.
+                    gm_b.cmp(&gm_a)
+                });
+            }
+
+            sorted_pids.sort_by(|a, b| {
+                let r_a = app.task_rows.get(a).unwrap();
+                let r_b = app.task_rows.get(b).unwrap();
+                let tgid_a = if r_a.tgid > 0 { r_a.tgid } else { *a };
+                let tgid_b = if r_b.tgid > 0 { r_b.tgid } else { *b };
+                let rank_a = tgid_rank.get(&tgid_a).copied().unwrap_or(usize::MAX);
+                let rank_b = tgid_rank.get(&tgid_b).copied().unwrap_or(usize::MAX);
+                rank_a.cmp(&rank_b).then_with(|| {
+                    // Within same tgid group, keep original sort order
+                    r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us)
+                })
+            });
+
+            app.sorted_pids = sorted_pids;
 
             last_tick = Instant::now();
         }
