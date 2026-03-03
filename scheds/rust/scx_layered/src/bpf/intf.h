@@ -198,6 +198,7 @@ struct cpu_ctx {
 	u64			layer_membw_agg[MAX_LAYERS][NR_LAYER_USAGES];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
+	u64			layer_duty_sum[MAX_LAYERS];
 	u64			ran_current_for;
 
 	u64			usage;

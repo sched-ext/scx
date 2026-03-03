@@ -2597,13 +2597,15 @@ replenish:
  * get fresh duty_cycle values. last_stopped_at is updated on each call
  * to track the last measurement point.
  */
-static void update_duty_cycle(struct task_ctx *taskc, u64 now)
+static void update_duty_cycle(struct cpu_ctx *cpuc, struct task_ctx *taskc,
+			      u64 now)
 {
 	u64 period = now - taskc->last_stopped_at;
 
 	if (period > 0) {
 		u64 runnable_start = taskc->runnable_at;
 		u64 runnable;
+		s32 task_lid = taskc->layer_id;
 
 		if (runnable_start < taskc->last_stopped_at)
 			runnable_start = taskc->last_stopped_at;
@@ -2615,6 +2617,19 @@ static void update_duty_cycle(struct task_ctx *taskc, u64 now)
 		taskc->duty_cycle =
 			((RUNTIME_DECAY_FACTOR - 1) * taskc->duty_cycle + duty) /
 			RUNTIME_DECAY_FACTOR;
+
+		/*
+		 * Accumulate smoothed runnable time. duty_cycle is an
+		 * EWMA of runnable/total, so duty_cycle * period >>
+		 * DUTY_CYCLE_SHIFT ~= runnable_ns for this window.
+		 * Unlike layer_usages which only counts actual CPU
+		 * time, this includes queue wait time - at saturation
+		 * the sum exceeds utilization, giving userspace a
+		 * signal to rebalance across nodes.
+		 */
+		if (likely(task_lid < nr_layers))
+			cpuc->layer_duty_sum[task_lid] +=
+				(taskc->duty_cycle * period) >> DUTY_CYCLE_SHIFT;
 	}
 	taskc->last_stopped_at = now;
 }
@@ -2628,7 +2643,7 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	update_duty_cycle(taskc, now);
+	update_duty_cycle(cpuc, taskc, now);
 	account_used(p, cpuc, taskc, now);
 }
 
@@ -3337,7 +3352,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + runtime) /
 		RUNTIME_DECAY_FACTOR;
 
-	update_duty_cycle(taskc, now);
+	update_duty_cycle(cpuc, taskc, now);
 
 	account_used(p, cpuc, taskc, now);
 
