@@ -1949,9 +1949,39 @@ skip_ddsp:
 
 		if (p->nr_cpus_allowed > 1) {
 			struct cpu_prox_map *pmap = &task_cpuc->prox_map;
+			u32 preempt_end = pmap->sys_end;
+
+			/*
+			 * Gate cross-NUMA preemption. Probe whether
+			 * any remote node has budget. If all deny,
+			 * stop the walk at the node boundary.
+			 *
+			 * No budget is deducted here — layered_running()
+			 * charges the actual duty_cycle when the task
+			 * starts on the preempted CPU.
+			 */
+			if (nr_nodes > 1) {
+				u32 src_nid = task_cpuc->node_id;
+				s32 nid;
+
+				if (!xnuma_is_mig_src(layer->id, src_nid))
+					goto preempt_xnuma_deny;
+
+				bpf_for(nid, 0, nr_nodes) {
+					if ((u32)nid == src_nid)
+						continue;
+					if (xnuma_gate(layer->id, src_nid, nid,
+						       (s64)taskc->duty_cycle))
+						goto preempt_xnuma_done;
+				}
+
+preempt_xnuma_deny:
+				preempt_end = pmap->node_end;
+preempt_xnuma_done: ;
+			}
 
 			bpf_for(cpu, 1, MAX_CPUS) {
-				if (cpu >= pmap->sys_end)
+				if (cpu >= preempt_end)
 					break;
 				u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
 				if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer, 0))
@@ -1960,7 +1990,7 @@ skip_ddsp:
 
 			if (nr_excl_layers && layer->excl) {
 				bpf_for(cpu, 0, MAX_CPUS) {
-					if (cpu >= pmap->sys_end)
+					if (cpu >= preempt_end)
 						break;
 					u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
 					if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer,
