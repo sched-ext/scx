@@ -686,6 +686,8 @@ struct task_ctx {
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
+	u64			duty_cycle;	/* EWMA, 1.0 = 1 << DUTY_CYCLE_SHIFT */
+	u64			last_stopped_at;
 	u64			dsq_id;
 	u32			llc_id;
 
@@ -2589,15 +2591,45 @@ replenish:
 		prev->scx.slice = prev_layer->slice_ns;
 }
 
+/*
+ * Update per-task duty cycle EWMA. Called from both layered_tick() and
+ * layered_stopping() so that kept tasks (which bypass stopping) still
+ * get fresh duty_cycle values. last_stopped_at is updated on each call
+ * to track the last measurement point.
+ */
+static void update_duty_cycle(struct task_ctx *taskc, u64 now)
+{
+	u64 period = now - taskc->last_stopped_at;
+
+	if (period > 0) {
+		u64 runnable_start = taskc->runnable_at;
+		u64 runnable;
+
+		if (runnable_start < taskc->last_stopped_at)
+			runnable_start = taskc->last_stopped_at;
+		runnable = now - runnable_start;
+
+		u64 duty = runnable * (1 << DUTY_CYCLE_SHIFT) / period;
+		if (duty > (1 << DUTY_CYCLE_SHIFT))
+			duty = (1 << DUTY_CYCLE_SHIFT);
+		taskc->duty_cycle =
+			((RUNTIME_DECAY_FACTOR - 1) * taskc->duty_cycle + duty) /
+			RUNTIME_DECAY_FACTOR;
+	}
+	taskc->last_stopped_at = now;
+}
+
 void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
+	u64 now = scx_bpf_now();
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	account_used(p, cpuc, taskc, scx_bpf_now());
+	update_duty_cycle(taskc, now);
+	account_used(p, cpuc, taskc, now);
 }
 
 static __noinline bool match_one(struct layer *layer, struct layer_match *match, struct task_ctx *taskc,
@@ -3305,6 +3337,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + runtime) /
 		RUNTIME_DECAY_FACTOR;
 
+	update_duty_cycle(taskc, now);
+
 	account_used(p, cpuc, taskc, now);
 
 	if (taskc->dsq_id & HI_FB_DSQ_BASE)
@@ -3653,6 +3687,9 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	 * used that instead.
 	 */
 	taskc->runtime_avg = slice_ns / 4;
+	/* Start at 25% — EWMA converges quickly */
+	taskc->duty_cycle = (1 << DUTY_CYCLE_SHIFT) / 4;
+	taskc->last_stopped_at = scx_bpf_now();
 
 	/*
 	 * We are matching cgroup hierarchy path directly rather than the CPU
