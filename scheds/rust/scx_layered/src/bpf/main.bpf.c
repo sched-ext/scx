@@ -455,6 +455,18 @@ static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
 	else
 		bpf_cpumask_set_cpu(cpuc->cpu, unprotected_cpumask);
 
+	/* Called under scoped_guard(rcu) from refresh_cpumasks() — don't nest */
+	struct node_ctx *nodec = lookup_node_ctx(cpuc->node_id);
+
+	if (nodec && nodec->unprotected_cpumask) {
+		if (cpuc->is_protected)
+			bpf_cpumask_clear_cpu(cpuc->cpu,
+					      nodec->unprotected_cpumask);
+		else
+			bpf_cpumask_set_cpu(cpuc->cpu,
+					    nodec->unprotected_cpumask);
+	}
+
 	return true;
 }
 
@@ -686,6 +698,8 @@ struct task_ctx {
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
+	u64			duty_cycle;	/* EWMA, 1.0 = 1 << DUTY_CYCLE_SHIFT */
+	u64			last_stopped_at;
 	u64			dsq_id;
 	u32			llc_id;
 
@@ -1112,6 +1126,92 @@ static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct
 	}
 }
 
+static __always_inline bool xnuma_is_mig_src(u32 layer_id, u32 nid)
+{
+	bool *is_src = MEMBER_VPTR(layers, [layer_id].node[nid].xnuma_is_mig_src);
+	return is_src && *is_src;
+}
+
+static struct xnuma_bucket *xnuma_bucket_refill(u32 layer_id, u32 src_nid,
+						 u32 dst_nid)
+{
+	struct xnuma_bucket *bucket;
+	u64 now, elapsed;
+	s64 refill, max_tokens;
+
+	bucket = MEMBER_VPTR(layers, [layer_id].node[src_nid].xnuma[dst_nid]);
+	if (!bucket || !bucket->rate || bucket->rate == (u64)-1)
+		return NULL;
+
+	now = scx_bpf_now();
+	elapsed = now - bucket->last_refill_ts;
+	if (elapsed > 1000000000ULL)
+		elapsed = 1000000000ULL;
+
+	refill = (s64)(bucket->rate * elapsed / 1000000000ULL);
+	max_tokens = (s64)bucket->rate;	/* cap at 1 second worth */
+	bucket->tokens += refill;
+	if (bucket->tokens > max_tokens)
+		bucket->tokens = max_tokens;
+	bucket->last_refill_ts = now;
+
+	return bucket;
+}
+
+/*
+ * Check whether a cross-NUMA migration is allowed for this (layer, src, dst)
+ * direction. rate semantics: U64_MAX = infinite (gating off, always allow),
+ * 0 = zero budget (always deny), other = token bucket rate.
+ * Does NOT deduct budget — use xnuma_gate_charge() in layered_running()
+ * when the migration actually happens.
+ */
+static bool xnuma_gate(u32 layer_id, u32 src_nid, u32 dst_nid, s64 cost)
+{
+	struct xnuma_bucket *bucket;
+
+	if (src_nid == dst_nid || src_nid >= MAX_NUMA_NODES ||
+	    dst_nid >= MAX_NUMA_NODES)
+		return true;
+
+	bucket = MEMBER_VPTR(layers, [layer_id].node[src_nid].xnuma[dst_nid]);
+	if (!bucket)
+		return true;
+	if (bucket->rate == (u64)-1)
+		return true;	/* infinite budget → gating off */
+	if (!bucket->rate)
+		return false;	/* zero budget → deny */
+
+	/* Fast path: budget covers cost, skip refill */
+	if (bucket->tokens >= cost)
+		return true;
+
+	/* Slow path: refill and recheck */
+	xnuma_bucket_refill(layer_id, src_nid, dst_nid);
+	return bucket->tokens >= cost;
+}
+
+/*
+ * Charge a completed cross-NUMA migration against the token bucket.
+ * Called from layered_running() when a task actually starts running
+ * on a different node than its previous CPU. No refill here — the next
+ * xnuma_gate() call will refill if needed.
+ */
+static void xnuma_gate_charge(u32 layer_id, u32 src_nid, u32 dst_nid,
+			      u64 duty_cycle)
+{
+	struct xnuma_bucket *bucket;
+
+	if (src_nid == dst_nid || src_nid >= MAX_NUMA_NODES ||
+	    dst_nid >= MAX_NUMA_NODES)
+		return;
+
+	bucket = MEMBER_VPTR(layers, [layer_id].node[src_nid].xnuma[dst_nid]);
+	if (!bucket || !bucket->rate || bucket->rate == (u64)-1)
+		return;
+
+	bucket->tokens -= (s64)duty_cycle;
+}
+
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 			      const struct cpumask *idle_smtmask, const struct layer *layer)
 {
@@ -1373,35 +1473,135 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 
 no_locality:
 	/*
-	 * Next try a CPU in the current node
+	 * Multi-node idle CPU search with NUMA gating.
+	 *
+	 * Two mask types are available:
+	 *
+	 * - Per-node masks (node_ctx->cpumask, ->unprotected_cpumask,
+	 *   lookup_layer_node_cpumask()): raw topology masks, NOT
+	 *   intersected with p->cpus_ptr. Safe only for tasks with
+	 *   all_cpus_allowed. Used in the per-node prox walk.
+	 *
+	 * - Per-task cached masks (layered_mask, layered_node_mask,
+	 *   layered_unprotected_mask): intersected with p->cpus_ptr
+	 *   (layered_mask = layer_cpumask & cpus_ptr; others derived
+	 *   from it). Safe for all tasks. Used as fallback.
+	 *
+	 * For all_cpus_allowed tasks on multi-node:
+	 *  1. Layer CPUs on local node (per-task layered_node_mask)
+	 *  2. Open CPUs on local node (per-node unprotected_cpumask)
+	 *  3. Remote nodes in prox order, xnuma gated: layer then open
+	 *
+	 * Local open is cheaper than any NUMA crossing, so step 2 comes
+	 * before remote layer CPUs in step 3.
+	 *
+	 * For !all_cpus_allowed or single-node, use per-task cached
+	 * masks which respect p->cpus_ptr.
 	 */
-	if (nr_nodes > 1) {
+	if (nr_nodes > 1 && taskc->all_cpus_allowed) {
+		bool is_open = layer->kind != LAYER_KIND_CONFINED;
+		u32 src_nid = prev_cpuc->node_id;
+		struct node_ctx *src_nodec;
+		s32 i;
+
+		src_nodec = lookup_node_ctx(src_nid);
+		if (!src_nodec)
+			goto xnuma_done;
+
+		/* Layer CPUs on local node */
 		maybe_refresh_layered_cpus_node(p, taskc, layer_cpumask,
-						prev_cpuc->node_id, cpus_seq);
+						src_nid, cpus_seq);
 		if (!(cpumask = cast_mask(taskc->layered_node_mask))) {
 			cpu = -1;
 			goto out;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu,
+					     idle_smtmask, layer)) >= 0)
 			goto out;
-	}
 
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
-		goto out;
+		/* Open CPUs on local node */
+		if (is_open &&
+		    (unprot_mask = src_nodec->unprotected_cpumask) &&
+		    (cpu = pick_idle_cpu_from(cast_mask(unprot_mask),
+					     prev_cpu, idle_smtmask,
+					     layer)) >= 0) {
+			lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
+			goto out;
+		}
 
-	/*
-	 * If the layer is an open one, we can try the whole machine.
-	 */
-	if (layer->kind != LAYER_KIND_CONFINED) {
-	    maybe_refresh_layered_cpus_unprotected(p, taskc, layered_cpumask);
-	    unprot_mask = taskc->layered_unprotected_mask;
-	    if (!unprot_mask)
-		    unprot_mask = unprotected_cpumask;
+		/* Remote nodes in prox order, xnuma gated */
+		if (!xnuma_is_mig_src(layer->id, src_nid))
+			goto xnuma_done;
+		bpf_for(i, 0, src_nodec->prox_map.sys_end) {
+			const struct cpumask *node_cpumask;
+			struct node_ctx *dst_nodec;
+			u32 nid;
 
-	    if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask), prev_cpu, idle_smtmask, layer)) >= 0) {
-		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
-		goto out;
-	    }
+			if (i >= MAX_NUMA_NODES)
+				break;
+			nid = src_nodec->prox_map.nodes[i];
+
+			if (nid == src_nid)
+				continue;
+
+			if (!xnuma_gate(layer->id, src_nid, nid,
+					(s64)taskc->duty_cycle))
+				continue;
+
+			/* Layer CPUs on remote node */
+			if ((node_cpumask = lookup_layer_node_cpumask(layer->id, nid)) &&
+			    (cpu = pick_idle_cpu_from(node_cpumask, prev_cpu,
+						     idle_smtmask, layer)) >= 0)
+				goto out;
+
+			/* Open CPUs on remote node */
+			if (is_open &&
+			    (dst_nodec = lookup_node_ctx(nid)) &&
+			    (unprot_mask = dst_nodec->unprotected_cpumask) &&
+			    (cpu = pick_idle_cpu_from(cast_mask(unprot_mask),
+						     prev_cpu, idle_smtmask,
+						     layer)) >= 0) {
+				lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
+				goto out;
+			}
+		}
+xnuma_done: ;
+	} else {
+		/*
+		 * Single-node or restricted-affinity fallback. Uses per-task
+		 * cached masks (cpus_ptr-intersected) so safe for all tasks.
+		 */
+		if (nr_nodes > 1) {
+			maybe_refresh_layered_cpus_node(p, taskc, layer_cpumask,
+							prev_cpuc->node_id,
+							cpus_seq);
+			if (!(cpumask = cast_mask(taskc->layered_node_mask))) {
+				cpu = -1;
+				goto out;
+			}
+			if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu,
+						     idle_smtmask, layer)) >= 0)
+				goto out;
+		}
+
+		if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
+					     idle_smtmask, layer)) >= 0)
+			goto out;
+
+		if (layer->kind != LAYER_KIND_CONFINED) {
+			maybe_refresh_layered_cpus_unprotected(p, taskc,
+							       layered_cpumask);
+			unprot_mask = taskc->layered_unprotected_mask;
+			if (!unprot_mask)
+				unprot_mask = unprotected_cpumask;
+
+			if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask),
+						     prev_cpu, idle_smtmask,
+						     layer)) >= 0) {
+				lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
+				goto out;
+			}
+		}
 	}
 
 	cpu = -1;
@@ -1610,6 +1810,10 @@ preempt:
 		lstat_inc(LSTAT_PREEMPT, layer, cpuc);
 		if (flags & PREEMPT_FIRST)
 			lstat_inc(LSTAT_PREEMPT_FIRST, layer, cpuc);
+		if (cand_cpuc->llc_id != cpuc->llc_id)
+			lstat_inc(LSTAT_PREEMPT_XLLC, layer, cpuc);
+		if (cand_cpuc->node_id != cpuc->node_id)
+			lstat_inc(LSTAT_PREEMPT_XNUMA, layer, cpuc);
 	}
 
 	return true;
@@ -1745,9 +1949,39 @@ skip_ddsp:
 
 		if (p->nr_cpus_allowed > 1) {
 			struct cpu_prox_map *pmap = &task_cpuc->prox_map;
+			u32 preempt_end = pmap->sys_end;
+
+			/*
+			 * Gate cross-NUMA preemption. Probe whether
+			 * any remote node has budget. If all deny,
+			 * stop the walk at the node boundary.
+			 *
+			 * No budget is deducted here — layered_running()
+			 * charges the actual duty_cycle when the task
+			 * starts on the preempted CPU.
+			 */
+			if (nr_nodes > 1) {
+				u32 src_nid = task_cpuc->node_id;
+				s32 nid;
+
+				if (!xnuma_is_mig_src(layer->id, src_nid))
+					goto preempt_xnuma_deny;
+
+				bpf_for(nid, 0, nr_nodes) {
+					if ((u32)nid == src_nid)
+						continue;
+					if (xnuma_gate(layer->id, src_nid, nid,
+						       (s64)taskc->duty_cycle))
+						goto preempt_xnuma_done;
+				}
+
+preempt_xnuma_deny:
+				preempt_end = pmap->node_end;
+preempt_xnuma_done: ;
+			}
 
 			bpf_for(cpu, 1, MAX_CPUS) {
-				if (cpu >= pmap->sys_end)
+				if (cpu >= preempt_end)
 					break;
 				u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
 				if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer, 0))
@@ -1756,7 +1990,7 @@ skip_ddsp:
 
 			if (nr_excl_layers && layer->excl) {
 				bpf_for(cpu, 0, MAX_CPUS) {
-					if (cpu >= pmap->sys_end)
+					if (cpu >= preempt_end)
 						break;
 					u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
 					if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer,
@@ -2315,11 +2549,14 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 
 		if (u > 0) {
 			struct llc_ctx *remote_llcc;
+			u32 remote_nid;
 
 			if (!(remote_llcc = lookup_llc_ctx(*llc_idp)))
 				return false;
 
-			if (skip_remote_node && nid != llc_node_id(remote_llcc->id)) {
+			remote_nid = llc_node_id(remote_llcc->id);
+
+			if (skip_remote_node && nid != remote_nid) {
 				lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
 				continue;
 			}
@@ -2328,7 +2565,34 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 				xllc_mig_skipped = true;
 				continue;
 			}
+
+			/*
+			 * Gate cross-NUMA consumption. Budget is not
+			 * deducted here — layered_running() charges
+			 * the actual task's duty_cycle when the pulled
+			 * task starts running on this CPU.
+			 */
+			if (nid != remote_nid &&
+			    (!xnuma_is_mig_src(layer_id, remote_nid) ||
+			     !xnuma_gate(layer_id, remote_nid, nid, 0))) {
+				/*
+				 * On 2-node systems, there's only one
+				 * remote node — no point continuing.
+				 */
+				if (nr_nodes <= 2)
+					break;
+				continue;
+			}
 		}
+
+		/*
+		 * Re-verify layer_id range after xnuma_gate() subprog
+		 * call — verifiers before 6.19 lose scalar bounds
+		 * across non-inline function calls.  Can be removed
+		 * once the minimum supported kernel is >= 6.19.
+		 */
+		if (layer_id >= nr_layers)
+			return false;
 
 		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
 			return true;
@@ -2585,15 +2849,60 @@ replenish:
 		prev->scx.slice = prev_layer->slice_ns;
 }
 
+/*
+ * Update per-task duty cycle EWMA. Called from both layered_tick() and
+ * layered_stopping() so that kept tasks (which bypass stopping) still
+ * get fresh duty_cycle values. last_stopped_at is updated on each call
+ * to track the last measurement point.
+ */
+static void update_duty_cycle(struct cpu_ctx *cpuc, struct task_ctx *taskc,
+			      u64 now)
+{
+	u64 period = now - taskc->last_stopped_at;
+
+	if (period > 0) {
+		u64 runnable_start = taskc->runnable_at;
+		u64 runnable;
+		s32 task_lid = taskc->layer_id;
+
+		if (runnable_start < taskc->last_stopped_at)
+			runnable_start = taskc->last_stopped_at;
+		runnable = now - runnable_start;
+
+		u64 duty = runnable * (1 << DUTY_CYCLE_SHIFT) / period;
+		if (duty > (1 << DUTY_CYCLE_SHIFT))
+			duty = (1 << DUTY_CYCLE_SHIFT);
+		taskc->duty_cycle =
+			((RUNTIME_DECAY_FACTOR - 1) * taskc->duty_cycle + duty) /
+			RUNTIME_DECAY_FACTOR;
+
+		/*
+		 * Accumulate smoothed runnable time. duty_cycle is an
+		 * EWMA of runnable/total, so duty_cycle * period >>
+		 * DUTY_CYCLE_SHIFT ~= runnable_ns for this window.
+		 * Unlike layer_usages which only counts actual CPU
+		 * time, this includes queue wait time - at saturation
+		 * the sum exceeds utilization, giving userspace a
+		 * signal to rebalance across nodes.
+		 */
+		if (likely(task_lid < nr_layers))
+			cpuc->layer_duty_sum[task_lid] +=
+				(taskc->duty_cycle * period) >> DUTY_CYCLE_SHIFT;
+	}
+	taskc->last_stopped_at = now;
+}
+
 void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
+	u64 now = scx_bpf_now();
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	account_used(p, cpuc, taskc, scx_bpf_now());
+	update_duty_cycle(cpuc, taskc, now);
+	account_used(p, cpuc, taskc, now);
 }
 
 static __noinline bool match_one(struct layer *layer, struct layer_match *match, struct task_ctx *taskc,
@@ -3051,10 +3360,16 @@ static s32 create_node(u32 node_id)
 	ret = create_save_cpumask(&nodec->cpumask);
 	if (ret)
 		return ret;
+	ret = create_save_cpumask(&nodec->unprotected_cpumask);
+	if (ret)
+		return ret;
 
 	scoped_guard(rcu) {
+		struct bpf_cpumask *unprot;
+
 		cpumask = nodec->cpumask;
-		if (!cpumask) {
+		unprot = nodec->unprotected_cpumask;
+		if (!cpumask || !unprot) {
 			scx_bpf_error("Failed to lookup node cpumask");
 			return -ENOENT;
 		}
@@ -3071,6 +3386,8 @@ static s32 create_node(u32 node_id)
 
 			if (*nmask & (1LLU << (cpu % 64))) {
 				bpf_cpumask_set_cpu(cpu, cpumask);
+				/* All CPUs start unprotected */
+				bpf_cpumask_set_cpu(cpu, unprot);
 				if (!(cpuc = lookup_cpu_ctx(cpu))) {
 					scx_bpf_error("cpu ctx error");
 					ret = -ENOENT;
@@ -3216,8 +3533,16 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		if (!(nodec = lookup_node_ctx(cpuc->node_id)))
 			return;
 		if (nodec->cpumask &&
-		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(nodec->cpumask)))
+		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(nodec->cpumask))) {
+			struct cpu_ctx *last_cpuc;
+
 			lstat_inc(LSTAT_XNUMA_MIGRATION, layer, cpuc);
+			if ((last_cpuc = lookup_cpu_ctx(taskc->last_cpu)))
+				xnuma_gate_charge(layer_id,
+						  last_cpuc->node_id,
+						  cpuc->node_id,
+						  taskc->duty_cycle);
+		}
 		if (llcc->cpumask &&
 		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(llcc->cpumask)))
 			lstat_inc(LSTAT_XLLC_MIGRATION, layer, cpuc);
@@ -3300,6 +3625,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	taskc->runtime_avg =
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + runtime) /
 		RUNTIME_DECAY_FACTOR;
+
+	update_duty_cycle(cpuc, taskc, now);
 
 	account_used(p, cpuc, taskc, now);
 
@@ -3649,6 +3976,9 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	 * used that instead.
 	 */
 	taskc->runtime_avg = slice_ns / 4;
+	/* Start at 25% — EWMA converges quickly */
+	taskc->duty_cycle = (1 << DUTY_CYCLE_SHIFT) / 4;
+	taskc->last_stopped_at = scx_bpf_now();
 
 	/*
 	 * We are matching cgroup hierarchy path directly rather than the CPU

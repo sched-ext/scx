@@ -61,6 +61,7 @@ const LSTAT_KEEP_FAIL_BUSY: usize = bpf_intf::layer_stat_id_LSTAT_KEEP_FAIL_BUSY
 const LSTAT_PREEMPT: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT as usize;
 const LSTAT_PREEMPT_FIRST: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_FIRST as usize;
 const LSTAT_PREEMPT_XLLC: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_XLLC as usize;
+const LSTAT_PREEMPT_XNUMA: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_XNUMA as usize;
 const LSTAT_PREEMPT_IDLE: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_IDLE as usize;
 const LSTAT_PREEMPT_FAIL: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_FAIL as usize;
 const LSTAT_EXCL_COLLISION: usize = bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION as usize;
@@ -174,6 +175,8 @@ pub struct LayerStats {
     pub preempt: f64,
     #[stat(desc = "% preempted XLLC tasks")]
     pub preempt_xllc: f64,
+    #[stat(desc = "% preempted across NUMA nodes")]
+    pub preempt_xnuma: f64,
     #[stat(desc = "% first-preempted other tasks")]
     pub preempt_first: f64,
     #[stat(desc = "% idle-preempted other tasks")]
@@ -236,10 +239,16 @@ pub struct LayerStats {
     pub membw_pct: f64,
     #[stat(desc = "DSQ insertion ratio EWMA (10s window)")]
     pub dsq_insert_ewma: f64,
+    #[stat(desc = "Per-node layer utilization (100% = one full CPU)")]
+    pub node_utils: Vec<f64>,
     #[stat(desc = "Per-node pinned task utilization (100% = one full CPU)")]
     pub node_pinned_utils: Vec<f64>,
     #[stat(desc = "Per-node pinned task counts")]
     pub node_pinned_tasks: Vec<u64>,
+    #[stat(desc = "Per-node load (100% = one full CPU, from duty cycle sum)")]
+    pub node_loads: Vec<f64>,
+    #[stat(desc = "Whether xnuma gating is active for this layer (0/1)")]
+    pub xnuma_active: u32,
 }
 
 impl LayerStats {
@@ -249,6 +258,7 @@ impl LayerStats {
         stats: &Stats,
         bstats: &BpfStats,
         nr_cpus_range: (usize, usize),
+        xnuma_active: bool,
     ) -> Self {
         let lstat = |sidx| bstats.lstats[lidx][sidx];
         let ltotal = lstat(LSTAT_SEL_LOCAL)
@@ -313,6 +323,7 @@ impl LayerStats {
             open_idle: lstat_pct(LSTAT_OPEN_IDLE),
             preempt: lstat_pct(LSTAT_PREEMPT),
             preempt_xllc: lstat_pct(LSTAT_PREEMPT_XLLC),
+            preempt_xnuma: lstat_pct(LSTAT_PREEMPT_XNUMA),
             preempt_first: lstat_pct(LSTAT_PREEMPT_FIRST),
             preempt_idle: lstat_pct(LSTAT_PREEMPT_IDLE),
             preempt_fail: lstat_pct(LSTAT_PREEMPT_FAIL),
@@ -357,11 +368,20 @@ impl LayerStats {
                 .collect(),
             membw_pct: membw_frac * 100.0,
             dsq_insert_ewma: stats.layer_dsq_insert_ewma[lidx] * 100.0,
+            node_utils: stats.layer_node_utils[lidx]
+                .iter()
+                .map(|u| u * 100.0)
+                .collect(),
             node_pinned_utils: stats.layer_node_pinned_utils[lidx]
                 .iter()
                 .map(|u| u * 100.0)
                 .collect(),
             node_pinned_tasks: stats.layer_nr_node_pinned_tasks[lidx].clone(),
+            node_loads: stats.layer_node_duty_sums[lidx]
+                .iter()
+                .map(|l| l * 100.0)
+                .collect(),
+            xnuma_active: if xnuma_active { 1 } else { 0 },
         }
     }
 
@@ -432,11 +452,12 @@ impl LayerStats {
         // preempt: preemption
         writeln!(
             w,
-            "  {:<7} preempt/first/xllc/idle/fail={}/{}/{}/{}/{}",
+            "  {:<7} preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{}",
             "preempt",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
             fmt_pct(self.preempt_xllc),
+            fmt_pct(self.preempt_xnuma),
             fmt_pct(self.preempt_idle),
             fmt_pct(self.preempt_fail),
         )?;
@@ -453,6 +474,39 @@ impl LayerStats {
             fmt_pct(self.skip_remote_node),
         )?;
 
+        // per-node utilization and load (multi-node only)
+        if self.node_utils.len() > 1 {
+            let xnuma_tag = if self.xnuma_active != 0 {
+                " [xnuma]"
+            } else {
+                ""
+            };
+            let prefix = format!("  node util/load{xnuma_tag} ");
+            // N99=99999.9/99999.9 = 19 chars + 1 space = 20
+            let cell_width = 21;
+            let usable = if max_width > prefix.len() {
+                max_width - prefix.len()
+            } else {
+                60
+            };
+            let cells_per_row = (usable / cell_width).max(1);
+
+            for nid in 0..self.node_utils.len() {
+                let util = self.node_utils[nid];
+                let load = self.node_loads.get(nid).copied().unwrap_or(0.0);
+                if nid % cells_per_row == 0 {
+                    if nid > 0 {
+                        writeln!(w)?;
+                    }
+                    write!(w, "{prefix}")?;
+                } else {
+                    write!(w, " ")?;
+                }
+                write!(w, "N{}={:7.1}/{:7.1}", nid, util, load)?;
+            }
+            writeln!(w)?;
+        }
+
         // node-pinned utilization and task counts (util/tasks per node)
         if self.node_pinned_tasks.iter().any(|t| *t > 0) {
             let prefix = "  pinned  util/tasks ";
@@ -465,11 +519,11 @@ impl LayerStats {
             };
             let cells_per_row = (usable / cell_width).max(1);
 
-            for (col, nid) in (0..self.node_pinned_utils.len()).enumerate() {
+            for nid in 0..self.node_pinned_utils.len() {
                 let util = self.node_pinned_utils[nid];
                 let tasks = self.node_pinned_tasks.get(nid).copied().unwrap_or(0);
-                if col % cells_per_row == 0 {
-                    if col > 0 {
+                if nid % cells_per_row == 0 {
+                    if nid > 0 {
                         writeln!(w)?;
                     }
                     write!(w, "{prefix}")?;

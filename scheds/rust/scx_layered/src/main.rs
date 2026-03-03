@@ -737,9 +737,10 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         .context("Failed to lookup cpu_ctx")?
         .unwrap();
     for cpu in 0..*NR_CPUS_POSSIBLE {
-        cpu_ctxs.push(*unsafe {
-            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
-        });
+        cpu_ctxs.push(
+            *plain::from_bytes(cpu_ctxs_vec[cpu].as_slice())
+                .expect("cpu_ctx: short or misaligned buffer"),
+        );
     }
     Ok(cpu_ctxs)
 }
@@ -784,16 +785,14 @@ impl BpfStats {
             // kernel >= v6.12 fails verification after such
             // conversion due to seemingly verifier bugs. Convert to
             // bss maps later.
-            let key = llc_id as u32;
-            let llc_id_slice =
-                unsafe { std::slice::from_raw_parts((&key as *const u32) as *const u8, 4) };
             let v = skel
                 .maps
                 .llc_data
-                .lookup(llc_id_slice, libbpf_rs::MapFlags::ANY)
+                .lookup(&(llc_id as u32).to_ne_bytes(), libbpf_rs::MapFlags::ANY)
                 .unwrap()
                 .unwrap();
-            let llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
+            let llcc: &bpf_intf::llc_ctx =
+                plain::from_bytes(v.as_slice()).expect("llc_ctx: short or misaligned buffer");
 
             for layer_id in 0..nr_layers {
                 for stat_id in 0..NR_LLC_LSTATS {
@@ -860,6 +859,10 @@ struct Stats {
     prev_layer_usages: Vec<Vec<u64>>,
     layer_node_pinned_utils: Vec<Vec<f64>>,
     prev_layer_node_pinned_usages: Vec<Vec<u64>>,
+    layer_node_utils: Vec<Vec<f64>>,
+    prev_layer_node_usages: Vec<Vec<u64>>,
+    layer_node_duty_sums: Vec<Vec<f64>>, // Per-node per-layer duty in CPU units (EWMA)
+    prev_layer_node_duty_raw: Vec<Vec<u64>>, // Raw accumulated layer_duty_sum values
 
     layer_membws: Vec<Vec<f64>>, // Estimated memory bandsidth consumption
     prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
@@ -931,6 +934,44 @@ impl Stats {
         usages
     }
 
+    fn read_layer_node_usages(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+        nr_nodes: usize,
+    ) -> Vec<Vec<u64>> {
+        let mut usages = vec![vec![0u64; nr_nodes]; nr_layers];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let node = topo.all_cpus.get(&cpu).map_or(0, |c| c.node_id);
+            for layer in 0..nr_layers {
+                for usage in 0..=LAYER_USAGE_SUM_UPTO {
+                    usages[layer][node] += cpu_ctxs[cpu].layer_usages[layer][usage];
+                }
+            }
+        }
+
+        usages
+    }
+
+    fn read_layer_node_duty_raw(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+        nr_nodes: usize,
+    ) -> Vec<Vec<u64>> {
+        let mut sums = vec![vec![0u64; nr_nodes]; nr_layers];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let node = topo.all_cpus.get(&cpu).map_or(0, |c| c.node_id);
+            for layer in 0..nr_layers {
+                sums[layer][node] += cpu_ctxs[cpu].layer_duty_sum[layer];
+            }
+        }
+
+        sums
+    }
+
     /// Use the membw reported by resctrl to normalize the values reported by hw counters.
     /// We have the following problem:
     /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
@@ -986,7 +1027,14 @@ impl Stats {
             prev_layer_node_pinned_usages: Self::read_layer_node_pinned_usages(
                 &cpu_ctxs, &topo, nr_layers, nr_nodes,
             ),
-
+            layer_node_utils: vec![vec![0.0; nr_nodes]; nr_layers],
+            prev_layer_node_usages: Self::read_layer_node_usages(
+                &cpu_ctxs, &topo, nr_layers, nr_nodes,
+            ),
+            layer_node_duty_sums: vec![vec![0.0; nr_nodes]; nr_layers],
+            prev_layer_node_duty_raw: Self::read_layer_node_duty_raw(
+                &cpu_ctxs, &topo, nr_layers, nr_nodes,
+            ),
             layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             // This is not normalized because we don't have enough history to do so.
             // It should not matter too much, since the value is dropped on the first
@@ -1047,6 +1095,18 @@ impl Stats {
 
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
         let cur_layer_node_pinned_usages = Self::read_layer_node_pinned_usages(
+            &cpu_ctxs,
+            &self.topo,
+            self.nr_layers,
+            self.topo.nodes.len(),
+        );
+        let cur_layer_node_usages = Self::read_layer_node_usages(
+            &cpu_ctxs,
+            &self.topo,
+            self.nr_layers,
+            self.topo.nodes.len(),
+        );
+        let cur_layer_node_duty_raw = Self::read_layer_node_duty_raw(
             &cpu_ctxs,
             &self.topo,
             self.nr_layers,
@@ -1138,6 +1198,14 @@ impl Stats {
             &self.layer_node_pinned_utils,
             *USAGE_DECAY,
         );
+        let cur_node_utils: Vec<Vec<f64>> =
+            compute_diff(&cur_layer_node_usages, &self.prev_layer_node_usages);
+        let layer_node_utils: Vec<Vec<f64>> =
+            metric_decay(cur_node_utils, &self.layer_node_utils, *USAGE_DECAY);
+        let cur_node_duty: Vec<Vec<f64>> =
+            compute_diff(&cur_layer_node_duty_raw, &self.prev_layer_node_duty_raw);
+        let layer_node_duty_sums: Vec<Vec<f64>> =
+            metric_decay(cur_node_duty, &self.layer_node_duty_sums, *USAGE_DECAY);
 
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
 
@@ -1199,6 +1267,10 @@ impl Stats {
             prev_layer_usages: cur_layer_usages,
             layer_node_pinned_utils,
             prev_layer_node_pinned_usages: cur_layer_node_pinned_usages,
+            layer_node_utils,
+            prev_layer_node_usages: cur_layer_node_usages,
+            layer_node_duty_sums,
+            prev_layer_node_duty_raw: cur_layer_node_duty_raw,
 
             layer_membws,
             prev_layer_membw_agg: cur_layer_membw_agg,
@@ -1616,12 +1688,133 @@ struct Scheduler<'a> {
     cgroup_regexes: Option<HashMap<u32, Regex>>,
 
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
+    xnuma_mig_src: Vec<Vec<bool>>,
+    growth_denied: Vec<Vec<bool>>,
     processing_dur: Duration,
 
     topo: Arc<Topology>,
     netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
     gpu_task_handler: GpuTaskAffinitizer,
+}
+
+const DUTY_CYCLE_SCALE: f64 = (1u64 << 20) as f64;
+const XNUMA_RATE_DAMPEN: f64 = 0.5;
+
+/// Result of xnuma water-fill computation for a single layer.
+struct XnumaRates {
+    /// rates[src][dst]: migration rate in duty-cycle-scaled units.
+    rates: Vec<Vec<u64>>,
+}
+
+/// Determine per-node migration source state with two-threshold hysteresis.
+///
+/// Each (layer, node) independently decides if it's a migration source.
+/// Open (is_mig_src=true) requires all three:
+///   1. load/alloc > threshold.1 (significant load)
+///   2. surplus/alloc > delta.1 (significant imbalance)
+///   3. growth_denied (allocation can't solve it)
+///
+/// Close (is_mig_src=false) when any one:
+///   1. load/alloc < threshold.0 (load dropped)
+///   2. surplus/alloc < delta.0 (imbalance resolved)
+///   3. !growth_denied (growth succeeded)
+fn xnuma_check_active(
+    duty_sums: &[f64],
+    allocs: &[usize],
+    threshold: (f64, f64),
+    threshold_delta: (f64, f64),
+    growth_denied: &[bool],
+    currently_active: &[bool],
+) -> Vec<bool> {
+    let nr_nodes = duty_sums.len();
+    let total_duty: f64 = duty_sums.iter().sum();
+    let total_alloc: f64 = allocs.iter().map(|&a| a as f64).sum();
+    let eq_ratio = if total_alloc > 0.0 {
+        total_duty / total_alloc
+    } else {
+        0.0
+    };
+
+    let (thresh_lo, thresh_hi) = threshold;
+    let (delta_lo, delta_hi) = threshold_delta;
+
+    let mut result = vec![false; nr_nodes];
+    for nid in 0..nr_nodes {
+        let alloc = allocs[nid] as f64;
+        if alloc <= 0.0 {
+            if duty_sums[nid] > 0.0 && growth_denied[nid] {
+                result[nid] = true;
+            }
+            continue;
+        }
+
+        let load_ratio = duty_sums[nid] / alloc;
+        let surplus = duty_sums[nid] - eq_ratio * alloc;
+        let surplus_ratio = surplus / alloc;
+
+        let should_activate =
+            load_ratio > thresh_hi && surplus_ratio > delta_hi && growth_denied[nid];
+        let should_deactivate =
+            load_ratio < thresh_lo || surplus_ratio < delta_lo || !growth_denied[nid];
+
+        if should_activate {
+            result[nid] = true;
+        } else if should_deactivate {
+            result[nid] = false;
+        } else {
+            result[nid] = currently_active[nid];
+        }
+    }
+    result
+}
+
+/// Compute water-fill migration rates for a single layer.
+///
+/// Finds the equalization ratio (water line) across all nodes, then
+/// computes per-(src, dst) migration rates proportional to each source's
+/// surplus and each destination's share of total deficit.
+fn xnuma_compute_rates(duty_sums: &[f64], allocs: &[usize]) -> XnumaRates {
+    let nr_nodes = duty_sums.len();
+    let total_duty: f64 = duty_sums.iter().sum();
+    let total_alloc: f64 = allocs.iter().map(|&a| a as f64).sum();
+
+    if total_alloc <= 0.0 {
+        return XnumaRates {
+            rates: vec![vec![0u64; nr_nodes]; nr_nodes],
+        };
+    }
+
+    let eq_ratio = total_duty / total_alloc;
+
+    let mut surpluses = vec![0.0f64; nr_nodes];
+    let mut deficits = vec![0.0f64; nr_nodes];
+    for nid in 0..nr_nodes {
+        let expected = eq_ratio * allocs[nid] as f64;
+        let delta = duty_sums[nid] - expected;
+        if delta > 0.0 {
+            surpluses[nid] = delta;
+        } else {
+            deficits[nid] = -delta;
+        }
+    }
+
+    let total_deficit: f64 = deficits.iter().sum();
+
+    let mut rates = vec![vec![0u64; nr_nodes]; nr_nodes];
+    for src in 0..nr_nodes {
+        for dst in 0..nr_nodes {
+            if src == dst || total_deficit <= 0.0 || surpluses[src] <= 0.0 {
+                continue;
+            }
+            // Dampen: transfer half the surplus per cycle so convergence
+            // is gradual rather than a single-step overcorrection.
+            let migration = surpluses[src] * deficits[dst] / total_deficit * XNUMA_RATE_DAMPEN;
+            rates[src][dst] = (migration * DUTY_CYCLE_SCALE) as u64;
+        }
+    }
+
+    XnumaRates { rates }
 }
 
 impl<'a> Scheduler<'a> {
@@ -2018,16 +2211,8 @@ impl<'a> Scheduler<'a> {
 
     fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
         cpu_ctxs
-            .into_iter()
-            .map(|cpu_ctx| {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        &cpu_ctx as *const bpf_intf::cpu_ctx as *const u8,
-                        std::mem::size_of::<bpf_intf::cpu_ctx>(),
-                    )
-                };
-                bytes.to_vec()
-            })
+            .iter()
+            .map(|cpu_ctx| unsafe { plain::as_bytes(cpu_ctx) }.to_vec())
             .collect()
     }
 
@@ -2080,9 +2265,10 @@ impl<'a> Scheduler<'a> {
 
         // FIXME - this incorrectly assumes all possible CPUs are consecutive.
         for cpu in 0..*NR_CPUS_POSSIBLE {
-            cpu_ctxs.push(*unsafe {
-                &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
-            });
+            cpu_ctxs.push(
+                *plain::from_bytes(cpu_ctxs_vec[cpu].as_slice())
+                    .expect("cpu_ctx: short or misaligned buffer"),
+            );
 
             let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
             let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
@@ -2184,16 +2370,15 @@ impl<'a> Scheduler<'a> {
             //
             // XXX - This would be a lot easier if llc_ctx were in the bss.
             // See BpfStats::read().
-            let key = llc_id as u32;
-            let llc_id_slice =
-                unsafe { std::slice::from_raw_parts((&key as *const u32) as *const u8, 4) };
+            let key = (llc_id as u32).to_ne_bytes();
             let v = skel
                 .maps
                 .llc_data
-                .lookup(llc_id_slice, libbpf_rs::MapFlags::ANY)
+                .lookup(&key, libbpf_rs::MapFlags::ANY)
                 .unwrap()
                 .unwrap();
-            let mut llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
+            let mut llcc: bpf_intf::llc_ctx =
+                *plain::from_bytes(v.as_slice()).expect("llc_ctx: short or misaligned buffer");
 
             let pmap = &mut llcc.prox_map;
             for (i, &llc_id) in order.iter().enumerate() {
@@ -2202,18 +2387,57 @@ impl<'a> Scheduler<'a> {
             pmap.node_end = node_end as u32;
             pmap.sys_end = sys_end as u32;
 
-            let v = unsafe {
-                std::slice::from_raw_parts(
-                    &llcc as *const bpf_intf::llc_ctx as *const u8,
-                    std::mem::size_of::<bpf_intf::llc_ctx>(),
-                )
-            };
-
-            skel.maps
-                .llc_data
-                .update(llc_id_slice, v, libbpf_rs::MapFlags::ANY)?
+            skel.maps.llc_data.update(
+                &key,
+                unsafe { plain::as_bytes(&llcc) },
+                libbpf_rs::MapFlags::ANY,
+            )?
         }
 
+        Ok(())
+    }
+
+    fn init_node_prox_map(skel: &mut BpfSkel, topo: &Topology) -> Result<()> {
+        for (&node_id, node) in &topo.nodes {
+            let mut order: Vec<(usize, usize)> = node
+                .distance
+                .iter()
+                .enumerate()
+                .filter(|&(nid, _)| nid != node_id)
+                .map(|(nid, &dist)| (nid, dist))
+                .collect();
+            order.sort_by_key(|&(_, dist)| dist);
+
+            let key = (node_id as u32).to_ne_bytes();
+
+            // The map entry may not exist yet — create a zeroed one.
+            let v = skel.maps.node_data.lookup(&key, libbpf_rs::MapFlags::ANY);
+            let mut nodec: bpf_intf::node_ctx = match v {
+                Ok(Some(v)) => {
+                    *plain::from_bytes(v.as_slice()).expect("node_ctx: short or misaligned buffer")
+                }
+                _ => unsafe { MaybeUninit::zeroed().assume_init() },
+            };
+
+            let pmap = &mut nodec.prox_map;
+            for (i, &(nid, _)) in order.iter().enumerate() {
+                pmap.nodes[i] = nid as u16;
+            }
+            pmap.sys_end = order.len() as u32;
+
+            debug!(
+                "NODE[{}] prox_map[{}]: {:?}",
+                node_id,
+                pmap.sys_end,
+                &order.iter().map(|(n, d)| (*n, *d)).collect::<Vec<_>>()
+            );
+
+            skel.maps.node_data.update(
+                &key,
+                unsafe { plain::as_bytes(&nodec) },
+                libbpf_rs::MapFlags::ANY,
+            )?;
+        }
         Ok(())
     }
 
@@ -2624,6 +2848,7 @@ impl<'a> Scheduler<'a> {
 
         Self::init_cpus(&skel, &layer_specs, &topo)?;
         Self::init_llc_prox_map(&mut skel, &topo)?;
+        Self::init_node_prox_map(&mut skel, &topo)?;
         Self::init_node_ctx(&mut skel, &topo, nr_layers)?;
 
         // Other stuff.
@@ -2691,6 +2916,8 @@ impl<'a> Scheduler<'a> {
 
             cgroup_regexes: Some(cgroup_regexes),
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
+            xnuma_mig_src: vec![vec![false; topo.nodes.len()]; nr_layers],
+            growth_denied: vec![vec![false; topo.nodes.len()]; nr_layers],
             processing_dur: Default::default(),
 
             proc_reader,
@@ -3298,12 +3525,7 @@ impl<'a> Scheduler<'a> {
             }
 
             let input = ProgramInput {
-                context_in: Some(unsafe {
-                    std::slice::from_raw_parts_mut(
-                        &mut arg as *mut _ as *mut u8,
-                        std::mem::size_of_val(&arg),
-                    )
-                }),
+                context_in: Some(unsafe { plain::as_mut_bytes(&mut arg) }),
                 ..Default::default()
             };
             let _ = skel.progs.refresh_node_ctx.test_run(input);
@@ -3537,6 +3759,31 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // Recompute growth_denied: for each node, check whether the
+        // unpinned portion of the layer warranted growth (unpinned util /
+        // util_high > unpinned CPUs) but the node didn't gain CPUs.  Only
+        // unpinned matters because pinned tasks can't migrate cross-node.
+        let node_utils = &self.sched_stats.layer_node_utils;
+        let pinned_utils = &self.sched_stats.layer_node_pinned_utils;
+        for (idx, layer) in self.layers.iter().enumerate() {
+            self.growth_denied[idx].fill(false);
+            let util_high = match layer.kind.util_range() {
+                Some((_, high)) => high,
+                None => continue,
+            };
+            for n in 0..nr_nodes {
+                let unpinned_util = (node_utils[idx][n] - pinned_utils[idx][n]).max(0.0);
+                let unpinned_cpus_needed = unpinned_util / util_high;
+                let unpinned_cpus_have =
+                    layer.nr_node_cpus[n].saturating_sub(layer.nr_pinned_cpus[n]) as f64;
+                let wanted = unpinned_cpus_needed > unpinned_cpus_have;
+                let got = layer.nr_node_cpus[n] > prev_node_cpus[idx][n];
+                if wanted && !got {
+                    self.growth_denied[idx][n] = true;
+                }
+            }
+        }
+
         // Log per-layer allocation changes.
         if updated {
             for (idx, layer) in self.layers.iter().enumerate() {
@@ -3682,6 +3929,59 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn refresh_xnuma(&mut self) {
+        let nr_nodes = self.topo.nodes.len();
+        if nr_nodes <= 1 {
+            return;
+        }
+
+        let duty_sums = &self.sched_stats.layer_node_duty_sums;
+
+        for (layer_idx, spec) in self.layer_specs.iter().enumerate() {
+            let common = spec.kind.common();
+            let threshold = common.xnuma_threshold;
+            let threshold_delta = common.xnuma_threshold_delta;
+            let bpf_layer = &mut self.skel.maps.bss_data.as_mut().unwrap().layers[layer_idx];
+
+            if threshold.0 <= 0.0 && threshold.1 <= 0.0 {
+                // Off — all open, infinite budget
+                for src in 0..nr_nodes {
+                    bpf_layer.node[src].xnuma_is_mig_src.write(true);
+                    for dst in 0..nr_nodes {
+                        bpf_layer.node[src].xnuma[dst].rate = u64::MAX;
+                    }
+                }
+                self.xnuma_mig_src[layer_idx].fill(false);
+                continue;
+            }
+
+            let layer = &self.layers[layer_idx];
+            let is_mig_src = xnuma_check_active(
+                &duty_sums[layer_idx],
+                &layer.nr_node_cpus,
+                threshold,
+                threshold_delta,
+                &self.growth_denied[layer_idx],
+                &self.xnuma_mig_src[layer_idx],
+            );
+
+            self.xnuma_mig_src[layer_idx] = is_mig_src.clone();
+
+            let result = xnuma_compute_rates(&duty_sums[layer_idx], &layer.nr_node_cpus);
+
+            // Write rates before is_mig_src so BPF sees valid rates
+            // when the gate activates.
+            for src in 0..nr_nodes {
+                for dst in 0..nr_nodes {
+                    bpf_layer.node[src].xnuma[dst].rate = result.rates[src][dst];
+                }
+            }
+            for nid in 0..nr_nodes {
+                bpf_layer.node[nid].xnuma_is_mig_src.write(is_mig_src[nid]);
+            }
+        }
+    }
+
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
         self.sched_stats.refresh(
@@ -3711,6 +4011,7 @@ impl<'a> Scheduler<'a> {
         }
 
         self.refresh_cpumasks()?;
+        self.refresh_xnuma();
         self.refresh_idle_qos()?;
         self.gpu_task_handler.maybe_affinitize();
         self.processing_dur += Instant::now().duration_since(started_at);
@@ -3726,7 +4027,14 @@ impl<'a> Scheduler<'a> {
         let mut sys_stats = SysStats::new(stats, bstats, &self.cpu_pool.fallback_cpus)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
-            let layer_stats = LayerStats::new(lidx, layer, stats, bstats, cpus_ranges[lidx]);
+            let layer_stats = LayerStats::new(
+                lidx,
+                layer,
+                stats,
+                bstats,
+                cpus_ranges[lidx],
+                self.xnuma_mig_src[lidx].iter().any(|&a| a),
+            );
             sys_stats.layers.insert(spec.name.to_string(), layer_stats);
             cpus_ranges[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
@@ -4710,4 +5018,633 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod xnuma_tests {
+    use super::*;
+
+    // Default thresholds for tests
+    const THRESH: (f64, f64) = (0.6, 0.7);
+    const DELTA: (f64, f64) = (0.2, 0.3);
+
+    // =====================================================================
+    // xnuma_check_active tests — per-(layer, node) two-threshold
+    // =====================================================================
+
+    #[test]
+    fn test_activation_below_threshold() {
+        // Both nodes below threshold — both closed
+        let duty = vec![40.0, 40.0];
+        let allocs = vec![96, 96];
+        let gd = vec![true, true];
+        let cur = vec![false, false];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // ratio = 0.42 < 0.6 (low) → deactivate
+        assert!(!result[0]);
+        assert!(!result[1]);
+    }
+
+    #[test]
+    fn test_activation_above_all_thresholds() {
+        // N0 overloaded + imbalanced + growth denied → open
+        let duty = vec![90.0, 20.0];
+        let allocs = vec![96, 96];
+        let gd = vec![true, false];
+        let cur = vec![false, false];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // N0: load=0.94>0.7, eq=110/192=0.573, surplus=90-55=35, ratio=0.365>0.3, gd=true → open
+        assert!(result[0]);
+        // N1: load=0.21<0.6 → closed
+        assert!(!result[1]);
+    }
+
+    #[test]
+    fn test_activation_requires_growth_denied() {
+        // N0 overloaded + imbalanced but growth NOT denied → closed
+        let duty = vec![90.0, 20.0];
+        let allocs = vec![96, 96];
+        let gd = vec![false, false]; // growth succeeded
+        let cur = vec![false, false];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        assert!(!result[0]); // !growth_denied → deactivate
+    }
+
+    #[test]
+    fn test_symmetric_high_load_stays_closed() {
+        // Both nodes above threshold but balanced (delta=0) → closed
+        let duty = vec![80.0, 80.0];
+        let allocs = vec![96, 96];
+        let gd = vec![true, true];
+        let cur = vec![false, false];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // load=0.83>0.7 but surplus=0, surplus_ratio=0 < 0.3 → no activation
+        assert!(!result[0]);
+        assert!(!result[1]);
+    }
+
+    #[test]
+    fn test_hysteresis_stays_active() {
+        // N0 was active, now between thresholds → stays active
+        let duty = vec![75.0, 20.0];
+        let allocs = vec![96, 96];
+        let gd = vec![true, false];
+        let cur = vec![true, false]; // N0 was active
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // N0: load=0.78 > 0.6(lo) and < 0.7(hi), surplus=(75-20)/2=27.5, ratio=0.286 > 0.2(lo)
+        // gd=true. activate: 0.78<0.7 NO. deactivate: 0.78>0.6 NO, 0.286>0.2 NO, gd=true NO
+        // → hysteresis preserves true
+        assert!(result[0]);
+    }
+
+    #[test]
+    fn test_hysteresis_stays_inactive() {
+        // N0 was inactive, in hysteresis band → stays inactive
+        let duty = vec![75.0, 20.0];
+        let allocs = vec![96, 96];
+        let gd = vec![true, false];
+        let cur = vec![false, false]; // N0 was inactive
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // Same conditions but currently inactive → stays inactive
+        assert!(!result[0]);
+    }
+
+    #[test]
+    fn test_deactivation_load_drops() {
+        // N0 was active, load drops below low → closes
+        let duty = vec![50.0, 50.0];
+        let allocs = vec![96, 96];
+        let gd = vec![true, true];
+        let cur = vec![true, false];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // N0: load=0.52 < 0.6(lo) → deactivate
+        assert!(!result[0]);
+    }
+
+    #[test]
+    fn test_deactivation_growth_succeeds() {
+        // N0 was active, growth now succeeds → closes
+        let duty = vec![90.0, 20.0];
+        let allocs = vec![96, 96];
+        let gd = vec![false, false]; // growth succeeded
+        let cur = vec![true, false];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // !growth_denied → deactivate regardless of load/delta
+        assert!(!result[0]);
+    }
+
+    #[test]
+    fn test_zero_alloc_with_duty_and_growth_denied() {
+        // Zero alloc but duty > 0 and growth denied → open
+        let duty = vec![50.0, 0.0];
+        let allocs = vec![0, 96];
+        let gd = vec![true, false];
+        let cur = vec![false, false];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        assert!(result[0]); // zero alloc + duty + gd → source
+    }
+
+    #[test]
+    fn test_all_zero_alloc() {
+        let duty = vec![0.0, 0.0];
+        let allocs = vec![0, 0];
+        let gd = vec![true, true];
+        let cur = vec![true, true];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        assert!(!result[0]);
+        assert!(!result[1]);
+    }
+
+    #[test]
+    fn test_three_nodes_mixed() {
+        // 3 nodes: N0 overloaded+imbalanced+gd, N1 moderate, N2 low
+        let duty = vec![90.0, 40.0, 10.0];
+        let allocs = vec![96, 96, 96];
+        let gd = vec![true, true, false];
+        let cur = vec![false, false, false];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // eq_ratio = 140/288 ≈ 0.486
+        // N0: load=0.94>0.7, surplus=90-46.7=43.3, ratio=0.451>0.3, gd=true → open
+        assert!(result[0]);
+        // N1: load=0.42<0.6 → deactivate
+        assert!(!result[1]);
+        // N2: load=0.10<0.6 → deactivate
+        assert!(!result[2]);
+    }
+
+    #[test]
+    fn test_per_node_independence() {
+        // N0 active, N1 deactivates independently
+        let duty = vec![90.0, 50.0];
+        let allocs = vec![96, 96];
+        let gd = vec![true, true];
+        let cur = vec![true, true];
+        let result = xnuma_check_active(&duty, &allocs, THRESH, DELTA, &gd, &cur);
+        // N0: load=0.94>0.7, eq=140/192=0.729, surplus=90-70=20, ratio=0.208>0.2(lo)
+        //   activate: 0.94>0.7 YES, 0.208>0.3 NO → no activate
+        //   deactivate: 0.94>0.6 NO, 0.208>0.2 NO, gd=true NO → no deactivate → preserve true
+        assert!(result[0]);
+        // N1: load=0.52<0.6 → deactivate
+        assert!(!result[1]);
+    }
+
+    // =====================================================================
+    // xnuma_compute_rates tests — basic
+    // =====================================================================
+
+    #[test]
+    fn test_rates_balanced_load() {
+        // Equal load per CPU on both nodes — no migration needed
+        let duty = vec![48.0, 48.0];
+        let allocs = vec![96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // No surplus/deficit → all rates zero
+        for src in 0..2 {
+            for dst in 0..2 {
+                assert_eq!(result.rates[src][dst], 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rates_one_overloaded() {
+        // N0 has 80 CPUs of duty, N1 has 40. Both have 96 CPUs.
+        // eq_ratio = 120/192 = 0.625
+        // N0 expected = 0.625 * 96 = 60, surplus = 80 - 60 = 20
+        // N1 expected = 0.625 * 96 = 60, deficit = 60 - 40 = 20
+        let duty = vec![80.0, 40.0];
+        let allocs = vec![96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // rate[0][1] should be positive (migrate from N0 to N1)
+        assert!(result.rates[0][1] > 0);
+        // rate[1][0] should be 0 (N1 has no surplus)
+        assert_eq!(result.rates[1][0], 0);
+        // Self-rates always 0
+        assert_eq!(result.rates[0][0], 0);
+        assert_eq!(result.rates[1][1], 0);
+
+        // Verify the rate magnitude: migration = 20.0 * DAMPEN, scaled
+        let expected_rate = (20.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        assert_eq!(result.rates[0][1], expected_rate);
+    }
+
+    #[test]
+    fn test_rates_asymmetric_allocation() {
+        // N0 has 48 CPUs, N1 has 144 CPUs. Duty 48 each.
+        // eq_ratio = 96/192 = 0.5
+        // N0 expected = 0.5 * 48 = 24, surplus = 48 - 24 = 24
+        // N1 expected = 0.5 * 144 = 72, deficit = 72 - 48 = 24
+        let duty = vec![48.0, 48.0];
+        let allocs = vec![48, 144];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        let expected_rate = (24.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        assert_eq!(result.rates[0][1], expected_rate);
+        assert_eq!(result.rates[1][0], 0);
+    }
+
+    // =====================================================================
+    // xnuma_compute_rates tests — multi-node
+    // =====================================================================
+
+    #[test]
+    fn test_rates_three_nodes_one_source() {
+        // N0 overloaded, N1 and N2 are deficit
+        // allocs: 96 each, duty: N0=120, N1=30, N2=30
+        // eq_ratio = 180/288 = 0.625
+        // N0 expected = 60, surplus = 60
+        // N1 expected = 60, deficit = 30
+        // N2 expected = 60, deficit = 30
+        let duty = vec![120.0, 30.0, 30.0];
+        let allocs = vec![96, 96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // Total deficit = 60. N1 gets 30/60 = 50%, N2 gets 30/60 = 50%
+        // rate[0][1] = 60 * 30/60 * DAMPEN = 15
+        // rate[0][2] = 60 * 30/60 * DAMPEN = 15
+        let rate_01 = (30.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        let rate_02 = (30.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        assert_eq!(result.rates[0][1], rate_01);
+        assert_eq!(result.rates[0][2], rate_02);
+
+        // No reverse flow
+        assert_eq!(result.rates[1][0], 0);
+        assert_eq!(result.rates[2][0], 0);
+        assert_eq!(result.rates[1][2], 0);
+        assert_eq!(result.rates[2][1], 0);
+    }
+
+    #[test]
+    fn test_rates_three_nodes_unequal_deficit() {
+        // N0 overloaded. N1 slight deficit, N2 large deficit.
+        // allocs: 96 each, duty: N0=120, N1=50, N2=10
+        // eq_ratio = 180/288 = 0.625
+        // N0: expected=60, surplus=60
+        // N1: expected=60, deficit=10
+        // N2: expected=60, deficit=50
+        let duty = vec![120.0, 50.0, 10.0];
+        let allocs = vec![96, 96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // Total deficit = 60. N1 share = 10/60, N2 share = 50/60
+        // rate[0][1] = 60 * 10/60 * DAMPEN = 5
+        // rate[0][2] = 60 * 50/60 * DAMPEN = 25
+        let rate_01 = (10.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        let rate_02 = (50.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        assert_eq!(result.rates[0][1], rate_01);
+        assert_eq!(result.rates[0][2], rate_02);
+    }
+
+    #[test]
+    fn test_rates_two_sources_one_sink() {
+        // N0 and N1 overloaded, N2 deficit
+        // allocs: 96 each, duty: N0=80, N1=70, N2=30
+        // total = 180, eq_ratio = 180/288 = 0.625
+        // N0: expected=60, surplus=20
+        // N1: expected=60, surplus=10
+        // N2: expected=60, deficit=30
+        let duty = vec![80.0, 70.0, 30.0];
+        let allocs = vec![96, 96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // Total deficit = 30. Only N2 is deficit, so deficit share = 1.0
+        // rate[0][2] = 20 * 1.0 * DAMPEN = 10
+        // rate[1][2] = 10 * 1.0 * DAMPEN = 5
+        let rate_02 = (20.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        let rate_12 = (10.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        assert_eq!(result.rates[0][2], rate_02);
+        assert_eq!(result.rates[1][2], rate_12);
+
+        // No flow between sources
+        assert_eq!(result.rates[0][1], 0);
+        assert_eq!(result.rates[1][0], 0);
+    }
+
+    // =====================================================================
+    // Conservation invariants
+    // =====================================================================
+
+    #[test]
+    fn test_conservation_per_source_outbound() {
+        // Each source's total outbound should equal its surplus * DAMPEN (scaled).
+        // Total outbound from src = surplus[src] * DAMPEN * DUTY_CYCLE_SCALE
+        let duty = vec![100.0, 30.0, 50.0, 20.0];
+        let allocs = vec![96, 96, 96, 96];
+        let nr = 4;
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        let total_duty: f64 = duty.iter().sum();
+        let total_alloc: f64 = allocs.iter().map(|&a| a as f64).sum();
+        let eq_ratio = total_duty / total_alloc;
+
+        for src in 0..nr {
+            let expected = eq_ratio * allocs[src] as f64;
+            let surplus = (duty[src] - expected).max(0.0);
+            let total_outbound: u64 = (0..nr).map(|dst| result.rates[src][dst]).sum();
+            let expected_rate = (surplus * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+            assert_eq!(
+                total_outbound, expected_rate,
+                "node {} outbound mismatch",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn test_conservation_surplus_equals_deficit() {
+        // Mathematical invariant: total surplus == total deficit in water-fill
+        let duty = vec![100.0, 30.0, 50.0];
+        let allocs = vec![96, 96, 96];
+
+        let total_duty: f64 = duty.iter().sum();
+        let total_alloc: f64 = allocs.iter().map(|&a| a as f64).sum();
+        let eq_ratio = total_duty / total_alloc;
+
+        let mut total_surplus = 0.0f64;
+        let mut total_deficit = 0.0f64;
+        for i in 0..3 {
+            let expected = eq_ratio * allocs[i] as f64;
+            let delta = duty[i] - expected;
+            if delta > 0.0 {
+                total_surplus += delta;
+            } else {
+                total_deficit += -delta;
+            }
+        }
+        assert!((total_surplus - total_deficit).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_self_rates_always_zero() {
+        let duty = vec![100.0, 30.0, 50.0];
+        let allocs = vec![96, 96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        for nid in 0..3 {
+            assert_eq!(result.rates[nid][nid], 0);
+        }
+    }
+
+    #[test]
+    fn test_deficit_nodes_have_zero_outbound() {
+        // Deficit nodes should have zero outbound rates
+        let duty = vec![100.0, 20.0, 30.0, 50.0];
+        let allocs = vec![96, 96, 96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // eq_ratio = 200/384 ≈ 0.521. N0: surplus=50, N3: surplus=0
+        // N1: deficit=30, N2: deficit=20
+        // Deficit nodes (outbound sum == 0) should have all zero rates
+        for nid in 0..4 {
+            let outbound: u64 = (0..4).map(|dst| result.rates[nid][dst]).sum();
+            if outbound == 0 {
+                for dst in 0..4 {
+                    assert_eq!(
+                        result.rates[nid][dst], 0,
+                        "deficit node {} has non-zero rate to {}",
+                        nid, dst
+                    );
+                }
+            }
+        }
+    }
+
+    // =====================================================================
+    // Edge cases
+    // =====================================================================
+
+    #[test]
+    fn test_rates_zero_duty_everywhere() {
+        let duty = vec![0.0, 0.0];
+        let allocs = vec![96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        for src in 0..2 {
+            for dst in 0..2 {
+                assert_eq!(result.rates[src][dst], 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rates_zero_alloc() {
+        let duty = vec![50.0, 50.0];
+        let allocs = vec![0, 0];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // total_alloc = 0 → early return with all zeros
+        for src in 0..2 {
+            for dst in 0..2 {
+                assert_eq!(result.rates[src][dst], 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rates_all_load_one_node() {
+        // All duty on N0, nothing on N1
+        // allocs: 96 each, duty: N0=96, N1=0
+        // eq_ratio = 96/192 = 0.5
+        // N0: expected=48, surplus=48
+        // N1: expected=48, deficit=48
+        let duty = vec![96.0, 0.0];
+        let allocs = vec![96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        let expected_rate = (48.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        assert_eq!(result.rates[0][1], expected_rate);
+    }
+
+    #[test]
+    fn test_rates_single_node() {
+        // Single node — balanced by definition
+        let duty = vec![96.0];
+        let allocs = vec![96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        assert_eq!(result.rates[0][0], 0);
+    }
+
+    #[test]
+    fn test_rates_one_node_zero_alloc() {
+        // N0 has allocation, N1 has zero
+        // eq_ratio = 80/96
+        // N0: expected=80, surplus=0 → balanced
+        // N1: expected=0, deficit=0 → zero alloc skipped effectively
+        let duty = vec![80.0, 0.0];
+        let allocs = vec![96, 0];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // N0: surplus = 80 - (80/96 * 96) = 0
+        // N1: deficit = (80/96 * 0) - 0 = 0
+        // All zeros — nothing to migrate
+        assert_eq!(result.rates[0][1], 0);
+        assert_eq!(result.rates[1][0], 0);
+    }
+
+    // =====================================================================
+    // Rate magnitude and scaling
+    // =====================================================================
+
+    #[test]
+    fn test_rate_scaling() {
+        // Verify rates are in DUTY_CYCLE_SCALE units
+        let duty = vec![80.0, 40.0];
+        let allocs = vec![96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // surplus = 20, deficit = 20 → migration = 20 * DAMPEN = 10
+        // rate = 10 * (1 << 20)
+        let expected = (20.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+        assert_eq!(result.rates[0][1], expected);
+        assert_eq!(expected, 10 * (1 << 20));
+    }
+
+    #[test]
+    fn test_rates_tiny_imbalance() {
+        // Very small imbalance — should still produce non-zero rate
+        let duty = vec![48.001, 47.999];
+        let allocs = vec![96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // surplus ≈ 0.001, rate ≈ 0.001 * 2^20 ≈ 1048
+        assert!(result.rates[0][1] > 0);
+        assert!(result.rates[0][1] < (1 << 20)); // Less than 1.0 CPU worth
+    }
+
+    #[test]
+    fn test_rates_large_values() {
+        // Large system: 8 nodes, 96 CPUs each
+        let duty = vec![300.0, 100.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0];
+        let allocs = vec![96, 96, 96, 96, 96, 96, 96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // eq_ratio = 700/768 ≈ 0.911. N0 surplus=212.5, N1 surplus=12.5
+        // N2-N7 deficit=37.5 each. N0 and N1 have surplus.
+        assert!(result.rates[0][2] > 0); // N0 → N2 (deficit node)
+        assert!(result.rates[1][2] > 0); // N1 → N2 (N1 also has surplus)
+
+        // Verify conservation: per-source outbound ≈ surplus * DAMPEN (within
+        // truncation tolerance — each `as u64` can lose up to 1 per cell)
+        let total_duty: f64 = duty.iter().sum();
+        let total_alloc: f64 = allocs.iter().map(|&a| a as f64).sum();
+        let eq_ratio = total_duty / total_alloc;
+        let nr = 8;
+        for src in 0..nr {
+            let surplus = (duty[src] - eq_ratio * allocs[src] as f64).max(0.0);
+            let outbound: u64 = (0..nr).map(|dst| result.rates[src][dst]).sum();
+            let expected = (surplus * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64;
+            let tolerance = nr as u64; // up to 1 per destination cell
+            assert!(
+                outbound.abs_diff(expected) <= tolerance,
+                "node {} outbound {} vs expected {}, diff {}",
+                src,
+                outbound,
+                expected,
+                outbound.abs_diff(expected)
+            );
+        }
+    }
+
+    // =====================================================================
+    // Hysteresis integration
+    // =====================================================================
+
+    #[test]
+    fn test_hysteresis_cycle() {
+        let allocs = vec![96, 96];
+        let gd = vec![true, false]; // N0 growth denied
+
+        // Start: all closed, low load
+        let active =
+            xnuma_check_active(&[40.0, 40.0], &allocs, THRESH, DELTA, &gd, &[false, false]);
+        assert!(!active[0]); // load 0.42 < 0.6(lo) → deactivate
+
+        // N0 overloaded + imbalanced + gd → opens
+        let active =
+            xnuma_check_active(&[90.0, 20.0], &allocs, THRESH, DELTA, &gd, &[false, false]);
+        assert!(active[0]); // load 0.94>0.7, surplus=35, ratio=0.365>0.3, gd=true
+
+        // Load decreases but in hysteresis band → stays open
+        let active = xnuma_check_active(&[75.0, 20.0], &allocs, THRESH, DELTA, &gd, &[true, false]);
+        assert!(active[0]); // load 0.78 between 0.6 and 0.7, surplus ok, gd → preserve
+
+        // Load drops below low threshold → closes
+        let active = xnuma_check_active(&[50.0, 50.0], &allocs, THRESH, DELTA, &gd, &[true, false]);
+        assert!(!active[0]); // load 0.52 < 0.6(lo) → deactivate
+    }
+
+    #[test]
+    fn test_hysteresis_growth_toggle() {
+        // N0 was open, then growth succeeds → closes
+        let allocs = vec![96, 96];
+        let gd_denied = vec![true, false];
+        let gd_ok = vec![false, false];
+
+        // Active with growth denied
+        let active = xnuma_check_active(
+            &[90.0, 20.0],
+            &allocs,
+            THRESH,
+            DELTA,
+            &gd_denied,
+            &[false, false],
+        );
+        assert!(active[0]);
+
+        // Growth succeeds → !gd → deactivate
+        let active = xnuma_check_active(
+            &[90.0, 20.0],
+            &allocs,
+            THRESH,
+            DELTA,
+            &gd_ok,
+            &[true, false],
+        );
+        assert!(!active[0]); // !growth_denied → deactivate
+    }
+
+    // =====================================================================
+    // Proportional distribution to multiple sinks
+    // =====================================================================
+
+    #[test]
+    fn test_proportional_sink_distribution() {
+        // 4 nodes: N0 source, N1-N3 sinks with different deficits
+        // allocs: 96 each, duty: N0=180, N1=20, N2=40, N3=0
+        // total = 240, eq_ratio = 240/384 = 0.625
+        // N0: expected=60, surplus=120
+        // N1: expected=60, deficit=40
+        // N2: expected=60, deficit=20
+        // N3: expected=60, deficit=60
+        // total_deficit = 120
+        let duty = vec![180.0, 20.0, 40.0, 0.0];
+        let allocs = vec![96, 96, 96, 96];
+        let result = xnuma_compute_rates(&duty, &allocs);
+
+        // rate[0][1] = 120 * 40/120 * DAMPEN = 20
+        // rate[0][2] = 120 * 20/120 * DAMPEN = 10
+        // rate[0][3] = 120 * 60/120 * DAMPEN = 30
+        assert_eq!(
+            result.rates[0][1],
+            (40.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
+        );
+        assert_eq!(
+            result.rates[0][2],
+            (20.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
+        );
+        assert_eq!(
+            result.rates[0][3],
+            (60.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
+        );
+
+        // Total outbound from N0 = 20 + 10 + 30 = 60 (half of surplus, dampened)
+        let total_from_n0: u64 = (0..4).map(|dst| result.rates[0][dst]).sum();
+        assert_eq!(
+            total_from_n0,
+            (120.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
+        );
+    }
 }
