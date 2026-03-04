@@ -1,0 +1,19 @@
+[package]
+name = "scx_pandemonium"
+version = "5.4.12"
+edition = "2021"
+
+[dependencies]
+libbpf-rs = { version = "=0.26.1" }
+libc = "0.2.175"
+anyhow = "1.0.65"
+clap = { version = "4.5.41", features = ["derive"] }
+ctrlc = { version = "3.4.7", features = ["termination"] }
+flate2 = "1.1.2"
+regex = "1.11.2"
+
+[dev-dependencies]
+libc = "0.2.175"
+
+[build-dependencies]
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
