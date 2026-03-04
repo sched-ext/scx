@@ -203,7 +203,7 @@ pub enum SortColumn {
     Gate1Pct,
     Jitter,
     Tier,
-    Ewma,
+    Pelt,
     Vcsw,
     Hog,
     RunsPerSec,
@@ -238,7 +238,7 @@ pub struct TuiApp {
     pub bench_latency_handle: Option<thread::JoinHandle<Vec<Vec<f64>>>>, // Background c2c bench
     pub _prev_stats: Option<cake_stats>,       // Previous global stats for rate calc
     // BenchLab cached results
-    pub bench_entries: [(u64, u64, u64, u64); 50], // (min_ns, max_ns, total_ns, last_value)
+    pub bench_entries: [(u64, u64, u64, u64); 67], // (min_ns, max_ns, total_ns, last_value)
     pub bench_samples: Vec<Vec<u64>>, // Per-entry accumulated raw samples for percentiles
     pub bench_cpu: u32,
     pub bench_iterations: u32,
@@ -269,7 +269,7 @@ pub struct TaskTelemetryRow {
     pub pid: u32,
     pub comm: String,
     pub tier: u8,
-    pub avg_runtime_us: u32,
+    pub pelt_util: u32,
     pub deficit_us: u32,
     pub wait_duration_ns: u64,
     pub gate_hit_pcts: [f64; 10], // G1, G2, G1W, G3, G1P, G1C, G1CP, G1D, G1WC, GTUN
@@ -307,7 +307,7 @@ pub struct TaskTelemetryRow {
     // Voluntary/involuntary context switch tracking (GPU detection)
     pub nvcsw_delta: u32,
     pub nivcsw_delta: u32,
-    pub ewma_recomp_count: u16,
+    pub _pad_recomp: u16,
     pub is_hog: bool,         // Hog squeeze: BULK + non-yielder + deprioritized
     pub is_bg: bool,          // Background noise squeeze: non-game, non-wb, non-kernel
     pub is_game_member: bool, // Task is in the game PPID family (tgid==game_tgid or ppid==game_ppid)
@@ -317,7 +317,7 @@ pub struct TaskTelemetryRow {
     pub idle_probe_ns: u32,    // select_cpu: winning gate idle probe cost
     pub vtime_compute_ns: u32, // enqueue: vtime calculation + tier weighting
     pub mbox_staging_ns: u32,  // running: mailbox CL0 write burst
-    pub ewma_compute_ns: u32,  // stopping: compute_ewma() call
+    pub _pad_ewma: u32,
     pub classify_ns: u32,      // stopping: tier classify + squeeze fusion
     pub vtime_staging_ns: u32, // stopping: dsq_vtime bit packing + writes
     pub warm_history_ns: u32,  // stopping: warm CPU ring shift
@@ -338,7 +338,7 @@ impl Default for TaskTelemetryRow {
             pid: 0,
             comm: String::new(),
             tier: 0,
-            avg_runtime_us: 0,
+            pelt_util: 0,
             deficit_us: 0,
             wait_duration_ns: 0,
             gate_hit_pcts: [0.0; 10],
@@ -371,7 +371,7 @@ impl Default for TaskTelemetryRow {
             wakeup_source_pid: 0,
             nvcsw_delta: 0,
             nivcsw_delta: 0,
-            ewma_recomp_count: 0,
+            _pad_recomp: 0,
             is_hog: false,
             is_bg: false,
             is_game_member: false,
@@ -381,7 +381,7 @@ impl Default for TaskTelemetryRow {
             idle_probe_ns: 0,
             vtime_compute_ns: 0,
             mbox_staging_ns: 0,
-            ewma_compute_ns: 0,
+            _pad_ewma: 0,
             classify_ns: 0,
             vtime_staging_ns: 0,
             warm_history_ns: 0,
@@ -417,7 +417,7 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.max_stopping_ns = total.max_stopping_ns.max(s.max_stopping_ns);
             total.max_running_ns = total.max_running_ns.max(s.max_running_ns);
             total.nr_stop_confidence_skip += s.nr_stop_confidence_skip;
-            total.nr_stop_ewma += s.nr_stop_ewma;
+            total.nr_stop_classify += s.nr_stop_classify;
             total.nr_stop_ramp += s.nr_stop_ramp;
             total.nr_stop_miss += s.nr_stop_miss;
 
@@ -477,8 +477,8 @@ impl TuiApp {
             collapsed_ppids: std::collections::HashSet::new(),
             bench_latency_handle: None,
             _prev_stats: None,
-            bench_entries: [(0, 0, 0, 0); 50],
-            bench_samples: vec![Vec::new(); 50],
+            bench_entries: [(0, 0, 0, 0); 67],
+            bench_samples: vec![Vec::new(); 67],
             bench_cpu: 0,
             bench_iterations: 0,
             bench_timestamp: 0,
@@ -538,8 +538,8 @@ impl TuiApp {
             SortColumn::Gate1Pct => SortColumn::TargetCpu,
             SortColumn::TargetCpu => SortColumn::Pid,
             SortColumn::Pid => SortColumn::Tier,
-            SortColumn::Tier => SortColumn::Ewma,
-            SortColumn::Ewma => SortColumn::Vcsw,
+            SortColumn::Tier => SortColumn::Pelt,
+            SortColumn::Pelt => SortColumn::Vcsw,
             SortColumn::Vcsw => SortColumn::Hog,
             SortColumn::Hog => SortColumn::RunsPerSec,
             SortColumn::RunsPerSec => SortColumn::Gap,
@@ -971,7 +971,7 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         (21, "Disruptor CL0 full read", "Mailbox CL0", "C"),
         // Composite: cake-only multi-step operations
         (16, "Bitflag shift+mask+brless", "Composite Ops", "C"),
-        (17, "compute_ewma() full", "Composite Ops", "C"),
+        (17, "(reserved, was compute_ewma)", "Composite Ops", "C"),
         // DVFS / Performance: CPU frequency queries
         (35, "scx_bpf_cpuperf_cur(cpu)", "DVFS / Perf", "K"),
         (42, "scx_bpf_cpuperf_cap(cpu)", "DVFS / Perf", "K"),
@@ -992,6 +992,29 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         (49, "BSS xorshift32 PRNG", "Synchronization", "C"),
         // TLB/Memory: arena access pattern cost
         (23, "Arena stride (TLB/hugepage)", "TLB/Memory", "C"),
+        // Kernel Free Data: zero-cost task_struct field reads
+        (50, "PELT util+runnable_avg", "Kernel Free Data", "K"),
+        (51, "PELT runnable_avg only", "Kernel Free Data", "K"),
+        (52, "schedstats nr_wakeups", "Kernel Free Data", "K"),
+        (53, "p->policy+prio+flags", "Kernel Free Data", "K"),
+        (54, "PELT read+tier classify", "Kernel Free Data", "K"),
+        // End-to-End Workflow Comparisons
+        (55, "task_storage write+read", "Storage Roundtrip", "C"),
+        (56, "Arena write+read", "Storage Roundtrip", "C"),
+        (57, "6-gate cascade (cake)", "Idle Selection", "C"),
+        (58, "pick_idle_cpu full", "Idle Selection", "K"),
+        (59, "Weight classify (bpfland)", "Classification", "C"),
+        (60, "Lat-cri classify (lavd)", "Classification", "C"),
+        (61, "SMT: cake sib probe", "SMT Probing", "C"),
+        (62, "SMT: cpumask probe", "SMT Probing", "K"),
+        // ═══ Fairness Fixes (cold-cache + remote) ═══
+        // Note: cold probes use arena-stride L1 pollution. storage_get cold
+        // can't evict task_struct — add ~10ns (L3 hit) conservatively.
+        // kick_cpu remote measures bit-set only — add ~100ns for IPI delivery.
+        (63, "storage_get COLD ~est", "Cold Cache", "K"),
+        (64, "PELT classify COLD", "Cold Cache", "K"),
+        (65, "legacy EWMA COLD", "Cold Cache", "C"),
+        (66, "kick_cpu REMOTE ~est", "Cold Cache", "K"),
     ];
 
     let percentile = |samples: &[u64], pct: f64| -> u64 {
@@ -1121,17 +1144,17 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
 
     // Compact callback profile (all on 2 lines)
     let stop_total = stats.nr_stop_confidence_skip
-        + stats.nr_stop_ewma
+        + stats.nr_stop_classify
         + stats.nr_stop_ramp
         + stats.nr_stop_miss;
     let stop_total_f = (stop_total as f64).max(1.0);
     output.push_str(&format!(
-        "cb.stop: tot_µs={} max_ns={} calls={} skip={:.1}% ewma={:.1}% ramp={:.1}% miss={:.1}%\n",
+        "cb.stop: tot_µs={} max_ns={} calls={} skip={:.1}% classify={:.1}% ramp={:.1}% miss={:.1}%\n",
         stats.total_stopping_ns / 1000,
         stats.max_stopping_ns,
         stop_total,
         stats.nr_stop_confidence_skip as f64 / stop_total_f * 100.0,
-        stats.nr_stop_ewma as f64 / stop_total_f * 100.0,
+        stats.nr_stop_classify as f64 / stop_total_f * 100.0,
         stats.nr_stop_ramp as f64 / stop_total_f * 100.0,
         stats.nr_stop_miss as f64 / stop_total_f * 100.0,
     ));
@@ -1148,9 +1171,9 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     }
 
     // Task matrix header — compact column key
-    output.push_str("\ntasks: [PPID PID ST COMM EWMA AVG MAX GAP JIT WAIT R/s CPU SEL ENQ STOP RUN G1 G2 G1W G3 G1P G1C G1CP G1D G1WC G5 MIG/s WHIST]\n");
+    output.push_str("\ntasks: [PPID PID ST COMM PELT AVG MAX GAP JIT WAIT R/s CPU SEL ENQ STOP RUN G1 G2 G1W G3 G1P G1C G1CP G1D G1WC G5 MIG/s WHIST]\n");
     output.push_str("       [detail-A: gates% + DIRECT DEFI YIELD PRMPT ENQ MASK MAX_GAP DSQ_INS RUNS SUTIL LLC STREAK WAKER VCSW ICSW CONF TGID]\n");
-    output.push_str("       [detail-B: sw=cascade/probe/vtime/mbox/ewma/classify/vstg/warm(ns) qc=F%/Y%/P% wk=pid/tgid@cpu dist=C:pct,...]\n");
+    output.push_str("       [detail-B: sw=cascade/probe/vtime/mbox/pelt/classify/vstg/warm(ns) qc=F%/Y%/P% wk=pid/tgid@cpu dist=C:pct,...]\n");
 
     // Dump always captures ALL BPF-tracked tasks (not filtered by TUI view)
     let mut dump_pids: Vec<u32> = app
@@ -1162,7 +1185,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     dump_pids.sort_by(|a, b| {
         let r_a = app.task_rows.get(a).unwrap();
         let r_b = app.task_rows.get(b).unwrap();
-        r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us)
+        r_b.pelt_util.cmp(&r_a.pelt_util)
     });
     // TGID grouping (same logic as TUI)
     let mut tgid_rank: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
@@ -1181,7 +1204,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         let rank_b = tgid_rank.get(&tgid_b).copied().unwrap_or(usize::MAX);
         rank_a
             .cmp(&rank_b)
-            .then_with(|| r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us))
+            .then_with(|| r_b.pelt_util.cmp(&r_a.pelt_util))
     });
 
     // Pre-compute thread counts per tgid
@@ -1222,7 +1245,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             };
             let status_str = match row.status {
                 // Game family member: show ●GAME badge to signal boost status.
-                // This takes priority over HOG/BG which are cosmetic EWMA labels.
+                // This takes priority over HOG/BG which are cosmetic PELT labels.
                 // Note: BPF's can_squeeze = !is_game so game tasks are NEVER squeezed.
                 TaskStatus::Alive if row.is_game_member => "●GAME",
                 TaskStatus::Alive if row.is_hog => "●HOG",
@@ -1245,8 +1268,8 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.pid,
                 status_str,
                 row.comm,
-                row.avg_runtime_us,  // EWMA runtime µs
-                row.avg_runtime_us,
+                row.pelt_util,  // PELT utilization (0-1024)
+                row.pelt_util,
                 row.max_runtime_us,
                 row.dispatch_gap_us,
                 j_us,
@@ -1283,7 +1306,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.max_dispatch_gap_us, row.dsq_insert_ns, row.total_runs,
                 row.slice_util_pct, row.llc_id, row.same_cpu_streak,
                 row.wakeup_source_pid, row.nvcsw_delta, row.nivcsw_delta,
-                row.ewma_recomp_count, row.total_runs, row.tgid,
+                row._pad_recomp, row.total_runs, row.tgid,
             ));
             // detail-B: stopwatch(ns) + quantum completion % + waker + cpu dist — all one line
             let q_total = row.quantum_full_count as u32
@@ -1321,7 +1344,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 "{}  sw={}/{}/{}/{}/{}/{}/{}/{} qc=F{:.0}/Y{:.0}/P{:.0} wk={}/{}@{} ppid={} dist={}\n",
                 indent,
                 row.gate_cascade_ns, row.idle_probe_ns, row.vtime_compute_ns,
-                row.mbox_staging_ns, row.ewma_compute_ns, row.classify_ns,
+                row.mbox_staging_ns, row._pad_ewma, row.classify_ns,
                 row.vtime_staging_ns, row.warm_history_ns,
                 q_full_pct, q_yield_pct, q_preempt_pct,
                 row.wakeup_source_pid, row.waker_tgid, row.waker_cpu,
@@ -1402,7 +1425,7 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
         SortColumn::Enqueue => format!("[ENQ_NS]{}", arrow),
         SortColumn::Jitter => format!("[JITTER]{}", arrow),
         SortColumn::Tier => format!("[TIER]{}", arrow),
-        SortColumn::Ewma => format!("[EWMA]{}", arrow),
+        SortColumn::Pelt => format!("[PELT]{}", arrow),
         SortColumn::Vcsw => format!("[VCSW]{}", arrow),
         SortColumn::Hog => format!("[HOG]{}", arrow),
         SortColumn::RunsPerSec => format!("[RUN/s]{}", arrow),
@@ -1455,16 +1478,16 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         0.0
     };
 
-    // EWMA tier summary: count tasks by runtime bands
+    // PELT tier summary: count tasks by utilization bands
     let (mut wc0, mut wc1, mut wc2, mut wc3) = (0u32, 0u32, 0u32, 0u32);
     for row in app.task_rows.values() {
         if !row.is_bpf_tracked || row.total_runs == 0 {
             continue;
         }
-        match row.avg_runtime_us {
+        match row.pelt_util {
             0..=49 => wc0 += 1,
-            50..=499 => wc1 += 1,
-            500..=4999 => wc2 += 1,
+            50..=255 => wc1 += 1,
+            256..=799 => wc2 += 1,
             _ => wc3 += 1,
         }
     }
@@ -1631,8 +1654,8 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     );
     frame.render_widget(header, outer_layout[0]);
 
-    // --- EWMA Class Performance Panel ---
-    // Aggregate by EWMA bands: E0 <50µs, E1 50-500µs, E2 500µs-5ms, E3 ≥5ms
+    // --- PELT Utilization Tier Panel ---
+    // Aggregate by PELT bands: P0 <5%, P1 5-25%, P2 25-78%, P3 ≥HOG
     let mut tier_pids = [0u32; 4];
     let mut tier_avg_rt_sum = [0u64; 4];
     let mut tier_jitter_sum = [0u64; 4];
@@ -1644,14 +1667,14 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         if !row.is_bpf_tracked || row.total_runs == 0 {
             continue;
         }
-        let t = match row.avg_runtime_us {
+        let t = match row.pelt_util {
             0..=49 => 0,
-            50..=499 => 1,
-            500..=4999 => 2,
+            50..=255 => 1,
+            256..=799 => 2,
             _ => 3,
         };
         tier_pids[t] += 1;
-        tier_avg_rt_sum[t] += row.avg_runtime_us as u64;
+        tier_avg_rt_sum[t] += row.pelt_util as u64;
         tier_active[t] += 1;
         let j = row.jitter_accum_ns / row.total_runs as u64;
         tier_jitter_sum[t] += j / 1000;
@@ -1661,11 +1684,11 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
 
     let total_runs_sec: f64 = tier_runs_per_sec.iter().sum();
 
-    let tier_names = ["E0 <50µs", "E1 <500µs", "E2 <5ms", "E3 ≥5ms"];
+    let tier_names = ["P0 <5%", "P1 5-25%", "P2 25-78%", "P3 ≥HOG"];
     let tier_colors = [Color::LightCyan, Color::Green, Color::Yellow, Color::Red];
 
     let tier_header = Row::new(vec![
-        Cell::from("EWMA").style(
+        Cell::from("PELT").style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -1746,7 +1769,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     .header(tier_header)
     .block(
         Block::default()
-            .title(" EWMA Class Performance (vtime offset = EWMA runtime) ")
+            .title(" PELT Utilization Tiers ")
             .title_style(
                 Style::default()
                     .fg(Color::Yellow)
@@ -2028,7 +2051,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             })),
             Cell::from(row.comm.as_str()),
             Cell::from(format!("{}", row.nvcsw_delta)).style(vcsw_style),
-            Cell::from(format!("{}", row.avg_runtime_us)),
+            Cell::from(format!("{}", row.pelt_util)),
             Cell::from(format!("{}", row.max_runtime_us)),
             Cell::from(format!("{}", row.dispatch_gap_us)),
             Cell::from(format!("{}", jitter_us)),
@@ -2257,7 +2280,7 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("EWMA avg runtime per run (µs) — how long task runs each time"),
+            Span::raw("PELT utilization (0-1024) — kernel-maintained CPU usage estimate"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -2361,7 +2384,7 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("stopping duration (ns) — EWMA + classify + staging"),
+            Span::raw("stopping duration (ns) — PELT + classify + staging"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -2571,12 +2594,12 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(
-                "ewma         ",
+                "pelt         ",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("stopping: compute_ewma() call (every 64th stop)"),
+            Span::raw("stopping: PELT classify (every 64th stop, was compute_ewma)"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -2741,7 +2764,7 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("EWMA confidence x/y (recomp_count/total_runs)"),
+            Span::raw("Classify confidence x/y (recomp_count/total_runs)"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -2767,15 +2790,15 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("EWMA + classify + staging + warm history. Heaviest callback."),
+            Span::raw("PELT classify + staging + warm history. Heaviest callback."),
         ]),
         Line::from(vec![
-            Span::styled("  conf_skip  ", Style::default().fg(Color::DarkGray)),
-            Span::raw("  98.4% of stops — confidence gate skips full EWMA recompute"),
+            Span::styled("  skip      ", Style::default().fg(Color::DarkGray)),
+            Span::raw("  98.4% of stops — confidence gate skips full PELT reclassify"),
         ]),
         Line::from(vec![
-            Span::styled("  ewma       ", Style::default().fg(Color::DarkGray)),
-            Span::raw("  ~1.6% — full EWMA recomputation (every 64th stop)"),
+            Span::styled("  classify  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("  ~1.6% — full PELT classify path (every 64th stop)"),
         ]),
         Line::from(vec![
             Span::styled("  ramp       ", Style::default().fg(Color::DarkGray)),
@@ -2974,7 +2997,7 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         (21, "Disruptor CL0 full read", "Mailbox CL0", "C"),
         // Composite: cake-only multi-step operations
         (16, "Bitflag shift+mask+brless", "Composite Ops", "C"),
-        (17, "compute_ewma() full", "Composite Ops", "C"),
+        (17, "(reserved, was compute_ewma)", "Composite Ops", "C"),
         // DVFS / Performance: CPU frequency queries
         (35, "scx_bpf_cpuperf_cur(cpu)", "DVFS / Perf", "K"),
         (42, "scx_bpf_cpuperf_cap(cpu)", "DVFS / Perf", "K"),
@@ -2995,6 +3018,26 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         (49, "BSS xorshift32 PRNG", "Synchronization", "C"),
         // TLB/Memory: arena access pattern cost
         (23, "Arena stride (TLB/hugepage)", "TLB/Memory", "C"),
+        // Kernel Free Data: zero-cost task_struct field reads
+        (50, "PELT util+runnable_avg", "Kernel Free Data", "K"),
+        (51, "PELT runnable_avg only", "Kernel Free Data", "K"),
+        (52, "schedstats nr_wakeups", "Kernel Free Data", "K"),
+        (53, "p->policy+prio+flags", "Kernel Free Data", "K"),
+        (54, "PELT read+tier classify", "Kernel Free Data", "K"),
+        // End-to-End Workflow Comparisons
+        (55, "task_storage write+read", "Storage Roundtrip", "C"),
+        (56, "Arena write+read", "Storage Roundtrip", "C"),
+        (57, "6-gate cascade (cake)", "Idle Selection", "C"),
+        (58, "pick_idle_cpu full", "Idle Selection", "K"),
+        (59, "Weight classify (bpfland)", "Classification", "C"),
+        (60, "Lat-cri classify (lavd)", "Classification", "C"),
+        (61, "SMT: cake sib probe", "SMT Probing", "C"),
+        (62, "SMT: cpumask probe", "SMT Probing", "K"),
+        // ═══ Fairness Fixes (cold-cache + remote) ═══
+        (63, "storage_get COLD ~est", "Cold Cache", "K"),
+        (64, "PELT classify COLD", "Cold Cache", "K"),
+        (65, "legacy EWMA COLD", "Cold Cache", "C"),
+        (66, "kick_cpu REMOTE ~est", "Cold Cache", "K"),
     ];
 
     // Pre-compute percentiles: sort once per entry, extract p1/p50/p99 together.
@@ -3332,7 +3375,7 @@ pub fn run_tui(
                 app.bench_cpu = br.cpu;
                 app.bench_run_count += 1;
                 app.bench_timestamp = br.bench_timestamp;
-                for i in 0..50 {
+                for i in 0..67 {
                     let new_min = br.entries[i].min_ns;
                     let new_max = br.entries[i].max_ns;
                     let new_total = br.entries[i].total_ns;
@@ -3696,8 +3739,8 @@ pub fn run_tui(
                                 .to_string(),
                         };
 
-                        // avg_runtime_us and deficit_us now directly in cake_iter_record
-                        let avg_runtime_us = rec.avg_runtime_us as u32;
+                        // pelt_util and deficit_us now directly in cake_iter_record
+                        let pelt_util = rec.pelt_util as u32;
                         let deficit_us: u32 = rec.deficit_us as u32;
 
                         let g1 = rec.telemetry.gate_1_hits;
@@ -3737,7 +3780,7 @@ pub fn run_tui(
                                 pid,
                                 comm: comm.clone(),
                                 tier: tier as u8,
-                                avg_runtime_us,
+                                pelt_util,
                                 deficit_us,
                                 wait_duration_ns: rec.telemetry.wait_duration_ns,
                                 select_cpu_ns: rec.telemetry.select_cpu_duration_ns,
@@ -3775,7 +3818,7 @@ pub fn run_tui(
                                 wakeup_source_pid: rec.telemetry.wakeup_source_pid,
                                 nvcsw_delta: rec.telemetry.nvcsw_delta,
                                 nivcsw_delta: rec.telemetry.nivcsw_delta,
-                                ewma_recomp_count: rec.telemetry.ewma_recomp_count,
+                                _pad_recomp: rec.telemetry._pad_recomp,
                                 is_hog,
                                 is_bg,
                                 ppid,
@@ -3783,7 +3826,7 @@ pub fn run_tui(
                                 idle_probe_ns: rec.telemetry.idle_probe_ns,
                                 vtime_compute_ns: rec.telemetry.vtime_compute_ns,
                                 mbox_staging_ns: rec.telemetry.mbox_staging_ns,
-                                ewma_compute_ns: rec.telemetry.ewma_compute_ns,
+                                _pad_ewma: rec.telemetry._pad_ewma,
                                 classify_ns: rec.telemetry.classify_ns,
                                 vtime_staging_ns: rec.telemetry.vtime_staging_ns,
                                 warm_history_ns: rec.telemetry.warm_history_ns,
@@ -3798,7 +3841,7 @@ pub fn run_tui(
 
                         // Update dynamic row elements
                         row.tier = tier as u8;
-                        row.avg_runtime_us = avg_runtime_us;
+                        row.pelt_util = pelt_util;
                         row.deficit_us = deficit_us;
                         row.wait_duration_ns = rec.telemetry.wait_duration_ns;
                         row.select_cpu_ns = rec.telemetry.select_cpu_duration_ns;
@@ -3830,7 +3873,7 @@ pub fn run_tui(
                         row.llc_id = rec.telemetry.llc_id;
                         row.same_cpu_streak = rec.telemetry.same_cpu_streak;
                         row.wakeup_source_pid = rec.telemetry.wakeup_source_pid;
-                        row.ewma_recomp_count = rec.telemetry.ewma_recomp_count;
+                        row._pad_recomp = rec.telemetry._pad_recomp;
                         row.is_hog = is_hog;
                         row.is_bg = is_bg;
                         row.is_game_member = app.tracked_game_tgid > 0
@@ -3841,7 +3884,7 @@ pub fn run_tui(
                         row.idle_probe_ns = rec.telemetry.idle_probe_ns;
                         row.vtime_compute_ns = rec.telemetry.vtime_compute_ns;
                         row.mbox_staging_ns = rec.telemetry.mbox_staging_ns;
-                        row.ewma_compute_ns = rec.telemetry.ewma_compute_ns;
+                        row._pad_ewma = rec.telemetry._pad_ewma;
                         row.classify_ns = rec.telemetry.classify_ns;
                         row.vtime_staging_ns = rec.telemetry.vtime_staging_ns;
                         row.warm_history_ns = rec.telemetry.warm_history_ns;
@@ -4033,7 +4076,7 @@ pub fn run_tui(
                 };
 
                 // Helper: resolve best TGID + name for a given PPID (cold path only).
-                // Selects the TGID with the highest avg_runtime_us — the game's main/render
+                // Selects the TGID with the highest pelt_util — the game's main/render
                 // loop runs for milliseconds; Windows service exes (Services.exe, pluginhost,
                 // winedevice) run for microseconds and are filtered by the blocklist.
                 let resolve_game = |ppid: u32,
@@ -4070,11 +4113,11 @@ pub fn run_tui(
                     let mut tgid_max_rt: std::collections::HashMap<u32, u32> =
                         std::collections::HashMap::new();
                     for (_pid, row) in rows.iter() {
-                        if row.ppid == ppid && row.avg_runtime_us > 0 {
+                        if row.ppid == ppid && row.pelt_util > 0 {
                             let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
                             let entry = tgid_max_rt.entry(tgid).or_insert(0);
-                            if row.avg_runtime_us > *entry {
-                                *entry = row.avg_runtime_us;
+                            if row.pelt_util > *entry {
+                                *entry = row.pelt_util;
                             }
                         }
                     }
@@ -4250,7 +4293,7 @@ pub fn run_tui(
                 let new_state = if app.tracked_game_tgid > 0 {
                     CAKE_STATE_GAMING
                 } else {
-                    // Detect active compiler processes: avg_runtime >= 8ms AND
+                    // Detect active compiler processes: PELT util >= 800 (~78% CPU) AND
                     // comm matches a known compiler binary. Require >=2 to avoid
                     // false positives from a single transient ld/as invocation.
                     const COMPILE_COMMS: &[&str] = &[
@@ -4262,7 +4305,7 @@ pub fn run_tui(
                         .values()
                         .filter(|r| {
                             r.status != TaskStatus::Dead
-                                && r.avg_runtime_us >= 8000
+                                && r.pelt_util >= 800
                                 && COMPILE_COMMS.iter().any(|&c| r.comm.contains(c))
                         })
                         .count();
@@ -4275,6 +4318,13 @@ pub fn run_tui(
                 };
                 app.sched_state = new_state;
                 bss.sched_state = new_state as u32;
+                // Precompute quantum ceiling alongside sched_state (Rule 5: no BPF branch).
+                // COMPILATION → 8ms, else → 2ms. Values match intf.h constants.
+                bss.quantum_ceiling_ns = if new_state == CAKE_STATE_COMPILATION {
+                    8_000_000 // AQ_BULK_CEILING_COMPILE_NS
+                } else {
+                    2_000_000 // AQ_BULK_CEILING_NS
+                };
             }
 
             // --- Delta Mode: compute per-second rates ---
@@ -4323,7 +4373,7 @@ pub fn run_tui(
                 SortColumn::RunDuration => sorted_pids.sort_by(|a, b| {
                     let r_a = app.task_rows.get(a).unwrap();
                     let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us);
+                    let cmp = r_b.pelt_util.cmp(&r_a.pelt_util);
                     if desc {
                         cmp
                     } else {
@@ -4410,10 +4460,10 @@ pub fn run_tui(
                         cmp.reverse()
                     }
                 }),
-                SortColumn::Ewma => sorted_pids.sort_by(|a, b| {
+                SortColumn::Pelt => sorted_pids.sort_by(|a, b| {
                     let r_a = app.task_rows.get(a).unwrap();
                     let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us);
+                    let cmp = r_b.pelt_util.cmp(&r_a.pelt_util);
                     if desc {
                         cmp
                     } else {
@@ -4498,7 +4548,7 @@ pub fn run_tui(
                 let rank_b = tgid_rank.get(&tgid_b).copied().unwrap_or(usize::MAX);
                 rank_a.cmp(&rank_b).then_with(|| {
                     // Within same tgid group, keep original sort order
-                    r_b.avg_runtime_us.cmp(&r_a.avg_runtime_us)
+                    r_b.pelt_util.cmp(&r_a.pelt_util)
                 })
             });
 
