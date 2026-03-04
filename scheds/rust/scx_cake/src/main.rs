@@ -227,9 +227,7 @@ impl<'a> Scheduler<'a> {
                 rodata.enable_stats = args.verbose || args.testing;
             }
 
-            // Topology: has_hybrid enables P/E-core DVFS scaling in cake_tick
-            rodata.has_hybrid = topo.has_hybrid_cores;
-
+            // has_hybrid removed: smt_sibling now uses pre-filled cpu_sibling_map only
             // Per-LLC DSQ partitioning: populate CPU→LLC mapping
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
@@ -280,6 +278,12 @@ impl<'a> Scheduler<'a> {
             "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
             task_ctx_size, topo.nr_cpus
         );
+
+        // Set initial BSS values before attach (zero-init'd in BPF for BSS placement).
+        // quantum_ceiling_ns: default IDLE/GAMING → 2ms. TUI updates at ~2Hz.
+        if let Some(bss) = &mut skel.maps.bss_data {
+            bss.quantum_ceiling_ns = 2_000_000; // AQ_BULK_CEILING_NS
+        }
 
         Ok(Self {
             skel,
@@ -338,7 +342,7 @@ impl<'a> Scheduler<'a> {
 
             let delta = end_dispatches.saturating_sub(start_dispatches);
             let throughput = delta as f64 / duration;
-            println!("{{\"duration_sec\": {:.2}, \"total_dispatches\": {}, \"dispatches_per_sec\": {:.2}}}", 
+            println!("{{\"duration_sec\": {:.2}, \"total_dispatches\": {}, \"dispatches_per_sec\": {:.2}}}",
                      duration, delta, throughput);
 
             shutdown.store(true, Ordering::Relaxed);
