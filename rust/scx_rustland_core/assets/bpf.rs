@@ -183,7 +183,7 @@ pub struct BpfScheduler<'cb> {
 //
 // NOTE: make the buffer aligned to 64-bits to prevent misaligned dereferences when accessing the
 // buffer using a pointer.
-const BUFSIZE: usize = std::mem::size_of::<QueuedTask>();
+const BUFSIZE: usize = size_of::<queued_task_ctx>();
 
 #[repr(align(8))]
 struct AlignedBuffer([u8; BUFSIZE]);
