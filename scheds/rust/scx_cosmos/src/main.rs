@@ -820,10 +820,14 @@ impl<'a> Scheduler<'a> {
         // Generate the list of available CPUs sorted by capacity in descending order.
         let mut cpus: Vec<_> = topo.all_cpus.values().collect();
         cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
+        // Normalize CPU capacities to 1..1024 so the highest capacity is always 1024.
+        let max_cap = cpus.first().map(|c| c.cpu_capacity).unwrap_or(1).max(1);
         for (i, cpu) in cpus.iter().enumerate() {
-            rodata.cpu_capacity[cpu.id] = cpu.cpu_capacity as c_ulong;
+            let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
+            rodata.cpu_capacity[cpu.id] = normalized as c_ulong;
             rodata.preferred_cpus[i] = cpu.id as u64;
         }
+        rodata.all_cpus_same_capacity = cpus.iter().all(|cpu| cpu.cpu_capacity == max_cap);
         if opts.preferred_idle_scan {
             info!(
                 "Preferred CPUs: {:?}",

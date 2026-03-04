@@ -81,6 +81,11 @@ const volatile u64 preferred_cpus[MAX_CPUS];
 const volatile u64 cpu_capacity[MAX_CPUS];
 
 /*
+ * True when all CPUs have the same capacity (no capacity asymmetry).
+ */
+const volatile bool all_cpus_same_capacity = false;
+
+/*
  * Enable cpufreq integration.
  */
 const volatile bool cpufreq_enabled = true;
@@ -664,7 +669,7 @@ static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
  */
 static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
 {
-	if (this_cpu == that_cpu)
+	if (all_cpus_same_capacity || this_cpu == that_cpu)
 		return false;
 
 	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
@@ -1363,6 +1368,17 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 		scx_pmu_event_start(p, false);
 }
 
+/*
+ * Return the time slice normalized by @cpu's capacity.
+ */
+static u64 scale_by_cpu_capacity(u64 slice, s32 cpu)
+{
+	if (all_cpus_same_capacity || !is_cpu_valid(cpu))
+		return slice;
+
+	return slice * cpu_capacity[cpu] / SCX_CPUPERF_ONE;
+}
+
 void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
@@ -1383,6 +1399,12 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 * Evaluate the used time slice.
 	 */
 	slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_ns);
+
+	/*
+	 * Scale used time slice by CPU capacity: time spent on slower CPU
+	 * is charged less time than running on faster CPU.
+	 */
+	slice = scale_by_cpu_capacity(slice, cpu);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
