@@ -1363,6 +1363,17 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 		scx_pmu_event_start(p, false);
 }
 
+/*
+ * Return the time slice normalized by @cpu's capacity.
+ */
+static inline u64 scale_by_cpu_capacity(u64 slice, s32 cpu)
+{
+	u64 max_cap = preferred_cpus[0];
+	u64 cpu_cap = is_cpu_valid(cpu) ? cpu_capacity[cpu] : max_cap;
+
+	return slice * cpu_cap / max_cap;
+}
+
 void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
@@ -1383,6 +1394,12 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 * Evaluate the used time slice.
 	 */
 	slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_ns);
+
+	/*
+	 * Scale used time slice by CPU capacity: time spent on slower CPU
+	 * is charged less time than running on faster CPU.
+	 */
+	slice = scale_by_cpu_capacity(slice, cpu);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
