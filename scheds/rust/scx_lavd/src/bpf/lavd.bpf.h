@@ -193,7 +193,7 @@ struct task_ctx {
 
 	/* --- cacheline 3 boundary (192 bytes) --- */
 	u64	last_quiescent_clk;	/* last time when a task became asleep */
-	u64	last_sum_exec_clk;	/* last time when sum exec time was measured */
+	u64	last_task_clk;		/* last time when scx_clock_task() was measured */
 	u64	cgrp_id;		/* cgroup id of this task */
 	u64	resched_interval_wall;	/* reschedule interval in ns: [last running, this running] */
 	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
