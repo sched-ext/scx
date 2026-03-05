@@ -1796,6 +1796,44 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	return 0;
 }
 
+void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
+		    struct task_struct *p)
+{
+	int cgroup_throttled = 0, task_throttled = 0;
+	char cgrp_name[64] = "unknown";
+	struct kernfs_node *kn;
+	struct cgroup *cgrp;
+	task_ctx *taskc;
+
+	taskc = get_task_ctx(p);
+	if (!taskc)
+		return;
+
+	if (enable_cpu_bw) {
+		cgroup_throttled = scx_cgroup_bw_is_cgroup_throttled(taskc->cgrp_id);
+		task_throttled = scx_cgroup_bw_is_task_throttled((u64)taskc);
+	}
+
+
+	cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
+	if (cgrp) {
+		kn = BPF_CORE_READ(cgrp, kn);
+		bpf_probe_read_kernel_str(cgrp_name, sizeof(cgrp_name), BPF_CORE_READ(kn, name));
+		bpf_cgroup_release(cgrp);
+	}
+
+	scx_bpf_dump("  + given_slice: %llu   lat_cri: %d/%d   perf_cri: %d/%d\n",
+		     taskc->slice_wall,
+		     taskc->lat_cri, sys_stat.avg_lat_cri,
+		     taskc->perf_cri, sys_stat.avg_perf_cri);
+
+	scx_bpf_dump("  + cpdom_id: %d   cgroup: %s[%llu] (%s)   task_status: %s\n",
+		     taskc->cpdom_id,
+		     cgrp_name, taskc->cgrp_id,
+		     (cgroup_throttled) ? "throttled" : "not throttled",
+		     (task_throttled) ? "throttled" : "not throttled");
+}
+
 static s32 init_cpdoms(u64 now)
 {
 	struct cpdom_ctx *cpdomc;
@@ -2318,6 +2356,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
 	       .exit_task		= (void *)lavd_exit_task,
+	       .dump_task		= (void *)lavd_dump_task,
 	       .cgroup_init		= (void *)lavd_cgroup_init,
 	       .cgroup_exit		= (void *)lavd_cgroup_exit,
 	       .cgroup_move		= (void *)lavd_cgroup_move,

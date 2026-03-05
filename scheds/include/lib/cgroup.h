@@ -158,3 +158,22 @@ int scx_cgroup_bw_cancel(u64 taskc);
 		eqcb(taskc);							\
 		return 0;							\
 	}
+
+/**
+ * scx_cgroup_bw_is_cgroup_throttled - Test if a cgroup is throttled or not.
+ *
+ * @cgrp_id: cgroup id
+ *
+ * Return true if the cgroup is throttled. Otherwise, return false.
+ */
+int scx_cgroup_bw_is_cgroup_throttled(u64 cgrp_id);
+
+/**
+ * scx_cgroup_bw_is_task_throttled - Test if a task is throttled or not.
+ *
+ * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the scheduler.
+ *
+ * Return true if the task is throttled. Otherwise, return false.
+ */
+int scx_cgroup_bw_is_task_throttled(u64 taskc);
