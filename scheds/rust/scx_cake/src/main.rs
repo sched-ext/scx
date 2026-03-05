@@ -302,6 +302,13 @@ impl<'a> Scheduler<'a> {
             .attach_struct_ops()
             .context("Failed to attach scheduler")?;
 
+        // Release builds: --verbose and --testing are unavailable (stats compiled out).
+        // Warn early so user knows these flags require a debug build.
+        #[cfg(not(debug_assertions))]
+        if self.args.verbose || self.args.testing {
+            warn!("--verbose/--testing are disabled in release builds (stats compiled out). Ignoring.");
+        }
+
         // Standard startup: simple log message like other sched_ext schedulers
         let version = env!("CARGO_PKG_VERSION");
         info!(
