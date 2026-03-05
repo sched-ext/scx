@@ -1930,9 +1930,15 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 				u32 wcpu = (u32)hot->warm_cpus[i];
 				if (wcpu >= nr_cpus || wcpu == prev_idx)
 					continue;
-				/* Skip if already tried as SMT sibling (Gate 1b) */
-				if (nr_cpus > nr_phys_cpus &&
-				    wcpu == (u32)prev_sib)
+				/* Verifier fix: compiler proves wcpu < nr_cpus < CAKE_MAX_CPUS
+				 * and dead-code-eliminates the & mask. Barrier breaks the
+				 * compiler's range proof so the mask survives as a real
+				 * BPF instruction, giving verifier the BSS bound it needs. */
+				asm volatile("" : "+r"(wcpu));
+				wcpu &= (CAKE_MAX_CPUS - 1);
+				/* Skip if already tried as SMT sibling (Gate 1b).
+				 * A→C: prev_sib == prev_idx on non-SMT. */
+				if (wcpu == (u32)prev_sib)
 					continue;
 				/* Skip if already tried as home_cpu (Gate 1c) */
 				if (wcpu == home)
@@ -2241,10 +2247,19 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 			     : 0;
 		u32 yl_shift = (u32)(waker_boost | waker_yl) * 3;
 		u32 penalty_shift = vtime_penalty_shift[tc_enq & 3];
+		/* GAMING UNFAIRNESS: double vtime penalty for HOG/BG.
+		 * HOG: 4×→8×, BG: 2×→4×. Pushes them further back in DSQ
+		 * so GAME always dispatches first. NORMAL unaffected (shift=0). */
+		if (sched_state == CAKE_STATE_GAMING && penalty_shift)
+			penalty_shift += 1;
 		effective_weight = (weight_ns >> yl_shift) << penalty_shift;
 
-		/* Anti-starvation: only for penalized HOG/BG tasks */
-		if (unlikely(((tc_enq == CAKE_CLASS_HOG) | (tc_enq == CAKE_CLASS_BG)) && effective_weight > 0)) {
+		/* Anti-starvation: only during GAMING (prevent HOG/BG starvation
+		 * vs GAME priority). During COMPILATION: no GAME → no starvation
+		 * risk → skip entire check. Saves ~3-5ns per HOG enqueue. */
+		if (sched_state == CAKE_STATE_GAMING &&
+		    ((tc_enq == CAKE_CLASS_HOG) | (tc_enq == CAKE_CLASS_BG)) &&
+		    effective_weight > 0) {
 			if (hot) {
 				u32 last_run_32 = hot->last_run_at;
 				u32 now_32 = (u32)now_cached;
@@ -2772,6 +2787,11 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 			u64 base_slice = yield_gated_quantum_ns(pelt_runtime_us,
 				yielder, ceiling);
 			u32 cap_raw = quantum_cap_ns[tc & 3];
+			/* GAMING UNFAIRNESS: halve HOG/BG cap during GAMING.
+			 * HOG: 250µs→125µs, BG: 500µs→250µs.
+			 * Shorter slices = more preemption points for GAME. */
+			if (sched_state == CAKE_STATE_GAMING && cap_raw)
+				cap_raw >>= 1;
 			u64 slice = base_slice;
 			if (cap_raw) {
 				u64 cap = (u64)cap_raw;
