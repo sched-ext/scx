@@ -3180,8 +3180,10 @@ int cake_task_iter(struct bpf_iter__task *ctx)
 		return 0;
 #endif
 
-	/* Build iter record from arena tctx data (zero-copy field assignment). */
-	struct cake_iter_record rec;
+	/* Build iter record from arena tctx data (zero-copy field assignment).
+	 * Zero-init: in release builds, telemetry block is skipped (#ifndef
+	 * CAKE_RELEASE) — without this, bpf_seq_write emits stack garbage. */
+	struct cake_iter_record rec = {};
 	rec.pid         = task->pid;
 	rec.ppid        = tctx->ppid;
 	rec.packed_info = tctx->packed_info;
