@@ -621,22 +621,35 @@ impl CellManager {
             }
         }
 
-        for (claimants, cpus) in contested_groups {
-            let mut recipients: Vec<(u32, f64)> = Vec::new();
-            let mut all_zero = true;
-            for &cell_id in &claimants {
-                let target = *targets.get(&cell_id).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "BUG: cell {} in contention map but missing from targets",
-                        cell_id
-                    )
-                })?;
+        // Freeze deficit weights before processing any group. Each group is an
+        // independent allocation decision, so a cell's weight should not depend
+        // on HashMap iteration order (i.e., which other groups were processed
+        // first). Using the initial deficit (target - exclusive_count) as weight
+        // for all groups makes the result deterministic.
+        let initial_deficit: HashMap<u32, f64> = targets
+            .iter()
+            .map(|(&cell_id, &target)| {
+                // Cells with no exclusive CPUs have no entry yet; 0 is correct.
                 let already = assigned_count.get(&cell_id).copied().unwrap_or(0);
                 let deficit = if target > already {
                     (target - already) as f64
                 } else {
                     0.0
                 };
+                (cell_id, deficit)
+            })
+            .collect();
+
+        for (claimants, cpus) in contested_groups {
+            let mut recipients: Vec<(u32, f64)> = Vec::new();
+            let mut all_zero = true;
+            for &cell_id in &claimants {
+                let deficit = *initial_deficit.get(&cell_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "BUG: cell {} in contention map but missing from targets",
+                        cell_id
+                    )
+                })?;
                 if deficit > 0.0 {
                     all_zero = false;
                 }
@@ -2486,5 +2499,81 @@ mod tests {
         for (_, &count) in &targets {
             assert!(count >= 3 && count <= 4);
         }
+    }
+
+    /// Symmetric pairwise overlaps must produce equal cell sizes regardless
+    /// of HashMap iteration order.
+    #[test]
+    fn test_symmetric_pairwise_overlap_produces_equal_cells() {
+        let tmp = TempDir::new().unwrap();
+
+        // 5 cells on 56 CPUs. Every pair shares exactly 2 CPUs.
+        // Each cell: 4 exclusive + 8 contested (2 per pair) = 12 in cpuset.
+        // Exclusive: 0-19, contested: 20-39, unclaimed: 40-55 (cell 0).
+        //
+        // Shared pairs:
+        //   AB: 20-21, AC: 22-23, AD: 24-25, AE: 26-27
+        //   BC: 28-29, BD: 30-31, BE: 32-33
+        //   CD: 34-35, CE: 36-37
+        //   DE: 38-39
+        let cpusets = [
+            ("cell_a", "0-3,20-27"),
+            ("cell_b", "4-7,20-21,28-33"),
+            ("cell_c", "8-11,22-23,28-29,34-37"),
+            ("cell_d", "12-15,24-25,30-31,34-35,38-39"),
+            ("cell_e", "16-19,26-27,32-33,36-39"),
+        ];
+        for (name, cpus) in &cpusets {
+            let p = tmp.path().join(name);
+            std::fs::create_dir(&p).unwrap();
+            std::fs::write(p.join("cpuset.cpus"), format!("{cpus}\n")).unwrap();
+        }
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(56),
+            HashSet::new(),
+        )
+        .unwrap();
+
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+
+        let workload: Vec<_> = assignments.iter().filter(|a| a.cell_id != 0).collect();
+        assert_eq!(workload.len(), 5, "Expected 5 workload cells");
+
+        // All workload cells must have equal CPU counts.
+        let counts: Vec<(u32, usize)> = workload
+            .iter()
+            .map(|a| (a.cell_id, a.primary.weight()))
+            .collect();
+        for &(cell_id, count) in &counts {
+            assert_eq!(
+                count, counts[0].1,
+                "Cell {} has {} CPUs, expected {} — symmetric inputs \
+                 should produce equal cell sizes. All counts: {:?}",
+                cell_id, count, counts[0].1, counts,
+            );
+        }
+
+        // Verify no overlap between any pair of cells.
+        for i in 0..assignments.len() {
+            for j in (i + 1)..assignments.len() {
+                for cpu in 0..56 {
+                    assert!(
+                        !(assignments[i].primary.test_cpu(cpu)
+                            && assignments[j].primary.test_cpu(cpu)),
+                        "CPU {} assigned to both cell {} and cell {}",
+                        cpu,
+                        assignments[i].cell_id,
+                        assignments[j].cell_id,
+                    );
+                }
+            }
+        }
+
+        // Verify all 56 CPUs are assigned.
+        let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
+        assert_eq!(total, 56, "All CPUs must be assigned");
     }
 }
