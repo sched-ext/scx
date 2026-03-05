@@ -179,7 +179,6 @@ struct task_ctx {
 	/* --- cacheline 2 boundary (128 bytes) --- */
 	u64	last_runnable_clk;	/* last time when a task became runnable */
 	u64	last_running_clk;	/* last time when scheduled in */
-	u64	last_stopping_clk;	/* last time when scheduled out */
 	u64	run_freq;		/* scheduling frequency in a second */
 	u16	lat_cri;		/* final context-aware latency criticality */
 	u16	lat_cri_waker;		/* waker's latency criticality */

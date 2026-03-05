@@ -528,7 +528,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 
 	taskc->avg_runtime_wall = calc_avg(taskc->avg_runtime_wall,
 					   taskc->acc_runtime_wall);
-	taskc->last_stopping_clk = now;
 
 	/*
 	 * Account for how much of the slice was used for this instance.
@@ -1757,8 +1756,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	
 		now = scx_bpf_now();
 		taskc->last_runnable_clk = now;
-		taskc->last_running_clk = now; /* for avg_runtime_wall */
-		taskc->last_stopping_clk = now; /* for avg_runtime_wall */
+		taskc->last_running_clk = now;
 		taskc->last_quiescent_clk = now;
 		taskc->avg_runtime_wall = sys_stat.slice_wall;
 		taskc->svc_time_wwgt = sys_stat.avg_svc_time_wwgt;
