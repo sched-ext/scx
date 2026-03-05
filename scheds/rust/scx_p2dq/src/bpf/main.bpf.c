@@ -2588,6 +2588,36 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 	return 0;
 }
 
+/*
+ * Helpers for accessing cpus_ptr from scx_bpf_dsq_peek() results.
+ * scx_bpf_dsq_peek() returns a non-trusted pointer, so accessing RCU-protected
+ * fields like cpus_ptr requires obtaining a trusted reference via bpf_task_from_pid().
+ */
+static bool peek_cpumask_test_cpu(s32 cpu, struct task_struct *p)
+{
+	struct task_struct *tp;
+	bool result = false;
+
+	tp = bpf_task_from_pid(p->pid);
+	if (tp) {
+		result = bpf_cpumask_test_cpu(cpu, tp->cpus_ptr);
+		bpf_task_release(tp);
+	}
+	return result;
+}
+
+static s32 peek_cpumask_any_distribute(struct task_struct *p)
+{
+	struct task_struct *tp;
+	s32 result = -1;
+
+	tp = bpf_task_from_pid(p->pid);
+	if (tp) {
+		result = bpf_cpumask_any_distribute(tp->cpus_ptr);
+		bpf_task_release(tp);
+	}
+	return result;
+}
 
 static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 {
@@ -2612,13 +2642,13 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 	// start with affn_dsq (local cpu dsq)
 	p = __COMPAT_scx_bpf_dsq_peek(cpuc->affn_dsq);
 	if (p) {
-		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		if (peek_cpumask_test_cpu(cpu, p)) {
 			min_vtime = p->scx.dsq_vtime;
 			dsq_id = cpuc->affn_dsq;
 		} else {
 			// Task at head of affn_dsq can't run here - move it to correct affn_dsq
 			// This prevents livelock where mismatched tasks block the queue
-			s32 target_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+			s32 target_cpu = peek_cpumask_any_distribute(p);
 			if (target_cpu >= 0 && target_cpu < NR_CPUS) {
 				struct cpu_ctx *target_cpuc = lookup_cpu_ctx(target_cpu);
 				if (target_cpuc) {
@@ -2643,7 +2673,7 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 					}
 					// Re-peek after cleanup
 					p = __COMPAT_scx_bpf_dsq_peek(cpuc->affn_dsq);
-					if (p && bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+					if (p && peek_cpumask_test_cpu(cpu, p)) {
 						min_vtime = p->scx.dsq_vtime;
 						dsq_id = cpuc->affn_dsq;
 					}
@@ -2679,7 +2709,7 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 
 			// Peek at the other CPU's affn_dsq
 			p = __COMPAT_scx_bpf_dsq_peek(other_cpuc->affn_dsq);
-			if (p && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+			if (p && peek_cpumask_test_cpu(cpu, p) &&
 			    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
 				min_vtime = p->scx.dsq_vtime;
 				dsq_id = other_cpuc->affn_dsq;
@@ -2691,7 +2721,7 @@ check_llc_dsq:
 	// LLC DSQ for vtime comparison
 	p = __COMPAT_scx_bpf_dsq_peek(cpuc->llc_dsq);
 	if (p && (p->scx.dsq_vtime < min_vtime || min_vtime == 0) &&
-	    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+	    peek_cpumask_test_cpu(cpu, p)) {
 		min_vtime = p->scx.dsq_vtime;
 		dsq_id = cpuc->llc_dsq;
 	}
@@ -2728,7 +2758,7 @@ check_llc_dsq:
 		} else {
 			// Peek migration DSQ - only consider tasks that can run here
 			p = __COMPAT_scx_bpf_dsq_peek(cpuc->mig_dsq);
-			if (p && likely(bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) &&
+			if (p && likely(peek_cpumask_test_cpu(cpu, p)) &&
 			    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
 				min_vtime = p->scx.dsq_vtime;
 				dsq_id = cpuc->mig_dsq;
