@@ -160,16 +160,19 @@ struct task_ctx {
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	last_measured_wall_clk;	/* last time when running time was measured (wall clock) */
+	u64	last_measured_pelt_clk;	/* last time when running time was measured (pelt clock) */
 	/*
 	 * - Accumulated runtime from runnable to quiescent state
-	 * - Used to calculate avg_runtime_wall and latency criticality
+	 * - Used to calculate avg_runtime_wall/invr and latency criticality
 	 */
 	u64	acc_runtime_wall;
+	u64	acc_runtime_invr;
 	/*
 	 * - Average runtime per schedule
 	 * - Used to calculate latency criticality
 	 */
 	u64	avg_runtime_wall;
+	u64	avg_runtime_invr;
 	/*
 	 * - Total CPU time consumed for this task scaled by task's weight
 	 * - Used to calculate avg_svc_time_wwgt
