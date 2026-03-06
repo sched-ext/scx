@@ -110,6 +110,10 @@ static void collect_sys_stat(void)
 		cpdomc->avg_util_wall_sum = 0;
 		cpdomc->cur_util_invr_sum = 0;
 		cpdomc->avg_util_invr_sum = 0;
+		cpdomc->cur_steal_util_wall_sum = 0;
+		cpdomc->avg_steal_util_wall_sum = 0;
+		cpdomc->cur_steal_util_invr_sum = 0;
+		cpdomc->avg_steal_util_invr_sum = 0;
 		cpdomc->nr_queued_task = 0;
 
 		if (use_cpdom_dsq())
@@ -318,10 +322,32 @@ static void collect_sys_stat(void)
 		 * Use the snapshot for both rt_dl_time_invr and the utilization
 		 * calculation below so both see the same consistent value.
 		 */
-		cpuc_tot_task_time_invr= cpuc->tot_task_time_invr;
+		cpuc_tot_task_time_invr = cpuc->tot_task_time_invr;
 		cpuc->tot_task_time_invr = 0;
 		rt_dl_time_invr = time_delta(delta_pelt, cpuc_tot_task_time_invr);
 		cpuc->steal_time_invr = irq_steal_invr + rt_dl_time_invr;
+		/*
+		 * Same conservative clamp as delta_pelt above: irq_steal_invr
+		 * is scaled by perf_factor (delta_pelt / task_wall), which can
+		 * exceed 1.0 on a frequency-boosted CPU, pushing steal_time_invr
+		 * above compute_wall. Clamp so cur_steal_util_invr stays ≤ 1.0.
+		 */
+		if (cpuc->steal_time_invr > compute_wall)
+			cpuc->steal_time_invr = compute_wall;
+
+		/*
+		 * Calculate steal utilization: steal_time as a fraction of
+		 * duration_wall. cur_util - cur_steal_util gives the remaining
+		 * SCX capacity, usable for load balancing decisions.
+		 */
+		cpuc->cur_steal_util_wall = (cpuc->steal_time_wall << LAVD_SHIFT) /
+					c->duration_wall;
+		cpuc->avg_steal_util_wall = calc_asym_avg(cpuc->avg_steal_util_wall,
+							   cpuc->cur_steal_util_wall);
+		cpuc->cur_steal_util_invr = (cpuc->steal_time_invr << LAVD_SHIFT) /
+					c->duration_wall;
+		cpuc->avg_steal_util_invr = calc_asym_avg(cpuc->avg_steal_util_invr,
+							   cpuc->cur_steal_util_invr);
 
 		/*
 		 * Calculate per-CPU wall-clock utilization.
@@ -355,6 +381,11 @@ static void collect_sys_stat(void)
 			cpdomc->avg_util_wall_sum += cpuc->avg_util_wall;
 			cpdomc->cur_util_invr_sum += cpuc->cur_util_invr;
 			cpdomc->avg_util_invr_sum += cpuc->avg_util_invr;
+
+			cpdomc->cur_steal_util_wall_sum += cpuc->cur_steal_util_wall;
+			cpdomc->avg_steal_util_wall_sum += cpuc->avg_steal_util_wall;
+			cpdomc->cur_steal_util_invr_sum += cpuc->cur_steal_util_invr;
+			cpdomc->avg_steal_util_invr_sum += cpuc->avg_steal_util_invr;
 		}
 
 		cpuc->prev_task_clk = now_task;

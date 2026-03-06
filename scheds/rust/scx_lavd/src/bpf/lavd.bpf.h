@@ -231,6 +231,10 @@ struct cpdom_ctx {
 	u32	avg_util_wall_sum;		    /* the sum of average CPU utilization */
 	u32	cur_util_invr_sum;		    /* the sum of invariant CPU utilization in the current interval */
 	u32	avg_util_invr_sum;		    /* the sum of average invariant CPU utilization */
+	u32	cur_steal_util_wall_sum;	    /* the sum of steal utilization in the current interval */
+	u32	avg_steal_util_wall_sum;	    /* the sum of average steal utilization */
+	u32	cur_steal_util_invr_sum;	    /* the sum of invariant steal utilization in the current interval */
+	u32	avg_steal_util_invr_sum;	    /* the sum of average invariant steal utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
@@ -348,6 +352,18 @@ struct cpu_ctx {
 	 */
 	u64		steal_time_wall;	/* wall clock */
 	u64		steal_time_invr;	/* capacity + frequency invariant */
+
+	/*
+	 * Steal utilization: steal_time as a fraction of duration_wall,
+	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
+	 * avg_* is the asymmetric EWMA (fast-rise, slow-decay).
+	 * Used for load balancing: a CPU with high steal utilization has
+	 * less capacity remaining for SCX tasks.
+	 */
+	u32		cur_steal_util_wall;
+	u32		avg_steal_util_wall;
+	u32		cur_steal_util_invr;
+	u32		avg_steal_util_invr;
 
 	/*
 	 * --- cacheline 3 boundary (192 bytes) ---
