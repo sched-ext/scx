@@ -306,7 +306,9 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * slice (i.e., taskc->avg_runtime_wall > sys_stat.slice_wall),
 	 * that means the task could be scheduled out due to a shorter time
 	 * slice than required. In this case, let's consider boosting task's
-	 * time slice.
+	 * time slice. avg_runtime_wall (wall clock) is used here because time
+	 * slices are wall-clock durations -- they represent how long the CPU
+	 * is physically occupied, regardless of CPU frequency or capacity.
 	 *
 	 * However, if there are pinned tasks waiting to run on this CPU,
 	 * we do not boost the task's time slice to avoid delaying the pinned
@@ -379,10 +381,17 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
+	 *
+	 * The scheduling interval is avg_runtime_invr + wait_period. Using
+	 * avg_runtime_invr (invariant runtime) for the compute portion
+	 * normalizes away CPU speed differences so that run_freq *
+	 * avg_runtime_invr in calc_sum_runtime_factor correctly approximates
+	 * total invariant compute demand per second. wait_period stays on
+	 * wall clock since it is driven by external events.
 	 */
 	if (have_scheduled(taskc)) {
 		wait_period = time_delta(now, taskc->last_quiescent_clk);
-		interval = taskc->avg_runtime_wall + wait_period;
+		interval = taskc->avg_runtime_invr + wait_period;
 		if (interval > 0)
 			taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 	}
@@ -1253,7 +1262,10 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Update wake frequency.
+	 * Update wake frequency using wall clock time. wake_freq measures how
+	 * often this task wakes up other tasks -- an event-driven, external-world
+	 * phenomenon. The interval between wakeup events is inherently a
+	 * wall-clock quantity, unaffected by CPU capacity or frequency changes.
 	 */
 	now = scx_bpf_now();
 	interval = time_delta(now, READ_ONCE(waker_taskc->last_runnable_clk));
@@ -1434,6 +1446,10 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
+	 * wait_freq measures how often a task sleeps waiting for external
+	 * events (I/O completion, timers, network packets, user input). These
+	 * events arrive at a rate fixed by the external world, not by CPU
+	 * speed, so wall clock time is the correct basis.
 	 */
 	now = scx_bpf_now();
 	interval = time_delta(now, taskc->last_quiescent_clk);

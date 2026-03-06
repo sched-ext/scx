@@ -21,6 +21,12 @@ struct preemption_info {
 __hidden
 u64 get_est_stopping_clk(task_ctx *taskc, u64 now)
 {
+	/*
+	 * Estimate the future wall-clock time when the task will stop running.
+	 * avg_runtime_wall (wall clock) is used here because we are computing
+	 * a future timestamp by adding a duration to `now` (wall clock).
+	 * slice_wall is also wall-clock based, so both are in the same unit.
+	 */
 	return now + min(taskc->avg_runtime_wall, taskc->slice_wall);
 }
 
