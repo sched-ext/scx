@@ -85,6 +85,8 @@ pub use cpumask::set_cpumask_test_width;
 pub use cpumask::Cpumask;
 
 mod gpu;
+#[cfg(feature = "gpu-topology")]
+pub use gpu::GpuIndex;
 
 mod infeasible;
 pub use infeasible::LoadAggregator;

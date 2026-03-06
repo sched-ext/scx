@@ -3828,6 +3828,8 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "nvml-wrapper",
+ "nvml-wrapper-sys",
  "perf-event-open-sys",
  "scx_cargo",
  "scx_stats",
