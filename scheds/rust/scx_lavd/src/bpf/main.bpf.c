@@ -403,8 +403,8 @@ static void update_stat_for_running(struct task_struct *p,
 	reset_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
 	reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	taskc->last_running_clk = now;
-	taskc->last_measured_clk = now;
-	taskc->last_task_clk = scx_clock_task(cpuc->cpu_id);
+	taskc->last_measured_wall_clk = now;
+	taskc->last_measured_task_clk = scx_clock_task(cpuc->cpu_id);
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -466,8 +466,8 @@ static void account_task_runtime(struct task_struct *p,
 				 struct cpu_ctx *cpuc,
 				 u64 now)
 {
-	u64 suspended_wall, runtime_wall, task_time_wwgt, task_time_invr;
-	u64 task_time_wall, exec_delta_wall;
+	u64 task_time_wall, task_time_wwgt, task_time_invr;
+	u64 suspended_wall, duration_wall, now_task;
 
 	/*
 	 * Since task execution can span one or more sys_stat intervals,
@@ -477,30 +477,29 @@ static void account_task_runtime(struct task_struct *p,
 	 * execution duration since the last measured time.
 	 */
 	suspended_wall = get_suspended_duration_and_reset(cpuc);
-	runtime_wall = time_delta(now, taskc->last_measured_clk + suspended_wall);
+	duration_wall = time_delta(now, taskc->last_measured_wall_clk + suspended_wall);
 
 	/*
-	 * runtime - exec_delta must equal to irq_time + steal_time barring
-	 * some imprecision when the time was snapshotted. We accumulate the
-	 * delta as cpuc->stolen_time_est to try and approximate the total
+	 * duration_wall - task_time_wall must equal to irq_time + steal_time
+	 * barring some imprecision when the time was snapshotted. We accumulate
+	 * the delta as cpuc->stolen_time_wall to try and approximate the total
 	 * time CPU spent in stolen time (irq+steal).
 	 */
-	task_time_wall = scx_clock_task(cpuc->cpu_id);
-	exec_delta_wall = time_delta(task_time_wall, taskc->last_task_clk);
-	cpuc->stolen_time_wall += time_delta(runtime_wall, exec_delta_wall);
-	runtime_wall = exec_delta_wall;
+	now_task = scx_clock_task(cpuc->cpu_id);
+	task_time_wall = time_delta(now_task, taskc->last_measured_task_clk);
+	cpuc->stolen_time_wall += time_delta(duration_wall, task_time_wall);
 
-	task_time_wwgt = runtime_wall / p->scx.weight;
-	task_time_invr = conv_wall_to_invr(runtime_wall, cpuc);
+	task_time_wwgt = task_time_wall / p->scx.weight;
+	task_time_invr = conv_wall_to_invr(task_time_wall, cpuc);
 
 	WRITE_ONCE(cpuc->tot_task_time_wall, cpuc->tot_task_time_wall + task_time_wall);
 	WRITE_ONCE(cpuc->tot_task_time_wwgt, cpuc->tot_task_time_wwgt + task_time_wwgt);
 	WRITE_ONCE(cpuc->tot_task_time_invr, cpuc->tot_task_time_invr + task_time_invr);
 
-	taskc->acc_runtime_wall += runtime_wall;
+	taskc->acc_runtime_wall += task_time_wall;
 	taskc->svc_time_wwgt += task_time_wwgt;
-	taskc->last_measured_clk = now;
-	taskc->last_task_clk = task_time_wall;
+	taskc->last_measured_wall_clk = now;
+	taskc->last_measured_task_clk = now_task;
 
 	/*
 	 * Under CPU bandwidth control using cpu.max, we also need to report
@@ -509,7 +508,7 @@ static void account_task_runtime(struct task_struct *p,
 	if (enable_cpu_bw && (p->pid != lavd_pid)) {
 		struct cgroup *cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
 		if (cgrp) {
-			scx_cgroup_bw_consume(cgrp, runtime_wall);
+			scx_cgroup_bw_consume(cgrp, task_time_wall);
 			bpf_cgroup_release(cgrp);
 		}
 	}
