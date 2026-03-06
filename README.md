@@ -265,12 +265,6 @@ with schedulers? See the developer guide for more details.
 
 ## Other sched_ext Schedulers
 
-- [**PANDEMONIUM**](https://github.com/wllclngn/PANDEMONIUM) - A scheduler
-  written in Rust and C that dynamically learns task behavior. It classifies
-  tasks by wakeup frequency, context switch rate, runtime, and sleep patterns,
-  then adapts scheduling decisions in real time using a persistent process
-  database.
-
 - [**scx_horoscope**](https://github.com/zampierilucas/scx_horoscope) - An
   astrological CPU scheduler that makes scheduling decisions based on real-time
   planetary positions and zodiac signs. Tasks get boosted or penalized depending
