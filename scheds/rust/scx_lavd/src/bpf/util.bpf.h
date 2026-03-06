@@ -39,7 +39,6 @@ bool use_full_cpus(void);
 void set_on_core_type(task_ctx __arg_arena *taskc, const struct cpumask *cpumask);
 bool prob_x_out_of_y(u32 x, u32 y);
 u32 get_primary_cpu(u32 cpu);
-u64 task_exec_time(struct task_struct __arg_trusted *p);
 
 static inline bool rt_or_dl_task(struct task_struct *p)
 {

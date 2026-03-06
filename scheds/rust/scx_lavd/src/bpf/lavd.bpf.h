@@ -159,7 +159,7 @@ struct task_ctx {
 	u64	slice_wall;		/* time slice (wall clock time) */
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
-	u64	last_measured_clk;	/* last time when running time was measured */
+	u64	last_measured_wall_clk;	/* last time when running time was measured (wall clock) */
 	/*
 	 * - Accumulated runtime from runnable to quiescent state
 	 * - Used to calculate avg_runtime_wall and latency criticality
@@ -179,7 +179,6 @@ struct task_ctx {
 	/* --- cacheline 2 boundary (128 bytes) --- */
 	u64	last_runnable_clk;	/* last time when a task became runnable */
 	u64	last_running_clk;	/* last time when scheduled in */
-	u64	last_stopping_clk;	/* last time when scheduled out */
 	u64	run_freq;		/* scheduling frequency in a second */
 	u16	lat_cri;		/* final context-aware latency criticality */
 	u16	lat_cri_waker;		/* waker's latency criticality */
@@ -193,7 +192,7 @@ struct task_ctx {
 
 	/* --- cacheline 3 boundary (192 bytes) --- */
 	u64	last_quiescent_clk;	/* last time when a task became asleep */
-	u64	last_sum_exec_clk;	/* last time when sum exec time was measured */
+	u64	last_measured_task_clk;	/* last time when running time was measured (task clock) */
 	u64	cgrp_id;		/* cgroup id of this task */
 	u64	resched_interval_wall;	/* reschedule interval in ns: [last running, this running] */
 	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
