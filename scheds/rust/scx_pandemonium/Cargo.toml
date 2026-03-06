@@ -5,15 +5,15 @@ edition = "2021"
 
 [dependencies]
 libbpf-rs = { version = "=0.26.1" }
-libc = "0.2.175"
-anyhow = "1.0.65"
-clap = { version = "4.5.41", features = ["derive"] }
-ctrlc = { version = "3.4.7", features = ["termination"] }
-flate2 = "1.1.2"
-regex = "1.11.2"
+libc = "0.2.182"
+anyhow = "1.0.102"
+clap = { version = "4.5.60", features = ["derive"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+flate2 = "1.1.9"
+regex = "1.12.3"
 
 [dev-dependencies]
-libc = "0.2.175"
+libc = "0.2.182"
 
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
