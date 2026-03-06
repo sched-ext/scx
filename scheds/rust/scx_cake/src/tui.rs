@@ -330,6 +330,9 @@ pub struct TaskTelemetryRow {
     pub waker_tgid: u32, // TGID of the waker (process group)
     // Phase 8: CPU core distribution histogram
     pub cpu_run_count: [u16; 64], // Per-CPU run count (TUI normalizes to %)
+    // EEVDF telemetry
+    pub nice_shift: u8, // Nice tier (7=baseline, <7 high-pri, >7 low-pri)
+    pub sleep_lag: u16, // Last stored lag credit (dsq_weight units)
 }
 
 impl Default for TaskTelemetryRow {
@@ -391,6 +394,8 @@ impl Default for TaskTelemetryRow {
             waker_cpu: 0,
             waker_tgid: 0,
             cpu_run_count: [0u16; 64],
+            nice_shift: 7,
+            sleep_lag: 0,
         }
     }
 }
@@ -432,6 +437,11 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             // Phase 8: dispatch callback timing
             total.total_dispatch_ns += s.total_dispatch_ns;
             total.max_dispatch_ns = total.max_dispatch_ns.max(s.max_dispatch_ns);
+
+            // EEVDF topology telemetry
+            total.nr_vprot_suppressed += s.nr_vprot_suppressed;
+            total.nr_lag_applied += s.nr_lag_applied;
+            total.nr_capacity_scaled += s.nr_capacity_scaled;
         }
     }
 
@@ -964,7 +974,7 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         // Data Read: kernel struct vs cake data paths
         (8, "BSS global_stats[cpu]", "Data Read", "C"),
         (9, "Arena per_cpu.mbox", "Data Read", "C"),
-        (15, "RODATA llc+tier_slice", "Data Read", "C"),
+        (15, "RODATA llc+quantum_ns", "Data Read", "C"),
         // Mailbox CL0: cake's Disruptor handoff variants
         (12, "Mbox CL0 tctx+deref", "Mailbox CL0", "C"),
         (18, "CL0 ptr+fused+packed", "Mailbox CL0", "C"),
@@ -1001,7 +1011,7 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         // End-to-End Workflow Comparisons
         (55, "task_storage write+read", "Storage Roundtrip", "C"),
         (56, "Arena write+read", "Storage Roundtrip", "C"),
-        (57, "6-gate cascade (cake)", "Idle Selection", "C"),
+        (57, "3-probe cascade (cake)", "Idle Selection", "C"),
         (58, "pick_idle_cpu full", "Idle Selection", "K"),
         (59, "Weight classify (bpfland)", "Classification", "C"),
         (60, "Lat-cri classify (lavd)", "Classification", "C"),
@@ -1171,7 +1181,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     }
 
     // Task matrix header — compact column key
-    output.push_str("\ntasks: [PPID PID ST COMM PELT AVG MAX GAP JIT WAIT R/s CPU SEL ENQ STOP RUN G1 G2 G1W G3 G1P G1C G1CP G1D G1WC G5 MIG/s WHIST]\n");
+    output.push_str("\ntasks: [PPID PID ST COMM CLS PELT AVG MAX GAP JIT WAIT R/s CPU SEL ENQ STOP RUN G1 G3 DSQ MIG/s WHIST]\n");
     output.push_str("       [detail-A: gates% + DIRECT DEFI YIELD PRMPT ENQ MASK MAX_GAP DSQ_INS RUNS SUTIL LLC STREAK WAKER VCSW ICSW CONF TGID]\n");
     output.push_str("       [detail-B: sw=cascade/probe/vtime/mbox/pelt/classify/vstg/warm(ns) qc=F%/Y%/P% wk=pid/tgid@cpu dist=C:pct,...]\n");
 
@@ -1255,21 +1265,31 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 TaskStatus::Dead => "✗",
             };
             let indent = if tgid != pid { "  " } else { "" };
-            let wait_us = row.wait_duration_ns / 1000;
-            let wait_str = if row.status == TaskStatus::Dead && wait_us > 10000 {
-                format!("{}†", wait_us)
+            let cls_str = match row.tier {
+                1 => "GAME",
+                2 => "HOG",
+                3 => "BG",
+                _ => "NORM",
+            };
+            let avg_wait_us = if row.total_runs > 0 {
+                row.wait_duration_ns / row.total_runs as u64 / 1000
             } else {
-                format!("{}", wait_us)
+                0
+            };
+            let wait_str = if row.status == TaskStatus::Dead && avg_wait_us > 10000 {
+                format!("{}†", avg_wait_us)
+            } else {
+                format!("{}", avg_wait_us)
             };
             output.push_str(&format!(
-                "{}{:<5} {:<7} {:<3} {:<15} {:<4} {:<6} {:<6} {:<7} {:<7} {:<6} {:<7.1} C{:<3} {:<5} {:<5} {:<5} {:<5} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<4.0} {:<7.1} {}/{}/{}/{}\n",
+                "{}{:<5} {:<7} {:<3} {:<15} {:<4} {:<4} {:<6} {:<7} {:<7} {:<6} {:<7.1} C{:<3} {:<5} {:<5} {:<5} {:<5} {:<4.0} {:<4.0} {:<4.0} {:<7.1} {}/{}/{}/{}\n",
                 indent,
                 row.ppid,
                 row.pid,
                 status_str,
                 row.comm,
+                cls_str,
                 row.pelt_util,  // PELT utilization (0-1024)
-                row.pelt_util,
                 row.max_runtime_us,
                 row.dispatch_gap_us,
                 j_us,
@@ -1281,26 +1301,16 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 row.stopping_duration_ns,
                 row.running_duration_ns,
                 row.gate_hit_pcts[0],  // G1
-                row.gate_hit_pcts[1],  // G2
-                row.gate_hit_pcts[2],  // G1W
                 row.gate_hit_pcts[3],  // G3
-                row.gate_hit_pcts[4],  // G1P
-                row.gate_hit_pcts[5],  // G1C
-                row.gate_hit_pcts[6],  // G1CP
-                row.gate_hit_pcts[7],  // G1D
-                row.gate_hit_pcts[8],  // G1WC
-                row.gate_hit_pcts[9],  // G5
+                row.gate_hit_pcts[9],  // DSQ
                 row.migrations_per_sec,
                 row.wait_hist[0], row.wait_hist[1], row.wait_hist[2], row.wait_hist[3],
             ));
-            // detail-A: gate % (G1..G5) + all extended fields, compact labels
+            // detail-A: gate % (G1/G3/DSQ) + all extended fields, compact labels
             output.push_str(&format!(
-                "{}  g={:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0} dir={} defi={}µs yld={} prmpt={} enq={} mask={} maxgap={}µs dsqins={}ns runs={} sutil={}% llc=L{:02} streak={} waker={} vcsw={} icsw={} conf={}/{} tgid={}\n",
+                "{}  g={:.0}/{:.0}/{:.0} dir={} defi={}µs yld={} prmpt={} enq={} mask={} maxgap={}µs dsqins={}ns runs={} sutil={}% llc=L{:02} streak={} waker={} vcsw={} icsw={} conf={}/{} tgid={}\n",
                 indent,
-                row.gate_hit_pcts[0], row.gate_hit_pcts[1], row.gate_hit_pcts[2],
-                row.gate_hit_pcts[3], row.gate_hit_pcts[4], row.gate_hit_pcts[5],
-                row.gate_hit_pcts[6], row.gate_hit_pcts[7], row.gate_hit_pcts[8],
-                row.gate_hit_pcts[9],
+                row.gate_hit_pcts[0], row.gate_hit_pcts[3], row.gate_hit_pcts[9],
                 row.direct_dispatch_count, row.deficit_us, row.yield_count,
                 row.preempt_count, row.enqueue_count, row.cpumask_change_count,
                 row.max_dispatch_gap_us, row.dsq_insert_ns, row.total_runs,
@@ -1361,12 +1371,7 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
     let area = frame.area();
 
     // --- Tab Bar ---
-    let tab_titles = vec![
-        " ● Dashboard ",
-        " ◎ Topology ",
-        " BenchLab ",
-        " ⓘ Reference ",
-    ];
+    let tab_titles = vec![" Dashboard ", " Topology ", " BenchLab ", " Reference "];
     let tabs = Tabs::new(tab_titles)
         .select(match app.active_tab {
             TuiTab::Dashboard => 0,
@@ -1383,7 +1388,7 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
         .divider("│")
         .block(
             Block::default()
-                .title(" scx_cake ")
+                .title(format!(" scx_cake v{} ", env!("CARGO_PKG_VERSION")))
                 .title_style(
                     Style::default()
                         .fg(Color::Cyan)
@@ -1432,16 +1437,14 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
         SortColumn::Gap => format!("[GAP]{}", arrow),
     };
 
-    let quit_label = "[q] Quit";
-
     let footer_text = match app.get_status() {
         Some(status) => format!(
-            " Sort:{}  [s] Cycle  [S] Rev  [+/-] Rate  [↑↓] Scroll  [T] Top  [Enter] Fold  [x] Fold All  [Tab] Views  [f] Filter  [c] Copy  [d] Dump  {}  │  {}",
-            sort_label, quit_label, status
+            " {} [s]Sort [S]Rev [+/-]Rate [↑↓]Scrl [T]Top [⏎]Fold [␣]Grp [x]FoldAll [Tab]Tabs [f]Filt [r]Reset [b]Bench [c]Copy [d]Dump [q]Quit │ {}",
+            sort_label, status
         ),
         None => format!(
-            " Sort:{}  [s] Cycle  [S] Rev  [+/-] Rate  [↑↓] Scroll  [T] Top  [Enter] Fold  [x] Fold All  [Tab] Views  [f] Filter  [c] Copy  [d] Dump  {}",
-            sort_label, quit_label
+            " {} [s]Sort [S]Rev [+/-]Rate [↑↓]Scrl [T]Top [⏎]Fold [␣]Grp [x]FoldAll [Tab]Tabs [f]Filt [r]Reset [b]Bench [c]Copy [d]Dump [q]Quit",
+            sort_label
         ),
     };
     let (fg_color, border_color) = if app.get_status().is_some() {
@@ -1548,7 +1551,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
 
     // Line 2: Dispatch locality | Queue depth | Tasks | Filter
     let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
-    let filter_label = if app.show_all_tasks {
+    let _filter_label = if app.show_all_tasks {
         "ALL tasks"
     } else {
         "BPF-tracked only"
@@ -1573,16 +1576,16 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     };
 
     let line2 = format!(
-        " Dispatch: Local:{} Steal:{} Miss:{} HintSkip:{} ({:.0}%)  │  {}  │  Tasks: {} ({} arena)  │  [f] {}",
+        " Dispatch: Local:{} Steal:{} Miss:{} HintSkip:{} ({:.0}%)  │  {}  │  EEVDF: Vprot:{} Lag:{} Cap:{}",
         stats.nr_local_dispatches,
         stats.nr_stolen_dispatches,
         stats.nr_dispatch_misses,
         stats.nr_dispatch_hint_skip,
         hint_pct,
         queue_str,
-        app.bpf_task_count,
-        app.arena_active,
-        filter_label,
+        stats.nr_vprot_suppressed,
+        stats.nr_lag_applied,
+        stats.nr_capacity_scaled,
     );
 
     // State label — shown in header for all three operating states
@@ -1663,10 +1666,19 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     let mut tier_wait_sum = [0u64; 4];
     let mut tier_active = [0u32; 4];
 
+    // --- CLASS Distribution Panel ---
+    // Aggregate by scheduling class: GAME=1, NORM=0, HOG=2, BG=3
+    let mut cls_pids = [0u32; 4];
+    let mut cls_pelt_sum = [0u64; 4];
+    let mut cls_wait_sum = [0u64; 4];
+    let mut cls_runs_per_sec = [0.0f64; 4];
+    let mut cls_active = [0u32; 4];
+
     for row in app.task_rows.values() {
         if !row.is_bpf_tracked || row.total_runs == 0 {
             continue;
         }
+        // PELT tier aggregation
         let t = match row.pelt_util {
             0..=49 => 0,
             50..=255 => 1,
@@ -1679,11 +1691,30 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         let j = row.jitter_accum_ns / row.total_runs as u64;
         tier_jitter_sum[t] += j / 1000;
         tier_runs_per_sec[t] += row.runs_per_sec;
-        tier_wait_sum[t] += row.wait_duration_ns / 1000;
+        tier_wait_sum[t] += row.wait_duration_ns / row.total_runs as u64 / 1000;
+
+        // CLASS aggregation (tier field: 0=NORM, 1=GAME, 2=HOG, 3=BG)
+        let c = match row.tier {
+            1 => 0, // GAME
+            0 => 1, // NORM
+            2 => 2, // HOG
+            3 => 3, // BG
+            _ => 1, // default NORM
+        };
+        cls_pids[c] += 1;
+        cls_pelt_sum[c] += row.pelt_util as u64;
+        cls_wait_sum[c] += row.wait_duration_ns / row.total_runs as u64 / 1000;
+        cls_runs_per_sec[c] += row.runs_per_sec;
+        cls_active[c] += 1;
     }
 
     let total_runs_sec: f64 = tier_runs_per_sec.iter().sum();
 
+    // Split tier row into two side-by-side panels
+    let tier_cols = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(outer_layout[1]);
+
+    // ── Left: PELT Utilization Tiers ──
     let tier_names = ["P0 <5%", "P1 5-25%", "P2 25-78%", "P3 ≥HOG"];
     let tier_colors = [Color::LightCyan, Color::Green, Color::Yellow, Color::Red];
 
@@ -1779,10 +1810,101 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             .border_style(Style::default().fg(Color::DarkGray))
             .border_type(BorderType::Rounded),
     );
-    frame.render_widget(tier_table, outer_layout[1]);
+    frame.render_widget(tier_table, tier_cols[0]);
+
+    // ── Right: CLASS Distribution ──
+    let cls_names = ["GAME", "NORM", "HOG", "BG"];
+    let cls_colors = [Color::Green, Color::Blue, Color::Yellow, Color::Red];
+
+    let cls_header = Row::new(vec![
+        Cell::from("CLASS").style(
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("PIDs").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("PELT").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("WAIT µs").style(
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("RUNS/s").style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("WORK%").style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+    .height(1);
+
+    let cls_rows: Vec<Row> = (0..4)
+        .map(|c| {
+            let count = cls_active[c].max(1) as u64;
+            let avg_pelt = cls_pelt_sum[c] / count;
+            let avg_wait = cls_wait_sum[c] / count;
+            let work_pct = if total_runs_sec > 0.0 {
+                (cls_runs_per_sec[c] / total_runs_sec) * 100.0
+            } else {
+                0.0
+            };
+
+            Row::new(vec![
+                Cell::from(cls_names[c]).style(
+                    Style::default()
+                        .fg(cls_colors[c])
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Cell::from(format!("{}", cls_pids[c])),
+                Cell::from(format!("{}", avg_pelt)),
+                Cell::from(format!("{}", avg_wait)),
+                Cell::from(format!("{:.1}", cls_runs_per_sec[c])),
+                Cell::from(format!("{:.1}%", work_pct)),
+            ])
+        })
+        .collect();
+
+    let cls_table = Table::new(
+        cls_rows,
+        [
+            Constraint::Length(7), // CLASS
+            Constraint::Length(6), // PIDs
+            Constraint::Length(6), // PELT
+            Constraint::Length(9), // WAIT µs
+            Constraint::Length(9), // RUNS/s
+            Constraint::Length(7), // WORK%
+        ],
+    )
+    .header(cls_header)
+    .block(
+        Block::default()
+            .title(" Class Distribution ")
+            .title_style(
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .border_type(BorderType::Rounded),
+    );
+    frame.render_widget(cls_table, tier_cols[1]);
 
     // All timing columns standardized to µs (noted in block title)
     let matrix_header = Row::new(vec![
+        // ── Identity (DarkGray = secondary, Yellow = primary key) ──
         Cell::from("PPID").style(
             Style::default()
                 .fg(Color::DarkGray)
@@ -1803,9 +1925,16 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
+        // ── Classification (LightMagenta) ──
+        Cell::from("CLS").style(
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        // ── Timing (Cyan) ──
         Cell::from("VCSW").style(
             Style::default()
-                .fg(Color::LightGreen)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("AVGRT").style(
@@ -1815,47 +1944,49 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         ),
         Cell::from("MAXRT").style(
             Style::default()
-                .fg(Color::LightRed)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("GAP").style(
             Style::default()
-                .fg(Color::LightMagenta)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("JITTER").style(
             Style::default()
-                .fg(Color::LightCyan)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("WAIT").style(
             Style::default()
-                .fg(Color::LightYellow)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("RUNS/s").style(
             Style::default()
-                .fg(Color::Green)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
+        // ── Placement (Magenta) ──
         Cell::from("CPU").style(
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
+        // ── Callback Overhead (LightCyan) ──
         Cell::from("SEL").style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("ENQ").style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("STOP").style(
             Style::default()
-                .fg(Color::LightRed)
+                .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("RUN").style(
@@ -1863,74 +1994,43 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
+        // ── Gate Distribution (Green) ──
         Cell::from("G1").style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("G2").style(
+        Cell::from("G3").style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("G1W").style(
+        Cell::from("DSQ").style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("G3").style(
-            Style::default()
-                .fg(Color::LightRed)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Cell::from("G1P").style(
-            Style::default()
-                .fg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Cell::from("G1C").style(
-            Style::default()
-                .fg(Color::LightYellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Cell::from("G1CP").style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Cell::from("G1D").style(
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Cell::from("G1WC").style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Cell::from("G5").style(
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
+        // ── Placement (Magenta) ──
         Cell::from("MIGR/s").style(
             Style::default()
-                .fg(Color::LightMagenta)
+                .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
+        // ── Identity (DarkGray) ──
         Cell::from("TGID").style(
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         ),
+        // ── Quantum Completion (LightYellow) ──
         Cell::from("Q%F").style(
             Style::default()
-                .fg(Color::LightRed)
+                .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("Q%Y").style(
             Style::default()
-                .fg(Color::LightGreen)
+                .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("Q%P").style(
@@ -1938,9 +2038,16 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD),
         ),
+        // ── EEVDF (LightGreen) ──
         Cell::from("WAKER").style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
+        // ── Classification (LightMagenta) ──
+        Cell::from("NICE").style(
+            Style::default()
+                .fg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
         ),
     ])
@@ -2050,34 +2157,60 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 row.status.color()
             })),
             Cell::from(row.comm.as_str()),
+            Cell::from(match row.tier {
+                1 => "GAME",
+                2 => "HOG",
+                3 => "BG",
+                _ => "NORM",
+            })
+            .style(Style::default().fg(match row.tier {
+                1 => Color::Green,
+                2 => Color::Yellow,
+                3 => Color::Red,
+                _ => Color::Blue,
+            })),
             Cell::from(format!("{}", row.nvcsw_delta)).style(vcsw_style),
             Cell::from(format!("{}", row.pelt_util)),
             Cell::from(format!("{}", row.max_runtime_us)),
             Cell::from(format!("{}", row.dispatch_gap_us)),
             Cell::from(format!("{}", jitter_us)),
-            Cell::from(format!("{}", row.wait_duration_ns / 1000)),
+            Cell::from(format!(
+                "{}",
+                if row.total_runs > 0 {
+                    row.wait_duration_ns / row.total_runs as u64 / 1000
+                } else {
+                    0
+                }
+            )),
             Cell::from(format!("{:.1}", row.runs_per_sec)),
             Cell::from(format!("C{:02}", row.core_placement)),
             Cell::from(format!("{}", row.select_cpu_ns)),
             Cell::from(format!("{}", row.enqueue_ns)),
             Cell::from(format!("{}", row.stopping_duration_ns)),
             Cell::from(format!("{}", row.running_duration_ns)),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[0])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[1])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[2])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[3])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[4])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[5])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[6])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[7])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[8])),
-            Cell::from(format!("{:.0}", row.gate_hit_pcts[9])),
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[0])), // G1
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[3])), // G3
+            Cell::from(format!("{:.0}", row.gate_hit_pcts[9])), // DSQ (tunnel)
             Cell::from(format!("{:.1}", row.migrations_per_sec)),
             Cell::from(format!("{}", row.tgid)),
             Cell::from(format!("{:.0}", q_full_pct)),
             Cell::from(format!("{:.0}", q_yield_pct)),
             Cell::from(format!("{:.0}", q_preempt_pct)),
             Cell::from(format!("{}", row.wakeup_source_pid)),
+            Cell::from(if row.nice_shift == 7 {
+                "N0".to_string()
+            } else if row.nice_shift < 7 {
+                format!("N-{}", 7 - row.nice_shift)
+            } else {
+                format!("N+{}", row.nice_shift - 7)
+            })
+            .style(Style::default().fg(if row.nice_shift < 7 {
+                Color::LightGreen
+            } else if row.nice_shift > 7 {
+                Color::LightRed
+            } else {
+                Color::DarkGray
+            })),
         ];
         matrix_rows.push(Row::new(cells).height(1));
     }
@@ -2094,6 +2227,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Constraint::Length(8),  // PID
             Constraint::Length(3),  // ST
             Constraint::Length(15), // COMM
+            Constraint::Length(5),  // CLS
             Constraint::Length(5),  // VCSW
             Constraint::Length(6),  // AVGRT
             Constraint::Length(6),  // MAXRT
@@ -2107,21 +2241,15 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Constraint::Length(5),  // STOP
             Constraint::Length(5),  // RUN
             Constraint::Length(3),  // G1
-            Constraint::Length(3),  // G2
-            Constraint::Length(4),  // G1W
             Constraint::Length(3),  // G3
-            Constraint::Length(4),  // G1P
-            Constraint::Length(4),  // G1C
-            Constraint::Length(5),  // G1CP
-            Constraint::Length(4),  // G1D
-            Constraint::Length(5),  // G1WC
-            Constraint::Length(3),  // G5
+            Constraint::Length(4),  // DSQ
             Constraint::Length(7),  // MIGR/s
             Constraint::Length(7),  // TGID
             Constraint::Length(4),  // Q%F
             Constraint::Length(4),  // Q%Y
             Constraint::Length(4),  // Q%P
             Constraint::Length(7),  // WAKER
+            Constraint::Length(4),  // NICE
             Constraint::Length(6),  // TIER∆
         ],
     )
@@ -2178,767 +2306,138 @@ fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
 }
 
 fn draw_reference_tab(frame: &mut Frame, area: Rect) {
-    let ref_text = vec![
+    // 2-column layout: left = matrix columns, right = dump/profile/keys
+    let cols =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+
+    // Helper: styled section header
+    fn section(text: &str) -> Line<'_> {
         Line::from(Span::styled(
-            "═══ DASHBOARD MATRIX COLUMNS ═══",
+            text,
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
+        ))
+    }
+    // Helper: styled subsection header
+    fn subsection(text: &str) -> Line<'_> {
         Line::from(Span::styled(
-            "── Identity & Status ──",
+            text,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        )),
+        ))
+    }
+    // Helper: column definition entry
+    fn col(name: &str, desc: &str) -> Line<'static> {
         Line::from(vec![
             Span::styled(
-                "PPID    ",
+                format!("{:<8}", name),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("Parent Process ID — groups threads by launcher"),
-        ]),
+            Span::raw(desc.to_string()),
+        ])
+    }
+    // Helper: indented sub-entry
+    fn sub(prefix: &str, desc: &str, color: Color) -> Line<'static> {
         Line::from(vec![
-            Span::styled(
-                "PID     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Thread ID (per-thread, not process)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "ST      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Task status indicator:"),
-        ]),
-        Line::from(vec![
-            Span::styled("          ●   ", Style::default().fg(Color::Green)),
-            Span::raw("Alive — actively scheduled by BPF, has telemetry"),
-        ]),
-        Line::from(vec![
-            Span::styled("          ●HOG", Style::default().fg(Color::Red)),
-            Span::raw(" Hog — detected as CPU hog, squeeze penalty applied"),
-        ]),
-        Line::from(vec![
-            Span::styled("          ●BG ", Style::default().fg(Color::DarkGray)),
-            Span::raw("Background — low-priority noise task (short runtime, infrequent)"),
-        ]),
-        Line::from(vec![
-            Span::styled("          ○   ", Style::default().fg(Color::DarkGray)),
-            Span::raw("Idle — in sysinfo but no BPF telemetry (sleeping/suspended)"),
-        ]),
-        Line::from(vec![
-            Span::styled("          ✗   ", Style::default().fg(Color::DarkGray)),
-            Span::raw("Dead — exited since last TUI refresh, pending cleanup"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "COMM    ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Thread command name (first 15 chars)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "TGID    ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Thread Group ID (process PID that owns this thread)"),
-        ]),
+            Span::styled(format!("          {}", prefix), Style::default().fg(color)),
+            Span::raw(format!(" {}", desc)),
+        ])
+    }
+
+    // ═══ LEFT PANEL: Matrix Columns ═══
+    let left_text = vec![
+        section("═══ MATRIX COLUMNS (28) ═══"),
         Line::from(""),
-        Line::from(Span::styled(
-            "── Timing (all values in µs unless noted) ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "VCSW    ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Voluntary context switches this interval (high = GPU/IO)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "AVGRT   ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("PELT utilization (0-1024) — kernel-maintained CPU usage estimate"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "MAXRT   ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Max runtime seen this TUI interval (µs)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "GAP     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Dispatch gap — time between consecutive runs (µs)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "JITTER  ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Avg jitter: variance in inter-run gap (µs)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "WAIT    ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Last wait duration before being scheduled (µs)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "RUNS/s  ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Runs per second — scheduling frequency"),
-        ]),
+        subsection("── Identity & Status ──"),
+        col("PPID", "Parent PID — groups threads by launcher"),
+        col("PID", "Thread ID (per-thread, not process)"),
+        col("ST", "Task status:"),
+        sub(
+            "●",
+            "Alive — actively scheduled, has telemetry",
+            Color::Green,
+        ),
+        sub("●HOG", "Hog — CPU hog detection, HOG class", Color::Red),
+        sub(
+            "●BG",
+            "Background — low-priority noise task",
+            Color::Rgb(255, 165, 0),
+        ),
+        sub(
+            "○",
+            "Idle — in sysinfo but no BPF telemetry",
+            Color::DarkGray,
+        ),
+        sub("✗", "Dead — exited since last refresh", Color::DarkGray),
+        col("COMM", "Thread name (first 15 chars, from /proc)"),
+        col("CLS", "CAKE class assignment:"),
+        sub(
+            "GAME",
+            "Game family member (Steam/Wine detected)",
+            Color::Green,
+        ),
+        sub("NORM", "Normal interactive task (default)", Color::Blue),
+        sub(
+            "HOG",
+            "CPU hog (high PELT, low voluntary yield)",
+            Color::Yellow,
+        ),
+        sub("BG", "Background noise (low PELT, infrequent)", Color::Red),
+        col("TGID", "Thread Group ID (process that owns thread)"),
         Line::from(""),
-        Line::from(Span::styled(
-            "── Placement ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "CPU     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Last CPU core this task ran on (Cxx)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "MIGR/s  ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("CPU migrations per second — how often task moves cores"),
-        ]),
+        subsection("── Timing ──"),
+        col("VCSW", "Voluntary context switches (high = GPU/IO)"),
+        col("AVGRT", "PELT util_avg (0-1024) — kernel CPU usage"),
+        col("MAXRT", "Max runtime seen this interval (µs)"),
+        col("GAP", "Dispatch gap: time between runs (µs)"),
+        col("JITTER", "Avg jitter: variance in inter-run gap (µs)"),
+        col("WAIT", "Last DSQ wait before scheduling (µs)"),
+        col("RUNS/s", "Runs per second — scheduling frequency"),
         Line::from(""),
-        Line::from(Span::styled(
-            "── Callback Overhead (ns) ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "SEL     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("select_cpu duration (ns) — gate cascade to find idle CPU"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "ENQ     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("enqueue duration (ns) — vtime calc + DSQ insert"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "STOP    ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("stopping duration (ns) — PELT + classify + staging"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "RUN     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("running duration (ns) — mailbox writes + arena telemetry"),
-        ]),
+        subsection("── Placement ──"),
+        col("CPU", "Last CPU core this task ran on (Cxx)"),
+        col("MIGR/s", "CPU migrations per second"),
         Line::from(""),
-        Line::from(Span::styled(
-            "── Gate Hit Distribution (%) ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "G1      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 1: prev_cpu idle — best case, 0 migration"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G2      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 1b: prev_cpu SMT sibling idle"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G1W     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 1w: warm_cpus[0..2] idle — recently used cache"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G3      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 3: LLC-wide idle scan — fallback, broader search"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G1P     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 1p: prev_cpu physical idle, SMT busy"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G1C     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 1c: warm CPU — cache-warm but not idle"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G1CP    ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 1cp: warm CPU physical — phys core idle, SMT busy"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G1D     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 1d: dedicated core fallback"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G1WC    ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 1wc: warm+cache combined probe"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "G5      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate 5 (tunnel): enqueue fallback — no direct dispatch"),
-        ]),
+        subsection("── Callback Overhead (ns) ──"),
+        col("SEL", "select_cpu: gate cascade to find idle CPU"),
+        col("ENQ", "enqueue: vtime calc + DSQ insert kfunc"),
+        col("STOP", "stopping: PELT classify + staging + DRR"),
+        col("RUN", "running: mailbox writes + arena telemetry"),
         Line::from(""),
-        Line::from(Span::styled(
-            "── Quantum Completion (%) ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "Q%F     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Full: task exhausted its entire slice (preempted at expiry)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "Q%Y     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Yield: task voluntarily slept/yielded before slice expired"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "Q%P     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Preempt: task was forcibly kicked mid-slice by higher priority"),
-        ]),
+        subsection("── Gate Distribution (%) ──"),
+        col("G1", "Gate 1: prev_cpu idle — direct dispatch"),
+        col("G3", "Gate 3: kernel scx_select_cpu_dfl fallback"),
+        col("DSQ", "Tunnel: all busy → LLC DSQ vtime ordering"),
         Line::from(""),
-        Line::from(Span::styled(
-            "── Wake Chain ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "WAKER   ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("PID of the task that last woke this task (0 = self-wake / kernel-woken)"),
-        ]),
+        subsection("── Quantum Completion (%) ──"),
+        col("Q%F", "Full: slice exhausted (preempted at expiry)"),
+        col("Q%Y", "Yield: voluntarily slept before expiry"),
+        col("Q%P", "Preempt: forcibly kicked mid-slice"),
         Line::from(""),
-        Line::from(Span::styled(
-            "═══ DUMP / COPY ADDITIONAL FIELDS ═══",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "── Per-Callback Stopwatch (ns, in STOPWATCH line) ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "gate_cascade ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("select_cpu: full gate cascade duration"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "idle_probe   ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("select_cpu: winning gate idle probe cost"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "vtime_comp   ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("enqueue: vtime calculation + tier weighting overhead"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "mbox         ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("running: per-CPU mailbox CL0 write burst"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "pelt         ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("stopping: PELT classify (every 64th stop, was compute_ewma)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "classify     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("stopping: tier classify + DRR++ + squeeze fusion"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "vtime_stg    ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("stopping: dsq_vtime bit packing + slice/vtime write"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "warm         ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("stopping: warm CPU ring shift (only on migration)"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "── QCOMP Line ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "Full         ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("%(count) — slice fully consumed. CPU-bound tasks."),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "Yield        ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("%(count) — voluntary yield. Cooperative/IO tasks."),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "Preempt      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("%(count) — forcibly preempted. Contention indicator."),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "── WAKER Line ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "PID          ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Waker thread PID"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "TGID         ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Waker process TGID (for cross-process chain detection)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "@CPU         ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("CPU the waker was running on when it woke this task"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "── CPU_DIST Line ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("Per-CPU run count histogram — top 8 cores by % usage."),
-        Line::from("Identifies affinity patterns: 1 core = pinned, many = migrating."),
-        Line::from(""),
-        Line::from(Span::styled(
-            "── Extended Detail Fields ──",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "DIRECT       ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Direct dispatch count (bypassed DSQ, placed on CPU)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "DEFICIT      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("DRR++ deficit (µs) — 0 for yielders, 9750 for bulk"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "SUTIL        ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Slice utilization % (actual_run / allocated_slice)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "LLC          ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Last LLC (L3 cache) node this task ran on"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "STREAK       ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Consecutive runs on same CPU (locality indicator)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "CONF         ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Classify confidence x/y (recomp_count/total_runs)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "WHIST        ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Wait histogram: <10µs/<100µs/<1ms/≥1ms bucket counts"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "═══ CALLBACK PROFILE (system-wide) ═══",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "stopping     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("PELT classify + staging + warm history. Heaviest callback."),
-        ]),
-        Line::from(vec![
-            Span::styled("  skip      ", Style::default().fg(Color::DarkGray)),
-            Span::raw("  98.4% of stops — confidence gate skips full PELT reclassify"),
-        ]),
-        Line::from(vec![
-            Span::styled("  classify  ", Style::default().fg(Color::DarkGray)),
-            Span::raw("  ~1.6% — full PELT classify path (every 64th stop)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  ramp       ", Style::default().fg(Color::DarkGray)),
-            Span::raw("  Stability ramp — new task building confidence"),
-        ]),
-        Line::from(vec![
-            Span::styled("  miss       ", Style::default().fg(Color::DarkGray)),
-            Span::raw("  Cold/self-seed — first runs with no history"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "running      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Mailbox stamping + arena telemetry writes"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "enqueue      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Vtime computation + scx_bpf_dsq_insert_vtime kfunc"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "select_cpu   ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Gate cascade probing idle CPUs for direct dispatch"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "dispatch     ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Per-LLC DSQ consume + cross-LLC steal + dsq_gen optimization"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "═══ KEY BINDINGS ═══",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "←/→  Tab/S-Tab",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Switch tabs"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "↑/↓  j/k      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Scroll task list / navigate"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "Enter          ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Open Task Inspector for selected task"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "r/g/c/p/s      ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Sort: Runtime / Gate1% / CPU / PID / runs/Second"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "a              ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Toggle all tasks vs BPF-tracked only"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "c              ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Copy full dump to clipboard"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "d              ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Dump to file (target/debug/tui_dump_*.txt)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "b              ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Run BenchLab benchmark iteration"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "q / Esc        ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Quit scx_cake"),
-        ]),
+        subsection("── EEVDF ──"),
+        col("WAKER", "PID of last waker (0 = self/kernel-woken)"),
+        col("NICE", "Nice tier: N0=baseline, N-x=high, N+x=low"),
+        sub(
+            "N-x",
+            "Higher priority (lower nice, weight > 100)",
+            Color::LightGreen,
+        ),
+        sub("N0", "Baseline (nice 0, weight = 100)", Color::DarkGray),
+        sub(
+            "N+x",
+            "Lower priority (higher nice, weight < 100)",
+            Color::LightRed,
+        ),
     ];
 
-    let paragraph = Paragraph::new(ref_text)
+    let left_paragraph = Paragraph::new(left_text)
         .block(
             Block::default()
-                .title(" Reference Guide — Column Definitions ")
+                .title(" Matrix Columns ")
                 .title_style(
                     Style::default()
                         .fg(Color::Yellow)
@@ -2948,10 +2447,93 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
                 .border_style(Style::default().fg(Color::Blue))
                 .border_type(BorderType::Rounded),
         )
-        .wrap(Wrap { trim: false })
-        .scroll((0, 0));
+        .wrap(Wrap { trim: false });
 
-    frame.render_widget(paragraph, area);
+    // ═══ RIGHT PANEL: Dump Fields + Profile + Keys ═══
+    let right_text = vec![
+        section("═══ DUMP / COPY FIELDS ═══"),
+        Line::from(""),
+        subsection("── Per-Callback Stopwatch (ns) ──"),
+        col("gate_cas", "select_cpu: full gate cascade duration"),
+        col("idle_prb", "select_cpu: winning gate idle probe cost"),
+        col("vtime_cm", "enqueue: vtime + tier weighting overhead"),
+        col("mbox", "running: per-CPU mailbox CL0 write burst"),
+        col("classify", "stopping: tier classify + DRR + deficit"),
+        col("vtime_st", "stopping: dsq_vtime bit packing + write"),
+        col("warm", "stopping: warm CPU ring shift (migration)"),
+        Line::from(""),
+        subsection("── Extended Detail Fields ──"),
+        col("DIRECT", "Direct dispatch count (bypassed DSQ)"),
+        col("DEFICIT", "DRR++ deficit (µs) — 0=yielder, max=bulk"),
+        col("SUTIL", "Slice util % (actual_run / slice)"),
+        col("LLC", "Last LLC (L3 cache) node"),
+        col("STREAK", "Consecutive same-CPU runs (locality)"),
+        col("WHIST", "Wait histogram: <10µ/<100µ/<1m/≥1ms"),
+        Line::from(""),
+        section("═══ CALLBACK PROFILE ═══"),
+        Line::from(""),
+        col("stopping", "PELT classify + staging + warm history"),
+        sub(
+            "skip",
+            "98.4% — confidence gate skips reclassify",
+            Color::DarkGray,
+        ),
+        sub(
+            "classify",
+            "~1.6% — full PELT (every 64th stop)",
+            Color::DarkGray,
+        ),
+        col("running", "Mailbox stamping + arena telemetry"),
+        col("enqueue", "Vtime + scx_bpf_dsq_insert_vtime"),
+        col("select", "Gate cascade probing idle CPUs"),
+        col("dispatch", "Per-LLC DSQ consume + cross-LLC steal"),
+        Line::from(""),
+        section("═══ KEY BINDINGS ═══"),
+        Line::from(""),
+        col("←/→ Tab", "Switch tabs"),
+        col("↑/↓ j/k", "Scroll task list / navigate"),
+        col("Enter", "Open Task Inspector for selected task"),
+        col("r", "Sort by Runtime"),
+        col("g", "Sort by Gate 1 %"),
+        col("c", "Sort by CPU / Copy to clipboard"),
+        col("p", "Sort by PID"),
+        col("s", "Sort by runs/Second"),
+        col("a", "Toggle all tasks vs BPF-tracked only"),
+        col("d", "Dump to file (tui_dump_*.txt)"),
+        col("b", "Run BenchLab benchmark iteration"),
+        col("q / Esc", "Quit scx_cake"),
+        Line::from(""),
+        subsection("── Scheduler States ──"),
+        sub(
+            "IDLE",
+            "No game detected — standard scheduling",
+            Color::DarkGray,
+        ),
+        sub("COMPILE", "≥2 compiler procs at ≥78% PELT", Color::Yellow),
+        sub(
+            "GAMING",
+            "Game detected — full priority system",
+            Color::Green,
+        ),
+    ];
+
+    let right_paragraph = Paragraph::new(right_text)
+        .block(
+            Block::default()
+                .title(" Fields & Keybindings ")
+                .title_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .border_type(BorderType::Rounded),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(left_paragraph, cols[0]);
+    frame.render_widget(right_paragraph, cols[1]);
 }
 
 fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
@@ -2990,7 +2572,7 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         // Data Read: kernel struct vs cake data paths
         (8, "BSS global_stats[cpu]", "Data Read", "C"),
         (9, "Arena per_cpu.mbox", "Data Read", "C"),
-        (15, "RODATA llc+tier_slice", "Data Read", "C"),
+        (15, "RODATA llc+quantum_ns", "Data Read", "C"),
         // Mailbox CL0: cake's Disruptor handoff variants
         (12, "Mbox CL0 tctx+deref", "Mailbox CL0", "C"),
         (18, "CL0 ptr+fused+packed", "Mailbox CL0", "C"),
@@ -3027,7 +2609,7 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         // End-to-End Workflow Comparisons
         (55, "task_storage write+read", "Storage Roundtrip", "C"),
         (56, "Arena write+read", "Storage Roundtrip", "C"),
-        (57, "6-gate cascade (cake)", "Idle Selection", "C"),
+        (57, "3-probe cascade (cake)", "Idle Selection", "C"),
         (58, "pick_idle_cpu full", "Idle Selection", "K"),
         (59, "Weight classify (bpfland)", "Classification", "C"),
         (60, "Lat-cri classify (lavd)", "Classification", "C"),
@@ -3837,6 +3419,8 @@ pub fn run_tui(
                                 waker_tgid: rec.telemetry.waker_tgid,
                                 cpu_run_count: rec.telemetry.cpu_run_count,
                                 is_game_member: false,
+                                nice_shift: rec.nice_shift,
+                                sleep_lag: rec.sleep_lag,
                             });
 
                         // Update dynamic row elements
@@ -3880,6 +3464,8 @@ pub fn run_tui(
                             && (row.tgid == app.tracked_game_tgid
                                 || (row.ppid > 0 && row.ppid == app.tracked_game_ppid));
                         row.ppid = ppid;
+                        row.nice_shift = rec.nice_shift;
+                        row.sleep_lag = rec.sleep_lag;
                         row.gate_cascade_ns = rec.telemetry.gate_cascade_ns;
                         row.idle_probe_ns = rec.telemetry.idle_probe_ns;
                         row.vtime_compute_ns = rec.telemetry.vtime_compute_ns;
@@ -4108,7 +3694,7 @@ pub fn run_tui(
                         "cmd",
                     ];
 
-                    // Build per-TGID max avg_runtime. The game thread always wins —
+                    // Build per-TGID max pelt_util. The game thread always wins —
                     // render frames take ms, infra processes take µs.
                     let mut tgid_max_rt: std::collections::HashMap<u32, u32> =
                         std::collections::HashMap::new();
@@ -4280,7 +3866,7 @@ pub fn run_tui(
             // Write game state to BPF BSS — drives all scheduling decisions.
             // game_ppid is the primary family signal (includes wineserver + siblings).
             // game_tgid written for display/existence checks.
-            // sched_state drives HOG/bg/Gate1P/quantum policy.
+            // sched_state drives HOG/bg/vprot/quantum policy.
             if let Some(bss) = &mut skel.maps.bss_data {
                 bss.game_tgid = app.tracked_game_tgid;
                 bss.game_ppid = app.tracked_game_ppid;

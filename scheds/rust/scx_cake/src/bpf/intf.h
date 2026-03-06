@@ -54,7 +54,7 @@ enum cake_class {
 struct cake_task_hot {
 	u64 staged_vtime_bits; /* 8B: VALID|HOME|WB|WB_DUP|NF|weight */
 	u16 deficit_u16;       /* 2B: DRR deficit (drain from slice delta) */
-	u16 _pad0;             /* 2B: alignment */
+	u16 wake_counter;      /* 2B: EWMA wakeup frequency (0–1023), higher=more critical */
 	u32 packed_info;       /* 4B: flags + tier + flow_id */
 	u32 ppid;              /* 4B: Parent PID (game family detection) */
 	u32 last_run_at;       /* 4B: (u32)scx_bpf_now() from stopping */
@@ -63,7 +63,8 @@ struct cake_task_hot {
 	u16 waker_cpu;         /* 2B: CPU where waker last ran */
 	u64 nvcsw_snapshot;    /* 8B: Last nvcsw for yield detection */
 	u8  task_class;        /* 1B: CAKE_CLASS_* enum */
-	u8  _pad[3];           /* 3B: align to 4B → 64B total */
+	u8  nice_shift;         /* 1B: EEVDF nice scaling (7=baseline, <7 high-pri, >7 low-pri) */
+	u16 sleep_lag;         /* 2B: EEVDF lag credit (dsq_weight units, applied on wake) */
 	u64 cached_cpumask;    /* 8B: Affinity mask (select_cpu) */
 }; /* Total: 64B = 1 cache line */
 
@@ -83,16 +84,26 @@ struct cake_cpu_bss {
 	u32 run_start;     /* 4B: (u32)scx_bpf_now() when task started */
 	u8  is_yielder;    /* 1B: task_class-derived yielder + waker_boost */
 	u8  idle_hint;     /* 1B: 0=busy, 1=idle */
-	u16 _pad0;         /* 2B: alignment (P4-1: cached_cpu removed — never read) */
+	u8  running_class; /* 1B: CAKE_CLASS_* of running task (vprot scaling) */
+	u8  _pad0;         /* 1B: padding (was reverse_boost — dead, never set) */
 	u64 tick_slice;    /* 8B: p->scx.slice ?: quantum_ns */
 	u32 last_tgid;     /* 4B: p->tgid (COMPILATION only) */
 	u32 last_pid;      /* 4B: Fast path — skip get_task_hot if same task */
 	u64 cached_now;    /* 8B: scx_bpf_now() from select_cpu tunnel */
-	u8  _pad[32];      /* Pad to 64B cache line */
+	u16 wake_freq;     /* 2B: cached wake_counter of running task (Gate 2 SMT reads) */
+	u16 cached_perf;   /* 2B: last cpuperf value set — skip kfunc if unchanged */
+	u8  _pad[28];      /* Pad to 64B cache line */
 } __attribute__((aligned(64)));
+
+/* Global bitmask: bit N set = CPU N is running a GAME task.
+ * Written atomically in cake_running, read in cake_enqueue.
+ * find-victim = __builtin_ctzll(~game_cpu_mask & online_mask)
+ * = single tzcnt instruction on Zen 4 (1-cycle latency). */
 
 #define CAKE_MAX_CPUS 64
 #define CAKE_MAX_LLCS 8
+#define CAKE_MAX_AUDIO_TGIDS 8       /* Max tracked audio daemon TGIDs (RODATA) */
+#define CAKE_MAX_COMPOSITOR_TGIDS 4  /* Max tracked compositor TGIDs (RODATA) */
 
 /* Per-LLC DSQ base — DSQ IDs are LLC_DSQ_BASE + llc_index (0..nr_llcs-1).
  * V3: Single vtime-ordered DSQ per LLC. Priority encoded in vtime:
@@ -110,7 +121,7 @@ struct cake_cpu_bss {
  *   [50]       = HOG (BULK tier + non-boosted)
  *   [49]       = WAKER_BOOST_DUP (Gate 1P — was VCSW yielder)
  *   [48]       = NEW_FLOW (first enqueue after init)
- *   [31:0]     = WEIGHT_NS (pelt_runtime_us * 1000) */
+ *   [31:0]     = DSQ_WEIGHT (dsq_weight: tier_base + pelt_scaled, or inverted PELT for GAME during GAMING) */
 #define STAGED_BIT_VALID        63
 #define STAGED_SHIFT_HOME       55
 #define STAGED_BIT_BG_NOISE     53  /* Background noise squeeze */
@@ -234,10 +245,11 @@ struct kfunc_bench_results {
 	u64 bench_timestamp; /* When bench completed (ktime_ns) */
 };
 
-/* Gate cascade: G1 (prev_cpu idle), G1b (SMT sibling), G1c (home CPU),
- * G1cp (home preempt-hog), G1WC (waker-chain), G1D (domestic tgid),
- * G1W (waker LLC), G1P (yielder preempts bulk), G3 (kernel idle),
- * and tunnel (DSQ fallback). */
+/* Gate cascade (simplified 3-gate design):
+ *   Gate 1: prev_cpu idle (91% hit, L1/L2 warm, zero arena)
+ *   Gate 2: perf-ordered idle scan (P/E topology, GAMING active)
+ *   Gate 3: kernel scx_bpf_select_cpu_dfl (any idle)
+ *   Tunnel: all CPUs busy → DSQ fallback (vtime ordering) */
 
 /* Flow state flags (packed_info bits 24-27) */
 enum cake_flow_flags {
@@ -258,6 +270,9 @@ struct cake_iter_record {
 	u32 packed_info; /* tier + flags — same field read in Rust telemetry loop */
 	u16 pelt_util;       /* PELT util_avg (0-1024) from p->se.avg */
 	u16 deficit_us;      /* DRR deficit in µs */
+	u8  nice_shift;      /* EEVDF nice tier (7=baseline) */
+	u8  _pad_iter;       /* alignment */
+	u16 sleep_lag;       /* EEVDF lag credit (dsq_weight units) */
 	/* telemetry block: everything the TUI currently reads from arena pointers */
 	struct {
 		u64 run_start_ns;
@@ -398,7 +413,8 @@ struct cake_task_ctx {
 
 	/* Phase 2: Userspace-stamped task class */
 	u8  task_class;        /* 1B: CAKE_CLASS_* enum, written by reclassifier */
-	u8  _pad_class[3];    /* 3B: Alignment padding to 64B CL0 */
+	u8  nice_shift;         /* 1B: mirrors hot->nice_shift */
+	u16 sleep_lag;         /* 2B: EEVDF lag credit (dsq_weight units, applied on wake) */
 
 	/* ─── CL0 total (with alignment): 8+8+(2+2+4)+4+(4+4)+(6+2)+[4 implicit]+8+(1+3) = 60B ─── */
 	/* nvcsw_snapshot (u64) at offset 44 → compiler inserts 4B alignment pad to 48.
@@ -524,11 +540,10 @@ _Static_assert(
 #define MASK_TIER 0x03 /* 2 bits: 0-3 */
 #define MASK_FLAGS 0x0F /* 4 bits */
 
-/* PELT-based HOG detection threshold.
- * util_avg >= 800 ≈ 78% CPU utilization = resource hog.
- * Replaces EWMA-based er.new_avg >= 8000 (1.0.3 design).
- * Kernel maintains PELT for free — zero BPF computation. */
-#define CAKE_PELT_HOG_THRESHOLD 800
+/* HOG detection: rt_raw >= tick_slice * 3/4 (inline, no RODATA).
+ * Task consumed ≥ 75% of allocated quantum = resource hog.
+ * Both values already in BPF registers in cake_stopping.
+ * Zero cold CL: replaces old PELT p->se.avg.util_avg read. */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: Per-CPU arena state
@@ -626,19 +641,22 @@ struct cake_stats {
 	u64 total_dispatch_ns;       /* Total time in cake_dispatch */
 	u64 max_dispatch_ns;         /* Worst single cake_dispatch */
 
-	u64 _pad[1]; /* Pad to 64-byte alignment */
+	/* ═══ EEVDF TOPOLOGY TELEMETRY ═══ */
+	u64 nr_vprot_suppressed;     /* Kicks suppressed by vprot guard */
+	u64 nr_lag_applied;          /* Enqueues where sleep_lag credit was used */
+	u64 nr_capacity_scaled;      /* Stops where CPU capacity < 1024 (P/E active) */
 } __attribute__((aligned(64)));
 
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS (2 * 1000 * 1000) /* 2ms */
-#define CAKE_DEFAULT_NEW_FLOW_BONUS_NS (8 * 1000 * 1000) /* 8ms */
+#define CAKE_DEFAULT_NEW_FLOW_BONUS_NS (3 * 1000 * 1000) /* 3ms — EEVDF half-slice */
 
 /* ═══ ADAPTIVE QUANTUM — YIELD-GATED (Phase 4.0) ═══
  * Per-task runtime-proportional quantum modulated by voluntary yield signal.
  * Yielders (nvcsw > 0 since last stop) get generous headroom + high ceiling.
  * Non-yielders get tight headroom + low ceiling, forcing faster CPU release.
  *
- * Quantum = clamp(pelt_runtime_us × HEADROOM, MIN, MAX/CEILING)
+ * Quantum = clamp(pelt_scaled × HEADROOM, MIN, MAX/CEILING)
  * Yielders: game render, audio, input, network → 50ms ceiling (cooperators)
  * Non-yielders: compilation, background tasks → PELT × 1, capped 2ms */
 #define AQ_BULK_HEADROOM     1               /* 1× PELT runtime for non-yielders */

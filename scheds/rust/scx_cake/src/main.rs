@@ -16,6 +16,7 @@ use log::{info, warn};
 use nix::sys::signal::{SigSet, Signal};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 use scx_arena::ArenaLib;
+use scx_utils::build_id;
 use scx_utils::NR_CPU_IDS;
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
@@ -74,11 +75,11 @@ impl Profile {
 ///
 /// PROFILES set all tuning parameters at once. Individual options override profile defaults.
 ///
-/// 4-TIER SYSTEM (classified by avg_runtime):
-///   T0 Critical  (<100µs): IRQ, input, audio, network
-///   T1 Interact  (<2ms):   compositor, physics, AI
-///   T2 Frame     (<8ms):   game render, encoding
-///   T3 Bulk      (≥8ms):   compilation, background
+/// 4-CLASS SYSTEM (classified by PELT utilization + game family detection):
+///   GAME:    game process tree + audio + compositor (during GAMING)
+///   NORMAL:  default class — interactive desktop tasks
+///   HOG:     high PELT utilization (≥78% CPU) non-game tasks
+///   BG:      low PELT utilization non-game tasks during GAMING
 ///
 /// EXAMPLES:
 ///   scx_cake                          # Run with gaming profile (default)
@@ -111,8 +112,7 @@ struct Args {
     ///   - Currently same as gaming; will diverge in future versions
     ///
     /// BATTERY: Power-efficient for handhelds/laptops on battery.
-    ///   - Quantum: 4000µs, DVFS enabled, per-tier frequency scaling
-    ///   - T0: 100%, T1: 87.5%, T2: 75%, T3: 50%
+    ///   - Quantum: 4000µs, reduced context switch overhead
     #[arg(long, short, value_enum, default_value_t = Profile::Gaming, verbatim_doc_comment)]
     profile: Profile,
 
@@ -256,9 +256,269 @@ impl<'a> Scheduler<'a> {
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
+
+            // Performance-ordered CPU arrays: read prefcore ranking from sysfs,
+            // sort by performance, group SMT pairs together.
+            // GAME tasks scan fast→slow, non-GAME scans slow→fast.
+            {
+                let nr = topo.nr_cpus.min(64);
+                // Read prefcore ranking per CPU (higher = faster)
+                let mut rankings: Vec<(usize, u32)> = (0..nr)
+                    .map(|cpu| {
+                        let path = format!(
+                            "/sys/devices/system/cpu/cpu{}/cpufreq/amd_pstate_prefcore_ranking",
+                            cpu
+                        );
+                        let rank = std::fs::read_to_string(&path)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<u32>().ok())
+                            .unwrap_or(100); // fallback: equal ranking
+                        (cpu, rank)
+                    })
+                    .collect();
+
+                // Sort by descending rank (fastest first), stable for SMT grouping
+                rankings.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+                // Build fast→slow array with SMT pairs grouped together:
+                // [best_phys, best_smt, second_phys, second_smt, ...]
+                let mut fast_to_slow: Vec<u8> = Vec::with_capacity(nr);
+                let mut used = vec![false; nr];
+                for &(cpu, _) in &rankings {
+                    if used[cpu] {
+                        continue;
+                    }
+                    fast_to_slow.push(cpu as u8);
+                    used[cpu] = true;
+                    // Add SMT sibling immediately after
+                    let sib = topo.cpu_sibling_map.get(cpu).copied().unwrap_or(0xFF);
+                    if (sib as usize) < nr && !used[sib as usize] {
+                        fast_to_slow.push(sib);
+                        used[sib as usize] = true;
+                    }
+                }
+
+                // Populate RODATA arrays
+                for i in 0..64usize {
+                    if i < fast_to_slow.len() {
+                        rodata.cpus_fast_to_slow[i] = fast_to_slow[i];
+                        // Reverse for slow→fast
+                        rodata.cpus_slow_to_fast[i] = fast_to_slow[fast_to_slow.len() - 1 - i];
+                    } else {
+                        rodata.cpus_fast_to_slow[i] = 0xFF; // sentinel
+                        rodata.cpus_slow_to_fast[i] = 0xFF;
+                    }
+                }
+
+                let top_cpus: Vec<_> = fast_to_slow.iter().take(4).collect();
+                info!(
+                    "Core steering: fast→slow order {:?} ({} CPUs)",
+                    top_cpus, nr
+                );
+            }
             // Arena library: nr_cpu_ids must be set before load() — arena_init
             // checks this and returns -ENODEV (errno 19) if uninitialized.
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
+
+            // ═══ Audio stack detection ═══
+            // Phase 1: Core audio daemons by comm name.
+            // Phase 2: PipeWire socket clients (mixers like goxlr-daemon).
+            // Both are session-persistent → bake into RODATA.
+            {
+                use std::collections::HashSet;
+
+                const AUDIO_COMMS: &[&str] = &[
+                    "pipewire",
+                    "wireplumber",
+                    "pipewire-pulse",
+                    "pulseaudio",
+                    "jackd",
+                    "jackdbus",
+                ];
+                let mut audio_tgids: Vec<u32> = Vec::new();
+                let mut audio_tgid_set: HashSet<u32> = HashSet::new();
+
+                // Phase 1: comm-based detection
+                if let Ok(entries) = std::fs::read_dir("/proc") {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if !name_str.chars().all(|c| c.is_ascii_digit()) {
+                            continue;
+                        }
+                        let pid: u32 = match name_str.parse() {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
+                            let comm = comm.trim();
+                            if AUDIO_COMMS.contains(&comm) {
+                                if audio_tgid_set.insert(pid) {
+                                    audio_tgids.push(pid);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Phase 2: PipeWire socket client detection.
+                // Scan /proc/net/unix for pipewire-0 socket inodes, then find
+                // processes with fds pointing to those inodes. This catches any
+                // audio mixer daemon (goxlr-daemon, easyeffects, etc.) without
+                // brittle comm lists.
+                let core_count = audio_tgids.len();
+                'pw_detect: {
+                    let uid = unsafe { libc::getuid() };
+                    let pw_socket_path = format!("/run/user/{}/pipewire-0", uid);
+
+                    // Collect inodes for the PipeWire socket
+                    let unix_content = match std::fs::read_to_string("/proc/net/unix") {
+                        Ok(c) => c,
+                        Err(_) => break 'pw_detect,
+                    };
+                    let mut pw_inodes: HashSet<u64> = HashSet::new();
+                    for line in unix_content.lines().skip(1) {
+                        if line.ends_with(&pw_socket_path)
+                            || line.contains(&format!("{} ", pw_socket_path))
+                        {
+                            // Format: Num RefCount Protocol Flags Type St Inode Path
+                            let fields: Vec<&str> = line.split_whitespace().collect();
+                            if fields.len() >= 7 {
+                                if let Ok(inode) = fields[6].parse::<u64>() {
+                                    if inode > 0 {
+                                        pw_inodes.insert(inode);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if pw_inodes.is_empty() {
+                        break 'pw_detect;
+                    }
+
+                    // Scan /proc/*/fd for socket links matching PipeWire inodes.
+                    // Only check thread-group leaders (dirs in /proc with numeric names).
+                    if let Ok(proc_entries) = std::fs::read_dir("/proc") {
+                        for entry in proc_entries.flatten() {
+                            if audio_tgids.len() >= 8 {
+                                break;
+                            }
+                            let name = entry.file_name();
+                            let name_str = name.to_string_lossy();
+                            if !name_str.chars().all(|c| c.is_ascii_digit()) {
+                                continue;
+                            }
+                            let pid: u32 = match name_str.parse() {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            // Skip PIDs already detected as core audio
+                            if audio_tgid_set.contains(&pid) {
+                                continue;
+                            }
+                            let fd_dir = format!("/proc/{}/fd", pid);
+                            let fd_entries = match std::fs::read_dir(&fd_dir) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                            for fd_entry in fd_entries.flatten() {
+                                if let Ok(link) = std::fs::read_link(fd_entry.path()) {
+                                    let link_str = link.to_string_lossy();
+                                    // Socket links look like "socket:[12345]"
+                                    if let Some(inode_str) = link_str
+                                        .strip_prefix("socket:[")
+                                        .and_then(|s| s.strip_suffix(']'))
+                                    {
+                                        if let Ok(inode) = inode_str.parse::<u64>() {
+                                            if pw_inodes.contains(&inode) {
+                                                if audio_tgid_set.insert(pid) {
+                                                    audio_tgids.push(pid);
+                                                }
+                                                break; // Found one match, move to next PID
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                rodata.nr_audio_tgids = audio_tgids.len() as u32;
+                for (i, &tgid) in audio_tgids.iter().enumerate() {
+                    rodata.audio_tgids[i] = tgid;
+                }
+                let client_count = audio_tgids.len() - core_count;
+                if !audio_tgids.is_empty() {
+                    info!(
+                        "Audio stack detected: {} daemons{} (TGIDs: {:?})",
+                        audio_tgids.len(),
+                        if client_count > 0 {
+                            format!(
+                                ", {} PipeWire client{}",
+                                client_count,
+                                if client_count == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            String::new()
+                        },
+                        audio_tgids
+                    );
+                }
+            }
+
+            // ═══ Compositor detection ═══
+            // Wayland compositors present every frame to the display.
+            // Session-persistent → bake into RODATA.
+            {
+                const COMPOSITOR_COMMS: &[&str] = &[
+                    "kwin_wayland",
+                    "kwin_x11",
+                    "mutter",
+                    "gnome-shell",
+                    "sway",
+                    "Hyprland",
+                    "weston",
+                    "labwc",
+                    "wayfire",
+                    "river",
+                    "gamescope",
+                ];
+                let mut compositor_tgids: Vec<u32> = Vec::new();
+                if let Ok(entries) = std::fs::read_dir("/proc") {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if !name_str.chars().all(|c| c.is_ascii_digit()) {
+                            continue;
+                        }
+                        let pid: u32 = match name_str.parse() {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
+                            let comm = comm.trim();
+                            if COMPOSITOR_COMMS.contains(&comm) {
+                                compositor_tgids.push(pid);
+                                if compositor_tgids.len() >= 4 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                rodata.nr_compositor_tgids = compositor_tgids.len() as u32;
+                for (i, &tgid) in compositor_tgids.iter().enumerate() {
+                    rodata.compositor_tgids[i] = tgid;
+                }
+                if !compositor_tgids.is_empty() {
+                    info!(
+                        "Compositor detected: {} (TGIDs: {:?})",
+                        compositor_tgids.len(),
+                        compositor_tgids
+                    );
+                }
+            }
         }
 
         // Load the BPF program
@@ -306,14 +566,31 @@ impl<'a> Scheduler<'a> {
         // Warn early so user knows these flags require a debug build.
         #[cfg(not(debug_assertions))]
         if self.args.verbose || self.args.testing {
-            warn!("--verbose/--testing are disabled in release builds (stats compiled out). Ignoring.");
+            warn!("--verbose and --testing require a debug build (telemetry is compiled out in release).");
+            warn!("Rebuild without --release: cargo build -p scx_cake");
+            self.args.verbose = false;
+            self.args.testing = false;
         }
 
-        // Standard startup: simple log message like other sched_ext schedulers
-        let version = env!("CARGO_PKG_VERSION");
+        // Standard startup banner: follows scx_cosmos/scx_bpfland convention
         info!(
-            "scx_cake v{} started ({} CPUs, {} LLCs, profile: {:?})",
-            version,
+            "scx_cake {} {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION")),
+            if self.topology.smt_enabled {
+                "SMT on"
+            } else {
+                "SMT off"
+            }
+        );
+
+        // Print command line.
+        info!(
+            "scheduler options: {}",
+            std::env::args().collect::<Vec<_>>().join(" ")
+        );
+
+        info!(
+            "{} CPUs, {} LLCs, profile: {:?}",
             self.topology.nr_cpus,
             self.topology
                 .llc_cpu_mask
