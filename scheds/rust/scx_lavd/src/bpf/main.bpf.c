@@ -477,7 +477,7 @@ static void account_task_runtime(struct task_struct *p,
 				 u64 now)
 {
 	u64 task_time_wall, task_time_wwgt, task_time_invr;
-	u64 suspended_wall, duration_wall, now_task, now_pelt;
+	u64 now_task, now_pelt;
 
 	/*
 	 * Since task execution can span one or more sys_stat intervals,
@@ -486,18 +486,8 @@ static void account_task_runtime(struct task_struct *p,
 	 * the load of long-running tasks properly. So, we add up only the
 	 * execution duration since the last measured time.
 	 */
-	suspended_wall = get_suspended_duration_and_reset(cpuc);
-	duration_wall = time_delta(now, taskc->last_measured_wall_clk + suspended_wall);
-
-	/*
-	 * duration_wall - task_time_wall must equal to irq_time + steal_time
-	 * barring some imprecision when the time was snapshotted. We accumulate
-	 * the delta as cpuc->stolen_time_wall to try and approximate the total
-	 * time CPU spent in stolen time (irq+steal).
-	 */
 	now_task = scx_clock_task(cpuc->cpu_id);
 	task_time_wall = time_delta(now_task, taskc->last_measured_task_clk);
-	cpuc->stolen_time_wall += time_delta(duration_wall, task_time_wall);
 
 	now_pelt = scx_clock_pelt(cpuc->cpu_id);
 	task_time_invr = time_delta(now_pelt, taskc->last_measured_pelt_clk);
@@ -1476,6 +1466,9 @@ unlock_out:
 	cpuc->lat_cri = 0;
 	cpuc->running_clk = 0;
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
+	cpuc->prev_task_clk = scx_clock_task(cpu_id);
+	cpuc->prev_pelt_clk = scx_clock_pelt(cpu_id);
+	cpuc->avg_perf_factor = LAVD_SCALE;
 	WRITE_ONCE(cpuc->online_clk, now);
 	barrier();
 
@@ -1658,24 +1651,12 @@ void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
 		    struct scx_cpu_acquire_args *args)
 {
 	struct cpu_ctx *cpuc;
-	u64 duration_wall, duration_invr;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
-
-	/*
-	 * When regaining control of a CPU under the higher priority scheduler
-	 * class, measure how much time the higher priority scheduler class
-	 * used -- i.e., [lavd_cpu_release, lavd_cpu_acquire]. This will be
-	 * used to calculate capacity-invariant and frequency-invariant CPU
-	 * utilization.
-	 */
-	duration_wall = time_delta(scx_bpf_now(), cpuc->cpu_release_clk);
-	duration_invr = conv_wall_to_invr(duration_wall, cpuc);
-	cpuc->tot_task_time_invr += duration_invr;
 
 	/*
 	 * The higher-priority scheduler class could change the CPU frequency,
@@ -1713,13 +1694,6 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 	 * the target properly after regaining the control.
 	 */
 	reset_cpuperf_target(cpuc);
-
-	/*
-	 * Keep track of when the higher-priority scheduler class takes
-	 * the CPU to calculate capacity-invariant and frequency-invariant
-	 * CPU utilization.
-	 */
-	cpuc->cpu_release_clk = scx_bpf_now();
 }
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
@@ -2035,7 +2009,6 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->online_clk = now;
 		cpuc->offline_clk = now;
-		cpuc->cpu_release_clk = now;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
 		cpuc->max_capacity = cpu_capacity[cpu];
 		cpuc->effective_capacity = cpuc->max_capacity;
@@ -2044,6 +2017,18 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->min_perf_cri = LAVD_SCALE;
 		cpuc->max_freq = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
+		/*
+		 * Sample initial clock baselines. This runs at scheduler
+		 * load time (lavd_init), not from a scheduling callback, so
+		 * the rq lock for @cpu is not held. Accessing rq->clock_task
+		 * and rq->clock_pelt without the lock is a benign data race:
+		 * the values are only used as baselines for the first
+		 * collect_sys_stat() interval, and any slight staleness is
+		 * harmless.
+		 */
+		cpuc->prev_task_clk = scx_clock_task(cpu);
+		cpuc->prev_pelt_clk = scx_clock_pelt(cpu);
+		cpuc->avg_perf_factor = LAVD_SCALE;
 
 		sum_capacity += cpuc->max_capacity;
 

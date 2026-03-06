@@ -14,6 +14,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+extern bool CONFIG_NO_HZ_IDLE __kconfig __weak;
+
 struct sys_stat		__weak	sys_stat;
 const volatile u8	__weak preempt_shift;
 volatile u64		__weak performance_mode_ns;
@@ -50,8 +52,8 @@ struct sys_stat_ctx {
 	u64		duration_total_wall;
 	u64		idle_total_wall;
 	u64		compute_total_wall;
+	u64		compute_total_invr;
 	u64		tot_task_time_wwgt;
-	u64		tot_task_time_invr;
 	u64		tsct_spike_invr;
 	u64		nr_queued_task;
 	s32		max_lat_cri;
@@ -106,6 +108,8 @@ static void collect_sys_stat(void)
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cpdomc->cur_util_wall_sum = 0;
 		cpdomc->avg_util_wall_sum = 0;
+		cpdomc->cur_util_invr_sum = 0;
+		cpdomc->avg_util_invr_sum = 0;
 		cpdomc->nr_queued_task = 0;
 
 		if (use_cpdom_dsq())
@@ -139,8 +143,12 @@ static void collect_sys_stat(void)
 	 * one.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		u64 non_scx_time_wall, sc_non_scx_time_invr, cpuc_tot_task_time_invr;
+		u64 compute_invr, cpuc_tot_task_time_invr, irq_steal_wall;
+		u64 irq_steal_invr, task_wall, rt_dl_time_invr, now_task;
+		u64 now_pelt, delta_task, delta_pelt;
+		u64 cur_idle_wall = 0, past_idle_wall;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+
 		if (!cpuc) {
 			c->compute_total_wall = 0;
 			break;
@@ -175,62 +183,195 @@ static void collect_sys_stat(void)
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				u64 duration_wall = time_delta(c->now, old_clk);
-
+				cur_idle_wall = time_delta(c->now, old_clk);
 				__sync_fetch_and_add(&cpuc->idle_total_wall,
-						     duration_wall);
+						     cur_idle_wall);
 				break;
 			}
 		}
 
 		/*
-		 * Calculate per-CPU utilization.
+		 * Calculate steal time for this interval using scx_clock_task()
+		 * and scx_clock_pelt() snapshots.
+		 *
+		 * 1) steal_time_wall = compute_wall - tot_task_time_wall:
+		 *   wall-clock time the CPU was active but not running SCX
+		 *   tasks (IRQ + hypervisor steal + RT/DL), excluding idle.
+		 *
+		 * 2) steal_time_invr: invariant equivalent, derived as:
+		 *   - irq_steal_invr: uses the observed performance factor
+		 *     (delta_pelt / task_wall) via conv_wall_to_invr_obs().
+		 *     Falls back to avg_perf_factor EWMA when task_wall is
+		 *     zero (e.g., CPU was entirely idle with only IRQ traffic).
+		 *   - rt_dl_time_invr: derived directly from the delta_pelt
+		 *     minus SCX task invariant time -- no approximation needed.
+		 *
+		 * 3) Deriving task_wall and irq_steal_wall from delta_task:
+		 *
+		 * 3-1) scx_clock_task() reads rq->clock_task for a remote CPU
+		 * without holding the rq lock. With NO_HZ_IDLE, rq->clock_task
+		 * is not updated while the CPU is idle (no ticks, no scheduling
+		 * events). However, when the CPU wakes from idle,
+		 * update_rq_clock() catches rq->clock_task up to the current
+		 * time, including the elapsed idle duration.
+		 *
+		 * Moreover, a CPU may toggle between idle and active multiple
+		 * times within a single collection interval. At collection
+		 * time, idle_total_wall (after the CAS above) includes all
+		 * idle periods: both the completed ones and the current
+		 * in-progress one (cur_idle_wall). delta_task, however, only
+		 * catches up through the last wakeup event -- it includes
+		 * completed idle periods but NOT the current in-progress one.
+		 * Therefore:
+		 *
+		 *   delta_task ≈ (idle_total_wall - cur_idle_wall)
+		 *                + compute_wall - IRQ - steal
+		 *
+		 * 3-2) Subtracting the idle periods already captured by
+		 * delta_task:
+		 *
+		 *   past_idle_wall = idle_total_wall - cur_idle_wall
+		 *   task_wall      = delta_task - past_idle_wall
+		 *                  = compute_wall - IRQ - steal
+		 *   irq_steal_wall = compute_wall - task_wall
+		 *                  = IRQ + steal
+		 *
+		 * This identity holds regardless of the number of idle/active
+		 * transitions within the interval and whether the CPU is
+		 * currently idle or active at collection time.
+		 *
+		 * 4) Correcting delta_pelt for the NO_HZ_IDLE stale-read:
+		 *
+		 * scx_clock_pelt() reads clock_pelt - lost_idle_time. With
+		 * NO_HZ_IDLE, clock_pelt advances at wall-clock rate but
+		 * lost_idle_time is only updated via update_rq_clock_pelt(),
+		 * which requires update_rq_clock() to be called. Since no
+		 * ticks fire on an idle CPU, lost_idle_time stays frozen and
+		 * delta_pelt drifts at wall-clock rate -- the same stale
+		 * behaviour as delta_task before the past_idle_wall correction.
+		 *
+		 * When the CPU is currently idle (cur_idle_wall > 0), advance
+		 * now_pelt by cur_idle_pelt -- the invariant equivalent of
+		 * cur_idle_wall -- before computing delta_pelt. This corrects
+		 * the current interval and also pre-compensates prev_pelt_clk
+		 * for the wakeup bounce: when the CPU wakes up,
+		 * update_rq_clock_pelt() advances clock_pelt by
+		 * idle_dur * cap/1024 without a matching lost_idle_time update,
+		 * which would otherwise inflate delta_pelt in the first active
+		 * interval after idle. Storing the pre-compensated value in
+		 * prev_pelt_clk cancels this bounce exactly.
+		 * A safety clamp then ensures delta_pelt never exceeds
+		 * compute_wall, covering residual approximation error and torn
+		 * reads of clock_pelt/lost_idle_time at idle exit.
+		 *
+		 * Without NO_HZ_IDLE, periodic ticks keep lost_idle_time
+		 * nearly in sync, so no correction is needed.
 		 */
 		compute_wall = time_delta(c->duration_wall, cpuc->idle_total_wall);
+		cpuc->steal_time_wall = time_delta(compute_wall, cpuc->tot_task_time_wall);
+		cpuc->tot_task_time_wall = 0;
+		now_task = scx_clock_task(cpu);
+		now_pelt = scx_clock_pelt(cpu);
+		delta_task = time_delta(now_task, cpuc->prev_task_clk);
+		if (CONFIG_NO_HZ_IDLE && cur_idle_wall > 0) {
+			/*
+			 * With NO_HZ_IDLE, lost_idle_time is not updated while
+			 * the CPU is idle, so clock_pelt - lost_idle_time drifts
+			 * at wall-clock rate during the current idle period.
+			 * Advance now_pelt by cur_idle_pelt -- the invariant
+			 * equivalent of cur_idle_wall -- before computing
+			 * delta_pelt. This corrects the current interval and
+			 * pre-compensates prev_pelt_clk for the wakeup bounce
+			 * (see block comment above).
+			 */
+			u64 cap = scx_bpf_cpuperf_cap(cpu);
+			u64 cur_idle_pelt = (cur_idle_wall * cap) >> LAVD_SHIFT;
+			now_pelt += cur_idle_pelt;
+		}
+		delta_pelt = time_delta(now_pelt, cpuc->prev_pelt_clk);
+		/*
+		 * Safety clamp: invariant active time cannot exceed wall active
+		 * time. Handles residual approximation error from the
+		 * compensation above and torn reads of clock_pelt/lost_idle_time
+		 * at idle exit (e.g., when the CPU woke up just before
+		 * collection and cur_idle_wall is already zero).
+		 */
+		if (delta_pelt > compute_wall)
+			delta_pelt = compute_wall;
+
+		past_idle_wall = time_delta(cpuc->idle_total_wall, cur_idle_wall);
+		task_wall = time_delta(delta_task, past_idle_wall);
+		irq_steal_wall = time_delta(compute_wall, task_wall);
+		if (task_wall > 0) {
+			u64 perf_factor = (delta_pelt << LAVD_SHIFT) / task_wall;
+			cpuc->avg_perf_factor = calc_avg(cpuc->avg_perf_factor,
+							 perf_factor);
+			irq_steal_invr = conv_wall_to_invr_obs(irq_steal_wall,
+							       delta_pelt, task_wall);
+		} else {
+			irq_steal_invr = (irq_steal_wall * cpuc->avg_perf_factor) >> LAVD_SHIFT;
+		}
+
+		/*
+		 * Snapshot and immediately reset tot_task_time_invr so that
+		 * newly accumulated SCX work goes into the next interval.
+		 * Use the snapshot for both rt_dl_time_invr and the utilization
+		 * calculation below so both see the same consistent value.
+		 */
+		cpuc_tot_task_time_invr= cpuc->tot_task_time_invr;
+		cpuc->tot_task_time_invr = 0;
+		rt_dl_time_invr = time_delta(delta_pelt, cpuc_tot_task_time_invr);
+		cpuc->steal_time_invr = irq_steal_invr + rt_dl_time_invr;
+
+		/*
+		 * Calculate per-CPU wall-clock utilization.
+		 * compute_wall = steal_time_wall + tot_task_time_wall (before
+		 * zeroing above), i.e., all non-idle CPU time.
+		 */
 		cpuc->cur_util_wall = (compute_wall << LAVD_SHIFT) / c->duration_wall;
 		cpuc->avg_util_wall = calc_asym_avg(cpuc->avg_util_wall, cpuc->cur_util_wall);
+
+		/*
+		 * Calculate invariant CPU utilization using steal_time_invr.
+		 * tot_task_time_invr + steal_time_invr = SCX_invr + irq_steal_invr
+		 * + rt_dl_invr = total invariant active time.
+		 *
+		 * Clamp compute_invr to compute_wall: invariant active time
+		 * cannot exceed wall active time (cap x freq <= 1024^2). Any
+		 * excess is a cross-interval measurement artifact where a task
+		 * that started in the previous interval contributes its full
+		 * runtime to this interval's tot_task_time_invr.
+		 */
+		compute_invr = cpuc_tot_task_time_invr + cpuc->steal_time_invr;
+		if (compute_invr > compute_wall)
+			compute_invr = compute_wall;
+		cpuc->cur_util_invr = (compute_invr << LAVD_SHIFT) /
+					c->duration_wall;
+		cpuc->avg_util_invr = calc_asym_avg(cpuc->avg_util_invr, cpuc->cur_util_invr);
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 		if (cpdomc) {
 			cpdomc->cur_util_wall_sum += cpuc->cur_util_wall;
 			cpdomc->avg_util_wall_sum += cpuc->avg_util_wall;
+			cpdomc->cur_util_invr_sum += cpuc->cur_util_invr;
+			cpdomc->avg_util_invr_sum += cpuc->avg_util_invr;
 		}
 
-		/*
-		 * Calculate the scaled non-SCX time of this CPU, including
-		 * IRQ, non-SCX (RT/DL) tasks. Since there is no direct way
-		 * to track non-SCX time, we derive it from the total SCX task
-		 * time (i.e., tot_task_time) and total compute time (i.e.,
-		 * duration - idle_total). We assume the CPU frequency was at
-		 * its maximum while running non-SCX tasks.
-		 */
-		non_scx_time_wall = time_delta(compute_wall, cpuc->tot_task_time_wall);
-		sc_non_scx_time_invr = conv_wall_to_invr_max_freq(non_scx_time_wall, cpu);
-		cpuc->tot_task_time_wall = 0;
-
-		/*
-		 * Update scaled CPU utilization, which is capacity and
-		 * frequency invariant. The scaled CPU utilization should
-		 * include everything — SCX task time, non-SCX task time
-		 * (RT/DL), IRQ times, etc.
-		 */
-		cpuc_tot_task_time_invr = cpuc->tot_task_time_invr + sc_non_scx_time_invr;
-		cpuc->cur_util_invr = (cpuc_tot_task_time_invr << LAVD_SHIFT) /
-					c->duration_wall;
-		cpuc->avg_util_invr = calc_avg(cpuc->avg_util_invr, cpuc->cur_util_invr);
-		cpuc->tot_task_time_invr = 0;
+		cpuc->prev_task_clk = now_task;
+		cpuc->prev_pelt_clk = now_pelt;
 
 		/*
 		 * Accumulate cpus' scaled loads,
 		 * which is capacity and frequency invariant.
 		 */
-		c->tot_task_time_invr += cpuc_tot_task_time_invr;
+		c->compute_total_invr += compute_invr;
 
 		/*
 		 * Track the scaled time when the utilization spikes happened.
 		 */
 		if (cpuc->cur_util_wall > LAVD_CC_UTIL_SPIKE)
-			c->tsct_spike_invr += cpuc_tot_task_time_invr;
+			c->tsct_spike_invr += compute_invr;
+
 	}
 
 	/*
@@ -294,7 +435,6 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each CPU (phase 3).
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		u64 cpu_compute_wall;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total_wall = 0;
@@ -316,24 +456,6 @@ static void collect_sys_stat(void)
 			c->sum_perf_cri += cpuc->sum_perf_cri;
 			cpuc->sum_perf_cri = 0;
 		}
-
-		/*
-		 * cpuc->cur_stolen_est is only an estimate of the time stolen by
-		 * irq/steal during execution times. We extrapolate that ratio to
-		 * the rest of CPU time as an approximation.
-		 *
-		 * Note: compute_wall is calculated per-CPU (duration - idle)
-		 * and can be zero when the CPU is fully idle. Guard against
-		 * division by zero (BPF silently returns 0, but be explicit).
-		 */
-		cpu_compute_wall = time_delta(c->duration_wall,
-					      cpuc->idle_total_wall) ? : 1;
-		cpuc->cur_stolen_time_wall = (cpuc->stolen_time_wall <<
-						LAVD_SHIFT) / cpu_compute_wall;
-		cpuc->avg_stolen_time_wall = calc_asym_avg(
-						cpuc->avg_stolen_time_wall,
-						cpuc->cur_stolen_time_wall);
-		cpuc->stolen_time_wall = 0;
 
 		/*
 		 * Accumulate system-wide idle time.
@@ -361,7 +483,7 @@ static void calc_sys_stat(void)
 	 * Calculate the scaled CPU utilization that includes everything
 	 * — scx tasks, non-scx tasks (e.g., RT/DL), IRQ, etc.
 	 */
-	cur_util_invr = (c->tot_task_time_invr << LAVD_SHIFT) / c->duration_total_wall;
+	cur_util_invr = (c->compute_total_invr << LAVD_SHIFT) / c->duration_total_wall;
 	if (cur_util_invr > c->cur_util_wall)
 		cur_util_invr = min(sys_stat.avg_util_invr, c->cur_util_wall);
 

@@ -983,7 +983,20 @@ static inline u64 scx_clock_task(u32 cpu)
 {
 	struct rq___local *rq = get_current_rq(cpu);
 
-	/* Equivalent to the kernel's rq_clock_task(). */
+	/*
+	 * Equivalent to the kernel's rq_clock_task(): wall-clock time minus
+	 * cumulative IRQ time (CONFIG_IRQ_TIME_ACCOUNTING) and hypervisor
+	 * steal time (CONFIG_PARAVIRT_TIME_ACCOUNTING). Without those configs,
+	 * it equals rq->clock.
+	 *
+	 * Conceptually this clock advances during idle (the idle task counts
+	 * as a running task), but rq->clock_task is only updated on scheduling
+	 * events. With NO_HZ_IDLE (the default), the periodic tick is stopped
+	 * on idle CPUs, so rq->clock_task is not refreshed while a CPU is
+	 * idle. Reading this clock for a remote idle CPU from a BPF timer
+	 * callback returns the value from when the CPU last went idle, making
+	 * the delta over an idle interval effectively zero.
+	 */
 	return rq ? rq->clock_task : 0;
 }
 
@@ -994,9 +1007,23 @@ static inline u64 scx_clock_pelt(u32 cpu)
 	/*
 	 * Equivalent to the kernel's rq_clock_pelt(): subtracts
 	 * lost_idle_time from clock_pelt to absorb the jump that occurs
-	 * when clock_pelt resyncs with clock_task at idle exit. The result
-	 * is a continuous, capacity-invariant clock safe for both task
-	 * execution time stamping and cross-idle measurements.
+	 * when clock_pelt resyncs with clock_task at idle exit. The intent
+	 * is a continuous, capacity- and frequency-invariant clock that is
+	 * frozen during idle, IRQ, and hypervisor steal.
+	 *
+	 * However, like scx_clock_task(), this clock has a stale-read issue
+	 * for remote idle CPUs with NO_HZ_IDLE (the default). clock_pelt
+	 * itself advances at wall-clock rate (hardware-clock based), but
+	 * lost_idle_time is only updated via update_rq_clock_pelt(), which
+	 * requires update_rq_clock() to be called. With NO_HZ_IDLE, the
+	 * periodic tick is stopped on idle CPUs, so lost_idle_time is not
+	 * refreshed during idle. Reading this clock for a remote idle CPU
+	 * from a BPF timer callback therefore returns a value that drifts
+	 * at wall-clock rate -- the same stale behaviour as scx_clock_task().
+	 *
+	 * Without NO_HZ_IDLE, periodic ticks keep lost_idle_time nearly in
+	 * sync (stale by at most one tick period, ~1 ms), so the result is
+	 * accurate.
 	 */
 	return rq ? (rq->clock_pelt - rq->lost_idle_time) : 0;
 }
