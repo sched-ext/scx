@@ -15,7 +15,7 @@ clap_main = "0.2"
 crossbeam = "0.8"
 ctrlc = { version = "3", features = ["termination"] }
 fastrand = "2"
-fb_procfs = "0.7"
+fb_procfs = "0.9"
 inotify = "0.11"
 lazy_static = "1"
 libbpf-rs = "=0.26.1"
