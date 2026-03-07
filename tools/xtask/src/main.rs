@@ -69,9 +69,10 @@ fn main() {
 
     let res = match cli.command {
         Commands::Versions { format } => versions::version_command(format),
-        Commands::BumpVersions { target, min_version } => {
-            bump_versions::bump_versions_command(target.packages, target.all, min_version)
-        }
+        Commands::BumpVersions {
+            target,
+            min_version,
+        } => bump_versions::bump_versions_command(target.packages, target.all, min_version),
     };
 
     if let Err(e) = res {
