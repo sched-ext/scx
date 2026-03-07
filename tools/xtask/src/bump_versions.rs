@@ -12,7 +12,11 @@ use std::path::PathBuf;
 use crate::get_cargo_metadata;
 use crate::get_rust_paths;
 
-pub fn bump_versions_command(packages: Vec<String>, all: bool) -> Result<()> {
+pub fn bump_versions_command(
+    packages: Vec<String>,
+    all: bool,
+    min_version: Option<String>,
+) -> Result<()> {
     // Determine target crates
     let target_crates = if all {
         get_all_workspace_crates()?
@@ -107,7 +111,8 @@ pub fn bump_versions_command(packages: Vec<String>, all: bool) -> Result<()> {
     // Bump all versions
     for crate_name in &crates_to_bump {
         if let Some(crate_path) = crate_paths.get(crate_name) {
-            let (old_version, new_version) = bump_crate_version(crate_path)?;
+            let (old_version, new_version) =
+                bump_crate_version(crate_path, min_version.as_deref())?;
             version_updates.insert(crate_name.clone(), new_version.clone());
             log::info!("Bumping {crate_name}: {old_version} → {new_version}");
         }
@@ -139,7 +144,10 @@ pub fn get_all_workspace_crates() -> Result<Vec<String>> {
     Ok(crates)
 }
 
-pub fn bump_crate_version(crate_path: &PathBuf) -> Result<(String, String)> {
+pub fn bump_crate_version(
+    crate_path: &PathBuf,
+    min_version: Option<&str>,
+) -> Result<(String, String)> {
     let content = fs::read_to_string(crate_path)?;
     let lines: Vec<&str> = content.lines().collect();
 
@@ -148,7 +156,15 @@ pub fn bump_crate_version(crate_path: &PathBuf) -> Result<(String, String)> {
     for (line_no, line) in lines.iter().enumerate() {
         if let Some(captures) = version_re.captures(line) {
             let current_version = captures.get(2).unwrap().as_str();
-            let new_version = increment_patch_version(current_version)?;
+            let new_version = if let Some(min) = min_version {
+                if version_tuple(current_version)? < version_tuple(min)? {
+                    min.to_string()
+                } else {
+                    increment_patch_version(current_version)?
+                }
+            } else {
+                increment_patch_version(current_version)?
+            };
 
             // Update the file
             let mut new_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
@@ -170,6 +186,14 @@ pub fn bump_crate_version(crate_path: &PathBuf) -> Result<(String, String)> {
         "Could not find version in {:?}",
         crate_path
     ))
+}
+
+fn version_tuple(version: &str) -> Result<(u32, u32, u32)> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() < 3 {
+        return Err(anyhow::anyhow!("Invalid version format: {}", version));
+    }
+    Ok((parts[0].parse()?, parts[1].parse()?, parts[2].parse()?))
 }
 
 fn increment_patch_version(version: &str) -> Result<String> {
