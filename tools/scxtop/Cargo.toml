@@ -54,7 +54,7 @@ blazesym = "0.2"
 rayon = "1"
 
 [dev-dependencies]
-criterion = "0.6"
+criterion = "0.8"
 tempfile = "3"
 
 [[bench]]
