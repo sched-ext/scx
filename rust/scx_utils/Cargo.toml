@@ -50,7 +50,7 @@ scx_cargo = { path = "../scx_cargo", version = "1.1.0" }
 sscanf = "0.5"
 tar = "0.4"
 tempfile = "3"
-vergen = { version = "8", features = ["cargo", "git", "gitcl"] }
+vergen-gitcl = { version = "9", features = ["cargo"] }
 version-compare = "0.2"
 walkdir = "2"
 
