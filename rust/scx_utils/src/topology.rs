@@ -734,15 +734,15 @@ fn read_cpu_ids() -> Result<Vec<usize>> {
         let cpu_str = cpu_path.to_str().unwrap().trim();
         if ROOT_PREFIX.is_empty() {
             match sscanf!(cpu_str, "/sys/devices/system/cpu/cpu{usize}") {
-                Ok(val) => cpu_ids.push(val),
-                Err(_) => {
+                Some(val) => cpu_ids.push(val),
+                None => {
                     bail!("Failed to parse cpu ID {}", cpu_str);
                 }
             }
         } else {
             match sscanf!(cpu_str, "{str}/sys/devices/system/cpu/cpu{usize}") {
-                Ok((_, val)) => cpu_ids.push(val),
-                Err(_) => {
+                Some((_, val)) => cpu_ids.push(val),
+                None => {
                     bail!("Failed to parse cpu ID {}", cpu_str);
                 }
             }
@@ -1041,15 +1041,15 @@ fn create_numa_nodes(
         let numa_str = numa_path.to_str().unwrap().trim();
         let node_id = if ROOT_PREFIX.is_empty() {
             match sscanf!(numa_str, "/sys/devices/system/node/node{usize}") {
-                Ok(val) => val,
-                Err(_) => {
+                Some(val) => val,
+                None => {
                     bail!("Failed to parse NUMA node ID {}", numa_str);
                 }
             }
         } else {
             match sscanf!(numa_str, "{str}/sys/devices/system/node/node{usize}") {
-                Ok((_, val)) => val,
-                Err(_) => {
+                Some((_, val)) => val,
+                None => {
                     bail!("Failed to parse NUMA node ID {}", numa_str);
                 }
             }
@@ -1092,8 +1092,8 @@ fn create_numa_nodes(
             let cpu_str = cpu_path.to_str().unwrap().trim();
             let cpu_id = if ROOT_PREFIX.is_empty() {
                 match sscanf!(cpu_str, "/sys/devices/system/node/node{usize}/cpu{usize}") {
-                    Ok((_, val)) => val,
-                    Err(_) => {
+                    Some((_, val)) => val,
+                    None => {
                         bail!("Failed to parse cpu ID {}", cpu_str);
                     }
                 }
@@ -1102,8 +1102,8 @@ fn create_numa_nodes(
                     cpu_str,
                     "{str}/sys/devices/system/node/node{usize}/cpu{usize}"
                 ) {
-                    Ok((_, _, val)) => val,
-                    Err(_) => {
+                    Some((_, _, val)) => val,
+                    None => {
                         bail!("Failed to parse cpu ID {}", cpu_str);
                     }
                 }

@@ -124,8 +124,10 @@ impl From<TuiArgs> for Config {
 }
 
 pub fn get_config_path() -> Result<PathBuf> {
-    let xdg_dirs = xdg::BaseDirectories::with_prefix("scxtop")?;
-    let config_path = xdg_dirs.get_config_file("scxtop.toml");
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("scxtop");
+    let config_path = xdg_dirs
+        .get_config_file("scxtop.toml")
+        .ok_or_else(|| anyhow::anyhow!("Failed to determine XDG config directory"))?;
     Ok(config_path)
 }
 

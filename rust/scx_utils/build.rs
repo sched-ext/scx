@@ -9,7 +9,7 @@ use std::io::{Read, Seek};
 use std::path::PathBuf;
 
 use scx_cargo::ClangInfo;
-use vergen::EmitBuilder;
+use vergen_gitcl::{CargoBuilder, Emitter, GitclBuilder};
 
 fn gen_bindings() {
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -65,10 +65,17 @@ fn gen_bindings() {
 fn main() {
     gen_bindings();
 
-    EmitBuilder::builder()
-        .git_sha(true)
-        .git_dirty(true)
-        .cargo_target_triple()
+    let gitcl = GitclBuilder::default()
+        .sha(true)
+        .dirty(true)
+        .build()
+        .unwrap();
+    let cargo = CargoBuilder::default().target_triple(true).build().unwrap();
+    Emitter::default()
+        .add_instructions(&gitcl)
+        .unwrap()
+        .add_instructions(&cargo)
+        .unwrap()
         .emit()
         .unwrap();
 

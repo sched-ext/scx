@@ -119,7 +119,8 @@ impl MemoryRenderer {
                     .border_type(BorderType::Rounded)
                     .style(theme.border_style()),
             )
-            .line_set(THICK)
+            .filled_symbol(THICK.horizontal)
+            .unfilled_symbol(THICK.horizontal)
             .filled_style(mem_gradient_color)
             .ratio(mem_used_percent / 100.0)
             .label(format!(
@@ -159,7 +160,8 @@ impl MemoryRenderer {
                     .border_type(BorderType::Rounded)
                     .style(theme.border_style()),
             )
-            .line_set(THICK)
+            .filled_symbol(THICK.horizontal)
+            .unfilled_symbol(THICK.horizontal)
             .filled_style(swap_gradient_color)
             .ratio(swap_used_percent / 100.0)
             .label(format!(
