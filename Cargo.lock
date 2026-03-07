@@ -4538,15 +4538,15 @@ dependencies = [
 
 [[package]]
 name = "tachyonfx"
-version = "0.22.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6258f6e8464efd9c4b197354159b577cdf56dc876d558cdc9a1e99f42178f454"
+checksum = "c144c687e9f3628c06add1b6db585a68d3cd285a9d7213b9bca836771e337592"
 dependencies = [
  "anpa",
  "bon",
  "compact_str",
  "micromath",
- "ratatui",
+ "ratatui-core",
  "thiserror 2.0.18",
  "unicode-width 0.2.2",
 ]
