@@ -71,7 +71,7 @@ def publish(crate, extra_args, ignore_existing):
 
         okay = False
         if ignore_existing:
-            already_re = r'(^.*)(crate.*already uploaded)(.*$)'
+            already_re = r'(^.*)(crate.*already uploaded|already exists on crates.io)(.*$)'
             m = re.match(already_re, stderr[-1])
             if m:
                 print(f'IGNORE: {m.group(1)}{underline(m.group(2))}{m.group(3)}')
