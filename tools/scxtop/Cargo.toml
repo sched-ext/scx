@@ -47,7 +47,7 @@ tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 xdg = "2"
 log-panics = { version = "2", features = ["with-backtrace"]}
-hashbrown = "0.15"
+hashbrown = "0.16"
 smartstring = { version = "1", features = ["serde"] }
 nix = { version = "0.30", features = ["time", "user"] }
 blazesym = "0.2"
