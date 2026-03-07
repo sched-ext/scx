@@ -309,11 +309,11 @@ pub fn setup_cpu_to_ringbuf_mapping(rb_cnt: usize, cpu_cnt: usize) -> Result<Vec
             topo.sort_by_key(|t| t.cpu);
 
             // Balance step: merge smallest groups randomly until we hit rb_cnt
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
+            use rand::RngExt;
+            let mut rng = rand::rng();
 
             while set_cnt > rb_cnt {
-                let cpu = rng.gen_range(0..cpu_cnt);
+                let cpu = rng.random_range(0..cpu_cnt);
                 let mut best_cpu = None;
                 let mut best_cnt = usize::MAX;
 
