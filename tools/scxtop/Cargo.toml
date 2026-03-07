@@ -45,7 +45,7 @@ sysinfo = "0.38"
 tokio-util = "0.7"
 tokio = { version = "1", features = ["full"] }
 toml = "1"
-xdg = "2"
+xdg = "3"
 log-panics = { version = "2", features = ["with-backtrace"]}
 hashbrown = "0.16"
 smartstring = { version = "1", features = ["serde"] }
