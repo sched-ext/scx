@@ -10,7 +10,7 @@ description = "Build time utilities for sched_ext schedulers"
 [dependencies]
 anyhow = "1"
 lazy_static = "1"
-sscanf = "0.4"
+sscanf = "0.5"
 version-compare = "0.1"
 glob = "0.3"
 tracing = "0.1"
