@@ -883,6 +883,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn cpumask_for_range(nr_cpus: usize) -> Cpumask {
+        scx_utils::set_cpumask_test_width(nr_cpus);
         let mut mask = Cpumask::new();
         for cpu in 0..nr_cpus {
             mask.set_cpu(cpu).unwrap();
