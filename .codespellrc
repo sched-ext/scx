@@ -3,11 +3,13 @@
 # only maintained sources and documentation, and skip generated/imported files.
 
 # Comma-separated list of paths/globs to skip.
-skip =
-    ./scheds/vmlinux,
-    ./rust/scx_raw_pmu,
-    ./**/*.autogen.*,
-    ./rust/scx_utils/src/enums.rs
+skip = ./scheds/vmlinux/*,./scheds/vmlinux/**/*,./rust/scx_raw_pmu/*,./rust/scx_raw_pmu/**/*,rust/scx_utils/src/enums.rs
+
+ignore-words-list = ratatui,affinitized
 
 # Regex of lines to ignore (project-specific terms / proper nouns).
-ignore-regex = .*(ratatui|Affinitized|affinitized).*
+ignore-regex = .*(Ratatui|Affinitized|affinitized).*
+
+# Optional quality tweaks
+count =
+quiet-level = 2
