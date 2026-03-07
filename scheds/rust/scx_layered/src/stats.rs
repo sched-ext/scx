@@ -474,16 +474,11 @@ impl LayerStats {
             fmt_pct(self.skip_remote_node),
         )?;
 
-        // per-node utilization and load (multi-node only)
+        // per-node utilization, load, and pinned utilization (multi-node only)
         if self.node_utils.len() > 1 {
-            let xnuma_tag = if self.xnuma_active != 0 {
-                " [xnuma]"
-            } else {
-                ""
-            };
-            let prefix = format!("  node util/load{xnuma_tag} ");
-            // N99=99999.9/99999.9 = 19 chars + 1 space = 20
-            let cell_width = 21;
+            let prefix = "  node    pin/ut/ld ";
+            // N99=999.9/999.9/99999.9 = 24 chars + 1 space = 25
+            let cell_width = 25;
             let usable = if max_width > prefix.len() {
                 max_width - prefix.len()
             } else {
@@ -494,6 +489,7 @@ impl LayerStats {
             for nid in 0..self.node_utils.len() {
                 let util = self.node_utils[nid];
                 let load = self.node_loads.get(nid).copied().unwrap_or(0.0);
+                let pin = self.node_pinned_utils.get(nid).copied().unwrap_or(0.0);
                 if nid % cells_per_row == 0 {
                     if nid > 0 {
                         writeln!(w)?;
@@ -502,35 +498,7 @@ impl LayerStats {
                 } else {
                     write!(w, " ")?;
                 }
-                write!(w, "N{}={:7.1}/{:7.1}", nid, util, load)?;
-            }
-            writeln!(w)?;
-        }
-
-        // node-pinned utilization and task counts (util/tasks per node)
-        if self.node_pinned_tasks.iter().any(|t| *t > 0) {
-            let prefix = "  pinned  util/tasks ";
-            // N99=99999.9/99999 = 18 chars + 1 space = 19
-            let cell_width = 19;
-            let usable = if max_width > prefix.len() {
-                max_width - prefix.len()
-            } else {
-                60
-            };
-            let cells_per_row = (usable / cell_width).max(1);
-
-            for nid in 0..self.node_pinned_utils.len() {
-                let util = self.node_pinned_utils[nid];
-                let tasks = self.node_pinned_tasks.get(nid).copied().unwrap_or(0);
-                if nid % cells_per_row == 0 {
-                    if nid > 0 {
-                        writeln!(w)?;
-                    }
-                    write!(w, "{prefix}")?;
-                } else {
-                    write!(w, " ")?;
-                }
-                write!(w, "N{}={:7.1}/{:5}", nid, util, tasks)?;
+                write!(w, "N{}={:5.1}/{:5.1}/{:7.1}", nid, pin, util, load)?;
             }
             writeln!(w)?;
         }
