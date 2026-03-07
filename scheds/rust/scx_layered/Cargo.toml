@@ -35,7 +35,7 @@ plain = "0.2"
 walkdir = "2"
 nvml-wrapper = "0.12"
 nix = { version = "0.31", features = ["sched"] }
-sysinfo = "0.35"
+sysinfo = "0.38"
 
 [dev-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0", features = ["testutils"] }
