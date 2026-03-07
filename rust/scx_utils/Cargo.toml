@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 sscanf = "0.5"
 tar = "0.4"
 walkdir = "2"
-version-compare = "0.1"
+version-compare = "0.2"
 zbus = { version = "5", optional = true }
 num = "0.4"
 tempfile = "3"
@@ -51,7 +51,7 @@ sscanf = "0.5"
 tar = "0.4"
 tempfile = "3"
 vergen = { version = "8", features = ["cargo", "git", "gitcl"] }
-version-compare = "0.1"
+version-compare = "0.2"
 walkdir = "2"
 
 [features]
