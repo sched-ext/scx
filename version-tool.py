@@ -114,6 +114,13 @@ def do_rust_deps(path, deps, new_deps):
                 in_dep = None
             continue
 
+        # [[bin]], [[bench]], [[test]], [[example]] are not dep sections
+        double_sect_re = r'^\s*\[\[([^\[\]]*)\]\]\s*$'
+        m = re.match(double_sect_re, line)
+        if m:
+            in_dep = None
+            continue
+
         if not in_dep:
             continue
 
