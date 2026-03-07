@@ -2704,22 +2704,22 @@ dependencies = [
 
 [[package]]
 name = "object"
-version = "0.36.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
-dependencies = [
- "flate2",
- "memchr",
- "ruzstd 0.7.3",
-]
-
-[[package]]
-name = "object"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "object"
+version = "0.38.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "271638cd5fa9cca89c4c304675ca658efc4e64a66c716b7cfe1afb4b9611dbbc"
+dependencies = [
+ "flate2",
+ "memchr",
+ "ruzstd",
 ]
 
 [[package]]
@@ -3576,20 +3576,11 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ruzstd"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fad02996bfc73da3e301efe90b1837be9ed8f4a462b6ed410aa35d00381de89f"
-dependencies = [
- "twox-hash 1.6.3",
-]
-
-[[package]]
-name = "ruzstd"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5ff0cc5e135c8870a775d3320910cd9b564ec036b4dc0b8741629020be63f01"
 dependencies = [
- "twox-hash 2.1.2",
+ "twox-hash",
 ]
 
 [[package]]
@@ -3674,7 +3665,7 @@ dependencies = [
  "cc",
  "indoc",
  "libbpf-sys",
- "object 0.36.7",
+ "object 0.38.1",
 ]
 
 [[package]]
@@ -3729,7 +3720,7 @@ dependencies = [
  "libbpf-cargo",
  "libbpf-rs",
  "regex",
- "ruzstd 0.8.2",
+ "ruzstd",
  "sscanf",
  "tar",
  "tempfile",
@@ -4105,7 +4096,7 @@ dependencies = [
  "nvml-wrapper-sys",
  "paste",
  "regex",
- "ruzstd 0.8.2",
+ "ruzstd",
  "scx_cargo",
  "scx_stats",
  "serde",
@@ -4995,16 +4986,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "twox-hash"
-version = "1.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
-dependencies = [
- "cfg-if",
- "static_assertions",
 ]
 
 [[package]]
