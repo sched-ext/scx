@@ -24,7 +24,7 @@ ctrlc = { version = "3", features = ["termination"] }
 libbpf-rs = "=0.26.1"
 libc = "0.2"
 log = "0.4"
-nix = { version = "0.30", features = ["process"] }
+nix = { version = "0.31", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 simplelog = "0.12"
 

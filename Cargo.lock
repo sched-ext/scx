@@ -2416,18 +2416,6 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
-dependencies = [
- "bitflags 2.11.0",
- "cfg-if",
- "cfg_aliases",
- "libc",
-]
-
-[[package]]
-name = "nix"
 version = "0.31.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
@@ -3722,7 +3710,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "nix 0.30.1",
+ "nix 0.31.2",
  "quanta",
  "ratatui",
  "scx_cargo",
@@ -3762,7 +3750,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "nix 0.30.1",
+ "nix 0.31.2",
  "scx_arena",
  "scx_cargo",
  "scx_p2dq",
@@ -3830,7 +3818,7 @@ dependencies = [
  "itertools 0.14.0",
  "libbpf-rs",
  "libc",
- "nix 0.30.1",
+ "nix 0.31.2",
  "ordered-float 3.9.2",
  "plain",
  "rlimit",
@@ -3862,7 +3850,7 @@ dependencies = [
  "lazy_static",
  "libbpf-rs",
  "libc",
- "nix 0.30.1",
+ "nix 0.31.2",
  "nvml-wrapper",
  "once_cell",
  "plain",
@@ -3898,7 +3886,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "maplit",
- "nix 0.30.1",
+ "nix 0.31.2",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
@@ -4111,7 +4099,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "nix 0.30.1",
+ "nix 0.31.2",
  "num",
  "nvml-wrapper",
  "nvml-wrapper-sys",
@@ -4144,7 +4132,7 @@ dependencies = [
  "fb_procfs",
  "libbpf-rs",
  "log",
- "nix 0.30.1",
+ "nix 0.31.2",
  "ordered-float 3.9.2",
  "scx_arena",
  "scx_cargo",
@@ -4192,7 +4180,7 @@ dependencies = [
  "libc",
  "log",
  "log-panics",
- "nix 0.30.1",
+ "nix 0.31.2",
  "num-format",
  "perfetto_protos",
  "plain",

@@ -36,7 +36,7 @@ plain = "0.2"
 gpoint = "0.2"
 combinations = "0.1"
 rlimit = "0.10"
-nix = "0.30"
+nix = "0.31"
 
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.0" }
