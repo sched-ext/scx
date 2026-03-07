@@ -41,6 +41,12 @@ enum Commands {
     BumpVersions {
         #[command(flatten)]
         target: BumpTarget,
+        #[arg(
+            short = 'm',
+            long = "min-version",
+            help = "Minimum version floor; crates below this are set to it, others bump patch"
+        )]
+        min_version: Option<String>,
     },
 }
 
@@ -63,8 +69,8 @@ fn main() {
 
     let res = match cli.command {
         Commands::Versions { format } => versions::version_command(format),
-        Commands::BumpVersions { target } => {
-            bump_versions::bump_versions_command(target.packages, target.all)
+        Commands::BumpVersions { target, min_version } => {
+            bump_versions::bump_versions_command(target.packages, target.all, min_version)
         }
     };
 
