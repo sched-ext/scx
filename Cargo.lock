@@ -2741,18 +2741,18 @@ dependencies = [
 
 [[package]]
 name = "ordered-float"
-version = "3.9.2"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1e1c390732d15f1d48471625cd92d154e66db2c56645e29a9cd26f4699f72dc"
+checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
 dependencies = [
  "num-traits",
 ]
 
 [[package]]
 name = "ordered-float"
-version = "4.6.0"
+version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
+checksum = "7f4779c6901a562440c3786d08192c6fbda7c1c2060edd10006b05ee35d10f2d"
 dependencies = [
  "num-traits",
 ]
@@ -3787,7 +3787,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "nix 0.31.2",
- "ordered-float 3.9.2",
+ "ordered-float 5.1.0",
  "plain",
  "rlimit",
  "scx_arena",
@@ -3879,7 +3879,7 @@ dependencies = [
  "lazy_static",
  "libbpf-rs",
  "libc",
- "ordered-float 3.9.2",
+ "ordered-float 5.1.0",
  "scx_arena",
  "scx_cargo",
  "scx_stats",
@@ -3946,7 +3946,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "ordered-float 3.9.2",
+ "ordered-float 5.1.0",
  "plain",
  "procfs",
  "scx_cargo",
@@ -3983,7 +3983,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "ordered-float 3.9.2",
+ "ordered-float 5.1.0",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
@@ -4101,7 +4101,7 @@ dependencies = [
  "libbpf-rs",
  "log",
  "nix 0.31.2",
- "ordered-float 3.9.2",
+ "ordered-float 5.1.0",
  "scx_arena",
  "scx_cargo",
  "scx_stats",
