@@ -13,7 +13,7 @@ clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
 crossbeam = "0.8"
 libbpf-rs = "=0.26.1"
 log = "0.4"
-nvml-wrapper = "0.11"
+nvml-wrapper = "0.12"
 nvml-wrapper-sys = "0.9"
 perf-event-open-sys = "5"
 scx_stats = { path = "../../../rust/scx_stats", version = "1.1.0" }
