@@ -39,7 +39,7 @@ def query_crates_io(deps):
             req = urllib.request.Request(url, headers={'User-Agent': 'scx-version-tool'})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 info = json.loads(resp.read())
-            latest = info['crate']['newest_version']
+            latest = info['crate'].get('max_stable_version') or info['crate']['newest_version']
         except Exception as e:
             warn(f'Failed to query crates.io for {name}: {e}')
             continue
