@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.request
 
 verbose = False
 
@@ -21,6 +22,54 @@ def dbg(line):
 
 def underline(string):
     return f'\033[4m{string}\033[0m'
+
+def query_crates_io(deps):
+    """Query crates.io for the latest version of each dep. Return dict of
+    deps that have a newer version beyond the current spec's compatibility
+    range."""
+    newer = {}
+    for name in sorted(deps.keys()):
+        ver = deps[name]
+        # skip exact pins and special operators
+        if ver.startswith('=') or ver.startswith('>') or ver.startswith('<'):
+            continue
+
+        try:
+            url = f'https://crates.io/api/v1/crates/{name}'
+            req = urllib.request.Request(url, headers={'User-Agent': 'scx-version-tool'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                info = json.loads(resp.read())
+            latest = info['crate'].get('max_stable_version') or info['crate']['newest_version']
+        except Exception as e:
+            warn(f'Failed to query crates.io for {name}: {e}')
+            continue
+
+        # parse our spec
+        parts = ver.split('.')
+        our_major = int(parts[0])
+        our_minor = int(parts[1]) if len(parts) > 1 else 0
+
+        # parse latest
+        # strip build metadata (e.g., "1.6.3+v1.6.3")
+        lat_clean = latest.split('+')[0]
+        lparts = lat_clean.split('.')
+        try:
+            lat_major = int(lparts[0])
+            lat_minor = int(lparts[1]) if len(lparts) > 1 else 0
+        except ValueError:
+            continue
+
+        # check if a newer version exists beyond our compatibility range
+        if our_major == 0:
+            # 0.x: minor is the breaking boundary
+            if lat_major > 0 or lat_minor > our_minor:
+                newer[name] = latest
+        else:
+            # >=1.0: major is the breaking boundary
+            if lat_major > our_major:
+                newer[name] = latest
+
+    return newer
 
 def get_rust_paths():
     result = subprocess.run(['git', 'ls-files'], stdout=subprocess.PIPE)
@@ -114,6 +163,13 @@ def do_rust_deps(path, deps, new_deps):
                 in_dep = None
             continue
 
+        # [[bin]], [[bench]], [[test]], [[example]] are not dep sections
+        double_sect_re = r'^\s*\[\[([^\[\]]*)\]\]\s*$'
+        m = re.match(double_sect_re, line)
+        if m:
+            in_dep = None
+            continue
+
         if not in_dep:
             continue
 
@@ -200,6 +256,8 @@ def main():
                                      description='Check and update versions. "version-tool.py > vers.json" to generate the template. Apply the edited version with "version-too.py -u vers.json"')
     parser.add_argument('-u', '--update', metavar='JSON', type=str,
                         help='Update versions from the specified json file')
+    parser.add_argument('-q', '--query-new', action='store_true',
+                        help='Query crates.io for newer versions and include in output')
     parser.add_argument('-v', '--verbose', action='store_true')
 
     args = parser.parse_args()
@@ -210,6 +268,7 @@ def main():
     vers_key = '00-versions'
     rust_vers_key = '01-rust-versions'
     rust_deps_key = '02-rust-deps'
+    newer_key = '03-newer-versions'
 
     vers = {}
     rust_vers = {}
@@ -250,6 +309,12 @@ def main():
         manifest = { vers_key: vers,
                      rust_vers_key: rust_vers,
                      rust_deps_key: rust_deps }
+
+        if args.query_new:
+            print('Querying crates.io for newer versions...', file=sys.stderr)
+            newer = query_crates_io(rust_deps)
+            if newer:
+                manifest[newer_key] = newer
 
         print(json.dumps(manifest, sort_keys=True, indent=4))
 

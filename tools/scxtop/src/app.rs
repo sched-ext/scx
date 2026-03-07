@@ -1616,7 +1616,8 @@ impl<'a> App<'a> {
 
                     let line_gauge = LineGauge::default()
                         .ratio(ratio)
-                        .line_set(THICK)
+                        .filled_symbol(THICK.horizontal)
+                        .unfilled_symbol(THICK.horizontal)
                         .label(Line::from(label).style(self.theme().text_color()))
                         .filled_style(Style::default().fg(gradient_color).bg(Color::Reset))
                         .unfilled_style(
@@ -1844,7 +1845,8 @@ impl<'a> App<'a> {
                     let line_gauge = LineGauge::default()
                         .ratio(ratio)
                         .label(Line::from(label).style(self.theme().text_color()))
-                        .line_set(THICK)
+                        .filled_symbol(THICK.horizontal)
+                        .unfilled_symbol(THICK.horizontal)
                         .filled_style(Style::default().fg(gradient_color).bg(Color::Reset))
                         .unfilled_style(
                             Style::default()
@@ -2387,7 +2389,8 @@ impl<'a> App<'a> {
                     let line_gauge = LineGauge::default()
                         .ratio(ratio)
                         .label(Line::from(label).style(self.theme().text_color()))
-                        .line_set(THICK)
+                        .filled_symbol(THICK.horizontal)
+                        .unfilled_symbol(THICK.horizontal)
                         .filled_style(Style::default().fg(gradient_color))
                         .unfilled_style(
                             Style::default().fg(self

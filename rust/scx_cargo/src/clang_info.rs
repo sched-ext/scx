@@ -53,7 +53,7 @@ impl ClangInfo {
         let stdout = String::from_utf8(output.stdout)?;
         let (mut ver, mut arch) = (None, None);
         for line in stdout.lines() {
-            if let Ok(v) = sscanf!(
+            if let Some(v) = sscanf!(
                 Self::skip_clang_version_prefix(line),
                 "clang version {String}"
             ) {
@@ -62,7 +62,7 @@ impl ClangInfo {
                 ver = Some(v.split_whitespace().next().unwrap().to_string());
                 continue;
             }
-            if let Ok(v) = sscanf!(line, "Target: {String}") {
+            if let Some(v) = sscanf!(line, "Target: {String}") {
                 arch = Some(v.split('-').next().unwrap().to_string());
                 continue;
             }
@@ -146,7 +146,7 @@ impl ClangInfo {
 
         let mut endian = None;
         for line in stdout.lines() {
-            if let Ok(v) = sscanf!(line, "#define __BYTE_ORDER__ {str}") {
+            if let Some(v) = sscanf!(line, "#define __BYTE_ORDER__ {str}") {
                 endian = Some(match v {
                     "__ORDER_LITTLE_ENDIAN__" => "little",
                     "__ORDER_BIG_ENDIAN__" => "big",

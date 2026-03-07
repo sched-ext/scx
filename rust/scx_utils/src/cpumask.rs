@@ -402,10 +402,10 @@ pub fn read_cpulist(cpulist: &str) -> Result<Vec<usize>> {
     let mut cpu_ids = vec![];
     for group in cpu_groups.iter() {
         let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
-            Ok((x, y)) => (x, y),
-            Err(_) => match sscanf!(group.trim(), "{usize}") {
-                Ok(x) => (x, x),
-                Err(_) => {
+            Some((x, y)) => (x, y),
+            None => match sscanf!(group.trim(), "{usize}") {
+                Some(x) => (x, x),
+                None => {
                     bail!("Failed to parse cpulist {}", group.trim());
                 }
             },

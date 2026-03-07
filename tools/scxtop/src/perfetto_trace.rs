@@ -6,7 +6,7 @@
 use anyhow::Result;
 use procfs::process::Process as ProcProcess;
 use rand::rngs::StdRng;
-use rand::RngCore;
+use rand::Rng;
 use rand::SeedableRng;
 use scx_utils::scx_enums;
 
