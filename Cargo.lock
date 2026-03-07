@@ -1058,7 +1058,7 @@ dependencies = [
  "libc",
  "mio 0.8.11",
  "parking_lot",
- "signal-hook",
+ "signal-hook 0.3.18",
  "signal-hook-mio",
  "winapi",
 ]
@@ -1075,7 +1075,7 @@ dependencies = [
  "parking_lot",
  "rustix 0.38.44",
  "serde",
- "signal-hook",
+ "signal-hook 0.3.18",
  "signal-hook-mio",
  "winapi",
 ]
@@ -1095,7 +1095,7 @@ dependencies = [
  "parking_lot",
  "rustix 1.1.4",
  "serde",
- "signal-hook",
+ "signal-hook 0.3.18",
  "signal-hook-mio",
  "winapi",
 ]
@@ -1181,7 +1181,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "signal-hook",
+ "signal-hook 0.3.18",
  "unicode-segmentation",
  "unicode-width 0.1.14",
 ]
@@ -4189,7 +4189,7 @@ dependencies = [
  "scx_utils",
  "serde",
  "serde_json",
- "signal-hook",
+ "signal-hook 0.4.3",
  "simplelog",
  "smartstring",
  "sysinfo",
@@ -4329,6 +4329,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-hook"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b57709da74f9ff9f4a27dce9526eec25ca8407c45a7887243b031a58935fb8e"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
 name = "signal-hook-mio"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4337,7 +4347,7 @@ dependencies = [
  "libc",
  "mio 0.8.11",
  "mio 1.1.1",
- "signal-hook",
+ "signal-hook 0.3.18",
 ]
 
 [[package]]
@@ -4685,7 +4695,7 @@ dependencies = [
  "phf",
  "serde",
  "sha2",
- "signal-hook",
+ "signal-hook 0.3.18",
  "siphasher",
  "terminfo",
  "termios",
