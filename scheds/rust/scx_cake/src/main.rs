@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 // scx_cake - sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling
 
-mod calibrate;
-mod stats;
 mod topology;
 mod tui;
 
 use core::sync::atomic::Ordering;
+use std::io::IsTerminal;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -16,6 +15,8 @@ use clap::{Parser, ValueEnum};
 use log::{info, warn};
 use nix::sys::signal::{SigSet, Signal};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
+use scx_arena::ArenaLib;
+use scx_utils::NR_CPU_IDS;
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 mod bpf_intf {
@@ -40,6 +41,8 @@ pub enum Profile {
     Gaming,
     /// Balanced profile for general desktop use (same as gaming for now)
     Default,
+    /// Power-efficient profile for handhelds/laptops on battery (DVFS enabled)
+    Battery,
 }
 
 impl Profile {
@@ -54,97 +57,13 @@ impl Profile {
             Profile::Gaming => (2000, 8000, 100000),
             // Default: Same as gaming for now
             Profile::Default => (2000, 8000, 100000),
+            // Battery: 4ms quantum — fewer context switches = less power
+            Profile::Battery => (4000, 12000, 200000),
         }
     }
 
-    /// Per-tier starvation thresholds in nanoseconds (4 tiers + padding)
-    fn starvation_threshold(&self) -> [u64; 8] {
-        match self {
-            Profile::Esports => [
-                1_500_000,  // T0 Critical: 1.5ms
-                4_000_000,  // T1 Interactive: 4ms
-                20_000_000, // T2 Frame: 20ms
-                50_000_000, // T3 Bulk: 50ms
-                50_000_000, 50_000_000, 50_000_000, 50_000_000, // Padding
-            ],
-            Profile::Legacy => [
-                6_000_000,   // T0 Critical: 6ms
-                16_000_000,  // T1 Interactive: 16ms
-                80_000_000,  // T2 Frame: 80ms
-                200_000_000, // T3 Bulk: 200ms
-                200_000_000,
-                200_000_000,
-                200_000_000,
-                200_000_000, // Padding
-            ],
-            Profile::Gaming | Profile::Default => [
-                3_000_000,   // T0 Critical: 3ms
-                8_000_000,   // T1 Interactive: 8ms
-                40_000_000,  // T2 Frame: 40ms
-                100_000_000, // T3 Bulk: 100ms
-                100_000_000,
-                100_000_000,
-                100_000_000,
-                100_000_000, // Padding
-            ],
-        }
-    }
-
-    /// Tier quantum multipliers (fixed-point, 1024 = 1.0x) — 4 tiers + padding
-    fn tier_multiplier(&self) -> [u32; 8] {
-        match self {
-            Profile::Esports | Profile::Legacy | Profile::Gaming | Profile::Default => [
-                768,  // T0 Critical: 0.75x
-                1024, // T1 Interactive: 1.0x
-                1229, // T2 Frame: 1.2x
-                1434, // T3 Bulk: 1.4x
-                1434, 1434, 1434, 1434, // Padding
-            ],
-        }
-    }
-
-    /// Wait budget per tier in nanoseconds — 4 tiers + padding
-    fn wait_budget(&self) -> [u64; 8] {
-        match self {
-            Profile::Esports => [
-                50_000,    // T0 Critical: 50µs
-                1_000_000, // T1 Interactive: 1ms
-                4_000_000, // T2 Frame: 4ms
-                0,         // T3 Bulk: no limit
-                0, 0, 0, 0, // Padding
-            ],
-            Profile::Legacy => [
-                200_000,    // T0 Critical: 200µs
-                4_000_000,  // T1 Interactive: 4ms
-                16_000_000, // T2 Frame: 16ms
-                0,          // T3 Bulk: no limit
-                0, 0, 0, 0, // Padding
-            ],
-            Profile::Gaming | Profile::Default => [
-                100_000,   // T0 Critical: 100µs
-                2_000_000, // T1 Interactive: 2ms
-                8_000_000, // T2 Frame: 8ms
-                0,         // T3 Bulk: no limit
-                0, 0, 0, 0, // Padding
-            ],
-        }
-    }
-
-    /// Consolidated tier config - packs quantum/multiplier/budget/starvation into 64-bit per tier.
-    fn tier_configs(&self, quantum_us: u64) -> [u64; 8] {
-        let starvation = self.starvation_threshold();
-        let multiplier = self.tier_multiplier();
-        let budget = self.wait_budget();
-
-        let mut configs = [0u64; 8];
-        for i in 0..8 {
-            configs[i] = (multiplier[i] as u64 & 0xFFF)
-                | ((quantum_us & 0xFFFF) << 12)
-                | (((budget[i] >> 10) & 0xFFFF) << 28)
-                | (((starvation[i] >> 10) & 0xFFFFF) << 44);
-        }
-        configs
-    }
+    // DVFS — disabled (tick architecture removed, no runtime effect).
+    // RODATA symbols retained in BPF for loader compat; JIT eliminates.
 }
 
 /// 🍰 scx_cake: A sched_ext scheduler applying CAKE bufferbloat concepts
@@ -190,6 +109,10 @@ struct Args {
     ///
     /// DEFAULT: Balanced profile for general desktop use.
     ///   - Currently same as gaming; will diverge in future versions
+    ///
+    /// BATTERY: Power-efficient for handhelds/laptops on battery.
+    ///   - Quantum: 4000µs, DVFS enabled, per-tier frequency scaling
+    ///   - T0: 100%, T1: 87.5%, T2: 75%, T3: 50%
     #[arg(long, short, value_enum, default_value_t = Profile::Gaming, verbatim_doc_comment)]
     profile: Profile,
 
@@ -239,6 +162,13 @@ struct Args {
     /// Default: 1 second
     #[arg(long, default_value_t = 1, verbatim_doc_comment)]
     interval: u64,
+
+    /// Live in-kernel testing mode for automated benchmarking.
+    ///
+    /// Runs the scheduler for 10 seconds, collects BPF data points,
+    /// and prints a structured JSON output to stdout.
+    #[arg(long, verbatim_doc_comment)]
+    testing: bool,
 }
 
 impl Args {
@@ -265,7 +195,7 @@ impl<'a> Scheduler<'a> {
         args: Args,
         open_object: &'a mut std::mem::MaybeUninit<libbpf_rs::OpenObject>,
     ) -> Result<Self> {
-        use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+        use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 
         // Open and load the BPF skeleton
         let skel_builder = BpfSkelBuilder::default();
@@ -283,38 +213,73 @@ impl<'a> Scheduler<'a> {
         // Get effective values (profile + CLI overrides)
         let (quantum, new_flow_bonus, _starvation) = args.effective_values();
 
-        // ETD: Empirical Topology Discovery — display-grade measurement
-        // Measures inter-core CAS latency for startup heatmap and TUI display
-        info!("Starting ETD calibration...");
-        let latency_matrix = calibrate::calibrate_full_matrix(
-            topo.nr_cpus,
-            &calibrate::EtdConfig::default(),
-            |current, total, is_complete| {
-                tui::render_calibration_progress(current, total, is_complete);
-            },
-        );
+        // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
+        let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
 
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
             rodata.quantum_ns = quantum * 1000;
             rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
-            rodata.enable_stats = args.verbose;
-            rodata.tier_configs = args.profile.tier_configs(quantum);
+            // Stats/telemetry: only available in debug builds (CAKE_RELEASE omits the field).
+            // In release, --verbose is silently ignored — zero overhead for production gaming.
+            #[cfg(debug_assertions)]
+            {
+                rodata.enable_stats = args.verbose || args.testing;
+            }
 
-            // Topology: only has_hybrid is live (DVFS scaling in cake_tick)
+            // Topology: has_hybrid enables P/E-core DVFS scaling in cake_tick
             rodata.has_hybrid = topo.has_hybrid_cores;
 
             // Per-LLC DSQ partitioning: populate CPU→LLC mapping
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
             rodata.nr_cpus = topo.nr_cpus.min(64) as u32; // Rule 39: bounds kick scan loop
+            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(64) as u32; // V3: PHYS_FIRST scan mask
+
+            // Ferry explicit 64-bit topology arrays down into BPF (O(1) execution replacements)
+
+            // Heterogeneous Gaming Topology
+            rodata.big_core_phys_mask = topo.big_core_phys_mask;
+            rodata.big_core_smt_mask = topo.big_core_smt_mask;
+            rodata.little_core_mask = topo.little_core_mask;
+            rodata.vcache_llc_mask = topo.vcache_llc_mask;
+            rodata.has_vcache = topo.has_vcache;
+
+            for i in 0..topo.cpu_sibling_map.len() {
+                rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i];
+            }
+            for i in 0..topo.llc_cpu_mask.len().min(8) {
+                rodata.llc_cpu_mask[i] = topo.llc_cpu_mask[i];
+            }
+            for i in 0..topo.core_cpu_mask.len().min(32) {
+                rodata.core_cpu_mask[i] = topo.core_cpu_mask[i];
+            }
+
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
+            // Arena library: nr_cpu_ids must be set before load() — arena_init
+            // checks this and returns -ENODEV (errno 19) if uninitialized.
+            rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
         }
 
         // Load the BPF program
-        let skel = open_skel.load().context("Failed to load BPF program")?;
+        let mut skel = open_skel.load().context("Failed to load BPF program")?;
+
+        // Initialize the BPF arena library.
+        // Must happen after load() (BPF maps are now live) but before attach_struct_ops()
+        // (scheduler not yet running, so init_task hasn't fired yet).
+        // ArenaLib::setup() runs SEC("syscall") probes:
+        //   1. arena_init: allocates static pages, inits task stack allocator
+        //   2. arena_topology_node_init: registers topology nodes for arena traversal
+        let task_ctx_size = std::mem::size_of::<bpf_intf::cake_task_ctx>();
+        let arena = ArenaLib::init(skel.object_mut(), task_ctx_size, topo.nr_cpus)
+            .context("Failed to create ArenaLib")?;
+        arena.setup().context("Failed to initialize BPF arena")?;
+        info!(
+            "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
+            task_ctx_size, topo.nr_cpus
+        );
 
         Ok(Self {
             skel,
@@ -326,31 +291,75 @@ impl<'a> Scheduler<'a> {
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
         // Attach the scheduler
-        let _link = self
+        let link = self
             .skel
             .maps
             .cake_ops
             .attach_struct_ops()
             .context("Failed to attach scheduler")?;
 
-        self.show_startup_splash()?;
+        // Standard startup: simple log message like other sched_ext schedulers
+        let version = env!("CARGO_PKG_VERSION");
+        info!(
+            "scx_cake v{} started ({} CPUs, {} LLCs, profile: {:?})",
+            version,
+            self.topology.nr_cpus,
+            self.topology
+                .llc_cpu_mask
+                .iter()
+                .filter(|&&m| m != 0)
+                .count()
+                .max(1),
+            self.args.profile
+        );
+        if self.args.testing {
+            info!("Running in benchmarking mode for 10 seconds...");
+            std::thread::sleep(std::time::Duration::from_secs(1)); // Warmup
 
-        if self.args.verbose {
+            let mut start_dispatches = 0u64;
+            for cpu in 0..self.topology.nr_cpus {
+                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
+                start_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
+            }
+
+            let start_time = std::time::Instant::now();
+            let mut elapsed = 0;
+            while elapsed < 10 && !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                elapsed += 1;
+            }
+            let duration = start_time.elapsed().as_secs_f64();
+
+            let mut end_dispatches = 0u64;
+            for cpu in 0..self.topology.nr_cpus {
+                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
+                end_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
+            }
+
+            let delta = end_dispatches.saturating_sub(start_dispatches);
+            let throughput = delta as f64 / duration;
+            println!("{{\"duration_sec\": {:.2}, \"total_dispatches\": {}, \"dispatches_per_sec\": {:.2}}}", 
+                     duration, delta, throughput);
+
+            shutdown.store(true, Ordering::Relaxed);
+        } else if self.args.verbose && std::io::stdout().is_terminal() {
             // Run TUI mode
             tui::run_tui(
                 &mut self.skel,
                 shutdown.clone(),
                 self.args.interval,
                 self.topology.clone(),
+                self.latency_matrix.clone(),
             )?;
         } else {
+            if self.args.verbose && !std::io::stdout().is_terminal() {
+                warn!("TUI disabled: no terminal detected (headless mode)");
+            }
             // Event-based silent mode - block on signalfd, poll with 60s timeout for UEI check
-
-            // Block SIGINT and SIGTERM from normal delivery
+            // Signals are already blocked from main() — just create signalfd to read them
             let mut mask = SigSet::empty();
             mask.add(Signal::SIGINT);
             mask.add(Signal::SIGTERM);
-            mask.thread_block().context("Failed to block signals")?;
 
             // Create signalfd to receive signals as readable events
             let sfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK)
@@ -407,20 +416,14 @@ impl<'a> Scheduler<'a> {
         }
 
         info!("scx_cake scheduler shutting down");
-        Ok(())
-    }
 
-    fn show_startup_splash(&self) -> Result<()> {
-        let (q, _nfb, starv) = self.args.effective_values();
-        let profile_str = format!("{:?}", self.args.profile).to_uppercase();
+        // Drop struct_ops link BEFORE uei_report — this triggers the kernel to
+        // set UEI kind=SCX_EXIT_UNREG. Matches scx_bpfland/scx_p2dq/scx_lavd
+        // pattern: `let _ = self.struct_ops.take(); uei_report!(...)`
+        drop(link);
 
-        tui::render_startup_screen(tui::StartupParams {
-            topology: &self.topology,
-            latency_matrix: &self.latency_matrix,
-            profile: &profile_str,
-            quantum: q,
-            starvation: starv,
-        })
+        // Standard UEI exit report — produces "EXIT: unregistered from user space".
+        scx_utils::uei_report!(&self.skel, uei).map(|_| ())
     }
 }
 
@@ -429,7 +432,17 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Set up signal handler
+    // Block SIGINT/SIGTERM early, before any threads spawn (ctrlc crate spawns one).
+    // This ensures signals are never delivered via default handler (which would
+    // exit with 128+signum=143 in CI). signalfd in run() reads them cleanly.
+    {
+        let mut mask = SigSet::empty();
+        mask.add(Signal::SIGINT);
+        mask.add(Signal::SIGTERM);
+        mask.thread_block().ok(); // best-effort; signalfd will catch in run()
+    }
+
+    // Set up signal handler (ctrlc thread inherits our signal mask)
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
 
