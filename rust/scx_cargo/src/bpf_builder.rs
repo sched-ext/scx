@@ -530,7 +530,7 @@ mod tests {
                 &arch, &ver, &sha1,
             );
 
-            assert!(regex::Regex::new(r"^([1-9][0-9]*\.[1-9][0-9][a-z0-9-]*)$")
+            assert!(regex::Regex::new(r"^([1-9][0-9]*\.[0-9]+[a-z0-9-]*)$")
                 .unwrap()
                 .is_match(&ver));
             assert!(regex::Regex::new(r"^[0-9a-z]{12}$")

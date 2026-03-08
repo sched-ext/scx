@@ -1548,12 +1548,7 @@ void BPF_STRUCT_OPS(pandemonium_quiescent, struct task_struct *p,
 void BPF_STRUCT_OPS(pandemonium_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
 {
-	u32 nr = scx_bpf_reenqueue_local();
-	if (nr > 0) {
-		struct pandemonium_stats *s = get_stats();
-		if (s)
-			s->nr_reenqueue += nr;
-	}
+	scx_bpf_reenqueue_local();
 }
 
 // CPU HOTPLUG CALLBACKS

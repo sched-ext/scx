@@ -60,6 +60,8 @@ enums = [
             ("scx_enq_flags", "SCX_ENQ_LAST"),
             ("scx_enq_flags", "SCX_ENQ_CLEAR_OPSS"),
             ("scx_enq_flags", "SCX_ENQ_DSQ_PRIQ"),
+
+            ("scx_deq_flags", "SCX_DEQ_SCHED_CHANGE"),
 ]
 
 def localvar(symbol):

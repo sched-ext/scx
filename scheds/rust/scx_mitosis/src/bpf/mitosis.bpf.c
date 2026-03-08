@@ -153,7 +153,7 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 	struct cgroup *cgrp;
 
 	if (!cpu_controller_disabled) {
-		cgrp = __COMPAT_scx_bpf_task_cgroup(p);
+		cgrp = scx_bpf_task_cgroup(p);
 	} else {
 		/*
 		 * When CPU controller is disabled, scx_bpf_task_cgroup() returns
