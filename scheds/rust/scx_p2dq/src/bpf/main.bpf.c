@@ -2662,7 +2662,7 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 						if (target_cpu >= 0 && target_cpu < NR_CPUS) {
 							target_cpuc = lookup_cpu_ctx(target_cpu);
 							if (target_cpuc) {
-								__COMPAT_scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER,
+								scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER,
 												p,
 												target_cpuc->affn_dsq,
 												0);
