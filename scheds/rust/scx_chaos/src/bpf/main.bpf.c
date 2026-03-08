@@ -465,18 +465,16 @@ complete_p2dq_enqueue_move(struct enqueue_promise  *pro,
 			" after a task was placed in the delay dsq!");
 		break;
 	case P2DQ_ENQUEUE_PROMISE_FIFO:
-		scx_bpf_dsq_move_set_slice(
-			it__iter, *MEMBER_VPTR(pro->fifo, .slice_ns));
+		scx_bpf_dsq_move_set_slice(it__iter,
+					   *MEMBER_VPTR(pro->fifo, .slice_ns));
 		scx_bpf_dsq_move(it__iter, p, pro->fifo.dsq_id,
-						pro->fifo.enq_flags);
+				 pro->fifo.enq_flags);
 		break;
 	case P2DQ_ENQUEUE_PROMISE_VTIME:
-		scx_bpf_dsq_move_set_slice(it__iter,
-							  pro->vtime.slice_ns);
-		scx_bpf_dsq_move_set_vtime(it__iter,
-							  pro->vtime.vtime);
-		scx_bpf_dsq_move_vtime(
-			it__iter, p, pro->vtime.dsq_id, pro->vtime.enq_flags);
+		scx_bpf_dsq_move_set_slice(it__iter, pro->vtime.slice_ns);
+		scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
+		scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id,
+				       pro->vtime.enq_flags);
 		break;
 	case P2DQ_ENQUEUE_PROMISE_ATQ_FIFO:
 	case P2DQ_ENQUEUE_PROMISE_ATQ_VTIME:
