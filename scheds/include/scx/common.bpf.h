@@ -832,21 +832,21 @@ static inline int ctzll(u64 v)
 
 	/*
 	 * Each isolated bit produces a unique 6-bit value, guaranteed by the
-	 * De Bruijn property. Calculate a unique index into the lookup table
+	 * De Bruijn property. Calculate a unique index into the lookup table
 	 * using the magic constant and a right shift.
 	 *
-	 * Multiplying by the 64-bit constant “spreads out” that 1-bit into a
+	 * Multiplying by the 64-bit constant "spreads out" that 1-bit into a
 	 * unique pattern in the top 6 bits. This uniqueness property is
-	 * exactly what a De Bruijn sequence guarantees: Every possible 6-bit
+	 * exactly what a De Bruijn sequence guarantees: Every possible 6-bit
 	 * pattern (in top bits) occurs exactly once for each LSB position. So,
 	 * the constant 0x03f79d71b4cb0a89ULL is carefully chosen to be a
-	 * De Bruijn sequence, ensuring no collisions in the table index.
+	 * De Bruijn sequence, ensuring no collisions in the table index.
 	 */
 	index = (lowest_bit * DEBRUIJN_CONSTANT) >> 58;
 
 	/*
 	 * Lookup in a precomputed table. No collision is guaranteed by the
-	 * De Bruijn property.
+	 * De Bruijn property.
 	 */
 	lt = MEMBER_VPTR(lookup_table, [index]);
 	return (lt)? *lt : -1;
@@ -868,6 +868,7 @@ static inline u64 scale_by_task_weight_inverse(const struct task_struct *p, u64 
 {
 	return value * 100 / p->scx.weight;
 }
+
 
 /*
  * Get a random u64 from the kernel's pseudo-random generator.
