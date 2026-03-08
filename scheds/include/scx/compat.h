@@ -8,6 +8,7 @@
 #define __SCX_COMPAT_H
 
 #include <bpf/btf.h>
+#include <bpf/libbpf.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -182,9 +183,41 @@ static inline long scx_hotplug_seq(void)
 	__skel; 								\
 })
 
+/*
+ * Associate non-struct_ops BPF programs with the scheduler's struct_ops map so
+ * that scx_prog_sched() can determine which scheduler a BPF program belongs
+ * to. Requires libbpf >= 1.7.
+ */
+#if LIBBPF_MAJOR_VERSION > 1 ||							\
+	(LIBBPF_MAJOR_VERSION == 1 && LIBBPF_MINOR_VERSION >= 7)
+static inline void __scx_ops_assoc_prog(struct bpf_program *prog,
+					struct bpf_map *map,
+					const char *ops_name)
+{
+	s32 err = bpf_program__assoc_struct_ops(prog, map, NULL);
+	if (err)
+		fprintf(stderr,
+			"ERROR: Failed to associate %s with %s: %d\n",
+			bpf_program__name(prog), ops_name, err);
+}
+#else
+static inline void __scx_ops_assoc_prog(struct bpf_program *prog,
+					struct bpf_map *map,
+					const char *ops_name)
+{
+}
+#endif
+
 #define SCX_OPS_LOAD(__skel, __ops_name, __scx_name, __uei_name) ({		\
+	struct bpf_program *__prog;						\
 	UEI_SET_SIZE(__skel, __ops_name, __uei_name);				\
 	SCX_BUG_ON(__scx_name##__load((__skel)), "Failed to load skel");	\
+	bpf_object__for_each_program(__prog, (__skel)->obj) {			\
+		if (bpf_program__type(__prog) == BPF_PROG_TYPE_STRUCT_OPS)	\
+			continue;						\
+		__scx_ops_assoc_prog(__prog, (__skel)->maps.__ops_name,		\
+				     #__ops_name);				\
+	}									\
 })
 
 /*
