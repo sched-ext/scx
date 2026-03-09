@@ -52,8 +52,7 @@ $ sudo pacman -Sy cargo bpf pahole
 Make sure you build the kernel with the right configuration, installation
 should be easy:
 ```
-echo 'sys-kernel/scx ~amd64' >> /etc/portage/package.accept_keywords
-emerge sys-kernel/scx sys-libs/libseccomp dev-libs/protobuf
+emerge sys-kernel/scx
 ```
 The kernel config used for CI can be used as a reference for required configs.
 See [kernel.config](kernel.config) for reference.
