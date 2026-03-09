@@ -2,36 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use aya::{EbpfLoader, KfuncParamType, KfuncSignature, include_bytes_aligned};
+use aya::{EbpfLoader, include_bytes_aligned};
 
 fn main() -> Result<()> {
     let mut ebpf = EbpfLoader::new()
-        .register_kfunc(
-            "scx_bpf_dsq_insert",
-            KfuncSignature {
-                params: vec![
-                    KfuncParamType::Ptr,
-                    KfuncParamType::U64,
-                    KfuncParamType::U64,
-                    KfuncParamType::U64,
-                ],
-                ret: None,
-            },
-        )
-        .register_kfunc(
-            "scx_bpf_dsq_move_to_local",
-            KfuncSignature {
-                params: vec![KfuncParamType::U64],
-                ret: Some(KfuncParamType::Bool),
-            },
-        )
-        .register_kfunc(
-            "scx_bpf_create_dsq",
-            KfuncSignature {
-                params: vec![KfuncParamType::U64, KfuncParamType::I32],
-                ret: Some(KfuncParamType::I32),
-            },
-        )
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_purerust"
