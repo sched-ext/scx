@@ -84,6 +84,12 @@ struct Opts {
     #[clap(short = 'l', long, action = clap::ArgAction::SetTrue)]
     percpu_local: bool,
 
+    /// Enable NUMA-local idle CPU selection. When enabled, tasks with a preferred NUMA node will
+    /// preferentially be assigned an idle CPU from that node. This is opt-in as NUMA balancing
+    /// overhead may be undesirable on certain workloads.
+    #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
+    numa_local: bool,
+
     /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
     /// sched_setscheduler(2) are switched. Otherwise, all tasks are switched.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
@@ -174,6 +180,7 @@ impl<'a> Scheduler<'a> {
             opts.partial,
             opts.verbose,
             true, // Enable built-in idle CPU selection policy
+            opts.numa_local,
             slice_ns_min,
             "rustland",
         )?;

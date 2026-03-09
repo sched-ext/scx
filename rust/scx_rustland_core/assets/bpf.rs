@@ -212,6 +212,7 @@ impl<'cb> BpfScheduler<'cb> {
         partial: bool,
         debug: bool,
         builtin_idle: bool,
+        numa_local: bool,
         slice_ns: u64,
         name: &str,
     ) -> Result<Self> {
@@ -259,10 +260,14 @@ impl<'cb> BpfScheduler<'cb> {
         if partial {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
+        if numa_local {
+            skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE;
+        }
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
         skel.maps.rodata_data.as_mut().unwrap().usersched_pid = std::process::id();
         skel.maps.rodata_data.as_mut().unwrap().khugepaged_pid = Self::khugepaged_pid();
         skel.maps.rodata_data.as_mut().unwrap().builtin_idle = builtin_idle;
+        skel.maps.rodata_data.as_mut().unwrap().numa_local = numa_local;
         skel.maps.rodata_data.as_mut().unwrap().slice_ns = slice_ns;
         skel.maps.rodata_data.as_mut().unwrap().debug = debug;
         let _ = Self::set_scx_ops_name(&mut skel.struct_ops.rustland_mut().name, name);
