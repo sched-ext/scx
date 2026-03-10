@@ -1372,7 +1372,13 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	now			 = scx_bpf_now();
-	used			 = now - tctx->started_running_at;
+	/*
+	 * Use time_delta() to clamp negative values to zero. During scheduler
+	 * reload, started_running_at can briefly exceed now (stale BPF task
+	 * storage or rq clock race), causing unsigned underflow that corrupts
+	 * dsq_vtime and triggers "vtime too far ahead" in enqueue.
+	 */
+	used			 = time_delta(now, tctx->started_running_at);
 	tctx->started_running_at = now;
 	/* scale the execution time by the inverse of the weight and charge */
 	if (p->scx.weight == 0) {
