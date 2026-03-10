@@ -443,7 +443,6 @@ void set_task_flag(task_ctx *taskc, u64 flag);
 void reset_task_flag(task_ctx *taskc, u64 flag);
 bool test_task_flag(task_ctx *taskc, u64 flag);
 bool test_task_flag_mask(task_ctx __arg_arena *taskc, u64 flag);
-void reset_task_flag(task_ctx *taskc, u64 flag);
 
 static __always_inline bool use_per_cpu_dsq(void)
 {
