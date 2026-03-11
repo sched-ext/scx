@@ -109,6 +109,8 @@ struct task_ctx_x {
 	u64	cpu_util_invr;		/* scaled cpu utilization in [0..100] */
 	u64	steal_util_wall;	/* steal utilization in [0..100] */
 	u64	steal_util_invr;	/* scaled steal utilization in [0..100] */
+	u64	dom_pinned_util_wall;	/* domain-pinned task utilization in [0..100] */
+	u64	dom_pinned_util_invr;	/* scaled domain-pinned task utilization in [0..100] */
 	u32	nr_active;	/* number of active cores */
 	u64	dsq_id;		/* CPU's associated DSQ */
 	u64	dsq_consume_lat; /* DSQ's consume latency */

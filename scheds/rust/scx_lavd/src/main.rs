@@ -751,6 +751,8 @@ impl<'a> Scheduler<'a> {
             cpu_util_invr: tx.cpu_util_invr,
             steal_util_wall: tx.steal_util_wall,
             steal_util_invr: tx.steal_util_invr,
+            dom_pinned_util_wall: tx.dom_pinned_util_wall,
+            dom_pinned_util_invr: tx.dom_pinned_util_invr,
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
