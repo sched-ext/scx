@@ -9,3 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 scx-ebpf = { path = "../../../../rust/scx_ebpf" }
+
+[build-dependencies]
+scx-vmlinux = { path = "../../../../rust/scx_vmlinux" }

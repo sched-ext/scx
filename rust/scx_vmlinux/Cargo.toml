@@ -1,0 +1,10 @@
+[package]
+name = "scx-vmlinux"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Build-time vmlinux BTF struct generation for pure-Rust sched_ext schedulers"
+
+[dependencies]
+bindgen = "0.71"
+tempfile = "3"
