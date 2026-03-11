@@ -1,8 +1,7 @@
-//! A simple sched_ext scheduler in pure Rust.
+//! A simple sched_ext FIFO scheduler in pure Rust.
 //!
-//! Equivalent to `scx_simple.bpf.c` from the Linux kernel, operating in
-//! FIFO scheduling mode. All tasks are dispatched to a shared DSQ and
-//! consumed by any CPU in FIFO order.
+//! All tasks are dispatched to a shared DSQ and consumed by any CPU
+//! in FIFO order. Equivalent to `scx_simple.bpf.c` from the kernel.
 
 #![no_std]
 #![no_main]
@@ -53,7 +52,7 @@ pub fn on_exit(_ei: *mut scx_exit_info) {}
 // ── Registration ───────────────────────────────────────────────────────
 
 scx_ops_define! {
-    name: "purerust",
+    name: "simple",
     select_cpu: on_select_cpu,
     enqueue: on_enqueue,
     dispatch: on_dispatch,

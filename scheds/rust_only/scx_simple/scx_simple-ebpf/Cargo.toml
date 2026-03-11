@@ -1,0 +1,11 @@
+[package]
+name = "scx_simple-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "scx_simple"
+path = "src/main.rs"
+
+[dependencies]
+scx-ebpf = { path = "../../../../rust/scx_ebpf" }

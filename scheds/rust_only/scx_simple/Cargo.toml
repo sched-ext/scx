@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = [".", "scx_purerust-ebpf"]
+members = [".", "scx_simple-ebpf"]
 
 [package]
-name = "scx_purerust"
+name = "scx_simple"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-only"

@@ -1,11 +1,11 @@
 fn main() {
     aya_build::build_ebpf(
         [aya_build::Package {
-            name: "scx_purerust-ebpf",
-            root_dir: "scx_purerust-ebpf",
+            name: "scx_simple-ebpf",
+            root_dir: "scx_simple-ebpf",
             ..Default::default()
         }],
         aya_build::Toolchain::default(),
     )
-    .expect("Failed to build scx_purerust-ebpf eBPF program");
+    .expect("Failed to build scx_simple-ebpf eBPF program");
 }

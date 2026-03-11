@@ -8,7 +8,7 @@ fn main() -> Result<()> {
     let mut ebpf = EbpfLoader::new()
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
-            "/scx_purerust"
+            "/scx_simple"
         )))
         .context("Failed to load BPF object")?;
 
@@ -16,7 +16,7 @@ fn main() -> Result<()> {
         .attach_struct_ops("_scx_ops")
         .context("Failed to attach struct_ops scheduler")?;
 
-    println!("scx_purerust: scheduler attached (pure Rust BPF)");
+    println!("scx_simple: scheduler attached (pure Rust BPF)");
     println!("Press Ctrl-C to detach and exit.");
 
     let running = Arc::new(AtomicBool::new(true));
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     }
 
     drop(link);
-    println!("\nscx_purerust: scheduler detached");
+    println!("\nscx_simple: scheduler detached");
 
     Ok(())
 }
