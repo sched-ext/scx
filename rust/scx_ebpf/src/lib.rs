@@ -6,7 +6,7 @@
 //! - [`ops`]: `sched_ext_ops` struct definition matching kernel BTF
 //! - [`kfuncs`]: Safe wrappers around `scx_bpf_*` kernel functions
 //! - [`vmlinux`]: Opaque kernel type stubs
-//! - [`scx_ops_define!`]: Macro to register callbacks and generate trampolines
+//! - [`scx_ops_define!`]: Proc macro to register callbacks and generate trampolines
 //!
 //! # Example
 //!
@@ -15,14 +15,14 @@
 //! #![no_main]
 //! use scx_ebpf::prelude::*;
 //!
-//! fn my_enqueue(p: *mut task_struct, enq_flags: u64) {
-//!     kfuncs::dsq_insert(p, 0, kfuncs::SLICE_DFL, enq_flags);
+//! fn my_enqueue(p: *mut core::ffi::c_void, enq_flags: u64) {
+//!     kfuncs::dsq_insert(p as _, 0, kfuncs::SLICE_DFL, enq_flags);
 //! }
 //!
 //! fn my_init() -> i32 { kfuncs::create_dsq(0, -1) }
-//! fn my_exit(_ei: *mut scx_exit_info) {}
+//! fn my_exit(_ei: *mut core::ffi::c_void) {}
 //!
-//! scx_ops_define! {
+//! scx_ebpf::scx_ops_define! {
 //!     name: "my_sched",
 //!     enqueue: my_enqueue,
 //!     init: my_init,
@@ -36,6 +36,9 @@
 pub mod kfuncs;
 pub mod ops;
 pub mod vmlinux;
+
+/// Proc macro for registering sched_ext callbacks and generating trampolines.
+pub use scx_ebpf_derive::scx_ops_define;
 
 /// Re-exports for convenient glob import.
 pub mod prelude {

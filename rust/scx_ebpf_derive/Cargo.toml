@@ -1,0 +1,14 @@
+[package]
+name = "scx-ebpf-derive"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Proc macros for pure-Rust sched_ext schedulers"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

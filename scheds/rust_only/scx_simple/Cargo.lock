@@ -501,6 +501,18 @@ dependencies = [
 [[package]]
 name = "scx-ebpf"
 version = "0.1.0"
+dependencies = [
+ "scx-ebpf-derive",
+]
+
+[[package]]
+name = "scx-ebpf-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "scx-vmlinux"

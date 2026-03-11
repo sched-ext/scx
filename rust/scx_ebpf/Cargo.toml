@@ -6,3 +6,4 @@ license = "GPL-2.0-only"
 description = "Shared eBPF-side support for pure-Rust sched_ext schedulers"
 
 [dependencies]
+scx-ebpf-derive = { path = "../scx_ebpf_derive" }
