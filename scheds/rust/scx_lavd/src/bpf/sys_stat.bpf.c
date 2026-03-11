@@ -114,6 +114,10 @@ static void collect_sys_stat(void)
 		cpdomc->avg_steal_util_wall_sum = 0;
 		cpdomc->cur_steal_util_invr_sum = 0;
 		cpdomc->avg_steal_util_invr_sum = 0;
+		cpdomc->cur_dom_pinned_util_wall_sum = 0;
+		cpdomc->avg_dom_pinned_util_wall_sum = 0;
+		cpdomc->cur_dom_pinned_util_invr_sum = 0;
+		cpdomc->avg_dom_pinned_util_invr_sum = 0;
 		cpdomc->nr_queued_task = 0;
 
 		if (use_cpdom_dsq())
@@ -151,6 +155,7 @@ static void collect_sys_stat(void)
 		u64 irq_steal_invr, task_wall, rt_dl_time_invr, now_task;
 		u64 now_pelt, delta_task, delta_pelt;
 		u64 cur_idle_wall = 0, past_idle_wall;
+		u64 dom_pinned_task_time_wall, dom_pinned_task_time_invr;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 
 		if (!cpuc) {
@@ -274,6 +279,8 @@ static void collect_sys_stat(void)
 		compute_wall = time_delta(c->duration_wall, cpuc->idle_total_wall);
 		cpuc->steal_time_wall = time_delta(compute_wall, cpuc->tot_task_time_wall);
 		cpuc->tot_task_time_wall = 0;
+		dom_pinned_task_time_wall = cpuc->tot_dom_pinned_task_time_wall;
+		cpuc->tot_dom_pinned_task_time_wall = 0;
 		now_task = scx_clock_task(cpu);
 		now_pelt = scx_clock_pelt(cpu);
 		delta_task = time_delta(now_task, cpuc->prev_task_clk);
@@ -324,6 +331,8 @@ static void collect_sys_stat(void)
 		 */
 		cpuc_tot_task_time_invr = cpuc->tot_task_time_invr;
 		cpuc->tot_task_time_invr = 0;
+		dom_pinned_task_time_invr = cpuc->tot_dom_pinned_task_time_invr;
+		cpuc->tot_dom_pinned_task_time_invr = 0;
 		rt_dl_time_invr = time_delta(delta_pelt, cpuc_tot_task_time_invr);
 		cpuc->steal_time_invr = irq_steal_invr + rt_dl_time_invr;
 		/*
@@ -375,6 +384,33 @@ static void collect_sys_stat(void)
 					c->duration_wall;
 		cpuc->avg_util_invr = calc_asym_avg(cpuc->avg_util_invr, cpuc->cur_util_invr);
 
+		/*
+		 * Calculate domain-pinned task utilization. Clamp both
+		 * snapshots to compute_wall. For wall time, this guards against
+		 * cross-interval contamination (last_measured_*_clk is sampled
+		 * at tick, so the first delta after a reset can span the
+		 * interval boundary). For invariant time, the additional risk is
+		 * a perf_factor > 1.0 on a frequency-boosted CPU scaling the
+		 * sum above duration_wall; compute_wall is the same bound used
+		 * for compute_invr above.
+		 */
+		if (dom_pinned_task_time_wall > compute_wall)
+			dom_pinned_task_time_wall = compute_wall;
+		if (dom_pinned_task_time_invr > compute_wall)
+			dom_pinned_task_time_invr = compute_wall;
+		cpuc->cur_dom_pinned_util_wall =
+			(dom_pinned_task_time_wall << LAVD_SHIFT) /
+			c->duration_wall;
+		cpuc->avg_dom_pinned_util_wall =
+			calc_asym_avg(cpuc->avg_dom_pinned_util_wall,
+				      cpuc->cur_dom_pinned_util_wall);
+		cpuc->cur_dom_pinned_util_invr =
+			(dom_pinned_task_time_invr << LAVD_SHIFT) /
+			c->duration_wall;
+		cpuc->avg_dom_pinned_util_invr =
+			calc_asym_avg(cpuc->avg_dom_pinned_util_invr,
+				      cpuc->cur_dom_pinned_util_invr);
+
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 		if (cpdomc) {
 			cpdomc->cur_util_wall_sum += cpuc->cur_util_wall;
@@ -386,6 +422,11 @@ static void collect_sys_stat(void)
 			cpdomc->avg_steal_util_wall_sum += cpuc->avg_steal_util_wall;
 			cpdomc->cur_steal_util_invr_sum += cpuc->cur_steal_util_invr;
 			cpdomc->avg_steal_util_invr_sum += cpuc->avg_steal_util_invr;
+
+			cpdomc->cur_dom_pinned_util_wall_sum += cpuc->cur_dom_pinned_util_wall;
+			cpdomc->avg_dom_pinned_util_wall_sum += cpuc->avg_dom_pinned_util_wall;
+			cpdomc->cur_dom_pinned_util_invr_sum += cpuc->cur_dom_pinned_util_invr;
+			cpdomc->avg_dom_pinned_util_invr_sum += cpuc->avg_dom_pinned_util_invr;
 		}
 
 		cpuc->prev_task_clk = now_task;

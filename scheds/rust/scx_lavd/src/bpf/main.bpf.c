@@ -492,6 +492,13 @@ static void account_task_runtime(struct task_struct *p,
 	WRITE_ONCE(cpuc->tot_task_time_wwgt, cpuc->tot_task_time_wwgt + task_time_wwgt);
 	WRITE_ONCE(cpuc->tot_task_time_invr, cpuc->tot_task_time_invr + task_time_invr);
 
+	if (test_task_flag(taskc, LAVD_FLAG_DOMAIN_PINNED)) {
+		WRITE_ONCE(cpuc->tot_dom_pinned_task_time_wall,
+			   cpuc->tot_dom_pinned_task_time_wall + task_time_wall);
+		WRITE_ONCE(cpuc->tot_dom_pinned_task_time_invr,
+			   cpuc->tot_dom_pinned_task_time_invr + task_time_invr);
+	}
+
 	taskc->acc_runtime_wall += task_time_wall;
 	taskc->acc_runtime_invr += task_time_invr;
 	taskc->svc_time_wwgt += task_time_wwgt;

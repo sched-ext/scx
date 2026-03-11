@@ -236,6 +236,10 @@ struct cpdom_ctx {
 	u32	avg_steal_util_wall_sum;	    /* the sum of average steal utilization */
 	u32	cur_steal_util_invr_sum;	    /* the sum of invariant steal utilization in the current interval */
 	u32	avg_steal_util_invr_sum;	    /* the sum of average invariant steal utilization */
+	u32	cur_dom_pinned_util_wall_sum;	    /* the sum of domain-pinned task utilization in the current interval */
+	u32	avg_dom_pinned_util_wall_sum;	    /* the sum of average domain-pinned task utilization */
+	u32	cur_dom_pinned_util_invr_sum;	    /* the sum of invariant domain-pinned task utilization in the current interval */
+	u32	avg_dom_pinned_util_invr_sum;	    /* the sum of average invariant domain-pinned task utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
@@ -285,6 +289,14 @@ struct cpu_ctx {
 	 * util_invr.
 	 */
 	volatile u64	tot_task_time_invr;
+	/*
+	 * Total wall-clock and invariant time spent running
+	 * LAVD_FLAG_DOMAIN_PINNED tasks (tasks whose cpumask is confined
+	 * to a single compute domain). Used to calculate
+	 * dom_pinned_util_wall/invr.
+	 */
+	volatile u64	tot_dom_pinned_task_time_wall;
+	volatile u64	tot_dom_pinned_task_time_invr;
 
 	/* --- cacheline 1 boundary (64 bytes) --- */
 	volatile u64	sum_perf_cri;	/* sum of performance criticality */
@@ -365,6 +377,16 @@ struct cpu_ctx {
 	u32		avg_steal_util_wall;
 	u32		cur_steal_util_invr;
 	u32		avg_steal_util_invr;
+	/*
+	 * Domain-pinned task utilization: the fraction of duration_wall
+	 * spent running LAVD_FLAG_DOMAIN_PINNED tasks, in LAVD_SHIFT
+	 * fixed-point. cur_* is the current interval value; avg_* is the
+	 * asymmetric EWMA (fast-rise, slow-decay).
+	 */
+	u32		cur_dom_pinned_util_wall;
+	u32		avg_dom_pinned_util_wall;
+	u32		cur_dom_pinned_util_invr;
+	u32		avg_dom_pinned_util_invr;
 
 	/*
 	 * --- cacheline 3 boundary (192 bytes) ---
