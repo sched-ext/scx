@@ -1186,8 +1186,6 @@ impl<'a> Scheduler<'a> {
     fn get_metrics(&self) -> Metrics {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
-            cpu_thresh: self.skel.maps.rodata_data.as_ref().unwrap().busy_threshold,
-            cpu_util: self.skel.maps.bss_data.as_ref().unwrap().cpu_util,
             nr_event_dispatches: bss_data.nr_event_dispatches,
             nr_ev_sticky_dispatches: bss_data.nr_ev_sticky_dispatches,
             nr_gpu_dispatches: bss_data.nr_gpu_dispatches,
@@ -1211,55 +1209,83 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn read_cpu_times() -> Option<CpuTimes> {
+    /// Read per-CPU times from /proc/stat (lines "cpu0", "cpu1", ...).
+    /// Returns one CpuTimes per CPU, in order.
+    fn read_per_cpu_cpu_times(nr_cpus: usize) -> Option<Vec<CpuTimes>> {
         let file = File::open("/proc/stat").ok()?;
         let reader = BufReader::new(file);
+        let mut result = Vec::with_capacity(nr_cpus);
 
         for line in reader.lines() {
             let line = line.ok()?;
-            if line.starts_with("cpu ") {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() < 5 {
-                    return None;
-                }
-
-                let user: u64 = fields[1].parse().ok()?;
-                let nice: u64 = fields[2].parse().ok()?;
-
-                // Sum the first 8 fields as total time, including idle, system, etc.
-                let total: u64 = fields
-                    .iter()
-                    .skip(1)
-                    .take(8)
-                    .filter_map(|v| v.parse::<u64>().ok())
-                    .sum();
-
-                return Some(CpuTimes { user, nice, total });
+            let line = line.trim();
+            if !line.starts_with("cpu") {
+                continue;
+            }
+            let rest = line.strip_prefix("cpu")?;
+            if rest.starts_with(' ') {
+                // Aggregate line "cpu " - skip.
+                continue;
+            }
+            let cpu_id: usize = rest.split_whitespace().next()?.parse().ok()?;
+            if cpu_id != result.len() {
+                break;
+            }
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 5 {
+                return None;
+            }
+            let user: u64 = fields[1].parse().ok()?;
+            let nice: u64 = fields[2].parse().ok()?;
+            let total: u64 = fields
+                .iter()
+                .skip(1)
+                .take(8)
+                .filter_map(|v| v.parse::<u64>().ok())
+                .sum();
+            result.push(CpuTimes { user, nice, total });
+            if result.len() >= nr_cpus {
+                break;
             }
         }
 
-        None
+        if result.len() == nr_cpus {
+            Some(result)
+        } else {
+            None
+        }
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
-        // Periodically evaluate user CPU utilization from user-space and update a global variable
-        // in BPF.
-        //
-        // The BPF scheduler will use this value to determine when the system is idle (using local
-        // DSQs and simple round-robin scheduler) or busy (switching to a deadline-based policy).
+        // Periodically evaluate per-CPU user utilization from userspace and update the
+        // cpu_util_map in BPF. The scheduler uses is_cpu_busy(cpu) with prev_cpu or
+        // scx_bpf_task_cpu(p) to decide per-CPU whether to use local DSQs (round-robin)
+        // or deadline-based shared DSQ.
         let polling_time = Duration::from_millis(self.opts.polling_ms).min(Duration::from_secs(1));
-        let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
+        let nr_cpus = *NR_CPU_IDS as usize;
+        let mut prev_cputime =
+            Self::read_per_cpu_cpu_times(nr_cpus).expect("Failed to read initial per-CPU stats");
         let mut last_update = Instant::now();
         let mut last_gpu_sync = Instant::now();
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            // Update CPU utilization and GPU PID -> node map (NVML).
+            // Update per-CPU utilization and GPU PID -> node map (NVML).
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
-                if let Some(curr_cputime) = Self::read_cpu_times() {
-                    Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
-                        .map(|util| self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util);
+                if let Some(curr_cputime) = Self::read_per_cpu_cpu_times(nr_cpus) {
+                    let map = &self.skel.maps.cpu_util_map;
+                    for cpu in 0..nr_cpus {
+                        if let Some(util) =
+                            Self::compute_user_cpu_pct(&prev_cputime[cpu], &curr_cputime[cpu])
+                        {
+                            let _ = map.update(
+                                &(cpu as u32).to_ne_bytes(),
+                                &util.to_ne_bytes(),
+                                MapFlags::ANY,
+                            );
+                        }
+                    }
                     prev_cputime = curr_cputime;
                 }
 
