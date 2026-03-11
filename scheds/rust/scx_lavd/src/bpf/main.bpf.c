@@ -1630,11 +1630,7 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		return;
 	}
 
-	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
-		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
-	else
-		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
-	set_on_core_type(taskc, cpumask);
+	set_affinity_flags(taskc, cpumask);
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
@@ -1770,12 +1766,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	taskc->cgrp_id = args->cgroup->kn->id;
 
 	bpf_rcu_read_lock();
-	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
-		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
-	else
-		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
-
-	set_on_core_type(taskc, p->cpus_ptr);
+	set_affinity_flags(taskc, p->cpus_ptr);
 	bpf_rcu_read_unlock();
 
 	if (is_ksoftirqd(p))

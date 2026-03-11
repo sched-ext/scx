@@ -36,7 +36,8 @@ bool is_kernel_worker(struct task_struct *p);
 bool is_ksoftirqd(struct task_struct *p);
 bool is_pinned(const struct task_struct *p);
 bool use_full_cpus(void);
-void set_on_core_type(task_ctx __arg_arena *taskc, const struct cpumask *cpumask);
+void set_affinity_flags(task_ctx __arg_arena *taskc,
+			const struct cpumask *cpumask);
 bool prob_x_out_of_y(u32 x, u32 y);
 u32 get_primary_cpu(u32 cpu);
 

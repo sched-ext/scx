@@ -253,15 +253,26 @@ bool use_full_cpus(void)
 }
 
 __hidden
-void set_on_core_type(task_ctx __arg_arena *taskc,
-		      const struct cpumask *cpumask)
+void set_affinity_flags(task_ctx __arg_arena *taskc,
+			const struct cpumask *cpumask)
 {
+	bool is_affinitized, dom_pinned, dom_pinned_settled;
 	bool on_big = false, on_little = false;
+	s32 first_cpdom_id = -ENOENT;
 	struct cpu_ctx *cpuc;
 	int cpu;
 
 	if (!cpumask)
 		return;
+
+	is_affinitized = bpf_cpumask_weight(cpumask) != nr_cpu_ids;
+	if (nr_cpdoms == 1) {
+		dom_pinned = false;
+		dom_pinned_settled = true;
+	} else {
+		dom_pinned = is_affinitized;
+		dom_pinned_settled = !is_affinitized;
+	}
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		if (cpu >= LAVD_CPU_ID_MAX)
@@ -281,9 +292,29 @@ void set_on_core_type(task_ctx __arg_arena *taskc,
 		else
 			on_little = true;
 
-		if (on_big && on_little)
+		/*
+		 * Track whether the task is domain-pinned: confined to a
+		 * single compute domain. On the first CPU seen, record its
+		 * domain. On any subsequent CPU in a different domain, the
+		 * task spans multiple domains and is not domain-pinned.
+		 */
+		if (!dom_pinned_settled) {
+			if (first_cpdom_id < 0)
+				first_cpdom_id = cpuc->cpdom_id;
+			else if (cpuc->cpdom_id != first_cpdom_id) {
+				dom_pinned = false;
+				dom_pinned_settled = true;
+			}
+		}
+
+		if (on_big && on_little && dom_pinned_settled)
 			break;
 	}
+
+	if (is_affinitized)
+		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 
 	if (on_big)
 		set_task_flag(taskc, LAVD_FLAG_ON_BIG);
@@ -294,6 +325,11 @@ void set_on_core_type(task_ctx __arg_arena *taskc,
 		set_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
 	else
 		reset_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
+
+	if (dom_pinned)
+		set_task_flag(taskc, LAVD_FLAG_DOMAIN_PINNED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_DOMAIN_PINNED);
 }
 
 __hidden
