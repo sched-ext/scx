@@ -189,6 +189,23 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     dynamic_affinity_cpu_selection: bool,
 
+    /// Enable preempt-kicking for pinned kthreads.
+    /// When enabled, kthreads on per-CPU DSQs get a preempt IPI so they
+    /// don't wait behind application time slices.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    kthread_preempt_kick: bool,
+
+    /// Per-CPU cooldown for kthread preempt-kicks in microseconds.
+    /// When set, limits how frequently a given CPU can be preempt-kicked
+    /// for kthread scheduling, reducing IPI pressure.
+    /// Only effective when --kthread-preempt-kick is enabled.
+    #[clap(long)]
+    kthread_kick_cooldown_us: Option<u64>,
+
+    /// Time slice duration in milliseconds. Defaults to the kernel's SCX_SLICE_DFL.
+    #[clap(long)]
+    slice_ms: Option<u64>,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -327,11 +344,16 @@ impl<'a> Scheduler<'a> {
 
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
 
-        rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
+        rodata.slice_ns = match opts.slice_ms {
+            Some(ms) => ms * 1_000_000,
+            None => scx_enums.SCX_SLICE_DFL,
+        };
         rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
+        rodata.kthread_preempt_kick = opts.kthread_preempt_kick;
+        rodata.kthread_kick_cooldown_ns = opts.kthread_kick_cooldown_us.unwrap_or(0) * 1000;
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
@@ -896,6 +918,65 @@ impl<'a> Scheduler<'a> {
 
         trace!("{} {}", prefix, stats);
 
+        let pin_idle_hits: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_IDLE_HIT as usize])
+            .sum::<u64>();
+        let pin_idle_misses: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_IDLE_MISS as usize])
+            .sum::<u64>();
+        let pin_total = pin_idle_hits + pin_idle_misses;
+        if pin_total > 0 {
+            trace!(
+                "  Pin idle: {:.1}% hit ({}/{})",
+                100.0 * (pin_idle_hits as f64) / (pin_total as f64),
+                pin_idle_hits,
+                pin_total,
+            );
+        }
+
+        let enq_pin_keeps: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_ENQ_PIN_KEEP as usize])
+            .sum::<u64>();
+        let enq_pin_moves: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_ENQ_PIN_MOVE as usize])
+            .sum::<u64>();
+        let enq_pin_total = enq_pin_keeps + enq_pin_moves;
+        if enq_pin_total > 0 {
+            trace!(
+                "  Enq pin: {:.1}% keep ({}/{})",
+                100.0 * (enq_pin_keeps as f64) / (enq_pin_total as f64),
+                enq_pin_keeps,
+                enq_pin_total,
+            );
+        }
+
+        let kthread_kick_sel: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_KTHREAD_KICK_SEL as usize])
+            .sum::<u64>();
+        let kthread_kick_enq: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_KTHREAD_KICK_ENQ as usize])
+            .sum::<u64>();
+        let kthread_kick_throttle: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_KTHREAD_KICK_THROTTLE as usize])
+            .sum::<u64>();
+        let kthread_kicks = kthread_kick_sel + kthread_kick_enq;
+        if kthread_kicks > 0 || kthread_kick_throttle > 0 {
+            trace!(
+                "  Kthread kicks: {} (sel={}, enq={}, throttled={})",
+                kthread_kicks,
+                kthread_kick_sel,
+                kthread_kick_enq,
+                kthread_kick_throttle
+            );
+        }
+
         Ok(())
     }
 
@@ -949,6 +1030,54 @@ impl<'a> Scheduler<'a> {
                 .update(&stats);
 
             trace!("{} {}", prefix, stats);
+
+            let pin_idle_hits: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_IDLE_HIT as usize];
+            let pin_idle_misses: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_IDLE_MISS as usize];
+            let pin_total = pin_idle_hits + pin_idle_misses;
+            if pin_total > 0 {
+                trace!(
+                    "{}   Pin idle: {:.1}% hit ({}/{})",
+                    prefix,
+                    100.0 * (pin_idle_hits as f64) / (pin_total as f64),
+                    pin_idle_hits,
+                    pin_total,
+                );
+            }
+
+            let enq_pin_keeps: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_ENQ_PIN_KEEP as usize];
+            let enq_pin_moves: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_ENQ_PIN_MOVE as usize];
+            let enq_pin_total = enq_pin_keeps + enq_pin_moves;
+            if enq_pin_total > 0 {
+                trace!(
+                    "{}   Enq pin: {:.1}% keep ({}/{})",
+                    prefix,
+                    100.0 * (enq_pin_keeps as f64) / (enq_pin_total as f64),
+                    enq_pin_keeps,
+                    enq_pin_total,
+                );
+            }
+
+            let kthread_kick_sel: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_KTHREAD_KICK_SEL as usize];
+            let kthread_kick_enq: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_KTHREAD_KICK_ENQ as usize];
+            let kthread_kick_throttle: u64 = cell_stats_delta[cell]
+                [bpf_intf::cell_stat_idx_CSTAT_KTHREAD_KICK_THROTTLE as usize];
+            let kthread_kicks = kthread_kick_sel + kthread_kick_enq;
+            if kthread_kicks > 0 || kthread_kick_throttle > 0 {
+                trace!(
+                    "{}   Kthread kicks: {} (sel={}, enq={}, throttled={})",
+                    prefix,
+                    kthread_kicks,
+                    kthread_kick_sel,
+                    kthread_kick_enq,
+                    kthread_kick_throttle
+                );
+            }
         }
         Ok(())
     }
