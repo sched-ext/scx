@@ -669,6 +669,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 		}
 		cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
 		if (cpu >= 0) {
+			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 			if (kick)
@@ -1309,29 +1310,15 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	return 0;
 }
 
-void advance_dsq_vtimes(struct cell *cell, struct cpu_ctx *cctx,
-			struct task_ctx *tctx, u64 task_vtime)
+static inline void advance_cell_llc_vtime(struct cell	  *cell,
+					  struct task_ctx *tctx, u64 task_vtime)
 {
-	/* If the CPU DSQ's vtime is behind the task's, advance it. */
-	if (time_before(READ_ONCE(cctx->vtime_now), task_vtime))
-		WRITE_ONCE(cctx->vtime_now, task_vtime);
+	u32 llc_idx = enable_llc_awareness && llc_is_valid(tctx->llc) ?
+			      tctx->llc :
+			      FAKE_FLAT_CELL_LLC;
 
-	if (!enable_llc_awareness) {
-		/* If the cell DSQ's vtime is behind the task's, advance it. */
-		if (time_before(
-			    READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
-			    task_vtime))
-			WRITE_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now,
-				   task_vtime);
-		return;
-	}
-
-	/* We are in the llc aware case  */
-	if (llc_is_valid(tctx->llc)) {
-		if (time_before(READ_ONCE(cell->llcs[tctx->llc].vtime_now),
-				task_vtime))
-			WRITE_ONCE(cell->llcs[tctx->llc].vtime_now, task_vtime);
-	}
+	if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now), task_vtime))
+		WRITE_ONCE(cell->llcs[llc_idx].vtime_now, task_vtime);
 }
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
@@ -1381,31 +1368,33 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	}
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
-	if (tctx->cell != cidx) {
-		/*
-		 * Task is on a borrowed CPU from a different cell.
-		 * Advance the task's (borrowing) cell's vtime_now,
-		 * not the CPU's (lending) cell. Skip cctx->vtime_now
-		 * since the per-CPU DSQ vtime is unrelated to the
-		 * borrowed task.
-		 */
-		struct cell *task_cell = lookup_cell(tctx->cell);
-		if (task_cell) {
-			u32 llc_idx = enable_llc_awareness &&
-						      llc_is_valid(tctx->llc) ?
-					      tctx->llc :
-					      FAKE_FLAT_CELL_LLC;
-			if (time_before(
-				    READ_ONCE(
-					    task_cell->llcs[llc_idx].vtime_now),
-				    p->scx.dsq_vtime))
-				WRITE_ONCE(task_cell->llcs[llc_idx].vtime_now,
-					   p->scx.dsq_vtime);
-		}
-	} else {
-		/* Advance cell and cpu dsq vtime to keep in sync with task vtime. */
-		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
+	/*
+	 * Advance this CPU's per-CPU DSQ vtime, UNLESS the task was
+	 * genuinely borrowed from another cell. Borrowed tasks' vtime
+	 * is in the borrowing cell's domain — writing it to the lending
+	 * CPU's vtime_now would contaminate that domain.
+	 *
+	 * For cell-reassigned tasks (tctx->cell != cidx but not borrowed),
+	 * the vtime was initialized in this CPU's cell domain, so
+	 * advancing cctx->vtime_now is correct and prevents staleness.
+	 */
+	if (!tctx->borrowed) {
+		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
+			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 	}
+
+	/* Clear the borrowed flag — it is one-shot, consumed above */
+	tctx->borrowed = false;
+
+	struct cell *vtime_cell;
+	if (tctx->cell != cidx) {
+		vtime_cell = lookup_cell(tctx->cell);
+		if (!vtime_cell)
+			return;
+	} else {
+		vtime_cell = cell;
+	}
+	advance_cell_llc_vtime(vtime_cell, tctx, p->scx.dsq_vtime);
 
 	{
 		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
