@@ -1,0 +1,8 @@
+[package]
+name = "scx-ebpf"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Shared eBPF-side support for pure-Rust sched_ext schedulers"
+
+[dependencies]

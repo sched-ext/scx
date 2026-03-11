@@ -269,6 +269,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx-ebpf"
+version = "0.1.0"
+
+[[package]]
 name = "scx_purerust"
 version = "0.1.0"
 dependencies = [
@@ -281,6 +285,9 @@ dependencies = [
 [[package]]
 name = "scx_purerust-ebpf"
 version = "0.1.0"
+dependencies = [
+ "scx-ebpf",
+]
 
 [[package]]
 name = "semver"

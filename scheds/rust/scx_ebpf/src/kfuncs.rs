@@ -1,12 +1,7 @@
 //! Safe wrappers around sched_ext BPF kfunc calls.
 //!
-//! HACK: The Rust BPF compiler does not emit proper kfunc call
-//! instructions for `extern "C"` declarations — it generates a broken
-//! `call -1; exit` sequence. We use inline assembly to manually set up
-//! registers and emit the call instruction.
-//!
-//! When the Rust BPF compiler gains proper kfunc support, each wrapper
-//! here becomes a plain `extern "C"` call with no inline asm.
+//! Uses inline assembly because the Rust BPF compiler does not emit
+//! proper kfunc call instructions for `extern "C"` declarations.
 
 use super::vmlinux::task_struct;
 

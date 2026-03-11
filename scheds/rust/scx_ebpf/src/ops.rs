@@ -139,8 +139,8 @@ macro_rules! scx_ops_define {
         // Generate the ops static with `..DEFAULT_OPS` for unset fields.
         #[unsafe(link_section = ".struct_ops.link")]
         #[unsafe(no_mangle)]
-        static _scx_ops: $crate::compat::struct_ops::sched_ext_ops =
-            $crate::compat::struct_ops::sched_ext_ops {
+        static _scx_ops: $crate::ops::sched_ext_ops =
+            $crate::ops::sched_ext_ops {
                 $($field: Some($field),)*
                 name: {
                     let mut n = [0u8; 128];
@@ -152,7 +152,7 @@ macro_rules! scx_ops_define {
                     }
                     n
                 },
-                ..$crate::compat::struct_ops::DEFAULT_OPS
+                ..$crate::ops::DEFAULT_OPS
             };
     };
 
@@ -167,7 +167,7 @@ macro_rules! scx_ops_define {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = "struct_ops/select_cpu")]
         unsafe extern "C" fn select_cpu(ctx: *const u64) -> i32 {
-            let p = unsafe { *ctx as *mut $crate::compat::vmlinux::task_struct };
+            let p = unsafe { *ctx as *mut $crate::vmlinux::task_struct };
             let prev_cpu = unsafe { *ctx.add(1) as i32 };
             let wake_flags = unsafe { *ctx.add(2) };
             $handler(p, prev_cpu, wake_flags)
@@ -179,7 +179,7 @@ macro_rules! scx_ops_define {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = "struct_ops/enqueue")]
         unsafe extern "C" fn enqueue(ctx: *const u64) {
-            let p = unsafe { *ctx as *mut $crate::compat::vmlinux::task_struct };
+            let p = unsafe { *ctx as *mut $crate::vmlinux::task_struct };
             let enq_flags = unsafe { *ctx.add(1) };
             $handler(p, enq_flags);
         }
@@ -190,7 +190,7 @@ macro_rules! scx_ops_define {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = "struct_ops/dequeue")]
         unsafe extern "C" fn dequeue(ctx: *const u64) {
-            let p = unsafe { *ctx as *mut $crate::compat::vmlinux::task_struct };
+            let p = unsafe { *ctx as *mut $crate::vmlinux::task_struct };
             let deq_flags = unsafe { *ctx.add(1) };
             $handler(p, deq_flags);
         }
@@ -202,7 +202,7 @@ macro_rules! scx_ops_define {
         #[unsafe(link_section = "struct_ops/dispatch")]
         unsafe extern "C" fn dispatch(ctx: *const u64) {
             let cpu = unsafe { *ctx as i32 };
-            let prev = unsafe { *ctx.add(1) as *mut $crate::compat::vmlinux::task_struct };
+            let prev = unsafe { *ctx.add(1) as *mut $crate::vmlinux::task_struct };
             $handler(cpu, prev);
         }
     };
@@ -212,7 +212,7 @@ macro_rules! scx_ops_define {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = "struct_ops/running")]
         unsafe extern "C" fn running(ctx: *const u64) {
-            let p = unsafe { *ctx as *mut $crate::compat::vmlinux::task_struct };
+            let p = unsafe { *ctx as *mut $crate::vmlinux::task_struct };
             $handler(p);
         }
     };
@@ -222,7 +222,7 @@ macro_rules! scx_ops_define {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = "struct_ops/stopping")]
         unsafe extern "C" fn stopping(ctx: *const u64) {
-            let p = unsafe { *ctx as *mut $crate::compat::vmlinux::task_struct };
+            let p = unsafe { *ctx as *mut $crate::vmlinux::task_struct };
             let runnable = unsafe { *ctx.add(1) != 0 };
             $handler(p, runnable);
         }
@@ -233,7 +233,7 @@ macro_rules! scx_ops_define {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = "struct_ops/enable")]
         unsafe extern "C" fn enable(ctx: *const u64) {
-            let p = unsafe { *ctx as *mut $crate::compat::vmlinux::task_struct };
+            let p = unsafe { *ctx as *mut $crate::vmlinux::task_struct };
             $handler(p);
         }
     };
@@ -243,7 +243,7 @@ macro_rules! scx_ops_define {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = "struct_ops/disable")]
         unsafe extern "C" fn disable(ctx: *const u64) {
-            let p = unsafe { *ctx as *mut $crate::compat::vmlinux::task_struct };
+            let p = unsafe { *ctx as *mut $crate::vmlinux::task_struct };
             $handler(p);
         }
     };
@@ -262,7 +262,7 @@ macro_rules! scx_ops_define {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = "struct_ops/exit")]
         unsafe extern "C" fn exit(ctx: *const u64) {
-            let ei = unsafe { *ctx as *mut $crate::compat::vmlinux::scx_exit_info };
+            let ei = unsafe { *ctx as *mut $crate::vmlinux::scx_exit_info };
             $handler(ei);
         }
     };
