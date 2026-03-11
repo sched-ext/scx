@@ -105,8 +105,10 @@ struct task_ctx_x {
 	u32	perf_cri;		/* performance criticality of a task */
 	u32	thr_perf_cri;	/* performance criticality threshold */
 	u32	cpuperf_cur;	/* CPU's current performance target */
-	u64	cpu_util_wall;	/* cpu utilization in [0..100] */
-	u64	cpu_util_invr;	/* scaled cpu utilization in [0..100] */
+	u64	cpu_util_wall;		/* cpu utilization in [0..100] */
+	u64	cpu_util_invr;		/* scaled cpu utilization in [0..100] */
+	u64	steal_util_wall;	/* steal utilization in [0..100] */
+	u64	steal_util_invr;	/* scaled steal utilization in [0..100] */
 	u32	nr_active;	/* number of active cores */
 	u64	dsq_id;		/* CPU's associated DSQ */
 	u64	dsq_consume_lat; /* DSQ's consume latency */

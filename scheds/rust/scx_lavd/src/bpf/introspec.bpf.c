@@ -79,6 +79,8 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
 	m->taskc_x.cpu_util_wall = s2p(cpuc->avg_util_wall);
 	m->taskc_x.cpu_util_invr = s2p(cpuc->avg_util_invr);
+	m->taskc_x.steal_util_wall = s2p(cpuc->avg_steal_util_wall);
+	m->taskc_x.steal_util_invr = s2p(cpuc->avg_steal_util_invr);
 	m->taskc_x.nr_active = sys_stat.nr_active;
 	m->taskc_x.dsq_id = cpdomc->id;
 	m->taskc_x.dsq_consume_lat = cpdomc->dsq_consume_lat;
