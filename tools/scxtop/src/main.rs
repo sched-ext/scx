@@ -601,6 +601,22 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let trace_file = trace_args.output_file.clone();
             let mut trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
+            // Embed topology metadata in traces for cross-machine analysis
+            {
+                use scx_utils::Topology;
+                if let Ok(topo) = Topology::new() {
+                    let mut cpu_to_llc = std::collections::HashMap::new();
+                    let mut cpu_to_numa = std::collections::HashMap::new();
+                    let mut cpu_to_core = std::collections::HashMap::new();
+                    for cpu in topo.all_cpus.values() {
+                        cpu_to_llc.insert(cpu.id as u32, cpu.llc_id as u32);
+                        cpu_to_numa.insert(cpu.id as u32, cpu.node_id as u32);
+                        cpu_to_core.insert(cpu.id as u32, cpu.core_id as u32);
+                    }
+                    trace_manager.set_topology(cpu_to_llc, cpu_to_numa, cpu_to_core);
+                }
+            }
+
             info!("starting trace for {}ms", trace_args.trace_ms);
             trace_manager.start()?;
             let mut tracer = Tracer::new(skel);
@@ -1830,11 +1846,15 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
             })
     } else {
         // One-shot mode: No BPF, just serve static data
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        let trace_cache = Arc::new(Mutex::new(HashMap::new()));
         let mut server = McpServer::new(mcp_config)
             .with_topology(topo_arc)
             .setup_scheduler_resource()
             .setup_profiling_resources()
             .with_stats_client(None)
+            .with_trace_cache(trace_cache)
             .setup_stats_resources();
         server.run_blocking()
     }

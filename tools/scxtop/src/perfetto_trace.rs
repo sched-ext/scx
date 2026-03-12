@@ -74,6 +74,8 @@ pub struct PerfettoTraceManager {
     sys_stats: BTreeMap<u64, Vec<SysStats>>,
     mem_events: BTreeMap<String, Vec<TrackEvent>>,
     mem_uuids: HashMap<String, u64>,
+    // Topology metadata to embed in trace for cross-machine analysis
+    topology_json: Option<String>,
 }
 
 impl PerfettoTraceManager {
@@ -108,7 +110,39 @@ impl PerfettoTraceManager {
             sys_stats: BTreeMap::new(),
             mem_events: BTreeMap::new(),
             mem_uuids,
+            topology_json: None,
         }
+    }
+
+    /// Set topology metadata to embed in the trace.
+    /// The topology is serialized as a JSON string in a special TrackDescriptor
+    /// so traces can be analyzed on different machines.
+    pub fn set_topology(
+        &mut self,
+        cpu_to_llc: HashMap<u32, u32>,
+        cpu_to_numa: HashMap<u32, u32>,
+        cpu_to_core: HashMap<u32, u32>,
+    ) {
+        let nr_cpus = cpu_to_llc.len() as u32;
+        let nr_llcs = cpu_to_llc
+            .values()
+            .collect::<std::collections::HashSet<_>>()
+            .len() as u32;
+        let nr_numa_nodes = cpu_to_numa
+            .values()
+            .collect::<std::collections::HashSet<_>>()
+            .len() as u32;
+
+        let topo = serde_json::json!({
+            "cpu_to_llc": cpu_to_llc,
+            "cpu_to_numa": cpu_to_numa,
+            "cpu_to_core": cpu_to_core,
+            "nr_cpus": nr_cpus,
+            "nr_llcs": nr_llcs,
+            "nr_numa_nodes": nr_numa_nodes,
+        });
+
+        self.topology_json = Some(topo.to_string());
     }
 
     /// Starts a new perfetto trace.
@@ -400,6 +434,19 @@ impl PerfettoTraceManager {
                     ..TracePacket::default()
                 });
             }
+        }
+
+        // Topology metadata (embedded for cross-machine trace analysis)
+        if let Some(topo_json) = &self.topology_json {
+            let topo_name = format!("scxtop_topo:{}", topo_json);
+            self.trace.packet.push(TracePacket {
+                data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
+                    uuid: Some(self.rng.next_u64()),
+                    static_or_dynamic_name: Some(Static_or_dynamic_name::StaticName(topo_name)),
+                    ..TrackDescriptor::default()
+                })),
+                ..TracePacket::default()
+            });
         }
 
         // dsq latency tracks

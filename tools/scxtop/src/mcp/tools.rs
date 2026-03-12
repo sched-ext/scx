@@ -420,7 +420,7 @@ impl McpTools {
                         },
                         "analysis_type": {
                             "type": "string",
-                            "enum": ["cpu_utilization", "process_runtime", "wakeup_latency", "migration_patterns", "dsq_summary", "task_states", "preemptions", "wakeup_chains", "latency_breakdown", "irq_analysis", "ipi_analysis", "block_io", "network_io", "memory_pressure", "file_io", "cpu_frequency", "cpu_idle", "power_state"],
+                            "enum": ["cpu_utilization", "process_runtime", "wakeup_latency", "migration_patterns", "dsq_summary", "dsq_latency", "task_states", "preemptions", "wakeup_chains", "latency_breakdown", "llc_locality", "runqueue_depth", "fairness", "irq_analysis", "ipi_analysis", "block_io", "network_io", "memory_pressure", "file_io", "cpu_frequency", "cpu_idle", "power_state"],
                             "description": "Type of analysis to perform"
                         },
                         "use_parallel": {
@@ -438,6 +438,10 @@ impl McpTools {
                         "pid": {
                             "type": "integer",
                             "description": "Optional PID filter for process-specific analysis"
+                        },
+                        "cpu": {
+                            "type": "integer",
+                            "description": "Optional CPU filter for cpu_utilization and wakeup_latency analyses"
                         }
                     },
                     "required": ["trace_id", "analysis_type"]
@@ -836,6 +840,81 @@ impl McpTools {
                 }),
             },
             McpTool {
+                name: "analyze_dsq_latency".to_string(),
+                description: "Analyze DSQ (dispatch queue) latency and queue depth statistics per DSQ".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        }
+                    },
+                    "required": ["trace_id"]
+                }),
+            },
+            McpTool {
+                name: "analyze_llc_locality".to_string(),
+                description: "Analyze cache locality of migrations - tracks same-LLC vs cross-LLC vs cross-NUMA migrations. Requires topology metadata in trace.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of top results to return",
+                            "default": 20
+                        }
+                    },
+                    "required": ["trace_id"]
+                }),
+            },
+            McpTool {
+                name: "analyze_runqueue_depth".to_string(),
+                description: "Analyze runqueue depth over time per CPU. Shows how many runnable tasks are queued on each CPU.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "cpu": {
+                            "type": "integer",
+                            "description": "Optional CPU filter"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of top CPUs to return",
+                            "default": 20
+                        }
+                    },
+                    "required": ["trace_id"]
+                }),
+            },
+            McpTool {
+                name: "analyze_fairness".to_string(),
+                description: "Analyze scheduling fairness using Gini coefficient. Identifies starved and hogging processes.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of top starved/hogging processes to return",
+                            "default": 20
+                        }
+                    },
+                    "required": ["trace_id"]
+                }),
+            },
+            McpTool {
                 name: "analyze_task_states".to_string(),
                 description: "Analyze task state transitions (running, runnable, blocked, etc.). Returns verbose per-thread or per-process data.".to_string(),
                 input_schema: json!({
@@ -1107,7 +1186,14 @@ impl McpTools {
             "control_analyzers" => self.tool_control_analyzers(arguments),
             "analyze_waker_wakee" => self.tool_analyze_waker_wakee(arguments),
             "analyze_softirq" => self.tool_analyze_softirq(arguments),
-            "load_perfetto_trace" => self.tool_load_perfetto_trace(arguments),
+            "load_perfetto_trace" => {
+                eprintln!("[mcp] load_perfetto_trace called with args: {}", arguments);
+                let result = self.tool_load_perfetto_trace(arguments);
+                if let Err(ref e) = result {
+                    eprintln!("[mcp] load_perfetto_trace failed: {}", e);
+                }
+                result
+            }
             "query_trace_events" => self.tool_query_trace_events(arguments),
             "analyze_trace_scheduling" => self.tool_analyze_trace_scheduling(arguments),
             "get_process_timeline" => self.tool_get_process_timeline(arguments),
@@ -1139,6 +1225,10 @@ impl McpTools {
             "analyze_cpu_frequency" => self.tool_analyze_cpu_frequency(arguments),
             "analyze_cpu_idle" => self.tool_analyze_cpu_idle(arguments),
             "analyze_power_state" => self.tool_analyze_power_state(arguments),
+            "analyze_dsq_latency" => self.tool_analyze_dsq_latency(arguments),
+            "analyze_llc_locality" => self.tool_analyze_llc_locality(arguments),
+            "analyze_runqueue_depth" => self.tool_analyze_runqueue_depth(arguments),
+            "analyze_fairness" => self.tool_analyze_fairness(arguments),
             _ => Err(anyhow!("Unknown tool: {}", name)),
         }
     }
@@ -2264,6 +2354,8 @@ impl McpTools {
 
         let pid = args.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32);
 
+        let cpu_filter = args.get("cpu").and_then(|v| v.as_u64()).map(|v| v as u32);
+
         // Extract aggregation_mode parameter for task state analysis
         let aggregation_mode = args
             .get("aggregation_mode")
@@ -2294,11 +2386,69 @@ impl McpTools {
                     analyzer.analyze_cpu_utilization()
                 };
 
+                // If a specific CPU is requested, return just that CPU's data
+                if let Some(cpu_id) = cpu_filter {
+                    if let Some(cpu_stats) = stats.get(&cpu_id) {
+                        return Ok(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string_pretty(&json!({
+                                    "analysis_type": "cpu_utilization",
+                                    "cpu_filter": cpu_id,
+                                    "cpu": cpu_stats,
+                                })).unwrap()
+                            }]
+                        }));
+                    } else {
+                        return Err(anyhow!("CPU {} not found in trace", cpu_id));
+                    }
+                }
+
+                // Build sorted list for summary
+                let mut cpu_list: Vec<_> = stats.values().collect();
+                cpu_list.sort_by(|a, b| {
+                    b.utilization_percent
+                        .partial_cmp(&a.utilization_percent)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let total_cpus = cpu_list.len();
+                let avg_util = if total_cpus > 0 {
+                    cpu_list.iter().map(|c| c.utilization_percent).sum::<f64>() / total_cpus as f64
+                } else {
+                    0.0
+                };
+                let high_util = cpu_list
+                    .iter()
+                    .filter(|c| c.utilization_percent > 80.0)
+                    .count();
+                let mid_util = cpu_list
+                    .iter()
+                    .filter(|c| c.utilization_percent >= 50.0 && c.utilization_percent <= 80.0)
+                    .count();
+                let low_util = cpu_list
+                    .iter()
+                    .filter(|c| c.utilization_percent < 10.0)
+                    .count();
+
+                // Return top N and bottom N CPUs instead of all
+                let top_n = limit.min(20);
+                let top_cpus: Vec<_> = cpu_list.iter().take(top_n).collect();
+                let bottom_cpus: Vec<_> = cpu_list.iter().rev().take(top_n.min(5)).collect();
+
                 json!({
                     "analysis_type": "cpu_utilization",
-                    "cpus_analyzed": stats.len(),
+                    "cpus_analyzed": total_cpus,
                     "multi_threaded": use_parallel,
-                    "cpus": stats,
+                    "summary": {
+                        "avg_utilization_percent": avg_util,
+                        "cpus_above_80_pct": high_util,
+                        "cpus_50_to_80_pct": mid_util,
+                        "cpus_below_10_pct": low_util,
+                    },
+                    "top_utilized_cpus": top_cpus,
+                    "bottom_utilized_cpus": bottom_cpus,
+                    "note": format!("Showing top {} and bottom {} of {} CPUs. Use cpu parameter to filter specific CPU, limit to adjust count.", top_n, top_n.min(5), total_cpus),
                 })
             }
             "process_runtime" => {
@@ -2309,11 +2459,13 @@ impl McpTools {
                     analyzer.analyze_process_runtime(pid)
                 };
 
+                let total_processes = stats.len();
                 let limited_stats: Vec<_> = stats.into_iter().take(limit).collect();
 
                 json!({
                     "analysis_type": "process_runtime",
-                    "processes_analyzed": limited_stats.len(),
+                    "total_processes": total_processes,
+                    "processes_shown": limited_stats.len(),
                     "multi_threaded": use_parallel,
                     "pid_filter": pid,
                     "processes": limited_stats,
@@ -2323,18 +2475,83 @@ impl McpTools {
                 let analyzer = WakeupChainAnalyzer::new(trace);
                 let stats = analyzer.analyze_wakeup_latency();
 
+                // If a specific CPU is requested, return just that CPU's data
+                if let Some(cpu_id) = cpu_filter {
+                    if let Some(cpu_stats) = stats.per_cpu_stats.get(&cpu_id) {
+                        return Ok(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string_pretty(&json!({
+                                    "analysis_type": "wakeup_latency",
+                                    "cpu_filter": cpu_id,
+                                    "cpu_stats": cpu_stats,
+                                    "global_comparison": {
+                                        "global_avg_latency_ns": stats.avg_latency_ns,
+                                        "global_p99_latency_ns": stats.p99_latency_ns,
+                                    }
+                                })).unwrap()
+                            }]
+                        }));
+                    } else {
+                        return Err(anyhow!("CPU {} not found in wakeup latency data", cpu_id));
+                    }
+                }
+
+                // Sort per-CPU stats by avg latency descending, show top N worst
+                let mut per_cpu_sorted: Vec<_> = stats.per_cpu_stats.values().collect();
+                per_cpu_sorted.sort_by(|a, b| b.avg_latency_ns.cmp(&a.avg_latency_ns));
+                let total_cpus = per_cpu_sorted.len();
+                let top_n = limit.min(20);
+                let worst_cpus: Vec<_> = per_cpu_sorted.iter().take(top_n).collect();
+
                 json!({
                     "analysis_type": "wakeup_latency",
-                    "stats": stats,
+                    "total_wakeups": stats.total_wakeups,
+                    "total_cpus": total_cpus,
+                    "global_stats": {
+                        "min_latency_ns": stats.min_latency_ns,
+                        "max_latency_ns": stats.max_latency_ns,
+                        "avg_latency_ns": stats.avg_latency_ns,
+                        "p50_latency_ns": stats.p50_latency_ns,
+                        "p95_latency_ns": stats.p95_latency_ns,
+                        "p99_latency_ns": stats.p99_latency_ns,
+                        "p999_latency_ns": stats.p999_latency_ns,
+                    },
+                    "worst_cpus_by_avg_latency": worst_cpus,
+                    "note": format!("Showing {} worst CPUs by avg latency out of {}. Use cpu parameter to filter specific CPU, limit to adjust count.", top_n, total_cpus),
                 })
             }
             "migration_patterns" => {
                 let analyzer = PerfettoMigrationAnalyzer::new(trace);
                 let stats = analyzer.analyze_migration_patterns();
 
+                // Sort migrations_by_process by count descending and limit
+                let mut migrations_sorted: Vec<_> = stats.migrations_by_process.iter().collect();
+                migrations_sorted.sort_by(|a, b| b.1.cmp(a.1));
+                let total_processes = migrations_sorted.len();
+                let top_n = limit.min(20);
+                let top_migrators: Vec<_> = migrations_sorted
+                    .iter()
+                    .take(top_n)
+                    .map(|(pid, count)| json!({"pid": pid, "migration_count": count}))
+                    .collect();
+
                 json!({
                     "analysis_type": "migration_patterns",
-                    "stats": stats,
+                    "total_migrations": stats.total_migrations,
+                    "cross_numa_migrations": stats.cross_numa_migrations,
+                    "cross_llc_migrations": stats.cross_llc_migrations,
+                    "latency": {
+                        "min_ns": stats.min_latency_ns,
+                        "max_ns": stats.max_latency_ns,
+                        "avg_ns": stats.avg_latency_ns,
+                        "p50_ns": stats.p50_latency_ns,
+                        "p95_ns": stats.p95_latency_ns,
+                        "p99_ns": stats.p99_latency_ns,
+                    },
+                    "total_processes_migrated": total_processes,
+                    "top_migrating_processes": top_migrators,
+                    "note": format!("Showing top {} of {} migrating processes.", top_n, total_processes),
                 })
             }
             "dsq_summary" => {
@@ -2354,6 +2571,126 @@ impl McpTools {
                 json!({
                     "analysis_type": "dsq_summary",
                     "summary": summary,
+                })
+            }
+            "dsq_latency" => {
+                use super::perfetto_analyzers_scheduling::DsqLatencyAnalyzer;
+                let analyzer = DsqLatencyAnalyzer::new(trace);
+
+                match analyzer.analyze() {
+                    Some(stats) => {
+                        json!({
+                            "analysis_type": "dsq_latency",
+                            "scheduler_name": stats.scheduler_name,
+                            "total_dsqs": stats.total_dsqs,
+                            "total_events": stats.total_events,
+                            "per_dsq": stats.per_dsq,
+                        })
+                    }
+                    None => {
+                        return Ok(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": "This trace does not contain sched_ext (DSQ) data.\n\nDSQ latency analysis requires a trace generated while a sched_ext scheduler is active."
+                            }]
+                        }));
+                    }
+                }
+            }
+            "llc_locality" => {
+                use super::perfetto_analyzers_scheduling::LlcLocalityAnalyzer;
+                let analyzer = LlcLocalityAnalyzer::new(trace);
+
+                match analyzer.analyze() {
+                    Some(stats) => {
+                        // Limit per-LLC stats and top processes
+                        let mut per_llc_sorted: Vec<_> = stats.per_llc_stats.values().collect();
+                        per_llc_sorted
+                            .sort_by(|a, b| b.outbound_migrations.cmp(&a.outbound_migrations));
+                        let top_n = limit.min(20);
+                        let limited_llc: Vec<_> = per_llc_sorted.into_iter().take(top_n).collect();
+                        let limited_procs: Vec<_> =
+                            stats.top_cross_llc_processes.iter().take(top_n).collect();
+
+                        let locality_pct = if stats.total_migrations > 0 {
+                            stats.same_llc_migrations as f64 / stats.total_migrations as f64 * 100.0
+                        } else {
+                            100.0
+                        };
+
+                        json!({
+                            "analysis_type": "llc_locality",
+                            "topology": {
+                                "nr_cpus": stats.nr_cpus,
+                                "nr_llcs": stats.nr_llcs,
+                                "nr_numa_nodes": stats.nr_numa_nodes,
+                            },
+                            "total_migrations": stats.total_migrations,
+                            "same_llc_migrations": stats.same_llc_migrations,
+                            "cross_llc_same_numa_migrations": stats.cross_llc_same_numa_migrations,
+                            "cross_numa_migrations": stats.cross_numa_migrations,
+                            "llc_locality_pct": locality_pct,
+                            "per_llc_stats": limited_llc,
+                            "top_cross_llc_processes": limited_procs,
+                        })
+                    }
+                    None => {
+                        return Ok(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": "No topology data available in this trace.\n\nLLC locality analysis requires topology metadata embedded in the trace. Traces generated by scxtop >= v1.x include this data automatically.\n\nFor older traces, re-record with the latest scxtop version."
+                            }]
+                        }));
+                    }
+                }
+            }
+            "runqueue_depth" => {
+                use super::perfetto_analyzers_scheduling::RunqueueDepthAnalyzer;
+                let analyzer = RunqueueDepthAnalyzer::new(trace);
+                let stats = analyzer.analyze(cpu_filter);
+
+                // Sort CPUs by max depth descending
+                let mut cpu_sorted: Vec<_> = stats.per_cpu.values().collect();
+                cpu_sorted.sort_by(|a, b| b.max_depth.cmp(&a.max_depth));
+                let top_n = limit.min(20);
+                let worst_cpus: Vec<_> = cpu_sorted.iter().take(top_n).collect();
+
+                json!({
+                    "analysis_type": "runqueue_depth",
+                    "total_cpus": stats.total_cpus,
+                    "global_avg_depth": stats.global_avg_depth,
+                    "global_max_depth": stats.global_max_depth,
+                    "cpus_with_high_depth": stats.cpus_with_high_depth,
+                    "worst_cpus_by_max_depth": worst_cpus,
+                    "note": format!("Showing top {} CPUs by max queue depth. Use cpu parameter to filter specific CPU.", top_n),
+                })
+            }
+            "fairness" => {
+                use super::perfetto_analyzers_scheduling::FairnessAnalyzer;
+                let analyzer = FairnessAnalyzer::new(trace);
+                let stats = analyzer.analyze();
+
+                let top_n = limit.min(20);
+                let starved: Vec<_> = stats.starved_processes.iter().take(top_n).collect();
+                let hogging: Vec<_> = stats.hogging_processes.iter().take(top_n).collect();
+
+                json!({
+                    "analysis_type": "fairness",
+                    "total_processes": stats.total_processes,
+                    "total_cpu_time_ns": stats.total_cpu_time_ns,
+                    "fair_share_ns": stats.fair_share_ns,
+                    "gini_coefficient": stats.gini_coefficient,
+                    "max_min_ratio": stats.max_min_ratio,
+                    "interpretation": {
+                        "gini": if stats.gini_coefficient < 0.3 { "Low inequality (good)" }
+                               else if stats.gini_coefficient < 0.6 { "Moderate inequality" }
+                               else { "High inequality (potential starvation)" },
+                    },
+                    "starved_processes_count": stats.starved_processes.len(),
+                    "hogging_processes_count": stats.hogging_processes.len(),
+                    "top_starved": starved,
+                    "top_hogging": hogging,
+                    "note": format!("Showing top {} starved and hogging processes.", top_n),
                 })
             }
             "task_states" => {
@@ -2386,24 +2723,66 @@ impl McpTools {
                 use super::perfetto_analyzers_extended::PreemptionAnalyzer;
                 let analyzer = PreemptionAnalyzer::new(trace);
                 let stats = analyzer.analyze_preemptions(pid);
-                let limited_stats: Vec<_> = stats.into_iter().take(limit).collect();
+                let total_processes = stats.len();
+                let total_preemptions: usize = stats.iter().map(|s| s.preempted_count).sum();
+                let top_n = limit.min(20);
+                // Limit number of processes and truncate preempted_by per process
+                let limited_stats: Vec<_> = stats
+                    .into_iter()
+                    .take(top_n)
+                    .map(|mut s| {
+                        let total_preemptors = s.preempted_by.len();
+                        s.preempted_by.truncate(5);
+                        json!({
+                            "pid": s.pid,
+                            "comm": s.comm,
+                            "preempted_count": s.preempted_count,
+                            "total_unique_preemptors": total_preemptors,
+                            "top_preempted_by": s.preempted_by,
+                        })
+                    })
+                    .collect();
 
                 json!({
                     "analysis_type": "preemptions",
-                    "processes_analyzed": limited_stats.len(),
+                    "total_preemptions": total_preemptions,
+                    "total_processes": total_processes,
+                    "processes_shown": limited_stats.len(),
                     "pid_filter": pid,
                     "processes": limited_stats,
+                    "note": format!("Showing top {} of {} processes. preempted_by limited to top 5 per process.", top_n, total_processes),
                 })
             }
             "wakeup_chains" => {
                 use super::perfetto_analyzers_extended::WakeupChainDetector;
                 let analyzer = WakeupChainDetector::new(trace);
-                let chains = analyzer.find_wakeup_chains(limit);
+                // Cap wakeup chains to prevent massive output
+                let chain_limit = limit.min(10);
+                let chains = analyzer.find_wakeup_chains(chain_limit);
+                let total_chains = chains.len();
+
+                // Truncate chain events to max 10 per chain
+                let limited_chains: Vec<_> = chains
+                    .into_iter()
+                    .map(|mut c| {
+                        let full_length = c.chain.len();
+                        c.chain.truncate(10);
+                        json!({
+                            "chain": c.chain,
+                            "total_latency_ns": c.total_latency_ns,
+                            "chain_length": c.chain_length,
+                            "full_chain_length": full_length,
+                            "criticality_score": c.criticality_score,
+                        })
+                    })
+                    .collect();
 
                 json!({
                     "analysis_type": "wakeup_chains",
-                    "chains_found": chains.len(),
-                    "chains": chains,
+                    "total_chains_found": total_chains,
+                    "chains_shown": limited_chains.len(),
+                    "chains": limited_chains,
+                    "note": format!("Showing top {} chains, events per chain limited to 10.", chain_limit),
                 })
             }
             "latency_breakdown" => {
@@ -3671,6 +4050,30 @@ impl McpTools {
     fn tool_analyze_power_state(&self, args: &Value) -> Result<Value> {
         let mut modified_args = args.clone();
         modified_args["analysis_type"] = json!("power_state");
+        self.tool_analyze_trace_scheduling(&modified_args)
+    }
+
+    fn tool_analyze_dsq_latency(&self, args: &Value) -> Result<Value> {
+        let mut modified_args = args.clone();
+        modified_args["analysis_type"] = json!("dsq_latency");
+        self.tool_analyze_trace_scheduling(&modified_args)
+    }
+
+    fn tool_analyze_llc_locality(&self, args: &Value) -> Result<Value> {
+        let mut modified_args = args.clone();
+        modified_args["analysis_type"] = json!("llc_locality");
+        self.tool_analyze_trace_scheduling(&modified_args)
+    }
+
+    fn tool_analyze_runqueue_depth(&self, args: &Value) -> Result<Value> {
+        let mut modified_args = args.clone();
+        modified_args["analysis_type"] = json!("runqueue_depth");
+        self.tool_analyze_trace_scheduling(&modified_args)
+    }
+
+    fn tool_analyze_fairness(&self, args: &Value) -> Result<Value> {
+        let mut modified_args = args.clone();
+        modified_args["analysis_type"] = json!("fairness");
         self.tool_analyze_trace_scheduling(&modified_args)
     }
 }

@@ -21,6 +21,7 @@ pub mod perfetto_analyzers_extended;
 pub mod perfetto_analyzers_io;
 pub mod perfetto_analyzers_irq;
 pub mod perfetto_analyzers_power;
+pub mod perfetto_analyzers_scheduling;
 pub mod perfetto_event_types;
 pub mod perfetto_outlier_analyzer;
 pub mod perfetto_parser;
@@ -91,6 +92,10 @@ pub use perfetto_analyzers_power::{
     CpuIdleStateAnalyzer, CpuIdleStats, FrequencyEvent, IdleEvent, PowerStateAnalyzer,
     PowerStateResult, SuspendResumeEvent,
 };
+pub use perfetto_analyzers_scheduling::{
+    CpuRunqueueStats, DsqLatencyAnalyzer, DsqLatencyStats, FairnessAnalyzer, FairnessStats,
+    LlcLocalityAnalyzer, LlcLocalityStats, PerDsqStats, RunqueueDepthAnalyzer, RunqueueDepthStats,
+};
 pub use perfetto_event_types::{
     event_category, event_type_name, events_in_category, softirq_type_name, EventCategory,
 };
@@ -101,7 +106,7 @@ pub use perfetto_outlier_analyzer::{
 pub use perfetto_parser::{
     CpuEventType, CpuTimeline, CpuTimelineEvent, DsqDescriptor, DsqEvent, FtraceEventWithIndex,
     Percentiles, PerfettoTrace, ProcessInfo, ProcessTimeline, ProcessTimelineEvent,
-    SchedExtEventData, SchedExtMetadata, ThreadInfo,
+    SchedExtEventData, SchedExtMetadata, ThreadInfo, TraceTopology,
 };
 pub use perfetto_parser_enhanced::{
     ClockType, CompatibilityDetector, EventTypeIndex, TraceCapabilities, TraceSource,
