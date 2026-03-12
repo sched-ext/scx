@@ -12,43 +12,57 @@ use syn::{
     punctuated::Punctuated,
 };
 
+/// Parameter types for callback signatures.
+#[derive(Clone, Copy)]
+enum ParamType {
+    /// `*mut task_struct` — cast from `*ctx.add(N) as *mut scx_ebpf::vmlinux::task_struct`
+    Task,
+    /// `*mut scx_exit_info` — cast from `*ctx.add(N) as *mut scx_ebpf::vmlinux::scx_exit_info`
+    ExitInfo,
+    /// `*mut core::ffi::c_void` — generic kernel pointer (cpumask, args, dctx, etc.)
+    Ptr,
+    /// `i32` — cast from `*ctx.add(N) as i32`
+    I32,
+    /// `u32` — cast from `*ctx.add(N) as u32`
+    U32,
+    /// `u64` — read directly from `*ctx.add(N)`
+    U64,
+    /// `bool` — `*ctx.add(N) != 0`
+    Bool,
+}
+
 /// Description of a sched_ext_ops callback's kernel signature.
 struct CallbackSig {
     name: &'static str,
-    /// Each param: (extraction expression from ctx, cast type).
-    /// `"ptr"` means `*ctx.add(N) as *mut task_struct`
-    /// `"i32"` means `*ctx.add(N) as i32`
-    /// `"u64"` means `*ctx.add(N)`
-    /// `"bool"` means `*ctx.add(N) != 0`
-    params: &'static [(&'static str, &'static str)],
-    /// Return type: `None` for void, `Some("i32")` for s32
+    params: &'static [(ParamType, &'static str)],
     ret: Option<&'static str>,
-    /// Whether this is sleepable (uses struct_ops.s/ section)
     sleepable: bool,
 }
+
+use ParamType::*;
 
 const CALLBACKS: &[CallbackSig] = &[
     CallbackSig {
         name: "select_cpu",
-        params: &[("ptr", "p"), ("i32", "prev_cpu"), ("u64", "wake_flags")],
+        params: &[(Task, "p"), (I32, "prev_cpu"), (U64, "wake_flags")],
         ret: Some("i32"),
         sleepable: false,
     },
     CallbackSig {
         name: "enqueue",
-        params: &[("ptr", "p"), ("u64", "enq_flags")],
+        params: &[(Task, "p"), (U64, "enq_flags")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "dequeue",
-        params: &[("ptr", "p"), ("u64", "deq_flags")],
+        params: &[(Task, "p"), (U64, "deq_flags")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "dispatch",
-        params: &[("i32", "cpu"), ("ptr", "prev")],
+        params: &[(I32, "cpu"), (Task, "prev")],
         ret: None,
         sleepable: false,
     },
@@ -60,109 +74,109 @@ const CALLBACKS: &[CallbackSig] = &[
     },
     CallbackSig {
         name: "runnable",
-        params: &[("ptr", "p"), ("u64", "enq_flags")],
+        params: &[(Task, "p"), (U64, "enq_flags")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "running",
-        params: &[("ptr", "p")],
+        params: &[(Task, "p")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "stopping",
-        params: &[("ptr", "p"), ("bool", "runnable")],
+        params: &[(Task, "p"), (Bool, "runnable")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "quiescent",
-        params: &[("ptr", "p"), ("u64", "deq_flags")],
+        params: &[(Task, "p"), (U64, "deq_flags")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "set_weight",
-        params: &[("ptr", "p"), ("u32", "weight")],
+        params: &[(Task, "p"), (U32, "weight")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "set_cpumask",
-        params: &[("ptr", "p"), ("ptr", "cpumask")],
+        params: &[(Task, "p"), (Ptr, "cpumask")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "update_idle",
-        params: &[("i32", "cpu"), ("bool", "idle")],
+        params: &[(I32, "cpu"), (Bool, "idle")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "cpu_acquire",
-        params: &[("i32", "cpu"), ("ptr", "args")],
+        params: &[(I32, "cpu"), (Ptr, "args")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "cpu_release",
-        params: &[("i32", "cpu"), ("ptr", "args")],
+        params: &[(I32, "cpu"), (Ptr, "args")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "init_task",
-        params: &[("ptr", "p"), ("ptr", "args")],
+        params: &[(Task, "p"), (Ptr, "args")],
         ret: Some("i32"),
         sleepable: false,
     },
     CallbackSig {
         name: "exit_task",
-        params: &[("ptr", "p"), ("ptr", "args")],
+        params: &[(Task, "p"), (Ptr, "args")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "enable",
-        params: &[("ptr", "p")],
+        params: &[(Task, "p")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "disable",
-        params: &[("ptr", "p")],
+        params: &[(Task, "p")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "dump",
-        params: &[("ptr", "dctx")],
+        params: &[(Ptr, "dctx")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "dump_cpu",
-        params: &[("ptr", "dctx"), ("i32", "cpu"), ("bool", "idle")],
+        params: &[(Ptr, "dctx"), (I32, "cpu"), (Bool, "idle")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "dump_task",
-        params: &[("ptr", "dctx"), ("ptr", "p")],
+        params: &[(Ptr, "dctx"), (Task, "p")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "cpu_online",
-        params: &[("i32", "cpu")],
+        params: &[(I32, "cpu")],
         ret: None,
         sleepable: false,
     },
     CallbackSig {
         name: "cpu_offline",
-        params: &[("i32", "cpu")],
+        params: &[(I32, "cpu")],
         ret: None,
         sleepable: false,
     },
@@ -174,7 +188,7 @@ const CALLBACKS: &[CallbackSig] = &[
     },
     CallbackSig {
         name: "exit",
-        params: &[("ptr", "ei")],
+        params: &[(ExitInfo, "ei")],
         ret: None,
         sleepable: false,
     },
@@ -203,19 +217,41 @@ struct ScxOpsDef {
 
 impl Parse for ScxOpsDef {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        // Parse `name: "..."`
         let _name_kw: Ident = input.parse()?;
         input.parse::<Token![:]>()?;
         let name: LitStr = input.parse()?;
         input.parse::<Token![,]>()?;
-
-        // Parse remaining `field: handler` entries
         let entries = Punctuated::<CallbackEntry, Token![,]>::parse_terminated(input)?;
-
         Ok(Self {
             name,
             callbacks: entries.into_iter().collect(),
         })
+    }
+}
+
+fn param_extract(ty: ParamType, idx: usize, name: &Ident) -> proc_macro2::TokenStream {
+    match ty {
+        Task => quote! {
+            let #name = unsafe { *ctx.add(#idx) as *mut scx_ebpf::vmlinux::task_struct };
+        },
+        ExitInfo => quote! {
+            let #name = unsafe { *ctx.add(#idx) as *mut scx_ebpf::vmlinux::scx_exit_info };
+        },
+        Ptr => quote! {
+            let #name = unsafe { *ctx.add(#idx) as *mut core::ffi::c_void };
+        },
+        I32 => quote! {
+            let #name = unsafe { *ctx.add(#idx) as i32 };
+        },
+        U32 => quote! {
+            let #name = unsafe { *ctx.add(#idx) as u32 };
+        },
+        U64 => quote! {
+            let #name = unsafe { *ctx.add(#idx) };
+        },
+        Bool => quote! {
+            let #name = unsafe { *ctx.add(#idx) != 0 };
+        },
     }
 }
 
@@ -242,9 +278,7 @@ pub fn scx_ops_define(input: TokenStream) -> TokenStream {
         let handler = &entry.handler;
         let field_str = field_name.to_string();
 
-        // Find the callback signature
-        let sig = CALLBACKS.iter().find(|s| s.name == field_str);
-        let sig = match sig {
+        let sig = match CALLBACKS.iter().find(|s| s.name == field_str) {
             Some(s) => s,
             None => {
                 return syn::Error::new(
@@ -256,49 +290,27 @@ pub fn scx_ops_define(input: TokenStream) -> TokenStream {
             }
         };
 
-        // Generate the link section name
         let section = if sig.sleepable {
             format!("struct_ops.s/{field_str}")
         } else {
             format!("struct_ops/{field_str}")
         };
 
-        // Generate parameter extraction from ctx
-        let mut param_extracts = Vec::new();
+        let mut extracts = Vec::new();
         let mut call_args = Vec::new();
 
         for (i, (ty, param_name)) in sig.params.iter().enumerate() {
             let param_ident = Ident::new(param_name, Span::call_site());
-            let extract = match *ty {
-                "ptr" => quote! {
-                    let #param_ident = unsafe { *ctx.add(#i) as *mut core::ffi::c_void };
-                },
-                "i32" => quote! {
-                    let #param_ident = unsafe { *ctx.add(#i) as i32 };
-                },
-                "u32" => quote! {
-                    let #param_ident = unsafe { *ctx.add(#i) as u32 };
-                },
-                "u64" => quote! {
-                    let #param_ident = unsafe { *ctx.add(#i) };
-                },
-                "bool" => quote! {
-                    let #param_ident = unsafe { *ctx.add(#i) != 0 };
-                },
-                _ => unreachable!(),
-            };
-            param_extracts.push(extract);
+            extracts.push(param_extract(*ty, i, &param_ident));
             call_args.push(quote! { #param_ident });
         }
 
-        // Generate the trampoline function
         let ret_type = match sig.ret {
             Some("i32") => quote! { -> i32 },
             _ => quote! {},
         };
 
         let trampoline = if sig.params.is_empty() {
-            // No ctx parameter for init()
             quote! {
                 #[unsafe(no_mangle)]
                 #[unsafe(link_section = #section)]
@@ -311,28 +323,21 @@ pub fn scx_ops_define(input: TokenStream) -> TokenStream {
                 #[unsafe(no_mangle)]
                 #[unsafe(link_section = #section)]
                 unsafe extern "C" fn #field_name(ctx: *const u64) #ret_type {
-                    #(#param_extracts)*
+                    #(#extracts)*
                     #handler(#(#call_args),*)
                 }
             }
         };
 
         trampolines.push(trampoline);
-
-        // Generate the ops struct field assignment
-        ops_fields.push(quote! {
-            #field_name: Some(#field_name),
-        });
+        ops_fields.push(quote! { #field_name: Some(#field_name), });
     }
 
-    // Generate the scheduler name as a [u8; 128] constant
     let sched_name = def.name.value();
     let name_bytes: Vec<u8> = {
         let mut n = vec![0u8; 128];
         for (i, b) in sched_name.bytes().enumerate() {
-            if i >= 127 {
-                break;
-            }
+            if i >= 127 { break; }
             n[i] = b;
         }
         n
