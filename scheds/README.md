@@ -35,5 +35,7 @@ As the ecosystem has matured these schedulers have been superseded by those in t
 `rust/` directory, many of which are production-ready. These schedulers better represent
 modern `sched_ext` codebases and are a more appropriate starting point for newcomers.
 The build system and surrouding crates ecosystem is also geared towards Rust schedulers.
-As a result, the C schedulers are no longer mirrored here and are only available
-from the kernel source.
+As a result, the C schedulers are no longer mirrored here. They are available
+from the kernel/tools/sched_ext, and also in the dedicated
+[scx-c-examples](https://github.com/sched-ext/scx-c-examples) repository for
+those who want to explore or experiment with C-based schedulers.

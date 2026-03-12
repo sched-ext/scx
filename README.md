@@ -63,7 +63,7 @@ local=696 global=192
 ^CEXIT: BPF scheduler unregistered
 ```
 
-[`scx_simple`](https://github.com/sched-ext/scx/blob/main/scheds/c/scx_simple.bpf.c)
+[`scx_simple`](https://github.com/sched-ext/scx-c-examples/blob/main/scheds/c/scx_simple.bpf.c)
 is a very simple global vtime scheduler which can behave acceptably on CPUs
 with a simple topology (single socket and single L3 cache domain).
 
@@ -73,6 +73,10 @@ to the kernel default scheduler by terminating the process with `ctrl-c`.
 For `scx_simple`, suspending the scheduler process doesn't affect scheduling
 behavior because all that the userspace component does is print statistics.
 This doesn't hold for all schedulers.
+
+Note: C schedulers like `scx_simple` were previously included in this repository
+but have since been moved to [scx-c-examples](https://github.com/sched-ext/scx-c-examples).
+The schedulers in this repository now use Rust for userspace components.
 
 In addition to terminating the program, there are two more ways to disable a
 `sched_ext` scheduler - `sysrq-S` and the watchdog timer. Ignoring kernel
@@ -109,9 +113,7 @@ scx
 
 ## Build & Install
 
-This repository provides two build systems:
-
-- **Rust schedulers**: Use `cargo`
+**Rust schedulers** : use `cargo`.
 
 **Dependencies:**
 
