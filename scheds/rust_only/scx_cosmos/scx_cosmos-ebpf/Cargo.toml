@@ -1,0 +1,14 @@
+[package]
+name = "scx_cosmos-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "scx_cosmos"
+path = "src/main.rs"
+
+[dependencies]
+scx-ebpf = { path = "../../../../rust/scx_ebpf" }
+
+[build-dependencies]
+scx-vmlinux = { path = "../../../../rust/scx_vmlinux" }
