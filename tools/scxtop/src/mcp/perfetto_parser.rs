@@ -32,6 +32,23 @@ pub struct InternTables {
     pub debug_annotation_string_values: HashMap<u64, String>,
 }
 
+/// Topology information embedded in a trace (for cross-machine analysis)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceTopology {
+    /// CPU to LLC (Last Level Cache) ID mapping
+    pub cpu_to_llc: HashMap<u32, u32>,
+    /// CPU to NUMA node ID mapping
+    pub cpu_to_numa: HashMap<u32, u32>,
+    /// CPU to core ID mapping
+    pub cpu_to_core: HashMap<u32, u32>,
+    /// Total number of CPUs
+    pub nr_cpus: u32,
+    /// Total number of LLCs
+    pub nr_llcs: u32,
+    /// Total number of NUMA nodes
+    pub nr_numa_nodes: u32,
+}
+
 /// Core structure for a parsed perfetto trace file
 #[derive(Clone)]
 pub struct PerfettoTrace {
@@ -46,7 +63,6 @@ pub struct PerfettoTrace {
     /// Ftrace events indexed by CPU for efficient per-CPU queries
     ftrace_events_by_cpu: BTreeMap<u32, Vec<FtraceEventWithIndex>>,
     /// DSQ (dispatch queue) events indexed by DSQ ID
-    #[allow(dead_code)] // Reserved for future DSQ latency analysis
     dsq_events: HashMap<u64, Vec<DsqEvent>>,
     /// System statistics indexed by timestamp
     #[allow(dead_code)] // Reserved for future system stats analysis
@@ -55,6 +71,8 @@ pub struct PerfettoTrace {
     time_range: (u64, u64),
     /// sched_ext scheduler metadata (if trace contains sched_ext events)
     scx_metadata: Option<SchedExtMetadata>,
+    /// Topology information extracted from trace metadata (if available)
+    topology: Option<TraceTopology>,
 
     /// NEW: Track events parsed from wprof traces (ONCPU, WAKER, etc.)
     track_events: Vec<super::perfetto_track_event_types::ParsedTrackEvent>,
@@ -254,11 +272,25 @@ impl PerfettoTrace {
     /// Parse a perfetto trace file from disk
     pub fn from_file(path: &Path) -> Result<Self> {
         // Read entire file into memory
-        let bytes = fs::read(path)?;
+        eprintln!("[perfetto_parser] Loading trace file: {:?}", path);
+        let bytes = fs::read(path).map_err(|e| {
+            eprintln!("[perfetto_parser] Failed to read file {:?}: {}", path, e);
+            anyhow!("Failed to read trace file {:?}: {}", path, e)
+        })?;
+        eprintln!(
+            "[perfetto_parser] Read {} bytes, parsing protobuf...",
+            bytes.len()
+        );
 
         // Parse protobuf
-        let trace = Trace::parse_from_bytes(&bytes)
-            .map_err(|e| anyhow!("Failed to parse perfetto trace: {}", e))?;
+        let trace = Trace::parse_from_bytes(&bytes).map_err(|e| {
+            eprintln!("[perfetto_parser] Failed to parse protobuf: {}", e);
+            anyhow!("Failed to parse perfetto trace: {}", e)
+        })?;
+        eprintln!(
+            "[perfetto_parser] Parsed {} packets, building indexes...",
+            trace.packet.len()
+        );
 
         // Build trace structure with indexes
         Self::from_trace(trace)
@@ -277,6 +309,13 @@ impl PerfettoTrace {
         // Track DSQ descriptors as we parse
         let mut dsq_descriptors: HashMap<u64, DsqDescriptor> = HashMap::new();
         let mut has_scx_events = false;
+
+        // UUID-to-DSQ-ID mappings for proper TrackEvent correlation
+        let mut uuid_to_dsq_latency: HashMap<u64, u64> = HashMap::new();
+        let mut uuid_to_dsq_nr_queued: HashMap<u64, u64> = HashMap::new();
+
+        // Topology metadata (if embedded in trace)
+        let mut trace_topology: Option<TraceTopology> = None;
 
         // Track events storage
         let mut track_events: Vec<super::perfetto_track_event_types::ParsedTrackEvent> = Vec::new();
@@ -389,29 +428,59 @@ impl PerfettoTrace {
                         if let Some(counter) = track_desc.counter.as_ref() {
                             if let Some(unit_name) = &counter.unit_name {
                                 // DSQ tracks have unit names like "DSQ 0 latency ns" or "DSQ 0 nr_queued"
-                                if unit_name.contains("DSQ ") && unit_name.contains("latency") {
-                                    // Extract DSQ ID from track UUID
-                                    if let Some(_uuid) = track_desc.uuid {
-                                        // DSQ ID is encoded in the track name
-                                        if let Some(name_str) = &track_desc.static_or_dynamic_name {
-                                            use perfetto_protos::track_descriptor::track_descriptor::Static_or_dynamic_name;
-                                            if let Static_or_dynamic_name::StaticName(name) =
-                                                name_str
+                                if unit_name.contains("DSQ ") {
+                                    let is_latency = unit_name.contains("latency");
+                                    let is_nr_queued = unit_name.contains("nr_queued");
+
+                                    if is_latency || is_nr_queued {
+                                        if let Some(uuid) = track_desc.uuid {
+                                            // Extract DSQ ID from the track name
+                                            if let Some(name_str) =
+                                                &track_desc.static_or_dynamic_name
                                             {
-                                                if let Some(dsq_id) = extract_dsq_id_from_name(name)
+                                                use perfetto_protos::track_descriptor::track_descriptor::Static_or_dynamic_name;
+                                                if let Static_or_dynamic_name::StaticName(name) =
+                                                    name_str
                                                 {
-                                                    has_scx_events = true;
-                                                    dsq_descriptors.entry(dsq_id).or_insert(
-                                                        DsqDescriptor {
-                                                            dsq_id,
-                                                            first_seen: u64::MAX,
-                                                            last_seen: 0,
-                                                            event_count: 0,
-                                                        },
-                                                    );
+                                                    if let Some(dsq_id) =
+                                                        extract_dsq_id_from_name(name)
+                                                    {
+                                                        has_scx_events = true;
+                                                        dsq_descriptors.entry(dsq_id).or_insert(
+                                                            DsqDescriptor {
+                                                                dsq_id,
+                                                                first_seen: u64::MAX,
+                                                                last_seen: 0,
+                                                                event_count: 0,
+                                                            },
+                                                        );
+
+                                                        // Store UUID-to-DSQ mapping for proper event correlation
+                                                        if is_latency {
+                                                            uuid_to_dsq_latency
+                                                                .insert(uuid, dsq_id);
+                                                        } else {
+                                                            uuid_to_dsq_nr_queued
+                                                                .insert(uuid, dsq_id);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check for topology metadata (scxtop embeds this as "scxtop_topo:{json}")
+                        if let Some(name_str) = &track_desc.static_or_dynamic_name {
+                            use perfetto_protos::track_descriptor::track_descriptor::Static_or_dynamic_name;
+                            if let Static_or_dynamic_name::StaticName(name) = name_str {
+                                if let Some(json_str) = name.strip_prefix("scxtop_topo:") {
+                                    if let Ok(topo) =
+                                        serde_json::from_str::<TraceTopology>(json_str)
+                                    {
+                                        trace_topology = Some(topo);
                                     }
                                 }
                             }
@@ -516,29 +585,52 @@ impl PerfettoTrace {
                             track_events.push(parsed_event);
                         }
 
-                        // Also extract DSQ events from track events (legacy behavior)
-                        if let Some(_uuid) = track_event.track_uuid {
-                            // Check if this is a DSQ track by looking for it in descriptors
-                            for (&dsq_id, desc) in dsq_descriptors.iter_mut() {
-                                // This is a simplified check - in reality we'd match UUIDs properly
-                                if let Some(ts) = extract_track_event_timestamp(track_event) {
-                                    let ts_ns = ts * 1000; // Convert us to ns
+                        // Extract DSQ events using proper UUID matching
+                        if let Some(uuid) = track_event.track_uuid {
+                            if let Some(ts) = extract_track_event_timestamp(track_event) {
+                                let ts_ns = ts * 1000; // Convert us to ns
+                                let value = extract_counter_value(track_event);
 
-                                    // Extract counter value
-                                    let value = extract_counter_value(track_event);
+                                // Check if this UUID belongs to a DSQ latency track
+                                if let Some(&dsq_id) = uuid_to_dsq_latency.get(&uuid) {
+                                    if let Some(desc) = dsq_descriptors.get_mut(&dsq_id) {
+                                        desc.first_seen = desc.first_seen.min(ts_ns);
+                                        desc.last_seen = desc.last_seen.max(ts_ns);
+                                        desc.event_count += 1;
+                                    }
 
-                                    // Update descriptor
-                                    desc.first_seen = desc.first_seen.min(ts_ns);
-                                    desc.last_seen = desc.last_seen.max(ts_ns);
-                                    desc.event_count += 1;
-
-                                    // Create DSQ event (simplified - would need proper UUID matching)
+                                    // Insert or update DSQ event with latency
                                     dsq_events.entry(dsq_id).or_default().push(DsqEvent {
                                         dsq_id,
                                         timestamp: ts_ns,
                                         latency_us: value,
-                                        nr_queued: None, // Would be filled from separate track
+                                        nr_queued: None,
                                     });
+                                }
+                                // Check if this UUID belongs to a DSQ nr_queued track
+                                else if let Some(&dsq_id) = uuid_to_dsq_nr_queued.get(&uuid) {
+                                    if let Some(desc) = dsq_descriptors.get_mut(&dsq_id) {
+                                        desc.first_seen = desc.first_seen.min(ts_ns);
+                                        desc.last_seen = desc.last_seen.max(ts_ns);
+                                    }
+
+                                    // Try to merge with existing latency event at same timestamp,
+                                    // otherwise create new event with just nr_queued
+                                    let events = dsq_events.entry(dsq_id).or_default();
+                                    let merged = events
+                                        .last_mut()
+                                        .filter(|e| e.timestamp == ts_ns && e.nr_queued.is_none())
+                                        .is_some();
+                                    if merged {
+                                        events.last_mut().unwrap().nr_queued = value;
+                                    } else {
+                                        events.push(DsqEvent {
+                                            dsq_id,
+                                            timestamp: ts_ns,
+                                            latency_us: None,
+                                            nr_queued: value,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -579,6 +671,7 @@ impl PerfettoTrace {
             system_stats,
             time_range: (min_ts, max_ts),
             scx_metadata,
+            topology: trace_topology,
             track_events,
             track_events_by_pid,
             track_events_by_category,
@@ -707,18 +800,26 @@ impl PerfettoTrace {
             .unwrap_or(false)
     }
 
-    /// Get sched_ext events for a specific DSQ
-    ///
-    /// Returns SchedExtEventData for the specified DSQ extracted from the trace.
-    /// Note: Currently returns simplified data; full DSQ event correlation
-    /// requires UUID matching between TrackDescriptors and TrackEvents.
+    /// Get DSQ events for a specific DSQ ID
+    pub fn get_dsq_events(&self, dsq_id: u64) -> &[DsqEvent] {
+        self.dsq_events
+            .get(&dsq_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Get all DSQ events across all DSQs
+    pub fn get_all_dsq_events(&self) -> &HashMap<u64, Vec<DsqEvent>> {
+        &self.dsq_events
+    }
+
+    /// Get topology information embedded in the trace (if available)
+    pub fn get_topology(&self) -> Option<&TraceTopology> {
+        self.topology.as_ref()
+    }
+
+    /// Get sched_ext events for a specific DSQ (legacy interface)
     pub fn get_scx_events_by_dsq(&self, _dsq_id: u64) -> Vec<SchedExtEventData> {
-        // Full implementation would correlate:
-        // 1. TrackDescriptor UUIDs for DSQ tracks
-        // 2. TrackEvent counter values matching those UUIDs
-        // 3. sched_switch events occurring at same timestamp
-        // This requires more complex UUID tracking during parse phase.
-        // For now, DSQ metadata is available via get_scx_metadata()
         Vec::new()
     }
 

@@ -196,7 +196,7 @@ impl JsonRpcError {
     pub fn internal_error(msg: &str) -> Self {
         Self {
             code: -32603,
-            message: "Internal error".to_string(),
+            message: format!("Internal error: {}", msg),
             data: Some(serde_json::json!({"detail": msg})),
         }
     }
