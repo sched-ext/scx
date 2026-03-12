@@ -33,6 +33,7 @@
 #![no_std]
 #![feature(asm_experimental_arch)]
 
+pub mod helpers;
 pub mod kfuncs;
 pub mod ops;
 pub mod vmlinux;

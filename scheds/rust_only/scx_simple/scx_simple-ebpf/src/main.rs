@@ -6,10 +6,17 @@
 #![no_std]
 #![no_main]
 #![feature(asm_experimental_arch)]
+#![allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 
 use scx_ebpf::prelude::*;
+use scx_ebpf::core_read;
 
 scx_ebpf::scx_ebpf_boilerplate!();
+
+/// Generated vmlinux struct definitions with real field layouts.
+mod vmlinux {
+    include!(concat!(env!("OUT_DIR"), "/vmlinux.rs"));
+}
 
 /// User-created shared dispatch queue.
 const SHARED_DSQ: u64 = 0;
@@ -17,7 +24,15 @@ const SHARED_DSQ: u64 = 0;
 // ── Scheduler callbacks ────────────────────────────────────────────────
 
 #[inline(always)]
-pub fn on_select_cpu(_p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i32 {
+pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i32 {
+    // Demonstrate CO-RE field access via core_read!
+    // Read nr_cpus_allowed from the real kernel task_struct layout
+    if let Ok(nr_cpus) = core_read!(vmlinux::task_struct, p, nr_cpus_allowed) {
+        if nr_cpus == 1 {
+            // Pinned task — must use prev_cpu
+            return prev_cpu;
+        }
+    }
     prev_cpu
 }
 
