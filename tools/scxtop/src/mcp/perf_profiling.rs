@@ -61,17 +61,23 @@ pub struct PerfProfilingConfig {
     pub max_samples: usize,
     /// Duration to collect in seconds (0 for manual stop)
     pub duration_secs: u64,
+    /// Counting-only mode: no BPF attachment, just count events.
+    /// Automatically set for tracepoints; can be explicitly set when
+    /// stack traces are not needed.
+    #[serde(default)]
+    pub counting_only: bool,
 }
 
 impl Default for PerfProfilingConfig {
     fn default() -> Self {
         Self {
-            event: "hw:cpu-clock".to_string(),
+            event: "hw:cycles".to_string(),
             freq: 99,
             cpu: -1,
             pid: -1,
             max_samples: 10000,
             duration_secs: 0,
+            counting_only: false,
         }
     }
 }
@@ -151,8 +157,12 @@ impl PerfProfiler {
         self.start_time = Some(Instant::now());
 
         // Attach perf events if we have the required components
-        if self.bpf_attacher.is_some() && self.topology.is_some() {
-            self.attach_perf_events(&config)?;
+        if self.topology.is_some() {
+            if config.counting_only {
+                self.open_counting_events(&config)?;
+            } else if self.bpf_attacher.is_some() {
+                self.attach_perf_events(&config)?;
+            }
         }
 
         self.config = Some(config);
@@ -184,6 +194,7 @@ impl PerfProfiler {
         );
 
         let mut attached_count = 0;
+        let mut last_error: Option<String> = None;
         let cpus: Vec<usize> = topology.all_cpus.keys().copied().collect();
         log::debug!("Total CPUs available: {}", cpus.len());
 
@@ -199,16 +210,34 @@ impl PerfProfiler {
 
             self.configure_perf_event_attr(&mut attr, &config.event)?;
 
-            // Configure for sampling with instruction pointer
             // Stack traces are collected by BPF program using bpf_get_stack()
-            attr.sample_type = perf::bindings::PERF_SAMPLE_IP as u64;
-            attr.__bindgen_anon_1.sample_period = config.freq as u64;
-            attr.set_freq(0); // Use period mode (sample every N events)
-            attr.set_disabled(0);
             attr.set_exclude_kernel(0);
             attr.set_exclude_hv(0);
-            attr.set_inherit(1);
-            attr.set_pinned(1);
+            attr.set_freq(0);
+
+            attr.set_disabled(0);
+
+            if attr.type_ == perf::bindings::PERF_TYPE_TRACEPOINT {
+                // Tracepoints: sample every occurrence, no PMU-specific flags
+                attr.__bindgen_anon_1.sample_period = 1;
+            } else {
+                // Hardware/software events: sample with IP capture
+                attr.sample_type = perf::bindings::PERF_SAMPLE_IP as u64;
+                attr.__bindgen_anon_1.sample_period = config.freq as u64;
+                attr.set_inherit(if config.pid == -1 { 1 } else { 0 });
+                attr.set_pinned(1);
+            }
+
+            log::debug!(
+                "perf_event_open attr: type={}, size={}, config={}, sample_period={}, sample_type={:#x}, cpu={}, pid={}",
+                attr.type_,
+                attr.size,
+                attr.config,
+                unsafe { attr.__bindgen_anon_1.sample_period },
+                attr.sample_type,
+                cpu_id,
+                config.pid
+            );
 
             // Open perf event for this specific CPU
             let perf_fd = unsafe {
@@ -216,19 +245,23 @@ impl PerfProfiler {
                     &mut attr as *mut perf::bindings::perf_event_attr,
                     config.pid,
                     cpu_id as i32,
-                    -1, // group_fd
-                    0,  // flags
+                    -1,        // group_fd
+                    1u64 << 3, // PERF_FLAG_FD_CLOEXEC
                 )
             };
 
-            if perf_fd <= 0 {
+            if perf_fd < 0 {
                 let err = std::io::Error::last_os_error();
-                log::warn!(
-                    "Failed to open perf event for CPU {}: {} (errno: {})",
+                let msg = format!(
+                    "perf_event_open failed for CPU {}: {} (errno: {})",
                     cpu_id,
                     err,
                     err.raw_os_error().unwrap_or(0)
                 );
+                log::warn!("{}", msg);
+                if last_error.is_none() {
+                    last_error = Some(msg);
+                }
                 continue;
             }
 
@@ -265,12 +298,14 @@ impl PerfProfiler {
                     attached_count += 1;
                 }
                 Err(e) => {
-                    log::error!(
-                        "Failed to attach BPF program to perf fd={} for CPU {}: {}",
-                        perf_fd,
-                        cpu_id,
-                        e
+                    let msg = format!(
+                        "BPF attach failed for perf fd={} CPU {}: {}",
+                        perf_fd, cpu_id, e
                     );
+                    log::error!("{}", msg);
+                    if last_error.is_none() {
+                        last_error = Some(msg);
+                    }
                     unsafe {
                         libc::close(perf_fd);
                     }
@@ -279,8 +314,11 @@ impl PerfProfiler {
         }
 
         if attached_count == 0 {
-            log::error!("Failed to attach perf events to any CPU - no CPUs attached!");
-            return Err(anyhow!("Failed to attach perf events to any CPU"));
+            let detail = last_error.unwrap_or_else(|| "unknown error".to_string());
+            return Err(anyhow!(
+                "Failed to attach perf events to any CPU: {}",
+                detail
+            ));
         }
 
         log::info!(
@@ -299,6 +337,104 @@ impl PerfProfiler {
         Ok(())
     }
 
+    /// Open perf events in counting-only mode (no BPF attachment).
+    /// Used for tracepoints or when stack traces are not needed.
+    fn open_counting_events(&mut self, config: &PerfProfilingConfig) -> Result<()> {
+        use scx_utils::perf;
+
+        let topology = self
+            .topology
+            .as_ref()
+            .ok_or_else(|| anyhow!("Topology not set"))?;
+
+        log::info!(
+            "Opening counting perf events for '{}' (cpu={}, pid={})",
+            config.event,
+            config.cpu,
+            config.pid
+        );
+
+        let mut opened_count = 0;
+        let mut last_error: Option<String> = None;
+        let cpus: Vec<usize> = topology.all_cpus.keys().copied().collect();
+
+        for cpu_id in cpus {
+            if config.cpu >= 0 && cpu_id != config.cpu as usize {
+                continue;
+            }
+
+            let mut attr: perf::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+            attr.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
+
+            self.configure_perf_event_attr(&mut attr, &config.event)?;
+
+            // Counting mode: no sampling, just count events
+            attr.set_disabled(0);
+            attr.set_exclude_kernel(0);
+            attr.set_exclude_hv(0);
+            attr.set_freq(0);
+            attr.set_inherit(if config.pid == -1 { 1 } else { 0 });
+            attr.set_pinned(1);
+
+            let perf_fd = unsafe {
+                perf::perf_event_open(
+                    &mut attr as *mut perf::bindings::perf_event_attr,
+                    config.pid,
+                    cpu_id as i32,
+                    -1,
+                    1u64 << 3, // PERF_FLAG_FD_CLOEXEC
+                )
+            };
+
+            if perf_fd < 0 {
+                let err = std::io::Error::last_os_error();
+                let msg = format!(
+                    "perf_event_open (counting) failed for CPU {}: {} (errno: {})",
+                    cpu_id,
+                    err,
+                    err.raw_os_error().unwrap_or(0)
+                );
+                log::warn!("{}", msg);
+                if last_error.is_none() {
+                    last_error = Some(msg);
+                }
+                continue;
+            }
+
+            if unsafe { perf::ioctls::enable(perf_fd, 0) } < 0 {
+                let err = std::io::Error::last_os_error();
+                log::error!(
+                    "Failed to enable counting perf event fd={} for CPU {}: {}",
+                    perf_fd,
+                    cpu_id,
+                    err
+                );
+                unsafe {
+                    libc::close(perf_fd);
+                }
+                continue;
+            }
+
+            self.perf_fds.push(perf_fd);
+            opened_count += 1;
+        }
+
+        if opened_count == 0 {
+            let detail = last_error.unwrap_or_else(|| "unknown error".to_string());
+            return Err(anyhow!(
+                "Failed to open counting perf events on any CPU: {}",
+                detail
+            ));
+        }
+
+        log::info!(
+            "Opened {} counting perf events for '{}'",
+            opened_count,
+            config.event
+        );
+        Ok(())
+    }
+
     /// Configure perf_event_attr based on event string
     fn configure_perf_event_attr(
         &self,
@@ -311,20 +447,29 @@ impl PerfProfiler {
         // - "cache-misses", "cycles", "instructions" (hardware events)
         // - "cpu-clock", "task-clock" (software events)
         // - "hw:cache-misses", "sw:cpu-clock" (explicit subsystem)
+        // - "tracepoint:subsystem:event" (tracepoint events)
 
-        let (subsystem, event_name) = if event_str.contains(':') {
-            let parts: Vec<&str> = event_str.split(':').collect();
-            if parts.len() != 2 {
-                return Err(anyhow!("Invalid event format: {}", event_str));
+        let parts: Vec<&str> = event_str.splitn(3, ':').collect();
+
+        let (subsystem, event_name, tp_event) = match parts.len() {
+            3 => {
+                // tracepoint:subsystem:event
+                (parts[0], parts[1], Some(parts[2]))
             }
-            (parts[0], parts[1])
-        } else {
-            // Try to infer subsystem from event name
-            match event_str.to_lowercase().as_str() {
-                "cpu-clock" | "task-clock" | "context-switches" | "page-faults"
-                | "minor-faults" | "major-faults" | "migrations" => ("sw", event_str),
-                _ => ("hw", event_str), // Default to hardware
+            2 => {
+                // hw:cycles or sw:cpu-clock
+                (parts[0], parts[1], None)
             }
+            1 => {
+                // Bare event name — infer subsystem
+                let name = parts[0];
+                match name.to_lowercase().as_str() {
+                    "cpu-clock" | "task-clock" | "context-switches" | "page-faults"
+                    | "minor-faults" | "major-faults" | "migrations" => ("sw", name, None),
+                    _ => ("hw", name, None),
+                }
+            }
+            _ => return Err(anyhow!("Invalid event format: {}", event_str)),
         };
 
         match subsystem.to_lowercase().as_str() {
@@ -395,12 +540,30 @@ impl PerfProfiler {
                     }
                 }
             }
+            "tracepoint" => {
+                let tp_name = tp_event.ok_or_else(|| {
+                    anyhow!(
+                        "Tracepoint format must be 'tracepoint:subsystem:event', got: {}",
+                        event_str
+                    )
+                })?;
+                attr.type_ = perf::bindings::PERF_TYPE_TRACEPOINT;
+                // Look up tracepoint ID from debugfs/tracefs
+                let tp_id = Self::resolve_tracepoint_id(event_name, tp_name)?;
+                attr.config = tp_id;
+            }
             _ => {
-                return Err(anyhow!("Unknown subsystem: {}", subsystem));
+                return Err(anyhow!("Unknown event subsystem '{}'. Use 'hw:', 'sw:', or 'tracepoint:subsystem:event'", subsystem));
             }
         }
 
         Ok(())
+    }
+
+    /// Resolve a tracepoint subsystem:event name to its numeric ID
+    fn resolve_tracepoint_id(subsystem: &str, event: &str) -> Result<u64> {
+        use crate::profiling_events::perf::perf_event_config;
+        perf_event_config(subsystem, event)
     }
 
     /// Stop profiling
@@ -492,8 +655,15 @@ impl PerfProfiler {
             .map(|start| start.elapsed().as_millis())
             .unwrap_or(0);
 
+        let counting_only = self
+            .config
+            .as_ref()
+            .map(|c| c.counting_only)
+            .unwrap_or(false);
+
         serde_json::json!({
             "status": format!("{:?}", self.status),
+            "mode": if counting_only { "counting" } else { "sampling" },
             "samples_collected": self.samples_collected,
             "duration_ms": duration_ms,
             "config": self.config,
@@ -502,6 +672,16 @@ impl PerfProfiler {
 
     /// Get results with symbolization (done on-demand to avoid Send issues)
     pub fn get_results(&self, limit: usize, include_stacks: bool) -> serde_json::Value {
+        let is_counting = self
+            .config
+            .as_ref()
+            .map(|c| c.counting_only)
+            .unwrap_or(false);
+
+        if is_counting {
+            return self.get_counting_results();
+        }
+
         use crate::symbol_data::SymbolData;
 
         // Create SymbolData fresh for symbolization (avoids Send issues)
@@ -560,6 +740,53 @@ impl PerfProfiler {
             "symbols": symbols,
             "total_samples": symbol_data.total_samples(),
             "samples_collected": self.samples_collected,
+        })
+    }
+
+    /// Get results for counting-only mode
+    fn get_counting_results(&self) -> serde_json::Value {
+        let duration_ms = self
+            .start_time
+            .map(|start| start.elapsed().as_millis())
+            .unwrap_or(0);
+
+        // Read per-CPU counts
+        let mut per_cpu_counts: Vec<serde_json::Value> = Vec::new();
+        let mut total_count: u64 = 0;
+
+        for (i, &fd) in self.perf_fds.iter().enumerate() {
+            let mut count: u64 = 0;
+            let size = std::mem::size_of::<u64>();
+            let ret = unsafe { libc::read(fd, &mut count as *mut _ as *mut libc::c_void, size) };
+            if ret == size as isize {
+                per_cpu_counts.push(serde_json::json!({
+                    "cpu_index": i,
+                    "count": count,
+                }));
+                total_count += count;
+            }
+        }
+
+        let event = self
+            .config
+            .as_ref()
+            .map(|c| c.event.as_str())
+            .unwrap_or("unknown");
+
+        let rate = if duration_ms > 0 {
+            (total_count as f64 / duration_ms as f64) * 1000.0
+        } else {
+            0.0
+        };
+
+        serde_json::json!({
+            "mode": "counting",
+            "event": event,
+            "total_count": total_count,
+            "duration_ms": duration_ms,
+            "rate_per_sec": format!("{:.1}", rate),
+            "num_cpus": per_cpu_counts.len(),
+            "per_cpu": per_cpu_counts,
         })
     }
 

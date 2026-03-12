@@ -12,12 +12,13 @@ use std::time::Duration;
 #[test]
 fn test_perf_profiling_config_default() {
     let config = PerfProfilingConfig::default();
-    assert_eq!(config.event, "hw:cpu-clock");
+    assert_eq!(config.event, "hw:cycles");
     assert_eq!(config.freq, 99);
     assert_eq!(config.cpu, -1);
     assert_eq!(config.pid, -1);
     assert_eq!(config.max_samples, 10000);
     assert_eq!(config.duration_secs, 0);
+    assert!(!config.counting_only);
 }
 
 #[test]
@@ -37,6 +38,7 @@ fn test_shared_perf_profiler_start() {
         pid: -1,
         max_samples: 1000,
         duration_secs: 0,
+        counting_only: false,
     };
 
     let result = profiler.start(config);
@@ -92,6 +94,7 @@ fn test_shared_perf_profiler_add_sample() {
         pid: -1,
         max_samples: 10,
         duration_secs: 0,
+        counting_only: false,
     };
 
     profiler.start(config).unwrap();
@@ -124,6 +127,7 @@ fn test_shared_perf_profiler_should_stop_max_samples() {
         pid: -1,
         max_samples: 3,
         duration_secs: 0,
+        counting_only: false,
     };
 
     profiler.start(config).unwrap();
@@ -157,6 +161,7 @@ fn test_shared_perf_profiler_should_stop_duration() {
         pid: -1,
         max_samples: 0,   // unlimited
         duration_secs: 1, // 1 second
+        counting_only: false,
     };
 
     profiler.start(config).unwrap();
@@ -361,6 +366,7 @@ fn test_perf_profiler_config_validation() {
         pid: 1234,
         max_samples: 5000,
         duration_secs: 10,
+        counting_only: false,
     };
 
     assert_eq!(config1.event, "sw:task-clock");
@@ -467,6 +473,7 @@ fn test_perf_profiler_with_topology() {
         pid: -1,
         max_samples: 0,
         duration_secs: 10,
+        counting_only: false,
     };
 
     let result = profiler.start(config);
@@ -506,6 +513,7 @@ fn test_perf_config_serialization() {
         pid: 1234,
         max_samples: 5000,
         duration_secs: 10,
+        counting_only: false,
     };
 
     // Serialize to JSON
@@ -520,4 +528,5 @@ fn test_perf_config_serialization() {
     assert_eq!(config.pid, config2.pid);
     assert_eq!(config.max_samples, config2.max_samples);
     assert_eq!(config.duration_secs, config2.duration_secs);
+    assert_eq!(config.counting_only, config2.counting_only);
 }
