@@ -7,6 +7,7 @@
 
 use super::perfetto_parser::{Percentiles, PerfettoTrace};
 use perfetto_protos::ftrace_event::ftrace_event;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -652,6 +653,143 @@ impl WakeupChainDetector {
                 }
             }
         }
+
+        chains.sort_by(|a, b| {
+            b.criticality_score
+                .partial_cmp(&a.criticality_score)
+                .unwrap()
+        });
+
+        chains.into_iter().take(limit).collect()
+    }
+
+    /// Find critical wakeup chains using parallel per-CPU collection
+    pub fn find_wakeup_chains_parallel(&self, limit: usize) -> Vec<WakeupChain> {
+        // Phase 1: Parallel per-CPU event collection
+        #[allow(clippy::type_complexity)]
+        let per_cpu_data: Vec<(HashMap<i32, Vec<WakeupChainEvent>>, HashMap<i32, u64>)> =
+            (0..self.trace.num_cpus())
+                .into_par_iter()
+                .map(|cpu| {
+                    let mut cpu_wakeup_map: HashMap<i32, Vec<WakeupChainEvent>> = HashMap::new();
+                    let mut cpu_schedule_times: HashMap<i32, u64> = HashMap::new();
+                    let events = self.trace.get_events_by_cpu(cpu as u32);
+
+                    for event_with_idx in events {
+                        if let Some(ts) = event_with_idx.event.timestamp {
+                            match &event_with_idx.event.event {
+                                Some(ftrace_event::Event::SchedWakeup(wakeup)) => {
+                                    if let (Some(wakee_pid), Some(waker_pid)) =
+                                        (wakeup.pid, event_with_idx.event.pid)
+                                    {
+                                        cpu_wakeup_map.entry(wakee_pid).or_default().push(
+                                            WakeupChainEvent {
+                                                wakee_pid,
+                                                waker_pid: waker_pid as i32,
+                                                wakee_comm: wakeup.comm.clone().unwrap_or_default(),
+                                                waker_comm: String::new(),
+                                                wakeup_ts: ts,
+                                                schedule_ts: None,
+                                            },
+                                        );
+                                    }
+                                }
+                                Some(ftrace_event::Event::SchedSwitch(switch)) => {
+                                    if let Some(next_pid) = switch.next_pid {
+                                        cpu_schedule_times.insert(next_pid, ts);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    (cpu_wakeup_map, cpu_schedule_times)
+                })
+                .collect();
+
+        // Phase 1b: Merge per-CPU results
+        let mut wakeup_map: HashMap<i32, Vec<WakeupChainEvent>> = HashMap::new();
+        let mut schedule_times: HashMap<i32, u64> = HashMap::new();
+        for (cpu_wakeups, cpu_schedules) in per_cpu_data {
+            for (pid, events) in cpu_wakeups {
+                wakeup_map.entry(pid).or_default().extend(events);
+            }
+            for (pid, ts) in cpu_schedules {
+                schedule_times
+                    .entry(pid)
+                    .and_modify(|existing| *existing = (*existing).max(ts))
+                    .or_insert(ts);
+            }
+        }
+
+        // Phase 2: Match wakeups to schedules
+        for wakeup_list in wakeup_map.values_mut() {
+            for wakeup_event in wakeup_list {
+                if let Some(&schedule_ts) = schedule_times.get(&wakeup_event.wakee_pid) {
+                    if schedule_ts >= wakeup_event.wakeup_ts {
+                        wakeup_event.schedule_ts = Some(schedule_ts);
+                    }
+                }
+            }
+        }
+
+        // Phase 3: Build chains in parallel by partitioning PIDs
+        let pids: Vec<i32> = wakeup_map.keys().copied().collect();
+        let wakeup_map_ref = &wakeup_map;
+
+        let mut chains: Vec<WakeupChain> = pids
+            .into_par_iter()
+            .flat_map(|wakee_pid| {
+                let mut pid_chains = Vec::new();
+                if let Some(wakeups) = wakeup_map_ref.get(&wakee_pid) {
+                    // Only process first wakeup per PID (matches visited set behavior)
+                    if let Some(wakeup) = wakeups.first() {
+                        let mut chain = vec![wakeup.clone()];
+                        let mut current_waker = wakeup.waker_pid;
+
+                        // Follow chain backwards
+                        for _ in 0..10 {
+                            if let Some(waker_wakeups) = wakeup_map_ref.get(&current_waker) {
+                                if let Some(waker_wakeup) = waker_wakeups
+                                    .iter()
+                                    .filter(|w| w.wakeup_ts <= wakeup.wakeup_ts)
+                                    .max_by_key(|w| w.wakeup_ts)
+                                {
+                                    chain.push(waker_wakeup.clone());
+                                    current_waker = waker_wakeup.waker_pid;
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+
+                        if chain.len() > 1 {
+                            chain.reverse();
+
+                            let total_latency: u64 = chain
+                                .iter()
+                                .filter_map(|e| {
+                                    e.schedule_ts.map(|s| s.saturating_sub(e.wakeup_ts))
+                                })
+                                .sum();
+
+                            let chain_len = chain.len();
+                            pid_chains.push(WakeupChain {
+                                chain,
+                                total_latency_ns: total_latency,
+                                chain_length: chain_len,
+                                criticality_score: (chain_len as f64)
+                                    * (total_latency as f64 / 1_000_000.0),
+                            });
+                        }
+                    }
+                }
+                pid_chains
+            })
+            .collect();
 
         chains.sort_by(|a, b| {
             b.criticality_score

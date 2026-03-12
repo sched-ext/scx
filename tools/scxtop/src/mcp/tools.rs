@@ -162,19 +162,19 @@ impl McpTools {
             },
             McpTool {
                 name: "start_perf_profiling".to_string(),
-                description: "Start perf profiling with stack trace collection and symbolization"
+                description: "Start perf profiling. Hardware/software events collect stack traces via BPF sampling. Tracepoints use counting-only mode (event counts, no stacks)."
                     .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "event": {
                             "type": "string",
-                            "description": "Event to profile: 'hw:cpu-clock', 'sw:task-clock', or 'tracepoint:subsystem:event'",
-                            "default": "hw:cpu-clock"
+                            "description": "Event to profile: 'hw:cycles', 'sw:cpu-clock', 'sw:task-clock', or 'tracepoint:subsystem:event'",
+                            "default": "hw:cycles"
                         },
                         "freq": {
                             "type": "integer",
-                            "description": "Sampling frequency in Hz (e.g., 99)",
+                            "description": "Sample period (sample every N events). For hw:cycles this is cycle count, for sw:cpu-clock this is clock ticks. Ignored for tracepoints (always samples every event).",
                             "default": 99
                         },
                         "cpu": {
@@ -211,7 +211,7 @@ impl McpTools {
             McpTool {
                 name: "get_perf_results".to_string(),
                 description:
-                    "Get perf profiling results with symbolized stack traces and top functions"
+                    "Get perf profiling results. For sampling mode: symbolized stack traces and top functions. For counting mode (tracepoints): event counts per CPU."
                         .to_string(),
                 input_schema: json!({
                     "type": "object",
@@ -1618,26 +1618,72 @@ impl McpTools {
             .as_ref()
             .ok_or_else(|| anyhow!("Perf profiler not available"))?;
 
+        let user_event = args.get("event").and_then(|v| v.as_str());
+        let event = user_event.unwrap_or("hw:cycles").to_string();
+        let freq = args.get("freq").and_then(|v| v.as_u64()).unwrap_or(99) as u32;
+        let cpu = args.get("cpu").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+        let pid = args.get("pid").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+        let max_samples = args
+            .get("max_samples")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10000) as usize;
+        let duration_secs = args
+            .get("duration_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        // Tracepoints require counting-only mode (BPF_PROG_TYPE_PERF_EVENT
+        // cannot attach to tracepoint perf events)
+        let is_tracepoint = event.starts_with("tracepoint:");
+        let counting_only = is_tracepoint;
+
         let config = PerfProfilingConfig {
-            event: args
-                .get("event")
-                .and_then(|v| v.as_str())
-                .unwrap_or("hw:cpu-clock")
-                .to_string(),
-            freq: args.get("freq").and_then(|v| v.as_u64()).unwrap_or(99) as u32,
-            cpu: args.get("cpu").and_then(|v| v.as_i64()).unwrap_or(-1) as i32,
-            pid: args.get("pid").and_then(|v| v.as_i64()).unwrap_or(-1) as i32,
-            max_samples: args
-                .get("max_samples")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(10000) as usize,
-            duration_secs: args
-                .get("duration_secs")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
+            event: event.clone(),
+            freq,
+            cpu,
+            pid,
+            max_samples,
+            duration_secs,
+            counting_only,
         };
 
-        profiler.start(config.clone())?;
+        match profiler.start(config) {
+            Ok(()) => {}
+            Err(e) if user_event.is_none() => {
+                // User didn't specify an event and hw:cycles failed;
+                // fall back to sw:cpu-clock (works in VMs without PMU)
+                log::warn!(
+                    "Failed to start hw:cycles ({}), falling back to sw:cpu-clock",
+                    e
+                );
+                let fallback = PerfProfilingConfig {
+                    event: "sw:cpu-clock".to_string(),
+                    freq,
+                    cpu,
+                    pid,
+                    max_samples,
+                    duration_secs,
+                    counting_only: false,
+                };
+                profiler.start(fallback)?;
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Read back the actual event from the profiler (may have changed due to fallback)
+        let actual_event = profiler
+            .get_status()
+            .get("config")
+            .and_then(|c| c.get("event"))
+            .and_then(|e| e.as_str())
+            .unwrap_or(&event)
+            .to_string();
+
+        let mode_desc = if counting_only {
+            "Counting events (no stack traces for tracepoints)"
+        } else {
+            "Collecting stack traces for both kernel and userspace"
+        };
 
         Ok(json!({
             "content": [{
@@ -1645,35 +1691,38 @@ impl McpTools {
                 "text": format!(
                     "Perf profiling started:\n\
                      - Event: {}\n\
-                     - Frequency: {} Hz\n\
+                     - Mode: {}\n\
+                     - Frequency: {}\n\
                      - CPU: {}\n\
                      - PID: {}\n\
                      - Max samples: {}\n\
                      - Duration: {} seconds\n\n\
-                     Collecting stack traces for both kernel and userspace...\n\
+                     {}...\n\
                      Use stop_perf_profiling to stop and get_perf_results to retrieve results.",
-                    config.event,
-                    config.freq,
-                    if config.cpu == -1 {
+                    actual_event,
+                    if counting_only { "counting" } else { "sampling" },
+                    freq,
+                    if cpu == -1 {
                         "all".to_string()
                     } else {
-                        config.cpu.to_string()
+                        cpu.to_string()
                     },
-                    if config.pid == -1 {
+                    if pid == -1 {
                         "all".to_string()
                     } else {
-                        config.pid.to_string()
+                        pid.to_string()
                     },
-                    if config.max_samples == 0 {
+                    if max_samples == 0 {
                         "unlimited".to_string()
                     } else {
-                        config.max_samples.to_string()
+                        max_samples.to_string()
                     },
-                    if config.duration_secs == 0 {
+                    if duration_secs == 0 {
                         "manual".to_string()
                     } else {
-                        config.duration_secs.to_string()
-                    }
+                        duration_secs.to_string()
+                    },
+                    mode_desc
                 )
             }]
         }))
@@ -2758,7 +2807,11 @@ impl McpTools {
                 let analyzer = WakeupChainDetector::new(trace);
                 // Cap wakeup chains to prevent massive output
                 let chain_limit = limit.min(10);
-                let chains = analyzer.find_wakeup_chains(chain_limit);
+                let chains = if use_parallel {
+                    analyzer.find_wakeup_chains_parallel(chain_limit)
+                } else {
+                    analyzer.find_wakeup_chains(chain_limit)
+                };
                 let total_chains = chains.len();
 
                 // Truncate chain events to max 10 per chain
@@ -3315,7 +3368,7 @@ impl McpTools {
                 "wakeup_chains" => {
                     use super::perfetto_analyzers_extended::WakeupChainDetector;
                     let analyzer = WakeupChainDetector::new(trace.clone());
-                    let chains = analyzer.find_wakeup_chains(10);
+                    let chains = analyzer.find_wakeup_chains_parallel(10);
                     export_data["wakeup_chains"] = json!(chains);
                 }
                 "latency_breakdown" => {

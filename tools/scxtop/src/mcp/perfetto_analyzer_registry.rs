@@ -660,7 +660,7 @@ impl TraceAnalyzer for WakeupChainAnalyzerWrapper {
 
         let start = std::time::Instant::now();
         let analyzer = WakeupChainDetector::new(trace);
-        let result = analyzer.find_wakeup_chains(20);
+        let result = analyzer.find_wakeup_chains_parallel(20);
         let duration = start.elapsed();
 
         AnalyzerResult {
