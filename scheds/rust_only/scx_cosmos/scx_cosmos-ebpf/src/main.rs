@@ -216,21 +216,22 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
 /// callback is not invoked by the kernel.
 // PORT_TODO: Migration attempt in enqueue when task should migrate
 // C reference: cosmos_enqueue() calls task_should_migrate() to check if
-// ops.select_cpu() was NOT called. If so, it calls pick_idle_cpu() to try
-// dispatching to an idle CPU via SCX_DSQ_LOCAL_ON. For pcpu tasks, it
-// only tries test_and_clear_cpu_idle on prev_cpu.
+// ops.select_cpu() was NOT called and task is not running. If so, it calls
+// pick_idle_cpu() to find an idle CPU and dispatches via SCX_DSQ_LOCAL_ON.
+// Then calls wakeup_cpu() to kick the target CPU.
+// BPF verifier constraint: kfunc calls (task_cpu, task_running) consume
+// the trusted_ptr to p, preventing subsequent kfunc calls with the same
+// pointer. This makes the migration pattern difficult without RCU read lock.
 // PORT_TODO: Deadline calculation using exec_runtime (task_dl)
 // C reference: task_dl() computes `dsq_vtime + scale_inverse(exec_runtime)`
 // where exec_runtime tracks CPU time since last sleep. This prioritizes
 // interactive tasks (short bursts) over CPU-bound ones. Without per-task
 // storage, we use plain dsq_vtime as the virtual deadline.
-// PORT_TODO: Kick idle CPU after enqueue
-// C reference: wakeup_cpu(prev_cpu) is called after enqueue when the task
-// should migrate. With deferred_wakeups, this is a no-op (timer handles it).
-// Without, it calls scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE).
 #[inline(always)]
 pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
-    // Read ALL fields we need BEFORE any writes to the task struct.
+    // Read ALL fields we need BEFORE any kfunc calls.
+    // The BPF verifier invalidates the trusted pointer after kfunc calls
+    // that consume it (dsq_insert, task_cpu, task_running, etc.).
     let vtime = if let Ok(v) = core_read!(vmlinux::task_struct, p, scx.dsq_vtime) {
         v
     } else {
@@ -248,7 +249,7 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
         return;
     }
 
-    // System is busy — use deadline-mode dispatch to the shared DSQ.
+    // No idle CPU found — use deadline-mode dispatch to the shared DSQ.
     // Clamp vtime so tasks don't accumulate too much credit from sleeping.
     // C: vtime_min = vtime_now - scale_by_task_weight(p, slice_lag)
     let vtime_now = unsafe { VTIME_NOW };
