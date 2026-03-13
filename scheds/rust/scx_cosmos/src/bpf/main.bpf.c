@@ -537,6 +537,14 @@ static s32 pick_cpu_on_gpu_node(const struct task_struct *p, int node,
 }
 
 /*
+ * Return true if @p still wants to run, false otherwise.
+ */
+static bool is_task_queued(const struct task_struct *p)
+{
+	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
  * Return true if @p can only run on a single CPU, false otherwise.
  */
 static inline bool is_pcpu_task(const struct task_struct *p)
@@ -1045,6 +1053,7 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu,
 		    cpu_llc_id(cpu) != cpu_llc_id(prev_cpu) ||
 		    !is_cpu_idle(cpu) ||
 		    !is_primary_cpu(cpu) ||
+		    (avoid_smt && is_smt_contended(cpu)) ||
 		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
@@ -1114,7 +1123,9 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 * If task exceeds the perf sticky threshold, dispatch it directly
 	 * on the same CPU if no other tasks are waiting.
 	 */
-	if (is_sticky_event_heavy(tctx) && is_primary_cpu(prev_cpu)) {
+	if (is_sticky_event_heavy(tctx) &&
+	    is_primary_cpu(prev_cpu) &&
+	    (!avoid_smt || !is_smt_contended(prev_cpu))) {
 		__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 		return prev_cpu;
@@ -1218,7 +1229,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * same CPU.
 	 */
 	if (is_sticky_event_heavy(tctx) &&
-	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
+	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p)) &&
+	    (!avoid_smt || !is_smt_contended(prev_cpu))) {
 		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(shared_dsq(prev_cpu));
 
 		/*
@@ -1291,6 +1303,45 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
+/*
+ * Return true if the task can keep running on its current CPU from
+ * ops.dispatch(), false if the task should migrate.
+ */
+static bool keep_running(const struct task_struct *p, s32 cpu)
+{
+	const struct cpumask *mask = cast_mask(primary_cpumask);
+
+	/*
+	 * Do not keep running if the task doesn't need to run.
+	 */
+	if (!is_task_queued(p))
+		return false;
+
+	/*
+	* If the task can only run on this CPU, keep it running.
+	*/
+	if (is_pcpu_task(p))
+		return true;
+
+	/*
+	 * If the task is not running in a full-idle SMT core and there are
+	 * full-idle SMT cores available in the system, give it a chance to
+	 * migrate elsewhere.
+	 */
+	if (avoid_smt && is_smt_contended(cpu))
+		return false;
+
+	/*
+	 * If the task is not in the primary domain, give it a chance to
+	 * migrate.
+	 */
+	if (!is_primary_cpu(cpu) &&
+	    mask && bpf_cpumask_intersects(p->cpus_ptr, mask))
+		return false;
+
+	return true;
+}
+
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
@@ -1305,8 +1356,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * wants to run on this CPU, give it another time slot if the CPU
 	 * is on the primary domain.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
-	    (is_primary_cpu(cpu) || prev->nr_cpus_allowed == 1))
+	if (prev && keep_running(prev, cpu))
 		prev->scx.slice = task_slice(prev);
 }
 
