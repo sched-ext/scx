@@ -35,9 +35,6 @@ mod vmlinux {
 /// Shared DSQ used for deadline-mode scheduling.
 const SHARED_DSQ: u64 = 0;
 
-/// SCX_DSQ_LOCAL: dispatch to the local CPU's DSQ.
-const SCX_DSQ_LOCAL: u64 = 0x8000000000000002;
-
 /// Default time slice: 10us (matches C cosmos `slice_ns = 10000`).
 const SLICE_NS: u64 = 10_000;
 
@@ -81,7 +78,7 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
             100
         };
         let slice = if weight > 0 { (SLICE_NS * weight) / 100 } else { SLICE_NS };
-        kfuncs::dsq_insert(p, SCX_DSQ_LOCAL, slice, 0);
+        kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
     }
     cpu
 }

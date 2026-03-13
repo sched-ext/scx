@@ -14,11 +14,24 @@
 ///
 /// This is BPF helper #113 (`bpf_probe_read_kernel`).
 ///
-/// BPF calling convention: all r1-r5 are clobbered by helper calls.
-/// The LLVM BPF backend has a bug where it eliminates register setup
-/// for consecutive identical helper calls when the function is inlined.
-/// By marking this as `#[inline(never)]`, each callsite becomes a
-/// separate BPF subprogram call that independently sets up r1-r3.
+/// # LLVM BPF backend register clobber bug
+///
+/// BPF calling convention requires all r1-r5 to be clobbered by helper
+/// calls. However, the LLVM BPF backend has a bug where it fails to
+/// re-materialize argument registers (r1-r3) between consecutive inlined
+/// helper calls when the arguments happen to have the same value.
+///
+/// For example, two back-to-back `bpf_probe_read_kernel` calls both
+/// reading 4 bytes would share `r2 = 4`, and LLVM may skip emitting the
+/// second `r2 = 4` instruction because it believes r2 still holds 4 from
+/// the first call -- even though the BPF helper clobbered it.
+///
+/// Workarounds:
+/// 1. Ensure consecutive reads have different sizes (e.g., read a u64
+///    instead of two u32s by combining adjacent fields)
+/// 2. Use `core_read!` calls that naturally read different-sized types
+/// 3. The `#[inline(never)]` annotation is intended to force separate
+///    subprogram calls, but LLVM may still inline the function via LTO
 #[inline(never)]
 unsafe fn bpf_probe_read_kernel_raw(dst: *mut u8, len: u32, src: *const u8) -> i64 {
     let ret: i64;

@@ -14,6 +14,22 @@ pub struct cpumask {
 /// Default scheduling time slice (20ms in nanoseconds).
 pub const SLICE_DFL: u64 = 20_000_000;
 
+/// SCX dispatch queue ID constants.
+/// These match the kernel's `enum scx_dsq_id_flags` values.
+
+/// Dispatch to the local CPU's DSQ (uses the current CPU).
+pub const SCX_DSQ_LOCAL: u64 = 0x8000000000000002;
+
+/// Dispatch to a specific CPU's local DSQ. OR with the CPU number:
+/// `SCX_DSQ_LOCAL_ON | cpu_id`
+pub const SCX_DSQ_LOCAL_ON: u64 = 0x8000000000000004;
+
+/// Dispatch to the global DSQ (shared across all CPUs).
+pub const SCX_DSQ_GLOBAL: u64 = 0x8000000000000001;
+
+/// Invalid DSQ ID.
+pub const SCX_DSQ_INVALID: u64 = 0x8000000000000000;
+
 // ── kfunc extern declarations (used as sym targets in inline asm) ───────
 
 // Public extern for the scx_bpf_error! macro (needs sym visibility across crates).
