@@ -176,13 +176,14 @@ fn is_system_busy() -> bool {
 
 /// select_cpu: find an idle CPU for the task.
 ///
-/// Uses `scx_bpf_select_cpu_dfl` for idle CPU selection. When the system
-/// is not busy, dispatches directly to the local DSQ (round-robin mode).
-/// When busy, returns the CPU but does NOT dispatch — lets enqueue() handle
-/// it with vtime-ordered dispatch to the shared DSQ (deadline mode).
+/// Uses `scx_bpf_select_cpu_dfl` for idle CPU selection.
+/// - If idle CPU found: dispatch directly to local DSQ (any saturation level)
+/// - If no idle CPU and not busy: dispatch to local DSQ (round-robin)
+/// - If no idle CPU and busy: do NOT dispatch, let enqueue() handle
+///   deadline-mode dispatch to the shared DSQ
 ///
-/// This matches the C cosmos dual-mode approach where select_cpu dispatches
-/// to SCX_DSQ_LOCAL when not busy, and falls through to enqueue when busy.
+/// This matches the C cosmos behavior:
+///   `if (cpu >= 0 || !is_busy) dsq_insert(LOCAL, ...);`
 // PORT_TODO: Enhanced select_cpu with pick_idle_cpu() strategies
 // C reference: cosmos_select_cpu() calls pick_idle_cpu() which tries multiple
 // strategies: (1) flat/preferred scan when enabled, (2) wake-affine optimization
@@ -193,15 +194,23 @@ fn is_system_busy() -> bool {
 pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     let mut is_idle: bool = false;
     let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
-    if is_idle {
+
+    // Dispatch to local DSQ when:
+    // 1. An idle CPU was found (always dispatch, regardless of busy state), or
+    // 2. No idle CPU but system is not busy (round-robin mode)
+    //
+    // When busy and no idle CPU, don't dispatch — let enqueue() handle
+    // deadline-mode dispatch to the shared DSQ for fairness.
+    // C: if (cpu >= 0 || !is_busy) dsq_insert(LOCAL, ...);
+    if is_idle || !is_system_busy() {
         let weight = read_weight(p);
         let slice = task_slice(weight);
-        // When idle CPU found: always dispatch directly to local DSQ.
-        // In non-busy mode this is the final dispatch.
-        // In busy mode, this is still correct — an idle CPU can take the task.
         kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
     }
-    cpu
+
+    // Return the idle CPU if found, otherwise prev_cpu.
+    // C: return cpu >= 0 ? cpu : prev_cpu;
+    if is_idle { cpu } else { prev_cpu }
 }
 
 /// enqueue: dual-mode dispatch — local round-robin or shared DSQ deadline.
