@@ -5,12 +5,18 @@
 //! - `select_cpu`: uses `scx_bpf_select_cpu_dfl` with busy-aware dispatch
 //! - `enqueue`: dual-mode — local DSQ when idle, vtime-ordered shared DSQ when busy
 //! - `dispatch`: `dsq_move_to_local` + slice extension for prev task
-//! - `running`: updates vtime_now + records per-CPU last_run_at
-//! - `stopping`: charges actual used time (via scx_bpf_now delta) to dsq_vtime
+//! - `running`: updates vtime_now + records per-task last_run_at via task storage
+//! - `stopping`: charges actual used time (via scx_bpf_now delta) to dsq_vtime,
+//!   accumulates exec_runtime in per-task storage
+//! - `runnable`: resets exec_runtime, updates wakeup_freq via per-task storage
 //! - `enable`: initializes task dsq_vtime to current vtime_now
+//! - `init_task`: creates per-task context via BPF_MAP_TYPE_TASK_STORAGE
+//!
+//! BPF map usage:
+//! - `TASK_CTX`: per-task storage for exec_runtime, wakeup_freq, last_run_at
+//! - `CPU_CTX`: per-CPU array for load tracking (last_update timestamp)
 //!
 //! Gaps vs the full C implementation (see PORT_TODO comments throughout):
-//! - No per-task BPF map storage (task_ctx), so no exec_runtime/wakeup_freq/deadline calc
 //! - No cpufreq scaling, no PMU tracking
 //! - No NUMA per-node DSQs
 //! - No flat/preferred idle scan, no mm_affinity
@@ -23,6 +29,7 @@
 
 use scx_ebpf::prelude::*;
 use scx_ebpf::core_read;
+use scx_ebpf::maps::{TaskStorage, PerCpuArray};
 
 scx_ebpf::scx_ebpf_boilerplate!();
 
@@ -30,6 +37,46 @@ scx_ebpf::scx_ebpf_boilerplate!();
 mod vmlinux {
     include!(concat!(env!("OUT_DIR"), "/vmlinux.rs"));
 }
+
+// ── Per-task context ────────────────────────────────────────────────────
+
+/// Per-task context stored in BPF_MAP_TYPE_TASK_STORAGE.
+///
+/// Mirrors the C cosmos `struct task_ctx`:
+/// - `exec_runtime`: accumulated CPU time since last sleep (for deadline calc)
+/// - `wakeup_freq`: exponentially-smoothed wakeup frequency (for slice_lag scaling)
+/// - `last_run_at`: timestamp when this task last started running
+/// - `last_woke_at`: timestamp of last wakeup (for wakeup_freq calculation)
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct TaskCtx {
+    exec_runtime: u64,
+    wakeup_freq: u64,
+    last_run_at: u64,
+    last_woke_at: u64,
+}
+
+/// Per-CPU context stored in BPF_MAP_TYPE_PERCPU_ARRAY.
+///
+/// Tracks the last scheduling update timestamp for this CPU, used for
+/// load tracking and cpufreq scaling.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct CpuCtx {
+    last_update: u64,
+}
+
+// ── BPF map declarations ────────────────────────────────────────────────
+
+/// Per-task storage map. Automatically freed when a task exits.
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new();
+
+/// Per-CPU context array (1 entry, each CPU gets its own copy).
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
 
 // ── Constants ───────────────────────────────────────────────────────────
 
@@ -44,10 +91,6 @@ const SLICE_LAG: u64 = 20_000_000;
 
 /// SCX_TASK_QUEUED flag in scx entity flags.
 const SCX_TASK_QUEUED: u32 = 1;
-
-/// Maximum number of CPUs we support for per-CPU arrays.
-/// Matches C cosmos MAX_CPUS.
-const MAX_CPUS: usize = 1024;
 
 /// SCX_KICK_IDLE flag for kick_cpu.
 const SCX_KICK_IDLE: u64 = 1;
@@ -89,17 +132,6 @@ const SCX_KICK_IDLE: u64 = 1;
 // is_wake_affine() returns true. select_cpu uses this to keep wakee on the
 // waker's CPU for cache locality.
 
-// PORT_TODO: init_task / exit_task callbacks
-// C reference: cosmos_init_task creates per-task storage via
-// bpf_task_storage_get(&task_ctx_stor, ..., BPF_LOCAL_STORAGE_GET_F_CREATE)
-// and calls scx_pmu_task_init(). cosmos_exit_task calls scx_pmu_task_fini().
-// Requires BPF_MAP_TYPE_TASK_STORAGE support in the Rust framework.
-
-// PORT_TODO: per-CPU context map (cpu_ctx_stor)
-// C reference: BPF_MAP_TYPE_PERCPU_ARRAY storing struct cpu_ctx with
-// last_update, perf_lvl, perf_events, and __kptr smt cpumask. Used for
-// cpufreq scaling and SMT sibling tracking.
-
 // ── Global state ────────────────────────────────────────────────────────
 
 /// Current global vruntime — tracks the most recent dsq_vtime seen.
@@ -107,12 +139,6 @@ static mut VTIME_NOW: u64 = 0;
 
 /// Number of CPUs on this system, set in init().
 static mut NR_CPU_IDS: u32 = 0;
-
-/// Per-CPU last_run_at timestamps.
-/// Since only one task runs on a CPU at a time, we can track this per-CPU
-/// instead of per-task. This lets us compute actual time slices in stopping()
-/// without requiring BPF_MAP_TYPE_TASK_STORAGE.
-static mut LAST_RUN_AT: [u64; MAX_CPUS] = [0; MAX_CPUS];
 
 // PORT_TODO: Global cpu_util and busy_threshold for is_system_busy()
 // C reference: `volatile u64 cpu_util` is the current CPU utilization
@@ -170,6 +196,25 @@ fn read_weight(p: *mut task_struct) -> u64 {
 #[inline(always)]
 fn is_system_busy() -> bool {
     kfuncs::dsq_nr_queued(SHARED_DSQ) > 0
+}
+
+/// Exponential moving average update for wakeup frequency tracking.
+///
+/// Computes `update_freq(old_freq, delta_t)` matching the C cosmos logic:
+///   new_freq = (1024 * NSEC_PER_MSEC) / delta_t
+///   smoothed = (old_freq + new_freq) / 2
+///
+/// Capped at 1024 to prevent overflow.
+#[inline(always)]
+fn update_freq(old_freq: u64, delta_ns: u64) -> u64 {
+    // Avoid division by zero; if delta is tiny, cap at max frequency.
+    if delta_ns == 0 {
+        return 1024;
+    }
+    // 1024 * 1_000_000 = 1024 * NSEC_PER_MSEC
+    let new_freq = (1024 * 1_000_000) / delta_ns;
+    let smoothed = (old_freq + new_freq) / 2;
+    if smoothed > 1024 { 1024 } else { smoothed }
 }
 
 // ── Scheduler callbacks ─────────────────────────────────────────────────
@@ -231,11 +276,6 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
 // BPF verifier constraint: kfunc calls (task_cpu, task_running) consume
 // the trusted_ptr to p, preventing subsequent kfunc calls with the same
 // pointer. This makes the migration pattern difficult without RCU read lock.
-// PORT_TODO: Deadline calculation using exec_runtime (task_dl)
-// C reference: task_dl() computes `dsq_vtime + scale_inverse(exec_runtime)`
-// where exec_runtime tracks CPU time since last sleep. This prioritizes
-// interactive tasks (short bursts) over CPU-bound ones. Without per-task
-// storage, we use plain dsq_vtime as the virtual deadline.
 #[inline(always)]
 pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     // Read ALL fields we need BEFORE any kfunc calls.
@@ -258,21 +298,46 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
         return;
     }
 
+    // Compute deadline using exec_runtime from per-task storage.
+    // C: task_dl() = dsq_vtime + scale_inverse(exec_runtime)
+    // Tasks with more accumulated runtime get higher (later) deadlines,
+    // prioritizing interactive tasks that sleep frequently.
+    //
+    // Read both exec_runtime and wakeup_freq in a single lookup to avoid
+    // the LLVM BPF backend register clobber bug (see helpers.rs docs).
+    let (exec_runtime, wakeup_freq) = if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
+        let tctx = unsafe { tctx.as_ref() };
+        (tctx.exec_runtime, tctx.wakeup_freq)
+    } else {
+        (0, 0)
+    };
+    let deadline = if weight > 0 {
+        vtime.wrapping_add(exec_runtime * 100 / weight)
+    } else {
+        vtime.wrapping_add(exec_runtime)
+    };
+
     // No idle CPU found — use deadline-mode dispatch to the shared DSQ.
     // Clamp vtime so tasks don't accumulate too much credit from sleeping.
     // C: vtime_min = vtime_now - scale_by_task_weight(p, slice_lag)
     let vtime_now = unsafe { VTIME_NOW };
-    let vsleep_max = if weight > 0 { (SLICE_LAG * weight) / 100 } else { SLICE_LAG };
+
+    // Scale slice_lag by wakeup frequency: tasks that wake up often get
+    // more vtime credit (larger effective slice_lag).
+    // C: wakeup_freq_lag = slice_lag + slice_lag * tctx->wakeup_freq / 1024
+    let effective_lag = SLICE_LAG + SLICE_LAG * wakeup_freq / 1024;
+
+    let vsleep_max = if weight > 0 { (effective_lag * weight) / 100 } else { effective_lag };
     let vtime_min = vtime_now.wrapping_sub(vsleep_max);
-    let clamped_vtime = if vtime < vtime_min { vtime_min } else { vtime };
+    let clamped_deadline = if deadline < vtime_min { vtime_min } else { deadline };
 
     // Write clamped vtime back if it changed (after all reads are done).
-    if clamped_vtime != vtime {
+    if clamped_deadline != vtime {
         let offset = core::mem::offset_of!(vmlinux::task_struct, scx.dsq_vtime);
-        unsafe { write_field_u64(p, offset, clamped_vtime); }
+        unsafe { write_field_u64(p, offset, clamped_deadline); }
     }
 
-    kfuncs::dsq_insert_vtime(p, SHARED_DSQ, slice, clamped_vtime, enq_flags);
+    kfuncs::dsq_insert_vtime(p, SHARED_DSQ, slice, clamped_deadline, enq_flags);
 }
 
 /// dispatch: consume from the shared DSQ.
@@ -313,25 +378,31 @@ pub fn on_dispatch(_cpu: i32, prev: *mut task_struct) {
 
 /// runnable: called when a task becomes runnable (wakeup or new fork).
 ///
-/// Currently a stub — full implementation needs per-task storage.
-// PORT_TODO: Reset exec_runtime and update wakeup frequency
-// C reference: cosmos_runnable() does:
-//   tctx->exec_runtime = 0;  (reset accumulated runtime since last sleep)
-//   delta_t = now - tctx->last_woke_at;
-//   tctx->wakeup_freq = update_freq(tctx->wakeup_freq, delta_t);
-//   tctx->wakeup_freq = MIN(tctx->wakeup_freq, 1024);
-//   tctx->last_woke_at = now;
-// The wakeup_freq is used in task_dl() to scale slice_lag: tasks that wake
-// up frequently get more vtime credit (larger slice_lag * wakeup_freq).
-// Requires BPF_MAP_TYPE_TASK_STORAGE.
+/// Resets exec_runtime and updates wakeup frequency in per-task storage.
+/// C reference: cosmos_runnable() does:
+///   tctx->exec_runtime = 0;
+///   delta_t = now - tctx->last_woke_at;
+///   tctx->wakeup_freq = update_freq(tctx->wakeup_freq, delta_t);
+///   tctx->wakeup_freq = MIN(tctx->wakeup_freq, 1024);
+///   tctx->last_woke_at = now;
 #[inline(always)]
-pub fn on_runnable(_p: *mut task_struct, _enq_flags: u64) {
+pub fn on_runnable(p: *mut task_struct, _enq_flags: u64) {
+    let now = kfuncs::now();
+    if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
+        let tctx = unsafe { tctx.as_mut() };
+        // Reset accumulated runtime — task just woke up.
+        tctx.exec_runtime = 0;
+        // Update wakeup frequency using time since last wakeup.
+        let delta = now.wrapping_sub(tctx.last_woke_at);
+        tctx.wakeup_freq = update_freq(tctx.wakeup_freq, delta);
+        tctx.last_woke_at = now;
+    }
 }
 
-/// running: update vtime_now and record run start time.
+/// running: update vtime_now and record run start time in per-task storage.
 ///
 /// Advances the global vruntime to track the most recent task's vtime.
-/// Records the timestamp in the per-CPU array for accurate time-slice
+/// Records the timestamp in per-task storage for accurate time-slice
 /// charging in stopping().
 // PORT_TODO: cpufreq update on running
 // C reference: cosmos_running() calls update_cpufreq(scx_bpf_task_cpu(p))
@@ -339,14 +410,17 @@ pub fn on_runnable(_p: *mut task_struct, _enq_flags: u64) {
 // Also calls scx_pmu_event_start() when perf_config is set.
 #[inline(always)]
 pub fn on_running(p: *mut task_struct) {
-    // Record per-CPU run start time for actual slice calculation in stopping().
+    // Record run start time in per-task storage.
     // C: tctx->last_run_at = scx_bpf_now();
-    let cpu = kfuncs::task_cpu(p);
     let now = kfuncs::now();
-    unsafe {
-        if (cpu as usize) < MAX_CPUS {
-            LAST_RUN_AT[cpu as usize] = now;
-        }
+    if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
+        unsafe { tctx.as_mut().last_run_at = now; }
+    }
+
+    // Update per-CPU context timestamp.
+    let cctx = CPU_CTX.get_ptr_mut(0);
+    if !cctx.is_null() {
+        unsafe { (*cctx).last_update = now; }
     }
 
     // Update current system's vruntime.
@@ -363,13 +437,10 @@ pub fn on_running(p: *mut task_struct) {
 
 /// stopping: charge the actual used time slice and update dsq_vtime.
 ///
-/// Uses the per-CPU last_run_at timestamp to compute the real time delta,
+/// Uses the per-task last_run_at timestamp to compute the real time delta,
 /// capped at slice_ns. Advances dsq_vtime inversely proportional to
 /// weight (higher weight = slower vtime advancement = more CPU time).
-// PORT_TODO: Update exec_runtime for deadline calculation
-// C reference: tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag)
-// This tracks accumulated runtime since last sleep, used in task_dl() for
-// deadline calculation. Requires per-task storage.
+/// Also accumulates exec_runtime in per-task storage for deadline calculation.
 // PORT_TODO: Update per-CPU load for cpufreq scaling
 // C reference: update_cpu_load(p, slice) computes perf_lvl as
 // MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE) and
@@ -388,21 +459,23 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
 
     let weight = read_weight(p);
 
-    // Compute actual time slice used (not just SLICE_NS).
+    // Compute actual time slice used from per-task last_run_at, and
+    // update exec_runtime, all in a single TASK_CTX lookup to avoid
+    // the LLVM BPF backend register clobber bug (see helpers.rs docs).
     // C: slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_ns);
-    let cpu = kfuncs::task_cpu(p);
+    // C: tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag)
     let now = kfuncs::now();
-    let last_run = unsafe {
-        if (cpu as usize) < MAX_CPUS {
-            LAST_RUN_AT[cpu as usize]
-        } else {
-            0
-        }
+    let slice = if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
+        let tctx = unsafe { tctx.as_mut() };
+        let delta = now.wrapping_sub(tctx.last_run_at);
+        let s = if delta < SLICE_NS { delta } else { SLICE_NS };
+        // Update exec_runtime while we have the pointer.
+        let new_runtime = tctx.exec_runtime + s;
+        tctx.exec_runtime = if new_runtime > SLICE_LAG { SLICE_LAG } else { new_runtime };
+        s
+    } else {
+        SLICE_NS
     };
-    // Cap the charged time at SLICE_NS to prevent large vruntime jumps
-    // from preemption delays or long time slices.
-    let delta = now.wrapping_sub(last_run);
-    let slice = if delta < SLICE_NS { delta } else { SLICE_NS };
 
     // C: p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
     // scale_by_task_weight_inverse(p, v) = v * 100 / weight
@@ -421,6 +494,19 @@ pub fn on_enable(p: *mut task_struct) {
     let vtime_now = unsafe { VTIME_NOW };
     let offset = core::mem::offset_of!(vmlinux::task_struct, scx.dsq_vtime);
     unsafe { write_field_u64(p, offset, vtime_now); }
+}
+
+/// init_task: create per-task context via BPF task storage.
+///
+/// C reference: cosmos_init_task creates per-task storage via
+/// bpf_task_storage_get(&task_ctx_stor, ..., BPF_LOCAL_STORAGE_GET_F_CREATE).
+#[inline(always)]
+pub fn on_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
+    // Create per-task storage (zero-initialized by the kernel).
+    if TASK_CTX.get_or_create(p as *mut u8).is_none() {
+        return -12; // ENOMEM
+    }
+    0
 }
 
 /// init: create the shared DSQ and record nr_cpu_ids.
@@ -465,6 +551,7 @@ scx_ebpf::scx_ops_define! {
     running: on_running,
     stopping: on_stopping,
     enable: on_enable,
+    init_task: on_init_task,
     init: on_init,
     exit: on_exit,
 }

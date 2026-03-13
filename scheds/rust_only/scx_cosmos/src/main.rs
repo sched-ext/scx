@@ -6,6 +6,7 @@ use aya::{EbpfLoader, include_bytes_aligned};
 
 fn main() -> Result<()> {
     let mut ebpf = EbpfLoader::new()
+        .allow_unsupported_maps()
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_cosmos"
