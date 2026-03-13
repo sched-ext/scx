@@ -33,10 +33,13 @@
 #![no_std]
 #![feature(asm_experimental_arch)]
 
+pub mod cpumask;
 pub mod helpers;
 pub mod kfuncs;
 pub mod maps;
 pub mod ops;
+pub mod pmu;
+pub mod timer;
 pub mod vmlinux;
 
 /// Proc macro for registering sched_ext callbacks and generating trampolines.
