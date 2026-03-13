@@ -200,19 +200,38 @@ struct CallbackEntry {
     handler: syn::Path,
 }
 
-impl Parse for CallbackEntry {
+/// A single entry in the macro input — either a callback or a data field.
+enum MacroEntry {
+    Callback(CallbackEntry),
+    DataField { field: Ident, value: syn::LitInt },
+}
+
+impl Parse for MacroEntry {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let field = input.parse()?;
+        let field: Ident = input.parse()?;
         input.parse::<Token![:]>()?;
-        let handler = input.parse()?;
-        Ok(Self { field, handler })
+
+        // Peek to see if the value is a literal integer or a path.
+        if input.peek(syn::LitInt) {
+            let value: syn::LitInt = input.parse()?;
+            Ok(MacroEntry::DataField { field, value })
+        } else {
+            let handler: syn::Path = input.parse()?;
+            Ok(MacroEntry::Callback(CallbackEntry { field, handler }))
+        }
     }
 }
 
 /// The full macro input: `name: "...", field: handler, ...`
+///
+/// Supports optional data fields mixed with callbacks:
+/// - `timeout_ms: 5000` — scheduler timeout in milliseconds
+/// - `flags: 0` — scheduler flags
 struct ScxOpsDef {
     name: LitStr,
     callbacks: Vec<CallbackEntry>,
+    timeout_ms: Option<u32>,
+    flags: Option<u64>,
 }
 
 impl Parse for ScxOpsDef {
@@ -221,11 +240,36 @@ impl Parse for ScxOpsDef {
         input.parse::<Token![:]>()?;
         let name: LitStr = input.parse()?;
         input.parse::<Token![,]>()?;
-        let entries = Punctuated::<CallbackEntry, Token![,]>::parse_terminated(input)?;
-        Ok(Self {
-            name,
-            callbacks: entries.into_iter().collect(),
-        })
+
+        let mut callbacks = Vec::new();
+        let mut timeout_ms = None;
+        let mut flags = None;
+
+        let entries = Punctuated::<MacroEntry, Token![,]>::parse_terminated(input)?;
+        for entry in entries {
+            match entry {
+                MacroEntry::Callback(cb) => callbacks.push(cb),
+                MacroEntry::DataField { field, value } => {
+                    let field_str = field.to_string();
+                    match field_str.as_str() {
+                        "timeout_ms" => {
+                            timeout_ms = Some(value.base10_parse::<u32>()?);
+                        }
+                        "flags" => {
+                            flags = Some(value.base10_parse::<u64>()?);
+                        }
+                        _ => {
+                            return Err(syn::Error::new(
+                                field.span(),
+                                format!("unknown data field: `{field_str}` (expected timeout_ms or flags)"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Self { name, callbacks, timeout_ms, flags })
     }
 }
 
@@ -343,6 +387,16 @@ pub fn scx_ops_define(input: TokenStream) -> TokenStream {
         n
     };
 
+    // Generate data field overrides for timeout_ms and flags.
+    let timeout_field = match def.timeout_ms {
+        Some(v) => quote! { timeout_ms: #v, },
+        None => quote! {},
+    };
+    let flags_field = match def.flags {
+        Some(v) => quote! { flags: #v, },
+        None => quote! {},
+    };
+
     let output = quote! {
         #(#trampolines)*
 
@@ -350,6 +404,8 @@ pub fn scx_ops_define(input: TokenStream) -> TokenStream {
         #[unsafe(no_mangle)]
         static _scx_ops: scx_ebpf::ops::sched_ext_ops = scx_ebpf::ops::sched_ext_ops {
             #(#ops_fields)*
+            #timeout_field
+            #flags_field
             name: [#(#name_bytes),*],
             ..scx_ebpf::ops::DEFAULT_OPS
         };

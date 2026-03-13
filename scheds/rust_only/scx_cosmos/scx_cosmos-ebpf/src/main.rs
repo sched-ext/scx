@@ -447,6 +447,7 @@ pub fn on_exit(_ei: *mut scx_exit_info) {}
 
 scx_ebpf::scx_ops_define! {
     name: "cosmos",
+    timeout_ms: 5000,
     select_cpu: on_select_cpu,
     enqueue: on_enqueue,
     dispatch: on_dispatch,
