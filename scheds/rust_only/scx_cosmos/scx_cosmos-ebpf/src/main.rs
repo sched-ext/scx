@@ -2,25 +2,32 @@
 //!
 //! This is an incremental port of scx_cosmos. It implements:
 //!
-//! - `select_cpu`: uses `scx_bpf_select_cpu_dfl` with busy-aware dispatch
+//! - `select_cpu`: uses `scx_bpf_select_cpu_dfl` with busy-aware dispatch,
+//!   no_wake_sync support, and SMT-awareness (globals for future use)
 //! - `enqueue`: dual-mode — local DSQ when idle, vtime-ordered shared DSQ when busy
 //! - `dispatch`: `dsq_move_to_local` + slice extension for prev task
-//! - `running`: updates vtime_now + records per-task last_run_at via task storage
+//! - `running`: updates vtime_now + records per-task last_run_at via task storage,
+//!   applies cpufreq performance level
 //! - `stopping`: charges actual used time (via scx_bpf_now delta) to dsq_vtime,
-//!   accumulates exec_runtime in per-task storage
+//!   accumulates exec_runtime in per-task storage, updates per-CPU load for cpufreq
 //! - `runnable`: resets exec_runtime, updates wakeup_freq via per-task storage
 //! - `enable`: initializes task dsq_vtime to current vtime_now
 //! - `init_task`: creates per-task context via BPF_MAP_TYPE_TASK_STORAGE
 //!
 //! BPF map usage:
 //! - `TASK_CTX`: per-task storage for exec_runtime, wakeup_freq, last_run_at
-//! - `CPU_CTX`: per-CPU array for load tracking (last_update timestamp)
+//! - `CPU_CTX`: per-CPU array for load tracking (last_update, perf_lvl)
 //!
-//! Gaps vs the full C implementation (see PORT_TODO comments throughout):
-//! - No cpufreq scaling, no PMU tracking
+//! Userspace-configurable globals:
+//! - `SLICE_NS`, `SLICE_LAG`: time slice and maximum runtime parameters
+//! - `BUSY_THRESHOLD`, `CPU_UTIL`: system busy detection
+//! - `NO_WAKE_SYNC`, `CPUFREQ_ENABLED`, `SMT_ENABLED`, `AVOID_SMT`: feature flags
+//!
+//! Remaining gaps vs the full C implementation (see PORT_TODO comments):
+//! - No PMU tracking
 //! - No NUMA per-node DSQs
-//! - No flat/preferred idle scan, no mm_affinity
-//! - No deferred wakeup timer
+//! - No flat/preferred idle scan, no mm_affinity, no primary_cpumask
+//! - SMT-aware idle scanning needs register allocation fix (see PORT_TODO)
 
 #![no_std]
 #![no_main]
@@ -58,12 +65,14 @@ struct TaskCtx {
 
 /// Per-CPU context stored in BPF_MAP_TYPE_PERCPU_ARRAY.
 ///
-/// Tracks the last scheduling update timestamp for this CPU, used for
-/// load tracking and cpufreq scaling.
+/// Tracks per-CPU scheduling state for load tracking and cpufreq scaling.
+/// - `last_update`: timestamp of last scheduling update on this CPU
+/// - `perf_lvl`: EWMA-smoothed CPU performance level [0..1024]
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct CpuCtx {
     last_update: u64,
+    perf_lvl: u64,
 }
 
 // ── BPF map declarations ────────────────────────────────────────────────
@@ -83,21 +92,71 @@ static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
 /// Shared DSQ used for deadline-mode scheduling when the system is saturated.
 const SHARED_DSQ: u64 = 0;
 
-/// Default time slice: 10us (matches C cosmos `slice_ns = 10000`).
-const SLICE_NS: u64 = 10_000;
-
-/// Maximum runtime charged to a task (bounds vruntime jumps).
-const SLICE_LAG: u64 = 20_000_000;
-
 /// SCX_TASK_QUEUED flag in scx entity flags.
 const SCX_TASK_QUEUED: u32 = 1;
 
 /// SCX_KICK_IDLE flag for kick_cpu.
 const SCX_KICK_IDLE: u64 = 1;
 
-// PORT_TODO: cpufreq performance scaling thresholds
-// C reference: CPUFREQ_LOW_THRESH and CPUFREQ_HIGH_THRESH control hysteresis
-// for CPU frequency scaling. update_cpu_load() / update_cpufreq() use these.
+/// SCX_WAKE_SYNC flag value (from kernel enum).
+const SCX_WAKE_SYNC: u64 = 16;
+
+/// Maximum CPU performance level (SCX_CPUPERF_ONE = 1024).
+const SCX_CPUPERF_ONE: u64 = 1024;
+
+/// Below this threshold, reduce cpufreq to half.
+const CPUFREQ_LOW_THRESH: u64 = SCX_CPUPERF_ONE / 4;
+
+/// Above this threshold, raise cpufreq to maximum.
+const CPUFREQ_HIGH_THRESH: u64 = SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4;
+
+// ── Userspace-configurable globals ──────────────────────────────────────
+//
+// These are `#[unsafe(no_mangle)] static mut` globals that userspace can
+// set before loading the BPF program (via EbpfLoader::set_global) or
+// update at runtime (via map operations on .bss/.data/.rodata).
+//
+// C reference uses `const volatile` for compile-time-set globals and
+// `volatile` for runtime-updated globals.
+
+/// Default time slice: 10us (matches C cosmos `slice_ns = 10000`).
+#[unsafe(no_mangle)]
+static mut SLICE_NS: u64 = 10_000;
+
+/// Maximum runtime that can be charged to a task (bounds vruntime jumps).
+#[unsafe(no_mangle)]
+static mut SLICE_LAG: u64 = 20_000_000;
+
+/// CPU utilization threshold for system busy detection [0..1024].
+/// When `CPU_UTIL >= BUSY_THRESHOLD`, the system is considered busy.
+/// C reference: `const volatile u64 busy_threshold`
+#[unsafe(no_mangle)]
+static mut BUSY_THRESHOLD: u64 = 75;
+
+/// Current global CPU utilization [0..1024], set by userspace polling loop.
+/// C reference: `volatile u64 cpu_util`
+#[unsafe(no_mangle)]
+static mut CPU_UTIL: u64 = 0;
+
+/// When true, clear SCX_WAKE_SYNC from wake_flags in select_cpu.
+/// C reference: `const volatile bool no_wake_sync`
+#[unsafe(no_mangle)]
+static mut NO_WAKE_SYNC: bool = false;
+
+/// When true, enable cpufreq performance scaling in running/stopping.
+/// C reference: `const volatile bool cpufreq_enabled = true`
+#[unsafe(no_mangle)]
+static mut CPUFREQ_ENABLED: bool = true;
+
+/// When true, CPUs have SMT (hyperthreading) enabled.
+/// C reference: `const volatile bool smt_enabled = true`
+#[unsafe(no_mangle)]
+static mut SMT_ENABLED: bool = true;
+
+/// When true, try to avoid placing tasks on SMT siblings of busy cores.
+/// C reference: `const volatile bool avoid_smt = true`
+#[unsafe(no_mangle)]
+static mut AVOID_SMT: bool = true;
 
 // PORT_TODO: primary_cpumask and primary_all for preferred CPU domain
 // C reference: `private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask`
@@ -109,28 +168,21 @@ const SCX_KICK_IDLE: u64 = 1;
 // C reference: When flat_idle_scan or preferred_idle_scan is true, cosmos
 // uses pick_idle_cpu_flat() which iterates CPUs in preferred order or
 // round-robin to find idle cores. Requires preferred_cpus[] array and
-// cpu_capacity[] array from userspace.
+// cpu_capacity[] array from userspace. These are large arrays (MAX_CPUS=1024
+// entries) that need userspace to sort CPUs by capacity and populate.
 
-// PORT_TODO: NUMA support with per-node DSQs
-// C reference: When numa_enabled is true, cosmos creates per-node DSQs
-// (one per NUMA node) and routes tasks to their node's DSQ via
-// shared_dsq(cpu) = cpu_node(cpu). Requires cpu_node_map BPF hash map.
-
-// PORT_TODO: deferred wakeup timer
-// C reference: A BPF timer (wakeup_timerfn) fires every slice_ns to kick
-// idle CPUs that have pending tasks. This reduces overhead in the enqueue
-// hot path by deferring wakeups. Requires BPF_MAP_TYPE_ARRAY + bpf_timer.
+// PORT_TODO: mm_affinity (address space affinity)
+// C reference: When mm_affinity is true and waker/wakee share the same mm,
+// is_wake_affine() returns true. select_cpu uses this to keep wakee on the
+// waker's CPU for cache locality. Requires reading task_struct->mm and
+// comparing waker/wakee mm pointers. The waker is accessed via
+// bpf_get_current_task_btf() which needs BTF-aware task access support.
 
 // PORT_TODO: PMU / perf event integration
 // C reference: perf_config selects a hardware counter. scx_pmu_event_start/stop
 // track per-task events. is_event_heavy() checks if a task exceeds
 // perf_threshold. pick_least_busy_event_cpu() distributes event-heavy tasks.
-// Requires BPF perf event support.
-
-// PORT_TODO: mm_affinity (address space affinity)
-// C reference: When mm_affinity is true and waker/wakee share the same mm,
-// is_wake_affine() returns true. select_cpu uses this to keep wakee on the
-// waker's CPU for cache locality.
+// Requires BPF perf event support (scx_pmu_install/scx_pmu_read kfuncs).
 
 // ── Global state ────────────────────────────────────────────────────────
 
@@ -139,25 +191,6 @@ static mut VTIME_NOW: u64 = 0;
 
 /// Number of CPUs on this system, set in init().
 static mut NR_CPU_IDS: u32 = 0;
-
-// PORT_TODO: Global cpu_util and busy_threshold for is_system_busy()
-// C reference: `volatile u64 cpu_util` is the current CPU utilization
-// (range [0..1024]) set by userspace. `const volatile u64 busy_threshold`
-// is the threshold. is_system_busy() returns cpu_util >= busy_threshold.
-// For now we approximate: system is busy when the shared DSQ has queued tasks.
-
-// PORT_TODO: smt_enabled and avoid_smt for SMT-aware idle scanning
-// C reference: When smt_enabled is true, cosmos uses scx_bpf_get_idle_smtmask()
-// and is_smt_contended() to prefer full-idle SMT cores. avoid_smt controls
-// whether to pass SCX_PICK_IDLE_CORE to scx_bpf_select_cpu_and().
-
-// PORT_TODO: no_wake_sync for disabling synchronous wakeup hints
-// C reference: `const volatile bool no_wake_sync` — when true, the
-// SCX_WAKE_SYNC bit is cleared from wake_flags before pick_idle_cpu().
-
-// PORT_TODO: cpufreq_enabled for CPU frequency scaling
-// C reference: `const volatile bool cpufreq_enabled = true` — controls
-// whether update_cpu_load() and update_cpufreq() are called in running/stopping.
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -168,11 +201,24 @@ unsafe fn write_field_u64(base: *mut task_struct, offset: usize, val: u64) {
     core::ptr::write_volatile(ptr, val);
 }
 
+/// Read the current slice_ns value (from userspace-configurable global).
+#[inline(always)]
+fn get_slice_ns() -> u64 {
+    unsafe { SLICE_NS }
+}
+
+/// Read the current slice_lag value (from userspace-configurable global).
+#[inline(always)]
+fn get_slice_lag() -> u64 {
+    unsafe { SLICE_LAG }
+}
+
 /// Compute a weight-scaled time slice: slice_ns * weight / 100.
 /// This matches C cosmos `task_slice()` = `scale_by_task_weight(p, slice_ns)`.
 #[inline(always)]
 fn task_slice(weight: u64) -> u64 {
-    if weight > 0 { (SLICE_NS * weight) / 100 } else { SLICE_NS }
+    let slice_ns = get_slice_ns();
+    if weight > 0 { (slice_ns * weight) / 100 } else { slice_ns }
 }
 
 /// Read the task's scx.weight, defaulting to 100 (NICE 0).
@@ -185,17 +231,32 @@ fn read_weight(p: *mut task_struct) -> u64 {
     }
 }
 
-/// Approximate check for system saturation.
+/// Determine if the system is busy (saturated).
 ///
-/// Returns true if there are tasks queued in the shared DSQ, indicating
-/// the system has more runnable tasks than idle CPUs.
-// PORT_TODO: Real is_system_busy() using cpu_util from userspace
-// C reference: `is_system_busy()` returns `cpu_util >= busy_threshold`
-// where cpu_util is set by the userspace daemon based on /proc/stat.
-// Our approximation checks if the shared DSQ has tasks queued.
+/// Uses userspace-provided CPU utilization when available (CPU_UTIL > 0),
+/// falling back to DSQ queue depth when userspace hasn't set it yet.
+/// C reference: `is_system_busy()` returns `cpu_util >= busy_threshold`.
 #[inline(always)]
 fn is_system_busy() -> bool {
-    kfuncs::dsq_nr_queued(SHARED_DSQ) > 0
+    let cpu_util = unsafe { CPU_UTIL };
+    if cpu_util > 0 {
+        // Userspace has set CPU utilization — use threshold comparison.
+        let threshold = unsafe { BUSY_THRESHOLD };
+        cpu_util >= threshold
+    } else {
+        // Fallback: userspace hasn't set CPU_UTIL yet, approximate
+        // by checking if the shared DSQ has queued tasks.
+        kfuncs::dsq_nr_queued(SHARED_DSQ) > 0
+    }
+}
+
+/// Exponential weighted moving average (EWMA).
+///
+/// Matches C cosmos `calc_avg()`:
+///   new_avg = (old_val * 0.75) + (new_val * 0.25)
+#[inline(always)]
+fn calc_avg(old_val: u64, new_val: u64) -> u64 {
+    (old_val - (old_val >> 2)) + (new_val >> 2)
 }
 
 /// Exponential moving average update for wakeup frequency tracking.
@@ -217,28 +278,114 @@ fn update_freq(old_freq: u64, delta_ns: u64) -> u64 {
     if smoothed > 1024 { 1024 } else { smoothed }
 }
 
+// ── Cpufreq helpers ─────────────────────────────────────────────────────
+
+/// Update the per-CPU load tracking and compute a new EWMA performance level.
+///
+/// Called from `on_stopping()` after computing the actual used time slice.
+/// C reference: `update_cpu_load(p, slice)` computes perf_lvl as
+///   MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE)
+/// and smooths it with EWMA via calc_avg().
+#[inline(always)]
+fn update_cpu_load(slice: u64, now: u64) {
+    if unsafe { !CPUFREQ_ENABLED } {
+        return;
+    }
+
+    let cctx = CPU_CTX.get_ptr_mut(0);
+    if cctx.is_null() {
+        return;
+    }
+    let cctx = unsafe { &mut *cctx };
+
+    let delta_t = now.wrapping_sub(cctx.last_update);
+    if delta_t == 0 {
+        return;
+    }
+
+    // Compute instantaneous performance level.
+    let perf_lvl = {
+        let raw = slice * SCX_CPUPERF_ONE / delta_t;
+        if raw > SCX_CPUPERF_ONE { SCX_CPUPERF_ONE } else { raw }
+    };
+
+    // Smooth with EWMA.
+    cctx.perf_lvl = calc_avg(cctx.perf_lvl, perf_lvl);
+    cctx.last_update = now;
+}
+
+/// Apply the target cpufreq performance level to the current CPU.
+///
+/// Called from `on_running()` to set the CPU frequency based on recent load.
+/// Uses hysteresis thresholds: below LOW -> half, above HIGH -> max,
+/// between -> use the smoothed value.
+/// C reference: `update_cpufreq(cpu)`.
+#[inline(always)]
+fn update_cpufreq(cpu: i32) {
+    if unsafe { !CPUFREQ_ENABLED } {
+        return;
+    }
+
+    let cctx = CPU_CTX.get_ptr_mut(0);
+    if cctx.is_null() {
+        return;
+    }
+    let perf_lvl_stored = unsafe { (*cctx).perf_lvl };
+
+    // Apply hysteresis thresholds.
+    let perf_lvl = if perf_lvl_stored >= CPUFREQ_HIGH_THRESH {
+        SCX_CPUPERF_ONE
+    } else if perf_lvl_stored <= CPUFREQ_LOW_THRESH {
+        SCX_CPUPERF_ONE / 2
+    } else {
+        perf_lvl_stored
+    };
+
+    kfuncs::cpuperf_set(cpu, perf_lvl as u32);
+}
+
 // ── Scheduler callbacks ─────────────────────────────────────────────────
 
 /// select_cpu: find an idle CPU for the task.
 ///
-/// Uses `scx_bpf_select_cpu_dfl` for idle CPU selection.
+/// Uses `scx_bpf_select_cpu_dfl` for idle CPU selection with:
+/// - no_wake_sync: clears SCX_WAKE_SYNC from wake_flags when enabled.
 /// - If idle CPU found: dispatch directly to local DSQ (any saturation level)
 /// - If no idle CPU and not busy: dispatch to local DSQ (round-robin)
 /// - If no idle CPU and busy: do NOT dispatch, let enqueue() handle
 ///   deadline-mode dispatch to the shared DSQ
-///
-/// This matches the C cosmos behavior:
-///   `if (cpu >= 0 || !is_busy) dsq_insert(LOCAL, ...);`
 // PORT_TODO: Enhanced select_cpu with pick_idle_cpu() strategies
 // C reference: cosmos_select_cpu() calls pick_idle_cpu() which tries multiple
 // strategies: (1) flat/preferred scan when enabled, (2) wake-affine optimization
 // for hybrid cores, (3) scx_bpf_select_cpu_and() with primary cpumask and
 // avoid_smt flag, (4) fallback scx_bpf_select_cpu_dfl(). It also handles
 // mm_affinity (same address space) and perf_config (event-heavy tasks).
+// The full pick_idle_cpu() requires primary_cpumask (kptr), cpu_capacity[]
+// arrays, and flat_idle_scan infrastructure that are not yet available.
+//
+// PORT_TODO: Full SMT-aware idle scanning
+// C reference: pick_idle_cpu() calls scx_bpf_get_idle_smtmask(),
+// tests the CPU against the mask, then calls scx_bpf_put_cpumask().
+// The BPF verifier requires the cpumask pointer to survive across
+// the test_cpu kfunc call, but LLVM BPF backend register allocation
+// doesn't reliably spill the pointer when callee-saved registers
+// are exhausted (all r6-r9 are occupied by p, cpu, prev_cpu, etc.).
+// A workaround would be to use a separate BPF subprogram for the
+// SMT check (separate register frame), or to restructure the code
+// to use select_cpu_and() directly which handles SMT internally
+// via the SCX_PICK_IDLE_CORE flag.
 #[inline(always)]
 pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
+    // Clear SCX_WAKE_SYNC if no_wake_sync is enabled.
+    // C: if (no_wake_sync) wake_flags &= ~SCX_WAKE_SYNC;
+    let effective_wake_flags = if unsafe { NO_WAKE_SYNC } {
+        wake_flags & !SCX_WAKE_SYNC
+    } else {
+        wake_flags
+    };
+
     let mut is_idle: bool = false;
-    let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
+    let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, effective_wake_flags, &mut is_idle);
 
     // Dispatch to local DSQ when:
     // 1. An idle CPU was found (always dispatch, regardless of busy state), or
@@ -305,27 +452,36 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     //
     // Read both exec_runtime and wakeup_freq in a single lookup to avoid
     // the LLVM BPF backend register clobber bug (see helpers.rs docs).
-    let (exec_runtime, wakeup_freq) = if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
+    //
+    // Compute the deadline and wakeup_freq inside the TASK_CTX lookup
+    // branches to avoid register liveness issues: LLVM BPF backend may
+    // not spill the default-0 registers across the task_storage_get call.
+    let (deadline, wakeup_freq) = if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
         let tctx = unsafe { tctx.as_ref() };
-        (tctx.exec_runtime, tctx.wakeup_freq)
+        let er = tctx.exec_runtime;
+        let wf = tctx.wakeup_freq;
+        let dl = if weight > 0 {
+            vtime.wrapping_add(er * 100 / weight)
+        } else {
+            vtime.wrapping_add(er)
+        };
+        (dl, wf)
     } else {
-        (0, 0)
-    };
-    let deadline = if weight > 0 {
-        vtime.wrapping_add(exec_runtime * 100 / weight)
-    } else {
-        vtime.wrapping_add(exec_runtime)
+        // No task context: exec_runtime=0, wakeup_freq=0.
+        // deadline = vtime + 0 = vtime.
+        (vtime, 0u64)
     };
 
     // No idle CPU found — use deadline-mode dispatch to the shared DSQ.
     // Clamp vtime so tasks don't accumulate too much credit from sleeping.
     // C: vtime_min = vtime_now - scale_by_task_weight(p, slice_lag)
     let vtime_now = unsafe { VTIME_NOW };
+    let slice_lag = get_slice_lag();
 
     // Scale slice_lag by wakeup frequency: tasks that wake up often get
     // more vtime credit (larger effective slice_lag).
     // C: wakeup_freq_lag = slice_lag + slice_lag * tctx->wakeup_freq / 1024
-    let effective_lag = SLICE_LAG + SLICE_LAG * wakeup_freq / 1024;
+    let effective_lag = slice_lag + slice_lag * wakeup_freq / 1024;
 
     let vsleep_max = if weight > 0 { (effective_lag * weight) / 100 } else { effective_lag };
     let vtime_min = vtime_now.wrapping_sub(vsleep_max);
@@ -399,15 +555,13 @@ pub fn on_runnable(p: *mut task_struct, _enq_flags: u64) {
     }
 }
 
-/// running: update vtime_now and record run start time in per-task storage.
+/// running: update vtime_now, record run start time, and apply cpufreq.
 ///
 /// Advances the global vruntime to track the most recent task's vtime.
 /// Records the timestamp in per-task storage for accurate time-slice
-/// charging in stopping().
-// PORT_TODO: cpufreq update on running
-// C reference: cosmos_running() calls update_cpufreq(scx_bpf_task_cpu(p))
-// which reads per-CPU perf_lvl and applies it via scx_bpf_cpuperf_set().
-// Also calls scx_pmu_event_start() when perf_config is set.
+/// charging in stopping(). Applies the per-CPU cpufreq performance level.
+///
+/// C reference: cosmos_running() calls update_cpufreq(scx_bpf_task_cpu(p)).
 #[inline(always)]
 pub fn on_running(p: *mut task_struct) {
     // Record run start time in per-task storage.
@@ -433,21 +587,34 @@ pub fn on_running(p: *mut task_struct) {
             }
         }
     }
+
+    // Apply cpufreq performance level based on recent load.
+    // C: update_cpufreq(scx_bpf_task_cpu(p));
+    //
+    // NOTE: We use kfuncs::task_cpu(p) here. This consumes the trusted_ptr
+    // to p, but we've already finished reading from p above, so this is safe.
+    // The BPF verifier requires that we don't use p after this kfunc call.
+    if unsafe { CPUFREQ_ENABLED } {
+        let cpu = kfuncs::task_cpu(p);
+        update_cpufreq(cpu);
+    }
 }
 
-/// stopping: charge the actual used time slice and update dsq_vtime.
+/// stopping: charge the actual used time slice, update dsq_vtime, and
+/// update per-CPU load for cpufreq scaling.
 ///
 /// Uses the per-task last_run_at timestamp to compute the real time delta,
 /// capped at slice_ns. Advances dsq_vtime inversely proportional to
 /// weight (higher weight = slower vtime advancement = more CPU time).
 /// Also accumulates exec_runtime in per-task storage for deadline calculation.
-// PORT_TODO: Update per-CPU load for cpufreq scaling
-// C reference: update_cpu_load(p, slice) computes perf_lvl as
-// MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE) and
-// smooths it with EWMA. Requires per-CPU context map.
+///
+/// C reference: cosmos_stopping() calls update_cpu_load(p, slice) which
+/// computes perf_lvl = MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE)
+/// and smooths it with EWMA.
 // PORT_TODO: PMU counter update in stopping
 // C reference: scx_pmu_event_stop(p) + update_counters(p, tctx, cpu)
 // reads perf event delta and stores in per-task and per-CPU contexts.
+// Requires scx_pmu_event_stop/scx_pmu_read kfuncs.
 #[inline(always)]
 pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     // Read ALL fields before writing.
@@ -458,6 +625,8 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     };
 
     let weight = read_weight(p);
+    let slice_ns = get_slice_ns();
+    let slice_lag = get_slice_lag();
 
     // Compute actual time slice used from per-task last_run_at, and
     // update exec_runtime, all in a single TASK_CTX lookup to avoid
@@ -468,13 +637,13 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     let slice = if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
         let tctx = unsafe { tctx.as_mut() };
         let delta = now.wrapping_sub(tctx.last_run_at);
-        let s = if delta < SLICE_NS { delta } else { SLICE_NS };
+        let s = if delta < slice_ns { delta } else { slice_ns };
         // Update exec_runtime while we have the pointer.
         let new_runtime = tctx.exec_runtime + s;
-        tctx.exec_runtime = if new_runtime > SLICE_LAG { SLICE_LAG } else { new_runtime };
+        tctx.exec_runtime = if new_runtime > slice_lag { slice_lag } else { new_runtime };
         s
     } else {
-        SLICE_NS
+        slice_ns
     };
 
     // C: p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
@@ -484,6 +653,10 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
 
     let offset = core::mem::offset_of!(vmlinux::task_struct, scx.dsq_vtime);
     unsafe { write_field_u64(p, offset, new_vtime); }
+
+    // Update per-CPU load for cpufreq scaling.
+    // C: update_cpu_load(p, slice);
+    update_cpu_load(slice, now);
 }
 
 /// enable: initialize a task's dsq_vtime to the current global vruntime.
@@ -514,9 +687,13 @@ pub fn on_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
 // C reference: When numa_enabled is true, cosmos_init creates one DSQ per
 // NUMA node via `bpf_for(node, 0, nr_node_ids) { create_dsq(node, node); }`.
 // Each CPU dispatches to its node's DSQ via shared_dsq(cpu) = cpu_node(cpu).
-// PORT_TODO: Deferred wakeup timer initialization
-// C reference: When deferred_wakeups is true, cosmos_init creates a BPF timer
-// that fires every slice_ns and kicks idle CPUs with pending local DSQ tasks.
+// Implementing this requires:
+// 1. A `NUMA_ENABLED: bool` global flag
+// 2. A `NR_NODE_IDS: u32` global set by userspace
+// 3. A `cpu_node_map: HashMap<u32, u32>` BPF map populated by userspace
+// 4. A `shared_dsq(cpu)` helper that returns the node's DSQ ID
+// The loop in init would iterate `bpf_for(node, 0, nr_node_ids)` creating
+// per-node DSQs. dispatch() would use `shared_dsq(cpu)` instead of SHARED_DSQ.
 // PORT_TODO: PMU installation
 // C reference: When perf_config is set, cosmos_init calls scx_pmu_install().
 #[inline(always)]
