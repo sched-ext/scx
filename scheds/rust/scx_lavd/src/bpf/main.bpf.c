@@ -39,7 +39,7 @@
  * execution of Task B, and Task B's completion triggers Task C. Many
  * event-driven systems can be represented as task graphs.
  *
- *        [Task x] --> [Task B] --> [Task C]
+ *        [Task A] --> [Task B] --> [Task C]
  *
  * We define Task B is more latency-critical in the following cases: a) as Task
  * B's runtime per schedule is shorter (runtime B) b) as Task B wakes Task C
