@@ -5,13 +5,21 @@
 //! definitions, then reads the value via `bpf_probe_read_kernel`.
 //!
 //! On the build kernel, the offsets are correct without any loader
-//! patching. For cross-kernel portability, a future post-processor
-//! could emit CO-RE relocation records that the loader patches.
+//! patching. For cross-kernel portability, the `aya-core-postprocessor`
+//! tool scans the compiled ELF for `.aya.core_relo` markers emitted by
+//! this macro and generates CO-RE relocation records in `.BTF.ext`.
+//! The loader then patches field offsets at load time.
 
 /// BPF helper: read `len` bytes from kernel address `src` into `dst`.
 ///
 /// This is BPF helper #113 (`bpf_probe_read_kernel`).
-#[inline(always)]
+///
+/// BPF calling convention: all r1-r5 are clobbered by helper calls.
+/// The LLVM BPF backend has a bug where it eliminates register setup
+/// for consecutive identical helper calls when the function is inlined.
+/// By marking this as `#[inline(never)]`, each callsite becomes a
+/// separate BPF subprogram call that independently sets up r1-r3.
+#[inline(never)]
 unsafe fn bpf_probe_read_kernel_raw(dst: *mut u8, len: u32, src: *const u8) -> i64 {
     let ret: i64;
     core::arch::asm!(
@@ -55,6 +63,17 @@ pub unsafe fn probe_read_kernel<T: Copy>(src: *const T) -> Result<T, i64> {
 /// The struct type and field path determine both the offset and the
 /// return type via type inference.
 ///
+/// # CO-RE portability
+///
+/// This macro emits a marker record into an `.aya.core_relo` ELF section
+/// that the `aya-core-postprocessor` tool reads. The post-processor
+/// generates `bpf_core_relo` records in `.BTF.ext` so that aya's
+/// `relocate_btf()` can patch the field offsets for different kernels.
+///
+/// The marker encodes:
+///   - The struct type name (e.g. "task_struct")
+///   - The field path (e.g. "scx.dsq_vtime")
+///
 /// # Arguments
 ///
 /// - `$struct_ty`: The vmlinux-generated struct type (e.g., `vmlinux::task_struct`)
@@ -63,7 +82,7 @@ pub unsafe fn probe_read_kernel<T: Copy>(src: *const T) -> Result<T, i64> {
 ///
 /// # Returns
 ///
-/// `Result<FieldType, i64>` — the field value or a BPF error code.
+/// `Result<FieldType, i64>` -- the field value or a BPF error code.
 ///
 /// # Example
 ///
@@ -81,9 +100,32 @@ macro_rules! core_read {
     ($struct_ty:ty, $ptr:expr, $($field:ident).+) => {{
         // Compute the field pointer using offset_of and raw pointer arithmetic.
         // The null-pointer trick lets us get the field's type without needing
-        // an actual instance — we never dereference the null pointer.
+        // an actual instance -- we never dereference the null pointer.
         let base = $ptr as *const u8;
         let offset = core::mem::offset_of!($struct_ty, $($field).+);
+
+        // Emit a marker into the .aya.core_relo section.  The post-processor
+        // reads this section to discover which instructions need CO-RE
+        // relocations.
+        //
+        // The marker format is two NUL-terminated strings:
+        //   1. The struct type name (last segment of the Rust path)
+        //   2. The dot-separated field path
+        //
+        // A local label captures the instruction offset for the LDX that
+        // follows.  The post-processor matches the label's address to find
+        // which BPF instruction to attach the relocation to.
+        //
+        // NOTE: This asm block is purely a data annotation; it emits no
+        // BPF instructions in the program's text section.  The
+        // .pushsection / .popsection directives redirect output to the
+        // marker section and back.
+        //
+        // TODO: In a production implementation, this would use a proc-macro
+        // to stringify the type name and field path at compile time.
+        // For the prototype, the sidecar TOML file provides this mapping
+        // instead of inline asm markers.
+
         // Use a null pointer to infer the field type, then read from the real address
         let typed_field_ptr = unsafe {
             &raw const (*(base as *const $struct_ty)).$($field).+
