@@ -35,6 +35,7 @@
 
 pub mod helpers;
 pub mod kfuncs;
+pub mod maps;
 pub mod ops;
 pub mod vmlinux;
 

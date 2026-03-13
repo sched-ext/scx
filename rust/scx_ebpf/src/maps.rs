@@ -1,0 +1,442 @@
+//! BPF map types for pure-Rust sched_ext schedulers.
+//!
+//! This module provides BPF map declarations and helper wrappers for use
+//! in eBPF programs. Maps are declared as `#[link_section = ".maps"]`
+//! statics with BTF-compatible `#[repr(C)]` layout that the aya loader
+//! recognizes.
+//!
+//! # Supported map types
+//!
+//! - [`HashMap`] — generic key-value hash map (`BPF_MAP_TYPE_HASH`)
+//! - [`PerCpuArray`] — per-CPU indexed array (`BPF_MAP_TYPE_PERCPU_ARRAY`)
+//! - [`TaskStorage`] — per-task local storage (`BPF_MAP_TYPE_TASK_STORAGE`)
+//!
+//! # Usage
+//!
+//! Maps must be declared as `#[unsafe(no_mangle)]` statics with
+//! `#[unsafe(link_section = ".maps")]`:
+//!
+//! ```ignore
+//! use scx_ebpf::maps::{HashMap, PerCpuArray, TaskStorage};
+//!
+//! #[unsafe(link_section = ".maps")]
+//! #[unsafe(no_mangle)]
+//! static TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new();
+//!
+//! #[unsafe(link_section = ".maps")]
+//! #[unsafe(no_mangle)]
+//! static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
+//!
+//! #[unsafe(link_section = ".maps")]
+//! #[unsafe(no_mangle)]
+//! static GPU_NODE: HashMap<u32, u32, 64> = HashMap::new();
+//! ```
+
+use core::marker::PhantomData;
+use core::ptr::NonNull;
+
+// ── BPF map type constants ──────────────────────────────────────────────
+
+/// `BPF_MAP_TYPE_HASH` = 1
+const MAP_TYPE_HASH: usize = 1;
+/// `BPF_MAP_TYPE_ARRAY` = 2
+#[allow(dead_code)]
+const MAP_TYPE_ARRAY: usize = 2;
+/// `BPF_MAP_TYPE_PERCPU_ARRAY` = 6
+const MAP_TYPE_PERCPU_ARRAY: usize = 6;
+/// `BPF_MAP_TYPE_TASK_STORAGE` = 29
+const MAP_TYPE_TASK_STORAGE: usize = 29;
+
+/// `BPF_F_NO_PREALLOC` = 1
+const BPF_F_NO_PREALLOC: usize = 1;
+
+/// `BPF_LOCAL_STORAGE_GET_F_CREATE` = 1
+pub const BPF_LOCAL_STORAGE_GET_F_CREATE: u64 = 1;
+
+// ── BPF helper wrappers (inline asm) ────────────────────────────────────
+//
+// These call BPF helpers by number using `call N` in inline asm, matching
+// the pattern used throughout scx-ebpf for kfunc calls.
+
+/// BPF helper #1: `bpf_map_lookup_elem(map, key) -> *mut value`
+#[inline(always)]
+unsafe fn bpf_map_lookup_elem(map: *const u8, key: *const u8) -> *mut u8 {
+    let ret: *mut u8;
+    core::arch::asm!(
+        "call 1",
+        in("r1") map,
+        in("r2") key,
+        lateout("r0") ret,
+        lateout("r3") _,
+        lateout("r4") _,
+        lateout("r5") _,
+    );
+    ret
+}
+
+/// BPF helper #2: `bpf_map_update_elem(map, key, value, flags) -> int`
+#[inline(always)]
+unsafe fn bpf_map_update_elem(
+    map: *const u8,
+    key: *const u8,
+    value: *const u8,
+    flags: u64,
+) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "call 2",
+        in("r1") map,
+        in("r2") key,
+        in("r3") value,
+        in("r4") flags,
+        lateout("r0") ret,
+        lateout("r5") _,
+    );
+    ret
+}
+
+/// BPF helper #3: `bpf_map_delete_elem(map, key) -> int`
+#[inline(always)]
+unsafe fn bpf_map_delete_elem(map: *const u8, key: *const u8) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "call 3",
+        in("r1") map,
+        in("r2") key,
+        lateout("r0") ret,
+        lateout("r3") _,
+        lateout("r4") _,
+        lateout("r5") _,
+    );
+    ret
+}
+
+/// BPF helper #156: `bpf_task_storage_get(map, task, value, flags) -> *mut value`
+#[inline(always)]
+unsafe fn bpf_task_storage_get(
+    map: *const u8,
+    task: *mut u8,
+    value: *mut u8,
+    flags: u64,
+) -> *mut u8 {
+    let ret: *mut u8;
+    core::arch::asm!(
+        "call 156",
+        in("r1") map,
+        in("r2") task,
+        in("r3") value,
+        in("r4") flags,
+        lateout("r0") ret,
+        lateout("r5") _,
+    );
+    ret
+}
+
+/// BPF helper #157: `bpf_task_storage_delete(map, task) -> int`
+#[inline(always)]
+unsafe fn bpf_task_storage_delete(map: *const u8, task: *mut u8) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "call 157",
+        in("r1") map,
+        in("r2") task,
+        lateout("r0") ret,
+        lateout("r3") _,
+        lateout("r4") _,
+        lateout("r5") _,
+    );
+    ret
+}
+
+// ── BTF map definition structs ──────────────────────────────────────────
+//
+// The BTF encoding uses pointer-to-sized-array trick:
+//   `*const [i32; N]` encodes the integer N in BTF via the array size.
+// The pointer fields are never dereferenced — they exist purely for
+// BTF type information that the loader reads.
+//
+// The `key` and `value` fields use `*const K` / `*const V` so the
+// loader can determine the key/value types from BTF.
+
+// ── HashMap ─────────────────────────────────────────────────────────────
+
+/// A BTF-compatible BPF hash map (`BPF_MAP_TYPE_HASH`).
+///
+/// Provides key-value storage with O(1) lookups. Declare as a
+/// `#[unsafe(link_section = ".maps")]` static.
+///
+/// # Type Parameters
+///
+/// - `K` — key type (must be `Copy`)
+/// - `V` — value type (must be `Copy`)
+/// - `MAX_ENTRIES` — maximum number of entries
+///
+/// # Example
+///
+/// ```ignore
+/// #[unsafe(link_section = ".maps")]
+/// #[unsafe(no_mangle)]
+/// static GPU_NODE_MAP: HashMap<u32, u32, 64> = HashMap::new();
+///
+/// // In a BPF program:
+/// let node = gpu_node_map.get(&gpu_id);
+/// ```
+#[repr(C)]
+pub struct HashMap<K, V, const MAX_ENTRIES: usize> {
+    r#type: *const [i32; MAP_TYPE_HASH],
+    key: *const K,
+    value: *const V,
+    max_entries: *const [i32; MAX_ENTRIES],
+    _kv: PhantomData<(K, V)>,
+}
+
+unsafe impl<K, V, const N: usize> Sync for HashMap<K, V, N> {}
+
+impl<K, V, const MAX_ENTRIES: usize> HashMap<K, V, MAX_ENTRIES> {
+    /// Create a new hash map definition.
+    pub const fn new() -> Self {
+        Self {
+            r#type: core::ptr::null(),
+            key: core::ptr::null(),
+            value: core::ptr::null(),
+            max_entries: core::ptr::null(),
+            _kv: PhantomData,
+        }
+    }
+
+    /// Look up a value by key. Returns `None` if the key is not found.
+    #[inline(always)]
+    pub fn get(&self, key: &K) -> Option<&V> {
+        let ptr = self.get_ptr_mut(key);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &*ptr })
+        }
+    }
+
+    /// Look up a value by key, returning a mutable pointer.
+    #[inline(always)]
+    pub fn get_ptr_mut(&self, key: &K) -> *mut V {
+        unsafe {
+            bpf_map_lookup_elem(
+                core::ptr::from_ref(self).cast(),
+                core::ptr::from_ref(key).cast(),
+            )
+            .cast()
+        }
+    }
+
+    /// Insert or update a key-value pair. `flags` is typically 0 (`BPF_ANY`).
+    #[inline(always)]
+    pub fn insert(&self, key: &K, value: &V, flags: u64) -> Result<(), i64> {
+        let ret = unsafe {
+            bpf_map_update_elem(
+                core::ptr::from_ref(self).cast(),
+                core::ptr::from_ref(key).cast(),
+                core::ptr::from_ref(value).cast(),
+                flags,
+            )
+        };
+        if ret == 0 { Ok(()) } else { Err(ret) }
+    }
+
+    /// Delete an entry by key.
+    #[inline(always)]
+    pub fn delete(&self, key: &K) -> Result<(), i64> {
+        let ret = unsafe {
+            bpf_map_delete_elem(
+                core::ptr::from_ref(self).cast(),
+                core::ptr::from_ref(key).cast(),
+            )
+        };
+        if ret == 0 { Ok(()) } else { Err(ret) }
+    }
+}
+
+// ── PerCpuArray ─────────────────────────────────────────────────────────
+
+/// A BTF-compatible per-CPU array map (`BPF_MAP_TYPE_PERCPU_ARRAY`).
+///
+/// Each CPU gets its own copy of each array element, providing
+/// lock-free per-CPU storage. Indexed by `u32`.
+///
+/// # Type Parameters
+///
+/// - `V` — value type (must be `Copy`)
+/// - `MAX_ENTRIES` — number of array entries
+///
+/// # Example
+///
+/// ```ignore
+/// #[unsafe(link_section = ".maps")]
+/// #[unsafe(no_mangle)]
+/// static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
+///
+/// // In a BPF program — gets this CPU's element:
+/// if let Some(ctx) = cpu_ctx.get(0) { ... }
+/// ```
+#[repr(C)]
+pub struct PerCpuArray<V, const MAX_ENTRIES: usize> {
+    r#type: *const [i32; MAP_TYPE_PERCPU_ARRAY],
+    key: *const u32,
+    value: *const V,
+    max_entries: *const [i32; MAX_ENTRIES],
+    _v: PhantomData<V>,
+}
+
+unsafe impl<V, const N: usize> Sync for PerCpuArray<V, N> {}
+
+impl<V, const MAX_ENTRIES: usize> PerCpuArray<V, MAX_ENTRIES> {
+    /// Create a new per-CPU array definition.
+    pub const fn new() -> Self {
+        Self {
+            r#type: core::ptr::null(),
+            key: core::ptr::null(),
+            value: core::ptr::null(),
+            max_entries: core::ptr::null(),
+            _v: PhantomData,
+        }
+    }
+
+    /// Look up the current CPU's element at `index`.
+    #[inline(always)]
+    pub fn get(&self, index: u32) -> Option<&V> {
+        let ptr = self.get_ptr_mut(index);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &*ptr })
+        }
+    }
+
+    /// Look up the current CPU's element, returning a mutable pointer.
+    #[inline(always)]
+    pub fn get_ptr_mut(&self, index: u32) -> *mut V {
+        unsafe {
+            bpf_map_lookup_elem(
+                core::ptr::from_ref(self).cast(),
+                core::ptr::from_ref(&index).cast(),
+            )
+            .cast()
+        }
+    }
+
+    /// Set the current CPU's element at `index`.
+    #[inline(always)]
+    pub fn set(&self, index: u32, value: &V, flags: u64) -> Result<(), i64> {
+        let ret = unsafe {
+            bpf_map_update_elem(
+                core::ptr::from_ref(self).cast(),
+                core::ptr::from_ref(&index).cast(),
+                core::ptr::from_ref(value).cast(),
+                flags,
+            )
+        };
+        if ret == 0 { Ok(()) } else { Err(ret) }
+    }
+}
+
+// ── TaskStorage ─────────────────────────────────────────────────────────
+
+/// A BTF-compatible per-task local storage map (`BPF_MAP_TYPE_TASK_STORAGE`).
+///
+/// Provides per-task storage that is automatically freed when the task
+/// exits. Uses `BPF_F_NO_PREALLOC` and `max_entries = 0` as required
+/// by the kernel for task storage maps.
+///
+/// # Type Parameters
+///
+/// - `V` — value type stored per task (must be `Copy` + zero-initializable)
+///
+/// # Example
+///
+/// ```ignore
+/// #[repr(C)]
+/// #[derive(Copy, Clone)]
+/// struct TaskCtx {
+///     exec_runtime: u64,
+///     last_run_at: u64,
+/// }
+///
+/// #[unsafe(link_section = ".maps")]
+/// #[unsafe(no_mangle)]
+/// static TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new();
+///
+/// // Get or create per-task context:
+/// let tctx = task_ctx.get_or_create(p);
+/// ```
+#[repr(C)]
+pub struct TaskStorage<V> {
+    r#type: *const [i32; MAP_TYPE_TASK_STORAGE],
+    key: *const i32,
+    value: *const V,
+    max_entries: *const [i32; 0],
+    map_flags: *const [i32; BPF_F_NO_PREALLOC],
+    _v: PhantomData<V>,
+}
+
+unsafe impl<V> Sync for TaskStorage<V> {}
+
+impl<V> TaskStorage<V> {
+    /// Create a new task storage map definition.
+    pub const fn new() -> Self {
+        Self {
+            r#type: core::ptr::null(),
+            key: core::ptr::null(),
+            value: core::ptr::null(),
+            max_entries: core::ptr::null(),
+            map_flags: core::ptr::null(),
+            _v: PhantomData,
+        }
+    }
+
+    /// Get the per-task storage for a task, returning `None` if not yet created.
+    ///
+    /// `task` must be a valid `task_struct` pointer (e.g., from a sched_ext callback).
+    #[inline(always)]
+    pub fn get(&self, task: *mut u8) -> Option<NonNull<V>> {
+        let ptr = unsafe {
+            bpf_task_storage_get(
+                core::ptr::from_ref(self).cast(),
+                task,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        NonNull::new(ptr.cast())
+    }
+
+    /// Get or create the per-task storage for a task.
+    ///
+    /// If storage does not yet exist for this task, it is zero-initialized
+    /// and created (using `BPF_LOCAL_STORAGE_GET_F_CREATE`).
+    ///
+    /// `task` must be a valid `task_struct` pointer.
+    #[inline(always)]
+    pub fn get_or_create(&self, task: *mut u8) -> Option<NonNull<V>> {
+        let ptr = unsafe {
+            bpf_task_storage_get(
+                core::ptr::from_ref(self).cast(),
+                task,
+                core::ptr::null_mut(),
+                BPF_LOCAL_STORAGE_GET_F_CREATE,
+            )
+        };
+        NonNull::new(ptr.cast())
+    }
+
+    /// Delete the per-task storage for a task.
+    ///
+    /// `task` must be a valid `task_struct` pointer.
+    #[inline(always)]
+    pub fn delete(&self, task: *mut u8) -> Result<(), i64> {
+        let ret = unsafe {
+            bpf_task_storage_delete(
+                core::ptr::from_ref(self).cast(),
+                task,
+            )
+        };
+        if ret == 0 { Ok(()) } else { Err(ret) }
+    }
+}
