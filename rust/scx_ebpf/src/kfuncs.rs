@@ -16,6 +16,14 @@ pub const SLICE_DFL: u64 = 20_000_000;
 
 // ── kfunc extern declarations (used as sym targets in inline asm) ───────
 
+// Public extern for the scx_bpf_error! macro (needs sym visibility across crates).
+#[doc(hidden)]
+pub mod __raw {
+    unsafe extern "C" {
+        pub fn scx_bpf_error_bstr(fmt: *const u8, data: *const u64, data_len: u32);
+    }
+}
+
 unsafe extern "C" {
     fn scx_bpf_dsq_insert(p: *mut task_struct, dsq_id: u64, slice: u64, enq_flags: u64);
     fn scx_bpf_dsq_insert_vtime(
@@ -192,10 +200,15 @@ pub fn error_bstr(fmt: *const u8, data: *const u64, data_len: u32) {
 }
 
 /// Report a fatal scheduler error with a simple static message (no args).
+///
+/// IMPORTANT: Do NOT call this directly with a string literal -- the literal
+/// will land in `.rodata` which is a read-only BPF map, and the verifier will
+/// reject it. Use the [`scx_bpf_error!`] macro instead, which copies the
+/// string to the stack first.
 #[inline(always)]
-pub fn error_msg(msg: &[u8]) {
+pub fn error_msg(msg: *const u8) {
     // Pass empty data array (data_len = 0).
-    error_bstr(msg.as_ptr(), core::ptr::null(), 0);
+    error_bstr(msg, core::ptr::null(), 0);
 }
 
 /// Set the target CPU performance level (0 .. SCX_CPUPERF_ONE).

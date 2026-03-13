@@ -166,7 +166,7 @@ pub fn on_enable(p: *mut task_struct) {
 pub fn on_init() -> i32 {
     let err = kfuncs::create_dsq(SHARED_DSQ, -1);
     if err != 0 {
-        kfuncs::error_msg(b"cosmos: failed to create shared DSQ\0");
+        scx_ebpf::scx_bpf_error!("cosmos: failed to create shared DSQ");
         return err;
     }
     0
