@@ -282,7 +282,7 @@ struct Opts {
     ///
     /// A higher value is recommended for server-type workloads, while a lower value is recommended
     /// for interactive-type workloads.
-    #[clap(short = 'c', long, default_value = "75")]
+    #[clap(short = 'c', long, default_value = "0")]
     cpu_busy_thresh: u64,
 
     /// Polling time (ms) to refresh the CPU utilization.
@@ -295,7 +295,7 @@ struct Opts {
     /// Value is clamped to the range [10 .. 1000].
     ///
     /// 0 = disabled.
-    #[clap(short = 'p', long, default_value = "250")]
+    #[clap(short = 'p', long, default_value = "0")]
     polling_ms: u64,
 
     /// Specifies a list of CPUs to prioritize.
