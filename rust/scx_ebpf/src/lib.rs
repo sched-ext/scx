@@ -41,6 +41,7 @@ pub mod ops;
 pub mod pmu;
 pub mod timer;
 pub mod vmlinux;
+pub mod kptr;
 
 /// Proc macro for registering sched_ext callbacks and generating trampolines.
 pub use scx_ebpf_derive::scx_ops_define;

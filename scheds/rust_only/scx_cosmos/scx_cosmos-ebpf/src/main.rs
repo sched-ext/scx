@@ -37,6 +37,8 @@
 use scx_ebpf::prelude::*;
 use scx_ebpf::core_read;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray};
+use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
+use scx_ebpf::cpumask::{self, bpf_cpumask};
 
 scx_ebpf::scx_ebpf_boilerplate!();
 
@@ -162,7 +164,29 @@ static mut AVOID_SMT: bool = true;
 // C reference: `private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask`
 // and `const volatile bool primary_all = true` control a subset of CPUs
 // to prioritize. enable_primary_cpu() is a syscall program that sets bits.
-// Requires BPF kptr support in the Rust framework.
+//
+// KPTR EXPERIMENT: Below is a prototype kptr global using the Kptr<T>
+// wrapper. This compiles and generates the right runtime code, but the
+// BPF verifier will reject bpf_kptr_xchg() calls because the Rust
+// compiler does not emit BTF_KIND_TYPE_TAG "kptr" annotations.
+//
+// See kptr.rs module docs and the findings at the bottom of this file
+// for details on the BTF gap and workaround strategies.
+
+/// Primary cpumask kptr — prototype kptr storage.
+///
+/// In C: `private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;`
+///
+/// NOTE: This is placed in `.data` (not `.bss`) because kptr globals in
+/// C are typically in the `.data` section. The section matters because
+/// the verifier resolves kptr locations relative to map values, and
+/// `.data` / `.bss` are loaded as implicit BPF maps.
+#[unsafe(no_mangle)]
+static mut PRIMARY_CPUMASK: Kptr<bpf_cpumask> = Kptr::zeroed();
+
+/// When true, primary domain includes all CPUs (primary_cpumask is empty/unused).
+#[unsafe(no_mangle)]
+static mut PRIMARY_ALL: bool = true;
 
 // PORT_TODO: flat_idle_scan and preferred_idle_scan modes
 // C reference: When flat_idle_scan or preferred_idle_scan is true, cosmos
@@ -696,6 +720,55 @@ pub fn on_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
 // per-node DSQs. dispatch() would use `shared_dsq(cpu)` instead of SHARED_DSQ.
 // PORT_TODO: PMU installation
 // C reference: When perf_config is set, cosmos_init calls scx_pmu_install().
+
+/// Initialize a kptr cpumask: create a new mask and atomically store it.
+///
+/// Mirrors the C `init_cpumask()` function:
+/// ```c
+/// static int init_cpumask(struct bpf_cpumask **p_cpumask) {
+///     mask = bpf_cpumask_create();
+///     mask = bpf_kptr_xchg(p_cpumask, mask);
+///     if (mask) bpf_cpumask_release(mask);
+/// }
+/// ```
+///
+/// # KPTR EXPERIMENT NOTE
+///
+/// This function compiles correctly and generates proper BPF instructions
+/// for `bpf_kptr_xchg` (helper #194) and the cpumask kfuncs. However,
+/// the BPF verifier will reject it because the BTF for `PRIMARY_CPUMASK`
+/// lacks the `BTF_KIND_TYPE_TAG "kptr"` annotation.
+///
+/// Expected verifier error (one of):
+/// - `"arg#0 expected pointer to map value"` — verifier doesn't
+///   recognize the global as containing a kptr
+/// - `"R1 doesn't point to kptr"` — verifier found the map value
+///   but the BTF type chain doesn't have TYPE_TAG "kptr"
+#[inline(always)]
+fn init_primary_cpumask() -> i32 {
+    // Create a new cpumask with all bits cleared.
+    let mask = cpumask::create();
+    if mask.is_null() {
+        return -12; // ENOMEM
+    }
+
+    // Atomically store the new mask in the kptr slot.
+    // bpf_kptr_xchg returns the old value (should be null on first init).
+    let old = unsafe { kptr_xchg(&raw mut PRIMARY_CPUMASK, mask) };
+    if !old.is_null() {
+        // Release the old mask if there was one (shouldn't happen on init).
+        cpumask::release(old);
+    }
+
+    // Verify the exchange succeeded by reading back under RCU.
+    rcu_read_lock();
+    let stored = unsafe { Kptr::get(&raw const PRIMARY_CPUMASK) };
+    let ok = !stored.is_null();
+    rcu_read_unlock();
+
+    if ok { 0 } else { -12 }
+}
+
 #[inline(always)]
 pub fn on_init() -> i32 {
     // Record the number of CPUs for bounds checking.
@@ -706,6 +779,20 @@ pub fn on_init() -> i32 {
         scx_ebpf::scx_bpf_error!("cosmos: failed to create shared DSQ");
         return err;
     }
+
+    // KPTR EXPERIMENT: Initialize the primary cpumask kptr.
+    // This will fail at the verifier until BTF patching is implemented.
+    // To test compilation without verifier rejection, set
+    // KPTR_EXPERIMENT_ENABLED to false.
+    #[cfg(feature = "kptr_experiment")]
+    {
+        let err = init_primary_cpumask();
+        if err != 0 {
+            scx_ebpf::scx_bpf_error!("cosmos: failed to init primary cpumask");
+            return err;
+        }
+    }
+
     0
 }
 
@@ -732,3 +819,95 @@ scx_ebpf::scx_ops_define! {
     init: on_init,
     exit: on_exit,
 }
+
+// ── KPTR EXPERIMENT FINDINGS ────────────────────────────────────────────
+//
+// This file prototypes kptr support for Rust BPF. Here are the findings:
+//
+// ## What works
+//
+// 1. The `Kptr<T>` wrapper compiles to the correct memory layout — a
+//    single `*mut T` field, identical to C's `struct T __kptr *`.
+//
+// 2. The `kptr_xchg` inline asm wrapper correctly emits `call 194`
+//    (BPF helper bpf_kptr_xchg) with the right register assignments.
+//
+// 3. The `rcu_read_lock` / `rcu_read_unlock` kfunc wrappers compile
+//    correctly as kfunc calls (using `sym` references to extern fns).
+//
+// 4. The `bpf_cpumask_create` / `bpf_cpumask_release` kfuncs from
+//    the cpumask module integrate cleanly with the kptr pattern.
+//
+// 5. The overall code structure matches the C pattern exactly:
+//    create -> kptr_xchg -> release old -> rcu_read_lock -> access ->
+//    rcu_read_unlock.
+//
+// ## What does NOT work (the BTF gap)
+//
+// The BPF verifier requires `BTF_KIND_TYPE_TAG` with value `"kptr"`
+// in the BTF type chain for kptr globals. Specifically, for a variable
+// like `primary_cpumask`, the BTF must contain:
+//
+//   VAR "PRIMARY_CPUMASK" -> PTR -> TYPE_TAG "kptr" -> STRUCT "bpf_cpumask"
+//
+// The Rust BPF compiler emits:
+//
+//   VAR "PRIMARY_CPUMASK" -> STRUCT "Kptr<bpf_cpumask>" -> PTR -> STRUCT "bpf_cpumask"
+//
+// Missing: the TYPE_TAG "kptr" between PTR and STRUCT.
+//
+// Without this tag, the verifier will reject bpf_kptr_xchg() with one
+// of these errors:
+//   - "arg#0 expected pointer to map value"
+//   - "R1 doesn't point to kptr"
+//
+// ## Recommended fix: aya-core-postprocessor BTF patching
+//
+// The aya-core-postprocessor (which already patches BTF for CO-RE
+// relocations) should be extended to:
+//
+// 1. Detect `Kptr<T>` types in DATASEC BTF entries by looking for
+//    structs named "Kptr" with a single pointer field.
+//
+// 2. Inject a `BTF_KIND_TYPE_TAG` type with string "kptr".
+//
+// 3. Rewire the pointer's target: instead of PTR -> STRUCT T, make
+//    it PTR -> TYPE_TAG "kptr" -> STRUCT T.
+//
+// 4. Optionally, collapse the Kptr wrapper struct so the DATASEC
+//    entry becomes VAR -> PTR -> TYPE_TAG -> STRUCT (matching clang).
+//
+// This approach is clean because:
+// - It reuses existing post-processor infrastructure
+// - TYPE_TAG is a simple BTF type (kind + string, no complex data)
+// - The Kptr<T> struct is a well-defined marker that won't collide
+// - It can be driven by a sidecar annotation file or auto-detected
+//
+// ## Alternative: raw BTF injection via inline asm
+//
+// It is theoretically possible to emit raw BTF bytes into the `.BTF`
+// section using `core::arch::global_asm!(".pushsection .BTF ...")`.
+// However, this is extremely fragile because:
+// - The injected bytes must mesh with compiler-generated BTF
+// - BTF type IDs are assigned sequentially; inserting a type shifts
+//   all subsequent IDs
+// - The BTF header checksums and offsets must be updated
+// - Any change to the program can break the hardcoded offsets
+//
+// This approach is not recommended for production use.
+//
+// ## Alternative: map-based storage instead of global kptr
+//
+// Instead of a global `static mut Kptr<T>`, store the cpumask pointer
+// in a BPF array map value struct. This is how some C schedulers handle
+// it (e.g., per-CPU context with kptr fields).
+//
+// However, this has the SAME fundamental BTF problem: the map value
+// type's BTF must also contain TYPE_TAG "kptr" for the pointer field.
+// The Rust compiler won't emit it for map value structs either.
+//
+// The map approach does work differently in one way: the verifier
+// checks the map's BTF at map creation time, so the loader would
+// need to patch the map value BTF before creating the map. This is
+// actually the same loader-side patching approach, just applied to
+// a map definition instead of a DATASEC entry.
