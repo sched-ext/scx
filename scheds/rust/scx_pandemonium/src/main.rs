@@ -31,8 +31,8 @@ use scheduler::Scheduler;
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser)]
-#[command(name = "pandemonium")]
-#[command(version)]
+#[command(name = "scx_pandemonium")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), env!("PANDEMONIUM_BUILD_ID"), " ", env!("PANDEMONIUM_TARGET")))]
 #[command(about = "PANDEMONIUM -- ADAPTIVE LINUX SCHEDULER")]
 struct Cli {
     #[command(subcommand)]
@@ -228,7 +228,17 @@ fn run_scheduler(
         .trim()
         .to_string();
 
-    log_info!("PANDEMONIUM v{}", env!("CARGO_PKG_VERSION"));
+    let smt_on = std::fs::read_to_string("/sys/devices/system/cpu/smt/active")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false);
+
+    log_info!(
+        "scx_pandemonium {}{} {} SMT {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("PANDEMONIUM_BUILD_ID"),
+        env!("PANDEMONIUM_TARGET"),
+        if smt_on { "on" } else { "off" }
+    );
     log_info!(
         "CPUS: {} (governor: {})",
         nr_cpus_display,
