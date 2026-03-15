@@ -1,0 +1,251 @@
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 * * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BPF_CLANG: clang-19
+  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev"
+  SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
+  SCHED_EXT_KERNEL_TAG: for-next
+  RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld"
+
+jobs:
+  lint:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-deps-action
+      - name: Format Rust
+        run: cargo fmt --check
+      - name: Format C
+        run: |
+          find tools/scxtop scheds/rust/scx_chaos scheds/rust/scx_mitosis \
+            -name '*.c' -o -name '*.h' | xargs clang-format --dry-run -Werror
+      - name: Clippy
+        run: |
+          cargo metadata --format-version 1 | \
+            jq -r '.packages[] | select(.metadata.scx.ci.use_clippy == true) | .name' | \
+            xargs -I{} cargo clippy --no-deps --locked -p {} -- -Dwarnings
+      - name: Check
+        run: cargo check --profile ci --locked
+      - name: Check vmlinux sync
+        run: |
+          tmpdir=$(mktemp -d)
+          tar -xf rust/scx_utils/vmlinux.tar.zst -C "$tmpdir"
+          diff --no-dereference -qr scheds/vmlinux/ "$tmpdir/vmlinux/"
+
+  veristat:
+    if: github.repository == 'sched-ext/scx' || github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel:
+          - name: scx__sched_ext__for-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
+            tag: for-next
+          - name: scx__bpf__bpf-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
+            tag: master
+          - name: scx__stable__linux-rolling-stable
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-rolling-stable
+          - name: scx__stable__6_13
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-6.13.y
+            veristat-disable: scx_layered scx_lavd
+          - name: scx__stable__6_16
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-6.16.y
+            veristat-disable: scx_lavd
+          - name: scx__stable__6_18
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-6.18.y
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-deps-action
+      - name: Install veristat tools
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/libbpf/veristat /tmp/veristat
+          make -C /tmp/veristat/src -j$(nproc)
+          sudo cp /tmp/veristat/src/veristat /usr/local/bin/
+          sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
+          cargo install cargo-veristat --locked
+      - name: Disable veristat for excluded schedulers
+        if: matrix.kernel.veristat-disable != ''
+        run: |
+          for pkg in ${{ matrix.kernel.veristat-disable }}; do
+            printf '\n[package.metadata.veristat]\ndisable = true\n' >> "scheds/rust/${pkg}/Cargo.toml"
+          done
+      - name: Build packages
+        run: cargo build --profile ci --locked
+      - name: 'Veristat: ${{ matrix.kernel.name }}'
+        uses: likewhatevs/vng-action@v0.3.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v17
+          network: user
+          verbose: true
+          run: cargo veristat --profile ci --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
+  test:
+    if: github.repository == 'sched-ext/scx' || github.event_name != 'schedule'
+    needs: [veristat]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-deps-action
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Unit tests
+        run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
+      - name: Build arena selftests
+        run: cargo build --profile ci -p scx_arena_selftests --locked
+      - name: Arena selftests
+        uses: likewhatevs/vng-action@v0.3.0
+        with:
+          name: scx__sched_ext__for-next__${{ runner.arch }}
+          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
+          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          kconfig: kernel.config
+          version: v17
+          network: user
+          verbose: true
+          run: target/ci/scx_arena_selftests
+      - name: Build all schedulers
+        run: |
+          for sched in beerland bpfland chaos cosmos flash lavd layered p2dq rlfifo rustland rusty tickless; do
+            cargo build --profile ci --locked -p "scx_${sched}"
+          done
+      - name: Test all schedulers
+        uses: likewhatevs/vng-action@v0.3.0
+        with:
+          name: scx__sched_ext__for-next__${{ runner.arch }}
+          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
+          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          kconfig: kernel.config
+          version: v17
+          network: user
+          verbose: true
+          run: |
+            set +e
+            passed=""
+            failed=""
+            declare -A flags
+            flags[chaos]="--random-delay-frequency 0.5 --random-delay-min-us 1000 --random-delay-max-us 2000"
+            flags[lavd]="--log-level info"
+            flags[layered]="--log-level info --stats 15 --run-example"
+            for sched in beerland bpfland chaos cosmos flash lavd layered p2dq rlfifo rustland rusty tickless; do
+              echo "=== Testing ${sched} ==="
+              stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
+                --affinity 1 --affinity-delay 1 --affinity-pin &
+              stress_pid=$!
+              timeout --foreground --preserve-status 45 \
+                target/ci/scx_${sched} ${flags[$sched]:-"-v"}
+              rc=$?
+              kill $stress_pid 2>/dev/null || true
+              wait $stress_pid 2>/dev/null || true
+              if [ $rc -ne 0 ]; then
+                failed="${failed} ${sched}"
+              else
+                passed="${passed} ${sched}"
+              fi
+            done
+            echo ""
+            echo "=== Scheduler Test Results ==="
+            if [ -n "$passed" ]; then
+              echo "Passed:${passed} ✅"
+            fi
+            if [ -n "$failed" ]; then
+              echo "Failed:${failed} ❌"
+            fi
+            {
+              echo "## Scheduler Test Results"
+              echo ""
+              if [ -n "$passed" ]; then
+                echo "**Passed**:${passed} ✅"
+              fi
+              if [ -n "$failed" ]; then
+                echo "**Failed**:${failed} ❌"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "$failed" ]; then
+              exit 1
+            fi
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
+  required-checks:
+    needs: [lint, veristat, test]
+    runs-on: ubuntu-latest
+    if: always()
+    env:
+      NEEDS_CONTEXT: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")'
+
+  pages:
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      # prevent cache permission errors
+      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/install-deps-action
+      - name: Build Book and Linux Docs
+        run: |
+          rustup install nightly
+          rustup component add rustfmt --toolchain nightly
+          RUSTDOCFLAGS="--enable-index-page -Zunstable-options" cargo +nightly doc --workspace --no-deps --bins --lib --examples --document-private-items
+          sudo apt install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
+          cargo install htmlq
+          git clone --single-branch -b "$SCHED_EXT_KERNEL_TAG" --depth 1 "$SCHED_EXT_KERNEL_URL" linux
+          cd linux
+          make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=scheduler htmldocs
+          make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=bpf htmldocs
+          cd ..
+          cp -a linux/Documentation/output/scheduler target/doc/
+          cp -a linux/Documentation/output/bpf target/doc/
+          sed -i 's%<li><a href="server/index.html">server</a></li>%<li><a href="server/index.html">server</a></li><li><a href="scheduler/sched-ext.html">Kernel Sched Ext Docs</a></li><li><a href="bpf/helpers.html">Kernel Bpf Helpers Docs</a></li>%' target/doc/index.html
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: 'target/doc'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
