@@ -53,7 +53,7 @@ struct sys_stat {
 	u64	avg_util_invr;	/* average of the scaled CPU utilization,
 				   which is capacity and frequency invariant */
 
-	u64	avg_svc_time_wwgt; /* average service time per task (weighted wall clock time) */
+	u64	avg_svc_time_iwgt; /* average service time per task (weighted invariant time) */
 	u64	nr_queued_task;
 	u64	slice_wall;	/* base time slice (wall clock time) */
 

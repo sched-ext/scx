@@ -262,8 +262,15 @@ static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 	 * Calculate the task's lag -- the underserved time. Bound the lag
 	 * into [-lag_max, +lag_max] and set the LAVD_FLAG_IS_GREEDY flag
 	 * for preemption decision.
+	 *
+	 * svc_time_iwgt uses invariant time weighted by task priority.
+	 * Using invariant time avoids penalizing tasks placed on slow cores,
+	 * which accumulate wall-clock time faster for the same actual work.
+	 * Fairness accounting must use the same clock basis as the system
+	 * average (sys_stat.avg_svc_time_iwgt) for an apples-to-apples
+	 * comparison.
 	 */
-	lag = sys_stat.avg_svc_time_wwgt - taskc->svc_time_wwgt;
+	lag = sys_stat.avg_svc_time_iwgt - taskc->svc_time_iwgt;
 	lag_max = scale_by_task_weight_inverse(p, LAVD_TASK_LAG_MAX);
 	if (lag >= 0) {
 		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
@@ -273,7 +280,7 @@ static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 		 * boost of long-sleepers.
 		 */
 		if (lag > lag_max) {
-			taskc->svc_time_wwgt = sys_stat.avg_svc_time_wwgt - lag_max;
+			taskc->svc_time_iwgt = sys_stat.avg_svc_time_iwgt - lag_max;
 			lag = lag_max;
 		}
 	} else {

@@ -202,9 +202,9 @@ char _license[] SEC("license") = "GPL";
 u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
 
 /*
- * Current service time (weighted wall clock time)
+ * Current service time (weighted invariant time)
  */
-static u64		cur_svc_time_wwgt;
+static u64		cur_svc_time_iwgt;
 
 
 /*
@@ -470,7 +470,7 @@ static void account_task_runtime(struct task_struct *p,
 				 struct cpu_ctx *cpuc,
 				 u64 now)
 {
-	u64 task_time_wall, task_time_wwgt, task_time_invr;
+	u64 task_time_wall, task_time_iwgt, task_time_invr;
 	u64 now_task, now_pelt;
 
 	/*
@@ -486,10 +486,10 @@ static void account_task_runtime(struct task_struct *p,
 	now_pelt = scx_clock_pelt(cpuc->cpu_id);
 	task_time_invr = time_delta(now_pelt, taskc->last_measured_pelt_clk);
 
-	task_time_wwgt = task_time_wall / p->scx.weight;
+	task_time_iwgt = task_time_invr / p->scx.weight;
 
 	WRITE_ONCE(cpuc->tot_task_time_wall, cpuc->tot_task_time_wall + task_time_wall);
-	WRITE_ONCE(cpuc->tot_task_time_wwgt, cpuc->tot_task_time_wwgt + task_time_wwgt);
+	WRITE_ONCE(cpuc->tot_task_time_iwgt, cpuc->tot_task_time_iwgt + task_time_iwgt);
 	WRITE_ONCE(cpuc->tot_task_time_invr, cpuc->tot_task_time_invr + task_time_invr);
 
 	if (test_task_flag(taskc, LAVD_FLAG_DOMAIN_PINNED)) {
@@ -501,7 +501,7 @@ static void account_task_runtime(struct task_struct *p,
 
 	taskc->acc_runtime_wall += task_time_wall;
 	taskc->acc_runtime_invr += task_time_invr;
-	taskc->svc_time_wwgt += task_time_wwgt;
+	taskc->svc_time_iwgt += task_time_iwgt;
 	taskc->last_measured_wall_clk = now;
 	taskc->last_measured_task_clk = now_task;
 	taskc->last_measured_pelt_clk = now_pelt;
@@ -543,8 +543,8 @@ static void update_stat_for_stopping(struct task_struct *p,
 	/*
 	 * Update the current service time if necessary.
 	 */
-	if (READ_ONCE(cur_svc_time_wwgt) < taskc->svc_time_wwgt)
-		WRITE_ONCE(cur_svc_time_wwgt, taskc->svc_time_wwgt);
+	if (READ_ONCE(cur_svc_time_iwgt) < taskc->svc_time_iwgt)
+		WRITE_ONCE(cur_svc_time_iwgt, taskc->svc_time_iwgt);
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -1702,7 +1702,7 @@ void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 		return;
 	}
 
-	taskc->svc_time_wwgt = READ_ONCE(cur_svc_time_wwgt);
+	taskc->svc_time_iwgt = READ_ONCE(cur_svc_time_iwgt);
 }
 
 
@@ -1765,7 +1765,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		taskc->last_quiescent_clk = now;
 		taskc->avg_runtime_wall = sys_stat.slice_wall;
 		taskc->avg_runtime_invr = sys_stat.slice_wall;
-		taskc->svc_time_wwgt = sys_stat.avg_svc_time_wwgt;
+		taskc->svc_time_iwgt = sys_stat.avg_svc_time_iwgt;
 	}
 
 	taskc->pinned_cpu_id = -ENOENT;
@@ -2268,7 +2268,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 * Initialize the current logical clock and service time.
 	 */
 	WRITE_ONCE(cur_logical_clk, 0);
-	WRITE_ONCE(cur_svc_time_wwgt, 0);
+	WRITE_ONCE(cur_svc_time_iwgt, 0);
 
 	/*
 	 * Initialize cpu.max library if enabled.

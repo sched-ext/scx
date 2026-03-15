@@ -175,10 +175,10 @@ struct task_ctx {
 	u64	avg_runtime_wall;
 	u64	avg_runtime_invr;
 	/*
-	 * - Total CPU time consumed for this task scaled by task's weight
-	 * - Used to calculate avg_svc_time_wwgt
+	 * - Total invariant CPU time consumed for this task scaled by task's weight
+	 * - Used to calculate avg_svc_time_iwgt
 	 */
-	u64	svc_time_wwgt;
+	u64	svc_time_iwgt;
 
 	/* --- cacheline 2 boundary (128 bytes) --- */
 	u64	last_runnable_clk;	/* last time when a task became runnable */
@@ -279,10 +279,10 @@ struct cpu_ctx {
 	 */
 	volatile u64	tot_task_time_wall;
 	/*
-	 * Total scx tasks' service time on a CPU scaled by tasks' weights.
-	 * Used to calculate avg_svc_time_wwgt.
+	 * Total scx tasks' invariant service time on a CPU scaled by tasks' weights.
+	 * Used to calculate avg_svc_time_iwgt.
 	 */
-	volatile u64	tot_task_time_wwgt;
+	volatile u64	tot_task_time_iwgt;
 	/*
 	 * Total invariant CPU time consumed by SCX tasks in the current
 	 * interval (capacity and frequency scaled). Used to calculate

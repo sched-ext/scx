@@ -53,7 +53,7 @@ struct sys_stat_ctx {
 	u64		idle_total_wall;
 	u64		compute_total_wall;
 	u64		compute_total_invr;
-	u64		tot_task_time_wwgt;
+	u64		tot_task_time_iwgt;
 	u64		tsct_spike_invr;
 	u64		nr_queued_task;
 	s32		max_lat_cri;
@@ -177,8 +177,8 @@ static void collect_sys_stat(void)
 		/*
 		 * Accumulate cpus' loads.
 		 */
-		c->tot_task_time_wwgt += cpuc->tot_task_time_wwgt;
-		cpuc->tot_task_time_wwgt = 0;
+		c->tot_task_time_iwgt += cpuc->tot_task_time_iwgt;
+		cpuc->tot_task_time_iwgt = 0;
 
 		/*
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
@@ -541,7 +541,7 @@ static void calc_sys_stat(void)
 {
 	struct sys_stat_ctx *c = &ctx;
 	static int cnt = 0;
-	u64 avg_svc_time_wwgt = 0, cur_util_invr, scu_spike_invr;
+	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr;
 
 	/*
 	 * Calculate the CPU utilization that includes everything
@@ -630,9 +630,9 @@ static void calc_sys_stat(void)
 	}
 
 	if (c->nr_sched > 0)
-		avg_svc_time_wwgt = c->tot_task_time_wwgt / c->nr_sched;
-	sys_stat.avg_svc_time_wwgt = calc_avg(sys_stat.avg_svc_time_wwgt,
-					      avg_svc_time_wwgt);
+		avg_svc_time_iwgt = c->tot_task_time_iwgt / c->nr_sched;
+	sys_stat.avg_svc_time_iwgt = calc_avg(sys_stat.avg_svc_time_iwgt,
+					      avg_svc_time_iwgt);
 	sys_stat.nr_queued_task = calc_avg(sys_stat.nr_queued_task, c->nr_queued_task);
 
 	/*
