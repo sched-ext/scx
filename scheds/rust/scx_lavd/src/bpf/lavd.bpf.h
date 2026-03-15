@@ -155,53 +155,69 @@ struct task_ctx {
 	 */
 	struct scx_task_common atq __attribute__((aligned(CACHELINE_SIZE)));
 
-	/* --- cacheline 1 boundary (64 bytes) --- */
+	/* --- cacheline 1 boundary (64 bytes): running/stopping hot --- */
+	/*
+	 * Accessed together in account_task_runtime() and lavd_stopping().
+	 * Grouped here to avoid cross-cacheline traffic on every task switch.
+	 */
 	volatile u64	flags;		/* LAVD_FLAG_* */
 	u64	slice_wall;		/* time slice (wall clock time) */
-	u64	wait_freq;		/* waiting frequency in a second */
-	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	last_measured_wall_clk;	/* last time when running time was measured (wall clock) */
 	u64	last_measured_pelt_clk;	/* last time when running time was measured (pelt clock) */
+	u64	last_measured_task_clk;	/* last time when running time was measured (task clock) */
 	/*
-	 * - Accumulated runtime from runnable to quiescent state
-	 * - Used to calculate avg_runtime_wall/invr and latency criticality
+	 * Accumulated runtime from runnable to quiescent state.
+	 * Used to calculate avg_runtime_wall/invr and latency criticality.
 	 */
 	u64	acc_runtime_wall;
 	u64	acc_runtime_invr;
 	/*
-	 * - Average runtime per schedule
-	 * - Used to calculate latency criticality
-	 */
-	u64	avg_runtime_wall;
-	u64	avg_runtime_invr;
-	/*
-	 * - Total invariant CPU time consumed for this task scaled by task's weight
-	 * - Used to calculate avg_svc_time_iwgt
+	 * Total invariant CPU time consumed for this task scaled by task's weight.
+	 * Used to calculate avg_svc_time_iwgt.
 	 */
 	u64	svc_time_iwgt;
 
-	/* --- cacheline 2 boundary (128 bytes) --- */
-	u64	last_runnable_clk;	/* last time when a task became runnable */
-	u64	last_running_clk;	/* last time when scheduled in */
-	u64	run_freq;		/* scheduling frequency in a second */
+	/* --- cacheline 2 boundary (128 bytes): enqueue/wakeup hot --- */
+	/*
+	 * Accessed together in calc_lat_cri(), calc_when_to_run(), and
+	 * ops.enqueue()/ops.select_cpu(). Grouped here to avoid cross-cacheline
+	 * traffic on the critical scheduling path.
+	 */
 	u16	lat_cri;		/* final context-aware latency criticality */
 	u16	lat_cri_waker;		/* waker's latency criticality */
 	u16	lat_cri_wakee;		/* wakee's latency criticality */
 	u16	perf_cri;		/* performance criticality of a task */
 	u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
-	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
-	u32	prev_cpu_id;		/* where a task ran last time */
-	u32	cpu_id;			/* where a task is running now */
+	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
+	u32	__pad0;
+	u64	last_running_clk;	/* last time when scheduled in */
+	u64	run_freq;		/* scheduling frequency in a second */
+	u64	wait_freq;		/* waiting frequency in a second */
+	u64	wake_freq;		/* waking-up frequency in a second */
+	/*
+	 * Average invariant runtime per schedule.
+	 * Used to calculate latency criticality.
+	 */
+	u64	avg_runtime_invr;
 
-	/* --- cacheline 3 boundary (192 bytes) --- */
+	/* --- cacheline 3 boundary (192 bytes): lower-frequency / monitoring --- */
+	/*
+	 * Average wall-clock runtime per schedule.
+	 * Used for reporting.
+	 */
+	u64	avg_runtime_wall;
+	u64	last_runnable_clk;	/* last time when a task became runnable */
 	u64	last_quiescent_clk;	/* last time when a task became asleep */
-	u64	last_measured_task_clk;	/* last time when running time was measured (task clock) */
 	u64	cgrp_id;		/* cgroup id of this task */
 	u64	resched_interval_wall;	/* reschedule interval in ns: [last running, this running] */
 	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
+	u32	cpu_id;			/* where a task is running now */
+	u32	prev_cpu_id;		/* where a task ran last time */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
+
+	/* --- cacheline 4 boundary (256 bytes) --- */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -265,14 +281,40 @@ struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
  * CPU context
  */
 struct cpu_ctx {
-	/* --- cacheline 0 boundary (0 bytes) --- */
+	/* --- cacheline 0 boundary (0 bytes): IPI-read + topology --- */
+	/*
+	 * Fields read by remote CPUs during IPI-based preemption decisions
+	 * (flags, est_stopping_clk, running_clk, lat_cri), plus topology and
+	 * classification fields set at init time. Keeping them in a dedicated
+	 * cacheline prevents the write-heavy accumulators in CL1 from causing
+	 * false-sharing with remote readers.
+	 */
 	volatile u64	flags;		/* cached copy of task's flags */
 	volatile u64	est_stopping_clk; /* estimated stopping time */
 	volatile u64	running_clk;	/* when a task starts running */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u16	effective_capacity;/* the capacity that CPU can do right now */
-	volatile u32	max_lat_cri;	/* maximum latency criticality */
+	u16		cpu_id;		/* cpu id */
+	u16		max_capacity;	/* the maximum capacity that CPU can do */
 	volatile u64	sum_lat_cri;	/* sum of latency criticality */
+	volatile u32	max_lat_cri;	/* maximum latency criticality */
+	volatile u32	nr_pinned_tasks; /* the number of pinned tasks waiting for running on this CPU */
+	u8		cpdom_id;	/* compute domain id */
+	u8		big_core;	/* is it a big core? */
+	u8		turbo_core;	/* is it a turbo core? */
+	u8		llc_id;		/* llc domain id */
+	u8		cpdom_alt_id;	/* compute domain id of alternative type */
+	u8		is_online;	/* is this CPU online? */
+	u8		__pad0[2];
+	u32		cpuperf_cur;	/* CPU's current performance target */
+	volatile s32	futex_op;	/* futex op in futex V1 */
+
+	/* --- cacheline 1 boundary (64 bytes): write accumulators --- */
+	/*
+	 * Updated on every lavd_stopping() call. Isolated in their own
+	 * cacheline so that the frequent local writes do not invalidate
+	 * the IPI-read fields in CL0 for remote CPUs.
+	 */
 	/*
 	 * Total wall-clock time this CPU has spent running scx tasks so far.
 	 * Used to calculate non_scx_time.
@@ -297,29 +339,75 @@ struct cpu_ctx {
 	 */
 	volatile u64	tot_dom_pinned_task_time_wall;
 	volatile u64	tot_dom_pinned_task_time_invr;
-
-	/* --- cacheline 1 boundary (64 bytes) --- */
 	volatile u64	sum_perf_cri;	/* sum of performance criticality */
 	volatile u32	min_perf_cri;	/* minimum performance criticality */
 	volatile u32	max_perf_cri;	/* maximum performance criticality */
-	volatile u32	max_freq;	/* maximum CPU frequency averaged across multiple intervals */
-	volatile u32	max_freq_observed; /* maximum CPU frequency observed within an interval scaled to 1024 */
 	volatile u32	nr_sched;	/* number of schedules */
 	volatile u32	nr_preempt;
+
+	/* --- cacheline 2 boundary (128 bytes): per-interval results --- */
+	/*
+	 * Updated once per sys_stat collection interval. Read by userspace
+	 * monitoring and sys_stat aggregation.
+	 */
 	volatile u32	nr_x_migration;
 	volatile u32	nr_perf_cri;
 	volatile u32	nr_lat_cri;
-	volatile u32	nr_pinned_tasks; /* the number of pinned tasks waiting for running on this CPU */
-	volatile s32	futex_op;	/* futex op in futex V1 */
 	volatile u32	avg_util_wall;	/* average of the CPU utilization (based on wall clock time) */
 	volatile u32	cur_util_wall;	/* CPU utilization of the current interval (based on wall clock time) */
-	u32		cpuperf_cur;	/* CPU's current performance target */
-
-	/* --- cacheline 2 boundary (128 bytes) --- */
 	volatile u32	avg_util_invr;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
+	/*
+	 * Steal utilization: steal_time as a fraction of duration_wall,
+	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
+	 * avg_* is the asymmetric EWMA (fast-rise, slow-decay).
+	 * Used for load balancing: a CPU with high steal utilization has
+	 * less capacity remaining for SCX tasks.
+	 */
+	u32		cur_steal_util_wall;
+	u32		avg_steal_util_wall;
+	u32		cur_steal_util_invr;
+	u32		avg_steal_util_invr;
+	/*
+	 * Domain-pinned task utilization: the fraction of duration_wall
+	 * spent running LAVD_FLAG_DOMAIN_PINNED tasks, in LAVD_SHIFT
+	 * fixed-point. cur_* is the current interval value; avg_* is the
+	 * asymmetric EWMA (fast-rise, slow-decay).
+	 */
+	u32		cur_dom_pinned_util_wall;
+	u32		avg_dom_pinned_util_wall;
+	u32		cur_dom_pinned_util_invr;
+	u32		avg_dom_pinned_util_invr;
+	u32		__pad1;
+
+	/* --- cacheline 3 boundary (192 bytes): sys_stat raw inputs --- */
+	/*
+	 * Updated at collect_sys_stat() and used as raw inputs for deriving
+	 * utilization and other per-interval metrics.
+	 */
+	/*
+	 * Steal time for the current interval: time the CPU was not running
+	 * SCX tasks and not idle (= IRQ + hypervisor steal + RT/DL).
+	 */
+	u64		steal_time_wall;	/* wall clock */
+	u64		steal_time_invr;	/* capacity + frequency invariant */
 	volatile u64	idle_total_wall;/* total idle time so far (wall clock time) */
 	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
+	/*
+	 * Exponential weighted moving average of the observed performance
+	 * factor (delta_pelt / task_wall) in LAVD_SHIFT fixed-point format.
+	 * Updated each collect_sys_stat() interval when task_wall > 0. Used
+	 * as a fallback for conv_wall_to_invr_obs() when the CPU has no active
+	 * time in the current interval (e.g., mostly idle with only IRQ
+	 * traffic), so that irq_steal_invr is estimated from recent history
+	 * rather than defaulting to zero or assuming max frequency.
+	 * Initialized to LAVD_SCALE at init_per_cpu_ctx() and
+	 * cpu_ctx_init_online().
+	 */
+	u32		avg_perf_factor;
+	volatile u32	max_freq_observed; /* maximum CPU frequency observed within an interval scaled to 1024 */
+	volatile u32	max_freq;	/* maximum CPU frequency averaged across multiple intervals */
+	u32		__pad2;
 	/*
 	 * Snapshot of scx_clock_task() taken at the end of the last
 	 * collect_sys_stat() interval. scx_clock_task() advances during tasks
@@ -347,60 +435,8 @@ struct cpu_ctx {
 	 * updated each collect_sys_stat().
 	 */
 	u64		prev_pelt_clk;
-	/*
-	 * Exponential weighted moving average of the observed performance
-	 * factor (delta_pelt / task_wall) in LAVD_SHIFT fixed-point format.
-	 * Updated each collect_sys_stat() interval when task_wall > 0. Used
-	 * as a fallback for conv_wall_to_invr_obs() when the CPU has no active
-	 * time in the current interval (e.g., mostly idle with only IRQ
-	 * traffic), so that irq_steal_invr is estimated from recent history
-	 * rather than defaulting to zero or assuming max frequency.
-	 * Initialized to LAVD_SCALE at init_per_cpu_ctx() and
-	 * cpu_ctx_init_online().
-	 */
-	u32		avg_perf_factor;
-	/*
-	 * Steal time for the current interval: time the CPU was not running
-	 * SCX tasks and not idle (= IRQ + hypervisor steal + RT/DL).
-	 */
-	u64		steal_time_wall;	/* wall clock */
-	u64		steal_time_invr;	/* capacity + frequency invariant */
 
-	/*
-	 * Steal utilization: steal_time as a fraction of duration_wall,
-	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
-	 * avg_* is the asymmetric EWMA (fast-rise, slow-decay).
-	 * Used for load balancing: a CPU with high steal utilization has
-	 * less capacity remaining for SCX tasks.
-	 */
-	u32		cur_steal_util_wall;
-	u32		avg_steal_util_wall;
-	u32		cur_steal_util_invr;
-	u32		avg_steal_util_invr;
-	/*
-	 * Domain-pinned task utilization: the fraction of duration_wall
-	 * spent running LAVD_FLAG_DOMAIN_PINNED tasks, in LAVD_SHIFT
-	 * fixed-point. cur_* is the current interval value; avg_* is the
-	 * asymmetric EWMA (fast-rise, slow-decay).
-	 */
-	u32		cur_dom_pinned_util_wall;
-	u32		avg_dom_pinned_util_wall;
-	u32		cur_dom_pinned_util_invr;
-	u32		avg_dom_pinned_util_invr;
-
-	/*
-	 * --- cacheline 3 boundary (192 bytes) ---
-	 * (read-only)
-	 */
-	u16		cpu_id;		/* cpu id */
-	u16		max_capacity;	/* the maximum capacity that CPU can do */
-	u8		big_core;	/* is it a big core? */
-	u8		turbo_core;	/* is it a turbo core? */
-	u8		llc_id;		/* llc domain id */
-	u8		cpdom_id;	/* compute domain id */
-	u8		cpdom_alt_id;	/* compute domain id of anternative type */
-	u8		is_online;	/* is this CPU online? */
-
+	/* --- cacheline 4 boundary (256 bytes): cpumask temps --- */
 	struct bpf_cpumask __kptr *tmp_a_mask; /* for active set */
 	struct bpf_cpumask __kptr *tmp_o_mask; /* for overflow set */
 	struct bpf_cpumask __kptr *tmp_l_mask; /* for online cpumask */
