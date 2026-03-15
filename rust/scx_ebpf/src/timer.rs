@@ -126,9 +126,9 @@ pub fn timer_init(timer: *mut BpfTimer, map: *const core::ffi::c_void, flags: u6
     unsafe {
         core::arch::asm!(
             "call 169",
-            in("r1") timer,
-            in("r2") map,
-            in("r3") flags,
+            inlateout("r1") timer => _,
+            inlateout("r2") map => _,
+            inlateout("r3") flags => _,
             lateout("r0") ret,
             lateout("r4") _,
             lateout("r5") _,
@@ -163,8 +163,8 @@ pub fn timer_set_callback(timer: *mut BpfTimer, callback: u64) -> i64 {
     unsafe {
         core::arch::asm!(
             "call 170",
-            in("r1") timer,
-            in("r2") callback,
+            inlateout("r1") timer => _,
+            inlateout("r2") callback => _,
             lateout("r0") ret,
             lateout("r3") _,
             lateout("r4") _,
@@ -200,9 +200,9 @@ pub fn timer_start(timer: *mut BpfTimer, nsecs: u64, flags: u64) -> i64 {
     unsafe {
         core::arch::asm!(
             "call 171",
-            in("r1") timer,
-            in("r2") nsecs,
-            in("r3") flags,
+            inlateout("r1") timer => _,
+            inlateout("r2") nsecs => _,
+            inlateout("r3") flags => _,
             lateout("r0") ret,
             lateout("r4") _,
             lateout("r5") _,
@@ -231,7 +231,7 @@ pub fn timer_cancel(timer: *mut BpfTimer) -> i64 {
     unsafe {
         core::arch::asm!(
             "call 172",
-            in("r1") timer,
+            inlateout("r1") timer => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,

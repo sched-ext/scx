@@ -64,8 +64,8 @@ unsafe fn bpf_map_lookup_elem(map: *const u8, key: *const u8) -> *mut u8 {
     let ret: *mut u8;
     core::arch::asm!(
         "call 1",
-        in("r1") map,
-        in("r2") key,
+        inlateout("r1") map => _,
+        inlateout("r2") key => _,
         lateout("r0") ret,
         lateout("r3") _,
         lateout("r4") _,
@@ -85,10 +85,10 @@ unsafe fn bpf_map_update_elem(
     let ret: i64;
     core::arch::asm!(
         "call 2",
-        in("r1") map,
-        in("r2") key,
-        in("r3") value,
-        in("r4") flags,
+        inlateout("r1") map => _,
+        inlateout("r2") key => _,
+        inlateout("r3") value => _,
+        inlateout("r4") flags => _,
         lateout("r0") ret,
         lateout("r5") _,
     );
@@ -101,8 +101,8 @@ unsafe fn bpf_map_delete_elem(map: *const u8, key: *const u8) -> i64 {
     let ret: i64;
     core::arch::asm!(
         "call 3",
-        in("r1") map,
-        in("r2") key,
+        inlateout("r1") map => _,
+        inlateout("r2") key => _,
         lateout("r0") ret,
         lateout("r3") _,
         lateout("r4") _,
@@ -122,10 +122,10 @@ unsafe fn bpf_task_storage_get(
     let ret: *mut u8;
     core::arch::asm!(
         "call 156",
-        in("r1") map,
-        in("r2") task,
-        in("r3") value,
-        in("r4") flags,
+        inlateout("r1") map => _,
+        inlateout("r2") task => _,
+        inlateout("r3") value => _,
+        inlateout("r4") flags => _,
         lateout("r0") ret,
         lateout("r5") _,
     );
@@ -138,8 +138,8 @@ unsafe fn bpf_task_storage_delete(map: *const u8, task: *mut u8) -> i64 {
     let ret: i64;
     core::arch::asm!(
         "call 157",
-        in("r1") map,
-        in("r2") task,
+        inlateout("r1") map => _,
+        inlateout("r2") task => _,
         lateout("r0") ret,
         lateout("r3") _,
         lateout("r4") _,

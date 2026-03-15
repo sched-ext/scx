@@ -188,10 +188,10 @@ pub unsafe fn perf_event_read_value(
     let size = core::mem::size_of::<PerfEventValue>() as u64;
     core::arch::asm!(
         "call 55",
-        in("r1") map,
-        in("r2") index,
-        in("r3") buf,
-        in("r4") size,
+        inlateout("r1") map => _,
+        inlateout("r2") index => _,
+        inlateout("r3") buf => _,
+        inlateout("r4") size => _,
         lateout("r0") ret,
         lateout("r5") _,
     );
@@ -238,11 +238,11 @@ pub unsafe fn perf_event_output(
     let ret: i64;
     core::arch::asm!(
         "call 25",
-        in("r1") ctx,
-        in("r2") map,
-        in("r3") flags,
-        in("r4") data,
-        in("r5") size,
+        inlateout("r1") ctx => _,
+        inlateout("r2") map => _,
+        inlateout("r3") flags => _,
+        inlateout("r4") data => _,
+        inlateout("r5") size => _,
         lateout("r0") ret,
     );
     ret

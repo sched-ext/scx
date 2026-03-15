@@ -2,6 +2,16 @@
 //!
 //! Uses inline assembly because the Rust BPF compiler does not emit
 //! proper kfunc call instructions for `extern "C"` declarations.
+//!
+//! ## Register clobbering
+//!
+//! BPF calling convention clobbers R0-R5 on every function call
+//! (R6-R9 are callee-saved). All inline asm wrappers must declare
+//! R1-R5 as clobbered (via `lateout` or `inlateout`) so that LLVM
+//! does not assume input register values survive across calls. Without
+//! this, LLVM may omit `mov r1, r6` between sequential kfunc calls
+//! on the same pointer, causing the BPF verifier to reject the program
+//! because it sees a cleared R1 being passed as an argument.
 
 use super::vmlinux::task_struct;
 
@@ -88,10 +98,10 @@ pub fn dsq_insert(p: *mut task_struct, dsq_id: u64, slice: u64, enq_flags: u64) 
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_dsq_insert,
-            in("r1") p,
-            in("r2") dsq_id,
-            in("r3") slice,
-            in("r4") enq_flags,
+            inlateout("r1") p => _,
+            inlateout("r2") dsq_id => _,
+            inlateout("r3") slice => _,
+            inlateout("r4") enq_flags => _,
             lateout("r0") _,
             lateout("r5") _,
         );
@@ -111,11 +121,11 @@ pub fn dsq_insert_vtime(
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_dsq_insert_vtime,
-            in("r1") p,
-            in("r2") dsq_id,
-            in("r3") slice,
-            in("r4") vtime,
-            in("r5") enq_flags,
+            inlateout("r1") p => _,
+            inlateout("r2") dsq_id => _,
+            inlateout("r3") slice => _,
+            inlateout("r4") vtime => _,
+            inlateout("r5") enq_flags => _,
             lateout("r0") _,
         );
     }
@@ -129,7 +139,7 @@ pub fn dsq_move_to_local(dsq_id: u64) -> bool {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_dsq_move_to_local,
-            in("r1") dsq_id,
+            inlateout("r1") dsq_id => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -148,8 +158,8 @@ pub fn create_dsq(dsq_id: u64, node: i32) -> i32 {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_create_dsq,
-            in("r1") dsq_id,
-            in("r2") node as i64,
+            inlateout("r1") dsq_id => _,
+            inlateout("r2") (node as i64) => _,
             lateout("r0") ret,
             lateout("r3") _,
             lateout("r4") _,
@@ -166,8 +176,8 @@ pub fn kick_cpu(cpu: i32, flags: u64) {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_kick_cpu,
-            in("r1") cpu as i64,
-            in("r2") flags,
+            inlateout("r1") (cpu as i64) => _,
+            inlateout("r2") flags => _,
             lateout("r0") _,
             lateout("r3") _,
             lateout("r4") _,
@@ -184,7 +194,7 @@ pub fn dsq_nr_queued(dsq_id: u64) -> i32 {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_dsq_nr_queued,
-            in("r1") dsq_id,
+            inlateout("r1") dsq_id => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -205,9 +215,9 @@ pub fn error_bstr(fmt: *const u8, data: *const u64, data_len: u32) {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_error_bstr,
-            in("r1") fmt,
-            in("r2") data,
-            in("r3") data_len as u64,
+            inlateout("r1") fmt => _,
+            inlateout("r2") data => _,
+            inlateout("r3") (data_len as u64) => _,
             lateout("r0") _,
             lateout("r4") _,
             lateout("r5") _,
@@ -234,8 +244,8 @@ pub fn cpuperf_set(cpu: i32, perf: u32) {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_cpuperf_set,
-            in("r1") cpu as i64,
-            in("r2") perf as u64,
+            inlateout("r1") (cpu as i64) => _,
+            inlateout("r2") (perf as u64) => _,
             lateout("r0") _,
             lateout("r3") _,
             lateout("r4") _,
@@ -308,7 +318,7 @@ pub fn put_cpumask(mask: *const cpumask) {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_put_cpumask,
-            in("r1") mask,
+            inlateout("r1") mask => _,
             lateout("r0") _,
             lateout("r2") _,
             lateout("r3") _,
@@ -326,7 +336,7 @@ pub fn test_and_clear_cpu_idle(cpu: i32) -> bool {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_test_and_clear_cpu_idle,
-            in("r1") cpu as i64,
+            inlateout("r1") (cpu as i64) => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -345,7 +355,7 @@ pub fn task_running(p: *const task_struct) -> bool {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_task_running,
-            in("r1") p,
+            inlateout("r1") p => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -364,7 +374,7 @@ pub fn task_cpu(p: *const task_struct) -> i32 {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_task_cpu,
-            in("r1") p,
+            inlateout("r1") p => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -385,7 +395,7 @@ pub fn cpu_curr(cpu: i32) -> *mut task_struct {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_cpu_curr,
-            in("r1") cpu as i64,
+            inlateout("r1") (cpu as i64) => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -428,10 +438,10 @@ pub fn select_cpu_dfl(
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_select_cpu_dfl,
-            in("r1") p,
-            in("r2") prev_cpu as i64,
-            in("r3") wake_flags,
-            in("r4") is_idle,
+            inlateout("r1") p => _,
+            inlateout("r2") (prev_cpu as i64) => _,
+            inlateout("r3") wake_flags => _,
+            inlateout("r4") is_idle => _,
             lateout("r0") ret,
             lateout("r5") _,
         );
@@ -455,11 +465,11 @@ pub fn select_cpu_and(
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_select_cpu_and,
-            in("r1") p,
-            in("r2") prev_cpu as i64,
-            in("r3") wake_flags,
-            in("r4") cpus_allowed,
-            in("r5") flags,
+            inlateout("r1") p => _,
+            inlateout("r2") (prev_cpu as i64) => _,
+            inlateout("r3") wake_flags => _,
+            inlateout("r4") cpus_allowed => _,
+            inlateout("r5") flags => _,
             lateout("r0") ret,
         );
     }

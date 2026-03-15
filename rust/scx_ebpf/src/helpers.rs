@@ -37,9 +37,9 @@ unsafe fn bpf_probe_read_kernel_raw(dst: *mut u8, len: u32, src: *const u8) -> i
     let ret: i64;
     core::arch::asm!(
         "call 113",
-        in("r1") dst,
-        in("r2") len as u64,
-        in("r3") src,
+        inlateout("r1") dst => _,
+        inlateout("r2") (len as u64) => _,
+        inlateout("r3") src => _,
         lateout("r0") ret,
         lateout("r4") _,
         lateout("r5") _,

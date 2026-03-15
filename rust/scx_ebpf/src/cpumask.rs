@@ -142,7 +142,7 @@ pub fn release(mask: *mut bpf_cpumask) {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_release,
-            in("r1") mask,
+            inlateout("r1") mask => _,
             lateout("r0") _,
             lateout("r2") _,
             lateout("r3") _,
@@ -159,8 +159,8 @@ pub fn set_cpu(cpu: u32, mask: *mut bpf_cpumask) {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_set_cpu,
-            in("r1") cpu as u64,
-            in("r2") mask,
+            inlateout("r1") (cpu as u64) => _,
+            inlateout("r2") mask => _,
             lateout("r0") _,
             lateout("r3") _,
             lateout("r4") _,
@@ -176,8 +176,8 @@ pub fn clear_cpu(cpu: u32, mask: *mut bpf_cpumask) {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_clear_cpu,
-            in("r1") cpu as u64,
-            in("r2") mask,
+            inlateout("r1") (cpu as u64) => _,
+            inlateout("r2") mask => _,
             lateout("r0") _,
             lateout("r3") _,
             lateout("r4") _,
@@ -197,8 +197,8 @@ pub fn test_cpu(cpu: u32, mask: *const cpumask) -> bool {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_test_cpu,
-            in("r1") cpu as u64,
-            in("r2") mask,
+            inlateout("r1") (cpu as u64) => _,
+            inlateout("r2") mask => _,
             lateout("r0") ret,
             lateout("r3") _,
             lateout("r4") _,
@@ -219,7 +219,7 @@ pub fn first(mask: *const cpumask) -> u32 {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_first,
-            in("r1") mask,
+            inlateout("r1") mask => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -241,7 +241,7 @@ pub fn first_zero(mask: *const cpumask) -> u32 {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_first_zero,
-            in("r1") mask,
+            inlateout("r1") mask => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -263,7 +263,7 @@ pub fn empty(mask: *const cpumask) -> bool {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_empty,
-            in("r1") mask,
+            inlateout("r1") mask => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -285,7 +285,7 @@ pub fn full(mask: *const cpumask) -> bool {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_full,
-            in("r1") mask,
+            inlateout("r1") mask => _,
             lateout("r0") ret,
             lateout("r2") _,
             lateout("r3") _,
@@ -307,9 +307,9 @@ pub fn and(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask) ->
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_and,
-            in("r1") dst,
-            in("r2") src1,
-            in("r3") src2,
+            inlateout("r1") dst => _,
+            inlateout("r2") src1 => _,
+            inlateout("r3") src2 => _,
             lateout("r0") ret,
             lateout("r4") _,
             lateout("r5") _,
@@ -328,9 +328,9 @@ pub fn or(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask) {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_or,
-            in("r1") dst,
-            in("r2") src1,
-            in("r3") src2,
+            inlateout("r1") dst => _,
+            inlateout("r2") src1 => _,
+            inlateout("r3") src2 => _,
             lateout("r0") _,
             lateout("r4") _,
             lateout("r5") _,
@@ -348,8 +348,8 @@ pub fn copy(dst: *mut bpf_cpumask, src: *const cpumask) {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_copy,
-            in("r1") dst,
-            in("r2") src,
+            inlateout("r1") dst => _,
+            inlateout("r2") src => _,
             lateout("r0") _,
             lateout("r3") _,
             lateout("r4") _,
@@ -365,7 +365,7 @@ pub fn setall(mask: *mut bpf_cpumask) {
         core::arch::asm!(
             "call {func}",
             func = sym bpf_cpumask_setall,
-            in("r1") mask,
+            inlateout("r1") mask => _,
             lateout("r0") _,
             lateout("r2") _,
             lateout("r3") _,

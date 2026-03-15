@@ -194,8 +194,8 @@ pub unsafe fn kptr_xchg<T>(kptr: *mut Kptr<T>, new: *mut T) -> *mut T {
     let ret: *mut T;
     core::arch::asm!(
         "call 194",
-        in("r1") kptr,
-        in("r2") new,
+        inlateout("r1") kptr => _,
+        inlateout("r2") new => _,
         lateout("r0") ret,
         lateout("r3") _,
         lateout("r4") _,
