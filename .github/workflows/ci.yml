@@ -109,7 +109,7 @@ jobs:
         run: sudo chown -R $(id -u):$(id -g) ~
 
   test:
-    if: github.repository == 'sched-ext/scx' || github.event_name != 'schedule'
+    if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: [veristat]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -137,7 +137,7 @@ jobs:
           run: target/ci/scx_arena_selftests
       - name: Build all schedulers
         run: |
-          for sched in beerland bpfland chaos cosmos flash lavd layered p2dq rlfifo rustland rusty tickless; do
+          for sched in beerland bpfland cake chaos cosmos flash lavd layered p2dq pandemonium rlfifo rustland rusty tickless; do
             cargo build --profile ci --locked -p "scx_${sched}"
           done
       - name: Test all schedulers
@@ -158,7 +158,7 @@ jobs:
             flags[chaos]="--random-delay-frequency 0.5 --random-delay-min-us 1000 --random-delay-max-us 2000"
             flags[lavd]="--log-level info"
             flags[layered]="--log-level info --stats 15 --run-example"
-            for sched in beerland bpfland chaos cosmos flash lavd layered p2dq rlfifo rustland rusty tickless; do
+            for sched in beerland bpfland cake chaos cosmos flash lavd layered p2dq pandemonium rlfifo rustland rusty tickless; do
               echo "=== Testing ${sched} ==="
               stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
                 --affinity 1 --affinity-delay 1 --affinity-pin &

@@ -1,0 +1,139 @@
+[{
+        "value": {
+            ".rodata": [{
+                    "primary_all": true
+                },{
+                    "slice_max": 4096000
+                },{
+                    "slice_min": 128000
+                },{
+                    "slice_lag": 4096000
+                },{
+                    "run_lag": 32768000
+                },{
+                    "max_avg_nvcsw": 128
+                },{
+                    "cpu_busy_thresh": -1
+                },{
+                    "smt_enabled": true
+                },{
+                    "numa_disabled": true
+                },{
+                    "__SCX_OPS_NAME_LEN": 128
+                },{
+                    "__SCX_SLICE_DFL": 20000000
+                },{
+                    "__SCX_SLICE_INF": 18446744073709551615
+                },{
+                    "__SCX_RQ_ONLINE": 1
+                },{
+                    "__SCX_RQ_CAN_STOP_TICK": 2
+                },{
+                    "__SCX_RQ_BAL_PENDING": 4
+                },{
+                    "__SCX_RQ_BAL_KEEP": 8
+                },{
+                    "__SCX_RQ_BYPASSING": 16
+                },{
+                    "__SCX_RQ_CLK_VALID": 32
+                },{
+                    "__SCX_RQ_IN_WAKEUP": 65536
+                },{
+                    "__SCX_RQ_IN_BALANCE": 131072
+                },{
+                    "__SCX_DSQ_FLAG_BUILTIN": 9223372036854775808
+                },{
+                    "__SCX_DSQ_FLAG_LOCAL_ON": 4611686018427387904
+                },{
+                    "__SCX_DSQ_INVALID": 9223372036854775808
+                },{
+                    "__SCX_DSQ_GLOBAL": 9223372036854775809
+                },{
+                    "__SCX_DSQ_LOCAL": 9223372036854775810
+                },{
+                    "__SCX_DSQ_LOCAL_ON": 13835058055282163712
+                },{
+                    "__SCX_DSQ_LOCAL_CPU_MASK": 4294967295
+                },{
+                    "__SCX_TASK_QUEUED": 1
+                },{
+                    "__SCX_TASK_RESET_RUNNABLE_AT": 4
+                },{
+                    "__SCX_TASK_DEQD_FOR_SLEEP": 8
+                },{
+                    "__SCX_TASK_STATE_SHIFT": 8
+                },{
+                    "__SCX_TASK_STATE_BITS": 2
+                },{
+                    "__SCX_TASK_STATE_MASK": 768
+                },{
+                    "__SCX_TASK_CURSOR": 18446744071562067968
+                },{
+                    "__SCX_TASK_NONE": 0
+                },{
+                    "__SCX_TASK_INIT": 1
+                },{
+                    "__SCX_TASK_READY": 2
+                },{
+                    "__SCX_TASK_ENABLED": 3
+                },{
+                    "__SCX_TASK_NR_STATES": 4
+                },{
+                    "__SCX_TASK_DSQ_ON_PRIQ": 1
+                },{
+                    "__SCX_KICK_IDLE": 1
+                },{
+                    "__SCX_KICK_PREEMPT": 2
+                },{
+                    "__SCX_KICK_WAIT": 4
+                },{
+                    "__SCX_ENQ_WAKEUP": 1
+                },{
+                    "__SCX_ENQ_HEAD": 16
+                },{
+                    "__SCX_ENQ_PREEMPT": 4294967296
+                },{
+                    "__SCX_ENQ_REENQ": 1099511627776
+                },{
+                    "__SCX_ENQ_LAST": 2199023255552
+                },{
+                    "__SCX_ENQ_CLEAR_OPSS": 72057594037927936
+                },{
+                    "__SCX_ENQ_DSQ_PRIQ": 144115188075855872
+                },{
+                    "__SCX_DEQ_SCHED_CHANGE": 0
+                },{
+                    "__COMPAT_SCX_PICK_IDLE_IN_NODE": 2
+                },{
+                    "debug": false
+                },{
+                    "rr_sched": false
+                },{
+                    "slice_lag_scaling": false
+                },{
+                    "no_wake_sync": false
+                },{
+                    "local_kthreads": false
+                },{
+                    "sticky_cpu": false
+                },{
+                    "local_pcpu": false
+                },{
+                    "direct_dispatch": false
+                },{
+                    "builtin_idle": true
+                },{
+                    "native_priority": false
+                },{
+                    "tickless_sched": false
+                },{
+                    "throttle_ns": 0
+                },{
+                    "uei_dump_len": 32768
+                },{
+                    "numa_timerfn.____fmt": "node %d util %llu rebalance %d"
+                }
+            ]
+        }
+    }
+]
