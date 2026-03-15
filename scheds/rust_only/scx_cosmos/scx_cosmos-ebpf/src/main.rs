@@ -4,7 +4,8 @@
 //!
 //! - `select_cpu`: uses `scx_bpf_select_cpu_dfl` with busy-aware dispatch,
 //!   no_wake_sync support, and SMT-awareness (globals for future use)
-//! - `enqueue`: dual-mode — local DSQ when idle, vtime-ordered shared DSQ when busy
+//! - `enqueue`: three-tier — migration to idle CPU, local DSQ when not busy,
+//!   vtime-ordered shared DSQ when busy (uses task_cpu + task_running kfuncs)
 //! - `dispatch`: `dsq_move_to_local` + slice extension for prev task
 //! - `running`: updates vtime_now + records per-task last_run_at via task storage,
 //!   applies cpufreq performance level
@@ -27,7 +28,8 @@
 //! - No PMU tracking
 //! - No NUMA per-node DSQs
 //! - No flat/preferred idle scan, no mm_affinity, no primary_cpumask
-//! - SMT-aware idle scanning needs register allocation fix (see PORT_TODO)
+//! - Migration only tries prev_cpu (no full pick_idle_cpu scan)
+//! - SMT-aware idle scanning (see PORT_TODO)
 
 #![no_std]
 #![no_main]
@@ -390,14 +392,9 @@ fn update_cpufreq(cpu: i32) {
 // PORT_TODO: Full SMT-aware idle scanning
 // C reference: pick_idle_cpu() calls scx_bpf_get_idle_smtmask(),
 // tests the CPU against the mask, then calls scx_bpf_put_cpumask().
-// The BPF verifier requires the cpumask pointer to survive across
-// the test_cpu kfunc call, but LLVM BPF backend register allocation
-// doesn't reliably spill the pointer when callee-saved registers
-// are exhausted (all r6-r9 are occupied by p, cpu, prev_cpu, etc.).
-// A workaround would be to use a separate BPF subprogram for the
-// SMT check (separate register frame), or to restructure the code
-// to use select_cpu_and() directly which handles SMT internally
-// via the SCX_PICK_IDLE_CORE flag.
+// The smtmask is a KF_ACQUIRE pointer that must be released (KF_RELEASE).
+// An alternative is to use select_cpu_and() directly which handles SMT
+// internally via the SCX_PICK_IDLE_CORE flag.
 #[inline(always)]
 pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     // Clear SCX_WAKE_SYNC if no_wake_sync is enabled.
@@ -429,57 +426,95 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
     if is_idle { cpu } else { prev_cpu }
 }
 
-/// enqueue: dual-mode dispatch — local round-robin or shared DSQ deadline.
+/// enqueue: three-tier dispatch — migration, local round-robin, or shared DSQ.
 ///
-/// When the system is NOT busy (no tasks queued in shared DSQ), dispatch
-/// directly to the local DSQ in round-robin mode for low latency.
+/// Mirrors the C cosmos_enqueue() pattern:
 ///
-/// When the system IS busy, dispatch to the shared DSQ with vtime-based
-/// ordering (deadline mode) for fairness under contention.
+/// 1. **Migration attempt** (wakeup path): If the task is not currently
+///    running (i.e., this is a wakeup), try to find an idle CPU and
+///    dispatch directly there via `SCX_DSQ_LOCAL_ON`. This avoids
+///    waiting for dispatch() and gets the task running immediately.
+///
+/// 2. **Local round-robin** (low load): When the system is not busy,
+///    dispatch to the local DSQ for simple round-robin scheduling.
+///    If the task should migrate, kick prev_cpu to wake it.
+///
+/// 3. **Deadline mode** (high load): When the system is busy,
+///    dispatch to the shared DSQ with vtime-based ordering for fairness.
 ///
 /// If select_cpu already dispatched the task (via SCX_DSQ_LOCAL), this
 /// callback is not invoked by the kernel.
-// PORT_TODO: Migration attempt in enqueue when task should migrate
-// C reference: cosmos_enqueue() calls task_should_migrate() to check if
-// ops.select_cpu() was NOT called and task is not running. If so, it calls
-// pick_idle_cpu() to find an idle CPU and dispatches via SCX_DSQ_LOCAL_ON.
-// Then calls wakeup_cpu() to kick the target CPU.
-// BPF verifier constraint: kfunc calls (task_cpu, task_running) consume
-// the trusted_ptr to p, preventing subsequent kfunc calls with the same
-// pointer. This makes the migration pattern difficult without RCU read lock.
+///
+/// ## Trusted pointer usage
+///
+/// The BPF verifier preserves PTR_TRUSTED in callee-saved registers (R6-R9)
+/// across kfunc calls. The scx kfuncs (task_cpu, task_running, dsq_insert)
+/// are KF_RCU, NOT KF_RELEASE, so they do not invalidate trusted pointers.
+/// This means we can call multiple kfuncs on the same `p` safely.
+///
+/// To minimize register pressure (only R6-R9 available), we:
+/// - Read struct fields (via core_read!) AFTER the kfunc calls, not before
+/// - Use early-return branches to limit live variable scope
+/// - Compute deadline values only in the branch that needs them
 #[inline(always)]
 pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
-    // Read ALL fields we need BEFORE any kfunc calls.
-    // The BPF verifier invalidates the trusted pointer after kfunc calls
-    // that consume it (dsq_insert, task_cpu, task_running, etc.).
+    // ── Phase 1: kfunc calls ─────────────────────────────────────────
+    // Call kfuncs first while register pressure is minimal.
+    // p is in a callee-saved register; these KF_RCU kfuncs preserve it.
+    let prev_cpu = kfuncs::task_cpu(p);
+    let is_running = kfuncs::task_running(p);
+
+    // ── Phase 2: migration attempt ───────────────────────────────────
+    // C: if (task_should_migrate(p, enq_flags)) { ... }
+    // task_should_migrate = !is_running (simplified; full version also
+    // checks SCX_ENQ_CPU_SELECTED which isn't available yet).
+    //
+    // If the task is waking up (not running), try to find an idle CPU
+    // and dispatch directly there for minimal latency.
+    if !is_running {
+        if kfuncs::test_and_clear_cpu_idle(prev_cpu) {
+            // prev_cpu is idle — dispatch there directly.
+            let weight = read_weight(p);
+            let slice = task_slice(weight);
+            kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL_ON | prev_cpu as u64, slice, enq_flags);
+            // Kick the CPU to wake it up.
+            kfuncs::kick_cpu(prev_cpu, SCX_KICK_IDLE);
+            return;
+        }
+        // PORT_TODO: full pick_idle_cpu() scan across all CPUs
+        // C reference: pick_idle_cpu(p, prev_cpu, -1, 0, true) tries
+        // multiple strategies: primary cpumask, SMT-aware scan, etc.
+        // For now we only try prev_cpu via test_and_clear_cpu_idle.
+    }
+
+    // ── Phase 3: local dispatch when not busy ────────────────────────
+    // C: if (!is_system_busy()) { dsq_insert(LOCAL, ...); wakeup_cpu(); }
+    if !is_system_busy() {
+        let weight = read_weight(p);
+        let slice = task_slice(weight);
+        kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, enq_flags);
+        // If the task should migrate (wakeup), kick prev_cpu.
+        if !is_running {
+            kfuncs::kick_cpu(prev_cpu, SCX_KICK_IDLE);
+        }
+        return;
+    }
+
+    // ── Phase 4: deadline mode to shared DSQ ─────────────────────────
+    // Read struct fields now — we've finished all the kfunc calls that
+    // need minimal register pressure.
     let vtime = if let Ok(v) = core_read!(vmlinux::task_struct, p, scx.dsq_vtime) {
         v
     } else {
         unsafe { VTIME_NOW }
     };
-
     let weight = read_weight(p);
     let slice = task_slice(weight);
-
-    // When system is not saturated, use round-robin local dispatch.
-    // This avoids shared DSQ contention and gives lower latency.
-    // C: if (!is_system_busy()) { dsq_insert(LOCAL, ...); return; }
-    if !is_system_busy() {
-        kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, enq_flags);
-        return;
-    }
 
     // Compute deadline using exec_runtime from per-task storage.
     // C: task_dl() = dsq_vtime + scale_inverse(exec_runtime)
     // Tasks with more accumulated runtime get higher (later) deadlines,
     // prioritizing interactive tasks that sleep frequently.
-    //
-    // Read both exec_runtime and wakeup_freq in a single lookup to avoid
-    // the LLVM BPF backend register clobber bug (see helpers.rs docs).
-    //
-    // Compute the deadline and wakeup_freq inside the TASK_CTX lookup
-    // branches to avoid register liveness issues: LLVM BPF backend may
-    // not spill the default-0 registers across the task_storage_get call.
     let (deadline, wakeup_freq) = if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
         let tctx = unsafe { tctx.as_ref() };
         let er = tctx.exec_runtime;
@@ -491,12 +526,9 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
         };
         (dl, wf)
     } else {
-        // No task context: exec_runtime=0, wakeup_freq=0.
-        // deadline = vtime + 0 = vtime.
         (vtime, 0u64)
     };
 
-    // No idle CPU found — use deadline-mode dispatch to the shared DSQ.
     // Clamp vtime so tasks don't accumulate too much credit from sleeping.
     // C: vtime_min = vtime_now - scale_by_task_weight(p, slice_lag)
     let vtime_now = unsafe { VTIME_NOW };
@@ -506,18 +538,23 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     // more vtime credit (larger effective slice_lag).
     // C: wakeup_freq_lag = slice_lag + slice_lag * tctx->wakeup_freq / 1024
     let effective_lag = slice_lag + slice_lag * wakeup_freq / 1024;
-
     let vsleep_max = if weight > 0 { (effective_lag * weight) / 100 } else { effective_lag };
     let vtime_min = vtime_now.wrapping_sub(vsleep_max);
     let clamped_deadline = if deadline < vtime_min { vtime_min } else { deadline };
 
-    // Write clamped vtime back if it changed (after all reads are done).
+    // Write clamped vtime back if it changed.
     if clamped_deadline != vtime {
         let offset = core::mem::offset_of!(vmlinux::task_struct, scx.dsq_vtime);
         unsafe { write_field_u64(p, offset, clamped_deadline); }
     }
 
     kfuncs::dsq_insert_vtime(p, SHARED_DSQ, slice, clamped_deadline, enq_flags);
+
+    // If the task should migrate (wakeup), kick prev_cpu.
+    // C: if (task_should_migrate(p, enq_flags)) wakeup_cpu(prev_cpu);
+    if !is_running {
+        kfuncs::kick_cpu(prev_cpu, SCX_KICK_IDLE);
+    }
 }
 
 /// dispatch: consume from the shared DSQ.
@@ -614,10 +651,6 @@ pub fn on_running(p: *mut task_struct) {
 
     // Apply cpufreq performance level based on recent load.
     // C: update_cpufreq(scx_bpf_task_cpu(p));
-    //
-    // NOTE: We use kfuncs::task_cpu(p) here. This consumes the trusted_ptr
-    // to p, but we've already finished reading from p above, so this is safe.
-    // The BPF verifier requires that we don't use p after this kfunc call.
     if unsafe { CPUFREQ_ENABLED } {
         let cpu = kfuncs::task_cpu(p);
         update_cpufreq(cpu);
