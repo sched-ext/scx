@@ -15,7 +15,7 @@ concurrency:
 
 env:
   BPF_CLANG: clang-19
-  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev"
+  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng"
   SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
   SCHED_EXT_KERNEL_TAG: for-next
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld"
@@ -85,6 +85,29 @@ jobs:
           sudo cp /tmp/veristat/src/veristat /usr/local/bin/
           sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
           cargo install cargo-veristat --locked
+      - name: Restore kernel cache
+        uses: likewhatevs/vng-action@v0.4.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v19
+          network: user
+          verbose: true
+          run: "true"
+      - name: Update vmlinux headers
+        run: |
+          cp linux/vmlinux.h /tmp/vmlinux-ci.h
+          python3 scripts/fixup_vmlinux_h.py /tmp/vmlinux-ci.h
+          cp /tmp/vmlinux-ci.h scheds/vmlinux/arch/x86/vmlinux-ci.h
+          ln -fsT vmlinux-ci.h scheds/vmlinux/arch/x86/vmlinux.h
+          tar --use-compress-program 'zstd -19' \
+            --owner=0 --group=0 --numeric-owner \
+            --format=ustar \
+            --mtime='1970-01-01 00:00:00 UTC' \
+            -cf rust/scx_utils/vmlinux.tar.zst \
+            -C scheds vmlinux
       - name: Disable veristat for excluded schedulers
         if: matrix.kernel.veristat-disable != ''
         run: |
@@ -94,13 +117,13 @@ jobs:
       - name: Build packages
         run: cargo build --profile ci --locked
       - name: 'Veristat: ${{ matrix.kernel.name }}'
-        uses: likewhatevs/vng-action@v0.3.0
+        uses: likewhatevs/vng-action@v0.4.0
         with:
           name: ${{ matrix.kernel.name }}__${{ runner.arch }}
           kernel-url: ${{ matrix.kernel.url }}
           kernel-tag: ${{ matrix.kernel.tag }}
           kconfig: kernel.config
-          version: v17
+          version: v19
           network: user
           verbose: true
           run: cargo veristat --profile ci --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
@@ -117,6 +140,29 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/install-deps-action
+      - name: Restore kernel cache
+        uses: likewhatevs/vng-action@v0.4.0
+        with:
+          name: scx__sched_ext__for-next__${{ runner.arch }}
+          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
+          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          kconfig: kernel.config
+          version: v19
+          network: user
+          verbose: true
+          run: "true"
+      - name: Update vmlinux headers
+        run: |
+          cp linux/vmlinux.h /tmp/vmlinux-ci.h
+          python3 scripts/fixup_vmlinux_h.py /tmp/vmlinux-ci.h
+          cp /tmp/vmlinux-ci.h scheds/vmlinux/arch/x86/vmlinux-ci.h
+          ln -fsT vmlinux-ci.h scheds/vmlinux/arch/x86/vmlinux.h
+          tar --use-compress-program 'zstd -19' \
+            --owner=0 --group=0 --numeric-owner \
+            --format=ustar \
+            --mtime='1970-01-01 00:00:00 UTC' \
+            -cf rust/scx_utils/vmlinux.tar.zst \
+            -C scheds vmlinux
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -125,13 +171,13 @@ jobs:
       - name: Build arena selftests
         run: cargo build --profile ci -p scx_arena_selftests --locked
       - name: Arena selftests
-        uses: likewhatevs/vng-action@v0.3.0
+        uses: likewhatevs/vng-action@v0.4.0
         with:
           name: scx__sched_ext__for-next__${{ runner.arch }}
           kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
           kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
           kconfig: kernel.config
-          version: v17
+          version: v19
           network: user
           verbose: true
           run: target/ci/scx_arena_selftests
@@ -141,13 +187,13 @@ jobs:
             cargo build --profile ci --locked -p "scx_${sched}"
           done
       - name: Test all schedulers
-        uses: likewhatevs/vng-action@v0.3.0
+        uses: likewhatevs/vng-action@v0.4.0
         with:
           name: scx__sched_ext__for-next__${{ runner.arch }}
           kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
           kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
           kconfig: kernel.config
-          version: v17
+          version: v19
           network: user
           verbose: true
           run: |
