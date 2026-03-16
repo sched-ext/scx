@@ -88,29 +88,6 @@ jobs:
           sudo cp /tmp/veristat/src/veristat /usr/local/bin/
           sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
           cargo install cargo-veristat --locked
-      - name: Restore kernel cache
-        uses: likewhatevs/vng-action@v0.4.0
-        with:
-          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
-          kernel-url: ${{ matrix.kernel.url }}
-          kernel-tag: ${{ matrix.kernel.tag }}
-          kconfig: kernel.config
-          version: v19
-          network: user
-          verbose: true
-          run: "true"
-      - name: Update vmlinux headers
-        run: |
-          cp linux/vmlinux.h /tmp/vmlinux-ci.h
-          python3 scripts/fixup_vmlinux_h.py /tmp/vmlinux-ci.h
-          cp /tmp/vmlinux-ci.h scheds/vmlinux/arch/x86/vmlinux-ci.h
-          ln -fsT vmlinux-ci.h scheds/vmlinux/arch/x86/vmlinux.h
-          tar --use-compress-program 'zstd -19' \
-            --owner=0 --group=0 --numeric-owner \
-            --format=ustar \
-            --mtime='1970-01-01 00:00:00 UTC' \
-            -cf rust/scx_utils/vmlinux.tar.zst \
-            -C scheds vmlinux
       - name: Disable veristat for excluded packages
         if: matrix.kernel.veristat-disable != ''
         run: |
@@ -146,29 +123,6 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/install-deps-action
-      - name: Restore kernel cache
-        uses: likewhatevs/vng-action@v0.4.0
-        with:
-          name: scx__sched_ext__for-next__${{ runner.arch }}
-          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
-          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
-          kconfig: kernel.config
-          version: v19
-          network: user
-          verbose: true
-          run: "true"
-      - name: Update vmlinux headers
-        run: |
-          cp linux/vmlinux.h /tmp/vmlinux-ci.h
-          python3 scripts/fixup_vmlinux_h.py /tmp/vmlinux-ci.h
-          cp /tmp/vmlinux-ci.h scheds/vmlinux/arch/x86/vmlinux-ci.h
-          ln -fsT vmlinux-ci.h scheds/vmlinux/arch/x86/vmlinux.h
-          tar --use-compress-program 'zstd -19' \
-            --owner=0 --group=0 --numeric-owner \
-            --format=ustar \
-            --mtime='1970-01-01 00:00:00 UTC' \
-            -cf rust/scx_utils/vmlinux.tar.zst \
-            -C scheds vmlinux
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
