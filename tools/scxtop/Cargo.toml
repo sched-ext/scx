@@ -10,6 +10,9 @@ description = "sched_ext scheduler tool for observability"
 [package.metadata.scx]
 ci.use_clippy = true
 
+[package.metadata.veristat]
+disable = true
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = [
