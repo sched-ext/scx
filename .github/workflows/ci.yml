@@ -88,6 +88,11 @@ jobs:
           sudo cp /tmp/veristat/src/veristat /usr/local/bin/
           sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
           cargo install cargo-veristat --locked
+      - name: Build bpftool
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
+          make -C /tmp/bpftool/src -j$(nproc)
+          sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
       - name: Disable veristat for excluded packages
         if: matrix.kernel.veristat-disable != ''
         run: |
@@ -110,6 +115,26 @@ jobs:
           network: user
           verbose: true
           run: cargo veristat --profile ci --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
+      - name: 'Dump BTF: ${{ matrix.kernel.name }}'
+        if: always()
+        uses: likewhatevs/vng-action@v0.4.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v19
+          network: user
+          run: |
+            mkdir -p btf-dump
+            /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > btf-dump/kernel-vmlinux.h
+            /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format raw > btf-dump/kernel-raw.btf
+      - name: 'Upload BTF: ${{ matrix.kernel.name }}'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btf-${{ matrix.kernel.name }}
+          path: btf-dump/
       - name: Fix permissions for cache
         if: always()
         run: sudo chown -R $(id -u):$(id -g) ~
@@ -117,6 +142,13 @@ jobs:
   test:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: [veristat]
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel:
+          - name: scx__sched_ext__for-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
+            tag: for-next
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -126,6 +158,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      - name: Build bpftool
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
+          make -C /tmp/bpftool/src -j$(nproc)
+          sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
       - name: Build arena selftests
@@ -133,9 +170,9 @@ jobs:
       - name: Arena selftests
         uses: likewhatevs/vng-action@v0.4.0
         with:
-          name: scx__sched_ext__for-next__${{ runner.arch }}
-          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
-          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
           kconfig: kernel.config
           version: v19
           network: user
@@ -146,12 +183,43 @@ jobs:
           for sched in beerland bpfland cake chaos cosmos flash lavd layered p2dq pandemonium rlfifo rustland rusty tickless; do
             cargo build --profile ci --locked -p "scx_${sched}"
           done
+      - name: Dump BPF object BTF
+        if: always()
+        run: |
+          mkdir -p btf-dump
+          for f in target/ci/build/scx_beerland-*/out/*.bpf.o; do
+            if [ -f "$f" ]; then
+              cp "$f" btf-dump/bpf-object.o
+              /usr/local/bin/bpftool btf dump file "$f" format raw > btf-dump/bpf-raw.btf
+              break
+            fi
+          done
+      - name: Dump kernel BTF
+        if: always()
+        uses: likewhatevs/vng-action@v0.4.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v19
+          network: user
+          run: |
+            mkdir -p btf-dump
+            /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > btf-dump/kernel-vmlinux.h
+            /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format raw > btf-dump/kernel-raw.btf
+      - name: 'Upload BTF: ${{ matrix.kernel.name }}'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btf-test-${{ matrix.kernel.name }}
+          path: btf-dump/
       - name: Test all schedulers
         uses: likewhatevs/vng-action@v0.4.0
         with:
-          name: scx__sched_ext__for-next__${{ runner.arch }}
-          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
-          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
           kconfig: kernel.config
           version: v19
           network: user
