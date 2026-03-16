@@ -303,8 +303,6 @@ struct cpu_ctx {
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
 	volatile u64	idle_total_wall;/* total idle time so far (wall clock time) */
 	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
-	u64		online_clk;	/* when a CPU becomes online */
-	u64		offline_clk;	/* when a CPU becomes offline */
 	/*
 	 * Snapshot of scx_clock_task() taken at the end of the last
 	 * collect_sys_stat() interval. scx_clock_task() advances during tasks

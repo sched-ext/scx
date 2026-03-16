@@ -26,9 +26,6 @@ int reset_cpuperf_target(struct cpu_ctx *cpuc);
 int update_cpuperf_target(struct cpu_ctx *cpuc);
 u16 get_cpuperf_cap(s32 cpu);
 
-int reset_suspended_duration(struct cpu_ctx *cpuc);
-u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc);
-
 const volatile u16 *get_cpu_order(void);
 void update_effective_capacity(struct cpu_ctx *cpuc);
 

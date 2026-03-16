@@ -463,12 +463,6 @@ static void update_stat_for_running(struct task_struct *p,
 	prev_cpuc = get_cpu_ctx_id(taskc->prev_cpu_id);
 	if (prev_cpuc && prev_cpuc->cpdom_id != cpuc->cpdom_id)
 		cpuc->nr_x_migration++;
-
-	/*
-	 * It is clear there is no need to consider the suspended duration
-	 * while running a task, so reset the suspended duration to zero.
-	 */
-	reset_suspended_duration(cpuc);
 }
 
 static void account_task_runtime(struct task_struct *p,
@@ -1449,7 +1443,7 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	}
 }
 
-static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
+static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id)
 {
 	struct bpf_cpumask *cd_cpumask;
 
@@ -1469,13 +1463,12 @@ unlock_out:
 	cpuc->prev_task_clk = scx_clock_task(cpu_id);
 	cpuc->prev_pelt_clk = scx_clock_pelt(cpu_id);
 	cpuc->avg_perf_factor = LAVD_SCALE;
-	WRITE_ONCE(cpuc->online_clk, now);
 	barrier();
 
 	cpuc->is_online = true;
 }
 
-static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
+static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id)
 {
 	struct bpf_cpumask *cd_cpumask;
 
@@ -1489,7 +1482,6 @@ unlock_out:
 
 	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
-	WRITE_ONCE(cpuc->offline_clk, now);
 	cpuc->is_online = false;
 	barrier();
 
@@ -1504,7 +1496,6 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	 * When a cpu becomes online, reset its cpu context and trigger the
 	 * recalculation of the global cpu load.
 	 */
-	u64 now = scx_bpf_now();
 	struct cpu_ctx *cpuc;
 
 	cpuc = get_cpu_ctx_id(cpu);
@@ -1526,7 +1517,7 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 		return;
 	}
 
-	cpu_ctx_init_online(cpuc, cpu, now);
+	cpu_ctx_init_online(cpuc, cpu);
 
 	__sync_fetch_and_add(&nr_cpus_onln, 1);
 	__sync_fetch_and_add(&total_max_capacity, cpuc->max_capacity);
@@ -1540,7 +1531,6 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	 * When a cpu becomes offline, trigger the recalculation of the global
 	 * cpu load.
 	 */
-	u64 now = scx_bpf_now();
 	struct cpu_ctx *cpuc;
 
 	cpuc = get_cpu_ctx_id(cpu);
@@ -1549,7 +1539,7 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 		return;
 	}
 
-	cpu_ctx_init_offline(cpuc, cpu, now);
+	cpu_ctx_init_offline(cpuc, cpu);
 
 	__sync_fetch_and_sub(&nr_cpus_onln, 1);
 	__sync_fetch_and_sub(&total_max_capacity, cpuc->max_capacity);
@@ -2007,8 +1997,6 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->lat_cri = 0;
 		cpuc->running_clk = 0;
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
-		cpuc->online_clk = now;
-		cpuc->offline_clk = now;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
 		cpuc->max_capacity = cpu_capacity[cpu];
 		cpuc->effective_capacity = cpuc->max_capacity;

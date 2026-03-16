@@ -178,36 +178,6 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 		cpu, cpuc->effective_capacity, capacity_policy, capacity_observed, mfo, pressure);
 }
 
-__hidden
-int reset_suspended_duration(struct cpu_ctx *cpuc)
-{
-	if (cpuc->online_clk > cpuc->offline_clk)
-		cpuc->offline_clk = cpuc->online_clk;
-
-	return 0;
-}
-
-__hidden
-u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
-{
-	/*
-	 * When a system is suspended, a task is also suspended in a running
-	 * stat on the CPU. Hence, we subtract the suspended duration when it
-	 * resumes.
-	 */
-	u64 duration = 0;
-
-	if (cpuc->online_clk > cpuc->offline_clk) {
-		duration = time_delta(cpuc->online_clk, cpuc->offline_clk);
-		/*
-		 * Once calculated, reset the duration to zero.
-		 */
-		cpuc->offline_clk = cpuc->online_clk;
-	}
-
-	return duration;
-}
-
 bool is_perf_cri(task_ctx __arg_arena *taskc)
 {
 	if (unlikely(!taskc))
