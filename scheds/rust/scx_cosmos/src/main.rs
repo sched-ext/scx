@@ -539,6 +539,9 @@ pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
 /// Initial value for the dynamic threshold (in BPF units).
 const DYNAMIC_THRESHOLD_INIT_VALUE: u64 = 1000;
 
+/// Minimum value for the dynamic threshold (in BPF units).
+const DYNAMIC_THRESHOLD_MIN_VALUE: u64 = 10;
+
 /// Target event rate (per second) above which we consider migrations/sticky dispatches too high.
 const DYNAMIC_THRESHOLD_RATE_HIGH: f64 = 4000.0;
 
@@ -684,7 +687,7 @@ impl DynamicThresholdState {
             let scale = Self::compute_scale(rate, raising);
             let factor = if raising { 1.0 + scale } else { 1.0 - scale };
             let new_threshold = ((self.threshold as f64) * factor).round() as u64;
-            self.threshold = new_threshold.clamp(1, u64::MAX);
+            self.threshold = new_threshold.clamp(DYNAMIC_THRESHOLD_MIN_VALUE, u64::MAX);
         }
 
         self.adjustment_direction = new_direction;
