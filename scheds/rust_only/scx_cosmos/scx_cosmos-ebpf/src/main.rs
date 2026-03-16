@@ -2,8 +2,8 @@
 //!
 //! This is an incremental port of scx_cosmos. It implements:
 //!
-//! - `select_cpu`: uses `scx_bpf_select_cpu_dfl` with busy-aware dispatch,
-//!   no_wake_sync support, and SMT-awareness (globals for future use)
+//! - `select_cpu`: uses `pick_idle_cpu` with SMT-aware idle scanning,
+//!   `select_cpu_dfl` fallback, busy-aware dispatch, and no_wake_sync support
 //! - `enqueue`: three-tier — migration to idle CPU, local DSQ when not busy,
 //!   vtime-ordered shared DSQ when busy (uses task_cpu + task_running kfuncs)
 //! - `dispatch`: `dsq_move_to_local` + slice extension for prev task
@@ -23,13 +23,12 @@
 //! - `SLICE_NS`, `SLICE_LAG`: time slice and maximum runtime parameters
 //! - `BUSY_THRESHOLD`, `CPU_UTIL`: system busy detection
 //! - `NO_WAKE_SYNC`, `CPUFREQ_ENABLED`, `SMT_ENABLED`, `AVOID_SMT`: feature flags
+//! - `NUMA_ENABLED`, `NR_NODES`, `CPU_TO_NODE`: NUMA-aware per-node DSQ routing
 //!
 //! Remaining gaps vs the full C implementation (see PORT_TODO comments):
 //! - No PMU tracking
-//! - No NUMA per-node DSQs
 //! - No flat/preferred idle scan, no mm_affinity, no primary_cpumask
-//! - Migration only tries prev_cpu (no full pick_idle_cpu scan)
-//! - SMT-aware idle scanning (see PORT_TODO)
+//! - Migration only tries prev_cpu (no full pick_idle_cpu scan in enqueue)
 
 #![no_std]
 #![no_main]
@@ -96,6 +95,12 @@ static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
 /// Shared DSQ used for deadline-mode scheduling when the system is saturated.
 const SHARED_DSQ: u64 = 0;
 
+/// Maximum number of CPUs supported (matches C cosmos MAX_CPUS).
+const MAX_CPUS: usize = 1024;
+
+/// Maximum number of NUMA nodes supported (matches C cosmos MAX_NODES).
+const MAX_NODES: u32 = 1024;
+
 /// SCX_TASK_QUEUED flag in scx entity flags.
 const SCX_TASK_QUEUED: u32 = 1;
 
@@ -113,6 +118,10 @@ const CPUFREQ_LOW_THRESH: u64 = SCX_CPUPERF_ONE / 4;
 
 /// Above this threshold, raise cpufreq to maximum.
 const CPUFREQ_HIGH_THRESH: u64 = SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4;
+
+/// PF_EXITING flag in task_struct.flags — task is in the process of exiting.
+/// Used by is_wake_affine() to skip wakers that are exiting.
+const PF_EXITING: u32 = 0x00000004;
 
 // ── Userspace-configurable globals ──────────────────────────────────────
 //
@@ -162,6 +171,22 @@ static mut SMT_ENABLED: bool = true;
 #[unsafe(no_mangle)]
 static mut AVOID_SMT: bool = true;
 
+/// When true, enable NUMA-aware per-node DSQ routing.
+/// C reference: `const volatile bool numa_enabled`
+#[unsafe(no_mangle)]
+static mut NUMA_ENABLED: bool = false;
+
+/// Number of NUMA nodes on this system, set by userspace.
+/// C reference: `const volatile u32 nr_node_ids`
+#[unsafe(no_mangle)]
+static mut NR_NODES: u32 = 1;
+
+/// CPU-to-NUMA-node mapping, populated by userspace via .bss.
+/// C reference: `cpu_node_map` BPF hash map (we use a flat array instead).
+/// Each entry maps a CPU index to its NUMA node ID.
+#[unsafe(no_mangle)]
+static mut CPU_TO_NODE: [u32; MAX_CPUS] = [0; MAX_CPUS];
+
 // PORT_TODO: primary_cpumask and primary_all for preferred CPU domain
 // C reference: `private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask`
 // and `const volatile bool primary_all = true` control a subset of CPUs
@@ -197,12 +222,12 @@ static mut PRIMARY_ALL: bool = true;
 // cpu_capacity[] array from userspace. These are large arrays (MAX_CPUS=1024
 // entries) that need userspace to sort CPUs by capacity and populate.
 
-// PORT_TODO: mm_affinity (address space affinity)
-// C reference: When mm_affinity is true and waker/wakee share the same mm,
-// is_wake_affine() returns true. select_cpu uses this to keep wakee on the
-// waker's CPU for cache locality. Requires reading task_struct->mm and
-// comparing waker/wakee mm pointers. The waker is accessed via
-// bpf_get_current_task_btf() which needs BTF-aware task access support.
+/// When true, enable address space affinity in select_cpu.
+/// Keeps wakee on the waker's CPU when they share the same mm (address space),
+/// improving cache locality for tasks that share memory (e.g., threads).
+/// C reference: `const volatile bool mm_affinity`
+#[unsafe(no_mangle)]
+static mut MM_AFFINITY: bool = false;
 
 // PORT_TODO: PMU / perf event integration
 // C reference: perf_config selects a hardware counter. scx_pmu_event_start/stop
@@ -225,6 +250,93 @@ static mut NR_CPU_IDS: u32 = 0;
 unsafe fn write_field_u64(base: *mut task_struct, offset: usize, val: u64) {
     let ptr = (base as *mut u8).add(offset) as *mut u64;
     core::ptr::write_volatile(ptr, val);
+}
+
+/// BPF helper #158: `bpf_get_current_task_btf() -> *mut task_struct`
+///
+/// Returns a pointer to the current task's task_struct with BTF type info.
+/// Used to access the waker's task in select_cpu for mm_affinity.
+#[inline(always)]
+fn get_current_task_btf() -> *mut task_struct {
+    let ret: *mut task_struct;
+    unsafe {
+        core::arch::asm!(
+            "call 158",
+            lateout("r0") ret,
+            lateout("r1") _,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret
+}
+
+/// BPF helper #8: `bpf_get_smp_processor_id() -> u32`
+///
+/// Returns the ID of the CPU on which the BPF program is currently running.
+#[inline(always)]
+fn get_smp_processor_id() -> i32 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "call 8",
+            lateout("r0") ret,
+            lateout("r1") _,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret as i32
+}
+
+/// Check if the waker and wakee share the same address space.
+///
+/// Returns true when mm_affinity is enabled, the waker is not exiting,
+/// and both tasks share the same mm_struct (same address space -- typically
+/// threads of the same process). Used to keep the wakee on the waker's
+/// CPU for cache locality.
+///
+/// C reference: `is_wake_affine(waker, wakee)`:
+///   return mm_affinity &&
+///       !(waker->flags & PF_EXITING) && wakee->mm && (wakee->mm == waker->mm);
+#[inline(always)]
+fn is_wake_affine(waker: *mut task_struct, wakee: *mut task_struct) -> bool {
+    if !unsafe { MM_AFFINITY } {
+        return false;
+    }
+
+    // Read waker->flags to check PF_EXITING.
+    let waker_flags = if let Ok(f) = core_read!(vmlinux::task_struct, waker, flags) {
+        f
+    } else {
+        return false;
+    };
+    if waker_flags & PF_EXITING != 0 {
+        return false;
+    }
+
+    // Read wakee->mm (a pointer -- compare as u64 for address equality).
+    let wakee_mm = if let Ok(mm) = core_read!(vmlinux::task_struct, wakee, mm) {
+        mm as u64
+    } else {
+        return false;
+    };
+    if wakee_mm == 0 {
+        return false;
+    }
+
+    // Read waker->mm.
+    let waker_mm = if let Ok(mm) = core_read!(vmlinux::task_struct, waker, mm) {
+        mm as u64
+    } else {
+        return false;
+    };
+
+    wakee_mm == waker_mm
 }
 
 /// Read the current slice_ns value (from userspace-configurable global).
@@ -273,6 +385,28 @@ fn is_system_busy() -> bool {
         // Fallback: userspace hasn't set CPU_UTIL yet, approximate
         // by checking if the shared DSQ has queued tasks.
         kfuncs::dsq_nr_queued(SHARED_DSQ) > 0
+    }
+}
+
+/// Return the DSQ ID for the given CPU.
+///
+/// When NUMA is enabled, each NUMA node gets its own DSQ (DSQ ID = node ID).
+/// Tasks are routed to their node's DSQ to keep memory-local scheduling.
+/// When NUMA is disabled, all CPUs share a single DSQ (SHARED_DSQ = 0).
+///
+/// C reference: `shared_dsq(cpu)` returns `cpu_node(cpu)` when numa_enabled.
+#[inline(always)]
+fn shared_dsq(cpu: i32) -> u64 {
+    if unsafe { NUMA_ENABLED } {
+        // Bounds-check for BPF verifier: cpu must be within array.
+        let idx = cpu as u32 as usize;
+        if idx < MAX_CPUS {
+            unsafe { CPU_TO_NODE[idx] as u64 }
+        } else {
+            SHARED_DSQ
+        }
+    } else {
+        SHARED_DSQ
     }
 }
 
@@ -370,31 +504,109 @@ fn update_cpufreq(cpu: i32) {
     kfuncs::cpuperf_set(cpu, perf_lvl as u32);
 }
 
+// ── Idle CPU selection ──────────────────────────────────────────────────
+
+/// Pick an idle CPU for a task, with SMT awareness.
+///
+/// Uses `#[inline(always)]` instead of `#[inline(never)]` because aya's
+/// kfunc resolution does not yet handle BPF subprograms: after function
+/// linking, subprogram instructions are appended to the main function
+/// at new offsets, but `fixup_kfunc_calls()` still uses the original
+/// section offsets to look up relocations, so kfunc calls in subprograms
+/// get left as `imm=0` and the verifier rejects them with "invalid kernel
+/// function call not eliminated". Once aya fixes this, switch to
+/// `#[inline(never)]` for its own register scope.
+///
+/// Tries two strategies:
+///
+/// 1. **`select_cpu_dfl()`** — the kernel's default idle CPU picker.
+///    Always tried first; this handles wake-affine, LLC locality, and
+///    basic idle scanning.
+///
+/// 2. **SMT verification** — when `AVOID_SMT` is enabled and strategy 1
+///    found an idle CPU, we check whether the entire physical core is
+///    idle (both SMT siblings) using `get_idle_smtmask()`. If the found
+///    CPU's core is not fully idle, we reject it and return -1 so the
+///    caller falls back to non-idle dispatch.
+///
+/// Returns the idle CPU number (>= 0) if one was found, or a negative
+/// value if no suitable idle CPU is available.
+///
+/// C reference: `pick_idle_cpu()` in `main.bpf.c` with a simplified
+/// strategy set (no flat_idle_scan, no preferred_idle_scan, no hybrid
+/// core migration, no primary cpumask filtering).
+// PORT_TODO: Enhanced pick_idle_cpu() with primary cpumask filtering
+// C reference: When primary_all is false and primary_cpumask is set,
+// pick_idle_cpu() first tries scx_bpf_select_cpu_and() with the primary
+// mask and SCX_PICK_IDLE_CORE, falling back to the full cpus_ptr.
+// Requires kptr support for primary_cpumask.
+//
+// PORT_TODO: flat_idle_scan and preferred_idle_scan modes
+// C reference: When flat_idle_scan or preferred_idle_scan is true, cosmos
+// uses pick_idle_cpu_flat() which iterates CPUs in preferred order or
+// round-robin to find idle cores. Requires preferred_cpus[] array and
+// cpu_capacity[] array from userspace.
+//
+// PORT_TODO: Hybrid core wake-affine migration
+// C reference: When primary_all and the waker's CPU is faster than the
+// wakee's CPU (is_cpu_faster()), pick_idle_cpu() migrates prev_cpu to
+// this_cpu to naturally move tasks to faster cores. Requires
+// cpu_capacity[] array from userspace.
+#[inline(always)]
+fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
+    // Strategy 1: kernel's default idle CPU selection.
+    let mut is_idle: bool = false;
+    let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
+
+    if !is_idle {
+        // No idle CPU found — nothing more to try.
+        return -1;
+    }
+
+    // Strategy 2: SMT-aware verification.
+    // If avoid_smt is enabled, check whether the found CPU's physical
+    // core is fully idle (both SMT siblings). If not, reject it to
+    // avoid contention on the same core.
+    //
+    // The idle SMT mask has a bit set for each CPU whose SMT sibling(s)
+    // are ALL idle. So if cpu is set in the smtmask, the entire core
+    // is idle and it's a good pick.
+    if unsafe { SMT_ENABLED } && unsafe { AVOID_SMT } {
+        let smtmask = kfuncs::get_idle_smtmask();
+        let core_idle = cpumask::test_cpu(cpu as u32, smtmask);
+        kfuncs::put_cpumask(smtmask);
+
+        if !core_idle {
+            // The CPU is idle but its SMT sibling is busy. Reject it.
+            // The caller can still dispatch locally (non-idle path)
+            // or let enqueue() handle it.
+            return -1;
+        }
+    }
+
+    cpu
+}
+
 // ── Scheduler callbacks ─────────────────────────────────────────────────
 
 /// select_cpu: find an idle CPU for the task.
 ///
-/// Uses `scx_bpf_select_cpu_dfl` for idle CPU selection with:
+/// Uses `pick_idle_cpu()` for idle CPU selection with:
 /// - no_wake_sync: clears SCX_WAKE_SYNC from wake_flags when enabled.
+/// - SMT awareness: when avoid_smt is enabled, prefers fully-idle cores
 /// - If idle CPU found: dispatch directly to local DSQ (any saturation level)
 /// - If no idle CPU and not busy: dispatch to local DSQ (round-robin)
 /// - If no idle CPU and busy: do NOT dispatch, let enqueue() handle
 ///   deadline-mode dispatch to the shared DSQ
-// PORT_TODO: Enhanced select_cpu with pick_idle_cpu() strategies
-// C reference: cosmos_select_cpu() calls pick_idle_cpu() which tries multiple
-// strategies: (1) flat/preferred scan when enabled, (2) wake-affine optimization
-// for hybrid cores, (3) scx_bpf_select_cpu_and() with primary cpumask and
-// avoid_smt flag, (4) fallback scx_bpf_select_cpu_dfl(). It also handles
-// mm_affinity (same address space) and perf_config (event-heavy tasks).
-// The full pick_idle_cpu() requires primary_cpumask (kptr), cpu_capacity[]
-// arrays, and flat_idle_scan infrastructure that are not yet available.
+// PORT_TODO: mm_affinity (address space affinity) in select_cpu
+// C reference: When mm_affinity is true and waker/wakee share the same mm,
+// is_wake_affine() returns true and select_cpu keeps the wakee on the
+// waker's CPU for cache locality. Requires reading task_struct->mm.
 //
-// PORT_TODO: Full SMT-aware idle scanning
-// C reference: pick_idle_cpu() calls scx_bpf_get_idle_smtmask(),
-// tests the CPU against the mask, then calls scx_bpf_put_cpumask().
-// The smtmask is a KF_ACQUIRE pointer that must be released (KF_RELEASE).
-// An alternative is to use select_cpu_and() directly which handles SMT
-// internally via the SCX_PICK_IDLE_CORE flag.
+// PORT_TODO: PMU / perf event integration in select_cpu
+// C reference: When perf_config is set, cosmos_select_cpu dispatches
+// event-heavy tasks via pick_least_busy_event_cpu(). Requires BPF perf
+// event support (scx_pmu kfuncs).
 #[inline(always)]
 pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     // Clear SCX_WAKE_SYNC if no_wake_sync is enabled.
@@ -405,8 +617,8 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
         wake_flags
     };
 
-    let mut is_idle: bool = false;
-    let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, effective_wake_flags, &mut is_idle);
+    let cpu = pick_idle_cpu(p, prev_cpu, effective_wake_flags);
+    let found_idle = cpu >= 0;
 
     // Dispatch to local DSQ when:
     // 1. An idle CPU was found (always dispatch, regardless of busy state), or
@@ -415,7 +627,7 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
     // When busy and no idle CPU, don't dispatch — let enqueue() handle
     // deadline-mode dispatch to the shared DSQ for fairness.
     // C: if (cpu >= 0 || !is_busy) dsq_insert(LOCAL, ...);
-    if is_idle || !is_system_busy() {
+    if found_idle || !is_system_busy() {
         let weight = read_weight(p);
         let slice = task_slice(weight);
         kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
@@ -423,7 +635,7 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
 
     // Return the idle CPU if found, otherwise prev_cpu.
     // C: return cpu >= 0 ? cpu : prev_cpu;
-    if is_idle { cpu } else { prev_cpu }
+    if found_idle { cpu } else { prev_cpu }
 }
 
 /// enqueue: three-tier dispatch — migration, local round-robin, or shared DSQ.
@@ -548,7 +760,7 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
         unsafe { write_field_u64(p, offset, clamped_deadline); }
     }
 
-    kfuncs::dsq_insert_vtime(p, SHARED_DSQ, slice, clamped_deadline, enq_flags);
+    kfuncs::dsq_insert_vtime(p, shared_dsq(prev_cpu), slice, clamped_deadline, enq_flags);
 
     // If the task should migrate (wakeup), kick prev_cpu.
     // C: if (task_should_migrate(p, enq_flags)) wakeup_cpu(prev_cpu);
@@ -562,9 +774,13 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
 /// If the shared DSQ has a task, move it to the local CPU. Otherwise,
 /// if the previous task is still queued (expired its slice but no
 /// contention), extend its slice to avoid unnecessary context switches.
+///
+/// When NUMA is enabled, consumes from the per-node DSQ for this CPU's
+/// NUMA node instead of the single global shared DSQ.
+/// C reference: `scx_bpf_dsq_move_to_local(shared_dsq(cpu))`
 #[inline(always)]
-pub fn on_dispatch(_cpu: i32, prev: *mut task_struct) {
-    if kfuncs::dsq_move_to_local(SHARED_DSQ) {
+pub fn on_dispatch(cpu: i32, prev: *mut task_struct) {
+    if kfuncs::dsq_move_to_local(shared_dsq(cpu)) {
         return;
     }
 
@@ -739,18 +955,27 @@ pub fn on_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
     0
 }
 
-/// init: create the shared DSQ and record nr_cpu_ids.
-// PORT_TODO: Per-node DSQ creation for NUMA
-// C reference: When numa_enabled is true, cosmos_init creates one DSQ per
-// NUMA node via `bpf_for(node, 0, nr_node_ids) { create_dsq(node, node); }`.
-// Each CPU dispatches to its node's DSQ via shared_dsq(cpu) = cpu_node(cpu).
-// Implementing this requires:
-// 1. A `NUMA_ENABLED: bool` global flag
-// 2. A `NR_NODE_IDS: u32` global set by userspace
-// 3. A `cpu_node_map: HashMap<u32, u32>` BPF map populated by userspace
-// 4. A `shared_dsq(cpu)` helper that returns the node's DSQ ID
-// The loop in init would iterate `bpf_for(node, 0, nr_node_ids)` creating
-// per-node DSQs. dispatch() would use `shared_dsq(cpu)` instead of SHARED_DSQ.
+/// exit_task: clean up per-task storage when a task exits.
+///
+/// Called by the kernel when a task is being destroyed. Deletes the
+/// per-task context from the TASK_CTX storage map.
+///
+/// C reference: cosmos_exit_task() calls scx_pmu_task_fini(p).
+/// We don't have PMU support yet, so we just clean up task storage.
+// PORT_TODO: PMU per-task cleanup
+// C reference: scx_pmu_task_fini(p) cleans up per-task perf event state.
+// Requires scx_pmu_task_fini kfunc.
+#[inline(always)]
+pub fn on_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
+    // Clean up per-task storage.
+    let _ = TASK_CTX.delete(p as *mut u8);
+}
+
+/// init: create DSQ(s) and record nr_cpu_ids.
+///
+/// When NUMA is enabled, creates one DSQ per NUMA node (DSQ ID = node ID).
+/// Otherwise creates a single shared DSQ (DSQ 0).
+/// C reference: `cosmos_init()` with `bpf_for(node, 0, nr_node_ids)`.
 // PORT_TODO: PMU installation
 // C reference: When perf_config is set, cosmos_init calls scx_pmu_install().
 
@@ -807,10 +1032,28 @@ pub fn on_init() -> i32 {
     // Record the number of CPUs for bounds checking.
     unsafe { NR_CPU_IDS = kfuncs::nr_cpu_ids(); }
 
-    let err = kfuncs::create_dsq(SHARED_DSQ, -1);
-    if err != 0 {
-        scx_ebpf::scx_bpf_error!("cosmos: failed to create shared DSQ");
-        return err;
+    // Create per-node DSQs when NUMA is enabled, otherwise a single shared DSQ.
+    // C: if (numa_enabled) { bpf_for(node, 0, nr_node_ids) create_dsq(node, node); }
+    //    else { create_dsq(SHARED_DSQ, -1); }
+    if unsafe { NUMA_ENABLED } {
+        let nr_nodes = unsafe { NR_NODES };
+        // Cap at MAX_NODES to satisfy BPF verifier's bounded loop requirement.
+        let max = if nr_nodes < MAX_NODES { nr_nodes } else { MAX_NODES };
+        let mut node: u32 = 0;
+        while node < max {
+            let err = kfuncs::create_dsq(node as u64, node as i32);
+            if err != 0 {
+                scx_ebpf::scx_bpf_error!("cosmos: failed to create node DSQ");
+                return err;
+            }
+            node += 1;
+        }
+    } else {
+        let err = kfuncs::create_dsq(SHARED_DSQ, -1);
+        if err != 0 {
+            scx_ebpf::scx_bpf_error!("cosmos: failed to create shared DSQ");
+            return err;
+        }
     }
 
     // KPTR EXPERIMENT: Initialize the primary cpumask kptr.
@@ -849,6 +1092,7 @@ scx_ebpf::scx_ops_define! {
     stopping: on_stopping,
     enable: on_enable,
     init_task: on_init_task,
+    exit_task: on_exit_task,
     init: on_init,
     exit: on_exit,
 }
