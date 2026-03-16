@@ -19016,14 +19016,14 @@ enum memcg_memory_event {
 };
 
 enum memcg_stat_item {
-	MEMCG_SWAP = 48,
-	MEMCG_SOCK = 49,
-	MEMCG_PERCPU_B = 50,
-	MEMCG_VMALLOC = 51,
-	MEMCG_KMEM = 52,
-	MEMCG_ZSWAP_B = 53,
-	MEMCG_ZSWAPPED = 54,
-	MEMCG_NR_STAT = 55,
+	MEMCG_SWAP = 51,
+	MEMCG_SOCK = 52,
+	MEMCG_PERCPU_B = 53,
+	MEMCG_VMALLOC = 54,
+	MEMCG_KMEM = 55,
+	MEMCG_ZSWAP_B = 56,
+	MEMCG_ZSWAPPED = 57,
+	MEMCG_NR_STAT = 58,
 };
 
 enum meminit_context {
@@ -20075,14 +20075,17 @@ enum node_stat_item {
 	NR_SECONDARY_PAGETABLE = 38,
 	NR_IOMMU_PAGES = 39,
 	NR_SWAPCACHE = 40,
-	PGDEMOTE_KSWAPD = 41,
-	PGDEMOTE_DIRECT = 42,
-	PGDEMOTE_KHUGEPAGED = 43,
-	PGDEMOTE_PROACTIVE = 44,
-	NR_HUGETLB = 45,
-	NR_BALLOON_PAGES = 46,
-	NR_KERNEL_FILE_PAGES = 47,
-	NR_VM_NODE_STAT_ITEMS = 48,
+	PGPROMOTE_SUCCESS = 41,
+	PGPROMOTE_CANDIDATE = 42,
+	PGPROMOTE_CANDIDATE_NRL = 43,
+	PGDEMOTE_KSWAPD = 44,
+	PGDEMOTE_DIRECT = 45,
+	PGDEMOTE_KHUGEPAGED = 46,
+	PGDEMOTE_PROACTIVE = 47,
+	NR_HUGETLB = 48,
+	NR_BALLOON_PAGES = 49,
+	NR_KERNEL_FILE_PAGES = 50,
+	NR_VM_NODE_STAT_ITEMS = 51,
 };
 
 enum node_states {
@@ -20113,6 +20116,13 @@ enum ns_type {
 	NET_NS = 1073741824,
 };
 
+enum numa_faults_stats {
+	NUMA_MEM = 0,
+	NUMA_CPU = 1,
+	NUMA_MEMBUF = 2,
+	NUMA_CPUBUF = 3,
+};
+
 enum numa_stat_item {
 	NUMA_HIT = 0,
 	NUMA_MISS = 1,
@@ -20127,6 +20137,22 @@ enum numa_topology_type {
 	NUMA_DIRECT = 0,
 	NUMA_GLUELESS_MESH = 1,
 	NUMA_BACKPLANE = 2,
+};
+
+enum numa_type {
+	node_has_spare = 0,
+	node_fully_busy = 1,
+	node_overloaded = 2,
+};
+
+enum numa_vmaskip_reason {
+	NUMAB_SKIP_UNSUITABLE = 0,
+	NUMAB_SKIP_SHARED_RO = 1,
+	NUMAB_SKIP_INACCESSIBLE = 2,
+	NUMAB_SKIP_SCAN_DELAY = 3,
+	NUMAB_SKIP_PID_INACTIVE = 4,
+	NUMAB_SKIP_IGNORE_PID = 5,
+	NUMAB_SKIP_SEQ_COMPLETED = 6,
 };
 
 enum nvmem_type {
@@ -25303,46 +25329,51 @@ enum vm_event_item {
 	DROP_PAGECACHE = 50,
 	DROP_SLAB = 51,
 	OOM_KILL = 52,
-	PGMIGRATE_SUCCESS = 53,
-	PGMIGRATE_FAIL = 54,
-	THP_MIGRATION_SUCCESS = 55,
-	THP_MIGRATION_FAIL = 56,
-	THP_MIGRATION_SPLIT = 57,
-	COMPACTMIGRATE_SCANNED = 58,
-	COMPACTFREE_SCANNED = 59,
-	COMPACTISOLATED = 60,
-	COMPACTSTALL = 61,
-	COMPACTFAIL = 62,
-	COMPACTSUCCESS = 63,
-	KCOMPACTD_WAKE = 64,
-	KCOMPACTD_MIGRATE_SCANNED = 65,
-	KCOMPACTD_FREE_SCANNED = 66,
-	HTLB_BUDDY_PGALLOC = 67,
-	HTLB_BUDDY_PGALLOC_FAIL = 68,
-	UNEVICTABLE_PGCULLED = 69,
-	UNEVICTABLE_PGSCANNED = 70,
-	UNEVICTABLE_PGRESCUED = 71,
-	UNEVICTABLE_PGMLOCKED = 72,
-	UNEVICTABLE_PGMUNLOCKED = 73,
-	UNEVICTABLE_PGCLEARED = 74,
-	UNEVICTABLE_PGSTRANDED = 75,
-	BALLOON_INFLATE = 76,
-	BALLOON_DEFLATE = 77,
-	BALLOON_MIGRATE = 78,
-	SWAP_RA = 79,
-	SWAP_RA_HIT = 80,
-	SWPIN_ZERO = 81,
-	SWPOUT_ZERO = 82,
-	DIRECT_MAP_LEVEL2_SPLIT = 83,
-	DIRECT_MAP_LEVEL3_SPLIT = 84,
-	DIRECT_MAP_LEVEL2_COLLAPSE = 85,
-	DIRECT_MAP_LEVEL3_COLLAPSE = 86,
-	KSTACK_1K = 87,
-	KSTACK_2K = 88,
-	KSTACK_4K = 89,
-	KSTACK_8K = 90,
-	KSTACK_16K = 91,
-	NR_VM_EVENT_ITEMS = 92,
+	NUMA_PTE_UPDATES = 53,
+	NUMA_HUGE_PTE_UPDATES = 54,
+	NUMA_HINT_FAULTS = 55,
+	NUMA_HINT_FAULTS_LOCAL = 56,
+	NUMA_PAGE_MIGRATE = 57,
+	PGMIGRATE_SUCCESS = 58,
+	PGMIGRATE_FAIL = 59,
+	THP_MIGRATION_SUCCESS = 60,
+	THP_MIGRATION_FAIL = 61,
+	THP_MIGRATION_SPLIT = 62,
+	COMPACTMIGRATE_SCANNED = 63,
+	COMPACTFREE_SCANNED = 64,
+	COMPACTISOLATED = 65,
+	COMPACTSTALL = 66,
+	COMPACTFAIL = 67,
+	COMPACTSUCCESS = 68,
+	KCOMPACTD_WAKE = 69,
+	KCOMPACTD_MIGRATE_SCANNED = 70,
+	KCOMPACTD_FREE_SCANNED = 71,
+	HTLB_BUDDY_PGALLOC = 72,
+	HTLB_BUDDY_PGALLOC_FAIL = 73,
+	UNEVICTABLE_PGCULLED = 74,
+	UNEVICTABLE_PGSCANNED = 75,
+	UNEVICTABLE_PGRESCUED = 76,
+	UNEVICTABLE_PGMLOCKED = 77,
+	UNEVICTABLE_PGMUNLOCKED = 78,
+	UNEVICTABLE_PGCLEARED = 79,
+	UNEVICTABLE_PGSTRANDED = 80,
+	BALLOON_INFLATE = 81,
+	BALLOON_DEFLATE = 82,
+	BALLOON_MIGRATE = 83,
+	SWAP_RA = 84,
+	SWAP_RA_HIT = 85,
+	SWPIN_ZERO = 86,
+	SWPOUT_ZERO = 87,
+	DIRECT_MAP_LEVEL2_SPLIT = 88,
+	DIRECT_MAP_LEVEL3_SPLIT = 89,
+	DIRECT_MAP_LEVEL2_COLLAPSE = 90,
+	DIRECT_MAP_LEVEL3_COLLAPSE = 91,
+	KSTACK_1K = 92,
+	KSTACK_2K = 93,
+	KSTACK_4K = 94,
+	KSTACK_8K = 95,
+	KSTACK_16K = 96,
+	NR_VM_EVENT_ITEMS = 97,
 };
 
 enum vm_fault_reason {
@@ -27246,6 +27277,15 @@ typedef struct {
 	void *lock;
 } class_cpus_read_lock_t;
 
+struct raw_spinlock;
+
+typedef struct raw_spinlock raw_spinlock_t;
+
+typedef struct {
+	raw_spinlock_t *lock;
+	raw_spinlock_t *lock2;
+} class_double_raw_spinlock_t;
+
 typedef struct {
 	struct rq *lock;
 	struct rq *lock2;
@@ -27345,10 +27385,6 @@ typedef struct {
 typedef struct {
 	void *lock;
 } class_preempt_t;
-
-struct raw_spinlock;
-
-typedef struct raw_spinlock raw_spinlock_t;
 
 typedef struct {
 	raw_spinlock_t *lock;
@@ -91808,6 +91844,13 @@ struct migration_mpol {
 	long unsigned int ilx;
 };
 
+struct migration_swap_arg {
+	struct task_struct *src_task;
+	struct task_struct *dst_task;
+	int src_cpu;
+	int dst_cpu;
+};
+
 struct migration_target_control {
 	int nid;
 	nodemask_t *nmask;
@@ -92225,12 +92268,20 @@ struct mm_struct {
 		struct user_namespace *user_ns;
 		struct file *exe_file;
 		struct mmu_notifier_subscriptions *notifier_subscriptions;
+		long unsigned int numa_next_scan;
+		long unsigned int numa_scan_offset;
+		int numa_scan_seq;
 		atomic_t tlb_flush_pending;
 		atomic_t tlb_flush_batched;
 		struct uprobes_state uprobes_state;
 		atomic_long_t hugetlb_usage;
 		struct work_struct async_put_work;
 		struct iommu_mm_data *iommu_mm;
+		long: 64;
+		long: 64;
+		long: 64;
+		long: 64;
+		long: 64;
 		long: 64;
 	};
 	char flexible_array[0];
@@ -96498,6 +96549,18 @@ struct numa_drop_counters {
 	long: 64;
 };
 
+struct numa_group {
+	refcount_t refcount;
+	spinlock_t lock;
+	int nr_tasks;
+	pid_t gid;
+	int active_nodes;
+	struct callback_head rcu;
+	long unsigned int total_faults;
+	long unsigned int max_faults_cpu;
+	long unsigned int faults[0];
+};
+
 struct numa_maps {
 	long unsigned int pages;
 	long unsigned int anon;
@@ -96538,6 +96601,17 @@ struct numa_memblk {
 struct numa_meminfo {
 	int nr_blks;
 	struct numa_memblk blk[128];
+};
+
+struct numa_stats {
+	long unsigned int load;
+	long unsigned int runnable;
+	long unsigned int util;
+	long unsigned int compute_capacity;
+	unsigned int nr_running;
+	unsigned int weight;
+	enum numa_type node_type;
+	int idle_cpu;
 };
 
 struct nvmem_cell_entry;
@@ -99499,7 +99573,7 @@ struct pebs_xmm {
 
 struct per_cpu_nodestat {
 	s8 stat_threshold;
-	s8 vm_node_stat_diff[48];
+	s8 vm_node_stat_diff[51];
 };
 
 struct per_cpu_pages {
@@ -100444,22 +100518,20 @@ struct pglist_data {
 	long: 64;
 	long: 64;
 	struct cacheline_padding _pad1_;
+	unsigned int nbp_rl_start;
+	long unsigned int nbp_rl_nr_cand;
+	unsigned int nbp_threshold;
+	unsigned int nbp_th_start;
+	long unsigned int nbp_th_nr_cand;
 	struct lruvec __lruvec;
 	long unsigned int flags;
 	long: 64;
 	long: 64;
 	long: 64;
-	long: 64;
-	long: 64;
-	long: 64;
-	long: 64;
 	struct cacheline_padding _pad2_;
 	struct per_cpu_nodestat *per_cpu_nodestats;
-	atomic_long_t vm_stat[48];
+	atomic_long_t vm_stat[51];
 	struct memory_tier *memtier;
-	long: 64;
-	long: 64;
-	long: 64;
 	long: 64;
 	long: 64;
 	long: 64;
@@ -105772,6 +105844,8 @@ struct sched_class;
 
 struct rq {
 	unsigned int nr_running;
+	unsigned int nr_numa_running;
+	unsigned int nr_preferred_running;
 	unsigned int ttwu_pending;
 	long unsigned int cpu_capacity;
 	union {
@@ -105779,7 +105853,6 @@ struct rq {
 		struct task_struct *curr;
 	};
 	struct task_struct *idle;
-	long: 64;
 	long: 64;
 	long: 64;
 	long: 64;
@@ -105798,13 +105871,13 @@ struct rq {
 	struct sched_dl_entity fair_server;
 	struct list_head leaf_cfs_rq_list;
 	struct list_head *tmp_alone_branch;
+	unsigned int numa_migrate_on;
 	long unsigned int nr_uninterruptible;
 	struct sched_dl_entity *dl_server;
 	struct task_struct *stop;
 	const struct sched_class *next_class;
 	long unsigned int next_balance;
 	struct mm_struct *prev_mm;
-	long: 64;
 	long: 64;
 	u64 clock_task;
 	u64 clock_pelt;
@@ -107878,6 +107951,8 @@ struct sg_lb_stats {
 	unsigned int group_smt_balance;
 	long unsigned int group_misfit_task_load;
 	unsigned int group_overutilized;
+	unsigned int nr_numa_running;
+	unsigned int nr_preferred_running;
 };
 
 struct sd_lb_stats {
@@ -114395,6 +114470,22 @@ struct task_group {
 	struct cfs_bandwidth cfs_bandwidth;
 };
 
+struct task_numa_env {
+	struct task_struct *p;
+	int src_cpu;
+	int src_nid;
+	int dst_cpu;
+	int dst_nid;
+	int imb_numa_nr;
+	struct numa_stats src_stats;
+	struct numa_stats dst_stats;
+	int imbalance_pct;
+	int dist;
+	struct task_struct *best_task;
+	long int best_imp;
+	int best_cpu;
+};
+
 typedef struct task_struct *class_find_get_task_t;
 
 struct thread_info {
@@ -114648,6 +114739,20 @@ struct task_struct {
 	short int il_prev;
 	u8 il_weight;
 	short int pref_node_fork;
+	int numa_scan_seq;
+	unsigned int numa_scan_period;
+	unsigned int numa_scan_period_max;
+	int numa_preferred_nid;
+	long unsigned int numa_migrate_retry;
+	u64 node_stamp;
+	u64 last_task_numa_placement;
+	u64 last_sum_exec_runtime;
+	struct callback_head numa_work;
+	struct numa_group *numa_group;
+	long unsigned int *numa_faults;
+	long unsigned int total_numa_faults;
+	long unsigned int numa_faults_locality[3];
+	long unsigned int numa_pages_migrated;
 	struct rseq_data rseq;
 	struct sched_mm_cid mm_cid;
 	struct tlbflush_unmap_batch tlb_ubc;
@@ -114694,13 +114799,6 @@ struct task_struct {
 	struct callback_head l1d_flush_kill;
 	struct unwind_task_info unwind_info;
 	struct thread_struct thread;
-	long: 64;
-	long: 64;
-	long: 64;
-	long: 64;
-	long: 64;
-	long: 64;
-	long: 64;
 };
 
 struct task_struct__safe_rcu {
@@ -118620,6 +118718,10 @@ struct trace_event_data_offsets_sched_migrate_task {
 	const void *comm_ptr_;
 };
 
+struct trace_event_data_offsets_sched_move_numa {};
+
+struct trace_event_data_offsets_sched_numa_pair_template {};
+
 struct trace_event_data_offsets_sched_pi_setprio {
 	u32 comm;
 	const void *comm_ptr_;
@@ -118657,6 +118759,10 @@ struct trace_event_data_offsets_sched_process_wait {
 	u32 comm;
 	const void *comm_ptr_;
 };
+
+struct trace_event_data_offsets_sched_skip_cpuset_numa {};
+
+struct trace_event_data_offsets_sched_skip_vma_numa {};
 
 struct trace_event_data_offsets_sched_stat_runtime {
 	u32 comm;
@@ -123769,6 +123875,33 @@ struct trace_event_raw_sched_migrate_task {
 	char __data[0];
 };
 
+struct trace_event_raw_sched_move_numa {
+	struct trace_entry ent;
+	pid_t pid;
+	pid_t tgid;
+	pid_t ngid;
+	int src_cpu;
+	int src_nid;
+	int dst_cpu;
+	int dst_nid;
+	char __data[0];
+};
+
+struct trace_event_raw_sched_numa_pair_template {
+	struct trace_entry ent;
+	pid_t src_pid;
+	pid_t src_tgid;
+	pid_t src_ngid;
+	int src_cpu;
+	int src_nid;
+	pid_t dst_pid;
+	pid_t dst_tgid;
+	pid_t dst_ngid;
+	int dst_cpu;
+	int dst_nid;
+	char __data[0];
+};
+
 struct trace_event_raw_sched_pi_setprio {
 	struct trace_entry ent;
 	u32 __data_loc_comm;
@@ -123826,6 +123959,25 @@ struct trace_event_raw_sched_process_wait {
 	u32 __data_loc_comm;
 	pid_t pid;
 	int prio;
+	char __data[0];
+};
+
+struct trace_event_raw_sched_skip_cpuset_numa {
+	struct trace_entry ent;
+	char comm[16];
+	pid_t pid;
+	pid_t tgid;
+	pid_t ngid;
+	long unsigned int mem_allowed[1];
+	char __data[0];
+};
+
+struct trace_event_raw_sched_skip_vma_numa {
+	struct trace_entry ent;
+	long unsigned int numa_scan_offset;
+	long unsigned int vm_start;
+	long unsigned int vm_end;
+	enum numa_vmaskip_reason reason;
 	char __data[0];
 };
 
@@ -129185,6 +129337,8 @@ struct vm_area_desc {
 
 struct vm_userfaultfd_ctx {};
 
+struct vma_numab_state;
+
 struct vm_area_struct {
 	union {
 		struct {
@@ -129208,7 +129362,7 @@ struct vm_area_struct {
 	void *vm_private_data;
 	atomic_long_t swap_readahead_info;
 	struct mempolicy *vm_policy;
-	long: 64;
+	struct vma_numab_state *numab_state;
 	refcount_t vm_refcnt;
 	struct lockdep_map vmlock_dep_map;
 	struct {
@@ -129230,7 +129384,7 @@ struct vm_area_struct__safe_trusted_or_null {
 };
 
 struct vm_event_state {
-	long unsigned int event[92];
+	long unsigned int event[97];
 };
 
 struct vm_fault {
@@ -129351,6 +129505,14 @@ struct vma_merge_struct {
 	bool __adjust_next_start: 1;
 	bool __remove_middle: 1;
 	bool __remove_next: 1;
+};
+
+struct vma_numab_state {
+	long unsigned int next_scan;
+	long unsigned int pids_active_reset;
+	long unsigned int pids_active[2];
+	int start_scan_seq;
+	int prev_scan_seq;
 };
 
 struct vma_prepare {
@@ -134010,6 +134172,8 @@ typedef void (*btf_trace_sched_kthread_work_queue_work)(void *, struct kthread_w
 
 typedef void (*btf_trace_sched_migrate_task)(void *, struct task_struct *, int);
 
+typedef void (*btf_trace_sched_move_numa)(void *, struct task_struct *, int, int);
+
 typedef void (*btf_trace_sched_overutilized_tp)(void *, struct root_domain *, bool);
 
 typedef void (*btf_trace_sched_pi_setprio)(void *, struct task_struct *, struct task_struct *);
@@ -134028,6 +134192,10 @@ typedef void (*btf_trace_sched_process_wait)(void *, struct pid *);
 
 typedef void (*btf_trace_sched_set_need_resched_tp)(void *, struct task_struct *, int, int);
 
+typedef void (*btf_trace_sched_skip_cpuset_numa)(void *, struct task_struct *, nodemask_t *);
+
+typedef void (*btf_trace_sched_skip_vma_numa)(void *, struct mm_struct *, struct vm_area_struct *, enum numa_vmaskip_reason);
+
 typedef void (*btf_trace_sched_stat_blocked)(void *, struct task_struct *, u64);
 
 typedef void (*btf_trace_sched_stat_iowait)(void *, struct task_struct *, u64);
@@ -134037,6 +134205,10 @@ typedef void (*btf_trace_sched_stat_runtime)(void *, struct task_struct *, u64);
 typedef void (*btf_trace_sched_stat_sleep)(void *, struct task_struct *, u64);
 
 typedef void (*btf_trace_sched_stat_wait)(void *, struct task_struct *, u64);
+
+typedef void (*btf_trace_sched_stick_numa)(void *, struct task_struct *, int, struct task_struct *, int);
+
+typedef void (*btf_trace_sched_swap_numa)(void *, struct task_struct *, int, struct task_struct *, int);
 
 typedef void (*btf_trace_sched_switch)(void *, bool, struct task_struct *, struct task_struct *, unsigned int);
 
