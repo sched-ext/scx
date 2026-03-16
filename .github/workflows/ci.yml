@@ -13,7 +13,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail -x {0}
+
 env:
+  PS4: '+ $(date "+%H:%M:%S") '
   BPF_CLANG: clang-19
   SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng"
   SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
@@ -114,7 +119,10 @@ jobs:
           version: v19
           network: user
           verbose: true
-          run: cargo veristat --profile ci --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
+          run: |
+            export PS4='+ $(date "+%H:%M:%S") '
+            set -x
+            cargo veristat --profile ci --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
       - name: 'Dump BTF: ${{ matrix.kernel.name }}'
         if: always()
         uses: likewhatevs/vng-action@v0.4.0
@@ -126,6 +134,8 @@ jobs:
           version: v19
           network: user
           run: |
+            export PS4='+ $(date "+%H:%M:%S") '
+            set -x
             mkdir -p btf-dump
             /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > btf-dump/kernel-vmlinux.h
             /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format raw > btf-dump/kernel-raw.btf
@@ -177,7 +187,10 @@ jobs:
           version: v19
           network: user
           verbose: true
-          run: target/ci/scx_arena_selftests
+          run: |
+            export PS4='+ $(date "+%H:%M:%S") '
+            set -x
+            target/ci/scx_arena_selftests
       - name: Build all schedulers
         run: |
           for sched in beerland bpfland cake chaos cosmos flash lavd layered p2dq pandemonium rlfifo rustland rusty tickless; do
@@ -205,6 +218,8 @@ jobs:
           version: v19
           network: user
           run: |
+            export PS4='+ $(date "+%H:%M:%S") '
+            set -x
             mkdir -p btf-dump
             /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > btf-dump/kernel-vmlinux.h
             /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format raw > btf-dump/kernel-raw.btf
@@ -225,6 +240,8 @@ jobs:
           network: user
           verbose: true
           run: |
+            export PS4='+ $(date "+%H:%M:%S") '
+            set -x
             set +e
             passed=""
             failed=""
