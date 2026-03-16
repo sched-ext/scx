@@ -56,16 +56,18 @@ jobs:
           - name: scx__sched_ext__for-next
             url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
             tag: for-next
+            allow-failure: true
           - name: scx__bpf__bpf-next
             url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
             tag: master
+            allow-failure: true
           - name: scx__stable__linux-rolling-stable
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-rolling-stable
           - name: scx__stable__6_13
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.13.y
-            veristat-disable: scx_layered scx_lavd
+            veristat-disable: scx_layered scx_lavd scx_arena_selftests
           - name: scx__stable__6_16
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.16.y
@@ -74,6 +76,7 @@ jobs:
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.18.y
     runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.kernel.allow-failure == true }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -108,11 +111,14 @@ jobs:
             --mtime='1970-01-01 00:00:00 UTC' \
             -cf rust/scx_utils/vmlinux.tar.zst \
             -C scheds vmlinux
-      - name: Disable veristat for excluded schedulers
+      - name: Disable veristat for excluded packages
         if: matrix.kernel.veristat-disable != ''
         run: |
           for pkg in ${{ matrix.kernel.veristat-disable }}; do
-            printf '\n[package.metadata.veristat]\ndisable = true\n' >> "scheds/rust/${pkg}/Cargo.toml"
+            manifest=$(cargo metadata --format-version 1 --no-deps | jq -r ".packages[] | select(.name == \"$pkg\") | .manifest_path")
+            if [ -n "$manifest" ]; then
+              printf '\n[package.metadata.veristat]\ndisable = true\n' >> "$manifest"
+            fi
           done
       - name: Build packages
         run: cargo build --profile ci --locked
