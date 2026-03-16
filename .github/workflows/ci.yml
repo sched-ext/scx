@@ -146,9 +146,9 @@ jobs:
       fail-fast: false
       matrix:
         kernel:
-          - name: scx__sched_ext__for-next
-            url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
-            tag: for-next
+          - name: scx__stable__linux-rolling-stable
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-rolling-stable
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
