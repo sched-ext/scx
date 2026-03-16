@@ -8,6 +8,9 @@ repository = "https://github.com/sched-ext/scx"
 description = "Cache Usage Analyzer for sched_ext Schedulers"
 build = "build.rs"
 
+[package.metadata.veristat]
+disable = true
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
