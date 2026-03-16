@@ -1,0 +1,508 @@
+[{
+        "value": {
+            ".rodata": [{
+                    "scx_storage_init_single.____fmt": "Did not find map entry for cpu %d"
+                },{
+                    "arena_init.____fmt": "uninitialized nr_cpu_ids variable"
+                },{
+                    "arena_init.____fmt.1": "scx_bitmap_init failed with %d"
+                },{
+                    "arena_init.____fmt.2": "scx_percpu_storage_init failed with %d"
+                },{
+                    "arena_init.____fmt.3": "scx_task_init failed with %d"
+                },{
+                    "arena_init.____fmt.4": "scx_rb_init failed with %d"
+                },{
+                    "arena_init.____fmt.5": "scx_atq_init failed with %d"
+                },{
+                    "__SCX_OPS_NAME_LEN": 128
+                },{
+                    "__SCX_SLICE_DFL": 20000000
+                },{
+                    "__SCX_SLICE_INF": 18446744073709551615
+                },{
+                    "__SCX_RQ_ONLINE": 1
+                },{
+                    "__SCX_RQ_CAN_STOP_TICK": 2
+                },{
+                    "__SCX_RQ_BAL_PENDING": 4
+                },{
+                    "__SCX_RQ_BAL_KEEP": 8
+                },{
+                    "__SCX_RQ_BYPASSING": 16
+                },{
+                    "__SCX_RQ_CLK_VALID": 32
+                },{
+                    "__SCX_RQ_IN_WAKEUP": 65536
+                },{
+                    "__SCX_RQ_IN_BALANCE": 131072
+                },{
+                    "__SCX_DSQ_FLAG_BUILTIN": 9223372036854775808
+                },{
+                    "__SCX_DSQ_FLAG_LOCAL_ON": 4611686018427387904
+                },{
+                    "__SCX_DSQ_INVALID": 9223372036854775808
+                },{
+                    "__SCX_DSQ_GLOBAL": 9223372036854775809
+                },{
+                    "__SCX_DSQ_LOCAL": 9223372036854775810
+                },{
+                    "__SCX_DSQ_LOCAL_ON": 13835058055282163712
+                },{
+                    "__SCX_DSQ_LOCAL_CPU_MASK": 4294967295
+                },{
+                    "__SCX_TASK_QUEUED": 1
+                },{
+                    "__SCX_TASK_RESET_RUNNABLE_AT": 4
+                },{
+                    "__SCX_TASK_DEQD_FOR_SLEEP": 8
+                },{
+                    "__SCX_TASK_STATE_SHIFT": 8
+                },{
+                    "__SCX_TASK_STATE_BITS": 2
+                },{
+                    "__SCX_TASK_STATE_MASK": 768
+                },{
+                    "__SCX_TASK_CURSOR": 18446744071562067968
+                },{
+                    "__SCX_TASK_NONE": 0
+                },{
+                    "__SCX_TASK_INIT": 1
+                },{
+                    "__SCX_TASK_READY": 2
+                },{
+                    "__SCX_TASK_ENABLED": 3
+                },{
+                    "__SCX_TASK_NR_STATES": 4
+                },{
+                    "__SCX_TASK_DSQ_ON_PRIQ": 1
+                },{
+                    "__SCX_KICK_IDLE": 1
+                },{
+                    "__SCX_KICK_PREEMPT": 2
+                },{
+                    "__SCX_KICK_WAIT": 4
+                },{
+                    "__SCX_ENQ_WAKEUP": 1
+                },{
+                    "__SCX_ENQ_HEAD": 16
+                },{
+                    "__SCX_ENQ_PREEMPT": 4294967296
+                },{
+                    "__SCX_ENQ_REENQ": 1099511627776
+                },{
+                    "__SCX_ENQ_LAST": 2199023255552
+                },{
+                    "__SCX_ENQ_CLEAR_OPSS": 72057594037927936
+                },{
+                    "__SCX_ENQ_DSQ_PRIQ": 144115188075855872
+                },{
+                    "__SCX_DEQ_SCHED_CHANGE": 0
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "create_save_bpfmask.____fmt": "Failed to create bpfmask"
+                },{
+                    "create_save_bpfmask.____fmt.6": "kptr already had cpumask"
+                },{
+                    "scx_atq_pop.____fmt": "%s: error %d"
+                },{
+                    "scx_atq_cancel.____fmt": "Failed to lock ATQ for task"
+                },{
+                    "scx_atq_cancel.____fmt.1": "Failed to remove node from task"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "nr_cpu_ids": 32
+                },{
+                    "scx_bitmap_copy_to_stack.____fmt": "invalid pointer args to pointer copy"
+                },{
+                    "scx_bitmap_print.____fmt": "%08x"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "scx_minheap_dump.____fmt": "HEAP %p SIZE %ld"
+                },{
+                    "scx_minheap_dump.____fmt.1": "[0] (0x%lx, %ld)"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "rbnode_print.___fmt": "[DEPTH %d] %p (%s) PARENT %p"
+                },{
+                    "rbnode_print.___fmt.2": [9,75,86,32,40,37,108,100,44,32,37,108,100,41,32,76,69,70,84,32,37,112,32,82,73,71,72,84,32,37,112,93,10,0
+                    ]
+                },{
+                    "rb_print.____fmt": "=== BPF PRINTK START ==="
+                },{
+                    "rb_print.____fmt.3": "=== BPF PRINTK END (depth %d)==="
+                },{
+                    "rb_print.____fmt.4": "=== BPF PRINTK END ==="
+                },{
+                    "rb_integrity_check.____fmt": "WARNING: Inconsistent tree. Parent %p has no child %p"
+                },{
+                    "rb_integrity_check.____fmt.5": "WARNING: Inconsistent tree, node %p is its own parent"
+                },{
+                    "rb_integrity_check.____fmt.6": "WARNING: Inconsistent tree, node %p is its own left child"
+                },{
+                    "rb_integrity_check.____fmt.7": "WARNING: Inconsistent tree, node %p is its own right child"
+                },{
+                    "rb_integrity_check.____fmt.8": "WARNING: Inconsistent tree. Parent has %p has red child %p"
+                },{
+                    "rb_integrity_check.____fmt.9": "WARNING: Inconsistent tree. Parent has %p has red child %p"
+                },{
+                    "rb_integrity_check.____fmt.10": "WARNING: Inconsistent tree. Black node %p has no sibling"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "rb_node_remove.____fmt": "rbtree: removed black node has no sibling"
+                },{
+                    "rb_node_remove.____fmt.11": "rbtree: removed black node has no sibling"
+                },{
+                    "rbnode_remove_node_single_child.____fmt": "Node unexpectedly red"
+                },{
+                    "rbnode_remove_node_single_child.____fmt.12": "Only child is black"
+                },{
+                    "scx_arena_subprog_init.____fmt": "%s: arena pointer %p"
+                },{
+                    "scx_alloc_free_idx.____fmt": "%s: root not allocated"
+                },{
+                    "scx_alloc_free_idx.____fmt.1": "%s: freeing nonexistent idx [0x%llx] (level %llu)"
+                },{
+                    "scx_alloc_internal.____fmt": "%s: failed to find empty tree key"
+                },{
+                    "scx_alloc_internal.____fmt.2": "%s: failed to allocate data from pool"
+                },{
+                    "scx_static_alloc_internal.____fmt": [105,110,118,97,108,105,100,32,114,101,113,117,101,115,116,32,37,108,100,44,32,109,97,120,32,105,115,32,37,108,100,10,0
+                    ]
+                },{
+                    "scx_static_alloc_internal.____fmt.3": "concurrent static memory allocations unsupported"
+                },{
+                    "scx_stk_init.____fmt": "failed to allocate lock"
+                },{
+                    "scx_stk_free_internal.____fmt": "spinlock error %d"
+                },{
+                    "scx_stk_alloc.____fmt": "using uninitialized stack allocator"
+                },{
+                    "scx_stk_alloc.____fmt.4": "spinlock error %d"
+                },{
+                    "scx_stk_alloc.____fmt.5": "elem creation failed"
+                },{
+                    "scx_buddy_alloc_internal.____fmt": "Allocation size %lu too large"
+                },{
+                    "scx_buddy_free_internal.____fmt": "Freeing unaligned address %llx"
+                },{
+                    "scx_buddy_free_internal.____fmt.6": "could not find chunk for address %llx"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "pool_set_size.____fmt.7": "%s: allocation size is 0"
+                },{
+                    "scx_stk_fill_new_elems.____fmt": "new elements must fit into a single segment"
+                },{
+                    "scx_stk_get_arena_memory.____fmt": "spinlock error %d"
+                },{
+                    "scx_buddy_chunk_get.____fmt": "buddy chunk metadata require allocation of order %d"
+                },{
+                    "header_set_order.____fmt": "setting invalid order"
+                },{
+                    "header_set_order.____fmt.8": "setting order of invalid offset"
+                },{
+                    "size_to_order.____fmt": "size 0 has no order"
+                },{
+                    "size_to_order.____fmt.9": "size 0 has no order"
+                },{
+                    "scx_task_alloc.____fmt": "%s:%d bpf_task_storage_get failed"
+                },{
+                    "scx_task_alloc.____fmt.1": "%s:%d scx_alloc failed"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "topo_init.____fmt": "couldn't initialize topology"
+                },{
+                    "topo_init.____fmt.1": "mask not a subset of a topology node"
+                },{
+                    "topo_init.____fmt.2": "partially intersecting topology nodes"
+                },{
+                    "topo_init.____fmt.3": "child is not valid"
+                },{
+                    "topo_init.____fmt.4": "topology is too deep"
+                },{
+                    "topo_find_descendant.____fmt": "missing cpu from topology"
+                },{
+                    "topo_find_descendant.____fmt.5": "missing cpu from inner topology nodes"
+                },{
+                    "topo_find_ancestor.____fmt": "could not find cpu"
+                },{
+                    "topo_find_sibling.____fmt": "node is at the top level"
+                },{
+                    "topo_mask_level_internal.____fmt": "invalid topology level %d"
+                },{
+                    "topo_mask_level_internal.____fmt.6": "requesting cpumask from lower level %d, starting from %d"
+                },{
+                    "topo_iter_next.____fmt": "passing NULL iterator"
+                },{
+                    "topo_iter_next.____fmt.7": "invalid child level %d"
+                },{
+                    "topo_iter_next.____fmt.8": "invalid child level %d"
+                },{
+                    "topo_iter_next.____fmt.9": "invalid level %d"
+                },{
+                    "topo_cpu_to_llc_id.____fmt": "invalid cpu id: %u"
+                },{
+                    "topo_cpu_to_llc_id.____fmt.10": "cpu %u has no topology node set"
+                },{
+                    "topo_print.____fmt": "[NO TOPOLOGY]"
+                },{
+                    "topo_print.___fmt": "%s (LEVEL %d) [%d, %d, %d ,%d, %d]"
+                },{
+                    "topo_print_by_level.____fmt": "TOP-LEVEL MASK"
+                },{
+                    "topo_print_by_level.____fmt.11": [10,0
+                    ]
+                },{
+                    "topo_print_by_level.____fmt.12": "NODE MASKS"
+                },{
+                    "topo_print_by_level.____fmt.13": [10,0
+                    ]
+                },{
+                    "topo_print_by_level.____fmt.14": "LLC MASKS"
+                },{
+                    "topo_print_by_level.____fmt.15": [10,0
+                    ]
+                },{
+                    "topo_print_by_level.____fmt.16": "CORE MASKS"
+                },{
+                    "topo_print_by_level.____fmt.17": [10,0
+                    ]
+                },{
+                    "topo_print_by_level.____fmt.18": "CPU MASKS"
+                },{
+                    "topo_print_by_level.____fmt.19": [10,0
+                    ]
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "topo_node.____fmt": "static allocation failed"
+                },{
+                    "topo_node.____fmt.20": "topology is too deep"
+                },{
+                    "topo_node.____fmt.21": "invalid node id"
+                },{
+                    "topo_add.____fmt": "NULL mask pointer"
+                },{
+                    "topo_add.____fmt.22": "topology fanout is too large"
+                },{
+                    "scx_storage_init_single.____fmt": "Did not find map entry for cpu %d"
+                },{
+                    "topo_config": {
+                        "nr_cpus": 32,
+                        "nr_llcs": 2,
+                        "nr_nodes": 1,
+                        "smt_enabled": true,
+                        "has_little_cores": true
+                    }
+                },{
+                    "timeline_config": {
+                        "min_slice_us": 100,
+                        "max_exec_ns": 10000000,
+                        "autoslice": false,
+                        "deadline": false
+                    }
+                },{
+                    "lb_config": {
+                        "backoff_ns": 5000000,
+                        "dispatch_lb_busy": 75,
+                        "min_llc_runs_pick2": 1,
+                        "min_nr_queued_pick2": 0,
+                        "slack_factor": 5,
+                        "wakeup_lb_busy": 0,
+                        "dispatch_lb_interactive": true,
+                        "dispatch_pick2_disable": false,
+                        "eager_load_balance": true,
+                        "max_dsq_pick2": false,
+                        "wakeup_llc_migrations": false,
+                        "single_llc_mode": false
+                    }
+                },{
+                    "p2dq_config": {
+                        "nr_dsqs_per_llc": 3,
+                        "init_dsq_index": 0,
+                        "dsq_shift": 4,
+                        "interactive_ratio": 10,
+                        "saturated_percent": 5,
+                        "sched_mode": 0,
+                        "llc_shards": 4,
+                        "dhq_max_imbalance": 3,
+                        "atq_enabled": false,
+                        "dhq_enabled": false,
+                        "cpu_priority": false,
+                        "task_slice": false,
+                        "freq_control": false,
+                        "interactive_sticky": false,
+                        "keep_running_enabled": false,
+                        "kthreads_local": true,
+                        "pelt_enabled": true,
+                        "fork_balance": true,
+                        "exec_balance": true,
+                        "enable_eas": false,
+                        "thermal_enabled": false,
+                        "small_task_threshold": 256,
+                        "large_task_threshold": 768
+                    }
+                },{
+                    "latency_config": {
+                        "latency_priority_enabled": false,
+                        "wakeup_preemption_enabled": false
+                    }
+                },{
+                    "debug": 0
+                },{
+                    "zero_u32": 0
+                },{
+                    "lb_timer_intvl_ns": 250000000
+                },{
+                    "ppid_targeting_ppid": -1
+                },{
+                    "ppid_targeting_inclusive": false
+                },{
+                    "chaos_timer_check_queues_min_ns": 500000
+                },{
+                    "chaos_timer_check_queues_max_ns": 2000000
+                },{
+                    "chaos_timer_check_queues_slack_ns": 2500000
+                },{
+                    "random_delays_min_ns": 1
+                },{
+                    "random_delays_max_ns": 2
+                },{
+                    "cpu_freq_min": 0
+                },{
+                    "cpu_freq_max": 1024
+                },{
+                    "degradation_freq_frac32": 1
+                },{
+                    "degradation_frac7": 0
+                },{
+                    "kprobe_delays_freq_frac32": 1
+                },{
+                    "kprobe_delays_min_ns": 1
+                },{
+                    "kprobe_delays_max_ns": 2
+                },{
+                    "generic.____fmt": "GENERIC: setting pending_trait to RANDOM_DELAYS - task[%d]"
+                },{
+                    "uei_dump_len": 32768
+                },{
+                    "trait_delay_freq_frac32": [4294967295,4294967295,4294967295,4294967295,4294967295
+                    ]
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "create_save_bpfmask.____fmt": "Failed to create bpfmask"
+                },{
+                    "create_save_bpfmask.____fmt.1": "kptr already had cpumask"
+                },{
+                    "____p2dq_stopping.___fmt.3": "STOPPING %s weight %d slice %llu used %llu scaled %llu"
+                },{
+                    "____p2dq_stopping.___fmt.4": "%s[%p]: DSQ inc %llu -> %u"
+                },{
+                    "____p2dq_stopping.___fmt.5": "%s[%p]: DSQ dec %llu -> %u"
+                },{
+                    "____p2dq_set_cpumask.____fmt": "AFFINITY_NARROW [%d][%s] moved from mig_dsq to llc_dsq %llu"
+                },{
+                    "p2dq_init_impl.____fmt": "CFG creating affn CPU[%d]DSQ[%llu]"
+                },{
+                    "llc_create_atqs.____fmt": "ATQ mig_atq %llu created for LLC %llu"
+                },{
+                    "llc_create_dhqs.___fmt.40": "DHQ %u created for node %u (LLC %u, strand A) capacity=%llu"
+                },{
+                    "llc_create_dhqs.____fmt": "DHQ %u assigned to LLC %u (node %u, strand B)"
+                },{
+                    "init_node.____fmt": "CFG NODE[%u] configured"
+                },{
+                    "init_cpu.____fmt": "CPU[%d] is big"
+                },{
+                    "init_cpu.____fmt.49": "CFG CPU[%d]NODE[%d]LLC[%d] initialized"
+                },{
+                    "timer_cb.____fmt": "TIMER timer %d stopped"
+                },{
+                    "load_balance_timer.___fmt.65": "LB llcx[%u] %llu lb_llcx[%u] %llu imbalance %lli"
+                },{
+                    "load_balance_timer.____fmt": "LB Total load %llu, Total interactive %llu"
+                },{
+                    "load_balance_timer.____fmt.66": "LB autoslice ideal/sum %llu/%llu"
+                },{
+                    "load_balance_timer.____fmt.67": "LB autoslice interactive slice %llu"
+                },{
+                    "load_balance_timer.____fmt.68": "LB autoslice interactive slice %llu"
+                },{
+                    "async_p2dq_enqueue.____fmt": "FORK/EXEC: pid=%d -> cpu=%d llc=%u"
+                },{
+                    "async_p2dq_enqueue.___fmt.74": "PENALIZE [%d][%s] cpu=%d nr_queued=%llu old_slice=%llu new_slice=%llu"
+                },{
+                    "async_p2dq_enqueue.___fmt.75": "ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu affn_dsq"
+                },{
+                    "async_p2dq_enqueue.___fmt.78": "ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu"
+                },{
+                    "async_p2dq_enqueue.___fmt.81": "ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu"
+                },{
+                    "pick_idle_cpu.____fmt": "PREF idle %s->%d"
+                },{
+                    "p2dq_dispatch_impl.____fmt": "DISPATCH cpu[%d] moved affn task %d to cpu[%d] affn_dsq"
+                },{
+                    "p2dq_dispatch_impl.___fmt.89": "DISPATCH cpu[%d] min_vtime %llu dsq_id %llu atq %llu dhq %llu"
+                },{
+                    "p2dq_dispatch_impl.____fmt.90": "DHQ dispatching %llu with min vtime %llu"
+                },{
+                    "p2dq_dispatch_impl.____fmt.93": "ATQ dispatching %llu with min vtime %llu"
+                },{
+                    "dispatch_pick_two.___fmt": "PICK2 cpu[%d] first[%d] %llu second[%d] %llu"
+                },{
+                    "consume_llc.____fmt": "DHQ pop returned NULL"
+                },{
+                    "consume_llc.____fmt.103": "DHQ failed to get pid %llu"
+                },{
+                    "consume_llc.____fmt.104": "DHQ %llu insert %s[%d] to LLC DSQ"
+                },{
+                    "consume_llc.____fmt.105": "ATQ failed to get pid %llu"
+                },{
+                    "consume_llc.____fmt.106": "ATQ %llu insert %s[%d] to LLC DSQ"
+                },{
+                    "____chaos_enqueue.____fmt": "CHAOS[degradation][%d] slice_ns: %llu"
+                },{
+                    "____chaos_enqueue.____fmt.108": "CHAOS[degradation][%d] vtime: %llu slice_ns: %llu"
+                },{
+                    "____chaos_running.____fmt": "CHAOS[freq][%d] freq: %d"
+                },{
+                    "p2dq_running_impl.___fmt": "RUNNING %d cpu %d->%d llc %d->%d"
+                },{
+                    "p2dq_select_cpu_impl.___fmt": "PREEMPT_TARGET [%d][%s] weight=%u > running_weight=%u on cpu=%d"
+                },{
+                    "p2dq_select_cpu_impl.___fmt.122": "SELECT [%d][%s] %i->%i idle %i"
+                }
+            ]
+        }
+    }
+]

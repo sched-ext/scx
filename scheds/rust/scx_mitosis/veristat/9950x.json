@@ -1,0 +1,122 @@
+[{
+        "value": {
+            ".rodata": [{
+                    "enable_llc_awareness": false
+                },{
+                    "enable_work_stealing": false
+                },{
+                    "nr_llc": 2
+                },{
+                    "nr_possible_cpus": 32
+                },{
+                    "smt_enabled": true
+                },{
+                    "root_cgid": 1
+                },{
+                    "debug_events_enabled": false
+                },{
+                    "exiting_task_workaround_enabled": true
+                },{
+                    "cpu_controller_disabled": false
+                },{
+                    "reject_multicpu_pinning": false
+                },{
+                    "userspace_managed_cell_mode": false
+                },{
+                    "enable_borrowing": false
+                },{
+                    "__SCX_OPS_NAME_LEN": 128
+                },{
+                    "__SCX_SLICE_DFL": 20000000
+                },{
+                    "__SCX_SLICE_INF": 18446744073709551615
+                },{
+                    "__SCX_RQ_ONLINE": 1
+                },{
+                    "__SCX_RQ_CAN_STOP_TICK": 2
+                },{
+                    "__SCX_RQ_BAL_PENDING": 4
+                },{
+                    "__SCX_RQ_BAL_KEEP": 8
+                },{
+                    "__SCX_RQ_BYPASSING": 16
+                },{
+                    "__SCX_RQ_CLK_VALID": 32
+                },{
+                    "__SCX_RQ_IN_WAKEUP": 65536
+                },{
+                    "__SCX_RQ_IN_BALANCE": 131072
+                },{
+                    "__SCX_DSQ_FLAG_BUILTIN": 9223372036854775808
+                },{
+                    "__SCX_DSQ_FLAG_LOCAL_ON": 4611686018427387904
+                },{
+                    "__SCX_DSQ_INVALID": 9223372036854775808
+                },{
+                    "__SCX_DSQ_GLOBAL": 9223372036854775809
+                },{
+                    "__SCX_DSQ_LOCAL": 9223372036854775810
+                },{
+                    "__SCX_DSQ_LOCAL_ON": 13835058055282163712
+                },{
+                    "__SCX_DSQ_LOCAL_CPU_MASK": 4294967295
+                },{
+                    "__SCX_TASK_QUEUED": 1
+                },{
+                    "__SCX_TASK_RESET_RUNNABLE_AT": 4
+                },{
+                    "__SCX_TASK_DEQD_FOR_SLEEP": 8
+                },{
+                    "__SCX_TASK_STATE_SHIFT": 8
+                },{
+                    "__SCX_TASK_STATE_BITS": 2
+                },{
+                    "__SCX_TASK_STATE_MASK": 768
+                },{
+                    "__SCX_TASK_CURSOR": 18446744071562067968
+                },{
+                    "__SCX_TASK_NONE": 0
+                },{
+                    "__SCX_TASK_INIT": 1
+                },{
+                    "__SCX_TASK_READY": 2
+                },{
+                    "__SCX_TASK_ENABLED": 3
+                },{
+                    "__SCX_TASK_NR_STATES": 4
+                },{
+                    "__SCX_TASK_DSQ_ON_PRIQ": 1
+                },{
+                    "__SCX_KICK_IDLE": 1
+                },{
+                    "__SCX_KICK_PREEMPT": 2
+                },{
+                    "__SCX_KICK_WAIT": 4
+                },{
+                    "__SCX_ENQ_WAKEUP": 1
+                },{
+                    "__SCX_ENQ_HEAD": 16
+                },{
+                    "__SCX_ENQ_PREEMPT": 4294967296
+                },{
+                    "__SCX_ENQ_REENQ": 1099511627776
+                },{
+                    "__SCX_ENQ_LAST": 2199023255552
+                },{
+                    "__SCX_ENQ_CLEAR_OPSS": 72057594037927936
+                },{
+                    "__SCX_ENQ_DSQ_PRIQ": 144115188075855872
+                },{
+                    "__SCX_DEQ_SCHED_CHANGE": 0
+                },{
+                    "all_cpus": [255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+                    ]
+                },{
+                    "slice_ns": 20000000
+                },{
+                    "uei_dump_len": 32768
+                }
+            ]
+        }
+    }
+]

@@ -1,0 +1,426 @@
+[{
+        "value": {
+            ".rodata": [{
+                    "scx_storage_init_single.____fmt": "Did not find map entry for cpu %d"
+                },{
+                    "arena_init.____fmt": "uninitialized nr_cpu_ids variable"
+                },{
+                    "arena_init.____fmt.1": "scx_bitmap_init failed with %d"
+                },{
+                    "arena_init.____fmt.2": "scx_percpu_storage_init failed with %d"
+                },{
+                    "arena_init.____fmt.3": "scx_task_init failed with %d"
+                },{
+                    "arena_init.____fmt.4": "scx_rb_init failed with %d"
+                },{
+                    "arena_init.____fmt.5": "scx_atq_init failed with %d"
+                },{
+                    "__SCX_OPS_NAME_LEN": 128
+                },{
+                    "__SCX_SLICE_DFL": 20000000
+                },{
+                    "__SCX_SLICE_INF": 18446744073709551615
+                },{
+                    "__SCX_RQ_ONLINE": 1
+                },{
+                    "__SCX_RQ_CAN_STOP_TICK": 2
+                },{
+                    "__SCX_RQ_BAL_PENDING": 4
+                },{
+                    "__SCX_RQ_BAL_KEEP": 8
+                },{
+                    "__SCX_RQ_BYPASSING": 16
+                },{
+                    "__SCX_RQ_CLK_VALID": 32
+                },{
+                    "__SCX_RQ_IN_WAKEUP": 65536
+                },{
+                    "__SCX_RQ_IN_BALANCE": 131072
+                },{
+                    "__SCX_DSQ_FLAG_BUILTIN": 9223372036854775808
+                },{
+                    "__SCX_DSQ_FLAG_LOCAL_ON": 4611686018427387904
+                },{
+                    "__SCX_DSQ_INVALID": 9223372036854775808
+                },{
+                    "__SCX_DSQ_GLOBAL": 9223372036854775809
+                },{
+                    "__SCX_DSQ_LOCAL": 9223372036854775810
+                },{
+                    "__SCX_DSQ_LOCAL_ON": 13835058055282163712
+                },{
+                    "__SCX_DSQ_LOCAL_CPU_MASK": 4294967295
+                },{
+                    "__SCX_TASK_QUEUED": 1
+                },{
+                    "__SCX_TASK_RESET_RUNNABLE_AT": 4
+                },{
+                    "__SCX_TASK_DEQD_FOR_SLEEP": 8
+                },{
+                    "__SCX_TASK_STATE_SHIFT": 8
+                },{
+                    "__SCX_TASK_STATE_BITS": 2
+                },{
+                    "__SCX_TASK_STATE_MASK": 768
+                },{
+                    "__SCX_TASK_CURSOR": 18446744071562067968
+                },{
+                    "__SCX_TASK_NONE": 0
+                },{
+                    "__SCX_TASK_INIT": 1
+                },{
+                    "__SCX_TASK_READY": 2
+                },{
+                    "__SCX_TASK_ENABLED": 3
+                },{
+                    "__SCX_TASK_NR_STATES": 4
+                },{
+                    "__SCX_TASK_DSQ_ON_PRIQ": 1
+                },{
+                    "__SCX_KICK_IDLE": 1
+                },{
+                    "__SCX_KICK_PREEMPT": 2
+                },{
+                    "__SCX_KICK_WAIT": 4
+                },{
+                    "__SCX_ENQ_WAKEUP": 1
+                },{
+                    "__SCX_ENQ_HEAD": 16
+                },{
+                    "__SCX_ENQ_PREEMPT": 4294967296
+                },{
+                    "__SCX_ENQ_REENQ": 1099511627776
+                },{
+                    "__SCX_ENQ_LAST": 2199023255552
+                },{
+                    "__SCX_ENQ_CLEAR_OPSS": 72057594037927936
+                },{
+                    "__SCX_ENQ_DSQ_PRIQ": 144115188075855872
+                },{
+                    "__SCX_DEQ_SCHED_CHANGE": 0
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "create_save_bpfmask.____fmt": "Failed to create bpfmask"
+                },{
+                    "create_save_bpfmask.____fmt.6": "kptr already had cpumask"
+                },{
+                    "scx_atq_pop.____fmt": "%s: error %d"
+                },{
+                    "scx_atq_cancel.____fmt": "Failed to lock ATQ for task"
+                },{
+                    "scx_atq_cancel.____fmt.1": "Failed to remove node from task"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "nr_cpu_ids": 32
+                },{
+                    "scx_bitmap_copy_to_stack.____fmt": "invalid pointer args to pointer copy"
+                },{
+                    "scx_bitmap_print.____fmt": "%08x"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "scx_storage_init_single.____fmt": "Did not find map entry for cpu %d"
+                },{
+                    "scx_bitmap_vacate_cpu.____fmt": "freeing invalid cpu"
+                },{
+                    "scx_bitmap_vacate_cpu.____fmt.1": "impossible out-of-bounds on free"
+                },{
+                    "scx_bitmap_to_bpf.____fmt": "error %d when calling bpf_cpumask_populate"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "create_save_bpfmask.____fmt": "Failed to create bpfmask"
+                },{
+                    "create_save_bpfmask.____fmt.2": "kptr already had cpumask"
+                },{
+                    "scx_percpu_scx_bitmap_stack.____fmt": "Did not find map entry"
+                },{
+                    "scx_percpu_scx_bitmap.____fmt": "Did not find map entry (bitmap)"
+                },{
+                    "scx_percpu_scx_bitmap.____fmt.3": "Did not properly initialize singleton scx_bitmap"
+                },{
+                    "scx_percpu_bpfmask.____fmt": "Did not find map entry"
+                },{
+                    "scx_percpu_bpfmask.____fmt.4": "Did not properly initialize singleton bpfmask"
+                },{
+                    "rbnode_print.___fmt": "[DEPTH %d] %p (%s) PARENT %p"
+                },{
+                    "rbnode_print.___fmt.2": [9,75,86,32,40,37,108,100,44,32,37,108,100,41,32,76,69,70,84,32,37,112,32,82,73,71,72,84,32,37,112,93,10,0
+                    ]
+                },{
+                    "rb_print.____fmt": "=== BPF PRINTK START ==="
+                },{
+                    "rb_print.____fmt.3": "=== BPF PRINTK END (depth %d)==="
+                },{
+                    "rb_print.____fmt.4": "=== BPF PRINTK END ==="
+                },{
+                    "rb_integrity_check.____fmt": "WARNING: Inconsistent tree. Parent %p has no child %p"
+                },{
+                    "rb_integrity_check.____fmt.5": "WARNING: Inconsistent tree, node %p is its own parent"
+                },{
+                    "rb_integrity_check.____fmt.6": "WARNING: Inconsistent tree, node %p is its own left child"
+                },{
+                    "rb_integrity_check.____fmt.7": "WARNING: Inconsistent tree, node %p is its own right child"
+                },{
+                    "rb_integrity_check.____fmt.8": "WARNING: Inconsistent tree. Parent has %p has red child %p"
+                },{
+                    "rb_integrity_check.____fmt.9": "WARNING: Inconsistent tree. Parent has %p has red child %p"
+                },{
+                    "rb_integrity_check.____fmt.10": "WARNING: Inconsistent tree. Black node %p has no sibling"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "rb_node_remove.____fmt": "rbtree: removed black node has no sibling"
+                },{
+                    "rb_node_remove.____fmt.11": "rbtree: removed black node has no sibling"
+                },{
+                    "rbnode_remove_node_single_child.____fmt": "Node unexpectedly red"
+                },{
+                    "rbnode_remove_node_single_child.____fmt.12": "Only child is black"
+                },{
+                    "scx_arena_subprog_init.____fmt": "%s: arena pointer %p"
+                },{
+                    "scx_alloc_free_idx.____fmt": "%s: root not allocated"
+                },{
+                    "scx_alloc_free_idx.____fmt.1": "%s: freeing nonexistent idx [0x%llx] (level %llu)"
+                },{
+                    "scx_alloc_internal.____fmt": "%s: failed to find empty tree key"
+                },{
+                    "scx_alloc_internal.____fmt.2": "%s: failed to allocate data from pool"
+                },{
+                    "scx_static_alloc_internal.____fmt": [105,110,118,97,108,105,100,32,114,101,113,117,101,115,116,32,37,108,100,44,32,109,97,120,32,105,115,32,37,108,100,10,0
+                    ]
+                },{
+                    "scx_static_alloc_internal.____fmt.3": "concurrent static memory allocations unsupported"
+                },{
+                    "scx_stk_init.____fmt": "failed to allocate lock"
+                },{
+                    "scx_stk_free_internal.____fmt": "spinlock error %d"
+                },{
+                    "scx_stk_alloc.____fmt": "using uninitialized stack allocator"
+                },{
+                    "scx_stk_alloc.____fmt.4": "spinlock error %d"
+                },{
+                    "scx_stk_alloc.____fmt.5": "elem creation failed"
+                },{
+                    "scx_buddy_alloc_internal.____fmt": "Allocation size %lu too large"
+                },{
+                    "scx_buddy_free_internal.____fmt": "Freeing unaligned address %llx"
+                },{
+                    "scx_buddy_free_internal.____fmt.6": "could not find chunk for address %llx"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "pool_set_size.____fmt.7": "%s: allocation size is 0"
+                },{
+                    "scx_stk_fill_new_elems.____fmt": "new elements must fit into a single segment"
+                },{
+                    "scx_stk_get_arena_memory.____fmt": "spinlock error %d"
+                },{
+                    "scx_buddy_chunk_get.____fmt": "buddy chunk metadata require allocation of order %d"
+                },{
+                    "header_set_order.____fmt": "setting invalid order"
+                },{
+                    "header_set_order.____fmt.8": "setting order of invalid offset"
+                },{
+                    "size_to_order.____fmt": "size 0 has no order"
+                },{
+                    "size_to_order.____fmt.9": "size 0 has no order"
+                },{
+                    "scx_task_alloc.____fmt": "%s:%d bpf_task_storage_get failed"
+                },{
+                    "scx_task_alloc.____fmt.1": "%s:%d scx_alloc failed"
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "topo_init.____fmt": "couldn't initialize topology"
+                },{
+                    "topo_init.____fmt.1": "mask not a subset of a topology node"
+                },{
+                    "topo_init.____fmt.2": "partially intersecting topology nodes"
+                },{
+                    "topo_init.____fmt.3": "child is not valid"
+                },{
+                    "topo_init.____fmt.4": "topology is too deep"
+                },{
+                    "topo_find_descendant.____fmt": "missing cpu from topology"
+                },{
+                    "topo_find_descendant.____fmt.5": "missing cpu from inner topology nodes"
+                },{
+                    "topo_find_ancestor.____fmt": "could not find cpu"
+                },{
+                    "topo_find_sibling.____fmt": "node is at the top level"
+                },{
+                    "topo_mask_level_internal.____fmt": "invalid topology level %d"
+                },{
+                    "topo_mask_level_internal.____fmt.6": "requesting cpumask from lower level %d, starting from %d"
+                },{
+                    "topo_iter_next.____fmt": "passing NULL iterator"
+                },{
+                    "topo_iter_next.____fmt.7": "invalid child level %d"
+                },{
+                    "topo_iter_next.____fmt.8": "invalid child level %d"
+                },{
+                    "topo_iter_next.____fmt.9": "invalid level %d"
+                },{
+                    "topo_cpu_to_llc_id.____fmt": "invalid cpu id: %u"
+                },{
+                    "topo_cpu_to_llc_id.____fmt.10": "cpu %u has no topology node set"
+                },{
+                    "topo_print.____fmt": "[NO TOPOLOGY]"
+                },{
+                    "topo_print.___fmt": "%s (LEVEL %d) [%d, %d, %d ,%d, %d]"
+                },{
+                    "topo_print_by_level.____fmt": "TOP-LEVEL MASK"
+                },{
+                    "topo_print_by_level.____fmt.11": [10,0
+                    ]
+                },{
+                    "topo_print_by_level.____fmt.12": "NODE MASKS"
+                },{
+                    "topo_print_by_level.____fmt.13": [10,0
+                    ]
+                },{
+                    "topo_print_by_level.____fmt.14": "LLC MASKS"
+                },{
+                    "topo_print_by_level.____fmt.15": [10,0
+                    ]
+                },{
+                    "topo_print_by_level.____fmt.16": "CORE MASKS"
+                },{
+                    "topo_print_by_level.____fmt.17": [10,0
+                    ]
+                },{
+                    "topo_print_by_level.____fmt.18": "CPU MASKS"
+                },{
+                    "topo_print_by_level.____fmt.19": [10,0
+                    ]
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "topo_node.____fmt": "static allocation failed"
+                },{
+                    "topo_node.____fmt.20": "topology is too deep"
+                },{
+                    "topo_node.____fmt.21": "invalid node id"
+                },{
+                    "topo_add.____fmt": "NULL mask pointer"
+                },{
+                    "topo_add.____fmt.22": "topology fanout is too large"
+                },{
+                    "quantum_ns": 2000000
+                },{
+                    "new_flow_bonus_ns": 8000000
+                },{
+                    "hog_vtime_shift": 2
+                },{
+                    "hog_quantum_cap_ns": 250000
+                },{
+                    "bg_vtime_shift": 1
+                },{
+                    "bg_quantum_cap_ns": 500000
+                },{
+                    "aq_yielder_ceiling_ns": 50000000
+                },{
+                    "aq_min_ns": 50000
+                },{
+                    "preempt_vip_ns": 50000
+                },{
+                    "preempt_yielder_ns": 100000
+                },{
+                    "quantum_cap_ns": [0,0,250000,500000
+                    ]
+                },{
+                    "tier_base": [8192,0,16384,49152
+                    ]
+                },{
+                    "rt_cost_cap": [4096,4096,4096,4096
+                    ]
+                },{
+                    "preempt_thresh_ns": [100000,50000,100000,100000
+                    ]
+                },{
+                    "enable_stats": false
+                },{
+                    "enable_dvfs": false
+                },{
+                    "nr_llcs": 2
+                },{
+                    "nr_cpus": 32
+                },{
+                    "nr_phys_cpus": 16
+                },{
+                    "nr_nodes": 1
+                },{
+                    "cpu_llc_id": [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+                    ]
+                },{
+                    "cpuperf_cap_table": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+                    ]
+                },{
+                    "cpus_fast_to_slow": [0,16,3,19,1,17,2,18,4,20,5,21,7,23,6,22,9,25,13,29,8,24,11,27,10,26,12,28,15,31,14,30,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+                    ]
+                },{
+                    "cpus_slow_to_fast": [30,14,31,15,28,12,26,10,27,11,24,8,29,13,25,9,22,6,23,7,21,5,20,4,18,2,17,1,19,3,16,0,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+                    ]
+                },{
+                    "llc_cpu_mask": [16711935,4278255360,0,0,0,0,0,0
+                    ]
+                },{
+                    "core_cpu_mask": [65537,131074,262148,524296,1048592,2097184,4194368,8388736,16777472,33554944,67109888,134219776,268439552,536879104,1073758208,2147516416,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+                    ]
+                },{
+                    "cpu_sibling_map": [16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63
+                    ]
+                },{
+                    "big_core_phys_mask": 255
+                },{
+                    "big_core_smt_mask": 16711680
+                },{
+                    "little_core_mask": 4278255360
+                },{
+                    "vcache_llc_mask": 0
+                },{
+                    "has_vcache": false
+                },{
+                    "nr_audio_tgids": 3
+                },{
+                    "audio_tgids": [1920,1956,1957,0,0,0,0,0
+                    ]
+                },{
+                    "nr_compositor_tgids": 0
+                },{
+                    "compositor_tgids": [0,0,0,0
+                    ]
+                },{
+                    "tier_perf_target": [1024,1024,1024,1024,1024,1024,1024,1024
+                    ]
+                },{
+                    "uei_dump_len": 0
+                },{
+                    "arena_fetch_set_pending_acquire.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                },{
+                    "xchg_tail.____fmt": "RUNTIME ERROR: %s unexpected cond_break exit!!!"
+                }
+            ]
+        }
+    }
+]
