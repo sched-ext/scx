@@ -3,7 +3,8 @@
 //! This is an incremental port of scx_cosmos. It implements:
 //!
 //! - `select_cpu`: uses `pick_idle_cpu` with SMT-aware idle scanning,
-//!   `select_cpu_dfl` fallback, busy-aware dispatch, and no_wake_sync support
+//!   `select_cpu_dfl` fallback, mm_affinity, busy-aware dispatch, and
+//!   no_wake_sync support
 //! - `enqueue`: three-tier — migration to idle CPU, local DSQ when not busy,
 //!   vtime-ordered shared DSQ when busy (uses task_cpu + task_running kfuncs)
 //! - `dispatch`: `dsq_move_to_local` + slice extension for prev task
@@ -14,6 +15,7 @@
 //! - `runnable`: resets exec_runtime, updates wakeup_freq via per-task storage
 //! - `enable`: initializes task dsq_vtime to current vtime_now
 //! - `init_task`: creates per-task context via BPF_MAP_TYPE_TASK_STORAGE
+//! - `exit_task`: cleans up per-task storage when a task exits
 //!
 //! BPF map usage:
 //! - `TASK_CTX`: per-task storage for exec_runtime, wakeup_freq, last_run_at
@@ -23,11 +25,12 @@
 //! - `SLICE_NS`, `SLICE_LAG`: time slice and maximum runtime parameters
 //! - `BUSY_THRESHOLD`, `CPU_UTIL`: system busy detection
 //! - `NO_WAKE_SYNC`, `CPUFREQ_ENABLED`, `SMT_ENABLED`, `AVOID_SMT`: feature flags
+//! - `MM_AFFINITY`: address space affinity for cache-friendly wakeups
 //! - `NUMA_ENABLED`, `NR_NODES`, `CPU_TO_NODE`: NUMA-aware per-node DSQ routing
 //!
 //! Remaining gaps vs the full C implementation (see PORT_TODO comments):
 //! - No PMU tracking
-//! - No flat/preferred idle scan, no mm_affinity, no primary_cpumask
+//! - No flat/preferred idle scan, no primary_cpumask
 //! - Migration only tries prev_cpu (no full pick_idle_cpu scan in enqueue)
 
 #![no_std]
@@ -594,14 +597,12 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
 /// Uses `pick_idle_cpu()` for idle CPU selection with:
 /// - no_wake_sync: clears SCX_WAKE_SYNC from wake_flags when enabled.
 /// - SMT awareness: when avoid_smt is enabled, prefers fully-idle cores
+/// - mm_affinity: when enabled and waker/wakee share the same address space,
+///   keeps the wakee on the waker's CPU for cache locality (non-busy only)
 /// - If idle CPU found: dispatch directly to local DSQ (any saturation level)
 /// - If no idle CPU and not busy: dispatch to local DSQ (round-robin)
 /// - If no idle CPU and busy: do NOT dispatch, let enqueue() handle
 ///   deadline-mode dispatch to the shared DSQ
-// PORT_TODO: mm_affinity (address space affinity) in select_cpu
-// C reference: When mm_affinity is true and waker/wakee share the same mm,
-// is_wake_affine() returns true and select_cpu keeps the wakee on the
-// waker's CPU for cache locality. Requires reading task_struct->mm.
 //
 // PORT_TODO: PMU / perf event integration in select_cpu
 // C reference: When perf_config is set, cosmos_select_cpu dispatches
@@ -617,6 +618,35 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
         wake_flags
     };
 
+    let is_busy = is_system_busy();
+
+    // mm_affinity: when the waker and wakee share the same address space
+    // (same mm) and the waker is currently running on the same CPU as
+    // prev_cpu, keep the wakee on prev_cpu for cache locality.
+    //
+    // This optimization only applies when the system is not saturated,
+    // to avoid introducing too much unfairness.
+    //
+    // C reference: cosmos_select_cpu():
+    //   if (is_wake_affine(current, p) && !is_busy) {
+    //       if (this_cpu == prev_cpu) {
+    //           scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+    //           return this_cpu;
+    //       }
+    //   }
+    if !is_busy {
+        let current = get_current_task_btf();
+        if !current.is_null() && is_wake_affine(current, p) {
+            let this_cpu = get_smp_processor_id();
+            if this_cpu == prev_cpu {
+                let weight = read_weight(p);
+                let slice = task_slice(weight);
+                kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
+                return this_cpu;
+            }
+        }
+    }
+
     let cpu = pick_idle_cpu(p, prev_cpu, effective_wake_flags);
     let found_idle = cpu >= 0;
 
@@ -627,7 +657,7 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
     // When busy and no idle CPU, don't dispatch — let enqueue() handle
     // deadline-mode dispatch to the shared DSQ for fairness.
     // C: if (cpu >= 0 || !is_busy) dsq_insert(LOCAL, ...);
-    if found_idle || !is_system_busy() {
+    if found_idle || !is_busy {
         let weight = read_weight(p);
         let slice = task_slice(weight);
         kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
