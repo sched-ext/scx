@@ -36,6 +36,7 @@ scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.0" }
 
 [dev-dependencies]
 tempfile = "3"
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0", features = ["testutils"] }
 
 [features]
 enable_backtrace = []
