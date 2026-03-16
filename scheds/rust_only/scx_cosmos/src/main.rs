@@ -2,8 +2,11 @@
 //
 // scx_cosmos userspace loader — pure Rust BPF scheduler
 //
-// CLI options, CPU utilization polling, and BPF global configuration.
+// CLI options, CPU topology detection, utilization polling, periodic stats,
+// and BPF global configuration.
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::os::fd::{AsFd, AsRawFd};
@@ -64,10 +67,265 @@ struct Opts {
     #[clap(short = 't', long, default_value = "5000")]
     timeout_ms: u64,
 
+    /// Enable NUMA-aware scheduling.
+    ///
+    /// When enabled, the scheduler will attempt to keep tasks on their
+    /// NUMA node. Automatically enabled when multiple NUMA nodes are
+    /// detected and not explicitly disabled.
+    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
+    numa: bool,
+
+    /// Override SMT contention avoidance.
+    ///
+    /// When enabled, the scheduler aggressively avoids placing tasks on
+    /// sibling SMT threads. Defaults to true when SMT is detected.
+    /// Use --avoid-smt=false to disable.
+    #[clap(long)]
+    avoid_smt: Option<bool>,
+
     /// Enable verbose logging output.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
 }
+
+// ── CPU Topology ─────────────────────────────────────────────────────────
+
+/// Detected CPU topology from sysfs.
+struct Topology {
+    /// Total number of possible CPUs.
+    nr_cpus: usize,
+    /// NUMA node ID -> list of CPU IDs in that node.
+    numa_nodes: BTreeMap<u32, Vec<u32>>,
+    /// Whether any CPU has an SMT sibling.
+    smt_enabled: bool,
+    /// Whether CPUs have heterogeneous capacities (big.LITTLE).
+    has_big_little: bool,
+}
+
+impl Topology {
+    /// Detect CPU topology from sysfs.
+    fn detect() -> Result<Self> {
+        let nr_cpus = Self::read_nr_cpus()?;
+        let numa_nodes = Self::read_numa_nodes();
+        let smt_enabled = Self::detect_smt(nr_cpus);
+        let has_big_little = Self::detect_big_little(nr_cpus);
+
+        Ok(Self {
+            nr_cpus,
+            numa_nodes,
+            smt_enabled,
+            has_big_little,
+        })
+    }
+
+    /// Read number of possible CPUs from /sys/devices/system/cpu/possible.
+    ///
+    /// The file contains a CPU range like "0-175" or "0-7".
+    fn read_nr_cpus() -> Result<usize> {
+        let content = fs::read_to_string("/sys/devices/system/cpu/possible")
+            .context("Failed to read /sys/devices/system/cpu/possible")?;
+        let content = content.trim();
+
+        // Parse "0-N" format -> N+1 CPUs, or just "0" -> 1 CPU.
+        // Also handles comma-separated ranges like "0-3,8-11".
+        let mut max_cpu: usize = 0;
+        for range in content.split(',') {
+            let range = range.trim();
+            if let Some((_start, end)) = range.split_once('-') {
+                if let Ok(end_cpu) = end.parse::<usize>() {
+                    if end_cpu > max_cpu {
+                        max_cpu = end_cpu;
+                    }
+                }
+            } else if let Ok(cpu) = range.parse::<usize>() {
+                if cpu > max_cpu {
+                    max_cpu = cpu;
+                }
+            }
+        }
+
+        Ok(max_cpu + 1)
+    }
+
+    /// Read NUMA node topology from /sys/devices/system/node/node*/cpulist.
+    ///
+    /// Returns a map of node_id -> CPU list. If sysfs is not available,
+    /// returns a single node containing all CPUs.
+    fn read_numa_nodes() -> BTreeMap<u32, Vec<u32>> {
+        let mut nodes = BTreeMap::new();
+
+        // List /sys/devices/system/node/ for node* directories.
+        if let Ok(entries) = fs::read_dir("/sys/devices/system/node") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if !name_str.starts_with("node") {
+                    continue;
+                }
+                let node_id: u32 = match name_str[4..].parse() {
+                    Ok(id) => id,
+                    Err(_) => continue,
+                };
+
+                let cpulist_path = format!(
+                    "/sys/devices/system/node/{}/cpulist",
+                    name_str
+                );
+                if let Ok(content) = fs::read_to_string(&cpulist_path) {
+                    let cpus = Self::parse_cpu_list(content.trim());
+                    if !cpus.is_empty() {
+                        nodes.insert(node_id, cpus);
+                    }
+                }
+            }
+        }
+
+        // Fallback: if no NUMA info found, create a single node.
+        if nodes.is_empty() {
+            // We don't have nr_cpus here, but a single empty node is
+            // sufficient to signal "no NUMA".
+            nodes.insert(0, Vec::new());
+        }
+
+        nodes
+    }
+
+    /// Detect if SMT (hyperthreading) is enabled by reading
+    /// /sys/devices/system/cpu/cpu*/topology/thread_siblings_list.
+    ///
+    /// Returns true if any CPU has more than one sibling (including itself).
+    fn detect_smt(nr_cpus: usize) -> bool {
+        for cpu in 0..nr_cpus {
+            let path = format!(
+                "/sys/devices/system/cpu/cpu{}/topology/thread_siblings_list",
+                cpu
+            );
+            if let Ok(content) = fs::read_to_string(&path) {
+                let siblings = Self::parse_cpu_list(content.trim());
+                if siblings.len() > 1 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Detect big.LITTLE (heterogeneous CPU capacity) by reading
+    /// /sys/devices/system/cpu/cpu*/cpu_capacity.
+    ///
+    /// Returns true if CPUs have different capacity values.
+    fn detect_big_little(nr_cpus: usize) -> bool {
+        let mut first_capacity: Option<u64> = None;
+        for cpu in 0..nr_cpus {
+            let path = format!(
+                "/sys/devices/system/cpu/cpu{}/cpu_capacity",
+                cpu
+            );
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(cap) = content.trim().parse::<u64>() {
+                    match first_capacity {
+                        None => first_capacity = Some(cap),
+                        Some(first) if cap != first => return true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Parse a CPU list string like "0-3,8-11" into a sorted Vec of CPU IDs.
+    fn parse_cpu_list(s: &str) -> Vec<u32> {
+        let mut cpus = Vec::new();
+        for range in s.split(',') {
+            let range = range.trim();
+            if range.is_empty() {
+                continue;
+            }
+            if let Some((start, end)) = range.split_once('-') {
+                if let (Ok(s), Ok(e)) = (start.parse::<u32>(), end.parse::<u32>()) {
+                    for cpu in s..=e {
+                        cpus.push(cpu);
+                    }
+                }
+            } else if let Ok(cpu) = range.parse::<u32>() {
+                cpus.push(cpu);
+            }
+        }
+        cpus.sort();
+        cpus
+    }
+
+    /// Print a human-readable summary of the detected topology.
+    fn print_summary(&self) {
+        println!("Topology:");
+        println!("  CPUs: {}", self.nr_cpus);
+        println!(
+            "  NUMA nodes: {} ({})",
+            self.numa_nodes.len(),
+            if self.numa_nodes.len() > 1 {
+                "multi-node"
+            } else {
+                "single-node"
+            }
+        );
+        for (node_id, cpus) in &self.numa_nodes {
+            if !cpus.is_empty() {
+                println!(
+                    "    node {}: {} CPUs ({})",
+                    node_id,
+                    cpus.len(),
+                    Self::format_cpu_range(cpus)
+                );
+            }
+        }
+        println!(
+            "  SMT: {}",
+            if self.smt_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        if self.has_big_little {
+            println!("  CPU capacity: heterogeneous (big.LITTLE)");
+        }
+    }
+
+    /// Format a list of CPU IDs as a compact range string (e.g., "0-3,8-11").
+    fn format_cpu_range(cpus: &[u32]) -> String {
+        if cpus.is_empty() {
+            return String::new();
+        }
+
+        let mut ranges = Vec::new();
+        let mut start = cpus[0];
+        let mut end = cpus[0];
+
+        for &cpu in &cpus[1..] {
+            if cpu == end + 1 {
+                end = cpu;
+            } else {
+                if start == end {
+                    ranges.push(format!("{}", start));
+                } else {
+                    ranges.push(format!("{}-{}", start, end));
+                }
+                start = cpu;
+                end = cpu;
+            }
+        }
+        if start == end {
+            ranges.push(format!("{}", start));
+        } else {
+            ranges.push(format!("{}-{}", start, end));
+        }
+
+        ranges.join(",")
+    }
+}
+
+// ── CPU utilization ──────────────────────────────────────────────────────
 
 /// Read aggregate CPU times from /proc/stat.
 ///
@@ -119,6 +377,8 @@ fn compute_cpu_util(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
         None
     }
 }
+
+// ── BPF data map runtime updates ─────────────────────────────────────────
 
 /// Update a u64 value in a BPF data-section map at a given byte offset.
 ///
@@ -278,6 +538,26 @@ impl BpfDataMap {
     }
 }
 
+// ── Formatting helpers ───────────────────────────────────────────────────
+
+/// Format a Duration as "Xh Ym Zs" or "Xm Zs" or "Zs".
+fn format_uptime(d: Duration) -> String {
+    let secs = d.as_secs();
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let s = secs % 60;
+
+    if hours > 0 {
+        format!("{}h {}m {}s", hours, mins, s)
+    } else if mins > 0 {
+        format!("{}m {}s", mins, s)
+    } else {
+        format!("{}s", s)
+    }
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────
+
 fn main() -> Result<()> {
     let opts = Opts::parse();
 
@@ -292,7 +572,30 @@ fn main() -> Result<()> {
             .init();
     }
 
-    // Compute BPF global values from CLI options.
+    // ── Topology detection ───────────────────────────────────────────
+    let topo = Topology::detect()
+        .context("Failed to detect CPU topology")?;
+    topo.print_summary();
+
+    // Determine NUMA awareness: enable only if CLI allows AND multiple nodes exist.
+    let nr_numa_nodes = topo.numa_nodes.values().filter(|cpus| !cpus.is_empty()).count();
+    let numa_enabled = opts.numa && nr_numa_nodes > 1;
+    if !numa_enabled && nr_numa_nodes > 1 {
+        println!("  NUMA awareness: disabled (--no-numa)");
+    } else if numa_enabled {
+        println!("  NUMA awareness: enabled ({} nodes)", nr_numa_nodes);
+    } else {
+        println!("  NUMA awareness: disabled (single node)");
+    }
+
+    // Determine SMT avoidance: default to smt_enabled unless overridden.
+    let avoid_smt = opts.avoid_smt.unwrap_or(topo.smt_enabled);
+    println!(
+        "  SMT avoidance: {}",
+        if avoid_smt { "enabled" } else { "disabled" }
+    );
+
+    // ── Compute BPF global values ────────────────────────────────────
     let slice_ns: u64 = opts.slice_us * 1000;
     let slice_lag: u64 = (opts.slice_us * 2000).min(20_000_000);
     let busy_threshold: u64 = opts.cpu_busy_thresh;
@@ -307,18 +610,25 @@ fn main() -> Result<()> {
     );
     info!("  busy_thresh  = {}%", busy_threshold);
     info!("  no_wake_sync = {}", no_wake_sync);
+    info!("  smt_enabled  = {}", topo.smt_enabled);
+    info!("  avoid_smt    = {}", avoid_smt);
     info!("  timeout_ms   = {}", opts.timeout_ms);
 
-    // Load the BPF object with global overrides.
+    // ── Load BPF with global overrides ───────────────────────────────
     //
     // override_global with must_exist=false silently skips globals that
     // don't exist in the BPF object yet (another agent is adding these).
+    let smt_enabled_val: u8 = topo.smt_enabled as u8;
+    let avoid_smt_val: u8 = avoid_smt as u8;
+
     let mut ebpf = EbpfLoader::new()
         .allow_unsupported_maps()
         .override_global("SLICE_NS", &slice_ns, false)
         .override_global("SLICE_LAG", &slice_lag, false)
         .override_global("BUSY_THRESHOLD", &busy_threshold, false)
         .override_global("NO_WAKE_SYNC", &(no_wake_sync as u8), false)
+        .override_global("SMT_ENABLED", &smt_enabled_val, false)
+        .override_global("AVOID_SMT", &avoid_smt_val, false)
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_cosmos"
@@ -336,6 +646,7 @@ fn main() -> Result<()> {
         .attach_struct_ops("_scx_ops")
         .context("Failed to attach struct_ops scheduler")?;
 
+    println!();
     println!("scx_cosmos: scheduler attached (pure Rust BPF)");
     println!("  slice       = {} us", opts.slice_us);
     println!("  slice_lag   = {} us (capped at 20ms)", slice_lag / 1000);
@@ -348,6 +659,10 @@ fn main() -> Result<()> {
             "enabled"
         }
     );
+    println!(
+        "  smt_avoid   = {}",
+        if avoid_smt { "yes" } else { "no" }
+    );
     println!("  timeout     = {} ms", opts.timeout_ms);
     println!("Press Ctrl-C to detach and exit.");
 
@@ -359,15 +674,21 @@ fn main() -> Result<()> {
     })
     .context("Failed to set Ctrl-C handler")?;
 
-    // CPU utilization polling loop.
+    // ── Main polling loop with periodic stats ────────────────────────
     //
     // Reads /proc/stat every 100ms and computes overall CPU utilization.
     // When a BPF data map is available, writes the utilization value to
     // the CPU_UTIL global so the BPF scheduler can use it for busy/idle
     // mode switching.
+    //
+    // Every 2 seconds, prints a stats summary line showing CPU
+    // utilization, scheduling mode, and uptime.
     let poll_interval = Duration::from_millis(100);
+    let stats_interval = Duration::from_secs(2);
+    let start_time = Instant::now();
     let mut prev_cputime = read_cpu_times().expect("Failed to read initial /proc/stat");
     let mut last_poll = Instant::now();
+    let mut last_stats = Instant::now();
     let mut last_util: u64 = 0;
 
     while running.load(Ordering::SeqCst) {
@@ -390,6 +711,23 @@ fn main() -> Result<()> {
             last_poll = Instant::now();
         }
 
+        // Print periodic stats every 2 seconds.
+        if last_stats.elapsed() >= stats_interval {
+            let uptime = start_time.elapsed();
+            let mode = if last_util >= opts.cpu_busy_thresh {
+                "deadline"
+            } else {
+                "round-robin"
+            };
+            println!(
+                "[scx_cosmos] cpu {:>3}% [{}]  uptime {}",
+                last_util,
+                mode,
+                format_uptime(uptime),
+            );
+            last_stats = Instant::now();
+        }
+
         // Periodically log CPU utilization in verbose mode.
         if opts.verbose && last_poll.elapsed() < Duration::from_millis(20) {
             log::debug!("CPU utilization: {}%", last_util);
@@ -398,8 +736,9 @@ fn main() -> Result<()> {
 
     drop(link);
     println!(
-        "\nscx_cosmos: scheduler detached (last CPU util: {}%)",
-        last_util
+        "\nscx_cosmos: scheduler detached (last CPU util: {}%, uptime {})",
+        last_util,
+        format_uptime(start_time.elapsed()),
     );
 
     Ok(())
