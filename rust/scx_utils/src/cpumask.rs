@@ -488,6 +488,7 @@ mod tests {
 
     #[test]
     fn test_to_cpulist_single_cpu() {
+        set_cpumask_test_width(16);
         let mut mask = Cpumask::new();
         mask.set_cpu(5).unwrap();
         assert_eq!(mask.to_cpulist(), "5");
@@ -495,6 +496,7 @@ mod tests {
 
     #[test]
     fn test_to_cpulist_contiguous_range() {
+        set_cpumask_test_width(16);
         let mut mask = Cpumask::new();
         for cpu in 0..8 {
             mask.set_cpu(cpu).unwrap();
@@ -504,6 +506,7 @@ mod tests {
 
     #[test]
     fn test_to_cpulist_multiple_ranges() {
+        set_cpumask_test_width(16);
         let mut mask = Cpumask::new();
         for cpu in 0..4 {
             mask.set_cpu(cpu).unwrap();
@@ -516,6 +519,7 @@ mod tests {
 
     #[test]
     fn test_to_cpulist_scattered() {
+        set_cpumask_test_width(16);
         let mut mask = Cpumask::new();
         mask.set_cpu(1).unwrap();
         mask.set_cpu(3).unwrap();
@@ -525,6 +529,7 @@ mod tests {
 
     #[test]
     fn test_to_cpulist_mixed() {
+        set_cpumask_test_width(16);
         let mut mask = Cpumask::new();
         mask.set_cpu(0).unwrap();
         mask.set_cpu(1).unwrap();
@@ -537,6 +542,7 @@ mod tests {
 
     #[test]
     fn test_to_cpulist_roundtrip() {
+        set_cpumask_test_width(32);
         let original = "0-3,8-11,16";
         let mask = Cpumask::from_cpulist(original).unwrap();
         assert_eq!(mask.to_cpulist(), original);
