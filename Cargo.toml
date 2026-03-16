@@ -56,3 +56,26 @@ debug = 0
 incremental = false
 strip = true
 lto = false
+
+[workspace.dependencies]
+anyhow = "1"
+crossbeam = "0.8"
+glob = "0.3"
+lazy_static = "1"
+libc = "0.2"
+log = "0.4"
+ordered-float = "5"
+plain = "0.2"
+regex = "1"
+ruzstd = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+simplelog = "0.12"
+sscanf = "0.5"
+static_assertions = "1"
+tempfile = "3"
+tracing = "0.1"
+version-compare = "0.2"
+walkdir = "2"
+libbpf-cargo = "=0.26.1"
+libbpf-rs = "=0.26.1"
