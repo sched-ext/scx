@@ -602,12 +602,17 @@ int cbw_init_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 	return 0;
 }
 
+__hidden
+int cbw_put_aside(u64 ctx, u64 vtime, struct cgroup *cgrp __arg_trusted);
+
 static
 void cbw_free_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 {
 	struct scx_cgroup_llc_ctx *llcx;
+	struct cgroup *root_cgrp;
 	scx_atq_t *btq;
-	int i;
+	int i, ret;
+	u64 taskc;
 
 	if (!cgrp)
 		return;
@@ -618,14 +623,46 @@ void cbw_free_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 		cgx->has_llcx = false;
 	}
 
+	root_cgrp = bpf_cgroup_from_id(1);
+	if (!root_cgrp)
+		cbw_err("Failed to fetch the root cgroup pointer.");
+
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		llcx = cbw_get_llc_ctx(cgrp, i);
-		if (!llcx || !(btq = llcx->btq))
-			break;
+		if (!llcx || !(btq = READ_ONCE(llcx->btq)))
+			continue;
 
-		if (scx_atq_nr_queued(btq)) {
-			cbw_err("Throttled tasks should not be in an existing cgroup: [%llu/%d]",
-				cgroup_get_id(cgrp), i);
+		/*
+		 * Signal cbw_drain_btq_until_throttled() that the ATQ is being
+		 * destroyed by nulling llcx->btq. smp_mb() orders this store
+		 * before scx_atq_destroy().
+		 */
+		WRITE_ONCE(llcx->btq, NULL);
+		smp_mb();
+
+		/*
+		 * Move all the throttled exiting tasks into the root cgroup.
+		 * Then, delete the LLC context and its associated BTQ.
+		 */
+		if (root_cgrp && (cgrp != root_cgrp)) {
+			while ((taskc = scx_atq_pop(btq)) && can_loop) {
+				/*
+				 * Set task's vtime to zero so we can reap the
+				 * the throttled exiting task as soon as possible.
+				 *
+				 * We will try to reenqueue the throttled exiting
+				 * task in the next replenishment interval. This
+				 * is fair since the task was throttled under the
+				 * cgroup, so it has to wait until the next
+				 * replenishment interval anyway.
+				 */
+				ret = cbw_put_aside(taskc, 0, root_cgrp);
+				if (ret) {
+					cbw_err("Failed to put aside a task "
+						"while exiting cgid%llu: %d",
+						cgroup_get_id(cgrp), ret);
+				}
+			}
 		}
 
 		if (cbw_del_llc_ctx(cgrp, i)) {
@@ -636,6 +673,9 @@ void cbw_free_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 
 		scx_atq_destroy(btq);
 	}
+
+	if (root_cgrp)
+		bpf_cgroup_release(root_cgrp);
 }
 
 static
@@ -819,7 +859,7 @@ int cbw_update_nr_taskable_descendents(struct cgroup *cgrp, int delta)
 	}
 
 	/*
-	 * Update the budget transfer unit accordingto the new
+	 * Update the budget transfer unit according to the new
 	 * nr_taskable_descendents of a subroot. Since a budget transfer
 	 * unit of a subroot cgroup is updated, all its descendants
 	 * should be updated as well.
@@ -897,10 +937,12 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 */
 	if ((cgrp->level > 0) &&
 	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
-		parentx = cbw_get_cgroup_ctx(parent);
-		if (parentx && !cgroup_is_threaded(parent)) {
-			cbw_free_llc_ctx(parent, parentx);
-			cbw_update_nr_taskable_descendents(parent, -1);
+		if (cgroup_get_id(parent) != 1) {
+			parentx = cbw_get_cgroup_ctx(parent);
+			if (parentx && !cgroup_is_threaded(parent)) {
+				cbw_free_llc_ctx(parent, parentx);
+				cbw_update_nr_taskable_descendents(parent, -1);
+			}
 		}
 		bpf_cgroup_release(parent);
 	}
@@ -922,6 +964,54 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	return cbw_update_nr_taskable_descendents(cgrp, 1);
 }
 
+static
+int cbw_unthrottle_cgroup_for_exit(struct cgroup *cgrp)
+{
+	struct scx_cgroup_llc_ctx *llcx;
+	struct scx_cgroup_ctx *cgx;
+	int i;
+
+	/*
+	 * Stop throttling the cgroup by setting its upper bound and
+	 * budget remaining to infinite.
+	 */
+	if (!(cgx = cbw_get_cgroup_ctx(cgrp))) {
+		cbw_err("Failed to lookup a cgroup ctx: %llu",
+			cgroup_get_id(cgrp));
+		return -ESRCH;
+	}
+
+	if (cgx->nquota_ub == CBW_RUNTUME_INF)
+		return 0;
+
+	WRITE_ONCE(cgx->nquota_ub, CBW_RUNTUME_INF);
+	WRITE_ONCE(cgx->budget_remaining, CBW_RUNTUME_INF);
+	/*
+	 * Make the changes to quota and budget globally visible before setting
+	 * is_throttled to false. Without this, on a non-TSO architecture (like
+	 * ARM64), a remote CPU can observe a state where is_throttled is false,
+	 * but budget_remaining is negative, unexpectedly setting is_throttled
+	 * to true again.
+	 */
+	smp_mb();
+
+	WRITE_ONCE(cgx->is_throttled, false);
+
+	if (cgx->has_llcx) {
+		bpf_for(i, 0, TOPO_NR(LLC)) {
+			if (!(llcx = cbw_get_llc_ctx(cgrp, i)))
+				continue;
+			WRITE_ONCE(llcx->budget_remaining, CBW_RUNTUME_INF);
+		}
+	}
+
+	/*
+	 * Make the unthrottling changes visible before draining its BTQs.
+	 */
+	smp_mb();
+	return 0;
+}
+
 /**
  * scx_cgroup_bw_exit - Exit a cgroup.
  * @cgrp: cgroup being exited
@@ -937,6 +1027,17 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	int ret = 0;
 
 	cbw_dbg_cgrp();
+
+	/*
+	 * A cgroup can exit when there are exiting tasks (TASK_DEAD) under it,
+	 * because the kernel does not count them as living tasks. So, care
+	 * should be taken to properly handle the race between cgroup exit
+	 * and task exit, especially when exiting tasks under an exiting cgroup
+	 * are throttled. We first stop throttling the cgroup to prevent any
+	 * more tasks from being throttled. 
+	 */
+	cbw_unthrottle_cgroup_for_exit(cgrp);
+
 	if (cgrp->level > 1)
 		ret = cbw_update_nr_taskable_descendents(cgrp, -1);
 
@@ -1584,6 +1685,66 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 	return 0;
 }
 
+__hidden
+int cbw_put_aside(u64 ctx, u64 vtime, struct cgroup *cgrp __arg_trusted)
+{
+	scx_task_common *taskc = (scx_task_common *)ctx;
+	struct scx_cgroup_llc_ctx *llcx;
+	scx_atq_t *btq;
+	int llc_id, ret;
+
+	/* Get the current LLC ID. */
+	if ((llc_id = cbw_get_current_llc_id()) < 0) {
+		cbw_err("Invalid LLC id: %d", llc_id);
+		return -EINVAL;
+	}
+
+	/*
+	 * Put aside the task to the BTQ of the LLC context.
+	 */
+	llcx = cbw_get_llc_ctx(cgrp, llc_id);
+	if (!llcx) {
+		cbw_err("Failed to lookup an LLC ctx: [%llu/%d]",
+			cgroup_get_id(cgrp), llc_id);
+		return -ESRCH;
+	}
+
+	/*
+	 * Snapshot llcx->btq. cbw_free_llc_ctx() nulls this field before
+	 * destroying the ATQ, so observing NULL means the ATQ is gone.
+	 */
+	btq = READ_ONCE(llcx->btq);
+	if (!btq)
+		return -ESRCH;
+
+	ret = scx_atq_lock(btq);
+	if (ret) {
+		cbw_err("Failed to lock ATQ.");
+		return -EBUSY;
+	}
+
+	if (taskc->atq != NULL) {
+		/*
+		 * Not really a bug: The initial .enqueue() may race with
+		 * a pair of .dequeue()/.enqueue() calls, and cause two
+		 * instances of this function to happen simultaneously
+		 * for the task. This should be rare, but possible.
+		 * The spinlock turns the race into a benign one.
+		 */
+		cbw_dbg("Possible double enqueue detected.");
+		scx_atq_unlock(btq);
+		return 0;
+	}
+
+	ret = scx_atq_insert_vtime_unlocked(btq, taskc, vtime);
+	if (ret)
+		cbw_err("Failed to insert a task to BTQ: %d", ret);
+
+	scx_atq_unlock(btq);
+
+	return ret;
+}
+
 /**
  * scx_cgroup_bw_put_aside - Put aside a task to execute it when the cgroup is
  * unthrottled later.
@@ -1603,59 +1764,8 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 __hidden
 int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, struct cgroup *cgrp __arg_trusted)
 {
-	scx_task_common *taskc = (scx_task_common *)ctx;
-	struct scx_cgroup_llc_ctx *llcx;
-	int llc_id, ret;
-
 	cbw_dbg_cgrp(" [%s/%d]", p->comm, p->pid);
-
-	/* Get the current LLC ID. */
-	if ((llc_id = cbw_get_current_llc_id()) < 0) {
-		cbw_err("Invalid LLC id: %d", llc_id);
-		return -EINVAL;
-	}
-
-	/*
-	 * Put aside the task to the BTQ of the LLC context.
-	 */
-	llcx = cbw_get_llc_ctx(cgrp, llc_id);
-	if (!llcx) {
-		cbw_err("Failed to lookup an LLC ctx: [%llu/%d]",
-			cgroup_get_id(cgrp), llc_id);
-		return -ESRCH;
-	}
-
-	if (!llcx->btq) {
-		cbw_err("BTQ of an LLC ctx is not properly initialized.");
-		return -ESRCH;
-	}
-
-	ret = scx_atq_lock(llcx->btq);
-	if (ret) {
-		cbw_err("Failed to lock ATQ.");
-		return -EBUSY;
-	}
-
-	if (taskc->atq != NULL) {
-		/* 
-		 * Not really a bug: The initial .enqueue() may race with
-		 * a pair of .dequeue()/.enqueue() calls, and cause two
-		 * instances of this function to happen simultaneously
-		 * for the task. This should be rare, but possible.
-		 * The spinlock turns the race into a benign one.
-		 */
-		cbw_dbg("Possible double enqueue detected.");
-		scx_atq_unlock(llcx->btq);
-		return 0;
-	}
-
-	ret = scx_atq_insert_vtime_unlocked(llcx->btq, taskc, vtime);
-	if (ret)
-		cbw_err("Failed to insert a task to BTQ: %d", ret);
-
-	scx_atq_unlock(llcx->btq);
-
-	return ret;
+	return cbw_put_aside(ctx, vtime, cgrp);
 }
 
 static
@@ -2050,6 +2160,7 @@ int cbw_drain_btq_batch(struct scx_cgroup_ctx *cgx,
 			struct scx_cgroup_llc_ctx *llcx)
 {
 	scx_task_common *taskc;
+	scx_atq_t *btq;
 	int i;
 
 	/*
@@ -2062,9 +2173,16 @@ int cbw_drain_btq_batch(struct scx_cgroup_ctx *cgx,
 	 * to have been enqueued and not been dequeued. ATQ integrity aside,
 	 * the main problem is that because a .dequeue() callback can happen
 	 * at any point.
+	 *
+	 * Re-read llcx->btq on every iteration. cbw_free_llc_ctx() nulls
+	 * this field before destroying the ATQ; catching NULL between
+	 * iterations prevents operating on a freed ATQ. Note that there
+	 * remains a small window within a single iteration between the
+	 * READ_ONCE and scx_atq_pop() where the ATQ could be destroyed.
 	 */
 	for (i = 0; i < CBW_REENQ_MAX_BATCH &&
-		    (taskc = (scx_task_common *)scx_atq_pop(llcx->btq)) &&
+		    (btq = READ_ONCE(llcx->btq)) &&
+		    (taskc = (scx_task_common *)scx_atq_pop(btq)) &&
 		    can_loop; i++) {
 		/*
 		 * Note that we do not worry about racing with .dequeue() here,
