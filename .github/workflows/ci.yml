@@ -146,10 +146,6 @@ jobs:
           sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
-      - name: Build arena selftests
-        run: cargo build --profile ci -p scx_arena_selftests --locked
-      - name: Arena selftests
-        run: sudo target/ci/scx_arena_selftests
       - name: Build all schedulers
         run: |
           for sched in beerland bpfland cake chaos cosmos flash lavd layered p2dq pandemonium rlfifo rustland rusty tickless; do
@@ -221,8 +217,42 @@ jobs:
             exit 1
           fi
 
+  test-vm:
+    if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
+    needs: []
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-deps-action
+      - name: Build bpftool
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
+          make -C /tmp/bpftool/src -j$(nproc)
+          sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
+      - name: Build arena selftests
+        run: cargo build --profile ci -p scx_arena_selftests --locked
+      - name: Arena selftests
+        uses: likewhatevs/vng-action@v0.4.0
+        with:
+          name: scx__stable__linux-rolling-stable__${{ runner.arch }}
+          kernel-url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+          kernel-tag: linux-rolling-stable
+          kconfig: kernel.config
+          version: v19
+          network: user
+          verbose: true
+          run: |
+            export PS4='+ $(date "+%H:%M:%S") '
+            set -x
+            target/ci/scx_arena_selftests
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
   required-checks:
-    needs: [lint, veristat, test]
+    needs: [lint, veristat, test, test-vm]
     runs-on: ubuntu-latest
     if: always()
     env:
