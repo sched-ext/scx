@@ -24,6 +24,7 @@ env:
   SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
   SCHED_EXT_KERNEL_TAG: for-next
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   lint:
@@ -32,6 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
       - name: Format Rust
         run: cargo fmt --check
@@ -85,6 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
       - name: Install veristat tools
         run: |
@@ -127,7 +130,7 @@ jobs:
         if: always()
         run: sudo chown -R $(id -u):$(id -g) ~
 
-  test:
+  unit-test:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: []
     runs-on: ubuntu-24.04
@@ -135,6 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
       - uses: taiki-e/install-action@v2
         with:
@@ -142,7 +146,7 @@ jobs:
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
 
-  test-sched:
+  test:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: []
     runs-on: ubuntu-24.04
@@ -157,6 +161,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
       - name: Build schedulers
         run: |
@@ -220,6 +225,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
       - name: Build bpftool
         run: |
@@ -275,7 +281,7 @@ jobs:
         run: sudo chown -R $(id -u):$(id -g) ~
 
   required-checks:
-    needs: [lint, veristat, test, test-sched, test-vm]
+    needs: [lint, veristat, unit-test, test, test-vm]
     runs-on: ubuntu-latest
     if: always()
     env:
@@ -297,6 +303,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
       - name: Build Book and Linux Docs
         run: |
