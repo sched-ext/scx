@@ -208,6 +208,7 @@ struct perf_sample_event {
 
 struct bpf_event {
 	int type;
+	u32 size;
 	u64 ts;
 	u32 cpu;
 	union {
@@ -232,6 +233,13 @@ struct bpf_event {
 		struct perf_sample_event   perf_sample;
 	} event;
 };
+
+/* Size of bpf_event header without any union payload */
+#define BPF_EVENT_HDR_SIZE offsetof(struct bpf_event, event)
+
+/* Size of bpf_event with a specific union member */
+#define BPF_EVENT_SIZE(member) \
+	(BPF_EVENT_HDR_SIZE + sizeof(((struct bpf_event *)0)->event.member))
 
 struct task_ctx {
 	u64 wakeup_ts;

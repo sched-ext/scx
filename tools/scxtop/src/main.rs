@@ -468,12 +468,13 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                         return 0;
                     }
 
-                    let data_slice = std::slice::from_raw_parts(data as *const u8, size as usize);
-
                     let mut event = bpf_event::default();
-                    if plain::copy_from_bytes(&mut event, data_slice).is_err() {
-                        return 0;
-                    }
+                    let copy_size = std::cmp::min(size as usize, std::mem::size_of::<bpf_event>());
+                    std::ptr::copy_nonoverlapping(
+                        data as *const u8,
+                        &mut event as *mut bpf_event as *mut u8,
+                        copy_size,
+                    );
 
                     // Drop events with invalid timestamps
                     if event.ts == 0 {
@@ -1080,12 +1081,13 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                             return 0;
                         }
 
-                        let data_slice = std::slice::from_raw_parts(data as *const u8, size as usize);
-
                         let mut event = bpf_event::default();
-                        if plain::copy_from_bytes(&mut event, data_slice).is_err() {
-                            return 0;
-                        }
+                        let copy_size = std::cmp::min(size as usize, std::mem::size_of::<bpf_event>());
+                        std::ptr::copy_nonoverlapping(
+                            data as *const u8,
+                            &mut event as *mut bpf_event as *mut u8,
+                            copy_size,
+                        );
 
                         // Drop events with invalid timestamps
                         if event.ts == 0 {
@@ -1415,12 +1417,13 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                             return 0;
                         }
 
-                        let data_slice = std::slice::from_raw_parts(data as *const u8, size as usize);
-
                         let mut event = bpf_event::default();
-                        if plain::copy_from_bytes(&mut event, data_slice).is_err() {
-                            return 0;
-                        }
+                        let copy_size = std::cmp::min(size as usize, std::mem::size_of::<bpf_event>());
+                        std::ptr::copy_nonoverlapping(
+                            data as *const u8,
+                            &mut event as *mut bpf_event as *mut u8,
+                            copy_size,
+                        );
 
                         // Drop events with invalid timestamps
                         if event.ts == 0 {
