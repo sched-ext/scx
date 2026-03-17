@@ -8,50 +8,50 @@ repository = "https://github.com/sched-ext/scx"
 description = "Utilities for sched_ext schedulers"
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 bitvec = { version = "1", features = ["serde"] }
 bindgen = ">=0.69"
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
-glob = "0.3"
+glob.workspace = true
 hex = "0.4"
-lazy_static = "1"
-libbpf-cargo = "=0.26.1"
-libbpf-rs = "=0.26.1"
-log = "0.4"
+lazy_static.workspace = true
+libbpf-cargo.workspace = true
+libbpf-rs.workspace = true
+log.workspace = true
 nvml-wrapper = { version = "0.12", optional = true }
 nvml-wrapper-sys = { version = "0.9", optional = true }
 paste = "1"
-regex = "1"
-ruzstd = "0.8"
+regex.workspace = true
+ruzstd.workspace = true
 scx_stats = { path = "../scx_stats", version = "1.1.0" }
-serde = { version = "1", features = ["derive"] }
-sscanf = "0.5"
+serde.workspace = true
+sscanf.workspace = true
 tar = "0.4"
-walkdir = "2"
-version-compare = "0.2"
+walkdir.workspace = true
+version-compare.workspace = true
 zbus = { version = "5", optional = true }
 num = "0.4"
-tempfile = "3"
-tracing = "0.1"
+tempfile.workspace = true
+tracing.workspace = true
 tracing-subscriber = "0.3"
-libc = "0.2"
+libc.workspace = true
 nix = { version = "0.31", features = ["resource"] }
 
 scx_cargo = { path = "../scx_cargo", version = "1.1.0", optional = true }
 
 [build-dependencies]
-anyhow = "1"
+anyhow.workspace = true
 bindgen = ">=0.69"
-glob = "0.3"
-lazy_static = "1"
-libbpf-cargo = "=0.26.1"
-ruzstd = "0.8"
+glob.workspace = true
+lazy_static.workspace = true
+libbpf-cargo.workspace = true
+ruzstd.workspace = true
 scx_cargo = { path = "../scx_cargo", version = "1.1.0" }
-sscanf = "0.5"
+sscanf.workspace = true
 tar = "0.4"
-tempfile = "3"
-version-compare = "0.2"
-walkdir = "2"
+tempfile.workspace = true
+version-compare.workspace = true
+walkdir.workspace = true
 
 [features]
 default = []

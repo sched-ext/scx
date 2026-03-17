@@ -6,10 +6,10 @@ description = "Crate for setting up the BPF arena library for sched-ext schedule
 license = "GPL-2.0-only"
 
 [dependencies]
-anyhow = "1"
-libbpf-rs = "=0.26.1"
+anyhow.workspace = true
+libbpf-rs.workspace = true
 libbpf-sys = "=1.6.3"
-simplelog = "0.12"
+simplelog.workspace = true
 scx_utils = { path = "../../scx_utils", version = "1.1.0" }
 
 [build-dependencies]

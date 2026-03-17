@@ -8,10 +8,10 @@ repository = "https://github.com/sched-ext/scx"
 description = "Framework to implement sched_ext schedulers running in user space"
 
 [dependencies]
-anyhow = "1"
-plain = "0.2"
-libbpf-rs = "=0.26.1"
-libc = "0.2"
+anyhow.workspace = true
+plain.workspace = true
+libbpf-rs.workspace = true
+libc.workspace = true
 seccomp = "0.1"
 scx_cargo = { path = "../scx_cargo", version = "1.1.0" }
 

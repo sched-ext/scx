@@ -9,33 +9,33 @@ license = "GPL-2.0-only"
 publish = false
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 bitvec = "1"
 cgroupfs = "0.9"
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
 clap_main = "0.2"
 ctrlc = { version = "3", features = ["termination"] }
 itertools = "0.14"
-lazy_static = "1"
-libbpf-rs = "=0.26.1"
-libc = "0.2"
+lazy_static.workspace = true
+libbpf-rs.workspace = true
+libc.workspace = true
 inotify = "0.11"
 nix = { version = "0.31", features = ["event"] }
-crossbeam = "0.8"
+crossbeam.workspace = true
 maplit = "1"
 scx_stats = { path = "../../../rust/scx_stats", version = "1.1.0" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.0" }
 scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parking_lot", "tracing-log"] }
 
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.0" }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0", features = ["testutils"] }
 
 [features]

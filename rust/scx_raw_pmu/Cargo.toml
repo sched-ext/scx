@@ -6,17 +6,17 @@ description = "Utilities to handle raw PMU counters in sched_ext schedulers"
 license = "GPL-2.0-only"
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 csv = "1"
 include_dir = "0.7"
 procfs = "0.18"
-regex = "1"
+regex.workspace = true
 scx_utils = { path = "../scx_utils", version = "1.1.0" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [build-dependencies]
 scx_utils = { path = "../scx_utils", version = "1.1.0" }

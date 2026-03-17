@@ -7,12 +7,12 @@ description = "A sched_ext scheduler applying CAKE bufferbloat concepts to CPU s
 license = "GPL-2.0-only"
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
-libbpf-rs = "=0.26.1"
-libc = "0.2"
-log = "0.4"
+libbpf-rs.workspace = true
+libc.workspace = true
+log.workspace = true
 env_logger = "0.11"
 ratatui = { version = "0.30" }
 crossterm = "0.29"
