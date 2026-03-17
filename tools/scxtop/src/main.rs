@@ -633,17 +633,6 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                         // Check shutdown flag to stop early if requested
                         _ = tokio::time::sleep(Duration::from_millis(100)) => {
                             if shutdown_trace.load(Ordering::Relaxed) {
-                                info!("trace task: shutdown requested, draining remaining events");
-                                // Drain remaining events in the channel
-                                while let Ok(a) = action_rx.try_recv() {
-                                    count += 1;
-                                    trace_manager
-                                        .on_action(&a)
-                                        .expect("Action should have been resolved");
-                                }
-                                info!("trace task: stopping trace manager");
-                                trace_manager.stop(trace_file, None).unwrap();
-                                info!("trace file compiled, collected {count} events");
                                 break;
                             }
                         }
@@ -657,16 +646,30 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                                 trace_manager
                                     .on_action(&a)
                                     .expect("Action should have been resolved");
+                                // After processing, check shutdown to avoid
+                                // draining the entire buffered channel through
+                                // select! one event at a time.
+                                if shutdown_trace.load(Ordering::Relaxed) {
+                                    break;
+                                }
                             } else {
-                                info!("trace task: channel closed, stopping trace manager");
-                                trace_manager.stop(trace_file, None).unwrap();
-                                info!("trace file compiled, collected {count} events");
                                 break;
                             }
                         }
                     }
                 }
-                info!("trace task: exiting");
+                // Drain remaining events in a tight loop without select!
+                // overhead. This is much faster for large buffered channels.
+                info!("trace task: draining remaining events");
+                while let Ok(a) = action_rx.try_recv() {
+                    count += 1;
+                    trace_manager
+                        .on_action(&a)
+                        .expect("Action should have been resolved");
+                }
+                info!("trace task: stopping trace manager");
+                trace_manager.stop(trace_file, None).unwrap();
+                info!("trace file compiled, collected {count} events");
             });
 
             info!("waiting for trace duration ({}ms)", trace_args.trace_ms);

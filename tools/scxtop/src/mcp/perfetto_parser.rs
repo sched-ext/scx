@@ -498,10 +498,13 @@ impl PerfettoTrace {
 
                         // Process individual FtraceEvents
                         for event in &ftrace_bundle.event {
-                            // Track timestamp range
+                            // Track timestamp range (skip zero timestamps
+                            // from partially initialized events)
                             if let Some(ts) = event.timestamp {
-                                min_ts = min_ts.min(ts);
-                                max_ts = max_ts.max(ts);
+                                if ts > 0 {
+                                    min_ts = min_ts.min(ts);
+                                    max_ts = max_ts.max(ts);
+                                }
                             }
 
                             // Add to per-CPU index
@@ -521,8 +524,10 @@ impl PerfettoTrace {
                             // Track timestamp range from expanded events
                             for event_with_idx in &expanded_events {
                                 if let Some(ts) = event_with_idx.event.timestamp {
-                                    min_ts = min_ts.min(ts);
-                                    max_ts = max_ts.max(ts);
+                                    if ts > 0 {
+                                        min_ts = min_ts.min(ts);
+                                        max_ts = max_ts.max(ts);
+                                    }
                                 }
                             }
 
@@ -577,9 +582,11 @@ impl PerfettoTrace {
                                     .push(event_idx);
                             }
 
-                            // Update time range
-                            min_ts = min_ts.min(timestamp_ns);
-                            max_ts = max_ts.max(timestamp_ns);
+                            // Update time range (skip events with no timestamp)
+                            if timestamp_ns > 0 {
+                                min_ts = min_ts.min(timestamp_ns);
+                                max_ts = max_ts.max(timestamp_ns);
+                            }
 
                             // Store the parsed event
                             track_events.push(parsed_event);
@@ -638,8 +645,10 @@ impl PerfettoTrace {
                     trace_packet::Data::SysStats(sys_stat) => {
                         if let Some(ts) = packet.timestamp {
                             system_stats.insert(ts, sys_stat.clone());
-                            min_ts = min_ts.min(ts);
-                            max_ts = max_ts.max(ts);
+                            if ts > 0 {
+                                min_ts = min_ts.min(ts);
+                                max_ts = max_ts.max(ts);
+                            }
                         }
                     }
                     _ => {}
