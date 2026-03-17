@@ -20,10 +20,10 @@ defaults:
 env:
   PS4: '+ $(date "+%H:%M:%S") '
   BPF_CLANG: clang-19
-  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng"
+  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng mold"
   SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
   SCHED_EXT_KERNEL_TAG: for-next
-  RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld"
+  RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
 
 jobs:
   lint:
@@ -147,10 +147,7 @@ jobs:
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
       - name: Build all schedulers
-        run: |
-          for sched in beerland bpfland cake chaos cosmos flash lavd layered p2dq pandemonium rlfifo rustland rusty tickless; do
-            cargo build --profile ci --locked -p "scx_${sched}"
-          done
+        run: cargo build --profile ci --locked -p scx_beerland -p scx_bpfland -p scx_cake -p scx_chaos -p scx_cosmos -p scx_flash -p scx_lavd -p scx_layered -p scx_p2dq -p scx_pandemonium -p scx_rlfifo -p scx_rustland -p scx_rusty -p scx_tickless
       - name: Dump BTF
         if: always() && runner.debug == '1'
         run: |
