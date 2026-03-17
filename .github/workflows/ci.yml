@@ -112,8 +112,10 @@ jobs:
               printf '\n[package.metadata.veristat]\ndisable = true\n' >> "$manifest"
             fi
           done
-      - name: Build packages
-        run: cargo build --profile ci --locked
+      - name: Build packages and generate metadata
+        run: |
+          cargo build --profile ci --locked
+          cargo metadata --format-version 1 > /tmp/meta.json
       - name: 'Veristat: ${{ matrix.kernel.name }}'
         uses: likewhatevs/vng-action@v0.5.0
         with:
@@ -128,7 +130,7 @@ jobs:
           run: |
             export PS4='+ $(date "+%H:%M:%S") '
             set -x
-            cargo veristat --profile ci --no-build --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
+            cargo veristat --profile ci --metadata-json /tmp/meta.json --no-build --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
       - name: Fix permissions for cache
         if: always()
         run: sudo chown -R $(id -u):$(id -g) ~
@@ -178,7 +180,7 @@ jobs:
           set +e
           passed=""
           failed=""
-          declare -A flags
+          declare -A flags results
           flags[chaos]="--random-delay-frequency 0.5 --random-delay-min-us 1000 --random-delay-max-us 2000"
           flags[lavd]="--log-level info"
           flags[layered]="--log-level info --stats 15 --run-example"
@@ -194,27 +196,30 @@ jobs:
             wait $stress_pid 2>/dev/null || true
             if [ $rc -ne 0 ]; then
               failed="${failed} ${sched}"
+              results[$sched]="FAIL"
             else
               passed="${passed} ${sched}"
+              results[$sched]="PASS"
             fi
           done
           echo ""
           echo "=== Scheduler Test Results ==="
           if [ -n "$passed" ]; then
-            echo "Passed:${passed} ✅"
+            echo "Passed:${passed}"
           fi
           if [ -n "$failed" ]; then
-            echo "Failed:${failed} ❌"
+            echo "Failed:${failed}"
           fi
           {
-            echo "## Scheduler Test Results (${{ matrix.scheds }})"
-            echo ""
-            if [ -n "$passed" ]; then
-              echo "**Passed**:${passed} ✅"
-            fi
-            if [ -n "$failed" ]; then
-              echo "**Failed**:${failed} ❌"
-            fi
+            echo "| Scheduler | Result |"
+            echo "|-----------|--------|"
+            for sched in ${{ matrix.scheds }}; do
+              if [ "${results[$sched]}" = "PASS" ]; then
+                echo "| ${sched} | PASS |"
+              else
+                echo "| ${sched} | FAIL |"
+              fi
+            done
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$failed" ]; then
             exit 1
@@ -246,10 +251,19 @@ jobs:
           run: |
             export PS4='+ $(date "+%H:%M:%S") '
             set -x
-            target/ci/scx_arena_selftests
             set +e
+            target/ci/scx_arena_selftests
+            arena_rc=$?
             passed=""
             failed=""
+            declare -A results
+            if [ $arena_rc -ne 0 ]; then
+              results[arena_selftests]="FAIL"
+              failed="${failed} arena_selftests"
+            else
+              results[arena_selftests]="PASS"
+              passed="${passed} arena_selftests"
+            fi
             for sched in cake pandemonium; do
               echo "=== Testing ${sched} ==="
               stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
@@ -262,8 +276,10 @@ jobs:
               wait $stress_pid 2>/dev/null || true
               if [ $rc -ne 0 ]; then
                 failed="${failed} ${sched}"
+                results[$sched]="FAIL"
               else
                 passed="${passed} ${sched}"
+                results[$sched]="PASS"
               fi
             done
             echo ""
@@ -273,6 +289,19 @@ jobs:
             fi
             if [ -n "$failed" ]; then
               echo "Failed:${failed}"
+            fi
+            {
+              echo "| Scheduler | Result |"
+              echo "|-----------|--------|"
+              for sched in arena_selftests cake pandemonium; do
+                if [ "${results[$sched]}" = "PASS" ]; then
+                  echo "| ${sched} | PASS |"
+                else
+                  echo "| ${sched} | FAIL |"
+                fi
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "$failed" ]; then
               exit 1
             fi
       - name: Fix permissions for cache
