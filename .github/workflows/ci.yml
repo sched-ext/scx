@@ -36,6 +36,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
       - uses: ./.github/actions/install-deps-action
       - name: Format Rust
         run: cargo fmt --check
@@ -90,6 +92,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
       - uses: ./.github/actions/install-deps-action
       - name: Install veristat tools
         run: |
@@ -144,6 +148,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
       - uses: ./.github/actions/install-deps-action
       - uses: taiki-e/install-action@v2
         with:
@@ -167,6 +173,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
       - uses: ./.github/actions/install-deps-action
       - name: Build schedulers
         run: |
@@ -205,19 +213,19 @@ jobs:
           echo ""
           echo "=== Scheduler Test Results ==="
           if [ -n "$passed" ]; then
-            echo "Passed:${passed}"
+            echo "✅ Passed:${passed}"
           fi
           if [ -n "$failed" ]; then
-            echo "Failed:${failed}"
+            echo "❌ Failed:${failed}"
           fi
           {
             echo "| Scheduler | Result |"
             echo "|-----------|--------|"
             for sched in ${{ matrix.scheds }}; do
               if [ "${results[$sched]}" = "PASS" ]; then
-                echo "| ${sched} | PASS |"
+                echo "| ${sched} | ✅ |"
               else
-                echo "| ${sched} | FAIL |"
+                echo "| ${sched} | ❌ |"
               fi
             done
           } >> "$GITHUB_STEP_SUMMARY"
@@ -234,6 +242,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
       - uses: ./.github/actions/install-deps-action
       - name: Build
         run: cargo build --profile ci --locked -p scx_arena_selftests -p scx_cake -p scx_pandemonium
@@ -285,19 +295,19 @@ jobs:
             echo ""
             echo "=== VM Scheduler Test Results ==="
             if [ -n "$passed" ]; then
-              echo "Passed:${passed}"
+              echo "✅ Passed:${passed}"
             fi
             if [ -n "$failed" ]; then
-              echo "Failed:${failed}"
+              echo "❌ Failed:${failed}"
             fi
             {
               echo "| Scheduler | Result |"
               echo "|-----------|--------|"
               for sched in arena_selftests cake pandemonium; do
                 if [ "${results[$sched]}" = "PASS" ]; then
-                  echo "| ${sched} | PASS |"
+                  echo "| ${sched} | ✅ |"
                 else
-                  echo "| ${sched} | FAIL |"
+                  echo "| ${sched} | ❌ |"
                 fi
               done
             } >> "$GITHUB_STEP_SUMMARY"
@@ -332,6 +342,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
       - uses: ./.github/actions/install-deps-action
       - name: Build Book and Linux Docs
         run: |
