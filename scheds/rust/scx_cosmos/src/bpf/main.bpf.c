@@ -81,6 +81,11 @@ const volatile u64 preferred_cpus[MAX_CPUS];
 const volatile u64 cpu_capacity[MAX_CPUS];
 
 /*
+ * True when all CPUs have the same capacity (no capacity asymmetry).
+ */
+const volatile bool all_cpus_same_capacity = false;
+
+/*
  * Enable cpufreq integration.
  */
 const volatile bool cpufreq_enabled = true;
@@ -532,6 +537,14 @@ static s32 pick_cpu_on_gpu_node(const struct task_struct *p, int node,
 }
 
 /*
+ * Return true if @p still wants to run, false otherwise.
+ */
+static bool is_task_queued(const struct task_struct *p)
+{
+	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
  * Return true if @p can only run on a single CPU, false otherwise.
  */
 static inline bool is_pcpu_task(const struct task_struct *p)
@@ -664,7 +677,7 @@ static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
  */
 static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
 {
-	if (this_cpu == that_cpu)
+	if (all_cpus_same_capacity || this_cpu == that_cpu)
 		return false;
 
 	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
@@ -1040,6 +1053,7 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu,
 		    cpu_llc_id(cpu) != cpu_llc_id(prev_cpu) ||
 		    !is_cpu_idle(cpu) ||
 		    !is_primary_cpu(cpu) ||
+		    (avoid_smt && is_smt_contended(cpu)) ||
 		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
@@ -1109,7 +1123,9 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 * If task exceeds the perf sticky threshold, dispatch it directly
 	 * on the same CPU if no other tasks are waiting.
 	 */
-	if (is_sticky_event_heavy(tctx) && is_primary_cpu(prev_cpu)) {
+	if (is_sticky_event_heavy(tctx) &&
+	    is_primary_cpu(prev_cpu) &&
+	    (!avoid_smt || !is_smt_contended(prev_cpu))) {
 		__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 		return prev_cpu;
@@ -1212,7 +1228,9 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to immediately dispatch sticky event-heavy tasks to the
 	 * same CPU.
 	 */
-	if (is_sticky_event_heavy(tctx) && is_primary_cpu(prev_cpu)) {
+	if (is_sticky_event_heavy(tctx) &&
+	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p)) &&
+	    (!avoid_smt || !is_smt_contended(prev_cpu))) {
 		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(shared_dsq(prev_cpu));
 
 		/*
@@ -1233,7 +1251,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Immediately dispatch migration event-heavy tasks to a new CPU
 	 * (if the task is allowed to migrate).
 	 */
-	if (!is_migration_disabled(p) && is_event_heavy(tctx)) {
+	if (is_event_heavy(tctx) && !is_pcpu_task(p)) {
 		new_cpu = pick_least_busy_event_cpu(p, prev_cpu, tctx);
 		if (new_cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | new_cpu,
@@ -1250,7 +1268,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to dispatch directly to an idle CPU if the task can
 	 * migrate.
 	 */
-	if (task_should_migrate(p, enq_flags) || !is_primary_cpu(prev_cpu)) {
+	if (task_should_migrate(p, enq_flags) ||
+	    (!is_primary_cpu(prev_cpu) && !is_pcpu_task(p))) {
 		if (is_pcpu_task(p))
 			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
 		else
@@ -1266,7 +1285,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Keep using the same CPU if that CPU is not busy.
 	 */
-	if (!is_cpu_busy(prev_cpu) && is_primary_cpu(prev_cpu)) {
+	if (!is_cpu_busy(prev_cpu) &&
+	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 		if (task_should_migrate(p, enq_flags))
 			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
@@ -1283,6 +1303,45 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
+/*
+ * Return true if the task can keep running on its current CPU from
+ * ops.dispatch(), false if the task should migrate.
+ */
+static bool keep_running(const struct task_struct *p, s32 cpu)
+{
+	const struct cpumask *mask = cast_mask(primary_cpumask);
+
+	/*
+	 * Do not keep running if the task doesn't need to run.
+	 */
+	if (!is_task_queued(p))
+		return false;
+
+	/*
+	* If the task can only run on this CPU, keep it running.
+	*/
+	if (is_pcpu_task(p))
+		return true;
+
+	/*
+	 * If the task is not running in a full-idle SMT core and there are
+	 * full-idle SMT cores available in the system, give it a chance to
+	 * migrate elsewhere.
+	 */
+	if (avoid_smt && is_smt_contended(cpu))
+		return false;
+
+	/*
+	 * If the task is not in the primary domain, give it a chance to
+	 * migrate.
+	 */
+	if (!is_primary_cpu(cpu) &&
+	    mask && bpf_cpumask_intersects(p->cpus_ptr, mask))
+		return false;
+
+	return true;
+}
+
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
@@ -1297,7 +1356,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * wants to run on this CPU, give it another time slot if the CPU
 	 * is on the primary domain.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && is_primary_cpu(cpu))
+	if (prev && keep_running(prev, cpu))
 		prev->scx.slice = task_slice(prev);
 }
 
@@ -1359,6 +1418,17 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 		scx_pmu_event_start(p, false);
 }
 
+/*
+ * Return the time slice normalized by @cpu's capacity.
+ */
+static u64 scale_by_cpu_capacity(u64 slice, s32 cpu)
+{
+	if (all_cpus_same_capacity || !is_cpu_valid(cpu))
+		return slice;
+
+	return slice * cpu_capacity[cpu] / SCX_CPUPERF_ONE;
+}
+
 void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
@@ -1379,6 +1449,12 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 * Evaluate the used time slice.
 	 */
 	slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_ns);
+
+	/*
+	 * Scale used time slice by CPU capacity: time spent on slower CPU
+	 * is charged less time than running on faster CPU.
+	 */
+	slice = scale_by_cpu_capacity(slice, cpu);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
