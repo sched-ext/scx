@@ -47,7 +47,7 @@ jobs:
         run: |
           cargo metadata --format-version 1 | \
             jq -r '.packages[] | select(.metadata.scx.ci.use_clippy == true) | .name' | \
-            xargs -I{} cargo clippy --no-deps --locked -p {} -- -Dwarnings
+            xargs -I{} cargo clippy --profile ci --no-deps --locked -p {} -- -Dwarnings
       - name: Check
         run: cargo check --profile ci --locked
       - name: Check vmlinux sync
