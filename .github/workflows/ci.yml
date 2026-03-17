@@ -131,7 +131,7 @@ jobs:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: []
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -139,35 +139,33 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Build bpftool
-        run: |
-          git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
-          make -C /tmp/bpftool/src -j$(nproc)
-          sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
-      - name: Build all schedulers
-        run: cargo build --profile ci --locked -p scx_beerland -p scx_bpfland -p scx_cake -p scx_chaos -p scx_cosmos -p scx_flash -p scx_lavd -p scx_layered -p scx_p2dq -p scx_pandemonium -p scx_rlfifo -p scx_rustland -p scx_rusty -p scx_tickless
-      - name: Dump BTF
-        if: always() && runner.debug == '1'
+
+  test-sched:
+    if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
+    needs: []
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scheds:
+          - flash beerland bpfland cosmos
+          - layered p2dq lavd mitosis
+          - chaos rlfifo rustland rusty tickless
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-deps-action
+      - name: Build schedulers
         run: |
-          mkdir -p btf-dump
-          for f in target/ci/build/scx_beerland-*/out/*.bpf.o; do
-            if [ -f "$f" ]; then
-              cp "$f" btf-dump/bpf-object.o
-              /usr/local/bin/bpftool btf dump file "$f" format raw > btf-dump/bpf-raw.btf
-              break
-            fi
+          build_args=""
+          for s in ${{ matrix.scheds }}; do
+            build_args="$build_args -p scx_${s}"
           done
-          /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > btf-dump/kernel-vmlinux.h
-          /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format raw > btf-dump/kernel-raw.btf
-      - name: Upload BTF
-        if: always() && runner.debug == '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: btf-test-host
-          path: btf-dump/
-      - name: Test all schedulers
+          cargo build --profile ci --locked $build_args
+      - name: Test schedulers
         run: |
           set +e
           passed=""
@@ -176,7 +174,7 @@ jobs:
           flags[chaos]="--random-delay-frequency 0.5 --random-delay-min-us 1000 --random-delay-max-us 2000"
           flags[lavd]="--log-level info"
           flags[layered]="--log-level info --stats 15 --run-example"
-          for sched in beerland bpfland cake chaos cosmos flash lavd layered p2dq pandemonium rlfifo rustland rusty tickless; do
+          for sched in ${{ matrix.scheds }}; do
             echo "=== Testing ${sched} ==="
             stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
               --affinity 1 --affinity-delay 1 --affinity-pin &
@@ -201,7 +199,7 @@ jobs:
             echo "Failed:${failed} ❌"
           fi
           {
-            echo "## Scheduler Test Results"
+            echo "## Scheduler Test Results (${{ matrix.scheds }})"
             echo ""
             if [ -n "$passed" ]; then
               echo "**Passed**:${passed} ✅"
@@ -228,9 +226,9 @@ jobs:
           git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
           make -C /tmp/bpftool/src -j$(nproc)
           sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
-      - name: Build arena selftests
-        run: cargo build --profile ci -p scx_arena_selftests --locked
-      - name: Arena selftests
+      - name: Build
+        run: cargo build --profile ci --locked -p scx_arena_selftests -p scx_cake -p scx_pandemonium
+      - name: Arena selftests and scheduler tests
         uses: likewhatevs/vng-action@v0.4.0
         with:
           name: scx__stable__linux-rolling-stable__${{ runner.arch }}
@@ -244,12 +242,40 @@ jobs:
             export PS4='+ $(date "+%H:%M:%S") '
             set -x
             target/ci/scx_arena_selftests
+            set +e
+            passed=""
+            failed=""
+            for sched in cake pandemonium; do
+              echo "=== Testing ${sched} ==="
+              stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
+                --affinity 1 --affinity-delay 1 --affinity-pin &
+              stress_pid=$!
+              timeout --foreground --preserve-status 45 \
+                target/ci/scx_${sched} -v
+              rc=$?
+              kill $stress_pid 2>/dev/null || true
+              wait $stress_pid 2>/dev/null || true
+              if [ $rc -ne 0 ]; then
+                failed="${failed} ${sched}"
+              else
+                passed="${passed} ${sched}"
+              fi
+            done
+            echo ""
+            echo "=== VM Scheduler Test Results ==="
+            if [ -n "$passed" ]; then
+              echo "Passed:${passed}"
+            fi
+            if [ -n "$failed" ]; then
+              echo "Failed:${failed}"
+              exit 1
+            fi
       - name: Fix permissions for cache
         if: always()
         run: sudo chown -R $(id -u):$(id -g) ~
 
   required-checks:
-    needs: [lint, veristat, test, test-vm]
+    needs: [lint, veristat, test, test-sched, test-vm]
     runs-on: ubuntu-latest
     if: always()
     env:
