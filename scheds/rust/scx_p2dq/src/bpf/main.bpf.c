@@ -221,6 +221,11 @@ static u64 min(u64 a, u64 b)
 	return a <= b ? a : b;
 }
 
+static __always_inline bool vtime_before(u64 a, u64 b)
+{
+	return (s64)(a - b) < 0;
+}
+
 static __always_inline u64 dsq_time_slice(int dsq_index)
 {
 	if (dsq_index > p2dq_config.nr_dsqs_per_llc || dsq_index < 0) {
@@ -943,9 +948,11 @@ static void update_vtime(struct task_struct *p, struct cpu_ctx *cpuc,
 			return;
 
 		u64 scaled_min = scale_by_task_weight(p, max_dsq_time_slice());
+		u64 vtime_floor = (llcx->vtime > scaled_min) ?
+				  llcx->vtime - scaled_min : 0;
 
-		if (p->scx.dsq_vtime < llcx->vtime - scaled_min)
-			p->scx.dsq_vtime = llcx->vtime - scaled_min;
+		if (p->scx.dsq_vtime < vtime_floor)
+			p->scx.dsq_vtime = vtime_floor;
 
 		return;
 	}
@@ -2710,7 +2717,7 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 			// Peek at the other CPU's affn_dsq
 			p = __COMPAT_scx_bpf_dsq_peek(other_cpuc->affn_dsq);
 			if (p && peek_cpumask_test_cpu(cpu, p) &&
-			    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
+			    (vtime_before(p->scx.dsq_vtime, min_vtime) || min_vtime == 0)) {
 				min_vtime = p->scx.dsq_vtime;
 				dsq_id = other_cpuc->affn_dsq;
 			}
@@ -2720,7 +2727,7 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 check_llc_dsq:
 	// LLC DSQ for vtime comparison
 	p = __COMPAT_scx_bpf_dsq_peek(cpuc->llc_dsq);
-	if (p && (p->scx.dsq_vtime < min_vtime || min_vtime == 0) &&
+	if (p && (vtime_before(p->scx.dsq_vtime, min_vtime) || min_vtime == 0) &&
 	    peek_cpumask_test_cpu(cpu, p)) {
 		min_vtime = p->scx.dsq_vtime;
 		dsq_id = cpuc->llc_dsq;
@@ -2732,7 +2739,7 @@ check_llc_dsq:
 			pid = scx_dhq_peek_strand(cpuc->mig_dhq, cpuc->dhq_strand);
 			if (pid && (p = bpf_task_from_pid((s32)pid))) {
 				if (likely(bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) &&
-				    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
+				    (vtime_before(p->scx.dsq_vtime, min_vtime) || min_vtime == 0)) {
 					min_vtime = p->scx.dsq_vtime;
 					min_dhq = cpuc->mig_dhq;
 				}
@@ -2742,7 +2749,7 @@ check_llc_dsq:
 			pid = scx_atq_peek(cpuc->mig_atq);
 			if ((p = bpf_task_from_pid((s32)pid))) {
 				if (likely(bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) &&
-				    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
+				    (vtime_before(p->scx.dsq_vtime, min_vtime) || min_vtime == 0)) {
 					min_vtime = p->scx.dsq_vtime;
 					min_atq = cpuc->mig_atq;
 					/*
@@ -2759,7 +2766,7 @@ check_llc_dsq:
 			// Peek migration DSQ - only consider tasks that can run here
 			p = __COMPAT_scx_bpf_dsq_peek(cpuc->mig_dsq);
 			if (p && likely(peek_cpumask_test_cpu(cpu, p)) &&
-			    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
+			    (vtime_before(p->scx.dsq_vtime, min_vtime) || min_vtime == 0)) {
 				min_vtime = p->scx.dsq_vtime;
 				dsq_id = cpuc->mig_dsq;
 			}

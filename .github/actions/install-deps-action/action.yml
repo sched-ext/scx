@@ -12,22 +12,25 @@ runs:
         echo 'Acquire::Retries "3";'             | sudo tee /etc/apt/apt.conf.d/99retries >/dev/null
         echo 'Acquire::Languages "none";'        | sudo tee /etc/apt/apt.conf.d/99no-languages >/dev/null
         echo 'Dpkg::Use-Pty "0";'               | sudo tee /etc/apt/apt.conf.d/99no-pty >/dev/null
-        # Handle legacy .list format
+        # GitHub runners use mirror+file:///etc/apt/apt-mirrors.txt which
+        # resolves to azure mirrors. Overwrite it with the main archive.
+        echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+        # Also fix any sources that embed azure URLs directly
         sudo sed -i -E \
-          -e 's|https?://([a-z0-9-]+\.)*archive\.ubuntu\.com/ubuntu|mirror://mirrors.ubuntu.com/mirrors.txt|g' \
-          -e 's|https?://security\.ubuntu\.com/ubuntu|mirror://mirrors.ubuntu.com/mirrors.txt|g' \
-          /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
-        # Handle deb822 .sources format (ubuntu 24.04+)
-        sudo sed -i -E \
-          -e 's|https?://([a-z0-9-]+\.)*archive\.ubuntu\.com/ubuntu/?|mirror://mirrors.ubuntu.com/mirrors.txt|g' \
-          -e 's|https?://security\.ubuntu\.com/ubuntu/?|mirror://mirrors.ubuntu.com/mirrors.txt|g' \
-          /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          -e 's|https?://([a-z0-9-]+\.)*archive\.ubuntu\.com/ubuntu/?|http://archive.ubuntu.com/ubuntu/|g' \
+          -e 's|https?://security\.ubuntu\.com/ubuntu/?|http://archive.ubuntu.com/ubuntu/|g' \
+          /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
     - name: Install build dependencies
       run: |
         if sudo -n true 2>/dev/null; then
           read -ra pkgs <<< "$SCX_PACKAGES"
-          sudo apt-get update
-          sudo apt-get install -y "${pkgs[@]}"
+          for attempt in 1 2 3; do
+            if timeout 90 sudo apt-get update && timeout 90 sudo apt-get install -y "${pkgs[@]}"; then
+              break
+            fi
+            echo "::warning::apt attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
         fi
         echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
       shell: bash
