@@ -25,13 +25,14 @@ env:
   SCHED_EXT_KERNEL_TAG: for-next
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
   RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   lint:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
@@ -85,7 +86,7 @@ jobs:
     runs-on: ubuntu-24.04
     continue-on-error: ${{ matrix.kernel.allow-failure == true }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
@@ -113,7 +114,7 @@ jobs:
       - name: Build packages
         run: cargo build --profile ci --locked
       - name: 'Veristat: ${{ matrix.kernel.name }}'
-        uses: likewhatevs/vng-action@v0.4.0
+        uses: likewhatevs/vng-action@v0.5.0
         with:
           name: ${{ matrix.kernel.name }}__${{ runner.arch }}
           kernel-url: ${{ matrix.kernel.url }}
@@ -136,7 +137,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
@@ -159,7 +160,7 @@ jobs:
           - layered p2dq lavd mitosis
           - chaos rlfifo rustland rusty tickless
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
@@ -223,19 +224,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: ./.github/actions/install-deps-action
-      - name: Build bpftool
-        run: |
-          git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
-          make -C /tmp/bpftool/src -j$(nproc)
-          sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
       - name: Build
         run: cargo build --profile ci --locked -p scx_arena_selftests -p scx_cake -p scx_pandemonium
       - name: Arena selftests and scheduler tests
-        uses: likewhatevs/vng-action@v0.4.0
+        uses: likewhatevs/vng-action@v0.5.0
         with:
           name: scx__stable__linux-rolling-stable__${{ runner.arch }}
           kernel-url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
@@ -287,7 +283,7 @@ jobs:
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")'
 
   pages:
@@ -300,7 +296,7 @@ jobs:
     steps:
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: mozilla-actions/sccache-action@v0.0.9
