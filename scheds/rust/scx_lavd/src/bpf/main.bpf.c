@@ -1494,6 +1494,19 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 		return;
 	}
 
+	/*
+	 * When an initially offline CPU becomes online, we should restart the
+	 * scheduler to properly reload its topology information. Offline CPUs
+	 * lack the /sys/devices/system/cpu/cpuN/topology directory, so they
+	 * lack proper topology information and report capacity values of 0.
+	 */
+	if (cpuc->max_capacity == 0) {
+		scx_bpf_exit(SCX_ECODE_ACT_RESTART,
+			"RESTART: cpu %d becomes online. Restart the scheduler.",
+			cpu);
+		return;
+	}
+
 	cpu_ctx_init_online(cpuc, cpu, now);
 
 	__sync_fetch_and_add(&nr_cpus_onln, 1);
