@@ -101,11 +101,6 @@ jobs:
           sudo cp /tmp/veristat/src/veristat /usr/local/bin/
           sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
           cargo install cargo-veristat --locked
-      - name: Build bpftool
-        run: |
-          git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
-          make -C /tmp/bpftool/src -j$(nproc)
-          sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
       - name: Disable veristat for excluded packages
         if: matrix.kernel.veristat-disable != ''
         run: |
