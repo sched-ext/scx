@@ -8,20 +8,19 @@ use std::fmt::Write;
 lazy_static::lazy_static! {
     static ref GIT_VERSION: String = {
         let mut ver = String::new();
-        match option_env!("VERGEN_GIT_SHA") {
-            Some(v) if v != "VERGEN_IDEMPOTENT_OUTPUT" => {
+        if let Some(sha) = option_env!("SCX_GIT_SHA") {
+            if !sha.is_empty() {
                 ver += "g";
-                ver += v;
-                if let Some("true") = option_env!("VERGEN_GIT_DIRTY") {
+                ver += sha;
+                if option_env!("SCX_GIT_DIRTY").is_some() {
                     ver += "-dirty";
                 }
             }
-            _ => {}
         }
         ver
     };
     static ref BUILD_TAG: String = {
-        let mut tag = env!("VERGEN_CARGO_TARGET_TRIPLE").to_string();
+        let mut tag = env!("SCX_TARGET_TRIPLE").to_string();
         if cfg!(debug_assertions) {
             write!(tag, "/debug").unwrap();
         }

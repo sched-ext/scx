@@ -25,6 +25,7 @@ env:
   SCHED_EXT_KERNEL_TAG: for-next
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
   RUSTC_WRAPPER: sccache
+  SCX_GIT_SHA: ${{ github.sha }}
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
