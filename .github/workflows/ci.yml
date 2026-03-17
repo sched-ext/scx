@@ -124,6 +124,7 @@ jobs:
           version: v19
           network: user
           verbose: true
+          workspace-rw: false
           run: |
             export PS4='+ $(date "+%H:%M:%S") '
             set -x
@@ -241,6 +242,7 @@ jobs:
           version: v19
           network: user
           verbose: true
+          workspace-rw: false
           run: |
             export PS4='+ $(date "+%H:%M:%S") '
             set -x
