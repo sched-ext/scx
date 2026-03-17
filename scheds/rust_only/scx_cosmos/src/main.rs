@@ -107,6 +107,25 @@ struct Opts {
     #[clap(long, default_value = "0")]
     perf_threshold: u64,
 
+    /// Enable preferred idle scan for big.LITTLE systems.
+    ///
+    /// When enabled, the scheduler iterates CPUs in descending capacity
+    /// order to find idle ones, preferring high-performance cores.
+    /// Falls back to the kernel's default idle CPU selection if none found.
+    /// Automatically populates PREFERRED_CPUS from sysfs cpu_capacity.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    preferred_idle_scan: bool,
+
+    /// Enable flat idle scan for big.LITTLE systems.
+    ///
+    /// When enabled, the scheduler iterates ALL CPUs in preferred capacity
+    /// order rather than using the kernel's default select_cpu_dfl.
+    /// More aggressive than --preferred-idle-scan: skips select_cpu_dfl
+    /// entirely when a preferred idle CPU is found.
+    /// Automatically populates PREFERRED_CPUS from sysfs cpu_capacity.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    flat_idle_scan: bool,
+
     /// Enable verbose logging output.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
@@ -265,6 +284,72 @@ impl Topology {
             }
         }
         false
+    }
+
+    /// Read per-CPU capacity values from sysfs.
+    ///
+    /// Returns a Vec of (cpu_id, capacity) tuples for all CPUs that have
+    /// a readable cpu_capacity file. When cpu_capacity is not available
+    /// (common on homogeneous x86 servers), returns all CPUs with a
+    /// default capacity of 1024 (maximum).
+    fn read_cpu_capacities(nr_cpus: usize) -> Vec<(u32, u64)> {
+        let mut caps = Vec::new();
+        let mut any_found = false;
+        for cpu in 0..nr_cpus {
+            let path = format!(
+                "/sys/devices/system/cpu/cpu{}/cpu_capacity",
+                cpu
+            );
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(cap) = content.trim().parse::<u64>() {
+                    caps.push((cpu as u32, cap));
+                    any_found = true;
+                }
+            }
+        }
+
+        // If no cpu_capacity files exist (homogeneous server), populate
+        // all CPUs with default capacity so preferred scan still works.
+        if !any_found {
+            for cpu in 0..nr_cpus {
+                caps.push((cpu as u32, 1024));
+            }
+        }
+
+        caps
+    }
+
+    /// Build the preferred CPU order: sorted by capacity descending.
+    ///
+    /// Returns (preferred_cpus, cpu_capacity) arrays suitable for writing
+    /// to the BPF globals. preferred_cpus is terminated by -1 sentinel.
+    /// cpu_capacity is indexed by CPU ID.
+    fn build_preferred_cpu_arrays(nr_cpus: usize) -> ([i32; 1024], [u64; 1024]) {
+        let mut preferred_cpus = [-1i32; 1024];
+        let mut cpu_capacity = [0u64; 1024];
+
+        let mut caps = Self::read_cpu_capacities(nr_cpus);
+
+        // Populate cpu_capacity array (indexed by CPU ID).
+        for &(cpu, cap) in &caps {
+            if (cpu as usize) < 1024 {
+                cpu_capacity[cpu as usize] = cap;
+            }
+        }
+
+        // Sort by capacity descending (big cores first), stable sort
+        // preserves CPU order within same capacity.
+        caps.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Fill preferred_cpus in sorted order.
+        for (i, &(cpu, _cap)) in caps.iter().enumerate() {
+            if i >= 1024 {
+                break;
+            }
+            preferred_cpus[i] = cpu as i32;
+        }
+
+        (preferred_cpus, cpu_capacity)
     }
 
     /// Parse a CPU list string like "0-3,8-11" into a sorted Vec of CPU IDs.
@@ -653,6 +738,37 @@ fn main() -> Result<()> {
         info!("  perf_config  = 0 (PMU disabled)");
     }
 
+    // ── Build preferred CPU arrays for idle scan modes ────────────────
+    let preferred_idle_scan = opts.preferred_idle_scan;
+    let flat_idle_scan = opts.flat_idle_scan;
+
+    // Build the capacity-sorted CPU arrays when either scan mode is enabled.
+    let (preferred_cpus, cpu_capacity) = if preferred_idle_scan || flat_idle_scan {
+        let (pref, cap) = Topology::build_preferred_cpu_arrays(topo.nr_cpus);
+
+        // Log the preferred CPU order.
+        let count = pref.iter().take_while(|&&c| c >= 0).count();
+        let top_cpus: Vec<String> = pref.iter()
+            .take_while(|&&c| c >= 0)
+            .take(8)
+            .map(|c| format!("{}", c))
+            .collect();
+        info!(
+            "  idle_scan    = {} ({} CPUs, preferred order: {}{})",
+            if flat_idle_scan { "flat" } else { "preferred" },
+            count,
+            top_cpus.join(", "),
+            if count > 8 { ", ..." } else { "" },
+        );
+        if !topo.has_big_little {
+            info!("  NOTE: All CPUs have the same capacity (no big.LITTLE detected).");
+            info!("         Preferred scan order is arbitrary but functional.");
+        }
+        (pref, cap)
+    } else {
+        ([-1i32; 1024], [0u64; 1024])
+    };
+
     // ── Load BPF with global overrides ───────────────────────────────
     //
     // override_global with must_exist=false silently skips globals that
@@ -670,6 +786,10 @@ fn main() -> Result<()> {
         .override_global("AVOID_SMT", &avoid_smt_val, false)
         .override_global("PERF_CONFIG", &opts.perf_config, false)
         .override_global("PERF_THRESHOLD", &opts.perf_threshold, false)
+        .override_global("PREFERRED_IDLE_SCAN", &(preferred_idle_scan as u8), false)
+        .override_global("FLAT_IDLE_SCAN", &(flat_idle_scan as u8), false)
+        .override_global("PREFERRED_CPUS", &preferred_cpus, false)
+        .override_global("CPU_CAPACITY", &cpu_capacity, false)
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_cosmos"
@@ -705,6 +825,12 @@ fn main() -> Result<()> {
         if avoid_smt { "yes" } else { "no" }
     );
     println!("  timeout     = {} ms", opts.timeout_ms);
+    if preferred_idle_scan || flat_idle_scan {
+        println!(
+            "  idle_scan   = {}",
+            if flat_idle_scan { "flat" } else { "preferred" }
+        );
+    }
     if opts.perf_config != 0 {
         println!("  perf_config = 0x{:X}", opts.perf_config);
         println!("  perf_thresh = {}", opts.perf_threshold);

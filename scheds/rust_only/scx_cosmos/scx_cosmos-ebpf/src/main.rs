@@ -29,10 +29,12 @@
 //! - `MM_AFFINITY`: address space affinity for cache-friendly wakeups
 //! - `NUMA_ENABLED`, `NR_NODES`, `CPU_TO_NODE`: NUMA-aware per-node DSQ routing
 //! - `PERF_CONFIG`, `PERF_THRESHOLD`: PMU perf event tracking configuration
+//! - `PREFERRED_IDLE_SCAN`, `FLAT_IDLE_SCAN`: idle CPU scan modes for big.LITTLE
+//! - `PREFERRED_CPUS`, `CPU_CAPACITY`: CPU ordering/capacity for idle scan
 //!
 //! Remaining gaps vs the full C implementation (see PORT_TODO comments):
 //! - PMU perf_event_read_value() calls need PERF_EVENT_ARRAY map (structure in place)
-//! - No flat/preferred idle scan, no primary_cpumask
+//! - No primary_cpumask filtering (requires kptr BTF support)
 //! - Migration only tries prev_cpu (no full pick_idle_cpu scan in enqueue)
 
 #![no_std]
@@ -227,12 +229,29 @@ static mut PRIMARY_CPUMASK: Kptr<bpf_cpumask> = Kptr::zeroed();
 #[unsafe(no_mangle)]
 static mut PRIMARY_ALL: bool = true;
 
-// PORT_TODO: flat_idle_scan and preferred_idle_scan modes
-// C reference: When flat_idle_scan or preferred_idle_scan is true, cosmos
-// uses pick_idle_cpu_flat() which iterates CPUs in preferred order or
-// round-robin to find idle cores. Requires preferred_cpus[] array and
-// cpu_capacity[] array from userspace. These are large arrays (MAX_CPUS=1024
-// entries) that need userspace to sort CPUs by capacity and populate.
+/// When true, use preferred idle scan: iterate CPUs in descending capacity
+/// order (from userspace's PREFERRED_CPUS array) to find an idle CPU,
+/// preferring high-performance cores. Falls back to select_cpu_dfl if none found.
+/// C reference: `const volatile bool preferred_idle_scan`
+#[unsafe(no_mangle)]
+static mut PREFERRED_IDLE_SCAN: bool = false;
+
+/// When true, use flat idle scan: iterate ALL CPUs in preferred order
+/// (from PREFERRED_CPUS array) rather than using select_cpu_dfl at all.
+/// C reference: `const volatile bool flat_idle_scan`
+#[unsafe(no_mangle)]
+static mut FLAT_IDLE_SCAN: bool = false;
+
+/// CPUs sorted by capacity in descending order, populated by userspace.
+/// Terminated by -1 sentinel. Used by pick_idle_cpu_preferred().
+/// C reference: `const volatile s32 preferred_cpus[MAX_CPUS]`
+#[unsafe(no_mangle)]
+static mut PREFERRED_CPUS: [i32; MAX_CPUS] = [-1i32; MAX_CPUS];
+
+/// Per-CPU capacity value, populated by userspace from sysfs cpu_capacity.
+/// C reference: `const volatile u64 cpu_capacity[MAX_CPUS]`
+#[unsafe(no_mangle)]
+static mut CPU_CAPACITY: [u64; MAX_CPUS] = [0u64; MAX_CPUS];
 
 /// When true, enable address space affinity in select_cpu.
 /// Keeps wakee on the waker's CPU when they share the same mm (address space),
@@ -538,7 +557,41 @@ fn update_cpufreq(cpu: i32) {
 
 // ── Idle CPU selection ──────────────────────────────────────────────────
 
-/// Pick an idle CPU for a task, with SMT awareness.
+/// Pick an idle CPU by iterating the preferred CPU list in order.
+///
+/// Scans the PREFERRED_CPUS array (CPUs sorted by capacity descending,
+/// populated by userspace) and atomically tests+clears each CPU's idle
+/// bit. Returns the first idle CPU found, or -1 if none.
+///
+/// The loop is bounded to MAX_PREFERRED_SCAN (64) iterations to satisfy
+/// the BPF verifier's bounded loop requirement. On systems with more
+/// CPUs than this limit, only the first 64 preferred CPUs are checked.
+///
+/// C reference: `pick_idle_cpu_flat()` iterates `preferred_cpus[]`
+/// calling `scx_bpf_test_and_clear_cpu_idle()`.
+const MAX_PREFERRED_SCAN: usize = 64;
+
+#[inline(always)]
+fn pick_idle_cpu_preferred() -> i32 {
+    let mut i: usize = 0;
+    while i < MAX_PREFERRED_SCAN {
+        if i >= MAX_CPUS {
+            break;
+        }
+        let cpu = unsafe { PREFERRED_CPUS[i] };
+        if cpu < 0 {
+            // Sentinel: end of preferred CPU list.
+            break;
+        }
+        if kfuncs::test_and_clear_cpu_idle(cpu) {
+            return cpu;
+        }
+        i += 1;
+    }
+    -1
+}
+
+/// Pick an idle CPU for a task, with SMT awareness and preferred/flat scan.
 ///
 /// Uses `#[inline(always)]` instead of `#[inline(never)]` because aya's
 /// kfunc resolution does not yet handle BPF subprograms: after function
@@ -549,11 +602,17 @@ fn update_cpufreq(cpu: i32) {
 /// function call not eliminated". Once aya fixes this, switch to
 /// `#[inline(never)]` for its own register scope.
 ///
-/// Tries two strategies:
+/// Tries these strategies in order:
+///
+/// 0. **Preferred/flat idle scan** — when `PREFERRED_IDLE_SCAN` or
+///    `FLAT_IDLE_SCAN` is enabled, first try `pick_idle_cpu_preferred()`
+///    which iterates CPUs in descending capacity order (big cores first).
+///    If flat_idle_scan is enabled and preferred scan found a CPU, return
+///    it immediately (skipping select_cpu_dfl entirely).
 ///
 /// 1. **`select_cpu_dfl()`** — the kernel's default idle CPU picker.
-///    Always tried first; this handles wake-affine, LLC locality, and
-///    basic idle scanning.
+///    Tried after preferred scan (or first if preferred scan is disabled);
+///    this handles wake-affine, LLC locality, and basic idle scanning.
 ///
 /// 2. **SMT verification** — when `AVOID_SMT` is enabled and strategy 1
 ///    found an idle CPU, we check whether the entire physical core is
@@ -564,20 +623,12 @@ fn update_cpufreq(cpu: i32) {
 /// Returns the idle CPU number (>= 0) if one was found, or a negative
 /// value if no suitable idle CPU is available.
 ///
-/// C reference: `pick_idle_cpu()` in `main.bpf.c` with a simplified
-/// strategy set (no flat_idle_scan, no preferred_idle_scan, no hybrid
-/// core migration, no primary cpumask filtering).
+/// C reference: `pick_idle_cpu()` in `main.bpf.c`.
 // PORT_TODO: Enhanced pick_idle_cpu() with primary cpumask filtering
 // C reference: When primary_all is false and primary_cpumask is set,
 // pick_idle_cpu() first tries scx_bpf_select_cpu_and() with the primary
 // mask and SCX_PICK_IDLE_CORE, falling back to the full cpus_ptr.
 // Requires kptr support for primary_cpumask.
-//
-// PORT_TODO: flat_idle_scan and preferred_idle_scan modes
-// C reference: When flat_idle_scan or preferred_idle_scan is true, cosmos
-// uses pick_idle_cpu_flat() which iterates CPUs in preferred order or
-// round-robin to find idle cores. Requires preferred_cpus[] array and
-// cpu_capacity[] array from userspace.
 //
 // PORT_TODO: Hybrid core wake-affine migration
 // C reference: When primary_all and the waker's CPU is faster than the
@@ -586,6 +637,22 @@ fn update_cpufreq(cpu: i32) {
 // cpu_capacity[] array from userspace.
 #[inline(always)]
 fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
+    // Strategy 0: Preferred/flat idle scan.
+    // When preferred_idle_scan or flat_idle_scan is enabled, try the
+    // preferred CPU list first (CPUs sorted by capacity, big cores first).
+    let preferred = unsafe { PREFERRED_IDLE_SCAN };
+    let flat = unsafe { FLAT_IDLE_SCAN };
+    if preferred || flat {
+        let pref_cpu = pick_idle_cpu_preferred();
+        if pref_cpu >= 0 {
+            // flat_idle_scan: skip select_cpu_dfl entirely, use preferred result.
+            // preferred_idle_scan: also return immediately since we found one.
+            return pref_cpu;
+        }
+        // If flat_idle_scan is enabled but no preferred CPU was idle,
+        // still fall through to select_cpu_dfl as a fallback.
+    }
+
     // Strategy 1: kernel's default idle CPU selection.
     let mut is_idle: bool = false;
     let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
