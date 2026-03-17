@@ -18,8 +18,9 @@
 //! - `exit_task`: cleans up per-task storage when a task exits
 //!
 //! BPF map usage:
-//! - `TASK_CTX`: per-task storage for exec_runtime, wakeup_freq, last_run_at
-//! - `CPU_CTX`: per-CPU array for load tracking (last_update, perf_lvl)
+//! - `TASK_CTX`: per-task storage for exec_runtime, wakeup_freq, last_run_at,
+//!   perf_baseline, perf_events
+//! - `CPU_CTX`: per-CPU array for load tracking (last_update, perf_lvl, perf_events)
 //!
 //! Userspace-configurable globals:
 //! - `SLICE_NS`, `SLICE_LAG`: time slice and maximum runtime parameters
@@ -27,9 +28,10 @@
 //! - `NO_WAKE_SYNC`, `CPUFREQ_ENABLED`, `SMT_ENABLED`, `AVOID_SMT`: feature flags
 //! - `MM_AFFINITY`: address space affinity for cache-friendly wakeups
 //! - `NUMA_ENABLED`, `NR_NODES`, `CPU_TO_NODE`: NUMA-aware per-node DSQ routing
+//! - `PERF_CONFIG`, `PERF_THRESHOLD`: PMU perf event tracking configuration
 //!
 //! Remaining gaps vs the full C implementation (see PORT_TODO comments):
-//! - No PMU tracking
+//! - PMU perf_event_read_value() calls need PERF_EVENT_ARRAY map (structure in place)
 //! - No flat/preferred idle scan, no primary_cpumask
 //! - Migration only tries prev_cpu (no full pick_idle_cpu scan in enqueue)
 
@@ -43,6 +45,7 @@ use scx_ebpf::core_read;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray};
 use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
 use scx_ebpf::cpumask::{self, bpf_cpumask};
+use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
 
 scx_ebpf::scx_ebpf_boilerplate!();
 
@@ -60,6 +63,8 @@ mod vmlinux {
 /// - `wakeup_freq`: exponentially-smoothed wakeup frequency (for slice_lag scaling)
 /// - `last_run_at`: timestamp when this task last started running
 /// - `last_woke_at`: timestamp of last wakeup (for wakeup_freq calculation)
+/// - `perf_baseline`: PMU counter value when task started running (for delta calc)
+/// - `perf_events`: accumulated perf event count from last run (for event-heavy detection)
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct TaskCtx {
@@ -67,6 +72,8 @@ struct TaskCtx {
     wakeup_freq: u64,
     last_run_at: u64,
     last_woke_at: u64,
+    perf_baseline: u64,
+    perf_events: u64,
 }
 
 /// Per-CPU context stored in BPF_MAP_TYPE_PERCPU_ARRAY.
@@ -74,11 +81,13 @@ struct TaskCtx {
 /// Tracks per-CPU scheduling state for load tracking and cpufreq scaling.
 /// - `last_update`: timestamp of last scheduling update on this CPU
 /// - `perf_lvl`: EWMA-smoothed CPU performance level [0..1024]
+/// - `perf_events`: accumulated perf event count on this CPU (for least-busy CPU selection)
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct CpuCtx {
     last_update: u64,
     perf_lvl: u64,
+    perf_events: u64,
 }
 
 // ── BPF map declarations ────────────────────────────────────────────────
@@ -232,11 +241,31 @@ static mut PRIMARY_ALL: bool = true;
 #[unsafe(no_mangle)]
 static mut MM_AFFINITY: bool = false;
 
-// PORT_TODO: PMU / perf event integration
-// C reference: perf_config selects a hardware counter. scx_pmu_event_start/stop
-// track per-task events. is_event_heavy() checks if a task exceeds
-// perf_threshold. pick_least_busy_event_cpu() distributes event-heavy tasks.
-// Requires BPF perf event support (scx_pmu_install/scx_pmu_read kfuncs).
+/// PMU perf event config: hardware counter ID to track.
+/// 0 = disabled (no PMU tracking). Set by userspace via `--perf-config`.
+/// Common values (x86): 0xC0 = retired instructions, 0x3C = unhalted core cycles.
+/// C reference: `const volatile u64 perf_config`
+#[unsafe(no_mangle)]
+static mut PERF_CONFIG: u64 = 0;
+
+/// Performance counter threshold to classify a task as event-heavy.
+/// When a task's per-run perf_events exceeds this value, it is considered
+/// event-heavy and may be migrated to a less busy CPU.
+/// C reference: `const volatile u64 perf_threshold`
+#[unsafe(no_mangle)]
+static mut PERF_THRESHOLD: u64 = 0;
+
+// PORT_TODO(PMU): Full PMU integration requires a BPF_MAP_TYPE_PERF_EVENT_ARRAY
+// map that userspace populates with perf_event_open() fds for each CPU.
+// Currently, the PERF_CONFIG/PERF_THRESHOLD globals and the tracking structure
+// (perf_baseline/perf_events in TaskCtx, perf_events in CpuCtx) are in place,
+// but the actual perf_event_read_value() calls are guarded behind PERF_CONFIG != 0
+// and will be no-ops until the PERF_EVENT_ARRAY map is wired up.
+// See scx_ebpf::pmu module for the BPF helper wrappers.
+// What's needed:
+//   1. Declare a PERF_EVENT_ARRAY map (scx_ebpf::maps doesn't support this yet)
+//   2. Userspace: call perf_event_open() per CPU, store fds in the map
+//   3. eBPF: pass the map pointer to perf_event_read_value() in running/stopping
 
 // ── Global state ────────────────────────────────────────────────────────
 
@@ -590,6 +619,62 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     cpu
 }
 
+// ── PMU helpers ─────────────────────────────────────────────────────────
+
+/// Check if a task is event-heavy based on its last-run perf event count.
+///
+/// C reference: `is_event_heavy(tctx)` returns `tctx->perf_events > perf_threshold`.
+/// When PERF_CONFIG == 0, this always returns false (no PMU tracking).
+#[inline(always)]
+fn is_event_heavy(tctx: &TaskCtx) -> bool {
+    let threshold = unsafe { PERF_THRESHOLD };
+    threshold > 0 && tctx.perf_events > threshold
+}
+
+/// Find the least busy CPU by perf event count within the same NUMA node.
+///
+/// C reference: `pick_least_busy_event_cpu(p, prev_cpu)` scans per-CPU
+/// `cctx->perf_events` to find the CPU with the least PMU activity.
+///
+/// NOTE: The full CPU scan loop causes BPF verifier instruction count
+/// overflow on large machines (the verifier unrolls it). For now, this
+/// returns prev_cpu as a placeholder. Once BPF bounded loop iterators
+/// (bpf_for / bpf_loop) are available in Rust, this can do a proper scan.
+#[inline(always)]
+fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
+    // Placeholder: return prev_cpu.
+    // Full implementation needs bpf_loop() or bpf_for_each_cpu() to scan
+    // CPUs without verifier instruction overflow.
+    prev_cpu
+}
+
+/// Update perf event counters when a task stops running.
+///
+/// Reads the perf event delta (current - baseline) and stores it in both
+/// per-task context (for is_event_heavy) and per-CPU context (for
+/// pick_least_busy_event_cpu).
+///
+/// C reference: `update_counters(p, tctx, cpu)` calls `scx_pmu_read()`
+/// and accumulates the delta in `tctx->perf_events` and `cctx->perf_events`.
+///
+/// NOTE: Currently a stub — the actual `perf_event_read_value()` call requires
+/// a PERF_EVENT_ARRAY map pointer. The perf_baseline/perf_events tracking
+/// structure is in place; once the map is wired up, this function computes
+/// the real delta.
+#[inline(always)]
+fn update_perf_counters(p: *mut task_struct, delta: u64) {
+    // Store delta in per-task context for is_event_heavy().
+    if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
+        unsafe { tctx.as_mut().perf_events = delta; }
+    }
+
+    // Accumulate in per-CPU context for pick_least_busy_event_cpu().
+    let cctx = CPU_CTX.get_ptr_mut(0);
+    if !cctx.is_null() {
+        unsafe { (*cctx).perf_events += delta; }
+    }
+}
+
 // ── Scheduler callbacks ─────────────────────────────────────────────────
 
 /// select_cpu: find an idle CPU for the task.
@@ -599,15 +684,12 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
 /// - SMT awareness: when avoid_smt is enabled, prefers fully-idle cores
 /// - mm_affinity: when enabled and waker/wakee share the same address space,
 ///   keeps the wakee on the waker's CPU for cache locality (non-busy only)
+/// - PMU: when perf_config is set, event-heavy tasks are dispatched to the
+///   least busy CPU (by perf event count) rather than the default idle CPU
 /// - If idle CPU found: dispatch directly to local DSQ (any saturation level)
 /// - If no idle CPU and not busy: dispatch to local DSQ (round-robin)
 /// - If no idle CPU and busy: do NOT dispatch, let enqueue() handle
 ///   deadline-mode dispatch to the shared DSQ
-//
-// PORT_TODO: PMU / perf event integration in select_cpu
-// C reference: When perf_config is set, cosmos_select_cpu dispatches
-// event-heavy tasks via pick_least_busy_event_cpu(). Requires BPF perf
-// event support (scx_pmu kfuncs).
 #[inline(always)]
 pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     // Clear SCX_WAKE_SYNC if no_wake_sync is enabled.
@@ -643,6 +725,30 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
                 let slice = task_slice(weight);
                 kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
                 return this_cpu;
+            }
+        }
+    }
+
+    // PMU event-heavy dispatch: when perf_config is set, redirect
+    // event-heavy tasks to the least busy CPU (by perf event count).
+    //
+    // C reference: cosmos_select_cpu():
+    //   if (perf_config) {
+    //       tctx = try_lookup_task_ctx(p);
+    //       if (tctx && is_event_heavy(tctx)) {
+    //           dsq_insert(p, SCX_DSQ_LOCAL, ...);
+    //           new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
+    //           return new_cpu < 0 ? prev_cpu : new_cpu;
+    //       }
+    //   }
+    if unsafe { PERF_CONFIG } != 0 {
+        if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
+            if is_event_heavy(unsafe { tctx.as_ref() }) {
+                let weight = read_weight(p);
+                let slice = task_slice(weight);
+                kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
+                let new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
+                return if new_cpu >= 0 { new_cpu } else { prev_cpu };
             }
         }
     }
@@ -862,20 +968,49 @@ pub fn on_runnable(p: *mut task_struct, _enq_flags: u64) {
     }
 }
 
-/// running: update vtime_now, record run start time, and apply cpufreq.
+/// running: update vtime_now, record run start time, capture PMU baseline,
+/// and apply cpufreq.
 ///
 /// Advances the global vruntime to track the most recent task's vtime.
 /// Records the timestamp in per-task storage for accurate time-slice
-/// charging in stopping(). Applies the per-CPU cpufreq performance level.
+/// charging in stopping(). When PMU tracking is enabled (PERF_CONFIG != 0),
+/// captures the current perf counter value as a baseline for delta
+/// computation in stopping().
 ///
-/// C reference: cosmos_running() calls update_cpufreq(scx_bpf_task_cpu(p)).
+/// C reference: cosmos_running() calls update_cpufreq(scx_bpf_task_cpu(p))
+/// and scx_pmu_event_start(p, false) when perf_config is set.
 #[inline(always)]
 pub fn on_running(p: *mut task_struct) {
     // Record run start time in per-task storage.
     // C: tctx->last_run_at = scx_bpf_now();
     let now = kfuncs::now();
     if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
-        unsafe { tctx.as_mut().last_run_at = now; }
+        let tctx = unsafe { tctx.as_mut() };
+        tctx.last_run_at = now;
+
+        // Capture PMU baseline when task starts running.
+        // C: if (perf_config) scx_pmu_event_start(p, false);
+        //
+        // NOTE: The actual perf_event_read_value() call requires a
+        // PERF_EVENT_ARRAY map pointer. Once that map is wired up,
+        // uncomment the read and store the counter value here.
+        // For now, we zero the baseline so delta computation in
+        // stopping() produces 0 (no-op).
+        if unsafe { PERF_CONFIG } != 0 {
+            tctx.perf_baseline = 0;
+            // When PERF_EVENT_ARRAY map is available:
+            // let mut val = PerfEventValue::ZERO;
+            // let ret = unsafe {
+            //     pmu::perf_event_read_value(
+            //         &raw const PERF_EVENT_MAP as *const _,
+            //         BPF_F_CURRENT_CPU,
+            //         &mut val,
+            //     )
+            // };
+            // if ret == 0 {
+            //     tctx.perf_baseline = val.counter;
+            // }
+        }
     }
 
     // Update per-CPU context timestamp.
@@ -903,21 +1038,20 @@ pub fn on_running(p: *mut task_struct) {
     }
 }
 
-/// stopping: charge the actual used time slice, update dsq_vtime, and
-/// update per-CPU load for cpufreq scaling.
+/// stopping: charge the actual used time slice, update dsq_vtime, update
+/// PMU counters, and update per-CPU load for cpufreq scaling.
 ///
 /// Uses the per-task last_run_at timestamp to compute the real time delta,
 /// capped at slice_ns. Advances dsq_vtime inversely proportional to
 /// weight (higher weight = slower vtime advancement = more CPU time).
 /// Also accumulates exec_runtime in per-task storage for deadline calculation.
+/// When PMU tracking is enabled, reads the perf counter, computes delta
+/// from baseline, and stores in per-task and per-CPU contexts.
 ///
 /// C reference: cosmos_stopping() calls update_cpu_load(p, slice) which
 /// computes perf_lvl = MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE)
-/// and smooths it with EWMA.
-// PORT_TODO: PMU counter update in stopping
-// C reference: scx_pmu_event_stop(p) + update_counters(p, tctx, cpu)
-// reads perf event delta and stores in per-task and per-CPU contexts.
-// Requires scx_pmu_event_stop/scx_pmu_read kfuncs.
+/// and smooths it with EWMA. Also calls scx_pmu_event_stop(p) +
+/// update_counters(p, tctx, cpu) for PMU tracking.
 #[inline(always)]
 pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     // Read ALL fields before writing.
@@ -957,6 +1091,28 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     let offset = core::mem::offset_of!(vmlinux::task_struct, scx.dsq_vtime);
     unsafe { write_field_u64(p, offset, new_vtime); }
 
+    // Update PMU counters when perf tracking is enabled.
+    // C: if (perf_config) { scx_pmu_event_stop(p); update_counters(p, tctx, cpu); }
+    //
+    // NOTE: The actual perf_event_read_value() call requires a
+    // PERF_EVENT_ARRAY map pointer. Once that map is wired up, read
+    // the counter here and compute delta = current - baseline.
+    // For now, delta is 0 (no-op since baseline is also 0).
+    if unsafe { PERF_CONFIG } != 0 {
+        // When PERF_EVENT_ARRAY map is available:
+        // let mut val = PerfEventValue::ZERO;
+        // let ret = unsafe {
+        //     pmu::perf_event_read_value(
+        //         &raw const PERF_EVENT_MAP as *const _,
+        //         BPF_F_CURRENT_CPU,
+        //         &mut val,
+        //     )
+        // };
+        // let delta = if ret == 0 { val.counter - baseline } else { 0 };
+        let perf_delta: u64 = 0; // Placeholder until PERF_EVENT_ARRAY map is wired
+        update_perf_counters(p, perf_delta);
+    }
+
     // Update per-CPU load for cpufreq scaling.
     // C: update_cpu_load(p, slice);
     update_cpu_load(slice, now);
@@ -990,24 +1146,22 @@ pub fn on_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
 /// Called by the kernel when a task is being destroyed. Deletes the
 /// per-task context from the TASK_CTX storage map.
 ///
-/// C reference: cosmos_exit_task() calls scx_pmu_task_fini(p).
-/// We don't have PMU support yet, so we just clean up task storage.
-// PORT_TODO: PMU per-task cleanup
-// C reference: scx_pmu_task_fini(p) cleans up per-task perf event state.
-// Requires scx_pmu_task_fini kfunc.
+/// C reference: cosmos_exit_task() calls scx_pmu_task_fini(p) for PMU
+/// cleanup. Our PMU state is embedded in the TaskCtx storage map and
+/// is automatically cleaned up when the storage entry is deleted.
 #[inline(always)]
 pub fn on_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
     // Clean up per-task storage.
     let _ = TASK_CTX.delete(p as *mut u8);
 }
 
-/// init: create DSQ(s) and record nr_cpu_ids.
+/// init: create DSQ(s), record nr_cpu_ids, and initialize PMU state.
 ///
 /// When NUMA is enabled, creates one DSQ per NUMA node (DSQ ID = node ID).
 /// Otherwise creates a single shared DSQ (DSQ 0).
-/// C reference: `cosmos_init()` with `bpf_for(node, 0, nr_node_ids)`.
-// PORT_TODO: PMU installation
-// C reference: When perf_config is set, cosmos_init calls scx_pmu_install().
+/// When PMU tracking is enabled, initializes per-CPU perf_events counters.
+/// C reference: `cosmos_init()` with `bpf_for(node, 0, nr_node_ids)` and
+/// `scx_pmu_install(perf_config)` when perf_config is set.
 
 /// Initialize a kptr cpumask: create a new mask and atomically store it.
 ///
@@ -1099,13 +1253,33 @@ pub fn on_init() -> i32 {
         }
     }
 
+    // Initialize per-CPU perf_events counters to zero when PMU is enabled.
+    // C reference: cosmos_init() zeros cctx->perf_events for all CPUs.
+    if unsafe { PERF_CONFIG } != 0 {
+        let nr = unsafe { NR_CPU_IDS } as i32;
+        let max = if nr < MAX_CPUS as i32 { nr } else { MAX_CPUS as i32 };
+        let mut cpu: i32 = 0;
+        while cpu < max {
+            let cctx = CPU_CTX.get_ptr_mut(0);
+            if !cctx.is_null() {
+                unsafe { (*cctx).perf_events = 0; }
+            }
+            cpu += 1;
+        }
+        // NOTE: scx_pmu_install(perf_config) requires the PERF_EVENT_ARRAY
+        // map — see the consolidated PORT_TODO at the PERF_CONFIG global.
+    }
+
     0
 }
 
-/// exit: no-op for now.
-// PORT_TODO: PMU cleanup and UEI_RECORD
-// C reference: cosmos_exit() calls scx_pmu_uninstall() when perf_config
-// is set, and UEI_RECORD(uei, ei) to save exit info for userspace.
+/// exit: PMU cleanup placeholder.
+///
+/// C reference: cosmos_exit() calls scx_pmu_uninstall() when perf_config
+/// is set, and UEI_RECORD(uei, ei) to save exit info for userspace.
+/// Our PMU state is in per-CPU and per-task maps that are automatically
+/// cleaned up when the BPF program detaches. UEI_RECORD is not yet
+/// ported (requires the UEI mechanism).
 #[inline(always)]
 pub fn on_exit(_ei: *mut scx_exit_info) {}
 

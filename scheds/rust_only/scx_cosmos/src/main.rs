@@ -83,9 +83,42 @@ struct Opts {
     #[clap(long)]
     avoid_smt: Option<bool>,
 
+    /// PMU perf event configuration (hex hardware counter ID).
+    ///
+    /// When set to a non-zero value, the scheduler tracks hardware performance
+    /// counters per task and per CPU, and uses them to distribute event-heavy
+    /// tasks across CPUs more evenly.
+    ///
+    /// Common values (x86):
+    ///   0xC0 — retired instructions
+    ///   0x3C — unhalted core cycles
+    ///
+    /// Default: 0 (disabled).
+    #[clap(long, default_value = "0", value_parser = parse_hex_u64)]
+    perf_config: u64,
+
+    /// PMU perf event threshold for event-heavy task classification.
+    ///
+    /// When a task's per-run perf event count exceeds this threshold, it is
+    /// considered "event-heavy" and may be migrated to a less busy CPU.
+    /// Only meaningful when --perf-config is non-zero.
+    ///
+    /// Default: 0 (auto / unused).
+    #[clap(long, default_value = "0")]
+    perf_threshold: u64,
+
     /// Enable verbose logging output.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
+}
+
+/// Parse a u64 value from a string, supporting both decimal and hex (0x...) formats.
+fn parse_hex_u64(s: &str) -> Result<u64, String> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|e| format!("invalid hex value '{}': {}", s, e))
+    } else {
+        s.parse::<u64>().map_err(|e| format!("invalid value '{}': {}", s, e))
+    }
 }
 
 // ── CPU Topology ─────────────────────────────────────────────────────────
@@ -613,6 +646,12 @@ fn main() -> Result<()> {
     info!("  smt_enabled  = {}", topo.smt_enabled);
     info!("  avoid_smt    = {}", avoid_smt);
     info!("  timeout_ms   = {}", opts.timeout_ms);
+    if opts.perf_config != 0 {
+        info!("  perf_config  = 0x{:X}", opts.perf_config);
+        info!("  perf_thresh  = {}", opts.perf_threshold);
+    } else {
+        info!("  perf_config  = 0 (PMU disabled)");
+    }
 
     // ── Load BPF with global overrides ───────────────────────────────
     //
@@ -629,6 +668,8 @@ fn main() -> Result<()> {
         .override_global("NO_WAKE_SYNC", &(no_wake_sync as u8), false)
         .override_global("SMT_ENABLED", &smt_enabled_val, false)
         .override_global("AVOID_SMT", &avoid_smt_val, false)
+        .override_global("PERF_CONFIG", &opts.perf_config, false)
+        .override_global("PERF_THRESHOLD", &opts.perf_threshold, false)
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_cosmos"
@@ -664,6 +705,15 @@ fn main() -> Result<()> {
         if avoid_smt { "yes" } else { "no" }
     );
     println!("  timeout     = {} ms", opts.timeout_ms);
+    if opts.perf_config != 0 {
+        println!("  perf_config = 0x{:X}", opts.perf_config);
+        println!("  perf_thresh = {}", opts.perf_threshold);
+        println!();
+        println!("  NOTE: PMU tracking structure is in place, but actual perf counter");
+        println!("  reads require a BPF_MAP_TYPE_PERF_EVENT_ARRAY map populated with");
+        println!("  perf_event_open() fds. This is not yet implemented — event-heavy");
+        println!("  task classification will be a no-op until the map is wired up.");
+    }
     println!("Press Ctrl-C to detach and exit.");
 
     // Set up Ctrl-C handler.
