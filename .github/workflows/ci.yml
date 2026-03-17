@@ -33,6 +33,7 @@ jobs:
   lint:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -88,6 +89,7 @@ jobs:
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.18.y
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     continue-on-error: ${{ matrix.kernel.allow-failure == true }}
     steps:
       - uses: actions/checkout@v6
@@ -144,7 +146,7 @@ jobs:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: []
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -162,7 +164,7 @@ jobs:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: []
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -238,7 +240,7 @@ jobs:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: []
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
