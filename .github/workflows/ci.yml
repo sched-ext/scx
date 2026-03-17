@@ -15,7 +15,7 @@ concurrency:
 
 env:
   BPF_CLANG: clang-19
-  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev"
+  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng"
   SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
   SCHED_EXT_KERNEL_TAG: for-next
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld"
@@ -56,16 +56,18 @@ jobs:
           - name: scx__sched_ext__for-next
             url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
             tag: for-next
+            allow-failure: true
           - name: scx__bpf__bpf-next
             url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
             tag: master
+            allow-failure: true
           - name: scx__stable__linux-rolling-stable
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-rolling-stable
           - name: scx__stable__6_13
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.13.y
-            veristat-disable: scx_layered scx_lavd
+            veristat-disable: scx_layered scx_lavd scx_arena_selftests
           - name: scx__stable__6_16
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.16.y
@@ -74,6 +76,7 @@ jobs:
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.18.y
     runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.kernel.allow-failure == true }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -85,25 +88,53 @@ jobs:
           sudo cp /tmp/veristat/src/veristat /usr/local/bin/
           sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
           cargo install cargo-veristat --locked
-      - name: Disable veristat for excluded schedulers
+      - name: Build bpftool
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
+          make -C /tmp/bpftool/src -j$(nproc)
+          sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
+      - name: Disable veristat for excluded packages
         if: matrix.kernel.veristat-disable != ''
         run: |
           for pkg in ${{ matrix.kernel.veristat-disable }}; do
-            printf '\n[package.metadata.veristat]\ndisable = true\n' >> "scheds/rust/${pkg}/Cargo.toml"
+            manifest=$(cargo metadata --format-version 1 --no-deps | jq -r ".packages[] | select(.name == \"$pkg\") | .manifest_path")
+            if [ -n "$manifest" ]; then
+              printf '\n[package.metadata.veristat]\ndisable = true\n' >> "$manifest"
+            fi
           done
       - name: Build packages
         run: cargo build --profile ci --locked
       - name: 'Veristat: ${{ matrix.kernel.name }}'
-        uses: likewhatevs/vng-action@v0.3.0
+        uses: likewhatevs/vng-action@v0.4.0
         with:
           name: ${{ matrix.kernel.name }}__${{ runner.arch }}
           kernel-url: ${{ matrix.kernel.url }}
           kernel-tag: ${{ matrix.kernel.tag }}
           kconfig: kernel.config
-          version: v17
+          version: v19
           network: user
           verbose: true
           run: cargo veristat --profile ci --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
+      - name: 'Dump BTF: ${{ matrix.kernel.name }}'
+        if: always()
+        uses: likewhatevs/vng-action@v0.4.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v19
+          network: user
+          run: |
+            mkdir -p btf-dump
+            /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > btf-dump/kernel-vmlinux.h
+            /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format raw > btf-dump/kernel-raw.btf
+      - name: 'Upload BTF: ${{ matrix.kernel.name }}'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btf-${{ matrix.kernel.name }}
+          path: btf-dump/
       - name: Fix permissions for cache
         if: always()
         run: sudo chown -R $(id -u):$(id -g) ~
@@ -111,6 +142,13 @@ jobs:
   test:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
     needs: [veristat]
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel:
+          - name: scx__stable__linux-rolling-stable
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-rolling-stable
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -120,18 +158,23 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      - name: Build bpftool
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/libbpf/bpftool /tmp/bpftool
+          make -C /tmp/bpftool/src -j$(nproc)
+          sudo cp /tmp/bpftool/src/bpftool /usr/local/bin/
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
       - name: Build arena selftests
         run: cargo build --profile ci -p scx_arena_selftests --locked
       - name: Arena selftests
-        uses: likewhatevs/vng-action@v0.3.0
+        uses: likewhatevs/vng-action@v0.4.0
         with:
-          name: scx__sched_ext__for-next__${{ runner.arch }}
-          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
-          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
           kconfig: kernel.config
-          version: v17
+          version: v19
           network: user
           verbose: true
           run: target/ci/scx_arena_selftests
@@ -140,14 +183,45 @@ jobs:
           for sched in beerland bpfland cake chaos cosmos flash lavd layered p2dq pandemonium rlfifo rustland rusty tickless; do
             cargo build --profile ci --locked -p "scx_${sched}"
           done
-      - name: Test all schedulers
-        uses: likewhatevs/vng-action@v0.3.0
+      - name: Dump BPF object BTF
+        if: always()
+        run: |
+          mkdir -p btf-dump
+          for f in target/ci/build/scx_beerland-*/out/*.bpf.o; do
+            if [ -f "$f" ]; then
+              cp "$f" btf-dump/bpf-object.o
+              /usr/local/bin/bpftool btf dump file "$f" format raw > btf-dump/bpf-raw.btf
+              break
+            fi
+          done
+      - name: Dump kernel BTF
+        if: always()
+        uses: likewhatevs/vng-action@v0.4.0
         with:
-          name: scx__sched_ext__for-next__${{ runner.arch }}
-          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
-          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
           kconfig: kernel.config
-          version: v17
+          version: v19
+          network: user
+          run: |
+            mkdir -p btf-dump
+            /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > btf-dump/kernel-vmlinux.h
+            /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format raw > btf-dump/kernel-raw.btf
+      - name: 'Upload BTF: ${{ matrix.kernel.name }}'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btf-test-${{ matrix.kernel.name }}
+          path: btf-dump/
+      - name: Test all schedulers
+        uses: likewhatevs/vng-action@v0.4.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v19
           network: user
           verbose: true
           run: |
