@@ -2168,6 +2168,7 @@ void BPF_STRUCT_OPS(lavd_cgroup_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
 	task_ctx *taskc;
+	int ret;
 
 	taskc = get_task_ctx(p);
 	if (!taskc) {
@@ -2175,6 +2176,12 @@ void BPF_STRUCT_OPS(lavd_cgroup_move, struct task_struct *p,
 		return;
 	}
 	taskc->cgrp_id = to->kn->id;
+
+	if (enable_cpu_bw &&
+	    (ret = scx_cgroup_bw_move(p, (u64)taskc, from, to))) {
+	       scx_bpf_error("Failed to move a task (%s:%d) from cgid%llu to cgid%llu: %d",
+			     p->comm, p->pid, from->kn->id, to->kn->id, ret);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_cgroup_set_bandwidth, struct cgroup *cgrp,

@@ -2338,3 +2338,45 @@ int scx_cgroup_bw_is_task_throttled(u64 taskc)
 	return ctx && (ctx->atq != NULL);
 }
 
+/**
+ * scx_cgroup_bw_move - Move a task from a cgroup to another (@from -> @to).
+ *
+ * @p: task being moved
+ * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the scheduler.
+ * @from: cgroup @p is being moved from
+ * @to: cgroup @p is being moved to
+ *
+ * Return 0 for success, -errno for failure.
+ */
+__hidden
+int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
+		       struct cgroup *from __arg_trusted,
+		       struct cgroup *to __arg_trusted)
+{
+	int ret;
+
+	/*
+	 * If a task is throttled, remove it from the @from cgroup,
+	 * then add it to the BTQ of the @to cgroup.
+	 *
+	 * We will try to reenqueue it in the next replenishment interval.
+	 * This is fair because the task was throttled under @from cgroup,
+	 * so it has to wait until the next replenishment interval anyway.
+	 */
+	if (!scx_cgroup_bw_is_task_throttled(taskc))
+		return 0;
+
+	if ((ret = scx_cgroup_bw_cancel(taskc))) {
+		cbw_err("Fail to cancel a throttled task (%s:%d) from a cgroup (cgid%llu): %d",
+			p->comm, p->pid, cgroup_get_id(from), ret);
+		return ret;
+	}
+
+	if ((ret = scx_cgroup_bw_put_aside(p, taskc,  p->scx.dsq_vtime, to))) {
+		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
+			p->comm, p->pid, cgroup_get_id(to), ret);
+	}
+
+	return ret;
+}

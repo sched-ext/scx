@@ -188,3 +188,18 @@ int scx_cgroup_bw_is_cgroup_throttled(u64 cgrp_id);
  * Return true if the task is throttled. Otherwise, return false.
  */
 int scx_cgroup_bw_is_task_throttled(u64 taskc);
+
+/**
+ * scx_cgroup_bw_move - Move a task from a cgroup to another (@from -> @to).
+ *
+ * @p: task being moved
+ * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the scheduler.
+ * @from: cgroup @p is being moved from
+ * @to: cgroup @p is being moved to
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
+		       struct cgroup *from __arg_trusted,
+		       struct cgroup *to __arg_trusted);
