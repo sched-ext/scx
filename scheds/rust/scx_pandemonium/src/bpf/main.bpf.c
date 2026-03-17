@@ -651,8 +651,25 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 			p->cpus_ptr, node, 0);
 		if (cpu >= 0 && (u64)cpu < nr_cpu_ids &&
 		    __COMPAT_scx_bpf_cpu_curr(cpu)) {
-			dl = task_deadline(p, tctx, node_dsq, knobs);
-			scx_bpf_dsq_insert_vtime(p, node_dsq, sl, dl,
+			// DEPTH GATE: USE PER-CPU DSQ IF ROOM, ELSE NODE DSQ.
+			// PREVENTS DSQ BUILDUP DURING FORK STORMS.
+			u64 tier2_dsq;
+			if ((u64)cpu < nr_cpu_ids &&
+			    scx_bpf_dsq_nr_queued((u64)cpu) < pcpu_depth_base) {
+				tier2_dsq = (u64)cpu;
+				if ((u32)cpu < MAX_CPUS)
+					__sync_val_compare_and_swap(
+						&pcpu_enqueue_ns[cpu], 0,
+						bpf_ktime_get_ns());
+			} else {
+				tier2_dsq = node_dsq;
+				__sync_val_compare_and_swap(
+					&interactive_enqueue_ns, 0,
+					bpf_ktime_get_ns());
+			}
+
+			dl = task_deadline(p, tctx, tier2_dsq, knobs);
+			scx_bpf_dsq_insert_vtime(p, tier2_dsq, sl, dl,
 						  enq_flags);
 
 			u64 kick_flag = (is_wakeup ||
@@ -673,7 +690,7 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 			}
 #if TRACE_SCHED
 			if (is_sched_task(p))
-				bpf_printk("PAND: enq tier2 pid=%d cpu=%d", p->pid, cpu);
+				bpf_printk("PAND: enq tier2 pid=%d cpu=%d dsq=%llu", p->pid, cpu, tier2_dsq);
 #endif
 			return;
 		}
@@ -705,11 +722,14 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	// DISPATCHES FROM THE HEAD, SO DAEMONS AT THE TAIL STARVE.
 	// THE CEILING CAPS DEADLINE AT vtime_now + 30MS, KEEPING EVERY BATCH
 	// TASK WITHIN 6 SOJOURN CYCLES OF THE HEAD.
-	// GATED AT >= 8 CORES: ON LOW CORE COUNTS THE BATCH DSQ IS SHALLOW
-	// ENOUGH THAT SOJOURN RESCUE REACHES EVERY TASK NATURALLY. THE CEILING
-	// COMPRESSES VTIME AND DESTROYS PRIORITY DIFFERENTIATION AT 2-4 CORES.
-	if (target_dsq != node_dsq && nr_cpu_ids >= 8) {
-		u64 vtime_ceiling = vtime_now + (LAG_CAP_NS * 3 >> 2);
+	// CORE-SCALED CEILING: WIDER AT LOW CORES (PRESERVE DIFFERENTIATION),
+	// TIGHTER AT HIGH CORES (PREVENT TAIL STARVATION).
+	// 2C: 40MS, 4C: 40MS, 8C: 80MS, 16C: 160MS (CAPPED AT LAG_CAP_NS*4)
+	if (target_dsq != node_dsq) {
+		u64 ceil_scale = nr_cpu_ids >> 2;
+		if (ceil_scale < 1) ceil_scale = 1;
+		if (ceil_scale > 4) ceil_scale = 4;
+		u64 vtime_ceiling = vtime_now + LAG_CAP_NS * ceil_scale;
 		if (time_after(dl, vtime_ceiling))
 			dl = vtime_ceiling;
 	}
@@ -753,9 +773,6 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	// TOTAL-ENQUEUE CUSUM: SAMPLE EVERY 64TH ENQUEUE.
 	// TRACKS TIME INTERVAL PER 64 ENQUEUES (SHORTER = HIGHER RATE).
 	// EWMA BASELINE SELF-TUNES TO ACTUAL SYSTEM CAPACITY.
-	// EFFECTIVE FOR BPF (1MS SLICES) WHERE RATE INCREASES DURING BURST.
-	// RATE-BOUNDED UNDER ADAPTIVE (4MS SLICES) -- WAKEUP CUSUM ABOVE
-	// COVERS THAT CASE. EITHER CUSUM FIRING ACTIVATES burst_mode IN tick().
 	u64 count = __sync_fetch_and_add(&cusum_enq_count, 1);
 	if ((count & 63) == 0) {
 		if (__sync_bool_compare_and_swap(&cusum_lock, 0, 1)) {
@@ -881,8 +898,13 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	// DEFICIT GATE: WHEN INTERACTIVE HAS EXCEEDED ITS BUDGET AND BATCH
 	// IS STARVING, SKIP INTERACTIVE OVERFLOW RESCUE SO BATCH
 	// GETS SERVED VIA DEFICIT CHECK OR STARVATION RESCUE INSTEAD.
-	if (interactive_run >= effective_budget && batch_starving)
-		goto skip_interactive_rescue;
+	// EXCEPTION: IF INTERACTIVE TASKS HAVE BEEN WAITING PAST THE
+	// OVERFLOW SOJOURN THRESHOLD, RESCUE IS MORE URGENT THAN DEFICIT.
+	if (interactive_run >= effective_budget && batch_starving) {
+		u64 ie_gate = interactive_enqueue_ns;
+		if (ie_gate == 0 || (now - ie_gate) <= overflow_sojourn_rescue_ns)
+			goto skip_interactive_rescue;
+	}
 
 	// STEP 2: OVERFLOW SOJOURN AMPLIFICATION
 	// WHEN OVERFLOW DSQs HAVE TASKS AGING PAST 10MS, SERVE THEM.
@@ -1382,7 +1404,9 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 
 	u64 thresh = burst_mode ? 0 : (knobs ? knobs->preempt_thresh_ns : 1000000);
 
-	if (tctx->tier == TIER_BATCH && tctx->avg_runtime >= thresh) {
+	u64 on_cpu = tctx->last_run_at > 0
+		? bpf_ktime_get_ns() - tctx->last_run_at : 0;
+	if (tctx->tier == TIER_BATCH && on_cpu >= thresh) {
 		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
 		interactive_waiting = false;
 		if (!s)

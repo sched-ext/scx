@@ -96,7 +96,7 @@ static __always_inline void stat_inc(u32 idx)
 		(*cnt_p)++;
 }
 
-static __always_inline struct bpf_event *try_reserve_event()
+static __always_inline struct bpf_event *try_reserve_event(u32 size)
 {
 	struct bpf_event *event = NULL;
 	void		 *rb;
@@ -116,10 +116,13 @@ static __always_inline struct bpf_event *try_reserve_event()
 		return NULL;
 	}
 
-	event = bpf_ringbuf_reserve(rb, sizeof(struct bpf_event), 0);
-	if (!event)
+	event = bpf_ringbuf_reserve(rb, size, 0);
+	if (!event) {
 		stat_inc(STAT_DROPPED_EVENTS);
+		return NULL;
+	}
 
+	event->size = size;
 	return event;
 }
 
@@ -250,7 +253,7 @@ int generic_kprobe(struct pt_regs *ctx)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(kprobe))))
 		return -ENOMEM;
 
 	event->type		= KPROBE;
@@ -272,7 +275,7 @@ int BPF_KPROBE(scx_sched_reg)
 	if (!enable_bpf_events)
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_HDR_SIZE)))
 		return -ENOMEM;
 
 	event->type = SCHED_REG;
@@ -291,7 +294,7 @@ int BPF_KPROBE(scx_sched_unreg)
 	if (!enable_bpf_events)
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_HDR_SIZE)))
 		return -ENOMEM;
 
 	event->type = SCHED_UNREG;
@@ -310,7 +313,7 @@ int BPF_KPROBE(on_sched_cpu_perf, s32 cpu, u32 perf)
 	if (!enable_bpf_events)
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(perf))))
 		return -ENOMEM;
 
 	event->type	       = CPU_PERF_SET;
@@ -552,7 +555,7 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 		record_real_comm(tctx->last_waker_comm, waker);
 	}
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(wakeup))))
 		return 0;
 
 	event->type		 = SCHED_WAKEUP;
@@ -633,7 +636,7 @@ int BPF_PROG(on_sched_waking, struct task_struct *p)
 		record_real_comm(tctx->last_waker_comm, waker);
 	}
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(waking))))
 		return 0;
 
 	event->type		 = SCHED_WAKING;
@@ -681,7 +684,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	if (should_send_event) {
 		u32 *lctx;
 
-		if (!(event = try_reserve_event()))
+		if (!(event = try_reserve_event(BPF_EVENT_SIZE(sched_switch))))
 			return -ENOMEM;
 
 		u64 now	    = bpf_ktime_get_ns();
@@ -821,7 +824,7 @@ int BPF_PROG(on_sched_migrate_task, struct task_struct *p, int dest_cpu)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(migrate))))
 		return -ENOMEM;
 
 	event->type		      = SCHED_MIGRATE;
@@ -844,7 +847,7 @@ int BPF_PROG(on_sched_hang, struct task_struct *p)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(hang))))
 		return -ENOMEM;
 
 	event->type = SCHED_HANG;
@@ -897,7 +900,7 @@ int BPF_PROG(on_softirq_exit, unsigned int nr)
 
 	bpf_map_delete_elem(&softirq_events, &zero_int);
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(softirq))))
 		return -ENOMEM;
 
 	event->type			= SOFTIRQ;
@@ -922,7 +925,7 @@ static int stop_trace_timer_callback(void *map, int key,
 
 	sample_rate	      = last_sample_rate;
 
-	if ((event = try_reserve_event())) {
+	if ((event = try_reserve_event(BPF_EVENT_HDR_SIZE))) {
 		mode	    = MODE_NORMAL;
 
 		event->ts   = end;
@@ -972,7 +975,7 @@ static __always_inline int start_trace_real(bool schedule_stop,
 	sample_rate	 = 1;
 
 	// inform userspace that following events are in trace mode
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(trace))))
 		goto error_no_event;
 
 	if (schedule_stop) {
@@ -1092,7 +1095,7 @@ int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(ipi))))
 		return -ENOMEM;
 
 	event->type		    = IPI;
@@ -1119,7 +1122,7 @@ int BPF_PROG(on_sched_exit, struct task_struct *task)
 	if (!enable_bpf_events)
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(exit))))
 		return -ENOMEM;
 
 	event->type	       = EXIT;
@@ -1145,7 +1148,7 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent,
 	if (!enable_bpf_events)
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(fork))))
 		return -ENOMEM;
 
 	event->type		      = FORK;
@@ -1183,7 +1186,7 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid,
 	if (!enable_bpf_events)
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(exec))))
 		return -ENOMEM;
 
 	event->type		  = EXEC;
@@ -1211,7 +1214,7 @@ int BPF_PROG(on_sched_wait, struct pid *pid)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(wait))))
 		return -ENOMEM;
 
 	event->type = WAIT;
@@ -1242,7 +1245,7 @@ int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(gm))))
 		return -ENOMEM;
 
 	event->type	     = GPU_MEM;
@@ -1266,7 +1269,7 @@ int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(chp))))
 		return -ENOMEM;
 
 	event->type		= CPU_HP_ENTER;
@@ -1295,7 +1298,7 @@ int BPF_PROG(on_cpuhp_exit, u32 cpu, int state, int idx, int ret)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(cxp))))
 		return -ENOMEM;
 
 	event->type	       = CPU_HP_EXIT;
@@ -1324,7 +1327,7 @@ int BPF_PROG(on_hw_pressure_update, u32 cpu, u64 hw_pressure)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(hwp))))
 		return -ENOMEM;
 
 	event->type		     = HW_PRESSURE;
@@ -1349,7 +1352,7 @@ int perf_sample_handler(struct bpf_perf_event_data *ctx)
 	if (!enable_bpf_events || !should_sample())
 		return 0;
 
-	if (!(event = try_reserve_event()))
+	if (!(event = try_reserve_event(BPF_EVENT_SIZE(perf_sample))))
 		return -ENOMEM;
 
 	event->type		     = PERF_SAMPLE;

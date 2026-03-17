@@ -331,8 +331,7 @@ pub struct TaskTelemetryRow {
     // Phase 8: CPU core distribution histogram
     pub cpu_run_count: [u16; 64], // Per-CPU run count (TUI normalizes to %)
     // EEVDF telemetry
-    pub nice_shift: u8, // Nice tier (7=baseline, <7 high-pri, >7 low-pri)
-    pub sleep_lag: u16, // Last stored lag credit (dsq_weight units)
+    pub vtime_mult: u16, // EEVDF vtime reciprocal (1024=nice0, <1024 high-pri, >1024 low-pri)
 }
 
 impl Default for TaskTelemetryRow {
@@ -394,8 +393,7 @@ impl Default for TaskTelemetryRow {
             waker_cpu: 0,
             waker_tgid: 0,
             cpu_run_count: [0u16; 64],
-            nice_shift: 7,
-            sleep_lag: 0,
+            vtime_mult: 1024,
         }
     }
 }
@@ -1040,7 +1038,7 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
     let mut output = String::new();
     // System hardware context header
     output.push_str(&app.system_info.format_header());
-    output.push_str("\n");
+    output.push('\n');
     output.push_str(&format!(
         "=== BenchLab ({} runs, {} samples, CPU {}) ===\n\n",
         app.bench_run_count, app.bench_iterations, app.bench_cpu
@@ -2197,16 +2195,16 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Cell::from(format!("{:.0}", q_yield_pct)),
             Cell::from(format!("{:.0}", q_preempt_pct)),
             Cell::from(format!("{}", row.wakeup_source_pid)),
-            Cell::from(if row.nice_shift == 7 {
+            Cell::from(if row.vtime_mult == 1024 {
                 "N0".to_string()
-            } else if row.nice_shift < 7 {
-                format!("N-{}", 7 - row.nice_shift)
+            } else if row.vtime_mult < 1024 {
+                "N-".to_string()
             } else {
-                format!("N+{}", row.nice_shift - 7)
+                "N+".to_string()
             })
-            .style(Style::default().fg(if row.nice_shift < 7 {
+            .style(Style::default().fg(if row.vtime_mult < 1024 {
                 Color::LightGreen
-            } else if row.nice_shift > 7 {
+            } else if row.vtime_mult > 1024 {
                 Color::LightRed
             } else {
                 Color::DarkGray
@@ -2826,6 +2824,7 @@ fn run_core_latency_bench(nr_cpus: usize) -> Vec<Vec<f64>> {
     const WARMUP: u64 = 500;
     const RUNS: usize = 3;
 
+    #[allow(clippy::needless_range_loop)]
     for i in 0..nr_cpus {
         for j in (i + 1)..nr_cpus {
             let mut best = f64::MAX;
@@ -3089,10 +3088,10 @@ pub fn run_tui(
                                     for ppid in ppids {
                                         app.collapsed_ppids.insert(ppid);
                                     }
-                                    app.set_status("Folded all PPID groups".into());
+                                    app.set_status("Folded all PPID groups");
                                 } else {
                                     app.collapsed_ppids.clear();
-                                    app.set_status("Unfolded all PPID groups".into());
+                                    app.set_status("Unfolded all PPID groups");
                                 }
                             }
                         }
@@ -3291,11 +3290,7 @@ pub fn run_tui(
                     let rec_size = std::mem::size_of::<crate::bpf_intf::cake_iter_record>();
                     let mut buf = vec![0u8; rec_size];
                     use std::io::Read;
-                    loop {
-                        match f.read_exact(&mut buf) {
-                            Ok(()) => {}
-                            Err(_) => break, // EOF or error — all records read
-                        }
+                    while f.read_exact(&mut buf).is_ok() {
                         let rec: crate::bpf_intf::cake_iter_record =
                             unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const _) };
 
@@ -3419,8 +3414,7 @@ pub fn run_tui(
                                 waker_tgid: rec.telemetry.waker_tgid,
                                 cpu_run_count: rec.telemetry.cpu_run_count,
                                 is_game_member: false,
-                                nice_shift: rec.nice_shift,
-                                sleep_lag: rec.sleep_lag,
+                                vtime_mult: rec.vtime_mult,
                             });
 
                         // Update dynamic row elements
@@ -3464,8 +3458,7 @@ pub fn run_tui(
                             && (row.tgid == app.tracked_game_tgid
                                 || (row.ppid > 0 && row.ppid == app.tracked_game_ppid));
                         row.ppid = ppid;
-                        row.nice_shift = rec.nice_shift;
-                        row.sleep_lag = rec.sleep_lag;
+                        row.vtime_mult = rec.vtime_mult;
                         row.gate_cascade_ns = rec.telemetry.gate_cascade_ns;
                         row.idle_probe_ns = rec.telemetry.idle_probe_ns;
                         row.vtime_compute_ns = rec.telemetry.vtime_compute_ns;
@@ -3552,6 +3545,7 @@ pub fn run_tui(
                     app.game_challenger_since = None;
                     app.game_stable_polls = 0;
                     app.game_skip_counter = 0;
+                    app.game_confidence = 0;
                 }
             }
 
@@ -3576,8 +3570,8 @@ pub fn run_tui(
                 // any activity). No yield threshold required for Steam/.exe —
                 // the binary signal is definitive on its own.
                 //
-                // Phase 3 (yield fallback) retains the 64-yield + 5-thread dual gate
-                // for unrecognised native games: guards against browsers, IDEs, etc.
+                // Phase 3 (yield fallback) removed: yield-heavy non-games (Brave, Chrome,
+                // IDEs, Electron apps) too easily exceed the threshold and false-positive.
 
                 // Reusable Steam env probe (cold path, ~1 file read per PPID).
                 let has_steam_env = |pid: u32| -> bool {
@@ -3602,6 +3596,15 @@ pub fn run_tui(
                     }
                 };
 
+                // Known Steam infrastructure comms — never game processes.
+                const STEAM_INFRA: &[&str] = &[
+                    "steam",
+                    "steamwebhelper",
+                    "pressure-vessel",
+                    "pv-bwrap",
+                    "reaper",
+                ];
+
                 // Aggregate thread counts by PPID for Phase 1 + 2 thread-count gate.
                 let mut ppid_data: std::collections::HashMap<u32, usize> =
                     std::collections::HashMap::new(); // ppid → thread_count
@@ -3613,28 +3616,24 @@ pub fn run_tui(
                 }
 
                 // Phase 1: Steam scan — highest priority, no yield threshold.
-                // Covers: Proton games, native Linux Steam games, Battle.net/Epic via Steam.
+                // Covers: Proton games, native Linux Steam games (CS2, Dota 2),
+                // Battle.net/Epic via Steam. SteamGameId= is the definitive signal.
+                // Filter: skip PPID groups where ALL threads are Steam infrastructure.
                 let mut steam_ppid: u32 = 0;
                 for (&ppid, &thread_count) in &ppid_data {
                     if thread_count >= GAME_MIN_THREADS && has_steam_env(ppid) {
-                        // Validate: skip the Steam launcher's own process group.
-                        // Find any thread under this PPID and check if its cmdline
-                        // is a real game binary (not "steam" or "steamwebhelper").
-                        // Inlined here because resolve_game closure is defined later.
-                        let has_game_binary = app.task_rows.values().any(|row| {
-                            row.ppid == ppid && {
-                                let comm_lc = row.comm.to_lowercase();
-                                let is_steam_infra = comm_lc.contains("steam")
-                                    || comm_lc.contains("steamwebhelper")
-                                    || comm_lc.contains("pressure-vessel");
-                                !is_steam_infra && (comm_lc.ends_with(".exe") || row.tgid == ppid)
-                            }
+                        // Skip if ALL threads under this PPID are Steam infra.
+                        let has_non_infra = app.task_rows.values().any(|row| {
+                            row.ppid == ppid
+                                && row.status != TaskStatus::Dead
+                                && !STEAM_INFRA
+                                    .iter()
+                                    .any(|&infra| row.comm.to_lowercase().contains(infra))
                         });
-                        if has_game_binary {
+                        if has_non_infra {
                             steam_ppid = ppid;
                             break;
                         }
-                        // Launcher group only — keep scanning.
                     }
                 }
 
@@ -3650,9 +3649,6 @@ pub fn run_tui(
                 }
 
                 // Resolve winning PPID: Steam wins → .exe wins → no game.
-                // Phase 3 (yield fallback) removed: yield-heavy non-games (Brave, Chrome,
-                // IDEs, Electron apps) too easily exceed the threshold and false-positive.
-                // If it has no Steam env and no .exe process, it is not a game.
                 let new_game_ppid = if steam_ppid > 0 {
                     steam_ppid
                 } else if exe_ppid > 0 {
@@ -3662,15 +3658,21 @@ pub fn run_tui(
                 };
 
                 // Helper: resolve best TGID + name for a given PPID (cold path only).
-                // Selects the TGID with the highest pelt_util — the game's main/render
-                // loop runs for milliseconds; Windows service exes (Services.exe, pluginhost,
-                // winedevice) run for microseconds and are filtered by the blocklist.
+                // Picks the TGID with the highest pelt_util — the game's main/render
+                // thread runs for ms; infra processes run for µs.
+                // Works for both Proton (.exe) and native (cs2, dota2) games.
                 let resolve_game = |ppid: u32,
                                     rows: &HashMap<u32, TaskTelemetryRow>|
                  -> (u32, String) {
-                    // Known Windows infrastructure exes that appear in Proton/Wine trees
-                    // but are never the actual game. Skip these when selecting game TGID.
-                    const WIN_INFRA_EXES: &[&str] = &[
+                    // Known infra exes to skip when selecting game TGID.
+                    const INFRA_BLOCKLIST: &[&str] = &[
+                        "steam",
+                        "steamwebhelper",
+                        "pressure-vessel",
+                        "pv-bwrap",
+                        "reaper",
+                        "bash",
+                        "sh",
                         "services",
                         "pluginhost",
                         "winedevice",
@@ -3694,8 +3696,7 @@ pub fn run_tui(
                         "cmd",
                     ];
 
-                    // Build per-TGID max pelt_util. The game thread always wins —
-                    // render frames take ms, infra processes take µs.
+                    // Build per-TGID max pelt_util.
                     let mut tgid_max_rt: std::collections::HashMap<u32, u32> =
                         std::collections::HashMap::new();
                     for (_pid, row) in rows.iter() {
@@ -3708,39 +3709,29 @@ pub fn run_tui(
                         }
                     }
 
-                    // Sort TGIDs by max runtime descending; skip Windows infra exes.
+                    // Sort TGIDs by max pelt_util descending; skip infra.
                     let mut ranked: Vec<(u32, u32)> = tgid_max_rt.into_iter().collect();
                     ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
                     let mut game_tgid: u32 = ppid; // fallback
-                    'outer: for (tgid, _rt) in &ranked {
-                        // Read cmdline to get exe name (cold path).
-                        if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", tgid)) {
-                            for arg in cmdline.split(|&b| b == 0) {
-                                if let Ok(s) = std::str::from_utf8(arg) {
-                                    let low = s.to_lowercase();
-                                    if low.ends_with(".exe") {
-                                        let basename = s.rsplit(['\\', '/']).next().unwrap_or(s);
-                                        let bare = basename
-                                            .trim_end_matches(".exe")
-                                            .trim_end_matches(".EXE")
-                                            .to_lowercase();
-                                        if WIN_INFRA_EXES.iter().any(|&b| bare == b) {
-                                            continue 'outer; // skip infra exe
-                                        }
-                                        game_tgid = *tgid;
-                                        break 'outer;
-                                    }
-                                }
-                            }
+                    for (tgid, _rt) in &ranked {
+                        // Check comm against blocklist.
+                        let comm_lc = rows
+                            .values()
+                            .find(|r| {
+                                let t = if r.tgid > 0 { r.tgid } else { r.pid };
+                                t == *tgid
+                            })
+                            .map(|r| r.comm.to_lowercase())
+                            .unwrap_or_default();
+                        if INFRA_BLOCKLIST.iter().any(|&b| comm_lc.contains(b)) {
+                            continue;
                         }
-                        // No .exe in cmdline — could be native, take it as fallback.
-                        if game_tgid == ppid {
-                            game_tgid = *tgid;
-                        }
+                        game_tgid = *tgid;
+                        break;
                     }
 
-                    // Read display name: prefer .exe basename, fall back to comm.
+                    // Read display name: try .exe basename (Proton), then comm (native).
                     let name = {
                         let mut n = String::from("unknown");
                         if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", game_tgid)) {
@@ -3757,6 +3748,7 @@ pub fn run_tui(
                                 }
                             }
                         }
+                        // Native game fallback: use comm (e.g., "cs2", "dota2").
                         if n == "unknown" {
                             if let Ok(comm) =
                                 std::fs::read_to_string(format!("/proc/{}/comm", game_tgid))
@@ -3803,7 +3795,7 @@ pub fn run_tui(
                             let accept = holdoff == 0
                                 || app
                                     .game_challenger_since
-                                    .map_or(false, |s| s.elapsed() >= Duration::from_secs(holdoff));
+                                    .is_some_and(|s| s.elapsed() >= Duration::from_secs(holdoff));
                             if accept {
                                 let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
                                 app.tracked_game_tgid = tgid;
@@ -3825,23 +3817,30 @@ pub fn run_tui(
                         }
                     }
                 } else if new_game_ppid == app.tracked_game_ppid {
-                    // Same game family still winning — update thread count, reset challenger.
+                    // Same game family still winning — update thread count.
                     app.game_thread_count = ppid_data.get(&new_game_ppid).copied().unwrap_or(0);
-                    app.game_challenger_ppid = 0;
-                    app.game_challenger_since = None;
-                    app.game_stable_polls = app.game_stable_polls.saturating_add(1);
-                } else if new_game_confidence > 0 && new_game_confidence > app.game_confidence {
-                    // Only strictly higher confidence can contest the incumbent.
-                    // Equal confidence (e.g. two Steam-env PPIDs) is irrelevant — the locked
-                    // game stays sticky until its /proc entry dies (checked above).
-                    // This prevents HashMap iteration non-determinism from resetting stable_polls
-                    // when the Steam launcher and game.exe both have SteamGameId in env.
+                    // GAME SWAP FIX (C): preserve active challenger timer.
+                    // When two games coexist (Game A dying + Game B starting), HashMap
+                    // iteration non-determinism alternates the scan winner. Resetting
+                    // the challenger here kills Game B's holdoff timer every other poll.
+                    if app.game_challenger_ppid == 0 {
+                        app.game_stable_polls = app.game_stable_polls.saturating_add(1);
+                    }
+                } else if new_game_confidence > 0 && new_game_confidence >= app.game_confidence {
+                    // GAME SWAP FIX (B): equal-or-higher confidence can contest.
+                    // Handles: close Game A → launch Game B (both Steam = 100%).
+                    // Equal confidence gets 5s holdoff to prevent HashMap flicker;
+                    // higher confidence uses phase-based holdoff (0s Steam, 5s .exe).
                     app.game_stable_polls = 0;
                     if app.game_challenger_ppid != new_game_ppid {
                         app.game_challenger_ppid = new_game_ppid;
                         app.game_challenger_since = Some(Instant::now());
                     } else if let Some(since) = app.game_challenger_since {
-                        let holdoff = holdoff_for_conf(new_game_confidence);
+                        let holdoff = if new_game_confidence > app.game_confidence {
+                            holdoff_for_conf(new_game_confidence)
+                        } else {
+                            5 // Equal confidence: 5s holdoff prevents HashMap flicker
+                        };
                         if since.elapsed() >= Duration::from_secs(holdoff) {
                             let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
                             app.tracked_game_tgid = tgid;
@@ -3904,6 +3903,12 @@ pub fn run_tui(
                 };
                 app.sched_state = new_state;
                 bss.sched_state = new_state as u32;
+                // Sync sched_state_local to all per-CPU BSS entries (Rule 78).
+                // Eliminates remote global BSS cache line fetch at 5 BPF hot-path sites.
+                // Cold path: runs every 500ms in TUI poll — bounded staleness.
+                for i in 0..app.topology.nr_cpus.min(bss.cpu_bss.len()) {
+                    bss.cpu_bss[i].sched_state_local = new_state;
+                }
                 // Precompute quantum ceiling alongside sched_state (Rule 5: no BPF branch).
                 // COMPILATION → 8ms, else → 2ms. Values match intf.h constants.
                 bss.quantum_ceiling_ns = if new_state == CAKE_STATE_COMPILATION {
@@ -4118,8 +4123,8 @@ pub fn run_tui(
             // each group. Uses stable_sort so relative order is unchanged.
             if app.tracked_game_tgid > 0 {
                 sorted_pids.sort_by(|a, b| {
-                    let gm_a = app.task_rows.get(a).map_or(false, |r| r.is_game_member);
-                    let gm_b = app.task_rows.get(b).map_or(false, |r| r.is_game_member);
+                    let gm_a = app.task_rows.get(a).is_some_and(|r| r.is_game_member);
+                    let gm_b = app.task_rows.get(b).is_some_and(|r| r.is_game_member);
                     // true sorts before false (1 > 0), so game members come first.
                     gm_b.cmp(&gm_a)
                 });

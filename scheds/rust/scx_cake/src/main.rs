@@ -6,17 +6,17 @@ mod tui;
 
 use core::sync::atomic::Ordering;
 use std::io::IsTerminal;
-use std::os::fd::AsRawFd;
+
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use log::{info, warn};
-use nix::sys::signal::{SigSet, Signal};
-use nix::sys::signalfd::{SfdFlags, SignalFd};
+
 use scx_arena::ArenaLib;
 use scx_utils::build_id;
+use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
@@ -30,6 +30,8 @@ mod bpf_skel {
     include!(concat!(env!("OUT_DIR"), "/bpf_skel.rs"));
 }
 use bpf_skel::*;
+
+const SCHEDULER_NAME: &str = "scx_cake";
 
 /// Scheduler profile presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -86,10 +88,11 @@ impl Profile {
 ///   scx_cake -p esports               # Ultra-low-latency for competitive play
 ///   scx_cake --quantum 1500           # Gaming profile with custom quantum
 ///   scx_cake -v                       # Run with live TUI stats display
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     author,
     version,
+    disable_version_flag = true,
     about = "🍰 A sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling",
     verbatim_doc_comment
 )]
@@ -169,6 +172,10 @@ struct Args {
     /// and prints a structured JSON output to stdout.
     #[arg(long, verbatim_doc_comment)]
     testing: bool,
+
+    /// Print scheduler version and exit.
+    #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 }
 
 impl Args {
@@ -188,6 +195,7 @@ struct Scheduler<'a> {
     args: Args,
     topology: topology::TopologyInfo,
     latency_matrix: Vec<Vec<f64>>,
+    struct_ops: Option<libbpf_rs::Link>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -197,12 +205,64 @@ impl<'a> Scheduler<'a> {
     ) -> Result<Self> {
         use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 
-        // Open and load the BPF skeleton
-        let skel_builder = BpfSkelBuilder::default();
+        // ═══ scx_ops_open! equivalent ═══
+        // Matches scx_ops_open!(skel_builder, open_object, cake_ops, None)
+        // Cake can't use the macro directly (custom arena architecture),
+        // so we inline the critical functionality.
+        scx_utils::compat::check_min_requirements()?;
 
+        let skel_builder = BpfSkelBuilder::default();
         let mut open_skel = skel_builder
             .open(open_object)
             .context("Failed to open BPF skeleton")?;
+
+        // Inject version suffix into ops name: "cake" → "cake_1.1.0_g<hash>_<target>"
+        // This is what scx_loader reads from /sys/kernel/sched_ext/root/ops
+        {
+            let ops = open_skel.struct_ops.cake_ops_mut();
+            let name_field = &mut ops.name;
+
+            let version_suffix = scx_utils::build_id::ops_version_suffix(env!("CARGO_PKG_VERSION"));
+            let bytes = version_suffix.as_bytes();
+            let mut i = 0;
+            let mut bytes_idx = 0;
+            let mut found_null = false;
+
+            while i < name_field.len() - 1 {
+                found_null |= name_field[i] == 0;
+                if !found_null {
+                    i += 1;
+                    continue;
+                }
+
+                if bytes_idx < bytes.len() {
+                    name_field[i] = bytes[bytes_idx] as i8;
+                    bytes_idx += 1;
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            name_field[i] = 0;
+        }
+
+        // Read hotplug sequence number — enables kernel-requested restarts on CPU hotplug
+        {
+            let path = std::path::Path::new("/sys/kernel/sched_ext/hotplug_seq");
+            let val = std::fs::read_to_string(path)
+                .context("Failed to read /sys/kernel/sched_ext/hotplug_seq")?;
+            open_skel.struct_ops.cake_ops_mut().hotplug_seq = val
+                .trim()
+                .parse::<u64>()
+                .context("Failed to parse hotplug_seq")?;
+        }
+
+        // Honor SCX_TIMEOUT_MS environment variable (matches scx_ops_open! behavior)
+        if let Ok(s) = std::env::var("SCX_TIMEOUT_MS") {
+            let ms: u32 = s.parse().context("SCX_TIMEOUT_MS has invalid value")?;
+            info!("Setting timeout_ms to {} based on environment", ms);
+            open_skel.struct_ops.cake_ops_mut().timeout_ms = ms;
+        }
 
         // Populate SCX enum RODATA from kernel BTF (SCX_DSQ_LOCAL_ON, SCX_KICK_PREEMPT, etc.)
         scx_utils::import_enums!(open_skel);
@@ -231,17 +291,18 @@ impl<'a> Scheduler<'a> {
             // Per-LLC DSQ partitioning: populate CPU→LLC mapping
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
-            rodata.nr_cpus = topo.nr_cpus.min(64) as u32; // Rule 39: bounds kick scan loop
-            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(64) as u32; // V3: PHYS_FIRST scan mask
+            rodata.nr_cpus = topo.nr_cpus.min(256) as u32; // F2: widened from 64→256 for Threadripper
+            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(256) as u32; // V3: PHYS_FIRST scan mask
 
             // Ferry explicit 64-bit topology arrays down into BPF (O(1) execution replacements)
 
-            // Heterogeneous Gaming Topology
-            rodata.big_core_phys_mask = topo.big_core_phys_mask;
-            rodata.big_core_smt_mask = topo.big_core_smt_mask;
-            rodata.little_core_mask = topo.little_core_mask;
-            rodata.vcache_llc_mask = topo.vcache_llc_mask;
+            // Heterogeneous Gaming Topology — u64[4] arrays (F2: 256-bit masks)
+            rodata.big_core_phys_mask[0] = topo.big_core_phys_mask;
+            rodata.big_core_smt_mask[0] = topo.big_core_smt_mask;
+            rodata.little_core_mask[0] = topo.little_core_mask;
+            rodata.vcache_llc_mask[0] = topo.vcache_llc_mask;
             rodata.has_vcache = topo.has_vcache;
+            rodata.has_hybrid_cores = topo.big_core_phys_mask != 0;
 
             for i in 0..topo.cpu_sibling_map.len() {
                 rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i];
@@ -261,7 +322,7 @@ impl<'a> Scheduler<'a> {
             // sort by performance, group SMT pairs together.
             // GAME tasks scan fast→slow, non-GAME scans slow→fast.
             {
-                let nr = topo.nr_cpus.min(64);
+                let nr = topo.nr_cpus.min(256);
                 // Read prefcore ranking per CPU (higher = faster)
                 let mut rankings: Vec<(usize, u32)> = (0..nr)
                     .map(|cpu| {
@@ -316,6 +377,42 @@ impl<'a> Scheduler<'a> {
                     top_cpus, nr
                 );
             }
+
+            // ═══ Per-CPU capacity table (F1 correctness fix) ═══
+            // Read arch_scale_cpu_capacity from sysfs for P/E core vruntime scaling.
+            // Scale: 0-1024, where 1024 = fastest core. On SMP all = 1024 → JIT folds.
+            // Intel hybrid: P-cores ~1024, E-cores ~600-700.
+            // AMD SMP: all 1024 → cap > 0 && cap < 1024 is always false → zero overhead.
+            {
+                let nr = topo.nr_cpus.min(256);
+                let mut all_equal = true;
+                let mut first_cap: u32 = 0;
+
+                for cpu in 0..nr {
+                    let path = format!("/sys/devices/system/cpu/cpu{}/cpu_capacity", cpu);
+                    let cap = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                        .unwrap_or(1024);
+
+                    rodata.cpuperf_cap_table[cpu] = cap;
+
+                    if cpu == 0 {
+                        first_cap = cap;
+                    } else if cap != first_cap {
+                        all_equal = false;
+                    }
+                }
+
+                if !all_equal {
+                    info!(
+                        "Capacity scaling: heterogeneous (P/E cores, range {}-{})",
+                        rodata.cpuperf_cap_table[..nr].iter().min().unwrap_or(&0),
+                        rodata.cpuperf_cap_table[..nr].iter().max().unwrap_or(&1024)
+                    );
+                }
+            }
+
             // Arena library: nr_cpu_ids must be set before load() — arena_init
             // checks this and returns -ENODEV (errno 19) if uninitialized.
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
@@ -352,10 +449,8 @@ impl<'a> Scheduler<'a> {
                         };
                         if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
                             let comm = comm.trim();
-                            if AUDIO_COMMS.contains(&comm) {
-                                if audio_tgid_set.insert(pid) {
-                                    audio_tgids.push(pid);
-                                }
+                            if AUDIO_COMMS.contains(&comm) && audio_tgid_set.insert(pid) {
+                                audio_tgids.push(pid);
                             }
                         }
                     }
@@ -521,7 +616,10 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Load the BPF program
+        // ═══ scx_ops_load! equivalent ═══
+        // Set UEI dump buffer size before load (matches scx_ops_load! behavior)
+        scx_utils::uei_set_size!(open_skel, cake_ops, uei);
+
         let mut skel = open_skel.load().context("Failed to load BPF program")?;
 
         // Initialize the BPF arena library.
@@ -550,17 +648,30 @@ impl<'a> Scheduler<'a> {
             args,
             topology: topo,
             latency_matrix,
+            struct_ops: None,
         })
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
-        // Attach the scheduler
-        let link = self
-            .skel
-            .maps
-            .cake_ops
-            .attach_struct_ops()
-            .context("Failed to attach scheduler")?;
+    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+        use libbpf_rs::skel::Skel;
+
+        // ═══ scx_ops_attach! equivalent ═══
+        // Guard: prevent loading if another sched_ext scheduler is already active
+        if scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
+            anyhow::bail!("another sched_ext scheduler is already running");
+        }
+
+        // Attach non-struct_ops BPF programs first, then struct_ops
+        self.skel
+            .attach()
+            .context("Failed to attach non-struct_ops BPF programs")?;
+        self.struct_ops = Some(
+            self.skel
+                .maps
+                .cake_ops
+                .attach_struct_ops()
+                .context("Failed to attach struct_ops BPF programs")?,
+        );
 
         // Release builds: --verbose and --testing are unavailable (stats compiled out).
         // Warn early so user knows these flags require a debug build.
@@ -574,7 +685,8 @@ impl<'a> Scheduler<'a> {
 
         // Standard startup banner: follows scx_cosmos/scx_bpfland convention
         info!(
-            "scx_cake {} {}",
+            "{} {} {}",
+            SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION")),
             if self.topology.smt_enabled {
                 "SMT on"
@@ -643,75 +755,32 @@ impl<'a> Scheduler<'a> {
             if self.args.verbose && !std::io::stdout().is_terminal() {
                 warn!("TUI disabled: no terminal detected (headless mode)");
             }
-            // Event-based silent mode - block on signalfd, poll with 60s timeout for UEI check
-            // Signals are already blocked from main() — just create signalfd to read them
-            let mut mask = SigSet::empty();
-            mask.add(Signal::SIGINT);
-            mask.add(Signal::SIGTERM);
-
-            // Create signalfd to receive signals as readable events
-            let sfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK)
-                .context("Failed to create signalfd")?;
-
-            use nix::poll::{poll, PollFd, PollFlags};
-            use std::os::fd::BorrowedFd;
-
-            loop {
-                // Block for up to 60 seconds, then check UEI
-                // poll() returns: >0 = readable, 0 = timeout, -1 = error
-                // SAFETY: sfd is valid for the duration of this loop
-                let poll_fd = unsafe {
-                    PollFd::new(BorrowedFd::borrow_raw(sfd.as_raw_fd()), PollFlags::POLLIN)
-                };
-                let mut fds = [poll_fd];
-                let result = poll(&mut fds, nix::poll::PollTimeout::from(60_000u16)); // 60 seconds
-
-                match result {
-                    Ok(n) if n > 0 => {
-                        // Signal received - read it to clear and exit
-                        if let Ok(Some(siginfo)) = sfd.read_signal() {
-                            info!("Received signal {} - shutting down", siginfo.ssi_signo);
-                            shutdown.store(true, Ordering::Relaxed);
-                        }
-                        break;
-                    }
-                    Ok(_) => {
-                        // Timeout - check UEI
-                        if scx_utils::uei_exited!(&self.skel, uei) {
-                            match scx_utils::uei_report!(&self.skel, uei) {
-                                Ok(reason) => {
-                                    warn!("BPF scheduler exited: {:?}", reason);
-                                }
-                                Err(e) => {
-                                    warn!("BPF scheduler exited (failed to get reason: {})", e);
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    Err(nix::errno::Errno::EINTR) => {
-                        // Interrupted - check shutdown flag
-                        if shutdown.load(Ordering::Relaxed) {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("poll() error: {}", e);
-                        break;
-                    }
+            // Simple headless mode: matches cosmos/bpfland pattern exactly.
+            // ctrlc handler sets shutdown on SIGINT/SIGTERM.
+            // 1-second sleep + UEI check = responsive shutdown.
+            while !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if scx_utils::uei_exited!(&self.skel, uei) {
+                    break;
                 }
             }
         }
 
-        info!("scx_cake scheduler shutting down");
+        info!("{SCHEDULER_NAME} scheduler shutting down");
 
         // Drop struct_ops link BEFORE uei_report — this triggers the kernel to
-        // set UEI kind=SCX_EXIT_UNREG. Matches scx_bpfland/scx_p2dq/scx_lavd
+        // set UEI kind=SCX_EXIT_UNREG. Matches scx_bpfland/scx_cosmos/scx_lavd
         // pattern: `let _ = self.struct_ops.take(); uei_report!(...)`
-        drop(link);
+        let _ = self.struct_ops.take();
 
-        // Standard UEI exit report — produces "EXIT: unregistered from user space".
-        scx_utils::uei_report!(&self.skel, uei).map(|_| ())
+        // Standard UEI exit report — returns UserExitInfo for should_restart().
+        scx_utils::uei_report!(&self.skel, uei)
+    }
+}
+
+impl Drop for Scheduler<'_> {
+    fn drop(&mut self) {
+        info!("Unregister {SCHEDULER_NAME} scheduler");
     }
 }
 
@@ -720,17 +789,19 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Block SIGINT/SIGTERM early, before any threads spawn (ctrlc crate spawns one).
-    // This ensures signals are never delivered via default handler (which would
-    // exit with 128+signum=143 in CI). signalfd in run() reads them cleanly.
-    {
-        let mut mask = SigSet::empty();
-        mask.add(Signal::SIGINT);
-        mask.add(Signal::SIGTERM);
-        mask.thread_block().ok(); // best-effort; signalfd will catch in run()
+    // Handle --version before anything else (matches cosmos/bpfland)
+    if args.version {
+        println!(
+            "{} {}",
+            SCHEDULER_NAME,
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
     }
 
-    // Set up signal handler (ctrlc thread inherits our signal mask)
+    // Set up signal handler: ctrlc handles both SIGINT and SIGTERM on Linux.
+    // This is the same pattern cosmos/bpfland use — no SigSet blocking or
+    // SignalFd complexity needed.
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
 
@@ -742,9 +813,14 @@ fn main() -> Result<()> {
     // Create open object for BPF - needs to outlive scheduler
     let mut open_object = std::mem::MaybeUninit::uninit();
 
-    // Create and run the scheduler
-    let mut scheduler = Scheduler::new(args, &mut open_object)?;
-    scheduler.run(shutdown)?;
+    // Restart loop: matches cosmos/bpfland pattern.
+    // Kernel can request restart via UEI (e.g., CPU hotplug).
+    loop {
+        let mut scheduler = Scheduler::new(args.clone(), &mut open_object)?;
+        if !scheduler.run(shutdown.clone())?.should_restart() {
+            break;
+        }
+    }
 
     Ok(())
 }
