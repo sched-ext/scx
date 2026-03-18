@@ -14,6 +14,7 @@ use scx_ebpf::core_read;
 scx_ebpf::scx_ebpf_boilerplate!();
 
 /// Generated vmlinux struct definitions with real field layouts.
+#[allow(non_snake_case, improper_ctypes_definitions, unnecessary_transmutes)]
 mod vmlinux {
     include!(concat!(env!("OUT_DIR"), "/vmlinux.rs"));
 }

@@ -8,6 +8,7 @@
 //! # Supported map types
 //!
 //! - [`HashMap`] — generic key-value hash map (`BPF_MAP_TYPE_HASH`)
+//! - [`BpfArray`] — indexed array (`BPF_MAP_TYPE_ARRAY`), used for timer maps
 //! - [`PerCpuArray`] — per-CPU indexed array (`BPF_MAP_TYPE_PERCPU_ARRAY`)
 //! - [`PerfEventArray`] — perf event array for hardware counter access (`BPF_MAP_TYPE_PERF_EVENT_ARRAY`)
 //! - [`TaskStorage`] — per-task local storage (`BPF_MAP_TYPE_TASK_STORAGE`)
@@ -251,6 +252,98 @@ impl<K, V, const MAX_ENTRIES: usize> HashMap<K, V, MAX_ENTRIES> {
             bpf_map_delete_elem(
                 core::ptr::from_ref(self).cast(),
                 core::ptr::from_ref(key).cast(),
+            )
+        };
+        if ret == 0 { Ok(()) } else { Err(ret) }
+    }
+}
+
+// ── BpfArray ────────────────────────────────────────────────────────────
+
+/// A BTF-compatible BPF array map (`BPF_MAP_TYPE_ARRAY`).
+///
+/// A simple, non-per-CPU indexed array with a fixed number of entries.
+/// Unlike [`PerCpuArray`], all CPUs share the same data.
+///
+/// This is the map type required for `BpfTimer` storage — the kernel
+/// manages timer lifecycle through the map, so the timer must live in
+/// a regular (non-per-CPU) array value.
+///
+/// # Type Parameters
+///
+/// - `V` — value type (must be `Copy`)
+/// - `MAX_ENTRIES` — number of array entries
+///
+/// # Example
+///
+/// ```ignore
+/// use scx_ebpf::timer::BpfTimer;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy)]
+/// struct WakeupTimer {
+///     timer: BpfTimer,
+/// }
+///
+/// #[unsafe(link_section = ".maps")]
+/// #[unsafe(no_mangle)]
+/// static WAKEUP_TIMER: BpfArray<WakeupTimer, 1> = BpfArray::new();
+/// ```
+#[repr(C)]
+pub struct BpfArray<V, const MAX_ENTRIES: usize> {
+    r#type: *const [i32; MAP_TYPE_ARRAY],
+    key: *const u32,
+    value: *const V,
+    max_entries: *const [i32; MAX_ENTRIES],
+    _v: PhantomData<V>,
+}
+
+unsafe impl<V, const N: usize> Sync for BpfArray<V, N> {}
+
+impl<V, const MAX_ENTRIES: usize> BpfArray<V, MAX_ENTRIES> {
+    /// Create a new array map definition.
+    pub const fn new() -> Self {
+        Self {
+            r#type: core::ptr::null(),
+            key: core::ptr::null(),
+            value: core::ptr::null(),
+            max_entries: core::ptr::null(),
+            _v: PhantomData,
+        }
+    }
+
+    /// Look up an element at `index`. Returns `None` if the index is out of bounds.
+    #[inline(always)]
+    pub fn get(&self, index: u32) -> Option<&V> {
+        let ptr = self.get_ptr_mut(index);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &*ptr })
+        }
+    }
+
+    /// Look up an element at `index`, returning a mutable pointer.
+    #[inline(always)]
+    pub fn get_ptr_mut(&self, index: u32) -> *mut V {
+        unsafe {
+            bpf_map_lookup_elem(
+                core::ptr::from_ref(self).cast(),
+                core::ptr::from_ref(&index).cast(),
+            )
+            .cast()
+        }
+    }
+
+    /// Set the element at `index`.
+    #[inline(always)]
+    pub fn set(&self, index: u32, value: &V, flags: u64) -> Result<(), i64> {
+        let ret = unsafe {
+            bpf_map_update_elem(
+                core::ptr::from_ref(self).cast(),
+                core::ptr::from_ref(&index).cast(),
+                core::ptr::from_ref(value).cast(),
+                flags,
             )
         };
         if ret == 0 { Ok(()) } else { Err(ret) }

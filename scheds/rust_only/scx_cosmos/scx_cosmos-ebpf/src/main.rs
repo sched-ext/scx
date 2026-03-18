@@ -22,10 +22,15 @@
 //!   perf_events
 //! - `CPU_CTX`: per-CPU array for load tracking (last_update, perf_lvl, perf_events)
 //! - `SCX_PMU_MAP`: perf event array (populated by userspace, not readable from struct_ops)
+//! - `WAKEUP_TIMER`: single-element BPF_MAP_TYPE_ARRAY holding the deferred
+//!   wakeup bpf_timer. When `DEFERRED_WAKEUPS` is enabled, CPU kicks in the
+//!   enqueue path are deferred to a periodic timer callback that scans for idle
+//!   CPUs with pending tasks, reducing IPI overhead in the hot path.
 //!
 //! Userspace-configurable globals:
 //! - `SLICE_NS`, `SLICE_LAG`: time slice and maximum runtime parameters
 //! - `BUSY_THRESHOLD`, `CPU_UTIL`: system busy detection
+//! - `DEFERRED_WAKEUPS`: enable/disable deferred wakeup timer (default: true)
 //! - `NO_WAKE_SYNC`, `CPUFREQ_ENABLED`, `SMT_ENABLED`, `AVOID_SMT`: feature flags
 //! - `MM_AFFINITY`: address space affinity for cache-friendly wakeups
 //! - `NUMA_ENABLED`, `NR_NODES`, `CPU_TO_NODE`: NUMA-aware per-node DSQ routing
@@ -44,19 +49,21 @@
 #![no_std]
 #![no_main]
 #![feature(asm_experimental_arch)]
-#![allow(non_camel_case_types, non_upper_case_globals, dead_code)]
+#![allow(non_camel_case_types, non_upper_case_globals, dead_code, unused_imports)]
 
 use scx_ebpf::prelude::*;
 use scx_ebpf::core_read;
 use scx_ebpf::bpf_for;
-use scx_ebpf::maps::{TaskStorage, PerCpuArray, PerfEventArray};
+use scx_ebpf::maps::{TaskStorage, PerCpuArray, PerfEventArray, BpfArray};
 use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
 use scx_ebpf::cpumask::{self, bpf_cpumask};
 use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
+use scx_ebpf::timer::{self, BpfTimer, CLOCK_MONOTONIC};
 
 scx_ebpf::scx_ebpf_boilerplate!();
 
 /// Generated vmlinux struct definitions with real field layouts.
+#[allow(non_snake_case, improper_ctypes_definitions, unnecessary_transmutes)]
 mod vmlinux {
     include!(concat!(env!("OUT_DIR"), "/vmlinux.rs"));
 }
@@ -139,6 +146,30 @@ static SCX_PMU_MAP: PerfEventArray<1024> = PerfEventArray::new();
 #[unsafe(no_mangle)]
 static PMU_BASELINE: PerCpuArray<u64, 1> = PerCpuArray::new();
 
+/// Timer map value type for deferred wakeup timer.
+///
+/// The BPF timer must live inside a map value — the kernel manages its
+/// lifecycle through the map. Uses `BPF_MAP_TYPE_ARRAY` (not per-CPU)
+/// since there's a single global wakeup timer shared across all CPUs.
+///
+/// C reference: `struct wakeup_timer { struct bpf_timer timer; };`
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WakeupTimer {
+    timer: BpfTimer,
+}
+
+/// Wakeup timer map — single-element array holding the deferred wakeup timer.
+///
+/// C reference:
+/// ```c
+/// struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1);
+///          __type(key, u32); __type(value, struct wakeup_timer); } wakeup_timer;
+/// ```
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static WAKEUP_TIMER: BpfArray<WakeupTimer, 1> = BpfArray::new();
+
 // ── Constants ───────────────────────────────────────────────────────────
 
 /// Shared DSQ used for deadline-mode scheduling when the system is saturated.
@@ -174,6 +205,11 @@ const CPUFREQ_HIGH_THRESH: u64 = SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4;
 /// PF_EXITING flag in task_struct.flags — task is in the process of exiting.
 /// Used by is_wake_affine() to skip wakers that are exiting.
 const PF_EXITING: u32 = 0x00000004;
+
+/// PF_IDLE flag in task_struct.flags — task is the idle thread.
+/// Used by is_cpu_idle() to detect whether a CPU is running its idle thread.
+/// C reference: `p->flags & PF_IDLE`
+const PF_IDLE: u32 = 0x00000002;
 
 // ── Userspace-configurable globals ──────────────────────────────────────
 //
@@ -304,6 +340,16 @@ static mut PERF_CONFIG: u64 = 0;
 /// C reference: `const volatile u64 perf_threshold`
 #[unsafe(no_mangle)]
 static mut PERF_THRESHOLD: u64 = 0;
+
+/// Enable deferred wakeup timer.
+///
+/// When true, CPU wakeups triggered by enqueue are deferred to a periodic
+/// timer callback (`wakeup_timerfn`) instead of being performed inline.
+/// This reduces IPI overhead in the enqueue hot path.
+///
+/// C reference: `const volatile bool deferred_wakeups = true`
+#[unsafe(no_mangle)]
+static mut DEFERRED_WAKEUPS: bool = true;
 
 // PMU integration architecture:
 //
@@ -628,6 +674,37 @@ fn update_cpufreq(cpu: i32) {
     kfuncs::cpuperf_set(cpu, perf_lvl as u32);
 }
 
+/// Check if a CPU is running its idle thread.
+///
+/// Reads the current task on the given CPU via `scx_bpf_cpu_curr()`, then
+/// checks if the task has the `PF_IDLE` flag set in `task_struct.flags`.
+/// This is used by the deferred wakeup timer to determine which CPUs
+/// need to be kicked.
+///
+/// C reference: `is_cpu_idle(cpu)` in `main.bpf.c`:
+/// ```c
+/// bpf_rcu_read_lock();
+/// p = __COMPAT_scx_bpf_cpu_curr(cpu);
+/// idle = p->flags & PF_IDLE;
+/// bpf_rcu_read_unlock();
+/// ```
+#[inline(always)]
+fn is_cpu_idle(cpu: i32) -> bool {
+    rcu_read_lock();
+    let p = kfuncs::cpu_curr(cpu);
+    if p.is_null() {
+        rcu_read_unlock();
+        return false;
+    }
+    let idle = if let Ok(flags) = core_read!(vmlinux::task_struct, p, flags) {
+        flags & PF_IDLE != 0
+    } else {
+        false
+    };
+    rcu_read_unlock();
+    idle
+}
+
 // ── Idle CPU selection ──────────────────────────────────────────────────
 
 /// Pick an idle CPU by iterating the preferred CPU list in order.
@@ -830,6 +907,84 @@ fn update_perf_counters(p: *mut task_struct, delta: u64) {
     }
 }
 
+// ── Deferred wakeup timer ───────────────────────────────────────────────
+
+/// Timer callback: kick idle CPUs that have pending tasks.
+///
+/// Instead of waking up CPUs inline in the enqueue hot path, we defer
+/// the wakeup to this periodic timer callback. This reduces IPI overhead.
+///
+/// The callback iterates all CPUs, checking for:
+/// 1. Tasks pending in the local DSQ (`SCX_DSQ_LOCAL_ON | cpu`)
+/// 2. The CPU is idle (running the idle thread)
+///
+/// For each such CPU, it issues a `scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE)`.
+///
+/// The timer re-arms itself at the end for periodic execution with period
+/// equal to `SLICE_NS`.
+///
+/// C reference: `wakeup_timerfn()` in `main.bpf.c`
+///
+/// # Signature
+///
+/// This function has the signature required by `bpf_timer_set_callback`:
+///   `fn(map: *mut c_void, key: *mut i32, timer: *mut BpfTimer) -> i32`
+///
+/// It must be `#[inline(never)]` because the kernel calls it as a BPF
+/// subprogram (callback from the timer subsystem).
+#[inline(never)]
+fn wakeup_timerfn(
+    _map: *mut core::ffi::c_void,
+    _key: *mut i32,
+    timer: *mut BpfTimer,
+) -> i32 {
+    let nr = unsafe { NR_CPU_IDS };
+    let bound = if nr < MAX_CPUS as u32 { nr } else { MAX_CPUS as u32 };
+
+    // Iterate all CPUs and kick idle ones that have pending tasks.
+    // C reference: bpf_for(cpu, 0, nr_cpu_ids)
+    //   if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) && is_cpu_idle(cpu))
+    //       scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+    bpf_for!(cpu, 0, bound, {
+        let dsq_id = kfuncs::SCX_DSQ_LOCAL_ON | cpu as u64;
+        if kfuncs::dsq_nr_queued(dsq_id) > 0 && is_cpu_idle(cpu as i32) {
+            kfuncs::kick_cpu(cpu as i32, SCX_KICK_IDLE);
+        }
+    });
+
+    // Re-arm the timer for periodic execution.
+    let slice_ns = unsafe { SLICE_NS };
+    let err = timer::timer_start(timer, slice_ns, 0);
+    if err != 0 {
+        scx_ebpf::scx_bpf_error!("cosmos: failed to re-arm wakeup timer");
+    }
+
+    0
+}
+
+/// Wake up a CPU if it's idle, respecting deferred wakeup mode.
+///
+/// When `DEFERRED_WAKEUPS` is enabled, all wakeup events are deferred to
+/// the periodic `wakeup_timerfn()` timer callback. The inline kick is
+/// skipped to reduce IPI overhead in the enqueue hot path.
+///
+/// When disabled, directly calls `scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE)`.
+///
+/// C reference: `wakeup_cpu(cpu)` in `main.bpf.c`:
+/// ```c
+/// static inline void wakeup_cpu(s32 cpu) {
+///     if (deferred_wakeups) return;
+///     scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+/// }
+/// ```
+#[inline(always)]
+fn wakeup_cpu(cpu: i32) {
+    if unsafe { DEFERRED_WAKEUPS } {
+        return;
+    }
+    kfuncs::kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
 // ── Scheduler callbacks ─────────────────────────────────────────────────
 
 /// select_cpu: find an idle CPU for the task.
@@ -1005,8 +1160,8 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
             let weight = read_weight(p);
             let slice = task_slice(weight);
             kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL_ON | prev_cpu as u64, slice, enq_flags);
-            // Kick the CPU to wake it up.
-            kfuncs::kick_cpu(prev_cpu, SCX_KICK_IDLE);
+            // Wake up the CPU (deferred if DEFERRED_WAKEUPS is enabled).
+            wakeup_cpu(prev_cpu);
             return;
         }
         // Full idle CPU scan: try preferred list, primary cpumask,
@@ -1018,7 +1173,7 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
             let weight = read_weight(p);
             let slice = task_slice(weight);
             kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL_ON | idle_cpu as u64, slice, enq_flags);
-            kfuncs::kick_cpu(idle_cpu, SCX_KICK_IDLE);
+            wakeup_cpu(idle_cpu);
             return;
         }
     }
@@ -1029,9 +1184,9 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
         let weight = read_weight(p);
         let slice = task_slice(weight);
         kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, enq_flags);
-        // If the task should migrate (wakeup), kick prev_cpu.
+        // If the task should migrate (wakeup), wake prev_cpu.
         if !is_running {
-            kfuncs::kick_cpu(prev_cpu, SCX_KICK_IDLE);
+            wakeup_cpu(prev_cpu);
         }
         return;
     }
@@ -1086,10 +1241,10 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
 
     kfuncs::dsq_insert_vtime(p, shared_dsq(prev_cpu), slice, clamped_deadline, enq_flags);
 
-    // If the task should migrate (wakeup), kick prev_cpu.
+    // If the task should migrate (wakeup), wake prev_cpu.
     // C: if (task_should_migrate(p, enq_flags)) wakeup_cpu(prev_cpu);
     if !is_running {
-        kfuncs::kick_cpu(prev_cpu, SCX_KICK_IDLE);
+        wakeup_cpu(prev_cpu);
     }
 }
 
@@ -1402,6 +1557,33 @@ pub fn on_init() -> i32 {
     if err != 0 {
         scx_ebpf::scx_bpf_error!("cosmos: failed to init primary cpumask");
         return err;
+    }
+
+    // Initialize the deferred wakeup timer when enabled.
+    //
+    // C reference: cosmos_init():
+    //   timer = bpf_map_lookup_elem(&wakeup_timer, &key);
+    //   bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
+    //   bpf_timer_set_callback(timer, wakeup_timerfn);
+    //   bpf_timer_start(timer, slice_ns, 0);
+    if unsafe { DEFERRED_WAKEUPS } {
+        let timer_ptr = WAKEUP_TIMER.get_ptr_mut(0);
+        if timer_ptr.is_null() {
+            scx_ebpf::scx_bpf_error!("cosmos: failed to lookup wakeup timer");
+            return -3; // ESRCH
+        }
+        let timer = unsafe { &mut (*timer_ptr).timer };
+        let map = &raw const WAKEUP_TIMER as *const core::ffi::c_void;
+
+        timer::timer_init(timer as *mut BpfTimer, map, CLOCK_MONOTONIC);
+        timer::timer_set_callback(timer as *mut BpfTimer, wakeup_timerfn as *const () as u64);
+
+        let slice_ns = unsafe { SLICE_NS };
+        let err = timer::timer_start(timer as *mut BpfTimer, slice_ns, 0);
+        if err != 0 {
+            scx_ebpf::scx_bpf_error!("cosmos: failed to arm wakeup timer");
+            return err as i32;
+        }
     }
 
     // Initialize per-CPU perf_events counters to zero when PMU is enabled.
