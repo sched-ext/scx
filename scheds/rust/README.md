@@ -20,6 +20,7 @@ main.rs or \*.bpf.c files.
 - [scx_cosmos](scx_cosmos/README.md)
 - [scx_lavd](scx_lavd/README.md)
 - [scx_layered](scx_layered/README.md)
+- [scx_maestro](scx_maestro/README.md)
 - [scx_mitosis](scx_mitosis/README.md)
 - [scx_pandemonium](scx_pandemonium/README.md)
 - [scx_p2dq](scx_p2dq/README.md)
