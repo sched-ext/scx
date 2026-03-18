@@ -26,13 +26,33 @@ int reset_cpuperf_target(struct cpu_ctx *cpuc);
 int update_cpuperf_target(struct cpu_ctx *cpuc);
 u16 get_cpuperf_cap(s32 cpu);
 
-int reset_suspended_duration(struct cpu_ctx *cpuc);
-u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc);
-
 const volatile u16 *get_cpu_order(void);
 void update_effective_capacity(struct cpu_ctx *cpuc);
 
-u64 conv_wall_to_invr_max_freq(u64 dur, s32 cpu);
+/*
+ * Convert a wall-clock duration to invariant time using an observed
+ * performance factor derived from a reference pair of measurements taken
+ * over the same interval:
+ *
+ *   duration_invr = duration_wall * (ref_invr / ref_wall)
+ *
+ * This is more accurate than conv_wall_to_invr() (which queries cpuperf
+ * at the current instant) because it uses the actual performance factor
+ * observed over the measurement window rather than the instantaneous value.
+ *
+ * Typical use at collection point (collect_sys_stat):
+ *   ref_wall = task_wall    (SCX + RT/DL wall time,   excl. IRQ+steal+idle)
+ *   ref_invr = delta_pelt   (invariant task time,     excl. IRQ+steal+idle)
+ *
+ * Returns 0 if ref_wall is zero (CPU was entirely idle or preempted).
+ */
+static __inline u64 conv_wall_to_invr_obs(u64 duration_wall,
+					  u64 ref_invr, u64 ref_wall)
+{
+	if (!ref_wall)
+		return 0;
+	return duration_wall * ref_invr / ref_wall;
+}
 
 static __inline u64 conv_wall_to_invr(u64 duration_wall, struct cpu_ctx *cpuc)
 {

@@ -184,6 +184,16 @@ pub struct SchedSample {
     pub cpu_util_wall: u64,
     #[stat(desc = "Invariant CPU utilization of this CPU scaled by CPU capacity and frequency")]
     pub cpu_util_invr: u64,
+    #[stat(desc = "Steal utilization of this CPU (IRQ + hypervisor steal + RT/DL)")]
+    pub steal_util_wall: u64,
+    #[stat(desc = "Invariant steal utilization of this CPU scaled by CPU capacity and frequency")]
+    pub steal_util_invr: u64,
+    #[stat(desc = "Utilization of this CPU by domain-pinned tasks")]
+    pub dom_pinned_util_wall: u64,
+    #[stat(
+        desc = "Invariant utilization of this CPU by domain-pinned tasks scaled by CPU capacity and frequency"
+    )]
+    pub dom_pinned_util_invr: u64,
     #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
     #[stat(desc = "DSQ ID where this task was dispatched from")]
@@ -196,7 +206,7 @@ impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:6} | {:10} |\x1b[0m",
+            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:11} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:10} | {:11} | {:9} | {:10} | {:6} | {:6} | {:10} |\x1b[0m",
             "MSEQ",
             "PID",
             "COMM",
@@ -221,7 +231,11 @@ impl SchedSample {
             "THR_PC",
             "CPUFREQ",
             "CPU_UTIL",
-            "CPU_SUTIL",
+            "CPU_IUTIL",
+            "STEAL_UTIL",
+            "STEAL_IUTIL",
+            "DPIN_UTIL",
+            "DPIN_IUTIL",
             "NR_ACT",
             "DSQ_ID",
             "DSQ_LAT_NS",
@@ -236,7 +250,7 @@ impl SchedSample {
 
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:12} | {:12} |",
+            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:11} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:10} | {:11} | {:9} | {:10} | {:6} | {:6} | {:10} |",
             self.mseq,
             self.pid,
             self.comm,
@@ -262,6 +276,10 @@ impl SchedSample {
             self.cpuperf_cur,
             self.cpu_util_wall,
             self.cpu_util_invr,
+            self.steal_util_wall,
+            self.steal_util_invr,
+            self.dom_pinned_util_wall,
+            self.dom_pinned_util_invr,
             self.nr_active,
             self.dsq_id,
             self.dsq_consume_lat,

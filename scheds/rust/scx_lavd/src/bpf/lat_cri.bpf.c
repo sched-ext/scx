@@ -126,16 +126,41 @@ static u64 calc_wake_factor(task_ctx *taskc)
 
 static inline u64 calc_reverse_runtime_factor(task_ctx *taskc)
 {
-	if (LAVD_LC_RUNTIME_MAX > taskc->avg_runtime_wall) {
-		u64 delta = LAVD_LC_RUNTIME_MAX - taskc->avg_runtime_wall;
-		return delta / LAVD_SLICE_MIN_NS_DFL;
+	/*
+	 * Shorter invariant runtime -> more latency-critical. Using
+	 * avg_runtime_invr (pelt-clock based) normalizes out CPU frequency and
+	 * capacity differences, so a task running on a slow core is not
+	 * unfairly penalized compared to the same task on a fast core.
+	 *
+	 * LAVD_LC_RUNTIME_MAX and LAVD_SLICE_MIN_NS_DFL are wall-clock
+	 * calibrated constants, while avg_runtime_invr is invariant time.
+	 * This mixed comparison is intentional and acceptable: on a CPU at
+	 * nominal frequency/capacity the two are equal; on a slow core,
+	 * avg_runtime_invr is smaller, making the delta larger and correctly
+	 * giving the task more latency-criticality headroom. The constants are
+	 * heuristic thresholds, not precise physical measurements, so the
+	 * slight unit mismatch is negligible in practice.
+	 */
+	if (LAVD_LC_RUNTIME_MAX > taskc->avg_runtime_invr) {
+		u64 delta = time_delta(LAVD_LC_RUNTIME_MAX, taskc->avg_runtime_invr);
+		return (delta / LAVD_SLICE_MIN_NS_DFL) + 1;
 	}
 	return 1;
 }
 
 static u64 calc_sum_runtime_factor(struct task_struct *p, task_ctx *taskc)
 {
-	u64 runtime = max(taskc->avg_runtime_wall, taskc->acc_runtime_wall);
+	/*
+	 * Estimate total invariant compute demand per second:
+	 *   run_freq * avg_runtime_invr ~= fraction of CPU capacity consumed.
+	 * Using avg_runtime_invr (pelt-clock based) makes this quantity
+	 * comparable across CPUs with different frequencies or capacities.
+	 * acc_runtime_invr captures the burst since the last sleep; taking
+	 * the max of the two avoids penalizing tasks that occasionally run
+	 * longer than their average. run_freq stays on wall clock because it
+	 * is derived from wall-clock wait intervals (external event rates).
+	 */
+	u64 runtime = max(taskc->avg_runtime_invr, taskc->acc_runtime_invr);
 	u64 sum = max(taskc->run_freq, 1) * max(runtime, 1);
 	return (sum >> LAVD_SHIFT) * p->scx.weight;
 }
@@ -237,8 +262,15 @@ static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 	 * Calculate the task's lag -- the underserved time. Bound the lag
 	 * into [-lag_max, +lag_max] and set the LAVD_FLAG_IS_GREEDY flag
 	 * for preemption decision.
+	 *
+	 * svc_time_iwgt uses invariant time weighted by task priority.
+	 * Using invariant time avoids penalizing tasks placed on slow cores,
+	 * which accumulate wall-clock time faster for the same actual work.
+	 * Fairness accounting must use the same clock basis as the system
+	 * average (sys_stat.avg_svc_time_iwgt) for an apples-to-apples
+	 * comparison.
 	 */
-	lag = sys_stat.avg_svc_time_wwgt - taskc->svc_time_wwgt;
+	lag = sys_stat.avg_svc_time_iwgt - taskc->svc_time_iwgt;
 	lag_max = scale_by_task_weight_inverse(p, LAVD_TASK_LAG_MAX);
 	if (lag >= 0) {
 		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
@@ -248,7 +280,7 @@ static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 		 * boost of long-sleepers.
 		 */
 		if (lag > lag_max) {
-			taskc->svc_time_wwgt = sys_stat.avg_svc_time_wwgt - lag_max;
+			taskc->svc_time_iwgt = sys_stat.avg_svc_time_iwgt - lag_max;
 			lag = lag_max;
 		}
 	} else {
@@ -276,12 +308,15 @@ static u64 calc_adjusted_runtime(task_ctx *taskc)
 	u64 runtime;
 
 	/*
-	 * Prefer a short-running (avg_runtime_wall) and recently woken-up
-	 * (acc_runtime) task. To avoid the starvation of CPU-bound tasks,
-	 * which rarely sleep, limit the impact of acc_runtime.
+	 * Prefer a recently woken-up task over one that has been running
+	 * continuously. acc_runtime_invr captures the invariant compute time
+	 * consumed since the last sleep; using the invariant (pelt-clock)
+	 * value means a task on a slow core is treated consistently with the
+	 * same task on a fast core. To avoid starvation of CPU-bound tasks,
+	 * which rarely sleep, limit the impact of acc_runtime_invr.
 	 */
 	runtime = LAVD_ACC_RUNTIME_MAX +
-		  min(taskc->acc_runtime_wall, LAVD_ACC_RUNTIME_MAX);
+		  min(taskc->acc_runtime_invr, LAVD_ACC_RUNTIME_MAX);
 
 	return runtime;
 }

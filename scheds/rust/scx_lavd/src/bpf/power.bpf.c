@@ -178,36 +178,6 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 		cpu, cpuc->effective_capacity, capacity_policy, capacity_observed, mfo, pressure);
 }
 
-__hidden
-int reset_suspended_duration(struct cpu_ctx *cpuc)
-{
-	if (cpuc->online_clk > cpuc->offline_clk)
-		cpuc->offline_clk = cpuc->online_clk;
-
-	return 0;
-}
-
-__hidden
-u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
-{
-	/*
-	 * When a system is suspended, a task is also suspended in a running
-	 * stat on the CPU. Hence, we subtract the suspended duration when it
-	 * resumes.
-	 */
-	u64 duration = 0;
-
-	if (cpuc->online_clk > cpuc->offline_clk) {
-		duration = time_delta(cpuc->online_clk, cpuc->offline_clk);
-		/*
-		 * Once calculated, reset the duration to zero.
-		 */
-		cpuc->offline_clk = cpuc->online_clk;
-	}
-
-	return duration;
-}
-
 bool is_perf_cri(task_ctx __arg_arena *taskc)
 {
 	if (unlikely(!taskc))
@@ -883,20 +853,6 @@ u16 get_cpuperf_cap(s32 cpu)
 
 	debugln("Infeasible CPU id: %d", cpu);
 	return 0;
-}
-
-u64 conv_wall_to_invr_max_freq(u64 duration_wall, s32 cpu)
-{
-	u64 cap, duration_invr;
-
-	/*
-	 * Scale the duration by CPU capacity and its max frequency,
-	 * so calculate capacity-invariant time duration.
-	 */
-	cap = get_cpuperf_cap(cpu);
-	duration_invr = (duration_wall * cap) >> LAVD_SHIFT;
-
-	return duration_invr;
 }
 
 static void do_update_autopilot_high_cap(void)
