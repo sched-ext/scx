@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use aya::{EbpfLoader, include_bytes_aligned};
+use aya::{Btf, EbpfLoader, include_bytes_aligned};
+use aya::programs::BtfTracePoint;
 use clap::Parser;
 use log::info;
 
@@ -831,6 +832,36 @@ fn setup_perf_events(
     fds
 }
 
+/// Load and attach the PMU tracing program (`tp_btf/sched_switch`).
+///
+/// The tracing program is compiled into the same ELF binary as the struct_ops
+/// scheduler. It reads perf counters via `bpf_perf_event_read_value` (helper #55)
+/// on each context switch and writes the results to shared maps (TASK_CTX, CPU_CTX)
+/// that the struct_ops scheduler reads.
+///
+/// Returns the link ID that keeps the program attached. The link must be held
+/// alive for the lifetime of the scheduler.
+fn load_and_attach_pmu_tracing(
+    ebpf: &mut aya::Ebpf,
+) -> Result<aya::programs::tp_btf::BtfTracePointLinkId> {
+    let btf = Btf::from_sys_fs().context("Failed to load vmlinux BTF from sysfs")?;
+
+    let prog: &mut BtfTracePoint = ebpf
+        .program_mut("scx_pmu_sched_switch")
+        .context("PMU tracing program 'scx_pmu_sched_switch' not found in BPF object")?
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("Program is not a BtfTracePoint: {:?}", e))?;
+
+    prog.load("sched_switch", &btf)
+        .context("Failed to load PMU tracing program")?;
+
+    let link_id = prog
+        .attach()
+        .context("Failed to attach PMU tracing program to tp_btf/sched_switch")?;
+
+    Ok(link_id)
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -891,10 +922,8 @@ fn main() -> Result<()> {
     if opts.perf_config != 0 {
         info!("  perf_config  = 0x{:X}", opts.perf_config);
         info!("  perf_thresh  = {}", opts.perf_threshold);
-        log::warn!("PMU perf event reading is not yet functional: bpf_perf_event_read_value \
-                    (helper #55) is not available in struct_ops programs. \
-                    Perf event fds are installed but counter reads are no-ops. \
-                    The scheduler will run but event-heavy task detection will not work.");
+        info!("PMU tracking enabled: tp_btf/sched_switch tracing program will read \
+               perf counters on context switches.");
     } else {
         info!("  perf_config  = 0 (PMU disabled)");
     }
@@ -971,6 +1000,28 @@ fn main() -> Result<()> {
         Vec::new()
     };
 
+    // Load and attach the PMU tracing program if perf events are configured.
+    //
+    // The tracing program (`tp_btf/sched_switch`) is in the same ELF binary
+    // as the struct_ops scheduler. It reads perf counters via helper #55
+    // (which struct_ops programs cannot call) and shares the data via the
+    // TASK_CTX and CPU_CTX maps.
+    let _pmu_link = if opts.perf_config != 0 && !_perf_fds.is_empty() {
+        match load_and_attach_pmu_tracing(&mut ebpf) {
+            Ok(link) => {
+                info!("PMU tracing program attached to tp_btf/sched_switch");
+                Some(link)
+            }
+            Err(e) => {
+                log::warn!("Failed to attach PMU tracing program: {} — \
+                           scheduler will run without PMU event tracking", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Attach the struct_ops scheduler.
     let link = ebpf
         .attach_struct_ops("_scx_ops")
@@ -1005,8 +1056,10 @@ fn main() -> Result<()> {
         println!("  perf_thresh = {}", opts.perf_threshold);
         if _perf_fds.is_empty() {
             println!("  perf_status = DISABLED (perf_event_open failed or map not found)");
+        } else if _pmu_link.is_some() {
+            println!("  perf_status = ACTIVE ({} CPUs, tp_btf/sched_switch attached)", _perf_fds.len());
         } else {
-            println!("  perf_status = fds installed ({} CPUs), reads not yet functional", _perf_fds.len());
+            println!("  perf_status = PARTIAL (fds installed, tracing program failed to attach)");
         }
     }
     println!("Press Ctrl-C to detach and exit.");

@@ -34,11 +34,12 @@
 //! - `PREFERRED_CPUS`, `CPU_CAPACITY`: CPU ordering/capacity for idle scan
 //!
 //! Remaining gaps vs the full C implementation:
-//! - PMU perf event reading: bpf_perf_event_read_value (helper #55) is not
-//!   available in BPF_PROG_TYPE_STRUCT_OPS. The C cosmos has the same limitation.
-//!   The infrastructure (map, globals, is_event_heavy, pick_least_busy_event_cpu)
-//!   is in place but perf_events is always 0. The fix requires a separate
-//!   tracing BPF program (see scx/lib/pmu.bpf.c SEC("?tp_btf/sched_switch")).
+//! - PMU perf event reading is implemented via a separate `tp_btf/sched_switch`
+//!   tracing program that reads `bpf_perf_event_read_value` (helper #55) on each
+//!   context switch. The struct_ops scheduler cannot call this helper directly
+//!   (kernel restricts it to tracing program types). The tracing program writes
+//!   per-task and per-CPU perf counters to the shared `TASK_CTX` and `CPU_CTX` maps.
+//!   Userspace loads both programs from the same ELF object.
 
 #![no_std]
 #![no_main]
@@ -51,9 +52,7 @@ use scx_ebpf::bpf_for;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray, PerfEventArray};
 use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
 use scx_ebpf::cpumask::{self, bpf_cpumask};
-// NOTE: pmu::perf_event_read_value (helper #55) is NOT available in struct_ops.
-// The import is kept commented for reference:
-// use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
+use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
 
 scx_ebpf::scx_ebpf_boilerplate!();
 
@@ -120,16 +119,25 @@ static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
 /// Perf event array for hardware performance counter access.
 ///
 /// Userspace populates this map with perf_event_open() fds (one per CPU).
-///
-/// LIMITATION: bpf_perf_event_read_value (helper #55) is NOT available in
-/// BPF_PROG_TYPE_STRUCT_OPS programs. The helper is restricted to tracing
-/// program types (kprobe, tracepoint, fentry, tp_btf). This map is declared
-/// so the PMU infrastructure is ready for a future solution using a separate
-/// tracing BPF program that reads counters and shares data via a map.
-/// See scx/lib/pmu.bpf.c SEC("?tp_btf/sched_switch") for reference.
+/// The `tp_btf/sched_switch` tracing program reads counter values from this
+/// map via `bpf_perf_event_read_value` (helper #55). The struct_ops scheduler
+/// cannot call this helper directly — the kernel restricts it to tracing types.
 #[unsafe(link_section = ".maps")]
 #[unsafe(no_mangle)]
 static SCX_PMU_MAP: PerfEventArray<1024> = PerfEventArray::new();
+
+/// Per-CPU scratch space for PMU counter baselines.
+///
+/// The `tp_btf/sched_switch` tracing program stores the perf counter value
+/// at the start of each task's run here. On the next sched_switch, it reads
+/// the counter again and computes the delta (current - start), which it
+/// stores in the task's `TASK_CTX.perf_events` and the CPU's `CPU_CTX.perf_events`.
+///
+/// This is a per-CPU array with 1 entry (the baseline counter value for
+/// the task currently running on that CPU).
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static PMU_BASELINE: PerCpuArray<u64, 1> = PerCpuArray::new();
 
 // ── Constants ───────────────────────────────────────────────────────────
 
@@ -297,28 +305,26 @@ static mut PERF_CONFIG: u64 = 0;
 #[unsafe(no_mangle)]
 static mut PERF_THRESHOLD: u64 = 0;
 
-// PMU integration status:
+// PMU integration architecture:
 //
-// SCX_PMU_MAP (BPF_MAP_TYPE_PERF_EVENT_ARRAY) is declared and userspace
-// populates it with perf_event_open() fds. However, the BPF helper
-// bpf_perf_event_read_value (#55) is NOT available in struct_ops programs.
+// SCX_PMU_MAP (BPF_MAP_TYPE_PERF_EVENT_ARRAY) is populated by userspace with
+// perf_event_open() fds. The BPF helper bpf_perf_event_read_value (#55) is
+// NOT available in struct_ops programs — the kernel restricts it to tracing
+// program types (kprobe, tracepoint, fentry, tp_btf).
 //
-// The kernel restricts helper #55 to tracing program types (defined in
-// bpf_tracing_func_proto in kernel/trace/bpf_trace.c). The struct_ops
-// verifier_ops (bpf_struct_ops_verifier_ops in kernel/bpf/bpf_struct_ops.c)
-// has no get_func_proto callback, so it only gets the base helper set.
+// Solution: A separate `tp_btf/sched_switch` tracing program is included in
+// this same ELF binary. On each context switch it:
+//   1. Reads the perf counter via helper #55
+//   2. Computes the delta for the outgoing task (prev) since its last switch-in
+//   3. Stores the delta in prev's TASK_CTX.perf_events and CPU_CTX.perf_events
+//   4. Records the baseline counter for the incoming task (next) in PMU_BASELINE
 //
-// The C cosmos has the SAME bug: it calls bpf_perf_event_read_value from
-// cosmos_running/cosmos_stopping (via scx_pmu_event_start/scx_pmu_event_stop
-// in lib/pmu.bpf.c) and fails to load with --perf-config on kernel 6.13.
+// The struct_ops scheduler reads TASK_CTX.perf_events (is_event_heavy) and
+// CPU_CTX.perf_events (pick_least_busy_event_cpu) without needing helper #55.
 //
-// The correct architecture (as sketched in pmu.bpf.c) is to use separate
-// tracing programs (tp_btf/sched_switch, fentry/scx_tick) that CAN call
-// helper #55, and share the counter data via a shared BPF map.
-//
-// For now, all PMU reads are no-ops (perf_events is always 0).
-// The infrastructure (map, globals, is_event_heavy, pick_least_busy_event_cpu)
-// is kept so it can be wired up when the tracing-program approach is implemented.
+// Userspace loads and attaches both programs from the same ELF object:
+//   - Struct_ops: attached via ebpf.attach_struct_ops("_scx_ops")
+//   - Tracing: loaded via BtfTracePoint::load("sched_switch", &btf) then .attach()
 
 // ── Global state ────────────────────────────────────────────────────────
 
@@ -802,14 +808,14 @@ fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
     prev_cpu
 }
 
-/// Update perf event counters when a task stops running.
+/// Update perf event counters for a task.
 ///
-/// Reads the perf event delta (current - baseline) and stores it in both
-/// per-task context (for is_event_heavy) and per-CPU context (for
-/// pick_least_busy_event_cpu).
+/// Called by the `tp_btf/sched_switch` tracing program to store per-task
+/// and per-CPU perf event deltas. The struct_ops scheduler reads these
+/// values via `is_event_heavy()` and `pick_least_busy_event_cpu()`.
 ///
-/// C reference: `update_counters(p, tctx, cpu)` calls `scx_pmu_read()`
-/// and accumulates the delta in `tctx->perf_events` and `cctx->perf_events`.
+/// This function is NOT called from struct_ops callbacks — it is called
+/// exclusively from the tracing program which has access to helper #55.
 #[inline(always)]
 fn update_perf_counters(p: *mut task_struct, delta: u64) {
     // Store delta in per-task context for is_event_heavy().
@@ -1257,15 +1263,10 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     let offset = core::mem::offset_of!(vmlinux::task_struct, scx.dsq_vtime);
     unsafe { write_field_u64(p, offset, new_vtime); }
 
-    // Update PMU counters when perf tracking is enabled.
-    // C: if (perf_config) { scx_pmu_event_stop(p); update_counters(p, tctx, cpu); }
-    // NOTE: perf_delta is always 0 because bpf_perf_event_read_value (#55)
-    // is not available in struct_ops programs. The infrastructure is kept
-    // so is_event_heavy() and pick_least_busy_event_cpu() will work once
-    // a tracing-program-based PMU solution is implemented.
-    if unsafe { PERF_CONFIG } != 0 {
-        update_perf_counters(p, 0);
-    }
+    // PMU counter updates are handled by the tp_btf/sched_switch tracing
+    // program, which reads perf events on context switches and writes to
+    // TASK_CTX.perf_events and CPU_CTX.perf_events. The struct_ops scheduler
+    // only reads those values (via is_event_heavy / pick_least_busy_event_cpu).
 
     // Update per-CPU load for cpufreq scaling.
     // C: update_cpu_load(p, slice);
@@ -1433,6 +1434,101 @@ pub fn on_init() -> i32 {
 /// ported (requires the UEI mechanism).
 #[inline(always)]
 pub fn on_exit(_ei: *mut scx_exit_info) {}
+
+// ── PMU tracing program ─────────────────────────────────────────────────
+//
+// This is a BTF-enabled raw tracepoint program that attaches to
+// `sched_switch`. It runs on every context switch and can call
+// `bpf_perf_event_read_value` (helper #55), which is restricted to
+// tracing program types and NOT available in struct_ops programs.
+//
+// Architecture (mirrors C scx/lib/pmu.bpf.c):
+//   On sched_switch(prev, next):
+//     1. Read perf counter for current CPU
+//     2. For prev: compute delta = current - baseline, write to
+//        TASK_CTX.perf_events (for is_event_heavy) and
+//        CPU_CTX.perf_events (for pick_least_busy_event_cpu)
+//     3. For next: record baseline = current in PMU_BASELINE
+//
+// The tracepoint context for tp_btf/sched_switch is an array of u64
+// pointers. The layout matches the kernel's tracepoint definition:
+//   ctx[0] = (unused, preempt flag in some kernels)
+//   ctx[1] = pointer to prev task_struct
+//   ctx[2] = pointer to next task_struct
+
+/// `tp_btf/sched_switch` — PMU perf event reader.
+///
+/// This function is placed in the `tp_btf/sched_switch` ELF section, which
+/// aya recognizes as a `BtfTracePoint` program. Userspace loads and attaches
+/// it separately from the struct_ops scheduler.
+///
+/// On each context switch:
+/// - Reads the perf counter for the current CPU
+/// - Computes the event delta for the outgoing task (prev)
+/// - Stores the delta in prev's per-task and per-CPU context
+/// - Records the baseline counter for the incoming task (next)
+///
+/// When PERF_CONFIG is 0 (PMU disabled), this function returns immediately.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "tp_btf/sched_switch")]
+pub unsafe extern "C" fn scx_pmu_sched_switch(ctx: *const u64) -> i32 {
+    // Skip if PMU is not configured.
+    if PERF_CONFIG == 0 {
+        return 0;
+    }
+
+    // Read the perf counter for the current CPU.
+    let mut val = core::mem::MaybeUninit::<PerfEventValue>::uninit();
+    let ret = pmu::perf_event_read_value(
+        &raw const SCX_PMU_MAP as *const core::ffi::c_void,
+        BPF_F_CURRENT_CPU,
+        val.as_mut_ptr(),
+    );
+    if ret != 0 {
+        // If the read fails (e.g., no perf event installed for this CPU),
+        // silently skip. This is expected during startup or on CPUs where
+        // perf events haven't been installed yet.
+        return 0;
+    }
+    let current_counter = val.assume_init().counter;
+
+    // Extract prev and next task pointers from the tracepoint context.
+    // tp_btf/sched_switch context layout: ctx[1] = prev, ctx[2] = next.
+    let prev = *ctx.add(1) as *mut task_struct;
+    let next = *ctx.add(2) as *mut task_struct;
+
+    // Process outgoing task (prev): compute delta and store in maps.
+    if !prev.is_null() {
+        // Read prev's PID to skip kernel idle thread (pid 0).
+        let prev_pid = core_read!(vmlinux::task_struct, prev, pid);
+        if let Ok(pid) = prev_pid {
+            if pid != 0 {
+                // Read the baseline for this CPU.
+                if let Some(baseline) = PMU_BASELINE.get(0) {
+                    let delta = current_counter.wrapping_sub(*baseline);
+                    // Write delta to per-task and per-CPU contexts.
+                    update_perf_counters(prev, delta);
+                }
+            }
+        }
+    }
+
+    // Process incoming task (next): record baseline for next run.
+    if !next.is_null() {
+        let next_pid = core_read!(vmlinux::task_struct, next, pid);
+        if let Ok(pid) = next_pid {
+            if pid != 0 {
+                // Store the current counter as the baseline for next's run.
+                let ptr = PMU_BASELINE.get_ptr_mut(0);
+                if !ptr.is_null() {
+                    core::ptr::write_volatile(ptr, current_counter);
+                }
+            }
+        }
+    }
+
+    0
+}
 
 // ── Registration ────────────────────────────────────────────────────────
 
