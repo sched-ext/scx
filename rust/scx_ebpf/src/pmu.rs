@@ -90,7 +90,7 @@ pub const BPF_F_CURRENT_CPU: u64 = 0xFFFF_FFFF;
 /// When `enabled != running`, the counter was multiplexed (time-shared
 /// with other events). In that case, the true count can be estimated as:
 /// `counter * enabled / running`.
-#[repr(C)]
+#[repr(C, align(8))]
 #[derive(Clone, Copy)]
 pub struct PerfEventValue {
     /// Raw event count accumulated since the counter was enabled.

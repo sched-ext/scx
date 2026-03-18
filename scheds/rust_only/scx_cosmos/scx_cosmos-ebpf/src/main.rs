@@ -1251,18 +1251,16 @@ pub fn on_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
 /// }
 /// ```
 ///
-/// # KPTR EXPERIMENT NOTE
+/// Initialize the primary cpumask kptr.
 ///
-/// This function compiles correctly and generates proper BPF instructions
-/// for `bpf_kptr_xchg` (helper #194) and the cpumask kfuncs. However,
-/// the BPF verifier will reject it because the BTF for `PRIMARY_CPUMASK`
-/// lacks the `BTF_KIND_TYPE_TAG "kptr"` annotation.
+/// Creates an empty `bpf_cpumask` and stores it in the `PRIMARY_CPUMASK`
+/// global kptr via `bpf_kptr_xchg`. The aya loader's `fixup_kptr_types()`
+/// transforms the `Kptr<T>` wrapper's BTF into the `PTR -> TYPE_TAG("kptr")`
+/// chain that the verifier requires.
 ///
-/// Expected verifier error (one of):
-/// - `"arg#0 expected pointer to map value"` — verifier doesn't
-///   recognize the global as containing a kptr
-/// - `"R1 doesn't point to kptr"` — verifier found the map value
-///   but the BTF type chain doesn't have TYPE_TAG "kptr"
+/// Called from `on_init()`. The cpumask starts empty; userspace can later
+/// populate it via the `.bss` map to restrict idle CPU selection to a
+/// subset of CPUs (e.g., performance cores on big.LITTLE systems).
 #[inline(always)]
 fn init_primary_cpumask() -> i32 {
     // Create a new cpumask with all bits cleared.
