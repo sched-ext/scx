@@ -3,8 +3,8 @@
 //! This is an incremental port of scx_cosmos. It implements:
 //!
 //! - `select_cpu`: uses `pick_idle_cpu` with SMT-aware idle scanning,
-//!   `select_cpu_dfl` fallback, mm_affinity, busy-aware dispatch, and
-//!   no_wake_sync support
+//!   `select_cpu_dfl` fallback, mm_affinity, hybrid core wake-affine,
+//!   busy-aware dispatch, and no_wake_sync support
 //! - `enqueue`: three-tier — migration to idle CPU, local DSQ when not busy,
 //!   vtime-ordered shared DSQ when busy (uses task_cpu + task_running kfuncs)
 //! - `dispatch`: `dsq_move_to_local` + slice extension for prev task
@@ -378,6 +378,39 @@ fn get_smp_processor_id() -> i32 {
     ret as i32
 }
 
+/// Read the CPU capacity for a given CPU index.
+///
+/// Returns 0 if the index is negative or out of bounds.
+/// The BPF verifier needs the bounds check tightly coupled with the
+/// array access to prove safety, so this is a separate helper.
+#[inline(always)]
+fn cpu_capacity(cpu: i32) -> u64 {
+    if cpu < 0 {
+        return 0;
+    }
+    let idx = cpu as u32 as usize;
+    if idx >= MAX_CPUS {
+        return 0;
+    }
+    unsafe { CPU_CAPACITY[idx] }
+}
+
+/// Check if CPU `a` has higher capacity than CPU `b` (e.g., P-core vs E-core).
+///
+/// Used for hybrid core wake-affine: when the waker is on a faster core,
+/// prefer migrating the wakee to the waker's core rather than keeping it
+/// on a slower one.
+///
+/// Returns false if either CPU index is negative or out of bounds.
+///
+/// C reference: `is_cpu_faster(a, b)` compares `cpu_capacity[a] > cpu_capacity[b]`.
+#[inline(always)]
+fn is_cpu_faster(a: i32, b: i32) -> bool {
+    let cap_a = cpu_capacity(a);
+    let cap_b = cpu_capacity(b);
+    cap_a > cap_b
+}
+
 /// Check if the waker and wakee share the same address space.
 ///
 /// Returns true when mm_affinity is enabled, the waker is not exiting,
@@ -669,11 +702,6 @@ fn pick_idle_cpu_preferred() -> i32 {
 /// value if no suitable idle CPU is available.
 ///
 /// C reference: `pick_idle_cpu()` in `main.bpf.c`.
-// PORT_TODO: Hybrid core wake-affine migration
-// C reference: When primary_all and the waker's CPU is faster than the
-// wakee's CPU (is_cpu_faster()), pick_idle_cpu() migrates prev_cpu to
-// this_cpu to naturally move tasks to faster cores. Requires
-// cpu_capacity[] array from userspace.
 #[inline(always)]
 fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     // Strategy 0: Preferred/flat idle scan.
@@ -850,6 +878,31 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
         if !current.is_null() && is_wake_affine(current, p) {
             let this_cpu = get_smp_processor_id();
             if this_cpu == prev_cpu {
+                let weight = read_weight(p);
+                let slice = task_slice(weight);
+                kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
+                return this_cpu;
+            }
+        }
+    }
+
+    // Hybrid core wake-affine: on heterogeneous CPU systems (big.LITTLE,
+    // Intel hybrid P/E-cores), if the waker is on a faster core and
+    // SCX_WAKE_SYNC is set, try to move the wakee to the waker's core.
+    // This naturally migrates tasks toward higher-performance cores.
+    //
+    // On homogeneous systems (all CPUs same capacity), is_cpu_faster()
+    // always returns false and this path is never taken.
+    //
+    // C reference: pick_idle_cpu():
+    //   if (is_wake_affine(p, prev_cpu, wake_flags) &&
+    //       is_cpu_faster(this_cpu, prev_cpu)) {
+    //       cpu = this_cpu;
+    //   }
+    if (effective_wake_flags & SCX_WAKE_SYNC) != 0 {
+        let this_cpu = get_smp_processor_id();
+        if is_cpu_faster(this_cpu, prev_cpu) {
+            if kfuncs::test_and_clear_cpu_idle(this_cpu) {
                 let weight = read_weight(p);
                 let slice = task_slice(weight);
                 kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
