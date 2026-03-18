@@ -33,8 +33,6 @@
 //! - `PREFERRED_CPUS`, `CPU_CAPACITY`: CPU ordering/capacity for idle scan
 //!
 //! Remaining gaps vs the full C implementation (see PORT_TODO comments):
-//! - PMU perf_event_read_value() calls need PERF_EVENT_ARRAY map (structure in place)
-//! - No primary_cpumask filtering (requires kptr BTF support)
 //! - Migration only tries prev_cpu (no full pick_idle_cpu scan in enqueue)
 
 #![no_std]
@@ -44,7 +42,7 @@
 
 use scx_ebpf::prelude::*;
 use scx_ebpf::core_read;
-use scx_ebpf::maps::{TaskStorage, PerCpuArray};
+use scx_ebpf::maps::{TaskStorage, PerCpuArray, PerfEventArray};
 use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
 use scx_ebpf::cpumask::{self, bpf_cpumask};
 use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
@@ -104,6 +102,14 @@ static TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new();
 #[unsafe(no_mangle)]
 static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
 
+/// Perf event array for hardware performance counter access.
+///
+/// Userspace populates this map with perf_event_open() fds (one per CPU).
+/// eBPF reads counter values via bpf_perf_event_read_value() (helper #55).
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static SCX_PMU_MAP: PerfEventArray<1024> = PerfEventArray::new();
+
 // ── Constants ───────────────────────────────────────────────────────────
 
 /// Shared DSQ used for deadline-mode scheduling when the system is saturated.
@@ -120,6 +126,9 @@ const SCX_TASK_QUEUED: u32 = 1;
 
 /// SCX_KICK_IDLE flag for kick_cpu.
 const SCX_KICK_IDLE: u64 = 1;
+
+/// SCX_PICK_IDLE_CORE flag for select_cpu_and: prefer fully-idle SMT cores.
+const SCX_PICK_IDLE_CORE: u64 = 1;
 
 /// SCX_WAKE_SYNC flag value (from kernel enum).
 const SCX_WAKE_SYNC: u64 = 16;
@@ -201,31 +210,23 @@ static mut NR_NODES: u32 = 1;
 #[unsafe(no_mangle)]
 static mut CPU_TO_NODE: [u32; MAX_CPUS] = [0; MAX_CPUS];
 
-// PORT_TODO: primary_cpumask and primary_all for preferred CPU domain
-// C reference: `private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask`
-// and `const volatile bool primary_all = true` control a subset of CPUs
-// to prioritize. enable_primary_cpu() is a syscall program that sets bits.
-//
-// KPTR EXPERIMENT: Below is a prototype kptr global using the Kptr<T>
-// wrapper. This compiles and generates the right runtime code, but the
-// BPF verifier will reject bpf_kptr_xchg() calls because the Rust
-// compiler does not emit BTF_KIND_TYPE_TAG "kptr" annotations.
-//
-// See kptr.rs module docs and the findings at the bottom of this file
-// for details on the BTF gap and workaround strategies.
-
-/// Primary cpumask kptr — prototype kptr storage.
+/// Primary cpumask kptr — kernel-managed reference-counted cpumask.
 ///
 /// In C: `private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;`
 ///
-/// NOTE: This is placed in `.data` (not `.bss`) because kptr globals in
-/// C are typically in the `.data` section. The section matters because
-/// the verifier resolves kptr locations relative to map values, and
-/// `.data` / `.bss` are loaded as implicit BPF maps.
+/// The aya loader's `fixup_kptr_types()` automatically transforms the
+/// `Kptr<T>` wrapper into the BTF chain `PTR -> TYPE_TAG("kptr") -> T`
+/// that the verifier requires for kptr recognition.
+///
+/// Initialized in `init_primary_cpumask()`, read under RCU lock in
+/// `pick_idle_cpu()` to filter idle CPU selection to the primary domain.
 #[unsafe(no_mangle)]
 static mut PRIMARY_CPUMASK: Kptr<bpf_cpumask> = Kptr::zeroed();
 
-/// When true, primary domain includes all CPUs (primary_cpumask is empty/unused).
+/// When true, primary domain includes all CPUs (primary_cpumask is unused).
+/// When false, `pick_idle_cpu()` first tries `select_cpu_and()` with
+/// the primary cpumask before falling back to the full cpus_ptr.
+/// C reference: `const volatile bool primary_all = true`
 #[unsafe(no_mangle)]
 static mut PRIMARY_ALL: bool = true;
 
@@ -274,17 +275,10 @@ static mut PERF_CONFIG: u64 = 0;
 #[unsafe(no_mangle)]
 static mut PERF_THRESHOLD: u64 = 0;
 
-// PORT_TODO(PMU): Full PMU integration requires a BPF_MAP_TYPE_PERF_EVENT_ARRAY
-// map that userspace populates with perf_event_open() fds for each CPU.
-// Currently, the PERF_CONFIG/PERF_THRESHOLD globals and the tracking structure
-// (perf_baseline/perf_events in TaskCtx, perf_events in CpuCtx) are in place,
-// but the actual perf_event_read_value() calls are guarded behind PERF_CONFIG != 0
-// and will be no-ops until the PERF_EVENT_ARRAY map is wired up.
-// See scx_ebpf::pmu module for the BPF helper wrappers.
-// What's needed:
-//   1. Declare a PERF_EVENT_ARRAY map (scx_ebpf::maps doesn't support this yet)
-//   2. Userspace: call perf_event_open() per CPU, store fds in the map
-//   3. eBPF: pass the map pointer to perf_event_read_value() in running/stopping
+// PMU integration: SCX_PMU_MAP (BPF_MAP_TYPE_PERF_EVENT_ARRAY) is declared
+// above and populated by userspace with perf_event_open() fds per CPU.
+// perf_event_read_value() calls in on_running/on_stopping read counter
+// values from the map when PERF_CONFIG != 0.
 
 // ── Global state ────────────────────────────────────────────────────────
 
@@ -591,7 +585,8 @@ fn pick_idle_cpu_preferred() -> i32 {
     -1
 }
 
-/// Pick an idle CPU for a task, with SMT awareness and preferred/flat scan.
+/// Pick an idle CPU for a task, with SMT awareness, primary cpumask
+/// filtering, and preferred/flat scan.
 ///
 /// Uses `#[inline(always)]` instead of `#[inline(never)]` because aya's
 /// kfunc resolution does not yet handle BPF subprograms: after function
@@ -610,11 +605,16 @@ fn pick_idle_cpu_preferred() -> i32 {
 ///    If flat_idle_scan is enabled and preferred scan found a CPU, return
 ///    it immediately (skipping select_cpu_dfl entirely).
 ///
-/// 1. **`select_cpu_dfl()`** — the kernel's default idle CPU picker.
-///    Tried after preferred scan (or first if preferred scan is disabled);
-///    this handles wake-affine, LLC locality, and basic idle scanning.
+/// 1. **Primary cpumask** — when `PRIMARY_ALL` is false and a primary
+///    cpumask is set, try `select_cpu_and()` with the primary cpumask to
+///    prefer CPUs in the primary domain. Uses `SCX_PICK_IDLE_CORE` when
+///    `AVOID_SMT` is enabled to prefer fully-idle cores.
 ///
-/// 2. **SMT verification** — when `AVOID_SMT` is enabled and strategy 1
+/// 2. **`select_cpu_dfl()`** — the kernel's default idle CPU picker.
+///    Tried after primary cpumask (or first if primary filtering is
+///    disabled); handles wake-affine, LLC locality, and basic idle scanning.
+///
+/// 3. **SMT verification** — when `AVOID_SMT` is enabled and strategy 2
 ///    found an idle CPU, we check whether the entire physical core is
 ///    idle (both SMT siblings) using `get_idle_smtmask()`. If the found
 ///    CPU's core is not fully idle, we reject it and return -1 so the
@@ -624,12 +624,6 @@ fn pick_idle_cpu_preferred() -> i32 {
 /// value if no suitable idle CPU is available.
 ///
 /// C reference: `pick_idle_cpu()` in `main.bpf.c`.
-// PORT_TODO: Enhanced pick_idle_cpu() with primary cpumask filtering
-// C reference: When primary_all is false and primary_cpumask is set,
-// pick_idle_cpu() first tries scx_bpf_select_cpu_and() with the primary
-// mask and SCX_PICK_IDLE_CORE, falling back to the full cpus_ptr.
-// Requires kptr support for primary_cpumask.
-//
 // PORT_TODO: Hybrid core wake-affine migration
 // C reference: When primary_all and the waker's CPU is faster than the
 // wakee's CPU (is_cpu_faster()), pick_idle_cpu() migrates prev_cpu to
@@ -653,7 +647,34 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
         // still fall through to select_cpu_dfl as a fallback.
     }
 
-    // Strategy 1: kernel's default idle CPU selection.
+    // Strategy 1: Primary cpumask filtering.
+    // When PRIMARY_ALL is false, try to pick an idle CPU from the primary
+    // domain first using select_cpu_and(). This restricts idle scanning to
+    // a subset of CPUs (e.g., performance cores on big.LITTLE systems).
+    //
+    // C reference: pick_idle_cpu() in main.bpf.c:
+    //   if (!primary_all && mask) {
+    //       cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask,
+    //                                    avoid_smt ? SCX_PICK_IDLE_CORE : 0);
+    //       if (cpu >= 0) return cpu;
+    //   }
+    if !unsafe { PRIMARY_ALL } {
+        rcu_read_lock();
+        let mask = unsafe { Kptr::get(&raw const PRIMARY_CPUMASK) };
+        if !mask.is_null() {
+            let pmask = cpumask::cast(mask);
+            let flags = if unsafe { AVOID_SMT } { SCX_PICK_IDLE_CORE } else { 0 };
+            let cpu = kfuncs::select_cpu_and(p, prev_cpu, wake_flags, pmask, flags);
+            rcu_read_unlock();
+            if cpu >= 0 {
+                return cpu;
+            }
+        } else {
+            rcu_read_unlock();
+        }
+    }
+
+    // Strategy 2: kernel's default idle CPU selection.
     let mut is_idle: bool = false;
     let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
 
@@ -662,7 +683,7 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
         return -1;
     }
 
-    // Strategy 2: SMT-aware verification.
+    // Strategy 3: SMT-aware verification.
     // If avoid_smt is enabled, check whether the found CPU's physical
     // core is fully idle (both SMT siblings). If not, reject it to
     // avoid contention on the same core.
@@ -723,11 +744,6 @@ fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
 ///
 /// C reference: `update_counters(p, tctx, cpu)` calls `scx_pmu_read()`
 /// and accumulates the delta in `tctx->perf_events` and `cctx->perf_events`.
-///
-/// NOTE: Currently a stub — the actual `perf_event_read_value()` call requires
-/// a PERF_EVENT_ARRAY map pointer. The perf_baseline/perf_events tracking
-/// structure is in place; once the map is wired up, this function computes
-/// the real delta.
 #[inline(always)]
 fn update_perf_counters(p: *mut task_struct, delta: u64) {
     // Store delta in per-task context for is_event_heavy().
@@ -1057,26 +1073,16 @@ pub fn on_running(p: *mut task_struct) {
 
         // Capture PMU baseline when task starts running.
         // C: if (perf_config) scx_pmu_event_start(p, false);
-        //
-        // NOTE: The actual perf_event_read_value() call requires a
-        // PERF_EVENT_ARRAY map pointer. Once that map is wired up,
-        // uncomment the read and store the counter value here.
-        // For now, we zero the baseline so delta computation in
-        // stopping() produces 0 (no-op).
         if unsafe { PERF_CONFIG } != 0 {
-            tctx.perf_baseline = 0;
-            // When PERF_EVENT_ARRAY map is available:
-            // let mut val = PerfEventValue::ZERO;
-            // let ret = unsafe {
-            //     pmu::perf_event_read_value(
-            //         &raw const PERF_EVENT_MAP as *const _,
-            //         BPF_F_CURRENT_CPU,
-            //         &mut val,
-            //     )
-            // };
-            // if ret == 0 {
-            //     tctx.perf_baseline = val.counter;
-            // }
+            let mut val = PerfEventValue::ZERO;
+            let ret = unsafe {
+                pmu::perf_event_read_value(
+                    &raw const SCX_PMU_MAP as *const _,
+                    BPF_F_CURRENT_CPU,
+                    &mut val,
+                )
+            };
+            tctx.perf_baseline = if ret == 0 { val.counter } else { 0 };
         }
     }
 
@@ -1160,23 +1166,27 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
 
     // Update PMU counters when perf tracking is enabled.
     // C: if (perf_config) { scx_pmu_event_stop(p); update_counters(p, tctx, cpu); }
-    //
-    // NOTE: The actual perf_event_read_value() call requires a
-    // PERF_EVENT_ARRAY map pointer. Once that map is wired up, read
-    // the counter here and compute delta = current - baseline.
-    // For now, delta is 0 (no-op since baseline is also 0).
     if unsafe { PERF_CONFIG } != 0 {
-        // When PERF_EVENT_ARRAY map is available:
-        // let mut val = PerfEventValue::ZERO;
-        // let ret = unsafe {
-        //     pmu::perf_event_read_value(
-        //         &raw const PERF_EVENT_MAP as *const _,
-        //         BPF_F_CURRENT_CPU,
-        //         &mut val,
-        //     )
-        // };
-        // let delta = if ret == 0 { val.counter - baseline } else { 0 };
-        let perf_delta: u64 = 0; // Placeholder until PERF_EVENT_ARRAY map is wired
+        // Read the perf counter baseline from per-task storage.
+        let baseline = if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
+            unsafe { tctx.as_ref().perf_baseline }
+        } else {
+            0
+        };
+
+        let mut val = PerfEventValue::ZERO;
+        let ret = unsafe {
+            pmu::perf_event_read_value(
+                &raw const SCX_PMU_MAP as *const _,
+                BPF_F_CURRENT_CPU,
+                &mut val,
+            )
+        };
+        let perf_delta = if ret == 0 {
+            val.counter.wrapping_sub(baseline)
+        } else {
+            0
+        };
         update_perf_counters(p, perf_delta);
     }
 
@@ -1307,17 +1317,15 @@ pub fn on_init() -> i32 {
         }
     }
 
-    // KPTR EXPERIMENT: Initialize the primary cpumask kptr.
-    // This will fail at the verifier until BTF patching is implemented.
-    // To test compilation without verifier rejection, set
-    // KPTR_EXPERIMENT_ENABLED to false.
-    #[cfg(feature = "kptr_experiment")]
-    {
-        let err = init_primary_cpumask();
-        if err != 0 {
-            scx_ebpf::scx_bpf_error!("cosmos: failed to init primary cpumask");
-            return err;
-        }
+    // Initialize the primary cpumask kptr.
+    // Creates an empty cpumask and stores it via kptr_xchg.
+    // When PRIMARY_ALL is true (default), the cpumask exists but is not
+    // consulted in pick_idle_cpu(). When userspace sets PRIMARY_ALL = false
+    // and populates the cpumask, it restricts idle CPU selection.
+    let err = init_primary_cpumask();
+    if err != 0 {
+        scx_ebpf::scx_bpf_error!("cosmos: failed to init primary cpumask");
+        return err;
     }
 
     // Initialize per-CPU perf_events counters to zero when PMU is enabled.
@@ -1367,95 +1375,3 @@ scx_ebpf::scx_ops_define! {
     init: on_init,
     exit: on_exit,
 }
-
-// ── KPTR EXPERIMENT FINDINGS ────────────────────────────────────────────
-//
-// This file prototypes kptr support for Rust BPF. Here are the findings:
-//
-// ## What works
-//
-// 1. The `Kptr<T>` wrapper compiles to the correct memory layout — a
-//    single `*mut T` field, identical to C's `struct T __kptr *`.
-//
-// 2. The `kptr_xchg` inline asm wrapper correctly emits `call 194`
-//    (BPF helper bpf_kptr_xchg) with the right register assignments.
-//
-// 3. The `rcu_read_lock` / `rcu_read_unlock` kfunc wrappers compile
-//    correctly as kfunc calls (using `sym` references to extern fns).
-//
-// 4. The `bpf_cpumask_create` / `bpf_cpumask_release` kfuncs from
-//    the cpumask module integrate cleanly with the kptr pattern.
-//
-// 5. The overall code structure matches the C pattern exactly:
-//    create -> kptr_xchg -> release old -> rcu_read_lock -> access ->
-//    rcu_read_unlock.
-//
-// ## What does NOT work (the BTF gap)
-//
-// The BPF verifier requires `BTF_KIND_TYPE_TAG` with value `"kptr"`
-// in the BTF type chain for kptr globals. Specifically, for a variable
-// like `primary_cpumask`, the BTF must contain:
-//
-//   VAR "PRIMARY_CPUMASK" -> PTR -> TYPE_TAG "kptr" -> STRUCT "bpf_cpumask"
-//
-// The Rust BPF compiler emits:
-//
-//   VAR "PRIMARY_CPUMASK" -> STRUCT "Kptr<bpf_cpumask>" -> PTR -> STRUCT "bpf_cpumask"
-//
-// Missing: the TYPE_TAG "kptr" between PTR and STRUCT.
-//
-// Without this tag, the verifier will reject bpf_kptr_xchg() with one
-// of these errors:
-//   - "arg#0 expected pointer to map value"
-//   - "R1 doesn't point to kptr"
-//
-// ## Recommended fix: aya-core-postprocessor BTF patching
-//
-// The aya-core-postprocessor (which already patches BTF for CO-RE
-// relocations) should be extended to:
-//
-// 1. Detect `Kptr<T>` types in DATASEC BTF entries by looking for
-//    structs named "Kptr" with a single pointer field.
-//
-// 2. Inject a `BTF_KIND_TYPE_TAG` type with string "kptr".
-//
-// 3. Rewire the pointer's target: instead of PTR -> STRUCT T, make
-//    it PTR -> TYPE_TAG "kptr" -> STRUCT T.
-//
-// 4. Optionally, collapse the Kptr wrapper struct so the DATASEC
-//    entry becomes VAR -> PTR -> TYPE_TAG -> STRUCT (matching clang).
-//
-// This approach is clean because:
-// - It reuses existing post-processor infrastructure
-// - TYPE_TAG is a simple BTF type (kind + string, no complex data)
-// - The Kptr<T> struct is a well-defined marker that won't collide
-// - It can be driven by a sidecar annotation file or auto-detected
-//
-// ## Alternative: raw BTF injection via inline asm
-//
-// It is theoretically possible to emit raw BTF bytes into the `.BTF`
-// section using `core::arch::global_asm!(".pushsection .BTF ...")`.
-// However, this is extremely fragile because:
-// - The injected bytes must mesh with compiler-generated BTF
-// - BTF type IDs are assigned sequentially; inserting a type shifts
-//   all subsequent IDs
-// - The BTF header checksums and offsets must be updated
-// - Any change to the program can break the hardcoded offsets
-//
-// This approach is not recommended for production use.
-//
-// ## Alternative: map-based storage instead of global kptr
-//
-// Instead of a global `static mut Kptr<T>`, store the cpumask pointer
-// in a BPF array map value struct. This is how some C schedulers handle
-// it (e.g., per-CPU context with kptr fields).
-//
-// However, this has the SAME fundamental BTF problem: the map value
-// type's BTF must also contain TYPE_TAG "kptr" for the pointer field.
-// The Rust compiler won't emit it for map value structs either.
-//
-// The map approach does work differently in one way: the verifier
-// checks the map's BTF at map creation time, so the loader would
-// need to patch the map value BTF before creating the map. This is
-// actually the same loader-side patching approach, just applied to
-// a map definition instead of a DATASEC entry.

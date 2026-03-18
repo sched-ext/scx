@@ -9,6 +9,7 @@
 //!
 //! - [`HashMap`] — generic key-value hash map (`BPF_MAP_TYPE_HASH`)
 //! - [`PerCpuArray`] — per-CPU indexed array (`BPF_MAP_TYPE_PERCPU_ARRAY`)
+//! - [`PerfEventArray`] — perf event array for hardware counter access (`BPF_MAP_TYPE_PERF_EVENT_ARRAY`)
 //! - [`TaskStorage`] — per-task local storage (`BPF_MAP_TYPE_TASK_STORAGE`)
 //!
 //! # Usage
@@ -42,6 +43,8 @@ const MAP_TYPE_HASH: usize = 1;
 /// `BPF_MAP_TYPE_ARRAY` = 2
 #[allow(dead_code)]
 const MAP_TYPE_ARRAY: usize = 2;
+/// `BPF_MAP_TYPE_PERF_EVENT_ARRAY` = 4
+const MAP_TYPE_PERF_EVENT_ARRAY: usize = 4;
 /// `BPF_MAP_TYPE_PERCPU_ARRAY` = 6
 const MAP_TYPE_PERCPU_ARRAY: usize = 6;
 /// `BPF_MAP_TYPE_TASK_STORAGE` = 29
@@ -334,6 +337,65 @@ impl<V, const MAX_ENTRIES: usize> PerCpuArray<V, MAX_ENTRIES> {
             )
         };
         if ret == 0 { Ok(()) } else { Err(ret) }
+    }
+}
+
+// ── PerfEventArray ──────────────────────────────────────────────────────
+
+/// A BTF-compatible perf event array map (`BPF_MAP_TYPE_PERF_EVENT_ARRAY`).
+///
+/// This map is used as a bridge between userspace and eBPF for hardware
+/// performance counter access. Userspace opens perf events via
+/// `perf_event_open(2)` and stores the resulting fds in this map
+/// (one per CPU). eBPF programs then read counter values via
+/// `bpf_perf_event_read_value()` (helper #55).
+///
+/// Key and value are both `u32`: the key is the CPU index, and the
+/// value is the perf event fd (set by userspace).
+///
+/// This map type does not support lookup/update from eBPF — it is
+/// populated exclusively by userspace and consumed by the perf read helper.
+///
+/// # Type Parameters
+///
+/// - `MAX_ENTRIES` — maximum number of entries (typically >= nr_cpus)
+///
+/// # Example
+///
+/// ```ignore
+/// #[unsafe(link_section = ".maps")]
+/// #[unsafe(no_mangle)]
+/// static SCX_PMU_MAP: PerfEventArray<1024> = PerfEventArray::new();
+///
+/// // In a BPF program — read the current CPU's perf counter:
+/// let mut val = PerfEventValue::ZERO;
+/// let ret = unsafe {
+///     pmu::perf_event_read_value(
+///         &raw const SCX_PMU_MAP as *const _,
+///         BPF_F_CURRENT_CPU,
+///         &mut val,
+///     )
+/// };
+/// ```
+#[repr(C)]
+pub struct PerfEventArray<const MAX_ENTRIES: usize> {
+    r#type: *const [i32; MAP_TYPE_PERF_EVENT_ARRAY],
+    key: *const u32,
+    value: *const u32,
+    max_entries: *const [i32; MAX_ENTRIES],
+}
+
+unsafe impl<const N: usize> Sync for PerfEventArray<N> {}
+
+impl<const MAX_ENTRIES: usize> PerfEventArray<MAX_ENTRIES> {
+    /// Create a new perf event array definition.
+    pub const fn new() -> Self {
+        Self {
+            r#type: core::ptr::null(),
+            key: core::ptr::null(),
+            value: core::ptr::null(),
+            max_entries: core::ptr::null(),
+        }
     }
 }
 

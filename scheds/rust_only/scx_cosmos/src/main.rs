@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -674,6 +674,163 @@ fn format_uptime(d: Duration) -> String {
     }
 }
 
+// ── PMU perf event setup ─────────────────────────────────────────────────
+
+/// Minimal `perf_event_attr` for `perf_event_open(2)`.
+///
+/// Only the fields needed for raw hardware event configuration are defined;
+/// the rest are zero-initialized via `..Default::default()`.
+#[repr(C)]
+#[derive(Default)]
+struct PerfEventAttr {
+    type_: u32,
+    size: u32,
+    config: u64,
+    sample_period_or_freq: u64,
+    sample_type: u64,
+    read_format: u64,
+    flags: u64,
+    wakeup_events_or_watermark: u32,
+    bp_type: u32,
+    bp_addr_or_config1: u64,
+    bp_len_or_config2: u64,
+    branch_sample_type: u64,
+    sample_regs_user: u64,
+    sample_stack_user: u32,
+    clockid: i32,
+    sample_regs_intr: u64,
+    aux_watermark: u32,
+    sample_max_stack: u16,
+    _reserved_2: u16,
+    aux_sample_size: u32,
+    _reserved_3: u32,
+    sig_data: u64,
+    config3: u64,
+}
+
+/// PERF_TYPE_RAW = 4
+const PERF_TYPE_RAW: u32 = 4;
+
+/// Set up perf events for hardware counter tracking.
+///
+/// For each CPU, opens a raw perf event with the given config and stores
+/// the fd in the BPF PERF_EVENT_ARRAY map. Returns the list of OwnedFds
+/// (they must stay alive for the scheduler's lifetime).
+///
+/// On failure (e.g., no PMU support, invalid config), logs a warning and
+/// returns an empty Vec — the scheduler continues without PMU tracking.
+fn setup_perf_events(
+    ebpf: &mut aya::Ebpf,
+    nr_cpus: usize,
+    perf_config: u64,
+) -> Vec<OwnedFd> {
+    let mut fds = Vec::new();
+
+    // Find the SCX_PMU_MAP in the loaded BPF object.
+    let map = match ebpf.map_mut("SCX_PMU_MAP") {
+        Some(m) => m,
+        None => {
+            log::warn!("SCX_PMU_MAP not found in BPF object — PMU tracking disabled");
+            return fds;
+        }
+    };
+    // Extract the inner MapData to get the raw fd.
+    let map_fd = match map {
+        aya::maps::Map::PerfEventArray(ref data) => data.fd().as_fd().as_raw_fd(),
+        _ => {
+            log::warn!("SCX_PMU_MAP has unexpected map type — PMU tracking disabled");
+            return fds;
+        }
+    };
+
+    for cpu in 0..nr_cpus {
+        let mut attr = PerfEventAttr {
+            type_: PERF_TYPE_RAW,
+            size: core::mem::size_of::<PerfEventAttr>() as u32,
+            config: perf_config,
+            ..Default::default()
+        };
+
+        // perf_event_open(attr, pid=-1 (all), cpu, group_fd=-1, flags=0)
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_perf_event_open,
+                &mut attr as *mut PerfEventAttr,
+                -1i32,      // pid: all processes
+                cpu as i32, // cpu
+                -1i32,      // group_fd: no group
+                0u64,       // flags
+            )
+        };
+
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            log::warn!(
+                "perf_event_open(config=0x{:X}) failed on CPU {}: {} — PMU tracking disabled",
+                perf_config,
+                cpu,
+                err,
+            );
+            // Return what we have; partial setup is worse than none since
+            // the BPF side would read stale/zero values for unconfigured CPUs.
+            return Vec::new();
+        }
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+
+        // Store the fd in the BPF map: key = cpu index, value = fd
+        // Uses BPF_MAP_UPDATE_ELEM syscall directly.
+        let key: u32 = cpu as u32;
+        let value: u32 = fd as u32;
+
+        #[repr(C)]
+        #[derive(Default)]
+        struct BpfMapUpdate {
+            map_fd: u32,
+            _pad0: u32,
+            key: u64,
+            value: u64,
+            flags: u64,
+        }
+
+        let mut update_attr = BpfMapUpdate {
+            map_fd: map_fd as u32,
+            key: &key as *const u32 as u64,
+            value: &value as *const u32 as u64,
+            ..Default::default()
+        };
+
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                2i32, // BPF_MAP_UPDATE_ELEM
+                &mut update_attr as *mut _ as *mut libc::c_void,
+                core::mem::size_of::<BpfMapUpdate>(),
+            )
+        };
+
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            log::warn!(
+                "Failed to store perf fd in SCX_PMU_MAP for CPU {}: {} — PMU tracking disabled",
+                cpu,
+                err,
+            );
+            return Vec::new();
+        }
+
+        fds.push(owned_fd);
+    }
+
+    info!(
+        "PMU perf events installed: config=0x{:X}, {} CPUs",
+        perf_config,
+        fds.len(),
+    );
+
+    fds
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -802,6 +959,14 @@ fn main() -> Result<()> {
         info!("No .bss/.data map found for CPU_UTIL updates (BPF globals may not be added yet)");
     }
 
+    // Set up PMU perf events if configured.
+    // The returned fds must stay alive for the scheduler's lifetime.
+    let _perf_fds = if opts.perf_config != 0 {
+        setup_perf_events(&mut ebpf, topo.nr_cpus, opts.perf_config)
+    } else {
+        Vec::new()
+    };
+
     // Attach the struct_ops scheduler.
     let link = ebpf
         .attach_struct_ops("_scx_ops")
@@ -834,11 +999,11 @@ fn main() -> Result<()> {
     if opts.perf_config != 0 {
         println!("  perf_config = 0x{:X}", opts.perf_config);
         println!("  perf_thresh = {}", opts.perf_threshold);
-        println!();
-        println!("  NOTE: PMU tracking structure is in place, but actual perf counter");
-        println!("  reads require a BPF_MAP_TYPE_PERF_EVENT_ARRAY map populated with");
-        println!("  perf_event_open() fds. This is not yet implemented — event-heavy");
-        println!("  task classification will be a no-op until the map is wired up.");
+        if _perf_fds.is_empty() {
+            println!("  perf_status = DISABLED (perf_event_open failed or map not found)");
+        } else {
+            println!("  perf_status = active ({} CPUs)", _perf_fds.len());
+        }
     }
     println!("Press Ctrl-C to detach and exit.");
 
