@@ -231,11 +231,17 @@ static u64		cbw_taskable_cgroup_ids[CBW_NR_CGRP_MAX];
 /*
  * An array of throttled cgroups that need to be reenqueued.
  */
-static u64		cbw_nr_throttled_cgroups;
 static u64		cbw_throttled_cgroup_ids[CBW_NR_CGRP_MAX];
 
 /*
  * Timer to replenish time budget for all cgroups periodically.
+ *
+ * The replenish timer is split into two parts: the top half and the bottom
+ * half. The top half -- the actual BPF timer function -- runs the essential,
+ * critical part, such as refilling the time budget. On the other hand,
+ * the bottom half -- scx_cgroup_bw_reenqueue() - runs on a BPF scheduler's
+ * ops.dispatch() and reenqueues the backlogged tasks to proper DSQs.
+ *
  */
 struct replenish_timer {
 	struct bpf_timer timer;
@@ -253,38 +259,98 @@ static u64		cbw_last_replenish_at;
 static
 int replenish_timerfn(void *map, int *key, struct bpf_timer *timer);
 
-/*
- * The replenish timer running status. The replenish timer is split into two
- * parts: the top half and the bottom half. The top half -- the actual BPF
- * timer function -- runs the essential, critical part, such as refilling the
- * time budget. On the other hand, the bottom half -- scx_cgroup_bw_reenqueue()
- * -- runs on a BPF scheduler's ops.dispatch() and requeues the backlogged
- *  tasks to proper DSQs.
- *
- *    +----------------+
- *    |                |
- *   \+/               |
- *  [IDLE] -> [TOP_HALF_RUNNING] -> [BOTTOM_HALF_READY] -> [BOTTOM_HALF_RUNNING]
- *   /+\             /+\                                            |
- *    |               |                                             |
- *    +-------------------------------------------------------------+
- */
-enum replenish_stats {
-	/* Nothing related to the replenishment is going on. */
-	CBW_REPLENISH_STAT_IDLE			= 0,
-	/* The top half of the replenish timer is running. */
-	CBW_REPLENISH_STAT_TOP_HALF_RUNNING	= 1,
-	/* The top half was done. It is ready to start the bottom-half part. */
-	CBW_REPLENISH_STAT_BOTTOM_HALF_READY	= 2,
-	/* The bottom half of the replenish timer is running at ops.dispatch(). */
-	CBW_REPLENISH_STAT_BOTTOM_HALF_RUNNING	= 3,
-};
-
-struct replenish_stat {
-	int			s;
+union backlog_stat {
+	struct {
+		/* sequence counter for replenish operation. */
+		u16 rp_seq;
+		/* number of cbw_throttled_cgroup_ids */
+		u16 nr_throttled_cgroups;
+		/* a flag denoting if there is a throttled task */
+		u16 has_throttled_tasks;
+		/* padding for u64 alignment */
+		u16 __pad;
+	};
+	u64 val;
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
-static struct replenish_stat cbw_replenish_stat;
+static union backlog_stat cbw_backlog_stat;
+
+static inline
+bool cbw_update_backlog_stat_cas(union backlog_stat *old,
+				 u16 rp_seq,
+				 u16 nr_throttled_cgroups,
+				 u16 has_throttled_tasks)
+{
+	union backlog_stat new = {
+		.rp_seq = rp_seq,
+		.nr_throttled_cgroups = nr_throttled_cgroups,
+		.has_throttled_tasks = has_throttled_tasks,
+		.__pad = 0,
+	};
+
+	return __sync_bool_compare_and_swap(&cbw_backlog_stat.val, old->val,
+					    new.val);
+}
+
+static inline
+bool cbw_top_half_running(void)
+{
+	/*
+	 * The sequence counter increments at the beginning and end of the
+	 * replenishment timer, respectively. So if the counter is an odd
+	 * number, that means the replenishment timer is running.
+	 */
+	union backlog_stat stat;
+
+	stat.val = smp_load_acquire(&cbw_backlog_stat.val);
+	return stat.rp_seq & 0x1;
+}
+
+static inline
+void cbw_top_half_begin(void)
+{
+	/*
+	 * Increase the sequence counter, making it an odd number.
+	 * Only one caller is permitted at a time (the replenish timer).
+	 */
+	union backlog_stat old, new, ret;
+
+	ret.val = smp_load_acquire(&cbw_backlog_stat.val);
+	do {
+		new.val = old.val = ret.val;
+		new.rp_seq++;
+		ret.val = __sync_val_compare_and_swap(&cbw_backlog_stat.val,
+						      old.val, new.val);
+	} while ((ret.val != old.val) && can_loop);
+}
+
+static inline
+void cbw_top_half_abort(void)
+{
+	/*
+	 * The top half was started (rp_seq is odd) but cannot proceed.
+	 * Increment rp_seq again to make it even, restoring the "top half
+	 * not running" state so the bottom half can continue normally.
+	 */
+	cbw_top_half_begin();
+}
+
+static inline
+void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
+{
+	/* Increase the sequence counter, making it an even number. */
+	union backlog_stat old, new, ret;
+
+	ret.val = smp_load_acquire(&cbw_backlog_stat.val);
+	do {
+		new.val = old.val = ret.val;
+		new.rp_seq++;
+		new.nr_throttled_cgroups = nr_throttled_cgroups;
+		new.has_throttled_tasks = has_throttled_tasks;
+		ret.val = __sync_val_compare_and_swap(&cbw_backlog_stat.val,
+						      old.val, new.val);
+	} while ((ret.val != old.val) && can_loop);
+}
 
 /*
  * Debug macros.
@@ -1107,7 +1173,7 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		}
 
 		/* If the cgroup reached the upper bound, mark it throttled. */
-		if (cur_cgx->runtime_total_sloppy >= cur_cgx->nquota_ub)
+		if (READ_ONCE(cur_cgx->runtime_total_sloppy) >= cur_cgx->nquota_ub)
 			WRITE_ONCE(cur_cgx->is_throttled, true);
 
 		/* Aggregate this cgroup's runtime_total_sloppy to the level. */
@@ -1602,7 +1668,7 @@ bool cbw_has_backlogged_tasks(struct scx_cgroup_ctx *cgx)
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		llcx = cbw_get_llc_ctx_with_id(cgx->id, i);
 		if (!llcx)
-			break;
+			continue;
 
 		if (scx_atq_nr_queued(llcx->btq))
 			return true;
@@ -1684,21 +1750,7 @@ out_no_replenish:
 	return READ_ONCE(cgx->is_throttled) || cbw_has_backlogged_tasks(cgx);
 }
 
-static
-int cbw_get_replenish_stat(void)
-{
-	return READ_ONCE(cbw_replenish_stat.s);
-}
-
-static
-bool cbw_transit_replenish_stat(int from, int to)
-{
-	if (cbw_get_replenish_stat() != from)
-		return false;
-	return __sync_bool_compare_and_swap(&cbw_replenish_stat.s, from, to);
-}
-
-/**
+/*
  * scx_cgroup_bw_cancel - Cancel throttling for a task.
  *
  * @taskc: Pointer to the scx_task_common task context. Passed as a u64
@@ -1727,6 +1779,7 @@ int scx_cgroup_bw_cancel(u64 ctx)
 static
 int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
+	static int nr_throttled; /* Add `static` to work around the verifier error (-E2BIG) */
 	struct cgroup *root_cgrp, *cur_cgrp, *subroot_cgrp;
 	struct cgroup_subsys_state *subroot_css, *pos;
 	struct scx_cgroup_ctx *cur_cgx, *subroot_cgx;
@@ -1741,27 +1794,11 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	scx_arena_subprog_init();
 
 	/*
+	 * Let's start running the top half.
 	 * Get the current time to calculate when to re-arm the timer.
 	 */
 	now = scx_bpf_now();
-
-	/*
-	 * Let's start running the top half.
-	 *
-	 * The bottom half may still be running (BOTTOM_HALF_RUNNING) when the
-	 * new timer expires. In such a case, it is appropriate to proceed to
-	 * refill the time budget. Hence, we allow the transition from
-	 * {BOTTOM_HALF_RUNNING, IDLE} to TOP_HALF_RUNNING.
-	 */
-	if (!cbw_transit_replenish_stat(CBW_REPLENISH_STAT_IDLE,
-					CBW_REPLENISH_STAT_TOP_HALF_RUNNING) &&
-	    !cbw_transit_replenish_stat(CBW_REPLENISH_STAT_BOTTOM_HALF_RUNNING,
-					CBW_REPLENISH_STAT_TOP_HALF_RUNNING)) {
-		cbw_err("Incorrect replenish state: %d -- %d => %d",
-			cbw_replenish_stat.s, CBW_REPLENISH_STAT_IDLE,
-			CBW_REPLENISH_STAT_TOP_HALF_RUNNING);
-		return 0;
-	}
+	cbw_top_half_begin();
 	cbw_dbg("at %llu", now);
 
 	/*
@@ -1770,7 +1807,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	root_cgrp = bpf_cgroup_from_id(1);
 	if (!root_cgrp) {
 		cbw_err("Failed to fetch the root cgroup pointer.");
-		goto idle_out;
+		cbw_top_half_abort();
+		goto rearm_out;
 	}
 	cbw_update_runtime_total_sloppy(root_cgrp);
 
@@ -1858,7 +1896,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * calculation has more benefits than drawbacks.
 	 */
 	cbw_dbg("Start replenish %llu taskable cgroups.", cbw_nr_taskable_cgroups);
-	cbw_nr_throttled_cgroups = 0;
+	nr_throttled = 0;
 	bpf_for(i, 0, cbw_nr_taskable_cgroups) {
 		ids = MEMBER_VPTR(cbw_taskable_cgroup_ids, [i]);
 		if (!ids) {
@@ -1868,22 +1906,19 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 
 		/*
 		 * Fetch contexts of taskable cgroup and its subroot cgroup.
+		 * A throttled cgroup can exit during the replenishment process,
+		 * leading to context-lookup failures. This is okay, and we can
+		 * safely ignore the error.
 		 */
 		cur_cgrp = bpf_cgroup_from_id(ids[0]);
 		if (!cur_cgrp) {
-			/*
-			 * This can happen when a new cgroup is destroyed
-			 * during the replenishment process. This can happen
-			 * when closing a new terminal session, etc. So we can
-			 * safely ignore the lookup failure.
-			 */
 			cbw_dbg("Failed to fetch a cgroup pointer: cgid%llu", ids[0]);
 			continue;
 		}
 
 		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
 		if (!cur_cgx) {
-			cbw_err("Failed to lookup a cgroup ctx: cgid%llu", ids[0]);
+			cbw_dbg("Failed to lookup a cgroup ctx: cgid%llu", ids[0]);
 			bpf_cgroup_release(cur_cgrp);
 			continue;
 		}
@@ -1891,7 +1926,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		if (cur_cgrp->level > 1) {
 			subroot_cgrp = bpf_cgroup_ancestor(cur_cgrp, 1);
 			if (!subroot_cgrp) {
-				cbw_err("Failed to lookup a subroot cgroup: cgid%llu",
+				cbw_dbg("Failed to lookup a subroot cgroup: cgid%llu",
 					cgroup_get_id(cur_cgrp));
 				bpf_cgroup_release(cur_cgrp);
 				continue;
@@ -1899,7 +1934,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	
 			subroot_cgx = cbw_get_cgroup_ctx(subroot_cgrp);
 			if (!subroot_cgx) {
-				cbw_err("Failed to lookup a subroot context: cgid%llu",
+				cbw_dbg("Failed to lookup a subroot context: cgid%llu",
 					cgroup_get_id(subroot_cgrp));
 				bpf_cgroup_release(cur_cgrp);
 				bpf_cgroup_release(subroot_cgrp);
@@ -1913,29 +1948,30 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		/*
 		 * Replenish a taskable cgroup. If it was throttled,
 		 * add it to the throttled cgroup table.
+		 *
+		 * These writes are ordered before cbw_top_half_end() publishes
+		 * has_throttled_tasks=true via its __sync_val_compare_and_swap()
+		 * (which acts as a full memory barrier), ensuring the bottom half
+		 * observes a consistent cbw_throttled_cgroup_ids[].
 		 */
 		if (cbw_replenish_taskable_cgroup(subroot_cgx, cur_cgx, now)) {
 			ids = MEMBER_VPTR(cbw_throttled_cgroup_ids,
-					  [cbw_nr_throttled_cgroups]);
+					  [nr_throttled]);
 			if (!ids) {
 				cbw_err("Failed to fetch a throttled cgroup table.");
 				continue;
 			}
 			WRITE_ONCE(ids[0], cur_cgx->id);
-			cbw_nr_throttled_cgroups++;
+			nr_throttled++;
 		}
 	}
 
 	/*
-	 * If there are thtottled cgroups, transit from a top-half running
-	 * to a bottom-half ready. After this, the bottom half can start.
+	 * If there are thtottled cgroups, let's transit to the non-empty state
+	 * so the bottom half can start.
 	 */
-	if (cbw_nr_throttled_cgroups > 0) {
-		if (!cbw_transit_replenish_stat(
-				CBW_REPLENISH_STAT_TOP_HALF_RUNNING,
-				CBW_REPLENISH_STAT_BOTTOM_HALF_READY)) {
-			cbw_err("Fail to transit the replenish state");
-		}
+	if (nr_throttled > 0) {
+		cbw_top_half_end(nr_throttled, true);
 	
 		/*
 		 * scx_cgroup_bw_reenqueue() may be called from ops.dispatch().
@@ -1957,21 +1993,18 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		scx_bpf_put_cpumask(online_mask);
 	}
 	/*
-	 * If there is no thtottled cgroup, let's return to the idle state.
+	 * If there is no throttled cgroup, let's transit to the empty state
+	 * so the bottom half can stop.
 	 */
 	else {
-idle_out:
-		if (!cbw_transit_replenish_stat(
-				CBW_REPLENISH_STAT_TOP_HALF_RUNNING,
-				CBW_REPLENISH_STAT_IDLE)) {
-			cbw_err("Fail to transit the replenish state");
-		}
+		cbw_top_half_end(0, false);
 	}
 
 	/*
 	 * Re-arm the replenish timer. We calculate the jitter to compensate
-	 * for the delay of the timer execution.CBW_NPERIOD,
+	 * for the delay of the timer execution, CBW_NPERIOD.
 	 */
+rearm_out:
 	interval = time_delta(now, cbw_last_replenish_at);
 	jitter = time_delta(interval, CBW_NPERIOD);
 	period = max(time_delta(CBW_NPERIOD, jitter), CBW_BUDGET_XFER_MIN);
@@ -2075,6 +2108,27 @@ void cbw_unlock(u64 *lock)
 	WRITE_ONCE(*lock, 0);
 }
 
+static
+bool cbw_has_throttled_tasks(union backlog_stat *stat)
+{
+	/*
+	 * Check if there are throttled tasks and populate *stat with a
+	 * consistent snapshot of cbw_backlog_stat for the caller to use.
+	 *
+	 * Test twice -- first with a plain volatile read as a cheap fast path,
+	 * then with smp_load_acquire() which pairs with the
+	 * __sync_val_compare_and_swap() in cbw_top_half_end(), ensuring that
+	 * if has_throttled_tasks=true is observed, all preceding writes to
+	 * cbw_throttled_cgroup_ids[] are also visible.
+	 */
+	stat->val = READ_ONCE(cbw_backlog_stat.val);
+	if (unlikely(stat->has_throttled_tasks)) {
+		stat->val = smp_load_acquire(&cbw_backlog_stat.val);
+		return stat->has_throttled_tasks;
+	}
+	return false;
+}
+
 /*
  * scx_cgroup_bw_reenqueue - Reenqueue backlogged tasks.
  *
@@ -2091,6 +2145,7 @@ int scx_cgroup_bw_reenqueue(void)
 {
 	static u64 reenq_lock = 0;
 
+	union backlog_stat backlog_stat;
 	struct scx_cgroup_ctx *cur_cgx;
 	struct cgroup *cur_cgrp;
 	int i, idx, n, nr_enq = 0;
@@ -2098,19 +2153,10 @@ int scx_cgroup_bw_reenqueue(void)
 	u64 *ids, cur_cgrp_id;
 
 	/*
-	 * If it is in the BOTTOM_HALF_RUNNING state, the started bottom half
-	 * hasn't finished yet. So, let's continue to run.
-	 *
-	 * If the bottom half is ready to run, go ahead after changing the
-	 * state to the bottom-half running. Otherwise, stop here.
+	 * If there are throttled tasks in BTQ, let’s reenqueue them.
 	 */
-	if ((cbw_get_replenish_stat() !=
-		CBW_REPLENISH_STAT_BOTTOM_HALF_RUNNING) &&
-	    (!cbw_transit_replenish_stat(
-		CBW_REPLENISH_STAT_BOTTOM_HALF_READY,
-		CBW_REPLENISH_STAT_BOTTOM_HALF_RUNNING))) {
+	if (likely(!cbw_has_throttled_tasks(&backlog_stat)))
 		return 0;
-	}
 
 	/*
 	 * If another task is already performing the reenqueue operation,
@@ -2119,6 +2165,9 @@ int scx_cgroup_bw_reenqueue(void)
 	 * That is because the concurrent reenqueue operation has more harm
 	 * than good, especially on a beefy machine, slowing down its caller,
 	 * ops.dispatch().
+	 *
+	 * Note that the reenqueue operation can happen concurrently with
+	 * the replenish timer operation.
 	 */
 	if (!cbw_try_lock(&reenq_lock))
 		return 0;
@@ -2135,7 +2184,7 @@ int scx_cgroup_bw_reenqueue(void)
 	 */
 	cbw_dbg();
 	nuance = bpf_get_prandom_u32();
-	nr_tcgs = READ_ONCE(cbw_nr_throttled_cgroups);
+	nr_tcgs = backlog_stat.nr_throttled_cgroups;
 	bpf_for(i, 0, nr_tcgs) {
 		nuance2 = nuance + i;
 		idx = nuance2 % nr_tcgs;
@@ -2171,17 +2220,18 @@ int scx_cgroup_bw_reenqueue(void)
 		bpf_cgroup_release(cur_cgrp);
 
 		/*
-		 * The reenqueue operation finished before hitting the upper
-		 * bound (CBW_REENQ_MAX_BATCH). That means there are no more
-		 * backlogged tasks under the cgroup. So, let's purge the task
-		 * from the throttled cgroup table.
+		 * When there are no more backlogged tasks under the cgroup,
+		 * let's purge the cgroup entry from the throttled cgroup table.
 		 */
-		if (n < CBW_REENQ_MAX_BATCH) {
+		if ((n == 0) && !cbw_top_half_running()) {
 			/*
-			 * The CAS might fail if the replenish timer is running
-			 * and updating the throttled cgroup table.
-			 * Even if it happens, we don't care since it does not
-			 * break the correctness.
+			 * There is a TOCTOU window between the
+			 * !cbw_top_half_running() check above and this CAS.
+			 * cbw_top_half_begin() may fire in that window and
+			 * overwrite ids[idx] with a new cgroup ID. The CAS
+			 * handles this safely: it is keyed on the old
+			 * cur_cgrp_id, so it fails if the entry was already
+			 * overwritten by the timer.
 			 */
 			__sync_bool_compare_and_swap(ids, cur_cgrp_id, 0);
 		}
@@ -2196,20 +2246,26 @@ int scx_cgroup_bw_reenqueue(void)
 	}
 
 	/*
-	 * Unlock the reenqueue lock so that others can start
-	 * the reqneueue operation.
+	 * Unlock before the final state update so other CPUs can start a new
+	 * reenqueue cycle. The processing loop above must be serialized, but
+	 * the final state update below is protected by CAS and does not need
+	 * the lock.
 	 */
 	cbw_unlock(&reenq_lock);
 
 	/*
-	 * If we didn't reach the max reenqueue batch, transit from a
-	 * bottom-half running to an idle state. After this,
-	 * the top half can start.
+	 * If there is nothing that we can reenqueue (because the BTQs are
+	 * empty or the cgroups are throttled again), transit to the empty
+	 * state. The CAS is keyed on the full backlog_stat snapshot including
+	 * rp_seq. If cbw_top_half_begin() fired since the snapshot was taken,
+	 * rp_seq in cbw_backlog_stat.val will have changed and the CAS will
+	 * fail safely, leaving has_throttled_tasks for the new cycle to manage.
 	 */
-	if (nr_enq < CBW_REENQ_MAX_BATCH) {
-		cbw_transit_replenish_stat(
-			CBW_REPLENISH_STAT_BOTTOM_HALF_RUNNING,
-			CBW_REPLENISH_STAT_IDLE);
+	if ((nr_enq == 0) && !cbw_top_half_running()) {
+		cbw_update_backlog_stat_cas(&backlog_stat,
+					    backlog_stat.rp_seq,
+					    backlog_stat.nr_throttled_cgroups,
+					    false);
 	}
 	return 0;
 }
