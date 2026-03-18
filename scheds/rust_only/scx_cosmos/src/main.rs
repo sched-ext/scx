@@ -891,6 +891,10 @@ fn main() -> Result<()> {
     if opts.perf_config != 0 {
         info!("  perf_config  = 0x{:X}", opts.perf_config);
         info!("  perf_thresh  = {}", opts.perf_threshold);
+        log::warn!("PMU perf event reading is not yet functional: bpf_perf_event_read_value \
+                    (helper #55) is not available in struct_ops programs. \
+                    Perf event fds are installed but counter reads are no-ops. \
+                    The scheduler will run but event-heavy task detection will not work.");
     } else {
         info!("  perf_config  = 0 (PMU disabled)");
     }
@@ -1002,7 +1006,7 @@ fn main() -> Result<()> {
         if _perf_fds.is_empty() {
             println!("  perf_status = DISABLED (perf_event_open failed or map not found)");
         } else {
-            println!("  perf_status = active ({} CPUs)", _perf_fds.len());
+            println!("  perf_status = fds installed ({} CPUs), reads not yet functional", _perf_fds.len());
         }
     }
     println!("Press Ctrl-C to detach and exit.");

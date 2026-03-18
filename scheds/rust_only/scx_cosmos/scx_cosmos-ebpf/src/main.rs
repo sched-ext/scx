@@ -19,8 +19,9 @@
 //!
 //! BPF map usage:
 //! - `TASK_CTX`: per-task storage for exec_runtime, wakeup_freq, last_run_at,
-//!   perf_baseline, perf_events
+//!   perf_events
 //! - `CPU_CTX`: per-CPU array for load tracking (last_update, perf_lvl, perf_events)
+//! - `SCX_PMU_MAP`: perf event array (populated by userspace, not readable from struct_ops)
 //!
 //! Userspace-configurable globals:
 //! - `SLICE_NS`, `SLICE_LAG`: time slice and maximum runtime parameters
@@ -32,8 +33,13 @@
 //! - `PREFERRED_IDLE_SCAN`, `FLAT_IDLE_SCAN`: idle CPU scan modes for big.LITTLE
 //! - `PREFERRED_CPUS`, `CPU_CAPACITY`: CPU ordering/capacity for idle scan
 //!
-//! Remaining gaps vs the full C implementation (see PORT_TODO comments):
+//! Remaining gaps vs the full C implementation:
 //! - Migration only tries prev_cpu (no full pick_idle_cpu scan in enqueue)
+//! - PMU perf event reading: bpf_perf_event_read_value (helper #55) is not
+//!   available in BPF_PROG_TYPE_STRUCT_OPS. The C cosmos has the same limitation.
+//!   The infrastructure (map, globals, is_event_heavy, pick_least_busy_event_cpu)
+//!   is in place but perf_events is always 0. The fix requires a separate
+//!   tracing BPF program (see scx/lib/pmu.bpf.c SEC("?tp_btf/sched_switch")).
 
 #![no_std]
 #![no_main]
@@ -45,7 +51,9 @@ use scx_ebpf::core_read;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray, PerfEventArray};
 use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
 use scx_ebpf::cpumask::{self, bpf_cpumask};
-use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
+// NOTE: pmu::perf_event_read_value (helper #55) is NOT available in struct_ops.
+// The import is kept commented for reference:
+// use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
 
 scx_ebpf::scx_ebpf_boilerplate!();
 
@@ -63,8 +71,16 @@ mod vmlinux {
 /// - `wakeup_freq`: exponentially-smoothed wakeup frequency (for slice_lag scaling)
 /// - `last_run_at`: timestamp when this task last started running
 /// - `last_woke_at`: timestamp of last wakeup (for wakeup_freq calculation)
-/// - `perf_baseline`: PMU counter value when task started running (for delta calc)
 /// - `perf_events`: accumulated perf event count from last run (for event-heavy detection)
+///
+/// NOTE: The C cosmos also has a `perf_events` field that is populated by
+/// the scx PMU library via `bpf_perf_event_read_value` (helper #55).
+/// That helper is NOT available in BPF_PROG_TYPE_STRUCT_OPS programs —
+/// it is restricted to tracing program types (kprobe, tracepoint, fentry).
+/// The C cosmos has the same limitation (fails to load with --perf-config).
+/// The perf_events field is kept for future use when a tracing-program-based
+/// PMU solution is implemented (see scx/lib/pmu.bpf.c's SEC("?tp_btf/sched_switch")
+/// for the intended architecture).
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct TaskCtx {
@@ -72,7 +88,6 @@ struct TaskCtx {
     wakeup_freq: u64,
     last_run_at: u64,
     last_woke_at: u64,
-    perf_baseline: u64,
     perf_events: u64,
 }
 
@@ -105,7 +120,13 @@ static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
 /// Perf event array for hardware performance counter access.
 ///
 /// Userspace populates this map with perf_event_open() fds (one per CPU).
-/// eBPF reads counter values via bpf_perf_event_read_value() (helper #55).
+///
+/// LIMITATION: bpf_perf_event_read_value (helper #55) is NOT available in
+/// BPF_PROG_TYPE_STRUCT_OPS programs. The helper is restricted to tracing
+/// program types (kprobe, tracepoint, fentry, tp_btf). This map is declared
+/// so the PMU infrastructure is ready for a future solution using a separate
+/// tracing BPF program that reads counters and shares data via a map.
+/// See scx/lib/pmu.bpf.c SEC("?tp_btf/sched_switch") for reference.
 #[unsafe(link_section = ".maps")]
 #[unsafe(no_mangle)]
 static SCX_PMU_MAP: PerfEventArray<1024> = PerfEventArray::new();
@@ -276,10 +297,28 @@ static mut PERF_CONFIG: u64 = 0;
 #[unsafe(no_mangle)]
 static mut PERF_THRESHOLD: u64 = 0;
 
-// PMU integration: SCX_PMU_MAP (BPF_MAP_TYPE_PERF_EVENT_ARRAY) is declared
-// above and populated by userspace with perf_event_open() fds per CPU.
-// perf_event_read_value() calls in on_running/on_stopping read counter
-// values from the map when PERF_CONFIG != 0.
+// PMU integration status:
+//
+// SCX_PMU_MAP (BPF_MAP_TYPE_PERF_EVENT_ARRAY) is declared and userspace
+// populates it with perf_event_open() fds. However, the BPF helper
+// bpf_perf_event_read_value (#55) is NOT available in struct_ops programs.
+//
+// The kernel restricts helper #55 to tracing program types (defined in
+// bpf_tracing_func_proto in kernel/trace/bpf_trace.c). The struct_ops
+// verifier_ops (bpf_struct_ops_verifier_ops in kernel/bpf/bpf_struct_ops.c)
+// has no get_func_proto callback, so it only gets the base helper set.
+//
+// The C cosmos has the SAME bug: it calls bpf_perf_event_read_value from
+// cosmos_running/cosmos_stopping (via scx_pmu_event_start/scx_pmu_event_stop
+// in lib/pmu.bpf.c) and fails to load with --perf-config on kernel 6.13.
+//
+// The correct architecture (as sketched in pmu.bpf.c) is to use separate
+// tracing programs (tp_btf/sched_switch, fentry/scx_tick) that CAN call
+// helper #55, and share the counter data via a shared BPF map.
+//
+// For now, all PMU reads are no-ops (perf_events is always 0).
+// The infrastructure (map, globals, is_event_heavy, pick_least_busy_event_cpu)
+// is kept so it can be wired up when the tracing-program approach is implemented.
 
 // ── Global state ────────────────────────────────────────────────────────
 
@@ -1059,9 +1098,13 @@ pub fn on_runnable(p: *mut task_struct, _enq_flags: u64) {
 ///
 /// Advances the global vruntime to track the most recent task's vtime.
 /// Records the timestamp in per-task storage for accurate time-slice
-/// charging in stopping(). When PMU tracking is enabled (PERF_CONFIG != 0),
-/// captures the current perf counter value as a baseline for delta
-/// computation in stopping().
+/// charging in stopping(). Applies cpufreq performance scaling.
+///
+/// NOTE: The C cosmos also calls scx_pmu_event_start(p, false) here when
+/// perf_config is set, which reads bpf_perf_event_read_value to capture a
+/// baseline counter value. We cannot do this because helper #55 is not
+/// available in struct_ops programs. See the PMU integration comment block
+/// above for details.
 ///
 /// C reference: cosmos_running() calls update_cpufreq(scx_bpf_task_cpu(p))
 /// and scx_pmu_event_start(p, false) when perf_config is set.
@@ -1073,15 +1116,6 @@ pub fn on_running(p: *mut task_struct) {
     if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
         let tctx = unsafe { tctx.as_mut() };
         tctx.last_run_at = now;
-
-        // Capture PMU baseline when task starts running.
-        // PORT_TODO(PMU): bpf_perf_event_read_value (helper #55) is not
-        // available in struct_ops programs. The C cosmos uses it but may
-        // have special kernel config. Need to use a kfunc alternative or
-        // a separate tracing program for PMU reads.
-        if unsafe { PERF_CONFIG } != 0 {
-            tctx.perf_baseline = 0;
-        }
     }
 
     // Update per-CPU context timestamp.
@@ -1109,15 +1143,19 @@ pub fn on_running(p: *mut task_struct) {
     }
 }
 
-/// stopping: charge the actual used time slice, update dsq_vtime, update
-/// PMU counters, and update per-CPU load for cpufreq scaling.
+/// stopping: charge the actual used time slice, update dsq_vtime, and
+/// update per-CPU load for cpufreq scaling.
 ///
 /// Uses the per-task last_run_at timestamp to compute the real time delta,
 /// capped at slice_ns. Advances dsq_vtime inversely proportional to
 /// weight (higher weight = slower vtime advancement = more CPU time).
 /// Also accumulates exec_runtime in per-task storage for deadline calculation.
-/// When PMU tracking is enabled, reads the perf counter, computes delta
-/// from baseline, and stores in per-task and per-CPU contexts.
+///
+/// NOTE: The C cosmos also calls scx_pmu_event_stop(p) + update_counters()
+/// here, which uses bpf_perf_event_read_value to compute a delta from
+/// the baseline captured in running(). We cannot do this because helper #55
+/// is not available in struct_ops programs. The PMU counter update is a
+/// no-op (perf_delta is always 0). See the PMU integration comment block.
 ///
 /// C reference: cosmos_stopping() calls update_cpu_load(p, slice) which
 /// computes perf_lvl = MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE)
@@ -1164,17 +1202,12 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
 
     // Update PMU counters when perf tracking is enabled.
     // C: if (perf_config) { scx_pmu_event_stop(p); update_counters(p, tctx, cpu); }
+    // NOTE: perf_delta is always 0 because bpf_perf_event_read_value (#55)
+    // is not available in struct_ops programs. The infrastructure is kept
+    // so is_event_heavy() and pick_least_busy_event_cpu() will work once
+    // a tracing-program-based PMU solution is implemented.
     if unsafe { PERF_CONFIG } != 0 {
-        // Read the perf counter baseline from per-task storage.
-        let baseline = if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
-            unsafe { tctx.as_ref().perf_baseline }
-        } else {
-            0
-        };
-
-        // PORT_TODO(PMU): bpf_perf_event_read_value not available in struct_ops
-        let perf_delta: u64 = 0;
-        update_perf_counters(p, perf_delta);
+        update_perf_counters(p, 0);
     }
 
     // Update per-CPU load for cpufreq scaling.

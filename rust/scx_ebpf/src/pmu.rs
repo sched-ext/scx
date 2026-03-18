@@ -4,6 +4,29 @@
 //! counters that have been installed by userspace into a
 //! `BPF_MAP_TYPE_PERF_EVENT_ARRAY` map.
 //!
+//! # IMPORTANT: struct_ops limitation
+//!
+//! **`bpf_perf_event_read_value` (helper #55) is NOT available in
+//! `BPF_PROG_TYPE_STRUCT_OPS` programs.** The kernel restricts this helper
+//! to tracing program types (kprobe, tracepoint, fentry, tp_btf). This is
+//! defined in `bpf_tracing_func_proto()` in `kernel/trace/bpf_trace.c`.
+//! The struct_ops verifier_ops (`bpf_struct_ops_verifier_ops` in
+//! `kernel/bpf/bpf_struct_ops.c`) has no `get_func_proto` callback, so
+//! struct_ops programs only get the base helper set from `bpf_base_func_proto()`.
+//!
+//! Attempting to call helper #55 from a struct_ops program will cause the
+//! BPF verifier to reject the program with:
+//! `program of this type cannot use helper bpf_perf_event_read_value#55`
+//!
+//! The C sched_ext PMU library (scx/lib/pmu.bpf.c) has the same limitation.
+//! Its solution architecture uses separate tracing BPF programs
+//! (`SEC("?tp_btf/sched_switch")` and `SEC("?fentry/scx_tick")`) that CAN
+//! call the helper, with counter data shared to struct_ops programs via a
+//! BPF map. This pattern is not yet implemented in the Rust eBPF framework.
+//!
+//! These functions are usable from tracing-type BPF programs if you need
+//! to read perf events from fentry/tracepoint/kprobe programs.
+//!
 //! # Architecture overview
 //!
 //! Hardware performance monitoring works as a cooperation between userspace
@@ -147,6 +170,13 @@ impl PerfEventValue {
 /// This wraps BPF helper #55 (`bpf_perf_event_read_value`). The helper
 /// reads the hardware performance counter associated with the given CPU
 /// index from the perf event array map.
+///
+/// # struct_ops limitation
+///
+/// **This helper is NOT available in `BPF_PROG_TYPE_STRUCT_OPS` programs.**
+/// Calling it from a struct_ops callback will cause the BPF verifier to
+/// reject the program. Only use this from tracing program types (kprobe,
+/// tracepoint, fentry, tp_btf).
 ///
 /// # Arguments
 ///
