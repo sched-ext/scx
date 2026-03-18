@@ -1075,24 +1075,12 @@ pub fn on_running(p: *mut task_struct) {
         tctx.last_run_at = now;
 
         // Capture PMU baseline when task starts running.
-        // Uses MaybeUninit to avoid compiler-generated memset that the BPF
-        // verifier rejects due to misaligned stack access.
-        // C: if (perf_config) scx_pmu_event_start(p, false);
+        // PORT_TODO(PMU): bpf_perf_event_read_value (helper #55) is not
+        // available in struct_ops programs. The C cosmos uses it but may
+        // have special kernel config. Need to use a kfunc alternative or
+        // a separate tracing program for PMU reads.
         if unsafe { PERF_CONFIG } != 0 {
-            let mut val = core::mem::MaybeUninit::<PerfEventValue>::uninit();
-            let ret = unsafe {
-                pmu::perf_event_read_value(
-                    &raw const SCX_PMU_MAP as *const core::ffi::c_void,
-                    BPF_F_CURRENT_CPU,
-                    val.as_mut_ptr(),
-                )
-            };
-            if ret == 0 {
-                let val = unsafe { val.assume_init() };
-                tctx.perf_baseline = val.counter;
-            } else {
-                tctx.perf_baseline = 0;
-            }
+            tctx.perf_baseline = 0;
         }
     }
 
@@ -1184,21 +1172,8 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
             0
         };
 
-        // Read current counter value using MaybeUninit to avoid memset.
-        let mut val = core::mem::MaybeUninit::<PerfEventValue>::uninit();
-        let ret = unsafe {
-            pmu::perf_event_read_value(
-                &raw const SCX_PMU_MAP as *const core::ffi::c_void,
-                BPF_F_CURRENT_CPU,
-                val.as_mut_ptr(),
-            )
-        };
-        let perf_delta = if ret == 0 {
-            let val = unsafe { val.assume_init() };
-            val.counter.wrapping_sub(baseline)
-        } else {
-            0
-        };
+        // PORT_TODO(PMU): bpf_perf_event_read_value not available in struct_ops
+        let perf_delta: u64 = 0;
         update_perf_counters(p, perf_delta);
     }
 
