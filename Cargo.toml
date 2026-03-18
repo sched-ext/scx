@@ -15,6 +15,7 @@ members = [
     "scheds/rust/scx_cake",
     "scheds/rust/scx_chaos",
     "scheds/rust/scx_cosmos",
+    "scheds/rust/scx_maestro",
     "scheds/rust/scx_flash",
     "scheds/rust/scx_lavd",
     "scheds/rust/scx_layered",
