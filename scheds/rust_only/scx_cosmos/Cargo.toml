@@ -8,6 +8,13 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-only"
 
+[features]
+# Enable scx_bpf_select_cpu_and() kfunc in the eBPF program.
+# Requires kernel >= 6.16 where this kfunc exists in vmlinux BTF.
+# Without this feature, pick_idle_cpu() skips primary cpumask filtering
+# and falls back to select_cpu_dfl().
+kernel_6_16 = []
+
 [dependencies]
 aya = { path = "../../../../aya/aya" }
 anyhow = "1.0"

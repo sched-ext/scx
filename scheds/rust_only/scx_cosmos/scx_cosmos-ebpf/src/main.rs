@@ -224,8 +224,9 @@ static mut CPU_TO_NODE: [u32; MAX_CPUS] = [0; MAX_CPUS];
 static mut PRIMARY_CPUMASK: Kptr<bpf_cpumask> = Kptr::zeroed();
 
 /// When true, primary domain includes all CPUs (primary_cpumask is unused).
-/// When false, `pick_idle_cpu()` first tries `select_cpu_and()` with
-/// the primary cpumask before falling back to the full cpus_ptr.
+/// When false and the `kernel_6_16` feature is enabled, `pick_idle_cpu()`
+/// first tries `select_cpu_and()` with the primary cpumask before falling
+/// back to the full cpus_ptr.
 /// C reference: `const volatile bool primary_all = true`
 #[unsafe(no_mangle)]
 static mut PRIMARY_ALL: bool = true;
@@ -609,6 +610,7 @@ fn pick_idle_cpu_preferred() -> i32 {
 ///    cpumask is set, try `select_cpu_and()` with the primary cpumask to
 ///    prefer CPUs in the primary domain. Uses `SCX_PICK_IDLE_CORE` when
 ///    `AVOID_SMT` is enabled to prefer fully-idle cores.
+///    Only compiled when the `kernel_6_16` feature is enabled.
 ///
 /// 2. **`select_cpu_dfl()`** — the kernel's default idle CPU picker.
 ///    Tried after primary cpumask (or first if primary filtering is
@@ -648,15 +650,32 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     }
 
     // Strategy 1: Primary cpumask filtering.
-    // PORT_TODO: Use scx_bpf_select_cpu_and() when available (kernel >= 6.16).
-    // On older kernels, the kfunc doesn't exist in vmlinux BTF and the verifier
-    // rejects call #0. For now, skip this strategy. When select_cpu_and is
-    // available, the code would be:
-    //   if !PRIMARY_ALL { rcu_read_lock(); let mask = Kptr::get(&PRIMARY_CPUMASK);
-    //     cpu = select_cpu_and(p, prev_cpu, wake_flags, cast(mask), flags);
-    //     rcu_read_unlock(); if cpu >= 0 { return cpu; } }
-    // The primary cpumask is still initialized in on_init() for when this
-    // kfunc becomes available.
+    // On kernel >= 6.16, use scx_bpf_select_cpu_and() to prefer CPUs in the
+    // primary domain. On older kernels this kfunc doesn't exist in vmlinux
+    // BTF, so the code is compiled out via the kernel_6_16 feature flag.
+    #[cfg(feature = "kernel_6_16")]
+    {
+        if !unsafe { PRIMARY_ALL } {
+            rcu_read_lock();
+            let mask = unsafe { Kptr::get(&raw mut PRIMARY_CPUMASK) };
+            if !mask.is_null() {
+                let flags = if unsafe { AVOID_SMT } { SCX_PICK_IDLE_CORE } else { 0 };
+                let cpu = kfuncs::select_cpu_and(
+                    p,
+                    prev_cpu,
+                    wake_flags,
+                    cpumask::cast(mask),
+                    flags,
+                );
+                rcu_read_unlock();
+                if cpu >= 0 {
+                    return cpu;
+                }
+            } else {
+                rcu_read_unlock();
+            }
+        }
+    }
 
     // Strategy 2: kernel's default idle CPU selection.
     let mut is_idle: bool = false;

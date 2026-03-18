@@ -7,6 +7,12 @@ edition = "2021"
 name = "scx_cosmos"
 path = "src/main.rs"
 
+[features]
+# Enable scx_bpf_select_cpu_and() kfunc (requires kernel >= 6.16).
+# Without this feature, pick_idle_cpu() skips the primary cpumask
+# filtering strategy and falls back to select_cpu_dfl().
+kernel_6_16 = []
+
 [dependencies]
 scx-ebpf = { path = "../../../../rust/scx_ebpf" }
 
