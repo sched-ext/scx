@@ -59,14 +59,17 @@
 //!
 //! ```ignore
 //! use scx_ebpf::pmu::{PerfEventValue, perf_event_read_value, BPF_F_CURRENT_CPU};
+//! use core::mem::MaybeUninit;
 //!
 //! // In ops.running() — capture baseline when task starts:
-//! let mut start_val = PerfEventValue::ZERO;
-//! let ret = unsafe { perf_event_read_value(map_ptr, BPF_F_CURRENT_CPU, &mut start_val) };
+//! let mut start_val = MaybeUninit::<PerfEventValue>::uninit();
+//! let ret = unsafe { perf_event_read_value(map_ptr, BPF_F_CURRENT_CPU, start_val.as_mut_ptr()) };
+//! let start_val = unsafe { start_val.assume_init() };
 //!
 //! // In ops.stopping() — read current value, compute delta:
-//! let mut end_val = PerfEventValue::ZERO;
-//! let ret = unsafe { perf_event_read_value(map_ptr, BPF_F_CURRENT_CPU, &mut end_val) };
+//! let mut end_val = MaybeUninit::<PerfEventValue>::uninit();
+//! let ret = unsafe { perf_event_read_value(map_ptr, BPF_F_CURRENT_CPU, end_val.as_mut_ptr()) };
+//! let end_val = unsafe { end_val.assume_init() };
 //! let delta = end_val.counter - start_val.counter;
 //! ```
 
@@ -151,7 +154,10 @@ impl PerfEventValue {
 ///   programs, this is typically the address of a global map variable.
 /// - `index`: CPU index to read, or [`BPF_F_CURRENT_CPU`] to read the
 ///   current CPU's counter.
-/// - `val`: Output buffer for the counter value.
+/// - `val`: Output pointer for the counter value. A raw pointer is used
+///   instead of `&mut` to allow callers to use `MaybeUninit`, avoiding
+///   compiler-generated `memset` that the BPF verifier rejects due to
+///   stack alignment issues.
 ///
 /// # Returns
 ///
@@ -162,18 +168,23 @@ impl PerfEventValue {
 /// # Safety
 ///
 /// - `map` must point to a valid `BPF_MAP_TYPE_PERF_EVENT_ARRAY` map.
-/// - `val` must point to a valid, writable `PerfEventValue`.
+/// - `val` must point to a valid, writable `PerfEventValue`-sized buffer.
 /// - The perf event fd for the target CPU must have been installed by
 ///   userspace before this call.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let mut val = PerfEventValue::ZERO;
+/// let mut val = core::mem::MaybeUninit::<PerfEventValue>::uninit();
 /// let ret = unsafe {
-///     perf_event_read_value(&raw const MY_PERF_MAP as *const _, BPF_F_CURRENT_CPU, &mut val)
+///     perf_event_read_value(
+///         &raw const MY_PERF_MAP as *const _,
+///         BPF_F_CURRENT_CPU,
+///         val.as_mut_ptr(),
+///     )
 /// };
 /// if ret == 0 {
+///     let val = unsafe { val.assume_init() };
 ///     // val.counter contains the event count
 /// }
 /// ```
@@ -181,10 +192,10 @@ impl PerfEventValue {
 pub unsafe fn perf_event_read_value(
     map: *const core::ffi::c_void,
     index: u64,
-    val: &mut PerfEventValue,
+    val: *mut PerfEventValue,
 ) -> i64 {
     let ret: i64;
-    let buf = val as *mut PerfEventValue as u64;
+    let buf = val as u64;
     let size = core::mem::size_of::<PerfEventValue>() as u64;
     core::arch::asm!(
         "call 55",

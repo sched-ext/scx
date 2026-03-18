@@ -1056,13 +1056,24 @@ pub fn on_running(p: *mut task_struct) {
         tctx.last_run_at = now;
 
         // Capture PMU baseline when task starts running.
-        // PORT_TODO(PMU): Uncomment when PerfEventValue stack alignment is fixed.
-        // The BPF verifier rejects compiler-generated memset for PerfEventValue
-        // initialization due to misaligned stack access.
+        // Uses MaybeUninit to avoid compiler-generated memset that the BPF
+        // verifier rejects due to misaligned stack access.
         // C: if (perf_config) scx_pmu_event_start(p, false);
         if unsafe { PERF_CONFIG } != 0 {
-            // PMU baseline capture — infrastructure ready, reads disabled.
-            tctx.perf_baseline = 0;
+            let mut val = core::mem::MaybeUninit::<PerfEventValue>::uninit();
+            let ret = unsafe {
+                pmu::perf_event_read_value(
+                    &raw const SCX_PMU_MAP as *const core::ffi::c_void,
+                    BPF_F_CURRENT_CPU,
+                    val.as_mut_ptr(),
+                )
+            };
+            if ret == 0 {
+                let val = unsafe { val.assume_init() };
+                tctx.perf_baseline = val.counter;
+            } else {
+                tctx.perf_baseline = 0;
+            }
         }
     }
 
@@ -1154,10 +1165,21 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
             0
         };
 
-        // PORT_TODO(PMU): Uncomment when PerfEventValue stack alignment is fixed.
-        // let mut val = PerfEventValue::ZERO;
-        // let ret = unsafe { pmu::perf_event_read_value(...) };
-        let perf_delta: u64 = 0; // placeholder until PMU reads work
+        // Read current counter value using MaybeUninit to avoid memset.
+        let mut val = core::mem::MaybeUninit::<PerfEventValue>::uninit();
+        let ret = unsafe {
+            pmu::perf_event_read_value(
+                &raw const SCX_PMU_MAP as *const core::ffi::c_void,
+                BPF_F_CURRENT_CPU,
+                val.as_mut_ptr(),
+            )
+        };
+        let perf_delta = if ret == 0 {
+            let val = unsafe { val.assume_init() };
+            val.counter.wrapping_sub(baseline)
+        } else {
+            0
+        };
         update_perf_counters(p, perf_delta);
     }
 
@@ -1310,8 +1332,9 @@ pub fn on_init() -> i32 {
             }
             cpu += 1;
         }
-        // NOTE: scx_pmu_install(perf_config) requires the PERF_EVENT_ARRAY
-        // map — see the consolidated PORT_TODO at the PERF_CONFIG global.
+        // NOTE: The C version calls scx_pmu_install(perf_config) here to
+        // program per-CPU perf events. In Rust, userspace handles this via
+        // perf_event_open() and populating SCX_PMU_MAP (see loader code).
     }
 
     0
