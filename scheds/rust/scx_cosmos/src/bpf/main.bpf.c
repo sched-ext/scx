@@ -144,6 +144,11 @@ const volatile bool tick_preempt = true;
 const volatile bool no_wake_sync;
 
 /*
+ * Disable early clearing of idle CPU state.
+ */
+const volatile bool no_early_clear;
+
+/*
  * Default time slice.
  */
 const volatile u64 slice_ns = 1000000ULL;
@@ -666,6 +671,40 @@ static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
 }
 
 /*
+ * Return true if @cpu is in the primary domain, false otherwise.
+ */
+static inline bool is_primary_cpu(s32 cpu)
+{
+	const struct cpumask *mask = cast_mask(primary_cpumask);
+
+	if (primary_all)
+		return true;
+
+	return mask && bpf_cpumask_test_cpu(cpu, mask);
+}
+
+static inline bool is_cpu_idle(s32 cpu)
+{
+	struct task_struct *p;
+
+	p = __COMPAT_scx_bpf_cpu_curr(cpu);
+
+	return p ? p->flags & PF_IDLE : false;
+}
+
+/*
+ * Test if a CPU is idle.
+ *
+ * If no_early_clear is true, leave the idle state intact so that concurrent
+ * wakeups can stack tasks on the same cache. Otherwise, atomically test and
+ * clear the idle state.
+ */
+static inline bool test_cpu_idle(s32 cpu)
+{
+	return no_early_clear ? is_cpu_idle(cpu) : scx_bpf_test_and_clear_cpu_idle(cpu);
+}
+
+/*
  * Try to pick the best idle CPU based on the @preferred_cpus ranking.
  * Return a full-idle SMT core if @do_idle_smt is true, or any idle CPU if
  * @do_idle_smt is false.
@@ -680,7 +719,7 @@ static s32 pick_idle_cpu_pref_smt(struct task_struct *p, s32 prev_cpu, bool is_p
 	if (is_prev_allowed &&
 	    (!primary || bpf_cpumask_test_cpu(prev_cpu, primary)) &&
 	    (!smt || bpf_cpumask_test_cpu(prev_cpu, smt)) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+	    test_cpu_idle(prev_cpu))
 		return prev_cpu;
 
 	start = last_cpu;
@@ -698,7 +737,7 @@ static s32 pick_idle_cpu_pref_smt(struct task_struct *p, s32 prev_cpu, bool is_p
 
 		if ((!primary || bpf_cpumask_test_cpu(cpu, primary)) &&
 		    (!smt || bpf_cpumask_test_cpu(cpu, smt)) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu)) {
+		    test_cpu_idle(cpu)) {
 			if (!preferred_idle_scan)
 				last_cpu = cpu + 1;
 			return cpu;
@@ -726,7 +765,7 @@ static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
 	 * CPUs.
 	 */
 	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		if (test_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out;
 		}
@@ -822,7 +861,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 		 */
 		if (cpus_share_cache(this_cpu, prev_cpu) &&
 		    !is_smt_contended(prev_cpu) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		    test_cpu_idle(prev_cpu))
 			return prev_cpu;
 
 		prev_cpu = this_cpu;
@@ -1002,19 +1041,6 @@ is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
 		!(waker->flags & PF_EXITING) && wakee->mm && (wakee->mm == waker->mm);
 }
 
-/*
- * Return true if @cpu is in the primary domain, false otherwise.
- */
-static inline bool is_primary_cpu(s32 cpu)
-{
-	const struct cpumask *mask = cast_mask(primary_cpumask);
-
-	if (primary_all)
-		return true;
-
-	return mask && bpf_cpumask_test_cpu(cpu, mask);
-}
-
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
@@ -1110,15 +1136,6 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	}
 }
 
-static inline bool is_cpu_idle(s32 cpu)
-{
-	struct task_struct *p;
-
-	p = __COMPAT_scx_bpf_cpu_curr(cpu);
-
-	return p ? p->flags & PF_IDLE : false;
-}
-
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
@@ -1183,7 +1200,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	    (avoid_smt && is_smt_contended(prev_cpu)) ||
 	    (!is_pcpu_task(p) && (is_event_heavy(tctx) || !is_primary_cpu(prev_cpu)))) {
 		if (is_pcpu_task(p))
-			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
+			cpu = test_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
 		else
 			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
 		if (cpu >= 0) {
