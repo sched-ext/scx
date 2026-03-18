@@ -188,6 +188,7 @@ struct task_ctx {
 	 * traffic on the critical scheduling path.
 	 */
 	u16	lat_cri;		/* final context-aware latency criticality */
+	u16	normalized_lat_cri;	/* lat_cri normalized to [0, 1024] scale */
 	u16	lat_cri_waker;		/* waker's latency criticality */
 	u16	lat_cri_wakee;		/* wakee's latency criticality */
 	u16	perf_cri;		/* performance criticality of a task */
@@ -589,6 +590,7 @@ static __always_inline bool use_cpdom_dsq(void)
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
+u16 normalize_lat_cri(u16 lat_cri);
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */

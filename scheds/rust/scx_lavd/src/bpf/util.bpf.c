@@ -393,3 +393,31 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
 		return cpu_to_dsq(cpuc->cpu_id);
 	return cpdom_to_dsq(cpuc->cpdom_id);
 }
+
+/**
+ * normalize_lat_cri - Normalize latency criticality to 1024 scale
+ * @lat_cri: The latency criticality value from task_ctx
+ *
+ * Normalizes the lat_cri value from the range [0, max_lat_cri] to [0, 1024].
+ * Uses the system-wide max_lat_cri as the upper bound for normalization.
+ *
+ * Returns: Normalized value in range [0, 1024]
+ */
+__hidden
+u16 normalize_lat_cri(u16 lat_cri)
+{
+	u32 max = sys_stat.max_lat_cri;
+
+	/*
+	 * Handle edge cases:
+	 * - If max_lat_cri is 0, return 0 (no tasks have run yet)
+	 * - If lat_cri >= max_lat_cri, return 1024 (maximum)
+	 */
+	if (max == 0)
+		return 0;
+
+	if (lat_cri >= max)
+		return 1024;
+
+	return (u16)(((u64)lat_cri << LAVD_SHIFT) / max);
+}
