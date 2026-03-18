@@ -34,7 +34,6 @@
 //! - `PREFERRED_CPUS`, `CPU_CAPACITY`: CPU ordering/capacity for idle scan
 //!
 //! Remaining gaps vs the full C implementation:
-//! - Migration only tries prev_cpu (no full pick_idle_cpu scan in enqueue)
 //! - PMU perf event reading: bpf_perf_event_read_value (helper #55) is not
 //!   available in BPF_PROG_TYPE_STRUCT_OPS. The C cosmos has the same limitation.
 //!   The infrastructure (map, globals, is_event_heavy, pick_least_busy_event_cpu)
@@ -1004,10 +1003,18 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
             kfuncs::kick_cpu(prev_cpu, SCX_KICK_IDLE);
             return;
         }
-        // PORT_TODO: full pick_idle_cpu() scan across all CPUs
-        // C reference: pick_idle_cpu(p, prev_cpu, -1, 0, true) tries
-        // multiple strategies: primary cpumask, SMT-aware scan, etc.
-        // For now we only try prev_cpu via test_and_clear_cpu_idle.
+        // Full idle CPU scan: try preferred list, primary cpumask,
+        // select_cpu_dfl, and SMT-aware filtering.
+        // C reference: pick_idle_cpu(p, prev_cpu, -1, 0, true)
+        // We pass wake_flags=0 since enqueue doesn't have wake_flags.
+        let idle_cpu = pick_idle_cpu(p, prev_cpu, 0);
+        if idle_cpu >= 0 {
+            let weight = read_weight(p);
+            let slice = task_slice(weight);
+            kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL_ON | idle_cpu as u64, slice, enq_flags);
+            kfuncs::kick_cpu(idle_cpu, SCX_KICK_IDLE);
+            return;
+        }
     }
 
     // ── Phase 3: local dispatch when not busy ────────────────────────
