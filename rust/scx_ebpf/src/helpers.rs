@@ -1,9 +1,36 @@
 //! Helpers for BPF programs: kernel reads and bounded iteration.
 //!
 //! Provides:
-//! - [`core_read!`] for portable kernel struct field access via CO-RE
-//! - [`bpf_loop`] for bounded iteration using BPF helper #181
-//! - [`probe_read_kernel`] for raw kernel memory reads
+//! - [`bpf_for!`] / [`bpf_repeat!`] -- bounded loop macros for ergonomic iteration
+//! - [`bpf_loop`] -- raw BPF helper #181 wrapper for callback-based iteration
+//! - [`core_read!`] -- portable kernel struct field access via CO-RE
+//! - [`probe_read_kernel`] -- raw kernel memory reads
+//!
+//! ## Bounded iteration
+//!
+//! [`bpf_for!`] provides `for`-loop-like syntax for bounded BPF iteration:
+//!
+//! ```ignore
+//! bpf_for!(i, 0, nr_cpus, {
+//!     let cpu = unsafe { PREFERRED_CPUS[i as usize] };
+//!     if cpu < 0 { break; }
+//!     if kfuncs::test_and_clear_cpu_idle(cpu) {
+//!         found_cpu = cpu;
+//!         break;
+//!     }
+//! });
+//! ```
+//!
+//! The macro emits a `while` loop with a verifier-provable bound. On
+//! kernel 6.1+, the BPF verifier natively handles bounded `while` loops,
+//! so no callback subprogram is needed. This means:
+//! - The loop body runs **inline** -- kfunc calls, local variable access,
+//!   `break`, and `return` all work naturally.
+//! - No context struct or `#[inline(never)]` callback function required.
+//! - No aya-55 kfunc-in-subprogram issues.
+//!
+//! For callback-based iteration (e.g., pre-6.1 kernels), use [`bpf_loop`]
+//! directly with a named `#[inline(never)]` callback function.
 //!
 //! ## CO-RE field access
 //!
@@ -16,13 +43,6 @@
 //! tool scans the compiled ELF for `.aya.core_relo` markers emitted by
 //! this macro and generates CO-RE relocation records in `.BTF.ext`.
 //! The loader then patches field offsets at load time.
-//!
-//! ## Bounded iteration
-//!
-//! [`bpf_loop`] wraps BPF helper #181 for efficient bounded loops.
-//! The BPF verifier analyzes the callback body only once, making it
-//! suitable for large iteration counts (e.g., scanning all CPUs on
-//! a 1024-CPU system).
 
 /// BPF helper: read `len` bytes from kernel address `src` into `dst`.
 ///
@@ -129,6 +149,96 @@ pub unsafe fn bpf_loop(
         lateout("r5") _,
     );
     ret
+}
+
+/// Bounded iteration over a `start..end` range, like C's `bpf_for()`.
+///
+/// Expands to a `while` loop with a verifier-provable bound. The BPF
+/// verifier on kernel 6.1+ natively tracks bounded `while` loops, so no
+/// callback subprogram (and thus no aya-55 kfunc issues) is needed.
+///
+/// The loop variable is bound as a `u32`. Use `as usize` for array
+/// indexing, `as i32` for signed APIs.
+///
+/// `break` exits the loop. `return` exits the **enclosing function**.
+///
+/// # Comparison with `bpf_loop`
+///
+/// | Feature              | `bpf_for!`        | `bpf_loop()`            |
+/// |----------------------|-------------------|-------------------------|
+/// | Kfunc calls in body  | Yes               | No (aya-55)             |
+/// | `break` / `return`   | Natural           | Return 1 / not possible |
+/// | Local variable access| Natural           | Via context struct      |
+/// | Verifier cost        | Proportional to N | Constant (1 analysis)   |
+/// | Min kernel version   | 6.1               | 5.17                    |
+///
+/// For very large iteration counts (>100K) where verifier analysis time
+/// matters, prefer `bpf_loop()` with a named callback. For typical
+/// scheduler loops (scanning CPUs, DSQs, NUMA nodes), `bpf_for!` is
+/// simpler and more ergonomic.
+///
+/// # Syntax
+///
+/// ```ignore
+/// bpf_for!(var, start, end, { body });
+/// ```
+///
+/// Equivalent to C: `bpf_for(var, start, end) { body }`
+///
+/// # Examples
+///
+/// ```ignore
+/// // Scan all CPUs for an idle one:
+/// let mut found_cpu: i32 = -1;
+/// bpf_for!(i, 0, nr_cpus, {
+///     let cpu = unsafe { PREFERRED_CPUS[i as usize] };
+///     if cpu < 0 { break; }
+///     if kfuncs::test_and_clear_cpu_idle(cpu) {
+///         found_cpu = cpu;
+///         break;
+///     }
+/// });
+///
+/// // Create per-node dispatch queues:
+/// bpf_for!(node, 0, nr_nodes, {
+///     kfuncs::create_dsq(node as u64, node as i32);
+/// });
+/// ```
+#[macro_export]
+macro_rules! bpf_for {
+    ($var:ident, $start:expr, $end:expr, $body:block) => {{
+        let __bpf_for_end: u32 = $end;
+        let mut $var: u32 = $start;
+        while $var < __bpf_for_end {
+            $body
+            $var += 1;
+        }
+    }};
+}
+
+/// Bounded repetition without an index variable, like C's `bpf_repeat()`.
+///
+/// Executes `$body` up to `$count` times. Use `break` to exit early.
+///
+/// # Example
+///
+/// ```ignore
+/// bpf_repeat!(100, {
+///     if try_something() {
+///         break;
+///     }
+/// });
+/// ```
+#[macro_export]
+macro_rules! bpf_repeat {
+    ($count:expr , $body:block) => {{
+        let __bpf_repeat_end: u32 = $count;
+        let mut __bpf_repeat_i: u32 = 0;
+        while __bpf_repeat_i < __bpf_repeat_end {
+            $body
+            __bpf_repeat_i += 1;
+        }
+    }};
 }
 
 /// Read a field from a kernel struct pointer using compile-time offsets.

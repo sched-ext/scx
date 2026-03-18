@@ -48,6 +48,7 @@
 
 use scx_ebpf::prelude::*;
 use scx_ebpf::core_read;
+use scx_ebpf::bpf_for;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray, PerfEventArray};
 use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
 use scx_ebpf::cpumask::{self, bpf_cpumask};
@@ -630,26 +631,19 @@ fn update_cpufreq(cpu: i32) {
 /// populated by userspace) and atomically tests+clears each CPU's idle
 /// bit. Returns the first idle CPU found, or -1 if none.
 ///
-/// Iterates up to NR_CPU_IDS entries (capped at MAX_CPUS for array
-/// bounds safety). On kernel 6.1+, the BPF verifier natively handles
-/// bounded `while` loops with large iteration counts.
+/// Uses the `bpf_for!` macro for bounded iteration over all CPUs. The
+/// macro emits a `while` loop that the BPF verifier (kernel 6.1+)
+/// natively tracks as bounded, so kfunc calls in the loop body work
+/// without the aya-55 subprogram kfunc resolution issue that affects
+/// `bpf_loop()` callbacks.
 ///
-/// NOTE: We use a regular bounded loop instead of `bpf_loop` (helper #181)
-/// because the callback for `bpf_loop` must be a separate BPF subprogram
-/// (`#[inline(never)]`), and aya's kfunc resolution does not yet handle
-/// kfunc calls inside subprograms (aya-55). Since this loop body calls the
-/// `test_and_clear_cpu_idle` kfunc, `bpf_loop` cannot be used here until
-/// aya-55 is fixed.
-///
-/// C reference: `pick_idle_cpu_flat()` uses `bpf_for()` macro which
-/// expands to `bpf_loop()` under the hood.
+/// C reference: `pick_idle_cpu_flat()` uses `bpf_for(i, 0, nr_cpus)`.
 #[inline(always)]
 fn pick_idle_cpu_preferred() -> i32 {
-    let nr = unsafe { NR_CPU_IDS } as usize;
-    let bound = if nr < MAX_CPUS { nr } else { MAX_CPUS };
-    let mut i: usize = 0;
-    while i < bound {
-        let cpu = unsafe { PREFERRED_CPUS[i] };
+    let nr = unsafe { NR_CPU_IDS };
+    let bound = if nr < MAX_CPUS as u32 { nr } else { MAX_CPUS as u32 };
+    bpf_for!(i, 0, bound, {
+        let cpu = unsafe { PREFERRED_CPUS[i as usize] };
         if cpu < 0 {
             // Sentinel: end of preferred CPU list.
             break;
@@ -657,8 +651,7 @@ fn pick_idle_cpu_preferred() -> i32 {
         if kfuncs::test_and_clear_cpu_idle(cpu) {
             return cpu;
         }
-        i += 1;
-    }
+    });
     -1
 }
 
