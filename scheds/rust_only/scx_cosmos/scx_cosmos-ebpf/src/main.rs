@@ -648,31 +648,15 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     }
 
     // Strategy 1: Primary cpumask filtering.
-    // When PRIMARY_ALL is false, try to pick an idle CPU from the primary
-    // domain first using select_cpu_and(). This restricts idle scanning to
-    // a subset of CPUs (e.g., performance cores on big.LITTLE systems).
-    //
-    // C reference: pick_idle_cpu() in main.bpf.c:
-    //   if (!primary_all && mask) {
-    //       cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask,
-    //                                    avoid_smt ? SCX_PICK_IDLE_CORE : 0);
-    //       if (cpu >= 0) return cpu;
-    //   }
-    if !unsafe { PRIMARY_ALL } {
-        rcu_read_lock();
-        let mask = unsafe { Kptr::get(&raw const PRIMARY_CPUMASK) };
-        if !mask.is_null() {
-            let pmask = cpumask::cast(mask);
-            let flags = if unsafe { AVOID_SMT } { SCX_PICK_IDLE_CORE } else { 0 };
-            let cpu = kfuncs::select_cpu_and(p, prev_cpu, wake_flags, pmask, flags);
-            rcu_read_unlock();
-            if cpu >= 0 {
-                return cpu;
-            }
-        } else {
-            rcu_read_unlock();
-        }
-    }
+    // PORT_TODO: Use scx_bpf_select_cpu_and() when available (kernel >= 6.16).
+    // On older kernels, the kfunc doesn't exist in vmlinux BTF and the verifier
+    // rejects call #0. For now, skip this strategy. When select_cpu_and is
+    // available, the code would be:
+    //   if !PRIMARY_ALL { rcu_read_lock(); let mask = Kptr::get(&PRIMARY_CPUMASK);
+    //     cpu = select_cpu_and(p, prev_cpu, wake_flags, cast(mask), flags);
+    //     rcu_read_unlock(); if cpu >= 0 { return cpu; } }
+    // The primary cpumask is still initialized in on_init() for when this
+    // kfunc becomes available.
 
     // Strategy 2: kernel's default idle CPU selection.
     let mut is_idle: bool = false;
@@ -1072,17 +1056,13 @@ pub fn on_running(p: *mut task_struct) {
         tctx.last_run_at = now;
 
         // Capture PMU baseline when task starts running.
+        // PORT_TODO(PMU): Uncomment when PerfEventValue stack alignment is fixed.
+        // The BPF verifier rejects compiler-generated memset for PerfEventValue
+        // initialization due to misaligned stack access.
         // C: if (perf_config) scx_pmu_event_start(p, false);
         if unsafe { PERF_CONFIG } != 0 {
-            let mut val = PerfEventValue::ZERO;
-            let ret = unsafe {
-                pmu::perf_event_read_value(
-                    &raw const SCX_PMU_MAP as *const _,
-                    BPF_F_CURRENT_CPU,
-                    &mut val,
-                )
-            };
-            tctx.perf_baseline = if ret == 0 { val.counter } else { 0 };
+            // PMU baseline capture — infrastructure ready, reads disabled.
+            tctx.perf_baseline = 0;
         }
     }
 
@@ -1174,19 +1154,10 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
             0
         };
 
-        let mut val = PerfEventValue::ZERO;
-        let ret = unsafe {
-            pmu::perf_event_read_value(
-                &raw const SCX_PMU_MAP as *const _,
-                BPF_F_CURRENT_CPU,
-                &mut val,
-            )
-        };
-        let perf_delta = if ret == 0 {
-            val.counter.wrapping_sub(baseline)
-        } else {
-            0
-        };
+        // PORT_TODO(PMU): Uncomment when PerfEventValue stack alignment is fixed.
+        // let mut val = PerfEventValue::ZERO;
+        // let ret = unsafe { pmu::perf_event_read_value(...) };
+        let perf_delta: u64 = 0; // placeholder until PMU reads work
         update_perf_counters(p, perf_delta);
     }
 
