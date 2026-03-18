@@ -27,6 +27,7 @@ fn main() {
         .add_source("src/bpf/lib/sdt_alloc.bpf.c")
         .add_source("src/bpf/lib/sdt_task.bpf.c")
         .add_source("src/bpf/lib/topology.bpf.c")
+        .add_source("src/bpf/lib/ravg.bpf.c")
         .compile_link_gen()
         .unwrap();
 }

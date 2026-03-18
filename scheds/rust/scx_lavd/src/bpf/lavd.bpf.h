@@ -8,6 +8,7 @@
 
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.bpf.h>
+#include <lib/ravg.h>
 #include <lib/sdt_task.h>
 #include <lib/atq.h>
 
@@ -87,6 +88,9 @@ enum consts_internal {
 	LAVD_LC_WAKE_INTERVAL_MIN	= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
 	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
+	LAVD_LC_LATENCY_SENSITIVE_THRESH = LAVD_SCALE - (LAVD_SCALE >> 3), /* top 12.5% most latency-critical tasks */
+
+	LAVD_RAVG_HALFLIFE_NS		= (128ULL * NSEC_PER_MSEC),
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (10ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
@@ -218,6 +222,8 @@ struct task_ctx {
 	pid_t	waker_pid;		/* last waker's PID */
 
 	/* --- cacheline 4 boundary (256 bytes) --- */
+	u32	util_est;		/* Estimated task util using ravg duty cycle */
+	struct ravg_data avg_util_ravg;	/* Running average of task utilization using ravg */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -357,6 +363,7 @@ struct cpu_ctx {
 	volatile u32	cur_util_wall;	/* CPU utilization of the current interval (based on wall clock time) */
 	volatile u32	avg_util_invr;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
+	volatile u32	lat_headroom;	/* latency headroom available to this CPU (inversely related to irq/steal time) */
 	/*
 	 * Steal utilization: steal_time as a fraction of duration_wall,
 	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
@@ -368,6 +375,7 @@ struct cpu_ctx {
 	u32		avg_steal_util_wall;
 	u32		cur_steal_util_invr;
 	u32		avg_steal_util_invr;
+
 	/*
 	 * Domain-pinned task utilization: the fraction of duration_wall
 	 * spent running LAVD_FLAG_DOMAIN_PINNED tasks, in LAVD_SHIFT
@@ -444,6 +452,10 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_t_mask;
 	struct bpf_cpumask __kptr *tmp_t2_mask;
 	struct bpf_cpumask __kptr *tmp_t3_mask;
+
+	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
+	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
+	volatile u32	util_est;	/* Estimated CPU utilization from ravg tracking */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */

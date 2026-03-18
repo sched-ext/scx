@@ -358,6 +358,12 @@ static void collect_sys_stat(void)
 		cpuc->avg_steal_util_invr = calc_asym_avg(cpuc->avg_steal_util_invr,
 							   cpuc->cur_steal_util_invr);
 
+		ravg_accumulate(&cpuc->avg_irq_steal_ravg, cpuc->cur_steal_util_invr, c->now,
+					LAVD_RAVG_HALFLIFE_NS);
+		u64 avg_irq_fp = ravg_read(&cpuc->avg_irq_steal_ravg, c->now, LAVD_RAVG_HALFLIFE_NS);
+		u32 avg_irq_val = (u32)(avg_irq_fp >> RAVG_FRAC_BITS);
+		cpuc->lat_headroom = (avg_irq_val < LAVD_SCALE) ? (LAVD_SCALE - avg_irq_val) : 0;
+
 		/*
 		 * Calculate per-CPU wall-clock utilization.
 		 * compute_wall = steal_time_wall + tot_task_time_wall (before
