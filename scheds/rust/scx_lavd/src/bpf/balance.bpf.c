@@ -39,6 +39,7 @@ int plan_x_cpdom_migration(void)
 	u64 cpdom_id;
 	u32 stealer_threshold, stealee_threshold, nr_stealee = 0;
 	u64 avg_load_invr = 0, min_load_invr = U64_MAX, max_load_invr = 0;
+	u64 max_avg_util_wall = 0;
 	u64 x_mig_delta, util, qlen, qlen_invr;
 	bool overflow_running = false;
 	int nz_qlen = 0;
@@ -56,12 +57,6 @@ int plan_x_cpdom_migration(void)
 	 * throughput when the system is overloaded.
 	 */
 
-	/*
-	 * When system utilization is low, periodic load balancing across
-	 * LLC domains is unnecessary since there is plenty of idle capacity.
-	 */
-	if (lb_low_util_wall > 0 && sys_stat.avg_util_wall < lb_low_util_wall)
-		goto reset_and_skip_lb;
 
 	/*
 	 * Calculate scaled load for each active compute domain.
@@ -89,6 +84,8 @@ int plan_x_cpdom_migration(void)
 		 * Use avg_util_wall_sum for stable load balancing decisions.
 		 */
 		util = (cpdomc->avg_util_wall_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
+		if ((util >> LAVD_SHIFT) > max_avg_util_wall)
+			max_avg_util_wall = util >> LAVD_SHIFT;
 		qlen = cpdomc->nr_queued_task;
 		qlen_invr = (qlen << (LAVD_SHIFT * 3)) / cpdomc->cap_sum_active_cpus;
 		cpdomc->load_invr = util + qlen_invr;
@@ -103,6 +100,14 @@ int plan_x_cpdom_migration(void)
 	}
 	if (sys_stat.nr_active_cpdoms)
 		avg_load_invr /= sys_stat.nr_active_cpdoms;
+
+	/*
+	 * When the highest per-CPU utilization among all compute
+	 * domains is below the low utilization threshold, there is
+	 * no meaningful workload worth rebalancing across domains.
+	 */
+	if (lb_low_util_wall > 0 && max_avg_util_wall < lb_low_util_wall)
+		goto reset_and_skip_lb;
 
 	/*
 	 * Determine the criteria for stealer and stealee domains.
