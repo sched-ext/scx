@@ -1,14 +1,28 @@
-//! Helpers for reading kernel struct fields from BPF programs.
+//! Helpers for BPF programs: kernel reads and bounded iteration.
 //!
-//! Provides [`core_read!`] for portable field access. The macro computes
-//! the field offset at compile time using the vmlinux-generated struct
-//! definitions, then reads the value via `bpf_probe_read_kernel`.
+//! Provides:
+//! - [`core_read!`] for portable kernel struct field access via CO-RE
+//! - [`bpf_loop`] for bounded iteration using BPF helper #181
+//! - [`probe_read_kernel`] for raw kernel memory reads
+//!
+//! ## CO-RE field access
+//!
+//! [`core_read!`] computes the field offset at compile time using the
+//! vmlinux-generated struct definitions, then reads the value via
+//! `bpf_probe_read_kernel`.
 //!
 //! On the build kernel, the offsets are correct without any loader
 //! patching. For cross-kernel portability, the `aya-core-postprocessor`
 //! tool scans the compiled ELF for `.aya.core_relo` markers emitted by
 //! this macro and generates CO-RE relocation records in `.BTF.ext`.
 //! The loader then patches field offsets at load time.
+//!
+//! ## Bounded iteration
+//!
+//! [`bpf_loop`] wraps BPF helper #181 for efficient bounded loops.
+//! The BPF verifier analyzes the callback body only once, making it
+//! suitable for large iteration counts (e.g., scanning all CPUs on
+//! a 1024-CPU system).
 
 /// BPF helper: read `len` bytes from kernel address `src` into `dst`.
 ///
@@ -65,6 +79,56 @@ pub unsafe fn probe_read_kernel<T: Copy>(src: *const T) -> Result<T, i64> {
     } else {
         Err(ret)
     }
+}
+
+/// BPF helper: call `callback_fn(index, ctx)` for `nr_loops` iterations.
+///
+/// This is BPF helper #181 (`bpf_loop`), available since Linux 5.17.
+/// The callback receives the current iteration index (0..nr_loops) and the
+/// user-provided context pointer. Return 0 from the callback to continue,
+/// 1 to break early.
+///
+/// Unlike a regular bounded `while` loop, the BPF verifier only analyzes the
+/// callback body once regardless of `nr_loops`, making this efficient for
+/// large iteration counts (e.g., iterating all CPUs on a 1024-CPU system).
+///
+/// `flags` must be 0.
+///
+/// # BPF subprogram requirement
+///
+/// The callback MUST be a named `#[inline(never)]` function (not a closure),
+/// so that LLVM emits it as a separate BPF subprogram. The `bpf_loop` helper
+/// calls the subprogram by BPF function pointer.
+///
+/// # Kfunc limitation (aya-55)
+///
+/// Due to aya bug aya-55, kfunc calls inside `#[inline(never)]` subprograms
+/// are not resolved correctly (their `imm` field stays 0). If the callback
+/// needs kfunc calls, use inline asm with `call {func}` / `sym` to emit the
+/// kfunc call directly — OR restructure to avoid kfuncs in the callback
+/// (e.g., communicate via a global variable / context struct).
+///
+/// # Returns
+///
+/// The number of iterations performed (0 on error).
+#[inline(always)]
+pub unsafe fn bpf_loop(
+    nr_loops: u32,
+    callback_fn: unsafe extern "C" fn(u32, *mut core::ffi::c_void) -> i64,
+    ctx: *mut core::ffi::c_void,
+    flags: u64,
+) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "call 181",
+        inlateout("r1") (nr_loops as u64) => _,
+        inlateout("r2") callback_fn => _,
+        inlateout("r3") ctx => _,
+        inlateout("r4") flags => _,
+        lateout("r0") ret,
+        lateout("r5") _,
+    );
+    ret
 }
 
 /// Read a field from a kernel struct pointer using compile-time offsets.

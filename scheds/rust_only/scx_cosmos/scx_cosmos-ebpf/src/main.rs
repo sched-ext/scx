@@ -597,21 +597,25 @@ fn update_cpufreq(cpu: i32) {
 /// populated by userspace) and atomically tests+clears each CPU's idle
 /// bit. Returns the first idle CPU found, or -1 if none.
 ///
-/// The loop is bounded to MAX_PREFERRED_SCAN (64) iterations to satisfy
-/// the BPF verifier's bounded loop requirement. On systems with more
-/// CPUs than this limit, only the first 64 preferred CPUs are checked.
+/// Iterates up to NR_CPU_IDS entries (capped at MAX_CPUS for array
+/// bounds safety). On kernel 6.1+, the BPF verifier natively handles
+/// bounded `while` loops with large iteration counts.
 ///
-/// C reference: `pick_idle_cpu_flat()` iterates `preferred_cpus[]`
-/// calling `scx_bpf_test_and_clear_cpu_idle()`.
-const MAX_PREFERRED_SCAN: usize = 64;
-
+/// NOTE: We use a regular bounded loop instead of `bpf_loop` (helper #181)
+/// because the callback for `bpf_loop` must be a separate BPF subprogram
+/// (`#[inline(never)]`), and aya's kfunc resolution does not yet handle
+/// kfunc calls inside subprograms (aya-55). Since this loop body calls the
+/// `test_and_clear_cpu_idle` kfunc, `bpf_loop` cannot be used here until
+/// aya-55 is fixed.
+///
+/// C reference: `pick_idle_cpu_flat()` uses `bpf_for()` macro which
+/// expands to `bpf_loop()` under the hood.
 #[inline(always)]
 fn pick_idle_cpu_preferred() -> i32 {
+    let nr = unsafe { NR_CPU_IDS } as usize;
+    let bound = if nr < MAX_CPUS { nr } else { MAX_CPUS };
     let mut i: usize = 0;
-    while i < MAX_PREFERRED_SCAN {
-        if i >= MAX_CPUS {
-            break;
-        }
+    while i < bound {
         let cpu = unsafe { PREFERRED_CPUS[i] };
         if cpu < 0 {
             // Sentinel: end of preferred CPU list.
