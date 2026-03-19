@@ -133,8 +133,11 @@ GPL-2.0-only
 
 These references informed Cognis' design and evaluation mindset, especially around deadline ordering, bounded wake credit, locality-aware hierarchy design, and BPF-owned hot paths. They are inspirations and reference points, not a claim that Cognis automatically reproduces each cited paper's or project's published results.
 
-- Caprita, R., Wong, C., & Zwaenepoel, W. (2005). Group ratio round-robin: O(1) proportional share scheduling for uniprocessor and multiprocessor systems. *USENIX Annual Technical Conference*. https://www.usenix.org/event/usenix05/tech/general/full_papers/caprita/caprita.pdf
-- Chandra, R., Fink, S., & Vahdat, A. (2000). The case for surplus fair scheduling. *OSDI 2000*. https://www.usenix.org/events/osdi2000/full_papers/chandra/chandra.pdf
-- Duda, K. J., & Cheriton, D. R. (1999). Borrowed-virtual-time (BVT) scheduling: Supporting latency-sensitive threads in a general-purpose scheduler. *SOSP 1999*. https://web.stanford.edu/class/cs240/old/sp2014/readings/duda99borrowed.pdf
-- Linux kernel documentation. (n.d.). *EEVDF Scheduler*. https://docs.kernel.org/scheduler/sched-eevdf.html
-- sched-ext maintainers and contributors. (n.d.). `scx_beerland`, `scx_bpfland`, `scx_cake`, `scx_cosmos`, `scx_lavd`, `scx_pandemonium`, and `scx_rustland` in the `sched-ext/scx` repository. https://github.com/sched-ext/scx
+1. Linux kernel documentation. (n.d.). *EEVDF Scheduler*. https://docs.kernel.org/scheduler/sched-eevdf.html
+2. Duda, K. J., & Cheriton, D. R. (1999). *Borrowed-virtual-time (BVT) scheduling: Supporting latency-sensitive threads in a general-purpose scheduler*. Proceedings of the 17th ACM Symposium on Operating Systems Principles. https://web.stanford.edu/class/cs240/old/sp2014/readings/duda99borrowed.pdf
+3. Agrawal, K., & Sukha, J. (2011). *Hierarchical scheduling for multicores with multilevel cache hierarchies*. Washington University in St. Louis, Department of Computer Science and Engineering. https://openscholarship.wustl.edu/cse_research/66/
+4. Wang, J., Trach, B., Fu, M., Behrens, D., Schwender, J., Liu, Y., Lei, J., Vafeiadis, V., Härtig, H., & Chen, H. (2023). *BWoS: Formally verified block-based work stealing for parallel processing*. 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI 23). https://www.usenix.org/conference/osdi23/presentation/wang-jiawei
+5. sched-ext maintainers. (n.d.). *scx_bpfland* [Software]. GitHub. https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_bpfland
+6. sched-ext maintainers. (n.d.). *scx_beerland* [Software]. GitHub. https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_beerland
+7. sched-ext maintainers. (n.d.). *scx_lavd* [Software]. GitHub. https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_lavd
+8. sched-ext maintainers. (n.d.). *scx_cake* [Software]. GitHub. https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_cake

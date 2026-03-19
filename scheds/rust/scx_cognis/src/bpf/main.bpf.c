@@ -435,14 +435,17 @@ static bool usersched_has_pending_tasks(void)
 }
 
 /*
- * Return true if @cpu is valid, otherwise trigger an error and return false.
+ * Return true if @cpu is valid, otherwise return false.
+ *
+ * Invalid CPUs are handled as a recoverable condition so helper callers can
+ * fall back to a safer placement choice without kicking the scheduler.
  */
 static inline bool is_cpu_valid(s32 cpu)
 {
 	u64 max_cpu = MIN(nr_cpu_ids, MAX_CPUS);
 
 	if (cpu < 0 || cpu >= max_cpu) {
-		scx_bpf_error("Invalid cpu: %d", cpu);
+		dbg_msg("invalid cpu: %d", cpu);
 		return false;
 	}
 	return true;
@@ -531,8 +534,8 @@ static inline u64 cpu_node_dsq(s32 cpu)
  */
 static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
 {
-        if (this_cpu == that_cpu)
-                return true;
+	if (this_cpu == that_cpu)
+		return true;
 
 	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
 		return false;
@@ -545,8 +548,8 @@ static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
  */
 static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
 {
-        if (this_cpu == that_cpu)
-                return false;
+	if (this_cpu == that_cpu)
+		return false;
 
 	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
 		return false;
@@ -560,7 +563,7 @@ static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
 static inline bool is_smt_idle(s32 cpu)
 {
 	const struct cpumask *idle_smtmask;
-        bool is_idle;
+	bool is_idle;
 
 	if (!smt_enabled)
 		return true;
@@ -748,10 +751,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 
 	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
-	 * their only allowed CPU is still idle.
+	 * their only allowed CPU is still the previous CPU and still idle.
 	 */
 	if (p->nr_cpus_allowed == 1) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		if (is_cpu_valid(prev_cpu) &&
+		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 
 		return -EBUSY;
