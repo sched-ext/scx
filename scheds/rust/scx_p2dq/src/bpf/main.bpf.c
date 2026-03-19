@@ -2660,12 +2660,12 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 				struct cpu_ctx *target_cpuc = lookup_cpu_ctx(target_cpu);
 				if (target_cpuc) {
 					bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
-						if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+						if (peek_cpumask_test_cpu(cpu, p)) {
 							// Found a task that belongs here, stop cleanup
 							break;
 						}
 						// Move mismatched task to its target CPU's affn_dsq
-						target_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+						target_cpu = peek_cpumask_any_distribute(p);
 						if (target_cpu >= 0 && target_cpu < NR_CPUS) {
 							target_cpuc = lookup_cpu_ctx(target_cpu);
 							if (target_cpuc) {
