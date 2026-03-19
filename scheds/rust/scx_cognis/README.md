@@ -41,8 +41,8 @@ Both profiles use the same hierarchy. `desktop` is tuned for faster wake respons
 
 | Profile | Default slice ceiling | Default min slice | Saturated-path bias |
 |:--|:--|:--|:--|
-| `desktop` | `1000 us` | `250 us` | favors local, LLC, and nearby-domain retention before broader spill |
-| `server` | `8000 us` | `1000 us` | uses the same hierarchy but reaches node/shared spill sooner |
+| `desktop` | `1000 µs` | `250 µs` | favors local, LLC, and nearby-domain retention before broader spill |
+| `server` | `8000 µs` | `1000 µs` | uses the same hierarchy but reaches node/shared spill sooner |
 
 ## Production Ready?
 
@@ -72,6 +72,8 @@ Run explicitly in desktop or server mode:
 sudo ./target/release/scx_cognis --mode desktop
 sudo ./target/release/scx_cognis --mode server
 ```
+
+Only one `sched_ext` scheduler instance should be active at a time.
 
 Selected options:
 
@@ -128,6 +130,8 @@ sudo ./target/release/scx_cognis --tui
 GPL-2.0-only
 
 ## Inspirations and References
+
+These references informed Cognis' design and evaluation mindset, especially around deadline ordering, bounded wake credit, locality-aware hierarchy design, and BPF-owned hot paths. They are inspirations and reference points, not a claim that Cognis automatically reproduces each cited paper's or project's published results.
 
 - Caprita, R., Wong, C., & Zwaenepoel, W. (2005). Group ratio round-robin: O(1) proportional share scheduling for uniprocessor and multiprocessor systems. *USENIX Annual Technical Conference*. https://www.usenix.org/event/usenix05/tech/general/full_papers/caprita/caprita.pdf
 - Chandra, R., Fink, S., & Vahdat, A. (2000). The case for surplus fair scheduling. *OSDI 2000*. https://www.usenix.org/events/osdi2000/full_papers/chandra/chandra.pdf
