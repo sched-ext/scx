@@ -224,6 +224,32 @@ impl BpfProfile {
     }
 }
 
+fn enabled_flag_summary(opts: &Opts) -> String {
+    let mut flags = Vec::new();
+
+    if opts.partial {
+        flags.push("partial");
+    }
+    if opts.percpu_local {
+        flags.push("percpu_local");
+    }
+    if opts.verbose {
+        flags.push("verbose");
+    }
+    if opts.tui {
+        flags.push("tui");
+    }
+    if opts.stats.is_some() {
+        flags.push("stats");
+    }
+
+    if flags.is_empty() {
+        "none".to_string()
+    } else {
+        flags.join(",")
+    }
+}
+
 // ── Task record ────────────────────────────────────────────────────────────
 
 /// A task in the user-space scheduler queues.
@@ -388,12 +414,23 @@ impl<'a> Scheduler<'a> {
     ) -> Result<Self> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         let profile = BpfProfile::from_opts(opts);
+        let enabled_flags = enabled_flag_summary(opts);
 
         let base_slice_ns = profile.slice_ns;
         let slice_ns_min = profile.slice_min_ns;
 
         let slice_controller = SliceController::new(base_slice_ns);
         let initial_assigned_slice_ns = slice_controller.read_slice_ns();
+
+        info!(
+            "Starting {} v{} (mode={}, slice={}us, min_slice={}us, flags={})",
+            SCHEDULER_NAME,
+            build_id::full_version(env!("CARGO_PKG_VERSION")),
+            profile.mode.as_str(),
+            profile.slice_ns / NSEC_PER_USEC,
+            profile.slice_min_ns / NSEC_PER_USEC,
+            enabled_flags
+        );
 
         let bpf = BpfScheduler::init(
             shutdown,
@@ -406,6 +443,8 @@ impl<'a> Scheduler<'a> {
             &profile,
             "cognis",
         )?;
+
+        info!("Registered {SCHEDULER_NAME} scheduler");
 
         let tui_state = if opts.tui {
             Some(tui::new_shared_state())
@@ -427,10 +466,8 @@ impl<'a> Scheduler<'a> {
         };
 
         debug!(
-            "{} version {} — mode={} — scx_rustland_core {}",
+            "{} is using scx_rustland_core {}",
             SCHEDULER_NAME,
-            build_id::full_version(env!("CARGO_PKG_VERSION")),
-            profile.mode.as_str(),
             scx_rustland_core::VERSION
         );
 
@@ -1766,9 +1803,9 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BpfProfile, Opts, Scheduler, DEFAULT_DESKTOP_SLICE_LAG_NS, DEFAULT_DESKTOP_SLICE_MIN_NS,
-        DEFAULT_DESKTOP_SLICE_NS, DEFAULT_SERVER_SLICE_LAG_NS, DEFAULT_SERVER_SLICE_MIN_NS,
-        DEFAULT_SERVER_SLICE_NS,
+        enabled_flag_summary, BpfProfile, Opts, Scheduler, DEFAULT_DESKTOP_SLICE_LAG_NS,
+        DEFAULT_DESKTOP_SLICE_MIN_NS, DEFAULT_DESKTOP_SLICE_NS, DEFAULT_SERVER_SLICE_LAG_NS,
+        DEFAULT_SERVER_SLICE_MIN_NS, DEFAULT_SERVER_SLICE_NS,
     };
     use clap::Parser;
 
@@ -1851,5 +1888,31 @@ mod tests {
         assert_eq!(profile.slice_lag_ns, DEFAULT_SERVER_SLICE_LAG_NS);
         assert!(!profile.sticky_tasks);
         assert!(profile.no_wake_sync);
+    }
+
+    #[test]
+    fn enabled_flag_summary_defaults_to_none() {
+        let opts = Opts::parse_from(["scx_cognis"]);
+        assert_eq!(enabled_flag_summary(&opts), "none");
+    }
+
+    #[test]
+    fn enabled_flag_summary_lists_behavioral_flags() {
+        let opts = Opts::parse_from([
+            "scx_cognis",
+            "--mode",
+            "server",
+            "-p",
+            "-l",
+            "-v",
+            "-t",
+            "--stats",
+            "1",
+        ]);
+
+        assert_eq!(
+            enabled_flag_summary(&opts),
+            "partial,percpu_local,verbose,tui,stats"
+        );
     }
 }
