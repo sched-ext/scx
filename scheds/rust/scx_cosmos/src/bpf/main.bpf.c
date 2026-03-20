@@ -411,7 +411,7 @@ static u64 update_freq(u64 freq, u64 interval)
  */
 static void update_cpu_load(struct task_struct *p, u64 slice)
 {
-	u64 now = scx_bpf_now();
+	u64 now = bpf_ktime_get_ns();
 	s32 cpu = scx_bpf_task_cpu(p);
 	u64 perf_lvl, delta_t;
 	struct cpu_ctx *cctx;
@@ -1125,7 +1125,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	 * - the system is busy and there are tasks waiting in the
 	 *   local or shared DSQ.
 	 */
-	if (time_delta(scx_bpf_now(), tctx->last_run_at) > task_slice(p)) {
+	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > task_slice(p)) {
 		s32 cpu = scx_bpf_task_cpu(p);
 		bool smt_contention = avoid_smt && is_smt_contended(cpu);
 		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
@@ -1294,7 +1294,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = scx_bpf_now(), delta_t;
+	u64 now = bpf_ktime_get_ns(), delta_t;
 	struct task_ctx *tctx;
 
 	tctx = try_lookup_task_ctx(p);
@@ -1330,7 +1330,7 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	 * Save a timestamp when the task begins to run (used to evaluate
 	 * the used time slice).
 	 */
-	tctx->last_run_at = scx_bpf_now();
+	tctx->last_run_at = bpf_ktime_get_ns();
 
 	/*
 	 * Update current system's vruntime.
@@ -1380,7 +1380,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the used time slice.
 	 */
-	slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_ns);
+	slice = bpf_ktime_get_ns() - tctx->last_run_at;
 
 	/*
 	 * Scale used time slice by CPU capacity: time spent on slower CPU
