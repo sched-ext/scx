@@ -5,8 +5,11 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fs;
 use std::mem::MaybeUninit;
 use std::rc::Rc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::bpf_intf;
 use crate::bpf_intf::*;
@@ -59,6 +62,9 @@ const MAX_NODES: usize = 64;
 // The task will be dispatched to the global shared DSQ and it will run on the first CPU available.
 #[allow(dead_code)]
 pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
+const ROOT_OPS_PATH: &str = "/sys/kernel/sched_ext/root/ops";
+const DETACH_WAIT_TIMEOUT: Duration = Duration::from_millis(500);
+const DETACH_WAIT_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 struct TopologyExport {
@@ -248,6 +254,16 @@ unsafe impl Plain for bpf_intf::dispatched_task_ctx {}
 impl AsMut<bpf_intf::dispatched_task_ctx> for bpf_intf::dispatched_task_ctx {
     fn as_mut(&mut self) -> &mut bpf_intf::dispatched_task_ctx {
         self
+    }
+}
+
+fn current_root_ops_name() -> Option<String> {
+    let content = fs::read_to_string(ROOT_OPS_PATH).ok()?;
+    let name = content.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_owned())
     }
 }
 
@@ -765,6 +781,21 @@ impl<'cb> BpfScheduler<'cb> {
     pub fn shutdown_and_report(&mut self) -> Result<UserExitInfo> {
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
+    }
+
+    pub fn wait_for_detach(&self) -> Option<String> {
+        let started = Instant::now();
+        loop {
+            match current_root_ops_name() {
+                Some(name) if name.starts_with("cognis_") => {
+                    if started.elapsed() >= DETACH_WAIT_TIMEOUT {
+                        return Some(name);
+                    }
+                    thread::sleep(DETACH_WAIT_POLL);
+                }
+                _ => return None,
+            }
+        }
     }
 }
 

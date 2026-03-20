@@ -1541,7 +1541,14 @@ impl Drop for Scheduler<'_> {
         if let Some(ref mut term) = self.tui_term {
             let _ = tui::restore_terminal(term);
         }
-        info!("Unregistered {SCHEDULER_NAME} scheduler");
+        if let Some(name) = self.bpf.wait_for_detach() {
+            warn!(
+                "{SCHEDULER_NAME} scheduler stop requested, but {ROOT} still reports {name}",
+                ROOT = "/sys/kernel/sched_ext/root/ops"
+            );
+        } else {
+            info!("Unregistered {SCHEDULER_NAME} scheduler");
+        }
     }
 }
 
