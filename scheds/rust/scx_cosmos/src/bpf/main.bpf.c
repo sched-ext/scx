@@ -1110,6 +1110,15 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	}
 }
 
+static inline bool is_cpu_idle(s32 cpu)
+{
+	struct task_struct *p;
+
+	p = __COMPAT_scx_bpf_cpu_curr(cpu);
+
+	return p ? p->flags & PF_IDLE : false;
+}
+
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
@@ -1170,6 +1179,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * migrate.
 	 */
 	if (task_should_migrate(p, enq_flags) ||
+	    !is_cpu_idle(prev_cpu) ||
+	    (avoid_smt && is_smt_contended(prev_cpu)) ||
 	    (!is_pcpu_task(p) && (is_event_heavy(tctx) || !is_primary_cpu(prev_cpu)))) {
 		if (is_pcpu_task(p))
 			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
