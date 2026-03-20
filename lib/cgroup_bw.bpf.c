@@ -1683,7 +1683,7 @@ bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
 {
 	struct scx_cgroup_llc_ctx *llcx;
 	s64 burst = 0, debt = 0, base, budget;
-	bool period_end;
+	bool period_end, was_throttled;
 	int i;
 
 	/*
@@ -1741,13 +1741,19 @@ bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
 
 out_no_replenish:
 	/*
-	 * If the cgroup is throttled or has backlogged tasks, return true
-	 * so the cgroup's backlogged tasks can be reenqueued. Note that
-	 * unthrottled tasks can still have backlogged tasks if reenqueuing
-	 * them could not finish within one replenish period.
+	 * Snapshot is_throttled before clearing it. Both conditions mean the
+	 * cgroup needs reenqueue attention next period:
+	 *
+	 * - was_throttled: budget was exhausted this period. Even if the BTQ
+	 *   appears empty (e.g., the bottom half just popped the last task but
+	 *   hasn't reenqueued it yet), we must not miss this cgroup.
+	 *
+	 * - cbw_has_backlogged_tasks: tasks remain in the BTQ from an
+	 *   incomplete drain (reenqueuing couldn't finish within one period).
 	 */
+	was_throttled = READ_ONCE(cgx->is_throttled);
 	WRITE_ONCE(cgx->is_throttled, false);
-	return READ_ONCE(cgx->is_throttled) || cbw_has_backlogged_tasks(cgx);
+	return was_throttled || cbw_has_backlogged_tasks(cgx);
 }
 
 /*
