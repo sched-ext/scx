@@ -578,7 +578,7 @@ static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 {
 	return (is_cpu_idle && !queued_on_cpu(cpuc)) ||
 	       (lb_local_dsq_util_wall > 0 &&
-		sys_stat.avg_util_wall < lb_local_dsq_util_wall);
+		cpuc->avg_util_wall < lb_local_dsq_util_wall);
 }
 
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
