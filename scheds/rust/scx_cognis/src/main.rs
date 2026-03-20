@@ -75,7 +75,7 @@ const DEFAULT_DESKTOP_SLICE_MIN_NS: u64 = 250_000;
 const DEFAULT_SERVER_SLICE_MIN_NS: u64 = 1_000_000;
 const DEFAULT_DESKTOP_SLICE_LAG_NS: u64 = 40_000_000;
 const DEFAULT_SERVER_SLICE_LAG_NS: u64 = 1_500_000;
-const IDLE_BACKOFF: Duration = Duration::from_micros(250);
+const IDLE_BACKOFF: Duration = Duration::from_millis(5);
 const RESTART_BACKOFF: Duration = Duration::from_millis(250);
 const RAPID_FAILURE_WINDOW: Duration = Duration::from_secs(30);
 const RAPID_FAILURE_LIMIT: u32 = 20;
@@ -1553,33 +1553,6 @@ impl Drop for Scheduler<'_> {
     }
 }
 
-fn elevate_scheduler_thread() {
-    // Keep the userspace scheduler responsive without turning it into a
-    // permanent real-time thread.
-    //
-    // The previous implementation promoted the main loop to SCHED_FIFO(1).
-    // That diverged from Andrea Righi's stable reference scheduler and was
-    // unsafe here because Cognis runs a mostly non-blocking control loop
-    // (schedule → housekeeping → optional TUI draw). Under SCHED_FIFO, Linux
-    // runs the thread until it blocks, is preempted by a higher-priority RT
-    // thread, or yields to an equal-priority peer; normal-priority kworkers on
-    // the same CPU can therefore be starved long enough to trip the sched_ext
-    // watchdog. See sched(7): https://man7.org/linux/man-pages/man7/sched.7.html
-    //
-    // A best-effort nice(-20) boost keeps the scheduler favored under CFS
-    // while still preserving fair progress for kernel workers and the rest of
-    // the system.
-    unsafe {
-        if libc::setpriority(libc::PRIO_PROCESS, 0, -20) != 0 {
-            warn!(
-                "Could not raise nice priority to -20 (errno {}); continuing \
-                 with default CFS priority",
-                *libc::__errno_location()
-            );
-        }
-    }
-}
-
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(msg) = payload.downcast_ref::<&'static str>() {
         (*msg).to_string()
@@ -1704,8 +1677,6 @@ fn main() -> Result<()> {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
-
-        elevate_scheduler_thread();
 
         let loop_result = panic::catch_unwind(AssertUnwindSafe(|| -> Result<bool> {
             let mut sched = Scheduler::init(&opts, &mut open_object, shutdown.clone())?;

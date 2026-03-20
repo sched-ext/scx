@@ -30,6 +30,7 @@ Cognis uses a BPF queue hierarchy and tries to keep normal scheduling decisions 
 - default CLI mode: `desktop`
 - alternate CLI mode: `server`
 - watchdog-triggered `sched_ext` exits are treated as non-restartable failures so Cognis fails open to the kernel scheduler instead of immediately re-executing itself
+- the headless no-fallback path now backs off more aggressively and does not boost the Cognis userspace thread priority by default
 
 The BPF policy lives in [src/bpf/main.bpf.c](src/bpf/main.bpf.c). The Rust control plane lives in [src/main.rs](src/main.rs) and [src/bpf.rs](src/bpf.rs).
 
@@ -123,6 +124,7 @@ sudo ./target/release/scx_cognis --tui
 - The BPF side uses bounded queue domains and per-task local state.
 - `desktop` and `server` share the same hierarchy so the server profile remains a first-class mode rather than a neglected side path.
 - Watchdog / runnable-task-stall exits fail open to the kernel scheduler instead of being treated as restartable runtime exits.
+- In headless no-fallback periods, the Rust loop backs off instead of trying to run as an aggressively favored userspace thread.
 
 ## Limitations
 
