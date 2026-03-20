@@ -29,6 +29,7 @@ Cognis uses a BPF queue hierarchy and tries to keep normal scheduling decisions 
 - remote balancing: cross-LLC and cross-node steals before the final shared spill path
 - default CLI mode: `desktop`
 - alternate CLI mode: `server`
+- watchdog-triggered `sched_ext` exits are treated as non-restartable failures so Cognis fails open to the kernel scheduler instead of immediately re-executing itself
 
 The BPF policy lives in [src/bpf/main.bpf.c](src/bpf/main.bpf.c). The Rust control plane lives in [src/main.rs](src/main.rs) and [src/bpf.rs](src/bpf.rs).
 
@@ -121,12 +122,14 @@ sudo ./target/release/scx_cognis --tui
 - The Rust-side scheduler tables are fixed-capacity and allocated once at startup rather than grown on demand on the hot path.
 - The BPF side uses bounded queue domains and per-task local state.
 - `desktop` and `server` share the same hierarchy so the server profile remains a first-class mode rather than a neglected side path.
+- Watchdog / runnable-task-stall exits fail open to the kernel scheduler instead of being treated as restartable runtime exits.
 
 ## Limitations
 
 - Cognis is BPF-first, but not a pure BPF-only scheduler with no Rust companion.
 - Production readiness still depends on machine-specific validation under the target desktop or server workload mix.
 - The monitor exposes fallback slice state more directly than live BPF per-task slice state.
+- The current mitigation for watchdog-triggered `sched_ext` exits is fail-open behavior, not a claim that the entire stall class has been eliminated.
 
 ## License
 

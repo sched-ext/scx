@@ -79,6 +79,7 @@ const IDLE_BACKOFF: Duration = Duration::from_micros(250);
 const RESTART_BACKOFF: Duration = Duration::from_millis(250);
 const RAPID_FAILURE_WINDOW: Duration = Duration::from_secs(30);
 const RAPID_FAILURE_LIMIT: u32 = 20;
+const EXIT_CODE_SCHED_EXT_RUNTIME_FAILURE: i32 = 86;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum SchedulerMode {
@@ -1589,8 +1590,14 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn is_runtime_exit_error(err: &anyhow::Error) -> bool {
-    err.to_string().starts_with("EXIT:")
+fn runtime_exit_reason(err: &anyhow::Error) -> Option<String> {
+    err.to_string()
+        .strip_prefix("EXIT:")
+        .map(|reason| reason.trim().to_string())
+}
+
+fn is_watchdog_runtime_exit(reason: &str) -> bool {
+    reason.contains("runnable task stall") || reason.contains("watchdog failed to check in")
 }
 
 fn log_cognis_failure(reason: &str) {
@@ -1708,50 +1715,27 @@ fn main() -> Result<()> {
         match loop_result {
             Ok(Ok(true)) => continue,
             Ok(Ok(false)) => break,
-            Ok(Err(err)) if is_runtime_exit_error(&err) => {
+            Ok(Err(err)) if runtime_exit_reason(&err).is_some() => {
                 tui::emergency_restore_terminal();
-                let now = Instant::now();
-                rapid_failures = if last_failure_at
-                    .is_some_and(|prev| now.duration_since(prev) <= RAPID_FAILURE_WINDOW)
-                {
-                    rapid_failures.saturating_add(1)
-                } else {
-                    1
-                };
-                last_failure_at = Some(now);
+                let reason =
+                    runtime_exit_reason(&err).unwrap_or_else(|| "unknown sched_ext exit".into());
 
-                if rapid_failures > RAPID_FAILURE_LIMIT {
-                    log_cognis_failure(&format!(
-                        "exceeded {} restart attempts in {:?}: {}",
-                        RAPID_FAILURE_LIMIT, RAPID_FAILURE_WINDOW, err
-                    ));
-                    std::process::exit(1);
+                if is_watchdog_runtime_exit(&reason) {
+                    warn!(
+                        "sched_ext watchdog exit detected; refusing automatic restart and \
+                         leaving the system on the kernel scheduler: {}",
+                        reason
+                    );
+                } else {
+                    warn!(
+                        "non-restartable sched_ext runtime exit detected; refusing automatic \
+                         restart: {}",
+                        reason
+                    );
                 }
 
-                warn!(
-                    "runtime failure detected (attempt {}/{} in {:?}): {}; re-executing for \
-                     clean restart in {:?}",
-                    rapid_failures, RAPID_FAILURE_LIMIT, RAPID_FAILURE_WINDOW, err, RESTART_BACKOFF
-                );
-                std::thread::sleep(RESTART_BACKOFF);
-
-                // Re-exec this binary for a completely clean OS state.
-                //
-                // In-process restart fails after a sched_ext watchdog event because
-                // the post-crash kernel state leaves sigaltstack(2) broken (EPERM),
-                // which then aborts the process when StatsServer::launch() tries to
-                // spawn its stats thread.  exec() replaces the process image in-place
-                // (same PID so systemd keeps tracking it) and resets all OS state.
-                let exe = std::env::current_exe()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("/proc/self/exe"));
-                let exec_err = std::process::Command::new(&exe)
-                    .args(std::env::args_os().skip(1))
-                    .exec();
-                // exec() only returns on error — fall back to in-process restart.
-                warn!(
-                    "re-exec failed ({}); falling back to in-process restart",
-                    exec_err
-                );
+                log_cognis_failure(&format!("non-restartable sched_ext exit: {reason}"));
+                std::process::exit(EXIT_CODE_SCHED_EXT_RUNTIME_FAILURE);
             }
             Ok(Err(err)) => {
                 tui::emergency_restore_terminal();
@@ -1810,9 +1794,10 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        enabled_flag_summary, BpfProfile, Opts, Scheduler, DEFAULT_DESKTOP_SLICE_LAG_NS,
-        DEFAULT_DESKTOP_SLICE_MIN_NS, DEFAULT_DESKTOP_SLICE_NS, DEFAULT_SERVER_SLICE_LAG_NS,
-        DEFAULT_SERVER_SLICE_MIN_NS, DEFAULT_SERVER_SLICE_NS,
+        enabled_flag_summary, is_watchdog_runtime_exit, runtime_exit_reason, BpfProfile, Opts,
+        Scheduler, DEFAULT_DESKTOP_SLICE_LAG_NS, DEFAULT_DESKTOP_SLICE_MIN_NS,
+        DEFAULT_DESKTOP_SLICE_NS, DEFAULT_SERVER_SLICE_LAG_NS, DEFAULT_SERVER_SLICE_MIN_NS,
+        DEFAULT_SERVER_SLICE_NS,
     };
     use clap::Parser;
 
@@ -1921,5 +1906,22 @@ mod tests {
             enabled_flag_summary(&opts),
             "partial,percpu_local,verbose,tui,stats"
         );
+    }
+
+    #[test]
+    fn runtime_exit_reason_extracts_sched_ext_exit_message() {
+        let err = anyhow::anyhow!("EXIT: runnable task stall (watchdog failed to check in)");
+        assert_eq!(
+            runtime_exit_reason(&err).as_deref(),
+            Some("runnable task stall (watchdog failed to check in)")
+        );
+    }
+
+    #[test]
+    fn watchdog_runtime_exit_detection_matches_stall_message() {
+        assert!(is_watchdog_runtime_exit(
+            "runnable task stall (watchdog failed to check in)"
+        ));
+        assert!(!is_watchdog_runtime_exit("scheduler requested restart"));
     }
 }
