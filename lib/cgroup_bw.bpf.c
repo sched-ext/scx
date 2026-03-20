@@ -2107,14 +2107,12 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 		}
 
 		/*
-		 * Update cgx->is_throttled before draining BTQ.
-		 * When the cgroup is already throttled, bail out early.
+		 * Update cgx->is_throttled before draining BTQ. Even if this
+		 * LLC context is throttled, continue to other LLC contexts
+		 * since they may have remaining budget.
 		 */
-		if (cbw_cgroup_bw_throttled(cgrp, idx) == -EAGAIN) {
-			cbw_dbg("Give up on re-enqueueing tasks since cgroup "
-				"is already throttled: cgid%llu", cgrp_id);
-			break;
-		}
+		if (cbw_cgroup_bw_throttled(cgrp, idx) == -EAGAIN)
+			continue;
 
 		nr_enq += cbw_drain_btq_until_throttled(cgx, llcx);
 		if (nr_enq >= CBW_REENQ_MAX_BATCH)
