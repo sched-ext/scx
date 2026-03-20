@@ -1177,7 +1177,7 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 			WRITE_ONCE(cur_cgx->is_throttled, true);
 
 		/* Aggregate this cgroup's runtime_total_sloppy to the level. */
-		tree->levels[cur_level] += cur_cgx->runtime_total_sloppy;
+		tree->levels[cur_level] += READ_ONCE(cur_cgx->runtime_total_sloppy);
 		
 		/* Update the previous level. */
 		prev_level = cur_level;
@@ -1703,10 +1703,12 @@ bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
 	if ((cgx->burst > 0) && (debt < 0)) {
 		burst = min(-debt, cgx->burst_remaining);
 
-		if (period_end)
-			cgx->burst_remaining = cgx->burst;
-		else
-			cgx->burst_remaining -= burst;
+		if (period_end) {
+			WRITE_ONCE(cgx->burst_remaining, cgx->burst);
+		} else {
+			WRITE_ONCE(cgx->burst_remaining,
+				   cgx->burst_remaining - burst);
+		}
 	}
 
 	/*
@@ -1740,6 +1742,26 @@ bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
 	dbg_cgx(cgx, "replenished: ");
 
 out_no_replenish:
+	/*
+	 * Ensure budget_remaining writes above are globally visible before
+	 * is_throttled is read and cleared below. This provides two guarantees:
+	 *
+	 * 1. Same-cgroup ordering: a task observing is_throttled=false must also
+	 *    see the replenished budget_remaining. Without this, on non-TSO
+	 *    architectures like ARM64, a task could see is_throttled=false but
+	 *    still read the old negative budget, spuriously re-throttle itself,
+	 *    and land back in the BTQ unnecessarily.
+	 *
+	 * 2. Cross-cgroup ordering: cgroups are replenished top-down (subroot
+	 *    before leaf). This barrier ensures the subroot's budget_remaining
+	 *    write is globally visible before the timer reads the leaf's
+	 *    is_throttled in the next iteration. Without this, a task processing
+	 *    a leaf cgroup could read the subroot's stale-negative budget and
+	 *    spuriously re-throttle, corrupting the timer's throttle detection
+	 *    for the leaf.
+	 */
+	smp_mb();
+
 	/*
 	 * Snapshot is_throttled before clearing it. Both conditions mean the
 	 * cgroup needs reenqueue attention next period:
