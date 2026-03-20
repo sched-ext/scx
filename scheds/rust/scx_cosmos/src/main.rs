@@ -378,6 +378,14 @@ struct Opts {
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     avoid_smt: bool,
 
+    /// Disable early clearing of idle CPU state.
+    ///
+    /// When enabled, multiple concurrent wakeups can select the same idle CPU
+    /// before it fully wakes up. This can improve performance in highly communicative
+    /// workloads by aggressively stacking tasks on the same cache.
+    #[clap(short = 'N', long, action = clap::ArgAction::SetTrue)]
+    no_early_clear: bool,
+
     /// Disable direct dispatch during synchronous wakeups.
     ///
     /// Enabling this option can lead to a more uniform load distribution across available cores,
@@ -810,6 +818,7 @@ impl<'a> Scheduler<'a> {
         rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.avoid_smt = opts.avoid_smt;
+        rodata.no_early_clear = opts.no_early_clear;
         rodata.tick_preempt = !opts.no_tick_preempt;
         rodata.mm_affinity = opts.mm_affinity;
 
