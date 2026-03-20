@@ -4,6 +4,9 @@
 
 Cognis keeps the normal scheduling path in BPF. Rust remains in the process as a control plane for loading, topology export, stats, restart handling, the optional TUI, and a narrow compatibility fallback when work intentionally crosses into userspace.
 
+> [!NOTE]
+> This in-tree README is intentionally shorter than the standalone [galpt/scx_cognis](https://github.com/galpt/scx_cognis) README. For fuller benchmark notes, standalone install scripts, and additional operational details, see the main Cognis repository.
+
 ## Table of Contents
 
 - [Overview](#overview)
