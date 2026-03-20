@@ -1,6 +1,6 @@
 [package]
 name = "scx_cognis"
-version = "2.0.7"
+version = "2.0.8"
 authors = ["scx_cognis contributors"]
 edition = "2021"
 description = "BPF-first sched_ext CPU scheduler with locality-aware desktop and server profiles. https://github.com/sched-ext/scx/tree/main"
