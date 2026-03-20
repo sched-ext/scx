@@ -2046,8 +2046,8 @@ rearm_out:
 }
 
 static
-int cbw_drain_btq_until_throttled(struct scx_cgroup_ctx *cgx,
-				  struct scx_cgroup_llc_ctx *llcx)
+int cbw_drain_btq_batch(struct scx_cgroup_ctx *cgx,
+			struct scx_cgroup_llc_ctx *llcx)
 {
 	scx_task_common *taskc;
 	int i;
@@ -2064,7 +2064,6 @@ int cbw_drain_btq_until_throttled(struct scx_cgroup_ctx *cgx,
 	 * at any point.
 	 */
 	for (i = 0; i < CBW_REENQ_MAX_BATCH &&
-		    !READ_ONCE(cgx->is_throttled) &&
 		    (taskc = (scx_task_common *)scx_atq_pop(llcx->btq)) &&
 		    can_loop; i++) {
 		/*
@@ -2114,7 +2113,7 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 		if (cbw_cgroup_bw_throttled(cgrp, idx) == -EAGAIN)
 			continue;
 
-		nr_enq += cbw_drain_btq_until_throttled(cgx, llcx);
+		nr_enq += cbw_drain_btq_batch(cgx, llcx);
 		if (nr_enq >= CBW_REENQ_MAX_BATCH)
 			break;
 	}
