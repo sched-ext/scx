@@ -47,6 +47,8 @@
 
 #![allow(dead_code)]
 
+use std::io;
+
 /// Number of slots in the trust table.  Power of 2 so the hash shift is exact.
 /// 4096 slots can track up to 4096 simultaneous PIDs before collision eviction.
 pub const TRUST_TABLE_SIZE: usize = 4096;
@@ -630,4 +632,3 @@ mod tests {
         assert_eq!(s, "this_is_a_very_");
     }
 }
-use std::io;

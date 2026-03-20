@@ -143,7 +143,7 @@ These references informed Cognis' design and evaluation mindset, especially arou
 3. Agrawal, K., & Sukha, J. (2011). *Hierarchical scheduling for multicores with multilevel cache hierarchies*. Washington University in St. Louis, Department of Computer Science and Engineering. https://openscholarship.wustl.edu/cse_research/66/
 4. Wang, J., Trach, B., Fu, M., Behrens, D., Schwender, J., Liu, Y., Lei, J., Vafeiadis, V., Härtig, H., & Chen, H. (2023). *BWoS: Formally verified block-based work stealing for parallel processing*. 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI 23). Used here as a steal-policy and hierarchy reference point rather than as a Linux CPU-scheduler blueprint. https://www.usenix.org/conference/osdi23/presentation/wang-jiawei
 
-### Reference Schedulers And Implementation References
+### Reference Schedulers
 
 1. sched-ext maintainers. (n.d.). *scx_bpfland* [Software]. GitHub. https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_bpfland
 2. sched-ext maintainers. (n.d.). *scx_beerland* [Software]. GitHub. https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_beerland
