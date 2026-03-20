@@ -1453,6 +1453,7 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, int llc_id)
 	 */
 	if (cgrp->level == 1) {
 		dbg_cgx(cgx, "throttled: ");
+		WRITE_ONCE(cgx->is_throttled, true);
 		return -EAGAIN;
 	}
 
@@ -1487,6 +1488,7 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, int llc_id)
 	 * remaining budget for this cgroup.
 	 */
 	ret = -EAGAIN;
+	WRITE_ONCE(cgx->is_throttled, true);
 	dbg_cgx(subroot_cgx, "subroot_cgx:throttled: ");
 	dbg_cgx(cgx, "cgx:throttled: ");
 	dbg_llcx(llcx, "llcx:throttled: ");
