@@ -53,22 +53,33 @@
 /// This is a 16-byte structure (two `u64`s) with 8-byte alignment,
 /// matching the kernel's `struct bpf_timer { __u64 __opaque[2]; }`.
 ///
+/// The struct is named `bpf_timer` (not `BpfTimer`) because the kernel's
+/// `btf_find_timer()` searches for a struct member whose BTF type is
+/// literally named `bpf_timer`. If the BTF name doesn't match, the
+/// kernel rejects the map with "map has no valid bpf_timer". This is
+/// the same approach used for `bpf_spin_lock`.
+///
 /// The timer must be initialized with [`timer_init`] before use.
 /// The kernel manages the timer's internal state; BPF programs must
 /// not read or write the opaque fields directly.
 #[repr(C, align(8))]
 #[derive(Clone, Copy)]
-pub struct BpfTimer {
+#[allow(non_camel_case_types)]
+pub struct bpf_timer {
     _opaque: [u64; 2],
 }
 
-impl BpfTimer {
-    /// Create a zero-initialized `BpfTimer`.
+/// Alias for idiomatic Rust naming. The underlying type must be named
+/// `bpf_timer` for BTF compatibility with the kernel.
+pub type BpfTimer = bpf_timer;
+
+impl bpf_timer {
+    /// Create a zero-initialized `bpf_timer`.
     ///
     /// This is suitable for embedding in a map value struct. The timer
     /// is not usable until [`timer_init`] is called on it.
     pub const fn zeroed() -> Self {
-        BpfTimer { _opaque: [0; 2] }
+        bpf_timer { _opaque: [0; 2] }
     }
 }
 

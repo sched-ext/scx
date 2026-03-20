@@ -58,9 +58,8 @@ use scx_ebpf::maps::{TaskStorage, PerCpuArray, PerfEventArray, BpfArray};
 use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
 use scx_ebpf::cpumask::{self, bpf_cpumask};
 use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
-// BpfTimer type kept for WakeupTimer struct definition (disabled until BTF fixup).
-#[allow(unused_imports)]
-use scx_ebpf::timer::BpfTimer;
+// bpf_timer type and helpers for deferred wakeup timer.
+use scx_ebpf::timer::{self, BpfTimer};
 
 scx_ebpf::scx_ebpf_boilerplate!();
 
@@ -150,10 +149,9 @@ static PMU_BASELINE: PerCpuArray<u64, 1> = PerCpuArray::new();
 
 /// Timer map value type for deferred wakeup timer.
 ///
-/// DISABLED: The kernel's btf_find_timer() requires the BTF type to be named
-/// "bpf_timer", but Rust emits "BpfTimer". The map creation fails with
-/// "map has no valid bpf_timer". This needs a BTF fixup in aya-obj similar
-/// to the kptr TYPE_TAG injection. See aya-48 follow-up.
+/// The kernel's btf_find_timer() walks the map value struct looking for a
+/// member whose BTF type is named exactly `bpf_timer`. The `BpfTimer` type
+/// alias resolves to `struct bpf_timer` in BTF, satisfying this requirement.
 ///
 /// C reference: `struct wakeup_timer { struct bpf_timer timer; };`
 #[repr(C)]
@@ -162,11 +160,9 @@ struct WakeupTimer {
     timer: BpfTimer,
 }
 
-// WAKEUP_TIMER map disabled — see above.
-// When aya gains bpf_timer BTF fixup, uncomment this:
-// #[unsafe(link_section = ".maps")]
-// #[unsafe(no_mangle)]
-// static WAKEUP_TIMER: BpfArray<WakeupTimer, 1> = BpfArray::new();
+#[unsafe(link_section = ".maps")]
+#[unsafe(no_mangle)]
+static WAKEUP_TIMER: BpfArray<WakeupTimer, 1> = BpfArray::new();
 
 // ── Constants ───────────────────────────────────────────────────────────
 
@@ -347,10 +343,7 @@ static mut PERF_THRESHOLD: u64 = 0;
 ///
 /// C reference: `const volatile bool deferred_wakeups = true`
 #[unsafe(no_mangle)]
-// NOTE: Disabled by default until BTF fixup for bpf_timer type name is
-// implemented. The kernel's btf_find_timer() requires the type to be named
-// "bpf_timer", but Rust emits "BpfTimer". See aya-48 follow-up.
-static mut DEFERRED_WAKEUPS: bool = false;
+static mut DEFERRED_WAKEUPS: bool = true;
 
 // PMU integration architecture:
 //
@@ -825,36 +818,22 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     }
 
     // Strategy 2: kernel's default idle CPU selection.
+    //
+    // NOTE: Do NOT reject the CPU returned by select_cpu_dfl based on
+    // SMT sibling state. select_cpu_dfl internally claims the CPU's idle
+    // bit (via scx_bpf_test_and_clear_cpu_idle). Rejecting the CPU here
+    // would waste it: the CPU is marked non-idle but never used, causing
+    // subsequent tasks to skip it. This leads to severe wakeup latency
+    // (3ms+) as tasks pile up in DSQs with no CPU to consume them.
+    //
+    // SMT-aware idle CPU selection is properly handled by
+    // scx_bpf_select_cpu_and() with SCX_PICK_IDLE_CORE (Strategy 1 above,
+    // kernel >= 6.16). On older kernels, accept whatever select_cpu_dfl
+    // returns — matching C cosmos behavior.
     let mut is_idle: bool = false;
     let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
 
-    if !is_idle {
-        // No idle CPU found — nothing more to try.
-        return -1;
-    }
-
-    // Strategy 3: SMT-aware verification.
-    // If avoid_smt is enabled, check whether the found CPU's physical
-    // core is fully idle (both SMT siblings). If not, reject it to
-    // avoid contention on the same core.
-    //
-    // The idle SMT mask has a bit set for each CPU whose SMT sibling(s)
-    // are ALL idle. So if cpu is set in the smtmask, the entire core
-    // is idle and it's a good pick.
-    if unsafe { SMT_ENABLED } && unsafe { AVOID_SMT } {
-        let smtmask = kfuncs::get_idle_smtmask();
-        let core_idle = cpumask::test_cpu(cpu as u32, smtmask);
-        kfuncs::put_cpumask(smtmask);
-
-        if !core_idle {
-            // The CPU is idle but its SMT sibling is busy. Reject it.
-            // The caller can still dispatch locally (non-idle path)
-            // or let enqueue() handle it.
-            return -1;
-        }
-    }
-
-    cpu
+    if is_idle { cpu } else { -1 }
 }
 
 // ── PMU helpers ─────────────────────────────────────────────────────────
@@ -924,33 +903,37 @@ fn update_perf_counters(p: *mut task_struct, delta: u64) {
 /// The timer re-arms itself at the end for periodic execution with period
 /// equal to `SLICE_NS`.
 ///
-/// Deferred wakeup timer callback (DISABLED — bpf_timer BTF fixup needed).
+/// Deferred wakeup timer callback.
 ///
 /// C reference: `wakeup_timerfn()` in `main.bpf.c`
 ///
-/// When BTF fixup for bpf_timer is implemented, this will:
-/// - Iterate all CPUs, kick idle ones with queued tasks
-/// - Re-arm itself for periodic execution
+/// Iterates all CPUs, kicks idle ones with queued tasks, and re-arms
+/// the timer for periodic execution.
 ///
-/// Kept as dead code for documentation and future enablement.
-#[allow(dead_code)]
+/// Note: The C version also checks `is_cpu_idle(cpu)` using
+/// `__COMPAT_scx_bpf_cpu_curr()`. We skip that check because
+/// `SCX_KICK_IDLE` already makes the kick a no-op for non-idle CPUs,
+/// and `scx_bpf_cpu_curr` is not available on all kernels (requires
+/// the compat fallback via `scx_bpf_cpu_rq`).
 #[inline(never)]
 fn wakeup_timerfn(
     _map: *mut core::ffi::c_void,
     _key: *mut i32,
-    _timer: *mut BpfTimer,
+    timer_ptr: *mut BpfTimer,
 ) -> i32 {
     let nr = unsafe { NR_CPU_IDS };
     let bound = if nr < MAX_CPUS as u32 { nr } else { MAX_CPUS as u32 };
 
     bpf_for!(cpu, 0, bound, {
         let dsq_id = kfuncs::SCX_DSQ_LOCAL_ON | cpu as u64;
-        if kfuncs::dsq_nr_queued(dsq_id) > 0 && is_cpu_idle(cpu as i32) {
+        if kfuncs::dsq_nr_queued(dsq_id) > 0 {
             kfuncs::kick_cpu(cpu as i32, SCX_KICK_IDLE);
         }
     });
 
-    // Re-arm: timer::timer_start(timer, slice_ns, 0);
+    // Re-arm the timer for periodic execution (every slice_ns).
+    let slice = unsafe { SLICE_NS };
+    timer::timer_start(timer_ptr, slice, 0);
     0
 }
 
@@ -1556,18 +1539,19 @@ pub fn on_init() -> i32 {
     // C reference: cosmos_init():
     //   timer = bpf_map_lookup_elem(&wakeup_timer, &key);
     //   bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
-    //   bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
     //   bpf_timer_set_callback(timer, wakeup_timerfn);
     //   bpf_timer_start(timer, slice_ns, 0);
-    //
-    // DISABLED: bpf_timer BTF fixup not yet implemented. The WAKEUP_TIMER
-    // map is commented out. When enabled, uncomment the block below.
-    // See aya-48 follow-up.
-    //
-    // if unsafe { DEFERRED_WAKEUPS } {
-    //     let timer_ptr = WAKEUP_TIMER.get_ptr_mut(0);
-    //     ...
-    // }
+    if unsafe { DEFERRED_WAKEUPS } {
+        let timer_val = WAKEUP_TIMER.get_ptr_mut(0);
+        if !timer_val.is_null() {
+            let t = unsafe { &mut (*timer_val).timer as *mut BpfTimer };
+            let map_ptr = core::ptr::from_ref(&WAKEUP_TIMER).cast();
+            timer::timer_init(t, map_ptr, timer::CLOCK_MONOTONIC);
+            timer::timer_set_callback(t, wakeup_timerfn as *const () as u64);
+            let slice = unsafe { SLICE_NS };
+            timer::timer_start(t, slice, 0);
+        }
+    }
 
     // Initialize per-CPU perf_events counters to zero when PMU is enabled.
     // C reference: cosmos_init() zeros cctx->perf_events for all CPUs.
