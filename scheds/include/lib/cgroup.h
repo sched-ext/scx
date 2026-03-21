@@ -144,19 +144,29 @@ int scx_cgroup_bw_cancel(u64 taskc);
 
 /**
  * REGISTER_SCX_CGROUP_BW_ENQUEUE_CB - Register an enqueue callback.
- * @eqcb: A function name with a prototype of 'void fn(void * __arg_arena)'.
+ * @eqcb: A function name with a prototype of
+ *        'int fn(struct task_struct * __arg_trusted, u64)'.
  *
- * @eqcb enqueues a task with @pid following the BPF scheduler's
- * regular enqueue path. @enqueue_cb will be called when a throttled cgroup
- * becomes available again or when the cgroup is exiting for some reason.
+ * @eqcb enqueues task @p following the BPF scheduler's regular enqueue
+ * path. @eqcb will be called when a throttled cgroup becomes available
+ * again or when the cgroup is exiting for some reason.
  * @eqcb MUST enqueue the task; otherwise, the task will be lost and
  * never be scheduled.
  */
 #define REGISTER_SCX_CGROUP_BW_ENQUEUE_CB(eqcb)					\
-	__hidden int scx_cgroup_bw_enqueue_cb(u64 taskc)			\
+	__hidden int scx_cgroup_bw_enqueue_cb(u64 ctx)				\
 	{									\
-		extern int eqcb(u64);						\
-		eqcb(taskc);							\
+		extern int eqcb(struct task_struct * __arg_trusted, u64);	\
+		task_ctx *taskc = (task_ctx *)ctx;				\
+		struct task_struct *p = bpf_task_from_pid(taskc->pid);		\
+		if (p) {							\
+			eqcb(p, (u64)taskc);					\
+			bpf_task_release(p);					\
+		} else {							\
+			scx_bpf_error("BUG: bpf_task_from_pid() failed for "	\
+				      "pid %d -- exiting task was "		\
+				      "unexpectedly throttled", taskc->pid);	\
+		}								\
 		return 0;							\
 	}
 
