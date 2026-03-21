@@ -243,6 +243,145 @@ macro_rules! bpf_repeat {
     }};
 }
 
+/// Maximum size of a CO-RE marker record in bytes.
+///
+/// Layout: tag(1) + name_len(1) + name(N) + path_len(1) + path(M).
+/// 128 bytes is generous for any reasonable struct name + field path.
+pub const CORE_RELO_MARKER_MAX: usize = 128;
+
+/// Tag byte marking the start of a CO-RE relocation marker.
+pub const CORE_RELO_TAG: u8 = 0xAC;
+
+/// Result of building a CO-RE marker at compile time.
+///
+/// Contains the fixed-size buffer and the actual length of valid data.
+pub struct CoreReloMarkerData {
+    pub buf: [u8; CORE_RELO_MARKER_MAX],
+    pub len: usize,
+}
+
+/// Extracts the last path segment from a stringified type path.
+///
+/// `stringify!(vmlinux::task_struct)` produces `"vmlinux :: task_struct"`.
+/// This function returns the byte range for `"task_struct"` (skipping
+/// spaces around `::` separators).
+///
+/// Returns `(start, end)` indices into the input byte slice.
+pub const fn last_path_segment(s: &[u8]) -> (usize, usize) {
+    // Walk backwards to find the last `:`
+    let len = s.len();
+    let mut last_colon = len; // "no colon found"
+    let mut i = len;
+    while i > 0 {
+        i -= 1;
+        if s[i] == b':' {
+            last_colon = i;
+            break;
+        }
+    }
+
+    if last_colon == len {
+        // No `::` -- strip leading/trailing spaces from the whole string
+        let start = skip_spaces_forward(s, 0);
+        let end = skip_spaces_backward(s, len);
+        return (start, end);
+    }
+
+    // Start after the last `:`, skip spaces
+    let start = skip_spaces_forward(s, last_colon + 1);
+    let end = skip_spaces_backward(s, len);
+    (start, end)
+}
+
+/// Removes spaces from a stringified field path.
+///
+/// `stringify!(scx.dsq_vtime)` produces `"scx . dsq_vtime"`.
+/// This function copies the bytes without spaces into `dst` and
+/// returns the number of bytes written.
+pub const fn strip_spaces(src: &[u8], dst: &mut [u8]) -> usize {
+    let mut out = 0;
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] != b' ' {
+            dst[out] = src[i];
+            out += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+const fn skip_spaces_forward(s: &[u8], mut i: usize) -> usize {
+    while i < s.len() && s[i] == b' ' {
+        i += 1;
+    }
+    i
+}
+
+const fn skip_spaces_backward(s: &[u8], mut i: usize) -> usize {
+    while i > 0 && s[i - 1] == b' ' {
+        i -= 1;
+    }
+    i
+}
+
+/// Builds a CO-RE marker record at compile time.
+///
+/// The marker format (matching `marker_parser.rs`):
+///   - 1 byte:  tag `0xAC`
+///   - 1 byte:  struct name length (N)
+///   - N bytes: struct name (UTF-8)
+///   - 1 byte:  field path length (M)
+///   - M bytes: field path (dot-separated, UTF-8)
+pub const fn build_core_relo_marker(
+    type_str: &[u8],      // e.g. b"vmlinux :: task_struct"
+    field_str: &[u8],     // e.g. b"scx . dsq_vtime"
+) -> CoreReloMarkerData {
+    let mut buf = [0u8; CORE_RELO_MARKER_MAX];
+
+    // Extract struct name (last path segment, e.g., "task_struct")
+    let (seg_start, seg_end) = last_path_segment(type_str);
+    let name_len = seg_end - seg_start;
+
+    // Strip spaces from field path
+    // First compute stripped length, then copy
+    let mut field_buf = [0u8; CORE_RELO_MARKER_MAX];
+    let field_len = strip_spaces(field_str, &mut field_buf);
+
+    // Build the marker
+    let mut pos = 0;
+
+    // Tag
+    buf[pos] = CORE_RELO_TAG;
+    pos += 1;
+
+    // Struct name length
+    buf[pos] = name_len as u8;
+    pos += 1;
+
+    // Struct name bytes
+    let mut i = 0;
+    while i < name_len {
+        buf[pos] = type_str[seg_start + i];
+        pos += 1;
+        i += 1;
+    }
+
+    // Field path length
+    buf[pos] = field_len as u8;
+    pos += 1;
+
+    // Field path bytes
+    i = 0;
+    while i < field_len {
+        buf[pos] = field_buf[i];
+        pos += 1;
+        i += 1;
+    }
+
+    CoreReloMarkerData { buf, len: pos }
+}
+
 /// Write a value to a kernel struct field using compile-time offsets.
 ///
 /// Uses `core::ptr::write_volatile` to write the value at the computed
@@ -251,12 +390,10 @@ macro_rules! bpf_repeat {
 ///
 /// # CO-RE portability
 ///
-/// Like `core_read!`, this macro relies on compile-time offsets that are
-/// correct for the build kernel. For cross-kernel portability, the
-/// `aya-core-postprocessor` scans the compiled BPF bytecode for `STX`
-/// instructions whose `off` field matches known struct field offsets and
-/// generates CO-RE relocation records in `.BTF.ext`. The aya loader's
-/// `relocate_btf()` then patches the `off` field at load time.
+/// This macro emits a marker record into an `.aya.core_relo` ELF section
+/// that the `aya-core-postprocessor` tool reads. The post-processor
+/// generates `bpf_core_relo` records in `.BTF.ext` so that aya's
+/// `relocate_btf()` can patch the `off` field at load time.
 ///
 /// # Arguments
 ///
@@ -277,6 +414,27 @@ macro_rules! bpf_repeat {
 #[macro_export]
 macro_rules! core_write {
     ($struct_ty:ty, $ptr:expr, $($field:ident).+, $val:expr) => {{
+        // Emit CO-RE marker for postprocessor discovery.
+        const _: () = {
+            const __MARKER: $crate::helpers::CoreReloMarkerData =
+                $crate::helpers::build_core_relo_marker(
+                    stringify!($struct_ty).as_bytes(),
+                    stringify!($($field).+).as_bytes(),
+                );
+
+            #[unsafe(link_section = ".aya.core_relo")]
+            #[used]
+            static __CORE_RELO: [u8; __MARKER.len] = {
+                let mut out = [0u8; __MARKER.len];
+                let mut i = 0;
+                while i < __MARKER.len {
+                    out[i] = __MARKER.buf[i];
+                    i += 1;
+                }
+                out
+            };
+        };
+
         let base = $ptr as *mut u8;
         let offset = core::mem::offset_of!($struct_ty, $($field).+);
         let field_ptr = unsafe { base.add(offset) } as *mut _;
@@ -330,33 +488,30 @@ macro_rules! core_write {
 #[macro_export]
 macro_rules! core_read {
     ($struct_ty:ty, $ptr:expr, $($field:ident).+) => {{
+        // Emit CO-RE marker for postprocessor discovery.
+        const _: () = {
+            const __MARKER: $crate::helpers::CoreReloMarkerData =
+                $crate::helpers::build_core_relo_marker(
+                    stringify!($struct_ty).as_bytes(),
+                    stringify!($($field).+).as_bytes(),
+                );
+
+            #[unsafe(link_section = ".aya.core_relo")]
+            #[used]
+            static __CORE_RELO: [u8; __MARKER.len] = {
+                let mut out = [0u8; __MARKER.len];
+                let mut i = 0;
+                while i < __MARKER.len {
+                    out[i] = __MARKER.buf[i];
+                    i += 1;
+                }
+                out
+            };
+        };
+
         // Compute the field pointer using offset_of and raw pointer arithmetic.
-        // The null-pointer trick lets us get the field's type without needing
-        // an actual instance -- we never dereference the null pointer.
         let base = $ptr as *const u8;
         let offset = core::mem::offset_of!($struct_ty, $($field).+);
-
-        // Emit a marker into the .aya.core_relo section.  The post-processor
-        // reads this section to discover which instructions need CO-RE
-        // relocations.
-        //
-        // The marker format is two NUL-terminated strings:
-        //   1. The struct type name (last segment of the Rust path)
-        //   2. The dot-separated field path
-        //
-        // A local label captures the instruction offset for the LDX that
-        // follows.  The post-processor matches the label's address to find
-        // which BPF instruction to attach the relocation to.
-        //
-        // NOTE: This asm block is purely a data annotation; it emits no
-        // BPF instructions in the program's text section.  The
-        // .pushsection / .popsection directives redirect output to the
-        // marker section and back.
-        //
-        // TODO: In a production implementation, this would use a proc-macro
-        // to stringify the type name and field path at compile time.
-        // For the prototype, the sidecar TOML file provides this mapping
-        // instead of inline asm markers.
 
         // Use a null pointer to infer the field type, then read from the real address
         let typed_field_ptr = unsafe {

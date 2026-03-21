@@ -25,4 +25,4 @@ log = "0.4"
 env_logger = "0.11"
 
 [build-dependencies]
-aya-build = "0.1"
+aya-build = { path = "../../../../aya/aya-build", features = ["core-postprocess"] }
