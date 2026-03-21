@@ -246,6 +246,22 @@ impl<'a> Scheduler<'a> {
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
         let mut skel = scx_ops_open!(skel_builder, open_object, maestro_ops, open_opts)?;
 
+        if !compat::struct_has_field("sched_ext_ops", "cgroup_init").unwrap_or(false) {
+            warn!("kernel doesn't support ops.cgroup_init(), disabling");
+            skel.struct_ops.maestro_ops_mut().cgroup_init = std::ptr::null_mut();
+        }
+        if !compat::struct_has_field("sched_ext_ops", "cgroup_exit").unwrap_or(false) {
+            warn!("kernel doesn't support ops.cgroup_exit(), disabling");
+            skel.struct_ops.maestro_ops_mut().cgroup_exit = std::ptr::null_mut();
+        }
+        if !compat::struct_has_field("sched_ext_ops", "cgroup_set_weight").unwrap_or(false) {
+            warn!("kernel doesn't support ops.cgroup_set_weight(), disabling");
+            skel.struct_ops.maestro_ops_mut().cgroup_set_weight = std::ptr::null_mut();
+        }
+        if !compat::struct_has_field("sched_ext_ops", "cgroup_move").unwrap_or(false) {
+            warn!("kernel doesn't support ops.cgroup_move(), disabling");
+            skel.struct_ops.maestro_ops_mut().cgroup_move = std::ptr::null_mut();
+        }
         if !compat::struct_has_field("sched_ext_ops", "sub_attach").unwrap_or(false) {
             warn!("kernel doesn't support ops.sub_attach(), disabling");
             skel.struct_ops.maestro_ops_mut().sub_attach = std::ptr::null_mut();
@@ -281,6 +297,9 @@ impl<'a> Scheduler<'a> {
         } else {
             false
         };
+
+        // Skip scx_bpf_sub_dispatch() in maestro_dispatch() on leaf sub-scheduler instances.
+        rodata.sub_sched_enabled = !is_subsched;
 
         // Normalize CPU capacities to 1..1024 so the highest capacity is always 1024 (Rust-only).
         let mut cpus: Vec<_> = topo.all_cpus.values().collect();
