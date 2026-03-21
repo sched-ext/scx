@@ -50,6 +50,7 @@ pub struct Enums {
     pub SCX_ENQ_LAST: u64,
     pub SCX_ENQ_CLEAR_OPSS: u64,
     pub SCX_ENQ_DSQ_PRIQ: u64,
+    pub SCX_DEQ_SCHED_CHANGE: u64,
 }
 
 lazy_static::lazy_static! {
@@ -95,6 +96,7 @@ lazy_static::lazy_static! {
         SCX_ENQ_LAST: read_enum("scx_enq_flags","SCX_ENQ_LAST").unwrap_or(0),
         SCX_ENQ_CLEAR_OPSS: read_enum("scx_enq_flags","SCX_ENQ_CLEAR_OPSS").unwrap_or(0),
         SCX_ENQ_DSQ_PRIQ: read_enum("scx_enq_flags","SCX_ENQ_DSQ_PRIQ").unwrap_or(0),
+        SCX_DEQ_SCHED_CHANGE: read_enum("scx_deq_flags","SCX_DEQ_SCHED_CHANGE").unwrap_or(0),
     };
 }
 
@@ -144,5 +146,6 @@ macro_rules! import_enums {
         rodata.__SCX_ENQ_LAST = $crate::scx_enums.SCX_ENQ_LAST;
         rodata.__SCX_ENQ_CLEAR_OPSS = $crate::scx_enums.SCX_ENQ_CLEAR_OPSS;
         rodata.__SCX_ENQ_DSQ_PRIQ = $crate::scx_enums.SCX_ENQ_DSQ_PRIQ;
+        rodata.__SCX_DEQ_SCHED_CHANGE = $crate::scx_enums.SCX_DEQ_SCHED_CHANGE;
     }};
 }
