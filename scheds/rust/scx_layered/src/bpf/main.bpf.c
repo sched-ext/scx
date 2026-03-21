@@ -3063,11 +3063,6 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 
 			u64 avg_runtime_us = taskc->runtime_avg / 1000;
 
-			if (!taskc) {
-				scx_bpf_error("could not find task");
-				return false;
-			}
-
 			/* To match, we must get min <= time < max. */
 			return match->min_avg_runtime_us <= avg_runtime_us &&
 				avg_runtime_us < match->max_avg_runtime_us;
