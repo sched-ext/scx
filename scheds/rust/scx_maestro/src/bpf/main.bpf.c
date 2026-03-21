@@ -37,7 +37,28 @@ const volatile bool debug;
  * Sub-scheduler support.
  */
 #define MAX_SUB_SCHEDS		8
-u64 sub_sched_cgroup_ids[MAX_SUB_SCHEDS];
+
+/*
+ * Sub-scheduler context.
+ */
+struct sub_sched_ctx {
+	u64 cgroup_id;
+	u32 weight;
+	u64 cvtime;
+};
+static struct sub_sched_ctx sub_scheds[MAX_SUB_SCHEDS];
+
+/*
+ * Sub-scheduler vruntime (to implement sub-scheduler fair dispatch).
+ */
+static u64 sub_cvtime_now;
+
+/*
+ * Set from userspace (see main.rs): enable nested sub-scheduler dispatch in
+ * maestro_dispatch(). False for leaf sub-scheduler instances; true for root-level
+ * scheduler instances (const volatile rodata, no per-attach atomics).
+ */
+const volatile bool sub_sched_enabled = true;
 
 /*
  * Default task time slice.
@@ -153,6 +174,25 @@ struct {
 } throttle_timer SEC(".maps");
 
 /*
+ * Default cgroup weight (matches CGROUP_WEIGHT_DFL).
+ */
+#define CGROUP_WEIGHT_DFL	100
+
+/*
+ * Per-cgroup context: tracks the cgroup's cpu.weight.
+ */
+struct cgrp_ctx {
+	u32 weight;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct cgrp_ctx);
+} cgrp_ctx_stor SEC(".maps");
+
+/*
  * Per-task local storage.
  *
  * This contain all the per-task information used internally by the BPF code.
@@ -162,6 +202,7 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 wakeup_freq;
 	u64 last_woke_at;
+	u32 cgweight;
 };
 
 /* Map that contains task-local storage. */
@@ -202,6 +243,37 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor,
 					(struct task_struct *)p, 0, 0);
+}
+
+/*
+ * Return the effective weight of a task, incorporating its cgroup weight.
+ *
+ * The effective weight is: task_nice_weight * cgroup_weight / CGROUP_WEIGHT_DFL
+ *
+ * This ensures tasks in a cgroup with weight 200 get twice the CPU time
+ * of tasks in a cgroup with the default weight (100).
+ */
+static u64 task_weight(const struct task_struct *p)
+{
+	struct task_ctx *tctx;
+	u32 cgw;
+
+	tctx = try_lookup_task_ctx(p);
+	cgw = tctx ? tctx->cgweight : CGROUP_WEIGHT_DFL;
+
+	return (u64)p->scx.weight * cgw / CGROUP_WEIGHT_DFL;
+}
+
+static inline u64 scale_by_weight(const struct task_struct *p, u64 value)
+{
+	return value * task_weight(p) / CGROUP_WEIGHT_DFL;
+}
+
+static inline u64 scale_by_weight_inverse(const struct task_struct *p, u64 value)
+{
+	u64 w = task_weight(p);
+
+	return w ? value * CGROUP_WEIGHT_DFL / w : value;
 }
 
 /*
@@ -322,7 +394,7 @@ static inline bool is_primary_cpu(s32 cpu)
  */
 static u64 task_slice(const struct task_struct *p)
 {
-	return scale_by_task_weight(p, slice_ns);
+	return scale_by_weight(p, slice_ns);
 }
 
 /*
@@ -331,13 +403,13 @@ static u64 task_slice(const struct task_struct *p)
 static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 vsleep_max = scale_by_task_weight(p, slice_lag_ns * lag_scale);
+	u64 vsleep_max = scale_by_weight(p, slice_lag_ns * lag_scale);
 	u64 vtime_min = vtime_now - vsleep_max;
 
 	if (time_before(p->scx.dsq_vtime, vtime_min))
 		p->scx.dsq_vtime = vtime_min;
 
-	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->awake_vtime);
+	return p->scx.dsq_vtime + scale_by_weight_inverse(p, tctx->awake_vtime);
 }
 
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
@@ -552,13 +624,42 @@ void BPF_STRUCT_OPS(maestro_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * Try to consume tasks from sub-scheduler instances.
+	 * Try to consume tasks from sub-scheduler instances, picking the
+	 * one with the lowest cvtime first (weighted fair dispatch).
+	 * Skip when userspace disables nested sub-dispatch (sub_sched_enabled).
 	 */
-	if (bpf_ksym_exists(scx_bpf_sub_dispatch)) {
-		for (i = 0; i < MAX_SUB_SCHEDS; i++) {
-			if (sub_sched_cgroup_ids[i] &&
-			    scx_bpf_sub_dispatch(sub_sched_cgroup_ids[i]))
-			return;
+	if (sub_sched_enabled && bpf_ksym_exists(scx_bpf_sub_dispatch)) {
+		int tried = 0;
+
+		bpf_for(i, 0, MAX_SUB_SCHEDS) {
+			int best = -1, j;
+			u64 min_cvt = (u64)-1;
+
+			bpf_for(j, 0, MAX_SUB_SCHEDS) {
+				if (!sub_scheds[j].cgroup_id ||
+				    (tried & (1 << j)))
+					continue;
+
+				if (sub_scheds[j].cvtime < min_cvt) {
+					min_cvt = sub_scheds[j].cvtime;
+					best = j;
+				}
+			}
+
+			if (best < 0)
+				break;
+
+			tried |= (1 << best);
+
+			if (scx_bpf_sub_dispatch(sub_scheds[best].cgroup_id)) {
+				u32 w = sub_scheds[best].weight ?: 1;
+
+				if (time_before(sub_cvtime_now, sub_scheds[best].cvtime))
+					sub_cvtime_now = sub_scheds[best].cvtime;
+
+				sub_scheds[best].cvtime += slice_ns / w;
+				return;
+			}
 		}
 	}
 
@@ -636,7 +737,7 @@ void BPF_STRUCT_OPS(maestro_stopping, struct task_struct *p, bool runnable)
 	 * Cap the maximum accumulated time since last sleep to
 	 * @slice_lag_ns, to prevent starving CPU-intensive tasks.
 	 */
-	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
+	p->scx.dsq_vtime += scale_by_weight_inverse(p, slice);
 	tctx->awake_vtime = MIN(tctx->awake_vtime + slice, slice_lag_ns);
 }
 
@@ -693,11 +794,19 @@ s32 BPF_STRUCT_OPS(maestro_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	struct task_ctx *tctx;
+	struct cgrp_ctx *cgc;
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!tctx)
 		return -ENOMEM;
+
+	if (args->cgroup) {
+		cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, args->cgroup, 0, 0);
+		tctx->cgweight = cgc ? cgc->weight : CGROUP_WEIGHT_DFL;
+	} else {
+		tctx->cgweight = CGROUP_WEIGHT_DFL;
+	}
 
 	return 0;
 }
@@ -707,9 +816,23 @@ s32 BPF_STRUCT_OPS(maestro_sub_attach, struct scx_sub_attach_args *args)
 	s32 i;
 
 	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
-		if (!sub_sched_cgroup_ids[i]) {
-			sub_sched_cgroup_ids[i] = args->ops->sub_cgroup_id;
-			bpf_printk("attach sub-sched[%d] on %s", i, args->cgroup_path);
+		if (!sub_scheds[i].cgroup_id) {
+			struct cgroup *cgrp;
+			struct cgrp_ctx *cgc;
+			u32 weight = 100;
+
+			cgrp = bpf_cgroup_from_id(args->ops->sub_cgroup_id);
+			if (cgrp) {
+				cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
+				if (cgc)
+					weight = cgc->weight;
+				bpf_cgroup_release(cgrp);
+			}
+
+			sub_scheds[i].cgroup_id = args->ops->sub_cgroup_id;
+			sub_scheds[i].weight = weight;
+			sub_scheds[i].cvtime = sub_cvtime_now;
+			bpf_printk("attach sub-sched[%d] on %s weight %u", i, args->cgroup_path, weight);
 			return 0;
 		}
 	}
@@ -722,12 +845,65 @@ void BPF_STRUCT_OPS(maestro_sub_detach, struct scx_sub_detach_args *args)
 	s32 i;
 
 	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
-		if (sub_sched_cgroup_ids[i] == args->ops->sub_cgroup_id) {
-			sub_sched_cgroup_ids[i] = 0;
+		if (sub_scheds[i].cgroup_id == args->ops->sub_cgroup_id) {
+			sub_scheds[i].cgroup_id = 0;
+			sub_scheds[i].weight = 0;
+			sub_scheds[i].cvtime = 0;
 			bpf_printk("detach sub-sched[%d] on %s", i, args->cgroup_path);
 			break;
 		}
 	}
+}
+
+s32 BPF_STRUCT_OPS(maestro_cgroup_init, struct cgroup *cgrp,
+		   struct scx_cgroup_init_args *args)
+{
+	struct cgrp_ctx *cgc;
+
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!cgc)
+		return -ENOMEM;
+
+	cgc->weight = args->weight;
+
+	return 0;
+}
+
+void BPF_STRUCT_OPS(maestro_cgroup_exit, struct cgroup *cgrp)
+{
+}
+
+void BPF_STRUCT_OPS(maestro_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
+{
+	struct cgrp_ctx *cgc;
+	u64 cgid = cgrp->kn->id;
+	s32 i;
+
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
+	if (cgc)
+		cgc->weight = weight;
+
+	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
+		if (sub_scheds[i].cgroup_id == cgid) {
+			sub_scheds[i].weight = weight;
+			return;
+		}
+	}
+}
+
+void BPF_STRUCT_OPS(maestro_cgroup_move, struct task_struct *p,
+		    struct cgroup *from, struct cgroup *to)
+{
+	struct task_ctx *tctx;
+	struct cgrp_ctx *cgc;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, to, 0, 0);
+	tctx->cgweight = cgc ? cgc->weight : CGROUP_WEIGHT_DFL;
 }
 
 static s32 get_nr_online_cpus(void)
@@ -949,6 +1125,10 @@ SCX_OPS_DEFINE(maestro_ops,
 	       .runnable		= (void *)maestro_runnable,
 	       .enable			= (void *)maestro_enable,
 	       .init_task		= (void *)maestro_init_task,
+	       .cgroup_init		= (void *)maestro_cgroup_init,
+	       .cgroup_exit		= (void *)maestro_cgroup_exit,
+	       .cgroup_set_weight	= (void *)maestro_cgroup_set_weight,
+	       .cgroup_move		= (void *)maestro_cgroup_move,
 	       .sub_attach		= (void *)maestro_sub_attach,
 	       .sub_detach		= (void *)maestro_sub_detach,
 	       .init			= (void *)maestro_init,
