@@ -3960,7 +3960,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->refresh_layer = true;
 	taskc->llc_id = MAX_LLCS;
 	taskc->pinned_node = MAX_NUMA_NODES;
-	taskc->qrt_layer_id = MAX_LLCS;
+	taskc->qrt_layer_id = MAX_LAYERS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
 	/*
