@@ -536,7 +536,7 @@ static bool dispatch_steal_local_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 		if (dom == curr_dom || dom_node_id(dom) != my_node)
 			continue;
 
-		if (scx_bpf_dsq_move_to_local(dom)) {
+		if (scx_bpf_dsq_move_to_local(dom, 0)) {
 			stat_add(RUSTY_STAT_GREEDY_LOCAL, 1);
 			return true;
 		}
@@ -560,7 +560,7 @@ static bool dispatch_steal_x_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 		    scx_bpf_dsq_nr_queued(dom) >= greedy_threshold_x_numa)
 			continue;
 
-		if (scx_bpf_dsq_move_to_local(dom)) {
+		if (scx_bpf_dsq_move_to_local(dom, 0)) {
 			stat_add(RUSTY_STAT_GREEDY_XNUMA, 1);
 			return true;
 		}
@@ -586,7 +586,7 @@ void BPF_STRUCT_OPS(wd40_dispatch, s32 cpu, struct task_struct *prev)
 	if (unlikely(is_offline_cpu(cpu)))
 		return;
 
-	if (scx_bpf_dsq_move_to_local(curr_dom)) {
+	if (scx_bpf_dsq_move_to_local(curr_dom, 0)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
 		return;
 	}

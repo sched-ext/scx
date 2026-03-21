@@ -824,7 +824,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 
 	// STEP 0: OWN PER-CPU DSQ -- HIGHEST PRIORITY, CACHE-HOT
 	if ((u64)cpu < nr_cpu_ids &&
-	    scx_bpf_dsq_move_to_local((u64)cpu)) {
+	    scx_bpf_dsq_move_to_local((u64)cpu, 0)) {
 		if ((u32)cpu < MAX_CPUS &&
 		    scx_bpf_dsq_nr_queued((u64)cpu) == 0) {
 			u64 old = pcpu_enqueue_ns[cpu];
@@ -863,7 +863,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 			u32 sibling = *val;
 			if (sibling == my_cpu || sibling >= nr_cpu_ids)
 				continue;
-			if (scx_bpf_dsq_move_to_local((u64)sibling)) {
+			if (scx_bpf_dsq_move_to_local((u64)sibling, 0)) {
 				if (sibling < MAX_CPUS &&
 				    scx_bpf_dsq_nr_queued((u64)sibling) == 0) {
 					u64 old = pcpu_enqueue_ns[sibling];
@@ -911,7 +911,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	u64 int_oldest = interactive_enqueue_ns;
 	if (int_oldest > 0 &&
 	    (now - int_oldest) > overflow_sojourn_rescue_ns) {
-		if (scx_bpf_dsq_move_to_local(node_dsq)) {
+		if (scx_bpf_dsq_move_to_local(node_dsq, 0)) {
 			if (scx_bpf_dsq_nr_queued(node_dsq) == 0) {
 				u64 old_iens = interactive_enqueue_ns;
 				if (old_iens > 0)
@@ -938,7 +938,7 @@ skip_interactive_rescue:;
 	u64 bat_oldest = batch_enqueue_ns;
 	if (bat_oldest > 0 &&
 	    (now - bat_oldest) > overflow_sojourn_rescue_ns) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq)) {
+		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
 			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
 				u64 old_bens = batch_enqueue_ns;
 				if (old_bens > 0)
@@ -966,7 +966,7 @@ skip_interactive_rescue:;
 	// LONGRUN OVERRIDE: WHEN SUSTAINED BATCH PRESSURE (>2S), TIGHTEN
 	// FROM nr_cpu_ids*4 TO nr_cpu_ids*1, QUADRUPLING BATCH SHARE.
 	if (interactive_run >= effective_budget && batch_starving) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq)) {
+		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
 			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
 				u64 old_bens = batch_enqueue_ns;
 				if (old_bens > 0)
@@ -992,7 +992,7 @@ skip_interactive_rescue:;
 	// SERVICE WITHIN 500MS REGARDLESS OF INTERACTIVE PRESSURE.
 	if (oldest > 0 &&
 	    (now - oldest) > starvation_rescue_ns) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq)) {
+		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
 			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
 				u64 old_bens = batch_enqueue_ns;
 				if (old_bens > 0)
@@ -1010,7 +1010,7 @@ skip_interactive_rescue:;
 
 	// NODE INTERACTIVE OVERFLOW: LATCRIT + INTERACTIVE TASKS
 	// INTERACTIVE FIRST WITHIN EACH BUDGET CYCLE. NO PRIORITY INVERSION.
-	if (scx_bpf_dsq_move_to_local(node_dsq)) {
+	if (scx_bpf_dsq_move_to_local(node_dsq, 0)) {
 		if (scx_bpf_dsq_nr_queued(node_dsq) == 0) {
 			u64 old_iens = interactive_enqueue_ns;
 			if (old_iens > 0)
@@ -1029,7 +1029,7 @@ skip_interactive_rescue:;
 	// FIRES WHEN INTERACTIVE OVERFLOW IS EMPTY AND BATCH IS STARVING.
 	// THRESHOLD SET BY RUST ADAPTIVE LAYER FROM OBSERVED DISPATCH RATE.
 	if (batch_starving) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq)) {
+		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
 			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
 				u64 old_bens = batch_enqueue_ns;
 				if (old_bens > 0)
@@ -1045,7 +1045,7 @@ skip_interactive_rescue:;
 	}
 
 	// NODE BATCH OVERFLOW: NORMAL FALLBACK FOR BATCH TASKS
-	if (scx_bpf_dsq_move_to_local(batch_dsq)) {
+	if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
 		if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
 			u64 old_bens = batch_enqueue_ns;
 			if (old_bens > 0)
@@ -1062,13 +1062,13 @@ skip_interactive_rescue:;
 	// CROSS-NODE STEAL
 	for (u32 n = 0; n < nr_nodes && n < MAX_NODES; n++) {
 		if (n != (u32)node) {
-			if (scx_bpf_dsq_move_to_local(nr_cpu_ids + (u64)n)) {
+			if (scx_bpf_dsq_move_to_local(nr_cpu_ids + (u64)n, 0)) {
 				s = get_stats();
 				if (s)
 					s->nr_dispatches += 1;
 				return;
 			}
-			if (scx_bpf_dsq_move_to_local(nr_cpu_ids + nr_nodes + (u64)n)) {
+			if (scx_bpf_dsq_move_to_local(nr_cpu_ids + nr_nodes + (u64)n, 0)) {
 				s = get_stats();
 				if (s)
 					s->nr_dispatches += 1;

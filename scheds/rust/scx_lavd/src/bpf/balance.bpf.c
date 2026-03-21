@@ -228,7 +228,7 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 	/*
 	 * Try to consume a task on the associated DSQ.
 	 */
-	ret = scx_bpf_dsq_move_to_local(dsq_id);
+	ret = scx_bpf_dsq_move_to_local(dsq_id, 0);
 
 	if (is_monitored)
 		cpdomc->dsq_consume_lat = time_delta(bpf_ktime_get_ns(), before);

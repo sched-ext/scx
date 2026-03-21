@@ -291,7 +291,7 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		 * Actual retag and accounting happens in running() via
 		 * mismatch detection.
 		 */
-		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw))
+		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
 			continue;
 
 		// Success, we got a task

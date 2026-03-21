@@ -36,6 +36,8 @@ lazy_static::lazy_static! {
         read_enum("scx_ops_flags", "SCX_OPS_ALLOW_QUEUED_WAKEUP").unwrap_or(0);
     pub static ref SCX_OPS_BUILTIN_IDLE_PER_NODE: u64 =
         read_enum("scx_ops_flags", "SCX_OPS_BUILTIN_IDLE_PER_NODE").unwrap_or(0);
+    pub static ref SCX_OPS_ALWAYS_ENQ_IMMED: u64 =
+        read_enum("scx_ops_flags", "SCX_OPS_ALWAYS_ENQ_IMMED").unwrap_or(0);
 
     pub static ref SCX_PICK_IDLE_CORE: u64 =
         read_enum("scx_pick_idle_cpu_flags", "SCX_PICK_IDLE_CORE").unwrap_or(0);
@@ -495,11 +497,14 @@ macro_rules! scx_ops_load {
 #[rustfmt::skip]
 #[macro_export]
 macro_rules! scx_ops_attach {
-    ($skel: expr, $ops: ident) => { 'block: {
+    ($skel: expr, $ops: ident) => {
+        scx_ops_attach!($skel, $ops, false)
+    };
+    ($skel: expr, $ops: ident, $is_subsched: expr) => { 'block: {
         use ::anyhow::Context;
         use ::libbpf_rs::skel::Skel;
 
-        if scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
+        if !$is_subsched && scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
             break 'block Err(anyhow::anyhow!(
                 "another sched_ext scheduler is already running"
             ));
