@@ -1556,13 +1556,13 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Try to consume a task from the per-CPU DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu)))
+	if (scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu), 0))
 		return;
 
 	/*
 	 * Try to consume a task from the per-node DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(node_to_dsq(node)))
+	if (scx_bpf_dsq_move_to_local(node_to_dsq(node), 0))
 		return;
 
 	/*

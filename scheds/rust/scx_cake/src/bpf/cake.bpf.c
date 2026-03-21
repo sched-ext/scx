@@ -1947,7 +1947,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 		 * Zero BPF + zero Rust consumers (sleep_lag removed). */
 
 		if (depth > 0) {
-		if (scx_bpf_dsq_move_to_local(my_dsq_id)) {
+		if (scx_bpf_dsq_move_to_local(my_dsq_id, 0)) {
 			/* MAILBOX CLEAR: DSQ drained. Check-before-write (Rule 11).
 			 * Stays Shared if already 0 (MESI no-op on fast path). */
 			if (dsq_kick_needed[my_llc]) dsq_kick_needed[my_llc] = 0;
@@ -1976,7 +1976,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 			 * Prevents cache-cold migration of single tasks that are better
 			 * served waiting for their CCD's core to free up. Mirrors EEVDF's
 			 * imbalance_pct threshold for cross-domain migration. */
-			if (scx_bpf_dsq_nr_queued(victim_dsq) > 1 && scx_bpf_dsq_move_to_local(victim_dsq)) {
+			if (scx_bpf_dsq_nr_queued(victim_dsq) > 1 && scx_bpf_dsq_move_to_local(victim_dsq, 0)) {
 				/* MAILBOX CLEAR: stolen DSQ drained. */
 				if (dsq_kick_needed[victim]) dsq_kick_needed[victim] = 0;
 				if (stats_on) {

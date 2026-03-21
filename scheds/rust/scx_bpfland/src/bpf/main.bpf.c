@@ -952,7 +952,7 @@ static bool consume_first_task(u64 dsq_id, struct task_struct *p)
 	if (!p)
 		return false;
 
-	return scx_bpf_dsq_move_to_local(dsq_id);
+	return scx_bpf_dsq_move_to_local(dsq_id, 0);
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)

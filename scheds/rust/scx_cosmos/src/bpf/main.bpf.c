@@ -1280,7 +1280,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * Check if the there's any task waiting in the shared DSQ and
 	 * dispatch.
 	 */
-	if (scx_bpf_dsq_move_to_local(shared_dsq(cpu)))
+	if (scx_bpf_dsq_move_to_local(shared_dsq(cpu), 0))
 		return;
 
 	/*
