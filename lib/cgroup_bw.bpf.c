@@ -37,6 +37,8 @@ enum scx_cgroup_consts {
 	CBW_BUDGET_XFER_MAX_SHIFT	= 2,
 	/* maximum number of re-enqueue tasks in one dispatch */
 	CBW_REENQ_MAX_BATCH		= 2,
+	/* size of the deferred BTQ destroy queue */
+	CBW_DEFERRED_BTQ_SIZE		= 256,
 };
 
 /**
@@ -605,6 +607,47 @@ int cbw_init_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 __hidden
 int cbw_put_aside(u64 ctx, u64 vtime, struct cgroup *cgrp __arg_trusted);
 
+static void schedule_atq_destroy(scx_atq_t *btq)
+{
+	static u64 slots[CBW_DEFERRED_BTQ_SIZE] __attribute__((aligned(SCX_CACHELINE_SIZE)));
+	static u64 tail __attribute__((aligned(SCX_CACHELINE_SIZE)));
+	u64 slot, old, prev;
+
+	do {
+		/*
+		 * Atomically claim the slot. If the slot is empty, we are done.
+		 */
+		slot = __sync_fetch_and_add(&tail, 1) % CBW_DEFERRED_BTQ_SIZE;
+		old = __sync_val_compare_and_swap(&slots[slot], 0, (u64)btq);
+		if (!old)
+			return;
+
+		/*
+		 * If it is occupied, the tail has wrapped around: replace old
+		 * with the new BTQ via CAS to make the eviction atomic and
+		 * prevent a double-free.
+		 */
+		prev = __sync_val_compare_and_swap(&slots[slot], old, (u64)btq);
+		if (likely(old == prev)) {
+			scx_atq_destroy((scx_atq_t *)old);
+			return;
+		}
+
+		/*
+		 * The CAS can fail if CBW_DEFERRED_BTQ_SIZE concurrent
+		 * destroyer claimed the same slot. If the CAS fails,
+		 * retry to work on a new slot.
+		 */
+	} while (can_loop);
+
+	/*
+	 * Atomically updating tail and slots could be a potential memory hot
+	 * spot, causing a lot of cache coherence traffic. However, it is
+	 * unlikely that real-world workloads will continuously and concurrently
+	 * destroy cgroups. So, let’s keep the design simple for now.
+	 */
+}
+
 static
 void cbw_free_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 {
@@ -671,7 +714,13 @@ void cbw_free_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 			continue;
 		}
 
-		scx_atq_destroy(btq);
+		/*
+		 * Defer scx_atq_destroy() to avoid a use-after-free in
+		 * cbw_drain_btq_batch(): that function snapshots llcx->btq
+		 * under READ_ONCE(), and cbw_free_llc_ctx() may destroy the
+		 * BTQ in the window between the snapshot and scx_atq_pop().
+		 */
+		schedule_atq_destroy(btq);
 	}
 
 	if (root_cgrp)
@@ -2176,9 +2225,7 @@ int cbw_drain_btq_batch(struct scx_cgroup_ctx *cgx,
 	 *
 	 * Re-read llcx->btq on every iteration. cbw_free_llc_ctx() nulls
 	 * this field before destroying the ATQ; catching NULL between
-	 * iterations prevents operating on a freed ATQ. Note that there
-	 * remains a small window within a single iteration between the
-	 * READ_ONCE and scx_atq_pop() where the ATQ could be destroyed.
+	 * iterations prevents operating on a freed ATQ.
 	 */
 	for (i = 0; i < CBW_REENQ_MAX_BATCH &&
 		    (btq = READ_ONCE(llcx->btq)) &&
