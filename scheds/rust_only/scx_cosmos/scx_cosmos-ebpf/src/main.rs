@@ -817,9 +817,12 @@ fn is_cpu_idle(cpu: i32) -> bool {
         return false;
     }
 
-    // Read rq->curr (which is rq->__bindgen_anon_1.curr in the bindgen layout).
-    // Use inline bpf_probe_read_kernel to avoid subprogram call overhead.
+    // Read rq->curr using bpf_probe_read_kernel to avoid subprogram call overhead.
+    // On kernel 6.16+ the bindgen layout wraps curr in an anonymous union.
+    #[cfg(feature = "kernel_6_16")]
     let curr_offset = core::mem::offset_of!(vmlinux::rq, __bindgen_anon_1.curr);
+    #[cfg(not(feature = "kernel_6_16"))]
+    let curr_offset = core::mem::offset_of!(vmlinux::rq, curr);
     let mut p: *mut vmlinux::task_struct = core::ptr::null_mut();
     let ret: i64;
     unsafe {
