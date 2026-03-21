@@ -36,6 +36,7 @@ enums = [
             ("scx_ent_flags", "SCX_TASK_QUEUED"),
             ("scx_ent_flags", "SCX_TASK_RESET_RUNNABLE_AT"),
             ("scx_ent_flags", "SCX_TASK_DEQD_FOR_SLEEP"),
+            ("scx_ent_flags", "SCX_TASK_SUB_INIT"),
             ("scx_ent_flags", "SCX_TASK_STATE_SHIFT"),
             ("scx_ent_flags", "SCX_TASK_STATE_BITS"),
             ("scx_ent_flags", "SCX_TASK_STATE_MASK"),

@@ -30,6 +30,7 @@ pub struct Enums {
     pub SCX_TASK_QUEUED: u64,
     pub SCX_TASK_RESET_RUNNABLE_AT: u64,
     pub SCX_TASK_DEQD_FOR_SLEEP: u64,
+    pub SCX_TASK_SUB_INIT: u64,
     pub SCX_TASK_STATE_SHIFT: u64,
     pub SCX_TASK_STATE_BITS: u64,
     pub SCX_TASK_STATE_MASK: u64,
@@ -76,6 +77,7 @@ lazy_static::lazy_static! {
         SCX_TASK_QUEUED: read_enum("scx_ent_flags","SCX_TASK_QUEUED").unwrap_or(0),
         SCX_TASK_RESET_RUNNABLE_AT: read_enum("scx_ent_flags","SCX_TASK_RESET_RUNNABLE_AT").unwrap_or(0),
         SCX_TASK_DEQD_FOR_SLEEP: read_enum("scx_ent_flags","SCX_TASK_DEQD_FOR_SLEEP").unwrap_or(0),
+        SCX_TASK_SUB_INIT: read_enum("scx_ent_flags","SCX_TASK_SUB_INIT").unwrap_or(0),
         SCX_TASK_STATE_SHIFT: read_enum("scx_ent_flags","SCX_TASK_STATE_SHIFT").unwrap_or(0),
         SCX_TASK_STATE_BITS: read_enum("scx_ent_flags","SCX_TASK_STATE_BITS").unwrap_or(0),
         SCX_TASK_STATE_MASK: read_enum("scx_ent_flags","SCX_TASK_STATE_MASK").unwrap_or(0),
@@ -126,6 +128,7 @@ macro_rules! import_enums {
         rodata.__SCX_TASK_QUEUED = $crate::scx_enums.SCX_TASK_QUEUED;
         rodata.__SCX_TASK_RESET_RUNNABLE_AT = $crate::scx_enums.SCX_TASK_RESET_RUNNABLE_AT;
         rodata.__SCX_TASK_DEQD_FOR_SLEEP = $crate::scx_enums.SCX_TASK_DEQD_FOR_SLEEP;
+        rodata.__SCX_TASK_SUB_INIT = $crate::scx_enums.SCX_TASK_SUB_INIT;
         rodata.__SCX_TASK_STATE_SHIFT = $crate::scx_enums.SCX_TASK_STATE_SHIFT;
         rodata.__SCX_TASK_STATE_BITS = $crate::scx_enums.SCX_TASK_STATE_BITS;
         rodata.__SCX_TASK_STATE_MASK = $crate::scx_enums.SCX_TASK_STATE_MASK;

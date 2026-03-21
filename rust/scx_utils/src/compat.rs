@@ -495,11 +495,14 @@ macro_rules! scx_ops_load {
 #[rustfmt::skip]
 #[macro_export]
 macro_rules! scx_ops_attach {
-    ($skel: expr, $ops: ident) => { 'block: {
+    ($skel: expr, $ops: ident) => {
+        scx_ops_attach!($skel, $ops, false)
+    };
+    ($skel: expr, $ops: ident, $is_subsched: expr) => { 'block: {
         use ::anyhow::Context;
         use ::libbpf_rs::skel::Skel;
 
-        if scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
+        if !$is_subsched && scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
             break 'block Err(anyhow::anyhow!(
                 "another sched_ext scheduler is already running"
             ));
