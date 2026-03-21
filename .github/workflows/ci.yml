@@ -115,7 +115,7 @@ jobs:
           cargo build --profile ci --locked
           cargo metadata --format-version 1 > /tmp/meta.json
       - name: 'Veristat: ${{ matrix.kernel.name }}'
-        uses: likewhatevs/vng-action@v0.5.0
+        uses: likewhatevs/vng-action@v0.6.0
         with:
           name: ${{ matrix.kernel.name }}__${{ runner.arch }}
           kernel-url: ${{ matrix.kernel.url }}
@@ -242,7 +242,7 @@ jobs:
       - name: Build
         run: cargo build --profile ci --locked -p scx_arena_selftests -p scx_cake -p scx_pandemonium
       - name: Arena selftests and scheduler tests
-        uses: likewhatevs/vng-action@v0.5.0
+        uses: likewhatevs/vng-action@v0.6.0
         with:
           name: scx__stable__linux-rolling-stable__${{ runner.arch }}
           kernel-url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
