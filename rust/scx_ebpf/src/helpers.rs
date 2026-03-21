@@ -1,9 +1,10 @@
-//! Helpers for BPF programs: kernel reads and bounded iteration.
+//! Helpers for BPF programs: kernel reads/writes and bounded iteration.
 //!
 //! Provides:
 //! - [`bpf_for!`] / [`bpf_repeat!`] -- bounded loop macros for ergonomic iteration
 //! - [`bpf_loop`] -- raw BPF helper #181 wrapper for callback-based iteration
-//! - [`core_read!`] -- portable kernel struct field access via CO-RE
+//! - [`core_read!`] -- portable kernel struct field read via CO-RE
+//! - [`core_write!`] -- portable kernel struct field write via CO-RE
 //! - [`probe_read_kernel`] -- raw kernel memory reads
 //!
 //! ## Bounded iteration
@@ -34,15 +35,16 @@
 //!
 //! ## CO-RE field access
 //!
-//! [`core_read!`] computes the field offset at compile time using the
-//! vmlinux-generated struct definitions, then reads the value via
-//! `bpf_probe_read_kernel`.
+//! [`core_read!`] and [`core_write!`] compute field offsets at compile
+//! time using the vmlinux-generated struct definitions, then read/write
+//! the value using `bpf_probe_read_kernel` or `write_volatile`.
 //!
 //! On the build kernel, the offsets are correct without any loader
 //! patching. For cross-kernel portability, the `aya-core-postprocessor`
-//! tool scans the compiled ELF for `.aya.core_relo` markers emitted by
-//! this macro and generates CO-RE relocation records in `.BTF.ext`.
-//! The loader then patches field offsets at load time.
+//! tool scans the compiled ELF for matching BPF instructions (ALU ADD
+//! for reads, STX MEM for writes) and generates CO-RE relocation
+//! records in `.BTF.ext`. The loader then patches field offsets at
+//! load time.
 
 /// BPF helper: read `len` bytes from kernel address `src` into `dst`.
 ///
@@ -238,6 +240,49 @@ macro_rules! bpf_repeat {
             $body
             __bpf_repeat_i += 1;
         }
+    }};
+}
+
+/// Write a value to a kernel struct field using compile-time offsets.
+///
+/// Uses `core::ptr::write_volatile` to write the value at the computed
+/// field offset. The offset is determined at compile time from the
+/// vmlinux-generated struct definitions via `offset_of!`.
+///
+/// # CO-RE portability
+///
+/// Like `core_read!`, this macro relies on compile-time offsets that are
+/// correct for the build kernel. For cross-kernel portability, the
+/// `aya-core-postprocessor` scans the compiled BPF bytecode for `STX`
+/// instructions whose `off` field matches known struct field offsets and
+/// generates CO-RE relocation records in `.BTF.ext`. The aya loader's
+/// `relocate_btf()` then patches the `off` field at load time.
+///
+/// # Arguments
+///
+/// - `$struct_ty`: The vmlinux-generated struct type (e.g., `vmlinux::task_struct`)
+/// - `$ptr`: A mutable pointer to the kernel struct
+/// - `$($field).+`: The field path (e.g., `scx.dsq_vtime`)
+/// - `$val`: The value to write (must match the field type)
+///
+/// # Example
+///
+/// ```ignore
+/// // Write dsq_vtime:
+/// core_write!(vmlinux::task_struct, p, scx.dsq_vtime, new_vtime);
+///
+/// // Write slice:
+/// core_write!(vmlinux::task_struct, p, scx.slice, slice_ns);
+/// ```
+#[macro_export]
+macro_rules! core_write {
+    ($struct_ty:ty, $ptr:expr, $($field:ident).+, $val:expr) => {{
+        let base = $ptr as *mut u8;
+        let offset = core::mem::offset_of!($struct_ty, $($field).+);
+        let field_ptr = unsafe { base.add(offset) } as *mut _;
+        // write_volatile: the pointer type is inferred from $val,
+        // ensuring the correct store width (e.g. STX_MEM_DW for u64).
+        unsafe { core::ptr::write_volatile(field_ptr, $val) }
     }};
 }
 

@@ -136,6 +136,25 @@ unsafe fn bpf_task_storage_get(
     ret
 }
 
+/// BPF helper #195: `bpf_map_lookup_percpu_elem(map, key, cpu) -> *mut value`
+///
+/// Looks up a per-CPU map element for a specific CPU (not just the current CPU).
+/// Available since kernel 5.19. Returns null if the key or CPU is invalid.
+#[inline(always)]
+unsafe fn bpf_map_lookup_percpu_elem(map: *const u8, key: *const u8, cpu: u32) -> *mut u8 {
+    let ret: *mut u8;
+    core::arch::asm!(
+        "call 195",
+        inlateout("r1") map => _,
+        inlateout("r2") key => _,
+        inlateout("r3") cpu => _,
+        lateout("r0") ret,
+        lateout("r4") _,
+        lateout("r5") _,
+    );
+    ret
+}
+
 /// BPF helper #157: `bpf_task_storage_delete(map, task) -> int`
 #[inline(always)]
 unsafe fn bpf_task_storage_delete(map: *const u8, task: *mut u8) -> i64 {
@@ -415,6 +434,30 @@ impl<V, const MAX_ENTRIES: usize> PerCpuArray<V, MAX_ENTRIES> {
                 core::ptr::from_ref(&index).cast(),
             )
             .cast()
+        }
+    }
+
+    /// Look up a specific CPU's element at `index`.
+    ///
+    /// Unlike [`get`] / [`get_ptr_mut`] which return the *current* CPU's
+    /// element, this method returns the element for an arbitrary CPU by
+    /// calling BPF helper #195 (`bpf_map_lookup_percpu_elem`).
+    /// Available since kernel 5.19.
+    ///
+    /// Returns `None` if the `index` or `cpu` is out of range.
+    #[inline(always)]
+    pub fn get_percpu(&self, index: u32, cpu: u32) -> Option<&V> {
+        let ptr = unsafe {
+            bpf_map_lookup_percpu_elem(
+                core::ptr::from_ref(self).cast(),
+                core::ptr::from_ref(&index).cast(),
+                cpu,
+            )
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &*(ptr as *const V) })
         }
     }
 

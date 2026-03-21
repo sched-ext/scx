@@ -16,3 +16,8 @@ pub struct task_struct {
 pub struct scx_exit_info {
     _opaque: i32,
 }
+
+#[repr(C)]
+pub struct rq {
+    _opaque: i32,
+}

@@ -13,7 +13,7 @@
 //! on the same pointer, causing the BPF verifier to reject the program
 //! because it sees a cleared R1 being passed as an argument.
 
-use super::vmlinux::task_struct;
+use super::vmlinux::{rq, task_struct};
 
 /// Opaque kernel `struct cpumask` — used as a pointer target only.
 #[repr(C)]
@@ -73,6 +73,7 @@ unsafe extern "C" {
     fn scx_bpf_task_running(p: *const task_struct) -> bool;
     fn scx_bpf_task_cpu(p: *const task_struct) -> i32;
     fn scx_bpf_cpu_curr(cpu: i32) -> *mut task_struct;
+    fn scx_bpf_cpu_rq(cpu: i32) -> *mut rq;
     fn scx_bpf_now() -> u64;
     fn scx_bpf_select_cpu_dfl(
         p: *mut task_struct,
@@ -87,6 +88,12 @@ unsafe extern "C" {
         cpus_allowed: *const cpumask,
         flags: u64,
     ) -> i32;
+}
+
+#[cfg(feature = "kernel_6_16")]
+unsafe extern "C" {
+    fn scx_bpf_task_set_dsq_vtime(p: *mut task_struct, vtime: u64) -> bool;
+    fn scx_bpf_task_set_slice(p: *mut task_struct, slice: u64) -> bool;
 }
 
 // ── Safe wrappers ───────────────────────────────────────────────────────
@@ -387,6 +394,11 @@ pub fn task_cpu(p: *const task_struct) -> i32 {
 
 /// Return the task_struct of the task currently running on `cpu`.
 ///
+/// **Kernel compatibility note**: `scx_bpf_cpu_curr` was added in v6.15.
+/// On older kernels (6.12-6.14) this kfunc does not exist in vmlinux BTF
+/// and will cause a load-time `call #0` error. Use [`cpu_rq`] plus
+/// `core_read!(rq, rq_ptr, __bindgen_anon_1.curr)` as a fallback.
+///
 /// Must be called inside an RCU read-side critical section.
 #[inline(always)]
 pub fn cpu_curr(cpu: i32) -> *mut task_struct {
@@ -395,6 +407,34 @@ pub fn cpu_curr(cpu: i32) -> *mut task_struct {
         core::arch::asm!(
             "call {func}",
             func = sym scx_bpf_cpu_curr,
+            inlateout("r1") (cpu as i64) => _,
+            lateout("r0") ret,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret
+}
+
+/// Return the `struct rq` for the given CPU.
+///
+/// Available on all sched_ext kernels (6.12+). This is the fallback path
+/// for [`cpu_curr`] on kernels where `scx_bpf_cpu_curr` does not exist.
+///
+/// To get the current task from the rq, use:
+/// ```ignore
+/// let rq = kfuncs::cpu_rq(cpu);
+/// let p = core_read!(vmlinux::rq, rq, __bindgen_anon_1.curr)?;
+/// ```
+#[inline(always)]
+pub fn cpu_rq(cpu: i32) -> *mut rq {
+    let ret: *mut rq;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym scx_bpf_cpu_rq,
             inlateout("r1") (cpu as i64) => _,
             lateout("r0") ret,
             lateout("r2") _,
@@ -474,4 +514,52 @@ pub fn select_cpu_and(
         );
     }
     ret as i32
+}
+
+/// Set a task's `dsq_vtime` via the kernel kfunc (kernel >= 6.16).
+///
+/// Returns `true` if the vtime was successfully set.
+/// This is the proper API for writing `task_struct.scx.dsq_vtime` on kernels
+/// where the struct layout may have changed (e.g., new `selected_cpu` field).
+#[cfg(feature = "kernel_6_16")]
+#[inline(always)]
+pub fn task_set_dsq_vtime(p: *mut task_struct, vtime: u64) -> bool {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym scx_bpf_task_set_dsq_vtime,
+            inlateout("r1") p => _,
+            inlateout("r2") vtime => _,
+            lateout("r0") ret,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret != 0
+}
+
+/// Set a task's scheduling `slice` via the kernel kfunc (kernel >= 6.16).
+///
+/// Returns `true` if the slice was successfully set.
+/// This is the proper API for writing `task_struct.scx.slice` on kernels
+/// where the struct layout may have changed (e.g., new `selected_cpu` field).
+#[cfg(feature = "kernel_6_16")]
+#[inline(always)]
+pub fn task_set_slice(p: *mut task_struct, slice: u64) -> bool {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym scx_bpf_task_set_slice,
+            inlateout("r1") p => _,
+            inlateout("r2") slice => _,
+            lateout("r0") ret,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret != 0
 }

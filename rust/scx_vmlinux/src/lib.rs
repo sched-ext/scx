@@ -31,8 +31,12 @@ pub fn generate(type_names: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     let out_path = Path::new(&out_dir).join("vmlinux.rs");
 
     // Step 1: Get C header from vmlinux BTF
+    // Allow overriding the BTF source via SCX_VMLINUX_BTF env var
+    // (e.g., SCX_VMLINUX_BTF=/lib/modules/6.16.0/build/vmlinux for cross-kernel builds)
+    let btf_path = std::env::var("SCX_VMLINUX_BTF")
+        .unwrap_or_else(|_| "/sys/kernel/btf/vmlinux".to_string());
     let bpftool_output = Command::new("bpftool")
-        .args(["btf", "dump", "file", "/sys/kernel/btf/vmlinux", "format", "c"])
+        .args(["btf", "dump", "file", &btf_path, "format", "c"])
         .output()?;
 
     if !bpftool_output.status.success() {
@@ -73,7 +77,7 @@ pub fn generate(type_names: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     write!(file, "{bindings}")?;
 
     // Tell cargo to rerun if the kernel changes
-    println!("cargo:rerun-if-changed=/sys/kernel/btf/vmlinux");
+    println!("cargo:rerun-if-changed={btf_path}");
 
     Ok(())
 }

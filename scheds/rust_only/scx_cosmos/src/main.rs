@@ -42,6 +42,14 @@ struct Opts {
     #[clap(short = 's', long, default_value = "10")]
     slice_us: u64,
 
+    /// Maximum runtime lag in microseconds.
+    ///
+    /// Maximum runtime (since last sleep) that can be charged to a task.
+    /// Controls how much accumulated runtime a task can build up before
+    /// being penalized in deadline calculations.
+    #[clap(short = 'l', long, default_value = "20000")]
+    slice_lag_us: u64,
+
     /// CPU busy threshold (0-100%).
     ///
     /// When overall CPU utilization exceeds this threshold, the scheduler
@@ -61,6 +69,35 @@ struct Opts {
     /// but may reduce efficiency for pipe-intensive workloads.
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
+
+    /// Disable deferred wakeups.
+    ///
+    /// When set, deferred wakeups are disabled. This can reduce throughput
+    /// and performance for certain workloads, but can also reduce power
+    /// consumption (useful on battery-powered systems).
+    #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
+    no_deferred_wakeup: bool,
+
+    /// Disable CPU frequency control.
+    ///
+    /// When set, the scheduler will not adjust CPU frequency scaling.
+    #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
+    disable_cpufreq: bool,
+
+    /// Enable address space affinity.
+    ///
+    /// When enabled, tasks that share the same address space (e.g., threads
+    /// of the same process) are kept on the same CPU across wakeups.
+    /// This can improve locality and performance in cache-sensitive workloads.
+    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
+    mm_affinity: bool,
+
+    /// Disable SMT.
+    ///
+    /// When set, SMT (hyperthreading) awareness is disabled. This option
+    /// is most useful together with --flat-idle-scan or --preferred-idle-scan.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_smt: bool,
 
     /// Scheduler timeout in milliseconds.
     ///
@@ -127,6 +164,17 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     flat_idle_scan: bool,
 
+    /// Primary scheduling domain (CPU list or "all").
+    ///
+    /// Restricts idle CPU selection to the specified set of CPUs.
+    /// Accepts "all" (default, uses all CPUs) or a CPU list like
+    /// "0,1,2,3" or "0-7" or "0-3,8-11".
+    ///
+    /// When set to a CPU list, the scheduler prefers these CPUs for
+    /// idle CPU selection (e.g., performance cores on big.LITTLE).
+    #[clap(short = 'm', long, default_value = "all")]
+    primary_domain: String,
+
     /// Enable verbose logging output.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
@@ -139,6 +187,45 @@ fn parse_hex_u64(s: &str) -> Result<u64, String> {
     } else {
         s.parse::<u64>().map_err(|e| format!("invalid value '{}': {}", s, e))
     }
+}
+
+/// Parse a CPU list string like "0,1,2,3" or "0-7" or "0-3,8-11" into a
+/// sorted vector of CPU IDs.
+///
+/// Supports:
+/// - Individual CPUs: "0,1,5"
+/// - Ranges: "0-3" (expands to 0,1,2,3)
+/// - Mixed: "0-3,8,12-15"
+fn parse_cpu_list(s: &str) -> Result<Vec<u32>> {
+    let mut cpus = Vec::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((start_s, end_s)) = part.split_once('-') {
+            let start: u32 = start_s.trim().parse()
+                .with_context(|| format!("invalid CPU range start '{}'", start_s.trim()))?;
+            let end: u32 = end_s.trim().parse()
+                .with_context(|| format!("invalid CPU range end '{}'", end_s.trim()))?;
+            if start > end {
+                anyhow::bail!("invalid CPU range {}-{}: start > end", start, end);
+            }
+            for cpu in start..=end {
+                cpus.push(cpu);
+            }
+        } else {
+            let cpu: u32 = part.parse()
+                .with_context(|| format!("invalid CPU number '{}'", part))?;
+            cpus.push(cpu);
+        }
+    }
+    if cpus.is_empty() {
+        anyhow::bail!("empty CPU list");
+    }
+    cpus.sort();
+    cpus.dedup();
+    Ok(cpus)
 }
 
 // ── CPU Topology ─────────────────────────────────────────────────────────
@@ -862,6 +949,22 @@ fn load_and_attach_pmu_tracing(
     Ok(link_id)
 }
 
+// ── Scheduler exit detection ─────────────────────────────────────────────
+
+/// Check if the cosmos scheduler is still attached by reading sysfs.
+///
+/// The kernel exposes the active sched_ext scheduler name at
+/// `/sys/kernel/sched_ext/root/ops`. If this file is missing (sched_ext
+/// not enabled) or contains a different scheduler name, cosmos has been
+/// detached — possibly due to a BPF error, watchdog timeout, or manual
+/// `echo 0 > /sys/kernel/sched_ext/enable`.
+fn is_scheduler_attached() -> bool {
+    match fs::read_to_string("/sys/kernel/sched_ext/root/ops") {
+        Ok(name) => name.trim() == "cosmos",
+        Err(_) => false,
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -903,20 +1006,27 @@ fn main() -> Result<()> {
 
     // ── Compute BPF global values ────────────────────────────────────
     let slice_ns: u64 = opts.slice_us * 1000;
-    let slice_lag: u64 = (opts.slice_us * 2000).min(20_000_000);
+    let slice_lag: u64 = opts.slice_lag_us * 1000;
     let busy_threshold: u64 = opts.cpu_busy_thresh;
     let no_wake_sync: bool = opts.no_wake_sync;
+    let deferred_wakeups: bool = !opts.no_deferred_wakeup;
+    let cpufreq_enabled: bool = !opts.disable_cpufreq;
+    let mm_affinity: bool = opts.mm_affinity;
+    let smt_enabled_val: bool = topo.smt_enabled && !opts.disable_smt;
 
     info!("Loading scx_cosmos BPF program...");
     info!("  slice_ns     = {} ns ({} us)", slice_ns, opts.slice_us);
     info!(
-        "  slice_lag    = {} ns ({} us, capped at 20ms)",
+        "  slice_lag    = {} ns ({} us)",
         slice_lag,
-        slice_lag / 1000
+        opts.slice_lag_us
     );
     info!("  busy_thresh  = {}%", busy_threshold);
     info!("  no_wake_sync = {}", no_wake_sync);
-    info!("  smt_enabled  = {}", topo.smt_enabled);
+    info!("  deferred_wakeups = {}", deferred_wakeups);
+    info!("  cpufreq_enabled  = {}", cpufreq_enabled);
+    info!("  mm_affinity  = {}", mm_affinity);
+    info!("  smt_enabled  = {}", smt_enabled_val);
     info!("  avoid_smt    = {}", avoid_smt);
     info!("  timeout_ms   = {}", opts.timeout_ms);
     if opts.perf_config != 0 {
@@ -959,11 +1069,62 @@ fn main() -> Result<()> {
         ([-1i32; 1024], [0u64; 1024])
     };
 
+    // ── Build NUMA CPU-to-node mapping ──────────────────────────────────
+    let cpu_to_node: [u32; 1024] = {
+        let mut arr = [0u32; 1024];
+        if numa_enabled {
+            for (&node_id, cpus) in &topo.numa_nodes {
+                for &cpu in cpus {
+                    if (cpu as usize) < 1024 {
+                        arr[cpu as usize] = node_id;
+                    }
+                }
+            }
+        }
+        arr
+    };
+
+    // ── Parse primary domain ─────────────────────────────────────────
+    //
+    // --primary-domain "all" (default) => PRIMARY_ALL=true, cpumask unused
+    // --primary-domain "0-3,8-11"      => PRIMARY_ALL=false, populate PRIMARY_CPU_LIST
+    let (primary_all, primary_cpu_list): (bool, [i32; 1024]) = if opts.primary_domain == "all" {
+        (true, [-1i32; 1024])
+    } else {
+        let cpus = parse_cpu_list(&opts.primary_domain)
+            .context("Failed to parse --primary-domain CPU list")?;
+        let mut arr = [-1i32; 1024];
+        for (i, &cpu) in cpus.iter().enumerate() {
+            if i >= 1024 {
+                anyhow::bail!("--primary-domain: too many CPUs (max 1024)");
+            }
+            if cpu as usize >= topo.nr_cpus {
+                anyhow::bail!(
+                    "--primary-domain: CPU {} is out of range (system has {} CPUs)",
+                    cpu,
+                    topo.nr_cpus,
+                );
+            }
+            arr[i] = cpu as i32;
+        }
+        let cpu_strs: Vec<String> = cpus.iter().take(16).map(|c| format!("{}", c)).collect();
+        info!(
+            "  primary_domain = {} CPUs: {}{}",
+            cpus.len(),
+            cpu_strs.join(", "),
+            if cpus.len() > 16 { ", ..." } else { "" },
+        );
+        (false, arr)
+    };
+    if primary_all {
+        info!("  primary_domain = all");
+    }
+
     // ── Load BPF with global overrides ───────────────────────────────
     //
     // override_global with must_exist=false silently skips globals that
     // don't exist in the BPF object yet (another agent is adding these).
-    let smt_enabled_val: u8 = topo.smt_enabled as u8;
+    let smt_enabled_u8: u8 = smt_enabled_val as u8;
     let avoid_smt_val: u8 = avoid_smt as u8;
 
     let mut ebpf = EbpfLoader::new()
@@ -972,14 +1133,22 @@ fn main() -> Result<()> {
         .override_global("SLICE_LAG", &slice_lag, false)
         .override_global("BUSY_THRESHOLD", &busy_threshold, false)
         .override_global("NO_WAKE_SYNC", &(no_wake_sync as u8), false)
-        .override_global("SMT_ENABLED", &smt_enabled_val, false)
+        .override_global("DEFERRED_WAKEUPS", &(deferred_wakeups as u8), false)
+        .override_global("CPUFREQ_ENABLED", &(cpufreq_enabled as u8), false)
+        .override_global("MM_AFFINITY", &(mm_affinity as u8), false)
+        .override_global("SMT_ENABLED", &smt_enabled_u8, false)
         .override_global("AVOID_SMT", &avoid_smt_val, false)
+        .override_global("NUMA_ENABLED", &(numa_enabled as u8), false)
+        .override_global("NR_NODES", &(nr_numa_nodes as u32), false)
+        .override_global("CPU_TO_NODE", &cpu_to_node, false)
         .override_global("PERF_CONFIG", &opts.perf_config, false)
         .override_global("PERF_THRESHOLD", &opts.perf_threshold, false)
         .override_global("PREFERRED_IDLE_SCAN", &(preferred_idle_scan as u8), false)
         .override_global("FLAT_IDLE_SCAN", &(flat_idle_scan as u8), false)
         .override_global("PREFERRED_CPUS", &preferred_cpus, false)
         .override_global("CPU_CAPACITY", &cpu_capacity, false)
+        .override_global("PRIMARY_ALL", &(primary_all as u8), false)
+        .override_global("PRIMARY_CPU_LIST", &primary_cpu_list, false)
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_cosmos"
@@ -1030,7 +1199,7 @@ fn main() -> Result<()> {
     println!();
     println!("scx_cosmos: scheduler attached (pure Rust BPF)");
     println!("  slice       = {} us", opts.slice_us);
-    println!("  slice_lag   = {} us (capped at 20ms)", slice_lag / 1000);
+    println!("  slice_lag   = {} us", opts.slice_lag_us);
     println!("  busy_thresh = {}%", opts.cpu_busy_thresh);
     println!(
         "  wake_sync   = {}",
@@ -1041,10 +1210,37 @@ fn main() -> Result<()> {
         }
     );
     println!(
+        "  deferred_wakeups = {}",
+        if deferred_wakeups { "enabled" } else { "disabled" }
+    );
+    println!(
+        "  cpufreq     = {}",
+        if cpufreq_enabled { "enabled" } else { "disabled" }
+    );
+    println!(
+        "  mm_affinity = {}",
+        if mm_affinity { "enabled" } else { "disabled" }
+    );
+    println!(
+        "  smt_enabled = {}",
+        if smt_enabled_val { "yes" } else { "no" }
+    );
+    println!(
         "  smt_avoid   = {}",
         if avoid_smt { "yes" } else { "no" }
     );
+    if numa_enabled {
+        println!("  numa        = enabled ({} nodes)", nr_numa_nodes);
+    } else {
+        println!("  numa        = disabled");
+    }
     println!("  timeout     = {} ms", opts.timeout_ms);
+    if primary_all {
+        println!("  primary     = all");
+    } else {
+        let count = primary_cpu_list.iter().take_while(|&&c| c >= 0).count();
+        println!("  primary     = {} CPUs", count);
+    }
     if preferred_idle_scan || flat_idle_scan {
         println!(
             "  idle_scan   = {}",
@@ -1124,6 +1320,18 @@ fn main() -> Result<()> {
                 format_uptime(uptime),
             );
             last_stats = Instant::now();
+        }
+
+        // Check if the kernel detached the scheduler (BPF error, timeout,
+        // manual disable via sysfs, etc.). Checked every stats interval
+        // to avoid excessive sysfs reads.
+        if last_stats.elapsed() < Duration::from_millis(20) && !is_scheduler_attached() {
+            eprintln!(
+                "\nscx_cosmos: scheduler was detached by the kernel \
+                 (uptime {})",
+                format_uptime(start_time.elapsed()),
+            );
+            break;
         }
 
         // Periodically log CPU utilization in verbose mode.
