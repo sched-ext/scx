@@ -686,7 +686,7 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 		return -ESRCH;
 	}
 
-	ret = scx_cgroup_bw_throttled(cgrp);
+	ret = scx_cgroup_bw_throttled(cgrp, p);
 	if ((ret == -EAGAIN) && put_aside) {
 		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime, cgrp);
 		if (ret2) {

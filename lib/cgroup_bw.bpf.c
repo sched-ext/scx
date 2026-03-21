@@ -1432,15 +1432,29 @@ release_out:
 /**
  * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
  * @cgrp: cgroup where a task belongs to.
+ * @p: a task to be tested.
  *
  * Return 0 when the cgroup is not throttled,
  * -EAGAIN when the cgroup is throttled, and
  * -errno for some other failures.
  */
 __hidden
-int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted)
+int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, struct task_struct *p __arg_trusted)
 {
 	int llc_id;
+
+	/*
+	 * Never throttle an exiting task. In do_exit(), a task is removed from
+	 * the PID map by __unhash_process() (called from exit_notify()) in the
+	 * window between PF_EXITING being set and TASK_DEAD being set. If the
+	 * task is preempted in this window and throttled into the BTQ, the BTQ
+	 * drain calls scx_cgroup_bw_enqueue_cb() to reenqueue it. The callback
+	 * looks up the task pointer via bpf_task_from_pid(), which returns NULL
+	 * for an unhashed task. With no way to reenqueue it, the task is
+	 * permanently lost from all runqueues, causing a watchdog timeout.
+	 */
+	if (p->flags & PF_EXITING)
+		return 0;
 
 	/* Get the current LLC ID. */
 	if ((llc_id = cbw_get_current_llc_id()) < 0) {
