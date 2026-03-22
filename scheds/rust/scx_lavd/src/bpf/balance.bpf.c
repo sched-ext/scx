@@ -417,14 +417,29 @@ __hidden
 bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
-	struct task_struct *p;
-	u64 vtime = U64_MAX;
+	struct cpu_ctx *cpuc;
+	u64 cpdom_turb_dsq_id;
+	bool turbulent;
+	struct dsq_entry dsqs[3];
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
 	if (!cpdomc) {
 		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_to_cpdom(cpdom_dsq_id));
 		return false;
 	}
+
+	cpdom_turb_dsq_id = cpdom_to_turb_dsq(dsq_to_cpdom(cpdom_dsq_id));
+
+	/*
+	 * Determine if this CPU is turbulent (high IRQ/steal time).
+	 * Non-turbulent CPUs consume from all 3 DSQs.
+	 * Turbulent CPUs only consume from the turbulent DSQ
+	 * (which holds non-latency-critical tasks).
+	 */
+	cpuc = get_cpu_ctx();
+	if (!cpuc)
+		return false;
+	turbulent = cpuc->lat_headroom < LAVD_LC_LATENCY_SENSITIVE_THRESH;
 
 	/*
 	 * If the current compute domain is a stealer, try to steal
@@ -435,41 +450,33 @@ bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 		goto x_domain_migration_out;
 
 	/*
-	 * When per_cpu_dsq or pinned_slice_ns is enabled, compare vtimes
-	 * across cpu_dsq and cpdom_dsq to select the task with the lowest vtime.
+	 * Collect eligible DSQs and consume in lowest-vtime-first order.
+	 * Non-turbulent CPUs always see the cpdom DSQ. Turbulent CPUs
+	 * also see it when it has more queued tasks than the turbulent
+	 * DSQ (to prevent starvation) or when there are no steady CPUs
+	 * to drain it.
 	 */
-	if (use_per_cpu_dsq() && use_cpdom_dsq()) {
-		u64 dsq_id = cpu_dsq_id;
-		u64 backup_dsq_id = cpdom_dsq_id;
+	dsqs[0] = (struct dsq_entry){ cpu_dsq_id,       U64_MAX, use_per_cpu_dsq() };
+	dsqs[1] = (struct dsq_entry){ cpdom_dsq_id,     U64_MAX, use_cpdom_dsq() &&
+		(!turbulent ||
+		 scx_bpf_dsq_nr_queued(cpdom_dsq_id) > scx_bpf_dsq_nr_queued(cpdom_turb_dsq_id)) };
+	dsqs[2] = (struct dsq_entry){ cpdom_turb_dsq_id, U64_MAX, use_cpdom_dsq() };
 
-		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq_id);
-		if (p)
-			vtime = p->scx.dsq_vtime;
+	if (dsqs[0].eligible)
+		dsqs[0].vtime = peek_dsq_vtime(dsqs[0].dsq_id);
+	if (dsqs[1].eligible)
+		dsqs[1].vtime = peek_dsq_vtime(dsqs[1].dsq_id);
+	if (dsqs[2].eligible)
+		dsqs[2].vtime = peek_dsq_vtime(dsqs[2].dsq_id);
 
-		p = __COMPAT_scx_bpf_dsq_peek(cpdom_dsq_id);
-		if (p && p->scx.dsq_vtime < vtime) {
-			dsq_id = cpdom_dsq_id;
-			backup_dsq_id = cpu_dsq_id;
-		}
+	sort_dsqs(&dsqs[0], &dsqs[1], &dsqs[2]);
 
-		/*
-		 * There is a scenario where the task on the Cpdom DSQ has a
-		 * lower vtime, but this CPU fails to win the race and causes
-		 * the pinned task to stall and wait on the Per-CPU DSQ for the
-		 * next scheduling round. Always try consuming from the other DSQ
-		 * to prevent this scenario.
-		 */
-		if (consume_dsq(cpdomc, dsq_id))
-			return true;
-		if (consume_dsq(cpdomc, backup_dsq_id))
-			return true;
-	} else if (use_cpdom_dsq()) {
-		if (consume_dsq(cpdomc, cpdom_dsq_id))
-			return true;
-	} else if (use_per_cpu_dsq()) {
-		if (consume_dsq(cpdomc, cpu_dsq_id))
-			return true;
-	}
+	if (dsqs[0].eligible && consume_dsq(cpdomc, dsqs[0].dsq_id))
+		return true;
+	if (dsqs[1].eligible && consume_dsq(cpdomc, dsqs[1].dsq_id))
+		return true;
+	if (dsqs[2].eligible && consume_dsq(cpdomc, dsqs[2].dsq_id))
+		return true;
 
 	/*
 	 * If there is no task in the assssociated DSQ, traverse neighbor

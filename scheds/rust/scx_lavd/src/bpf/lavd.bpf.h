@@ -28,6 +28,7 @@
 #define s2p(scale)			(((scale) * 100) >> LAVD_SHIFT)
 
 #define cpdom_to_dsq(cpdom_id)		((cpdom_id) | LAVD_DSQ_TYPE_CPDOM << LAVD_DSQ_TYPE_SHFT)
+#define cpdom_to_turb_dsq(cpdom_id)	((cpdom_id) | LAVD_DSQ_TYPE_CPDOM_TURB << LAVD_DSQ_TYPE_SHFT)
 #define dsq_to_cpdom(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_to_cpu(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_type(dsq_id)		(((dsq_id) & LAVD_DSQ_TYPE_MASK) >> LAVD_DSQ_TYPE_SHFT)
@@ -49,8 +50,9 @@ enum {
 	LAVD_DSQ_TYPE_MASK		= 0x3 << LAVD_DSQ_TYPE_SHFT,
 	LAVD_DSQ_ID_SHFT		= 0,
 	LAVD_DSQ_ID_MASK		= 0xfff << LAVD_DSQ_ID_SHFT,
-	LAVD_DSQ_NR_TYPES		= 2,
+	LAVD_DSQ_NR_TYPES		= 3,
 	LAVD_DSQ_TYPE_CPDOM		= 1,
+	LAVD_DSQ_TYPE_CPDOM_TURB		= 2,
 	LAVD_DSQ_TYPE_CPU		= 0,
 };
 
@@ -596,6 +598,17 @@ extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
 extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+
+/* DSQ helpers. */
+
+struct dsq_entry {
+	u64 dsq_id;
+	u64 vtime;
+	bool eligible;
+};
+
+u64 peek_dsq_vtime(u64 dsq_id);
+void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 
 /* Load balancer helpers. */
 

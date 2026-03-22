@@ -384,8 +384,32 @@ bool queued_on_cpu(struct cpu_ctx *cpuc)
 	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id)))
 		return true;
 
+	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpuc->cpdom_id)))
+		return true;
+
 	return false;
 }
+
+__hidden
+u64 peek_dsq_vtime(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	return p ? p->scx.dsq_vtime : U64_MAX;
+}
+
+__hidden
+void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b,
+	       struct dsq_entry *c)
+{
+	struct dsq_entry t;
+
+	if (b->vtime < a->vtime) { t = *a; *a = *b; *b = t; }
+	if (c->vtime < b->vtime) { t = *b; *b = *c; *c = t; }
+	if (b->vtime < a->vtime) { t = *a; *a = *b; *b = t; }
+}
+
 __hidden
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
 {

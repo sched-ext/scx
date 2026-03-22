@@ -1910,6 +1910,19 @@ static s32 init_cpdoms(u64 now)
 					      cpdomc->id, cpdomc->numa_id);
 				return err;
 			}
+
+			/*
+			 * Create a turbulent DSQ for tasks that
+			 * turbulent CPUs will primarily
+			 * consume from.
+			 */
+			err = scx_bpf_create_dsq(cpdom_to_turb_dsq(cpdomc->id),
+						 cpdomc->numa_id);
+			if (err) {
+				scx_bpf_error("Failed to create a turb DSQ for cpdom %llu on NUMA node %d",
+					      cpdomc->id, cpdomc->numa_id);
+				return err;
+			}
 		}
 
 		/*
