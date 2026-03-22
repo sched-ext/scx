@@ -769,6 +769,10 @@ impl<'a> Scheduler<'a> {
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
+            lat_headroom: tx.lat_headroom,
+            vuln_thresh: tx.vuln_thresh,
+            task_util_est: tx.task_util_est,
+            norm_lat_cri: tx.norm_lat_cri,
             slice_used_wall: tx.last_slice_used_wall,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,
