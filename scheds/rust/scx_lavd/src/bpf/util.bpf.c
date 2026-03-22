@@ -25,6 +25,7 @@ private(LAVD) struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CP
 private(LAVD) struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
 private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+private(LAVD) struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent (steady) CPUs */
 
 const volatile u64	nr_llcs;	/* number of LLC domains */
 volatile u64		nr_cpus_onln;	/* current number of online CPUs */

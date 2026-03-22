@@ -1984,6 +1984,10 @@ static int init_cpumasks(void)
 	err = calloc_cpumask(&big_cpumask);
 	if (err)
 		goto out;
+
+	err = calloc_cpumask(&steady_cpumask);
+	if (err)
+		goto out;
 out:
 	bpf_rcu_read_unlock();
 	return err;

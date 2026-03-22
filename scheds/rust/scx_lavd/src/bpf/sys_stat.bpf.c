@@ -521,6 +521,7 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each CPU (phase 3).
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct bpf_cpumask *steady;
 		struct cpdom_ctx *cpu_cpdomc;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
@@ -543,6 +544,19 @@ static void collect_sys_stat(void)
 			c->sum_perf_cri += cpuc->sum_perf_cri;
 			cpuc->sum_perf_cri = 0;
 		}
+
+		/*
+		 * Update the global steady (non-turbulent) CPU mask.
+		 */
+		bpf_rcu_read_lock();
+		steady = steady_cpumask;
+		if (steady) {
+			if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
+				bpf_cpumask_set_cpu(cpu, steady);
+			else
+				bpf_cpumask_clear_cpu(cpu, steady);
+		}
+		bpf_rcu_read_unlock();
 
 		/*
 		 * Collect per-CPU tier stats for preemption vulnerability
