@@ -2172,8 +2172,10 @@ void BPF_STRUCT_OPS(lavd_cgroup_move, struct task_struct *p,
 	task_ctx *taskc;
 
 	taskc = get_task_ctx(p);
-	if (!taskc)
-	       scx_bpf_error("Failed to get a task context: %d", p->pid);
+	if (!taskc) {
+		scx_bpf_error("Failed to get a task context: %d", p->pid);
+		return;
+	}
 	taskc->cgrp_id = to->kn->id;
 }
 
