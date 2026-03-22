@@ -411,11 +411,20 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b,
 }
 
 __hidden
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc)
 {
+	struct cpdom_ctx *cpdomc;
+
 	if (per_cpu_dsq || (pinned_slice_ns && is_pinned(p)))
 		return cpu_to_dsq(cpuc->cpu_id);
-	return cpdom_to_dsq(cpuc->cpdom_id);
+
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+	if (cpdomc &&
+	    preemption_vulnerability(taskc->normalized_lat_cri,
+				    taskc->util_est) >= cpdomc->vuln_thresh)
+		return cpdom_to_dsq(cpuc->cpdom_id);
+
+	return cpdom_to_turb_dsq(cpuc->cpdom_id);
 }
 
 /**

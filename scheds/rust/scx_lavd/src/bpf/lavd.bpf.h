@@ -91,6 +91,10 @@ enum consts_internal {
 	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
 	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
 	LAVD_LC_LATENCY_SENSITIVE_THRESH = LAVD_SCALE - (LAVD_SCALE >> 3), /* top 12.5% most latency-critical tasks */
+	LAVD_VULN_THRESH_STEP_SIZE	= 64, /* granularity for lat and util in threshold space */
+	LAVD_VULN_THRESH_UTIL_STEPS	= LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE, /* util sub-steps per lat level (16) */
+	LAVD_VULN_THRESH_MAX		= (LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE) * (LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE), /* 16 lat × 16 util = 256 */
+	LAVD_VULN_THRESH_INIT		= 32, /* initial threshold */
 
 	LAVD_RAVG_HALFLIFE_NS		= (128ULL * NSEC_PER_MSEC),
 
@@ -268,6 +272,15 @@ struct cpdom_ctx {
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
+
+	/* per-cpdom preemption vulnerability threshold tracking */
+	u32	vuln_thresh;			    /* unified lat/util threshold step [0, LAVD_VULN_THRESH_MAX] */
+	u32	util_sum_steady;		    /* sum of util_est for steady CPUs in this cpdom */
+	u32	util_sum_turb;		    /* sum of util_est for turbulent CPUs in this cpdom */
+	u32	cap_sum_steady;		    /* sum of capacity for steady CPUs in this cpdom */
+	u32	cap_sum_turb;		    /* sum of capacity for turbulent CPUs in this cpdom */
+	u16	nr_steady_cpus;		    /* count of steady CPUs in this cpdom */
+	u16	nr_turb_cpus;		    /* count of turbulent CPUs in this cpdom */
 
 } __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -591,8 +604,23 @@ static __always_inline bool use_cpdom_dsq(void)
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
 u16 normalize_lat_cri(u16 lat_cri);
+
+/*
+ * Compute a task's preemption vulnerability — how likely it is to be
+ * routed to the turbulent DSQ. Lat is the major axis (weighted by
+ * LAVD_VULN_THRESH_UTIL_STEPS) and util is the minor axis, so the
+ * threshold naturally cascades: util sub-steps carry into lat levels
+ * when vuln_thresh is incremented/decremented.
+ */
+static __always_inline
+u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
+{
+	u32 lat_step = normalized_lat_cri / LAVD_VULN_THRESH_STEP_SIZE;
+	u32 util_step = util_est / LAVD_VULN_THRESH_STEP_SIZE;
+	return lat_step * LAVD_VULN_THRESH_UTIL_STEPS + util_step;
+}
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */

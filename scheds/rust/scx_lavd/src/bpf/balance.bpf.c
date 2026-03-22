@@ -459,7 +459,8 @@ bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 	dsqs[0] = (struct dsq_entry){ cpu_dsq_id,       U64_MAX, use_per_cpu_dsq() };
 	dsqs[1] = (struct dsq_entry){ cpdom_dsq_id,     U64_MAX, use_cpdom_dsq() &&
 		(!turbulent ||
-		 scx_bpf_dsq_nr_queued(cpdom_dsq_id) > scx_bpf_dsq_nr_queued(cpdom_turb_dsq_id)) };
+		 scx_bpf_dsq_nr_queued(cpdom_dsq_id) > scx_bpf_dsq_nr_queued(cpdom_turb_dsq_id) ||
+		 cpdomc->nr_steady_cpus == 0) };
 	dsqs[2] = (struct dsq_entry){ cpdom_turb_dsq_id, U64_MAX, use_cpdom_dsq() };
 
 	if (dsqs[0].eligible)

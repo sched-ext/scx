@@ -845,7 +845,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 	} else {
-		dsq_id = get_target_dsq_id(p, cpuc);
+		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	}
@@ -910,7 +910,7 @@ int enqueue_cb(struct task_struct __arg_trusted *p)
 	/*
 	 * Enqueue the task to a DSQ.
 	 */
-	dsq_id = get_target_dsq_id(p, cpuc);
+	dsq_id = get_target_dsq_id(p, cpuc, taskc);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
 
 	return 0;
@@ -1898,6 +1898,8 @@ static s32 init_cpdoms(u64 now)
 		}
 		if (!cpdomc->is_valid)
 			continue;
+
+		cpdomc->vuln_thresh = LAVD_VULN_THRESH_INIT;
 
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.
