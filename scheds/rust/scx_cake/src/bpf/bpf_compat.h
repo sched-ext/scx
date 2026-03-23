@@ -8,6 +8,7 @@
 
     /* MODERN PATH: Formal Atomics (Max Performance) */
     #define cake_relaxed_load_u32(ptr)      __atomic_load_n(ptr, __ATOMIC_RELAXED)
+    #define cake_relaxed_load_u64(ptr)      __atomic_load_n(ptr, __ATOMIC_RELAXED)
     #define cake_relaxed_store_u32(ptr, v)  __atomic_store_n(ptr, v, __ATOMIC_RELAXED)
 
 #else
@@ -20,6 +21,16 @@
             "%0 = *(u32 *)(%1 + 0)"
             : "=r"(val)
             : "r"(ptr), "m"(*ptr)  /* Targeted dependency, no global spill */
+        );
+        return val;
+    }
+
+    static __always_inline u64 cake_relaxed_load_u64(const volatile u64 *ptr) {
+        u64 val;
+        asm volatile(
+            "%0 = *(u64 *)(%1 + 0)"
+            : "=r"(val)
+            : "r"(ptr), "m"(*ptr)
         );
         return val;
     }
