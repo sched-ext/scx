@@ -169,9 +169,25 @@ int plan_x_cpdom_migration(void)
 
 		/*
 		 * Under-loaded active domains become a stealer.
+		 * Ingress budget = half the deficit below fair share.
 		 */
 		if (cpdomc->nr_active_cpus &&
 		    cpdomc->load_invr <= stealer_threshold) {
+			u64 stealer_budget = 0;
+
+			if (total_cap_sum > 0) {
+				u64 fair_share_invr = total_queued_load_invr *
+						     cpdomc->cap_sum_active_cpus /
+						     total_cap_sum;
+				if (fair_share_invr > cpdomc->queued_load_invr)
+					stealer_budget = (fair_share_invr -
+							  cpdomc->queued_load_invr) / 2;
+			}
+
+			if (stealer_budget == 0)
+				stealer_budget = sys_stat.avg_runtime_invr;
+
+			WRITE_ONCE(cpdomc->stealer_budget_invr, stealer_budget);
 			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, true);
 			WRITE_ONCE(cpdomc->is_stealee, false);
@@ -196,6 +212,7 @@ int plan_x_cpdom_migration(void)
 			}
 
 			WRITE_ONCE(cpdomc->stealee_budget_invr, stealee_budget_invr);
+			WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, false);
 			WRITE_ONCE(cpdomc->is_stealee, true);
 			nr_stealee++;
@@ -206,6 +223,7 @@ int plan_x_cpdom_migration(void)
 		 * Otherwise, keep tasks as it is.
 		 */
 		WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
+		WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
 		WRITE_ONCE(cpdomc->is_stealer, false);
 		WRITE_ONCE(cpdomc->is_stealee, false);
 	}
@@ -226,6 +244,7 @@ reset_and_skip_lb:
 
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
+			WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, false);
 			WRITE_ONCE(cpdomc->is_stealee, false);
 		}
