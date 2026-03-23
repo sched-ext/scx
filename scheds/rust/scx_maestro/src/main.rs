@@ -71,6 +71,14 @@ struct Opts {
     #[clap(long)]
     monitor: Option<f64>,
 
+    /// Disable SMT optimizations.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_smt: bool,
+
+    /// Disable NUMA optimizations.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_numa: bool,
+
     /// Enable BPF debugging via /sys/kernel/tracing/trace_pipe.
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     debug: bool,
@@ -228,6 +236,26 @@ impl<'a> Scheduler<'a> {
         // Initialize CPU topology.
         let topo = Topology::new().unwrap();
 
+        // Check host topology to determine if we need to enable SMT capabilities.
+        let smt_enabled = !opts.disable_smt && topo.smt_enabled;
+        if !smt_enabled {
+            info!("Disabling SMT optimizations");
+        }
+
+        // Determine the amount of non-empty NUMA nodes in the system.
+        let nr_nodes = topo
+            .nodes
+            .values()
+            .filter(|node| !node.all_cpus.is_empty())
+            .count();
+        info!("NUMA nodes: {}", nr_nodes);
+
+        // Automatically disable NUMA optimizations when running on non-NUMA systems.
+        let numa_enabled = !opts.disable_numa && nr_nodes > 1;
+        if !numa_enabled {
+            info!("Disabling NUMA optimizations");
+        }
+
         info!(
             "{} {}",
             SCHEDULER_NAME,
@@ -278,7 +306,8 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag_ns = opts.slice_lag_us * 1000;
         rodata.debug = opts.debug;
-        rodata.smt_enabled = topo.smt_enabled;
+        rodata.smt_enabled = smt_enabled;
+        rodata.numa_enabled = numa_enabled;
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.compaction = opts.compaction;
         rodata.lowlatency = opts.lowlatency;
@@ -353,6 +382,11 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+            | if numa_enabled {
+                *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
+            } else {
+                0
+            }
             | if opts.lowlatency {
                 *compat::SCX_OPS_ALWAYS_ENQ_IMMED
             } else {
@@ -376,7 +410,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize SMT sibling cpumasks (populate per-CPU smt via enable_sibling_cpu prog).
-        if topo.smt_enabled {
+        if smt_enabled {
             Self::init_smt_domains(&mut skel, &topo)?;
         }
 
