@@ -261,6 +261,7 @@ struct cpdom_ctx {
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
 	u64	queued_load_invr;		    /* sum of avg_runtime_invr for all tasks queued in this domain */
+	u64	stealee_budget_invr;		    /* egress budget: how much invariant runtime can leave this domain */
 
 } __attribute__((aligned(CACHELINE_SIZE)));
 

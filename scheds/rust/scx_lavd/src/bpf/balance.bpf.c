@@ -41,6 +41,7 @@ int plan_x_cpdom_migration(void)
 	u64 avg_load_invr = 0, min_load_invr = U64_MAX, max_load_invr = 0;
 	u64 max_avg_util_wall = 0;
 	u64 x_mig_delta, util, qlen, qlen_invr;
+	u64 total_queued_load_invr = 0, total_cap_sum = 0;
 	bool overflow_running = false;
 	int nz_qlen = 0;
 
@@ -97,6 +98,8 @@ int plan_x_cpdom_migration(void)
 			max_load_invr = cpdomc->load_invr;
 		if (qlen)
 			nz_qlen++;
+		total_queued_load_invr += cpdomc->queued_load_invr;
+		total_cap_sum += cpdomc->cap_sum_active_cpus;
 	}
 	if (sys_stat.nr_active_cpdoms)
 		avg_load_invr /= sys_stat.nr_active_cpdoms;
@@ -169,6 +172,7 @@ int plan_x_cpdom_migration(void)
 		 */
 		if (cpdomc->nr_active_cpus &&
 		    cpdomc->load_invr <= stealer_threshold) {
+			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, true);
 			WRITE_ONCE(cpdomc->is_stealee, false);
 			continue;
@@ -176,9 +180,22 @@ int plan_x_cpdom_migration(void)
 
 		/*
 		 * Over-loaded or non-active domains become a stealee.
+		 * Budget = half the excess invariant load beyond fair share.
 		 */
 		if (!cpdomc->nr_active_cpus ||
 		    cpdomc->load_invr >= stealee_threshold) {
+			u64 stealee_budget_invr = 0;
+
+			if (total_cap_sum > 0) {
+				u64 fair_share_invr = total_queued_load_invr *
+						     cpdomc->cap_sum_active_cpus /
+						     total_cap_sum;
+				if (cpdomc->queued_load_invr > fair_share_invr)
+					stealee_budget_invr = (cpdomc->queued_load_invr -
+						       fair_share_invr) / 2;
+			}
+
+			WRITE_ONCE(cpdomc->stealee_budget_invr, stealee_budget_invr);
 			WRITE_ONCE(cpdomc->is_stealer, false);
 			WRITE_ONCE(cpdomc->is_stealee, true);
 			nr_stealee++;
@@ -188,6 +205,7 @@ int plan_x_cpdom_migration(void)
 		/*
 		 * Otherwise, keep tasks as it is.
 		 */
+		WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 		WRITE_ONCE(cpdomc->is_stealer, false);
 		WRITE_ONCE(cpdomc->is_stealee, false);
 	}
@@ -207,6 +225,7 @@ reset_and_skip_lb:
 				break;
 
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, false);
 			WRITE_ONCE(cpdomc->is_stealee, false);
 		}
