@@ -246,22 +246,9 @@ pub struct TuiApp {
     pub bench_run_count: u32,
     pub last_bench_timestamp: u64, // to detect new results
     pub system_info: SystemInfo,
-    // Game TGID detection: process-level yielder promotion
-    pub tracked_game_tgid: u32, // currently detected game tgid (0 = none)
-    pub tracked_game_ppid: u32, // PPID of the locked game family (for hysteresis comparison)
-    pub game_thread_count: usize, // thread count for detected game
-    pub game_name: String,      // process name from /proc/{tgid}/comm
-    // Hysteresis: challenger must beat current game for 15s to take over
-    pub game_challenger_ppid: u32, // PPID contesting game slot (0 = none)
-    pub game_challenger_since: Option<Instant>, // When challenger first appeared
-    // Confidence-based polling throttle (Rule 40)
-    pub game_stable_polls: u32, // consecutive polls with same PPID winner
-    pub game_skip_counter: u32, // how many polls we've skipped this interval
-    // Scheduler state machine (IDLE=0, COMPILATION=1, GAMING=2)
-    pub sched_state: u8,           // current operating state written to BPF BSS
-    pub compile_task_count: usize, // active compiler task count for display
-    // Game detection confidence tier (100=Steam, 90=Wine .exe, 0=none)
-    pub game_confidence: u8,
+    // Shared game + compiler detection (same logic as headless/release mode).
+    // Delegates to detect.rs for identical behavior across all build modes.
+    pub detector: crate::detect::GameDetector,
 }
 
 #[derive(Clone, Debug)]
@@ -312,7 +299,7 @@ pub struct TaskTelemetryRow {
     pub is_bg: bool,          // Background noise squeeze: non-game, non-wb, non-kernel
     pub is_game_member: bool, // Task is in the game PPID family (tgid==game_tgid or ppid==game_ppid)
     pub ppid: u32,            // Parent PID for game family detection
-    // Phase 8: Per-callback sub-function stopwatch (ns)
+    // Per-callback sub-function stopwatch (ns)
     pub gate_cascade_ns: u32,  // select_cpu: full gate cascade duration
     pub idle_probe_ns: u32,    // select_cpu: winning gate idle probe cost
     pub vtime_compute_ns: u32, // enqueue: vtime calculation + tier weighting
@@ -321,15 +308,15 @@ pub struct TaskTelemetryRow {
     pub classify_ns: u32,      // stopping: tier classify + squeeze fusion
     pub vtime_staging_ns: u32, // stopping: dsq_vtime bit packing + writes
     pub warm_history_ns: u32,  // stopping: warm CPU ring shift
-    // Phase 8: Quantum completion tracking
+    // Quantum completion tracking
     pub quantum_full_count: u16,    // Task consumed entire slice
     pub quantum_yield_count: u16,   // Task yielded before slice exhaustion
     pub quantum_preempt_count: u16, // Task was kicked/preempted mid-slice
-    // Phase 8: Wake chain enhancement
+    // Wake chain tracking
     pub waker_cpu: u16,  // CPU the waker was running on
     pub waker_tgid: u32, // TGID of the waker (process group)
-    // Phase 8: CPU core distribution histogram
-    pub cpu_run_count: [u16; 64], // Per-CPU run count (TUI normalizes to %)
+    // CPU core distribution histogram
+    pub cpu_run_count: [u16; crate::topology::MAX_CPUS], // Per-CPU run count (TUI normalizes to %)
     // EEVDF telemetry
     pub vtime_mult: u16, // EEVDF vtime reciprocal (1024=nice0, <1024 high-pri, >1024 low-pri)
 }
@@ -378,7 +365,7 @@ impl Default for TaskTelemetryRow {
             is_bg: false,
             is_game_member: false,
             ppid: 0,
-            // Phase 8
+            // Telemetry fields
             gate_cascade_ns: 0,
             idle_probe_ns: 0,
             vtime_compute_ns: 0,
@@ -392,7 +379,7 @@ impl Default for TaskTelemetryRow {
             quantum_preempt_count: 0,
             waker_cpu: 0,
             waker_tgid: 0,
-            cpu_run_count: [0u16; 64],
+            cpu_run_count: [0u16; crate::topology::MAX_CPUS],
             vtime_mult: 1024,
         }
     }
@@ -402,7 +389,16 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
     let mut total: cake_stats = Default::default();
 
     if let Some(bss) = &skel.maps.bss_data {
-        for s in &bss.global_stats {
+        // Bound to actual CPU count — at compile-time MAX_CPUS=16,
+        // global_stats.len() is already 16. .take(nr_cpus) further
+        // ensures only populated entries are summed at runtime.
+        let nr = skel
+            .maps
+            .rodata_data
+            .as_ref()
+            .map(|r| r.nr_cpus as usize)
+            .unwrap_or(bss.global_stats.len());
+        for s in bss.global_stats.iter().take(nr) {
             // Sum all fields
             total.nr_new_flow_dispatches += s.nr_new_flow_dispatches;
             total.nr_old_flow_dispatches += s.nr_old_flow_dispatches;
@@ -432,7 +428,7 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.nr_dsq_queued += s.nr_dsq_queued;
             total.nr_dsq_consumed += s.nr_dsq_consumed;
 
-            // Phase 8: dispatch callback timing
+            // Dispatch callback timing
             total.total_dispatch_ns += s.total_dispatch_ns;
             total.max_dispatch_ns = total.max_dispatch_ns.max(s.max_dispatch_ns);
 
@@ -493,17 +489,7 @@ impl TuiApp {
             bench_run_count: 0,
             last_bench_timestamp: 0,
             system_info,
-            tracked_game_tgid: 0,
-            tracked_game_ppid: 0,
-            game_thread_count: 0,
-            game_name: String::new(),
-            game_challenger_ppid: 0,
-            game_challenger_since: None,
-            game_stable_polls: 0,
-            game_skip_counter: 0,
-            sched_state: 0,
-            compile_task_count: 0,
-            game_confidence: 0,
+            detector: crate::detect::GameDetector::new(),
         }
     }
 
@@ -670,7 +656,11 @@ fn build_cpu_topology_grid_compact<'a>(
         };
 
         // Determine if this LLC has 3D V-Cache
-        let has_vcache = (topo.vcache_llc_mask & (1 << *llc_id)) != 0;
+        let has_vcache = {
+            let word = (*llc_id as usize) >> 6;
+            let bit = 1u64 << ((*llc_id as usize) & 63);
+            word < topo.vcache_llc_mask.len() && (topo.vcache_llc_mask[word] & bit) != 0
+        };
         let vcache_label = if has_vcache { " [3D V-Cache]" } else { "" };
 
         text.push(Line::from(vec![Span::styled(
@@ -686,7 +676,11 @@ fn build_cpu_topology_grid_compact<'a>(
         for chunk in sorted_cpus.chunks(cpus_per_row) {
             let mut line_spans = vec![Span::raw("  ")]; // Indent
             for &cpu in chunk {
-                let is_e_core = (topo.little_core_mask & (1 << cpu)) != 0;
+                let is_e_core = {
+                    let word = cpu >> 6;
+                    let bit = 1u64 << (cpu & 63);
+                    word < topo.little_core_mask.len() && (topo.little_core_mask[word] & bit) != 0
+                };
                 let core_color = if is_e_core {
                     Color::DarkGray
                 } else {
@@ -1097,28 +1091,31 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     output.push_str(&app.system_info.format_header());
 
     // Compact state/game/uptime line
-    let state_str = match app.sched_state {
+    let state_str = match app.detector.sched_state {
         2 => {
-            let conf_label = match app.game_confidence {
+            let conf_label = match app.detector.game_confidence {
                 100 => "Steam",
                 90 => "Wine",
                 _ => "?",
             };
             format!(
                 "GAMING game={} pid={} threads={} conf={}%[{}]",
-                if app.game_name.is_empty() {
+                if app.detector.game_name.is_empty() {
                     "?"
                 } else {
-                    &app.game_name
+                    &app.detector.game_name
                 },
-                app.tracked_game_tgid,
-                app.game_thread_count,
-                app.game_confidence,
+                app.detector.tracked_game_tgid,
+                app.detector.game_thread_count,
+                app.detector.game_confidence,
                 conf_label,
             )
         }
 
-        1 => format!("COMPILATION compile_tasks={}", app.compile_task_count),
+        1 => format!(
+            "COMPILATION compile_tasks={}",
+            app.detector.compile_task_count
+        ),
         _ => "IDLE".to_string(),
     };
     output.push_str(&format!(
@@ -1587,44 +1584,48 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     );
 
     // State label — shown in header for all three operating states
-    let state_line = match app.sched_state {
+    let state_line = match app.detector.sched_state {
         2 => String::new(), // GAMING: state shown inline in game_line below
         1 => format!(
             " State: COMPILATION | {} compiler task{} active",
-            app.compile_task_count,
-            if app.compile_task_count == 1 { "" } else { "s" }
+            app.detector.compile_task_count,
+            if app.detector.compile_task_count == 1 {
+                ""
+            } else {
+                "s"
+            }
         ),
         _ => " State: IDLE".to_string(),
     };
 
-    let header_text = if app.tracked_game_tgid > 0 {
+    let header_text = if app.detector.tracked_game_tgid > 0 {
         // Confidence tag: shows detection tier + poll stability
-        let conf_label = match app.game_confidence {
+        let conf_label = match app.detector.game_confidence {
             100 => "Steam",
             90 => "Wine/.exe",
             _ => "unknown",
         };
-        let stability = if app.game_stable_polls >= 20 {
+        let stability = if app.detector.stable_polls >= 20 {
             "\u{1F512}".to_string()
         } else {
-            format!("{}/20", app.game_stable_polls)
+            format!("{}/20", app.detector.stable_polls)
         };
         let mut game_line = format!(
             " State: GAMING | Game: {} (PID {}, {} threads) [{}% {} {}]",
-            if app.game_name.is_empty() {
+            if app.detector.game_name.is_empty() {
                 "unknown"
             } else {
-                &app.game_name
+                &app.detector.game_name
             },
-            app.tracked_game_tgid,
-            app.game_thread_count,
-            app.game_confidence,
+            app.detector.tracked_game_tgid,
+            app.detector.game_thread_count,
+            app.detector.game_confidence,
             conf_label,
             stability,
         );
         // Show challenger holdoff status if active
-        if app.game_challenger_ppid > 0 {
-            if let Some(since) = app.game_challenger_since {
+        if app.detector.challenger_ppid > 0 {
+            if let Some(since) = app.detector.challenger_since {
                 let elapsed = since.elapsed().as_secs();
                 game_line.push_str(&format!(" [contender: {}s/15s]", elapsed));
             }
@@ -3318,7 +3319,7 @@ pub fn run_tui(
 
                         // pelt_util and deficit_us now directly in cake_iter_record
                         let pelt_util = rec.pelt_util as u32;
-                        let deficit_us: u32 = rec.deficit_us as u32;
+                        let deficit_us: u32 = rec._pad_iter_def as u32;
 
                         let g1 = rec.telemetry.gate_1_hits;
                         let g2 = rec.telemetry.gate_2_hits;
@@ -3454,9 +3455,9 @@ pub fn run_tui(
                         row._pad_recomp = rec.telemetry._pad_recomp;
                         row.is_hog = is_hog;
                         row.is_bg = is_bg;
-                        row.is_game_member = app.tracked_game_tgid > 0
-                            && (row.tgid == app.tracked_game_tgid
-                                || (row.ppid > 0 && row.ppid == app.tracked_game_ppid));
+                        row.is_game_member = app.detector.tracked_game_tgid > 0
+                            && (row.tgid == app.detector.tracked_game_tgid
+                                || (row.ppid > 0 && row.ppid == app.detector.tracked_game_ppid));
                         row.ppid = ppid;
                         row.vtime_mult = rec.vtime_mult;
                         row.gate_cascade_ns = rec.telemetry.gate_cascade_ns;
@@ -3523,399 +3524,25 @@ pub fn run_tui(
             //   Games under Proton easily satisfy: game.exe + wineserver +
             //   winedevice + render workers = 5+ threads always.
             //   Native Linux games also easily satisfy (main + audio + IO + render).
-            //
-            // CONFIDENCE THROTTLE (Rule 40): After GAME_CONFIDENCE_THRESHOLD
-            //   stable polls with the same PPID winning, reduce detection sweep
-            //   to every GAME_CONFIDENCE_SKIP-th poll (~2s effective instead of 500ms).
-            //   Resets immediately on game exit or PPID switch.
-            const GAME_MIN_THREADS: usize = 5;
-            const GAME_CONFIDENCE_THRESHOLD: u32 = 20; // 20 × 500ms = 10s stable
-            const GAME_CONFIDENCE_SKIP: u32 = 4; // check every 4th poll when confident
+            // Shared game + compiler detection — identical logic to headless/release.
+            // Uses detect.rs for /proc scanning, Steam/Wine/.exe detection,
+            // hysteresis state machine, and compiler detection.
+            // Guarantees TUI debugging matches production scheduling behavior.
+            let detect_result = app.detector.poll();
 
-            // Game exit detection fires before the throttle check so a dead game
-            // always clears on the very next poll, regardless of confidence state.
-            if app.tracked_game_tgid > 0 {
-                let proc_path = format!("/proc/{}", app.tracked_game_tgid);
-                if !std::path::Path::new(&proc_path).exists() {
-                    app.tracked_game_tgid = 0;
-                    app.tracked_game_ppid = 0;
-                    app.game_thread_count = 0;
-                    app.game_name.clear();
-                    app.game_challenger_ppid = 0;
-                    app.game_challenger_since = None;
-                    app.game_stable_polls = 0;
-                    app.game_skip_counter = 0;
-                    app.game_confidence = 0;
-                }
-            }
-
-            // Confidence throttle: if we've been stable long enough, skip
-            // the full PPID aggregation sweep on most polls.
-            let should_skip_sweep = app.game_stable_polls >= GAME_CONFIDENCE_THRESHOLD
-                && app.game_skip_counter > 0
-                && app.game_skip_counter < GAME_CONFIDENCE_SKIP;
-
-            if should_skip_sweep {
-                // Confident path: reuse existing winner, just bump skip counter.
-                // BPF write still happens below unconditionally.
-                app.game_skip_counter += 1;
-            } else {
-                // Full detection sweep.
-                app.game_skip_counter = 0;
-
-                // --- Three-phase game detection ---
-                // Priority: Steam (100) → Wine .exe (90) → yield fallback (50)
-                //
-                // Phase 1 + 2 scan qualifying PPIDs (≥GAME_MIN_THREADS threads with
-                // any activity). No yield threshold required for Steam/.exe —
-                // the binary signal is definitive on its own.
-                //
-                // Phase 3 (yield fallback) removed: yield-heavy non-games (Brave, Chrome,
-                // IDEs, Electron apps) too easily exceed the threshold and false-positive.
-
-                // Reusable Steam env probe (cold path, ~1 file read per PPID).
-                let has_steam_env = |pid: u32| -> bool {
-                    if let Ok(env) = std::fs::read(format!("/proc/{}/environ", pid)) {
-                        env.split(|&b| b == 0)
-                            .filter_map(|kv| std::str::from_utf8(kv).ok())
-                            .any(|s| s.starts_with("SteamGameId=") || s.starts_with("STEAM_GAME="))
-                    } else {
-                        false
-                    }
-                };
-
-                // Reusable .exe probe (cold path, ~1 file read per PPID).
-                let has_exe_cmdline = |pid: u32| -> bool {
-                    if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
-                        cmdline
-                            .split(|&b| b == 0)
-                            .filter_map(|arg| std::str::from_utf8(arg).ok())
-                            .any(|s| s.to_lowercase().ends_with(".exe"))
-                    } else {
-                        false
-                    }
-                };
-
-                // Known Steam infrastructure comms — never game processes.
-                const STEAM_INFRA: &[&str] = &[
-                    "steam",
-                    "steamwebhelper",
-                    "pressure-vessel",
-                    "pv-bwrap",
-                    "reaper",
-                ];
-
-                // Aggregate thread counts by PPID for Phase 1 + 2 thread-count gate.
-                let mut ppid_data: std::collections::HashMap<u32, usize> =
-                    std::collections::HashMap::new(); // ppid → thread_count
-                for (_pid, row) in app.task_rows.iter() {
-                    if row.status == TaskStatus::Dead || row.ppid == 0 {
-                        continue;
-                    }
-                    *ppid_data.entry(row.ppid).or_insert(0) += 1;
-                }
-
-                // Phase 1: Steam scan — highest priority, no yield threshold.
-                // Covers: Proton games, native Linux Steam games (CS2, Dota 2),
-                // Battle.net/Epic via Steam. SteamGameId= is the definitive signal.
-                // Filter: skip PPID groups where ALL threads are Steam infrastructure.
-                let mut steam_ppid: u32 = 0;
-                for (&ppid, &thread_count) in &ppid_data {
-                    if thread_count >= GAME_MIN_THREADS && has_steam_env(ppid) {
-                        // Skip if ALL threads under this PPID are Steam infra.
-                        let has_non_infra = app.task_rows.values().any(|row| {
-                            row.ppid == ppid
-                                && row.status != TaskStatus::Dead
-                                && !STEAM_INFRA
-                                    .iter()
-                                    .any(|&infra| row.comm.to_lowercase().contains(infra))
-                        });
-                        if has_non_infra {
-                            steam_ppid = ppid;
-                            break;
-                        }
-                    }
-                }
-
-                // Phase 2: .exe scan — Wine/Proton without Steam env (Heroic, Lutris, etc.).
-                let mut exe_ppid: u32 = 0;
-                if steam_ppid == 0 {
-                    for (&ppid, &thread_count) in &ppid_data {
-                        if thread_count >= GAME_MIN_THREADS && has_exe_cmdline(ppid) {
-                            exe_ppid = ppid;
-                            break;
-                        }
-                    }
-                }
-
-                // Resolve winning PPID: Steam wins → .exe wins → no game.
-                let new_game_ppid = if steam_ppid > 0 {
-                    steam_ppid
-                } else if exe_ppid > 0 {
-                    exe_ppid
-                } else {
-                    0
-                };
-
-                // Helper: resolve best TGID + name for a given PPID (cold path only).
-                // Picks the TGID with the highest pelt_util — the game's main/render
-                // thread runs for ms; infra processes run for µs.
-                // Works for both Proton (.exe) and native (cs2, dota2) games.
-                let resolve_game = |ppid: u32,
-                                    rows: &HashMap<u32, TaskTelemetryRow>|
-                 -> (u32, String) {
-                    // Known infra exes to skip when selecting game TGID.
-                    const INFRA_BLOCKLIST: &[&str] = &[
-                        "steam",
-                        "steamwebhelper",
-                        "pressure-vessel",
-                        "pv-bwrap",
-                        "reaper",
-                        "bash",
-                        "sh",
-                        "services",
-                        "pluginhost",
-                        "winedevice",
-                        "rpcss",
-                        "svchost",
-                        "explorer",
-                        "wineboot",
-                        "start",
-                        "conhost",
-                        "dxvk-cache-me",
-                        "crashhandler",
-                        "unitycrashhandler64",
-                        "werfault",
-                        "ngen",
-                        "mscorsvw",
-                        "gamebarfullscreensession",
-                        "gamebarpresencewriter",
-                        "rundll32",
-                        "regsvr32",
-                        "winedbg",
-                        "cmd",
-                    ];
-
-                    // Build per-TGID max pelt_util.
-                    let mut tgid_max_rt: std::collections::HashMap<u32, u32> =
-                        std::collections::HashMap::new();
-                    for (_pid, row) in rows.iter() {
-                        if row.ppid == ppid && row.pelt_util > 0 {
-                            let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
-                            let entry = tgid_max_rt.entry(tgid).or_insert(0);
-                            if row.pelt_util > *entry {
-                                *entry = row.pelt_util;
-                            }
-                        }
-                    }
-
-                    // Sort TGIDs by max pelt_util descending; skip infra.
-                    let mut ranked: Vec<(u32, u32)> = tgid_max_rt.into_iter().collect();
-                    ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-
-                    let mut game_tgid: u32 = ppid; // fallback
-                    for (tgid, _rt) in &ranked {
-                        // Check comm against blocklist.
-                        let comm_lc = rows
-                            .values()
-                            .find(|r| {
-                                let t = if r.tgid > 0 { r.tgid } else { r.pid };
-                                t == *tgid
-                            })
-                            .map(|r| r.comm.to_lowercase())
-                            .unwrap_or_default();
-                        if INFRA_BLOCKLIST.iter().any(|&b| comm_lc.contains(b)) {
-                            continue;
-                        }
-                        game_tgid = *tgid;
-                        break;
-                    }
-
-                    // Read display name: try .exe basename (Proton), then comm (native).
-                    let name = {
-                        let mut n = String::from("unknown");
-                        if let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", game_tgid)) {
-                            for arg in cmdline.split(|&b| b == 0) {
-                                if let Ok(s) = std::str::from_utf8(arg) {
-                                    if s.to_lowercase().ends_with(".exe") {
-                                        let basename = s.rsplit(['\\', '/']).next().unwrap_or(s);
-                                        n = basename
-                                            .trim_end_matches(".exe")
-                                            .trim_end_matches(".EXE")
-                                            .to_string();
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        // Native game fallback: use comm (e.g., "cs2", "dota2").
-                        if n == "unknown" {
-                            if let Ok(comm) =
-                                std::fs::read_to_string(format!("/proc/{}/comm", game_tgid))
-                            {
-                                n = comm.trim().to_string();
-                            }
-                        }
-                        n
-                    };
-                    (game_tgid, name)
-                };
-
-                // Confidence for the candidate comes from the winning detection phase.
-                // Phase 1 (Steam) → 100, Phase 2 (.exe) → 90, no game → 0.
-                let new_game_confidence: u8 = if new_game_ppid == 0 {
-                    0
-                } else if new_game_ppid == steam_ppid {
-                    100
-                } else {
-                    90 // exe match
-                };
-
-                // Holdoff by confidence tier:
-                //   100 (Steam) → instant lock
-                //    90 (.exe)  → 5s holdoff (Wine apps nearly always games, but brief wait)
-                let holdoff_for_conf = |conf: u8| -> u64 {
-                    if conf >= 100 {
-                        0
-                    } else {
-                        5
-                    }
-                };
-
-                // --- Hysteresis State Machine ---
-                // Challenger can only displace a locked game if challenger_confidence >=
-                // locked_game_confidence. Steam (100) always beats .exe (90).
-
-                if app.tracked_game_tgid == 0 {
-                    // No game locked — try to lock now.
-                    if new_game_confidence > 0 {
-                        let holdoff = holdoff_for_conf(new_game_confidence);
-                        if holdoff == 0 || app.game_challenger_ppid == new_game_ppid {
-                            // Either instant (Steam) or challenger already waited enough.
-                            let accept = holdoff == 0
-                                || app
-                                    .game_challenger_since
-                                    .is_some_and(|s| s.elapsed() >= Duration::from_secs(holdoff));
-                            if accept {
-                                let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
-                                app.tracked_game_tgid = tgid;
-                                app.tracked_game_ppid = new_game_ppid;
-                                app.game_thread_count =
-                                    ppid_data.get(&new_game_ppid).copied().unwrap_or(0);
-                                app.game_name = name;
-                                app.game_confidence = new_game_confidence;
-                                app.game_challenger_ppid = 0;
-                                app.game_challenger_since = None;
-                                app.game_stable_polls = 1;
-                            }
-                        } else {
-                            // Start or continue holdoff timer.
-                            if app.game_challenger_ppid != new_game_ppid {
-                                app.game_challenger_ppid = new_game_ppid;
-                                app.game_challenger_since = Some(Instant::now());
-                            }
-                        }
-                    }
-                } else if new_game_ppid == app.tracked_game_ppid {
-                    // Same game family still winning — update thread count.
-                    app.game_thread_count = ppid_data.get(&new_game_ppid).copied().unwrap_or(0);
-                    // GAME SWAP FIX (C): preserve active challenger timer.
-                    // When two games coexist (Game A dying + Game B starting), HashMap
-                    // iteration non-determinism alternates the scan winner. Resetting
-                    // the challenger here kills Game B's holdoff timer every other poll.
-                    if app.game_challenger_ppid == 0 {
-                        app.game_stable_polls = app.game_stable_polls.saturating_add(1);
-                    }
-                } else if new_game_confidence > 0 && new_game_confidence >= app.game_confidence {
-                    // GAME SWAP FIX (B): equal-or-higher confidence can contest.
-                    // Handles: close Game A → launch Game B (both Steam = 100%).
-                    // Equal confidence gets 5s holdoff to prevent HashMap flicker;
-                    // higher confidence uses phase-based holdoff (0s Steam, 5s .exe).
-                    app.game_stable_polls = 0;
-                    if app.game_challenger_ppid != new_game_ppid {
-                        app.game_challenger_ppid = new_game_ppid;
-                        app.game_challenger_since = Some(Instant::now());
-                    } else if let Some(since) = app.game_challenger_since {
-                        let holdoff = if new_game_confidence > app.game_confidence {
-                            holdoff_for_conf(new_game_confidence)
-                        } else {
-                            5 // Equal confidence: 5s holdoff prevents HashMap flicker
-                        };
-                        if since.elapsed() >= Duration::from_secs(holdoff) {
-                            let (tgid, name) = resolve_game(new_game_ppid, &app.task_rows);
-                            app.tracked_game_tgid = tgid;
-                            app.tracked_game_ppid = new_game_ppid;
-                            app.game_thread_count =
-                                ppid_data.get(&new_game_ppid).copied().unwrap_or(0);
-                            app.game_name = name;
-                            app.game_confidence = new_game_confidence;
-                            app.game_challenger_ppid = 0;
-                            app.game_challenger_since = None;
-                            app.game_stable_polls = 1;
-                        }
-                    }
-                } else {
-                    // No qualifying candidate or lower-confidence challenger — hold current.
-                    app.game_challenger_ppid = 0;
-                    app.game_challenger_since = None;
-                    app.game_stable_polls = 0;
-                }
-            }
-
-            // Write game state to BPF BSS — drives all scheduling decisions.
-            // game_ppid is the primary family signal (includes wineserver + siblings).
-            // game_tgid written for display/existence checks.
-            // sched_state drives HOG/bg/vprot/quantum policy.
+            // Write detection results to BPF BSS — drives reclassifier,
+            // class-aware kick guard, SYNC strip, and quantum ceiling.
             if let Some(bss) = &mut skel.maps.bss_data {
-                bss.game_tgid = app.tracked_game_tgid;
-                bss.game_ppid = app.tracked_game_ppid;
-                bss.game_confidence = app.game_confidence;
-                // --- State machine: GAMING > COMPILATION > IDLE ---
-                const CAKE_STATE_IDLE: u8 = 0;
-                const CAKE_STATE_COMPILATION: u8 = 1;
-                const CAKE_STATE_GAMING: u8 = 2;
-
-                let new_state = if app.tracked_game_tgid > 0 {
-                    CAKE_STATE_GAMING
-                } else {
-                    // Detect active compiler processes: PELT util >= 800 (~78% CPU) AND
-                    // comm matches a known compiler binary. Require >=2 to avoid
-                    // false positives from a single transient ld/as invocation.
-                    const COMPILE_COMMS: &[&str] = &[
-                        "cc1", "rustc", "clang", "clang++", "ld", "ld.lld", "lld", "ninja",
-                        "cmake", "as", "gcc", "g++", "link",
-                    ];
-                    let compile_count = app
-                        .task_rows
-                        .values()
-                        .filter(|r| {
-                            r.status != TaskStatus::Dead
-                                && r.pelt_util >= 800
-                                && COMPILE_COMMS.iter().any(|&c| r.comm.contains(c))
-                        })
-                        .count();
-                    app.compile_task_count = compile_count;
-                    if compile_count >= 2 {
-                        CAKE_STATE_COMPILATION
-                    } else {
-                        CAKE_STATE_IDLE
-                    }
-                };
-                app.sched_state = new_state;
-                bss.sched_state = new_state as u32;
-                // Sync sched_state_local to all per-CPU BSS entries (Rule 78).
-                // Eliminates remote global BSS cache line fetch at 5 BPF hot-path sites.
-                // Cold path: runs every 500ms in TUI poll — bounded staleness.
+                bss.game_tgid = detect_result.game_tgid;
+                bss.game_ppid = detect_result.game_ppid;
+                bss.game_confidence = detect_result.game_confidence;
+                bss.sched_state = detect_result.sched_state as u32;
+                // Per-CPU sched_state_local: eliminates remote global BSS
+                // cache line fetch at 5 BPF hot-path sites.
                 for i in 0..app.topology.nr_cpus.min(bss.cpu_bss.len()) {
-                    bss.cpu_bss[i].sched_state_local = new_state;
+                    bss.cpu_bss[i].sched_state_local = detect_result.sched_state;
                 }
-                // Precompute quantum ceiling alongside sched_state (Rule 5: no BPF branch).
-                // COMPILATION → 8ms, else → 2ms. Values match intf.h constants.
-                bss.quantum_ceiling_ns = if new_state == CAKE_STATE_COMPILATION {
-                    8_000_000 // AQ_BULK_CEILING_COMPILE_NS
-                } else {
-                    2_000_000 // AQ_BULK_CEILING_NS
-                };
+                bss.quantum_ceiling_ns = detect_result.quantum_ceiling_ns;
             }
 
             // --- Delta Mode: compute per-second rates ---
@@ -4121,7 +3748,7 @@ pub fn run_tui(
             }
             // Pin game-family rows to the top, preserving the user's sort order within
             // each group. Uses stable_sort so relative order is unchanged.
-            if app.tracked_game_tgid > 0 {
+            if app.detector.tracked_game_tgid > 0 {
                 sorted_pids.sort_by(|a, b| {
                     let gm_a = app.task_rows.get(a).is_some_and(|r| r.is_game_member);
                     let gm_b = app.task_rows.get(b).is_some_and(|r| r.is_game_member);
