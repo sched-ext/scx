@@ -80,6 +80,11 @@ const volatile u64 slice_lag_ns = 20ULL * NSEC_PER_MSEC;
 const volatile bool smt_enabled = true;
 
 /*
+ * NUMA is enabled on the system.
+ */
+const volatile bool numa_enabled = true;
+
+/*
  * Subset of CPUs to prioritize (primary scheduling domain).
  */
 private(ECO) struct bpf_cpumask __kptr *primary_cpumask;
@@ -302,7 +307,12 @@ struct llc_ctx *try_lookup_llc_ctx(int llc)
  */
 static inline int llc_node(int llc)
 {
-	struct llc_ctx *lctx = try_lookup_llc_ctx(llc);
+	struct llc_ctx *lctx;
+
+	if (!numa_enabled)
+		return 0;
+
+	lctx = try_lookup_llc_ctx(llc);
 
 	return lctx ? lctx->node_id : -ENOENT;
 }
@@ -412,6 +422,17 @@ static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 	return p->scx.dsq_vtime + scale_by_weight_inverse(p, tctx->awake_vtime);
 }
 
+/*
+ * Return the preferred NUMA node of task @p, or NUMA_NO_NODE if not set.
+ */
+static inline s32 get_task_numa_node(const struct task_struct *p)
+{
+	if (numa_enabled && bpf_core_field_exists(p->numa_preferred_nid))
+		return p->numa_preferred_nid;
+
+	return NUMA_NO_NODE;
+}
+
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 			 u64 wake_flags, bool from_enqueue)
 {
@@ -427,6 +448,22 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 		if (cpu >= 0)
 			return cpu;
 	}
+
+	if (numa_enabled) {
+		s32 task_node = get_task_numa_node(p);
+		int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+
+		if (task_node != NUMA_NO_NODE && node != task_node) {
+			cpu = scx_bpf_pick_idle_cpu_node(p->cpus_ptr, task_node, SCX_PICK_IDLE_IN_NODE);
+			if (cpu >= 0)
+				return cpu;
+		}
+	}
+
+	cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags,
+				     p->cpus_ptr, SCX_PICK_IDLE_IN_NODE);
+	if (cpu >= 0)
+		return cpu;
 
 	return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
 }
@@ -473,10 +510,29 @@ static inline bool is_cpu_idle(s32 cpu)
 	return p ? p->flags & PF_IDLE : false;
 }
 
-static s32 smt_sibling(s32 cpu)
+/*
+ * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_cpumask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_cpumask();
+
+	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
+ * Return the SMT sibling of @cpu, or @cpu if SMT is disabled.
+ */
+static inline s32 smt_sibling(s32 cpu)
 {
 	const struct cpumask *smt;
 	struct cpu_ctx *cctx;
+
+	if (!smt_enabled)
+		return cpu;
 
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
@@ -489,6 +545,9 @@ static s32 smt_sibling(s32 cpu)
 	return bpf_cpumask_first(smt);
 }
 
+/*
+ * Return true if @cpu is in  a partially-idle SMT core, false otherwise.
+ */
 static bool is_smt_contended(s32 cpu)
 {
 	const struct cpumask *idle_mask;
@@ -501,7 +560,7 @@ static bool is_smt_contended(s32 cpu)
 	 * If the sibling SMT CPU is not idle and there are other full-idle
 	 * SMT cores available, consider the current CPU as contended.
 	 */
-	idle_mask = scx_bpf_get_idle_cpumask();
+	idle_mask = get_idle_cpumask(cpu);
 	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
 		       !bpf_cpumask_empty(idle_mask);
 	scx_bpf_put_cpumask(idle_mask);
