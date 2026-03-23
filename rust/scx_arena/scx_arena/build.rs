@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 fn main() {
+    std::env::set_var("BPF_EXTRA_CFLAGS_PRE_INCL", "-Wno-missing-declarations");
     scx_cargo::BpfBuilder::new()
         .unwrap()
         .enable_skel("src/bpf/main.bpf.c", "bpf")

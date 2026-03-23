@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // scx_cake - sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling
 
+mod detect;
 mod topology;
 mod tui;
 
@@ -276,6 +277,10 @@ impl<'a> Scheduler<'a> {
         // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
         let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
 
+        // ALPHADEV Phase 7.3: Lockless Cache Definitions
+        let mut audio_tgids: Vec<u32> = Vec::new();
+        let mut compositor_tgids: Vec<u32> = Vec::new();
+
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
             rodata.quantum_ns = quantum * 1000;
@@ -291,26 +296,49 @@ impl<'a> Scheduler<'a> {
             // Per-LLC DSQ partitioning: populate CPU→LLC mapping
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
-            rodata.nr_cpus = topo.nr_cpus.min(256) as u32; // F2: widened from 64→256 for Threadripper
-            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(256) as u32; // V3: PHYS_FIRST scan mask
+            rodata.nr_cpus = topo.nr_cpus.min(topology::MAX_CPUS) as u32;
+            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(topology::MAX_CPUS) as u32;
 
-            // Ferry explicit 64-bit topology arrays down into BPF (O(1) execution replacements)
+            // Ferry topology arrays into BPF RODATA — compile-time scaled
 
-            // Heterogeneous Gaming Topology — u64[4] arrays (F2: 256-bit masks)
-            rodata.big_core_phys_mask[0] = topo.big_core_phys_mask;
-            rodata.big_core_smt_mask[0] = topo.big_core_smt_mask;
-            rodata.little_core_mask[0] = topo.little_core_mask;
-            rodata.vcache_llc_mask[0] = topo.vcache_llc_mask;
-            rodata.has_vcache = topo.has_vcache;
-            rodata.has_hybrid_cores = topo.big_core_phys_mask != 0;
-
-            for i in 0..topo.cpu_sibling_map.len() {
-                rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i];
+            // Heterogeneous Gaming Topology — only compiled when CAKE_HAS_HYBRID
+            #[cfg(cake_has_hybrid)]
+            {
+                for i in 0..topo
+                    .big_core_phys_mask
+                    .len()
+                    .min(rodata.big_core_phys_mask.len())
+                {
+                    rodata.big_core_phys_mask[i] = topo.big_core_phys_mask[i];
+                }
+                for i in 0..topo
+                    .big_core_smt_mask
+                    .len()
+                    .min(rodata.big_core_smt_mask.len())
+                {
+                    rodata.big_core_smt_mask[i] = topo.big_core_smt_mask[i];
+                }
+                for i in 0..topo
+                    .little_core_mask
+                    .len()
+                    .min(rodata.little_core_mask.len())
+                {
+                    rodata.little_core_mask[i] = topo.little_core_mask[i];
+                }
+                rodata.has_hybrid_cores = topo.big_core_phys_mask.iter().any(|&w| w != 0);
             }
-            for i in 0..topo.llc_cpu_mask.len().min(8) {
+            for i in 0..topo.vcache_llc_mask.len().min(rodata.vcache_llc_mask.len()) {
+                rodata.vcache_llc_mask[i] = topo.vcache_llc_mask[i];
+            }
+            rodata.has_vcache = topo.has_vcache;
+
+            for i in 0..topo.cpu_sibling_map.len().min(rodata.cpu_sibling_map.len()) {
+                rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i] as _;
+            }
+            for i in 0..topo.llc_cpu_mask.len().min(rodata.llc_cpu_mask.len()) {
                 rodata.llc_cpu_mask[i] = topo.llc_cpu_mask[i];
             }
-            for i in 0..topo.core_cpu_mask.len().min(32) {
+            for i in 0..topo.core_cpu_mask.len().min(rodata.core_cpu_mask.len()) {
                 rodata.core_cpu_mask[i] = topo.core_cpu_mask[i];
             }
 
@@ -318,12 +346,123 @@ impl<'a> Scheduler<'a> {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
 
-            // Performance-ordered CPU arrays: read prefcore ranking from sysfs,
-            // sort by performance, group SMT pairs together.
-            // GAME tasks scan fast→slow, non-GAME scans slow→fast.
+            // ALPHADEV Phase 11: Multi-CCD Gaming Steer & Evict
             {
-                let nr = topo.nr_cpus.min(256);
-                // Read prefcore ranking per CPU (higher = faster)
+                let mut best_llc: u8 = 0;
+                let mut max_rank = 0;
+
+                if topo.has_vcache {
+                    for (i, &mask) in topo.llc_cpu_mask.iter().enumerate() {
+                        if mask == topo.vcache_llc_mask[0] && mask != 0 {
+                            best_llc = i as u8;
+                            break;
+                        }
+                    }
+                } else if topo.nr_cpus > 1 {
+                    // Fall back to amd_pstate_prefcore_ranking if symmetric.
+                    for cpu in 0..topo.nr_cpus {
+                        let path = format!(
+                            "/sys/devices/system/cpu/cpu{}/cpufreq/amd_pstate_prefcore_ranking",
+                            cpu
+                        );
+                        let rank = std::fs::read_to_string(&path)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<u32>().ok())
+                            .unwrap_or(100);
+                        if rank > max_rank {
+                            max_rank = rank;
+                            best_llc = topo.cpu_llc_id[cpu] as u8;
+                        }
+                    }
+                }
+
+                let fallback_llc = if rodata.nr_llcs > 1 {
+                    (best_llc + 1) % (rodata.nr_llcs as u8)
+                } else {
+                    best_llc
+                };
+
+                // ALPHADEV Phase 8: Oracle Array Fetch (Locks LLC bounds at startup)
+                rodata.oracle_llc_by_class[bpf_intf::cake_class_CAKE_CLASS_GAME as usize] =
+                    best_llc;
+                rodata.oracle_llc_by_class[bpf_intf::cake_class_CAKE_CLASS_NORMAL as usize] =
+                    best_llc;
+                rodata.oracle_llc_by_class[bpf_intf::cake_class_CAKE_CLASS_BG as usize] =
+                    fallback_llc;
+                rodata.oracle_llc_by_class[bpf_intf::cake_class_CAKE_CLASS_HOG as usize] =
+                    fallback_llc;
+
+                // ALPHADEV Phase 8: Offset Map (Pre-calculating cross-CCD jumps)
+                for my_llc in 0..rodata.nr_llcs as usize {
+                    for i in 1..rodata.nr_llcs as usize {
+                        let mut victim = my_llc + i;
+                        if victim >= rodata.nr_llcs as usize {
+                            victim -= rodata.nr_llcs as usize;
+                        }
+                        rodata.victim_scan_order[my_llc][i] = victim as u8;
+                    }
+                }
+
+                // ALPHADEV Phase 3: Asymmetric SIMD topological scan matrices
+                for class_idx in 0..4 {
+                    for home_llc in 0..rodata.nr_llcs as u8 {
+                        let mut order = Vec::new();
+
+                        if class_idx == 1 {
+                            // GAME: Strictly confined to Primary Game LLC
+                            order.push(best_llc);
+                        } else if class_idx == 2 || class_idx == 3 {
+                            // BG/HOG: Start at Fallback LLC, scan all EXCEPT Primary Game LLC
+                            order.push(fallback_llc);
+                            for l in 0..rodata.nr_llcs as u8 {
+                                if l != fallback_llc && l != best_llc {
+                                    order.push(l);
+                                }
+                            }
+                        } else {
+                            // NORMAL: Start at its Home LLC (preserve cache affinity)
+                            order.push(home_llc);
+                            // Then scan Fallback LLC if saturated
+                            if fallback_llc != home_llc {
+                                order.push(fallback_llc);
+                            }
+                            // Then scan all other available LLCs
+                            for l in 0..rodata.nr_llcs as u8 {
+                                if l != home_llc && l != fallback_llc && l != best_llc {
+                                    order.push(l);
+                                }
+                            }
+                            // Evict: ONLY spill to Primary Game LLC as absolute last resort
+                            if best_llc != home_llc && best_llc != fallback_llc {
+                                order.push(best_llc);
+                            }
+                        }
+
+                        // Write directly to RO Data tensor mapping
+                        for (i, &llc) in order.iter().enumerate() {
+                            if i < rodata.llc_scan_order[class_idx][home_llc as usize].len() {
+                                rodata.llc_scan_order[class_idx][home_llc as usize][i] = llc;
+                            }
+                        }
+                        // Sentinel the tail bytes
+                        for i in
+                            order.len()..rodata.llc_scan_order[class_idx][home_llc as usize].len()
+                        {
+                            rodata.llc_scan_order[class_idx][home_llc as usize][i] = 0xFF;
+                        }
+                    }
+                }
+
+                info!(
+                    "Topology Strategy: Primary Game LLC={}, Fallback BG LLC={}, Max Rank={}",
+                    best_llc, fallback_llc, max_rank
+                );
+            }
+
+            // Performance-ordered CPU scan arrays — HYBRID ONLY
+            #[cfg(cake_has_hybrid)]
+            {
+                let nr = topo.nr_cpus.min(topology::MAX_CPUS);
                 let mut rankings: Vec<(usize, u32)> = (0..nr)
                     .map(|cpu| {
                         let path = format!(
@@ -333,41 +472,38 @@ impl<'a> Scheduler<'a> {
                         let rank = std::fs::read_to_string(&path)
                             .ok()
                             .and_then(|s| s.trim().parse::<u32>().ok())
-                            .unwrap_or(100); // fallback: equal ranking
+                            .unwrap_or(100);
                         (cpu, rank)
                     })
                     .collect();
 
-                // Sort by descending rank (fastest first), stable for SMT grouping
                 rankings.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-                // Build fast→slow array with SMT pairs grouped together:
-                // [best_phys, best_smt, second_phys, second_smt, ...]
-                let mut fast_to_slow: Vec<u8> = Vec::with_capacity(nr);
+                let mut fast_to_slow: Vec<u16> = Vec::with_capacity(nr);
                 let mut used = vec![false; nr];
                 for &(cpu, _) in &rankings {
                     if used[cpu] {
                         continue;
                     }
-                    fast_to_slow.push(cpu as u8);
+                    fast_to_slow.push(cpu as u16);
                     used[cpu] = true;
-                    // Add SMT sibling immediately after
-                    let sib = topo.cpu_sibling_map.get(cpu).copied().unwrap_or(0xFF);
+                    let sib = topo.cpu_sibling_map.get(cpu).copied().unwrap_or(0xFFFF);
                     if (sib as usize) < nr && !used[sib as usize] {
                         fast_to_slow.push(sib);
                         used[sib as usize] = true;
                     }
                 }
 
-                // Populate RODATA arrays
-                for i in 0..64usize {
+                for i in 0..topology::MAX_CPUS {
+                    if i >= rodata.cpus_fast_to_slow.len() {
+                        break;
+                    }
                     if i < fast_to_slow.len() {
-                        rodata.cpus_fast_to_slow[i] = fast_to_slow[i];
-                        // Reverse for slow→fast
-                        rodata.cpus_slow_to_fast[i] = fast_to_slow[fast_to_slow.len() - 1 - i];
+                        rodata.cpus_fast_to_slow[i] = fast_to_slow[i] as _;
+                        rodata.cpus_slow_to_fast[i] = fast_to_slow[fast_to_slow.len() - 1 - i] as _;
                     } else {
-                        rodata.cpus_fast_to_slow[i] = 0xFF; // sentinel
-                        rodata.cpus_slow_to_fast[i] = 0xFF;
+                        rodata.cpus_fast_to_slow[i] = rodata.cpus_fast_to_slow[i].wrapping_sub(1);
+                        rodata.cpus_slow_to_fast[i] = rodata.cpus_slow_to_fast[i].wrapping_sub(1);
                     }
                 }
 
@@ -384,7 +520,7 @@ impl<'a> Scheduler<'a> {
             // Intel hybrid: P-cores ~1024, E-cores ~600-700.
             // AMD SMP: all 1024 → cap > 0 && cap < 1024 is always false → zero overhead.
             {
-                let nr = topo.nr_cpus.min(256);
+                let nr = topo.nr_cpus.min(topology::MAX_CPUS);
                 let mut all_equal = true;
                 let mut first_cap: u32 = 0;
 
@@ -420,7 +556,7 @@ impl<'a> Scheduler<'a> {
             // ═══ Audio stack detection ═══
             // Phase 1: Core audio daemons by comm name.
             // Phase 2: PipeWire socket clients (mixers like goxlr-daemon).
-            // Both are session-persistent → bake into RODATA.
+            // Both are session-persistent → populated to BSS cache post-load.
             {
                 use std::collections::HashSet;
 
@@ -431,8 +567,8 @@ impl<'a> Scheduler<'a> {
                     "pulseaudio",
                     "jackd",
                     "jackdbus",
+                    "goxlr-daemon",
                 ];
-                let mut audio_tgids: Vec<u32> = Vec::new();
                 let mut audio_tgid_set: HashSet<u32> = HashSet::new();
 
                 // Phase 1: comm-based detection
@@ -539,10 +675,7 @@ impl<'a> Scheduler<'a> {
                     }
                 }
 
-                rodata.nr_audio_tgids = audio_tgids.len() as u32;
-                for (i, &tgid) in audio_tgids.iter().enumerate() {
-                    rodata.audio_tgids[i] = tgid;
-                }
+                /* Audio TGIDs populated into BSS post-load */
                 let client_count = audio_tgids.len() - core_count;
                 if !audio_tgids.is_empty() {
                     info!(
@@ -578,8 +711,10 @@ impl<'a> Scheduler<'a> {
                     "wayfire",
                     "river",
                     "gamescope",
+                    "Xwayland", // Input routing for Proton/Wine games on Wayland
+                    "Xorg",     // X11 display server + input handler
+                    "X",        // Xorg alternate comm name
                 ];
-                let mut compositor_tgids: Vec<u32> = Vec::new();
                 if let Ok(entries) = std::fs::read_dir("/proc") {
                     for entry in entries.flatten() {
                         let name = entry.file_name();
@@ -602,10 +737,7 @@ impl<'a> Scheduler<'a> {
                         }
                     }
                 }
-                rodata.nr_compositor_tgids = compositor_tgids.len() as u32;
-                for (i, &tgid) in compositor_tgids.iter().enumerate() {
-                    rodata.compositor_tgids[i] = tgid;
-                }
+                /* Compositor TGIDs populated into BSS post-load */
                 if !compositor_tgids.is_empty() {
                     info!(
                         "Compositor detected: {} (TGIDs: {:?})",
@@ -641,6 +773,19 @@ impl<'a> Scheduler<'a> {
         // quantum_ceiling_ns: default IDLE/GAMING → 2ms. TUI updates at ~2Hz.
         if let Some(bss) = &mut skel.maps.bss_data {
             bss.quantum_ceiling_ns = 2_000_000; // AQ_BULK_CEILING_NS
+
+            // ALPHADEV Phase 7.3: Muscle/Brain offload. Hydrate O(1) Cache locklessly.
+            let mask = (bpf_intf::BRAIN_CLASS_CACHE_SIZE as u32) - 1;
+            for &tgid in &audio_tgids {
+                let idx = (tgid & mask) as usize;
+                bss.brain_class_cache[idx].pid = tgid;
+                bss.brain_class_cache[idx].task_class = bpf_intf::cake_class_CAKE_CLASS_GAME as u8;
+            }
+            for &tgid in &compositor_tgids {
+                let idx = (tgid & mask) as usize;
+                bss.brain_class_cache[idx].pid = tgid;
+                bss.brain_class_cache[idx].task_class = bpf_intf::cake_class_CAKE_CLASS_GAME as u8;
+            }
         }
 
         Ok(Self {
@@ -755,13 +900,32 @@ impl<'a> Scheduler<'a> {
             if self.args.verbose && !std::io::stdout().is_terminal() {
                 warn!("TUI disabled: no terminal detected (headless mode)");
             }
-            // Simple headless mode: matches cosmos/bpfland pattern exactly.
-            // ctrlc handler sets shutdown on SIGINT/SIGTERM.
-            // 1-second sleep + UEI check = responsive shutdown.
+            // Headless mode with game detection.
+            // Polls /proc every 1s for Steam/Wine/.exe game processes and
+            // compiler activity. Writes results to BPF BSS so the reclassifier
+            // can transition to GAMING state and activate the 4-class system.
+            let nr_cpus = self.topology.nr_cpus;
+            let mut detector = detect::GameDetector::new_headless();
             while !shutdown.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 if scx_utils::uei_exited!(&self.skel, uei) {
                     break;
+                }
+                // Run game + compiler detection
+                let result = detector.poll();
+                // Propagate to BPF BSS — drives reclassifier sched_state gate,
+                // class-aware kick guard, SYNC strip, and quantum ceiling.
+                if let Some(bss) = &mut self.skel.maps.bss_data {
+                    bss.game_tgid = result.game_tgid;
+                    bss.game_ppid = result.game_ppid;
+                    bss.game_confidence = result.game_confidence;
+                    bss.sched_state = result.sched_state as u32;
+                    // Per-CPU sched_state_local: eliminates remote global BSS
+                    // cache line fetch at 5 BPF hot-path sites.
+                    for i in 0..nr_cpus.min(bss.cpu_bss.len()) {
+                        bss.cpu_bss[i].sched_state_local = result.sched_state;
+                    }
+                    bss.quantum_ceiling_ns = result.quantum_ceiling_ns;
                 }
             }
         }
@@ -786,6 +950,15 @@ impl Drop for Scheduler<'_> {
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Route libbpf messages through log crate — trim trailing \n to avoid double-newlines.
+    libbpf_rs::set_print(Some((libbpf_rs::PrintLevel::Debug, |level, msg| {
+        let msg = msg.trim_end();
+        match level {
+            libbpf_rs::PrintLevel::Debug => log::debug!("{msg}"),
+            libbpf_rs::PrintLevel::Info => log::info!("{msg}"),
+            libbpf_rs::PrintLevel::Warn => log::warn!("{msg}"),
+        }
+    })));
 
     let args = Args::parse();
 
