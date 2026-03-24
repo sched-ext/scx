@@ -460,8 +460,31 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
-			if (consume_dsq(cpdomc_pick, dsq_id))
+			/*
+			 * Peek at the head task to get its size.
+			 */
+			u64 task_load = sys_stat.avg_runtime_invr;
+			struct task_struct *peek_p =
+				__COMPAT_scx_bpf_dsq_peek(dsq_id);
+			if (peek_p) {
+				task_ctx *peek_taskc = get_task_ctx(peek_p);
+				if (peek_taskc &&
+				    peek_taskc->avg_runtime_invr)
+					task_load =
+						peek_taskc->avg_runtime_invr;
+			}
+
+			/*
+			 * Force steal is unconditional for work
+			 * conservation. Decrement budgets to keep
+			 * the accounting consistent.
+			 */
+			if (consume_dsq(cpdomc_pick, dsq_id)) {
+				decrement_stealee_budget(cpdomc_pick,
+							 task_load);
+				decrement_stealer_budget(cpdomc, task_load);
 				return true;
+			}
 		}
 	}
 
