@@ -745,7 +745,7 @@ void cbw_set_bandwidth(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 	cgx->burst_remaining = cgx->burst;
 }
 
-static
+static __noinline
 s64 cbw_calc_budget_tx(struct scx_cgroup_ctx *cgx, s64 base_unit, int nr_branch)
 {
 	s64 tgt_unit, budget_tx;
