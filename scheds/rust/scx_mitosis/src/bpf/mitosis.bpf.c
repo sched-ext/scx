@@ -855,7 +855,24 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	/* Peek at cell-LLC DSQ head */
+	/*
+	 * Dispatch from cell-LLC and per-CPU DSQs using lockless peek
+	 * to compare vtime, then locked consume via move_to_local.
+	 *
+	 * IMPORTANT: Always fall back to move_to_local even when peek
+	 * returns NULL. The lockless scx_bpf_dsq_peek reads
+	 * dsq->first_task via rcu_dereference, which can return NULL
+	 * while the DSQ list is non-empty due to visibility ordering
+	 * between list_add and rcu_assign_pointer in dispatch_enqueue.
+	 * Without fallback, a NULL peek causes dispatch to return
+	 * empty and the CPU goes idle. Since kicks only fire from
+	 * enqueue (not dispatch), no one wakes the idle CPU to retry
+	 * and the watchdog fires.
+	 *
+	 * The fallback move_to_local calls use consume_dispatch_q()
+	 * which takes dsq->lock and walks the actual list, catching
+	 * tasks the lockless peek missed.
+	 */
 	p = __COMPAT_scx_bpf_dsq_peek(cell_dsq.raw);
 	if (p) {
 		min_vtime     = p->scx.dsq_vtime;
@@ -863,7 +880,6 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		found	      = true;
 	}
 
-	/* Peek at CPU DSQ head, prefer if lower vtime */
 	p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq.raw);
 	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
 		min_vtime     = p->scx.dsq_vtime;
@@ -871,38 +887,38 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		found	      = true;
 	}
 
-	/*
-	 * If we failed to find an eligible task, try work stealing if enabled.
-	 * Otherwise, scx will keep running prev if prev->scx.flags &
-	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
-	 */
-	if (!found) {
-		/* Try work stealing if enabled */
-		if (enable_llc_awareness && enable_work_stealing) {
-			/* Returns: <0 error, 0 no steal, >0 stole work */
-			s32 ret = try_stealing_work(cell, llc);
-			if (ret < 0)
+	if (found) {
+		if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0))
+			return;
+		/* Race lost on peek winner, try the other DSQ */
+		if (min_vtime_dsq.raw == cell_dsq.raw) {
+			if (scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0))
 				return;
-			if (ret > 0) {
-				cstat_inc(CSTAT_STEAL, cell, cctx);
-			}
+		} else {
+			if (scx_bpf_dsq_move_to_local(cell_dsq.raw, 0))
+				return;
 		}
-		return;
 	}
 
 	/*
-	 * The move_to_local can fail if we raced with some other cpu in the cell
-	 * and now the cell is empty. We have to ensure to try the cpu_dsq or else
-	 * we might never wakeup.
+	 * Fallback: peek saw nothing (or peek winners were consumed
+	 * by racing CPUs). Try the locked consume path directly.
+	 * consume_dispatch_q takes dsq->lock and walks the list,
+	 * finding tasks that the lockless peek missed.
 	 */
-
-	/* Try the winner first */
-	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0))
+	if (scx_bpf_dsq_move_to_local(cell_dsq.raw, 0))
+		return;
+	if (scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0))
 		return;
 
-	/* Winner was cell DSQ but failed - try the CPU DSQ */
-	if (min_vtime_dsq.raw == cell_dsq.raw)
-		scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0);
+	/* Try work stealing if enabled */
+	if (enable_llc_awareness && enable_work_stealing) {
+		s32 ret = try_stealing_work(cell, llc);
+		if (ret < 0)
+			return;
+		if (ret > 0)
+			cstat_inc(CSTAT_STEAL, cell, cctx);
+	}
 }
 
 /*
