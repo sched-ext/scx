@@ -111,6 +111,10 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     lowlatency: bool,
 
+    /// Enable completely fair scheduling policy.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    fair: bool,
+
     /// Attach the scheduler to a specified cgroup (by path).
     #[clap(short = 'c', long)]
     cgroup: Option<String>,
@@ -311,6 +315,7 @@ impl<'a> Scheduler<'a> {
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.compaction = opts.compaction;
         rodata.lowlatency = opts.lowlatency;
+        rodata.fair = opts.fair;
 
         let is_subsched = if let Some(ref cgroup_path) = opts.cgroup {
             let meta = std::fs::metadata(cgroup_path)
