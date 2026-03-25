@@ -1,9 +1,6 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
 
-#define BPF_NO_KFUNC_PROTOTYPES
-#include "vmlinux.h"
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
+#include <scx/common.bpf.h>
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
