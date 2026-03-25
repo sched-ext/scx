@@ -647,7 +647,18 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 	cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx);
 	if (cpu >= 0) {
 		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		/*
+		 * Use SCX_DSQ_LOCAL_ON to target the idle CPU we found,
+		 * not SCX_DSQ_LOCAL which resolves to task_rq(p) -- the
+		 * CPU the task just ran on. Without this, when called
+		 * from put_prev_task_scx -> enqueue, the task goes back
+		 * to the current CPU's local DSQ while the idle CPU gets
+		 * kicked and finds nothing. This pins tasks to their
+		 * current CPU, starving per-CPU DSQ tasks (kworkers)
+		 * because ops.dispatch is never called when the local
+		 * DSQ is non-empty.
+		 */
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
 		if (kick)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return cpu;
@@ -671,7 +682,8 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 		if (cpu >= 0) {
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
+					   0);
 			if (kick)
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return cpu;
