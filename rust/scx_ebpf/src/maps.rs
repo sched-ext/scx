@@ -230,7 +230,7 @@ impl<K, V, const MAX_ENTRIES: usize> HashMap<K, V, MAX_ENTRIES> {
     /// Look up a value by key. Returns `None` if the key is not found.
     #[inline(always)]
     pub fn get(&self, key: &K) -> Option<&V> {
-        let ptr = self.get_ptr_mut(key);
+        let ptr = unsafe { self.get_ptr_mut(key) };
         if ptr.is_null() {
             None
         } else {
@@ -252,7 +252,7 @@ impl<K, V, const MAX_ENTRIES: usize> HashMap<K, V, MAX_ENTRIES> {
     /// references across BPF helper/kfunc calls.
     #[inline(always)]
     pub fn get_mut(&self, key: &K) -> Option<&mut V> {
-        let ptr = self.get_ptr_mut(key);
+        let ptr = unsafe { self.get_ptr_mut(key) };
         if ptr.is_null() {
             None
         } else {
@@ -261,8 +261,12 @@ impl<K, V, const MAX_ENTRIES: usize> HashMap<K, V, MAX_ENTRIES> {
     }
 
     /// Look up a value by key, returning a mutable pointer.
+    ///
+    /// # Safety
+    /// The returned pointer is only valid for the duration of the current
+    /// BPF program invocation. Callers must not hold it across helper/kfunc calls.
     #[inline(always)]
-    pub fn get_ptr_mut(&self, key: &K) -> *mut V {
+    pub unsafe fn get_ptr_mut(&self, key: &K) -> *mut V {
         unsafe {
             bpf_map_lookup_elem(
                 core::ptr::from_ref(self).cast(),
@@ -356,7 +360,7 @@ impl<V, const MAX_ENTRIES: usize> BpfArray<V, MAX_ENTRIES> {
     /// Look up an element at `index`. Returns `None` if the index is out of bounds.
     #[inline(always)]
     pub fn get(&self, index: u32) -> Option<&V> {
-        let ptr = self.get_ptr_mut(index);
+        let ptr = unsafe { self.get_ptr_mut(index) };
         if ptr.is_null() {
             None
         } else {
@@ -378,7 +382,7 @@ impl<V, const MAX_ENTRIES: usize> BpfArray<V, MAX_ENTRIES> {
     /// references across BPF helper/kfunc calls.
     #[inline(always)]
     pub fn get_mut(&self, index: u32) -> Option<&mut V> {
-        let ptr = self.get_ptr_mut(index);
+        let ptr = unsafe { self.get_ptr_mut(index) };
         if ptr.is_null() {
             None
         } else {
@@ -387,8 +391,12 @@ impl<V, const MAX_ENTRIES: usize> BpfArray<V, MAX_ENTRIES> {
     }
 
     /// Look up an element at `index`, returning a mutable pointer.
+    ///
+    /// # Safety
+    /// The returned pointer is only valid for the duration of the current
+    /// BPF program invocation. Callers must not hold it across helper/kfunc calls.
     #[inline(always)]
-    pub fn get_ptr_mut(&self, index: u32) -> *mut V {
+    pub unsafe fn get_ptr_mut(&self, index: u32) -> *mut V {
         unsafe {
             bpf_map_lookup_elem(
                 core::ptr::from_ref(self).cast(),
@@ -461,7 +469,7 @@ impl<V, const MAX_ENTRIES: usize> PerCpuArray<V, MAX_ENTRIES> {
     /// Look up the current CPU's element at `index`.
     #[inline(always)]
     pub fn get(&self, index: u32) -> Option<&V> {
-        let ptr = self.get_ptr_mut(index);
+        let ptr = unsafe { self.get_ptr_mut(index) };
         if ptr.is_null() {
             None
         } else {
@@ -483,7 +491,7 @@ impl<V, const MAX_ENTRIES: usize> PerCpuArray<V, MAX_ENTRIES> {
     /// references across BPF helper/kfunc calls.
     #[inline(always)]
     pub fn get_mut(&self, index: u32) -> Option<&mut V> {
-        let ptr = self.get_ptr_mut(index);
+        let ptr = unsafe { self.get_ptr_mut(index) };
         if ptr.is_null() {
             None
         } else {
@@ -492,8 +500,12 @@ impl<V, const MAX_ENTRIES: usize> PerCpuArray<V, MAX_ENTRIES> {
     }
 
     /// Look up the current CPU's element, returning a mutable pointer.
+    ///
+    /// # Safety
+    /// The returned pointer is only valid for the duration of the current
+    /// BPF program invocation. Callers must not hold it across helper/kfunc calls.
     #[inline(always)]
-    pub fn get_ptr_mut(&self, index: u32) -> *mut V {
+    pub unsafe fn get_ptr_mut(&self, index: u32) -> *mut V {
         unsafe {
             bpf_map_lookup_elem(
                 core::ptr::from_ref(self).cast(),
@@ -658,8 +670,13 @@ impl<V> TaskStorage<V> {
     /// Get the per-task storage for a task, returning `None` if not yet created.
     ///
     /// `task` must be a valid `task_struct` pointer (e.g., from a sched_ext callback).
+    ///
+    /// # Safety
+    /// The returned `NonNull` pointer is only valid for the duration of the
+    /// current BPF program invocation. Callers must not hold it across
+    /// helper/kfunc calls.
     #[inline(always)]
-    pub fn get(&self, task: *mut u8) -> Option<NonNull<V>> {
+    pub unsafe fn get(&self, task: *mut u8) -> Option<NonNull<V>> {
         let ptr = unsafe {
             bpf_task_storage_get(
                 core::ptr::from_ref(self).cast(),

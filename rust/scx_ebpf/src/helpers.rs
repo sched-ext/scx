@@ -251,8 +251,12 @@ macro_rules! bpf_repeat {
 ///
 /// The return type is a raw pointer so callers can cast to their own
 /// vmlinux `task_struct` type.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::get_current_task_btf()`](crate::ctx::BpfCtx::get_current_task_btf) for safe access.
 #[inline(always)]
-pub fn get_current_task_btf() -> *mut u8 {
+pub unsafe fn get_current_task_btf() -> *mut u8 {
     let ret: *mut u8;
     unsafe {
         core::arch::asm!(
@@ -273,8 +277,12 @@ pub fn get_current_task_btf() -> *mut u8 {
 /// Returns the ID of the CPU on which the BPF program is currently
 /// executing. The result is always valid and in-range for the current
 /// system.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::get_smp_processor_id()`](crate::ctx::BpfCtx::get_smp_processor_id) for safe access.
 #[inline(always)]
-pub fn get_smp_processor_id() -> i32 {
+pub unsafe fn get_smp_processor_id() -> i32 {
     let ret: u64;
     unsafe {
         core::arch::asm!(

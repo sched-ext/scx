@@ -231,8 +231,12 @@ unsafe extern "C" {
 /// }
 /// rcu_read_unlock();
 /// ```
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::rcu_read_lock()`](crate::ctx::BpfCtx::rcu_read_lock) for safe access.
 #[inline(always)]
-pub fn rcu_read_lock() {
+pub unsafe fn rcu_read_lock() {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -252,8 +256,12 @@ pub fn rcu_read_lock() {
 /// Must be paired with a preceding [`rcu_read_lock`] call. After this
 /// call, kptr-referenced objects may be freed by the kernel, so any
 /// pointers obtained via `Kptr::get()` become invalid.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::rcu_read_unlock()`](crate::ctx::BpfCtx::rcu_read_unlock) for safe access.
 #[inline(always)]
-pub fn rcu_read_unlock() {
+pub unsafe fn rcu_read_unlock() {
     unsafe {
         core::arch::asm!(
             "call {func}",

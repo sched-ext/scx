@@ -131,8 +131,12 @@ pub const BPF_F_TIMER_CPU_PIN: u64 = 1 << 1;
 /// * `-EBUSY` if the timer is already initialized
 /// * `-EINVAL` if invalid flags are passed
 /// * `-EPERM` if the map has no user references
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::timer_init()`](crate::ctx::BpfCtx::timer_init) for safe access.
 #[inline(always)]
-pub fn timer_init(timer: *mut BpfTimer, map: *const core::ffi::c_void, flags: u64) -> i64 {
+pub unsafe fn timer_init(timer: *mut BpfTimer, map: *const core::ffi::c_void, flags: u64) -> i64 {
     let ret: i64;
     unsafe {
         core::arch::asm!(
@@ -168,8 +172,12 @@ pub fn timer_init(timer: *mut BpfTimer, map: *const core::ffi::c_void, flags: u6
 /// `0` on success, negative errno on failure:
 /// * `-EINVAL` if the timer was not initialized
 /// * `-EPERM` if the map has no user references
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::timer_set_callback()`](crate::ctx::BpfCtx::timer_set_callback) for safe access.
 #[inline(always)]
-pub fn timer_set_callback(timer: *mut BpfTimer, callback: u64) -> i64 {
+pub unsafe fn timer_set_callback(timer: *mut BpfTimer, callback: u64) -> i64 {
     let ret: i64;
     unsafe {
         core::arch::asm!(
@@ -205,8 +213,12 @@ pub fn timer_set_callback(timer: *mut BpfTimer, callback: u64) -> i64 {
 /// # Returns
 ///
 /// `0` on success, negative errno on failure.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::timer_start()`](crate::ctx::BpfCtx::timer_start) for safe access.
 #[inline(always)]
-pub fn timer_start(timer: *mut BpfTimer, nsecs: u64, flags: u64) -> i64 {
+pub unsafe fn timer_start(timer: *mut BpfTimer, nsecs: u64, flags: u64) -> i64 {
     let ret: i64;
     unsafe {
         core::arch::asm!(
@@ -236,8 +248,12 @@ pub fn timer_start(timer: *mut BpfTimer, nsecs: u64, flags: u64) -> i64 {
 /// `0` if the timer was successfully cancelled.
 /// `1` if the timer was not active (already fired or never started).
 /// Negative errno on failure.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::timer_cancel()`](crate::ctx::BpfCtx::timer_cancel) for safe access.
 #[inline(always)]
-pub fn timer_cancel(timer: *mut BpfTimer) -> i64 {
+pub unsafe fn timer_cancel(timer: *mut BpfTimer) -> i64 {
     let ret: i64;
     unsafe {
         core::arch::asm!(

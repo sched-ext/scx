@@ -92,7 +92,11 @@ unsafe extern "C" {
     fn bpf_cpumask_setall(mask: *mut bpf_cpumask);
 }
 
-// ── Safe wrappers ────────────────────────────────────────────────────────
+// ── Raw kfunc wrappers (unsafe) ──────────────────────────────────────────
+//
+// All public functions in this module are `unsafe` because they perform
+// raw BPF kfunc calls that require a valid BPF program context.
+// Prefer using [`BpfCtx`](crate::ctx::BpfCtx) for safe access.
 
 /// Cast a mutable `bpf_cpumask` pointer to a read-only `cpumask` pointer.
 ///
@@ -112,8 +116,12 @@ pub fn cast(mask: *const bpf_cpumask) -> *const cpumask {
 /// Returns a pointer to the new mask, or null on allocation failure.
 /// The caller owns the reference and must call [`release`] when done,
 /// or transfer ownership to a map via `bpf_kptr_xchg`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_create()`](crate::ctx::BpfCtx::cpumask_create) for safe access.
 #[inline(always)]
-pub fn create() -> *mut bpf_cpumask {
+pub unsafe fn create() -> *mut bpf_cpumask {
     let ret: *mut bpf_cpumask;
     unsafe {
         core::arch::asm!(
@@ -136,8 +144,12 @@ pub fn create() -> *mut bpf_cpumask {
 /// Only call this on masks obtained from [`create`] or `bpf_kptr_xchg`.
 /// Do **not** call this on masks from `scx_bpf_get_idle_cpumask()` --
 /// use `kfuncs::put_cpumask()` for those.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_release()`](crate::ctx::BpfCtx::cpumask_release) for safe access.
 #[inline(always)]
-pub fn release(mask: *mut bpf_cpumask) {
+pub unsafe fn release(mask: *mut bpf_cpumask) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -153,8 +165,12 @@ pub fn release(mask: *mut bpf_cpumask) {
 }
 
 /// Set the bit for `cpu` in the cpumask.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_set_cpu()`](crate::ctx::BpfCtx::cpumask_set_cpu) for safe access.
 #[inline(always)]
-pub fn set_cpu(cpu: u32, mask: *mut bpf_cpumask) {
+pub unsafe fn set_cpu(cpu: u32, mask: *mut bpf_cpumask) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -170,8 +186,12 @@ pub fn set_cpu(cpu: u32, mask: *mut bpf_cpumask) {
 }
 
 /// Clear the bit for `cpu` in the cpumask.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_clear_cpu()`](crate::ctx::BpfCtx::cpumask_clear_cpu) for safe access.
 #[inline(always)]
-pub fn clear_cpu(cpu: u32, mask: *mut bpf_cpumask) {
+pub unsafe fn clear_cpu(cpu: u32, mask: *mut bpf_cpumask) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -190,8 +210,12 @@ pub fn clear_cpu(cpu: u32, mask: *mut bpf_cpumask) {
 ///
 /// Takes a `*const cpumask` (read-only). Use [`cast`] to convert a
 /// `*const bpf_cpumask` to the required type.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_test_cpu()`](crate::ctx::BpfCtx::cpumask_test_cpu) for safe access.
 #[inline(always)]
-pub fn test_cpu(cpu: u32, mask: *const cpumask) -> bool {
+pub unsafe fn test_cpu(cpu: u32, mask: *const cpumask) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -212,8 +236,12 @@ pub fn test_cpu(cpu: u32, mask: *const cpumask) -> bool {
 ///
 /// Takes a `*const cpumask` (read-only). Use [`cast`] to convert a
 /// `*const bpf_cpumask`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_first()`](crate::ctx::BpfCtx::cpumask_first) for safe access.
 #[inline(always)]
-pub fn first(mask: *const cpumask) -> u32 {
+pub unsafe fn first(mask: *const cpumask) -> u32 {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -234,8 +262,12 @@ pub fn first(mask: *const cpumask) -> u32 {
 ///
 /// Takes a `*const cpumask` (read-only). Use [`cast`] to convert a
 /// `*const bpf_cpumask`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_first_zero()`](crate::ctx::BpfCtx::cpumask_first_zero) for safe access.
 #[inline(always)]
-pub fn first_zero(mask: *const cpumask) -> u32 {
+pub unsafe fn first_zero(mask: *const cpumask) -> u32 {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -256,8 +288,12 @@ pub fn first_zero(mask: *const cpumask) -> u32 {
 ///
 /// Takes a `*const cpumask` (read-only). Use [`cast`] to convert a
 /// `*const bpf_cpumask`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_empty()`](crate::ctx::BpfCtx::cpumask_empty) for safe access.
 #[inline(always)]
-pub fn empty(mask: *const cpumask) -> bool {
+pub unsafe fn empty(mask: *const cpumask) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -278,8 +314,12 @@ pub fn empty(mask: *const cpumask) -> bool {
 ///
 /// Takes a `*const cpumask` (read-only). Use [`cast`] to convert a
 /// `*const bpf_cpumask`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_full()`](crate::ctx::BpfCtx::cpumask_full) for safe access.
 #[inline(always)]
-pub fn full(mask: *const cpumask) -> bool {
+pub unsafe fn full(mask: *const cpumask) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -300,8 +340,12 @@ pub fn full(mask: *const cpumask) -> bool {
 ///
 /// `dst` must be a mutable `bpf_cpumask`. `src1` and `src2` are read-only
 /// `cpumask` pointers (use [`cast`] to convert `bpf_cpumask` pointers).
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_and()`](crate::ctx::BpfCtx::cpumask_and) for safe access.
 #[inline(always)]
-pub fn and(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask) -> bool {
+pub unsafe fn and(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -322,8 +366,12 @@ pub fn and(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask) ->
 ///
 /// `dst` must be a mutable `bpf_cpumask`. `src1` and `src2` are read-only
 /// `cpumask` pointers (use [`cast`] to convert `bpf_cpumask` pointers).
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_or()`](crate::ctx::BpfCtx::cpumask_or) for safe access.
 #[inline(always)]
-pub fn or(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask) {
+pub unsafe fn or(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -342,8 +390,12 @@ pub fn or(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask) {
 ///
 /// `dst` must be a mutable `bpf_cpumask`. `src` is a read-only `cpumask`
 /// pointer (use [`cast`] to convert a `bpf_cpumask` pointer).
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_copy()`](crate::ctx::BpfCtx::cpumask_copy) for safe access.
 #[inline(always)]
-pub fn copy(dst: *mut bpf_cpumask, src: *const cpumask) {
+pub unsafe fn copy(dst: *mut bpf_cpumask, src: *const cpumask) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -359,8 +411,12 @@ pub fn copy(dst: *mut bpf_cpumask, src: *const cpumask) {
 }
 
 /// Set all possible CPU bits in the cpumask.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpumask_setall()`](crate::ctx::BpfCtx::cpumask_setall) for safe access.
 #[inline(always)]
-pub fn setall(mask: *mut bpf_cpumask) {
+pub unsafe fn setall(mask: *mut bpf_cpumask) {
     unsafe {
         core::arch::asm!(
             "call {func}",

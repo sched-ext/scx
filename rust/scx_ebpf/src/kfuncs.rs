@@ -1,4 +1,8 @@
-//! Safe wrappers around sched_ext BPF kfunc calls.
+//! Raw wrappers around sched_ext BPF kfunc calls.
+//!
+//! All public functions in this module are `unsafe` because they perform
+//! raw BPF kfunc calls that require a valid BPF program context.
+//! Prefer using [`BpfCtx`](crate::ctx::BpfCtx) for safe access.
 //!
 //! Uses inline assembly because the Rust BPF compiler does not emit
 //! proper kfunc call instructions for `extern "C"` declarations.
@@ -99,8 +103,12 @@ unsafe extern "C" {
 // ── Safe wrappers ───────────────────────────────────────────────────────
 
 /// Insert a task into a dispatch queue with a given time slice.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::dsq_insert()`](crate::ctx::BpfCtx::dsq_insert) for safe access.
 #[inline(always)]
-pub fn dsq_insert(p: *mut task_struct, dsq_id: u64, slice: u64, enq_flags: u64) {
+pub unsafe fn dsq_insert(p: *mut task_struct, dsq_id: u64, slice: u64, enq_flags: u64) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -116,8 +124,12 @@ pub fn dsq_insert(p: *mut task_struct, dsq_id: u64, slice: u64, enq_flags: u64) 
 }
 
 /// Insert a task into a dispatch queue with vtime-based ordering.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::dsq_insert_vtime()`](crate::ctx::BpfCtx::dsq_insert_vtime) for safe access.
 #[inline(always)]
-pub fn dsq_insert_vtime(
+pub unsafe fn dsq_insert_vtime(
     p: *mut task_struct,
     dsq_id: u64,
     slice: u64,
@@ -139,8 +151,12 @@ pub fn dsq_insert_vtime(
 }
 
 /// Move one task from a dispatch queue to the local CPU's DSQ.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::dsq_move_to_local()`](crate::ctx::BpfCtx::dsq_move_to_local) for safe access.
 #[inline(always)]
-pub fn dsq_move_to_local(dsq_id: u64) -> bool {
+pub unsafe fn dsq_move_to_local(dsq_id: u64) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -158,8 +174,12 @@ pub fn dsq_move_to_local(dsq_id: u64) -> bool {
 }
 
 /// Create a user dispatch queue. Returns 0 on success, negative errno on failure.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::create_dsq()`](crate::ctx::BpfCtx::create_dsq) for safe access.
 #[inline(always)]
-pub fn create_dsq(dsq_id: u64, node: i32) -> i32 {
+pub unsafe fn create_dsq(dsq_id: u64, node: i32) -> i32 {
     let ret: i64;
     unsafe {
         core::arch::asm!(
@@ -177,8 +197,12 @@ pub fn create_dsq(dsq_id: u64, node: i32) -> i32 {
 }
 
 /// Kick a CPU, optionally only if idle (`SCX_KICK_IDLE = 1`).
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::kick_cpu()`](crate::ctx::BpfCtx::kick_cpu) for safe access.
 #[inline(always)]
-pub fn kick_cpu(cpu: i32, flags: u64) {
+pub unsafe fn kick_cpu(cpu: i32, flags: u64) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -194,8 +218,12 @@ pub fn kick_cpu(cpu: i32, flags: u64) {
 }
 
 /// Return the number of tasks queued on a DSQ.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::dsq_nr_queued()`](crate::ctx::BpfCtx::dsq_nr_queued) for safe access.
 #[inline(always)]
-pub fn dsq_nr_queued(dsq_id: u64) -> i32 {
+pub unsafe fn dsq_nr_queued(dsq_id: u64) -> i32 {
     let ret: i64;
     unsafe {
         core::arch::asm!(
@@ -216,8 +244,12 @@ pub fn dsq_nr_queued(dsq_id: u64) -> i32 {
 ///
 /// `fmt` must be a null-terminated format string. `data` is the packed
 /// argument array and `data_len` its size in bytes.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::error_bstr()`](crate::ctx::BpfCtx::error_bstr) for safe access.
 #[inline(always)]
-pub fn error_bstr(fmt: *const u8, data: *const u64, data_len: u32) {
+pub unsafe fn error_bstr(fmt: *const u8, data: *const u64, data_len: u32) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -238,15 +270,22 @@ pub fn error_bstr(fmt: *const u8, data: *const u64, data_len: u32) {
 /// will land in `.rodata` which is a read-only BPF map, and the verifier will
 /// reject it. Use the [`scx_bpf_error!`] macro instead, which copies the
 /// string to the stack first.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
 #[inline(always)]
-pub fn error_msg(msg: *const u8) {
+pub unsafe fn error_msg(msg: *const u8) {
     // Pass empty data array (data_len = 0).
     error_bstr(msg, core::ptr::null(), 0);
 }
 
 /// Set the target CPU performance level (0 .. SCX_CPUPERF_ONE).
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpuperf_set()`](crate::ctx::BpfCtx::cpuperf_set) for safe access.
 #[inline(always)]
-pub fn cpuperf_set(cpu: i32, perf: u32) {
+pub unsafe fn cpuperf_set(cpu: i32, perf: u32) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -262,8 +301,12 @@ pub fn cpuperf_set(cpu: i32, perf: u32) {
 }
 
 /// Return the maximum number of CPU IDs on this system.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::nr_cpu_ids()`](crate::ctx::BpfCtx::nr_cpu_ids) for safe access.
 #[inline(always)]
-pub fn nr_cpu_ids() -> u32 {
+pub unsafe fn nr_cpu_ids() -> u32 {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -281,8 +324,12 @@ pub fn nr_cpu_ids() -> u32 {
 }
 
 /// Get a read-only reference to the idle CPU mask. Must be released with `put_cpumask`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::get_idle_cpumask()`](crate::ctx::BpfCtx::get_idle_cpumask) for safe access.
 #[inline(always)]
-pub fn get_idle_cpumask() -> *const cpumask {
+pub unsafe fn get_idle_cpumask() -> *const cpumask {
     let ret: *const cpumask;
     unsafe {
         core::arch::asm!(
@@ -300,8 +347,12 @@ pub fn get_idle_cpumask() -> *const cpumask {
 }
 
 /// Get a read-only reference to the idle SMT-sibling mask. Must be released with `put_cpumask`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::get_idle_smtmask()`](crate::ctx::BpfCtx::get_idle_smtmask) for safe access.
 #[inline(always)]
-pub fn get_idle_smtmask() -> *const cpumask {
+pub unsafe fn get_idle_smtmask() -> *const cpumask {
     let ret: *const cpumask;
     unsafe {
         core::arch::asm!(
@@ -319,8 +370,12 @@ pub fn get_idle_smtmask() -> *const cpumask {
 }
 
 /// Release a cpumask reference obtained from `get_idle_cpumask` or `get_idle_smtmask`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::put_cpumask()`](crate::ctx::BpfCtx::put_cpumask) for safe access.
 #[inline(always)]
-pub fn put_cpumask(mask: *const cpumask) {
+pub unsafe fn put_cpumask(mask: *const cpumask) {
     unsafe {
         core::arch::asm!(
             "call {func}",
@@ -336,8 +391,12 @@ pub fn put_cpumask(mask: *const cpumask) {
 }
 
 /// Atomically test and clear the idle bit for `cpu`. Returns true if the CPU was idle.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::test_and_clear_cpu_idle()`](crate::ctx::BpfCtx::test_and_clear_cpu_idle) for safe access.
 #[inline(always)]
-pub fn test_and_clear_cpu_idle(cpu: i32) -> bool {
+pub unsafe fn test_and_clear_cpu_idle(cpu: i32) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -355,8 +414,12 @@ pub fn test_and_clear_cpu_idle(cpu: i32) -> bool {
 }
 
 /// Return true if the task is currently running on a CPU.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::task_running()`](crate::ctx::BpfCtx::task_running) for safe access.
 #[inline(always)]
-pub fn task_running(p: *const task_struct) -> bool {
+pub unsafe fn task_running(p: *const task_struct) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -374,8 +437,12 @@ pub fn task_running(p: *const task_struct) -> bool {
 }
 
 /// Return the CPU a task is currently assigned to.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::task_cpu()`](crate::ctx::BpfCtx::task_cpu) for safe access.
 #[inline(always)]
-pub fn task_cpu(p: *const task_struct) -> i32 {
+pub unsafe fn task_cpu(p: *const task_struct) -> i32 {
     let ret: i64;
     unsafe {
         core::arch::asm!(
@@ -400,8 +467,12 @@ pub fn task_cpu(p: *const task_struct) -> i32 {
 /// `core_read!(rq, rq_ptr, __bindgen_anon_1.curr)` as a fallback.
 ///
 /// Must be called inside an RCU read-side critical section.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpu_curr()`](crate::ctx::BpfCtx::cpu_curr) for safe access.
 #[inline(always)]
-pub fn cpu_curr(cpu: i32) -> *mut task_struct {
+pub unsafe fn cpu_curr(cpu: i32) -> *mut task_struct {
     let ret: *mut task_struct;
     unsafe {
         core::arch::asm!(
@@ -428,8 +499,12 @@ pub fn cpu_curr(cpu: i32) -> *mut task_struct {
 /// let rq = kfuncs::cpu_rq(cpu);
 /// let p = core_read!(vmlinux::rq, rq, __bindgen_anon_1.curr)?;
 /// ```
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::cpu_rq()`](crate::ctx::BpfCtx::cpu_rq) for safe access.
 #[inline(always)]
-pub fn cpu_rq(cpu: i32) -> *mut rq {
+pub unsafe fn cpu_rq(cpu: i32) -> *mut rq {
     let ret: *mut rq;
     unsafe {
         core::arch::asm!(
@@ -447,8 +522,12 @@ pub fn cpu_rq(cpu: i32) -> *mut rq {
 }
 
 /// Return the current scheduler clock value in nanoseconds.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::now()`](crate::ctx::BpfCtx::now) for safe access.
 #[inline(always)]
-pub fn now() -> u64 {
+pub unsafe fn now() -> u64 {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -466,8 +545,12 @@ pub fn now() -> u64 {
 }
 
 /// Select the default idle CPU for a task. Returns the CPU and sets `*is_idle`.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::select_cpu_dfl()`](crate::ctx::BpfCtx::select_cpu_dfl) for safe access.
 #[inline(always)]
-pub fn select_cpu_dfl(
+pub unsafe fn select_cpu_dfl(
     p: *mut task_struct,
     prev_cpu: i32,
     wake_flags: u64,
@@ -492,8 +575,12 @@ pub fn select_cpu_dfl(
 /// Select an idle CPU intersected with an additional cpumask constraint.
 ///
 /// `flags` can include `SCX_PICK_IDLE_CORE` (1) to prefer full-idle SMT cores.
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::select_cpu_and()`](crate::ctx::BpfCtx::select_cpu_and) for safe access.
 #[inline(always)]
-pub fn select_cpu_and(
+pub unsafe fn select_cpu_and(
     p: *mut task_struct,
     prev_cpu: i32,
     wake_flags: u64,
@@ -521,9 +608,13 @@ pub fn select_cpu_and(
 /// Returns `true` if the vtime was successfully set.
 /// This is the proper API for writing `task_struct.scx.dsq_vtime` on kernels
 /// where the struct layout may have changed (e.g., new `selected_cpu` field).
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::task_set_dsq_vtime()`](crate::ctx::BpfCtx::task_set_dsq_vtime) for safe access.
 #[cfg(feature = "kernel_6_16")]
 #[inline(always)]
-pub fn task_set_dsq_vtime(p: *mut task_struct, vtime: u64) -> bool {
+pub unsafe fn task_set_dsq_vtime(p: *mut task_struct, vtime: u64) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(
@@ -545,9 +636,13 @@ pub fn task_set_dsq_vtime(p: *mut task_struct, vtime: u64) -> bool {
 /// Returns `true` if the slice was successfully set.
 /// This is the proper API for writing `task_struct.scx.slice` on kernels
 /// where the struct layout may have changed (e.g., new `selected_cpu` field).
+///
+/// # Safety
+/// Caller must ensure this is called from a valid BPF program context.
+/// Prefer using [`BpfCtx::task_set_slice()`](crate::ctx::BpfCtx::task_set_slice) for safe access.
 #[cfg(feature = "kernel_6_16")]
 #[inline(always)]
-pub fn task_set_slice(p: *mut task_struct, slice: u64) -> bool {
+pub unsafe fn task_set_slice(p: *mut task_struct, slice: u64) -> bool {
     let ret: u64;
     unsafe {
         core::arch::asm!(

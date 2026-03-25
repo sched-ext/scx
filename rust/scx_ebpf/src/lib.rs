@@ -4,7 +4,7 @@
 //! scheduler in pure Rust eBPF:
 //!
 //! - [`ops`]: `sched_ext_ops` struct definition matching kernel BTF
-//! - [`kfuncs`]: Safe wrappers around `scx_bpf_*` kernel functions
+//! - [`kfuncs`]: Raw wrappers around `scx_bpf_*` kernel functions (unsafe)
 //! - [`vmlinux`]: Opaque kernel type stubs
 //! - [`scx_ops_define!`]: Proc macro to register callbacks and generate trampolines
 //!
@@ -16,10 +16,10 @@
 //! use scx_ebpf::prelude::*;
 //!
 //! fn my_enqueue(p: *mut core::ffi::c_void, enq_flags: u64) {
-//!     kfuncs::dsq_insert(p as _, 0, kfuncs::SLICE_DFL, enq_flags);
+//!     unsafe { kfuncs::dsq_insert(p as _, 0, kfuncs::SLICE_DFL, enq_flags) };
 //! }
 //!
-//! fn my_init() -> i32 { kfuncs::create_dsq(0, -1) }
+//! fn my_init() -> i32 { unsafe { kfuncs::create_dsq(0, -1) } }
 //! fn my_exit(_ei: *mut core::ffi::c_void) {}
 //!
 //! scx_ebpf::scx_ops_define! {

@@ -284,43 +284,50 @@ impl BpfCtx {
     /// Return the current scheduler clock value in nanoseconds.
     #[inline(always)]
     pub fn now(&self) -> u64 {
-        crate::kfuncs::now()
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::now() }
     }
 
     /// Return the maximum number of CPU IDs on this system.
     #[inline(always)]
     pub fn nr_cpu_ids(&self) -> u32 {
-        crate::kfuncs::nr_cpu_ids()
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::nr_cpu_ids() }
     }
 
     /// Return true if the task is currently running on a CPU.
     #[inline(always)]
     pub fn task_running(&self, p: *const task_struct) -> bool {
-        crate::kfuncs::task_running(p)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::task_running(p) }
     }
 
     /// Return the CPU a task is currently assigned to.
     #[inline(always)]
     pub fn task_cpu(&self, p: *const task_struct) -> i32 {
-        crate::kfuncs::task_cpu(p)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::task_cpu(p) }
     }
 
     /// Return the number of tasks queued on a DSQ.
     #[inline(always)]
     pub fn dsq_nr_queued(&self, dsq_id: u64) -> i32 {
-        crate::kfuncs::dsq_nr_queued(dsq_id)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::dsq_nr_queued(dsq_id) }
     }
 
     /// Return the ID of the CPU the BPF program is currently executing on.
     #[inline(always)]
     pub fn get_smp_processor_id(&self) -> i32 {
-        crate::helpers::get_smp_processor_id()
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::helpers::get_smp_processor_id() }
     }
 
     /// Return a BTF-typed pointer to the current task's `task_struct`.
     #[inline(always)]
     pub fn get_current_task_btf(&self) -> *mut u8 {
-        crate::helpers::get_current_task_btf()
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::helpers::get_current_task_btf() }
     }
 
     // ── Read-only cpumask queries ────────────────────────────────────────
@@ -328,31 +335,36 @@ impl BpfCtx {
     /// Test whether `cpu` is set in a cpumask.
     #[inline(always)]
     pub fn cpumask_test_cpu(&self, cpu: u32, mask: *const cpumask) -> bool {
-        crate::cpumask::test_cpu(cpu, mask)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::test_cpu(cpu, mask) }
     }
 
     /// Return the index of the first set bit in a cpumask.
     #[inline(always)]
     pub fn cpumask_first(&self, mask: *const cpumask) -> u32 {
-        crate::cpumask::first(mask)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::first(mask) }
     }
 
     /// Return the index of the first unset bit in a cpumask.
     #[inline(always)]
     pub fn cpumask_first_zero(&self, mask: *const cpumask) -> u32 {
-        crate::cpumask::first_zero(mask)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::first_zero(mask) }
     }
 
     /// Return true if no bits are set in the cpumask.
     #[inline(always)]
     pub fn cpumask_empty(&self, mask: *const cpumask) -> bool {
-        crate::cpumask::empty(mask)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::empty(mask) }
     }
 
     /// Return true if all possible CPU bits are set.
     #[inline(always)]
     pub fn cpumask_full(&self, mask: *const cpumask) -> bool {
-        crate::cpumask::full(mask)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::full(mask) }
     }
 
     // =====================================================================
@@ -370,7 +382,8 @@ impl BpfCtx {
         slice: u64,
         enq_flags: u64,
     ) {
-        crate::kfuncs::dsq_insert(p, dsq_id, slice, enq_flags);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::dsq_insert(p, dsq_id, slice, enq_flags) };
     }
 
     /// Insert a task into a dispatch queue with vtime-based ordering.
@@ -383,19 +396,22 @@ impl BpfCtx {
         vtime: u64,
         enq_flags: u64,
     ) {
-        crate::kfuncs::dsq_insert_vtime(p, dsq_id, slice, vtime, enq_flags);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::dsq_insert_vtime(p, dsq_id, slice, vtime, enq_flags) };
     }
 
     /// Move one task from a dispatch queue to the local CPU's DSQ.
     #[inline(always)]
     pub fn dsq_move_to_local(&mut self, dsq_id: u64) -> bool {
-        crate::kfuncs::dsq_move_to_local(dsq_id)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::dsq_move_to_local(dsq_id) }
     }
 
     /// Create a user dispatch queue. Returns 0 on success, negative errno on failure.
     #[inline(always)]
     pub fn create_dsq(&mut self, dsq_id: u64, node: i32) -> i32 {
-        crate::kfuncs::create_dsq(dsq_id, node)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::create_dsq(dsq_id, node) }
     }
 
     // ── CPU operations ───────────────────────────────────────────────────
@@ -403,14 +419,16 @@ impl BpfCtx {
     /// Kick a CPU, optionally only if idle (`SCX_KICK_IDLE = 1`).
     #[inline(always)]
     pub fn kick_cpu(&mut self, cpu: i32, flags: u64) {
-        crate::kfuncs::kick_cpu(cpu, flags);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::kick_cpu(cpu, flags) };
     }
 
     /// Atomically test and clear the idle bit for `cpu`.
     /// Returns true if the CPU was idle.
     #[inline(always)]
     pub fn test_and_clear_cpu_idle(&mut self, cpu: i32) -> bool {
-        crate::kfuncs::test_and_clear_cpu_idle(cpu)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::test_and_clear_cpu_idle(cpu) }
     }
 
     /// Select the default idle CPU for a task.
@@ -423,7 +441,8 @@ impl BpfCtx {
         wake_flags: u64,
         is_idle: *mut bool,
     ) -> i32 {
-        crate::kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, is_idle)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, is_idle) }
     }
 
     /// Select an idle CPU intersected with an additional cpumask constraint.
@@ -436,7 +455,8 @@ impl BpfCtx {
         cpus_allowed: *const cpumask,
         flags: u64,
     ) -> i32 {
-        crate::kfuncs::select_cpu_and(p, prev_cpu, wake_flags, cpus_allowed, flags)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::select_cpu_and(p, prev_cpu, wake_flags, cpus_allowed, flags) }
     }
 
     /// Set the target CPU performance level (0 .. SCX_CPUPERF_ONE).
@@ -445,7 +465,8 @@ impl BpfCtx {
     /// invalidate map pointers, it modifies kernel state.
     #[inline(always)]
     pub fn cpuperf_set(&mut self, cpu: i32, perf: u32) {
-        crate::kfuncs::cpuperf_set(cpu, perf);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::cpuperf_set(cpu, perf) };
     }
 
     /// Return the task_struct of the task currently running on `cpu`.
@@ -454,34 +475,39 @@ impl BpfCtx {
     /// critical section.
     #[inline(always)]
     pub fn cpu_curr(&mut self, cpu: i32) -> *mut task_struct {
-        crate::kfuncs::cpu_curr(cpu)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::cpu_curr(cpu) }
     }
 
     /// Return the `struct rq` for the given CPU.
     #[inline(always)]
     pub fn cpu_rq(&mut self, cpu: i32) -> *mut rq {
-        crate::kfuncs::cpu_rq(cpu)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::cpu_rq(cpu) }
     }
 
     /// Get a read-only reference to the idle CPU mask.
     /// Must be released with [`put_cpumask`](Self::put_cpumask).
     #[inline(always)]
     pub fn get_idle_cpumask(&mut self) -> *const cpumask {
-        crate::kfuncs::get_idle_cpumask()
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::get_idle_cpumask() }
     }
 
     /// Get a read-only reference to the idle SMT-sibling mask.
     /// Must be released with [`put_cpumask`](Self::put_cpumask).
     #[inline(always)]
     pub fn get_idle_smtmask(&mut self) -> *const cpumask {
-        crate::kfuncs::get_idle_smtmask()
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::get_idle_smtmask() }
     }
 
     /// Release a cpumask reference obtained from `get_idle_cpumask`
     /// or `get_idle_smtmask`.
     #[inline(always)]
     pub fn put_cpumask(&mut self, mask: *const cpumask) {
-        crate::kfuncs::put_cpumask(mask);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::put_cpumask(mask) };
     }
 
     // ── Error reporting ──────────────────────────────────────────────────
@@ -489,7 +515,8 @@ impl BpfCtx {
     /// Report a fatal scheduler error (triggers scheduler exit).
     #[inline(always)]
     pub fn error_bstr(&mut self, fmt: *const u8, data: *const u64, data_len: u32) {
-        crate::kfuncs::error_bstr(fmt, data, data_len);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::error_bstr(fmt, data, data_len) };
     }
 
     // ── Kernel 6.16 kfuncs ───────────────────────────────────────────────
@@ -498,14 +525,16 @@ impl BpfCtx {
     #[cfg(feature = "kernel_6_16")]
     #[inline(always)]
     pub fn task_set_dsq_vtime(&mut self, p: *mut task_struct, vtime: u64) -> bool {
-        crate::kfuncs::task_set_dsq_vtime(p, vtime)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::task_set_dsq_vtime(p, vtime) }
     }
 
     /// Set a task's scheduling `slice` (kernel >= 6.16).
     #[cfg(feature = "kernel_6_16")]
     #[inline(always)]
     pub fn task_set_slice(&mut self, p: *mut task_struct, slice: u64) -> bool {
-        crate::kfuncs::task_set_slice(p, slice)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kfuncs::task_set_slice(p, slice) }
     }
 
     // ── Cpumask mutations ────────────────────────────────────────────────
@@ -513,25 +542,29 @@ impl BpfCtx {
     /// Allocate a new BPF cpumask with all bits cleared.
     #[inline(always)]
     pub fn cpumask_create(&mut self) -> *mut bpf_cpumask {
-        crate::cpumask::create()
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::create() }
     }
 
     /// Release a BPF cpumask reference.
     #[inline(always)]
     pub fn cpumask_release(&mut self, mask: *mut bpf_cpumask) {
-        crate::cpumask::release(mask);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::release(mask) };
     }
 
     /// Set the bit for `cpu` in a BPF cpumask.
     #[inline(always)]
     pub fn cpumask_set_cpu(&mut self, cpu: u32, mask: *mut bpf_cpumask) {
-        crate::cpumask::set_cpu(cpu, mask);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::set_cpu(cpu, mask) };
     }
 
     /// Clear the bit for `cpu` in a BPF cpumask.
     #[inline(always)]
     pub fn cpumask_clear_cpu(&mut self, cpu: u32, mask: *mut bpf_cpumask) {
-        crate::cpumask::clear_cpu(cpu, mask);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::clear_cpu(cpu, mask) };
     }
 
     /// Compute `dst = src1 AND src2`. Returns true if result is non-empty.
@@ -542,7 +575,8 @@ impl BpfCtx {
         src1: *const cpumask,
         src2: *const cpumask,
     ) -> bool {
-        crate::cpumask::and(dst, src1, src2)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::and(dst, src1, src2) }
     }
 
     /// Compute `dst = src1 OR src2`.
@@ -553,19 +587,22 @@ impl BpfCtx {
         src1: *const cpumask,
         src2: *const cpumask,
     ) {
-        crate::cpumask::or(dst, src1, src2);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::or(dst, src1, src2) };
     }
 
     /// Copy all bits from `src` into `dst`.
     #[inline(always)]
     pub fn cpumask_copy(&mut self, dst: *mut bpf_cpumask, src: *const cpumask) {
-        crate::cpumask::copy(dst, src);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::copy(dst, src) };
     }
 
     /// Set all possible CPU bits in a cpumask.
     #[inline(always)]
     pub fn cpumask_setall(&mut self, mask: *mut bpf_cpumask) {
-        crate::cpumask::setall(mask);
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::cpumask::setall(mask) };
     }
 
     /// Cast a mutable `bpf_cpumask` pointer to a read-only `cpumask` pointer.
@@ -579,13 +616,15 @@ impl BpfCtx {
     /// Enter an RCU read-side critical section.
     #[inline(always)]
     pub fn rcu_read_lock(&mut self) {
-        crate::kptr::rcu_read_lock();
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kptr::rcu_read_lock() };
     }
 
     /// Exit an RCU read-side critical section.
     #[inline(always)]
     pub fn rcu_read_unlock(&mut self) {
-        crate::kptr::rcu_read_unlock();
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::kptr::rcu_read_unlock() };
     }
 
     // ── Kptr ─────────────────────────────────────────────────────────────
@@ -624,25 +663,29 @@ impl BpfCtx {
         map: *const core::ffi::c_void,
         flags: u64,
     ) -> i64 {
-        crate::timer::timer_init(timer, map, flags)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::timer::timer_init(timer, map, flags) }
     }
 
     /// Set the callback function for a BPF timer.
     #[inline(always)]
     pub fn timer_set_callback(&mut self, timer: *mut BpfTimer, callback: u64) -> i64 {
-        crate::timer::timer_set_callback(timer, callback)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::timer::timer_set_callback(timer, callback) }
     }
 
     /// Start (arm) a BPF timer.
     #[inline(always)]
     pub fn timer_start(&mut self, timer: *mut BpfTimer, nsecs: u64, flags: u64) -> i64 {
-        crate::timer::timer_start(timer, nsecs, flags)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::timer::timer_start(timer, nsecs, flags) }
     }
 
     /// Cancel a pending BPF timer.
     #[inline(always)]
     pub fn timer_cancel(&mut self, timer: *mut BpfTimer) -> i64 {
-        crate::timer::timer_cancel(timer)
+        // SAFETY: BpfCtx is only constructed at BPF program entry points.
+        unsafe { crate::timer::timer_cancel(timer) }
     }
 
     // ── Map mutation operations ──────────────────────────────────────────

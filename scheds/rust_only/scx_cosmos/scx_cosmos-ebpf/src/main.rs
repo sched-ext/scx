@@ -58,7 +58,7 @@ use scx_ebpf::core_read;
 use scx_ebpf::core_write;
 use scx_ebpf::bpf_for;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray, PerfEventArray, BpfArray};
-use scx_ebpf::kptr::{Kptr, kptr_xchg, rcu_read_lock, rcu_read_unlock};
+use scx_ebpf::kptr::Kptr;
 use scx_ebpf::cpumask::{self, bpf_cpumask};
 use scx_ebpf::pmu::{self, PerfEventValue, BPF_F_CURRENT_CPU};
 // bpf_timer type and helpers for deferred wakeup timer.
@@ -393,13 +393,15 @@ static LAST_CPU: BpfGlobal<u32> = BpfGlobal::new(0);
 /// our vmlinux `task_struct` pointer type.
 #[inline(always)]
 fn get_current_task_btf() -> *mut task_struct {
-    scx_ebpf::helpers::get_current_task_btf() as *mut task_struct
+    // SAFETY: called from within a BPF program context.
+    unsafe { scx_ebpf::helpers::get_current_task_btf() as *mut task_struct }
 }
 
 /// Wrapper around the library's `get_smp_processor_id()`.
 #[inline(always)]
 fn get_smp_processor_id() -> i32 {
-    scx_ebpf::helpers::get_smp_processor_id()
+    // SAFETY: called from within a BPF program context.
+    unsafe { scx_ebpf::helpers::get_smp_processor_id() }
 }
 
 /// Read the CPU capacity for a given CPU index.
@@ -1870,7 +1872,8 @@ pub fn on_init(ctx: &mut BpfCtx) -> i32 {
     //   bpf_timer_set_callback(timer, wakeup_timerfn);
     //   bpf_timer_start(timer, slice_ns, 0);
     if DEFERRED_WAKEUPS.get() {
-        let timer_val = WAKEUP_TIMER.get_ptr_mut(0);
+        // SAFETY: get_ptr_mut returns a raw pointer valid for this BPF invocation.
+        let timer_val = unsafe { WAKEUP_TIMER.get_ptr_mut(0) };
         if !timer_val.is_null() {
             let t = unsafe { &mut (*timer_val).timer as *mut BpfTimer };
             let map_ptr = core::ptr::from_ref(&WAKEUP_TIMER).cast();
