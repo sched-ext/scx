@@ -566,7 +566,7 @@ fn custom_sched_mixed(ctx: &Ctx) -> Result<VerifyResult> {
         (SchedPolicy::Normal, WorkType::CpuSpin),
         (SchedPolicy::Batch, WorkType::CpuSpin),
         (SchedPolicy::Idle, WorkType::CpuSpin),
-        (SchedPolicy::Fifo(1), WorkType::YieldHeavy),
+        (SchedPolicy::Fifo(1), WorkType::Bursty { burst_ms: 500, sleep_ms: 250 }),
     ];
     let mut handles = Vec::new();
     for i in 0..2 {
@@ -1504,9 +1504,9 @@ pub fn all_scenarios() -> Vec<Scenario> {
         s!("sched_batch", "sched_class", "SCHED_BATCH workers", 2, CpusetMode::None, w(WorkType::CpuSpin, SchedPolicy::Batch)),
         s!("sched_idle", "sched_class", "SCHED_IDLE workers", 2, CpusetMode::None, w(WorkType::CpuSpin, SchedPolicy::Idle)),
         s!("sched_fifo", "sched_class", "RT SCHED_FIFO + normal workers", 2, CpusetMode::None,
-            vec![CellWork { workers: 1, policy: SchedPolicy::Fifo(1), work_type: WorkType::YieldHeavy, ..Default::default() }]),
+            vec![CellWork { workers: 1, policy: SchedPolicy::Fifo(1), work_type: WorkType::Bursty { burst_ms: 500, sleep_ms: 250 }, ..Default::default() }]),
         s!("sched_rr", "sched_class", "RT SCHED_RR + normal workers", 2, CpusetMode::None,
-            vec![CellWork { workers: 2, policy: SchedPolicy::RoundRobin(1), work_type: WorkType::Mixed, ..Default::default() }]),
+            vec![CellWork { workers: 2, policy: SchedPolicy::RoundRobin(1), work_type: WorkType::Bursty { burst_ms: 500, sleep_ms: 250 }, ..Default::default() }]),
         // Borrowing (require flag)
         Scenario { name: "borrowing_idle", category: "advanced", description: "One cell idle, other overloaded",
             required_flags: &[Flag::Borrowing], excluded_flags: &[],
