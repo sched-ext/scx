@@ -487,6 +487,16 @@ macro_rules! scx_ops_load {
             use ::anyhow::Context;
             use ::libbpf_rs::skel::OpenSkel;
 
+            {
+                let ops = $skel.struct_ops.[<$ops _mut>]();
+                if ops.sub_cgroup_id > 0 {
+                    if let Ok(false) | Err(_) = scx_utils::compat::struct_has_field("sched_ext_ops", "sub_cgroup_id") {
+                        ::scx_utils::warn!("kernel doesn't support ops.sub_cgroup_id");
+                        ops.sub_cgroup_id = 0;
+                    }
+                }
+            }
+
             scx_utils::uei_set_size!($skel, $ops, $uei);
             $skel.load().context("Failed to load BPF program")
         }
