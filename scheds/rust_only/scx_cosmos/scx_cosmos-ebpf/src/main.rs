@@ -671,12 +671,12 @@ fn update_freq(old_freq: u64, delta_ns: u64) -> u64 {
 ///   MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE)
 /// and smooths it with EWMA via calc_avg().
 #[inline(always)]
-fn update_cpu_load(slice: u64, now: u64) {
+fn update_cpu_load(ctx: &mut BpfCtx, slice: u64, now: u64) {
     if !CPUFREQ_ENABLED.get() {
         return;
     }
 
-    let Some(cctx) = CPU_CTX.get_mut(0) else {
+    let Some(cctx) = ctx.percpu_array_get_mut(&CPU_CTX, 0) else {
         return;
     };
 
@@ -703,15 +703,18 @@ fn update_cpu_load(slice: u64, now: u64) {
 /// between -> use the smoothed value.
 /// C reference: `update_cpufreq(cpu)`.
 #[inline(always)]
-fn update_cpufreq(cpu: i32) {
+fn update_cpufreq(ctx: &mut BpfCtx, cpu: i32) {
     if !CPUFREQ_ENABLED.get() {
         return;
     }
 
-    let Some(cctx) = CPU_CTX.get(0) else {
-        return;
-    };
-    let perf_lvl_stored = cctx.perf_lvl;
+    // Read perf_lvl from per-CPU context (shared borrow of ctx).
+    let perf_lvl_stored = {
+        let Some(cctx) = ctx.percpu_array_get(&CPU_CTX, 0) else {
+            return;
+        };
+        cctx.perf_lvl
+    }; // cctx dropped, shared borrow released
 
     // Apply hysteresis thresholds.
     let perf_lvl = if perf_lvl_stored >= CPUFREQ_HIGH_THRESH {
@@ -722,7 +725,8 @@ fn update_cpufreq(cpu: i32) {
         perf_lvl_stored
     };
 
-    kfuncs::cpuperf_set(cpu, perf_lvl as u32);
+    // cpuperf_set requires &mut self — the shared borrow above is released.
+    ctx.cpuperf_set(cpu, perf_lvl as u32);
 }
 
 /// Check if a CPU is running its idle thread.
@@ -750,11 +754,11 @@ fn update_cpufreq(cpu: i32) {
 /// bpf_rcu_read_unlock();
 /// ```
 #[inline(always)]
-fn is_cpu_idle(cpu: i32) -> bool {
-    rcu_read_lock();
-    let rq = kfuncs::cpu_rq(cpu);
+fn is_cpu_idle(ctx: &mut BpfCtx, cpu: i32) -> bool {
+    ctx.rcu_read_lock();
+    let rq = ctx.cpu_rq(cpu);
     if rq.is_null() {
-        rcu_read_unlock();
+        ctx.rcu_read_unlock();
         return false;
     }
 
@@ -778,7 +782,7 @@ fn is_cpu_idle(cpu: i32) -> bool {
         );
     }
     if ret != 0 || p.is_null() {
-        rcu_read_unlock();
+        ctx.rcu_read_unlock();
         return false;
     }
 
@@ -798,7 +802,7 @@ fn is_cpu_idle(cpu: i32) -> bool {
         );
     }
 
-    rcu_read_unlock();
+    ctx.rcu_read_unlock();
     ret2 == 0 && (flags & PF_IDLE != 0)
 }
 
@@ -826,12 +830,12 @@ fn is_cpu_idle(cpu: i32) -> bool {
 ///              `pick_idle_cpu_flat()` which scans system-wide with no
 ///              primary or SMT filtering.
 #[inline(always)]
-fn pick_idle_cpu_preferred(prev_cpu: i32) -> i32 {
+fn pick_idle_cpu_preferred(ctx: &mut BpfCtx, prev_cpu: i32) -> i32 {
     // Fast path: try prev_cpu first.
     // C reference: pick_idle_cpu_pref_smt checks is_prev_allowed &&
     // scx_bpf_test_and_clear_cpu_idle(prev_cpu) before scanning.
     // We can't check p->cpus_ptr without CO-RE, so we just check idle.
-    if prev_cpu >= 0 && kfuncs::test_and_clear_cpu_idle(prev_cpu) {
+    if prev_cpu >= 0 && ctx.test_and_clear_cpu_idle(prev_cpu) {
         return prev_cpu;
     }
 
@@ -849,7 +853,7 @@ fn pick_idle_cpu_preferred(prev_cpu: i32) -> i32 {
                 break;
             }
             // Skip prev_cpu (already tried above) but keep iteration advancing.
-            if cpu != prev_cpu && kfuncs::test_and_clear_cpu_idle(cpu) {
+            if cpu != prev_cpu && ctx.test_and_clear_cpu_idle(cpu) {
                 return cpu;
             }
         });
@@ -861,7 +865,7 @@ fn pick_idle_cpu_preferred(prev_cpu: i32) -> i32 {
         bpf_for!(i, 0, bound, {
             let cpu = ((start + i) % bound) as i32;
             // Skip prev_cpu (already tried above) but keep iteration advancing.
-            if cpu != prev_cpu && kfuncs::test_and_clear_cpu_idle(cpu) {
+            if cpu != prev_cpu && ctx.test_and_clear_cpu_idle(cpu) {
                 LAST_CPU.set((cpu as u32 + 1) % bound);
                 return cpu;
             }
@@ -907,7 +911,7 @@ fn pick_idle_cpu_preferred(prev_cpu: i32) -> i32 {
 ///
 /// C reference: `pick_idle_cpu()` in `main.bpf.c`.
 #[inline(always)]
-fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64, from_enqueue: bool) -> i32 {
+fn pick_idle_cpu(ctx: &mut BpfCtx, p: *mut task_struct, prev_cpu: i32, wake_flags: u64, from_enqueue: bool) -> i32 {
     // Strategy 0: Preferred/flat idle scan.
     // Only enter when the system is not busy — under load the cpumask-based
     // scanning (select_cpu_dfl / select_cpu_and) is more efficient.
@@ -916,7 +920,7 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64, from_enque
     let preferred = PREFERRED_IDLE_SCAN.get();
     let flat = FLAT_IDLE_SCAN.get();
     if (preferred || flat) && !is_system_busy() {
-        let pref_cpu = pick_idle_cpu_preferred(prev_cpu);
+        let pref_cpu = pick_idle_cpu_preferred(ctx, prev_cpu);
         if pref_cpu >= 0 {
             return pref_cpu;
         }
@@ -931,23 +935,24 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64, from_enque
     #[cfg(feature = "kernel_6_16")]
     {
         if !PRIMARY_ALL.get() {
-            rcu_read_lock();
-            let mask = unsafe { Kptr::get(&raw mut PRIMARY_CPUMASK) };
+            ctx.rcu_read_lock();
+            let mask = unsafe { ctx.kptr_get(&raw const PRIMARY_CPUMASK) };
             if !mask.is_null() {
                 let flags = if AVOID_SMT.get() { SCX_PICK_IDLE_CORE } else { 0 };
-                let cpu = kfuncs::select_cpu_and(
+                let cast_mask = ctx.cpumask_cast(mask as *const bpf_cpumask);
+                let cpu = ctx.select_cpu_and(
                     p,
                     prev_cpu,
                     wake_flags,
-                    cpumask::cast(mask),
+                    cast_mask,
                     flags,
                 );
-                rcu_read_unlock();
+                ctx.rcu_read_unlock();
                 if cpu >= 0 {
                     return cpu;
                 }
             } else {
-                rcu_read_unlock();
+                ctx.rcu_read_unlock();
             }
         }
     }
@@ -982,7 +987,7 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64, from_enque
     }
 
     let mut is_idle: bool = false;
-    let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
+    let cpu = ctx.select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
 
     if is_idle { cpu } else { -1 }
 }
@@ -1058,7 +1063,7 @@ unsafe extern "C" fn least_busy_callback(idx: u32, ctx_ptr: *mut core::ffi::c_vo
 }
 
 #[inline(never)]
-fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
+fn pick_least_busy_event_cpu(ctx: &mut BpfCtx, _p: *mut task_struct, prev_cpu: i32) -> i32 {
     if PERF_STICKY.get() {
         return prev_cpu;
     }
@@ -1074,22 +1079,22 @@ fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
     let nr = NR_CPU_IDS.get();
     let bound = if nr < MAX_CPUS as u32 { nr } else { MAX_CPUS as u32 };
 
-    let mut ctx = LeastBusyCtx {
+    let mut lbctx = LeastBusyCtx {
         node,
         ret_cpu: -16, // -EBUSY
         min: u64::MAX,
     };
 
     unsafe {
-        scx_ebpf::helpers::bpf_loop(
+        ctx.bpf_loop(
             bound,
             least_busy_callback,
-            &mut ctx as *mut LeastBusyCtx as *mut core::ffi::c_void,
+            &mut lbctx as *mut LeastBusyCtx as *mut core::ffi::c_void,
             0,
         );
     }
 
-    ctx.ret_cpu
+    lbctx.ret_cpu
 }
 
 /// Update perf event counters for a task.
@@ -1101,14 +1106,14 @@ fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
 /// This function is NOT called from struct_ops callbacks — it is called
 /// exclusively from the tracing program which has access to helper #55.
 #[inline(always)]
-fn update_perf_counters(p: *mut task_struct, delta: u64) {
+fn update_perf_counters(ctx: &mut BpfCtx, p: *mut task_struct, delta: u64) {
     // Store delta in per-task context for is_event_heavy().
-    if let Some(tctx) = TASK_CTX.get_mut(p as *mut u8) {
+    if let Some(tctx) = ctx.task_storage_get_mut(&TASK_CTX, p as *mut u8) {
         tctx.perf_events = delta;
     }
 
     // Accumulate in per-CPU context for pick_least_busy_event_cpu().
-    if let Some(cctx) = CPU_CTX.get_mut(0) {
+    if let Some(cctx) = ctx.percpu_array_get_mut(&CPU_CTX, 0) {
         cctx.perf_events += delta;
     }
 }
@@ -1137,19 +1142,20 @@ fn wakeup_timerfn(
     _key: *mut i32,
     timer_ptr: *mut BpfTimer,
 ) -> i32 {
+    let mut ctx = BpfCtx::new();
     let nr = NR_CPU_IDS.get();
     let bound = if nr < MAX_CPUS as u32 { nr } else { MAX_CPUS as u32 };
 
     bpf_for!(cpu, 0, bound, {
         let dsq_id = kfuncs::SCX_DSQ_LOCAL_ON | cpu as u64;
-        if kfuncs::dsq_nr_queued(dsq_id) > 0 {
-            kfuncs::kick_cpu(cpu as i32, SCX_KICK_IDLE);
+        if ctx.dsq_nr_queued(dsq_id) > 0 {
+            ctx.kick_cpu(cpu as i32, SCX_KICK_IDLE);
         }
     });
 
     // Re-arm the timer for periodic execution (every slice_ns).
     let slice = SLICE_NS.get();
-    timer::timer_start(timer_ptr, slice, 0);
+    ctx.timer_start(timer_ptr, slice, 0);
     0
 }
 
@@ -1169,11 +1175,11 @@ fn wakeup_timerfn(
 /// }
 /// ```
 #[inline(always)]
-fn wakeup_cpu(cpu: i32) {
+fn wakeup_cpu(ctx: &mut BpfCtx, cpu: i32) {
     if DEFERRED_WAKEUPS.get() {
         return;
     }
-    kfuncs::kick_cpu(cpu, SCX_KICK_IDLE);
+    ctx.kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 // ── Scheduler callbacks ─────────────────────────────────────────────────
@@ -1192,7 +1198,7 @@ fn wakeup_cpu(cpu: i32) {
 /// - If no idle CPU and busy: do NOT dispatch, let enqueue() handle
 ///   deadline-mode dispatch to the shared DSQ
 #[inline(always)]
-pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
+pub fn on_select_cpu(ctx: &mut BpfCtx, p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
     // NOTE: prev_cpu validation.
     //
     // The C cosmos validates prev_cpu against p->cpus_ptr:
@@ -1238,7 +1244,7 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
             if this_cpu == prev_cpu {
                 let weight = read_weight(p);
                 let slice = task_slice(weight);
-                kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
+                ctx.dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
                 return this_cpu;
             }
         }
@@ -1271,10 +1277,10 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
     if PRIMARY_ALL.get() && (effective_wake_flags & SCX_WAKE_TTWU) != 0 {
         let this_cpu = get_smp_processor_id();
         if this_cpu >= 0 && is_cpu_faster(this_cpu, prev_cpu) {
-            if kfuncs::test_and_clear_cpu_idle(this_cpu) {
+            if ctx.test_and_clear_cpu_idle(this_cpu) {
                 let weight = read_weight(p);
                 let slice = task_slice(weight);
-                kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
+                ctx.dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
                 return this_cpu;
             }
             // Redirect subsequent idle scan to the faster core's
@@ -1297,18 +1303,25 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
     //       }
     //   }
     if PERF_CONFIG.get() != 0 {
-        if let Some(tctx) = TASK_CTX.get_ref(p as *mut u8) {
-            if is_event_heavy(tctx) {
-                let weight = read_weight(p);
-                let slice = task_slice(weight);
-                kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
-                let new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
-                return if new_cpu >= 0 { new_cpu } else { prev_cpu };
+        // Read map (shared borrow), copy needed values, drop ref.
+        let is_heavy = {
+            if let Some(tctx) = ctx.task_storage_get(&TASK_CTX, p as *mut u8) {
+                is_event_heavy(tctx)
+            } else {
+                false
             }
+        }; // tctx dropped
+
+        if is_heavy {
+            let weight = read_weight(p);
+            let slice = task_slice(weight);
+            ctx.dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
+            let new_cpu = pick_least_busy_event_cpu(ctx, p, prev_cpu);
+            return if new_cpu >= 0 { new_cpu } else { prev_cpu };
         }
     }
 
-    let cpu = pick_idle_cpu(p, prev_cpu, effective_wake_flags, false);
+    let cpu = pick_idle_cpu(ctx, p, prev_cpu, effective_wake_flags, false);
     let found_idle = cpu >= 0;
 
     // Dispatch to local DSQ when:
@@ -1321,7 +1334,7 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
     if found_idle || !is_busy {
         let weight = read_weight(p);
         let slice = task_slice(weight);
-        kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
+        ctx.dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
     }
 
     // Return the idle CPU if found, otherwise prev_cpu.
@@ -1365,12 +1378,12 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
 /// - Use early-return branches to limit live variable scope
 /// - Compute deadline values only in the branch that needs them
 #[inline(always)]
-pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
+pub fn on_enqueue(ctx: &mut BpfCtx, p: *mut task_struct, enq_flags: u64) {
     // ── Phase 1: kfunc calls ─────────────────────────────────────────
     // Call kfuncs first while register pressure is minimal.
     // p is in a callee-saved register; these KF_RCU kfuncs preserve it.
-    let prev_cpu = kfuncs::task_cpu(p);
-    let is_running = kfuncs::task_running(p);
+    let prev_cpu = ctx.task_cpu(p);
+    let is_running = ctx.task_running(p);
 
     // ── Phase 1.5: PMU event-heavy dispatch ──────────────────────────
     // C: if (perf_config && !is_migration_disabled(p) && is_event_heavy(tctx))
@@ -1380,23 +1393,30 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     // Immediately dispatch perf event-heavy tasks to a less busy CPU.
     // This runs before the migration check to prioritize PMU-aware placement.
     if PERF_CONFIG.get() != 0 && !is_migration_disabled(p) {
-        if let Some(tctx) = TASK_CTX.get_ref(p as *mut u8) {
-            if is_event_heavy(tctx) {
-                let new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
-                if new_cpu >= 0 {
-                    let weight = read_weight(p);
-                    let slice = task_slice(weight);
-                    kfuncs::dsq_insert(
-                        p,
-                        kfuncs::SCX_DSQ_LOCAL_ON | new_cpu as u64,
-                        slice,
-                        enq_flags,
-                    );
-                    if new_cpu != prev_cpu || !is_running {
-                        wakeup_cpu(new_cpu);
-                    }
-                    return;
+        // Read map (shared borrow), copy needed values, drop ref.
+        let is_heavy = {
+            if let Some(tctx) = ctx.task_storage_get(&TASK_CTX, p as *mut u8) {
+                is_event_heavy(tctx)
+            } else {
+                false
+            }
+        }; // tctx dropped
+
+        if is_heavy {
+            let new_cpu = pick_least_busy_event_cpu(ctx, p, prev_cpu);
+            if new_cpu >= 0 {
+                let weight = read_weight(p);
+                let slice = task_slice(weight);
+                ctx.dsq_insert(
+                    p,
+                    kfuncs::SCX_DSQ_LOCAL_ON | new_cpu as u64,
+                    slice,
+                    enq_flags,
+                );
+                if new_cpu != prev_cpu || !is_running {
+                    wakeup_cpu(ctx, new_cpu);
                 }
+                return;
             }
         }
     }
@@ -1418,26 +1438,26 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
         //    else
         //        cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
         let idle_cpu = if is_pcpu_task(p) {
-            if kfuncs::test_and_clear_cpu_idle(prev_cpu) {
+            if ctx.test_and_clear_cpu_idle(prev_cpu) {
                 prev_cpu
             } else {
                 -1
             }
         } else {
-            if kfuncs::test_and_clear_cpu_idle(prev_cpu) {
+            if ctx.test_and_clear_cpu_idle(prev_cpu) {
                 prev_cpu
             } else {
                 // Full idle CPU scan: try preferred list, primary cpumask,
                 // and SMT-aware filtering.
                 // C reference: pick_idle_cpu(p, prev_cpu, -1, 0, true)
-                pick_idle_cpu(p, prev_cpu, 0, true)
+                pick_idle_cpu(ctx, p, prev_cpu, 0, true)
             }
         };
         if idle_cpu >= 0 {
             let weight = read_weight(p);
             let slice = task_slice(weight);
-            kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL_ON | idle_cpu as u64, slice, enq_flags);
-            wakeup_cpu(idle_cpu);
+            ctx.dsq_insert(p, kfuncs::SCX_DSQ_LOCAL_ON | idle_cpu as u64, slice, enq_flags);
+            wakeup_cpu(ctx, idle_cpu);
             return;
         }
     }
@@ -1447,10 +1467,10 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     if !is_system_busy() {
         let weight = read_weight(p);
         let slice = task_slice(weight);
-        kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, enq_flags);
+        ctx.dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, enq_flags);
         // If the task should migrate (wakeup), wake prev_cpu.
         if should_migrate {
-            wakeup_cpu(prev_cpu);
+            wakeup_cpu(ctx, prev_cpu);
         }
         return;
     }
@@ -1471,11 +1491,13 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     //   deadline = dsq_vtime + scale_inverse(exec_runtime)
     // Tasks with more accumulated runtime get higher (later) deadlines,
     // prioritizing interactive tasks that sleep frequently.
-    let (exec_runtime, wakeup_freq) = if let Some(tctx) = TASK_CTX.get_ref(p as *mut u8) {
-        (tctx.exec_runtime, tctx.wakeup_freq)
-    } else {
-        (0u64, 0u64)
-    };
+    let (exec_runtime, wakeup_freq) = {
+        if let Some(tctx) = ctx.task_storage_get(&TASK_CTX, p as *mut u8) {
+            (tctx.exec_runtime, tctx.wakeup_freq)
+        } else {
+            (0u64, 0u64)
+        }
+    }; // tctx dropped
 
     // Clamp vtime FIRST so tasks don't accumulate too much credit from sleeping.
     // C: lag_scale = MAX(wakeup_freq, 1)
@@ -1492,7 +1514,7 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     // Write clamped vtime back to dsq_vtime if it changed.
     if clamped_vtime != vtime {
         #[cfg(feature = "kernel_6_16")]
-        kfuncs::task_set_dsq_vtime(p, clamped_vtime);
+        ctx.task_set_dsq_vtime(p, clamped_vtime);
         #[cfg(not(feature = "kernel_6_16"))]
         core_write!(vmlinux::task_struct, p, scx.dsq_vtime, clamped_vtime);
     }
@@ -1505,12 +1527,12 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
         clamped_vtime.wrapping_add(exec_runtime)
     };
 
-    kfuncs::dsq_insert_vtime(p, shared_dsq(prev_cpu), slice, deadline, enq_flags);
+    ctx.dsq_insert_vtime(p, shared_dsq(prev_cpu), slice, deadline, enq_flags);
 
     // If the task should migrate (wakeup), wake prev_cpu.
     // C: if (task_should_migrate(p, enq_flags)) wakeup_cpu(prev_cpu);
     if should_migrate {
-        wakeup_cpu(prev_cpu);
+        wakeup_cpu(ctx, prev_cpu);
     }
 }
 
@@ -1524,8 +1546,8 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
 /// NUMA node instead of the single global shared DSQ.
 /// C reference: `scx_bpf_dsq_move_to_local(shared_dsq(cpu))`
 #[inline(always)]
-pub fn on_dispatch(cpu: i32, prev: *mut task_struct) {
-    if kfuncs::dsq_move_to_local(shared_dsq(cpu)) {
+pub fn on_dispatch(ctx: &mut BpfCtx, cpu: i32, prev: *mut task_struct) {
+    if ctx.dsq_move_to_local(shared_dsq(cpu)) {
         return;
     }
 
@@ -1543,13 +1565,13 @@ pub fn on_dispatch(cpu: i32, prev: *mut task_struct) {
         let base = prev as *const u8;
         let flags_offset = core::mem::offset_of!(vmlinux::task_struct, scx.flags);
         let src = unsafe { base.add(flags_offset) as *const u64 };
-        if let Ok(flags_and_weight) = unsafe { scx_ebpf::helpers::probe_read_kernel(src) } {
+        if let Ok(flags_and_weight) = unsafe { ctx.probe_read_kernel(src) } {
             let flags = flags_and_weight as u32;
             let weight = (flags_and_weight >> 32) as u64;
             if flags & SCX_TASK_QUEUED != 0 {
                 let slice = task_slice(weight);
                 #[cfg(feature = "kernel_6_16")]
-                kfuncs::task_set_slice(prev, slice);
+                ctx.task_set_slice(prev, slice);
                 #[cfg(not(feature = "kernel_6_16"))]
                 core_write!(vmlinux::task_struct, prev, scx.slice, slice);
             }
@@ -1567,9 +1589,9 @@ pub fn on_dispatch(cpu: i32, prev: *mut task_struct) {
 ///   tctx->wakeup_freq = MIN(tctx->wakeup_freq, 1024);
 ///   tctx->last_woke_at = now;
 #[inline(always)]
-pub fn on_runnable(p: *mut task_struct, _enq_flags: u64) {
-    let now = kfuncs::now();
-    if let Some(tctx) = TASK_CTX.get_mut(p as *mut u8) {
+pub fn on_runnable(ctx: &mut BpfCtx, p: *mut task_struct, _enq_flags: u64) {
+    let now = ctx.now();
+    if let Some(tctx) = ctx.task_storage_get_mut(&TASK_CTX, p as *mut u8) {
         // Reset accumulated runtime — task just woke up.
         tctx.exec_runtime = 0;
         // Update wakeup frequency using time since last wakeup.
@@ -1599,11 +1621,11 @@ pub fn on_runnable(p: *mut task_struct, _enq_flags: u64) {
 /// C reference: cosmos_running() calls update_cpufreq(scx_bpf_task_cpu(p))
 /// and scx_pmu_event_start(p, false) when perf_config is set.
 #[inline(always)]
-pub fn on_running(p: *mut task_struct) {
+pub fn on_running(ctx: &mut BpfCtx, p: *mut task_struct) {
     // Record run start time in per-task storage.
     // C: tctx->last_run_at = scx_bpf_now();
-    let now = kfuncs::now();
-    if let Some(tctx) = TASK_CTX.get_mut(p as *mut u8) {
+    let now = ctx.now();
+    if let Some(tctx) = ctx.task_storage_get_mut(&TASK_CTX, p as *mut u8) {
         tctx.last_run_at = now;
     }
 
@@ -1622,8 +1644,8 @@ pub fn on_running(p: *mut task_struct) {
     // Apply cpufreq performance level based on recent load.
     // C: update_cpufreq(scx_bpf_task_cpu(p));
     if CPUFREQ_ENABLED.get() {
-        let cpu = kfuncs::task_cpu(p);
-        update_cpufreq(cpu);
+        let cpu = ctx.task_cpu(p);
+        update_cpufreq(ctx, cpu);
     }
 }
 
@@ -1646,7 +1668,7 @@ pub fn on_running(p: *mut task_struct) {
 /// and smooths it with EWMA. Also calls scx_pmu_event_stop(p) +
 /// update_counters(p, tctx, cpu) for PMU tracking.
 #[inline(always)]
-pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
+pub fn on_stopping(ctx: &mut BpfCtx, p: *mut task_struct, _runnable: bool) {
     // Read ALL fields before writing.
     let old_vtime = if let Ok(v) = core_read!(vmlinux::task_struct, p, scx.dsq_vtime) {
         v
@@ -1663,8 +1685,8 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     // the LLVM BPF backend register clobber bug (see helpers.rs docs).
     // C: slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_ns);
     // C: tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag)
-    let now = kfuncs::now();
-    let slice = if let Some(tctx) = TASK_CTX.get_mut(p as *mut u8) {
+    let now = ctx.now();
+    let slice = if let Some(tctx) = ctx.task_storage_get_mut(&TASK_CTX, p as *mut u8) {
         let delta = now.wrapping_sub(tctx.last_run_at);
         let s = if delta < slice_ns { delta } else { slice_ns };
         // Update exec_runtime while we have the pointer.
@@ -1673,7 +1695,7 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
         s
     } else {
         slice_ns
-    };
+    }; // tctx dropped
 
     // C: p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
     // scale_by_task_weight_inverse(p, v) = v * 100 / weight
@@ -1681,7 +1703,7 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     let new_vtime = old_vtime.wrapping_add(vtime_delta);
 
     #[cfg(feature = "kernel_6_16")]
-    kfuncs::task_set_dsq_vtime(p, new_vtime);
+    ctx.task_set_dsq_vtime(p, new_vtime);
     #[cfg(not(feature = "kernel_6_16"))]
     core_write!(vmlinux::task_struct, p, scx.dsq_vtime, new_vtime);
 
@@ -1692,17 +1714,17 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
 
     // Update per-CPU load for cpufreq scaling.
     // C: update_cpu_load(p, slice);
-    update_cpu_load(slice, now);
+    update_cpu_load(ctx, slice, now);
 }
 
 /// enable: initialize a task's dsq_vtime to the current global vruntime.
 ///
 /// Direct port of the C cosmos_enable callback.
 #[inline(always)]
-pub fn on_enable(p: *mut task_struct) {
+pub fn on_enable(ctx: &mut BpfCtx, p: *mut task_struct) {
     let vtime_now = VTIME_NOW.get();
     #[cfg(feature = "kernel_6_16")]
-    kfuncs::task_set_dsq_vtime(p, vtime_now);
+    ctx.task_set_dsq_vtime(p, vtime_now);
     #[cfg(not(feature = "kernel_6_16"))]
     core_write!(vmlinux::task_struct, p, scx.dsq_vtime, vtime_now);
 }
@@ -1712,9 +1734,9 @@ pub fn on_enable(p: *mut task_struct) {
 /// C reference: cosmos_init_task creates per-task storage via
 /// bpf_task_storage_get(&task_ctx_stor, ..., BPF_LOCAL_STORAGE_GET_F_CREATE).
 #[inline(always)]
-pub fn on_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
+pub fn on_init_task(ctx: &mut BpfCtx, p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
     // Create per-task storage (zero-initialized by the kernel).
-    if TASK_CTX.get_or_create(p as *mut u8).is_none() {
+    if ctx.task_storage_get_or_create(&TASK_CTX, p as *mut u8).is_none() {
         return -12; // ENOMEM
     }
     0
@@ -1729,9 +1751,9 @@ pub fn on_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
 /// cleanup. Our PMU state is embedded in the TaskCtx storage map and
 /// is automatically cleaned up when the storage entry is deleted.
 #[inline(always)]
-pub fn on_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
+pub fn on_exit_task(ctx: &mut BpfCtx, p: *mut task_struct, _args: *mut core::ffi::c_void) {
     // Clean up per-task storage.
-    let _ = TASK_CTX.delete(p as *mut u8);
+    let _ = ctx.task_storage_delete(&TASK_CTX, p as *mut u8);
 }
 
 /// Initialize the primary cpumask kptr.
@@ -1747,26 +1769,26 @@ pub fn on_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
 ///
 /// Mirrors the C `init_cpumask()` pattern: create, kptr_xchg, release old.
 #[inline(always)]
-fn init_primary_cpumask() -> i32 {
+fn init_primary_cpumask(ctx: &mut BpfCtx) -> i32 {
     // Create a new cpumask with all bits cleared.
-    let mask = cpumask::create();
+    let mask = ctx.cpumask_create();
     if mask.is_null() {
         return -12; // ENOMEM
     }
 
     // Atomically store the new mask in the kptr slot.
     // bpf_kptr_xchg returns the old value (should be null on first init).
-    let old = unsafe { kptr_xchg(&raw mut PRIMARY_CPUMASK, mask) };
+    let old = unsafe { ctx.kptr_xchg(&raw mut PRIMARY_CPUMASK, mask) };
     if !old.is_null() {
         // Release the old mask if there was one (shouldn't happen on init).
-        cpumask::release(old);
+        ctx.cpumask_release(old);
     }
 
     // Verify the exchange succeeded by reading back under RCU.
-    rcu_read_lock();
-    let stored = unsafe { Kptr::get(&raw const PRIMARY_CPUMASK) };
+    ctx.rcu_read_lock();
+    let stored = unsafe { ctx.kptr_get(&raw const PRIMARY_CPUMASK) };
     let ok = !stored.is_null();
-    rcu_read_unlock();
+    ctx.rcu_read_unlock();
 
     if ok { 0 } else { -12 }
 }
@@ -1782,9 +1804,9 @@ fn init_primary_cpumask() -> i32 {
 ///
 /// C reference: `cosmos_init()` with `bpf_for(node, 0, nr_node_ids)`.
 #[inline(always)]
-pub fn on_init() -> i32 {
+pub fn on_init(ctx: &mut BpfCtx) -> i32 {
     // Record the number of CPUs for bounds checking.
-    NR_CPU_IDS.set(kfuncs::nr_cpu_ids());
+    NR_CPU_IDS.set(ctx.nr_cpu_ids());
 
     // Create per-node DSQs when NUMA is enabled, otherwise a single shared DSQ.
     // C: if (numa_enabled) { bpf_for(node, 0, nr_node_ids) create_dsq(node, node); }
@@ -1795,7 +1817,7 @@ pub fn on_init() -> i32 {
         let max = if nr_nodes < MAX_NODES { nr_nodes } else { MAX_NODES };
         let mut node: u32 = 0;
         while node < max {
-            let err = kfuncs::create_dsq(node as u64, node as i32);
+            let err = ctx.create_dsq(node as u64, node as i32);
             if err != 0 {
                 scx_ebpf::scx_bpf_error!("cosmos: failed to create node DSQ");
                 return err;
@@ -1803,7 +1825,7 @@ pub fn on_init() -> i32 {
             node += 1;
         }
     } else {
-        let err = kfuncs::create_dsq(SHARED_DSQ, -1);
+        let err = ctx.create_dsq(SHARED_DSQ, -1);
         if err != 0 {
             scx_ebpf::scx_bpf_error!("cosmos: failed to create shared DSQ");
             return err;
@@ -1815,7 +1837,7 @@ pub fn on_init() -> i32 {
     // When PRIMARY_ALL is true (default), the cpumask exists but is not
     // consulted in pick_idle_cpu(). When userspace sets PRIMARY_ALL = false
     // and populates the cpumask, it restricts idle CPU selection.
-    let err = init_primary_cpumask();
+    let err = init_primary_cpumask(ctx);
     if err != 0 {
         scx_ebpf::scx_bpf_error!("cosmos: failed to init primary cpumask");
         return err;
@@ -1826,18 +1848,18 @@ pub fn on_init() -> i32 {
     // the CPUs that should be in the primary domain (terminated by -1).
     // This replaces the C cosmos's `enable_primary_cpu` syscall program.
     if !PRIMARY_ALL.get() {
-        rcu_read_lock();
-        let mask = unsafe { Kptr::get(&raw mut PRIMARY_CPUMASK) };
+        ctx.rcu_read_lock();
+        let mask = unsafe { ctx.kptr_get(&raw const PRIMARY_CPUMASK) };
         if !mask.is_null() {
             bpf_for!(i, 0, MAX_CPUS as u32, {
                 let cpu = PRIMARY_CPU_LIST.get(i as usize).unwrap_or(-1);
                 if cpu < 0 {
                     break;
                 }
-                cpumask::set_cpu(cpu as u32, mask as *mut bpf_cpumask);
+                ctx.cpumask_set_cpu(cpu as u32, mask as *mut bpf_cpumask);
             });
         }
-        rcu_read_unlock();
+        ctx.rcu_read_unlock();
     }
 
     // Initialize the deferred wakeup timer when enabled.
@@ -1852,10 +1874,10 @@ pub fn on_init() -> i32 {
         if !timer_val.is_null() {
             let t = unsafe { &mut (*timer_val).timer as *mut BpfTimer };
             let map_ptr = core::ptr::from_ref(&WAKEUP_TIMER).cast();
-            timer::timer_init(t, map_ptr, timer::CLOCK_MONOTONIC);
-            timer::timer_set_callback(t, wakeup_timerfn as *const () as u64);
+            ctx.timer_init(t, map_ptr, timer::CLOCK_MONOTONIC);
+            ctx.timer_set_callback(t, wakeup_timerfn as *const () as u64);
             let slice = SLICE_NS.get();
-            timer::timer_start(t, slice, 0);
+            ctx.timer_start(t, slice, 0);
         }
     }
 
@@ -1884,7 +1906,7 @@ pub fn on_init() -> i32 {
 /// cleaned up when the BPF program detaches. UEI_RECORD is not yet
 /// ported (requires the UEI mechanism).
 #[inline(always)]
-pub fn on_exit(_ei: *mut scx_exit_info) {}
+pub fn on_exit(_ctx: &mut BpfCtx, _ei: *mut scx_exit_info) {}
 
 // ── PMU tracing program ─────────────────────────────────────────────────
 //
@@ -1922,15 +1944,17 @@ pub fn on_exit(_ei: *mut scx_exit_info) {}
 /// When PERF_CONFIG is 0 (PMU disabled), this function returns immediately.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = "tp_btf/sched_switch")]
-pub unsafe extern "C" fn scx_pmu_sched_switch(ctx: *const u64) -> i32 {
+pub unsafe extern "C" fn scx_pmu_sched_switch(tp_ctx: *const u64) -> i32 {
     // Skip if PMU is not configured.
     if PERF_CONFIG.get() == 0 {
         return 0;
     }
 
+    let mut ctx = BpfCtx::new();
+
     // Read the perf counter for the current CPU.
     let mut val = core::mem::MaybeUninit::<PerfEventValue>::uninit();
-    let ret = pmu::perf_event_read_value(
+    let ret = ctx.perf_event_read_value(
         &raw const SCX_PMU_MAP as *const core::ffi::c_void,
         BPF_F_CURRENT_CPU,
         val.as_mut_ptr(),
@@ -1944,9 +1968,9 @@ pub unsafe extern "C" fn scx_pmu_sched_switch(ctx: *const u64) -> i32 {
     let current_counter = val.assume_init().counter;
 
     // Extract prev and next task pointers from the tracepoint context.
-    // tp_btf/sched_switch context layout: ctx[1] = prev, ctx[2] = next.
-    let prev = *ctx.add(1) as *mut task_struct;
-    let next = *ctx.add(2) as *mut task_struct;
+    // tp_btf/sched_switch context layout: tp_ctx[1] = prev, tp_ctx[2] = next.
+    let prev = *tp_ctx.add(1) as *mut task_struct;
+    let next = *tp_ctx.add(2) as *mut task_struct;
 
     // Process outgoing task (prev): compute delta and store in maps.
     if !prev.is_null() {
@@ -1955,10 +1979,12 @@ pub unsafe extern "C" fn scx_pmu_sched_switch(ctx: *const u64) -> i32 {
         if let Ok(pid) = prev_pid {
             if pid != 0 {
                 // Read the baseline for this CPU.
-                if let Some(baseline) = PMU_BASELINE.get(0) {
+                if let Some(baseline) = ctx.percpu_array_get(&PMU_BASELINE, 0) {
                     let delta = current_counter.wrapping_sub(*baseline);
                     // Write delta to per-task and per-CPU contexts.
-                    update_perf_counters(prev, delta);
+                    // Must drop `baseline` ref before mutable map access.
+                    drop(baseline);
+                    update_perf_counters(&mut ctx, prev, delta);
                 }
             }
         }

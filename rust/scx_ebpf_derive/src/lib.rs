@@ -359,7 +359,8 @@ pub fn scx_ops_define(input: TokenStream) -> TokenStream {
                 #[unsafe(no_mangle)]
                 #[unsafe(link_section = #section)]
                 unsafe extern "C" fn #field_name() #ret_type {
-                    #handler(#(#call_args),*)
+                    let mut bpf_ctx = scx_ebpf::ctx::BpfCtx::new();
+                    #handler(&mut bpf_ctx, #(#call_args),*)
                 }
             }
         } else {
@@ -367,8 +368,9 @@ pub fn scx_ops_define(input: TokenStream) -> TokenStream {
                 #[unsafe(no_mangle)]
                 #[unsafe(link_section = #section)]
                 unsafe extern "C" fn #field_name(ctx: *const u64) #ret_type {
+                    let mut bpf_ctx = scx_ebpf::ctx::BpfCtx::new();
                     #(#extracts)*
-                    #handler(#(#call_args),*)
+                    #handler(&mut bpf_ctx, #(#call_args),*)
                 }
             }
         };
