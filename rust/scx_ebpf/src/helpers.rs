@@ -243,6 +243,53 @@ macro_rules! bpf_repeat {
     }};
 }
 
+/// BPF helper #158: `bpf_get_current_task_btf() -> *mut task_struct`
+///
+/// Returns a BTF-typed pointer to the current task's `task_struct`.
+/// Used to access the current task in BPF programs (e.g., to compare
+/// the waker with the wakee for mm_affinity).
+///
+/// The return type is a raw pointer so callers can cast to their own
+/// vmlinux `task_struct` type.
+#[inline(always)]
+pub fn get_current_task_btf() -> *mut u8 {
+    let ret: *mut u8;
+    unsafe {
+        core::arch::asm!(
+            "call 158",
+            lateout("r0") ret,
+            lateout("r1") _,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret
+}
+
+/// BPF helper #8: `bpf_get_smp_processor_id() -> u32`
+///
+/// Returns the ID of the CPU on which the BPF program is currently
+/// executing. The result is always valid and in-range for the current
+/// system.
+#[inline(always)]
+pub fn get_smp_processor_id() -> i32 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "call 8",
+            lateout("r0") ret,
+            lateout("r1") _,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret as i32
+}
+
 /// Maximum size of a CO-RE marker record in bytes.
 ///
 /// Layout: tag(1) + name_len(1) + name(N) + path_len(1) + path(M).

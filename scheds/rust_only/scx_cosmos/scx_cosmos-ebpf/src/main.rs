@@ -389,45 +389,17 @@ static LAST_CPU: BpfGlobal<u32> = BpfGlobal::new(0);
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// BPF helper #158: `bpf_get_current_task_btf() -> *mut task_struct`
-///
-/// Returns a pointer to the current task's task_struct with BTF type info.
-/// Used to access the waker's task in select_cpu for mm_affinity.
+/// Wrapper around the library's `get_current_task_btf()` that casts to
+/// our vmlinux `task_struct` pointer type.
 #[inline(always)]
 fn get_current_task_btf() -> *mut task_struct {
-    let ret: *mut task_struct;
-    unsafe {
-        core::arch::asm!(
-            "call 158",
-            lateout("r0") ret,
-            lateout("r1") _,
-            lateout("r2") _,
-            lateout("r3") _,
-            lateout("r4") _,
-            lateout("r5") _,
-        );
-    }
-    ret
+    scx_ebpf::helpers::get_current_task_btf() as *mut task_struct
 }
 
-/// BPF helper #8: `bpf_get_smp_processor_id() -> u32`
-///
-/// Returns the ID of the CPU on which the BPF program is currently running.
+/// Wrapper around the library's `get_smp_processor_id()`.
 #[inline(always)]
 fn get_smp_processor_id() -> i32 {
-    let ret: u64;
-    unsafe {
-        core::arch::asm!(
-            "call 8",
-            lateout("r0") ret,
-            lateout("r1") _,
-            lateout("r2") _,
-            lateout("r3") _,
-            lateout("r4") _,
-            lateout("r5") _,
-        );
-    }
-    ret as i32
+    scx_ebpf::helpers::get_smp_processor_id()
 }
 
 /// Read the CPU capacity for a given CPU index.
