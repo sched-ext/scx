@@ -172,3 +172,65 @@ macro_rules! scx_ebpf_boilerplate {
         }
     };
 }
+
+/// Declare a BPF map.
+///
+/// Adds the required `#[unsafe(link_section = ".maps")]` and
+/// `#[unsafe(no_mangle)]` attributes that the aya loader needs to
+/// recognize the symbol as a BPF map definition.
+///
+/// # Example
+///
+/// ```ignore
+/// scx_ebpf::bpf_map!(TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new());
+/// scx_ebpf::bpf_map!(CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new());
+/// ```
+#[macro_export]
+macro_rules! bpf_map {
+    ($name:ident : $ty:ty = $init:expr) => {
+        #[unsafe(link_section = ".maps")]
+        #[unsafe(no_mangle)]
+        static $name: $ty = $init;
+    };
+}
+
+/// Declare a BPF global variable backed by [`BpfGlobal<T>`].
+///
+/// Adds the `#[unsafe(no_mangle)]` attribute so the aya loader can
+/// locate the symbol for `override_global`.  Wraps the value in
+/// `BpfGlobal` so reads and writes are safe (`.get()` / `.set()`).
+///
+/// # Example
+///
+/// ```ignore
+/// scx_ebpf::bpf_global!(SLICE_NS: u64 = 10_000);
+/// scx_ebpf::bpf_global!(CPUFREQ_ENABLED: bool = true);
+/// ```
+#[macro_export]
+macro_rules! bpf_global {
+    ($name:ident : $ty:ty = $init:expr) => {
+        #[unsafe(no_mangle)]
+        static $name: $crate::global::BpfGlobal<$ty> = $crate::global::BpfGlobal::new($init);
+    };
+}
+
+/// Declare a BPF global array backed by [`BpfGlobalArray<T, N>`].
+///
+/// Adds the `#[unsafe(no_mangle)]` attribute so the aya loader can
+/// locate the symbol.  Wraps the array in `BpfGlobalArray` so element
+/// access is bounds-checked (`.get()` / `.set()`).
+///
+/// # Example
+///
+/// ```ignore
+/// scx_ebpf::bpf_global_array!(CPU_TO_NODE: [u32; 1024] = [0; 1024]);
+/// scx_ebpf::bpf_global_array!(PREFERRED_CPUS: [i32; 1024] = [-1i32; 1024]);
+/// ```
+#[macro_export]
+macro_rules! bpf_global_array {
+    ($name:ident : [$ty:ty; $n:expr] = $init:expr) => {
+        #[unsafe(no_mangle)]
+        static $name: $crate::global::BpfGlobalArray<$ty, $n> =
+            $crate::global::BpfGlobalArray::new($init);
+    };
+}

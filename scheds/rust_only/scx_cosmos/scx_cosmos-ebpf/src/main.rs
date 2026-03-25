@@ -117,38 +117,30 @@ struct CpuCtx {
 
 // ── BPF map declarations ────────────────────────────────────────────────
 
-/// Per-task storage map. Automatically freed when a task exits.
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new();
+// Per-task storage map. Automatically freed when a task exits.
+scx_ebpf::bpf_map!(TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new());
 
-/// Per-CPU context array (1 entry, each CPU gets its own copy).
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new();
+// Per-CPU context array (1 entry, each CPU gets its own copy).
+scx_ebpf::bpf_map!(CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new());
 
-/// Perf event array for hardware performance counter access.
-///
-/// Userspace populates this map with perf_event_open() fds (one per CPU).
-/// The `tp_btf/sched_switch` tracing program reads counter values from this
-/// map via `bpf_perf_event_read_value` (helper #55). The struct_ops scheduler
-/// cannot call this helper directly — the kernel restricts it to tracing types.
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static SCX_PMU_MAP: PerfEventArray<1024> = PerfEventArray::new();
+// Perf event array for hardware performance counter access.
+//
+// Userspace populates this map with perf_event_open() fds (one per CPU).
+// The `tp_btf/sched_switch` tracing program reads counter values from this
+// map via `bpf_perf_event_read_value` (helper #55). The struct_ops scheduler
+// cannot call this helper directly — the kernel restricts it to tracing types.
+scx_ebpf::bpf_map!(SCX_PMU_MAP: PerfEventArray<1024> = PerfEventArray::new());
 
-/// Per-CPU scratch space for PMU counter baselines.
-///
-/// The `tp_btf/sched_switch` tracing program stores the perf counter value
-/// at the start of each task's run here. On the next sched_switch, it reads
-/// the counter again and computes the delta (current - start), which it
-/// stores in the task's `TASK_CTX.perf_events` and the CPU's `CPU_CTX.perf_events`.
-///
-/// This is a per-CPU array with 1 entry (the baseline counter value for
-/// the task currently running on that CPU).
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static PMU_BASELINE: PerCpuArray<u64, 1> = PerCpuArray::new();
+// Per-CPU scratch space for PMU counter baselines.
+//
+// The `tp_btf/sched_switch` tracing program stores the perf counter value
+// at the start of each task's run here. On the next sched_switch, it reads
+// the counter again and computes the delta (current - start), which it
+// stores in the task's `TASK_CTX.perf_events` and the CPU's `CPU_CTX.perf_events`.
+//
+// This is a per-CPU array with 1 entry (the baseline counter value for
+// the task currently running on that CPU).
+scx_ebpf::bpf_map!(PMU_BASELINE: PerCpuArray<u64, 1> = PerCpuArray::new());
 
 /// Timer map value type for deferred wakeup timer.
 ///
@@ -163,9 +155,7 @@ struct WakeupTimer {
     timer: BpfTimer,
 }
 
-#[unsafe(link_section = ".maps")]
-#[unsafe(no_mangle)]
-static WAKEUP_TIMER: BpfArray<WakeupTimer, 1> = BpfArray::new();
+scx_ebpf::bpf_map!(WAKEUP_TIMER: BpfArray<WakeupTimer, 1> = BpfArray::new());
 
 // ── Constants ───────────────────────────────────────────────────────────
 
@@ -231,60 +221,49 @@ const PF_IDLE: u32 = 0x00000002;
 // `BpfGlobal` is `#[repr(transparent)]`, so the loader sees the same
 // memory layout as a bare `T`.
 
-/// Default time slice: 10us (matches C cosmos `slice_ns = 10000`).
-#[unsafe(no_mangle)]
-static SLICE_NS: BpfGlobal<u64> = BpfGlobal::new(10_000);
+// Default time slice: 10us (matches C cosmos `slice_ns = 10000`).
+scx_ebpf::bpf_global!(SLICE_NS: u64 = 10_000);
 
-/// Maximum runtime that can be charged to a task (bounds vruntime jumps).
-#[unsafe(no_mangle)]
-static SLICE_LAG: BpfGlobal<u64> = BpfGlobal::new(20_000_000);
+// Maximum runtime that can be charged to a task (bounds vruntime jumps).
+scx_ebpf::bpf_global!(SLICE_LAG: u64 = 20_000_000);
 
-/// CPU utilization threshold for system busy detection [0..100].
-/// When `CPU_UTIL >= BUSY_THRESHOLD`, the system is considered busy.
-/// C reference: `const volatile u64 busy_threshold`
-#[unsafe(no_mangle)]
-static BUSY_THRESHOLD: BpfGlobal<u64> = BpfGlobal::new(0);
+// CPU utilization threshold for system busy detection [0..100].
+// When `CPU_UTIL >= BUSY_THRESHOLD`, the system is considered busy.
+// C reference: `const volatile u64 busy_threshold`
+scx_ebpf::bpf_global!(BUSY_THRESHOLD: u64 = 0);
 
-/// Current global CPU utilization [0..100], set by userspace polling loop.
-/// C reference: `volatile u64 cpu_util`
-#[unsafe(no_mangle)]
-static CPU_UTIL: BpfGlobal<u64> = BpfGlobal::new(0);
+// Current global CPU utilization [0..100], set by userspace polling loop.
+// C reference: `volatile u64 cpu_util`
+scx_ebpf::bpf_global!(CPU_UTIL: u64 = 0);
 
-/// When true, clear SCX_WAKE_SYNC from wake_flags in select_cpu.
-/// C reference: `const volatile bool no_wake_sync`
-#[unsafe(no_mangle)]
-static NO_WAKE_SYNC: BpfGlobal<bool> = BpfGlobal::new(false);
+// When true, clear SCX_WAKE_SYNC from wake_flags in select_cpu.
+// C reference: `const volatile bool no_wake_sync`
+scx_ebpf::bpf_global!(NO_WAKE_SYNC: bool = false);
 
-/// When true, enable cpufreq performance scaling in running/stopping.
-/// C reference: `const volatile bool cpufreq_enabled = true`
-#[unsafe(no_mangle)]
-static CPUFREQ_ENABLED: BpfGlobal<bool> = BpfGlobal::new(true);
+// When true, enable cpufreq performance scaling in running/stopping.
+// C reference: `const volatile bool cpufreq_enabled = true`
+scx_ebpf::bpf_global!(CPUFREQ_ENABLED: bool = true);
 
-/// When true, CPUs have SMT (hyperthreading) enabled.
-/// C reference: `const volatile bool smt_enabled = true`
-#[unsafe(no_mangle)]
-static SMT_ENABLED: BpfGlobal<bool> = BpfGlobal::new(true);
+// When true, CPUs have SMT (hyperthreading) enabled.
+// C reference: `const volatile bool smt_enabled = true`
+scx_ebpf::bpf_global!(SMT_ENABLED: bool = true);
 
-/// When true, try to avoid placing tasks on SMT siblings of busy cores.
-/// C reference: `const volatile bool avoid_smt = true`
-#[unsafe(no_mangle)]
-static AVOID_SMT: BpfGlobal<bool> = BpfGlobal::new(true);
+// When true, try to avoid placing tasks on SMT siblings of busy cores.
+// C reference: `const volatile bool avoid_smt = true`
+scx_ebpf::bpf_global!(AVOID_SMT: bool = true);
 
-/// When true, enable NUMA-aware per-node DSQ routing.
-/// C reference: `const volatile bool numa_enabled`
-#[unsafe(no_mangle)]
-static NUMA_ENABLED: BpfGlobal<bool> = BpfGlobal::new(false);
+// When true, enable NUMA-aware per-node DSQ routing.
+// C reference: `const volatile bool numa_enabled`
+scx_ebpf::bpf_global!(NUMA_ENABLED: bool = false);
 
-/// Number of NUMA nodes on this system, set by userspace.
-/// C reference: `const volatile u32 nr_node_ids`
-#[unsafe(no_mangle)]
-static NR_NODES: BpfGlobal<u32> = BpfGlobal::new(1);
+// Number of NUMA nodes on this system, set by userspace.
+// C reference: `const volatile u32 nr_node_ids`
+scx_ebpf::bpf_global!(NR_NODES: u32 = 1);
 
-/// CPU-to-NUMA-node mapping, populated by userspace via .bss.
-/// C reference: `cpu_node_map` BPF hash map (we use a flat array instead).
-/// Each entry maps a CPU index to its NUMA node ID.
-#[unsafe(no_mangle)]
-static CPU_TO_NODE: BpfGlobalArray<u32, MAX_CPUS> = BpfGlobalArray::new([0; MAX_CPUS]);
+// CPU-to-NUMA-node mapping, populated by userspace via .bss.
+// C reference: `cpu_node_map` BPF hash map (we use a flat array instead).
+// Each entry maps a CPU index to its NUMA node ID.
+scx_ebpf::bpf_global_array!(CPU_TO_NODE: [u32; MAX_CPUS] = [0; MAX_CPUS]);
 
 /// Primary cpumask kptr — kernel-managed reference-counted cpumask.
 ///
@@ -305,83 +284,72 @@ static CPU_TO_NODE: BpfGlobalArray<u32, MAX_CPUS> = BpfGlobalArray::new([0; MAX_
 #[unsafe(no_mangle)]
 static mut PRIMARY_CPUMASK: Kptr<bpf_cpumask> = Kptr::zeroed();
 
-/// When true, primary domain includes all CPUs (primary_cpumask is unused).
-/// When false and the `kernel_6_16` feature is enabled, `pick_idle_cpu()`
-/// first tries `select_cpu_and()` with the primary cpumask before falling
-/// back to the full cpus_ptr.
-/// C reference: `const volatile bool primary_all = true`
-#[unsafe(no_mangle)]
-static PRIMARY_ALL: BpfGlobal<bool> = BpfGlobal::new(true);
+// When true, primary domain includes all CPUs (primary_cpumask is unused).
+// When false and the `kernel_6_16` feature is enabled, `pick_idle_cpu()`
+// first tries `select_cpu_and()` with the primary cpumask before falling
+// back to the full cpus_ptr.
+// C reference: `const volatile bool primary_all = true`
+scx_ebpf::bpf_global!(PRIMARY_ALL: bool = true);
 
-/// When true, use preferred idle scan: iterate CPUs in descending capacity
-/// order (from userspace's PREFERRED_CPUS array) to find an idle CPU,
-/// preferring high-performance cores. Falls back to select_cpu_dfl if none found.
-/// C reference: `const volatile bool preferred_idle_scan`
-#[unsafe(no_mangle)]
-static PREFERRED_IDLE_SCAN: BpfGlobal<bool> = BpfGlobal::new(false);
+// When true, use preferred idle scan: iterate CPUs in descending capacity
+// order (from userspace's PREFERRED_CPUS array) to find an idle CPU,
+// preferring high-performance cores. Falls back to select_cpu_dfl if none found.
+// C reference: `const volatile bool preferred_idle_scan`
+scx_ebpf::bpf_global!(PREFERRED_IDLE_SCAN: bool = false);
 
-/// When true, use flat idle scan: iterate ALL CPUs in preferred order
-/// (from PREFERRED_CPUS array) rather than using select_cpu_dfl at all.
-/// C reference: `const volatile bool flat_idle_scan`
-#[unsafe(no_mangle)]
-static FLAT_IDLE_SCAN: BpfGlobal<bool> = BpfGlobal::new(false);
+// When true, use flat idle scan: iterate ALL CPUs in preferred order
+// (from PREFERRED_CPUS array) rather than using select_cpu_dfl at all.
+// C reference: `const volatile bool flat_idle_scan`
+scx_ebpf::bpf_global!(FLAT_IDLE_SCAN: bool = false);
 
-/// CPU list for primary domain, set by userspace via `override_global`.
-///
-/// Contains CPU IDs that belong to the primary scheduling domain.
-/// Terminated by -1 sentinel. When `PRIMARY_ALL` is false, `on_init()`
-/// iterates this list and calls `bpf_cpumask_set_cpu` for each CPU.
-/// C reference: populated via `bpf_prog_test_run` on syscall programs;
-/// we use a global array instead for simplicity.
-#[unsafe(no_mangle)]
-static PRIMARY_CPU_LIST: BpfGlobalArray<i32, MAX_CPUS> = BpfGlobalArray::new([-1i32; MAX_CPUS]);
+// CPU list for primary domain, set by userspace via `override_global`.
+//
+// Contains CPU IDs that belong to the primary scheduling domain.
+// Terminated by -1 sentinel. When `PRIMARY_ALL` is false, `on_init()`
+// iterates this list and calls `bpf_cpumask_set_cpu` for each CPU.
+// C reference: populated via `bpf_prog_test_run` on syscall programs;
+// we use a global array instead for simplicity.
+scx_ebpf::bpf_global_array!(PRIMARY_CPU_LIST: [i32; MAX_CPUS] = [-1i32; MAX_CPUS]);
 
-/// C reference: `const volatile s32 preferred_cpus[MAX_CPUS]`
-#[unsafe(no_mangle)]
-static PREFERRED_CPUS: BpfGlobalArray<i32, MAX_CPUS> = BpfGlobalArray::new([-1i32; MAX_CPUS]);
+// C reference: `const volatile s32 preferred_cpus[MAX_CPUS]`
+scx_ebpf::bpf_global_array!(PREFERRED_CPUS: [i32; MAX_CPUS] = [-1i32; MAX_CPUS]);
 
-/// Per-CPU capacity value, populated by userspace from sysfs cpu_capacity.
-/// C reference: `const volatile u64 cpu_capacity[MAX_CPUS]`
-#[unsafe(no_mangle)]
-static CPU_CAPACITY: BpfGlobalArray<u64, MAX_CPUS> = BpfGlobalArray::new([0u64; MAX_CPUS]);
+// Per-CPU capacity value, populated by userspace from sysfs cpu_capacity.
+// C reference: `const volatile u64 cpu_capacity[MAX_CPUS]`
+scx_ebpf::bpf_global_array!(CPU_CAPACITY: [u64; MAX_CPUS] = [0u64; MAX_CPUS]);
 
-/// When true, enable address space affinity in select_cpu.
-/// Keeps wakee on the waker's CPU when they share the same mm (address space),
-/// improving cache locality for tasks that share memory (e.g., threads).
-/// C reference: `const volatile bool mm_affinity`
-#[unsafe(no_mangle)]
-static MM_AFFINITY: BpfGlobal<bool> = BpfGlobal::new(false);
+// When true, enable address space affinity in select_cpu.
+// Keeps wakee on the waker's CPU when they share the same mm (address space),
+// improving cache locality for tasks that share memory (e.g., threads).
+// C reference: `const volatile bool mm_affinity`
+scx_ebpf::bpf_global!(MM_AFFINITY: bool = false);
 
-/// PMU perf event config: hardware counter ID to track.
-/// 0 = disabled (no PMU tracking). Set by userspace via `--perf-config`.
-/// Common values (x86): 0xC0 = retired instructions, 0x3C = unhalted core cycles.
-/// C reference: `const volatile u64 perf_config`
-#[unsafe(no_mangle)]
-static PERF_CONFIG: BpfGlobal<u64> = BpfGlobal::new(0);
+// PMU perf event config: hardware counter ID to track.
+// 0 = disabled (no PMU tracking). Set by userspace via `--perf-config`.
+// Common values (x86): 0xC0 = retired instructions, 0x3C = unhalted core cycles.
+// C reference: `const volatile u64 perf_config`
+scx_ebpf::bpf_global!(PERF_CONFIG: u64 = 0);
 
-/// Performance counter threshold to classify a task as event-heavy.
-/// When a task's per-run perf_events exceeds this value, it is considered
-/// event-heavy and may be migrated to a less busy CPU.
-/// C reference: `const volatile u64 perf_threshold`
-#[unsafe(no_mangle)]
-static PERF_THRESHOLD: BpfGlobal<u64> = BpfGlobal::new(0);
+// Performance counter threshold to classify a task as event-heavy.
+// When a task's per-run perf_events exceeds this value, it is considered
+// event-heavy and may be migrated to a less busy CPU.
+// C reference: `const volatile u64 perf_threshold`
+scx_ebpf::bpf_global!(PERF_THRESHOLD: u64 = 0);
 
-/// When true, keep event-heavy tasks on their current CPU instead of
-/// migrating to the least busy CPU. Effectively disables the CPU scan
-/// in `pick_least_busy_event_cpu`, returning `prev_cpu` immediately.
-/// C reference: `const volatile bool perf_sticky`
-#[unsafe(no_mangle)]
-static PERF_STICKY: BpfGlobal<bool> = BpfGlobal::new(false);
+// When true, keep event-heavy tasks on their current CPU instead of
+// migrating to the least busy CPU. Effectively disables the CPU scan
+// in `pick_least_busy_event_cpu`, returning `prev_cpu` immediately.
+// C reference: `const volatile bool perf_sticky`
+scx_ebpf::bpf_global!(PERF_STICKY: bool = false);
 
-/// Enable deferred wakeup timer.
-///
-/// When true, CPU wakeups triggered by enqueue are deferred to a periodic
-/// timer callback (`wakeup_timerfn`) instead of being performed inline.
-/// This reduces IPI overhead in the enqueue hot path.
-///
-/// C reference: `const volatile bool deferred_wakeups = true`
-#[unsafe(no_mangle)]
-static DEFERRED_WAKEUPS: BpfGlobal<bool> = BpfGlobal::new(true);
+// Enable deferred wakeup timer.
+//
+// When true, CPU wakeups triggered by enqueue are deferred to a periodic
+// timer callback (`wakeup_timerfn`) instead of being performed inline.
+// This reduces IPI overhead in the enqueue hot path.
+//
+// C reference: `const volatile bool deferred_wakeups = true`
+scx_ebpf::bpf_global!(DEFERRED_WAKEUPS: bool = true);
 
 // PMU integration architecture:
 //
