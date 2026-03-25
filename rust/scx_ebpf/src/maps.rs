@@ -238,6 +238,28 @@ impl<K, V, const MAX_ENTRIES: usize> HashMap<K, V, MAX_ENTRIES> {
         }
     }
 
+    /// Returns a mutable reference to the value for `key`.
+    ///
+    /// The reference is valid for the duration of the current BPF program
+    /// invocation, provided no other mutable reference to the same map
+    /// entry is held.
+    ///
+    /// # Safety note
+    ///
+    /// This is safe under BPF's execution model (single-threaded,
+    /// non-preemptible) but the returned reference has an implicit lifetime
+    /// tied to BPF verifier state, not Rust's borrow checker. Do not hold
+    /// references across BPF helper/kfunc calls.
+    #[inline(always)]
+    pub fn get_mut(&self, key: &K) -> Option<&mut V> {
+        let ptr = self.get_ptr_mut(key);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *ptr })
+        }
+    }
+
     /// Look up a value by key, returning a mutable pointer.
     #[inline(always)]
     pub fn get_ptr_mut(&self, key: &K) -> *mut V {
@@ -342,6 +364,28 @@ impl<V, const MAX_ENTRIES: usize> BpfArray<V, MAX_ENTRIES> {
         }
     }
 
+    /// Returns a mutable reference to the element at `index`.
+    ///
+    /// The reference is valid for the duration of the current BPF program
+    /// invocation, provided no other mutable reference to the same map
+    /// entry is held.
+    ///
+    /// # Safety note
+    ///
+    /// This is safe under BPF's execution model (single-threaded,
+    /// non-preemptible) but the returned reference has an implicit lifetime
+    /// tied to BPF verifier state, not Rust's borrow checker. Do not hold
+    /// references across BPF helper/kfunc calls.
+    #[inline(always)]
+    pub fn get_mut(&self, index: u32) -> Option<&mut V> {
+        let ptr = self.get_ptr_mut(index);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *ptr })
+        }
+    }
+
     /// Look up an element at `index`, returning a mutable pointer.
     #[inline(always)]
     pub fn get_ptr_mut(&self, index: u32) -> *mut V {
@@ -422,6 +466,28 @@ impl<V, const MAX_ENTRIES: usize> PerCpuArray<V, MAX_ENTRIES> {
             None
         } else {
             Some(unsafe { &*ptr })
+        }
+    }
+
+    /// Returns a mutable reference to the current CPU's element at `index`.
+    ///
+    /// The reference is valid for the duration of the current BPF program
+    /// invocation, provided no other mutable reference to the same map
+    /// entry is held.
+    ///
+    /// # Safety note
+    ///
+    /// This is safe under BPF's execution model (single-threaded,
+    /// non-preemptible) but the returned reference has an implicit lifetime
+    /// tied to BPF verifier state, not Rust's borrow checker. Do not hold
+    /// references across BPF helper/kfunc calls.
+    #[inline(always)]
+    pub fn get_mut(&self, index: u32) -> Option<&mut V> {
+        let ptr = self.get_ptr_mut(index);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *ptr })
         }
     }
 
@@ -603,6 +669,68 @@ impl<V> TaskStorage<V> {
             )
         };
         NonNull::new(ptr.cast())
+    }
+
+    /// Returns a reference to the per-task storage value.
+    ///
+    /// The reference is valid for the duration of the current BPF program
+    /// invocation, provided no other mutable reference to the same map
+    /// entry is held.
+    ///
+    /// # Safety note
+    ///
+    /// This is safe under BPF's execution model (single-threaded,
+    /// non-preemptible) but the returned reference has an implicit lifetime
+    /// tied to BPF verifier state, not Rust's borrow checker. Do not hold
+    /// references across BPF helper/kfunc calls.
+    ///
+    /// `task` must be a valid `task_struct` pointer.
+    #[inline(always)]
+    pub fn get_ref(&self, task: *mut u8) -> Option<&V> {
+        let ptr = unsafe {
+            bpf_task_storage_get(
+                core::ptr::from_ref(self).cast(),
+                task,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &*(ptr as *const V) })
+        }
+    }
+
+    /// Returns a mutable reference to the per-task storage value.
+    ///
+    /// The reference is valid for the duration of the current BPF program
+    /// invocation, provided no other mutable reference to the same map
+    /// entry is held.
+    ///
+    /// # Safety note
+    ///
+    /// This is safe under BPF's execution model (single-threaded,
+    /// non-preemptible) but the returned reference has an implicit lifetime
+    /// tied to BPF verifier state, not Rust's borrow checker. Do not hold
+    /// references across BPF helper/kfunc calls.
+    ///
+    /// `task` must be a valid `task_struct` pointer.
+    #[inline(always)]
+    pub fn get_mut(&self, task: *mut u8) -> Option<&mut V> {
+        let ptr = unsafe {
+            bpf_task_storage_get(
+                core::ptr::from_ref(self).cast(),
+                task,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *(ptr as *mut V) })
+        }
     }
 
     /// Get or create the per-task storage for a task.

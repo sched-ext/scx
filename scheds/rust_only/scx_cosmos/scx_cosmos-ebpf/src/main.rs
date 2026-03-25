@@ -223,67 +223,68 @@ const PF_IDLE: u32 = 0x00000002;
 
 // ── Userspace-configurable globals ──────────────────────────────────────
 //
-// These are `#[unsafe(no_mangle)] static mut` globals that userspace can
-// set before loading the BPF program (via EbpfLoader::set_global) or
-// update at runtime (via map operations on .bss/.data/.rodata).
+// These are `#[unsafe(no_mangle)]` globals that userspace can set before
+// loading the BPF program (via EbpfLoader::set_global) or update at
+// runtime (via map operations on .bss/.data/.rodata).
 //
-// C reference uses `const volatile` for compile-time-set globals and
-// `volatile` for runtime-updated globals.
+// Wrapped in `BpfGlobal<T>` to eliminate `unsafe` at every access site.
+// `BpfGlobal` is `#[repr(transparent)]`, so the loader sees the same
+// memory layout as a bare `T`.
 
 /// Default time slice: 10us (matches C cosmos `slice_ns = 10000`).
 #[unsafe(no_mangle)]
-static mut SLICE_NS: u64 = 10_000;
+static SLICE_NS: BpfGlobal<u64> = BpfGlobal::new(10_000);
 
 /// Maximum runtime that can be charged to a task (bounds vruntime jumps).
 #[unsafe(no_mangle)]
-static mut SLICE_LAG: u64 = 20_000_000;
+static SLICE_LAG: BpfGlobal<u64> = BpfGlobal::new(20_000_000);
 
 /// CPU utilization threshold for system busy detection [0..100].
 /// When `CPU_UTIL >= BUSY_THRESHOLD`, the system is considered busy.
 /// C reference: `const volatile u64 busy_threshold`
 #[unsafe(no_mangle)]
-static mut BUSY_THRESHOLD: u64 = 0;
+static BUSY_THRESHOLD: BpfGlobal<u64> = BpfGlobal::new(0);
 
 /// Current global CPU utilization [0..100], set by userspace polling loop.
 /// C reference: `volatile u64 cpu_util`
 #[unsafe(no_mangle)]
-static mut CPU_UTIL: u64 = 0;
+static CPU_UTIL: BpfGlobal<u64> = BpfGlobal::new(0);
 
 /// When true, clear SCX_WAKE_SYNC from wake_flags in select_cpu.
 /// C reference: `const volatile bool no_wake_sync`
 #[unsafe(no_mangle)]
-static mut NO_WAKE_SYNC: bool = false;
+static NO_WAKE_SYNC: BpfGlobal<bool> = BpfGlobal::new(false);
 
 /// When true, enable cpufreq performance scaling in running/stopping.
 /// C reference: `const volatile bool cpufreq_enabled = true`
 #[unsafe(no_mangle)]
-static mut CPUFREQ_ENABLED: bool = true;
+static CPUFREQ_ENABLED: BpfGlobal<bool> = BpfGlobal::new(true);
 
 /// When true, CPUs have SMT (hyperthreading) enabled.
 /// C reference: `const volatile bool smt_enabled = true`
 #[unsafe(no_mangle)]
-static mut SMT_ENABLED: bool = true;
+static SMT_ENABLED: BpfGlobal<bool> = BpfGlobal::new(true);
 
 /// When true, try to avoid placing tasks on SMT siblings of busy cores.
 /// C reference: `const volatile bool avoid_smt = true`
 #[unsafe(no_mangle)]
-static mut AVOID_SMT: bool = true;
+static AVOID_SMT: BpfGlobal<bool> = BpfGlobal::new(true);
 
 /// When true, enable NUMA-aware per-node DSQ routing.
 /// C reference: `const volatile bool numa_enabled`
 #[unsafe(no_mangle)]
-static mut NUMA_ENABLED: bool = false;
+static NUMA_ENABLED: BpfGlobal<bool> = BpfGlobal::new(false);
 
 /// Number of NUMA nodes on this system, set by userspace.
 /// C reference: `const volatile u32 nr_node_ids`
 #[unsafe(no_mangle)]
-static mut NR_NODES: u32 = 1;
+static NR_NODES: BpfGlobal<u32> = BpfGlobal::new(1);
 
 /// CPU-to-NUMA-node mapping, populated by userspace via .bss.
 /// C reference: `cpu_node_map` BPF hash map (we use a flat array instead).
 /// Each entry maps a CPU index to its NUMA node ID.
 #[unsafe(no_mangle)]
-static mut CPU_TO_NODE: [u32; MAX_CPUS] = [0; MAX_CPUS];
+static CPU_TO_NODE: BpfGlobalArray<u32, MAX_CPUS> = BpfGlobalArray::new([0; MAX_CPUS]);
 
 /// Primary cpumask kptr — kernel-managed reference-counted cpumask.
 ///
@@ -295,6 +296,12 @@ static mut CPU_TO_NODE: [u32; MAX_CPUS] = [0; MAX_CPUS];
 ///
 /// Initialized in `init_primary_cpumask()`, read under RCU lock in
 /// `pick_idle_cpu()` to filter idle CPU selection to the primary domain.
+///
+/// NOTE: PRIMARY_CPUMASK uses a raw `static mut` instead of `BpfGlobal`
+/// because `Kptr<T>` requires `&raw mut` / `&raw const` access for
+/// `bpf_kptr_xchg` and RCU dereferencing, which are inherently unsafe
+/// kernel operations. Wrapping in BpfGlobal would not eliminate the
+/// unsafety and would complicate the pointer-to-kptr-slot semantics.
 #[unsafe(no_mangle)]
 static mut PRIMARY_CPUMASK: Kptr<bpf_cpumask> = Kptr::zeroed();
 
@@ -304,20 +311,20 @@ static mut PRIMARY_CPUMASK: Kptr<bpf_cpumask> = Kptr::zeroed();
 /// back to the full cpus_ptr.
 /// C reference: `const volatile bool primary_all = true`
 #[unsafe(no_mangle)]
-static mut PRIMARY_ALL: bool = true;
+static PRIMARY_ALL: BpfGlobal<bool> = BpfGlobal::new(true);
 
 /// When true, use preferred idle scan: iterate CPUs in descending capacity
 /// order (from userspace's PREFERRED_CPUS array) to find an idle CPU,
 /// preferring high-performance cores. Falls back to select_cpu_dfl if none found.
 /// C reference: `const volatile bool preferred_idle_scan`
 #[unsafe(no_mangle)]
-static mut PREFERRED_IDLE_SCAN: bool = false;
+static PREFERRED_IDLE_SCAN: BpfGlobal<bool> = BpfGlobal::new(false);
 
 /// When true, use flat idle scan: iterate ALL CPUs in preferred order
 /// (from PREFERRED_CPUS array) rather than using select_cpu_dfl at all.
 /// C reference: `const volatile bool flat_idle_scan`
 #[unsafe(no_mangle)]
-static mut FLAT_IDLE_SCAN: bool = false;
+static FLAT_IDLE_SCAN: BpfGlobal<bool> = BpfGlobal::new(false);
 
 /// CPU list for primary domain, set by userspace via `override_global`.
 ///
@@ -327,44 +334,44 @@ static mut FLAT_IDLE_SCAN: bool = false;
 /// C reference: populated via `bpf_prog_test_run` on syscall programs;
 /// we use a global array instead for simplicity.
 #[unsafe(no_mangle)]
-static mut PRIMARY_CPU_LIST: [i32; MAX_CPUS] = [-1i32; MAX_CPUS];
+static PRIMARY_CPU_LIST: BpfGlobalArray<i32, MAX_CPUS> = BpfGlobalArray::new([-1i32; MAX_CPUS]);
 
 /// C reference: `const volatile s32 preferred_cpus[MAX_CPUS]`
 #[unsafe(no_mangle)]
-static mut PREFERRED_CPUS: [i32; MAX_CPUS] = [-1i32; MAX_CPUS];
+static PREFERRED_CPUS: BpfGlobalArray<i32, MAX_CPUS> = BpfGlobalArray::new([-1i32; MAX_CPUS]);
 
 /// Per-CPU capacity value, populated by userspace from sysfs cpu_capacity.
 /// C reference: `const volatile u64 cpu_capacity[MAX_CPUS]`
 #[unsafe(no_mangle)]
-static mut CPU_CAPACITY: [u64; MAX_CPUS] = [0u64; MAX_CPUS];
+static CPU_CAPACITY: BpfGlobalArray<u64, MAX_CPUS> = BpfGlobalArray::new([0u64; MAX_CPUS]);
 
 /// When true, enable address space affinity in select_cpu.
 /// Keeps wakee on the waker's CPU when they share the same mm (address space),
 /// improving cache locality for tasks that share memory (e.g., threads).
 /// C reference: `const volatile bool mm_affinity`
 #[unsafe(no_mangle)]
-static mut MM_AFFINITY: bool = false;
+static MM_AFFINITY: BpfGlobal<bool> = BpfGlobal::new(false);
 
 /// PMU perf event config: hardware counter ID to track.
 /// 0 = disabled (no PMU tracking). Set by userspace via `--perf-config`.
 /// Common values (x86): 0xC0 = retired instructions, 0x3C = unhalted core cycles.
 /// C reference: `const volatile u64 perf_config`
 #[unsafe(no_mangle)]
-static mut PERF_CONFIG: u64 = 0;
+static PERF_CONFIG: BpfGlobal<u64> = BpfGlobal::new(0);
 
 /// Performance counter threshold to classify a task as event-heavy.
 /// When a task's per-run perf_events exceeds this value, it is considered
 /// event-heavy and may be migrated to a less busy CPU.
 /// C reference: `const volatile u64 perf_threshold`
 #[unsafe(no_mangle)]
-static mut PERF_THRESHOLD: u64 = 0;
+static PERF_THRESHOLD: BpfGlobal<u64> = BpfGlobal::new(0);
 
 /// When true, keep event-heavy tasks on their current CPU instead of
 /// migrating to the least busy CPU. Effectively disables the CPU scan
 /// in `pick_least_busy_event_cpu`, returning `prev_cpu` immediately.
 /// C reference: `const volatile bool perf_sticky`
 #[unsafe(no_mangle)]
-static mut PERF_STICKY: bool = false;
+static PERF_STICKY: BpfGlobal<bool> = BpfGlobal::new(false);
 
 /// Enable deferred wakeup timer.
 ///
@@ -374,7 +381,7 @@ static mut PERF_STICKY: bool = false;
 ///
 /// C reference: `const volatile bool deferred_wakeups = true`
 #[unsafe(no_mangle)]
-static mut DEFERRED_WAKEUPS: bool = true;
+static DEFERRED_WAKEUPS: BpfGlobal<bool> = BpfGlobal::new(true);
 
 // PMU integration architecture:
 //
@@ -400,17 +407,17 @@ static mut DEFERRED_WAKEUPS: bool = true;
 // ── Global state ────────────────────────────────────────────────────────
 
 /// Current global vruntime — tracks the most recent dsq_vtime seen.
-static mut VTIME_NOW: u64 = 0;
+static VTIME_NOW: BpfGlobal<u64> = BpfGlobal::new(0);
 
 /// Number of CPUs on this system, set in init().
-static mut NR_CPU_IDS: u32 = 0;
+static NR_CPU_IDS: BpfGlobal<u32> = BpfGlobal::new(0);
 
 /// Round-robin rotation for flat idle scan. Tracks the next CPU to start
 /// scanning from, incremented each time a CPU is claimed. Only used when
 /// `FLAT_IDLE_SCAN` is true (not `PREFERRED_IDLE_SCAN`).
 ///
 /// C reference: `static u32 last_cpu` in `pick_idle_cpu_pref_smt()`.
-static mut LAST_CPU: u32 = 0;
+static LAST_CPU: BpfGlobal<u32> = BpfGlobal::new(0);
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -469,7 +476,7 @@ fn cpu_capacity(cpu: i32) -> u64 {
     if idx >= MAX_CPUS {
         return 0;
     }
-    unsafe { CPU_CAPACITY[idx] }
+    CPU_CAPACITY.get(idx).unwrap_or(0)
 }
 
 /// Check if CPU `a` has higher capacity than CPU `b` (e.g., P-core vs E-core).
@@ -500,7 +507,7 @@ fn is_cpu_faster(a: i32, b: i32) -> bool {
 ///       !(waker->flags & PF_EXITING) && wakee->mm && (wakee->mm == waker->mm);
 #[inline(always)]
 fn is_wake_affine(waker: *mut task_struct, wakee: *mut task_struct) -> bool {
-    if !unsafe { MM_AFFINITY } {
+    if !MM_AFFINITY.get() {
         return false;
     }
 
@@ -537,13 +544,13 @@ fn is_wake_affine(waker: *mut task_struct, wakee: *mut task_struct) -> bool {
 /// Read the current slice_ns value (from userspace-configurable global).
 #[inline(always)]
 fn get_slice_ns() -> u64 {
-    unsafe { SLICE_NS }
+    SLICE_NS.get()
 }
 
 /// Read the current slice_lag value (from userspace-configurable global).
 #[inline(always)]
 fn get_slice_lag() -> u64 {
-    unsafe { SLICE_LAG }
+    SLICE_LAG.get()
 }
 
 /// Compute a weight-scaled time slice: slice_ns * weight / 100.
@@ -620,7 +627,7 @@ fn is_pcpu_task(p: *mut task_struct) -> bool {
 /// C reference: `is_system_busy()` returns `cpu_util >= busy_threshold`.
 #[inline(always)]
 fn is_system_busy() -> bool {
-    unsafe { CPU_UTIL >= BUSY_THRESHOLD }
+    CPU_UTIL.get() >= BUSY_THRESHOLD.get()
 }
 
 /// Return the DSQ ID for the given CPU.
@@ -632,14 +639,10 @@ fn is_system_busy() -> bool {
 /// C reference: `shared_dsq(cpu)` returns `cpu_node(cpu)` when numa_enabled.
 #[inline(always)]
 fn shared_dsq(cpu: i32) -> u64 {
-    if unsafe { NUMA_ENABLED } {
+    if NUMA_ENABLED.get() {
         // Bounds-check for BPF verifier: cpu must be within array.
         let idx = cpu as u32 as usize;
-        if idx < MAX_CPUS {
-            unsafe { CPU_TO_NODE[idx] as u64 }
-        } else {
-            SHARED_DSQ
-        }
+        CPU_TO_NODE.get(idx).map(|n| n as u64).unwrap_or(SHARED_DSQ)
     } else {
         SHARED_DSQ
     }
@@ -677,7 +680,9 @@ fn cpu_node(cpu: u32) -> u32 {
         );
     }
     if in_bounds != 0 {
-        unsafe { CPU_TO_NODE[idx] }
+        // SAFETY: bounds verified by asm block above; get_unchecked avoids
+        // a second bounds check that the BPF verifier cannot correlate.
+        unsafe { CPU_TO_NODE.get_unchecked(idx) }
     } else {
         u32::MAX
     }
@@ -727,15 +732,13 @@ fn update_freq(old_freq: u64, delta_ns: u64) -> u64 {
 /// and smooths it with EWMA via calc_avg().
 #[inline(always)]
 fn update_cpu_load(slice: u64, now: u64) {
-    if unsafe { !CPUFREQ_ENABLED } {
+    if !CPUFREQ_ENABLED.get() {
         return;
     }
 
-    let cctx = CPU_CTX.get_ptr_mut(0);
-    if cctx.is_null() {
+    let Some(cctx) = CPU_CTX.get_mut(0) else {
         return;
-    }
-    let cctx = unsafe { &mut *cctx };
+    };
 
     let delta_t = now.wrapping_sub(cctx.last_update);
     if delta_t == 0 {
@@ -761,15 +764,14 @@ fn update_cpu_load(slice: u64, now: u64) {
 /// C reference: `update_cpufreq(cpu)`.
 #[inline(always)]
 fn update_cpufreq(cpu: i32) {
-    if unsafe { !CPUFREQ_ENABLED } {
+    if !CPUFREQ_ENABLED.get() {
         return;
     }
 
-    let cctx = CPU_CTX.get_ptr_mut(0);
-    if cctx.is_null() {
+    let Some(cctx) = CPU_CTX.get(0) else {
         return;
-    }
-    let perf_lvl_stored = unsafe { (*cctx).perf_lvl };
+    };
+    let perf_lvl_stored = cctx.perf_lvl;
 
     // Apply hysteresis thresholds.
     let perf_lvl = if perf_lvl_stored >= CPUFREQ_HIGH_THRESH {
@@ -893,15 +895,15 @@ fn pick_idle_cpu_preferred(prev_cpu: i32) -> i32 {
         return prev_cpu;
     }
 
-    let nr = unsafe { NR_CPU_IDS };
+    let nr = NR_CPU_IDS.get();
     let bound = if nr < MAX_CPUS as u32 { nr } else { MAX_CPUS as u32 };
-    let preferred = unsafe { PREFERRED_IDLE_SCAN };
+    let preferred = PREFERRED_IDLE_SCAN.get();
 
     if preferred {
         // Preferred mode: iterate PREFERRED_CPUS array in order (big cores first).
         // C reference: cpu = preferred_cpus[i] when preferred_idle_scan is true.
         bpf_for!(i, 0, bound, {
-            let cpu = unsafe { PREFERRED_CPUS[i as usize] };
+            let cpu = PREFERRED_CPUS.get(i as usize).unwrap_or(-1);
             if cpu < 0 {
                 // Sentinel: end of preferred CPU list.
                 break;
@@ -915,12 +917,12 @@ fn pick_idle_cpu_preferred(prev_cpu: i32) -> i32 {
         // Flat mode: round-robin starting from LAST_CPU.
         // C reference: start = last_cpu; cpu = (start + i) % max_cpus;
         //              last_cpu = cpu + 1 on success.
-        let start = unsafe { LAST_CPU };
+        let start = LAST_CPU.get();
         bpf_for!(i, 0, bound, {
             let cpu = ((start + i) % bound) as i32;
             // Skip prev_cpu (already tried above) but keep iteration advancing.
             if cpu != prev_cpu && kfuncs::test_and_clear_cpu_idle(cpu) {
-                unsafe { LAST_CPU = (cpu as u32 + 1) % bound; }
+                LAST_CPU.set((cpu as u32 + 1) % bound);
                 return cpu;
             }
         });
@@ -971,8 +973,8 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64, from_enque
     // scanning (select_cpu_dfl / select_cpu_and) is more efficient.
     // C reference: if ((flat_idle_scan || preferred_idle_scan) && !is_system_busy())
     //                  return pick_idle_cpu_flat(p, prev_cpu);
-    let preferred = unsafe { PREFERRED_IDLE_SCAN };
-    let flat = unsafe { FLAT_IDLE_SCAN };
+    let preferred = PREFERRED_IDLE_SCAN.get();
+    let flat = FLAT_IDLE_SCAN.get();
     if (preferred || flat) && !is_system_busy() {
         let pref_cpu = pick_idle_cpu_preferred(prev_cpu);
         if pref_cpu >= 0 {
@@ -988,11 +990,11 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64, from_enque
     // BTF, so the code is compiled out via the kernel_6_16 feature flag.
     #[cfg(feature = "kernel_6_16")]
     {
-        if !unsafe { PRIMARY_ALL } {
+        if !PRIMARY_ALL.get() {
             rcu_read_lock();
             let mask = unsafe { Kptr::get(&raw mut PRIMARY_CPUMASK) };
             if !mask.is_null() {
-                let flags = if unsafe { AVOID_SMT } { SCX_PICK_IDLE_CORE } else { 0 };
+                let flags = if AVOID_SMT.get() { SCX_PICK_IDLE_CORE } else { 0 };
                 let cpu = kfuncs::select_cpu_and(
                     p,
                     prev_cpu,
@@ -1053,7 +1055,7 @@ fn pick_idle_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64, from_enque
 /// When PERF_CONFIG == 0, this always returns false (no PMU tracking).
 #[inline(always)]
 fn is_event_heavy(tctx: &TaskCtx) -> bool {
-    let threshold = unsafe { PERF_THRESHOLD };
+    let threshold = PERF_THRESHOLD.get();
     threshold > 0 && tctx.perf_events > threshold
 }
 
@@ -1117,7 +1119,7 @@ unsafe extern "C" fn least_busy_callback(idx: u32, ctx_ptr: *mut core::ffi::c_vo
 
 #[inline(never)]
 fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
-    if unsafe { PERF_STICKY } {
+    if PERF_STICKY.get() {
         return prev_cpu;
     }
 
@@ -1129,7 +1131,7 @@ fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
     }
     let node = cpu_node(prev_cpu as u32);
 
-    let nr = unsafe { NR_CPU_IDS };
+    let nr = NR_CPU_IDS.get();
     let bound = if nr < MAX_CPUS as u32 { nr } else { MAX_CPUS as u32 };
 
     let mut ctx = LeastBusyCtx {
@@ -1161,14 +1163,13 @@ fn pick_least_busy_event_cpu(_p: *mut task_struct, prev_cpu: i32) -> i32 {
 #[inline(always)]
 fn update_perf_counters(p: *mut task_struct, delta: u64) {
     // Store delta in per-task context for is_event_heavy().
-    if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
-        unsafe { tctx.as_mut().perf_events = delta; }
+    if let Some(tctx) = TASK_CTX.get_mut(p as *mut u8) {
+        tctx.perf_events = delta;
     }
 
     // Accumulate in per-CPU context for pick_least_busy_event_cpu().
-    let cctx = CPU_CTX.get_ptr_mut(0);
-    if !cctx.is_null() {
-        unsafe { (*cctx).perf_events += delta; }
+    if let Some(cctx) = CPU_CTX.get_mut(0) {
+        cctx.perf_events += delta;
     }
 }
 
@@ -1196,7 +1197,7 @@ fn wakeup_timerfn(
     _key: *mut i32,
     timer_ptr: *mut BpfTimer,
 ) -> i32 {
-    let nr = unsafe { NR_CPU_IDS };
+    let nr = NR_CPU_IDS.get();
     let bound = if nr < MAX_CPUS as u32 { nr } else { MAX_CPUS as u32 };
 
     bpf_for!(cpu, 0, bound, {
@@ -1207,7 +1208,7 @@ fn wakeup_timerfn(
     });
 
     // Re-arm the timer for periodic execution (every slice_ns).
-    let slice = unsafe { SLICE_NS };
+    let slice = SLICE_NS.get();
     timer::timer_start(timer_ptr, slice, 0);
     0
 }
@@ -1229,7 +1230,7 @@ fn wakeup_timerfn(
 /// ```
 #[inline(always)]
 fn wakeup_cpu(cpu: i32) {
-    if unsafe { DEFERRED_WAKEUPS } {
+    if DEFERRED_WAKEUPS.get() {
         return;
     }
     kfuncs::kick_cpu(cpu, SCX_KICK_IDLE);
@@ -1268,7 +1269,7 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
 
     // Clear SCX_WAKE_SYNC if no_wake_sync is enabled.
     // C: if (no_wake_sync) wake_flags &= ~SCX_WAKE_SYNC;
-    let effective_wake_flags = if unsafe { NO_WAKE_SYNC } {
+    let effective_wake_flags = if NO_WAKE_SYNC.get() {
         wake_flags & !SCX_WAKE_SYNC
     } else {
         wake_flags
@@ -1327,7 +1328,7 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
     // have in the pure-Rust BPF context. This means we may redirect the
     // idle scan to a faster core even when prev_cpu is in the same LLC and
     // fully idle — a minor suboptimality that select_cpu_dfl handles well.
-    if unsafe { PRIMARY_ALL } && (effective_wake_flags & SCX_WAKE_TTWU) != 0 {
+    if PRIMARY_ALL.get() && (effective_wake_flags & SCX_WAKE_TTWU) != 0 {
         let this_cpu = get_smp_processor_id();
         if this_cpu >= 0 && is_cpu_faster(this_cpu, prev_cpu) {
             if kfuncs::test_and_clear_cpu_idle(this_cpu) {
@@ -1355,9 +1356,9 @@ pub fn on_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32
     //           return new_cpu < 0 ? prev_cpu : new_cpu;
     //       }
     //   }
-    if unsafe { PERF_CONFIG } != 0 {
-        if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
-            if is_event_heavy(unsafe { tctx.as_ref() }) {
+    if PERF_CONFIG.get() != 0 {
+        if let Some(tctx) = TASK_CTX.get_ref(p as *mut u8) {
+            if is_event_heavy(tctx) {
                 let weight = read_weight(p);
                 let slice = task_slice(weight);
                 kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
@@ -1438,9 +1439,9 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     //
     // Immediately dispatch perf event-heavy tasks to a less busy CPU.
     // This runs before the migration check to prioritize PMU-aware placement.
-    if unsafe { PERF_CONFIG } != 0 && !is_migration_disabled(p) {
-        if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
-            if is_event_heavy(unsafe { tctx.as_ref() }) {
+    if PERF_CONFIG.get() != 0 && !is_migration_disabled(p) {
+        if let Some(tctx) = TASK_CTX.get_ref(p as *mut u8) {
+            if is_event_heavy(tctx) {
                 let new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
                 if new_cpu >= 0 {
                     let weight = read_weight(p);
@@ -1520,7 +1521,7 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     let vtime = if let Ok(v) = core_read!(vmlinux::task_struct, p, scx.dsq_vtime) {
         v
     } else {
-        unsafe { VTIME_NOW }
+        VTIME_NOW.get()
     };
     let weight = read_weight(p);
     let slice = task_slice(weight);
@@ -1530,8 +1531,7 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     //   deadline = dsq_vtime + scale_inverse(exec_runtime)
     // Tasks with more accumulated runtime get higher (later) deadlines,
     // prioritizing interactive tasks that sleep frequently.
-    let (exec_runtime, wakeup_freq) = if let Some(tctx) = TASK_CTX.get(p as *mut u8) {
-        let tctx = unsafe { tctx.as_ref() };
+    let (exec_runtime, wakeup_freq) = if let Some(tctx) = TASK_CTX.get_ref(p as *mut u8) {
         (tctx.exec_runtime, tctx.wakeup_freq)
     } else {
         (0u64, 0u64)
@@ -1542,7 +1542,7 @@ pub fn on_enqueue(p: *mut task_struct, enq_flags: u64) {
     //    vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale)
     //    vtime_min = vtime_now - vsleep_max
     //    if (time_before(dsq_vtime, vtime_min)) dsq_vtime = vtime_min
-    let vtime_now = unsafe { VTIME_NOW };
+    let vtime_now = VTIME_NOW.get();
     let slice_lag = get_slice_lag();
     let lag_scale = if wakeup_freq > 1 { wakeup_freq } else { 1 };
     let vsleep_max = if weight > 0 { (slice_lag * lag_scale * weight) / 100 } else { slice_lag * lag_scale };
@@ -1629,8 +1629,7 @@ pub fn on_dispatch(cpu: i32, prev: *mut task_struct) {
 #[inline(always)]
 pub fn on_runnable(p: *mut task_struct, _enq_flags: u64) {
     let now = kfuncs::now();
-    if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
-        let tctx = unsafe { tctx.as_mut() };
+    if let Some(tctx) = TASK_CTX.get_mut(p as *mut u8) {
         // Reset accumulated runtime — task just woke up.
         tctx.exec_runtime = 0;
         // Update wakeup frequency using time since last wakeup.
@@ -1664,8 +1663,7 @@ pub fn on_running(p: *mut task_struct) {
     // Record run start time in per-task storage.
     // C: tctx->last_run_at = scx_bpf_now();
     let now = kfuncs::now();
-    if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
-        let tctx = unsafe { tctx.as_mut() };
+    if let Some(tctx) = TASK_CTX.get_mut(p as *mut u8) {
         tctx.last_run_at = now;
     }
 
@@ -1676,16 +1674,14 @@ pub fn on_running(p: *mut task_struct) {
     // C: if (time_before(vtime_now, p->scx.dsq_vtime))
     //        vtime_now = p->scx.dsq_vtime;
     if let Ok(dsq_vtime) = core_read!(vmlinux::task_struct, p, scx.dsq_vtime) {
-        unsafe {
-            if VTIME_NOW < dsq_vtime {
-                VTIME_NOW = dsq_vtime;
-            }
+        if VTIME_NOW.get() < dsq_vtime {
+            VTIME_NOW.set(dsq_vtime);
         }
     }
 
     // Apply cpufreq performance level based on recent load.
     // C: update_cpufreq(scx_bpf_task_cpu(p));
-    if unsafe { CPUFREQ_ENABLED } {
+    if CPUFREQ_ENABLED.get() {
         let cpu = kfuncs::task_cpu(p);
         update_cpufreq(cpu);
     }
@@ -1728,8 +1724,7 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
     // C: slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_ns);
     // C: tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag)
     let now = kfuncs::now();
-    let slice = if let Some(mut tctx) = TASK_CTX.get(p as *mut u8) {
-        let tctx = unsafe { tctx.as_mut() };
+    let slice = if let Some(tctx) = TASK_CTX.get_mut(p as *mut u8) {
         let delta = now.wrapping_sub(tctx.last_run_at);
         let s = if delta < slice_ns { delta } else { slice_ns };
         // Update exec_runtime while we have the pointer.
@@ -1765,7 +1760,7 @@ pub fn on_stopping(p: *mut task_struct, _runnable: bool) {
 /// Direct port of the C cosmos_enable callback.
 #[inline(always)]
 pub fn on_enable(p: *mut task_struct) {
-    let vtime_now = unsafe { VTIME_NOW };
+    let vtime_now = VTIME_NOW.get();
     #[cfg(feature = "kernel_6_16")]
     kfuncs::task_set_dsq_vtime(p, vtime_now);
     #[cfg(not(feature = "kernel_6_16"))]
@@ -1849,13 +1844,13 @@ fn init_primary_cpumask() -> i32 {
 #[inline(always)]
 pub fn on_init() -> i32 {
     // Record the number of CPUs for bounds checking.
-    unsafe { NR_CPU_IDS = kfuncs::nr_cpu_ids(); }
+    NR_CPU_IDS.set(kfuncs::nr_cpu_ids());
 
     // Create per-node DSQs when NUMA is enabled, otherwise a single shared DSQ.
     // C: if (numa_enabled) { bpf_for(node, 0, nr_node_ids) create_dsq(node, node); }
     //    else { create_dsq(SHARED_DSQ, -1); }
-    if unsafe { NUMA_ENABLED } {
-        let nr_nodes = unsafe { NR_NODES };
+    if NUMA_ENABLED.get() {
+        let nr_nodes = NR_NODES.get();
         // Cap at MAX_NODES to satisfy BPF verifier's bounded loop requirement.
         let max = if nr_nodes < MAX_NODES { nr_nodes } else { MAX_NODES };
         let mut node: u32 = 0;
@@ -1890,12 +1885,12 @@ pub fn on_init() -> i32 {
     // has set PRIMARY_ALL = false. Userspace fills PRIMARY_CPU_LIST with
     // the CPUs that should be in the primary domain (terminated by -1).
     // This replaces the C cosmos's `enable_primary_cpu` syscall program.
-    if !unsafe { PRIMARY_ALL } {
+    if !PRIMARY_ALL.get() {
         rcu_read_lock();
         let mask = unsafe { Kptr::get(&raw mut PRIMARY_CPUMASK) };
         if !mask.is_null() {
             bpf_for!(i, 0, MAX_CPUS as u32, {
-                let cpu = unsafe { PRIMARY_CPU_LIST[i as usize] };
+                let cpu = PRIMARY_CPU_LIST.get(i as usize).unwrap_or(-1);
                 if cpu < 0 {
                     break;
                 }
@@ -1912,14 +1907,14 @@ pub fn on_init() -> i32 {
     //   bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
     //   bpf_timer_set_callback(timer, wakeup_timerfn);
     //   bpf_timer_start(timer, slice_ns, 0);
-    if unsafe { DEFERRED_WAKEUPS } {
+    if DEFERRED_WAKEUPS.get() {
         let timer_val = WAKEUP_TIMER.get_ptr_mut(0);
         if !timer_val.is_null() {
             let t = unsafe { &mut (*timer_val).timer as *mut BpfTimer };
             let map_ptr = core::ptr::from_ref(&WAKEUP_TIMER).cast();
             timer::timer_init(t, map_ptr, timer::CLOCK_MONOTONIC);
             timer::timer_set_callback(t, wakeup_timerfn as *const () as u64);
-            let slice = unsafe { SLICE_NS };
+            let slice = SLICE_NS.get();
             timer::timer_start(t, slice, 0);
         }
     }
@@ -1989,7 +1984,7 @@ pub fn on_exit(_ei: *mut scx_exit_info) {}
 #[unsafe(link_section = "tp_btf/sched_switch")]
 pub unsafe extern "C" fn scx_pmu_sched_switch(ctx: *const u64) -> i32 {
     // Skip if PMU is not configured.
-    if PERF_CONFIG == 0 {
+    if PERF_CONFIG.get() == 0 {
         return 0;
     }
 
