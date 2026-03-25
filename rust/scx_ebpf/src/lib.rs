@@ -34,6 +34,7 @@
 #![feature(asm_experimental_arch)]
 
 pub mod cpumask;
+pub mod ctx;
 pub mod global;
 pub mod helpers;
 pub mod kfuncs;
@@ -49,6 +50,7 @@ pub use scx_ebpf_derive::scx_ops_define;
 
 /// Re-exports for convenient glob import.
 pub mod prelude {
+    pub use crate::ctx::BpfCtx;
     pub use crate::global::{BpfGlobal, BpfGlobalArray};
     pub use crate::kfuncs;
     pub use crate::ops::{DEFAULT_OPS, sched_ext_ops};
