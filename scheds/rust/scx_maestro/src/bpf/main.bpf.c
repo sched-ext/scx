@@ -106,6 +106,11 @@ const volatile bool lowlatency = false;
 const volatile bool compaction = false;
 
 /*
+ * Always honor task weight.
+ */
+const volatile bool fair = false;
+
+/*
  * Runtime throttling.
  *
  * Throttle the CPUs by injecting @throttle_ns idle time every @slice_ns.
@@ -412,7 +417,7 @@ static u64 task_slice(const struct task_struct *p)
  */
 static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
 {
-	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
+	u64 lag_scale = fair ? 1 : MAX(tctx->wakeup_freq, 1);
 	u64 vsleep_max = scale_by_weight(p, slice_lag_ns * lag_scale);
 	u64 vtime_min = vtime_now - vsleep_max;
 	u64 dl = p->scx.dsq_vtime;
@@ -423,7 +428,7 @@ static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
 	if (time_before(dl, vtime_min))
 		dl = vtime_min;
 
-	return dl + scale_by_weight_inverse(p, tctx->awake_vtime);
+	return dl + (fair ? 0 : scale_by_weight_inverse(p, tctx->awake_vtime));
 }
 
 /*
@@ -649,6 +654,20 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	return true;
 }
 
+/*
+ * Return the time slice normalized by the average capacity of @cpu's LLC.
+ */
+static u64 scale_by_llc_capacity(u64 slice, s32 cpu)
+{
+	int llc;
+
+	llc = cpu_llc(cpu);
+	if (llc < 0 || llc >= nr_llc_ids || llc >= MAX_LLCS)
+		return slice;
+
+	return slice * llc_capacity[llc] / SCX_CPUPERF_ONE;
+}
+
 void BPF_STRUCT_OPS(maestro_dispatch, s32 cpu, struct task_struct *prev)
 {
 	int llc, curr_llc = cpu_llc(cpu);
@@ -660,6 +679,31 @@ void BPF_STRUCT_OPS(maestro_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (is_throttled())
 		return;
+
+	/*
+	 * Check if @prev should keep running over the next task in the LLC
+	 * when fairness is enabled.
+	 */
+	if (fair && prev && is_task_queued(prev) && keep_running(prev, cpu)) {
+		struct task_struct *next = __COMPAT_scx_bpf_dsq_peek(curr_llc);
+
+		if (next) {
+			struct task_ctx *tctx = try_lookup_task_ctx(prev);
+
+			if (tctx) {
+				u64 slice = bpf_ktime_get_ns() - tctx->last_run_at;
+				u64 new_vtime;
+
+				slice = scale_by_llc_capacity(slice, cpu);
+				new_vtime = prev->scx.dsq_vtime + scale_by_weight_inverse(prev, slice);
+
+				if (time_before(new_vtime, next->scx.dsq_vtime)) {
+					scx_bpf_task_set_slice(prev, task_slice(prev));
+					return;
+				}
+			}
+		}
+	}
 
 	/*
 	 * Check if other tasks in the same LLC needs to run.
@@ -690,6 +734,7 @@ void BPF_STRUCT_OPS(maestro_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Try to consume tasks from sub-scheduler instances, picking the
 	 * one with the lowest cvtime first (weighted fair dispatch).
+	 *
 	 * Skip when userspace disables nested sub-dispatch (sub_sched_enabled).
 	 */
 	if (sub_sched_enabled && bpf_ksym_exists(scx_bpf_sub_dispatch)) {
@@ -753,20 +798,6 @@ void BPF_STRUCT_OPS(maestro_running, struct task_struct *p)
 	 */
 	if (time_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
-}
-
-/*
- * Return the time slice normalized by the average capacity of @cpu's LLC.
- */
-static u64 scale_by_llc_capacity(u64 slice, s32 cpu)
-{
-	int llc;
-
-	llc = cpu_llc(cpu);
-	if (llc < 0 || llc >= nr_llc_ids || llc >= MAX_LLCS)
-		return slice;
-
-	return slice * llc_capacity[llc] / SCX_CPUPERF_ONE;
 }
 
 /*
