@@ -39,13 +39,14 @@
 //! - `PREFERRED_IDLE_SCAN`, `FLAT_IDLE_SCAN`: idle CPU scan modes for big.LITTLE
 //! - `PREFERRED_CPUS`, `CPU_CAPACITY`: CPU ordering/capacity for idle scan
 //!
-//! Remaining gaps vs the full C implementation:
-//! - PMU perf event reading is implemented via a separate `tp_btf/sched_switch`
-//!   tracing program that reads `bpf_perf_event_read_value` (helper #55) on each
-//!   context switch. The struct_ops scheduler cannot call this helper directly
-//!   (kernel restricts it to tracing program types). The tracing program writes
-//!   per-task and per-CPU perf counters to the shared `TASK_CTX` and `CPU_CTX` maps.
-//!   Userspace loads both programs from the same ELF object.
+//! PMU architecture:
+//! PMU perf event reading uses a separate `tp_btf/sched_switch` tracing program
+//! (included in this same ELF binary) that calls `bpf_perf_event_read_value`
+//! (helper #55) on each context switch. The struct_ops scheduler cannot call
+//! this helper directly (kernel restricts it to tracing program types). The
+//! tracing program writes per-task and per-CPU perf counters to the shared
+//! `TASK_CTX` and `CPU_CTX` maps. Userspace loads both programs from the same
+//! ELF object.
 
 #![no_std]
 #![no_main]
@@ -82,14 +83,14 @@ mod vmlinux {
 /// - `last_woke_at`: timestamp of last wakeup (for wakeup_freq calculation)
 /// - `perf_events`: accumulated perf event count from last run (for event-heavy detection)
 ///
-/// NOTE: The C cosmos also has a `perf_events` field that is populated by
-/// the scx PMU library via `bpf_perf_event_read_value` (helper #55).
-/// That helper is NOT available in BPF_PROG_TYPE_STRUCT_OPS programs —
-/// it is restricted to tracing program types (kprobe, tracepoint, fentry).
-/// The C cosmos has the same limitation (fails to load with --perf-config).
-/// The perf_events field is kept for future use when a tracing-program-based
-/// PMU solution is implemented (see scx/lib/pmu.bpf.c's SEC("?tp_btf/sched_switch")
-/// for the intended architecture).
+/// NOTE: The `perf_events` field is populated by the `tp_btf/sched_switch`
+/// tracing program included in this binary. That program calls
+/// `bpf_perf_event_read_value` (helper #55), which is restricted to tracing
+/// program types and NOT available in struct_ops programs. On each context
+/// switch, the tracing program computes the perf counter delta and writes
+/// it to `TASK_CTX.perf_events` and `CPU_CTX.perf_events`. The struct_ops
+/// scheduler reads these values via `is_event_heavy()` and
+/// `pick_least_busy_event_cpu()`.
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct TaskCtx {
@@ -237,13 +238,13 @@ static mut SLICE_NS: u64 = 10_000;
 #[unsafe(no_mangle)]
 static mut SLICE_LAG: u64 = 20_000_000;
 
-/// CPU utilization threshold for system busy detection [0..1024].
+/// CPU utilization threshold for system busy detection [0..100].
 /// When `CPU_UTIL >= BUSY_THRESHOLD`, the system is considered busy.
 /// C reference: `const volatile u64 busy_threshold`
 #[unsafe(no_mangle)]
 static mut BUSY_THRESHOLD: u64 = 0;
 
-/// Current global CPU utilization [0..1024], set by userspace polling loop.
+/// Current global CPU utilization [0..100], set by userspace polling loop.
 /// C reference: `volatile u64 cpu_util`
 #[unsafe(no_mangle)]
 static mut CPU_UTIL: u64 = 0;
@@ -318,8 +319,6 @@ static mut PREFERRED_IDLE_SCAN: bool = false;
 #[unsafe(no_mangle)]
 static mut FLAT_IDLE_SCAN: bool = false;
 
-/// CPUs sorted by capacity in descending order, populated by userspace.
-/// Terminated by -1 sentinel. Used by pick_idle_cpu_preferred().
 /// CPU list for primary domain, set by userspace via `override_global`.
 ///
 /// Contains CPU IDs that belong to the primary scheduling domain.
@@ -932,14 +931,9 @@ fn pick_idle_cpu_preferred(prev_cpu: i32) -> i32 {
 /// Pick an idle CPU for a task, with SMT awareness, primary cpumask
 /// filtering, and preferred/flat scan.
 ///
-/// Uses `#[inline(always)]` instead of `#[inline(never)]` because aya's
-/// kfunc resolution does not yet handle BPF subprograms: after function
-/// linking, subprogram instructions are appended to the main function
-/// at new offsets, but `fixup_kfunc_calls()` still uses the original
-/// section offsets to look up relocations, so kfunc calls in subprograms
-/// get left as `imm=0` and the verifier rejects them with "invalid kernel
-/// function call not eliminated". Once aya fixes this, switch to
-/// `#[inline(never)]` for its own register scope.
+/// Uses `#[inline(always)]` because kfunc calls in BPF subprograms are
+/// not yet supported by aya (subprogram instruction offsets shift after
+/// function linking, causing kfunc relocations to be missed).
 ///
 /// Tries these strategies in order:
 ///
@@ -1180,32 +1174,22 @@ fn update_perf_counters(p: *mut task_struct, delta: u64) {
 
 // ── Deferred wakeup timer ───────────────────────────────────────────────
 
-/// Timer callback: kick idle CPUs that have pending tasks.
+/// Deferred wakeup timer callback.
 ///
 /// Instead of waking up CPUs inline in the enqueue hot path, we defer
 /// the wakeup to this periodic timer callback. This reduces IPI overhead.
 ///
-/// The callback iterates all CPUs, checking for:
-/// 1. Tasks pending in the local DSQ (`SCX_DSQ_LOCAL_ON | cpu`)
-/// 2. The CPU is idle (running the idle thread)
+/// C reference: `wakeup_timerfn()` in `main.bpf.c`
 ///
-/// For each such CPU, it issues a `scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE)`.
+/// The callback iterates all CPUs, checking for tasks pending in the
+/// local DSQ (`SCX_DSQ_LOCAL_ON | cpu`). For each CPU with queued tasks,
+/// it issues `scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE)`. The `SCX_KICK_IDLE`
+/// flag makes the kick a no-op for non-idle CPUs, so no explicit
+/// `is_cpu_idle()` check is needed (the C version does check, but we
+/// skip it since `scx_bpf_cpu_curr` is not available on all kernels).
 ///
 /// The timer re-arms itself at the end for periodic execution with period
 /// equal to `SLICE_NS`.
-///
-/// Deferred wakeup timer callback.
-///
-/// C reference: `wakeup_timerfn()` in `main.bpf.c`
-///
-/// Iterates all CPUs, kicks idle ones with queued tasks, and re-arms
-/// the timer for periodic execution.
-///
-/// Note: The C version also checks `is_cpu_idle(cpu)` using
-/// `__COMPAT_scx_bpf_cpu_curr()`. We skip that check because
-/// `SCX_KICK_IDLE` already makes the kick a no-op for non-idle CPUs,
-/// and `scx_bpf_cpu_curr` is not available on all kernels (requires
-/// the compat fallback via `scx_bpf_cpu_rq`).
 #[inline(never)]
 fn wakeup_timerfn(
     _map: *mut core::ffi::c_void,
@@ -1613,8 +1597,9 @@ pub fn on_dispatch(cpu: i32, prev: *mut task_struct) {
         // Read flags and weight together as a u64 to avoid the LLVM BPF
         // backend bug where consecutive bpf_probe_read_kernel calls with
         // the same size arg skip re-materializing r2.
-        // scx.flags is at offset 816 (u32), scx.weight is at offset 820 (u32).
-        // Reading 8 bytes at offset 816 gets both in one call.
+        // scx.flags (u32) is immediately followed by scx.weight (u32) in
+        // the kernel's task_struct layout. Reading 8 bytes at the flags
+        // offset gets both in one call.
         let base = prev as *const u8;
         let flags_offset = core::mem::offset_of!(vmlinux::task_struct, scx.flags);
         let src = unsafe { base.add(flags_offset) as *const u64 };
@@ -1666,11 +1651,11 @@ pub fn on_runnable(p: *mut task_struct, _enq_flags: u64) {
 /// Records the timestamp in per-task storage for accurate time-slice
 /// charging in stopping(). Applies cpufreq performance scaling.
 ///
-/// NOTE: The C cosmos also calls scx_pmu_event_start(p, false) here when
+/// NOTE: The C cosmos calls scx_pmu_event_start(p, false) here when
 /// perf_config is set, which reads bpf_perf_event_read_value to capture a
-/// baseline counter value. We cannot do this because helper #55 is not
-/// available in struct_ops programs. See the PMU integration comment block
-/// above for details.
+/// baseline counter value. Helper #55 is not available in struct_ops programs,
+/// so this is handled instead by the `tp_btf/sched_switch` tracing program,
+/// which records the baseline counter for each incoming task in PMU_BASELINE.
 ///
 /// C reference: cosmos_running() calls update_cpufreq(scx_bpf_task_cpu(p))
 /// and scx_pmu_event_start(p, false) when perf_config is set.
@@ -1685,6 +1670,9 @@ pub fn on_running(p: *mut task_struct) {
     }
 
     // Update current system's vruntime.
+    // C uses time_before(vtime_now, dsq_vtime) which does wrapping comparison;
+    // we use plain `<` which is sufficient because vtime_now stays near current
+    // values and wrapping is not expected in practice.
     // C: if (time_before(vtime_now, p->scx.dsq_vtime))
     //        vtime_now = p->scx.dsq_vtime;
     if let Ok(dsq_vtime) = core_read!(vmlinux::task_struct, p, scx.dsq_vtime) {
@@ -1711,11 +1699,11 @@ pub fn on_running(p: *mut task_struct) {
 /// weight (higher weight = slower vtime advancement = more CPU time).
 /// Also accumulates exec_runtime in per-task storage for deadline calculation.
 ///
-/// NOTE: The C cosmos also calls scx_pmu_event_stop(p) + update_counters()
-/// here, which uses bpf_perf_event_read_value to compute a delta from
-/// the baseline captured in running(). We cannot do this because helper #55
-/// is not available in struct_ops programs. The PMU counter update is a
-/// no-op (perf_delta is always 0). See the PMU integration comment block.
+/// NOTE: The C cosmos calls scx_pmu_event_stop(p) + update_counters() here
+/// to compute perf counter deltas. In our implementation, PMU counters are
+/// updated by the separate `tp_btf/sched_switch` tracing program on context
+/// switches, not inline in stopping(). The struct_ops scheduler only reads
+/// the stored values via `is_event_heavy()` and `pick_least_busy_event_cpu()`.
 ///
 /// C reference: cosmos_stopping() calls update_cpu_load(p, slice) which
 /// computes perf_lvl = MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE)
@@ -1811,25 +1799,6 @@ pub fn on_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
     let _ = TASK_CTX.delete(p as *mut u8);
 }
 
-/// init: create DSQ(s), record nr_cpu_ids, and initialize PMU state.
-///
-/// When NUMA is enabled, creates one DSQ per NUMA node (DSQ ID = node ID).
-/// Otherwise creates a single shared DSQ (DSQ 0).
-/// When PMU tracking is enabled, initializes per-CPU perf_events counters.
-/// C reference: `cosmos_init()` with `bpf_for(node, 0, nr_node_ids)` and
-/// `scx_pmu_install(perf_config)` when perf_config is set.
-
-/// Initialize a kptr cpumask: create a new mask and atomically store it.
-///
-/// Mirrors the C `init_cpumask()` function:
-/// ```c
-/// static int init_cpumask(struct bpf_cpumask **p_cpumask) {
-///     mask = bpf_cpumask_create();
-///     mask = bpf_kptr_xchg(p_cpumask, mask);
-///     if (mask) bpf_cpumask_release(mask);
-/// }
-/// ```
-///
 /// Initialize the primary cpumask kptr.
 ///
 /// Creates an empty `bpf_cpumask` and stores it in the `PRIMARY_CPUMASK`
@@ -1837,9 +1806,11 @@ pub fn on_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
 /// transforms the `Kptr<T>` wrapper's BTF into the `PTR -> TYPE_TAG("kptr")`
 /// chain that the verifier requires.
 ///
-/// Called from `on_init()`. The cpumask starts empty; userspace can later
-/// populate it via the `.bss` map to restrict idle CPU selection to a
-/// subset of CPUs (e.g., performance cores on big.LITTLE systems).
+/// Called from `on_init()`. The cpumask starts empty; when `PRIMARY_ALL` is
+/// false, `on_init()` then populates it from the `PRIMARY_CPU_LIST` array
+/// (set by userspace via `override_global`).
+///
+/// Mirrors the C `init_cpumask()` pattern: create, kptr_xchg, release old.
 #[inline(always)]
 fn init_primary_cpumask() -> i32 {
     // Create a new cpumask with all bits cleared.
@@ -1865,6 +1836,16 @@ fn init_primary_cpumask() -> i32 {
     if ok { 0 } else { -12 }
 }
 
+/// init: create DSQ(s), record nr_cpu_ids, initialize primary cpumask,
+/// and set up the deferred wakeup timer.
+///
+/// When NUMA is enabled, creates one DSQ per NUMA node (DSQ ID = node ID).
+/// Otherwise creates a single shared DSQ (DSQ 0). Initializes the primary
+/// cpumask kptr and populates it from `PRIMARY_CPU_LIST` when `PRIMARY_ALL`
+/// is false. When `DEFERRED_WAKEUPS` is enabled, initializes and starts
+/// the periodic wakeup timer.
+///
+/// C reference: `cosmos_init()` with `bpf_for(node, 0, nr_node_ids)`.
 #[inline(always)]
 pub fn on_init() -> i32 {
     // Record the number of CPUs for bounds checking.

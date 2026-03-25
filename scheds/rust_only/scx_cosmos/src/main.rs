@@ -64,17 +64,19 @@ struct Opts {
 
     /// Disable synchronous wakeup hints.
     ///
-    /// When enabled, the scheduler will not perform direct dispatch on
-    /// synchronous wakeups. This can lead to more uniform load distribution
-    /// but may reduce efficiency for pipe-intensive workloads.
+    /// When enabled, clears the SCX_WAKE_SYNC hint from wakeup flags, which
+    /// affects the kernel's idle CPU selection heuristics for synchronous
+    /// wakeups. This can lead to more uniform load distribution but may
+    /// reduce cache locality for pipe-intensive workloads.
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
     /// Disable deferred wakeups.
     ///
-    /// When set, deferred wakeups are disabled. This can reduce throughput
-    /// and performance for certain workloads, but can also reduce power
-    /// consumption (useful on battery-powered systems).
+    /// When set, CPU kicks are sent inline during enqueue instead of being
+    /// batched into a periodic timer callback. This provides faster task
+    /// pickup but increases IPI overhead, which may reduce throughput and
+    /// increase power consumption under heavy load.
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     no_deferred_wakeup: bool,
 
@@ -711,9 +713,11 @@ impl BpfDataMap {
                 //   <padding>: u32 (offset 12, for alignment)
                 //   CPU_UTIL: u64 (offset 16)
                 //
-                // Once the other agent adds the CPU_UTIL global to the eBPF
-                // code, this offset must match the actual layout. We validate
-                // that the offset fits within the map value.
+                // CAUTION: This offset is empirically determined and depends on
+                // the BPF linker's symbol ordering. If globals are added, removed,
+                // or reordered in the eBPF code, this offset may break silently.
+                // A robust solution would use BTF to look up the CPU_UTIL symbol
+                // offset. We validate that the offset fits within the map value.
                 let cpu_util_offset = 16;
 
                 if cpu_util_offset + 8 <= value_size {
