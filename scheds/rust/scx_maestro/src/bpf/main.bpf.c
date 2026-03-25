@@ -410,16 +410,20 @@ static u64 task_slice(const struct task_struct *p)
 /*
  * Return task deadline in function of the vruntime and wakeup frequency.
  */
-static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
+static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
 	u64 vsleep_max = scale_by_weight(p, slice_lag_ns * lag_scale);
 	u64 vtime_min = vtime_now - vsleep_max;
+	u64 dl = p->scx.dsq_vtime;
 
-	if (time_before(p->scx.dsq_vtime, vtime_min))
-		p->scx.dsq_vtime = vtime_min;
+	if (enq_flags & SCX_ENQ_REENQ)
+		return dl;
 
-	return p->scx.dsq_vtime + scale_by_weight_inverse(p, tctx->awake_vtime);
+	if (time_before(dl, vtime_min))
+		dl = vtime_min;
+
+	return dl + scale_by_weight_inverse(p, tctx->awake_vtime);
 }
 
 /*
@@ -600,7 +604,8 @@ void BPF_STRUCT_OPS(maestro_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 	}
 
-	scx_bpf_dsq_insert_vtime(p, cpu_llc(prev_cpu), task_slice(p), task_dl(p, tctx), enq_flags);
+	scx_bpf_dsq_insert_vtime(p, cpu_llc(prev_cpu), task_slice(p),
+				 task_dl(p, tctx, enq_flags), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	if (do_migrate)
@@ -726,7 +731,7 @@ void BPF_STRUCT_OPS(maestro_dispatch, s32 cpu, struct task_struct *prev)
 	 * If no other task wants to run, let the same task run on the CPU.
 	 */
 	if (prev && keep_running(prev, cpu))
-		prev->scx.slice = task_slice(prev);
+		scx_bpf_task_set_slice(prev, task_slice(prev));
 }
 
 void BPF_STRUCT_OPS(maestro_running, struct task_struct *p)
@@ -772,7 +777,7 @@ void BPF_STRUCT_OPS(maestro_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
-	u64 slice;
+	u64 slice, vtime;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -796,7 +801,8 @@ void BPF_STRUCT_OPS(maestro_stopping, struct task_struct *p, bool runnable)
 	 * Cap the maximum accumulated time since last sleep to
 	 * @slice_lag_ns, to prevent starving CPU-intensive tasks.
 	 */
-	p->scx.dsq_vtime += scale_by_weight_inverse(p, slice);
+	vtime = p->scx.dsq_vtime + scale_by_weight_inverse(p, slice);
+	scx_bpf_task_set_dsq_vtime(p, vtime);
 	tctx->awake_vtime = MIN(tctx->awake_vtime + slice, slice_lag_ns);
 }
 
@@ -846,7 +852,7 @@ void BPF_STRUCT_OPS(maestro_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(maestro_enable, struct task_struct *p)
 {
-	p->scx.dsq_vtime = vtime_now;
+	scx_bpf_task_set_dsq_vtime(p, vtime_now);
 }
 
 s32 BPF_STRUCT_OPS(maestro_init_task, struct task_struct *p,
