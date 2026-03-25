@@ -73,6 +73,7 @@ enum cell_stat_idx {
 	CSTAT_AFFN_VIOL,
 	CSTAT_BORROWED,
 	CSTAT_STEAL,
+	CSTAT_CLAMP_USED,
 	NR_CSTATS,
 };
 
