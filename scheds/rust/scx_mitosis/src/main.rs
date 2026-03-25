@@ -185,6 +185,12 @@ struct Opts {
     #[clap(long, default_value = "0.3", value_parser = parse_ewma_factor)]
     demand_smoothing: f64,
 
+    /// Watchdog timeout in milliseconds. If any task stays runnable without
+    /// being dispatched for this long, the kernel terminates the scheduler.
+    /// 0 uses the kernel default (30s).
+    #[clap(long, default_value = "0")]
+    watchdog_timeout_ms: u32,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -344,6 +350,10 @@ impl<'a> Scheduler<'a> {
 
         rodata.enable_borrowing = opts.enable_borrowing;
         rodata.use_lockless_peek = opts.use_lockless_peek;
+
+        if opts.watchdog_timeout_ms > 0 {
+            skel.struct_ops.mitosis_mut().timeout_ms = opts.watchdog_timeout_ms;
+        }
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
@@ -959,9 +969,13 @@ impl<'a> Scheduler<'a> {
             .flat_map(|cell| QUEUE_STATS_IDX.iter().map(|&idx| cell[idx as usize]))
             .sum();
 
-        // We don't want to divide by zero later, but this is never expected.
+        // Zero decisions can happen transiently during cell reconfiguration
+        // when all tasks are already dispatched and no new scheduling events
+        // occur within the monitoring interval. Skip stats for this interval
+        // rather than killing the scheduler.
         if global_queue_decisions == 0 {
-            bail!("Error: No queueing decisions made globally");
+            warn!("No queueing decisions made globally in this interval, skipping stats");
+            return Ok(());
         }
 
         self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
