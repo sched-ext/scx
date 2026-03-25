@@ -378,10 +378,13 @@ fn split_half(ctx: &Ctx) -> (BTreeSet<usize>, BTreeSet<usize>) {
 }
 
 fn custom_dynamic_add(ctx: &Ctx) -> Result<VerifyResult> {
+    // Start with 2, add up to 2 more. Need room for cell 0 + all cells.
+    let max_new = ctx.topo.total_cpus().saturating_sub(3).min(2);
+    if max_new == 0 { return Ok(VerifyResult { passed: true, details: vec!["skipped: need >=4 CPUs".into()], stats: Default::default() }); }
     let wl = dfl_wl(ctx);
     let mut handles = setup_cells(ctx, 2, &wl)?;
     thread::sleep(ctx.duration / 2);
-    for i in 2..4 {
+    for i in 2..(2 + max_new) {
         ctx.cgroups.create_cell(&format!("cell_{i}"))?;
         let h = WorkloadHandle::spawn(&wl)?;
         for t in h.tids() { ctx.cgroups.move_task(&format!("cell_{i}"), t)?; }

@@ -214,9 +214,7 @@ pub fn gauntlet_presets() -> Vec<TopoPreset> {
         ("large-4llc",    "128 CPUs, 4 LLCs",                 4, 16,  2,  2048),
         ("large-8llc",    "128 CPUs, 8 LLCs",                 8,  8,  2,  2048),
         ("near-max-llc",  "240 CPUs, 15 LLCs (near max)",    15,  8,  2,  2048),
-        ("max-llc",       "256 CPUs, 16 LLCs (at max)",      16,  8,  2,  2048),
-        ("high-cpu",      "384 CPUs, 12 LLCs",               12, 16,  2,  4096),
-        ("near-max-cpu",  "504 CPUs, 14 LLCs (near max)",    14, 18,  2,  4096),
+        ("max-cpu",       "252 CPUs, 14 LLCs (near i440fx limit)", 14, 9, 2, 4096),
     ];
     defs.iter().map(|&(n, d, s, c, t, m)| TopoPreset {
         name: n, description: d, topology: VngTopology { sockets: s, cores_per_socket: c, threads_per_core: t }, memory_mb: m,
@@ -251,7 +249,7 @@ mod tests {
 
     #[test]
     fn gauntlet_presets_count() {
-        assert_eq!(gauntlet_presets().len(), 15);
+        assert_eq!(gauntlet_presets().len(), 13);
     }
 
     #[test]
