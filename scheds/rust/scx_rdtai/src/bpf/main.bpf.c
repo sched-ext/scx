@@ -108,7 +108,7 @@ struct {
 	__uint(max_entries, MAX_TREE_NODES);
 } rdtai_tree SEC(".maps");
 
-static u32 walk_tree(struct task_ctx *taskc)
+static u32 walk_tree(struct task_ctx *taskc, u32 *leaf_idx)
 {
 	u32 node_idx = 0;
 	struct rdtai_node *node;
@@ -119,8 +119,10 @@ static u32 walk_tree(struct task_ctx *taskc)
 		if (!node)
 			break;
 
-		if (node->is_leaf)
+		if (node->is_leaf) {
+			*leaf_idx = node_idx;
 			return node->leaf_action;
+		}
 
 		u64 val = 0;
 		switch (node->feature_id) {
@@ -973,11 +975,12 @@ s32 BPF_STRUCT_OPS(rdtai_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		goto enoent;
 
-	u32 action = walk_tree(taskc);
+	u32 node_idx = 0;
+	u32 action = walk_tree(taskc, &node_idx);
 	if (debug >= 2) {
-		bpf_printk("rdtai: task %s[%d] tree action: %u (wait: %llu, burst: %llu)", 
-				p->comm, p->pid, action, 
-				scx_bpf_now() - taskc->wait_at, taskc->last_burst);
+		bpf_printk("rdtai: task %s[%d] TA: %u (Node: %u, wait: %llu, burst: %llu, cache: %llu)", 
+				p->comm, p->pid, action, node_idx,
+				scx_bpf_now() - taskc->wait_at, taskc->last_burst, taskc->cache_misses);
 	}
 
 	if (action == 2) { // RDTAI_ACTION_RUN_IMMEDIATELY

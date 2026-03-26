@@ -504,54 +504,72 @@ impl<'a> Scheduler<'a> {
     fn push_default_tree(skel: &mut BpfSkel) -> Result<()> {
         let tree_map = &mut skel.maps.rdtai_tree;
         
-        // Node 0: If Wait Time > 1ms -> Node 1 (Leaf: Run Immediately)
-        //                            Else -> Node 2 (Leaf: Keep Local)
-        let root = bpf_intf::rdtai_node {
+        let wait_threshold = 1_000_000; 
+        let cache_threshold = 50;
+        let burst_threshold = 1_000_000;
+
+        let mut nodes = Vec::with_capacity(15);
+
+        // NODE 0: Root (Wait Time)
+        nodes.push(bpf_intf::rdtai_node {
             feature_id: bpf_intf::rdtai_feature_FEAT_WAIT_TIME,
-            threshold: 1_000_000, // 1ms in nanoseconds
-            left_child: 2,
-            right_child: 1,
-            is_leaf: false,
-            leaf_action: 0,
-        };
-        
-        // Node 1: Leaf - Run Immediately
-        let leaf_run = bpf_intf::rdtai_node {
-            feature_id: 0,
-            threshold: 0,
-            left_child: 0,
-            right_child: 0,
-            is_leaf: true,
-            leaf_action: 2, // RDTAI_ACTION_RUN_IMMEDIATELY
-        };
-        
-        // Node 2: Leaf - Keep Local (Normal scheduling)
-        let leaf_keep = bpf_intf::rdtai_node {
-            feature_id: 0,
-            threshold: 0,
-            left_child: 0,
-            right_child: 0,
-            is_leaf: true,
-            leaf_action: 0, // RDTAI_ACTION_KEEP_LOCAL
-        };
+            threshold: wait_threshold,
+            left_child: 1, right_child: 2, is_leaf: false, leaf_action: 0,
+        });
 
-        let mut key = [0u8; 4];
-        key.copy_from_slice(&0u32.to_ne_bytes());
-        tree_map.update(&key, unsafe { 
-            std::slice::from_raw_parts(&root as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
-        }, libbpf_rs::MapFlags::ANY)?;
+        // LEVEL 2: Cache Sensitivity
+        nodes.push(bpf_intf::rdtai_node { // Node 1
+            feature_id: bpf_intf::rdtai_feature_FEAT_CACHE_MISSES,
+            threshold: cache_threshold,
+            left_child: 3, right_child: 4, is_leaf: false, leaf_action: 0,
+        });
+        nodes.push(bpf_intf::rdtai_node { // Node 2
+            feature_id: bpf_intf::rdtai_feature_FEAT_CACHE_MISSES,
+            threshold: cache_threshold * 2,
+            left_child: 5, right_child: 6, is_leaf: false, leaf_action: 0,
+        });
 
-        key.copy_from_slice(&1u32.to_ne_bytes());
-        tree_map.update(&key, unsafe { 
-            std::slice::from_raw_parts(&leaf_run as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
-        }, libbpf_rs::MapFlags::ANY)?;
+        // LEVEL 3: Burstiness
+        nodes.push(bpf_intf::rdtai_node { // Node 3
+            feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
+            threshold: burst_threshold,
+            left_child: 7, right_child: 8, is_leaf: false, leaf_action: 0,
+        });
+        nodes.push(bpf_intf::rdtai_node { // Node 4
+            feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
+            threshold: burst_threshold,
+            left_child: 9, right_child: 10, is_leaf: false, leaf_action: 0,
+        });
+        nodes.push(bpf_intf::rdtai_node { // Node 5
+            feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
+            threshold: burst_threshold,
+            left_child: 11, right_child: 12, is_leaf: false, leaf_action: 0,
+        });
+        nodes.push(bpf_intf::rdtai_node { // Node 6
+            feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
+            threshold: burst_threshold,
+            left_child: 13, right_child: 14, is_leaf: false, leaf_action: 0,
+        });
 
-        key.copy_from_slice(&2u32.to_ne_bytes());
-        tree_map.update(&key, unsafe { 
-            std::slice::from_raw_parts(&leaf_keep as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
-        }, libbpf_rs::MapFlags::ANY)?;
+        // LEVEL 4: LEAVES
+        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
+        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
+        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
+        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
+        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
+        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 1 });
+        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
+        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
 
-        info!("Default decision tree pushed to kernel!");
+        for (i, node) in nodes.iter().enumerate() {
+            let mut key = [0u8; 4];
+            key.copy_from_slice(&(i as u32).to_ne_bytes());
+            tree_map.update(&key, unsafe { 
+                std::slice::from_raw_parts(node as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
+            }, libbpf_rs::MapFlags::ANY)?;
+        }
+
+        info!("Default 4-level RDTAI decision tree pushed to kernel!");
         Ok(())
     }
 

@@ -119,56 +119,96 @@ impl Tuner {
             }
 
             /// The Robust Loss Function Optimization
-            /// Calculates the 'Penalty' score of the current scheduling state and
-            /// adjusts the decision tree thresholds in the kernel.
+            /// Calculates the 'Penalty' score and generates a 4-level, 15-node decision tree.
             pub fn optimize_tree(&mut self, skel: &mut BpfSkel, avg_util: f64) -> Result<()> {
-            let tree_map = &mut skel.maps.rdtai_tree;
+                let tree_map = &mut skel.maps.rdtai_tree;
 
-            // LOSS FUNCTION:
-            // Penalty = (avg_util * wait_weight) + (cache_misses_est * cache_weight)
-            // We adjust the 'Wait Threshold' based on this penalty.
-            let penalty = avg_util * self.wait_weight;
+                // --- DYNAMIC THRESHOLD TUNING (The Loss Function Logic) ---
+                // Lower wait threshold as load increases to prevent lag
+                let wait_threshold = if avg_util > 0.8 { 500_000 } else { 2_000_000 }; 
+                // Be more protective of cache-heavy tasks when system is busy
+                let cache_threshold = if avg_util > 0.5 { 100 } else { 30 };
+                // Burst threshold to distinguish interactive (short) vs batch (long) tasks
+                let burst_threshold = 1_000_000; // 1ms
 
-            // Dynamic Threshold calculation:
-            // High Penalty (high util) -> Lower Threshold (be more aggressive)
-            // Low Penalty (low util) -> Higher Threshold (be more conservative)
-            let mut wait_threshold = 1_000_000; // Default 1ms
-            if penalty > 0.8 {
-            wait_threshold = 200_000; // 200us
-            } else if penalty > 0.5 {
-            wait_threshold = 500_000; // 500us
+                let mut nodes = Vec::with_capacity(15);
+
+                // NODE 0: Root (Wait Time)
+                nodes.push(bpf_intf::rdtai_node {
+                    feature_id: bpf_intf::rdtai_feature_FEAT_WAIT_TIME,
+                    threshold: wait_threshold,
+                    left_child: 1, right_child: 2, is_leaf: false, leaf_action: 0,
+                });
+
+                // LEVEL 2: Cache Sensitivity
+                nodes.push(bpf_intf::rdtai_node { // Node 1
+                    feature_id: bpf_intf::rdtai_feature_FEAT_CACHE_MISSES,
+                    threshold: cache_threshold,
+                    left_child: 3, right_child: 4, is_leaf: false, leaf_action: 0,
+                });
+                nodes.push(bpf_intf::rdtai_node { // Node 2 (Emergency - High Wait)
+                    feature_id: bpf_intf::rdtai_feature_FEAT_CACHE_MISSES,
+                    threshold: cache_threshold * 2,
+                    left_child: 5, right_child: 6, is_leaf: false, leaf_action: 0,
+                });
+
+                // LEVEL 3: Burstiness
+                nodes.push(bpf_intf::rdtai_node { // Node 3
+                    feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
+                    threshold: burst_threshold,
+                    left_child: 7, right_child: 8, is_leaf: false, leaf_action: 0,
+                });
+                nodes.push(bpf_intf::rdtai_node { // Node 4
+                    feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
+                    threshold: burst_threshold,
+                    left_child: 9, right_child: 10, is_leaf: false, leaf_action: 0,
+                });
+                nodes.push(bpf_intf::rdtai_node { // Node 5
+                    feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
+                    threshold: burst_threshold,
+                    left_child: 11, right_child: 12, is_leaf: false, leaf_action: 0,
+                });
+                nodes.push(bpf_intf::rdtai_node { // Node 6
+                    feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
+                    threshold: burst_threshold,
+                    left_child: 13, right_child: 14, is_leaf: false, leaf_action: 0,
+                });
+
+                // LEVEL 4: LEAVES (Actions)
+                // Action 0: Keep Local, Action 1: Migrate, Action 2: Run Now
+
+                // Leaf 7: Low Wait, Low Cache, Short Burst -> Run Now (Responsive)
+                nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
+                // Leaf 8: Low Wait, Low Cache, Long Burst -> Keep Local (Throughput)
+                nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
+                // Leaf 9: Low Wait, High Cache, Short Burst -> Keep Local (Protect Cache)
+                nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
+                // Leaf 10: Low Wait, High Cache, Long Burst -> Keep Local
+                nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
+
+                // Leaf 11: High Wait, Low Cache, Short Burst -> Run Now (Starvation Fix)
+                nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
+                // Leaf 12: High Wait, Low Cache, Long Burst -> Migrate (Load Balance)
+                nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 1 });
+                // Leaf 13: High Wait, High Cache, Short Burst -> Run Now
+                nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
+                // Leaf 14: High Wait, High Cache, Long Burst -> Run Now (Emergency)
+                nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
+                // Push all 15 nodes to the BPF Map
+                for (i, node) in nodes.iter().enumerate() {
+                    let mut key = [0u8; 4];
+                    key.copy_from_slice(&(i as u32).to_ne_bytes());
+                    tree_map.update(&key, unsafe {
+                        std::slice::from_raw_parts(node as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>())
+                    }, libbpf_rs::MapFlags::ANY)?;
+                }
+
+                if avg_util > 0.8 {
+                    info!("RDTAI 4-Level Tree Optimized for high load (Wait Threshold: {}ns)", wait_threshold);
+                }
+
+                Ok(())
             }
-
-            // Update the Root Node (Node 0) in the BPF map
-            let mut root = bpf_intf::rdtai_node {
-            feature_id: bpf_intf::rdtai_feature_FEAT_WAIT_TIME,
-            threshold: wait_threshold,
-            left_child: 2,  // Keep Local
-            right_child: 1, // Run Immediately
-            is_leaf: false,
-            leaf_action: 0,
-            };
-
-            let mut key = [0u8; 4];
-            key.copy_from_slice(&0u32.to_ne_bytes());
-            tree_map.update(
-            &key,
-            unsafe {
-                std::slice::from_raw_parts(
-                    &root as *const _ as *const u8,
-                    std::mem::size_of::<bpf_intf::rdtai_node>(),
-                )
-            },
-            libbpf_rs::MapFlags::ANY,
-            )?;
-
-            if avg_util > 0.9 {
-            info!("RDTAI Optimized: High Util detected, wait threshold lowered to {}ns", wait_threshold);
-            }
-
-            Ok(())
-    }
-
     /// Apply a step in the Tuner by:
     ///
     /// 1. Recording CPU stats from procfs

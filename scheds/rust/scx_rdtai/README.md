@@ -1,36 +1,51 @@
-# scx_rdtai
+# SCX_RDTAI: Real-time Decision Tree AI Scheduler
 
-This is a single user-defined scheduler used within [`sched_ext`](https://github.com/sched-ext/scx/tree/main), which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. [Read more about `sched_ext`](https://github.com/sched-ext/scx/tree/main).
+SCX_RDTAI is an experimental scheduler built on the `sched_ext` framework. It uses a **Hybrid AI Architecture** where a high-level "Brain" in Rust optimizes scheduling policy, while a low-level "Muscle" in BPF executes decisions in nanoseconds using a multi-level Decision Tree.
 
-## Overview
+## 🧠 The Decision Tree (Current Logic)
 
-A multi-domain, BPF / user space hybrid scheduler. The BPF portion of the
-scheduler does a simple round robin in each domain, and the user space portion
-(written in Rust) calculates the load factor of each domain, and informs BPF of
-how tasks should be load balanced accordingly.
+The scheduler implements a 4-level Binary Decision Tree with 15 nodes. Every time a task needs a CPU, BPF "walks" this tree based on real-time hardware telemetry.
 
-## How To Install
+### Decision Tree Diagram
+```mermaid
+graph TD
+    N0[Wait Time > Threshold?] -->|Yes| N2[High Wait Branch]
+    N0 -->|No| N1[Low Wait Branch]
+    
+    N1 -->|Cache Miss > X| N4[Sensitive Task]
+    N1 -->|Cache Miss < X| N3[Light Task]
+    
+    N2 -->|Cache Miss > X| N6[Emergency Cache]
+    N2 -->|Cache Miss < X| N5[Emergency Light]
+    
+    N3 -->|Burst < 1ms| L7[Action 2: Run Now]
+    N3 -->|Burst > 1ms| L8[Action 0: Keep Local]
+    
+    N4 -->|Burst < 1ms| L9[Action 0: Keep Local]
+    N4 -->|Burst > 1ms| L10[Action 0: Keep Local]
+    
+    N5 -->|Burst < 1ms| L11[Action 2: Run Now]
+    N5 -->|Burst > 1ms| L12[Action 1: Migrate]
+    
+    N6 -->|Burst < 1ms| L13[Action 2: Run Now]
+    N6 -->|Burst > 1ms| L14[Action 2: Run Now]
+```
 
-Available as a [Rust crate](https://crates.io/crates/scx_rdtai): `cargo add scx_rdtai`
+## 🛠 Features
+- **Wait Time (ns)**: Direct measurement of task starvation.
+- **Cache Misses**: Integrated with hardware **PMU** (Performance Monitoring Unit) to protect cache-heavy tasks.
+- **Burst Time (ns)**: Automatically identifies "Interactive" vs "Batch" workloads.
+- **Dynamic Optimization**: The Rust Tuner adjusts thresholds every 100ms based on system utilization.
 
-## Typical Use Case
+## 🏃 Actions Definition
+- **Action 0 (Keep Local)**: Prioritizes cache locality. Keeps the task on its previous CPU to reuse warm caches.
+- **Action 1 (Migrate)**: Prioritizes load balancing. Moves the task to a different CPU domain to prevent overloading.
+- **Action 2 (Run Now)**: Prioritizes responsiveness. Ignores locality and balancing to get the task executing immediately.
 
-`scx_rdtai` is designed to be flexible, accommodating different architectures and
-workloads. Various load balancing thresholds (e.g. greediness, frequency, etc),
-as well as how `scx_rdtai` should partition the system into scheduling domains, can
-be tuned to achieve the optimal configuration for any given system or workload.
-
-## Production Ready?
-
-Yes. If tuned correctly, `scx_rdtai` should be performant across various CPU
-architectures and workloads. By default, `scx_rdtai` creates a separate scheduling
-domain per-LLC, so its default configuration may be performant as well. Note
-however that `scx_rdtai` does not yet disambiguate between LLCs in different NUMA
-nodes, so it may perform better on multi-CCX machines where all the LLCs share
-the same socket, as opposed to multi-socket machines.
-
-Note as well that you may run into an issue with infeasible weights, where a
-task with a very high weight may cause the scheduler to incorrectly leave cores
-idle because it thinks they're necessary to accommodate the compute for a
-single task. This can also happen in CFS, and should soon be addressed for
-`scx_rdtai`.
+## 📊 Monitoring
+To see real-time tree decisions and hardware metrics:
+```bash
+sudo cat /sys/kernel/debug/tracing/trace_pipe | grep rdtai
+```
+Example Output:
+`rdtai: task gcc[1234] tree action: 2 (wait: 500432, burst: 12000, cache: 15)`
