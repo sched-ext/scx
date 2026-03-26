@@ -73,6 +73,13 @@ enum cell_stat_idx {
 	CSTAT_AFFN_VIOL,
 	CSTAT_BORROWED,
 	CSTAT_STEAL,
+	CSTAT_PIN_IDLE_HIT,
+	CSTAT_PIN_IDLE_MISS,
+	CSTAT_ENQ_PIN_KEEP,
+	CSTAT_ENQ_PIN_MOVE,
+	CSTAT_KTHREAD_KICK_SEL,
+	CSTAT_KTHREAD_KICK_ENQ,
+	CSTAT_KTHREAD_KICK_THROTTLE,
 	NR_CSTATS,
 };
 
@@ -81,6 +88,7 @@ struct cpu_ctx {
 	u64 cell_cycles[MAX_CELLS];
 	u64 running_ns[MAX_CELLS];
 	u64 vtime_now;
+	u64 last_kthread_kick_ns;
 	u32 cell;
 	u32 llc;
 };

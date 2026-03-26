@@ -47,6 +47,9 @@ const volatile bool	     cpu_controller_disabled	     = false;
 const volatile bool	     reject_multicpu_pinning	     = false;
 const volatile bool	     userspace_managed_cell_mode     = false;
 const volatile bool	     enable_borrowing		     = false;
+const volatile bool	     dynamic_affinity_cpu_selection  = false;
+const volatile bool	     kthread_preempt_kick	     = false;
+const volatile u64	     kthread_kick_cooldown_ns	     = 0;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -682,6 +685,57 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 }
 
 /*
+ * Switch task to a new CPU's per-CPU DSQ with vtime reset.
+ * Returns new_cpu on success, -1 on failure (tctx unchanged).
+ */
+static __always_inline s32 update_pinned_dsq(struct task_struct *p,
+					     struct task_ctx *tctx, s32 new_cpu)
+{
+	if (get_cpu_dsq_id(new_cpu).raw == tctx->dsq.raw)
+		return new_cpu; /* already on this DSQ */
+
+	struct cpu_ctx *new_cctx = lookup_cpu_ctx(new_cpu);
+	if (!new_cctx)
+		return -1;
+
+	tctx->dsq	 = get_cpu_dsq_id(new_cpu);
+	p->scx.dsq_vtime = READ_ONCE(new_cctx->vtime_now);
+	return new_cpu;
+}
+
+static __always_inline s32 select_pinned_cpu(struct task_struct *p,
+					     s32		 prev_cpu,
+					     struct task_ctx	*tctx,
+					     struct cpu_ctx	*cctx)
+{
+	const struct cpumask *idle_smtmask;
+	s32		      cpu;
+
+	/*
+			* Dynamic affinity balancing: use pick_idle_cpu_from
+			* for SMT-aware idle CPU selection. If no idle CPU,
+			* randomly pick to balance load over time.
+			*/
+	idle_smtmask = scx_bpf_get_idle_smtmask();
+	if (!idle_smtmask)
+		return prev_cpu;
+
+	cpu = pick_idle_cpu_from(p, p->cpus_ptr, prev_cpu, idle_smtmask);
+	scx_bpf_put_idle_cpumask(idle_smtmask);
+
+	if (cpu >= 0) {
+		cstat_inc(CSTAT_PIN_IDLE_HIT, tctx->cell, cctx);
+	} else {
+		cstat_inc(CSTAT_PIN_IDLE_MISS, tctx->cell, cctx);
+		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+	}
+
+	if (update_pinned_dsq(p, tctx, cpu) < 0)
+		cpu = prev_cpu;
+	return cpu;
+}
+
+/*
  * select_cpu is where we update each task's cell assignment and then try to
  * dispatch to an idle core in the cell if possible
  */
@@ -700,12 +754,21 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	if (!tctx->all_cell_cpus_allowed) {
 		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
-		cpu = get_cpu_from_dsq(tctx->dsq);
-		if (cpu < 0)
-			return prev_cpu;
 
-		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+		if (dynamic_affinity_cpu_selection)
+			cpu = select_pinned_cpu(p, prev_cpu, tctx, cctx);
+		else
+			cpu = get_cpu_from_dsq(tctx->dsq);
+
+		if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		} else if (kthread_preempt_kick && (p->flags & PF_KTHREAD)) {
+			// Unlikely to execute.
+			// This would only trigger for a kthread that is pinned to >1 CPU
+			// because select_cpu is not called when weight(thread_cpuset) == 1.
+			cstat_inc(CSTAT_KTHREAD_KICK_SEL, tctx->cell, cctx);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		}
 		return cpu;
 	}
 
@@ -729,6 +792,36 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	return cpu;
 }
 
+static __always_inline s32 enqueue_pinned_cpu(struct task_struct *p,
+					      struct task_ctx	 *tctx,
+					      struct cpu_ctx	 *cctx)
+{
+	/*
+	 * Dynamic affinity balancing: if current assigned CPU
+	 * has tasks queued, randomly pick from allowed CPUs to
+	 * balance load across compatible CPUs over time.
+	 *
+	 * This runs even if select_cpu() was called, because
+	 * select_cpu() may have picked a random CPU when no
+	 * idle CPUs were available, without checking queue depth.
+	 */
+	s32 cpu;
+	cpu = get_cpu_from_dsq(tctx->dsq);
+	if (scx_bpf_dsq_nr_queued(tctx->dsq.raw) > 0) {
+		s32 new_cpu;
+
+		new_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+		if (new_cpu < nr_possible_cpus)
+			if (update_pinned_dsq(p, tctx, new_cpu) >= 0) {
+				cstat_inc(CSTAT_ENQ_PIN_MOVE, tctx->cell, cctx);
+				cpu = new_cpu;
+			}
+	} else {
+		cstat_inc(CSTAT_ENQ_PIN_KEEP, tctx->cell, cctx);
+	}
+	return cpu;
+}
+
 void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx	*cctx;
@@ -749,9 +842,12 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	vtime = p->scx.dsq_vtime;
 
 	if (!tctx->all_cell_cpus_allowed) {
-		cpu = get_cpu_from_dsq(tctx->dsq);
-		if (cpu < 0)
-			return;
+		if (dynamic_affinity_cpu_selection) {
+			cpu = enqueue_pinned_cpu(p, tctx, cctx);
+			vtime = p->scx.dsq_vtime; /* re-read: may have been reset */
+		} else
+			cpu = get_cpu_from_dsq(tctx->dsq);
+
 	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		/*
 		 * If we haven't selected a cpu, then we haven't looked for and kicked an
@@ -824,6 +920,23 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = basis_vtime - slice_ns;
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
+
+	/* Preempt-kick for kthreads on pinned DSQs so they don't wait behind app slices */
+	// Perhaps we could give these a very short vtime?
+	if (kthread_preempt_kick && !tctx->all_cell_cpus_allowed &&
+	    (p->flags & PF_KTHREAD) && cpu >= 0) {
+		u64 now = bpf_ktime_get_ns();
+		if (!kthread_kick_cooldown_ns ||
+		    now - cctx->last_kthread_kick_ns >
+			    kthread_kick_cooldown_ns) {
+			cctx->last_kthread_kick_ns = now;
+			cstat_inc(CSTAT_KTHREAD_KICK_ENQ, tctx->cell, cctx);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		} else {
+			cstat_inc(CSTAT_KTHREAD_KICK_THROTTLE, tctx->cell,
+				  cctx);
+		}
+	}
 
 	/* Kick the CPU if needed */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
