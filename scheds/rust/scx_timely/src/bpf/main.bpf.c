@@ -17,6 +17,9 @@
  * idle CPU scan is enabled.
  */
 #define MAX_CPUS	1024
+#define V2_LOCALITY_NONE	0U
+#define V2_LOCALITY_BASE	1U
+#define V2_LOCALITY_CONGESTED	2U
 
 /*
  * Maximum rate of task wakeups/sec (tasks with a higher rate are capped to
@@ -72,6 +75,28 @@ const volatile u32 timely_backoff_high_fp = 960U;
 const volatile u32 timely_backoff_gradient_fp = 992U;
 const volatile u64 timely_gradient_margin_ns = 125ULL * NSEC_PER_USEC;
 const volatile u64 timely_control_interval_ns = 500ULL * NSEC_PER_USEC;
+const volatile bool v2_locality_fallback;
+const volatile u64 v2_locality_wakeup_freq = 8ULL;
+const volatile u64 v2_locality_max_cpuq = 0ULL;
+const volatile u64 v2_locality_congested_nodeq;
+const volatile u64 v2_locality_congested_max_cpuq;
+const volatile bool v2_local_head_bias;
+const volatile u64 v2_local_head_bias_slack_ns;
+const volatile u32 v2_pressure_enter_streak;
+const volatile u32 v2_pressure_exit_streak;
+
+/*
+ * v2 pressure-aware load-balancing thresholds.
+ *
+ * The scheduler operates in two modes:
+ * - CONTRACT (locality-first): Favor staying on the current/favored CPU set
+ * - EXPAND (balance-first): More aggressively spread work to reduce delay
+ *
+ * These thresholds control when to switch between modes based on the
+ * percentage of CPUs in the primary domain that have queued work.
+ */
+const volatile u32 v2ExpandThreshold = 75;  // % of CPUs with work to trigger expand
+const volatile u32 v2ContractThreshold = 50; // % of CPUs with work to contract back
 
 /*
  * Ignore synchronous wakeup events.
@@ -134,12 +159,46 @@ volatile u64 nr_kthread_dispatches, nr_direct_dispatches, nr_shared_dispatches,
 	     nr_delay_recovery_dispatches, nr_delay_middle_add_dispatches,
 	     nr_delay_fast_recovery_dispatches, nr_delay_rate_limited_dispatches,
 	     nr_gain_floor_dispatches, nr_gain_ceiling_dispatches,
+	     nr_delay_low_region_samples, nr_delay_mid_region_samples,
+	     nr_delay_high_region_samples, nr_gain_floor_resident_samples,
+	     nr_gain_mid_resident_samples, nr_gain_ceiling_resident_samples,
+	     nr_idle_select_path_picks, nr_idle_enqueue_path_picks,
+	     nr_idle_prev_cpu_picks, nr_idle_primary_picks,
+	     nr_idle_spill_picks, nr_idle_pick_failures,
+	     nr_idle_primary_domain_misses, nr_idle_global_misses,
+	     nr_waker_cpu_biases, nr_keep_running_reuses,
+	     nr_keep_running_queue_empty, nr_keep_running_smt_blocked,
+	     nr_keep_running_queued_work,
+	     nr_dispatch_cpu_dsq_consumes, nr_dispatch_node_dsq_consumes,
+	     nr_v2_locality_cpu_dispatches,
+	     nr_v2_congested_locality_cpu_dispatches,
+	     nr_v2_delay_locality_cpu_dispatches, nr_v2_local_head_biases,
+	     nr_v2_pressure_mode_entries, nr_v2_pressure_mode_exits,
+	     nr_v2_pressure_shared_dispatches,
+	     nr_v2_expand_mode_dispatches, nr_v2_contract_mode_dispatches,
 	     nr_cpu_release_reenqueue;
 
 /*
  * Amount of currently running tasks.
  */
 volatile u64 nr_running;
+
+/*
+ * v2 global pressure state for load-balancing decisions.
+ *
+ * This tracks system-wide saturation to decide when to expand (spread work
+ * more aggressively) vs contract (favor locality).
+ *
+ * v2LB policy (per timely-v2-redesign-note.md):
+ * - low pressure -> locality-first, favored CPU set first
+ * - sustained delay pressure -> more decisive shared / balancing behavior
+ * - pressure falls -> contract back toward locality-first behavior
+ */
+volatile u32 v2_global_pressure;       // EMA of delay-pressured tasks (0-100%)
+volatile u32 v2_expand_mode;           // 1 = expand mode (balance-first), 0 = contract mode (locality-first)
+volatile u32 v2_primary_domain_busy;    // % of primary domain CPUs with queued work
+volatile u64 v2_expand_mode_entries;  // Count of expand mode entries
+volatile u64 v2_expand_mode_exits;    // Count of expand mode exits
 
 /*
  * Amount of online CPUs.
@@ -260,6 +319,9 @@ struct task_ctx {
 	u64 wakeup_freq;
 	u64 last_woke_at;
 	u64 avg_runtime;
+	u32 v2_pressure_streak;
+	u32 v2_recovery_streak;
+	u32 v2_pressure_mode;
 };
 
 /* Map that contains task-local storage. */
@@ -501,6 +563,7 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 {
 	const struct cpumask *smt, *primary;
 	bool is_prev_allowed = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
+	bool tried_primary = false;
 	s32 cpu;
 
 	primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
@@ -518,6 +581,7 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 	}
 
 	if (!primary_all) {
+		tried_primary = true;
 		if (smt_enabled) {
 			/*
 			 * Try to pick a full-idle core in the primary
@@ -549,6 +613,10 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 	 * Try to pick any idle CPU in the system.
 	 */
 	cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, NULL, NULL);
+	if (tried_primary && cpu < 0)
+		__sync_fetch_and_add(&nr_idle_primary_domain_misses, 1);
+	if (cpu < 0)
+		__sync_fetch_and_add(&nr_idle_global_misses, 1);
 
 out:
 	if (smt)
@@ -602,6 +670,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 
+		__sync_fetch_and_add(&nr_waker_cpu_biases, 1);
 		prev_cpu = this_cpu;
 	}
 
@@ -630,12 +699,359 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, primary, 0);
 		if (cpu >= 0)
 			return cpu;
+		__sync_fetch_and_add(&nr_idle_primary_domain_misses, 1);
 	}
 
 	/*
 	 * Pick any idle CPU usable by the task.
 	 */
-	return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
+	cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
+	if (cpu < 0)
+		__sync_fetch_and_add(&nr_idle_global_misses, 1);
+	return cpu;
+}
+
+static void record_idle_pick_result(s32 cpu, s32 prev_cpu, bool from_enqueue)
+{
+	const struct cpumask *primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
+
+	if (cpu < 0) {
+		__sync_fetch_and_add(&nr_idle_pick_failures, 1);
+		return;
+	}
+
+	if (from_enqueue)
+		__sync_fetch_and_add(&nr_idle_enqueue_path_picks, 1);
+	else
+		__sync_fetch_and_add(&nr_idle_select_path_picks, 1);
+
+	if (cpu == prev_cpu)
+		__sync_fetch_and_add(&nr_idle_prev_cpu_picks, 1);
+
+	if (primary_all || !primary || bpf_cpumask_test_cpu(cpu, primary))
+		__sync_fetch_and_add(&nr_idle_primary_picks, 1);
+	else
+		__sync_fetch_and_add(&nr_idle_spill_picks, 1);
+}
+
+static bool is_delay_pressured(const struct task_ctx *tctx)
+{
+	const u32 TIMELY_GAIN_ONE = 1024U;
+	u64 low_target, high_target;
+	u32 gain;
+	s64 gradient_margin;
+
+	if (!tctx || !tctx->avg_queue_delay)
+		return false;
+
+	low_target = MAX(timely_tlow_ns, 1);
+	high_target = MAX(timely_thigh_ns, low_target + 1);
+	gain = tctx->timely_gain_fp ?: TIMELY_GAIN_ONE;
+	gradient_margin = (s64)MAX(timely_gradient_margin_ns, 1);
+
+	if (tctx->avg_queue_delay > high_target)
+		return true;
+
+	if (tctx->avg_queue_delay > low_target &&
+	    (gain < TIMELY_GAIN_ONE || tctx->avg_queue_gradient > gradient_margin))
+		return true;
+
+	return false;
+}
+
+static inline bool is_pressure_mode_active(const struct task_ctx *tctx)
+{
+	return tctx && tctx->v2_pressure_mode;
+}
+
+static void update_pressure_mode(struct task_ctx *tctx)
+{
+	if (!tctx || !v2_pressure_enter_streak || !v2_pressure_exit_streak)
+		return;
+
+	if (is_delay_pressured(tctx)) {
+		if (tctx->v2_pressure_streak < v2_pressure_enter_streak)
+			tctx->v2_pressure_streak++;
+		tctx->v2_recovery_streak = 0;
+
+		if (!tctx->v2_pressure_mode &&
+		    tctx->v2_pressure_streak >= v2_pressure_enter_streak) {
+			tctx->v2_pressure_mode = 1;
+			__sync_fetch_and_add(&nr_v2_pressure_mode_entries, 1);
+		}
+		return;
+	}
+
+	tctx->v2_pressure_streak = 0;
+
+	if (!tctx->v2_pressure_mode) {
+		tctx->v2_recovery_streak = 0;
+		return;
+	}
+
+	if (tctx->v2_recovery_streak < v2_pressure_exit_streak)
+		tctx->v2_recovery_streak++;
+
+	if (tctx->v2_recovery_streak >= v2_pressure_exit_streak) {
+		tctx->v2_pressure_mode = 0;
+		tctx->v2_recovery_streak = 0;
+		__sync_fetch_and_add(&nr_v2_pressure_mode_exits, 1);
+	}
+}
+
+/*
+ * v2 Global Pressure-Aware Load Balancing
+ *
+ * This implements the core v2 redesign principle from timely-v2-redesign-note.md:
+ * - low pressure -> locality-first, favored CPU set first
+ * - sustained delay pressure -> more decisive shared / balancing behavior
+ * - pressure falls -> contract back toward locality-first behavior
+ *
+ * The expand/contract decision is based on:
+ * 1. Global pressure: EMA of delay-pressured tasks (system-wide saturation signal)
+ * 2. Primary domain busy: % of CPUs in primary domain with queued work
+ *
+ * When expand mode is active, the scheduler:
+ * - Skips locality fallback and goes directly to shared queues
+ * - Is more aggressive about spreading work across CPUs
+ *
+ * When contract mode is active, the scheduler:
+ * - Favors locality fallback when possible
+ * - Keeps work close to the favored CPU set
+ */
+
+/*
+ * Update the global expand/contract mode based on system-wide pressure.
+ *
+ * This is called periodically from timely_running() to update the global
+ * pressure indicator and switch between expand/contract modes.
+ */
+static void update_global_pressure(const struct task_ctx *tctx)
+{
+	u32 expand_threshold, contract_threshold;
+	u32 new_pressure, old_pressure;
+	u32 primary_busy_pct;
+
+	if (!v2_pressure_enter_streak || !v2_pressure_exit_streak)
+		return;
+
+	/*
+	 * Calculate primary domain busy percentage.
+	 * This is a snapshot of how saturated the primary domain is.
+	 * Use a safe calculation that avoids division by zero and overflow.
+	 */
+	u32 online_cpus = READ_ONCE(nr_online_cpus);
+	if (online_cpus > 0) {
+		/*
+		 * Estimate: use nr_running vs online CPUs as a rough saturation metric.
+		 * Use div64_u64 to avoid overflow in multiplication.
+		 * The multiplication by 100 is safe because nr_running is typically
+		 * much smaller than 2^64 / 100 on any real system.
+		 */
+		u64 running = READ_ONCE(nr_running);
+		u64 product = running * 100ULL;
+		primary_busy_pct = (u32)(product / online_cpus);
+		primary_busy_pct = MIN(primary_busy_pct, 100U);
+		__sync_val_compare_and_swap(&v2_primary_domain_busy, v2_primary_domain_busy,
+					    primary_busy_pct);
+	}
+
+	/*
+	 * Update global pressure EMA.
+	 * If the current task is delay-pressured, increase pressure.
+	 */
+	old_pressure = READ_ONCE(v2_global_pressure);
+	new_pressure = old_pressure;
+
+	if (tctx && is_delay_pressured(tctx)) {
+		/*
+		 * Pressure rising: EMA with weight 0.25 on new sample.
+		 * Use shift for division: x * 3 / 4 = x - x/4
+		 */
+		new_pressure = old_pressure - (old_pressure >> 2) + 25;
+	} else {
+		/* Pressure falling: EMA decay by 1/8 using shift */
+		new_pressure = old_pressure - (old_pressure >> 3);
+	}
+	new_pressure = MIN(new_pressure, 100U);
+
+	__sync_val_compare_and_swap(&v2_global_pressure, old_pressure, new_pressure);
+
+	/*
+	 * Update expand/contract mode based on thresholds.
+	 *
+	 * Hysteresis: expand_threshold > contract_threshold creates a deadband
+	 * to prevent rapid oscillation between modes.
+	 *
+	 * Ensure expand_threshold is at least 1 to avoid division issues,
+	 * and contract_threshold is properly bounded.
+	 */
+	u32 expand_th = READ_ONCE(v2ExpandThreshold);
+	u32 contract_th = READ_ONCE(v2ContractThreshold);
+
+	/* If thresholds are disabled (0), use sensible defaults */
+	if (expand_th == 0)
+		expand_th = 1;
+	if (contract_th >= expand_th)
+		contract_th = expand_th - 1;
+
+	expand_threshold = expand_th;
+	contract_threshold = contract_th;
+
+	if (!v2_expand_mode) {
+		/* Currently in contract mode, check if we should expand */
+		if (new_pressure >= expand_threshold || primary_busy_pct >= expand_threshold) {
+			if (__sync_val_compare_and_swap(&v2_expand_mode, 0, 1) == 0) {
+				__sync_fetch_and_add(&v2_expand_mode_entries, 1);
+			}
+		}
+	} else {
+		/* Currently in expand mode, check if we should contract */
+		if (new_pressure < contract_threshold && primary_busy_pct < contract_threshold) {
+			if (__sync_val_compare_and_swap(&v2_expand_mode, 1, 0) == 1) {
+				__sync_fetch_and_add(&v2_expand_mode_exits, 1);
+			}
+		}
+	}
+}
+
+/*
+ * Return true if v2 expand mode is active (balance-first behavior).
+ */
+static inline bool is_expand_mode_active(void)
+{
+	return READ_ONCE(v2_expand_mode);
+}
+
+/*
+ * Return true if we should skip locality fallback and go directly to
+ * shared queues. This is the core "expand" behavior.
+ *
+ * In expand mode, we bypass the locality fallback and dispatch directly
+ * to the shared node queue to encourage spreading work across CPUs.
+ */
+static bool should_expand_skip_locality(const struct task_ctx *tctx)
+{
+	/*
+	 * In expand mode, skip locality fallback for most tasks to encourage
+	 * better load balancing. However, we still allow wake-heavy tasks
+	 * (typically interactive/audio) to use locality fallback even in
+	 * expand mode, since they benefit from cache locality.
+	 */
+	if (is_expand_mode_active()) {
+		/*
+		 * Check if this is a wake-heavy task.
+		 * Wake-heavy tasks have high wakeup_freq and benefit from staying
+		 * on the same CPU for cache locality, even under pressure.
+		 */
+		if (tctx) {
+			bool wake_heavy = tctx->wakeup_freq >= MAX(v2_locality_wakeup_freq, 1);
+			if (wake_heavy)
+				return false;  // Allow locality fallback for wake-heavy tasks
+		}
+		return true;  // Skip locality fallback for non-wake-heavy tasks
+	}
+
+	/*
+	 * In contract mode (low pressure), also skip locality fallback if
+	 * in task-level pressure mode and the primary domain is showing signs
+	 * of saturation.
+	 */
+	if (tctx && tctx->v2_pressure_mode) {
+		u32 primary_busy = READ_ONCE(v2_primary_domain_busy);
+		if (primary_busy >= v2ExpandThreshold / 2)
+			return true;
+	}
+
+	return false;
+}
+
+static u32 locality_fallback_kind(const struct task_struct *p,
+				  const struct task_ctx *tctx,
+				  s32 prev_cpu,
+				  bool *from_delay_pressure)
+{
+	u64 cpuq, nodeq;
+	bool wake_heavy, delay_pressured;
+
+	if (from_delay_pressure)
+		*from_delay_pressure = false;
+
+	if (!v2_locality_fallback || !tctx || is_pcpu_task(p))
+		return V2_LOCALITY_NONE;
+
+	wake_heavy = tctx->wakeup_freq >= MAX(v2_locality_wakeup_freq, 1);
+	delay_pressured = is_delay_pressured(tctx);
+	if (!wake_heavy && !delay_pressured)
+		return V2_LOCALITY_NONE;
+
+	cpuq = scx_bpf_dsq_nr_queued(cpu_dsq(prev_cpu));
+	nodeq = scx_bpf_dsq_nr_queued(node_dsq(prev_cpu));
+
+	/*
+	 * Only bias back toward the previous CPU when its local queue is nearly
+	 * empty and still lighter than the shared node queue. This keeps the v2
+	 * fallback tightly focused on wake-heavy locality instead of broadly
+	 * moving work out of the shared path.
+	 */
+	if (cpuq <= v2_locality_max_cpuq && cpuq < nodeq)
+		goto use_local;
+
+	/*
+	 * If the shared node queue is clearly congested, allow a slightly wider
+	 * fallback to prev_cpu's local queue. This remains bounded by requiring a
+	 * very small local queue and an explicitly non-empty shared path.
+	 */
+	if (v2_locality_congested_nodeq &&
+	    nodeq >= v2_locality_congested_nodeq &&
+	    cpuq <= v2_locality_congested_max_cpuq)
+		goto use_congested;
+
+	return V2_LOCALITY_NONE;
+
+use_local:
+	if (from_delay_pressure)
+		*from_delay_pressure = delay_pressured && !wake_heavy;
+	return V2_LOCALITY_BASE;
+
+use_congested:
+	if (from_delay_pressure)
+		*from_delay_pressure = delay_pressured && !wake_heavy;
+	return V2_LOCALITY_CONGESTED;
+}
+
+static bool should_bias_local_head(const struct task_struct *p,
+				   const struct task_struct *q,
+				   bool *from_delay_pressure)
+{
+	struct task_ctx *tctx;
+	bool wake_heavy, delay_pressured;
+	u64 slack, diff;
+
+	if (from_delay_pressure)
+		*from_delay_pressure = false;
+
+	if (!v2_local_head_bias || !p || !q)
+		return false;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return false;
+	wake_heavy = tctx->wakeup_freq >= MAX(v2_locality_wakeup_freq, 1);
+	delay_pressured = is_delay_pressured(tctx);
+	if (!wake_heavy && !delay_pressured)
+		return false;
+	if (p->scx.dsq_vtime <= q->scx.dsq_vtime)
+		return false;
+
+	slack = v2_local_head_bias_slack_ns;
+	if (!slack)
+		return false;
+
+	diff = p->scx.dsq_vtime - q->scx.dsq_vtime;
+	if (from_delay_pressure)
+		*from_delay_pressure = delay_pressured && !wake_heavy;
+	return diff <= slack;
 }
 
 /*
@@ -799,6 +1215,22 @@ static u64 task_slice(const struct task_struct *p, s32 cpu)
 		u32 action = TIMELY_ACTION_NONE;
 		bool gain_changed = false;
 
+		if (old_gain <= gain_min) {
+			__sync_fetch_and_add(&nr_gain_floor_resident_samples, 1);
+		} else if (old_gain >= TIMELY_GAIN_ONE) {
+			__sync_fetch_and_add(&nr_gain_ceiling_resident_samples, 1);
+		} else {
+			__sync_fetch_and_add(&nr_gain_mid_resident_samples, 1);
+		}
+
+		if (tctx->avg_queue_delay > high_target) {
+			__sync_fetch_and_add(&nr_delay_high_region_samples, 1);
+		} else if (tctx->avg_queue_delay <= low_target) {
+			__sync_fetch_and_add(&nr_delay_low_region_samples, 1);
+		} else {
+			__sync_fetch_and_add(&nr_delay_mid_region_samples, 1);
+		}
+
 		if (tctx->last_gain_update_at &&
 		    tctx->last_delay_sample_at - tctx->last_gain_update_at < control_interval) {
 			__sync_fetch_and_add(&nr_delay_rate_limited_dispatches, 1);
@@ -919,6 +1351,7 @@ s32 BPF_STRUCT_OPS(timely_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 */
 	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
 			    wake_flags, false);
+	record_idle_pick_result(cpu, prev_cpu, false);
 	if (cpu >= 0) {
 		struct task_ctx *tctx;
 
@@ -1003,11 +1436,15 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(timely_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p);
+	bool locality_from_delay_pressure = false;
+	bool pressure_mode_active;
+	u32 fallback_kind = V2_LOCALITY_NONE;
 	struct task_ctx *tctx;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	pressure_mode_active = is_pressure_mode_active(tctx);
 	tctx->last_enqueued_at = bpf_ktime_get_ns();
 
 	/*
@@ -1066,6 +1503,7 @@ void BPF_STRUCT_OPS(timely_enqueue, struct task_struct *p, u64 enq_flags)
 			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
 		else
 			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
+		record_idle_pick_result(cpu, prev_cpu, true);
 
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
@@ -1076,15 +1514,48 @@ void BPF_STRUCT_OPS(timely_enqueue, struct task_struct *p, u64 enq_flags)
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
+
+		/*
+		 * v2 pressure-aware load-balancing:
+		 * - In expand mode (sustained delay pressure): skip locality fallback,
+		 *   go directly to shared queue for better balancing
+		 * - In contract mode (low pressure): allow locality fallback to
+		 *   keep work close to the favored CPU set
+		 */
+		if (!should_expand_skip_locality(tctx))
+			fallback_kind = locality_fallback_kind(p, tctx, prev_cpu,
+						       &locality_from_delay_pressure);
+	}
+
+	if (fallback_kind != V2_LOCALITY_NONE) {
+		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
+					 task_slice(p, prev_cpu), task_dl(p, prev_cpu, tctx), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		__sync_fetch_and_add(&nr_v2_locality_cpu_dispatches, 1);
+		if (fallback_kind == V2_LOCALITY_CONGESTED)
+			__sync_fetch_and_add(&nr_v2_congested_locality_cpu_dispatches, 1);
+		if (locality_from_delay_pressure)
+			__sync_fetch_and_add(&nr_v2_delay_locality_cpu_dispatches, 1);
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		return;
 	}
 
 	/*
 	 * Dispatch the task to the node DSQ, using the deadline-based
 	 * scheduling.
+	 *
+	 * Track v2 expand vs contract mode for shared dispatches.
 	 */
 	scx_bpf_dsq_insert_vtime(p, node_dsq(prev_cpu),
 				 task_slice(p, prev_cpu), task_dl(p, prev_cpu, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+	if (is_expand_mode_active()) {
+		__sync_fetch_and_add(&nr_v2_expand_mode_dispatches, 1);
+	} else {
+		__sync_fetch_and_add(&nr_v2_contract_mode_dispatches, 1);
+	}
+	if (pressure_mode_active)
+		__sync_fetch_and_add(&nr_v2_pressure_shared_dispatches, 1);
 
 	/*
 	 * No need to kick the CPU if ops.select_cpu() has been called.
@@ -1100,8 +1571,10 @@ void BPF_STRUCT_OPS(timely_enqueue, struct task_struct *p, u64 enq_flags)
 static bool keep_running(const struct task_struct *p, s32 cpu)
 {
 	/* Do not keep running if the task doesn't need to run */
-	if (!is_task_queued(p))
+	if (!is_task_queued(p)) {
+		__sync_fetch_and_add(&nr_keep_running_queue_empty, 1);
 		return false;
+	}
 
 	/*
 	 * If the task can only run on this CPU, keep it running.
@@ -1114,8 +1587,10 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	 * full-idle SMT cores available in the system, give it a chance to
 	 * migrate elsewhere.
 	 */
-	if (is_smt_contended(cpu))
+	if (is_smt_contended(cpu)) {
+		__sync_fetch_and_add(&nr_keep_running_smt_blocked, 1);
 		return false;
+	}
 
 	return true;
 }
@@ -1136,6 +1611,14 @@ void BPF_STRUCT_OPS(timely_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(cpu));
 	struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(node_dsq(cpu));
+	bool had_queued_work = false;
+	bool consumed = false;
+	bool local_head_bias = should_bias_local_head(p, q, NULL);
+
+	if (p)
+		had_queued_work = true;
+	if (q)
+		had_queued_work = true;
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
@@ -1148,12 +1631,30 @@ void BPF_STRUCT_OPS(timely_dispatch, s32 cpu, struct task_struct *prev)
 	 * per-node DSQ, picking the one with the minimum deadline that can
 	 * run on @cpu.
 	 */
-	if (!is_deadline_min(q, p)) {
-		if (consume_first_task(cpu_dsq(cpu), p) || consume_first_task(node_dsq(cpu), q))
+	if (local_head_bias || !is_deadline_min(q, p)) {
+		if (consume_first_task(cpu_dsq(cpu), p)) {
+			__sync_fetch_and_add(&nr_dispatch_cpu_dsq_consumes, 1);
+			if (local_head_bias)
+				__sync_fetch_and_add(&nr_v2_local_head_biases, 1);
+			consumed = true;
 			return;
+		}
+		if (consume_first_task(node_dsq(cpu), q)) {
+			__sync_fetch_and_add(&nr_dispatch_node_dsq_consumes, 1);
+			consumed = true;
+			return;
+		}
 	} else {
-		if (consume_first_task(node_dsq(cpu), q) || consume_first_task(cpu_dsq(cpu), p))
+		if (consume_first_task(node_dsq(cpu), q)) {
+			__sync_fetch_and_add(&nr_dispatch_node_dsq_consumes, 1);
+			consumed = true;
 			return;
+		}
+		if (consume_first_task(cpu_dsq(cpu), p)) {
+			__sync_fetch_and_add(&nr_dispatch_cpu_dsq_consumes, 1);
+			consumed = true;
+			return;
+		}
 	}
 
 	/*
@@ -1161,8 +1662,12 @@ void BPF_STRUCT_OPS(timely_dispatch, s32 cpu, struct task_struct *prev)
 	 * to run, simply replenish its time slice and let it run for another
 	 * round on the same CPU.
 	 */
-	if (prev && keep_running(prev, cpu))
+	if (prev && !consumed && !had_queued_work && keep_running(prev, cpu)) {
+		__sync_fetch_and_add(&nr_keep_running_reuses, 1);
 		prev->scx.slice = task_slice(prev, cpu);
+	} else if (prev && !consumed && had_queued_work) {
+		__sync_fetch_and_add(&nr_keep_running_queued_work, 1);
+	}
 }
 
 /*
@@ -1249,6 +1754,8 @@ void BPF_STRUCT_OPS(timely_running, struct task_struct *p)
 			calc_avg_s64(tctx->avg_queue_gradient, gradient);
 		tctx->last_delay_sample_at = tctx->last_run_at;
 		tctx->last_enqueued_at = 0;
+		update_pressure_mode(tctx);
+		update_global_pressure(tctx);
 	}
 
 	/*
