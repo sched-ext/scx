@@ -108,7 +108,7 @@ struct Opts {
 
     /// The tuner runs at a higher frequency than the load balancer to dynamically
     /// tune scheduling behavior. Tuning interval in seconds.
-    #[clap(short = 'I', long, default_value = "0.1")]
+    #[clap(short = 'I', long, default_value = "2.0")]
     tune_interval: f64,
 
     /// The half-life of task and domain load running averages in seconds.

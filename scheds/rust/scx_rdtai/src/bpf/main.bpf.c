@@ -415,14 +415,16 @@ static void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable)
 		return;
 
 	bpf_spin_lock(&lockw->lock);
-	bucket->dcycle += adj;
+	if (adj < 0 && bucket->dcycle == 0) {
+		if (debug >= 1) {
+			bpf_printk("WARNING: cpu%d dom%u bucket%u load underflow prevented",
+				   bpf_get_smp_processor_id(), dom_id, bucket_idx);
+		}
+	} else {
+		bucket->dcycle += adj;
+	}
 	ravg_accumulate(&bucket->rd, bucket->dcycle, now, load_half_life);
 	bpf_spin_unlock(&lockw->lock);
-
-	if (adj < 0 && (s64)bucket->dcycle < 0)
-		scx_bpf_error("cpu%d dom%u bucket%u load underflow (dcycle=%lld adj=%lld)",
-			      bpf_get_smp_processor_id(), dom_id, bucket_idx,
-			      bucket->dcycle, adj);
 
 	if (debug >=2 &&
 	    (!domc->dbg_dcycle_printed_at || now - domc->dbg_dcycle_printed_at >= 1000000000)) {

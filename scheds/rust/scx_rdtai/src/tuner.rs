@@ -131,8 +131,12 @@ impl Tuner {
                 // Burst threshold to distinguish interactive (short) vs batch (long) tasks
                 let burst_threshold = 1_000_000; // 1ms
 
-                let mut nodes = Vec::with_capacity(15);
+                info!("RDTAI AI Optimization (Util: {:.2}%):", avg_util * 100.0);
+                info!("  [Node 0] Wait Threshold: {} ns", wait_threshold);
+                info!("  [Node 1&2] Cache Threshold: {} misses", cache_threshold);
+                info!("  [Node 3-6] Burst Threshold: {} ns", burst_threshold);
 
+                let mut nodes = Vec::with_capacity(15);
                 // NODE 0: Root (Wait Time)
                 nodes.push(bpf_intf::rdtai_node {
                     feature_id: bpf_intf::rdtai_feature_FEAT_WAIT_TIME,
@@ -194,21 +198,40 @@ impl Tuner {
                 nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
                 // Leaf 14: High Wait, High Cache, Long Burst -> Run Now (Emergency)
                 nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
-                // Push all 15 nodes to the BPF Map
+                // Push all 15 nodes to the BPF Map and log each one
+                info!("--- RDTAI 15-Node Tree Weights (2s Update) ---");
                 for (i, node) in nodes.iter().enumerate() {
+                    if node.is_leaf {
+                        let action_str = match node.leaf_action {
+                            0 => "Keep Local",
+                            1 => "Migrate",
+                            2 => "Run Now",
+                            _ => "Unknown",
+                        };
+                        info!("  [Node {:2}] LEAF -> Action: {}", i, action_str);
+                    } else {
+                        let feat_str = match node.feature_id {
+                            bpf_intf::rdtai_feature_FEAT_WAIT_TIME => "WaitTime",
+                            bpf_intf::rdtai_feature_FEAT_CACHE_MISSES => "CacheMiss",
+                            bpf_intf::rdtai_feature_FEAT_EXEC_TIME => "BurstTime",
+                            bpf_intf::rdtai_feature_FEAT_LOAD => "Load",
+                            _ => "Unknown",
+                        };
+                        info!("  [Node {:2}] Branch: {} < {} ? (L:{} R:{})", 
+                              i, feat_str, node.threshold, node.left_child, node.right_child);
+                    }
+
                     let mut key = [0u8; 4];
                     key.copy_from_slice(&(i as u32).to_ne_bytes());
                     tree_map.update(&key, unsafe {
                         std::slice::from_raw_parts(node as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>())
                     }, libbpf_rs::MapFlags::ANY)?;
                 }
-
-                if avg_util > 0.8 {
-                    info!("RDTAI 4-Level Tree Optimized for high load (Wait Threshold: {}ns)", wait_threshold);
-                }
+                info!("----------------------------------------------");
 
                 Ok(())
-            }
+                }
+
     /// Apply a step in the Tuner by:
     ///
     /// 1. Recording CPU stats from procfs

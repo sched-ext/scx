@@ -61,3 +61,272 @@ Testing Scheduler: scx_rdtai
      Result: 110.90 seconds
 --------------------------------
 Benchmarking Complete!
+Starting Benchmarking Suite...
+--------------------------------
+Testing Scheduler: scx_rlfifo
+  [ERROR] scx_rlfifo failed to start.
+Testing Scheduler: scx_rusty
+  [ERROR] scx_rusty failed to start.
+Testing Scheduler: scx_rustland
+Starting Benchmarking Suite...
+--------------------------------
+Testing Scheduler: scx_rlfifo
+  -> Running Sysbench...
+     Result: 22904.34 events/s
+  -> Running Schbench...
+Wakeup Latencies percentiles (usec) runtime 10 (s) (23007 total samples)
+	  50.0th: 981        (7094 samples)
+	  90.0th: 1007       (9109 samples)
+	* 99.0th: 1986       (1982 samples)
+	  99.9th: 2014       (192 samples)
+	  min=1, max=3988
+Request Latencies percentiles (usec) runtime 10 (s) (22980 total samples)
+	  50.0th: 10544      (6888 samples)
+	  90.0th: 20576      (9194 samples)
+	* 99.0th: 36160      (2042 samples)
+	  99.9th: 51136      (207 samples)
+	  min=3732, max=108440
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2212       (3 samples)
+	* 50.0th: 2260       (3 samples)
+	  90.0th: 2412       (4 samples)
+	  min=2195, max=2490
+sched delay: message 596 (usec) worker 623 (usec)
+current rps: 2208.03
+Wakeup Latencies percentiles (usec) runtime 10 (s) (23013 total samples)
+	  50.0th: 981        (7097 samples)
+	  90.0th: 1007       (9112 samples)
+	* 99.0th: 1986       (1982 samples)
+	  99.9th: 2014       (192 samples)
+	  min=1, max=3988
+Request Latencies percentiles (usec) runtime 10 (s) (23015 total samples)
+	  50.0th: 10544      (6896 samples)
+	  90.0th: 20576      (9209 samples)
+	* 99.0th: 36160      (2046 samples)
+	  99.9th: 51136      (208 samples)
+	  min=3732, max=108440
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2212       (3 samples)
+	* 50.0th: 2260       (3 samples)
+	  90.0th: 2412       (4 samples)
+	  min=2195, max=2490
+average rps: 2301.50
+sched delay: message 0 (usec) worker 0 (usec)
+     Parsed Result: Median=981
+981us, P99=1986
+1986us
+  -> Running Perf...
+     Result: 18.41% misses
+  -> Running Kernel Compile as rishi...
+     Result: 125.08 seconds
+--------------------------------
+Testing Scheduler: scx_rusty
+  -> Running Sysbench...
+Starting Benchmarking Suite...
+--------------------------------
+Testing Scheduler: scx_rlfifo
+  [ERROR] scx_rlfifo failed to start.
+Testing Scheduler: scx_rusty
+Starting Benchmarking Suite...
+--------------------------------
+Testing Scheduler: scx_rlfifo
+  -> Running Sysbench...
+     Result: 22928.55 events/s
+  -> Running Schbench...
+Wakeup Latencies percentiles (usec) runtime 10 (s) (24359 total samples)
+	  50.0th: 973        (7319 samples)
+	  90.0th: 1005       (10117 samples)
+	* 99.0th: 1986       (1823 samples)
+	  99.9th: 2010       (198 samples)
+	  min=1, max=7002
+Request Latencies percentiles (usec) runtime 10 (s) (24330 total samples)
+	  50.0th: 10160      (7344 samples)
+	  90.0th: 19104      (9660 samples)
+	* 99.0th: 32832      (2179 samples)
+	  99.9th: 46784      (219 samples)
+	  min=3545, max=64940
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2372       (3 samples)
+	* 50.0th: 2436       (4 samples)
+	  90.0th: 2476       (3 samples)
+	  min=2360, max=2483
+sched delay: message 551 (usec) worker 585 (usec)
+current rps: 2360.86
+Wakeup Latencies percentiles (usec) runtime 10 (s) (24362 total samples)
+	  50.0th: 973        (7319 samples)
+	  90.0th: 1005       (10120 samples)
+	* 99.0th: 1986       (1823 samples)
+	  99.9th: 2010       (198 samples)
+	  min=1, max=7002
+Request Latencies percentiles (usec) runtime 10 (s) (24363 total samples)
+	  50.0th: 10160      (7350 samples)
+	  90.0th: 19104      (9677 samples)
+	* 99.0th: 32832      (2183 samples)
+	  99.9th: 46784      (219 samples)
+	  min=3545, max=64940
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2372       (3 samples)
+	* 50.0th: 2436       (4 samples)
+	  90.0th: 2476       (3 samples)
+	  min=2360, max=2483
+average rps: 2436.30
+sched delay: message 0 (usec) worker 0 (usec)
+     Parsed Result: Median=973
+973us, P99=1986
+1986us
+  -> Running Perf...
+     Result: 11.98% misses
+  -> Running Kernel Compile as rishi...
+     Result: 114.68 seconds
+--------------------------------
+Testing Scheduler: scx_rusty
+  -> Running Sysbench...
+     Result: 22020.91 events/s
+  -> Running Schbench...
+Wakeup Latencies percentiles (usec) runtime 10 (s) (22405 total samples)
+	  50.0th: 497        (6671 samples)
+	  90.0th: 1842       (8964 samples)
+	* 99.0th: 4504       (2014 samples)
+	  99.9th: 9168       (201 samples)
+	  min=1, max=25168
+Request Latencies percentiles (usec) runtime 10 (s) (22376 total samples)
+	  50.0th: 10672      (6772 samples)
+	  90.0th: 22944      (8903 samples)
+	* 99.0th: 43968      (2000 samples)
+	  99.9th: 74368      (200 samples)
+	  min=3852, max=204441
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2188       (4 samples)
+	* 50.0th: 2204       (2 samples)
+	  90.0th: 2292       (4 samples)
+	  min=2139, max=2316
+sched delay: message 263 (usec) worker 682 (usec)
+current rps: 2195.80
+Wakeup Latencies percentiles (usec) runtime 10 (s) (22410 total samples)
+	  50.0th: 497        (6672 samples)
+	  90.0th: 1842       (8968 samples)
+	* 99.0th: 4504       (2014 samples)
+	  99.9th: 9168       (201 samples)
+	  min=1, max=25168
+Request Latencies percentiles (usec) runtime 10 (s) (22410 total samples)
+	  50.0th: 10672      (6780 samples)
+	  90.0th: 22944      (8914 samples)
+	* 99.0th: 43968      (2008 samples)
+	  99.9th: 74368      (200 samples)
+	  min=3852, max=204441
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2188       (4 samples)
+	* 50.0th: 2204       (2 samples)
+	  90.0th: 2292       (4 samples)
+	  min=2139, max=2316
+average rps: 2241.00
+sched delay: message 0 (usec) worker 0 (usec)
+     Parsed Result: Median=497
+497us, P99=4504
+4504us
+  -> Running Perf...
+     Result: 18.50% misses
+  -> Running Kernel Compile as rishi...
+     Result: 115.60 seconds
+--------------------------------
+Testing Scheduler: scx_rustland
+  -> Running Sysbench...
+     Result: 22319.11 events/s
+  -> Running Schbench...
+Wakeup Latencies percentiles (usec) runtime 10 (s) (25549 total samples)
+	  50.0th: 799        (7665 samples)
+	  90.0th: 1654       (10230 samples)
+	* 99.0th: 2436       (2288 samples)
+	  99.9th: 3068       (226 samples)
+	  min=1, max=4612
+Request Latencies percentiles (usec) runtime 10 (s) (25521 total samples)
+	  50.0th: 10032      (7627 samples)
+	  90.0th: 16416      (10208 samples)
+	* 99.0th: 29408      (2293 samples)
+	  99.9th: 44352      (229 samples)
+	  min=3748, max=60062
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2476       (3 samples)
+	* 50.0th: 2532       (3 samples)
+	  90.0th: 2604       (4 samples)
+	  min=2477, max=2616
+sched delay: message 919 (usec) worker 982 (usec)
+current rps: 2511.83
+Wakeup Latencies percentiles (usec) runtime 10 (s) (25554 total samples)
+	  50.0th: 799        (7665 samples)
+	  90.0th: 1654       (10235 samples)
+	* 99.0th: 2436       (2288 samples)
+	  99.9th: 3068       (226 samples)
+	  min=1, max=4612
+Request Latencies percentiles (usec) runtime 10 (s) (25555 total samples)
+	  50.0th: 10032      (7638 samples)
+	  90.0th: 16416      (10218 samples)
+	* 99.0th: 29408      (2299 samples)
+	  99.9th: 44352      (229 samples)
+	  min=3748, max=60062
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2476       (3 samples)
+	* 50.0th: 2532       (3 samples)
+	  90.0th: 2604       (4 samples)
+	  min=2477, max=2616
+average rps: 2555.50
+sched delay: message 0 (usec) worker 0 (usec)
+     Parsed Result: Median=799
+799us, P99=2436
+2436us
+  -> Running Perf...
+     Result: 18.52% misses
+  -> Running Kernel Compile as rishi...
+     Result: 114.10 seconds
+--------------------------------
+Testing Scheduler: scx_rdtai
+  -> Running Sysbench...
+     Result: 22203.67 events/s
+  -> Running Schbench...
+Wakeup Latencies percentiles (usec) runtime 10 (s) (29628 total samples)
+	  50.0th: 303        (8649 samples)
+	  90.0th: 3804       (11854 samples)
+	* 99.0th: 6712       (2661 samples)
+	  99.9th: 10800      (268 samples)
+	  min=1, max=20993
+Request Latencies percentiles (usec) runtime 10 (s) (29602 total samples)
+	  50.0th: 9392       (8939 samples)
+	  90.0th: 11824      (11758 samples)
+	* 99.0th: 15952      (2667 samples)
+	  99.9th: 18784      (261 samples)
+	  min=4002, max=24175
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2932       (3 samples)
+	* 50.0th: 2964       (4 samples)
+	  90.0th: 2972       (3 samples)
+	  min=2928, max=2977
+sched delay: message 219 (usec) worker 1374 (usec)
+current rps: 2928.47
+Wakeup Latencies percentiles (usec) runtime 10 (s) (29633 total samples)
+	  50.0th: 303        (8649 samples)
+	  90.0th: 3804       (11857 samples)
+	* 99.0th: 6712       (2663 samples)
+	  99.9th: 10800      (268 samples)
+	  min=1, max=20993
+Request Latencies percentiles (usec) runtime 10 (s) (29636 total samples)
+	  50.0th: 9392       (8951 samples)
+	  90.0th: 11824      (11773 samples)
+	* 99.0th: 15952      (2669 samples)
+	  99.9th: 18784      (261 samples)
+	  min=4002, max=24175
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+	  20.0th: 2932       (3 samples)
+	* 50.0th: 2964       (4 samples)
+	  90.0th: 2972       (3 samples)
+	  min=2928, max=2977
+average rps: 2963.60
+sched delay: message 0 (usec) worker 0 (usec)
+     Parsed Result: Median=303
+303us, P99=6712
+6712us
+  -> Running Perf...
+     Result: 20.21% misses
+  -> Running Kernel Compile as rishi...
+     Result: 113.87 seconds
+--------------------------------
+Benchmarking Complete!
