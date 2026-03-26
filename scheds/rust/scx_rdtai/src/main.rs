@@ -211,6 +211,10 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
+    /// PMU event to track. Default is 3 (PERF_COUNT_HW_CACHE_MISSES).
+    #[clap(long, default_value = "3")]
+    pmu_event: u64,
+
     /// Enable verbose output, including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -446,11 +450,16 @@ impl<'a> Scheduler<'a> {
         rodata.greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
         rodata.direct_greedy_numa = opts.direct_greedy_numa;
         rodata.mempolicy_affinity = opts.mempolicy_affinity;
+        rodata.rdtai_pmu_event = opts.pmu_event;
         rodata.debug = opts.verbose as u32;
         rodata.rdtai_perf_mode = opts.perf;
 
         // Attach.
         let mut skel = scx_ops_load!(skel, rdtai, uei)?;
+        
+        // Push default decision tree to the kernel.
+        Self::push_default_tree(&mut skel)?;
+
         let struct_ops = Some(scx_ops_attach!(skel, rdtai)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
@@ -490,6 +499,60 @@ impl<'a> Scheduler<'a> {
             )?,
             stats_server,
         })
+    }
+
+    fn push_default_tree(skel: &mut BpfSkel) -> Result<()> {
+        let tree_map = &mut skel.maps.rdtai_tree;
+        
+        // Node 0: If Wait Time > 1ms -> Node 1 (Leaf: Run Immediately)
+        //                            Else -> Node 2 (Leaf: Keep Local)
+        let root = bpf_intf::rdtai_node {
+            feature_id: bpf_intf::rdtai_feature_FEAT_WAIT_TIME,
+            threshold: 1_000_000, // 1ms in nanoseconds
+            left_child: 2,
+            right_child: 1,
+            is_leaf: false,
+            leaf_action: 0,
+        };
+        
+        // Node 1: Leaf - Run Immediately
+        let leaf_run = bpf_intf::rdtai_node {
+            feature_id: 0,
+            threshold: 0,
+            left_child: 0,
+            right_child: 0,
+            is_leaf: true,
+            leaf_action: 2, // RDTAI_ACTION_RUN_IMMEDIATELY
+        };
+        
+        // Node 2: Leaf - Keep Local (Normal scheduling)
+        let leaf_keep = bpf_intf::rdtai_node {
+            feature_id: 0,
+            threshold: 0,
+            left_child: 0,
+            right_child: 0,
+            is_leaf: true,
+            leaf_action: 0, // RDTAI_ACTION_KEEP_LOCAL
+        };
+
+        let mut key = [0u8; 4];
+        key.copy_from_slice(&0u32.to_ne_bytes());
+        tree_map.update(&key, unsafe { 
+            std::slice::from_raw_parts(&root as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
+        }, libbpf_rs::MapFlags::ANY)?;
+
+        key.copy_from_slice(&1u32.to_ne_bytes());
+        tree_map.update(&key, unsafe { 
+            std::slice::from_raw_parts(&leaf_run as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
+        }, libbpf_rs::MapFlags::ANY)?;
+
+        key.copy_from_slice(&2u32.to_ne_bytes());
+        tree_map.update(&key, unsafe { 
+            std::slice::from_raw_parts(&leaf_keep as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
+        }, libbpf_rs::MapFlags::ANY)?;
+
+        info!("Default decision tree pushed to kernel!");
+        Ok(())
     }
 
     fn cluster_stats(&self, sc: &StatsCtx, node_stats: BTreeMap<usize, NodeStats>) -> ClusterStats {

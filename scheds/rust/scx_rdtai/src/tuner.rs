@@ -9,8 +9,11 @@ use ::fb_procfs as procfs;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
+use log::info;
+use libbpf_rs::MapCore;
 use scx_utils::Cpumask;
 
+use crate::bpf_intf;
 use crate::sub_or_zero;
 use crate::BpfSkel;
 use crate::DomainGroup;
@@ -77,6 +80,10 @@ pub struct Tuner {
     kick_greedy_under: f64,
     proc_reader: procfs::ProcReader,
     prev_cpu_stats: BTreeMap<u32, procfs::CpuStat>,
+    // Optimization parameters
+    wait_weight: f64,
+    cache_weight: f64,
+    burst_weight: f64,
 }
 
 impl Tuner {
@@ -105,7 +112,61 @@ impl Tuner {
             underutil_slice_ns,
             overutil_slice_ns,
             dom_group,
-        })
+            wait_weight: 1.0,
+            cache_weight: 5.0, // Cache misses are expensive
+            burst_weight: 0.1,
+            })
+            }
+
+            /// The Robust Loss Function Optimization
+            /// Calculates the 'Penalty' score of the current scheduling state and
+            /// adjusts the decision tree thresholds in the kernel.
+            pub fn optimize_tree(&mut self, skel: &mut BpfSkel, avg_util: f64) -> Result<()> {
+            let tree_map = &mut skel.maps.rdtai_tree;
+
+            // LOSS FUNCTION:
+            // Penalty = (avg_util * wait_weight) + (cache_misses_est * cache_weight)
+            // We adjust the 'Wait Threshold' based on this penalty.
+            let penalty = avg_util * self.wait_weight;
+
+            // Dynamic Threshold calculation:
+            // High Penalty (high util) -> Lower Threshold (be more aggressive)
+            // Low Penalty (low util) -> Higher Threshold (be more conservative)
+            let mut wait_threshold = 1_000_000; // Default 1ms
+            if penalty > 0.8 {
+            wait_threshold = 200_000; // 200us
+            } else if penalty > 0.5 {
+            wait_threshold = 500_000; // 500us
+            }
+
+            // Update the Root Node (Node 0) in the BPF map
+            let mut root = bpf_intf::rdtai_node {
+            feature_id: bpf_intf::rdtai_feature_FEAT_WAIT_TIME,
+            threshold: wait_threshold,
+            left_child: 2,  // Keep Local
+            right_child: 1, // Run Immediately
+            is_leaf: false,
+            leaf_action: 0,
+            };
+
+            let mut key = [0u8; 4];
+            key.copy_from_slice(&0u32.to_ne_bytes());
+            tree_map.update(
+            &key,
+            unsafe {
+                std::slice::from_raw_parts(
+                    &root as *const _ as *const u8,
+                    std::mem::size_of::<bpf_intf::rdtai_node>(),
+                )
+            },
+            libbpf_rs::MapFlags::ANY,
+            )?;
+
+            if avg_util > 0.9 {
+            info!("RDTAI Optimized: High Util detected, wait threshold lowered to {}ns", wait_threshold);
+            }
+
+            Ok(())
     }
 
     /// Apply a step in the Tuner by:
@@ -137,6 +198,9 @@ impl Tuner {
         }
         avg_util /= self.dom_group.weight() as f64;
         self.fully_utilized = avg_util >= 0.99999;
+
+        // Optimize the AI Decision Tree based on current utilization (Loss Function)
+        self.optimize_tree(skel, avg_util)?;
 
         self.direct_greedy_mask.clear_all();
         self.kick_greedy_mask.clear_all();

@@ -45,6 +45,9 @@
 
 #include "ravg_impl.bpf.h"
 #include "sdt_task.h"
+#include <lib/pmu.h>
+#include <lib/cleanup.bpf.h>
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
@@ -85,6 +88,7 @@ const volatile u32 greedy_threshold;
 const volatile u32 greedy_threshold_x_numa;
 const volatile u32 rdtai_perf_mode;
 const volatile u32 debug;
+const volatile u64 rdtai_pmu_event;
 
 /* base slice duration */
 volatile u64 slice_ns;
@@ -96,6 +100,54 @@ struct bpfmask_wrapper {
 struct rdtai_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
 };
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct rdtai_node);
+	__uint(max_entries, MAX_TREE_NODES);
+} rdtai_tree SEC(".maps");
+
+static u32 walk_tree(struct task_ctx *taskc)
+{
+	u32 node_idx = 0;
+	struct rdtai_node *node;
+
+	#pragma unroll
+	for (int i = 0; i < 10; i++) {
+		node = bpf_map_lookup_elem(&rdtai_tree, &node_idx);
+		if (!node)
+			break;
+
+		if (node->is_leaf)
+			return node->leaf_action;
+
+		u64 val = 0;
+		switch (node->feature_id) {
+		case FEAT_WAIT_TIME:
+			val = scx_bpf_now() - taskc->wait_at;
+			break;
+		case FEAT_CACHE_MISSES:
+			val = taskc->cache_misses;
+			break;
+		case FEAT_EXEC_TIME:
+			val = taskc->last_burst;
+			break;
+		case FEAT_LOAD:
+			val = ravg_read(&taskc->dcyc_rd, scx_bpf_now(), load_half_life) >> RAVG_FRAC_BITS;
+			break;
+		}
+
+		if (val < node->threshold)
+			node_idx = node->left_child;
+		else
+			node_idx = node->right_child;
+		
+		if (node_idx >= MAX_TREE_NODES)
+			break;
+	}
+	return 0; // Default: Keep Local
+}
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -921,6 +973,20 @@ s32 BPF_STRUCT_OPS(rdtai_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		goto enoent;
 
+	u32 action = walk_tree(taskc);
+	if (debug >= 2) {
+		bpf_printk("rdtai: task %s[%d] tree action: %u (wait: %llu, burst: %llu)", 
+				p->comm, p->pid, action, 
+				scx_bpf_now() - taskc->wait_at, taskc->last_burst);
+	}
+
+	if (action == 2) { // RDTAI_ACTION_RUN_IMMEDIATELY
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			cpu = prev_cpu;
+			goto direct;
+		}
+	}
+
 	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
 		if (kthreads_local && (p->flags & PF_KTHREAD)) {
@@ -1428,6 +1494,7 @@ void BPF_STRUCT_OPS(rdtai_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
+	wakee_ctx->wait_at = now;
 
 	task_load_adj(wakee_ctx, now, true);
 	dom_dcycle_adj(wakee_ctx->domc, wakee_ctx->weight, now, true);
@@ -1505,6 +1572,7 @@ void BPF_STRUCT_OPS(rdtai_running, struct task_struct *p)
 
 	running_update_vtime(p, taskc, domc);
 	taskc->last_run_at = scx_bpf_now();
+	scx_pmu_event_start(p, true);
 }
 
 static void stopping_update_vtime(struct task_struct *p,
@@ -1527,6 +1595,7 @@ void BPF_STRUCT_OPS(rdtai_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *taskc;
 	dom_ptr domc;
+	u64 now = scx_bpf_now();
 
 	if (fifo_sched)
 		return;
@@ -1537,6 +1606,12 @@ void BPF_STRUCT_OPS(rdtai_stopping, struct task_struct *p, bool runnable)
 	if (!(domc = task_domain(taskc)))
 		return;
 
+	u64 cache_misses = 0;
+
+	taskc->last_burst = now - taskc->last_run_at;
+	scx_pmu_event_stop(p);
+	scx_pmu_read(p, rdtai_pmu_event, &cache_misses, true);
+	taskc->cache_misses = cache_misses;
 	stopping_update_vtime(p, taskc, domc);
 }
 
@@ -1699,6 +1774,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rdtai_init_task, struct task_struct *p,
 	task_pick_and_set_domain(taskc, p, p->cpus_ptr, true);
 	bpf_rcu_read_unlock();
 
+	scx_pmu_task_init(p);
+
 	return 0;
 }
 
@@ -1707,6 +1784,7 @@ void BPF_STRUCT_OPS(rdtai_exit_task, struct task_struct *p,
 {
 	long ret;
 
+	scx_pmu_task_fini(p);
 	sdt_task_free(p);
 
 	/*
@@ -1969,11 +2047,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rdtai_init)
 			return ret;
 	}
 
+	scx_pmu_install(rdtai_pmu_event);
+
 	return 0;
 }
 
 void BPF_STRUCT_OPS(rdtai_exit, struct scx_exit_info *ei)
 {
+	scx_pmu_uninstall(rdtai_pmu_event);
 	UEI_RECORD(uei, ei);
 }
 

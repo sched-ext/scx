@@ -41,6 +41,9 @@ struct task_ctx {
 	u64 sum_runtime;
 	u64 avg_runtime;
 	u64 last_run_at;
+	u64 wait_at;
+	u64 cache_misses;
+	u64 last_burst;
 
 	/* frequency with which a task is blocked (consumer) */
 	u64 blocked_freq;

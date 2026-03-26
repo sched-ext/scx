@@ -61,6 +61,26 @@ enum consts {
 	MAX_DOM_ACTIVE_TPTRS	= 1024,
 
 	STATIC_ALLOC_PAGES_GRANULARITY = 1,
+	MAX_TREE_NODES = 32,
+};
+
+/* Feature IDs for the Decision Tree */
+enum rdtai_feature {
+	FEAT_WAIT_TIME,      // ns
+	FEAT_CACHE_MISSES,   // counts
+	FEAT_EXEC_TIME,      // ns (burst time)
+	FEAT_LOAD,           // 0-100
+	NR_FEATURES,
+};
+
+/* Decision Tree Node */
+struct rdtai_node {
+	u32 feature_id;     // Use enum rdtai_feature
+	u64 threshold;
+	u32 left_child;     // Index of child node, or leaf action
+	u32 right_child;
+	bool is_leaf;
+	u32 leaf_action;    // 0: Keep Local, 1: Migrate, 2: Run Immediately
 };
 
 /* Statistics */
