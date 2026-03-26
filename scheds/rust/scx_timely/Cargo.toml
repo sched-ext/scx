@@ -1,11 +1,10 @@
 [package]
 name = "scx_timely"
-version = "2.0.0"
+version = "1.1.0"
 authors = ["scx_timely contributors"]
 edition = "2021"
 description = "A TIMELY-inspired sched_ext scheduler bootstrapped from scx_bpfland"
 license = "GPL-2.0-only"
-repository = "https://github.com/galpt/scx_timely"
 
 [dependencies]
 anyhow = "1"
@@ -14,20 +13,14 @@ clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
 crossbeam = "0.8"
 libbpf-rs = "=0.26.1"
 log = "0.4"
-scx_stats = "1.1.0"
-scx_stats_derive = "1.1.0"
-scx_utils = { version = "1.1.0", features = ["autopower"] }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.1.0" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.0" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0", features = ["autopower"] }
 serde = { version = "1", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_cargo = "1.1.0"
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.0" }
 
 [features]
 enable_backtrace = []
-
-[patch.crates-io]
-scx_cargo = { git = "https://github.com/sched-ext/scx", rev = "f08bd875efd0f5f7089cc2cf06bb7fbdd24187e3" }
-scx_stats = { git = "https://github.com/sched-ext/scx", rev = "f08bd875efd0f5f7089cc2cf06bb7fbdd24187e3" }
-scx_stats_derive = { git = "https://github.com/sched-ext/scx", rev = "f08bd875efd0f5f7089cc2cf06bb7fbdd24187e3" }
-scx_utils = { git = "https://github.com/sched-ext/scx", rev = "f08bd875efd0f5f7089cc2cf06bb7fbdd24187e3" }

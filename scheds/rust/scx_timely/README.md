@@ -1,38 +1,90 @@
-# scx_timely v2
+# scx_timely
 
-This is the experimental v2 branch of `scx_timely`, a TIMELY-inspired `sched_ext` CPU scheduler built on [`scx_bpfland`](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_bpfland).
+`scx_timely` is a `sched_ext` CPU scheduler built on top of [`scx_bpfland`](../scx_bpfland/README.md).
 
-For the full documentation, benchmarks, and production-ready v1.1.0, see the [`main`](https://github.com/galpt/scx_timely) branch.
+Its goal is to adapt the TIMELY paper's delay-driven feedback idea to CPU scheduling while keeping the inherited `bpfland` base small, understandable, and close to upstream behavior.
 
-## What's New in v2
+> [!IMPORTANT]
+> `scx_timely` is still experimental. It should be read as a `bpfland`-based TIMELY adaptation, not as a literal transport-layer port of the paper.
 
-v2 introduces **pressure-aware load-balancing** inspired by [Swift](https://research.google/pubs/swift-delay-is-simple-and-effective-for-congestion-control-in-the-datacenter/) and [Shenango](https://www.usenix.org/conference/nsdi19/presentation/ousterhout):
+## Overview
 
-- **Expand/Contract Mode**: The scheduler switches between locality-first and balance-first behavior based on sustained delay pressure
-- **Global Pressure Tracking**: System-wide saturation signal drives policy decisions
-- **Hysteresis**: Prevents oscillation between modes (expand at 75%, contract at 50% by default on desktop)
-
-The core principle (per [TIMELY](https://research.google/pubs/timely-rtt-based-congestion-control-for-the-datacenter/)): **delay stays the main control signal**
-
-## v2 Code Changes
-
-For line-by-line diff against v1 (for reviewer reference), see [docs/design-vs-bpfland.md](docs/design-vs-bpfland.md).
-
-For implementation details, see [docs/v2-pressure-mode-note.md](docs/v2-pressure-mode-note.md).
-
-## Build and Install
-
-```bash
-sudo sh install.sh --build-from-source --force
-```
+- `bpfland`-based scheduler with a narrower TIMELY-inspired control layer
+- explicit Timely-style `Tlow` / `Thigh` delay regions
+- queue-delay and delay-gradient feedback
+- additive increase, multiplicative decrease, and HAI-style faster recovery
+- built-in `desktop`, `powersave`, and `server` presets
+- CLI overrides for the main Timely controller knobs
+- local benchmark helpers for `mini`, `cachyos`, and `cachyos-quick`
 
 ## Modes
 
-All modes (`desktop`, `powersave`, `server`) now benefit from v2 expand/contract behavior with mode-specific thresholds.
+- `desktop`: the most validated profile so far and the main interactive preset
+- `powersave`: more conservative behavior around delay growth, throttling, and recovery
+- `server`: tuned around wider placement and more server-oriented policy knobs
 
-## Inspirations and References
+All three modes use the same controller structure, but with different default thresholds and policy settings.
 
-1. `sched-ext` maintainers. *scx_bpfland* [Software]. https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_bpfland
-2. Mittal, R., Lam, V. T., Dukkipati, N., et al. (2015). *TIMELY: RTT-based congestion control for the datacenter.* https://research.google.com/pubs/timely-rtt-based-congestion-control-for-the-datacenter/
-3. Kabbani, A., et al. (2020). *Swift: Delay is Simple and Effective for Congestion Control in the Datacenter.* https://research.google.com/pubs/swift-delay-is-simple-and-effective-for-congestion-control-in-the-datacenter/
-4. Ousterhout, A., et al. (2019). *Shenango: Achieving High CPU Efficiency for Latency-sensitive Datacenter Workloads.* https://www.usenix.org/conference/nsdi19/presentation/ousterhout
+## Typical Use Cases
+
+`scx_timely` is aimed at people who want a scheduler that reacts to measured queue pressure instead of staying locked into one fixed policy.
+
+Typical use cases:
+
+- gaming and mixed desktop workloads
+- low-latency creative work such as audio editing or monitoring
+- development machines doing local builds while staying responsive
+- heavier background work where interactive feel still matters
+
+If you want the safest public recommendation today, the more established upstream schedulers are still the better default pick.
+
+## TIMELY Mapping
+
+This project follows TIMELY's control ideas, but adapts them to CPU scheduling:
+
+- RTT -> task queue delay
+- send-rate control -> per-task slice gain
+- `Tlow` / `Thigh` -> low/high queue-delay thresholds
+- additive increase / multiplicative decrease -> slice-gain updates
+- HAI -> faster recovery after several consecutive favorable samples
+
+So the design is TIMELY-shaped, but not a word-for-word transport-layer port.
+
+## Building and Running
+
+Build from the workspace root:
+
+```bash
+cargo build --release -p scx_timely
+```
+
+Run it:
+
+```bash
+sudo ./target/release/scx_timely --mode desktop
+```
+
+Other presets:
+
+```bash
+sudo ./target/release/scx_timely --mode powersave
+sudo ./target/release/scx_timely --mode server
+```
+
+## Status
+
+- `desktop`: the most validated profile so far
+- `powersave`: calmer and usable enough for now, but still experimental
+- `server`: first repeated local checks landed in a healthy range
+
+These are not production-readiness claims. They are only the current state of the profile tuning work.
+
+## Notes
+
+- The controller is intentionally narrow and keeps most of the inherited `bpfland` fast path intact.
+- This in-tree README is intentionally shorter than the standalone [`galpt/scx_timely`](https://github.com/galpt/scx_timely) README. For standalone install scripts, local benchmark helpers, and extra tuning notes, see the standalone repository.
+
+## References
+
+1. Mittal, R., Lam, V. T., Dukkipati, N., et al. (2015). *TIMELY: RTT-based congestion control for the datacenter.* https://research.google/pubs/timely-rtt-based-congestion-control-for-the-datacenter/
+2. `sched-ext` maintainers. *scx_bpfland* [Software]. https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_bpfland

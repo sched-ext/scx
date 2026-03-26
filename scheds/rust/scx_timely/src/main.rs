@@ -65,15 +65,6 @@ const DEFAULT_TIMELY_BACKOFF_HIGH_FP: u32 = 960;
 const DEFAULT_TIMELY_BACKOFF_GRADIENT_FP: u32 = 992;
 const DEFAULT_TIMELY_GRADIENT_MARGIN_US: u64 = 187;
 const DEFAULT_TIMELY_CONTROL_INTERVAL_US: u64 = 500;
-const DEFAULT_V2_LOCALITY_WAKEUP_FREQ: u64 = 8;
-const DEFAULT_V2_LOCALITY_MAX_CPUQ: u64 = 0;
-const DEFAULT_V2_LOCALITY_CONGESTED_NODEQ: u64 = 2;
-const DEFAULT_V2_LOCALITY_CONGESTED_MAX_CPUQ: u64 = 1;
-const DEFAULT_V2_LOCAL_HEAD_BIAS_SLACK_US: u64 = 250;
-const DEFAULT_V2_PRESSURE_ENTER_STREAK: u32 = 3;
-const DEFAULT_V2_PRESSURE_EXIT_STREAK: u32 = 3;
-const DEFAULT_V2_EXPAND_THRESHOLD: u32 = 75;
-const DEFAULT_V2_CONTRACT_THRESHOLD: u32 = 50;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum TimelyMode {
@@ -98,17 +89,6 @@ struct EffectiveConfig {
     timely_backoff_gradient_fp: u32,
     timely_gradient_margin_us: u64,
     timely_control_interval_us: u64,
-    v2_locality_fallback: bool,
-    v2_locality_wakeup_freq: u64,
-    v2_locality_max_cpuq: u64,
-    v2_locality_congested_nodeq: u64,
-    v2_locality_congested_max_cpuq: u64,
-    v2_local_head_bias: bool,
-    v2_local_head_bias_slack_us: u64,
-    v2_pressure_enter_streak: u32,
-    v2_pressure_exit_streak: u32,
-    v2_expand_threshold: u32,
-    v2_contract_threshold: u32,
     throttle_us: u64,
     idle_resume_us: i64,
     primary_domain: String,
@@ -138,17 +118,6 @@ impl EffectiveConfig {
                 timely_backoff_gradient_fp: DEFAULT_TIMELY_BACKOFF_GRADIENT_FP,
                 timely_gradient_margin_us: DEFAULT_TIMELY_GRADIENT_MARGIN_US,
                 timely_control_interval_us: DEFAULT_TIMELY_CONTROL_INTERVAL_US,
-                v2_locality_fallback: true,
-                v2_locality_wakeup_freq: DEFAULT_V2_LOCALITY_WAKEUP_FREQ,
-                v2_locality_max_cpuq: DEFAULT_V2_LOCALITY_MAX_CPUQ,
-                v2_locality_congested_nodeq: DEFAULT_V2_LOCALITY_CONGESTED_NODEQ,
-                v2_locality_congested_max_cpuq: DEFAULT_V2_LOCALITY_CONGESTED_MAX_CPUQ,
-                v2_local_head_bias: true,
-                v2_local_head_bias_slack_us: DEFAULT_V2_LOCAL_HEAD_BIAS_SLACK_US,
-                v2_pressure_enter_streak: DEFAULT_V2_PRESSURE_ENTER_STREAK,
-                v2_pressure_exit_streak: DEFAULT_V2_PRESSURE_EXIT_STREAK,
-                v2_expand_threshold: DEFAULT_V2_EXPAND_THRESHOLD,
-                v2_contract_threshold: DEFAULT_V2_CONTRACT_THRESHOLD,
                 throttle_us: DEFAULT_THROTTLE_US,
                 idle_resume_us: DEFAULT_IDLE_RESUME_US,
                 primary_domain: DEFAULT_PRIMARY_DOMAIN.into(),
@@ -174,17 +143,6 @@ impl EffectiveConfig {
                 timely_backoff_gradient_fp: 1000,
                 timely_gradient_margin_us: 500,
                 timely_control_interval_us: 1250,
-                v2_locality_fallback: false,
-                v2_locality_wakeup_freq: DEFAULT_V2_LOCALITY_WAKEUP_FREQ,
-                v2_locality_max_cpuq: DEFAULT_V2_LOCALITY_MAX_CPUQ,
-                v2_locality_congested_nodeq: 0,
-                v2_locality_congested_max_cpuq: 0,
-                v2_local_head_bias: false,
-                v2_local_head_bias_slack_us: DEFAULT_V2_LOCAL_HEAD_BIAS_SLACK_US,
-                v2_pressure_enter_streak: 4,
-                v2_pressure_exit_streak: 4,
-                v2_expand_threshold: 65,
-                v2_contract_threshold: 40,
                 throttle_us: 100,
                 idle_resume_us: 5000,
                 primary_domain: "powersave".into(),
@@ -210,17 +168,6 @@ impl EffectiveConfig {
                 timely_backoff_gradient_fp: 992,
                 timely_gradient_margin_us: 187,
                 timely_control_interval_us: 750,
-                v2_locality_fallback: false,
-                v2_locality_wakeup_freq: DEFAULT_V2_LOCALITY_WAKEUP_FREQ,
-                v2_locality_max_cpuq: DEFAULT_V2_LOCALITY_MAX_CPUQ,
-                v2_locality_congested_nodeq: 0,
-                v2_locality_congested_max_cpuq: 0,
-                v2_local_head_bias: false,
-                v2_local_head_bias_slack_us: DEFAULT_V2_LOCAL_HEAD_BIAS_SLACK_US,
-                v2_pressure_enter_streak: 2,
-                v2_pressure_exit_streak: 2,
-                v2_expand_threshold: 80,
-                v2_contract_threshold: 55,
                 throttle_us: 0,
                 idle_resume_us: DEFAULT_IDLE_RESUME_US,
                 primary_domain: "all".into(),
@@ -276,33 +223,6 @@ impl EffectiveConfig {
         if opts.timely_control_interval_us != 0 {
             config.timely_control_interval_us = opts.timely_control_interval_us;
         }
-        if opts.v2_locality_wakeup_freq != 0 {
-            config.v2_locality_wakeup_freq = opts.v2_locality_wakeup_freq;
-        }
-        if opts.v2_locality_max_cpuq != DEFAULT_V2_LOCALITY_MAX_CPUQ {
-            config.v2_locality_max_cpuq = opts.v2_locality_max_cpuq;
-        }
-        if opts.v2_locality_congested_nodeq != 0 {
-            config.v2_locality_congested_nodeq = opts.v2_locality_congested_nodeq;
-        }
-        if opts.v2_locality_congested_max_cpuq != 0 {
-            config.v2_locality_congested_max_cpuq = opts.v2_locality_congested_max_cpuq;
-        }
-        if opts.v2_local_head_bias_slack_us != 0 {
-            config.v2_local_head_bias_slack_us = opts.v2_local_head_bias_slack_us;
-        }
-        if opts.v2_pressure_enter_streak != 0 {
-            config.v2_pressure_enter_streak = opts.v2_pressure_enter_streak;
-        }
-        if opts.v2_pressure_exit_streak != 0 {
-            config.v2_pressure_exit_streak = opts.v2_pressure_exit_streak;
-        }
-        if opts.v2_expand_threshold != 0 {
-            config.v2_expand_threshold = opts.v2_expand_threshold;
-        }
-        if opts.v2_contract_threshold != 0 {
-            config.v2_contract_threshold = opts.v2_contract_threshold;
-        }
         if opts.throttle_us != DEFAULT_THROTTLE_US {
             config.throttle_us = opts.throttle_us;
         }
@@ -317,8 +237,6 @@ impl EffectiveConfig {
             config.timely_tlow_us = std::cmp::max(config.timely_thigh_us / 2, 1);
         }
 
-        config.v2_locality_fallback |= opts.v2_locality_fallback;
-        config.v2_local_head_bias |= opts.v2_local_head_bias;
         config.preferred_idle_scan |= opts.preferred_idle_scan;
         config.local_pcpu |= opts.local_pcpu;
         config.local_kthreads |= opts.local_kthreads;
@@ -388,9 +306,8 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
 
 /// scx_timely: a BPF-first sched_ext scheduler bootstrapped from scx_bpfland.
 ///
-/// The current tree intentionally stays close to upstream bpfland behavior so
-/// the standalone repo keeps a small, buildable, reviewer-safe base while the
-/// TIMELY-inspired control layer is adapted on top.
+/// The current tree intentionally stays close to upstream bpfland behavior
+/// while adapting a narrower TIMELY-inspired control layer on top.
 #[derive(Debug, Parser)]
 struct Opts {
     /// Select a high-level scheduler mode.
@@ -462,60 +379,6 @@ struct Opts {
     /// Minimum time between Timely control updates in microseconds (0 = mode default).
     #[clap(long, default_value = "0")]
     timely_control_interval_us: u64,
-
-    /// Enable the v2 locality fallback.
-    ///
-    /// When no idle CPU is available, wake-heavy tasks may fall back to prev_cpu's local DSQ
-    /// instead of always entering the shared node queue.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    v2_locality_fallback: bool,
-
-    /// Wakeup-frequency threshold for the v2 locality fallback (0 = mode default).
-    #[clap(long, default_value = "0")]
-    v2_locality_wakeup_freq: u64,
-
-    /// Maximum allowed local per-CPU queue depth for the v2 locality fallback.
-    #[clap(long, default_value = "0")]
-    v2_locality_max_cpuq: u64,
-
-    /// Minimum shared node-queue depth before the v2 locality fallback broadens under congestion.
-    #[clap(long, default_value = "0")]
-    v2_locality_congested_nodeq: u64,
-
-    /// Maximum local per-CPU queue depth allowed for the broadened congested-node v2 fallback.
-    #[clap(long, default_value = "0")]
-    v2_locality_congested_max_cpuq: u64,
-
-    /// Enable a small local-head dispatch bias for wake-heavy work in the per-CPU DSQ.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    v2_local_head_bias: bool,
-
-    /// Maximum deadline slack in microseconds for the v2 local-head bias (0 = mode default).
-    #[clap(long, default_value = "0")]
-    v2_local_head_bias_slack_us: u64,
-
-    /// Consecutive delay-pressured fresh samples required to enter v2 pressure mode (0 = mode default).
-    #[clap(long, default_value = "0")]
-    v2_pressure_enter_streak: u32,
-
-    /// Consecutive recovered fresh samples required to exit v2 pressure mode (0 = mode default).
-    #[clap(long, default_value = "0")]
-    v2_pressure_exit_streak: u32,
-
-    /// v2 expand mode threshold: percentage of primary-domain CPUs with work to trigger expand mode (0 = mode default).
-    ///
-    /// When the system reaches this saturation level, the scheduler switches from
-    /// "contract" (locality-first) to "expand" (balance-first) mode, skipping
-    /// the locality fallback and dispatching directly to shared queues for better load distribution.
-    #[clap(long, default_value = "0")]
-    v2_expand_threshold: u32,
-
-    /// v2 contract mode threshold: percentage of primary-domain CPUs with work to exit expand mode (0 = mode default).
-    ///
-    /// This should be lower than v2_expand_threshold to create hysteresis and prevent
-    /// rapid oscillation between modes.
-    #[clap(long, default_value = "0")]
-    v2_contract_threshold: u32,
 
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
@@ -705,7 +568,7 @@ impl<'a> Scheduler<'a> {
             config.cpufreq
         );
         info!(
-            "timely control: tlow_us={} thigh_us={} gain_min_fp={} gain_step_fp={} hai_threshold={} hai_multiplier={} backoff_high_fp={} backoff_gradient_fp={} gradient_margin_us={} control_interval_us={} v2_locality_fallback={} v2_locality_wakeup_freq={} v2_locality_max_cpuq={} v2_locality_congested_nodeq={} v2_locality_congested_max_cpuq={} v2_local_head_bias={} v2_local_head_bias_slack_us={} v2_pressure_enter_streak={} v2_pressure_exit_streak={} v2_expand_threshold={} v2_contract_threshold={}",
+            "timely control: tlow_us={} thigh_us={} gain_min_fp={} gain_step_fp={} hai_threshold={} hai_multiplier={} backoff_high_fp={} backoff_gradient_fp={} gradient_margin_us={} control_interval_us={}",
             config.timely_tlow_us,
             config.timely_thigh_us,
             config.timely_gain_min_fp,
@@ -715,18 +578,7 @@ impl<'a> Scheduler<'a> {
             config.timely_backoff_high_fp,
             config.timely_backoff_gradient_fp,
             config.timely_gradient_margin_us,
-            config.timely_control_interval_us,
-            config.v2_locality_fallback,
-            config.v2_locality_wakeup_freq,
-            config.v2_locality_max_cpuq,
-            config.v2_locality_congested_nodeq,
-            config.v2_locality_congested_max_cpuq,
-            config.v2_local_head_bias,
-            config.v2_local_head_bias_slack_us,
-            config.v2_pressure_enter_streak,
-            config.v2_pressure_exit_streak,
-            config.v2_expand_threshold,
-            config.v2_contract_threshold
+            config.timely_control_interval_us
         );
 
         if config.idle_resume_us >= 0 {
@@ -772,17 +624,6 @@ impl<'a> Scheduler<'a> {
         rodata.timely_backoff_gradient_fp = config.timely_backoff_gradient_fp;
         rodata.timely_gradient_margin_ns = config.timely_gradient_margin_us * 1000;
         rodata.timely_control_interval_ns = config.timely_control_interval_us * 1000;
-        rodata.v2_locality_fallback = config.v2_locality_fallback;
-        rodata.v2_locality_wakeup_freq = config.v2_locality_wakeup_freq;
-        rodata.v2_locality_max_cpuq = config.v2_locality_max_cpuq;
-        rodata.v2_locality_congested_nodeq = config.v2_locality_congested_nodeq;
-        rodata.v2_locality_congested_max_cpuq = config.v2_locality_congested_max_cpuq;
-        rodata.v2_local_head_bias = config.v2_local_head_bias;
-        rodata.v2_local_head_bias_slack_ns = config.v2_local_head_bias_slack_us * 1000;
-        rodata.v2_pressure_enter_streak = config.v2_pressure_enter_streak;
-        rodata.v2_pressure_exit_streak = config.v2_pressure_exit_streak;
-        rodata.v2ExpandThreshold = config.v2_expand_threshold;
-        rodata.v2ContractThreshold = config.v2_contract_threshold;
         rodata.throttle_ns = config.throttle_us * 1000;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
 
@@ -1041,37 +882,6 @@ impl<'a> Scheduler<'a> {
             nr_delay_rate_limited_dispatches: bss_data.nr_delay_rate_limited_dispatches,
             nr_gain_floor_dispatches: bss_data.nr_gain_floor_dispatches,
             nr_gain_ceiling_dispatches: bss_data.nr_gain_ceiling_dispatches,
-            nr_delay_low_region_samples: bss_data.nr_delay_low_region_samples,
-            nr_delay_mid_region_samples: bss_data.nr_delay_mid_region_samples,
-            nr_delay_high_region_samples: bss_data.nr_delay_high_region_samples,
-            nr_gain_floor_resident_samples: bss_data.nr_gain_floor_resident_samples,
-            nr_gain_mid_resident_samples: bss_data.nr_gain_mid_resident_samples,
-            nr_gain_ceiling_resident_samples: bss_data.nr_gain_ceiling_resident_samples,
-            nr_idle_select_path_picks: bss_data.nr_idle_select_path_picks,
-            nr_idle_enqueue_path_picks: bss_data.nr_idle_enqueue_path_picks,
-            nr_idle_prev_cpu_picks: bss_data.nr_idle_prev_cpu_picks,
-            nr_idle_primary_picks: bss_data.nr_idle_primary_picks,
-            nr_idle_spill_picks: bss_data.nr_idle_spill_picks,
-            nr_idle_pick_failures: bss_data.nr_idle_pick_failures,
-            nr_idle_primary_domain_misses: bss_data.nr_idle_primary_domain_misses,
-            nr_idle_global_misses: bss_data.nr_idle_global_misses,
-            nr_waker_cpu_biases: bss_data.nr_waker_cpu_biases,
-            nr_keep_running_reuses: bss_data.nr_keep_running_reuses,
-            nr_keep_running_queue_empty: bss_data.nr_keep_running_queue_empty,
-            nr_keep_running_smt_blocked: bss_data.nr_keep_running_smt_blocked,
-            nr_keep_running_queued_work: bss_data.nr_keep_running_queued_work,
-            nr_dispatch_cpu_dsq_consumes: bss_data.nr_dispatch_cpu_dsq_consumes,
-            nr_dispatch_node_dsq_consumes: bss_data.nr_dispatch_node_dsq_consumes,
-            nr_v2_locality_cpu_dispatches: bss_data.nr_v2_locality_cpu_dispatches,
-            nr_v2_congested_locality_cpu_dispatches: bss_data
-                .nr_v2_congested_locality_cpu_dispatches,
-            nr_v2_delay_locality_cpu_dispatches: bss_data.nr_v2_delay_locality_cpu_dispatches,
-            nr_v2_local_head_biases: bss_data.nr_v2_local_head_biases,
-            nr_v2_pressure_mode_entries: bss_data.nr_v2_pressure_mode_entries,
-            nr_v2_pressure_mode_exits: bss_data.nr_v2_pressure_mode_exits,
-            nr_v2_pressure_shared_dispatches: bss_data.nr_v2_pressure_shared_dispatches,
-            nr_v2_expand_mode_dispatches: bss_data.nr_v2_expand_mode_dispatches,
-            nr_v2_contract_mode_dispatches: bss_data.nr_v2_contract_mode_dispatches,
             nr_cpu_release_reenqueue: bss_data.nr_cpu_release_reenqueue,
         }
     }
