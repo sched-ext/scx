@@ -647,7 +647,15 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 	cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx);
 	if (cpu >= 0) {
 		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		/*
+		 * Use SCX_DSQ_LOCAL_ON to explicitly target the idle CPU
+		 * we found. In the select_cpu path this is redundant
+		 * (SCX_DSQ_LOCAL already resolves to the selected CPU),
+		 * but from the enqueue path (put_prev_task_scx ->
+		 * enqueue), SCX_DSQ_LOCAL resolves to task_rq(p) -- not
+		 * the idle CPU we picked.
+		 */
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
 		if (kick)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return cpu;
@@ -671,7 +679,8 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 		if (cpu >= 0) {
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
+					   0);
 			if (kick)
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return cpu;
@@ -2387,6 +2396,21 @@ int apply_cell_config(void *ctx)
 				scx_bpf_error(
 					"borrowable tmp_cpumask should be null");
 				return -EINVAL;
+			}
+		}
+	}
+
+	/* Phase 2.5: Recompute per-LLC CPU counts for all cells */
+	if (enable_llc_awareness) {
+		u32 c;
+		scoped_guard(rcu)
+		{
+			bpf_for(c, 0, MAX_CELLS)
+			{
+				if (c >= config->num_cells)
+					break;
+				if (recalc_cell_llc_counts(c, NULL))
+					return -EINVAL;
 			}
 		}
 	}
