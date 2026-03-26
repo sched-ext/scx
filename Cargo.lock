@@ -3934,6 +3934,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_rdtai"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "fb_procfs",
+ "libbpf-rs",
+ "libc",
+ "log",
+ "ordered-float 5.1.0",
+ "scx_cargo",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "simplelog",
+ "sorted-vec",
+ "static_assertions",
+]
+
+[[package]]
 name = "scx_rlfifo"
 version = "1.1.0"
 dependencies = [
