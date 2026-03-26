@@ -2375,6 +2375,21 @@ int apply_cell_config(void *ctx)
 		}
 	}
 
+	/* Phase 2.5: Recompute per-LLC CPU counts for all cells */
+	if (enable_llc_awareness) {
+		u32 c;
+		scoped_guard(rcu)
+		{
+			bpf_for(c, 0, MAX_CELLS)
+			{
+				if (c >= config->num_cells)
+					break;
+				if (recalc_cell_llc_counts(c, NULL))
+					return -EINVAL;
+			}
+		}
+	}
+
 	/* Phase 3: Apply cell-to-cgroup assignments for owner cgroups */
 	if (config->num_cell_assignments > MAX_CELLS)
 		return -EINVAL;
