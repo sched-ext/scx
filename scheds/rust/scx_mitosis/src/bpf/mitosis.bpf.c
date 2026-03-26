@@ -648,15 +648,12 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 	if (cpu >= 0) {
 		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
 		/*
-		 * Use SCX_DSQ_LOCAL_ON to target the idle CPU we found,
-		 * not SCX_DSQ_LOCAL which resolves to task_rq(p) -- the
-		 * CPU the task just ran on. Without this, when called
-		 * from put_prev_task_scx -> enqueue, the task goes back
-		 * to the current CPU's local DSQ while the idle CPU gets
-		 * kicked and finds nothing. This pins tasks to their
-		 * current CPU, starving per-CPU DSQ tasks (kworkers)
-		 * because ops.dispatch is never called when the local
-		 * DSQ is non-empty.
+		 * Use SCX_DSQ_LOCAL_ON to explicitly target the idle CPU
+		 * we found. In the select_cpu path this is redundant
+		 * (SCX_DSQ_LOCAL already resolves to the selected CPU),
+		 * but from the enqueue path (put_prev_task_scx ->
+		 * enqueue), SCX_DSQ_LOCAL resolves to task_rq(p) -- not
+		 * the idle CPU we picked.
 		 */
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
 		if (kick)
