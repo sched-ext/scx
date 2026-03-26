@@ -64,6 +64,8 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
+	/* CPU cell at the start of the current running slice */
+	u32 running_cpu_cell;
 	u64 basis_vtime;
 	/* For the sake of monitoring, each task is owned by a cell */
 	u32 cell;
