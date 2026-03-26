@@ -66,7 +66,7 @@ struct cake_task_hot {
 	u32 ppid;              /* 4B: offset 12 (Parent PID / game detect) */
 	
 	/* ── ALPHA FUSION LAYER ── */
-	u32 reclass_counter;   /* 4B: offset 16 (Must sit exactly at 16 for *(u64) fused load) */
+	u32 nvcsw_64_snapshot; /* 4B: offset 16 (Epoch tracking for the 64-stop nvcsw delta) */
 	u32 last_run_at;       /* 4B: offset 20 ( (u32)scx_bpf_now() from stopping ) */
 	
 	u32 dsq_weight_base;   /* 4B: offset 24 (tier_base[task_class]) */
@@ -473,7 +473,7 @@ struct cake_task_ctx {
 	u32 ppid;              /* 4B: offset 12 (Parent PID) */
 	
 	/* ── ALPHA FUSION LAYER ── */
-	u32 reclass_counter;   /* 4B: offset 16 (Must sit exactly at 16 for *(u64) load) */
+	u32 _pad_alpha;        /* 4B: offset 16 (Symmetric padding) */
 	u32 last_run_at;       /* 4B: offset 20 (Last run timestamp, wraps 4.2s) */
 	
 	u8  task_class;        /* 1B: offset 24 (CAKE_CLASS_* enum) */
