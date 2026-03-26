@@ -160,7 +160,7 @@ static inline long scx_hotplug_seq(void)
  * COMPAT:
  * - v6.17: ops.cgroup_set_bandwidth()
  * - v6.19: ops.cgroup_set_idle()
- * - v7.1:  ops.sub_attach(), ops.sub_detach()
+ * - v7.1:  ops.sub_attach(), ops.sub_detach(), ops.sub_cgroup_id
  */
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
@@ -191,6 +191,11 @@ static inline long scx_hotplug_seq(void)
 	    !__COMPAT_struct_has_field("sched_ext_ops", "sub_detach")) {	\
 		fprintf(stderr, "WARNING: kernel doesn't support ops.sub_detach()\n"); \
 		__skel->struct_ops.__ops_name->sub_detach = NULL;		\
+	}									\
+	if (__skel->struct_ops.__ops_name->sub_cgroup_id > 1 &&		\
+	    !__COMPAT_struct_has_field("sched_ext_ops", "sub_cgroup_id")) { \
+		fprintf(stderr, "WARNING: kernel doesn't support ops.sub_cgroup_id\n"); \
+		__skel->struct_ops.__ops_name->sub_cgroup_id = 1;		\
 	}									\
 	__skel; 								\
 })
