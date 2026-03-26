@@ -63,6 +63,7 @@ struct llc_cpumask llc_to_cpus[MAX_LLCS];
 u32 configuration_seq;
 u32 applied_configuration_seq;
 u32 cpuset_seq;
+u32 applied_cpuset_seq;
 
 /*
  * Debug events circular buffer
@@ -421,12 +422,18 @@ static inline int update_task_cpumask(struct task_struct *p,
 	}
 
 	/*
-	* Single-CPU pinning is fine (even if outside this cell).
-	* However, multi-CPU pinning that doesn't cover the entire
-	* cell is not supported - the scheduler can't efficiently
-	* handle partial affinity restrictions.
-	*/
+	 * Reject multi-CPU pinning that doesn't cover the entire cell.
+	 * Single-CPU pinning is fine (routed to per-CPU DSQ below).
+	 *
+	 * Skip when a cpuset change is pending (cpuset_seq !=
+	 * applied_cpuset_seq). The kernel cpuset controller calls
+	 * set_cpumask to update cpus_ptr BEFORE mitosis processes
+	 * the change via apply_cell_config. In that window, the
+	 * task appears partially pinned because its cpus_ptr
+	 * reflects the new cpuset but the cell cpumask is still old.
+	 */
 	if (tctx->cell != 0 && reject_multicpu_pinning &&
+	    READ_ONCE(cpuset_seq) == READ_ONCE(applied_cpuset_seq) &&
 	    !tctx->all_cell_cpus_allowed &&
 	    bpf_cpumask_weight(p->cpus_ptr) > 1) {
 		scx_bpf_error("multi-CPU pinning within cell %d not supported",
@@ -2603,6 +2610,9 @@ int apply_cell_config(void *ctx)
 
 	/* Phase 5: Bump configuration sequence to make changes visible */
 	__atomic_add_fetch(&applied_configuration_seq, 1, __ATOMIC_RELEASE);
+
+	/* Record that we've processed cpuset changes up to this point */
+	WRITE_ONCE(applied_cpuset_seq, READ_ONCE(cpuset_seq));
 
 	return 0;
 }
