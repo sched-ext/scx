@@ -65,6 +65,8 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
+	/* CPU cell this task expected to run in when it was enqueued */
+	u32 enqueue_cpu_cell;
 	u64 basis_vtime;
 	/* For the sake of monitoring, each task is owned by a cell */
 	u32 cell;

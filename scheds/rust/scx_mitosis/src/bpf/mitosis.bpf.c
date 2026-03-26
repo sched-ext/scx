@@ -788,6 +788,18 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return;
 
+	/*
+	 * CPU -> cell mappings can change between enqueue() and stopping().
+	 * If that happens, the task's dsq_vtime may no longer belong to the
+	 * CPU-local or shared cell vtime domains visible at stopping(), and
+	 * advancing either one would charge the wrong domain.
+	 *
+	 * Snapshot the task's enqueue-time cell here. stopping() only advances
+	 * local and shared vtime if the task is not borrowed and the CPU it
+	 * stops on is still in this same cell.
+	 */
+	tctx->enqueue_cpu_cell = tctx->cell;
+
 	/* Ensure this is done *AFTER* refreshing cell which might manipulate vtime */
 	vtime = p->scx.dsq_vtime;
 
@@ -1355,6 +1367,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 			return;
 	}
 
+	/* Record the running slice start time. */
 	tctx->started_running_at = scx_bpf_now();
 }
 
@@ -1396,32 +1409,30 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
 	/*
-	 * Advance this CPU's per-CPU DSQ vtime, UNLESS the task was
-	 * genuinely borrowed from another cell. Borrowed tasks' vtime
-	 * is in the borrowing cell's domain — writing it to the lending
-	 * CPU's vtime_now would contaminate that domain.
-	 *
-	 * For cell-reassigned tasks (tctx->cell != cidx but not borrowed),
-	 * the vtime was initialized in this CPU's cell domain, so
-	 * advancing cctx->vtime_now is correct and prevents staleness.
+	 * Only advance this CPU's local vtime when the slice ends on a CPU
+	 * whose cell matches the cell this task expected at enqueue time and
+	 * the task was not borrowed. If execution ends in some other cell,
+	 * drop the local charge rather than risk charging an unexpected
+	 * domain.
 	 */
-	if (!tctx->borrowed) {
+	if (!tctx->borrowed && tctx->enqueue_cpu_cell == cidx) {
 		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
 			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 	}
 
+	/*
+	 * Only advance cell vtime when the task stops on a CPU whose cell
+	 * still matches the cell this task expected at enqueue time and the
+	 * task was not borrowed. If the CPU was retagged into a different
+	 * cell between enqueue() and stopping(), drop the charge rather than
+	 * advance the wrong cell domain.
+	 */
+	if (!tctx->borrowed && tctx->enqueue_cpu_cell == cidx) {
+		advance_cell_llc_vtime(cell, tctx, p->scx.dsq_vtime);
+	}
+
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
-
-	struct cell *vtime_cell;
-	if (tctx->cell != cidx) {
-		vtime_cell = lookup_cell(tctx->cell);
-		if (!vtime_cell)
-			return;
-	} else {
-		vtime_cell = cell;
-	}
-	advance_cell_llc_vtime(vtime_cell, tctx, p->scx.dsq_vtime);
 
 	{
 		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
