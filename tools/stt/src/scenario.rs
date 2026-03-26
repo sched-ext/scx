@@ -927,24 +927,25 @@ fn custom_borrowing_cpuset_change(ctx: &Ctx) -> Result<VerifyResult> {
 }
 
 fn custom_rebalancing_oscillate(ctx: &Ctx) -> Result<VerifyResult> {
-    // Alternating load: cell_0 heavy/cell_1 light, then swap. Tests rebalancing stability.
+    // Alternating load: cell_0 heavy/cell_1 light, then swap.
+    // Stop previous phase before starting next to avoid piling up workers.
     ctx.cgroups.create_cell("cell_0")?;
     ctx.cgroups.create_cell("cell_1")?;
     thread::sleep(Duration::from_secs(3));
     let phase = ctx.duration / 4;
-    let mut all_handles = Vec::new();
+    let mut result = VerifyResult::pass();
     for i in 0..4 {
         let (heavy_cell, light_cell) = if i % 2 == 0 { ("cell_0", "cell_1") } else { ("cell_1", "cell_0") };
-        let mut hh = WorkloadHandle::spawn(&WorkloadConfig { num_workers: 12, ..Default::default() })?;
+        let mut hh = WorkloadHandle::spawn(&WorkloadConfig { num_workers: ctx.workers_per_cell * 2, ..Default::default() })?;
         for t in hh.tids() { ctx.cgroups.move_task(heavy_cell, t)?; }
         let mut hl = WorkloadHandle::spawn(&WorkloadConfig { num_workers: 1, work_type: WorkType::YieldHeavy, ..Default::default() })?;
         for t in hl.tids() { ctx.cgroups.move_task(light_cell, t)?; }
         hh.start(); hl.start();
         thread::sleep(phase);
-        all_handles.push(hh);
-        all_handles.push(hl);
+        result.merge(verify::verify_not_starved(&hh.stop_and_collect()));
+        result.merge(verify::verify_not_starved(&hl.stop_and_collect()));
     }
-    Ok(collect_all(all_handles))
+    Ok(result)
 }
 
 fn custom_exclude_cpuset(ctx: &Ctx) -> Result<VerifyResult> {
