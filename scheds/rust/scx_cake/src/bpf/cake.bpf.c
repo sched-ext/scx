@@ -1776,6 +1776,19 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 						WRITE_ONCE(lockless_idle_shards[target_llc].slots[cpu], 0);
 						goto idle_found;
 					}
+
+					/* ALPHADEV Inline Re-Probe: If the lock failed due to global steal, mask out the failed 
+					 * byte and instantly check if any sibling cores in the exact same chunk are still idle. 
+					 * Prevents false-negative L3 misses under heavy system contention via 3 ALU ops. */
+					chunk0 &= ~(0xFFULL << ((fast_cpu - i) * 8));
+					if (chunk0 != 0) {
+						fast_cpu = i + (__builtin_ctzll(chunk0) >> 3);
+						if (fast_cpu < nr_cpus && scx_bpf_test_and_clear_cpu_idle(fast_cpu)) {
+							cpu = fast_cpu;
+							WRITE_ONCE(lockless_idle_shards[target_llc].slots[cpu], 0);
+							goto idle_found;
+						}
+					}
 				}
 			}
 		}
@@ -2071,11 +2084,17 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		u64 requeue_staged = hot->staged_vtime_bits;
 		u64 requeue_slice = p->scx.slice ?: quantum_ns;
 		u32 dsq_weight = (u32)(requeue_staged & 0xFFFFFFFF);
-		p->scx.dsq_vtime = now_cached + dsq_weight;
+		
 		/* Flat 50% requeue slice for all classes. */
 		requeue_slice >>= 1;
 		requeue_slice += (200000 - requeue_slice) & -(requeue_slice < 200000);
 		p->scx.slice = requeue_slice;
+
+		/* EEVDF Deadline Projection: strictly order yielding tasks by return-slice length */
+		u64 vslice = (requeue_slice * (u32)hot->vtime_mult) >> 10;
+		u64 deadline = now_cached + vslice;
+		p->scx.dsq_vtime = dsq_weight + deadline;
+
 		enqueue_dsq_dispatch(p, enq_flags,
 				    ((u64)enq_cpu << 32) | enq_llc);
 		return;
@@ -2086,13 +2105,21 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	{
 		u32 dsq_weight = (u32)(staged & 0xFFFFFFFF);
 		u8 new_flow = (staged >> STAGED_BIT_NEW_FLOW) & 1;
-		u64 vtime = dsq_weight + hot->dsq_vtime;
-		vtime -= new_flow_bonus_ns & -(u64)new_flow;
+		
 		/* ALPHADEV 4 / 40: is_game parsed directly from ALU bitmask staged_vtime_bits.
 		 * Bypass sched_state_local memory fetch in hottest loop. (Unconditional priority slicing) */
 		u64 is_game = (staged >> STAGED_BIT_IS_GAME) & 1;
+		u64 slice = quantum_ns << is_game;
+		p->scx.slice = slice;
+
+		/* EEVDF Deadline Projection: project virtual deadline to eliminate intra-tier latency jitter */
+		u64 vslice = (slice * (u32)hot->vtime_mult) >> 10;
+		u64 deadline = hot->dsq_vtime + vslice;
+		
+		/* Final Dispatch: Tier Isolation + EEVDF Deadline + Flow Bonus */
+		u64 vtime = dsq_weight + deadline;
+		vtime -= new_flow_bonus_ns & -(u64)new_flow;
 		p->scx.dsq_vtime = vtime;
-		p->scx.slice = quantum_ns << is_game;
 
 		enqueue_dsq_dispatch(p, enq_flags,
 				    ((u64)enq_cpu << 32) | enq_llc);
@@ -2237,8 +2264,7 @@ static __noinline void running_telemetry(
 
 	/* Fetch hot internally (cold path, ~10ns). */
 	struct cake_task_hot *hot_tel = get_task_hot(p);
-	u32 rc = hot_tel ? hot_tel->reclass_counter : 0;
-	if ((rc & 63) != 0)
+	if (hot_tel && ((p->nvcsw + p->nivcsw) & 63) != 0)
 		return;
 
 	/* 1. DISPATCH GAP */
@@ -2315,10 +2341,16 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	/* Cache-line illusion stripped: run_start unconditionally acquires Exclusive (M) state,
 	 * therefore avoiding the idle_hint check saves 1 branch and 1 load with zero MESI penalty. */
 	WRITE_ONCE(bss->idle_hint, 0);
-	/* ALPHADEV Phase 10: lockless tracker deactivation */
+	/* ALPHADEV Phase 10: lockless tracker deactivation.
+	 * Check-before-write: shard array is 4096B-aligned (separate CL from cpu_bss).
+	 * Unlike idle_hint (which piggybacks cpu_bss's already-dirty CL), this write
+	 * would dirty its own cache line. On ~75% same-task re-runs the slot is already 0.
+	 * Gate saves 1 store + avoids M-state acquisition on the shard CL.
+	 * On multi-CCD (9950X): prevents cross-CCD snoop on the shared 64B shard line. */
 	u32 bss_llc = bss->llc_id;
 	bss_llc &= (CAKE_MAX_LLCS - 1);
-	WRITE_ONCE(lockless_idle_shards[bss_llc].slots[cpu], 0);
+	if (lockless_idle_shards[bss_llc].slots[cpu])
+		WRITE_ONCE(lockless_idle_shards[bss_llc].slots[cpu], 0);
 
 	/* FAST PATH: Same task re-running on same CPU (~75% in gaming).
 	 * Slice load and task classification deferred into task-change block.
@@ -2409,13 +2441,10 @@ static __noinline u32 stopping_drr_ewma(
 	/* ════ EWMA BLOCK (no p dependency) ════
 	 * Compute EWMA BEFORE rt_raw so p does not need to survive
 	 * across the EWMA block — shrinks p liveness to ~5 instructions. */
-	/* ALPHADEV 64-BIT FUSION: Load reclass_counter and last_run_at as a single 64-bit 
-	 * aligned word. Eradicates 1 ldxw and 1 stxw from the hottest metric flow.
-	 * layout: [31..0: reclass_counter], [63..32: last_run_at] */
-	u32 rs = bss->run_start;
-	u64 rc_last = *(u64 *)&hot->reclass_counter;
-	u32 rc = (u32)rc_last + 1;
-	*(u64 *)&hot->reclass_counter = ((u64)rs << 32) | rc;
+	/* ALPHADEV Rule 17 (Free Math): 64-stop classification gate.
+	 * The kernel perfectly tracks total stops natively via (nvcsw + nivcsw). 
+	 * Eradicates parallel tracking variables and fusion logic. */
+	WRITE_ONCE(hot->last_run_at, bss->run_start);
 
 	/* ════ RT_RAW + RECLASSIFY (p alive here) ════
 	 * p->scx.slice read and reclassify call are adjacent,
@@ -2429,7 +2458,7 @@ static __noinline u32 stopping_drr_ewma(
 	 * Flattened: eliminates call/return overhead and enables
 	 * cross-boundary CSE on hot/bss. Register-heavy (audio/compositor
 	 * loops) but fires on only 1/64 stops (~1.5% of context switches). */
-	if (unlikely((rc & 63) == 0)) {
+	if (unlikely(((p->nvcsw + p->nivcsw) & 63) == 0)) {
 		u32 packed = hot->packed_info;
 		packed &= ~(((u32)CAKE_FLOW_WAKER_BOOST) << SHIFT_FLAGS);
 		if (hot->packed_info != packed)
@@ -2461,12 +2490,17 @@ static __noinline u32 stopping_drr_ewma(
 				}
 			}
 
-			/* ALPHADEV 40: is_kthread implicitly merged into cls_game. 
-			 * !cls_game mathematically guarantees !is_kthread. Removing redundant check. */
+			/* ALPHADEV 40: is_kthread implicitly merged into cls_game. */
 			bool cls_penalty = !cls_game
 				&& !(((packed >> SHIFT_FLAGS) & CAKE_FLOW_WAKER_BOOST));
-			u32 hog_thresh = ((u32)bss->tick_slice >> 2) * 3;
-			bool cls_hog = cls_penalty && (rt_raw >= hog_thresh);
+
+			u64 cur_nv = p->nvcsw;
+			u32 yields = (u32)(cur_nv - hot->nvcsw_64_snapshot);
+			hot->nvcsw_64_snapshot = (u32)cur_nv;
+
+			/* Behavioral Isolation: If it voluntarily slept < 15 times over the last 
+			 * 64 stops, the kernel forcibly preempted it > 75% of the time (HOG behavior). */
+			bool cls_hog = cls_penalty && (yields < 15);
 			bool cls_bg  = cls_penalty && !cls_hog;
 
 			u8 new_tc = cls_game       ? CAKE_CLASS_GAME
@@ -2589,7 +2623,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		 * Was using hot->reclass_counter (post-increment = rc+1) — fired on
 		 * different stop than classify, wasting a 29ns get_task_ctx call.
 		 * Now reuses tctx_stop (already fetched under same gate). */
-		if (((hot->reclass_counter - 1) & 63) == 0) {
+		if (unlikely(((p->nvcsw + p->nivcsw) & 63) == 0)) {
 			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 			if (tctx) {
 				/* P3-2: Use pre-computed nvcsw_accum from above
@@ -2670,7 +2704,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		u64 oh_agg = scx_bpf_now() - stopping_overhead_start;
 		s->total_stopping_ns += oh_agg;
 		s->max_stopping_ns = s->max_stopping_ns + ((oh_agg - s->max_stopping_ns) & -(oh_agg > s->max_stopping_ns));
-		if (((hot->reclass_counter - 1) & 63) == 0)
+		if (unlikely(((p->nvcsw + p->nivcsw) & 63) == 0))
 			s->nr_stop_classify++;
 		else
 			s->nr_stop_confidence_skip++;
@@ -2720,7 +2754,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	 * Gate arena CL0 init behind CAKE_STATS_ENABLED to save ~10 arena writes. */
 	if (CAKE_STATS_ENABLED) {
 		tctx->last_run_at      = 0;
-		tctx->reclass_counter  = 0;
+		tctx->_pad_alpha       = 0;
 		tctx->task_class       = CAKE_CLASS_NORMAL;
 	}
 
@@ -2775,7 +2809,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 			tctx->ppid = init_ppid;
 		hot->ppid              = init_ppid;
 		hot->last_run_at       = 0;
-		hot->reclass_counter   = 0;
+		hot->nvcsw_64_snapshot = (u32)p->nvcsw;
 		/* warm_cpus array eradicated: -8 bytes of cache footprint */
 		hot->nvcsw_snapshot    = p->nvcsw;
 		hot->new_flow          = 1;  /* Idea 5: standalone new-flow flag */

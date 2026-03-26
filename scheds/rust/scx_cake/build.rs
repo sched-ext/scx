@@ -132,7 +132,7 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "cargo:warning=scx_cake: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} SINGLE_LLC={} HAS_HYBRID={}",
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} SINGLE_LLC={} HAS_HYBRID={}",
         max_cpus, max_llcs, is_single_llc, has_hybrid
     );
 
