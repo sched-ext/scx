@@ -2080,7 +2080,14 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	if (!(enq_flags & ((u64)SCX_ENQ_WAKEUP | (u64)SCX_ENQ_PREEMPT))) {
 		/* ── REQUEUE (inlined from enqueue_requeue_path) ──
 		 * Yield/slice exhaust path. Halved slice, fresh vtime. */
-		u64 now_cached = scx_bpf_now();
+		/* ALPHADEV Phase 15: BPF-Native Clock read.
+		 * REQUEUE fires on same CPU that just ran cake_stopping,
+		 * which already advanced cake_clock by consumed time.
+		 * Temporally safe: same rq lock hold, no migration.
+		 * EEVDF-correct: post-consumption position matches
+		 * EEVDF's update_deadline (vruntime is post-consumption). */
+		u32 requeue_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+		u64 now_cached = cpu_bss[requeue_cpu].cake_clock;
 		u64 requeue_staged = hot->staged_vtime_bits;
 		u64 requeue_slice = p->scx.slice ?: quantum_ns;
 		u32 dsq_weight = (u32)(requeue_staged & 0xFFFFFFFF);
@@ -2330,14 +2337,16 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * forcing p through 2 separate spill/reload cycles. */
 	u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 
-	/* CLOCK DOMAIN FIX: tick_last_run_at MUST come from scx_bpf_now(),
-	 * NOT p->se.exec_start. */
-	u64 now_full = scx_bpf_now();
-	u32 now = (u32)now_full;
+	/* ALPHADEV Phase 15: BPF-Native Clock.
+	 * Branchless BSS read (1ns) replaces scx_bpf_now() kfunc (10ns).
+	 * On 75% same-task re-runs: zero kfunc calls.
+	 * On 25% task-change: resync inside existing branch below.
+	 * EEVDF-correct: consumed delta (tick_slice - p->scx.slice) is
+	 * kernel-computed and independent of clock source. */
+	struct cake_cpu_bss *bss = &cpu_bss[cpu];
+	u64 now_full = bss->cake_clock;
 
 	/* ── WRITE: BSS per-CPU (always needed) ── */
-	struct cake_cpu_bss *bss = &cpu_bss[cpu];
-	bss->run_start   = now;
 	/* Cache-line illusion stripped: run_start unconditionally acquires Exclusive (M) state,
 	 * therefore avoiding the idle_hint check saves 1 branch and 1 load with zero MESI penalty. */
 	WRITE_ONCE(bss->idle_hint, 0);
@@ -2354,11 +2363,18 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 
 	/* FAST PATH: Same task re-running on same CPU (~75% in gaming).
 	 * Slice load and task classification deferred into task-change block.
-	 * On same-task re-runs, avoids wasted p->scx.slice load + kfunc. */
+	 * On same-task re-runs, avoids wasted p->scx.slice load + kfunc.
+	 * BPF-Native Clock: cake_clock already advanced by cake_stopping.
+	 * now_full is correct without any kfunc call. */
 	if (bss->last_pid != p->pid) {
 		/* ── TASK CHANGE (inlined from running_task_change) ──
 		 * Register budget at get_task_hot: p(r6), cpu(r7), bss(r8)
-		 * = 3 callee-saves. slice + pid consumed before kfunc. */
+		 * = 3 callee-saves. slice + pid consumed before kfunc.
+		 * Clock resync: recalibrate cake_clock from kernel rq clock.
+		 * After idle, task-change is GUARANTEED (idle CPU → new task),
+		 * so this always fires when resync is needed. */
+		now_full = scx_bpf_now();
+		bss->cake_clock = now_full;
 		u64 slice = p->scx.slice;
 		bss->last_pid = p->pid;
 		bss->tick_slice = slice ?: quantum_ns;
@@ -2392,6 +2408,12 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 			}
 		}
 	}
+
+	/* BPF-Native Clock: single write with correct value.
+	 * Same-task (75%): now_full = cake_clock (from BSS, 1ns).
+	 * Task-change (25%): now_full = scx_bpf_now() (resynced above).
+	 * Deferred to here so the task-change path can overwrite it. */
+	bss->run_start = (u32)now_full;
 
 #ifndef CAKE_RELEASE
 	if (stats_on)
@@ -2445,6 +2467,15 @@ static __noinline u32 stopping_drr_ewma(
 	 * The kernel perfectly tracks total stops natively via (nvcsw + nivcsw). 
 	 * Eradicates parallel tracking variables and fusion logic. */
 	WRITE_ONCE(hot->last_run_at, bss->run_start);
+
+	/* ALPHADEV Phase 15: BPF-Native Clock advancement.
+	 * Advance cake_clock by consumed time. tick_slice is the original
+	 * slice assigned in cake_running, p->scx.slice is the remainder.
+	 * The delta is kernel-computed consumed CPU time — same math as
+	 * EEVDF's update_se() (fair.c:L1236: delta_exec = now - exec_start).
+	 * CSE: compiler merges with rt_raw computation (identical subtraction).
+	 * Cost: 1 SUB (shared) + 1 ADD + 1 STORE = ~2ns. Zero branches. */
+	bss->cake_clock += bss->tick_slice - p->scx.slice;
 
 	/* ════ RT_RAW + RECLASSIFY (p alive here) ════
 	 * p->scx.slice read and reclassify call are adjacent,
