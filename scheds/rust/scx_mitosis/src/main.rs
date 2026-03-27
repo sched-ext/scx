@@ -1000,6 +1000,14 @@ impl<'a> Scheduler<'a> {
 
         self.log_all_queue_stats(&cell_stats_delta)?;
 
+        for cell in 0..MAX_CELLS {
+            let ok = cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_MOVE_OK as usize];
+            let fail = cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_MOVE_FAIL as usize];
+            if ok + fail > 0 {
+                trace!("Cell {}: move_to_local ok={} fail={}", cell, ok, fail);
+            }
+        }
+
         if self.cell_manager.is_some() {
             self.collect_demand_metrics(&cpu_ctxs)?;
         }

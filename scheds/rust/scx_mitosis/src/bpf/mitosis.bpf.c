@@ -906,12 +906,19 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 
 	/* Try the winner first */
-	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0))
+	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
+		cstat_inc(CSTAT_MOVE_OK, cell, cctx);
 		return;
+	}
+	cstat_inc(CSTAT_MOVE_FAIL, cell, cctx);
 
 	/* Winner was cell DSQ but failed - try the CPU DSQ */
-	if (min_vtime_dsq.raw == cell_dsq.raw)
-		scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0);
+	if (min_vtime_dsq.raw == cell_dsq.raw) {
+		if (scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0))
+			cstat_inc(CSTAT_MOVE_OK, cell, cctx);
+		else
+			cstat_inc(CSTAT_MOVE_FAIL, cell, cctx);
+	}
 }
 
 /*
