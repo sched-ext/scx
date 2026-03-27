@@ -851,11 +851,20 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	/*
-	 * Limit the amount of budget that an idling task can accumulate
-	 * to one slice.
+	 * Clamp vtime so tasks don't accumulate too much credit.
+	 * Wakeups get up to one slice of credit (they were sleeping).
+	 * Re-enqueues (yield, slice expiry) get no credit — their
+	 * vtime reflects actual CPU usage. Without this distinction,
+	 * yielders perpetually win the PRIQ by resetting to
+	 * basis_vtime - slice_ns on every re-enqueue.
 	 */
-	if (time_before(vtime, basis_vtime - slice_ns))
-		vtime = basis_vtime - slice_ns;
+	if (enq_flags & SCX_ENQ_WAKEUP) {
+		if (time_before(vtime, basis_vtime - slice_ns))
+			vtime = basis_vtime - slice_ns;
+	} else {
+		if (time_before(vtime, basis_vtime))
+			vtime = basis_vtime;
+	}
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 
