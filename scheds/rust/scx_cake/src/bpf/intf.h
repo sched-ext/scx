@@ -114,7 +114,15 @@ struct cake_cpu_bss {
 				 *     Read: enqueue_dsq_dispatch (OR'd with idle_hint). */
 	u8  idle_hint;          /* 1B  off 30: 0=busy, 1=idle (Adjacent for SWAR fetch) */
 	u8  _reserved;          /* 1B  off 31: available for future use */
-	u8  _pad[4064];         /* 4064B off 32: pad to 4096B (Hardware Page). */
+	u64 cake_clock;         /* 8B  off 32: BPF-native monotonic clock (ns).
+				 *     ALPHADEV Phase 15: Self-maintaining accumulator.
+				 *     Advanced by consumed slice in cake_stopping
+				 *     (tick_slice - p->scx.slice). Resynced from
+				 *     scx_bpf_now() only on task-change (25%).
+				 *     Eliminates 2 scx_bpf_now() kfunc calls/switch.
+				 *     Single-writer (local CPU). Same CL as run_start
+				 *     (already M-state) — zero extra MESI cost. */
+	u8  _pad[4056];         /* 4056B off 40: pad to 4096B (Hardware Page). */
 } __attribute__((aligned(4096)));
 /* 4096B alignment: V-Cache Telescoping (Frontier Phase 1).
  * Hardware page boundary isolation ensures L2 hardware prefetchers cannot
