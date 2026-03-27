@@ -140,6 +140,7 @@ fn cmd_vm(args: VmArgs) -> Result<()> {
     if args.run_args.is_empty() { stt_args.push("--all".into()); } else { stt_args.extend(args.run_args); }
     let r = vng::run_in_vng(&cfg, &stt_args)?;
     if !r.output.is_empty() { print!("{}", r.output); }
+    if !r.stderr.is_empty() { eprint!("{}", r.stderr); }
     if r.timed_out { println!("{} timed out", style("FAIL").red().bold()); std::process::exit(1); }
     if !r.success { println!("{} exit {}", style("FAIL").red().bold(), r.exit_code); std::process::exit(1); }
     println!("{} ({:.1}s)", style("PASS").green().bold(), r.duration.as_secs_f64());
