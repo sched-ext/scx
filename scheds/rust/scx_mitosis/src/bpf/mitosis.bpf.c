@@ -687,6 +687,21 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 		}
 		cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
 		if (cpu >= 0) {
+			/*
+			 * Check if the target CPU's native cell has
+			 * waiting work before borrowing. If so, skip
+			 * — the native cell needs this CPU.
+			 */
+			struct cpu_ctx *target_cctx = lookup_cpu_ctx(cpu);
+			if (target_cctx) {
+				u32 tllc = enable_llc_awareness ?
+					target_cctx->llc : FAKE_FLAT_CELL_LLC;
+				if (scx_bpf_dsq_nr_queued(cell_llc_dsq_raw(
+					    target_cctx->cell, tllc)) > 0 ||
+				    scx_bpf_dsq_nr_queued(
+					    cpu_dsq_raw(cpu)) > 0)
+					goto no_borrow;
+			}
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
@@ -695,6 +710,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 			return cpu;
 		}
 	}
+no_borrow:
 
 	return -EBUSY;
 }
@@ -1832,6 +1848,39 @@ static void dump_cell_cpumask(int id)
 	dump_cpumask(cell_cpumask);
 }
 
+void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
+{
+	struct cpu_ctx  *cctx;
+	struct task_ctx *tctx;
+
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+		return;
+
+	/*
+	 * If this CPU's per-CPU DSQ has waiting tasks, zero the
+	 * slice so dispatch runs within this tick rather than
+	 * waiting for the full slice to expire.
+	 *
+	 * For cross-cell tasks, also check the native
+	 * cell DSQ — the borrower should yield to native cell
+	 * work that arrived after the borrow started.
+	 */
+	{
+		u64 cdsq = cpu_dsq_raw(scx_bpf_task_cpu(p));
+		if (scx_bpf_dsq_nr_queued(cdsq) > 0) {
+			p->scx.slice = 0;
+			return;
+		}
+	}
+	if (tctx->cell != cctx->cell) {
+		u32 llc = enable_llc_awareness ? cctx->llc : FAKE_FLAT_CELL_LLC;
+		u64 cldsq = cell_llc_dsq_raw(cctx->cell, llc);
+		if (scx_bpf_dsq_nr_queued(cldsq) > 0) {
+			p->scx.slice = 0;
+		}
+	}
+}
+
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
 	dsq_id_t	dsq_id;
@@ -2571,6 +2620,7 @@ SCX_OPS_DEFINE(mitosis,
 	       .dispatch		= (void *)mitosis_dispatch,
 	       .running			= (void *)mitosis_running,
 	       .stopping		= (void *)mitosis_stopping,
+	       .tick			= (void *)mitosis_tick,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
 	       .init_task		= (void *)mitosis_init_task,
 	       .cgroup_init		= (void *)mitosis_cgroup_init,
