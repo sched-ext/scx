@@ -47,6 +47,7 @@ const volatile bool	     cpu_controller_disabled	     = false;
 const volatile bool	     reject_multicpu_pinning	     = false;
 const volatile bool	     userspace_managed_cell_mode     = false;
 const volatile bool	     enable_borrowing		     = false;
+const volatile s32	     trace_cpu			     = -1;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -98,7 +99,53 @@ UEI_DEFINE(uei);
 struct cell_map cells SEC(".maps");
 
 /* Forward declaration for init_cgrp_ctx_with_ancestors (defined later) */
-static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp);
+static int	       init_cgrp_ctx_with_ancestors(struct cgroup *cgrp);
+
+static __noinline void mitosis_select_dd()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_try_select_dd()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_try_enqueue_dd()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_real_dispatch_not_found()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_real_dispatch_top()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_real_dispatch_cell()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_real_dispatch_cpu()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_real_dispatch_found_cell()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_real_dispatch_found_cpu()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_real_dispatch_lost_race()
+{
+	asm volatile("");
+}
+static __noinline void mitosis_tick_trace(s32 cpu, u64 ts, s32 pid, u32 cell,
+					  u64 runtime_ns)
+{
+	asm volatile("");
+}
 
 /*
  * We store per-cpu values along with per-cell values. Helper functions to
@@ -647,6 +694,15 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 	cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx);
 	if (cpu >= 0) {
 		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
+
+		if (!kick) {
+			if (cpu == trace_cpu)
+				mitosis_try_select_dd();
+		} else {
+			if (cpu == trace_cpu)
+				mitosis_try_enqueue_dd();
+		}
+
 		/*
 		 * Use SCX_DSQ_LOCAL_ON to explicitly target the idle CPU
 		 * we found. In the select_cpu path this is redundant
@@ -713,8 +769,11 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		if (cpu < 0)
 			return prev_cpu;
 
-		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+		if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+			if (cpu == trace_cpu)
+				mitosis_select_dd();
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		}
 		return cpu;
 	}
 
@@ -839,8 +898,140 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
+/*
+ * Slower but guaranteed dispatch: iterate DSQs with locking to avoid
+ * the race in scx_bpf_dsq_move_to_local(). Tries @first, then @second.
+ * Returns the raw DSQ ID that succeeded, or 0 on failure.
+ */
+static u64 try_dsq_move_locked(u64 first, u64 second)
+{
+	struct task_struct *p;
+
+	bpf_for_each(scx_dsq, p, first, 0) {
+		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL, 0))
+			return first;
+	}
+	bpf_for_each(scx_dsq, p, second, 0) {
+		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL, 0))
+			return second;
+	}
+	return 0;
+}
+
+/*
+ * Last-resort locked dispatch. All fast scx_bpf_dsq_move_to_local() attempts
+ * have failed. Use the iterator API (bpf_for_each + scx_bpf_dsq_move) which
+ * locks the DSQ and guarantees acquisition. Tries the winner DSQ first, then
+ * the other.
+ */
+static bool try_locked_dispatch(s32 cpu, dsq_id_t min_vtime_dsq,
+				dsq_id_t cell_dsq, dsq_id_t cpu_dsq)
+{
+	u64 other = (min_vtime_dsq.raw == cell_dsq.raw) ? cpu_dsq.raw :
+							  cell_dsq.raw;
+	u64 won	  = try_dsq_move_locked(min_vtime_dsq.raw, other);
+	if (won) {
+		if (cpu == trace_cpu) {
+			if (won == cell_dsq.raw)
+				mitosis_real_dispatch_cell();
+			else
+				mitosis_real_dispatch_cpu();
+		}
+		return true;
+	}
+
+	return false;
+}
+
+// The return here will return from mitosis_dispatch
+#define TRY_DISPATCH_TRACED(dsq, trace_fn)                      \
+	do {                                                    \
+		if (scx_bpf_dsq_move_to_local((dsq).raw, 0)) {  \
+			cstat_inc(CSTAT_MOVE_OK, cell, cctx);   \
+			if (cpu == trace_cpu)                   \
+				trace_fn();                     \
+			return;                                 \
+		} else {                                        \
+			cstat_inc(CSTAT_MOVE_FAIL, cell, cctx); \
+		}                                               \
+	} while (0)
+
+static __always_inline void tommys_dispatch(s32 cpu, struct task_struct *prev)
+{
+	if (cpu == trace_cpu)
+		mitosis_real_dispatch_top();
+
+	struct cpu_ctx *cctx = lookup_cpu_ctx(-1);
+	if (!cctx) {
+		scx_bpf_error("Failed to lookup cpu_ctx");
+		return;
+	}
+
+	// Get DSQs
+	u32	 cell	  = READ_ONCE(cctx->cell);
+	u32	 llc	  = FAKE_FLAT_CELL_LLC;
+	dsq_id_t cell_dsq = get_cell_llc_dsq_id(cell, llc);
+	dsq_id_t cpu_dsq  = get_cpu_dsq_id(cpu);
+	if (dsq_is_invalid(cell_dsq) || dsq_is_invalid(cpu_dsq)) {
+		scx_bpf_error("Invalid DSQs: cell=%x llc=%x cpu=%d", cell, llc,
+			      cpu);
+		return;
+	}
+
+	// Peek the cell DSQ
+	u64		    cell_dsq_task_vtime = 0;
+	struct task_struct *cell_p = __COMPAT_scx_bpf_dsq_peek(cell_dsq.raw);
+	if (cell_p) {
+		cell_dsq_task_vtime = cell_p->scx.dsq_vtime;
+		if (cpu == trace_cpu)
+			mitosis_real_dispatch_found_cell();
+	}
+
+	// Peek the CPU DSQ
+	u64		    cpu_dsq_task_vtime = 0;
+	struct task_struct *cpu_p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq.raw);
+	if (cpu_p) {
+		cpu_dsq_task_vtime = cpu_p->scx.dsq_vtime;
+		if (cpu == trace_cpu)
+			mitosis_real_dispatch_found_cpu();
+	}
+
+	if (!cell_p && !cpu_p) {
+		// Nothing to dispatch
+		if (cpu == trace_cpu)
+			mitosis_real_dispatch_not_found();
+		return;
+	} else if (!cpu_p) {
+		// Dispatch from cell DSQ
+		TRY_DISPATCH_TRACED(cell_dsq, mitosis_real_dispatch_cell);
+	} else if (!cell_p) {
+		// Dispatch from CPU DSQ
+		TRY_DISPATCH_TRACED(cpu_dsq, mitosis_real_dispatch_cpu);
+	}
+
+	// Both present — dispatch in vtime order; second try is race-loss fallback.
+	// CPU DSQ wins in a tie.
+	if (time_before(cell_dsq_task_vtime, cpu_dsq_task_vtime)) {
+		TRY_DISPATCH_TRACED(cell_dsq, mitosis_real_dispatch_cell);
+		TRY_DISPATCH_TRACED(cpu_dsq, mitosis_real_dispatch_cpu);
+	} else {
+		TRY_DISPATCH_TRACED(cpu_dsq, mitosis_real_dispatch_cpu);
+		// We have observed the sched get here. Perhaps the task exited before move to local?
+		// Don't think a race could have happened...
+		TRY_DISPATCH_TRACED(cell_dsq, mitosis_real_dispatch_cell);
+	}
+
+	/* Nothing dispatched */
+	if (cpu == trace_cpu)
+		mitosis_real_dispatch_lost_race();
+}
+#undef TRY_DISPATCH_TRACED
+
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
+	tommys_dispatch(cpu, prev);
+	return;
+
 	struct cpu_ctx *cctx;
 	u32		cell;
 
@@ -869,7 +1060,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	if (p) {
 		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = cell_dsq;
-		found	      = true;
+		if (cpu == trace_cpu)
+			mitosis_real_dispatch_found_cell();
+		found = true;
 	}
 
 	/* Peek at CPU DSQ head, prefer if lower vtime */
@@ -877,7 +1070,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
 		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = cpu_dsq;
-		found	      = true;
+		if (cpu == trace_cpu)
+			mitosis_real_dispatch_found_cpu();
+		found = true;
 	}
 
 	/*
@@ -886,6 +1081,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
 	 */
 	if (!found) {
+		if (cpu == trace_cpu)
+			mitosis_real_dispatch_not_found();
 		/* Try work stealing if enabled */
 		if (enable_llc_awareness && enable_work_stealing) {
 			/* Returns: <0 error, 0 no steal, >0 stole work */
@@ -896,6 +1093,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 				cstat_inc(CSTAT_STEAL, cell, cctx);
 			}
 		}
+
 		return;
 	}
 
@@ -906,12 +1104,31 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 
 	/* Try the winner first */
-	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0))
+	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
+		if (cpu == trace_cpu) {
+			if (min_vtime_dsq.raw == cell_dsq.raw)
+				mitosis_real_dispatch_cell();
+			else
+				mitosis_real_dispatch_cpu();
+		}
 		return;
+	}
 
 	/* Winner was cell DSQ but failed - try the CPU DSQ */
-	if (min_vtime_dsq.raw == cell_dsq.raw)
-		scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0);
+	if (min_vtime_dsq.raw == cell_dsq.raw) {
+		if (scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0)) {
+			if (cpu == trace_cpu)
+				mitosis_real_dispatch_cpu();
+			return;
+		}
+	}
+
+	if (try_locked_dispatch(cpu, min_vtime_dsq, cell_dsq, cpu_dsq)) {
+		return;
+	}
+
+	if (cpu == trace_cpu)
+		mitosis_real_dispatch_lost_race();
 }
 
 /*
@@ -1345,6 +1562,30 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	}
 
 	tctx->started_running_at = scx_bpf_now();
+}
+
+void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
+{
+	if (trace_cpu < 0)
+		return;
+
+	struct cpu_ctx	*cctx;
+	struct task_ctx *tctx;
+
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+		return;
+
+	// if (cctx->tick_count++ % 10 != 0)
+	// 	return;
+
+	s32 cpu	       = bpf_get_smp_processor_id();
+	u64 now	       = scx_bpf_now();
+	u64 runtime_ns = 0;
+	if (tctx->started_running_at && now > tctx->started_running_at)
+		runtime_ns = now - tctx->started_running_at;
+
+	mitosis_tick_trace(cpu, bpf_ktime_get_ns(), p->pid, tctx->cell,
+			   runtime_ns);
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
@@ -2537,6 +2778,7 @@ SCX_OPS_DEFINE(mitosis,
 	       .select_cpu		= (void *)mitosis_select_cpu,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
+	       .tick			= (void *)mitosis_tick,
 	       .running			= (void *)mitosis_running,
 	       .stopping		= (void *)mitosis_stopping,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
