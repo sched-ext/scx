@@ -18,11 +18,20 @@ pub enum WorkType {
     Mixed,
     IoSync,
     /// Work hard for burst_ms, sleep for sleep_ms, repeat. Frees CPUs during sleep for borrowing.
-    Bursty { burst_ms: u64, sleep_ms: u64 },
+    Bursty {
+        burst_ms: u64,
+        sleep_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum SchedPolicy { Normal, Batch, Idle, Fifo(u32), RoundRobin(u32) }
+pub enum SchedPolicy {
+    Normal,
+    Batch,
+    Idle,
+    Fifo(u32),
+    RoundRobin(u32),
+}
 
 #[derive(Debug, Clone)]
 pub struct WorkloadConfig {
@@ -34,12 +43,21 @@ pub struct WorkloadConfig {
 
 impl Default for WorkloadConfig {
     fn default() -> Self {
-        Self { num_workers: 1, affinity: AffinityMode::None, work_type: WorkType::CpuSpin, sched_policy: SchedPolicy::Normal }
+        Self {
+            num_workers: 1,
+            affinity: AffinityMode::None,
+            work_type: WorkType::CpuSpin,
+            sched_policy: SchedPolicy::Normal,
+        }
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Migration { pub at_ns: u64, pub from_cpu: usize, pub to_cpu: usize }
+pub struct Migration {
+    pub at_ns: u64,
+    pub from_cpu: usize,
+    pub to_cpu: usize,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkerReport {
@@ -84,7 +102,8 @@ impl WorkloadHandle {
             let mut report_fds = [0i32; 2];
             let mut start_fds = [0i32; 2];
             if unsafe { libc::pipe(report_fds.as_mut_ptr()) } != 0
-                || unsafe { libc::pipe(start_fds.as_mut_ptr()) } != 0 {
+                || unsafe { libc::pipe(start_fds.as_mut_ptr()) } != 0
+            {
                 anyhow::bail!("pipe failed: {}", std::io::Error::last_os_error());
             }
 
@@ -95,9 +114,14 @@ impl WorkloadHandle {
                     // Child: install signal handler FIRST (before start wait)
                     // to prevent SIGUSR1 killing us before we're ready
                     STOP.store(false, Ordering::Relaxed);
-                    unsafe { libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t); }
+                    unsafe {
+                        libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t);
+                    }
                     // Close unused pipe ends
-                    unsafe { libc::close(report_fds[0]); libc::close(start_fds[1]); }
+                    unsafe {
+                        libc::close(report_fds[0]);
+                        libc::close(start_fds[1]);
+                    }
                     // Wait for parent to move us to cgroup before starting work
                     let mut buf = [0u8; 1];
                     let mut f = unsafe { std::fs::File::from_raw_fd(start_fds[0]) };
@@ -111,17 +135,25 @@ impl WorkloadHandle {
                     let mut f = unsafe { std::fs::File::from_raw_fd(report_fds[1]) };
                     let _ = f.write_all(&json);
                     drop(f);
-                    unsafe { libc::_exit(0); }
+                    unsafe {
+                        libc::_exit(0);
+                    }
                 }
                 child_pid => {
                     // Parent: close unused pipe ends
-                    unsafe { libc::close(report_fds[1]); libc::close(start_fds[0]); }
+                    unsafe {
+                        libc::close(report_fds[1]);
+                        libc::close(start_fds[0]);
+                    }
                     children.push((child_pid as u32, report_fds[0], start_fds[1]));
                 }
             }
         }
 
-        Ok(Self { children, started: false })
+        Ok(Self {
+            children,
+            started: false,
+        })
     }
 
     pub fn tids(&self) -> Vec<u32> {
@@ -130,7 +162,9 @@ impl WorkloadHandle {
 
     /// Signal all children to start working (after they've been moved to cgroups).
     pub fn start(&mut self) {
-        if self.started { return; }
+        if self.started {
+            return;
+        }
         self.started = true;
         for &(_, _, start_fd) in &self.children {
             unsafe {
@@ -160,7 +194,9 @@ impl WorkloadHandle {
 
         // Signal all children to stop
         for &(pid, _, _) in &children {
-            unsafe { libc::kill(pid as i32, libc::SIGUSR1); }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGUSR1);
+            }
         }
 
         // Collect reports and wait for exit
@@ -172,7 +208,9 @@ impl WorkloadHandle {
 
             // Wait for child
             let mut status = 0i32;
-            unsafe { libc::waitpid(pid as i32, &mut status, 0); }
+            unsafe {
+                libc::waitpid(pid as i32, &mut status, 0);
+            }
 
             if let Ok(report) = serde_json::from_slice::<WorkerReport>(&buf) {
                 reports.push(report);
@@ -228,27 +266,43 @@ fn worker_main(
     while !STOP.load(Ordering::Relaxed) {
         match work_type {
             WorkType::CpuSpin => {
-                for _ in 0..1024 { work_units = work_units.wrapping_add(1); std::hint::spin_loop(); }
+                for _ in 0..1024 {
+                    work_units = work_units.wrapping_add(1);
+                    std::hint::spin_loop();
+                }
             }
             WorkType::YieldHeavy => {
                 work_units = work_units.wrapping_add(1);
                 std::thread::yield_now();
             }
             WorkType::Mixed => {
-                for _ in 0..1024 { work_units = work_units.wrapping_add(1); std::hint::spin_loop(); }
+                for _ in 0..1024 {
+                    work_units = work_units.wrapping_add(1);
+                    std::hint::spin_loop();
+                }
                 std::thread::yield_now();
             }
             WorkType::IoSync => {
-                let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true)
-                    .open(format!("/tmp/stt_io_{tid}")).unwrap();
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(format!("/tmp/stt_io_{tid}"))
+                    .unwrap();
                 let buf = [0u8; 4096];
-                for _ in 0..16 { let _ = f.write_all(&buf); work_units = work_units.wrapping_add(1); }
+                for _ in 0..16 {
+                    let _ = f.write_all(&buf);
+                    work_units = work_units.wrapping_add(1);
+                }
                 let _ = f.sync_all();
             }
             WorkType::Bursty { burst_ms, sleep_ms } => {
                 let burst_end = Instant::now() + Duration::from_millis(burst_ms);
                 while Instant::now() < burst_end && !STOP.load(Ordering::Relaxed) {
-                    for _ in 0..1024 { work_units = work_units.wrapping_add(1); std::hint::spin_loop(); }
+                    for _ in 0..1024 {
+                        work_units = work_units.wrapping_add(1);
+                        std::hint::spin_loop();
+                    }
                 }
                 if !STOP.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(sleep_ms));
@@ -277,7 +331,11 @@ fn worker_main(
             if cpu != last_cpu {
                 migration_count += 1;
                 cpus_used.insert(cpu);
-                migrations.push(Migration { at_ns: start.elapsed().as_nanos() as u64, from_cpu: last_cpu, to_cpu: cpu });
+                migrations.push(Migration {
+                    at_ns: start.elapsed().as_nanos() as u64,
+                    from_cpu: last_cpu,
+                    to_cpu: cpu,
+                });
                 last_cpu = cpu;
             }
         }
@@ -288,9 +346,14 @@ fn worker_main(
     let wall_time_ns = wall_time.as_nanos() as u64;
 
     WorkerReport {
-        tid, work_units, cpu_time_ns, wall_time_ns,
+        tid,
+        work_units,
+        cpu_time_ns,
+        wall_time_ns,
         runnable_ns: wall_time_ns.saturating_sub(cpu_time_ns),
-        migration_count, cpus_used, migrations,
+        migration_count,
+        cpus_used,
+        migrations,
         max_gap_ms: max_gap_ns / 1_000_000,
         max_gap_cpu,
         max_gap_at_ms: max_gap_at_ns / 1_000_000,
@@ -310,16 +373,27 @@ fn resolve_affinity(mode: &AffinityMode, _idx: usize) -> Result<Option<BTreeSet<
             use rand::seq::SliceRandom;
             let pool: Vec<usize> = from.iter().copied().collect();
             let count = (*count).min(pool.len()).max(1);
-            Ok(Some(pool.choose_multiple(&mut rand::thread_rng(), count).copied().collect()))
+            Ok(Some(
+                pool.choose_multiple(&mut rand::thread_rng(), count)
+                    .copied()
+                    .collect(),
+            ))
         }
     }
 }
 
-fn sched_getcpu() -> usize { unsafe { libc::sched_getcpu() as usize } }
+fn sched_getcpu() -> usize {
+    unsafe { libc::sched_getcpu() as usize }
+}
 
 fn thread_cpu_time_ns() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts); }
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts);
+    }
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
 
@@ -331,7 +405,9 @@ fn set_sched_policy(pid: u32, policy: SchedPolicy) -> Result<()> {
         SchedPolicy::Fifo(p) => (libc::SCHED_FIFO, p.clamp(1, 99) as i32),
         SchedPolicy::RoundRobin(p) => (libc::SCHED_RR, p.clamp(1, 99) as i32),
     };
-    let param = libc::sched_param { sched_priority: prio };
+    let param = libc::sched_param {
+        sched_priority: prio,
+    };
     if unsafe { libc::sched_setscheduler(pid as i32, pol, &param) } != 0 {
         anyhow::bail!("sched_setscheduler: {}", std::io::Error::last_os_error());
     }
@@ -342,8 +418,13 @@ pub fn set_thread_affinity(pid: u32, cpus: &BTreeSet<usize>) -> Result<()> {
     use nix::sched::{sched_setaffinity, CpuSet};
     use nix::unistd::Pid;
     let mut cpu_set = CpuSet::new();
-    for &cpu in cpus { cpu_set.set(cpu).with_context(|| format!("CPU {cpu} out of range"))?; }
-    sched_setaffinity(Pid::from_raw(pid as i32), &cpu_set).with_context(|| format!("sched_setaffinity pid={pid}"))?;
+    for &cpu in cpus {
+        cpu_set
+            .set(cpu)
+            .with_context(|| format!("CPU {cpu} out of range"))?;
+    }
+    sched_setaffinity(Pid::from_raw(pid as i32), &cpu_set)
+        .with_context(|| format!("sched_setaffinity pid={pid}"))?;
     Ok(())
 }
 
@@ -398,11 +479,21 @@ mod tests {
     #[test]
     fn worker_report_serde_roundtrip() {
         let r = WorkerReport {
-            tid: 42, work_units: 1000, cpu_time_ns: 5_000_000_000,
-            wall_time_ns: 10_000_000_000, runnable_ns: 5_000_000_000,
-            migration_count: 3, cpus_used: [0, 1, 2].into_iter().collect(),
-            migrations: vec![Migration { at_ns: 100, from_cpu: 0, to_cpu: 1 }],
-            max_gap_ms: 50, max_gap_cpu: 1, max_gap_at_ms: 500,
+            tid: 42,
+            work_units: 1000,
+            cpu_time_ns: 5_000_000_000,
+            wall_time_ns: 10_000_000_000,
+            runnable_ns: 5_000_000_000,
+            migration_count: 3,
+            cpus_used: [0, 1, 2].into_iter().collect(),
+            migrations: vec![Migration {
+                at_ns: 100,
+                from_cpu: 0,
+                to_cpu: 1,
+            }],
+            max_gap_ms: 50,
+            max_gap_cpu: 1,
+            max_gap_at_ms: 500,
         };
         let json = serde_json::to_string(&r).unwrap();
         let r2: WorkerReport = serde_json::from_str(&json).unwrap();
@@ -415,7 +506,11 @@ mod tests {
 
     #[test]
     fn migration_serde() {
-        let m = Migration { at_ns: 12345, from_cpu: 0, to_cpu: 3 };
+        let m = Migration {
+            at_ns: 12345,
+            from_cpu: 0,
+            to_cpu: 3,
+        };
         let json = serde_json::to_string(&m).unwrap();
         let m2: Migration = serde_json::from_str(&json).unwrap();
         assert_eq!(m.at_ns, m2.at_ns);
@@ -526,7 +621,10 @@ mod tests {
 
     #[test]
     fn drop_kills_children() {
-        let config = WorkloadConfig { num_workers: 2, ..Default::default() };
+        let config = WorkloadConfig {
+            num_workers: 2,
+            ..Default::default()
+        };
         let h = WorkloadHandle::spawn(&config).unwrap();
         let pids = h.tids();
         drop(h);
