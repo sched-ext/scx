@@ -1644,9 +1644,9 @@ fn custom_vtime_contamination(ctx: &Ctx) -> Result<VerifyResult> {
     let phase_dur = Duration::from_secs(8);
 
     // Actions: (num_cells, overlapping)
-    // Vary cell count 2-max × disjoint/overlap. Cap to usable/2 so
-    // each cell gets at least 2 CPUs.
-    let max_cells = (usable.len() / 2).min(6);
+    // Vary cell count 2-max × disjoint/overlap. Cap to usable/3 so
+    // each cell gets at least 3 CPUs (enough for cell 0 + user cells).
+    let max_cells = (usable.len() / 3).min(5);
     let all_actions: Vec<(usize, bool)> = (2..=max_cells)
         .flat_map(|n| vec![(n, false), (n, true)])
         .collect();
