@@ -304,6 +304,14 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
 	}
 }
 
+/*
+ * Scale raw task_load (nanoseconds) into load_invr intensity units
+ * to match the budget space.
+ */
+#define task_load_to_budget(task_load, cpdomc) \
+	((cpdomc)->cap_sum_active_cpus ? \
+	 ((task_load) << LAVD_SHIFT) / (cpdomc)->cap_sum_active_cpus : 0)
+
 extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 extern int			nr_cpdoms;

@@ -100,7 +100,8 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 			stealee_budget_invr = (cpdomc->load_invr -
 					       fair_share_invr) / 2;
 			stealee_budget_invr = min(stealee_budget_invr,
-						  cpdomc->queued_load_invr);
+				task_load_to_budget(cpdomc->queued_load_invr,
+						    cpdomc));
 		}
 
 		/*
@@ -415,8 +416,9 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			 */
 			if (consume_dsq(cpdomc_pick, dsq_id)) {
 				decrement_stealee_budget(cpdomc_pick,
-							 task_load);
-				decrement_stealer_budget(cpdomc, task_load);
+					task_load_to_budget(task_load, cpdomc_pick));
+				decrement_stealer_budget(cpdomc,
+					task_load_to_budget(task_load, cpdomc));
 				return true;
 			}
 		}
@@ -494,8 +496,9 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			 */
 			if (consume_dsq(cpdomc_pick, dsq_id)) {
 				decrement_stealee_budget(cpdomc_pick,
-							 task_load);
-				decrement_stealer_budget(cpdomc, task_load);
+					task_load_to_budget(task_load, cpdomc_pick));
+				decrement_stealer_budget(cpdomc,
+					task_load_to_budget(task_load, cpdomc));
 				return true;
 			}
 		}
