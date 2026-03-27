@@ -1,5 +1,5 @@
-use std::collections::BTreeSet;
 use crate::workload::WorkerReport;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VerifyResult {
@@ -37,9 +37,17 @@ pub struct ScenarioStats {
 }
 
 impl VerifyResult {
-    pub fn pass() -> Self { Self { passed: true, details: vec![], stats: Default::default() } }
+    pub fn pass() -> Self {
+        Self {
+            passed: true,
+            details: vec![],
+            stats: Default::default(),
+        }
+    }
     pub fn merge(&mut self, other: VerifyResult) {
-        if !other.passed { self.passed = false; }
+        if !other.passed {
+            self.passed = false;
+        }
         self.details.extend(other.details);
         self.stats.cells.extend(other.stats.cells);
         self.stats.total_workers += other.stats.total_workers;
@@ -61,7 +69,8 @@ pub fn verify_isolation(reports: &[WorkerReport], expected: &BTreeSet<usize>) ->
         let bad: BTreeSet<usize> = w.cpus_used.difference(expected).copied().collect();
         if !bad.is_empty() {
             r.passed = false;
-            r.details.push(format!("tid {} ran on unexpected CPUs {:?}", w.tid, bad));
+            r.details
+                .push(format!("tid {} ran on unexpected CPUs {:?}", w.tid, bad));
         }
     }
     r
@@ -70,15 +79,21 @@ pub fn verify_isolation(reports: &[WorkerReport], expected: &BTreeSet<usize>) ->
 /// Verify one cell's workers. Returns per-cell stats.
 pub fn verify_not_starved(reports: &[WorkerReport]) -> VerifyResult {
     let mut r = VerifyResult::pass();
-    if reports.is_empty() { return r; }
+    if reports.is_empty() {
+        return r;
+    }
 
-    let cpus: BTreeSet<usize> = reports.iter().flat_map(|w| w.cpus_used.iter().copied()).collect();
+    let cpus: BTreeSet<usize> = reports
+        .iter()
+        .flat_map(|w| w.cpus_used.iter().copied())
+        .collect();
     let mut pcts: Vec<f64> = Vec::new();
 
     for w in reports {
         if w.work_units == 0 {
             r.passed = false;
-            r.details.push(format!("tid {} starved (0 work units)", w.tid));
+            r.details
+                .push(format!("tid {} starved (0 work units)", w.tid));
         }
         if w.wall_time_ns > 0 {
             pcts.push(w.runnable_ns as f64 / w.wall_time_ns as f64 * 100.0);
@@ -87,11 +102,17 @@ pub fn verify_not_starved(reports: &[WorkerReport]) -> VerifyResult {
 
     let min = pcts.iter().cloned().reduce(f64::min).unwrap_or(0.0);
     let max = pcts.iter().cloned().reduce(f64::max).unwrap_or(0.0);
-    let avg = if pcts.is_empty() { 0.0 } else { pcts.iter().sum::<f64>() / pcts.len() as f64 };
+    let avg = if pcts.is_empty() {
+        0.0
+    } else {
+        pcts.iter().sum::<f64>() / pcts.len() as f64
+    };
     let spread = max - min;
 
     let worst_gap = reports.iter().max_by_key(|w| w.max_gap_ms);
-    let (gap_ms, gap_cpu) = worst_gap.map(|w| (w.max_gap_ms, w.max_gap_cpu)).unwrap_or((0, 0));
+    let (gap_ms, gap_cpu) = worst_gap
+        .map(|w| (w.max_gap_ms, w.max_gap_cpu))
+        .unwrap_or((0, 0));
 
     let cell = CellStats {
         num_workers: reports.len(),
@@ -110,7 +131,11 @@ pub fn verify_not_starved(reports: &[WorkerReport]) -> VerifyResult {
         r.passed = false;
         r.details.push(format!(
             "unfair cell: spread={:.0}% ({:.0}-{:.0}%) {} workers on {} cpus",
-            spread, min, max, reports.len(), cpus.len(),
+            spread,
+            min,
+            max,
+            reports.len(),
+            cpus.len(),
         ));
     }
 
@@ -118,7 +143,10 @@ pub fn verify_not_starved(reports: &[WorkerReport]) -> VerifyResult {
     for w in reports {
         if w.max_gap_ms > 2000 {
             r.passed = false;
-            r.details.push(format!("stuck {}ms on cpu{} at +{}ms", w.max_gap_ms, w.max_gap_cpu, w.max_gap_at_ms));
+            r.details.push(format!(
+                "stuck {}ms on cpu{} at +{}ms",
+                w.max_gap_ms, w.max_gap_cpu, w.max_gap_at_ms
+            ));
         }
     }
 
@@ -137,12 +165,16 @@ pub fn verify_not_starved(reports: &[WorkerReport]) -> VerifyResult {
 }
 
 fn verify_runnable(reports: &[WorkerReport], _available_cpus: usize) -> VerifyResult {
-    if reports.is_empty() { return VerifyResult::pass(); }
+    if reports.is_empty() {
+        return VerifyResult::pass();
+    }
 
     let mut r = VerifyResult::pass();
     let mut pcts: Vec<(u32, f64)> = Vec::new();
     for w in reports {
-        if w.wall_time_ns == 0 { continue; }
+        if w.wall_time_ns == 0 {
+            continue;
+        }
         let pct = w.runnable_ns as f64 / w.wall_time_ns as f64 * 100.0;
         pcts.push((w.tid, pct));
     }
@@ -163,8 +195,14 @@ fn verify_runnable(reports: &[WorkerReport], _available_cpus: usize) -> VerifyRe
         // similar CPU time regardless of oversubscription level.
         if spread > 15.0 && pcts.len() >= 2 {
             r.passed = false;
-            let min_w = pcts.iter().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
-            let max_w = pcts.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+            let min_w = pcts
+                .iter()
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap();
+            let max_w = pcts
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap();
             r.details.push(format!(
                 "unfair: spread={:.0}% (tid {} at {:.0}% vs tid {} at {:.0}%)",
                 spread, min_w.0, min_w.1, max_w.0, max_w.1,
@@ -190,16 +228,31 @@ mod tests {
     use super::*;
     use crate::workload::WorkerReport;
 
-    fn rpt(tid: u32, work: u64, wall_ns: u64, run_ns: u64, cpus: &[usize], gap_ms: u64) -> WorkerReport {
+    fn rpt(
+        tid: u32,
+        work: u64,
+        wall_ns: u64,
+        run_ns: u64,
+        cpus: &[usize],
+        gap_ms: u64,
+    ) -> WorkerReport {
         WorkerReport {
-            tid, work_units: work, cpu_time_ns: wall_ns.saturating_sub(run_ns),
-            wall_time_ns: wall_ns, runnable_ns: run_ns, migration_count: 0,
-            cpus_used: cpus.iter().copied().collect(), migrations: vec![],
-            max_gap_ms: gap_ms, max_gap_cpu: cpus.first().copied().unwrap_or(0), max_gap_at_ms: 1000,
+            tid,
+            work_units: work,
+            cpu_time_ns: wall_ns.saturating_sub(run_ns),
+            wall_time_ns: wall_ns,
+            runnable_ns: run_ns,
+            migration_count: 0,
+            cpus_used: cpus.iter().copied().collect(),
+            migrations: vec![],
+            max_gap_ms: gap_ms,
+            max_gap_cpu: cpus.first().copied().unwrap_or(0),
+            max_gap_at_ms: 1000,
         }
     }
 
-    #[test] fn healthy_pass() {
+    #[test]
+    fn healthy_pass() {
         let r = verify_not_starved(&[
             rpt(1, 1000, 5_000_000_000, 500_000_000, &[0, 1], 50),
             rpt(2, 1000, 5_000_000_000, 600_000_000, &[0, 1], 60),
@@ -208,21 +261,29 @@ mod tests {
         assert!(r.passed, "{:?}", r.details);
     }
 
-    #[test] fn starved_fail() {
-        let r = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50), rpt(2, 0, 5e9 as u64, 5e9 as u64, &[0], 50)]);
-        assert!(!r.passed); assert!(r.details.iter().any(|d| d.contains("starved")));
-    }
-
-    #[test] fn unfair_spread_fail() {
+    #[test]
+    fn starved_fail() {
         let r = verify_not_starved(&[
-            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1], 50),   // 10%
-            rpt(2, 500, 5e9 as u64, 4e9 as u64, &[0, 1], 50),    // 80%
-            rpt(3, 800, 5e9 as u64, 2e9 as u64, &[0, 1], 50),    // 40%
+            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50),
+            rpt(2, 0, 5e9 as u64, 5e9 as u64, &[0], 50),
         ]);
-        assert!(!r.passed); assert!(r.details.iter().any(|d| d.contains("unfair")));
+        assert!(!r.passed);
+        assert!(r.details.iter().any(|d| d.contains("starved")));
     }
 
-    #[test] fn fair_oversubscribed_pass() {
+    #[test]
+    fn unfair_spread_fail() {
+        let r = verify_not_starved(&[
+            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1], 50), // 10%
+            rpt(2, 500, 5e9 as u64, 4e9 as u64, &[0, 1], 50),  // 80%
+            rpt(3, 800, 5e9 as u64, 2e9 as u64, &[0, 1], 50),  // 40%
+        ]);
+        assert!(!r.passed);
+        assert!(r.details.iter().any(|d| d.contains("unfair")));
+    }
+
+    #[test]
+    fn fair_oversubscribed_pass() {
         let r = verify_not_starved(&[
             rpt(1, 100, 5e9 as u64, (3.75e9) as u64, &[0], 50),
             rpt(2, 100, 5e9 as u64, (3.70e9) as u64, &[0], 50),
@@ -232,59 +293,101 @@ mod tests {
         assert!(r.passed, "{:?}", r.details);
     }
 
-    #[test] fn stuck_fail() {
-        let r = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50), rpt(2, 1000, 5e9 as u64, 5e8 as u64, &[0], 2500)]);
-        assert!(!r.passed); assert!(r.details.iter().any(|d| d.contains("stuck")));
+    #[test]
+    fn stuck_fail() {
+        let r = verify_not_starved(&[
+            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50),
+            rpt(2, 1000, 5e9 as u64, 5e8 as u64, &[0], 2500),
+        ]);
+        assert!(!r.passed);
+        assert!(r.details.iter().any(|d| d.contains("stuck")));
     }
 
-    #[test] fn isolation_pass() {
+    #[test]
+    fn isolation_pass() {
         let expected: BTreeSet<usize> = [0, 1, 2, 3].into_iter().collect();
-        let r = verify_isolation(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1], 50), rpt(2, 1000, 5e9 as u64, 5e8 as u64, &[2, 3], 50)], &expected);
+        let r = verify_isolation(
+            &[
+                rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1], 50),
+                rpt(2, 1000, 5e9 as u64, 5e8 as u64, &[2, 3], 50),
+            ],
+            &expected,
+        );
         assert!(r.passed);
     }
 
-    #[test] fn isolation_fail() {
+    #[test]
+    fn isolation_fail() {
         let expected: BTreeSet<usize> = [0, 1].into_iter().collect();
-        let r = verify_isolation(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1, 4], 50)], &expected);
-        assert!(!r.passed); assert!(r.details.iter().any(|d| d.contains("unexpected")));
+        let r = verify_isolation(
+            &[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1, 4], 50)],
+            &expected,
+        );
+        assert!(!r.passed);
+        assert!(r.details.iter().any(|d| d.contains("unexpected")));
     }
 
-    #[test] fn merge_cells() {
-        let r1 = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1], 50), rpt(2, 1000, 5e9 as u64, 6e8 as u64, &[0, 1], 60)]);
-        let r2 = verify_not_starved(&[rpt(3, 1000, 5e9 as u64, 25e8 as u64, &[2, 3], 50), rpt(4, 1000, 5e9 as u64, 26e8 as u64, &[2, 3], 50)]);
-        let mut m = r1; m.merge(r2);
+    #[test]
+    fn merge_cells() {
+        let r1 = verify_not_starved(&[
+            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1], 50),
+            rpt(2, 1000, 5e9 as u64, 6e8 as u64, &[0, 1], 60),
+        ]);
+        let r2 = verify_not_starved(&[
+            rpt(3, 1000, 5e9 as u64, 25e8 as u64, &[2, 3], 50),
+            rpt(4, 1000, 5e9 as u64, 26e8 as u64, &[2, 3], 50),
+        ]);
+        let mut m = r1;
+        m.merge(r2);
         assert_eq!(m.stats.cells.len(), 2);
         assert_eq!(m.stats.total_workers, 4);
         assert!(m.passed, "diff cells diff runnable should pass");
     }
 
-    #[test] fn spread_boundary() {
+    #[test]
+    fn spread_boundary() {
         // 15% exactly - pass
-        let r = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 1e9 as u64, &[0], 50), rpt(2, 1000, 5e9 as u64, (1.75e9) as u64, &[0], 50)]);
+        let r = verify_not_starved(&[
+            rpt(1, 1000, 5e9 as u64, 1e9 as u64, &[0], 50),
+            rpt(2, 1000, 5e9 as u64, (1.75e9) as u64, &[0], 50),
+        ]);
         assert!(r.passed, "15% spread: {:?}", r.details);
         // 20% - fail
-        let r = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50), rpt(2, 1000, 5e9 as u64, (1.5e9) as u64, &[0], 50)]);
+        let r = verify_not_starved(&[
+            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50),
+            rpt(2, 1000, 5e9 as u64, (1.5e9) as u64, &[0], 50),
+        ]);
         assert!(!r.passed, "20% spread should fail");
     }
 
-    #[test] fn empty_pass() { assert!(verify_not_starved(&[]).passed); }
-
-    #[test] fn zero_wall_time() {
-        let r = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50), rpt(2, 0, 0, 0, &[], 0)]);
-        assert!(!r.passed); assert!(r.details.iter().any(|d| d.contains("starved")));
+    #[test]
+    fn empty_pass() {
+        assert!(verify_not_starved(&[]).passed);
     }
 
-    #[test] fn single_worker_always_pass() {
+    #[test]
+    fn zero_wall_time() {
+        let r = verify_not_starved(&[
+            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50),
+            rpt(2, 0, 0, 0, &[], 0),
+        ]);
+        assert!(!r.passed);
+        assert!(r.details.iter().any(|d| d.contains("starved")));
+    }
+
+    #[test]
+    fn single_worker_always_pass() {
         let r = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1], 50)]);
         assert!(r.passed);
         assert_eq!(r.stats.total_workers, 1);
         assert_eq!(r.stats.cells.len(), 1);
     }
 
-    #[test] fn stats_accuracy() {
+    #[test]
+    fn stats_accuracy() {
         let r = verify_not_starved(&[
-            rpt(1, 1000, 5e9 as u64, 1e9 as u64, &[0], 50),   // 20%
-            rpt(2, 1000, 5e9 as u64, 15e8 as u64, &[1], 60),  // 30%
+            rpt(1, 1000, 5e9 as u64, 1e9 as u64, &[0], 50),  // 20%
+            rpt(2, 1000, 5e9 as u64, 15e8 as u64, &[1], 60), // 30%
         ]);
         assert!(r.passed); // spread = 10% < 15%
         let c = &r.stats.cells[0];
@@ -296,15 +399,18 @@ mod tests {
         assert!((c.avg_runnable_pct - 25.0).abs() < 0.1);
     }
 
-    #[test] fn merge_takes_worst_gap() {
+    #[test]
+    fn merge_takes_worst_gap() {
         let r1 = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 100)]);
         let r2 = verify_not_starved(&[rpt(2, 1000, 5e9 as u64, 5e8 as u64, &[1], 500)]);
-        let mut m = r1; m.merge(r2);
+        let mut m = r1;
+        m.merge(r2);
         assert_eq!(m.stats.worst_gap_ms, 500);
         assert_eq!(m.stats.worst_gap_cpu, 1);
     }
 
-    #[test] fn merge_takes_worst_spread() {
+    #[test]
+    fn merge_takes_worst_spread() {
         let r1 = verify_not_starved(&[
             rpt(1, 1000, 5e9 as u64, 1e9 as u64, &[0], 50),
             rpt(2, 1000, 5e9 as u64, 12e8 as u64, &[0], 50),
@@ -313,43 +419,60 @@ mod tests {
             rpt(3, 1000, 5e9 as u64, 1e9 as u64, &[1], 50),
             rpt(4, 1000, 5e9 as u64, 15e8 as u64, &[1], 50),
         ]); // spread = 10%
-        let mut m = r1; m.merge(r2);
+        let mut m = r1;
+        m.merge(r2);
         assert!((m.stats.worst_spread - 10.0).abs() < 0.1);
     }
 
-    #[test] fn merge_accumulates_totals() {
+    #[test]
+    fn merge_accumulates_totals() {
         let r1 = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50)]);
         let r2 = verify_not_starved(&[rpt(2, 1000, 5e9 as u64, 5e8 as u64, &[1], 50)]);
-        let mut m = r1; m.merge(r2);
+        let mut m = r1;
+        m.merge(r2);
         assert_eq!(m.stats.total_workers, 2);
         assert_eq!(m.stats.total_cpus, 2);
     }
 
-    #[test] fn isolation_empty_reports() {
+    #[test]
+    fn isolation_empty_reports() {
         let expected: BTreeSet<usize> = [0, 1].into_iter().collect();
         assert!(verify_isolation(&[], &expected).passed);
     }
 
-    #[test] fn gap_boundary_2000ms_pass() {
+    #[test]
+    fn gap_boundary_2000ms_pass() {
         let r = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 2000)]);
         assert!(r.passed, "2000ms gap should pass: {:?}", r.details);
     }
 
-    #[test] fn gap_boundary_2001ms_fail() {
+    #[test]
+    fn gap_boundary_2001ms_fail() {
         let r = verify_not_starved(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 2001)]);
         assert!(!r.passed);
         assert!(r.details.iter().any(|d| d.contains("stuck")));
     }
 
-    #[test] fn scenario_stats_serde_roundtrip() {
+    #[test]
+    fn scenario_stats_serde_roundtrip() {
         let s = ScenarioStats {
             cells: vec![CellStats {
-                num_workers: 4, num_cpus: 2,
-                avg_runnable_pct: 50.0, min_runnable_pct: 40.0, max_runnable_pct: 60.0,
-                spread: 20.0, max_gap_ms: 150, max_gap_cpu: 3, total_migrations: 10,
+                num_workers: 4,
+                num_cpus: 2,
+                avg_runnable_pct: 50.0,
+                min_runnable_pct: 40.0,
+                max_runnable_pct: 60.0,
+                spread: 20.0,
+                max_gap_ms: 150,
+                max_gap_cpu: 3,
+                total_migrations: 10,
             }],
-            total_workers: 4, total_cpus: 2, total_migrations: 10,
-            worst_spread: 20.0, worst_gap_ms: 150, worst_gap_cpu: 3,
+            total_workers: 4,
+            total_cpus: 2,
+            total_migrations: 10,
+            worst_spread: 20.0,
+            worst_gap_ms: 150,
+            worst_gap_cpu: 3,
         };
         let json = serde_json::to_string(&s).unwrap();
         let s2: ScenarioStats = serde_json::from_str(&json).unwrap();
@@ -359,44 +482,60 @@ mod tests {
         assert_eq!(s.cells[0].num_workers, s2.cells[0].num_workers);
     }
 
-    #[test] fn verify_result_serde_roundtrip() {
-        let r = VerifyResult { passed: false, details: vec!["test".into()], stats: Default::default() };
+    #[test]
+    fn verify_result_serde_roundtrip() {
+        let r = VerifyResult {
+            passed: false,
+            details: vec!["test".into()],
+            stats: Default::default(),
+        };
         let json = serde_json::to_string(&r).unwrap();
         let r2: VerifyResult = serde_json::from_str(&json).unwrap();
         assert_eq!(r.passed, r2.passed);
         assert_eq!(r.details, r2.details);
     }
 
-    #[test] fn verify_runnable_empty() {
+    #[test]
+    fn verify_runnable_empty() {
         assert!(verify_runnable(&[], 4).passed);
     }
 
-    #[test] fn verify_runnable_fair() {
-        let r = verify_runnable(&[
-            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50),
-            rpt(2, 1000, 5e9 as u64, 6e8 as u64, &[0], 50),
-            rpt(3, 1000, 5e9 as u64, 55e7 as u64, &[0], 50),
-        ], 4);
+    #[test]
+    fn verify_runnable_fair() {
+        let r = verify_runnable(
+            &[
+                rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50),
+                rpt(2, 1000, 5e9 as u64, 6e8 as u64, &[0], 50),
+                rpt(3, 1000, 5e9 as u64, 55e7 as u64, &[0], 50),
+            ],
+            4,
+        );
         assert!(r.passed, "{:?}", r.details);
     }
 
-    #[test] fn verify_runnable_unfair() {
-        let r = verify_runnable(&[
-            rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50),   // 10%
-            rpt(2, 500, 5e9 as u64, 4e9 as u64, &[0], 50),    // 80%
-            rpt(3, 800, 5e9 as u64, 2e9 as u64, &[0], 50),    // 40%
-        ], 4);
+    #[test]
+    fn verify_runnable_unfair() {
+        let r = verify_runnable(
+            &[
+                rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 50), // 10%
+                rpt(2, 500, 5e9 as u64, 4e9 as u64, &[0], 50),  // 80%
+                rpt(3, 800, 5e9 as u64, 2e9 as u64, &[0], 50),  // 40%
+            ],
+            4,
+        );
         assert!(!r.passed);
         assert!(r.details.iter().any(|d| d.contains("unfair")));
     }
 
-    #[test] fn verify_runnable_stuck() {
+    #[test]
+    fn verify_runnable_stuck() {
         let r = verify_runnable(&[rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 2500)], 4);
         assert!(!r.passed);
         assert!(r.details.iter().any(|d| d.contains("stuck")));
     }
 
-    #[test] fn multiple_stuck_workers() {
+    #[test]
+    fn multiple_stuck_workers() {
         let r = verify_not_starved(&[
             rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0], 3000),
             rpt(2, 1000, 5e9 as u64, 5e8 as u64, &[1], 4000),
@@ -406,7 +545,8 @@ mod tests {
         assert_eq!(stuck_count, 2, "both workers should be flagged stuck");
     }
 
-    #[test] fn migration_tracking() {
+    #[test]
+    fn migration_tracking() {
         let mut report = rpt(1, 1000, 5e9 as u64, 5e8 as u64, &[0, 1, 2], 50);
         report.migration_count = 5;
         let r = verify_not_starved(&[report]);

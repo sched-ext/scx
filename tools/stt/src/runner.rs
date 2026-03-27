@@ -3,7 +3,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::cgroup::CgroupManager;
-use crate::scenario::{self, Flag, FlagProfile, Scenario, Ctx};
+use crate::scenario::{self, Ctx, Flag, FlagProfile, Scenario};
 use crate::topology::TestTopology;
 use crate::verify::ScenarioStats;
 
@@ -45,7 +45,9 @@ impl Runner {
                 None => s.profiles(),
                 Some(flags) => s.profiles_with(flags),
             };
-            for p in profiles { runs.push((s, p)); }
+            for p in profiles {
+                runs.push((s, p));
+            }
         }
         runs.sort_by(|a, b| a.1.name().cmp(&b.1.name()));
 
@@ -63,7 +65,9 @@ impl Runner {
             cgroups.setup(needs_cpu_ctrl).context("cgroup setup")?;
 
             if pname != cur_profile {
-                if let Some(mut p) = sched.take() { p.stop(); }
+                if let Some(mut p) = sched.take() {
+                    p.stop();
+                }
                 let args = s.scheduler_args(&self.config.parent_cgroup, profile);
                 tracing::info!(bin = %self.config.mitosis_bin, ?args, "starting scheduler");
                 let mut p = SchedulerProcess::start(&self.config.mitosis_bin, &args)?;
@@ -93,7 +97,9 @@ impl Runner {
             tracing::info!(qname, elapsed = ?start.elapsed(), "scenario complete");
 
             let sched_dead = sched.as_mut().map(|s| s.is_dead()).unwrap_or(false);
-            if sched_dead { tracing::warn!(qname, "scheduler died"); }
+            if sched_dead {
+                tracing::warn!(qname, "scheduler died");
+            }
 
             let _ = cgroups.cleanup_all();
             std::mem::forget(cgroups);
@@ -113,15 +119,24 @@ impl Runner {
                             let dump = s.read_stderr();
                             if !dump.is_empty() {
                                 for line in dump.lines() {
-                                    if !line.trim().is_empty() { v.details.push(line.to_string()); }
+                                    if !line.trim().is_empty() {
+                                        v.details.push(line.to_string());
+                                    }
                                 }
                             }
                         }
                         cur_profile.clear();
                     } else if sched_dead {
-                        sched.take(); cur_profile.clear();
+                        sched.take();
+                        cur_profile.clear();
                     }
-                    ScenarioResult { scenario_name: qname, passed: v.passed, duration_s: start.elapsed().as_secs_f64(), details: v.details, stats: v.stats }
+                    ScenarioResult {
+                        scenario_name: qname,
+                        passed: v.passed,
+                        duration_s: start.elapsed().as_secs_f64(),
+                        details: v.details,
+                        stats: v.stats,
+                    }
                 }
                 Err(e) => {
                     let mut details = vec![format!("{e:#}")];
@@ -130,17 +145,27 @@ impl Runner {
                         std::thread::sleep(Duration::from_millis(100));
                         let dump = s.read_stderr();
                         for line in dump.lines() {
-                            if !line.trim().is_empty() { details.push(line.to_string()); }
+                            if !line.trim().is_empty() {
+                                details.push(line.to_string());
+                            }
                         }
                     }
                     cur_profile.clear();
-                    ScenarioResult { scenario_name: qname, passed: false, duration_s: start.elapsed().as_secs_f64(), details, stats: Default::default() }
+                    ScenarioResult {
+                        scenario_name: qname,
+                        passed: false,
+                        duration_s: start.elapsed().as_secs_f64(),
+                        details,
+                        stats: Default::default(),
+                    }
                 }
             };
             results.push(r);
         }
 
-        if let Some(mut p) = sched.take() { p.stop(); }
+        if let Some(mut p) = sched.take() {
+            p.stop();
+        }
         Ok(results)
     }
 }
@@ -152,14 +177,20 @@ pub struct SchedulerProcess {
 
 impl SchedulerProcess {
     fn start(bin: &str, args: &[String]) -> Result<Self> {
-        let stderr_path = std::path::PathBuf::from(format!("/tmp/stt-sched-{}.log", std::process::id()));
+        let stderr_path =
+            std::path::PathBuf::from(format!("/tmp/stt-sched-{}.log", std::process::id()));
         let stderr_file = std::fs::File::create(&stderr_path)?;
-        let child = Command::new(bin).args(args)
-            .stdout(Stdio::null()).stderr(Stdio::from(stderr_file))
-            .spawn().with_context(|| format!("spawn {bin}"))?;
+        let child = Command::new(bin)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr_file))
+            .spawn()
+            .with_context(|| format!("spawn {bin}"))?;
         Ok(Self { child, stderr_path })
     }
-    pub fn pid(&self) -> u32 { self.child.id() }
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
     /// Read scheduler output (includes watchdog dumps on stall exit).
     pub fn read_stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_path).unwrap_or_default()
@@ -173,15 +204,23 @@ impl SchedulerProcess {
         let _ = kill(Pid::from_raw(self.child.id() as i32), Signal::SIGTERM);
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            if self.child.try_wait().ok().flatten().is_some() { return; }
-            if Instant::now() > deadline { let _ = self.child.kill(); let _ = self.child.wait(); return; }
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            if Instant::now() > deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return;
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 }
 
 impl Drop for SchedulerProcess {
-    fn drop(&mut self) { self.stop(); }
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 #[cfg(test)]
@@ -233,18 +272,34 @@ mod tests {
             stats: ScenarioStats {
                 cells: vec![
                     crate::verify::CellStats {
-                        num_workers: 4, num_cpus: 4,
-                        avg_runnable_pct: 75.0, min_runnable_pct: 70.0, max_runnable_pct: 80.0,
-                        spread: 10.0, max_gap_ms: 50, max_gap_cpu: 0, total_migrations: 3,
+                        num_workers: 4,
+                        num_cpus: 4,
+                        avg_runnable_pct: 75.0,
+                        min_runnable_pct: 70.0,
+                        max_runnable_pct: 80.0,
+                        spread: 10.0,
+                        max_gap_ms: 50,
+                        max_gap_cpu: 0,
+                        total_migrations: 3,
                     },
                     crate::verify::CellStats {
-                        num_workers: 4, num_cpus: 4,
-                        avg_runnable_pct: 72.0, min_runnable_pct: 68.0, max_runnable_pct: 76.0,
-                        spread: 8.0, max_gap_ms: 30, max_gap_cpu: 4, total_migrations: 2,
+                        num_workers: 4,
+                        num_cpus: 4,
+                        avg_runnable_pct: 72.0,
+                        min_runnable_pct: 68.0,
+                        max_runnable_pct: 76.0,
+                        spread: 8.0,
+                        max_gap_ms: 30,
+                        max_gap_cpu: 4,
+                        total_migrations: 2,
                     },
                 ],
-                total_workers: 8, total_cpus: 8, total_migrations: 5,
-                worst_spread: 10.0, worst_gap_ms: 50, worst_gap_cpu: 0,
+                total_workers: 8,
+                total_cpus: 8,
+                total_migrations: 5,
+                worst_spread: 10.0,
+                worst_gap_ms: 50,
+                worst_gap_cpu: 0,
             },
         };
         let json = serde_json::to_string(&r).unwrap();
@@ -256,7 +311,9 @@ mod tests {
 
     #[test]
     fn run_config_cpu_controller_flag() {
-        let profile_no_ctrl = FlagProfile { flags: vec![Flag::CpuControllerDisabled] };
+        let profile_no_ctrl = FlagProfile {
+            flags: vec![Flag::CpuControllerDisabled],
+        };
         assert!(profile_no_ctrl.flags.contains(&Flag::CpuControllerDisabled));
         let needs_cpu_ctrl = !profile_no_ctrl.flags.contains(&Flag::CpuControllerDisabled);
         assert!(!needs_cpu_ctrl);

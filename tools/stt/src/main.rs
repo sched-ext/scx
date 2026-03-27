@@ -18,7 +18,10 @@ use runner::{RunConfig, Runner};
 use topology::TestTopology;
 
 #[derive(Debug, Parser)]
-#[clap(name = "stt", about = "scx test tools - scheduler fuzzer for sched_ext")]
+#[clap(
+    name = "stt",
+    about = "scx test tools - scheduler fuzzer for sched_ext"
+)]
 struct Cli {
     #[clap(subcommand)]
     command: Command,
@@ -41,62 +44,108 @@ enum Command {
 #[derive(Debug, Parser)]
 struct RunArgs {
     scenarios: Vec<String>,
-    #[clap(long)] all: bool,
-    #[clap(long)] mitosis_bin: Option<String>,
-    #[clap(long, default_value = "/sys/fs/cgroup/stt")] parent_cgroup: String,
-    #[clap(long, default_value = "15")] duration_s: u64,
-    #[clap(long, default_value = "4")] workers: usize,
-    #[clap(long)] json: bool,
-    #[clap(long)] verbose: bool,
-    #[clap(long, conflicts_with = "flags")] all_flags: bool,
-    #[clap(long, value_delimiter = ',')] flags: Vec<String>,
+    #[clap(long)]
+    all: bool,
+    #[clap(long)]
+    mitosis_bin: Option<String>,
+    #[clap(long, default_value = "/sys/fs/cgroup/stt")]
+    parent_cgroup: String,
+    #[clap(long, default_value = "15")]
+    duration_s: u64,
+    #[clap(long, default_value = "4")]
+    workers: usize,
+    #[clap(long)]
+    json: bool,
+    #[clap(long)]
+    verbose: bool,
+    #[clap(long, conflicts_with = "flags")]
+    all_flags: bool,
+    #[clap(long, value_delimiter = ',')]
+    flags: Vec<String>,
 }
 
 #[derive(Debug, Parser)]
 struct VmArgs {
-    #[clap(long)] kernel: Option<String>,
-    #[clap(long, default_value = "2")] sockets: usize,
-    #[clap(long, default_value = "2")] cores: usize,
-    #[clap(long, default_value = "2")] threads: usize,
-    #[clap(long, default_value = "4096")] memory_mb: usize,
-    #[clap(long)] gauntlet: bool,
-    #[clap(long)] parallel: Option<usize>,
-    #[clap(long)] vng_arg: Vec<String>,
-    #[clap(last = true)] run_args: Vec<String>,
+    #[clap(long)]
+    kernel: Option<String>,
+    #[clap(long, default_value = "2")]
+    sockets: usize,
+    #[clap(long, default_value = "2")]
+    cores: usize,
+    #[clap(long, default_value = "2")]
+    threads: usize,
+    #[clap(long, default_value = "4096")]
+    memory_mb: usize,
+    #[clap(long)]
+    gauntlet: bool,
+    #[clap(long)]
+    parallel: Option<usize>,
+    #[clap(long)]
+    vng_arg: Vec<String>,
+    #[clap(last = true)]
+    run_args: Vec<String>,
 }
 
 #[derive(Debug, Parser)]
 struct CleanupArgs {
-    #[clap(long, default_value = "/sys/fs/cgroup/stt")] parent_cgroup: String,
+    #[clap(long, default_value = "/sys/fs/cgroup/stt")]
+    parent_cgroup: String,
 }
 
 fn main() -> Result<()> {
     // Tracing to stderr - inner stt (in VM) uses stdout for JSON/table output
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("stt=info".parse().unwrap()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("stt=info".parse().unwrap()),
+        )
         .with_writer(std::io::stderr)
         .init();
     vng::install_signal_handler();
     match Cli::parse().command {
         Command::Run(a) => cmd_run(a),
-        Command::Vm(a) => if a.gauntlet { cmd_gauntlet(&a) } else { cmd_vm(a) },
+        Command::Vm(a) => {
+            if a.gauntlet {
+                cmd_gauntlet(&a)
+            } else {
+                cmd_vm(a)
+            }
+        }
         Command::List => cmd_list(),
         Command::Topo => cmd_topo(),
-        Command::Cleanup(a) => { cgroup::CgroupManager::new(&a.parent_cgroup).cleanup_all()?; Ok(()) },
+        Command::Cleanup(a) => {
+            cgroup::CgroupManager::new(&a.parent_cgroup).cleanup_all()?;
+            Ok(())
+        }
     }
 }
 
 fn parse_flags(args: &RunArgs) -> Option<Vec<scenario::Flag>> {
-    if args.all_flags { return None; }
-    if args.flags.is_empty() { return Some(vec![]); }
-    Some(args.flags.iter().map(|s| {
-        scenario::Flag::from_short_name(s).unwrap_or_else(|| {
-            let all: Vec<&str> = scenario::Flag::all().iter().map(|f| f.short_name()).collect();
-            println!("{} unknown flag: {s}\navailable: {}", style("error:").red().bold(), all.join(", "));
-            std::process::exit(1);
-        })
-    }).collect())
+    if args.all_flags {
+        return None;
+    }
+    if args.flags.is_empty() {
+        return Some(vec![]);
+    }
+    Some(
+        args.flags
+            .iter()
+            .map(|s| {
+                scenario::Flag::from_short_name(s).unwrap_or_else(|| {
+                    let all: Vec<&str> = scenario::Flag::all()
+                        .iter()
+                        .map(|f| f.short_name())
+                        .collect();
+                    println!(
+                        "{} unknown flag: {s}\navailable: {}",
+                        style("error:").red().bold(),
+                        all.join(", ")
+                    );
+                    std::process::exit(1);
+                })
+            })
+            .collect(),
+    )
 }
 
 fn cmd_run(args: RunArgs) -> Result<()> {
@@ -105,50 +154,101 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     let selected: Vec<_> = if args.all || args.scenarios.is_empty() {
         scenarios.iter().collect()
     } else {
-        args.scenarios.iter().map(|name| {
-            scenarios.iter().find(|s| s.name == name.as_str()).unwrap_or_else(|| {
-                let names: Vec<&str> = scenarios.iter().map(|s| s.name).collect();
-                println!("{} unknown scenario: {name}\navailable: {}", style("error:").red().bold(), names.join(", "));
-                std::process::exit(1);
+        args.scenarios
+            .iter()
+            .map(|name| {
+                scenarios
+                    .iter()
+                    .find(|s| s.name == name.as_str())
+                    .unwrap_or_else(|| {
+                        let names: Vec<&str> = scenarios.iter().map(|s| s.name).collect();
+                        println!(
+                            "{} unknown scenario: {name}\navailable: {}",
+                            style("error:").red().bold(),
+                            names.join(", ")
+                        );
+                        std::process::exit(1);
+                    })
             })
-        }).collect()
+            .collect()
     };
     let active_flags = parse_flags(&args);
     let mitosis_bin = args.mitosis_bin.unwrap_or_else(default_mitosis_bin);
     let config = RunConfig {
-        mitosis_bin, parent_cgroup: args.parent_cgroup,
-        duration_s: args.duration_s, workers_per_cell: args.workers,
-        json: args.json, verbose: args.verbose, active_flags,
+        mitosis_bin,
+        parent_cgroup: args.parent_cgroup,
+        duration_s: args.duration_s,
+        workers_per_cell: args.workers,
+        json: args.json,
+        verbose: args.verbose,
+        active_flags,
     };
     let results = Runner::new(config, topo)?.run_scenarios(&selected)?;
-    if args.json { println!("{}", serde_json::to_string_pretty(&results)?); }
-    else { print_results(&results); }
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        print_results(&results);
+    }
     let failed = results.iter().filter(|r| !r.passed).count();
-    if failed > 0 { std::process::exit(1); }
+    if failed > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
 fn cmd_vm(args: VmArgs) -> Result<()> {
     let cfg = vng::VngConfig {
-        kernel: args.kernel, memory_mb: args.memory_mb, vng_args: args.vng_arg,
-        topology: vng::VngTopology { sockets: args.sockets, cores_per_socket: args.cores, threads_per_core: args.threads },
+        kernel: args.kernel,
+        memory_mb: args.memory_mb,
+        vng_args: args.vng_arg,
+        topology: vng::VngTopology {
+            sockets: args.sockets,
+            cores_per_socket: args.cores,
+            threads_per_core: args.threads,
+        },
         timeout: None,
     };
     let t = &cfg.topology;
-    println!("{} VM: {} CPUs, {} LLCs", style("launching").cyan().bold(), t.total_cpus(), t.num_llcs());
+    println!(
+        "{} VM: {} CPUs, {} LLCs",
+        style("launching").cyan().bold(),
+        t.total_cpus(),
+        t.num_llcs()
+    );
     let mut stt_args = vec!["run".into(), "--mitosis-bin".into(), default_mitosis_bin()];
-    if args.run_args.is_empty() { stt_args.push("--all".into()); } else { stt_args.extend(args.run_args); }
+    if args.run_args.is_empty() {
+        stt_args.push("--all".into());
+    } else {
+        stt_args.extend(args.run_args);
+    }
     let r = vng::run_in_vng(&cfg, &stt_args)?;
-    if !r.output.is_empty() { print!("{}", r.output); }
-    if !r.stderr.is_empty() { eprint!("{}", r.stderr); }
-    if r.timed_out { println!("{} timed out", style("FAIL").red().bold()); std::process::exit(1); }
-    if !r.success { println!("{} exit {}", style("FAIL").red().bold(), r.exit_code); std::process::exit(1); }
-    println!("{} ({:.1}s)", style("PASS").green().bold(), r.duration.as_secs_f64());
+    if !r.output.is_empty() {
+        print!("{}", r.output);
+    }
+    if !r.stderr.is_empty() {
+        eprint!("{}", r.stderr);
+    }
+    if r.timed_out {
+        println!("{} timed out", style("FAIL").red().bold());
+        std::process::exit(1);
+    }
+    if !r.success {
+        println!("{} exit {}", style("FAIL").red().bold(), r.exit_code);
+        std::process::exit(1);
+    }
+    println!(
+        "{} ({:.1}s)",
+        style("PASS").green().bold(),
+        r.duration.as_secs_f64()
+    );
     Ok(())
 }
 
 fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
-    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     use std::thread;
 
     let presets = vng::gauntlet_presets();
@@ -159,19 +259,35 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
     for p in &presets {
         for s in &scenarios {
             for prof in s.profiles_with(&[]) {
-                let mut stt_args = vec!["run".to_string(), "--json".to_string(), "--mitosis-bin".to_string(), default_mitosis_bin(), "--duration-s".to_string(), "20".to_string(), s.name.to_string()];
+                let mut stt_args = vec![
+                    "run".to_string(),
+                    "--json".to_string(),
+                    "--mitosis-bin".to_string(),
+                    default_mitosis_bin(),
+                    "--duration-s".to_string(),
+                    "20".to_string(),
+                    s.name.to_string(),
+                ];
                 if !prof.flags.is_empty() {
                     let names: Vec<&str> = prof.flags.iter().map(|f| f.short_name()).collect();
                     stt_args.push(format!("--flags={}", names.join(",")));
                 }
-                jobs.push((p.name, p.topology.clone(), p.memory_mb, s.name, prof.name(), stt_args));
+                jobs.push((
+                    p.name,
+                    p.topology.clone(),
+                    p.memory_mb,
+                    s.name,
+                    prof.name(),
+                    stt_args,
+                ));
             }
         }
     }
 
     let total = jobs.len();
     let timeout = vng::compute_timeout(1, 20);
-    let results: Arc<Mutex<Vec<(String, bool, f64, String, Vec<runner::ScenarioResult>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let results: Arc<Mutex<Vec<(String, bool, f64, String, Vec<runner::ScenarioResult>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
     let completed = Arc::new(AtomicUsize::new(0));
     let fail_count = Arc::new(AtomicUsize::new(0));
 
@@ -188,61 +304,103 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
         in_flight.fetch_add(1, Ordering::Relaxed);
 
         let (kernel, vng_extra) = (args.kernel.clone(), args.vng_arg.clone());
-        let (results, completed, fail_count) = (Arc::clone(&results), Arc::clone(&completed), Arc::clone(&fail_count));
+        let (results, completed, fail_count) = (
+            Arc::clone(&results),
+            Arc::clone(&completed),
+            Arc::clone(&fail_count),
+        );
         let (topo, mem, stt_args) = (topo.clone(), *mem, stt_args.clone());
         let in_flight = Arc::clone(&in_flight);
         let label = format!("{pname}/{sname}/{profname}");
         handles.push(thread::spawn(move || {
-                let mut ok = false;
-                let mut dur = 0.0;
-                let mut detail = String::new();
-                let mut inner_results = vec![];
-                for attempt in 0..3 {
-                    let cfg = vng::VngConfig {
-                        kernel: kernel.clone(), topology: topo.clone(), memory_mb: mem,
-                        vng_args: vng_extra.clone(), timeout: Some(timeout),
-                    };
-                    let (a_ok, a_dur, a_detail, a_inner) = match vng::run_in_vng(&cfg, &stt_args) {
-                        Ok(r) if r.timed_out => (false, r.duration.as_secs_f64(), "timed out".into(), vec![]),
-                        Ok(r) => {
-                            let parsed: Vec<runner::ScenarioResult> = extract_json(&r.output);
-                            let d = if parsed.is_empty() {
-                                let last_err = r.stderr.lines().rev()
-                                    .find(|l| !l.trim().is_empty())
-                                    .unwrap_or("no output");
-                                format!("VM failed: {}", &last_err[..last_err.len().min(120)])
-                            } else { String::new() };
-                            (r.success && !parsed.iter().any(|r| !r.passed), r.duration.as_secs_f64(), d, parsed)
-                        }
-                        Err(e) => (false, 0.0, format!("{e:#}"), vec![]),
-                    };
-                    ok = a_ok; dur = a_dur; detail = a_detail.clone(); inner_results = a_inner;
-                    if ok || !is_infra_failure(&inner_results, &a_detail) { break; }
-                    if attempt < 2 { std::thread::sleep(std::time::Duration::from_secs(2)); }
+            let mut ok = false;
+            let mut dur = 0.0;
+            let mut detail = String::new();
+            let mut inner_results = vec![];
+            for attempt in 0..3 {
+                let cfg = vng::VngConfig {
+                    kernel: kernel.clone(),
+                    topology: topo.clone(),
+                    memory_mb: mem,
+                    vng_args: vng_extra.clone(),
+                    timeout: Some(timeout),
+                };
+                let (a_ok, a_dur, a_detail, a_inner) = match vng::run_in_vng(&cfg, &stt_args) {
+                    Ok(r) if r.timed_out => {
+                        (false, r.duration.as_secs_f64(), "timed out".into(), vec![])
+                    }
+                    Ok(r) => {
+                        let parsed: Vec<runner::ScenarioResult> = extract_json(&r.output);
+                        let d = if parsed.is_empty() {
+                            let last_err = r
+                                .stderr
+                                .lines()
+                                .rev()
+                                .find(|l| !l.trim().is_empty())
+                                .unwrap_or("no output");
+                            format!("VM failed: {}", &last_err[..last_err.len().min(120)])
+                        } else {
+                            String::new()
+                        };
+                        (
+                            r.success && !parsed.iter().any(|r| !r.passed),
+                            r.duration.as_secs_f64(),
+                            d,
+                            parsed,
+                        )
+                    }
+                    Err(e) => (false, 0.0, format!("{e:#}"), vec![]),
+                };
+                ok = a_ok;
+                dur = a_dur;
+                detail = a_detail.clone();
+                inner_results = a_inner;
+                if ok || !is_infra_failure(&inner_results, &a_detail) {
+                    break;
                 }
-                let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                let is_skip = inner_results.iter().any(|r| r.details.iter().any(|d| d.contains("skipped")));
-                let status = if is_skip { "SKIP" } else if ok { "PASS" } else { "FAIL" };
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+            let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            let is_skip = inner_results
+                .iter()
+                .any(|r| r.details.iter().any(|d| d.contains("skipped")));
+            let status = if is_skip {
+                "SKIP"
+            } else if ok {
+                "PASS"
+            } else {
+                "FAIL"
+            };
 
-                let stats_str = inner_results.first().map(|r| format_gauntlet_stats(r)).unwrap_or_default();
-                let detail_str = format_gauntlet_detail(ok, &detail, &inner_results);
+            let stats_str = inner_results
+                .first()
+                .map(|r| format_gauntlet_stats(r))
+                .unwrap_or_default();
+            let detail_str = format_gauntlet_detail(ok, &detail, &inner_results);
 
-                // ALL output to stdout
-                println!("[{n}/{total}] {status} {label} ({dur:.0}s){stats_str}{detail_str}");
-                if !ok {
-                    fail_count.fetch_add(1, Ordering::Relaxed);
-                    for r in inner_results.iter().filter(|r| !r.passed) {
-                        for d in &r.details {
-                            println!("  {d}");
-                        }
+            // ALL output to stdout
+            println!("[{n}/{total}] {status} {label} ({dur:.0}s){stats_str}{detail_str}");
+            if !ok {
+                fail_count.fetch_add(1, Ordering::Relaxed);
+                for r in inner_results.iter().filter(|r| !r.passed) {
+                    for d in &r.details {
+                        println!("  {d}");
                     }
                 }
+            }
 
-                results.lock().unwrap().push((label, ok, dur, detail, inner_results));
-                in_flight.fetch_sub(1, Ordering::Relaxed);
-            }));
+            results
+                .lock()
+                .unwrap()
+                .push((label, ok, dur, detail, inner_results));
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+        }));
     }
-    for h in handles { let _ = h.join(); }
+    for h in handles {
+        let _ = h.join();
+    }
 
     let results = results.lock().unwrap();
     let passed = results.iter().filter(|r| r.1).count();
@@ -254,7 +412,9 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
         println!("\nFailed:");
         for (l, _, _, d, inner) in &failed {
             println!("\n  {l}:");
-            if !d.is_empty() { println!("    {d}"); }
+            if !d.is_empty() {
+                println!("    {d}");
+            }
             for r in inner.iter().filter(|r| !r.passed) {
                 for detail in &r.details {
                     println!("    {detail}");
@@ -272,17 +432,34 @@ fn cmd_list() -> Result<()> {
     for s in &scenarios {
         let n = s.profiles().len();
         total += n;
-        println!("{:<25} {:<12} {:>3}  {}", s.name, s.category, n, s.description);
+        println!(
+            "{:<25} {:<12} {:>3}  {}",
+            s.name, s.category, n, s.description
+        );
     }
-    println!("\n{} scenarios, {} total runs with --all-flags", scenarios.len(), style(total).cyan().bold());
+    println!(
+        "\n{} scenarios, {} total runs with --all-flags",
+        scenarios.len(),
+        style(total).cyan().bold()
+    );
     Ok(())
 }
 
 fn cmd_topo() -> Result<()> {
     let topo = TestTopology::from_system()?;
-    println!("{} CPUs, {} LLCs, {} NUMA\n", style(topo.total_cpus()).cyan().bold(), style(topo.num_llcs()).cyan().bold(), style(topo.num_numa_nodes()).cyan().bold());
+    println!(
+        "{} CPUs, {} LLCs, {} NUMA\n",
+        style(topo.total_cpus()).cyan().bold(),
+        style(topo.num_llcs()).cyan().bold(),
+        style(topo.num_numa_nodes()).cyan().bold()
+    );
     for (i, llc) in topo.llcs().iter().enumerate() {
-        let cpus = llc.cpus.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",");
+        let cpus = llc
+            .cpus
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         println!("LLC {i} (NUMA {}): {cpus}", llc.numa_node);
     }
     Ok(())
@@ -292,17 +469,26 @@ fn format_results(results: &[runner::ScenarioResult]) -> String {
     let mut out = String::new();
     for r in results {
         let tag = if r.passed { "PASS" } else { "FAIL" };
-        out.push_str(&format!("{tag} {} ({:.1}s)\n", r.scenario_name, r.duration_s));
+        out.push_str(&format!(
+            "{tag} {} ({:.1}s)\n",
+            r.scenario_name, r.duration_s
+        ));
         if !r.passed {
             for d in &r.details {
                 out.push_str(&format!("  {d}\n"));
             }
         }
     }
-    let (p, f) = (results.iter().filter(|r| r.passed).count(), results.iter().filter(|r| !r.passed).count());
+    let (p, f) = (
+        results.iter().filter(|r| r.passed).count(),
+        results.iter().filter(|r| !r.passed).count(),
+    );
     out.push('\n');
-    if f > 0 { out.push_str(&format!("{f} failed, {p} passed\n")); }
-    else { out.push_str(&format!("{p} passed\n")); }
+    if f > 0 {
+        out.push_str(&format!("{f} failed, {p} passed\n"));
+    } else {
+        out.push_str(&format!("{p} passed\n"));
+    }
     out
 }
 
@@ -327,38 +513,66 @@ fn print_results(results: &[runner::ScenarioResult]) {
 
 fn format_gauntlet_stats(r: &runner::ScenarioResult) -> String {
     let s = &r.stats;
-    let cells: Vec<String> = s.cells.iter().enumerate().map(|(i, c)| {
-        format!("c{}:{}w/{}c={:.0}-{:.0}%", i, c.num_workers, c.num_cpus, c.min_runnable_pct, c.max_runnable_pct)
-    }).collect();
+    let cells: Vec<String> = s
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            format!(
+                "c{}:{}w/{}c={:.0}-{:.0}%",
+                i, c.num_workers, c.num_cpus, c.min_runnable_pct, c.max_runnable_pct
+            )
+        })
+        .collect();
     let mut extra = String::new();
-    if s.worst_spread > 15.0 { extra += &format!(" UNFAIR={:.0}%", s.worst_spread); }
-    if s.worst_gap_ms > 100 { extra += &format!(" STUCK={}ms@cpu{}", s.worst_gap_ms, s.worst_gap_cpu); }
+    if s.worst_spread > 15.0 {
+        extra += &format!(" UNFAIR={:.0}%", s.worst_spread);
+    }
+    if s.worst_gap_ms > 100 {
+        extra += &format!(" STUCK={}ms@cpu{}", s.worst_gap_ms, s.worst_gap_cpu);
+    }
     format!(" {} mig={}{}", cells.join(" "), s.total_migrations, extra)
 }
 
-fn format_gauntlet_detail(ok: bool, detail: &str, inner_results: &[runner::ScenarioResult]) -> String {
+fn format_gauntlet_detail(
+    ok: bool,
+    detail: &str,
+    inner_results: &[runner::ScenarioResult],
+) -> String {
     if !ok && !detail.is_empty() {
         format!(" | {}", &detail[..detail.len().min(120)])
     } else if !ok && inner_results.is_empty() {
         " | VM failed (no results)".to_string()
     } else if !ok {
-        let fail_d: Vec<String> = inner_results.iter()
+        let fail_d: Vec<String> = inner_results
+            .iter()
             .filter(|r| !r.passed)
             .flat_map(|r| r.details.first().cloned())
             .collect();
-        if !fail_d.is_empty() { format!(" | {}", &fail_d[0][..fail_d[0].len().min(120)]) }
-        else { String::new() }
-    } else { String::new() }
+        if !fail_d.is_empty() {
+            format!(" | {}", &fail_d[0][..fail_d[0].len().min(120)])
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    }
 }
 
 fn is_infra_failure(inner_results: &[runner::ScenarioResult], detail: &str) -> bool {
-    let all_details: String = inner_results.iter()
+    let all_details: String = inner_results
+        .iter()
         .flat_map(|r| r.details.iter())
         .chain(std::iter::once(&detail.to_string()))
-        .cloned().collect::<Vec<_>>().join(" ");
-    all_details.contains("fork failed") || all_details.contains("timed out")
-        || all_details.contains("no JSON") || all_details.contains("spawn")
-        || all_details.contains("scheduler died") || all_details.contains("VM failed")
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    all_details.contains("fork failed")
+        || all_details.contains("timed out")
+        || all_details.contains("no JSON")
+        || all_details.contains("spawn")
+        || all_details.contains("scheduler died")
+        || all_details.contains("VM failed")
 }
 
 fn format_gauntlet_summary(failed: &[(String, Vec<String>)]) -> String {
@@ -372,7 +586,11 @@ fn format_gauntlet_summary(failed: &[(String, Vec<String>)]) -> String {
     out
 }
 
-fn num_cpus() -> usize { std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) }
+fn num_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
 
 fn extract_json(output: &str) -> Vec<runner::ScenarioResult> {
     if let Some(start) = output.find('[') {
@@ -388,7 +606,9 @@ fn extract_json(output: &str) -> Vec<runner::ScenarioResult> {
 fn default_mitosis_bin() -> String {
     if let Ok(exe) = std::env::current_exe() {
         let sibling = exe.parent().unwrap().join("scx_mitosis");
-        if sibling.exists() { return sibling.to_string_lossy().into(); }
+        if sibling.exists() {
+            return sibling.to_string_lossy().into();
+        }
     }
     "scx_mitosis".into()
 }
@@ -414,13 +634,19 @@ mod tests {
     }
 
     #[test]
-    fn extract_json_empty() { assert!(extract_json("").is_empty()); }
+    fn extract_json_empty() {
+        assert!(extract_json("").is_empty());
+    }
 
     #[test]
-    fn extract_json_invalid() { assert!(extract_json("[not json]").is_empty()); }
+    fn extract_json_invalid() {
+        assert!(extract_json("[not json]").is_empty());
+    }
 
     #[test]
-    fn extract_json_no_brackets() { assert!(extract_json("no json here").is_empty()); }
+    fn extract_json_no_brackets() {
+        assert!(extract_json("no json here").is_empty());
+    }
 
     #[test]
     fn extract_json_multiple_results() {
@@ -433,7 +659,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_json_empty_array() { assert!(extract_json("[]").is_empty()); }
+    fn extract_json_empty_array() {
+        assert!(extract_json("[]").is_empty());
+    }
 
     #[test]
     fn extract_json_preserves_stats() {
@@ -447,7 +675,9 @@ mod tests {
 
     fn sr(name: &str, passed: bool, dur: f64, details: Vec<&str>) -> runner::ScenarioResult {
         runner::ScenarioResult {
-            scenario_name: name.into(), passed, duration_s: dur,
+            scenario_name: name.into(),
+            passed,
+            duration_s: dur,
             details: details.into_iter().map(|s| s.into()).collect(),
             stats: Default::default(),
         }
@@ -464,11 +694,16 @@ mod tests {
 
     #[test]
     fn format_results_fail_shows_details() {
-        let out = format_results(&[sr("proportional/default", false, 6.7, vec![
-            "unfair cell: spread=85%",
-            "stuck 2448ms on cpu4",
-            "sched_ext: mitosis disabled (stall)",
-        ])]);
+        let out = format_results(&[sr(
+            "proportional/default",
+            false,
+            6.7,
+            vec![
+                "unfair cell: spread=85%",
+                "stuck 2448ms on cpu4",
+                "sched_ext: mitosis disabled (stall)",
+            ],
+        )]);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "FAIL proportional/default (6.7s)");
         assert_eq!(lines[1], "  unfair cell: spread=85%");
@@ -500,12 +735,17 @@ mod tests {
 
     #[test]
     fn format_results_dump_lines_raw() {
-        let out = format_results(&[sr("test/default", false, 1.0, vec![
-            "scheduler died",
-            "EXIT dump:",
-            "cell[0] cpus=0-3 vtime=12345",
-            "cell[1] cpus=4-7 vtime=67890",
-        ])]);
+        let out = format_results(&[sr(
+            "test/default",
+            false,
+            1.0,
+            vec![
+                "scheduler died",
+                "EXIT dump:",
+                "cell[0] cpus=0-3 vtime=12345",
+                "cell[1] cpus=4-7 vtime=67890",
+            ],
+        )]);
         // Each detail on its own line, indented, no | joining
         assert!(out.contains("  scheduler died\n"));
         assert!(out.contains("  EXIT dump:\n"));
@@ -516,40 +756,73 @@ mod tests {
 
     #[test]
     fn format_results_dmesg_lines_raw() {
-        let out = format_results(&[sr("test/default", false, 1.0, vec![
-            "stuck 3000ms on cpu2",
-            "sched_ext: BPF scheduler disabled (runnable task stall)",
-            "sched_ext: mitosis: (worker)[42] failed to run for 3.0s",
-        ])]);
+        let out = format_results(&[sr(
+            "test/default",
+            false,
+            1.0,
+            vec![
+                "stuck 3000ms on cpu2",
+                "sched_ext: BPF scheduler disabled (runnable task stall)",
+                "sched_ext: mitosis: (worker)[42] failed to run for 3.0s",
+            ],
+        )]);
         assert!(out.contains("  sched_ext: BPF scheduler disabled (runnable task stall)\n"));
         assert!(out.contains("  sched_ext: mitosis: (worker)[42] failed to run for 3.0s\n"));
     }
 
     // -- gauntlet formatting tests --
 
-    fn sr_with_stats(name: &str, passed: bool, cells: Vec<verify::CellStats>,
-                     spread: f64, gap_ms: u64, gap_cpu: usize, mig: u64) -> runner::ScenarioResult {
+    fn sr_with_stats(
+        name: &str,
+        passed: bool,
+        cells: Vec<verify::CellStats>,
+        spread: f64,
+        gap_ms: u64,
+        gap_cpu: usize,
+        mig: u64,
+    ) -> runner::ScenarioResult {
         runner::ScenarioResult {
-            scenario_name: name.into(), passed, duration_s: 20.0,
+            scenario_name: name.into(),
+            passed,
+            duration_s: 20.0,
             details: if passed { vec![] } else { vec!["stuck".into()] },
             stats: verify::ScenarioStats {
-                cells, total_workers: 4, total_cpus: 4, total_migrations: mig,
-                worst_spread: spread, worst_gap_ms: gap_ms, worst_gap_cpu: gap_cpu,
+                cells,
+                total_workers: 4,
+                total_cpus: 4,
+                total_migrations: mig,
+                worst_spread: spread,
+                worst_gap_ms: gap_ms,
+                worst_gap_cpu: gap_cpu,
             },
         }
     }
 
     fn cell(workers: usize, cpus: usize, min: f64, max: f64) -> verify::CellStats {
         verify::CellStats {
-            num_workers: workers, num_cpus: cpus,
-            avg_runnable_pct: (min + max) / 2.0, min_runnable_pct: min, max_runnable_pct: max,
-            spread: max - min, max_gap_ms: 0, max_gap_cpu: 0, total_migrations: 0,
+            num_workers: workers,
+            num_cpus: cpus,
+            avg_runnable_pct: (min + max) / 2.0,
+            min_runnable_pct: min,
+            max_runnable_pct: max,
+            spread: max - min,
+            max_gap_ms: 0,
+            max_gap_cpu: 0,
+            total_migrations: 0,
         }
     }
 
     #[test]
     fn gauntlet_stats_basic() {
-        let r = sr_with_stats("test", true, vec![cell(4, 2, 50.0, 60.0), cell(4, 2, 55.0, 65.0)], 10.0, 50, 0, 7);
+        let r = sr_with_stats(
+            "test",
+            true,
+            vec![cell(4, 2, 50.0, 60.0), cell(4, 2, 55.0, 65.0)],
+            10.0,
+            50,
+            0,
+            7,
+        );
         let s = format_gauntlet_stats(&r);
         assert!(s.contains("c0:4w/2c=50-60%"));
         assert!(s.contains("c1:4w/2c=55-65%"));
@@ -567,14 +840,30 @@ mod tests {
 
     #[test]
     fn gauntlet_stats_stuck() {
-        let r = sr_with_stats("test", false, vec![cell(4, 2, 50.0, 60.0)], 10.0, 2500, 3, 5);
+        let r = sr_with_stats(
+            "test",
+            false,
+            vec![cell(4, 2, 50.0, 60.0)],
+            10.0,
+            2500,
+            3,
+            5,
+        );
         let s = format_gauntlet_stats(&r);
         assert!(s.contains("STUCK=2500ms@cpu3"));
     }
 
     #[test]
     fn gauntlet_stats_unfair_and_stuck() {
-        let r = sr_with_stats("test", false, vec![cell(4, 2, 10.0, 90.0)], 80.0, 3000, 1, 0);
+        let r = sr_with_stats(
+            "test",
+            false,
+            vec![cell(4, 2, 10.0, 90.0)],
+            80.0,
+            3000,
+            1,
+            0,
+        );
         let s = format_gauntlet_stats(&r);
         assert!(s.contains("UNFAIR=80%"));
         assert!(s.contains("STUCK=3000ms@cpu1"));
@@ -594,8 +883,16 @@ mod tests {
 
     #[test]
     fn gauntlet_detail_first_failure() {
-        let d = format_gauntlet_detail(false, "",
-            &[sr("test", false, 1.0, vec!["unfair cell: spread=85%", "stuck 2000ms"])]);
+        let d = format_gauntlet_detail(
+            false,
+            "",
+            &[sr(
+                "test",
+                false,
+                1.0,
+                vec!["unfair cell: spread=85%", "stuck 2000ms"],
+            )],
+        );
         assert_eq!(d, " | unfair cell: spread=85%");
     }
 
@@ -630,32 +927,42 @@ mod tests {
     #[test]
     fn is_infra_scheduler_died() {
         assert!(is_infra_failure(
-            &[sr("test", false, 1.0, vec!["scheduler died"])], ""));
+            &[sr("test", false, 1.0, vec!["scheduler died"])],
+            ""
+        ));
     }
 
     #[test]
     fn not_infra_real_failure() {
         assert!(!is_infra_failure(
-            &[sr("test", false, 1.0, vec!["unfair cell: spread=85%"])], ""));
+            &[sr("test", false, 1.0, vec!["unfair cell: spread=85%"])],
+            ""
+        ));
     }
 
     #[test]
     fn not_infra_stuck() {
         assert!(!is_infra_failure(
-            &[sr("test", false, 1.0, vec!["stuck 3000ms on cpu2"])], ""));
+            &[sr("test", false, 1.0, vec!["stuck 3000ms on cpu2"])],
+            ""
+        ));
     }
 
     #[test]
     fn gauntlet_summary_format() {
         let failed = vec![
-            ("tiny-1llc/proportional/default".to_string(), vec![
-                "unfair cell: spread=85%".to_string(),
-                "stuck 2448ms on cpu4".to_string(),
-                "CELL[0] cpus=0-3 vtime=12345".to_string(),
-            ]),
-            ("tiny-2llc/cpuset_aligned/default".to_string(), vec![
-                "scheduler died".to_string(),
-            ]),
+            (
+                "tiny-1llc/proportional/default".to_string(),
+                vec![
+                    "unfair cell: spread=85%".to_string(),
+                    "stuck 2448ms on cpu4".to_string(),
+                    "CELL[0] cpus=0-3 vtime=12345".to_string(),
+                ],
+            ),
+            (
+                "tiny-2llc/cpuset_aligned/default".to_string(),
+                vec!["scheduler died".to_string()],
+            ),
         ];
         let out = format_gauntlet_summary(&failed);
         assert!(out.contains("tiny-1llc/proportional/default:"));
@@ -668,15 +975,16 @@ mod tests {
 
     #[test]
     fn gauntlet_summary_includes_dumps() {
-        let failed = vec![
-            ("test/default".to_string(), vec![
+        let failed = vec![(
+            "test/default".to_string(),
+            vec![
                 "stuck 2700ms on cpu2".to_string(),
                 "DEBUG DUMP".to_string(),
                 "CELL[0] CPUS=00000007".to_string(),
                 "CPU[0] cell=0 vtime=3437274".to_string(),
                 "R stt-bin[204] -1278ms".to_string(),
-            ]),
-        ];
+            ],
+        )];
         let out = format_gauntlet_summary(&failed);
         assert!(out.contains("    DEBUG DUMP"));
         assert!(out.contains("    CELL[0] CPUS=00000007"));
