@@ -70,6 +70,38 @@ struct scx_cgroup_ctx {
 	u64		nquota_ub;
 
 	/*
+	 * The budget allocation from a parent cgroup to a child cgroup in nsec.
+	 */
+	u64		budget_p2c;
+
+	/*
+	 * The budget allocation from a cgroup to its LLC context in nsec.
+	 */
+	u64		budget_c2l;
+
+	/*
+	 * The number of descendent cgroups that can have tasks.
+	 */
+	int		nr_taskable_descendents;
+
+	/*
+	 * A boolean flag indicating whether the cgroup has LLC contexts.
+	 */
+	bool		has_llcx;
+
+	/*
+	 * A boolean flag indicating whether the cgroup is throttled or not.
+	 * Note that the cgroup can be throttled before reaching the upper
+	 * bound (nquota_nb) if the subrooot cgroup runs out of the time.
+	 */
+	bool		is_throttled;
+
+	/*
+	 * How many time this cgroup is throttled so far.
+	 */
+	u32		nr_throttled;
+
+	/*
 	 * @period_start_clk represents when a new period starts.
 	 * @burst_remaining is the maximum burst that can be accumulated
 	 * until the end of the period from @period_start_clk.
@@ -100,33 +132,6 @@ struct scx_cgroup_ctx {
 	 * Total runtime at the last replenishment period.
 	 */
 	s64		runtime_total_last;
-
-	/*
-	 * The budget allocation from a parent cgroup to a child cgroup in nsec.
-	 */
-	u64		budget_p2c;
-
-	/*
-	 * The budget allocation from a cgroup to its LLC context in nsec.
-	 */
-	u64		budget_c2l;
-
-	/*
-	 * The number of descendent cgroups that can have tasks.
-	 */
-	int		nr_taskable_descendents;
-
-	/*
-	 * A boolean flag indicating whether the cgroup has LLC contexts.
-	 */
-	bool		has_llcx;
-
-	/*
-	 * A boolean flag indicating whether the cgroup is throttled or not.
-	 * Note that the cgroup can be throttled before reaching the upper
-	 * bound (nquota_nb) if the subrooot cgroup runs out of the time.
-	 */
-	bool		is_throttled;
 };
 
 
@@ -264,13 +269,11 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer);
 union backlog_stat {
 	struct {
 		/* sequence counter for replenish operation. */
-		u16 rp_seq;
+		u32 rp_seq;
 		/* number of cbw_throttled_cgroup_ids */
 		u16 nr_throttled_cgroups;
 		/* a flag denoting if there is a throttled task */
 		u16 has_throttled_tasks;
-		/* padding for u64 alignment */
-		u16 __pad;
 	};
 	u64 val;
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
@@ -279,7 +282,7 @@ static union backlog_stat cbw_backlog_stat;
 
 static inline
 bool cbw_update_backlog_stat_cas(union backlog_stat *old,
-				 u16 rp_seq,
+				 u32 rp_seq,
 				 u16 nr_throttled_cgroups,
 				 u16 has_throttled_tasks)
 {
@@ -287,7 +290,6 @@ bool cbw_update_backlog_stat_cas(union backlog_stat *old,
 		.rp_seq = rp_seq,
 		.nr_throttled_cgroups = nr_throttled_cgroups,
 		.has_throttled_tasks = has_throttled_tasks,
-		.__pad = 0,
 	};
 
 	return __sync_bool_compare_and_swap(&cbw_backlog_stat.val, old->val,
@@ -2110,6 +2112,10 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			cbw_dbg("Failed to lookup a cgroup ctx: cgid%llu", ids[0]);
 			bpf_cgroup_release(cur_cgrp);
 			continue;
+		}
+
+		if (READ_ONCE(cur_cgx->is_throttled)) {
+			cur_cgx->nr_throttled++;
 		}
 
 		if (cur_cgrp->level > 1) {
