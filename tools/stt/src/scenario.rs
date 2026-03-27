@@ -1472,6 +1472,276 @@ macro_rules! s {
     };
 }
 
+fn custom_dispatch_contention(ctx: &Ctx) -> Result<VerifyResult> {
+    // Stress the dispatch fallback path in mitosis_dispatch.
+    //
+    // Multiple CPUs in one cell all serve the same cell DSQ. When many
+    // bursty workers wake simultaneously, the lockless peek can miss
+    // tasks due to store visibility ordering (list_add visible before
+    // rcu_assign_pointer sets first_task). Without fallback to the
+    // locked consume path, CPUs go idle and never retry.
+    let all = ctx.topo.all_cpus();
+    if all.len() < 4 {
+        return Ok(VerifyResult { passed: true, details: vec!["skipped: need >=4 CPUs".into()], stats: Default::default() });
+    }
+    let last = all.len() - 1;
+
+    ctx.cgroups.create_cell("cell_0")?;
+    ctx.cgroups.set_cpuset("cell_0", &all[..last].iter().copied().collect())?;
+    thread::sleep(Duration::from_secs(3));
+
+    let n_unpinned = (last * 3).max(8);
+    let mut h_cell = WorkloadHandle::spawn(&WorkloadConfig {
+        num_workers: n_unpinned,
+        work_type: WorkType::Bursty { burst_ms: 10, sleep_ms: 5 },
+        ..Default::default()
+    })?;
+    for t in h_cell.tids() { ctx.cgroups.move_task("cell_0", t)?; }
+
+    let n_pinned = last.min(4);
+    let mut pinned_handles = Vec::new();
+    for i in 0..n_pinned {
+        let mut h = WorkloadHandle::spawn(&WorkloadConfig {
+            num_workers: 1,
+            affinity: AffinityMode::SingleCpu(all[i]),
+            work_type: WorkType::Bursty { burst_ms: 10, sleep_ms: 5 },
+            ..Default::default()
+        })?;
+        for t in h.tids() { ctx.cgroups.move_task("cell_0", t)?; }
+        pinned_handles.push(h);
+    }
+
+    h_cell.start();
+    for h in &mut pinned_handles { h.start(); }
+    thread::sleep(ctx.duration);
+
+    let mut r = VerifyResult::pass();
+    r.merge(verify::verify_not_starved(&h_cell.stop_and_collect()));
+    for h in pinned_handles {
+        let reports = h.stop_and_collect();
+        for w in &reports {
+            if w.max_gap_ms > 1500 {
+                r.passed = false;
+                r.details.push(format!(
+                    "pinned worker {} on CPU {} had {}ms gap (dispatch contention stall)",
+                    w.tid, w.cpus_used.iter().next().unwrap_or(&0), w.max_gap_ms
+                ));
+            }
+        }
+        r.merge(verify::verify_not_starved(&reports));
+    }
+    Ok(r)
+}
+
+fn custom_vtime_contamination(ctx: &Ctx) -> Result<VerifyResult> {
+    // Trigger cross-cell vtime contamination via rebalancing + cpuset
+    // transitions.
+    //
+    // Hot cells drive vtime high. Cold cells keep vtime low. Root cell
+    // has mixed work. We randomly walk through phases that add/remove
+    // cells and transition between disjoint and overlapping cpuset
+    // layouts. Each transition forces apply_cell_config to retag CPUs
+    // between cells with divergent vtime domains.
+    let all = ctx.topo.all_cpus();
+    if all.len() < 12 {
+        return Ok(VerifyResult { passed: true, details: vec!["skipped: need >=12 CPUs".into()], stats: Default::default() });
+    }
+    let last = all.len() - 1; // reserve for cell 0
+    let usable = &all[..last];
+
+    // Seed PRNG from pid for reproducibility per run
+    let mut rng = (std::process::id() as u64).wrapping_mul(6364136223846793005).wrapping_add(1);
+    let mut next = || -> u64 { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); rng >> 33 };
+
+    // Root cell (cell 0): mixed workload on CPUs being retagged
+    let mut handles = Vec::new();
+    let mut h_root = WorkloadHandle::spawn(&WorkloadConfig {
+        num_workers: usable.len(),
+        work_type: WorkType::Mixed,
+        ..Default::default()
+    })?;
+    h_root.start();
+    handles.push(h_root);
+
+    // Excluded cell — stays in cell 0 but with its own workload
+    ctx.cgroups.create_cell("excluded_cell")?;
+    let mut h_excl = WorkloadHandle::spawn(&WorkloadConfig {
+        num_workers: 4,
+        work_type: WorkType::Bursty { burst_ms: 100, sleep_ms: 200 },
+        ..Default::default()
+    })?;
+    for t in h_excl.tids() { ctx.cgroups.move_task("excluded_cell", t)?; }
+    h_excl.start();
+    handles.push(h_excl);
+
+    // Base cells that always exist: 2 hot, 3 cold
+    let base_cells: Vec<String> = (0..5).map(|i| format!("cell_{i}")).collect();
+    for name in &base_cells {
+        ctx.cgroups.create_cell(name)?;
+    }
+
+    // Spawn hot workers (cells 0,1)
+    for name in &base_cells[..2] {
+        let mut h = WorkloadHandle::spawn(&WorkloadConfig {
+            num_workers: usable.len(),
+            work_type: WorkType::CpuSpin,
+            ..Default::default()
+        })?;
+        for t in h.tids() { ctx.cgroups.move_task(name, t)?; }
+        h.start();
+        handles.push(h);
+    }
+    // Spawn cold workers (cells 2,3,4)
+    for name in &base_cells[2..] {
+        let mut h = WorkloadHandle::spawn(&WorkloadConfig {
+            num_workers: 2,
+            work_type: WorkType::Bursty { burst_ms: 50, sleep_ms: 500 },
+            ..Default::default()
+        })?;
+        for t in h.tids() { ctx.cgroups.move_task(name, t)?; }
+        h.start();
+        handles.push(h);
+    }
+
+    let check_alive = |r: &mut VerifyResult| -> bool {
+        if unsafe { libc::kill(ctx.sched_pid as i32, 0) } != 0 {
+            r.passed = false;
+            r.details.push("scheduler died".into());
+            if let Ok(dmesg) = std::process::Command::new("dmesg").arg("--notime").output() {
+                for line in String::from_utf8_lossy(&dmesg.stdout).lines() {
+                    r.details.push(line.to_string());
+                }
+            }
+            return false;
+        }
+        true
+    };
+
+    let apply_disjoint = |cells: &[String], usable: &[usize]| -> Result<()> {
+        let chunk = usable.len() / cells.len();
+        for (i, name) in cells.iter().enumerate() {
+            let start = i * chunk;
+            let end = if i == cells.len() - 1 { usable.len() } else { (i + 1) * chunk };
+            ctx.cgroups.set_cpuset(name, &usable[start..end].iter().copied().collect())?;
+        }
+        Ok(())
+    };
+
+    let apply_overlap = |cells: &[String], usable: &[usize], overlap_frac: f64| -> Result<()> {
+        let chunk = usable.len() / cells.len();
+        let overlap = (chunk as f64 * overlap_frac) as usize;
+        for (i, name) in cells.iter().enumerate() {
+            let start = if i == 0 { 0 } else { (i * chunk).saturating_sub(overlap) };
+            let end = if i == cells.len() - 1 { usable.len() } else { ((i + 1) * chunk + overlap).min(usable.len()) };
+            ctx.cgroups.set_cpuset(name, &usable[start..end].iter().copied().collect())?;
+        }
+        Ok(())
+    };
+
+    let mut r = VerifyResult::pass();
+    let mut extra_cell_exists = false;
+    let extra_name = "cell_5".to_string();
+    let phase_dur = Duration::from_secs(8);
+
+    // Actions: (num_cells, overlapping)
+    // Vary cell count 2-max × disjoint/overlap. Cap to usable/2 so
+    // each cell gets at least 2 CPUs.
+    let max_cells = (usable.len() / 2).min(6);
+    let all_actions: Vec<(usize, bool)> = (2..=max_cells)
+        .flat_map(|n| vec![(n, false), (n, true)])
+        .collect();
+
+    let mut actions: Vec<usize> = Vec::with_capacity(12);
+    for _ in 0..12 {
+        let last = actions.last().copied();
+        // Pick a random action that differs from the last
+        loop {
+            let idx = (next() as usize) % all_actions.len();
+            if Some(idx) != last {
+                actions.push(idx);
+                break;
+            }
+        }
+    }
+
+    // Extra cell names beyond the 2 base hot + base cold
+    let extra_names: Vec<String> = (5..10).map(|i| format!("cell_{i}")).collect();
+    let mut live_extras: Vec<String> = Vec::new();
+
+    // Initial layout: disjoint with base cells
+    apply_disjoint(&base_cells, usable)?;
+    thread::sleep(Duration::from_secs(2));
+
+    for (phase, &action_idx) in actions.iter().enumerate() {
+        if !check_alive(&mut r) {
+            break;
+        }
+
+        let (target_cells, overlapping) = &all_actions[action_idx];
+        let target_cells = *target_cells;
+        tracing::debug!(phase, target_cells, overlapping, "vtime_contamination phase");
+
+        // We always have 2 hot (cell_0, cell_1) + some cold cells.
+        // Total user cells = target_cells. Hot cells = min(2, target).
+        // Cold cells = target - hot.
+        let cold_count = target_cells.saturating_sub(2);
+
+        // Build the cell list for this phase
+        let mut phase_cells: Vec<String> = base_cells[..2.min(target_cells)].to_vec();
+        // Add cold cells from base_cells[2..] first, then extras
+        let base_cold = &base_cells[2..];
+        for i in 0..cold_count {
+            if i < base_cold.len() {
+                phase_cells.push(base_cold[i].clone());
+            } else {
+                let extra_idx = i - base_cold.len();
+                let name = &extra_names[extra_idx];
+                if !live_extras.contains(name) {
+                    ctx.cgroups.create_cell(name)?;
+                    let mut h = WorkloadHandle::spawn(&WorkloadConfig {
+                        num_workers: 2,
+                        work_type: WorkType::Bursty { burst_ms: 50, sleep_ms: 500 },
+                        ..Default::default()
+                    })?;
+                    for t in h.tids() { ctx.cgroups.move_task(name, t)?; }
+                    h.start();
+                    handles.push(h);
+                    live_extras.push(name.clone());
+                }
+                phase_cells.push(name.clone());
+            }
+        }
+
+        // Remove extras that aren't needed this phase
+        let needed: std::collections::BTreeSet<String> = phase_cells.iter().cloned().collect();
+        live_extras.retain(|name| {
+            if !needed.contains(name) {
+                let _ = ctx.cgroups.remove_cell(name);
+                false
+            } else {
+                true
+            }
+        });
+
+        // Apply cpuset layout
+        if *overlapping {
+            let frac = 0.2 + (next() % 30) as f64 / 100.0;
+            apply_overlap(&phase_cells, usable, frac)?;
+        } else {
+            apply_disjoint(&phase_cells, usable)?;
+        }
+
+        thread::sleep(phase_dur);
+    }
+
+    check_alive(&mut r);
+    for h in handles {
+        r.merge(verify::verify_not_starved(&h.stop_and_collect()));
+    }
+
+    Ok(r)
+}
+
 macro_rules! custom {
     ($name:expr, $cat:expr, $desc:expr, $fn:expr) => {
         Scenario { name: $name, category: $cat, description: $desc,
@@ -1688,6 +1958,14 @@ pub fn all_scenarios() -> Vec<Scenario> {
             cell_works: vec![CellWork { workers: 12, work_type: WorkType::Bursty { burst_ms: 200, sleep_ms: 50 }, ..Default::default() },
                              CellWork { workers: 4, ..Default::default() }],
             action: Action::Steady, extra_sched_args: &[] },
+        // Vtime contamination via rebalancing (PR 3464)
+        // Needs 90s+ because mitosis reconfigs are timer-driven (~1s)
+        Scenario { name: "vtime_contamination", category: "stress", description: "Hot/cold cells trigger cross-cell vtime contamination",
+            required_flags: &[Flag::Borrowing, Flag::Rebalancing, Flag::CpuControllerDisabled],
+            excluded_flags: &[Flag::RejectMulticpuPinning],
+            num_cells: 0, cpuset_mode: CpusetMode::None,
+            cell_works: vec![], action: Action::Custom(custom_vtime_contamination),
+            extra_sched_args: &["--cell-exclude", "excluded_cell"] },
         // Borrowing + rebalancing + cpusets
         Scenario { name: "borrow_rebal_cpuset", category: "interaction", description: "Borrowing + rebalancing + cpusets",
             required_flags: &[Flag::Borrowing, Flag::Rebalancing], excluded_flags: &[],
@@ -1754,6 +2032,8 @@ pub fn all_scenarios() -> Vec<Scenario> {
             num_cells: 0, cpuset_mode: CpusetMode::None,
             cell_works: vec![], action: Action::Custom(custom_nested_borrowing),
             extra_sched_args: &[] },
+        // Dispatch contention
+        custom!("dispatch_contention", "stress", "Cell DSQ contention starving per-CPU DSQ", custom_dispatch_contention),
         // Workload variety - no flags
         custom!("mix_no_flags", "stress", "All workload types, no flags", custom_mix_no_flags),
         custom!("mix_cpuset", "stress", "All workload types + cpusets", custom_mix_cpuset),
