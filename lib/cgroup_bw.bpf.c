@@ -99,7 +99,7 @@ struct scx_cgroup_ctx {
 	/*
 	 * How many time this cgroup is throttled so far.
 	 */
-	u32		nr_throttled;
+	u32		nr_throttled_periods;
 
 	/*
 	 * @period_start_clk represents when a new period starts.
@@ -733,14 +733,15 @@ static
 void cbw_set_bandwidth(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 		       u64 period_us, u64 quota_us, u64 burst_us)
 {
-	cgx->quota = quota_us * 1000;
 	cgx->period = period_us * 1000;
 	cgx->period_start_clk = scx_bpf_now();
 
 	if (quota_us == CBW_RUNTUME_INF_RAW) {
+		cgx->quota = CBW_RUNTUME_INF_RAW;
 		cgx->nquota = CBW_RUNTUME_INF;
 		cgx->burst = 0;
 	} else {
+		cgx->quota = quota_us * 1000;
 		cgx->nquota = div_round_up(quota_us * CBW_NPERIOD, period_us);
 		cgx->burst = burst_us * 1000;
 	}
@@ -2115,7 +2116,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		}
 
 		if (READ_ONCE(cur_cgx->is_throttled)) {
-			cur_cgx->nr_throttled++;
+			cur_cgx->nr_throttled_periods++;
 		}
 
 		if (cur_cgrp->level > 1) {
@@ -2550,4 +2551,142 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 	}
 
 	return ret;
+}
+
+static __noinline
+int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
+{
+	static const char indent_strs[][64] = {
+		"",
+		"  ",
+		"    ",
+		"      ",
+		"        ",
+		"          ",
+		"            ",
+		"              ",
+		"                ",
+		"                  ",
+		"                    ",
+		"                      ",
+		"                        ",
+		"                          ",
+		"                            ",
+		"                              ",
+		"                                ",
+		"                                  ",
+		"                                    ",
+		"                                      ",
+		"                                        ",
+		"                                          ",
+		"                                            ",
+		"                                              ",
+		"                                                ",
+		"                                                  ",
+		"                                                    ",
+		"                                                      ",
+		"                                                        ",
+		"                                                          ",
+		"                                                            ",
+	};
+	static const u32 indent_max = sizeof(indent_strs) / sizeof(indent_strs[0]);
+
+	struct scx_cgroup_llc_ctx *llcx;
+	int i, nr_throttled_tasks = 0;
+	struct scx_cgroup_ctx *cgx;
+	const char *indent_str;
+	scx_atq_t *btq;
+	char name[64];
+
+	/* Attach the timer function to the BPF area context. */
+	scx_arena_subprog_init();
+
+	cgx = cbw_get_cgroup_ctx(cgrp);
+	if (!cgx) {
+		cbw_dbg("Failed to lookup a cgroup context: %llu", cgroup_get_id(cgrp));
+		return -ESRCH;
+	}
+
+	indent_str = indent_strs[ clamp((u32)cgrp->level, 0, indent_max) ];
+
+	bpf_probe_read_kernel_str(name, sizeof(name), BPF_CORE_READ(cgrp->kn, name));
+	bpf_printk("%s +-- %s (id: %llu, level: %d)", indent_str,
+			name, cgroup_get_id(cgrp), (u32)cgrp->level);
+
+	if (cgx->nquota_ub == CBW_RUNTUME_INF)
+		return 0;
+
+	if (cgx->has_llcx) {
+		bpf_for(i, 0, TOPO_NR(LLC)) {
+			llcx = cbw_get_llc_ctx(cgrp, i);
+			if (!llcx || !(btq = READ_ONCE(llcx->btq)))
+				continue;
+			nr_throttled_tasks += scx_atq_nr_queued(btq);
+		}
+	}
+
+	bpf_printk("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
+			cgx->quota, cgx->period, cgx->burst);
+	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu", indent_str,
+			cgx->nquota, cgx->nquota_ub);
+	bpf_printk("%s   \\_ budget_p2c: %llu, budget_c2l: %llu", indent_str,
+			cgx->budget_p2c, cgx->budget_c2l);
+	bpf_printk("%s   \\_ has_llcx: %d, nr_taskable_descendents: %d", indent_str,
+			cgx->has_llcx, cgx->nr_taskable_descendents);
+	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
+			cgx->is_throttled,
+			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
+			nr_throttled_tasks);
+	bpf_printk("%s   \\_ budget_remaining: %lld, burst_remaining: %lld", indent_str,
+			cgx->budget_remaining, cgx->burst_remaining);
+	bpf_printk("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
+			cgx->runtime_total_sloppy, cgx->runtime_total_last);
+					
+	return 0;
+}
+
+/**
+ * scx_cgroup_bw_dump - Dump the cgroup status
+ *
+ * @cgrp_id: cgroup id
+ * @descendent: If true, dump the cgroup and its descendent in preorder.
+ * Otherwise, dump only itself.
+ * @accurate: If true, update runtime total before dumping the status to
+ * get more accurate information. Otherwise, dump the currently collected
+ * snapshot of runtime values.
+ * @indent: If true, indent the output. Otherwise, do not indent the output.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+__hidden
+int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
+{
+	struct cgroup_subsys_state *start_css, *pos;
+	struct cgroup *start_cgrp, *cur_cgrp;
+
+	start_cgrp = bpf_cgroup_from_id(cgrp_id);
+	if (!start_cgrp) {
+		cbw_dbg("Failed to fetch a cgroup pointer: cgid%llu", cgrp_id);
+		return -ESRCH;
+	}
+
+	if (accurate)
+		cbw_update_runtime_total_sloppy(start_cgrp);
+
+	if (!descendent) {
+		cbw_dump_cgroup(start_cgrp, indent);
+		goto release_out;
+	}
+
+	bpf_rcu_read_lock();
+	start_css = &start_cgrp->self;
+	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+		cur_cgrp = pos->cgroup;
+		cbw_dump_cgroup(cur_cgrp, indent);
+	}
+	bpf_rcu_read_unlock();
+
+release_out:
+	bpf_cgroup_release(start_cgrp);
+	return 0;
 }

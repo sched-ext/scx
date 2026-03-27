@@ -1789,6 +1789,16 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	return 0;
 }
 
+void BPF_STRUCT_OPS(lavd_dump, struct scx_dump_ctx *dctx)
+{
+	/*
+	 * Dump the cpu.max status of the entire cgroup hierarchy.
+	 */
+	if (enable_cpu_bw) {
+		scx_cgroup_bw_dump(1, true, true, true);
+	}
+}
+
 void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 		    struct task_struct *p)
 {
@@ -2364,6 +2374,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
 	       .exit_task		= (void *)lavd_exit_task,
+	       .dump			= (void *)lavd_dump,
 	       .dump_task		= (void *)lavd_dump_task,
 	       .cgroup_init		= (void *)lavd_cgroup_init,
 	       .cgroup_exit		= (void *)lavd_cgroup_exit,
