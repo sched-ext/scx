@@ -1367,8 +1367,15 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	if (!(cell = lookup_cell(cidx)))
 		return;
 
-	now			 = scx_bpf_now();
-	used			 = now - tctx->started_running_at;
+	now = scx_bpf_now();
+	/*
+	 * scx_bpf_now() is per-CPU (uses this_rq()) and not monotonic
+	 * across CPUs. Clamp negative deltas to zero to prevent
+	 * unsigned underflow from corrupting vtime.
+	 */
+	if (now < tctx->started_running_at)
+		cstat_inc(CSTAT_CLAMP_USED, cidx, cctx);
+	used			 = time_delta(now, tctx->started_running_at);
 	tctx->started_running_at = now;
 	/* scale the execution time by the inverse of the weight and charge */
 	if (p->scx.weight == 0) {
