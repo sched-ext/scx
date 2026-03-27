@@ -1408,16 +1408,15 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
 	/*
-	 * Advance this CPU's per-CPU DSQ vtime, UNLESS the task was
-	 * genuinely borrowed from another cell. Borrowed tasks' vtime
-	 * is in the borrowing cell's domain — writing it to the lending
-	 * CPU's vtime_now would contaminate that domain.
-	 *
-	 * For cell-reassigned tasks (tctx->cell != cidx but not borrowed),
-	 * the vtime was initialized in this CPU's cell domain, so
-	 * advancing cctx->vtime_now is correct and prevents staleness.
+	 * Only advance this CPU's per-CPU DSQ vtime when the task
+	 * belongs to the same cell as the CPU. Cross-cell tasks
+	 * (root cell kworkers, borrowed tasks, tasks mid-retag)
+	 * have vtime from a foreign domain — writing it to
+	 * cctx->vtime_now contaminates this cell's per-CPU vtime,
+	 * which then propagates to the cell DSQ via
+	 * apply_cell_config's vtime sync.
 	 */
-	if (!tctx->borrowed) {
+	if (!tctx->borrowed && tctx->cell == cidx) {
 		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
 			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 	}
