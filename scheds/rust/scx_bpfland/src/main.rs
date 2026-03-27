@@ -113,6 +113,9 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
 /// scheduling statistics.
 ///
 /// The BPF part makes all the scheduling decisions (see src/bpf/main.bpf.c).
+///
+/// When the --timely flag is set, the scheduler enables TIMELY's delay-driven feedback for
+/// adaptive time slices and pressure-aware load balancing.
 #[derive(Debug, Parser)]
 struct Opts {
     /// Exit debug dump buffer length. 0 indicates default.
@@ -221,6 +224,106 @@ struct Opts {
     /// With this option enabled the CPU frequency will be automatically scaled based on the load.
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
     cpufreq: bool,
+
+    /// Enable TIMELY mode: use TIMELY's delay-driven feedback for adaptive time slices
+    /// and pressure-aware load balancing.
+    #[clap(short = 'T', long, action = clap::ArgAction::SetTrue)]
+    timely: bool,
+
+    /// TIMELY lower delay threshold in microseconds.
+    ///
+    /// When the queue delay is below this threshold, the scheduler increases the time slice.
+    #[clap(long, default_value = "5000")]
+    timely_tlow_us: u64,
+
+    /// TIMELY higher delay threshold in microseconds.
+    ///
+    /// When the queue delay is above this threshold, the scheduler decreases the time slice.
+    #[clap(long, default_value = "50000")]
+    timely_thigh_us: u64,
+
+    /// TIMELY minimum gain value (fixed-point).
+    #[clap(long, default_value = "128")]
+    timely_gain_min: u32,
+
+    /// TIMELY gain step (fixed-point).
+    #[clap(long, default_value = "32")]
+    timely_gain_step: u32,
+
+    /// TIMELY HAI threshold (fixed-point).
+    #[clap(long, default_value = "768")]
+    timely_hai_thresh: u32,
+
+    /// TIMELY HAI multiplier.
+    #[clap(long, default_value = "2")]
+    timely_hai_multiplier: u32,
+
+    /// TIMELY backoff low threshold (fixed-point).
+    #[clap(long, default_value = "768")]
+    timely_backoff_low: u32,
+
+    /// TIMELY backoff high threshold (fixed-point).
+    #[clap(long, default_value = "960")]
+    timely_backoff_high: u32,
+
+    /// TIMELY backoff gradient (fixed-point).
+    #[clap(long, default_value = "992")]
+    timely_backoff_gradient: u32,
+
+    /// TIMELY gradient margin in microseconds.
+    #[clap(long, default_value = "125")]
+    timely_gradient_margin_us: u64,
+
+    /// TIMELY control interval in microseconds.
+    #[clap(long, default_value = "500")]
+    timely_control_interval_us: u64,
+
+    /// TIMELY v2: enable locality fallback.
+    ///
+    /// When no idle CPU is available, wake-heavy tasks may fall back to prev_cpu's local DSQ
+    /// instead of always entering the shared node queue.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    timely_v2_locality_fallback: bool,
+
+    /// TIMELY v2: wakeup-frequency threshold for locality fallback.
+    #[clap(long, default_value = "8")]
+    timely_v2_locality_wakeup_freq: u64,
+
+    /// TIMELY v2: maximum allowed local per-CPU queue depth for locality fallback.
+    #[clap(long, default_value = "0")]
+    timely_v2_locality_max_cpuq: u64,
+
+    /// TIMELY v2: minimum shared node-queue depth for broadened locality fallback.
+    #[clap(long, default_value = "0")]
+    timely_v2_locality_congested_nodeq: u64,
+
+    /// TIMELY v2: maximum local per-CPU queue depth for broadened locality fallback.
+    #[clap(long, default_value = "0")]
+    timely_v2_locality_congested_max_cpuq: u64,
+
+    /// TIMELY v2: enable local-head dispatch bias.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    timely_v2_local_head_bias: bool,
+
+    /// TIMELY v2: local-head bias slack in microseconds.
+    #[clap(long, default_value = "250")]
+    timely_v2_local_head_bias_slack_us: u64,
+
+    /// TIMELY v2: consecutive delay-pressured samples to enter pressure mode.
+    #[clap(long, default_value = "3")]
+    timely_v2_pressure_enter_streak: u32,
+
+    /// TIMELY v2: consecutive recovered samples to exit pressure mode.
+    #[clap(long, default_value = "3")]
+    timely_v2_pressure_exit_streak: u32,
+
+    /// TIMELY v2: expand mode threshold (% of CPUs with work to trigger expand).
+    #[clap(long, default_value = "75")]
+    timely_v2_expand_threshold: u32,
+
+    /// TIMELY v2: contract mode threshold (% of CPUs with work to exit expand).
+    #[clap(long, default_value = "50")]
+    timely_v2_contract_threshold: u32,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -344,6 +447,32 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
+
+        // TIMELY settings (only effective when timely_enabled=true)
+        rodata.timely_enabled = opts.timely;
+        rodata.timely_tlow_ns = opts.timely_tlow_us * 1000;
+        rodata.timely_thigh_ns = opts.timely_thigh_us * 1000;
+        rodata.timely_gain_min_fp = opts.timely_gain_min;
+        rodata.timely_gain_max_fp = 1024;
+        rodata.timely_gain_step_fp = opts.timely_gain_step;
+        rodata.timely_hai_thresh_fp = opts.timely_hai_thresh;
+        rodata.timely_hai_multiplier = opts.timely_hai_multiplier;
+        rodata.timely_backoff_low_fp = opts.timely_backoff_low;
+        rodata.timely_backoff_high_fp = opts.timely_backoff_high;
+        rodata.timely_backoff_gradient_fp = opts.timely_backoff_gradient;
+        rodata.timely_gradient_margin_ns = opts.timely_gradient_margin_us * 1000;
+        rodata.timely_control_interval_ns = opts.timely_control_interval_us * 1000;
+        rodata.v2_locality_fallback = opts.timely_v2_locality_fallback;
+        rodata.v2_locality_wakeup_freq = opts.timely_v2_locality_wakeup_freq;
+        rodata.v2_locality_max_cpuq = opts.timely_v2_locality_max_cpuq;
+        rodata.v2_locality_congested_nodeq = opts.timely_v2_locality_congested_nodeq;
+        rodata.v2_locality_congested_max_cpuq = opts.timely_v2_locality_congested_max_cpuq;
+        rodata.v2_local_head_bias = opts.timely_v2_local_head_bias;
+        rodata.v2_local_head_bias_slack_ns = opts.timely_v2_local_head_bias_slack_us * 1000;
+        rodata.v2_pressure_enter_streak = opts.timely_v2_pressure_enter_streak;
+        rodata.v2_pressure_exit_streak = opts.timely_v2_pressure_exit_streak;
+        rodata.v2ExpandThreshold = opts.timely_v2_expand_threshold;
+        rodata.v2ContractThreshold = opts.timely_v2_contract_threshold;
 
         // Generate the list of available CPUs sorted by capacity in descending order.
         let mut cpus: Vec<_> = topo.all_cpus.values().collect();
@@ -591,6 +720,44 @@ impl<'a> Scheduler<'a> {
             nr_kthread_dispatches: bss_data.nr_kthread_dispatches,
             nr_direct_dispatches: bss_data.nr_direct_dispatches,
             nr_shared_dispatches: bss_data.nr_shared_dispatches,
+            nr_delay_recovery_dispatches: bss_data.nr_delay_recovery_dispatches,
+            nr_delay_middle_add_dispatches: bss_data.nr_delay_middle_add_dispatches,
+            nr_delay_fast_recovery_dispatches: bss_data.nr_delay_fast_recovery_dispatches,
+            nr_delay_rate_limited_dispatches: bss_data.nr_delay_rate_limited_dispatches,
+            nr_gain_floor_dispatches: bss_data.nr_gain_floor_dispatches,
+            nr_gain_ceiling_dispatches: bss_data.nr_gain_ceiling_dispatches,
+            nr_delay_low_region_samples: bss_data.nr_delay_low_region_samples,
+            nr_delay_mid_region_samples: bss_data.nr_delay_mid_region_samples,
+            nr_delay_high_region_samples: bss_data.nr_delay_high_region_samples,
+            nr_gain_floor_resident_samples: bss_data.nr_gain_floor_resident_samples,
+            nr_gain_mid_resident_samples: bss_data.nr_gain_mid_resident_samples,
+            nr_gain_ceiling_resident_samples: bss_data.nr_gain_ceiling_resident_samples,
+            nr_idle_select_path_picks: bss_data.nr_idle_select_path_picks,
+            nr_idle_enqueue_path_picks: bss_data.nr_idle_enqueue_path_picks,
+            nr_idle_prev_cpu_picks: bss_data.nr_idle_prev_cpu_picks,
+            nr_idle_primary_picks: bss_data.nr_idle_primary_picks,
+            nr_idle_spill_picks: bss_data.nr_idle_spill_picks,
+            nr_idle_pick_failures: bss_data.nr_idle_pick_failures,
+            nr_idle_primary_domain_misses: bss_data.nr_idle_primary_domain_misses,
+            nr_idle_global_misses: bss_data.nr_idle_global_misses,
+            nr_waker_cpu_biases: bss_data.nr_waker_cpu_biases,
+            nr_keep_running_reuses: bss_data.nr_keep_running_reuses,
+            nr_keep_running_queue_empty: bss_data.nr_keep_running_queue_empty,
+            nr_keep_running_smt_blocked: bss_data.nr_keep_running_smt_blocked,
+            nr_keep_running_queued_work: bss_data.nr_keep_running_queued_work,
+            nr_dispatch_cpu_dsq_consumes: bss_data.nr_dispatch_cpu_dsq_consumes,
+            nr_dispatch_node_dsq_consumes: bss_data.nr_dispatch_node_dsq_consumes,
+            nr_v2_locality_cpu_dispatches: bss_data.nr_v2_locality_cpu_dispatches,
+            nr_v2_congested_locality_cpu_dispatches: bss_data
+                .nr_v2_congested_locality_cpu_dispatches,
+            nr_v2_delay_locality_cpu_dispatches: bss_data.nr_v2_delay_locality_cpu_dispatches,
+            nr_v2_local_head_biases: bss_data.nr_v2_local_head_biases,
+            nr_v2_pressure_mode_entries: bss_data.nr_v2_pressure_mode_entries,
+            nr_v2_pressure_mode_exits: bss_data.nr_v2_pressure_mode_exits,
+            nr_v2_pressure_shared_dispatches: bss_data.nr_v2_pressure_shared_dispatches,
+            nr_v2_expand_mode_dispatches: bss_data.nr_v2_expand_mode_dispatches,
+            nr_v2_contract_mode_dispatches: bss_data.nr_v2_contract_mode_dispatches,
+            nr_cpu_release_reenqueue: bss_data.nr_cpu_release_reenqueue,
         }
     }
 
