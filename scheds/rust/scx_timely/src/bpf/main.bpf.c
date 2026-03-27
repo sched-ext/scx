@@ -958,12 +958,10 @@ static u64 calc_avg(u64 old_val, u64 new_val)
 
 /*
  * Signed EWMA variant used to smooth queue-delay gradients.
- *
- * Use shifts instead of signed division so the helper stays BPF-friendly.
  */
 static s64 calc_avg_s64(s64 old_val, s64 new_val)
 {
-	return ((old_val * 3) + new_val) >> 2;
+	return ((old_val * 3) + new_val) / 4;
 }
 
 /*
