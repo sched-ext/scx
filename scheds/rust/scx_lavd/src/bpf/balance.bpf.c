@@ -354,14 +354,6 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 		return false;
 
 	/*
-	 * Probabilistically make a go or no go decision to avoid the
-	 * thundering herd problem. In other words, one out of nr_cpus
-	 * will try to steal a task at a moment.
-	 */
-	if (!prob_x_out_of_y(1, cpdomc->nr_active_cpus * LAVD_CPDOM_MIG_PROB_FT))
-		return false;
-
-	/*
 	 * Traverse neighbor compute domains in distance order.
 	 */
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
