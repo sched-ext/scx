@@ -13,8 +13,6 @@ pub use bpf_intf::*;
 mod stats;
 use std::ffi::c_int;
 use std::fmt::Write;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -184,19 +182,6 @@ struct Opts {
     #[clap(short = 'r', long, default_value = "32768")]
     run_us_lag: u64,
 
-    /// Utilization percentage to consider a CPU as busy (-1 = auto).
-    ///
-    /// A value close to 0 forces tasks to migrate quicker, increasing work conservation and
-    /// potentially system responsiveness.
-    ///
-    /// A value close to 100 makes tasks more sticky to their CPU, increasing cache-sensivite and
-    /// server-type workloads.
-    ///
-    /// In auto mode (-1) the scheduler autoomatically tries to determine the optimal value in
-    /// function of the current workload.
-    #[clap(short = 'C', long, allow_hyphen_values = true, default_value = "-1")]
-    cpu_busy_thresh: i64,
-
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
     /// This option can help extend battery life on portable devices, reduce heating, fan noise
@@ -227,16 +212,6 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
 
-    /// Enable per-CPU tasks prioritization.
-    ///
-    /// Enabling this option allows to prioritize per-CPU tasks that usually tend to be
-    /// de-prioritized, since they can't be migrated when their only usable CPU is busy. This
-    /// improves fairness, but it can also reduce the overall system throughput.
-    ///
-    /// This option is recommended for gaming or latency-sensitive workloads.
-    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
-    local_pcpu: bool,
-
     /// Always allow direct dispatch to idle CPUs.
     ///
     /// By default tasks are not directly dispatched to idle CPUs if there are other tasks waiting
@@ -249,14 +224,6 @@ struct Opts {
     /// introduce unfairness and potentially trigger stall conditions.
     #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
     direct_dispatch: bool,
-
-    /// Enable per-CPU kthread prioritization.
-    ///
-    /// Enabling this can improve system performance, but it may also introduce interactivity
-    /// issues or unfairness in scenarios with high kthread activity, such as heavy I/O or network
-    /// traffic.
-    #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
-    local_kthreads: bool,
 
     /// Disable direct dispatch during synchronous wakeups.
     ///
@@ -322,13 +289,6 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CpuTimes {
-    user: u64,
-    nice: u64,
-    total: u64,
 }
 
 struct Scheduler<'a> {
@@ -420,7 +380,6 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.numa_disabled = numa_disabled;
         rodata.rr_sched = opts.rr_sched;
-        rodata.local_pcpu = opts.local_pcpu;
         rodata.direct_dispatch = opts.direct_dispatch;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.tickless_sched = opts.tickless;
@@ -431,17 +390,6 @@ impl<'a> Scheduler<'a> {
         rodata.run_lag = opts.run_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
-
-        // Normalize CPU busy threshold in the range [0 .. 1024].
-        rodata.cpu_busy_thresh = if opts.cpu_busy_thresh < 0 {
-            opts.cpu_busy_thresh
-        } else {
-            opts.cpu_busy_thresh * 1024 / 100
-        };
-
-        // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
-        // (it's never a good idea to throttle per-CPU kthreads).
-        rodata.local_kthreads = opts.local_kthreads || opts.throttle_us > 0;
 
         // Set scheduler compatibility flags.
         rodata.__COMPAT_SCX_PICK_IDLE_IN_NODE = *compat::SCX_PICK_IDLE_IN_NODE;
@@ -684,66 +632,13 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
-    fn compute_user_cpu_pct(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
-        let total_diff = curr.total.saturating_sub(prev.total);
-        let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
-
-        if total_diff > 0 {
-            let user_ratio = user_diff as f64 / total_diff as f64;
-            Some((user_ratio * 1024.0).round() as u64)
-        } else {
-            None
-        }
-    }
-
-    fn read_cpu_times() -> Option<CpuTimes> {
-        let file = File::open("/proc/stat").ok()?;
-        let reader = BufReader::new(file);
-
-        for line in reader.lines() {
-            let line = line.ok()?;
-            if line.starts_with("cpu ") {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() < 5 {
-                    return None;
-                }
-
-                let user: u64 = fields[1].parse().ok()?;
-                let nice: u64 = fields[2].parse().ok()?;
-
-                // Sum the first 8 fields as total time, including idle, system, etc.
-                let total: u64 = fields
-                    .iter()
-                    .skip(1)
-                    .take(8)
-                    .filter_map(|v| v.parse::<u64>().ok())
-                    .sum();
-
-                return Some(CpuTimes { user, nice, total });
-            }
-        }
-
-        None
-    }
-
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
         let (res_ch, req_ch) = self.stats_server.channels();
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             if self.refresh_sched_domain() {
                 self.user_restart = true;
                 break;
-            }
-
-            if self.opts.cpu_busy_thresh < 0 {
-                if let Some(curr_cputime) = Self::read_cpu_times() {
-                    if let Some(cpu_util) = Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
-                    {
-                        self.skel.maps.bss_data.as_mut().unwrap().cpu_util = cpu_util;
-                    }
-                    prev_cputime = curr_cputime;
-                }
             }
 
             match req_ch.recv_timeout(Duration::from_secs(1)) {
