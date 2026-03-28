@@ -78,6 +78,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Code(KeyCode::Enter), Action::Enter);
         bindings.insert(Key::Code(KeyCode::Esc), Action::Esc);
         bindings.insert(Key::Code(KeyCode::Backspace), Action::Backspace);
+        bindings.insert(Key::Code(KeyCode::Tab), Action::FocusNext);
 
         Self { bindings }
     }
@@ -404,6 +405,7 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "PageDown" => Ok(Action::PageDown),
         "PageUp" => Ok(Action::PageUp),
         "Enter" => Ok(Action::Enter),
+        "FocusNext" => Ok(Action::FocusNext),
         "Esc" => Ok(Action::Esc),
         "Backspace" => Ok(Action::Backspace),
         _ => Err(anyhow!("Invalid action: {}", action_str)),
