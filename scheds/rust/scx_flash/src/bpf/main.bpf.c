@@ -54,11 +54,6 @@ const volatile bool primary_all = true;
 const volatile u64 slice_max = 4096ULL * NSEC_PER_USEC;
 
 /*
- * Time slice used when system is over commissioned.
- */
-const volatile u64 slice_min = 128ULL * NSEC_PER_USEC;
-
-/*
  * Maximum runtime budget that a task can accumulate while sleeping (used
  * to determine the task's minimum vruntime).
  */

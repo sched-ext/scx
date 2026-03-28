@@ -157,10 +157,6 @@ struct Opts {
     #[clap(short = 's', long, default_value = "4096")]
     slice_us: u64,
 
-    /// Minimum scheduling slice duration in microseconds.
-    #[clap(short = 'S', long, default_value = "128")]
-    slice_us_min: u64,
-
     /// Maximum runtime budget that a task can accumulate while sleeping (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
@@ -296,9 +292,6 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         try_set_rlimit_infinity();
 
-        // Validate command line arguments.
-        assert!(opts.slice_us >= opts.slice_us_min);
-
         // Initialize CPU topology.
         let topo = Topology::new().unwrap();
 
@@ -375,7 +368,6 @@ impl<'a> Scheduler<'a> {
         rodata.tickless_sched = opts.tickless;
         rodata.slice_lag_scaling = opts.slice_lag_scaling;
         rodata.slice_max = opts.slice_us * 1000;
-        rodata.slice_min = opts.slice_us_min * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.run_lag = opts.run_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
