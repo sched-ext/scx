@@ -11,7 +11,6 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::fmt::Write;
 use std::fs::File;
@@ -240,13 +239,6 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
 
-    /// Disable in-kernel idle CPU selection policy.
-    ///
-    /// Set this option to disable the in-kernel built-in idle CPU selection policy and rely on the
-    /// custom CPU selection policy.
-    #[clap(short = 'b', long, action = clap::ArgAction::SetTrue)]
-    no_builtin_idle: bool,
-
     /// Enable per-CPU tasks prioritization.
     ///
     /// Enabling this option allows to prioritize per-CPU tasks that usually tend to be
@@ -269,16 +261,6 @@ struct Opts {
     /// introduce unfairness and potentially trigger stall conditions.
     #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
     direct_dispatch: bool,
-
-    /// Enable CPU stickiness.
-    ///
-    /// Enabling this option can reduce the amount of task migrations, but it can also make
-    /// performance less consistent on systems with hybrid cores.
-    ///
-    /// This option has no effect if the primary scheduling domain includes all the CPUs
-    /// (e.g., `--primary-domain all`).
-    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
-    sticky_cpu: bool,
 
     /// Native tasks priorities.
     ///
@@ -318,14 +300,6 @@ struct Opts {
     ///  - "none" = no prioritization, tasks are dispatched on the first CPU available
     #[clap(short = 'm', long, default_value = "auto")]
     primary_domain: String,
-
-    /// Disable L2 cache awareness.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_l2: bool,
-
-    /// Disable L3 cache awareness.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_l3: bool,
 
     /// Disable SMT awareness.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -468,12 +442,10 @@ impl<'a> Scheduler<'a> {
         rodata.rr_sched = opts.rr_sched;
         rodata.local_pcpu = opts.local_pcpu;
         rodata.direct_dispatch = opts.direct_dispatch;
-        rodata.sticky_cpu = opts.sticky_cpu;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.tickless_sched = opts.tickless;
         rodata.native_priority = opts.native_priority;
         rodata.slice_lag_scaling = opts.slice_lag_scaling;
-        rodata.builtin_idle = !opts.no_builtin_idle;
         rodata.slice_max = opts.slice_us * 1000;
         rodata.slice_min = opts.slice_us_min * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
@@ -533,15 +505,6 @@ impl<'a> Scheduler<'a> {
         // Initialize SMT domains.
         if smt_enabled {
             Self::init_smt_domains(&mut skel, &topo)?;
-        }
-
-        // Initialize L2 cache domains.
-        if !opts.disable_l2 {
-            Self::init_l2_cache_domains(&mut skel, &topo)?;
-        }
-        // Initialize L3 cache domains.
-        if !opts.disable_l3 {
-            Self::init_l3_cache_domains(&mut skel, &topo)?;
         }
 
         // Attach the scheduler.
@@ -726,90 +689,6 @@ impl<'a> Scheduler<'a> {
         }
 
         Ok(())
-    }
-
-    fn are_smt_siblings(topo: &Topology, cpus: &[usize]) -> bool {
-        // Single CPU or empty array are considered siblings.
-        if cpus.len() <= 1 {
-            return true;
-        }
-
-        // Check if each CPU is a sibling of the first CPU.
-        let first_cpu = cpus[0];
-        let smt_siblings = topo.sibling_cpus();
-        cpus.iter().all(|&cpu| {
-            cpu == first_cpu
-                || smt_siblings[cpu] == first_cpu as i32
-                || (smt_siblings[first_cpu] >= 0 && smt_siblings[first_cpu] == cpu as i32)
-        })
-    }
-
-    fn init_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-        cache_lvl: usize,
-        enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>,
-    ) -> Result<(), std::io::Error> {
-        // Determine the list of CPU IDs associated to each cache node.
-        let mut cache_id_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for core in topo.all_cores.values() {
-            for (cpu_id, cpu) in &core.cpus {
-                let cache_id = match cache_lvl {
-                    2 => cpu.l2_id,
-                    3 => cpu.llc_id,
-                    _ => panic!("invalid cache level {}", cache_lvl),
-                };
-                cache_id_map.entry(cache_id).or_default().push(*cpu_id);
-            }
-        }
-
-        // Update the BPF cpumasks for the cache domains.
-        for (cache_id, cpus) in cache_id_map {
-            // Ignore the cache domain if it includes a single CPU.
-            if cpus.len() <= 1 {
-                continue;
-            }
-
-            // Ignore the cache domain if all the CPUs are part of the same SMT core.
-            if Self::are_smt_siblings(topo, &cpus) {
-                continue;
-            }
-
-            info!(
-                "L{} cache ID {}: sibling CPUs: {:?}",
-                cache_lvl, cache_id, cpus
-            );
-            for cpu in &cpus {
-                for sibling_cpu in &cpus {
-                    if enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu).is_err() {
-                        warn!(
-                            "L{} cache ID {}: failed to set CPU {} sibling {}",
-                            cache_lvl, cache_id, *cpu, *sibling_cpu
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn init_l2_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 2, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
-    }
-
-    fn init_l3_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
     }
 
     fn get_metrics(&self) -> Metrics {
