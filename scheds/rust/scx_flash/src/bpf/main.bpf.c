@@ -11,7 +11,7 @@
 
 #define CGROUP_WEIGHT_DFL	100
 
-extern unsigned CONFIG_HZ __kconfig;
+#define CONFIG_HZ		1000
 
 /*
  * Return the time interval between two ticks in ns.
@@ -30,8 +30,6 @@ static inline u64 tick_interval_ns(void)
  */
 #define CPUFREQ_LOW_THRESH	(SCX_CPUPERF_ONE / 4)
 #define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
-
-const volatile u64 __COMPAT_SCX_PICK_IDLE_IN_NODE;
 
 char _license[] SEC("license") = "GPL";
 
@@ -422,6 +420,16 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
 		return -EINVAL;
+
+	/*
+	 * Compatibility with older kernels (< v6.14).
+	 */
+	if (!__COMPAT_HAS_scx_bpf_select_cpu_and) {
+		if (wake_flags)
+			return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, is_idle);
+
+		return prev_cpu;
+	}
 
 	/*
 	 * Don't trust user-space about waker releasing the CPU: if it
