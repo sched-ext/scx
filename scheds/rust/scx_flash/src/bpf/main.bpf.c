@@ -291,23 +291,6 @@ struct task_ctx {
 	u64 last_run_at;
 
 	/*
-	 * Voluntary context switches metrics.
-	 */
-	u64 avg_nvcsw;
-	u64 last_sleep_at;
-
-	/*
-	 * Task's recently used CPU: used to determine whether we need to
-	 * refresh the task's cpumasks.
-	 */
-	s32 recent_used_cpu;
-
-	/*
-	 * Keep track of the last waker.
-	 */
-	u32 waker_pid;
-
-	/*
 	 * cgroup weight.
 	 */
 	u32 cgweight;
@@ -928,14 +911,6 @@ static u64 calc_avg(u64 old_val, u64 new_val)
 }
 
 /*
- * Evaluate the EWMA limited to the range [low ... high]
- */
-static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
-{
-	return CLAMP(calc_avg(old_val, new_val), low, high);
-}
-
-/*
  * Update CPU load and scale target performance level accordingly.
  */
 static void update_cpu_load(struct task_struct *p, struct task_ctx *tctx)
@@ -1068,7 +1043,6 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 {
-	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
 
 	if (rr_sched)
@@ -1079,38 +1053,6 @@ void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	tctx->exec_runtime = 0;
-	tctx->waker_pid = current->pid;
-}
-
-void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
-{
-	u64 now = bpf_ktime_get_ns();
-	s64 delta_t;
-	struct task_ctx *tctx;
-
-	if (rr_sched || !max_avg_nvcsw)
-		return;
-
-	/*
-	 * Update voluntary context switch rate only on task sleep events.
-	 */
-	if (!(deq_flags & SCX_DEQ_SLEEP))
-		return;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	/*
-	 * Refresh the average rate of voluntary context switches.
-	 */
-	delta_t = time_delta(now, tctx->last_sleep_at);
-	if (delta_t > 0) {
-	    u64 nvcsw = slice_max / delta_t;
-
-	    tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, nvcsw, 0, max_avg_nvcsw);
-	    tctx->last_sleep_at = now;
-	}
 }
 
 void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
@@ -1489,7 +1431,6 @@ SCX_OPS_DEFINE(flash_ops,
 	       .running			= (void *)flash_running,
 	       .stopping		= (void *)flash_stopping,
 	       .runnable		= (void *)flash_runnable,
-	       .quiescent		= (void *)flash_quiescent,
 	       .enable			= (void *)flash_enable,
 	       .cgroup_init		= (void *)flash_cgroup_init,
 	       .cgroup_set_weight	= (void *)flash_cgroup_set_weight,
