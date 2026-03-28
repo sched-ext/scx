@@ -80,11 +80,6 @@ const volatile bool slice_lag_scaling;
 const volatile u64 run_lag = 32768ULL * NSEC_PER_USEC;
 
 /*
- * Ignore synchronous wakeup events.
- */
-const volatile bool no_wake_sync;
-
-/*
  * Always directly dispatch a task if an idle CPU is found.
  */
 const volatile bool direct_dispatch;
@@ -428,8 +423,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	if (!primary)
 		return -EINVAL;
 
-	if (no_wake_sync)
-		wake_flags &= ~SCX_WAKE_SYNC;
+	/*
+	 * Don't trust user-space about waker releasing the CPU: if it
+	 * doesn't, we may have latency issues, so it's safer to just
+	 * ignore the hint.
+	 */
+	wake_flags &= ~SCX_WAKE_SYNC;
 
 	cpu = primary_all ? -ENOENT :
 			scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, primary, 0);

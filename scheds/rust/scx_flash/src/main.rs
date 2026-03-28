@@ -225,15 +225,6 @@ struct Opts {
     #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
     direct_dispatch: bool,
 
-    /// Disable direct dispatch during synchronous wakeups.
-    ///
-    /// Enabling this option can lead to a more uniform load distribution across available cores,
-    /// potentially improving performance in certain scenarios. However, it may come at the cost of
-    /// reduced efficiency for pipe-intensive workloads that benefit from tighter producer-consumer
-    /// coupling.
-    #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
-    no_wake_sync: bool,
-
     /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
     /// tasks may overflow to other available CPUs.
@@ -381,7 +372,6 @@ impl<'a> Scheduler<'a> {
         rodata.numa_disabled = numa_disabled;
         rodata.rr_sched = opts.rr_sched;
         rodata.direct_dispatch = opts.direct_dispatch;
-        rodata.no_wake_sync = opts.no_wake_sync;
         rodata.tickless_sched = opts.tickless;
         rodata.slice_lag_scaling = opts.slice_lag_scaling;
         rodata.slice_max = opts.slice_us * 1000;
