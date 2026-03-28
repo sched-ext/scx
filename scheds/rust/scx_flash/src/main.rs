@@ -11,11 +11,8 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::fmt::Write;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -131,10 +128,9 @@ Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize latency
 that sleep frequently and use the CPU in short bursts.
 
 To prevent sleeping tasks from gaining excessive priority, the maximum vruntime credit a task can
-accumulate while sleeping is capped by `slice_lag`, scaled by the task’s voluntary context switch
-rate (`max_avg_nvcsw`): tasks that sleep frequently can receive a larger credit, while tasks that
-perform fewer, longer sleeps are granted a smaller credit. This encourages responsive behavior
-without excessively boosting idle tasks.
+accumulate while sleeping is capped by `slice_lag`: tasks that sleep frequently can receive a larger
+credit, while tasks that perform fewer, longer sleeps are granted a smaller credit. This encourages
+responsive behavior without excessively boosting idle tasks.
 
 When dynamic fairness is enabled (`--slice-lag-scaling`), the maximum vruntime sleep credit is also
 scaled depending on the user-mode CPU utilization:
@@ -186,30 +182,6 @@ struct Opts {
     #[clap(short = 'r', long, default_value = "32768")]
     run_us_lag: u64,
 
-    /// Maximum rate of voluntary context switches.
-    ///
-    /// Increasing this value can help prioritize interactive tasks with a higher sleep frequency
-    /// over interactive tasks with lower sleep frequency.
-    ///
-    /// Decreasing this value makes the scheduler more robust and fair.
-    ///
-    /// (0 = disable voluntary context switch prioritization).
-    #[clap(short = 'c', long, default_value = "128")]
-    max_avg_nvcsw: u64,
-
-    /// Utilization percentage to consider a CPU as busy (-1 = auto).
-    ///
-    /// A value close to 0 forces tasks to migrate quicker, increasing work conservation and
-    /// potentially system responsiveness.
-    ///
-    /// A value close to 100 makes tasks more sticky to their CPU, increasing cache-sensivite and
-    /// server-type workloads.
-    ///
-    /// In auto mode (-1) the scheduler autoomatically tries to determine the optimal value in
-    /// function of the current workload.
-    #[clap(short = 'C', long, allow_hyphen_values = true, default_value = "-1")]
-    cpu_busy_thresh: i64,
-
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
     /// This option can help extend battery life on portable devices, reduce heating, fan noise
@@ -240,23 +212,6 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
 
-    /// Disable in-kernel idle CPU selection policy.
-    ///
-    /// Set this option to disable the in-kernel built-in idle CPU selection policy and rely on the
-    /// custom CPU selection policy.
-    #[clap(short = 'b', long, action = clap::ArgAction::SetTrue)]
-    no_builtin_idle: bool,
-
-    /// Enable per-CPU tasks prioritization.
-    ///
-    /// Enabling this option allows to prioritize per-CPU tasks that usually tend to be
-    /// de-prioritized, since they can't be migrated when their only usable CPU is busy. This
-    /// improves fairness, but it can also reduce the overall system throughput.
-    ///
-    /// This option is recommended for gaming or latency-sensitive workloads.
-    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
-    local_pcpu: bool,
-
     /// Always allow direct dispatch to idle CPUs.
     ///
     /// By default tasks are not directly dispatched to idle CPUs if there are other tasks waiting
@@ -269,41 +224,6 @@ struct Opts {
     /// introduce unfairness and potentially trigger stall conditions.
     #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
     direct_dispatch: bool,
-
-    /// Enable CPU stickiness.
-    ///
-    /// Enabling this option can reduce the amount of task migrations, but it can also make
-    /// performance less consistent on systems with hybrid cores.
-    ///
-    /// This option has no effect if the primary scheduling domain includes all the CPUs
-    /// (e.g., `--primary-domain all`).
-    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
-    sticky_cpu: bool,
-
-    /// Native tasks priorities.
-    ///
-    /// By default, the scheduler normalizes task priorities to avoid large gaps that could lead to
-    /// stalls or starvation. This option disables normalization and uses the default Linux priority
-    /// range instead.
-    #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
-    native_priority: bool,
-
-    /// Enable per-CPU kthread prioritization.
-    ///
-    /// Enabling this can improve system performance, but it may also introduce interactivity
-    /// issues or unfairness in scenarios with high kthread activity, such as heavy I/O or network
-    /// traffic.
-    #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
-    local_kthreads: bool,
-
-    /// Disable direct dispatch during synchronous wakeups.
-    ///
-    /// Enabling this option can lead to a more uniform load distribution across available cores,
-    /// potentially improving performance in certain scenarios. However, it may come at the cost of
-    /// reduced efficiency for pipe-intensive workloads that benefit from tighter producer-consumer
-    /// coupling.
-    #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
-    no_wake_sync: bool,
 
     /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
@@ -318,14 +238,6 @@ struct Opts {
     ///  - "none" = no prioritization, tasks are dispatched on the first CPU available
     #[clap(short = 'm', long, default_value = "auto")]
     primary_domain: String,
-
-    /// Disable L2 cache awareness.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_l2: bool,
-
-    /// Disable L3 cache awareness.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_l3: bool,
 
     /// Disable SMT awareness.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -368,13 +280,6 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CpuTimes {
-    user: u64,
-    nice: u64,
-    total: u64,
 }
 
 struct Scheduler<'a> {
@@ -466,35 +371,15 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.numa_disabled = numa_disabled;
         rodata.rr_sched = opts.rr_sched;
-        rodata.local_pcpu = opts.local_pcpu;
         rodata.direct_dispatch = opts.direct_dispatch;
-        rodata.sticky_cpu = opts.sticky_cpu;
-        rodata.no_wake_sync = opts.no_wake_sync;
         rodata.tickless_sched = opts.tickless;
-        rodata.native_priority = opts.native_priority;
         rodata.slice_lag_scaling = opts.slice_lag_scaling;
-        rodata.builtin_idle = !opts.no_builtin_idle;
         rodata.slice_max = opts.slice_us * 1000;
         rodata.slice_min = opts.slice_us_min * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.run_lag = opts.run_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
-        rodata.max_avg_nvcsw = opts.max_avg_nvcsw;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
-
-        // Normalize CPU busy threshold in the range [0 .. 1024].
-        rodata.cpu_busy_thresh = if opts.cpu_busy_thresh < 0 {
-            opts.cpu_busy_thresh
-        } else {
-            opts.cpu_busy_thresh * 1024 / 100
-        };
-
-        // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
-        // (it's never a good idea to throttle per-CPU kthreads).
-        rodata.local_kthreads = opts.local_kthreads || opts.throttle_us > 0;
-
-        // Set scheduler compatibility flags.
-        rodata.__COMPAT_SCX_PICK_IDLE_IN_NODE = *compat::SCX_PICK_IDLE_IN_NODE;
 
         // Set scheduler flags.
         skel.struct_ops.flash_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
@@ -533,15 +418,6 @@ impl<'a> Scheduler<'a> {
         // Initialize SMT domains.
         if smt_enabled {
             Self::init_smt_domains(&mut skel, &topo)?;
-        }
-
-        // Initialize L2 cache domains.
-        if !opts.disable_l2 {
-            Self::init_l2_cache_domains(&mut skel, &topo)?;
-        }
-        // Initialize L3 cache domains.
-        if !opts.disable_l3 {
-            Self::init_l3_cache_domains(&mut skel, &topo)?;
         }
 
         // Attach the scheduler.
@@ -728,90 +604,6 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn are_smt_siblings(topo: &Topology, cpus: &[usize]) -> bool {
-        // Single CPU or empty array are considered siblings.
-        if cpus.len() <= 1 {
-            return true;
-        }
-
-        // Check if each CPU is a sibling of the first CPU.
-        let first_cpu = cpus[0];
-        let smt_siblings = topo.sibling_cpus();
-        cpus.iter().all(|&cpu| {
-            cpu == first_cpu
-                || smt_siblings[cpu] == first_cpu as i32
-                || (smt_siblings[first_cpu] >= 0 && smt_siblings[first_cpu] == cpu as i32)
-        })
-    }
-
-    fn init_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-        cache_lvl: usize,
-        enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>,
-    ) -> Result<(), std::io::Error> {
-        // Determine the list of CPU IDs associated to each cache node.
-        let mut cache_id_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for core in topo.all_cores.values() {
-            for (cpu_id, cpu) in &core.cpus {
-                let cache_id = match cache_lvl {
-                    2 => cpu.l2_id,
-                    3 => cpu.llc_id,
-                    _ => panic!("invalid cache level {}", cache_lvl),
-                };
-                cache_id_map.entry(cache_id).or_default().push(*cpu_id);
-            }
-        }
-
-        // Update the BPF cpumasks for the cache domains.
-        for (cache_id, cpus) in cache_id_map {
-            // Ignore the cache domain if it includes a single CPU.
-            if cpus.len() <= 1 {
-                continue;
-            }
-
-            // Ignore the cache domain if all the CPUs are part of the same SMT core.
-            if Self::are_smt_siblings(topo, &cpus) {
-                continue;
-            }
-
-            info!(
-                "L{} cache ID {}: sibling CPUs: {:?}",
-                cache_lvl, cache_id, cpus
-            );
-            for cpu in &cpus {
-                for sibling_cpu in &cpus {
-                    if enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu).is_err() {
-                        warn!(
-                            "L{} cache ID {}: failed to set CPU {} sibling {}",
-                            cache_lvl, cache_id, *cpu, *sibling_cpu
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn init_l2_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 2, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
-    }
-
-    fn init_l3_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
-    }
-
     fn get_metrics(&self) -> Metrics {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
@@ -827,66 +619,13 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
-    fn compute_user_cpu_pct(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
-        let total_diff = curr.total.saturating_sub(prev.total);
-        let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
-
-        if total_diff > 0 {
-            let user_ratio = user_diff as f64 / total_diff as f64;
-            Some((user_ratio * 1024.0).round() as u64)
-        } else {
-            None
-        }
-    }
-
-    fn read_cpu_times() -> Option<CpuTimes> {
-        let file = File::open("/proc/stat").ok()?;
-        let reader = BufReader::new(file);
-
-        for line in reader.lines() {
-            let line = line.ok()?;
-            if line.starts_with("cpu ") {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() < 5 {
-                    return None;
-                }
-
-                let user: u64 = fields[1].parse().ok()?;
-                let nice: u64 = fields[2].parse().ok()?;
-
-                // Sum the first 8 fields as total time, including idle, system, etc.
-                let total: u64 = fields
-                    .iter()
-                    .skip(1)
-                    .take(8)
-                    .filter_map(|v| v.parse::<u64>().ok())
-                    .sum();
-
-                return Some(CpuTimes { user, nice, total });
-            }
-        }
-
-        None
-    }
-
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
         let (res_ch, req_ch) = self.stats_server.channels();
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             if self.refresh_sched_domain() {
                 self.user_restart = true;
                 break;
-            }
-
-            if self.opts.cpu_busy_thresh < 0 {
-                if let Some(curr_cputime) = Self::read_cpu_times() {
-                    if let Some(cpu_util) = Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
-                    {
-                        self.skel.maps.bss_data.as_mut().unwrap().cpu_util = cpu_util;
-                    }
-                    prev_cputime = curr_cputime;
-                }
             }
 
             match req_ch.recv_timeout(Duration::from_secs(1)) {
