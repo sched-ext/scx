@@ -130,10 +130,9 @@ Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize latency
 that sleep frequently and use the CPU in short bursts.
 
 To prevent sleeping tasks from gaining excessive priority, the maximum vruntime credit a task can
-accumulate while sleeping is capped by `slice_lag`, scaled by the task’s voluntary context switch
-rate (`max_avg_nvcsw`): tasks that sleep frequently can receive a larger credit, while tasks that
-perform fewer, longer sleeps are granted a smaller credit. This encourages responsive behavior
-without excessively boosting idle tasks.
+accumulate while sleeping is capped by `slice_lag`: tasks that sleep frequently can receive a larger
+credit, while tasks that perform fewer, longer sleeps are granted a smaller credit. This encourages
+responsive behavior without excessively boosting idle tasks.
 
 When dynamic fairness is enabled (`--slice-lag-scaling`), the maximum vruntime sleep credit is also
 scaled depending on the user-mode CPU utilization:
@@ -184,17 +183,6 @@ struct Opts {
     /// can also make performance more "spikey".
     #[clap(short = 'r', long, default_value = "32768")]
     run_us_lag: u64,
-
-    /// Maximum rate of voluntary context switches.
-    ///
-    /// Increasing this value can help prioritize interactive tasks with a higher sleep frequency
-    /// over interactive tasks with lower sleep frequency.
-    ///
-    /// Decreasing this value makes the scheduler more robust and fair.
-    ///
-    /// (0 = disable voluntary context switch prioritization).
-    #[clap(short = 'c', long, default_value = "128")]
-    max_avg_nvcsw: u64,
 
     /// Utilization percentage to consider a CPU as busy (-1 = auto).
     ///
@@ -442,7 +430,6 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.run_lag = opts.run_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
-        rodata.max_avg_nvcsw = opts.max_avg_nvcsw;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
