@@ -11,7 +11,7 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_ulong};
 use std::fmt::Write;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -444,6 +444,13 @@ impl<'a> Scheduler<'a> {
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.max_avg_nvcsw = opts.max_avg_nvcsw;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
+
+        // Generate the list of available CPUs sorted by capacity in descending order.
+        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
+        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
+        for (_, cpu) in cpus.iter().enumerate() {
+            rodata.cpu_capacity[cpu.id] = cpu.cpu_capacity as c_ulong;
+        }
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.cpu_busy_thresh = if opts.cpu_busy_thresh < 0 {

@@ -3,11 +3,14 @@
  * Copyright (c) 2024 Andrea Righi <andrea.righi@linux.dev>
  */
 #include <scx/common.bpf.h>
+#include <scx/percpu.bpf.h>
 #include "intf.h"
 
 #define MAX_VTIME	(~0ULL)
 
 #define DSQ_FLAG_NODE	(1LLU << 32)
+
+#define MAX_CPUS		4096
 
 #define CGROUP_WEIGHT_DFL	100
 
@@ -94,6 +97,11 @@ const volatile s64 cpu_busy_thresh = -1LL;
  * Current CPU user utilization (evaluated from user-space).
  */
 volatile u64 cpu_util;
+
+/*
+ * Cache CPU capacity values.
+ */
+const volatile u64 cpu_capacity[MAX_CPUS];
 
 /*
  * Ignore synchronous wakeup events.
@@ -254,6 +262,7 @@ struct cpu_ctx {
 	u64 prev_runtime;
 	u64 last_running;
 	u64 perf_lvl;
+	u64 capacity;
 	struct bpf_cpumask __kptr *smt;
 };
 
@@ -465,6 +474,138 @@ static inline u64 task_slice(const struct task_struct *p)
 }
 
 /*
+ * Return true if @cpu is valid, otherwise trigger an error and return
+ * false.
+ */
+static inline bool is_cpu_valid(s32 cpu)
+{
+	u64 max_cpu = MIN(nr_cpu_ids, MAX_CPUS);
+
+	if (cpu < 0 || cpu >= max_cpu)
+		return false;
+
+	return true;
+}
+
+/*
+ * Return true if @this_cpu and @that_cpu are in the same LLC, false
+ * otherwise.
+ */
+static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return true;
+
+	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
+		return false;
+
+	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
+}
+
+/*
+ * Return true if @this_cpu is faster than @that_cpu, false otherwise.
+ */
+static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
+{
+	const struct cpu_ctx *this_cctx, *that_cctx;
+	u64 this_cap, that_cap;
+
+        if (this_cpu == that_cpu)
+                return false;
+
+	this_cctx = try_lookup_cpu_ctx(this_cpu);
+	this_cap = this_cctx ? this_cctx->capacity : 0;
+
+	that_cctx = try_lookup_cpu_ctx(that_cpu);
+	that_cap = that_cctx ? that_cctx->capacity : 0;
+
+	return this_cap > that_cap;
+}
+
+/*
+ * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_cpumask(s32 cpu)
+{
+	if (numa_disabled)
+		return scx_bpf_get_idle_cpumask();
+
+	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
+ * Return the SMT sibling of @cpu, or @cpu if SMT is disabled.
+ */
+static inline s32 smt_sibling(s32 cpu)
+{
+	const struct cpumask *smt;
+	struct cpu_ctx *cctx;
+
+	if (!smt_enabled)
+		return cpu;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return cpu;
+
+	smt = cast_mask(cctx->smt);
+	if (!smt)
+		return cpu;
+
+	return bpf_cpumask_first(smt);
+}
+
+/*
+ * Return true if @cpu is in  a partially-idle SMT core, false otherwise.
+ */
+static bool is_smt_contended(s32 cpu)
+{
+	const struct cpumask *idle_mask;
+	bool is_contended;
+
+	if (!smt_enabled)
+		return false;
+
+	/*
+	 * If the sibling SMT CPU is not idle and there are other full-idle
+	 * SMT cores available, consider the current CPU as contended.
+	 */
+	idle_mask = get_idle_cpumask(cpu);
+	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
+		       !bpf_cpumask_empty(idle_mask);
+	scx_bpf_put_cpumask(idle_mask);
+
+	return is_contended;
+}
+
+/*
+ * Return true if @p is running on a primary CPU (or can't run on a primary
+ * CPU due to affinity constraints), false otherwise.
+ */
+static bool is_primary_cpu(const struct task_struct *p, s32 cpu)
+{
+	if (!primary_all) {
+		const struct cpumask *primary = cast_mask(primary_cpumask);
+
+		if (primary && bpf_cpumask_intersects(primary, p->cpus_ptr) &&
+		    !bpf_cpumask_test_cpu(cpu, primary))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Return true in case of a task wakeup, false otherwise.
+ */
+static inline bool is_wakeup(u64 wake_flags)
+{
+	return wake_flags & SCX_WAKE_TTWU;
+}
+
+/*
  * Find an idle CPU in the system.
  *
  * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
@@ -476,14 +617,25 @@ static inline u64 task_slice(const struct task_struct *p)
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
 	const struct cpumask *primary;
-	s32 cpu;
+	s32 cpu, this_cpu = bpf_get_smp_processor_id();
+	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
 		return -EINVAL;
 
 	if (no_wake_sync)
-		wake_flags &= ~SCX_WAKE_SYNC;
+		wake_flags &= ~(SCX_WAKE_SYNC | SCX_WAKE_TTWU);
+
+	if (primary_all && is_wakeup(wake_flags) &&
+	    is_this_cpu_allowed && is_cpu_faster(this_cpu, prev_cpu)) {
+		if (cpus_share_cache(this_cpu, prev_cpu) &&
+		    !is_smt_contended(prev_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+
+		prev_cpu = this_cpu;
+	}
 
 	cpu = primary_all ? -ENOENT :
 			scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, primary, 0);
@@ -583,81 +735,6 @@ static bool is_cpu_busy(s32 cpu)
 	 * check if the current utilization exceeds the target threshold.
 	 */
 	return cctx->perf_lvl >= cpu_thresh;
-}
-
-/*
- * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
- *
- * If NUMA support is disabled, @cpu is ignored.
- */
-static inline const struct cpumask *get_idle_cpumask(s32 cpu)
-{
-	if (numa_disabled)
-		return scx_bpf_get_idle_cpumask();
-
-	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
-}
-
-/*
- * Return the SMT sibling of @cpu, or @cpu if SMT is disabled.
- */
-static inline s32 smt_sibling(s32 cpu)
-{
-	const struct cpumask *smt;
-	struct cpu_ctx *cctx;
-
-	if (!smt_enabled)
-		return cpu;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return cpu;
-
-	smt = cast_mask(cctx->smt);
-	if (!smt)
-		return cpu;
-
-	return bpf_cpumask_first(smt);
-}
-
-/*
- * Return true if @cpu is in  a partially-idle SMT core, false otherwise.
- */
-static bool is_smt_contended(s32 cpu)
-{
-	const struct cpumask *idle_mask;
-	bool is_contended;
-
-	if (!smt_enabled)
-		return false;
-
-	/*
-	 * If the sibling SMT CPU is not idle and there are other full-idle
-	 * SMT cores available, consider the current CPU as contended.
-	 */
-	idle_mask = get_idle_cpumask(cpu);
-	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
-		       !bpf_cpumask_empty(idle_mask);
-	scx_bpf_put_cpumask(idle_mask);
-
-	return is_contended;
-}
-
-/*
- * Return true if @p is running on a primary CPU (or can't run on a primary
- * CPU due to affinity constraints), false otherwise.
- */
-static bool is_primary_cpu(const struct task_struct *p, s32 cpu)
-{
-	if (!primary_all) {
-		const struct cpumask *primary = cast_mask(primary_cpumask);
-
-		if (primary && bpf_cpumask_intersects(primary, p->cpus_ptr) &&
-		    !bpf_cpumask_test_cpu(cpu, primary))
-			return false;
-	}
-
-	return true;
 }
 
 /*
@@ -1415,11 +1492,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 
 	/* Create per-CPU DSQs */
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct cpu_ctx *cctx;
+
 		err = scx_bpf_create_dsq(cpu, __COMPAT_scx_bpf_cpu_node(cpu));
 		if (err) {
 			scx_bpf_error("failed to create DSQ %d: %d", cpu, err);
 			return err;
 		}
+
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (!cctx)
+			continue;
+
+		if (cpu >= 0 && cpu < MIN(nr_cpu_ids, MAX_CPUS))
+			cctx->capacity = cpu_capacity[cpu];
 	}
 
 	/* Create per-node DSQs */
