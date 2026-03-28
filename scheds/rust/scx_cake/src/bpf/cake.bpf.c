@@ -1865,7 +1865,7 @@ gate2:
 	/* ── TUNNEL: All CPUs busy — return prev_cpu ──
 	 * cached_now staging REMOVED (−12 insns).
 	 * bss->cached_now was written but had ZERO READERS in the codebase.
-	 * Enqueue paths call scx_bpf_now() directly — the staging was dead
+	 * Enqueue cold paths call scx_bpf_now() directly — the staging was dead
 	 * code from pre-optimization.
 	 * Tiered weights guarantee GAME [0,5120] sorts before NORMAL [8192,13312].
 	 * DSQ ordering handles all priority — no preemption or kicks needed. */
@@ -1893,7 +1893,15 @@ tunnel:
 						if (vpid) {
 							struct task_struct *victim_p = bpf_task_from_pid(vpid);
 							if (victim_p) {
-								WRITE_ONCE(victim_p->scx.slice, 1);
+								/* ALPHADEV TOCTOU Guard: Verify victim hasn't migrated and is still HOG/BG. 
+								 * Prevents accidental micro-slicing of GAME tasks (Rule 9).
+								 * Uses hog_shards slot directly — same cache line already in L1 from
+								 * the chunk scan above. Zero hash collisions (exact per-CPU truth),
+								 * eliminates pid_class_cache dependency entirely. */
+								if (scx_bpf_task_cpu(victim_p) == victim_cpu &&
+								    READ_ONCE(hog_shards[my_llc].slots[victim_cpu])) {
+									WRITE_ONCE(victim_p->scx.slice, 1);
+								}
 								bpf_task_release(victim_p);
 							}
 						}
@@ -2068,8 +2076,13 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	if (unlikely(!(staged & (1ULL << STAGED_BIT_VALID)))) {
 		/* ── NOSTAGED (inlined from enqueue_nostaged) ──
 		 * Cold path for kthreads or first dispatch.
-		 * No cached state — fetches timestamp internally. */
-		p->scx.dsq_vtime = scx_bpf_now();
+		 * No cached state — seed with CPU-local vtime floor.
+		 * Uses vtime_local (same anchor as cake_enable) to keep
+		 * NOSTAGED tasks in the virtual time domain. Prevents
+		 * trillion-scale wall-clock vtime from sorting kthreads
+		 * (USB IRQ handlers, GPU fences) to the back of the DSQ
+		 * on first dispatch — critical for hot-plug during gaming. */
+		p->scx.dsq_vtime = cpu_bss[enq_cpu].vtime_local;
 		p->scx.slice = quantum_ns;
 		enqueue_dsq_dispatch(p, enq_flags,
 				    ((u64)enq_cpu << 32) | enq_llc);
@@ -2080,14 +2093,9 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	if (!(enq_flags & ((u64)SCX_ENQ_WAKEUP | (u64)SCX_ENQ_PREEMPT))) {
 		/* ── REQUEUE (inlined from enqueue_requeue_path) ──
 		 * Yield/slice exhaust path. Halved slice, fresh vtime. */
-		/* ALPHADEV Phase 15: BPF-Native Clock read.
-		 * REQUEUE fires on same CPU that just ran cake_stopping,
-		 * which already advanced cake_clock by consumed time.
-		 * Temporally safe: same rq lock hold, no migration.
-		 * EEVDF-correct: post-consumption position matches
-		 * EEVDF's update_deadline (vruntime is post-consumption). */
-		u32 requeue_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-		u64 now_cached = cpu_bss[requeue_cpu].cake_clock;
+		/* ALPHADEV Phase 16: EEVDF Vtime Domain Alignment.
+		 * Directly anchor to the task's accumulated virtual runtime.
+		 * This eliminates 1 kfunc call and 1 BSS memory load from the hot path. */
 		u64 requeue_staged = hot->staged_vtime_bits;
 		u64 requeue_slice = p->scx.slice ?: quantum_ns;
 		u32 dsq_weight = (u32)(requeue_staged & 0xFFFFFFFF);
@@ -2097,9 +2105,9 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		requeue_slice += (200000 - requeue_slice) & -(requeue_slice < 200000);
 		p->scx.slice = requeue_slice;
 
-		/* EEVDF Deadline Projection: strictly order yielding tasks by return-slice length */
+		/* EEVDF Deadline Projection: strictly order yielding tasks by virtual progression */
 		u64 vslice = (requeue_slice * (u32)hot->vtime_mult) >> 10;
-		u64 deadline = now_cached + vslice;
+		u64 deadline = hot->dsq_vtime + vslice;
 		p->scx.dsq_vtime = dsq_weight + deadline;
 
 		enqueue_dsq_dispatch(p, enq_flags,
@@ -2126,6 +2134,12 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		/* Final Dispatch: Tier Isolation + EEVDF Deadline + Flow Bonus */
 		u64 vtime = dsq_weight + deadline;
 		vtime -= new_flow_bonus_ns & -(u64)new_flow;
+		/* ALPHADEV: One-Shot Flow Consumption.
+		 * unlikely() forces out-of-line assembly, preserving L1 cache density. 
+		 * Touches hot-> memory only once per task lifetime to avoid MESI invalidation. */
+		if (unlikely(new_flow)) {
+			hot->new_flow = 0;
+		}
 		p->scx.dsq_vtime = vtime;
 
 		enqueue_dsq_dispatch(p, enq_flags,
