@@ -9,6 +9,8 @@
 
 #define DSQ_FLAG_NODE	(1LLU << 32)
 
+#define CGROUP_WEIGHT_DFL	100
+
 extern unsigned CONFIG_HZ __kconfig;
 
 /*
@@ -304,6 +306,11 @@ struct task_ctx {
 	 * Keep track of the last waker.
 	 */
 	u32 waker_pid;
+
+	/*
+	 * cgroup weight.
+	 */
+	u32 cgweight;
 };
 
 /* Map that contains task-local storage. */
@@ -321,6 +328,28 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor,
 					(struct task_struct *)p, 0, 0);
+}
+
+/*
+ * Per-cgroup context: tracks the cgroup's cpu.weight.
+ */
+struct cgrp_ctx {
+	u32 weight;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct cgrp_ctx);
+} cgrp_ctx_stor SEC(".maps");
+
+/*
+ * Return a local cgroup context from a generic task.
+ */
+struct cgrp_ctx *try_lookup_cgrp_ctx(struct cgroup *cgrp)
+{
+	return bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
 }
 
 /*
@@ -345,6 +374,38 @@ static bool is_pcpu_task(const struct task_struct *p)
 static bool is_queued(const struct task_struct *p)
 {
 	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
+ * Return the effective weight of a task, incorporating its cgroup weight.
+ *
+ * The effective weight is:
+ *   task_nice_weight * cgroup_weight / CGROUP_WEIGHT_DFL
+ *
+ * This ensures tasks in a cgroup with weight 200 get twice the CPU time of
+ * tasks in a cgroup with the default weight (100).
+ */
+static u64 task_weight(const struct task_struct *p)
+{
+	struct task_ctx *tctx;
+	u32 cgw;
+
+	tctx = try_lookup_task_ctx(p);
+	cgw = tctx ? tctx->cgweight : CGROUP_WEIGHT_DFL;
+
+	return (u64)p->scx.weight * cgw / CGROUP_WEIGHT_DFL;
+}
+
+static inline u64 scale_by_weight(const struct task_struct *p, u64 value)
+{
+	return value * task_weight(p) / CGROUP_WEIGHT_DFL;
+}
+
+static inline u64 scale_by_weight_inverse(const struct task_struct *p, u64 value)
+{
+	u64 w = task_weight(p);
+
+	return w ? value * CGROUP_WEIGHT_DFL / w : value;
 }
 
 /*
@@ -399,7 +460,8 @@ static inline u64 nr_tasks_waiting(s32 cpu)
  */
 static inline u64 task_slice(const struct task_struct *p)
 {
-	return tickless_sched ? SCX_SLICE_INF : slice_max;
+	return tickless_sched ? SCX_SLICE_INF :
+				scale_by_weight(p, slice_max);
 }
 
 /*
@@ -793,21 +855,6 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 }
 
 /*
- * Return true if @p1's deadline is less than @p2's deadline, false
- * otherwise.
- */
-static inline bool
-is_deadline_min(const struct task_struct *p1, const struct task_struct *p2)
-{
-	if (!p1)
-		return false;
-	if (!p2)
-		return true;
-
-	return time_before(p1->scx.dsq_vtime, p2->scx.dsq_vtime);
-}
-
-/*
  * Consume and dispatch the first task from @dsq_id. If the first task can't be
  * dispatched on the corresponding DSQ, redirect the task to a proper CPU.
  */
@@ -824,6 +871,8 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(cpu_to_dsq(cpu));
 	struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(node_to_dsq(node));
+	u64 p_vtime = p ? p->scx.dsq_vtime : ULLONG_MAX;
+	u64 q_vtime = q ? q->scx.dsq_vtime : ULLONG_MAX;
 	bool need_running = prev && keep_running(prev, cpu);
 
 	/*
@@ -833,19 +882,21 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	if (need_running) {
-		struct task_ctx *tctx = prev ? try_lookup_task_ctx(prev) : NULL;
+		struct task_ctx *tctx = try_lookup_task_ctx(prev);
+
 		if (tctx) {
 			u64 slice = bpf_ktime_get_ns() - tctx->last_run_at;
-			u64 prev_vtime = prev->scx.dsq_vtime + scale_by_task_weight_inverse(prev, slice);
-			u64 p_vtime = p ? p->scx.dsq_vtime : ULLONG_MAX;
-			u64 q_vtime = q ? q->scx.dsq_vtime : ULLONG_MAX;
+			u64 prev_vtime = prev->scx.dsq_vtime +
+					 scale_by_weight_inverse(prev, slice);
 
-			if (prev_vtime < p_vtime && prev_vtime < q_vtime)
-				goto out_running;
+			if (prev_vtime < p_vtime && prev_vtime < q_vtime) {
+				prev->scx.slice = task_slice(prev);
+				return;
+			}
 		}
 	}
 
-	if (is_deadline_min(p, q)) {
+	if (p_vtime < q_vtime) {
 		if (consume_first_task(cpu_to_dsq(cpu), p) ||
 		    consume_first_task(node_to_dsq(node), q))
 			return;
@@ -855,7 +906,6 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 	}
 
-out_running:
 	/*
 	 * If the current task expired its time slice and no other task wants
 	 * to run, simply replenish its time slice and let it run for another
@@ -1005,7 +1055,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 		/*
 		 * Update task's vruntime.
 		 */
-		p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
+		p->scx.dsq_vtime += scale_by_weight_inverse(p, slice);
 	}
 
 	/*
@@ -1072,6 +1122,44 @@ void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
 		p->scx.dsq_vtime = vtime_now;
 }
 
+s32 BPF_STRUCT_OPS(flash_cgroup_init, struct cgroup *cgrp,
+		   struct scx_cgroup_init_args *args)
+{
+	struct cgrp_ctx *cgc;
+
+	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!cgc)
+		return -ENOMEM;
+
+	cgc->weight = args->weight;
+
+	return 0;
+}
+
+void BPF_STRUCT_OPS(flash_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
+{
+	struct cgrp_ctx *cgc;
+
+	cgc = try_lookup_cgrp_ctx(cgrp);
+	if (cgc)
+		cgc->weight = weight;
+}
+
+void BPF_STRUCT_OPS(flash_cgroup_move, struct task_struct *p,
+		    struct cgroup *from, struct cgroup *to)
+{
+	struct task_ctx *tctx;
+	struct cgrp_ctx *cgc;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	cgc = try_lookup_cgrp_ctx(to);
+	tctx->cgweight = cgc ? cgc->weight : CGROUP_WEIGHT_DFL;
+}
+
 static int init_cpumask(struct bpf_cpumask **cpumask)
 {
 	struct bpf_cpumask *mask;
@@ -1112,6 +1200,13 @@ s32 BPF_STRUCT_OPS(flash_init_task, struct task_struct *p,
 	err = init_cpumask(&tctx->cpumask);
 	if (err)
 		return err;
+
+	if (args->cgroup) {
+		struct cgrp_ctx *cgc = try_lookup_cgrp_ctx(args->cgroup);
+		tctx->cgweight = cgc ? cgc->weight : CGROUP_WEIGHT_DFL;
+	} else {
+		tctx->cgweight = CGROUP_WEIGHT_DFL;
+	}
 
 	return 0;
 }
@@ -1396,6 +1491,9 @@ SCX_OPS_DEFINE(flash_ops,
 	       .runnable		= (void *)flash_runnable,
 	       .quiescent		= (void *)flash_quiescent,
 	       .enable			= (void *)flash_enable,
+	       .cgroup_init		= (void *)flash_cgroup_init,
+	       .cgroup_set_weight	= (void *)flash_cgroup_set_weight,
+	       .cgroup_move		= (void *)flash_cgroup_move,
 	       .init_task		= (void *)flash_init_task,
 	       .init			= (void *)flash_init,
 	       .exit			= (void *)flash_exit,
