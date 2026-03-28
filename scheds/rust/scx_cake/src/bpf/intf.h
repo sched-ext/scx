@@ -67,7 +67,7 @@ struct cake_task_hot {
 	
 	/* ── ALPHA FUSION LAYER ── */
 	u32 nvcsw_64_snapshot; /* 4B: offset 16 (Epoch tracking for the 64-stop nvcsw delta) */
-	u32 last_run_at;       /* 4B: offset 20 ( (u32)scx_bpf_now() from stopping ) */
+	u32 last_run_at;       /* 4B: offset 20 ( (u32)cake_clock from stopping ) */
 	
 	u32 dsq_weight_base;   /* 4B: offset 24 (tier_base[task_class]) */
 	u8  task_class;        /* 1B: offset 28 (CAKE_CLASS_* enum) */
@@ -90,7 +90,7 @@ struct cake_task_hot {
  * 128-byte aligned for V-Cache sector isolation.
  * Single-writer (local running), multi-reader (no atomics needed). */
 struct cake_cpu_bss {
-	u32 run_start;          /* 4B  off  0: (u32)scx_bpf_now() when task started */
+	u32 run_start;          /* 4B  off  0: (u32)cake_clock when task started */
 	u8  is_yielder;         /* 1B  off  4: task_class-derived yielder + waker_boost */
 	u8  _reserved_5;        /* 1B  off  5: padding slot */
 	u8  tick_count;         /* 1B  off  6: cake_tick throttle counter */
