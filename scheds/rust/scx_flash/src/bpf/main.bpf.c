@@ -80,49 +80,9 @@ const volatile bool slice_lag_scaling;
 const volatile u64 run_lag = 32768ULL * NSEC_PER_USEC;
 
 /*
- * Maximum amount of voluntary context switches (this limit allows to prevent
- * spikes or abuse of the nvcsw dynamic).
- */
-const volatile u64 max_avg_nvcsw = 128ULL;
-
-/*
- * CPU utilization threshold to consider the CPU as busy.
- */
-const volatile s64 cpu_busy_thresh = -1LL;
-
-/*
- * Current CPU user utilization (evaluated from user-space).
- */
-volatile u64 cpu_util;
-
-/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
-
-/*
- * When enabled always dispatch per-CPU kthreads directly.
- *
- * This allows to prioritize critical kernel threads that may potentially slow
- * down the entire system if they are blocked for too long, but it may also
- * introduce interactivity issues or unfairness in scenarios with high kthread
- * activity, such as heavy I/O or network traffic.
- */
-const volatile bool local_kthreads;
-
-/*
- * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
- *
- * Enabling this option allows to prioritize per-CPU tasks that usually
- * tend to be de-prioritized, since they can't be migrated when their only
- * usable CPU is busy.
- *
- * This is implemented by disabling direct dispatch when there are tasks
- * queued to the per-CPU DSQ or the per-node DSQ. In this way, per-CPU
- * tasks waiting in those queues are scheduled based solely on their
- * deadline, avoiding further delays caused by direct dispatches.
- */
-const volatile bool local_pcpu;
 
 /*
  * Always directly dispatch a task if an idle CPU is found.
@@ -170,6 +130,9 @@ static volatile bool cpus_throttled;
 
 static inline bool is_throttled(void)
 {
+	if (!throttle_ns)
+		return false;
+
 	return READ_ONCE(cpus_throttled);
 }
 
@@ -519,56 +482,6 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 }
 
 /*
- * Return true if a CPU is busy (based on its utilization), false
- * otherwise.
- */
-static bool is_cpu_busy(s32 cpu)
-{
-	const struct cpu_ctx *cctx;
-
-	/*
-	 * If no other tasks are contending for this CPU, consider the CPU
-	 * as non-busy.
-	 */
-	if (!nr_tasks_waiting(cpu))
-		return false;
-
-	/*
-	 * Determine whether a CPU is considered busy using the following logic:
-	 *  - if a fixed threshold is provided (@cpu_busy_thresh), use it
-	 *    directly;
-	 *  - otherwise, compute a dynamic threshold as:
-	 *        100% - global CPU user time %
-	 *
-	 * The dynamic threshold adapts to system load: when user time is
-	 * high, the threshold decreases, making the scheduler more
-	 * aggressive in migrating tasks to improve responsiveness. When
-	 * user time is low, the threshold increases, encouraging task
-	 * stickiness to improve cache locality while still preserving work
-	 * conservation, since the system isn't overloaded.
-	 */
-	u64 cpu_thresh = cpu_busy_thresh >= 0 ? cpu_busy_thresh :
-						(SCX_CPUPERF_ONE - cpu_util);
-
-	/*
-	 * If the target threshold is greater than 100% assume the CPU is
-	 * never busy,
-	 */
-	if (cpu_thresh > SCX_CPUPERF_ONE)
-		return false;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return false;
-
-	/*
-	 * Normalize the utilization in range [0 .. SCX_CPUPERF_ONE] and
-	 * check if the current utilization exceeds the target threshold.
-	 */
-	return cctx->perf_lvl >= cpu_thresh;
-}
-
-/*
  * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
  *
  * If NUMA support is disabled, @cpu is ignored.
@@ -649,25 +562,22 @@ static bool is_primary_cpu(const struct task_struct *p, s32 cpu)
  * Return true if the task is dispatched, false otherwise.
  */
 static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
-				s32 prev_cpu, u64 enq_flags)
+				s32 prev_cpu, u64 enq_flags, bool is_running)
 {
-	bool is_idle = false, dispatched = false;
+	bool is_idle = false;
 	s32 cpu = prev_cpu;
 
 	/*
-	 * Dispatch per-CPU kthreads directly on their assigned CPU if
-	 * @local_kthreads is enabled.
-	 *
-	 * This allows to prioritize critical kernel threads that may
-	 * potentially stall the entire system if they are blocked (i.e.,
-	 * ksoftirqd/N, rcuop/N, etc.).
-	 */
-	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
+	 * If throttling is enabled always dispatch critical kernel threads
+	 * directly to prevent throttling the entire system.
+         */
+	if (throttle_ns > 0 && is_kthread(p) && p->nr_cpus_allowed == 1) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-		dispatched = true;
+		if (!is_running)
+			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 
-		goto out_kick;
+		return true;
 	}
 
 	/*
@@ -681,52 +591,44 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * the task has already had an opportunity for direct dispatch
 	 * there.
 	 */
-	if (__COMPAT_is_enq_cpu_selected(enq_flags))
+	if (!is_running && __COMPAT_is_enq_cpu_selected(enq_flags))
 		return false;
 
 	/*
-	 * In task is not running in the primary domain, its SMT sibling is
-	 * contended or it has been re-enqueued give it a chance to
-	 * migrate.
+	 * Attempt migration if possible.
 	 */
-	if (!(enq_flags & SCX_ENQ_REENQ) &&
-	    is_primary_cpu(p, cpu) &&
-	    (is_pcpu_task(p) || !is_smt_contended(cpu)))
-		return false;
+	if (!is_pcpu_task(p)) {
+		/*
+		 * In task is running in the primary domain, its SMT
+		 * sibling is not contended or it has not been re-enqueued,
+		 * keep it on the same CPU.
+		 */
+		if (!(enq_flags & SCX_ENQ_REENQ) &&
+		    is_primary_cpu(p, cpu) && !is_smt_contended(cpu))
+			return false;
 
-	/*
-	 * Try to pick an idle CPU close to the one the task is using.
-	 */
-	cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
-	if (!is_idle)
-		return false;
-
-	if (can_direct_dispatch(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		dispatched = true;
+		/*
+		 * Try to pick an idle CPU close to the one the task is
+		 * using.
+		 */
+		cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
+		if (!is_idle)
+			return false;
+	} else {
+		if (!scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return false;
 	}
 
-out_kick:
 	/*
-	 * Kick the CPU even if we didn't directly dispatch, so it can be
-	 * clear its idle state (transitioning from idle->awake->idle) or
-	 * consume another task from the CPU DSQ.
+	 * Attempt direct dispatch.
 	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
+	__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
-	return dispatched;
-}
+	if (cpu != prev_cpu || !is_running)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
-/*
- * Return true if the @p can be enqueued to the @cpu DSQ, false otherwise.
- */
-static bool can_enqueue_to_cpu(const struct task_struct *p, s32 cpu)
-{
-	if (local_pcpu && is_pcpu_task(p))
-		return true;
-
-	return !is_cpu_busy(cpu);
+	return true;
 }
 
 /*
@@ -770,6 +672,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
 	bool is_running = scx_bpf_task_running(p);
+	u64 dsq_id;
 
 	/*
 	 * Dispatch regular tasks to the shared DSQ.
@@ -789,24 +692,20 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Try to dispatch the task directly, if possible.
 	 */
-	if (try_direct_dispatch(p, tctx, prev_cpu, enq_flags))
+	if (try_direct_dispatch(p, tctx, prev_cpu, enq_flags, is_running))
 		return;
 
 	/*
-	 * Try to keep awakened tasks on the same CPU using the per-CPU DSQ
-	 * and use the per-node DSQ if the CPU is getting saturated, so
-	 * that tasks can attempt to migrate somewhere else.
+	 * Try to keep running tasks on the same CPU using the per-CPU DSQ
+	 * and use the per-node DSQ for tasks that are waking up, so they
+	 * can be consumed in the first CPU available.
 	 */
-	if (!is_running && can_enqueue_to_cpu(p, prev_cpu)) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
-					 task_slice(p), p->scx.dsq_vtime, enq_flags);
-		__sync_fetch_and_add(&nr_shared_dispatches, 1);
-		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+	if ((is_running && is_primary_cpu(p, prev_cpu)) || is_pcpu_task(p))
+		dsq_id = cpu_to_dsq(prev_cpu);
+	else
+		dsq_id = node_to_dsq(node);
 
-		return;
-	}
-
-	scx_bpf_dsq_insert_vtime(p, node_to_dsq(node),
+	scx_bpf_dsq_insert_vtime(p, dsq_id,
 				 task_slice(p), p->scx.dsq_vtime, enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
