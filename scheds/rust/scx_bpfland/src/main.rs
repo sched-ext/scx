@@ -222,6 +222,54 @@ struct Opts {
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
     cpufreq: bool,
 
+    /// Enable TIMELY mode: use TIMELY's delay-driven feedback for adaptive time slices.
+    #[clap(short = 'T', long, action = clap::ArgAction::SetTrue)]
+    timely: bool,
+
+    /// TIMELY lower delay threshold in microseconds.
+    #[clap(long, default_value = "5000")]
+    timely_tlow_us: u64,
+
+    /// TIMELY higher delay threshold in microseconds.
+    #[clap(long, default_value = "50000")]
+    timely_thigh_us: u64,
+
+    /// TIMELY minimum gain value (fixed-point).
+    #[clap(long, default_value = "128")]
+    timely_gain_min: u32,
+
+    /// TIMELY gain step (fixed-point).
+    #[clap(long, default_value = "32")]
+    timely_gain_step: u32,
+
+    /// TIMELY HAI threshold (fixed-point).
+    #[clap(long, default_value = "768")]
+    timely_hai_thresh: u32,
+
+    /// TIMELY HAI multiplier.
+    #[clap(long, default_value = "2")]
+    timely_hai_multiplier: u32,
+
+    /// TIMELY backoff low (fixed-point).
+    #[clap(long, default_value = "768")]
+    timely_backoff_low: u32,
+
+    /// TIMELY backoff high (fixed-point).
+    #[clap(long, default_value = "960")]
+    timely_backoff_high: u32,
+
+    /// TIMELY backoff gradient (fixed-point).
+    #[clap(long, default_value = "992")]
+    timely_backoff_gradient: u32,
+
+    /// TIMELY gradient margin in microseconds.
+    #[clap(long, default_value = "125")]
+    timely_gradient_margin_us: u64,
+
+    /// TIMELY control interval in microseconds.
+    #[clap(long, default_value = "500")]
+    timely_control_interval_us: u64,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -344,6 +392,21 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
+
+        // TIMELY settings (only effective when timely_enabled=true)
+        rodata.timely_enabled = opts.timely;
+        rodata.timely_tlow_ns = opts.timely_tlow_us * 1000;
+        rodata.timely_thigh_ns = opts.timely_thigh_us * 1000;
+        rodata.timely_gain_min_fp = opts.timely_gain_min;
+        rodata.timely_gain_max_fp = 1024;
+        rodata.timely_gain_step_fp = opts.timely_gain_step;
+        rodata.timely_hai_thresh_fp = opts.timely_hai_thresh;
+        rodata.timely_hai_multiplier = opts.timely_hai_multiplier;
+        rodata.timely_backoff_low_fp = opts.timely_backoff_low;
+        rodata.timely_backoff_high_fp = opts.timely_backoff_high;
+        rodata.timely_backoff_gradient_fp = opts.timely_backoff_gradient;
+        rodata.timely_gradient_margin_ns = opts.timely_gradient_margin_us * 1000;
+        rodata.timely_control_interval_ns = opts.timely_control_interval_us * 1000;
 
         // Generate the list of available CPUs sorted by capacity in descending order.
         let mut cpus: Vec<_> = topo.all_cpus.values().collect();
@@ -591,6 +654,34 @@ impl<'a> Scheduler<'a> {
             nr_kthread_dispatches: bss_data.nr_kthread_dispatches,
             nr_direct_dispatches: bss_data.nr_direct_dispatches,
             nr_shared_dispatches: bss_data.nr_shared_dispatches,
+            nr_delay_recovery_dispatches: bss_data.nr_delay_recovery_dispatches,
+            nr_delay_middle_add_dispatches: bss_data.nr_delay_middle_add_dispatches,
+            nr_delay_fast_recovery_dispatches: bss_data.nr_delay_fast_recovery_dispatches,
+            nr_delay_rate_limited_dispatches: bss_data.nr_delay_rate_limited_dispatches,
+            nr_gain_floor_dispatches: bss_data.nr_gain_floor_dispatches,
+            nr_gain_ceiling_dispatches: bss_data.nr_gain_ceiling_dispatches,
+            nr_delay_low_region_samples: bss_data.nr_delay_low_region_samples,
+            nr_delay_mid_region_samples: bss_data.nr_delay_mid_region_samples,
+            nr_delay_high_region_samples: bss_data.nr_delay_high_region_samples,
+            nr_gain_floor_resident_samples: bss_data.nr_gain_floor_resident_samples,
+            nr_gain_mid_resident_samples: bss_data.nr_gain_mid_resident_samples,
+            nr_gain_ceiling_resident_samples: bss_data.nr_gain_ceiling_resident_samples,
+            nr_idle_select_path_picks: bss_data.nr_idle_select_path_picks,
+            nr_idle_enqueue_path_picks: bss_data.nr_idle_enqueue_path_picks,
+            nr_idle_prev_cpu_picks: bss_data.nr_idle_prev_cpu_picks,
+            nr_idle_primary_picks: bss_data.nr_idle_primary_picks,
+            nr_idle_spill_picks: bss_data.nr_idle_spill_picks,
+            nr_idle_pick_failures: bss_data.nr_idle_pick_failures,
+            nr_idle_primary_domain_misses: bss_data.nr_idle_primary_domain_misses,
+            nr_idle_global_misses: bss_data.nr_idle_global_misses,
+            nr_waker_cpu_biases: bss_data.nr_waker_cpu_biases,
+            nr_keep_running_reuses: bss_data.nr_keep_running_reuses,
+            nr_keep_running_queue_empty: bss_data.nr_keep_running_queue_empty,
+            nr_keep_running_smt_blocked: bss_data.nr_keep_running_smt_blocked,
+            nr_keep_running_queued_work: bss_data.nr_keep_running_queued_work,
+            nr_dispatch_cpu_dsq_consumes: bss_data.nr_dispatch_cpu_dsq_consumes,
+            nr_dispatch_node_dsq_consumes: bss_data.nr_dispatch_node_dsq_consumes,
+            nr_cpu_release_reenqueue: bss_data.nr_cpu_release_reenqueue,
         }
     }
 
