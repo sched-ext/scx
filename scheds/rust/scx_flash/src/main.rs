@@ -262,14 +262,6 @@ struct Opts {
     #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
     direct_dispatch: bool,
 
-    /// Native tasks priorities.
-    ///
-    /// By default, the scheduler normalizes task priorities to avoid large gaps that could lead to
-    /// stalls or starvation. This option disables normalization and uses the default Linux priority
-    /// range instead.
-    #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
-    native_priority: bool,
-
     /// Enable per-CPU kthread prioritization.
     ///
     /// Enabling this can improve system performance, but it may also introduce interactivity
@@ -444,7 +436,6 @@ impl<'a> Scheduler<'a> {
         rodata.direct_dispatch = opts.direct_dispatch;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.tickless_sched = opts.tickless;
-        rodata.native_priority = opts.native_priority;
         rodata.slice_lag_scaling = opts.slice_lag_scaling;
         rodata.slice_max = opts.slice_us * 1000;
         rodata.slice_min = opts.slice_us_min * 1000;
