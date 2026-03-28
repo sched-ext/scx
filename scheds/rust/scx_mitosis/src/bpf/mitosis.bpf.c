@@ -956,6 +956,17 @@ static bool try_locked_dispatch(s32 cpu, dsq_id_t min_vtime_dsq,
 		}                                               \
 	} while (0)
 
+static __always_inline struct task_struct *dsq_peek(u64 dsq_id)
+{
+	struct bpf_iter_scx_dsq it;
+	struct task_struct     *p = NULL;
+
+	if (!bpf_iter_scx_dsq_new(&it, dsq_id, 0))
+		p = bpf_iter_scx_dsq_next(&it);
+	bpf_iter_scx_dsq_destroy(&it);
+	return p;
+}
+
 static __always_inline void tommys_dispatch(s32 cpu, struct task_struct *prev)
 {
 	if (cpu == trace_cpu)
@@ -980,7 +991,7 @@ static __always_inline void tommys_dispatch(s32 cpu, struct task_struct *prev)
 
 	// Peek the cell DSQ
 	u64		    cell_dsq_task_vtime = 0;
-	struct task_struct *cell_p = __COMPAT_scx_bpf_dsq_peek(cell_dsq.raw);
+	struct task_struct *cell_p		= dsq_peek(cell_dsq.raw);
 	if (cell_p) {
 		cell_dsq_task_vtime = cell_p->scx.dsq_vtime;
 		if (cpu == trace_cpu)
@@ -989,7 +1000,7 @@ static __always_inline void tommys_dispatch(s32 cpu, struct task_struct *prev)
 
 	// Peek the CPU DSQ
 	u64		    cpu_dsq_task_vtime = 0;
-	struct task_struct *cpu_p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq.raw);
+	struct task_struct *cpu_p	       = dsq_peek(cpu_dsq.raw);
 	if (cpu_p) {
 		cpu_dsq_task_vtime = cpu_p->scx.dsq_vtime;
 		if (cpu == trace_cpu)
