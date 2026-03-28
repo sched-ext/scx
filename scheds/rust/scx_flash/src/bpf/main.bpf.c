@@ -128,15 +128,6 @@ const volatile bool local_pcpu;
 const volatile bool direct_dispatch;
 
 /*
- * Native tasks priorities.
- *
- * By default, the scheduler normalizes task priorities to avoid large gaps
- * that could lead to stalls or starvation. This option disables
- * normalization and uses the default Linux priority range instead.
- */
-const volatile bool native_priority;
-
-/*
  * Enable tickless mode.
  */
 const volatile bool tickless_sched;
@@ -406,134 +397,9 @@ static inline u64 nr_tasks_waiting(s32 cpu)
  * Return the time slice that can be assigned to a task queued to @dsq_id
  * DSQ.
  */
-static inline u64 task_slice(const struct task_struct *p, s32 cpu)
+static inline u64 task_slice(const struct task_struct *p)
 {
-	u64 nr_wait = nr_tasks_waiting(cpu);
-
-	/*
-	 * Scale by task weight only when -n / native_priority is set.
-	 * Since we don't have preemption, if there's a big gap between
-	 * priorities certain tasks may get a really long time slice and
-	 * this can hurt interactivity.
-	 */
-	u64 smax = native_priority ? scale_by_task_weight(p, slice_max) : slice_max;
-
-	if (!nr_wait)
-		return tickless_sched ? SCX_SLICE_INF : smax;
-
-	return MAX(smax / nr_wait, slice_min);
-}
-
-/*
- * Return the task's weight, normalized into a smaller domain.
- *
- * Original weight range:   [1, 10000], default = 100
- * Normalized weight range: [1, 128], default = 64
- *
- * This normalization reduces the impact of extreme weight differences,
- * preventing highly prioritized tasks from starving lower-priority ones.
- *
- * The goal is to ensure a more balanced scheduling that is influenced more
- * by the task's behavior rather than its priority difference and prevent
- * potential stalls due to large priority gaps.
- */
-static inline u64 task_weight(const struct task_struct *p)
-{
-	/*
-	 * Return the non-normalized task weight if @native_priority is
-	 * enabled.
-	 */
-	if (native_priority)
-		return p->scx.weight;
-
-	return 1 + (127 * log2_u64(p->scx.weight) / log2_u64(10000));
-}
-
-/*
- * Return the default task weight.
- */
-static inline u64 task_base_weight(void)
-{
-	return native_priority ? 100 : 64;
-}
-
-/*
- * Scale a value proportional to the task's normalized weight.
- */
-static inline u64 scale_by_task_normalized_weight(const struct task_struct *p, u64 value)
-{
-	return value * task_weight(p) / task_base_weight();
-}
-
-/*
- * Scale a value inversely proportional to the task's normalized weight.
- */
-static inline u64 scale_by_task_normalized_weight_inverse(const struct task_struct *p, u64 value)
-{
-	return value * task_base_weight() / task_weight(p);
-}
-
-/*
- * Update the task deadline.
- */
-static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
-{
-	u64 vtime_min, max_sleep, lag_scale;
-
-	if (rr_sched)
-		return;
-
-	/*
-	 * Evaluate the scaling factor for the maximum time budget that a
-	 * task can accumulate while sleeping proportionally to the
-	 * voluntary context switch rate.
-	 *
-	 * A task that is doing few long sleeps will get a smaller time
-	 * budget, a task that is sleeping frequently will get a bigger
-	 * time budget.
-	 */
-	lag_scale = max_avg_nvcsw ? log2_u64(MAX(tctx->avg_nvcsw, 2)) : 1;
-
-	/*
-	 * Adjust the budget in function of the average user CPU
-	 * utilization: increase the allowed spread when CPUs are more
-	 * utilized and reduce it when they are more idle.
-	 *
-	 * This enables dynamic fairness: when user CPU utilization is low,
-	 * the impact of vruntime is reduced, favoring bursty workloads
-	 * that use short execution slots (i.e., message-passing tasks like
-	 * hackbench or similar).
-	 *
-	 * As utilization increases, sleeping tasks regain vruntime credit
-	 * more quickly, restoring fairness and maintaining system
-	 * responsiveness under load.
-         *
-         * This ensures that isolated bursty workloads are prioritized for
-         * performance, while mixed workloads remain responsive and balanced.
-	 */
-	if (slice_lag_scaling)
-		lag_scale = lag_scale * cpu_util / SCX_CPUPERF_ONE;
-
-	/*
-	 * Cap the vruntime budget that an idle task can accumulate to
-	 * the scaled @slice_lag, preventing sleeping tasks from gaining
-	 * excessive priority.
-	 *
-	 * A larger @slice_lag favors tasks that sleep longer by allowing
-	 * them to accumulate more credit, leading to shorter deadlines and
-	 * earlier execution. A smaller @slice_lag reduces the advantage of
-	 * long sleeps, treating short and long sleeps equally once they
-	 * exceed the threshold.
-	 */
-	max_sleep = scale_by_task_normalized_weight(p, slice_lag * lag_scale);
-	vtime_min = vtime_now > max_sleep ? vtime_now - max_sleep : 0;
-	if (time_before(p->scx.dsq_vtime, vtime_min))
-		p->scx.dsq_vtime = vtime_min;
-
-	/*
-	 * Add the execution vruntime to the deadline.
-	 */
-	p->scx.dsq_vtime += scale_by_task_normalized_weight_inverse(p, tctx->exec_runtime);
+	return tickless_sched ? SCX_SLICE_INF : slice_max;
 }
 
 /*
@@ -600,7 +466,7 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (rr_sched || (is_idle && can_direct_dispatch(cpu))) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, cpu), 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
 
@@ -791,7 +657,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	if (can_direct_dispatch(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p, cpu), 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		dispatched = true;
 	}
@@ -840,13 +706,13 @@ static void rr_enqueue(struct task_struct *p, struct task_ctx *tctx,
 			cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
 			if (is_idle) {
 				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-						   task_slice(p, cpu), enq_flags);
+						   task_slice(p), enq_flags);
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 				return;
 			}
 		}
 	}
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
 }
 
 /*
@@ -876,14 +742,6 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * No need to update the task's deadline if it was re-enqueued due
-	 * a higher scheduling class stealing the CPU (as the task didn't
-	 * actually run).
-	 */
-	if (!(enq_flags & SCX_ENQ_REENQ))
-		update_task_deadline(p, tctx);
-
-	/*
 	 * Try to dispatch the task directly, if possible.
 	 */
 	if (try_direct_dispatch(p, tctx, prev_cpu, enq_flags))
@@ -896,7 +754,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!is_running && can_enqueue_to_cpu(p, prev_cpu)) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
-					 task_slice(p, prev_cpu), p->scx.dsq_vtime, enq_flags);
+					 task_slice(p), p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 
@@ -904,7 +762,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	scx_bpf_dsq_insert_vtime(p, node_to_dsq(node),
-				 task_slice(p, prev_cpu), p->scx.dsq_vtime, enq_flags);
+				 task_slice(p), p->scx.dsq_vtime, enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	if (!is_running && !__COMPAT_is_enq_cpu_selected(enq_flags))
@@ -934,9 +792,39 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	return true;
 }
 
+/*
+ * Return true if @p1's deadline is less than @p2's deadline, false
+ * otherwise.
+ */
+static inline bool
+is_deadline_min(const struct task_struct *p1, const struct task_struct *p2)
+{
+	if (!p1)
+		return false;
+	if (!p2)
+		return true;
+
+	return time_before(p1->scx.dsq_vtime, p2->scx.dsq_vtime);
+}
+
+/*
+ * Consume and dispatch the first task from @dsq_id. If the first task can't be
+ * dispatched on the corresponding DSQ, redirect the task to a proper CPU.
+ */
+static bool consume_first_task(u64 dsq_id, struct task_struct *p)
+{
+	if (!p)
+		return false;
+
+	return scx_bpf_dsq_move_to_local(dsq_id, 0);
+}
+
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
+	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(cpu_to_dsq(cpu));
+	struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(node_to_dsq(node));
+	bool need_running = prev && keep_running(prev, cpu);
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
@@ -944,25 +832,37 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	if (is_throttled())
 		return;
 
-	/*
-	 * Try to consume a task from the per-CPU DSQ.
-	 */
-	if (scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu), 0))
-		return;
+	if (need_running) {
+		struct task_ctx *tctx = prev ? try_lookup_task_ctx(prev) : NULL;
+		if (tctx) {
+			u64 slice = bpf_ktime_get_ns() - tctx->last_run_at;
+			u64 prev_vtime = prev->scx.dsq_vtime + scale_by_task_weight_inverse(prev, slice);
+			u64 p_vtime = p ? p->scx.dsq_vtime : ULLONG_MAX;
+			u64 q_vtime = q ? q->scx.dsq_vtime : ULLONG_MAX;
 
-	/*
-	 * Try to consume a task from the per-node DSQ.
-	 */
-	if (scx_bpf_dsq_move_to_local(node_to_dsq(node), 0))
-		return;
+			if (prev_vtime < p_vtime && prev_vtime < q_vtime)
+				goto out_running;
+		}
+	}
 
+	if (is_deadline_min(p, q)) {
+		if (consume_first_task(cpu_to_dsq(cpu), p) ||
+		    consume_first_task(node_to_dsq(node), q))
+			return;
+	} else {
+		if (consume_first_task(node_to_dsq(node), q) ||
+		    consume_first_task(cpu_to_dsq(cpu), p))
+			return;
+	}
+
+out_running:
 	/*
 	 * If the current task expired its time slice and no other task wants
 	 * to run, simply replenish its time slice and let it run for another
 	 * round on the same CPU.
 	 */
-	if (prev && keep_running(prev, cpu))
-		prev->scx.slice = task_slice(prev, cpu);
+	if (need_running)
+		prev->scx.slice = task_slice(prev);
 }
 
 /*
@@ -990,7 +890,7 @@ static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
  */
 static void update_cpu_load(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 now = scx_bpf_now();
+	u64 now = bpf_ktime_get_ns();
 	s32 cpu = scx_bpf_task_cpu(p);
 	u64 perf_lvl, delta_runtime, delta_t;
 	struct cpu_ctx *cctx;
@@ -1056,7 +956,7 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	tctx->last_run_at = scx_bpf_now();
+	tctx->last_run_at = bpf_ktime_get_ns();
 
 	/*
 	 * Adjust target CPU frequency before the task starts to run.
@@ -1077,7 +977,7 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = scx_bpf_now(), slice;
+	u64 now = bpf_ktime_get_ns(), slice;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
@@ -1092,7 +992,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 		/*
 		 * Evaluate the time slice used by the task.
 		 */
-		slice = MIN(now - tctx->last_run_at, slice_max);
+		slice = now - tctx->last_run_at;
 
 		/*
 		 * Update task's execution time (exec_runtime), but never
@@ -1105,7 +1005,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 		/*
 		 * Update task's vruntime.
 		 */
-		p->scx.dsq_vtime += scale_by_task_normalized_weight_inverse(p, slice);
+		p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
 	}
 
 	/*
@@ -1134,7 +1034,7 @@ void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 {
-	u64 now = scx_bpf_now();
+	u64 now = bpf_ktime_get_ns();
 	s64 delta_t;
 	struct task_ctx *tctx;
 
