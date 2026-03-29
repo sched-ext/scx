@@ -82,6 +82,10 @@ struct VmArgs {
     parallel: Option<usize>,
     #[clap(long)]
     vng_arg: Vec<String>,
+    /// Flags to enable for gauntlet runs (comma-separated short names).
+    /// Without this, gauntlet uses each scenario's default profiles.
+    #[clap(long, value_delimiter = ',')]
+    flags: Vec<String>,
     #[clap(last = true)]
     run_args: Vec<String>,
 }
@@ -255,10 +259,37 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
     let scenarios = scenario::all_scenarios();
     let max_par = args.parallel.unwrap_or_else(|| (num_cpus() / 8).max(1));
 
+    let gauntlet_flags: Vec<scenario::Flag> = args
+        .flags
+        .iter()
+        .map(|s| {
+            scenario::Flag::from_short_name(s).unwrap_or_else(|| {
+                let all: Vec<&str> = scenario::Flag::all()
+                    .iter()
+                    .map(|f| f.short_name())
+                    .collect();
+                eprintln!("error: unknown flag: {s}\navailable: {}", all.join(", "));
+                std::process::exit(1);
+            })
+        })
+        .collect();
+    let fixed_profile = if gauntlet_flags.is_empty() {
+        None
+    } else {
+        Some(scenario::FlagProfile {
+            flags: gauntlet_flags,
+        })
+    };
+
     let mut jobs = Vec::new();
     for p in &presets {
         for s in &scenarios {
-            for prof in s.profiles_with(&[]) {
+            let profiles = if let Some(ref fp) = fixed_profile {
+                vec![fp.clone()]
+            } else {
+                s.profiles_with(&[])
+            };
+            for prof in profiles {
                 let mut stt_args = vec![
                     "run".to_string(),
                     "--json".to_string(),

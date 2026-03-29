@@ -279,15 +279,15 @@ pub struct TopoPreset {
 
 pub fn gauntlet_presets() -> Vec<TopoPreset> {
     let defs: &[(&str, &str, usize, usize, usize, usize)] = &[
-        ("tiny-1llc", "4 CPUs, 1 LLC", 1, 4, 1, 512),
-        ("tiny-2llc", "4 CPUs, 2 LLCs", 2, 2, 1, 512),
-        ("odd-3llc", "9 CPUs, 3 LLCs (odd)", 3, 3, 1, 512),
-        ("odd-5llc", "15 CPUs, 5 LLCs (prime)", 5, 3, 1, 512),
-        ("odd-7llc", "14 CPUs, 7 LLCs (prime)", 7, 2, 1, 512),
-        ("smt-2llc", "8 CPUs, 2 LLCs with SMT", 2, 2, 2, 512),
-        ("smt-3llc", "12 CPUs, 3 LLCs with SMT", 3, 2, 2, 512),
-        ("medium-4llc", "32 CPUs, 4 LLCs", 4, 4, 2, 1024),
-        ("medium-8llc", "64 CPUs, 8 LLCs", 8, 4, 2, 1024),
+        ("tiny-1llc", "4 CPUs, 1 LLC", 1, 4, 1, 2048),
+        ("tiny-2llc", "4 CPUs, 2 LLCs", 2, 2, 1, 2048),
+        ("odd-3llc", "9 CPUs, 3 LLCs (odd)", 3, 3, 1, 2048),
+        ("odd-5llc", "15 CPUs, 5 LLCs (prime)", 5, 3, 1, 2048),
+        ("odd-7llc", "14 CPUs, 7 LLCs (prime)", 7, 2, 1, 2048),
+        ("smt-2llc", "8 CPUs, 2 LLCs with SMT", 2, 2, 2, 2048),
+        ("smt-3llc", "12 CPUs, 3 LLCs with SMT", 3, 2, 2, 2048),
+        ("medium-4llc", "32 CPUs, 4 LLCs", 4, 4, 2, 2048),
+        ("medium-8llc", "64 CPUs, 8 LLCs", 8, 4, 2, 2048),
         ("large-4llc", "128 CPUs, 4 LLCs", 4, 16, 2, 2048),
         ("large-8llc", "128 CPUs, 8 LLCs", 8, 8, 2, 2048),
         (

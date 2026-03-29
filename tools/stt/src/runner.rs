@@ -43,7 +43,10 @@ impl Runner {
         for s in scenarios {
             let profiles = match &self.config.active_flags {
                 None => s.profiles(),
-                Some(flags) => s.profiles_with(flags),
+                Some(flags) if flags.is_empty() => vec![FlagProfile { flags: vec![] }],
+                Some(flags) => vec![FlagProfile {
+                    flags: flags.clone(),
+                }],
             };
             for p in profiles {
                 runs.push((s, p));
