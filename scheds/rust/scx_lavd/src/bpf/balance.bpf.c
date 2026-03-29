@@ -20,11 +20,17 @@
 extern const volatile u8	mig_delta_pct;
 extern const volatile u64	lb_low_util_wall;
 
-u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen)
+u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
+					      u64 mig_delta_factor)
 {
 	/*
 	 * Note that added "noinline" to make the verifier happy.
+	 * When mig_delta_factor > 0, the user specified a fixed
+	 * migration delta percentage; otherwise use the dynamic
+	 * shift-based heuristic.
 	 */
+	if (mig_delta_factor > 0)
+		return avg_load_invr * mig_delta_factor / LAVD_SCALE;
 	if (nz_qlen >= sys_stat.nr_active_cpdoms)
 		return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT_OL;
 	if (nz_qlen == 0)
@@ -32,15 +38,116 @@ u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen)
 	return avg_load_invr >> LAVD_CPDOM_MIG_SHIFT;
 }
 
+/*
+ * Classify a single compute domain as stealer, stealee, or neutral.
+ * Returns 1 if the domain became a stealee, 0 otherwise.
+ * Marked noinline so the verifier analyses it separately from the
+ * calling loop, keeping the jump complexity of the caller manageable.
+ */
+int __attribute__((noinline))
+classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
+	       u64 total_cap_sum, int nz_qlen, u64 mig_delta_factor)
+{
+	u64 x_mig_delta = 0;
+	u64 fair_share_invr = 0;
+	u64 stealer_threshold = 0;
+	u64 stealee_threshold = 0;
+
+	if (!cpdomc)
+		return 0;
+
+	if (cpdomc->nr_active_cpus && total_cap_sum > 0) {
+		fair_share_invr = total_load_invr *
+			     cpdomc->cap_sum_active_cpus /
+			     total_cap_sum;
+
+		x_mig_delta = calc_mig_delta(
+				fair_share_invr, nz_qlen,
+				mig_delta_factor);
+
+		stealer_threshold = fair_share_invr - x_mig_delta;
+		stealee_threshold = fair_share_invr + x_mig_delta;
+	}
+
+	/*
+	 * Under-loaded active domains become a stealer.
+	 * Ingress budget = half the deficit below fair share.
+	 */
+	if (cpdomc->nr_active_cpus &&
+	    cpdomc->load_invr <= stealer_threshold) {
+		u64 stealer_budget = 0;
+
+		if (fair_share_invr > cpdomc->load_invr)
+			stealer_budget = (fair_share_invr -
+					  cpdomc->load_invr) / 2;
+
+		WRITE_ONCE(cpdomc->stealer_budget_invr, stealer_budget);
+		WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
+		WRITE_ONCE(cpdomc->is_stealer, true);
+		WRITE_ONCE(cpdomc->is_stealee, false);
+		return 0;
+	}
+
+	/*
+	 * Over-loaded or non-active domains become a stealee.
+	 * Egress budget = half the excess above fair share.
+	 */
+	if (!cpdomc->nr_active_cpus ||
+	    cpdomc->load_invr >= stealee_threshold) {
+		u64 stealee_budget_invr = 0;
+
+		if (cpdomc->load_invr > fair_share_invr) {
+			stealee_budget_invr = (cpdomc->load_invr -
+					       fair_share_invr) / 2;
+			stealee_budget_invr = min(stealee_budget_invr,
+				task_load_to_budget(cpdomc->queued_load_invr,
+						    cpdomc));
+		}
+
+		/*
+		 * The budget is zero in two cases:
+		 * 1. cpdomc->load_invr <= fair_share_invr.
+		 *    Impossible: stealee_threshold =
+		 *    fair_share_invr + x_mig_delta, and
+		 *    load_invr >= stealee_threshold.
+		 * 2. cpdomc->queued_load_invr == 0.
+		 *    No queued tasks to steal. A big running
+		 *    task causes high utilization that accounts
+		 *    for all the excess load_invr. Don't mark
+		 *    as stealee since there is nothing in the
+		 *    DSQ to migrate.
+		 */
+		if (!stealee_budget_invr)
+			goto reset_role;
+
+		WRITE_ONCE(cpdomc->stealee_budget_invr, stealee_budget_invr);
+		WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
+		WRITE_ONCE(cpdomc->is_stealer, false);
+		WRITE_ONCE(cpdomc->is_stealee, true);
+		return 1;
+	}
+
+reset_role:
+	/*
+	 * Otherwise, keep tasks as it is.
+	 */
+	WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
+	WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
+	WRITE_ONCE(cpdomc->is_stealer, false);
+	WRITE_ONCE(cpdomc->is_stealee, false);
+	return 0;
+}
+
 __weak
 int plan_x_cpdom_migration(void)
 {
 	struct cpdom_ctx *cpdomc;
 	u64 cpdom_id;
-	u32 stealer_threshold, stealee_threshold, nr_stealee = 0;
-	u64 avg_load_invr = 0, min_load_invr = U64_MAX, max_load_invr = 0;
+	u32 nr_stealee = 0;
 	u64 max_avg_util_wall = 0;
-	u64 x_mig_delta, util, qlen, qlen_invr;
+	u64 util, qload_invr;
+	u64 total_load_invr = 0;
+	u64 total_cap_sum = 0;
 	bool overflow_running = false;
 	int nz_qlen = 0;
 
@@ -73,7 +180,7 @@ int plan_x_cpdom_migration(void)
 			 */
 			if (cpdomc->cur_util_wall_sum > 0) {
 				overflow_running = true;
-				cpdomc->load_invr = U32_MAX;
+				cpdomc->load_invr = U64_MAX;
 			}
 			else
 				cpdomc->load_invr = 0;
@@ -86,20 +193,15 @@ int plan_x_cpdom_migration(void)
 		util = (cpdomc->avg_util_wall_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
 		if ((util >> LAVD_SHIFT) > max_avg_util_wall)
 			max_avg_util_wall = util >> LAVD_SHIFT;
-		qlen = cpdomc->nr_queued_task;
-		qlen_invr = (qlen << (LAVD_SHIFT * 3)) / cpdomc->cap_sum_active_cpus;
-		cpdomc->load_invr = util + qlen_invr;
-		avg_load_invr += cpdomc->load_invr;
+		qload_invr = (cpdomc->queued_load_invr << LAVD_SHIFT) /
+			     cpdomc->cap_sum_active_cpus;
+		cpdomc->load_invr = util + qload_invr;
+		total_load_invr += cpdomc->load_invr;
 
-		if (min_load_invr > cpdomc->load_invr)
-			min_load_invr = cpdomc->load_invr;
-		if (max_load_invr < cpdomc->load_invr)
-			max_load_invr = cpdomc->load_invr;
-		if (qlen)
+		if (cpdomc->queued_load_invr)
 			nz_qlen++;
+		total_cap_sum += cpdomc->cap_sum_active_cpus;
 	}
-	if (sys_stat.nr_active_cpdoms)
-		avg_load_invr /= sys_stat.nr_active_cpdoms;
 
 	/*
 	 * When the highest per-CPU utilization among all compute
@@ -110,87 +212,35 @@ int plan_x_cpdom_migration(void)
 		goto reset_and_skip_lb;
 
 	/*
-	 * Determine the criteria for stealer and stealee domains.
-	 * The more the system is loaded, the tighter criteria will be chosen.
-	 * When mig_delta_pct is set (non-zero), use it as a fixed percentage
-	 * instead of the dynamic calculation.
+	 * Classify stealer and stealee domains using per-domain
+	 * capacity-proportional targets. Each domain's target is its
+	 * fair share of total system load scaled by its capacity
+	 * proportion. This correctly handles heterogeneous systems
+	 * where domains have different capacities. On homogeneous
+	 * systems, fair_share_invr equals the flat average, so
+	 * behavior is identical.
 	 */
-	if (mig_delta_pct > 0) {
-		u64 mig_delta_factor = (mig_delta_pct << LAVD_SHIFT) / 100;
-		x_mig_delta = avg_load_invr * mig_delta_factor / LAVD_SCALE;
-	} else {
-		x_mig_delta = calc_mig_delta(avg_load_invr, nz_qlen);
-	}
-	stealer_threshold = avg_load_invr - x_mig_delta;
-	stealee_threshold = avg_load_invr + x_mig_delta;
+	u64 mig_delta_factor = 0;
+	if (mig_delta_pct > 0)
+		mig_delta_factor = (mig_delta_pct << LAVD_SHIFT) / 100;
 
-	/*
-	 * If there is no overloaded domain (no stealees), skip load balancing.
-	 * Clear all stealer/stealee roles to prevent stale state from previous
-	 * balancing rounds from triggering incorrect migrations. While some
-	 * domains may be underloaded (stealers), migration is unnecessary
-	 * without overloaded domains (stealees) to steal from.
-	 *  <~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>
-	 * [stealer_threshold ... avg_load_invr ... max_load_invr ... stealee_threshold]
-	 *            -------------------------------------->
-	 */
-	if ((stealee_threshold > max_load_invr) && !overflow_running)
-		goto reset_and_skip_lb;
-
-	/*
-	 * At this point, there is at least one overloaded domain (stealee),
-	 * indicated by the following condition:
-	 *    stealee_threshold <= max_load_invr || overflow_running
-	 *
-	 * Adjust the stealer threshold to minimum scaled load to ensure that
-	 * there exists at least one stealer.
-	 */
-	if (stealer_threshold < min_load_invr) {
-		/*
-		 * If there is a overloaded domain, always try to steal.
-		 *  <~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>
-		 * [stealer_threshold ... min_load_invr ... avg_load_invr ... stealee_threshold ... max_load_invr]
-		 *                        <--------------------------------------------------------------->
-		 */
-		stealer_threshold = min_load_invr;
-	}
-
-	/*
-	 * Determine stealer and stealee domains.
-	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 
-		/*
-		 * Under-loaded active domains become a stealer.
-		 */
-		if (cpdomc->nr_active_cpus &&
-		    cpdomc->load_invr <= stealer_threshold) {
-			WRITE_ONCE(cpdomc->is_stealer, true);
-			WRITE_ONCE(cpdomc->is_stealee, false);
-			continue;
-		}
-
-		/*
-		 * Over-loaded or non-active domains become a stealee.
-		 */
-		if (!cpdomc->nr_active_cpus ||
-		    cpdomc->load_invr >= stealee_threshold) {
-			WRITE_ONCE(cpdomc->is_stealer, false);
-			WRITE_ONCE(cpdomc->is_stealee, true);
-			nr_stealee++;
-			continue;
-		}
-
-		/*
-		 * Otherwise, keep tasks as it is.
-		 */
-		WRITE_ONCE(cpdomc->is_stealer, false);
-		WRITE_ONCE(cpdomc->is_stealee, false);
+		nr_stealee += classify_cpdom(cpdomc, total_load_invr,
+					     total_cap_sum, nz_qlen,
+					     mig_delta_factor);
 	}
+
+	/*
+	 * If no stealee was found and no overflow domain is running,
+	 * skip load balancing.
+	 */
+	if (nr_stealee == 0 && !overflow_running)
+		goto reset_and_skip_lb;
 
 	sys_stat.nr_stealee = nr_stealee;
 
@@ -207,6 +257,8 @@ reset_and_skip_lb:
 				break;
 
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
+			WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, false);
 			WRITE_ONCE(cpdomc->is_stealee, false);
 		}
@@ -302,14 +354,6 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 		return false;
 
 	/*
-	 * Probabilistically make a go or no go decision to avoid the
-	 * thundering herd problem. In other words, one out of nr_cpus
-	 * will try to steal a task at a moment.
-	 */
-	if (!prob_x_out_of_y(1, cpdomc->nr_active_cpus * LAVD_CPDOM_MIG_PROB_FT))
-		return false;
-
-	/*
 	 * Traverse neighbor compute domains in distance order.
 	 */
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
@@ -341,19 +385,32 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
 			/*
-			 * If task stealing is successful, mark the stealer
-			 * and the stealee's job done. By marking done,
-			 * those compute domains would not be involved in
-			 * load balancing until the end of this round,
-			 * so this helps gradual migration. Note that multiple
-			 * stealers can steal tasks from the same stealee.
-			 * However, we don't coordinate concurrent stealing
-			 * because the chance is low and there is no harm
-			 * in slight over-stealing.
+			 * Peek at the head task to get its size for
+			 * budget accounting.
+			 */
+			u64 task_load = sys_stat.avg_runtime_invr;
+			struct task_struct *peek_p =
+				__COMPAT_scx_bpf_dsq_peek(dsq_id);
+			if (peek_p) {
+				task_ctx *peek_taskc = get_task_ctx(peek_p);
+				if (peek_taskc && peek_taskc->avg_runtime_invr)
+					task_load =
+						peek_taskc->avg_runtime_invr;
+			}
+
+			/*
+			 * On success, decrement both egress and ingress
+			 * budgets. The stealer stays active for the
+			 * entire round. Budget exhaustion clears the
+			 * is_stealee/is_stealer flags via the decrement
+			 * helpers, so the existing flag checks above
+			 * naturally stop further stealing.
 			 */
 			if (consume_dsq(cpdomc_pick, dsq_id)) {
-				WRITE_ONCE(cpdomc_pick->is_stealee, false);
-				WRITE_ONCE(cpdomc->is_stealer, false);
+				decrement_stealee_budget(cpdomc_pick,
+					task_load_to_budget(task_load, cpdomc_pick));
+				decrement_stealer_budget(cpdomc,
+					task_load_to_budget(task_load, cpdomc));
 				return true;
 			}
 		}
@@ -410,8 +467,32 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
-			if (consume_dsq(cpdomc_pick, dsq_id))
+			/*
+			 * Peek at the head task to get its size.
+			 */
+			u64 task_load = sys_stat.avg_runtime_invr;
+			struct task_struct *peek_p =
+				__COMPAT_scx_bpf_dsq_peek(dsq_id);
+			if (peek_p) {
+				task_ctx *peek_taskc = get_task_ctx(peek_p);
+				if (peek_taskc &&
+				    peek_taskc->avg_runtime_invr)
+					task_load =
+						peek_taskc->avg_runtime_invr;
+			}
+
+			/*
+			 * Force steal is unconditional for work
+			 * conservation. Decrement budgets to keep
+			 * the accounting consistent.
+			 */
+			if (consume_dsq(cpdomc_pick, dsq_id)) {
+				decrement_stealee_budget(cpdomc_pick,
+					task_load_to_budget(task_load, cpdomc_pick));
+				decrement_stealer_budget(cpdomc,
+					task_load_to_budget(task_load, cpdomc));
 				return true;
+			}
 		}
 	}
 
