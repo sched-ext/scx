@@ -7,11 +7,11 @@
 
 #define MAX_VTIME	(~0ULL)
 
-#define DSQ_FLAG_NODE	(1LLU << 32)
-
 #define CGROUP_WEIGHT_DFL	100
 
 #define CONFIG_HZ		1000
+
+#define MAX_WAKEUP_FREQ		100
 
 /*
  * Return the time interval between two ticks in ns.
@@ -218,8 +218,21 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
  * This contain all the per-task information used internally by the BPF code.
  */
 struct task_ctx {
-	u64 sum_runtime;
+	/*
+	 * Timestamp when the task started to run on a CPU (used to
+	 * evaluate the consumed time slice).
+	 */
 	u64 last_run_at;
+
+	/*
+	 * Task wakeup frequency.
+	 */
+	u64 wakeup_freq;
+	u64 last_woke_at;
+
+	/*
+	 * cgroup weight (cpu.weight).
+	 */
 	u32 cgweight;
 };
 
@@ -337,22 +350,6 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 }
 
 /*
- * Return the DSQ associated to @cpu.
- */
-static inline u64 cpu_to_dsq(s32 cpu)
-{
-	return (u64)cpu;
-}
-
-/*
- * Return the DSQ associated to @node.
- */
-static inline u64 node_to_dsq(int node)
-{
-	return DSQ_FLAG_NODE | node;
-}
-
-/*
  * Return the total amount of tasks that are currently waiting to be scheduled.
  */
 static inline u64 nr_tasks_waiting(s32 cpu)
@@ -360,13 +357,11 @@ static inline u64 nr_tasks_waiting(s32 cpu)
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 
 	return scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) +
-	       scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
-	       scx_bpf_dsq_nr_queued(node_to_dsq(node));
+	       scx_bpf_dsq_nr_queued(node);
 }
 
 /*
- * Return the time slice that can be assigned to a task queued to @dsq_id
- * DSQ.
+ * Return the time slice that can be assigned to a task.
  */
 static inline u64 task_slice(const struct task_struct *p)
 {
@@ -384,9 +379,10 @@ static inline u64 task_slice(const struct task_struct *p)
  * that sleep frequently accumulate less runtime and they also have a
  * larger budget).
  */
-static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
+static u64 task_dl(struct task_struct *p, int node, struct task_ctx *tctx, u64 enq_flags)
 {
-	u64 vsleep_max = scale_by_weight(p, slice_lag - tctx->sum_runtime);
+	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
+	u64 vsleep_max = scale_by_weight(p, slice_lag * lag_scale);
 	u64 vtime_min = vtime_now - vsleep_max;
 	u64 vtime = p->scx.dsq_vtime;
 
@@ -661,7 +657,6 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
 	bool is_running = scx_bpf_task_running(p);
-	u64 dsq_id;
 
 	/*
 	 * Dispatch regular tasks to the shared DSQ.
@@ -689,13 +684,8 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * and use the per-node DSQ for tasks that are waking up, so they
 	 * can be consumed in the first CPU available.
 	 */
-	if ((is_running && is_primary_cpu(p, prev_cpu)) || is_pcpu_task(p))
-		dsq_id = cpu_to_dsq(prev_cpu);
-	else
-		dsq_id = node_to_dsq(node);
-
-	scx_bpf_dsq_insert_vtime(p, dsq_id, task_slice(p),
-				 task_dl(p, tctx, enq_flags), enq_flags);
+	scx_bpf_dsq_insert_vtime(p, node, task_slice(p),
+				 task_dl(p, node, tctx, enq_flags), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	if (!is_running && !__COMPAT_is_enq_cpu_selected(enq_flags))
@@ -725,25 +715,9 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	return true;
 }
 
-/*
- * Consume and dispatch the first task from @dsq_id. If the first task can't be
- * dispatched on the corresponding DSQ, redirect the task to a proper CPU.
- */
-static bool consume_first_task(u64 dsq_id, struct task_struct *p)
-{
-	if (!p)
-		return false;
-
-	return scx_bpf_dsq_move_to_local(dsq_id, 0);
-}
-
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(cpu_to_dsq(cpu));
-	struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(node_to_dsq(node));
-	u64 p_vtime = p ? p->scx.dsq_vtime : ULLONG_MAX;
-	u64 q_vtime = q ? q->scx.dsq_vtime : ULLONG_MAX;
 	bool need_running = prev && keep_running(prev, cpu);
 
 	/*
@@ -754,28 +728,23 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (need_running) {
 		struct task_ctx *tctx = try_lookup_task_ctx(prev);
+		struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(node);
+		u64 q_vtime = q ? q->scx.dsq_vtime : ULLONG_MAX;
 
 		if (tctx) {
 			u64 slice = bpf_ktime_get_ns() - tctx->last_run_at;
 			u64 prev_vtime = prev->scx.dsq_vtime +
 					 scale_by_weight_inverse(prev, slice);
 
-			if (prev_vtime < p_vtime && prev_vtime < q_vtime) {
+			if (prev_vtime < q_vtime) {
 				prev->scx.slice = task_slice(prev);
 				return;
 			}
 		}
 	}
 
-	if (p_vtime < q_vtime) {
-		if (consume_first_task(cpu_to_dsq(cpu), p) ||
-		    consume_first_task(node_to_dsq(node), q))
-			return;
-	} else {
-		if (consume_first_task(node_to_dsq(node), q) ||
-		    consume_first_task(cpu_to_dsq(cpu), p))
-			return;
-	}
+	if (scx_bpf_dsq_move_to_local(node, 0))
+		return;
 
 	/*
 	 * If the current task expired its time slice and no other task wants
@@ -796,6 +765,21 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 static u64 calc_avg(u64 old_val, u64 new_val)
 {
 	return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
+/*
+ * Update the average frequency of an event.
+ *
+ * The frequency is computed from the given interval since the last event
+ * and combined with the previous frequency using an exponential weighted
+ * moving average.
+ */
+static u64 update_freq(u64 freq, u64 interval)
+{
+        u64 new_freq;
+
+        new_freq = (100 * NSEC_PER_MSEC) / interval;
+        return calc_avg(freq, new_freq);
 }
 
 /*
@@ -911,7 +895,6 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 		 * Update task's vruntime and accumulated runtime.
 		 */
 		p->scx.dsq_vtime += scale_by_weight_inverse(p, slice);
-		tctx->sum_runtime = MIN(tctx->sum_runtime + slice, slice_lag);
 	}
 
 	/*
@@ -928,14 +911,25 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 {
+	u64 now = bpf_ktime_get_ns(), delta_t;
 	struct task_ctx *tctx;
 
 	if (rr_sched)
 		return;
 
 	tctx = try_lookup_task_ctx(p);
-	if (tctx)
-		tctx->sum_runtime = 0;
+	if (!tctx)
+		return;
+
+	/*
+	 * Update the task's wakeup frequency based on the time since
+	 * the last wakeup, then cap the result at 1024 to avoid large
+	 * spikes.
+	 */
+	delta_t = now - tctx->last_woke_at;
+	tctx->wakeup_freq = update_freq(tctx->wakeup_freq, delta_t);
+	tctx->wakeup_freq = MIN(tctx->wakeup_freq, MAX_WAKEUP_FREQ);
+	tctx->last_woke_at = now;
 }
 
 void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
@@ -1219,7 +1213,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 {
 	struct bpf_timer *timer;
 	int err, node;
-	s32 cpu;
 	u32 key = 0;
 
 	/* Initialize amount of online and possible CPUs */
@@ -1229,18 +1222,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 	/* Initialize CPUs and NUMA properties */
 	init_cpuperf_target();
 
-	/* Create per-CPU DSQs */
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		err = scx_bpf_create_dsq(cpu, __COMPAT_scx_bpf_cpu_node(cpu));
-		if (err) {
-			scx_bpf_error("failed to create DSQ %d: %d", cpu, err);
-			return err;
-		}
-	}
-
 	/* Create per-node DSQs */
 	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
-		err = scx_bpf_create_dsq(node_to_dsq(node), node);
+		err = scx_bpf_create_dsq(node, node);
 		if (err) {
 			scx_bpf_error("failed to create DSQ %d: %d", node, err);
 			return err;
