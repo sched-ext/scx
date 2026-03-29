@@ -487,65 +487,37 @@ static inline const struct cpumask *get_idle_cpumask(s32 cpu)
 }
 
 /*
- * Return the SMT sibling of @cpu, or @cpu if SMT is disabled.
- */
-static inline s32 smt_sibling(s32 cpu)
-{
-	const struct cpumask *smt;
-	struct cpu_ctx *cctx;
-
-	if (!smt_enabled)
-		return cpu;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return cpu;
-
-	smt = cast_mask(cctx->smt);
-	if (!smt)
-		return cpu;
-
-	return bpf_cpumask_first(smt);
-}
-
-/*
- * Return true if @cpu is in  a partially-idle SMT core, false otherwise.
- */
-static bool is_smt_contended(s32 cpu)
-{
-	const struct cpumask *idle_mask;
-	bool is_contended;
-
-	if (!smt_enabled)
-		return false;
-
-	/*
-	 * If the sibling SMT CPU is not idle and there are other full-idle
-	 * SMT cores available, consider the current CPU as contended.
-	 */
-	idle_mask = get_idle_cpumask(cpu);
-	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
-		       !bpf_cpumask_empty(idle_mask);
-	scx_bpf_put_cpumask(idle_mask);
-
-	return is_contended;
-}
-
-/*
- * Return true if @p is running on a primary CPU (or can't run on a primary
- * CPU due to affinity constraints), false otherwise.
+ * Return true if @p is running on a primary CPU or can't run on a primary
+ * CPU, because all the CPUs are busy or due to affinity constraint.
+ * Otherwise, return false.
  */
 static bool is_primary_cpu(const struct task_struct *p, s32 cpu)
 {
-	if (!primary_all) {
-		const struct cpumask *primary = cast_mask(primary_cpumask);
+	const struct cpumask *primary = cast_mask(primary_cpumask);
+	const struct cpumask *idle_mask;
+	bool ret;
 
-		if (primary && bpf_cpumask_intersects(primary, p->cpus_ptr) &&
-		    !bpf_cpumask_test_cpu(cpu, primary))
-			return false;
-	}
+	if (!primary_all || !primary)
+		return true;
 
-	return true;
+	if (bpf_cpumask_test_cpu(cpu, primary))
+		return true;
+
+	idle_mask = get_idle_cpumask(cpu);
+	ret = bpf_cpumask_intersects(primary, p->cpus_ptr) &&
+	      bpf_cpumask_intersects(primary, idle_mask);
+	scx_bpf_put_cpumask(idle_mask);
+
+	return ret;
+}
+
+/*
+ * Return true if a task is wakeup-intensive (frequent and short
+ * sleep/wakeup cycles), false otherwise.
+ */
+static inline bool is_wakeup_heavy(const struct task_ctx *tctx)
+{
+	return tctx->slice_ns_ewma && tctx->slice_ns_ewma < SLICE_MIN_NS;
 }
 
 /*
@@ -573,36 +545,17 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	}
 
 	/*
-	 * Skip direct dispatch if the CPUs are forced to stay idle.
+	 * Don't attempt a migration if the task is running or if
+	 * ops.select_cpu() was already called, as the task has already had
+	 * an opportunity for direct dispatch there.
 	 */
-	if (is_throttled())
+	if (is_running || __COMPAT_is_enq_cpu_selected(enq_flags))
 		return false;
 
 	/*
-	 * Skip direct dispatch if ops.select_cpu() was already called, as
-	 * the task has already had an opportunity for direct dispatch
-	 * there.
-	 */
-	if (!is_running && __COMPAT_is_enq_cpu_selected(enq_flags))
-		return false;
-
-	/*
-	 * Attempt migration if possible.
+	 * Try migrating to an idle CPU.
 	 */
 	if (!is_pcpu_task(p)) {
-		/*
-		 * In task is running in the primary domain, its SMT
-		 * sibling is not contended or it has not been re-enqueued,
-		 * keep it on the same CPU.
-		 */
-		if (!(enq_flags & SCX_ENQ_REENQ) &&
-		    is_primary_cpu(p, cpu) && !is_smt_contended(cpu))
-			return false;
-
-		/*
-		 * Try to pick an idle CPU close to the one the task is
-		 * using.
-		 */
 		cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
 		if (!is_idle)
 			return false;
@@ -611,9 +564,6 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 			return false;
 	}
 
-	/*
-	 * Attempt direct dispatch.
-	 */
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
 	__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
@@ -690,9 +640,8 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If the task is aggressively sleeping and waking up, enqueue it
 	 * directly to the local DSQ to avoid node DSQ lock contention.
 	 */
-	if ((tctx->slice_ns_ewma && tctx->slice_ns_ewma < SLICE_MIN_NS) &&
-	    is_primary_cpu(p, prev_cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+	if (is_wakeup_heavy(tctx)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	} else {
 		scx_bpf_dsq_insert_vtime(p, node, task_slice(p),
@@ -708,17 +657,24 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
  * Return true if the task can keep running on its current CPU, false if
  * the task should migrate.
  */
-static bool keep_running(const struct task_struct *p, s32 cpu)
+static bool keep_running(const struct task_struct *p,
+			 const struct task_ctx *tctx, s32 cpu)
 {
 	/* Do not keep running if the task doesn't need to run */
 	if (!is_queued(p))
 		return false;
 
 	/*
+	 * Allow sleep stressors to run anywhere to avoid migration loops.
+	 */
+	if (!primary_all && is_wakeup_heavy(tctx))
+		return true;
+
+	/*
 	 * Do not keep running if the CPU is not in the primary domain and
 	 * the task can use the primary domain.
 	 */
-	if (!is_primary_cpu(p, cpu))
+	if (!is_pcpu_task(p) && !is_primary_cpu(p, cpu))
 		return false;
 
 	return true;
@@ -727,7 +683,8 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-	bool need_running = prev && keep_running(prev, cpu);
+	struct task_ctx *tctx = prev ? try_lookup_task_ctx(prev) : NULL;
+	bool need_running = tctx && keep_running(prev, tctx, cpu);
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
@@ -736,7 +693,6 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	if (need_running) {
-		struct task_ctx *tctx = try_lookup_task_ctx(prev);
 		struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(node);
 		u64 q_vtime = q ? q->scx.dsq_vtime : ULLONG_MAX;
 
@@ -1048,38 +1004,6 @@ s32 get_nr_online_cpus(void)
 	scx_bpf_put_cpumask(online_cpumask);
 
 	return cpus;
-}
-
-SEC("syscall")
-int enable_sibling_cpu(struct domain_arg *input)
-{
-	struct cpu_ctx *cctx;
-	struct bpf_cpumask *mask, **pmask;
-	int err = 0;
-
-	cctx = try_lookup_cpu_ctx(input->cpu_id);
-	if (!cctx)
-		return -ENOENT;
-
-	/* Make sure the target CPU mask is initialized */
-	switch (input->lvl_id) {
-	case 0:
-		pmask = &cctx->smt;
-		break;
-	default:
-		return -EINVAL;
-	}
-	err = init_cpumask(pmask);
-	if (err)
-		return err;
-
-	bpf_rcu_read_lock();
-	mask = *pmask;
-	if (mask)
-		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
-	bpf_rcu_read_unlock();
-
-	return err;
 }
 
 SEC("syscall")

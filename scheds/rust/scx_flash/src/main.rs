@@ -377,11 +377,6 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        // Initialize SMT domains.
-        if smt_enabled {
-            Self::init_smt_domains(&mut skel, &topo)?;
-        }
-
         // Attach the scheduler.
         let struct_ops = Some(scx_ops_attach!(skel, flash_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
@@ -524,46 +519,6 @@ impl<'a> Scheduler<'a> {
         }
 
         false
-    }
-
-    fn enable_sibling_cpu(
-        skel: &mut BpfSkel<'_>,
-        lvl: usize,
-        cpu: usize,
-        sibling_cpu: usize,
-    ) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_sibling_cpu;
-        let mut args = domain_arg {
-            lvl_id: lvl as c_int,
-            cpu_id: cpu as c_int,
-            sibling_cpu_id: sibling_cpu as c_int,
-        };
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let out = prog.test_run(input).unwrap();
-        if out.return_value != 0 {
-            return Err(out.return_value);
-        }
-
-        Ok(())
-    }
-
-    fn init_smt_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
-        let smt_siblings = topo.sibling_cpus();
-
-        info!("SMT sibling CPUs: {:?}", smt_siblings);
-        for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
-            Self::enable_sibling_cpu(skel, 0, cpu, *sibling_cpu as usize).unwrap();
-        }
-
-        Ok(())
     }
 
     fn get_metrics(&self) -> Metrics {
