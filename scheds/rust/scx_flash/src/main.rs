@@ -208,19 +208,6 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
 
-    /// Always allow direct dispatch to idle CPUs.
-    ///
-    /// By default tasks are not directly dispatched to idle CPUs if there are other tasks waiting
-    /// in the scheduler's queues. This prevents potential starvation of the already queued tasks.
-    ///
-    /// Enabling this option allows tasks to be always dispatched directly to idle CPUs,
-    /// potentially bypassing the scheduler queues.
-    ///
-    /// This allows to improve system throughput, especially with server workloads, but it can
-    /// introduce unfairness and potentially trigger stall conditions.
-    #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
-    direct_dispatch: bool,
-
     /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
     /// tasks may overflow to other available CPUs.
@@ -364,7 +351,6 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.numa_disabled = numa_disabled;
         rodata.rr_sched = opts.rr_sched;
-        rodata.direct_dispatch = opts.direct_dispatch;
         rodata.tickless_sched = opts.tickless;
         rodata.slice_lag_scaling = opts.slice_lag_scaling;
         rodata.slice_max = opts.slice_us * 1000;

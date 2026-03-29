@@ -73,11 +73,6 @@ const volatile bool slice_lag_scaling;
 const volatile u64 run_lag = 32768ULL * NSEC_PER_USEC;
 
 /*
- * Always directly dispatch a task if an idle CPU is found.
- */
-const volatile bool direct_dispatch;
-
-/*
  * Enable tickless mode.
  */
 const volatile bool tickless_sched;
@@ -446,20 +441,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 }
 
 /*
- * Return true if we can perform a direct dispatch on @cpu, false
- * otherwise.
- */
-static inline bool can_direct_dispatch(s32 cpu)
-{
-	/*
-	 * If @direct_dispatch is enabled always allow direct dispatch,
-	 * otherwise allow it only if there are no other tasks queued to
-	 * the DSQs.
-	 */
-	return direct_dispatch ?: !nr_tasks_waiting(cpu);
-}
-
-/*
  * Pick a target CPU for a task which is being woken up.
  *
  * If a task is dispatched here, ops.enqueue() will be skipped: task will be
@@ -475,7 +456,7 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 		return prev_cpu;
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
-	if (rr_sched || (is_idle && can_direct_dispatch(cpu))) {
+	if (rr_sched || is_idle) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
