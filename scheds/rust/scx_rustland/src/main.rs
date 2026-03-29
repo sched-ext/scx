@@ -297,10 +297,12 @@ impl<'a> Scheduler<'a> {
         dispatched_task.cpu = if self.opts.percpu_local {
             task.qtask.cpu
         } else {
-            match self
-                .bpf
-                .select_cpu(task.qtask.pid, task.qtask.cpu, task.qtask.flags)
-            {
+            match self.bpf.select_cpu(
+                task.qtask.pid,
+                task.qtask.cpu,
+                task.qtask.numa_node,
+                task.qtask.flags,
+            ) {
                 cpu if cpu >= 0 => cpu,
                 _ => RL_CPU_ANY,
             }

@@ -79,6 +79,7 @@ pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 pub struct QueuedTask {
     pub pid: i32,             // pid that uniquely identifies a task
     pub cpu: i32,             // CPU previously used by the task
+    pub numa_node: i32,       // Preferred NUMA node
     pub nr_cpus_allowed: u64, // Number of CPUs that the task can use
     pub flags: u64,           // task's enqueue flags
     pub start_ts: u64,        // Timestamp since last time the task ran on a CPU (in ns)
@@ -158,6 +159,7 @@ impl EnqueuedMessage {
         QueuedTask {
             pid: self.inner.pid,
             cpu: self.inner.cpu,
+            numa_node: self.inner.numa_node,
             nr_cpus_allowed: self.inner.nr_cpus_allowed,
             flags: self.inner.flags,
             start_ts: self.inner.start_ts,
@@ -495,11 +497,12 @@ impl<'cb> BpfScheduler<'cb> {
 
     // Pick an idle CPU for the target PID.
     #[allow(dead_code)]
-    pub fn select_cpu(&mut self, pid: i32, cpu: i32, flags: u64) -> i32 {
+    pub fn select_cpu(&mut self, pid: i32, cpu: i32, numa_node: i32, flags: u64) -> i32 {
         let prog = &mut self.skel.progs.rs_select_cpu;
         let mut args = task_cpu_arg {
             pid: pid as c_int,
             cpu: cpu as c_int,
+            numa_node: numa_node as c_int,
             flags: flags as c_ulong,
         };
         let input = ProgramInput {
