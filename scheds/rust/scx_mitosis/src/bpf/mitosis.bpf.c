@@ -2282,12 +2282,13 @@ int apply_cell_config(void *ctx)
 				if (!cctx)
 					return -ENOENT;
 				/*
-				 * If the CPU is changing cells, advance the
-				 * new cell's vtime to at least match this
-				 * CPU's per-CPU vtime. Otherwise the per-CPU
-				 * DSQ and cell DSQ are in different vtime
-				 * domains and dispatch will starve the
-				 * per-CPU DSQ tasks.
+				 * If the CPU is changing cells, sync its
+				 * per-CPU vtime with the new cell's vtime.
+				 * Without this, the per-CPU DSQ and cell
+				 * DSQ are in different vtime domains —
+				 * tasks enqueued on the per-CPU DSQ get
+				 * clamped to a wrong basis_vtime, breaking
+				 * vtime ordering within the cell.
 				 */
 				if (cctx->cell != cell_id) {
 					cell = lookup_cell(cell_id);
@@ -2299,14 +2300,25 @@ int apply_cell_config(void *ctx)
 									cctx->llc) ?
 							cctx->llc :
 							FAKE_FLAT_CELL_LLC;
-					if (time_before(
-						    READ_ONCE(
-							    cell->llcs[llc_idx]
-								    .vtime_now),
-						    cctx->vtime_now))
-						WRITE_ONCE(cell->llcs[llc_idx]
-								   .vtime_now,
-							   cctx->vtime_now);
+					/*
+					 * Sync the CPU's per-CPU vtime with
+					 * the new cell. Take the max of the
+					 * cell's vtime and the CPU's current
+					 * vtime so neither domain goes
+					 * backward, then set the CPU to
+					 * match the cell.
+					 */
+					u64 cell_vt = READ_ONCE(
+						cell->llcs[llc_idx].vtime_now);
+					u64 cpu_vt = cctx->vtime_now;
+					u64 sync_vt =
+						time_after(cell_vt, cpu_vt) ?
+							cell_vt :
+							cpu_vt;
+					WRITE_ONCE(
+						cell->llcs[llc_idx].vtime_now,
+						sync_vt);
+					WRITE_ONCE(cctx->vtime_now, sync_vt);
 				}
 				cctx->cell = cell_id;
 			}
