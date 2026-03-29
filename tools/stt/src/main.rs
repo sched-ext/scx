@@ -316,7 +316,6 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
     }
 
     let total = jobs.len();
-    let timeout = vng::compute_timeout(1, 20);
     let results: Arc<Mutex<Vec<(String, bool, f64, String, Vec<runner::ScenarioResult>)>>> =
         Arc::new(Mutex::new(Vec::new()));
     let completed = Arc::new(AtomicUsize::new(0));
@@ -348,6 +347,7 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
             let mut dur = 0.0;
             let mut detail = String::new();
             let mut inner_results = vec![];
+            let timeout = vng::compute_timeout(1, 20, topo.total_cpus());
             for attempt in 0..3 {
                 let cfg = vng::VngConfig {
                     kernel: kernel.clone(),

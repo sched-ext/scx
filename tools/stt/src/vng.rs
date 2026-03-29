@@ -266,8 +266,10 @@ pub fn parse_exit_code(raw: &str) -> i32 {
         .unwrap_or(-1)
 }
 
-pub fn compute_timeout(num_runs: usize, duration_s: u64) -> Duration {
-    Duration::from_secs(10 + num_runs as u64 * (duration_s + 2) * 2)
+pub fn compute_timeout(num_runs: usize, duration_s: u64, num_cpus: usize) -> Duration {
+    // Large VMs boot slower: add 1s per 10 CPUs beyond 16
+    let boot_overhead = 10 + (num_cpus.saturating_sub(16) / 10) as u64;
+    Duration::from_secs(boot_overhead + num_runs as u64 * (duration_s + 2) * 2)
 }
 
 pub struct TopoPreset {
@@ -327,8 +329,9 @@ mod tests {
 
     #[test]
     fn compute_timeout_basic() {
+        // 8 CPUs: no extra boot overhead (below 16 threshold)
         assert_eq!(
-            compute_timeout(1, 20),
+            compute_timeout(1, 20, 8),
             Duration::from_secs(10 + 1 * (20 + 2) * 2)
         );
     }
@@ -336,8 +339,17 @@ mod tests {
     #[test]
     fn compute_timeout_multiple_runs() {
         assert_eq!(
-            compute_timeout(5, 15),
+            compute_timeout(5, 15, 8),
             Duration::from_secs(10 + 5 * (15 + 2) * 2)
+        );
+    }
+
+    #[test]
+    fn compute_timeout_large_vm() {
+        // 240 CPUs: (240-16)/10 = 22 extra seconds
+        assert_eq!(
+            compute_timeout(1, 20, 240),
+            Duration::from_secs(32 + 1 * (20 + 2) * 2)
         );
     }
 

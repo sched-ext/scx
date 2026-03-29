@@ -1490,6 +1490,13 @@ fn custom_io_borrowing(ctx: &Ctx) -> Result<VerifyResult> {
 
 fn custom_rebalancing_many(ctx: &Ctx) -> Result<VerifyResult> {
     // Rebalancing with 4 cells and asymmetric demand.
+    if ctx.topo.all_cpus().len() < 5 {
+        return Ok(VerifyResult {
+            passed: true,
+            details: vec!["skipped: need >=5 CPUs for 4 cells".into()],
+            stats: Default::default(),
+        });
+    }
     for i in 0..4 {
         ctx.cgroups.create_cell(&format!("cell_{i}"))?;
     }
@@ -1986,6 +1993,13 @@ fn spawn_diverse(ctx: &Ctx, cell_names: &[&str]) -> Result<Vec<WorkloadHandle>> 
 
 fn custom_mix_no_flags(ctx: &Ctx) -> Result<VerifyResult> {
     // All workload types across 5 cells, no flags. Exercises base dispatch with every work pattern.
+    if ctx.topo.all_cpus().len() < 6 {
+        return Ok(VerifyResult {
+            passed: true,
+            details: vec!["skipped: need >=6 CPUs for 5 cells".into()],
+            stats: Default::default(),
+        });
+    }
     let names: Vec<String> = (0..5).map(|i| format!("cell_{i}")).collect();
     for n in &names {
         ctx.cgroups.create_cell(n)?;
@@ -2025,6 +2039,13 @@ fn custom_mix_cpuset(ctx: &Ctx) -> Result<VerifyResult> {
 
 fn custom_mix_dynamic(ctx: &Ctx) -> Result<VerifyResult> {
     // Dynamic cell ops with diverse workloads.
+    if ctx.topo.all_cpus().len() < 5 {
+        return Ok(VerifyResult {
+            passed: true,
+            details: vec!["skipped: need >=5 CPUs for dynamic cell add".into()],
+            stats: Default::default(),
+        });
+    }
     let names: Vec<String> = (0..3).map(|i| format!("cell_{i}")).collect();
     for n in &names {
         ctx.cgroups.create_cell(n)?;
@@ -2061,6 +2082,13 @@ fn custom_mix_dynamic(ctx: &Ctx) -> Result<VerifyResult> {
 fn custom_mix_allflags(ctx: &Ctx) -> Result<VerifyResult> {
     // All workload types + all flags active (borrow, rebal, no-ctrl, reject-pin) + excluded cell.
     // This is the "kitchen sink" - every work pattern hitting every capability simultaneously.
+    if ctx.topo.all_cpus().len() < 6 {
+        return Ok(VerifyResult {
+            passed: true,
+            details: vec!["skipped: need >=6 CPUs for 5 cells".into()],
+            stats: Default::default(),
+        });
+    }
     let names = ["cell_0", "cell_1", "cell_2", "cell_3", "excluded_cell"];
     for n in &names {
         ctx.cgroups.create_cell(n)?;
@@ -3423,7 +3451,99 @@ pub fn all_scenarios() -> Vec<Scenario> {
             action: Action::Custom(custom_mix_allflags_dynamic),
             extra_sched_args: &["--cell-exclude", "excluded_cell"],
         },
+        // LLC cpumask race — rapid cpuset flips across LLC boundaries
+        Scenario {
+            name: "llc_cpuset_race",
+            category: "stress",
+            description: "Rapid cross-LLC cpuset changes expose LLC mask intersection race",
+            required_flags: &[Flag::LlcAware, Flag::Rebalancing],
+            excluded_flags: &[],
+            num_cells: 0,
+            cpuset_mode: CpusetMode::None,
+            cell_works: vec![],
+            action: Action::Custom(custom_llc_cpuset_race),
+            extra_sched_args: &[],
+        },
     ]
+}
+
+fn custom_llc_cpuset_race(ctx: &Ctx) -> Result<VerifyResult> {
+    // Need at least 2 LLCs to flip cpusets across LLC boundaries.
+    if ctx.topo.num_llcs() < 2 {
+        return Ok(VerifyResult {
+            passed: true,
+            details: vec!["skipped: need >=2 LLCs".into()],
+            stats: Default::default(),
+        });
+    }
+    let llc0_full: BTreeSet<usize> = ctx.topo.llc_aligned_cpuset(0);
+    let llc1_full: BTreeSet<usize> = ctx.topo.llc_aligned_cpuset(1);
+
+    // Reserve one CPU from LLC0 for cell 0 to avoid cell-0-starvation.
+    let reserved = *llc0_full.iter().next().unwrap();
+    let llc0: BTreeSet<usize> = llc0_full.iter().copied().filter(|c| *c != reserved).collect();
+    let llc1: BTreeSet<usize> = llc1_full.clone();
+    if llc0.is_empty() {
+        return Ok(VerifyResult {
+            passed: true,
+            details: vec!["skipped: LLC0 too small after reserving for cell 0".into()],
+            stats: Default::default(),
+        });
+    }
+
+    // Two cells, initially each on its own LLC.
+    ctx.cgroups.create_cell("cell_0")?;
+    ctx.cgroups.set_cpuset("cell_0", &llc0)?;
+    ctx.cgroups.create_cell("cell_1")?;
+    ctx.cgroups.set_cpuset("cell_1", &llc1)?;
+    thread::sleep(Duration::from_secs(2));
+
+    // Oversubscribe both cells — lots of enqueue pressure.
+    let n = llc0.len().max(4) * 8;
+    let mut h0 = WorkloadHandle::spawn(&WorkloadConfig {
+        num_workers: n,
+        work_type: WorkType::Mixed,
+        ..Default::default()
+    })?;
+    for t in h0.tids() {
+        ctx.cgroups.move_task("cell_0", t)?;
+    }
+    let mut h1 = WorkloadHandle::spawn(&WorkloadConfig {
+        num_workers: n,
+        work_type: WorkType::Mixed,
+        ..Default::default()
+    })?;
+    for t in h1.tids() {
+        ctx.cgroups.move_task("cell_1", t)?;
+    }
+    h0.start();
+    h1.start();
+
+    // Rapidly flip cpusets across LLC boundaries to race with LLC assignment.
+    // Build cross-LLC sets (excluding the reserved CPU).
+    let cross0: BTreeSet<usize> = llc1.iter().copied().collect();
+    let cross1: BTreeSet<usize> = llc0.iter().copied().collect();
+    let deadline = Instant::now() + ctx.duration;
+    let mut flip = false;
+    while Instant::now() < deadline {
+        if flip {
+            // cell_0 on LLC1 CPUs, cell_1 on LLC0 CPUs — cross-LLC
+            let _ = ctx.cgroups.set_cpuset("cell_0", &cross0);
+            let _ = ctx.cgroups.set_cpuset("cell_1", &cross1);
+        } else {
+            // cell_0 on LLC0 CPUs, cell_1 on LLC1 CPUs — aligned
+            let _ = ctx.cgroups.set_cpuset("cell_0", &llc0);
+            let _ = ctx.cgroups.set_cpuset("cell_1", &llc1);
+        }
+        flip = !flip;
+        // Short sleep to let rebalancing/reconfiguration run between flips.
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    let mut r = VerifyResult::pass();
+    r.merge(verify::verify_not_starved(&h0.stop_and_collect()));
+    r.merge(verify::verify_not_starved(&h1.stop_and_collect()));
+    Ok(r)
 }
 
 #[cfg(test)]
