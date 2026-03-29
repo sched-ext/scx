@@ -60,26 +60,6 @@ struct cake_brain_hash_entry {
  *
  * Accessed by: cake_running, cake_stopping, cake_select_cpu, cake_enqueue.
  * Allocated in: cake_init_task (BPF_LOCAL_STORAGE_GET_F_CREATE). */
-struct cake_task_hot {
-	u64 staged_vtime_bits; /* 8B: offset 0  (VALID|HOME|WB|WB_DUP|NF|weight) */
-	u32 packed_info;       /* 4B: offset 8  (flags + tier + flow_id) */
-	u32 ppid;              /* 4B: offset 12 (Parent PID / game detect) */
-	
-	/* ── ALPHA FUSION LAYER ── */
-	u32 nvcsw_64_snapshot; /* 4B: offset 16 (Epoch tracking for the 64-stop nvcsw delta) */
-	u32 last_run_at;       /* 4B: offset 20 ( (u32)cake_clock from stopping ) */
-	
-	u32 dsq_weight_base;   /* 4B: offset 24 (tier_base[task_class]) */
-	u8  task_class;        /* 1B: offset 28 (CAKE_CLASS_* enum) */
-	u8  new_flow;          /* 1B: offset 29 (new-flow flag) */
-	u16 vtime_mult;        /* 2B: offset 30 (EEVDF vtime reciprocal) */
-	
-	u64 nvcsw_snapshot;    /* 8B: offset 32 (Perfectly aligned, 0 compiler padding) */
-	u64 dsq_vtime;         /* 8B: offset 40 (EEVDF intra-tier vruntime) */
-	
-	/* Liberated memory! Pad to exactly 64B structural stride */
-	u64 _pad_cl0[2];       /* 16B: offset 48-63 */
-}; /* Total: exactly 64B (1 cache line, complete structural false sharing isolation) */
 
 
 /* ═══ PER-CPU BSS ═══
@@ -113,7 +93,7 @@ struct cake_cpu_bss {
 				 *     Written: running_task_change (check-before-write).
 				 *     Read: enqueue_dsq_dispatch (OR'd with idle_hint). */
 	u8  idle_hint;          /* 1B  off 30: 0=busy, 1=idle (Adjacent for SWAR fetch) */
-	u8  _reserved;          /* 1B  off 31: available for future use */
+	u8  is_hog;             /* 1B  off 31: 1=HOG/BG running (prevents intra-LLC false sharing) */
 	u64 cake_clock;         /* 8B  off 32: BPF-native monotonic clock (ns).
 				 *     ALPHADEV Phase 15: Self-maintaining accumulator.
 				 *     Advanced by consumed slice in cake_stopping
@@ -129,10 +109,7 @@ struct cake_cpu_bss {
  * speculatively load adjacent CPU states, absolutely eradicating MESI
  * snoop invalidation storms across dual-CCD topologies. */
 
-/* Global bitmask: bit N set = CPU N is running a GAME task.
- * Written atomically in cake_running, read in cake_enqueue.
- * find-victim = __builtin_ctzll(~game_cpu_mask & online_mask)
- * = single tzcnt instruction on Zen 4 (1-cycle latency). */
+
 
 /* ═══ COMPILE-TIME HARDWARE SCALING ═══
  * build.rs detects host CPU/LLC count from sysfs at compile time,
@@ -205,18 +182,7 @@ typedef unsigned short cake_cpu_id_t;
  *
  * Bits [61:49] and [47:32] are RESERVED. */
 
-/* ═══ LOCKLESS IDLE SCANNER SHARDS ═══
- * Phase 10: O(1) BPF-Native Idle Tracking.
- * Resolves 9950X Multi-CCD cache snooping storms by physically isolating
- * each LLC's idle tracking array onto distinct 128-byte V-Cache sectors.
- * 
- * At 16 CPUs (9800X3D): 64 bytes (perfectly fits 1 cache line). */
-struct cake_lockless_idle_shard {
-	union {
-		u8 slots[CAKE_MAX_CPUS];
-		u64 chunks[CAKE_MAX_CPUS / 8];
-	};
-} __attribute__((aligned(4096)));
+
 #define STAGED_BIT_VALID        63
 #define STAGED_BIT_IS_GAME      62
 #define STAGED_BIT_NEW_FLOW     48
@@ -481,19 +447,20 @@ struct cake_task_ctx {
 	u32 ppid;              /* 4B: offset 12 (Parent PID) */
 	
 	/* ── ALPHA FUSION LAYER ── */
-	u32 _pad_alpha;        /* 4B: offset 16 (Symmetric padding) */
+	u32 nvcsw_64_snapshot; /* 4B: offset 16 (Epoch tracking for the 64-stop nvcsw delta) */
 	u32 last_run_at;       /* 4B: offset 20 (Last run timestamp, wraps 4.2s) */
 	
-	u8  task_class;        /* 1B: offset 24 (CAKE_CLASS_* enum) */
-	u8  _reserved;         /* 1B: offset 25 */
-	u16 vtime_mult;        /* 2B: offset 26 (mirrors hot->vtime_mult) */
-	u32 _pad_ctx2;         /* 4B: offset 28 (Explicit mathematical pad to close gap before u64) */
+	u32 dsq_weight_base;   /* 4B: offset 24 (tier_base[task_class]) */
+	u8  task_class;        /* 1B: offset 28 (CAKE_CLASS_* enum) */
+	u8  new_flow;          /* 1B: offset 29 (new-flow flag) */
+	u16 vtime_mult;        /* 2B: offset 30 (EEVDF vtime reciprocal) */
 	
 	u64 nvcsw_snapshot;    /* 8B: offset 32 (Zero implicit padding!) */
-
-	/* ─── CL0 total stripped directly to 40B! ─── */
-	/* Pad to 64B CL0 boundary: liberating exactly +24B of native memory real-estate. */
-	u64 _pad_cl0[3];       /* 24B: offset 40-63 (Explicit structural 64B CL0 array) */
+	u64 dsq_vtime;         /* 8B: offset 40 (EEVDF intra-tier vruntime) */
+	
+	/* ─── CL0 total stripped directly to 48B! ─── */
+	/* Pad to 64B CL0 boundary: liberating exactly +16B of native memory real-estate. */
+	u64 _pad_cl0[2];       /* 16B: offset 48-63 (Explicit structural 64B CL0 array) */
 
 #ifndef CAKE_RELEASE
 	/* ═══ CL1+ (bytes 64-511): DEBUG-ONLY TELEMETRY ═══
