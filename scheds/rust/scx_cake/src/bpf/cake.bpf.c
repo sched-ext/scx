@@ -264,19 +264,8 @@ u8 game_confidence = 0;
  * The global was written by every CPU on every context switch,
  * causing 15-core MESI invalidation storms. */
 
-/* PID→task_class cache: tunnels task_class from stopping → select_cpu Gate 2.
- * Eliminates bpf_task_storage_get (28ns avg, 1982ns worst-case jitter)
- * from the select_cpu wakeup path. BSS read = 14ns avg, 96ns jitter.
- * 4096 entries (4KB) indexed by p->pid & 4095. Hash collision risk with
- * ~100 gaming tasks is <0.1%. Written in stopping, read in select_cpu. */
-#define PID_CLASS_CACHE_SIZE 4096
-static u8 pid_class_cache[PID_CLASS_CACHE_SIZE];
 
-/* O(1) GAME preemption bitmask: bit N set = CPU N running a GAME task.
- * Written atomically (or/and) in cake_running. Read in cake_enqueue.
- * F2 FIX: widened to u64[4] for 256 CPUs.
- * find-victim scans words with tzcnt (1 cycle per word). */
-static u64 game_cpu_mask[CAKE_CPU_MASK_WORDS];
+
 
 /* ═══ Per-CPU BSS (128B sector-aligned per entry) ═══
  * Stores per-CPU scheduling state: run timestamps, idle hints,
@@ -292,14 +281,6 @@ static u64 game_cpu_mask[CAKE_CPU_MASK_WORDS];
  * idle_hint + game_running + sched_state_local from target CPU's entry. */
 struct cake_cpu_bss cpu_bss[CAKE_MAX_CPUS];
 
-/* Phase 10: BPF-Native Lockless Idle Tracker.
- * Physically isolates idle tracking bits onto distinct V-Cache sectors
- * to prevent 9950X Multi-CCD cache snooping storms. */
-struct cake_lockless_idle_shard lockless_idle_shards[CAKE_MAX_LLCS];
-
-/* Phase 14: SWAR Victim Tracker
- * Uses the precise identical physical isolation to track BG/HOG tasks. */
-struct cake_lockless_idle_shard hog_shards[CAKE_MAX_LLCS];
 
 /* DSQ MAILBOX: per-LLC flag tracks whether a kick has been sent to drain
  * the LLC DSQ. Set on enqueue (0→1 transition only, check-before-write).
@@ -307,7 +288,10 @@ struct cake_lockless_idle_shard hog_shards[CAKE_MAX_LLCS];
  * Prevents tasks from rotting in DSQ when all CPUs use Gate 1 direct
  * dispatch (which bypasses cake_dispatch entirely).
  * MESI: read-first — stays Shared if already set, no cache bounce. */
-u8 dsq_kick_needed[CAKE_MAX_LLCS];
+struct kick_slot {
+	u8 needed;
+} __attribute__((aligned(CAKE_MBOX_ALIGN)));
+struct kick_slot dsq_kick_needed[CAKE_MAX_LLCS];
 
 /* BenchLab ringbuf: tiny ringbuf for measuring reserve+submit overhead.
  * Size 4096 = minimum page-aligned allocation. Never consumed by userspace;
@@ -330,15 +314,7 @@ struct {
 	__type(value, struct bench_task_val);
 } bench_task_storage SEC(".maps");
 
-/* Per-task hot fields in BPF task_storage (~10ns lookup).
- * Contains DRR++ state (deficit, vtime, class) accessed every stop.
- * Arena CL0 still exists for telemetry but is dead in release builds. */
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct cake_task_hot);
-} task_hot_stor SEC(".maps");
+
 
 /* BenchLab spin lock: measures bpf_spin_lock + unlock cycle cost. */
 struct bench_lock_data {
@@ -1583,14 +1559,12 @@ get_task_ctx(struct task_struct *p)
 	return (struct cake_task_ctx __arena *)scx_task_data(p);
 }
 
-/* get_task_hot: returns the task's BPF task_storage hot fields (~10ns).
- * Contains DRR++ state: deficit, dsq_vtime, task_class, EWMA averages.
- * Faster than arena for fields accessed every stop/run cycle.
- * Returns NULL if task_storage not yet allocated. */
-static __always_inline struct cake_task_hot *
+/* get_task_hot: returns the task's Arena storage (~1ns).
+ * Replaced task_storage kernel kfunc map with O(1) hardware MMU pointer. */
+static __always_inline struct cake_task_ctx __arena *
 get_task_hot(struct task_struct *p)
 {
-	return bpf_task_storage_get(&task_hot_stor, p, 0, 0);
+	return get_task_ctx(p);
 }
 
 /* ═══ Dedup Helpers ═══
@@ -1746,53 +1720,11 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
 		if (cpu >= 0) goto idle_found;
 	} else {
-		/* Unrestricted Task: Unleash the Lockless L1 Scanner!
-		 * By packing all idle slots into a single CCX cache line, checking all 16 cores
-		 * locally takes ~14ns max, entirely bypassing the 700+ Kernel x86 kfunc penalty! */
-		
-		/* ALPHADEV Phase 3: Asymmetric SIMD Offloading 
-		 * Rust AVX512 logic pre-populated optimal search chains per task_class. 
-		 * Replaces massive evaluation tree + fixes old `slots[i]` unaligned steal array bug. */
-		u8 tctx_class = pid_class_cache[p->pid & (PID_CLASS_CACHE_SIZE - 1)];
-		if (tctx_class >= CAKE_CLASS_MAX) tctx_class = CAKE_CLASS_NORMAL;
-		
-		u32 my_llc = cpu_llc_id[prev_cpu & (CAKE_MAX_CPUS - 1)];
-		if (my_llc >= CAKE_MAX_LLCS) my_llc = 0;
-		
-		#pragma unroll(CAKE_MAX_LLCS)
-		for (u32 l = 0; l < CAKE_MAX_LLCS; l++) {
-			u8 target_llc = llc_scan_order[tctx_class][my_llc][l];
-			if (target_llc >= CAKE_MAX_LLCS || target_llc >= nr_llcs) break; /* Sentinel */
-			
-			#pragma unroll
-			for (u32 i = 0; i < CAKE_MAX_CPUS; i += 8) {
-				if (i >= nr_cpus) break;
-				/* ALPHADEV SWAR: 64-bit vectorization reads 8 CPUs simultaneously. */
-				u64 chunk0 = cake_relaxed_load_u64((const volatile u64 *)&lockless_idle_shards[target_llc].chunks[i / 8]);
-				if (chunk0 != 0) {
-					u32 fast_cpu = i + (__builtin_ctzll(chunk0) >> 3);
-					if (fast_cpu < nr_cpus && scx_bpf_test_and_clear_cpu_idle(fast_cpu)) {
-						cpu = fast_cpu;
-						WRITE_ONCE(lockless_idle_shards[target_llc].slots[cpu], 0);
-						goto idle_found;
-					}
-
-					/* ALPHADEV Inline Re-Probe: If the lock failed due to global steal, mask out the failed 
-					 * byte and instantly check if any sibling cores in the exact same chunk are still idle. 
-					 * Prevents false-negative L3 misses under heavy system contention via 3 ALU ops. */
-					chunk0 &= ~(0xFFULL << ((fast_cpu - i) * 8));
-					if (chunk0 != 0) {
-						fast_cpu = i + (__builtin_ctzll(chunk0) >> 3);
-						if (fast_cpu < nr_cpus && scx_bpf_test_and_clear_cpu_idle(fast_cpu)) {
-							cpu = fast_cpu;
-							WRITE_ONCE(lockless_idle_shards[target_llc].slots[cpu], 0);
-							goto idle_found;
-						}
-					}
-				}
-			}
-		}
-		/* Fast-Deny: 100% Load. All slots read 0. Skip idle hunt. */
+		/* Unrestricted Task: Unleash Native Kernel Idle Scanner
+		 * Phase 17: Eliminates BPF SWAR lockless tracking, totally preventing
+		 * intra-LLC false sharing, directly fetching perfectly accurate hw bitmask. */
+		cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
+		if (cpu >= 0) goto idle_found;
 	}
 
 	/* Force DSQ queuing if no idle cores found by lockless */
@@ -1847,7 +1779,7 @@ gate2:
 			 * Branchless: is_game ^ sib_game = true when mismatched. */
 			u8 sib = cpu_sibling_map[candidate & (CAKE_MAX_CPUS - 1)];
 			if (sib < nr_cpus && sib != candidate) {
-				bool sib_game = (game_cpu_mask[sib >> 6] >> (sib & 63)) & 1;
+				bool sib_game = READ_ONCE(cpu_bss[sib & (CAKE_MAX_CPUS - 1)].game_running);
 				if (is_game ^ sib_game)
 					continue;  /* class mismatch — skip */
 			}
@@ -1878,35 +1810,29 @@ tunnel:
 	 * scan local LLC for another BG/HOG task. If found, shrink its
 	 * slice to 1 to force a tick-yield, bypassing IPIs. */
 	do {
-		u8 waker_class = pid_class_cache[p->pid & (PID_CLASS_CACHE_SIZE - 1)];
+		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
+		u8 waker_class = tctx ? tctx->task_class : CAKE_CLASS_NORMAL;
 		if (waker_class == CAKE_CLASS_BG || waker_class == CAKE_CLASS_HOG) {
 			u32 my_llc = cpu_llc_id[prev_cpu & (CAKE_MAX_CPUS - 1)];
 			my_llc &= (CAKE_MAX_LLCS - 1);
 			#pragma unroll
-			for (u32 i = 0; i < CAKE_MAX_CPUS; i += 8) {
-				if (i >= nr_cpus) break;
-				u64 chunk = cake_relaxed_load_u64((const volatile u64 *)&hog_shards[my_llc].chunks[i / 8]);
-				if (chunk != 0) {
-					u32 victim_cpu = i + (__builtin_ctzll(chunk) >> 3);
-					if (victim_cpu < nr_cpus) {
-						u32 vpid = READ_ONCE(cpu_bss[victim_cpu].last_pid);
-						if (vpid) {
-							struct task_struct *victim_p = bpf_task_from_pid(vpid);
-							if (victim_p) {
-								/* ALPHADEV TOCTOU Guard: Verify victim hasn't migrated and is still HOG/BG. 
-								 * Prevents accidental micro-slicing of GAME tasks (Rule 9).
-								 * Uses hog_shards slot directly — same cache line already in L1 from
-								 * the chunk scan above. Zero hash collisions (exact per-CPU truth),
-								 * eliminates pid_class_cache dependency entirely. */
-								if (scx_bpf_task_cpu(victim_p) == victim_cpu &&
-								    READ_ONCE(hog_shards[my_llc].slots[victim_cpu])) {
-									WRITE_ONCE(victim_p->scx.slice, 1);
-								}
-								bpf_task_release(victim_p);
+			for (u32 victim_cpu = 0; victim_cpu < CAKE_MAX_CPUS; victim_cpu++) {
+				if (victim_cpu >= nr_cpus) break;
+				if ((cpu_llc_id[victim_cpu] & (CAKE_MAX_LLCS - 1)) != my_llc)
+					continue;
+				if (READ_ONCE(cpu_bss[victim_cpu].is_hog)) {
+					u32 vpid = READ_ONCE(cpu_bss[victim_cpu].last_pid);
+					if (vpid) {
+						struct task_struct *victim_p = bpf_task_from_pid(vpid);
+						if (victim_p) {
+							if (scx_bpf_task_cpu(victim_p) == victim_cpu &&
+							    READ_ONCE(cpu_bss[victim_cpu].is_hog)) {
+								WRITE_ONCE(victim_p->scx.slice, 1);
 							}
+							bpf_task_release(victim_p);
 						}
-						break;
 					}
+					break;
 				}
 			}
 		}
@@ -1984,7 +1910,7 @@ static __noinline void enqueue_dsq_dispatch(
 	u64 packed_cpu_llc)
 {
 	/* Derive enq_llc from parent (packed) — used for DSQ ID */
-	u32 enq_llc = (u32)(packed_cpu_llc & 0xFFFF);
+	u32 enq_llc = (u32)(packed_cpu_llc & 0xFFFF) & (CAKE_MAX_LLCS - 1);
 
 	/* Derive vtime+slice from parent (p) — consumed by insert, die immediately.
 	 * Via __noinline wrapper: CO-RE struct-arg stack usage stays
@@ -1994,8 +1920,8 @@ static __noinline void enqueue_dsq_dispatch(
 				 p->scx.dsq_vtime, enq_flags);
 
 	/* After insert: only packed_cpu_llc needed (parent of enq_cpu+enq_llc) */
-	if (!dsq_kick_needed[enq_llc]) {
-		dsq_kick_needed[enq_llc] = 1;
+	if (!dsq_kick_needed[enq_llc].needed) {
+		dsq_kick_needed[enq_llc].needed = 1;
 		/* Derive enq_cpu from parent (packed) — just-in-time for kick */
 		u32 enq_cpu = (u32)(packed_cpu_llc >> 32) & 0xFFFF;
 		/* Class-aware kick guard: game_running is set by running_task_change
@@ -2021,7 +1947,8 @@ static __noinline void enqueue_dsq_dispatch(
 		 * Only CAKE_CLASS_GAME tasks are permitted to issue an SCX_KICK_PREEMPT (IPI).
 		 * BG / HOG tasks use the slice-shrinking LAVD strategy instead. */
 		if (kick_flags == 0) { // If it resolves to PREEMPT
-			u8 waker_class = pid_class_cache[p->pid & (PID_CLASS_CACHE_SIZE - 1)];
+			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
+			u8 waker_class = tctx ? tctx->task_class : CAKE_CLASS_NORMAL;
 			if (waker_class != CAKE_CLASS_GAME) {
 				kick_flags = SCX_KICK_IDLE; // Downgrade to gentle wake, forbidding IPI
 			}
@@ -2052,7 +1979,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 {
 
 	u32 enq_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-	struct cake_task_hot *hot = get_task_hot(p);
+	struct cake_task_ctx __arena *hot = get_task_hot(p);
 	u64 staged = hot ? hot->staged_vtime_bits : 0;
 	
 	u32 enq_llc = 0;
@@ -2173,7 +2100,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	bool stats_on = CAKE_STATS_ACTIVE;
 	u64 dispatch_start = stats_on ? scx_bpf_now() : 0;
 
-	u32 my_llc = cpu_bss[cpu_idx].llc_id;
+	u32 my_llc = cpu_bss[cpu_idx].llc_id & (CAKE_MAX_LLCS - 1);
 	u64 my_dsq_id = LLC_DSQ_BASE + my_llc;
 
 	/* 1. Fast Path: Check if our local LLC DSQ actually has tasks */
@@ -2182,7 +2109,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 		 * Eradicates 1 kfunc call per dispatch loop unconditionally. */
 		if (scx_bpf_dsq_move_to_local(my_dsq_id, 0)) {
 			/* Clear mailbox after successful pull (check-before-write). */
-			if (dsq_kick_needed[my_llc]) dsq_kick_needed[my_llc] = 0;
+			if (dsq_kick_needed[my_llc].needed) dsq_kick_needed[my_llc].needed = 0;
 			if (stats_on) {
 				struct cake_stats *s = get_local_stats_for(cpu_idx);
 				s->nr_local_dispatches++;
@@ -2202,7 +2129,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 		for (u32 i = 1; i < CAKE_MAX_LLCS; i++) {
 			if (i >= nr_llcs) break;
 			/* ALPHADEV Phase 8: Multi-CCD O(1) Victim Routing */
-			u32 victim = victim_scan_order[my_llc & (CAKE_MAX_LLCS - 1)][i & (CAKE_MAX_LLCS - 1)];
+			u32 victim = victim_scan_order[my_llc & (CAKE_MAX_LLCS - 1)][i & (CAKE_MAX_LLCS - 1)] & (CAKE_MAX_LLCS - 1);
 
 			u64 victim_dsq = LLC_DSQ_BASE + victim;
 			/* EEVDF TOPOLOGY: only cross-CCD steal when victim has 2+ tasks.
@@ -2211,7 +2138,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 			 * imbalance_pct threshold for cross-domain migration. */
 			if (scx_bpf_dsq_nr_queued(victim_dsq) > 1 && scx_bpf_dsq_move_to_local(victim_dsq, 0)) {
 				/* MAILBOX CLEAR: stolen DSQ drained. */
-				if (dsq_kick_needed[victim]) dsq_kick_needed[victim] = 0;
+				if (dsq_kick_needed[victim].needed) dsq_kick_needed[victim].needed = 0;
 				if (stats_on) {
 					struct cake_stats *s = get_local_stats_for(cpu_idx);
 					s->nr_stolen_dispatches++;
@@ -2243,10 +2170,6 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	 * Avoids unnecessary cache line dirtying. */
 	if (!READ_ONCE(cpu_bss[cpu_idx].idle_hint)) {
 		cpu_bss[cpu_idx].idle_hint = 1;
-		/* ALPHADEV Phase 10: lockless tracker activation */
-		u32 llc = cpu_bss[cpu_idx].llc_id;
-		llc &= (CAKE_MAX_LLCS - 1);
-		WRITE_ONCE(lockless_idle_shards[llc].slots[cpu_idx], 1);
 	}
 }
 
@@ -2284,7 +2207,7 @@ static __noinline void running_telemetry(
 	tctx->telemetry.run_start_ns = start;
 
 	/* Fetch hot internally (cold path, ~10ns). */
-	struct cake_task_hot *hot_tel = get_task_hot(p);
+	struct cake_task_ctx __arena *hot_tel = get_task_hot(p);
 	if (hot_tel && ((p->nvcsw + p->nivcsw) & 63) != 0)
 		return;
 
@@ -2364,16 +2287,6 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	/* Cache-line illusion stripped: run_start unconditionally acquires Exclusive (M) state,
 	 * therefore avoiding the idle_hint check saves 1 branch and 1 load with zero MESI penalty. */
 	WRITE_ONCE(bss->idle_hint, 0);
-	/* ALPHADEV Phase 10: lockless tracker deactivation.
-	 * Check-before-write: shard array is 4096B-aligned (separate CL from cpu_bss).
-	 * Unlike idle_hint (which piggybacks cpu_bss's already-dirty CL), this write
-	 * would dirty its own cache line. On ~75% same-task re-runs the slot is already 0.
-	 * Gate saves 1 store + avoids M-state acquisition on the shard CL.
-	 * On multi-CCD (9950X): prevents cross-CCD snoop on the shared 64B shard line. */
-	u32 bss_llc = bss->llc_id;
-	bss_llc &= (CAKE_MAX_LLCS - 1);
-	if (lockless_idle_shards[bss_llc].slots[cpu])
-		WRITE_ONCE(lockless_idle_shards[bss_llc].slots[cpu], 0);
 
 	/* FAST PATH: Same task re-running on same CPU (~75% in gaming).
 	 * Slice load and task classification deferred into task-change block.
@@ -2392,13 +2305,11 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 		u64 slice = p->scx.slice;
 		bss->last_pid = p->pid;
 		bss->tick_slice = slice ?: quantum_ns;
-		struct cake_task_hot *hot = get_task_hot(p);
+		struct cake_task_ctx __arena *hot = get_task_hot(p);
 
 		if (hot) {
 			u8 tc = hot->task_class;
-			u32 my_llc = bss->llc_id;
-			my_llc &= (CAKE_MAX_LLCS - 1);
-			WRITE_ONCE(hog_shards[my_llc].slots[cpu], (tc == CAKE_CLASS_BG || tc == CAKE_CLASS_HOG) ? 1 : 0);
+			bss->is_hog = (tc == CAKE_CLASS_BG || tc == CAKE_CLASS_HOG) ? 1 : 0;
 
 			/* Class-aware kick guard: game_running=1 when protected. */
 			u8 is_protected = (tc == CAKE_CLASS_GAME);
@@ -2410,16 +2321,6 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 			if (tv > bss->vtime_local)
 				bss->vtime_local = tv;
 
-			/* game_cpu_mask: GAMING only (Gate 2 scan). */
-			if (READ_ONCE(bss->sched_state_local) == CAKE_STATE_GAMING) {
-				u8 game_flag = (tc == CAKE_CLASS_GAME);
-				u32 word = cpu >> 6;
-				u64 bit = 1ULL << (cpu & 63);
-				u64 cur = READ_ONCE(game_cpu_mask[word]);
-				u64 want = (cur & ~bit) | (bit & -(u64)game_flag);
-				if (want != cur)
-					WRITE_ONCE(game_cpu_mask[word], want);
-			}
 		}
 	}
 
@@ -2468,7 +2369,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
  * Register efficiency: p only alive for ~5 instructions (slice read
  * + reclassify call) rather than the full ~38 instruction EWMA block. */
 static __noinline u32 stopping_drr_ewma(
-	struct cake_task_hot *hot,
+	struct cake_task_ctx __arena *hot,
 	struct task_struct *p,
 	struct cake_cpu_bss *bss,
 	bool runnable)
@@ -2600,7 +2501,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	 * exceeds 4 callee-saves → 0 spills. */
 	u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 
-	struct cake_task_hot *hot = get_task_hot(p);
+	struct cake_task_ctx __arena *hot = get_task_hot(p);
 	if (unlikely(!hot))
 		return;
 
@@ -2631,12 +2532,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 	/* Gate Phase C on dsq_weight (0 = non-runnable). */
 	if (dsq_weight) {
-		/* Quantum pack (inlined): PID class cache + staged bits.
-		 * MESI check-before-write. */
-		u32 pid_idx = p->pid & (PID_CLASS_CACHE_SIZE - 1);
-		if (pid_class_cache[pid_idx] != tc)
-			pid_class_cache[pid_idx] = tc;
-			
+
 		/* ALPHADEV Phase 8: Branchless Lockless Oracle Vector */
 		u64 oracle_llc = oracle_llc_by_class[tc & 3];
 			
@@ -2799,7 +2695,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	 * Gate arena CL0 init behind CAKE_STATS_ENABLED to save ~10 arena writes. */
 	if (CAKE_STATS_ENABLED) {
 		tctx->last_run_at      = 0;
-		tctx->_pad_alpha       = 0;
+		tctx->nvcsw_64_snapshot = 0;
 		tctx->task_class       = CAKE_CLASS_NORMAL;
 	}
 
@@ -2845,8 +2741,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	 * dsq_vtime NOT seeded here — cake_enable always overwrites it
 	 * with the correct vtime_local before the task is schedulable.
 	 * Eliminates bpf_get_smp_processor_id() kfunc + BSS indexing. */
-	struct cake_task_hot *hot = bpf_task_storage_get(
-		&task_hot_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	/* BPF Arena hot pointer: fully lockless allocation bypass */
+	struct cake_task_ctx __arena *hot = tctx;
 	if (hot) {
 		hot->packed_info       = packed;
 		u32 init_ppid = p->real_parent ? p->real_parent->tgid : 0;
@@ -2897,7 +2793,7 @@ void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
 	 * p → r6 (callee-save) across storage call.
 	 * hot → r7 (callee-save) across CPU call.
 	 * Each kfunc has only 1 value to preserve → 0 spills. */
-	struct cake_task_hot *hot = get_task_hot(p);
+	struct cake_task_ctx __arena *hot = get_task_hot(p);
 	if (hot)
 		hot->dsq_vtime = cpu_bss[bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1)].vtime_local;
 }
@@ -3229,7 +3125,7 @@ void BPF_STRUCT_OPS(cake_set_weight, struct task_struct *p, u32 weight)
 	 * The kernel calls this when p->scx.weight changes (nice/cgroup).
 	 * Division runs ~once per task lifetime vs. 1/64 stops.
 	 * Eliminates the only division from the scheduling pipeline. */
-	struct cake_task_hot *hot = get_task_hot(p);
+	struct cake_task_ctx __arena *hot = get_task_hot(p);
 	if (hot) {
 		u32 w = weight ?: 100;
 		u16 mult = (u16)(102400 / w);
