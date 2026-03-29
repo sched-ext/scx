@@ -212,13 +212,14 @@ static inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
  */
 static inline u64 cpu_dsq_raw(u32 cpu)
 {
-	return ((dsq_id_t){ .cpu_dsq = { .cpu = cpu,
-					 .type = DSQ_TYPE_CPU } }).raw;
+	return ((dsq_id_t){ .cpu_dsq = { .cpu = cpu, .type = DSQ_TYPE_CPU } })
+		.raw;
 }
 
 static inline u64 cell_llc_dsq_raw(u32 cell, u32 llc)
 {
 	return ((dsq_id_t){ .cell_llc_dsq = { .llc  = llc,
 					      .cell = cell,
-					      .type = DSQ_TYPE_CELL_LLC } }).raw;
+					      .type = DSQ_TYPE_CELL_LLC } })
+		.raw;
 }
