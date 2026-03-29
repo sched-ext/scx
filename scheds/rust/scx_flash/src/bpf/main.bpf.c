@@ -13,6 +13,8 @@
 
 #define MAX_WAKEUP_FREQ		100
 
+#define SLICE_MIN_NS		(10ULL * NSEC_PER_USEC)
+
 /*
  * Return the time interval between two ticks in ns.
  */
@@ -229,6 +231,11 @@ struct task_ctx {
 	 */
 	u64 wakeup_freq;
 	u64 last_woke_at;
+
+	/*
+	 * EWMA of observed runtime slice.
+	 */
+	u64 slice_ns_ewma;
 
 	/*
 	 * cgroup weight (cpu.weight).
@@ -680,13 +687,18 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Try to keep running tasks on the same CPU using the per-CPU DSQ
-	 * and use the per-node DSQ for tasks that are waking up, so they
-	 * can be consumed in the first CPU available.
+	 * If the task is aggressively sleeping and waking up, enqueue it
+	 * directly to the local DSQ to avoid node DSQ lock contention.
 	 */
-	scx_bpf_dsq_insert_vtime(p, node, task_slice(p),
-				 task_dl(p, node, tctx, enq_flags), enq_flags);
-	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+	if ((tctx->slice_ns_ewma && tctx->slice_ns_ewma < SLICE_MIN_NS) &&
+	    is_primary_cpu(p, prev_cpu)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+	} else {
+		scx_bpf_dsq_insert_vtime(p, node, task_slice(p),
+					 task_dl(p, node, tctx, enq_flags), enq_flags);
+		__sync_fetch_and_add(&nr_shared_dispatches, 1);
+	}
 
 	if (!is_running && !__COMPAT_is_enq_cpu_selected(enq_flags))
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
@@ -698,8 +710,6 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
  */
 static bool keep_running(const struct task_struct *p, s32 cpu)
 {
-	const struct cpumask *primary = cast_mask(primary_cpumask);
-
 	/* Do not keep running if the task doesn't need to run */
 	if (!is_queued(p))
 		return false;
@@ -708,8 +718,7 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	 * Do not keep running if the CPU is not in the primary domain and
 	 * the task can use the primary domain.
 	 */
-	if (primary && bpf_cpumask_intersects(primary, p->cpus_ptr) &&
-	    !bpf_cpumask_test_cpu(cpu, primary))
+	if (!is_primary_cpu(p, cpu))
 		return false;
 
 	return true;
@@ -889,7 +898,12 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 		/*
 		 * Evaluate the time slice used by the task.
 		 */
-		slice = now - tctx->last_run_at;
+		slice = MAX(now - tctx->last_run_at, 1);
+
+		if (tctx->slice_ns_ewma)
+			tctx->slice_ns_ewma = calc_avg(tctx->slice_ns_ewma, slice);
+		else
+			tctx->slice_ns_ewma = slice;
 
 		/*
 		 * Update task's vruntime and accumulated runtime.
