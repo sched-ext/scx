@@ -381,9 +381,6 @@ impl<'a> Scheduler<'a> {
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
 
-        // Set scheduler compatibility flags.
-        rodata.__COMPAT_SCX_PICK_IDLE_IN_NODE = *compat::SCX_PICK_IDLE_IN_NODE;
-
         // Set scheduler flags.
         skel.struct_ops.flash_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
