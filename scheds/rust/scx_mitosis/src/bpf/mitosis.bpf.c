@@ -648,14 +648,28 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 	if (cpu >= 0) {
 		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
 		/*
-		 * Use SCX_DSQ_LOCAL_ON to explicitly target the idle CPU
-		 * we found. In the select_cpu path this is redundant
-		 * (SCX_DSQ_LOCAL already resolves to the selected CPU),
-		 * but from the enqueue path (put_prev_task_scx ->
-		 * enqueue), SCX_DSQ_LOCAL resolves to task_rq(p) -- not
-		 * the idle CPU we picked.
+		 * LOCAL_ON for a remote CPU is deferred (the kernel
+		 * can't double-lock a remote rq inline). direct_dispatch
+		 * clears ops_state (QUEUEING -> NONE) before deferring,
+		 * so the task has no synchronization protection during
+		 * the deferred window — a cpuset change can narrow
+		 * p->cpus_ptr before dispatch_to_local_dsq runs.
+		 * dispatch_to_local_dsq then calls
+		 * task_can_run_on_remote_rq(enforce=true), killing the
+		 * scheduler.
+		 *
+		 * Use the per-CPU DSQ for remote CPUs instead. It is a
+		 * user-created DSQ, so direct_dispatch enqueues inline
+		 * (no deferral). The kicked CPU pulls from its per-CPU
+		 * DSQ in ops.dispatch.
 		 */
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
+		if (cpu == scx_bpf_task_cpu(p)) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
+					   0);
+		} else {
+			scx_bpf_dsq_insert_vtime(p, cpu_dsq_raw(cpu), slice_ns,
+						 p->scx.dsq_vtime, 0);
+		}
 		if (kick)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return cpu;
@@ -685,17 +699,22 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 			struct cpu_ctx *target_cctx = lookup_cpu_ctx(cpu);
 			if (target_cctx) {
 				u32 tllc = enable_llc_awareness ?
-					target_cctx->llc : FAKE_FLAT_CELL_LLC;
+						   target_cctx->llc :
+						   FAKE_FLAT_CELL_LLC;
 				if (scx_bpf_dsq_nr_queued(cell_llc_dsq_raw(
 					    target_cctx->cell, tllc)) > 0 ||
-				    scx_bpf_dsq_nr_queued(
-					    cpu_dsq_raw(cpu)) > 0)
+				    scx_bpf_dsq_nr_queued(cpu_dsq_raw(cpu)) > 0)
 					goto no_borrow;
 			}
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
-					   0);
+			/*
+			 * Borrowed CPUs are typically remote — use
+			 * per-CPU DSQ to avoid deferred LOCAL_ON
+			 * (see above).
+			 */
+			scx_bpf_dsq_insert_vtime(p, cpu_dsq_raw(cpu), slice_ns,
+						 p->scx.dsq_vtime, 0);
 			if (kick)
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return cpu;
@@ -1828,7 +1847,7 @@ static void dump_cell_cpumask(int id)
 
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
 {
-	struct cpu_ctx  *cctx;
+	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
