@@ -154,14 +154,14 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "4096")]
+    #[clap(short = 's', long, default_value = "700")]
     slice_us: u64,
 
     /// Maximum runtime budget that a task can accumulate while sleeping (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
-    #[clap(short = 'l', long, default_value = "4096")]
+    #[clap(short = 'l', long, default_value = "20000")]
     slice_us_lag: u64,
 
     /// Dynamically adjust task's maximum sleep budget based on CPU utilization.
@@ -175,7 +175,7 @@ struct Opts {
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
-    #[clap(short = 'r', long, default_value = "32768")]
+    #[clap(short = 'r', long, default_value = "20000")]
     run_us_lag: u64,
 
     /// Throttle the running CPUs by periodically injecting idle cycles.

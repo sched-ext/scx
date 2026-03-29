@@ -51,13 +51,13 @@ const volatile bool primary_all = true;
 /*
  * Default task time slice.
  */
-const volatile u64 slice_max = 4096ULL * NSEC_PER_USEC;
+const volatile u64 slice_max = 700ULL * NSEC_PER_USEC;
 
 /*
  * Maximum runtime budget that a task can accumulate while sleeping (used
  * to determine the task's minimum vruntime).
  */
-const volatile u64 slice_lag = 4096ULL * NSEC_PER_USEC;
+const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
  * Adjust the maximum sleep budget in function of the average CPU
@@ -67,10 +67,10 @@ const volatile bool slice_lag_scaling;
 
 /*
  * Maximum runtime penalty that a task can accumulate while running (used
- * to determine the task's maximum exec_vruntime: accumulated vruntime
- * since last sleep).
+ * to determine the task's maximum awake_vtime: accumulated vruntime since
+ * last sleep).
  */
-const volatile u64 run_lag = 32768ULL * NSEC_PER_USEC;
+const volatile u64 run_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
  * Enable tickless mode.
@@ -233,7 +233,7 @@ struct task_ctx {
 	/*
 	 * Task's average used time slice.
 	 */
-	u64 exec_runtime;
+	u64 awake_vtime;
 	u64 last_run_at;
 
 	/*
@@ -391,6 +391,26 @@ static inline u64 task_slice(const struct task_struct *p)
 {
 	return tickless_sched ? SCX_SLICE_INF :
 				scale_by_weight(p, slice_max);
+}
+
+/*
+ * Return task deadline in function of the accumulated vruntime, limiting
+ * the maximum amount of credit a task can accumulate while sleeping to
+ * prevent starvation.
+ */
+static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
+{
+	u64 vsleep_max = scale_by_weight(p, slice_lag);
+	u64 vtime_min = vtime_now - vsleep_max;
+	u64 dl = p->scx.dsq_vtime;
+
+	if (enq_flags & SCX_ENQ_REENQ)
+		return dl;
+
+	if (time_before(dl, vtime_min))
+		return vtime_min;
+
+	return dl;
 }
 
 /*
@@ -688,8 +708,8 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	else
 		dsq_id = node_to_dsq(node);
 
-	scx_bpf_dsq_insert_vtime(p, dsq_id,
-				 task_slice(p), p->scx.dsq_vtime, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, dsq_id, task_slice(p),
+				 task_dl(p, tctx, enq_flags), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	if (!is_running && !__COMPAT_is_enq_cpu_selected(enq_flags))
@@ -902,12 +922,11 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 		slice = now - tctx->last_run_at;
 
 		/*
-		 * Update task's execution time (exec_runtime), but never
-		 * account more than @run_lag to prevent excessive
-		 * de-prioritization of CPU-intensive tasks (which could
-		 * lead to starvation).
+		 * Update task's execution time, but never account more
+		 * than @run_lag to prevent excessive de-prioritization of
+		 * CPU-intensive tasks (which could lead to starvation).
 		 */
-		tctx->exec_runtime = MIN(tctx->exec_runtime + slice, run_lag);
+		tctx->awake_vtime = MIN(tctx->awake_vtime + slice, run_lag);
 
 		/*
 		 * Update task's vruntime.
@@ -934,7 +953,7 @@ void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	tctx->exec_runtime = 0;
+	tctx->awake_vtime = 0;
 }
 
 void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
