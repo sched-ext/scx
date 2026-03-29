@@ -164,20 +164,6 @@ struct Opts {
     #[clap(short = 'l', long, default_value = "20000")]
     slice_us_lag: u64,
 
-    /// Dynamically adjust task's maximum sleep budget based on CPU utilization.
-    ///
-    /// Enabling this option allows to increase the throughput of highly message passing workloads,
-    /// but it can also reduce the overall system responsiveness.
-    #[clap(short = 'L', long, action = clap::ArgAction::SetTrue)]
-    slice_lag_scaling: bool,
-
-    /// Maximum runtime penalty that a task can accumulate while running (in microseconds).
-    ///
-    /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
-    /// can also make performance more "spikey".
-    #[clap(short = 'r', long, default_value = "20000")]
-    run_us_lag: u64,
-
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
     /// This option can help extend battery life on portable devices, reduce heating, fan noise
@@ -352,10 +338,8 @@ impl<'a> Scheduler<'a> {
         rodata.numa_disabled = numa_disabled;
         rodata.rr_sched = opts.rr_sched;
         rodata.tickless_sched = opts.tickless;
-        rodata.slice_lag_scaling = opts.slice_lag_scaling;
         rodata.slice_max = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
-        rodata.run_lag = opts.run_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
 

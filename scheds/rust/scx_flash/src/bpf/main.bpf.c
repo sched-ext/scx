@@ -66,13 +66,6 @@ const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
 const volatile bool slice_lag_scaling;
 
 /*
- * Maximum runtime penalty that a task can accumulate while running (used
- * to determine the task's maximum awake_vtime: accumulated vruntime since
- * last sleep).
- */
-const volatile u64 run_lag = 20ULL * NSEC_PER_MSEC;
-
-/*
  * Enable tickless mode.
  */
 const volatile bool tickless_sched;
@@ -225,20 +218,8 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
  * This contain all the per-task information used internally by the BPF code.
  */
 struct task_ctx {
-	/*
-	 * Temporary cpumask for calculating scheduling domains.
-	 */
-	struct bpf_cpumask __kptr *cpumask;
-
-	/*
-	 * Task's average used time slice.
-	 */
-	u64 awake_vtime;
+	u64 sum_runtime;
 	u64 last_run_at;
-
-	/*
-	 * cgroup weight.
-	 */
 	u32 cgweight;
 };
 
@@ -397,20 +378,25 @@ static inline u64 task_slice(const struct task_struct *p)
  * Return task deadline in function of the accumulated vruntime, limiting
  * the maximum amount of credit a task can accumulate while sleeping to
  * prevent starvation.
+ *
+ * The amount of time budget accumulated while tasks are sleeping is
+ * inversely proportional to the accumulated runtime (in this way tasks
+ * that sleep frequently accumulate less runtime and they also have a
+ * larger budget).
  */
 static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
 {
-	u64 vsleep_max = scale_by_weight(p, slice_lag);
+	u64 vsleep_max = scale_by_weight(p, slice_lag - tctx->sum_runtime);
 	u64 vtime_min = vtime_now - vsleep_max;
-	u64 dl = p->scx.dsq_vtime;
+	u64 vtime = p->scx.dsq_vtime;
 
 	if (enq_flags & SCX_ENQ_REENQ)
-		return dl;
+		return vtime;
 
-	if (time_before(dl, vtime_min))
-		return vtime_min;
+	if (time_before(vtime, vtime_min))
+		vtime = vtime_min;
 
-	return dl;
+	return vtime;
 }
 
 /*
@@ -888,7 +874,8 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
 	/*
 	 * Adjust target CPU frequency before the task starts to run.
 	 */
-	update_cpu_load(p, tctx);
+	if (cpufreq_perf_lvl < 0)
+		update_cpu_load(p, tctx);
 
 	/*
 	 * Update the global vruntime as a new task is starting to use a
@@ -906,7 +893,6 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 {
 	u64 now = bpf_ktime_get_ns(), slice;
 	s32 cpu = scx_bpf_task_cpu(p);
-	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
 	__sync_fetch_and_sub(&nr_running, 1);
@@ -922,24 +908,22 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 		slice = now - tctx->last_run_at;
 
 		/*
-		 * Update task's execution time, but never account more
-		 * than @run_lag to prevent excessive de-prioritization of
-		 * CPU-intensive tasks (which could lead to starvation).
-		 */
-		tctx->awake_vtime = MIN(tctx->awake_vtime + slice, run_lag);
-
-		/*
-		 * Update task's vruntime.
+		 * Update task's vruntime and accumulated runtime.
 		 */
 		p->scx.dsq_vtime += scale_by_weight_inverse(p, slice);
+		tctx->sum_runtime = MIN(tctx->sum_runtime + slice, slice_lag);
 	}
 
 	/*
 	 * Update CPU runtime.
 	 */
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (cctx)
-		cctx->tot_runtime += now - cctx->last_running;
+	if (cpufreq_perf_lvl < 0) {
+		struct cpu_ctx *cctx;
+
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (cctx)
+			cctx->tot_runtime += now - cctx->last_running;
+	}
 }
 
 void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
@@ -950,19 +934,16 @@ void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	tctx->awake_vtime = 0;
+	if (tctx)
+		tctx->sum_runtime = 0;
 }
 
 void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
 {
-	/*
-	 * Initialize the task vruntime to the current global vruntime.
-	 */
-	if (!rr_sched)
-		p->scx.dsq_vtime = vtime_now;
+	if (rr_sched)
+		return;
+
+	p->scx.dsq_vtime = vtime_now;
 }
 
 s32 BPF_STRUCT_OPS(flash_cgroup_init, struct cgroup *cgrp,
@@ -1030,19 +1011,11 @@ s32 BPF_STRUCT_OPS(flash_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	struct task_ctx *tctx;
-	int err;
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!tctx)
 		return -ENOMEM;
-
-	/*
-	 * Create task's primary cpumask.
-	 */
-	err = init_cpumask(&tctx->cpumask);
-	if (err)
-		return err;
 
 	if (args->cgroup) {
 		struct cgrp_ctx *cgc = try_lookup_cgrp_ctx(args->cgroup);
