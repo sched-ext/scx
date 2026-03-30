@@ -329,10 +329,32 @@ static inline int update_task_llc_assignment(struct task_struct *p,
 	}
 	bpf_cpumask_and(cpumask, (const struct cpumask *)cpumask, llc_mask);
 
-	/* If empty after intersection, nothing can run here */
+	/*
+	 * If empty after intersection, the picked LLC lost its CPUs
+	 * during a concurrent reconfig. Fall back to the flat DSQ
+	 * rather than fatally erroring — dispatch checks the flat
+	 * DSQ as a fallback, and the task will get a valid LLC on
+	 * next enqueue via maybe_refresh_cell.
+	 */
 	if (bpf_cpumask_empty((const struct cpumask *)cpumask)) {
-		scx_bpf_error("Empty cpumask after intersection");
-		return -EINVAL;
+		const struct cpumask *cell_cpumask =
+			lookup_cell_cpumask(tctx->cell);
+		if (cell_cpumask)
+			bpf_cpumask_and(cpumask, cell_cpumask, p->cpus_ptr);
+		tctx->llc = FAKE_FLAT_CELL_LLC;
+		tctx->dsq = get_cell_llc_dsq_id(tctx->cell, FAKE_FLAT_CELL_LLC);
+		if (dsq_is_invalid(tctx->dsq))
+			return -EINVAL;
+		struct cell *cell = lookup_cell(tctx->cell);
+		if (!cell)
+			return -ENOENT;
+		/*
+		 * Use the picked LLC's vtime as basis — the flat DSQ's
+		 * vtime_now may be 0/stale since it's not normally used
+		 * when LLC awareness is enabled.
+		 */
+		p->scx.dsq_vtime = READ_ONCE(cell->llcs[new_llc].vtime_now);
+		return 0;
 	}
 
 	/* --- Point to the correct (cell,LLC) DSQ and set vtime baseline --- */

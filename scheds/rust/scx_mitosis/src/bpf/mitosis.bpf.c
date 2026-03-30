@@ -962,6 +962,24 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	if (scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0))
 		return;
 
+	/*
+	 * Cross-LLC fallback: check other LLC DSQs in this cell.
+	 * After cell reconfiguration, tasks can be stranded on a
+	 * cell-LLC DSQ whose LLC lost all CPUs. Each empty DSQ
+	 * check is a hash lookup + list_empty — negligible cost.
+	 */
+	if (enable_llc_awareness) {
+		u32 other_llc;
+		bpf_for(other_llc, 0, nr_llc)
+		{
+			if (other_llc == llc)
+				continue;
+			if (scx_bpf_dsq_move_to_local(
+				    cell_llc_dsq_raw(cell, other_llc), 0))
+				return;
+		}
+	}
+
 	/* Try work stealing if enabled */
 	if (enable_llc_awareness && enable_work_stealing) {
 		s32 ret = try_stealing_work(cell, llc);
@@ -2541,9 +2559,16 @@ int apply_cell_config(void *ctx)
 			 */
 			continue;
 
-		cgc = lookup_cgrp_ctx(cg);
+		cgc = lookup_cgrp_ctx_fallible(cg);
 		if (!cgc)
-			return -ENOENT;
+			/*
+			 * The cgroup exists but has no storage yet — it
+			 * was created after scheduler init and its
+			 * cgroup_init / tp_cgroup_mkdir hasn't run.
+			 * Skip it; the next apply_cell_config will
+			 * pick it up once initialized.
+			 */
+			continue;
 
 		cell = lookup_cell(cell_id);
 		if (!cell)
@@ -2644,6 +2669,21 @@ int apply_cell_config(void *ctx)
 
 	/* Record that we've processed cpuset changes up to this point */
 	WRITE_ONCE(applied_cpuset_seq, READ_ONCE(cpuset_seq));
+
+	/*
+	 * Phase 6: Kick all CPUs so they re-enter dispatch.
+	 * After reconfiguration, tasks may be stranded on cell-LLC
+	 * DSQs whose LLC lost all CPUs in the cell. The cross-LLC
+	 * fallback in ops.dispatch rescues them, but only if
+	 * dispatch actually runs.
+	 */
+	if (enable_llc_awareness) {
+		u32 kick_cpu;
+		bpf_for(kick_cpu, 0, nr_possible_cpus)
+		{
+			scx_bpf_kick_cpu(kick_cpu, 0);
+		}
+	}
 
 	return 0;
 }
