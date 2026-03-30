@@ -386,7 +386,7 @@ static inline u64 task_slice(const struct task_struct *p)
  * that sleep frequently accumulate less runtime and they also have a
  * larger budget).
  */
-static u64 task_dl(struct task_struct *p, int node, struct task_ctx *tctx, u64 enq_flags)
+static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
 	u64 vsleep_max = scale_by_weight(p, slice_lag * lag_scale);
@@ -413,12 +413,8 @@ static u64 task_dl(struct task_struct *p, int node, struct task_ctx *tctx, u64 e
  */
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
-	const struct cpumask *primary;
+	const struct cpumask *primary = cast_mask(primary_cpumask);
 	s32 cpu;
-
-	primary = cast_mask(primary_cpumask);
-	if (!primary)
-		return -EINVAL;
 
 	/*
 	 * Compatibility with older kernels (< v6.14).
@@ -437,7 +433,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 */
 	wake_flags &= ~SCX_WAKE_SYNC;
 
-	cpu = primary_all ? -ENOENT :
+	cpu = (primary_all || !primary) ? -ENOENT :
 			scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, primary, 0);
 	if (cpu < 0) {
 		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
@@ -474,44 +470,6 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 }
 
 /*
- * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
- *
- * If NUMA support is disabled, @cpu is ignored.
- */
-static inline const struct cpumask *get_idle_cpumask(s32 cpu)
-{
-	if (numa_disabled)
-		return scx_bpf_get_idle_cpumask();
-
-	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
-}
-
-/*
- * Return true if @p is running on a primary CPU or can't run on a primary
- * CPU, because all the CPUs are busy or due to affinity constraint.
- * Otherwise, return false.
- */
-static bool is_primary_cpu(const struct task_struct *p, s32 cpu)
-{
-	const struct cpumask *primary = cast_mask(primary_cpumask);
-	const struct cpumask *idle_mask;
-	bool ret;
-
-	if (!primary_all || !primary)
-		return true;
-
-	if (bpf_cpumask_test_cpu(cpu, primary))
-		return true;
-
-	idle_mask = get_idle_cpumask(cpu);
-	ret = bpf_cpumask_intersects(primary, p->cpus_ptr) &&
-	      bpf_cpumask_intersects(primary, idle_mask);
-	scx_bpf_put_cpumask(idle_mask);
-
-	return ret;
-}
-
-/*
  * Return true if a task is wakeup-intensive (frequent and short
  * sleep/wakeup cycles), false otherwise.
  */
@@ -525,8 +483,8 @@ static inline bool is_wakeup_heavy(const struct task_ctx *tctx)
  *
  * Return true if the task is dispatched, false otherwise.
  */
-static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
-				s32 prev_cpu, u64 enq_flags, bool is_running)
+static bool try_direct_dispatch(struct task_struct *p, s32 prev_cpu,
+				u64 enq_flags, bool is_running)
 {
 	bool is_idle = false;
 	s32 cpu = prev_cpu;
@@ -576,8 +534,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 /*
  * Enqueue a task when running in round-robin mode.
  */
-static void rr_enqueue(struct task_struct *p, struct task_ctx *tctx,
-		       s32 prev_cpu, u64 enq_flags)
+static void rr_enqueue(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 {
 	bool is_idle;
 	s32 cpu;
@@ -610,10 +567,23 @@ static void rr_enqueue(struct task_struct *p, struct task_ctx *tctx,
  */
 void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct task_ctx *tctx;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
-	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
 	bool is_running = scx_bpf_task_running(p);
+	struct task_ctx *tctx;
+
+	/*
+	 * Keep reusing the same CPU in round-robin mode.
+	 */
+	if (rr_sched) {
+		rr_enqueue(p, prev_cpu, enq_flags);
+		return;
+	}
+
+	/*
+	 * Try to dispatch the task directly, if possible.
+	 */
+	if (try_direct_dispatch(p, prev_cpu, enq_flags, is_running))
+		return;
 
 	/*
 	 * Dispatch regular tasks to the shared DSQ.
@@ -623,29 +593,17 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Keep reusing the same CPU in round-robin mode.
-	 */
-	if (rr_sched) {
-		rr_enqueue(p, tctx, prev_cpu, enq_flags);
-		return;
-	}
-
-	/*
-	 * Try to dispatch the task directly, if possible.
-	 */
-	if (try_direct_dispatch(p, tctx, prev_cpu, enq_flags, is_running))
-		return;
-
-	/*
 	 * If the task is aggressively sleeping and waking up, enqueue it
 	 * directly to the local DSQ to avoid node DSQ lock contention.
 	 */
 	if (is_wakeup_heavy(tctx)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	} else {
+		int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+
 		scx_bpf_dsq_insert_vtime(p, node, task_slice(p),
-					 task_dl(p, node, tctx, enq_flags), enq_flags);
+					 task_dl(p, tctx, enq_flags), enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 	}
 
@@ -653,38 +611,10 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
-/*
- * Return true if the task can keep running on its current CPU, false if
- * the task should migrate.
- */
-static bool keep_running(const struct task_struct *p,
-			 const struct task_ctx *tctx, s32 cpu)
-{
-	/* Do not keep running if the task doesn't need to run */
-	if (!is_queued(p))
-		return false;
-
-	/*
-	 * Allow sleep stressors to run anywhere to avoid migration loops.
-	 */
-	if (!primary_all && is_wakeup_heavy(tctx))
-		return true;
-
-	/*
-	 * Do not keep running if the CPU is not in the primary domain and
-	 * the task can use the primary domain.
-	 */
-	if (!is_pcpu_task(p) && !is_primary_cpu(p, cpu))
-		return false;
-
-	return true;
-}
-
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-	struct task_ctx *tctx = prev ? try_lookup_task_ctx(prev) : NULL;
-	bool need_running = tctx && keep_running(prev, tctx, cpu);
+	bool is_prev_running = prev && is_queued(prev);
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
@@ -692,7 +622,8 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	if (is_throttled())
 		return;
 
-	if (need_running) {
+	if (is_prev_running) {
+		struct task_ctx *tctx = prev ? try_lookup_task_ctx(prev) : NULL;
 		struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(node);
 		u64 q_vtime = q ? q->scx.dsq_vtime : ULLONG_MAX;
 
@@ -716,7 +647,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * to run, simply replenish its time slice and let it run for another
 	 * round on the same CPU.
 	 */
-	if (need_running)
+	if (is_prev_running)
 		prev->scx.slice = task_slice(prev);
 }
 
