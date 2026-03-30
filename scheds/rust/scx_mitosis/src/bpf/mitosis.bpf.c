@@ -1877,13 +1877,15 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
 		return;
 
 	/*
-	 * If this CPU's per-CPU DSQ has waiting tasks, zero the
-	 * slice so dispatch runs within this tick rather than
-	 * waiting for the full slice to expire.
+	 * Zero the slice so dispatch runs within this tick when any
+	 * DSQ this CPU services has waiting work:
 	 *
-	 * For cross-cell tasks, also check the native
-	 * cell DSQ — the borrower should yield to native cell
-	 * work that arrived after the borrow started.
+	 *  1. Per-CPU DSQ — pinned tasks waiting on this CPU.
+	 *  2. Cell DSQ — this CPU's cell has queued work while the
+	 *     running task holds the CPU for a full slice. Without
+	 *     this, queued cell DSQ tasks wait up to slice_ns
+	 *     (20ms) for dispatch to run. For borrowed tasks this
+	 *     also reclaims the CPU when native cell work arrives.
 	 */
 	{
 		u64 cdsq = cpu_dsq_raw(scx_bpf_task_cpu(p));
@@ -1892,11 +1894,12 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
 			return;
 		}
 	}
-	if (tctx->cell != cctx->cell) {
+	{
 		u32 llc = enable_llc_awareness ? cctx->llc : FAKE_FLAT_CELL_LLC;
 		u64 cldsq = cell_llc_dsq_raw(cctx->cell, llc);
 		if (scx_bpf_dsq_nr_queued(cldsq) > 0) {
 			p->scx.slice = 0;
+			return;
 		}
 	}
 }
