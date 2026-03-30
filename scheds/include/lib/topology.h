@@ -5,7 +5,7 @@
 struct topology;
 typedef struct topology __arena * topo_ptr;
 
-#define TOPO_MAX_CHILDREN (16)
+#define TOPO_MAX_CHILDREN (512)
 
 enum topo_level {
 	TOPO_TOP	= 0,
