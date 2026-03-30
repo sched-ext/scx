@@ -72,11 +72,10 @@ static u64 vtime_now;
 // CLEARED BY tick() AFTER PREEMPTING A BATCH TASK.
 static bool interactive_waiting;
 
-// SOJOURN TRACKERS: RECORD WHEN OVERFLOW DSQs TRANSITION FROM EMPTY.
-// DISPATCH STEP 0 CHECKS THESE TO RESCUE OVERFLOW TASKS AGING PAST
-// overflow_sojourn_rescue_ns. WITHOUT THIS, PER-CPU DSQ DOMINANCE
-// UNDER SUSTAINED LOAD MAKES ALL DOWNSTREAM ANTI-STARVATION LOGIC
-// (DEFICIT, SOJOURN, STARVATION_RESCUE) UNREACHABLE.
+// SOJOURN TRACKERS: MONOTONIC TIMESTAMPS FOR DISPATCH BIAS.
+// SET WHEN TASKS ENTER DSQ. CLEARED ONLY WHEN DSQ IS EMPTY AND
+// NO NEW TASKS HAVE ARRIVED. DISPATCH COMPUTES SOJOURN BIAS FROM
+// THESE: LONGER WAIT = LOWER ADJUSTED DEADLINE = HIGHER PRIORITY.
 static u64 batch_enqueue_ns;
 static u64 interactive_enqueue_ns;
 
@@ -92,7 +91,6 @@ static u64 pcpu_enqueue_ns[MAX_CPUS];
 static u64 interactive_run;
 static u64 interactive_budget;
 static u64 starvation_rescue_ns;
-static u64 overflow_sojourn_rescue_ns;
 static u32 pcpu_depth_base;
 
 // CUSUM BURST DETECTION (TOTAL-ENQUEUE)
@@ -522,6 +520,35 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 		   s32 prev_cpu, u64 wake_flags)
 {
 	bool is_idle = false;
+
+	// WF_SYNC: PIPE/IPC WAKEUP CONVERGENCE
+	if (wake_flags & SCX_WAKE_SYNC) {
+		s32 waker_cpu = bpf_get_smp_processor_id();
+		if ((u64)waker_cpu < nr_cpu_ids &&
+		    scx_bpf_dsq_nr_queued((u64)waker_cpu) <= pcpu_depth_base) {
+			struct task_ctx *tctx = lookup_task_ctx(p);
+			struct tuning_knobs *knobs = get_knobs();
+			u64 sl = tctx ? task_slice(tctx, knobs) : 1000000;
+			u64 dl = tctx ? task_deadline(p, tctx,
+						       (u64)waker_cpu, knobs)
+				      : vtime_now;
+			scx_bpf_dsq_insert_vtime(p, (u64)waker_cpu,
+						  sl, dl, 0);
+			if ((u32)waker_cpu < MAX_CPUS)
+				__sync_val_compare_and_swap(
+					&pcpu_enqueue_ns[waker_cpu],
+					0, bpf_ktime_get_ns());
+			if (tctx)
+				tctx->dispatch_path = 0;
+			struct pandemonium_stats *s = get_stats();
+			if (s) {
+				s->nr_idle_hits += 1;
+				s->nr_dispatches += 1;
+			}
+			return waker_cpu;
+		}
+	}
+
 	s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
 	if (is_idle) {
@@ -532,7 +559,6 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 		u32 depth_thresh = burst_mode ? 1 : pcpu_depth_base;
 		if ((u64)cpu < nr_cpu_ids &&
 		    scx_bpf_dsq_nr_queued((u64)cpu) < depth_thresh) {
-			// PER-CPU DSQ: CACHE-HOT, VISIBLE, STEALABLE
 			u64 dl = tctx ? task_deadline(p, tctx, (u64)cpu, knobs)
 				      : vtime_now;
 			scx_bpf_dsq_insert_vtime(p, (u64)cpu, sl, dl, 0);
@@ -541,7 +567,6 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 					&pcpu_enqueue_ns[cpu], 0,
 					bpf_ktime_get_ns());
 		} else {
-			// DEPTH EXCEEDED: SPILL TO SHARED NODE DSQ
 			s32 node = __COMPAT_scx_bpf_cpu_node(cpu);
 			if (node < 0 || (u32)node >= nr_nodes) node = 0;
 			u64 node_dsq = nr_cpu_ids + (u64)node;
@@ -554,7 +579,6 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 		}
 
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		__sync_fetch_and_add(&interactive_run, 1);
 
 		if (tctx)
 			tctx->dispatch_path = 0;
@@ -566,11 +590,6 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 			if (tctx)
 				count_l2_affinity(s, tctx, cpu);
 		}
-
-#if TRACE_SCHED
-		if (is_sched_task(p))
-			bpf_printk("PAND: select_cpu pid=%d cpu=%d", p->pid, cpu);
-#endif
 	}
 
 	return cpu;
@@ -588,6 +607,7 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	u64 node_dsq = nr_cpu_ids + (u64)node;
 
 	struct task_ctx *tctx = lookup_task_ctx(p);
+
 	struct tuning_knobs *knobs = get_knobs();
 	u64 sl = tctx ? task_slice(tctx, knobs) : 1000000;
 	u64 dl;
@@ -798,292 +818,192 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	}
 }
 
-// DISPATCH: CPU IS IDLE AND NEEDS WORK
-// HYBRID PER-CPU + NODE DSQ DESIGN (v5.4.8):
-//   SELECT_CPU -> PER-CPU DSQ (DEPTH-GATED, VISIBLE, STEALABLE)
-//   ENQUEUE TIER 1/2 -> NODE DSQ (SHARED, ANY CPU DRAINS)
-//   ENQUEUE TIER 3 -> PER-NODE BATCH/INTERACTIVE DSQ
-//
-// 0. OWN PER-CPU DSQ (CACHE-HOT, ZERO CONTENTION)
-// 1. L2 WORK STEALING (SIBLING PER-CPU DSQs, SAME CACHE DOMAIN)
-// 2. DEFICIT GATE + OVERFLOW SOJOURN RESCUE (AGING OVERFLOW DSQ TASKS)
-// 3. DEFICIT CHECK (DRR: FORCE BATCH RESCUE AFTER BUDGET EXHAUSTED)
-// 4. HARD STARVATION RESCUE (ABSOLUTE SAFETY NET FOR BATCH)
-// 5. NODE INTERACTIVE OVERFLOW (ALL INTERACTIVE TASKS, VTIME-ORDERED)
-// 6. BATCH SOJOURN RESCUE + NODE BATCH OVERFLOW
-// 7. CROSS-NODE STEAL (BOTH INTERACTIVE AND BATCH PER REMOTE NODE)
-// 8. KEEP_RUNNING IF PREV STILL WANTS CPU AND NOTHING QUEUED
+// DISPATCH: UNIFIED CROSS-DSQ COMPARISON WITH SOJOURN BIAS
+// PEEK ALL DSQs (LOCKLESS). COMPUTE ADJUSTED DEADLINE:
+//   adjusted = dsq_vtime - sojourn_bias(wait_time)
+// DISPATCH LOWEST ADJUSTED DEADLINE. DEFICIT COUNTER AS BACKSTOP.
+// TIMESTAMPS ARE MONOTONIC: CLEARED ONLY WHEN DSQ IS TRULY IDLE
+// (CHECKED IN TICK), NOT ON INDIVIDUAL DRAIN EVENTS.
+
+static __always_inline u64 sojourn_bias(u64 now, u64 stamp)
+{
+	if (stamp == 0 || now <= stamp)
+		return 0;
+	u64 sojourn = now - stamp;
+	if (nr_cpu_ids <= 2)
+		return sojourn;
+	if (nr_cpu_ids <= 4)
+		return (sojourn * 3) >> 2;
+	return (sojourn * 3) >> 3;
+}
+
+static __always_inline bool dispatch_dsq(u64 dsq_id)
+{
+	if (!scx_bpf_dsq_move_to_local(dsq_id, 0))
+		return false;
+	// NO TIMESTAMP CLEARING HERE. TIMESTAMPS ARE MONOTONIC.
+	// THEY ARE CLEARED BY tick() WHEN THE DSQ IS CONFIRMED EMPTY.
+	struct pandemonium_stats *s = get_stats();
+	if (s)
+		s->nr_dispatches += 1;
+	return true;
+}
+
 void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 {
 	s32 node = __COMPAT_scx_bpf_cpu_node(cpu);
 	if (node < 0 || (u32)node >= nr_nodes) node = 0;
 	u64 node_dsq = nr_cpu_ids + (u64)node;
 	u64 batch_dsq = nr_cpu_ids + nr_nodes + (u64)node;
-	struct pandemonium_stats *s;
 	u64 now = bpf_ktime_get_ns();
 
-	// STEP 0: OWN PER-CPU DSQ -- HIGHEST PRIORITY, CACHE-HOT
-	if ((u64)cpu < nr_cpu_ids &&
-	    scx_bpf_dsq_move_to_local((u64)cpu, 0)) {
-		if ((u32)cpu < MAX_CPUS &&
-		    scx_bpf_dsq_nr_queued((u64)cpu) == 0) {
-			u64 old = pcpu_enqueue_ns[cpu];
-			if (old > 0)
-				__sync_val_compare_and_swap(
-					&pcpu_enqueue_ns[cpu], old, 0);
-		}
-		__sync_fetch_and_add(&interactive_run, 1);
-		s = get_stats();
-		if (s)
-			s->nr_dispatches += 1;
-		// SOJOURN GATE: ONLY RETURN IF SHARED DSQs ARE NOT STARVING.
-		// IF EITHER OVERFLOW DSQ HAS TASKS AGING PAST THRESHOLD,
-		// FALL THROUGH SO DOWNSTREAM RESCUE LOGIC CAN FIRE.
-		{
-			u64 ie = interactive_enqueue_ns;
-			u64 be = batch_enqueue_ns;
-			if ((ie == 0 || (now - ie) <= overflow_sojourn_rescue_ns) &&
-			    (be == 0 || (now - be) <= overflow_sojourn_rescue_ns))
-				return;
-		}
-	}
+	// PHASE 1: PEEK PER-CPU DSQ + L2 WORK STEAL
+	struct task_struct *pc = NULL;
+	u64 pc_dsq = (u64)cpu;
 
-	// STEP 1: L2 WORK STEALING -- PULL FROM SIBLING PER-CPU DSQs
-	// SAME L2 CACHE DOMAIN = MINIMAL CACHE PENALTY ON STEAL.
-	// BOUNDED LOOP (MAX_L2_SIBLINGS), SAME PATTERN AS find_idle_l2_sibling.
-	u32 my_cpu = (u32)cpu;
-	u32 *group = bpf_map_lookup_elem(&cache_domain, &my_cpu);
-	if (group) {
-		u32 base = *group * MAX_L2_SIBLINGS;
-		for (int i = 0; i < MAX_L2_SIBLINGS; i++) {
-			u32 key = base + i;
-			u32 *val = bpf_map_lookup_elem(&l2_siblings, &key);
-			if (!val || *val == (u32)-1)
-				break;
-			u32 sibling = *val;
-			if (sibling == my_cpu || sibling >= nr_cpu_ids)
-				continue;
-			if (scx_bpf_dsq_move_to_local((u64)sibling, 0)) {
-				if (sibling < MAX_CPUS &&
-				    scx_bpf_dsq_nr_queued((u64)sibling) == 0) {
-					u64 old = pcpu_enqueue_ns[sibling];
-					if (old > 0)
-						__sync_val_compare_and_swap(
-							&pcpu_enqueue_ns[sibling],
-							old, 0);
+	if ((u64)cpu < nr_cpu_ids)
+		pc = __COMPAT_scx_bpf_dsq_peek((u64)cpu);
+
+	if (!pc) {
+		u32 my_cpu = (u32)cpu;
+		u32 *grp = bpf_map_lookup_elem(&cache_domain, &my_cpu);
+		if (grp) {
+			u32 base = *grp * MAX_L2_SIBLINGS;
+			for (int i = 0; i < MAX_L2_SIBLINGS; i++) {
+				u32 key = base + i;
+				u32 *val = bpf_map_lookup_elem(
+					&l2_siblings, &key);
+				if (!val || *val == (u32)-1)
+					break;
+				u32 sib = *val;
+				if (sib == my_cpu || sib >= nr_cpu_ids)
+					continue;
+				if (scx_bpf_dsq_move_to_local((u64)sib, 0)) {
+					__sync_fetch_and_add(
+						&interactive_run, 1);
+					struct pandemonium_stats *s =
+						get_stats();
+					if (s)
+						s->nr_dispatches += 1;
+					return;
 				}
-				__sync_fetch_and_add(&interactive_run, 1);
-				s = get_stats();
-				if (s)
-					s->nr_dispatches += 1;
-				// SOJOURN GATE: SAME CHECK AS STEP 0.
-				{
-					u64 ie = interactive_enqueue_ns;
-					u64 be = batch_enqueue_ns;
-					if ((ie == 0 || (now - ie) <= overflow_sojourn_rescue_ns) &&
-					    (be == 0 || (now - be) <= overflow_sojourn_rescue_ns))
-						return;
-				}
-				break;
 			}
 		}
 	}
 
+	// PHASE 2: PEEK SHARED DSQs + COMPUTE ADJUSTED DEADLINES
+	struct task_struct *nd = __COMPAT_scx_bpf_dsq_peek(node_dsq);
+	struct task_struct *bt = __COMPAT_scx_bpf_dsq_peek(batch_dsq);
+
+	u64 pc_adj = ~0ULL;
+	u64 nd_adj = ~0ULL;
+	u64 bt_adj = ~0ULL;
+
+	if (pc) {
+		u64 stamp = ((u32)cpu < MAX_CPUS)
+			? pcpu_enqueue_ns[cpu] : 0;
+		u64 bias = sojourn_bias(now, stamp);
+		pc_adj = pc->scx.dsq_vtime;
+		if (bias < pc_adj) pc_adj -= bias; else pc_adj = 0;
+	}
+	if (nd) {
+		u64 bias = sojourn_bias(now, interactive_enqueue_ns);
+		nd_adj = nd->scx.dsq_vtime;
+		if (bias < nd_adj) nd_adj -= bias; else nd_adj = 0;
+	}
+	if (bt) {
+		u64 bias = sojourn_bias(now, batch_enqueue_ns);
+		bt_adj = bt->scx.dsq_vtime;
+		if (bias < bt_adj) bt_adj -= bias; else bt_adj = 0;
+	}
+
+	// PHASE 3: LOWEST ADJUSTED DEADLINE WINS
+	u64 best = ~0ULL;
+	u32 winner = 3;
+
+	if (pc && time_before(pc_adj, best)) { best = pc_adj; winner = 0; }
+	if (nd && time_before(nd_adj, best)) { best = nd_adj; winner = 1; }
+	if (bt && time_before(bt_adj, best)) { best = bt_adj; winner = 2; }
+
+	// PHASE 4: DEFICIT BACKSTOP
+	// DEPTH-BASED: IF BATCH DSQ HAS ANY TASKS AND BUDGET EXHAUSTED,
+	// FORCE BATCH. NO TIMESTAMP RACE POSSIBLE.
 	struct tuning_knobs *knobs = get_knobs();
-	u64 sojourn_thresh = knobs ? knobs->sojourn_thresh_ns : 5000000;
-	u64 oldest = batch_enqueue_ns;
-	bool batch_starving = oldest > 0 && (now - oldest) > sojourn_thresh;
 	u64 effective_budget = longrun_mode ? nr_cpu_ids : interactive_budget;
+	bool batch_has_work = bt != NULL;
 
-	// DEFICIT GATE: WHEN INTERACTIVE HAS EXCEEDED ITS BUDGET AND BATCH
-	// IS STARVING, SKIP INTERACTIVE OVERFLOW RESCUE SO BATCH
-	// GETS SERVED VIA DEFICIT CHECK OR STARVATION RESCUE INSTEAD.
-	// EXCEPTION: IF INTERACTIVE TASKS HAVE BEEN WAITING PAST THE
-	// OVERFLOW SOJOURN THRESHOLD, RESCUE IS MORE URGENT THAN DEFICIT.
-	if (interactive_run >= effective_budget && batch_starving) {
-		u64 ie_gate = interactive_enqueue_ns;
-		if (ie_gate == 0 || (now - ie_gate) <= overflow_sojourn_rescue_ns)
-			goto skip_interactive_rescue;
+	if (winner != 2 && winner != 3 &&
+	    interactive_run >= effective_budget &&
+	    batch_has_work) {
+		winner = 2;
+		struct pandemonium_stats *s = get_stats();
+		if (s) s->nr_overflow_rescue += 1;
 	}
 
-	// STEP 2: OVERFLOW SOJOURN AMPLIFICATION
-	// WHEN OVERFLOW DSQs HAVE TASKS AGING PAST 10MS, SERVE THEM.
-	u64 int_oldest = interactive_enqueue_ns;
-	if (int_oldest > 0 &&
-	    (now - int_oldest) > overflow_sojourn_rescue_ns) {
-		if (scx_bpf_dsq_move_to_local(node_dsq, 0)) {
-			if (scx_bpf_dsq_nr_queued(node_dsq) == 0) {
-				u64 old_iens = interactive_enqueue_ns;
-				if (old_iens > 0)
-					__sync_val_compare_and_swap(&interactive_enqueue_ns, old_iens, 0);
-			} else {
-				interactive_enqueue_ns = bpf_ktime_get_ns();
-			}
-			__sync_fetch_and_add(&interactive_run, 1);
-			s = get_stats();
-			if (s) {
-				s->nr_dispatches += 1;
-				s->nr_overflow_rescue += 1;
-			}
-			return;
-		}
-		u64 old_iens = interactive_enqueue_ns;
-		if (old_iens > 0)
-			__sync_val_compare_and_swap(&interactive_enqueue_ns, old_iens, 0);
+	// PHASE 5: DISPATCH WINNER
+	if (winner == 0 && dispatch_dsq(pc_dsq)) {
+		__sync_fetch_and_add(&interactive_run, 1);
+		return;
+	}
+	if (winner == 1 && dispatch_dsq(node_dsq)) {
+		__sync_fetch_and_add(&interactive_run, 1);
+		return;
+	}
+	if (winner == 2 && dispatch_dsq(batch_dsq)) {
+		__sync_lock_test_and_set(&interactive_run, 0);
+		return;
 	}
 
-skip_interactive_rescue:;
+	// RACE RECOVERY
+	if (pc && dispatch_dsq(pc_dsq)) {
+		__sync_fetch_and_add(&interactive_run, 1);
+		return;
+	}
+	if (nd && dispatch_dsq(node_dsq)) {
+		__sync_fetch_and_add(&interactive_run, 1);
+		return;
+	}
+	if (bt && dispatch_dsq(batch_dsq)) {
+		__sync_lock_test_and_set(&interactive_run, 0);
+		return;
+	}
 
-	// BATCH OVERFLOW RESCUE
+	// PHASE 6: SAFETY NETS
+
+	// 500MS HARD STARVATION RESCUE
 	u64 bat_oldest = batch_enqueue_ns;
 	if (bat_oldest > 0 &&
-	    (now - bat_oldest) > overflow_sojourn_rescue_ns) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
-			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
-				u64 old_bens = batch_enqueue_ns;
-				if (old_bens > 0)
-					__sync_val_compare_and_swap(&batch_enqueue_ns, old_bens, 0);
-			} else {
-				batch_enqueue_ns = bpf_ktime_get_ns();
-			}
+	    (now - bat_oldest) > starvation_rescue_ns) {
+		if (dispatch_dsq(batch_dsq)) {
 			__sync_lock_test_and_set(&interactive_run, 0);
-			s = get_stats();
-			if (s) {
-				s->nr_dispatches += 1;
-				s->nr_overflow_rescue += 1;
-			}
 			return;
 		}
-		u64 old_bens = batch_enqueue_ns;
-		if (old_bens > 0)
-			__sync_val_compare_and_swap(&batch_enqueue_ns, old_bens, 0);
-	}
-
-	// DEFICIT COUNTER: ANTI-STARVATION INTERLEAVE (DRR)
-	// AFTER interactive_budget DISPATCHES WITHOUT BATCH SERVICE,
-	// FORCE ONE BATCH DISPATCH WHEN BATCH IS STARVING.
-	// PROPORTIONAL: BUDGET = nr_cpu_ids * 4 (SET IN init()).
-	// LONGRUN OVERRIDE: WHEN SUSTAINED BATCH PRESSURE (>2S), TIGHTEN
-	// FROM nr_cpu_ids*4 TO nr_cpu_ids*1, QUADRUPLING BATCH SHARE.
-	if (interactive_run >= effective_budget && batch_starving) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
-			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
-				u64 old_bens = batch_enqueue_ns;
-				if (old_bens > 0)
-					__sync_val_compare_and_swap(&batch_enqueue_ns, old_bens, 0);
-			} else {
-				batch_enqueue_ns = bpf_ktime_get_ns();
-			}
-			__sync_lock_test_and_set(&interactive_run, 0);
-			s = get_stats();
-			if (s)
-				s->nr_dispatches += 1;
-			return;
-		}
-		__sync_lock_test_and_set(&interactive_run, 0);
-	}
-
-	// HARD STARVATION RESCUE: ABSOLUTE SAFETY NET
-	// THE DEFICIT COUNTER IS THE ONLY PATH THAT SERVES BATCH WHEN THE
-	// INTERACTIVE DSQ IS NON-EMPTY. IF IT FAILS (LOST INCREMENTS UNDER
-	// CONTENTION, SLOW ACCUMULATION ON HIGH CORE COUNTS), BATCH TASKS
-	// STARVE UNTIL THE KERNEL WATCHDOG KILLS THE SCHEDULER.
-	// THIS CHECK FIRES BEFORE THE INTERACTIVE DSQ AND GUARANTEES BATCH
-	// SERVICE WITHIN 500MS REGARDLESS OF INTERACTIVE PRESSURE.
-	if (oldest > 0 &&
-	    (now - oldest) > starvation_rescue_ns) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
-			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
-				u64 old_bens = batch_enqueue_ns;
-				if (old_bens > 0)
-					__sync_val_compare_and_swap(&batch_enqueue_ns, old_bens, 0);
-			} else {
-				batch_enqueue_ns = bpf_ktime_get_ns();
-			}
-			__sync_lock_test_and_set(&interactive_run, 0);
-			s = get_stats();
-			if (s)
-				s->nr_dispatches += 1;
-			return;
-		}
-	}
-
-	// NODE INTERACTIVE OVERFLOW: LATCRIT + INTERACTIVE TASKS
-	// INTERACTIVE FIRST WITHIN EACH BUDGET CYCLE. NO PRIORITY INVERSION.
-	if (scx_bpf_dsq_move_to_local(node_dsq, 0)) {
-		if (scx_bpf_dsq_nr_queued(node_dsq) == 0) {
-			u64 old_iens = interactive_enqueue_ns;
-			if (old_iens > 0)
-				__sync_val_compare_and_swap(&interactive_enqueue_ns, old_iens, 0);
-		} else {
-			interactive_enqueue_ns = bpf_ktime_get_ns();
-		}
-		__sync_fetch_and_add(&interactive_run, 1);
-		s = get_stats();
-		if (s)
-			s->nr_dispatches += 1;
-		return;
-	}
-
-	// BATCH SOJOURN RESCUE: CODEL-INSPIRED STARVATION SAFETY NET.
-	// FIRES WHEN INTERACTIVE OVERFLOW IS EMPTY AND BATCH IS STARVING.
-	// THRESHOLD SET BY RUST ADAPTIVE LAYER FROM OBSERVED DISPATCH RATE.
-	if (batch_starving) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
-			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
-				u64 old_bens = batch_enqueue_ns;
-				if (old_bens > 0)
-					__sync_val_compare_and_swap(&batch_enqueue_ns, old_bens, 0);
-			} else {
-				batch_enqueue_ns = bpf_ktime_get_ns();
-			}
-			s = get_stats();
-			if (s)
-				s->nr_dispatches += 1;
-			return;
-		}
-	}
-
-	// NODE BATCH OVERFLOW: NORMAL FALLBACK FOR BATCH TASKS
-	if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
-		if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
-			u64 old_bens = batch_enqueue_ns;
-			if (old_bens > 0)
-				__sync_val_compare_and_swap(&batch_enqueue_ns, old_bens, 0);
-		} else {
-			batch_enqueue_ns = bpf_ktime_get_ns();
-		}
-		s = get_stats();
-		if (s)
-			s->nr_dispatches += 1;
-		return;
 	}
 
 	// CROSS-NODE STEAL
 	for (u32 n = 0; n < nr_nodes && n < MAX_NODES; n++) {
 		if (n != (u32)node) {
 			if (scx_bpf_dsq_move_to_local(nr_cpu_ids + (u64)n, 0)) {
-				s = get_stats();
-				if (s)
-					s->nr_dispatches += 1;
+				struct pandemonium_stats *s = get_stats();
+				if (s) s->nr_dispatches += 1;
 				return;
 			}
-			if (scx_bpf_dsq_move_to_local(nr_cpu_ids + nr_nodes + (u64)n, 0)) {
-				s = get_stats();
-				if (s)
-					s->nr_dispatches += 1;
+			if (scx_bpf_dsq_move_to_local(
+				    nr_cpu_ids + nr_nodes + (u64)n, 0)) {
+				struct pandemonium_stats *s = get_stats();
+				if (s) s->nr_dispatches += 1;
 				return;
 			}
 		}
 	}
 
-	// NOTHING IN ANY DSQ -- KEEP PREV RUNNING IF POSSIBLE
+	// KEEP PREV RUNNING
 	if (prev && !(prev->flags & PF_EXITING) &&
 	    (prev->scx.flags & SCX_TASK_QUEUED)) {
 		struct task_ctx *tctx = lookup_task_ctx(prev);
 		prev->scx.slice = tctx ? task_slice(tctx, knobs) :
 				  (knobs ? knobs->slice_ns : 1000000);
-		s = get_stats();
+		struct pandemonium_stats *s = get_stats();
 		if (s) {
 			s->nr_keep_running += 1;
 			s->nr_dispatches += 1;
@@ -1352,6 +1272,28 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 		longrun_mode = false;
 		if (s)
 			s->batch_sojourn_ns = 0;
+		// DSQ CONFIRMED EMPTY IN TICK: CLEAR MONOTONIC TIMESTAMP
+		// SO SOJOURN BIAS DOESN'T ACCUMULATE WHEN NO TASKS WAITING.
+		u64 old_bens = batch_enqueue_ns;
+		if (old_bens > 0)
+			__sync_val_compare_and_swap(
+				&batch_enqueue_ns, old_bens, 0);
+	}
+
+	// CLEAR INTERACTIVE TIMESTAMP IF NODE DSQ EMPTY
+	{
+		s32 tick_node = __COMPAT_scx_bpf_cpu_node(
+			bpf_get_smp_processor_id());
+		if (tick_node >= 0 && (u32)tick_node < nr_nodes) {
+			u64 int_dsq = nr_cpu_ids + (u64)tick_node;
+			if (scx_bpf_dsq_nr_queued(int_dsq) == 0) {
+				u64 old_iens = interactive_enqueue_ns;
+				if (old_iens > 0)
+					__sync_val_compare_and_swap(
+						&interactive_enqueue_ns,
+						old_iens, 0);
+			}
+		}
 	}
 
 	// PER-CPU DSQ SOJOURN: CHECK OWN DSQ + ROTATING GLOBAL SCAN.
@@ -1484,14 +1426,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(pandemonium_init)
 	for (u32 i = 0; i < nr_nodes && i < MAX_NODES; i++)
 		scx_bpf_create_dsq(nr_cpu_ids + nr_nodes + i, (s32)i);
 
-	// ANTI-STARVATION BUDGET: SCALE RATIO WITH CORE COUNT
-	// 2C: RATIO=3 (BUDGET=6), 4C+: RATIO=4 (SAME AS BEFORE)
-	{
-		u64 ratio = 2 + (nr_cpu_ids >> 1);
-		if (ratio > 4) ratio = 4;
-		interactive_budget = nr_cpu_ids * ratio;
-		if (interactive_budget < 2) interactive_budget = 2;
-	}
+	// ANTI-STARVATION BUDGET: TIGHTER AT LOW CORE COUNTS
+	// UNIFIED DISPATCH RELIES ON SOJOURN BIAS FOR PRIMARY FAIRNESS.
+	// THE DEFICIT BACKSTOP FIRES LESS OFTEN BUT MUST FIRE FAST ENOUGH
+	// AT LOW CORE COUNTS WHERE BIAS HAS FEWER DISPATCH OPPORTUNITIES.
+	// 2C: 4, 4C: 8, 8C: 16, 12C: 24
+	interactive_budget = nr_cpu_ids * 2;
+	if (interactive_budget < 4) interactive_budget = 4;
 
 	// STARVATION RESCUE: MIN OF TWO LINEAR FUNCTIONS
 	// linear_up: SHORT AT LOW CORES (FAST STARVATION)
@@ -1509,14 +1450,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(pandemonium_init)
 		if (starvation_rescue_ns > 500000000ULL)
 			starvation_rescue_ns = 500000000ULL;
 	}
-
-	// OVERFLOW SOJOURN RESCUE: SCALE WITH CORE COUNT
-	// 2C: 4MS, 4C: 8MS, 5C+: 10MS (CAPPED AT OLD STATIC VALUE)
-	overflow_sojourn_rescue_ns = nr_cpu_ids * 2000000ULL;
-	if (overflow_sojourn_rescue_ns < 4000000ULL)
-		overflow_sojourn_rescue_ns = 4000000ULL;
-	if (overflow_sojourn_rescue_ns > 10000000ULL)
-		overflow_sojourn_rescue_ns = 10000000ULL;
 
 	// PER-CPU DSQ DEPTH GATE: 1 BELOW 4 CPUS, 2 AT 4+
 	pcpu_depth_base = (nr_cpu_ids < 4) ? 1 : 2;

@@ -205,7 +205,9 @@ pub fn monitor_loop(
             }
             if regime_hold >= 2 {
                 regime = detected;
-                sched.write_tuning_knobs(&scaled_regime_knobs(regime, nr_cpus))?;
+                let mut rk = scaled_regime_knobs(regime, nr_cpus);
+                rk.sojourn_thresh_ns = sojourn_thresh_ns;
+                sched.write_tuning_knobs(&rk)?;
                 regime_changed_this_tick = true;
                 tightened = false;
                 relax_counter = 0;
@@ -224,7 +226,7 @@ pub fn monitor_loop(
             let ceiling = regime.p99_ceiling();
             if tuning::should_reflex_tighten(p99_ns, tp99_i_ns, ceiling) {
                 spike_count += 1;
-                if spike_count >= 2 && regime == Regime::Mixed {
+                if spike_count >= 2 && regime != Regime::Light {
                     let current = sched.read_tuning_knobs();
                     let new_slice = (current.slice_ns * 3 / 4).max(MIN_SLICE_NS);
                     let knobs = TuningKnobs {
@@ -256,6 +258,7 @@ pub fn monitor_loop(
                             slice_ns: new_slice,
                             preempt_thresh_ns: baseline.preempt_thresh_ns.min(new_slice),
                             batch_slice_ns: current.batch_slice_ns,
+                            sojourn_thresh_ns,
                             ..baseline
                         };
                         sched.write_tuning_knobs(&knobs)?;
@@ -292,11 +295,13 @@ pub fn monitor_loop(
             baseline.affinity_mode
         };
 
-        // DISPATCH-RATE ADAPTIVE SOJOURN THRESHOLD
-        // MEASURE, DON'T ASSUME. DISPATCH RATE REFLECTS ACTUAL SYSTEM
-        // CAPACITY (PHYSICAL CORES, SMT, FREQUENCY, WORKLOAD INTENSITY).
-        // NORMALIZED TO ACTUAL ELAPSED TIME (SLEEP OVERSHOOTS UNDER LOAD).
-        const SOJOURN_MULTIPLIER: u64 = 4; // 4X DISPATCH INTERVAL
+        // DISPATCH-RATE ADAPTIVE SOJOURN THRESHOLD WITH RESCUE FEEDBACK
+        // BASE: 4X DISPATCH INTERVAL (DISPATCH RATE REFLECTS SYSTEM CAPACITY).
+        // RESCUE FEEDBACK: IF THE DEFICIT BACKSTOP FIRED (nr_overflow_rescue
+        // INCREMENTED), THE SOJOURN BIAS WASN'T SUFFICIENT -- TIGHTEN THE
+        // TICK PREEMPTION THRESHOLD TO FORCE MORE DISPATCH CYCLES.
+        // IF NO RESCUES FOR SEVERAL TICKS, RELAX TOWARD BASELINE.
+        const SOJOURN_MULTIPLIER: u64 = 4;
 
         if delta_d > 0 && elapsed_ns > 0 {
             let dispatch_rate = delta_d * 1_000_000_000 / elapsed_ns;
@@ -305,9 +310,14 @@ pub fn monitor_loop(
             } else {
                 0
             };
-            let target =
+            let mut target =
                 (interval_ns * SOJOURN_MULTIPLIER).clamp(sojourn_floor_ns, sojourn_ceil_ns);
-            // EWMA: 7/8 OLD + 1/8 NEW (SMOOTH, NO JITTER)
+
+            // RESCUE FEEDBACK: TIGHTEN WHEN BACKSTOP FIRES
+            if delta_rescue > 0 {
+                target = (target * 3 / 4).max(sojourn_floor_ns);
+            }
+
             sojourn_thresh_ns = sojourn_thresh_ns - (sojourn_thresh_ns >> 3) + (target >> 3);
         }
 

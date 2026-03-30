@@ -174,7 +174,7 @@ pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64) -> TuningKnobs {
     match r {
         Regime::Heavy | Regime::Light => {
             let slice_cap = nr_cpus * 500_000;
-            let preempt_cap = nr_cpus * 250_000;
+            let preempt_cap = (nr_cpus * 250_000).max(1_000_000);
             knobs.slice_ns = knobs.slice_ns.min(slice_cap);
             knobs.preempt_thresh_ns = knobs.preempt_thresh_ns.min(preempt_cap);
         }
