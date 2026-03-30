@@ -67,7 +67,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, u64 id)
 }
 
 
-static
+static __noinline
 int topo_add(topo_ptr parent, scx_bitmap_t mask, u64 id)
 {
 	topo_ptr child;
@@ -77,14 +77,14 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask, u64 id)
 		return -EINVAL;
 	}
 
-	child = topo_node(parent, mask, id);
-	if (!child)
-		return -ENOMEM;
-
 	if (parent->nr_children >= TOPO_MAX_CHILDREN) {
 		bpf_printk("topology fanout is too large");
 		return -EINVAL;
 	}
+
+	child = topo_node(parent, mask, id);
+	if (!child)
+		return -ENOMEM;
 
 	parent->children[parent->nr_children++] = child;
 
@@ -96,7 +96,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id)
 {
 	/* Initializing the child to appease the verifier. */
 	topo_ptr topo, child = NULL;
-	int i, j;
+	int i, j, ret;
 
 	topo = topo_all;
 	if (!topo_all) {
@@ -132,7 +132,9 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id)
 		 * parent topology node.
 		 */
 		if (j == topo->nr_children) {
-			topo_add(topo, mask, id);
+			ret = topo_add(topo, mask, id);
+			if (ret)
+				return ret;
 			nr_topo_nodes[i]++;
 			return 0;
 		}
