@@ -23,6 +23,7 @@ use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use log::info;
 use scx_stats::prelude::*;
+use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
@@ -37,8 +38,12 @@ use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_flow";
 
+fn full_version() -> String {
+    build_id::full_version(env!("CARGO_PKG_VERSION"))
+}
+
 #[derive(Debug, Parser)]
-#[command(name = SCHEDULER_NAME, version)]
+#[command(name = SCHEDULER_NAME, version, disable_version_flag = true)]
 struct Opts {
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -51,6 +56,10 @@ struct Opts {
     /// Debug mode
     #[clap(short, long, action = clap::ArgAction::SetTrue)]
     debug: bool,
+
+    /// Print scheduler version and exit.
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 
     /// Disable adaptive runtime tuning and keep fixed default policy values.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -470,6 +479,11 @@ fn main() -> Result<()> {
     let opts = Opts::parse();
     let monitor_only = opts.monitor.is_some();
 
+    if opts.version {
+        println!("{} {}", SCHEDULER_NAME, full_version());
+        return Ok(());
+    }
+
     if !monitor_only {
         simplelog::SimpleLogger::init(
             if opts.debug {
@@ -480,6 +494,7 @@ fn main() -> Result<()> {
             simplelog::Config::default(),
         )?;
 
+        info!("{} {}", SCHEDULER_NAME, full_version());
         info!("Starting {} scheduler", SCHEDULER_NAME);
     }
 
