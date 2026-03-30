@@ -567,15 +567,15 @@ _Static_assert(
 	"cake_task_ctx size mismatch (64B release, 512B debug)");
 
 /* packed_info bitfield layout (write-set co-located for mask fusion):
- * [Stable:2][Tier:2][Flags:4][KTH:1][BG:1][Rsvd:14][Rsvd:8]
+ * [Stable:2][Tier:2][Flags:4][KCR:1][BG:1][Rsvd:14][Rsvd:8]
  *  31-30     29-28   27-24    23     22    21-8       7-0
  * TIER+STABLE adjacent → fused 4-bit clear/set in reclassify.
- * KTH = cached PF_KTHREAD (set once in cake_init_task).
+ * KCR = cached critical kernel thread (set once in cake_init_task).
  * BG  = background noise squeeze (toggled in cake_stopping). */
 #define SHIFT_FLAGS 24 /* 4 bits: flow flags */
 #define SHIFT_TIER 28 /* 2 bits: tier 0-3 (coalesced with STABLE) */
 #define SHIFT_STABLE 30 /* 2 bits: tier-stability counter (0-3) */
-#define BIT_KTHREAD 23 /* 1 bit: cached PF_KTHREAD (set in init_task) */
+#define BIT_KCRITICAL 23 /* 1 bit: latency-critical kthread (set in init_task) */
 #define BIT_BG_NOISE 22 /* 1 bit: background noise squeeze active */
 
 #define MASK_TIER 0x03 /* 2 bits: 0-3 */

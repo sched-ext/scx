@@ -47,14 +47,18 @@ const u32  preempt_yielder_ns    = CAKE_PREEMPT_YIELDER_THRESHOLD_NS; /* 100µs 
  * Lookup tables eliminate branching chains — single indexed load is O(1)
  * regardless of class, with zero pipeline misprediction variance.
  *
- * tier_base[] defines vtime offsets that guarantee class ordering in DSQ:
- *   Index 0 = NORMAL → 8192  (baseline)
- *   Index 1 = GAME   → 0     (highest priority: sorts before NORMAL)
- *   Index 2 = HOG    → 49152 (6× NORMAL: worst offender, 75%+ quantum)
- *   Index 3 = BG     → 32768 (4× NORMAL: passive background)
+ * ALPHADEV Phase 17: Absolute Tier Isolation (Iron Curtain)
+ * vt_min floor gives up to 200,000,000ns (200ms) of "Sleeper Bonus" credit.
+ * To ensure sleeping lower-tier threads cannot usurp an active GAME thread, 
+ * the tier gap mathematically strictly exceeds 200,000,000.
+ *
+ *   Index 0 = NORMAL → 250,000,000 (250ms gap)
+ *   Index 1 = GAME   → 0           (Absolute VIP)
+ *   Index 2 = HOG    → 750,000,000 (750ms total gap)
+ *   Index 3 = BG     → 500,000,000 (500ms total gap)
  *
  * Resulting DSQ order: GAME < NORMAL < BG < HOG (lower = dispatched first). */
-const u32  tier_base[4]           = { 8192, 0, 49152, 32768 };
+const u32  tier_base[4]           = { 250000000, 0, 750000000, 500000000 };
 /* rt_cost_cap[]: max vtime cost per class, clamped to prevent cross-bucket drift.
  * All inter-bucket gaps ≥ 3072, so a uniform cap of 4096 is safe. */
 const u32  rt_cost_cap[4]        = { 4096, 4096, 4096, 4096 };
@@ -1943,13 +1947,13 @@ static __noinline void enqueue_dsq_dispatch(
 		 * entirely, saving ~30 instructions per dispatch under heavy load. */
 		u8 is_idle = (flag_pack >> 16) & 1;
 
-		/* ALPHADEV Phase 14: Origin-Aware Kick Guard (Anti-IPI Storm)
-		 * Only CAKE_CLASS_GAME tasks are permitted to issue an SCX_KICK_PREEMPT (IPI).
-		 * BG / HOG tasks use the slice-shrinking LAVD strategy instead. */
+		/* ALPHADEV Phase 14: Destination-Aware Kick Guard (Anti-IPI Storm)
+		 * Only CAKE_CLASS_GAME tasks (being woken up) are permitted to receive an SCX_KICK_PREEMPT (IPI).
+		 * BG / HOG tasks use the slice-shrinking LAVD strategy instead to prevent cache thrashing. */
 		if (kick_flags == 0) { // If it resolves to PREEMPT
 			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-			u8 waker_class = tctx ? tctx->task_class : CAKE_CLASS_NORMAL;
-			if (waker_class != CAKE_CLASS_GAME) {
+			u8 wakee_class = tctx ? tctx->task_class : CAKE_CLASS_NORMAL;
+			if (wakee_class != CAKE_CLASS_GAME) {
 				kick_flags = SCX_KICK_IDLE; // Downgrade to gentle wake, forbidding IPI
 			}
 		}
@@ -1980,6 +1984,14 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 
 	u32 enq_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 	struct cake_task_ctx __arena *hot = get_task_hot(p);
+
+	/* ALPHADEV D2: O(1) Local Bypass for Critical Network/Input KThreads */
+	if (hot && (hot->packed_info & (1u << BIT_KCRITICAL))) {
+		u32 task_cpu = scx_bpf_task_cpu(p);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | task_cpu, SCX_SLICE_DFL, enq_flags);
+		return;
+	}
+
 	u64 staged = hot ? hot->staged_vtime_bits : 0;
 	
 	u32 enq_llc = 0;
@@ -2045,13 +2057,25 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	/* ── WAKEUP (inlined from enqueue_wakeup_path) ──
 	 * Main dispatch path (~90%). Fuses hot-> derivatives. */
 	{
+		/* ALPHADEV Phase 1: Branchless Algebraic Floor 
+		 * Evaluated at wakeup to strictly enforce 200ms sleep credit max, 
+		 * guaranteeing the Iron Curtain tier integrity. */
+		u64 vcl = cpu_bss[enq_cpu].vtime_local;
+		u64 vt_min = vcl - 200000000ULL;
+		vt_min &= -(u64)(vcl >= 200000000ULL);
+
+		u64 cur_vt = hot->dsq_vtime;
+		hot->dsq_vtime = cur_vt + ((vt_min - cur_vt) & -(u64)(cur_vt < vt_min));
+
 		u32 dsq_weight = (u32)(staged & 0xFFFFFFFF);
 		u8 new_flow = (staged >> STAGED_BIT_NEW_FLOW) & 1;
 		
 		/* ALPHADEV 4 / 40: is_game parsed directly from ALU bitmask staged_vtime_bits.
 		 * Bypass sched_state_local memory fetch in hottest loop. (Unconditional priority slicing) */
 		u64 is_game = (staged >> STAGED_BIT_IS_GAME) & 1;
-		u64 slice = quantum_ns << is_game;
+		/* ALPHADEV ILP Shield: << (is_game * 2) mathematically yields 4x slice (8ms).
+		 * Prevents 2ms kernel tick from slicing 2.5ms frames in half at 400 FPS. */
+		u64 slice = quantum_ns << (is_game * 2);
 		p->scx.slice = slice;
 
 		/* EEVDF Deadline Projection: project virtual deadline to eliminate intra-tier latency jitter */
@@ -2163,7 +2187,8 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 		 * Avoids reading prev->pid and bss->pid_class_cache. 
 		 * cpu_bss[cpu_idx] is already hot in L1. 1 read + 1 ALU shift. */
 		u8 is_gaming = (cpu_bss[cpu_idx].sched_state_local == CAKE_STATE_GAMING);
-		prev->scx.slice = quantum_ns << is_gaming;
+		/* ALPHADEV ILP Shield: Branchless 4x quantum (8ms) mid-frame slice prevention. */
+		prev->scx.slice = quantum_ns << (is_gaming * 2);
 	}
 
 	/* Check-before-write: only mark idle if not already idle.
@@ -2420,12 +2445,12 @@ static __noinline u32 stopping_drr_ewma(
 			}
 		} else {
 			/* ── GAMING path: full classification ── */
-			u8 is_kthread = (packed >> BIT_KTHREAD) & 1;
+			u8 is_kcritical = (packed >> BIT_KCRITICAL) & 1;
 
 			bool cls_game = (p->tgid == game_tgid)
 				     || (hot->ppid == game_ppid)
 				     || (hot->ppid == game_tgid)
-				     || is_kthread;
+				     || is_kcritical;
 
 			/* O(1) Lockless Classification Cache 
 			 * Replaces 32+ loop iterations with a single branchless memory load. */
@@ -2436,7 +2461,7 @@ static __noinline u32 stopping_drr_ewma(
 				}
 			}
 
-			/* ALPHADEV 40: is_kthread implicitly merged into cls_game. */
+			/* ALPHADEV A.2: Only critical kthreads merge into cls_game. */
 			bool cls_penalty = !cls_game
 				&& !(((packed >> SHIFT_FLAGS) & CAKE_FLOW_WAKER_BOOST));
 
@@ -2470,11 +2495,6 @@ static __noinline u32 stopping_drr_ewma(
 	{
 		u64 vt_delta = (u64)rt_raw * (u32)hot->vtime_mult >> 10;
 		hot->dsq_vtime += vt_delta;
-		/* Vtime floor: prevent infinite credit from long sleep. */
-		u64 vt_min = bss->vtime_local - 200000000ULL;
-		u64 cur_vt = hot->dsq_vtime;
-		/* ALPHADEV Phase 1: Branchless algebraic floor */
-		hot->dsq_vtime = cur_vt + ((vt_min - cur_vt) & -(u64)(cur_vt < vt_min));
 	}
 
 	return hot->dsq_weight_base;
@@ -2726,10 +2746,29 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	u32 packed		= 0;
 	/* Fused FLAGS: bits [27:24] = [flags:4], FLOW_NEW set on creation */
 	packed |= ((u32)CAKE_FLOW_NEW & MASK_FLAGS) << SHIFT_FLAGS;
-	/* Cache PF_KTHREAD branchless (relocated from hot path to init).
-	 * Kthreads are immune to bg_noise squeeze.
-	 * Extract bit 21 (PF_KTHREAD) from p->flags, shift to BIT_KTHREAD. */
-	packed |= (((u32)(p->flags >> 21) & 1u) << BIT_KTHREAD);
+	/* ALPHADEV A.2: Cache Critical KThread branchless/cold.
+	 * IRQ (prio < 120) and ksoftirqd directly bypass the KWorker fog. */
+	if (p->flags & PF_KTHREAD) {
+		if (p->prio < 120) {
+			packed |= (1u << BIT_KCRITICAL);
+		} else {
+			u64 comm_val = ((u64 *)p->comm)[0];
+			/* Branchless O(1) Prefix Masking for GPU/Network Threads
+			 * 0x71726974666f736b = "ksoftirq" (Network NAPI processing)
+			 * 0x61696469766e     = "nvidia"   (NVIDIA proprietary / nouveau timeline sync)
+			 * 0x646d61           = "amd"      (AMDGPU / IOMMU rendering queues)
+			 * 0x35313969         = "i915"     (Intel Gen9-12 graphics timeline)
+			 * 0x6578             = "xe"       (Intel Xe discrete graphics)
+			 */
+			if (comm_val == 0x71726974666f736bULL ||
+			    (comm_val & 0x0000FFFFFFFFFFFFULL) == 0x000061696469766eULL ||
+			    (comm_val & 0x0000000000FFFFFFULL) == 0x0000000000646d61ULL ||
+			    (comm_val & 0x00000000FFFFFFFFULL) == 0x0000000035313969ULL ||
+			    (comm_val & 0x000000000000FFFFULL) == 0x0000000000006578ULL) {
+				packed |= (1u << BIT_KCRITICAL);
+			}
+		}
+	}
 	/* Arena copy: only read by iter/task (TUI). Hot-path uses hot->packed_info. */
 	if (CAKE_STATS_ENABLED)
 		tctx->packed_info = packed;
