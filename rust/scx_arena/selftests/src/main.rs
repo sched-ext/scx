@@ -254,7 +254,7 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     }
     for (_, cpu) in topo.all_cpus {
         let mut mask = [0; 9];
-        mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
+        mask[cpu.id / 64] |= 1 << (cpu.id % 64);
         setup_topology_node(skel, &mask)?;
     }
 
