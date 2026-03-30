@@ -522,9 +522,9 @@ fn main() -> Result<()> {
 
     let mut open_object = MaybeUninit::<libbpf_rs::OpenObject>::uninit();
     let mut sched = Scheduler::init(&opts, &mut open_object)?;
-    let uei = sched.run(shutdown, !opts.no_autotune)?;
+    sched.run(shutdown, !opts.no_autotune)?;
 
-    info!("Scheduler exited: {:?}", uei);
+    info!("Scheduler exited");
 
     Ok(())
 }
