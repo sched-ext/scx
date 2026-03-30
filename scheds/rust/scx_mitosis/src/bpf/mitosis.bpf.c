@@ -685,11 +685,11 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 			struct cpu_ctx *target_cctx = lookup_cpu_ctx(cpu);
 			if (target_cctx) {
 				u32 tllc = enable_llc_awareness ?
-					target_cctx->llc : FAKE_FLAT_CELL_LLC;
+						   target_cctx->llc :
+						   FAKE_FLAT_CELL_LLC;
 				if (scx_bpf_dsq_nr_queued(cell_llc_dsq_raw(
 					    target_cctx->cell, tllc)) > 0 ||
-				    scx_bpf_dsq_nr_queued(
-					    cpu_dsq_raw(cpu)) > 0)
+				    scx_bpf_dsq_nr_queued(cpu_dsq_raw(cpu)) > 0)
 					goto no_borrow;
 			}
 			tctx->borrowed = true;
@@ -1828,20 +1828,22 @@ static void dump_cell_cpumask(int id)
 
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
 {
-	struct cpu_ctx  *cctx;
+	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
 
 	/*
-	 * If this CPU's per-CPU DSQ has waiting tasks, zero the
-	 * slice so dispatch runs within this tick rather than
-	 * waiting for the full slice to expire.
+	 * Zero the slice so dispatch runs within this tick when any
+	 * DSQ this CPU services has waiting work:
 	 *
-	 * For cross-cell tasks, also check the native
-	 * cell DSQ — the borrower should yield to native cell
-	 * work that arrived after the borrow started.
+	 *  1. Per-CPU DSQ — pinned tasks waiting on this CPU.
+	 *  2. Cell DSQ — this CPU's cell has queued work while the
+	 *     running task holds the CPU for a full slice. Without
+	 *     this, queued cell DSQ tasks wait up to slice_ns
+	 *     (20ms) for dispatch to run. For borrowed tasks this
+	 *     also reclaims the CPU when native cell work arrives.
 	 */
 	{
 		u64 cdsq = cpu_dsq_raw(scx_bpf_task_cpu(p));
@@ -1850,11 +1852,12 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
 			return;
 		}
 	}
-	if (tctx->cell != cctx->cell) {
+	{
 		u32 llc = enable_llc_awareness ? cctx->llc : FAKE_FLAT_CELL_LLC;
 		u64 cldsq = cell_llc_dsq_raw(cctx->cell, llc);
 		if (scx_bpf_dsq_nr_queued(cldsq) > 0) {
 			p->scx.slice = 0;
+			return;
 		}
 	}
 }
