@@ -77,6 +77,32 @@ impl<'a> Scheduler<'a> {
         let builder = MainSkelBuilder::default();
         let mut open_skel = builder.open(open_object)?;
 
+        // INJECT VERSION SUFFIX INTO OPS NAME FOR scx_loader GUI
+        {
+            let ops = open_skel.struct_ops.pandemonium_ops_mut();
+            let name_field = &mut ops.name;
+            let version_suffix = scx_utils::build_id::ops_version_suffix(env!("CARGO_PKG_VERSION"));
+            let bytes = version_suffix.as_bytes();
+            let mut i = 0;
+            let mut bytes_idx = 0;
+            let mut found_null = false;
+            while i < name_field.len() - 1 {
+                found_null |= name_field[i] == 0;
+                if !found_null {
+                    i += 1;
+                    continue;
+                }
+                if bytes_idx < bytes.len() {
+                    name_field[i] = bytes[bytes_idx] as i8;
+                    bytes_idx += 1;
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            name_field[i] = 0;
+        }
+
         // CONFIGURE RODATA (BEFORE LOAD)
         let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
 
