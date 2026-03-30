@@ -1053,7 +1053,7 @@ impl<'a> Scheduler<'a> {
             // Lent time: non-owner cell tasks running on this CPU
             let total_on_cpu: u64 = cpu_ctx.running_ns.iter().sum();
             let owner_on_cpu = cpu_ctx.running_ns[owner];
-            lent_ns[owner] += total_on_cpu - owner_on_cpu;
+            lent_ns[owner] += total_on_cpu.saturating_sub(owner_on_cpu);
         }
 
         // Compute deltas since last collection interval
@@ -1066,9 +1066,9 @@ impl<'a> Scheduler<'a> {
 
         for cell in 0..MAX_CELLS {
             let delta_running =
-                total_running_ns[cell].wrapping_sub(self.prev_cell_running_ns[cell]);
-            let delta_on_own = on_own_ns[cell].wrapping_sub(self.prev_cell_own_ns[cell]);
-            let delta_lent = lent_ns[cell].wrapping_sub(self.prev_cell_lent_ns[cell]);
+                total_running_ns[cell].saturating_sub(self.prev_cell_running_ns[cell]);
+            let delta_on_own = on_own_ns[cell].saturating_sub(self.prev_cell_own_ns[cell]);
+            let delta_lent = lent_ns[cell].saturating_sub(self.prev_cell_lent_ns[cell]);
 
             self.prev_cell_running_ns[cell] = total_running_ns[cell];
             self.prev_cell_own_ns[cell] = on_own_ns[cell];
@@ -1126,10 +1126,10 @@ impl<'a> Scheduler<'a> {
                     .smoothed_util_pct = self.smoothed_util[cell];
             }
 
-            global_running_delta += delta_running;
-            global_borrowed_delta += delta_borrowed;
-            global_lent_delta += delta_lent;
-            global_capacity += capacity;
+            global_running_delta = global_running_delta.saturating_add(delta_running);
+            global_borrowed_delta = global_borrowed_delta.saturating_add(delta_borrowed);
+            global_lent_delta = global_lent_delta.saturating_add(delta_lent);
+            global_capacity = global_capacity.saturating_add(capacity);
         }
 
         let global_util_pct = if global_capacity > 0 {
