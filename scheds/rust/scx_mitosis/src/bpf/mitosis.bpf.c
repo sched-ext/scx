@@ -319,58 +319,7 @@ static inline void record_cgroup_exit(u64 cgid)
 	event->cgroup_exit.cgid = cgid;
 }
 
-/*
- * Store the cpumask for each cell (owned by BPF logic). We need this in an
- * explicit map to allow for these to be kptrs.
- */
-struct cell_cpumask_wrapper {
-	struct bpf_cpumask __kptr *cpumask;
-	/*
-	 * To avoid allocation on the reconfiguration path, have a second cpumask we
-	 * can just do an xchg on.
-	 */
-	struct bpf_cpumask __kptr *tmp_cpumask;
-	/* Borrowable cpumask: CPUs this cell can borrow from other cells */
-	struct bpf_cpumask __kptr *borrowable_cpumask;
-	struct bpf_cpumask __kptr *borrowable_tmp_cpumask;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct cell_cpumask_wrapper);
-	__uint(max_entries, MAX_CELLS);
-	__uint(map_flags, 0);
-} cell_cpumasks SEC(".maps");
-
-static inline const struct cpumask *lookup_cell_cpumask(int idx)
-{
-	struct cell_cpumask_wrapper *cpumaskw;
-
-	if (!(cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &idx))) {
-		scx_bpf_error("no cell cpumask");
-		return NULL;
-	}
-
-	if (!cpumaskw->cpumask) {
-		scx_bpf_error("cell cpumask is NULL");
-		return NULL;
-	}
-
-	return (const struct cpumask *)cpumaskw->cpumask;
-}
-
-static inline const struct cpumask *lookup_cell_borrowable_cpumask(int idx)
-{
-	struct cell_cpumask_wrapper *cpumaskw;
-
-	if (!(cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &idx))) {
-		scx_bpf_error("no cell cpumask wrapper for cell %d", idx);
-		return NULL;
-	}
-
-	return (const struct cpumask *)cpumaskw->borrowable_cpumask;
-}
+struct cell_cpumask_map cell_cpumasks SEC(".maps");
 
 /*
  * Helper functions for bumping per-cell stats
@@ -1065,18 +1014,17 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	/* Get the root cell (cell 0) and its cpumask */
 	int zero = 0;
 	struct cell_cpumask_wrapper *root_cell_cpumaskw;
-	if (!(root_cell_cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &zero))) {
-		scx_bpf_error("Failed to find root cell cpumask");
+	if (!(root_cell_cpumaskw = lookup_cell_cpumask_wrapper(zero))) {
 		return 0;
 	}
 
 	struct bpf_cpumask *root_bpf_cpumask __free(bpf_cpumask) =
-		bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask, NULL);
+		get_tmp_cpumask(&root_cell_cpumaskw->primary);
 	if (!root_bpf_cpumask) {
-		scx_bpf_error("tmp_cpumask should never be null");
+		scx_bpf_error("root tmp cpumask is NULL");
 		return 0;
 	}
-	if (!root_cell_cpumaskw->cpumask) {
+	if (!root_cell_cpumaskw->primary.cpumask) {
 		scx_bpf_error("root cpumasks should never be null");
 		return 0;
 	}
@@ -1180,15 +1128,14 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		}
 
 		struct cell_cpumask_wrapper *cell_cpumaskw;
-		if (!(cell_cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &cell_idx))) {
-			scx_bpf_error("Failed to find cell cpumask: %d", cell_idx);
+		if (!(cell_cpumaskw = lookup_cell_cpumask_wrapper(cell_idx))) {
 			return 0;
 		}
 
 		struct bpf_cpumask *bpf_cpumask __free(bpf_cpumask) =
-			bpf_kptr_xchg(&cell_cpumaskw->tmp_cpumask, NULL);
+			get_tmp_cpumask(&cell_cpumaskw->primary);
 		if (!bpf_cpumask) {
-			scx_bpf_error("tmp_cpumask should never be null");
+			scx_bpf_error("tmp cpumask is NULL for cell %d", cell_idx);
 			return 0;
 		}
 		bpf_cpumask_copy(bpf_cpumask, (const struct cpumask *)&entry->cpumask);
@@ -1215,17 +1162,8 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 				return 0;
 		}
 
-		bpf_cpumask = bpf_kptr_xchg(&cell_cpumaskw->cpumask, no_free_ptr(bpf_cpumask));
-		if (!bpf_cpumask) {
-			scx_bpf_error("cpumask should never be null");
-			return 0;
-		}
-
-		/* bpf_cpumask now holds the old cpumask, put it back as tmp */
-		struct bpf_cpumask *stale __free(bpf_cpumask) =
-			bpf_kptr_xchg(&cell_cpumaskw->tmp_cpumask, no_free_ptr(bpf_cpumask));
-		if (stale) {
-			scx_bpf_error("tmp_cpumask should be null");
+		if (publish_prepared_cpumask(&cell_cpumaskw->primary, &bpf_cpumask)) {
+			scx_bpf_error("failed to publish cpumask for cell %d", cell_idx);
 			return 0;
 		}
 
@@ -1266,18 +1204,8 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	 * Publish: swap new cpumask in, get old one back.
 	 * After this point, all CPUs see the new mask.
 	 */
-	root_bpf_cpumask =
-		bpf_kptr_xchg(&root_cell_cpumaskw->cpumask, no_free_ptr(root_bpf_cpumask));
-	if (!root_bpf_cpumask) {
-		scx_bpf_error("root cpumask should never be null");
-		return 0;
-	}
-
-	/* root_bpf_cpumask now holds the old mask, put it back as tmp */
-	struct bpf_cpumask *root_stale __free(bpf_cpumask) =
-		bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask, no_free_ptr(root_bpf_cpumask));
-	if (root_stale) {
-		scx_bpf_error("root tmp_cpumask should be null");
+	if (publish_prepared_cpumask(&root_cell_cpumaskw->primary, &root_bpf_cpumask)) {
+		scx_bpf_error("failed to publish root cpumask");
 		return 0;
 	}
 
@@ -2007,55 +1935,28 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 				return ret;
 		}
 
-		if (!(cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &i)))
+		if (!(cpumaskw = lookup_cell_cpumask_wrapper(i)))
 			return -ENOENT;
-
-		cpumask = bpf_cpumask_create();
-		if (!cpumask)
-			return -ENOMEM;
 
 		/*
 		 * Start with full cpumask for all cells. The timer will set up
 		 * the correct cpumasks based on cgroup configuration.
 		 */
-		bpf_cpumask_setall(cpumask);
-
-		cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
-		if (cpumask) {
-			/* Should be impossible, we just initialized the cell cpumask */
-			bpf_cpumask_release(cpumask);
-			return -EINVAL;
-		}
-
-		cpumask = bpf_cpumask_create();
-		if (!cpumask)
-			return -ENOMEM;
-		cpumask = bpf_kptr_xchg(&cpumaskw->tmp_cpumask, cpumask);
-		if (cpumask) {
-			/* Should be impossible, we just initialized the cell tmp_cpumask */
-			bpf_cpumask_release(cpumask);
-			return -EINVAL;
+		ret = init_cpumask_slot(&cpumaskw->primary, true);
+		if (ret) {
+			scx_bpf_error("failed to init primary cpumask slot for cell %d: %d", i,
+				      ret);
+			return ret;
 		}
 
 		if (enable_borrowing) {
-			cpumask = bpf_cpumask_create();
-			if (!cpumask)
-				return -ENOMEM;
-
 			/* Start with empty borrowable masks */
-			cpumask = bpf_kptr_xchg(&cpumaskw->borrowable_cpumask, cpumask);
-			if (cpumask) {
-				bpf_cpumask_release(cpumask);
-				return -EINVAL;
-			}
-
-			cpumask = bpf_cpumask_create();
-			if (!cpumask)
-				return -ENOMEM;
-			cpumask = bpf_kptr_xchg(&cpumaskw->borrowable_tmp_cpumask, cpumask);
-			if (cpumask) {
-				bpf_cpumask_release(cpumask);
-				return -EINVAL;
+			ret = init_cpumask_slot(&cpumaskw->borrowable, false);
+			if (ret) {
+				scx_bpf_error(
+					"failed to init borrowable cpumask slot for cell %d: %d", i,
+					ret);
+				return ret;
 			}
 		}
 	}
@@ -2168,9 +2069,9 @@ int apply_cell_config(void *ctx)
 		if (cell_id >= config->num_cells)
 			break;
 
-		cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &cell_id);
+		cpumaskw = lookup_cell_cpumask_wrapper(cell_id);
 		if (!cpumaskw)
-			continue;
+			return -EINVAL;
 
 		cpumask_data = MEMBER_VPTR(config->cpumasks, [cell_id]);
 		if (!cpumask_data) {
@@ -2180,70 +2081,58 @@ int apply_cell_config(void *ctx)
 
 		/* Get the tmp_cpumask to build the new mask */
 		struct bpf_cpumask *new_cpumask __free(bpf_cpumask) =
-			bpf_kptr_xchg(&cpumaskw->tmp_cpumask, NULL);
+			get_tmp_cpumask(&cpumaskw->primary);
 		if (!new_cpumask) {
-			scx_bpf_error("tmp_cpumask is NULL for cell %d", cell_id);
+			scx_bpf_error("tmp cpumask is NULL for cell_id %d", cell_id);
 			return -EINVAL;
 		}
 
-		/* Clear the cpumask and set bits based on the config data */
 		bpf_cpumask_clear(new_cpumask);
 
-		/* Set cpumask bits and CPU-to-cell mappings */
+		/* Build the mask and update CPU-to-cell mappings in one pass. */
 		u32 cpu;
 		bpf_for(cpu, 0, nr_possible_cpus)
 		{
-			u32 byte_idx = cpu / 8;
-			u32 bit_idx = cpu % 8;
+			bool cpu_in_cell;
 
-			const unsigned char *bytep = MEMBER_VPTR(cpumask_data->mask, [byte_idx]);
-			if (!bytep) {
-				scx_bpf_error("byte_idx %d out of bounds", byte_idx);
+			if (cell_cpumask_data_test_cpu(cpumask_data, cpu, &cpu_in_cell)) {
+				scx_bpf_error("failed to decode cpumask for cell_id %d", cell_id);
 				return -EINVAL;
 			}
 
-			if (*bytep & (1 << bit_idx)) {
-				bpf_cpumask_set_cpu(cpu, new_cpumask);
-				cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
-				if (!cctx)
+			if (!cpu_in_cell)
+				continue;
+
+			bpf_cpumask_set_cpu(cpu, new_cpumask);
+
+			cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
+			if (!cctx)
+				return -ENOENT;
+			/*
+			 * If the CPU is changing cells, advance the
+			 * new cell's vtime to at least match this
+			 * CPU's per-CPU vtime. Otherwise the per-CPU
+			 * DSQ and cell DSQ are in different vtime
+			 * domains and dispatch will starve the
+			 * per-CPU DSQ tasks.
+			 */
+			if (cctx->cell != cell_id) {
+				cell = lookup_cell(cell_id);
+				if (!cell)
 					return -ENOENT;
-				/*
-				 * If the CPU is changing cells, advance the
-				 * new cell's vtime to at least match this
-				 * CPU's per-CPU vtime. Otherwise the per-CPU
-				 * DSQ and cell DSQ are in different vtime
-				 * domains and dispatch will starve the
-				 * per-CPU DSQ tasks.
-				 */
-				if (cctx->cell != cell_id) {
-					cell = lookup_cell(cell_id);
-					if (!cell)
-						return -ENOENT;
-					u32 llc_idx = enable_llc_awareness &&
-								      llc_is_valid(cctx->llc) ?
-							      cctx->llc :
-							      FAKE_FLAT_CELL_LLC;
-					if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now),
-							cctx->vtime_now))
-						WRITE_ONCE(cell->llcs[llc_idx].vtime_now,
-							   cctx->vtime_now);
-				}
-				cctx->cell = cell_id;
+				u32 llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ?
+						      cctx->llc :
+						      FAKE_FLAT_CELL_LLC;
+				if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now),
+						cctx->vtime_now))
+					WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
 			}
+			cctx->cell = cell_id;
 		}
 
 		/* Swap the new cpumask into place */
-		new_cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, no_free_ptr(new_cpumask));
-		if (!new_cpumask) {
-			scx_bpf_error("cpumask should never be null");
-			return -EINVAL;
-		}
-
-		/* Put the old cpumask into tmp_cpumask for reuse */
-		struct bpf_cpumask *stale __free(bpf_cpumask) =
-			bpf_kptr_xchg(&cpumaskw->tmp_cpumask, no_free_ptr(new_cpumask));
-		if (stale) {
-			scx_bpf_error("tmp_cpumask should be null");
+		if (publish_prepared_cpumask(&cpumaskw->primary, &new_cpumask)) {
+			scx_bpf_error("failed to publish cpumask for cell_id %d", cell_id);
 			return -EINVAL;
 		}
 
@@ -2257,43 +2146,9 @@ int apply_cell_config(void *ctx)
 				return -EINVAL;
 			}
 
-			struct bpf_cpumask *bmask __free(bpf_cpumask) =
-				bpf_kptr_xchg(&cpumaskw->borrowable_tmp_cpumask, NULL);
-			if (!bmask) {
-				scx_bpf_error("borrowable_tmp_cpumask is NULL for cell %d",
+			if (set_cpumask_from_data(&cpumaskw->borrowable, borrowable_data)) {
+				scx_bpf_error("failed to set borrowable cpumask for cell_id %d",
 					      cell_id);
-				return -EINVAL;
-			}
-
-			bpf_cpumask_clear(bmask);
-
-			u32 bcpu;
-			bpf_for(bcpu, 0, nr_possible_cpus)
-			{
-				u32 byte_idx = bcpu / 8;
-				u32 bit_idx = bcpu % 8;
-
-				const unsigned char *bytep =
-					MEMBER_VPTR(borrowable_data->mask, [byte_idx]);
-				if (!bytep) {
-					scx_bpf_error("byte_idx %d out of bounds", byte_idx);
-					return -EINVAL;
-				}
-
-				if (*bytep & (1 << bit_idx))
-					bpf_cpumask_set_cpu(bcpu, bmask);
-			}
-
-			bmask = bpf_kptr_xchg(&cpumaskw->borrowable_cpumask, no_free_ptr(bmask));
-			if (!bmask) {
-				scx_bpf_error("borrowable cpumask should never be null");
-				return -EINVAL;
-			}
-
-			struct bpf_cpumask *bstale __free(bpf_cpumask) = bpf_kptr_xchg(
-				&cpumaskw->borrowable_tmp_cpumask, no_free_ptr(bmask));
-			if (bstale) {
-				scx_bpf_error("borrowable tmp_cpumask should be null");
 				return -EINVAL;
 			}
 		}
