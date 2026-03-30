@@ -1,0 +1,26 @@
+[package]
+name = "scx_flow"
+version = "1.0.0"
+authors = ["Galih Tama <galpt@v.recipes>"]
+edition = "2021"
+description = "A budget-based sched_ext CPU scheduler with reserved wakeup paths, shared fallback dispatch, and bounded adaptive tuning. https://github.com/sched-ext/scx"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1"
+ctrlc = { version = "3", features = ["termination"] }
+clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
+crossbeam = "0.8"
+libbpf-rs = "=0.26.1"
+log = "0.4"
+scx_stats = { path = "../../../rust/scx_stats", version = "1.1.0" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.0" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0" }
+serde = { version = "1", features = ["derive"] }
+simplelog = "0.12"
+
+[build-dependencies]
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.0" }
+
+[features]
+enable_backtrace = []
