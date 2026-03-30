@@ -18,6 +18,13 @@ u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
 
 int nr_topo_nodes[TOPO_MAX_LEVEL];
 
+/*
+ * Per-level maximum number of children. Set by arena_topology_init() before
+ * any topo_init() calls. Each topology node at level L is allocated with
+ * topo_max_children[L] child pointer slots.
+ */
+u32 topo_max_children[TOPO_MAX_LEVEL];
+
 __hidden
 int topo_contains(topo_ptr topo, u32 cpu)
 {
@@ -33,25 +40,11 @@ int topo_subset(topo_ptr topo, scx_bitmap_t mask)
 static
 topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, u64 id)
 {
-	topo_ptr topo;
+	volatile topo_ptr topo; /* add volatile to satisfy the verifier. */
+	u32 level = parent ? parent->level + 1 : 0;
+	u32 max_ch;
 
-	topo = scx_static_alloc(sizeof(struct topology), 1);
-	if (!topo) {
-		bpf_printk("static allocation failed");
-		return NULL;
-	}
-
-	topo->parent = parent;
-	topo->nr_children = 0;
-	topo->level = parent ? topo->parent->level + 1 : 0;
-	topo->id = id;
-	/*
-	* The passed-in mask is deliberately consumed; topo_node takes ownership.
-	* Do not reuse the same mask elsewhere after this call.
-	*/
-	topo->mask = mask;
-
-	if (topo->level >= TOPO_MAX_LEVEL) {
+	if (level >= TOPO_MAX_LEVEL) {
 		bpf_printk("topology is too deep");
 		return NULL;
 	}
@@ -61,7 +54,36 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, u64 id)
 		return NULL;
 	}
 
-	topo_nodes[topo->level][topo->id] = (u64)topo;
+	max_ch = topo_max_children[level];
+	topo = scx_static_alloc(sizeof(struct topology) + max_ch * sizeof(topo_ptr), 1);
+	if (!topo) {
+		bpf_printk("static allocation failed");
+		return NULL;
+	}
+
+	topo->parent = parent;
+	topo->nr_children = 0;
+	topo->level = level;
+	topo->id = id;
+	/*
+	 * The passed-in mask is deliberately consumed; topo_node takes ownership.
+	 * Do not reuse the same mask elsewhere after this call.
+	 */
+	topo->mask = mask;
+
+	/*
+	 * Re-assert bounds for the verifier. barrier_var() prevents the compiler
+	 * from treating these checks as dead code (since level/id are local
+	 * variables that it knows were already checked above). Without it, clang
+	 * eliminates the re-check, and the verifier loses the narrowed bounds
+	 * after scx_static_alloc().
+	 */
+	barrier_var(level);
+	barrier_var(id);
+	if (level >= TOPO_MAX_LEVEL || id >= NR_CPUS)
+		return NULL;
+
+	topo_nodes[level][id] = (u64)topo;
 
 	return topo;
 }
@@ -77,7 +99,12 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask, u64 id)
 		return -EINVAL;
 	}
 
-	if (parent->nr_children >= TOPO_MAX_CHILDREN) {
+	if (parent->level >= TOPO_MAX_LEVEL) {
+		bpf_printk("topology tree is too deep");
+		return -EINVAL;
+	}
+
+	if (parent->nr_children >= topo_max_children[parent->level]) {
 		bpf_printk("topology fanout is too large");
 		return -EINVAL;
 	}

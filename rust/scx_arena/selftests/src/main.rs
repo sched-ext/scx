@@ -191,6 +191,42 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
 fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     let topo = Topology::new().expect("Failed to build host topology");
 
+    // Set per-level max children before registering any topology nodes.
+    // NOTE: rust/scx_arena/scx_arena/src/arenalib.rs::setup_topology_max_children()
+    // contains equivalent logic and must be kept in sync with this block.
+    let max_children: [u32; 5] = [
+        topo.nodes.len() as u32,
+        topo.nodes.values().map(|n| n.llcs.len()).max().unwrap_or(0) as u32,
+        topo.all_llcs
+            .values()
+            .map(|l| l.cores.len())
+            .max()
+            .unwrap_or(0) as u32,
+        topo.all_cores
+            .values()
+            .map(|c| c.cpus.len())
+            .max()
+            .unwrap_or(0) as u32,
+        0,
+    ];
+    let mut init_args = types::arena_topology_init_args { max_children };
+    let init_input = ProgramInput {
+        context_in: Some(unsafe {
+            std::slice::from_raw_parts_mut(
+                &mut init_args as *mut _ as *mut u8,
+                std::mem::size_of_val(&init_args),
+            )
+        }),
+        ..Default::default()
+    };
+    let output = skel.progs.arena_topology_init.test_run(init_input)?;
+    if output.return_value != 0 {
+        bail!(
+            "arena_topology_init returned {}",
+            output.return_value as i32
+        );
+    }
+
     setup_topology_node(skel, topo.span.as_raw_slice())?;
 
     for (_, node) in topo.nodes {
