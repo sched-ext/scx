@@ -57,7 +57,6 @@ use stats::Metrics;
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
-
 /// Epoll token for inotify events (cgroup creation/destruction)
 const INOTIFY_TOKEN: u64 = 1;
 /// Epoll token for stats request wakeups
@@ -165,6 +164,10 @@ struct Opts {
     /// Only meaningful with --cell-parent-cgroup and multiple cells.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_borrowing: bool,
+
+    /// Use lockless scx_bpf_dsq_peek() instead of the default iterator-based peek.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    use_lockless_peek: bool,
 
     /// Enable demand-based CPU rebalancing between cells.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -340,6 +343,7 @@ impl<'a> Scheduler<'a> {
         rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
 
         rodata.enable_borrowing = opts.enable_borrowing;
+        rodata.use_lockless_peek = opts.use_lockless_peek;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),

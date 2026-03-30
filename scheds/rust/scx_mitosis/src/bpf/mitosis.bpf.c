@@ -47,6 +47,7 @@ const volatile bool	     cpu_controller_disabled	     = false;
 const volatile bool	     reject_multicpu_pinning	     = false;
 const volatile bool	     userspace_managed_cell_mode     = false;
 const volatile bool	     enable_borrowing		     = false;
+const volatile bool	     use_lockless_peek		     = false;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -839,6 +840,22 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
+/*
+ * Peek at the head of a DSQ. By default use a bpf_for_each iterator loop.
+ * When use_lockless_peek is set, use the lockless scx_bpf_dsq_peek() kfunc.
+ */
+static inline struct task_struct *dsq_peek(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	if (use_lockless_peek)
+		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0)
+		return p;
+	return NULL;
+}
+
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
@@ -865,7 +882,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/* Peek at cell-LLC DSQ head */
-	p = __COMPAT_scx_bpf_dsq_peek(cell_dsq.raw);
+	p = dsq_peek(cell_dsq.raw);
 	if (p) {
 		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = cell_dsq;
@@ -873,7 +890,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/* Peek at CPU DSQ head, prefer if lower vtime */
-	p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq.raw);
+	p = dsq_peek(cpu_dsq.raw);
 	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
 		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = cpu_dsq;
