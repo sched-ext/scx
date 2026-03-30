@@ -3916,6 +3916,7 @@ dependencies = [
  "libc",
  "regex",
  "scx_cargo",
+ "scx_utils",
 ]
 
 [[package]]

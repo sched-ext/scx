@@ -6,6 +6,7 @@ description = "A behavioral, adaptive sched_ext scheduler with three-tier classi
 license = "GPL-2.0-only"
 
 [dependencies]
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0" }
 libbpf-rs = { version = "=0.26.1" }
 libc = "0.2"
 anyhow = "1"

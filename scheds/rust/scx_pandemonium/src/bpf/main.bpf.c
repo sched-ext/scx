@@ -1500,7 +1500,7 @@ void BPF_STRUCT_OPS(pandemonium_quiescent, struct task_struct *p,
 // CPU RELEASE: RESCUE STRANDED TASKS WHEN RT/DL PREEMPTS OUR CPU
 // CALLED WHEN THE KERNEL TAKES A CPU AWAY FROM SCHED_EXT (DL SERVER,
 // RT TASKS, PIPEWIRE). WITHOUT THIS, TASKS THAT dispatch() MOVED TO THE
-// LOCAL DSQ VIA scx_bpf_dsq_move_to_local() GET STUCK, TRIGGERING THE
+// LOCAL DSQ VIA scx_bpf_dsq_move_to_local(, 0) GET STUCK, TRIGGERING THE
 // WATCHDOG. EVERY REFERENCE SCHEDULER IMPLEMENTS THIS.
 void BPF_STRUCT_OPS(pandemonium_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
