@@ -78,8 +78,7 @@
 
 /* Sum checks (in bits) */
 _Static_assert(CPU_B + TYPE_B == 32, "CPU layout low half must be 32 bits");
-_Static_assert(LLC_B + CELL_B + TYPE_B == 32,
-	       "CELL+LLC layout low half must be 32 bits");
+_Static_assert(LLC_B + CELL_B + TYPE_B == 32, "CELL+LLC layout low half must be 32 bits");
 _Static_assert(DATA_B + TYPE_B == 32, "Common layout low half must be 32 bits");
 
 typedef union {
@@ -124,8 +123,7 @@ typedef union {
 */
 #define DSQ_INVALID ((dsq_id_t){ 0 })
 
-_Static_assert(sizeof(((dsq_id_t){ 0 }).cpu_dsq) == sizeof(u64),
-	       "cpu view must be 8 bytes");
+_Static_assert(sizeof(((dsq_id_t){ 0 }).cpu_dsq) == sizeof(u64), "cpu view must be 8 bytes");
 _Static_assert(sizeof(((dsq_id_t){ 0 }).cell_llc_dsq) == sizeof(u64),
 	       "cell+LLC view must be 8 bytes");
 _Static_assert(sizeof(((dsq_id_t){ 0 }).user_dsq) == sizeof(u64),
@@ -134,10 +132,8 @@ _Static_assert(sizeof(((dsq_id_t){ 0 }).builtin_dsq) == sizeof(u64),
 	       "builtin view must be 8 bytes");
 
 /* Compile-time checks (in bytes) */
-_Static_assert(sizeof(dsq_id_t) == sizeof(u64),
-	       "dsq_id_t must be 8 bytes (64 bits)");
-_Static_assert(_Alignof(dsq_id_t) == sizeof(u64),
-	       "dsq_id_t must be 8-byte aligned");
+_Static_assert(sizeof(dsq_id_t) == sizeof(u64), "dsq_id_t must be 8 bytes (64 bits)");
+_Static_assert(_Alignof(dsq_id_t) == sizeof(u64), "dsq_id_t must be 8-byte aligned");
 
 /* DSQ type enumeration */
 enum dsq_type {
@@ -150,8 +146,7 @@ enum dsq_type {
 _Static_assert(MAX_CPUS <= (1u << CPU_B), "MAX_CPUS must fit in field");
 _Static_assert(MAX_LLCS <= (1u << LLC_B), "MAX_LLCS must fit in field");
 _Static_assert(MAX_CELLS <= (1u << CELL_B), "MAX_CELLS must fit in field");
-_Static_assert(DSQ_TYPE_CELL_LLC < (1u << TYPE_B),
-	       "DSQ_TYPE_CELL_LLC must fit in field");
+_Static_assert(DSQ_TYPE_CELL_LLC < (1u << TYPE_B), "DSQ_TYPE_CELL_LLC must fit in field");
 
 static inline bool dsq_is_invalid(dsq_id_t dsq_id)
 {
@@ -160,8 +155,7 @@ static inline bool dsq_is_invalid(dsq_id_t dsq_id)
 
 static inline bool is_user_dsq(dsq_id_t dsq_id)
 {
-	return !dsq_id.builtin_dsq.builtin &&
-	       dsq_id.user_dsq.type != DSQ_TYPE_NONE;
+	return !dsq_id.builtin_dsq.builtin && dsq_id.user_dsq.type != DSQ_TYPE_NONE;
 }
 
 // Is this a per CPU DSQ?
@@ -174,8 +168,7 @@ static inline bool is_cpu_dsq(dsq_id_t dsq_id)
 static inline s32 get_cpu_from_dsq(dsq_id_t dsq_id)
 {
 	if (!is_cpu_dsq(dsq_id)) {
-		scx_bpf_error("trying to get cpu from non-cpu dsq: %llx",
-			      dsq_id.raw);
+		scx_bpf_error("trying to get cpu from non-cpu dsq: %llx", dsq_id.raw);
 		return -EINVAL;
 	}
 
@@ -201,7 +194,6 @@ static inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
 		return DSQ_INVALID;
 	}
 
-	return (dsq_id_t){ .cell_llc_dsq = { .llc  = llc,
-					     .cell = cell,
-					     .type = DSQ_TYPE_CELL_LLC } };
+	return (dsq_id_t){ .cell_llc_dsq = {
+				   .llc = llc, .cell = cell, .type = DSQ_TYPE_CELL_LLC } };
 }
