@@ -963,20 +963,30 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Cross-LLC fallback: check other LLC DSQs in this cell.
-	 * After cell reconfiguration, tasks can be stranded on a
-	 * cell-LLC DSQ whose LLC lost all CPUs. Each empty DSQ
-	 * check is a hash lookup + list_empty — negligible cost.
+	 * Cross-LLC orphan rescue: after cell reconfiguration, tasks
+	 * can be stranded on a cell-LLC DSQ whose LLC lost all CPUs
+	 * in this cell. Only scan LLCs with cpu_cnt == 0 — if an
+	 * LLC still has CPUs in the cell, those CPUs drain their own
+	 * DSQ. This avoids unconditional cross-LLC stealing that
+	 * disrupts vtime fairness.
 	 */
 	if (enable_llc_awareness) {
-		u32 other_llc;
-		bpf_for(other_llc, 0, nr_llc)
-		{
-			if (other_llc == llc)
-				continue;
-			if (scx_bpf_dsq_move_to_local(
-				    cell_llc_dsq_raw(cell, other_llc), 0))
-				return;
+		struct cell *cell_ptr = lookup_cell(cell);
+		if (cell_ptr) {
+			u32 other_llc;
+			bpf_for(other_llc, 0, nr_llc)
+			{
+				if (other_llc == llc)
+					continue;
+				if (READ_ONCE(
+					    cell_ptr->llcs[other_llc].cpu_cnt) >
+				    0)
+					continue;
+				if (scx_bpf_dsq_move_to_local(
+					    cell_llc_dsq_raw(cell, other_llc),
+					    0))
+					return;
+			}
 		}
 	}
 
