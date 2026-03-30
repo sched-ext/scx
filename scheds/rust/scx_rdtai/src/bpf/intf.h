@@ -17,6 +17,8 @@
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned long long u64;
+typedef int s32;
+typedef long long s64;
 #endif
 
 #include "ravg.bpf.h"
@@ -64,23 +66,32 @@ enum consts {
 	MAX_TREE_NODES = 32,
 };
 
-/* Feature IDs for the Decision Tree */
+/* Aggregated system stats for Q-Learning Reward calculation */
+struct rdtai_stats {
+	u64 total_wait_ns;
+	u64 total_cache_misses;
+	u64 total_burst_ns;
+	u64 total_idle_ns;
+	u64 tasks_run;
+};
+
+/* Feature IDs */
 enum rdtai_feature {
-	FEAT_WAIT_TIME,      // ns
-	FEAT_CACHE_MISSES,   // counts
-	FEAT_EXEC_TIME,      // ns (burst time)
-	FEAT_LOAD,           // 0-100
+	FEAT_WAIT_TIME,
+	FEAT_CACHE_MISSES,
+	FEAT_EXEC_TIME,
+	FEAT_LOAD,
 	NR_FEATURES,
 };
 
-/* Decision Tree Node */
+/* New AI Node: Decision based on weighted sum of ALL features */
 struct rdtai_node {
-	u32 feature_id;     // Use enum rdtai_feature
-	u64 threshold;
-	u32 left_child;     // Index of child node, or leaf action
+	s32 weights[NR_FEATURES]; // Fixed-point weights (scaled by 100)
+	s64 threshold;
+	u32 left_child;
 	u32 right_child;
 	bool is_leaf;
-	u32 leaf_action;    // 0: Keep Local, 1: Migrate, 2: Run Immediately
+	u32 leaf_action;
 };
 
 /* Statistics */

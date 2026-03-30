@@ -1,3 +1,1 @@
-10:46:17 [0m[34m[INFO] [0mRustLand version 1.1.0 x86_64-unknown-linux-gnu - scx_rustland_core 2.4.11
-EXIT: unregistered from user space
-10:48:50 [0m[34m[INFO] [0mUnregister RustLand scheduler
+Error: another sched_ext scheduler is already running

@@ -330,3 +330,13 @@ sched delay: message 0 (usec) worker 0 (usec)
      Result: 113.87 seconds
 --------------------------------
 Benchmarking Complete!
+Starting Benchmarking Suite...
+--------------------------------
+Testing Scheduler: scx_rlfifo
+  [ERROR] scx_rlfifo failed to start.
+Testing Scheduler: scx_rusty
+  [ERROR] scx_rusty failed to start.
+Testing Scheduler: scx_rustland
+Starting Benchmarking Suite...
+--------------------------------
+Testing Scheduler: scx_rlfifo

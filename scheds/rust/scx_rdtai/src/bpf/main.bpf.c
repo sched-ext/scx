@@ -108,47 +108,53 @@ struct {
 	__uint(max_entries, MAX_TREE_NODES);
 } rdtai_tree SEC(".maps");
 
-static u32 walk_tree(struct task_ctx *taskc, u32 *leaf_idx)
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct rdtai_stats);
+	__uint(max_entries, 1);
+} global_rdtai_stats SEC(".maps");
+
+static u32 walk_tree(struct task_struct *p, struct task_ctx *taskc, u32 *leaf_idx)
 {
+	u64 wait_ns = scx_bpf_now() - taskc->wait_at;
+
+	/* --- ROOT LEVEL STARVATION PREVENTION (Hard limit 0.5s) --- */
+	if (wait_ns > 500000000ULL) {
+		if (debug >= 1)
+			bpf_printk("rdtai: STARVATION PREVENTED for task %s[%d] (wait: %llu)", p->comm, p->pid, wait_ns);
+		*leaf_idx = 0;
+		return 2; // Emergency Action: Run Now
+	}
+
 	u32 node_idx = 0;
 	struct rdtai_node *node;
 
 	#pragma unroll
 	for (int i = 0; i < 10; i++) {
 		node = bpf_map_lookup_elem(&rdtai_tree, &node_idx);
-		if (!node)
-			break;
+		if (!node) break;
 
 		if (node->is_leaf) {
 			*leaf_idx = node_idx;
 			return node->leaf_action;
 		}
 
-		u64 val = 0;
-		switch (node->feature_id) {
-		case FEAT_WAIT_TIME:
-			val = scx_bpf_now() - taskc->wait_at;
-			break;
-		case FEAT_CACHE_MISSES:
-			val = taskc->cache_misses;
-			break;
-		case FEAT_EXEC_TIME:
-			val = taskc->last_burst;
-			break;
-		case FEAT_LOAD:
-			val = ravg_read(&taskc->dcyc_rd, scx_bpf_now(), load_half_life) >> RAVG_FRAC_BITS;
-			break;
-		}
+		/* Weighted Linear Combination of all features */
+		s64 score = 0;
+		score += (s64)node->weights[FEAT_WAIT_TIME] * (s64)(wait_ns / 1000); // us
+		score += (s64)node->weights[FEAT_CACHE_MISSES] * (s64)taskc->cache_misses;
+		score += (s64)node->weights[FEAT_EXEC_TIME] * (s64)(taskc->last_burst / 1000); // us
+		score += (s64)node->weights[FEAT_LOAD] * (s64)(ravg_read(&taskc->dcyc_rd, scx_bpf_now(), load_half_life) >> RAVG_FRAC_BITS);
 
-		if (val < node->threshold)
+		if (score < node->threshold)
 			node_idx = node->left_child;
 		else
 			node_idx = node->right_child;
 		
-		if (node_idx >= MAX_TREE_NODES)
-			break;
+		if (node_idx >= MAX_TREE_NODES) break;
 	}
-	return 0; // Default: Keep Local
+	return 0;
 }
 
 struct {
@@ -225,6 +231,7 @@ static struct bpf_cpumask *scx_percpu_bpfmask(void)
 struct pcpu_ctx {
 	u32 dom_rr_cur; /* used when scanning other doms */
 	u32 dom_id;
+	u64 last_idle_at;
 	/*
 	 * Add some padding so that libbpf-rs can generate the rest of the
 	 * padding to CACHELINE_SIZE. This is necessary for now because most
@@ -348,6 +355,19 @@ static inline u32 weight_to_bucket_idx(u32 weight)
 {
 	/* Weight is calculated linearly, and is within range of [1, 10000] */
 	return weight * LB_LOAD_BUCKETS / LB_MAX_WEIGHT;
+}
+
+static void update_global_stats(u64 wait_ns, u64 cache_misses, u64 burst_ns, bool is_run)
+{
+	u32 zero = 0;
+	struct rdtai_stats *gs = bpf_map_lookup_elem(&global_rdtai_stats, &zero);
+	if (gs) {
+		__sync_fetch_and_add(&gs->total_wait_ns, wait_ns);
+		__sync_fetch_and_add(&gs->total_cache_misses, cache_misses);
+		__sync_fetch_and_add(&gs->total_burst_ns, burst_ns);
+		if (is_run)
+			__sync_fetch_and_add(&gs->tasks_run, 1);
+	}
 }
 
 static void task_load_adj(struct task_ctx *taskc,
@@ -978,8 +998,8 @@ s32 BPF_STRUCT_OPS(rdtai_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto enoent;
 
 	u32 node_idx = 0;
-	u32 action = walk_tree(taskc, &node_idx);
-	if (debug >= 2) {
+	u32 action = walk_tree(p, taskc, &node_idx);
+	if (debug >= 1) {
 		bpf_printk("rdtai: task %s[%d] TA: %u (Node: %u, wait: %llu, burst: %llu, cache: %llu)", 
 				p->comm, p->pid, action, node_idx,
 				scx_bpf_now() - taskc->wait_at, taskc->last_burst, taskc->cache_misses);
@@ -1427,6 +1447,16 @@ void BPF_STRUCT_OPS(rdtai_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (scx_bpf_dsq_move_to_local(curr_dom, 0)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
+		
+		pcpuc = lookup_pcpu_ctx(cpu);
+		if (pcpuc && pcpuc->last_idle_at) {
+			u64 idle_ns = scx_bpf_now() - pcpuc->last_idle_at;
+			u32 zero = 0;
+			struct rdtai_stats *gs = bpf_map_lookup_elem(&global_rdtai_stats, &zero);
+			if (gs)
+				__sync_fetch_and_add(&gs->total_idle_ns, idle_ns);
+			pcpuc->last_idle_at = 0;
+		}
 		return;
 	}
 
@@ -1617,7 +1647,15 @@ void BPF_STRUCT_OPS(rdtai_stopping, struct task_struct *p, bool runnable)
 	scx_pmu_event_stop(p);
 	scx_pmu_read(p, rdtai_pmu_event, &cache_misses, true);
 	taskc->cache_misses = cache_misses;
+	
+	update_global_stats(0, cache_misses, taskc->last_burst, true);
 	stopping_update_vtime(p, taskc, domc);
+
+	if (!runnable) {
+		struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(bpf_get_smp_processor_id());
+		if (pcpuc)
+			pcpuc->last_idle_at = now;
+	}
 }
 
 void BPF_STRUCT_OPS(rdtai_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1631,6 +1669,8 @@ void BPF_STRUCT_OPS(rdtai_quiescent, struct task_struct *p, u64 deq_flags)
 
 	if (!(domc = task_domain(taskc)))
 		return;
+
+	update_global_stats(now - taskc->wait_at, 0, 0, false);
 
 	task_load_adj(taskc, now, false);
 	dom_dcycle_adj(domc, taskc->weight, now, false);

@@ -504,62 +504,27 @@ impl<'a> Scheduler<'a> {
     fn push_default_tree(skel: &mut BpfSkel) -> Result<()> {
         let tree_map = &mut skel.maps.rdtai_tree;
         
-        let wait_threshold = 1_000_000; 
-        let cache_threshold = 50;
-        let burst_threshold = 1_000_000;
-
         let mut nodes = Vec::with_capacity(15);
 
-        // NODE 0: Root (Wait Time)
-        nodes.push(bpf_intf::rdtai_node {
-            feature_id: bpf_intf::rdtai_feature_FEAT_WAIT_TIME,
-            threshold: wait_threshold,
-            left_child: 1, right_child: 2, is_leaf: false, leaf_action: 0,
-        });
+        for i in 0..15 {
+            let mut node = bpf_intf::rdtai_node {
+                weights: [0; bpf_intf::rdtai_feature_NR_FEATURES as usize],
+                threshold: 1000,
+                left_child: (i * 2) + 1,
+                right_child: (i * 2) + 2,
+                is_leaf: i >= 7,
+                leaf_action: 0,
+            };
 
-        // LEVEL 2: Cache Sensitivity
-        nodes.push(bpf_intf::rdtai_node { // Node 1
-            feature_id: bpf_intf::rdtai_feature_FEAT_CACHE_MISSES,
-            threshold: cache_threshold,
-            left_child: 3, right_child: 4, is_leaf: false, leaf_action: 0,
-        });
-        nodes.push(bpf_intf::rdtai_node { // Node 2
-            feature_id: bpf_intf::rdtai_feature_FEAT_CACHE_MISSES,
-            threshold: cache_threshold * 2,
-            left_child: 5, right_child: 6, is_leaf: false, leaf_action: 0,
-        });
-
-        // LEVEL 3: Burstiness
-        nodes.push(bpf_intf::rdtai_node { // Node 3
-            feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
-            threshold: burst_threshold,
-            left_child: 7, right_child: 8, is_leaf: false, leaf_action: 0,
-        });
-        nodes.push(bpf_intf::rdtai_node { // Node 4
-            feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
-            threshold: burst_threshold,
-            left_child: 9, right_child: 10, is_leaf: false, leaf_action: 0,
-        });
-        nodes.push(bpf_intf::rdtai_node { // Node 5
-            feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
-            threshold: burst_threshold,
-            left_child: 11, right_child: 12, is_leaf: false, leaf_action: 0,
-        });
-        nodes.push(bpf_intf::rdtai_node { // Node 6
-            feature_id: bpf_intf::rdtai_feature_FEAT_EXEC_TIME,
-            threshold: burst_threshold,
-            left_child: 13, right_child: 14, is_leaf: false, leaf_action: 0,
-        });
-
-        // LEVEL 4: LEAVES
-        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
-        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
-        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
-        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 0 });
-        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
-        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 1 });
-        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
-        nodes.push(bpf_intf::rdtai_node { feature_id: 0, threshold: 0, left_child: 0, right_child: 0, is_leaf: true, leaf_action: 2 });
+            if !node.is_leaf {
+                // Initialize with some default heuristic weights
+                node.weights[bpf_intf::rdtai_feature_FEAT_WAIT_TIME as usize] = 100; // Priority on wait time
+                node.weights[bpf_intf::rdtai_feature_FEAT_CACHE_MISSES as usize] = 50;
+            } else {
+                node.leaf_action = if i % 2 == 0 { 2 } else { 0 };
+            }
+            nodes.push(node);
+        }
 
         for (i, node) in nodes.iter().enumerate() {
             let mut key = [0u8; 4];
@@ -569,7 +534,7 @@ impl<'a> Scheduler<'a> {
             }, libbpf_rs::MapFlags::ANY)?;
         }
 
-        info!("Default 4-level RDTAI decision tree pushed to kernel!");
+        info!("Full-scale RDTAI multi-metric tree initialized!");
         Ok(())
     }
 
