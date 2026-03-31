@@ -35,6 +35,7 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use clap_complete::Shell;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::libbpf_sys::bpf_program__set_autoattach;
 use libbpf_rs::AsRawLibbpf;
@@ -627,6 +628,10 @@ pub struct Args {
         conflicts_with = "args"
     )]
     pub pid: Option<libc::pid_t>,
+
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    pub completions: Option<Shell>,
 
     /// Program to run under the chaos scheduler
     ///

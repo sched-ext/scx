@@ -4,7 +4,10 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::generate;
+use clap_complete::Shell;
 use log::*;
 
 mod monitors;
@@ -61,10 +64,24 @@ struct Opts {
     /// Pin path of the task hint TLS map (mandatory with --hints).
     #[clap(long = "hints-map")]
     hints_map: Option<String>,
+
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 }
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if let Some(shell) = opts.completions {
+        generate(
+            shell,
+            &mut Opts::command(),
+            "scxcash",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
 
     let llv = match opts.verbose {
         0 => simplelog::LevelFilter::Info,

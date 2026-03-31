@@ -28,7 +28,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
+use clap_complete::generate;
+use clap_complete::Shell;
 
 use scheduler::Scheduler;
 use scx_utils::build_id;
@@ -65,6 +68,10 @@ struct Cli {
     #[arg(long)]
     no_adaptive: bool,
 
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
+
     /// Override the topology-derived Phi distance scale (phi_dist_scale_q16).
     /// 0 disables the Phi steal-resist (flat CoDel target); omit for the
     /// topology value. Test/bench use -- the override holds across both the
@@ -93,6 +100,16 @@ struct StressWorkerArgs {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(shell) = cli.completions {
+        generate(
+            shell,
+            &mut Cli::command(),
+            "scx_pandemonium",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
 
     let verbose = cli.verbose;
     let dump_log = cli.dump_log;

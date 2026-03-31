@@ -6,10 +6,22 @@ use anyhow::bail;
 use scx_chaos::run;
 use scx_chaos::Args;
 
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::generate;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if let Some(shell) = args.completions {
+        generate(
+            shell,
+            &mut Args::command(),
+            "scx_chaos",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
 
     let llv = match &args.verbose {
         0 => simplelog::LevelFilter::Info,
