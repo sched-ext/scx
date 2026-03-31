@@ -27,7 +27,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::generate;
+use clap_complete::Shell;
 use clap_num::number_range;
 use cpu_order::CpuOrder;
 use cpu_order::PerfCpuOrder;
@@ -268,6 +271,10 @@ struct Opts {
     /// Topology configuration options
     #[clap(flatten)]
     topology: Option<TopologyArgs>,
+
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 }
 
 impl Opts {
@@ -1004,6 +1011,16 @@ fn init_log(opts: &Opts) {
 
 #[clap_main::clap_main]
 fn main(mut opts: Opts) -> Result<()> {
+    if let Some(shell) = opts.completions {
+        generate(
+            shell,
+            &mut Opts::command(),
+            "scx_lavd",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
+
     if opts.version {
         println!(
             "scx_lavd {}",

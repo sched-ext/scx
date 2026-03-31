@@ -27,7 +27,10 @@ use std::time::Instant;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::generate;
+use clap_complete::Shell;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -187,6 +190,9 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 }
 
 // The subset of cstats we care about.
@@ -1294,6 +1300,16 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
 
 #[clap_main::clap_main]
 fn main(opts: Opts) -> Result<()> {
+    if let Some(shell) = opts.completions {
+        generate(
+            shell,
+            &mut Opts::command(),
+            "scx_mitosis",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
+
     if opts.version {
         println!(
             "scx_mitosis {}",
