@@ -24,6 +24,7 @@ members = [
     "scheds/rust/scx_rlfifo",
     "scheds/rust/scx_rustland",
     "scheds/rust/scx_rusty",
+    "scheds/rust/scx_sub_demo",
     "scheds/rust/scx_tickless",
     "scheds/rust/scx_wd40",
     "tools/scxcash",
@@ -56,3 +57,7 @@ debug = 0
 incremental = false
 strip = true
 lto = false
+
+[patch.crates-io]
+libbpf-rs = { git = "https://github.com/d-e-s-o/libbpf-rs", branch = "topic/assoc-struct-ops" }
+libbpf-cargo = { git = "https://github.com/d-e-s-o/libbpf-rs", branch = "topic/assoc-struct-ops" }

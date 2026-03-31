@@ -498,7 +498,27 @@ macro_rules! scx_ops_load {
             }
 
             scx_utils::uei_set_size!($skel, $ops, $uei);
-            $skel.load().context("Failed to load BPF program")
+            let mut loaded = match $skel.load().context("Failed to load BPF program") {
+                Ok(s) => s,
+                Err(e) => break 'block Err(e),
+            };
+
+            // Match C SCX_OPS_LOAD: associate non-struct_ops programs with
+            // struct_ops map so scx_prog_sched() can identify the scheduler.
+            {
+                use ::libbpf_rs::skel::Skel;
+                use ::libbpf_rs::ProgramType;
+                for prog in loaded.object().progs_mut() {
+                    if prog.prog_type() != ProgramType::StructOps {
+                        if let Err(e) = prog.assoc_struct_ops(&loaded.maps.$ops) {
+                            ::scx_utils::warn!("Failed to associate {:?} with {}: {}",
+                                prog.name(), stringify!($ops), e);
+                        }
+                    }
+                }
+            }
+
+            Ok(loaded)
         }
     }};
 }

@@ -2152,14 +2152,12 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "libbpf-cargo"
 version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd59674b82a31cb53e512cee97e3d5143737b40feda35f89b5b7f5c439e51e8"
+source = "git+https://github.com/d-e-s-o/libbpf-rs?branch=topic%2Fassoc-struct-ops#098440e0151e1b12a36b6a7ad2c2341659a3fb22"
 dependencies = [
  "anyhow",
  "cargo_metadata 0.19.2",
  "clap",
  "libbpf-rs",
- "libbpf-sys",
  "memmap2",
  "serde",
  "serde_json",
@@ -2171,8 +2169,7 @@ dependencies = [
 [[package]]
 name = "libbpf-rs"
 version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6af29f679fd713ba4466b0296436268f573f6c5a8ef2f316d237eb3019c3c6f"
+source = "git+https://github.com/d-e-s-o/libbpf-rs?branch=topic%2Fassoc-struct-ops#098440e0151e1b12a36b6a7ad2c2341659a3fb22"
 dependencies = [
  "bitflags 2.11.0",
  "libbpf-sys",
@@ -2182,9 +2179,9 @@ dependencies = [
 
 [[package]]
 name = "libbpf-sys"
-version = "1.6.3+v1.6.3"
+version = "1.7.0+v1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95f55336f7dbde4fbbaae7b5e271f9efc65bf1d0b69c6fcb1e5026a385e95f70"
+checksum = "a109478760b2900aa2a6f2087e9d0de1d9c535b1758602af2845d5d2ccfaed7c"
 dependencies = [
  "cc",
  "nix 0.31.2",
@@ -4032,6 +4029,21 @@ dependencies = [
  "scx_stats",
  "serde_json",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "scx_sub_demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "libbpf-rs",
+ "libc",
+ "log",
+ "scx_cargo",
+ "scx_utils",
+ "simplelog",
 ]
 
 [[package]]
