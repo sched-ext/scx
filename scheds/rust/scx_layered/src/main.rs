@@ -1346,7 +1346,7 @@ fn resolve_cpus_pct_range(
             let cpus_max_count = ((max_cpus as f64) * cpus_frac_max).round_ties_even() as usize;
             Ok((
                 std::cmp::max(cpus_min_count, 1),
-                std::cmp::min(cpus_max_count, max_cpus),
+                std::cmp::min(std::cmp::max(cpus_max_count, 1), max_cpus),
             ))
         }
         (None, None) => Ok((0, max_cpus)),
