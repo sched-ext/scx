@@ -66,6 +66,27 @@ have `rustup` installed this will use the version in `rust-toolchain.toml`.
 
     $ cargo fmt
 
+## Shell Completions
+
+All Rust schedulers and `scxcash` support a hidden `--completions <SHELL>` flag
+to generate shell completions for `bash`, `zsh`, `fish`, `elvish`, and `powershell`.
+This is intended for distro packaging — completions can be generated at install time:
+
+    scx_bpfland --completions bash > /usr/share/bash-completion/completions/scx_bpfland
+    scx_bpfland --completions zsh > /usr/share/zsh/site-functions/_scx_bpfland
+    scx_bpfland --completions fish > /usr/share/fish/vendor_completions.d/scx_bpfland.fish
+
+To generate and install completions for all schedulers at once (bash example):
+
+```bash
+for bin in scx_beerland scx_bpfland scx_cake scx_chaos scx_cosmos \
+           scx_flash scx_lavd scx_layered scx_mitosis scx_p2dq \
+           scx_pandemonium scx_rustland scx_rusty scx_tickless \
+           scx_wd40 scxcash; do
+    $bin --completions bash > /usr/share/bash-completion/completions/$bin
+done
+```
+
 ## Useful Tools
 
 ## [systing](https://github.com/josefbacik/systing)

@@ -17,7 +17,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use clap::CommandFactory;
 use clap::{Parser, ValueEnum};
+use clap_complete::generate;
+use clap_complete::Shell;
 use log::info;
 
 #[cfg(cake_needs_arena)]
@@ -453,6 +456,10 @@ struct Args {
     /// Print scheduler version and exit.
     #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 
     /// Compare two scx_cake TUI dump files and exit without loading BPF.
     #[arg(long, value_names = ["BASELINE", "CANDIDATE"], num_args = 2)]
@@ -1006,6 +1013,16 @@ fn main() -> Result<()> {
     })));
 
     let args = Args::parse();
+
+    if let Some(shell) = args.completions {
+        generate(
+            shell,
+            &mut Args::command(),
+            "scx_cake",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
 
     // Handle --version before anything else (matches cosmos/bpfland)
     if args.version {

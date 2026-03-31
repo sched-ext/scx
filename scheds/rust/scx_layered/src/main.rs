@@ -31,7 +31,10 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 pub use bpf_skel::*;
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::generate;
+use clap_complete::Shell;
 use crossbeam::channel::Receiver;
 use crossbeam::select;
 use lazy_static::lazy_static;
@@ -658,6 +661,9 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 }
 
 // Cgroup event types for inter-thread communication
@@ -4943,6 +4949,16 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
 
 #[clap_main::clap_main]
 fn main(opts: Opts) -> Result<()> {
+    if let Some(shell) = opts.completions {
+        generate(
+            shell,
+            &mut Opts::command(),
+            "scx_layered",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
+
     if opts.version {
         println!(
             "scx_layered {}",

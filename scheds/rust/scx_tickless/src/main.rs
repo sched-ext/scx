@@ -23,7 +23,10 @@ use affinity::set_thread_affinity;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::generate;
+use clap_complete::Shell;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -100,6 +103,9 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 }
 
 pub fn is_nohz_enabled() -> bool {
@@ -288,6 +294,16 @@ impl Drop for Scheduler<'_> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if let Some(shell) = opts.completions {
+        generate(
+            shell,
+            &mut Opts::command(),
+            "scx_tickless",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
 
     if opts.version {
         println!(

@@ -14,7 +14,10 @@ use std::time::Duration;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::generate;
+use clap_complete::Shell;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::AsRawLibbpf;
@@ -116,6 +119,10 @@ struct CliOpts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    pub completions: Option<Shell>,
 }
 
 struct Scheduler<'a> {
@@ -352,6 +359,16 @@ impl Drop for Scheduler<'_> {
 
 #[clap_main::clap_main]
 fn main(opts: CliOpts) -> Result<()> {
+    if let Some(shell) = opts.completions {
+        generate(
+            shell,
+            &mut CliOpts::command(),
+            "scx_p2dq",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
+
     if opts.version {
         println!(
             "scx_p2dq: {}",
