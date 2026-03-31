@@ -1851,9 +1851,9 @@ bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
 	int i;
 
 	/*
-	 * If the quota is infinite, we don't need to replenish the cgroup.
+	 * If the quota_ub is infinite, we don't need to replenish the cgroup.
 	 */
-	if (cgx->nquota == CBW_RUNTUME_INF)
+	if (cgx->nquota_ub == CBW_RUNTUME_INF)
 		goto out_no_replenish;
 
 	/*

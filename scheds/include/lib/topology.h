@@ -5,8 +5,6 @@
 struct topology;
 typedef struct topology __arena * topo_ptr;
 
-#define TOPO_MAX_CHILDREN (16)
-
 enum topo_level {
 	TOPO_TOP	= 0,
 	TOPO_NODE	= 1,
@@ -18,7 +16,6 @@ enum topo_level {
 
 struct topology {
 	topo_ptr parent;
-	topo_ptr children[TOPO_MAX_CHILDREN];
 	size_t nr_children;
 	scx_bitmap_t mask;
 	enum topo_level level;
@@ -26,9 +23,23 @@ struct topology {
 
 	/* Generic pointer, can be used for anything. */
 	void __arena *data;
+
+	/*
+	 * Variable-length children array. Allocated as part of the struct via
+	 * scx_static_alloc(sizeof(struct topology) + max_children * sizeof(topo_ptr)).
+	 * The per-level capacity is stored in topo_max_children[].
+	 */
+	topo_ptr children[];
 };
 
 extern volatile topo_ptr topo_all;
+
+/*
+ * Per-level maximum number of children. Must be set via arena_topology_init()
+ * before any topo_init() calls. Each node at level L is allocated with
+ * topo_max_children[L] child pointer slots.
+ */
+extern u32 topo_max_children[TOPO_MAX_LEVEL];
 
 int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id);
 int topo_contains(topo_ptr topo, u32 cpu);
