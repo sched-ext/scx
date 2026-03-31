@@ -62,14 +62,6 @@ jobs:
       fail-fast: false
       matrix:
         kernel:
-          - name: scx__sched_ext__for-next
-            url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
-            tag: for-next
-            allow-failure: true
-          - name: scx__bpf__bpf-next
-            url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
-            tag: master
-            allow-failure: true
           - name: scx__stable__linux-rolling-stable
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-rolling-stable
@@ -86,7 +78,6 @@ jobs:
             tag: linux-6.18.y
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    continue-on-error: ${{ matrix.kernel.allow-failure == true }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -110,6 +101,58 @@ jobs:
               printf '\n[package.metadata.veristat]\ndisable = true\n' >> "$manifest"
             fi
           done
+      - name: Build packages and generate metadata
+        run: |
+          cargo build --profile ci --locked
+          cargo metadata --format-version 1 > /tmp/meta.json
+      - name: 'Veristat: ${{ matrix.kernel.name }}'
+        uses: likewhatevs/vng-action@v0.7.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v21
+          network: user
+          verbose: true
+          workspace-rw: false
+          run: |
+            export PS4='+ $(date "+%H:%M:%S") '
+            set -x
+            cargo veristat --profile ci --metadata-json /tmp/meta.json --no-build --stderr-gfm-erronly 2>>"$GITHUB_STEP_SUMMARY"
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
+  veristat-dev:
+    if: github.repository == 'sched-ext/scx' || github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel:
+          - name: scx__sched_ext__for-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
+            tag: for-next
+          - name: scx__bpf__bpf-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
+            tag: master
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
+      - uses: ./.github/actions/install-deps-action
+      - name: Install veristat tools
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/libbpf/veristat /tmp/veristat
+          make -C /tmp/veristat/src -j$(nproc)
+          sudo cp /tmp/veristat/src/veristat /usr/local/bin/
+          sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
+          cargo install cargo-veristat --locked
       - name: Build packages and generate metadata
         run: |
           cargo build --profile ci --locked

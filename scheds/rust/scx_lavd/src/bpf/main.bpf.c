@@ -686,7 +686,7 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 		return -ESRCH;
 	}
 
-	ret = scx_cgroup_bw_throttled(cgrp);
+	ret = scx_cgroup_bw_throttled(cgrp, p);
 	if ((ret == -EAGAIN) && put_aside) {
 		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime, cgrp);
 		if (ret2) {
@@ -838,14 +838,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 }
 
 static
-int enqueue_cb(struct task_struct __arg_trusted *p)
+int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 {
 	struct cpu_ctx *cpuc, *cpuc_cur;
-	task_ctx *taskc;
 	u64 dsq_id;
 	s32 cpu;
 
-	taskc = get_task_ctx(p);
 	cpuc_cur = get_cpu_ctx();
 	if (!taskc || !cpuc_cur) {
 		scx_bpf_error("Failed to lookup a task context: %d", p->pid);
@@ -1093,7 +1091,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
-			break;
+			continue; /* ignore the lookup error */
 
 		/*
 		 * if the task is pinned to this cpu,
@@ -1791,6 +1789,16 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	return 0;
 }
 
+void BPF_STRUCT_OPS(lavd_dump, struct scx_dump_ctx *dctx)
+{
+	/*
+	 * Dump the cpu.max status of the entire cgroup hierarchy.
+	 */
+	if (enable_cpu_bw) {
+		scx_cgroup_bw_dump(1, true, true, true);
+	}
+}
+
 void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 		    struct task_struct *p)
 {
@@ -1817,12 +1825,13 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 		bpf_cgroup_release(cgrp);
 	}
 
-	scx_bpf_dump("  + given_slice: %llu   lat_cri: %d/%d   perf_cri: %d/%d\n",
+	scx_bpf_dump("  \\_ slice: %llu   vtime: %llu/%llu   lat_cri: %d/%d   perf_cri: %d/%d\n",
 		     taskc->slice_wall,
+		     p->scx.dsq_vtime, READ_ONCE(cur_logical_clk),
 		     taskc->lat_cri, sys_stat.avg_lat_cri,
 		     taskc->perf_cri, sys_stat.avg_perf_cri);
 
-	scx_bpf_dump("  + cpdom_id: %d   cgroup: %s[%llu] (%s)   task_status: %s\n",
+	scx_bpf_dump("  \\_ cpdom_id: %d   cgroup: %s[%llu] (%s)   task_status: %s\n",
 		     taskc->cpdom_id,
 		     cgrp_name, taskc->cgrp_id,
 		     (cgroup_throttled) ? "throttled" : "not throttled",
@@ -2170,6 +2179,7 @@ void BPF_STRUCT_OPS(lavd_cgroup_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
 	task_ctx *taskc;
+	int ret;
 
 	taskc = get_task_ctx(p);
 	if (!taskc) {
@@ -2177,6 +2187,12 @@ void BPF_STRUCT_OPS(lavd_cgroup_move, struct task_struct *p,
 		return;
 	}
 	taskc->cgrp_id = to->kn->id;
+
+	if (enable_cpu_bw &&
+	    (ret = scx_cgroup_bw_move(p, (u64)taskc, from, to))) {
+	       scx_bpf_error("Failed to move a task (%s:%d) from cgid%llu to cgid%llu: %d",
+			     p->comm, p->pid, from->kn->id, to->kn->id, ret);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_cgroup_set_bandwidth, struct cgroup *cgrp,
@@ -2192,23 +2208,19 @@ void BPF_STRUCT_OPS(lavd_cgroup_set_bandwidth, struct cgroup *cgrp,
 	       scx_bpf_error("Failed to set bandwidth of a cgroup: %d", ret);
 }
 
-int lavd_enqueue_cb(u64 ctx)
+int lavd_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
 {
 	task_ctx *taskc = (task_ctx *)ctx;
-	struct task_struct *p;
 
 	if (!enable_cpu_bw)
 		return 0;
 
 	/*
-	 * Enqueue a task with @pid. As long as the task is under scx,
+	 * Enqueue a task @p. As long as the task is under scx,
 	 * it must be enqueued regardless of whether its cgroup is throttled
 	 * or not.
 	 */
-	if ((p = bpf_task_from_pid(taskc->pid))) {
-		enqueue_cb(p);
-		bpf_task_release(p);
-	}
+	enqueue_cb(p, taskc);
 	return 0;
 }
 REGISTER_SCX_CGROUP_BW_ENQUEUE_CB(lavd_enqueue_cb);
@@ -2362,6 +2374,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
 	       .exit_task		= (void *)lavd_exit_task,
+	       .dump			= (void *)lavd_dump,
 	       .dump_task		= (void *)lavd_dump_task,
 	       .cgroup_init		= (void *)lavd_cgroup_init,
 	       .cgroup_exit		= (void *)lavd_cgroup_exit,

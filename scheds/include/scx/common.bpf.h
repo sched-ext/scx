@@ -14,12 +14,17 @@
  */
 #define BPF_NO_KFUNC_PROTOTYPES
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-declarations"
+
 #ifdef LSP
 #define __bpf__
 #include "../vmlinux.h"
 #else
 #include "vmlinux.h"
 #endif
+
+#pragma clang diagnostic pop
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
