@@ -1,0 +1,26 @@
+/*
+ * Assert: no enforced dispatch to a CPU excluded by cpus_ptr.
+ * Only fires when enforce=true (arg3), which is the lethal deferred
+ * LOCAL_ON path through dispatch_to_local_dsq. The consume path uses
+ * enforce=false and handles mismatches gracefully (skips the task).
+ */
+kprobe:task_can_run_on_remote_rq {
+    $enforce = (uint64)arg3;
+    if ($enforce == 0) { return; }
+
+    $p = (struct task_struct *)arg1;
+    $rq = (struct rq *)arg2;
+    $cpu = (uint64)$rq->cpu;
+    $word = $p->cpus_ptr->bits[$cpu / 64];
+    $bit = (uint64)1 << ($cpu % 64);
+    if (($word & $bit) == 0) {
+        printf("VIOLATION: %s[%d] dispatched to CPU %d which is not in cpus_ptr\n",
+               $p->comm, $p->pid, $cpu);
+        printf("  cpus_ptr[%d]=0x%lx does not have bit 0x%lx (CPU %d)\n",
+               $cpu / 64, $word, $bit, $cpu);
+        printf("  migration_disabled=%d\n", $p->migration_disabled);
+        printf("  call chain:\n%s", kstack);
+        printf("  ---RAW---\n%s---ENDRAW---\n", kstack(raw));
+        exit();
+    }
+}

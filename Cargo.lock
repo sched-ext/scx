@@ -4570,6 +4570,7 @@ name = "stt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blazesym",
  "clap",
  "console",
  "ctrlc",

@@ -184,7 +184,12 @@ pub struct Scenario {
 }
 
 impl Scenario {
-    pub fn scheduler_args(&self, parent_cgroup: &str, profile: &FlagProfile) -> Vec<String> {
+    pub fn scheduler_args(
+        &self,
+        parent_cgroup: &str,
+        profile: &FlagProfile,
+        repro: bool,
+    ) -> Vec<String> {
         let rel = parent_cgroup
             .strip_prefix("/sys/fs/cgroup")
             .unwrap_or(parent_cgroup);
@@ -192,12 +197,14 @@ impl Scenario {
             "--cell-parent-cgroup".into(),
             rel.into(),
             "--watchdog-timeout-ms".into(),
-            "2000".into(),
+            if repro { "30000" } else { "2000" }.into(),
             "--exit-dump-len".into(),
             "1048576".into(),
             "--debug-events".into(),
-            "--trigger-dump".into(),
         ];
+        if !repro {
+            args.push("--trigger-dump".into());
+        }
         for a in profile.args() {
             args.push(a.into());
         }
@@ -1432,7 +1439,7 @@ fn custom_cpuset_disjoint(ctx: &Ctx) -> Result<VerifyResult> {
         num_workers: ctx.workers_per_cell,
         ..Default::default()
     };
-    let mut handles: Vec<_> = ["cell_0", "cell_1"]
+    let handles: Vec<_> = ["cell_0", "cell_1"]
         .iter()
         .map(|n| {
             let mut h = WorkloadHandle::spawn(&wl).unwrap();
@@ -1741,7 +1748,7 @@ fn custom_no_ctrl_cpuset(ctx: &Ctx) -> Result<VerifyResult> {
     ctx.cgroups.set_cpuset("cell_1", &b)?;
     thread::sleep(Duration::from_secs(3));
     let wl = dfl_wl(ctx);
-    let mut handles: Vec<_> = ["cell_0", "cell_1"]
+    let handles: Vec<_> = ["cell_0", "cell_1"]
         .iter()
         .map(|n| {
             let mut h = WorkloadHandle::spawn(&wl).unwrap();
@@ -2219,7 +2226,7 @@ fn custom_dispatch_contention(ctx: &Ctx) -> Result<VerifyResult> {
     let n_pinned = last.min(4);
     let mut pinned_handles = Vec::new();
     for i in 0..n_pinned {
-        let mut h = WorkloadHandle::spawn(&WorkloadConfig {
+        let h = WorkloadHandle::spawn(&WorkloadConfig {
             num_workers: 1,
             affinity: AffinityMode::SingleCpu(all[i]),
             work_type: WorkType::Bursty {
@@ -2403,8 +2410,8 @@ fn custom_vtime_contamination(ctx: &Ctx) -> Result<VerifyResult> {
     };
 
     let mut r = VerifyResult::pass();
-    let mut extra_cell_exists = false;
-    let extra_name = "cell_5".to_string();
+    let _extra_cell_exists = false;
+    let _extra_name = "cell_5".to_string();
     let phase_dur = Duration::from_secs(8);
 
     // Actions: (num_cells, overlapping)
@@ -3482,7 +3489,11 @@ fn custom_llc_cpuset_race(ctx: &Ctx) -> Result<VerifyResult> {
 
     // Reserve one CPU from LLC0 for cell 0 to avoid cell-0-starvation.
     let reserved = *llc0_full.iter().next().unwrap();
-    let llc0: BTreeSet<usize> = llc0_full.iter().copied().filter(|c| *c != reserved).collect();
+    let llc0: BTreeSet<usize> = llc0_full
+        .iter()
+        .copied()
+        .filter(|c| *c != reserved)
+        .collect();
     let llc1: BTreeSet<usize> = llc1_full.clone();
     if llc0.is_empty() {
         return Ok(VerifyResult {
@@ -3667,7 +3678,7 @@ mod tests {
     fn scenario_scheduler_args_includes_parent() {
         let s = &all_scenarios()[0];
         let p = FlagProfile { flags: vec![] };
-        let args = s.scheduler_args("/sys/fs/cgroup/stt", &p);
+        let args = s.scheduler_args("/sys/fs/cgroup/stt", &p, false);
         assert!(args.contains(&"--cell-parent-cgroup".to_string()));
         assert!(args.contains(&"/stt".to_string()));
         assert!(args.contains(&"--watchdog-timeout-ms".to_string()));
@@ -3680,7 +3691,7 @@ mod tests {
         let p = FlagProfile {
             flags: vec![Flag::Borrowing],
         };
-        let args = s.scheduler_args("/sys/fs/cgroup/stt", &p);
+        let args = s.scheduler_args("/sys/fs/cgroup/stt", &p, false);
         assert!(args.contains(&"--enable-borrowing".to_string()));
     }
 
@@ -3912,7 +3923,7 @@ mod tests {
     fn scheduler_args_strips_cgroup_prefix() {
         let s = &all_scenarios()[0];
         let p = FlagProfile { flags: vec![] };
-        let args = s.scheduler_args("/sys/fs/cgroup/test/nested", &p);
+        let args = s.scheduler_args("/sys/fs/cgroup/test/nested", &p, false);
         assert!(args.contains(&"/test/nested".to_string()));
     }
 
@@ -3920,7 +3931,7 @@ mod tests {
     fn scheduler_args_includes_debug_events() {
         let s = &all_scenarios()[0];
         let p = FlagProfile { flags: vec![] };
-        let args = s.scheduler_args("/sys/fs/cgroup/stt", &p);
+        let args = s.scheduler_args("/sys/fs/cgroup/stt", &p, false);
         assert!(args.contains(&"--debug-events".to_string()));
         assert!(args.contains(&"--exit-dump-len".to_string()));
     }
@@ -3931,7 +3942,7 @@ mod tests {
         for s in &all_scenarios() {
             if !s.extra_sched_args.is_empty() {
                 let p = FlagProfile { flags: vec![] };
-                let args = s.scheduler_args("/sys/fs/cgroup/stt", &p);
+                let args = s.scheduler_args("/sys/fs/cgroup/stt", &p, false);
                 for extra in s.extra_sched_args {
                     assert!(
                         args.contains(&extra.to_string()),

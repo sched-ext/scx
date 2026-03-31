@@ -195,7 +195,7 @@ fn verify_runnable(reports: &[WorkerReport], _available_cpus: usize) -> VerifyRe
     if pcts.len() >= 3 {
         let mut sorted: Vec<f64> = pcts.iter().map(|(_, p)| *p).collect();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = sorted[sorted.len() / 2];
+        let _median = sorted[sorted.len() / 2];
 
         let spread = sorted.last().unwrap_or(&0.0) - sorted.first().unwrap_or(&0.0);
 

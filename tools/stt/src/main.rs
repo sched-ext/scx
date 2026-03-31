@@ -65,6 +65,17 @@ struct RunArgs {
     /// Log unfairness but don't fail on it
     #[clap(long)]
     warn_unfair: bool,
+    /// Reproducer mode: extend watchdog, disable dump trigger, run
+    /// bpftrace assertion scripts to catch invariant violations.
+    #[clap(long)]
+    repro: bool,
+    /// bpftrace assertion script (name or path). Runs during repro mode;
+    /// exits on invariant violation.
+    #[clap(long)]
+    assert_script: Option<String>,
+    /// Path to linux source tree (for VNG kernel boot and symbolization)
+    #[clap(long)]
+    kernel_dir: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -89,6 +100,9 @@ struct VmArgs {
     /// Without this, gauntlet uses each scenario's default profiles.
     #[clap(long, value_delimiter = ',')]
     flags: Vec<String>,
+    /// Linux source tree with built kernel (boots this instead of host kernel)
+    #[clap(long)]
+    kernel_dir: Option<String>,
     #[clap(last = true)]
     run_args: Vec<String>,
 }
@@ -184,6 +198,9 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     if args.warn_unfair {
         verify::set_warn_unfair(true);
     }
+    if args.repro {
+        workload::set_repro_mode(true);
+    }
     let config = RunConfig {
         mitosis_bin,
         parent_cgroup: args.parent_cgroup,
@@ -192,6 +209,9 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         json: args.json,
         verbose: args.verbose,
         active_flags,
+        repro: args.repro,
+        assert_script: args.assert_script,
+        kernel_dir: args.kernel_dir,
     };
     let results = Runner::new(config, topo)?.run_scenarios(&selected)?;
     if args.json {
@@ -249,6 +269,7 @@ fn cmd_vm(args: VmArgs) -> Result<()> {
         vng_args: args.vng_arg,
         topology: topo,
         timeout: None,
+        kernel_dir: args.kernel_dir,
     };
     let t = &cfg.topology;
     println!(
@@ -258,6 +279,10 @@ fn cmd_vm(args: VmArgs) -> Result<()> {
         t.num_llcs()
     );
     let mut stt_args = vec!["run".into(), "--mitosis-bin".into(), default_mitosis_bin()];
+    if let Some(ref kd) = cfg.kernel_dir {
+        stt_args.push("--kernel-dir".into());
+        stt_args.push(kd.clone());
+    }
     if run_all {
         stt_args.push("--all".into());
     } else {
@@ -323,6 +348,7 @@ fn cmd_vm_parallel(
         in_flight.fetch_add(1, Ordering::Relaxed);
 
         let (kernel, vng_extra) = (args.kernel.clone(), args.vng_arg.clone());
+        let kernel_dir = args.kernel_dir.clone();
         let mem = args.memory_mb;
         let topo = topo.clone();
         let sname = sname.clone();
@@ -355,6 +381,7 @@ fn cmd_vm_parallel(
                     memory_mb: mem,
                     vng_args: vng_extra.clone(),
                     timeout: Some(timeout),
+                    kernel_dir: kernel_dir.clone(),
                 };
                 let (a_ok, a_dur, a_detail, a_inner) = match vng::run_in_vng(&cfg, &stt_args) {
                     Ok(r) if r.timed_out => {
@@ -429,11 +456,7 @@ fn cmd_vm_parallel(
     let passed = results.iter().filter(|r| r.1).count();
     let failed: Vec<_> = results.iter().filter(|r| !r.1).collect();
 
-    println!(
-        "\n=== {}/{} passed ===",
-        passed,
-        results.len()
-    );
+    println!("\n=== {}/{} passed ===", passed, results.len());
 
     if !failed.is_empty() {
         println!("\nFailed:");
@@ -539,6 +562,7 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
         in_flight.fetch_add(1, Ordering::Relaxed);
 
         let (kernel, vng_extra) = (args.kernel.clone(), args.vng_arg.clone());
+        let kernel_dir = args.kernel_dir.clone();
         let (results, completed, fail_count) = (
             Arc::clone(&results),
             Arc::clone(&completed),
@@ -560,6 +584,7 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
                     memory_mb: mem,
                     vng_args: vng_extra.clone(),
                     timeout: Some(timeout),
+                    kernel_dir: kernel_dir.clone(),
                 };
                 let (a_ok, a_dur, a_detail, a_inner) = match vng::run_in_vng(&cfg, &stt_args) {
                     Ok(r) if r.timed_out => {

@@ -461,7 +461,10 @@ impl<'a> Scheduler<'a> {
             let bss = self.skel.maps.bss_data.as_mut().unwrap();
             DUMP_PTR.store(&mut bss.trigger_dump as *mut bool, Ordering::Relaxed);
             unsafe {
-                libc::signal(libc::SIGUSR2, sigusr2_handler as *const () as libc::sighandler_t);
+                libc::signal(
+                    libc::SIGUSR2,
+                    sigusr2_handler as *const () as libc::sighandler_t,
+                );
             }
         }
 

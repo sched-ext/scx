@@ -80,8 +80,15 @@ pub struct WorkerReport {
 /// PID of the scheduler process. Workers kill it on stall to trigger dump.
 static SCHED_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// In repro mode, don't kill the scheduler on stall — keep it alive for assertions.
+static REPRO_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn set_sched_pid(pid: u32) {
     SCHED_PID.store(pid as i32, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn set_repro_mode(v: bool) {
+    REPRO_MODE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Handle to running worker processes (forked, not threads).
@@ -115,7 +122,10 @@ impl WorkloadHandle {
                     // to prevent SIGUSR1 killing us before we're ready
                     STOP.store(false, Ordering::Relaxed);
                     unsafe {
-                        libc::signal(libc::SIGUSR1, sigusr1_handler as libc::sighandler_t);
+                        libc::signal(
+                            libc::SIGUSR1,
+                            sigusr1_handler as *const () as libc::sighandler_t,
+                        );
                     }
                     // Close unused pipe ends
                     unsafe {
@@ -318,10 +328,10 @@ fn worker_main(
                 max_gap_cpu = last_cpu;
                 max_gap_at_ns = now.duration_since(start).as_nanos() as u64;
             }
-            // If stuck >2s, send SIGUSR2 to the scheduler to trigger
-            // scx_bpf_error in ops.tick, producing an exit dump with
-            // full cell/CPU/task state.
-            if gap > 2_000_000_000 {
+            // If stuck >2s and not in repro mode, send SIGUSR2 to the
+            // scheduler to trigger scx_bpf_error in ops.tick. In repro
+            // mode, keep it alive for assertion scripts.
+            if gap > 2_000_000_000 && !REPRO_MODE.load(std::sync::atomic::Ordering::Relaxed) {
                 let pid = SCHED_PID.load(std::sync::atomic::Ordering::Relaxed);
                 if pid > 0 {
                     unsafe { libc::kill(pid, libc::SIGUSR2) };

@@ -100,6 +100,9 @@ pub struct VngConfig {
     pub memory_mb: usize,
     pub vng_args: Vec<String>,
     pub timeout: Option<Duration>,
+    /// Linux source tree with built kernel. When set, VNG boots this
+    /// kernel instead of the host kernel (-r).
+    pub kernel_dir: Option<String>,
 }
 
 impl Default for VngConfig {
@@ -114,6 +117,7 @@ impl Default for VngConfig {
             memory_mb: 4096,
             vng_args: vec![],
             timeout: None,
+            kernel_dir: None,
         }
     }
 }
@@ -157,7 +161,16 @@ pub fn run_in_vng(cfg: &VngConfig, stt_args: &[String]) -> Result<VngResult> {
     let t = &cfg.topology;
 
     let mut cmd = Command::new("vng");
-    cmd.args(["-r", "--force", "--disable-microvm"]);
+    if cfg.kernel_dir.is_some() {
+        // Boot the locally-built kernel from the source tree
+        cmd.args(["--force", "--disable-microvm"]);
+    } else {
+        // Boot the host's running kernel
+        cmd.args(["-r", "--force", "--disable-microvm"]);
+    }
+    if let Some(ref kd) = cfg.kernel_dir {
+        cmd.current_dir(kd);
+    }
     cmd.args(["--cpus", &t.total_cpus().to_string()]);
     cmd.args(["--memory", &format!("{}M", cfg.memory_mb)]);
     cmd.args([
