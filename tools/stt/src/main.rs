@@ -201,15 +201,47 @@ fn cmd_run(args: RunArgs) -> Result<()> {
 }
 
 fn cmd_vm(args: VmArgs) -> Result<()> {
+    let topo = vng::VngTopology {
+        sockets: args.sockets,
+        cores_per_socket: args.cores,
+        threads_per_core: args.threads,
+    };
+
+    // Parse scenario names and options from run_args.
+    // Options (--foo bar or --foo=bar) go to extra_args, bare words are scenarios.
+    let mut scenario_names = Vec::new();
+    let mut extra_args = Vec::new();
+    let run_all = args.run_args.is_empty();
+    {
+        let mut iter = args.run_args.iter().peekable();
+        while let Some(a) = iter.next() {
+            if a.starts_with('-') {
+                extra_args.push(a.clone());
+                // --key value (not --key=value): consume the next arg too
+                if !a.contains('=') {
+                    if let Some(v) = iter.peek() {
+                        if !v.starts_with('-') {
+                            extra_args.push(iter.next().unwrap().clone());
+                        }
+                    }
+                }
+            } else {
+                scenario_names.push(a.clone());
+            }
+        }
+    }
+
+    let max_par = args.parallel.unwrap_or(1);
+    if max_par > 1 && !scenario_names.is_empty() {
+        return cmd_vm_parallel(&args, &topo, &scenario_names, &extra_args, max_par);
+    }
+
+    // Single-VM mode (original behavior)
     let cfg = vng::VngConfig {
         kernel: args.kernel,
         memory_mb: args.memory_mb,
         vng_args: args.vng_arg,
-        topology: vng::VngTopology {
-            sockets: args.sockets,
-            cores_per_socket: args.cores,
-            threads_per_core: args.threads,
-        },
+        topology: topo,
         timeout: None,
     };
     let t = &cfg.topology;
@@ -220,7 +252,7 @@ fn cmd_vm(args: VmArgs) -> Result<()> {
         t.num_llcs()
     );
     let mut stt_args = vec!["run".into(), "--mitosis-bin".into(), default_mitosis_bin()];
-    if args.run_args.is_empty() {
+    if run_all {
         stt_args.push("--all".into());
     } else {
         stt_args.extend(args.run_args);
@@ -245,6 +277,173 @@ fn cmd_vm(args: VmArgs) -> Result<()> {
         style("PASS").green().bold(),
         r.duration.as_secs_f64()
     );
+    Ok(())
+}
+
+fn cmd_vm_parallel(
+    args: &VmArgs,
+    topo: &vng::VngTopology,
+    scenarios: &[String],
+    extra_args: &[String],
+    max_par: usize,
+) -> Result<()> {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    use std::thread;
+
+    let total = scenarios.len();
+    println!(
+        "{} {} VMs, {} parallel, {} CPUs, {} LLCs",
+        style("launching").cyan().bold(),
+        total,
+        max_par,
+        topo.total_cpus(),
+        topo.num_llcs()
+    );
+
+    let results: Arc<Mutex<Vec<(String, bool, f64, String, Vec<runner::ScenarioResult>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let fail_count = Arc::new(AtomicUsize::new(0));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+
+    for sname in scenarios {
+        while in_flight.load(Ordering::Relaxed) >= max_par {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        in_flight.fetch_add(1, Ordering::Relaxed);
+
+        let (kernel, vng_extra) = (args.kernel.clone(), args.vng_arg.clone());
+        let mem = args.memory_mb;
+        let topo = topo.clone();
+        let sname = sname.clone();
+        let extra_args = extra_args.to_vec();
+        let results = Arc::clone(&results);
+        let completed = Arc::clone(&completed);
+        let fail_count = Arc::clone(&fail_count);
+        let in_flight = Arc::clone(&in_flight);
+
+        handles.push(thread::spawn(move || {
+            let mut stt_args = vec![
+                "run".to_string(),
+                "--json".to_string(),
+                "--mitosis-bin".to_string(),
+                default_mitosis_bin(),
+                sname.clone(),
+            ];
+            stt_args.extend(extra_args);
+
+            let mut ok = false;
+            let mut dur = 0.0;
+            let mut detail = String::new();
+            let mut inner_results = vec![];
+            let timeout = vng::compute_timeout(1, 20, topo.total_cpus());
+
+            for attempt in 0..3 {
+                let cfg = vng::VngConfig {
+                    kernel: kernel.clone(),
+                    topology: topo.clone(),
+                    memory_mb: mem,
+                    vng_args: vng_extra.clone(),
+                    timeout: Some(timeout),
+                };
+                let (a_ok, a_dur, a_detail, a_inner) = match vng::run_in_vng(&cfg, &stt_args) {
+                    Ok(r) if r.timed_out => {
+                        (false, r.duration.as_secs_f64(), "timed out".into(), vec![])
+                    }
+                    Ok(r) => {
+                        let parsed: Vec<runner::ScenarioResult> = extract_json(&r.output);
+                        let d = if parsed.is_empty() {
+                            let last_err = r
+                                .stderr
+                                .lines()
+                                .rev()
+                                .find(|l| !l.trim().is_empty())
+                                .unwrap_or("no output");
+                            format!("VM failed: {}", &last_err[..last_err.len().min(120)])
+                        } else {
+                            String::new()
+                        };
+                        (
+                            r.success && !parsed.iter().any(|r| !r.passed),
+                            r.duration.as_secs_f64(),
+                            d,
+                            parsed,
+                        )
+                    }
+                    Err(e) => (false, 0.0, format!("{e:#}"), vec![]),
+                };
+                ok = a_ok;
+                dur = a_dur;
+                detail = a_detail.clone();
+                inner_results = a_inner;
+                if ok || !is_infra_failure(&inner_results, &a_detail) {
+                    break;
+                }
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+
+            let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            let status = if ok { "PASS" } else { "FAIL" };
+
+            let stats_str = inner_results
+                .first()
+                .map(|r| format_gauntlet_stats(r))
+                .unwrap_or_default();
+            let detail_str = format_gauntlet_detail(ok, &detail, &inner_results);
+
+            println!("[{n}/{total}] {status} {sname} ({dur:.0}s){stats_str}{detail_str}");
+            if !ok {
+                fail_count.fetch_add(1, Ordering::Relaxed);
+                for r in inner_results.iter().filter(|r| !r.passed) {
+                    for d in &r.details {
+                        println!("  {d}");
+                    }
+                }
+            }
+
+            results
+                .lock()
+                .unwrap()
+                .push((sname, ok, dur, detail, inner_results));
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+        }));
+    }
+
+    for h in handles {
+        let _ = h.join();
+    }
+
+    let results = results.lock().unwrap();
+    let passed = results.iter().filter(|r| r.1).count();
+    let failed: Vec<_> = results.iter().filter(|r| !r.1).collect();
+
+    println!(
+        "\n=== {}/{} passed ===",
+        passed,
+        results.len()
+    );
+
+    if !failed.is_empty() {
+        println!("\nFailed:");
+        for (name, _, _, d, inner) in &failed {
+            println!("\n  {name}:");
+            if !d.is_empty() {
+                println!("    {d}");
+            }
+            for r in inner.iter().filter(|r| !r.passed) {
+                for detail in &r.details {
+                    println!("    {detail}");
+                }
+            }
+        }
+        std::process::exit(1);
+    }
     Ok(())
 }
 
