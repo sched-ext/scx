@@ -124,6 +124,7 @@ fn handle_input_entry(app: &App, s: String) -> Option<Action> {
         | AppState::Memory
         | AppState::PerfTop
         | AppState::BpfPrograms
+        | AppState::Scheduler
             if app.filtering() =>
         {
             Some(Action::InputEntry(s))
