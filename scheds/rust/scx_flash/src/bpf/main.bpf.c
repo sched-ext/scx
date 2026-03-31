@@ -9,7 +9,7 @@
 
 #define CGROUP_WEIGHT_DFL	100
 
-#define CONFIG_HZ		1000
+#define CONFIG_HZ		100
 
 #define MAX_WAKEUP_FREQ		100
 
@@ -354,17 +354,6 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 		bpf_cpumask_release(cpumask);
 
 	return 0;
-}
-
-/*
- * Return the total amount of tasks that are currently waiting to be scheduled.
- */
-static inline u64 nr_tasks_waiting(s32 cpu)
-{
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-
-	return scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) +
-	       scx_bpf_dsq_nr_queued(node);
 }
 
 /*
@@ -1129,15 +1118,15 @@ static void init_cpuperf_target(void)
  */
 static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
+	int node, err;
 	s32 cpu;
-	int err;
 
 	/*
 	 * Check if we need to preempt the running tasks.
 	 */
-	bpf_rcu_read_lock();
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct task_struct *p = __COMPAT_scx_bpf_cpu_curr(cpu);
+		struct task_ctx *tctx;
 
 		/*
 		 * Ignore CPU if idle task is running.
@@ -1148,17 +1137,31 @@ static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
 		/*
 		 * Ignore CPUs without any task waiting.
 		 */
-		if (!nr_tasks_waiting(cpu))
+		node = __COMPAT_scx_bpf_cpu_node(cpu);
+		if (!scx_bpf_dsq_nr_queued(node) &&
+		    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu))
+			continue;
+
+		if (p->scx.slice != SCX_SLICE_INF)
+			continue;
+
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
 			continue;
 
 		/*
-		 * Set a finite time slice to the running task, so that it
-		 * can be preempted.
+		 * Preempt the running task if it has an infinite time
+		 * slice and has been running for more than slice_max.
 		 */
-		if (p->scx.slice == SCX_SLICE_INF)
-			p->scx.slice = task_slice(p);
+		tctx = try_lookup_task_ctx(p);
+		if (tctx) {
+			u64 slice = bpf_ktime_get_ns() - tctx->last_run_at;
+
+			if (slice > slice_max)
+				p->scx.slice = 0;
+		}
+		bpf_task_release(p);
 	}
-	bpf_rcu_read_unlock();
 
 	err = bpf_timer_start(timer, tick_interval_ns(), 0);
 	if (err)
@@ -1269,7 +1272,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 	if (throttle_ns) {
 		bpf_timer_init(timer, &throttle_timer, CLOCK_MONOTONIC);
 		bpf_timer_set_callback(timer, throttle_timerfn);
-		err = bpf_timer_start(timer, slice_max, 0);
+		err = bpf_timer_start(timer, tick_interval_ns(), 0);
 		if (err) {
 			scx_bpf_error("Failed to arm throttle timer");
 			return err;
