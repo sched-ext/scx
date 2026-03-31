@@ -62,6 +62,9 @@ struct RunArgs {
     all_flags: bool,
     #[clap(long, value_delimiter = ',')]
     flags: Vec<String>,
+    /// Log unfairness but don't fail on it
+    #[clap(long)]
+    warn_unfair: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -178,6 +181,9 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     };
     let active_flags = parse_flags(&args);
     let mitosis_bin = args.mitosis_bin.unwrap_or_else(default_mitosis_bin);
+    if args.warn_unfair {
+        verify::set_warn_unfair(true);
+    }
     let config = RunConfig {
         mitosis_bin,
         parent_cgroup: args.parent_cgroup,

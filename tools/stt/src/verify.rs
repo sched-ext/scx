@@ -1,5 +1,12 @@
 use crate::workload::WorkerReport;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static WARN_UNFAIR: AtomicBool = AtomicBool::new(false);
+
+pub fn set_warn_unfair(v: bool) {
+    WARN_UNFAIR.store(v, Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VerifyResult {
@@ -128,7 +135,9 @@ pub fn verify_not_starved(reports: &[WorkerReport]) -> VerifyResult {
 
     // Per-cell fairness: spread > 15% means unequal scheduling within a cell
     if spread > 15.0 && pcts.len() >= 2 {
-        r.passed = false;
+        if !WARN_UNFAIR.load(Ordering::Relaxed) {
+            r.passed = false;
+        }
         r.details.push(format!(
             "unfair cell: spread={:.0}% ({:.0}-{:.0}%) {} workers on {} cpus",
             spread,
