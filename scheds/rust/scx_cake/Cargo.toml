@@ -9,6 +9,7 @@ license = "GPL-2.0-only"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 ctrlc = { version = "3", features = ["termination"] }
 libbpf-rs = "=0.26.2"
 libc = "0.2"

@@ -3626,6 +3626,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "libbpf-rs",
@@ -3666,6 +3667,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "libbpf-rs",
@@ -3685,6 +3687,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "clap",
+ "clap_complete",
  "core_affinity",
  "crossbeam-utils",
  "crossterm 0.29.0",
@@ -3730,6 +3733,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "libbpf-rs",
@@ -3753,6 +3757,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "libbpf-rs",
@@ -3774,6 +3779,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "libbpf-rs",
@@ -3813,6 +3819,7 @@ dependencies = [
  "bitvec",
  "clap",
  "clap-num",
+ "clap_complete",
  "clap_main",
  "combinations",
  "crossbeam",
@@ -3845,6 +3852,7 @@ dependencies = [
  "bitvec",
  "chrono",
  "clap",
+ "clap_complete",
  "clap_main",
  "crossbeam",
  "ctrlc",
@@ -3879,6 +3887,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "libbpf-rs",
@@ -3899,6 +3908,7 @@ dependencies = [
  "bitvec",
  "cgroupfs",
  "clap",
+ "clap_complete",
  "clap_main",
  "crossbeam",
  "ctrlc",
@@ -3927,6 +3937,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "clap_complete",
  "clap_main",
  "crossbeam",
  "ctrlc",
@@ -3952,6 +3963,7 @@ version = "5.6.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "ctrlc",
  "flate2",
  "libbpf-rs",
@@ -3997,6 +4009,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "ctrlc",
  "libbpf-rs",
  "libc",
@@ -4032,6 +4045,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "fb_procfs",
@@ -4084,6 +4098,7 @@ dependencies = [
  "affinity",
  "anyhow",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "libbpf-rs",
@@ -4148,6 +4163,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "ctrlc",
  "libbpf-rs",
  "libc",

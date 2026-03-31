@@ -19,6 +19,7 @@ scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version 
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
+clap_complete = "4"
 crossbeam = "0.8"
 ctrlc = { version = "3", features = ["termination"] }
 libbpf-rs = "=0.26.2"
