@@ -17,9 +17,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -53,6 +51,15 @@ use tracing_subscriber::filter::EnvFilter;
 
 use stats::CellMetrics;
 use stats::Metrics;
+
+static DUMP_PTR: AtomicPtr<bool> = AtomicPtr::new(std::ptr::null_mut());
+
+extern "C" fn sigusr2_handler(_sig: libc::c_int) {
+    let ptr = DUMP_PTR.load(Ordering::Relaxed);
+    if !ptr.is_null() {
+        unsafe { std::ptr::write_volatile(ptr, true) };
+    }
+}
 
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
@@ -121,6 +128,10 @@ struct Opts {
     /// Events are recorded in a ring buffer and output in dump().
     #[clap(long, action = clap::ArgAction::SetTrue)]
     debug_events: bool,
+
+    /// Install SIGUSR2 handler that triggers scx_bpf_error with full dump.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    trigger_dump: bool,
 
     /// Enable workaround for exiting tasks with offline cgroups during scheduler load.
     /// This works around a kernel bug where tasks can be initialized with cgroups that
@@ -250,6 +261,7 @@ struct Scheduler<'a> {
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
+    trigger_dump: bool,
 }
 
 struct DistributionStats {
@@ -438,11 +450,20 @@ impl<'a> Scheduler<'a> {
             rebalance_count: 0,
             epoll,
             stats_waker,
+            trigger_dump: opts.trigger_dump,
         })
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let struct_ops = scx_ops_attach!(self.skel, mitosis)?;
+
+        if self.trigger_dump {
+            let bss = self.skel.maps.bss_data.as_mut().unwrap();
+            DUMP_PTR.store(&mut bss.trigger_dump as *mut bool, Ordering::Relaxed);
+            unsafe {
+                libc::signal(libc::SIGUSR2, sigusr2_handler as *const () as libc::sighandler_t);
+            }
+        }
 
         info!("Mitosis Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
 

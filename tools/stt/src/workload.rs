@@ -318,12 +318,14 @@ fn worker_main(
                 max_gap_cpu = last_cpu;
                 max_gap_at_ns = now.duration_since(start).as_nanos() as u64;
             }
-            // If stuck >2s, trigger sched_ext dump via sysrq-D.
-            // This calls scx_dump_state() which invokes the BPF dump/dump_task
-            // ops and writes full scheduler state to dmesg - without killing
-            // the scheduler.
+            // If stuck >2s, send SIGUSR2 to the scheduler to trigger
+            // scx_bpf_error in ops.tick, producing an exit dump with
+            // full cell/CPU/task state.
             if gap > 2_000_000_000 {
-                let _ = std::fs::write("/proc/sysrq-trigger", "D");
+                let pid = SCHED_PID.load(std::sync::atomic::Ordering::Relaxed);
+                if pid > 0 {
+                    unsafe { libc::kill(pid, libc::SIGUSR2) };
+                }
             }
             last_iter_time = now;
 

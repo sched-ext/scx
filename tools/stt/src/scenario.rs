@@ -196,6 +196,7 @@ impl Scenario {
             "--exit-dump-len".into(),
             "1048576".into(),
             "--debug-events".into(),
+            "--trigger-dump".into(),
         ];
         for a in profile.args() {
             args.push(a.into());
