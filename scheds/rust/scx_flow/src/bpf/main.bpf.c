@@ -517,7 +517,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					   tctx->budget_ns >= (s64)preempt_budget_min_ns)));
 
 				use_local_reserved = should_preempt ||
-					(tctx->wake_cpu_idle && is_wakeup);
+					(!contained_hog && tctx->wake_cpu_idle && is_wakeup);
 
 				if (should_preempt) {
 					enq_flags |= SCX_ENQ_PREEMPT;
