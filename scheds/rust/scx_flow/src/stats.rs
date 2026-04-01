@@ -54,6 +54,12 @@ pub struct Metrics {
     pub enable_events: u64,
     #[stat(desc = "Tasks explicitly cleaned up on exit from scx_flow")]
     pub exit_task_events: u64,
+    #[stat(desc = "Wakeups where select_cpu() biased toward the task's last CPU")]
+    pub cpu_stability_biases: u64,
+    #[stat(desc = "Wakeups where the chosen target CPU matched the task's last CPU")]
+    pub last_cpu_matches: u64,
+    #[stat(desc = "Observed task migrations between successive runs")]
+    pub cpu_migrations: u64,
     #[stat(desc = "Pinned positive-budget wakeups classified into the RT-sensitive lane")]
     pub rt_sensitive_wakeups: u64,
     #[stat(desc = "RT-sensitive wakeups inserted directly into selected local DSQs")]
@@ -88,7 +94,7 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] mode={} gen={} run={} reserve_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} init_task={} enable={} exit_task={} rt_wake={} rt_local={} rt_preempt={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={}",
+            "[{}] mode={} gen={} run={} reserve_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} rt_wake={} rt_local={} rt_preempt={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={}",
             crate::SCHEDULER_NAME,
             self.autotune_mode_name(),
             self.autotune_generation,
@@ -108,6 +114,9 @@ impl Metrics {
             self.init_task_events,
             self.enable_events,
             self.exit_task_events,
+            self.cpu_stability_biases,
+            self.last_cpu_matches,
+            self.cpu_migrations,
             self.rt_sensitive_wakeups,
             self.rt_sensitive_local_enqueues,
             self.rt_sensitive_preempts,
@@ -157,6 +166,11 @@ impl Metrics {
             init_task_events: self.init_task_events.wrapping_sub(rhs.init_task_events),
             enable_events: self.enable_events.wrapping_sub(rhs.enable_events),
             exit_task_events: self.exit_task_events.wrapping_sub(rhs.exit_task_events),
+            cpu_stability_biases: self
+                .cpu_stability_biases
+                .wrapping_sub(rhs.cpu_stability_biases),
+            last_cpu_matches: self.last_cpu_matches.wrapping_sub(rhs.last_cpu_matches),
+            cpu_migrations: self.cpu_migrations.wrapping_sub(rhs.cpu_migrations),
             rt_sensitive_wakeups: self
                 .rt_sensitive_wakeups
                 .wrapping_sub(rhs.rt_sensitive_wakeups),

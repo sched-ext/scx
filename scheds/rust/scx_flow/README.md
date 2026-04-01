@@ -21,6 +21,7 @@ Current implementation includes:
 
 - a reserved vs shared queue split
 - wakeup-budget accounting in `runnable()`
+- a soft last-CPU stability bias in `select_cpu()`
 - lifecycle cleanup through `enable()` and `exit_task()`
 - `cpu_release()` rescue handling
 - a narrow RT-sensitive wakeup lane for pinned positive-budget wakeups

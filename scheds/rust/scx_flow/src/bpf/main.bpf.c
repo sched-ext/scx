@@ -22,6 +22,7 @@ struct task_ctx {
 	s64 last_refill_ns;
 	u64 last_run_at;
 	u64 sleep_started_at;
+	s32 last_cpu;
 	s32 wake_cpu;
 	bool wake_cpu_idle;
 	bool wake_cpu_valid;
@@ -51,6 +52,9 @@ volatile u64 cpu_release_reenqueues;
 volatile u64 init_task_events;
 volatile u64 enable_events;
 volatile u64 exit_task_events;
+volatile u64 cpu_stability_biases;
+volatile u64 last_cpu_matches;
+volatile u64 cpu_migrations;
 volatile u64 rt_sensitive_wakeups;
 volatile u64 rt_sensitive_local_enqueues;
 volatile u64 rt_sensitive_preempts;
@@ -141,6 +145,7 @@ static __always_inline void reset_task_ctx(struct task_ctx *tctx, u64 now, bool 
 	tctx->last_refill_ns = 0;
 	tctx->last_run_at = 0;
 	tctx->sleep_started_at = sleeping ? now : 0;
+	tctx->last_cpu = -1;
 	clear_wake_target(tctx);
 }
 
@@ -280,6 +285,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	struct task_ctx *tctx;
 	bool is_idle = false;
 	s32 cpu;
+	s32 preferred_cpu;
 	s32 this_cpu = bpf_get_smp_processor_id();
 	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
 
@@ -292,16 +298,25 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
 		prev_cpu = is_this_cpu_allowed ? this_cpu : bpf_cpumask_first(p->cpus_ptr);
 
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	preferred_cpu = prev_cpu;
+	if (tctx && tctx->last_cpu >= 0 &&
+	    bpf_cpumask_test_cpu(tctx->last_cpu, p->cpus_ptr)) {
+		preferred_cpu = tctx->last_cpu;
+		__sync_fetch_and_add(&cpu_stability_biases, 1);
+	}
+
+	cpu = scx_bpf_select_cpu_dfl(p, preferred_cpu, wake_flags, &is_idle);
 	if (tctx) {
-		tctx->wake_cpu = cpu >= 0 ? cpu : prev_cpu;
+		tctx->wake_cpu = cpu >= 0 ? cpu : preferred_cpu;
 		tctx->wake_cpu_idle = is_idle;
 		tctx->wake_cpu_valid =
 			tctx->wake_cpu >= 0 &&
 			bpf_cpumask_test_cpu(tctx->wake_cpu, p->cpus_ptr);
+		if (tctx->last_cpu >= 0 && tctx->wake_cpu == tctx->last_cpu)
+			__sync_fetch_and_add(&last_cpu_matches, 1);
 	}
 
-	return cpu >= 0 ? cpu : prev_cpu;
+	return cpu >= 0 ? cpu : preferred_cpu;
 }
 
 void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
@@ -452,10 +467,18 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 {
 	struct task_ctx *tctx;
+	s32 current_cpu;
+	u64 now;
 
 	tctx = lookup_task_ctx(p);
-	if (tctx)
-		tctx->last_run_at = bpf_ktime_get_ns();
+	current_cpu = bpf_get_smp_processor_id();
+	now = bpf_ktime_get_ns();
+	if (tctx) {
+		if (tctx->last_cpu >= 0 && tctx->last_cpu != current_cpu)
+			__sync_fetch_and_add(&cpu_migrations, 1);
+		tctx->last_cpu = current_cpu;
+		tctx->last_run_at = now;
+	}
 
 	__sync_fetch_and_add(&nr_running, 1);
 }
