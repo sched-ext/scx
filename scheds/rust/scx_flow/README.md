@@ -20,8 +20,10 @@ without relying on manual tuning.
 Current implementation includes:
 
 - a reserved vs shared queue split
+- a dedicated latency lane ahead of the normal reserved queue
 - wakeup-budget accounting in `runnable()`
 - a soft last-CPU stability bias in `select_cpu()`
+- bounded hog containment that strips latency privileges from persistent budget exhausters until they recover
 - lifecycle cleanup through `enable()` and `exit_task()`
 - `cpu_release()` rescue handling
 - a narrow RT-sensitive wakeup lane for pinned positive-budget wakeups

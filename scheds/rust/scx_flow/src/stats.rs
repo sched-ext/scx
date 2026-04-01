@@ -26,6 +26,8 @@ pub struct Metrics {
     pub total_runtime: u64,
     #[stat(desc = "Tasks dispatched from the reserved positive-budget DSQ")]
     pub reserved_dispatches: u64,
+    #[stat(desc = "Tasks dispatched from the dedicated latency lane DSQ")]
+    pub latency_dispatches: u64,
     #[stat(desc = "Tasks dispatched from the shared DSQ")]
     pub shared_dispatches: u64,
     #[stat(desc = "Tasks fast-dispatched to local DSQs")]
@@ -38,6 +40,8 @@ pub struct Metrics {
     pub budget_exhaustions: u64,
     #[stat(desc = "Wakeups that still had positive budget at enqueue time")]
     pub positive_budget_wakeups: u64,
+    #[stat(desc = "Interactive wakeups inserted into the dedicated latency lane")]
+    pub latency_lane_enqueues: u64,
     #[stat(desc = "Positive-budget tasks inserted directly into selected local DSQs")]
     pub reserved_local_enqueues: u64,
     #[stat(desc = "Positive-budget tasks enqueued to the reserved global DSQ")]
@@ -66,6 +70,10 @@ pub struct Metrics {
     pub rt_sensitive_local_enqueues: u64,
     #[stat(desc = "RT-sensitive wakeups that used the preempt path")]
     pub rt_sensitive_preempts: u64,
+    #[stat(desc = "Enqueues where a persistent hog-like task had latency privileges reduced")]
+    pub hog_containment_enqueues: u64,
+    #[stat(desc = "Times a previously contained hog-like task decayed back below containment")]
+    pub hog_recoveries: u64,
     #[stat(desc = "Adaptive tuning generation counter")]
     pub autotune_generation: u64,
     #[stat(desc = "Adaptive tuning mode (0=balanced, 1=latency, 2=throughput)")]
@@ -94,11 +102,12 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] mode={} gen={} run={} reserve_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} rt_wake={} rt_local={} rt_preempt={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={}",
+            "[{}] mode={} gen={} run={} latency_disp={} reserve_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} latency_enq={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} rt_wake={} rt_local={} rt_preempt={} hog_contain={} hog_recover={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={}",
             crate::SCHEDULER_NAME,
             self.autotune_mode_name(),
             self.autotune_generation,
             self.nr_running,
+            self.latency_dispatches,
             self.reserved_dispatches,
             self.shared_dispatches,
             self.local_fast_dispatches,
@@ -106,6 +115,7 @@ impl Metrics {
             self.budget_refill_events,
             self.budget_exhaustions,
             self.positive_budget_wakeups,
+            self.latency_lane_enqueues,
             self.reserved_local_enqueues,
             self.reserved_global_enqueues,
             self.shared_wakeup_enqueues,
@@ -120,6 +130,8 @@ impl Metrics {
             self.rt_sensitive_wakeups,
             self.rt_sensitive_local_enqueues,
             self.rt_sensitive_preempts,
+            self.hog_containment_enqueues,
+            self.hog_recoveries,
             self.tune_reserved_max_ns / 1000,
             self.tune_shared_slice_ns / 1000,
             self.tune_interactive_floor_ns / 1000,
@@ -136,6 +148,9 @@ impl Metrics {
             reserved_dispatches: self
                 .reserved_dispatches
                 .wrapping_sub(rhs.reserved_dispatches),
+            latency_dispatches: self
+                .latency_dispatches
+                .wrapping_sub(rhs.latency_dispatches),
             shared_dispatches: self.shared_dispatches.wrapping_sub(rhs.shared_dispatches),
             local_fast_dispatches: self
                 .local_fast_dispatches
@@ -150,6 +165,9 @@ impl Metrics {
             positive_budget_wakeups: self
                 .positive_budget_wakeups
                 .wrapping_sub(rhs.positive_budget_wakeups),
+            latency_lane_enqueues: self
+                .latency_lane_enqueues
+                .wrapping_sub(rhs.latency_lane_enqueues),
             reserved_local_enqueues: self
                 .reserved_local_enqueues
                 .wrapping_sub(rhs.reserved_local_enqueues),
@@ -180,6 +198,10 @@ impl Metrics {
             rt_sensitive_preempts: self
                 .rt_sensitive_preempts
                 .wrapping_sub(rhs.rt_sensitive_preempts),
+            hog_containment_enqueues: self
+                .hog_containment_enqueues
+                .wrapping_sub(rhs.hog_containment_enqueues),
+            hog_recoveries: self.hog_recoveries.wrapping_sub(rhs.hog_recoveries),
             autotune_generation: self.autotune_generation,
             autotune_mode: self.autotune_mode,
             tune_reserved_max_ns: self.tune_reserved_max_ns,

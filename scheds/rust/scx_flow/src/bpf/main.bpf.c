@@ -22,6 +22,7 @@ struct task_ctx {
 	s64 last_refill_ns;
 	u64 last_run_at;
 	u64 sleep_started_at;
+	u32 hog_score;
 	s32 last_cpu;
 	s32 wake_cpu;
 	bool wake_cpu_idle;
@@ -38,12 +39,14 @@ struct {
 volatile u64 nr_running;
 volatile u64 total_runtime;
 volatile u64 reserved_dispatches;
+volatile u64 latency_dispatches;
 volatile u64 shared_dispatches;
 volatile u64 local_fast_dispatches;
 volatile u64 wake_preempt_dispatches;
 volatile u64 budget_refill_events;
 volatile u64 budget_exhaustions;
 volatile u64 positive_budget_wakeups;
+volatile u64 latency_lane_enqueues;
 volatile u64 reserved_local_enqueues;
 volatile u64 reserved_global_enqueues;
 volatile u64 shared_wakeup_enqueues;
@@ -58,6 +61,8 @@ volatile u64 cpu_migrations;
 volatile u64 rt_sensitive_wakeups;
 volatile u64 rt_sensitive_local_enqueues;
 volatile u64 rt_sensitive_preempts;
+volatile u64 hog_containment_enqueues;
+volatile u64 hog_recoveries;
 volatile u64 tune_reserved_max_ns = FLOW_SLICE_RESERVED_MAX_NS;
 volatile u64 tune_shared_slice_ns = FLOW_SLICE_SHARED_NS;
 volatile u64 tune_interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_NS;
@@ -66,6 +71,7 @@ volatile u64 tune_preempt_refill_min_ns = FLOW_PREEMPT_REFILL_MIN_NS;
 volatile u64 autotune_generation;
 volatile u64 autotune_mode;
 
+#define LATENCY_DSQ 1023
 #define RESERVED_DSQ 1024
 #define SHARED_DSQ 1025
 
@@ -145,6 +151,7 @@ static __always_inline void reset_task_ctx(struct task_ctx *tctx, u64 now, bool 
 	tctx->last_refill_ns = 0;
 	tctx->last_run_at = 0;
 	tctx->sleep_started_at = sleeping ? now : 0;
+	tctx->hog_score = 0;
 	tctx->last_cpu = -1;
 	clear_wake_target(tctx);
 }
@@ -180,11 +187,50 @@ static __always_inline s64 calc_budget_refill(const struct task_struct *p, u64 s
 	return refill_ns;
 }
 
+static __always_inline u32 clamp_hog_score(u32 hog_score)
+{
+	if (hog_score > FLOW_HOG_SCORE_MAX)
+		return FLOW_HOG_SCORE_MAX;
+	return hog_score;
+}
+
+static __always_inline bool is_contained_hog(const struct task_ctx *tctx)
+{
+	return tctx && tctx->hog_score >= FLOW_HOG_SCORE_CONTAIN;
+}
+
+static __always_inline void decay_hog_score(struct task_ctx *tctx, u32 delta)
+{
+	u32 old_score;
+
+	if (!tctx || !delta)
+		return;
+
+	old_score = tctx->hog_score;
+	if (old_score <= delta)
+		tctx->hog_score = 0;
+	else
+		tctx->hog_score = old_score - delta;
+
+	if (old_score >= FLOW_HOG_SCORE_CONTAIN &&
+	    tctx->hog_score < FLOW_HOG_SCORE_CONTAIN)
+		__sync_fetch_and_add(&hog_recoveries, 1);
+}
+
+static __always_inline void raise_hog_score(struct task_ctx *tctx, u32 delta)
+{
+	if (!tctx || !delta)
+		return;
+
+	tctx->hog_score = clamp_hog_score(tctx->hog_score + delta);
+}
+
 static __always_inline void update_budget_on_wakeup(const struct task_struct *p,
 						    struct task_ctx *tctx,
 						    u64 now)
 {
 	s64 refill_ns;
+	u32 hog_decay = FLOW_HOG_SCORE_DECAY_STEP;
 
 	if (!tctx)
 		return;
@@ -199,8 +245,12 @@ static __always_inline void update_budget_on_wakeup(const struct task_struct *p,
 	tctx->last_refill_ns = refill_ns;
 	tctx->sleep_started_at = 0;
 
-	if (refill_ns > 0)
+	if (refill_ns > 0) {
+		if (refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS)
+			hog_decay = FLOW_HOG_SCORE_INTERACTIVE_DECAY_STEP;
+		decay_hog_score(tctx, hog_decay);
 		__sync_fetch_and_add(&budget_refill_events, 1);
+	}
 }
 
 static __always_inline bool is_rt_sensitive_wakeup(const struct task_struct *p,
@@ -211,12 +261,32 @@ static __always_inline bool is_rt_sensitive_wakeup(const struct task_struct *p,
 		return false;
 	if (p->nr_cpus_allowed != 1)
 		return false;
+	if (is_contained_hog(tctx))
+		return false;
 	if (tctx->budget_ns <= 0)
 		return false;
 	if (tctx->last_refill_ns <= 0)
 		return false;
 
 	return tctx->last_refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS;
+}
+
+static __always_inline bool is_latency_lane_wakeup(const struct task_ctx *tctx,
+						   bool is_wakeup)
+{
+	u64 interactive_floor_ns = tune_interactive_floor_ns;
+
+	if (!tctx || !is_wakeup || tctx->budget_ns <= 0 || tctx->last_refill_ns <= 0)
+		return false;
+	if (is_contained_hog(tctx))
+		return false;
+
+	if (interactive_floor_ns < FLOW_INTERACTIVE_FLOOR_MIN_NS)
+		interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_MIN_NS;
+	else if (interactive_floor_ns > FLOW_INTERACTIVE_FLOOR_MAX_NS)
+		interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_MAX_NS;
+
+	return tctx->last_refill_ns >= (s64)interactive_floor_ns;
 }
 
 static __always_inline bool move_to_local_compat(u64 dsq_id)
@@ -233,6 +303,12 @@ static __always_inline bool move_to_local_compat(u64 dsq_id)
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
 	s32 ret;
+
+	ret = scx_bpf_create_dsq(LATENCY_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create latency DSQ %d: %d", LATENCY_DSQ, ret);
+		return ret;
+	}
 
 	ret = scx_bpf_create_dsq(RESERVED_DSQ, -1);
 	if (ret < 0 && ret != -EEXIST) {
@@ -342,6 +418,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	bool is_wakeup;
 	bool has_wake_target = false;
 	bool rt_sensitive_wakeup = false;
+	bool latency_lane_wakeup = false;
+	bool contained_hog = false;
 	bool use_local_reserved = false;
 
 	tctx = lookup_task_ctx(p);
@@ -364,14 +442,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (tctx) {
 		if (tctx->budget_ns > 0) {
+			contained_hog = is_contained_hog(tctx);
 			if (is_wakeup)
 				__sync_fetch_and_add(&positive_budget_wakeups, 1);
-
 			rt_sensitive_wakeup = is_rt_sensitive_wakeup(p, tctx, is_wakeup);
 			if (rt_sensitive_wakeup)
 				__sync_fetch_and_add(&rt_sensitive_wakeups, 1);
+			latency_lane_wakeup = is_latency_lane_wakeup(tctx, is_wakeup);
 
-			if (is_wakeup)
+			if (is_wakeup && !contained_hog)
 				enq_flags |= SCX_ENQ_HEAD;
 
 			if (has_wake_target ||
@@ -393,6 +472,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 
 				should_preempt = rt_sensitive_wakeup ||
 					(is_wakeup &&
+					 !contained_hog &&
 					 !tctx->wake_cpu_idle &&
 					 (single_cpu_task ||
 					  (tctx->last_refill_ns >= (s64)preempt_refill_min_ns &&
@@ -407,7 +487,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					__sync_fetch_and_add(&wake_preempt_dispatches, 1);
 					if (rt_sensitive_wakeup)
 						__sync_fetch_and_add(&rt_sensitive_preempts, 1);
-				} else if (tctx->wake_cpu_idle && (is_wakeup || !scx_bpf_task_running(p))) {
+				} else if (tctx->wake_cpu_idle &&
+					   (is_wakeup || !scx_bpf_task_running(p))) {
 					scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 				}
 
@@ -427,6 +508,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				}
 			}
 
+			if (contained_hog)
+				__sync_fetch_and_add(&hog_containment_enqueues, 1);
+
+			if (latency_lane_wakeup) {
+				scx_bpf_dsq_insert(p, LATENCY_DSQ, slice_ns, enq_flags);
+				__sync_fetch_and_add(&latency_lane_enqueues, 1);
+				if (has_wake_target && (is_wakeup || !scx_bpf_task_running(p)))
+					scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+				clear_wake_target(tctx);
+				return;
+			}
+
 			scx_bpf_dsq_insert(p, RESERVED_DSQ, slice_ns, enq_flags);
 			__sync_fetch_and_add(&reserved_global_enqueues, 1);
 			if (has_wake_target && (is_wakeup || !scx_bpf_task_running(p)))
@@ -435,6 +528,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 		}
 	}
+
+	if (tctx && is_contained_hog(tctx))
+		__sync_fetch_and_add(&hog_containment_enqueues, 1);
 
 	if (is_wakeup)
 		__sync_fetch_and_add(&shared_wakeup_enqueues, 1);
@@ -446,6 +542,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct task_ctx *tctx;
+
+	if (move_to_local_compat(LATENCY_DSQ)) {
+		__sync_fetch_and_add(&latency_dispatches, 1);
+		return;
+	}
 
 	if (move_to_local_compat(RESERVED_DSQ)) {
 		__sync_fetch_and_add(&reserved_dispatches, 1);
@@ -488,6 +589,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *tctx;
 	u64 now;
 	u64 runtime_ns = 0;
+	bool exhausted_budget = false;
 
 	tctx = lookup_task_ctx(p);
 	now = bpf_ktime_get_ns();
@@ -496,9 +598,13 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		if (tctx->last_run_at && now > tctx->last_run_at)
 			runtime_ns = now - tctx->last_run_at;
 
-		if (tctx->budget_ns > 0 &&
-		    tctx->budget_ns - (s64)runtime_ns <= 0)
+		exhausted_budget = tctx->budget_ns > 0 &&
+			tctx->budget_ns - (s64)runtime_ns <= 0;
+
+		if (exhausted_budget)
 			__sync_fetch_and_add(&budget_exhaustions, 1);
+		if (exhausted_budget)
+			raise_hog_score(tctx, 1);
 
 		tctx->budget_ns = clamp_budget(tctx->budget_ns - (s64)runtime_ns);
 		tctx->last_run_at = 0;

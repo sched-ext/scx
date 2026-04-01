@@ -3,7 +3,7 @@ name = "scx_flow"
 version = "1.0.0"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
-description = "A budget-based sched_ext CPU scheduler with reserved wakeup paths, shared fallback dispatch, and bounded adaptive tuning. https://github.com/sched-ext/scx"
+description = "A budget-based sched_ext CPU scheduler with a latency lane, CPU-stability bias, and bounded adaptive tuning. https://github.com/sched-ext/scx"
 license = "GPL-2.0-only"
 
 [dependencies]
