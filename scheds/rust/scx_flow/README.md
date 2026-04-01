@@ -21,8 +21,13 @@ Current implementation includes:
 
 - a reserved vs shared queue split
 - a dedicated latency lane ahead of the normal reserved queue
+- a dedicated contained throughput lane for hog-like tasks after latency and reserved work
+- a bounded fairness floor that periodically rescues contained and shared work under sustained higher-lane pressure
+- lane-aware runtime tuning for latency credit, fairness-floor thresholds, and local-fast pressure caps
 - wakeup-budget accounting in `runnable()`
 - a soft last-CPU stability bias in `select_cpu()`
+- a bounded stable-local fast path for non-RT positive-budget wakeups that can safely stay on their last CPU
+- stable-local diagnostics so last-CPU reuse, misses, and rejections can be observed directly
 - bounded hog containment that strips latency privileges from persistent budget exhausters until they recover
 - lifecycle cleanup through `enable()` and `exit_task()`
 - `cpu_release()` rescue handling

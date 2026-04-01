@@ -30,6 +30,8 @@ pub struct Metrics {
     pub latency_dispatches: u64,
     #[stat(desc = "Tasks dispatched from the shared DSQ")]
     pub shared_dispatches: u64,
+    #[stat(desc = "Tasks dispatched from the contained throughput/background DSQ")]
+    pub contained_dispatches: u64,
     #[stat(desc = "Tasks fast-dispatched to local DSQs")]
     pub local_fast_dispatches: u64,
     #[stat(desc = "Positive-budget wakeups sent to local DSQs with preempt kicks")]
@@ -76,10 +78,38 @@ pub struct Metrics {
     pub rt_sensitive_local_enqueues: u64,
     #[stat(desc = "RT-sensitive wakeups that used the preempt path")]
     pub rt_sensitive_preempts: u64,
+    #[stat(desc = "Stable-local wakeups that were eligible for last-CPU routing before final fast-path checks")]
+    pub stable_local_candidates: u64,
+    #[stat(desc = "Stable positive-budget wakeups routed directly to their last CPU without using the RT-sensitive path")]
+    pub stable_local_enqueues: u64,
+    #[stat(desc = "Stable-local candidates that lost the fast path and decayed back toward ordinary routing")]
+    pub stable_local_rejections: u64,
+    #[stat(desc = "Wakeups where the chosen target CPU did not match the remembered last CPU")]
+    pub stable_local_mismatches: u64,
+    #[stat(desc = "Tasks routed into the dedicated contained throughput/background DSQ")]
+    pub contained_enqueues: u64,
     #[stat(desc = "Enqueues where a persistent hog-like task had latency privileges reduced")]
     pub hog_containment_enqueues: u64,
     #[stat(desc = "Times a previously contained hog-like task decayed back below containment")]
     pub hog_recoveries: u64,
+    #[stat(desc = "Current consecutive dispatch rounds since a contained/background task last ran")]
+    pub contained_starvation_rounds: u64,
+    #[stat(desc = "Current consecutive dispatch rounds since a shared-fallback task last ran")]
+    pub shared_starvation_rounds: u64,
+    #[stat(desc = "Contained/background tasks rescued early by the fairness floor")]
+    pub contained_rescue_dispatches: u64,
+    #[stat(desc = "Shared-fallback tasks rescued early by the fairness floor")]
+    pub shared_rescue_dispatches: u64,
+    #[stat(desc = "Current latency-credit grant per strong interactive refill")]
+    pub tune_latency_credit_grant: u64,
+    #[stat(desc = "Current latency-credit decay applied when credit is consumed or exhausted")]
+    pub tune_latency_credit_decay: u64,
+    #[stat(desc = "Current contained-lane fairness-floor threshold")]
+    pub tune_contained_starvation_max: u64,
+    #[stat(desc = "Current shared-lane fairness-floor threshold")]
+    pub tune_shared_starvation_max: u64,
+    #[stat(desc = "Current runnable-pressure cap for the ordinary local fast path")]
+    pub tune_local_fast_nr_running_max: u64,
     #[stat(desc = "Adaptive tuning generation counter")]
     pub autotune_generation: u64,
     #[stat(desc = "Adaptive tuning mode (0=balanced, 1=latency, 2=throughput)")]
@@ -108,13 +138,14 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] mode={} gen={} run={} latency_disp={} reserve_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} latency_enq={} latency_cand={} latency_local={} latency_hog_block={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} rt_wake={} rt_local={} rt_preempt={} hog_contain={} hog_recover={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={}",
+            "[{}] mode={} gen={} run={} latency_disp={} reserve_disp={} contained_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} latency_enq={} latency_cand={} latency_local={} latency_hog_block={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} rt_wake={} rt_local={} rt_preempt={} stable_cand={} stable_local={} stable_reject={} stable_mismatch={} contained_enq={} hog_contain={} hog_recover={} contained_starve={} shared_starve={} contained_rescue={} shared_rescue={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={} credit_grant={} credit_decay={} contained_floor={} shared_floor={} local_fast_cap={}",
             crate::SCHEDULER_NAME,
             self.autotune_mode_name(),
             self.autotune_generation,
             self.nr_running,
             self.latency_dispatches,
             self.reserved_dispatches,
+            self.contained_dispatches,
             self.shared_dispatches,
             self.local_fast_dispatches,
             self.wake_preempt_dispatches,
@@ -139,13 +170,27 @@ impl Metrics {
             self.rt_sensitive_wakeups,
             self.rt_sensitive_local_enqueues,
             self.rt_sensitive_preempts,
+            self.stable_local_candidates,
+            self.stable_local_enqueues,
+            self.stable_local_rejections,
+            self.stable_local_mismatches,
+            self.contained_enqueues,
             self.hog_containment_enqueues,
             self.hog_recoveries,
+            self.contained_starvation_rounds,
+            self.shared_starvation_rounds,
+            self.contained_rescue_dispatches,
+            self.shared_rescue_dispatches,
             self.tune_reserved_max_ns / 1000,
             self.tune_shared_slice_ns / 1000,
             self.tune_interactive_floor_ns / 1000,
             self.tune_preempt_budget_min_ns / 1000,
             self.tune_preempt_refill_min_ns / 1000,
+            self.tune_latency_credit_grant,
+            self.tune_latency_credit_decay,
+            self.tune_contained_starvation_max,
+            self.tune_shared_starvation_max,
+            self.tune_local_fast_nr_running_max,
         )?;
         Ok(())
     }
@@ -160,6 +205,9 @@ impl Metrics {
             latency_dispatches: self
                 .latency_dispatches
                 .wrapping_sub(rhs.latency_dispatches),
+            contained_dispatches: self
+                .contained_dispatches
+                .wrapping_sub(rhs.contained_dispatches),
             shared_dispatches: self.shared_dispatches.wrapping_sub(rhs.shared_dispatches),
             local_fast_dispatches: self
                 .local_fast_dispatches
@@ -216,10 +264,38 @@ impl Metrics {
             rt_sensitive_preempts: self
                 .rt_sensitive_preempts
                 .wrapping_sub(rhs.rt_sensitive_preempts),
+            stable_local_candidates: self
+                .stable_local_candidates
+                .wrapping_sub(rhs.stable_local_candidates),
+            stable_local_enqueues: self
+                .stable_local_enqueues
+                .wrapping_sub(rhs.stable_local_enqueues),
+            stable_local_rejections: self
+                .stable_local_rejections
+                .wrapping_sub(rhs.stable_local_rejections),
+            stable_local_mismatches: self
+                .stable_local_mismatches
+                .wrapping_sub(rhs.stable_local_mismatches),
+            contained_enqueues: self
+                .contained_enqueues
+                .wrapping_sub(rhs.contained_enqueues),
             hog_containment_enqueues: self
                 .hog_containment_enqueues
                 .wrapping_sub(rhs.hog_containment_enqueues),
             hog_recoveries: self.hog_recoveries.wrapping_sub(rhs.hog_recoveries),
+            contained_starvation_rounds: self.contained_starvation_rounds,
+            shared_starvation_rounds: self.shared_starvation_rounds,
+            contained_rescue_dispatches: self
+                .contained_rescue_dispatches
+                .wrapping_sub(rhs.contained_rescue_dispatches),
+            shared_rescue_dispatches: self
+                .shared_rescue_dispatches
+                .wrapping_sub(rhs.shared_rescue_dispatches),
+            tune_latency_credit_grant: self.tune_latency_credit_grant,
+            tune_latency_credit_decay: self.tune_latency_credit_decay,
+            tune_contained_starvation_max: self.tune_contained_starvation_max,
+            tune_shared_starvation_max: self.tune_shared_starvation_max,
+            tune_local_fast_nr_running_max: self.tune_local_fast_nr_running_max,
             autotune_generation: self.autotune_generation,
             autotune_mode: self.autotune_mode,
             tune_reserved_max_ns: self.tune_reserved_max_ns,

@@ -107,6 +107,11 @@ struct RuntimeTunables {
     interactive_floor_ns: u64,
     preempt_budget_min_ns: u64,
     preempt_refill_min_ns: u64,
+    latency_credit_grant: u64,
+    latency_credit_decay: u64,
+    contained_starvation_max: u64,
+    shared_starvation_max: u64,
+    local_fast_nr_running_max: u64,
 }
 
 impl Default for RuntimeTunables {
@@ -117,6 +122,11 @@ impl Default for RuntimeTunables {
             interactive_floor_ns: u64::from(consts_FLOW_INTERACTIVE_FLOOR_NS),
             preempt_budget_min_ns: u64::from(consts_FLOW_PREEMPT_BUDGET_MIN_NS),
             preempt_refill_min_ns: u64::from(consts_FLOW_PREEMPT_REFILL_MIN_NS),
+            latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
+            latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
+            contained_starvation_max: u64::from(consts_FLOW_CONTAINED_STARVATION_MAX),
+            shared_starvation_max: u64::from(consts_FLOW_SHARED_STARVATION_MAX),
+            local_fast_nr_running_max: u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MAX),
         }
     }
 }
@@ -144,6 +154,26 @@ impl RuntimeTunables {
                 u64::from(consts_FLOW_PREEMPT_REFILL_MIN_NS),
                 u64::from(consts_FLOW_PREEMPT_REFILL_MAX_NS),
             ),
+            latency_credit_grant: self.latency_credit_grant.clamp(
+                u64::from(consts_FLOW_LATENCY_CREDIT_GRANT_MIN),
+                u64::from(consts_FLOW_LATENCY_CREDIT_GRANT_MAX),
+            ),
+            latency_credit_decay: self.latency_credit_decay.clamp(
+                u64::from(consts_FLOW_LATENCY_CREDIT_DECAY_MIN),
+                u64::from(consts_FLOW_LATENCY_CREDIT_DECAY_MAX),
+            ),
+            contained_starvation_max: self.contained_starvation_max.clamp(
+                u64::from(consts_FLOW_CONTAINED_STARVATION_MIN),
+                u64::from(consts_FLOW_CONTAINED_STARVATION_MAX_TUNE),
+            ),
+            shared_starvation_max: self.shared_starvation_max.clamp(
+                u64::from(consts_FLOW_SHARED_STARVATION_MIN),
+                u64::from(consts_FLOW_SHARED_STARVATION_MAX_TUNE),
+            ),
+            local_fast_nr_running_max: self.local_fast_nr_running_max.clamp(
+                u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MIN),
+                u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MAX_TUNE),
+            ),
         }
     }
 
@@ -156,6 +186,11 @@ impl RuntimeTunables {
                 interactive_floor_ns: 140 * 1000,
                 preempt_budget_min_ns: 225 * 1000,
                 preempt_refill_min_ns: 250 * 1000,
+                latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
+                latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
+                contained_starvation_max: u64::from(consts_FLOW_CONTAINED_STARVATION_MAX),
+                shared_starvation_max: 10,
+                local_fast_nr_running_max: u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MAX),
             }
             .clamp(),
             AutoTuneMode::Throughput => Self {
@@ -164,6 +199,11 @@ impl RuntimeTunables {
                 interactive_floor_ns: 80 * 1000,
                 preempt_budget_min_ns: 300 * 1000,
                 preempt_refill_min_ns: 325 * 1000,
+                latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
+                latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
+                contained_starvation_max: u64::from(consts_FLOW_CONTAINED_STARVATION_MAX),
+                shared_starvation_max: u64::from(consts_FLOW_SHARED_STARVATION_MAX),
+                local_fast_nr_running_max: u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MAX),
             }
             .clamp(),
         }
@@ -192,6 +232,23 @@ impl RuntimeTunables {
             &mut self.preempt_refill_min_ns,
             target.preempt_refill_min_ns,
             25 * 1000,
+        );
+        changed |= step_u64(&mut self.latency_credit_grant, target.latency_credit_grant, 1);
+        changed |= step_u64(&mut self.latency_credit_decay, target.latency_credit_decay, 1);
+        changed |= step_u64(
+            &mut self.contained_starvation_max,
+            target.contained_starvation_max,
+            1,
+        );
+        changed |= step_u64(
+            &mut self.shared_starvation_max,
+            target.shared_starvation_max,
+            1,
+        );
+        changed |= step_u64(
+            &mut self.local_fast_nr_running_max,
+            target.local_fast_nr_running_max,
+            1,
         );
 
         *self = self.clamp();
@@ -243,12 +300,24 @@ impl AutoTuner {
         let reserved_local = delta.reserved_local_enqueues;
         let reserved_global = delta.reserved_global_enqueues;
         let reserved_dispatches = delta.reserved_dispatches;
+        let latency_dispatches = delta.latency_dispatches;
+        let contained_enqueues = delta.contained_enqueues;
+        let contained_dispatches = delta.contained_dispatches;
+        let contained_rescues = delta.contained_rescue_dispatches;
+        let shared_rescues = delta.shared_rescue_dispatches;
         let wake_preempt = delta.wake_preempt_dispatches;
         let exhaustions = delta.budget_exhaustions;
         let runnable = delta.runnable_wakeups;
+        let stable_candidates = delta.stable_local_candidates;
+        let stable_rejections = delta.stable_local_rejections;
+        let stable_mismatches = delta.stable_local_mismatches;
+        let cpu_biases = delta.cpu_stability_biases;
         let reserved_total = reserved_local + reserved_global;
+        let lane_events = positive + shared_wake + contained_enqueues;
+        let dispatch_total =
+            latency_dispatches + reserved_dispatches + contained_dispatches + delta.shared_dispatches;
 
-        if positive + shared_wake < 3 && reserved_total < 2 {
+        if lane_events < 3 && reserved_total + contained_dispatches < 2 {
             return self.mode;
         }
 
@@ -256,23 +325,55 @@ impl AutoTuner {
         let global_ratio = reserved_global as f64 / reserved_total.max(1) as f64;
         let preempt_ratio = wake_preempt as f64 / reserved_local.max(1) as f64;
         let exhaustion_ratio = exhaustions as f64 / positive.max(1) as f64;
+        let contained_ratio = contained_enqueues as f64 / positive.max(1) as f64;
+        let stable_reject_ratio = stable_rejections as f64 / stable_candidates.max(1) as f64;
+        let stable_mismatch_ratio = stable_mismatches as f64 / cpu_biases.max(1) as f64;
+        let rescue_total = contained_rescues + shared_rescues;
+        let rescue_ratio = rescue_total as f64 / dispatch_total.max(1) as f64;
+        let latency_dispatch_ratio = latency_dispatches as f64 / dispatch_total.max(1) as f64;
+        let rescue_pressure = rescue_total >= 8 && rescue_ratio > 0.08;
         let keep_latency_mode = self.mode == AutoTuneMode::Latency
             && current.nr_running >= 1
+            && !rescue_pressure
             && (wake_preempt > 0
-                || reserved_dispatches > 0
-                || reserved_global > 0
+                || latency_dispatch_ratio > 0.45
+                || shared_ratio > 0.45
+                || global_ratio > 0.35
+                || exhaustion_ratio > 0.30
                 || runnable > 64);
+        let keep_throughput_mode = self.mode == AutoTuneMode::Throughput
+            && current.nr_running >= 2
+            && (contained_enqueues > 0 || contained_dispatches > 0)
+            && shared_ratio < 0.45
+            && global_ratio < 0.30;
+        let should_enter_throughput_mode = current.nr_running >= 3
+            && ((shared_ratio < 0.45
+                && global_ratio < 0.30
+                && ((contained_dispatches > 0 && contained_ratio > 0.12)
+                    || (stable_candidates > 0
+                        && stable_reject_ratio > 0.20
+                        && stable_mismatch_ratio > 0.20)))
+                || (reserved_local >= 2
+                    && preempt_ratio > 0.65
+                    && shared_ratio < 0.35
+                    && global_ratio < 0.20));
         let should_enter_latency_mode =
-            shared_ratio > 0.45 || global_ratio > 0.35 || exhaustion_ratio > 0.30;
+            latency_dispatch_ratio > 0.40
+                || wake_preempt > 0
+                || shared_ratio > 0.45
+                || global_ratio > 0.35
+                || exhaustion_ratio > 0.30;
+        let should_rebalance_mode = rescue_pressure
+            && latency_dispatch_ratio < 0.40
+            && shared_ratio < 0.45
+            && global_ratio < 0.35
+            && exhaustion_ratio < 0.30;
 
-        if keep_latency_mode || should_enter_latency_mode {
+        if keep_latency_mode || (should_enter_latency_mode && !should_rebalance_mode) {
             AutoTuneMode::Latency
-        } else if current.nr_running >= 3
-            && reserved_local >= 2
-            && preempt_ratio > 0.65
-            && shared_ratio < 0.35
-            && global_ratio < 0.20
-        {
+        } else if should_rebalance_mode {
+            AutoTuneMode::Balanced
+        } else if keep_throughput_mode || should_enter_throughput_mode {
             AutoTuneMode::Throughput
         } else {
             AutoTuneMode::Balanced
@@ -381,6 +482,7 @@ impl<'a> Scheduler<'a> {
             reserved_dispatches: bss_data.reserved_dispatches,
             latency_dispatches: bss_data.latency_dispatches,
             shared_dispatches: bss_data.shared_dispatches,
+            contained_dispatches: bss_data.contained_dispatches,
             local_fast_dispatches: bss_data.local_fast_dispatches,
             wake_preempt_dispatches: bss_data.wake_preempt_dispatches,
             budget_refill_events: bss_data.budget_refill_events,
@@ -404,8 +506,22 @@ impl<'a> Scheduler<'a> {
             rt_sensitive_wakeups: bss_data.rt_sensitive_wakeups,
             rt_sensitive_local_enqueues: bss_data.rt_sensitive_local_enqueues,
             rt_sensitive_preempts: bss_data.rt_sensitive_preempts,
+            stable_local_candidates: bss_data.stable_local_candidates,
+            stable_local_enqueues: bss_data.stable_local_enqueues,
+            stable_local_rejections: bss_data.stable_local_rejections,
+            stable_local_mismatches: bss_data.stable_local_mismatches,
+            contained_enqueues: bss_data.contained_enqueues,
             hog_containment_enqueues: bss_data.hog_containment_enqueues,
             hog_recoveries: bss_data.hog_recoveries,
+            contained_starvation_rounds: bss_data.contained_starvation_rounds,
+            shared_starvation_rounds: bss_data.shared_starvation_rounds,
+            contained_rescue_dispatches: bss_data.contained_rescue_dispatches,
+            shared_rescue_dispatches: bss_data.shared_rescue_dispatches,
+            tune_latency_credit_grant: data.tune_latency_credit_grant,
+            tune_latency_credit_decay: data.tune_latency_credit_decay,
+            tune_contained_starvation_max: data.tune_contained_starvation_max,
+            tune_shared_starvation_max: data.tune_shared_starvation_max,
+            tune_local_fast_nr_running_max: data.tune_local_fast_nr_running_max,
             autotune_generation: bss_data.autotune_generation,
             autotune_mode: bss_data.autotune_mode,
             tune_reserved_max_ns: data.tune_reserved_max_ns,
@@ -428,6 +544,11 @@ impl<'a> Scheduler<'a> {
         data.tune_interactive_floor_ns = tunables.interactive_floor_ns;
         data.tune_preempt_budget_min_ns = tunables.preempt_budget_min_ns;
         data.tune_preempt_refill_min_ns = tunables.preempt_refill_min_ns;
+        data.tune_latency_credit_grant = tunables.latency_credit_grant;
+        data.tune_latency_credit_decay = tunables.latency_credit_decay;
+        data.tune_contained_starvation_max = tunables.contained_starvation_max;
+        data.tune_shared_starvation_max = tunables.shared_starvation_max;
+        data.tune_local_fast_nr_running_max = tunables.local_fast_nr_running_max;
 
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.autotune_mode = mode.as_u64();
