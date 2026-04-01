@@ -109,9 +109,14 @@ struct RuntimeTunables {
     preempt_refill_min_ns: u64,
     latency_credit_grant: u64,
     latency_credit_decay: u64,
+    latency_debt_urgent_min: u64,
+    urgent_latency_burst_max: u64,
+    reserved_quota_burst_max: u64,
+    reserved_lane_burst_max: u64,
     contained_starvation_max: u64,
     shared_starvation_max: u64,
     local_fast_nr_running_max: u64,
+    local_reserved_burst_max: u64,
 }
 
 impl Default for RuntimeTunables {
@@ -124,9 +129,14 @@ impl Default for RuntimeTunables {
             preempt_refill_min_ns: u64::from(consts_FLOW_PREEMPT_REFILL_MIN_NS),
             latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
             latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
+            latency_debt_urgent_min: u64::from(consts_FLOW_LATENCY_DEBT_URGENT_MIN),
+            urgent_latency_burst_max: u64::from(consts_FLOW_URGENT_LATENCY_BURST_MAX),
+            reserved_quota_burst_max: u64::from(consts_FLOW_RESERVED_QUOTA_BURST_MAX),
+            reserved_lane_burst_max: u64::from(consts_FLOW_RESERVED_LANE_BURST_MAX),
             contained_starvation_max: u64::from(consts_FLOW_CONTAINED_STARVATION_MAX),
             shared_starvation_max: u64::from(consts_FLOW_SHARED_STARVATION_MAX),
             local_fast_nr_running_max: u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MAX),
+            local_reserved_burst_max: u64::from(consts_FLOW_LOCAL_RESERVED_BURST_MAX),
         }
     }
 }
@@ -162,6 +172,22 @@ impl RuntimeTunables {
                 u64::from(consts_FLOW_LATENCY_CREDIT_DECAY_MIN),
                 u64::from(consts_FLOW_LATENCY_CREDIT_DECAY_MAX),
             ),
+            latency_debt_urgent_min: self.latency_debt_urgent_min.clamp(
+                u64::from(consts_FLOW_LATENCY_DEBT_URGENT_MIN_MIN),
+                u64::from(consts_FLOW_LATENCY_DEBT_URGENT_MIN_MAX),
+            ),
+            urgent_latency_burst_max: self.urgent_latency_burst_max.clamp(
+                u64::from(consts_FLOW_URGENT_LATENCY_BURST_MIN),
+                u64::from(consts_FLOW_URGENT_LATENCY_BURST_MAX_TUNE),
+            ),
+            reserved_quota_burst_max: self.reserved_quota_burst_max.clamp(
+                u64::from(consts_FLOW_RESERVED_QUOTA_BURST_MIN),
+                u64::from(consts_FLOW_RESERVED_QUOTA_BURST_MAX_TUNE),
+            ),
+            reserved_lane_burst_max: self.reserved_lane_burst_max.clamp(
+                u64::from(consts_FLOW_RESERVED_LANE_BURST_MIN),
+                u64::from(consts_FLOW_RESERVED_LANE_BURST_MAX_TUNE),
+            ),
             contained_starvation_max: self.contained_starvation_max.clamp(
                 u64::from(consts_FLOW_CONTAINED_STARVATION_MIN),
                 u64::from(consts_FLOW_CONTAINED_STARVATION_MAX_TUNE),
@@ -173,6 +199,10 @@ impl RuntimeTunables {
             local_fast_nr_running_max: self.local_fast_nr_running_max.clamp(
                 u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MIN),
                 u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MAX_TUNE),
+            ),
+            local_reserved_burst_max: self.local_reserved_burst_max.clamp(
+                u64::from(consts_FLOW_LOCAL_RESERVED_BURST_MIN),
+                u64::from(consts_FLOW_LOCAL_RESERVED_BURST_MAX_TUNE),
             ),
         }
     }
@@ -188,9 +218,14 @@ impl RuntimeTunables {
                 preempt_refill_min_ns: 250 * 1000,
                 latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
                 latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
+                latency_debt_urgent_min: u64::from(consts_FLOW_LATENCY_DEBT_URGENT_MIN),
+                urgent_latency_burst_max: 3,
+                reserved_quota_burst_max: u64::from(consts_FLOW_RESERVED_QUOTA_BURST_MAX),
+                reserved_lane_burst_max: 4,
                 contained_starvation_max: u64::from(consts_FLOW_CONTAINED_STARVATION_MAX),
                 shared_starvation_max: 10,
                 local_fast_nr_running_max: u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MAX),
+                local_reserved_burst_max: 3,
             }
             .clamp(),
             AutoTuneMode::Throughput => Self {
@@ -201,9 +236,14 @@ impl RuntimeTunables {
                 preempt_refill_min_ns: 325 * 1000,
                 latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
                 latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
+                latency_debt_urgent_min: 2,
+                urgent_latency_burst_max: 1,
+                reserved_quota_burst_max: 3,
+                reserved_lane_burst_max: 6,
                 contained_starvation_max: u64::from(consts_FLOW_CONTAINED_STARVATION_MAX),
                 shared_starvation_max: u64::from(consts_FLOW_SHARED_STARVATION_MAX),
                 local_fast_nr_running_max: u64::from(consts_FLOW_LOCAL_FAST_NR_RUNNING_MAX),
+                local_reserved_burst_max: 3,
             }
             .clamp(),
         }
@@ -236,6 +276,26 @@ impl RuntimeTunables {
         changed |= step_u64(&mut self.latency_credit_grant, target.latency_credit_grant, 1);
         changed |= step_u64(&mut self.latency_credit_decay, target.latency_credit_decay, 1);
         changed |= step_u64(
+            &mut self.latency_debt_urgent_min,
+            target.latency_debt_urgent_min,
+            1,
+        );
+        changed |= step_u64(
+            &mut self.urgent_latency_burst_max,
+            target.urgent_latency_burst_max,
+            1,
+        );
+        changed |= step_u64(
+            &mut self.reserved_quota_burst_max,
+            target.reserved_quota_burst_max,
+            1,
+        );
+        changed |= step_u64(
+            &mut self.reserved_lane_burst_max,
+            target.reserved_lane_burst_max,
+            1,
+        );
+        changed |= step_u64(
             &mut self.contained_starvation_max,
             target.contained_starvation_max,
             1,
@@ -248,6 +308,11 @@ impl RuntimeTunables {
         changed |= step_u64(
             &mut self.local_fast_nr_running_max,
             target.local_fast_nr_running_max,
+            1,
+        );
+        changed |= step_u64(
+            &mut self.local_reserved_burst_max,
+            target.local_reserved_burst_max,
             1,
         );
 
@@ -314,8 +379,12 @@ impl AutoTuner {
         let cpu_biases = delta.cpu_stability_biases;
         let reserved_total = reserved_local + reserved_global;
         let lane_events = positive + shared_wake + contained_enqueues;
-        let dispatch_total =
-            latency_dispatches + reserved_dispatches + contained_dispatches + delta.shared_dispatches;
+        let urgent_latency_dispatches = delta.urgent_latency_dispatches;
+        let total_latency_dispatches = latency_dispatches + urgent_latency_dispatches;
+        let dispatch_total = total_latency_dispatches
+            + reserved_dispatches
+            + contained_dispatches
+            + delta.shared_dispatches;
 
         if lane_events < 3 && reserved_total + contained_dispatches < 2 {
             return self.mode;
@@ -330,7 +399,7 @@ impl AutoTuner {
         let stable_mismatch_ratio = stable_mismatches as f64 / cpu_biases.max(1) as f64;
         let rescue_total = contained_rescues + shared_rescues;
         let rescue_ratio = rescue_total as f64 / dispatch_total.max(1) as f64;
-        let latency_dispatch_ratio = latency_dispatches as f64 / dispatch_total.max(1) as f64;
+        let latency_dispatch_ratio = total_latency_dispatches as f64 / dispatch_total.max(1) as f64;
         let rescue_pressure = rescue_total >= 8 && rescue_ratio > 0.08;
         let keep_latency_mode = self.mode == AutoTuneMode::Latency
             && current.nr_running >= 1
@@ -480,6 +549,9 @@ impl<'a> Scheduler<'a> {
             nr_running: bss_data.nr_running,
             total_runtime: bss_data.total_runtime,
             reserved_dispatches: bss_data.reserved_dispatches,
+            urgent_latency_dispatches: bss_data.urgent_latency_dispatches,
+            urgent_latency_burst_grants: bss_data.urgent_latency_burst_grants,
+            urgent_latency_burst_continuations: bss_data.urgent_latency_burst_continuations,
             latency_dispatches: bss_data.latency_dispatches,
             shared_dispatches: bss_data.shared_dispatches,
             contained_dispatches: bss_data.contained_dispatches,
@@ -488,15 +560,29 @@ impl<'a> Scheduler<'a> {
             budget_refill_events: bss_data.budget_refill_events,
             budget_exhaustions: bss_data.budget_exhaustions,
             positive_budget_wakeups: bss_data.positive_budget_wakeups,
+            urgent_latency_enqueues: bss_data.urgent_latency_enqueues,
             latency_lane_enqueues: bss_data.latency_lane_enqueues,
             latency_lane_candidates: bss_data.latency_lane_candidates,
             latency_candidate_local_enqueues: bss_data.latency_candidate_local_enqueues,
             latency_candidate_hog_blocks: bss_data.latency_candidate_hog_blocks,
+            latency_debt_raises: bss_data.latency_debt_raises,
+            latency_debt_decays: bss_data.latency_debt_decays,
+            latency_debt_urgent_enqueues: bss_data.latency_debt_urgent_enqueues,
+            urgent_latency_misses: bss_data.urgent_latency_misses,
             reserved_local_enqueues: bss_data.reserved_local_enqueues,
             reserved_global_enqueues: bss_data.reserved_global_enqueues,
             shared_wakeup_enqueues: bss_data.shared_wakeup_enqueues,
             runnable_wakeups: bss_data.runnable_wakeups,
             cpu_release_reenqueues: bss_data.cpu_release_reenqueues,
+            urgent_latency_burst_rounds: bss_data.urgent_latency_burst_rounds,
+            high_priority_burst_rounds: bss_data.high_priority_burst_rounds,
+            local_reserved_burst_rounds: bss_data.local_reserved_burst_rounds,
+            local_reserved_fast_grants: bss_data.local_reserved_fast_grants,
+            local_reserved_burst_continuations: bss_data.local_reserved_burst_continuations,
+            local_quota_skips: bss_data.local_quota_skips,
+            reserved_quota_skips: bss_data.reserved_quota_skips,
+            quota_shared_forces: bss_data.quota_shared_forces,
+            quota_contained_forces: bss_data.quota_contained_forces,
             init_task_events: bss_data.init_task_events,
             enable_events: bss_data.enable_events,
             exit_task_events: bss_data.exit_task_events,
@@ -506,6 +592,16 @@ impl<'a> Scheduler<'a> {
             rt_sensitive_wakeups: bss_data.rt_sensitive_wakeups,
             rt_sensitive_local_enqueues: bss_data.rt_sensitive_local_enqueues,
             rt_sensitive_preempts: bss_data.rt_sensitive_preempts,
+            reserved_lane_burst_rounds: bss_data.reserved_lane_burst_rounds,
+            reserved_lane_grants: bss_data.reserved_lane_grants,
+            reserved_lane_burst_continuations: bss_data.reserved_lane_burst_continuations,
+            reserved_lane_skips: bss_data.reserved_lane_skips,
+            reserved_lane_shared_forces: bss_data.reserved_lane_shared_forces,
+            reserved_lane_contained_forces: bss_data.reserved_lane_contained_forces,
+            reserved_lane_shared_misses: bss_data.reserved_lane_shared_misses,
+            reserved_lane_contained_misses: bss_data.reserved_lane_contained_misses,
+            contained_starved_head_enqueues: bss_data.contained_starved_head_enqueues,
+            shared_starved_head_enqueues: bss_data.shared_starved_head_enqueues,
             stable_local_candidates: bss_data.stable_local_candidates,
             stable_local_enqueues: bss_data.stable_local_enqueues,
             stable_local_rejections: bss_data.stable_local_rejections,
@@ -519,9 +615,14 @@ impl<'a> Scheduler<'a> {
             shared_rescue_dispatches: bss_data.shared_rescue_dispatches,
             tune_latency_credit_grant: data.tune_latency_credit_grant,
             tune_latency_credit_decay: data.tune_latency_credit_decay,
+            tune_latency_debt_urgent_min: data.tune_latency_debt_urgent_min,
+            tune_urgent_latency_burst_max: data.tune_urgent_latency_burst_max,
+            tune_reserved_quota_burst_max: data.tune_reserved_quota_burst_max,
             tune_contained_starvation_max: data.tune_contained_starvation_max,
             tune_shared_starvation_max: data.tune_shared_starvation_max,
             tune_local_fast_nr_running_max: data.tune_local_fast_nr_running_max,
+            tune_local_reserved_burst_max: data.tune_local_reserved_burst_max,
+            tune_reserved_lane_burst_max: data.tune_reserved_lane_burst_max,
             autotune_generation: bss_data.autotune_generation,
             autotune_mode: bss_data.autotune_mode,
             tune_reserved_max_ns: data.tune_reserved_max_ns,
@@ -546,9 +647,14 @@ impl<'a> Scheduler<'a> {
         data.tune_preempt_refill_min_ns = tunables.preempt_refill_min_ns;
         data.tune_latency_credit_grant = tunables.latency_credit_grant;
         data.tune_latency_credit_decay = tunables.latency_credit_decay;
+        data.tune_latency_debt_urgent_min = tunables.latency_debt_urgent_min;
+        data.tune_urgent_latency_burst_max = tunables.urgent_latency_burst_max;
+        data.tune_reserved_quota_burst_max = tunables.reserved_quota_burst_max;
+        data.tune_reserved_lane_burst_max = tunables.reserved_lane_burst_max;
         data.tune_contained_starvation_max = tunables.contained_starvation_max;
         data.tune_shared_starvation_max = tunables.shared_starvation_max;
         data.tune_local_fast_nr_running_max = tunables.local_fast_nr_running_max;
+        data.tune_local_reserved_burst_max = tunables.local_reserved_burst_max;
 
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.autotune_mode = mode.as_u64();
@@ -586,7 +692,7 @@ impl<'a> Scheduler<'a> {
                     if let Some((mode, tunables, generation)) = autotuner.update(&current) {
                         self.apply_runtime_tunables(tunables, mode, generation);
                         info!(
-                            "autotune={} gen={} reserve_cap={}us shared_slice={}us refill_floor={}us preempt_budget={}us preempt_refill={}us",
+                            "autotune={} gen={} reserve_cap={}us shared_slice={}us refill_floor={}us preempt_budget={}us preempt_refill={}us debt_min={} urgent_burst_max={} reserved_quota_max={} reserved_lane_max={} local_burst_max={}",
                             mode.as_str(),
                             generation,
                             tunables.reserved_max_ns / 1000,
@@ -594,6 +700,11 @@ impl<'a> Scheduler<'a> {
                             tunables.interactive_floor_ns / 1000,
                             tunables.preempt_budget_min_ns / 1000,
                             tunables.preempt_refill_min_ns / 1000,
+                            tunables.latency_debt_urgent_min,
+                            tunables.urgent_latency_burst_max,
+                            tunables.reserved_quota_burst_max,
+                            tunables.reserved_lane_burst_max,
+                            tunables.local_reserved_burst_max,
                         );
                     }
                     next_tune_at = Instant::now() + Duration::from_secs(1);

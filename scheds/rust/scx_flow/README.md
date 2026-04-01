@@ -21,6 +21,16 @@ Current implementation includes:
 
 - a reserved vs shared queue split
 - a dedicated latency lane ahead of the normal reserved queue
+- bounded per-task latency debt so recently harmed interactive tasks can carry urgency across wakeups
+- a tiny urgent latency sub-lane so debt-bearing wakeups can cut ahead of ordinary latency-credit traffic
+- a bounded urgent-latency burst so that sub-lane can actually win a couple of dispatches before normal ordering resumes
+- a bounded high-priority dispatch quota so shared and contained lanes can occasionally force service before higher lanes monopolize dispatch forever
+- a bounded reserved-lane dispatch cap so the reserved global DSQ must rotate lower lanes before it can dominate dispatch indefinitely
+- explicit reserved-lane miss counters so we can tell whether that cap is firing too early or whether lower lanes are simply empty when rotation is attempted
+- bounded enqueue-side head-start promotion for real arriving shared/contained work when those lanes are already meaningfully starved
+- a bounded local-reserved burst cap so ordinary idle/stable fast-path routing backs off under pressure before it monopolizes wakeup placement
+- runtime-tunable urgent-debt and urgent-burst controls so the controller can steer that path without hard-coded threshold churn
+- explicit urgent-burst continuation counters so we can tell the difference between isolated urgent hits and a real multi-dispatch burst
 - a dedicated contained throughput lane for hog-like tasks after latency and reserved work
 - a bounded fairness floor that periodically rescues contained and shared work under sustained higher-lane pressure
 - lane-aware runtime tuning for latency credit, fairness-floor thresholds, and local-fast pressure caps

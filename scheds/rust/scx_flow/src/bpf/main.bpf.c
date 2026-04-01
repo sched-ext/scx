@@ -23,6 +23,7 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 sleep_started_at;
 	u32 latency_credit;
+	u32 latency_debt;
 	u32 hog_score;
 	u32 stable_score;
 	s32 last_cpu;
@@ -41,6 +42,9 @@ struct {
 volatile u64 nr_running;
 volatile u64 total_runtime;
 volatile u64 reserved_dispatches;
+volatile u64 urgent_latency_dispatches;
+volatile u64 urgent_latency_burst_grants;
+volatile u64 urgent_latency_burst_continuations;
 volatile u64 latency_dispatches;
 volatile u64 shared_dispatches;
 volatile u64 contained_dispatches;
@@ -49,15 +53,29 @@ volatile u64 wake_preempt_dispatches;
 volatile u64 budget_refill_events;
 volatile u64 budget_exhaustions;
 volatile u64 positive_budget_wakeups;
+volatile u64 urgent_latency_enqueues;
 volatile u64 latency_lane_enqueues;
 volatile u64 latency_lane_candidates;
 volatile u64 latency_candidate_local_enqueues;
 volatile u64 latency_candidate_hog_blocks;
+volatile u64 latency_debt_raises;
+volatile u64 latency_debt_decays;
+volatile u64 latency_debt_urgent_enqueues;
+volatile u64 urgent_latency_misses;
 volatile u64 reserved_local_enqueues;
 volatile u64 reserved_global_enqueues;
 volatile u64 shared_wakeup_enqueues;
 volatile u64 runnable_wakeups;
 volatile u64 cpu_release_reenqueues;
+volatile u64 urgent_latency_burst_rounds;
+volatile u64 high_priority_burst_rounds;
+volatile u64 local_reserved_burst_rounds;
+volatile u64 local_reserved_fast_grants;
+volatile u64 local_reserved_burst_continuations;
+volatile u64 local_quota_skips;
+volatile u64 reserved_quota_skips;
+volatile u64 quota_shared_forces;
+volatile u64 quota_contained_forces;
 volatile u64 init_task_events;
 volatile u64 enable_events;
 volatile u64 exit_task_events;
@@ -67,6 +85,16 @@ volatile u64 cpu_migrations;
 volatile u64 rt_sensitive_wakeups;
 volatile u64 rt_sensitive_local_enqueues;
 volatile u64 rt_sensitive_preempts;
+volatile u64 reserved_lane_burst_rounds;
+volatile u64 reserved_lane_grants;
+volatile u64 reserved_lane_burst_continuations;
+volatile u64 reserved_lane_skips;
+volatile u64 reserved_lane_shared_forces;
+volatile u64 reserved_lane_contained_forces;
+volatile u64 reserved_lane_shared_misses;
+volatile u64 reserved_lane_contained_misses;
+volatile u64 contained_starved_head_enqueues;
+volatile u64 shared_starved_head_enqueues;
 volatile u64 stable_local_candidates;
 volatile u64 stable_local_enqueues;
 volatile u64 stable_local_rejections;
@@ -85,12 +113,18 @@ volatile u64 tune_preempt_budget_min_ns = FLOW_PREEMPT_BUDGET_MIN_NS;
 volatile u64 tune_preempt_refill_min_ns = FLOW_PREEMPT_REFILL_MIN_NS;
 volatile u64 tune_latency_credit_grant = FLOW_LATENCY_CREDIT_GRANT;
 volatile u64 tune_latency_credit_decay = FLOW_LATENCY_CREDIT_DECAY;
+volatile u64 tune_latency_debt_urgent_min = FLOW_LATENCY_DEBT_URGENT_MIN;
+volatile u64 tune_urgent_latency_burst_max = FLOW_URGENT_LATENCY_BURST_MAX;
+volatile u64 tune_reserved_quota_burst_max = FLOW_RESERVED_QUOTA_BURST_MAX;
+volatile u64 tune_reserved_lane_burst_max = FLOW_RESERVED_LANE_BURST_MAX;
 volatile u64 tune_contained_starvation_max = FLOW_CONTAINED_STARVATION_MAX;
 volatile u64 tune_shared_starvation_max = FLOW_SHARED_STARVATION_MAX;
 volatile u64 tune_local_fast_nr_running_max = FLOW_LOCAL_FAST_NR_RUNNING_MAX;
+volatile u64 tune_local_reserved_burst_max = FLOW_LOCAL_RESERVED_BURST_MAX;
 volatile u64 autotune_generation;
 volatile u64 autotune_mode;
 
+#define URGENT_LATENCY_DSQ 1022
 #define LATENCY_DSQ 1023
 #define RESERVED_DSQ 1024
 #define CONTAINED_DSQ 1025
@@ -184,6 +218,7 @@ static __always_inline void reset_task_ctx(struct task_ctx *tctx, u64 now, bool 
 	tctx->last_run_at = 0;
 	tctx->sleep_started_at = sleeping ? now : 0;
 	tctx->latency_credit = 0;
+	tctx->latency_debt = 0;
 	tctx->hog_score = 0;
 	tctx->stable_score = 0;
 	tctx->last_cpu = -1;
@@ -240,6 +275,13 @@ static __always_inline u32 clamp_latency_credit(u32 latency_credit)
 	return latency_credit;
 }
 
+static __always_inline u32 clamp_latency_debt(u32 latency_debt)
+{
+	if (latency_debt > FLOW_LATENCY_DEBT_MAX)
+		return FLOW_LATENCY_DEBT_MAX;
+	return latency_debt;
+}
+
 static __always_inline u32 tuned_latency_credit_grant(void)
 {
 	u64 grant = tune_latency_credit_grant;
@@ -264,6 +306,66 @@ static __always_inline u32 tuned_latency_credit_decay(void)
 	return decay;
 }
 
+static __always_inline u32 tuned_latency_debt_urgent_min(void)
+{
+	u64 urgent_min = tune_latency_debt_urgent_min;
+
+	if (urgent_min < FLOW_LATENCY_DEBT_URGENT_MIN_MIN)
+		urgent_min = FLOW_LATENCY_DEBT_URGENT_MIN_MIN;
+	else if (urgent_min > FLOW_LATENCY_DEBT_URGENT_MIN_MAX)
+		urgent_min = FLOW_LATENCY_DEBT_URGENT_MIN_MAX;
+
+	return urgent_min;
+}
+
+static __always_inline u32 tuned_urgent_latency_burst_max(void)
+{
+	u64 burst_max = tune_urgent_latency_burst_max;
+
+	if (burst_max < FLOW_URGENT_LATENCY_BURST_MIN)
+		burst_max = FLOW_URGENT_LATENCY_BURST_MIN;
+	else if (burst_max > FLOW_URGENT_LATENCY_BURST_MAX_TUNE)
+		burst_max = FLOW_URGENT_LATENCY_BURST_MAX_TUNE;
+
+	return burst_max;
+}
+
+static __always_inline u32 tuned_reserved_quota_burst_max(void)
+{
+	u64 burst_max = tune_reserved_quota_burst_max;
+
+	if (burst_max < FLOW_RESERVED_QUOTA_BURST_MIN)
+		burst_max = FLOW_RESERVED_QUOTA_BURST_MIN;
+	else if (burst_max > FLOW_RESERVED_QUOTA_BURST_MAX_TUNE)
+		burst_max = FLOW_RESERVED_QUOTA_BURST_MAX_TUNE;
+
+	return burst_max;
+}
+
+static __always_inline u32 tuned_reserved_lane_burst_max(void)
+{
+	u64 burst_max = tune_reserved_lane_burst_max;
+
+	if (burst_max < FLOW_RESERVED_LANE_BURST_MIN)
+		burst_max = FLOW_RESERVED_LANE_BURST_MIN;
+	else if (burst_max > FLOW_RESERVED_LANE_BURST_MAX_TUNE)
+		burst_max = FLOW_RESERVED_LANE_BURST_MAX_TUNE;
+
+	return burst_max;
+}
+
+static __always_inline u32 tuned_local_reserved_burst_max(void)
+{
+	u64 burst_max = tune_local_reserved_burst_max;
+
+	if (burst_max < FLOW_LOCAL_RESERVED_BURST_MIN)
+		burst_max = FLOW_LOCAL_RESERVED_BURST_MIN;
+	else if (burst_max > FLOW_LOCAL_RESERVED_BURST_MAX_TUNE)
+		burst_max = FLOW_LOCAL_RESERVED_BURST_MAX_TUNE;
+
+	return burst_max;
+}
+
 static __always_inline void raise_latency_credit(struct task_ctx *tctx, u32 delta)
 {
 	if (!tctx || !delta)
@@ -281,6 +383,47 @@ static __always_inline void decay_latency_credit(struct task_ctx *tctx, u32 delt
 		tctx->latency_credit = 0;
 	else
 		tctx->latency_credit -= delta;
+}
+
+static __always_inline bool has_urgent_latency_debt(const struct task_ctx *tctx)
+{
+	return tctx && tctx->latency_debt >= tuned_latency_debt_urgent_min();
+}
+
+static __always_inline bool raise_latency_debt(struct task_ctx *tctx, u32 delta)
+{
+	u32 old_debt;
+	u32 new_debt;
+
+	if (!tctx || !delta)
+		return false;
+
+	old_debt = tctx->latency_debt;
+	new_debt = clamp_latency_debt(old_debt + delta);
+	if (new_debt == old_debt)
+		return false;
+
+	tctx->latency_debt = new_debt;
+	return true;
+}
+
+static __always_inline bool decay_latency_debt(struct task_ctx *tctx, u32 delta)
+{
+	u32 old_debt;
+
+	if (!tctx || !delta)
+		return false;
+
+	old_debt = tctx->latency_debt;
+	if (!old_debt)
+		return false;
+
+	if (old_debt <= delta)
+		tctx->latency_debt = 0;
+	else
+		tctx->latency_debt = old_debt - delta;
+
+	return tctx->latency_debt != old_debt;
 }
 
 static __always_inline u32 clamp_stable_score(u32 stable_score)
@@ -456,6 +599,7 @@ static __always_inline void note_high_priority_dispatch(void)
 {
 	u64 contained_max = tune_contained_starvation_max;
 	u64 shared_max = tune_shared_starvation_max;
+	u64 quota_max = tuned_reserved_quota_burst_max();
 
 	if (contained_max < FLOW_CONTAINED_STARVATION_MIN)
 		contained_max = FLOW_CONTAINED_STARVATION_MIN;
@@ -471,6 +615,61 @@ static __always_inline void note_high_priority_dispatch(void)
 			      contained_max);
 	bump_starvation_round(&shared_starvation_rounds,
 			      shared_max);
+	if (high_priority_burst_rounds < quota_max)
+		high_priority_burst_rounds++;
+}
+
+static __always_inline void reset_urgent_latency_burst(void)
+{
+	urgent_latency_burst_rounds = 0;
+}
+
+static __always_inline void reset_reserved_lane_burst(void)
+{
+	reserved_lane_burst_rounds = 0;
+}
+
+static __always_inline void reset_local_reserved_burst(void)
+{
+	local_reserved_burst_rounds = 0;
+}
+
+static __always_inline void note_local_reserved_fast(void)
+{
+	u64 burst_max = tuned_local_reserved_burst_max();
+
+	__sync_fetch_and_add(&local_reserved_fast_grants, 1);
+	if (local_reserved_burst_rounds > 0)
+		__sync_fetch_and_add(&local_reserved_burst_continuations, 1);
+	if (local_reserved_burst_rounds < burst_max)
+		local_reserved_burst_rounds++;
+}
+
+static __always_inline void note_urgent_latency_dispatch(void)
+{
+	if (urgent_latency_burst_rounds > 0)
+		__sync_fetch_and_add(&urgent_latency_burst_continuations, 1);
+	if (urgent_latency_burst_rounds < tuned_urgent_latency_burst_max())
+		urgent_latency_burst_rounds++;
+	__sync_fetch_and_add(&urgent_latency_dispatches, 1);
+	__sync_fetch_and_add(&urgent_latency_burst_grants, 1);
+	reset_reserved_lane_burst();
+	note_high_priority_dispatch();
+}
+
+static __always_inline void note_reserved_dispatch(void)
+{
+	u64 burst_max = tuned_reserved_lane_burst_max();
+
+	__sync_fetch_and_add(&reserved_dispatches, 1);
+	__sync_fetch_and_add(&reserved_lane_grants, 1);
+	if (reserved_lane_burst_rounds > 0)
+		__sync_fetch_and_add(&reserved_lane_burst_continuations, 1);
+	if (reserved_lane_burst_rounds < burst_max)
+		reserved_lane_burst_rounds++;
+	reset_urgent_latency_burst();
+	reset_local_reserved_burst();
+	note_high_priority_dispatch();
 }
 
 static __always_inline void note_contained_dispatch(bool rescued)
@@ -483,7 +682,11 @@ static __always_inline void note_contained_dispatch(bool rescued)
 		shared_max = FLOW_SHARED_STARVATION_MAX_TUNE;
 
 	contained_starvation_rounds = 0;
+	high_priority_burst_rounds = 0;
 	bump_starvation_round(&shared_starvation_rounds, shared_max);
+	reset_urgent_latency_burst();
+	reset_reserved_lane_burst();
+	reset_local_reserved_burst();
 	if (rescued)
 		__sync_fetch_and_add(&contained_rescue_dispatches, 1);
 }
@@ -498,9 +701,27 @@ static __always_inline void note_shared_dispatch(bool rescued)
 		contained_max = FLOW_CONTAINED_STARVATION_MAX_TUNE;
 
 	shared_starvation_rounds = 0;
+	high_priority_burst_rounds = 0;
 	bump_starvation_round(&contained_starvation_rounds, contained_max);
+	reset_urgent_latency_burst();
+	reset_reserved_lane_burst();
+	reset_local_reserved_burst();
 	if (rescued)
 		__sync_fetch_and_add(&shared_rescue_dispatches, 1);
+}
+
+static __always_inline bool local_reserved_quota_active(void)
+{
+	u64 max_running = tune_local_fast_nr_running_max;
+
+	if (max_running < FLOW_LOCAL_FAST_NR_RUNNING_MIN)
+		max_running = FLOW_LOCAL_FAST_NR_RUNNING_MIN;
+	else if (max_running > FLOW_LOCAL_FAST_NR_RUNNING_MAX_TUNE)
+		max_running = FLOW_LOCAL_FAST_NR_RUNNING_MAX_TUNE;
+
+	return nr_running > max_running ||
+		contained_starvation_rounds > 0 ||
+		shared_starvation_rounds > 0;
 }
 
 static __always_inline void note_stable_mismatch(struct task_ctx *tctx)
@@ -521,6 +742,30 @@ static __always_inline void note_stable_rejection(struct task_ctx *tctx)
 	decay_stable_score(tctx, FLOW_STABLE_MISMATCH_DECAY);
 }
 
+static __always_inline bool should_promote_shared_enqueue(void)
+{
+	u64 shared_max = tune_shared_starvation_max;
+
+	if (shared_max < FLOW_SHARED_STARVATION_MIN)
+		shared_max = FLOW_SHARED_STARVATION_MIN;
+	else if (shared_max > FLOW_SHARED_STARVATION_MAX_TUNE)
+		shared_max = FLOW_SHARED_STARVATION_MAX_TUNE;
+
+	return shared_starvation_rounds * 2 >= shared_max;
+}
+
+static __always_inline bool should_promote_contained_enqueue(void)
+{
+	u64 contained_max = tune_contained_starvation_max;
+
+	if (contained_max < FLOW_CONTAINED_STARVATION_MIN)
+		contained_max = FLOW_CONTAINED_STARVATION_MIN;
+	else if (contained_max > FLOW_CONTAINED_STARVATION_MAX_TUNE)
+		contained_max = FLOW_CONTAINED_STARVATION_MAX_TUNE;
+
+	return contained_starvation_rounds * 2 >= contained_max;
+}
+
 static __always_inline bool move_to_local_compat(u64 dsq_id)
 {
 	if (bpf_ksym_exists(scx_bpf_dsq_move_to_local___v2))
@@ -539,6 +784,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	ret = scx_bpf_create_dsq(LATENCY_DSQ, -1);
 	if (ret < 0 && ret != -EEXIST) {
 		scx_bpf_error("failed to create latency DSQ %d: %d", LATENCY_DSQ, ret);
+		return ret;
+	}
+
+	ret = scx_bpf_create_dsq(URGENT_LATENCY_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create urgent latency DSQ %d: %d",
+			     URGENT_LATENCY_DSQ, ret);
 		return ret;
 	}
 
@@ -659,10 +911,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	bool has_wake_target = false;
 	bool rt_sensitive_wakeup = false;
 	bool soft_latency_wakeup = false;
+	bool debt_latency_wakeup = false;
 	bool latency_lane_wakeup = false;
+	bool urgent_latency_wakeup = false;
 	bool stable_local_wakeup = false;
 	bool contained_hog = false;
 	bool use_local_reserved = false;
+	bool ordinary_local_reserved = false;
 
 	tctx = lookup_task_ctx(p);
 	slice_ns = task_slice_ns(tctx);
@@ -685,10 +940,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (tctx) {
 		if (tctx->budget_ns > 0) {
 			contained_hog = is_contained_hog(tctx);
+			debt_latency_wakeup = is_wakeup &&
+				!contained_hog &&
+				has_urgent_latency_debt(tctx);
 			soft_latency_wakeup = is_wakeup &&
 				!contained_hog &&
 				is_soft_latency_candidate(tctx);
-			if (soft_latency_wakeup) {
+			if (soft_latency_wakeup || debt_latency_wakeup) {
 				__sync_fetch_and_add(&latency_lane_candidates, 1);
 			}
 			if (contained_hog && is_soft_latency_candidate(tctx))
@@ -698,7 +956,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			rt_sensitive_wakeup = is_rt_sensitive_wakeup(p, tctx, is_wakeup);
 			if (rt_sensitive_wakeup)
 				__sync_fetch_and_add(&rt_sensitive_wakeups, 1);
-			latency_lane_wakeup = soft_latency_wakeup && !rt_sensitive_wakeup;
+			latency_lane_wakeup =
+				(soft_latency_wakeup || debt_latency_wakeup) &&
+				!rt_sensitive_wakeup;
+			urgent_latency_wakeup = debt_latency_wakeup &&
+				!rt_sensitive_wakeup;
 			stable_local_wakeup = is_stable_local_candidate(tctx, target_cpu,
 									       is_wakeup,
 									       rt_sensitive_wakeup,
@@ -745,6 +1007,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					 tctx->wake_cpu_idle && is_wakeup &&
 					 allow_idle_local_fast_path()) ||
 					stable_local_wakeup;
+				ordinary_local_reserved = use_local_reserved &&
+					!should_preempt;
+
+				if (ordinary_local_reserved &&
+				    local_reserved_quota_active() &&
+				    local_reserved_burst_rounds >=
+					    tuned_local_reserved_burst_max()) {
+					use_local_reserved = false;
+					ordinary_local_reserved = false;
+					__sync_fetch_and_add(&local_quota_skips, 1);
+				}
 
 				if (should_preempt) {
 					enq_flags |= SCX_ENQ_PREEMPT;
@@ -761,6 +1034,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					u64 local_slice_ns = rt_sensitive_wakeup ?
 						FLOW_RT_WAKE_SLICE_NS : slice_ns;
 
+					if (urgent_latency_wakeup)
+						__sync_fetch_and_add(&urgent_latency_misses, 1);
 					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | target_cpu,
 							   local_slice_ns, enq_flags);
 					if (latency_lane_wakeup)
@@ -772,6 +1047,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 						__sync_fetch_and_add(&stable_local_enqueues, 1);
 					if (tctx->wake_cpu_idle)
 						__sync_fetch_and_add(&local_fast_dispatches, 1);
+					if (ordinary_local_reserved)
+						note_local_reserved_fast();
 					clear_wake_target(tctx);
 					return;
 				}
@@ -781,8 +1058,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				note_stable_rejection(tctx);
 
 			if (contained_hog) {
+				if (should_promote_contained_enqueue()) {
+					enq_flags |= SCX_ENQ_HEAD;
+					__sync_fetch_and_add(&contained_starved_head_enqueues, 1);
+				}
 				scx_bpf_dsq_insert(p, CONTAINED_DSQ, contained_slice_ns(),
 						   enq_flags);
+				reset_local_reserved_burst();
 				__sync_fetch_and_add(&contained_enqueues, 1);
 				__sync_fetch_and_add(&hog_containment_enqueues, 1);
 				clear_wake_target(tctx);
@@ -790,8 +1072,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			}
 
 			if (latency_lane_wakeup) {
-				scx_bpf_dsq_insert(p, LATENCY_DSQ, slice_ns, enq_flags);
+				u64 latency_dsq = urgent_latency_wakeup ?
+					URGENT_LATENCY_DSQ : LATENCY_DSQ;
+
+				scx_bpf_dsq_insert(p, latency_dsq, slice_ns, enq_flags);
+				reset_local_reserved_burst();
 				decay_latency_credit(tctx, tuned_latency_credit_decay());
+				if (urgent_latency_wakeup)
+					__sync_fetch_and_add(&urgent_latency_enqueues, 1);
+				if (has_urgent_latency_debt(tctx))
+					__sync_fetch_and_add(&latency_debt_urgent_enqueues, 1);
+				if (decay_latency_debt(tctx, FLOW_LATENCY_DEBT_DECAY_STEP))
+					__sync_fetch_and_add(&latency_debt_decays, 1);
 				__sync_fetch_and_add(&latency_lane_enqueues, 1);
 				if (has_wake_target && (is_wakeup || !scx_bpf_task_running(p)))
 					scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
@@ -800,6 +1092,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			}
 
 			scx_bpf_dsq_insert(p, RESERVED_DSQ, slice_ns, enq_flags);
+			reset_local_reserved_burst();
 			__sync_fetch_and_add(&reserved_global_enqueues, 1);
 			if (has_wake_target && (is_wakeup || !scx_bpf_task_running(p)))
 				scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
@@ -809,7 +1102,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	if (tctx && is_contained_hog(tctx)) {
+		if (should_promote_contained_enqueue()) {
+			enq_flags |= SCX_ENQ_HEAD;
+			__sync_fetch_and_add(&contained_starved_head_enqueues, 1);
+		}
 		scx_bpf_dsq_insert(p, CONTAINED_DSQ, contained_slice_ns(), enq_flags);
+		reset_local_reserved_burst();
 		__sync_fetch_and_add(&contained_enqueues, 1);
 		__sync_fetch_and_add(&hog_containment_enqueues, 1);
 		clear_wake_target(tctx);
@@ -819,7 +1117,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (is_wakeup)
 		__sync_fetch_and_add(&shared_wakeup_enqueues, 1);
 
+	if (should_promote_shared_enqueue()) {
+		enq_flags |= SCX_ENQ_HEAD;
+		__sync_fetch_and_add(&shared_starved_head_enqueues, 1);
+	}
 	scx_bpf_dsq_insert(p, SHARED_DSQ, slice_ns, enq_flags);
+	reset_local_reserved_burst();
 	clear_wake_target(tctx);
 }
 
@@ -828,8 +1131,13 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	struct task_ctx *tctx;
 	u64 shared_max = tune_shared_starvation_max;
 	u64 contained_max = tune_contained_starvation_max;
+	u64 reserved_lane_max = tuned_reserved_lane_burst_max();
 	bool force_shared;
 	bool force_contained;
+	u64 quota_max = tuned_reserved_quota_burst_max();
+	bool quota_force_shared;
+	bool quota_force_contained;
+	bool shared_more_starved;
 
 	if (shared_max < FLOW_SHARED_STARVATION_MIN)
 		shared_max = FLOW_SHARED_STARVATION_MIN;
@@ -843,6 +1151,38 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 
 	force_shared = shared_starvation_rounds >= shared_max;
 	force_contained = contained_starvation_rounds >= contained_max;
+	quota_force_shared = !force_shared &&
+		high_priority_burst_rounds >= quota_max &&
+		shared_starvation_rounds > 0;
+	quota_force_contained = !force_contained &&
+		high_priority_burst_rounds >= quota_max &&
+		contained_starvation_rounds > 0;
+	shared_more_starved =
+		shared_starvation_rounds * contained_max >=
+		contained_starvation_rounds * shared_max;
+
+	if (quota_force_shared || quota_force_contained)
+		__sync_fetch_and_add(&reserved_quota_skips, 1);
+
+	if (quota_force_shared &&
+	    (!quota_force_contained || shared_more_starved)) {
+		if (move_to_local_compat(SHARED_DSQ)) {
+			__sync_fetch_and_add(&shared_dispatches, 1);
+			__sync_fetch_and_add(&quota_shared_forces, 1);
+			note_shared_dispatch(true);
+			return;
+		}
+	}
+
+	if (quota_force_contained &&
+	    (!quota_force_shared || !shared_more_starved)) {
+		if (move_to_local_compat(CONTAINED_DSQ)) {
+			__sync_fetch_and_add(&contained_dispatches, 1);
+			__sync_fetch_and_add(&quota_contained_forces, 1);
+			note_contained_dispatch(true);
+			return;
+		}
+	}
 
 	if (force_shared) {
 		if (move_to_local_compat(SHARED_DSQ)) {
@@ -862,15 +1202,59 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		backoff_starvation_round(&contained_starvation_rounds, contained_max);
 	}
 
+	if (urgent_latency_burst_rounds < tuned_urgent_latency_burst_max() &&
+	    move_to_local_compat(URGENT_LATENCY_DSQ)) {
+		reset_local_reserved_burst();
+		note_urgent_latency_dispatch();
+		return;
+	}
+
 	if (move_to_local_compat(LATENCY_DSQ)) {
+		reset_urgent_latency_burst();
+		reset_reserved_lane_burst();
+		reset_local_reserved_burst();
 		__sync_fetch_and_add(&latency_dispatches, 1);
 		note_high_priority_dispatch();
 		return;
 	}
 
+	if (reserved_lane_burst_rounds >= reserved_lane_max) {
+		__sync_fetch_and_add(&reserved_lane_skips, 1);
+		if (shared_more_starved) {
+			if (move_to_local_compat(SHARED_DSQ)) {
+				__sync_fetch_and_add(&shared_dispatches, 1);
+				__sync_fetch_and_add(&reserved_lane_shared_forces, 1);
+				note_shared_dispatch(true);
+				return;
+			}
+			__sync_fetch_and_add(&reserved_lane_shared_misses, 1);
+			if (move_to_local_compat(CONTAINED_DSQ)) {
+				__sync_fetch_and_add(&contained_dispatches, 1);
+				__sync_fetch_and_add(&reserved_lane_contained_forces, 1);
+				note_contained_dispatch(true);
+				return;
+			}
+			__sync_fetch_and_add(&reserved_lane_contained_misses, 1);
+		} else {
+			if (move_to_local_compat(CONTAINED_DSQ)) {
+				__sync_fetch_and_add(&contained_dispatches, 1);
+				__sync_fetch_and_add(&reserved_lane_contained_forces, 1);
+				note_contained_dispatch(true);
+				return;
+			}
+			__sync_fetch_and_add(&reserved_lane_contained_misses, 1);
+			if (move_to_local_compat(SHARED_DSQ)) {
+				__sync_fetch_and_add(&shared_dispatches, 1);
+				__sync_fetch_and_add(&reserved_lane_shared_forces, 1);
+				note_shared_dispatch(true);
+				return;
+			}
+			__sync_fetch_and_add(&reserved_lane_shared_misses, 1);
+		}
+	}
+
 	if (move_to_local_compat(RESERVED_DSQ)) {
-		__sync_fetch_and_add(&reserved_dispatches, 1);
-		note_high_priority_dispatch();
+		note_reserved_dispatch();
 		return;
 	}
 
@@ -939,6 +1323,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 			raise_hog_score(tctx, FLOW_HOG_SCORE_EXHAUST_STEP);
 		if (exhausted_budget)
 			decay_latency_credit(tctx, tuned_latency_credit_decay());
+		if (exhausted_budget && runnable &&
+		    !is_contained_hog(tctx) &&
+		    (tctx->last_refill_ns >= (s64)FLOW_LATENCY_LANE_REFILL_MIN_NS ||
+		     tctx->latency_credit > 0) &&
+		    raise_latency_debt(tctx, FLOW_LATENCY_DEBT_RAISE_STEP))
+			__sync_fetch_and_add(&latency_debt_raises, 1);
 
 		tctx->budget_ns = clamp_budget(tctx->budget_ns - (s64)runtime_ns);
 		tctx->last_run_at = 0;
