@@ -52,6 +52,7 @@
 extern int LINUX_KERNEL_VERSION __kconfig;
 extern const char CONFIG_CC_VERSION_TEXT[64] __kconfig __weak;
 extern const char CONFIG_LOCALVERSION[64] __kconfig __weak;
+extern bool CONFIG_PREEMPT_RCU __kconfig __weak;
 
 /*
  * Earlier versions of clang/pahole lost upper 32bits in 64bit enums which can
@@ -505,25 +506,27 @@ static __always_inline const struct cpumask *cast_mask(struct bpf_cpumask *mask)
 static inline bool is_migration_disabled(const struct task_struct *p)
 {
 	/*
-	 * Testing p->migration_disabled in a BPF code is tricky because the
-	 * migration is _always_ disabled while running the BPF code.
-	 * The prolog (__bpf_prog_enter) and epilog (__bpf_prog_exit) for BPF
-	 * code execution disable and re-enable the migration of the current
-	 * task, respectively. So, the _current_ task of the sched_ext ops is
-	 * always migration-disabled. Moreover, p->migration_disabled could be
-	 * two or greater when a sched_ext ops BPF code (e.g., ops.tick) is
-	 * executed in the middle of the other BPF code execution.
+	 * Testing p->migration_disabled in BPF is tricky. The BPF prolog
+	 * (__bpf_prog_enter) calls migrate_disable() for the current task,
+	 * which makes migration_disabled == 1 for any task running BPF code.
 	 *
-	 * Therefore, we should decide that the _current_ task is
-	 * migration-disabled only when its migration_disabled count is greater
-	 * than one. In other words, when  p->migration_disabled == 1, there is
-	 * an ambiguity, so we should check if @p is the current task or not.
+	 * However, since v6.18, the BPF prolog calls migrate_disable() only
+	 * when CONFIG_PREEMPT_RCU is enabled. So on v6.18+ kernels without
+	 * CONFIG_PREEMPT_RCU, migration_disabled == 1 unambiguously means the
+	 * task is truly migration-disabled.
+	 *
+	 * When ambiguity exists (pre-v6.18 or CONFIG_PREEMPT_RCU), distinguish
+	 * by checking if @p is the current task: if so, migration_disabled == 1
+	 * is from the BPF prolog, not a real migrate_disable() call.
 	 */
 	if (bpf_core_field_exists(p->migration_disabled)) {
-		if (p->migration_disabled == 1)
+		if (p->migration_disabled == 1) {
+			if (LINUX_KERNEL_VERSION >= KERNEL_VERSION(6, 18, 0) &&
+			    !CONFIG_PREEMPT_RCU)
+				return true;
 			return bpf_get_current_task_btf() != p;
-		else
-			return p->migration_disabled;
+		}
+		return p->migration_disabled;
 	}
 	return false;
 }
