@@ -277,12 +277,13 @@ static __always_inline bool is_rt_sensitive_wakeup(const struct task_struct *p,
 	return tctx->last_refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS;
 }
 
-static __always_inline bool is_latency_lane_wakeup(const struct task_ctx *tctx,
-						   bool is_wakeup)
+static __always_inline bool is_latency_lane_candidate(const struct task_ctx *tctx)
 {
 	u64 interactive_floor_ns = tune_interactive_floor_ns;
+	u64 refill_min_ns;
+	u64 budget_min_ns;
 
-	if (!tctx || !is_wakeup || tctx->budget_ns <= 0 || tctx->last_refill_ns <= 0)
+	if (!tctx || tctx->budget_ns <= 0 || tctx->last_refill_ns <= 0)
 		return false;
 	if (is_contained_hog(tctx))
 		return false;
@@ -292,7 +293,15 @@ static __always_inline bool is_latency_lane_wakeup(const struct task_ctx *tctx,
 	else if (interactive_floor_ns > FLOW_INTERACTIVE_FLOOR_MAX_NS)
 		interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_MAX_NS;
 
-	return tctx->last_refill_ns >= (s64)interactive_floor_ns;
+	refill_min_ns = interactive_floor_ns / 2;
+	if (refill_min_ns < FLOW_LATENCY_LANE_REFILL_MIN_NS)
+		refill_min_ns = FLOW_LATENCY_LANE_REFILL_MIN_NS;
+	budget_min_ns = refill_min_ns;
+	if (budget_min_ns < FLOW_LATENCY_LANE_BUDGET_MIN_NS)
+		budget_min_ns = FLOW_LATENCY_LANE_BUDGET_MIN_NS;
+
+	return tctx->last_refill_ns >= (s64)refill_min_ns &&
+		tctx->budget_ns >= (s64)budget_min_ns;
 }
 
 static __always_inline bool move_to_local_compat(u64 dsq_id)
@@ -454,7 +463,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			rt_sensitive_wakeup = is_rt_sensitive_wakeup(p, tctx, is_wakeup);
 			if (rt_sensitive_wakeup)
 				__sync_fetch_and_add(&rt_sensitive_wakeups, 1);
-			latency_lane_wakeup = is_latency_lane_wakeup(tctx, is_wakeup);
+			latency_lane_wakeup = is_latency_lane_candidate(tctx);
 
 			if (is_wakeup && !contained_hog)
 				enq_flags |= SCX_ENQ_HEAD;
