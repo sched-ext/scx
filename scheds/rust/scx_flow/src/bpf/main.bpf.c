@@ -230,7 +230,8 @@ static __always_inline void update_budget_on_wakeup(const struct task_struct *p,
 						    u64 now)
 {
 	s64 refill_ns;
-	u32 hog_decay = FLOW_HOG_SCORE_DECAY_STEP;
+	u64 interactive_floor_ns = tune_interactive_floor_ns;
+	u64 recovery_refill_min_ns;
 
 	if (!tctx)
 		return;
@@ -246,9 +247,14 @@ static __always_inline void update_budget_on_wakeup(const struct task_struct *p,
 	tctx->sleep_started_at = 0;
 
 	if (refill_ns > 0) {
-		if (refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS)
-			hog_decay = FLOW_HOG_SCORE_INTERACTIVE_DECAY_STEP;
-		decay_hog_score(tctx, hog_decay);
+		if (interactive_floor_ns < FLOW_INTERACTIVE_FLOOR_MIN_NS)
+			interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_MIN_NS;
+		else if (interactive_floor_ns > FLOW_INTERACTIVE_FLOOR_MAX_NS)
+			interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_MAX_NS;
+
+		recovery_refill_min_ns = interactive_floor_ns + FLOW_HOG_RECOVERY_MARGIN_NS;
+		if (refill_ns >= (s64)recovery_refill_min_ns)
+			decay_hog_score(tctx, FLOW_HOG_SCORE_DECAY_STEP);
 		__sync_fetch_and_add(&budget_refill_events, 1);
 	}
 }
@@ -604,7 +610,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		if (exhausted_budget)
 			__sync_fetch_and_add(&budget_exhaustions, 1);
 		if (exhausted_budget)
-			raise_hog_score(tctx, 1);
+			raise_hog_score(tctx, FLOW_HOG_SCORE_EXHAUST_STEP);
 
 		tctx->budget_ns = clamp_budget(tctx->budget_ns - (s64)runtime_ns);
 		tctx->last_run_at = 0;
