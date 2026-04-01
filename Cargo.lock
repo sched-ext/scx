@@ -4591,6 +4591,7 @@ dependencies = [
  "clap",
  "console",
  "ctrlc",
+ "libbpf-rs",
  "libc",
  "nix 0.29.0",
  "rand 0.8.5",

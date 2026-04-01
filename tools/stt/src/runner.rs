@@ -1,4 +1,6 @@
 use anyhow::{bail, Context, Result};
+use libbpf_rs::libbpf_sys;
+use libbpf_rs::AsRawLibbpf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -450,6 +452,7 @@ struct StackFunction {
     raw_name: String,
     display_name: String,
     is_bpf: bool,
+    bpf_prog_id: Option<u32>,
 }
 
 /// Public API for auto-repro: extract function names as strings.
@@ -496,6 +499,7 @@ fn extract_stack_functions_all(stack: &str) -> Vec<StackFunction> {
                 raw_name: func.to_string(),
                 display_name,
                 is_bpf,
+                bpf_prog_id: None,
             })
         })
         .collect()
@@ -543,6 +547,7 @@ fn load_probe_stack(input: &str) -> Vec<StackFunction> {
                     s.to_string()
                 },
                 is_bpf,
+                bpf_prog_id: None,
             }
         })
         .collect()
@@ -553,16 +558,23 @@ fn load_probe_stack(input: &str) -> Vec<StackFunction> {
 #[derive(Debug, Clone)]
 struct BtfParam {
     name: String,
-    /// Resolved struct name for pointers (e.g., "task_struct", "rq")
+    /// Known struct name (in STRUCT_FIELDS) for hardcoded enrichment
     struct_name: Option<String>,
     /// True if this is a pointer type
     is_ptr: bool,
+    /// For pointer-to-struct params NOT in STRUCT_FIELDS:
+    /// auto-discovered (field_name, field_access) pairs from BTF
+    auto_fields: Vec<(String, String)>,
+    /// Type name for display (e.g., "cgrp_ctx", "cpumask")
+    type_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct BtfFunc {
     name: String,
     params: Vec<BtfParam>,
+    /// Source location from BPF line info (e.g., "mitosis.bpf.c:450")
+    source_loc: Option<String>,
 }
 
 /// Struct types we know how to dereference in bpftrace.
@@ -574,10 +586,22 @@ const STRUCT_FIELDS: &[(&str, &[(&str, &str)])] = &[
             ("->pid", "pid"),
             ("->cpus_ptr->bits[0]", "cpus_ptr"),
             ("->scx.ddsp_dsq_id", "dsq_id"),
+            ("->scx.ddsp_enq_flags", "enq_flags"),
+            ("->scx.slice", "slice"),
+            ("->scx.dsq_vtime", "vtime"),
+            ("->scx.weight", "weight"),
+            ("->scx.sticky_cpu", "sticky_cpu"),
+            ("->scx.flags", "scx_flags"),
         ],
     ),
     ("rq", &[("->cpu", "cpu")]),
     ("scx_dispatch_q", &[("->id", "dsq_id")]),
+    ("scx_init_task_args", &[("->fork", "fork")]),
+    (
+        "scx_exit_info",
+        &[("->kind", "exit_kind"), ("->reason", "reason")],
+    ),
+    ("scx_cgroup_init_args", &[("->weight", "weight")]),
 ];
 
 /// Parse BTF from vmlinux for a set of function names using btf-rs.
@@ -654,12 +678,15 @@ fn parse_btf_functions(func_names: &[&str], vmlinux_path: Option<&str>) -> Vec<B
                         name,
                         struct_name,
                         is_ptr: is_ptr(tid),
+                        auto_fields: Vec::new(),
+                        type_name: None,
                     });
                 }
 
                 results.push(BtfFunc {
                     name: func_name.to_string(),
                     params,
+                    source_loc: None,
                 });
                 break; // take first match
             }
@@ -670,39 +697,519 @@ fn parse_btf_functions(func_names: &[&str], vmlinux_path: Option<&str>) -> Vec<B
     results
 }
 
+/// Walk a struct type's fields via BTF, returning (field_name, bpftrace_access)
+/// pairs for scalar and pointer members (one level deep).
+/// Resolve a BTF type_id to a C type string for struct definition generation.
+fn btf_type_to_c(btf: &libbpf_rs::btf::Btf<'_>, type_id: libbpf_rs::btf::TypeId) -> String {
+    use libbpf_rs::btf::{BtfKind, BtfType};
+
+    let t = match btf.type_by_id::<BtfType<'_>>(type_id) {
+        Some(t) => t,
+        None => return "u64".to_string(),
+    };
+    let inner = t.skip_mods_and_typedefs();
+    match inner.kind() {
+        BtfKind::Int => {
+            let int_ty: Result<libbpf_rs::btf::types::Int<'_>, _> = inner.try_into();
+            match int_ty.map(|i| i.bits / 8) {
+                Ok(1) => "unsigned char".to_string(),
+                Ok(2) => "unsigned short".to_string(),
+                Ok(4) => "unsigned int".to_string(),
+                _ => "unsigned long long".to_string(),
+            }
+        }
+        BtfKind::Enum => "int".to_string(),
+        BtfKind::Enum64 => "unsigned long long".to_string(),
+        BtfKind::Ptr => {
+            // If points to a vmlinux struct, emit real type for bpftrace
+            let deref = inner.next_type().map(|t| t.skip_mods_and_typedefs());
+            match deref
+                .as_ref()
+                .and_then(|d| d.name())
+                .and_then(|n| n.to_str())
+            {
+                Some(name)
+                    if (deref.as_ref().map(|d| d.kind()) == Some(BtfKind::Struct)
+                        || deref.as_ref().map(|d| d.kind()) == Some(BtfKind::Union)) =>
+                {
+                    format!("struct {name} *")
+                }
+                _ => "unsigned long long".to_string(),
+            }
+        }
+        _ => "unsigned long long".to_string(),
+    }
+}
+
+/// Generate a C struct definition from BTF for a BPF-local struct.
+fn generate_struct_def(
+    btf: &libbpf_rs::btf::Btf<'_>,
+    vmlinux: &libbpf_rs::btf::Btf<'_>,
+    type_id: libbpf_rs::btf::TypeId,
+) -> Option<(String, String)> {
+    use libbpf_rs::btf::{BtfKind, BtfType};
+
+    let t = match btf.type_by_id::<BtfType<'_>>(type_id) {
+        Some(t) => t.skip_mods_and_typedefs(),
+        None => return None,
+    };
+    let inner = if t.kind() == BtfKind::Ptr {
+        t.next_type()?.skip_mods_and_typedefs()
+    } else {
+        t
+    };
+    if inner.kind() != BtfKind::Struct && inner.kind() != BtfKind::Union {
+        return None;
+    }
+    let sname = inner.name()?.to_str()?.to_string();
+
+    // Skip vmlinux types — bpftrace already knows them
+    let vmlinux_check: Option<libbpf_rs::btf::types::Struct<'_>> = vmlinux.type_by_name(&sname);
+    if vmlinux_check.is_some() {
+        return None;
+    }
+
+    let composite: libbpf_rs::btf::types::Struct<'_> = inner.try_into().ok()?;
+    let keyword = if inner.kind() == BtfKind::Union {
+        "union"
+    } else {
+        "struct"
+    };
+    let mut def = format!("{keyword} {sname} {{\n");
+    for member in composite.iter() {
+        let fname = match member.name.and_then(|n| n.to_str()) {
+            Some(n) if !n.is_empty() => n,
+            _ => continue,
+        };
+        // Only emit scalar/pointer/enum fields — skip nested
+        // structs, unions, arrays (they need size info we don't have)
+        let member_type = match btf.type_by_id::<BtfType<'_>>(member.ty) {
+            Some(t) => t.skip_mods_and_typedefs(),
+            None => continue,
+        };
+        match member_type.kind() {
+            BtfKind::Int | BtfKind::Enum | BtfKind::Enum64 | BtfKind::Ptr => {
+                let ctype = btf_type_to_c(btf, member.ty);
+                def.push_str(&format!("    {ctype} {fname};\n"));
+            }
+            _ => {
+                // Pad with placeholder to maintain rough offset ordering
+                def.push_str(&format!("    unsigned long long _pad_{fname};\n"));
+            }
+        }
+    }
+    def.push_str("};\n");
+    Some((sname, def))
+}
+
+/// Walk a struct's fields via BTF, returning (field_name, bpftrace_access)
+/// pairs for scalar and pointer members (one level deep).
+fn discover_struct_fields(
+    btf: &libbpf_rs::btf::Btf<'_>,
+    type_id: libbpf_rs::btf::TypeId,
+) -> Vec<(String, String)> {
+    use libbpf_rs::btf::{BtfKind, BtfType};
+
+    let t = match btf.type_by_id::<BtfType<'_>>(type_id) {
+        Some(t) => t.skip_mods_and_typedefs(),
+        None => return Vec::new(),
+    };
+    let inner = if t.kind() == BtfKind::Ptr {
+        match t.next_type() {
+            Some(t) => t.skip_mods_and_typedefs(),
+            None => return Vec::new(),
+        }
+    } else {
+        t
+    };
+
+    if inner.kind() != BtfKind::Struct && inner.kind() != BtfKind::Union {
+        return Vec::new();
+    }
+
+    let composite: libbpf_rs::btf::types::Struct<'_> = match inner.try_into() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut fields = Vec::new();
+    for member in composite.iter().take(8) {
+        let fname = match member.name.and_then(|n| n.to_str()) {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => continue,
+        };
+
+        let member_type = match btf.type_by_id::<BtfType<'_>>(member.ty) {
+            Some(t) => t.skip_mods_and_typedefs(),
+            None => continue,
+        };
+
+        match member_type.kind() {
+            BtfKind::Int | BtfKind::Enum | BtfKind::Enum64 => {
+                fields.push((fname.clone(), format!("->{fname}")));
+            }
+            BtfKind::Ptr => {
+                // Follow pointer to vmlinux structs we know how to read
+                let deref = member_type.next_type().map(|t| t.skip_mods_and_typedefs());
+                let pointed_name = deref
+                    .as_ref()
+                    .and_then(|t| t.name())
+                    .and_then(|n| n.to_str());
+                match pointed_name {
+                    Some("cpumask") => {
+                        fields.push((fname.clone(), format!("->{fname}->bits[0]")));
+                    }
+                    Some("bpf_cpumask") => {
+                        // bpf_cpumask wraps cpumask_t: .cpumask.bits[0]
+                        fields.push((fname.clone(), format!("->{fname}->cpumask.bits[0]")));
+                    }
+                    _ => {} // skip unknown pointers
+                }
+            }
+            _ => {}
+        }
+    }
+    fields
+}
+
+/// Parse BTF from loaded BPF programs for function signatures.
+/// Uses libbpf-rs to load BTF directly from the kernel by prog_id.
+/// Returns (functions, struct_definitions) where struct_definitions
+/// are C definitions for BPF-local structs that bpftrace doesn't know.
+fn parse_bpf_btf_functions(
+    func_names: &[(&str, u32)], // (func_name, prog_id)
+) -> (Vec<BtfFunc>, Vec<String>) {
+    use libbpf_rs::btf;
+
+    // Group functions by prog_id to avoid redundant BTF loads
+    let mut by_prog: std::collections::HashMap<u32, Vec<&str>> = std::collections::HashMap::new();
+    for (name, pid) in func_names {
+        by_prog.entry(*pid).or_default().push(name);
+    }
+
+    // Load vmlinux BTF to distinguish kernel types from BPF-local types
+    let vmlinux = match btf::Btf::from_vmlinux() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(%e, "bpf_btf: failed to load vmlinux BTF");
+            return (Vec::new(), Vec::new());
+        }
+    };
+
+    // Resolve a type to its underlying struct name, following
+    // Ptr/Const/Volatile/Typedef chains.
+    let resolve_struct_name = |b: &btf::Btf<'_>, type_id: btf::TypeId| -> Option<String> {
+        let t = b.type_by_id::<btf::BtfType<'_>>(type_id)?;
+        let inner = t.skip_mods_and_typedefs();
+        // Follow pointer
+        let deref = if inner.kind() == btf::BtfKind::Ptr {
+            inner.next_type()?.skip_mods_and_typedefs()
+        } else {
+            inner
+        };
+        if deref.kind() == btf::BtfKind::Struct || deref.kind() == btf::BtfKind::Union {
+            let name = deref.name()?;
+            Some(name.to_str()?.to_string())
+        } else {
+            None
+        }
+    };
+
+    let mut results = Vec::new();
+    let mut struct_defs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    for (prog_id, names) in &by_prog {
+        let btf = match btf::Btf::from_prog_id(*prog_id) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::debug!(prog_id, %e, "bpf_btf: failed to load BTF from prog");
+                continue;
+            }
+        };
+
+        // Build func_name -> source_loc from BTF line_info
+        let mut source_locs: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        {
+            let fd = unsafe { libbpf_sys::bpf_prog_get_fd_by_id(*prog_id) };
+            if fd >= 0 {
+                // First call: get counts
+                let mut info = libbpf_sys::bpf_prog_info::default();
+                let mut info_len = std::mem::size_of::<libbpf_sys::bpf_prog_info>() as u32;
+                let ret = unsafe {
+                    libbpf_sys::bpf_obj_get_info_by_fd(
+                        fd,
+                        &mut info as *mut _ as *mut _,
+                        &mut info_len,
+                    )
+                };
+                tracing::debug!(
+                    prog_id,
+                    ret,
+                    nr_func_info = info.nr_func_info,
+                    nr_line_info = info.nr_line_info,
+                    "bpf_btf: prog_info query"
+                );
+                if ret == 0 && info.nr_func_info > 0 && info.nr_line_info > 0 {
+                    let nr_fi = info.nr_func_info as usize;
+                    let nr_li = info.nr_line_info as usize;
+                    let fi_rec = info.func_info_rec_size as usize;
+                    let li_rec = info.line_info_rec_size as usize;
+                    let mut fi_buf = vec![0u8; nr_fi * fi_rec];
+                    let mut li_buf = vec![0u8; nr_li * li_rec];
+
+                    // Fresh struct — only set the fields we want.
+                    // Reusing the first call's struct fails because the
+                    // kernel sees non-zero lengths for xlated/jited with
+                    // NULL buffer pointers.
+                    let mut info2 = libbpf_sys::bpf_prog_info::default();
+                    info2.nr_func_info = nr_fi as u32;
+                    info2.func_info_rec_size = fi_rec as u32;
+                    info2.func_info = fi_buf.as_mut_ptr() as u64;
+                    info2.nr_line_info = nr_li as u32;
+                    info2.line_info_rec_size = li_rec as u32;
+                    info2.line_info = li_buf.as_mut_ptr() as u64;
+                    let mut info2_len = std::mem::size_of::<libbpf_sys::bpf_prog_info>() as u32;
+                    let ret = unsafe {
+                        libbpf_sys::bpf_obj_get_info_by_fd(
+                            fd,
+                            &mut info2 as *mut _ as *mut _,
+                            &mut info2_len,
+                        )
+                    };
+                    if ret == 0 {
+                        let btf_ptr = btf.as_libbpf_object().as_ptr();
+                        for i in 0..nr_fi {
+                            let fi = unsafe {
+                                &*(fi_buf.as_ptr().add(i * fi_rec)
+                                    as *const libbpf_sys::bpf_func_info)
+                            };
+                            // Resolve func name from BTF
+                            let t = unsafe { libbpf_sys::btf__type_by_id(btf_ptr, fi.type_id) };
+                            if t.is_null() {
+                                continue;
+                            }
+                            let name_ptr =
+                                unsafe { libbpf_sys::btf__name_by_offset(btf_ptr, (*t).name_off) };
+                            if name_ptr.is_null() {
+                                continue;
+                            }
+                            let fname = unsafe { std::ffi::CStr::from_ptr(name_ptr) }
+                                .to_str()
+                                .unwrap_or("")
+                                .to_string();
+                            if fname.is_empty() {
+                                continue;
+                            }
+
+                            // Find first line_info at or after this func's insn_off
+                            let mut best_li: Option<&libbpf_sys::bpf_line_info> = None;
+                            for j in 0..nr_li {
+                                let li = unsafe {
+                                    &*(li_buf.as_ptr().add(j * li_rec)
+                                        as *const libbpf_sys::bpf_line_info)
+                                };
+                                if li.insn_off >= fi.insn_off {
+                                    if best_li.map_or(true, |b| li.insn_off < b.insn_off) {
+                                        best_li = Some(li);
+                                    }
+                                }
+                            }
+                            if let Some(li) = best_li {
+                                let file_ptr = unsafe {
+                                    libbpf_sys::btf__name_by_offset(btf_ptr, li.file_name_off)
+                                };
+                                if !file_ptr.is_null() {
+                                    let file = unsafe { std::ffi::CStr::from_ptr(file_ptr) }
+                                        .to_str()
+                                        .unwrap_or("");
+                                    if !file.is_empty() {
+                                        let file = file.rsplit('/').next().unwrap_or(file);
+                                        let line = li.line_col >> 10;
+                                        tracing::debug!(
+                                            func = %fname, file, line,
+                                            "bpf_btf: resolved source loc"
+                                        );
+                                        source_locs.insert(fname, format!("{file}:{line}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                unsafe { libc::close(fd) };
+            }
+        }
+
+        for func_name in names {
+            let func: Option<btf::types::Func<'_>> = btf.type_by_name(func_name);
+            let func = match func {
+                Some(f) => f,
+                None => continue,
+            };
+
+            // Func -> FuncProto via next_type on the underlying BtfType
+            let func_bt: btf::BtfType<'_> = (*func).into();
+            let proto_type = match func_bt.next_type() {
+                Some(t) if t.kind() == btf::BtfKind::FuncProto => t,
+                _ => continue,
+            };
+            let proto: btf::types::FuncProto<'_> = match proto_type.try_into() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let mut params = Vec::new();
+            for param in proto.iter() {
+                let name = param
+                    .name
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let all_struct_name = resolve_struct_name(&btf, param.ty);
+                let known_struct = all_struct_name
+                    .as_ref()
+                    .filter(|n| STRUCT_FIELDS.iter().any(|(s, _)| *s == n.as_str()))
+                    .cloned();
+                let is_ptr = btf
+                    .type_by_id::<btf::BtfType<'_>>(param.ty)
+                    .map(|t| t.skip_mods_and_typedefs().kind() == btf::BtfKind::Ptr)
+                    .unwrap_or(false);
+
+                // For unknown struct pointers: auto-discover fields
+                // and generate C struct definitions for BPF-local types
+                let (auto_fields, type_name) = if is_ptr && known_struct.is_none() {
+                    if let Some(ref sname) = all_struct_name {
+                        // Generate struct def if BPF-local
+                        if !struct_defs.contains_key(sname) {
+                            if let Some((name, def)) = generate_struct_def(&btf, &vmlinux, param.ty)
+                            {
+                                struct_defs.insert(name, def);
+                            }
+                        }
+                        let fields = discover_struct_fields(&btf, param.ty);
+                        (fields, Some(sname.clone()))
+                    } else {
+                        (Vec::new(), None)
+                    }
+                } else {
+                    (
+                        Vec::new(),
+                        all_struct_name.filter(|_| known_struct.is_none()),
+                    )
+                };
+
+                params.push(BtfParam {
+                    name,
+                    struct_name: known_struct,
+                    is_ptr,
+                    auto_fields,
+                    type_name,
+                });
+            }
+
+            results.push(BtfFunc {
+                name: func_name.to_string(),
+                params,
+                source_loc: source_locs.get(*func_name).cloned(),
+            });
+        }
+    }
+
+    tracing::debug!(
+        n = results.len(),
+        struct_defs = struct_defs.len(),
+        "bpf_btf: parsed BPF function signatures"
+    );
+    (results, struct_defs.into_values().collect())
+}
+
+enum ProbeMode {
+    Kprobe,
+    BpfFentry,
+}
+
 /// Generate bpftrace probe code for a function using BTF info.
-fn generate_btf_probe(func: &BtfFunc, safe: &str) -> (String, String) {
+/// In Kprobe mode: uses arg0..argN positional access, maps keyed by tid.
+/// In BpfFentry mode: uses args.{name} access, maps keyed by task_struct pointer.
+fn generate_btf_probe(func: &BtfFunc, safe: &str, mode: ProbeMode) -> (String, String) {
     let mut capture = String::new();
     let mut dump = String::new();
 
     let mut field_keys: Vec<String> = Vec::new();
 
-    // x86_64 kprobes only support arg0-arg5
+    let is_bpf = matches!(mode, ProbeMode::BpfFentry);
+    // Kprobes: arg0-arg5 positional. BPF fentry: args.{name} named access.
     let max_args = func.params.len().min(6);
+
+    // BPF fentry: find first task_struct* param for map keying
+    let task_param_idx = if is_bpf {
+        func.params
+            .iter()
+            .position(|p| p.struct_name.as_deref() == Some("task_struct"))
+    } else {
+        None
+    };
+
+    if is_bpf {
+        if let Some(idx) = task_param_idx {
+            let pname = &func.params[idx].name;
+            capture.push_str(&format!(
+                "    $tptr = (uint64)((struct task_struct *)args.{pname});\n"
+            ));
+        } else {
+            capture.push_str("    $tptr = (uint64)curtask;\n");
+        }
+        // Save tid->tptr mapping for trigger lookup
+        capture.push_str("    @stt_tptr[tid] = $tptr;\n");
+    }
+
+    let map_key = if is_bpf { "$tptr" } else { "tid" };
+
     for (i, param) in func.params[..max_args].iter().enumerate() {
+        let arg_access = if is_bpf {
+            format!("args.{}", param.name)
+        } else {
+            format!("arg{i}")
+        };
+
+        // Prefix encodes param name and type for grouped output.
+        // Format: "name:type." → postprocessing splits on ':' and '.'
         if let Some(ref sname) = param.struct_name {
-            // Known struct — dereference useful fields
+            let prefix = format!("{}:{}*.", param.name, sname);
             if let Some((_, fields)) = STRUCT_FIELDS.iter().find(|(s, _)| *s == sname) {
                 let var = format!("$btf_{}", param.name);
-                capture.push_str(&format!("    {var} = (struct {sname} *)arg{i};\n"));
+                capture.push_str(&format!("    {var} = (struct {sname} *){arg_access};\n"));
                 for (field_access, key) in *fields {
-                    let map_key = format!("{safe}_{}", key);
+                    let mk = format!("{safe}_{}", key);
                     capture.push_str(&format!(
-                        "    @fn_{map_key}[tid] = (uint64){var}{field_access};\n"
+                        "    @fn_{mk}[{map_key}] = (uint64){var}{field_access};\n"
                     ));
-                    field_keys.push(format!("{key}=%lu",));
+                    field_keys.push(format!("{prefix}{key}=%lu"));
                 }
             }
         } else if !param.is_ptr {
-            // Scalar — save raw with param name
-            let map_key = format!("{safe}_{}", param.name);
-            capture.push_str(&format!("    @fn_{map_key}[tid] = (uint64)arg{i};\n"));
-            field_keys.push(format!("{}=%lu", param.name));
+            let prefix = format!("{}:val.", param.name);
+            let mk = format!("{safe}_{}", param.name);
+            capture.push_str(&format!(
+                "    @fn_{mk}[{map_key}] = (uint64){arg_access};\n"
+            ));
+            field_keys.push(format!("{prefix}{}=%lu", param.name));
+        } else if !param.auto_fields.is_empty() {
+            let tname = param.type_name.as_deref().unwrap_or("void");
+            let prefix = format!("{}:{}*.", param.name, tname);
+            let var = format!("$auto_{}", param.name);
+            capture.push_str(&format!("    {var} = (struct {tname} *){arg_access};\n"));
+            for (fname, faccess) in &param.auto_fields {
+                let mk = format!("{safe}_{fname}");
+                capture.push_str(&format!(
+                    "    @fn_{mk}[{map_key}] = (uint64){var}{faccess};\n"
+                ));
+                field_keys.push(format!("{prefix}{fname}=%lu"));
+            }
         } else {
-            // Unknown pointer — save raw
-            let map_key = format!("{safe}_arg{i}");
-            capture.push_str(&format!("    @fn_{map_key}[tid] = (uint64)arg{i};\n"));
-            field_keys.push(format!("arg{i}=%lu"));
+            // Raw pointer with no struct info — suppress (zero signal)
         }
     }
 
@@ -712,21 +1219,32 @@ fn generate_btf_probe(func: &BtfFunc, safe: &str) -> (String, String) {
         let args: Vec<String> = func.params[..max_args]
             .iter()
             .enumerate()
-            .map(|(i, param)| {
+            .filter_map(|(_i, param)| {
                 if let Some(ref sname) = param.struct_name {
                     if let Some((_, fields)) = STRUCT_FIELDS.iter().find(|(s, _)| *s == sname) {
-                        fields
-                            .iter()
-                            .map(|(_, key)| format!("@fn_{safe}_{key}[tid]"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        Some(
+                            fields
+                                .iter()
+                                .map(|(_, key)| format!("@fn_{safe}_{key}[{map_key}]"))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        )
                     } else {
-                        format!("@fn_{safe}_arg{i}[tid]")
+                        None
                     }
                 } else if !param.is_ptr {
-                    format!("@fn_{safe}_{}[tid]", param.name)
+                    Some(format!("@fn_{safe}_{}[{map_key}]", param.name))
+                } else if !param.auto_fields.is_empty() {
+                    Some(
+                        param
+                            .auto_fields
+                            .iter()
+                            .map(|(fname, _)| format!("@fn_{safe}_{fname}[{map_key}]"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )
                 } else {
-                    format!("@fn_{safe}_arg{i}[tid]")
+                    None // suppressed raw pointer
                 }
             })
             .collect();
@@ -789,6 +1307,7 @@ fn discover_bpf_symbols() -> Vec<StackFunction> {
                 raw_name: format!("bpf_prog_{id}_{func}"),
                 display_name: func.to_string(),
                 is_bpf: true,
+                bpf_prog_id: id.parse().ok(),
             })
         })
         .collect();
@@ -835,7 +1354,7 @@ fn filter_traceable(functions: Vec<StackFunction>) -> Vec<StackFunction> {
 /// stack, saves arguments per-tid, and dumps on scx_exit.
 /// Uses BTF for type-aware argument access when available.
 fn generate_probe_script(functions: &[StackFunction]) -> String {
-    // Try to get BTF signatures for all kernel functions
+    // BTF signatures for kernel functions
     let kernel_names: Vec<&str> = functions
         .iter()
         .filter(|f| !f.is_bpf)
@@ -843,32 +1362,54 @@ fn generate_probe_script(functions: &[StackFunction]) -> String {
         .collect();
     let btf_funcs = parse_btf_functions(&kernel_names, None);
 
-    let mut script = String::new();
-    script.push_str("/* Auto-generated by stt --probe-stack (BTF-aware) */\n\n");
+    // Resolve prog_ids for BPF functions that don't have them
+    // (e.g. from crash stack extraction which doesn't know prog_id).
+    let discovered = discover_bpf_symbols();
+    let bpf_btf_args: Vec<(&str, u32)> = functions
+        .iter()
+        .filter(|f| f.is_bpf)
+        .filter_map(|f| {
+            let pid = f.bpf_prog_id.or_else(|| {
+                discovered
+                    .iter()
+                    .find(|d| d.display_name == f.display_name)
+                    .and_then(|d| d.bpf_prog_id)
+            })?;
+            Some((f.display_name.as_str(), pid))
+        })
+        .collect();
+    let (bpf_btf_funcs, bpf_struct_defs) = parse_bpf_btf_functions(&bpf_btf_args);
 
-    // If this chunk has BPF probes, add a bridge kprobe on do_enqueue_task.
-    // It runs on the same tid right before BPF sched_ext ops and captures
-    // the real task_struct args that fentry:bpf can't read directly.
+    let mut script = String::new();
+    script.push_str("/* Auto-generated by stt --probe-stack (BTF-aware, direct args) */\n\n");
+
+    // Emit C struct definitions for BPF-local types so bpftrace can
+    // dereference fields on scheduler-private structs.
+    for def in &bpf_struct_defs {
+        script.push_str(def);
+        script.push('\n');
+    }
+
     let has_bpf_probes = functions.iter().any(|f| f.is_bpf);
     if has_bpf_probes {
+        // Kernel caller bridges for ENTER/EXIT state comparison.
+        // These show what the kernel saw before and after the BPF op ran.
         let bridge_fields = [
             ("pid", "$p->pid"),
-            ("cpus", "$p->cpus_ptr->bits[0]"),
-            ("dsq", "$p->scx.ddsp_dsq_id"),
-            ("enqflags", "$p->scx.ddsp_enq_flags"),
+            ("cpus_ptr", "$p->cpus_ptr->bits[0]"),
+            ("dsq_id", "$p->scx.ddsp_dsq_id"),
+            ("enq_flags", "$p->scx.ddsp_enq_flags"),
             ("slice", "$p->scx.slice"),
             ("vtime", "$p->scx.dsq_vtime"),
             ("weight", "(uint64)$p->scx.weight"),
-            ("sticky", "(uint64)$p->scx.sticky_cpu"),
-            ("flags", "(uint64)$p->scx.flags"),
+            ("sticky_cpu", "(uint64)$p->scx.sticky_cpu"),
+            ("scx_flags", "(uint64)$p->scx.flags"),
         ];
 
-        // Each BPF op has a kernel caller. Bridge from that caller.
-        // Maps: BPF op short name → (kernel caller, task arg index)
         let op_callers: &[(&str, &str, usize)] = &[
             ("select_cpu", "do_enqueue_task", 1),
             ("enqueue", "do_enqueue_task", 1),
-            ("dispatch", "balance_one", 0), // no task arg, rq only
+            ("dispatch", "balance_one", 0),
             ("running", "set_next_task_scx", 1),
             ("stopping", "put_prev_task_scx", 1),
             ("tick", "task_tick_scx", 1),
@@ -877,7 +1418,6 @@ fn generate_probe_script(functions: &[StackFunction]) -> String {
             ("enable", "scx_enable_task", 1),
         ];
 
-        // Find which kernel callers we need bridges for
         let mut needed_callers = std::collections::HashSet::new();
         for f in functions.iter().filter(|f| f.is_bpf) {
             for (op, caller, _) in op_callers {
@@ -888,73 +1428,46 @@ fn generate_probe_script(functions: &[StackFunction]) -> String {
             }
         }
 
-        // Generate bridge kprobes for each needed kernel caller.
-        // All maps keyed by task_struct pointer (unique per task).
         for (op, caller, task_arg) in op_callers {
             if !needed_callers.contains(caller) {
                 continue;
             }
-            needed_callers.remove(caller); // only emit once per caller
+            needed_callers.remove(caller);
             if *task_arg == 0 && *op == "dispatch" {
                 continue;
             }
-            // Entry: capture state, save pointer for kretprobe + subprog bridge
+            // Entry bridge: kernel-side state before BPF op
             script.push_str(&format!("kprobe:{caller} {{\n"));
             script.push_str(&format!("    $p = (struct task_struct *)arg{task_arg};\n"));
             script.push_str("    $tptr = (uint64)$p;\n");
-            script.push_str("    @stt_task_ptr[tid] = $tptr;\n");
-            script.push_str(&format!("    @bpf_{caller}_seen[$tptr] = 1;\n"));
+            script.push_str("    @stt_tptr[tid] = $tptr;\n");
             script.push_str(&format!("    @bpf_{caller}_ts[$tptr] = nsecs;\n"));
             for (name, expr) in &bridge_fields {
                 script.push_str(&format!("    @bpf_{caller}_{name}[$tptr] = {expr};\n"));
             }
             script.push_str("}\n\n");
-
-            // Exit: read pointer back, capture post-BPF state
-            script.push_str(&format!("kretprobe:{caller} {{\n"));
-            script.push_str("    $tptr = @stt_task_ptr[tid];\n");
-            script.push_str(&format!("    $p = (struct task_struct *)$tptr;\n"));
-            script.push_str(&format!("    @bpf_{caller}_exit_seen[$tptr] = 1;\n"));
-            script.push_str(&format!("    @bpf_{caller}_exit_ts[$tptr] = nsecs;\n"));
-            for (name, expr) in &bridge_fields {
-                script.push_str(&format!("    @bpf_{caller}_exit_{name}[$tptr] = {expr};\n"));
-            }
-            script.push_str("}\n\n");
-        }
-
-        // Capture crashed task pointer for bridge lookup
-        script.push_str("kprobe:task_can_run_on_remote_rq {\n");
-        script.push_str("    @stt_crashed_ptr[tid] = (uint64)arg1;\n");
-        script.push_str("}\n\n");
-
-        // Subprog bridge: ALL callers set @stt_task_ptr[tid] so subprogs
-        // can key by task pointer. Callers already handled above set it;
-        // add any missing ones.
-        let all_callers: &[(&str, usize)] = &[
-            ("do_enqueue_task", 1),
-            ("set_next_task_scx", 1),
-            ("put_prev_task_scx", 1),
-            ("task_tick_scx", 1),
-            ("set_cpus_allowed_scx", 1),
-            ("scx_enable_task", 1),
-        ];
-        // Every chunk needs its own @stt_task_ptr setter (maps aren't
-        // shared across bpftrace processes). Emit all callers unconditionally.
-        for (caller, arg_idx) in all_callers {
-            script.push_str(&format!("kprobe:{caller} {{\n"));
-            script.push_str(&format!(
-                "    @stt_task_ptr[tid] = (uint64)((struct task_struct *)arg{arg_idx});\n"
-            ));
-            script.push_str("}\n\n");
         }
     }
 
-    // Per-function probes.
-    let mut probe_infos: Vec<(String, String, String, bool)> = Vec::new(); // (safe, label, dump_code, is_bpf)
+    // BPF op -> kernel caller mapping for bridge ENTER/EXIT dump
+    let op_caller_map: &[(&str, &str)] = &[
+        ("select_cpu", "do_enqueue_task"),
+        ("enqueue", "do_enqueue_task"),
+        ("dispatch", "balance_one"),
+        ("running", "set_next_task_scx"),
+        ("stopping", "put_prev_task_scx"),
+        ("tick", "task_tick_scx"),
+        ("set_cpumask", "set_cpus_allowed_scx"),
+        ("init_task", "scx_enable_task"),
+        ("enable", "scx_enable_task"),
+    ];
+
+    // Per-function probes
+    // (safe_name, label, dump_code, is_bpf, bridge_caller, bpf_source_loc)
+    let mut probe_infos: Vec<(String, String, String, bool, Option<String>, Option<String>)> =
+        Vec::new();
 
     for f in functions {
-        // BPF functions: use fentry:bpf:prog_name syntax.
-        // kprobe/kfunc don't work on BPF JIT code.
         let probe = if f.is_bpf {
             format!("fentry:bpf:{}", f.display_name)
         } else {
@@ -967,83 +1480,32 @@ fn generate_probe_script(functions: &[StackFunction]) -> String {
 
         script.push_str(&format!("{probe} {{\n"));
 
-        // BPF probes: fentry:bpf can't read args directly (kernel limitation).
-        // Bridge: read data from kprobe maps populated by do_enqueue_task
-        // which runs on the same tid right before the BPF function.
-        let dump_code = if f.is_bpf {
-            // Key by task pointer from bridge (unique per task)
-            script.push_str("    $tptr = (uint64)@stt_task_ptr[tid];\n");
-            script.push_str(&format!("    @fn_{safe}_fired[$tptr] = 1;\n"));
-            script.push_str(&format!("    @fn_{safe}_ts[$tptr] = nsecs;\n"));
-
-            // Find the kernel caller for this BPF op
-            let op_callers: &[(&str, &str)] = &[
-                ("select_cpu", "do_enqueue_task"),
-                ("enqueue", "do_enqueue_task"),
-                ("dispatch", "balance_one"),
-                ("running", "set_next_task_scx"),
-                ("stopping", "put_prev_task_scx"),
-                ("tick", "task_tick_scx"),
-                ("set_cpumask", "set_cpus_allowed_scx"),
-                ("init_task", "scx_enable_task"),
-                ("enable", "scx_enable_task"),
-            ];
-            let caller = op_callers
+        let (dump_code, bridge_caller, bpf_src) = if f.is_bpf {
+            // Direct args access via BPF program BTF
+            let btf = bpf_btf_funcs.iter().find(|b| b.name == f.display_name);
+            let src = btf.and_then(|b| b.source_loc.clone());
+            let dump = if let Some(btf_func) = btf {
+                let (capture, d) = generate_btf_probe(btf_func, &safe, ProbeMode::BpfFentry);
+                script.push_str(&capture);
+                d
+            } else {
+                // No BTF — still need $tptr for map keying
+                script.push_str("    $tptr = (uint64)curtask;\n");
+                script.push_str("    @stt_tptr[tid] = $tptr;\n");
+                String::new()
+            };
+            let caller = op_caller_map
                 .iter()
                 .find(|(op, _)| f.display_name.contains(op))
-                .map(|(_, c)| *c);
-
-            let fields = [
-                "pid", "cpus", "dsq", "enqflags", "slice", "vtime", "weight", "sticky", "flags",
-            ];
-
-            let mut d = String::new();
-            if let Some(caller) = caller {
-                let prefix = format!("bpf_{caller}");
-                // ENTER — from kprobe on kernel caller
-                let mut fmt_parts = vec!["seen=%lu".to_string(), "ts=%lu".to_string()];
-                let mut arg_parts = vec![
-                    format!("@{prefix}_seen[$crashed_ptr]"),
-                    format!("@{prefix}_ts[$crashed_ptr]"),
-                ];
-                for field in &fields {
-                    fmt_parts.push(format!("{field}=%lu"));
-                    arg_parts.push(format!("@{prefix}_{field}[$crashed_ptr]"));
-                }
-                d.push_str(&format!(
-                    "    printf(\"  STT_BPF_ENTER {}\\n\", {});\n",
-                    fmt_parts.join(" "),
-                    arg_parts.join(", ")
-                ));
-                // EXIT — from kretprobe on kernel caller
-                let mut exit_fmt = vec!["seen=%lu".to_string(), "ts=%lu".to_string()];
-                let mut exit_args = vec![
-                    format!("@{prefix}_exit_seen[$crashed_ptr]"),
-                    format!("@{prefix}_exit_ts[$crashed_ptr]"),
-                ];
-                for field in &fields {
-                    exit_fmt.push(format!("{field}=%lu"));
-                    exit_args.push(format!("@{prefix}_exit_{field}[$crashed_ptr]"));
-                }
-                d.push_str(&format!(
-                    "    printf(\"  STT_BPF_EXIT {}\\n\", {});\n",
-                    exit_fmt.join(" "),
-                    exit_args.join(", ")
-                ));
-            } else {
-                // Sub-function: no kernel caller bridge, just show timing
-                d.push_str(&format!(
-                    "    printf(\"  STT_BPF_ENTER seen=%lu ts=%lu\\n\", @fn_{safe}_fired[$crashed_ptr], @fn_{safe}_ts[$crashed_ptr]);\n"
-                ));
-            }
-            d
+                .map(|(_, c)| c.to_string());
+            (dump, caller, src)
         } else {
-            // Kernel function: try BTF, fall back to raw args, keyed by tid
+            // Kernel function: BTF or raw args, keyed by tid
             let btf = btf_funcs.iter().find(|b| b.name == f.raw_name);
-            if let Some(btf_func) = btf {
-                let (capture, dump) = generate_btf_probe(btf_func, &safe);
+            let dump = if let Some(btf_func) = btf {
+                let (capture, d) = generate_btf_probe(btf_func, &safe, ProbeMode::Kprobe);
                 script.push_str(&capture);
-                dump
+                d
             } else {
                 for i in 0..4 {
                     script.push_str(&format!("    @fn_{safe}_arg{i}[tid] = (uint64)arg{i};\n"));
@@ -1057,13 +1519,15 @@ fn generate_probe_script(functions: &[StackFunction]) -> String {
                     "           @fn_{safe}_arg2[tid], @fn_{safe}_arg3[tid]);\n"
                 ));
                 d
-            }
+            };
+            (dump, None, None)
         };
 
-        script.push_str(&format!("    @fn_{safe}_ts[tid] = nsecs;\n"));
+        let ts_key = if f.is_bpf { "$tptr" } else { "tid" };
+        script.push_str(&format!("    @fn_{safe}_ts[{ts_key}] = nsecs;\n"));
         script.push_str("}\n\n");
 
-        probe_infos.push((safe, label, dump_code, f.is_bpf));
+        probe_infos.push((safe, label, dump_code, f.is_bpf, bridge_caller, bpf_src));
     }
 
     // Trigger: dump on scx_exit
@@ -1071,18 +1535,63 @@ fn generate_probe_script(functions: &[StackFunction]) -> String {
     script.push_str("    printf(\"VIOLATION: scx_exit fired (auto-probe)\\n\");\n");
     script.push_str("    printf(\"trigger_tid=%d trigger_ts=%lu\\n\", tid, nsecs);\n\n");
 
-    // Get crashed task's pointer for BPF bridge lookup.
+    // Recover task pointer for BPF map lookups
     if has_bpf_probes {
-        script.push_str("    $crashed_ptr = @stt_crashed_ptr[tid];\n");
+        script.push_str("    $tptr = @stt_tptr[tid];\n\n");
     }
 
-    for (safe, label, dump_code, _is_bpf) in &probe_infos {
-        script.push_str(&format!("    printf(\"--- {label} ---\\n\");\n"));
-        let key = "tid"; // all probes now keyed by tid
+    let bridge_field_names = [
+        "pid",
+        "cpus_ptr",
+        "dsq_id",
+        "enq_flags",
+        "slice",
+        "vtime",
+        "weight",
+        "sticky_cpu",
+        "scx_flags",
+    ];
+
+    for (safe, label, dump_code, is_bpf, bridge_caller, bpf_src) in &probe_infos {
+        let src_suffix = bpf_src
+            .as_ref()
+            .map(|s| format!(" @{s}"))
+            .unwrap_or_default();
+        script.push_str(&format!(
+            "    printf(\"--- {label}{src_suffix} ---\\n\");\n"
+        ));
+        let key = if *is_bpf { "$tptr" } else { "tid" };
         script.push_str(&format!(
             "    printf(\"  ts=%lu\\n\", @fn_{safe}_ts[{key}]);\n"
         ));
+        // BPF function's own args (from direct BTF access)
         script.push_str(dump_code);
+        // Bridge ENTER/EXIT: kernel-side state before and after BPF op
+        if let Some(caller) = bridge_caller {
+            let prefix = format!("bpf_{caller}");
+            // Look up the real task_struct param name from kernel BTF
+            let pname = btf_funcs
+                .iter()
+                .find(|f| f.name == *caller)
+                .and_then(|f| {
+                    f.params
+                        .iter()
+                        .find(|p| p.struct_name.as_deref() == Some("task_struct"))
+                        .map(|p| p.name.as_str())
+                })
+                .unwrap_or("p");
+            let mut fmt = Vec::new();
+            let mut args = Vec::new();
+            for field in &bridge_field_names {
+                fmt.push(format!("{pname}:task_struct*.{field}=%lu"));
+                args.push(format!("@{prefix}_{field}[$tptr]"));
+            }
+            script.push_str(&format!(
+                "    printf(\"  {}\\n\", {});\n",
+                fmt.join(" "),
+                args.join(", ")
+            ));
+        }
         script.push('\n');
     }
 
@@ -1187,7 +1696,7 @@ fn decode_enq_flags(flags: u64) -> String {
         parts.push("NESTED");
     }
     if parts.is_empty() {
-        "0".into()
+        "NONE".into()
     } else {
         parts.join("|")
     }
@@ -1220,7 +1729,7 @@ fn decode_kick_flags(flags: u64) -> String {
         parts.push("WAIT");
     }
     if parts.is_empty() {
-        "0".into()
+        "NONE".into()
     } else {
         parts.join("|")
     }
@@ -1472,7 +1981,22 @@ fn postprocess_autoprobe(
             }
             let func = trimmed.trim_start_matches("--- ").trim_end_matches(" ---");
             let is_bpf = func.contains("(BPF)");
-            let func_name = func.split(" (").next().unwrap_or(func).trim();
+            // Extract @file:line from section header if present
+            let (func_no_src, bpf_src) = if let Some((f, src)) = func.split_once(" @") {
+                (f, Some(src.to_string()))
+            } else {
+                (func, None)
+            };
+            let func_name = func_no_src.split(" (").next().unwrap_or(func_no_src).trim();
+            // Add BPF source loc to sym_map for uniform output
+            if let Some(src) = bpf_src {
+                if let Some((file, line)) = src.rsplit_once(':') {
+                    let line_num: u32 = line.parse().unwrap_or(0);
+                    if !sym_map.iter().any(|(n, _, _)| n == func_name) {
+                        sym_map.push((func_name.to_string(), file.to_string(), line_num));
+                    }
+                }
+            }
             current = Some(ProbeSection {
                 func_name: func_name.to_string(),
                 is_bpf,
@@ -1530,27 +2054,15 @@ fn postprocess_autoprobe(
     // Skip sections with ts=0 (function never called for this tid)
     sections.retain(|s| s.ts > 0);
 
-    // In brief mode, skip BPF sections where the bridge didn't fire
-    // for the crashed task (seen flag not set)
-    if !verbose {
-        sections.retain(|s| {
-            if s.is_bpf {
-                s.named_args.iter().any(|(k, v)| k == "seen" && v != "0")
-            } else {
-                true
-            }
-        });
-    }
     // Strip 'seen' from display — internal flag only
     for sec in &mut sections {
         sec.named_args.retain(|(k, _)| k != "seen");
     }
 
-    // Sort by timestamp — all maps are now keyed by task_struct pointer
-    // so timestamps are consistent for the crashed task.
+    // Unified timeline: all probes sorted chronologically.
+    // With direct args access, BPF subprog timestamps are now accurate.
     sections.sort_by_key(|s| s.ts);
 
-    // Build compact output: one line per function
     out.push_str("=== AUTO-PROBE: scx_exit fired ===\n\n");
 
     let max_name = sections
@@ -1558,90 +2070,108 @@ fn postprocess_autoprobe(
         .map(|s| s.func_name.len())
         .max()
         .unwrap_or(0);
+
+    // Max field name width for value column alignment
+    let max_field_w: usize = sections
+        .iter()
+        .flat_map(|s| s.named_args.iter())
+        .map(|(k, _)| {
+            let (_, field) = k.split_once('.').unwrap_or((k, k));
+            field.len()
+        })
+        .max()
+        .unwrap_or(0);
+
+    // Source location column: past widest value line
+    let max_val_w: usize = sections
+        .iter()
+        .flat_map(|s| s.named_args.iter())
+        .map(|(k, v)| {
+            let (_, field) = k.split_once('.').unwrap_or((k, k));
+            let decoded = decode_named_value(field, v);
+            6 + max_field_w + 2 + decoded.len()
+        })
+        .max()
+        .unwrap_or(0);
+    let loc_col = max_val_w.max(max_name + 4) + 4;
+
     for sec in &sections {
-        // Source location
         let loc = sym_map.iter().find(|(n, _, _)| n == &sec.func_name);
         let loc_str = loc.map(|(_, f, l)| format!("{f}:{l}")).unwrap_or_default();
 
-        // Format args. For BPF functions, detect entry=>exit transition
-        // by finding the first duplicate key.
-        let args_str = if !sec.named_args.is_empty() {
-            let mut seen = std::collections::HashSet::new();
-            let mut entry_parts = Vec::new();
-            let mut exit_parts = Vec::new();
-            let mut in_exit = false;
-            for (k, v) in &sec.named_args {
-                if sec.is_bpf && !in_exit && !seen.insert(k.as_str()) {
-                    in_exit = true;
-                }
-                let decoded = decode_named_value(k, v);
-                if in_exit {
-                    exit_parts.push(format!("{k}={decoded}"));
-                } else {
-                    entry_parts.push(format!("{k}={decoded}"));
-                }
-            }
-            entry_parts.join(" ")
-        } else {
-            // Raw args — use type:value inference
-            sec.raw_args
-                .iter()
-                .map(|v| format_raw_arg(*v))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-
-        if sec.is_bpf {
-            // Sub-functions have no bridge data (few named_args after seen/ts stripped).
-            // Indent them to show nesting under parent ops.
-            let is_subprog = sec.named_args.len() <= 1; // only ts or empty
-            let indent = if is_subprog { "    " } else { "" };
-
-            let mut seen = std::collections::HashSet::new();
-            let mut entry_args = Vec::new();
-            let mut exit_args = Vec::new();
-            let mut in_exit = false;
-            for (k, v) in &sec.named_args {
-                if !in_exit && !seen.insert(k.as_str()) {
-                    in_exit = true;
-                }
-                let decoded = decode_named_value(k, v);
-                if in_exit {
-                    exit_args.push(format!("{k}={decoded}"));
-                } else {
-                    entry_args.push(format!("{k}={decoded}"));
-                }
-            }
-
-            if is_subprog {
-                out.push_str(&format!(
-                    "  {indent}{:<nw$}\tSTT_BPF_SUBPROG\n",
-                    sec.func_name,
-                    nw = max_name
-                ));
-            } else {
-                out.push_str(&format!(
-                    "  {indent}{:<nw$}\tSTT_BPF_ENTER\t{}\n",
-                    sec.func_name,
-                    entry_args.join(" "),
-                    nw = max_name
-                ));
-                if !exit_args.is_empty() {
-                    out.push_str(&format!(
-                        "  {indent}{:<nw$}\tSTT_BPF_EXIT\t{}\n",
-                        sec.func_name,
-                        exit_args.join(" "),
-                        nw = max_name
-                    ));
-                }
-            }
+        if loc_str.is_empty() {
+            out.push_str(&format!("  {}\n", sec.func_name));
         } else {
             out.push_str(&format!(
-                "  {:<nw$}\tKERNEL\t{:<40}\t{args_str}\n",
+                "  {:<lw$}\t{loc_str}\n",
                 sec.func_name,
-                loc_str,
-                nw = max_name
+                lw = loc_col
             ));
+        }
+
+        if sec.named_args.is_empty() && sec.raw_args.is_empty() {
+            continue;
+        }
+
+        // Collect field names from struct params to deduplicate scalars
+        let struct_fields: std::collections::HashSet<&str> = sec
+            .named_args
+            .iter()
+            .filter_map(|(k, _)| {
+                let (pp, field) = k.split_once('.')?;
+                let (_, ptype) = pp.split_once(':')?;
+                if ptype != "val" {
+                    Some(field)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Group by param, one field per line
+        let mut groups: Vec<(String, Vec<(String, String)>)> = Vec::new(); // (label, [(field, decoded)])
+        for (k, v) in &sec.named_args {
+            let (param_part, field) = k.split_once('.').unwrap_or((k, k));
+            let (pname, ptype) = param_part.split_once(':').unwrap_or((param_part, ""));
+
+            if ptype == "val" && struct_fields.contains(field) {
+                continue;
+            }
+            let label = if ptype == "val" {
+                pname.to_string()
+            } else if ptype.ends_with('*') {
+                let base = &ptype[..ptype.len() - 1];
+                format!("{base} *{pname}")
+            } else {
+                format!("{ptype} {pname}")
+            };
+            let decoded = decode_named_value(field, v);
+            if let Some(grp) = groups.iter_mut().find(|(l, _)| l == &label) {
+                grp.1.push((field.to_string(), decoded));
+            } else {
+                groups.push((label, vec![(field.to_string(), decoded)]));
+            }
+        }
+
+        let fw = max_field_w;
+        for (label, fields) in &groups {
+            if fields.len() == 1 && !label.contains('*') {
+                // Scalar param: same indent as struct fields for alignment
+                let (_, val) = &fields[0];
+                out.push_str(&format!("      {:<fw$}  {val}\n", label));
+            } else {
+                // Struct param: type header, then one field per line
+                out.push_str(&format!("    {label}\n"));
+                for (fname, val) in fields {
+                    out.push_str(&format!("      {:<fw$}  {val}\n", fname));
+                }
+            }
+        }
+
+        if !sec.raw_args.is_empty() {
+            for v in &sec.raw_args {
+                out.push_str(&format!("      {}\n", format_raw_arg(*v)));
+            }
         }
     }
 
@@ -1668,7 +2198,7 @@ fn decode_named_value(key: &str, val: &str) -> String {
 
     match key {
         "dsq_id" | "dsq" => decode_dsq_id(as_u64()),
-        "cpus_ptr" | "cpus" => {
+        "cpus_ptr" | "cpus" | "cpumask" => {
             let v = as_u64();
             format!("0x{v:x}({cpus})", cpus = decode_cpumask(v))
         }
@@ -1694,14 +2224,10 @@ fn decode_named_value(key: &str, val: &str) -> String {
         "task" => val.to_string(),
         "slice" | "vtime" => {
             let v = as_u64();
-            if v == 0 {
-                "0".into()
-            } else {
-                format!("{v}")
-            }
+            format!("{v}")
         }
         "weight" => val.to_string(),
-        "flags" => {
+        "flags" | "scx_flags" => {
             let v = as_u64();
             let mut parts = Vec::new();
             if v & 1 != 0 {
@@ -1713,8 +2239,16 @@ fn decode_named_value(key: &str, val: &str) -> String {
             if v & 8 != 0 {
                 parts.push("DEQD_FOR_SLEEP");
             }
+            // State bits [8:9]
+            let state = (v >> 8) & 3;
+            match state {
+                1 => parts.push("INIT"),
+                2 => parts.push("READY"),
+                3 => parts.push("ENABLED"),
+                _ => {}
+            }
             if parts.is_empty() {
-                format!("0x{v:x}")
+                "NONE".into()
             } else {
                 parts.join("|")
             }
