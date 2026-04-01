@@ -882,7 +882,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to dispatch directly to an idle CPU if ops.select_cpu() was
 	 * skipped.
 	 */
-	if (task_should_migrate(p, enq_flags)) {
+	if (task_should_migrate(p, enq_flags) ||
+	    (!is_pcpu_task(p) && is_smt_contended(prev_cpu))) {
 		s32 cpu;
 
 		if (is_pcpu_task(p))

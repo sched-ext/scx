@@ -203,3 +203,19 @@ int scx_cgroup_bw_is_task_throttled(u64 taskc);
 int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 		       struct cgroup *from __arg_trusted,
 		       struct cgroup *to __arg_trusted);
+
+/**
+ * scx_cgroup_bw_dump - Dump the cgroup status
+ *
+ * @cgrp_id: cgroup id
+ * @descendent: If true, dump the cgroup and its descendent in preorder.
+ * Otherwise, dump only itself.
+ * @accurate: If true, update runtime total before dumping the status to
+ * get more accurate information. Otherwise, dump the currently collected
+ * snapshot of runtime values.
+ * @indent: If true, indent the output. Otherwise, do not indent the output.
+ *
+ * Return 0 for success, -errno for failure.
+ */
+int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent);
+

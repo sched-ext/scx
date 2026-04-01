@@ -526,13 +526,35 @@ impl<'a> Scheduler<'a> {
             nodes.push(node);
         }
 
+        info!("--- RDTAI 15-Node Tree Initial Weights ---");
         for (i, node) in nodes.iter().enumerate() {
+            if node.is_leaf {
+                let action_str = match node.leaf_action {
+                    0 => "Keep Local",
+                    1 => "Migrate",
+                    2 => "Run Now",
+                    _ => "Unknown",
+                };
+                info!("  [Node {:2}] LEAF -> Action: {}", i, action_str);
+            } else {
+                let feat_str = match node.feature_id {
+                    bpf_intf::rdtai_feature_FEAT_WAIT_TIME => "WaitTime",
+                    bpf_intf::rdtai_feature_FEAT_CACHE_MISSES => "CacheMiss",
+                    bpf_intf::rdtai_feature_FEAT_EXEC_TIME => "BurstTime",
+                    bpf_intf::rdtai_feature_FEAT_LOAD => "Load",
+                    _ => "Unknown",
+                };
+                info!("  [Node {:2}] Branch: {} < {} ? (L:{} R:{})", 
+                      i, feat_str, node.threshold, node.left_child, node.right_child);
+            }
+
             let mut key = [0u8; 4];
             key.copy_from_slice(&(i as u32).to_ne_bytes());
             tree_map.update(&key, unsafe { 
                 std::slice::from_raw_parts(node as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
             }, libbpf_rs::MapFlags::ANY)?;
         }
+        info!("-------------------------------------------");
 
         info!("Full-scale RDTAI multi-metric tree initialized!");
         Ok(())
