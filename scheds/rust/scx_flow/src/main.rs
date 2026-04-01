@@ -21,6 +21,7 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::MapCore;
 use log::info;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -335,6 +336,16 @@ fn step_u64(value: &mut u64, target: u64, step: u64) -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CpuPolicyStateAgg {
+    urgent_latency_burst_rounds: u64,
+    high_priority_burst_rounds: u64,
+    local_reserved_burst_rounds: u64,
+    reserved_lane_burst_rounds: u64,
+    contained_starvation_rounds: u64,
+    shared_starvation_rounds: u64,
+}
+
 #[derive(Debug)]
 struct AutoTuner {
     tunables: RuntimeTunables,
@@ -503,6 +514,52 @@ impl AutoTuner {
 }
 
 impl<'a> Scheduler<'a> {
+    fn read_cpu_policy_state(&self) -> CpuPolicyStateAgg {
+        let key = 0u32.to_ne_bytes();
+        let mut agg = CpuPolicyStateAgg::default();
+
+        let percpu_vals: Vec<Vec<u8>> = match self
+            .skel
+            .maps
+            .cpu_state
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        {
+            Ok(Some(vals)) => vals,
+            _ => return agg,
+        };
+
+        for cpu_val in percpu_vals.iter() {
+            if cpu_val.len() < std::mem::size_of::<bpf_intf::flow_cpu_state>() {
+                continue;
+            }
+
+            let state = unsafe {
+                std::ptr::read_unaligned(cpu_val.as_ptr() as *const bpf_intf::flow_cpu_state)
+            };
+
+            agg.urgent_latency_burst_rounds = agg
+                .urgent_latency_burst_rounds
+                .max(state.urgent_latency_burst_rounds);
+            agg.high_priority_burst_rounds = agg
+                .high_priority_burst_rounds
+                .max(state.high_priority_burst_rounds);
+            agg.local_reserved_burst_rounds = agg
+                .local_reserved_burst_rounds
+                .max(state.local_reserved_burst_rounds);
+            agg.reserved_lane_burst_rounds = agg
+                .reserved_lane_burst_rounds
+                .max(state.reserved_lane_burst_rounds);
+            agg.contained_starvation_rounds = agg
+                .contained_starvation_rounds
+                .max(state.contained_starvation_rounds);
+            agg.shared_starvation_rounds = agg
+                .shared_starvation_rounds
+                .max(state.shared_starvation_rounds);
+        }
+
+        agg
+    }
+
     fn init(
         opts: &'a Opts,
         open_object: &'a mut MaybeUninit<libbpf_rs::OpenObject>,
@@ -520,7 +577,6 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
 
-        // Load BPF program
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         Self::write_runtime_tunables(
             &mut skel,
@@ -529,10 +585,9 @@ impl<'a> Scheduler<'a> {
             0,
         );
 
-        // Attach scheduler
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
 
-        // Launch stats server for scx_top
+        // Expose live metrics for monitor and stats clients.
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self {
@@ -545,6 +600,7 @@ impl<'a> Scheduler<'a> {
     fn get_metrics(&self) -> Metrics {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         let data = self.skel.maps.data_data.as_ref().unwrap();
+        let cpu_policy_state = self.read_cpu_policy_state();
         Metrics {
             nr_running: bss_data.nr_running,
             total_runtime: bss_data.total_runtime,
@@ -574,9 +630,9 @@ impl<'a> Scheduler<'a> {
             shared_wakeup_enqueues: bss_data.shared_wakeup_enqueues,
             runnable_wakeups: bss_data.runnable_wakeups,
             cpu_release_reenqueues: bss_data.cpu_release_reenqueues,
-            urgent_latency_burst_rounds: bss_data.urgent_latency_burst_rounds,
-            high_priority_burst_rounds: bss_data.high_priority_burst_rounds,
-            local_reserved_burst_rounds: bss_data.local_reserved_burst_rounds,
+            urgent_latency_burst_rounds: cpu_policy_state.urgent_latency_burst_rounds,
+            high_priority_burst_rounds: cpu_policy_state.high_priority_burst_rounds,
+            local_reserved_burst_rounds: cpu_policy_state.local_reserved_burst_rounds,
             local_reserved_fast_grants: bss_data.local_reserved_fast_grants,
             local_reserved_burst_continuations: bss_data.local_reserved_burst_continuations,
             local_quota_skips: bss_data.local_quota_skips,
@@ -592,7 +648,7 @@ impl<'a> Scheduler<'a> {
             rt_sensitive_wakeups: bss_data.rt_sensitive_wakeups,
             rt_sensitive_local_enqueues: bss_data.rt_sensitive_local_enqueues,
             rt_sensitive_preempts: bss_data.rt_sensitive_preempts,
-            reserved_lane_burst_rounds: bss_data.reserved_lane_burst_rounds,
+            reserved_lane_burst_rounds: cpu_policy_state.reserved_lane_burst_rounds,
             reserved_lane_grants: bss_data.reserved_lane_grants,
             reserved_lane_burst_continuations: bss_data.reserved_lane_burst_continuations,
             reserved_lane_skips: bss_data.reserved_lane_skips,
@@ -609,8 +665,8 @@ impl<'a> Scheduler<'a> {
             contained_enqueues: bss_data.contained_enqueues,
             hog_containment_enqueues: bss_data.hog_containment_enqueues,
             hog_recoveries: bss_data.hog_recoveries,
-            contained_starvation_rounds: bss_data.contained_starvation_rounds,
-            shared_starvation_rounds: bss_data.shared_starvation_rounds,
+            contained_starvation_rounds: cpu_policy_state.contained_starvation_rounds,
+            shared_starvation_rounds: cpu_policy_state.shared_starvation_rounds,
             contained_rescue_dispatches: bss_data.contained_rescue_dispatches,
             shared_rescue_dispatches: bss_data.shared_rescue_dispatches,
             tune_latency_credit_grant: data.tune_latency_credit_grant,
@@ -650,11 +706,11 @@ impl<'a> Scheduler<'a> {
         data.tune_latency_debt_urgent_min = tunables.latency_debt_urgent_min;
         data.tune_urgent_latency_burst_max = tunables.urgent_latency_burst_max;
         data.tune_reserved_quota_burst_max = tunables.reserved_quota_burst_max;
-        data.tune_reserved_lane_burst_max = tunables.reserved_lane_burst_max;
         data.tune_contained_starvation_max = tunables.contained_starvation_max;
         data.tune_shared_starvation_max = tunables.shared_starvation_max;
         data.tune_local_fast_nr_running_max = tunables.local_fast_nr_running_max;
         data.tune_local_reserved_burst_max = tunables.local_reserved_burst_max;
+        data.tune_reserved_lane_burst_max = tunables.reserved_lane_burst_max;
 
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.autotune_mode = mode.as_u64();
@@ -743,15 +799,14 @@ fn main() -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
 
-    // Handle Ctrl+C
     ctrlc::set_handler(move || {
         shutdown_clone.store(true, Ordering::Relaxed);
     })?;
 
     if let Some(intv) = opts.monitor.or(opts.stats) {
-        let shutdown_copy = shutdown.clone();
+        let monitor_shutdown = shutdown.clone();
         let jh = std::thread::spawn(move || {
-            if let Err(err) = stats::monitor(Duration::from_secs_f64(intv), shutdown_copy) {
+            if let Err(err) = stats::monitor(Duration::from_secs_f64(intv), monitor_shutdown) {
                 log::warn!("stats monitor thread finished with error: {err}");
             }
         });

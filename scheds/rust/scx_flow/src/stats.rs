@@ -76,11 +76,11 @@ pub struct Metrics {
     pub runnable_wakeups: u64,
     #[stat(desc = "Local DSQ tasks rescued during cpu_release")]
     pub cpu_release_reenqueues: u64,
-    #[stat(desc = "Current consecutive urgent-latency dispatches within the bounded burst window")]
+    #[stat(desc = "Maximum current consecutive urgent-latency dispatches within the bounded burst window across CPUs")]
     pub urgent_latency_burst_rounds: u64,
-    #[stat(desc = "Current consecutive high-priority dispatches since shared or contained service last ran")]
+    #[stat(desc = "Maximum current consecutive high-priority dispatches since shared or contained service last ran across CPUs")]
     pub high_priority_burst_rounds: u64,
-    #[stat(desc = "Current consecutive ordinary local-reserved fast-path enqueues under pressure")]
+    #[stat(desc = "Maximum current consecutive ordinary local-reserved fast-path enqueues under pressure across CPUs")]
     pub local_reserved_burst_rounds: u64,
     #[stat(desc = "Ordinary local-reserved fast-path grants that counted toward the local burst window")]
     pub local_reserved_fast_grants: u64,
@@ -112,7 +112,7 @@ pub struct Metrics {
     pub rt_sensitive_local_enqueues: u64,
     #[stat(desc = "RT-sensitive wakeups that used the preempt path")]
     pub rt_sensitive_preempts: u64,
-    #[stat(desc = "Current consecutive dispatches from the reserved global DSQ")]
+    #[stat(desc = "Maximum current consecutive dispatches from the reserved global DSQ across CPUs")]
     pub reserved_lane_burst_rounds: u64,
     #[stat(desc = "Dispatches granted from the reserved global DSQ while reserved-lane shaping was active")]
     pub reserved_lane_grants: u64,
@@ -146,9 +146,9 @@ pub struct Metrics {
     pub hog_containment_enqueues: u64,
     #[stat(desc = "Times a previously contained hog-like task decayed back below containment")]
     pub hog_recoveries: u64,
-    #[stat(desc = "Current consecutive dispatch rounds since a contained/background task last ran")]
+    #[stat(desc = "Maximum current consecutive dispatch rounds since a contained/background task last ran across CPUs")]
     pub contained_starvation_rounds: u64,
-    #[stat(desc = "Current consecutive dispatch rounds since a shared-fallback task last ran")]
+    #[stat(desc = "Maximum current consecutive dispatch rounds since a shared-fallback task last ran across CPUs")]
     pub shared_starvation_rounds: u64,
     #[stat(desc = "Contained/background tasks rescued early by the fairness floor")]
     pub contained_rescue_dispatches: u64,

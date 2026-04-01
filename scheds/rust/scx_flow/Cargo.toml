@@ -1,9 +1,9 @@
 [package]
 name = "scx_flow"
-version = "1.0.0"
+version = "2.0.0"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
-description = "A budget-based sched_ext CPU scheduler with a latency lane, CPU-stability bias, and bounded adaptive tuning. https://github.com/sched-ext/scx"
+description = "A multi-lane budget-based sched_ext scheduler for interactive responsiveness and general-purpose throughput. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 
 [dependencies]

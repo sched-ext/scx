@@ -39,6 +39,13 @@ struct {
 	__type(value, struct task_ctx);
 } task_ctx_stor SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct flow_cpu_state);
+} cpu_state SEC(".maps");
+
 volatile u64 nr_running;
 volatile u64 total_runtime;
 volatile u64 reserved_dispatches;
@@ -67,9 +74,6 @@ volatile u64 reserved_global_enqueues;
 volatile u64 shared_wakeup_enqueues;
 volatile u64 runnable_wakeups;
 volatile u64 cpu_release_reenqueues;
-volatile u64 urgent_latency_burst_rounds;
-volatile u64 high_priority_burst_rounds;
-volatile u64 local_reserved_burst_rounds;
 volatile u64 local_reserved_fast_grants;
 volatile u64 local_reserved_burst_continuations;
 volatile u64 local_quota_skips;
@@ -85,7 +89,6 @@ volatile u64 cpu_migrations;
 volatile u64 rt_sensitive_wakeups;
 volatile u64 rt_sensitive_local_enqueues;
 volatile u64 rt_sensitive_preempts;
-volatile u64 reserved_lane_burst_rounds;
 volatile u64 reserved_lane_grants;
 volatile u64 reserved_lane_burst_continuations;
 volatile u64 reserved_lane_skips;
@@ -102,8 +105,6 @@ volatile u64 stable_local_mismatches;
 volatile u64 contained_enqueues;
 volatile u64 hog_containment_enqueues;
 volatile u64 hog_recoveries;
-volatile u64 contained_starvation_rounds;
-volatile u64 shared_starvation_rounds;
 volatile u64 contained_rescue_dispatches;
 volatile u64 shared_rescue_dispatches;
 volatile u64 tune_reserved_max_ns = FLOW_SLICE_RESERVED_MAX_NS;
@@ -141,6 +142,13 @@ static inline struct task_ctx *alloc_task_ctx(struct task_struct *p)
 	return bpf_task_storage_get(&task_ctx_stor,
 				    (struct task_struct *)p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+}
+
+static __always_inline struct flow_cpu_state *lookup_cpu_state(void)
+{
+	u32 key = 0;
+
+	return bpf_map_lookup_elem(&cpu_state, &key);
 }
 
 static __always_inline bool is_kthread(const struct task_struct *p)
@@ -580,22 +588,22 @@ static __always_inline bool allow_stable_local_fast_path(void)
 	return true;
 }
 
-static __always_inline void bump_starvation_round(volatile u64 *counter, u64 max_rounds)
+static __always_inline void bump_starvation_round(u64 *counter, u64 max_rounds)
 {
-	if (*counter < max_rounds)
-		__sync_fetch_and_add(counter, 1);
+	if (counter && *counter < max_rounds)
+		*counter += 1;
 }
 
-static __always_inline void backoff_starvation_round(volatile u64 *counter, u64 max_rounds)
+static __always_inline void backoff_starvation_round(u64 *counter, u64 max_rounds)
 {
-	if (!max_rounds)
+	if (!counter || !max_rounds)
 		return;
 
 	if (*counter >= max_rounds)
 		*counter = max_rounds - 1;
 }
 
-static __always_inline void note_high_priority_dispatch(void)
+static __always_inline void note_high_priority_dispatch(struct flow_cpu_state *cstate)
 {
 	u64 contained_max = tune_contained_starvation_max;
 	u64 shared_max = tune_shared_starvation_max;
@@ -611,68 +619,73 @@ static __always_inline void note_high_priority_dispatch(void)
 	else if (shared_max > FLOW_SHARED_STARVATION_MAX_TUNE)
 		shared_max = FLOW_SHARED_STARVATION_MAX_TUNE;
 
-	bump_starvation_round(&contained_starvation_rounds,
+	bump_starvation_round(cstate ? &cstate->contained_starvation_rounds : NULL,
 			      contained_max);
-	bump_starvation_round(&shared_starvation_rounds,
+	bump_starvation_round(cstate ? &cstate->shared_starvation_rounds : NULL,
 			      shared_max);
-	if (high_priority_burst_rounds < quota_max)
-		high_priority_burst_rounds++;
+	if (cstate && cstate->high_priority_burst_rounds < quota_max)
+		cstate->high_priority_burst_rounds++;
 }
 
-static __always_inline void reset_urgent_latency_burst(void)
+static __always_inline void reset_urgent_latency_burst(struct flow_cpu_state *cstate)
 {
-	urgent_latency_burst_rounds = 0;
+	if (cstate)
+		cstate->urgent_latency_burst_rounds = 0;
 }
 
-static __always_inline void reset_reserved_lane_burst(void)
+static __always_inline void reset_reserved_lane_burst(struct flow_cpu_state *cstate)
 {
-	reserved_lane_burst_rounds = 0;
+	if (cstate)
+		cstate->reserved_lane_burst_rounds = 0;
 }
 
-static __always_inline void reset_local_reserved_burst(void)
+static __always_inline void reset_local_reserved_burst(struct flow_cpu_state *cstate)
 {
-	local_reserved_burst_rounds = 0;
+	if (cstate)
+		cstate->local_reserved_burst_rounds = 0;
 }
 
-static __always_inline void note_local_reserved_fast(void)
+static __always_inline void note_local_reserved_fast(struct flow_cpu_state *cstate)
 {
 	u64 burst_max = tuned_local_reserved_burst_max();
 
 	__sync_fetch_and_add(&local_reserved_fast_grants, 1);
-	if (local_reserved_burst_rounds > 0)
+	if (cstate && cstate->local_reserved_burst_rounds > 0)
 		__sync_fetch_and_add(&local_reserved_burst_continuations, 1);
-	if (local_reserved_burst_rounds < burst_max)
-		local_reserved_burst_rounds++;
+	if (cstate && cstate->local_reserved_burst_rounds < burst_max)
+		cstate->local_reserved_burst_rounds++;
 }
 
-static __always_inline void note_urgent_latency_dispatch(void)
+static __always_inline void note_urgent_latency_dispatch(struct flow_cpu_state *cstate)
 {
-	if (urgent_latency_burst_rounds > 0)
+	if (cstate && cstate->urgent_latency_burst_rounds > 0)
 		__sync_fetch_and_add(&urgent_latency_burst_continuations, 1);
-	if (urgent_latency_burst_rounds < tuned_urgent_latency_burst_max())
-		urgent_latency_burst_rounds++;
+	if (cstate &&
+	    cstate->urgent_latency_burst_rounds < tuned_urgent_latency_burst_max())
+		cstate->urgent_latency_burst_rounds++;
 	__sync_fetch_and_add(&urgent_latency_dispatches, 1);
 	__sync_fetch_and_add(&urgent_latency_burst_grants, 1);
-	reset_reserved_lane_burst();
-	note_high_priority_dispatch();
+	reset_reserved_lane_burst(cstate);
+	note_high_priority_dispatch(cstate);
 }
 
-static __always_inline void note_reserved_dispatch(void)
+static __always_inline void note_reserved_dispatch(struct flow_cpu_state *cstate)
 {
 	u64 burst_max = tuned_reserved_lane_burst_max();
 
 	__sync_fetch_and_add(&reserved_dispatches, 1);
 	__sync_fetch_and_add(&reserved_lane_grants, 1);
-	if (reserved_lane_burst_rounds > 0)
+	if (cstate && cstate->reserved_lane_burst_rounds > 0)
 		__sync_fetch_and_add(&reserved_lane_burst_continuations, 1);
-	if (reserved_lane_burst_rounds < burst_max)
-		reserved_lane_burst_rounds++;
-	reset_urgent_latency_burst();
-	reset_local_reserved_burst();
-	note_high_priority_dispatch();
+	if (cstate && cstate->reserved_lane_burst_rounds < burst_max)
+		cstate->reserved_lane_burst_rounds++;
+	reset_urgent_latency_burst(cstate);
+	reset_local_reserved_burst(cstate);
+	note_high_priority_dispatch(cstate);
 }
 
-static __always_inline void note_contained_dispatch(bool rescued)
+static __always_inline void note_contained_dispatch(struct flow_cpu_state *cstate,
+						    bool rescued)
 {
 	u64 shared_max = tune_shared_starvation_max;
 
@@ -681,17 +694,21 @@ static __always_inline void note_contained_dispatch(bool rescued)
 	else if (shared_max > FLOW_SHARED_STARVATION_MAX_TUNE)
 		shared_max = FLOW_SHARED_STARVATION_MAX_TUNE;
 
-	contained_starvation_rounds = 0;
-	high_priority_burst_rounds = 0;
-	bump_starvation_round(&shared_starvation_rounds, shared_max);
-	reset_urgent_latency_burst();
-	reset_reserved_lane_burst();
-	reset_local_reserved_burst();
+	if (cstate) {
+		cstate->contained_starvation_rounds = 0;
+		cstate->high_priority_burst_rounds = 0;
+	}
+	bump_starvation_round(cstate ? &cstate->shared_starvation_rounds : NULL,
+			      shared_max);
+	reset_urgent_latency_burst(cstate);
+	reset_reserved_lane_burst(cstate);
+	reset_local_reserved_burst(cstate);
 	if (rescued)
 		__sync_fetch_and_add(&contained_rescue_dispatches, 1);
 }
 
-static __always_inline void note_shared_dispatch(bool rescued)
+static __always_inline void note_shared_dispatch(struct flow_cpu_state *cstate,
+						 bool rescued)
 {
 	u64 contained_max = tune_contained_starvation_max;
 
@@ -700,17 +717,20 @@ static __always_inline void note_shared_dispatch(bool rescued)
 	else if (contained_max > FLOW_CONTAINED_STARVATION_MAX_TUNE)
 		contained_max = FLOW_CONTAINED_STARVATION_MAX_TUNE;
 
-	shared_starvation_rounds = 0;
-	high_priority_burst_rounds = 0;
-	bump_starvation_round(&contained_starvation_rounds, contained_max);
-	reset_urgent_latency_burst();
-	reset_reserved_lane_burst();
-	reset_local_reserved_burst();
+	if (cstate) {
+		cstate->shared_starvation_rounds = 0;
+		cstate->high_priority_burst_rounds = 0;
+	}
+	bump_starvation_round(cstate ? &cstate->contained_starvation_rounds : NULL,
+			      contained_max);
+	reset_urgent_latency_burst(cstate);
+	reset_reserved_lane_burst(cstate);
+	reset_local_reserved_burst(cstate);
 	if (rescued)
 		__sync_fetch_and_add(&shared_rescue_dispatches, 1);
 }
 
-static __always_inline bool local_reserved_quota_active(void)
+static __always_inline bool local_reserved_quota_active(struct flow_cpu_state *cstate)
 {
 	u64 max_running = tune_local_fast_nr_running_max;
 
@@ -720,8 +740,8 @@ static __always_inline bool local_reserved_quota_active(void)
 		max_running = FLOW_LOCAL_FAST_NR_RUNNING_MAX_TUNE;
 
 	return nr_running > max_running ||
-		contained_starvation_rounds > 0 ||
-		shared_starvation_rounds > 0;
+		(cstate && cstate->contained_starvation_rounds > 0) ||
+		(cstate && cstate->shared_starvation_rounds > 0);
 }
 
 static __always_inline void note_stable_mismatch(struct task_ctx *tctx)
@@ -742,7 +762,7 @@ static __always_inline void note_stable_rejection(struct task_ctx *tctx)
 	decay_stable_score(tctx, FLOW_STABLE_MISMATCH_DECAY);
 }
 
-static __always_inline bool should_promote_shared_enqueue(void)
+static __always_inline bool should_promote_shared_enqueue(struct flow_cpu_state *cstate)
 {
 	u64 shared_max = tune_shared_starvation_max;
 
@@ -751,10 +771,10 @@ static __always_inline bool should_promote_shared_enqueue(void)
 	else if (shared_max > FLOW_SHARED_STARVATION_MAX_TUNE)
 		shared_max = FLOW_SHARED_STARVATION_MAX_TUNE;
 
-	return shared_starvation_rounds * 2 >= shared_max;
+	return cstate && cstate->shared_starvation_rounds * 2 >= shared_max;
 }
 
-static __always_inline bool should_promote_contained_enqueue(void)
+static __always_inline bool should_promote_contained_enqueue(struct flow_cpu_state *cstate)
 {
 	u64 contained_max = tune_contained_starvation_max;
 
@@ -763,7 +783,7 @@ static __always_inline bool should_promote_contained_enqueue(void)
 	else if (contained_max > FLOW_CONTAINED_STARVATION_MAX_TUNE)
 		contained_max = FLOW_CONTAINED_STARVATION_MAX_TUNE;
 
-	return contained_starvation_rounds * 2 >= contained_max;
+	return cstate && cstate->contained_starvation_rounds * 2 >= contained_max;
 }
 
 static __always_inline bool move_to_local_compat(u64 dsq_id)
@@ -905,6 +925,7 @@ void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	struct flow_cpu_state *cstate;
 	s32 target_cpu = -1;
 	u64 slice_ns;
 	bool is_wakeup;
@@ -920,6 +941,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	bool ordinary_local_reserved = false;
 
 	tctx = lookup_task_ctx(p);
+	cstate = lookup_cpu_state();
 	slice_ns = task_slice_ns(tctx);
 	is_wakeup = enq_flags & SCX_ENQ_WAKEUP;
 
@@ -1011,8 +1033,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					!should_preempt;
 
 				if (ordinary_local_reserved &&
-				    local_reserved_quota_active() &&
-				    local_reserved_burst_rounds >=
+				    local_reserved_quota_active(cstate) &&
+				    cstate &&
+				    cstate->local_reserved_burst_rounds >=
 					    tuned_local_reserved_burst_max()) {
 					use_local_reserved = false;
 					ordinary_local_reserved = false;
@@ -1048,7 +1071,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					if (tctx->wake_cpu_idle)
 						__sync_fetch_and_add(&local_fast_dispatches, 1);
 					if (ordinary_local_reserved)
-						note_local_reserved_fast();
+						note_local_reserved_fast(cstate);
 					clear_wake_target(tctx);
 					return;
 				}
@@ -1058,13 +1081,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				note_stable_rejection(tctx);
 
 			if (contained_hog) {
-				if (should_promote_contained_enqueue()) {
+				if (should_promote_contained_enqueue(cstate)) {
 					enq_flags |= SCX_ENQ_HEAD;
 					__sync_fetch_and_add(&contained_starved_head_enqueues, 1);
 				}
 				scx_bpf_dsq_insert(p, CONTAINED_DSQ, contained_slice_ns(),
 						   enq_flags);
-				reset_local_reserved_burst();
+				reset_local_reserved_burst(cstate);
 				__sync_fetch_and_add(&contained_enqueues, 1);
 				__sync_fetch_and_add(&hog_containment_enqueues, 1);
 				clear_wake_target(tctx);
@@ -1076,7 +1099,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					URGENT_LATENCY_DSQ : LATENCY_DSQ;
 
 				scx_bpf_dsq_insert(p, latency_dsq, slice_ns, enq_flags);
-				reset_local_reserved_burst();
+				reset_local_reserved_burst(cstate);
 				decay_latency_credit(tctx, tuned_latency_credit_decay());
 				if (urgent_latency_wakeup)
 					__sync_fetch_and_add(&urgent_latency_enqueues, 1);
@@ -1092,7 +1115,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			}
 
 			scx_bpf_dsq_insert(p, RESERVED_DSQ, slice_ns, enq_flags);
-			reset_local_reserved_burst();
+			reset_local_reserved_burst(cstate);
 			__sync_fetch_and_add(&reserved_global_enqueues, 1);
 			if (has_wake_target && (is_wakeup || !scx_bpf_task_running(p)))
 				scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
@@ -1102,12 +1125,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	if (tctx && is_contained_hog(tctx)) {
-		if (should_promote_contained_enqueue()) {
+		if (should_promote_contained_enqueue(cstate)) {
 			enq_flags |= SCX_ENQ_HEAD;
 			__sync_fetch_and_add(&contained_starved_head_enqueues, 1);
 		}
 		scx_bpf_dsq_insert(p, CONTAINED_DSQ, contained_slice_ns(), enq_flags);
-		reset_local_reserved_burst();
+		reset_local_reserved_burst(cstate);
 		__sync_fetch_and_add(&contained_enqueues, 1);
 		__sync_fetch_and_add(&hog_containment_enqueues, 1);
 		clear_wake_target(tctx);
@@ -1117,18 +1140,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (is_wakeup)
 		__sync_fetch_and_add(&shared_wakeup_enqueues, 1);
 
-	if (should_promote_shared_enqueue()) {
+	if (should_promote_shared_enqueue(cstate)) {
 		enq_flags |= SCX_ENQ_HEAD;
 		__sync_fetch_and_add(&shared_starved_head_enqueues, 1);
 	}
 	scx_bpf_dsq_insert(p, SHARED_DSQ, slice_ns, enq_flags);
-	reset_local_reserved_burst();
+	reset_local_reserved_burst(cstate);
 	clear_wake_target(tctx);
 }
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct task_ctx *tctx;
+	struct flow_cpu_state *cstate;
 	u64 shared_max = tune_shared_starvation_max;
 	u64 contained_max = tune_contained_starvation_max;
 	u64 reserved_lane_max = tuned_reserved_lane_burst_max();
@@ -1138,6 +1162,11 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	bool quota_force_shared;
 	bool quota_force_contained;
 	bool shared_more_starved;
+	u64 shared_rounds;
+	u64 contained_rounds;
+	u64 high_priority_rounds;
+	u64 urgent_burst_rounds;
+	u64 reserved_lane_rounds;
 
 	if (shared_max < FLOW_SHARED_STARVATION_MIN)
 		shared_max = FLOW_SHARED_STARVATION_MIN;
@@ -1149,17 +1178,24 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	else if (contained_max > FLOW_CONTAINED_STARVATION_MAX_TUNE)
 		contained_max = FLOW_CONTAINED_STARVATION_MAX_TUNE;
 
-	force_shared = shared_starvation_rounds >= shared_max;
-	force_contained = contained_starvation_rounds >= contained_max;
+	cstate = lookup_cpu_state();
+	shared_rounds = cstate ? cstate->shared_starvation_rounds : 0;
+	contained_rounds = cstate ? cstate->contained_starvation_rounds : 0;
+	high_priority_rounds = cstate ? cstate->high_priority_burst_rounds : 0;
+	urgent_burst_rounds = cstate ? cstate->urgent_latency_burst_rounds : 0;
+	reserved_lane_rounds = cstate ? cstate->reserved_lane_burst_rounds : 0;
+
+	force_shared = shared_rounds >= shared_max;
+	force_contained = contained_rounds >= contained_max;
 	quota_force_shared = !force_shared &&
-		high_priority_burst_rounds >= quota_max &&
-		shared_starvation_rounds > 0;
+		high_priority_rounds >= quota_max &&
+		shared_rounds > 0;
 	quota_force_contained = !force_contained &&
-		high_priority_burst_rounds >= quota_max &&
-		contained_starvation_rounds > 0;
+		high_priority_rounds >= quota_max &&
+		contained_rounds > 0;
 	shared_more_starved =
-		shared_starvation_rounds * contained_max >=
-		contained_starvation_rounds * shared_max;
+		shared_rounds * contained_max >=
+		contained_rounds * shared_max;
 
 	if (quota_force_shared || quota_force_contained)
 		__sync_fetch_and_add(&reserved_quota_skips, 1);
@@ -1169,7 +1205,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (move_to_local_compat(SHARED_DSQ)) {
 			__sync_fetch_and_add(&shared_dispatches, 1);
 			__sync_fetch_and_add(&quota_shared_forces, 1);
-			note_shared_dispatch(true);
+			note_shared_dispatch(cstate, true);
 			return;
 		}
 	}
@@ -1179,7 +1215,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (move_to_local_compat(CONTAINED_DSQ)) {
 			__sync_fetch_and_add(&contained_dispatches, 1);
 			__sync_fetch_and_add(&quota_contained_forces, 1);
-			note_contained_dispatch(true);
+			note_contained_dispatch(cstate, true);
 			return;
 		}
 	}
@@ -1187,51 +1223,53 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	if (force_shared) {
 		if (move_to_local_compat(SHARED_DSQ)) {
 			__sync_fetch_and_add(&shared_dispatches, 1);
-			note_shared_dispatch(true);
+			note_shared_dispatch(cstate, true);
 			return;
 		}
-		backoff_starvation_round(&shared_starvation_rounds, shared_max);
+		backoff_starvation_round(cstate ? &cstate->shared_starvation_rounds : NULL,
+					 shared_max);
 	}
 
 	if (force_contained) {
 		if (move_to_local_compat(CONTAINED_DSQ)) {
 			__sync_fetch_and_add(&contained_dispatches, 1);
-			note_contained_dispatch(true);
+			note_contained_dispatch(cstate, true);
 			return;
 		}
-		backoff_starvation_round(&contained_starvation_rounds, contained_max);
+		backoff_starvation_round(cstate ? &cstate->contained_starvation_rounds : NULL,
+					 contained_max);
 	}
 
-	if (urgent_latency_burst_rounds < tuned_urgent_latency_burst_max() &&
+	if (urgent_burst_rounds < tuned_urgent_latency_burst_max() &&
 	    move_to_local_compat(URGENT_LATENCY_DSQ)) {
-		reset_local_reserved_burst();
-		note_urgent_latency_dispatch();
+		reset_local_reserved_burst(cstate);
+		note_urgent_latency_dispatch(cstate);
 		return;
 	}
 
 	if (move_to_local_compat(LATENCY_DSQ)) {
-		reset_urgent_latency_burst();
-		reset_reserved_lane_burst();
-		reset_local_reserved_burst();
+		reset_urgent_latency_burst(cstate);
+		reset_reserved_lane_burst(cstate);
+		reset_local_reserved_burst(cstate);
 		__sync_fetch_and_add(&latency_dispatches, 1);
-		note_high_priority_dispatch();
+		note_high_priority_dispatch(cstate);
 		return;
 	}
 
-	if (reserved_lane_burst_rounds >= reserved_lane_max) {
+	if (reserved_lane_rounds >= reserved_lane_max) {
 		__sync_fetch_and_add(&reserved_lane_skips, 1);
 		if (shared_more_starved) {
 			if (move_to_local_compat(SHARED_DSQ)) {
 				__sync_fetch_and_add(&shared_dispatches, 1);
 				__sync_fetch_and_add(&reserved_lane_shared_forces, 1);
-				note_shared_dispatch(true);
+				note_shared_dispatch(cstate, true);
 				return;
 			}
 			__sync_fetch_and_add(&reserved_lane_shared_misses, 1);
 			if (move_to_local_compat(CONTAINED_DSQ)) {
 				__sync_fetch_and_add(&contained_dispatches, 1);
 				__sync_fetch_and_add(&reserved_lane_contained_forces, 1);
-				note_contained_dispatch(true);
+				note_contained_dispatch(cstate, true);
 				return;
 			}
 			__sync_fetch_and_add(&reserved_lane_contained_misses, 1);
@@ -1239,14 +1277,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			if (move_to_local_compat(CONTAINED_DSQ)) {
 				__sync_fetch_and_add(&contained_dispatches, 1);
 				__sync_fetch_and_add(&reserved_lane_contained_forces, 1);
-				note_contained_dispatch(true);
+				note_contained_dispatch(cstate, true);
 				return;
 			}
 			__sync_fetch_and_add(&reserved_lane_contained_misses, 1);
 			if (move_to_local_compat(SHARED_DSQ)) {
 				__sync_fetch_and_add(&shared_dispatches, 1);
 				__sync_fetch_and_add(&reserved_lane_shared_forces, 1);
-				note_shared_dispatch(true);
+				note_shared_dispatch(cstate, true);
 				return;
 			}
 			__sync_fetch_and_add(&reserved_lane_shared_misses, 1);
@@ -1254,19 +1292,19 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	if (move_to_local_compat(RESERVED_DSQ)) {
-		note_reserved_dispatch();
+		note_reserved_dispatch(cstate);
 		return;
 	}
 
 	if (move_to_local_compat(CONTAINED_DSQ)) {
 		__sync_fetch_and_add(&contained_dispatches, 1);
-		note_contained_dispatch(false);
+		note_contained_dispatch(cstate, false);
 		return;
 	}
 
 	if (move_to_local_compat(SHARED_DSQ)) {
 		__sync_fetch_and_add(&shared_dispatches, 1);
-		note_shared_dispatch(false);
+		note_shared_dispatch(cstate, false);
 		return;
 	}
 

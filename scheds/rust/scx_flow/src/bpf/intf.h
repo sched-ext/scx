@@ -98,4 +98,13 @@ typedef signed long s64;
 typedef int pid_t;
 #endif /* __VMLINUX_H__ */
 
+struct flow_cpu_state {
+	u64 urgent_latency_burst_rounds;
+	u64 high_priority_burst_rounds;
+	u64 local_reserved_burst_rounds;
+	u64 reserved_lane_burst_rounds;
+	u64 contained_starvation_rounds;
+	u64 shared_starvation_rounds;
+};
+
 #endif /* __INTF_H */
