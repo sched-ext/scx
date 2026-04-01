@@ -320,7 +320,7 @@ fn worker_main(
             }
         }
 
-        if work_units % 1024 == 0 {
+        if work_units.is_multiple_of(1024) {
             let now = Instant::now();
             let gap = now.duration_since(last_iter_time).as_nanos() as u64;
             if gap > max_gap_ns {

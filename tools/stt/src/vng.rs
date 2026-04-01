@@ -220,12 +220,9 @@ pub fn run_in_vng(cfg: &VngConfig, stt_args: &[String]) -> Result<VngResult> {
     let mut timed_out = false;
     let mut exit_status = None;
     loop {
-        match child.try_wait()? {
-            Some(status) => {
-                exit_status = Some(status);
-                break;
-            }
-            None => {}
+        if let Some(status) = child.try_wait()? {
+            exit_status = Some(status);
+            break;
         }
         if start.elapsed() > timeout {
             let pid = child.id() as i32;

@@ -71,8 +71,20 @@ struct RunArgs {
     repro: bool,
     /// bpftrace assertion script (name or path). Runs during repro mode;
     /// exits on invariant violation.
-    #[clap(long)]
+    #[clap(long, conflicts_with = "probe_stack")]
     assert_script: Option<String>,
+    /// Auto-probe: crash stack trace (file path or comma-separated function
+    /// names). Generates a bpftrace script that captures arguments at each
+    /// function in the crash chain. Implies --repro.
+    #[clap(long, conflicts_with = "assert_script")]
+    probe_stack: Option<String>,
+    /// Auto-repro: crash once to get the stack, then automatically rerun
+    /// with --probe-stack to capture arguments at each function. Implies --repro.
+    #[clap(long, conflicts_with_all = ["assert_script", "probe_stack"])]
+    auto_repro: bool,
+    /// Include bootlin URLs in source line output
+    #[clap(long)]
+    bootlin: bool,
     /// Path to linux source tree (for VNG kernel boot and symbolization)
     #[clap(long)]
     kernel_dir: Option<String>,
@@ -198,7 +210,8 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     if args.warn_unfair {
         verify::set_warn_unfair(true);
     }
-    if args.repro {
+    let repro = args.repro || args.probe_stack.is_some() || args.auto_repro;
+    if repro {
         workload::set_repro_mode(true);
     }
     let config = RunConfig {
@@ -209,11 +222,58 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         json: args.json,
         verbose: args.verbose,
         active_flags,
-        repro: args.repro,
+        repro,
         assert_script: args.assert_script,
+        probe_stack: args.probe_stack,
+        auto_repro: args.auto_repro,
+        bootlin: args.bootlin,
         kernel_dir: args.kernel_dir,
     };
-    let results = Runner::new(config, topo)?.run_scenarios(&selected)?;
+    let mut results = Runner::new(config.clone(), topo.clone())?.run_scenarios(&selected)?;
+    let failed = results.iter().filter(|r| !r.passed).count();
+
+    // Auto-repro: if run 1 crashed, extract function names and rerun with --probe-stack
+    if config.auto_repro && failed > 0 && config.probe_stack.is_none() {
+        // Look for the suggestion line from run_scenarios, or fall back to stack extraction
+        let all_text: String = results
+            .iter()
+            .flat_map(|r| r.details.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let names: Option<String> = all_text
+            .lines()
+            .find(|l| l.contains("functions:"))
+            .map(|l| {
+                l.split("functions:")
+                    .nth(1)
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .or_else(|| {
+                let fns = runner::extract_stack_functions_all_pub(&all_text);
+                if fns.is_empty() {
+                    None
+                } else {
+                    Some(fns.join(","))
+                }
+            });
+        if let Some(ref names) = names {
+            let fn_count = names.split(',').count();
+            println!(
+                "\n{} auto-repro: rerunning with --probe-stack ({fn_count} functions)\n",
+                style(">>>").cyan().bold(),
+            );
+            let mut config2 = config;
+            config2.probe_stack = Some(names.clone());
+            results = Runner::new(config2, topo)?.run_scenarios(&selected)?;
+        }
+    }
+
     if args.json {
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
@@ -426,7 +486,7 @@ fn cmd_vm_parallel(
 
             let stats_str = inner_results
                 .first()
-                .map(|r| format_gauntlet_stats(r))
+                .map(format_gauntlet_stats)
                 .unwrap_or_default();
             let detail_str = format_gauntlet_detail(ok, &detail, &inner_results);
 
@@ -637,7 +697,7 @@ fn cmd_gauntlet(args: &VmArgs) -> Result<()> {
 
             let stats_str = inner_results
                 .first()
-                .map(|r| format_gauntlet_stats(r))
+                .map(format_gauntlet_stats)
                 .unwrap_or_default();
             let detail_str = format_gauntlet_detail(ok, &detail, &inner_results);
 

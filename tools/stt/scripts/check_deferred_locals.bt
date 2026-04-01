@@ -1,23 +1,57 @@
 /*
- * Assert: no enforced dispatch to a CPU excluded by cpus_ptr.
- * Only fires when enforce=true (arg3), which is the lethal deferred
- * LOCAL_ON path through dispatch_to_local_dsq. The consume path uses
- * enforce=false and handles mismatches gracefully (skips the task).
+ * Was the target CPU valid at deferral time?
+ *
+ * direct_dispatch(sch, p, enq_flags): captures cpus_ptr and target
+ * CPU when a task is dispatched to LOCAL_ON. If cpus_ptr already
+ * excludes the target, the bug is upstream (bad CPU selection).
+ * If cpus_ptr includes it, the mask changed during deferral.
+ *
+ * Requires: noinline on direct_dispatch in kernel/sched/ext.c
+ *
+ * SCX_DSQ_LOCAL_ON = (1<<63)|(1<<62), target CPU in low 32 bits.
  */
+
+kprobe:direct_dispatch {
+    $p = (struct task_struct *)arg1;
+    $dsq_id = $p->scx.ddsp_dsq_id;
+
+    if (($dsq_id >> 62) == 3) {
+        $pid = (uint64)$p->pid;
+        $target = $dsq_id & 0xffffffff;
+        @defer_cpu[$pid] = $target;
+        @defer_mask[$pid] = $p->cpus_ptr->bits[0];
+        @defer_ts[$pid] = nsecs;
+    }
+}
+
 kprobe:task_can_run_on_remote_rq {
-    $enforce = (uint64)arg3;
-    if ($enforce == 0) { return; }
+    if ((uint64)arg3 == 0) { return; }
 
     $p = (struct task_struct *)arg1;
     $rq = (struct rq *)arg2;
     $cpu = (uint64)$rq->cpu;
     $word = $p->cpus_ptr->bits[$cpu / 64];
     $bit = (uint64)1 << ($cpu % 64);
+
     if (($word & $bit) == 0) {
-        printf("VIOLATION: %s[%d] dispatched to CPU %d which is not in cpus_ptr\n",
-               $p->comm, $p->pid, $cpu);
-        printf("  cpus_ptr[%d]=0x%lx does not have bit 0x%lx (CPU %d)\n",
-               $cpu / 64, $word, $bit, $cpu);
+        $pid = (uint64)$p->pid;
+        $def_mask = @defer_mask[$pid];
+        $def_cpu = @defer_cpu[$pid];
+        $had_cpu = ($def_mask & $bit) != 0;
+
+        printf("VIOLATION: %s[%d] target_cpu=%d\n", $p->comm, $pid, $cpu);
+        printf("  at deferral:  cpus_ptr=0x%lx target=%lu\n", $def_mask, $def_cpu);
+        printf("  at violation: cpus_ptr=0x%lx\n", $word);
+
+        if ($had_cpu) {
+            printf("  RESULT: target was valid at deferral, mask changed after\n");
+        } else if ($def_mask != 0) {
+            printf("  RESULT: target was INVALID at deferral — bad CPU selection\n");
+        } else {
+            printf("  RESULT: no deferral captured\n");
+        }
+
+        printf("  delta: %lu ns\n", nsecs - @defer_ts[$pid]);
         printf("  migration_disabled=%d\n", $p->migration_disabled);
         printf("  call chain:\n%s", kstack);
         printf("  ---RAW---\n%s---ENDRAW---\n", kstack(raw));
