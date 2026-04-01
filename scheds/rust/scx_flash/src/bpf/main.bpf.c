@@ -389,10 +389,11 @@ static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
 		vtime = vtime_min;
 
 	/*
-	 * Penalize tasks that are abusing the wakeup frequency
+	 * Penalize user tasks that are abusing the wakeup frequency
 	 * prioritization by charging them @slice_lag.
 	 */
-	if (tctx->slice_ns_ewma && tctx->slice_ns_ewma < SLICE_MIN_NS)
+	if (!is_kthread(p) &&
+	    tctx->slice_ns_ewma && tctx->slice_ns_ewma < SLICE_MIN_NS)
 		vtime += slice_lag;
 
 	return vtime;
