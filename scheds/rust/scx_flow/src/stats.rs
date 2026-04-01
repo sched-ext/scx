@@ -42,6 +42,12 @@ pub struct Metrics {
     pub positive_budget_wakeups: u64,
     #[stat(desc = "Interactive wakeups inserted into the dedicated latency lane")]
     pub latency_lane_enqueues: u64,
+    #[stat(desc = "Soft latency-lane candidates observed before final routing decisions")]
+    pub latency_lane_candidates: u64,
+    #[stat(desc = "Latency-lane candidates that were consumed by the local reserved fast path")]
+    pub latency_candidate_local_enqueues: u64,
+    #[stat(desc = "Soft latency-lane candidates blocked because they were already contained hogs")]
+    pub latency_candidate_hog_blocks: u64,
     #[stat(desc = "Positive-budget tasks inserted directly into selected local DSQs")]
     pub reserved_local_enqueues: u64,
     #[stat(desc = "Positive-budget tasks enqueued to the reserved global DSQ")]
@@ -102,7 +108,7 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] mode={} gen={} run={} latency_disp={} reserve_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} latency_enq={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} rt_wake={} rt_local={} rt_preempt={} hog_contain={} hog_recover={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={}",
+            "[{}] mode={} gen={} run={} latency_disp={} reserve_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} latency_enq={} latency_cand={} latency_local={} latency_hog_block={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} rt_wake={} rt_local={} rt_preempt={} hog_contain={} hog_recover={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={}",
             crate::SCHEDULER_NAME,
             self.autotune_mode_name(),
             self.autotune_generation,
@@ -116,6 +122,9 @@ impl Metrics {
             self.budget_exhaustions,
             self.positive_budget_wakeups,
             self.latency_lane_enqueues,
+            self.latency_lane_candidates,
+            self.latency_candidate_local_enqueues,
+            self.latency_candidate_hog_blocks,
             self.reserved_local_enqueues,
             self.reserved_global_enqueues,
             self.shared_wakeup_enqueues,
@@ -168,6 +177,15 @@ impl Metrics {
             latency_lane_enqueues: self
                 .latency_lane_enqueues
                 .wrapping_sub(rhs.latency_lane_enqueues),
+            latency_lane_candidates: self
+                .latency_lane_candidates
+                .wrapping_sub(rhs.latency_lane_candidates),
+            latency_candidate_local_enqueues: self
+                .latency_candidate_local_enqueues
+                .wrapping_sub(rhs.latency_candidate_local_enqueues),
+            latency_candidate_hog_blocks: self
+                .latency_candidate_hog_blocks
+                .wrapping_sub(rhs.latency_candidate_hog_blocks),
             reserved_local_enqueues: self
                 .reserved_local_enqueues
                 .wrapping_sub(rhs.reserved_local_enqueues),

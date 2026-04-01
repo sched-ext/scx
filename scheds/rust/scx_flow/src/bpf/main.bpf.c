@@ -47,6 +47,9 @@ volatile u64 budget_refill_events;
 volatile u64 budget_exhaustions;
 volatile u64 positive_budget_wakeups;
 volatile u64 latency_lane_enqueues;
+volatile u64 latency_lane_candidates;
+volatile u64 latency_candidate_local_enqueues;
+volatile u64 latency_candidate_hog_blocks;
 volatile u64 reserved_local_enqueues;
 volatile u64 reserved_global_enqueues;
 volatile u64 shared_wakeup_enqueues;
@@ -304,6 +307,21 @@ static __always_inline bool is_latency_lane_candidate(const struct task_ctx *tct
 		tctx->budget_ns >= (s64)budget_min_ns;
 }
 
+static __always_inline bool is_soft_latency_candidate(const struct task_ctx *tctx)
+{
+	u64 budget_min_ns = FLOW_LATENCY_LANE_BUDGET_MIN_NS;
+
+	if (!tctx || tctx->budget_ns <= 0 || tctx->last_refill_ns <= 0)
+		return false;
+
+	if (tctx->last_refill_ns < (s64)FLOW_LATENCY_LANE_REFILL_MIN_NS)
+		return false;
+	if (budget_min_ns < FLOW_SLICE_MIN_NS)
+		budget_min_ns = FLOW_SLICE_MIN_NS;
+
+	return tctx->budget_ns >= (s64)budget_min_ns;
+}
+
 static __always_inline bool move_to_local_compat(u64 dsq_id)
 {
 	if (bpf_ksym_exists(scx_bpf_dsq_move_to_local___v2))
@@ -458,6 +476,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (tctx) {
 		if (tctx->budget_ns > 0) {
 			contained_hog = is_contained_hog(tctx);
+			if (is_soft_latency_candidate(tctx)) {
+				__sync_fetch_and_add(&latency_lane_candidates, 1);
+				if (contained_hog)
+					__sync_fetch_and_add(&latency_candidate_hog_blocks, 1);
+			}
 			if (is_wakeup)
 				__sync_fetch_and_add(&positive_budget_wakeups, 1);
 			rt_sensitive_wakeup = is_rt_sensitive_wakeup(p, tctx, is_wakeup);
@@ -513,6 +536,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 
 					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | target_cpu,
 							   local_slice_ns, enq_flags);
+					if (latency_lane_wakeup)
+						__sync_fetch_and_add(&latency_candidate_local_enqueues, 1);
 					__sync_fetch_and_add(&reserved_local_enqueues, 1);
 					if (rt_sensitive_wakeup)
 						__sync_fetch_and_add(&rt_sensitive_local_enqueues, 1);
