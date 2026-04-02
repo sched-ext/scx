@@ -69,10 +69,6 @@ pub struct SharedStats {
     pub cpu_stats: BTreeMap<usize, CpuStats>,
     pub process_stats: BTreeMap<i32, ProcessStats>,
     pub dsq_stats: BTreeMap<u64, DsqStats>,
-    /// Track pending wakeups per-thread (TID) to avoid overwriting when multiple
-    /// threads from the same process wake up before being scheduled.
-    /// Note: In Linux kernel scheduling events, the "pid" field is actually the TID.
-    pub pending_wakeups: BTreeMap<i32, u64>, // tid -> wakeup_timestamp_ns
     pub start_time_ns: u64,
     /// Flag to control whether stat tracking is enabled. When false, update_from_event
     /// does no work, providing significant performance improvement when stats aren't needed.
@@ -85,7 +81,6 @@ impl Default for SharedStats {
             cpu_stats: BTreeMap::new(),
             process_stats: BTreeMap::new(),
             dsq_stats: BTreeMap::new(),
-            pending_wakeups: BTreeMap::new(),
             start_time_ns: crate::util::get_clock_value(libc::CLOCK_BOOTTIME),
             tracking_enabled: false, // Disabled by default for performance
         }
@@ -125,8 +120,6 @@ impl SharedStats {
                 self.handle_sched_wakeup(event)
             }
             bpf_intf::event_type_SCHED_MIGRATE => self.handle_sched_migrate(event),
-            bpf_intf::event_type_EXIT => self.handle_exit(event),
-            bpf_intf::event_type_EXEC => self.handle_exec(event),
             _ => {}
         }
     }
@@ -144,10 +137,13 @@ impl SharedStats {
         cpu_stats.cpu_id = cpu_id;
         cpu_stats.nr_switches += 1;
 
-        // Check if this thread was previously woken up (tracks per-TID to avoid
-        // losing wakeup events when multiple threads in same process wake up)
-        if let Some(wakeup_ts) = self.pending_wakeups.remove(&next_tid) {
-            let latency_ns = timestamp_ns.saturating_sub(wakeup_ts);
+        // Use wakeup timestamp from the BPF event directly rather than
+        // correlating wakeup/switch events in userspace. Multi-ringbuffer
+        // delivery can reorder events across CPUs, causing stale entries
+        // in pending_wakeups and massively inflated latency measurements.
+        let wakeup_ts = sched_switch.next_wakeup_ts;
+        if wakeup_ts > 0 && timestamp_ns > wakeup_ts {
+            let latency_ns = timestamp_ns - wakeup_ts;
 
             // Update CPU latency stats
             cpu_stats.total_latency_ns = cpu_stats.total_latency_ns.saturating_add(latency_ns);
@@ -209,11 +205,6 @@ impl SharedStats {
         // Note: wakeup.pid is actually the TID (Thread ID) in kernel scheduling events
         let tid = wakeup.pid as i32;
         let tgid = wakeup.tgid as i32; // Actual process ID
-        let timestamp_ns = event.ts;
-
-        // Store wakeup timestamp per-thread (TID) for accurate latency calculation
-        // This prevents losing wakeup events when multiple threads wake up before scheduling
-        self.pending_wakeups.insert(tid, timestamp_ns);
 
         // Update CPU wakeup count
         let cpu_stats = self.cpu_stats.entry(cpu_id).or_default();
@@ -239,24 +230,6 @@ impl SharedStats {
         let cpu_stats = self.cpu_stats.entry(cpu_id).or_default();
         cpu_stats.cpu_id = cpu_id;
         cpu_stats.nr_migrations += 1;
-    }
-
-    fn handle_exit(&mut self, event: &bpf_event) {
-        let exit = unsafe { &event.event.exit };
-        let tid = exit.pid as i32;
-
-        // Clean up stale wakeup timestamp to prevent TID reuse from causing
-        // inflated latency measurements
-        self.pending_wakeups.remove(&tid);
-    }
-
-    fn handle_exec(&mut self, event: &bpf_event) {
-        let exec = unsafe { &event.event.exec };
-        let tid = exec.pid as i32;
-
-        // Clean up wakeup timestamp on exec since the thread identity has changed
-        // Latency measurements from before exec() are not meaningful for the new program
-        self.pending_wakeups.remove(&tid);
     }
 
     /// Get CPU stats as JSON
