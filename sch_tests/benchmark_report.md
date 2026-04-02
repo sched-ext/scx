@@ -1,29 +1,32 @@
-# Scheduler Benchmark Report
-Generated on: Thu Apr  2 05:25:17 AM IST 2026
+# Scheduler Benchmark Report (Deep Analysis)
+Generated on: Thu Apr  2 08:21:29 AM IST 2026
 
-## 1. Throughput & Efficiency
+## 1. Throughput & Execution Efficiency
+*Higher Events/s and IPC is better. Lower Cache Misses and Compile Time is better.*
 
-| Scheduler | Sysbench (Events/s) | Cache Misses (%) | Kernel Compile (s) |
-|-----------|---------------------|------------------|--------------------|
-| scx_rlfifo | 12826.26 | 15.98 | 105.49 |
-| scx_rusty | 12772.64 | 20.40 | 102.98 |
-| scx_rustland | 12776.90 | 15.91 | 107.63 |
-| scx_rdtai | 12658.75 | 18.92 | 107.45 |
+| Scheduler | Sysbench (Events/s) | IPC (instr/cycle) | Cache Misses (%) | Kernel Compile (s) | Hackbench (s) |
+|-----------|----------------------|-------------------|------------------|--------------------|---------------|
+| scx_rlfifo | 13067.02 | 0.83 | 13.45 | 107.02 | 0.730 |
+| scx_rusty | 12799.96 | 0.87 | 18.29 | 107.33 | 1.043 |
+| scx_rustland | 12775.35 | 0.87 | 15.14 | 106.13 | 0.719 |
+| scx_rdtai | 12842.66 | 0.87 | 20.71 | 106.42 | 1.127 |
 
 ## 2. Wakeup Latencies (Schbench)
+*Time from thread wake to execution. Lower is better (microseconds).*
 
 | Scheduler | 50.0th (us) | 90.0th (us) | 99.0th (us) | 99.9th (us) |
 |-----------|-------------|-------------|-------------|-------------|
-| scx_rlfifo | 973 | 1005 | 1934 | 2014 |
-| scx_rusty | 365 | 1258 | 3132 | 6824 |
-| scx_rustland | 859 | 1630 | 2316 | 2996 |
-| scx_rdtai | 210 | 4488 | 9744 | 16928 |
+| scx_rlfifo | 965 | 1007 | 1990 | 2018 |
+| scx_rusty | 486 | 1550 | 4200 | 7816 |
+| scx_rustland | 851 | 1662 | 2412 | 3148 |
+| scx_rdtai | 221 | 4084 | 7960 | 12304 |
 
 ## 3. Request Latencies (Schbench)
+*Time from request start to completion. Lower is better (microseconds).*
 
 | Scheduler | 50.0th (us) | 90.0th (us) | 99.0th (us) | 99.9th (us) |
 |-----------|-------------|-------------|-------------|-------------|
-| scx_rlfifo | 10736 | 20704 | 36032 | 52288 |
-| scx_rusty | 10256 | 22560 | 42688 | 64320 |
-| scx_rustland | 9872 | 16544 | 30496 | 45248 |
-| scx_rdtai | 8944 | 11376 | 17888 | 26528 |
+| scx_rlfifo | 10288 | 19296 | 33344 | 48192 |
+| scx_rusty | 10320 | 21920 | 41664 | 64704 |
+| scx_rustland | 9968 | 16480 | 30304 | 45248 |
+| scx_rdtai | 9136 | 11344 | 16272 | 20960 |

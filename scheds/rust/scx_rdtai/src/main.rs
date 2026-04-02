@@ -653,6 +653,11 @@ impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         info!("Unregister {SCHEDULER_NAME} scheduler");
 
+        // Persist RL Q-Table to disk
+        if let Err(e) = self.tuner.save_to_disk() {
+            log::warn!("Failed to persist Q-Table to disk: {}", e);
+        }
+
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
         }

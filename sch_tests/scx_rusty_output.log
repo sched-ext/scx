@@ -1,17 +1,17 @@
-05:31:26 [0m[34m[INFO] [0mRunning scx_rusty (build ID: 1.1.0 x86_64-unknown-linux-gnu)
-05:31:26 [0m[34m[INFO] [0mNODE[00] mask= ffffff
-05:31:26 [0m[34m[INFO] [0m DOM[00] mask= 00f00f
-05:31:26 [0m[34m[INFO] [0m DOM[01] mask= ff0ff0
-05:31:26 [0m[34m[INFO] [0mlibbpf: struct_ops rusty: member cgroup_set_idle not found in kernel, skipping it as it's set to zero
+08:26:57 [0m[34m[INFO] [0mRunning scx_rusty (build ID: 1.1.0 x86_64-unknown-linux-gnu)
+08:26:57 [0m[34m[INFO] [0mNODE[00] mask= ffffff
+08:26:57 [0m[34m[INFO] [0m DOM[00] mask= 00f00f
+08:26:57 [0m[34m[INFO] [0m DOM[01] mask= ff0ff0
+08:26:57 [0m[34m[INFO] [0mlibbpf: struct_ops rusty: member cgroup_set_idle not found in kernel, skipping it as it's set to zero
 
-05:31:26 [0m[34m[INFO] [0mlibbpf: struct_ops rusty: member sub_attach not found in kernel, skipping it as it's set to zero
+08:26:57 [0m[34m[INFO] [0mlibbpf: struct_ops rusty: member sub_attach not found in kernel, skipping it as it's set to zero
 
-05:31:26 [0m[34m[INFO] [0mlibbpf: struct_ops rusty: member sub_detach not found in kernel, skipping it as it's set to zero
+08:26:57 [0m[34m[INFO] [0mlibbpf: struct_ops rusty: member sub_detach not found in kernel, skipping it as it's set to zero
 
-05:31:26 [0m[34m[INFO] [0mlibbpf: struct_ops rusty: member sub_cgroup_id not found in kernel, skipping it as it's set to zero
+08:26:57 [0m[34m[INFO] [0mlibbpf: struct_ops rusty: member sub_cgroup_id not found in kernel, skipping it as it's set to zero
 
-05:31:26 [0m[33m[WARN] [0mlibbpf: map 'rusty': BPF map skeleton link is uninitialized
+08:26:58 [0m[33m[WARN] [0mlibbpf: map 'rusty': BPF map skeleton link is uninitialized
 
-05:31:26 [0m[34m[INFO] [0mRusty scheduler started! Run `scx_rusty --monitor` for metrics.
-05:33:52 [0m[34m[INFO] [0mUnregister scx_rusty scheduler
-Error: Expected nonzero load transfer
+08:26:58 [0m[34m[INFO] [0mRusty scheduler started! Run `scx_rusty --monitor` for metrics.
+EXIT: unregistered from user space
+08:32:22 [0m[34m[INFO] [0mUnregister scx_rusty scheduler

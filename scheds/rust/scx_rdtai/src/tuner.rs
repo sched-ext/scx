@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::io::{Read, Write};
 
 use ::fb_procfs as procfs;
 use anyhow::anyhow;
@@ -86,6 +87,8 @@ pub struct Tuner {
     epsilon: f64,
 }
 
+const Q_TABLE_PATH: &str = "/var/lib/scx_rdtai_qtable.bin";
+
 impl Tuner {
     pub fn new(
         dom_group: Arc<DomainGroup>,
@@ -100,6 +103,14 @@ impl Tuner {
             .cpus_map
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
 
+        let q_matrix = match Self::load_from_file(Q_TABLE_PATH) {
+            Ok(m) => m,
+            Err(_) => {
+                info!("Initializing fresh Q-Matrix (Persistence file not found)");
+                vec![[0.0f64; 3]; 8192]
+            }
+        };
+
         Ok(Self {
             direct_greedy_mask: Cpumask::new(),
             kick_greedy_mask: Cpumask::new(),
@@ -112,9 +123,34 @@ impl Tuner {
             underutil_slice_ns,
             overutil_slice_ns,
             dom_group,
-            q_matrix: vec![[0.0f64; 3]; 8192],
+            q_matrix,
             epsilon: 0.05,
         })
+    }
+
+    pub fn save_to_disk(&self) -> Result<()> {
+        let mut file = std::fs::File::create(Q_TABLE_PATH)?;
+        for state in &self.q_matrix {
+            for val in state {
+                file.write_all(&val.to_le_bytes())?;
+            }
+        }
+        info!("RL Q-Table successfully persisted to {}", Q_TABLE_PATH);
+        Ok(())
+    }
+
+    fn load_from_file(path: &str) -> Result<Vec<[f64; 3]>> {
+        let mut file = std::fs::File::open(path)?;
+        let mut matrix = vec![[0.0f64; 3]; 8192];
+        let mut buf = [0u8; 8];
+        for state in 0..8192 {
+            for action in 0..3 {
+                file.read_exact(&mut buf)?;
+                matrix[state][action] = f64::from_le_bytes(buf);
+            }
+        }
+        info!("RL Q-Table successfully loaded from {}", path);
+        Ok(matrix)
     }
 
     /// Tabular Q-Learning Optimizer

@@ -92,6 +92,7 @@ const volatile u64 rdtai_pmu_event;
 
 /* base slice duration */
 volatile u64 slice_ns;
+volatile u32 epsilon_pm;
 
 struct bpfmask_wrapper {
 	struct bpf_cpumask __kptr *instance;
@@ -100,8 +101,6 @@ struct bpfmask_wrapper {
 struct rdtai_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
 };
-
-volatile u32 epsilon_pm;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
