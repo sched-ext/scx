@@ -3669,6 +3669,12 @@ int BPF_PROG(on_thermal_pressure, u32 cpu, u64 hw_pressure)
 #if P2DQ_CREATE_STRUCT_OPS
 s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 {
+	int err;
+
+	err = scx_lib_init();
+	if (err)
+		return err;
+
 	return p2dq_init_impl();
 }
 
