@@ -57,3 +57,7 @@ debug = 0
 incremental = false
 strip = true
 lto = false
+
+[patch.crates-io]
+libbpf-cargo = { git = "https://github.com/libbpf/libbpf-rs", rev = "bfa427053384c2dd1251a0f5ed98c473395aa52b" }
+libbpf-rs = { git = "https://github.com/libbpf/libbpf-rs", rev = "bfa427053384c2dd1251a0f5ed98c473395aa52b" }
