@@ -332,6 +332,36 @@ int BPF_KPROBE(scx_insert_vtime, struct task_struct *p, u64 dsq, u64 slice_ns,
 	return update_task_ctx(p, dsq, vtime, slice_ns);
 }
 
+/*
+ * __scx_bpf_dsq_insert_vtime takes a struct pointer as the second arg:
+ * struct scx_bpf_dsq_insert_vtime_args { u64 dsq_id, slice, vtime, enq_flags; }
+ * This is the current canonical vtime insert on 6.19+ kernels.
+ */
+SEC("kprobe/__scx_bpf_dsq_insert_vtime")
+int BPF_KPROBE(scx_insert_vtime_args, struct task_struct *p, void *args)
+{
+	if (!enable_bpf_events)
+		return 0;
+
+	struct task_ctx *tctx;
+
+	if (!(tctx = try_lookup_task_ctx(p)))
+		return -ENOENT;
+
+	u64 dsq_id = 0, slice = 0, vtime = 0;
+
+	bpf_probe_read_kernel(&dsq_id, sizeof(dsq_id), args);
+	bpf_probe_read_kernel(&slice, sizeof(slice), args + sizeof(u64));
+	bpf_probe_read_kernel(&vtime, sizeof(vtime), args + 2 * sizeof(u64));
+
+	tctx->dsq_insert_time = bpf_ktime_get_ns();
+	tctx->dsq_id	      = dsq_id;
+	tctx->dsq_vtime	      = vtime;
+	tctx->slice_ns	      = slice;
+
+	return 0;
+}
+
 SEC("kprobe/scx_bpf_dispatch_vtime")
 int BPF_KPROBE(scx_dispatch_vtime, struct task_struct *p, u64 dsq, u64 slice_ns,
 	       u64 vtime)
@@ -358,6 +388,12 @@ static int on_insert(struct task_struct *p, u64 dsq)
 
 SEC("kprobe/scx_bpf_dsq_insert")
 int BPF_KPROBE(scx_insert, struct task_struct *p, u64 dsq)
+{
+	return on_insert(p, dsq);
+}
+
+SEC("kprobe/scx_bpf_dsq_insert___v2")
+int BPF_KPROBE(scx_insert_v2, struct task_struct *p, u64 dsq)
 {
 	return on_insert(p, dsq);
 }
@@ -749,6 +785,10 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 			event->event.sched_switch.next_pid  = next->pid;
 			event->event.sched_switch.next_tgid = next->tgid;
 			event->event.sched_switch.next_prio = (int)next->prio;
+			// Pass wakeup timestamp directly so userspace doesn't
+			// need to correlate across ring buffers
+			event->event.sched_switch.next_wakeup_ts =
+				next_tctx ? next_tctx->wakeup_ts : 0;
 			record_real_comm(event->event.sched_switch.next_comm,
 					 next);
 
@@ -785,6 +825,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 			}
 		} else {
 			event->event.sched_switch.next_dsq_lat_us = 0;
+			event->event.sched_switch.next_wakeup_ts  = 0;
 			event->event.sched_switch.next_pid	  = 0;
 			event->event.sched_switch.next_tgid	  = 0;
 		}

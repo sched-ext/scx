@@ -205,8 +205,16 @@ fn attach_progs_selective(
         safe_attach!(skel.progs.scx_insert_vtime, "scx_insert_vtime");
         safe_attach!(skel.progs.scx_insert, "scx_insert");
         safe_attach!(skel.progs.scx_dsq_move, "scx_dsq_move");
+        safe_attach!(skel.progs.scx_dsq_move_vtime, "scx_dsq_move_vtime");
         safe_attach!(skel.progs.scx_dsq_move_set_vtime, "scx_dsq_move_set_vtime");
         safe_attach!(skel.progs.scx_dsq_move_set_slice, "scx_dsq_move_set_slice");
+        // v2 API variants (6.19+) - schedulers call these directly via compat macros
+        if compat::ksym_exists("scx_bpf_dsq_insert___v2")? {
+            safe_attach!(skel.progs.scx_insert_v2, "scx_insert_v2");
+        }
+        if compat::ksym_exists("__scx_bpf_dsq_insert_vtime")? {
+            safe_attach!(skel.progs.scx_insert_vtime_args, "scx_insert_vtime_args");
+        }
     } else {
         safe_attach!(skel.progs.scx_dispatch, "scx_dispatch");
         safe_attach!(skel.progs.scx_dispatch_vtime, "scx_dispatch_vtime");
@@ -219,6 +227,10 @@ fn attach_progs_selective(
             "scx_dispatch_from_dsq_set_slice"
         );
         safe_attach!(skel.progs.scx_dispatch_from_dsq, "scx_dispatch_from_dsq");
+        safe_attach!(
+            skel.progs.scx_dispatch_vtime_from_dsq,
+            "scx_dispatch_vtime_from_dsq"
+        );
     }
 
     // Optional probes
@@ -358,11 +370,25 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 if let Ok(link) = skel.progs.scx_dsq_move.attach() {
                     links.push(link);
                 }
+                if let Ok(link) = skel.progs.scx_dsq_move_vtime.attach() {
+                    links.push(link);
+                }
                 if let Ok(link) = skel.progs.scx_dsq_move_set_vtime.attach() {
                     links.push(link);
                 }
                 if let Ok(link) = skel.progs.scx_dsq_move_set_slice.attach() {
                     links.push(link);
+                }
+                // v2 API variants (6.19+)
+                if compat::ksym_exists("scx_bpf_dsq_insert___v2")? {
+                    if let Ok(link) = skel.progs.scx_insert_v2.attach() {
+                        links.push(link);
+                    }
+                }
+                if compat::ksym_exists("__scx_bpf_dsq_insert_vtime")? {
+                    if let Ok(link) = skel.progs.scx_insert_vtime_args.attach() {
+                        links.push(link);
+                    }
                 }
             } else {
                 if let Ok(link) = skel.progs.scx_dispatch.attach() {
@@ -378,6 +404,9 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                     links.push(link);
                 }
                 if let Ok(link) = skel.progs.scx_dispatch_from_dsq.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_dispatch_vtime_from_dsq.attach() {
                     links.push(link);
                 }
             }
