@@ -100,6 +100,11 @@ impl<'a> ArenaLib<'a> {
             bitmap: 0 as c_ulong,
         };
 
+        // Exclude memory-only NUMA nodes
+        if mask.into_iter().all(|&b| b == 0) {
+            return Ok(());
+        }
+
         let input = ProgramInput {
             context_in: Some(unsafe {
                 std::slice::from_raw_parts_mut(
