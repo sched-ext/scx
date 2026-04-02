@@ -1831,8 +1831,8 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 		     taskc->lat_cri, sys_stat.avg_lat_cri,
 		     taskc->perf_cri, sys_stat.avg_perf_cri);
 
-	scx_bpf_dump("  \\_ cpdom_id: %d   cgroup: %s[%llu] (%s)   task_status: %s\n",
-		     taskc->cpdom_id,
+	scx_bpf_dump("  \\_ cpdom_id: %d   scpu: %d   cgroup: %s[%llu] (%s)   task_status: %s\n",
+		     taskc->cpdom_id, taskc->suggested_cpu_id,
 		     cgrp_name, taskc->cgrp_id,
 		     (cgroup_throttled) ? "throttled" : "not throttled",
 		     (task_throttled) ? "throttled" : "not throttled");
@@ -2229,6 +2229,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 {
 	u64 now = scx_bpf_now();
 	int err;
+
+	err = scx_lib_init();
+	if (err)
+		return err;
 
 	/*
 	 * Create compute domains.

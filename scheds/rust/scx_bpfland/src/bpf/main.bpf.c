@@ -1389,6 +1389,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	int err, i;
 	u32 key = 0;
 
+	err = scx_lib_init();
+	if (err)
+		return err;
+
 	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
