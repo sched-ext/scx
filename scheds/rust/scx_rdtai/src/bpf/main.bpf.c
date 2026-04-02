@@ -101,60 +101,52 @@ struct rdtai_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
 };
 
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct rdtai_node);
-	__uint(max_entries, MAX_TREE_NODES);
-} rdtai_tree SEC(".maps");
+volatile u32 epsilon_pm;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
-	__type(value, struct rdtai_stats);
-	__uint(max_entries, 1);
-} global_rdtai_stats SEC(".maps");
+	__type(value, u32);
+	__uint(max_entries, 8192);
+} q_table SEC(".maps");
 
-static u32 walk_tree(struct task_struct *p, struct task_ctx *taskc, u32 *leaf_idx)
-{
-	u64 wait_ns = scx_bpf_now() - taskc->wait_at;
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct q_record);
+	__uint(max_entries, 24576); // 8192 states * 3 actions
+} q_rewards SEC(".maps");
 
-	/* --- ROOT LEVEL STARVATION PREVENTION (Hard limit 0.5s) --- */
-	if (wait_ns > 500000000ULL) {
-		if (debug >= 1)
-			bpf_printk("rdtai: STARVATION PREVENTED for task %s[%d] (wait: %llu)", p->comm, p->pid, wait_ns);
-		*leaf_idx = 0;
-		return 2; // Emergency Action: Run Now
-	}
+static inline u32 bucket_wait(u64 wait_ns) {
+	if (wait_ns < 50000) return 0;
+	if (wait_ns < 100000) return 1;
+	if (wait_ns < 500000) return 2;
+	if (wait_ns < 1000000) return 3;
+	if (wait_ns < 2000000) return 4;
+	if (wait_ns < 5000000) return 5;
+	if (wait_ns < 10000000) return 6;
+	return 7;
+}
 
-	u32 node_idx = 0;
-	struct rdtai_node *node;
+static inline u32 bucket_cache(u64 misses) {
+	if (misses < 10) return 0;
+	if (misses < 50) return 1;
+	if (misses < 200) return 2;
+	return 3;
+}
 
-	#pragma unroll
-	for (int i = 0; i < 10; i++) {
-		node = bpf_map_lookup_elem(&rdtai_tree, &node_idx);
-		if (!node) break;
+static inline u32 bucket_run(u64 ns) {
+	if (ns < 100000) return 0;
+	if (ns < 1000000) return 1;
+	if (ns < 5000000) return 2;
+	return 3;
+}
 
-		if (node->is_leaf) {
-			*leaf_idx = node_idx;
-			return node->leaf_action;
-		}
-
-		/* Weighted Linear Combination of all features */
-		s64 score = 0;
-		score += (s64)node->weights[FEAT_WAIT_TIME] * (s64)(wait_ns / 1000); // us
-		score += (s64)node->weights[FEAT_CACHE_MISSES] * (s64)taskc->cache_misses;
-		score += (s64)node->weights[FEAT_EXEC_TIME] * (s64)(taskc->last_burst / 1000); // us
-		score += (s64)node->weights[FEAT_LOAD] * (s64)(ravg_read(&taskc->dcyc_rd, scx_bpf_now(), load_half_life) >> RAVG_FRAC_BITS);
-
-		if (score < node->threshold)
-			node_idx = node->left_child;
-		else
-			node_idx = node->right_child;
-		
-		if (node_idx >= MAX_TREE_NODES) break;
-	}
-	return 0;
+static inline u32 bucket_freq(u64 freq) {
+	if (freq < 1000) return 0;
+	if (freq < 5000) return 1;
+	if (freq < 20000) return 2;
+	return 3;
 }
 
 struct {
@@ -357,18 +349,7 @@ static inline u32 weight_to_bucket_idx(u32 weight)
 	return weight * LB_LOAD_BUCKETS / LB_MAX_WEIGHT;
 }
 
-static void update_global_stats(u64 wait_ns, u64 cache_misses, u64 burst_ns, bool is_run)
-{
-	u32 zero = 0;
-	struct rdtai_stats *gs = bpf_map_lookup_elem(&global_rdtai_stats, &zero);
-	if (gs) {
-		__sync_fetch_and_add(&gs->total_wait_ns, wait_ns);
-		__sync_fetch_and_add(&gs->total_cache_misses, cache_misses);
-		__sync_fetch_and_add(&gs->total_burst_ns, burst_ns);
-		if (is_run)
-			__sync_fetch_and_add(&gs->tasks_run, 1);
-	}
-}
+
 
 static void task_load_adj(struct task_ctx *taskc,
 			  u64 now, bool runnable)
@@ -1001,12 +982,39 @@ s32 BPF_STRUCT_OPS(rdtai_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		goto enoent;
 
-	u32 node_idx = 0;
-	u32 action = walk_tree(p, taskc, &node_idx);
-	if (debug >= 1) {
-		bpf_printk("rdtai: task %s[%d] TA: %u (Node: %u, wait: %llu, burst: %llu, cache: %llu)", 
-				p->comm, p->pid, action, node_idx,
-				scx_bpf_now() - taskc->wait_at, taskc->last_burst, taskc->cache_misses);
+	u32 action = 0;
+	u64 current_wait_ns = scx_bpf_now() - taskc->wait_at;
+	taskc->last_wait_time = current_wait_ns;
+
+	if (current_wait_ns > 20000000) { // Starvation safety net (20ms)
+		action = 2; 
+		taskc->last_state_index = 0; // Don't care, forced action
+	} else {
+		u32 wait = bucket_wait(current_wait_ns);
+		u32 cache = bucket_cache(taskc->cache_misses);
+		u32 blocked = bucket_freq(taskc->blocked_freq);
+		u32 avg_run = bucket_run(taskc->avg_runtime);
+		u32 burst = bucket_run(taskc->last_burst);
+		u32 waker = bucket_freq(taskc->waker_freq);
+
+		u32 state_index = (wait << 10) | (cache << 8) | (blocked << 6) | (avg_run << 4) | (burst << 2) | waker;
+		taskc->last_state_index = state_index;
+
+		if (bpf_get_prandom_u32() % 100 < 5) {
+			// 5% Exploration
+			action = bpf_get_prandom_u32() % 3;
+		} else {
+			// 95% Exploitation
+			u32 *act = bpf_map_lookup_elem(&q_table, &state_index);
+			action = act ? *act : 0;
+		}
+	}
+	taskc->last_action = action;
+
+	if (debug >= 2) {
+		bpf_printk("rdtai: task %s[%d] TA: %u (State: %u, wait: %llu, burst: %llu, cache: %llu)", 
+				p->comm, p->pid, action, taskc->last_state_index,
+				current_wait_ns, taskc->last_burst, taskc->cache_misses);
 	}
 
 	if (action == 2) { // RDTAI_ACTION_RUN_IMMEDIATELY
@@ -1454,11 +1462,6 @@ void BPF_STRUCT_OPS(rdtai_dispatch, s32 cpu, struct task_struct *prev)
 		
 		pcpuc = lookup_pcpu_ctx(cpu);
 		if (pcpuc && pcpuc->last_idle_at) {
-			u64 idle_ns = scx_bpf_now() - pcpuc->last_idle_at;
-			u32 zero = 0;
-			struct rdtai_stats *gs = bpf_map_lookup_elem(&global_rdtai_stats, &zero);
-			if (gs)
-				__sync_fetch_and_add(&gs->total_idle_ns, idle_ns);
 			pcpuc->last_idle_at = 0;
 		}
 		return;
@@ -1652,8 +1655,19 @@ void BPF_STRUCT_OPS(rdtai_stopping, struct task_struct *p, bool runnable)
 	scx_pmu_read(p, rdtai_pmu_event, &cache_misses, true);
 	taskc->cache_misses = cache_misses;
 	
-	update_global_stats(0, cache_misses, taskc->last_burst, true);
 	stopping_update_vtime(p, taskc, domc);
+
+	// RL Reward Aggregation
+	s64 time_penalty = taskc->last_wait_time / 1000; // in us
+	s64 cache_penalty = taskc->cache_misses * 200;
+	s64 reward = -(time_penalty + cache_penalty);
+
+	u32 key = (taskc->last_state_index * 3) + taskc->last_action;
+	struct q_record *rec = bpf_map_lookup_elem(&q_rewards, &key);
+	if (rec) {
+		__sync_fetch_and_add(&rec->total_reward, reward);
+		__sync_fetch_and_add(&rec->count, 1);
+	}
 
 	if (!runnable) {
 		struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(bpf_get_smp_processor_id());
@@ -1674,7 +1688,7 @@ void BPF_STRUCT_OPS(rdtai_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!(domc = task_domain(taskc)))
 		return;
 
-	update_global_stats(now - taskc->wait_at, 0, 0, false);
+
 
 	task_load_adj(taskc, now, false);
 	dom_dcycle_adj(domc, taskc->weight, now, false);

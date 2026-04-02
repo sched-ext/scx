@@ -66,6 +66,11 @@ struct task_ctx {
 	u32 pid;
 
 	struct ravg_data dcyc_rd;
+
+	/* Q-Learning Context */
+	u32 last_state_index;
+	u32 last_action;
+	u64 last_wait_time;
 };
 
 /* XXXETSAL Same rationale as for dom_ptr. Remove once we dump Clang 18.*/

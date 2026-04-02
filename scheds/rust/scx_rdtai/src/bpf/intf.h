@@ -66,32 +66,9 @@ enum consts {
 	MAX_TREE_NODES = 32,
 };
 
-/* Aggregated system stats for Q-Learning Reward calculation */
-struct rdtai_stats {
-	u64 total_wait_ns;
-	u64 total_cache_misses;
-	u64 total_burst_ns;
-	u64 total_idle_ns;
-	u64 tasks_run;
-};
-
-/* Feature IDs */
-enum rdtai_feature {
-	FEAT_WAIT_TIME,
-	FEAT_CACHE_MISSES,
-	FEAT_EXEC_TIME,
-	FEAT_LOAD,
-	NR_FEATURES,
-};
-
-/* New AI Node: Decision based on weighted sum of ALL features */
-struct rdtai_node {
-	s32 weights[NR_FEATURES]; // Fixed-point weights (scaled by 100)
-	s64 threshold;
-	u32 left_child;
-	u32 right_child;
-	bool is_leaf;
-	u32 leaf_action;
+struct q_record {
+	s64 total_reward;
+	u32 count;
 };
 
 /* Statistics */

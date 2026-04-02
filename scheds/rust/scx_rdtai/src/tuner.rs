@@ -80,15 +80,10 @@ pub struct Tuner {
     kick_greedy_under: f64,
     proc_reader: procfs::ProcReader,
     prev_cpu_stats: BTreeMap<u32, procfs::CpuStat>,
-
+    
     // Q-Learning Parameters
-    q_weights: [f64; bpf_intf::rdtai_feature_NR_FEATURES as usize],
-    learning_rate: f64,
-    discount_factor: f64,
-    epsilon: f64, // Exploration rate
-
-    // Previous window stats for reward calculation
-    prev_gs: bpf_intf::rdtai_stats,
+    q_matrix: Vec<[f64; 3]>,
+    epsilon: f64,
 }
 
 impl Tuner {
@@ -117,102 +112,72 @@ impl Tuner {
             underutil_slice_ns,
             overutil_slice_ns,
             dom_group,
-
-            // Initial AI Weights
-            q_weights: [1.0, 5.0, 0.1, 10.0], 
-            learning_rate: 0.1,
-            discount_factor: 0.9,
-            epsilon: 0.1,
-
-            prev_gs: bpf_intf::rdtai_stats {
-                total_wait_ns: 0,
-                total_cache_misses: 0,
-                total_burst_ns: 0,
-                total_idle_ns: 0,
-                tasks_run: 0,
-            },
+            q_matrix: vec![[0.0f64; 3]; 8192],
+            epsilon: 0.05,
         })
     }
 
-    pub fn optimize_tree(&mut self, skel: &mut BpfSkel, avg_util: f64) -> Result<()> {
-        let tree_map = &mut skel.maps.rdtai_tree;
-        let stats_map = &mut skel.maps.global_rdtai_stats;
-
-        // 1. Fetch training data from BPF
-        let zero_key = [0u8; 4];
-        let gs_raw = stats_map.lookup(&zero_key, libbpf_rs::MapFlags::ANY)?
-            .ok_or_else(|| anyhow!("Failed to lookup global stats"))?;
-        let gs: bpf_intf::rdtai_stats = unsafe { 
-            std::ptr::read(gs_raw.as_ptr() as *const _) 
-        };
-
-        // 2. Calculate Reward (Difference since last window)
-        let tasks_run = gs.tasks_run.saturating_sub(self.prev_gs.tasks_run);
-        let wait_delta = gs.total_wait_ns.saturating_sub(self.prev_gs.total_wait_ns);
-        let cache_delta = gs.total_cache_misses.saturating_sub(self.prev_gs.total_cache_misses);
-
-        let avg_wait = if tasks_run > 0 { (wait_delta / tasks_run) as f64 } else { 0.0 };
-
-        // Reward Function: High Throughput - High Latency - High Cache Misses
-        let reward = (tasks_run as f64 * 100.0) - (avg_wait / 1000.0) - (cache_delta as f64 * 10.0);
-
-        // 3. Q-Learning Weight Update (Stochastic Gradient Descent style)
-        // Adjust wait_weight if latency was the biggest loss contributor
-        if avg_wait > 1_000_000.0 { // > 1ms
-            self.q_weights[bpf_intf::rdtai_feature_FEAT_WAIT_TIME as usize] += self.learning_rate * reward.signum();
-        }
-
-        // 4. Dynamic Slice Adjustment
-        // If system is thrashing (high cache misses), increase slice to maintain locality
-        if cache_delta > 1000 {
-            self.slice_ns = (self.slice_ns as f64 * 1.1).min(50_000_000.0) as u64; // Max 50ms
-        } else {
-            self.slice_ns = (self.slice_ns as f64 * 0.9).max(1_000_000.0) as u64; // Min 1ms
-        }
-
-        info!("RDTAI Training Pass - Reward: {:.2}, AvgWait: {:.2}us, CacheMiss: {}, Slice: {}ms", 
-              reward, avg_wait/1000.0, cache_delta, self.slice_ns/1000000);
-
-        // 5. Re-generate multi-metric Decision Tree and Log Weights
-        let mut nodes = Vec::with_capacity(15);
-        info!("--- RDTAI 15-Node Tree Learned Weights ---");
-        for i in 0..15 {
-            let mut node = bpf_intf::rdtai_node {
-                weights: [0; bpf_intf::rdtai_feature_NR_FEATURES as usize],
-                threshold: 1000, // Normalized threshold
-                left_child: (i * 2) + 1,
-                right_child: (i * 2) + 2,
-                is_leaf: i >= 7,
-                leaf_action: 0,
-            };
-
-            if node.is_leaf {
-                node.leaf_action = if i % 2 == 0 { 2 } else { 0 };
-                info!("  [Node {:2}] LEAF -> Action: {}", i, if node.leaf_action == 2 { "Run Now" } else { "Keep Local" });
-            } else {
-                for f in 0..bpf_intf::rdtai_feature_NR_FEATURES as usize {
-                    node.weights[f] = (self.q_weights[f] * 100.0) as i32;
+    /// Tabular Q-Learning Optimizer
+    /// Reads rewards from BPF, updates Q-Matrix, and pushes best actions to Q-Table.
+    pub fn optimize_q_table(&mut self, skel: &mut BpfSkel) -> Result<()> {
+        let q_rewards_map = &mut skel.maps.q_rewards;
+        let q_table_map = &mut skel.maps.q_table;
+        
+        let mut total_updates = 0;
+        
+        // Temporary buffer to clear elements
+        let zero_record = [0u8; 16]; // s64 + u32 + 4 bytes padding
+        
+        for state in 0..8192 {
+            for action in 0..3 {
+                let key: u32 = (state * 3) + action;
+                let key_bytes = key.to_ne_bytes();
+                
+                if let Ok(Some(val)) = q_rewards_map.lookup(&key_bytes, libbpf_rs::MapFlags::ANY) {
+                    // val is 16 bytes: 8 bytes total_reward (s64), 4 bytes count (u32), 4 bytes padding
+                    let mut tr_bytes = [0u8; 8];
+                    tr_bytes.copy_from_slice(&val[0..8]);
+                    let total_reward = i64::from_ne_bytes(tr_bytes);
+                    
+                    let mut count_bytes = [0u8; 4];
+                    count_bytes.copy_from_slice(&val[8..12]);
+                    let count = u32::from_ne_bytes(count_bytes);
+                    
+                    if count > 0 {
+                        let avg_reward = (total_reward as f64) / (count as f64);
+                        
+                        // Exponential Moving Average (Alpha = 0.1)
+                        self.q_matrix[state as usize][action as usize] = 
+                            0.9 * self.q_matrix[state as usize][action as usize] + 0.1 * avg_reward;
+                        
+                        // Clear it so kernel starts fresh counts
+                        let _ = q_rewards_map.update(&key_bytes, &zero_record, libbpf_rs::MapFlags::ANY);
+                        total_updates += 1;
+                    }
                 }
-                info!("  [Node {:2}] Weights: Wait:{}, Cache:{}, Burst:{}, Load:{} (Threshold: {})", 
-                      i, node.weights[0], node.weights[1], node.weights[2], node.weights[3], node.threshold);
             }
-            nodes.push(node);
+            
+            // Find best action
+            let mut best_action = 0;
+            let mut best_val = f64::NEG_INFINITY;
+            for action in 0..3 {
+                if self.q_matrix[state as usize][action] > best_val {
+                    best_val = self.q_matrix[state as usize][action];
+                    best_action = action as u32;
+                }
+            }
+            
+            let state_bytes = (state as u32).to_ne_bytes();
+            let action_bytes = best_action.to_ne_bytes();
+            let _ = q_table_map.update(&state_bytes, &action_bytes, libbpf_rs::MapFlags::ANY);
         }
-        info!("------------------------------------------");
-
-        // Push to Kernel
-        for (i, node) in nodes.iter().enumerate() {
-            let mut key = [0u8; 4];
-            key.copy_from_slice(&(i as u32).to_ne_bytes());
-            tree_map.update(&key, unsafe {
-                std::slice::from_raw_parts(node as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>())
-            }, libbpf_rs::MapFlags::ANY)?;
+        
+        if total_updates > 0 {
+            info!("RL Optimizer: Processed {} state-action rewards and updated Q-Table.", total_updates);
         }
-
-        self.prev_gs = gs;
+        
         Ok(())
     }
-
 
     /// Apply a step in the Tuner by:
     ///
@@ -244,8 +209,12 @@ impl Tuner {
         avg_util /= self.dom_group.weight() as f64;
         self.fully_utilized = avg_util >= 0.99999;
 
-        // Optimize the AI Decision Tree based on current utilization (Loss Function)
-        self.optimize_tree(skel, avg_util)?;
+        // Run RL Optimization step
+        self.optimize_q_table(skel)?;
+
+        // Epsilon Decay: Reduce exploration rate over time down to 0.5%
+        self.epsilon = (self.epsilon * 0.95).max(0.005);
+        skel.maps.bss_data.as_mut().unwrap().epsilon_pm = (self.epsilon * 1000.0) as u32;
 
         self.direct_greedy_mask.clear_all();
         self.kick_greedy_mask.clear_all();

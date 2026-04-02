@@ -31,12 +31,32 @@ cat <<EOF > "$RESULT_FILE"
 # Scheduler Benchmark Report
 Generated on: $(date)
 
-| Scheduler | Sysbench (Events/s) | Schbench Median (us) | Schbench 99th (us) | Cache Misses (%) | Kernel Compile (s) |
-|-----------|----------------------|----------------------|--------------------|------------------|-------------------|
+## 1. Throughput & Efficiency
+
+| Scheduler | Sysbench (Events/s) | Cache Misses (%) | Kernel Compile (s) |
+|-----------|---------------------|------------------|--------------------|
 EOF
 
-echo "Starting Benchmarking Suite..." | tee -a "$LOG_FILE"
-echo "--------------------------------" | tee -a "$LOG_FILE"
+# Temporary files for cleanly separating latency tables in the report
+WAKEUP_TABLE=$(mktemp)
+REQ_TABLE=$(mktemp)
+
+cat <<EOF > "$WAKEUP_TABLE"
+## 2. Wakeup Latencies (Schbench)
+
+| Scheduler | 50.0th (us) | 90.0th (us) | 99.0th (us) | 99.9th (us) |
+|-----------|-------------|-------------|-------------|-------------|
+EOF
+
+cat <<EOF > "$REQ_TABLE"
+## 3. Request Latencies (Schbench)
+
+| Scheduler | 50.0th (us) | 90.0th (us) | 99.0th (us) | 99.9th (us) |
+|-----------|-------------|-------------|-------------|-------------|
+EOF
+
+echo "Starting Benchmarking Suite (Warmup + Recording Runs)..." | tee -a "$LOG_FILE"
+echo "--------------------------------------------------------" | tee -a "$LOG_FILE"
 
 for SCHED in "${SCHEDULERS[@]}"; do
     echo "Testing Scheduler: $SCHED" | tee -a "$LOG_FILE"
@@ -48,62 +68,100 @@ for SCHED in "${SCHEDULERS[@]}"; do
     
     if ! ps -p $SCHED_PID > /dev/null; then
         echo "  [ERROR] $SCHED failed to start." | tee -a "$LOG_FILE"
-        echo "| $SCHED | FAILED | FAILED | FAILED | FAILED | FAILED |" >> "$RESULT_FILE"
+        echo "| $SCHED | FAILED | FAILED | FAILED |" >> "$RESULT_FILE"
+        echo "| $SCHED | FAILED | FAILED | FAILED | FAILED |" >> "$WAKEUP_TABLE"
+        echo "| $SCHED | FAILED | FAILED | FAILED | FAILED |" >> "$REQ_TABLE"
         continue
     fi
 
     # 2. Sysbench
-    echo "  -> Running Sysbench..." | tee -a "$LOG_FILE"
-    SYS_OUT=$(sysbench cpu --cpu-max-prime=20000 --threads=$(nproc) run)
-    EPS=$(echo "$SYS_OUT" | grep "events per second:" | awk '{print $4}')
-    echo "     Result: $EPS events/s" | tee -a "$LOG_FILE"
+    for RUN in 1 2; do
+        echo "  -> Running Sysbench (Run $RUN/2)..." | tee -a "$LOG_FILE"
+        # Increased load: max prime 30000, 20 seconds
+        SYS_OUT=$(sysbench cpu --cpu-max-prime=30000 --time=20 --threads=$(nproc) run)
+        if [ $RUN -eq 2 ]; then
+            EPS=$(echo "$SYS_OUT" | grep "events per second:" | awk '{print $4}')
+            echo "     Result: $EPS events/s" | tee -a "$LOG_FILE"
+        fi
+    done
 
     # 3. Schbench
-    echo "  -> Running Schbench..." | tee -a "$LOG_FILE"
-    SCH_OUT=$($TEST_DIR/schbench/schbench -m 8 -t 4 -r 10 2>&1)
-    
-    # RESTORED: Print the full detailed schbench output to the screen and log
-    echo "$SCH_OUT" | tee -a "$LOG_FILE"
-    
-    P50=$(echo "$SCH_OUT" | grep -A 5 "Wakeup Latencies" | grep "50.0th:" | sed 's/.*50.0th:[[:space:]]*//' | awk '{print $1}')
-    P99=$(echo "$SCH_OUT" | grep -A 5 "Wakeup Latencies" | grep "99.0th:" | sed 's/.*99.0th:[[:space:]]*//' | awk '{print $1}')
-    echo "     Parsed Result: Median=${P50}us, P99=${P99}us" | tee -a "$LOG_FILE"
+    for RUN in 1 2; do
+        echo "  -> Running Schbench (Run $RUN/2)..." | tee -a "$LOG_FILE"
+        # Increased load: -m 8 -t 4, running for 30 seconds
+        SCH_OUT=$($TEST_DIR/schbench/schbench -m 8 -t 4 -r 30 2>&1)
+        
+        if [ $RUN -eq 2 ]; then
+            echo "$SCH_OUT" | tee -a "$LOG_FILE"
+            
+            W_P50=$(echo "$SCH_OUT" | grep -A 6 "Wakeup Latencies" | grep "50.0th:" | tail -1 | sed 's/.*50.0th:[[:space:]]*//' | awk '{print $1}')
+            W_P90=$(echo "$SCH_OUT" | grep -A 6 "Wakeup Latencies" | grep "90.0th:" | tail -1 | sed 's/.*90.0th:[[:space:]]*//' | awk '{print $1}')
+            W_P99=$(echo "$SCH_OUT" | grep -A 6 "Wakeup Latencies" | grep "99.0th:" | tail -1 | sed 's/.*99.0th:[[:space:]]*//' | awk '{print $1}')
+            W_P999=$(echo "$SCH_OUT" | grep -A 6 "Wakeup Latencies" | grep "99.9th:" | tail -1 | sed 's/.*99.9th:[[:space:]]*//' | awk '{print $1}')
+
+            R_P50=$(echo "$SCH_OUT" | grep -A 6 "Request Latencies" | grep "50.0th:" | tail -1 | sed 's/.*50.0th:[[:space:]]*//' | awk '{print $1}')
+            R_P90=$(echo "$SCH_OUT" | grep -A 6 "Request Latencies" | grep "90.0th:" | tail -1 | sed 's/.*90.0th:[[:space:]]*//' | awk '{print $1}')
+            R_P99=$(echo "$SCH_OUT" | grep -A 6 "Request Latencies" | grep "99.0th:" | tail -1 | sed 's/.*99.0th:[[:space:]]*//' | awk '{print $1}')
+            R_P999=$(echo "$SCH_OUT" | grep -A 6 "Request Latencies" | grep "99.9th:" | tail -1 | sed 's/.*99.9th:[[:space:]]*//' | awk '{print $1}')
+
+            echo "     Parsed Wakeup Latencies: Median=${W_P50}us, P90=${W_P90}us, P99=${W_P99}us, P99.9=${W_P999}us" | tee -a "$LOG_FILE"
+            echo "     Parsed Request Latencies: Median=${R_P50}us, P90=${R_P90}us, P99=${R_P99}us, P99.9=${R_P999}us" | tee -a "$LOG_FILE"
+        fi
+    done
 
     # 4. Perf (Under Load)
-    echo "  -> Running Perf..." | tee -a "$LOG_FILE"
-    PERF_OUT=$(perf stat -e cache-misses,cache-references -- sysbench cpu --cpu-max-prime=10000 --threads=$(nproc) run 2>&1)
-    CACHE_PCT=$(echo "$PERF_OUT" | grep "cache-misses" | awk '{print $4}' | tr -d '%')
-    echo "     Result: ${CACHE_PCT:-N/A}% misses" | tee -a "$LOG_FILE"
+    for RUN in 1 2; do
+        echo "  -> Running Perf (Run $RUN/2)..." | tee -a "$LOG_FILE"
+        PERF_OUT=$(perf stat -e cache-misses,cache-references -- sysbench cpu --cpu-max-prime=20000 --time=20 --threads=$(nproc) run 2>&1)
+        if [ $RUN -eq 2 ]; then
+            CACHE_PCT=$(echo "$PERF_OUT" | grep "cache-misses" | awk '{print $4}' | tr -d '%')
+            echo "     Result: ${CACHE_PCT:-N/A}% misses" | tee -a "$LOG_FILE"
+        fi
+    done
 
     # 5. Kernel Compilation (Run as normal user)
-    echo "  -> Running Kernel Compile as $NORMAL_USER..." | tee -a "$LOG_FILE"
-    cd "$LINUX_DIR"
-    sudo -u $NORMAL_USER make mrproper > /dev/null 2>&1
-    sudo -u $NORMAL_USER make defconfig > /dev/null 2>&1
-    
-    START_TIME=$(date +%s.%N)
-    sudo -u $NORMAL_USER make -j$(nproc) > "$TEST_DIR/last_kernel_build.log" 2>&1
-    EXIT_VAL=$?
-    END_TIME=$(date +%s.%N)
-    
-    if [ $EXIT_VAL -ne 0 ]; then
-        COMPILE_TIME="FAILED"
-        echo "     [ERROR] Kernel compile failed! Check last_kernel_build.log" | tee -a "$LOG_FILE"
-    else
-        COMPILE_TIME=$(echo "$END_TIME - $START_TIME" | bc | awk '{printf "%.2f", $0}')
-        echo "     Result: $COMPILE_TIME seconds" | tee -a "$LOG_FILE"
-    fi
-    cd "$BASE_DIR"
+    for RUN in 1 2; do
+        echo "  -> Running Kernel Compile as $NORMAL_USER (Run $RUN/2)..." | tee -a "$LOG_FILE"
+        cd "$LINUX_DIR"
+        sudo -u $NORMAL_USER make mrproper > /dev/null 2>&1
+        sudo -u $NORMAL_USER make defconfig > /dev/null 2>&1
+        
+        START_TIME=$(date +%s.%N)
+        sudo -u $NORMAL_USER make -j$(nproc) > "$TEST_DIR/last_kernel_build.log" 2>&1
+        EXIT_VAL=$?
+        END_TIME=$(date +%s.%N)
+        cd "$BASE_DIR"
+        
+        if [ $RUN -eq 2 ]; then
+            if [ $EXIT_VAL -ne 0 ]; then
+                COMPILE_TIME="FAILED"
+                echo "     [ERROR] Kernel compile failed! Check last_kernel_build.log" | tee -a "$LOG_FILE"
+            else
+                COMPILE_TIME=$(echo "$END_TIME - $START_TIME" | bc | awk '{printf "%.2f", $0}')
+                echo "     Result: $COMPILE_TIME seconds" | tee -a "$LOG_FILE"
+            fi
+        fi
+    done
 
     # 6. Stop Scheduler
     kill -SIGINT $SCHED_PID
     wait $SCHED_PID 2>/dev/null
     
     # 7. Record Results
-    echo "| $SCHED | ${EPS:-N/A} | ${P50:-N/A} | ${P99:-N/A} | ${CACHE_PCT:-N/A} | $COMPILE_TIME |" >> "$RESULT_FILE"
-    echo "--------------------------------" | tee -a "$LOG_FILE"
+    echo "| $SCHED | ${EPS:-N/A} | ${CACHE_PCT:-N/A} | $COMPILE_TIME |" >> "$RESULT_FILE"
+    echo "| $SCHED | ${W_P50:-N/A} | ${W_P90:-N/A} | ${W_P99:-N/A} | ${W_P999:-N/A} |" >> "$WAKEUP_TABLE"
+    echo "| $SCHED | ${R_P50:-N/A} | ${R_P90:-N/A} | ${R_P99:-N/A} | ${R_P999:-N/A} |" >> "$REQ_TABLE"
+    echo "--------------------------------------------------------" | tee -a "$LOG_FILE"
     sleep 2
 done
+
+# Assemble Final Report
+echo "" >> "$RESULT_FILE"
+cat "$WAKEUP_TABLE" >> "$RESULT_FILE"
+echo "" >> "$RESULT_FILE"
+cat "$REQ_TABLE" >> "$RESULT_FILE"
+
+rm "$WAKEUP_TABLE" "$REQ_TABLE"
 
 echo "Benchmarking Complete!" | tee -a "$LOG_FILE"
 cat "$RESULT_FILE"

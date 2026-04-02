@@ -1,1614 +1,201 @@
-10:48:52 [0m[34m[INFO] [0mRunning scx_rdtai (build ID: 1.1.0 x86_64-unknown-linux-gnu)
-10:48:52 [0m[34m[INFO] [0mNODE[00] mask= ffffff
-10:48:52 [0m[34m[INFO] [0m DOM[00] mask= 00f00f
-10:48:52 [0m[34m[INFO] [0m DOM[01] mask= ff0ff0
-10:48:52 [0m[34m[INFO] [0mlibbpf: struct_ops rdtai: member cgroup_set_idle not found in kernel, skipping it as it's set to zero
+05:43:37 [0m[34m[INFO] [0mRunning scx_rdtai (build ID: 1.1.0 x86_64-unknown-linux-gnu)
+05:43:37 [0m[34m[INFO] [0mNODE[00] mask= ffffff
+05:43:37 [0m[34m[INFO] [0m DOM[00] mask= 00f00f
+05:43:37 [0m[34m[INFO] [0m DOM[01] mask= ff0ff0
+05:43:37 [0m[34m[INFO] [0mlibbpf: struct_ops rdtai: member cgroup_set_idle not found in kernel, skipping it as it's set to zero
 
-10:48:52 [0m[34m[INFO] [0mlibbpf: struct_ops rdtai: member sub_attach not found in kernel, skipping it as it's set to zero
+05:43:37 [0m[34m[INFO] [0mlibbpf: struct_ops rdtai: member sub_attach not found in kernel, skipping it as it's set to zero
 
-10:48:52 [0m[34m[INFO] [0mlibbpf: struct_ops rdtai: member sub_detach not found in kernel, skipping it as it's set to zero
+05:43:37 [0m[34m[INFO] [0mlibbpf: struct_ops rdtai: member sub_detach not found in kernel, skipping it as it's set to zero
 
-10:48:52 [0m[34m[INFO] [0mlibbpf: struct_ops rdtai: member sub_cgroup_id not found in kernel, skipping it as it's set to zero
+05:43:37 [0m[34m[INFO] [0mlibbpf: struct_ops rdtai: member sub_cgroup_id not found in kernel, skipping it as it's set to zero
 
-10:48:52 [0m[34m[INFO] [0mDefault 4-level RDTAI decision tree pushed to kernel!
-10:48:52 [0m[33m[WARN] [0mlibbpf: map 'rdtai': BPF map skeleton link is uninitialized
+05:43:37 [0m[34m[INFO] [0mDefault RL Q-Table initialized and pushed to kernel!
+05:43:37 [0m[33m[WARN] [0mlibbpf: map 'rdtai': BPF map skeleton link is uninitialized
 
-10:48:53 [0m[34m[INFO] [0mRusty scheduler started! Run `scx_rdtai --monitor` for metrics.
-10:48:55 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 5.27%):
-10:48:55 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:48:55 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:48:55 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:48:55 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:48:55 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:48:55 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:48:55 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:48:55 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:48:55 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:48:55 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:48:55 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:48:55 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:48:55 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:48:55 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:48:55 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:48:55 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:48:55 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:48:55 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:48:55 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:48:55 [0m[34m[INFO] [0m----------------------------------------------
-10:48:57 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 5.35%):
-10:48:57 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:48:57 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:48:57 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:48:57 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:48:57 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:48:57 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:48:57 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:48:57 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:48:57 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:48:57 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:48:57 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:48:57 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:48:57 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:48:57 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:48:57 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:48:57 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:48:57 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:48:57 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:48:57 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:48:57 [0m[34m[INFO] [0m----------------------------------------------
-10:48:59 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 59.23%):
-10:48:59 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:48:59 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:48:59 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:48:59 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:48:59 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:48:59 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:48:59 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:48:59 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:48:59 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:48:59 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:48:59 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:48:59 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:48:59 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:48:59 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:48:59 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:48:59 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:48:59 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:48:59 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:48:59 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:48:59 [0m[34m[INFO] [0m----------------------------------------------
-10:49:01 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.73%):
-10:49:01 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:01 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:01 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:01 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:01 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:01 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:01 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:01 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:01 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:01 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:01 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:01 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:01 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:01 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:01 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:01 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:01 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:01 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:01 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:01 [0m[34m[INFO] [0m----------------------------------------------
-10:49:03 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.58%):
-10:49:03 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:03 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:03 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:03 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:03 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:03 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:03 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:03 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:03 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:03 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:03 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:03 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:03 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:03 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:03 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:03 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:03 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:03 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:03 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:03 [0m[34m[INFO] [0m----------------------------------------------
-10:49:05 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.62%):
-10:49:05 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:05 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:05 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:05 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:05 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:05 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:05 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:05 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:05 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:05 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:05 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:05 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:05 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:05 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:05 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:05 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:05 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:05 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:05 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:05 [0m[34m[INFO] [0m----------------------------------------------
-10:49:07 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.71%):
-10:49:07 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:07 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:07 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:07 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:07 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:07 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:07 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:07 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:07 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:07 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:07 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:07 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:07 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:07 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:07 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:07 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:07 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:07 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:07 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:07 [0m[34m[INFO] [0m----------------------------------------------
-10:49:09 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.48%):
-10:49:09 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:09 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:09 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:09 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:09 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:09 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:09 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:09 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:09 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:09 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:09 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:09 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:09 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:09 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:09 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:09 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:09 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:09 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:09 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:09 [0m[34m[INFO] [0m----------------------------------------------
-10:49:11 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.73%):
-10:49:11 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:11 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:11 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:11 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:11 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:11 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:11 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:11 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:11 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:11 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:11 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:11 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:11 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:11 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:11 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:11 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:11 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:11 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:11 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:11 [0m[34m[INFO] [0m----------------------------------------------
-10:49:13 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.75%):
-10:49:13 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:13 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:13 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:13 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:13 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:13 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:13 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:13 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:13 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:13 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:13 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:13 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:13 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:13 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:13 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:13 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:13 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:13 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:13 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:13 [0m[34m[INFO] [0m----------------------------------------------
-10:49:15 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.88%):
-10:49:15 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:15 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:15 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:15 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:15 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:15 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:15 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:15 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:15 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:15 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:15 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:15 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:15 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:15 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:15 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:15 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:15 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:15 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:15 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:15 [0m[34m[INFO] [0m----------------------------------------------
-10:49:17 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.75%):
-10:49:17 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:17 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:17 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:17 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:17 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:17 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:17 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:17 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:17 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:17 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:17 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:17 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:17 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:17 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:17 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:17 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:17 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:17 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:17 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:17 [0m[34m[INFO] [0m----------------------------------------------
-10:49:19 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 97.62%):
-10:49:19 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:19 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:19 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:19 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:19 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:19 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:19 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:19 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:19 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:19 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:19 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:19 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:19 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:19 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:19 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:19 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:19 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:19 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:19 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:19 [0m[34m[INFO] [0m----------------------------------------------
-10:49:21 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.61%):
-10:49:21 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:21 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:21 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:21 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:21 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:21 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:21 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:21 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:21 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:21 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:21 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:21 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:21 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:21 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:21 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:21 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:21 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:21 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:21 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:21 [0m[34m[INFO] [0m----------------------------------------------
-10:49:23 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.52%):
-10:49:23 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:23 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:23 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:23 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:23 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:23 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:23 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:23 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:23 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:23 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:23 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:23 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:23 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:23 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:23 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:23 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:23 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:23 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:23 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:23 [0m[34m[INFO] [0m----------------------------------------------
-10:49:25 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.54%):
-10:49:25 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:25 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:25 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:25 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:25 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:25 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:25 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:25 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:25 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:25 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:25 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:25 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:25 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:25 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:25 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:25 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:25 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:25 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:25 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:25 [0m[34m[INFO] [0m----------------------------------------------
-10:49:27 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.52%):
-10:49:27 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:27 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:27 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:27 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:27 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:27 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:27 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:27 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:27 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:27 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:27 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:27 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:27 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:27 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:27 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:27 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:27 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:27 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:27 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:27 [0m[34m[INFO] [0m----------------------------------------------
-10:49:29 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 51.61%):
-10:49:29 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:49:29 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:29 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:29 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:29 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:49:29 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:29 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:29 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:29 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:29 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:29 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:29 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:29 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:29 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:29 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:29 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:29 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:29 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:29 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:29 [0m[34m[INFO] [0m----------------------------------------------
-10:49:31 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 13.75%):
-10:49:31 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:49:31 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:49:31 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:31 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:31 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:49:31 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:49:31 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:49:31 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:31 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:31 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:31 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:31 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:31 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:31 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:31 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:31 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:31 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:31 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:31 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:31 [0m[34m[INFO] [0m----------------------------------------------
-10:49:33 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 13.19%):
-10:49:33 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:49:33 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:49:33 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:33 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:33 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:49:33 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:49:33 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:49:33 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:33 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:33 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:33 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:33 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:33 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:33 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:33 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:33 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:33 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:33 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:33 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:33 [0m[34m[INFO] [0m----------------------------------------------
-10:49:35 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 22.04%):
-10:49:35 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:49:35 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:49:35 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:35 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:35 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:49:35 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:49:35 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:49:35 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:35 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:35 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:35 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:35 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:35 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:35 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:35 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:35 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:35 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:35 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:35 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:35 [0m[34m[INFO] [0m----------------------------------------------
-10:49:37 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 10.51%):
-10:49:37 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:49:37 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:49:37 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:37 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:37 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:49:37 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:49:37 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:49:37 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:37 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:37 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:37 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:37 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:37 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:37 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:37 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:37 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:37 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:37 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:37 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:37 [0m[34m[INFO] [0m----------------------------------------------
-10:49:39 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 67.04%):
-10:49:39 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:49:39 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:39 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:39 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:39 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:49:39 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:39 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:39 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:39 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:39 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:39 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:39 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:39 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:39 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:39 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:39 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:39 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:39 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:39 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:39 [0m[34m[INFO] [0m----------------------------------------------
-10:49:41 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.83%):
-10:49:41 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:41 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:41 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:41 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:41 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:41 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:41 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:41 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:41 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:41 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:41 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:41 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:41 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:41 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:41 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:41 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:41 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:41 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:41 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:41 [0m[34m[INFO] [0m----------------------------------------------
-10:49:43 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.70%):
-10:49:43 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:43 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:43 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:43 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:43 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:43 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:43 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:43 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:43 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:43 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:43 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:43 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:43 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:43 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:43 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:43 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:43 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:43 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:43 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:43 [0m[34m[INFO] [0m----------------------------------------------
-10:49:45 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.69%):
-10:49:45 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:45 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:45 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:45 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:45 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:45 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:45 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:45 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:45 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:45 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:45 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:45 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:45 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:45 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:45 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:45 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:45 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:45 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:45 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:45 [0m[34m[INFO] [0m----------------------------------------------
-10:49:47 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.89%):
-10:49:47 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:47 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:47 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:47 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:47 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:47 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:47 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:47 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:47 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:47 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:47 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:47 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:47 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:47 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:47 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:47 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:47 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:47 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:47 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:47 [0m[34m[INFO] [0m----------------------------------------------
-10:49:49 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.27%):
-10:49:49 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:49 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:49 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:49 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:49 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:49 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:49 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:49 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:49 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:49 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:49 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:49 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:49 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:49 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:49 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:49 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:49 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:49 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:49 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:49 [0m[34m[INFO] [0m----------------------------------------------
-10:49:51 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.39%):
-10:49:51 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:51 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:51 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:51 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:51 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:51 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:51 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:51 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:51 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:51 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:51 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:51 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:51 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:51 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:51 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:51 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:51 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:51 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:51 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:51 [0m[34m[INFO] [0m----------------------------------------------
-10:49:53 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.19%):
-10:49:53 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:53 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:53 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:53 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:53 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:53 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:53 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:53 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:53 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:53 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:53 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:53 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:53 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:53 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:53 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:53 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:53 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:53 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:53 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:53 [0m[34m[INFO] [0m----------------------------------------------
-10:49:55 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.35%):
-10:49:55 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:55 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:55 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:55 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:55 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:55 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:55 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:55 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:55 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:55 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:55 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:55 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:55 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:55 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:55 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:55 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:55 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:55 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:55 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:55 [0m[34m[INFO] [0m----------------------------------------------
-10:49:57 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.60%):
-10:49:57 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:57 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:57 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:57 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:57 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:57 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:57 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:57 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:57 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:57 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:57 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:57 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:57 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:57 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:57 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:57 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:57 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:57 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:57 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:57 [0m[34m[INFO] [0m----------------------------------------------
-10:49:59 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.16%):
-10:49:59 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:49:59 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:49:59 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:49:59 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:49:59 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:49:59 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:49:59 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:49:59 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:49:59 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:49:59 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:49:59 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:49:59 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:49:59 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:49:59 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:49:59 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:49:59 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:49:59 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:49:59 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:49:59 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:49:59 [0m[34m[INFO] [0m----------------------------------------------
-10:50:01 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.44%):
-10:50:01 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:01 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:01 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:01 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:01 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:01 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:01 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:01 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:01 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:01 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:01 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:01 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:01 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:01 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:01 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:01 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:01 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:01 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:01 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:01 [0m[34m[INFO] [0m----------------------------------------------
-10:50:03 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.83%):
-10:50:03 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:03 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:03 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:03 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:03 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:03 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:03 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:03 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:03 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:03 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:03 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:03 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:03 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:03 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:03 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:03 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:03 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:03 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:03 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:03 [0m[34m[INFO] [0m----------------------------------------------
-10:50:05 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.75%):
-10:50:05 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:05 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:05 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:05 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:05 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:05 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:05 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:05 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:05 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:05 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:05 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:05 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:05 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:05 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:05 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:05 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:05 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:05 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:05 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:05 [0m[34m[INFO] [0m----------------------------------------------
-10:50:07 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.88%):
-10:50:07 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:07 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:07 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:07 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:07 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:07 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:07 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:07 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:07 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:07 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:07 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:07 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:07 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:07 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:07 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:07 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:07 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:07 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:07 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:07 [0m[34m[INFO] [0m----------------------------------------------
-10:50:09 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.25%):
-10:50:09 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:09 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:09 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:09 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:09 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:09 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:09 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:09 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:09 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:09 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:09 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:09 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:09 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:09 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:09 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:09 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:09 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:09 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:09 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:09 [0m[34m[INFO] [0m----------------------------------------------
-10:50:11 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.08%):
-10:50:11 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:11 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:11 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:11 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:11 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:11 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:11 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:11 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:11 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:11 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:11 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:11 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:11 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:11 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:11 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:11 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:11 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:11 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:11 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:11 [0m[34m[INFO] [0m----------------------------------------------
-10:50:13 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.83%):
-10:50:13 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:13 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:13 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:13 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:13 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:13 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:13 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:13 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:13 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:13 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:13 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:13 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:13 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:13 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:13 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:13 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:13 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:13 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:13 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:13 [0m[34m[INFO] [0m----------------------------------------------
-10:50:15 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.52%):
-10:50:15 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:15 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:15 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:15 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:15 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:15 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:15 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:15 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:15 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:15 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:15 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:15 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:15 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:15 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:15 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:15 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:15 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:15 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:15 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:15 [0m[34m[INFO] [0m----------------------------------------------
-10:50:17 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.40%):
-10:50:17 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:17 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:17 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:17 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:17 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:17 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:17 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:17 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:17 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:17 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:17 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:17 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:17 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:17 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:17 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:17 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:17 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:17 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:17 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:17 [0m[34m[INFO] [0m----------------------------------------------
-10:50:19 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.04%):
-10:50:19 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:19 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:19 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:19 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:19 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:19 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:19 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:19 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:19 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:19 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:19 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:19 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:19 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:19 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:19 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:19 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:19 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:19 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:19 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:19 [0m[34m[INFO] [0m----------------------------------------------
-10:50:21 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.66%):
-10:50:21 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:21 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:21 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:21 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:21 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:21 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:21 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:21 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:21 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:21 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:21 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:21 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:21 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:21 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:21 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:21 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:21 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:21 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:21 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:21 [0m[34m[INFO] [0m----------------------------------------------
-10:50:23 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 97.93%):
-10:50:23 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:23 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:23 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:23 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:23 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:23 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:23 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:23 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:23 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:23 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:23 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:23 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:23 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:23 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:23 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:23 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:23 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:23 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:23 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:23 [0m[34m[INFO] [0m----------------------------------------------
-10:50:25 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.14%):
-10:50:25 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:25 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:25 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:25 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:25 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:25 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:25 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:25 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:25 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:25 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:25 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:25 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:25 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:25 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:25 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:25 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:25 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:25 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:25 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:25 [0m[34m[INFO] [0m----------------------------------------------
-10:50:27 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.71%):
-10:50:27 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:27 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:27 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:27 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:27 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:27 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:27 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:27 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:27 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:27 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:27 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:27 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:27 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:27 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:27 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:27 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:27 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:27 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:27 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:27 [0m[34m[INFO] [0m----------------------------------------------
-10:50:29 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.25%):
-10:50:29 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:29 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:29 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:29 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:29 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:29 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:29 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:29 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:29 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:29 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:29 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:29 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:29 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:29 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:29 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:29 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:29 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:29 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:29 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:29 [0m[34m[INFO] [0m----------------------------------------------
-10:50:31 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.44%):
-10:50:31 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:31 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:31 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:31 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:31 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:31 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:31 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:31 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:31 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:31 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:31 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:31 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:31 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:31 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:31 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:31 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:31 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:31 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:31 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:31 [0m[34m[INFO] [0m----------------------------------------------
-10:50:33 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.35%):
-10:50:33 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:33 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:33 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:33 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:33 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:33 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:33 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:33 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:33 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:33 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:33 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:33 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:33 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:33 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:33 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:33 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:33 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:33 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:33 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:33 [0m[34m[INFO] [0m----------------------------------------------
-10:50:35 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.83%):
-10:50:35 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:35 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:35 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:35 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:35 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:35 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:35 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:35 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:35 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:35 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:35 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:35 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:35 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:35 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:35 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:35 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:35 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:35 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:35 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:35 [0m[34m[INFO] [0m----------------------------------------------
-10:50:37 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.21%):
-10:50:37 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:37 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:37 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:37 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:37 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:37 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:37 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:37 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:37 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:37 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:37 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:37 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:37 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:37 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:37 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:37 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:37 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:37 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:37 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:37 [0m[34m[INFO] [0m----------------------------------------------
-10:50:39 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.08%):
-10:50:39 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:39 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:39 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:39 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:39 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:39 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:39 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:39 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:39 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:39 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:39 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:39 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:39 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:39 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:39 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:39 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:39 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:39 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:39 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:39 [0m[34m[INFO] [0m----------------------------------------------
-10:50:41 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.95%):
-10:50:41 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:41 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:41 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:41 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:41 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:41 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:41 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:41 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:41 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:41 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:41 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:41 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:41 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:41 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:41 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:41 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:41 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:41 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:41 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:41 [0m[34m[INFO] [0m----------------------------------------------
-10:50:43 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.35%):
-10:50:43 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:43 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:43 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:43 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:43 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:43 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:43 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:43 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:43 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:43 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:43 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:43 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:43 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:43 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:43 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:43 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:43 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:43 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:43 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:43 [0m[34m[INFO] [0m----------------------------------------------
-10:50:45 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.98%):
-10:50:45 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:45 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:45 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:45 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:45 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:45 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:45 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:45 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:45 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:45 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:45 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:45 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:45 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:45 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:45 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:45 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:45 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:45 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:45 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:45 [0m[34m[INFO] [0m----------------------------------------------
-10:50:47 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.25%):
-10:50:47 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:47 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:47 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:47 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:47 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:47 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:47 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:47 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:47 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:47 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:47 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:47 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:47 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:47 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:47 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:47 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:47 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:47 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:47 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:47 [0m[34m[INFO] [0m----------------------------------------------
-10:50:49 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.04%):
-10:50:49 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:49 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:49 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:49 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:49 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:49 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:49 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:49 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:49 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:49 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:49 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:49 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:49 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:49 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:49 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:49 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:49 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:49 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:49 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:49 [0m[34m[INFO] [0m----------------------------------------------
-10:50:51 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.87%):
-10:50:51 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:51 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:51 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:51 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:51 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:51 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:51 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:51 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:51 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:51 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:51 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:51 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:51 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:51 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:51 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:51 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:51 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:51 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:51 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:51 [0m[34m[INFO] [0m----------------------------------------------
-10:50:53 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.56%):
-10:50:53 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:53 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:53 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:53 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:53 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:53 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:53 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:53 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:53 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:53 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:53 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:53 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:53 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:53 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:53 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:53 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:53 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:53 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:53 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:53 [0m[34m[INFO] [0m----------------------------------------------
-10:50:55 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.25%):
-10:50:55 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:55 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:55 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:55 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:55 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:55 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:55 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:55 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:55 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:55 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:55 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:55 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:55 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:55 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:55 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:55 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:55 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:55 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:55 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:55 [0m[34m[INFO] [0m----------------------------------------------
-10:50:57 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.96%):
-10:50:57 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:57 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:57 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:57 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:57 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:57 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:57 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:57 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:57 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:57 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:57 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:57 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:57 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:57 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:57 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:57 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:57 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:57 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:57 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:57 [0m[34m[INFO] [0m----------------------------------------------
-10:50:59 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.02%):
-10:50:59 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:50:59 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:50:59 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:50:59 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:50:59 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:50:59 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:50:59 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:50:59 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:50:59 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:50:59 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:50:59 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:50:59 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:50:59 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:50:59 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:50:59 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:50:59 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:50:59 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:50:59 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:50:59 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:50:59 [0m[34m[INFO] [0m----------------------------------------------
-10:51:01 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.27%):
-10:51:01 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:51:01 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:51:01 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:01 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:01 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:51:01 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:51:01 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:51:01 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:01 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:01 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:01 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:01 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:01 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:01 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:01 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:01 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:01 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:01 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:01 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:01 [0m[34m[INFO] [0m----------------------------------------------
-10:51:03 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.10%):
-10:51:03 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:51:03 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:51:03 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:03 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:03 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:51:03 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:51:03 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:51:03 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:03 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:03 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:03 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:03 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:03 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:03 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:03 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:03 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:03 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:03 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:03 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:03 [0m[34m[INFO] [0m----------------------------------------------
-10:51:05 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.79%):
-10:51:05 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:51:05 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:51:05 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:05 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:05 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:51:05 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:51:05 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:51:05 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:05 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:05 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:05 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:05 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:05 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:05 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:05 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:05 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:05 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:05 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:05 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:05 [0m[34m[INFO] [0m----------------------------------------------
-10:51:07 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 98.79%):
-10:51:07 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:51:07 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:51:07 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:07 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:07 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:51:07 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:51:07 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:51:07 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:07 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:07 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:07 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:07 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:07 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:07 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:07 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:07 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:07 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:07 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:07 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:07 [0m[34m[INFO] [0m----------------------------------------------
-10:51:09 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 99.21%):
-10:51:09 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:51:09 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:51:09 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:09 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:09 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:51:09 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:51:09 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:51:09 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:09 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:09 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:09 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:09 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:09 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:09 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:09 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:09 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:09 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:09 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:09 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:09 [0m[34m[INFO] [0m----------------------------------------------
-10:51:11 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 81.83%):
-10:51:11 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 500000 ns
-10:51:11 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 100 misses
-10:51:11 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:11 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:11 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 500000 ? (L:1 R:2)
-10:51:11 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 100 ? (L:3 R:4)
-10:51:11 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 200 ? (L:5 R:6)
-10:51:11 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:11 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:11 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:11 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:11 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:11 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:11 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:11 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:11 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:11 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:11 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:11 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:11 [0m[34m[INFO] [0m----------------------------------------------
-10:51:13 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 10.48%):
-10:51:13 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:51:13 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:51:13 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:13 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:13 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:51:13 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:51:13 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:51:13 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:13 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:13 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:13 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:13 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:13 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:13 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:13 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:13 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:13 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:13 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:13 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:13 [0m[34m[INFO] [0m----------------------------------------------
-10:51:15 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 9.50%):
-10:51:15 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:51:15 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:51:15 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:15 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:15 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:51:15 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:51:15 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:51:15 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:15 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:15 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:15 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:15 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:15 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:15 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:15 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:15 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:15 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:15 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:15 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:15 [0m[34m[INFO] [0m----------------------------------------------
-10:51:17 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 15.23%):
-10:51:17 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:51:17 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:51:17 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:17 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:17 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:51:17 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:51:17 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:51:17 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:17 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:17 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:17 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:17 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:17 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:17 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:17 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:17 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:17 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:17 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:17 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:17 [0m[34m[INFO] [0m----------------------------------------------
-10:51:19 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 11.02%):
-10:51:19 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:51:19 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:51:19 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:19 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:19 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:51:19 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:51:19 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:51:19 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:19 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:19 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:19 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:19 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:19 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:19 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:19 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:19 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:19 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:19 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:19 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:19 [0m[34m[INFO] [0m----------------------------------------------
-10:51:21 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 10.67%):
-10:51:21 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:51:21 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:51:21 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:21 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:21 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:51:21 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:51:21 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:51:21 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:21 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:21 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:21 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:21 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:21 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:21 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:21 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:21 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:21 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:21 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:21 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:21 [0m[34m[INFO] [0m----------------------------------------------
-10:51:23 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 9.98%):
-10:51:23 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:51:23 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:51:23 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:23 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:23 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:51:23 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:51:23 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:51:23 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:23 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:23 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:23 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:23 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:23 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:23 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:23 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:23 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:23 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:23 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:23 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:23 [0m[34m[INFO] [0m----------------------------------------------
-10:51:25 [0m[34m[INFO] [0mRDTAI AI Optimization (Util: 21.97%):
-10:51:25 [0m[34m[INFO] [0m  [Node 0] Wait Threshold: 2000000 ns
-10:51:25 [0m[34m[INFO] [0m  [Node 1&2] Cache Threshold: 30 misses
-10:51:25 [0m[34m[INFO] [0m  [Node 3-6] Burst Threshold: 1000000 ns
-10:51:25 [0m[34m[INFO] [0m--- RDTAI 15-Node Tree Weights (2s Update) ---
-10:51:25 [0m[34m[INFO] [0m  [Node  0] Branch: WaitTime < 2000000 ? (L:1 R:2)
-10:51:25 [0m[34m[INFO] [0m  [Node  1] Branch: CacheMiss < 30 ? (L:3 R:4)
-10:51:25 [0m[34m[INFO] [0m  [Node  2] Branch: CacheMiss < 60 ? (L:5 R:6)
-10:51:25 [0m[34m[INFO] [0m  [Node  3] Branch: BurstTime < 1000000 ? (L:7 R:8)
-10:51:25 [0m[34m[INFO] [0m  [Node  4] Branch: BurstTime < 1000000 ? (L:9 R:10)
-10:51:25 [0m[34m[INFO] [0m  [Node  5] Branch: BurstTime < 1000000 ? (L:11 R:12)
-10:51:25 [0m[34m[INFO] [0m  [Node  6] Branch: BurstTime < 1000000 ? (L:13 R:14)
-10:51:25 [0m[34m[INFO] [0m  [Node  7] LEAF -> Action: Run Now
-10:51:25 [0m[34m[INFO] [0m  [Node  8] LEAF -> Action: Keep Local
-10:51:25 [0m[34m[INFO] [0m  [Node  9] LEAF -> Action: Keep Local
-10:51:25 [0m[34m[INFO] [0m  [Node 10] LEAF -> Action: Keep Local
-10:51:25 [0m[34m[INFO] [0m  [Node 11] LEAF -> Action: Run Now
-10:51:25 [0m[34m[INFO] [0m  [Node 12] LEAF -> Action: Migrate
-10:51:25 [0m[34m[INFO] [0m  [Node 13] LEAF -> Action: Run Now
-10:51:25 [0m[34m[INFO] [0m  [Node 14] LEAF -> Action: Run Now
-10:51:25 [0m[34m[INFO] [0m----------------------------------------------
+05:43:37 [0m[34m[INFO] [0mRusty scheduler started! Run `scx_rdtai --monitor` for metrics.
+05:43:39 [0m[34m[INFO] [0mRL Optimizer: Processed 328 state-action rewards and updated Q-Table.
+05:43:41 [0m[34m[INFO] [0mRL Optimizer: Processed 362 state-action rewards and updated Q-Table.
+05:43:43 [0m[34m[INFO] [0mRL Optimizer: Processed 311 state-action rewards and updated Q-Table.
+05:43:45 [0m[34m[INFO] [0mRL Optimizer: Processed 235 state-action rewards and updated Q-Table.
+05:43:47 [0m[34m[INFO] [0mRL Optimizer: Processed 218 state-action rewards and updated Q-Table.
+05:43:49 [0m[34m[INFO] [0mRL Optimizer: Processed 241 state-action rewards and updated Q-Table.
+05:43:51 [0m[34m[INFO] [0mRL Optimizer: Processed 223 state-action rewards and updated Q-Table.
+05:43:53 [0m[34m[INFO] [0mRL Optimizer: Processed 185 state-action rewards and updated Q-Table.
+05:43:55 [0m[34m[INFO] [0mRL Optimizer: Processed 236 state-action rewards and updated Q-Table.
+05:43:57 [0m[34m[INFO] [0mRL Optimizer: Processed 195 state-action rewards and updated Q-Table.
+05:43:59 [0m[34m[INFO] [0mRL Optimizer: Processed 207 state-action rewards and updated Q-Table.
+05:44:01 [0m[34m[INFO] [0mRL Optimizer: Processed 224 state-action rewards and updated Q-Table.
+05:44:03 [0m[34m[INFO] [0mRL Optimizer: Processed 226 state-action rewards and updated Q-Table.
+05:44:05 [0m[34m[INFO] [0mRL Optimizer: Processed 214 state-action rewards and updated Q-Table.
+05:44:07 [0m[34m[INFO] [0mRL Optimizer: Processed 221 state-action rewards and updated Q-Table.
+05:44:09 [0m[34m[INFO] [0mRL Optimizer: Processed 226 state-action rewards and updated Q-Table.
+05:44:11 [0m[34m[INFO] [0mRL Optimizer: Processed 217 state-action rewards and updated Q-Table.
+05:44:13 [0m[34m[INFO] [0mRL Optimizer: Processed 218 state-action rewards and updated Q-Table.
+05:44:15 [0m[34m[INFO] [0mRL Optimizer: Processed 256 state-action rewards and updated Q-Table.
+05:44:17 [0m[34m[INFO] [0mRL Optimizer: Processed 198 state-action rewards and updated Q-Table.
+05:44:19 [0m[34m[INFO] [0mRL Optimizer: Processed 229 state-action rewards and updated Q-Table.
+05:44:21 [0m[34m[INFO] [0mRL Optimizer: Processed 239 state-action rewards and updated Q-Table.
+05:44:23 [0m[34m[INFO] [0mRL Optimizer: Processed 503 state-action rewards and updated Q-Table.
+05:44:25 [0m[34m[INFO] [0mRL Optimizer: Processed 475 state-action rewards and updated Q-Table.
+05:44:27 [0m[34m[INFO] [0mRL Optimizer: Processed 444 state-action rewards and updated Q-Table.
+05:44:29 [0m[34m[INFO] [0mRL Optimizer: Processed 477 state-action rewards and updated Q-Table.
+05:44:31 [0m[34m[INFO] [0mRL Optimizer: Processed 470 state-action rewards and updated Q-Table.
+05:44:33 [0m[34m[INFO] [0mRL Optimizer: Processed 479 state-action rewards and updated Q-Table.
+05:44:35 [0m[34m[INFO] [0mRL Optimizer: Processed 459 state-action rewards and updated Q-Table.
+05:44:37 [0m[34m[INFO] [0mRL Optimizer: Processed 481 state-action rewards and updated Q-Table.
+05:44:39 [0m[34m[INFO] [0mRL Optimizer: Processed 460 state-action rewards and updated Q-Table.
+05:44:41 [0m[34m[INFO] [0mRL Optimizer: Processed 483 state-action rewards and updated Q-Table.
+05:44:43 [0m[34m[INFO] [0mRL Optimizer: Processed 470 state-action rewards and updated Q-Table.
+05:44:45 [0m[34m[INFO] [0mRL Optimizer: Processed 453 state-action rewards and updated Q-Table.
+05:44:47 [0m[34m[INFO] [0mRL Optimizer: Processed 483 state-action rewards and updated Q-Table.
+05:44:49 [0m[34m[INFO] [0mRL Optimizer: Processed 462 state-action rewards and updated Q-Table.
+05:44:51 [0m[34m[INFO] [0mRL Optimizer: Processed 465 state-action rewards and updated Q-Table.
+05:44:53 [0m[34m[INFO] [0mRL Optimizer: Processed 549 state-action rewards and updated Q-Table.
+05:44:55 [0m[34m[INFO] [0mRL Optimizer: Processed 455 state-action rewards and updated Q-Table.
+05:44:57 [0m[34m[INFO] [0mRL Optimizer: Processed 479 state-action rewards and updated Q-Table.
+05:44:59 [0m[34m[INFO] [0mRL Optimizer: Processed 454 state-action rewards and updated Q-Table.
+05:45:01 [0m[34m[INFO] [0mRL Optimizer: Processed 495 state-action rewards and updated Q-Table.
+05:45:03 [0m[34m[INFO] [0mRL Optimizer: Processed 482 state-action rewards and updated Q-Table.
+05:45:05 [0m[34m[INFO] [0mRL Optimizer: Processed 451 state-action rewards and updated Q-Table.
+05:45:07 [0m[34m[INFO] [0mRL Optimizer: Processed 486 state-action rewards and updated Q-Table.
+05:45:09 [0m[34m[INFO] [0mRL Optimizer: Processed 477 state-action rewards and updated Q-Table.
+05:45:11 [0m[34m[INFO] [0mRL Optimizer: Processed 500 state-action rewards and updated Q-Table.
+05:45:13 [0m[34m[INFO] [0mRL Optimizer: Processed 479 state-action rewards and updated Q-Table.
+05:45:15 [0m[34m[INFO] [0mRL Optimizer: Processed 466 state-action rewards and updated Q-Table.
+05:45:17 [0m[34m[INFO] [0mRL Optimizer: Processed 457 state-action rewards and updated Q-Table.
+05:45:19 [0m[34m[INFO] [0mRL Optimizer: Processed 485 state-action rewards and updated Q-Table.
+05:45:21 [0m[34m[INFO] [0mRL Optimizer: Processed 453 state-action rewards and updated Q-Table.
+05:45:23 [0m[34m[INFO] [0mRL Optimizer: Processed 511 state-action rewards and updated Q-Table.
+05:45:25 [0m[34m[INFO] [0mRL Optimizer: Processed 256 state-action rewards and updated Q-Table.
+05:45:27 [0m[34m[INFO] [0mRL Optimizer: Processed 239 state-action rewards and updated Q-Table.
+05:45:29 [0m[34m[INFO] [0mRL Optimizer: Processed 241 state-action rewards and updated Q-Table.
+05:45:31 [0m[34m[INFO] [0mRL Optimizer: Processed 229 state-action rewards and updated Q-Table.
+05:45:33 [0m[34m[INFO] [0mRL Optimizer: Processed 228 state-action rewards and updated Q-Table.
+05:45:35 [0m[34m[INFO] [0mRL Optimizer: Processed 251 state-action rewards and updated Q-Table.
+05:45:37 [0m[34m[INFO] [0mRL Optimizer: Processed 213 state-action rewards and updated Q-Table.
+05:45:39 [0m[34m[INFO] [0mRL Optimizer: Processed 240 state-action rewards and updated Q-Table.
+05:45:41 [0m[34m[INFO] [0mRL Optimizer: Processed 236 state-action rewards and updated Q-Table.
+05:45:43 [0m[34m[INFO] [0mRL Optimizer: Processed 305 state-action rewards and updated Q-Table.
+05:45:45 [0m[34m[INFO] [0mRL Optimizer: Processed 247 state-action rewards and updated Q-Table.
+05:45:47 [0m[34m[INFO] [0mRL Optimizer: Processed 244 state-action rewards and updated Q-Table.
+05:45:49 [0m[34m[INFO] [0mRL Optimizer: Processed 222 state-action rewards and updated Q-Table.
+05:45:51 [0m[34m[INFO] [0mRL Optimizer: Processed 215 state-action rewards and updated Q-Table.
+05:45:53 [0m[34m[INFO] [0mRL Optimizer: Processed 237 state-action rewards and updated Q-Table.
+05:45:55 [0m[34m[INFO] [0mRL Optimizer: Processed 217 state-action rewards and updated Q-Table.
+05:45:57 [0m[34m[INFO] [0mRL Optimizer: Processed 234 state-action rewards and updated Q-Table.
+05:45:59 [0m[34m[INFO] [0mRL Optimizer: Processed 238 state-action rewards and updated Q-Table.
+05:46:01 [0m[34m[INFO] [0mRL Optimizer: Processed 211 state-action rewards and updated Q-Table.
+05:46:03 [0m[34m[INFO] [0mRL Optimizer: Processed 361 state-action rewards and updated Q-Table.
+05:46:05 [0m[34m[INFO] [0mRL Optimizer: Processed 355 state-action rewards and updated Q-Table.
+05:46:07 [0m[34m[INFO] [0mRL Optimizer: Processed 441 state-action rewards and updated Q-Table.
+05:46:09 [0m[34m[INFO] [0mRL Optimizer: Processed 362 state-action rewards and updated Q-Table.
+05:46:11 [0m[34m[INFO] [0mRL Optimizer: Processed 293 state-action rewards and updated Q-Table.
+05:46:13 [0m[34m[INFO] [0mRL Optimizer: Processed 248 state-action rewards and updated Q-Table.
+05:46:15 [0m[34m[INFO] [0mRL Optimizer: Processed 245 state-action rewards and updated Q-Table.
+05:46:17 [0m[34m[INFO] [0mRL Optimizer: Processed 266 state-action rewards and updated Q-Table.
+05:46:19 [0m[34m[INFO] [0mRL Optimizer: Processed 278 state-action rewards and updated Q-Table.
+05:46:21 [0m[34m[INFO] [0mRL Optimizer: Processed 265 state-action rewards and updated Q-Table.
+05:46:23 [0m[34m[INFO] [0mRL Optimizer: Processed 272 state-action rewards and updated Q-Table.
+05:46:25 [0m[34m[INFO] [0mRL Optimizer: Processed 286 state-action rewards and updated Q-Table.
+05:46:27 [0m[34m[INFO] [0mRL Optimizer: Processed 271 state-action rewards and updated Q-Table.
+05:46:29 [0m[34m[INFO] [0mRL Optimizer: Processed 280 state-action rewards and updated Q-Table.
+05:46:31 [0m[34m[INFO] [0mRL Optimizer: Processed 257 state-action rewards and updated Q-Table.
+05:46:33 [0m[34m[INFO] [0mRL Optimizer: Processed 235 state-action rewards and updated Q-Table.
+05:46:35 [0m[34m[INFO] [0mRL Optimizer: Processed 263 state-action rewards and updated Q-Table.
+05:46:37 [0m[34m[INFO] [0mRL Optimizer: Processed 258 state-action rewards and updated Q-Table.
+05:46:39 [0m[34m[INFO] [0mRL Optimizer: Processed 246 state-action rewards and updated Q-Table.
+05:46:41 [0m[34m[INFO] [0mRL Optimizer: Processed 258 state-action rewards and updated Q-Table.
+05:46:43 [0m[34m[INFO] [0mRL Optimizer: Processed 253 state-action rewards and updated Q-Table.
+05:46:45 [0m[34m[INFO] [0mRL Optimizer: Processed 228 state-action rewards and updated Q-Table.
+05:46:47 [0m[34m[INFO] [0mRL Optimizer: Processed 247 state-action rewards and updated Q-Table.
+05:46:49 [0m[34m[INFO] [0mRL Optimizer: Processed 251 state-action rewards and updated Q-Table.
+05:46:51 [0m[34m[INFO] [0mRL Optimizer: Processed 268 state-action rewards and updated Q-Table.
+05:46:53 [0m[34m[INFO] [0mRL Optimizer: Processed 271 state-action rewards and updated Q-Table.
+05:46:55 [0m[34m[INFO] [0mRL Optimizer: Processed 294 state-action rewards and updated Q-Table.
+05:46:57 [0m[34m[INFO] [0mRL Optimizer: Processed 274 state-action rewards and updated Q-Table.
+05:46:59 [0m[34m[INFO] [0mRL Optimizer: Processed 268 state-action rewards and updated Q-Table.
+05:47:01 [0m[34m[INFO] [0mRL Optimizer: Processed 266 state-action rewards and updated Q-Table.
+05:47:03 [0m[34m[INFO] [0mRL Optimizer: Processed 230 state-action rewards and updated Q-Table.
+05:47:05 [0m[34m[INFO] [0mRL Optimizer: Processed 245 state-action rewards and updated Q-Table.
+05:47:07 [0m[34m[INFO] [0mRL Optimizer: Processed 232 state-action rewards and updated Q-Table.
+05:47:09 [0m[34m[INFO] [0mRL Optimizer: Processed 259 state-action rewards and updated Q-Table.
+05:47:11 [0m[34m[INFO] [0mRL Optimizer: Processed 264 state-action rewards and updated Q-Table.
+05:47:13 [0m[34m[INFO] [0mRL Optimizer: Processed 233 state-action rewards and updated Q-Table.
+05:47:15 [0m[34m[INFO] [0mRL Optimizer: Processed 264 state-action rewards and updated Q-Table.
+05:47:17 [0m[34m[INFO] [0mRL Optimizer: Processed 266 state-action rewards and updated Q-Table.
+05:47:19 [0m[34m[INFO] [0mRL Optimizer: Processed 261 state-action rewards and updated Q-Table.
+05:47:21 [0m[34m[INFO] [0mRL Optimizer: Processed 283 state-action rewards and updated Q-Table.
+05:47:23 [0m[34m[INFO] [0mRL Optimizer: Processed 266 state-action rewards and updated Q-Table.
+05:47:25 [0m[34m[INFO] [0mRL Optimizer: Processed 293 state-action rewards and updated Q-Table.
+05:47:27 [0m[34m[INFO] [0mRL Optimizer: Processed 260 state-action rewards and updated Q-Table.
+05:47:29 [0m[34m[INFO] [0mRL Optimizer: Processed 241 state-action rewards and updated Q-Table.
+05:47:31 [0m[34m[INFO] [0mRL Optimizer: Processed 231 state-action rewards and updated Q-Table.
+05:47:33 [0m[34m[INFO] [0mRL Optimizer: Processed 231 state-action rewards and updated Q-Table.
+05:47:35 [0m[34m[INFO] [0mRL Optimizer: Processed 228 state-action rewards and updated Q-Table.
+05:47:37 [0m[34m[INFO] [0mRL Optimizer: Processed 255 state-action rewards and updated Q-Table.
+05:47:39 [0m[34m[INFO] [0mRL Optimizer: Processed 297 state-action rewards and updated Q-Table.
+05:47:41 [0m[34m[INFO] [0mRL Optimizer: Processed 288 state-action rewards and updated Q-Table.
+05:47:43 [0m[34m[INFO] [0mRL Optimizer: Processed 331 state-action rewards and updated Q-Table.
+05:47:45 [0m[34m[INFO] [0mRL Optimizer: Processed 403 state-action rewards and updated Q-Table.
+05:47:47 [0m[34m[INFO] [0mRL Optimizer: Processed 292 state-action rewards and updated Q-Table.
+05:47:49 [0m[34m[INFO] [0mRL Optimizer: Processed 290 state-action rewards and updated Q-Table.
+05:47:51 [0m[34m[INFO] [0mRL Optimizer: Processed 360 state-action rewards and updated Q-Table.
+05:47:53 [0m[34m[INFO] [0mRL Optimizer: Processed 312 state-action rewards and updated Q-Table.
+05:47:55 [0m[34m[INFO] [0mRL Optimizer: Processed 382 state-action rewards and updated Q-Table.
+05:47:57 [0m[34m[INFO] [0mRL Optimizer: Processed 416 state-action rewards and updated Q-Table.
+05:47:59 [0m[34m[INFO] [0mRL Optimizer: Processed 358 state-action rewards and updated Q-Table.
+05:48:01 [0m[34m[INFO] [0mRL Optimizer: Processed 333 state-action rewards and updated Q-Table.
+05:48:03 [0m[34m[INFO] [0mRL Optimizer: Processed 235 state-action rewards and updated Q-Table.
+05:48:05 [0m[34m[INFO] [0mRL Optimizer: Processed 250 state-action rewards and updated Q-Table.
+05:48:07 [0m[34m[INFO] [0mRL Optimizer: Processed 250 state-action rewards and updated Q-Table.
+05:48:09 [0m[34m[INFO] [0mRL Optimizer: Processed 256 state-action rewards and updated Q-Table.
+05:48:11 [0m[34m[INFO] [0mRL Optimizer: Processed 256 state-action rewards and updated Q-Table.
+05:48:13 [0m[34m[INFO] [0mRL Optimizer: Processed 244 state-action rewards and updated Q-Table.
+05:48:15 [0m[34m[INFO] [0mRL Optimizer: Processed 285 state-action rewards and updated Q-Table.
+05:48:17 [0m[34m[INFO] [0mRL Optimizer: Processed 261 state-action rewards and updated Q-Table.
+05:48:19 [0m[34m[INFO] [0mRL Optimizer: Processed 248 state-action rewards and updated Q-Table.
+05:48:21 [0m[34m[INFO] [0mRL Optimizer: Processed 231 state-action rewards and updated Q-Table.
+05:48:23 [0m[34m[INFO] [0mRL Optimizer: Processed 252 state-action rewards and updated Q-Table.
+05:48:25 [0m[34m[INFO] [0mRL Optimizer: Processed 257 state-action rewards and updated Q-Table.
+05:48:27 [0m[34m[INFO] [0mRL Optimizer: Processed 242 state-action rewards and updated Q-Table.
+05:48:29 [0m[34m[INFO] [0mRL Optimizer: Processed 281 state-action rewards and updated Q-Table.
+05:48:31 [0m[34m[INFO] [0mRL Optimizer: Processed 258 state-action rewards and updated Q-Table.
+05:48:33 [0m[34m[INFO] [0mRL Optimizer: Processed 274 state-action rewards and updated Q-Table.
+05:48:35 [0m[34m[INFO] [0mRL Optimizer: Processed 266 state-action rewards and updated Q-Table.
+05:48:37 [0m[34m[INFO] [0mRL Optimizer: Processed 271 state-action rewards and updated Q-Table.
+05:48:39 [0m[34m[INFO] [0mRL Optimizer: Processed 257 state-action rewards and updated Q-Table.
+05:48:41 [0m[34m[INFO] [0mRL Optimizer: Processed 241 state-action rewards and updated Q-Table.
+05:48:43 [0m[34m[INFO] [0mRL Optimizer: Processed 272 state-action rewards and updated Q-Table.
+05:48:45 [0m[34m[INFO] [0mRL Optimizer: Processed 297 state-action rewards and updated Q-Table.
+05:48:47 [0m[34m[INFO] [0mRL Optimizer: Processed 274 state-action rewards and updated Q-Table.
+05:48:49 [0m[34m[INFO] [0mRL Optimizer: Processed 259 state-action rewards and updated Q-Table.
+05:48:51 [0m[34m[INFO] [0mRL Optimizer: Processed 261 state-action rewards and updated Q-Table.
+05:48:53 [0m[34m[INFO] [0mRL Optimizer: Processed 240 state-action rewards and updated Q-Table.
+05:48:55 [0m[34m[INFO] [0mRL Optimizer: Processed 262 state-action rewards and updated Q-Table.
+05:48:57 [0m[34m[INFO] [0mRL Optimizer: Processed 279 state-action rewards and updated Q-Table.
+05:48:59 [0m[34m[INFO] [0mRL Optimizer: Processed 244 state-action rewards and updated Q-Table.
+05:49:01 [0m[34m[INFO] [0mRL Optimizer: Processed 278 state-action rewards and updated Q-Table.
+05:49:03 [0m[34m[INFO] [0mRL Optimizer: Processed 240 state-action rewards and updated Q-Table.
+05:49:05 [0m[34m[INFO] [0mRL Optimizer: Processed 231 state-action rewards and updated Q-Table.
+05:49:07 [0m[34m[INFO] [0mRL Optimizer: Processed 272 state-action rewards and updated Q-Table.
+05:49:09 [0m[34m[INFO] [0mRL Optimizer: Processed 266 state-action rewards and updated Q-Table.
+05:49:11 [0m[34m[INFO] [0mRL Optimizer: Processed 267 state-action rewards and updated Q-Table.
+05:49:13 [0m[34m[INFO] [0mRL Optimizer: Processed 257 state-action rewards and updated Q-Table.
+05:49:15 [0m[34m[INFO] [0mRL Optimizer: Processed 295 state-action rewards and updated Q-Table.
+05:49:17 [0m[34m[INFO] [0mRL Optimizer: Processed 292 state-action rewards and updated Q-Table.
+05:49:19 [0m[34m[INFO] [0mRL Optimizer: Processed 266 state-action rewards and updated Q-Table.
+05:49:21 [0m[34m[INFO] [0mRL Optimizer: Processed 218 state-action rewards and updated Q-Table.
+05:49:23 [0m[34m[INFO] [0mRL Optimizer: Processed 223 state-action rewards and updated Q-Table.
+05:49:25 [0m[34m[INFO] [0mRL Optimizer: Processed 216 state-action rewards and updated Q-Table.
+05:49:27 [0m[34m[INFO] [0mRL Optimizer: Processed 229 state-action rewards and updated Q-Table.
+05:49:29 [0m[34m[INFO] [0mRL Optimizer: Processed 285 state-action rewards and updated Q-Table.
+05:49:31 [0m[34m[INFO] [0mRL Optimizer: Processed 320 state-action rewards and updated Q-Table.
+05:49:33 [0m[34m[INFO] [0mRL Optimizer: Processed 241 state-action rewards and updated Q-Table.
+05:49:35 [0m[34m[INFO] [0mRL Optimizer: Processed 352 state-action rewards and updated Q-Table.
+05:49:37 [0m[34m[INFO] [0mRL Optimizer: Processed 280 state-action rewards and updated Q-Table.
+05:49:39 [0m[34m[INFO] [0mRL Optimizer: Processed 373 state-action rewards and updated Q-Table.
+05:49:41 [0m[34m[INFO] [0mRL Optimizer: Processed 293 state-action rewards and updated Q-Table.
+05:49:43 [0m[34m[INFO] [0mRL Optimizer: Processed 346 state-action rewards and updated Q-Table.
 EXIT: unregistered from user space
-10:51:27 [0m[34m[INFO] [0mUnregister scx_rdtai scheduler
+05:49:45 [0m[34m[INFO] [0mUnregister scx_rdtai scheduler

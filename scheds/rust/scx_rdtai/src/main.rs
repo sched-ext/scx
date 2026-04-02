@@ -457,8 +457,8 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, rdtai, uei)?;
         
-        // Push default decision tree to the kernel.
-        Self::push_default_tree(&mut skel)?;
+        // Push default Q-Table to the kernel.
+        Self::push_default_q_table(&mut skel)?;
 
         let struct_ops = Some(scx_ops_attach!(skel, rdtai)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
@@ -501,62 +501,21 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn push_default_tree(skel: &mut BpfSkel) -> Result<()> {
-        let tree_map = &mut skel.maps.rdtai_tree;
+    fn push_default_q_table(skel: &mut BpfSkel) -> Result<()> {
+        let q_table_map = &mut skel.maps.q_table;
         
-        let mut nodes = Vec::with_capacity(15);
-
-        for i in 0..15 {
-            let mut node = bpf_intf::rdtai_node {
-                weights: [0; bpf_intf::rdtai_feature_NR_FEATURES as usize],
-                threshold: 1000,
-                left_child: (i * 2) + 1,
-                right_child: (i * 2) + 2,
-                is_leaf: i >= 7,
-                leaf_action: 0,
-            };
-
-            if !node.is_leaf {
-                // Initialize with some default heuristic weights
-                node.weights[bpf_intf::rdtai_feature_FEAT_WAIT_TIME as usize] = 100; // Priority on wait time
-                node.weights[bpf_intf::rdtai_feature_FEAT_CACHE_MISSES as usize] = 50;
-            } else {
-                node.leaf_action = if i % 2 == 0 { 2 } else { 0 };
-            }
-            nodes.push(node);
+        for state in 0..8192u32 {
+            // Bits: wait(3) | cache(2) | blocked(2) | avg_run(2) | burst(2) | waker(2)
+            let wait_bucket = (state >> 10) & 0b111;
+            
+            // Baseline Heuristic: If wait bucket is high (>= 4, i.e., > 2ms), try to run immediately.
+            // Otherwise, default to 0 (Keep Local) and let the RL agent learn the rest.
+            let default_action: u32 = if wait_bucket >= 4 { 2 } else { 0 };
+            
+            q_table_map.update(&state.to_ne_bytes(), &default_action.to_ne_bytes(), libbpf_rs::MapFlags::ANY)?;
         }
-
-        info!("--- RDTAI 15-Node Tree Initial Weights ---");
-        for (i, node) in nodes.iter().enumerate() {
-            if node.is_leaf {
-                let action_str = match node.leaf_action {
-                    0 => "Keep Local",
-                    1 => "Migrate",
-                    2 => "Run Now",
-                    _ => "Unknown",
-                };
-                info!("  [Node {:2}] LEAF -> Action: {}", i, action_str);
-            } else {
-                let feat_str = match node.feature_id {
-                    bpf_intf::rdtai_feature_FEAT_WAIT_TIME => "WaitTime",
-                    bpf_intf::rdtai_feature_FEAT_CACHE_MISSES => "CacheMiss",
-                    bpf_intf::rdtai_feature_FEAT_EXEC_TIME => "BurstTime",
-                    bpf_intf::rdtai_feature_FEAT_LOAD => "Load",
-                    _ => "Unknown",
-                };
-                info!("  [Node {:2}] Branch: {} < {} ? (L:{} R:{})", 
-                      i, feat_str, node.threshold, node.left_child, node.right_child);
-            }
-
-            let mut key = [0u8; 4];
-            key.copy_from_slice(&(i as u32).to_ne_bytes());
-            tree_map.update(&key, unsafe { 
-                std::slice::from_raw_parts(node as *const _ as *const u8, std::mem::size_of::<bpf_intf::rdtai_node>()) 
-            }, libbpf_rs::MapFlags::ANY)?;
-        }
-        info!("-------------------------------------------");
-
-        info!("Full-scale RDTAI multi-metric tree initialized!");
+        
+        info!("Default RL Q-Table initialized and pushed to kernel!");
         Ok(())
     }
 
