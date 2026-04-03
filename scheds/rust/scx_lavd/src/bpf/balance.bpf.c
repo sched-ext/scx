@@ -40,7 +40,7 @@ int plan_x_cpdom_migration(void)
 	u32 stealer_threshold, stealee_threshold, nr_stealee = 0;
 	u64 avg_load_invr = 0, min_load_invr = U64_MAX, max_load_invr = 0;
 	u64 max_avg_util_wall = 0;
-	u64 x_mig_delta, util, qlen, qlen_invr;
+	u64 x_mig_delta, util;
 	bool overflow_running = false;
 	int nz_qlen = 0;
 
@@ -73,7 +73,7 @@ int plan_x_cpdom_migration(void)
 			 */
 			if (cpdomc->cur_util_wall_sum > 0) {
 				overflow_running = true;
-				cpdomc->load_invr = U32_MAX;
+				cpdomc->load_invr = U64_MAX;
 			}
 			else
 				cpdomc->load_invr = 0;
@@ -81,21 +81,26 @@ int plan_x_cpdom_migration(void)
 		}
 
 		/*
-		 * Use avg_util_wall_sum for stable load balancing decisions.
+		 * Track max per-CPU util for the low-util LB skip check.
 		 */
 		util = (cpdomc->avg_util_wall_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
 		if ((util >> LAVD_SHIFT) > max_avg_util_wall)
 			max_avg_util_wall = util >> LAVD_SHIFT;
-		qlen = cpdomc->nr_queued_task;
-		qlen_invr = (qlen << (LAVD_SHIFT * 3)) / cpdomc->cap_sum_active_cpus;
-		cpdomc->load_invr = util + qlen_invr;
+
+		/*
+		 * Domain load combines running load (avg_util_invr_sum)
+		 * and queued load (qload_invr, tracked atomically via
+		 * account/unaccount at enqueue/running).
+		 */
+		cpdomc->load_invr = cpdomc->avg_util_invr_sum +
+				    cpdomc->qload_invr;
 		avg_load_invr += cpdomc->load_invr;
 
 		if (min_load_invr > cpdomc->load_invr)
 			min_load_invr = cpdomc->load_invr;
 		if (max_load_invr < cpdomc->load_invr)
 			max_load_invr = cpdomc->load_invr;
-		if (qlen)
+		if (cpdomc->qload_invr)
 			nz_qlen++;
 	}
 	if (sys_stat.nr_active_cpdoms)
