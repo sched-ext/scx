@@ -346,22 +346,34 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
 				continue;
 
+			if (READ_ONCE(cpdomc_pick->stealee_budget_invr) == 0)
+				continue;
+
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
 			/*
-			 * If task stealing is successful, mark the stealer
-			 * and the stealee's job done. By marking done,
-			 * those compute domains would not be involved in
-			 * load balancing until the end of this round,
-			 * so this helps gradual migration. Note that multiple
-			 * stealers can steal tasks from the same stealee.
-			 * However, we don't coordinate concurrent stealing
-			 * because the chance is low and there is no harm
-			 * in slight over-stealing.
+			 * Peek at the head task to get its size for
+			 * budget accounting.
+			 */
+			u64 task_load = 0;
+			struct task_struct *peek_p =
+				__COMPAT_scx_bpf_dsq_peek(dsq_id);
+			if (peek_p) {
+				task_ctx *peek_taskc = get_task_ctx(peek_p);
+				if (peek_taskc)
+					task_load = task_load_metric(peek_taskc);
+			}
+
+			/*
+			 * On success, decrement both egress and ingress
+			 * budgets. The stealer stays active for the
+			 * entire round. Budget exhaustion clears the
+			 * is_stealee/is_stealer flags via the decrement
+			 * helpers.
 			 */
 			if (consume_dsq(cpdomc_pick, dsq_id)) {
-				WRITE_ONCE(cpdomc_pick->is_stealee, false);
-				WRITE_ONCE(cpdomc->is_stealer, false);
+				decrement_stealee_budget(cpdomc_pick, task_load);
+				decrement_stealer_budget(cpdomc, task_load);
 				return true;
 			}
 		}

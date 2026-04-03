@@ -291,6 +291,42 @@ struct cpdom_ctx {
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
 
+/*
+ * Subtract @amount from the stealee's egress budget (saturating at 0).
+ * When budget reaches 0, clear the stealee flag so other stealers
+ * skip this domain for the rest of the round.
+ */
+static __always_inline void decrement_stealee_budget(struct cpdom_ctx *cpdomc,
+						     u64 amount)
+{
+	u64 remaining = READ_ONCE(cpdomc->stealee_budget_invr);
+
+	if (remaining > amount)
+		WRITE_ONCE(cpdomc->stealee_budget_invr, remaining - amount);
+	else {
+		WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
+		WRITE_ONCE(cpdomc->is_stealee, false);
+	}
+}
+
+/*
+ * Subtract @amount from the stealer's ingress budget (saturating at 0).
+ * When budget reaches 0, clear the stealer flag so it stops pulling
+ * more work for the rest of the round.
+ */
+static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
+						     u64 amount)
+{
+	u64 remaining = READ_ONCE(cpdomc->stealer_budget_invr);
+
+	if (remaining > amount)
+		WRITE_ONCE(cpdomc->stealer_budget_invr, remaining - amount);
+	else {
+		WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
+		WRITE_ONCE(cpdomc->is_stealer, false);
+	}
+}
+
 extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 extern int			nr_cpdoms;
