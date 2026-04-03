@@ -17,14 +17,17 @@ enum scx_cgroup_consts {
 	SCX_CACHELINE_SIZE		= 64,
 	/* clock boottime constant */
 	CBW_CLOCK_BOOTTIME		= 7,
-	/* normalized period in nsec: 100 msec */
-	CBW_NPERIOD			= (100ULL * 1000ULL * 1000ULL),
+	/* replenish period in nsec: 100 msec */
+	CBW_REPLENISH_PERIOD		= (100ULL * 1000ULL * 1000ULL),
+	/* accounting period in nsec: 5 msec */
+	CBW_ACCOUNTING_PERIOD		= (5ULL * 1000ULL * 1000ULL),
 	/* maximum number of cgroups */
 	CBW_NR_CGRP_MAX			= 2048,
 	/* maximum number of scx_cgroup_llc_ctx: 2048 cgroups * 32 LLCs */
 	CBW_NR_CGRP_LLC_MAX		= (CBW_NR_CGRP_MAX * 32),
-	/* The maximum height of a cgroup tree. */
-	CBW_CGRP_TREE_HEIGHT_MAX	= 16,
+	/* The maximum height of a cgroup tree.
+	 * cgroupv2 default maximum depth is 32 (kernel CGROUPS_DEPTH_MAX). */
+	CBW_CGRP_TREE_HEIGHT_MAX	= 32,
 	/* unlimited quota ("max") from scx_cgroup_init_args and scx_cgroup_bw_set() */
 	CBW_RUNTUME_INF_RAW		= ((u64)~0ULL),
 	/* unlimited quota ("max"); This is for easier comparison between signed vs. unsigned integers. */
@@ -266,6 +269,26 @@ static u64		cbw_last_replenish_at;
 static
 int replenish_timerfn(void *map, int *key, struct bpf_timer *timer);
 
+/*
+ * Timer to account runtime_total for all cgroups periodically.
+ */
+struct accounting_timer {
+	struct bpf_timer timer;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct accounting_timer);
+} accounting_timer SEC(".maps") __weak;
+
+static
+int accounting_timerfn(void *map, int *key, struct bpf_timer *timer);
+
+/*
+ * Backlog status related functions
+ */
 union backlog_stat {
 	struct {
 		/* sequence counter for replenish operation. */
@@ -464,9 +487,9 @@ bool is_kernel_compatible(void)
 __hidden
 int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 {
-	struct bpf_timer *timer;
-	int ret;
+	struct bpf_timer *rp_timer, *ac_timer;
 	u32 key = 0;
+	int ret;
 
 	/* If the kernel does not support cpu.max, let's stop here. */
 	if (!is_kernel_compatible()) {
@@ -480,17 +503,31 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 	cbw_config = *config;
 
 	/* Initialize the replenish timer. */
-	timer = bpf_map_lookup_elem(&replenish_timer, &key);
-	if (!timer) {
+	rp_timer = bpf_map_lookup_elem(&replenish_timer, &key);
+	if (!rp_timer) {
 		cbw_err("Failed to lookup replenish timer");
 		return -ESRCH;
 	}
 
 	cbw_last_replenish_at = scx_bpf_now();
-	bpf_timer_init(timer, &replenish_timer, CBW_CLOCK_BOOTTIME);
-	bpf_timer_set_callback(timer, replenish_timerfn);
-	if ((ret = bpf_timer_start(timer, CBW_NPERIOD, 0))) {
+	bpf_timer_init(rp_timer, &replenish_timer, CBW_CLOCK_BOOTTIME);
+	bpf_timer_set_callback(rp_timer, replenish_timerfn);
+	if ((ret = bpf_timer_start(rp_timer, CBW_REPLENISH_PERIOD, 0))) {
 		cbw_err("Failed to start replenish timer");
+		return ret;
+	}
+
+	/* Initialize the accounting timer. */
+	ac_timer = bpf_map_lookup_elem(&accounting_timer, &key);
+	if (!ac_timer) {
+		cbw_err("Failed to lookup accounting timer");
+		return -ESRCH;
+	}
+
+	bpf_timer_init(ac_timer, &accounting_timer, CBW_CLOCK_BOOTTIME);
+	bpf_timer_set_callback(ac_timer, accounting_timerfn);
+	if ((ret = bpf_timer_start(ac_timer, CBW_ACCOUNTING_PERIOD, 0))) {
+		cbw_err("Failed to start accounting timer");
 		return ret;
 	}
 
@@ -758,7 +795,8 @@ void cbw_set_bandwidth(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 		cgx->burst = 0;
 	} else {
 		cgx->quota = quota_us * 1000;
-		cgx->nquota = div_round_up(quota_us * CBW_NPERIOD, period_us);
+		cgx->nquota = div_round_up(quota_us * CBW_REPLENISH_PERIOD,
+					   period_us);
 		cgx->burst = burst_us * 1000;
 	}
 	cgx->burst_remaining = cgx->burst;
@@ -1412,6 +1450,79 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 }
 
 static
+int cbw_throttle_cgroups(struct cgroup *cgrp)
+{
+	struct cgroup_subsys_state *start_css, *pos, *anc_css;
+	struct scx_cgroup_ctx *cur_cgx, *cur_anc_cgx;
+	struct cgroup *cur_anc_cgrp;
+	int i;
+
+	/*
+	 * We traverse the cgroup hierarchy in post-order (left-right-self,
+	 * i.e., bottom-up). For each cgroup, check if there is any throttled
+	 * ancestor. If so, throttle itself.
+	 *
+	 * Before this, each cgroup’s runtime_total_sloppy should be updated
+	 * by calling cbw_update_runtime_total_sloppy().
+	 */
+	bpf_rcu_read_lock();
+	start_css = &cgrp->self;
+	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
+		cur_cgx = cbw_get_cgroup_ctx(pos->cgroup);
+		if (!cur_cgx) {
+			/*
+			 * The CPU controller of this cgroup is not enabled
+			 * so that we can skip it safely.
+			 */
+			continue;
+		}
+
+		/*
+		 * This cgroup has an unlimited quota,
+		 * so it cannot be throttled; skip it.
+		 */
+		if (cur_cgx->nquota_ub == CBW_RUNTUME_INF)
+			continue;
+
+		/*
+		 * This cgroup is already throttled;
+		 * there is no need to check its ancestors.
+		 */
+		if (READ_ONCE(cur_cgx->is_throttled))
+			continue;
+
+		/*
+		 * If the top half is running, stop here since
+		 * the top half will replenish and unthrottle
+		 * all the cgroups anyway.
+		 */
+		if (unlikely(cbw_top_half_running()))
+			break;
+
+		/*
+		 * If there is a throttled ancestor, all its descendants should
+		 * be throttled; so this cgroup should be throttled too.
+		 */
+		anc_css = pos->parent;
+		bpf_for(i, 0, CBW_CGRP_TREE_HEIGHT_MAX) {
+			if (!anc_css)
+				break;
+			cur_anc_cgrp = anc_css->cgroup;
+			if (!cur_anc_cgrp || cur_anc_cgrp->level == 0)
+				break;
+			cur_anc_cgx = cbw_get_cgroup_ctx(cur_anc_cgrp);
+			if (cur_anc_cgx && READ_ONCE(cur_anc_cgx->is_throttled)) {
+				WRITE_ONCE(cur_cgx->is_throttled, true);
+				break;
+			}
+			anc_css = anc_css->parent;
+		}
+	}
+	bpf_rcu_read_unlock();
+	return 0;
+}
+
+static
 s64 cbw_transfer_budget_c2l(struct scx_cgroup_ctx *src_cgx, int src_level,
 			    struct scx_cgroup_llc_ctx *tgt_llcx)
 {
@@ -2034,6 +2145,46 @@ int scx_cgroup_bw_cancel(u64 ctx)
 }
 
 /*
+ * A handler function for the accounting timer.
+ */
+static
+int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
+{
+	struct cgroup *root_cgrp;
+	u64 now;
+	int ret;
+
+	/*
+	 * Update the runtime total and throttle cgroups.
+	 *
+	 * If the top half is running, we can skip the accounting since the top
+	 * half will replenish and unthrottle all the cgroups anyway.
+	 */
+	root_cgrp = bpf_cgroup_from_id(1);
+	if (unlikely(!root_cgrp)) {
+		cbw_err("Failed to fetch the root cgroup pointer.");
+		goto rearm_out;
+	}
+
+	if (unlikely(cbw_top_half_running()))
+		goto release_out;
+
+	now = scx_bpf_now();
+	cbw_dbg("at %llu", now);
+
+	cbw_update_runtime_total_sloppy(root_cgrp);
+	cbw_throttle_cgroups(root_cgrp);
+	smp_mb();
+
+release_out:
+	bpf_cgroup_release(root_cgrp);
+rearm_out:
+	if ((ret = bpf_timer_start(timer, CBW_ACCOUNTING_PERIOD, 0)))
+		cbw_err("Failed to re-arm accounting timer: %d", ret);
+	return 0;
+}
+
+/*
  * A handler function for the replenish timer.
  */
 static
@@ -2290,12 +2441,12 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 
 	/*
 	 * Re-arm the replenish timer. We calculate the jitter to compensate
-	 * for the delay of the timer execution, CBW_NPERIOD.
+	 * for the delay of the timer execution, CBW_REPLENISH_PERIOD.
 	 */
 rearm_out:
 	interval = time_delta(now, cbw_last_replenish_at);
-	jitter = time_delta(interval, CBW_NPERIOD);
-	period = max(time_delta(CBW_NPERIOD, jitter), CBW_BUDGET_XFER_MIN);
+	jitter = time_delta(interval, CBW_REPLENISH_PERIOD);
+	period = max(time_delta(CBW_REPLENISH_PERIOD, jitter), CBW_BUDGET_XFER_MIN);
 	if ((ret = bpf_timer_start(timer, period, 0)))
 		cbw_err("Failed to re-arm replenish timer: %d", ret);
 	cbw_last_replenish_at = now;
