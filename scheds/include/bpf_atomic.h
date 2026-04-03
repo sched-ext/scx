@@ -102,7 +102,7 @@ extern bool CONFIG_X86_64 __kconfig __weak;
 		if (!CONFIG_X86_64)    \
 			smp_mb();      \
 		barrier();             \
-		WRITE_ONCE(*(p), val); \
+		(void)WRITE_ONCE(*(p), val); \
 	})
 
 #define smp_cond_load_relaxed_label(p, cond_expr, label)                \

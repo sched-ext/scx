@@ -1222,7 +1222,8 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 	address = (u64)chunk_idx_to_mem(chunk, idx);
 
 	/* If we allocated from a larger-order chunk, split the buddies. */
-	bpf_for(order, order_req, order) {
+	int order_end = order;
+	bpf_for(order, order_req, order_end) {
 		/* Flip the bit for the current order. */
 		idx ^= 1 << order;
 
