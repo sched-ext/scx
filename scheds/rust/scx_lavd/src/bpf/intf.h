@@ -115,6 +115,10 @@ struct task_ctx_x {
 	u64	dsq_id;		/* CPU's associated DSQ */
 	u64	dsq_consume_lat; /* DSQ's consume latency */
 	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
+	u32	lat_headroom;	/* CPU's latency headroom */
+	u32	vuln_thresh;	/* preemption vulnerability threshold step */
+	u32	task_util_est;	/* task's estimated utilization from ravg */
+	u16	norm_lat_cri;	/* task's normalized latency criticality [0, 1024] */
 };
 
 
