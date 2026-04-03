@@ -74,6 +74,7 @@ enum cell_stat_idx {
 	CSTAT_BORROWED,
 	CSTAT_STEAL,
 	CSTAT_CLAMP_USED,
+	CSTAT_PIN_SKIP,
 	NR_CSTATS,
 };
 

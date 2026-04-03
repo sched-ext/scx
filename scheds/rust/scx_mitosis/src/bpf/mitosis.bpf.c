@@ -64,6 +64,7 @@ struct llc_cpumask llc_to_cpus[MAX_LLCS];
 u32 configuration_seq;
 u32 applied_configuration_seq;
 u32 cpuset_seq;
+u32 applied_cpuset_seq;
 
 /*
  * Debug events circular buffer
@@ -365,15 +366,25 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	}
 
 	/*
-	* Single-CPU pinning is fine (even if outside this cell).
-	* However, multi-CPU pinning that doesn't cover the entire
-	* cell is not supported - the scheduler can't efficiently
-	* handle partial affinity restrictions.
-	*/
+	 * Single-CPU pinning is fine (even if outside this cell).
+	 * However, multi-CPU pinning that doesn't cover the entire
+	 * cell is not supported - the scheduler can't efficiently
+	 * handle partial affinity restrictions.
+	 *
+	 * While cpuset_seq != applied_cpuset_seq, multi-CPU pinned
+	 * tasks are allowed until userspace closes the window.
+	 */
 	if (tctx->cell != 0 && reject_multicpu_pinning && !tctx->all_cell_cpus_allowed &&
 	    bpf_cpumask_weight(p->cpus_ptr) > 1) {
-		scx_bpf_error("multi-CPU pinning within cell %d not supported", tctx->cell);
-		return -EINVAL;
+		if (userspace_managed_cell_mode &&
+		    READ_ONCE(cpuset_seq) != READ_ONCE(applied_cpuset_seq)) {
+			struct cpu_ctx *cctx = lookup_cpu_ctx(-1);
+			if (cctx)
+				cstat_inc(CSTAT_PIN_SKIP, tctx->cell, cctx);
+		} else {
+			scx_bpf_error("multi-CPU pinning within cell %d not supported", tctx->cell);
+			return -EINVAL;
+		}
 	}
 
 	/*

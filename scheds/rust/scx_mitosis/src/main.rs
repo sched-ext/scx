@@ -255,6 +255,7 @@ struct DistributionStats {
     borrowed_pct: f64,
     affn_viol_pct: f64,
     steal_pct: f64,
+    pin_skip_pct: f64,
 
     // for formatting
     global_queue_decisions: u64,
@@ -276,7 +277,7 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
@@ -285,6 +286,7 @@ impl Display for DistributionStats {
             self.borrowed_pct,
             self.affn_viol_pct,
             self.steal_pct,
+            self.pin_skip_pct,
             width = descisions_width,
         )
     }
@@ -717,6 +719,7 @@ impl<'a> Scheduler<'a> {
             .bss_data
             .as_mut()
             .expect("bss_data must be available after scheduler load");
+
         let config = &mut bss_data.cell_config;
 
         // Zero out the config struct. This is necessary because:
@@ -785,6 +788,8 @@ impl<'a> Scheduler<'a> {
             );
         }
 
+        self.update_applied_cpuset_seq();
+
         Ok(())
     }
 
@@ -799,6 +804,7 @@ impl<'a> Scheduler<'a> {
         scope_queue_decisions: u64,
         scope_affn_viols: u64,
         scope_steals: u64,
+        scope_pin_skips: u64,
     ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
@@ -829,6 +835,12 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_steals as f64) / (scope_queue_decisions as f64)
         };
 
+        let pin_skip_pct = if scope_queue_decisions == 0 {
+            0.0
+        } else {
+            100.0 * (scope_pin_skips as f64) / (scope_queue_decisions as f64)
+        };
+
         const EXPECTED_QUEUES: usize = 4;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
@@ -847,6 +859,7 @@ impl<'a> Scheduler<'a> {
             borrowed_pct: queue_pct[3],
             affn_viol_pct: affinity_violations_percent,
             steal_pct,
+            pin_skip_pct,
             global_queue_decisions,
         });
     }
@@ -879,6 +892,12 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_STEAL as usize])
             .sum::<u64>();
 
+        // Sum pin skips over all cells
+        let scope_pin_skips: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize])
+            .sum::<u64>();
+
         // Special case where the number of scope decisions == number global decisions
         let stats = self.calculate_distribution_stats(
             &queue_counts,
@@ -886,6 +905,7 @@ impl<'a> Scheduler<'a> {
             global_queue_decisions,
             scope_affn_viols,
             scope_steals,
+            scope_pin_skips,
         )?;
 
         self.metrics.update(&stats);
@@ -930,12 +950,17 @@ impl<'a> Scheduler<'a> {
             let scope_steals: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_STEAL as usize];
 
+            // Pin skips for this cell
+            let scope_pin_skips: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize];
+
             let stats = self.calculate_distribution_stats(
                 &queue_counts,
                 global_queue_decisions,
                 cell_queue_decisions,
                 scope_affn_viols,
                 scope_steals,
+                scope_pin_skips,
             )?;
 
             self.metrics
@@ -1154,6 +1179,14 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    /// Write applied_cpuset_seq to BSS, closing the rejection-skip window.
+    fn update_applied_cpuset_seq(&mut self) {
+        unsafe {
+            let ptr = &mut self.skel.maps.bss_data.as_mut().unwrap().applied_cpuset_seq as *mut u32;
+            std::ptr::write_volatile(ptr, self.last_cpuset_seq);
+        }
+    }
+
     /// Check if any cell's cpuset was modified and recompute if so.
     fn check_cpuset_changes(&mut self) -> Result<()> {
         let Some(ref mut cm) = self.cell_manager else {
@@ -1174,7 +1207,9 @@ impl<'a> Scheduler<'a> {
         self.last_cpuset_seq = current_seq;
 
         if !cm.refresh_cpusets()? {
-            return Ok(()); // seq changed but no cpusets on our cells changed
+            // seq changed but no cpusets on our cells changed
+            self.update_applied_cpuset_seq();
+            return Ok(());
         }
 
         let cpu_assignments = self.compute_and_apply_cell_config(&[])?;
