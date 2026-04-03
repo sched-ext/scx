@@ -2125,7 +2125,8 @@ int apply_cell_config(void *ctx)
 						      FAKE_FLAT_CELL_LLC;
 				if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now),
 						cctx->vtime_now))
-					(void)WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
+					(void)WRITE_ONCE(cell->llcs[llc_idx].vtime_now,
+							 cctx->vtime_now);
 			}
 			cctx->cell = cell_id;
 		}
