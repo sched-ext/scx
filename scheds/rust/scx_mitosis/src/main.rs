@@ -788,8 +788,6 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        self.update_applied_cpuset_seq();
-
         Ok(())
     }
 
@@ -1213,6 +1211,7 @@ impl<'a> Scheduler<'a> {
         }
 
         let cpu_assignments = self.compute_and_apply_cell_config(&[])?;
+        self.update_applied_cpuset_seq();
         let cell_manager = self.cell_manager.as_ref().unwrap();
         info!(
             "Cpuset change detected, recomputed config: {}",
