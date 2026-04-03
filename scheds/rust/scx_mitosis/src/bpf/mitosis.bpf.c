@@ -251,7 +251,7 @@ static inline int free_cell(int cell_idx)
 	if (!(c = lookup_cell(cell_idx)))
 		return -1;
 
-	WRITE_ONCE(c->in_use, 0);
+	(void)WRITE_ONCE(c->in_use, 0);
 	return 0;
 }
 
@@ -907,7 +907,7 @@ static inline struct cpumask_entry *allocate_cpumask_entry()
 
 static inline void free_cpumask_entry(struct cpumask_entry *entry)
 {
-	WRITE_ONCE(entry->used, 0);
+	(void)WRITE_ONCE(entry->used, 0);
 }
 
 /* Cpumask entry — uses RAII framework from mitosis.bpf.h */
@@ -1109,7 +1109,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 				 * cgroup's ancestor's cells in level_cells.
 				 */
 				u32 parent_cell = level_cells[level - 1];
-				WRITE_ONCE(cgrp_ctx->cell, parent_cell);
+				(void)WRITE_ONCE(cgrp_ctx->cell, parent_cell);
 				level_cells[level] = parent_cell;
 			}
 			continue;
@@ -1168,7 +1168,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		}
 
 		barrier();
-		WRITE_ONCE(cgrp_ctx->cell, cell_idx);
+		(void)WRITE_ONCE(cgrp_ctx->cell, cell_idx);
 		u32 level = cur_cgrp->level;
 		if (level <= 0 || level >= MAX_CG_DEPTH) {
 			scx_bpf_error("Cgroup hierarchy is too deep: %d", level);
@@ -1210,7 +1210,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	}
 
 	barrier();
-	WRITE_ONCE(applied_configuration_seq, local_configuration_seq);
+	(void)WRITE_ONCE(applied_configuration_seq, local_configuration_seq);
 
 	return 0;
 }
@@ -1221,7 +1221,7 @@ static inline void advance_cell_llc_vtime(struct cell *cell, struct task_ctx *tc
 									FAKE_FLAT_CELL_LLC;
 
 	if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now), task_vtime))
-		WRITE_ONCE(cell->llcs[llc_idx].vtime_now, task_vtime);
+		(void)WRITE_ONCE(cell->llcs[llc_idx].vtime_now, task_vtime);
 }
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
@@ -1290,7 +1290,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	 */
 	if (!tctx->borrowed) {
 		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
-			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
+			(void)WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 	}
 
 	/* Clear the borrowed flag — it is one-shot, consumed above */
@@ -1365,7 +1365,7 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 	}
 
 	if (cgrp->kn->id == root_cgid) {
-		WRITE_ONCE(cgc->cell, 0);
+		(void)WRITE_ONCE(cgc->cell, 0);
 		return 0;
 	}
 
@@ -2046,7 +2046,7 @@ int apply_cell_config(void *ctx)
 		if (!cell)
 			return -EINVAL;
 
-		WRITE_ONCE(cell->in_use, 0);
+		(void)WRITE_ONCE(cell->in_use, 0);
 		cell->owner_cgid = 0;
 	}
 
@@ -2125,7 +2125,7 @@ int apply_cell_config(void *ctx)
 						      FAKE_FLAT_CELL_LLC;
 				if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now),
 						cctx->vtime_now))
-					WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
+					(void)WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
 			}
 			cctx->cell = cell_id;
 		}
@@ -2286,7 +2286,7 @@ int apply_cell_config(void *ctx)
 			else
 				parent_cell = 0;
 
-			WRITE_ONCE(cgrp_ctx->cell, parent_cell);
+			(void)WRITE_ONCE(cgrp_ctx->cell, parent_cell);
 			level_cells[level] = parent_cell;
 		}
 	}
