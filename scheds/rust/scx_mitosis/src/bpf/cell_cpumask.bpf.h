@@ -25,12 +25,13 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
+#include "../../../../include/lib/cleanup.bpf.h"
 #else
 #include <scx/common.bpf.h>
+#include <lib/cleanup.bpf.h>
 #endif
 
 #include "intf.h"
-#include <lib/cleanup.bpf.h>
 
 /*
  * One publishable cell cpumask slot.

@@ -12,6 +12,13 @@ typedef unsigned int u32;
 typedef _Bool bool;
 #endif
 
+#ifdef LSP
+#define __bpf__
+typedef unsigned long long u64;
+typedef unsigned int u32;
+typedef _Bool bool;
+#endif
+
 enum consts {
 	CACHELINE_SIZE = 64,
 	MAX_CPUS_SHIFT = 9,

@@ -11,6 +11,10 @@
  */
 #pragma once
 
+#ifdef LSP
+#define __bpf__
+#endif
+
 #include "mitosis.bpf.h"
 #include "intf.h"
 
@@ -190,10 +194,10 @@ static void zero_cell_vtimes(struct cell *cell)
 		u32 llc_idx;
 		bpf_for(llc_idx, 0, MAX_LLCS)
 		{
-			WRITE_ONCE(cell->llcs[llc_idx].vtime_now, 0);
+			(void)WRITE_ONCE(cell->llcs[llc_idx].vtime_now, 0);
 		}
 	} else {
-		WRITE_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now, 0);
+		(void)WRITE_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now, 0);
 	}
 }
 

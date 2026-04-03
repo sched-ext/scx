@@ -8,6 +8,9 @@ license = "GPL-2.0-only"
 
 publish = false
 
+[package.metadata.scx]
+ci.use_clippy = true
+
 [dependencies]
 anyhow = "1"
 bitvec = "1"
