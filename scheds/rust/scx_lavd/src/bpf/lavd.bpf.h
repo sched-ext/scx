@@ -286,6 +286,7 @@ struct cpdom_ctx {
 	u16	nr_turb_cpus;		    /* count of turbulent CPUs in this cpdom */
 
 	u64	stealee_budget_invr;		    /* egress budget: how much load can leave this domain per round */
+	u64	stealer_budget_invr;		    /* ingress budget: how much additional load this stealer can accept */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
