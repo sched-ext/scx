@@ -39,6 +39,7 @@ int plan_x_cpdom_migration(void)
 	u64 cpdom_id;
 	u32 stealer_threshold, stealee_threshold, nr_stealee = 0;
 	u64 avg_load_invr = 0, min_load_invr = U64_MAX, max_load_invr = 0;
+	u64 total_load_invr = 0, total_cap_sum = 0;
 	u64 max_avg_util_wall = 0;
 	u64 x_mig_delta, util;
 	bool overflow_running = false;
@@ -95,6 +96,8 @@ int plan_x_cpdom_migration(void)
 		cpdomc->load_invr = cpdomc->avg_util_invr_sum +
 				    cpdomc->qload_invr;
 		avg_load_invr += cpdomc->load_invr;
+		total_load_invr += cpdomc->load_invr;
+		total_cap_sum += cpdomc->cap_sum_active_cpus;
 
 		if (min_load_invr > cpdomc->load_invr)
 			min_load_invr = cpdomc->load_invr;
@@ -174,6 +177,7 @@ int plan_x_cpdom_migration(void)
 		 */
 		if (cpdomc->nr_active_cpus &&
 		    cpdomc->load_invr <= stealer_threshold) {
+			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, true);
 			WRITE_ONCE(cpdomc->is_stealee, false);
 			continue;
@@ -181,9 +185,29 @@ int plan_x_cpdom_migration(void)
 
 		/*
 		 * Over-loaded or non-active domains become a stealee.
+		 * Budget = half the excess load above capacity-proportional
+		 * fair share. Halving (rather than draining the full excess)
+		 * avoids two failure modes:
+		 * - Ping-pong: prevent overshooting. Moving everything in one
+		 *   round may trigger the imbalance and ping-pong effect.
+		 * - Thundering-herd: without a per-round limit, every stealer
+		 *   that sees this domain can migrate out the tasks from it and
+		 *   drain it past the fair share in a single round.
 		 */
 		if (!cpdomc->nr_active_cpus ||
 		    cpdomc->load_invr >= stealee_threshold) {
+			u64 budget = 0;
+
+			if (cpdomc->nr_active_cpus && total_cap_sum > 0) {
+				u64 fair_share = total_load_invr *
+					cpdomc->cap_sum_active_cpus /
+					total_cap_sum;
+				if (cpdomc->load_invr > fair_share)
+					budget = (cpdomc->load_invr -
+						  fair_share) / 2;
+			}
+
+			WRITE_ONCE(cpdomc->stealee_budget_invr, budget);
 			WRITE_ONCE(cpdomc->is_stealer, false);
 			WRITE_ONCE(cpdomc->is_stealee, true);
 			nr_stealee++;
@@ -193,6 +217,7 @@ int plan_x_cpdom_migration(void)
 		/*
 		 * Otherwise, keep tasks as it is.
 		 */
+		WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 		WRITE_ONCE(cpdomc->is_stealer, false);
 		WRITE_ONCE(cpdomc->is_stealee, false);
 	}
@@ -212,6 +237,7 @@ reset_and_skip_lb:
 				break;
 
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+			WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 			WRITE_ONCE(cpdomc->is_stealer, false);
 			WRITE_ONCE(cpdomc->is_stealee, false);
 		}
