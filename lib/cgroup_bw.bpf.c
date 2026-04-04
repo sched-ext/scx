@@ -1402,6 +1402,16 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 		return 0;
 	}
 
+	/*
+	 * consumed_ns may span a CBW_REPLENISH_PERIOD boundary when a task
+	 * runs across it. Since this function is called on every tick
+	 * (ops.stopping() and ops.tick()), consumed_ns per call is bounded by
+	 * roughly one tick interval (~1-4ms). Any cross-period overcount is
+	 * therefore a bounded approximation error: it appears as overspend in
+	 * runtime_total, which cbw_replenish_cgroup() converts into debt that
+	 * is subtracted from the next period's budget, keeping long-term CPU
+	 * bandwidth correct.
+	 */
 	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
 
 	cbw_dbg_cgrp("  llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
