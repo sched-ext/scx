@@ -21,8 +21,24 @@ enum scx_cgroup_consts {
 	CBW_REPLENISH_PERIOD		= (100ULL * 1000ULL * 1000ULL),
 	/* min replenish period in nsec after jitter compensation: 1 msec */
 	CBW_REPLENISH_PERIOD_MIN	= (1ULL * 1000ULL * 1000ULL),
-	/* accounting period in nsec: 5 msec */
-	CBW_ACCOUNTING_PERIOD		= (5ULL * 1000ULL * 1000ULL),
+	/* min/max accounting period in nsec: 3 msec and 20 msec */
+	CBW_ACCOUNTING_PERIOD_MIN	= (3ULL * 1000ULL * 1000ULL),
+	CBW_ACCOUNTING_PERIOD_MAX	= (20ULL * 1000ULL * 1000ULL),
+	/*
+	 * Divisor for converting time-to-throttle to accounting interval.
+	 * The accounting timer fires CBW_ACCOUNTING_PERIOD_DIVISOR times
+	 * before the predicted throttle point, giving multiple chances to
+	 * observe rate changes before overuse occurs.
+	 */
+	CBW_ACCOUNTING_PERIOD_DIVISOR	= 4,
+	/* fixed-point scale for consumption rate: 1024 = 100% quota consumed */
+	CBW_SHIFT			= 10,
+	CBW_SCALE			= (1 << CBW_SHIFT),
+	/*
+	 * EWMA decay factor for avg_consumption_rate. With decay=3 and
+	 * CBW_REPLENISH_PERIOD=100ms, the half-lifetime is ~520ms.
+	 */
+	CBW_CONSUMPTION_RATE_DECAY	= 3,
 	/* maximum number of cgroups */
 	CBW_NR_CGRP_MAX			= 2048,
 	/* maximum number of scx_cgroup_llc_ctx: 2048 cgroups * 32 LLCs */
@@ -119,6 +135,27 @@ struct scx_cgroup_ctx {
 	 * Total runtime at the last replenishment period.
 	 */
 	s64		runtime_total_last;
+
+	/*
+	 * EWMA of CPU consumption rate within a replenish interval, in
+	 * CBW_SCALE fixed-point. CBW_SCALE (1024) represents consuming the
+	 * full CBW_REPLENISH_PERIOD worth of CPU time, i.e., 100% of one CPU
+	 * core. Updated only when the cgroup was active (runtime_total_last
+	 * > 0) to avoid pulling the average toward zero during idle periods.
+	 * With CBW_CONSUMPTION_RATE_DECAY=3, the half-lifetime is ~5.2
+	 * replenish intervals (~520ms at CBW_REPLENISH_PERIOD = 100ms).
+	 *
+	 * Default is 0 (zero-initialized by BPF map). This is reasonable
+	 * because __calc_avg() uses a 50/50 blend when the old value is small
+	 * (< 1 << decay), so the average ramps up quickly on the first few
+	 * active intervals rather than warming up slowly.
+	 *
+	 * For unconstrained cgroups (nquota_ub == CBW_RUNTUME_INF),
+	 * cbw_replenish_cgroup() returns early, so avg_consumption_rate stays
+	 * 0. This is correct: a cgroup with no quota limit has no meaningful
+	 * consumption rate to track.
+	 */
+	u64		avg_consumption_rate;
 };
 
 
@@ -382,11 +419,13 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
 		"cgx:runtime_total_sloppy: %lld -- "				\
 		"cgx:nquota: %lld -- "						\
 		"cgx:nquota_ub: %lld -- "					\
-		"cgx:is_throttled: %d "						\
+		"cgx:is_throttled: %d -- "					\
+		"cgx:avg_consumption_rate: %llu "				\
 		##__VA_ARGS__,							\
 		cgx->id, cgx->period_budget,					\
 		cgx->runtime_total_last, cgx->runtime_total_sloppy,		\
-		cgx->nquota, cgx->nquota_ub, cgx->is_throttled);		\
+		cgx->nquota, cgx->nquota_ub, cgx->is_throttled,		\
+		cgx->avg_consumption_rate);					\
 } while (0);
 
 #define dbg_llcx(llcx, str, ...) do {						\
@@ -407,11 +446,13 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
 		 "cgx:runtime_total_sloppy: %lld -- "				\
 		 "cgx:nquota: %lld -- "						\
 		 "cgx:nquota_ub: %lld -- "					\
-		 "cgx:is_throttled: %d"						\
+		 "cgx:is_throttled: %d -- "					\
+		 "cgx:avg_consumption_rate: %llu"				\
 		 ##__VA_ARGS__,							\
 		 cgx->id, cgx->period_budget,					\
 		 cgx->runtime_total_last, cgx->runtime_total_sloppy,		\
-		 cgx->nquota, cgx->nquota_ub, cgx->is_throttled);		\
+		 cgx->nquota, cgx->nquota_ub, cgx->is_throttled,		\
+		 cgx->avg_consumption_rate);					\
 } while (0);
 
 /*
@@ -489,7 +530,7 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 
 	bpf_timer_init(ac_timer, &accounting_timer, CBW_CLOCK_BOOTTIME);
 	bpf_timer_set_callback(ac_timer, accounting_timerfn);
-	if ((ret = bpf_timer_start(ac_timer, CBW_ACCOUNTING_PERIOD, 0))) {
+	if ((ret = bpf_timer_start(ac_timer, CBW_ACCOUNTING_PERIOD_MAX, 0))) {
 		cbw_err("Failed to start accounting timer");
 		return ret;
 	}
@@ -1596,6 +1637,19 @@ bool cbw_replenish_cgroup(struct scx_cgroup_ctx *cgx, u64 now)
 	 */
 	keep_throttled = (budget <= 0);
 
+	/*
+	 * Update the EWMA consumption rate (CBW_SCALE = 1024 means 100% of
+	 * one CPU core consumed within CBW_REPLENISH_PERIOD). Only updated
+	 * when the cgroup was active this interval to avoid pulling the average
+	 * toward zero during idle periods.
+	 */
+	if (cgx->runtime_total_last > 0) {
+		u64 rate = (u64)cgx->runtime_total_last * CBW_SCALE /
+			   CBW_REPLENISH_PERIOD;
+		cgx->avg_consumption_rate =
+			__calc_avg(cgx->avg_consumption_rate, rate,
+				   CBW_CONSUMPTION_RATE_DECAY);
+	}
 
 	dbg_cgx(cgx, "replenished: ");
 
