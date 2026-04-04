@@ -1282,29 +1282,6 @@ int cbw_throttle_cgroups(struct cgroup *cgrp)
 	return 0;
 }
 
-static 
-void cbw_consume_budget(struct scx_cgroup_ctx *cgx,
-			struct scx_cgroup_llc_ctx *llcx, u64 consumed_ns)
-{
-	s64 period_duration;
-
-	/*
-	 * When budget consumption occurs across two periods,
-	 * account only for the time of this period.
-	 *
-	 *  <-- period 1 --><-- period 2 -->
-	 *       \== consumed_ns ==/
-	 */
-	period_duration = time_delta(scx_bpf_now(),
-				     READ_ONCE(cgx->period_start_clk));
-	if (consumed_ns > period_duration) {
-		consumed_ns = period_duration;
-	}
-
-	/* Increase the total runtime */
-	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
-}
-
 static
 int cbw_get_current_llc_id(void)
 {
@@ -1395,7 +1372,6 @@ __hidden
 int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 {
 	struct scx_cgroup_llc_ctx *llcx;
-	struct scx_cgroup_ctx *cgx;
 	int llc_id;
 
 	/* Always go ahead with the root cgroup. */
@@ -1416,9 +1392,8 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 	 * because LLC's runtime_total will be aggregated to the cgroup level
 	 * at reservation.
 	 */
-	cgx = cbw_get_cgroup_ctx(cgrp);
 	llcx = cbw_get_llc_ctx(cgrp, llc_id);
-	if (!cgx || !llcx) {
+	if (!llcx) {
 		/*
 		 * When exiting a scx scheduler, the sched_ext kernel shuts
 		 * down cgroup support before tasks. Hence, failing to look
@@ -1427,9 +1402,9 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 		return 0;
 	}
 
-	cbw_consume_budget(cgx, llcx, consumed_ns);
+	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
 
-	cbw_dbg_cgrp("  llc_id: %d -- reserved_ns: %llu -- consumed_ns: %llu -- llcx:runtime_total: %lld",
+	cbw_dbg_cgrp("  llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
 		     llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
 	return 0;
 }
@@ -1557,8 +1532,6 @@ bool cbw_replenish_cgroup(struct scx_cgroup_ctx *cgx, u64 now)
 	 * may differ. The burst allowance (burst_remaining) resets to its
 	 * cap (cgx->burst) at each cpu.max period boundary.
 	 *
-	 * period_start_clk also serves cbw_consume_budget(), which uses it
-	 * to cap cross-period runtime consumption.
 	 */
 	period_end = time_delta(now, cgx->period_start_clk) >= cgx->period;
 	if (period_end)
