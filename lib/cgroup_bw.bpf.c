@@ -94,11 +94,14 @@ struct scx_cgroup_ctx {
 	s64		burst_remaining;
 
 	/*
-	 * The amount of remaining time out of @quota after LLC contexts
-	 * deduct the budget for execution. It can be negative when the quota
-	 * is over-allocated.
+	 * Effective quota for the current period: nquota_ub adjusted for
+	 * debt (overspend from the previous period, subtracted) and burst
+	 * credit (underspend carried forward, added). Set at each period
+	 * boundary by replenish_timerfn(). Used by cbw_update_runtime_total_sloppy()
+	 * as the throttle threshold instead of the bare nquota_ub, so that
+	 * long-run average utilization converges to the configured quota.
 	 */
-	s64		budget_remaining;
+	s64		period_budget;
 
 	/*
 	 * Total amount of time executed once replenished. It includes
@@ -203,8 +206,8 @@ struct {
  * An array of cgroups that can have tasks. This is necessary to iterate
  * cgroups without holding an RCU lock.
  */
-static u64		cbw_nr_taskable_cgroups;
-static u64		cbw_taskable_cgroup_ids[CBW_NR_CGRP_MAX];
+static u64		cbw_nr_cgroups;
+static u64		cbw_cgroup_ids[CBW_NR_CGRP_MAX];
 
 /*
  * An array of throttled cgroups that need to be reenqueued.
@@ -374,14 +377,14 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
 } while(0)
 
 #define dbg_cgx(cgx, str, ...) do {						\
-	cbw_dbg(str "cgid%llu -- cgx:budget_remaining: %lld -- "		\
+	cbw_dbg(str "cgid%llu -- cgx:period_budget: %lld -- "			\
 		"cgx:runtime_total_last: %lld -- "				\
 		"cgx:runtime_total_sloppy: %lld -- "				\
 		"cgx:nquota: %lld -- "						\
 		"cgx:nquota_ub: %lld -- "					\
 		"cgx:is_throttled: %d "						\
 		##__VA_ARGS__,							\
-		cgx->id, cgx->budget_remaining,					\
+		cgx->id, cgx->period_budget,					\
 		cgx->runtime_total_last, cgx->runtime_total_sloppy,		\
 		cgx->nquota, cgx->nquota_ub, cgx->is_throttled);		\
 } while (0);
@@ -399,14 +402,14 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
 } while (0);
 
 #define info_cgx(cgx, str, ...) do {						\
-	cbw_info(str "cgid%llu -- cgx:budget_remaining: %lld -- "		\
+	cbw_info(str "cgid%llu -- cgx:period_budget: %lld -- "			\
 		 "cgx:runtime_total_last: %lld -- "				\
 		 "cgx:runtime_total_sloppy: %lld -- "				\
 		 "cgx:nquota: %lld -- "						\
 		 "cgx:nquota_ub: %lld -- "					\
 		 "cgx:is_throttled: %d"						\
 		 ##__VA_ARGS__,							\
-		 cgx->id, cgx->budget_remaining,				\
+		 cgx->id, cgx->period_budget,					\
 		 cgx->runtime_total_last, cgx->runtime_total_sloppy,		\
 		 cgx->nquota, cgx->nquota_ub, cgx->is_throttled);		\
 } while (0);
@@ -828,7 +831,7 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 			  args->bw_burst_us);
 	cbw_update_nquota_ub(cgrp, cgx);
 	cgx->runtime_total_sloppy = 0;
-	cgx->budget_remaining = (cgrp->level == 1)? cgx->nquota : 0;
+	cgx->period_budget = cgx->nquota_ub;
 	cgx->is_throttled = false;
 
 	/*
@@ -878,7 +881,7 @@ int cbw_unthrottle_cgroup_for_exit(struct cgroup *cgrp)
 		return 0;
 
 	WRITE_ONCE(cgx->nquota_ub, CBW_RUNTUME_INF);
-	WRITE_ONCE(cgx->budget_remaining, CBW_RUNTUME_INF);
+	WRITE_ONCE(cgx->period_budget, CBW_RUNTUME_INF);
 	/*
 	 * Ensure nquota_ub = INF is globally visible before clearing
 	 * is_throttled. Without this, the accounting timer could observe
@@ -1183,8 +1186,13 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 			tree->levels[prev_level] = 0;
 		}
 
-		/* If the cgroup reached the upper bound, mark it throttled. */
-		if (READ_ONCE(cur_cgx->runtime_total_sloppy) >= cur_cgx->nquota_ub)
+		/*
+		 * If the cgroup has consumed its effective period budget, mark
+		 * it throttled. period_budget = nquota_ub - debt + burst_credit
+		 * reflects any debt carried from the previous period, so the
+		 * comparison enforces long-run average convergence.
+		 */
+		if (READ_ONCE(cur_cgx->runtime_total_sloppy) >= cur_cgx->period_budget)
 			WRITE_ONCE(cur_cgx->is_throttled, true);
 
 		/* Aggregate this cgroup's runtime_total_sloppy to the level. */
@@ -1531,58 +1539,80 @@ bool cbw_has_backlogged_tasks(struct scx_cgroup_ctx *cgx)
 }
 
 static
-bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
-				   struct scx_cgroup_ctx *cgx, u64 now)
+bool cbw_replenish_cgroup(struct scx_cgroup_ctx *cgx, u64 now)
 {
-	s64 burst = 0, debt = 0, base, budget;
-	bool period_end, was_throttled;
+	s64 burst_credit = 0, debt = 0, budget;
+	bool period_end, was_throttled, keep_throttled = false;
 
 	/*
-	 * If the quota_ub is infinite, we don't need to replenish the cgroup.
+	 * If the nquota_ub is infinite, we don’t need to replenish the cgroup.
 	 */
 	if (cgx->nquota_ub == CBW_RUNTUME_INF)
 		goto out_no_replenish;
 
 	/*
-	 * Calculate the burst time, which is the remaining time to carry over.
+	 * Detect whether the cpu.max period boundary has been crossed.
+	 * CBW_REPLENISH_PERIOD normalizes nquota_ub to a fixed 100ms window,
+	 * but cgx->period is the user-configured period from cpu.max, which
+	 * may differ. The burst allowance (burst_remaining) resets to its
+	 * cap (cgx->burst) at each cpu.max period boundary.
+	 *
+	 * period_start_clk also serves cbw_consume_budget(), which uses it
+	 * to cap cross-period runtime consumption.
 	 */
 	period_end = time_delta(now, cgx->period_start_clk) >= cgx->period;
 	if (period_end)
 		WRITE_ONCE(cgx->period_start_clk, now);
 
-	debt = cgx->runtime_total_last - cgx->nquota_ub;
-	if ((cgx->burst > 0) && (debt < 0)) {
-		burst = min(-debt, cgx->burst_remaining);
+	/*
+	 * Debt and burst credit are computed independently:
+	 *
+	 * Debt: overspend relative to period_budget (the effective budget for
+	 * the just-completed interval). Using period_budget rather than bare
+	 * nquota_ub is correct: if burst was granted last interval, spending
+	 * up to period_budget is not a violation and should not incur debt.
+	 *
+	 * Burst credit: underspend relative to nquota (the cgroup's own
+	 * quota), clamped to [0, burst_remaining], matching cpu.max.burst
+	 * semantics. Using nquota rather than nquota_ub means burst is earned
+	 * against the cgroup's own quota regardless of ancestor constraints,
+	 * consistent with how the kernel cpu.max.burst is defined. Ancestor
+	 * quota enforcement is handled separately through the bottom-up
+	 * aggregation and top-down propagation in the accounting timer.
+	 *
+	 * When burst is not configured (cgx->burst = 0), burst_remaining is
+	 * also 0, so clamp(..., 0LL, 0LL) = 0 and burst_credit is always
+	 * zero without any special casing.
+	 */
+	debt = max(cgx->runtime_total_last - cgx->period_budget, 0LL);
+	burst_credit = clamp((s64)cgx->nquota - cgx->runtime_total_last,
+			     0LL, cgx->burst_remaining);
 
-		if (period_end) {
-			WRITE_ONCE(cgx->burst_remaining, cgx->burst);
-		} else {
-			WRITE_ONCE(cgx->burst_remaining,
-				   cgx->burst_remaining - burst);
-		}
-	}
+	dbg_cgx(cgx, "replenishing: ");
 
 	/*
-	 * Replenish the quota at the cgroup level, considering the burst.
-	 *
-	 * We need to replenish budget_remaining at the subroot level
-	 * (level == 1) because only the subroot cgroup distributes the budget
-	 * to its descendants. For the non-sburoot level, we only carry over
-	 * the burst.
-	 *
-	 * If the subroot cgroup’s quota is unlimited, transfer the budget at
-	 * once to the target cgroup by the target’s upper bound.
-	 *
-	 * Note that the carry-over of the (positive) remaining budget is
-	 * limited by the burst. However, the debt should be paid off for
-	 * eventual bandwidth control.
+	 * Update burst_remaining. On period_end, reset to the full burst cap
+	 * for the new cpu.max period. Otherwise, decrease by the credit
+	 * consumed this interval.
 	 */
-	dbg_cgx(cgx, "replenishing: ");
-	base = ((subroot_cgx == cgx) ||
-		(subroot_cgx->nquota_ub == CBW_RUNTUME_INF)) ?
-		cgx->nquota_ub : 0;
-	budget = base + ((debt > 0) ? -debt : burst);
-	WRITE_ONCE(cgx->budget_remaining, budget);
+	if (period_end)
+		WRITE_ONCE(cgx->burst_remaining, cgx->burst);
+	else
+		WRITE_ONCE(cgx->burst_remaining,
+			   cgx->burst_remaining - burst_credit);
+
+	budget = (s64)cgx->nquota_ub + burst_credit - debt;
+	WRITE_ONCE(cgx->period_budget, budget);
+
+	/*
+	 * If budget <= 0, the cgroup's debt exceeds its quota and burst for
+	 * this period, so it has no CPU time to spend. Keep it throttled so
+	 * that (a) the bottom half does not drain its BTQ and (b) the caller
+	 * can propagate the throttle to descendants immediately via
+	 * cbw_throttle_cgroups() without waiting for the next accounting tick.
+	 */
+	keep_throttled = (budget <= 0);
+
 
 	dbg_cgx(cgx, "replenished: ");
 
@@ -1597,19 +1627,28 @@ out_no_replenish:
 	smp_mb();
 
 	/*
-	 * Snapshot is_throttled before clearing it. Both conditions mean the
-	 * cgroup needs reenqueue attention next period:
+	 * Snapshot is_throttled before updating it. The following conditions
+	 * mean the cgroup needs reenqueue attention next period:
 	 *
 	 * - was_throttled: budget was exhausted this period. Even if the BTQ
 	 *   appears empty (e.g., the bottom half just popped the last task but
 	 *   hasn't reenqueued it yet), we must not miss this cgroup.
 	 *
+	 * - keep_throttled: budget <= 0, so the cgroup stays throttled into
+	 *   the new period. was_throttled is almost always true in this case,
+	 *   but keep_throttled guards the rare edge where it is not.
+	 *
 	 * - cbw_has_backlogged_tasks: tasks remain in the BTQ from an
 	 *   incomplete drain (reenqueuing couldn't finish within one period).
+	 *
+	 * Set is_throttled to keep_throttled: true when budget <= 0 so the
+	 * cgroup stays throttled for the new period; false otherwise. For
+	 * unlimited-quota cgroups that jumped to out_no_replenish,
+	 * keep_throttled is always false.
 	 */
 	was_throttled = READ_ONCE(cgx->is_throttled);
-	WRITE_ONCE(cgx->is_throttled, false);
-	return was_throttled || cbw_has_backlogged_tasks(cgx);
+	WRITE_ONCE(cgx->is_throttled, keep_throttled);
+	return was_throttled || keep_throttled || cbw_has_backlogged_tasks(cgx);
 }
 
 /*
@@ -1682,9 +1721,9 @@ static
 int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
 	static int nr_throttled; /* Add `static` to work around the verifier error (-E2BIG) */
-	struct cgroup *root_cgrp, *cur_cgrp, *subroot_cgrp;
-	struct cgroup_subsys_state *subroot_css, *pos;
-	struct scx_cgroup_ctx *cur_cgx, *subroot_cgx;
+	struct cgroup *root_cgrp, *cur_cgrp;
+	struct cgroup_subsys_state *root_css, *pos;
+	struct scx_cgroup_ctx *cur_cgx;
 	struct scx_cgroup_llc_ctx *cur_llcx;
 	const struct cpumask *online_mask;
 	s64 interval, jitter, period;
@@ -1725,8 +1764,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * replenishment calculations.
 	 */
 	bpf_rcu_read_lock();
-	subroot_css = &root_cgrp->self;
-	bpf_for_each(css, pos, subroot_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
+	root_css = &root_cgrp->self;
+	bpf_for_each(css, pos, root_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
 		cur_cgrp = pos->cgroup;
 		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
 		if (!cur_cgx) {
@@ -1751,16 +1790,17 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	bpf_rcu_read_unlock();
 
 	/*
-	 * Update the array of taskable or subroot-level (level == 1) cgroup
-	 * IDs (cbw_taskable_cgroup_ids) in a pre order (i.e., top-down
-	 * manner), so we can replenish cgroups in a pre order. This avoids
-	 * the case such that a lower-level cgroup is throttled before
-	 * upper-lever cgroups are replenished.
+	 * Build the list of all cgroups that have a context in a pre-order
+	 * (top-down) traversal so that parents are replenished before their
+	 * children. This ensures that when we clear a parent's is_throttled
+	 * flag, the top-down propagation in the next accounting tick does
+	 * not spuriously re-throttle children before the parent's flag is
+	 * cleared.
 	 */
 	bpf_rcu_read_lock();
-	cbw_nr_taskable_cgroups = 0;
-	subroot_css = &root_cgrp->self;
-	bpf_for_each(css, pos, subroot_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+	cbw_nr_cgroups = 0;
+	root_css = &root_cgrp->self;
+	bpf_for_each(css, pos, root_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
 		cur_cgrp = pos->cgroup;
 		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
 		if (!cur_cgx) {
@@ -1771,22 +1811,20 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 		}
 
-		if (cur_cgx->has_llcx || cur_cgrp->level == 1) {
-			ids = MEMBER_VPTR(cbw_taskable_cgroup_ids,
-					  [cbw_nr_taskable_cgroups]);
-			if (!ids) {
-				cbw_err("Failed to fetch a taskable cgroup table.");
-				continue;
-			}
-			*ids = cgroup_get_id(cur_cgrp);
-			cbw_nr_taskable_cgroups++;
+		ids = MEMBER_VPTR(cbw_cgroup_ids,
+				  [cbw_nr_cgroups]);
+		if (!ids) {
+			cbw_err("Failed to fetch a cgroup table.");
+			continue;
 		}
+		*ids = cgroup_get_id(cur_cgrp);
+		cbw_nr_cgroups++;
 	}
 	bpf_rcu_read_unlock();
 	bpf_cgroup_release(root_cgrp);
 
 	/*
-	 * Replenish all the taskable cgroups in a pre order.
+	 * Replenish all cgroups in a pre order.
 	 *
 	 * Note that we do not use the cgroup iterator here since it requires
 	 * an RCU read lock. We should not acquire the RCU read lock here since
@@ -1798,19 +1836,18 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * the burst time. However, relaxing some accuracy in burst time
 	 * calculation has more benefits than drawbacks.
 	 */
-	cbw_dbg("Start replenish %llu taskable cgroups.", cbw_nr_taskable_cgroups);
+	cbw_dbg("Start replenish %llu cgroups.", cbw_nr_cgroups);
 	nr_throttled = 0;
-	bpf_for(i, 0, cbw_nr_taskable_cgroups) {
-		ids = MEMBER_VPTR(cbw_taskable_cgroup_ids, [i]);
+	bpf_for(i, 0, cbw_nr_cgroups) {
+		ids = MEMBER_VPTR(cbw_cgroup_ids, [i]);
 		if (!ids) {
-			cbw_err("Failed to fetch a taskable cgroup table.");
+			cbw_err("Failed to fetch a cgroup table.");
 			continue;
 		}
 
 		/*
-		 * Fetch contexts of taskable cgroup and its subroot cgroup.
-		 * A throttled cgroup can exit during the replenishment process,
-		 * leading to context-lookup failures.
+		 * Fetch the cgroup context. A cgroup can exit during the
+		 * replenishment process, leading to context-lookup failures.
 		 */
 		cur_cgrp = bpf_cgroup_from_id(ids[0]);
 		if (!cur_cgrp) {
@@ -1837,38 +1874,18 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			cur_cgx->nr_throttled_periods++;
 		}
 
-		if (cur_cgrp->level > 1) {
-			subroot_cgrp = bpf_cgroup_ancestor(cur_cgrp, 1);
-			if (!subroot_cgrp) {
-				cbw_dbg("Failed to lookup a subroot cgroup: cgid%llu",
-					cgroup_get_id(cur_cgrp));
-				bpf_cgroup_release(cur_cgrp);
-				continue;
-			}
-	
-			subroot_cgx = cbw_get_cgroup_ctx(subroot_cgrp);
-			if (!subroot_cgx) {
-				cbw_dbg("Failed to lookup a subroot context: cgid%llu",
-					cgroup_get_id(subroot_cgrp));
-				bpf_cgroup_release(cur_cgrp);
-				bpf_cgroup_release(subroot_cgrp);
-				continue;
-			}
-			bpf_cgroup_release(subroot_cgrp);
-		} else
-			subroot_cgx = cur_cgx;
 		bpf_cgroup_release(cur_cgrp);
 
 		/*
-		 * Replenish a taskable cgroup. If it was throttled,
-		 * add it to the throttled cgroup table.
+		 * Replenish the cgroup. If it was throttled, add it to the
+		 * throttled cgroup table.
 		 *
 		 * These writes are ordered before cbw_top_half_end() publishes
 		 * has_throttled_tasks=true via its __sync_val_compare_and_swap()
 		 * (which acts as a full memory barrier), ensuring the bottom half
 		 * observes a consistent cbw_throttled_cgroup_ids[].
 		 */
-		if (cbw_replenish_taskable_cgroup(subroot_cgx, cur_cgx, now)) {
+		if (cbw_replenish_cgroup(cur_cgx, now)) {
 			ids = MEMBER_VPTR(cbw_throttled_cgroup_ids,
 					  [nr_throttled]);
 			if (!ids) {
@@ -1902,7 +1919,23 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	if (nr_throttled > 0) {
 		cbw_top_half_end(nr_throttled, true);
-	
+
+		/*
+		 * Propagate is_throttled to descendants of cgroups that were
+		 * kept throttled due to a non-positive budget. This must be
+		 * called after cbw_top_half_end() — before that point,
+		 * cbw_top_half_running() is true and cbw_throttle_cgroups()
+		 * would bail out early. The race with accounting_timerfn, which
+		 * may also call cbw_throttle_cgroups() concurrently, is benign:
+		 * cbw_throttle_cgroups() only sets is_throttled (never clears
+		 * it), so two concurrent calls are idempotent.
+		 */
+		root_cgrp = bpf_cgroup_from_id(1);
+		if (root_cgrp) {
+			cbw_throttle_cgroups(root_cgrp);
+			bpf_cgroup_release(root_cgrp);
+		}
+
 		/*
 		 * scx_cgroup_bw_reenqueue() may be called from ops.dispatch().
 		 * In the worst case, when all CPUs are idle and all runnable
@@ -2404,8 +2437,8 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
 			nr_throttled_tasks);
-	bpf_printk("%s   \\_ budget_remaining: %lld, burst_remaining: %lld", indent_str,
-			cgx->budget_remaining, cgx->burst_remaining);
+	bpf_printk("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
+			cgx->period_budget, cgx->burst_remaining);
 	bpf_printk("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
 			cgx->runtime_total_sloppy, cgx->runtime_total_last);
 					
