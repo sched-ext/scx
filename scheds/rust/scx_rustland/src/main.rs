@@ -18,7 +18,10 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::generate;
+use clap_complete::Shell;
 use libbpf_rs::OpenObject;
 use log::info;
 use log::warn;
@@ -123,6 +126,9 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 }
 
 // Time constants.
@@ -388,6 +394,16 @@ impl Drop for Scheduler<'_> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if let Some(shell) = opts.completions {
+        generate(
+            shell,
+            &mut Opts::command(),
+            "scx_rustland",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
 
     if opts.version {
         println!(
