@@ -1,0 +1,28 @@
+[package]
+name = "stt"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+repository = "https://github.com/sched-ext/scx"
+description = "scx test tools - test harness for sched_ext schedulers"
+publish = false
+
+[package.metadata.veristat]
+disable = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "unicode", "wrap_help"] }
+ctrlc = "3"
+console = "0.15"
+libc = "0.2"
+nix = { version = "0.29", features = ["sched", "signal", "process"] }
+blazesym = { version = "0.2", features = ["dwarf"] }
+rand = "0.8"
+scx_utils = { path = "../../rust/scx_utils", version = "1.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+btf-rs = "1.1.1"
+libbpf-rs = "=0.26.1"
