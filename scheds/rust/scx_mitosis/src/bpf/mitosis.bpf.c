@@ -1252,7 +1252,9 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 			return;
 	}
 
+	/* Record the running slice start time and CPU cell. */
 	tctx->started_running_at = scx_bpf_now();
+	tctx->running_cpu_cell	 = cctx->cell;
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
@@ -1298,11 +1300,23 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	 * is in the borrowing cell's domain — writing it to the lending
 	 * CPU's vtime_now would contaminate that domain.
 	 *
-	 * For cell-reassigned tasks (tctx->cell != cidx but not borrowed),
-	 * the vtime was initialized in this CPU's cell domain, so
-	 * advancing cctx->vtime_now is correct and prevents staleness.
+	 * A task's dsq_vtime belongs to the domain it was enqueued into.
+	 * tctx->cell != cidx only tells us that the task's nominal cell and
+	 * the CPU's current cell differ at stopping time. That can happen if
+	 * userspace retagged the CPU while the task was running, or if pinned
+	 * cross-cell work (for example a root-cell kworker) is running on a
+	 * CPU that currently belongs to another cell. Neither case means the
+	 * running slice belongs to cidx's vtime domain, so blindly copying its
+	 * dsq_vtime into cctx->vtime_now can taint the destination cell's
+	 * local timeline.
+	 *
+	 * If userspace retags this CPU to a different cell while the task
+	 * is running, copying that old-domain vtime into the new CPU-local
+	 * clock taints the destination cell's local timeline.
+	 * Only advance the CPU-local clock when the CPU stayed in the same
+	 * cell for the entire running slice.
 	 */
-	if (!tctx->borrowed) {
+	if (!tctx->borrowed && tctx->running_cpu_cell == cidx) {
 		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
 			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 	}
@@ -1310,15 +1324,12 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
 
-	struct cell *vtime_cell;
-	if (tctx->cell != cidx) {
-		vtime_cell = lookup_cell(tctx->cell);
-		if (!vtime_cell)
-			return;
-	} else {
-		vtime_cell = cell;
-	}
-	advance_cell_llc_vtime(vtime_cell, tctx, p->scx.dsq_vtime);
+	/*
+	 * Keep the shared cell cursor in the same domain dispatch compares
+	 * against on this CPU. Cross-cell pinned work can otherwise advance
+	 * the CPU-local cursor without advancing this CPU's current cell DSQ.
+	 */
+	advance_cell_llc_vtime(cell, tctx, p->scx.dsq_vtime);
 
 	{
 		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
