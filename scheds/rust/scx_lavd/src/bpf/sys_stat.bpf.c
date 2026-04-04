@@ -53,6 +53,7 @@ struct sys_stat_ctx {
 	u64		idle_total_wall;
 	u64		compute_total_wall;
 	u64		compute_total_invr;
+	u64		tot_task_time_invr;
 	u64		tot_task_time_iwgt;
 	u64		tsct_spike_invr;
 	u64		nr_queued_task;
@@ -437,6 +438,7 @@ static void collect_sys_stat(void)
 		 * which is capacity and frequency invariant.
 		 */
 		c->compute_total_invr += compute_invr;
+		c->tot_task_time_invr += cpuc_tot_task_time_invr;
 
 		/*
 		 * Track the scaled time when the utilization spikes happened.
@@ -629,8 +631,11 @@ static void calc_sys_stat(void)
 			calc_avg32(sys_stat.max_perf_cri, c->max_perf_cri);
 	}
 
-	if (c->nr_sched > 0)
+	if (c->nr_sched > 0) {
 		avg_svc_time_iwgt = c->tot_task_time_iwgt / c->nr_sched;
+		sys_stat.avg_runtime_invr = calc_avg(sys_stat.avg_runtime_invr,
+						     c->tot_task_time_invr / c->nr_sched);
+	}
 	sys_stat.avg_svc_time_iwgt = calc_avg(sys_stat.avg_svc_time_iwgt,
 					      avg_svc_time_iwgt);
 	sys_stat.nr_queued_task = calc_avg(sys_stat.nr_queued_task, c->nr_queued_task);

@@ -200,6 +200,7 @@ struct task_ctx {
 	 * Used to calculate latency criticality.
 	 */
 	u64	avg_runtime_invr;
+	u8	queued_in_cpdom_id;	/* cpdom this task's load is counted in; LAVD_CPDOM_MAX_NR = not queued */
 
 	/* --- cacheline 3 boundary (192 bytes): lower-frequency / monitoring --- */
 	/*
@@ -242,7 +243,7 @@ struct cpdom_ctx {
 	u8	is_stealee;			    /* stealer domain should steal tasks from this domain */
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
-	u32	load_invr;			    /* invariant load considering DSQ length and invariant CPU utilization */
+	u64	load_invr;			    /* invariant load considering queued load and invariant CPU utilization */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
 	u32	avg_util_wall_sum;		    /* the sum of average CPU utilization */
@@ -259,10 +260,57 @@ struct cpdom_ctx {
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
+	u64	queued_load_invr;		    /* sum of avg_runtime_invr for all tasks queued in this domain */
+	u64	stealee_budget_invr;		    /* egress budget: how much invariant runtime can leave this domain */
+	u64	stealer_budget_invr;		    /* ingress budget: how much additional load this stealer can accept */
 
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
+
+/*
+ * Subtract @amount from the stealee's egress budget (saturating at 0).
+ * When budget reaches 0, clear the stealee flag so other stealers
+ * skip this domain for the rest of the round.
+ */
+static __always_inline void decrement_stealee_budget(struct cpdom_ctx *cpdomc,
+						     u64 amount)
+{
+	u64 remaining = READ_ONCE(cpdomc->stealee_budget_invr);
+
+	if (remaining > amount)
+		WRITE_ONCE(cpdomc->stealee_budget_invr, remaining - amount);
+	else {
+		WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
+		WRITE_ONCE(cpdomc->is_stealee, false);
+	}
+}
+
+/*
+ * Subtract @amount from the stealer's ingress budget (saturating at 0).
+ * When budget reaches 0, clear the stealer flag so it stops pulling
+ * more work for the rest of the round.
+ */
+static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
+						     u64 amount)
+{
+	u64 remaining = READ_ONCE(cpdomc->stealer_budget_invr);
+
+	if (remaining > amount)
+		WRITE_ONCE(cpdomc->stealer_budget_invr, remaining - amount);
+	else {
+		WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
+		WRITE_ONCE(cpdomc->is_stealer, false);
+	}
+}
+
+/*
+ * Scale raw task_load (nanoseconds) into load_invr intensity units
+ * to match the budget space.
+ */
+#define task_load_to_budget(task_load, cpdomc) \
+	((cpdomc)->cap_sum_active_cpus ? \
+	 ((task_load) << LAVD_SHIFT) / (cpdomc)->cap_sum_active_cpus : 0)
 
 extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
