@@ -1697,60 +1697,38 @@ int cbw_get_current_llc_id(void)
 	return topo_cpu_to_llc_id(cpu);
 }
 
-int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, int llc_id)
+static
+int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted)
 {
-	struct scx_cgroup_ctx *cgx, *subroot_cgx;
-	struct scx_cgroup_llc_ctx *llcx;
-	struct cgroup *subroot_cgrp;
-	int ret;
+	struct scx_cgroup_ctx *cgx;
+
+	/*
+	 * The throttle decision is based solely on cgx->is_throttled, which is
+	 * maintained asynchronously by the accounting timer via a two-step
+	 * process:
+	 *
+	 *   Step 1 (cbw_update_runtime_total_sloppy): aggregates runtime_total
+	 *   from LLC contexts bottom-up and sets is_throttled when
+	 *   runtime_total_sloppy reaches nquota_ub.
+	 *
+	 *   Step 2 (cbw_throttle_cgroups): propagates is_throttled top-down to
+	 *   all descendants of a throttled ancestor.
+	 *
+	 * The flag is cleared at the replenish period boundary. A stale read
+	 * is harmless: at worst it allows one extra accounting interval of
+	 * overspend, which is recovered via debt carry-over at the next period.
+	 */
 
 	/* Always go ahead with the root cgroup. */
 	if (cgrp->level == 0)
 		return 0;
 
-	/* Sanity check of the LLC id. */
-	if (!is_llc_id_valid(llc_id)) {
-		cbw_err("Invalid LLC id: %d", llc_id);
-		return -EINVAL;
-	}
-
-	/*
-	 * If the budget remains at the LLC level, let's reserve it and go
-	 * ahead.
-	 *
-	 * Note that we overbook the time on purpose. That is because it is
-	 * better to overbook the cgroup. If underbooked, the cgroup's
-	 * quota won't be fully consumed, and the remaining time won't be
-	 * accumulated. On the other hand, if overbooked, the cgroup's quota
-	 * will be fully utilized, and its debt will be charged over time.
-	 */
-	llcx = cbw_get_llc_ctx(cgrp, llc_id);
-	if (!llcx) {
-		/*
-		 * This can happen when a new cgroup is created and a task of
-		 * the cgroup is enqueued *before* the cgroup initialization
-		 * is finished in scx. This can happen, for example, when
-		 * opening a new terminal session, etc. In this case, let the
-		 * task proceed instead of waiting for cgroup initialization
-		 * to finish.
-		 */
-		cbw_dbg("Failed to lookup an LLC ctx: [%llu/%d]",
-			cgroup_get_id(cgrp), llc_id);
-		return -ESRCH;
-	}
-	cbw_dbg_cgrp("  llc_id: %d -- llcx:budget_remaining: %lld",
-		     llc_id, READ_ONCE(llcx->budget_remaining));
-
-	if (READ_ONCE(llcx->budget_remaining) > 0)
-		return 0;
-
-	/*
-	 * If the budget remains at the cgroup level, transfer the cgroup's
-	 * budget to the LLC level by budget_c2l.
-	 */
 	cgx = cbw_get_cgroup_ctx(cgrp);
 	if (!cgx) {
-		cbw_err("Failed to lookup a cgroup ctx: %llu",
+		/*
+		 * The CPU controller is not enabled for this cgroup.
+		 */
+		cbw_dbg("Failed to lookup a cgroup ctx: %llu",
 			cgroup_get_id(cgrp));
 		return -ESRCH;
 	}
@@ -1760,73 +1738,7 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, int llc_id)
 		return -EAGAIN;
 	}
 
-	if (cbw_transfer_budget_c2l(cgx, cgrp->level, llcx) > 0) {
-		dbg_cgx(cgx, "budget-transfer-to-leaf: ");
-		dbg_llcx(llcx, "budget-transfer-to-llcx: ");
-		return 0;
-	}
-
-	/*
-	 * There is no budget remaining at the cgroup level. Before asking
-	 * more budget to its subroot cgroup, let's first check whether the
-	 * cgroup is already hit the upper bound.
-	 */
-	cbw_update_runtime_total_sloppy(cgrp);
-
-	if (READ_ONCE(cgx->is_throttled)) {
-		dbg_cgx(cgx, "throttled: ");
-		return -EAGAIN;
-	}
-
-	/*
-	 * There is no budget remaining at the cgroup level, and the cgroup is
-	 * not throttled yet. Let's secure budget from the subroot cgroup.
-	 * If this cgroup is a subroot (level == 1), there is nothing to do.
-	 */
-	if (cgrp->level == 1) {
-		dbg_cgx(cgx, "throttled: ");
-		WRITE_ONCE(cgx->is_throttled, true);
-		return -EAGAIN;
-	}
-
-	subroot_cgrp = bpf_cgroup_ancestor(cgrp, 1);
-	if (!subroot_cgrp) {
-		cbw_err("Failed to lookup a subroot cgroup: %llu",
-			cgroup_get_id(cgrp));
-		return -ESRCH;
-	}
-
-	subroot_cgx = cbw_get_cgroup_ctx(subroot_cgrp);
-	if (!subroot_cgx) {
-		cbw_err("Failed to lookup a cgroup ctx: %llu",
-			cgroup_get_id(subroot_cgrp));
-		ret = -ESRCH;
-		goto release_out;
-	}
-
-	if (cbw_transfer_budget_p2l(subroot_cgx, cgx, cgrp->level, llcx) > 0) {
-		dbg_cgx(subroot_cgx, "budget-transfer-to-subroot_cgx: ");
-		dbg_cgx(cgx, "budget-transfer-to-cgx: ");
-		dbg_llcx(llcx, "budget-transfer-to-llcx: ");
-		ret = 0;
-		goto release_out;
-	}
-
-	/*
-	 * Unfortunately, there is not enough budget in the subroot cgroup.
-	 * The cgroup is throttled before reaching the upper bound (nquota_ub).
-	 * This can happen in various cases. For example, this cgroup's
-	 * siblings have already spent too much budget, so there is no
-	 * remaining budget for this cgroup.
-	 */
-	ret = -EAGAIN;
-	WRITE_ONCE(cgx->is_throttled, true);
-	dbg_cgx(subroot_cgx, "subroot_cgx:throttled: ");
-	dbg_cgx(cgx, "cgx:throttled: ");
-	dbg_llcx(llcx, "llcx:throttled: ");
-release_out:
-	bpf_cgroup_release(subroot_cgrp);
-	return ret;
+	return 0;
 }
 
 /**
@@ -1841,8 +1753,6 @@ release_out:
 __hidden
 int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, struct task_struct *p __arg_trusted)
 {
-	int llc_id;
-
 	/*
 	 * Never throttle an exiting task. In do_exit(), a task is removed from
 	 * the PID map by __unhash_process() (called from exit_notify()) in the
@@ -1856,13 +1766,7 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, struct task_struc
 	if (p->flags & PF_EXITING)
 		return 0;
 
-	/* Get the current LLC ID. */
-	if ((llc_id = cbw_get_current_llc_id()) < 0) {
-		cbw_err("Invalid LLC id: %d", llc_id);
-		return -EINVAL;
-	}
-
-	return cbw_cgroup_bw_throttled(cgrp, llc_id);
+	return cbw_cgroup_bw_throttled(cgrp);
 }
 
 /**
@@ -2521,12 +2425,11 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 		}
 
 		/*
-		 * Update cgx->is_throttled before draining BTQ. Even if this
-		 * LLC context is throttled, continue to other LLC contexts
-		 * since they may have remaining budget.
+		 * If the cgroup is throttled, all its LLC contexts are
+		 * throttled too. Stop draining immediately.
 		 */
-		if (cbw_cgroup_bw_throttled(cgrp, idx) == -EAGAIN)
-			continue;
+		if (cbw_cgroup_bw_throttled(cgrp) == -EAGAIN)
+			break;
 
 		nr_enq += cbw_drain_btq_batch(cgx, llcx);
 		if (nr_enq >= CBW_REENQ_MAX_BATCH)
