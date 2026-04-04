@@ -721,9 +721,16 @@ int cbw_free_llc_ctx(struct scx_cgroup_ctx *cgx, u64 cgrp_id)
 		}
 
 		if (cbw_del_llc_ctx_with_id(cgrp_id, i)) {
-			cbw_dbg("Failed to delete an LLC context: [%llu/%d]",
+			cbw_err("Failed to delete an LLC context: [%llu/%d]",
 				cgrp_id, i);
-			continue;
+			/*
+			 * Even if the map delete fails, it is still safe to
+			 * call schedule_atq_destroy() below. We won the CAS
+			 * above, so we hold exclusive ownership of btq -- no
+			 * other CPU will access it. The stale LLC map entry
+			 * will be harmless: future lookups will find
+			 * llcx->btq == NULL and skip it.
+			 */
 		}
 
 		/*
@@ -2435,6 +2442,7 @@ int scx_cgroup_bw_reenqueue(void)
 	int i, idx, n, nr_enq = 0;
 	u64 nuance, nuance2, nr_tcgs;
 	u64 *ids, cur_cgrp_id;
+	bool root_added = false;
 
 	/*
 	 * If there are throttled tasks in BTQ, let’s reenqueue them.
@@ -2497,7 +2505,15 @@ int scx_cgroup_bw_reenqueue(void)
 			 * run. Move all its throttled tasks to the root cgroup
 			 * for immediate draining.
 			 */
-			cbw_cgroup_bw_offline(cur_cgrp_id);
+			if (cbw_cgroup_bw_offline(cur_cgrp_id) > 0) {
+				/*
+				 * At least one throttled task was moved to
+				 * the root cgroup. So we should not transition
+				 * to the empty state to stop reenqueue
+				 * operations.
+				 */
+				root_added = true;
+			}
 
 			/*
 			 * Drain the offline cgroup's BTQ to the root cgroup.
@@ -2573,7 +2589,7 @@ int scx_cgroup_bw_reenqueue(void)
 	 * rp_seq in cbw_backlog_stat.val will have changed and the CAS will
 	 * fail safely, leaving has_throttled_tasks for the new cycle to manage.
 	 */
-	if ((nr_enq == 0) && !cbw_top_half_running()) {
+	if ((nr_enq == 0) && !root_added && !cbw_top_half_running()) {
 		cbw_update_backlog_stat_cas(&backlog_stat,
 					    backlog_stat.rp_seq,
 					    backlog_stat.nr_throttled_cgroups,
