@@ -10,6 +10,10 @@
 #include <lib/cgroup.h>
 #include <lib/atq.h>
 
+#ifndef U64_MAX
+#define U64_MAX		((u64)~0ULL)
+#endif
+
 extern int scx_cgroup_bw_enqueue_cb(u64 taskc);
 
 enum scx_cgroup_consts {
@@ -21,8 +25,8 @@ enum scx_cgroup_consts {
 	CBW_REPLENISH_PERIOD		= (100ULL * 1000ULL * 1000ULL),
 	/* min replenish period in nsec after jitter compensation: 1 msec */
 	CBW_REPLENISH_PERIOD_MIN	= (1ULL * 1000ULL * 1000ULL),
-	/* min/max accounting period in nsec: 3 msec and 20 msec */
-	CBW_ACCOUNTING_PERIOD_MIN	= (3ULL * 1000ULL * 1000ULL),
+	/* min/max accounting period in nsec: 1 msec and 20 msec */
+	CBW_ACCOUNTING_PERIOD_MIN	= (1ULL * 1000ULL * 1000ULL),
 	CBW_ACCOUNTING_PERIOD_MAX	= (20ULL * 1000ULL * 1000ULL),
 	/*
 	 * Divisor for converting time-to-throttle to accounting interval.
@@ -1251,21 +1255,41 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 }
 
 static
-int cbw_throttle_cgroups(struct cgroup *cgrp)
+u64 cbw_throttle_cgroups(struct cgroup *cgrp)
 {
-	struct cgroup_subsys_state *start_css, *pos, *anc_css;
-	struct scx_cgroup_ctx *cur_cgx, *cur_anc_cgx;
-	struct cgroup *cur_anc_cgrp;
-	int i;
-
 	/*
+	 * Throttle cgroups that have exhausted their budget and compute the
+	 * next accounting timer interval in a single traversal.
+	 *
 	 * We traverse the cgroup hierarchy in post-order (left-right-self,
 	 * i.e., bottom-up). For each cgroup, check if there is any throttled
 	 * ancestor. If so, throttle itself.
 	 *
 	 * Before this, each cgroup’s runtime_total_sloppy should be updated
 	 * by calling cbw_update_runtime_total_sloppy().
+	 *
+	 * For the interval, each non-throttled constrained cgroup with a
+	 * non-zero consumption rate contributes a predicted time-to-throttle:
+	 *
+	 *   time_to_throttle = (period_budget - runtime_total_sloppy)
+	 *                    * CBW_SCALE / avg_consumption_rate
+	 *
+	 * avg_consumption_rate is in CBW_SCALE units per CBW_REPLENISH_PERIOD
+	 * (CPU ns / wall ns * CBW_SCALE), so this directly yields wall-time ns.
+	 * The minimum across all such cgroups drives the next interval:
+	 *
+	 *   next_interval = clamp(min / CBW_ACCOUNTING_PERIOD_DIVISOR,
+	 *                         CBW_ACCOUNTING_PERIOD_MIN,
+	 *                         CBW_ACCOUNTING_PERIOD_MAX)
 	 */
+	struct cgroup_subsys_state *start_css, *pos, *anc_css;
+	struct scx_cgroup_ctx *cur_cgx, *cur_anc_cgx;
+	struct cgroup *cur_anc_cgrp;
+	u64 min_time_to_throttle = U64_MAX;
+	u64 time_to_throttle;
+	s64 remaining;
+	int i;
+
 	bpf_rcu_read_lock();
 	start_css = &cgrp->self;
 	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
@@ -1297,8 +1321,10 @@ int cbw_throttle_cgroups(struct cgroup *cgrp)
 		 * the top half will replenish and unthrottle
 		 * all the cgroups anyway.
 		 */
-		if (unlikely(cbw_top_half_running()))
+		if (unlikely(cbw_top_half_running())) {
+			min_time_to_throttle = U64_MAX;
 			break;
+		}
 
 		/*
 		 * If there is a throttled ancestor, all its descendants should
@@ -1318,9 +1344,28 @@ int cbw_throttle_cgroups(struct cgroup *cgrp)
 			}
 			anc_css = anc_css->parent;
 		}
+
+		/*
+		 * If this cgroup is still not throttled after the ancestor
+		 * check, estimate its time-to-throttle and track the minimum.
+		 */
+		if (!READ_ONCE(cur_cgx->is_throttled) &&
+		    cur_cgx->avg_consumption_rate > 0) {
+			remaining = READ_ONCE(cur_cgx->period_budget) -
+				    READ_ONCE(cur_cgx->runtime_total_sloppy);
+			if (remaining > 0) {
+				time_to_throttle = (u64)remaining * CBW_SCALE /
+						   cur_cgx->avg_consumption_rate;
+				if (time_to_throttle < min_time_to_throttle)
+					min_time_to_throttle = time_to_throttle;
+			}
+		}
 	}
 	bpf_rcu_read_unlock();
-	return 0;
+
+	return clamp(min_time_to_throttle / CBW_ACCOUNTING_PERIOD_DIVISOR,
+		     (u64)CBW_ACCOUNTING_PERIOD_MIN,
+		     (u64)CBW_ACCOUNTING_PERIOD_MAX);
 }
 
 static
@@ -1718,14 +1763,15 @@ static
 int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
 	struct cgroup *root_cgrp;
-	u64 now;
+	u64 now, next_interval = CBW_ACCOUNTING_PERIOD_MAX;
 	int ret;
 
 	/*
 	 * Update the runtime total and throttle cgroups.
 	 *
 	 * If the top half is running, we can skip the accounting since the top
-	 * half will replenish and unthrottle all the cgroups anyway.
+	 * half will replenish and unthrottle all the cgroups anyway; use the
+	 * maximum interval so we do not busy-wait.
 	 */
 	root_cgrp = bpf_cgroup_from_id(1);
 	if (unlikely(!root_cgrp)) {
@@ -1740,13 +1786,13 @@ int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 	cbw_dbg("at %llu", now);
 
 	cbw_update_runtime_total_sloppy(root_cgrp);
-	cbw_throttle_cgroups(root_cgrp);
+	next_interval = cbw_throttle_cgroups(root_cgrp);
 	smp_mb();
 
 release_out:
 	bpf_cgroup_release(root_cgrp);
 rearm_out:
-	if ((ret = bpf_timer_start(timer, CBW_ACCOUNTING_PERIOD, 0)))
+	if ((ret = bpf_timer_start(timer, next_interval, 0)))
 		cbw_err("Failed to re-arm accounting timer: %d", ret);
 	return 0;
 }
