@@ -34,6 +34,8 @@ fn gen_bpf_h() {
             println!("cargo:rerun-if-changed={}", ent.path().to_string_lossy());
         }
     }
+    println!("cargo:rerun-if-changed=vmlinux.tar.zst");
+    println!("cargo:rerun-if-changed=build.rs");
 }
 
 fn main() {
