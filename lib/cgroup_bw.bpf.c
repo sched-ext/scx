@@ -19,6 +19,8 @@ enum scx_cgroup_consts {
 	CBW_CLOCK_BOOTTIME		= 7,
 	/* replenish period in nsec: 100 msec */
 	CBW_REPLENISH_PERIOD		= (100ULL * 1000ULL * 1000ULL),
+	/* min replenish period in nsec after jitter compensation: 1 msec */
+	CBW_REPLENISH_PERIOD_MIN	= (1ULL * 1000ULL * 1000ULL),
 	/* accounting period in nsec: 5 msec */
 	CBW_ACCOUNTING_PERIOD		= (5ULL * 1000ULL * 1000ULL),
 	/* maximum number of cgroups */
@@ -32,12 +34,6 @@ enum scx_cgroup_consts {
 	CBW_RUNTUME_INF_RAW		= ((u64)~0ULL),
 	/* unlimited quota ("max"); This is for easier comparison between signed vs. unsigned integers. */
 	CBW_RUNTUME_INF			= ((s64)~((u64)1 << 63)),
-	/* preferred lower bound of budget transfer unit in nsec (100 msec) */
-	CBW_BUDGET_XFER_LB		= (100ULL * 1000ULL * 1000ULL),
-	/* absolute minimum budget transfer unit in nsec (20 msec) */
-	CBW_BUDGET_XFER_MIN		= (20ULL * 1000ULL * 1000ULL),
-	/* maximum budget transfer is (nquota_ub / 2**2) */
-	CBW_BUDGET_XFER_MAX_SHIFT	= 2,
 	/* maximum number of re-enqueue tasks in one dispatch */
 	CBW_REENQ_MAX_BATCH		= 2,
 	/* size of the deferred BTQ destroy queue */
@@ -71,21 +67,6 @@ struct scx_cgroup_ctx {
 	 * normalized quota of all its ancestors and itself.
 	 */
 	u64		nquota_ub;
-
-	/*
-	 * The budget allocation from a parent cgroup to a child cgroup in nsec.
-	 */
-	u64		budget_p2c;
-
-	/*
-	 * The budget allocation from a cgroup to its LLC context in nsec.
-	 */
-	u64		budget_c2l;
-
-	/*
-	 * The number of descendent cgroups that can have tasks.
-	 */
-	int		nr_taskable_descendents;
 
 	/*
 	 * A boolean flag indicating whether the cgroup has LLC contexts.
@@ -147,19 +128,6 @@ struct scx_cgroup_ctx {
 struct scx_cgroup_llc_ctx {
 	/* cgroup id */
 	u64		id;
-
-	/*
-	 * The amount of remaining time reserved before task execution.
-	 * When @budget_remaining becomes zero (or negative), we ask
-	 * more time budget to the scx_cgroup_ctx. When no budget remains
-	 * the scx_cgroup_ctx, we walk up the cgroup hierarchy. It can be
-	 * negative when the quota is over-booked.
-	 *
-	 * The budget that was chunk-allocated from the upper level may not
-	 * be fully used. Such remaining time at the LLC level will be carried
-	 * over to the next period for eventual quota enforcement.
-	 */
-	s64		budget_remaining;
 
 	/*
 	 * Total amount of time executed once replenished. It should not
@@ -411,29 +379,23 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
 		"cgx:runtime_total_sloppy: %lld -- "				\
 		"cgx:nquota: %lld -- "						\
 		"cgx:nquota_ub: %lld -- "					\
-		"cgx:is_throttled: %d -- cgx:nr_taskable_descendents: %d -- "	\
-		"cgx:budget_p2c: %llu -- cgx:budget_c2l: %llu",			\
+		"cgx:is_throttled: %d "						\
 		##__VA_ARGS__,							\
 		cgx->id, cgx->budget_remaining,					\
 		cgx->runtime_total_last, cgx->runtime_total_sloppy,		\
-		cgx->nquota, cgx->nquota_ub, cgx->is_throttled,			\
-		cgx->nr_taskable_descendents, cgx->budget_p2c, cgx->budget_c2l);\
+		cgx->nquota, cgx->nquota_ub, cgx->is_throttled);		\
 } while (0);
 
 #define dbg_llcx(llcx, str, ...) do {						\
-	cbw_dbg(str "cgid%llu -- llcx:budget_remaining: %lld -- "		\
-		"llcx:runtime_total: %lld",					\
+	cbw_dbg(str "cgid%llu -- llcx:runtime_total: %lld",			\
 		##__VA_ARGS__,							\
-		llcx->id,							\
-		llcx->budget_remaining, llcx->runtime_total);			\
+		llcx->id, llcx->runtime_total);					\
 } while (0);
 
 #define info_llcx(llcx, str, ...) do {						\
-	cbw_dbg(str "cgid%llu -- llcx:budget_remaining: %lld -- "		\
-		"llcx:runtime_total: %lld",					\
+	cbw_dbg(str "cgid%llu -- llcx:runtime_total: %lld",			\
 		##__VA_ARGS__,							\
-		llcx->id,							\
-		llcx->budget_remaining, llcx->runtime_total);			\
+		llcx->id, llcx->runtime_total);					\
 } while (0);
 
 #define info_cgx(cgx, str, ...) do {						\
@@ -442,13 +404,11 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
 		 "cgx:runtime_total_sloppy: %lld -- "				\
 		 "cgx:nquota: %lld -- "						\
 		 "cgx:nquota_ub: %lld -- "					\
-		 "cgx:is_throttled: %d -- cgx:nr_taskable_descendents: %d -- "	\
-		 "cgx:budget_p2c: %llu -- cgx:budget_c2l: %llu",		\
+		 "cgx:is_throttled: %d"						\
 		 ##__VA_ARGS__,							\
 		 cgx->id, cgx->budget_remaining,				\
 		 cgx->runtime_total_last, cgx->runtime_total_sloppy,		\
-		 cgx->nquota, cgx->nquota_ub, cgx->is_throttled,		\
-		 cgx->nr_taskable_descendents, cgx->budget_p2c, cgx->budget_c2l);\
+		 cgx->nquota, cgx->nquota_ub, cgx->is_throttled);		\
 } while (0);
 
 /*
@@ -585,12 +545,6 @@ struct scx_cgroup_llc_ctx *cbw_alloc_llc_ctx(struct cgroup *cgrp,
 		bpf_map_delete_elem(&cbw_cgrp_llc_map, &key);
 		return NULL;
 	}
-
-	/*
-	 * Set budget to infinity in advance if there is no upper bound.
-	 */
-	if (cgx->nquota_ub == CBW_RUNTUME_INF)
-		llcx->budget_remaining = CBW_RUNTUME_INF;
 
 	return llcx;
 }
@@ -802,65 +756,11 @@ void cbw_set_bandwidth(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 	cgx->burst_remaining = cgx->burst;
 }
 
-static __noinline
-s64 cbw_calc_budget_tx(struct scx_cgroup_ctx *cgx, s64 base_unit, int nr_branch)
-{
-	s64 tgt_unit, budget_tx;
-
-	if (nr_branch <= 0)
-		nr_branch = 1;
-
-	if (nr_branch > 1)
-		nr_branch <<= CBW_BUDGET_XFER_MAX_SHIFT;
-
-	if (base_unit == 0)
-		base_unit = cgx->nquota_ub;
-
-	tgt_unit = div_round_up((u64)base_unit, (u64)nr_branch);
-
-	if (cgx->nquota_ub <= CBW_BUDGET_XFER_LB)
-		budget_tx = clamp(tgt_unit, CBW_BUDGET_XFER_MIN, cgx->nquota_ub);
-	else
-		budget_tx = clamp(tgt_unit, CBW_BUDGET_XFER_LB, cgx->nquota_ub);
-
-	cbw_dbg("cgid%llu -- base_unit: %lld -- nr_branch: %d -- "
-		"tgt_unit: %lld -- budget_tx: %lld -- nquota_ub: %lld",
-		cgx->id, base_unit, nr_branch, tgt_unit, budget_tx, cgx->nquota_ub);
-
-	return budget_tx;
-}
-
-static
-void cbw_update_budget_tx(struct scx_cgroup_ctx *subroot_cgx,
-			  struct scx_cgroup_ctx *cgx)
-{
-	int nr_branch_cgs;
-	s64 base;
-
-	base = (subroot_cgx == cgx) ? subroot_cgx->nquota_ub :
-		min(subroot_cgx->budget_p2c, cgx->nquota_ub);
-
-	if (base != CBW_RUNTUME_INF) {
-		nr_branch_cgs = ((subroot_cgx == cgx) ? cgx->nr_taskable_descendents : 0) +
-				(cgx->has_llcx ? 1 : 0);
-		cgx->budget_p2c = cbw_calc_budget_tx(cgx, base, nr_branch_cgs);
-	} else
-		cgx->budget_p2c = CBW_RUNTUME_INF;
-
-	base = cgx->budget_p2c;
-	if (base != CBW_RUNTUME_INF)
-		cgx->budget_c2l = cbw_calc_budget_tx(cgx, base, TOPO_NR(LLC));
-	else
-		cgx->budget_c2l = CBW_RUNTUME_INF;
-}
-
 __noinline
 int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_ctx *cgx)
 {
-	struct scx_cgroup_ctx *parentx, *subroot_cgx;
-	struct cgroup *parent, *subroot_cgrp;
-	struct scx_cgroup_llc_ctx *llcx;
-	int i;
+	struct scx_cgroup_ctx *parentx;
+	struct cgroup *parent;
 
 	if (!cgx || !cgrp)
 		return -EINVAL;
@@ -885,106 +785,6 @@ int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_ct
 		cgx->nquota_ub = min(cgx->nquota_ub, parentx->nquota);
 		bpf_cgroup_release(parent);
 	}
-
-	/* Update the budget transfer unit according to the new nquota_ub. */
-	if (cgrp->level > 1) {
-		subroot_cgrp = bpf_cgroup_ancestor(cgrp, 1);
-		if (!subroot_cgrp) {
-			cbw_err("Failed to lookup a subroot cgroup: %llu",
-				cgroup_get_id(cgrp));
-			return -ESRCH;
-		}
-
-		subroot_cgx = cbw_get_cgroup_ctx(subroot_cgrp);
-		if (!subroot_cgx) {
-			cbw_err("Failed to lookup a subroot context: %llu",
-				cgroup_get_id(subroot_cgrp));
-			bpf_cgroup_release(subroot_cgrp);
-			return -ESRCH;
-		}
-		bpf_cgroup_release(subroot_cgrp);
-	} else
-		subroot_cgx = cgx;
-
-	cbw_update_budget_tx(subroot_cgx, cgx);
-
-	/*
-	 * Set budget of LLC to infinity in advance if there is no upper bound.
-	 */
-	if (!cgx->has_llcx)
-		goto out;
-
-	bpf_for(i, 0, TOPO_NR(LLC)) {
-		llcx = cbw_get_llc_ctx(cgrp, i);
-		if (!llcx)
-			break;
-
-		if (cgx->nquota_ub == CBW_RUNTUME_INF) {
-			WRITE_ONCE(llcx->budget_remaining, CBW_RUNTUME_INF);
-		} else if (READ_ONCE(llcx->budget_remaining) == CBW_RUNTUME_INF) {
-			WRITE_ONCE(llcx->budget_remaining, 0);
-		}
-	}
-out:
-	return 0;
-}
-
-static
-int cbw_update_nr_taskable_descendents(struct cgroup *cgrp, int delta)
-{
-	struct cgroup_subsys_state *subroot_css, *pos;
-	struct scx_cgroup_ctx *subroot_cgx, *cur_cgx;
-	struct cgroup *subroot_cgrp, *cur_cgrp;
-
-	/* It is above the subroot-level (i.e., root). Skip it. */
-	if (cgrp->level < 1)
-		return 0;
-
-	/*
-	 * Update the number of taskable descendants of the cgroup's subroot.
-	 *
-	 * Note that we distribute the budget in two cases:
-	 *  1) a subroot cgroup * distributes the budget to all its taskable
-	 *     descendents; and
-	 *  2) a taskable cgroup distributes the budget to all its LLC domains.
-	 * So nr_taskable_descendents matters only for subroot cgroups.
-	 */
-	subroot_cgrp = bpf_cgroup_ancestor(cgrp, 1);
-	if (!subroot_cgrp) {
-		cbw_err("Failed to lookup a subroot cgroup: %llu",
-			cgroup_get_id(cgrp));
-		return -ESRCH;
-	}
-
-	subroot_cgx = cbw_get_cgroup_ctx(subroot_cgrp);
-	if (!subroot_cgx) {
-		cbw_err("Failed to lookup a subroot context: %llu",
-			cgroup_get_id(subroot_cgrp));
-		bpf_cgroup_release(subroot_cgrp);
-		return -ESRCH;
-	}
-
-	/*
-	 * Update the budget transfer unit according to the new
-	 * nr_taskable_descendents of a subroot. Since a budget transfer
-	 * unit of a subroot cgroup is updated, all its descendants
-	 * should be updated as well.
-	 */
-	subroot_cgx->nr_taskable_descendents += delta;
-	cbw_update_budget_tx(subroot_cgx, subroot_cgx);
-
-	bpf_rcu_read_lock();
-	subroot_css = &subroot_cgrp->self;
-	bpf_for_each(css, pos, subroot_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
-		cur_cgrp = pos->cgroup;
-		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
-		if (!cur_cgx)
-			continue;
-		cbw_update_budget_tx(subroot_cgx, cur_cgx);
-	}
-	bpf_rcu_read_unlock();
-
-	bpf_cgroup_release(subroot_cgrp);
 	return 0;
 }
 
@@ -1003,7 +803,6 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 {
 	struct scx_cgroup_ctx *cgx, *parentx;
 	struct cgroup *parent;
-	int ret;
 
 	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
 		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
@@ -1046,7 +845,6 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 			parentx = cbw_get_cgroup_ctx(parent);
 			if (parentx && !cgroup_is_threaded(parent)) {
 				cbw_free_llc_ctx(parentx, parentx->id);
-				cbw_update_nr_taskable_descendents(parent, -1);
 			}
 		}
 		bpf_cgroup_release(parent);
@@ -1058,23 +856,13 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * is at the leaf (a cgroup is a leaf until its child is created),
 	 * so we will create per-LLC-cgroup contexts anyway.
 	 */
-	ret = cbw_init_llc_ctx(cgrp, cgx);
-	if (ret)
-		return ret;
-
-	/*
-	 * Increase the number of taskable descendants of the cgroup's subroot.
-	 */
-	cgx->nr_taskable_descendents = 1;
-	return cbw_update_nr_taskable_descendents(cgrp, 1);
+	return cbw_init_llc_ctx(cgrp, cgx);
 }
 
 static
 int cbw_unthrottle_cgroup_for_exit(struct cgroup *cgrp)
 {
-	struct scx_cgroup_llc_ctx *llcx;
 	struct scx_cgroup_ctx *cgx;
-	int i;
 
 	/*
 	 * Stop throttling the cgroup by setting its upper bound and
@@ -1092,47 +880,21 @@ int cbw_unthrottle_cgroup_for_exit(struct cgroup *cgrp)
 	WRITE_ONCE(cgx->nquota_ub, CBW_RUNTUME_INF);
 	WRITE_ONCE(cgx->budget_remaining, CBW_RUNTUME_INF);
 	/*
-	 * Make the changes to quota and budget globally visible before setting
-	 * is_throttled to false. Without this, on a non-TSO architecture (like
-	 * ARM64), a remote CPU can observe a state where is_throttled is false,
-	 * but budget_remaining is negative, unexpectedly setting is_throttled
-	 * to true again.
+	 * Ensure nquota_ub = INF is globally visible before clearing
+	 * is_throttled. Without this, the accounting timer could observe
+	 * is_throttled = false, evaluate runtime_total_sloppy >= nquota_ub
+	 * with the stale (finite) quota, and spuriously re-throttle the
+	 * cgroup.
 	 */
 	smp_mb();
 
 	WRITE_ONCE(cgx->is_throttled, false);
-
-	if (cgx->has_llcx) {
-		bpf_for(i, 0, TOPO_NR(LLC)) {
-			if (!(llcx = cbw_get_llc_ctx(cgrp, i)))
-				continue;
-			WRITE_ONCE(llcx->budget_remaining, CBW_RUNTUME_INF);
-		}
-	}
 
 	/*
 	 * Make the unthrottling changes visible before draining its BTQs.
 	 */
 	smp_mb();
 	return 0;
-}
-
-static __always_inline
-void cbw_unthrottle_cgroup_for_offline(u64 cgrp_id)
-{
-	struct scx_cgroup_llc_ctx *llcx;
-	int i;
-
-	bpf_for(i, 0, TOPO_NR(LLC)) {
-		if (!(llcx = cbw_get_llc_ctx_with_id(cgrp_id, i)))
-			continue;
-		WRITE_ONCE(llcx->budget_remaining, CBW_RUNTUME_INF);
-	}
-
-	/*
-	 * Make the unthrottling changes visible before draining its BTQs.
-	 */
-	smp_mb();
 }
 
 static __always_inline
@@ -1166,7 +928,6 @@ int cbw_cgroup_bw_offline(u64 cgrp_id)
 	 * chains.
 	 */
 	cbw_dbg("Offline a cgroup: %llu", cgrp_id);
-	cbw_unthrottle_cgroup_for_offline(cgrp_id);
 	return cbw_free_llc_ctx(NULL, cgrp_id);
 }
 
@@ -1195,9 +956,6 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	 * more tasks from being throttled. 
 	 */
 	cbw_unthrottle_cgroup_for_exit(cgrp);
-
-	if (cgrp->level > 1)
-		ret = cbw_update_nr_taskable_descendents(cgrp, -1);
 
 	cbw_del_cgroup_ctx(cgrp);
 	cbw_free_llc_ctx(NULL, cgroup_get_id(cgrp));
@@ -1229,7 +987,7 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 {
 	struct cgroup *cur_cgrp, *cur_cgrp_trusted;
 	struct scx_cgroup_ctx *cgx, *cur_cgx;
-	struct cgroup_subsys_state *subroot_css, *pos;
+	struct cgroup_subsys_state *start_css, *pos;
 	int ret = 0;
 
 	cbw_dbg_cgrp();
@@ -1249,8 +1007,8 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	 * top-down-like manner (pre-order traversal: self -> left -> right).
 	 */
 	bpf_rcu_read_lock();
-	subroot_css = &cgrp->self;
-	bpf_for_each(css, pos, subroot_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+	start_css = &cgrp->self;
+	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
 		cur_cgrp = pos->cgroup;
 		cur_cgrp_trusted = bpf_cgroup_from_id(cgroup_get_id(cur_cgrp));
 		if (!cur_cgrp_trusted)
@@ -1274,12 +1032,6 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 unlock_out:
 	bpf_rcu_read_unlock();
 	return ret;
-}
-
-static
-bool is_llc_id_valid(int llc_id)
-{
-	return llc_id >= 0 && llc_id < TOPO_NR(LLC);
 }
 
 static
@@ -1319,7 +1071,7 @@ static
 int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 {
 	u32 cur_level, prev_level = CBW_CGRP_TREE_HEIGHT_MAX;
-	struct cgroup_subsys_state *subroot_css, *pos;
+	struct cgroup_subsys_state *start_css, *pos;
 	struct scx_cgroup_ctx *cur_cgx = NULL;
 	struct tree_levels *tree;
 	struct cgroup *cur_cgrp;
@@ -1359,8 +1111,8 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 	 * does not harm and will be compensated for over time.
 	 */
 	bpf_rcu_read_lock();
-	subroot_css = &cgrp->self;
-	bpf_for_each(css, pos, subroot_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
+	start_css = &cgrp->self;
+	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
 		/*
 		 * We first obtain the up-to-date value of runtime_total
 		 * of its LLC contexts if they exist.
@@ -1522,153 +1274,11 @@ int cbw_throttle_cgroups(struct cgroup *cgrp)
 	return 0;
 }
 
-static
-s64 cbw_transfer_budget_c2l(struct scx_cgroup_ctx *src_cgx, int src_level,
-			    struct scx_cgroup_llc_ctx *tgt_llcx)
-{
-	s64 remaining, debt, b, tgt_br = 0;
-
-	/*
-	 * We move the budget from a cgroup level to the LLC level by
-	 * budget_c2l at a time until enough budget is secured at the LLC
-	 * level, or the budget at the cgroup level becomes empty.
-	 */
-	do {
-		remaining = READ_ONCE(tgt_llcx->budget_remaining);
-		if (remaining > 0)
-			return remaining;
-		debt = -remaining;
-
-		remaining = READ_ONCE(src_cgx->budget_remaining);
-		if (remaining <= 0)
-			break;
-		b = min(debt + src_cgx->budget_c2l, remaining);
-
-		__sync_fetch_and_sub(&src_cgx->budget_remaining, b);
-		__sync_fetch_and_add(&tgt_llcx->budget_remaining, b);
-	} while ( ((tgt_br = (READ_ONCE(tgt_llcx->budget_remaining))) <= 0) &&
-		  (READ_ONCE(src_cgx->budget_remaining) > 0) && can_loop);
-
-	/*
-	 * When there is no remaining budget in the subroot cgroup,
-	 * throttle the cgroup here. That is because there is nowhere
-	 * to borrow budget.
-	 */
-	if ((src_level == 1) && (READ_ONCE(tgt_llcx->budget_remaining) < 0))
-		WRITE_ONCE(src_cgx->is_throttled, true);
-
-	/*
-	 * Let’s return the last observed remaining budget of the target
-	 * that was used to escape the loop. This is necessary to avoid
-	 * the escape-then-overconsumed case.
-	 */
-	return tgt_br;
-}
-
-static
-s64 cbw_transfer_budget_p2c(struct scx_cgroup_ctx *subroot_cgx,
-			    struct scx_cgroup_ctx *tgt_cgx)
-{
-	s64 remaining, debt, b, tgt_br = 0;
-
-	/*
-	 * We move the budget from a subroot cgroup level to the leaf/threaded
-	 * cgroup level.
-	 */
-	do {
-		remaining = READ_ONCE(tgt_cgx->budget_remaining);
-		if (remaining > 0)
-			return remaining;
-
-		/*
-		 * If the subroot cgroup (subroot_cgx) is unlimited and its
-		 * target descendant (tgt_cgx) is not, the target cgroup
-		 * (tgt_cgx) is already fully replenished
-		 * (cbw_replenish_taskable_cgroup). So we don’t need to
-		 * replenish it again.
-		 *
-		 * Otherwise, transfer by budget_p2c at a time until enough
-		 * budget is secured or the budget at the subroot cgroup level
-		 * becomes empty.
-		 */
-		if (subroot_cgx->nquota_ub == CBW_RUNTUME_INF) {
-			return READ_ONCE(tgt_cgx->budget_remaining);
-		} else {
-			debt = -remaining;
-
-			remaining = READ_ONCE(subroot_cgx->budget_remaining);
-			if (remaining <= 0)
-				break;
-			b = min(debt + subroot_cgx->budget_p2c, remaining);
-
-			__sync_fetch_and_sub(&subroot_cgx->budget_remaining, b);
-			__sync_fetch_and_add(&tgt_cgx->budget_remaining, b);
-		}
-	} while ( ((tgt_br = READ_ONCE(tgt_cgx->budget_remaining)) <= 0) &&
-		  (READ_ONCE(subroot_cgx->budget_remaining) > 0) && can_loop);
-
-	/*
-	 * When there is no remaining budget in the subroot cgroup,
-	 * throttle the subroot cgroup here. That is because there is
-	 * nowhere to borrow budget. Note that we always borrow budget
-	 * from the subroot cgroup, so a source cgroup is always a
-	 * subroot cgroup.
-	 */
-	if (READ_ONCE(subroot_cgx->budget_remaining) < 0)
-		WRITE_ONCE(subroot_cgx->is_throttled, true);
-
-	/*
-	 * Let’s return the last observed remaining budget of the target
-	 * that was used to escape the loop. This is necessary to avoid
-	 * the escape-then-overconsumed case.
-	 */
-	return tgt_br;
-}
-
-static
-s64 cbw_transfer_budget_p2l(struct scx_cgroup_ctx *subroot_cgx,
-			    struct scx_cgroup_ctx *tgt_cgx,
-			    int tgt_level,
-			    struct scx_cgroup_llc_ctx *tgt_llcx)
-{
-	s64 remaining;
-
-	if (READ_ONCE(subroot_cgx->budget_remaining) <= 0)
-		return READ_ONCE(tgt_llcx->budget_remaining);
-
-	/*
-	 * We move the budget from the subroot cgroup to the target cgroup,
-	 * then finally to the target LLC context.
-	 */
-	do {
-		remaining = cbw_transfer_budget_p2c(subroot_cgx, tgt_cgx);
-		if (remaining <= 0) {
-			/*
-			 * If there is no remaining budget in the subroot
-			 * cgroup, we should throttle the cgroup.
-			 */
-			WRITE_ONCE(tgt_cgx->is_throttled, true);
-			break;
-		}
-
-		remaining = cbw_transfer_budget_c2l(tgt_cgx, tgt_level, tgt_llcx);
-	} while((remaining <= 0) && can_loop);
-
-	return READ_ONCE(tgt_llcx->budget_remaining);
-}
-
 static 
 void cbw_consume_budget(struct scx_cgroup_ctx *cgx,
 			struct scx_cgroup_llc_ctx *llcx, u64 consumed_ns)
 {
 	s64 period_duration;
-
-	/*
-	 * If the runtime is infinite, we don't need to update runtime_total
-	 * and budget_remaining, which saves cache coherence traffic.
-	 */
-	if (llcx->budget_remaining == CBW_RUNTUME_INF)
-		return;
 
 	/*
 	 * When budget consumption occurs across two periods,
@@ -1682,9 +1292,6 @@ void cbw_consume_budget(struct scx_cgroup_ctx *cgx,
 	if (consumed_ns > period_duration) {
 		consumed_ns = period_duration;
 	}
-
-	/* Decrease the budget budget_remaining */
-	__sync_fetch_and_sub(&llcx->budget_remaining, consumed_ns);
 
 	/* Increase the total runtime */
 	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
@@ -1814,9 +1421,8 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 
 	cbw_consume_budget(cgx, llcx, consumed_ns);
 
-	cbw_dbg_cgrp("  llc_id: %d -- reserved_ns: %llu -- consumed_ns: %llu -- llcx:budget_remaining: %lld -- llcx:runtime_total: %lld",
-		     llc_id, consumed_ns, READ_ONCE(llcx->budget_remaining),
-		     READ_ONCE(llcx->runtime_total));
+	cbw_dbg_cgrp("  llc_id: %d -- reserved_ns: %llu -- consumed_ns: %llu -- llcx:runtime_total: %lld",
+		     llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
 	return 0;
 }
 
@@ -1928,10 +1534,8 @@ static
 bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
 				   struct scx_cgroup_ctx *cgx, u64 now)
 {
-	struct scx_cgroup_llc_ctx *llcx;
 	s64 burst = 0, debt = 0, base, budget;
 	bool period_end, was_throttled;
-	int i;
 
 	/*
 	 * If the quota_ub is infinite, we don't need to replenish the cgroup.
@@ -1974,12 +1578,6 @@ bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
 	 * eventual bandwidth control.
 	 */
 	dbg_cgx(cgx, "replenishing: ");
-	bpf_for(i, 0, TOPO_NR(LLC)) {
-		llcx = cbw_get_llc_ctx_with_id(cgx->id, i);
-		if (llcx && (READ_ONCE(llcx->budget_remaining) < 0))
-			WRITE_ONCE(llcx->budget_remaining, 0);
-	}
-
 	base = ((subroot_cgx == cgx) ||
 		(subroot_cgx->nquota_ub == CBW_RUNTUME_INF)) ?
 		cgx->nquota_ub : 0;
@@ -1990,22 +1588,11 @@ bool cbw_replenish_taskable_cgroup(struct scx_cgroup_ctx *subroot_cgx,
 
 out_no_replenish:
 	/*
-	 * Ensure budget_remaining writes above are globally visible before
-	 * is_throttled is read and cleared below. This provides two guarantees:
-	 *
-	 * 1. Same-cgroup ordering: a task observing is_throttled=false must also
-	 *    see the replenished budget_remaining. Without this, on non-TSO
-	 *    architectures like ARM64, a task could see is_throttled=false but
-	 *    still read the old negative budget, spuriously re-throttle itself,
-	 *    and land back in the BTQ unnecessarily.
-	 *
-	 * 2. Cross-cgroup ordering: cgroups are replenished top-down (subroot
-	 *    before leaf). This barrier ensures the subroot's budget_remaining
-	 *    write is globally visible before the timer reads the leaf's
-	 *    is_throttled in the next iteration. Without this, a task processing
-	 *    a leaf cgroup could read the subroot's stale-negative budget and
-	 *    spuriously re-throttle, corrupting the timer's throttle detection
-	 *    for the leaf.
+	 * Ensure the runtime_total_sloppy = 0 resets performed earlier in the
+	 * replenish top half are globally visible before is_throttled is
+	 * cleared. Without this, on non-TSO architectures like ARM64, the
+	 * accounting timer could observe is_throttled = false, read stale
+	 * runtime_total_sloppy values, and spuriously re-throttle the cgroup.
 	 */
 	smp_mb();
 
@@ -2350,7 +1937,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 rearm_out:
 	interval = time_delta(now, cbw_last_replenish_at);
 	jitter = time_delta(interval, CBW_REPLENISH_PERIOD);
-	period = max(time_delta(CBW_REPLENISH_PERIOD, jitter), CBW_BUDGET_XFER_MIN);
+	period = max(time_delta(CBW_REPLENISH_PERIOD, jitter), CBW_REPLENISH_PERIOD_MIN);
 	if ((ret = bpf_timer_start(timer, period, 0)))
 		cbw_err("Failed to re-arm replenish timer: %d", ret);
 	cbw_last_replenish_at = now;
@@ -2811,12 +2398,8 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 
 	bpf_printk("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
 			cgx->quota, cgx->period, cgx->burst);
-	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu", indent_str,
-			cgx->nquota, cgx->nquota_ub);
-	bpf_printk("%s   \\_ budget_p2c: %llu, budget_c2l: %llu", indent_str,
-			cgx->budget_p2c, cgx->budget_c2l);
-	bpf_printk("%s   \\_ has_llcx: %d, nr_taskable_descendents: %d", indent_str,
-			cgx->has_llcx, cgx->nr_taskable_descendents);
+	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
+			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
 	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
