@@ -66,101 +66,115 @@ enum scx_cgroup_consts {
  * beyond cpu.max.
  */
 struct scx_cgroup_ctx {
-	/* cgroup id */
-	u64		id;
+	/* read-only cache line */
+	struct {
+		/* cgroup id */
+		u64		id;
+	
+		/*
+		 * Given @quota, @period, and @burst in nanoseconds.
+		 */
+		u64		quota;
+		u64		period;
+		u64		burst;
+	
+		/*
+		 * Normalized quota by period of 100 msec. By using the same
+		 * period, we can use a single BPF timer to handle all the
+		 * cgroups.
+		 */
+		u64		nquota;
+	
+		/*
+		 * The upper bound of a cgroup’s quota, which is the minimum
+		 * normalized quota of all its ancestors and itself.
+		 */
+		u64		nquota_ub;
+	
+		/*
+		 * A boolean flag indicating whether the cgroup has LLC
+		 * contexts. Written only during slow-path init/destroy;
+		 * treated as read-only in the hot path.
+		 */
+		bool		has_llcx;
+	} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
-	/*
-	 * Given @quota, @period, and @burst in nanoseconds.
-	 */
-	u64		quota;
-	u64		period;
-	u64		burst;
+	/* read-write cache line */
+	struct {
+		/*
+		 * A boolean flag indicating whether the cgroup is throttled or
+		 * not. Note that the cgroup can be throttled before reaching
+		 * the upper bound (nquota_ub) if its ancestor runs out of the
+		 * time.
+		 */
+		bool		is_throttled;
 
-	/*
-	 * Normalized quota by period of 100 msec. By using the same period,
-	 * we can use a single BPF timer to handle all the cgroups.
-	 */
-	u64		nquota;
+		/*
+		 * How many times this cgroup is throttled so far.
+		 */
+		u32		nr_throttled_periods;
 
-	/*
-	 * The upper bound of a cgroup’s quota, which is the minimum
-	 * normalized quota of all its ancestors and itself.
-	 */
-	u64		nquota_ub;
+		/*
+		 * @period_start_clk represents when a new period starts.
+		 * @burst_remaining is the maximum burst that can be accumulated
+		 * until the end of the period from @period_start_clk.
+		 */
+		u64		period_start_clk;
+		s64		burst_remaining;
 
-	/*
-	 * A boolean flag indicating whether the cgroup has LLC contexts.
-	 */
-	bool		has_llcx;
+		/*
+		 * Effective quota for the current period: nquota_ub adjusted
+		 * for debt (overspend from the previous period, subtracted) and
+		 * burst credit (underspend carried forward, added). Set at each
+		 * period boundary by replenish_timerfn(). Used by
+		 * cbw_update_runtime_total_sloppy() as the throttle threshold
+		 * instead of the bare nquota_ub, so that long-run average
+		 * utilization converges to the configured quota.
+		 */
+		s64		period_budget;
 
-	/*
-	 * A boolean flag indicating whether the cgroup is throttled or not.
-	 * Note that the cgroup can be throttled before reaching the upper
-	 * bound (nquota_nb) if the subrooot cgroup runs out of the time.
-	 */
-	bool		is_throttled;
+		/*
+		 * Total amount of time executed once replenished. It includes
+		 * @runtime_total of all LLC contexts of this cgroup. It is
+		 * sloppy since it is update only before asking more budget to
+		 * its parent. In other words, it is not updated as
+		 * @runtime_total of its LLC contexts are updated, so it could
+		 * be outdated. When it is greater than @quota_ub, we cannot ask
+		 * for more budget from the parent, so there will be no more
+		 * updates on @runtime_total_sloppy before the next period
+		 * starts.
+		 */
+		s64		runtime_total_sloppy;
 
-	/*
-	 * How many time this cgroup is throttled so far.
-	 */
-	u32		nr_throttled_periods;
+		/*
+		 * Total runtime at the last replenishment period.
+		 */
+		s64		runtime_total_last;
 
-	/*
-	 * @period_start_clk represents when a new period starts.
-	 * @burst_remaining is the maximum burst that can be accumulated
-	 * until the end of the period from @period_start_clk.
-	 */
-	u64		period_start_clk;
-	s64		burst_remaining;
-
-	/*
-	 * Effective quota for the current period: nquota_ub adjusted for
-	 * debt (overspend from the previous period, subtracted) and burst
-	 * credit (underspend carried forward, added). Set at each period
-	 * boundary by replenish_timerfn(). Used by cbw_update_runtime_total_sloppy()
-	 * as the throttle threshold instead of the bare nquota_ub, so that
-	 * long-run average utilization converges to the configured quota.
-	 */
-	s64		period_budget;
-
-	/*
-	 * Total amount of time executed once replenished. It includes
-	 * @runtime_total of all LLC contexts of this cgroup. It is sloppy
-	 * since it is updated only before asking more budget to its parent.
-	 * In other words, it is not updated as @runtime_total of its LLC
-	 * contexts are updated, so it could be outdated. When it is greater
-	 * than @quota_ub, we cannot ask for more budget from the parent,
-	 * so there will be no more updates on @runtime_total_sloppy before
-	 * the next period starts.
-	 */
-	s64		runtime_total_sloppy;
-
-	/*
-	 * Total runtime at the last replenishment period.
-	 */
-	s64		runtime_total_last;
-
-	/*
-	 * EWMA of CPU consumption rate within a replenish interval, in
-	 * CBW_SCALE fixed-point. CBW_SCALE (1024) represents consuming the
-	 * full CBW_REPLENISH_PERIOD worth of CPU time, i.e., 100% of one CPU
-	 * core. Updated only when the cgroup was active (runtime_total_last
-	 * > 0) to avoid pulling the average toward zero during idle periods.
-	 * With CBW_CONSUMPTION_RATE_DECAY=3, the half-lifetime is ~5.2
-	 * replenish intervals (~520ms at CBW_REPLENISH_PERIOD = 100ms).
-	 *
-	 * Default is 0 (zero-initialized by BPF map). This is reasonable
-	 * because __calc_avg() uses a 50/50 blend when the old value is small
-	 * (< 1 << decay), so the average ramps up quickly on the first few
-	 * active intervals rather than warming up slowly.
-	 *
-	 * For unconstrained cgroups (nquota_ub == CBW_RUNTUME_INF),
-	 * cbw_replenish_cgroup() returns early, so avg_consumption_rate stays
-	 * 0. This is correct: a cgroup with no quota limit has no meaningful
-	 * consumption rate to track.
-	 */
-	u64		avg_consumption_rate;
-};
+		/*
+		 * EWMA of CPU consumption rate within a replenish interval, in
+		 * CBW_SCALE fixed-point. CBW_SCALE (1024) represents consuming
+		 * the full CBW_REPLENISH_PERIOD worth of CPU time, i.e., 100%
+		 * of one CPU core. Updated only when the cgroup was active
+		 * (runtime_total_last > 0) to avoid pulling the average toward
+		 * zero during idle periods. With CBW_CONSUMPTION_RATE_DECAY=3,
+		 * the half-lifetime is ~5.2 replenish intervals (~520ms at
+		 * CBW_REPLENISH_PERIOD = 100ms).
+		 *
+		 * Default is 0 (zero-initialized by BPF map). This is
+		 * reasonable because __calc_avg() uses a 50/50 blend when the
+		 * old value is small (< 1 << decay), so the average ramps up
+		 * quickly on the first few active intervals rather than warming
+		 * up slowly.
+		 *
+		 * For unconstrained cgroups (nquota_ub == CBW_RUNTUME_INF),
+		 * cbw_replenish_cgroup() returns early, so avg_consumption_rate
+		 * stays 0. This is correct: a cgroup with no quota limit has no
+		 * meaningful consumption rate to track.
+		 */
+		u64		avg_consumption_rate;
+	} __attribute__((aligned(SCX_CACHELINE_SIZE)));
+} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 
 /**
