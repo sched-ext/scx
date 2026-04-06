@@ -2411,7 +2411,7 @@ bool antistall_consume(struct cpu_ctx *cpuc)
 	if (*antistall_dsq == SCX_DSQ_INVALID)
 		return false;
 
-	consumed = scx_bpf_dsq_move_to_local(*antistall_dsq);
+	consumed = scx_bpf_dsq_move_to_local(*antistall_dsq, 0);
 
 	if (!consumed)
 		goto reset;
@@ -2496,7 +2496,7 @@ static bool try_drain_layer_node_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 			disabled = true;
 		}
 
-		consumed = scx_bpf_dsq_move_to_local(dsq_id);
+		consumed = scx_bpf_dsq_move_to_local(dsq_id, 0);
 
 		/*
 		 * Interlocked with enabling in layered_enqueue(). Either we see
@@ -2594,7 +2594,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 		if (layer_id >= nr_layers)
 			return false;
 
-		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
+		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp), 0))
 			return true;
 	}
 
@@ -2705,7 +2705,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/* always consume hi_fb_dsq_id first for kthreads */
-	if (scx_bpf_dsq_move_to_local(cpuc->hi_fb_dsq_id))
+	if (scx_bpf_dsq_move_to_local(cpuc->hi_fb_dsq_id, 0))
 		return;
 
 	/*
@@ -2756,7 +2756,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			cpuc->lo_fb_usage_base;
 
 		if (dur > lo_fb_wait_ns && 1024 * usage < lo_fb_share_ppk * dur) {
-			if (scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
+			if (scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id, 0))
 				return;
 			tried_lo_fb = true;
 		}
@@ -2838,7 +2838,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 replenish:
-	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
+	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id, 0))
 		return;
         /*
          * !NULL prev_taskc indicates runnable prev.
@@ -3062,11 +3062,6 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 			}
 
 			u64 avg_runtime_us = taskc->runtime_avg / 1000;
-
-			if (!taskc) {
-				scx_bpf_error("could not find task");
-				return false;
-			}
 
 			/* To match, we must get min <= time < max. */
 			return match->min_avg_runtime_us <= avg_runtime_us &&
@@ -3960,7 +3955,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->refresh_layer = true;
 	taskc->llc_id = MAX_LLCS;
 	taskc->pinned_node = MAX_NUMA_NODES;
-	taskc->qrt_layer_id = MAX_LLCS;
+	taskc->qrt_layer_id = MAX_LAYERS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
 	/*
@@ -4565,6 +4560,10 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	int i, nr_online_cpus, ret;
+
+	ret = scx_lib_init();
+	if (ret)
+		return ret;
 
 	struct bpf_cpumask *cpumask __free(bpf_cpumask) = bpf_cpumask_create();
 	if (!cpumask)

@@ -34,6 +34,8 @@ pub struct CellMetrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Pin reject skipped %")]
+    pub pin_skip_pct: f64,
     #[stat(desc = "Decision share % of global")]
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
@@ -56,6 +58,7 @@ impl CellMetrics {
         self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
+        self.pin_skip_pct = ds.pin_skip_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
     }
@@ -85,6 +88,8 @@ pub struct Metrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Pin reject skipped %")]
+    pub pin_skip_pct: f64,
     #[stat(desc = "Decision share % of global")]
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
@@ -109,6 +114,7 @@ impl Metrics {
         self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
+        self.pin_skip_pct = ds.pin_skip_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
     }

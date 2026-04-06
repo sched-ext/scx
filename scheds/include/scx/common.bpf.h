@@ -14,12 +14,17 @@
  */
 #define BPF_NO_KFUNC_PROTOTYPES
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-declarations"
+
 #ifdef LSP
 #define __bpf__
 #include "../vmlinux.h"
 #else
 #include "vmlinux.h"
 #endif
+
+#pragma clang diagnostic pop
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -47,6 +52,7 @@
 extern int LINUX_KERNEL_VERSION __kconfig;
 extern const char CONFIG_CC_VERSION_TEXT[64] __kconfig __weak;
 extern const char CONFIG_LOCALVERSION[64] __kconfig __weak;
+extern bool CONFIG_PREEMPT_RCU __kconfig __weak;
 
 /*
  * Earlier versions of clang/pahole lost upper 32bits in 64bit enums which can
@@ -494,31 +500,80 @@ static __always_inline const struct cpumask *cast_mask(struct bpf_cpumask *mask)
 }
 
 /*
+ * True if the BPF prolog (__bpf_prog_enter) calls migrate_disable() for the
+ * current task. Probed at runtime by scx_lib_init(). Defaults to true because
+ * the prolog called migrate_disable() unconditionally on kernels before v6.18,
+ * so schedulers that omit scx_lib_init() safely fall back to the original
+ * p == current disambiguation.
+ */
+static bool __scx_prolog_disables_migration = true;
+
+/*
+ * scx_lib_init - initialize the scx BPF library
+ *
+ * Must be called at the top of ops.init(). Probes runtime behavior needed by
+ * library functions such as is_migration_disabled().
+ *
+ * Returns 0 on success.
+ */
+static inline int scx_lib_init(void)
+{
+	/*
+	 * Probe whether the BPF prolog calls migrate_disable() by checking
+	 * migration_disabled of the current task. Since we are executing BPF
+	 * code right now, the prolog has already run: if it called
+	 * migrate_disable(), migration_disabled is non-zero.
+	 */
+	if (bpf_core_field_exists(((struct task_struct *)0)->migration_disabled)) {
+		const struct task_struct *p = bpf_get_current_task_btf();
+		__scx_prolog_disables_migration = p->migration_disabled > 0;
+	}
+	return 0;
+}
+
+/*
  * Return true if task @p cannot migrate to a different CPU, false
  * otherwise.
  */
 static inline bool is_migration_disabled(const struct task_struct *p)
 {
 	/*
-	 * Testing p->migration_disabled in a BPF code is tricky because the
-	 * migration is _always_ disabled while running the BPF code.
-	 * The prolog (__bpf_prog_enter) and epilog (__bpf_prog_exit) for BPF
-	 * code execution disable and re-enable the migration of the current
-	 * task, respectively. So, the _current_ task of the sched_ext ops is
-	 * always migration-disabled. Moreover, p->migration_disabled could be
-	 * two or greater when a sched_ext ops BPF code (e.g., ops.tick) is
-	 * executed in the middle of the other BPF code execution.
+	 * Testing p->migration_disabled in BPF is tricky because the BPF prolog
+	 * (__bpf_prog_enter) may call migrate_disable() for the current task,
+	 * making migration_disabled == 1 even for tasks that are not truly
+	 * migration-disabled.
 	 *
-	 * Therefore, we should decide that the _current_ task is
-	 * migration-disabled only when its migration_disabled count is greater
-	 * than one. In other words, when  p->migration_disabled == 1, there is
-	 * an ambiguity, so we should check if @p is the current task or not.
+	 * Since commit 8e4f0b1ebcf2 ("bpf: use rcu_read_lock_dont_migrate() for
+	 * trampoline.c"), the BPF prolog calls migrate_disable() only when
+	 * CONFIG_PREEMPT_RCU is enabled. Two fast paths cover the common cases:
+	 *
+	 *   1) CONFIG_PREEMPT_RCU: prolog always calls migrate_disable(), so
+	 *      migration_disabled == 1 for the current task is ambiguous.
+	 *      Disambiguate by checking p == current.
+	 *
+	 *   2) v6.18+ without CONFIG_PREEMPT_RCU: prolog never calls
+	 *      migrate_disable(), so migration_disabled == 1 is unambiguously
+	 *      a real migrate_disable() call.
+	 *
+	 * A slow path handles pre-v6.18 kernels without CONFIG_PREEMPT_RCU,
+	 * where the prolog historically called migrate_disable() unconditionally
+	 * but a cherry-picked downstream kernel may not. The runtime-probed flag
+	 * __scx_prolog_disables_migration (set by scx_lib_init()) distinguishes
+	 * the two cases without relying on the kernel version alone.
 	 */
 	if (bpf_core_field_exists(p->migration_disabled)) {
-		if (p->migration_disabled == 1)
-			return bpf_get_current_task_btf() != p;
-		else
-			return p->migration_disabled;
+		if (p->migration_disabled == 1) {
+			/* Fast path: prolog always disables migration */
+			if (CONFIG_PREEMPT_RCU)
+				return bpf_get_current_task_btf() != p;
+			/* Fast path: prolog never disables migration */
+			if (LINUX_KERNEL_VERSION >= KERNEL_VERSION(6, 18, 0))
+				return true;
+			/* Slow path: pre-v6.18, !PREEMPT_RCU - use runtime flag */
+			return __scx_prolog_disables_migration ?
+			       bpf_get_current_task_btf() != p : true;
+		}
+		return p->migration_disabled;
 	}
 	return false;
 }

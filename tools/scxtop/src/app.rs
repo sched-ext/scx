@@ -18,7 +18,7 @@ use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
 use crate::render::bpf_programs::{ProgramDetailParams, ProgramsListParams};
-use crate::render::scheduler::{SchedulerStatsParams, SchedulerViewParams};
+use crate::render::scheduler::{DsqSummaryParams, ProcessLatencyParams, SchedulerViewParams};
 use crate::render::{
     BpfProgramRenderer, MemoryRenderer, NetworkRenderer, ProcessRenderer, SchedulerRenderer,
 };
@@ -187,6 +187,13 @@ pub struct App<'a> {
     // power monitoring
     power_snapshot: crate::PowerSnapshot,
     power_collector: crate::PowerDataCollector,
+
+    // scheduler DSQ filter (hex string match)
+    dsq_filter_text: String,
+    dsq_summary_table_state: TableState,
+    dsq_summary_row_count: usize,
+    proc_latency_table_state: TableState,
+    proc_latency_row_count: usize,
 
     // layout related
     events_list_size: u16,
@@ -433,6 +440,11 @@ impl<'a> App<'a> {
             kprobe_links: Vec::new(),
             filtered_state,
             filtering: false,
+            dsq_filter_text: String::new(),
+            dsq_summary_table_state: TableState::default(),
+            dsq_summary_row_count: 0,
+            proc_latency_table_state: TableState::default(),
+            proc_latency_row_count: 0,
             events_list_size: 1,
             prev_bpf_sample_rate: sample_rate,
             trace_start: 0,
@@ -691,6 +703,11 @@ impl<'a> App<'a> {
             kprobe_links: Vec::new(),
             filtered_state,
             filtering: false,
+            dsq_filter_text: String::new(),
+            dsq_summary_table_state: TableState::default(),
+            dsq_summary_row_count: 0,
+            proc_latency_table_state: TableState::default(),
+            proc_latency_row_count: 0,
             events_list_size: 1,
             prev_bpf_sample_rate: sample_rate,
             trace_start: 0,
@@ -2545,16 +2562,13 @@ impl<'a> App<'a> {
                     self.render_capability_warnings(frame, area)?;
                     return Ok(());
                 }
-                let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-                let [left_top, left_center, left_bottom] = Layout::vertical([
+
+                let [top, middle, bottom] = Layout::vertical([
                     Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 4),
+                    Constraint::Fill(1),
                 ])
-                .areas(left);
-                let [right_top, right_bottom] =
-                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
-                        .areas(right);
+                .areas(area);
 
                 let sample_rate = self
                     .skel
@@ -2562,7 +2576,8 @@ impl<'a> App<'a> {
                     .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
                     .unwrap_or(0);
 
-                let params1 = SchedulerViewParams {
+                // Top: DSQ latency sparklines/barchart
+                let sparkline_params = SchedulerViewParams {
                     event: "dsq_lat_us",
                     scheduler_name: &self.scheduler,
                     dsq_data: &self.dsq_data,
@@ -2570,83 +2585,55 @@ impl<'a> App<'a> {
                     localize: self.localize,
                     locale: &self.locale,
                     theme: self.theme(),
-                    render_title: false,
+                    render_title: true,
                     render_sample_rate: true,
                 };
                 let new_max = SchedulerRenderer::render_scheduler_view(
                     frame,
-                    left_top,
+                    top,
                     &self.view_state,
                     self.max_sched_events,
-                    &params1,
+                    &sparkline_params,
                 )?;
-                self.max_sched_events = new_max;
+                if new_max != self.max_sched_events {
+                    self.max_sched_events = new_max;
+                    for dsq_event_data in self.dsq_data.values_mut() {
+                        dsq_event_data.set_max_size(new_max);
+                    }
+                }
 
-                let params2 = SchedulerViewParams {
-                    event: "dsq_slice_consumed",
+                // Middle: DSQ summary table with percentile aggregations
+                let theme = self.config.theme().clone();
+                let summary_params = DsqSummaryParams {
                     scheduler_name: &self.scheduler,
                     dsq_data: &self.dsq_data,
                     sample_rate,
-                    localize: self.localize,
-                    locale: &self.locale,
-                    theme: self.theme(),
-                    render_title: false,
-                    render_sample_rate: false,
+                    dsq_filter_text: &self.dsq_filter_text,
+                    filtering: self.filtering,
+                    filter_input: &self.event_input_buffer,
+                    theme: &theme,
                 };
-                SchedulerRenderer::render_scheduler_view(
+                self.dsq_summary_row_count = SchedulerRenderer::render_dsq_summary_table(
                     frame,
-                    left_center,
-                    &self.view_state,
-                    self.max_sched_events,
-                    &params2,
+                    middle,
+                    &summary_params,
+                    &mut self.dsq_summary_table_state,
                 )?;
 
-                let params3 = SchedulerViewParams {
-                    event: "dsq_vtime",
-                    scheduler_name: &self.scheduler,
-                    dsq_data: &self.dsq_data,
-                    sample_rate,
-                    localize: self.localize,
-                    locale: &self.locale,
-                    theme: self.theme(),
-                    render_title: false,
-                    render_sample_rate: false,
+                // Bottom: Per-process scheduling latency table
+                let proc_params = ProcessLatencyParams {
+                    proc_data: &self.proc_data,
+                    dsq_filter_text: &self.dsq_filter_text,
+                    theme: &theme,
                 };
-                SchedulerRenderer::render_scheduler_view(
+                self.proc_latency_row_count = SchedulerRenderer::render_process_latency_table(
                     frame,
-                    left_bottom,
-                    &self.view_state,
-                    self.max_sched_events,
-                    &params3,
+                    bottom,
+                    &proc_params,
+                    &mut self.proc_latency_table_state,
                 )?;
 
-                let params4 = SchedulerViewParams {
-                    event: "dsq_nr_queued",
-                    scheduler_name: &self.scheduler,
-                    dsq_data: &self.dsq_data,
-                    sample_rate,
-                    localize: self.localize,
-                    locale: &self.locale,
-                    theme: self.theme(),
-                    render_title: false,
-                    render_sample_rate: false,
-                };
-                SchedulerRenderer::render_scheduler_view(
-                    frame,
-                    right_bottom,
-                    &self.view_state,
-                    self.max_sched_events,
-                    &params4,
-                )?;
-                let stats_params = SchedulerStatsParams {
-                    scheduler_name: &self.scheduler,
-                    sched_stats_raw: &self.sched_stats_raw,
-                    tick_rate_ms: self.config.tick_rate_ms(),
-                    dispatch_keep_last: self.scx_stats.dispatch_keep_last,
-                    select_cpu_fallback: self.scx_stats.select_cpu_fallback,
-                    theme: self.theme(),
-                };
-                SchedulerRenderer::render_scheduler_stats(frame, right_top, &stats_params)
+                Ok(())
             }
             AppState::Tracing => self.render_tracing(frame),
             _ => self.render_default(frame),
@@ -3959,6 +3946,12 @@ impl<'a> App<'a> {
                 self.perf_top_table_state
                     .select(Some(self.selected_symbol_index));
             }
+        } else if self.state == AppState::Scheduler {
+            // Scroll the process latency table (bottom pane)
+            let max_index = self.proc_latency_row_count.saturating_sub(1);
+            let current = self.proc_latency_table_state.selected().unwrap_or(0);
+            let new_selected = if current < max_index { current + 1 } else { 0 };
+            self.proc_latency_table_state.select(Some(new_selected));
         } else {
             let mut filtered_state = self.filtered_state.lock().unwrap();
             if (self.state == AppState::PerfEvent
@@ -4031,6 +4024,14 @@ impl<'a> App<'a> {
             }
             self.perf_top_table_state
                 .select(Some(self.selected_symbol_index));
+        } else if self.state == AppState::Scheduler {
+            let current = self.proc_latency_table_state.selected().unwrap_or(0);
+            let new_selected = if current > 0 {
+                current - 1
+            } else {
+                self.proc_latency_row_count.saturating_sub(1)
+            };
+            self.proc_latency_table_state.select(Some(new_selected));
         } else if self.state == AppState::Help {
         } else {
             let mut filtered_state = self.filtered_state.lock().unwrap();
@@ -4100,6 +4101,16 @@ impl<'a> App<'a> {
             }
             self.perf_top_table_state
                 .select(Some(self.selected_symbol_index));
+        } else if self.state == AppState::Scheduler {
+            let page_size = 10;
+            let max_index = self.proc_latency_row_count.saturating_sub(1);
+            let current = self.proc_latency_table_state.selected().unwrap_or(0);
+            let new_selected = if current + page_size <= max_index {
+                current + page_size
+            } else {
+                max_index
+            };
+            self.proc_latency_table_state.select(Some(new_selected));
         } else {
             let mut filtered_state = self.filtered_state.lock().unwrap();
             if (self.state == AppState::PerfEvent
@@ -4161,6 +4172,11 @@ impl<'a> App<'a> {
             }
             self.perf_top_table_state
                 .select(Some(self.selected_symbol_index));
+        } else if self.state == AppState::Scheduler {
+            let page_size = 10;
+            let current = self.proc_latency_table_state.selected().unwrap_or(0);
+            let new_selected = current.saturating_sub(page_size);
+            self.proc_latency_table_state.select(Some(new_selected));
         } else {
             let mut filtered_state = self.filtered_state.lock().unwrap();
             if (self.state == AppState::PerfEvent
@@ -4306,6 +4322,11 @@ impl<'a> App<'a> {
 
                 self.filter_events();
             }
+            AppState::Scheduler => {
+                // Confirm DSQ filter
+                self.apply_dsq_filter();
+                self.filtering = false;
+            }
             _ => {
                 // Handle other states (Help, MangoApp, Memory, Pause, Scheduler, etc.)
                 // For these states, do nothing on Enter
@@ -4315,8 +4336,20 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Updates dsq_filter_text from event_input_buffer for string-based DSQ matching
+    fn apply_dsq_filter(&mut self) {
+        self.dsq_filter_text = self.event_input_buffer.trim().to_string();
+    }
+
     fn on_escape(&mut self) -> Result<()> {
         match self.state() {
+            AppState::Scheduler => {
+                if self.filtering {
+                    self.filtering = false;
+                    self.event_input_buffer.clear();
+                    self.dsq_filter_text.clear();
+                }
+            }
             AppState::BpfPrograms => {
                 if self.filtering {
                     // Clear filter and exit filtering mode
@@ -4812,7 +4845,7 @@ impl<'a> App<'a> {
             let next_dsq_data = self
                 .dsq_data
                 .entry(next_dsq_id)
-                .or_insert(EventData::new(self.max_cpu_events));
+                .or_insert(EventData::new(self.max_sched_events));
 
             if self.state == AppState::MangoApp {
                 if self.process_id > 0 && action.next_tgid == self.process_id as u32 {
@@ -4835,7 +4868,7 @@ impl<'a> App<'a> {
             let prev_dsq_data = self
                 .dsq_data
                 .entry(prev_dsq_id)
-                .or_insert(EventData::new(self.max_cpu_events));
+                .or_insert(EventData::new(self.max_sched_events));
             if self.state == AppState::MangoApp {
                 if self.process_id > 0 && action.prev_tgid == self.process_id as u32 {
                     prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
@@ -5704,6 +5737,9 @@ impl<'a> App<'a> {
                     self.filtering = true;
                     self.filter_symbols();
                 }
+                AppState::Scheduler => {
+                    self.filtering = true;
+                }
                 _ => {}
             },
             Action::InputEntry(input) => {
@@ -5714,6 +5750,10 @@ impl<'a> App<'a> {
                     }
                     AppState::PerfTop => {
                         self.filter_symbols();
+                    }
+                    AppState::Scheduler => {
+                        // Live-update DSQ filter as user types
+                        self.apply_dsq_filter();
                     }
                     _ => {
                         self.filter_events();
@@ -5728,6 +5768,9 @@ impl<'a> App<'a> {
                     }
                     AppState::PerfTop => {
                         self.filter_symbols();
+                    }
+                    AppState::Scheduler => {
+                        self.apply_dsq_filter();
                     }
                     _ => {
                         self.filter_events();

@@ -486,7 +486,7 @@ void BPF_STRUCT_OPS(tickless_dispatch, s32 cpu, struct task_struct *prev)
 	 * the shared DSQ after distributing them to the tickless CPUs,
 	 * primary CPUs will also start consuming them.
 	 */
-	if (scx_bpf_dsq_move_to_local(SHARED_DSQ)) {
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -690,6 +690,10 @@ int enable_primary_cpu(struct cpu_arg *input)
 s32 BPF_STRUCT_OPS_SLEEPABLE(tickless_init)
 {
 	int ret;
+
+	ret = scx_lib_init();
+	if (ret)
+		return ret;
 
 	ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
 	if (ret < 0)

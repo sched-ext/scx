@@ -4,18 +4,19 @@
 // GNU General Public License version 2.
 
 use crate::util::sanitize_nbsp;
-use crate::{AppTheme, EventData, VecStats, ViewState};
+use crate::{AppTheme, EventData, ProcData, StatAggregation, VecStats, ViewState};
 use anyhow::Result;
 use num_format::{SystemLocale, ToFormattedString};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::prelude::Stylize;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Paragraph, RenderDirection,
-    Sparkline,
+    Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Paragraph, RenderDirection,
+    Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table, TableState,
 };
 use ratatui::Frame;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Parameters for rendering scheduler views
 pub struct SchedulerViewParams<'a> {
@@ -42,13 +43,21 @@ pub struct DsqRenderParams<'a> {
     pub render_sample_rate: bool,
 }
 
-/// Parameters for scheduler statistics
-pub struct SchedulerStatsParams<'a> {
+/// Parameters for DSQ summary table
+pub struct DsqSummaryParams<'a> {
     pub scheduler_name: &'a str,
-    pub sched_stats_raw: &'a str,
-    pub tick_rate_ms: usize,
-    pub dispatch_keep_last: i64,
-    pub select_cpu_fallback: i64,
+    pub dsq_data: &'a BTreeMap<u64, EventData>,
+    pub sample_rate: u32,
+    pub dsq_filter_text: &'a str,
+    pub filtering: bool,
+    pub filter_input: &'a str,
+    pub theme: &'a AppTheme,
+}
+
+/// Parameters for process latency table
+pub struct ProcessLatencyParams<'a> {
+    pub proc_data: &'a BTreeMap<i32, ProcData>,
+    pub dsq_filter_text: &'a str,
     pub theme: &'a AppTheme,
 }
 
@@ -82,41 +91,362 @@ impl SchedulerRenderer {
         }
     }
 
-    /// Renders scheduler statistics panel
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_scheduler_stats(
+    /// Renders DSQ latency summary table with percentile aggregations.
+    /// Returns the number of rows for scroll state management.
+    pub fn render_dsq_summary_table(
         frame: &mut Frame,
         area: Rect,
-        params: &SchedulerStatsParams,
-    ) -> Result<()> {
-        let paragraph = Paragraph::new(params.sched_stats_raw.to_string());
+        params: &DsqSummaryParams,
+        table_state: &mut TableState,
+    ) -> Result<usize> {
+        let percentile_set: HashSet<StatAggregation> = [
+            StatAggregation::P50,
+            StatAggregation::P90,
+            StatAggregation::P99,
+        ]
+        .into_iter()
+        .collect();
+
+        struct DsqEntry {
+            dsq_id: u64,
+            p50: u64,
+            p90: u64,
+            p99: u64,
+            avg: u64,
+            max: u64,
+            q_max: u64,
+            count: usize,
+        }
+
+        let mut entries: Vec<DsqEntry> = Vec::new();
+        for (dsq_id, event_data) in params.dsq_data.iter() {
+            if !params.dsq_filter_text.is_empty() {
+                let dsq_hex = format!("{:#X}", dsq_id);
+                let filter_upper = params.dsq_filter_text.to_uppercase();
+                if !dsq_hex.to_uppercase().contains(&filter_upper) {
+                    continue;
+                }
+            }
+            let lat_data = event_data.event_data_immut("dsq_lat_us");
+            let non_zero: Vec<u64> = lat_data.into_iter().filter(|&v| v > 0).collect();
+            if non_zero.is_empty() {
+                continue;
+            }
+            let lat_stats = VecStats::new(&non_zero, Some(percentile_set.clone()));
+            let nr_queued_data = event_data.event_data_immut("dsq_nr_queued");
+            let nr_non_zero: Vec<u64> = nr_queued_data.into_iter().filter(|&v| v > 0).collect();
+            let nr_stats = VecStats::new(&nr_non_zero, None);
+
+            let pmap = lat_stats.percentiles.as_ref();
+            entries.push(DsqEntry {
+                dsq_id: *dsq_id,
+                p50: pmap
+                    .and_then(|m| m.get(&StatAggregation::P50))
+                    .copied()
+                    .unwrap_or(0),
+                p90: pmap
+                    .and_then(|m| m.get(&StatAggregation::P90))
+                    .copied()
+                    .unwrap_or(0),
+                p99: pmap
+                    .and_then(|m| m.get(&StatAggregation::P99))
+                    .copied()
+                    .unwrap_or(0),
+                avg: lat_stats.avg,
+                max: lat_stats.max,
+                q_max: nr_stats.max,
+                count: non_zero.len(),
+            });
+        }
+
+        // Sort by avg desc, then p99 desc, then q_max desc
+        entries.sort_by(|a, b| {
+            b.avg
+                .cmp(&a.avg)
+                .then(b.p99.cmp(&a.p99))
+                .then(b.q_max.cmp(&a.q_max))
+        });
+
+        let row_count = entries.len();
+
+        let rows: Vec<Row> = entries
+            .iter()
+            .map(|e| {
+                let color = Self::latency_group_color(e.p90, params.theme);
+                Row::new(vec![
+                    Cell::from(format!("{:#X}", e.dsq_id)),
+                    Cell::from(format!("{}", e.p50)),
+                    Cell::from(format!("{}", e.p90)),
+                    Cell::from(format!("{}", e.p99)),
+                    Cell::from(format!("{}", e.avg)),
+                    Cell::from(format!("{}", e.max)),
+                    Cell::from(format!("{}", e.q_max)),
+                    Cell::from(format!("{}", e.count)),
+                ])
+                .style(Style::default().fg(color))
+            })
+            .collect();
+
+        let header = Row::new(vec![
+            Cell::from("DSQ"),
+            Cell::from("p50"),
+            Cell::from("p90"),
+            Cell::from("p99"),
+            Cell::from("avg ▼"),
+            Cell::from("max"),
+            Cell::from("q_max"),
+            Cell::from("count"),
+        ])
+        .style(params.theme.text_color())
+        .bold()
+        .underlined();
+
+        let constraints = vec![
+            Constraint::Min(14),
+            Constraint::Min(8),
+            Constraint::Min(8),
+            Constraint::Min(8),
+            Constraint::Min(8),
+            Constraint::Min(8),
+            Constraint::Min(8),
+            Constraint::Min(8),
+        ];
+
         let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(params.theme.border_style())
             .title_top(
-                Line::from(params.scheduler_name.to_string())
-                    .style(params.theme.title_style())
-                    .centered(),
+                Line::from(format!(
+                    "{} DSQ Latency Summary (μs)",
+                    params.scheduler_name
+                ))
+                .style(params.theme.title_style())
+                .centered(),
             )
             .title_top(
-                Line::from(format!("{}ms", params.tick_rate_ms))
+                Line::from(vec![
+                    Span::styled("f", params.theme.text_important_color()),
+                    Span::styled(
+                        if params.filtering {
+                            format!("ilter DSQ: {}_", params.filter_input)
+                        } else if !params.dsq_filter_text.is_empty() {
+                            format!("ilter DSQ: {}", params.dsq_filter_text)
+                        } else {
+                            "ilter".to_string()
+                        },
+                        params.theme.text_color(),
+                    ),
+                ])
+                .left_aligned(),
+            )
+            .title_top(
+                Line::from(format!("sample rate {}", params.sample_rate))
                     .style(params.theme.text_important_color())
                     .right_aligned(),
-            )
-            .title_bottom(
-                Line::from(format!("keep_last {}", params.dispatch_keep_last))
-                    .style(params.theme.text_important_color())
-                    .right_aligned(),
-            )
-            .title_bottom(
-                Line::from(format!("select_fall {}", params.select_cpu_fallback))
-                    .style(params.theme.text_important_color())
-                    .left_aligned(),
-            )
-            .style(params.theme.border_style())
-            .border_type(BorderType::Rounded);
+            );
 
-        frame.render_widget(paragraph.block(block), area);
+        let table = Table::new(rows, constraints)
+            .header(header)
+            .block(block)
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        frame.render_stateful_widget(table, area, table_state);
 
-        Ok(())
+        // Scrollbar
+        let visible_rows = area.height.saturating_sub(4) as usize;
+        if row_count > visible_rows {
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            let scroll_pos = table_state.selected().unwrap_or(0);
+            let mut scrollbar_state = ScrollbarState::new(row_count).position(scroll_pos);
+            frame.render_stateful_widget(
+                scrollbar,
+                area.inner(ratatui::layout::Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
+
+        Ok(row_count)
+    }
+
+    /// Renders per-process scheduling latency table.
+    /// Returns the number of rows for scroll state management.
+    pub fn render_process_latency_table(
+        frame: &mut Frame,
+        area: Rect,
+        params: &ProcessLatencyParams,
+        table_state: &mut TableState,
+    ) -> Result<usize> {
+        let percentile_set: HashSet<StatAggregation> = [
+            StatAggregation::P50,
+            StatAggregation::P90,
+            StatAggregation::P99,
+        ]
+        .into_iter()
+        .collect();
+
+        struct ProcEntry {
+            pid: i32,
+            comm: String,
+            dsq: String,
+            cpu: i32,
+            p50: u64,
+            p90: u64,
+            p99: u64,
+            slice_avg_us: u64,
+            count: usize,
+        }
+
+        let mut entries: Vec<ProcEntry> = Vec::new();
+
+        for (pid, proc_data) in params.proc_data.iter() {
+            if !params.dsq_filter_text.is_empty() {
+                let proc_dsq_hex = proc_data
+                    .dsq
+                    .map(|d| format!("{:#X}", d))
+                    .unwrap_or_default();
+                let filter_upper = params.dsq_filter_text.to_uppercase();
+                if !proc_dsq_hex.to_uppercase().contains(&filter_upper) {
+                    continue;
+                }
+            }
+            let lat_data = proc_data.event_data_immut("lat_us");
+            let non_zero: Vec<u64> = lat_data.into_iter().filter(|&v| v > 0).collect();
+            if non_zero.is_empty() {
+                continue;
+            }
+            let lat_stats = VecStats::new(&non_zero, Some(percentile_set.clone()));
+            let pmap = lat_stats.percentiles.as_ref();
+
+            let slice_data = proc_data.event_data_immut("slice_consumed");
+            let slice_non_zero: Vec<u64> = slice_data.into_iter().filter(|&v| v > 0).collect();
+            let slice_stats = VecStats::new(&slice_non_zero, None);
+
+            entries.push(ProcEntry {
+                pid: *pid,
+                comm: proc_data.process_name.clone(),
+                dsq: proc_data
+                    .dsq
+                    .map(|d| format!("{:#X}", d))
+                    .unwrap_or_default(),
+                cpu: proc_data.cpu,
+                p50: pmap
+                    .and_then(|m| m.get(&StatAggregation::P50))
+                    .copied()
+                    .unwrap_or(0),
+                p90: pmap
+                    .and_then(|m| m.get(&StatAggregation::P90))
+                    .copied()
+                    .unwrap_or(0),
+                p99: pmap
+                    .and_then(|m| m.get(&StatAggregation::P99))
+                    .copied()
+                    .unwrap_or(0),
+                slice_avg_us: slice_stats.avg / 1000, // ns to μs
+                count: non_zero.len(),
+            });
+        }
+
+        // Sort by p90 descending (highest latency first)
+        entries.sort_by(|a, b| b.p90.cmp(&a.p90));
+
+        let header = Row::new(vec![
+            Cell::from("PID"),
+            Cell::from("COMM"),
+            Cell::from("DSQ"),
+            Cell::from("CPU"),
+            Cell::from("lat p50"),
+            Cell::from("lat p90"),
+            Cell::from("lat p99"),
+            Cell::from("slice(μs)"),
+            Cell::from("count"),
+        ])
+        .style(params.theme.text_color())
+        .bold()
+        .underlined();
+
+        let constraints = vec![
+            Constraint::Min(8),
+            Constraint::Min(16),
+            Constraint::Min(14),
+            Constraint::Min(5),
+            Constraint::Min(8),
+            Constraint::Min(8),
+            Constraint::Min(8),
+            Constraint::Min(10),
+            Constraint::Min(8),
+        ];
+
+        let rows: Vec<Row> = entries
+            .iter()
+            .map(|e| {
+                let color = Self::latency_group_color(e.p90, params.theme);
+                Row::new(vec![
+                    Cell::from(format!("{}", e.pid)),
+                    Cell::from(e.comm.clone()),
+                    Cell::from(e.dsq.clone()),
+                    Cell::from(format!("{}", e.cpu)),
+                    Cell::from(format!("{}", e.p50)),
+                    Cell::from(format!("{}", e.p90)),
+                    Cell::from(format!("{}", e.p99)),
+                    Cell::from(format!("{}", e.slice_avg_us)),
+                    Cell::from(format!("{}", e.count)),
+                ])
+                .style(Style::default().fg(color))
+            })
+            .collect();
+
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(params.theme.border_style())
+            .title_top(
+                Line::from(format!(
+                    "Process Scheduling Latency (μs) ({} procs)",
+                    entries.len()
+                ))
+                .style(params.theme.title_style())
+                .centered(),
+            );
+
+        let row_count = entries.len();
+
+        let table = Table::new(rows, constraints)
+            .header(header)
+            .block(block)
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        frame.render_stateful_widget(table, area, table_state);
+
+        // Scrollbar
+        let visible_rows = area.height.saturating_sub(4) as usize;
+        if row_count > visible_rows {
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            let scroll_pos = table_state.selected().unwrap_or(0);
+            let mut scrollbar_state = ScrollbarState::new(row_count).position(scroll_pos);
+            frame.render_stateful_widget(
+                scrollbar,
+                area.inner(ratatui::layout::Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
+
+        Ok(row_count)
+    }
+
+    /// Returns color based on latency group thresholds (similar to rsched)
+    fn latency_group_color(p90_us: u64, theme: &AppTheme) -> Color {
+        // Latency groups matching rsched:
+        // <10μs green, 10-100μs light green, 100-1000μs yellow, 1-10ms orange, >10ms red
+        theme.gradient_5(p90_us as f64, 10.0, 100.0, 1000.0, 10000.0, false)
     }
 
     /// Renders the scheduler state as sparklines.
@@ -256,7 +586,6 @@ impl SchedulerRenderer {
         let barchart = BarChart::default()
             .data(BarGroup::default().bars(&dsq_bars))
             .block(bar_block)
-            .max(stats.max)
             .direction(Direction::Horizontal)
             .bar_gap(0)
             .bar_width(1);
@@ -347,11 +676,9 @@ impl SchedulerRenderer {
     }
 
     /// Generates a DSQ bar chart.
-    #[allow(clippy::too_many_arguments)]
     fn dsq_bar(
         dsq: u64,
         value: u64,
-        avg: u64,
         max: u64,
         min: u64,
         localize: bool,
@@ -363,17 +690,7 @@ impl SchedulerRenderer {
         Bar::default()
             .value(value)
             .style(Style::default().fg(gradient_color))
-            .label(Line::from(if localize {
-                format!(
-                    "{:#X} avg {} max {} min {}",
-                    dsq,
-                    sanitize_nbsp(avg.to_formatted_string(locale)),
-                    sanitize_nbsp(max.to_formatted_string(locale)),
-                    sanitize_nbsp(min.to_formatted_string(locale))
-                )
-            } else {
-                format!("{dsq:#X} avg {avg} max {max} min {min}",)
-            }))
+            .label(Line::from(format!("{dsq:#X}")))
             .text_value(if localize {
                 sanitize_nbsp(value.to_formatted_string(locale))
             } else {
@@ -397,7 +714,7 @@ impl SchedulerRenderer {
                 let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, None);
                 Self::dsq_bar(
-                    *dsq_id, value, stats.avg, stats.max, stats.min, localize, locale, theme,
+                    *dsq_id, value, stats.max, stats.min, localize, locale, theme,
                 )
             })
             .collect()

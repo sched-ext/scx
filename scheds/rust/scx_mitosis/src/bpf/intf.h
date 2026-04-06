@@ -8,22 +8,22 @@
 #ifdef __BINDGEN_RUNNING__
 #include <stddef.h>
 typedef unsigned long long u64;
-typedef unsigned int	   u32;
+typedef unsigned int u32;
 typedef _Bool bool;
 #endif
 
 enum consts {
-	CACHELINE_SIZE	      = 64,
-	MAX_CPUS_SHIFT	      = 9,
-	MAX_CPUS	      = 1 << MAX_CPUS_SHIFT,
-	MAX_CPUS_U8	      = MAX_CPUS / 8,
-	MAX_CELLS	      = 256,
-	USAGE_HALF_LIFE	      = 100000000, /* 100ms */
-	TIMER_INTERVAL_NS     = 100000000, /* 100 ms */
-	CLOCK_BOOTTIME	      = 7,
+	CACHELINE_SIZE = 64,
+	MAX_CPUS_SHIFT = 9,
+	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
+	MAX_CPUS_U8 = MAX_CPUS / 8,
+	MAX_CELLS = 256,
+	USAGE_HALF_LIFE = 100000000, /* 100ms */
+	TIMER_INTERVAL_NS = 100000000, /* 100 ms */
+	CLOCK_BOOTTIME = 7,
 
-	MAX_CG_DEPTH	      = 256,
-	MAX_LLCS	      = 16,
+	MAX_CG_DEPTH = 256,
+	MAX_LLCS = 16,
 
 	DEBUG_EVENTS_BUF_SIZE = 4096,
 
@@ -73,6 +73,8 @@ enum cell_stat_idx {
 	CSTAT_AFFN_VIOL,
 	CSTAT_BORROWED,
 	CSTAT_STEAL,
+	CSTAT_CLAMP_USED,
+	CSTAT_PIN_SKIP,
 	NR_CSTATS,
 };
 
@@ -86,7 +88,7 @@ struct cpu_ctx {
 };
 
 struct cgrp_ctx {
-	u32  cell;
+	u32 cell;
 	bool cell_owner;
 };
 
@@ -147,18 +149,14 @@ struct cell {
 // It is a BPF constraint that it is 4 byte aligned.
 
 // All assertions work for both BPF and userspace builds
-_Static_assert(offsetof(struct cell, lock) == 0,
-	       "lock/padding must be first field");
+_Static_assert(offsetof(struct cell, lock) == 0, "lock/padding must be first field");
 
-_Static_assert(sizeof(((struct cell *)0)->lock) == 4,
-	       "lock/padding must be 4 bytes");
+_Static_assert(sizeof(((struct cell *)0)->lock) == 4, "lock/padding must be 4 bytes");
 
-_Static_assert(_Alignof(CELL_LOCK_T) == 4,
-	       "lock/padding must be 4-byte aligned");
+_Static_assert(_Alignof(CELL_LOCK_T) == 4, "lock/padding must be 4-byte aligned");
 
 // Verify these are the same size in both BPF and Rust.
-_Static_assert(sizeof(struct cell) ==
-		       (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
+_Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
 	       "struct cell size must be stable for Rust bindings");
 
 /* Cell assignment entry: maps a cgroup to a cell */
@@ -181,9 +179,9 @@ struct cell_cpumask_data {
  * - Cell cpumasks (which CPUs belong to each cell)
  */
 struct cell_config {
-	u32			 num_cell_assignments;
-	u32			 num_cells;
-	struct cell_assignment	 assignments[MAX_CELLS];
+	u32 num_cell_assignments;
+	u32 num_cells;
+	struct cell_assignment assignments[MAX_CELLS];
 	struct cell_cpumask_data cpumasks[MAX_CELLS];
 	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
 };

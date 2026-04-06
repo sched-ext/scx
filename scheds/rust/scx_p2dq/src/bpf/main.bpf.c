@@ -2462,7 +2462,7 @@ static bool consume_llc(struct llc_ctx *llcx)
 					 taskc->enq_flags);
 		bpf_task_release(p);
 
-		if (scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
+		if (scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0))
 			return true;
 
 		goto try_dsq;
@@ -2484,10 +2484,10 @@ static bool consume_llc(struct llc_ctx *llcx)
 					 taskc->enq_flags);
 		bpf_task_release(p);
 
-		return scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
+		return scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0);
 	}
 try_dsq:
-	if (likely(scx_bpf_dsq_move_to_local(llcx->mig_dsq))) {
+	if (likely(scx_bpf_dsq_move_to_local(llcx->mig_dsq, 0))) {
 		stat_inc(P2DQ_STAT_DISPATCH_PICK2);
 		return true;
 	}
@@ -2801,7 +2801,7 @@ check_llc_dsq:
 			bpf_task_release(p);
 
 			/* Try to dispatch - move_to_local handles affinity atomically */
-			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
+			scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0);
 			return;
 		}
 	} else if (unlikely(min_atq)) {
@@ -2822,11 +2822,11 @@ check_llc_dsq:
 						 taskc->enq_flags);
 			bpf_task_release(p);
 
-			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
+			scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0);
 			return;
 		}
 	} else {
-		if (likely(valid_dsq(dsq_id) && scx_bpf_dsq_move_to_local(dsq_id)))
+		if (likely(valid_dsq(dsq_id) && scx_bpf_dsq_move_to_local(dsq_id, 0)))
 			return;
 	}
 
@@ -2835,7 +2835,7 @@ check_llc_dsq:
 	if (likely(p2dq_config.llc_shards > 1)) {
 		// First try the current CPU's assigned shard
 		if (dsq_id != cpuc->llc_dsq &&
-		    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
+		    scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0))
 			return;
 
 		if ((llcx = lookup_llc_ctx(cpuc->llc_id)) && llcx->nr_shards > 1) {
@@ -2848,14 +2848,14 @@ check_llc_dsq:
 				if (shard_idx < MAX_LLC_SHARDS && shard_idx < llcx->nr_shards) {
 					u64 shard_dsq = *MEMBER_VPTR(llcx->shard_dsqs, [shard_idx]);
 					if (shard_dsq != cpuc->llc_dsq && shard_dsq != dsq_id &&
-					    scx_bpf_dsq_move_to_local(shard_dsq))
+					    scx_bpf_dsq_move_to_local(shard_dsq, 0))
 						return;
 				}
 			}
 		}
 	} else {
 		if (dsq_id != cpuc->llc_dsq &&
-		    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
+		    scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0))
 			return;
 	}
 
@@ -2875,7 +2875,7 @@ check_llc_dsq:
 						 taskc->enq_flags);
 			bpf_task_release(p);
 
-			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
+			scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0);
 		}
 	} else if (unlikely(p2dq_config.atq_enabled)) {
 		pid = scx_atq_pop(cpuc->mig_atq);
@@ -2893,12 +2893,12 @@ check_llc_dsq:
 						 taskc->enq_flags);
 			bpf_task_release(p);
 
-			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
+			scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0);
 			return;
 		}
 	} else {
 		if (likely(cpuc && dsq_id != cpuc->mig_dsq &&
-		    scx_bpf_dsq_move_to_local(cpuc->mig_dsq)))
+		    scx_bpf_dsq_move_to_local(cpuc->mig_dsq, 0)))
 			return;
 	}
 
@@ -3669,6 +3669,12 @@ int BPF_PROG(on_thermal_pressure, u32 cpu, u64 hw_pressure)
 #if P2DQ_CREATE_STRUCT_OPS
 s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 {
+	int err;
+
+	err = scx_lib_init();
+	if (err)
+		return err;
+
 	return p2dq_init_impl();
 }
 

@@ -19,12 +19,13 @@
 #endif
 
 #include "intf.h"
+#include "cell_cpumask.bpf.h"
 #include "dsq.bpf.h"
 #include <lib/cleanup.bpf.h>
 
 extern const volatile u32 nr_llc;
 
-extern struct cell_map	  cells;
+extern struct cell_map cells;
 
 enum mitosis_constants {
 
@@ -38,9 +39,9 @@ enum mitosis_constants {
 /*
  * Variables populated by userspace
  */
-const volatile bool	   enable_llc_awareness = false;
-const volatile bool	   enable_work_stealing = false;
-const volatile u32	   nr_llc		= 1;
+const volatile bool enable_llc_awareness = false;
+const volatile bool enable_work_stealing = false;
+const volatile u32 nr_llc = 1;
 
 static inline struct cell *lookup_cell(int idx)
 {
@@ -89,8 +90,7 @@ struct task_ctx {
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 };
 
-static inline const struct cpumask *lookup_cell_cpumask(int idx);
-static inline struct task_ctx	   *lookup_task_ctx(struct task_struct *p);
+static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
 
 struct cell_map {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -99,5 +99,4 @@ struct cell_map {
 	__uint(max_entries, MAX_CELLS);
 };
 
-static inline int update_task_cpumask(struct task_struct *p,
-				      struct task_ctx	 *tctx);
+static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);

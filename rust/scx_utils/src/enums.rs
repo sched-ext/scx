@@ -30,6 +30,8 @@ pub struct Enums {
     pub SCX_TASK_QUEUED: u64,
     pub SCX_TASK_RESET_RUNNABLE_AT: u64,
     pub SCX_TASK_DEQD_FOR_SLEEP: u64,
+    pub SCX_TASK_SUB_INIT: u64,
+    pub SCX_TASK_IMMED: u64,
     pub SCX_TASK_STATE_SHIFT: u64,
     pub SCX_TASK_STATE_BITS: u64,
     pub SCX_TASK_STATE_MASK: u64,
@@ -46,10 +48,12 @@ pub struct Enums {
     pub SCX_ENQ_WAKEUP: u64,
     pub SCX_ENQ_HEAD: u64,
     pub SCX_ENQ_PREEMPT: u64,
+    pub SCX_ENQ_IMMED: u64,
     pub SCX_ENQ_REENQ: u64,
     pub SCX_ENQ_LAST: u64,
     pub SCX_ENQ_CLEAR_OPSS: u64,
     pub SCX_ENQ_DSQ_PRIQ: u64,
+    pub SCX_DEQ_SCHED_CHANGE: u64,
 }
 
 lazy_static::lazy_static! {
@@ -75,6 +79,8 @@ lazy_static::lazy_static! {
         SCX_TASK_QUEUED: read_enum("scx_ent_flags","SCX_TASK_QUEUED").unwrap_or(0),
         SCX_TASK_RESET_RUNNABLE_AT: read_enum("scx_ent_flags","SCX_TASK_RESET_RUNNABLE_AT").unwrap_or(0),
         SCX_TASK_DEQD_FOR_SLEEP: read_enum("scx_ent_flags","SCX_TASK_DEQD_FOR_SLEEP").unwrap_or(0),
+        SCX_TASK_SUB_INIT: read_enum("scx_ent_flags","SCX_TASK_SUB_INIT").unwrap_or(0),
+        SCX_TASK_IMMED: read_enum("scx_ent_flags","SCX_TASK_IMMED").unwrap_or(0),
         SCX_TASK_STATE_SHIFT: read_enum("scx_ent_flags","SCX_TASK_STATE_SHIFT").unwrap_or(0),
         SCX_TASK_STATE_BITS: read_enum("scx_ent_flags","SCX_TASK_STATE_BITS").unwrap_or(0),
         SCX_TASK_STATE_MASK: read_enum("scx_ent_flags","SCX_TASK_STATE_MASK").unwrap_or(0),
@@ -91,10 +97,12 @@ lazy_static::lazy_static! {
         SCX_ENQ_WAKEUP: read_enum("scx_enq_flags","SCX_ENQ_WAKEUP").unwrap_or(0),
         SCX_ENQ_HEAD: read_enum("scx_enq_flags","SCX_ENQ_HEAD").unwrap_or(0),
         SCX_ENQ_PREEMPT: read_enum("scx_enq_flags","SCX_ENQ_PREEMPT").unwrap_or(0),
+        SCX_ENQ_IMMED: read_enum("scx_enq_flags","SCX_ENQ_IMMED").unwrap_or(0),
         SCX_ENQ_REENQ: read_enum("scx_enq_flags","SCX_ENQ_REENQ").unwrap_or(0),
         SCX_ENQ_LAST: read_enum("scx_enq_flags","SCX_ENQ_LAST").unwrap_or(0),
         SCX_ENQ_CLEAR_OPSS: read_enum("scx_enq_flags","SCX_ENQ_CLEAR_OPSS").unwrap_or(0),
         SCX_ENQ_DSQ_PRIQ: read_enum("scx_enq_flags","SCX_ENQ_DSQ_PRIQ").unwrap_or(0),
+        SCX_DEQ_SCHED_CHANGE: read_enum("scx_deq_flags","SCX_DEQ_SCHED_CHANGE").unwrap_or(0),
     };
 }
 
@@ -124,6 +132,8 @@ macro_rules! import_enums {
         rodata.__SCX_TASK_QUEUED = $crate::scx_enums.SCX_TASK_QUEUED;
         rodata.__SCX_TASK_RESET_RUNNABLE_AT = $crate::scx_enums.SCX_TASK_RESET_RUNNABLE_AT;
         rodata.__SCX_TASK_DEQD_FOR_SLEEP = $crate::scx_enums.SCX_TASK_DEQD_FOR_SLEEP;
+        rodata.__SCX_TASK_SUB_INIT = $crate::scx_enums.SCX_TASK_SUB_INIT;
+        rodata.__SCX_TASK_IMMED = $crate::scx_enums.SCX_TASK_IMMED;
         rodata.__SCX_TASK_STATE_SHIFT = $crate::scx_enums.SCX_TASK_STATE_SHIFT;
         rodata.__SCX_TASK_STATE_BITS = $crate::scx_enums.SCX_TASK_STATE_BITS;
         rodata.__SCX_TASK_STATE_MASK = $crate::scx_enums.SCX_TASK_STATE_MASK;
@@ -140,9 +150,11 @@ macro_rules! import_enums {
         rodata.__SCX_ENQ_WAKEUP = $crate::scx_enums.SCX_ENQ_WAKEUP;
         rodata.__SCX_ENQ_HEAD = $crate::scx_enums.SCX_ENQ_HEAD;
         rodata.__SCX_ENQ_PREEMPT = $crate::scx_enums.SCX_ENQ_PREEMPT;
+        rodata.__SCX_ENQ_IMMED = $crate::scx_enums.SCX_ENQ_IMMED;
         rodata.__SCX_ENQ_REENQ = $crate::scx_enums.SCX_ENQ_REENQ;
         rodata.__SCX_ENQ_LAST = $crate::scx_enums.SCX_ENQ_LAST;
         rodata.__SCX_ENQ_CLEAR_OPSS = $crate::scx_enums.SCX_ENQ_CLEAR_OPSS;
         rodata.__SCX_ENQ_DSQ_PRIQ = $crate::scx_enums.SCX_ENQ_DSQ_PRIQ;
+        rodata.__SCX_DEQ_SCHED_CHANGE = $crate::scx_enums.SCX_DEQ_SCHED_CHANGE;
     }};
 }

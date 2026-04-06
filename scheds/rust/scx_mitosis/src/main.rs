@@ -57,7 +57,6 @@ use stats::Metrics;
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
-
 /// Epoll token for inotify events (cgroup creation/destruction)
 const INOTIFY_TOKEN: u64 = 1;
 /// Epoll token for stats request wakeups
@@ -166,6 +165,10 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_borrowing: bool,
 
+    /// Use lockless scx_bpf_dsq_peek() instead of the default iterator-based peek.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    use_lockless_peek: bool,
+
     /// Enable demand-based CPU rebalancing between cells.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_rebalancing: bool,
@@ -252,6 +255,7 @@ struct DistributionStats {
     borrowed_pct: f64,
     affn_viol_pct: f64,
     steal_pct: f64,
+    pin_skip_pct: f64,
 
     // for formatting
     global_queue_decisions: u64,
@@ -273,7 +277,7 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
@@ -282,6 +286,7 @@ impl Display for DistributionStats {
             self.borrowed_pct,
             self.affn_viol_pct,
             self.steal_pct,
+            self.pin_skip_pct,
             width = descisions_width,
         )
     }
@@ -340,6 +345,7 @@ impl<'a> Scheduler<'a> {
         rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
 
         rodata.enable_borrowing = opts.enable_borrowing;
+        rodata.use_lockless_peek = opts.use_lockless_peek;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
@@ -713,6 +719,7 @@ impl<'a> Scheduler<'a> {
             .bss_data
             .as_mut()
             .expect("bss_data must be available after scheduler load");
+
         let config = &mut bss_data.cell_config;
 
         // Zero out the config struct. This is necessary because:
@@ -795,6 +802,7 @@ impl<'a> Scheduler<'a> {
         scope_queue_decisions: u64,
         scope_affn_viols: u64,
         scope_steals: u64,
+        scope_pin_skips: u64,
     ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
@@ -825,6 +833,12 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_steals as f64) / (scope_queue_decisions as f64)
         };
 
+        let pin_skip_pct = if scope_queue_decisions == 0 {
+            0.0
+        } else {
+            100.0 * (scope_pin_skips as f64) / (scope_queue_decisions as f64)
+        };
+
         const EXPECTED_QUEUES: usize = 4;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
@@ -843,6 +857,7 @@ impl<'a> Scheduler<'a> {
             borrowed_pct: queue_pct[3],
             affn_viol_pct: affinity_violations_percent,
             steal_pct,
+            pin_skip_pct,
             global_queue_decisions,
         });
     }
@@ -875,6 +890,12 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_STEAL as usize])
             .sum::<u64>();
 
+        // Sum pin skips over all cells
+        let scope_pin_skips: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize])
+            .sum::<u64>();
+
         // Special case where the number of scope decisions == number global decisions
         let stats = self.calculate_distribution_stats(
             &queue_counts,
@@ -882,6 +903,7 @@ impl<'a> Scheduler<'a> {
             global_queue_decisions,
             scope_affn_viols,
             scope_steals,
+            scope_pin_skips,
         )?;
 
         self.metrics.update(&stats);
@@ -926,12 +948,17 @@ impl<'a> Scheduler<'a> {
             let scope_steals: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_STEAL as usize];
 
+            // Pin skips for this cell
+            let scope_pin_skips: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize];
+
             let stats = self.calculate_distribution_stats(
                 &queue_counts,
                 global_queue_decisions,
                 cell_queue_decisions,
                 scope_affn_viols,
                 scope_steals,
+                scope_pin_skips,
             )?;
 
             self.metrics
@@ -1049,7 +1076,7 @@ impl<'a> Scheduler<'a> {
             // Lent time: non-owner cell tasks running on this CPU
             let total_on_cpu: u64 = cpu_ctx.running_ns.iter().sum();
             let owner_on_cpu = cpu_ctx.running_ns[owner];
-            lent_ns[owner] += total_on_cpu - owner_on_cpu;
+            lent_ns[owner] += total_on_cpu.saturating_sub(owner_on_cpu);
         }
 
         // Compute deltas since last collection interval
@@ -1062,9 +1089,9 @@ impl<'a> Scheduler<'a> {
 
         for cell in 0..MAX_CELLS {
             let delta_running =
-                total_running_ns[cell].wrapping_sub(self.prev_cell_running_ns[cell]);
-            let delta_on_own = on_own_ns[cell].wrapping_sub(self.prev_cell_own_ns[cell]);
-            let delta_lent = lent_ns[cell].wrapping_sub(self.prev_cell_lent_ns[cell]);
+                total_running_ns[cell].saturating_sub(self.prev_cell_running_ns[cell]);
+            let delta_on_own = on_own_ns[cell].saturating_sub(self.prev_cell_own_ns[cell]);
+            let delta_lent = lent_ns[cell].saturating_sub(self.prev_cell_lent_ns[cell]);
 
             self.prev_cell_running_ns[cell] = total_running_ns[cell];
             self.prev_cell_own_ns[cell] = on_own_ns[cell];
@@ -1122,10 +1149,10 @@ impl<'a> Scheduler<'a> {
                     .smoothed_util_pct = self.smoothed_util[cell];
             }
 
-            global_running_delta += delta_running;
-            global_borrowed_delta += delta_borrowed;
-            global_lent_delta += delta_lent;
-            global_capacity += capacity;
+            global_running_delta = global_running_delta.saturating_add(delta_running);
+            global_borrowed_delta = global_borrowed_delta.saturating_add(delta_borrowed);
+            global_lent_delta = global_lent_delta.saturating_add(delta_lent);
+            global_capacity = global_capacity.saturating_add(capacity);
         }
 
         let global_util_pct = if global_capacity > 0 {
@@ -1150,6 +1177,14 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    /// Write applied_cpuset_seq to BSS, closing the rejection-skip window.
+    fn update_applied_cpuset_seq(&mut self) {
+        unsafe {
+            let ptr = &mut self.skel.maps.bss_data.as_mut().unwrap().applied_cpuset_seq as *mut u32;
+            std::ptr::write_volatile(ptr, self.last_cpuset_seq);
+        }
+    }
+
     /// Check if any cell's cpuset was modified and recompute if so.
     fn check_cpuset_changes(&mut self) -> Result<()> {
         let Some(ref mut cm) = self.cell_manager else {
@@ -1170,10 +1205,13 @@ impl<'a> Scheduler<'a> {
         self.last_cpuset_seq = current_seq;
 
         if !cm.refresh_cpusets()? {
-            return Ok(()); // seq changed but no cpusets on our cells changed
+            // seq changed but no cpusets on our cells changed
+            self.update_applied_cpuset_seq();
+            return Ok(());
         }
 
         let cpu_assignments = self.compute_and_apply_cell_config(&[])?;
+        self.update_applied_cpuset_seq();
         let cell_manager = self.cell_manager.as_ref().unwrap();
         info!(
             "Cpuset change detected, recomputed config: {}",

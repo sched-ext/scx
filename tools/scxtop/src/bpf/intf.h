@@ -76,6 +76,7 @@ struct sched_switch_event {
 	u32  next_dsq_nr;
 	u64  next_dsq_vtime;
 	u64  next_slice_ns;
+	u64  next_wakeup_ts;
 	u32  next_pid;
 	u32  next_tgid;
 	int  next_prio;

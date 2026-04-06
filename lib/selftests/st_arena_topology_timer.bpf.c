@@ -86,7 +86,7 @@ static int topology_timer_callback(void *map, int *key, struct bpf_timer *timer)
 	if (topo_all->mask && topo_all->nr_children > 0) {
 		topology_accessed_in_timer = true;
 
-		for (i = 0; i < topo_all->nr_children && i < TOPO_MAX_CHILDREN && can_loop; i++) {
+		for (i = 0; i < topo_all->nr_children && i < topo_max_children[topo_all->level] && can_loop; i++) {
 			topo = topo_all->children[i];
 			/* make sure we can deference arena pointers */
 			if (topo && topo->mask) {

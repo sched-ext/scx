@@ -22,10 +22,10 @@ typedef u32 llc_id_t;
  * cpu_to_llc: Maps each CPU index to its LLC domain ID.
  * llc_to_cpus: Maps each LLC domain ID to a cpumask of CPUs in that domain.
  */
-extern u32		  cpu_to_llc[MAX_CPUS];
+extern u32 cpu_to_llc[MAX_CPUS];
 extern struct llc_cpumask llc_to_cpus[MAX_LLCS];
 
-static inline bool	  llc_is_valid(u32 llc_id)
+static inline bool llc_is_valid(u32 llc_id)
 {
 	if (llc_id == LLC_INVALID)
 		return false;
@@ -40,7 +40,7 @@ static inline void init_task_llc(struct task_ctx *tctx)
 	if (!enable_work_stealing)
 		return;
 
-	tctx->steal_count    = 0;
+	tctx->steal_count = 0;
 	tctx->last_stolen_at = 0;
 }
 
@@ -62,8 +62,7 @@ static inline const struct cpumask *lookup_llc_cpumask(u32 llc)
  *                 cell cpumask. This allows pre-calculating counts for a new
  *                 cpumask BEFORE swapping it in, avoiding race conditions.
  */
-static __always_inline int
-recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
+static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
 {
 	struct cell *cell = lookup_cell(cell_idx);
 	if (!cell)
@@ -71,14 +70,13 @@ recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
 
 	struct bpf_cpumask *tmp_mask __free(bpf_cpumask) = bpf_cpumask_create();
 	if (!tmp_mask) {
-		scx_bpf_error(
-			"recalc_cell_llc_counts: failed to create tmp mask");
+		scx_bpf_error("recalc_cell_llc_counts: failed to create tmp mask");
 		return -ENOMEM;
 	}
 
 	u32 llc, llcs_present = 0, total_cpus = 0;
 	// Just so we don't hold the lock longer than necessary
-	u32		      llc_cpu_cnt_tmp[MAX_LLCS] = { 0 };
+	u32 llc_cpu_cnt_tmp[MAX_LLCS] = { 0 };
 
 	const struct cpumask *cell_mask;
 	if (explicit_mask) {
@@ -117,7 +115,7 @@ recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
 		}
 
 		cell->llc_present_cnt = llcs_present;
-		cell->cpu_cnt	      = total_cpus;
+		cell->cpu_cnt = total_cpus;
 	}
 	return 0;
 }
@@ -156,9 +154,7 @@ static inline s32 pick_llc_for_task(u32 cell_id)
 	}
 
 	if (!total_cpu_cnt) {
-		scx_bpf_error(
-			"pick_llc_for_task: cell %d has no CPUs accounted yet",
-			cell_id);
+		scx_bpf_error("pick_llc_for_task: cell %d has no CPUs accounted yet", cell_id);
 		return LLC_INVALID;
 	}
 
@@ -208,9 +204,8 @@ static void zero_cell_vtimes(struct cell *cell)
  *
  * Caller must ensure enable_llc_awareness is true.
  */
-static inline int maybe_retag_stolen_task(struct task_struct *p,
-					  struct task_ctx    *tctx,
-					  struct cpu_ctx     *cctx)
+static inline int maybe_retag_stolen_task(struct task_struct *p, struct task_ctx *tctx,
+					  struct cpu_ctx *cctx)
 {
 	/* No mismatch = no steal, fast path */
 	if (tctx->llc == cctx->llc)
@@ -240,8 +235,7 @@ static inline int maybe_retag_stolen_task(struct task_struct *p,
 static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 {
 	if (!llc_is_valid(local_llc)) {
-		scx_bpf_error("try_stealing_work: invalid local_llc: %d",
-			      local_llc);
+		scx_bpf_error("try_stealing_work: invalid local_llc: %d", local_llc);
 		return -EINVAL;
 	}
 
@@ -270,12 +264,10 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
     * if the LLC actually doesn't have CPUs come steal time,
     * we will fail the steal and continue to the next LLC.
     */
-		if (cell_ptr &&
-		    READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
+		if (cell_ptr && READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
 			continue;
 
-		dsq_id_t candidate_dsq =
-			get_cell_llc_dsq_id(cell, candidate_llc);
+		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell, candidate_llc);
 		if (dsq_is_invalid(candidate_dsq))
 			return -EINVAL; // already errored in get_cell_llc_dsq_id
 
@@ -291,7 +283,7 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		 * Actual retag and accounting happens in running() via
 		 * mismatch detection.
 		 */
-		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw))
+		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
 			continue;
 
 		// Success, we got a task
@@ -300,8 +292,7 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 	return false;
 }
 
-static inline int update_task_llc_assignment(struct task_struct *p,
-					     struct task_ctx	*tctx)
+static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx)
 {
 	if (!tctx) {
 		scx_bpf_error("Invalid task context");
@@ -316,7 +307,7 @@ static inline int update_task_llc_assignment(struct task_struct *p,
 		return -EINVAL;
 
 	tctx->llc = new_llc;
-	llc_mask  = lookup_llc_cpumask((u32)tctx->llc);
+	llc_mask = lookup_llc_cpumask((u32)tctx->llc);
 	if (!llc_mask)
 		return -ENOENT;
 
