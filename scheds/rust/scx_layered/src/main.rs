@@ -871,6 +871,13 @@ struct Stats {
     prev_total_cpu: fb_procfs::CpuStat,
     prev_pmu_resctrl_membw: (u64, u64), // (PMU-reported membw, resctrl-reported membw)
 
+    llc_utils: Vec<f64>, // EWMA of per-LLC utilization from /proc/stat (0.0-1.0)
+    layer_utils_compensated: Vec<Vec<f64>>, // EWMA of per-CPU-scaled layer utils
+    cpu_util_scales: Vec<f64>, // Per-CPU scale: /proc/stat busy / attributed (EWMA)
+    prev_cpu_total_attributed: Vec<u64>, // Per-CPU sum of all layer usages (previous)
+    prev_cpu_layer_usages: Vec<u64>, // Flat [cpu][layer][usage] for per-CPU deltas
+    prev_per_cpu_stats: BTreeMap<u32, fb_procfs::CpuStat>,
+
     system_cpu_util_ewma: f64,       // 10s EWMA of system CPU utilization
     layer_dsq_insert_ewma: Vec<f64>, // 10s EWMA of per-layer DSQ insertion ratio
 
@@ -972,6 +979,40 @@ impl Stats {
         sums
     }
 
+    /// Sum all layer usages per CPU to get total attributed time per CPU.
+    fn read_cpu_total_attributed(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<u64> {
+        let mut attributed = vec![0u64; *NR_CPUS_POSSIBLE];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            for layer in 0..nr_layers {
+                for usage in 0..=LAYER_USAGE_SUM_UPTO {
+                    attributed[cpu] += cpu_ctxs[cpu].layer_usages[layer][usage];
+                }
+            }
+        }
+
+        attributed
+    }
+
+    /// Read per-CPU per-layer usages as a flat vec for computing per-CPU deltas.
+    /// Layout: [cpu * nr_layers * NR_LAYER_USAGES + layer * NR_LAYER_USAGES + usage]
+    fn read_cpu_layer_usages_flat(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<u64> {
+        let stride = nr_layers * NR_LAYER_USAGES;
+        let mut flat = vec![0u64; *NR_CPUS_POSSIBLE * stride];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let base = cpu * stride;
+            for layer in 0..nr_layers {
+                for usage in 0..NR_LAYER_USAGES {
+                    flat[base + layer * NR_LAYER_USAGES + usage] =
+                        cpu_ctxs[cpu].layer_usages[layer][usage];
+                }
+            }
+        }
+
+        flat
+    }
+
     /// Use the membw reported by resctrl to normalize the values reported by hw counters.
     /// We have the following problem:
     /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
@@ -1044,6 +1085,12 @@ impl Stats {
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
+            llc_utils: vec![0.0; topo.all_llcs.len()],
+            layer_utils_compensated: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
+            cpu_util_scales: vec![1.0; *NR_CPUS_POSSIBLE],
+            prev_cpu_total_attributed: Self::read_cpu_total_attributed(&cpu_ctxs, nr_layers),
+            prev_cpu_layer_usages: Self::read_cpu_layer_usages_flat(&cpu_ctxs, nr_layers),
+            prev_per_cpu_stats: BTreeMap::new(),
             system_cpu_util_ewma: 0.0,
             layer_dsq_insert_ewma: vec![0.0; nr_layers],
 
@@ -1209,7 +1256,12 @@ impl Stats {
 
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
 
-        let cur_total_cpu = read_total_cpu(proc_reader)?;
+        let stat = proc_reader
+            .read_stat()
+            .context("Failed to read /proc/stat")?;
+        let cur_total_cpu = stat
+            .total_cpu
+            .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
 
         // Calculate system CPU utilization EWMA (10 second window)
@@ -1217,6 +1269,147 @@ impl Stats {
         let elapsed_f64 = elapsed.as_secs_f64();
         let alpha = elapsed_f64 / SYS_CPU_UTIL_EWMA_SECS.max(elapsed_f64);
         let system_cpu_util_ewma = alpha * cpu_busy + (1.0 - alpha) * self.system_cpu_util_ewma;
+
+        // Compute per-LLC utilization from /proc/stat per-CPU data
+        let cur_per_cpu_stats = stat.cpus_map.unwrap_or_default();
+        let nr_llcs = self.topo.all_llcs.len();
+        let mut llc_busy = vec![0u64; nr_llcs];
+        let mut llc_total = vec![0u64; nr_llcs];
+
+        for (&cpu_id, cur_cpu_stat) in &cur_per_cpu_stats {
+            let cpu_id_usize = cpu_id as usize;
+            if let Some(cpu) = self.topo.all_cpus.get(&cpu_id_usize) {
+                if let Some(prev_cpu_stat) = self.prev_per_cpu_stats.get(&cpu_id) {
+                    if let (
+                        fb_procfs::CpuStat {
+                            user_usec: Some(curr_user),
+                            nice_usec: Some(curr_nice),
+                            system_usec: Some(curr_system),
+                            idle_usec: Some(curr_idle),
+                            iowait_usec: Some(curr_iowait),
+                            irq_usec: Some(curr_irq),
+                            softirq_usec: Some(curr_softirq),
+                            stolen_usec: Some(curr_stolen),
+                            ..
+                        },
+                        fb_procfs::CpuStat {
+                            user_usec: Some(prev_user),
+                            nice_usec: Some(prev_nice),
+                            system_usec: Some(prev_system),
+                            idle_usec: Some(prev_idle),
+                            iowait_usec: Some(prev_iowait),
+                            irq_usec: Some(prev_irq),
+                            softirq_usec: Some(prev_softirq),
+                            stolen_usec: Some(prev_stolen),
+                            ..
+                        },
+                    ) = (cur_cpu_stat, prev_cpu_stat)
+                    {
+                        let idle = curr_idle.saturating_sub(*prev_idle);
+                        let iowait = curr_iowait.saturating_sub(*prev_iowait);
+                        let busy = curr_user.saturating_sub(*prev_user)
+                            + curr_system.saturating_sub(*prev_system)
+                            + curr_nice.saturating_sub(*prev_nice)
+                            + curr_irq.saturating_sub(*prev_irq)
+                            + curr_softirq.saturating_sub(*prev_softirq)
+                            + curr_stolen.saturating_sub(*prev_stolen);
+                        llc_busy[cpu.llc_id] += busy;
+                        llc_total[cpu.llc_id] += idle + busy + iowait;
+                    }
+                }
+            }
+        }
+
+        let llc_utils: Vec<f64> = (0..nr_llcs)
+            .map(|llc_id| {
+                let cur_util = if llc_total[llc_id] > 0 {
+                    (llc_busy[llc_id] as f64 / llc_total[llc_id] as f64).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let decay = USAGE_DECAY.powf(elapsed_f64);
+                self.llc_utils[llc_id] * decay + cur_util * (1.0 - decay)
+            })
+            .collect();
+
+        // Compute per-CPU utilization scale: /proc/stat busy / attributed.
+        // This captures unattributed work (softirq, irq, kernel threads).
+        let cur_cpu_total_attributed = Self::read_cpu_total_attributed(&cpu_ctxs, self.nr_layers);
+        let decay = USAGE_DECAY.powf(elapsed_f64);
+        let mut cpu_util_scales = self.cpu_util_scales.clone();
+        for (&cpu_id, cur_cpu_stat) in &cur_per_cpu_stats {
+            let cpu = cpu_id as usize;
+            if let Some(prev_cpu_stat) = self.prev_per_cpu_stats.get(&cpu_id) {
+                if let (
+                    fb_procfs::CpuStat {
+                        user_usec: Some(cu),
+                        nice_usec: Some(cn),
+                        system_usec: Some(cs),
+                        idle_usec: Some(_ci),
+                        iowait_usec: Some(_cw),
+                        irq_usec: Some(cq),
+                        softirq_usec: Some(cf),
+                        stolen_usec: Some(ct),
+                        ..
+                    },
+                    fb_procfs::CpuStat {
+                        user_usec: Some(pu),
+                        nice_usec: Some(pn),
+                        system_usec: Some(ps),
+                        idle_usec: Some(_pi),
+                        iowait_usec: Some(_pw),
+                        irq_usec: Some(pq),
+                        softirq_usec: Some(pf),
+                        stolen_usec: Some(pt),
+                        ..
+                    },
+                ) = (cur_cpu_stat, prev_cpu_stat)
+                {
+                    let busy_us = cu.saturating_sub(*pu)
+                        + cs.saturating_sub(*ps)
+                        + cn.saturating_sub(*pn)
+                        + cq.saturating_sub(*pq)
+                        + cf.saturating_sub(*pf)
+                        + ct.saturating_sub(*pt);
+                    let attr_delta_ns = cur_cpu_total_attributed[cpu]
+                        .saturating_sub(self.prev_cpu_total_attributed[cpu]);
+                    // Convert attributed ns to us for comparison
+                    let attr_us = attr_delta_ns / 1000;
+                    let cur_scale = if attr_us > 0 {
+                        (busy_us as f64 / attr_us as f64).max(1.0)
+                    } else {
+                        1.0
+                    };
+                    cpu_util_scales[cpu] = cpu_util_scales[cpu] * decay + cur_scale * (1.0 - decay);
+                }
+            }
+        }
+
+        // Compute compensated layer utils by scaling per-CPU usage deltas
+        // by per-CPU scale factors before aggregation.
+        let cur_cpu_layer_usages = Self::read_cpu_layer_usages_flat(&cpu_ctxs, self.nr_layers);
+        let stride = self.nr_layers * NR_LAYER_USAGES;
+        let cur_compensated_utils: Vec<Vec<f64>> = (0..self.nr_layers)
+            .map(|layer| {
+                (0..NR_LAYER_USAGES)
+                    .map(|usage| {
+                        let mut scaled_sum = 0.0f64;
+                        for cpu in 0..*NR_CPUS_POSSIBLE {
+                            let idx = cpu * stride + layer * NR_LAYER_USAGES + usage;
+                            let delta = cur_cpu_layer_usages[idx]
+                                .saturating_sub(self.prev_cpu_layer_usages[idx]);
+                            scaled_sum += delta as f64 * cpu_util_scales[cpu];
+                        }
+                        scaled_sum / 1_000_000_000.0 / elapsed_f64
+                    })
+                    .collect()
+            })
+            .collect();
+        let layer_utils_compensated: Vec<Vec<f64>> = metric_decay(
+            cur_compensated_utils,
+            &self.layer_utils_compensated,
+            *USAGE_DECAY,
+        );
 
         let cur_bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let bpf_stats = &cur_bpf_stats - &self.prev_bpf_stats;
@@ -1279,6 +1472,12 @@ impl Stats {
 
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
+            llc_utils,
+            layer_utils_compensated,
+            cpu_util_scales,
+            prev_cpu_total_attributed: cur_cpu_total_attributed,
+            prev_cpu_layer_usages: cur_cpu_layer_usages,
+            prev_per_cpu_stats: cur_per_cpu_stats,
             system_cpu_util_ewma,
             layer_dsq_insert_ewma,
 
@@ -1430,6 +1629,24 @@ impl Layer {
             if util_range.0 < 0.0 || util_range.1 < 0.0 || util_range.0 >= util_range.1 {
                 bail!("invalid util_range {:?}", util_range);
             }
+        }
+
+        match &kind {
+            LayerKind::Confined {
+                util_compensation, ..
+            }
+            | LayerKind::Grouped {
+                util_compensation, ..
+            } => {
+                if *util_compensation < 0.0 || *util_compensation > 1.0 {
+                    bail!(
+                        "layer {:?}: util_compensation must be in [0.0, 1.0], got {}",
+                        name,
+                        util_compensation
+                    );
+                }
+            }
+            _ => {}
         }
 
         let layer_growth_algo = kind.common().growth_algo.clone();
@@ -3094,9 +3311,11 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Calculate how many CPUs each layer would like to have if there were
-    /// no competition. The CPU range is determined by applying the inverse
-    /// of util_range and then capping by cpus_range. If the current
-    /// allocation is within the acceptable range, no change is made.
+    /// no competition. The layer's utilization is optionally compensated
+    /// for unattributed per-CPU work (via util_compensation), then the
+    /// CPU range is determined by applying the inverse of util_range and
+    /// capping by cpus_range. If the current allocation is within the
+    /// acceptable range, no change is made.
     /// Returns (target, min) pair for each layer.
     fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
         let nr_cpus = self.cpu_pool.topo.all_cpus.len();
@@ -3113,6 +3332,7 @@ impl<'a> Scheduler<'a> {
                     cpus_range,
                     cpus_range_frac,
                     membw_gb,
+                    util_compensation,
                     ..
                 }
                 | LayerKind::Grouped {
@@ -3120,6 +3340,7 @@ impl<'a> Scheduler<'a> {
                     cpus_range,
                     cpus_range_frac,
                     membw_gb,
+                    util_compensation,
                     ..
                 } => {
                     let cpus_range =
@@ -3142,7 +3363,34 @@ impl<'a> Scheduler<'a> {
                         membw += membw_open;
                     }
 
+                    // Compensate utilization for unattributed per-CPU work
+                    // (softirq, irq, kernel threads outside scx). Blends
+                    // between raw and per-CPU-scaled utilization.
+                    let comp = *util_compensation;
+                    let util = if comp > 0.0 {
+                        let comp_utils = &self.sched_stats.layer_utils_compensated;
+                        let comp_owned = comp_utils[idx][LAYER_USAGE_OWNED];
+                        let comp_open = comp_utils[idx][LAYER_USAGE_OPEN];
+                        let mut comp_util = comp_owned;
+                        if layer.kind.util_includes_open_cputime() || layer.nr_cpus == 0 {
+                            comp_util += comp_open;
+                        }
+                        let blended = util * (1.0 - comp) + comp_util * comp;
+                        if blended != util {
+                            trace!(
+                                "layer {} util_compensation: util {:.2} -> {:.2}",
+                                layer.name,
+                                util,
+                                blended
+                            );
+                        }
+                        blended
+                    } else {
+                        util
+                    };
+
                     let util = if util < 0.01 { 0.0 } else { util };
+
                     let low = (util / util_range.1).ceil() as usize;
                     let high = ((util / util_range.0).floor() as usize).max(low);
 
@@ -5646,5 +5894,116 @@ mod xnuma_tests {
             total_from_n0,
             (120.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
         );
+    }
+}
+
+#[cfg(test)]
+mod util_compensation_tests {
+    use super::*;
+
+    /// Simulate the per-CPU-scaled aggregation that refresh() does.
+    /// Given per-CPU per-layer usage deltas and per-CPU scales,
+    /// computes the compensated layer utilization.
+    fn scaled_aggregate(
+        // deltas[cpu][layer] — usage delta in ns for that cpu+layer
+        deltas: &[Vec<u64>],
+        scales: &[f64],
+        nr_layers: usize,
+        elapsed: f64,
+    ) -> Vec<f64> {
+        (0..nr_layers)
+            .map(|layer| {
+                let mut sum = 0.0f64;
+                for (cpu, cpu_deltas) in deltas.iter().enumerate() {
+                    sum += cpu_deltas[layer] as f64 * scales[cpu];
+                }
+                sum / 1_000_000_000.0 / elapsed
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_uniform_scale_matches_unscaled() {
+        // When all scales are 1.0, compensated == unscaled
+        let deltas = vec![vec![1_000_000_000u64; 2]; 4]; // 4 CPUs, 2 layers, 1s each
+        let scales = vec![1.0; 4];
+        let result = scaled_aggregate(&deltas, &scales, 2, 1.0);
+        // Each layer: 4 CPUs * 1s = 4.0 CPU-seconds/s
+        assert!((result[0] - 4.0).abs() < 0.01);
+        assert!((result[1] - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_hot_cpu_weighted_more() {
+        // CPU 0 has scale 2.0 (50% unattributed), CPU 1 has scale 1.0
+        // Layer 0: 900ms on CPU 0, 100ms on CPU 1
+        // Unscaled: (900 + 100)ms = 1.0 CPU-s/s
+        // Scaled: 900ms*2.0 + 100ms*1.0 = 1900ms = 1.9 CPU-s/s
+        let deltas = vec![
+            vec![900_000_000, 0], // CPU 0
+            vec![100_000_000, 0], // CPU 1
+        ];
+        let scales = vec![2.0, 1.0];
+        let result = scaled_aggregate(&deltas, &scales, 2, 1.0);
+        assert!(
+            (result[0] - 1.9).abs() < 0.01,
+            "expected 1.9, got {}",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn test_cold_cpu_weighted_less() {
+        // Same total usage as above but concentrated on cold CPU
+        // Layer 0: 100ms on CPU 0 (scale=2.0), 900ms on CPU 1 (scale=1.0)
+        // Scaled: 100ms*2.0 + 900ms*1.0 = 1100ms = 1.1 CPU-s/s
+        let deltas = vec![
+            vec![100_000_000, 0], // CPU 0 (hot)
+            vec![900_000_000, 0], // CPU 1 (cold)
+        ];
+        let scales = vec![2.0, 1.0];
+        let result = scaled_aggregate(&deltas, &scales, 2, 1.0);
+        assert!(
+            (result[0] - 1.1).abs() < 0.01,
+            "expected 1.1, got {}",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn test_blend_with_compensation_factor() {
+        // unscaled util = 1.0, compensated util = 1.9
+        // compensation=0.5: blend = 1.0*0.5 + 1.9*0.5 = 1.45
+        let unscaled: f64 = 1.0;
+        let compensated: f64 = 1.9;
+        let comp: f64 = 0.5;
+        let blended = unscaled * (1.0 - comp) + compensated * comp;
+        assert!((blended - 1.45).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_blend_zero_compensation() {
+        let unscaled = 5.0;
+        let compensated = 10.0;
+        let blended = unscaled * (1.0 - 0.0) + compensated * 0.0;
+        assert_eq!(blended, 5.0);
+    }
+
+    #[test]
+    fn test_blend_full_compensation() {
+        let unscaled = 5.0;
+        let compensated = 10.0;
+        let blended = unscaled * (1.0 - 1.0) + compensated * 1.0;
+        assert_eq!(blended, 10.0);
+    }
+
+    #[test]
+    fn test_no_usage_no_compensation() {
+        // All deltas zero → compensated is also zero
+        let deltas = vec![vec![0u64; 2]; 4];
+        let scales = vec![5.0; 4];
+        let result = scaled_aggregate(&deltas, &scales, 2, 1.0);
+        assert_eq!(result[0], 0.0);
+        assert_eq!(result[1], 0.0);
     }
 }

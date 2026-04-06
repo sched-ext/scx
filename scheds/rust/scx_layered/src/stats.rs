@@ -645,6 +645,8 @@ pub struct SysStats {
     pub gpu_task_affinitization_ms: u64,
     #[stat(desc = "System CPU utilization EWMA (10s window)")]
     pub system_cpu_util_ewma: f64,
+    #[stat(desc = "Per-LLC utilization % EWMA")]
+    pub llc_utils: Vec<f64>,
 }
 
 impl SysStats {
@@ -712,6 +714,7 @@ impl SysStats {
             gpu_tasks_affinitized: stats.gpu_tasks_affinitized,
             gpu_task_affinitization_ms: stats.gpu_task_affinitization_ms,
             system_cpu_util_ewma: stats.system_cpu_util_ewma * 100.0,
+            llc_utils: stats.llc_utils.iter().map(|u| u * 100.0).collect(),
         })
     }
 
@@ -770,6 +773,16 @@ impl SysStats {
             "gpu_tasks_affinitized={} gpu_task_affinitization_time={}",
             self.gpu_tasks_affinitized, self.gpu_task_affinitization_ms
         )?;
+
+        if !self.llc_utils.is_empty() {
+            let llc_strs: Vec<String> = self
+                .llc_utils
+                .iter()
+                .enumerate()
+                .map(|(id, u)| format!("L{}:{:.1}", id, u))
+                .collect();
+            writeln!(w, "llc_util=[{}]", llc_strs.join(" "))?;
+        }
 
         Ok(())
     }
