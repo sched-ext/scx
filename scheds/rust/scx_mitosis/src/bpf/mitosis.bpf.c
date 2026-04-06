@@ -2315,13 +2315,20 @@ int apply_cell_config(void *ctx)
 		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
 		{
 			struct cell_cpumask_wrapper *subcell_cpumaskw;
+			struct subcell(*subcell_configs)[MAX_SUBCELLS_PER_CELL];
 			struct subcell *subcell_config;
 
 			subcell_cpumaskw = lookup_subcell_cpumask_wrapper(cell_id, subcell_id);
 			if (!subcell_cpumaskw)
 				return -EINVAL;
 
-			subcell_config = MEMBER_VPTR(config->subcells[cell_id], [subcell_id]);
+			subcell_configs = MEMBER_VPTR(config->subcells, [cell_id]);
+			if (!subcell_configs) {
+				scx_bpf_error("cell_id %d out of bounds for subcells", cell_id);
+				return -EINVAL;
+			}
+
+			subcell_config = MEMBER_VPTR(*subcell_configs, [subcell_id]);
 			if (!subcell_config) {
 				scx_bpf_error("subcell_id %d out of bounds for cell_id %d",
 					      subcell_id, cell_id);
