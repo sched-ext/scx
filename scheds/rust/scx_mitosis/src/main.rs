@@ -9,7 +9,7 @@ mod cell_manager;
 mod mitosis_topology_utils;
 mod stats;
 
-use cell_manager::{CellManager, CpuAssignment};
+use cell_manager::{CellManager, CpuAssignment, CpuRecipient};
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -204,6 +204,33 @@ const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 4] = [
 #[derive(Debug)]
 struct Cell {
     cpus: Cpumask,
+    subcells: Vec<Subcell>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Subcell {
+    id: u32,
+    primary: Cpumask,
+    borrowable: Option<Cpumask>,
+}
+
+impl Cell {
+    fn new() -> Self {
+        Self {
+            cpus: Cpumask::new(),
+            subcells: vec![Subcell::new(0)],
+        }
+    }
+}
+
+impl Subcell {
+    fn new(id: u32) -> Self {
+        Self {
+            id,
+            primary: Cpumask::new(),
+            borrowable: None,
+        }
+    }
 }
 
 struct Scheduler<'a> {
@@ -573,7 +600,7 @@ impl<'a> Scheduler<'a> {
         &mut self,
         new_cell_ids: &[u32],
     ) -> Result<Vec<CpuAssignment>> {
-        let (cell_assignments, cpu_assignments) = {
+        let (cell_assignments, cpu_assignments, _subcell_assignments) = {
             let cell_manager = self.cell_manager.as_ref().unwrap();
             let active_cell_ids: Vec<u32> = cell_manager
                 .get_cell_assignments()
@@ -624,7 +651,13 @@ impl<'a> Scheduler<'a> {
                 cell_manager.compute_cpu_assignments(self.enable_borrowing)?
             };
 
-            (cell_manager.get_cell_assignments(), cpu_assignments)
+            let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
+
+            (
+                cell_manager.get_cell_assignments(),
+                cpu_assignments,
+                subcell_assignments,
+            )
         };
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments)?;
@@ -669,7 +702,7 @@ impl<'a> Scheduler<'a> {
             .collect();
 
         // Compute new assignments and check if they differ from current
-        let (cell_assignments, cpu_assignments) = {
+        let (cell_assignments, cpu_assignments, _subcell_assignments) = {
             let cell_manager = self.cell_manager.as_ref().unwrap();
             let cpu_assignments = cell_manager
                 .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)?;
@@ -684,7 +717,13 @@ impl<'a> Scheduler<'a> {
                 return Ok(());
             }
 
-            (cell_manager.get_cell_assignments(), cpu_assignments)
+            let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
+
+            (
+                cell_manager.get_cell_assignments(),
+                cpu_assignments,
+                subcell_assignments,
+            )
         };
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments)?;
@@ -700,6 +739,72 @@ impl<'a> Scheduler<'a> {
             self.rebalance_count,
             cell_manager.format_cell_config(&cpu_assignments)
         );
+
+        Ok(())
+    }
+
+    fn compute_subcell_assignments(
+        &self,
+        cell_cpu_assignments: &[CpuAssignment],
+    ) -> Result<Vec<Vec<CpuAssignment>>> {
+        cell_cpu_assignments
+            .iter()
+            .map(|cell_assignment| {
+                let recipients: Vec<CpuRecipient> = self
+                    .cells
+                    .get(&cell_assignment.id)
+                    .map(|cell| {
+                        cell.subcells
+                            .iter()
+                            .map(|subcell| CpuRecipient {
+                                id: subcell.id,
+                                weight: 1.0,
+                                allowed: None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        vec![CpuRecipient {
+                            id: 0,
+                            weight: 1.0,
+                            allowed: None,
+                        }]
+                    });
+
+                CellManager::compute_subcell_cpu_assignments(
+                    &cell_assignment.primary,
+                    &recipients,
+                    self.enable_borrowing,
+                )
+            })
+            .collect()
+    }
+
+    fn refresh_bpf_subcells(
+        &mut self,
+        cell_to_cpus: &HashMap<u32, Cpumask>,
+        active_cells: &HashSet<u32>,
+    ) -> Result<()> {
+        if self.cell_manager.is_none() {
+            return Ok(());
+        }
+
+        // Until subcell state is read back from BPF, mirror each cell's observed
+        // primary mask into all of its subcells and keep borrowable empty.
+        for cell_id in active_cells {
+            let primary = cell_to_cpus
+                .get(cell_id)
+                .cloned()
+                .unwrap_or_else(Cpumask::new);
+            let cell = self.cells.get_mut(cell_id).ok_or_else(|| {
+                anyhow::anyhow!("Cell {} missing during subcell refresh", cell_id)
+            })?;
+
+            for subcell in &mut cell.subcells {
+                subcell.primary = primary.clone();
+                subcell.borrowable = Some(Cpumask::new());
+            }
+        }
 
         Ok(())
     }
@@ -773,6 +878,9 @@ impl<'a> Scheduler<'a> {
             }
         }
         config.num_cells = max_cell_id;
+
+        // When subcell configuration is applied to BPF, extend this function to
+        // write and apply the computed subcell state here as well.
 
         // Trigger the BPF program to apply the configuration
         let prog = &mut self.skel.progs.apply_cell_config;
@@ -1270,18 +1378,15 @@ impl<'a> Scheduler<'a> {
                 .get(cell_idx)
                 .cloned()
                 .unwrap_or_else(|| Cpumask::new());
-            self.cells
-                .entry(*cell_idx)
-                .or_insert_with(|| Cell {
-                    cpus: Cpumask::new(),
-                })
-                .cpus = cpus;
+            self.cells.entry(*cell_idx).or_insert_with(Cell::new).cpus = cpus;
             self.metrics.cells.insert(*cell_idx, CellMetrics::default());
         }
 
         // Remove cells that no longer have CPUs assigned
         self.cells.retain(|&k, _| active_cells.contains(&k));
         self.metrics.cells.retain(|&k, _| active_cells.contains(&k));
+
+        self.refresh_bpf_subcells(&cell_to_cpus, &active_cells)?;
 
         self.last_configuration_seq = Some(applied_configuration);
 
