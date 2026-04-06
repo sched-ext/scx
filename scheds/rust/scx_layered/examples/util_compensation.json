@@ -1,0 +1,40 @@
+[
+	{
+		"name": "network",
+		"matches": [
+			[{ "PcommPrefix": "nginx" }],
+			[{ "PcommPrefix": "envoy" }]
+		],
+		"kind": {
+			"Confined": {
+				"util_range": [0.7, 0.9],
+				"llc_util_compensation": 0.8,
+				"growth_algo": "Topo",
+				"llcs": [0, 1]
+			}
+		}
+	},
+	{
+		"name": "batch",
+		"matches": [
+			[{ "PcommPrefix": "stress-ng" }]
+		],
+		"kind": {
+			"Grouped": {
+				"util_range": [0.5, 0.8],
+				"growth_algo": "Sticky"
+			}
+		}
+	},
+	{
+		"name": "rest",
+		"matches": [
+			[]
+		],
+		"kind": {
+			"Open": {
+				"growth_algo": "Sticky"
+			}
+		}
+	}
+]
