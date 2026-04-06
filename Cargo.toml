@@ -28,6 +28,7 @@ members = [
     "scheds/rust/scx_wd40",
     "tools/scxcash",
     "tools/scxtop",
+    "tools/stt",
     "tools/vmlinux_docify",
     "tools/xtask",
 ]
