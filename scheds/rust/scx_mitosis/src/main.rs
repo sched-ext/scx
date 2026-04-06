@@ -56,6 +56,7 @@ use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
+const MAX_SUBCELLS_PER_CELL: usize = bpf_intf::consts_MAX_SUBCELLS_PER_CELL as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 /// Epoll token for inotify events (cgroup creation/destruction)
 const INOTIFY_TOKEN: u64 = 1;
@@ -600,7 +601,7 @@ impl<'a> Scheduler<'a> {
         &mut self,
         new_cell_ids: &[u32],
     ) -> Result<Vec<CpuAssignment>> {
-        let (cell_assignments, cpu_assignments, _subcell_assignments) = {
+        let (cell_assignments, cpu_assignments, subcell_assignments) = {
             let cell_manager = self.cell_manager.as_ref().unwrap();
             let active_cell_ids: Vec<u32> = cell_manager
                 .get_cell_assignments()
@@ -651,6 +652,8 @@ impl<'a> Scheduler<'a> {
                 cell_manager.compute_cpu_assignments(self.enable_borrowing)?
             };
 
+            // TODO(kkd): Plug in demand weighted subcell assignments once
+            // supported.
             let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
 
             (
@@ -660,7 +663,7 @@ impl<'a> Scheduler<'a> {
             )
         };
 
-        self.apply_cell_config(&cell_assignments, &cpu_assignments)?;
+        self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)?;
 
         Ok(cpu_assignments)
     }
@@ -702,7 +705,7 @@ impl<'a> Scheduler<'a> {
             .collect();
 
         // Compute new assignments and check if they differ from current
-        let (cell_assignments, cpu_assignments, _subcell_assignments) = {
+        let (cell_assignments, cpu_assignments, subcell_assignments) = {
             let cell_manager = self.cell_manager.as_ref().unwrap();
             let cpu_assignments = cell_manager
                 .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)?;
@@ -712,6 +715,9 @@ impl<'a> Scheduler<'a> {
                     .get(&a.id)
                     .map_or(true, |cell| cell.cpus != a.primary)
             });
+
+            // TODO(kkd): Need logic to check changed demand assignments for
+            // subcells as well once demand weighted allocations work.
 
             if !changed {
                 return Ok(());
@@ -726,7 +732,7 @@ impl<'a> Scheduler<'a> {
             )
         };
 
-        self.apply_cell_config(&cell_assignments, &cpu_assignments)?;
+        self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)?;
 
         self.last_rebalance = Instant::now();
         self.rebalance_count += 1;
@@ -780,30 +786,38 @@ impl<'a> Scheduler<'a> {
             .collect()
     }
 
-    fn refresh_bpf_subcells(
-        &mut self,
-        cell_to_cpus: &HashMap<u32, Cpumask>,
-        active_cells: &HashSet<u32>,
-    ) -> Result<()> {
+    fn refresh_bpf_subcells(&mut self, active_cells: &HashSet<u32>) -> Result<()> {
         if self.cell_manager.is_none() {
             return Ok(());
         }
 
-        // Until subcell state is read back from BPF, mirror each cell's observed
-        // primary mask into all of its subcells and keep borrowable empty.
         for cell_id in active_cells {
-            let primary = cell_to_cpus
-                .get(cell_id)
-                .cloned()
-                .unwrap_or_else(Cpumask::new);
+            let bpf_cell = read_bpf_cell(&self.skel, *cell_id)?;
+            let subcells: Vec<Subcell> = bpf_cell
+                .subcells
+                .iter()
+                .filter(|subcell| subcell.in_use != 0)
+                .map(|subcell| {
+                    Ok(Subcell {
+                        id: subcell.id,
+                        primary: read_cpumask_from_bytes(&subcell.primary.mask)?,
+                        borrowable: if self.enable_borrowing {
+                            Some(read_cpumask_from_bytes(&subcell.borrowable.mask)?)
+                        } else {
+                            None
+                        },
+                    })
+                })
+                .collect::<Result<_>>()?;
+
+            if subcells.is_empty() {
+                bail!("Cell {} has no active subcells in BPF state", cell_id);
+            }
+
             let cell = self.cells.get_mut(cell_id).ok_or_else(|| {
                 anyhow::anyhow!("Cell {} missing during subcell refresh", cell_id)
             })?;
-
-            for subcell in &mut cell.subcells {
-                subcell.primary = primary.clone();
-                subcell.borrowable = Some(Cpumask::new());
-            }
+            cell.subcells = subcells;
         }
 
         Ok(())
@@ -817,6 +831,7 @@ impl<'a> Scheduler<'a> {
         &mut self,
         cell_assignments: &[(u64, u32)],
         cpu_assignments: &[CpuAssignment],
+        subcell_assignments: &[Vec<CpuAssignment>],
     ) -> Result<()> {
         let bss_data = self
             .skel
@@ -842,6 +857,14 @@ impl<'a> Scheduler<'a> {
             );
         }
 
+        if subcell_assignments.len() != cpu_assignments.len() {
+            bail!(
+                "Mismatched subcell assignments: {} cell assignments vs {} subcell groups",
+                cpu_assignments.len(),
+                subcell_assignments.len()
+            );
+        }
+
         if cell_assignments.len() > bpf_intf::consts_MAX_CELLS as usize {
             bail!(
                 "Too many cell assignments: {} > MAX_CELLS ({})",
@@ -858,7 +881,7 @@ impl<'a> Scheduler<'a> {
 
         // Set cell cpumasks and borrowable cpumasks
         let mut max_cell_id: u32 = 0;
-        for a in cpu_assignments {
+        for (a, cell_subcells) in cpu_assignments.iter().zip(subcell_assignments.iter()) {
             if a.id >= bpf_intf::consts_MAX_CELLS {
                 bail!(
                     "Cell ID {} exceeds MAX_CELLS ({})",
@@ -876,11 +899,48 @@ impl<'a> Scheduler<'a> {
                     &mut config.borrowable_cpumasks[a.id as usize].mask,
                 );
             }
+
+            if cell_subcells.len() > MAX_SUBCELLS_PER_CELL {
+                bail!(
+                    "Cell {} has too many subcells: {} > MAX_SUBCELLS_PER_CELL ({})",
+                    a.id,
+                    cell_subcells.len(),
+                    MAX_SUBCELLS_PER_CELL
+                );
+            }
+
+            let mut used_subcell_slots = [false; MAX_SUBCELLS_PER_CELL];
+            for subcell in cell_subcells {
+                if subcell.id >= bpf_intf::consts_MAX_SUBCELLS_PER_CELL {
+                    bail!(
+                        "Subcell ID {} for cell {} exceeds MAX_SUBCELLS_PER_CELL ({})",
+                        subcell.id,
+                        a.id,
+                        bpf_intf::consts_MAX_SUBCELLS_PER_CELL
+                    );
+                }
+
+                let slot = subcell.id as usize;
+                if used_subcell_slots[slot] {
+                    bail!("Duplicate subcell ID {} for cell {}", subcell.id, a.id);
+                }
+                used_subcell_slots[slot] = true;
+
+                config.subcells[a.id as usize][slot].id = subcell.id;
+                config.subcells[a.id as usize][slot].in_use = 1;
+                write_cpumask_to_config(
+                    &subcell.primary,
+                    &mut config.subcells[a.id as usize][slot].primary.mask,
+                );
+                if let Some(ref borrowable) = subcell.borrowable {
+                    write_cpumask_to_config(
+                        borrowable,
+                        &mut config.subcells[a.id as usize][slot].borrowable.mask,
+                    );
+                }
+            }
         }
         config.num_cells = max_cell_id;
-
-        // When subcell configuration is applied to BPF, extend this function to
-        // write and apply the computed subcell state here as well.
 
         // Trigger the BPF program to apply the configuration
         let prog = &mut self.skel.progs.apply_cell_config;
@@ -1386,7 +1446,7 @@ impl<'a> Scheduler<'a> {
         self.cells.retain(|&k, _| active_cells.contains(&k));
         self.metrics.cells.retain(|&k, _| active_cells.contains(&k));
 
-        self.refresh_bpf_subcells(&cell_to_cpus, &active_cells)?;
+        self.refresh_bpf_subcells(&active_cells)?;
 
         self.last_configuration_seq = Some(applied_configuration);
 
@@ -1406,6 +1466,41 @@ fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
             }
         }
     }
+}
+
+fn read_cpumask_from_bytes(src: &[u8]) -> Result<Cpumask> {
+    let mut cpumask = Cpumask::new();
+
+    for (byte_idx, byte) in src.iter().copied().enumerate() {
+        let mut bits = byte;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= !(1u8 << bit);
+            cpumask.set_cpu((byte_idx * 8) + bit)?;
+        }
+    }
+
+    Ok(cpumask)
+}
+
+fn read_bpf_cell(skel: &BpfSkel, cell_id: u32) -> Result<bpf_intf::cell> {
+    let raw = skel
+        .maps
+        .cells
+        .lookup(&cell_id.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+        .with_context(|| format!("Failed to lookup cell {}", cell_id))?
+        .ok_or_else(|| anyhow::anyhow!("Cell {} missing from BPF map", cell_id))?;
+
+    if raw.len() != std::mem::size_of::<bpf_intf::cell>() {
+        bail!(
+            "Unexpected cell {} value size: {} != {}",
+            cell_id,
+            raw.len(),
+            std::mem::size_of::<bpf_intf::cell>()
+        );
+    }
+
+    Ok(unsafe { std::ptr::read_unaligned(raw.as_ptr() as *const bpf_intf::cell) })
 }
 
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {

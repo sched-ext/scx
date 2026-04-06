@@ -18,6 +18,7 @@ enum consts {
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 256,
+	MAX_SUBCELLS_PER_CELL = 8,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 	TIMER_INTERVAL_NS = 100000000, /* 100 ms */
 	CLOCK_BOOTTIME = 7,
@@ -105,6 +106,19 @@ struct cell_llc {
 _Static_assert(sizeof(struct cell_llc) >= CACHELINE_SIZE,
 	       "cell_llc must be at least one cache line");
 
+/* Cell cpumask data for a single cell or subcell */
+struct cell_cpumask_data {
+	unsigned char mask[MAX_CPUS_U8];
+};
+
+/* Subcell state shared between kernel and userspace. */
+struct subcell {
+	u32 id;
+	u32 in_use;
+	struct cell_cpumask_data primary;
+	struct cell_cpumask_data borrowable;
+};
+
 // CELL_LOCK_T is a lock for kernel and padding for user.
 #if !defined(__BINDGEN_RUNNING__)
 #define CELL_LOCK_T struct bpf_spin_lock
@@ -142,6 +156,9 @@ struct cell {
 
 	// Per-LLC data (cacheline-aligned)
 	struct cell_llc llcs[MAX_LLCS];
+
+	// Fixed-size subcell state owned by this cell.
+	struct subcell subcells[MAX_SUBCELLS_PER_CELL];
 };
 
 // Putting the lock first in the struct is our convention.
@@ -156,18 +173,14 @@ _Static_assert(sizeof(((struct cell *)0)->lock) == 4, "lock/padding must be 4 by
 _Static_assert(_Alignof(CELL_LOCK_T) == 4, "lock/padding must be 4-byte aligned");
 
 // Verify these are the same size in both BPF and Rust.
-_Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
+_Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS) +
+				       (sizeof(struct subcell) * MAX_SUBCELLS_PER_CELL)),
 	       "struct cell size must be stable for Rust bindings");
 
 /* Cell assignment entry: maps a cgroup to a cell */
 struct cell_assignment {
 	u64 cgid; /* cgroup ID (from cgroup file inode) */
 	u32 cell_id; /* cell ID to assign */
-};
-
-/* Cell cpumask data for a single cell */
-struct cell_cpumask_data {
-	unsigned char mask[MAX_CPUS_U8];
 };
 
 /*
@@ -177,6 +190,7 @@ struct cell_cpumask_data {
  * BPF program invocation:
  * - Cell-to-cgroup assignments (which cgroups own which cells)
  * - Cell cpumasks (which CPUs belong to each cell)
+ * - Per-cell subcell cpumasks
  */
 struct cell_config {
 	u32 num_cell_assignments;
@@ -184,6 +198,7 @@ struct cell_config {
 	struct cell_assignment assignments[MAX_CELLS];
 	struct cell_cpumask_data cpumasks[MAX_CELLS];
 	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
+	struct subcell subcells[MAX_CELLS][MAX_SUBCELLS_PER_CELL];
 };
 
 #endif /* __INTF_H */
