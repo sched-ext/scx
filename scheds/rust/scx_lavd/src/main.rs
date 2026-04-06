@@ -126,6 +126,14 @@ struct Opts {
     #[clap(long = "slice-min-us", default_value = "500")]
     slice_min_us: u64,
 
+    /// Target load percentage for turbulent CPUs relative to non-turbulent
+    /// CPUs' per-capacity utilization. 100 means turbulent CPUs should carry
+    /// the same per-capacity load as non-turbulent CPUs. Values below 100
+    /// route fewer tasks to turbulent CPUs; values above 100 route more.
+    /// Range: 0-200. Default: 100.
+    #[clap(long = "lat-load-target-pct", default_value = "100", value_parser=Opts::lat_load_target_pct_range)]
+    lat_load_target_pct: u16,
+
     /// Migration delta threshold percentage (0-100). When set to a non-zero value,
     /// the migration threshold is mig-delta-pct percent of the average load.
     /// Additionally, disables force task stealing in the consume path, relying only
@@ -385,6 +393,10 @@ impl Opts {
 
     fn preempt_shift_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 10)
+    }
+
+    fn lat_load_target_pct_range(s: &str) -> Result<u16, String> {
+        number_range(s, 0, 200)
     }
 
     fn mig_delta_pct_range(s: &str) -> Result<u8, String> {
@@ -669,6 +681,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_min_ns = opts.slice_min_us * 1000;
         rodata.pinned_slice_ns = opts.pinned_slice_us.map(|v| v * 1000).unwrap_or(0);
         rodata.preempt_shift = opts.preempt_shift;
+        rodata.lat_load_target_pct = opts.lat_load_target_pct;
         rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.lb_low_util_wall = ((opts.lb_low_util_pct as u64) << 10) / 100;
         rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
@@ -756,6 +769,10 @@ impl<'a> Scheduler<'a> {
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
+            lat_headroom: tx.lat_headroom,
+            vuln_thresh: tx.vuln_thresh,
+            task_util_est: tx.task_util_est,
+            norm_lat_cri: tx.norm_lat_cri,
             slice_used_wall: tx.last_slice_used_wall,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,

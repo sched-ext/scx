@@ -17,6 +17,7 @@
 extern bool CONFIG_NO_HZ_IDLE __kconfig __weak;
 
 struct sys_stat		__weak	sys_stat;
+const volatile u16	__weak lat_load_target_pct;
 const volatile u8	__weak preempt_shift;
 volatile u64		__weak performance_mode_ns;
 volatile u64		__weak balanced_mode_ns;
@@ -119,9 +120,16 @@ static void collect_sys_stat(void)
 		cpdomc->cur_dom_pinned_util_invr_sum = 0;
 		cpdomc->avg_dom_pinned_util_invr_sum = 0;
 		cpdomc->nr_queued_task = 0;
+		cpdomc->util_sum_steady = 0;
+		cpdomc->util_sum_turb = 0;
+		cpdomc->cap_sum_steady = 0;
+		cpdomc->cap_sum_turb = 0;
+		cpdomc->nr_steady_cpus = 0;
+		cpdomc->nr_turb_cpus = 0;
 
 		if (use_cpdom_dsq())
-			cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
+			cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id))
+					       + scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpdom_id));
 
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
 			u64 cpumask = cpdomc->__cpumask[i];
@@ -358,6 +366,12 @@ static void collect_sys_stat(void)
 		cpuc->avg_steal_util_invr = calc_asym_avg(cpuc->avg_steal_util_invr,
 							   cpuc->cur_steal_util_invr);
 
+		ravg_accumulate(&cpuc->avg_irq_steal_ravg, cpuc->cur_steal_util_invr, c->now,
+					LAVD_RAVG_HALFLIFE_NS);
+		u64 avg_irq_fp = ravg_read(&cpuc->avg_irq_steal_ravg, c->now, LAVD_RAVG_HALFLIFE_NS);
+		u32 avg_irq_val = (u32)(avg_irq_fp >> RAVG_FRAC_BITS);
+		cpuc->lat_headroom = (avg_irq_val < LAVD_SCALE) ? (LAVD_SCALE - avg_irq_val) : 0;
+
 		/*
 		 * Calculate per-CPU wall-clock utilization.
 		 * compute_wall = steal_time_wall + tot_task_time_wall (before
@@ -507,6 +521,8 @@ static void collect_sys_stat(void)
 	 * Collect statistics for each CPU (phase 3).
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct bpf_cpumask *steady;
+		struct cpdom_ctx *cpu_cpdomc;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total_wall = 0;
@@ -530,6 +546,36 @@ static void collect_sys_stat(void)
 		}
 
 		/*
+		 * Update the global steady (non-turbulent) CPU mask.
+		 */
+		bpf_rcu_read_lock();
+		steady = steady_cpumask;
+		if (steady) {
+			if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
+				bpf_cpumask_set_cpu(cpu, steady);
+			else
+				bpf_cpumask_clear_cpu(cpu, steady);
+		}
+		bpf_rcu_read_unlock();
+
+		/*
+		 * Collect per-CPU tier stats for preemption vulnerability
+		 * threshold into the CPU's compute domain.
+		 */
+		cpu_cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+		if (cpu_cpdomc) {
+			if (cpuc->lat_headroom >= LAVD_LC_LATENCY_SENSITIVE_THRESH) {
+				cpu_cpdomc->util_sum_steady += cpuc->util_est;
+				cpu_cpdomc->cap_sum_steady += cpuc->max_capacity;
+				cpu_cpdomc->nr_steady_cpus++;
+			} else {
+				cpu_cpdomc->util_sum_turb += cpuc->util_est;
+				cpu_cpdomc->cap_sum_turb += cpuc->max_capacity;
+				cpu_cpdomc->nr_turb_cpus++;
+			}
+		}
+
+		/*
 		 * Accumulate system-wide idle time.
 		 */
 		c->idle_total_wall += cpuc->idle_total_wall;
@@ -541,7 +587,7 @@ static void calc_sys_stat(void)
 {
 	struct sys_stat_ctx *c = &ctx;
 	static int cnt = 0;
-	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr;
+	u64 avg_svc_time_iwgt = 0, cur_util_invr, scu_spike_invr, cpdom_id;
 
 	/*
 	 * Calculate the CPU utilization that includes everything
@@ -663,6 +709,41 @@ static void calc_sys_stat(void)
 	sys_stat.nr_big += c->nr_big;
 	sys_stat.nr_pc_on_big += c->nr_pc_on_big;
 	sys_stat.nr_lc_on_big += c->nr_lc_on_big;
+
+	/*
+	 * Adjust per-cpdom preemption vulnerability threshold to balance
+	 * load between turbulent and non-turbulent CPU tiers. The target
+	 * is lat_load_target_pct percent of non-turbulent per-capacity
+	 * load (100 = equal load, <100 = lighter turbulent load, >100 =
+	 * heavier). When turbulent CPUs exceed the target, lower the
+	 * threshold so more tasks qualify for the main DSQ, reducing
+	 * turbulent CPU load. When under the target, raise it so fewer
+	 * tasks qualify, pushing more to the turbulent DSQ.
+	 */
+	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		struct cpdom_ctx *cpdomc;
+
+		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		if (!cpdomc)
+			continue;
+
+		if (cpdomc->nr_turb_cpus == 0 || cpdomc->cap_sum_turb == 0) {
+			cpdomc->vuln_thresh = 0;
+		} else if (cpdomc->cap_sum_steady > 0) {
+			u64 load_high = ((u64)cpdomc->util_sum_steady << LAVD_SHIFT) / cpdomc->cap_sum_steady;
+			u64 load_low = ((u64)cpdomc->util_sum_turb << LAVD_SHIFT) / cpdomc->cap_sum_turb;
+			u64 target = (load_high * lat_load_target_pct) / 100;
+
+			if (load_low > target && cpdomc->vuln_thresh > 0)
+				cpdomc->vuln_thresh--;
+			else if (load_low < target &&
+				 cpdomc->vuln_thresh < LAVD_VULN_THRESH_MAX)
+				cpdomc->vuln_thresh++;
+		}
+	}
 
 	update_power_mode_time();
 }

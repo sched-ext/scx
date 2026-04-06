@@ -233,6 +233,12 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 	taskc->lat_cri_wakee = 0;
 
 	/*
+	 * Normalize lat_cri to [0, 1024] scale for CPU selection
+	 * and DSQ routing decisions.
+	 */
+	taskc->normalized_lat_cri = normalize_lat_cri(lat_cri);
+
+	/*
 	 * A task is more CPU-performance sensitive when it meets the following
 	 * conditions:
 	 *
