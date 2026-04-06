@@ -18,6 +18,7 @@ use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -53,6 +54,15 @@ use tracing_subscriber::filter::EnvFilter;
 
 use stats::CellMetrics;
 use stats::Metrics;
+
+static DUMP_PTR: AtomicPtr<bool> = AtomicPtr::new(std::ptr::null_mut());
+
+extern "C" fn sigusr2_handler(_sig: libc::c_int) {
+    let ptr = DUMP_PTR.load(Ordering::Relaxed);
+    if !ptr.is_null() {
+        unsafe { std::ptr::write_volatile(ptr, true) };
+    }
+}
 
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
@@ -185,6 +195,16 @@ struct Opts {
     #[clap(long, default_value = "0.3", value_parser = parse_ewma_factor)]
     demand_smoothing: f64,
 
+    /// Watchdog timeout in milliseconds. If any task stays runnable without
+    /// being dispatched for this long, the kernel terminates the scheduler.
+    /// 0 uses the kernel default (30s).
+    #[clap(long, default_value = "0")]
+    watchdog_timeout_ms: u32,
+
+    /// Install SIGUSR2 handler that triggers scx_bpf_error.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    trigger_dump: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -244,6 +264,7 @@ struct Scheduler<'a> {
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
+    trigger_dump: bool,
 }
 
 struct DistributionStats {
@@ -347,6 +368,10 @@ impl<'a> Scheduler<'a> {
         rodata.enable_borrowing = opts.enable_borrowing;
         rodata.use_lockless_peek = opts.use_lockless_peek;
 
+        if opts.watchdog_timeout_ms > 0 {
+            skel.struct_ops.mitosis_mut().timeout_ms = opts.watchdog_timeout_ms;
+        }
+
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
             v => skel.struct_ops.mitosis_mut().flags |= v,
@@ -430,11 +455,23 @@ impl<'a> Scheduler<'a> {
             rebalance_count: 0,
             epoll,
             stats_waker,
+            trigger_dump: opts.trigger_dump,
         })
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let struct_ops = scx_ops_attach!(self.skel, mitosis)?;
+
+        if self.trigger_dump {
+            let bss = self.skel.maps.bss_data.as_mut().unwrap();
+            DUMP_PTR.store(&mut bss.trigger_dump as *mut bool, Ordering::Relaxed);
+            unsafe {
+                libc::signal(
+                    libc::SIGUSR2,
+                    sigusr2_handler as *const () as libc::sighandler_t,
+                );
+            }
+        }
 
         info!("Mitosis Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
 
@@ -982,9 +1019,10 @@ impl<'a> Scheduler<'a> {
             .flat_map(|cell| QUEUE_STATS_IDX.iter().map(|&idx| cell[idx as usize]))
             .sum();
 
-        // We don't want to divide by zero later, but this is never expected.
+        // Can fire transiently; not worth killing the scheduler over.
         if global_queue_decisions == 0 {
-            bail!("Error: No queueing decisions made globally");
+            warn!("No queueing decisions made globally, skipping stats");
+            return Ok(());
         }
 
         self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;

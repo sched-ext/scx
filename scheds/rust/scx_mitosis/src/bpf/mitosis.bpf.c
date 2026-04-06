@@ -49,6 +49,9 @@ const volatile bool userspace_managed_cell_mode = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
 
+/* Set by userspace signal handler to trigger error exit with dump */
+bool trigger_dump;
+
 /*
  * Global arrays for LLC topology, populated by userspace before load.
  * Declared in llc_aware.bpf.h as extern.
@@ -2311,11 +2314,18 @@ int apply_cell_config(void *ctx)
 	return 0;
 }
 
+void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
+{
+	if (READ_ONCE(trigger_dump))
+		scx_bpf_error("dump requested via signal");
+}
+
 // clang-format off
 SCX_OPS_DEFINE(mitosis,
 	       .select_cpu		= (void *)mitosis_select_cpu,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
+	       .tick			= (void *)mitosis_tick,
 	       .running			= (void *)mitosis_running,
 	       .stopping		= (void *)mitosis_stopping,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
