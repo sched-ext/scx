@@ -17,7 +17,7 @@ use scx_ebpf::bpf_for;
 use scx_ebpf::core_read;
 use scx_ebpf::core_write;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray, HashMap, BpfArray, CgrpStorage};
-use scx_ebpf::helpers::BpfSpinLock;
+use scx_ebpf::helpers::bpf_spin_lock;
 use scx_ebpf::cgroup::cgroup;
 use scx_ebpf::cpumask::{self, bpf_cpumask};
 use scx_ebpf::kptr::{Kptr, kptr_xchg};
@@ -213,7 +213,7 @@ impl CellLlc {
 #[derive(Clone, Copy)]
 struct Cell {
     /// BPF spin lock (4 bytes). Must be first field at offset 0.
-    lock: BpfSpinLock,
+    lock: bpf_spin_lock,
     /// Whether this cell is currently in use.
     in_use: u32,
     /// Number of CPUs assigned to this cell.
@@ -243,7 +243,7 @@ const _: () = assert!(
 
 impl Cell {
     const ZERO: Self = Self {
-        lock: BpfSpinLock::new(),
+        lock: bpf_spin_lock::new(),
         in_use: 0,
         cpu_cnt: 0,
         llc_present_cnt: 0,
@@ -638,7 +638,7 @@ fn allocate_cell() -> i32 {
         if let Some(c) = lookup_cell(cell_idx) {
             // Spin lock for atomic check-and-set of in_use.
             // Optimization: replace with BPF_ATOMIC|BPF_CMPXCHG when available.
-            let lock_ptr = &c.lock as *const BpfSpinLock as *mut BpfSpinLock;
+            let lock_ptr = &c.lock as *const bpf_spin_lock as *mut bpf_spin_lock;
             scx_ebpf::helpers::spin_lock(lock_ptr);
             let was_free = c.in_use == 0;
             if was_free {
@@ -1270,7 +1270,7 @@ fn recalc_cell_llc_counts(cell_idx: u32) {
     }
 
     // Write LLC counts under spin lock to protect concurrent readers.
-    let lock_ptr = &cell.lock as *const BpfSpinLock as *mut BpfSpinLock;
+    let lock_ptr = &cell.lock as *const bpf_spin_lock as *mut bpf_spin_lock;
     scx_ebpf::helpers::spin_lock(lock_ptr);
     i = 0;
     while i < nr_llc && i < MAX_LLCS {
@@ -1307,7 +1307,7 @@ fn pick_llc_for_task(cell_id: u32) -> i32 {
     let mut total_cpu_cnt = 0u32;
 
     // Read LLC cpu counts under spin lock for consistency.
-    let lock_ptr = &cell.lock as *const BpfSpinLock as *mut BpfSpinLock;
+    let lock_ptr = &cell.lock as *const bpf_spin_lock as *mut bpf_spin_lock;
     scx_ebpf::helpers::spin_lock(lock_ptr);
     let mut i: u32 = 0;
     while i < nr_llc && i < MAX_LLCS {

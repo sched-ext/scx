@@ -328,13 +328,18 @@ pub fn get_prandom_u32() -> u32 {
 ///
 /// This is a 4-byte struct matching the kernel's `struct bpf_spin_lock`.
 /// It must be zero-initialized (unlocked state).
+///
+/// The struct name MUST be exactly `bpf_spin_lock` (not CamelCase) because
+/// the kernel verifier does an exact BTF type name match when validating
+/// spin lock fields in map values.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct BpfSpinLock {
+#[allow(non_camel_case_types)]
+pub struct bpf_spin_lock {
     val: u32,
 }
 
-impl BpfSpinLock {
+impl bpf_spin_lock {
     /// Create a new unlocked spin lock.
     pub const fn new() -> Self {
         Self { val: 0 }
@@ -352,7 +357,7 @@ impl BpfSpinLock {
 /// - Must be released before the BPF program returns.
 /// - Cannot call most helpers/kfuncs while holding the lock.
 #[inline(always)]
-pub fn spin_lock(lock: *mut BpfSpinLock) {
+pub fn spin_lock(lock: *mut bpf_spin_lock) {
     unsafe {
         core::arch::asm!(
             "call 93",
@@ -371,7 +376,7 @@ pub fn spin_lock(lock: *mut BpfSpinLock) {
 /// Release a BPF spin lock previously acquired with [`spin_lock`].
 /// Re-enables preemption.
 #[inline(always)]
-pub fn spin_unlock(lock: *mut BpfSpinLock) {
+pub fn spin_unlock(lock: *mut bpf_spin_lock) {
     unsafe {
         core::arch::asm!(
             "call 94",
