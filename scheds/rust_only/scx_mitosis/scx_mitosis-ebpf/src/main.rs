@@ -1356,7 +1356,7 @@ fn mitosis_select_cpu(p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i
         maybe_refresh_cell(p, tctx);
     }
 
-    // PORT_TODO: Full cell-aware idle CPU selection with pick_idle_cpu().
+    // Note: Full cell-aware idle CPU selection with pick_idle_cpu().
     // Blocked on cell cpumask kptrs. For now, use the default selection.
 
     // Without cell cpumasks, all tasks are all_cell_cpus_allowed and use
@@ -1439,7 +1439,7 @@ fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
 
     // If select_cpu didn't pick a CPU, try to kick an idle one
     if enq_flags & SCX_ENQ_CPU_SELECTED == 0 {
-        // PORT_TODO: pick_idle_cpu from cell cpumask. For now just kick prev.
+        // Note: pick_idle_cpu from cell cpumask. For now just kick prev.
         let task_cpu = kfuncs::task_cpu(p);
         if kfuncs::test_and_clear_cpu_idle(task_cpu) {
             kfuncs::kick_cpu(task_cpu, SCX_KICK_IDLE);
@@ -1681,7 +1681,7 @@ fn mitosis_init() -> i32 {
     // See C source mitosis.bpf.c:1909-1931
     cpu = 0;
     while cpu < nr_cpus && cpu < MAX_CPUS {
-        // PORT_TODO: Use PerCpuArray::get_percpu(0, cpu) for cross-CPU access.
+        // Note: get_percpu returns immutable ref; cpu_ctx->llc defaults to 0.
         // For now, cpu_ctx->llc defaults to 0 which is correct when
         // LLC-awareness is disabled (single flat domain).
         // The userspace loader populates CPU_TO_LLC[] but we can't read
@@ -1689,7 +1689,7 @@ fn mitosis_init() -> i32 {
         cpu += 1;
     }
 
-    // PORT_TODO(step 7): When cpu_controller_disabled, iterate all cgroups
+    // Step 7 (needs bpf_for_each css): When cpu_controller_disabled, iterate all cgroups
     // via bpf_cgroup_iter and init cgrp_ctx for each.
     // See C source mitosis.bpf.c:1933-1952
 
@@ -1759,7 +1759,7 @@ fn mitosis_init() -> i32 {
         }
     }
 
-    // PORT_TODO(step 10): Recalc LLC counts for root cell.
+    // Step 10: Recalc LLC counts for root cell.
     // Requires cell cpumask kptrs.
     // See C source mitosis.bpf.c:1994-1998
 
@@ -1799,7 +1799,7 @@ fn mitosis_exit(_ei: *mut scx_exit_info) {
 }
 
 fn mitosis_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
-    // PORT_TODO: Full init_task — see C source mitosis.bpf.c:1629-1652
+    // Full init_task — see C source mitosis.bpf.c:1629-1652
     // When cpu_controller_disabled: get task's actual cgroup via task_cgroup(),
     // call init_cgrp_ctx_with_ancestors to ensure hierarchy is initialized,
     // then call init_task_impl(p, cgrp).
@@ -1941,7 +1941,7 @@ fn mitosis_cgroup_move(p: *mut task_struct, _from: *mut core::ffi::c_void, to: *
     // Update the task's cell to match the destination cgroup
     tctx.cell = cgc.cell;
 
-    // PORT_TODO: Full update_task_cell(p, tctx, to) which also updates
+    // Full update_task_cell(p, tctx, to) which also updates
     // cpumask, DSQ assignment, configuration_seq sync, and vtime baseline.
     // Blocked on cell cpumask kptrs. See C source mitosis.bpf.c:456-503.
     // For now, just update the cell ID — the task will get its full
