@@ -33,6 +33,7 @@
 #![no_std]
 #![feature(asm_experimental_arch)]
 
+pub mod cgroup;
 pub mod cpumask;
 pub mod ctx;
 pub mod global;

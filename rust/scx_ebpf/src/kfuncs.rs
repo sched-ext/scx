@@ -17,6 +17,7 @@
 //! on the same pointer, causing the BPF verifier to reject the program
 //! because it sees a cleared R1 being passed as an argument.
 
+use super::cgroup::cgroup;
 use super::vmlinux::{rq, task_struct};
 
 /// Opaque kernel `struct cpumask` — used as a pointer target only.
@@ -92,6 +93,9 @@ unsafe extern "C" {
         cpus_allowed: *const cpumask,
         flags: u64,
     ) -> i32;
+    fn scx_bpf_pick_idle_cpu(cpus_allowed: *const cpumask, flags: u64) -> i32;
+    fn scx_bpf_dsq_peek(dsq_id: u64) -> *mut task_struct;
+    fn scx_bpf_task_cgroup(p: *mut task_struct) -> *mut cgroup;
 }
 
 #[cfg(feature = "kernel_6_16")]
@@ -657,4 +661,73 @@ pub unsafe fn task_set_slice(p: *mut task_struct, slice: u64) -> bool {
         );
     }
     ret != 0
+}
+
+/// Pick an idle CPU from the given cpumask.
+///
+/// `flags` can include `SCX_PICK_IDLE_CORE` (1) to prefer full-idle SMT
+/// cores. Returns a CPU index, or negative if no idle CPU was found.
+#[inline(always)]
+pub fn pick_idle_cpu(cpus_allowed: *const cpumask, flags: u64) -> i32 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym scx_bpf_pick_idle_cpu,
+            inlateout("r1") cpus_allowed => _,
+            inlateout("r2") flags => _,
+            lateout("r0") ret,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret as i32
+}
+
+/// Peek at the head of a dispatch queue without consuming the task.
+///
+/// Returns a pointer to the first task on the DSQ, or null if empty.
+/// The task is not removed from the DSQ. Available since kernel 6.19.
+#[inline(always)]
+pub fn dsq_peek(dsq_id: u64) -> *mut task_struct {
+    let ret: *mut task_struct;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym scx_bpf_dsq_peek,
+            inlateout("r1") dsq_id => _,
+            lateout("r0") ret,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret
+}
+
+/// Get the default cgroup of a task.
+///
+/// Returns a pointer to the task's cgroup. The returned pointer is
+/// valid for the duration of the current BPF program invocation under
+/// RCU protection.
+///
+/// When the CPU controller is disabled, this returns the root cgroup.
+#[inline(always)]
+pub fn task_cgroup(p: *mut task_struct) -> *mut cgroup {
+    let ret: *mut cgroup;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym scx_bpf_task_cgroup,
+            inlateout("r1") p => _,
+            lateout("r0") ret,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret
 }

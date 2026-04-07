@@ -298,6 +298,93 @@ pub unsafe fn get_smp_processor_id() -> i32 {
     ret as i32
 }
 
+/// BPF helper #7: `bpf_get_prandom_u32() -> u32`
+///
+/// Returns a pseudo-random 32-bit unsigned integer. Useful for
+/// randomized load balancing decisions (e.g., LLC selection in MITOSIS).
+#[inline(always)]
+pub fn get_prandom_u32() -> u32 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "call 7",
+            lateout("r0") ret,
+            lateout("r1") _,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret as u32
+}
+
+/// Opaque BPF spin lock type.
+///
+/// Must be embedded in a map value struct. The kernel manages the lock
+/// state; BPF programs can only lock/unlock via helpers.
+///
+/// # Layout
+///
+/// This is a 4-byte struct matching the kernel's `struct bpf_spin_lock`.
+/// It must be zero-initialized (unlocked state).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BpfSpinLock {
+    val: u32,
+}
+
+impl BpfSpinLock {
+    /// Create a new unlocked spin lock.
+    pub const fn new() -> Self {
+        Self { val: 0 }
+    }
+}
+
+/// BPF helper #93: `bpf_spin_lock(lock) -> void`
+///
+/// Acquire a BPF spin lock. The lock must be embedded in a map value.
+/// Disables preemption while held. Must be paired with [`spin_unlock`].
+///
+/// # Verifier constraints
+///
+/// - Only one lock can be held at a time.
+/// - Must be released before the BPF program returns.
+/// - Cannot call most helpers/kfuncs while holding the lock.
+#[inline(always)]
+pub fn spin_lock(lock: *mut BpfSpinLock) {
+    unsafe {
+        core::arch::asm!(
+            "call 93",
+            inlateout("r1") lock => _,
+            lateout("r0") _,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+}
+
+/// BPF helper #94: `bpf_spin_unlock(lock) -> void`
+///
+/// Release a BPF spin lock previously acquired with [`spin_lock`].
+/// Re-enables preemption.
+#[inline(always)]
+pub fn spin_unlock(lock: *mut BpfSpinLock) {
+    unsafe {
+        core::arch::asm!(
+            "call 94",
+            inlateout("r1") lock => _,
+            lateout("r0") _,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+}
+
 /// Maximum size of a CO-RE marker record in bytes.
 ///
 /// Layout: tag(1) + name_len(1) + name(N) + path_len(1) + path(M).

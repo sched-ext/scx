@@ -90,6 +90,9 @@ unsafe extern "C" {
     fn bpf_cpumask_or(dst: *mut bpf_cpumask, src1: *const cpumask, src2: *const cpumask);
     fn bpf_cpumask_copy(dst: *mut bpf_cpumask, src: *const cpumask);
     fn bpf_cpumask_setall(mask: *mut bpf_cpumask);
+    fn bpf_cpumask_any_distribute(mask: *const cpumask) -> u32;
+    fn bpf_cpumask_subset(src1: *const cpumask, src2: *const cpumask) -> bool;
+    fn bpf_cpumask_weight(mask: *const cpumask) -> u32;
 }
 
 // ── Raw kfunc wrappers (unsafe) ──────────────────────────────────────────
@@ -429,4 +432,75 @@ pub unsafe fn setall(mask: *mut bpf_cpumask) {
             lateout("r5") _,
         );
     }
+}
+
+/// Pick a pseudo-random set CPU from the cpumask, with distribution.
+///
+/// Returns a CPU index, or `>= nr_cpu_ids` if the mask is empty.
+/// The kernel distributes selections across set bits to avoid
+/// thundering-herd on a single CPU.
+///
+/// Takes a `*const cpumask` (read-only). Use [`cast`] to convert a
+/// `*const bpf_cpumask`.
+#[inline(always)]
+pub fn any_distribute(mask: *const cpumask) -> u32 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym bpf_cpumask_any_distribute,
+            inlateout("r1") mask => _,
+            lateout("r0") ret,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret as u32
+}
+
+/// Test whether `src1` is a subset of `src2` (every bit set in `src1`
+/// is also set in `src2`).
+///
+/// Both arguments are `*const cpumask` (read-only). Use [`cast`] to
+/// convert `*const bpf_cpumask` pointers.
+#[inline(always)]
+pub fn subset(src1: *const cpumask, src2: *const cpumask) -> bool {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym bpf_cpumask_subset,
+            inlateout("r1") src1 => _,
+            inlateout("r2") src2 => _,
+            lateout("r0") ret,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret != 0
+}
+
+/// Return the number of set bits (popcount) in the cpumask.
+///
+/// Takes a `*const cpumask` (read-only). Use [`cast`] to convert a
+/// `*const bpf_cpumask`.
+#[inline(always)]
+pub fn weight(mask: *const cpumask) -> u32 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "call {func}",
+            func = sym bpf_cpumask_weight,
+            inlateout("r1") mask => _,
+            lateout("r0") ret,
+            lateout("r2") _,
+            lateout("r3") _,
+            lateout("r4") _,
+            lateout("r5") _,
+        );
+    }
+    ret as u32
 }
