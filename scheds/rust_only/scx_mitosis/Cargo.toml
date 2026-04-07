@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [".", "scx_mitosis-ebpf"]
+
+[package]
+name = "scx_mitosis_rs"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[features]
+
+[dependencies]
+aya = { path = "../../../../aya/aya" }
+anyhow = "1.0"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3.4"
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+
+[build-dependencies]
+aya-build = { path = "../../../../aya/aya-build", features = ["core-postprocess"] }

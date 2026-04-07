@@ -7,6 +7,49 @@
 // simple vtime scheduling for each cell; userspace makes the dynamic
 // decisions of which Cells should be merged/split and which CPUs they
 // should be assigned to.
+//
+// PORT_TODO: Userspace loader gaps vs C version (scx/scheds/rust/scx_mitosis/src/main.rs):
+//
+// Missing CLI flags:
+// - log_level with tracing_subscriber EnvFilter — see C main.rs:68-69
+// - exit_dump_len — see C main.rs:73
+// - monitor mode (--monitor, stats-only without running scheduler) — see C main.rs:90-91
+// - run_id — see C main.rs:98
+// - exiting_task_workaround (default true) — see C main.rs:108-109
+// - libbpf options (--libbpf-* flags) — see C main.rs:130-131
+//
+// Missing rodata population — see C main.rs:235-268:
+// - slice_ns = SCX_SLICE_DFL
+// - smt_enabled (currently detected but not passed to BPF)
+// - all_cpus[] bitmask (currently built but not passed to BPF)
+// - nr_possible_cpus (currently detected but not passed to BPF)
+// - debug_events_enabled
+// - exiting_task_workaround_enabled
+// - cpu_controller_disabled
+// - reject_multicpu_pinning
+// - cpu_to_llc[] and llc_to_cpus[] (currently built but not passed to BPF)
+// These need aya override_global or BPF map data section support.
+//
+// Missing struct_ops flags:
+// - SCX_OPS_ALLOW_QUEUED_WAKEUP — see C main.rs:254-257
+// - exit_dump_len on struct_ops — see C main.rs:233
+//
+// Missing runtime monitoring — see C main.rs:286-603:
+// - Scheduler struct with full cell tracking, configuration_seq sync
+// - refresh_bpf_cells() — reads applied_configuration_seq atomically,
+//   rebuilds cell map from CPU contexts
+// - calculate_cell_stat_delta() — reads percpu cpu_ctx stats, computes deltas
+// - log_all_queue_stats() — DistributionStats with per-cell and global breakdown
+// - read_cpu_ctxs() — percpu map reading (not yet supported by aya)
+//
+// Missing stats module — see C main.rs:9, stats.rs:
+// - CellMetrics, Metrics structs
+// - StatsServer integration for external monitoring
+// - monitor() function for stats-only mode
+//
+// Missing UEI (User Exit Info) — see C main.rs:37, 293, 305:
+// - uei_exited!() check in main loop
+// - uei_report!() for structured exit info to userspace
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -422,6 +465,16 @@ fn main() -> Result<()> {
     let llc_aware: u8 = opts.enable_llc_awareness as u8;
     let work_stealing: u8 = opts.enable_work_stealing as u8;
 
+    // PORT_TODO: Missing global overrides — the following BPF globals need to be
+    // set before load but are not yet passed:
+    //   SMT_ENABLED, SLICE_NS, all_cpus[], nr_possible_cpus,
+    //   debug_events_enabled, exiting_task_workaround_enabled,
+    //   cpu_controller_disabled, reject_multicpu_pinning,
+    //   cpu_to_llc[], llc_to_cpus[]
+    // The arrays (all_cpus, cpu_to_llc, llc_to_cpus) are already computed above
+    // but override_global for arrays may need special handling in aya.
+    // See C main.rs:235-268
+
     let mut ebpf = EbpfLoader::new()
         .allow_unsupported_maps()
         .override_global("NR_LLC", &nr_llc, false)
@@ -488,15 +541,17 @@ fn main() -> Result<()> {
                 break;
             }
 
-            // TODO: Read CPU_CTX percpu array to collect per-cell stats.
-            // The eBPF side currently dispatches everything to GLOBAL_DSQ,
-            // so stats will be zero until cell-aware enqueue is implemented.
+            // PORT_TODO: Read CPU_CTX percpu array to collect per-cell stats.
+            // Requires aya support for reading BPF_MAP_TYPE_PERCPU_ARRAY.
+            // The C version does this via libbpf_rs lookup_percpu().
+            // See C main.rs:490-535 (collect_metrics, calculate_cell_stat_delta)
+            // and C main.rs:606-627 (read_cpu_ctxs).
             //
-            // When the eBPF map reading is implemented, we'll:
-            // 1. Read the CPU_CTX percpu array
-            // 2. Aggregate cstats per cell
-            // 3. Calculate deltas from prev_cell_stats
-            // 4. Log distribution stats
+            // When implemented:
+            // 1. Read the CPU_CTX percpu array via aya map API
+            // 2. Aggregate cstats per cell across all CPUs
+            // 3. Calculate deltas from previous snapshot
+            // 4. Log distribution stats (local/cpu_dsq/cell_dsq/affinity_viol/steal %)
 
             println!(
                 "[scx_mitosis] cells: 1  uptime {}",

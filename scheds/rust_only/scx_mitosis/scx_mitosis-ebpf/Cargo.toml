@@ -1,0 +1,16 @@
+[package]
+name = "scx_mitosis-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "scx_mitosis"
+path = "src/main.rs"
+
+[features]
+
+[dependencies]
+scx-ebpf = { path = "../../../../rust/scx_ebpf" }
+
+[build-dependencies]
+scx-vmlinux = { path = "../../../../rust/scx_vmlinux" }
