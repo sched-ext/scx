@@ -13,6 +13,7 @@
 #![allow(non_camel_case_types, non_upper_case_globals, dead_code, unused_imports)]
 
 use scx_ebpf::prelude::*;
+use scx_ebpf::bpf_for;
 use scx_ebpf::core_read;
 use scx_ebpf::core_write;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray, HashMap, BpfArray, CgrpStorage};
@@ -1799,17 +1800,31 @@ fn mitosis_exit(_ei: *mut scx_exit_info) {
 }
 
 fn mitosis_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
-    // Full init_task — see C source mitosis.bpf.c:1629-1652
+    // Port of C mitosis_init_task (mitosis.bpf.c:1629-1652).
+    //
     // When cpu_controller_disabled: get task's actual cgroup via task_cgroup(),
     // call init_cgrp_ctx_with_ancestors to ensure hierarchy is initialized,
-    // then call init_task_impl(p, cgrp).
-    // Otherwise: call init_task_impl(p, args->cgroup).
-    // init_task_impl creates bpf_cpumask kptr via bpf_kptr_xchg into tctx->cpumask,
-    // initializes LLC fields, calls update_task_cell.
+    // then set up the task context.
+    //
+    // PORT_TODO(kptr): Full init_task_impl creates bpf_cpumask kptr via
+    // bpf_kptr_xchg into tctx->cpumask. Not available in aya yet.
     let tctx = TASK_CTX.get_or_create(p as *mut u8);
     if tctx.is_none() {
         return -1;
     }
+
+    // When CPU controller is disabled, ensure the task's cgroup hierarchy
+    // is initialized (since SCX cgroup callbacks won't fire).
+    if CPU_CONTROLLER_DISABLED.get() {
+        let cgrp = kfuncs::task_cgroup(p);
+        if !cgrp.is_null() {
+            let ret = init_cgrp_ctx_with_ancestors(cgrp);
+            if ret != 0 {
+                return ret;
+            }
+        }
+    }
+
     0
 }
 
@@ -1856,13 +1871,29 @@ fn init_cgrp_ctx(cgrp: *mut cgroup) -> i32 {
         return 0;
     }
 
-    // Initialize to parent's cell (for non-root cgroups)
-    // PORT_TODO: Proper cgrp->level read via CO-RE. For now, try ancestor at
-    // level (cgrp_level - 1). Since we can't read the level field, we try
-    // looking up parent via ancestor(cgrp, cgrp->level - 1). Without the
-    // level, we use a workaround: just inherit cell 0 (root cell) as default.
-    // The timer callback will reassign cells based on cpusets.
-    cgc.cell = ROOT_CELL_ID;
+    // Initialize to parent's cell (for non-root cgroups).
+    // Read cgrp->level via CO-RE, then look up the parent cgroup
+    // at (level - 1) and inherit its cell assignment.
+    let parent_cell = if let Ok(level) = core_read!(vmlinux::cgroup, cgrp, level) {
+        if level > 0 {
+            let parent = lookup_cgrp_ancestor(cgrp, level - 1);
+            if !parent.is_null() {
+                let cell = match lookup_cgrp_ctx_fallible(parent) {
+                    Some(parent_cgc) => parent_cgc.cell,
+                    None => ROOT_CELL_ID, // Parent not yet initialized
+                };
+                scx_ebpf::cgroup::release(parent);
+                cell
+            } else {
+                ROOT_CELL_ID
+            }
+        } else {
+            ROOT_CELL_ID // level 0 = root
+        }
+    } else {
+        ROOT_CELL_ID // Can't read level — default to root cell
+    };
+    cgc.cell = parent_cell;
     cgc.cell_owner = 0;
 
     // PORT_TODO: Check cpuset with get_cgroup_cpumask(). If cpuset exists,
@@ -1870,6 +1901,57 @@ fn init_cgrp_ctx(cgrp: *mut cgroup) -> i32 {
     // See C source mitosis.bpf.c:1365-1378.
 
     0
+}
+
+/// Initialize a cgroup and all its ancestors, ensuring the hierarchy
+/// is properly set up from root down.
+///
+/// Port of C init_cgrp_ctx_with_ancestors (mitosis.bpf.c:1394-1430).
+///
+/// When the CPU controller is disabled, SCX cgroup callbacks don't fire,
+/// so cgroups may not have cgrp_ctx when first encountered. This function
+/// walks the ancestor chain (from root toward the target) and initializes
+/// any missing cgrp_ctx entries.
+///
+/// Uses `bpf_cgroup_ancestor` kfunc + `bpf_for!` bounded loop.
+/// Each ancestor reference is acquired and released within the loop body.
+#[inline(always)]
+fn init_cgrp_ctx_with_ancestors(cgrp: *mut cgroup) -> i32 {
+    // Read cgrp->level via CO-RE
+    let target_level = match core_read!(vmlinux::cgroup, cgrp, level) {
+        Ok(level) => level as u32,
+        Err(_) => return -2, // Can't read level — bail
+    };
+
+    // Initialize ancestors first, from level 1 (first child of root)
+    // down to level target_level-1. This replicates the order in which
+    // SCX cgroup_init would fire (parents before children).
+    bpf_for!(level, 1, target_level, {
+        let ancestor = lookup_cgrp_ancestor(cgrp, level as i32);
+        if ancestor.is_null() {
+            return -2; // -ENOENT — ancestor lookup failed
+        }
+
+        // Only initialize if not already present in cgroup storage
+        if lookup_cgrp_ctx_fallible(ancestor).is_none() {
+            let ret = init_cgrp_ctx(ancestor);
+            // Release the acquired reference before checking error
+            scx_ebpf::cgroup::release(ancestor);
+            if ret != 0 {
+                return ret;
+            }
+        } else {
+            // Already initialized — just release
+            scx_ebpf::cgroup::release(ancestor);
+        }
+    });
+
+    // Finally, initialize the target cgroup itself (if not already)
+    if lookup_cgrp_ctx_fallible(cgrp).is_some() {
+        return 0; // Already initialized
+    }
+
+    init_cgrp_ctx(cgrp)
 }
 
 /// cgroup_init: Called when a cgroup is created.
@@ -2019,10 +2101,9 @@ pub fn fentry_cpuset_write_resmask(_ctx: *mut core::ffi::c_void) -> i32 {
 ///   arg0: struct cgroup *cgrp
 ///   arg1: const char *cgrp_path
 ///
-/// Note: init_cgrp_ctx_with_ancestors() is not yet implemented.
-/// It walks the cgroup hierarchy upward, ensuring all ancestors have
-/// cgrp_ctx initialized. For now, we call init_cgrp_ctx() which only
-/// initializes the immediate cgroup. See C source mitosis.bpf.c:1394-1434.
+/// Walks the cgroup hierarchy upward, ensuring all ancestors have
+/// cgrp_ctx initialized, then initializes this cgroup.
+/// See C source mitosis.bpf.c:1495-1509.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = "tp_btf/cgroup_mkdir")]
 pub fn tp_cgroup_mkdir(ctx: *mut u64) -> i32 {
@@ -2036,13 +2117,9 @@ pub fn tp_cgroup_mkdir(ctx: *mut u64) -> i32 {
         return 0;
     }
 
-    // PORT_TODO: Use init_cgrp_ctx_with_ancestors(cgrp) to walk up the
-    // hierarchy and ensure all ancestors have cgrp_ctx. For now, just
-    // init this cgroup directly. This works if the parent was already
-    // initialized (e.g., via a previous cgroup_mkdir or cgroup_init).
-    let ret = init_cgrp_ctx(cgrp);
+    let ret = init_cgrp_ctx_with_ancestors(cgrp);
     if ret != 0 {
-        scx_ebpf::scx_bpf_error!("mitosis: init_cgrp_ctx failed in cgroup_mkdir");
+        scx_ebpf::scx_bpf_error!("mitosis: init_cgrp_ctx_with_ancestors failed in cgroup_mkdir");
     }
 
     0
