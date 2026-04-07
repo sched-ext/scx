@@ -35,10 +35,14 @@ scx_ebpf::scx_ebpf_boilerplate!();
 const CACHELINE_SIZE: usize = 64;
 const MAX_CPUS_SHIFT: u32 = 9;
 const MAX_CPUS: u32 = 1 << MAX_CPUS_SHIFT;  // 512
+const MAX_CPUS_U8: usize = (MAX_CPUS as usize) / 8; // 64
 const MAX_CELLS: u32 = 256;
 const MAX_LLCS: u32 = 16;
+const MAX_CG_DEPTH: usize = 256;
 const TIMER_INTERVAL_NS: u64 = 100_000_000;  // 100ms
 const USAGE_HALF_LIFE: u64 = 100_000_000;     // 100ms
+const DEBUG_EVENTS_BUF_SIZE: u32 = 4096;
+const CPUMASK_LONG_ENTRIES: usize = 128;
 
 /// Statistics indices, matching C enum cell_stat_idx.
 #[repr(u32)]
@@ -352,35 +356,80 @@ impl CgrpCtx {
 
 const ROOT_CELL_ID: u32 = 0;
 
+// ── LLC cpumask (fixed-size CPU bitmask for topology arrays) ─────────
+
+/// Fixed-size CPU bitmask matching C `struct llc_cpumask` (intf.h:39-41).
+/// Supports up to CPUMASK_LONG_ENTRIES * 64 = 8192 CPUs.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LlcCpumask {
+    bits: [u64; CPUMASK_LONG_ENTRIES],
+}
+
+impl LlcCpumask {
+    const ZERO: Self = Self {
+        bits: [0; CPUMASK_LONG_ENTRIES],
+    };
+}
+
+// ── Debug events ────────────────────────────────────────────────────
+
+/// Debug event types matching C `enum debug_event_type` (intf.h:44-48).
+#[repr(u32)]
+#[derive(Clone, Copy)]
+enum DebugEventType {
+    CgroupInit = 0,
+    InitTask = 1,
+    CgroupExit = 2,
+}
+
+/// Debug event record matching C `struct debug_event` (intf.h:51-66).
+///
+/// In C this is a discriminated union. Here we flatten the union to the
+/// largest variant (init_task: cgid + pid = 12 bytes) since the BPF
+/// verifier needs a fixed-size type in the array map.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DebugEvent {
+    timestamp: u64,
+    event_type: u32,
+    /// Union field 1: cgid (used by all event types).
+    cgid: u64,
+    /// Union field 2: pid (only used by InitTask).
+    pid: u32,
+    _pad: u32,
+}
+
+impl DebugEvent {
+    const ZERO: Self = Self {
+        timestamp: 0,
+        event_type: 0,
+        cgid: 0,
+        pid: 0,
+        _pad: 0,
+    };
+}
+
 // PORT_TODO: Missing struct cell_cpumask_wrapper — holds kptr cpumask + tmp_cpumask
-// for double-buffered cpumask updates. See C source mitosis.bpf.c:321-328
-
-// PORT_TODO: Missing struct debug_event — discriminated union for debug events
-// (CGROUP_INIT, INIT_TASK, CGROUP_EXIT). See C source intf.h:50-66
-
-// PORT_TODO: Missing struct update_timer — wraps bpf_timer for periodic reconfiguration.
-// See C source mitosis.bpf.c:76-78
+// for double-buffered cpumask updates. Blocked on kptr support in aya.
+// See C source mitosis.bpf.c:321-328
 
 // PORT_TODO: Missing struct cpumask_entry — per-CPU scratch buffer for reading
 // cgroup cpusets. See C source mitosis.bpf.c:847-850
-
-// PORT_TODO: Missing struct llc_cpumask { bits: [u64; 128] } — fixed-size CPU bitmask
-// for LLC topology arrays. See C source intf.h:39-41
 
 // ── BPF maps ──────────────────────────────────────────────────────────
 
 scx_ebpf::bpf_map!(TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new());
 scx_ebpf::bpf_map!(CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new());
 scx_ebpf::bpf_map!(CELLS: BpfArray<Cell, { MAX_CELLS as usize }> = BpfArray::new());
+scx_ebpf::bpf_map!(DEBUG_EVENTS: BpfArray<DebugEvent, { DEBUG_EVENTS_BUF_SIZE as usize }> = BpfArray::new());
 
 // PORT_TODO: CGRP_CTX needs BPF_MAP_TYPE_CGRP_STORAGE which is tracked
 // by mitosis-cgroup-storage-map task. For now we skip cgroup storage.
 
-// PORT_TODO: Missing debug_events map (BPF_MAP_TYPE_ARRAY, max_entries=4096)
-// — circular buffer for debug event records. See C source mitosis.bpf.c:69-74
-
 // PORT_TODO: Missing update_timer map (BPF_MAP_TYPE_ARRAY, max_entries=1)
-// — holds bpf_timer for periodic cell reconfiguration. See C source mitosis.bpf.c:76-85
+// — holds bpf_timer for periodic cell reconfiguration. Blocked on
+// bpf_timer support in aya. See C source mitosis.bpf.c:76-85
 
 // PORT_TODO: Missing cell_cpumasks map (BPF_MAP_TYPE_ARRAY, max_entries=MAX_CELLS)
 // — stores cell_cpumask_wrapper { cpumask: bpf_cpumask __kptr, tmp_cpumask: bpf_cpumask __kptr }
@@ -392,11 +441,38 @@ scx_ebpf::bpf_map!(CELLS: BpfArray<Cell, { MAX_CELLS as usize }> = BpfArray::new
 
 // ── Globals ───────────────────────────────────────────────────────────
 
+// Const volatile globals set by userspace before load (rodata section).
 scx_ebpf::bpf_global!(NR_LLC: u32 = 1);
 scx_ebpf::bpf_global!(ENABLE_LLC_AWARENESS: bool = false);
 scx_ebpf::bpf_global!(ENABLE_WORK_STEALING: bool = false);
 scx_ebpf::bpf_global!(SLICE_NS: u64 = 20_000_000); // 20ms default
 scx_ebpf::bpf_global!(SMT_ENABLED: bool = true);
+scx_ebpf::bpf_global!(NR_POSSIBLE_CPUS: u32 = 1);
+scx_ebpf::bpf_global!(ROOT_CGID: u64 = 1);
+scx_ebpf::bpf_global!(DEBUG_EVENTS_ENABLED: bool = false);
+scx_ebpf::bpf_global!(EXITING_TASK_WORKAROUND_ENABLED: bool = true);
+scx_ebpf::bpf_global!(CPU_CONTROLLER_DISABLED: bool = false);
+scx_ebpf::bpf_global!(REJECT_MULTICPU_PINNING: bool = false);
+
+// All-CPUs bitmask (one bit per CPU, supports up to 512 CPUs).
+scx_ebpf::bpf_global_array!(ALL_CPUS: [u8; MAX_CPUS_U8] = [0u8; MAX_CPUS_U8]);
+
+// LLC topology arrays, populated by userspace before load.
+scx_ebpf::bpf_global_array!(CPU_TO_LLC: [u32; { MAX_CPUS as usize }] = [0u32; { MAX_CPUS as usize }]);
+// PORT_TODO: LLC_TO_CPUS needs LlcCpumask which is large (128*8 = 1024 bytes per entry).
+// bpf_global_array doesn't support custom struct values. Need a BpfArray map instead,
+// or flatten to [u64; MAX_LLCS * CPUMASK_LONG_ENTRIES].
+// See C source mitosis.bpf.c:54
+
+// Mutable globals (bss section — writable at runtime).
+// These use raw statics since bpf_global! generates const-section globals.
+// In BPF, the linker places non-const statics in .bss which is mutable.
+#[unsafe(no_mangle)]
+static mut CONFIGURATION_SEQ: u32 = 0;
+#[unsafe(no_mangle)]
+static mut APPLIED_CONFIGURATION_SEQ: u32 = 0;
+#[unsafe(no_mangle)]
+static mut DEBUG_EVENT_POS: u32 = 0;
 
 /// When LLC awareness is disabled, use a single "fake" LLC index to flatten
 /// the entire cell's topology into one scheduling domain.
@@ -411,31 +487,16 @@ const SCX_KICK_IDLE: u64 = 1;
 /// SCX_ENQ_CPU_SELECTED flag — set when select_cpu already picked a CPU.
 const SCX_ENQ_CPU_SELECTED: u64 = 1 << 52;
 
-// PORT_TODO: Missing const volatile globals populated by userspace — see C source mitosis.bpf.c:38-48
-// - nr_possible_cpus: u32 — number of possible CPUs
-// - smt_enabled: bool — whether SMT is active
-// - all_cpus: [u8; MAX_CPUS_U8] — bitmask of all online CPUs
-// - slice_ns: u64 — scheduling time slice (SCX_SLICE_DFL)
-// - root_cgid: u64 — root cgroup kn->id (default 1)
-// - debug_events_enabled: bool — enable debug event ring buffer
-// - exiting_task_workaround_enabled: bool — workaround for exiting tasks with offline cgroups
-// - cpu_controller_disabled: bool — use tracepoints instead of SCX cgroup callbacks
-// - reject_multicpu_pinning: bool — reject tasks with partial cell CPU affinity
-
-// PORT_TODO: Missing mutable globals — see C source mitosis.bpf.c:53-67
-// - cpu_to_llc: [u32; MAX_CPUS] — per-CPU LLC mapping (populated by userspace)
-// - llc_to_cpus: [llc_cpumask; MAX_LLCS] — per-LLC CPU bitmasks (populated by userspace)
-// - configuration_seq: u32 — bumped on cpuset writes, drives timer reconfiguration
-// - applied_configuration_seq: u32 — bumped when timer finishes applying config
-// - debug_event_pos: u32 — circular buffer write position for debug events
-// - level_cells: [u32; MAX_CG_DEPTH] — tracks ancestor cell IDs during cgroup tree walk
-
 // PORT_TODO: Missing kptr globals — see C source mitosis.bpf.c:87-88
 // - all_cpumask: bpf_cpumask __kptr — all-CPUs mask, needs kptr support in aya
 // - root_cgrp: cgroup __kptr — acquired reference to root cgroup
 
 // PORT_TODO: Missing UEI (User Exit Info) — see C source mitosis.bpf.c:90
 // - UEI_DEFINE(uei) — enables structured exit reporting to userspace
+
+// PORT_TODO: Missing level_cells: [u32; MAX_CG_DEPTH] mutable global
+// — tracks ancestor cell IDs during cgroup tree walk in update_timer_cb.
+// See C source mitosis.bpf.c:967
 
 // ── Helper functions ──────────────────────────────────────────────────
 
@@ -511,14 +572,79 @@ fn advance_dsq_vtimes(cell: &mut Cell, cctx: &mut CpuCtx, tctx: &TaskCtx, task_v
 // PORT_TODO: Missing allocate_cell() / free_cell() — atomic cell pool management using
 // __sync_bool_compare_and_swap on cell.in_use. See C source mitosis.bpf.c:219-251
 
-// PORT_TODO: Missing record_cgroup_init/record_init_task/record_cgroup_exit — debug event
-// recording to circular buffer. See C source mitosis.bpf.c:256-315
+/// Record a cgroup_init debug event. See C source mitosis.bpf.c:256-274.
+#[inline(always)]
+fn record_cgroup_init(cgid: u64) {
+    if !DEBUG_EVENTS_ENABLED.get() {
+        return;
+    }
+    let pos = unsafe {
+        let p = DEBUG_EVENT_POS;
+        DEBUG_EVENT_POS = p.wrapping_add(1);
+        p
+    };
+    let idx = pos % DEBUG_EVENTS_BUF_SIZE;
+    if let Some(event) = DEBUG_EVENTS.get_mut(idx) {
+        event.timestamp = kfuncs::now();
+        event.event_type = DebugEventType::CgroupInit as u32;
+        event.cgid = cgid;
+        event.pid = 0;
+    }
+}
+
+/// Record an init_task debug event. See C source mitosis.bpf.c:276-295.
+#[inline(always)]
+fn record_init_task(cgid: u64, pid: u32) {
+    if !DEBUG_EVENTS_ENABLED.get() {
+        return;
+    }
+    let pos = unsafe {
+        let p = DEBUG_EVENT_POS;
+        DEBUG_EVENT_POS = p.wrapping_add(1);
+        p
+    };
+    let idx = pos % DEBUG_EVENTS_BUF_SIZE;
+    if let Some(event) = DEBUG_EVENTS.get_mut(idx) {
+        event.timestamp = kfuncs::now();
+        event.event_type = DebugEventType::InitTask as u32;
+        event.cgid = cgid;
+        event.pid = pid;
+    }
+}
+
+/// Record a cgroup_exit debug event. See C source mitosis.bpf.c:297-315.
+#[inline(always)]
+fn record_cgroup_exit(cgid: u64) {
+    if !DEBUG_EVENTS_ENABLED.get() {
+        return;
+    }
+    let pos = unsafe {
+        let p = DEBUG_EVENT_POS;
+        DEBUG_EVENT_POS = p.wrapping_add(1);
+        p
+    };
+    let idx = pos % DEBUG_EVENTS_BUF_SIZE;
+    if let Some(event) = DEBUG_EVENTS.get_mut(idx) {
+        event.timestamp = kfuncs::now();
+        event.event_type = DebugEventType::CgroupExit as u32;
+        event.cgid = cgid;
+        event.pid = 0;
+    }
+}
 
 // PORT_TODO: Missing lookup_cell_cpumask(idx) — reads cell_cpumask_wrapper.cpumask kptr.
 // Blocked on cell_cpumasks map + kptr support. See C source mitosis.bpf.c:338-353
 
-// PORT_TODO: Missing cstat_add/cstat_inc — per-cell statistics helpers using MEMBER_VPTR
-// for verifier-safe array access. See C source mitosis.bpf.c:358-372
+/// Increment a per-cell statistic counter.
+///
+/// Mirrors C cstat_inc() — see mitosis.bpf.c:369-372.
+/// Bounds-checks cell and stat indices to satisfy the BPF verifier.
+#[inline(always)]
+fn cstat_inc(idx: CellStat, cell: u32, cctx: &mut CpuCtx) {
+    if (cell as usize) < MAX_CELLS as usize && (idx as usize) < NR_CSTATS {
+        cctx.cstats[cell as usize][idx as usize] += 1;
+    }
+}
 
 // PORT_TODO: Missing update_task_cpumask(p, tctx) — intersects cell cpumask with task
 // affinity, handles per-CPU pinning vs cell-wide path vs LLC-aware path, sets tctx->dsq
@@ -546,11 +672,64 @@ fn advance_dsq_vtimes(cell: &mut Cell, cctx: &mut CpuCtx, tctx: &TaskCtx, task_v
 // PORT_TODO: Missing init_task_impl(p, cgrp) — full task init: creates cpumask kptr,
 // initializes LLC fields, calls update_task_cell. See C source mitosis.bpf.c:1591-1627
 
+/// Validate configuration flags. See C source mitosis.bpf.c:1561-1579.
+#[inline(always)]
+fn validate_flags() -> i32 {
+    let nr_llc = NR_LLC.get();
+    if ENABLE_LLC_AWARENESS.get() && (nr_llc < 1 || nr_llc > MAX_LLCS) {
+        return -22; // -EINVAL
+    }
+    if ENABLE_WORK_STEALING.get() && !ENABLE_LLC_AWARENESS.get() {
+        return -22; // -EINVAL
+    }
+    0
+}
+
+/// Validate data populated by userspace. See C source mitosis.bpf.c:1581-1589.
+#[inline(always)]
+fn validate_userspace_data() -> i32 {
+    if NR_POSSIBLE_CPUS.get() > MAX_CPUS {
+        return -22; // -EINVAL
+    }
+    0
+}
+
+/// Zero vtime_now for all LLCs in a cell.
+/// See C source llc_aware.bpf.h:191-202.
+#[inline(always)]
+fn zero_cell_vtimes(cell: &mut Cell) {
+    if ENABLE_LLC_AWARENESS.get() {
+        for i in 0..(MAX_LLCS as usize) {
+            cell.llcs[i].vtime_now = 0;
+        }
+    } else {
+        cell.llcs[FAKE_FLAT_CELL_LLC as usize].vtime_now = 0;
+    }
+}
+
+/// Check if an LLC ID is valid.
+/// See C source llc_aware.bpf.h:28-34.
+#[inline(always)]
+fn llc_is_valid(llc_id: u32) -> bool {
+    llc_id != u32::MAX && llc_id < MAX_LLCS
+}
+
+/// Initialize task LLC fields.
+/// See C source llc_aware.bpf.h:36-45.
+#[inline(always)]
+fn init_task_llc(tctx: &mut TaskCtx) {
+    tctx.llc = -1; // LLC_INVALID = ~0u32 as i32
+    if ENABLE_WORK_STEALING.get() {
+        tctx.steal_count = 0;
+        tctx.last_stolen_at = 0;
+    }
+}
+
 // === LLC-aware helpers (from llc_aware.bpf.h) ===
 
 // PORT_TODO: Missing recalc_cell_llc_counts(cell_idx, explicit_mask) — recomputes per-LLC
 // CPU counts within a cell, using bpf_cpumask_and + bpf_cpumask_weight under spin lock.
-// See C source llc_aware.bpf.h:65-123
+// Blocked on cell cpumask kptrs. See C source llc_aware.bpf.h:65-123
 
 // PORT_TODO: Missing pick_llc_for_task(cell_id) — weighted random LLC selection using
 // bpf_get_prandom_u32, proportional to per-LLC CPU count.
