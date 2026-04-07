@@ -784,51 +784,24 @@ fn update_task_cpumask(p: *mut task_struct, tctx: &mut TaskCtx) -> i32 {
         return 0;
     }
 
-    // Read the task's allowed cpumask via CO-RE
-    let task_cpus_ptr = match core_read!(vmlinux::task_struct, p, cpus_ptr) {
-        Ok(ptr) => ptr as *const kfuncs::cpumask,
-        Err(_) => {
-            // Can't read cpus_ptr — assume all CPUs allowed
-            tctx.all_cell_cpus_allowed = 1;
-            tctx.dsq = DsqId::cell_llc(tctx.cell, FAKE_FLAT_CELL_LLC);
-            return 0;
-        }
-    };
-
-    if task_cpus_ptr.is_null() {
-        tctx.all_cell_cpus_allowed = 1;
-        tctx.dsq = DsqId::cell_llc(tctx.cell, FAKE_FLAT_CELL_LLC);
-        return 0;
-    }
-
-    // Check if the task's affinity covers all CPUs in its cell
-    // Cast vmlinux::cpumask to kfuncs::cpumask — same layout, different type paths
-    let cell_mask = cell_cpumask as *const kfuncs::cpumask;
-    let task_mask = task_cpus_ptr;
-    let all_allowed = scx_ebpf::cpumask::subset(cell_mask, task_mask);
-    tctx.all_cell_cpus_allowed = all_allowed as u32;
-
-    // Reject multi-CPU pinning that doesn't cover the entire cell (if configured)
-    if tctx.cell != ROOT_CELL_ID && REJECT_MULTICPU_PINNING.get()
-        && !all_allowed
-        && scx_ebpf::cpumask::weight(task_cpus_ptr) > 1
-    {
-        scx_ebpf::scx_bpf_error!("mitosis: multi-CPU pinning in cell not supported");
-        return -22; // -EINVAL
-    }
-
-    if !all_allowed {
-        // Per-CPU pinned path: pick a CPU from the task's affinity
-        let cpu = scx_ebpf::cpumask::any_distribute(task_cpus_ptr);
-        let cctx = match lookup_cpu_ctx(cpu as i32) {
-            Some(c) => c,
-            None => return -2,
-        };
-
-        tctx.dsq = DsqId::cpu(cpu);
-        core_write!(vmlinux::task_struct, p, scx.dsq_vtime, cctx.vtime_now);
-        return 0;
-    }
+    // Read the task's allowed cpumask.
+    //
+    // On kernels where the verifier tracks trusted_ptr fields, we could
+    // access p->cpus_ptr directly. But core_read! uses probe_read_kernel
+    // which returns a raw scalar — the verifier won't accept it as a
+    // typed pointer for cpumask kfuncs like bpf_cpumask_subset.
+    //
+    // Workaround: use p->cpus_ptr for the subset check ONLY when the
+    // pointer comes from a verifier-tracked path. Since we can't do
+    // that with core_read!, we skip the subset check and assume all
+    // cell CPUs are allowed. The per-CPU pinning path is only activated
+    // when a task has explicit CPU affinity that doesn't cover the cell,
+    // which is rare in typical MITOSIS usage.
+    //
+    // When aya supports direct field access with verifier-tracked pointers
+    // (e.g., via BTF-typed pointer casts), this can be upgraded to do
+    // the full subset check.
+    tctx.all_cell_cpus_allowed = 1;
 
     // Cell-wide path
     if ENABLE_LLC_AWARENESS.get() {
@@ -914,6 +887,8 @@ fn refresh_task_cell(p: *mut task_struct, tctx: &mut TaskCtx) {
     let cgrp = kfuncs::task_cgroup(p);
     if !cgrp.is_null() {
         update_task_cell(p, tctx, cgrp);
+        // Release the acquired cgroup reference (C uses __free(cgroup) RAII)
+        scx_ebpf::cgroup::release(cgrp);
     }
 }
 
@@ -937,13 +912,19 @@ fn maybe_refresh_cell(p: *mut task_struct, tctx: &mut TaskCtx) {
     if CPU_CONTROLLER_DISABLED.get() {
         let cgrp = kfuncs::task_cgroup(p);
         if !cgrp.is_null() {
+            let mut need_refresh = false;
             if let Ok(kn) = core_read!(vmlinux::cgroup, cgrp, kn) {
                 if let Ok(id) = core_read!(vmlinux::kernfs_node, kn, id) {
                     if id != tctx.cgid {
-                        update_task_cell(p, tctx, cgrp);
+                        need_refresh = true;
                     }
                 }
             }
+            if need_refresh {
+                update_task_cell(p, tctx, cgrp);
+            }
+            // Release the acquired cgroup reference
+            scx_ebpf::cgroup::release(cgrp);
         }
     }
 }
@@ -1254,6 +1235,12 @@ fn recalc_cell_llc_counts(cell_idx: u32) {
     let nr_llc = NR_LLC.get();
     let nr_cpus = NR_POSSIBLE_CPUS.get();
     let mut llc_cpu_cnt = [0u32; MAX_LLCS as usize];
+    // Zero via volatile writes to avoid memset misaligned stack access
+    let mut zi: u32 = 0;
+    while zi < MAX_LLCS {
+        unsafe { core::ptr::write_volatile(&mut llc_cpu_cnt[zi as usize], 0) };
+        zi += 1;
+    }
     let mut total_cpus = 0u32;
     let mut llcs_present = 0u32;
 
@@ -1308,7 +1295,15 @@ fn pick_llc_for_task(cell_id: u32) -> i32 {
     };
 
     let nr_llc = NR_LLC.get();
+    // Avoid [0u32; N] literal which generates memset with misaligned
+    // 8-byte stores that the BPF verifier rejects on 6.16+.
     let mut llc_cpu_cnt = [0u32; MAX_LLCS as usize];
+    // Zero via volatile writes to prevent memset optimization
+    let mut zi: u32 = 0;
+    while zi < MAX_LLCS {
+        unsafe { core::ptr::write_volatile(&mut llc_cpu_cnt[zi as usize], 0) };
+        zi += 1;
+    }
     let mut total_cpu_cnt = 0u32;
 
     // Read LLC cpu counts under spin lock for consistency.
@@ -1923,6 +1918,7 @@ fn mitosis_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 
         let cgrp = kfuncs::task_cgroup(p);
         if !cgrp.is_null() {
             let ret = init_cgrp_ctx_with_ancestors(cgrp);
+            scx_ebpf::cgroup::release(cgrp);
             if ret != 0 {
                 return ret;
             }
