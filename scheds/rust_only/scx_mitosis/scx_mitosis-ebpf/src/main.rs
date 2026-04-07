@@ -599,7 +599,12 @@ fn lookup_cgrp_ctx(cgrp: *mut cgroup) -> Option<&'static mut CgrpCtx> {
 // For now, cgroup callbacks receive the cgroup directly from the kernel.
 
 /// Allocate a free cell from the cell pool.
-/// Uses atomic CAS on cell.in_use to handle concurrent access.
+///
+/// Uses the cell's BPF spin lock to atomically check and set `in_use`.
+/// The C version uses `__sync_bool_compare_and_swap` (lock-free atomic CAS)
+/// which maps to `BPF_ATOMIC | BPF_CMPXCHG`. We use spin_lock instead
+/// because Rust BPF doesn't yet emit atomic CAS instructions.
+///
 /// See C source mitosis.bpf.c:219-235.
 #[inline(always)]
 fn allocate_cell() -> i32 {
@@ -607,9 +612,23 @@ fn allocate_cell() -> i32 {
     let mut cell_idx: u32 = 0;
     while cell_idx < MAX_CELLS {
         if let Some(c) = lookup_cell(cell_idx) {
-            // Atomic compare-and-swap: if in_use == 0, set to 1
-            if c.in_use == 0 {
+            // Acquire spin lock for atomic check-and-set of in_use.
+            // PORT_TODO: Replace with BPF atomic CAS (__sync_bool_compare_and_swap)
+            // once aya-ebpf supports emitting BPF_ATOMIC|BPF_CMPXCHG instructions.
+            // The spin lock approach works but is heavier than the C version's
+            // lock-free CAS. Note: spin_lock/unlock on map values has verifier
+            // restrictions — we must not call most helpers while holding it.
+            let lock_ptr = &c.lock as *const BpfSpinLock as *mut BpfSpinLock;
+            scx_ebpf::helpers::spin_lock(lock_ptr);
+            let was_free = c.in_use == 0;
+            if was_free {
                 c.in_use = 1;
+            }
+            scx_ebpf::helpers::spin_unlock(lock_ptr);
+
+            if was_free {
+                // zero_cell_vtimes AFTER releasing lock — it accesses the cell
+                // but doesn't need the lock since no other CPU can claim this cell.
                 zero_cell_vtimes(c);
                 return cell_idx as i32;
             }
@@ -887,7 +906,18 @@ fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
 
     tctx.basis_vtime = basis_vtime;
 
-    // Clamp vtime: cap accumulated idle budget to one slice
+    // Upper vtime clamp: reject tasks with absurdly far-ahead vtime.
+    // This catches bugs in vtime accounting that could starve other tasks.
+    // Matches C: time_after(vtime, basis_vtime + 8192 * slice_ns) — mitosis.bpf.c:730
+    if time_after(vtime, basis_vtime.wrapping_add(8192 * slice)) {
+        // PORT_TODO: scx_bpf_error("vtime too far ahead: pid=%d vtime=%llu basis=%llu")
+        // For now, clamp to basis + 8192*slice instead of erroring, since we lack
+        // scx_bpf_error. The C version errors here but clamping is safer for a port.
+        vtime = basis_vtime.wrapping_add(8192 * slice);
+    }
+
+    // Lower vtime clamp: cap accumulated idle budget to one slice.
+    // Matches C: time_before(vtime, basis_vtime - slice_ns) — mitosis.bpf.c:738
     if time_before(vtime, basis_vtime.wrapping_sub(slice)) {
         vtime = basis_vtime.wrapping_sub(slice);
     }
@@ -1039,20 +1069,112 @@ fn mitosis_set_cpumask(p: *mut task_struct, _cpumask: *mut core::ffi::c_void) {
 }
 
 fn mitosis_init() -> i32 {
-    // PORT_TODO: Full init implementation — see C source mitosis.bpf.c:1801-2013
-    // Must:
-    // 1. validate_flags() and validate_userspace_data()
-    // 2. Acquire root cgroup (bpf_cgroup_from_id), store as kptr
-    // 3. Initialize cgrp_ctx for root cgroup
-    // 4. Build all_cpumask from all_cpus[] bitmap
-    // 5. Create per-CPU DSQs (scx_bpf_create_dsq for each online CPU)
-    // 6. Set cpu_ctx->llc from cpu_to_llc[] array
-    // 7. When cpu_controller_disabled: iterate all cgroups and init cgrp_ctx
-    // 8. Create per-cell DSQs (cell+LLC combinations)
-    // 9. Initialize cell_cpumasks (cpumask + tmp_cpumask kptrs)
-    // 10. Recalc LLC counts for root cell
-    // 11. Mark cell 0 as in_use
-    // 12. Setup and arm bpf_timer for periodic reconfiguration
+    // ── Step 1: Validate configuration ──────────────────────────────
+    let ret = validate_flags();
+    if ret != 0 {
+        return ret;
+    }
+    let ret = validate_userspace_data();
+    if ret != 0 {
+        return ret;
+    }
+
+    // PORT_TODO(step 2): Acquire root cgroup via bpf_cgroup_from_id(ROOT_CGID).
+    // Store as kptr for cgroup tree walking. Blocked on kptr support.
+    // See C source mitosis.bpf.c:1836-1848
+
+    // PORT_TODO(step 3): Initialize cgrp_ctx for root cgroup.
+    // Requires root cgroup kptr from step 2.
+    // See C source mitosis.bpf.c:1850-1859
+
+    // PORT_TODO(step 4): Build all_cpumask from ALL_CPUS[] bitmap.
+    // Requires bpf_cpumask_create() + bpf_cpumask_set_cpu() + kptr storage.
+    // See C source mitosis.bpf.c:1862-1882
+
+    // ── Step 5: Create per-CPU DSQs ─────────────────────────────────
+    // Each online CPU gets its own DSQ for pinned tasks.
+    // See C source mitosis.bpf.c:1884-1907
+    let nr_cpus = NR_POSSIBLE_CPUS.get();
+    let mut cpu: u32 = 0;
+    while cpu < nr_cpus && cpu < MAX_CPUS {
+        // Check if this CPU is in the ALL_CPUS bitmask
+        let byte_idx = (cpu / 8) as usize;
+        let bit_idx = (cpu % 8) as u8;
+        if byte_idx < MAX_CPUS_U8 {
+            if let Some(byte) = ALL_CPUS.get(byte_idx) {
+                if byte & (1 << bit_idx) != 0 {
+                    let cpu_dsq = DsqId::cpu(cpu);
+                    let ret = kfuncs::create_dsq(cpu_dsq.raw(), -1);
+                    if ret != 0 {
+                        // PORT_TODO: scx_bpf_error("Failed to create CPU DSQ for cpu %d", cpu)
+                        return ret;
+                    }
+                }
+            }
+        }
+        cpu += 1;
+    }
+
+    // ── Step 6: Set cpu_ctx->llc from CPU_TO_LLC[] ──────────────────
+    // See C source mitosis.bpf.c:1909-1931
+    cpu = 0;
+    while cpu < nr_cpus && cpu < MAX_CPUS {
+        // PORT_TODO: Use PerCpuArray::get_percpu(0, cpu) for cross-CPU access.
+        // For now, cpu_ctx->llc defaults to 0 which is correct when
+        // LLC-awareness is disabled (single flat domain).
+        // The userspace loader populates CPU_TO_LLC[] but we can't read
+        // per-CPU array entries for other CPUs yet.
+        cpu += 1;
+    }
+
+    // PORT_TODO(step 7): When cpu_controller_disabled, iterate all cgroups
+    // via bpf_cgroup_iter and init cgrp_ctx for each.
+    // See C source mitosis.bpf.c:1933-1952
+
+    // ── Step 8: Create cell DSQs ────────────────────────────────────
+    // Create DSQs for all cell+LLC combinations. Only cell 0 (root) is
+    // active initially; the rest are created preemptively so they're
+    // ready when cells are allocated dynamically.
+    // See C source mitosis.bpf.c:1954-1976
+    let nr_llc = if ENABLE_LLC_AWARENESS.get() { NR_LLC.get() } else { 1 };
+    let mut cell: u32 = 0;
+    while cell < MAX_CELLS {
+        let mut llc: u32 = 0;
+        while llc < nr_llc && llc < MAX_LLCS {
+            let dsq = DsqId::cell_llc(cell, llc);
+            let ret = kfuncs::create_dsq(dsq.raw(), -1);
+            if ret != 0 {
+                // PORT_TODO: scx_bpf_error("Failed to create cell+LLC DSQ")
+                return ret;
+            }
+            llc += 1;
+        }
+        cell += 1;
+    }
+
+    // PORT_TODO(step 9): Initialize cell_cpumasks (cpumask + tmp_cpumask kptrs).
+    // Requires cell_cpumasks map + bpf_cpumask_create kptr.
+    // See C source mitosis.bpf.c:1978-1992
+
+    // PORT_TODO(step 10): Recalc LLC counts for root cell.
+    // Requires cell cpumask kptrs.
+    // See C source mitosis.bpf.c:1994-1998
+
+    // ── Step 11: Mark cell 0 (root cell) as in_use ──────────────────
+    // See C source mitosis.bpf.c:2000-2002
+    if let Some(root_cell) = lookup_cell(ROOT_CELL_ID) {
+        root_cell.in_use = 1;
+        // All CPUs start in cell 0 (root cell). The cpu_cnt will be set
+        // by the timer callback once cell cpumasks are implemented.
+        root_cell.cpu_cnt = nr_cpus;
+    } else {
+        return -2; // -ENOENT
+    }
+
+    // PORT_TODO(step 12): Setup and arm bpf_timer for periodic reconfiguration.
+    // Requires bpf_timer support in aya (bpf_timer_init + bpf_timer_set_callback + bpf_timer_start).
+    // See C source mitosis.bpf.c:2004-2013
+
     0
 }
 
@@ -1202,13 +1324,37 @@ fn mitosis_cgroup_move(p: *mut task_struct, _from: *mut core::ffi::c_void, to: *
     // assignment refreshed on next enqueue via maybe_refresh_cell.
 }
 
-// PORT_TODO: Missing dump callback — see C source mitosis.bpf.c:1690-1782
-// Dumps all in-use cells with cpumasks, vtime, nr_queued for each DSQ.
-// Dumps per-CPU cell assignment and vtime. If debug_events_enabled, dumps
-// the circular debug event buffer.
+/// dump: Called by the kernel to dump overall scheduler state.
+///
+/// Port of C mitosis_dump (mitosis.bpf.c:1690-1782):
+/// Iterates all in-use cells, printing cpumask, vtime, and nr_queued
+/// for each DSQ. Then per-CPU cell assignment and vtime.
+///
+/// PORT_TODO: scx_bpf_dump() is a variadic printf-like kfunc not yet
+/// available in scx-ebpf. Until we add a wrapper, this is a no-op stub.
+fn mitosis_dump(_dctx: *mut core::ffi::c_void) {
+    // PORT_TODO: Add scx_bpf_dump() kfunc wrapper to scx-ebpf, then:
+    // 1. Iterate CELLS[0..MAX_CELLS], for each in_use cell:
+    //    - Print cell index, vtime_now, nr_queued for each LLC DSQ
+    // 2. Iterate CPUs [0..nr_possible_cpus]:
+    //    - Print CPU cell assignment, vtime_now, per-CPU DSQ nr_queued
+    // 3. If debug_events_enabled, dump the debug event circular buffer
+    // See C source mitosis.bpf.c:1690-1782
+}
 
-// PORT_TODO: Missing dump_task callback — see C source mitosis.bpf.c:1784-1799
-// Dumps per-task vtime, basis_vtime, cell, DSQ, all_cell_cpus_allowed, cpumask.
+/// dump_task: Called by the kernel to dump per-task debug info.
+///
+/// Port of C mitosis_dump_task (mitosis.bpf.c:1784-1799):
+/// Prints task's vtime, basis_vtime, cell, DSQ, all_cell_cpus_allowed.
+///
+/// PORT_TODO: scx_bpf_dump() not yet available. Same blocker as dump().
+fn mitosis_dump_task(_dctx: *mut core::ffi::c_void, p: *mut task_struct) {
+    // Read task context to validate it exists (verifier path coverage)
+    let _tctx = lookup_task_ctx(p);
+    // PORT_TODO: Once scx_bpf_dump() wrapper exists, print:
+    // Task[pid] vtime=... basis_vtime=... cell=... dsq=... all_cpus=...
+    // See C source mitosis.bpf.c:1784-1799
+}
 
 // PORT_TODO: Missing fentry/cpuset_write_resmask program — see C source mitosis.bpf.c:1316-1326
 // fentry hook that bumps configuration_seq when a cpuset.cpus file is written,
