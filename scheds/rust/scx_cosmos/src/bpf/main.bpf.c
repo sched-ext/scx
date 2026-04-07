@@ -1475,6 +1475,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 	int cpu;
 	struct cpu_ctx *cctx;
 
+	err = scx_lib_init();
+	if (err)
+		return err;
+
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	/*

@@ -25,6 +25,7 @@ private(LAVD) struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CP
 private(LAVD) struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
 private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+private(LAVD) struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent (steady) CPUs */
 
 const volatile u64	nr_llcs;	/* number of LLC domains */
 volatile u64		nr_cpus_onln;	/* current number of online CPUs */
@@ -384,12 +385,73 @@ bool queued_on_cpu(struct cpu_ctx *cpuc)
 	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id)))
 		return true;
 
+	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpuc->cpdom_id)))
+		return true;
+
 	return false;
 }
+
 __hidden
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
+u64 peek_dsq_vtime(u64 dsq_id)
 {
+	struct task_struct *p;
+
+	p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	return p ? p->scx.dsq_vtime : U64_MAX;
+}
+
+__hidden
+void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b,
+	       struct dsq_entry *c)
+{
+	struct dsq_entry t;
+
+	if (b->vtime < a->vtime) { t = *a; *a = *b; *b = t; }
+	if (c->vtime < b->vtime) { t = *b; *b = *c; *c = t; }
+	if (b->vtime < a->vtime) { t = *a; *a = *b; *b = t; }
+}
+
+__hidden
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc)
+{
+	struct cpdom_ctx *cpdomc;
+
 	if (per_cpu_dsq || (pinned_slice_ns && is_pinned(p)))
 		return cpu_to_dsq(cpuc->cpu_id);
-	return cpdom_to_dsq(cpuc->cpdom_id);
+
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+	if (cpdomc &&
+	    preemption_vulnerability(taskc->normalized_lat_cri,
+				    taskc->util_est) >= cpdomc->vuln_thresh)
+		return cpdom_to_dsq(cpuc->cpdom_id);
+
+	return cpdom_to_turb_dsq(cpuc->cpdom_id);
+}
+
+/**
+ * normalize_lat_cri - Normalize latency criticality to 1024 scale
+ * @lat_cri: The latency criticality value from task_ctx
+ *
+ * Normalizes the lat_cri value from the range [0, max_lat_cri] to [0, 1024].
+ * Uses the system-wide max_lat_cri as the upper bound for normalization.
+ *
+ * Returns: Normalized value in range [0, 1024]
+ */
+__hidden
+u16 normalize_lat_cri(u16 lat_cri)
+{
+	u32 max = sys_stat.max_lat_cri;
+
+	/*
+	 * Handle edge cases:
+	 * - If max_lat_cri is 0, return 0 (no tasks have run yet)
+	 * - If lat_cri >= max_lat_cri, return 1024 (maximum)
+	 */
+	if (max == 0)
+		return 0;
+
+	if (lat_cri >= max)
+		return 1024;
+
+	return (u16)(((u64)lat_cri << LAVD_SHIFT) / max);
 }

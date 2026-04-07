@@ -8,6 +8,7 @@
 
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.bpf.h>
+#include <lib/ravg.h>
 #include <lib/sdt_task.h>
 #include <lib/atq.h>
 
@@ -27,6 +28,7 @@
 #define s2p(scale)			(((scale) * 100) >> LAVD_SHIFT)
 
 #define cpdom_to_dsq(cpdom_id)		((cpdom_id) | LAVD_DSQ_TYPE_CPDOM << LAVD_DSQ_TYPE_SHFT)
+#define cpdom_to_turb_dsq(cpdom_id)	((cpdom_id) | LAVD_DSQ_TYPE_CPDOM_TURB << LAVD_DSQ_TYPE_SHFT)
 #define dsq_to_cpdom(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_to_cpu(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_type(dsq_id)		(((dsq_id) & LAVD_DSQ_TYPE_MASK) >> LAVD_DSQ_TYPE_SHFT)
@@ -48,8 +50,9 @@ enum {
 	LAVD_DSQ_TYPE_MASK		= 0x3 << LAVD_DSQ_TYPE_SHFT,
 	LAVD_DSQ_ID_SHFT		= 0,
 	LAVD_DSQ_ID_MASK		= 0xfff << LAVD_DSQ_ID_SHFT,
-	LAVD_DSQ_NR_TYPES		= 2,
+	LAVD_DSQ_NR_TYPES		= 3,
 	LAVD_DSQ_TYPE_CPDOM		= 1,
+	LAVD_DSQ_TYPE_CPDOM_TURB		= 2,
 	LAVD_DSQ_TYPE_CPU		= 0,
 };
 
@@ -87,6 +90,13 @@ enum consts_internal {
 	LAVD_LC_WAKE_INTERVAL_MIN	= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
 	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
+	LAVD_LC_LATENCY_SENSITIVE_THRESH = LAVD_SCALE - (LAVD_SCALE >> 3), /* top 12.5% most latency-critical tasks */
+	LAVD_VULN_THRESH_STEP_SIZE	= 64, /* granularity for lat and util in threshold space */
+	LAVD_VULN_THRESH_UTIL_STEPS	= LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE, /* util sub-steps per lat level (16) */
+	LAVD_VULN_THRESH_MAX		= (LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE) * (LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE), /* 16 lat × 16 util = 256 */
+	LAVD_VULN_THRESH_INIT		= 32, /* initial threshold */
+
+	LAVD_RAVG_HALFLIFE_NS		= (128ULL * NSEC_PER_MSEC),
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (10ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
@@ -184,6 +194,7 @@ struct task_ctx {
 	 * traffic on the critical scheduling path.
 	 */
 	u16	lat_cri;		/* final context-aware latency criticality */
+	u16	normalized_lat_cri;	/* lat_cri normalized to [0, 1024] scale */
 	u16	lat_cri_waker;		/* waker's latency criticality */
 	u16	lat_cri_wakee;		/* wakee's latency criticality */
 	u16	perf_cri;		/* performance criticality of a task */
@@ -218,6 +229,8 @@ struct task_ctx {
 	pid_t	waker_pid;		/* last waker's PID */
 
 	/* --- cacheline 4 boundary (256 bytes) --- */
+	u32	util_est;		/* Estimated task util using ravg duty cycle */
+	struct ravg_data avg_util_ravg;	/* Running average of task utilization using ravg */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -259,6 +272,15 @@ struct cpdom_ctx {
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
+
+	/* per-cpdom preemption vulnerability threshold tracking */
+	u32	vuln_thresh;			    /* unified lat/util threshold step [0, LAVD_VULN_THRESH_MAX] */
+	u32	util_sum_steady;		    /* sum of util_est for steady CPUs in this cpdom */
+	u32	util_sum_turb;		    /* sum of util_est for turbulent CPUs in this cpdom */
+	u32	cap_sum_steady;		    /* sum of capacity for steady CPUs in this cpdom */
+	u32	cap_sum_turb;		    /* sum of capacity for turbulent CPUs in this cpdom */
+	u16	nr_steady_cpus;		    /* count of steady CPUs in this cpdom */
+	u16	nr_turb_cpus;		    /* count of turbulent CPUs in this cpdom */
 
 } __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -357,6 +379,7 @@ struct cpu_ctx {
 	volatile u32	cur_util_wall;	/* CPU utilization of the current interval (based on wall clock time) */
 	volatile u32	avg_util_invr;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
+	volatile u32	lat_headroom;	/* latency headroom available to this CPU (inversely related to irq/steal time) */
 	/*
 	 * Steal utilization: steal_time as a fraction of duration_wall,
 	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
@@ -368,6 +391,7 @@ struct cpu_ctx {
 	u32		avg_steal_util_wall;
 	u32		cur_steal_util_invr;
 	u32		avg_steal_util_invr;
+
 	/*
 	 * Domain-pinned task utilization: the fraction of duration_wall
 	 * spent running LAVD_FLAG_DOMAIN_PINNED tasks, in LAVD_SHIFT
@@ -444,6 +468,10 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_t_mask;
 	struct bpf_cpumask __kptr *tmp_t2_mask;
 	struct bpf_cpumask __kptr *tmp_t3_mask;
+
+	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
+	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
+	volatile u32	util_est;	/* Estimated CPU utilization from ravg tracking */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
@@ -576,12 +604,40 @@ static __always_inline bool use_cpdom_dsq(void)
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
+u16 normalize_lat_cri(u16 lat_cri);
+
+/*
+ * Compute a task's preemption vulnerability — how likely it is to be
+ * routed to the turbulent DSQ. Lat is the major axis (weighted by
+ * LAVD_VULN_THRESH_UTIL_STEPS) and util is the minor axis, so the
+ * threshold naturally cascades: util sub-steps carry into lat levels
+ * when vuln_thresh is incremented/decremented.
+ */
+static __always_inline
+u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
+{
+	u32 lat_step = normalized_lat_cri / LAVD_VULN_THRESH_STEP_SIZE;
+	u32 util_step = util_est / LAVD_VULN_THRESH_STEP_SIZE;
+	return lat_step * LAVD_VULN_THRESH_UTIL_STEPS + util_step;
+}
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
 extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+extern struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent (steady) CPUs */
+
+/* DSQ helpers. */
+
+struct dsq_entry {
+	u64 dsq_id;
+	u64 vtime;
+	bool eligible;
+};
+
+u64 peek_dsq_vtime(u64 dsq_id);
+void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 
 /* Load balancer helpers. */
 

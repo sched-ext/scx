@@ -376,7 +376,24 @@ static void update_stat_for_running(struct task_struct *p,
 				    struct cpu_ctx *cpuc, u64 now)
 {
 	u64 wait_period, interval;
+	struct ravg_data local_ravg;
 	struct cpu_ctx *prev_cpuc;
+
+	/*
+	 * Mark the task as running in the duty-cycle ravg immediately,
+	 * while the arena pointer is still fresh for the verifier.
+	 * Read fields individually to ensure the compiler goes through
+	 * the arena-cast pointer for each access.
+	 */
+	local_ravg.val = taskc->avg_util_ravg.val;
+	local_ravg.val_at = taskc->avg_util_ravg.val_at;
+	local_ravg.old = taskc->avg_util_ravg.old;
+	local_ravg.cur = taskc->avg_util_ravg.cur;
+	ravg_accumulate(&local_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
+	taskc->avg_util_ravg.val = local_ravg.val;
+	taskc->avg_util_ravg.val_at = local_ravg.val_at;
+	taskc->avg_util_ravg.old = local_ravg.old;
+	taskc->avg_util_ravg.cur = local_ravg.cur;
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
@@ -415,6 +432,15 @@ static void update_stat_for_running(struct task_struct *p,
 	taskc->last_measured_wall_clk = now;
 	taskc->last_measured_task_clk = scx_clock_task(cpuc->cpu_id);
 	taskc->last_measured_pelt_clk = scx_clock_pelt(cpuc->cpu_id);
+
+	/*
+	 * Mark this CPU as busy in the duty-cycle ravg.
+	 */
+	ravg_accumulate(&cpuc->avg_util_ravg, LAVD_SCALE,
+			now, LAVD_RAVG_HALFLIFE_NS);
+	cpuc->util_est = (u32)(ravg_read(&cpuc->avg_util_ravg,
+				now, LAVD_RAVG_HALFLIFE_NS) >>
+				RAVG_FRAC_BITS);
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -534,6 +560,14 @@ static void update_stat_for_stopping(struct task_struct *p,
 					   taskc->acc_runtime_wall);
 	taskc->avg_runtime_invr = calc_avg(taskc->avg_runtime_invr,
 					   taskc->acc_runtime_invr);
+
+	/*
+	 * Mark this CPU as idle in the duty-cycle ravg.
+	 */
+	ravg_accumulate(&cpuc->avg_util_ravg, 0, now,
+			LAVD_RAVG_HALFLIFE_NS);
+	cpuc->util_est = (u32)(ravg_read(&cpuc->avg_util_ravg, now,
+				  LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
 
 	/*
 	 * Account for how much of the slice was used for this instance.
@@ -811,7 +845,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 	} else {
-		dsq_id = get_target_dsq_id(p, cpuc);
+		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	}
@@ -874,7 +908,7 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	/*
 	 * Enqueue the task to a DSQ.
 	 */
-	dsq_id = get_target_dsq_id(p, cpuc);
+	dsq_id = get_target_dsq_id(p, cpuc, taskc);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
 
 	return 0;
@@ -1434,6 +1468,25 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 		return;
 
 	/*
+	 * Mark the task as sleeping in the duty-cycle ravg.
+	 * Read fields individually to ensure the compiler goes through
+	 * the arena-cast pointer for each access.
+	 */
+	now = scx_bpf_now();
+	struct ravg_data local_ravg;
+	local_ravg.val = taskc->avg_util_ravg.val;
+	local_ravg.val_at = taskc->avg_util_ravg.val_at;
+	local_ravg.old = taskc->avg_util_ravg.old;
+	local_ravg.cur = taskc->avg_util_ravg.cur;
+	ravg_accumulate(&local_ravg, 0, now, LAVD_RAVG_HALFLIFE_NS);
+	u64 avg_util_fp = ravg_read(&local_ravg, now, LAVD_RAVG_HALFLIFE_NS);
+	taskc->avg_util_ravg.val = local_ravg.val;
+	taskc->avg_util_ravg.val_at = local_ravg.val_at;
+	taskc->avg_util_ravg.old = local_ravg.old;
+	taskc->avg_util_ravg.cur = local_ravg.cur;
+	taskc->util_est = (u32)(avg_util_fp >> RAVG_FRAC_BITS);
+
+	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 * wait_freq measures how often a task sleeps waiting for external
 	 * events (I/O completion, timers, network packets, user input). These
@@ -1831,8 +1884,8 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 		     taskc->lat_cri, sys_stat.avg_lat_cri,
 		     taskc->perf_cri, sys_stat.avg_perf_cri);
 
-	scx_bpf_dump("  \\_ cpdom_id: %d   cgroup: %s[%llu] (%s)   task_status: %s\n",
-		     taskc->cpdom_id,
+	scx_bpf_dump("  \\_ cpdom_id: %d   scpu: %d   cgroup: %s[%llu] (%s)   task_status: %s\n",
+		     taskc->cpdom_id, taskc->suggested_cpu_id,
 		     cgrp_name, taskc->cgrp_id,
 		     (cgroup_throttled) ? "throttled" : "not throttled",
 		     (task_throttled) ? "throttled" : "not throttled");
@@ -1855,6 +1908,8 @@ static s32 init_cpdoms(u64 now)
 		if (!cpdomc->is_valid)
 			continue;
 
+		cpdomc->vuln_thresh = LAVD_VULN_THRESH_INIT;
+
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.
 		 */
@@ -1863,6 +1918,19 @@ static s32 init_cpdoms(u64 now)
 						 cpdomc->numa_id);
 			if (err) {
 				scx_bpf_error("Failed to create a DSQ for cpdom %llu on NUMA node %d",
+					      cpdomc->id, cpdomc->numa_id);
+				return err;
+			}
+
+			/*
+			 * Create a turbulent DSQ for tasks that
+			 * turbulent CPUs will primarily
+			 * consume from.
+			 */
+			err = scx_bpf_create_dsq(cpdom_to_turb_dsq(cpdomc->id),
+						 cpdomc->numa_id);
+			if (err) {
+				scx_bpf_error("Failed to create a turb DSQ for cpdom %llu on NUMA node %d",
 					      cpdomc->id, cpdomc->numa_id);
 				return err;
 			}
@@ -1923,6 +1991,10 @@ static int init_cpumasks(void)
 		goto out;
 
 	err = calloc_cpumask(&big_cpumask);
+	if (err)
+		goto out;
+
+	err = calloc_cpumask(&steady_cpumask);
 	if (err)
 		goto out;
 out:
@@ -2229,6 +2301,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 {
 	u64 now = scx_bpf_now();
 	int err;
+
+	err = scx_lib_init();
+	if (err)
+		return err;
 
 	/*
 	 * Create compute domains.

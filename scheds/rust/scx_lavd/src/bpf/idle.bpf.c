@@ -84,6 +84,64 @@ bool init_ao_masks(struct pick_ctx *ctx)
 }
 
 static __always_inline
+bool is_preemption_vulnerable(struct pick_ctx *ctx)
+{
+	struct cpdom_ctx *cpdc;
+
+	cpdc = MEMBER_VPTR(cpdom_ctxs, [ctx->cpuc_cur->cpdom_id]);
+	if (!cpdc)
+		return false;
+
+	return preemption_vulnerability(ctx->taskc->normalized_lat_cri,
+				       ctx->taskc->util_est) >= cpdc->vuln_thresh;
+}
+
+/*
+ * For preemption-vulnerable tasks, repartition active/overflow masks based
+ * on the pre-computed steady_cpumask. Steady (non-turbulent) CPUs become
+ * the active set, and turbulent CPUs become the overflow set.
+ */
+static __always_inline
+bool repartition_masks_for_latency(struct pick_ctx *ctx)
+{
+	struct bpf_cpumask *steady_set = ctx->cpuc_cur->tmp_a_mask;
+	struct bpf_cpumask *turb_set = ctx->cpuc_cur->tmp_o_mask;
+	struct bpf_cpumask *steady = steady_cpumask;
+
+	if (!steady_set || !turb_set || !steady)
+		return false;
+
+	/*
+	 * Start from the unfiltered active/overflow masks and apply
+	 * affinity if needed. We can't reuse a_mask/o_mask from
+	 * init_ao_masks() because they share the same tmp buffers
+	 * we're about to overwrite.
+	 *
+	 * steady_set = eligible_cpus ∩ steady
+	 * turb_set   = eligible_cpus - steady
+	 */
+	bpf_cpumask_or(steady_set, cast_mask(ctx->active), cast_mask(ctx->ovrflw));
+
+	if (test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
+		bpf_cpumask_and(steady_set, ctx->p->cpus_ptr, cast_mask(steady_set));
+
+	bpf_cpumask_copy(turb_set, cast_mask(steady_set));
+	bpf_cpumask_and(steady_set, cast_mask(steady_set), cast_mask(steady));
+	bpf_cpumask_xor(turb_set, cast_mask(turb_set), cast_mask(steady_set));
+
+	ctx->a_mask = steady_set;
+	ctx->o_mask = turb_set;
+	ctx->a_empty = bpf_cpumask_empty(cast_mask(steady_set));
+	ctx->o_empty = bpf_cpumask_empty(cast_mask(turb_set));
+	if (ctx->a_empty)
+		ctx->a_mask = NULL;
+	if (ctx->o_empty)
+		ctx->o_mask = NULL;
+
+	return true;
+}
+
+static __always_inline
 bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 {
 	ctx->ia_mask = ctx->cpuc_cur->tmp_t_mask;
@@ -645,6 +703,16 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 		goto unlock_out;
 	}
 	/* NOTE: Now task @p can run on either active or overflow set. */
+
+	/*
+	 * For preemption-vulnerable tasks, repartition the active/overflow
+	 * masks so the idle CPU search prefers non-turbulent CPUs with
+	 * sufficient latency headroom.
+	 */
+	if (is_preemption_vulnerable(ctx)) {
+		if (!repartition_masks_for_latency(ctx))
+			goto err_out;
+	}
 
 	/*
 	 * Find a sticky cpu and domain considering the core & task type

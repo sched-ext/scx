@@ -911,6 +911,11 @@ void BPF_STRUCT_OPS(beerland_exit, struct scx_exit_info *ei)
 s32 BPF_STRUCT_OPS_SLEEPABLE(beerland_init)
 {
 	s32 cpu;
+	int err;
+
+	err = scx_lib_init();
+	if (err)
+		return err;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
