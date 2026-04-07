@@ -185,6 +185,12 @@ struct Opts {
     #[clap(long, default_value = "0.3", value_parser = parse_ewma_factor)]
     demand_smoothing: f64,
 
+    /// Dynamically reassign multi-CPU affinitized tasks on each wake: prefer an
+    /// idle CPU within the mask, fall back to random. Redistribute at enqueue if
+    /// the target CPU already has queued work.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    dynamic_affinity_cpu_selection: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -329,6 +335,7 @@ impl<'a> Scheduler<'a> {
         rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
+        rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
