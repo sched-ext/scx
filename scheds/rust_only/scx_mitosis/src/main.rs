@@ -56,6 +56,7 @@ mod stats;
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,7 +64,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use aya::{EbpfLoader, include_bytes_aligned};
 use clap::Parser;
-use log::{info, debug};
+use log::{info, debug, warn};
 
 use mitosis_topology_utils::{LlcTopology, TopologySource, format_cpu_range};
 
@@ -244,6 +245,146 @@ impl Topology {
     }
 }
 
+// ── BPF percpu map reader ────────────────────────────────────────────
+
+/// Userspace mirror of the eBPF CpuCtx struct.
+///
+/// Must match the exact layout in scx_mitosis-ebpf/src/main.rs.
+/// The eBPF side defines: cstats[MAX_CELLS][NR_CSTATS], cell_cycles[MAX_CELLS],
+/// vtime_now, cell, llc.
+#[repr(C)]
+#[derive(Clone)]
+struct CpuCtx {
+    cstats: [[u64; stats::NR_CSTATS]; stats::MAX_CELLS],
+    cell_cycles: [u64; stats::MAX_CELLS],
+    vtime_now: u64,
+    cell: u32,
+    llc: u32,
+}
+
+const CPU_CTX_SIZE: usize = core::mem::size_of::<CpuCtx>();
+
+/// Reads per-cell statistics from the BPF CPU_CTX percpu array.
+///
+/// For a percpu array map, BPF_MAP_LOOKUP_ELEM returns `nr_cpus` copies
+/// of the value (one per possible CPU). We aggregate the cstats across
+/// all CPUs to get per-cell totals.
+struct BpfStatsReader {
+    map_fd: i32,
+    nr_cpus: usize,
+}
+
+impl BpfStatsReader {
+    /// Try to locate the CPU_CTX map in the loaded BPF object.
+    fn find(ebpf: &aya::Ebpf, nr_cpus: usize) -> Option<Self> {
+        let map = ebpf.map("CPU_CTX")?;
+
+        // Get the raw fd. The map is a PerCpuArray internally.
+        let fd = match map {
+            aya::maps::Map::PerCpuArray(ref data) => data.fd().as_fd().as_raw_fd(),
+            _ => {
+                // Try other map types that might hold CPU_CTX
+                warn!("CPU_CTX map has unexpected type, stats disabled");
+                return None;
+            }
+        };
+
+        // Validate value_size matches our CpuCtx struct.
+        if let Ok(map_info) = match map {
+            aya::maps::Map::PerCpuArray(ref data) => data.info(),
+            _ => return None,
+        } {
+            let value_size = map_info.value_size() as usize;
+            if value_size != CPU_CTX_SIZE {
+                warn!(
+                    "CPU_CTX value_size {} != expected {} — layout mismatch, stats disabled",
+                    value_size, CPU_CTX_SIZE
+                );
+                return None;
+            }
+        }
+
+        info!(
+            "CPU_CTX map found: fd={}, value_size={}, nr_cpus={}",
+            fd, CPU_CTX_SIZE, nr_cpus
+        );
+
+        Some(Self { map_fd: fd, nr_cpus })
+    }
+
+    /// Read the CPU_CTX percpu array and aggregate cstats per cell.
+    ///
+    /// Returns aggregated `[cell][stat]` totals across all CPUs, plus
+    /// a map of active cells (cells that have CPUs assigned to them).
+    fn read_aggregated_stats(
+        &self,
+    ) -> Result<([[u64; stats::NR_CSTATS]; stats::MAX_CELLS], BTreeMap<u32, u32>)> {
+        // For percpu maps, the kernel returns nr_possible_cpus * value_size bytes.
+        // We need to use nr_possible_cpus (from /sys/devices/system/cpu/possible),
+        // which may differ from online CPUs.
+        let nr_possible = self.nr_cpus;
+        let total_size = nr_possible * CPU_CTX_SIZE;
+        let mut buf = vec![0u8; total_size];
+        let key: u32 = 0;
+
+        #[repr(C)]
+        #[derive(Default)]
+        struct BpfAttrLookup {
+            map_fd: u32,
+            _pad0: u32,
+            key: u64,
+            value: u64,
+            flags: u64,
+        }
+
+        let mut attr = BpfAttrLookup {
+            map_fd: self.map_fd as u32,
+            key: &key as *const u32 as u64,
+            value: buf.as_mut_ptr() as u64,
+            ..Default::default()
+        };
+
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                1i32, // BPF_MAP_LOOKUP_ELEM
+                &mut attr as *mut _ as *mut libc::c_void,
+                core::mem::size_of::<BpfAttrLookup>(),
+            )
+        };
+        if ret < 0 {
+            anyhow::bail!(
+                "BPF_MAP_LOOKUP_ELEM for CPU_CTX failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        // Parse per-CPU CpuCtx values and aggregate.
+        let mut aggregated = [[0u64; stats::NR_CSTATS]; stats::MAX_CELLS];
+        let mut cell_cpu_counts: BTreeMap<u32, u32> = BTreeMap::new();
+
+        for cpu in 0..nr_possible {
+            let offset = cpu * CPU_CTX_SIZE;
+            let cpu_bytes = &buf[offset..offset + CPU_CTX_SIZE];
+
+            // Safety: buf is properly aligned (allocated by Vec) and CpuCtx is repr(C).
+            let cpu_ctx = unsafe { &*(cpu_bytes.as_ptr() as *const CpuCtx) };
+
+            // Track which cell this CPU belongs to.
+            *cell_cpu_counts.entry(cpu_ctx.cell).or_insert(0) += 1;
+
+            // Aggregate per-cell stats across all CPUs.
+            for cell in 0..stats::MAX_CELLS {
+                for stat in 0..stats::NR_CSTATS {
+                    aggregated[cell][stat] += cpu_ctx.cstats[cell][stat];
+                }
+            }
+        }
+
+        Ok((aggregated, cell_cpu_counts))
+    }
+}
+
 // ── Scheduler exit detection ─────────────────────────────────────────
 
 /// Check if the mitosis scheduler is still attached.
@@ -366,6 +507,12 @@ fn main() -> Result<()> {
     }
     println!("Press Ctrl-C to detach and exit.");
 
+    // ── Set up stats reader ──────────────────────────────────────────
+    let stats_reader = BpfStatsReader::find(&ebpf, nr_cpus);
+    if stats_reader.is_none() {
+        info!("CPU_CTX map not found or layout mismatch — stats will show zeroes");
+    }
+
     // ── Set up Ctrl-C handler ────────────────────────────────────────
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -376,24 +523,23 @@ fn main() -> Result<()> {
 
     // ── Main scheduler loop ─────────────────────────────────────────
     //
-    // Periodically:
-    //   - Check if scheduler is still attached
-    //   - Collect per-cell stats from BPF maps (once they're populated)
-    //   - Report metrics
-    //
-    // Future: cell reconfiguration and CPU rebalancing will go here.
+    // Every stats_interval:
+    //   1. Read CPU_CTX percpu array, aggregate per-cell stats
+    //   2. Compute deltas from last snapshot
+    //   3. Print stats line (dispatches/s, queue distribution, etc.)
+    //   4. Check if scheduler is still attached
 
-    let monitor_interval = Duration::from_secs(opts.monitor_interval_s);
+    let stats_interval = Duration::from_secs(2);
     let start_time = Instant::now();
-    let mut last_monitor = Instant::now();
+    let mut last_stats = Instant::now();
     let mut stats_collector = stats::StatsCollector::new();
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(100));
 
-        // ── Periodic monitoring ──────────────────────────────────────
-        if last_monitor.elapsed() >= monitor_interval {
+        if last_stats.elapsed() >= stats_interval {
             let uptime = start_time.elapsed();
+            let elapsed_secs = last_stats.elapsed().as_secs_f64();
 
             // Check if the kernel detached us.
             if !is_scheduler_attached() {
@@ -404,30 +550,68 @@ fn main() -> Result<()> {
                 break;
             }
 
-            // PORT_TODO: Read CPU_CTX percpu array to collect per-cell stats.
-            // Requires aya support for reading BPF_MAP_TYPE_PERCPU_ARRAY.
-            // The C version does this via libbpf_rs lookup_percpu().
-            // See C main.rs:490-535 (collect_metrics, calculate_cell_stat_delta)
-            // and C main.rs:606-627 (read_cpu_ctxs).
-            //
-            // When implemented:
-            // 1. Read the CPU_CTX percpu array via aya map API
-            // 2. Aggregate cstats per cell across all CPUs into
-            //    aggregated_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS]
-            // 3. let delta = stats_collector.calculate_cell_stat_delta(&aggregated);
-            // 4. stats_collector.update_metrics(&delta);
-            // 5. println!("{}", stats_collector.format_summary());
-            //    or for verbose: print!("{}", stats_collector.format_detailed());
+            // Read and aggregate stats from BPF percpu map.
+            if let Some(ref reader) = stats_reader {
+                match reader.read_aggregated_stats() {
+                    Ok((aggregated, cell_cpus)) => {
+                        let delta = stats_collector.calculate_cell_stat_delta(&aggregated);
+                        stats_collector.update_metrics(&delta);
+                        stats_collector.metrics.num_cells =
+                            cell_cpus.len().max(1) as u32;
 
-            debug!("[scx_mitosis] stats: {}", stats_collector.format_summary());
+                        // Update per-cell CPU counts.
+                        for (&cell_id, &cpu_count) in &cell_cpus {
+                            stats_collector
+                                .metrics
+                                .cells
+                                .entry(cell_id)
+                                .or_default()
+                                .num_cpus = cpu_count;
+                        }
 
-            println!(
-                "[scx_mitosis] cells: {}  uptime {}",
-                stats_collector.metrics.num_cells.max(1),
-                format_uptime(uptime),
-            );
+                        // Compute rate.
+                        let decisions = stats_collector.metrics.total_decisions;
+                        let rate = if elapsed_secs > 0.0 {
+                            (decisions as f64 / elapsed_secs) as u64
+                        } else {
+                            0
+                        };
 
-            last_monitor = Instant::now();
+                        if decisions > 0 {
+                            println!(
+                                "[scx_mitosis] {:>7}/s  {}  uptime {}",
+                                rate,
+                                stats_collector.format_summary(),
+                                format_uptime(uptime),
+                            );
+
+                            if opts.verbose {
+                                print!("{}", stats_collector.format_detailed());
+                            }
+                        } else {
+                            println!(
+                                "[scx_mitosis] cells: {}  uptime {}",
+                                stats_collector.metrics.num_cells,
+                                format_uptime(uptime),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to read CPU_CTX: {}", e);
+                        println!(
+                            "[scx_mitosis] cells: 1  uptime {}  (stats read failed)",
+                            format_uptime(uptime),
+                        );
+                    }
+                }
+            } else {
+                println!(
+                    "[scx_mitosis] cells: 1  uptime {}",
+                    format_uptime(uptime),
+                );
+            }
+
+            last_stats = Instant::now();
         }
     }
 
