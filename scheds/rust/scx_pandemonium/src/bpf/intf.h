@@ -13,6 +13,7 @@ typedef unsigned char u8;
 // BPF VERIFIER LOOP BOUNDS
 #define MAX_CPUS  1024
 #define MAX_NODES 32
+#define MAX_AFFINITY_CANDIDATES 16
 
 // KERNEL PROCESS FLAGS (NOT IN vmlinux.h -- THESE ARE #define MACROS)
 #define PF_KTHREAD 0x00200000

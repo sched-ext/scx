@@ -174,7 +174,7 @@ pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64) -> TuningKnobs {
     match r {
         Regime::Heavy | Regime::Light => {
             let slice_cap = nr_cpus * 500_000;
-            let preempt_cap = nr_cpus * 250_000;
+            let preempt_cap = (nr_cpus * 250_000).max(1_000_000);
             knobs.slice_ns = knobs.slice_ns.min(slice_cap);
             knobs.preempt_thresh_ns = knobs.preempt_thresh_ns.min(preempt_cap);
         }
@@ -187,6 +187,8 @@ pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64) -> TuningKnobs {
             knobs.batch_slice_ns = knobs.batch_slice_ns.min(batch_cap);
         }
     }
+    // SOJOURN FLOOR: CPU-SCALED, SAME FORMULA THE OLD EWMA USED AS ITS FLOOR
+    knobs.sojourn_thresh_ns = (nr_cpus * 1_000_000).clamp(2_000_000, 6_000_000);
     knobs
 }
 
@@ -287,6 +289,7 @@ pub fn compute_p99_from_histogram(counts: &[u64; HIST_BUCKETS]) -> u64 {
 
 // REFLEX TIGHTEN DECISION: USES BOTH AGGREGATE AND INTERACTIVE P99.
 // TIGHTEN IF EITHER EXCEEDS CEILING (INTERACTIVE STARVATION HIDDEN IN AGGREGATE).
+#[allow(dead_code)]
 pub fn should_reflex_tighten(aggregate_p99: u64, interactive_p99: u64, ceiling: u64) -> bool {
     aggregate_p99 > ceiling || interactive_p99 > ceiling
 }
@@ -295,8 +298,10 @@ pub fn should_reflex_tighten(aggregate_p99: u64, interactive_p99: u64, ceiling: 
 // IO-HEAVY: EXTEND BATCH SLICES (+25%) -- IO-BOUND TASKS BATCH BETWEEN FREQUENT SHORT SLEEPS
 // IDLE-HEAVY: TIGHTEN BATCH SLICES (-25%) -- SPORADIC USER INPUT NEEDS FASTER PREEMPTION
 
+#[allow(dead_code)]
 pub const BATCH_MAX_NS: u64 = 25_000_000; // 25MS CEILING
 
+#[allow(dead_code)]
 pub fn sleep_adjust_batch_ns(base_batch_ns: u64, io_pct: u64) -> u64 {
     if io_pct > 60 {
         // IO-HEAVY: EXTEND BATCH SLICES (+25%)
@@ -306,5 +311,279 @@ pub fn sleep_adjust_batch_ns(base_batch_ns: u64, io_pct: u64) -> u64 {
         (base_batch_ns * 3 / 4).max(base_batch_ns / 2)
     } else {
         base_batch_ns
+    }
+}
+
+// MWU ORCHESTRATOR
+// SCHMITT-GATED MULTIPLICATIVE WEIGHT UPDATES ACROSS ALL 11 TUNING KNOBS.
+// 6 EXPERT PROFILES, EACH A SCALE FACTOR ON THE REGIME BASELINE.
+// CORRECTED SCALE FACTORS: sum(EQ[i] * SCALE[i]) = 1.0 FOR EACH CONTINUOUS KNOB.
+// DISCRETE KNOBS (LAG, AFFINITY, DEPTH) USE MAJORITY VOTE, NOT WEIGHTED AVERAGE.
+// 4 LOSS PATHWAYS: P99 SPIKE, RESCUE DELTA, IO DELTA, FORK STORM.
+// 1e-6 WEIGHT FLOOR PREVENTS UNDERFLOW (DEAD WEIGHTS CAN'T RECOVER).
+
+const N_EXPERTS: usize = 6;
+const ETA: f64 = 8.0;
+const RELAX_RATE: f64 = 0.80;
+const SPIKE_CONFIRM: u32 = 2;
+const RELAX_HOLD: u32 = 2;
+const RELAX_CEIL_PCT: f64 = 0.70;
+const EQUILIBRIUM: [f64; N_EXPERTS] = [0.08, 0.44, 0.12, 0.12, 0.12, 0.12];
+const WEIGHT_FLOOR: f64 = 1e-6;
+
+const EX_LATENCY: usize = 0;
+const EX_BALANCED: usize = 1;
+const EX_THROUGHPUT: usize = 2;
+const EX_IO_HEAVY: usize = 3;
+const EX_FORK_STORM: usize = 4;
+const EX_SATURATED: usize = 5;
+
+// CORRECTED CONTINUOUS SCALE FACTORS
+// PROPORTIONALLY ADJUSTED SO sum(EQ[i] * SCALE[i]) = 1.0 AT EQUILIBRIUM.
+// [LATENCY, BALANCED, THROUGHPUT, IO_HEAVY, FORK_STORM, SATURATED]
+const SC_SLICE: [f64; 6] = [0.74, 1.00, 1.23, 0.98, 0.49, 1.47];
+const SC_PREEMPT: [f64; 6] = [0.74, 1.00, 1.23, 0.98, 0.49, 1.47];
+const SC_BATCH: [f64; 6] = [0.78, 1.00, 1.30, 1.30, 0.52, 1.04];
+const SC_DEMOTE: [f64; 6] = [0.86, 1.00, 1.29, 1.08, 0.86, 0.86];
+const SC_LCRI_HI: [f64; 6] = [0.74, 1.00, 1.23, 0.98, 0.98, 0.98];
+const SC_LCRI_LO: [f64; 6] = [0.70, 1.00, 1.40, 0.93, 0.93, 0.93];
+const SC_SOJOURN: [f64; 6] = [0.80, 1.00, 1.60, 0.93, 0.53, 1.07];
+const SC_BURST: [f64; 6] = [0.74, 1.00, 1.47, 0.98, 0.49, 1.23];
+
+// DISCRETE KNOB VALUES (ABSOLUTE, NOT SCALE FACTORS)
+const DV_LAG: [u64; 6] = [6, 4, 3, 4, 4, 3];
+const DV_AFFINITY: [u64; 6] = [
+    AFFINITY_STRONG,
+    AFFINITY_STRONG,
+    AFFINITY_WEAK,
+    AFFINITY_WEAK,
+    AFFINITY_OFF,
+    AFFINITY_WEAK,
+];
+fn blend_continuous(base: u64, scales: &[f64; 6], w: &[f64; N_EXPERTS]) -> u64 {
+    let v: f64 = (0..N_EXPERTS).map(|i| w[i] * base as f64 * scales[i]).sum();
+    (v.round() as u64).max(1)
+}
+
+fn majority_discrete(values: &[u64; 6], w: &[f64; N_EXPERTS]) -> u64 {
+    // GROUP BY VALUE, SUM WEIGHTS, PICK HIGHEST GROUP
+    let mut best_val = values[0];
+    let mut best_w = 0.0f64;
+    for &v in values.iter() {
+        let total: f64 = (0..N_EXPERTS)
+            .filter(|&i| values[i] == v)
+            .map(|i| w[i])
+            .sum();
+        if total > best_w {
+            best_w = total;
+            best_val = v;
+        }
+    }
+    best_val
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IoBucket {
+    Low,
+    Mid,
+    High,
+}
+
+pub fn io_bucket(io_pct: u64) -> IoBucket {
+    if io_pct > 60 {
+        IoBucket::High
+    } else if io_pct < 15 {
+        IoBucket::Low
+    } else {
+        IoBucket::Mid
+    }
+}
+
+pub struct MwuSignals {
+    pub p99_ns: u64,
+    pub interactive_p99_ns: u64,
+    pub io_pct: u64,
+    pub rescue_count: u64,
+    pub wakeup_rate: u64,
+}
+
+pub struct MwuController {
+    weights: [f64; N_EXPERTS],
+    baseline: TuningKnobs,
+    spike_streak: u32,
+    healthy_streak: u32,
+    fork_streak: u32,
+    prev_io_bucket: IoBucket,
+    prev_rescuing: bool,
+    losses_applied: bool,
+}
+
+impl MwuController {
+    pub fn new(baseline: TuningKnobs) -> Self {
+        Self {
+            weights: EQUILIBRIUM,
+            baseline,
+            spike_streak: 0,
+            healthy_streak: 0,
+            fork_streak: 0,
+            prev_io_bucket: IoBucket::Mid,
+            prev_rescuing: false,
+            losses_applied: false,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.weights = EQUILIBRIUM;
+        self.spike_streak = 0;
+        self.healthy_streak = 0;
+        self.fork_streak = 0;
+        self.prev_io_bucket = IoBucket::Mid;
+        self.prev_rescuing = false;
+        self.losses_applied = false;
+    }
+
+    pub fn set_baseline(&mut self, baseline: TuningKnobs) {
+        self.baseline = baseline;
+    }
+
+    pub fn update(&mut self, sig: &MwuSignals, ceiling: u64, nr_cpus: u64) -> TuningKnobs {
+        let worst = sig.p99_ns.max(sig.interactive_p99_ns);
+        let above = worst > ceiling;
+        let below_relax = (worst as f64) < (ceiling as f64 * RELAX_CEIL_PCT);
+
+        let mut losses = [0.0f64; N_EXPERTS];
+        let mut has_loss = false;
+
+        // PATHWAY 1: P99 SPIKE (SCHMITT-GATED)
+        if above {
+            self.healthy_streak = 0;
+            self.spike_streak += 1;
+            if self.spike_streak >= SPIKE_CONFIRM {
+                let v = ((worst - ceiling) as f64 / ceiling as f64).min(3.0);
+                losses[EX_BALANCED] += v * 0.5;
+                losses[EX_THROUGHPUT] += v * 1.0;
+                losses[EX_IO_HEAVY] += v * 0.6;
+                losses[EX_FORK_STORM] += v * 0.3;
+                losses[EX_SATURATED] += v * 0.9;
+                has_loss = true;
+            }
+        } else {
+            self.spike_streak = 0;
+        }
+
+        // PATHWAY 2: RESCUE DELTA (0 -> NONZERO TRANSITION)
+        // PATHWAY 2: RESCUE DELTA (0 -> NONZERO TRANSITION)
+        // PENALIZE ALL EXPERTS EQUALLY: THE DAMPED OSCILLATION IN BPF
+        // HANDLES TIGHTENING VIA THE CODEL TARGET. MWU SHOULD HOLD STEADY,
+        // NOT COMPOUND BY ALSO TIGHTENING SLICES VIA LATENCY EXPERT.
+        let rescuing = sig.rescue_count > 0;
+        if rescuing && !self.prev_rescuing {
+            let v = (sig.rescue_count as f64 * 1.5).min(3.0);
+            losses[EX_LATENCY] += v * 0.4;
+            losses[EX_THROUGHPUT] += v * 0.6;
+            losses[EX_SATURATED] += v * 0.6;
+            losses[EX_IO_HEAVY] += v * 0.4;
+            losses[EX_BALANCED] += v * 0.2;
+            has_loss = true;
+        }
+        self.prev_rescuing = rescuing;
+
+        // PATHWAY 3: IO DELTA (BUCKET TRANSITION)
+        let cur_io = io_bucket(sig.io_pct);
+        if cur_io != self.prev_io_bucket {
+            match cur_io {
+                IoBucket::High => {
+                    let v = ((sig.io_pct as f64 - 60.0) / 40.0).min(1.0);
+                    for i in 0..N_EXPERTS {
+                        if i != EX_IO_HEAVY {
+                            losses[i] += v * 0.8;
+                        }
+                    }
+                    has_loss = true;
+                }
+                IoBucket::Low => {
+                    let v = ((15.0 - sig.io_pct as f64) / 15.0).clamp(0.0, 1.0);
+                    losses[EX_IO_HEAVY] += v * 1.0;
+                    has_loss = true;
+                }
+                IoBucket::Mid => {}
+            }
+        }
+        self.prev_io_bucket = cur_io;
+
+        // PATHWAY 4: FORK STORM (SCHMITT-GATED)
+        let fork_storm = sig.wakeup_rate > nr_cpus * 2;
+        if fork_storm {
+            self.fork_streak += 1;
+            if self.fork_streak >= SPIKE_CONFIRM {
+                losses[EX_LATENCY] += 0.05;
+                losses[EX_BALANCED] += 0.15;
+                losses[EX_THROUGHPUT] += 0.30;
+                losses[EX_IO_HEAVY] += 0.25;
+                losses[EX_SATURATED] += 0.20;
+                has_loss = true;
+            }
+        } else {
+            self.fork_streak = 0;
+        }
+
+        // APPLY LOSSES WITH WEIGHT FLOOR
+        if has_loss {
+            for i in 0..N_EXPERTS {
+                if losses[i] > 0.0 {
+                    self.weights[i] *= (-ETA * losses[i]).exp();
+                }
+                if self.weights[i] < WEIGHT_FLOOR {
+                    self.weights[i] = WEIGHT_FLOOR;
+                }
+            }
+            let sum: f64 = self.weights.iter().sum();
+            for w in self.weights.iter_mut() {
+                *w /= sum;
+            }
+        }
+
+        // RELAXATION
+        if !has_loss && below_relax {
+            self.healthy_streak += 1;
+            if self.healthy_streak >= RELAX_HOLD {
+                for i in 0..N_EXPERTS {
+                    self.weights[i] =
+                        (1.0 - RELAX_RATE) * self.weights[i] + RELAX_RATE * EQUILIBRIUM[i];
+                }
+            }
+        } else if !has_loss {
+            self.healthy_streak = 0;
+        }
+
+        self.losses_applied = has_loss;
+
+        // BLEND: CONTINUOUS KNOBS VIA CORRECTED SCALE FACTORS, DISCRETE VIA MAJORITY
+        let b = &self.baseline;
+        TuningKnobs {
+            slice_ns: blend_continuous(b.slice_ns, &SC_SLICE, &self.weights),
+            preempt_thresh_ns: blend_continuous(b.preempt_thresh_ns, &SC_PREEMPT, &self.weights),
+            lag_scale: majority_discrete(&DV_LAG, &self.weights),
+            batch_slice_ns: blend_continuous(b.batch_slice_ns, &SC_BATCH, &self.weights),
+            cpu_bound_thresh_ns: blend_continuous(b.cpu_bound_thresh_ns, &SC_DEMOTE, &self.weights),
+            lat_cri_thresh_high: blend_continuous(
+                b.lat_cri_thresh_high,
+                &SC_LCRI_HI,
+                &self.weights,
+            ),
+            lat_cri_thresh_low: blend_continuous(b.lat_cri_thresh_low, &SC_LCRI_LO, &self.weights),
+            affinity_mode: majority_discrete(&DV_AFFINITY, &self.weights),
+            sojourn_thresh_ns: blend_continuous(b.sojourn_thresh_ns, &SC_SOJOURN, &self.weights),
+            burst_slice_ns: blend_continuous(b.burst_slice_ns, &SC_BURST, &self.weights),
+        }
+    }
+
+    pub fn had_losses(&self) -> bool {
+        self.losses_applied
+    }
+
+    pub fn scale(&self) -> f64 {
+        let s: f64 = (0..N_EXPERTS).map(|i| self.weights[i] * SC_SLICE[i]).sum();
+        s
     }
 }

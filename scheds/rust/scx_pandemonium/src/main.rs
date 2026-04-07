@@ -27,19 +27,27 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use scheduler::Scheduler;
+use scx_utils::build_id;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser)]
 #[command(name = "scx_pandemonium")]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), env!("PANDEMONIUM_BUILD_ID"), " ", env!("PANDEMONIUM_TARGET")))]
-#[command(about = "PANDEMONIUM -- ADAPTIVE LINUX SCHEDULER")]
+#[command(
+    version,
+    disable_version_flag = true,
+    about = "PANDEMONIUM -- ADAPTIVE LINUX SCHEDULER"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<SubCmd>,
 
     #[arg(short, long)]
     verbose: bool,
+
+    /// Print scheduler version and exit.
+    #[arg(long)]
+    version: bool,
 
     #[arg(long)]
     dump_log: bool,
@@ -164,6 +172,14 @@ fn main() -> Result<()> {
     let no_adaptive = cli.no_adaptive;
     let extra_compositors = cli.compositor;
 
+    if cli.version {
+        println!(
+            "scx_pandemonium {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
+
     match cli.command {
         None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive, &extra_compositors),
         Some(SubCmd::Check) => cli::check::run_check(),
@@ -233,10 +249,8 @@ fn run_scheduler(
         .unwrap_or(false);
 
     log_info!(
-        "scx_pandemonium {}{} {} SMT {}",
-        env!("CARGO_PKG_VERSION"),
-        env!("PANDEMONIUM_BUILD_ID"),
-        env!("PANDEMONIUM_TARGET"),
+        "scx_pandemonium {} SMT {}",
+        build_id::full_version(env!("CARGO_PKG_VERSION")),
         if smt_on { "on" } else { "off" }
     );
     log_info!(
@@ -271,6 +285,13 @@ fn run_scheduler(
                 }
                 if let Err(e) = topo.populate_l2_siblings_map(&sched) {
                     log_warn!("L2 SIBLINGS MAP WRITE FAILED: {}", e);
+                }
+                // RESISTANCE AFFINITY: COMPUTE R_EFF VIA LAPLACIAN PSEUDOINVERSE
+                // AND POPULATE BPF AFFINITY RANK MAP
+                let (reff, rank) = topo.compute_resistance_affinity();
+                topo.log_resistance_affinity(&reff, &rank);
+                if let Err(e) = topo.populate_affinity_rank_map(&sched, &rank) {
+                    log_warn!("AFFINITY RANK MAP WRITE FAILED: {}", e);
                 }
             }
             Err(e) => log_warn!("CACHE TOPOLOGY DETECT FAILED: {}", e),
