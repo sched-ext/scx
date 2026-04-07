@@ -171,6 +171,43 @@ unsafe fn bpf_task_storage_delete(map: *const u8, task: *mut u8) -> i64 {
     ret
 }
 
+/// BPF helper #210: `bpf_cgrp_storage_get(map, cgroup, value, flags) -> *mut value`
+#[inline(always)]
+unsafe fn bpf_cgrp_storage_get(
+    map: *const u8,
+    cgroup: *mut u8,
+    value: *mut u8,
+    flags: u64,
+) -> *mut u8 {
+    let ret: *mut u8;
+    core::arch::asm!(
+        "call 210",
+        inlateout("r1") map => _,
+        inlateout("r2") cgroup => _,
+        inlateout("r3") value => _,
+        inlateout("r4") flags => _,
+        lateout("r0") ret,
+        lateout("r5") _,
+    );
+    ret
+}
+
+/// BPF helper #211: `bpf_cgrp_storage_delete(map, cgroup) -> int`
+#[inline(always)]
+unsafe fn bpf_cgrp_storage_delete(map: *const u8, cgroup: *mut u8) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "call 211",
+        inlateout("r1") map => _,
+        inlateout("r2") cgroup => _,
+        lateout("r0") ret,
+        lateout("r3") _,
+        lateout("r4") _,
+        lateout("r5") _,
+    );
+    ret
+}
+
 // ── BTF map definition structs ──────────────────────────────────────────
 //
 // The BTF encoding uses pointer-to-sized-array trick:
@@ -778,6 +815,105 @@ impl<V> TaskStorage<V> {
             bpf_task_storage_delete(
                 core::ptr::from_ref(self).cast(),
                 task,
+            )
+        };
+        if ret == 0 { Ok(()) } else { Err(ret) }
+    }
+}
+
+// ── CgrpStorage ───────────────────────────────────────────────────────
+
+/// `BPF_MAP_TYPE_CGRP_STORAGE` = 34
+const MAP_TYPE_CGRP_STORAGE: usize = 34;
+
+/// A BTF-compatible per-cgroup local storage map (`BPF_MAP_TYPE_CGRP_STORAGE`).
+///
+/// Provides per-cgroup storage that is automatically freed when the cgroup
+/// is destroyed. Uses `BPF_F_NO_PREALLOC` and `max_entries = 0` as required
+/// by the kernel for cgroup storage maps.
+///
+/// Requires kernel 6.2 or later.
+///
+/// # Type Parameters
+///
+/// - `V` — value type stored per cgroup (must be `Copy` + zero-initializable)
+#[repr(C)]
+pub struct CgrpStorage<V> {
+    r#type: *const [i32; MAP_TYPE_CGRP_STORAGE],
+    key: *const i32,
+    value: *const V,
+    max_entries: *const [i32; 0],
+    map_flags: *const [i32; BPF_F_NO_PREALLOC],
+    _v: PhantomData<V>,
+}
+
+unsafe impl<V> Sync for CgrpStorage<V> {}
+
+impl<V> CgrpStorage<V> {
+    /// Create a new cgroup storage map definition.
+    pub const fn new() -> Self {
+        Self {
+            r#type: core::ptr::null(),
+            key: core::ptr::null(),
+            value: core::ptr::null(),
+            max_entries: core::ptr::null(),
+            map_flags: core::ptr::null(),
+            _v: PhantomData,
+        }
+    }
+
+    /// Get a reference to the storage for a cgroup (lookup only, no create).
+    #[inline(always)]
+    pub fn get(&self, cgroup: *mut u8) -> Option<&V> {
+        let ptr = unsafe {
+            bpf_cgrp_storage_get(
+                core::ptr::from_ref(self).cast(),
+                cgroup,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        if ptr.is_null() { None } else { Some(unsafe { &*(ptr as *const V) }) }
+    }
+
+    /// Get a mutable reference to the storage for a cgroup (lookup only).
+    #[inline(always)]
+    pub fn get_mut(&self, cgroup: *mut u8) -> Option<&mut V> {
+        let ptr = unsafe {
+            bpf_cgrp_storage_get(
+                core::ptr::from_ref(self).cast(),
+                cgroup,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        if ptr.is_null() { None } else { Some(unsafe { &mut *(ptr as *mut V) }) }
+    }
+
+    /// Get or create the storage for a cgroup.
+    ///
+    /// If storage doesn't exist for this cgroup, it is initialized from
+    /// `init_val` (using `BPF_LOCAL_STORAGE_GET_F_CREATE`).
+    #[inline(always)]
+    pub fn get_or_init(&self, cgroup: *mut u8, init_val: &V) -> Option<&mut V> {
+        let ptr = unsafe {
+            bpf_cgrp_storage_get(
+                core::ptr::from_ref(self).cast(),
+                cgroup,
+                core::ptr::from_ref(init_val).cast_mut().cast(),
+                BPF_LOCAL_STORAGE_GET_F_CREATE,
+            )
+        };
+        if ptr.is_null() { None } else { Some(unsafe { &mut *(ptr as *mut V) }) }
+    }
+
+    /// Delete the storage for a cgroup.
+    #[inline(always)]
+    pub fn delete(&self, cgroup: *mut u8) -> Result<(), i64> {
+        let ret = unsafe {
+            bpf_cgrp_storage_delete(
+                core::ptr::from_ref(self).cast(),
+                cgroup,
             )
         };
         if ret == 0 { Ok(()) } else { Err(ret) }

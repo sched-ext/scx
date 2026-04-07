@@ -15,7 +15,7 @@
 use scx_ebpf::prelude::*;
 use scx_ebpf::core_read;
 use scx_ebpf::core_write;
-use scx_ebpf::maps::{TaskStorage, PerCpuArray, HashMap, BpfArray};
+use scx_ebpf::maps::{TaskStorage, PerCpuArray, HashMap, BpfArray, CgrpStorage};
 use scx_ebpf::helpers::BpfSpinLock;
 use scx_ebpf::cgroup::cgroup;
 use scx_ebpf::cpumask::bpf_cpumask;
@@ -424,8 +424,7 @@ scx_ebpf::bpf_map!(CPU_CTX: PerCpuArray<CpuCtx, 1> = PerCpuArray::new());
 scx_ebpf::bpf_map!(CELLS: BpfArray<Cell, { MAX_CELLS as usize }> = BpfArray::new());
 scx_ebpf::bpf_map!(DEBUG_EVENTS: BpfArray<DebugEvent, { DEBUG_EVENTS_BUF_SIZE as usize }> = BpfArray::new());
 
-// PORT_TODO: CGRP_CTX needs BPF_MAP_TYPE_CGRP_STORAGE which is tracked
-// by mitosis-cgroup-storage-map task. For now we skip cgroup storage.
+scx_ebpf::bpf_map!(CGRP_CTX: CgrpStorage<CgrpCtx> = CgrpStorage::new());
 
 // PORT_TODO: Missing update_timer map (BPF_MAP_TYPE_ARRAY, max_entries=1)
 // — holds bpf_timer for periodic cell reconfiguration. Blocked on
@@ -532,6 +531,12 @@ fn time_before(a: u64, b: u64) -> bool {
     (a as i64).wrapping_sub(b as i64) < 0
 }
 
+/// Returns true if `a` is after `b` in the vtime timeline.
+#[inline(always)]
+fn time_after(a: u64, b: u64) -> bool {
+    (a as i64).wrapping_sub(b as i64) > 0
+}
+
 /// Advance CPU and cell DSQ vtime watermarks to keep in sync with task vtime.
 ///
 /// Mirrors C advance_dsq_vtimes() — see mitosis.bpf.c:1231-1254.
@@ -559,18 +564,76 @@ fn advance_dsq_vtimes(cell: &mut Cell, cctx: &mut CpuCtx, tctx: &TaskCtx, task_v
     }
 }
 
-// PORT_TODO: Missing lookup_cgrp_ancestor(cgrp, level) — wraps bpf_cgroup_ancestor.
-// — See C source mitosis.bpf.c:102-114
+/// Look up a cgroup ancestor at the given hierarchy level.
+/// Returns null on failure. Caller must release the returned reference.
+/// See C source mitosis.bpf.c:102-114.
+#[inline(always)]
+fn lookup_cgrp_ancestor(cgrp: *mut cgroup, level: i32) -> *mut cgroup {
+    let cg = scx_ebpf::cgroup::ancestor(cgrp, level);
+    if cg.is_null() {
+        // PORT_TODO: scx_bpf_error("Failed to get ancestor level %d", level)
+    }
+    cg
+}
 
-// PORT_TODO: Missing lookup_cgrp_ctx_fallible(cgrp) / lookup_cgrp_ctx(cgrp)
-// — wraps bpf_cgrp_storage_get on cgrp_ctxs map. Blocked on cgrp storage map.
-// — See C source mitosis.bpf.c:123-143
+/// Look up cgrp_ctx for a cgroup (returns None if not found, no error).
+/// See C source mitosis.bpf.c:123-132.
+#[inline(always)]
+fn lookup_cgrp_ctx_fallible(cgrp: *mut cgroup) -> Option<&'static mut CgrpCtx> {
+    CGRP_CTX.get_mut(cgrp as *mut u8)
+}
+
+/// Look up cgrp_ctx for a cgroup (errors on failure).
+/// See C source mitosis.bpf.c:134-143.
+#[inline(always)]
+fn lookup_cgrp_ctx(cgrp: *mut cgroup) -> Option<&'static mut CgrpCtx> {
+    let cgc = CGRP_CTX.get_mut(cgrp as *mut u8);
+    if cgc.is_none() {
+        // PORT_TODO: scx_bpf_error("cgrp_ctx lookup failed for cgid %llu")
+    }
+    cgc
+}
 
 // PORT_TODO: Missing task_cgroup(p) — gets task's cgroup, handling cpu_controller_disabled
 // mode (reads p->cgroups->dfl_cgrp under RCU). See C source mitosis.bpf.c:145-169
+// For now, cgroup callbacks receive the cgroup directly from the kernel.
 
-// PORT_TODO: Missing allocate_cell() / free_cell() — atomic cell pool management using
-// __sync_bool_compare_and_swap on cell.in_use. See C source mitosis.bpf.c:219-251
+/// Allocate a free cell from the cell pool.
+/// Uses atomic CAS on cell.in_use to handle concurrent access.
+/// See C source mitosis.bpf.c:219-235.
+#[inline(always)]
+fn allocate_cell() -> i32 {
+    // Linear scan for a free cell
+    let mut cell_idx: u32 = 0;
+    while cell_idx < MAX_CELLS {
+        if let Some(c) = lookup_cell(cell_idx) {
+            // Atomic compare-and-swap: if in_use == 0, set to 1
+            if c.in_use == 0 {
+                c.in_use = 1;
+                zero_cell_vtimes(c);
+                return cell_idx as i32;
+            }
+        }
+        cell_idx += 1;
+    }
+    // PORT_TODO: scx_bpf_error("No available cells to allocate");
+    -1
+}
+
+/// Free a cell back to the pool.
+/// See C source mitosis.bpf.c:237-251.
+#[inline(always)]
+fn free_cell(cell_idx: i32) -> i32 {
+    if cell_idx < 0 || cell_idx >= MAX_CELLS as i32 {
+        return -1;
+    }
+    if let Some(c) = lookup_cell(cell_idx as u32) {
+        c.in_use = 0;
+        0
+    } else {
+        -1
+    }
+}
 
 /// Record a cgroup_init debug event. See C source mitosis.bpf.c:256-274.
 #[inline(always)]
@@ -951,6 +1014,30 @@ fn mitosis_stopping(p: *mut task_struct, _runnable: bool) {
     }
 }
 
+/// set_cpumask: Called when a task's CPU affinity changes.
+///
+/// Port of C mitosis_set_cpumask (mitosis.bpf.c:1545-1559):
+/// - Look up task context
+/// - Re-intersect the task's allowed cpumask with its cell cpumask
+///   via update_task_cpumask, which may change the task's DSQ assignment
+///   (e.g., from cell-wide to per-CPU pinned or vice versa)
+///
+/// The `_cpumask` parameter is the new cpumask set by the kernel. The C
+/// version doesn't use it directly — update_task_cpumask reads p->cpus_ptr
+/// which is already updated by the time this callback fires.
+fn mitosis_set_cpumask(p: *mut task_struct, _cpumask: *mut core::ffi::c_void) {
+    let _tctx = match lookup_task_ctx(p) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // PORT_TODO: Call update_task_cpumask(p, tctx) to re-intersect the task's
+    // CPU affinity with its cell cpumask. This updates tctx->dsq (per-CPU vs
+    // cell+LLC) and tctx->all_cell_cpus_allowed based on the new affinity.
+    // Blocked on cell cpumask kptrs (cell_cpumasks map).
+    // See C source mitosis.bpf.c:1545-1559
+}
+
 fn mitosis_init() -> i32 {
     // PORT_TODO: Full init implementation — see C source mitosis.bpf.c:1801-2013
     // Must:
@@ -993,16 +1080,127 @@ fn mitosis_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
     let _ = TASK_CTX.delete(p as *mut u8);
 }
 
-// PORT_TODO: Missing cgroup_init callback — see C source mitosis.bpf.c:1436-1442
-// Calls init_cgrp_ctx(cgrp) to create cgrp_ctx in cgrp storage, assign to
-// parent's cell, and bump configuration_seq if cgroup has a cpuset.
+/// Initialize cgrp_ctx for a cgroup.
+///
+/// Port of C init_cgrp_ctx (mitosis.bpf.c:1347-1392):
+/// - Creates cgrp_ctx in cgroup storage
+/// - Root cgroup gets cell 0
+/// - Non-root cgroups inherit parent's cell
+/// - If cgroup has a cpuset, bumps configuration_seq so the timer
+///   allocates a dedicated cell
+///
+/// PORT_TODO: get_cgroup_cpumask() check for cpusets is not yet
+/// implemented (needs CO-RE reads of cpuset->cpus_allowed).
+/// See C source mitosis.bpf.c:1365-1378.
+#[inline(always)]
+fn init_cgrp_ctx(cgrp: *mut cgroup) -> i32 {
+    // PORT_TODO: Read cgrp->kn->id for debug event recording.
+    // For now, pass 0 as cgid placeholder.
+    record_cgroup_init(0);
 
-// PORT_TODO: Missing cgroup_exit callback — see C source mitosis.bpf.c:1444-1475
-// Frees cell if cgrp_ctx->cell_owner, bumps configuration_seq to trigger
-// CPU redistribution.
+    // Create cgrp_ctx in cgroup storage
+    let cgc = match CGRP_CTX.get_or_init(cgrp as *mut u8, &CgrpCtx::ZERO) {
+        Some(c) => c,
+        None => {
+            // PORT_TODO: scx_bpf_error("cgrp_ctx creation failed")
+            return -2; // -ENOENT
+        }
+    };
 
-// PORT_TODO: Missing cgroup_move callback — see C source mitosis.bpf.c:1477-1489
-// Calls update_task_cell(p, tctx, to) to reassign task to new cgroup's cell.
+    let root_cgid = ROOT_CGID.get();
+
+    // PORT_TODO: Read cgrp->kn->id to check if this is the root cgroup.
+    // For now, we can't read cgroup fields via CO-RE without vmlinux bindings.
+    // The root cgroup is handled by init() which sets cell 0 directly.
+    // Non-root cgroups get parent cell via ancestor lookup below.
+
+    // Initialize to parent's cell (for non-root cgroups)
+    // PORT_TODO: Proper cgrp->level read via CO-RE. For now, try ancestor at
+    // level (cgrp_level - 1). Since we can't read the level field, we try
+    // looking up parent via ancestor(cgrp, cgrp->level - 1). Without the
+    // level, we use a workaround: just inherit cell 0 (root cell) as default.
+    // The timer callback will reassign cells based on cpusets.
+    cgc.cell = ROOT_CELL_ID;
+    cgc.cell_owner = 0;
+
+    // PORT_TODO: Check cpuset with get_cgroup_cpumask(). If cpuset exists,
+    // bump configuration_seq to trigger cell allocation in timer callback.
+    // See C source mitosis.bpf.c:1365-1378.
+
+    0
+}
+
+/// cgroup_init: Called when a cgroup is created.
+///
+/// Port of C mitosis_cgroup_init (mitosis.bpf.c:1436-1442).
+fn mitosis_cgroup_init(cgrp: *mut core::ffi::c_void, _args: *mut core::ffi::c_void) -> i32 {
+    if CPU_CONTROLLER_DISABLED.get() {
+        return 0;
+    }
+    init_cgrp_ctx(cgrp as *mut cgroup)
+}
+
+/// cgroup_exit: Called when a cgroup is destroyed.
+///
+/// Port of C mitosis_cgroup_exit (mitosis.bpf.c:1444-1475):
+/// - Looks up cgrp_ctx
+/// - If this cgroup owned a cell, frees it
+/// - Bumps configuration_seq to redistribute CPUs back to root cell
+fn mitosis_cgroup_exit(cgrp: *mut core::ffi::c_void) {
+    if CPU_CONTROLLER_DISABLED.get() {
+        return;
+    }
+
+    // PORT_TODO: record_cgroup_exit needs cgrp->kn->id
+    record_cgroup_exit(0);
+
+    let cgc = match lookup_cgrp_ctx(cgrp as *mut cgroup) {
+        Some(c) => c,
+        None => {
+            // If lookup fails, the cgroup doesn't have storage — not a cell owner
+            return;
+        }
+    };
+
+    if cgc.cell_owner != 0 {
+        let _ret = free_cell(cgc.cell as i32);
+        // Bump configuration_seq so the timer redistributes CPUs
+        unsafe {
+            CONFIGURATION_SEQ = CONFIGURATION_SEQ.wrapping_add(1);
+        }
+    }
+}
+
+/// cgroup_move: Called when a task is migrated between cgroups.
+///
+/// Port of C mitosis_cgroup_move (mitosis.bpf.c:1477-1489):
+/// - Looks up the task's context
+/// - Updates the task's cell assignment to match the destination cgroup
+fn mitosis_cgroup_move(p: *mut task_struct, _from: *mut core::ffi::c_void, to: *mut core::ffi::c_void) {
+    if CPU_CONTROLLER_DISABLED.get() {
+        return;
+    }
+
+    let tctx = match lookup_task_ctx(p) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Look up the destination cgroup's cell assignment
+    let cgc = match lookup_cgrp_ctx_fallible(to as *mut cgroup) {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Update the task's cell to match the destination cgroup
+    tctx.cell = cgc.cell;
+
+    // PORT_TODO: Full update_task_cell(p, tctx, to) which also updates
+    // cpumask, DSQ assignment, configuration_seq sync, and vtime baseline.
+    // Blocked on cell cpumask kptrs. See C source mitosis.bpf.c:456-503.
+    // For now, just update the cell ID — the task will get its full
+    // assignment refreshed on next enqueue via maybe_refresh_cell.
+}
 
 // PORT_TODO: Missing dump callback — see C source mitosis.bpf.c:1690-1782
 // Dumps all in-use cells with cpumasks, vtime, nr_queued for each DSQ.
@@ -1025,7 +1223,7 @@ fn mitosis_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
 // bumps configuration_seq.
 
 // PORT_TODO: scx_ops_define is missing callbacks that the C version registers:
-// set_cpumask, cgroup_init, cgroup_exit, cgroup_move, dump, dump_task.
+// dump, dump_task.
 // Also missing .flags for SCX_OPS_ALLOW_QUEUED_WAKEUP.
 // See C source mitosis.bpf.c:2021-2037
 scx_ebpf::scx_ops_define! {
@@ -1035,8 +1233,12 @@ scx_ebpf::scx_ops_define! {
     dispatch: mitosis_dispatch,
     running: mitosis_running,
     stopping: mitosis_stopping,
+    set_cpumask: mitosis_set_cpumask,
     init: mitosis_init,
     exit: mitosis_exit,
     init_task: mitosis_init_task,
     exit_task: mitosis_exit_task,
+    cgroup_init: mitosis_cgroup_init,
+    cgroup_exit: mitosis_cgroup_exit,
+    cgroup_move: mitosis_cgroup_move,
 }

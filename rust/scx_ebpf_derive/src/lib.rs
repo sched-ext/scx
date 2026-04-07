@@ -181,6 +181,42 @@ const CALLBACKS: &[CallbackSig] = &[
         sleepable: false,
     },
     CallbackSig {
+        name: "cgroup_init",
+        params: &[(Ptr, "cgrp"), (Ptr, "args")],
+        ret: Some("i32"),
+        sleepable: false,
+    },
+    CallbackSig {
+        name: "cgroup_exit",
+        params: &[(Ptr, "cgrp")],
+        ret: None,
+        sleepable: false,
+    },
+    CallbackSig {
+        name: "cgroup_prep_move",
+        params: &[(Task, "p"), (Ptr, "from"), (Ptr, "to")],
+        ret: Some("i32"),
+        sleepable: false,
+    },
+    CallbackSig {
+        name: "cgroup_move",
+        params: &[(Task, "p"), (Ptr, "from"), (Ptr, "to")],
+        ret: None,
+        sleepable: false,
+    },
+    CallbackSig {
+        name: "cgroup_cancel_move",
+        params: &[(Task, "p"), (Ptr, "from"), (Ptr, "to")],
+        ret: None,
+        sleepable: false,
+    },
+    CallbackSig {
+        name: "cgroup_set_weight",
+        params: &[(Ptr, "cgrp"), (U32, "weight")],
+        ret: None,
+        sleepable: false,
+    },
+    CallbackSig {
         name: "init",
         params: &[],
         ret: Some("i32"),
