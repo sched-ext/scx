@@ -809,22 +809,189 @@ fn init_task_llc(tctx: &mut TaskCtx) {
 
 // === LLC-aware helpers (from llc_aware.bpf.h) ===
 
-// PORT_TODO: Missing recalc_cell_llc_counts(cell_idx, explicit_mask) — recomputes per-LLC
-// CPU counts within a cell, using bpf_cpumask_and + bpf_cpumask_weight under spin lock.
-// Blocked on cell cpumask kptrs. See C source llc_aware.bpf.h:65-123
+/// Recompute per-LLC CPU counts within a cell.
+///
+/// Port of C recalc_cell_llc_counts (llc_aware.bpf.h:65-123).
+/// Without cell cpumask kptrs, uses cpu_ctx.cell + CPU_TO_LLC to count.
+#[inline(always)]
+fn recalc_cell_llc_counts(cell_idx: u32) {
+    let cell = match lookup_cell(cell_idx) {
+        Some(c) => c,
+        None => return,
+    };
 
-// PORT_TODO: Missing pick_llc_for_task(cell_id) — weighted random LLC selection using
-// bpf_get_prandom_u32, proportional to per-LLC CPU count.
-// See C source llc_aware.bpf.h:135-189
+    let nr_llc = NR_LLC.get();
+    let nr_cpus = NR_POSSIBLE_CPUS.get();
+    let mut llc_cpu_cnt = [0u32; MAX_LLCS as usize];
+    let mut total_cpus = 0u32;
+    let mut llcs_present = 0u32;
 
-// PORT_TODO: Missing maybe_retag_stolen_task(p, tctx, cctx) — detects cross-LLC migration
-// (work stealing), updates steal accounting, reassigns LLC. See C source llc_aware.bpf.h:211-231
+    // PORT_TODO: The C version uses cell cpumask kptrs with bpf_cpumask_and.
+    // Our fallback reads cpu_ctx.cell via get_percpu for each CPU.
+    let mut cpu: u32 = 0;
+    while cpu < nr_cpus && cpu < MAX_CPUS {
+        if let Some(cctx) = CPU_CTX.get_percpu(0, cpu) {
+            if cctx.cell == cell_idx {
+                if let Some(llc) = CPU_TO_LLC.get(cpu as usize) {
+                    if llc < nr_llc && llc < MAX_LLCS {
+                        llc_cpu_cnt[llc as usize] += 1;
+                        total_cpus += 1;
+                    }
+                }
+            }
+        }
+        cpu += 1;
+    }
 
-// PORT_TODO: Missing try_stealing_work(cell, local_llc) — scans sibling (cell,LLC) DSQs
-// for stealable tasks, calls scx_bpf_dsq_move_to_local. See C source llc_aware.bpf.h:240-301
+    let mut i: u32 = 0;
+    while i < nr_llc && i < MAX_LLCS {
+        if llc_cpu_cnt[i as usize] > 0 {
+            llcs_present += 1;
+        }
+        i += 1;
+    }
+
+    // PORT_TODO: Use spin_lock(&cell->lock) here.
+    i = 0;
+    while i < nr_llc && i < MAX_LLCS {
+        cell.llcs[i as usize].cpu_cnt = llc_cpu_cnt[i as usize];
+        i += 1;
+    }
+    cell.llc_present_cnt = llcs_present;
+    cell.cpu_cnt = total_cpus;
+}
+
+/// Weighted random LLC selection for a task.
+///
+/// Port of C pick_llc_for_task (llc_aware.bpf.h:135-189).
+/// P(LLC) proportional to number of CPUs in that LLC within the cell.
+/// Returns LLC ID on success, -1 on error.
+#[inline(always)]
+fn pick_llc_for_task(cell_id: u32) -> i32 {
+    let cell = match lookup_cell(cell_id) {
+        Some(c) => c,
+        None => return -1,
+    };
+
+    let nr_llc = NR_LLC.get();
+    let mut llc_cpu_cnt = [0u32; MAX_LLCS as usize];
+    let mut total_cpu_cnt = 0u32;
+
+    // PORT_TODO: Use spin_lock for consistency with C version.
+    let mut i: u32 = 0;
+    while i < nr_llc && i < MAX_LLCS {
+        llc_cpu_cnt[i as usize] = cell.llcs[i as usize].cpu_cnt;
+        total_cpu_cnt += llc_cpu_cnt[i as usize];
+        i += 1;
+    }
+
+    if total_cpu_cnt == 0 {
+        return -1;
+    }
+
+    let target = scx_ebpf::helpers::get_prandom_u32() % total_cpu_cnt;
+    let mut cur = 0u32;
+
+    i = 0;
+    while i < nr_llc && i < MAX_LLCS {
+        cur += llc_cpu_cnt[i as usize];
+        if target < cur {
+            return i as i32;
+        }
+        i += 1;
+    }
+
+    -1
+}
+
+/// Detect and handle cross-LLC task migration (work stealing).
+///
+/// Port of C maybe_retag_stolen_task (llc_aware.bpf.h:211-231).
+/// Called from running() when LLC-aware + work stealing is enabled.
+#[inline(always)]
+fn maybe_retag_stolen_task(
+    _p: *mut task_struct,
+    tctx: &mut TaskCtx,
+    cctx: &CpuCtx,
+) -> i32 {
+    if tctx.llc as u32 == cctx.llc {
+        return 0;
+    }
+
+    tctx.steal_count += 1;
+    tctx.last_stolen_at = kfuncs::now();
+    tctx.llc = cctx.llc as i32;
+    tctx.dsq = DsqId::cell_llc(tctx.cell, cctx.llc);
+
+    // Set vtime baseline from new LLC
+    if let Some(cell) = lookup_cell(tctx.cell) {
+        if (cctx.llc as usize) < MAX_LLCS as usize {
+            tctx.basis_vtime = cell.llcs[cctx.llc as usize].vtime_now;
+        }
+    }
+
+    // PORT_TODO: Full update_task_cpumask(p, tctx) to narrow cpumask by new LLC.
+    // Blocked on cell cpumask kptrs. See C source llc_aware.bpf.h:230.
+    0
+}
+
+/// Try stealing work from sibling LLC DSQs within the same cell.
+///
+/// Port of C try_stealing_work (llc_aware.bpf.h:240-301).
+/// Returns true if a task was stolen, false otherwise.
+#[inline(always)]
+fn try_stealing_work(cell_idx: u32, local_llc: u32) -> bool {
+    if !llc_is_valid(local_llc) {
+        return false;
+    }
+
+    let nr_llc = NR_LLC.get();
+
+    let cell_ptr = match lookup_cell(cell_idx) {
+        Some(c) => c,
+        None => return false,
+    };
+
+    let mut i: u32 = 1;
+    while i < nr_llc && i < MAX_LLCS {
+        let candidate_llc = (local_llc + i) % nr_llc;
+
+        if candidate_llc >= MAX_LLCS {
+            i += 1;
+            continue;
+        }
+
+        // Skip if cell has no CPUs in this LLC
+        if cell_ptr.llcs[candidate_llc as usize].cpu_cnt == 0 {
+            i += 1;
+            continue;
+        }
+
+        let candidate_dsq = DsqId::cell_llc(cell_idx, candidate_llc);
+        if candidate_dsq.is_invalid() {
+            return false;
+        }
+
+        // Skip if empty (fast path)
+        if kfuncs::dsq_nr_queued(candidate_dsq.raw()) == 0 {
+            i += 1;
+            continue;
+        }
+
+        // Attempt the steal — retag happens in running() via maybe_retag_stolen_task
+        if kfuncs::dsq_move_to_local(candidate_dsq.raw()) {
+            return true;
+        }
+
+        i += 1;
+    }
+
+    false
+}
 
 // PORT_TODO: Missing update_task_llc_assignment(p, tctx) — picks new LLC, narrows cpumask
-// by LLC, sets DSQ and vtime baseline. See C source llc_aware.bpf.h:303-349
+// by LLC, sets DSQ and vtime baseline. Blocked on cell cpumask kptrs.
+// See C source llc_aware.bpf.h:303-349
 
 // ── Scheduler callbacks ───────────────────────────────────────────────
 
@@ -1368,8 +1535,6 @@ fn mitosis_dump_task(_dctx: *mut core::ffi::c_void, p: *mut task_struct) {
 // When cpu_controller_disabled, handles cgroup removal — frees owned cells,
 // bumps configuration_seq.
 
-// PORT_TODO: scx_ops_define is missing callbacks that the C version registers:
-// dump, dump_task.
 // Also missing .flags for SCX_OPS_ALLOW_QUEUED_WAKEUP.
 // See C source mitosis.bpf.c:2021-2037
 scx_ebpf::scx_ops_define! {
@@ -1380,6 +1545,8 @@ scx_ebpf::scx_ops_define! {
     running: mitosis_running,
     stopping: mitosis_stopping,
     set_cpumask: mitosis_set_cpumask,
+    dump: mitosis_dump,
+    dump_task: mitosis_dump_task,
     init: mitosis_init,
     exit: mitosis_exit,
     init_task: mitosis_init_task,
