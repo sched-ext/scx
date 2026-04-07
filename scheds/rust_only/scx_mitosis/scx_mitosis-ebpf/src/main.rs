@@ -465,6 +465,16 @@ scx_ebpf::bpf_global_array!(ALL_CPUS: [u8; MAX_CPUS_U8] = [0u8; MAX_CPUS_U8]);
 
 // LLC topology arrays, populated by userspace before load.
 scx_ebpf::bpf_global_array!(CPU_TO_LLC: [u32; { MAX_CPUS as usize }] = [0u32; { MAX_CPUS as usize }]);
+
+// Init-time cgroup IDs: userspace walks /sys/fs/cgroup and populates
+// this array with kn->id values (= cgroupfs inode numbers). BPF
+// mitosis_init iterates this array to proactively initialize cgrp_ctx
+// for all pre-existing cgroups when cpu_controller_disabled is true.
+// Cgroups beyond this limit are lazily initialized via init_task.
+const MAX_INIT_CGRPS: usize = 1024;
+scx_ebpf::bpf_global_array!(INIT_CGRP_IDS: [u64; MAX_INIT_CGRPS] = [0u64; MAX_INIT_CGRPS]);
+scx_ebpf::bpf_global!(NR_INIT_CGRPS: u32 = 0);
+
 // Note: LLC_TO_CPUS needs LlcCpumask which is large (128*8 = 1024 bytes per entry).
 // bpf_global_array doesn't support custom struct values. Need a BpfArray map instead,
 // or flatten to [u64; MAX_LLCS * CPUMASK_LONG_ENTRIES].
@@ -1033,10 +1043,13 @@ fn get_cgroup_cpumask(_cgrp: *mut cgroup, _entry: &mut CpumaskEntry) -> i32 {
 /// 4. Root cell gets leftover CPUs
 /// 5. Update applied_configuration_seq
 ///
-/// PORT_TODO(bpf_for_each css): `bpf_for_each(css, pos, root_css,
-/// BPF_CGROUP_ITER_DESCENDANTS_PRE)` is a C macro that expands to
-/// an open-coded BPF iterator. This has no Rust equivalent.
-/// The cgroup walk is stubbed with a bounded loop.
+/// PORT_TODO(bpf_for_each css): The C version uses bpf_for_each(css)
+/// to walk the cgroup tree in pre-order. Without CSS iterator support
+/// in aya, the timer callback cannot iterate cgroups directly.
+/// However, since get_cgroup_cpumask() always returns 0 (PORT_TODO(aya-33)),
+/// the walk would only do "inherit parent cell" — which is already handled
+/// by init_cgrp_ctx_with_ancestors at cgrp_ctx creation time. This PORT_TODO
+/// only becomes meaningful when cpuset introspection is implemented.
 ///
 /// Note: Cell cpumask updates could use kptr_xchg for lock-free
 /// double-buffer swaps (kptr_xchg is available — used in init step 9).
@@ -1086,9 +1099,18 @@ fn update_timer_cb() -> i32 {
 
     // ── Step 4: Walk cgroup tree (pre-order DFS) ─────────────────
     //
-    // Blocked: The C version uses bpf_for_each(css, ...) open-coded
-    // iterator which has no Rust equivalent. When aya adds support for
-    // open-coded iterators, this section should iterate all descendant
+    // PORT_TODO(bpf_for_each css + aya-33): The C version uses
+    // bpf_for_each(css) to walk all cgroups and reassign cells based
+    // on cpuset changes. This requires both:
+    //   a) CSS iterator support (no aya equivalent yet)
+    //   b) get_cgroup_cpumask() (PORT_TODO(aya-33) — CO-RE cpuset read)
+    //
+    // Without (b), the walk only does "inherit parent cell" which is
+    // already handled by init_cgrp_ctx_with_ancestors at cgrp_ctx
+    // creation time. So this step is effectively a no-op until cpuset
+    // introspection is implemented.
+    //
+    // When both are available, this section should iterate all descendant
     // cgroups and:
     //
     // For each cgroup `cur_cgrp` at depth `level`:
@@ -1760,9 +1782,29 @@ fn mitosis_init() -> i32 {
         cpu += 1;
     }
 
-    // Step 7 (needs bpf_for_each css): When cpu_controller_disabled, iterate all cgroups
-    // via bpf_cgroup_iter and init cgrp_ctx for each.
-    // See C source mitosis.bpf.c:1933-1952
+    // ── Step 7: Init cgrp_ctx for pre-existing cgroups ────────────────
+    // When cpu_controller_disabled, SCX cgroup callbacks don't fire, so
+    // existing cgroups need explicit initialization. Userspace walked
+    // /sys/fs/cgroup and populated INIT_CGRP_IDS[] with kn->id values.
+    // We iterate the array and call init_cgrp_ctx_with_ancestors for each.
+    // Any cgroups beyond MAX_INIT_CGRPS are lazily initialized via
+    // init_task's fallback path.
+    //
+    // Port of C mitosis_init step 7 (mitosis.bpf.c:1907-1924).
+    if CPU_CONTROLLER_DISABLED.get() {
+        let nr_init = NR_INIT_CGRPS.get();
+        bpf_for!(i, 0, nr_init, {
+            if let Some(cgid) = INIT_CGRP_IDS.get(i as usize) {
+                if cgid != 0 {
+                    let cgrp = scx_ebpf::cgroup::from_id(cgid);
+                    if !cgrp.is_null() {
+                        let _ = init_cgrp_ctx_with_ancestors(cgrp);
+                        scx_ebpf::cgroup::release(cgrp);
+                    }
+                }
+            }
+        });
+    }
 
     // ── Step 8: Create cell DSQs ────────────────────────────────────
     // Create DSQs for all cell+LLC combinations. Only cell 0 (root) is

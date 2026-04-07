@@ -34,6 +34,7 @@
 // ✓ slice_ns — passed via override_global
 // ✓ CellMetrics, Metrics, StatsCollector — implemented in stats.rs
 // ✓ exiting_task_workaround — CLI flag + override_global
+// ✓ init_cgrp_ids[] — userspace walks /sys/fs/cgroup, passes via override_global
 
 mod mitosis_topology_utils;
 mod stats;
@@ -395,6 +396,51 @@ fn format_uptime(d: Duration) -> String {
     }
 }
 
+// ── Cgroup hierarchy walk ───────────────────────────────────────────
+
+/// Maximum number of cgroup IDs to pass to BPF for init-time walk.
+/// Matches `MAX_INIT_CGRPS` on the BPF side.
+const MAX_INIT_CGRPS: usize = 1024;
+
+/// Walk /sys/fs/cgroup recursively and collect cgroup inode numbers.
+///
+/// On the unified cgroup v2 hierarchy, each directory's inode number
+/// equals its `kernfs_node->id`, which is the value `bpf_cgroup_from_id`
+/// expects. This lets the BPF side look up and initialize each cgroup
+/// without needing the CSS iterator.
+fn collect_cgroup_ids() -> Vec<u64> {
+    let mut ids = Vec::new();
+    collect_cgroup_ids_recursive(std::path::Path::new("/sys/fs/cgroup"), &mut ids);
+    ids
+}
+
+fn collect_cgroup_ids_recursive(path: &std::path::Path, ids: &mut Vec<u64>) {
+    // Stop collecting if we've hit the limit
+    if ids.len() >= MAX_INIT_CGRPS {
+        return;
+    }
+
+    // Read the inode number (= kn->id on cgroupfs)
+    if let Ok(meta) = fs::metadata(path) {
+        use std::os::unix::fs::MetadataExt;
+        let ino = meta.ino();
+        if ino > 0 {
+            ids.push(ino);
+        }
+    }
+
+    // Recurse into subdirectories
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_dir() {
+                    collect_cgroup_ids_recursive(&entry.path(), ids);
+                }
+            }
+        }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -461,6 +507,25 @@ fn main() -> Result<()> {
     let slice_ns: u64 = 20_000_000;
     let root_cgid: u64 = 1; // Root cgroup kn->id (always 1 on unified hierarchy)
 
+    // Collect cgroup IDs for init-time walk (only when CPU controller disabled).
+    // Userspace walks /sys/fs/cgroup and collects inode numbers (= kn->id),
+    // which the BPF side uses to proactively initialize cgrp_ctx for all
+    // pre-existing cgroups. Any cgroups beyond MAX_INIT_CGRPS are lazily
+    // initialized via init_task's fallback path.
+    let mut init_cgrp_ids = [0u64; MAX_INIT_CGRPS];
+    let nr_init_cgrps: u32 = if opts.cpu_controller_disabled {
+        let ids = collect_cgroup_ids();
+        let nr = ids.len().min(MAX_INIT_CGRPS);
+        for (i, &id) in ids.iter().take(MAX_INIT_CGRPS).enumerate() {
+            init_cgrp_ids[i] = id;
+        }
+        info!("Collected {} cgroup IDs for init-time walk (max {})",
+              nr, MAX_INIT_CGRPS);
+        nr as u32
+    } else {
+        0
+    };
+
     // Remaining: llc_to_cpus[] (LlcCpumask array — 1024 bytes per entry,
     // exceeds override_global size limit; needs BpfArray map instead)
 
@@ -478,6 +543,8 @@ fn main() -> Result<()> {
         .override_global("ALL_CPUS", &all_cpus, false)
         .override_global("SLICE_NS", &slice_ns, false)
         .override_global("ROOT_CGID", &root_cgid, false)
+        .override_global("INIT_CGRP_IDS", &init_cgrp_ids, false)
+        .override_global("NR_INIT_CGRPS", &nr_init_cgrps, false)
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_mitosis"
