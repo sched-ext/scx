@@ -19,6 +19,7 @@ use scx_ebpf::maps::{TaskStorage, PerCpuArray, HashMap, BpfArray, CgrpStorage};
 use scx_ebpf::helpers::BpfSpinLock;
 use scx_ebpf::cgroup::cgroup;
 use scx_ebpf::cpumask::bpf_cpumask;
+use scx_ebpf::timer::{self, BpfTimer};
 
 mod vmlinux {
     include!(concat!(env!("OUT_DIR"), "/vmlinux.rs"));
@@ -426,9 +427,20 @@ scx_ebpf::bpf_map!(DEBUG_EVENTS: BpfArray<DebugEvent, { DEBUG_EVENTS_BUF_SIZE as
 
 scx_ebpf::bpf_map!(CGRP_CTX: CgrpStorage<CgrpCtx> = CgrpStorage::new());
 
-// PORT_TODO: Missing update_timer map (BPF_MAP_TYPE_ARRAY, max_entries=1)
-// — holds bpf_timer for periodic cell reconfiguration. Blocked on
-// bpf_timer support in aya. See C source mitosis.bpf.c:76-85
+/// Timer map value wrapper for the periodic reconfiguration timer.
+///
+/// The kernel requires the timer field to have BTF type name `bpf_timer`.
+/// The `BpfTimer` type alias resolves to `struct bpf_timer` in BTF.
+///
+/// C reference: `struct update_timer { struct bpf_timer timer; };`
+/// See C source mitosis.bpf.c:76-78
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UpdateTimer {
+    timer: BpfTimer,
+}
+
+scx_ebpf::bpf_map!(UPDATE_TIMER: BpfArray<UpdateTimer, 1> = BpfArray::new());
 
 // PORT_TODO: Missing cell_cpumasks map (BPF_MAP_TYPE_ARRAY, max_entries=MAX_CELLS)
 // — stores cell_cpumask_wrapper { cpumask: bpf_cpumask __kptr, tmp_cpumask: bpf_cpumask __kptr }
@@ -575,7 +587,7 @@ fn advance_dsq_vtimes(cell: &mut Cell, cctx: &mut CpuCtx, tctx: &TaskCtx, task_v
 fn lookup_cgrp_ancestor(cgrp: *mut cgroup, level: i32) -> *mut cgroup {
     let cg = scx_ebpf::cgroup::ancestor(cgrp, level);
     if cg.is_null() {
-        // PORT_TODO: scx_bpf_error("Failed to get ancestor level %d", level)
+        scx_ebpf::scx_bpf_error!("mitosis: failed to get ancestor level");
     }
     cg
 }
@@ -593,7 +605,7 @@ fn lookup_cgrp_ctx_fallible(cgrp: *mut cgroup) -> Option<&'static mut CgrpCtx> {
 fn lookup_cgrp_ctx(cgrp: *mut cgroup) -> Option<&'static mut CgrpCtx> {
     let cgc = CGRP_CTX.get_mut(cgrp as *mut u8);
     if cgc.is_none() {
-        // PORT_TODO: scx_bpf_error("cgrp_ctx lookup failed for cgid %llu")
+        scx_ebpf::scx_bpf_error!("mitosis: cgrp_ctx lookup failed");
     }
     cgc
 }
@@ -639,7 +651,7 @@ fn allocate_cell() -> i32 {
         }
         cell_idx += 1;
     }
-    // PORT_TODO: scx_bpf_error("No available cells to allocate");
+    scx_ebpf::scx_bpf_error!("mitosis: no available cells to allocate");
     -1
 }
 
@@ -932,11 +944,6 @@ fn get_cgroup_cpumask(_cgrp: *mut cgroup, _entry: &mut CpumaskEntry) -> i32 {
 /// 4. Root cell gets leftover CPUs
 /// 5. Update applied_configuration_seq
 ///
-/// PORT_TODO(bpf_timer): bpf_timer_init/set_callback/start are BPF helpers
-/// (helpers #169-#171) not yet available in aya-ebpf. The timer map and
-/// callback setup in init() are stubbed. When aya adds bpf_timer support,
-/// this function becomes the timer callback.
-///
 /// PORT_TODO(bpf_for_each css): `bpf_for_each(css, pos, root_css,
 /// BPF_CGROUP_ITER_DESCENDANTS_PRE)` is a C macro that expands to
 /// `bpf_for_each_css_task` open-coded iterator. This has no Rust equivalent.
@@ -1113,6 +1120,21 @@ fn init_task_llc(tctx: &mut TaskCtx) {
         tctx.steal_count = 0;
         tctx.last_stolen_at = 0;
     }
+}
+
+/// BPF timer callback — invoked by the kernel timer subsystem.
+///
+/// Signature: `fn(map: *mut c_void, key: *mut i32, timer: *mut BpfTimer) -> i32`
+/// Registered via `bpf_timer_set_callback` in `mitosis_init`.
+/// Calls `update_timer_cb()` and re-arms the timer.
+fn update_timer_fn(
+    _map: *mut core::ffi::c_void,
+    _key: *mut i32,
+    timer_ptr: *mut BpfTimer,
+) -> i32 {
+    timer::timer_start(timer_ptr, TIMER_INTERVAL_NS, 0);
+    update_timer_cb();
+    0
 }
 
 // === LLC-aware helpers (from llc_aware.bpf.h) ===
@@ -1387,9 +1409,8 @@ fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
     // This catches bugs in vtime accounting that could starve other tasks.
     // Matches C: time_after(vtime, basis_vtime + 8192 * slice_ns) — mitosis.bpf.c:730
     if time_after(vtime, basis_vtime.wrapping_add(8192 * slice)) {
-        // PORT_TODO: scx_bpf_error("vtime too far ahead: pid=%d vtime=%llu basis=%llu")
-        // For now, clamp to basis + 8192*slice instead of erroring, since we lack
-        // scx_bpf_error. The C version errors here but clamping is safer for a port.
+        scx_ebpf::scx_bpf_error!("mitosis: vtime too far ahead");
+        // Clamp to prevent starvation.
         vtime = basis_vtime.wrapping_add(8192 * slice);
     }
 
@@ -1415,10 +1436,9 @@ fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
 ///
 /// Port of C mitosis_dispatch (mitosis.bpf.c:751-824):
 /// - Build cell+LLC DSQ and per-CPU DSQ IDs
-/// - Try cell+LLC DSQ first, then per-CPU DSQ
+/// - Peek both DSQs, dispatch from whichever has the lowest-vtime task
 /// - If both empty and LLC-aware + work stealing enabled, try stealing
 ///   from sibling LLC DSQs within the same cell
-/// - PORT_TODO: peek both DSQs, pick lowest vtime (needs dsq_peek on 6.19+)
 fn mitosis_dispatch(cpu: i32, _prev: *mut task_struct) {
     let cctx = match lookup_cpu_ctx(-1) {
         Some(c) => c,
@@ -1435,12 +1455,32 @@ fn mitosis_dispatch(cpu: i32, _prev: *mut task_struct) {
         return;
     }
 
-    // Try cell+LLC DSQ first (higher priority — vtime-ordered shared queue)
-    if kfuncs::dsq_move_to_local(cell_dsq.raw()) {
+    // Peek both DSQs to pick the task with the lowest vtime.
+    // dsq_peek returns the head task without consuming it (kernel 6.19+).
+    // On older kernels the __weak extern returns null — we fall back to
+    // cell-first ordering.
+    let cell_head = kfuncs::dsq_peek(cell_dsq.raw());
+    let cpu_head = kfuncs::dsq_peek(cpu_dsq.raw());
+
+    if !cell_head.is_null() && !cpu_head.is_null() {
+        // Both DSQs have tasks — compare vtimes
+        let cell_vtime = core_read!(vmlinux::task_struct, cell_head, scx.dsq_vtime)
+            .unwrap_or(u64::MAX);
+        let cpu_vtime = core_read!(vmlinux::task_struct, cpu_head, scx.dsq_vtime)
+            .unwrap_or(u64::MAX);
+
+        if time_before(cpu_vtime, cell_vtime) {
+            kfuncs::dsq_move_to_local(cpu_dsq.raw());
+            return;
+        }
+        kfuncs::dsq_move_to_local(cell_dsq.raw());
         return;
     }
 
-    // Then per-CPU DSQ (for pinned tasks)
+    // Only one (or neither) has tasks — try cell first, then CPU
+    if kfuncs::dsq_move_to_local(cell_dsq.raw()) {
+        return;
+    }
     if kfuncs::dsq_move_to_local(cpu_dsq.raw()) {
         return;
     }
@@ -1598,7 +1638,7 @@ fn mitosis_init() -> i32 {
                     let cpu_dsq = DsqId::cpu(cpu);
                     let ret = kfuncs::create_dsq(cpu_dsq.raw(), -1);
                     if ret != 0 {
-                        // PORT_TODO: scx_bpf_error("Failed to create CPU DSQ for cpu %d", cpu)
+                        scx_ebpf::scx_bpf_error!("mitosis: failed to create CPU DSQ");
                         return ret;
                     }
                 }
@@ -1636,7 +1676,7 @@ fn mitosis_init() -> i32 {
             let dsq = DsqId::cell_llc(cell, llc);
             let ret = kfuncs::create_dsq(dsq.raw(), -1);
             if ret != 0 {
-                // PORT_TODO: scx_bpf_error("Failed to create cell+LLC DSQ")
+                scx_ebpf::scx_bpf_error!("mitosis: failed to create cell+LLC DSQ");
                 return ret;
             }
             llc += 1;
@@ -1663,34 +1703,21 @@ fn mitosis_init() -> i32 {
         return -2; // -ENOENT
     }
 
-    // PORT_TODO(step 12): Setup and arm bpf_timer for periodic reconfiguration.
-    // Requires bpf_timer support in aya-ebpf.
-    //
-    // The C version does:
-    //   struct bpf_timer *timer = bpf_map_lookup_elem(&update_timer, &key);
-    //   bpf_timer_init(timer, &update_timer, CLOCK_BOOTTIME);
-    //   bpf_timer_set_callback(timer, update_timer_cb);
-    //   bpf_timer_start(timer, TIMER_INTERVAL_NS, 0);
-    //
-    // This requires:
-    // 1. An array map with value type containing `struct bpf_timer` (16 bytes)
-    // 2. BPF helper #169 bpf_timer_init(timer, map, flags)
-    // 3. BPF helper #170 bpf_timer_set_callback(timer, callback_fn)
-    // 4. BPF helper #171 bpf_timer_start(timer, nsecs, flags)
-    //
-    // bpf_timer is a special kernel type that cannot be represented as a plain
-    // Rust struct — the kernel initializes hidden fields in it. Until aya-ebpf
-    // adds bpf_timer support, the timer-driven cgroup walker cannot fire.
-    //
-    // Impact: Without the timer, configuration changes (cpuset modifications)
-    // are not automatically detected. The CONFIGURATION_SEQ / APPLIED_CONFIGURATION_SEQ
-    // mechanism works, but nothing calls update_timer_cb to process the change.
-    // Tasks will still refresh via maybe_refresh_cell on enqueue, but CPU→cell
-    // assignments won't update until the timer fires.
-    //
-    // Workaround: userspace could periodically trigger a reconfiguration by
-    // calling update_timer_cb via a SEC("syscall") program, but this is not
-    // implemented yet.
+    // ── Step 12: Setup and arm bpf_timer for periodic reconfiguration ──
+    // Port of C mitosis.bpf.c:2004-2014
+    {
+        let timer_val = UPDATE_TIMER.get_ptr_mut(0);
+        if !timer_val.is_null() {
+            let t = unsafe { &mut (*timer_val).timer as *mut BpfTimer };
+            let map_ptr = core::ptr::from_ref(&UPDATE_TIMER).cast();
+            timer::timer_init(t, map_ptr, timer::CLOCK_BOOTTIME);
+            timer::timer_set_callback(t, update_timer_fn as *const () as u64);
+            let ret = timer::timer_start(t, TIMER_INTERVAL_NS, 0);
+            if ret < 0 {
+                return ret as i32;
+            }
+        }
+    }
 
     0
 }
@@ -1741,7 +1768,7 @@ fn init_cgrp_ctx(cgrp: *mut cgroup) -> i32 {
     let cgc = match CGRP_CTX.get_or_init(cgrp as *mut u8, &CgrpCtx::ZERO) {
         Some(c) => c,
         None => {
-            // PORT_TODO: scx_bpf_error("cgrp_ctx creation failed")
+            scx_ebpf::scx_bpf_error!("mitosis: cgrp_ctx creation failed");
             return -2; // -ENOENT
         }
     };
@@ -1944,7 +1971,7 @@ pub fn tp_cgroup_mkdir(ctx: *mut u64) -> i32 {
     // initialized (e.g., via a previous cgroup_mkdir or cgroup_init).
     let ret = init_cgrp_ctx(cgrp);
     if ret != 0 {
-        // PORT_TODO: scx_bpf_error("tp_cgroup_mkdir: init_cgrp_ctx failed: %d", ret)
+        scx_ebpf::scx_bpf_error!("mitosis: init_cgrp_ctx failed in cgroup_mkdir");
     }
 
     0
@@ -1986,8 +2013,10 @@ pub fn tp_cgroup_rmdir(ctx: *mut u64) -> i32 {
     record_cgroup_exit(0);
 
     if cgc.cell_owner != 0 {
-        let _ret = free_cell(cgc.cell as i32);
-        // PORT_TODO: if ret != 0: scx_bpf_error("Failed to free cell %d: %d", ...)
+        let ret = free_cell(cgc.cell as i32);
+        if ret != 0 {
+            scx_ebpf::scx_bpf_error!("mitosis: failed to free cell in cgroup_rmdir");
+        }
 
         // Bump configuration_seq so the timer redistributes the freed
         // cell's CPUs back to the root cell.
