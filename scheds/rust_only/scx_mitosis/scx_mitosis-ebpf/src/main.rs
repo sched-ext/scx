@@ -824,10 +824,11 @@ fn maybe_refresh_cell(p: *mut task_struct, tctx: &mut TaskCtx) {
     if CPU_CONTROLLER_DISABLED.get() {
         let cgrp = kfuncs::task_cgroup(p);
         if !cgrp.is_null() {
-            let cgid = unsafe { core_read!(vmlinux::cgroup, cgrp, kn, id) };
-            if let Ok(id) = cgid {
-                if id != tctx.cgid {
-                    update_task_cell(p, tctx, cgrp);
+            if let Ok(kn) = core_read!(vmlinux::cgroup, cgrp, kn) {
+                if let Ok(id) = core_read!(vmlinux::kernfs_node, kn, id) {
+                    if id != tctx.cgid {
+                        update_task_cell(p, tctx, cgrp);
+                    }
                 }
             }
         }
