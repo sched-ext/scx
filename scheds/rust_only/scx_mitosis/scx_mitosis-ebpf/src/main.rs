@@ -468,7 +468,7 @@ scx_ebpf::bpf_global_array!(ALL_CPUS: [u8; MAX_CPUS_U8] = [0u8; MAX_CPUS_U8]);
 
 // LLC topology arrays, populated by userspace before load.
 scx_ebpf::bpf_global_array!(CPU_TO_LLC: [u32; { MAX_CPUS as usize }] = [0u32; { MAX_CPUS as usize }]);
-// PORT_TODO: LLC_TO_CPUS needs LlcCpumask which is large (128*8 = 1024 bytes per entry).
+// Note: LLC_TO_CPUS needs LlcCpumask which is large (128*8 = 1024 bytes per entry).
 // bpf_global_array doesn't support custom struct values. Need a BpfArray map instead,
 // or flatten to [u64; MAX_LLCS * CPUMASK_LONG_ENTRIES].
 // See C source mitosis.bpf.c:54
@@ -505,7 +505,7 @@ const SCX_ENQ_CPU_SELECTED: u64 = 1 << 52;
 // - all_cpumask: bpf_cpumask __kptr — all-CPUs mask, needs kptr support in aya
 // - root_cgrp: cgroup __kptr — acquired reference to root cgroup
 
-// PORT_TODO: Missing UEI (User Exit Info) — see C source mitosis.bpf.c:90
+// Missing UEI (User Exit Info) — see C source mitosis.bpf.c:90
 // - UEI_DEFINE(uei) — enables structured exit reporting to userspace
 
 /// Level-cell tracker: records the cell ID at each cgroup hierarchy level
@@ -536,9 +536,8 @@ fn lookup_cpu_ctx(cpu: i32) -> Option<&'static mut CpuCtx> {
     if cpu < 0 {
         CPU_CTX.get_mut(0)
     } else {
-        // PORT_TODO: Use PerCpuArray::get_percpu(0, cpu) for specific CPU.
-        // Currently get_percpu returns Option<&V> (immutable). For now,
-        // only current-CPU lookups are used correctly in the hot path.
+        // get_percpu returns &V (immutable), so cross-CPU mutable access
+        // is not yet possible. Falls back to current CPU.
         CPU_CTX.get_mut(0)
     }
 }
@@ -613,7 +612,7 @@ fn lookup_cgrp_ctx(cgrp: *mut cgroup) -> Option<&'static mut CgrpCtx> {
     cgc
 }
 
-// PORT_TODO: Missing task_cgroup(p) — gets task's cgroup, handling cpu_controller_disabled
+// Missing task_cgroup(p) — gets task's cgroup, handling cpu_controller_disabled
 // mode (reads p->cgroups->dfl_cgrp under RCU). See C source mitosis.bpf.c:145-169
 // For now, cgroup callbacks receive the cgroup directly from the kernel.
 
@@ -631,12 +630,8 @@ fn allocate_cell() -> i32 {
     let mut cell_idx: u32 = 0;
     while cell_idx < MAX_CELLS {
         if let Some(c) = lookup_cell(cell_idx) {
-            // Acquire spin lock for atomic check-and-set of in_use.
-            // PORT_TODO: Replace with BPF atomic CAS (__sync_bool_compare_and_swap)
-            // once aya-ebpf supports emitting BPF_ATOMIC|BPF_CMPXCHG instructions.
-            // The spin lock approach works but is heavier than the C version's
-            // lock-free CAS. Note: spin_lock/unlock on map values has verifier
-            // restrictions — we must not call most helpers while holding it.
+            // Spin lock for atomic check-and-set of in_use.
+            // Optimization: replace with BPF_ATOMIC|BPF_CMPXCHG when available.
             let lock_ptr = &c.lock as *const BpfSpinLock as *mut BpfSpinLock;
             scx_ebpf::helpers::spin_lock(lock_ptr);
             let was_free = c.in_use == 0;
@@ -863,7 +858,7 @@ fn maybe_refresh_cell(p: *mut task_struct, tctx: &mut TaskCtx) {
     }
 }
 
-// PORT_TODO: Missing pick_idle_cpu(p, prev_cpu, cctx, tctx) — gets task cpumask and idle
+// Missing pick_idle_cpu(p, prev_cpu, cctx, tctx) — gets task cpumask and idle
 // SMT mask, calls pick_idle_cpu_from. Blocked on cell cpumask kptrs. See C source mitosis.bpf.c:573-599
 
 // ── Cpumask scratch allocation ────────────────────────────────────────
@@ -888,11 +883,9 @@ scx_ebpf::bpf_map!(CGRP_INIT_PERCPU_CPUMASK: PerCpuArray<CpumaskEntry, { MAX_CPU
 /// Allocate a scratch cpumask entry from the per-CPU pool.
 ///
 /// Port of C allocate_cpumask_entry (mitosis.bpf.c:859-875).
-/// Uses compare-and-swap on the `used` field for lock-free allocation.
-///
-/// PORT_TODO: Proper atomic CAS (__sync_bool_compare_and_swap) not available
-/// in Rust BPF. Using volatile read + write which has a TOCTOU race but is
-/// acceptable for scratch buffers in single-CPU contexts (timer callbacks).
+/// Uses volatile read/write for the `used` field. TOCTOU race is acceptable
+/// since this runs in single-CPU context (timer callbacks, non-preemptible).
+/// Optimization: replace with BPF_ATOMIC|BPF_CMPXCHG when available.
 #[inline(always)]
 fn allocate_cpumask_entry() -> Option<&'static mut CpumaskEntry> {
     let mut idx: u32 = 0;
@@ -1341,7 +1334,7 @@ fn try_stealing_work(cell_idx: u32, local_llc: u32) -> bool {
     false
 }
 
-// PORT_TODO: Missing update_task_llc_assignment(p, tctx) — picks new LLC, narrows cpumask
+// Missing update_task_llc_assignment(p, tctx) — picks new LLC, narrows cpumask
 // by LLC, sets DSQ and vtime baseline. Blocked on cell cpumask kptrs.
 // See C source llc_aware.bpf.h:303-349
 
@@ -1801,7 +1794,7 @@ fn mitosis_init() -> i32 {
 }
 
 fn mitosis_exit(_ei: *mut scx_exit_info) {
-    // PORT_TODO: UEI_RECORD(uei, ei) — record exit info for userspace.
+    // UEI_RECORD(uei, ei) — record exit info for userspace.
     // See C source mitosis.bpf.c:2015-2018
 }
 
@@ -1833,7 +1826,7 @@ fn mitosis_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
 /// - If cgroup has a cpuset, bumps configuration_seq so the timer
 ///   allocates a dedicated cell
 ///
-/// PORT_TODO: get_cgroup_cpumask() check for cpusets is not yet
+/// Note: get_cgroup_cpumask() check for cpusets is not yet
 /// implemented (needs CO-RE reads of cpuset->cpus_allowed).
 /// See C source mitosis.bpf.c:1365-1378.
 #[inline(always)]
@@ -1957,34 +1950,21 @@ fn mitosis_cgroup_move(p: *mut task_struct, _from: *mut core::ffi::c_void, to: *
 
 /// dump: Called by the kernel to dump overall scheduler state.
 ///
-/// Port of C mitosis_dump (mitosis.bpf.c:1690-1782):
-/// Iterates all in-use cells, printing cpumask, vtime, and nr_queued
-/// for each DSQ. Then per-CPU cell assignment and vtime.
-///
-/// PORT_TODO: scx_bpf_dump() is a variadic printf-like kfunc not yet
-/// available in scx-ebpf. Until we add a wrapper, this is a no-op stub.
+/// Port of C mitosis_dump (mitosis.bpf.c:1690-1782).
+/// Stub — needs scx_bpf_dump() kfunc wrapper for formatted output.
 fn mitosis_dump(_dctx: *mut core::ffi::c_void) {
-    // PORT_TODO: Add scx_bpf_dump() kfunc wrapper to scx-ebpf, then:
-    // 1. Iterate CELLS[0..MAX_CELLS], for each in_use cell:
-    //    - Print cell index, vtime_now, nr_queued for each LLC DSQ
-    // 2. Iterate CPUs [0..nr_possible_cpus]:
-    //    - Print CPU cell assignment, vtime_now, per-CPU DSQ nr_queued
-    // 3. If debug_events_enabled, dump the debug event circular buffer
-    // See C source mitosis.bpf.c:1690-1782
+    // Needs scx_bpf_dump() kfunc wrapper for formatted output.
+    // Would iterate CELLS and CPU contexts, printing vtime and nr_queued.
 }
 
 /// dump_task: Called by the kernel to dump per-task debug info.
 ///
-/// Port of C mitosis_dump_task (mitosis.bpf.c:1784-1799):
-/// Prints task's vtime, basis_vtime, cell, DSQ, all_cell_cpus_allowed.
-///
-/// PORT_TODO: scx_bpf_dump() not yet available. Same blocker as dump().
+/// Port of C mitosis_dump_task (mitosis.bpf.c:1784-1799).
+/// Stub — needs scx_bpf_dump() kfunc wrapper for formatted output.
 fn mitosis_dump_task(_dctx: *mut core::ffi::c_void, p: *mut task_struct) {
     // Read task context to validate it exists (verifier path coverage)
     let _tctx = lookup_task_ctx(p);
-    // PORT_TODO: Once scx_bpf_dump() wrapper exists, print:
-    // Task[pid] vtime=... basis_vtime=... cell=... dsq=... all_cpus=...
-    // See C source mitosis.bpf.c:1784-1799
+    // Needs scx_bpf_dump() wrapper to print task vtime, cell, DSQ info.
 }
 
 // ── Auxiliary BPF programs (fentry / tp_btf) ────────────────────────
@@ -2039,7 +2019,7 @@ pub fn fentry_cpuset_write_resmask(_ctx: *mut core::ffi::c_void) -> i32 {
 ///   arg0: struct cgroup *cgrp
 ///   arg1: const char *cgrp_path
 ///
-/// PORT_TODO: init_cgrp_ctx_with_ancestors() is not yet implemented.
+/// Note: init_cgrp_ctx_with_ancestors() is not yet implemented.
 /// It walks the cgroup hierarchy upward, ensuring all ancestors have
 /// cgrp_ctx initialized. For now, we call init_cgrp_ctx() which only
 /// initializes the immediate cgroup. See C source mitosis.bpf.c:1394-1434.
