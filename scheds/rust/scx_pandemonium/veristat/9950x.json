@@ -1,0 +1,105 @@
+[{
+        "value": {
+            ".rodata": [{
+                    "nr_cpu_ids": 32
+                },{
+                    "__SCX_OPS_NAME_LEN": 0
+                },{
+                    "__SCX_SLICE_DFL": 0
+                },{
+                    "__SCX_SLICE_INF": 0
+                },{
+                    "__SCX_RQ_ONLINE": 0
+                },{
+                    "__SCX_RQ_CAN_STOP_TICK": 0
+                },{
+                    "__SCX_RQ_BAL_PENDING": 0
+                },{
+                    "__SCX_RQ_BAL_KEEP": 0
+                },{
+                    "__SCX_RQ_BYPASSING": 0
+                },{
+                    "__SCX_RQ_CLK_VALID": 0
+                },{
+                    "__SCX_RQ_IN_WAKEUP": 0
+                },{
+                    "__SCX_RQ_IN_BALANCE": 0
+                },{
+                    "__SCX_DSQ_FLAG_BUILTIN": 9223372036854775808
+                },{
+                    "__SCX_DSQ_FLAG_LOCAL_ON": 4611686018427387904
+                },{
+                    "__SCX_DSQ_INVALID": 9223372036854775808
+                },{
+                    "__SCX_DSQ_GLOBAL": 9223372036854775809
+                },{
+                    "__SCX_DSQ_LOCAL": 13835058055282163712
+                },{
+                    "__SCX_DSQ_LOCAL_ON": 13835058055282163713
+                },{
+                    "__SCX_DSQ_LOCAL_CPU_MASK": 4294967295
+                },{
+                    "__SCX_TASK_QUEUED": 0
+                },{
+                    "__SCX_TASK_RESET_RUNNABLE_AT": 0
+                },{
+                    "__SCX_TASK_DEQD_FOR_SLEEP": 0
+                },{
+                    "__SCX_TASK_STATE_SHIFT": 0
+                },{
+                    "__SCX_TASK_STATE_BITS": 0
+                },{
+                    "__SCX_TASK_STATE_MASK": 0
+                },{
+                    "__SCX_TASK_CURSOR": 0
+                },{
+                    "__SCX_TASK_NONE": 0
+                },{
+                    "__SCX_TASK_INIT": 0
+                },{
+                    "__SCX_TASK_READY": 0
+                },{
+                    "__SCX_TASK_ENABLED": 0
+                },{
+                    "__SCX_TASK_NR_STATES": 0
+                },{
+                    "__SCX_TASK_DSQ_ON_PRIQ": 0
+                },{
+                    "__SCX_KICK_IDLE": 1
+                },{
+                    "__SCX_KICK_PREEMPT": 2
+                },{
+                    "__SCX_KICK_WAIT": 4
+                },{
+                    "__SCX_ENQ_WAKEUP": 0
+                },{
+                    "__SCX_ENQ_HEAD": 0
+                },{
+                    "__SCX_ENQ_PREEMPT": 0
+                },{
+                    "__SCX_ENQ_REENQ": 0
+                },{
+                    "__SCX_ENQ_LAST": 0
+                },{
+                    "__SCX_ENQ_CLEAR_OPSS": 0
+                },{
+                    "__SCX_ENQ_DSQ_PRIQ": 0
+                },{
+                    "__SCX_DEQ_SCHED_CHANGE": 0
+                },{
+                    "uei_dump_len": 0
+                },{
+                    "____pandemonium_select_cpu.____fmt": "PAND: select_cpu pid=%d cpu=%d"
+                },{
+                    "____pandemonium_enqueue.____fmt": "PAND: enq tier1 pid=%d cpu=%d"
+                },{
+                    "____pandemonium_enqueue.____fmt.1": "PAND: enq tier2 pid=%d cpu=%d"
+                },{
+                    "____pandemonium_enqueue.____fmt.2": "PAND: enq tier3 pid=%d dsq=%llu tier=%d"
+                },{
+                    "____pandemonium_running.____fmt": "PAND: running pid=%d cpu=%d"
+                }
+            ]
+        }
+    }
+]
