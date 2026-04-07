@@ -412,10 +412,6 @@ impl DebugEvent {
     };
 }
 
-// PORT_TODO: cell_cpumask_wrapper uses placeholder u64 fields instead of
-// bpf_cpumask __kptr. Blocked on kptr support in aya.
-// See C source mitosis.bpf.c:321-328
-
 // ── BPF maps ──────────────────────────────────────────────────────────
 
 scx_ebpf::bpf_map!(TASK_CTX: TaskStorage<TaskCtx> = TaskStorage::new());
@@ -502,12 +498,11 @@ const SCX_KICK_IDLE: u64 = 1;
 /// SCX_ENQ_CPU_SELECTED flag — set when select_cpu already picked a CPU.
 const SCX_ENQ_CPU_SELECTED: u64 = 1 << 52;
 
-// PORT_TODO: Missing kptr globals — see C source mitosis.bpf.c:87-88
-// - all_cpumask: bpf_cpumask __kptr — all-CPUs mask, needs kptr support in aya
-// - root_cgrp: cgroup __kptr — acquired reference to root cgroup
+// PORT_TODO: root_cgrp kptr global — the C version stores an acquired cgroup
+// reference for use in the timer callback. We re-acquire via bpf_cgroup_from_id.
 
 // Missing UEI (User Exit Info) — see C source mitosis.bpf.c:90
-// - UEI_DEFINE(uei) — enables structured exit reporting to userspace
+// UEI_DEFINE/UEI_RECORD requires libbpf macros not available in pure Rust.
 
 /// Level-cell tracker: records the cell ID at each cgroup hierarchy level
 /// during the pre-order cgroup tree walk in `update_timer_cb`.
@@ -756,9 +751,103 @@ fn cstat_inc(idx: CellStat, cell: u32, cctx: &mut CpuCtx) {
     }
 }
 
-// PORT_TODO: Missing update_task_cpumask(p, tctx) — intersects cell cpumask with task
-// affinity, handles per-CPU pinning vs cell-wide path vs LLC-aware path, sets tctx->dsq
-// and p->scx.dsq_vtime. Blocked on cell cpumask kptrs. See C source mitosis.bpf.c:374-450
+/// Update a task's cpumask and DSQ assignment based on its cell.
+///
+/// Port of C update_task_cpumask (mitosis.bpf.c:374-450):
+/// - Looks up the cell's cpumask
+/// - Checks if the task's affinity covers all cell CPUs (all_cell_cpus_allowed)
+/// - Per-CPU pinned path: pick a CPU from task's affinity, use per-CPU DSQ
+/// - Cell-wide path: use cell+LLC DSQ (with LLC awareness if enabled)
+///
+/// PORT_TODO(kptr): The per-task cpumask kptr (tctx->cpumask) is not yet
+/// functional because TaskStorage values need BTF_KIND_TYPE_TAG "kptr"
+/// annotation for the verifier to accept bpf_kptr_xchg. Without it, we
+/// can't store an intersected cpumask per-task. Instead, we use the cell
+/// cpumask directly for the subset check.
+#[inline(always)]
+fn update_task_cpumask(p: *mut task_struct, tctx: &mut TaskCtx) -> i32 {
+    let cell_cpumask = lookup_cell_cpumask(tctx.cell);
+    if cell_cpumask.is_null() {
+        // No cell cpumask — assign to flat DSQ
+        tctx.all_cell_cpus_allowed = 1;
+        tctx.dsq = DsqId::cell_llc(tctx.cell, FAKE_FLAT_CELL_LLC);
+        return 0;
+    }
+
+    // Read the task's allowed cpumask via CO-RE
+    let task_cpus_ptr = match core_read!(vmlinux::task_struct, p, cpus_ptr) {
+        Ok(ptr) => ptr as *const kfuncs::cpumask,
+        Err(_) => {
+            // Can't read cpus_ptr — assume all CPUs allowed
+            tctx.all_cell_cpus_allowed = 1;
+            tctx.dsq = DsqId::cell_llc(tctx.cell, FAKE_FLAT_CELL_LLC);
+            return 0;
+        }
+    };
+
+    if task_cpus_ptr.is_null() {
+        tctx.all_cell_cpus_allowed = 1;
+        tctx.dsq = DsqId::cell_llc(tctx.cell, FAKE_FLAT_CELL_LLC);
+        return 0;
+    }
+
+    // Check if the task's affinity covers all CPUs in its cell
+    // Cast vmlinux::cpumask to kfuncs::cpumask — same layout, different type paths
+    let cell_mask = cell_cpumask as *const kfuncs::cpumask;
+    let task_mask = task_cpus_ptr;
+    let all_allowed = scx_ebpf::cpumask::subset(cell_mask, task_mask);
+    tctx.all_cell_cpus_allowed = all_allowed as u32;
+
+    // Reject multi-CPU pinning that doesn't cover the entire cell (if configured)
+    if tctx.cell != ROOT_CELL_ID && REJECT_MULTICPU_PINNING.get()
+        && !all_allowed
+        && scx_ebpf::cpumask::weight(task_cpus_ptr) > 1
+    {
+        scx_ebpf::scx_bpf_error!("mitosis: multi-CPU pinning in cell not supported");
+        return -22; // -EINVAL
+    }
+
+    if !all_allowed {
+        // Per-CPU pinned path: pick a CPU from the task's affinity
+        let cpu = scx_ebpf::cpumask::any_distribute(task_cpus_ptr);
+        let cctx = match lookup_cpu_ctx(cpu as i32) {
+            Some(c) => c,
+            None => return -2,
+        };
+
+        tctx.dsq = DsqId::cpu(cpu);
+        core_write!(vmlinux::task_struct, p, scx.dsq_vtime, cctx.vtime_now);
+        return 0;
+    }
+
+    // Cell-wide path
+    if ENABLE_LLC_AWARENESS.get() {
+        // Use update_task_llc_assignment for LLC-aware scheduling
+        let new_llc = pick_llc_for_task(tctx.cell);
+        if new_llc >= 0 {
+            tctx.llc = new_llc;
+            tctx.dsq = DsqId::cell_llc(tctx.cell, new_llc as u32);
+
+            if let Some(cell) = lookup_cell(tctx.cell) {
+                if (new_llc as usize) < MAX_LLCS as usize {
+                    let vtime = cell.llcs[new_llc as usize].vtime_now;
+                    core_write!(vmlinux::task_struct, p, scx.dsq_vtime, vtime);
+                }
+            }
+        } else {
+            tctx.dsq = DsqId::cell_llc(tctx.cell, FAKE_FLAT_CELL_LLC);
+        }
+        return 0;
+    }
+
+    // Non-LLC-aware: flat cell DSQ
+    tctx.dsq = DsqId::cell_llc(tctx.cell, FAKE_FLAT_CELL_LLC);
+    if let Some(cell) = lookup_cell(tctx.cell) {
+        let vtime = cell.llcs[FAKE_FLAT_CELL_LLC as usize].vtime_now;
+        core_write!(vmlinux::task_struct, p, scx.dsq_vtime, vtime);
+    }
+    0
+}
 
 /// Update a task's cell assignment based on its cgroup's cell.
 ///
@@ -767,9 +856,6 @@ fn cstat_inc(idx: CellStat, cell: u32, cctx: &mut CpuCtx) {
 /// - Handles exiting_task_workaround (dying cgroups → root cell)
 /// - Syncs configuration_seq to prevent redundant refreshes
 /// - Calls update_task_cpumask to recalculate DSQ assignment
-///
-/// PORT_TODO: `update_task_cpumask` is stubbed (needs cell cpumask kptrs).
-/// Currently just assigns the cell and DSQ without cpumask intersection.
 #[inline(always)]
 fn update_task_cell(p: *mut task_struct, tctx: &mut TaskCtx, cgrp: *mut cgroup) {
     if cgrp.is_null() {
@@ -802,15 +888,8 @@ fn update_task_cell(p: *mut task_struct, tctx: &mut TaskCtx, cgrp: *mut cgroup) 
         }
     }
 
-    // PORT_TODO: update_task_cpumask(p, tctx) — intersect cell cpumask with task
-    // affinity, set tctx->dsq properly. For now, assign to the cell's flat DSQ.
-    let llc = if ENABLE_LLC_AWARENESS.get() {
-        // Use task's current LLC or fallback to 0
-        if tctx.llc >= 0 { tctx.llc as u32 } else { 0 }
-    } else {
-        FAKE_FLAT_CELL_LLC
-    };
-    tctx.dsq = DsqId::cell_llc(cell, llc);
+    // Update cpumask intersection and DSQ assignment
+    update_task_cpumask(p, tctx);
 }
 
 /// Refresh a task's cell assignment by looking up its cgroup.
@@ -1269,16 +1348,8 @@ fn maybe_retag_stolen_task(
     tctx.llc = cctx.llc as i32;
     tctx.dsq = DsqId::cell_llc(tctx.cell, cctx.llc);
 
-    // Set vtime baseline from new LLC
-    if let Some(cell) = lookup_cell(tctx.cell) {
-        if (cctx.llc as usize) < MAX_LLCS as usize {
-            tctx.basis_vtime = cell.llcs[cctx.llc as usize].vtime_now;
-        }
-    }
-
-    // PORT_TODO: Full update_task_cpumask(p, tctx) to narrow cpumask by new LLC.
-    // Blocked on cell cpumask kptrs. See C source llc_aware.bpf.h:230.
-    0
+    // Re-compute cpumask intersection and DSQ assignment for the new LLC
+    update_task_cpumask(_p, tctx)
 }
 
 /// Try stealing work from sibling LLC DSQs within the same cell.
@@ -1604,16 +1675,12 @@ fn mitosis_stopping(p: *mut task_struct, _runnable: bool) {
 /// version doesn't use it directly — update_task_cpumask reads p->cpus_ptr
 /// which is already updated by the time this callback fires.
 fn mitosis_set_cpumask(p: *mut task_struct, _cpumask: *mut core::ffi::c_void) {
-    let _tctx = match lookup_task_ctx(p) {
+    let tctx = match lookup_task_ctx(p) {
         Some(t) => t,
         None => return,
     };
 
-    // PORT_TODO: Call update_task_cpumask(p, tctx) to re-intersect the task's
-    // CPU affinity with its cell cpumask. This updates tctx->dsq (per-CPU vs
-    // cell+LLC) and tctx->all_cell_cpus_allowed based on the new affinity.
-    // Blocked on cell cpumask kptrs (cell_cpumasks map).
-    // See C source mitosis.bpf.c:1545-1559
+    update_task_cpumask(p, tctx);
 }
 
 fn mitosis_init() -> i32 {
