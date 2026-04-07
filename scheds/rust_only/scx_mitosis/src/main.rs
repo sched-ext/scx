@@ -459,11 +459,10 @@ fn main() -> Result<()> {
 
     // SCX_SLICE_DFL = 20ms (matches kernel default, see include/linux/sched/ext.h)
     let slice_ns: u64 = 20_000_000;
+    let root_cgid: u64 = 1; // Root cgroup kn->id (always 1 on unified hierarchy)
 
-    // PORT_TODO: Remaining global overrides not yet passed:
-    //   ROOT_CGID (default 1 is usually correct for the root cgroup),
-    //   llc_to_cpus[] (LlcCpumask array — 1024 bytes per entry, may exceed
-    //   override_global size limit; needs BpfArray map instead)
+    // Remaining: llc_to_cpus[] (LlcCpumask array — 1024 bytes per entry,
+    // exceeds override_global size limit; needs BpfArray map instead)
 
     let mut ebpf = EbpfLoader::new()
         .allow_unsupported_maps()
@@ -478,6 +477,7 @@ fn main() -> Result<()> {
         .override_global("CPU_TO_LLC", &llc_topo.cpu_to_llc, false)
         .override_global("ALL_CPUS", &all_cpus, false)
         .override_global("SLICE_NS", &slice_ns, false)
+        .override_global("ROOT_CGID", &root_cgid, false)
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_mitosis"
