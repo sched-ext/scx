@@ -3,7 +3,7 @@ resolver = "2"
 members = [".", "scx_cosmos-ebpf"]
 
 [package]
-name = "scx_cosmos"
+name = "scx_cosmos_rs"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-only"

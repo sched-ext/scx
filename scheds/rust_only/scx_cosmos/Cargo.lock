@@ -738,7 +738,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "scx_cosmos"
+name = "scx_cosmos-ebpf"
+version = "0.1.0"
+dependencies = [
+ "scx-ebpf",
+ "scx-vmlinux",
+]
+
+[[package]]
+name = "scx_cosmos_rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -749,14 +757,6 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
-]
-
-[[package]]
-name = "scx_cosmos-ebpf"
-version = "0.1.0"
-dependencies = [
- "scx-ebpf",
- "scx-vmlinux",
 ]
 
 [[package]]
