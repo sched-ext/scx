@@ -676,7 +676,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 						(u64)target, sl, dl, 0);
 					if ((u32)target < MAX_CPUS)
 						__sync_val_compare_and_swap(
-							&pcpu_enqueue_ns[target],
+							&pcpu_enqueue_ns[target & (MAX_CPUS - 1)],
 							0, bpf_ktime_get_ns());
 					if (tctx)
 						tctx->dispatch_path = 0;
@@ -707,7 +707,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 						(u64)waker_cpu, sl, dl, 0);
 					if ((u32)waker_cpu < MAX_CPUS)
 						__sync_val_compare_and_swap(
-							&pcpu_enqueue_ns[waker_cpu],
+							&pcpu_enqueue_ns[waker_cpu & (MAX_CPUS - 1)],
 							0, bpf_ktime_get_ns());
 					if (tctx)
 						tctx->dispatch_path = 0;
