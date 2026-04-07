@@ -1043,13 +1043,11 @@ fn get_cgroup_cpumask(_cgrp: *mut cgroup, _entry: &mut CpumaskEntry) -> i32 {
 /// 4. Root cell gets leftover CPUs
 /// 5. Update applied_configuration_seq
 ///
-/// PORT_TODO(bpf_for_each css): The C version uses bpf_for_each(css)
-/// to walk the cgroup tree in pre-order. Without CSS iterator support
-/// in aya, the timer callback cannot iterate cgroups directly.
-/// However, since get_cgroup_cpumask() always returns 0 (PORT_TODO(aya-33)),
-/// the walk would only do "inherit parent cell" — which is already handled
-/// by init_cgrp_ctx_with_ancestors at cgrp_ctx creation time. This PORT_TODO
-/// only becomes meaningful when cpuset introspection is implemented.
+/// PORT_TODO(bpf_for_each css + aya-33): The C version uses bpf_for_each(css)
+/// to walk the cgroup tree and get_cgroup_cpumask() for cpuset introspection.
+/// Without CSS iterator support and CO-RE cpuset reading in aya, the timer
+/// callback cannot iterate cgroups or read cpusets. Cell assignment is instead
+/// handled by init_cgrp_ctx_with_ancestors at cgrp_ctx creation time.
 ///
 /// Note: Cell cpumask updates could use kptr_xchg for lock-free
 /// double-buffer swaps (kptr_xchg is available — used in init step 9).
@@ -1099,16 +1097,8 @@ fn update_timer_cb() -> i32 {
 
     // ── Step 4: Walk cgroup tree (pre-order DFS) ─────────────────
     //
-    // PORT_TODO(bpf_for_each css + aya-33): The C version uses
-    // bpf_for_each(css) to walk all cgroups and reassign cells based
-    // on cpuset changes. This requires both:
-    //   a) CSS iterator support (no aya equivalent yet)
-    //   b) get_cgroup_cpumask() (PORT_TODO(aya-33) — CO-RE cpuset read)
-    //
-    // Without (b), the walk only does "inherit parent cell" which is
-    // already handled by init_cgrp_ctx_with_ancestors at cgrp_ctx
-    // creation time. So this step is effectively a no-op until cpuset
-    // introspection is implemented.
+    // Blocked on bpf_for_each css + aya-33 (see function header).
+    // Currently a no-op — cell assignment handled at cgrp_ctx creation.
     //
     // When both are available, this section should iterate all descendant
     // cgroups and:
