@@ -493,9 +493,13 @@ const SCX_ENQ_CPU_SELECTED: u64 = 1 << 52;
 // PORT_TODO: Missing UEI (User Exit Info) — see C source mitosis.bpf.c:90
 // - UEI_DEFINE(uei) — enables structured exit reporting to userspace
 
-// PORT_TODO: Missing level_cells: [u32; MAX_CG_DEPTH] mutable global
-// — tracks ancestor cell IDs during cgroup tree walk in update_timer_cb.
-// See C source mitosis.bpf.c:967
+/// Level-cell tracker: records the cell ID at each cgroup hierarchy level
+/// during the pre-order cgroup tree walk in `update_timer_cb`.
+/// Parents are visited before children, so `level_cells[level-1]` gives
+/// the parent's cell when processing a child at `level`.
+/// See C source mitosis.bpf.c:967.
+#[unsafe(no_mangle)]
+static mut LEVEL_CELLS: [u32; MAX_CG_DEPTH] = [0u32; MAX_CG_DEPTH];
 
 // ── Helper functions ──────────────────────────────────────────────────
 
@@ -732,27 +736,330 @@ fn cstat_inc(idx: CellStat, cell: u32, cctx: &mut CpuCtx) {
 // affinity, handles per-CPU pinning vs cell-wide path vs LLC-aware path, sets tctx->dsq
 // and p->scx.dsq_vtime. Blocked on cell cpumask kptrs. See C source mitosis.bpf.c:374-450
 
-// PORT_TODO: Missing update_task_cell(p, tctx, cg) — reads cgrp_ctx to get cell assignment,
-// handles exiting_task_workaround, syncs configuration_seq. See C source mitosis.bpf.c:456-503
+/// Update a task's cell assignment based on its cgroup's cell.
+///
+/// Port of C update_task_cell (mitosis.bpf.c:456-503):
+/// - Reads cgrp_ctx->cell from the task's cgroup
+/// - Handles exiting_task_workaround (dying cgroups → root cell)
+/// - Syncs configuration_seq to prevent redundant refreshes
+/// - Calls update_task_cpumask to recalculate DSQ assignment
+///
+/// PORT_TODO: `update_task_cpumask` is stubbed (needs cell cpumask kptrs).
+/// Currently just assigns the cell and DSQ without cpumask intersection.
+#[inline(always)]
+fn update_task_cell(p: *mut task_struct, tctx: &mut TaskCtx, cgrp: *mut cgroup) {
+    if cgrp.is_null() {
+        return;
+    }
 
-// PORT_TODO: Missing refresh_task_cell(p, tctx) — gets task's cgroup and calls
-// update_task_cell. See C source mitosis.bpf.c:508-515
+    let cgrp_ctx = match lookup_cgrp_ctx_fallible(cgrp) {
+        Some(ctx) => ctx,
+        None => {
+            // Dying cgroup with no storage — assign to root cell
+            if EXITING_TASK_WORKAROUND_ENABLED.get() {
+                tctx.cell = ROOT_CELL_ID;
+                tctx.dsq = DsqId::cell_llc(ROOT_CELL_ID, FAKE_FLAT_CELL_LLC);
+            }
+            return;
+        }
+    };
 
-// PORT_TODO: Missing maybe_refresh_cell(p, tctx) — checks configuration_seq staleness and
-// cpu_controller_disabled cgroup move detection. See C source mitosis.bpf.c:547-571
+    let cell = unsafe { core::ptr::read_volatile(&cgrp_ctx.cell) };
+    tctx.cell = cell;
+
+    // Sync configuration_seq to mark this task as up-to-date
+    let cur_seq = unsafe { core::ptr::read_volatile(&raw const APPLIED_CONFIGURATION_SEQ) };
+    tctx.configuration_seq = cur_seq;
+
+    // Record cgroup ID for detecting cgroup moves when cpu_controller_disabled
+    if let Ok(kn) = core_read!(vmlinux::cgroup, cgrp, kn) {
+        if let Ok(id) = core_read!(vmlinux::kernfs_node, kn, id) {
+            tctx.cgid = id;
+        }
+    }
+
+    // PORT_TODO: update_task_cpumask(p, tctx) — intersect cell cpumask with task
+    // affinity, set tctx->dsq properly. For now, assign to the cell's flat DSQ.
+    let llc = if ENABLE_LLC_AWARENESS.get() {
+        // Use task's current LLC or fallback to 0
+        if tctx.llc >= 0 { tctx.llc as u32 } else { 0 }
+    } else {
+        FAKE_FLAT_CELL_LLC
+    };
+    tctx.dsq = DsqId::cell_llc(cell, llc);
+}
+
+/// Refresh a task's cell assignment by looking up its cgroup.
+///
+/// Port of C refresh_task_cell (mitosis.bpf.c:508-515).
+///
+/// PORT_TODO: Needs task_cgroup() helper (reading p->cgroups->dfl_cgrp
+/// under RCU). For now, uses scx_bpf_task_cgroup kfunc which requires
+/// the CPU controller to be enabled.
+#[inline(always)]
+fn refresh_task_cell(p: *mut task_struct, tctx: &mut TaskCtx) {
+    let cgrp = kfuncs::task_cgroup(p);
+    if !cgrp.is_null() {
+        update_task_cell(p, tctx, cgrp);
+    }
+}
+
+/// Check if a task's cell assignment needs refreshing and do so if stale.
+///
+/// Port of C maybe_refresh_cell (mitosis.bpf.c:547-571):
+/// - Compares task's configuration_seq to applied_configuration_seq
+/// - When they differ, refresh via cgroup lookup
+/// - Also handles cpu_controller_disabled cgroup move detection (cgid change)
+#[inline(always)]
+fn maybe_refresh_cell(p: *mut task_struct, tctx: &mut TaskCtx) {
+    let applied_seq = unsafe { core::ptr::read_volatile(&raw const APPLIED_CONFIGURATION_SEQ) };
+
+    if tctx.configuration_seq != applied_seq {
+        refresh_task_cell(p, tctx);
+        return;
+    }
+
+    // When CPU controller is disabled, detect cgroup moves by checking
+    // if the task's cgroup ID has changed since last refresh.
+    if CPU_CONTROLLER_DISABLED.get() {
+        let cgrp = kfuncs::task_cgroup(p);
+        if !cgrp.is_null() {
+            let cgid = unsafe { core_read!(vmlinux::cgroup, cgrp, kn, id) };
+            if let Ok(id) = cgid {
+                if id != tctx.cgid {
+                    update_task_cell(p, tctx, cgrp);
+                }
+            }
+        }
+    }
+}
 
 // PORT_TODO: Missing pick_idle_cpu(p, prev_cpu, cctx, tctx) — gets task cpumask and idle
 // SMT mask, calls pick_idle_cpu_from. Blocked on cell cpumask kptrs. See C source mitosis.bpf.c:573-599
 
-// PORT_TODO: Missing allocate_cpumask_entry() / free_cpumask_entry() — per-CPU scratch
-// cpumask allocation for cgroup init. See C source mitosis.bpf.c:859-884
+// ── Cpumask scratch allocation ────────────────────────────────────────
 
-// PORT_TODO: Missing update_timer_cb() — periodic timer callback that walks cgroup tree,
-// allocates cells, assigns CPUs, updates cell cpumasks via kptr_xchg, recalcs LLC counts.
-// This is the core reconfiguration logic (~250 lines). See C source mitosis.bpf.c:972-1229
+/// Scratch buffer for reading cgroup cpusets.
+///
+/// Port of C struct cpumask_entry (mitosis.bpf.c:847-850).
+/// Used as per-CPU scratch space during cgroup tree walks.
+#[repr(C)]
+struct CpumaskEntry {
+    /// The cpumask read from a cgroup's cpuset.
+    cpumask: [u64; CPUMASK_LONG_ENTRIES],
+    /// Whether this entry is currently in use (atomic CAS guard).
+    used: u32,
+    _pad: u32,
+}
 
-// PORT_TODO: Missing init_task_impl(p, cgrp) — full task init: creates cpumask kptr,
-// initializes LLC fields, calls update_task_cell. See C source mitosis.bpf.c:1591-1627
+const MAX_CPUMASK_ENTRIES: u32 = 4;
+
+scx_ebpf::bpf_map!(CGRP_INIT_PERCPU_CPUMASK: PerCpuArray<CpumaskEntry, { MAX_CPUMASK_ENTRIES as usize }> = PerCpuArray::new());
+
+/// Allocate a scratch cpumask entry from the per-CPU pool.
+///
+/// Port of C allocate_cpumask_entry (mitosis.bpf.c:859-875).
+/// Uses compare-and-swap on the `used` field for lock-free allocation.
+///
+/// PORT_TODO: Proper atomic CAS (__sync_bool_compare_and_swap) not available
+/// in Rust BPF. Using volatile read + write which has a TOCTOU race but is
+/// acceptable for scratch buffers in single-CPU contexts (timer callbacks).
+#[inline(always)]
+fn allocate_cpumask_entry() -> Option<&'static mut CpumaskEntry> {
+    let mut idx: u32 = 0;
+    while idx < MAX_CPUMASK_ENTRIES {
+        if let Some(ent) = CGRP_INIT_PERCPU_CPUMASK.get_mut(idx) {
+            let was_used = unsafe { core::ptr::read_volatile(&ent.used) };
+            if was_used == 0 {
+                unsafe { core::ptr::write_volatile(&mut ent.used, 1) };
+                return Some(ent);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+/// Free a scratch cpumask entry.
+///
+/// Port of C free_cpumask_entry (mitosis.bpf.c:877-884).
+#[inline(always)]
+fn free_cpumask_entry(entry: &mut CpumaskEntry) {
+    unsafe { core::ptr::write_volatile(&mut entry.used, 0) };
+}
+
+/// Check if a cgroup has a non-trivial cpuset mask and read it.
+///
+/// Port of C get_cgroup_cpumask (mitosis.bpf.c:905-961).
+///
+/// Returns:
+/// -  1 = cgroup has a cpuset with a CPU restriction (mask written to entry)
+/// -  0 = no cpuset or cpuset covers all CPUs (no restriction)
+/// - <0 = error
+///
+/// PORT_TODO(aya-33): This requires CO-RE introspection that isn't available
+/// in pure Rust BPF:
+/// - `cgrp->subsys[cpuset_cgrp_id]` — array index on kernel struct
+/// - `container_of(css, struct cpuset, css)` — CO-RE container_of
+/// - `bpf_core_type_matches(struct cpuset___cpumask_arr)` — type matching
+/// - `bpf_core_read(&entry->cpumask, ..., &cpuset->cpus_allowed)` — flexible read
+///
+/// For now, this always returns 0 (no cpuset), meaning all cgroups get the
+/// root cell. Cpuset-based cell allocation will require either:
+/// 1. vmlinux bindgen with cpuset struct definition, or
+/// 2. A helper BPF program written in C that exposes cpuset reads
+#[inline(always)]
+fn get_cgroup_cpumask(_cgrp: *mut cgroup, _entry: &mut CpumaskEntry) -> i32 {
+    // PORT_TODO(aya-33): Implement cpuset introspection.
+    // The C version reads cgrp->subsys[cpuset_cgrp_id]->cpuset->cpus_allowed
+    // using bpf_core_type_matches to handle different kernel cpuset layouts.
+    // Without CO-RE type matching in Rust BPF, we cannot safely read cpuset data.
+    0 // No cpuset restriction detected
+}
+
+// ── Timer callback: cgroup walker / cell reconfiguration ──────────────
+
+/// Periodic timer callback that walks the cgroup hierarchy and
+/// reconfigures cell↔CPU assignments based on cpuset changes.
+///
+/// Port of C update_timer_cb (mitosis.bpf.c:972-1229).
+///
+/// This is the heart of MITOSIS's dynamic reconfiguration:
+/// 1. Check if configuration_seq changed (someone bumped it)
+/// 2. Walk cgroup tree (pre-order DFS)
+/// 3. For each cgroup with a cpuset, allocate a cell and assign CPUs
+/// 4. Root cell gets leftover CPUs
+/// 5. Update applied_configuration_seq
+///
+/// PORT_TODO(bpf_timer): bpf_timer_init/set_callback/start are BPF helpers
+/// (helpers #169-#171) not yet available in aya-ebpf. The timer map and
+/// callback setup in init() are stubbed. When aya adds bpf_timer support,
+/// this function becomes the timer callback.
+///
+/// PORT_TODO(bpf_for_each css): `bpf_for_each(css, pos, root_css,
+/// BPF_CGROUP_ITER_DESCENDANTS_PRE)` is a C macro that expands to
+/// `bpf_for_each_css_task` open-coded iterator. This has no Rust equivalent.
+/// The cgroup walk is stubbed with a bounded loop and PORT_TODO.
+///
+/// PORT_TODO(kptr): Cell cpumask updates use bpf_kptr_xchg for lock-free
+/// double-buffer swaps. Not available in aya.
+#[inline(always)]
+fn update_timer_cb() -> i32 {
+    // ── Step 1: Check if configuration changed ────────────────────
+    let local_configuration_seq = unsafe {
+        core::ptr::read_volatile(&raw const CONFIGURATION_SEQ)
+    };
+    let applied_seq = unsafe {
+        core::ptr::read_volatile(&raw const APPLIED_CONFIGURATION_SEQ)
+    };
+    if local_configuration_seq == applied_seq {
+        return 0; // Nothing changed
+    }
+
+    // ── Step 2: Allocate scratch cpumask ──────────────────────────
+    let entry = match allocate_cpumask_entry() {
+        Some(e) => e as *mut CpumaskEntry,
+        None => return 0,
+    };
+
+    // ── Step 3: Initialize root cell's cpumask to all CPUs ───────
+    //
+    // PORT_TODO(kptr): The C version does:
+    //   root_bpf_cpumask = bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask, NULL);
+    //   bpf_cpumask_copy(root_bpf_cpumask, all_cpumask);
+    // We can't do kptr_xchg. Instead, we track CPU assignments via
+    // cpu_ctx.cell and rebuild from there.
+
+    // Reset all CPU assignments to root cell (cell 0)
+    let nr_cpus = NR_POSSIBLE_CPUS.get();
+    let mut cpu_idx: u32 = 0;
+    while cpu_idx < nr_cpus && cpu_idx < MAX_CPUS {
+        if let Some(cctx) = lookup_cpu_ctx(cpu_idx as i32) {
+            cctx.cell = ROOT_CELL_ID;
+        }
+        cpu_idx += 1;
+    }
+
+    // Initialize level_cells[0] = root cell
+    unsafe {
+        core::ptr::write_volatile(&mut LEVEL_CELLS[0], ROOT_CELL_ID);
+    }
+
+    // ── Step 4: Walk cgroup tree (pre-order DFS) ─────────────────
+    //
+    // PORT_TODO(bpf_for_each css): The C version iterates the cgroup
+    // hierarchy with:
+    //   bpf_for_each(css, pos, root_css, BPF_CGROUP_ITER_DESCENDANTS_PRE)
+    //
+    // This is an open-coded iterator that the BPF verifier understands.
+    // There is no Rust equivalent. When aya adds support for open-coded
+    // iterators (or we use a C shim), this section should iterate all
+    // descendant cgroups and:
+    //
+    // For each cgroup `cur_cgrp` at depth `level`:
+    //   1. Look up cgrp_ctx (fallible — dying cgroups may lack storage)
+    //   2. Call get_cgroup_cpumask(cur_cgrp, entry)
+    //   3. If no cpuset (rc == 0):
+    //      - Inherit parent's cell: cgrp_ctx.cell = level_cells[level - 1]
+    //      - Record: level_cells[level] = cgrp_ctx.cell
+    //   4. If cpuset found (rc == 1):
+    //      - Allocate a cell if cgrp_ctx is not already a cell_owner
+    //      - Copy cpuset mask to cell's cpumask (kptr_xchg double buffer)
+    //      - For each CPU in cpuset: cpu_ctx.cell = cell_idx
+    //      - Remove those CPUs from root cell's cpumask
+    //      - If LLC-aware: recalc_cell_llc_counts
+    //      - Record: level_cells[level] = cell_idx
+    //      - Write cgrp_ctx.cell = cell_idx
+    //
+    // For now, without cgroup iteration, all cgroups stay in the root cell.
+    // The configuration_seq mechanism still works — tasks will refresh
+    // their cell assignment via maybe_refresh_cell → lookup cgrp_ctx.
+
+    // ── Step 5: Assign leftover CPUs to root cell ────────────────
+    //
+    // After the cgroup walk, any CPUs not claimed by a cpuset-bearing
+    // cgroup belong to the root cell. Since we reset all CPUs to root
+    // in step 3 and the cgroup walk (step 4) is currently stubbed,
+    // all CPUs remain in the root cell.
+    //
+    // PORT_TODO(kptr): The C version updates root cell's kptr cpumask:
+    //   root_bpf_cpumask = bpf_kptr_xchg(&root_cell_cpumaskw->cpumask, root_bpf_cpumask);
+    //   bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask, root_bpf_cpumask);
+
+    // Update root cell CPU count
+    if let Some(root_cell) = lookup_cell(ROOT_CELL_ID) {
+        let mut count: u32 = 0;
+        let mut cpu: u32 = 0;
+        while cpu < nr_cpus && cpu < MAX_CPUS {
+            if let Some(cctx) = lookup_cpu_ctx(cpu as i32) {
+                if cctx.cell == ROOT_CELL_ID {
+                    count += 1;
+                }
+            }
+            cpu += 1;
+        }
+        root_cell.cpu_cnt = count;
+    }
+
+    // ── Step 6: Recalc LLC counts for root cell ──────────────────
+    //
+    // PORT_TODO(kptr): recalc_cell_llc_counts needs cell cpumask kptr.
+    // Stubbed for now.
+
+    // ── Step 7: Publish applied_configuration_seq ────────────────
+    //
+    // barrier() equivalent: volatile write ensures ordering.
+    // Tasks checking maybe_refresh_cell will see the new seq and
+    // re-read their cgrp_ctx.cell.
+    unsafe {
+        core::ptr::write_volatile(&raw mut APPLIED_CONFIGURATION_SEQ, local_configuration_seq);
+    }
+
+    // Free scratch cpumask
+    unsafe { free_cpumask_entry(&mut *entry) };
+
+    0
+}
 
 /// Validate configuration flags. See C source mitosis.bpf.c:1561-1579.
 #[inline(always)]
@@ -1006,8 +1313,10 @@ fn try_stealing_work(cell_idx: u32, local_llc: u32) -> bool {
 /// awareness, handle per-CPU pinning, fall back to prev_cpu or
 /// bpf_cpumask_any_distribute.
 fn mitosis_select_cpu(p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i32 {
-    // PORT_TODO: maybe_refresh_cell(p, tctx) — refresh cell assignment if
-    // configuration_seq changed. Blocked on cgroup storage.
+    // Refresh cell assignment if configuration_seq changed
+    if let Some(tctx) = lookup_task_ctx(p) {
+        maybe_refresh_cell(p, tctx);
+    }
 
     // PORT_TODO: Full cell-aware idle CPU selection with pick_idle_cpu().
     // Blocked on cell cpumask kptrs. For now, use the default selection.
@@ -1039,8 +1348,8 @@ fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
 
     let slice = SLICE_NS.get();
 
-    // PORT_TODO: maybe_refresh_cell(p, tctx) — refresh cell if stale.
-    // Blocked on cgroup storage.
+    // Refresh cell assignment if configuration changed
+    maybe_refresh_cell(p, tctx);
 
     // Read vtime AFTER any cell refresh (which might manipulate it)
     let mut vtime = match core_read!(vmlinux::task_struct, p, scx.dsq_vtime) {
@@ -1150,16 +1459,22 @@ fn mitosis_dispatch(cpu: i32, _prev: *mut task_struct) {
 /// running: Record task start time for runtime accounting.
 ///
 /// Port of C mitosis_running (mitosis.bpf.c:1256-1272):
+/// - Handle stolen task retag (LLC-aware + work stealing mode)
 /// - Record scx_bpf_now() as started_running_at
-/// - PORT_TODO: Handle stolen task retag (LLC-aware mode)
 fn mitosis_running(p: *mut task_struct) {
     let tctx = match lookup_task_ctx(p) {
         Some(t) => t,
         None => return,
     };
 
-    // PORT_TODO: maybe_retag_stolen_task(p, tctx, cctx) for LLC-aware mode.
-    // Blocked on cell cpumask kptrs + update_task_cpumask.
+    // Detect cross-LLC migration (work stealing) and retag task
+    if ENABLE_LLC_AWARENESS.get() && ENABLE_WORK_STEALING.get() {
+        if let Some(cctx) = lookup_cpu_ctx(-1) {
+            if maybe_retag_stolen_task(p, tctx, cctx) < 0 {
+                return;
+            }
+        }
+    }
 
     tctx.started_running_at = kfuncs::now();
 }
@@ -1348,8 +1663,33 @@ fn mitosis_init() -> i32 {
     }
 
     // PORT_TODO(step 12): Setup and arm bpf_timer for periodic reconfiguration.
-    // Requires bpf_timer support in aya (bpf_timer_init + bpf_timer_set_callback + bpf_timer_start).
-    // See C source mitosis.bpf.c:2004-2013
+    // Requires bpf_timer support in aya-ebpf.
+    //
+    // The C version does:
+    //   struct bpf_timer *timer = bpf_map_lookup_elem(&update_timer, &key);
+    //   bpf_timer_init(timer, &update_timer, CLOCK_BOOTTIME);
+    //   bpf_timer_set_callback(timer, update_timer_cb);
+    //   bpf_timer_start(timer, TIMER_INTERVAL_NS, 0);
+    //
+    // This requires:
+    // 1. An array map with value type containing `struct bpf_timer` (16 bytes)
+    // 2. BPF helper #169 bpf_timer_init(timer, map, flags)
+    // 3. BPF helper #170 bpf_timer_set_callback(timer, callback_fn)
+    // 4. BPF helper #171 bpf_timer_start(timer, nsecs, flags)
+    //
+    // bpf_timer is a special kernel type that cannot be represented as a plain
+    // Rust struct — the kernel initializes hidden fields in it. Until aya-ebpf
+    // adds bpf_timer support, the timer-driven cgroup walker cannot fire.
+    //
+    // Impact: Without the timer, configuration changes (cpuset modifications)
+    // are not automatically detected. The CONFIGURATION_SEQ / APPLIED_CONFIGURATION_SEQ
+    // mechanism works, but nothing calls update_timer_cb to process the change.
+    // Tasks will still refresh via maybe_refresh_cell on enqueue, but CPU→cell
+    // assignments won't update until the timer fires.
+    //
+    // Workaround: userspace could periodically trigger a reconfiguration by
+    // calling update_timer_cb via a SEC("syscall") program, but this is not
+    // implemented yet.
 
     0
 }

@@ -319,24 +319,29 @@ fn main() -> Result<()> {
     // ── Load BPF with global overrides ───────────────────────────────
     let llc_aware: u8 = opts.enable_llc_awareness as u8;
     let work_stealing: u8 = opts.enable_work_stealing as u8;
+    let smt: u8 = topo.smt_enabled as u8;
+    let nr_cpus_u32 = nr_cpus as u32;
+    let debug_events: u8 = opts.debug_events as u8;
+    let cpu_ctrl_disabled: u8 = opts.cpu_controller_disabled as u8;
+    let reject_pin: u8 = opts.reject_multicpu_pinning as u8;
 
-    // PORT_TODO: Missing global overrides — the following BPF globals need to be
-    // set before load but are not yet declared in the eBPF side:
-    //   SMT_ENABLED, SLICE_NS, all_cpus[], nr_possible_cpus,
-    //   debug_events_enabled, exiting_task_workaround_enabled,
-    //   cpu_controller_disabled, reject_multicpu_pinning,
-    //   cpu_to_llc[], llc_to_cpus[]
-    // The LLC arrays are computed above (llc_topo.cpu_to_llc, llc_topo.llc_to_cpus).
-    // Once the eBPF side declares these as bpf_global!, add:
-    //   .override_global("cpu_to_llc", &llc_topo.cpu_to_llc, false)
-    //   .override_global("llc_to_cpus", &llc_topo.llc_to_cpus, false)
-    // See C main.rs:235-268
+    // PORT_TODO: Missing global overrides:
+    //   SLICE_NS (needs SCX_SLICE_DFL constant from kernel),
+    //   ROOT_CGID (default 1 is usually correct),
+    //   EXITING_TASK_WORKAROUND_ENABLED,
+    //   llc_to_cpus[] (LlcCpumask array — too large for override_global?)
 
     let mut ebpf = EbpfLoader::new()
         .allow_unsupported_maps()
         .override_global("NR_LLC", &nr_llc, false)
         .override_global("ENABLE_LLC_AWARENESS", &llc_aware, false)
         .override_global("ENABLE_WORK_STEALING", &work_stealing, false)
+        .override_global("SMT_ENABLED", &smt, false)
+        .override_global("NR_POSSIBLE_CPUS", &nr_cpus_u32, false)
+        .override_global("DEBUG_EVENTS_ENABLED", &debug_events, false)
+        .override_global("CPU_CONTROLLER_DISABLED", &cpu_ctrl_disabled, false)
+        .override_global("REJECT_MULTICPU_PINNING", &reject_pin, false)
+        .override_global("CPU_TO_LLC", &llc_topo.cpu_to_llc, false)
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_mitosis"
