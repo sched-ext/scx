@@ -1103,11 +1103,12 @@ fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
 
 /// dispatch: Pick the highest-priority task from this CPU's cell DSQs.
 ///
-/// Port of C mitosis_dispatch (mitosis.bpf.c:751-817):
+/// Port of C mitosis_dispatch (mitosis.bpf.c:751-824):
 /// - Build cell+LLC DSQ and per-CPU DSQ IDs
 /// - Try cell+LLC DSQ first, then per-CPU DSQ
+/// - If both empty and LLC-aware + work stealing enabled, try stealing
+///   from sibling LLC DSQs within the same cell
 /// - PORT_TODO: peek both DSQs, pick lowest vtime (needs dsq_peek on 6.19+)
-/// - PORT_TODO: work stealing from sibling LLCs when both DSQs empty
 fn mitosis_dispatch(cpu: i32, _prev: *mut task_struct) {
     let cctx = match lookup_cpu_ctx(-1) {
         Some(c) => c,
@@ -1134,8 +1135,16 @@ fn mitosis_dispatch(cpu: i32, _prev: *mut task_struct) {
         return;
     }
 
-    // PORT_TODO: work stealing when both DSQs are empty.
-    // Requires try_stealing_work(cell, llc) — see llc_aware.bpf.h:240-301.
+    // Both local DSQs empty — try work stealing from sibling LLCs
+    if ENABLE_LLC_AWARENESS.get() && ENABLE_WORK_STEALING.get() {
+        if try_stealing_work(cell_idx, llc) {
+            // Re-borrow cctx since lookup_cell in try_stealing_work may have
+            // invalidated the previous reference in the verifier's view.
+            if let Some(cctx) = lookup_cpu_ctx(-1) {
+                cstat_inc(CellStat::Steal, cell_idx, cctx);
+            }
+        }
+    }
 }
 
 /// running: Record task start time for runtime accounting.
@@ -1523,17 +1532,131 @@ fn mitosis_dump_task(_dctx: *mut core::ffi::c_void, p: *mut task_struct) {
     // See C source mitosis.bpf.c:1784-1799
 }
 
-// PORT_TODO: Missing fentry/cpuset_write_resmask program — see C source mitosis.bpf.c:1316-1326
-// fentry hook that bumps configuration_seq when a cpuset.cpus file is written,
-// triggering the timer to reconfigure cells.
+// ── Auxiliary BPF programs (fentry / tp_btf) ────────────────────────
+//
+// These are standalone BPF programs in separate ELF sections, loaded and
+// attached independently from the struct_ops scheduler. They detect
+// cpuset/cgroup changes and bump configuration_seq to trigger cell
+// reconfiguration.
+//
+// The userspace loader must find these programs by section name and
+// attach them via aya's FEntry/BtfTracePoint program types.
 
-// PORT_TODO: Missing tp_btf/cgroup_mkdir tracepoint — see C source mitosis.bpf.c:1496-1509
-// When cpu_controller_disabled, initializes cgrp_ctx for new cgroups since
-// SCX cgroup callbacks don't fire.
+/// fentry/cpuset_write_resmask — detect cpuset.cpus modifications.
+///
+/// Port of C fentry_cpuset_write_resmask (mitosis.bpf.c:1316-1326).
+///
+/// When a cpuset.cpus file is written, the scheduler needs to know so it can
+/// reconfigure cells to match the new CPU masks. We bump configuration_seq
+/// so the timer callback (update_timer_cb) will re-walk the cgroup tree and
+/// reassign CPUs.
+///
+/// The C version's arguments are:
+///   (struct kernfs_open_file *of, char *buf, size_t nbytes, loff_t off, ssize_t retval)
+/// We don't need to read them — just the fact that the function was called
+/// is enough to know a cpuset changed.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "fentry/cpuset_write_resmask")]
+pub fn fentry_cpuset_write_resmask(_ctx: *mut core::ffi::c_void) -> i32 {
+    // Bump configuration_seq so the timer reconfigures cells.
+    // PORT_TODO: Use __atomic_add_fetch for proper memory ordering.
+    // In BPF, concurrent increments from different CPUs are safe since
+    // BPF programs are non-preemptible and we only need eventual visibility.
+    unsafe {
+        CONFIGURATION_SEQ = CONFIGURATION_SEQ.wrapping_add(1);
+    }
+    0
+}
 
-// PORT_TODO: Missing tp_btf/cgroup_rmdir tracepoint — see C source mitosis.bpf.c:1511-1543
-// When cpu_controller_disabled, handles cgroup removal — frees owned cells,
-// bumps configuration_seq.
+/// tp_btf/cgroup_mkdir — fallback cgroup creation tracking.
+///
+/// Port of C trace_cgroup_mkdir (mitosis.bpf.c:1495-1509).
+///
+/// When cpu_controller_disabled is true, the SCX cgroup_init callback
+/// doesn't fire for new cgroups. This tracepoint catches cgroup creation
+/// and initializes cgrp_ctx so the cgroup can participate in cell scheduling.
+///
+/// Arguments from tp_btf/cgroup_mkdir:
+///   arg0: struct cgroup *cgrp
+///   arg1: const char *cgrp_path
+///
+/// PORT_TODO: init_cgrp_ctx_with_ancestors() is not yet implemented.
+/// It walks the cgroup hierarchy upward, ensuring all ancestors have
+/// cgrp_ctx initialized. For now, we call init_cgrp_ctx() which only
+/// initializes the immediate cgroup. See C source mitosis.bpf.c:1394-1434.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "tp_btf/cgroup_mkdir")]
+pub fn tp_cgroup_mkdir(ctx: *mut u64) -> i32 {
+    if !CPU_CONTROLLER_DISABLED.get() {
+        return 0;
+    }
+
+    // arg0 = struct cgroup *cgrp
+    let cgrp = unsafe { *ctx.add(0) } as *mut cgroup;
+    if cgrp.is_null() {
+        return 0;
+    }
+
+    // PORT_TODO: Use init_cgrp_ctx_with_ancestors(cgrp) to walk up the
+    // hierarchy and ensure all ancestors have cgrp_ctx. For now, just
+    // init this cgroup directly. This works if the parent was already
+    // initialized (e.g., via a previous cgroup_mkdir or cgroup_init).
+    let ret = init_cgrp_ctx(cgrp);
+    if ret != 0 {
+        // PORT_TODO: scx_bpf_error("tp_cgroup_mkdir: init_cgrp_ctx failed: %d", ret)
+    }
+
+    0
+}
+
+/// tp_btf/cgroup_rmdir — fallback cgroup removal tracking.
+///
+/// Port of C trace_cgroup_rmdir (mitosis.bpf.c:1511-1543).
+///
+/// When cpu_controller_disabled is true, the SCX cgroup_exit callback
+/// doesn't fire. This tracepoint catches cgroup removal, frees any owned
+/// cells, and bumps configuration_seq to redistribute CPUs.
+///
+/// Arguments from tp_btf/cgroup_rmdir:
+///   arg0: struct cgroup *cgrp
+///   arg1: const char *cgrp_path
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "tp_btf/cgroup_rmdir")]
+pub fn tp_cgroup_rmdir(ctx: *mut u64) -> i32 {
+    if !CPU_CONTROLLER_DISABLED.get() {
+        return 0;
+    }
+
+    // arg0 = struct cgroup *cgrp
+    let cgrp = unsafe { *ctx.add(0) } as *mut cgroup;
+    if cgrp.is_null() {
+        return 0;
+    }
+
+    // Use fallible lookup since this tracepoint fires for ALL cgroups,
+    // including ones that never had tasks or cgrp_ctx storage.
+    let cgc = match lookup_cgrp_ctx_fallible(cgrp) {
+        Some(c) => c,
+        None => return 0,
+    };
+
+    // PORT_TODO: record_cgroup_exit needs cgrp->kn->id for event tracking.
+    // For now, pass 0 as cgid placeholder.
+    record_cgroup_exit(0);
+
+    if cgc.cell_owner != 0 {
+        let _ret = free_cell(cgc.cell as i32);
+        // PORT_TODO: if ret != 0: scx_bpf_error("Failed to free cell %d: %d", ...)
+
+        // Bump configuration_seq so the timer redistributes the freed
+        // cell's CPUs back to the root cell.
+        unsafe {
+            CONFIGURATION_SEQ = CONFIGURATION_SEQ.wrapping_add(1);
+        }
+    }
+
+    0
+}
 
 // Also missing .flags for SCX_OPS_ALLOW_QUEUED_WAKEUP.
 // See C source mitosis.bpf.c:2021-2037
