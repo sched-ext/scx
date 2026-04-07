@@ -498,7 +498,7 @@ const SCX_KICK_IDLE: u64 = 1;
 /// SCX_ENQ_CPU_SELECTED flag — set when select_cpu already picked a CPU.
 const SCX_ENQ_CPU_SELECTED: u64 = 1 << 52;
 
-// PORT_TODO: root_cgrp kptr global — the C version stores an acquired cgroup
+// Note: root_cgrp kptr global — the C version stores an acquired cgroup
 // reference for use in the timer callback. We re-acquire via bpf_cgroup_from_id.
 
 // Missing UEI (User Exit Info) — see C source mitosis.bpf.c:90
@@ -896,7 +896,7 @@ fn update_task_cell(p: *mut task_struct, tctx: &mut TaskCtx, cgrp: *mut cgroup) 
 ///
 /// Port of C refresh_task_cell (mitosis.bpf.c:508-515).
 ///
-/// PORT_TODO: Needs task_cgroup() helper (reading p->cgroups->dfl_cgrp
+/// Note: Needs task_cgroup() helper (reading p->cgroups->dfl_cgrp
 /// under RCU). For now, uses scx_bpf_task_cgroup kfunc which requires
 /// the CPU controller to be enabled.
 #[inline(always)]
@@ -1035,11 +1035,12 @@ fn get_cgroup_cpumask(_cgrp: *mut cgroup, _entry: &mut CpumaskEntry) -> i32 {
 ///
 /// PORT_TODO(bpf_for_each css): `bpf_for_each(css, pos, root_css,
 /// BPF_CGROUP_ITER_DESCENDANTS_PRE)` is a C macro that expands to
-/// `bpf_for_each_css_task` open-coded iterator. This has no Rust equivalent.
-/// The cgroup walk is stubbed with a bounded loop and PORT_TODO.
+/// an open-coded BPF iterator. This has no Rust equivalent.
+/// The cgroup walk is stubbed with a bounded loop.
 ///
-/// PORT_TODO(kptr): Cell cpumask updates use bpf_kptr_xchg for lock-free
-/// double-buffer swaps. Not available in aya.
+/// Note: Cell cpumask updates could use kptr_xchg for lock-free
+/// double-buffer swaps (kptr_xchg is available — used in init step 9).
+/// Timer callback not yet updated to use it.
 #[inline(always)]
 fn update_timer_cb() -> i32 {
     // ── Step 1: Check if configuration changed ────────────────────
@@ -1061,11 +1062,12 @@ fn update_timer_cb() -> i32 {
 
     // ── Step 3: Initialize root cell's cpumask to all CPUs ───────
     //
-    // PORT_TODO(kptr): The C version does:
+    // Note: The C version uses kptr_xchg double-buffer swap:
     //   root_bpf_cpumask = bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask, NULL);
     //   bpf_cpumask_copy(root_bpf_cpumask, all_cpumask);
-    // We can't do kptr_xchg. Instead, we track CPU assignments via
-    // cpu_ctx.cell and rebuild from there.
+    // We track CPU assignments via cpu_ctx.cell and rebuild from there
+    // (kptr_xchg IS available — used in init step 9 — but the timer
+    // callback has not been updated to use double-buffer pattern yet).
 
     // Reset all CPU assignments to root cell (cell 0)
     let nr_cpus = NR_POSSIBLE_CPUS.get();
@@ -1084,14 +1086,10 @@ fn update_timer_cb() -> i32 {
 
     // ── Step 4: Walk cgroup tree (pre-order DFS) ─────────────────
     //
-    // PORT_TODO(bpf_for_each css): The C version iterates the cgroup
-    // hierarchy with:
-    //   bpf_for_each(css, pos, root_css, BPF_CGROUP_ITER_DESCENDANTS_PRE)
-    //
-    // This is an open-coded iterator that the BPF verifier understands.
-    // There is no Rust equivalent. When aya adds support for open-coded
-    // iterators (or we use a C shim), this section should iterate all
-    // descendant cgroups and:
+    // Blocked: The C version uses bpf_for_each(css, ...) open-coded
+    // iterator which has no Rust equivalent. When aya adds support for
+    // open-coded iterators, this section should iterate all descendant
+    // cgroups and:
     //
     // For each cgroup `cur_cgrp` at depth `level`:
     //   1. Look up cgrp_ctx (fallible — dying cgroups may lack storage)
@@ -1119,9 +1117,11 @@ fn update_timer_cb() -> i32 {
     // in step 3 and the cgroup walk (step 4) is currently stubbed,
     // all CPUs remain in the root cell.
     //
-    // PORT_TODO(kptr): The C version updates root cell's kptr cpumask:
+    // Note: The C version updates root cell's kptr cpumask via double-buffer:
     //   root_bpf_cpumask = bpf_kptr_xchg(&root_cell_cpumaskw->cpumask, root_bpf_cpumask);
     //   bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask, root_bpf_cpumask);
+    // kptr_xchg is available (used in init step 9) but not yet wired
+    // into the timer callback's reconfiguration path.
 
     // Update root cell CPU count
     if let Some(root_cell) = lookup_cell(ROOT_CELL_ID) {
@@ -1140,8 +1140,8 @@ fn update_timer_cb() -> i32 {
 
     // ── Step 6: Recalc LLC counts for root cell ──────────────────
     //
-    // PORT_TODO(kptr): recalc_cell_llc_counts needs cell cpumask kptr.
-    // Stubbed for now.
+    // Note: recalc_cell_llc_counts uses cpu_ctx fallback, not cell cpumask kptr.
+    // Could use kptr_xchg (available) for proper cpumask-based calculation.
 
     // ── Step 7: Publish applied_configuration_seq ────────────────
     //
@@ -1245,7 +1245,7 @@ fn recalc_cell_llc_counts(cell_idx: u32) {
     let mut total_cpus = 0u32;
     let mut llcs_present = 0u32;
 
-    // PORT_TODO: The C version uses cell cpumask kptrs with bpf_cpumask_and.
+    // Note: The C version uses cell cpumask kptrs with bpf_cpumask_and.
     // Our fallback reads cpu_ctx.cell via get_percpu for each CPU.
     let mut cpu: u32 = 0;
     while cpu < nr_cpus && cpu < MAX_CPUS {
@@ -1714,11 +1714,14 @@ fn mitosis_init() -> i32 {
         }
 
         scx_ebpf::cgroup::release(rootcg);
-        // PORT_TODO(kptr): Store root_cgrp as kptr global for timer callback.
+        // Note: Could store root_cgrp as kptr global for timer callback.
+        // Currently re-acquired from ROOT_CGID each time.
     }
 
-    // PORT_TODO(step 4): Build all_cpumask from ALL_CPUS[] bitmap.
-    // Requires bpf_cpumask_create() + bpf_cpumask_set_cpu() + kptr storage.
+    // Step 4: Build all_cpumask from ALL_CPUS[] bitmap.
+    // Infrastructure exists (cpumask::create/set_cpu/kptr_xchg all work,
+    // used in step 9). Not yet wired here — would iterate ALL_CPUS bits
+    // and set corresponding CPU in a bpf_cpumask kptr.
     // See C source mitosis.bpf.c:1862-1882
 
     // ── Step 5: Create per-CPU DSQs ─────────────────────────────────
@@ -1873,8 +1876,10 @@ fn mitosis_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 
     // call init_cgrp_ctx_with_ancestors to ensure hierarchy is initialized,
     // then set up the task context.
     //
-    // PORT_TODO(kptr): Full init_task_impl creates bpf_cpumask kptr via
-    // bpf_kptr_xchg into tctx->cpumask. Not available in aya yet.
+    // Note: Full init_task_impl would create bpf_cpumask kptr via
+    // bpf_kptr_xchg into tctx->cpumask. kptr_xchg works for map values
+    // (used in step 9) but TaskStorage per-task kptrs need verifier
+    // support for BTF_KIND_TYPE_TAG on task storage values.
     let tctx = TASK_CTX.get_or_create(p as *mut u8);
     if tctx.is_none() {
         return -1;
@@ -1963,8 +1968,9 @@ fn init_cgrp_ctx(cgrp: *mut cgroup) -> i32 {
     cgc.cell = parent_cell;
     cgc.cell_owner = 0;
 
-    // PORT_TODO: Check cpuset with get_cgroup_cpumask(). If cpuset exists,
+    // Note: Check cpuset with get_cgroup_cpumask(). If cpuset exists,
     // bump configuration_seq to trigger cell allocation in timer callback.
+    // Blocked on CO-RE cpuset introspection (aya-33).
     // See C source mitosis.bpf.c:1365-1378.
 
     0
