@@ -18,7 +18,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use log::{debug, info};
+use log::debug;
 
 // ── Constants matching intf.h ────────────────────────────────────────
 
@@ -59,6 +59,7 @@ impl LlcCpumask {
     }
 
     /// Count the number of set bits.
+    #[allow(dead_code)]
     pub fn weight(&self) -> u32 {
         self.bits.iter().map(|w| w.count_ones()).sum()
     }
@@ -82,6 +83,7 @@ impl Default for LlcCpumask {
 
 /// How to obtain the CPU-to-LLC mapping.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum TopologySource {
     /// Auto-detect from sysfs (default).
     Sysfs,

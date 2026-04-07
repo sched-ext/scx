@@ -355,9 +355,13 @@ impl StatsCollector {
 }
 
 // ── Debug events ────────────────────────────────────────────────────
+//
+// These types are the userspace API for reading the BPF debug event
+// circular buffer. They'll be used when percpu map reading is wired up.
 
 /// Debug event types matching the eBPF DebugEventType enum.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub enum DebugEventType {
     CgroupInit,
     InitTask,
@@ -389,6 +393,7 @@ impl fmt::Display for DebugEventType {
 
 /// A parsed debug event from the BPF circular buffer.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct DebugEvent {
     pub timestamp: u64,
     pub event_type: DebugEventType,
@@ -415,6 +420,7 @@ impl fmt::Display for DebugEvent {
 /// (DEBUG_EVENT_POS global).
 ///
 /// Returns events in chronological order (oldest first).
+#[allow(dead_code)]
 pub fn parse_debug_events(
     raw_events: &[RawDebugEvent],
     write_pos: u32,
@@ -463,6 +469,7 @@ pub fn parse_debug_events(
 /// This must match the #[repr(C)] layout in the eBPF program.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)]
 pub struct RawDebugEvent {
     pub timestamp: u64,
     pub event_type: u32,
