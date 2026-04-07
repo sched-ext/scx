@@ -52,6 +52,7 @@
 // - uei_report!() for structured exit info to userspace
 
 mod mitosis_topology_utils;
+mod stats;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -62,7 +63,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use aya::{EbpfLoader, include_bytes_aligned};
 use clap::Parser;
-use log::info;
+use log::{info, debug};
 
 use mitosis_topology_utils::{LlcTopology, TopologySource, format_cpu_range};
 
@@ -380,6 +381,7 @@ fn main() -> Result<()> {
     let monitor_interval = Duration::from_secs(opts.monitor_interval_s);
     let start_time = Instant::now();
     let mut last_monitor = Instant::now();
+    let mut stats_collector = stats::StatsCollector::new();
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(100));
@@ -405,12 +407,18 @@ fn main() -> Result<()> {
             //
             // When implemented:
             // 1. Read the CPU_CTX percpu array via aya map API
-            // 2. Aggregate cstats per cell across all CPUs
-            // 3. Calculate deltas from previous snapshot
-            // 4. Log distribution stats (local/cpu_dsq/cell_dsq/affinity_viol/steal %)
+            // 2. Aggregate cstats per cell across all CPUs into
+            //    aggregated_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS]
+            // 3. let delta = stats_collector.calculate_cell_stat_delta(&aggregated);
+            // 4. stats_collector.update_metrics(&delta);
+            // 5. println!("{}", stats_collector.format_summary());
+            //    or for verbose: print!("{}", stats_collector.format_detailed());
+
+            debug!("[scx_mitosis] stats: {}", stats_collector.format_summary());
 
             println!(
-                "[scx_mitosis] cells: 1  uptime {}",
+                "[scx_mitosis] cells: {}  uptime {}",
+                stats_collector.metrics.num_cells.max(1),
                 format_uptime(uptime),
             );
 
