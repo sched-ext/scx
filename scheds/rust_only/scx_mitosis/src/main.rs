@@ -8,48 +8,32 @@
 // decisions of which Cells should be merged/split and which CPUs they
 // should be assigned to.
 //
-// PORT_TODO: Userspace loader gaps vs C version (scx/scheds/rust/scx_mitosis/src/main.rs):
+// Remaining userspace loader gaps vs C version:
 //
 // Missing CLI flags:
-// - log_level with tracing_subscriber EnvFilter — see C main.rs:68-69
-// - exit_dump_len — see C main.rs:73
-// - monitor mode (--monitor, stats-only without running scheduler) — see C main.rs:90-91
-// - run_id — see C main.rs:98
-// - exiting_task_workaround (default true) — see C main.rs:108-109
-// - libbpf options (--libbpf-* flags) — see C main.rs:130-131
-//
-// Missing rodata population — see C main.rs:235-268:
-// - slice_ns = SCX_SLICE_DFL
-// - smt_enabled (currently detected but not passed to BPF)
-// - all_cpus[] bitmask (currently built but not passed to BPF)
-// - nr_possible_cpus (currently detected but not passed to BPF)
-// - debug_events_enabled
-// - exiting_task_workaround_enabled
-// - cpu_controller_disabled
-// - reject_multicpu_pinning
-// - cpu_to_llc[] and llc_to_cpus[] (currently built but not passed to BPF)
-// These need aya override_global or BPF map data section support.
+// - log_level with tracing_subscriber EnvFilter
+// - exit_dump_len, monitor mode, run_id, libbpf options
 //
 // Missing struct_ops flags:
-// - SCX_OPS_ALLOW_QUEUED_WAKEUP — see C main.rs:254-257
-// - exit_dump_len on struct_ops — see C main.rs:233
+// - SCX_OPS_ALLOW_QUEUED_WAKEUP, exit_dump_len
 //
-// Missing runtime monitoring — see C main.rs:286-603:
-// - Scheduler struct with full cell tracking, configuration_seq sync
-// - refresh_bpf_cells() — reads applied_configuration_seq atomically,
-//   rebuilds cell map from CPU contexts
-// - calculate_cell_stat_delta() — reads percpu cpu_ctx stats, computes deltas
-// - log_all_queue_stats() — DistributionStats with per-cell and global breakdown
-// - read_cpu_ctxs() — percpu map reading (not yet supported by aya)
+// Missing runtime monitoring:
+// - refresh_bpf_cells() with configuration_seq sync
+// - percpu map reading for full stats collection
 //
-// Missing stats module — see C main.rs:9, stats.rs:
-// - CellMetrics, Metrics structs
-// - StatsServer integration for external monitoring
-// - monitor() function for stats-only mode
-//
-// Missing UEI (User Exit Info) — see C main.rs:37, 293, 305:
+// Missing UEI (User Exit Info):
 // - uei_exited!() check in main loop
-// - uei_report!() for structured exit info to userspace
+// - uei_report!() for structured exit info
+//
+// DONE (previously listed as missing):
+// ✓ smt_enabled, nr_possible_cpus — passed via override_global
+// ✓ debug_events_enabled, cpu_controller_disabled — passed via override_global
+// ✓ reject_multicpu_pinning — passed via override_global
+// ✓ cpu_to_llc[] — passed via override_global
+// ✓ all_cpus[] bitmask — built and passed via override_global
+// ✓ slice_ns — passed via override_global
+// ✓ CellMetrics, Metrics, StatsCollector — implemented in stats.rs
+// ✓ exiting_task_workaround — CLI flag + override_global
 
 mod mitosis_topology_utils;
 mod stats;
@@ -466,11 +450,20 @@ fn main() -> Result<()> {
     let cpu_ctrl_disabled: u8 = opts.cpu_controller_disabled as u8;
     let reject_pin: u8 = opts.reject_multicpu_pinning as u8;
 
-    // PORT_TODO: Missing global overrides:
-    //   SLICE_NS (needs SCX_SLICE_DFL constant from kernel),
-    //   ROOT_CGID (default 1 is usually correct),
-    //   EXITING_TASK_WORKAROUND_ENABLED,
-    //   llc_to_cpus[] (LlcCpumask array — too large for override_global?)
+    // Build ALL_CPUS bitmask (1 bit per CPU, up to 512 CPUs = 64 bytes).
+    // The BPF side uses this to know which CPUs are present.
+    let mut all_cpus = [0u8; 64]; // MAX_CPUS / 8
+    for cpu in 0..nr_cpus.min(512) {
+        all_cpus[cpu / 8] |= 1 << (cpu % 8);
+    }
+
+    // SCX_SLICE_DFL = 20ms (matches kernel default, see include/linux/sched/ext.h)
+    let slice_ns: u64 = 20_000_000;
+
+    // PORT_TODO: Remaining global overrides not yet passed:
+    //   ROOT_CGID (default 1 is usually correct for the root cgroup),
+    //   llc_to_cpus[] (LlcCpumask array — 1024 bytes per entry, may exceed
+    //   override_global size limit; needs BpfArray map instead)
 
     let mut ebpf = EbpfLoader::new()
         .allow_unsupported_maps()
@@ -483,6 +476,8 @@ fn main() -> Result<()> {
         .override_global("CPU_CONTROLLER_DISABLED", &cpu_ctrl_disabled, false)
         .override_global("REJECT_MULTICPU_PINNING", &reject_pin, false)
         .override_global("CPU_TO_LLC", &llc_topo.cpu_to_llc, false)
+        .override_global("ALL_CPUS", &all_cpus, false)
+        .override_global("SLICE_NS", &slice_ns, false)
         .load(include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/scx_mitosis"

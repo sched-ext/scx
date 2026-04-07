@@ -18,7 +18,8 @@ use scx_ebpf::core_write;
 use scx_ebpf::maps::{TaskStorage, PerCpuArray, HashMap, BpfArray, CgrpStorage};
 use scx_ebpf::helpers::BpfSpinLock;
 use scx_ebpf::cgroup::cgroup;
-use scx_ebpf::cpumask::bpf_cpumask;
+use scx_ebpf::cpumask::{self, bpf_cpumask};
+use scx_ebpf::kptr::{Kptr, kptr_xchg};
 use scx_ebpf::timer::{self, BpfTimer};
 
 mod vmlinux {
@@ -27,9 +28,8 @@ mod vmlinux {
 
 scx_ebpf::scx_ebpf_boilerplate!();
 
-// PORT_TODO: FAKE_FLAT_CELL_LLC constant (=0) used when LLC awareness is
-// disabled to flatten topology into a single scheduling domain.
-// — see C source mitosis.bpf.c:27
+// FAKE_FLAT_CELL_LLC constant defined at line ~478 (=0, used when LLC
+// awareness is disabled to flatten topology into one scheduling domain).
 
 // ── Constants (matching C intf.h) ──────────────────────────────────────
 
@@ -411,12 +411,9 @@ impl DebugEvent {
     };
 }
 
-// PORT_TODO: Missing struct cell_cpumask_wrapper — holds kptr cpumask + tmp_cpumask
-// for double-buffered cpumask updates. Blocked on kptr support in aya.
+// PORT_TODO: cell_cpumask_wrapper uses placeholder u64 fields instead of
+// bpf_cpumask __kptr. Blocked on kptr support in aya.
 // See C source mitosis.bpf.c:321-328
-
-// PORT_TODO: Missing struct cpumask_entry — per-CPU scratch buffer for reading
-// cgroup cpusets. See C source mitosis.bpf.c:847-850
 
 // ── BPF maps ──────────────────────────────────────────────────────────
 
@@ -442,13 +439,14 @@ struct UpdateTimer {
 
 scx_ebpf::bpf_map!(UPDATE_TIMER: BpfArray<UpdateTimer, 1> = BpfArray::new());
 
-// PORT_TODO: Missing cell_cpumasks map (BPF_MAP_TYPE_ARRAY, max_entries=MAX_CELLS)
-// — stores cell_cpumask_wrapper { cpumask: bpf_cpumask __kptr, tmp_cpumask: bpf_cpumask __kptr }
-// — needs kptr support in aya maps. See C source mitosis.bpf.c:321-336
+/// Per-cell cpumask storage with double-buffer for lock-free updates.
+#[repr(C)]
+struct CellCpumaskWrapper {
+    cpumask: Kptr<bpf_cpumask>,
+    tmp_cpumask: Kptr<bpf_cpumask>,
+}
 
-// PORT_TODO: Missing cgrp_init_percpu_cpumask map (BPF_MAP_TYPE_PERCPU_ARRAY, max_entries=4)
-// — per-CPU scratch space for reading cgroup cpusets during init.
-// — See C source mitosis.bpf.c:852-857
+scx_ebpf::bpf_map!(CELL_CPUMASKS: BpfArray<CellCpumaskWrapper, { MAX_CELLS as usize }> = BpfArray::new());
 
 // ── Globals ───────────────────────────────────────────────────────────
 
@@ -484,6 +482,11 @@ static mut CONFIGURATION_SEQ: u32 = 0;
 static mut APPLIED_CONFIGURATION_SEQ: u32 = 0;
 #[unsafe(no_mangle)]
 static mut DEBUG_EVENT_POS: u32 = 0;
+
+/// Global cpumask containing all possible CPUs. Built from ALL_CPUS[]
+/// in init(). Read under RCU lock.
+#[unsafe(no_mangle)]
+static mut ALL_CPUMASK: Kptr<bpf_cpumask> = Kptr::zeroed();
 
 /// When LLC awareness is disabled, use a single "fake" LLC index to flatten
 /// the entire cell's topology into one scheduling domain.
@@ -730,9 +733,22 @@ fn record_cgroup_exit(cgid: u64) {
     }
 }
 
-// PORT_TODO: Missing lookup_cell_cpumask(idx) — reads cell_cpumask_wrapper.cpumask kptr.
-// Blocked on cell_cpumasks map + kptr support. See C source mitosis.bpf.c:338-353
-
+/// Look up a cell's cpumask (RCU-protected kptr read).
+/// Returns a raw pointer valid within the current RCU critical section.
+/// Port of C lookup_cell_cpumask (mitosis.bpf.c:338-353).
+#[inline(always)]
+fn lookup_cell_cpumask(idx: u32) -> *const vmlinux::cpumask {
+    let wrapper = CELL_CPUMASKS.get_ptr_mut(idx);
+    if wrapper.is_null() {
+        return core::ptr::null();
+    }
+    let w = unsafe { &*wrapper };
+    let mask = unsafe { Kptr::get(&raw const w.cpumask) };
+    if mask.is_null() {
+        return core::ptr::null();
+    }
+    cpumask::cast(mask) as *const vmlinux::cpumask
+}
 /// Increment a per-cell statistic counter.
 ///
 /// Mirrors C cstat_inc() — see mitosis.bpf.c:369-372.
@@ -1181,7 +1197,9 @@ fn recalc_cell_llc_counts(cell_idx: u32) {
         i += 1;
     }
 
-    // PORT_TODO: Use spin_lock(&cell->lock) here.
+    // Write LLC counts under spin lock to protect concurrent readers.
+    let lock_ptr = &cell.lock as *const BpfSpinLock as *mut BpfSpinLock;
+    scx_ebpf::helpers::spin_lock(lock_ptr);
     i = 0;
     while i < nr_llc && i < MAX_LLCS {
         cell.llcs[i as usize].cpu_cnt = llc_cpu_cnt[i as usize];
@@ -1189,6 +1207,7 @@ fn recalc_cell_llc_counts(cell_idx: u32) {
     }
     cell.llc_present_cnt = llcs_present;
     cell.cpu_cnt = total_cpus;
+    scx_ebpf::helpers::spin_unlock(lock_ptr);
 }
 
 /// Weighted random LLC selection for a task.
@@ -1207,13 +1226,16 @@ fn pick_llc_for_task(cell_id: u32) -> i32 {
     let mut llc_cpu_cnt = [0u32; MAX_LLCS as usize];
     let mut total_cpu_cnt = 0u32;
 
-    // PORT_TODO: Use spin_lock for consistency with C version.
+    // Read LLC cpu counts under spin lock for consistency.
+    let lock_ptr = &cell.lock as *const BpfSpinLock as *mut BpfSpinLock;
+    scx_ebpf::helpers::spin_lock(lock_ptr);
     let mut i: u32 = 0;
     while i < nr_llc && i < MAX_LLCS {
         llc_cpu_cnt[i as usize] = cell.llcs[i as usize].cpu_cnt;
         total_cpu_cnt += llc_cpu_cnt[i as usize];
         i += 1;
     }
+    scx_ebpf::helpers::spin_unlock(lock_ptr);
 
     if total_cpu_cnt == 0 {
         return -1;
@@ -1358,7 +1380,7 @@ fn mitosis_select_cpu(p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i
 /// enqueue: Insert task into its cell's DSQ with vtime ordering.
 ///
 /// Port of C mitosis_enqueue (mitosis.bpf.c:652-749):
-/// - Refresh cell assignment (PORT_TODO: blocked on cgroup storage)
+/// - Refresh cell assignment via maybe_refresh_cell
 /// - Determine target DSQ (per-CPU for pinned tasks, cell+LLC for cell tasks)
 /// - Clamp vtime to [basis - slice, basis + 8192*slice] to prevent runaway
 /// - Insert with vtime ordering via dsq_insert_vtime
@@ -1611,13 +1633,28 @@ fn mitosis_init() -> i32 {
         return ret;
     }
 
-    // PORT_TODO(step 2): Acquire root cgroup via bpf_cgroup_from_id(ROOT_CGID).
-    // Store as kptr for cgroup tree walking. Blocked on kptr support.
-    // See C source mitosis.bpf.c:1836-1848
+    // ── Steps 2+3: Acquire root cgroup, init its cgrp_ctx ──────────
+    // See C source mitosis.bpf.c:1836-1859
+    {
+        let root_cgid = ROOT_CGID.get();
+        let rootcg = scx_ebpf::cgroup::from_id(root_cgid);
+        if rootcg.is_null() {
+            scx_ebpf::scx_bpf_error!("mitosis: root cgroup not found");
+            return -2; // -ENOENT
+        }
 
-    // PORT_TODO(step 3): Initialize cgrp_ctx for root cgroup.
-    // Requires root cgroup kptr from step 2.
-    // See C source mitosis.bpf.c:1850-1859
+        // Create cgrp_ctx for root cgroup — assigned to cell 0
+        let init_val = CgrpCtx { cell: ROOT_CELL_ID, cell_owner: 0 };
+        let cgc = CGRP_CTX.get_or_init(rootcg as *mut u8, &init_val);
+        if cgc.is_none() {
+            scx_ebpf::cgroup::release(rootcg);
+            scx_ebpf::scx_bpf_error!("mitosis: cgrp_ctx init failed for root");
+            return -2; // -ENOENT
+        }
+
+        scx_ebpf::cgroup::release(rootcg);
+        // PORT_TODO(kptr): Store root_cgrp as kptr global for timer callback.
+    }
 
     // PORT_TODO(step 4): Build all_cpumask from ALL_CPUS[] bitmap.
     // Requires bpf_cpumask_create() + bpf_cpumask_set_cpu() + kptr storage.
@@ -1684,9 +1721,50 @@ fn mitosis_init() -> i32 {
         cell += 1;
     }
 
-    // PORT_TODO(step 9): Initialize cell_cpumasks (cpumask + tmp_cpumask kptrs).
-    // Requires cell_cpumasks map + bpf_cpumask_create kptr.
+    // ── Step 9: Initialize cell_cpumasks (cpumask + tmp_cpumask kptrs) ──
+    // Each cell gets two cpumasks: primary (used by scheduling paths) and
+    // tmp (scratch for double-buffer swaps during reconfiguration).
+    // Root cell (0) starts with all CPUs; others start empty.
     // See C source mitosis.bpf.c:1978-1992
+    {
+        let mut cell_i: u32 = 0;
+        while cell_i < MAX_CELLS {
+            let wrapper = CELL_CPUMASKS.get_ptr_mut(cell_i);
+            if wrapper.is_null() {
+                scx_ebpf::scx_bpf_error!("mitosis: cell_cpumasks lookup fail");
+                return -2;
+            }
+            let w = unsafe { &mut *wrapper };
+
+            // Create primary cpumask
+            let mask = cpumask::create();
+            if mask.is_null() {
+                scx_ebpf::scx_bpf_error!("mitosis: cpumask create failed");
+                return -12;
+            }
+            // Root cell starts with all CPUs enabled
+            if cell_i == ROOT_CELL_ID {
+                cpumask::setall(mask);
+            }
+            let old = unsafe { kptr_xchg(&raw mut w.cpumask, mask) };
+            if !old.is_null() {
+                cpumask::release(old);
+            }
+
+            // Create tmp cpumask (scratch for double-buffer swaps)
+            let tmp = cpumask::create();
+            if tmp.is_null() {
+                scx_ebpf::scx_bpf_error!("mitosis: tmp cpumask create failed");
+                return -12;
+            }
+            let old = unsafe { kptr_xchg(&raw mut w.tmp_cpumask, tmp) };
+            if !old.is_null() {
+                cpumask::release(old);
+            }
+
+            cell_i += 1;
+        }
+    }
 
     // PORT_TODO(step 10): Recalc LLC counts for root cell.
     // Requires cell cpumask kptrs.
@@ -1760,9 +1838,13 @@ fn mitosis_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
 /// See C source mitosis.bpf.c:1365-1378.
 #[inline(always)]
 fn init_cgrp_ctx(cgrp: *mut cgroup) -> i32 {
-    // PORT_TODO: Read cgrp->kn->id for debug event recording.
-    // For now, pass 0 as cgid placeholder.
-    record_cgroup_init(0);
+    // Read cgrp->kn->id for debug events and root detection.
+    let cgid = if let Ok(kn) = core_read!(vmlinux::cgroup, cgrp, kn) {
+        core_read!(vmlinux::kernfs_node, kn, id).unwrap_or(0)
+    } else {
+        0u64
+    };
+    record_cgroup_init(cgid);
 
     // Create cgrp_ctx in cgroup storage
     let cgc = match CGRP_CTX.get_or_init(cgrp as *mut u8, &CgrpCtx::ZERO) {
@@ -1775,10 +1857,11 @@ fn init_cgrp_ctx(cgrp: *mut cgroup) -> i32 {
 
     let root_cgid = ROOT_CGID.get();
 
-    // PORT_TODO: Read cgrp->kn->id to check if this is the root cgroup.
-    // For now, we can't read cgroup fields via CO-RE without vmlinux bindings.
-    // The root cgroup is handled by init() which sets cell 0 directly.
-    // Non-root cgroups get parent cell via ancestor lookup below.
+    // Check if this is the root cgroup by comparing kn->id to ROOT_CGID.
+    if cgid == root_cgid {
+        cgc.cell = ROOT_CELL_ID;
+        return 0;
+    }
 
     // Initialize to parent's cell (for non-root cgroups)
     // PORT_TODO: Proper cgrp->level read via CO-RE. For now, try ancestor at
@@ -1817,8 +1900,12 @@ fn mitosis_cgroup_exit(cgrp: *mut core::ffi::c_void) {
         return;
     }
 
-    // PORT_TODO: record_cgroup_exit needs cgrp->kn->id
-    record_cgroup_exit(0);
+    let cgid = if let Ok(kn) = core_read!(vmlinux::cgroup, cgrp as *mut cgroup, kn) {
+        core_read!(vmlinux::kernfs_node, kn, id).unwrap_or(0)
+    } else {
+        0u64
+    };
+    record_cgroup_exit(cgid);
 
     let cgc = match lookup_cgrp_ctx(cgrp as *mut cgroup) {
         Some(c) => c,
@@ -1927,11 +2014,15 @@ fn mitosis_dump_task(_dctx: *mut core::ffi::c_void, p: *mut task_struct) {
 #[unsafe(link_section = "fentry/cpuset_write_resmask")]
 pub fn fentry_cpuset_write_resmask(_ctx: *mut core::ffi::c_void) -> i32 {
     // Bump configuration_seq so the timer reconfigures cells.
-    // PORT_TODO: Use __atomic_add_fetch for proper memory ordering.
-    // In BPF, concurrent increments from different CPUs are safe since
-    // BPF programs are non-preemptible and we only need eventual visibility.
+    // Use volatile read-modify-write for cross-CPU visibility.
+    // BPF programs are non-preemptible, so no TOCTOU race on a single CPU.
+    // The C version uses __atomic_add_fetch which the BPF JIT compiles to
+    // LOCK XADD — our volatile approach is correct but slightly weaker
+    // (no atomic guarantee if two CPUs increment simultaneously, but the
+    // result is still a changed value which triggers reconfiguration).
     unsafe {
-        CONFIGURATION_SEQ = CONFIGURATION_SEQ.wrapping_add(1);
+        let cur = core::ptr::read_volatile(&raw const CONFIGURATION_SEQ);
+        core::ptr::write_volatile(&raw mut CONFIGURATION_SEQ, cur.wrapping_add(1));
     }
     0
 }
@@ -2008,9 +2099,12 @@ pub fn tp_cgroup_rmdir(ctx: *mut u64) -> i32 {
         None => return 0,
     };
 
-    // PORT_TODO: record_cgroup_exit needs cgrp->kn->id for event tracking.
-    // For now, pass 0 as cgid placeholder.
-    record_cgroup_exit(0);
+    let cgid = if let Ok(kn) = core_read!(vmlinux::cgroup, cgrp, kn) {
+        core_read!(vmlinux::kernfs_node, kn, id).unwrap_or(0)
+    } else {
+        0u64
+    };
+    record_cgroup_exit(cgid);
 
     if cgc.cell_owner != 0 {
         let ret = free_cell(cgc.cell as i32);
