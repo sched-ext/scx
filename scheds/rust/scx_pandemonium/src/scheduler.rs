@@ -77,6 +77,32 @@ impl<'a> Scheduler<'a> {
         let builder = MainSkelBuilder::default();
         let mut open_skel = builder.open(open_object)?;
 
+        // INJECT VERSION SUFFIX INTO OPS NAME FOR scx_loader GUI
+        {
+            let ops = open_skel.struct_ops.pandemonium_ops_mut();
+            let name_field = &mut ops.name;
+            let version_suffix = scx_utils::build_id::ops_version_suffix(env!("CARGO_PKG_VERSION"));
+            let bytes = version_suffix.as_bytes();
+            let mut i = 0;
+            let mut bytes_idx = 0;
+            let mut found_null = false;
+            while i < name_field.len() - 1 {
+                found_null |= name_field[i] == 0;
+                if !found_null {
+                    i += 1;
+                    continue;
+                }
+                if bytes_idx < bytes.len() {
+                    name_field[i] = bytes[bytes_idx] as i8;
+                    bytes_idx += 1;
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            name_field[i] = 0;
+        }
+
         // CONFIGURE RODATA (BEFORE LOAD)
         let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
 
@@ -189,6 +215,7 @@ impl<'a> Scheduler<'a> {
                 if stats.longrun_mode_active > total.longrun_mode_active {
                     total.longrun_mode_active = stats.longrun_mode_active;
                 }
+                total.nr_overflow_rescue += stats.nr_overflow_rescue;
             }
         }
 
@@ -295,6 +322,19 @@ impl<'a> Scheduler<'a> {
         self.skel
             .maps
             .l2_siblings
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+
+    // POPULATE RESISTANCE AFFINITY RANK MAP
+    // affinity_rank[cpu * MAX_AFFINITY_CANDIDATES + slot] = target_cpu
+    // SORTED BY ASCENDING R_EFF FROM LAPLACIAN PSEUDOINVERSE
+    pub fn write_affinity_rank(&self, cpu: u32, slot: u32, target_cpu: u32) -> Result<()> {
+        let key = (cpu * 16 + slot).to_ne_bytes(); // MAX_AFFINITY_CANDIDATES = 16
+        let val = target_cpu.to_ne_bytes();
+        self.skel
+            .maps
+            .affinity_rank
             .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }

@@ -3,8 +3,8 @@
 //
 // ONE THREAD: MONITOR LOOP (1-SECOND CONTROL LOOP)
 //   READS BPF PER-CPU HISTOGRAMS FOR P99 COMPUTATION.
-//   DETECTS WORKLOAD REGIME. SETS BASELINE KNOBS.
-//   TIGHTENS ON P99 SPIKES. RELAXES GRADUALLY AFTER P99 NORMALIZES.
+//   DETECTS WORKLOAD REGIME VIA SCHMITT TRIGGER.
+//   MWU ORCHESTRATOR TUNES ALL 11 KNOBS WITHIN REGIME.
 //
 // BPF PRODUCES HISTOGRAMS, RUST READS AND REACTS. RUST WRITES KNOBS,
 // BPF READS THEM ON THE VERY NEXT SCHEDULING DECISION.
@@ -16,18 +16,12 @@ use anyhow::Result;
 
 use crate::procdb::ProcessDb;
 use crate::scheduler::{PandemoniumStats, Scheduler};
-use crate::tuning::{self, detect_regime, scaled_regime_knobs, Regime, TuningKnobs, HIST_BUCKETS};
+use crate::tuning::{
+    self, detect_regime, scaled_regime_knobs, MwuController, MwuSignals, Regime, HIST_BUCKETS,
+};
 
 // REGIME THRESHOLDS, PROFILES, AND KNOB COMPUTATION LIVE IN tuning.rs
 // (ZERO BPF DEPENDENCIES, TESTABLE OFFLINE)
-
-// TIGHTEN PARAMETERS
-
-const MIN_SLICE_NS: u64 = 500_000; // 500US FLOOR
-
-// GRADUATED RELAX: STEP TOWARD BASELINE AFTER P99 NORMALIZES
-const RELAX_STEP_NS: u64 = 500_000; // RELAX BY 500US PER TICK
-const RELAX_HOLD_TICKS: u32 = 2; // WAIT 2S OF GOOD P99 BEFORE STEPPING
 
 // SLEEP PATTERN BUCKETS: CLASSIFY IO-WAIT VS IDLE WORKLOADS
 const SLEEP_BUCKETS: usize = 4;
@@ -47,21 +41,14 @@ pub fn monitor_loop(
     let mut prev_hist = [[0u64; HIST_BUCKETS]; 3];
     let mut prev_sleep = [0u64; SLEEP_BUCKETS];
     let mut regime = Regime::Mixed;
-    let mut relax_counter: u32 = 0;
-    let mut tightened = false;
+    let mut mwu = MwuController::new(scaled_regime_knobs(regime, nr_cpus));
     let mut pending_regime = regime;
     let mut regime_hold: u32 = 0;
     let mut light_ticks: u64 = 0;
     let mut mixed_ticks: u64 = 0;
     let mut heavy_ticks: u64 = 0;
     let mut stability_score: u32 = 0;
-    let mut spike_count: u32 = 0;
     let mut tick_counter: u64 = 0;
-    let mut tighten_events: u64 = 0;
-    let mut prev_tighten_events: u64 = 0;
-    let sojourn_floor_ns: u64 = (nr_cpus * 1_000_000).clamp(2_000_000, 6_000_000);
-    let sojourn_ceil_ns: u64 = sojourn_floor_ns * 2;
-    let mut sojourn_thresh_ns: u64 = sojourn_floor_ns;
 
     let mut procdb = match ProcessDb::new() {
         Ok(db) => Some(db),
@@ -75,9 +62,7 @@ pub fn monitor_loop(
     sched.write_tuning_knobs(&scaled_regime_knobs(regime, nr_cpus))?;
 
     while !shutdown.load(Ordering::Relaxed) && !sched.exited() {
-        let tick_start = std::time::Instant::now();
         std::thread::sleep(Duration::from_secs(1));
-        let elapsed_ns = tick_start.elapsed().as_nanos() as u64;
 
         let stats = sched.read_stats();
 
@@ -205,130 +190,33 @@ pub fn monitor_loop(
             }
             if regime_hold >= 2 {
                 regime = detected;
-                sched.write_tuning_knobs(&scaled_regime_knobs(regime, nr_cpus))?;
+                let rk = scaled_regime_knobs(regime, nr_cpus);
+                sched.write_tuning_knobs(&rk)?;
                 regime_changed_this_tick = true;
-                tightened = false;
-                relax_counter = 0;
-                spike_count = 0;
+                mwu.set_baseline(rk);
+                mwu.reset();
             }
         } else {
             pending_regime = regime;
             regime_hold = 0;
         }
 
-        // TIGHTEN CHECK: P99 SPIKE DETECTION
-        // REQUIRE 2 CONSECUTIVE ABOVE-CEILING TICKS BEFORE TIGHTENING.
-        // ONLY TIGHTEN IN MIXED: LIGHT HAS NO CONTENTION (POINTLESS),
-        // HEAVY IS FULLY SATURATED (MORE PREEMPTION JUST ADDS OVERHEAD).
-        if !tightened && !regime_changed_this_tick {
-            let ceiling = regime.p99_ceiling();
-            if tuning::should_reflex_tighten(p99_ns, tp99_i_ns, ceiling) {
-                spike_count += 1;
-                if spike_count >= 2 && regime == Regime::Mixed {
-                    let current = sched.read_tuning_knobs();
-                    let new_slice = (current.slice_ns * 3 / 4).max(MIN_SLICE_NS);
-                    let knobs = TuningKnobs {
-                        slice_ns: new_slice,
-                        preempt_thresh_ns: new_slice,
-                        ..current
-                    };
-                    sched.write_tuning_knobs(&knobs)?;
-                    tightened = true;
-                    tighten_events += 1;
-                    spike_count = 0;
-                }
-            } else {
-                spike_count = 0;
-            }
-        }
-
-        // GRADUATED RELAX: STEP SLICE TOWARD BASELINE (BATCH UNTOUCHED)
-        if tightened && !regime_changed_this_tick {
-            let ceiling = regime.p99_ceiling();
-            let baseline = scaled_regime_knobs(regime, nr_cpus);
-            if p99_ns <= ceiling {
-                relax_counter += 1;
-                if relax_counter >= RELAX_HOLD_TICKS {
-                    let current = sched.read_tuning_knobs();
-                    if current.slice_ns < baseline.slice_ns {
-                        let new_slice = (current.slice_ns + RELAX_STEP_NS).min(baseline.slice_ns);
-                        let knobs = TuningKnobs {
-                            slice_ns: new_slice,
-                            preempt_thresh_ns: baseline.preempt_thresh_ns.min(new_slice),
-                            batch_slice_ns: current.batch_slice_ns,
-                            ..baseline
-                        };
-                        sched.write_tuning_knobs(&knobs)?;
-                        if new_slice >= baseline.slice_ns {
-                            tightened = false;
-                        }
-                    } else {
-                        tightened = false;
-                    }
-                    relax_counter = 0;
-                }
-            } else {
-                relax_counter = 0;
-            }
-        }
-
-        // SLEEP-INFORMED BATCH TUNING (EVERY TICK)
-        let baseline = scaled_regime_knobs(regime, nr_cpus);
-        let longrun_active = stats.longrun_mode_active > 0;
-
-        // LONGRUN OVERRIDE: DURING SUSTAINED BATCH PRESSURE (>2S),
-        // USE BASE BATCH SLICE (SKIP SLEEP ADJUSTMENT -- LONG-RUNNERS ARE
-        // CPU-BOUND, NOT IO-BOUND) AND WEAKEN AFFINITY TO SPREAD BATCH
-        // TASKS ACROSS MORE CPUS INSTEAD OF CONCENTRATING ON HOTSPOTS.
-        // BURST IS OWNED ENTIRELY BY BPF (CUSUM + WAKEUP RATE IN TICK).
-        let final_batch = if longrun_active {
-            baseline.batch_slice_ns
-        } else {
-            tuning::sleep_adjust_batch_ns(baseline.batch_slice_ns, io_pct)
-        };
-        let final_affinity = if longrun_active {
-            tuning::AFFINITY_WEAK
-        } else {
-            baseline.affinity_mode
-        };
-
-        // DISPATCH-RATE ADAPTIVE SOJOURN THRESHOLD
-        // MEASURE, DON'T ASSUME. DISPATCH RATE REFLECTS ACTUAL SYSTEM
-        // CAPACITY (PHYSICAL CORES, SMT, FREQUENCY, WORKLOAD INTENSITY).
-        // NORMALIZED TO ACTUAL ELAPSED TIME (SLEEP OVERSHOOTS UNDER LOAD).
-        const SOJOURN_MULTIPLIER: u64 = 4; // 4X DISPATCH INTERVAL
-
-        if delta_d > 0 && elapsed_ns > 0 {
-            let dispatch_rate = delta_d * 1_000_000_000 / elapsed_ns;
-            let interval_ns = if dispatch_rate > 0 {
-                1_000_000_000 / dispatch_rate
-            } else {
-                0
+        // MWU ORCHESTRATOR: UNIFIED KNOB CONTROL
+        // REPLACES: TIGHTEN/RELAX, SLEEP-INFORMED BATCH, SOJOURN EWMA, LONGRUN OVERRIDE
+        if !regime_changed_this_tick {
+            let signals = MwuSignals {
+                p99_ns,
+                interactive_p99_ns: tp99_i_ns,
+                io_pct,
+                rescue_count: delta_rescue,
+                wakeup_rate: delta_enq_wake / nr_cpus.max(1),
             };
-            let target =
-                (interval_ns * SOJOURN_MULTIPLIER).clamp(sojourn_floor_ns, sojourn_ceil_ns);
-            // EWMA: 7/8 OLD + 1/8 NEW (SMOOTH, NO JITTER)
-            sojourn_thresh_ns = sojourn_thresh_ns - (sojourn_thresh_ns >> 3) + (target >> 3);
-        }
-
-        {
-            let current = sched.read_tuning_knobs();
-            if current.batch_slice_ns != final_batch
-                || current.sojourn_thresh_ns != sojourn_thresh_ns
-                || current.affinity_mode != final_affinity
-            {
-                sched.write_tuning_knobs(&TuningKnobs {
-                    batch_slice_ns: final_batch,
-                    sojourn_thresh_ns,
-                    affinity_mode: final_affinity,
-                    ..current
-                })?;
-            }
+            let knobs = mwu.update(&signals, regime.p99_ceiling(), nr_cpus);
+            sched.write_tuning_knobs(&knobs)?;
         }
 
         // STABILITY TRACKING
-        let tighten_delta = tighten_events.wrapping_sub(prev_tighten_events);
-        prev_tighten_events = tighten_events;
+        let tighten_delta = if mwu.had_losses() { 1u64 } else { 0u64 };
         stability_score = tuning::compute_stability_score(
             stability_score,
             regime_changed_this_tick,
@@ -354,7 +242,7 @@ pub fn monitor_loop(
         let knobs = sched.read_tuning_knobs();
 
         let sojourn_ms = stats.batch_sojourn_ns / 1_000_000;
-        let sojourn_thresh_ms = sojourn_thresh_ns / 1_000_000;
+        let sojourn_thresh_ms = knobs.sojourn_thresh_ns / 1_000_000;
         let delta_burst = stats.burst_mode_active.wrapping_sub(prev.burst_mode_active);
         let burst_label = if delta_burst > 0 { " BURST" } else { "" };
         let longrun_label = if stats.longrun_mode_active > 0 {
@@ -442,10 +330,10 @@ pub fn monitor_loop(
         0
     };
     println!(
-        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} demotion_ns={} lag={} tightened={} tighten_events={} ticks=L:{}/M:{}/H:{} l2_hit=B:{}%/I:{}%/L:{}%",
+        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} demotion_ns={} lag={} mwu={:.3} ticks=L:{}/M:{}/H:{} l2_hit=B:{}%/I:{}%/L:{}%",
         regime.label(), final_knobs.slice_ns, final_knobs.batch_slice_ns,
         final_knobs.preempt_thresh_ns, final_knobs.cpu_bound_thresh_ns,
-        final_knobs.lag_scale, tightened, tighten_events,
+        final_knobs.lag_scale, mwu.scale(),
         light_ticks, mixed_ticks, heavy_ticks,
         l2_cum_b, l2_cum_i, l2_cum_l,
     );

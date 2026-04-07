@@ -95,6 +95,40 @@ static u64 starvation_rescue_ns;
 static u64 overflow_sojourn_rescue_ns;
 static u32 pcpu_depth_base;
 
+// UNIFIED SIGMOID + DAMPED OSCILLATION STALL DETECTION
+// VARIABLE MARGIN INTERPOLATES BETWEEN CODEL AND SMOOTH SIGMOID:
+//   SMALL MARGIN (2C): SHARP TRANSITION -> NEAR-BINARY CODEL BEHAVIOR
+//   LARGE MARGIN (12C): SMOOTH TRANSITION -> ADAPTIVE SIGMOID BEHAVIOR
+// ONE CODE PATH. NO MODE SPLIT. CORE COUNT BAKED INTO CONSTANTS AT INIT.
+// THREE ZONES: FLOWING (P<25%), UNCERTAIN (25-75%), STALLED (P>75%)
+// CENTER ADAPTS VIA DAMPED OSCILLATION: RESCUE TIGHTENS, QUIET RELAXES.
+// DAMPING + PULL STRENGTH ALSO CORE-SCALED:
+//   2C: HEAVY DAMPING, WEAK PULL -> CENTER BARELY MOVES (FIXED THRESHOLD)
+//   12C: LIGHT DAMPING, STRONG PULL -> CENTER TRACKS STALL POINT
+// REFERENCE: VAN JACOBSON CODEL (RFC 8289) + DAMPED HARMONIC OSCILLATOR
+#define SOJOURN_TARGET_NS     500000   // 500us: INITIAL SIGMOID CENTER
+#define SIGMOID_P_MAX         256      // FIXED-POINT 1.0
+#define SIGMOID_LOW_THRESH    64       // 25%: BELOW = FLOWING
+#define SIGMOID_HIGH_THRESH   192      // 75%: ABOVE = STALLED
+#define SIGMOID_CENTER_MAX    2000000  // 2ms: CEILING
+#define SIGMOID_PULL_NS       8000     // BASE TIGHTEN IMPULSE
+#define SIGMOID_RELAX_NS      1000     // RELAX IMPULSE PER QUIET TICK
+// CORE-SCALED CONSTANTS (SET ONCE IN init())
+static u64 sigmoid_margin_ns;          // TRANSITION HALF-WIDTH
+static u32 sigmoid_p_shift;            // log2(margin/128) FOR BPF-SAFE DIVISION
+static u32 sigmoid_damping;            // VELOCITY DECAY SHIFT
+static u32 sigmoid_pull_scale;         // RESCUE IMPULSE MULTIPLIER
+static s64 sigmoid_velocity_cap;       // VELOCITY CLAMP
+static u64 sigmoid_center_min;         // CORE-SCALED FLOOR FOR TARGET
+// ADAPTIVE STATE
+static u64 sojourn_interval_ns;        // CORE-SCALED, UNCERTAIN ZONE TIMER
+static u64 sigmoid_center_ns;          // ADAPTIVE CENTER
+static s64 sigmoid_velocity_ns;        // DAMPED OSCILLATION VELOCITY
+static u64 prev_rescue_snapshot;       // LAST-SEEN RESCUE COUNT
+static u64 global_rescue_count;        // ATOMIC CROSS-CPU RESCUE ACCUMULATOR
+static u64 pcpu_min_sojourn_ns[MAX_CPUS];
+static u64 pcpu_stall_start_ns[MAX_CPUS];
+
 // CUSUM BURST DETECTION (TOTAL-ENQUEUE)
 // MONITORS ENQUEUE RATE TO DETECT FORK/EXEC STORMS.
 // SAMPLES EVERY 64TH ENQUEUE: TRACKS TIME INTERVAL (SHORTER = BURST).
@@ -187,6 +221,19 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 } l2_siblings SEC(".maps");
+
+// RESISTANCE AFFINITY MAP: PER-CPU RANKED PLACEMENT TARGETS
+// affinity_rank[cpu * MAX_AFFINITY_CANDIDATES + slot] = target_cpu
+// SORTED BY ASCENDING EFFECTIVE RESISTANCE (LAPLACIAN PSEUDOINVERSE).
+// SLOT 0 = CHEAPEST MIGRATION TARGET (TYPICALLY L2 SIBLING).
+// POPULATED BY RUST AT STARTUP FROM EXACT R_EFF COMPUTATION.
+// SENTINEL: (u32)-1 MARKS END OF VALID ENTRIES.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CPUS * MAX_AFFINITY_CANDIDATES);
+	__type(key, u32);
+	__type(value, u32);
+} affinity_rank SEC(".maps");
 
 // WAKEUP LATENCY HISTOGRAM: 3 TIERS x 12 BUCKETS = 36 ENTRIES PER CPU
 // BPF INCREMENTS IN running(); RUST READS ONCE PER SECOND IN MONITOR LOOP
@@ -312,6 +359,74 @@ static __always_inline s32 find_idle_l2_sibling(const struct task_ctx *tctx)
 			return cpu;
 	}
 	return -1;
+}
+
+// RESISTANCE AFFINITY: IDLE CPU SEARCH BY EFFECTIVE RESISTANCE
+// WALKS THE R_EFF-RANKED AFFINITY LIST (LAPLACIAN PSEUDOINVERSE) FOR A
+// GIVEN SOURCE CPU. RETURNS FIRST IDLE CPU FOUND, OR -1.
+// SEARCH IS BOUNDED TO limit ENTRIES TO CONTROL HOT-PATH COST.
+// SLOT 0 = L2 SIBLING (LOWEST R_EFF), SLOT 1+ = NEXT CHEAPEST.
+// NO DEPTH GATE. NO DSQ DISPATCH. PURE IDLE SEARCH.
+// REFERENCE: KYNG ET AL. EFFECTIVE RESISTANCE (STOC 2011, FOCS 2022)
+
+#define AFFINITY_SEARCH_LIMIT 3
+
+static __always_inline s32 find_idle_by_affinity(s32 src_cpu)
+{
+	if (src_cpu < 0 || (u32)src_cpu >= nr_cpu_ids)
+		return -1;
+
+	u32 base = (u32)src_cpu * MAX_AFFINITY_CANDIDATES;
+	for (int i = 0; i < AFFINITY_SEARCH_LIMIT; i++) {
+		u32 key = base + (u32)i;
+		u32 *val = bpf_map_lookup_elem(&affinity_rank, &key);
+		if (!val || *val == (u32)-1 || *val >= nr_cpu_ids)
+			break;
+		if (scx_bpf_test_and_clear_cpu_idle((s32)*val))
+			return (s32)*val;
+	}
+
+	return -1;
+}
+
+// CODEL DRAIN RATE: UPDATE MIN SOJOURN WHEN TASK DEQUEUED FROM PER-CPU DSQ
+static __always_inline void update_pcpu_sojourn(u32 cpu, u64 now)
+{
+	if (cpu >= MAX_CPUS) return;
+	u64 enq = pcpu_enqueue_ns[cpu];
+	if (enq == 0) return;
+	u64 sojourn = now - enq;
+	if (sojourn < pcpu_min_sojourn_ns[cpu])
+		pcpu_min_sojourn_ns[cpu] = sojourn;
+}
+
+// CODEL STALL DETECTION: MIN SOJOURN ABOVE DYNAMIC TARGET FOR INTERVAL = STALLED.
+// THE TARGET (sigmoid_center_ns) IS MODULATED BY DAMPED OSCILLATION IN tick().
+// RESCUES PULL THE TARGET DOWN (TIGHTEN). QUIET PUSHES IT UP (RELAX).
+// THE TARGET ADAPTS TO WHAT "NORMAL SOJOURN" IS ON THIS SYSTEM RIGHT NOW.
+static __always_inline bool pcpu_dsq_is_stalled(u32 cpu, u64 now)
+{
+	if (cpu >= MAX_CPUS) return false;
+	u64 min_s = pcpu_min_sojourn_ns[cpu];
+
+	if (min_s < sigmoid_center_ns) {
+		pcpu_stall_start_ns[cpu] = 0;
+		pcpu_min_sojourn_ns[cpu] = ~0ULL;
+		return false;
+	}
+
+	if (pcpu_stall_start_ns[cpu] == 0) {
+		pcpu_stall_start_ns[cpu] = now + sojourn_interval_ns;
+		return false;
+	}
+
+	if (now >= pcpu_stall_start_ns[cpu]) {
+		pcpu_min_sojourn_ns[cpu] = ~0ULL;
+		pcpu_stall_start_ns[cpu] = 0;
+		return true;
+	}
+
+	return false;
 }
 
 // HISTOGRAM BUCKETING: MATCHES HIST_EDGES_NS AND SLEEP_EDGES_NS IN RUST
@@ -522,6 +637,92 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 		   s32 prev_cpu, u64 wake_flags)
 {
 	bool is_idle = false;
+
+	// RESISTANCE AFFINITY: WAKEE_FLIPS-GATED WAKE_SYNC
+	// GATE: wakee_flips (per-task wakeup partner diversity) separates
+	//   1:1 pipe pairs (low flips, affinity beneficial) from
+	//   1:N server patterns (high flips, affinity harmful).
+	// PLACEMENT: R_eff ranked search from waker's CPU finds cheapest
+	//   idle CPU in waker's L2 group. Falls back to waker's DSQ if
+	//   no idle found and DSQ depth allows.
+	// REFERENCE: kernel wake_wide() uses same wakee_flips signal.
+	//   Kyng et al. effective resistance for migration cost.
+	if (wake_flags & SCX_WAKE_SYNC) {
+		// COUNT WAKE_SYNC FOR BURST DETECTION (SIGMOID CONDITIONAL RELAX)
+		__sync_fetch_and_add(&wake_rate_count, 1);
+		struct task_struct *waker =
+			(struct task_struct *)bpf_get_current_task_btf();
+		if (waker) {
+			u32 wflips = BPF_CORE_READ(waker, wakee_flips);
+			u32 pflips = p->wakee_flips;
+			u32 thresh = nr_cpu_ids;
+
+			// WAKE_WIDE: SKIP IF EITHER SIDE WAKES DIVERSE TASKS
+			if (wflips <= thresh && pflips <= thresh) {
+				s32 waker_cpu = bpf_get_smp_processor_id();
+				if ((u64)waker_cpu >= nr_cpu_ids)
+					goto normal_path;
+
+				// R_EFF RANKED IDLE SEARCH FROM WAKER
+				s32 target = find_idle_by_affinity(waker_cpu);
+				if (target >= 0) {
+					struct task_ctx *tctx = lookup_task_ctx(p);
+					struct tuning_knobs *knobs = get_knobs();
+					u64 sl = tctx ? task_slice(tctx, knobs)
+						      : 1000000;
+					u64 dl = tctx ? task_deadline(p, tctx,
+						(u64)target, knobs) : vtime_now;
+					scx_bpf_dsq_insert_vtime(p,
+						(u64)target, sl, dl, 0);
+					if ((u32)target < MAX_CPUS)
+						__sync_val_compare_and_swap(
+							&pcpu_enqueue_ns[target],
+							0, bpf_ktime_get_ns());
+					if (tctx)
+						tctx->dispatch_path = 0;
+					struct pandemonium_stats *s = get_stats();
+					if (s) {
+						s->nr_idle_hits += 1;
+						s->nr_dispatches += 1;
+					}
+					return target;
+				}
+
+				// NO IDLE NEAR WAKER: DSQ DISPATCH IF DSQ IS FLOWING
+				// CODEL: IF MIN SOJOURN < 500us OVER LAST 8ms, TASKS
+				// ARE CYCLING THROUGH FAST. DSQ DISPATCH IS SAFE.
+				// IF STALLED (PINNED WORKERS), FALL THROUGH TO
+				// NORMAL PATH WHERE scx_bpf_select_cpu_dfl HANDLES
+				// PREEMPTION AND LOAD BALANCING.
+				if (!pcpu_dsq_is_stalled(
+					(u32)waker_cpu, bpf_ktime_get_ns())) {
+					struct task_ctx *tctx = lookup_task_ctx(p);
+					struct tuning_knobs *knobs = get_knobs();
+					u64 sl = tctx ? task_slice(tctx, knobs)
+						      : 1000000;
+					u64 dl = tctx ? task_deadline(p, tctx,
+						(u64)waker_cpu, knobs)
+						      : vtime_now;
+					scx_bpf_dsq_insert_vtime(p,
+						(u64)waker_cpu, sl, dl, 0);
+					if ((u32)waker_cpu < MAX_CPUS)
+						__sync_val_compare_and_swap(
+							&pcpu_enqueue_ns[waker_cpu],
+							0, bpf_ktime_get_ns());
+					if (tctx)
+						tctx->dispatch_path = 0;
+					struct pandemonium_stats *s = get_stats();
+					if (s) {
+						s->nr_idle_hits += 1;
+						s->nr_dispatches += 1;
+					}
+					return waker_cpu;
+				}
+			}
+		}
+	}
+normal_path:;
+
 	s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
 	if (is_idle) {
@@ -588,6 +789,7 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	u64 node_dsq = nr_cpu_ids + (u64)node;
 
 	struct task_ctx *tctx = lookup_task_ctx(p);
+
 	struct tuning_knobs *knobs = get_knobs();
 	u64 sl = tctx ? task_slice(tctx, knobs) : 1000000;
 	u64 dl;
@@ -603,6 +805,7 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	if (knobs && knobs->affinity_mode > 0 && tctx &&
 	    tctx->tier != TIER_LAT_CRITICAL &&
 	    !(p->flags & PF_KTHREAD)) {
+		// cpu = find_idle_by_affinity(tctx->last_cpu);
 		cpu = find_idle_l2_sibling(tctx);
 	}
 	if (cpu < 0)
@@ -825,6 +1028,8 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	// STEP 0: OWN PER-CPU DSQ -- HIGHEST PRIORITY, CACHE-HOT
 	if ((u64)cpu < nr_cpu_ids &&
 	    scx_bpf_dsq_move_to_local((u64)cpu, 0)) {
+		// CODEL: UPDATE DRAIN RATE BEFORE CLEARING TIMESTAMP
+		update_pcpu_sojourn((u32)cpu, now);
 		if ((u32)cpu < MAX_CPUS &&
 		    scx_bpf_dsq_nr_queued((u64)cpu) == 0) {
 			u64 old = pcpu_enqueue_ns[cpu];
@@ -864,6 +1069,8 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 			if (sibling == my_cpu || sibling >= nr_cpu_ids)
 				continue;
 			if (scx_bpf_dsq_move_to_local((u64)sibling, 0)) {
+				// CODEL: UPDATE DRAIN RATE BEFORE CLEARING
+				update_pcpu_sojourn(sibling, now);
 				if (sibling < MAX_CPUS &&
 				    scx_bpf_dsq_nr_queued((u64)sibling) == 0) {
 					u64 old = pcpu_enqueue_ns[sibling];
@@ -925,6 +1132,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 				s->nr_dispatches += 1;
 				s->nr_overflow_rescue += 1;
 			}
+			__sync_fetch_and_add(&global_rescue_count, 1);
 			return;
 		}
 		u64 old_iens = interactive_enqueue_ns;
@@ -952,6 +1160,7 @@ skip_interactive_rescue:;
 				s->nr_dispatches += 1;
 				s->nr_overflow_rescue += 1;
 			}
+			__sync_fetch_and_add(&global_rescue_count, 1);
 			return;
 		}
 		u64 old_bens = batch_enqueue_ns;
@@ -1307,8 +1516,49 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 		cusum_s > (cusum_interval_ewma << 1);
 	u64 wakeups = __sync_fetch_and_add(&wake_rate_count, 0);
 	bool wake_burst = wakeups > (nr_cpu_ids << 1);
-	if (bpf_get_smp_processor_id() == 0)
+	if (bpf_get_smp_processor_id() == 0) {
 		__sync_lock_test_and_set(&wake_rate_count, 0);
+
+		// SIGMOID DAMPED OSCILLATION: CORE-SCALED PULL + DAMPING
+		// 2C: HEAVY DAMPING, WEAK PULL -> CENTER BARELY MOVES
+		// 12C: LIGHT DAMPING, STRONG PULL -> CENTER TRACKS STALL POINT
+		{
+			u64 cur = __sync_fetch_and_add(&global_rescue_count, 0);
+			u64 delta = cur - prev_rescue_snapshot;
+			prev_rescue_snapshot = cur;
+
+			s64 impulse;
+			if (delta > 0) {
+				u64 capped = delta > 8 ? 8 : delta;
+				impulse = -((s64)(capped * SIGMOID_PULL_NS *
+					sigmoid_pull_scale));
+			} else if (!wake_burst && !cusum_burst) {
+				impulse = (s64)SIGMOID_RELAX_NS;
+			} else {
+				impulse = 0;
+			}
+
+			sigmoid_velocity_ns += impulse;
+			sigmoid_velocity_ns -= sigmoid_velocity_ns >>
+				sigmoid_damping;
+
+			if (sigmoid_velocity_ns > sigmoid_velocity_cap)
+				sigmoid_velocity_ns = sigmoid_velocity_cap;
+			if (sigmoid_velocity_ns < -sigmoid_velocity_cap)
+				sigmoid_velocity_ns = -sigmoid_velocity_cap;
+
+			// MODULATE THE CODEL TARGET (WHAT COUNTS AS "ABOVE NORMAL")
+			// RESCUES -> PULL TARGET DOWN (TIGHTEN: DETECT STALLS SOONER)
+			// QUIET -> PUSH TARGET UP (RELAX: TOLERATE HIGHER SOJOURN)
+			// THE TARGET ADAPTS TO WHAT "NORMAL" IS ON THIS SYSTEM.
+			s64 nc = (s64)sigmoid_center_ns + sigmoid_velocity_ns;
+			if (nc < (s64)sigmoid_center_min)
+				nc = (s64)sigmoid_center_min;
+			if (nc > (s64)SIGMOID_CENTER_MAX)
+				nc = (s64)SIGMOID_CENTER_MAX;
+			sigmoid_center_ns = (u64)nc;
+		}
+	}
 
 	burst_mode = cusum_burst || wake_burst;
 
@@ -1521,6 +1771,70 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(pandemonium_init)
 	// PER-CPU DSQ DEPTH GATE: 1 BELOW 4 CPUS, 2 AT 4+
 	pcpu_depth_base = (nr_cpu_ids < 4) ? 1 : 2;
 
+	// UNIFIED SIGMOID: CORE-SCALED MARGIN + DAMPING
+	// SMALL MARGIN -> SHARP TRANSITION (CODEL-LIKE AT 2C)
+	// LARGE MARGIN -> SMOOTH TRANSITION (SIGMOID-LIKE AT 12C+)
+	{
+		// CORE-SCALED INIT: TIGHT AT LOW CORES, RELAXED AT HIGH
+		// 2C: 2ms. 4C: 4ms. 8C: 8ms. 12C: 12ms. 16C+: 12ms.
+		// DAMPED OSCILLATION ADJUSTS FROM HERE.
+		u64 interval = nr_cpu_ids * 1000000ULL;
+		if (interval < 2000000ULL) interval = 2000000ULL;
+		if (interval > 12000000ULL) interval = 12000000ULL;
+		sojourn_interval_ns = interval;
+
+		// MARGIN: POWER OF 2 FOR SHIFT-BASED DIVISION
+		u64 raw_margin = nr_cpu_ids * 16000ULL;
+		if (raw_margin < 64000ULL) raw_margin = 64000ULL;
+		if (raw_margin > 512000ULL) raw_margin = 512000ULL;
+		u64 margin = 1;
+		for (u32 i = 0; i < 20 && margin < raw_margin; i++)
+			margin <<= 1;
+		sigmoid_margin_ns = margin;
+
+		// SHIFT: log2(margin / 128)
+		u64 divisor = margin >> 7;
+		u32 shift = 0;
+		u64 tmp = divisor;
+		for (u32 i = 0; i < 20 && tmp > 1; i++) {
+			tmp >>= 1;
+			shift++;
+		}
+		sigmoid_p_shift = shift;
+
+		// DAMPING: 2C=v/2 (heavy), 4C=v/3, 8C=v/5, 12C+=v/5
+		u32 damp = (nr_cpu_ids >> 1) + 1;
+		if (damp > 5) damp = 5;
+		sigmoid_damping = damp;
+
+		// PULL SCALE: 2C=2x, 4C=3x, 8C=4x, 12C=4x
+		u32 pull = (nr_cpu_ids + 2) >> 1;
+		if (pull < 1) pull = 1;
+		if (pull > 4) pull = 4;
+		sigmoid_pull_scale = pull;
+
+		// VELOCITY CAP: SCALES WITH PULL
+		sigmoid_velocity_cap = (s64)(50000ULL * pull);
+
+		// CENTER FLOOR: CORE-SCALED. HIGHER AT MORE CORES WHERE
+		// NORMAL SOJOURN IS HIGHER UNDER SATURATION.
+		// 2C: 200us. 4C: 300us. 8C: 500us. 12C: 700us. 16C+: 800us.
+		u64 cmin = nr_cpu_ids * 50000ULL + 100000ULL;
+		if (cmin < 200000ULL) cmin = 200000ULL;
+		if (cmin > 800000ULL) cmin = 800000ULL;
+		sigmoid_center_min = cmin;
+	}
+	// START PERMISSIVE. LET THE DAMPED OSCILLATION FIND THE RIGHT CENTER.
+	// RESCUES PULL IT DOWN. NO STATIC FORMULA. THE WAVE FUNCTION DOES THE WORK.
+	sigmoid_center_ns = SIGMOID_CENTER_MAX;
+	sigmoid_velocity_ns = 0;
+	prev_rescue_snapshot = 0;
+	global_rescue_count = 0;
+	for (u32 i = 0; i < nr_cpu_ids && i < MAX_CPUS; i++) {
+		pcpu_min_sojourn_ns[i] = ~0ULL;
+		pcpu_stall_start_ns[i] = 0;
+	}
+
 	// CUSUM BURST DETECTION: CALIBRATES ON FIRST 64 ENQUEUES
 	cusum_last_check_ns = bpf_ktime_get_ns();
 	cusum_interval_ewma = 0;
@@ -1567,7 +1881,7 @@ void BPF_STRUCT_OPS(pandemonium_quiescent, struct task_struct *p,
 // CPU RELEASE: RESCUE STRANDED TASKS WHEN RT/DL PREEMPTS OUR CPU
 // CALLED WHEN THE KERNEL TAKES A CPU AWAY FROM SCHED_EXT (DL SERVER,
 // RT TASKS, PIPEWIRE). WITHOUT THIS, TASKS THAT dispatch() MOVED TO THE
-// LOCAL DSQ VIA scx_bpf_dsq_move_to_local() GET STUCK, TRIGGERING THE
+// LOCAL DSQ VIA scx_bpf_dsq_move_to_local(, 0) GET STUCK, TRIGGERING THE
 // WATCHDOG. EVERY REFERENCE SCHEDULER IMPLEMENTS THIS.
 void BPF_STRUCT_OPS(pandemonium_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
@@ -1576,8 +1890,40 @@ void BPF_STRUCT_OPS(pandemonium_cpu_release, s32 cpu,
 }
 
 // CPU HOTPLUG CALLBACKS
-void BPF_STRUCT_OPS(pandemonium_cpu_online, s32 cpu) {}
-void BPF_STRUCT_OPS(pandemonium_cpu_offline, s32 cpu) {}
+// SUSPEND/RESUME: KERNEL PM CALLS scx_bypass(true) BEFORE SUSPEND,
+// DEQUEUES ALL TASKS FROM BPF DSQs. CPUs GO OFFLINE ONE BY ONE.
+// ON RESUME, CPUs COME BACK, scx_bypass(false), BPF TAKES OVER.
+// STALE TIMESTAMPS AND COUNTERS FROM PRE-SUSPEND CAUSE THE DISPATCH
+// WATERFALL TO MALFUNCTION FOR 30-40s POST-RESUME, STARVING
+// LATENCY-CRITICAL TASKS UNTIL THE WATCHDOG KILLS THE SCHEDULER.
+// FIX: CLEAR PER-CPU AND GLOBAL STATE ON HOTPLUG TRANSITIONS.
+
+void BPF_STRUCT_OPS(pandemonium_cpu_online, s32 cpu)
+{
+	if ((u32)cpu < MAX_CPUS) {
+		__sync_lock_test_and_set(&pcpu_enqueue_ns[cpu], 0);
+		pcpu_min_sojourn_ns[cpu] = ~0ULL;
+		pcpu_stall_start_ns[cpu] = 0;
+	}
+}
+
+void BPF_STRUCT_OPS(pandemonium_cpu_offline, s32 cpu)
+{
+	if ((u32)cpu < MAX_CPUS) {
+		__sync_lock_test_and_set(&pcpu_enqueue_ns[cpu], 0);
+		pcpu_min_sojourn_ns[cpu] = ~0ULL;
+		pcpu_stall_start_ns[cpu] = 0;
+	}
+
+	__sync_lock_test_and_set(&interactive_enqueue_ns, 0);
+	__sync_lock_test_and_set(&batch_enqueue_ns, 0);
+	__sync_lock_test_and_set(&interactive_run, 0);
+
+	// RESET SIGMOID FEEDBACK TO AVOID STALE DELTA POST-SUSPEND
+	__sync_lock_test_and_set(&global_rescue_count, 0);
+	prev_rescue_snapshot = 0;
+	sigmoid_velocity_ns = 0;
+}
 
 SCX_OPS_DEFINE(pandemonium_ops,
 	       .select_cpu   = (void *)pandemonium_select_cpu,
