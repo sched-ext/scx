@@ -593,6 +593,9 @@ cleanup:
 void BPF_STRUCT_OPS(chaos_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct chaos_task_ctx *wakee_ctx;
+
+	p2dq_runnable_impl(p);
+
 	if (!(wakee_ctx = lookup_create_chaos_task_ctx(p)))
 		return;
 
