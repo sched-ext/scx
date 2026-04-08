@@ -11,7 +11,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use clap::CommandFactory;
 use clap::{Parser, ValueEnum};
+use clap_complete::generate;
+use clap_complete::Shell;
 use log::{info, warn};
 
 use scx_arena::ArenaLib;
@@ -176,6 +179,10 @@ struct Args {
     /// Print scheduler version and exit.
     #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Generate shell completions for the given shell and exit.
+    #[clap(long, value_name = "SHELL", hide = true)]
+    completions: Option<Shell>,
 }
 
 impl Args {
@@ -788,6 +795,16 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
+
+    if let Some(shell) = args.completions {
+        generate(
+            shell,
+            &mut Args::command(),
+            "scx_cake",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
 
     // Handle --version before anything else (matches cosmos/bpfland)
     if args.version {
