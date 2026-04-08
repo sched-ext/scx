@@ -60,6 +60,12 @@ enum scx_cgroup_consts {
 	CBW_DEFERRED_BTQ_SIZE		= 256,
 };
 
+/*
+ * Root cgroup id; Inside a cgroup namespace
+ * (e.g., within a container), root cgroup id won't be 1.
+ */
+static u64 ROOT_CGID = 1;
+
 /**
  * Per-cgroup data structure containing cpu.max-related information.
  * In the future, it can be extended to support other features of cgroup
@@ -868,6 +874,9 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 
 	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
 		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
+
+	if (unlikely(cgrp->level == 0))
+		ROOT_CGID = cgroup_get_id(cgrp);
 
 	/*
 	 * Allocate and initialize scx_cgroup_ctx for @cgrp.
@@ -1787,7 +1796,7 @@ int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * half will replenish and unthrottle all the cgroups anyway; use the
 	 * maximum interval so we do not busy-wait.
 	 */
-	root_cgrp = bpf_cgroup_from_id(1);
+	root_cgrp = bpf_cgroup_from_id(ROOT_CGID);
 	if (unlikely(!root_cgrp)) {
 		cbw_err("Failed to fetch the root cgroup pointer.");
 		goto rearm_out;
@@ -1843,7 +1852,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	/*
 	 * Update the runtime total before replenishing budgets.
 	 */
-	root_cgrp = bpf_cgroup_from_id(1);
+	root_cgrp = bpf_cgroup_from_id(ROOT_CGID);
 	if (!root_cgrp) {
 		cbw_err("Failed to fetch the root cgroup pointer.");
 		cbw_top_half_abort();
@@ -2027,7 +2036,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		 * cbw_throttle_cgroups() only sets is_throttled (never clears
 		 * it), so two concurrent calls are idempotent.
 		 */
-		root_cgrp = bpf_cgroup_from_id(1);
+		root_cgrp = bpf_cgroup_from_id(ROOT_CGID);
 		if (root_cgrp) {
 			cbw_throttle_cgroups(root_cgrp);
 			bpf_cgroup_release(root_cgrp);
