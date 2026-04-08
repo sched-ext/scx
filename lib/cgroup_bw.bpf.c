@@ -2701,6 +2701,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 		"                                                        ",
 		"                                                          ",
 		"                                                            ",
+		"                                                              ",
 	};
 	static const u32 indent_max = sizeof(indent_strs) / sizeof(indent_strs[0]);
 
@@ -2720,7 +2721,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 		return -ESRCH;
 	}
 
-	indent_str = indent_strs[ clamp((u32)cgrp->level, 0, indent_max) ];
+	indent_str = indent_strs[ clamp((u32)cgrp->level, 0, indent_max - 1) ];
 
 	bpf_probe_read_kernel_str(name, sizeof(name), BPF_CORE_READ(cgrp->kn, name));
 	bpf_printk("%s +-- %s (id: %llu, level: %d)", indent_str,
