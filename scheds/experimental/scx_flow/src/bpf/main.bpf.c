@@ -383,17 +383,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					  (tctx->last_refill_ns >= (s64)preempt_refill_min_ns &&
 					   tctx->budget_ns >= (s64)preempt_budget_min_ns)));
 
-				use_local_reserved = should_preempt ||
-					(tctx->wake_cpu_idle && is_wakeup);
-
 				if (should_preempt) {
+					use_local_reserved = true;
 					enq_flags |= SCX_ENQ_PREEMPT;
-					scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
 					__sync_fetch_and_add(&wake_preempt_dispatches, 1);
 					if (rt_sensitive_wakeup)
 						__sync_fetch_and_add(&rt_sensitive_preempts, 1);
-				} else if (tctx->wake_cpu_idle && (is_wakeup || !scx_bpf_task_running(p))) {
-					scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+				} else if (tctx->wake_cpu_idle && is_wakeup) {
+					use_local_reserved = true;
 				}
 
 				if (use_local_reserved) {
