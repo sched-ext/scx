@@ -2157,20 +2157,6 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 }
 
 static
-bool cbw_try_lock(u64 *lock)
-{
-	if (READ_ONCE(*lock) == 1)
-		return false;
-	return __sync_bool_compare_and_swap(lock, 0, 1);
-}
-
-static
-void cbw_unlock(u64 *lock)
-{
-	WRITE_ONCE(*lock, 0);
-}
-
-static
 bool cbw_has_throttled_tasks(union backlog_stat *stat)
 {
 	/*
@@ -2205,8 +2191,6 @@ bool cbw_has_throttled_tasks(union backlog_stat *stat)
 __hidden
 int scx_cgroup_bw_reenqueue(void)
 {
-	static u64 reenq_lock = 0;
-
 	union backlog_stat backlog_stat;
 	struct scx_cgroup_ctx *cur_cgx;
 	struct cgroup *cur_cgrp;
@@ -2219,20 +2203,6 @@ int scx_cgroup_bw_reenqueue(void)
 	 * If there are throttled tasks in BTQ, let’s reenqueue them.
 	 */
 	if (likely(!cbw_has_throttled_tasks(&backlog_stat)))
-		return 0;
-
-	/*
-	 * If another task is already performing the reenqueue operation,
-	 * don't start another concurrent reenqueue operation.
-	 *
-	 * That is because the concurrent reenqueue operation has more harm
-	 * than good, especially on a beefy machine, slowing down its caller,
-	 * ops.dispatch().
-	 *
-	 * Note that the reenqueue operation can happen concurrently with
-	 * the replenish timer operation.
-	 */
-	if (!cbw_try_lock(&reenq_lock))
 		return 0;
 
 	/*
@@ -2343,14 +2313,6 @@ int scx_cgroup_bw_reenqueue(void)
 		if (nr_enq >= CBW_REENQ_MAX_BATCH)
 			break;
 	}
-
-	/*
-	 * Unlock before the final state update so other CPUs can start a new
-	 * reenqueue cycle. The processing loop above must be serialized, but
-	 * the final state update below is protected by CAS and does not need
-	 * the lock.
-	 */
-	cbw_unlock(&reenq_lock);
 
 	/*
 	 * If there is nothing that we can reenqueue (because the BTQs are
