@@ -12,11 +12,6 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-bool scx_bpf_dsq_move_to_local___v2(u64 dsq_id, u64 enq_flags) __ksym __weak;
-bool scx_bpf_dsq_move_to_local___v1(u64 dsq_id) __ksym __weak;
-bool scx_bpf_dsq_move_to_local___new(u64 dsq_id) __ksym __weak;
-bool scx_bpf_consume___old(u64 dsq_id) __ksym __weak;
-
 struct task_ctx {
 	s64 budget_ns;
 	s64 last_refill_ns;
@@ -214,17 +209,6 @@ static __always_inline bool is_rt_sensitive_wakeup(const struct task_struct *p,
 	return tctx->last_refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS;
 }
 
-static __always_inline bool move_to_local_compat(u64 dsq_id)
-{
-	if (bpf_ksym_exists(scx_bpf_dsq_move_to_local___v2))
-		return scx_bpf_dsq_move_to_local___v2(dsq_id, 0);
-	if (bpf_ksym_exists(scx_bpf_dsq_move_to_local___v1))
-		return scx_bpf_dsq_move_to_local___v1(dsq_id);
-	if (bpf_ksym_exists(scx_bpf_dsq_move_to_local___new))
-		return scx_bpf_dsq_move_to_local___new(dsq_id);
-	return scx_bpf_consume___old(dsq_id);
-}
-
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
 	s32 ret;
@@ -285,7 +269,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 
 	tctx = lookup_task_ctx(p);
 	if (tctx) {
-		update_budget_on_wakeup(p, tctx, bpf_ktime_get_ns());
+		if (tctx->sleep_started_at)
+			update_budget_on_wakeup(p, tctx, bpf_ktime_get_ns());
 		clear_wake_target(tctx);
 	}
 
@@ -429,12 +414,12 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct task_ctx *tctx;
 
-	if (move_to_local_compat(RESERVED_DSQ)) {
+	if (scx_bpf_dsq_move_to_local(RESERVED_DSQ, 0)) {
 		__sync_fetch_and_add(&reserved_dispatches, 1);
 		return;
 	}
 
-	if (move_to_local_compat(SHARED_DSQ)) {
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ, 0)) {
 		__sync_fetch_and_add(&shared_dispatches, 1);
 		return;
 	}
