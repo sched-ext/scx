@@ -66,6 +66,7 @@ enum {
 struct task_cpu_arg {
 	pid_t pid;
 	s32 cpu;
+	s32 numa_node;
 	u64 flags;
 };
 
@@ -86,6 +87,7 @@ struct domain_arg {
 struct queued_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task is running */
+	s32 numa_node; /* Preferred NUMA node */
 	u64 nr_cpus_allowed; /* Number of CPUs that the task can use */
 	u64 flags; /* Task enqueue flags */
 	u64 start_ts; /* Timestamp since last time the task ran on a CPU */
