@@ -8,46 +8,58 @@ dynamically loading them. [Read more about
 
 ## Overview
 
-`scx_flow` is a budget-based `sched_ext` scheduler focused on balancing
-interactive wakeup responsiveness with general-purpose throughput.
+`scx_flow` is a budget-based `sched_ext` scheduler built around a small number
+of bounded service lanes. It aims to keep interactive wakeups responsive
+without abandoning general-purpose throughput or turning the policy into a
+large collection of special cases.
 
-Tasks earn wakeup budget while sleeping and spend that budget while running.
-Positive-budget tasks are favored through a reserved path ahead of the shared
-fallback queue. The scheduler also includes a bounded adaptive controller so it
-can move between balanced, latency-guarded, and throughput-oriented settings
-without relying on manual tuning.
-
-Current implementation includes:
-
-- a reserved vs shared queue split
-- wakeup-budget accounting in `runnable()`
-- lifecycle cleanup through `enable()` and `exit_task()`
-- `cpu_release()` rescue handling
-- a narrow RT-sensitive wakeup lane for pinned positive-budget wakeups
+Tasks accumulate wakeup budget while sleeping and spend that budget while
+running. Positive-budget work is favored ahead of the shared fallback path,
+while bounded adaptive tuning lets the scheduler move between balanced,
+latency-oriented, and throughput-oriented behavior without requiring constant
+manual retuning. The implementation combines reserved, latency, shared, and
+contained paths with bounded urgency, fairness, locality, and confidence
+signals so the scheduler stays explainable and measurable instead of depending
+on large, open-ended heuristics.
 
 ## Typical Use Case
 
-General-purpose workloads where interactive sleepers and background CPU work
-need to coexist reasonably well without per-machine hand tuning.
+General-purpose desktop and workstation use where foreground responsiveness and
+background CPU work both matter.
+
+In plain terms, `scx_flow` is aimed at machines that do several things at once:
+
+- gaming while browsers, chat apps, or launchers stay open
+- coding or office work while builds, downloads, or background jobs keep running
+- everyday multitasking where short interactive work should feel quick instead
+  of getting buried behind heavier CPU activity
+
+What users should usually notice is not "maximum benchmark throughput at all
+costs", but a machine that feels more consistently responsive, with fewer
+obvious hiccups when interactive tasks and background load need to coexist.
 
 ## Production Ready?
 
-Yes, for practical general-purpose use, with caveats.
+Yes, for everyday general-purpose use.
 
-`scx_flow` is stable enough to run as an everyday `sched_ext` scheduler and has
-been exercised across normal workload, lifecycle, and stress scenarios. Its
-core behavior, adaptive tuning loop, and task lifecycle paths are all intended
-to be production-capable rather than experimental scaffolding.
-
-That said, `scx_flow` should still be described conservatively. It does not yet
-justify hard wakeup-latency guarantees, and its implementation surface is still
-smaller and less feature-rich than the most mature schedulers in the tree.
+`scx_flow` has been exercised across broad workload, lifecycle, and adversarial
+stress validation, and its core paths are intended to be robust rather than
+experimental scaffolding. It should still be described conservatively for hard
+latency guarantees under extreme interference, but it is suitable for daily use
+as a general-purpose `sched_ext` scheduler.
 
 ## Validation
 
 Benchmark scripts, validation helpers, and archived result bundles used during
 development are available at:
 https://github.com/galpt/testing-scx_flow
+
+Direct `v2.2.0` benchmark snapshot:
+https://github.com/galpt/testing-scx_flow/tree/benchmark-archives/20260409_scx_flow_v2.2.0_release
+
+In practice, the stronger results there usually translate to better foreground
+responsiveness, steadier behavior under background load, and fewer obvious
+hiccups when interactive and CPU-heavy work happen at the same time.
 
 These artifacts are provided as supplementary validation material and are not
 required to use `scx_flow` itself.
