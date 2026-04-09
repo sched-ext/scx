@@ -1645,6 +1645,14 @@ static __noinline s32 select_cpu_and_idle(
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
+	/* ALPHADEV Phase 18: MESI Teleportation
+	 * Read the global state from the LOCAL waking core's BSS array rather 
+	 * than prev_cpu's array. Prevents multi-CCD cross-die L3 cache snoops. 
+	 * bpf_get_smp_processor_id() compiles down to a native gs-offset memory load. */
+	u32 origin_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+	if (READ_ONCE(cpu_bss[origin_cpu].sched_state_local) == CAKE_STATE_GAMING)
+		wake_flags &= ~SCX_WAKE_SYNC;
+
 	/* RELEASE: zero arena dereferences in this callback — all behind
 	 * stats_on / #ifndef CAKE_RELEASE guards. Skip ARENA_ASSOC to avoid
 	 * wasting a callee-saved register + 2 instructions. */
@@ -1662,20 +1670,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	u64 start_time = 0;
 #endif
 
-	/* SYNC STRIP: In gaming, wakes are signal-only (vsync, futex, GPU done)
-	 * — no data locality from SYNC. A/B tested: SYNC enabled = same or
-	 * slightly worse FPS in Arc Raiders during GAMING. */
-#ifdef CAKE_SINGLE_LLC
-	/* SINGLE_LLC: all per-CPU sched_state_local are identical (Rust writes
-	 * uniformly). Read global sched_state instead — saves ~5 insns
-	 * (eliminates prev_cpu & mask + shift + BSS base add + offset load).
-	 * sched_state is BSS MESI-S (rarely written). */
-	if (sched_state == CAKE_STATE_GAMING)
-#else
-	/* Multi-LLC: per-CPU sched_state_local avoids remote BSS fetch. */
-	if (READ_ONCE(cpu_bss[prev_cpu & (CAKE_MAX_CPUS - 1)].sched_state_local) == CAKE_STATE_GAMING)
-#endif
-		wake_flags &= ~SCX_WAKE_SYNC;
 
 	/* ── KERNEL IDLE SELECTION ──
 	 * Uses scx_bpf_select_cpu_and (6.17+) or scx_bpf_select_cpu_dfl (6.12+).
@@ -1720,27 +1714,16 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 *    we MUST bypass the native scanner and fallback to the kernel tracking. 
 	 *    is_bpf_migration_disabled is true for ALL current tasks under BPF sandbox, 
 	 *    so we rely purely on nr_cpus_allowed. */
-	if (p->nr_cpus_allowed != nr_cpus) {
-		cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
-		if (cpu >= 0) goto idle_found;
-	} else {
-		/* Unrestricted Task: Unleash Native Kernel Idle Scanner
-		 * Phase 17: Eliminates BPF SWAR lockless tracking, totally preventing
-		 * intra-LLC false sharing, directly fetching perfectly accurate hw bitmask. */
-		cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
-		if (cpu >= 0) goto idle_found;
-	}
+	/* ALPHADEV Phase 17/19: Ghost Branch Annihilation
+	 * Unrestricted or pinned, the kernel native wrapper natively honors bounds.
+	 * Removing the redundant wrapper branch completely flattens the execution tree 
+	 * and preserves Zen 4 Branch Predictor slots from dead-code evaluation. */
+	cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
+	if (cpu >= 0) goto idle_found;
 
 	/* Force DSQ queuing if no idle cores found by lockless */
 	if (cpu >= 0) {
 	idle_found: __attribute__((unused));
-		/* CSE: shared post-select block — factored from two
-		 * identical copies (dfl_idle + and_idle paths). */
-		{
-			u64 slice = p->scx.slice ?: quantum_ns;
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					    slice, wake_flags);
-		}
 		if (stats_on) {
 			struct cake_stats *s = get_local_stats();
 			s->total_gate1_latency_ns += scx_bpf_now() - start_time;
@@ -1748,7 +1731,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 			if (tctx) {
 				tctx->telemetry.gate_1_hits++;
-				tctx->telemetry.direct_dispatch_count++;
 				if (cpu != prev_cpu)
 					tctx->telemetry.migration_count++;
 			}
@@ -1789,9 +1771,6 @@ gate2:
 			}
 
 			if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
-				u64 slice = p->scx.slice ?: quantum_ns;
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | candidate,
-						   slice, wake_flags);
 				return candidate;
 			}
 		}
@@ -1809,38 +1788,9 @@ gate2:
 	#undef stats_on
 #endif
 tunnel:
-	/* ALPHADEV Phase 14: Origin-Aware Yield (LAVD strategy)
-	 * If waking task is BG or HOG, and NO idle cores exist,
-	 * scan local LLC for another BG/HOG task. If found, shrink its
-	 * slice to 1 to force a tick-yield, bypassing IPIs. */
-	do {
-		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-		u8 waker_class = tctx ? tctx->task_class : CAKE_CLASS_NORMAL;
-		if (waker_class == CAKE_CLASS_BG || waker_class == CAKE_CLASS_HOG) {
-			u32 my_llc = cpu_llc_id[prev_cpu & (CAKE_MAX_CPUS - 1)];
-			my_llc &= (CAKE_MAX_LLCS - 1);
-			#pragma unroll
-			for (u32 victim_cpu = 0; victim_cpu < CAKE_MAX_CPUS; victim_cpu++) {
-				if (victim_cpu >= nr_cpus) break;
-				if ((cpu_llc_id[victim_cpu] & (CAKE_MAX_LLCS - 1)) != my_llc)
-					continue;
-				if (READ_ONCE(cpu_bss[victim_cpu].is_hog)) {
-					u32 vpid = READ_ONCE(cpu_bss[victim_cpu].last_pid);
-					if (vpid) {
-						struct task_struct *victim_p = bpf_task_from_pid(vpid);
-						if (victim_p) {
-							if (scx_bpf_task_cpu(victim_p) == victim_cpu &&
-							    READ_ONCE(cpu_bss[victim_cpu].is_hog)) {
-								WRITE_ONCE(victim_p->scx.slice, 1);
-							}
-							bpf_task_release(victim_p);
-						}
-					}
-					break;
-				}
-			}
-		}
-	} while (0);
+	/* ALPHADEV Phase 3: Local-Until-Busy
+	 * When NO idle cores exist, we default completely to the shared DSQ fallback routing
+	 * instead of manually forcing slice shrinking or migrating within the lockless scan. */
 
 	return prev_cpu;
 }
@@ -1908,57 +1858,77 @@ static __noinline void dsq_insert_vtime_wrapper(
 	}
 }
 
-static __noinline void enqueue_dsq_dispatch(
+static __always_inline void enqueue_dsq_dispatch(
 	struct task_struct *p,
 	u64 enq_flags,
-	u64 packed_cpu_llc)
+	u64 packed_cpu_llc,
+	u32 nr,
+	u64 is_game)
 {
 	/* Derive enq_llc from parent (packed) — used for DSQ ID */
 	u32 enq_llc = (u32)(packed_cpu_llc & 0xFFFF) & (CAKE_MAX_LLCS - 1);
+	u32 enq_cpu = (u32)(packed_cpu_llc >> 32) & 0xFFFF;
+	u64 dsq_id = LLC_DSQ_BASE + enq_llc;
 
-	/* Derive vtime+slice from parent (p) — consumed by insert, die immediately.
-	 * Via __noinline wrapper: CO-RE struct-arg stack usage stays
-	 * in wrapper's frame → 0 r10 references in this function. */
-	dsq_insert_vtime_wrapper(p, LLC_DSQ_BASE + enq_llc,
-				 p->scx.slice ?: quantum_ns,
-				 p->scx.dsq_vtime, enq_flags);
+	/* ALPHADEV Phase 3 / Phase 5: Local-Until-Busy & Guarded Direct Dispatch */
+	bool can_direct = (nr == 0);
+	u32 flag_pack_origin = 0;
+	u8 is_idle_origin = 0;
+
+	if (can_direct) {
+		/* Guard Direct Dispatch: enforce idle state or highly privileged class */
+		flag_pack_origin = cake_relaxed_load_u32((const volatile u32 *)&cpu_bss[enq_cpu & (CAKE_MAX_CPUS - 1)].sched_state_local);
+		is_idle_origin = (flag_pack_origin >> 16) & 1;
+
+		if (!is_idle_origin && !is_game) {
+			/* CPU is busy, and we are not a game. Defer to Shared DSQ to maintain ordering. */
+			can_direct = false;
+		}
+	}
+
+	if (can_direct) {
+		/* Queue empty and safe: bypass strictly-ordered Shared DSQ and put immediately on local CPU. */
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | enq_cpu, p->scx.slice ?: quantum_ns, enq_flags);
+#ifndef CAKE_RELEASE
+		if (CAKE_STATS_ACTIVE) {
+			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
+			if (tctx) tctx->telemetry.direct_dispatch_count++;
+		}
+#endif
+	} else {
+		/* Shared saturated target: enqueue to EEVDF ordered timeline. */
+		dsq_insert_vtime_wrapper(p, dsq_id,
+					 p->scx.slice ?: quantum_ns,
+					 p->scx.dsq_vtime, enq_flags);
+	}
 
 	/* After insert: only packed_cpu_llc needed (parent of enq_cpu+enq_llc) */
-	if (!dsq_kick_needed[enq_llc].needed) {
+	if (!dsq_kick_needed[enq_llc].needed || nr == 0) {
 		dsq_kick_needed[enq_llc].needed = 1;
-		/* Derive enq_cpu from parent (packed) — just-in-time for kick */
-		u32 enq_cpu = (u32)(packed_cpu_llc >> 32) & 0xFFFF;
+		/* enq_cpu derived above */
 		/* Class-aware kick guard: game_running is set by running_task_change
 		 * when ANY CAKE_CLASS_GAME task runs (game, audio, compositor, etc.).
 		 * ALPHADEV SWAR FUSION: sched_state_local(28), game_running(29), 
 		 * and idle_hint(30) are packed sequentially in cpu_bss.
 		 * Single 32-bit load replaces 3 parallel 1-byte loads.
 		 * Unary cast (-(u64)(any_set > 0)) avoids branching. */
-		struct cake_cpu_bss *kick_bss = &cpu_bss[enq_cpu];
-		u32 flag_pack = cake_relaxed_load_u32((const volatile u32 *)&kick_bss->sched_state_local);
+		/* Reuse earlier load if direct dispatch evaluated it, else load now.
+		 * Fuses two volatile fetches into one. */
+		u32 flag_pack = (nr == 0) ? flag_pack_origin : cake_relaxed_load_u32((const volatile u32 *)&cpu_bss[enq_cpu & (CAKE_MAX_CPUS - 1)].sched_state_local);
 		u32 diff_state = (flag_pack & 0xFF) ^ CAKE_STATE_GAMING;
 		u32 any_set = diff_state | (flag_pack & 0x00FFFF00);
 		u64 kick_flags = (-(u64)(any_set > 0)) & SCX_KICK_IDLE;
 		
-		/* ALPHADEV Phase 14: O(1) Kfunc Kick Bypass
-		 * idle_hint is packed at byte 30 (bits 16-23 of flag_pack).
-		 * If kick_flags == SCX_KICK_IDLE but the target CPU is busy (is_idle == 0),
-		 * the kernel mathematically drops the kick. We bypass the kfunc
-		 * entirely, saving ~30 instructions per dispatch under heavy load. */
-		u8 is_idle = (flag_pack >> 16) & 1;
+		/* ALPHADEV Phase 14: O(1) Kfunc Kick Bypass */
+		u8 kick_is_idle = (flag_pack >> 16) & 1;
 
 		/* ALPHADEV Phase 14: Destination-Aware Kick Guard (Anti-IPI Storm)
-		 * Only CAKE_CLASS_GAME tasks (being woken up) are permitted to receive an SCX_KICK_PREEMPT (IPI).
-		 * BG / HOG tasks use the slice-shrinking LAVD strategy instead to prevent cache thrashing. */
-		if (kick_flags == 0) { // If it resolves to PREEMPT
-			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-			u8 wakee_class = tctx ? tctx->task_class : CAKE_CLASS_NORMAL;
-			if (wakee_class != CAKE_CLASS_GAME) {
-				kick_flags = SCX_KICK_IDLE; // Downgrade to gentle wake, forbidding IPI
-			}
+		 * Only CAKE_CLASS_GAME tasks (being woken up) are permitted to receive an SCX_KICK_PREEMPT (IPI). */
+		if (kick_flags == 0 && !is_game) { // If it resolves to PREEMPT
+			kick_flags = SCX_KICK_IDLE; // Downgrade to gentle wake, forbidding IPI
 		}
 
-		if (kick_flags == 0 || is_idle) {
+		if (kick_flags == 0 || kick_is_idle) {
 			scx_bpf_kick_cpu(enq_cpu, kick_flags);
 		}
 	}
@@ -1982,7 +1952,9 @@ static __noinline void enqueue_dsq_dispatch(
 static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 {
 
+#ifndef CAKE_SINGLE_LLC
 	u32 enq_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+#endif
 	struct cake_task_ctx __arena *hot = get_task_hot(p);
 
 	/* ALPHADEV D2: O(1) Local Bypass for Critical Network/Input KThreads */
@@ -2021,10 +1993,16 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		 * trillion-scale wall-clock vtime from sorting kthreads
 		 * (USB IRQ handlers, GPU fences) to the back of the DSQ
 		 * on first dispatch — critical for hot-plug during gaming. */
-		p->scx.dsq_vtime = cpu_bss[enq_cpu].vtime_local;
+		u32 target_cpu = scx_bpf_task_cpu(p);
+		p->scx.dsq_vtime = cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)].vtime_local;
 		p->scx.slice = quantum_ns;
+		
+		u64 dsq_id = LLC_DSQ_BASE + (enq_llc & (CAKE_MAX_LLCS - 1));
+		u32 nr = scx_bpf_dsq_nr_queued(dsq_id);
+		u64 is_game = 0; /* Cold fallback defaults to unprivileged struct rights */
+		
 		enqueue_dsq_dispatch(p, enq_flags,
-				    ((u64)enq_cpu << 32) | enq_llc);
+				    ((u64)target_cpu << 32) | enq_llc, nr, is_game);
 		return;
 	}
 
@@ -2049,20 +2027,38 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		u64 deadline = hot->dsq_vtime + vslice;
 		p->scx.dsq_vtime = dsq_weight + deadline;
 
+		u32 target_cpu = scx_bpf_task_cpu(p);
+		
+		u64 is_game = (requeue_staged >> STAGED_BIT_IS_GAME) & 1;
+		u64 dsq_id = LLC_DSQ_BASE + (enq_llc & (CAKE_MAX_LLCS - 1));
+		u32 nr = scx_bpf_dsq_nr_queued(dsq_id);
+		
 		enqueue_dsq_dispatch(p, enq_flags,
-				    ((u64)enq_cpu << 32) | enq_llc);
+				    ((u64)target_cpu << 32) | enq_llc, nr, is_game);
 		return;
 	}
 
 	/* ── WAKEUP (inlined from enqueue_wakeup_path) ──
 	 * Main dispatch path (~90%). Fuses hot-> derivatives. */
 	{
-		/* ALPHADEV Phase 1: Branchless Algebraic Floor 
-		 * Evaluated at wakeup to strictly enforce 200ms sleep credit max, 
-		 * guaranteeing the Iron Curtain tier integrity. */
-		u64 vcl = cpu_bss[enq_cpu].vtime_local;
-		u64 vt_min = vcl - 200000000ULL;
-		vt_min &= -(u64)(vcl >= 200000000ULL);
+		/* ALPHADEV Phase 2: Pressure-Aware Shrinking */
+		u32 target_cpu = scx_bpf_task_cpu(p);
+		u64 dsq_id = LLC_DSQ_BASE + (enq_llc & (CAKE_MAX_LLCS - 1));
+		u32 nr = scx_bpf_dsq_nr_queued(dsq_id);
+
+		/* Smooth proportional scaling: 1 shift level per 4 queued tasks (max 3 levels) */
+		u8 pressure = nr >> 2;
+		u8 shrink_shift = (pressure > 3) ? 3 : pressure;
+		u64 credit_max = 200000000ULL >> (shrink_shift * 2);
+
+		/* ALPHADEV Phase 6/1: MESI Decoupling & Algebraic Floor 
+		 * Evaluated at wakeup to strictly enforce sleep credit max.
+		 * Reads the local cpu's vtime, annihilating cross-CCD L3 cache 
+		 * snoops that would otherwise downgrade the gaming core's L1. */
+		u32 origin_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+		u64 vcl = cpu_bss[origin_cpu].vtime_local;
+		u64 vt_min = vcl - credit_max;
+		vt_min &= -(u64)(vcl >= credit_max);
 
 		u64 cur_vt = hot->dsq_vtime;
 		hot->dsq_vtime = cur_vt + ((vt_min - cur_vt) & -(u64)(cur_vt < vt_min));
@@ -2070,12 +2066,10 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		u32 dsq_weight = (u32)(staged & 0xFFFFFFFF);
 		u8 new_flow = (staged >> STAGED_BIT_NEW_FLOW) & 1;
 		
-		/* ALPHADEV 4 / 40: is_game parsed directly from ALU bitmask staged_vtime_bits.
-		 * Bypass sched_state_local memory fetch in hottest loop. (Unconditional priority slicing) */
 		u64 is_game = (staged >> STAGED_BIT_IS_GAME) & 1;
-		/* ALPHADEV ILP Shield: << (is_game * 2) mathematically yields 4x slice (8ms).
-		 * Prevents 2ms kernel tick from slicing 2.5ms frames in half at 400 FPS. */
 		u64 slice = quantum_ns << (is_game * 2);
+		/* ALPHADEV Phase 2: Universal Slice Shrinking under congestion */
+		slice >>= shrink_shift; 
 		p->scx.slice = slice;
 
 		/* EEVDF Deadline Projection: project virtual deadline to eliminate intra-tier latency jitter */
@@ -2094,7 +2088,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		p->scx.dsq_vtime = vtime;
 
 		enqueue_dsq_dispatch(p, enq_flags,
-				    ((u64)enq_cpu << 32) | enq_llc);
+				    ((u64)target_cpu << 32) | enq_llc, nr, is_game);
 	}
 }
 
@@ -2383,132 +2377,13 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
  * GAMING path: game_tgid/game_ppid guaranteed non-zero by Rust TUI.
  * Now inlined into stopping_drr_ewma (execution path flattening). */
 
-/* stopping_drr_ewma: fused DRR deficit + EWMA + EEVDF vtime + reclassification.
- *
- * Full 3-function fusion: DRR/EWMA + EEVDF vtime advancement + reclassification.
- * Returns dsq_weight (0 if non-runnable, hot->dsq_weight_base otherwise).
- *
- * 'runnable' is consumed INSIDE this callee frame, eliminating the spill
- * that occurred when cake_stopping tried to carry it across the call.
- * CSE: bss pointer passed directly, avoiding recomputation.
- * Register efficiency: p only alive for ~5 instructions (slice read
- * + reclassify call) rather than the full ~38 instruction EWMA block. */
-static __noinline u32 stopping_drr_ewma(
-	struct cake_task_ctx __arena *hot,
-	struct task_struct *p,
-	struct cake_cpu_bss *bss,
-	bool runnable)
-{
-
-	/* ════ EWMA BLOCK (no p dependency) ════
-	 * Compute EWMA BEFORE rt_raw so p does not need to survive
-	 * across the EWMA block — shrinks p liveness to ~5 instructions. */
-	/* ALPHADEV Rule 17 (Free Math): 64-stop classification gate.
-	 * The kernel perfectly tracks total stops natively via (nvcsw + nivcsw). 
-	 * Eradicates parallel tracking variables and fusion logic. */
-	WRITE_ONCE(hot->last_run_at, bss->run_start);
-
-	/* ALPHADEV Phase 15: BPF-Native Clock advancement.
-	 * Advance cake_clock by consumed time. tick_slice is the original
-	 * slice assigned in cake_running, p->scx.slice is the remainder.
-	 * The delta is kernel-computed consumed CPU time — same math as
-	 * EEVDF's update_se() (fair.c:L1236: delta_exec = now - exec_start).
-	 * CSE: compiler merges with rt_raw computation (identical subtraction).
-	 * Cost: 1 SUB (shared) + 1 ADD + 1 STORE = ~2ns. Zero branches. */
-	bss->cake_clock += bss->tick_slice - p->scx.slice;
-
-	/* ════ RT_RAW + RECLASSIFY (p alive here) ════
-	 * p->scx.slice read and reclassify call are adjacent,
-	 * so p survives < 10 instructions (zero spills). */
-	u32 rt_raw = (u32)(bss->tick_slice - p->scx.slice);
-	rt_raw -= (rt_raw - (65535U << 10)) & -(rt_raw > (65535U << 10));
-
-	/* Confidence-gated reclassification (1/64 stops).
-	 * Placed BEFORE EEVDF so p doesn't need to survive past it.
-	 * ── RECLASSIFY (inlined from stopping_reclassify) ──
-	 * Flattened: eliminates call/return overhead and enables
-	 * cross-boundary CSE on hot/bss. Register-heavy (audio/compositor
-	 * loops) but fires on only 1/64 stops (~1.5% of context switches). */
-	if (unlikely(((p->nvcsw + p->nivcsw) & 63) == 0)) {
-		u32 packed = hot->packed_info;
-		packed &= ~(((u32)CAKE_FLOW_WAKER_BOOST) << SHIFT_FLAGS);
-		if (hot->packed_info != packed)
-			hot->packed_info = packed;
-
-		/* !GAMING early exit: when sched_state != GAMING, game_tgid/ppid == 0
-		 * so cls_game = false. Result is always CAKE_CLASS_NORMAL. */
-		u32 snap_sched_state = sched_state;
-		if (snap_sched_state != CAKE_STATE_GAMING) {
-			if (hot->task_class != CAKE_CLASS_NORMAL) {
-				hot->task_class = CAKE_CLASS_NORMAL;
-				hot->dsq_weight_base = 8192;
-			}
-		} else {
-			/* ── GAMING path: full classification ── */
-			u8 is_kcritical = (packed >> BIT_KCRITICAL) & 1;
-
-			bool cls_game = (p->tgid == game_tgid)
-				     || (hot->ppid == game_ppid)
-				     || (hot->ppid == game_tgid)
-				     || is_kcritical;
-
-			/* O(1) Lockless Classification Cache 
-			 * Replaces 32+ loop iterations with a single branchless memory load. */
-			if (!cls_game) {
-				struct cake_brain_hash_entry entry = brain_class_cache[p->tgid & (BRAIN_CLASS_CACHE_SIZE - 1)];
-				if (entry.pid == p->tgid && entry.task_class == CAKE_CLASS_GAME) {
-					cls_game = true;
-				}
-			}
-
-			/* ALPHADEV A.2: Only critical kthreads merge into cls_game. */
-			bool cls_penalty = !cls_game
-				&& !(((packed >> SHIFT_FLAGS) & CAKE_FLOW_WAKER_BOOST));
-
-			u64 cur_nv = p->nvcsw;
-			u32 yields = (u32)(cur_nv - hot->nvcsw_64_snapshot);
-			hot->nvcsw_64_snapshot = (u32)cur_nv;
-
-			/* Behavioral Isolation: If it voluntarily slept < 15 times over the last 
-			 * 64 stops, the kernel forcibly preempted it > 75% of the time (HOG behavior). */
-			bool cls_hog = cls_penalty && (yields < 15);
-			bool cls_bg  = cls_penalty && !cls_hog;
-
-			u8 new_tc = cls_game       ? CAKE_CLASS_GAME
-				  : cls_hog        ? CAKE_CLASS_HOG
-				  : cls_bg         ? CAKE_CLASS_BG
-				  : CAKE_CLASS_NORMAL;
-
-			if (hot->task_class != new_tc) {
-				hot->task_class = new_tc;
-				hot->dsq_weight_base = tier_base[new_tc & 3];
-			}
-		}
-	}
-
-	/* ════ EEVDF vtime advancement (fused from stopping_eevdf_weight) ════
-	 * runnable consumed HERE inside callee frame — no cross-call spill.
-	 * Non-runnable: skip vtime, return 0. Sleep credit IS the vtime gap. */
-	if (!runnable)
-		return 0;
-
-	{
-		u64 vt_delta = (u64)rt_raw * (u32)hot->vtime_mult >> 10;
-		hot->dsq_vtime += vt_delta;
-	}
-
-	return hot->dsq_weight_base;
-}
-
 /* cake_stopping: struct_ops callback fired when a task stops on a CPU.
  *
- * The heaviest per-task callback. Pipeline:
- *   1. stopping_drr_ewma: DRR deficit + EWMA + rt_raw + reclassify (1/64)
- *   2. stopping_eevdf_weight: vtime advancement + DSQ weight
- *   3. stopping_quantum_pack: staged bits + pid_class_cache tunnel
- *   4. Telemetry (debug only): overhead timing + arena stats
+ * Partially ripped out via ALPHADEV Phase 4 (evacuate the stop path).
+ * DRR, EWMA, and reclassification were completely removed. 
+ * Fully streamlined to strictly handle vtime integration and telemetry.
  *
- * Reads task_storage (hot) for DRR state; per-CPU BSS for run timestamps.
+ * Reads task_storage (hot) for state; per-CPU BSS for run timestamps.
  * Arena access only in debug telemetry (dead in release). */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
@@ -2516,9 +2391,6 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	ARENA_ASSOC();
 #endif
 
-	/* Register ordering: bpf_get_smp_processor_id FIRST (p, runnable
-	 * survive as callee-saves). Then get_task_hot. Neither call
-	 * exceeds 4 callee-saves → 0 spills. */
 	u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 
 	struct cake_task_ctx __arena *hot = get_task_hot(p);
@@ -2526,10 +2398,22 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	struct cake_cpu_bss *bss = &cpu_bss[cpu];
-	/* DRR + EWMA + EEVDF vtime + reclassify (fully fused).
-	 * Returns dsq_weight (0 if non-runnable). runnable consumed
-	 * inside callee frame — no cross-call spill in cake_stopping. */
-	u32 dsq_weight = stopping_drr_ewma(hot, p, bss, runnable);
+
+	/* ════ ALPHADEV Phase 7: ILP Flattened VTIME Integration ════ */
+	WRITE_ONCE(hot->last_run_at, bss->run_start);
+
+	u32 slice_consumed = (u32)bss->tick_slice - (u32)p->scx.slice;
+	bss->cake_clock += slice_consumed;
+
+	/* Branchless math bounding */
+	u32 rt_raw = slice_consumed - ((slice_consumed - (65535U << 10)) & -(slice_consumed > (65535U << 10)));
+	u32 dsq_weight = 0;
+
+	if (runnable) {
+		u64 vt_delta = (u64)rt_raw * (u32)hot->vtime_mult >> 10;
+		hot->dsq_vtime += vt_delta;
+		dsq_weight = hot->dsq_weight_base;
+	}
 
 	bool stats_on = CAKE_STATS_ACTIVE;
 	u64 stopping_overhead_start = 0;
