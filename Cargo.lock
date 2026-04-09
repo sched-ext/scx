@@ -3782,6 +3782,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_flow"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "libbpf-rs",
+ "log",
+ "scx_cargo",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "simplelog",
+]
+
+[[package]]
 name = "scx_lavd"
 version = "1.1.0"
 dependencies = [
@@ -4097,31 +4115,6 @@ dependencies = [
  "version-compare",
  "walkdir",
  "zbus",
-]
-
-[[package]]
-name = "scx_wd40"
-version = "1.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossbeam",
- "ctrlc",
- "fb_procfs",
- "libbpf-rs",
- "log",
- "nix 0.31.2",
- "ordered-float 5.1.0",
- "scx_arena",
- "scx_cargo",
- "scx_stats",
- "scx_stats_derive",
- "scx_utils",
- "serde",
- "simplelog",
- "sorted-vec",
- "static_assertions",
 ]
 
 [[package]]
