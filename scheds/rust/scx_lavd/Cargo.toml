@@ -22,7 +22,7 @@ crossbeam = "0.8"
 ctrlc = { version = "3", features = ["termination"] }
 hex = "0.4"
 itertools = "0.14"
-libbpf-rs = "=0.26.1"
+libbpf-rs = "=0.26.2"
 libc = "0.2"
 ordered-float = "5"
 scx_stats = { path = "../../../rust/scx_stats", version = "1.1.0" }
