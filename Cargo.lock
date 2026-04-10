@@ -3788,10 +3788,11 @@ dependencies = [
 
 [[package]]
 name = "scx_flow"
-version = "1.0.0"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "crossbeam",
  "ctrlc",
  "libbpf-rs",
