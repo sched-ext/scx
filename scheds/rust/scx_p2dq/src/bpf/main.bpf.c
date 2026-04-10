@@ -439,33 +439,6 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 	taskc->pelt_last_update_time = now;
 }
 
-/*
- * Aggregate task's PELT metrics to LLC context.
- * Called when task stops running to update LLC utilization averages.
- *
- * @llcx: LLC context to update
- * @taskc: Task context with updated PELT metrics
- * @is_interactive: Whether task is interactive
- * @is_affinitized: Whether task is affinitized to this LLC
- */
-static __always_inline void aggregate_pelt_to_llc(struct llc_ctx *llcx,
-						   task_ctx *taskc,
-						   bool is_interactive,
-						   bool is_affinitized)
-{
-	if (!p2dq_config.pelt_enabled)
-		return;
-
-	__sync_fetch_and_add(&llcx->util_avg, taskc->util_avg);
-
-	if (is_interactive)
-		__sync_fetch_and_add(&llcx->intr_util_avg, taskc->util_avg);
-
-	if (is_affinitized)
-		__sync_fetch_and_add(&llcx->affn_util_avg, taskc->util_avg);
-}
-
-
 static u32 idle_cpu_percent(const struct cpumask *idle_cpumask)
 {
 	return (100 * nr_idle_cpus(idle_cpumask)) / topo_config.nr_cpus;
@@ -723,6 +696,20 @@ struct {
 	__type(value, struct mask_wrapper);
 } task_masks SEC(".maps");
 
+struct task_llc_pelt_state {
+	u32 llc_id;
+	u32 util;
+	u32 intr_util;
+	u32 affn_util;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 131072);
+	__type(key, u32);
+	__type(value, struct task_llc_pelt_state);
+} task_llc_pelt SEC(".maps");
+
 static task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	task_ctx *taskc = scx_task_data(p);
@@ -731,6 +718,88 @@ static task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed");
 
 	return taskc;
+}
+
+static __always_inline void llc_add_s64(u64 *dst, s64 delta)
+{
+	if (delta > 0)
+		__sync_fetch_and_add(dst, (u64)delta);
+	else if (delta < 0)
+		__sync_fetch_and_sub(dst, (u64)(-delta));
+}
+
+/*
+ * Aggregate task's PELT metrics to LLC context.
+ * Called when task stops running to update LLC utilization averages.
+ *
+ * @llcx: LLC context to update
+ * @taskc: Task context with updated PELT metrics
+ * @is_interactive: Whether task is interactive
+ * @is_affinitized: Whether task is affinitized to this LLC
+ */
+static __always_inline void aggregate_pelt_to_llc(struct llc_ctx *llcx,
+						   task_ctx *taskc,
+						   bool is_interactive,
+						   bool is_affinitized)
+{
+	struct task_llc_pelt_state *st;
+	struct task_llc_pelt_state init_st = {};
+	struct llc_ctx *old_llcx;
+	u32 pid, old_llc_id;
+	u32 old_util, old_intr, old_affn;
+	u32 new_util, new_intr, new_affn;
+	s64 util_delta, intr_delta, affn_delta;
+
+	if (!p2dq_config.pelt_enabled)
+		return;
+	if (!llcx || !taskc)
+		return;
+
+	pid = taskc->pid;
+	new_util = taskc->util_avg;
+	new_intr = is_interactive ? taskc->util_avg : 0;
+	new_affn = is_affinitized ? taskc->util_avg : 0;
+
+	st = bpf_map_lookup_elem(&task_llc_pelt, &pid);
+	if (!st) {
+		init_st.llc_id = llcx->id;
+		bpf_map_update_elem(&task_llc_pelt, &pid, &init_st, BPF_NOEXIST);
+		st = bpf_map_lookup_elem(&task_llc_pelt, &pid);
+		if (!st)
+			return;
+	}
+
+	old_llc_id = st->llc_id;
+	old_util = st->util;
+	old_intr = st->intr_util;
+	old_affn = st->affn_util;
+
+	/* Rebase contributions if the task moved to a different LLC. */
+	if (old_llc_id != llcx->id) {
+		old_llcx = lookup_llc_ctx(old_llc_id);
+		if (old_llcx) {
+			llc_add_s64(&old_llcx->util_avg, -(s64)old_util);
+			llc_add_s64(&old_llcx->intr_util_avg, -(s64)old_intr);
+			llc_add_s64(&old_llcx->affn_util_avg, -(s64)old_affn);
+		}
+
+		old_util = 0;
+		old_intr = 0;
+		old_affn = 0;
+	}
+
+	util_delta = (s64)new_util - (s64)old_util;
+	intr_delta = (s64)new_intr - (s64)old_intr;
+	affn_delta = (s64)new_affn - (s64)old_affn;
+
+	llc_add_s64(&llcx->util_avg, util_delta);
+	llc_add_s64(&llcx->intr_util_avg, intr_delta);
+	llc_add_s64(&llcx->affn_util_avg, affn_delta);
+
+	st->llc_id = llcx->id;
+	st->util = new_util;
+	st->intr_util = new_intr;
+	st->affn_util = new_affn;
 }
 
 /*
@@ -2298,6 +2367,35 @@ static int p2dq_running_impl(struct task_struct *p)
 	return 0;
 }
 
+static void p2dq_runnable_impl(struct task_struct *p)
+{
+	task_ctx *taskc;
+	struct llc_ctx *llcx;
+	s32 task_cpu;
+	u64 now;
+
+	if (!p2dq_config.pelt_enabled)
+		return;
+
+	taskc = lookup_task_ctx(p);
+	if (!taskc)
+		return;
+
+	llcx = lookup_llc_ctx(taskc->llc_id);
+	if (!llcx)
+		return;
+
+	task_cpu = scx_bpf_task_cpu(p);
+	if (task_cpu < 0 || task_cpu >= MAX_CPUS)
+		task_cpu = 0;
+
+	now = bpf_ktime_get_ns();
+	update_task_pelt(taskc, now, 0, task_cpu);
+	aggregate_pelt_to_llc(llcx, taskc,
+				      task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE),
+				      !task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS));
+}
+
 void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 {
 	task_ctx *taskc;
@@ -3119,6 +3217,8 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 void BPF_STRUCT_OPS(p2dq_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
+	u32 pid = p->pid;
+	bpf_map_delete_elem(&task_llc_pelt, &pid);
 	scx_task_free(p);
 }
 
@@ -3678,6 +3778,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 	return p2dq_init_impl();
 }
 
+void BPF_STRUCT_OPS(p2dq_runnable, struct task_struct *p, u64 enq_flags)
+{
+	p2dq_runnable_impl(p);
+}
+
 void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 {
 	p2dq_running_impl(p);
@@ -3725,6 +3830,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
 
 SCX_OPS_DEFINE(p2dq,
 	       .select_cpu		= (void *)p2dq_select_cpu,
+	       .runnable		= (void *)p2dq_runnable,
 	       .enqueue			= (void *)p2dq_enqueue,
 	       .dequeue			= (void *)p2dq_dequeue,
 	       .dispatch		= (void *)p2dq_dispatch,
