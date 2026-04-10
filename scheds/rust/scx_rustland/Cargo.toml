@@ -11,7 +11,7 @@ anyhow = "1"
 plain = "0.2"
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
 ctrlc = { version = "3", features = ["termination"] }
-libbpf-rs = "=0.26.1"
+libbpf-rs = "=0.26.2"
 libc = "0.2"
 log = "0.4"
 ordered-float = "5"

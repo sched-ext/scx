@@ -18,7 +18,7 @@ fastrand = "2"
 fb_procfs = "0.9"
 inotify = "0.11"
 lazy_static = "1"
-libbpf-rs = "=0.26.1"
+libbpf-rs = "=0.26.2"
 libc = "0.2"
 regex = "1"
 scx_bpf_compat = { path = "../../../rust/scx_bpf_compat", version = "1.1.0" }
