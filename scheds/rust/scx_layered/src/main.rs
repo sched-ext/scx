@@ -722,6 +722,43 @@ fn calc_util(curr: &fb_procfs::CpuStat, prev: &fb_procfs::CpuStat) -> Result<f64
     }
 }
 
+/// Compensate a layer's utilization for unattributed per-CPU work.
+///
+/// When CPUs assigned to a layer are busy with work not attributed to any
+/// layer (softirq, irq, kernel threads outside scx), the layer's own
+/// utilization underestimates the capacity it needs. This function scales
+/// the layer's utilization by the average per-CPU scale factor
+/// (total busy / attributed) across the layer's assigned CPUs.
+///
+/// `compensation` controls how much of the gap to add (0.0 = none, 1.0 = full).
+/// Returns the compensated utilization (>= base_util).
+fn calc_util_compensation(
+    base_util: f64,
+    compensation: f64,
+    layer_cpus: &Cpumask,
+    cpu_util_scales: &[f64],
+) -> f64 {
+    if compensation <= 0.0 || base_util < 0.01 {
+        return base_util;
+    }
+
+    let mut total_scale = 0.0;
+    let mut count = 0.0;
+    for cpu in layer_cpus.iter() {
+        let scale = cpu_util_scales.get(cpu).copied().unwrap_or(1.0);
+        total_scale += scale;
+        count += 1.0;
+    }
+
+    if count > 0.0 {
+        let avg_scale = total_scale / count;
+        let effective_scale = 1.0 + compensation * (avg_scale - 1.0);
+        base_util * effective_scale
+    } else {
+        base_util
+    }
+}
+
 fn copy_into_cstr(dst: &mut [i8], src: &str) {
     let cstr = CString::new(src).unwrap();
     let bytes = unsafe { std::mem::transmute::<&[u8], &[i8]>(cstr.as_bytes_with_nul()) };
@@ -871,6 +908,11 @@ struct Stats {
     prev_total_cpu: fb_procfs::CpuStat,
     prev_pmu_resctrl_membw: (u64, u64), // (PMU-reported membw, resctrl-reported membw)
 
+    llc_utils: Vec<f64>, // EWMA of per-LLC utilization from /proc/stat (0.0-1.0)
+    cpu_util_scales: Vec<f64>, // Per-CPU scale: /proc/stat busy / attributed (EWMA)
+    prev_cpu_total_attributed: Vec<u64>, // Per-CPU sum of all layer usages (previous snapshot)
+    prev_per_cpu_stats: BTreeMap<u32, fb_procfs::CpuStat>, // Previous per-CPU /proc/stat snapshot
+
     system_cpu_util_ewma: f64,       // 10s EWMA of system CPU utilization
     layer_dsq_insert_ewma: Vec<f64>, // 10s EWMA of per-layer DSQ insertion ratio
 
@@ -972,6 +1014,21 @@ impl Stats {
         sums
     }
 
+    /// Sum all layer usages per CPU to get total attributed time per CPU.
+    fn read_cpu_total_attributed(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<u64> {
+        let mut attributed = vec![0u64; *NR_CPUS_POSSIBLE];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            for layer in 0..nr_layers {
+                for usage in 0..=LAYER_USAGE_SUM_UPTO {
+                    attributed[cpu] += cpu_ctxs[cpu].layer_usages[layer][usage];
+                }
+            }
+        }
+
+        attributed
+    }
+
     /// Use the membw reported by resctrl to normalize the values reported by hw counters.
     /// We have the following problem:
     /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
@@ -1044,6 +1101,10 @@ impl Stats {
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
+            llc_utils: vec![0.0; topo.all_llcs.len()],
+            cpu_util_scales: vec![1.0; *NR_CPUS_POSSIBLE],
+            prev_cpu_total_attributed: Self::read_cpu_total_attributed(&cpu_ctxs, nr_layers),
+            prev_per_cpu_stats: BTreeMap::new(),
             system_cpu_util_ewma: 0.0,
             layer_dsq_insert_ewma: vec![0.0; nr_layers],
 
@@ -1209,7 +1270,12 @@ impl Stats {
 
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
 
-        let cur_total_cpu = read_total_cpu(proc_reader)?;
+        let stat = proc_reader
+            .read_stat()
+            .context("Failed to read /proc/stat")?;
+        let cur_total_cpu = stat
+            .total_cpu
+            .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
 
         // Calculate system CPU utilization EWMA (10 second window)
@@ -1217,6 +1283,121 @@ impl Stats {
         let elapsed_f64 = elapsed.as_secs_f64();
         let alpha = elapsed_f64 / SYS_CPU_UTIL_EWMA_SECS.max(elapsed_f64);
         let system_cpu_util_ewma = alpha * cpu_busy + (1.0 - alpha) * self.system_cpu_util_ewma;
+
+        // Compute per-LLC utilization from /proc/stat per-CPU data
+        let cur_per_cpu_stats = stat.cpus_map.unwrap_or_default();
+        let nr_llcs = self.topo.all_llcs.len();
+        let mut llc_busy = vec![0u64; nr_llcs];
+        let mut llc_total = vec![0u64; nr_llcs];
+
+        for (&cpu_id, cur_cpu_stat) in &cur_per_cpu_stats {
+            let cpu_id_usize = cpu_id as usize;
+            if let Some(cpu) = self.topo.all_cpus.get(&cpu_id_usize) {
+                if let Some(prev_cpu_stat) = self.prev_per_cpu_stats.get(&cpu_id) {
+                    if let (
+                        fb_procfs::CpuStat {
+                            user_usec: Some(curr_user),
+                            nice_usec: Some(curr_nice),
+                            system_usec: Some(curr_system),
+                            idle_usec: Some(curr_idle),
+                            iowait_usec: Some(curr_iowait),
+                            irq_usec: Some(curr_irq),
+                            softirq_usec: Some(curr_softirq),
+                            stolen_usec: Some(curr_stolen),
+                            ..
+                        },
+                        fb_procfs::CpuStat {
+                            user_usec: Some(prev_user),
+                            nice_usec: Some(prev_nice),
+                            system_usec: Some(prev_system),
+                            idle_usec: Some(prev_idle),
+                            iowait_usec: Some(prev_iowait),
+                            irq_usec: Some(prev_irq),
+                            softirq_usec: Some(prev_softirq),
+                            stolen_usec: Some(prev_stolen),
+                            ..
+                        },
+                    ) = (cur_cpu_stat, prev_cpu_stat)
+                    {
+                        let idle = curr_idle.saturating_sub(*prev_idle);
+                        let iowait = curr_iowait.saturating_sub(*prev_iowait);
+                        let busy = curr_user.saturating_sub(*prev_user)
+                            + curr_system.saturating_sub(*prev_system)
+                            + curr_nice.saturating_sub(*prev_nice)
+                            + curr_irq.saturating_sub(*prev_irq)
+                            + curr_softirq.saturating_sub(*prev_softirq)
+                            + curr_stolen.saturating_sub(*prev_stolen);
+                        llc_busy[cpu.llc_id] += busy;
+                        llc_total[cpu.llc_id] += idle + busy + iowait;
+                    }
+                }
+            }
+        }
+
+        let llc_utils: Vec<f64> = (0..nr_llcs)
+            .map(|llc_id| {
+                let cur_util = if llc_total[llc_id] > 0 {
+                    (llc_busy[llc_id] as f64 / llc_total[llc_id] as f64).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let decay = USAGE_DECAY.powf(elapsed_f64);
+                self.llc_utils[llc_id] * decay + cur_util * (1.0 - decay)
+            })
+            .collect();
+
+        // Compute per-CPU utilization scale: /proc/stat busy / attributed.
+        // This captures unattributed work (softirq, irq, kernel threads).
+        let cur_cpu_total_attributed = Self::read_cpu_total_attributed(&cpu_ctxs, self.nr_layers);
+        let decay = USAGE_DECAY.powf(elapsed_f64);
+        let mut cpu_util_scales = self.cpu_util_scales.clone();
+        for (&cpu_id, cur_cpu_stat) in &cur_per_cpu_stats {
+            let cpu = cpu_id as usize;
+            if let Some(prev_cpu_stat) = self.prev_per_cpu_stats.get(&cpu_id) {
+                if let (
+                    fb_procfs::CpuStat {
+                        user_usec: Some(cu),
+                        nice_usec: Some(cn),
+                        system_usec: Some(cs),
+                        idle_usec: Some(_ci),
+                        iowait_usec: Some(_cw),
+                        irq_usec: Some(cq),
+                        softirq_usec: Some(cf),
+                        stolen_usec: Some(ct),
+                        ..
+                    },
+                    fb_procfs::CpuStat {
+                        user_usec: Some(pu),
+                        nice_usec: Some(pn),
+                        system_usec: Some(ps),
+                        idle_usec: Some(_pi),
+                        iowait_usec: Some(_pw),
+                        irq_usec: Some(pq),
+                        softirq_usec: Some(pf),
+                        stolen_usec: Some(pt),
+                        ..
+                    },
+                ) = (cur_cpu_stat, prev_cpu_stat)
+                {
+                    let busy_us = cu.saturating_sub(*pu)
+                        + cs.saturating_sub(*ps)
+                        + cn.saturating_sub(*pn)
+                        + cq.saturating_sub(*pq)
+                        + cf.saturating_sub(*pf)
+                        + ct.saturating_sub(*pt);
+                    let attr_delta_ns = cur_cpu_total_attributed[cpu]
+                        .saturating_sub(self.prev_cpu_total_attributed[cpu]);
+                    // Convert attributed ns to us for comparison
+                    let attr_us = attr_delta_ns / 1000;
+                    let cur_scale = if attr_us > 0 {
+                        (busy_us as f64 / attr_us as f64).max(1.0)
+                    } else {
+                        1.0
+                    };
+                    cpu_util_scales[cpu] = cpu_util_scales[cpu] * decay + cur_scale * (1.0 - decay);
+                }
+            }
+        }
 
         let cur_bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let bpf_stats = &cur_bpf_stats - &self.prev_bpf_stats;
@@ -1279,6 +1460,10 @@ impl Stats {
 
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
+            llc_utils,
+            cpu_util_scales,
+            prev_cpu_total_attributed: cur_cpu_total_attributed,
+            prev_per_cpu_stats: cur_per_cpu_stats,
             system_cpu_util_ewma,
             layer_dsq_insert_ewma,
 
@@ -1430,6 +1615,24 @@ impl Layer {
             if util_range.0 < 0.0 || util_range.1 < 0.0 || util_range.0 >= util_range.1 {
                 bail!("invalid util_range {:?}", util_range);
             }
+        }
+
+        match &kind {
+            LayerKind::Confined {
+                util_compensation, ..
+            }
+            | LayerKind::Grouped {
+                util_compensation, ..
+            } => {
+                if *util_compensation < 0.0 || *util_compensation > 1.0 {
+                    bail!(
+                        "layer {:?}: util_compensation must be in [0.0, 1.0], got {}",
+                        name,
+                        util_compensation
+                    );
+                }
+            }
+            _ => {}
         }
 
         let layer_growth_algo = kind.common().growth_algo.clone();
@@ -3094,9 +3297,11 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Calculate how many CPUs each layer would like to have if there were
-    /// no competition. The CPU range is determined by applying the inverse
-    /// of util_range and then capping by cpus_range. If the current
-    /// allocation is within the acceptable range, no change is made.
+    /// no competition. The layer's utilization is optionally compensated
+    /// for unattributed per-CPU work (via util_compensation), then the
+    /// CPU range is determined by applying the inverse of util_range and
+    /// capping by cpus_range. If the current allocation is within the
+    /// acceptable range, no change is made.
     /// Returns (target, min) pair for each layer.
     fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
         let nr_cpus = self.cpu_pool.topo.all_cpus.len();
@@ -3113,6 +3318,7 @@ impl<'a> Scheduler<'a> {
                     cpus_range,
                     cpus_range_frac,
                     membw_gb,
+                    util_compensation,
                     ..
                 }
                 | LayerKind::Grouped {
@@ -3120,6 +3326,7 @@ impl<'a> Scheduler<'a> {
                     cpus_range,
                     cpus_range_frac,
                     membw_gb,
+                    util_compensation,
                     ..
                 } => {
                     let cpus_range =
@@ -3143,6 +3350,29 @@ impl<'a> Scheduler<'a> {
                     }
 
                     let util = if util < 0.01 { 0.0 } else { util };
+
+                    // Compensate utilization for unattributed per-CPU work
+                    // (softirq, irq, kernel threads outside scx).
+                    let util = if *util_compensation > 0.0 {
+                        let compensated = calc_util_compensation(
+                            util,
+                            *util_compensation,
+                            &layer.cpus,
+                            &self.sched_stats.cpu_util_scales,
+                        );
+                        if compensated != util {
+                            trace!(
+                                "layer {} util_compensation: util {:.2} -> {:.2}",
+                                layer.name,
+                                util,
+                                compensated
+                            );
+                        }
+                        compensated
+                    } else {
+                        util
+                    };
+
                     let low = (util / util_range.1).ceil() as usize;
                     let high = ((util / util_range.0).floor() as usize).max(low);
 
@@ -5646,5 +5876,114 @@ mod xnuma_tests {
             total_from_n0,
             (120.0 * XNUMA_RATE_DAMPEN * DUTY_CYCLE_SCALE) as u64
         );
+    }
+}
+
+#[cfg(test)]
+mod util_compensation_tests {
+    use super::*;
+    use scx_utils::Cpumask;
+
+    fn make_cpumask(cpus: &[usize]) -> Cpumask {
+        let mut mask = Cpumask::new();
+        for &cpu in cpus {
+            mask.set_cpu(cpu).unwrap();
+        }
+        mask
+    }
+
+    #[test]
+    fn test_no_compensation_when_zero() {
+        let cpus = make_cpumask(&[0, 1, 2, 3]);
+        let scales = vec![1.5, 1.5, 1.5, 1.5];
+        let result = calc_util_compensation(5.0, 0.0, &cpus, &scales);
+        assert_eq!(result, 5.0);
+    }
+
+    #[test]
+    fn test_no_compensation_when_scale_is_one() {
+        // All CPUs have scale 1.0 (no unattributed work)
+        let cpus = make_cpumask(&[0, 1, 2, 3]);
+        let scales = vec![1.0, 1.0, 1.0, 1.0];
+        let result = calc_util_compensation(5.0, 1.0, &cpus, &scales);
+        assert_eq!(result, 5.0);
+    }
+
+    #[test]
+    fn test_full_compensation() {
+        // All assigned CPUs have scale 1.5 (50% unattributed)
+        // compensation=1.0 → util * 1.5
+        let cpus = make_cpumask(&[0, 1, 2, 3]);
+        let scales = vec![1.5, 1.5, 1.5, 1.5];
+        let result = calc_util_compensation(5.0, 1.0, &cpus, &scales);
+        assert!((result - 7.5).abs() < 0.01, "expected 7.5, got {}", result);
+    }
+
+    #[test]
+    fn test_partial_compensation() {
+        // scale=1.5, compensation=0.5
+        // effective_scale = 1 + 0.5 * (1.5 - 1) = 1.25
+        let cpus = make_cpumask(&[0, 1, 2, 3]);
+        let scales = vec![1.5, 1.5, 1.5, 1.5];
+        let result = calc_util_compensation(5.0, 0.5, &cpus, &scales);
+        assert!(
+            (result - 6.25).abs() < 0.01,
+            "expected 6.25, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_mixed_cpu_scales() {
+        // CPUs 0,1 are hot (scale=2.0), CPUs 2,3 are cold (scale=1.0)
+        // avg_scale = (2.0 + 2.0 + 1.0 + 1.0) / 4 = 1.5
+        let cpus = make_cpumask(&[0, 1, 2, 3]);
+        let scales = vec![2.0, 2.0, 1.0, 1.0];
+        let result = calc_util_compensation(4.0, 1.0, &cpus, &scales);
+        assert!((result - 6.0).abs() < 0.01, "expected 6.0, got {}", result);
+    }
+
+    #[test]
+    fn test_only_hot_cpus_assigned() {
+        // Layer only on hot CPUs
+        let cpus = make_cpumask(&[0, 1]);
+        let scales = vec![2.0, 2.0, 1.0, 1.0];
+        let result = calc_util_compensation(4.0, 1.0, &cpus, &scales);
+        assert!((result - 8.0).abs() < 0.01, "expected 8.0, got {}", result);
+    }
+
+    #[test]
+    fn test_empty_cpumask() {
+        let cpus = make_cpumask(&[]);
+        let scales = vec![2.0, 2.0, 2.0, 2.0];
+        let result = calc_util_compensation(5.0, 1.0, &cpus, &scales);
+        assert_eq!(result, 5.0);
+    }
+
+    #[test]
+    fn test_low_util_skipped() {
+        // util < 0.01 → returned as-is
+        let cpus = make_cpumask(&[0, 1]);
+        let scales = vec![2.0, 2.0];
+        let result = calc_util_compensation(0.005, 1.0, &cpus, &scales);
+        assert_eq!(result, 0.005);
+    }
+
+    #[test]
+    fn test_compensation_always_gte_base() {
+        let cpus = make_cpumask(&[0, 1, 2, 3]);
+        for scale in [1.0, 1.5, 2.0, 5.0] {
+            let scales = vec![scale; 4];
+            for comp in [0.0, 0.5, 1.0] {
+                let result = calc_util_compensation(5.0, comp, &cpus, &scales);
+                assert!(
+                    result >= 5.0,
+                    "returned {} < 5.0 at scale={}, comp={}",
+                    result,
+                    scale,
+                    comp
+                );
+            }
+        }
     }
 }

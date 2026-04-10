@@ -67,5 +67,35 @@ per layer. This is useful if a layer has more latency sensitive tasks, where
 timeslices should be shorter. Conversely if a layer is largely CPU bound with
 less concerns of latency it may be useful to increase the `slice_us` parameter.
 
+### Utilization Compensation
+
+On systems where external system work (e.g. softirq from network processing)
+concentrates on specific CPUs, layers on those CPUs see reduced effective
+capacity, but their own utilization metrics don't reflect the loss — because
+softirq/irq time isn't attributed to any layer. This causes layers to
+under-request CPUs.
+
+The `util_compensation` option addresses this by proportionally scaling a
+layer's utilization to account for unattributed CPU work. For each CPU, it
+compares `/proc/stat` busy time (which includes irq/softirq) against the
+total layer-attributed utilization on that CPU. The ratio gives a per-CPU
+scale factor that captures how much unattributed work is consuming capacity.
+The layer's utilization is then scaled by the average of these per-CPU scale
+factors across its assigned CPUs.
+
+`util_compensation` is a float from 0.0 to 1.0:
+- **0.0** (default): no compensation, existing behavior
+- **1.0**: full proportional scaling — the layer's utilization is scaled by the
+  average ratio of total busy time to attributed layer time across its CPUs
+- **0.5**: half the gap is applied
+
+For example, if a CPU is 90% busy per `/proc/stat` but layers only account for
+60% of that (the other 30% is softirq), the scale factor for that CPU is
+90/60 = 1.5x. With `util_compensation: 0.8`, the effective scale is
+`1 + 0.8 * (1.5 - 1) = 1.4`, so a layer with util=5.0 sees compensated
+util=7.0 and requests more CPUs via the normal `util_range` mechanism.
+
+See `examples/util_compensation.json` for a sample configuration.
+
 `scx_layered` can provide performance wins, for certain workloads when
 sufficient tuning on the layer config.

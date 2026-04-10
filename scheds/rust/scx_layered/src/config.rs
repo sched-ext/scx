@@ -177,6 +177,9 @@ pub enum LayerKind {
         membw_gb: Option<f64>,
 
         #[serde(default)]
+        util_compensation: f64,
+
+        #[serde(default)]
         protected: bool,
 
         #[serde(flatten)]
@@ -194,6 +197,9 @@ pub enum LayerKind {
 
         #[serde(default)]
         membw_gb: Option<f64>,
+
+        #[serde(default)]
+        util_compensation: f64,
 
         #[serde(default)]
         protected: bool,
