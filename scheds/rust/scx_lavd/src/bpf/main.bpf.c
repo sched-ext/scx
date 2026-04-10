@@ -911,6 +911,10 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	dsq_id = get_target_dsq_id(p, cpuc, taskc);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
 
+	/*
+	 * Kick the target CPU if it is idle.
+	 */
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	return 0;
 }
 
