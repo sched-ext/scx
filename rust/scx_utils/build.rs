@@ -83,4 +83,8 @@ fn main() {
     bindings
         .write_to_file(out_path.join("perf_bindings.rs"))
         .expect("Couldn't write bindings!");
+
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=vmlinux.tar.zst");
+    println!("cargo:rerun-if-changed=perf_wrapper.h");
 }

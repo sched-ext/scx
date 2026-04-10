@@ -337,10 +337,9 @@ impl BpfBuilder {
     }
 
     pub fn compile_link_gen(&mut self) -> Result<()> {
-        let input = match &self.skel_input_name {
-            Some((name, _)) => name,
-            None => return Ok(()),
-        };
+        if self.skel_input_name.is_none() {
+            return Ok(());
+        }
 
         // Better to hardcode the name because it gets embedded in
         // all the skeleton struct/member definitions.
@@ -379,9 +378,9 @@ impl BpfBuilder {
             .generate(&skel_path)?;
 
         let mut deps = BTreeSet::new();
-        self.add_src_deps(&mut deps, input)?;
         for filename in self.sources.iter() {
             deps.insert(filename.to_string());
+            self.add_src_deps(&mut deps, filename)?;
         }
 
         self.gen_cargo_reruns(Some(&deps))?;
