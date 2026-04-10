@@ -622,6 +622,21 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		}
 		cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
 		if (cpu >= 0) {
+			/*
+			 * Check if the target CPU's native cell has
+			 * waiting work before borrowing. If so, skip
+			 * — the native cell needs this CPU.
+			 */
+			struct cpu_ctx *target_cctx = lookup_cpu_ctx(cpu);
+			if (target_cctx) {
+				u32 tllc = enable_llc_awareness ?
+						   target_cctx->llc :
+						   FAKE_FLAT_CELL_LLC;
+				if (scx_bpf_dsq_nr_queued(cell_llc_dsq_raw(
+					    target_cctx->cell, tllc)) > 0 ||
+				    scx_bpf_dsq_nr_queued(cpu_dsq_raw(cpu)) > 0)
+					goto no_borrow;
+			}
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
@@ -630,6 +645,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 			return cpu;
 		}
 	}
+no_borrow:
 
 	return -EBUSY;
 }
@@ -1805,6 +1821,42 @@ static void dump_cell_cpumask(int id)
 	dump_cpumask(cell_cpumask);
 }
 
+void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
+{
+	struct cpu_ctx	*cctx;
+	struct task_ctx *tctx;
+
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+		return;
+
+	/*
+	 * Zero the slice so dispatch runs within this tick when any
+	 * DSQ this CPU services has waiting work:
+	 *
+	 *  1. Per-CPU DSQ — pinned tasks waiting on this CPU.
+	 *  2. Cell DSQ — this CPU's cell has queued work while the
+	 *     running task holds the CPU for a full slice. Without
+	 *     this, queued cell DSQ tasks wait up to slice_ns
+	 *     (20ms) for dispatch to run. For borrowed tasks this
+	 *     also reclaims the CPU when native cell work arrives.
+	 */
+	{
+		u64 cdsq = cpu_dsq_raw(scx_bpf_task_cpu(p));
+		if (scx_bpf_dsq_nr_queued(cdsq) > 0) {
+			p->scx.slice = 0;
+			return;
+		}
+	}
+	{
+		u32 llc = enable_llc_awareness ? cctx->llc : FAKE_FLAT_CELL_LLC;
+		u64 cldsq = cell_llc_dsq_raw(cctx->cell, llc);
+		if (scx_bpf_dsq_nr_queued(cldsq) > 0) {
+			p->scx.slice = 0;
+			return;
+		}
+	}
+}
+
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
 	dsq_id_t dsq_id;
@@ -2421,6 +2473,7 @@ SCX_OPS_DEFINE(mitosis,
 	       .dispatch		= (void *)mitosis_dispatch,
 	       .running			= (void *)mitosis_running,
 	       .stopping		= (void *)mitosis_stopping,
+	       .tick			= (void *)mitosis_tick,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
 	       .init_task		= (void *)mitosis_init_task,
 	       .cgroup_init		= (void *)mitosis_cgroup_init,
