@@ -11,4 +11,4 @@ libbpf-sys = "=1.7.0"  # need the includes and can't use libbpf_rs instead
 [build-dependencies]
 cc = "1"
 indoc = "2"
-object = "0.38"
+object = "0.39"
