@@ -3929,7 +3929,7 @@ dependencies = [
 
 [[package]]
 name = "scx_pandemonium"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3939,6 +3939,7 @@ dependencies = [
  "libc",
  "regex",
  "scx_cargo",
+ "scx_utils",
 ]
 
 [[package]]
