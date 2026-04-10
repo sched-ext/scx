@@ -1102,6 +1102,50 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	bool batch_starving = oldest > 0 && (now - oldest) > sojourn_thresh;
 	u64 effective_budget = longrun_mode ? nr_cpu_ids : interactive_budget;
 
+	// HARD STARVATION RESCUE: ABSOLUTE SAFETY NET FOR BOTH TIERS
+	// FIRES BEFORE THE DEFICIT GATE SO IT CAN NEVER BE SUPPRESSED.
+	// GUARANTEES NO TASK IN ANY OVERFLOW DSQ SITS LONGER THAN 500MS.
+	{
+		u64 int_age = interactive_enqueue_ns;
+		if (int_age > 0 && (now - int_age) > starvation_rescue_ns) {
+			if (scx_bpf_dsq_move_to_local(node_dsq, 0)) {
+				if (scx_bpf_dsq_nr_queued(node_dsq) == 0) {
+					u64 old_iens = interactive_enqueue_ns;
+					if (old_iens > 0)
+						__sync_val_compare_and_swap(
+							&interactive_enqueue_ns,
+							old_iens, 0);
+				} else {
+					interactive_enqueue_ns =
+						bpf_ktime_get_ns();
+				}
+				s = get_stats();
+				if (s)
+					s->nr_dispatches += 1;
+				return;
+			}
+		}
+		if (oldest > 0 && (now - oldest) > starvation_rescue_ns) {
+			if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
+				if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
+					u64 old_bens = batch_enqueue_ns;
+					if (old_bens > 0)
+						__sync_val_compare_and_swap(
+							&batch_enqueue_ns,
+							old_bens, 0);
+				} else {
+					batch_enqueue_ns =
+						bpf_ktime_get_ns();
+				}
+				__sync_lock_test_and_set(&interactive_run, 0);
+				s = get_stats();
+				if (s)
+					s->nr_dispatches += 1;
+				return;
+			}
+		}
+	}
+
 	// DEFICIT GATE: WHEN INTERACTIVE HAS EXCEEDED ITS BUDGET AND BATCH
 	// IS STARVING, SKIP INTERACTIVE OVERFLOW RESCUE SO BATCH
 	// GETS SERVED VIA DEFICIT CHECK OR STARVATION RESCUE INSTEAD.
@@ -1190,31 +1234,6 @@ skip_interactive_rescue:;
 			return;
 		}
 		__sync_lock_test_and_set(&interactive_run, 0);
-	}
-
-	// HARD STARVATION RESCUE: ABSOLUTE SAFETY NET
-	// THE DEFICIT COUNTER IS THE ONLY PATH THAT SERVES BATCH WHEN THE
-	// INTERACTIVE DSQ IS NON-EMPTY. IF IT FAILS (LOST INCREMENTS UNDER
-	// CONTENTION, SLOW ACCUMULATION ON HIGH CORE COUNTS), BATCH TASKS
-	// STARVE UNTIL THE KERNEL WATCHDOG KILLS THE SCHEDULER.
-	// THIS CHECK FIRES BEFORE THE INTERACTIVE DSQ AND GUARANTEES BATCH
-	// SERVICE WITHIN 500MS REGARDLESS OF INTERACTIVE PRESSURE.
-	if (oldest > 0 &&
-	    (now - oldest) > starvation_rescue_ns) {
-		if (scx_bpf_dsq_move_to_local(batch_dsq, 0)) {
-			if (scx_bpf_dsq_nr_queued(batch_dsq) == 0) {
-				u64 old_bens = batch_enqueue_ns;
-				if (old_bens > 0)
-					__sync_val_compare_and_swap(&batch_enqueue_ns, old_bens, 0);
-			} else {
-				batch_enqueue_ns = bpf_ktime_get_ns();
-			}
-			__sync_lock_test_and_set(&interactive_run, 0);
-			s = get_stats();
-			if (s)
-				s->nr_dispatches += 1;
-			return;
-		}
 	}
 
 	// NODE INTERACTIVE OVERFLOW: LATCRIT + INTERACTIVE TASKS
