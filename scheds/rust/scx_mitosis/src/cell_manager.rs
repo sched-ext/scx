@@ -19,6 +19,10 @@ use inotify::{Inotify, WatchMask};
 use scx_utils::Cpumask;
 use tracing::{debug, info};
 
+/// (new_cells, destroyed_cells) returned by event processing.
+/// Each new cell is a (cgid, cell_id) pair.
+pub type CellEventResult = (Vec<(u64, u32)>, Vec<u32>);
+
 /// Information about a cell created for a cgroup
 #[derive(Debug)]
 pub struct CellInfo {
@@ -326,7 +330,7 @@ impl CellManager {
     /// Rather than processing individual events, we simply check if any events occurred
     /// and then rescan the directory to reconcile state. This is simpler and handles
     /// edge cases like inotify queue overflow gracefully.
-    pub fn process_events(&mut self) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
+    pub fn process_events(&mut self) -> Result<CellEventResult> {
         let mut buffer = [0; 1024];
         let mut has_events = false;
 
@@ -357,7 +361,7 @@ impl CellManager {
 
     /// Reconcile our tracked cells with the actual cgroup directory contents.
     /// Returns (new_cells, destroyed_cells).
-    fn reconcile_cells(&mut self) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
+    fn reconcile_cells(&mut self) -> Result<CellEventResult> {
         let mut new_cells = Vec::new();
 
         // Find current cgroups on disk
@@ -729,9 +733,7 @@ impl CellManager {
         // Phase 5: Verify all cells have at least one CPU assigned
         for info in self.cells.values() {
             if !cell_cpus.contains_key(&info.cell_id)
-                || cell_cpus
-                    .get(&info.cell_id)
-                    .map_or(true, |m| m.weight() == 0)
+                || cell_cpus.get(&info.cell_id).is_none_or(|m| m.weight() == 0)
             {
                 bail!(
                     "Cell {} has no CPUs assigned (nr_cpus={}, num_cells={})",

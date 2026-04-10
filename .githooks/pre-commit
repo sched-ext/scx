@@ -1,22 +1,51 @@
 #!/bin/sh
 
+# Mirror CI lint checks locally.
+# CI reference: .github/workflows/ci.yml (lint job)
+
+# Run all formatting first so clippy caches the post-formatted state.
+# If formatting runs after clippy, the file mutations invalidate
+# clippy's fingerprints for the next run.
+
+if command -v clang-format >/dev/null 2>&1; then
+    echo "Running clang-format..."
+    # Same dirs as CI
+    find tools/scxtop scheds/rust/scx_chaos scheds/rust/scx_mitosis \
+        \( -name '*.c' -o -name '*.h' \) 2>/dev/null | while read -r file; do
+        clang-format -i "$file"
+    done
+else
+    echo "Warning: clang-format not found, skipping C formatting"
+fi
+
 if command -v cargo >/dev/null 2>&1; then
     echo "Running cargo fmt..."
     cargo fmt --all
+
+    echo "Running clippy..."
+    if command -v jq >/dev/null 2>&1; then
+        clippy_args=""
+        for pkg in $(cargo metadata --format-version 1 | \
+            jq -r '.packages[] | select(.metadata.scx.ci.use_clippy == true) | .name'); do
+            clippy_args="$clippy_args -p $pkg"
+        done
+        if [ -n "$clippy_args" ]; then
+            if ! cargo clippy --no-deps --locked $clippy_args -- -Dwarnings; then
+                echo "Error: clippy failed, commit aborted"
+                exit 1
+            fi
+        fi
+    else
+        echo "Warning: jq not found, skipping clippy"
+    fi
 else
-    echo "Warning: cargo not found, skipping Rust formatting"
+    echo "Warning: cargo not found, skipping Rust formatting and clippy"
 fi
 
-if command -v clang-format >/dev/null 2>&1; then
-    echo "Running clang-format on scx_mitosis"
-    for file in scheds/rust/scx_mitosis/src/bpf/*.c scheds/rust/scx_mitosis/src/bpf/*.h; do
-        [ -f "$file" ] && clang-format -i "$file"
-    done
-else
-    echo "Warning: clang-format not found, skipping formatting"
+# Stage any formatting changes
+changed=$(git diff --name-only)
+if [ -n "$changed" ]; then
+    git add $changed
 fi
-
-git add $(git diff --name-only)
 
 exit 0
-
