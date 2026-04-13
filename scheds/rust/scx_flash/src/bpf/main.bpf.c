@@ -551,7 +551,6 @@ static bool try_direct_dispatch(struct task_struct *p, s32 prev_cpu,
 				u64 enq_flags, bool is_running)
 {
 	bool is_idle = false;
-	s32 cpu = prev_cpu;
 
 	/*
 	 * If throttling is enabled always dispatch critical kernel threads
@@ -580,22 +579,26 @@ static bool try_direct_dispatch(struct task_struct *p, s32 prev_cpu,
 		return false;
 
 	/*
-	 * Try migrating to an idle CPU.
+	 * Try migrating to an idle CPU if possible.
 	 */
-	if (!is_pcpu_task(p)) {
-		cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
-		if (!is_idle)
-			return false;
-	} else {
+	if (is_pcpu_task(p)) {
 		if (!scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return false;
+
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+		if (!is_running)
+			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+	} else {
+		s32 cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
+
+		if (!is_idle)
+			return false;
+
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
+		if (cpu != prev_cpu || !is_running)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
-
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), 0);
 	__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-	if (cpu != prev_cpu || !is_running)
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	return true;
 }
