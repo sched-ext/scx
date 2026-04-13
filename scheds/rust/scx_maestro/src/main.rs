@@ -24,26 +24,26 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::OpenObject;
-use libbpf_rs::ProgramInput;
 use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
+use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::warn;
 use log::{debug, info};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
-use scx_utils::CoreType;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
-use scx_utils::NR_CPU_IDS;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::CoreType;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_maestro";
@@ -149,8 +149,8 @@ fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
         .values()
         .flat_map(|core| &core.cpus)
         .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
-            (Powermode::Performance, CoreType::Big { .. }) |
-            (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
+            (Powermode::Performance, CoreType::Big { .. })
+            | (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
             (Powermode::Any, ..) => Some(*cpu_id),
             _ => None,
         })
@@ -350,16 +350,14 @@ impl<'a> Scheduler<'a> {
 
         // Precompute average CPU capacity per LLC (sum of normalized capacities / nr_cpus) for BPF rodata.
         for (dense_id, (_, llc)) in topo.all_llcs.iter().enumerate() {
-            let (sum, count) = llc.all_cpus.values().fold((0u64, 0u32), |(sum, count), cpu| {
-                let normalized =
-                    (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024) as u64;
-                (sum + normalized, count + 1)
-            });
-            rodata.llc_capacity[dense_id] = if count > 0 {
-                sum / count as u64
-            } else {
-                0
-            };
+            let (sum, count) = llc
+                .all_cpus
+                .values()
+                .fold((0u64, 0u32), |(sum, count), cpu| {
+                    let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024) as u64;
+                    (sum + normalized, count + 1)
+                });
+            rodata.llc_capacity[dense_id] = if count > 0 { sum / count as u64 } else { 0 };
         }
         let llc_capacities: Vec<u64> = (0..nr_llc_ids).map(|i| rodata.llc_capacity[i]).collect();
         rodata.llc_id_max = (0..nr_llc_ids)
@@ -421,10 +419,7 @@ impl<'a> Scheduler<'a> {
 
         // Configure CPU->LLC mapping (must be done after skeleton is loaded).
         for cpu in topo.all_cpus.values() {
-            let dense_llc = llc_id_to_dense
-                .get(&cpu.llc_id)
-                .copied()
-                .unwrap_or(0);
+            let dense_llc = llc_id_to_dense.get(&cpu.llc_id).copied().unwrap_or(0);
             if opts.verbose {
                 let cap = llc_capacities.get(dense_llc).copied().unwrap_or(0);
                 info!("CPU{} -> LLC{} (capacity: {})", cpu.id, dense_llc, cap);
@@ -500,8 +495,12 @@ impl<'a> Scheduler<'a> {
         let smt_siblings = topo.sibling_cpus();
         info!("SMT sibling CPUs: {:?}", smt_siblings);
         for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
-            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("enable_sibling_cpu: {}", e)))?;
+            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("enable_sibling_cpu: {}", e),
+                )
+            })?;
         }
         Ok(())
     }
