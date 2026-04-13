@@ -594,18 +594,25 @@ void BPF_STRUCT_OPS(maestro_enqueue, struct task_struct *p, u64 enq_flags)
 			  (!is_pcpu_task(p) && !is_primary_cpu(prev_cpu))))) {
 		s32 cpu;
 
-		if (is_pcpu_task(p))
-			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
-		else
+		if (is_pcpu_task(p)) {
+			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+				__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+				if (do_migrate)
+					scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+				return;
+			}
+		} else {
 			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
+			if (cpu >= 0) {
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
+				__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
-		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-			if (prev_cpu != cpu || !scx_bpf_task_running(p))
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			return;
+				if (prev_cpu != cpu || do_migrate)
+					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+				return;
+			}
 		}
 	}
 
