@@ -190,6 +190,15 @@ struct scx_cgroup_ctx {
  * not manage per-LLC context since they will be accessed much less frequently.
  */
 struct scx_cgroup_llc_ctx {
+	/*
+	 * Free-list link.  Must be the first field so that cbw_freelist_pop()
+	 * and cbw_freelist_push() can operate on any arena struct generically.
+	 * When this object is on the free list, holds the raw u64 arena address
+	 * of the next free node (0 = end of list).  Only valid between
+	 * cbw_free_llcx() pushing and cbw_alloc_llcx() popping.
+	 */
+	u64		free_next;
+
 	/* cgroup id */
 	u64		id;
 
@@ -215,6 +224,8 @@ struct scx_cgroup_llc_ctx {
 	scx_atq_t	*btq;
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
+typedef struct scx_cgroup_llc_ctx __arena scx_cgroup_llc_ctx_t;
+
 /*
  * Library-wide configuration for CPU bandwidth control.
  */
@@ -233,19 +244,89 @@ struct {
 /*
  * A map to store scx_cgroup_llc_ctx. It is accessed through a pair of
  * cgroup id and LLC id (struct cgroup_llc_id).
+ *
+ * scx_cgroup_llc_ctx objects are allocated in the BPF arena via
+ * scx_static_alloc(); the map holds only an arena pointer to each object.
  */
 struct cgroup_llc_id {
 	u64		cgrp_id;
 	int		llc_id;
 };
 
+struct cbw_llc_entry {
+	u64	llcx;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct cgroup_llc_id);
-	__type(value, struct scx_cgroup_llc_ctx);
+	__type(value, struct cbw_llc_entry);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, CBW_NR_CGRP_LLC_MAX);
 } cbw_cgrp_llc_map SEC(".maps");
+
+/*
+ * Generic Treiber-stack free list for arena objects.
+ *
+ * Any arena struct using these helpers must place a u64 free_next field first.
+ * The head is a plain u64 BSS variable holding the raw arena address of the
+ * top-of-stack object (0 = empty).  Both push and pop use CAS with can_loop-
+ * bounded retries; arena pointers are reconstructed via addr_space_cast on pop.
+ */
+static inline void __arena *cbw_freelist_pop(u64 *head)
+{
+	u64 old_head, new_head;
+	u64 __arena *node;
+
+	old_head = *head;
+	while (old_head && can_loop) {
+		node = (u64 __arena *)old_head;	/* first field is free_next */
+		new_head = *node;
+		if (__sync_bool_compare_and_swap(head, old_head, new_head))
+			return (void __arena *)node;
+		old_head = *head;
+	}
+	return NULL;
+}
+
+static inline void cbw_freelist_push(u64 *head, void __arena *ptr)
+{
+	u64 __arena *node = (u64 __arena *)ptr;	/* first field is free_next */
+	u64 old_head;
+
+	old_head = *head;
+	do {
+		*node = old_head;
+		if (__sync_bool_compare_and_swap(head, old_head, (u64)node))
+			return;
+		old_head = *head;
+	} while (can_loop);
+}
+
+/*
+ * Per-type free-list heads and alloc/free wrappers for scx_cgroup_llc_ctx.
+ * Cacheline-aligned to avoid false sharing with adjacent globals.
+ */
+static u64 cbw_llcx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
+
+static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx(void)
+{
+	scx_cgroup_llc_ctx_t *llcx;
+
+	llcx = cbw_freelist_pop(&cbw_llcx_free_head);
+	if (!llcx)
+		llcx = scx_static_alloc(sizeof(*llcx), SCX_CACHELINE_SIZE);
+	return llcx;
+}
+
+static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
+{
+	llcx->free_next = 0;
+	llcx->id = 0;
+	llcx->runtime_total = 0;
+	/* llcx->btq is already NULL from the ownership-transfer CAS */
+	cbw_freelist_push(&cbw_llcx_free_head, llcx);
+}
 
 /*
  * A per-CPU map to store levels in traversing a cgroup hierarchy while
@@ -586,50 +667,65 @@ long cbw_del_cgroup_ctx(struct cgroup *cgrp)
 }
 
 static
-struct scx_cgroup_llc_ctx *cbw_alloc_llc_ctx(struct cgroup *cgrp,
-					     struct scx_cgroup_ctx *cgx,
-					     int llc_id)
+scx_cgroup_llc_ctx_t *cbw_alloc_llc_ctx(struct cgroup *cgrp,
+					 struct scx_cgroup_ctx *cgx,
+					 int llc_id)
 {
-	static const struct scx_cgroup_llc_ctx llcx0;
-	struct scx_cgroup_llc_ctx *llcx;
+	scx_cgroup_llc_ctx_t *llcx;
+	struct cbw_llc_entry entry = {};
 	struct cgroup_llc_id key = {
 		.cgrp_id = cgroup_get_id(cgrp),
 		.llc_id = llc_id,
 	};
 
-	/* Allocate an LLC context on the map. */
-	if (bpf_map_update_elem(&cbw_cgrp_llc_map, &key, &llcx0, BPF_NOEXIST))
-		return NULL;
-
-	llcx = bpf_map_lookup_elem(&cbw_cgrp_llc_map, &key);
+	/* Allocate an LLC context from the free list or the arena bump allocator. */
+	llcx = cbw_alloc_llcx();
 	if (!llcx)
 		return NULL;
+
 	llcx->id = cgroup_get_id(cgrp);
 
 	/* Create an associated BTQ. */
 	llcx->btq = (scx_atq_t *)scx_atq_create(false);
 	if (!llcx->btq) {
 		cbw_err("Fail to allocate a BTQ");
-		bpf_map_delete_elem(&cbw_cgrp_llc_map, &key);
+		cbw_free_llcx(llcx);
+		return NULL;
+	}
+
+	/* Store the arena pointer in the map. */
+	entry.llcx = (u64)llcx;
+	if (bpf_map_update_elem(&cbw_cgrp_llc_map, &key, &entry, BPF_NOEXIST)) {
+		scx_atq_destroy(llcx->btq);
+		llcx->btq = NULL;
+		cbw_free_llcx(llcx);
 		return NULL;
 	}
 
 	return llcx;
 }
 
-static
-struct scx_cgroup_llc_ctx *cbw_get_llc_ctx_with_id(u64 cgrp_id, int llc_id)
+static __always_inline
+u64 cbw_get_llc_ctx_raw_with_id(u64 cgrp_id, int llc_id)
 {
+	struct cbw_llc_entry *entry;
 	struct cgroup_llc_id key = {
 		.cgrp_id = cgrp_id,
 		.llc_id = llc_id,
 	};
 
-	return bpf_map_lookup_elem(&cbw_cgrp_llc_map, &key);
+	entry = bpf_map_lookup_elem(&cbw_cgrp_llc_map, &key);
+	return entry ? entry->llcx : 0;
 }
 
-static
-struct scx_cgroup_llc_ctx *cbw_get_llc_ctx(struct cgroup *cgrp, int llc_id)
+static __always_inline
+scx_cgroup_llc_ctx_t *cbw_get_llc_ctx_with_id(u64 cgrp_id, int llc_id)
+{
+	return (scx_cgroup_llc_ctx_t *)cbw_get_llc_ctx_raw_with_id(cgrp_id, llc_id);
+}
+
+static __always_inline
+scx_cgroup_llc_ctx_t *cbw_get_llc_ctx(struct cgroup *cgrp, int llc_id)
 {
 	return cbw_get_llc_ctx_with_id(cgroup_get_id(cgrp), llc_id);
 }
@@ -654,7 +750,7 @@ int cbw_init_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 		return -EINVAL;
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
-		struct scx_cgroup_llc_ctx *llcx;
+		scx_cgroup_llc_ctx_t *llcx;
 
 		llcx = cbw_alloc_llc_ctx(cgrp, cgx, i);
 		if (!llcx)
@@ -712,7 +808,7 @@ static void schedule_atq_destroy(scx_atq_t *btq)
 static __always_inline
 int cbw_free_llc_ctx(struct scx_cgroup_ctx *cgx, u64 cgrp_id)
 {
-	struct scx_cgroup_llc_ctx *llcx;
+	scx_cgroup_llc_ctx_t *llcx;
 	volatile int nr_moved = 0; /* Add volatile to satisfy the verifier. */
 	int i, ret;
 	scx_atq_t *btq;
@@ -789,7 +885,16 @@ int cbw_free_llc_ctx(struct scx_cgroup_ctx *cgx, u64 cgrp_id)
 			 * other CPU will access it. The stale LLC map entry
 			 * will be harmless: future lookups will find
 			 * llcx->btq == NULL and skip it.
+			 *
+			 * Do NOT recycle llcx: the stale map entry still
+			 * holds a reference to it.
 			 */
+		} else {
+			/*
+			 * Map entry removed; no future lookup can reach llcx.
+			 * Return it to the free list for reuse.
+			 */
+			cbw_free_llcx(llcx);
 		}
 
 		/*
@@ -1108,7 +1213,7 @@ unlock_out:
 static
 s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 {
-	struct scx_cgroup_llc_ctx *llcx;
+	scx_cgroup_llc_ctx_t *llcx;
 	s64 sum;
 	int i;
 
@@ -1480,7 +1585,7 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, struct task_struc
 __hidden
 int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 {
-	struct scx_cgroup_llc_ctx *llcx;
+	scx_cgroup_llc_ctx_t *llcx;
 	int llc_id;
 
 	/* Always go ahead with the root cgroup. */
@@ -1532,7 +1637,7 @@ __hidden
 int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 {
 	scx_task_common *taskc = (scx_task_common *)ctx;
-	struct scx_cgroup_llc_ctx *llcx;
+	scx_cgroup_llc_ctx_t *llcx;
 	scx_atq_t *btq;
 	int llc_id, ret;
 
@@ -1614,7 +1719,7 @@ int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vt
 static
 bool cbw_has_backlogged_tasks(struct scx_cgroup_ctx *cgx)
 {
-	struct scx_cgroup_llc_ctx *llcx;
+	scx_cgroup_llc_ctx_t *llcx;
 	int i;
 
 	if (!cgx || !cgx->has_llcx)
@@ -1830,7 +1935,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	struct cgroup *root_cgrp, *cur_cgrp;
 	struct cgroup_subsys_state *root_css, *pos;
 	struct scx_cgroup_ctx *cur_cgx;
-	struct scx_cgroup_llc_ctx *cur_llcx;
+	scx_cgroup_llc_ctx_t *cur_llcx;
 	const struct cpumask *online_mask;
 	s64 interval, jitter, period;
 	int i, ret, nr_moved = 0;
@@ -2086,7 +2191,7 @@ rearm_out:
 
 static
 int cbw_drain_btq_batch(struct scx_cgroup_ctx *cgx,
-			struct scx_cgroup_llc_ctx *llcx)
+			scx_cgroup_llc_ctx_t *llcx)
 {
 	scx_task_common *taskc;
 	scx_atq_t *btq;
@@ -2128,7 +2233,7 @@ static
 int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 			 u64 cgrp_id, u64 nuance)
 {
-	struct scx_cgroup_llc_ctx *llcx;
+	scx_cgroup_llc_ctx_t *llcx;
 	int i, idx, nr_enq = 0;
 
 	/*
@@ -2463,7 +2568,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	};
 	static const u32 indent_max = sizeof(indent_strs) / sizeof(indent_strs[0]);
 
-	struct scx_cgroup_llc_ctx *llcx;
+	scx_cgroup_llc_ctx_t *llcx;
 	int i, nr_throttled_tasks = 0;
 	struct scx_cgroup_ctx *cgx;
 	const char *indent_str;
