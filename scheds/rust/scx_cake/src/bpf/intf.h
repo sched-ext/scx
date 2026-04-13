@@ -44,14 +44,15 @@ enum cake_class {
 	CAKE_CLASS_MAX     = 4,
 };
 
-/* ═══ O(1) Lockless Classification Cache ═══
- * Ashyncronously hydrated by Rust. Hot path evaluates in O(1) */
-#define BRAIN_CLASS_CACHE_SIZE 16384 /* 16K slots (~131KB) to minimize collisions */
-struct cake_brain_hash_entry {
-	u32 pid;
-	u8  task_class;
-	u8  _reserved[3];
-};
+/* ═══ Additive Fairness Model ═══
+ * Hot path reads p->scx.weight directly from task_struct (L1-hot).
+ * vtime_mult_cache[] BSS array DELETED. -4KB BSS, -64 cache lines.
+ * VTIME_MULT_CACHE_SIZE kept for backward compat only (no consumers). */
+#define VTIME_MULT_CACHE_SIZE 2048
+
+/* brain_class_cache REMOVED: 131KB BSS array (16384×8B) was hydrated by Rust
+ * every poll cycle but had zero BPF readers. Classification now done inline
+ * from game_tgid/game_ppid BSS globals. */
 
 /* ═══ TASK HOT FIELDS — BPF task_storage ═══
  * Per-task scheduling state in kernel task_storage (~10ns lookup).
@@ -70,39 +71,41 @@ struct cake_brain_hash_entry {
  * 128-byte aligned for V-Cache sector isolation.
  * Single-writer (local running), multi-reader (no atomics needed). */
 struct cake_cpu_bss {
-	u32 run_start;          /* 4B  off  0: (u32)cake_clock when task started */
-	u8  is_yielder;         /* 1B  off  4: task_class-derived yielder + waker_boost */
-	u8  _reserved_5;        /* 1B  off  5: padding slot */
-	u8  tick_count;         /* 1B  off  6: cake_tick throttle counter */
-	u8  llc_id;             /* 1B  off  7: per-CPU LLC ID cache.
+	u32 run_start;          /* 4B: (u32)cake_clock when task started.
+				 *     Written: cake_running (debug only).
+				 *     Read: running_telemetry (debug only).
+				 *     Kept unconditional: BenchLab bench 55 references it. */
+	u8  tick_count;         /* 1B: cake_tick throttle counter */
+	u8  llc_id;             /* 1B: per-CPU LLC ID cache.
 				 *     Set once at init from cpu_llc_id RODATA.
 				 *     Eliminates indexed RODATA load in dispatch/tick. */
-	u64 tick_slice;         /* 8B  off  8: p->scx.slice ?: quantum_ns */
-	u64 vtime_local;        /* 8B  off 16: per-CPU monotonic max vtime.
+	u16 _pad_6;             /* 2B: natural alignment for tick_slice */
+	u64 tick_slice;         /* 8B: p->scx.slice ?: quantum_ns */
+	u64 vtime_local;        /* 8B: per-CPU monotonic max vtime.
 				 *     Replaces global vtime_now to avoid
 				 *     cross-core cache line bouncing. */
-	u32 last_pid;           /* 4B  off 24: Fast path — skip get_task_hot if same pid */
-	u8  sched_state_local;  /* 1B  off 28: per-CPU sched_state mirror.
+	u32 last_pid;           /* 4B: Fast path — skip get_task_hot if same pid */
+	u8  sched_state_local;  /* 1B: per-CPU sched_state mirror.
 				 *     Updated by Rust TUI on state transitions.
-				 *     Eliminates remote global BSS fetch at
-				 *     5 hot-path read sites. */
-	u8  game_running;       /* 1B  off 29: class-aware kick guard flag.
-				 *     1 when CAKE_CLASS_GAME task runs (game,
-				 *     audio, compositor, kthread during gaming).
-				 *     Prevents non-game IPI kicks mid-slice.
-				 *     Written: running_task_change (check-before-write).
-				 *     Read: enqueue_dsq_dispatch (OR'd with idle_hint). */
-	u8  idle_hint;          /* 1B  off 30: 0=busy, 1=idle (Adjacent for SWAR fetch) */
-	u8  is_hog;             /* 1B  off 31: 1=HOG/BG running (prevents intra-LLC false sharing) */
-	u64 cake_clock;         /* 8B  off 32: BPF-native monotonic clock (ns).
-				 *     ALPHADEV Phase 15: Self-maintaining accumulator.
-				 *     Advanced by consumed slice in cake_stopping
-				 *     (tick_slice - p->scx.slice). Resynced from
-				 *     scx_bpf_now() only on task-change (25%).
-				 *     Eliminates 2 scx_bpf_now() kfunc calls/switch.
-				 *     Single-writer (local CPU). Same CL as run_start
-				 *     (already M-state) — zero extra MESI cost. */
-	u8  _pad[4056];         /* 4056B off 40: pad to 4096B (Hardware Page). */
+				 *     SWAR: 4-byte load from this address reads
+				 *     sched_state_local + game_running + idle_hint
+				 *     in a single fetch for kick guard. */
+	u8  game_running;       /* 1B: class-aware kick guard flag.
+				 *     1 when CAKE_CLASS_GAME task runs.
+				 *     Written: cake_running (check-before-write).
+				 *     Read: enqueue_dsq_dispatch SWAR. */
+	u8  idle_hint;          /* 1B: 0=busy, 1=idle. Adjacent for SWAR fetch. */
+	u8  _pad_swar;          /* 1B: SWAR u32 read at &sched_state_local reads
+				 *     this byte as [3]; must be zero/benign. */
+#ifndef CAKE_RELEASE
+	u64 cake_clock;         /* 8B: BPF-native monotonic clock (ns).
+				 *     Debug-only accumulator. Advanced by consumed
+				 *     slice in cake_stopping. Resynced from
+				 *     scx_bpf_now() only on task-change (25%). */
+#endif
+	/* Compiler pads to 4096B via aligned attribute.
+	 * Hardware page boundary isolation ensures L2 prefetchers
+	 * cannot speculatively load adjacent CPU states. */
 } __attribute__((aligned(4096)));
 /* 4096B alignment: V-Cache Telescoping (Frontier Phase 1).
  * Hardware page boundary isolation ensures L2 hardware prefetchers cannot
@@ -172,21 +175,9 @@ typedef unsigned short cake_cpu_id_t;
  * first. Eliminates 3 empty-DSQ probes vs old 4-tier split. */
 #define LLC_DSQ_BASE 200
 
-/* ── dsq_vtime STAGED BIT LAYOUT ──
- * Written by cake_stopping (stopping_quantum_pack),
- * read by cake_enqueue (enqueue_wakeup_path).
- *   [63]       = VALID (set once context exists)
- *   [62]       = IS_GAME (ALPHADEV: hot-cold cache boundary telescope)
- *   [48]       = NEW_FLOW (first enqueue after init)
- *   [31:0]     = DSQ_WEIGHT (tier_base offset)
- *
- * Bits [61:49] and [47:32] are RESERVED. */
-
-
-#define STAGED_BIT_VALID        63
-#define STAGED_BIT_IS_GAME      62
-#define STAGED_BIT_NEW_FLOW     48
-#define STAGED_BIT_ORACLE_LLC   40
+/* STAGED_BIT_* defines REMOVED: staged_vtime_bits field was dead.
+ * All vtime/class state moved to p->scx.dsq_vtime (task_struct)
+ * and inline classification from BSS globals. */
 
 /* ── Kfunc BenchLab: extensible per-kfunc stopwatch ──
  * Each kfunc gets a slot. Run N iterations, capture min/max/avg + return value.
@@ -427,40 +418,28 @@ struct cake_iter_record {
 #endif
 
 /* Per-task flow state — conditional sizing (Release/Debug pattern).
- *   RELEASE: 64B (1 CL) — scheduling hot fields only, telemetry compiled out
+ *   RELEASE: 64B (1 CL) — iter-visible fields only, telemetry compiled out
  *   DEBUG:  512B (8 CL) — CL0 hot + CL1-7 telemetry for TUI analytics
  *
- * CACHE LINE SEGREGATION (Ghost Struct):
- *   CL0 (bytes 0-63): Every field needed for release-mode scheduling.
- *     In --release, CAKE_STATS_ENABLED=0 → Clang dead-codes all telemetry.
- *     The CPU prefetcher only ever loads CL0 — telemetry bytes stay in RAM.
+ * CACHE LINE SEGREGATION:
+ *   CL0 (bytes 0-63): Fields needed for iter + debug scheduling.
+ *     aligned(CAKE_TCTX_ALIGN) handles CL0 padding automatically —
+ *     no manual _pad arrays needed.
  *   CL1+ (bytes 64+): Debug-only telemetry for TUI analytics.
- *     Compiled out in release → 448B savings per task in BPF arena.
- *
- * staged_vtime_bits at offset 0: most-read field across all 4 callbacks
- *   (select_cpu, enqueue, running, stopping). JIT emits [reg+0] instead
- *   of [reg+48], saving one ADD instruction per access. */
+ *     Compiled out in release → struct shrinks from 512B to 64B. */
 struct cake_task_ctx {
-	/* ═══ CACHE LINE 0 (bytes 0-63): HOT / RELEASE MODE ═══ */
-	u64 staged_vtime_bits; /* 8B: offset 0  (VALID|HOME|WB|GAME|HOG|BG|WB_DUP|NF|weight) */
-	u32 packed_info;       /* 4B: offset 8  (Bitfield flags) */
-	u32 ppid;              /* 4B: offset 12 (Parent PID) */
-	
-	/* ── ALPHA FUSION LAYER ── */
-	u32 nvcsw_64_snapshot; /* 4B: offset 16 (Epoch tracking for the 64-stop nvcsw delta) */
-	u32 last_run_at;       /* 4B: offset 20 (Last run timestamp, wraps 4.2s) */
-	
-	u32 dsq_weight_base;   /* 4B: offset 24 (tier_base[task_class]) */
-	u8  task_class;        /* 1B: offset 28 (CAKE_CLASS_* enum) */
-	u8  new_flow;          /* 1B: offset 29 (new-flow flag) */
-	u16 vtime_mult;        /* 2B: offset 30 (EEVDF vtime reciprocal) */
-	
-	u64 nvcsw_snapshot;    /* 8B: offset 32 (Zero implicit padding!) */
-	u64 dsq_vtime;         /* 8B: offset 40 (EEVDF intra-tier vruntime) */
-	
-	/* ─── CL0 total stripped directly to 48B! ─── */
-	/* Pad to 64B CL0 boundary: liberating exactly +16B of native memory real-estate. */
-	u64 _pad_cl0[2];       /* 16B: offset 48-63 (Explicit structural 64B CL0 array) */
+	/* ═══ CACHE LINE 0: RELEASE + ITER FIELDS ═══ */
+	u32 packed_info;       /* 4B: Bitfield flags (iter-visible) */
+	u32 ppid;              /* 4B: Parent PID (iter-visible) */
+	u16 vtime_mult;        /* 2B: EEVDF vtime reciprocal 102400/weight (iter-visible) */
+
+#ifndef CAKE_RELEASE
+	/* ── DEBUG-ONLY CL0 FIELDS ── */
+	u8  task_class;        /* 1B: CAKE_CLASS_* enum (iter sync, debug stopping) */
+	u8  _pad_tc;           /* 1B: alignment */
+	u64 nvcsw_snapshot;    /* 8B: voluntary ctx switch snapshot (debug stopping) */
+#endif
+	/* Compiler pads to CAKE_TCTX_ALIGN via aligned attribute. */
 
 #ifndef CAKE_RELEASE
 	/* ═══ CL1+ (bytes 64-511): DEBUG-ONLY TELEMETRY ═══

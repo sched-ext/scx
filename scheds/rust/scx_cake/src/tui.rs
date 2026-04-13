@@ -318,7 +318,7 @@ pub struct TaskTelemetryRow {
     // CPU core distribution histogram
     pub cpu_run_count: [u16; crate::topology::MAX_CPUS], // Per-CPU run count (TUI normalizes to %)
     // EEVDF telemetry
-    pub vtime_mult: u16, // EEVDF vtime reciprocal (1024=nice0, <1024 high-pri, >1024 low-pri)
+    pub vtime_mult: u16, // Task weight (100=nice0, >100=high-pri, <100=low-pri)
 }
 
 impl Default for TaskTelemetryRow {
@@ -380,7 +380,7 @@ impl Default for TaskTelemetryRow {
             waker_cpu: 0,
             waker_tgid: 0,
             cpu_run_count: [0u16; crate::topology::MAX_CPUS],
-            vtime_mult: 1024,
+            vtime_mult: 100,
         }
     }
 }
@@ -2196,16 +2196,18 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Cell::from(format!("{:.0}", q_yield_pct)),
             Cell::from(format!("{:.0}", q_preempt_pct)),
             Cell::from(format!("{}", row.wakeup_source_pid)),
-            Cell::from(if row.vtime_mult == 1024 {
+            Cell::from(if row.vtime_mult == 100 {
                 "N0".to_string()
-            } else if row.vtime_mult < 1024 {
+            } else if row.vtime_mult > 100 {
+                // weight > 100 = negative nice = high priority
                 "N-".to_string()
             } else {
+                // weight < 100 = positive nice = low priority
                 "N+".to_string()
             })
-            .style(Style::default().fg(if row.vtime_mult < 1024 {
+            .style(Style::default().fg(if row.vtime_mult > 100 {
                 Color::LightGreen
-            } else if row.vtime_mult > 1024 {
+            } else if row.vtime_mult < 100 {
                 Color::LightRed
             } else {
                 Color::DarkGray
@@ -3533,16 +3535,25 @@ pub fn run_tui(
             // Write detection results to BPF BSS — drives reclassifier,
             // class-aware kick guard, SYNC strip, and quantum ceiling.
             if let Some(bss) = &mut skel.maps.bss_data {
-                bss.game_tgid = detect_result.game_tgid;
-                bss.game_ppid = detect_result.game_ppid;
-                bss.game_confidence = detect_result.game_confidence;
-                bss.sched_state = detect_result.sched_state as u32;
+                if bss.game_tgid != detect_result.game_tgid {
+                    bss.game_tgid = detect_result.game_tgid;
+                }
+                if bss.game_ppid != detect_result.game_ppid {
+                    bss.game_ppid = detect_result.game_ppid;
+                }
+                // game_confidence: only in Rust detector, not BPF BSS.
+                let state_u32 = detect_result.sched_state as u32;
+                if bss.sched_state != state_u32 {
+                    bss.sched_state = state_u32;
+                }
                 // Per-CPU sched_state_local: eliminates remote global BSS
                 // cache line fetch at 5 BPF hot-path sites.
                 for i in 0..app.topology.nr_cpus.min(bss.cpu_bss.len()) {
-                    bss.cpu_bss[i].sched_state_local = detect_result.sched_state;
+                    if bss.cpu_bss[i].sched_state_local != detect_result.sched_state {
+                        bss.cpu_bss[i].sched_state_local = detect_result.sched_state;
+                    }
                 }
-                bss.quantum_ceiling_ns = detect_result.quantum_ceiling_ns;
+                // quantum_ceiling_ns REMOVED: zero BPF readers.
             }
 
             // --- Delta Mode: compute per-second rates ---
