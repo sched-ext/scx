@@ -6,6 +6,7 @@
 #pragma once
 
 #include <errno.h>
+#include <lib/atq.h>
 
 /**
  * Configs for cpu.max
@@ -218,4 +219,25 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
  * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent);
+
+/**
+ * Per-task context for CPU bandwidth control.
+ *
+ * Schedulers that use cpu.max control should embed this struct at the
+ * beginning of their per-task context. @common is at offset 0, so all
+ * existing scx_task_common casts still work.
+ *
+ * @common:      Must be first; all existing scx_task_common casts still work.
+ * @cgx_raw:     Cached arena pointer to scx_cgroup_ctx (0 = not cached).
+ * @llcx_raw:    Cached arena pointer to scx_cgroup_llc_ctx (0 = not cached).
+ * @last_llc_id: LLC id for which @llcx_raw was cached.
+ */
+struct scx_task_cgroup_bw {
+	struct scx_task_common	common;		/* MUST be first */
+	u64			cgx_raw;	/* 0 = not cached */
+	u64			llcx_raw;	/* 0 = not cached */
+	int			last_llc_id;
+};
+
+typedef struct scx_task_cgroup_bw __arena scx_task_cgroup_bw_t;
 
