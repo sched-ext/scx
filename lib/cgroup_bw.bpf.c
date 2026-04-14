@@ -74,6 +74,14 @@ static u64 ROOT_CGID = 1;
 struct scx_cgroup_ctx {
 	/* read-only cache line */
 	struct {
+		/*
+		 * Free-list link.  Must be the first field so that
+		 * cbw_freelist_pop() and cbw_freelist_push() can operate on any
+		 * arena struct generically.  Only valid while the object is on
+		 * the free list; overwritten by scx_cgroup_bw_init() on reuse.
+		 */
+		u64		free_next;
+
 		/* cgroup id */
 		u64		id;
 	
@@ -182,6 +190,7 @@ struct scx_cgroup_ctx {
 	} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
+typedef struct scx_cgroup_ctx __arena scx_cgroup_ctx_t;
 
 /**
  * If a cgroup is either at a leaf level or threaded, we manage per-LLC-cgroup
@@ -232,13 +241,20 @@ typedef struct scx_cgroup_llc_ctx __arena scx_cgroup_llc_ctx_t;
 static struct scx_cgroup_bw_config cbw_config;
 
 /*
- * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer. 
+ * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer.
+ *
+ * scx_cgroup_ctx objects are allocated in the BPF arena via
+ * scx_static_alloc(); the map holds only an arena pointer to each object.
  */
+struct cbw_cgrp_entry {
+	u64	cgx;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
-	__type(value, struct scx_cgroup_ctx);
+	__type(value, struct cbw_cgrp_entry);
 } cbw_cgrp_map SEC(".maps");
 
 /*
@@ -326,6 +342,38 @@ static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
 	llcx->runtime_total = 0;
 	/* llcx->btq is already NULL from the ownership-transfer CAS */
 	cbw_freelist_push(&cbw_llcx_free_head, llcx);
+}
+
+/*
+ * Per-type free-list head and alloc/free wrappers for scx_cgroup_ctx.
+ * Cacheline-aligned to avoid false sharing with adjacent globals.
+ */
+static u64 cbw_cgx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
+
+static inline scx_cgroup_ctx_t *cbw_alloc_cgx(void)
+{
+	scx_cgroup_ctx_t *cgx;
+
+	cgx = cbw_freelist_pop(&cbw_cgx_free_head);
+	if (!cgx)
+		cgx = scx_static_alloc(sizeof(*cgx), SCX_CACHELINE_SIZE);
+	return cgx;
+}
+
+static inline void cbw_free_cgx(scx_cgroup_ctx_t *cgx)
+{
+	/*
+	 * Zero the fields that scx_cgroup_bw_init() does not explicitly
+	 * reinitialize.  All other fields are overwritten on the next
+	 * scx_cgroup_bw_init() call for the recycled object.
+	 */
+	cgx->has_llcx = false;
+	cgx->nr_throttled_periods = 0;
+	cgx->period_start_clk = 0;
+	cgx->burst_remaining = 0;
+	cgx->runtime_total_last = 0;
+	cgx->avg_consumption_rate = 0;
+	cbw_freelist_push(&cbw_cgx_free_head, cgx);
 }
 
 /*
@@ -655,20 +703,33 @@ u64 cgroup_get_id(struct cgroup *cgrp)
 	return cgrp->kn->id;
 }
 
-static
-struct scx_cgroup_ctx *cbw_get_cgroup_ctx(struct cgroup *cgrp)
+static __always_inline
+u64 cbw_get_cgroup_ctx_raw(struct cgroup *cgrp)
 {
-	return bpf_cgrp_storage_get(&cbw_cgrp_map, cgrp, 0, 0);
+	struct cbw_cgrp_entry *entry;
+
+	entry = bpf_cgrp_storage_get(&cbw_cgrp_map, cgrp, 0, 0);
+	return entry ? entry->cgx : 0;
+}
+
+static __always_inline
+scx_cgroup_ctx_t *cbw_get_cgroup_ctx(struct cgroup *cgrp)
+{
+	return (scx_cgroup_ctx_t *)cbw_get_cgroup_ctx_raw(cgrp);
 }
 
 long cbw_del_cgroup_ctx(struct cgroup *cgrp)
 {
+	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx(cgrp);
+
+	if (cgx)
+		cbw_free_cgx(cgx);
 	return bpf_cgrp_storage_delete(&cbw_cgrp_map, cgrp);
 }
 
 static
 scx_cgroup_llc_ctx_t *cbw_alloc_llc_ctx(struct cgroup *cgrp,
-					 struct scx_cgroup_ctx *cgx,
+					 scx_cgroup_ctx_t *cgx,
 					 int llc_id)
 {
 	scx_cgroup_llc_ctx_t *llcx;
@@ -742,7 +803,7 @@ long cbw_del_llc_ctx_with_id(u64 cgrp_id, int llc_id)
 }
 
 static
-int cbw_init_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
+int cbw_init_llc_ctx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 {
 	int i;
 
@@ -806,7 +867,7 @@ static void schedule_atq_destroy(scx_atq_t *btq)
 }
 
 static __always_inline
-int cbw_free_llc_ctx(struct scx_cgroup_ctx *cgx, u64 cgrp_id)
+int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 {
 	scx_cgroup_llc_ctx_t *llcx;
 	volatile int nr_moved = 0; /* Add volatile to satisfy the verifier. */
@@ -909,10 +970,14 @@ int cbw_free_llc_ctx(struct scx_cgroup_ctx *cgx, u64 cgrp_id)
 	return nr_moved;
 }
 
-static
-void cbw_set_bandwidth(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
-		       u64 period_us, u64 quota_us, u64 burst_us)
+__noinline
+int cbw_set_bandwidth(u64 cgx_raw, u64 period_us, u64 quota_us, u64 burst_us)
 {
+	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
+
+	/* Attach the timer function to the BPF area context. */
+	scx_arena_subprog_init();
+
 	cgx->period = period_us * 1000;
 	cgx->period_start_clk = scx_bpf_now();
 
@@ -927,12 +992,22 @@ void cbw_set_bandwidth(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 		cgx->burst = burst_us * 1000;
 	}
 	cgx->burst_remaining = cgx->burst;
+	return 0;
 }
 
 __noinline
-int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_ctx *cgx)
+int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, u64 cgx_raw)
 {
-	struct scx_cgroup_ctx *parentx;
+	/*
+	 * Accept cgx as u64 rather than scx_cgroup_ctx_t * to avoid a BPF
+	 * verifier type mismatch.  When cgx comes from scx_static_alloc() the
+	 * compiler tracks it as a scalar; __noinline call sites with arena
+	 * pointer parameters require an arena-qualified register, which the
+	 * compiler does not emit from a scalar.  Passing u64 and casting here
+	 * causes the compiler to emit addr_space_cast inside the subprogram.
+	 */
+	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
+	scx_cgroup_ctx_t *parentx;
 	struct cgroup *parent;
 
 	if (!cgx || !cgrp)
@@ -974,7 +1049,8 @@ int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_ct
  */
 int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init_args *args __arg_trusted)
 {
-	struct scx_cgroup_ctx *cgx, *parentx;
+	scx_cgroup_ctx_t *cgx, *parentx;
+	struct cbw_cgrp_entry *entry;
 	struct cgroup *parent;
 
 	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
@@ -991,18 +1067,26 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * so the cgroup can distribute the budget to its descendants
 	 * when requested.
 	 */
-	cgx = bpf_cgrp_storage_get(&cbw_cgrp_map, cgrp, 0,
-				   BPF_LOCAL_STORAGE_GET_F_CREATE);
+	entry = bpf_cgrp_storage_get(&cbw_cgrp_map, cgrp, 0,
+				     BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!entry) {
+		cbw_err("Failed to allocate cgroup entry: %llu",
+			cgroup_get_id(cgrp));
+		return -ENOMEM;
+	}
+
+	cgx = cbw_alloc_cgx();
 	if (!cgx) {
 		cbw_err("Failed to allocate cgroup ctx: %llu",
 			cgroup_get_id(cgrp));
 		return -ENOMEM;
 	}
+	entry->cgx = (u64)cgx;
 
 	cgx->id = cgroup_get_id(cgrp);
-	cbw_set_bandwidth(cgrp, cgx, args->bw_period_us, args->bw_quota_us,
+	cbw_set_bandwidth((u64)cgx, args->bw_period_us, args->bw_quota_us,
 			  args->bw_burst_us);
-	cbw_update_nquota_ub(cgrp, cgx);
+	cbw_update_nquota_ub(cgrp, (u64)cgx);
 	cgx->runtime_total_sloppy = 0;
 	cgx->period_budget = cgx->nquota_ub;
 	cgx->is_throttled = false;
@@ -1035,10 +1119,10 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	return cbw_init_llc_ctx(cgrp, cgx);
 }
 
-static
-int cbw_unthrottle_cgroup_for_exit(struct cgroup *cgrp)
+__noinline
+int cbw_unthrottle_cgroup_for_exit(struct cgroup *cgrp __arg_trusted)
 {
-	struct scx_cgroup_ctx *cgx;
+	scx_cgroup_ctx_t *cgx;
 
 	/*
 	 * Stop throttling the cgroup by setting its upper bound and
@@ -1162,21 +1246,21 @@ __hidden
 int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quota_us, u64 burst_us)
 {
 	struct cgroup *cur_cgrp, *cur_cgrp_trusted;
-	struct scx_cgroup_ctx *cgx, *cur_cgx;
+	u64 cgx_raw, cur_cgx_raw;
 	struct cgroup_subsys_state *start_css, *pos;
 	int ret = 0;
 
 	cbw_dbg_cgrp();
 
 	/* Update the cgroup's bandwidth. */
-	cgx = cbw_get_cgroup_ctx(cgrp);
-	if (!cgx) {
+	cgx_raw = cbw_get_cgroup_ctx_raw(cgrp);
+	if (!cgx_raw) {
 		cbw_err("Failed to lookup a cgroup ctx: %llu",
 			cgroup_get_id(cgrp));
 		return -ESRCH;
 	}
 
-	cbw_set_bandwidth(cgrp, cgx, period_us, quota_us, burst_us);
+	cbw_set_bandwidth(cgx_raw, period_us, quota_us, burst_us);
 
 	/*
 	 * Update nquota_ub of the cgroup and all its descendents in a
@@ -1189,9 +1273,9 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 		cur_cgrp_trusted = bpf_cgroup_from_id(cgroup_get_id(cur_cgrp));
 		if (!cur_cgrp_trusted)
 			continue;
-	
-		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp_trusted);
-		if (!cur_cgx) {
+
+		cur_cgx_raw = cbw_get_cgroup_ctx_raw(cur_cgrp_trusted);
+		if (!cur_cgx_raw) {
 			/*
 			 * The CPU controller is not enabled for this cgroup.
 			 * Let's move on.
@@ -1200,7 +1284,7 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 			continue;
 		}
 
-		ret = cbw_update_nquota_ub(cur_cgrp_trusted, cur_cgx);
+		ret = cbw_update_nquota_ub(cur_cgrp_trusted, cur_cgx_raw);
 		bpf_cgroup_release(cur_cgrp_trusted);
 		if (ret)
 			goto unlock_out;
@@ -1211,7 +1295,7 @@ unlock_out:
 }
 
 static
-s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
+s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 {
 	scx_cgroup_llc_ctx_t *llcx;
 	s64 sum;
@@ -1248,7 +1332,7 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 {
 	u32 cur_level, prev_level = CBW_CGRP_TREE_HEIGHT_MAX;
 	struct cgroup_subsys_state *start_css, *pos;
-	struct scx_cgroup_ctx *cur_cgx = NULL;
+	scx_cgroup_ctx_t *cur_cgx = NULL;
 	struct tree_levels *tree;
 	struct cgroup *cur_cgrp;
 	s64 rt_llcx;
@@ -1411,7 +1495,7 @@ u64 cbw_throttle_cgroups(struct cgroup *cgrp)
 	 *                         CBW_ACCOUNTING_PERIOD_MAX)
 	 */
 	struct cgroup_subsys_state *start_css, *pos, *anc_css;
-	struct scx_cgroup_ctx *cur_cgx, *cur_anc_cgx;
+	scx_cgroup_ctx_t *cur_cgx, *cur_anc_cgx;
 	struct cgroup *cur_anc_cgrp;
 	u64 min_time_to_throttle = U64_MAX;
 	u64 time_to_throttle;
@@ -1506,7 +1590,7 @@ int cbw_get_current_llc_id(void)
 static
 int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted)
 {
-	struct scx_cgroup_ctx *cgx;
+	scx_cgroup_ctx_t *cgx;
 
 	/*
 	 * The throttle decision is based solely on cgx->is_throttled, which is
@@ -1717,7 +1801,7 @@ int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vt
 }
 
 static
-bool cbw_has_backlogged_tasks(struct scx_cgroup_ctx *cgx)
+bool cbw_has_backlogged_tasks(scx_cgroup_ctx_t *cgx)
 {
 	scx_cgroup_llc_ctx_t *llcx;
 	int i;
@@ -1738,7 +1822,7 @@ bool cbw_has_backlogged_tasks(struct scx_cgroup_ctx *cgx)
 }
 
 static
-bool cbw_replenish_cgroup(struct scx_cgroup_ctx *cgx, u64 now)
+bool cbw_replenish_cgroup(scx_cgroup_ctx_t *cgx, u64 now)
 {
 	s64 burst_credit = 0, debt = 0, budget;
 	bool period_end, was_throttled, keep_throttled = false;
@@ -1785,8 +1869,6 @@ bool cbw_replenish_cgroup(struct scx_cgroup_ctx *cgx, u64 now)
 	burst_credit = clamp((s64)cgx->nquota - cgx->runtime_total_last,
 			     0LL, cgx->burst_remaining);
 
-	dbg_cgx(cgx, "replenishing: ");
-
 	/*
 	 * Update burst_remaining. On period_end, reset to the full burst cap
 	 * for the new cpu.max period. Otherwise, decrease by the credit
@@ -1819,12 +1901,11 @@ bool cbw_replenish_cgroup(struct scx_cgroup_ctx *cgx, u64 now)
 	if (cgx->runtime_total_last > 0) {
 		u64 rate = (u64)cgx->runtime_total_last * CBW_SCALE /
 			   CBW_REPLENISH_PERIOD;
-		cgx->avg_consumption_rate =
-			__calc_avg(cgx->avg_consumption_rate, rate,
-				   CBW_CONSUMPTION_RATE_DECAY);
-	}
+		u64 avg = cgx->avg_consumption_rate;
 
-	dbg_cgx(cgx, "replenished: ");
+		cgx->avg_consumption_rate =
+			__calc_avg(avg, rate, CBW_CONSUMPTION_RATE_DECAY);
+	}
 
 out_no_replenish:
 	/*
@@ -1933,14 +2014,14 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
 	static int nr_throttled; /* Add `static` to work around the verifier error (-E2BIG) */
 	struct cgroup *root_cgrp, *cur_cgrp;
+	u64 *ids, now;
 	struct cgroup_subsys_state *root_css, *pos;
-	struct scx_cgroup_ctx *cur_cgx;
+	scx_cgroup_ctx_t *cur_cgx;
 	scx_cgroup_llc_ctx_t *cur_llcx;
 	const struct cpumask *online_mask;
 	s64 interval, jitter, period;
 	int i, ret, nr_moved = 0;
 	bool root_added = false;
-	u64 *ids, now;
 	s32 idle_cpu;
 
 	/* Attach the timer function to the BPF area context. */
@@ -2190,7 +2271,7 @@ rearm_out:
 }
 
 static
-int cbw_drain_btq_batch(struct scx_cgroup_ctx *cgx,
+int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 			scx_cgroup_llc_ctx_t *llcx)
 {
 	scx_task_common *taskc;
@@ -2230,7 +2311,7 @@ int cbw_drain_btq_batch(struct scx_cgroup_ctx *cgx,
 }
 
 static
-int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
+int cbw_reenqueue_cgroup(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx,
 			 u64 cgrp_id, u64 nuance)
 {
 	scx_cgroup_llc_ctx_t *llcx;
@@ -2306,7 +2387,7 @@ __hidden
 int scx_cgroup_bw_reenqueue(void)
 {
 	union backlog_stat backlog_stat;
-	struct scx_cgroup_ctx *cur_cgx;
+	scx_cgroup_ctx_t *cur_cgx;
 	struct cgroup *cur_cgrp;
 	int i, idx, n, nr_enq = 0;
 	u64 nuance, nuance2, nr_tcgs;
@@ -2455,7 +2536,7 @@ int scx_cgroup_bw_reenqueue(void)
 __hidden
 int scx_cgroup_bw_is_cgroup_throttled(u64 cgrp_id)
 {
-	struct scx_cgroup_ctx *cgx;
+	scx_cgroup_ctx_t *cgx;
 	struct cgroup *cgrp;
 
 	cgrp = bpf_cgroup_from_id(cgrp_id);
@@ -2570,7 +2651,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 
 	scx_cgroup_llc_ctx_t *llcx;
 	int i, nr_throttled_tasks = 0;
-	struct scx_cgroup_ctx *cgx;
+	scx_cgroup_ctx_t *cgx;
 	const char *indent_str;
 	scx_atq_t *btq;
 	char name[64];
