@@ -272,7 +272,7 @@ impl<'a> Scheduler<'a> {
         let topo = topology::detect()?;
 
         // Get effective values (profile + CLI overrides)
-        let (quantum, new_flow_bonus, _starvation) = args.effective_values();
+        let (quantum, _new_flow_bonus, _starvation) = args.effective_values();
 
         // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
         let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
@@ -284,7 +284,7 @@ impl<'a> Scheduler<'a> {
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
             rodata.quantum_ns = quantum * 1000;
-            rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
+            // new_flow_bonus_ns REMOVED: zero BPF readers.
             // Stats/telemetry: only available in debug builds (CAKE_RELEASE omits the field).
             // In release, --verbose is silently ignored — zero overhead for production gaming.
             #[cfg(debug_assertions)]
@@ -297,7 +297,7 @@ impl<'a> Scheduler<'a> {
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
             rodata.nr_cpus = topo.nr_cpus.min(topology::MAX_CPUS) as u32;
-            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(topology::MAX_CPUS) as u32;
+            // nr_phys_cpus REMOVED: zero BPF readers.
 
             // Ferry topology arrays into BPF RODATA — compile-time scaled
 
@@ -327,10 +327,8 @@ impl<'a> Scheduler<'a> {
                 }
                 rodata.has_hybrid_cores = topo.big_core_phys_mask.iter().any(|&w| w != 0);
             }
-            for i in 0..topo.vcache_llc_mask.len().min(rodata.vcache_llc_mask.len()) {
-                rodata.vcache_llc_mask[i] = topo.vcache_llc_mask[i];
-            }
-            rodata.has_vcache = topo.has_vcache;
+            // vcache_llc_mask/has_vcache REMOVED from BPF: zero BPF readers.
+            // Rust TUI reads topology directly.
 
             for i in 0..topo.cpu_sibling_map.len().min(rodata.cpu_sibling_map.len()) {
                 rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i] as _;
@@ -338,9 +336,7 @@ impl<'a> Scheduler<'a> {
             for i in 0..topo.llc_cpu_mask.len().min(rodata.llc_cpu_mask.len()) {
                 rodata.llc_cpu_mask[i] = topo.llc_cpu_mask[i];
             }
-            for i in 0..topo.core_cpu_mask.len().min(rodata.core_cpu_mask.len()) {
-                rodata.core_cpu_mask[i] = topo.core_cpu_mask[i];
-            }
+            // core_cpu_mask REMOVED from BPF: zero BPF readers.
 
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
@@ -403,55 +399,8 @@ impl<'a> Scheduler<'a> {
                     }
                 }
 
-                // ALPHADEV Phase 3: Asymmetric SIMD topological scan matrices
-                for class_idx in 0..4 {
-                    for home_llc in 0..rodata.nr_llcs as u8 {
-                        let mut order = Vec::new();
-
-                        if class_idx == 1 {
-                            // GAME: Strictly confined to Primary Game LLC
-                            order.push(best_llc);
-                        } else if class_idx == 2 || class_idx == 3 {
-                            // BG/HOG: Start at Fallback LLC, scan all EXCEPT Primary Game LLC
-                            order.push(fallback_llc);
-                            for l in 0..rodata.nr_llcs as u8 {
-                                if l != fallback_llc && l != best_llc {
-                                    order.push(l);
-                                }
-                            }
-                        } else {
-                            // NORMAL: Start at its Home LLC (preserve cache affinity)
-                            order.push(home_llc);
-                            // Then scan Fallback LLC if saturated
-                            if fallback_llc != home_llc {
-                                order.push(fallback_llc);
-                            }
-                            // Then scan all other available LLCs
-                            for l in 0..rodata.nr_llcs as u8 {
-                                if l != home_llc && l != fallback_llc && l != best_llc {
-                                    order.push(l);
-                                }
-                            }
-                            // Evict: ONLY spill to Primary Game LLC as absolute last resort
-                            if best_llc != home_llc && best_llc != fallback_llc {
-                                order.push(best_llc);
-                            }
-                        }
-
-                        // Write directly to RO Data tensor mapping
-                        for (i, &llc) in order.iter().enumerate() {
-                            if i < rodata.llc_scan_order[class_idx][home_llc as usize].len() {
-                                rodata.llc_scan_order[class_idx][home_llc as usize][i] = llc;
-                            }
-                        }
-                        // Sentinel the tail bytes
-                        for i in
-                            order.len()..rodata.llc_scan_order[class_idx][home_llc as usize].len()
-                        {
-                            rodata.llc_scan_order[class_idx][home_llc as usize][i] = 0xFF;
-                        }
-                    }
-                }
+                // llc_scan_order REMOVED from BPF: zero BPF readers.
+                // Was: Asymmetric SIMD topological scan matrices
 
                 info!(
                     "Topology Strategy: Primary Game LLC={}, Fallback BG LLC={}, Max Rank={}",
@@ -514,38 +463,17 @@ impl<'a> Scheduler<'a> {
                 );
             }
 
-            // ═══ Per-CPU capacity table (F1 correctness fix) ═══
-            // Read arch_scale_cpu_capacity from sysfs for P/E core vruntime scaling.
-            // Scale: 0-1024, where 1024 = fastest core. On SMP all = 1024 → JIT folds.
-            // Intel hybrid: P-cores ~1024, E-cores ~600-700.
-            // AMD SMP: all 1024 → cap > 0 && cap < 1024 is always false → zero overhead.
+            // cpuperf_cap_table: kept for BenchLab but no scheduling reads.
+            // Still populate for bench competitor comparison.
             {
                 let nr = topo.nr_cpus.min(topology::MAX_CPUS);
-                let mut all_equal = true;
-                let mut first_cap: u32 = 0;
-
                 for cpu in 0..nr {
                     let path = format!("/sys/devices/system/cpu/cpu{}/cpu_capacity", cpu);
                     let cap = std::fs::read_to_string(&path)
                         .ok()
                         .and_then(|s| s.trim().parse::<u32>().ok())
                         .unwrap_or(1024);
-
                     rodata.cpuperf_cap_table[cpu] = cap;
-
-                    if cpu == 0 {
-                        first_cap = cap;
-                    } else if cap != first_cap {
-                        all_equal = false;
-                    }
-                }
-
-                if !all_equal {
-                    info!(
-                        "Capacity scaling: heterogeneous (P/E cores, range {}-{})",
-                        rodata.cpuperf_cap_table[..nr].iter().min().unwrap_or(&0),
-                        rodata.cpuperf_cap_table[..nr].iter().max().unwrap_or(&1024)
-                    );
                 }
             }
 
@@ -769,23 +697,12 @@ impl<'a> Scheduler<'a> {
             task_ctx_size, topo.nr_cpus
         );
 
-        // Set initial BSS values before attach (zero-init'd in BPF for BSS placement).
-        // quantum_ceiling_ns: default IDLE/GAMING → 2ms. TUI updates at ~2Hz.
-        if let Some(bss) = &mut skel.maps.bss_data {
-            bss.quantum_ceiling_ns = 2_000_000; // AQ_BULK_CEILING_NS
-
-            // ALPHADEV Phase 7.3: Muscle/Brain offload. Hydrate O(1) Cache locklessly.
-            let mask = (bpf_intf::BRAIN_CLASS_CACHE_SIZE as u32) - 1;
-            for &tgid in &audio_tgids {
-                let idx = (tgid & mask) as usize;
-                bss.brain_class_cache[idx].pid = tgid;
-                bss.brain_class_cache[idx].task_class = bpf_intf::cake_class_CAKE_CLASS_GAME as u8;
-            }
-            for &tgid in &compositor_tgids {
-                let idx = (tgid & mask) as usize;
-                bss.brain_class_cache[idx].pid = tgid;
-                bss.brain_class_cache[idx].task_class = bpf_intf::cake_class_CAKE_CLASS_GAME as u8;
-            }
+        // Set initial BSS values before attach.
+        if let Some(_bss) = &mut skel.maps.bss_data {
+            // brain_class_cache REMOVED: 131KB BSS with zero BPF readers.
+            // Audio/compositor TGIDs are now classified inline in BPF
+            // via game_tgid/game_ppid comparison.
+            let _ = (&audio_tgids, &compositor_tgids); // suppress unused warnings
         }
 
         Ok(Self {
@@ -916,16 +833,25 @@ impl<'a> Scheduler<'a> {
                 // Propagate to BPF BSS — drives reclassifier sched_state gate,
                 // class-aware kick guard, SYNC strip, and quantum ceiling.
                 if let Some(bss) = &mut self.skel.maps.bss_data {
-                    bss.game_tgid = result.game_tgid;
-                    bss.game_ppid = result.game_ppid;
-                    bss.game_confidence = result.game_confidence;
-                    bss.sched_state = result.sched_state as u32;
+                    if bss.game_tgid != result.game_tgid {
+                        bss.game_tgid = result.game_tgid;
+                    }
+                    if bss.game_ppid != result.game_ppid {
+                        bss.game_ppid = result.game_ppid;
+                    }
+                    // game_confidence: only synced to Rust detector, not BPF BSS.
+                    let state_u32 = result.sched_state as u32;
+                    if bss.sched_state != state_u32 {
+                        bss.sched_state = state_u32;
+                    }
                     // Per-CPU sched_state_local: eliminates remote global BSS
                     // cache line fetch at 5 BPF hot-path sites.
                     for i in 0..nr_cpus.min(bss.cpu_bss.len()) {
-                        bss.cpu_bss[i].sched_state_local = result.sched_state;
+                        if bss.cpu_bss[i].sched_state_local != result.sched_state {
+                            bss.cpu_bss[i].sched_state_local = result.sched_state;
+                        }
                     }
-                    bss.quantum_ceiling_ns = result.quantum_ceiling_ns;
+                    // quantum_ceiling_ns REMOVED: zero BPF readers.
                 }
             }
         }

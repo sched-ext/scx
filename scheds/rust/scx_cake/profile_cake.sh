@@ -44,10 +44,16 @@ else
 fi
 # ==========================================
 
-LOG_FILE="profile_${GAME_NAME//.exe/}_$(date +%s).log"
+SAFE_NAME="${GAME_NAME// /_}"
+SAFE_NAME="${SAFE_NAME//\//_}"
+SAFE_NAME="${SAFE_NAME//.exe/}"
+LOG_FILE="profile_${SAFE_NAME}_$(date +%s).log"
+
+LOAD_AVG=$(cat /proc/loadavg | awk '{print $1" "$2" "$3}')
 
 echo "--------------------------------------------------------" | tee -a "$LOG_FILE"
 echo " ACTIVE CONTEXT: $GAME_NAME" | tee -a "$LOG_FILE"
+echo " SYSTEM LOAD:    $LOAD_AVG" | tee -a "$LOG_FILE"
 echo "--------------------------------------------------------" | tee -a "$LOG_FILE"
 echo "Starting sequential profile (5 continuous seconds per function)... Play your game now!" | tee -a "$LOG_FILE"
 echo "Results will stream below:" | tee -a "$LOG_FILE"

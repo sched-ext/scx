@@ -56,6 +56,7 @@ const COMPILE_COMMS: &[&str] = &[
 // ═══ Public Types ═══
 
 /// BSS write payload returned by poll(). Caller writes these to BPF BSS.
+#[allow(dead_code)]
 pub struct DetectResult {
     pub game_tgid: u32,
     pub game_ppid: u32,
