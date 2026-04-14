@@ -1744,12 +1744,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 #ifdef CAKE_HAS_HYBRID
 gate2:
 	if (has_hybrid_cores) {
-		/* READ TASK CLASS from BSS pid_class_cache (tunneled from stopping).
-		 * Zero bpf_task_storage_get → eliminates 1982ns tail jitter.
-		 * BSS read = 14ns avg, 96ns jitter (vs 28ns/1982ns task_storage).
-		 * p->pid is L1-hot (same CL as p->scx.slice). */
-		u8 g2_tc = pid_class_cache[p->pid & (PID_CLASS_CACHE_SIZE - 1)];
-		bool is_game = (g2_tc == CAKE_CLASS_GAME);
+		/* INLINE TASK CLASS (Zero Arena, Zero array, L1-hot).
+		 * p->tgid is L1-hot (same cache line as p->scx.slice).
+		 * game_tgid/game_ppid are BSS globals (MESI-S). */
+		u32 tgid = p->tgid;
+		bool is_game = (sched_state == CAKE_STATE_GAMING) &&
+			       (tgid == game_tgid || tgid == game_ppid);
 		const u8 *scan_order = is_game
 			? cpus_fast_to_slow
 			: cpus_slow_to_fast;
@@ -2727,7 +2727,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 	 * Pages = ceil(nr_cpus × CAKE_MBOX_SIZE / 4096).
 	 * nr_cpus is RODATA → JIT constant-folds at load time. */
 	{
-		u32 nr_arena_pages = ((u32)nr_cpus * CAKE_MBOX_SIZE + 4095) / 4096;
+		/* 4096 is 2^12. Bitshift replaces division compiler inference. */
+		u32 nr_arena_pages = ((u32)nr_cpus * CAKE_MBOX_SIZE + 4095) >> 12;
 		if (nr_arena_pages < 1)
 			nr_arena_pages = 1;
 		per_cpu = (struct cake_per_cpu __arena *)bpf_arena_alloc_pages(
