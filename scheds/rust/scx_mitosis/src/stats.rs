@@ -36,6 +36,14 @@ pub struct CellMetrics {
     pub steal_pct: f64,
     #[stat(desc = "Pin reject skipped %")]
     pub pin_skip_pct: f64,
+    #[stat(desc = "Slice shrink events")]
+    pub slice_shrink: u64,
+    #[stat(desc = "Slice shrink at max")]
+    pub slice_shrink_max: u64,
+    #[stat(desc = "Slice shrink proportional")]
+    pub slice_shrink_proportional: u64,
+    #[stat(desc = "Slice shrink at min")]
+    pub slice_shrink_min: u64,
     #[stat(desc = "Decision share % of global")]
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
@@ -90,6 +98,14 @@ pub struct Metrics {
     pub steal_pct: f64,
     #[stat(desc = "Pin reject skipped %")]
     pub pin_skip_pct: f64,
+    #[stat(desc = "Slice shrink events")]
+    pub slice_shrink: u64,
+    #[stat(desc = "Slice shrink at max")]
+    pub slice_shrink_max: u64,
+    #[stat(desc = "Slice shrink proportional")]
+    pub slice_shrink_proportional: u64,
+    #[stat(desc = "Slice shrink at min")]
+    pub slice_shrink_min: u64,
     #[stat(desc = "Decision share % of global")]
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]

@@ -86,11 +86,61 @@ struct task_ctx {
 	/* Which LLC this task is assigned to */
 	s32 llc;
 
+	u64 avg_runtime_ns; /* EWMA of per-wake runtimes (ns), init to 0 */
+
 	u32 steal_count; /* how many times this task has been stolen */
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 };
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
+
+/*
+ * Smoothed average of a task's per-wake runtime (EWMA, alpha=1/8).
+ * Updated in stopping() after each run. Starts at 0 and converges
+ * over ~8 runs. Used by features like slice shrinking to estimate
+ * how long a task typically runs.
+ */
+static inline void update_task_runtime_ewma(struct task_ctx *tctx, u64 used)
+{
+	if (unlikely(!tctx->avg_runtime_ns))
+		/* Init */
+		tctx->avg_runtime_ns = used;
+	else
+		tctx->avg_runtime_ns = (tctx->avg_runtime_ns * 7 + used) / 8;
+}
+
+extern const volatile bool use_lockless_peek;
+
+/*
+ * Peek at the head of a DSQ. Uses lockless kfunc when available,
+ * otherwise falls back to bpf_for_each iterator.
+ */
+static inline struct task_struct *dsq_peek(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	if (use_lockless_peek)
+		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0)
+		return p;
+	return NULL;
+}
+
+static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
+{
+	u64 *vptr;
+
+	if ((vptr = MEMBER_VPTR(*cctx, .cstats[cell][idx])))
+		(*vptr) += delta;
+	else
+		scx_bpf_error("invalid cell or stat idxs: %d, %d", idx, cell);
+}
+
+static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
+{
+	cstat_add(idx, cell, cctx, 1);
+}
 
 struct cell_map {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
