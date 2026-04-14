@@ -77,12 +77,15 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
  * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
  * @cgrp: cgroup where a task belongs to.
  * @p: a task to be tested.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
+ *         pass 0 when no task context is available.
  *
  * Return 0 when the cgroup is not throttled,
  * -EAGAIN when the cgroup is throttled, and
  * -errno for some other failures.
  */
-int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, struct task_struct *p __arg_trusted);
+int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted,
+			    struct task_struct *p __arg_trusted, u64 taskc);
 
 /**
  * scx_cgroup_bw_consume - Consume the time actually used after the task execution.

@@ -362,17 +362,10 @@ static inline scx_cgroup_ctx_t *cbw_alloc_cgx(void)
 
 static inline void cbw_free_cgx(scx_cgroup_ctx_t *cgx)
 {
-	/*
-	 * Zero the fields that scx_cgroup_bw_init() does not explicitly
-	 * reinitialize.  All other fields are overwritten on the next
-	 * scx_cgroup_bw_init() call for the recycled object.
-	 */
-	cgx->has_llcx = false;
-	cgx->nr_throttled_periods = 0;
-	cgx->period_start_clk = 0;
-	cgx->burst_remaining = 0;
-	cgx->runtime_total_last = 0;
-	cgx->avg_consumption_rate = 0;
+	int i;
+
+	for (i = 0; i < sizeof(*cgx) && can_loop; i++)
+		((char __arena *)cgx)[i] = 0;
 	cbw_freelist_push(&cbw_cgx_free_head, cgx);
 }
 
@@ -1588,9 +1581,11 @@ int cbw_get_current_llc_id(void)
 }
 
 static
-int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted)
+int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, u64 taskc_raw)
 {
+	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
 	scx_cgroup_ctx_t *cgx;
+	u64 cgx_raw;
 
 	/*
 	 * The throttle decision is based solely on cgx->is_throttled, which is
@@ -1613,16 +1608,23 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted)
 	if (cgrp->level == 0)
 		return 0;
 
-	cgx = cbw_get_cgroup_ctx(cgrp);
-	if (!cgx) {
-		/*
-		 * The CPU controller is not enabled for this cgroup.
-		 */
-		cbw_dbg("Failed to lookup a cgroup ctx: %llu",
-			cgroup_get_id(cgrp));
-		return -ESRCH;
+	if (taskc && taskc->cgx_raw) {
+		cgx_raw = taskc->cgx_raw;
+	} else {
+		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp);
+		if (!cgx_raw) {
+			/*
+			 * The CPU controller is not enabled for this cgroup.
+			 */
+			cbw_dbg("Failed to lookup a cgroup ctx: %llu",
+				cgroup_get_id(cgrp));
+			return -ESRCH;
+		}
+		if (taskc)
+			taskc->cgx_raw = cgx_raw;
 	}
 
+	cgx = (scx_cgroup_ctx_t *)cgx_raw;
 	if (READ_ONCE(cgx->is_throttled)) {
 		dbg_cgx(cgx, "throttled: ");
 		return -EAGAIN;
@@ -1635,13 +1637,16 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted)
  * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
  * @cgrp: cgroup where a task belongs to.
  * @p: a task to be tested.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
+ *         pass 0 when no task context is available.
  *
  * Return 0 when the cgroup is not throttled,
  * -EAGAIN when the cgroup is throttled, and
  * -errno for some other failures.
  */
 __hidden
-int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, struct task_struct *p __arg_trusted)
+int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted,
+			     struct task_struct *p __arg_trusted, u64 taskc)
 {
 	/*
 	 * Never throttle an exiting task. In do_exit(), a task is removed from
@@ -1656,7 +1661,7 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, struct task_struc
 	if (p->flags & PF_EXITING)
 		return 0;
 
-	return cbw_cgroup_bw_throttled(cgrp);
+	return cbw_cgroup_bw_throttled(cgrp, taskc);
 }
 
 /**
@@ -2340,7 +2345,7 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx,
 		 * If the cgroup is throttled, all its LLC contexts are
 		 * throttled too. Stop draining immediately.
 		 */
-		if (cbw_cgroup_bw_throttled(cgrp) == -EAGAIN)
+		if (cbw_cgroup_bw_throttled(cgrp, 0) == -EAGAIN)
 			break;
 
 		nr_enq += cbw_drain_btq_batch(cgx, llcx);
@@ -2583,7 +2588,23 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 		       struct cgroup *from __arg_trusted,
 		       struct cgroup *to __arg_trusted)
 {
+	scx_task_cgroup_bw_t *tc;
 	int ret;
+
+	/*
+	 * Invalidate the per-task cache: cgx_raw and llcx_raw belong to the
+	 * old cgroup and will be repopulated on the next throttle/consume call.
+	 *
+	 * Use atomic exchanges instead of plain stores: LLVM folds constant
+	 * stores into base+offset addressing and omits addr_space_cast for the
+	 * arena pointer, which the BPF verifier rejects.  Atomics always emit
+	 * addr_space_cast for the base register regardless of offset.
+	 */
+	tc = (scx_task_cgroup_bw_t *)taskc;
+	if (tc) {
+		__sync_lock_test_and_set(&tc->cgx_raw, 0);
+		__sync_lock_test_and_set(&tc->llcx_raw, 0);
+	}
 
 	/*
 	 * If a task is throttled, remove it from the @from cgroup,
