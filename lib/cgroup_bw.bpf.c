@@ -251,10 +251,11 @@ struct cbw_cgrp_entry {
 };
 
 struct {
-	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
+	__type(key, u64);
 	__type(value, struct cbw_cgrp_entry);
+	__uint(max_entries, CBW_NR_CGRP_MAX);
 } cbw_cgrp_map SEC(".maps");
 
 /*
@@ -697,27 +698,28 @@ u64 cgroup_get_id(struct cgroup *cgrp)
 }
 
 static __always_inline
-u64 cbw_get_cgroup_ctx_raw(struct cgroup *cgrp)
+u64 cbw_get_cgroup_ctx_raw(u64 cgrp_id)
 {
 	struct cbw_cgrp_entry *entry;
 
-	entry = bpf_cgrp_storage_get(&cbw_cgrp_map, cgrp, 0, 0);
+	entry = bpf_map_lookup_elem(&cbw_cgrp_map, &cgrp_id);
 	return entry ? entry->cgx : 0;
 }
 
 static __always_inline
 scx_cgroup_ctx_t *cbw_get_cgroup_ctx(struct cgroup *cgrp)
 {
-	return (scx_cgroup_ctx_t *)cbw_get_cgroup_ctx_raw(cgrp);
+	return (scx_cgroup_ctx_t *)cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
 }
 
 long cbw_del_cgroup_ctx(struct cgroup *cgrp)
 {
+	u64 cgrp_id = cgroup_get_id(cgrp);
 	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx(cgrp);
 
 	if (cgx)
 		cbw_free_cgx(cgx);
-	return bpf_cgrp_storage_delete(&cbw_cgrp_map, cgrp);
+	return bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
 }
 
 static
@@ -908,6 +910,25 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		 */
 		if (cgrp_id != 1) {
 			while ((taskc = scx_atq_pop(btq)) && can_loop) {
+				scx_task_cgroup_bw_t *t = (scx_task_cgroup_bw_t *)taskc;
+				/*
+				 * Invalidate the per-task cgx/llcx caches before
+				 * moving the task to the root BTQ. The old cgroup
+				 * context will be freed by cbw_del_cgroup_ctx()
+				 * shortly; a stale cgx_raw would cause throttle
+				 * checks to read freed or reallocated memory
+				 * (ABA), potentially throttling the task under
+				 * the wrong cgroup.
+				 *
+				 * No smp_mb() is needed here: cbw_put_aside()
+				 * acquires and releases the BTQ spinlock, whose
+				 * store-release orders these stores before the
+				 * task becomes visible in the BTQ. The drain
+				 * path's lock-acquire provides the matching
+				 * load-acquire.
+				 */
+				WRITE_ONCE(t->cgx_raw, 0);
+				WRITE_ONCE(t->llcx_raw, 0);
 				/*
 				 * Set task's vtime to zero so we can reap the
 				 * the throttled exiting task as soon as possible.
@@ -1042,15 +1063,17 @@ int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, u64 cgx_raw)
  */
 int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init_args *args __arg_trusted)
 {
+	struct cbw_cgrp_entry entry;
 	scx_cgroup_ctx_t *cgx, *parentx;
-	struct cbw_cgrp_entry *entry;
 	struct cgroup *parent;
+	u64 cgrp_id;
 
 	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
 		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
 
+	cgrp_id = cgroup_get_id(cgrp);
 	if (unlikely(cgrp->level == 0))
-		ROOT_CGID = cgroup_get_id(cgrp);
+		ROOT_CGID = cgrp_id;
 
 	/*
 	 * Allocate and initialize scx_cgroup_ctx for @cgrp.
@@ -1060,21 +1083,17 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * so the cgroup can distribute the budget to its descendants
 	 * when requested.
 	 */
-	entry = bpf_cgrp_storage_get(&cbw_cgrp_map, cgrp, 0,
-				     BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!entry) {
-		cbw_err("Failed to allocate cgroup entry: %llu",
-			cgroup_get_id(cgrp));
-		return -ENOMEM;
-	}
-
 	cgx = cbw_alloc_cgx();
 	if (!cgx) {
-		cbw_err("Failed to allocate cgroup ctx: %llu",
-			cgroup_get_id(cgrp));
+		cbw_err("Failed to allocate cgroup ctx: %llu", cgrp_id);
 		return -ENOMEM;
 	}
-	entry->cgx = (u64)cgx;
+	entry.cgx = (u64)cgx;
+	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
+		cbw_free_cgx(cgx);
+		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
+		return -ENOMEM;
+	}
 
 	cgx->id = cgroup_get_id(cgrp);
 	cbw_set_bandwidth((u64)cgx, args->bw_period_us, args->bw_quota_us,
@@ -1246,7 +1265,7 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	cbw_dbg_cgrp();
 
 	/* Update the cgroup's bandwidth. */
-	cgx_raw = cbw_get_cgroup_ctx_raw(cgrp);
+	cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
 	if (!cgx_raw) {
 		cbw_err("Failed to lookup a cgroup ctx: %llu",
 			cgroup_get_id(cgrp));
@@ -1267,7 +1286,7 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 		if (!cur_cgrp_trusted)
 			continue;
 
-		cur_cgx_raw = cbw_get_cgroup_ctx_raw(cur_cgrp_trusted);
+		cur_cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cur_cgrp_trusted));
 		if (!cur_cgx_raw) {
 			/*
 			 * The CPU controller is not enabled for this cgroup.
@@ -1581,7 +1600,7 @@ int cbw_get_current_llc_id(void)
 }
 
 static
-int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, u64 taskc_raw)
+int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 {
 	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
 	scx_cgroup_ctx_t *cgx;
@@ -1605,19 +1624,22 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, u64 taskc_raw)
 	 */
 
 	/* Always go ahead with the root cgroup. */
-	if (cgrp->level == 0)
+	if (cgrp_id == ROOT_CGID)
+		return 0;
+
+	/* Skip the uninitialized cgroup id. */
+	if (unlikely(cgrp_id == 0))
 		return 0;
 
 	if (taskc && taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
-		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp);
+		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
 		if (!cgx_raw) {
 			/*
 			 * The CPU controller is not enabled for this cgroup.
 			 */
-			cbw_dbg("Failed to lookup a cgroup ctx: %llu",
-				cgroup_get_id(cgrp));
+			cbw_dbg("Failed to lookup a cgroup ctx: %llu", cgrp_id);
 			return -ESRCH;
 		}
 		if (taskc)
@@ -1635,7 +1657,7 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, u64 taskc_raw)
 
 /**
  * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
- * @cgrp: cgroup where a task belongs to.
+ * @cgrp_id: cgroup id where a task belongs to.
  * @p: a task to be tested.
  * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
  *         pass 0 when no task context is available.
@@ -1645,7 +1667,7 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, u64 taskc_raw)
  * -errno for some other failures.
  */
 __hidden
-int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted,
+int scx_cgroup_bw_throttled(u64 cgrp_id,
 			     struct task_struct *p __arg_trusted, u64 taskc)
 {
 	/*
@@ -1661,12 +1683,12 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted,
 	if (p->flags & PF_EXITING)
 		return 0;
 
-	return cbw_cgroup_bw_throttled(cgrp, taskc);
+	return cbw_cgroup_bw_throttled(cgrp_id, taskc);
 }
 
 /**
  * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
- * @cgrp: cgroup where a task belongs to.
+ * @cgrp_id: cgroup id where a task belongs to.
  * @consumed_ns: amount of time actually used.
  * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
  *             pass 0 when no task context is available.
@@ -1674,8 +1696,7 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted,
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns,
-			  u64 taskc_raw)
+int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 {
 	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
 	scx_cgroup_llc_ctx_t *llcx;
@@ -1684,7 +1705,7 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns,
 	int llc_id;
 
 	/* Always go ahead with the root cgroup. */
-	if (cgrp->level == 0)
+	if (cgrp_id == ROOT_CGID)
 		return 0;
 
 	if (unlikely(!taskc)) {
@@ -1699,7 +1720,7 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns,
 			cbw_err("Invalid LLC id: %d", llc_id);
 			return -EINVAL;
 		}
-		llcx = cbw_get_llc_ctx(cgrp, llc_id);
+		llcx = cbw_get_llc_ctx_with_id(cgrp_id, llc_id);
 		if (!llcx)
 			return 0;
 		goto accounting_out;
@@ -1711,7 +1732,7 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns,
 	if (taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
-		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp);
+		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
 		if (!cgx_raw)
 			return 0;
 		taskc->cgx_raw = cgx_raw;
@@ -1767,8 +1788,8 @@ accounting_out:
 	 */
 	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
 
-	cbw_dbg_cgrp("  llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
-		     llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
+	cbw_dbg("  cgrp_id: %llu -- llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
+		cgrp_id, llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
 	return 0;
 }
 
@@ -1838,7 +1859,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
  * @p: a task to be put aside since the cgroup is throttled.
  * @taskc: a task-embedded pointer to scx_task_common.
  * @vtime: vtime of a task @p.
- * @cgrp: cgroup where a task belongs to.
+ * @cgrp_id: cgroup id where a task belongs to.
  *
  * When a cgroup is throttled (i.e., scx_cgroup_bw_reserve() returns -EAGAIN),
  * a task that is in the ops.enqueue() path should be put aside to the BTQ of
@@ -1849,10 +1870,10 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, struct cgroup *cgrp __arg_trusted)
+int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, u64 cgrp_id)
 {
-	cbw_dbg_cgrp(" [%s/%d]", p->comm, p->pid);
-	return cbw_put_aside(ctx, vtime, cgroup_get_id(cgrp));
+	cbw_dbg(" [%s/%d]", p->comm, p->pid);
+	return cbw_put_aside(ctx, vtime, cgrp_id);
 }
 
 static
@@ -2395,7 +2416,7 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx,
 		 * If the cgroup is throttled, all its LLC contexts are
 		 * throttled too. Stop draining immediately.
 		 */
-		if (cbw_cgroup_bw_throttled(cgrp, 0) == -EAGAIN)
+		if (cbw_cgroup_bw_throttled(cgroup_get_id(cgrp), 0) == -EAGAIN)
 			break;
 
 		nr_enq += cbw_drain_btq_batch(cgx, llcx);
@@ -2674,7 +2695,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 		return ret;
 	}
 
-	if ((ret = scx_cgroup_bw_put_aside(p, taskc,  p->scx.dsq_vtime, to))) {
+	if ((ret = scx_cgroup_bw_put_aside(p, taskc, p->scx.dsq_vtime, cgroup_get_id(to)))) {
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
 	}
