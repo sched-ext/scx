@@ -539,7 +539,7 @@ static void account_task_runtime(struct task_struct *p,
 	if (enable_cpu_bw && (p->pid != lavd_pid)) {
 		struct cgroup *cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
 		if (cgrp) {
-			scx_cgroup_bw_consume(cgrp, task_time_wall);
+			scx_cgroup_bw_consume(cgrp, task_time_wall, (u64)taskc);
 			bpf_cgroup_release(cgrp);
 		}
 	}

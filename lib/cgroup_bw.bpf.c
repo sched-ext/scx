@@ -337,10 +337,10 @@ static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx(void)
 
 static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
 {
-	llcx->free_next = 0;
-	llcx->id = 0;
-	llcx->runtime_total = 0;
-	/* llcx->btq is already NULL from the ownership-transfer CAS */
+	int i;
+
+	for (i = 0; i < sizeof(*llcx) && can_loop; i++)
+		((char __arena *)llcx)[i] = 0;
 	cbw_freelist_push(&cbw_llcx_free_head, llcx);
 }
 
@@ -1668,25 +1668,86 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted,
  * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
  * @cgrp: cgroup where a task belongs to.
  * @consumed_ns: amount of time actually used.
+ * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
+ *             pass 0 when no task context is available.
  *
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
+int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns,
+			  u64 taskc_raw)
 {
+	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
 	scx_cgroup_llc_ctx_t *llcx;
+	scx_cgroup_ctx_t *cgx;
+	u64 cgx_raw, llcx_raw;
 	int llc_id;
 
 	/* Always go ahead with the root cgroup. */
 	if (cgrp->level == 0)
 		return 0;
 
-	/* Get the current LLC ID. */
+	if (unlikely(!taskc)) {
+		/*
+		 * No task context: fall back to map lookups.
+		 *
+		 * When exiting a scx scheduler, the sched_ext kernel shuts
+		 * down cgroup support before tasks. Hence, failing to look
+		 * up an LLC context is quite normal in this case.
+		 */
+		if ((llc_id = cbw_get_current_llc_id()) < 0) {
+			cbw_err("Invalid LLC id: %d", llc_id);
+			return -EINVAL;
+		}
+		llcx = cbw_get_llc_ctx(cgrp, llc_id);
+		if (!llcx)
+			return 0;
+		goto accounting_out;
+	}
+
+	/*
+	 * Ensure cgx_raw is cached; populate it on the first call.
+	 */
+	if (taskc->cgx_raw) {
+		cgx_raw = taskc->cgx_raw;
+	} else {
+		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp);
+		if (!cgx_raw)
+			return 0;
+		taskc->cgx_raw = cgx_raw;
+	}
+	cgx = (scx_cgroup_ctx_t *)cgx_raw;
+
+	/*
+	 * Infinite-quota fast path: skip accounting entirely for unconstrained
+	 * cgroups. cbw_get_current_llc_id() is not called in this path.
+	 */
+	if (READ_ONCE(cgx->nquota_ub) == CBW_RUNTUME_INF)
+		return 0;
+
+	/* Get the current LLC ID only when accounting is needed. */
 	if ((llc_id = cbw_get_current_llc_id()) < 0) {
 		cbw_err("Invalid LLC id: %d", llc_id);
 		return -EINVAL;
 	}
 
+	/*
+	 * Use the cached llcx if the LLC id matches; otherwise look up by
+	 * cgx->id (avoids cgroup_get_id() pointer dereferences) and update
+	 * the cache.
+	 */
+	if (taskc->llcx_raw && taskc->last_llc_id == llc_id) {
+		llcx = (scx_cgroup_llc_ctx_t *)taskc->llcx_raw;
+	} else {
+		llcx_raw = cbw_get_llc_ctx_raw_with_id(cgx->id, llc_id);
+		if (!llcx_raw)
+			return 0;
+		taskc->llcx_raw = llcx_raw;
+		taskc->last_llc_id = llc_id;
+		llcx = (scx_cgroup_llc_ctx_t *)llcx_raw;
+	}
+
+accounting_out:
 	/*
 	 * Update the budget usage.
 	 *
@@ -1694,18 +1755,7 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 	 * actually used in another LLC domain. However, that is not a problem
 	 * because LLC's runtime_total will be aggregated to the cgroup level
 	 * at reservation.
-	 */
-	llcx = cbw_get_llc_ctx(cgrp, llc_id);
-	if (!llcx) {
-		/*
-		 * When exiting a scx scheduler, the sched_ext kernel shuts
-		 * down cgroup support before tasks. Hence, failing to look
-		 * up an LLC context is quite normal in this case.
-		 */
-		return 0;
-	}
-
-	/*
+	 *
 	 * consumed_ns may span a CBW_REPLENISH_PERIOD boundary when a task
 	 * runs across it. Since this function is called on every tick
 	 * (ops.stopping() and ops.tick()), consumed_ns per call is bounded by
@@ -2583,14 +2633,15 @@ int scx_cgroup_bw_is_task_throttled(u64 taskc)
  *
  * Return 0 for success, -errno for failure.
  */
-__hidden
+__hidden __noinline
 int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 		       struct cgroup *from __arg_trusted,
 		       struct cgroup *to __arg_trusted)
 {
-	scx_task_cgroup_bw_t *tc;
+	volatile scx_task_cgroup_bw_t *tc; /* Add `volatile` to work around the verifier error */
 	int ret;
 
+	scx_arena_subprog_init();
 	/*
 	 * Invalidate the per-task cache: cgx_raw and llcx_raw belong to the
 	 * old cgroup and will be repopulated on the next throttle/consume call.

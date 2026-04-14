@@ -91,10 +91,13 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted,
  * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
  * @cgrp: cgroup where a task belongs to.
  * @consumed_ns: amount of time actually used.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
+ *         pass 0 when no task context is available.
  *
  * Return 0 for success, -errno for failure.
  */
-int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns);
+int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns,
+			  u64 taskc);
 
 /**
  * scx_cgroup_bw_put_aside - Put aside a task to execute it when the cgroup is
