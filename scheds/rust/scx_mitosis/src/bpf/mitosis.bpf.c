@@ -28,6 +28,7 @@
 
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
+#include "slice_shrinking.bpf.h"
 #include "llc_aware.bpf.h"
 
 char _license[] SEC("license") = "GPL";
@@ -322,24 +323,6 @@ static inline void record_cgroup_exit(u64 cgid)
 }
 
 struct cell_cpumask_map cell_cpumasks SEC(".maps");
-
-/*
- * Helper functions for bumping per-cell stats
- */
-static void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
-{
-	u64 *vptr;
-
-	if ((vptr = MEMBER_VPTR(*cctx, .cstats[cell][idx])))
-		(*vptr) += delta;
-	else
-		scx_bpf_error("invalid cell or stat idxs: %d, %d", idx, cell);
-}
-
-static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
-{
-	cstat_add(idx, cell, cctx, 1);
-}
 
 static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx)
 {
@@ -875,25 +858,18 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 
+	/* Shrink the running task's slice for this pinned waiter.
+	 * We know this task is pinned (!all_cell_cpus_allowed). */
+	if (!tctx->all_cell_cpus_allowed && enable_slice_shrinking) {
+		struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+		/* Likely overly defensive bc no other should read */
+		if (curr && !(curr->flags & PF_IDLE))
+			slice_shrink_on_enqueue(curr, tctx, tctx->cell, cctx);
+	}
+
 	/* Kick the CPU if needed */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-}
-
-/*
- * Peek at the head of a DSQ. By default use a bpf_for_each iterator loop.
- * When use_lockless_peek is set, use the lockless scx_bpf_dsq_peek() kfunc.
- */
-static inline struct task_struct *dsq_peek(u64 dsq_id)
-{
-	struct task_struct *p;
-
-	if (use_lockless_peek)
-		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
-
-	bpf_for_each(scx_dsq, p, dsq_id, 0)
-		return p;
-	return NULL;
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
@@ -1356,6 +1332,13 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	}
 
 	tctx->started_running_at = scx_bpf_now();
+
+	/* Shrink our slice if a pinned task is queued on this CPU's DSQ. */
+	if (enable_slice_shrinking) {
+		int ret = slice_shrink_on_running(p, tctx->cell, cctx);
+		if (ret < 0)
+			return;
+	}
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
@@ -1388,6 +1371,9 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 		cstat_inc(CSTAT_CLAMP_USED, cidx, cctx);
 	used = time_delta(now, tctx->started_running_at);
 	tctx->started_running_at = now;
+
+	update_task_runtime_ewma(tctx, used);
+
 	/* scale the execution time by the inverse of the weight and charge */
 	if (p->scx.weight == 0) {
 		scx_bpf_error("Task %d has zero weight", p->pid);

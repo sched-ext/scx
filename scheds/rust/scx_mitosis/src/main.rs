@@ -191,6 +191,22 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     dynamic_affinity_cpu_selection: bool,
 
+    /// Enable slice shrinking for CPU-pinned tasks. Uses per-task EWMA
+    /// runtime to shrink the running task's slice when pinned waiters are queued.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_slice_shrinking: bool,
+
+    /// Upper bound for shrink limit (us). Used when the proportional
+    /// value (avg_runtime * K) exceeds it.
+    #[clap(long, default_value = "4000")]
+    slice_shrink_max_us: u64,
+
+    /// Minimum shrink limit (us). Slices are never shrunk below this value.
+    /// In practice, the resolution here is determined by the kernel's
+    /// tick period.
+    #[clap(long, default_value = "500")]
+    slice_shrink_min_us: u64,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -336,6 +352,20 @@ impl<'a> Scheduler<'a> {
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
+
+        // Slice shrinking configuration
+        if opts.slice_shrink_min_us >= opts.slice_shrink_max_us {
+            bail!(
+                "--slice-shrink-min-us ({}) must be less than --slice-shrink-max-us ({})",
+                opts.slice_shrink_min_us,
+                opts.slice_shrink_max_us
+            );
+        }
+        rodata.enable_slice_shrinking = opts.enable_slice_shrinking;
+        rodata.slice_shrink_max_ns = opts.slice_shrink_max_us * 1_000;
+        // K=2: in the proportional region, a pinned task waits at most 2x its historical runtime
+        rodata.slice_shrink_multiplier = 2;
+        rodata.slice_shrink_min_ns = opts.slice_shrink_min_us * 1_000;
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
@@ -915,6 +945,18 @@ impl<'a> Scheduler<'a> {
 
         self.metrics.update(&stats);
 
+        // Slice shrink stats bypass DistributionStats — they're raw event counts
+        let sum = |idx: usize| -> u64 { cell_stats_delta.iter().map(|c| c[idx]).sum() };
+        self.metrics.slice_shrink_max =
+            sum(bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_MAX as usize);
+        self.metrics.slice_shrink_proportional =
+            sum(bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_PROPORTIONAL as usize);
+        self.metrics.slice_shrink_min =
+            sum(bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_MIN as usize);
+        self.metrics.slice_shrink = self.metrics.slice_shrink_max
+            + self.metrics.slice_shrink_proportional
+            + self.metrics.slice_shrink_min;
+
         trace!("{} {}", prefix, stats);
 
         Ok(())
@@ -968,11 +1010,19 @@ impl<'a> Scheduler<'a> {
                 scope_pin_skips,
             )?;
 
-            self.metrics
-                .cells
-                .entry(cell as u32)
-                .or_default()
-                .update(&stats);
+            let cell_metrics = self.metrics.cells.entry(cell as u32).or_default();
+            cell_metrics.update(&stats);
+
+            // Slice shrink stats bypass DistributionStats
+            cell_metrics.slice_shrink_max =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_MAX as usize];
+            cell_metrics.slice_shrink_proportional = cell_stats_delta[cell]
+                [bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_PROPORTIONAL as usize];
+            cell_metrics.slice_shrink_min =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_MIN as usize];
+            cell_metrics.slice_shrink = cell_metrics.slice_shrink_max
+                + cell_metrics.slice_shrink_proportional
+                + cell_metrics.slice_shrink_min;
 
             trace!("{} {}", prefix, stats);
         }
