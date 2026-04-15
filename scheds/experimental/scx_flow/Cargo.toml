@@ -1,15 +1,16 @@
 [package]
 name = "scx_flow"
-version = "1.0.0"
+version = "2.2.0"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
-description = "A budget-based sched_ext CPU scheduler with reserved wakeup paths, shared fallback dispatch, and bounded adaptive tuning. https://github.com/sched-ext/scx"
+description = "A multi-lane budget-based sched_ext scheduler for interactive responsiveness and general-purpose throughput. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 
 [dependencies]
 anyhow = "1"
 ctrlc = { version = "3", features = ["termination"] }
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
+clap_complete = "4"
 crossbeam = "0.8"
 libbpf-rs = "=0.26.2"
 log = "0.4"
