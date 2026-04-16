@@ -162,7 +162,7 @@ impl TaskStateAnalyzer {
         };
 
         let mut sorted_stats = stats;
-        sorted_stats.sort_by(|a, b| b.total_time_ns.cmp(&a.total_time_ns));
+        sorted_stats.sort_by_key(|b| std::cmp::Reverse(b.total_time_ns));
         sorted_stats
     }
 
@@ -516,7 +516,7 @@ impl PreemptionAnalyzer {
             .map(|(_, tracker)| tracker.into_stats())
             .collect();
 
-        stats.sort_by(|a, b| b.preempted_count.cmp(&a.preempted_count));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.preempted_count));
         stats
     }
 }
@@ -944,7 +944,7 @@ impl PreemptionTracker {
 
     fn into_stats(self) -> PreemptionStats {
         let mut preempted_by: Vec<PreemptorInfo> = self.preempted_by.into_values().collect();
-        preempted_by.sort_by(|a, b| b.count.cmp(&a.count));
+        preempted_by.sort_by_key(|b| std::cmp::Reverse(b.count));
 
         PreemptionStats {
             pid: self.pid,

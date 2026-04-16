@@ -771,20 +771,19 @@ impl<'a> App<'a> {
 
         // Handle perf sampling attachment/detachment for PerfTop view
         match (self.prev_state.clone(), self.state.clone()) {
-            (prev, AppState::PerfTop) if prev != AppState::PerfTop => {
-                if self.has_perf_cap {
-                    // Entering PerfTop view - attach perf sampling and reset selection
-                    self.selected_symbol_index = 0;
-                    if let Err(e) = self.attach_perf_sampling() {
-                        eprintln!("Failed to attach perf sampling: {e}");
-                    }
+            (prev, AppState::PerfTop) if prev != AppState::PerfTop && self.has_perf_cap => {
+                // Entering PerfTop view - attach perf sampling and reset selection
+                self.selected_symbol_index = 0;
+                if let Err(e) = self.attach_perf_sampling() {
+                    eprintln!("Failed to attach perf sampling: {e}");
                 }
             }
-            (AppState::PerfTop, new) if new != AppState::PerfTop => {
+            (AppState::PerfTop, new)
+                if new != AppState::PerfTop
                 // Leaving PerfTop view - detach perf sampling
-                if self.has_perf_cap {
-                    self.detach_perf_sampling();
-                }
+                && self.has_perf_cap =>
+            {
+                self.detach_perf_sampling();
             }
             _ => {}
         }
@@ -5515,15 +5514,11 @@ impl<'a> App<'a> {
                     self.set_state(state.clone());
                 }
             }
-            Action::NextEvent => {
-                if self.next_event().is_err() {
-                    // XXX handle error
-                }
+            Action::NextEvent if self.next_event().is_err() => {
+                // XXX handle error
             }
-            Action::PrevEvent => {
-                if self.prev_event().is_err() {
-                    // XXX handle error
-                }
+            Action::PrevEvent if self.prev_event().is_err() => {
+                // XXX handle error
             }
             Action::NextViewState => self.next_view_state(),
             Action::SchedReg => {
@@ -5709,12 +5704,10 @@ impl<'a> App<'a> {
                 AppState::Help => {
                     self.handle_action(&Action::SetState(AppState::Help))?;
                 }
-                AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
-                    if self.in_thread_view {
-                        self.in_thread_view = false;
-                    } else {
-                        self.should_quit.store(true, Ordering::Relaxed);
-                    }
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Process
+                    if self.in_thread_view =>
+                {
+                    self.in_thread_view = false;
                 }
                 _ => {
                     self.should_quit.store(true, Ordering::Relaxed);

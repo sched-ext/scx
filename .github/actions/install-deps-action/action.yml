@@ -24,13 +24,19 @@ runs:
       run: |
         if sudo -n true 2>/dev/null; then
           read -ra pkgs <<< "$SCX_PACKAGES"
+          ok=false
           for attempt in 1 2 3; do
-            if timeout 90 sudo apt-get update && timeout 90 sudo apt-get install -y "${pkgs[@]}"; then
+            if timeout 300 sudo apt-get update -y && timeout 300 sudo apt-get install -y "${pkgs[@]}"; then
+              ok=true
               break
             fi
             echo "::warning::apt attempt $attempt failed, retrying in 5s..."
             sleep 5
           done
+          if [ "$ok" != true ]; then
+            echo "::error::All apt install attempts failed"
+            exit 1
+          fi
         fi
         echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
       shell: bash

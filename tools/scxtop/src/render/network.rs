@@ -210,7 +210,7 @@ impl NetworkRenderer {
 
         let mut interfaces: Vec<(&String, &InterfaceStats)> =
             network_stats.interfaces.iter().collect();
-        interfaces.sort_by(|a, b| b.1.recv_bytes.cmp(&a.1.recv_bytes));
+        interfaces.sort_by_key(|b| std::cmp::Reverse(b.1.recv_bytes));
 
         // Limit to top 5 interfaces by received bytes
         let top_interfaces = interfaces.into_iter().take(5);
@@ -283,7 +283,7 @@ impl NetworkRenderer {
             .iter()
             .map(|(name, stats)| (name.clone(), stats.recv_bytes + stats.sent_bytes))
             .collect();
-        interface_activity.sort_by(|a, b| b.1.cmp(&a.1));
+        interface_activity.sort_by_key(|b| std::cmp::Reverse(b.1));
         let top_interfaces: Vec<String> = interface_activity
             .into_iter()
             .take(3)
