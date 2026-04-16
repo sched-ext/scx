@@ -141,6 +141,8 @@ pub struct LayerStats {
     pub index: usize,
     #[stat(desc = "Total CPU utilization (100% means one full CPU)")]
     pub util: f64,
+    #[stat(desc = "Compensated CPU utilization (adjusted for irq/softirq/stolen)")]
+    pub util_compensated: f64,
     #[stat(desc = "Protected CPU utilization %")]
     pub util_protected_frac: f64,
     #[stat(desc = "Preempt-protected CPU utilization %")]
@@ -280,6 +282,11 @@ impl LayerStats {
             .take(LAYER_USAGE_SUM_UPTO + 1)
             .sum::<f64>();
 
+        let util_comp_sum = stats.layer_utils_compensated[lidx]
+            .iter()
+            .take(LAYER_USAGE_SUM_UPTO + 1)
+            .sum::<f64>();
+
         let membw_frac = match &layer.kind {
             // Open layer's can't have a memory BW limit.
             LayerKind::Open { .. } => 0.0,
@@ -300,6 +307,7 @@ impl LayerStats {
         Self {
             index: lidx,
             util: util_sum * 100.0,
+            util_compensated: util_comp_sum * 100.0,
             util_open_frac: calc_frac(stats.layer_utils[lidx][LAYER_USAGE_OPEN], util_sum),
             util_protected_frac: calc_frac(
                 stats.layer_utils[lidx][LAYER_USAGE_PROTECTED],
@@ -394,13 +402,20 @@ impl LayerStats {
         no_llc: bool,
     ) -> Result<()> {
         // Line 1: layer summary
+        let comp_str = if self.util > 0.1 && (self.util_compensated - self.util).abs() > 0.1 {
+            let overhead_pct = (1.0 - self.util / self.util_compensated) * 100.0;
+            format!(" comp_overhead={:.1}%", overhead_pct)
+        } else {
+            String::new()
+        };
         writeln!(
             w,
-            "\n\u{25B6} {} \u{2500} util/open/frac={:6.1}/{}/{:7.1} prot/prot_preempt={}/{} tasks={:6}",
+            "\n\u{25B6} {} \u{2500} util/open/frac={:6.1}/{}/{:7.1}{} prot/prot_preempt={}/{} tasks={:6}",
             name,
             self.util,
             fmt_pct(self.util_open_frac),
             self.util_frac,
+            comp_str,
             fmt_pct(self.util_protected_frac),
             fmt_pct(self.util_protected_preempt_frac),
             self.tasks,

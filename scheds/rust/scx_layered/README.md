@@ -67,5 +67,36 @@ per layer. This is useful if a layer has more latency sensitive tasks, where
 timeslices should be shorter. Conversely if a layer is largely CPU bound with
 less concerns of latency it may be useful to increase the `slice_us` parameter.
 
+### Utilization Compensation
+
+On systems where interrupt processing (irq, softirq) or stolen time
+concentrates on specific CPUs, those CPUs lose a significant fraction of
+their capacity to work that isn't attributed to any layer. Without
+compensation, layers running on these CPUs appear to use less CPU time
+than they actually need, causing them to under-request CPUs.
+
+When enabled, `scx_layered` computes a per-CPU scale factor from
+`/proc/stat` using:
+
+    s[cpu] = Δt / (Δt - irq - softirq - stolen)
+
+Each CPU's per-layer usage delta is multiplied by that CPU's scale
+factor before being summed into the layer total, so a layer doing most
+of its work on interrupt-heavy CPUs gets more compensation than one on
+cold CPUs even if both have the same raw utilization. The compensated
+utilization then drives `calc_target_nr_cpus` through the normal
+`util_range` mechanism. The scale is clamped to `[1.0, 20.0]`.
+
+The compensated utilization is shown alongside raw utilization in the
+per-layer stats output as ` comp_overhead=X.X%` when the layer is
+non-trivially active and the raw and compensated values differ
+meaningfully.
+
+Compensation is disabled by default and can be enabled with
+`--util-compensation` for cases where it is needed. On CPUs with no
+interrupt overhead the scale factor is 1.0 and compensated utilization
+equals raw utilization, so the flag has no effect on layers that only
+run on clean CPUs.
+
 `scx_layered` can provide performance wins, for certain workloads when
 sufficient tuning on the layer config.
