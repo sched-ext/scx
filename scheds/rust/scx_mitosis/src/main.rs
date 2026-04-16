@@ -1039,9 +1039,9 @@ impl<'a> Scheduler<'a> {
             .flat_map(|cell| QUEUE_STATS_IDX.iter().map(|&idx| cell[idx as usize]))
             .sum();
 
-        // We don't want to divide by zero later, but this is never expected.
         if global_queue_decisions == 0 {
-            bail!("Error: No queueing decisions made globally");
+            warn!("No queueing decisions made globally");
+            return Ok(());
         }
 
         self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
