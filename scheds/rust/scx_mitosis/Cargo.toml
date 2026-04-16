@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parkin
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.0" }
 
 [dev-dependencies]
+ktstr = "0.3"
 tempfile = "3"
 scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0", features = ["testutils"] }
 
