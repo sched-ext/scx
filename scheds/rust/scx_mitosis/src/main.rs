@@ -92,6 +92,10 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
+    /// SCX watchdog stall timeout in milliseconds. 0 uses kernel default (30s).
+    #[clap(long, default_value = "0")]
+    stall_timeout_ms: u32,
+
     /// Interval to consider reconfiguring the Cells (e.g. merge or split)
     #[clap(long, default_value = "10")]
     reconfiguration_interval_s: u64,
@@ -328,6 +332,9 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, mitosis, open_opts)?;
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
+        if opts.stall_timeout_ms > 0 {
+            skel.struct_ops.mitosis_mut().timeout_ms = opts.stall_timeout_ms;
+        }
 
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
 
@@ -989,9 +996,9 @@ impl<'a> Scheduler<'a> {
             .flat_map(|cell| QUEUE_STATS_IDX.iter().map(|&idx| cell[idx as usize]))
             .sum();
 
-        // We don't want to divide by zero later, but this is never expected.
         if global_queue_decisions == 0 {
-            bail!("Error: No queueing decisions made globally");
+            warn!("No queueing decisions made globally");
+            return Ok(());
         }
 
         self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
