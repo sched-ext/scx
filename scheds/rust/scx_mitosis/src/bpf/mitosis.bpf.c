@@ -355,7 +355,13 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 
 	bpf_cpumask_and(tctx->cpumask, cell_cpumask, p->cpus_ptr);
 
-	if (cell_cpumask)
+	/*
+	 * Empty intersection: cell has 0 CPUs or is disjoint with task
+	 * cpuset. Route to per-CPU pinned path which uses p->cpus_ptr.
+	 */
+	if (tctx->cpumask && bpf_cpumask_empty((const struct cpumask *)tctx->cpumask))
+		tctx->all_cell_cpus_allowed = false;
+	else if (cell_cpumask)
 		tctx->all_cell_cpus_allowed = bpf_cpumask_subset(cell_cpumask, p->cpus_ptr);
 
 	if (tctx->all_cell_cpus_allowed && enable_borrowing) {
