@@ -578,10 +578,7 @@ impl BpfProgStats {
                 let calls_delta = new_prog_data.run_cnt.saturating_sub(prev_data.run_cnt);
 
                 // Calculate per-call runtime from delta
-                let avg_runtime = if calls_delta > 0 {
-                    let avg = runtime_delta / calls_delta;
-
-                    // Update min/max
+                let avg_runtime = if let Some(avg) = runtime_delta.checked_div(calls_delta) {
                     if new_prog_data.min_runtime_ns == 0 || avg < new_prog_data.min_runtime_ns {
                         new_prog_data.min_runtime_ns = avg;
                     } else {

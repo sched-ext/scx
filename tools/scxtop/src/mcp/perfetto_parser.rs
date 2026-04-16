@@ -988,35 +988,35 @@ impl PerfettoTrace {
                                 });
                             }
                         }
-                        Some(ftrace_event::Event::SchedWakeup(wakeup)) => {
-                            if wakeup.pid == Some(pid) {
-                                events.push(ProcessTimelineEvent::Woken {
-                                    by_pid: event_with_idx.event.pid.unwrap_or(0),
-                                    timestamp: ts,
-                                });
-                            }
+                        Some(ftrace_event::Event::SchedWakeup(wakeup))
+                            if wakeup.pid == Some(pid) =>
+                        {
+                            events.push(ProcessTimelineEvent::Woken {
+                                by_pid: event_with_idx.event.pid.unwrap_or(0),
+                                timestamp: ts,
+                            });
                         }
-                        Some(ftrace_event::Event::SchedMigrateTask(migrate)) => {
-                            if migrate.pid == Some(pid) {
-                                events.push(ProcessTimelineEvent::Migrated {
-                                    from_cpu: 0, // Would need to track current CPU
-                                    to_cpu: migrate.dest_cpu.unwrap_or(0) as u32,
-                                    timestamp: ts,
-                                });
-                            }
+                        Some(ftrace_event::Event::SchedMigrateTask(migrate))
+                            if migrate.pid == Some(pid) =>
+                        {
+                            events.push(ProcessTimelineEvent::Migrated {
+                                from_cpu: 0, // Would need to track current CPU
+                                to_cpu: migrate.dest_cpu.unwrap_or(0) as u32,
+                                timestamp: ts,
+                            });
                         }
-                        Some(ftrace_event::Event::SchedProcessFork(fork)) => {
-                            if fork.parent_pid == Some(pid) {
-                                events.push(ProcessTimelineEvent::Forked {
-                                    child_pid: fork.child_pid.unwrap_or(0),
-                                    timestamp: ts,
-                                });
-                            }
+                        Some(ftrace_event::Event::SchedProcessFork(fork))
+                            if fork.parent_pid == Some(pid) =>
+                        {
+                            events.push(ProcessTimelineEvent::Forked {
+                                child_pid: fork.child_pid.unwrap_or(0),
+                                timestamp: ts,
+                            });
                         }
-                        Some(ftrace_event::Event::SchedProcessExit(exit)) => {
-                            if exit.pid == Some(pid) {
-                                events.push(ProcessTimelineEvent::Exited { timestamp: ts });
-                            }
+                        Some(ftrace_event::Event::SchedProcessExit(exit))
+                            if exit.pid == Some(pid) =>
+                        {
+                            events.push(ProcessTimelineEvent::Exited { timestamp: ts });
                         }
                         _ => {}
                     }

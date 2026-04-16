@@ -60,7 +60,7 @@ pub fn fuzzy_search(entries: &[String], input: &str) -> Vec<String> {
             .collect()
     }
 
-    fuzzy_results.sort_by(|a, b| b.1.cmp(&a.1));
+    fuzzy_results.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     fuzzy_results
         .into_iter()

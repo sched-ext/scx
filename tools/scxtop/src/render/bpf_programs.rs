@@ -396,7 +396,7 @@ impl BpfProgramRenderer {
         // Sort operations by runtime descending
         let mut ops: Vec<(&SchedExtOpType, &crate::bpf_prog_data::OperationStats)> =
             bpf_program_stats.operation_stats.iter().collect();
-        ops.sort_by(|a, b| b.1.total_runtime_ns.cmp(&a.1.total_runtime_ns));
+        ops.sort_by_key(|b| std::cmp::Reverse(b.1.total_runtime_ns));
 
         let mut text = vec![
             Line::from(Span::styled(
@@ -435,11 +435,10 @@ impl BpfProgramRenderer {
 
         // Show top 8 operations
         for (op_type, stats) in ops.iter().take(8) {
-            let avg_ns = if stats.total_calls > 0 {
-                stats.total_runtime_ns / stats.total_calls
-            } else {
-                0
-            };
+            let avg_ns = stats
+                .total_runtime_ns
+                .checked_div(stats.total_calls)
+                .unwrap_or(0);
 
             let pct = if bpf_program_stats.total_runtime_ns > 0 {
                 (stats.total_runtime_ns as f64 / bpf_program_stats.total_runtime_ns as f64) * 100.0
@@ -589,11 +588,10 @@ impl BpfProgramRenderer {
         bpf_program_stats: &BpfProgStats,
         theme: &AppTheme,
     ) -> Result<()> {
-        let avg_runtime_ns = if prog_data.run_cnt > 0 {
-            prog_data.run_time_ns / prog_data.run_cnt
-        } else {
-            0
-        };
+        let avg_runtime_ns = prog_data
+            .run_time_ns
+            .checked_div(prog_data.run_cnt)
+            .unwrap_or(0);
 
         let runtime_percentage = prog_data.runtime_percentage(bpf_program_stats.total_runtime_ns);
 

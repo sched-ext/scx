@@ -238,11 +238,10 @@ impl SharedStats {
             .cpu_stats
             .values()
             .map(|stats| {
-                let avg_latency_ns = if stats.latency_samples > 0 {
-                    stats.total_latency_ns / stats.latency_samples
-                } else {
-                    0
-                };
+                let avg_latency_ns = stats
+                    .total_latency_ns
+                    .checked_div(stats.latency_samples)
+                    .unwrap_or(0);
 
                 serde_json::json!({
                     "cpu_id": stats.cpu_id,
@@ -271,17 +270,16 @@ impl SharedStats {
         let mut processes: Vec<_> = self.process_stats.values().collect();
 
         // Sort by total runtime or latency
-        processes.sort_by(|a, b| b.nr_switches.cmp(&a.nr_switches));
+        processes.sort_by_key(|b| std::cmp::Reverse(b.nr_switches));
 
         let processes: Vec<JsonValue> = processes
             .iter()
             .take(limit.unwrap_or(100))
             .map(|stats| {
-                let avg_latency_ns = if stats.latency_samples > 0 {
-                    stats.total_latency_ns / stats.latency_samples
-                } else {
-                    0
-                };
+                let avg_latency_ns = stats
+                    .total_latency_ns
+                    .checked_div(stats.latency_samples)
+                    .unwrap_or(0);
 
                 serde_json::json!({
                     "tid": stats.pid,  // This is actually TID
@@ -346,17 +344,16 @@ impl SharedStats {
         }
 
         let mut processes: Vec<_> = process_aggregates.iter().collect();
-        processes.sort_by(|(_, a), (_, b)| b.nr_switches.cmp(&a.nr_switches));
+        processes.sort_by_key(|(_, b)| std::cmp::Reverse(b.nr_switches));
 
         let processes: Vec<JsonValue> = processes
             .iter()
             .take(limit.unwrap_or(100))
             .map(|(tgid, stats)| {
-                let avg_latency_ns = if stats.latency_samples > 0 {
-                    stats.total_latency_ns / stats.latency_samples
-                } else {
-                    0
-                };
+                let avg_latency_ns = stats
+                    .total_latency_ns
+                    .checked_div(stats.latency_samples)
+                    .unwrap_or(0);
 
                 serde_json::json!({
                     "pid": tgid,
@@ -436,11 +433,10 @@ impl SharedStats {
         let llcs: Vec<JsonValue> = llc_aggregates
             .iter()
             .map(|(llc_id, stats)| {
-                let avg_latency_ns = if stats.latency_samples > 0 {
-                    stats.total_latency_ns / stats.latency_samples
-                } else {
-                    0
-                };
+                let avg_latency_ns = stats
+                    .total_latency_ns
+                    .checked_div(stats.latency_samples)
+                    .unwrap_or(0);
 
                 serde_json::json!({
                     "llc_id": llc_id,
@@ -499,11 +495,10 @@ impl SharedStats {
         let nodes: Vec<JsonValue> = node_aggregates
             .iter()
             .map(|(node_id, stats)| {
-                let avg_latency_ns = if stats.latency_samples > 0 {
-                    stats.total_latency_ns / stats.latency_samples
-                } else {
-                    0
-                };
+                let avg_latency_ns = stats
+                    .total_latency_ns
+                    .checked_div(stats.latency_samples)
+                    .unwrap_or(0);
 
                 serde_json::json!({
                     "node_id": node_id,

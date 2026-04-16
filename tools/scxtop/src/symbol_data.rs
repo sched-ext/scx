@@ -292,7 +292,7 @@ impl SymbolData {
 
     pub fn get_top_symbols(&self, limit: usize) -> Vec<&SymbolSample> {
         let mut samples: Vec<&SymbolSample> = self.symbol_samples.values().collect();
-        samples.sort_by(|a, b| b.count.cmp(&a.count));
+        samples.sort_by_key(|b| std::cmp::Reverse(b.count));
         samples.into_iter().take(limit).collect()
     }
 

@@ -352,7 +352,7 @@ impl SchedulerRenderer {
         }
 
         // Sort by p90 descending (highest latency first)
-        entries.sort_by(|a, b| b.p90.cmp(&a.p90));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.p90));
 
         let header = Row::new(vec![
             Cell::from("PID"),
