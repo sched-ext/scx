@@ -1315,6 +1315,18 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	}
 
 	/*
+	 * Cell 0 must always have at least 1 CPU so its DSQ gets
+	 * drained. When child cpusets cover all CPUs, steal CPU 0.
+	 */
+	if (bpf_cpumask_empty((const struct cpumask *)root_bpf_cpumask)) {
+		struct cpu_ctx *cpu_ctx;
+		if (!(cpu_ctx = lookup_cpu_ctx(0)))
+			return 0;
+		cpu_ctx->cell = 0;
+		bpf_cpumask_set_cpu(0, root_bpf_cpumask);
+	}
+
+	/*
 	 * Recalc LLC counts for root cell BEFORE making cpumask visible.
 	 * Pass the new mask explicitly to avoid race if recalc did a
 	 * lookup_cell_cpumask()
