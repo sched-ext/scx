@@ -127,7 +127,7 @@ pub fn detect() -> Result<TopologyInfo> {
 
         let mut mask: u64 = 0;
 
-        for (&cpu_id, _cpu) in &llc.all_cpus {
+        for &cpu_id in llc.all_cpus.keys() {
             if cpu_id < MAX_CPUS {
                 info.cpu_llc_id[cpu_id] = llc_idx as u8;
 

@@ -246,18 +246,15 @@ pub struct TuiApp {
     pub bench_run_count: u32,
     pub last_bench_timestamp: u64, // to detect new results
     pub system_info: SystemInfo,
-    // Shared game + compiler detection (same logic as headless/release mode).
-    // Delegates to detect.rs for identical behavior across all build modes.
-    pub detector: crate::detect::GameDetector,
 }
 
 #[derive(Clone, Debug)]
 pub struct TaskTelemetryRow {
     pub pid: u32,
     pub comm: String,
-    pub tier: u8,
+    pub class_slot: u8,
     pub pelt_util: u32,
-    pub deficit_us: u32,
+    pub legacy_slot_u16: u32,
     pub wait_duration_ns: u64,
     pub gate_hit_pcts: [f64; 10], // G1, G2, G1W, G3, G1P, G1C, G1CP, G1D, G1WC, GTUN
     pub select_cpu_ns: u32,
@@ -295,17 +292,16 @@ pub struct TaskTelemetryRow {
     pub nvcsw_delta: u32,
     pub nivcsw_delta: u32,
     pub _pad_recomp: u16,
-    pub is_hog: bool,         // Hog squeeze: BULK + non-yielder + deprioritized
-    pub is_bg: bool,          // Background noise squeeze: non-game, non-wb, non-kernel
-    pub is_game_member: bool, // Task is in the game PPID family (tgid==game_tgid or ppid==game_ppid)
-    pub ppid: u32,            // Parent PID for game family detection
+    pub is_legacy2: bool,
+    pub is_legacy3: bool,
+    pub ppid: u32,
     // Per-callback sub-function stopwatch (ns)
     pub gate_cascade_ns: u32,  // select_cpu: full gate cascade duration
     pub idle_probe_ns: u32,    // select_cpu: winning gate idle probe cost
     pub vtime_compute_ns: u32, // enqueue: vtime calculation + tier weighting
     pub mbox_staging_ns: u32,  // running: mailbox CL0 write burst
     pub _pad_ewma: u32,
-    pub classify_ns: u32,      // stopping: tier classify + squeeze fusion
+    pub legacy_classify_ns: u32,
     pub vtime_staging_ns: u32, // stopping: dsq_vtime bit packing + writes
     pub warm_history_ns: u32,  // stopping: warm CPU ring shift
     // Quantum completion tracking
@@ -318,7 +314,7 @@ pub struct TaskTelemetryRow {
     // CPU core distribution histogram
     pub cpu_run_count: [u16; crate::topology::MAX_CPUS], // Per-CPU run count (TUI normalizes to %)
     // EEVDF telemetry
-    pub vtime_mult: u16, // Task weight (100=nice0, >100=high-pri, <100=low-pri)
+    pub task_weight: u16, // Task weight (100=nice0, >100=high-pri, <100=low-pri)
 }
 
 impl Default for TaskTelemetryRow {
@@ -326,9 +322,9 @@ impl Default for TaskTelemetryRow {
         Self {
             pid: 0,
             comm: String::new(),
-            tier: 0,
+            class_slot: 0,
             pelt_util: 0,
-            deficit_us: 0,
+            legacy_slot_u16: 0,
             wait_duration_ns: 0,
             gate_hit_pcts: [0.0; 10],
             select_cpu_ns: 0,
@@ -361,9 +357,8 @@ impl Default for TaskTelemetryRow {
             nvcsw_delta: 0,
             nivcsw_delta: 0,
             _pad_recomp: 0,
-            is_hog: false,
-            is_bg: false,
-            is_game_member: false,
+            is_legacy2: false,
+            is_legacy3: false,
             ppid: 0,
             // Telemetry fields
             gate_cascade_ns: 0,
@@ -371,7 +366,7 @@ impl Default for TaskTelemetryRow {
             vtime_compute_ns: 0,
             mbox_staging_ns: 0,
             _pad_ewma: 0,
-            classify_ns: 0,
+            legacy_classify_ns: 0,
             vtime_staging_ns: 0,
             warm_history_ns: 0,
             quantum_full_count: 0,
@@ -380,7 +375,7 @@ impl Default for TaskTelemetryRow {
             waker_cpu: 0,
             waker_tgid: 0,
             cpu_run_count: [0u16; crate::topology::MAX_CPUS],
-            vtime_mult: 100,
+            task_weight: 100,
         }
     }
 }
@@ -400,9 +395,12 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             .unwrap_or(bss.global_stats.len());
         for s in bss.global_stats.iter().take(nr) {
             // Sum all fields
-            total.nr_new_flow_dispatches += s.nr_new_flow_dispatches;
-            total.nr_old_flow_dispatches += s.nr_old_flow_dispatches;
             total.nr_dropped_allocations += s.nr_dropped_allocations;
+            total.nr_prev_cpu_tunnels += s.nr_prev_cpu_tunnels;
+            total.nr_busy_handoff_dispatches += s.nr_busy_handoff_dispatches;
+            total.nr_busy_keep_suppressed += s.nr_busy_keep_suppressed;
+            total.nr_wakeup_busy_local_target += s.nr_wakeup_busy_local_target;
+            total.nr_wakeup_busy_remote_target += s.nr_wakeup_busy_remote_target;
 
             total.total_gate1_latency_ns += s.total_gate1_latency_ns;
             total.total_gate2_latency_ns += s.total_gate2_latency_ns;
@@ -415,8 +413,8 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.max_select_cpu_ns = total.max_select_cpu_ns.max(s.max_select_cpu_ns);
             total.max_stopping_ns = total.max_stopping_ns.max(s.max_stopping_ns);
             total.max_running_ns = total.max_running_ns.max(s.max_running_ns);
-            total.nr_stop_confidence_skip += s.nr_stop_confidence_skip;
-            total.nr_stop_classify += s.nr_stop_classify;
+            total.nr_stop_deferred_skip += s.nr_stop_deferred_skip;
+            total.nr_stop_deferred += s.nr_stop_deferred;
             total.nr_stop_ramp += s.nr_stop_ramp;
             total.nr_stop_miss += s.nr_stop_miss;
 
@@ -432,10 +430,10 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.total_dispatch_ns += s.total_dispatch_ns;
             total.max_dispatch_ns = total.max_dispatch_ns.max(s.max_dispatch_ns);
 
-            // EEVDF topology telemetry
-            total.nr_vprot_suppressed += s.nr_vprot_suppressed;
-            total.nr_lag_applied += s.nr_lag_applied;
-            total.nr_capacity_scaled += s.nr_capacity_scaled;
+            // Wakeup enqueue gate telemetry
+            total.nr_wakeup_direct_dispatches += s.nr_wakeup_direct_dispatches;
+            total.nr_wakeup_dsq_fallback_busy += s.nr_wakeup_dsq_fallback_busy;
+            total.nr_wakeup_dsq_fallback_queued += s.nr_wakeup_dsq_fallback_queued;
         }
     }
 
@@ -489,7 +487,6 @@ impl TuiApp {
             bench_run_count: 0,
             last_bench_timestamp: 0,
             system_info,
-            detector: crate::detect::GameDetector::new(),
         }
     }
 
@@ -999,14 +996,14 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         (51, "PELT runnable_avg only", "Kernel Free Data", "K"),
         (52, "schedstats nr_wakeups", "Kernel Free Data", "K"),
         (53, "p->policy+prio+flags", "Kernel Free Data", "K"),
-        (54, "PELT read+tier classify", "Kernel Free Data", "K"),
+        (54, "PELT read+legacy bucket", "Kernel Free Data", "K"),
         // End-to-End Workflow Comparisons
         (55, "task_storage write+read", "Storage Roundtrip", "C"),
         (56, "Arena write+read", "Storage Roundtrip", "C"),
         (57, "3-probe cascade (cake)", "Idle Selection", "C"),
         (58, "pick_idle_cpu full", "Idle Selection", "K"),
-        (59, "Weight classify (bpfland)", "Classification", "C"),
-        (60, "Lat-cri classify (lavd)", "Classification", "C"),
+        (59, "Weight-vtime calc (bpfland)", "Classification", "C"),
+        (60, "Latency score calc (lavd)", "Classification", "C"),
         (61, "SMT: cake sib probe", "SMT Probing", "C"),
         (62, "SMT: cpumask probe", "SMT Probing", "K"),
         // ═══ Fairness Fixes (cold-cache + remote) ═══
@@ -1014,7 +1011,7 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
         // can't evict task_struct — add ~10ns (L3 hit) conservatively.
         // kick_cpu remote measures bit-set only — add ~100ns for IPI delivery.
         (63, "storage_get COLD ~est", "Cold Cache", "K"),
-        (64, "PELT classify COLD", "Cold Cache", "K"),
+        (64, "PELT bucket COLD", "Cold Cache", "K"),
         (65, "legacy EWMA COLD", "Cold Cache", "C"),
         (66, "kick_cpu REMOTE ~est", "Cold Cache", "K"),
     ];
@@ -1080,48 +1077,14 @@ fn format_bench_for_clipboard(app: &TuiApp) -> String {
 
 /// Format stats as a copyable text string
 fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
-    let total_dispatches = stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
-    let new_pct = if total_dispatches > 0 {
-        (stats.nr_new_flow_dispatches as f64 / total_dispatches as f64) * 100.0
-    } else {
-        0.0
-    };
+    let total_dsq_dispatches = stats.nr_local_dispatches + stats.nr_stolen_dispatches;
 
     let mut output = String::new();
     output.push_str(&app.system_info.format_header());
 
-    // Compact state/game/uptime line
-    let state_str = match app.detector.sched_state {
-        2 => {
-            let conf_label = match app.detector.game_confidence {
-                100 => "Steam",
-                90 => "Wine",
-                _ => "?",
-            };
-            format!(
-                "GAMING game={} pid={} threads={} conf={}%[{}]",
-                if app.detector.game_name.is_empty() {
-                    "?"
-                } else {
-                    &app.detector.game_name
-                },
-                app.detector.tracked_game_tgid,
-                app.detector.game_thread_count,
-                app.detector.game_confidence,
-                conf_label,
-            )
-        }
-
-        1 => format!(
-            "COMPILATION compile_tasks={}",
-            app.detector.compile_task_count
-        ),
-        _ => "IDLE".to_string(),
-    };
     output.push_str(&format!(
-        "cake: uptime={} state={}\n",
+        "cake: uptime={} state=IDLE detector=disabled\n",
         app.format_uptime(),
-        state_str
     ));
 
     // Compact dispatch stats
@@ -1135,38 +1098,49 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     } else {
         0.0
     };
+    let wake_total = stats.nr_wakeup_direct_dispatches
+        + stats.nr_wakeup_dsq_fallback_busy
+        + stats.nr_wakeup_dsq_fallback_queued;
     output.push_str(&format!(
-        "disp: total={} new={:.1}% local={} steal={} miss={} hint_skip={} hint%={:.0} queue={}\n",
-        total_dispatches,
-        new_pct,
+        "disp: dsq_total={} local={} steal={} miss={} hint_skip={} hint%={:.0} queue={} wake:direct={} busy={} queued={} total={} busy_local={} busy_remote={} flow:tunnel_prev={} handoff={} supp={}\n",
+        total_dsq_dispatches,
         stats.nr_local_dispatches,
         stats.nr_stolen_dispatches,
         stats.nr_dispatch_misses,
         stats.nr_dispatch_hint_skip,
         hint_pct,
         dsq_depth,
+        stats.nr_wakeup_direct_dispatches,
+        stats.nr_wakeup_dsq_fallback_busy,
+        stats.nr_wakeup_dsq_fallback_queued,
+        wake_total,
+        stats.nr_wakeup_busy_local_target,
+        stats.nr_wakeup_busy_remote_target,
+        stats.nr_prev_cpu_tunnels,
+        stats.nr_busy_handoff_dispatches,
+        stats.nr_busy_keep_suppressed,
     ));
 
     // Compact callback profile (all on 2 lines)
-    let stop_total = stats.nr_stop_confidence_skip
-        + stats.nr_stop_classify
+    let stop_total = stats.nr_stop_deferred_skip
+        + stats.nr_stop_deferred
         + stats.nr_stop_ramp
         + stats.nr_stop_miss;
     let stop_total_f = (stop_total as f64).max(1.0);
     output.push_str(&format!(
-        "cb.stop: tot_µs={} max_ns={} calls={} skip={:.1}% classify={:.1}% ramp={:.1}% miss={:.1}%\n",
+        "cb.stop: tot_µs={} max_ns={} calls={} skip={:.1}% deferred={:.1}% legacy1={:.1}% legacy2={:.1}%\n",
         stats.total_stopping_ns / 1000,
         stats.max_stopping_ns,
         stop_total,
-        stats.nr_stop_confidence_skip as f64 / stop_total_f * 100.0,
-        stats.nr_stop_classify as f64 / stop_total_f * 100.0,
+        stats.nr_stop_deferred_skip as f64 / stop_total_f * 100.0,
+        stats.nr_stop_deferred as f64 / stop_total_f * 100.0,
         stats.nr_stop_ramp as f64 / stop_total_f * 100.0,
         stats.nr_stop_miss as f64 / stop_total_f * 100.0,
     ));
     output.push_str(&format!(
         "cb.run: tot_µs={} max_ns={} calls={}  cb.enq: tot_µs={} calls={}  sel: g1_µs={} g2_µs={}  cb.disp: tot_µs={} max_ns={} calls={}\n",
-        stats.total_running_ns / 1000, stats.max_running_ns, total_dispatches,
-        stats.total_enqueue_latency_ns / 1000, total_dispatches,
+        stats.total_running_ns / 1000, stats.max_running_ns, total_dsq_dispatches,
+        stats.total_enqueue_latency_ns / 1000, total_dsq_dispatches,
         stats.total_gate1_latency_ns / 1000, stats.total_gate2_latency_ns / 1000,
         stats.total_dispatch_ns / 1000, stats.max_dispatch_ns, total_dispatch_calls,
     ));
@@ -1177,10 +1151,10 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
 
     // Task matrix header — compact column key
     output.push_str("\ntasks: [PPID PID ST COMM CLS PELT AVG MAX GAP JIT WAIT R/s CPU SEL ENQ STOP RUN G1 G3 DSQ MIG/s WHIST]\n");
-    output.push_str("       [detail-A: gates% + DIRECT DEFI YIELD PRMPT ENQ MASK MAX_GAP DSQ_INS RUNS SUTIL LLC STREAK WAKER VCSW ICSW CONF TGID]\n");
-    output.push_str("       [detail-B: sw=cascade/probe/vtime/mbox/pelt/classify/vstg/warm(ns) qc=F%/Y%/P% wk=pid/tgid@cpu dist=C:pct,...]\n");
+    output.push_str("       [detail: gates% + DIRECT DEFI YIELD PRMPT ENQ MASK MAX_GAP DSQ_INS RUNS SUTIL LLC STREAK WAKER VCSW ICSW CONF TGID]\n");
 
-    // Dump always captures ALL BPF-tracked tasks (not filtered by TUI view)
+    const MAX_DUMP_ROWS: usize = 32;
+    // Dump captures the busiest BPF-tracked tasks only so exported files stay compact.
     let mut dump_pids: Vec<u32> = app
         .task_rows
         .iter()
@@ -1211,6 +1185,15 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             .cmp(&rank_b)
             .then_with(|| r_b.pelt_util.cmp(&r_a.pelt_util))
     });
+    let dump_total_rows = dump_pids.len();
+    if dump_pids.len() > MAX_DUMP_ROWS {
+        dump_pids.truncate(MAX_DUMP_ROWS);
+    }
+    output.push_str(&format!(
+        "dump: top {} of {} BPF-tracked rows by grouped PELT activity\n",
+        dump_pids.len(),
+        dump_total_rows,
+    ));
 
     // Pre-compute thread counts per tgid
     let mut tgid_counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
@@ -1249,21 +1232,17 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 0
             };
             let status_str = match row.status {
-                // Game family member: show ●GAME badge to signal boost status.
-                // This takes priority over HOG/BG which are cosmetic PELT labels.
-                // Note: BPF's can_squeeze = !is_game so game tasks are NEVER squeezed.
-                TaskStatus::Alive if row.is_game_member => "●GAME",
-                TaskStatus::Alive if row.is_hog => "●HOG",
-                TaskStatus::Alive if row.is_bg => "●BG",
+                TaskStatus::Alive if row.is_legacy2 => "●L2",
+                TaskStatus::Alive if row.is_legacy3 => "●L3",
                 TaskStatus::Alive => "●",
                 TaskStatus::Idle => "○",
                 TaskStatus::Dead => "✗",
             };
             let indent = if tgid != pid { "  " } else { "" };
-            let cls_str = match row.tier {
-                1 => "GAME",
-                2 => "HOG",
-                3 => "BG",
+            let cls_str = match row.class_slot {
+                1 => "RESV1",
+                2 => "LEG2",
+                3 => "LEG3",
                 _ => "NORM",
             };
             let avg_wait_us = if row.total_runs > 0 {
@@ -1306,54 +1285,12 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 "{}  g={:.0}/{:.0}/{:.0} dir={} defi={}µs yld={} prmpt={} enq={} mask={} maxgap={}µs dsqins={}ns runs={} sutil={}% llc=L{:02} streak={} waker={} vcsw={} icsw={} conf={}/{} tgid={}\n",
                 indent,
                 row.gate_hit_pcts[0], row.gate_hit_pcts[3], row.gate_hit_pcts[9],
-                row.direct_dispatch_count, row.deficit_us, row.yield_count,
+                row.direct_dispatch_count, row.legacy_slot_u16, row.yield_count,
                 row.preempt_count, row.enqueue_count, row.cpumask_change_count,
                 row.max_dispatch_gap_us, row.dsq_insert_ns, row.total_runs,
                 row.slice_util_pct, row.llc_id, row.same_cpu_streak,
                 row.wakeup_source_pid, row.nvcsw_delta, row.nivcsw_delta,
                 row._pad_recomp, row.total_runs, row.tgid,
-            ));
-            // detail-B: stopwatch(ns) + quantum completion % + waker + cpu dist — all one line
-            let q_total = row.quantum_full_count as u32
-                + row.quantum_yield_count as u32
-                + row.quantum_preempt_count as u32;
-            let (q_full_pct, q_yield_pct, q_preempt_pct) = if q_total > 0 {
-                (
-                    row.quantum_full_count as f64 / q_total as f64 * 100.0,
-                    row.quantum_yield_count as f64 / q_total as f64 * 100.0,
-                    row.quantum_preempt_count as f64 / q_total as f64 * 100.0,
-                )
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-            let total_cpu_runs: u32 = row.cpu_run_count.iter().map(|&c| c as u32).sum();
-            let dist_str = if total_cpu_runs > 0 {
-                let mut cpu_pcts: Vec<(usize, f64)> = row
-                    .cpu_run_count
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, &c)| c > 0)
-                    .map(|(i, &c)| (i, c as f64 / total_cpu_runs as f64 * 100.0))
-                    .collect();
-                cpu_pcts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                cpu_pcts
-                    .iter()
-                    .take(8)
-                    .map(|(cpu, pct)| format!("C{}:{:.0}", cpu, pct))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            } else {
-                "-".to_string()
-            };
-            output.push_str(&format!(
-                "{}  sw={}/{}/{}/{}/{}/{}/{}/{} qc=F{:.0}/Y{:.0}/P{:.0} wk={}/{}@{} ppid={} dist={}\n",
-                indent,
-                row.gate_cascade_ns, row.idle_probe_ns, row.vtime_compute_ns,
-                row.mbox_staging_ns, row._pad_ewma, row.classify_ns,
-                row.vtime_staging_ns, row.warm_history_ns,
-                q_full_pct, q_yield_pct, q_preempt_pct,
-                row.wakeup_source_pid, row.waker_tgid, row.waker_cpu,
-                row.ppid, dist_str,
             ));
         }
     }
@@ -1469,12 +1406,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         .split(area);
 
     // --- Compact Header: system info + tier counts on one line ---
-    let total_dispatches = stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
-    let new_pct = if total_dispatches > 0 {
-        (stats.nr_new_flow_dispatches as f64 / total_dispatches as f64) * 100.0
-    } else {
-        0.0
-    };
+    let total_dsq_dispatches = stats.nr_local_dispatches + stats.nr_stolen_dispatches;
 
     // PELT tier summary: count tasks by utilization bands
     let (mut wc0, mut wc1, mut wc2, mut wc3) = (0u32, 0u32, 0u32, 0u32);
@@ -1520,24 +1452,23 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             .map(|khz| format!(" {:.1}GHz", khz as f64 / 1_000_000.0))
             .unwrap_or_default();
 
-    // Hog count for header visibility
-    let hog_count = app.task_rows.values().filter(|r| r.is_hog).count();
-    let bg_count = app.task_rows.values().filter(|r| r.is_bg).count();
+    // Legacy class-slot counts for header visibility
+    let hog_count = app.task_rows.values().filter(|r| r.is_legacy2).count();
+    let bg_count = app.task_rows.values().filter(|r| r.is_legacy3).count();
     let squeeze_str = match (hog_count > 0, bg_count > 0) {
-        (true, true) => format!("  HOG:{}  BG:{}", hog_count, bg_count),
-        (true, false) => format!("  HOG:{}", hog_count),
-        (false, true) => format!("  BG:{}", bg_count),
+        (true, true) => format!("  LEG2:{}  LEG3:{}", hog_count, bg_count),
+        (true, false) => format!("  LEG2:{}", hog_count),
+        (false, true) => format!("  LEG3:{}", bg_count),
         (false, false) => String::new(),
     };
 
-    // Line 1: CPU | Dispatches | Tier Distribution
+    // Line 1: CPU | DSQ dispatches | Tier Distribution
     let line1 =
         format!(
-        " CPU: {}{}  │  Dispatches: {} ({:.0}% new)  │  Tiers: T0:{} T1:{} T2:{} T3:{}  │  {}{}{}",
+        " CPU: {}{}  │  DSQ Dispatches: {}  │  Tiers: T0:{} T1:{} T2:{} T3:{}  │  {}{}{}",
         topo_flags,
         cpu_freq_str,
-        total_dispatches,
-        new_pct,
+        total_dsq_dispatches,
         wc0, wc1, wc2, wc3,
         app.format_uptime(),
         squeeze_str,
@@ -1571,71 +1502,22 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     };
 
     let line2 = format!(
-        " Dispatch: Local:{} Steal:{} Miss:{} HintSkip:{} ({:.0}%)  │  {}  │  EEVDF: Vprot:{} Lag:{} Cap:{}",
+        " Dispatch: Local:{} Steal:{} Miss:{} HintSkip:{} ({:.0}%)  │  {}  │  Wake: Dir:{} Busy:{} Queued:{}  │  Flow: Tunnel:{} Handoff:{} Supp:{}",
         stats.nr_local_dispatches,
         stats.nr_stolen_dispatches,
         stats.nr_dispatch_misses,
         stats.nr_dispatch_hint_skip,
         hint_pct,
         queue_str,
-        stats.nr_vprot_suppressed,
-        stats.nr_lag_applied,
-        stats.nr_capacity_scaled,
+        stats.nr_wakeup_direct_dispatches,
+        stats.nr_wakeup_dsq_fallback_busy,
+        stats.nr_wakeup_dsq_fallback_queued,
+        stats.nr_prev_cpu_tunnels,
+        stats.nr_busy_handoff_dispatches,
+        stats.nr_busy_keep_suppressed,
     );
 
-    // State label — shown in header for all three operating states
-    let state_line = match app.detector.sched_state {
-        2 => String::new(), // GAMING: state shown inline in game_line below
-        1 => format!(
-            " State: COMPILATION | {} compiler task{} active",
-            app.detector.compile_task_count,
-            if app.detector.compile_task_count == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ),
-        _ => " State: IDLE".to_string(),
-    };
-
-    let header_text = if app.detector.tracked_game_tgid > 0 {
-        // Confidence tag: shows detection tier + poll stability
-        let conf_label = match app.detector.game_confidence {
-            100 => "Steam",
-            90 => "Wine/.exe",
-            _ => "unknown",
-        };
-        let stability = if app.detector.stable_polls >= 20 {
-            "\u{1F512}".to_string()
-        } else {
-            format!("{}/20", app.detector.stable_polls)
-        };
-        let mut game_line = format!(
-            " State: GAMING | Game: {} (PID {}, {} threads) [{}% {} {}]",
-            if app.detector.game_name.is_empty() {
-                "unknown"
-            } else {
-                &app.detector.game_name
-            },
-            app.detector.tracked_game_tgid,
-            app.detector.game_thread_count,
-            app.detector.game_confidence,
-            conf_label,
-            stability,
-        );
-        // Show challenger holdoff status if active
-        if app.detector.challenger_ppid > 0 {
-            if let Some(since) = app.detector.challenger_since {
-                let elapsed = since.elapsed().as_secs();
-                game_line.push_str(&format!(" [contender: {}s/15s]", elapsed));
-            }
-        }
-        format!("{}\n{}\n{}", line1, line2, game_line)
-    } else if !state_line.is_empty() {
-        format!("{}\n{}\n{}", line1, line2, state_line)
-    } else {
-        format!("{}\n{}", line1, line2)
-    };
+    let header_text = format!("{}\n{}\n State: IDLE | detector disabled", line1, line2);
 
     let header_border_color = if stats.nr_dropped_allocations > 0 {
         Color::Red
@@ -1657,7 +1539,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     frame.render_widget(header, outer_layout[0]);
 
     // --- PELT Utilization Tier Panel ---
-    // Aggregate by PELT bands: P0 <5%, P1 5-25%, P2 25-78%, P3 ≥HOG
+    // Aggregate by fixed PELT bands for display only.
     let mut tier_pids = [0u32; 4];
     let mut tier_avg_rt_sum = [0u64; 4];
     let mut tier_jitter_sum = [0u64; 4];
@@ -1666,7 +1548,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     let mut tier_active = [0u32; 4];
 
     // --- CLASS Distribution Panel ---
-    // Aggregate by scheduling class: GAME=1, NORM=0, HOG=2, BG=3
+    // Aggregate by current/legacy class slots carried in telemetry.
     let mut cls_pids = [0u32; 4];
     let mut cls_pelt_sum = [0u64; 4];
     let mut cls_wait_sum = [0u64; 4];
@@ -1692,12 +1574,12 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         tier_runs_per_sec[t] += row.runs_per_sec;
         tier_wait_sum[t] += row.wait_duration_ns / row.total_runs as u64 / 1000;
 
-        // CLASS aggregation (tier field: 0=NORM, 1=GAME, 2=HOG, 3=BG)
-        let c = match row.tier {
-            1 => 0, // GAME
+        // CLASS aggregation (tier field: 0=NORM, 1=reserved, 2=legacy2, 3=legacy3)
+        let c = match row.class_slot {
+            1 => 0, // reserved legacy slot
             0 => 1, // NORM
-            2 => 2, // HOG
-            3 => 3, // BG
+            2 => 2, // LEG2
+            3 => 3, // LEG3
             _ => 1, // default NORM
         };
         cls_pids[c] += 1;
@@ -1714,7 +1596,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         .split(outer_layout[1]);
 
     // ── Left: PELT Utilization Tiers ──
-    let tier_names = ["P0 <5%", "P1 5-25%", "P2 25-78%", "P3 ≥HOG"];
+    let tier_names = ["P0 <5%", "P1 5-25%", "P2 25-78%", "P3 >=78%"];
     let tier_colors = [Color::LightCyan, Color::Green, Color::Yellow, Color::Red];
 
     let tier_header = Row::new(vec![
@@ -1812,8 +1694,8 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     frame.render_widget(tier_table, tier_cols[0]);
 
     // ── Right: CLASS Distribution ──
-    let cls_names = ["GAME", "NORM", "HOG", "BG"];
-    let cls_colors = [Color::Green, Color::Blue, Color::Yellow, Color::Red];
+    let cls_names = ["RESV1", "NORM", "LEG2", "LEG3"];
+    let cls_colors = [Color::DarkGray, Color::Blue, Color::Yellow, Color::Red];
 
     let cls_header = Row::new(vec![
         Cell::from("CLASS").style(
@@ -2141,29 +2023,29 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         let cells = vec![
             Cell::from(format!("{}{}", indent, row.ppid)),
             Cell::from(format!("{}", row.pid)),
-            Cell::from(if row.is_hog {
-                "●HOG"
-            } else if row.is_bg {
-                "●BG"
+            Cell::from(if row.is_legacy2 {
+                "●L2"
+            } else if row.is_legacy3 {
+                "●L3"
             } else {
                 row.status.label()
             })
-            .style(Style::default().fg(if row.is_hog {
+            .style(Style::default().fg(if row.is_legacy2 {
                 Color::LightRed
-            } else if row.is_bg {
+            } else if row.is_legacy3 {
                 Color::Rgb(255, 165, 0) // orange for bg_noise
             } else {
                 row.status.color()
             })),
             Cell::from(row.comm.as_str()),
-            Cell::from(match row.tier {
-                1 => "GAME",
-                2 => "HOG",
-                3 => "BG",
+            Cell::from(match row.class_slot {
+                1 => "RESV",
+                2 => "LEG2",
+                3 => "LEG3",
                 _ => "NORM",
             })
-            .style(Style::default().fg(match row.tier {
-                1 => Color::Green,
+            .style(Style::default().fg(match row.class_slot {
+                1 => Color::DarkGray,
                 2 => Color::Yellow,
                 3 => Color::Red,
                 _ => Color::Blue,
@@ -2196,18 +2078,18 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Cell::from(format!("{:.0}", q_yield_pct)),
             Cell::from(format!("{:.0}", q_preempt_pct)),
             Cell::from(format!("{}", row.wakeup_source_pid)),
-            Cell::from(if row.vtime_mult == 100 {
+            Cell::from(if row.task_weight == 100 {
                 "N0".to_string()
-            } else if row.vtime_mult > 100 {
+            } else if row.task_weight > 100 {
                 // weight > 100 = negative nice = high priority
                 "N-".to_string()
             } else {
                 // weight < 100 = positive nice = low priority
                 "N+".to_string()
             })
-            .style(Style::default().fg(if row.vtime_mult > 100 {
+            .style(Style::default().fg(if row.task_weight > 100 {
                 Color::LightGreen
-            } else if row.vtime_mult < 100 {
+            } else if row.task_weight < 100 {
                 Color::LightRed
             } else {
                 Color::DarkGray
@@ -2362,10 +2244,10 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
             "Alive — actively scheduled, has telemetry",
             Color::Green,
         ),
-        sub("●HOG", "Hog — CPU hog detection, HOG class", Color::Red),
+        sub("●L2", "Legacy class-slot 2 marker", Color::Red),
         sub(
-            "●BG",
-            "Background — low-priority noise task",
+            "●L3",
+            "Legacy class-slot 3 marker",
             Color::Rgb(255, 165, 0),
         ),
         sub(
@@ -2375,19 +2257,11 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         ),
         sub("✗", "Dead — exited since last refresh", Color::DarkGray),
         col("COMM", "Thread name (first 15 chars, from /proc)"),
-        col("CLS", "CAKE class assignment:"),
-        sub(
-            "GAME",
-            "Game family member (Steam/Wine detected)",
-            Color::Green,
-        ),
+        col("CLS", "Current class slot / legacy debug slot:"),
         sub("NORM", "Normal interactive task (default)", Color::Blue),
-        sub(
-            "HOG",
-            "CPU hog (high PELT, low voluntary yield)",
-            Color::Yellow,
-        ),
-        sub("BG", "Background noise (low PELT, infrequent)", Color::Red),
+        sub("RESV1", "Reserved legacy class slot 1", Color::DarkGray),
+        sub("LEG2", "Reserved legacy class slot 2", Color::Yellow),
+        sub("LEG3", "Reserved legacy class slot 3", Color::Red),
         col("TGID", "Thread Group ID (process that owns thread)"),
         Line::from(""),
         subsection("── Timing ──"),
@@ -2406,7 +2280,7 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         subsection("── Callback Overhead (ns) ──"),
         col("SEL", "select_cpu: gate cascade to find idle CPU"),
         col("ENQ", "enqueue: vtime calc + DSQ insert kfunc"),
-        col("STOP", "stopping: PELT classify + staging + DRR"),
+        col("STOP", "stopping: runtime accounting + optional debug telemetry"),
         col("RUN", "running: mailbox writes + arena telemetry"),
         Line::from(""),
         subsection("── Gate Distribution (%) ──"),
@@ -2457,15 +2331,15 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         subsection("── Per-Callback Stopwatch (ns) ──"),
         col("gate_cas", "select_cpu: full gate cascade duration"),
         col("idle_prb", "select_cpu: winning gate idle probe cost"),
-        col("vtime_cm", "enqueue: vtime + tier weighting overhead"),
+        col("vtime_cm", "enqueue: vtime adjustment overhead"),
         col("mbox", "running: per-CPU mailbox CL0 write burst"),
-        col("classify", "stopping: tier classify + DRR + deficit"),
+        col("classify", "reserved legacy timing slot"),
         col("vtime_st", "stopping: dsq_vtime bit packing + write"),
         col("warm", "stopping: warm CPU ring shift (migration)"),
         Line::from(""),
         subsection("── Extended Detail Fields ──"),
         col("DIRECT", "Direct dispatch count (bypassed DSQ)"),
-        col("DEFICIT", "DRR++ deficit (µs) — 0=yielder, max=bulk"),
+        col("DEFICIT", "Reserved legacy field (retained for layout compatibility)"),
         col("SUTIL", "Slice util % (actual_run / slice)"),
         col("LLC", "Last LLC (L3 cache) node"),
         col("STREAK", "Consecutive same-CPU runs (locality)"),
@@ -2473,15 +2347,15 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         Line::from(""),
         section("═══ CALLBACK PROFILE ═══"),
         Line::from(""),
-        col("stopping", "PELT classify + staging + warm history"),
+        col("stopping", "runtime accounting + deferred telemetry"),
         sub(
             "skip",
-            "98.4% — confidence gate skips reclassify",
+            "Most stops skip deferred telemetry work",
             Color::DarkGray,
         ),
         sub(
-            "classify",
-            "~1.6% — full PELT (every 64th stop)",
+            "deferred",
+            "Every 64th stop runs the heavier deferred telemetry block",
             Color::DarkGray,
         ),
         col("running", "Mailbox stamping + arena telemetry"),
@@ -2504,17 +2378,11 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         col("b", "Run BenchLab benchmark iteration"),
         col("q / Esc", "Quit scx_cake"),
         Line::from(""),
-        subsection("── Scheduler States ──"),
+        subsection("── Scheduler State ──"),
         sub(
             "IDLE",
-            "No game detected — standard scheduling",
+            "General low-latency mode; detector removed",
             Color::DarkGray,
-        ),
-        sub("COMPILE", "≥2 compiler procs at ≥78% PELT", Color::Yellow),
-        sub(
-            "GAMING",
-            "Game detected — full priority system",
-            Color::Green,
         ),
     ];
 
@@ -2606,7 +2474,7 @@ fn draw_bench_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         (51, "PELT runnable_avg only", "Kernel Free Data", "K"),
         (52, "schedstats nr_wakeups", "Kernel Free Data", "K"),
         (53, "p->policy+prio+flags", "Kernel Free Data", "K"),
-        (54, "PELT read+tier classify", "Kernel Free Data", "K"),
+        (54, "PELT read+legacy bucket", "Kernel Free Data", "K"),
         // End-to-End Workflow Comparisons
         (55, "task_storage write+read", "Storage Roundtrip", "C"),
         (56, "Arena write+read", "Storage Roundtrip", "C"),
@@ -3222,7 +3090,7 @@ pub fn run_tui(
                     // Try to extract core number (e.g. "core 0" or "Tctl")
                     if let Some(core_id) = name
                         .split_whitespace()
-                        .last()
+                        .next_back()
                         .and_then(|s| s.parse::<usize>().ok())
                     {
                         if let Some(temp) = comp.temperature() {
@@ -3300,11 +3168,11 @@ pub fn run_tui(
                         let pid = rec.telemetry.pid_inner;
                         let ppid = rec.ppid;
                         let packed = rec.packed_info;
-                        let tier = (packed >> 28) & 0x03;
-                        let is_hog = (packed >> 27) & 1 != 0;
-                        let is_bg = (packed >> 22) & 1 != 0;
+                        let class_slot = (packed >> 28) & 0x03;
+                        let is_legacy2 = (packed >> 27) & 1 != 0;
+                        let is_legacy3 = (packed >> 22) & 1 != 0;
 
-                        if pid == 0 || tier > 3 {
+                        if pid == 0 || class_slot > 3 {
                             continue;
                         }
 
@@ -3319,9 +3187,9 @@ pub fn run_tui(
                                 .to_string(),
                         };
 
-                        // pelt_util and deficit_us now directly in cake_iter_record
+                        // pelt_util is in the iter record; legacy_slot_u16 is a reserved slot.
                         let pelt_util = rec.pelt_util as u32;
-                        let deficit_us: u32 = rec._pad_iter_def as u32;
+                        let legacy_slot_u16: u32 = rec.legacy_slot_u16 as u32;
 
                         let g1 = rec.telemetry.gate_1_hits;
                         let g2 = rec.telemetry.gate_2_hits;
@@ -3359,9 +3227,9 @@ pub fn run_tui(
                             .or_insert_with(|| TaskTelemetryRow {
                                 pid,
                                 comm: comm.clone(),
-                                tier: tier as u8,
+                                class_slot: class_slot as u8,
                                 pelt_util,
-                                deficit_us,
+                                legacy_slot_u16,
                                 wait_duration_ns: rec.telemetry.wait_duration_ns,
                                 select_cpu_ns: rec.telemetry.select_cpu_duration_ns,
                                 enqueue_ns: rec.telemetry.enqueue_duration_ns,
@@ -3399,15 +3267,15 @@ pub fn run_tui(
                                 nvcsw_delta: rec.telemetry.nvcsw_delta,
                                 nivcsw_delta: rec.telemetry.nivcsw_delta,
                                 _pad_recomp: rec.telemetry._pad_recomp,
-                                is_hog,
-                                is_bg,
+                                is_legacy2,
+                                is_legacy3,
                                 ppid,
                                 gate_cascade_ns: rec.telemetry.gate_cascade_ns,
                                 idle_probe_ns: rec.telemetry.idle_probe_ns,
                                 vtime_compute_ns: rec.telemetry.vtime_compute_ns,
                                 mbox_staging_ns: rec.telemetry.mbox_staging_ns,
                                 _pad_ewma: rec.telemetry._pad_ewma,
-                                classify_ns: rec.telemetry.classify_ns,
+                                legacy_classify_ns: rec.telemetry.legacy_classify_ns,
                                 vtime_staging_ns: rec.telemetry.vtime_staging_ns,
                                 warm_history_ns: rec.telemetry.warm_history_ns,
                                 quantum_full_count: rec.telemetry.quantum_full_count,
@@ -3416,14 +3284,13 @@ pub fn run_tui(
                                 waker_cpu: rec.telemetry.waker_cpu,
                                 waker_tgid: rec.telemetry.waker_tgid,
                                 cpu_run_count: rec.telemetry.cpu_run_count,
-                                is_game_member: false,
-                                vtime_mult: rec.vtime_mult,
+                                task_weight: rec.task_weight,
                             });
 
                         // Update dynamic row elements
-                        row.tier = tier as u8;
+                        row.class_slot = class_slot as u8;
                         row.pelt_util = pelt_util;
-                        row.deficit_us = deficit_us;
+                        row.legacy_slot_u16 = legacy_slot_u16;
                         row.wait_duration_ns = rec.telemetry.wait_duration_ns;
                         row.select_cpu_ns = rec.telemetry.select_cpu_duration_ns;
                         row.enqueue_ns = rec.telemetry.enqueue_duration_ns;
@@ -3455,19 +3322,16 @@ pub fn run_tui(
                         row.same_cpu_streak = rec.telemetry.same_cpu_streak;
                         row.wakeup_source_pid = rec.telemetry.wakeup_source_pid;
                         row._pad_recomp = rec.telemetry._pad_recomp;
-                        row.is_hog = is_hog;
-                        row.is_bg = is_bg;
-                        row.is_game_member = app.detector.tracked_game_tgid > 0
-                            && (row.tgid == app.detector.tracked_game_tgid
-                                || (row.ppid > 0 && row.ppid == app.detector.tracked_game_ppid));
+                        row.is_legacy2 = is_legacy2;
+                        row.is_legacy3 = is_legacy3;
                         row.ppid = ppid;
-                        row.vtime_mult = rec.vtime_mult;
+                        row.task_weight = rec.task_weight;
                         row.gate_cascade_ns = rec.telemetry.gate_cascade_ns;
                         row.idle_probe_ns = rec.telemetry.idle_probe_ns;
                         row.vtime_compute_ns = rec.telemetry.vtime_compute_ns;
                         row.mbox_staging_ns = rec.telemetry.mbox_staging_ns;
                         row._pad_ewma = rec.telemetry._pad_ewma;
-                        row.classify_ns = rec.telemetry.classify_ns;
+                        row.legacy_classify_ns = rec.telemetry.legacy_classify_ns;
                         row.vtime_staging_ns = rec.telemetry.vtime_staging_ns;
                         row.warm_history_ns = rec.telemetry.warm_history_ns;
                         row.quantum_full_count = rec.telemetry.quantum_full_count;
@@ -3493,7 +3357,7 @@ pub fn run_tui(
                     .or_insert_with(|| TaskTelemetryRow {
                         pid: pid_u32,
                         comm: process.name().to_string_lossy().to_string(),
-                        tier: 3,
+                        class_slot: 3,
                         ..Default::default()
                     });
             }
@@ -3514,47 +3378,6 @@ pub fn run_tui(
                 }
             }
             app.bpf_task_count = bpf_count;
-
-            // --- Game Detection: aggregate yields per PPID, pick winner ---
-            // Proton/Wine: all siblings (wineserver, game.exe, winedevice)
-            // share the same parent (pv-adverb). Aggregating by PPID means
-            // wineserver's yields + game yields combine, giving a stronger
-            // signal and ensuring the entire Wine prefix is detected as a family.
-            //
-            // GATE: Minimum 5 threads at PPID-family level.
-            //   Prevents idle browsers (1-3 yield-active threads) from qualifying.
-            //   Games under Proton easily satisfy: game.exe + wineserver +
-            //   winedevice + render workers = 5+ threads always.
-            //   Native Linux games also easily satisfy (main + audio + IO + render).
-            // Shared game + compiler detection — identical logic to headless/release.
-            // Uses detect.rs for /proc scanning, Steam/Wine/.exe detection,
-            // hysteresis state machine, and compiler detection.
-            // Guarantees TUI debugging matches production scheduling behavior.
-            let detect_result = app.detector.poll();
-
-            // Write detection results to BPF BSS — drives reclassifier,
-            // class-aware kick guard, SYNC strip, and quantum ceiling.
-            if let Some(bss) = &mut skel.maps.bss_data {
-                if bss.game_tgid != detect_result.game_tgid {
-                    bss.game_tgid = detect_result.game_tgid;
-                }
-                if bss.game_ppid != detect_result.game_ppid {
-                    bss.game_ppid = detect_result.game_ppid;
-                }
-                // game_confidence: only in Rust detector, not BPF BSS.
-                let state_u32 = detect_result.sched_state as u32;
-                if bss.sched_state != state_u32 {
-                    bss.sched_state = state_u32;
-                }
-                // Per-CPU sched_state_local: eliminates remote global BSS
-                // cache line fetch at 5 BPF hot-path sites.
-                for i in 0..app.topology.nr_cpus.min(bss.cpu_bss.len()) {
-                    if bss.cpu_bss[i].sched_state_local != detect_result.sched_state {
-                        bss.cpu_bss[i].sched_state_local = detect_result.sched_state;
-                    }
-                }
-                // quantum_ceiling_ns REMOVED: zero BPF readers.
-            }
 
             // --- Delta Mode: compute per-second rates ---
             let actual_elapsed = last_tick.elapsed().as_secs_f64().max(0.1);
@@ -3682,7 +3505,7 @@ pub fn run_tui(
                 SortColumn::Tier => sorted_pids.sort_by(|a, b| {
                     let r_a = app.task_rows.get(a).unwrap();
                     let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_a.tier.cmp(&r_b.tier);
+                    let cmp = r_a.class_slot.cmp(&r_b.class_slot);
                     if desc {
                         cmp
                     } else {
@@ -3713,7 +3536,7 @@ pub fn run_tui(
                     let r_a = app.task_rows.get(a).unwrap();
                     let r_b = app.task_rows.get(b).unwrap();
                     // Hogs first when descending
-                    let cmp = (r_b.is_hog as u8).cmp(&(r_a.is_hog as u8));
+                    let cmp = (r_b.is_legacy2 as u8).cmp(&(r_a.is_legacy2 as u8));
                     if desc {
                         cmp
                     } else {
@@ -3757,17 +3580,6 @@ pub fn run_tui(
                     tgid_rank.entry(tgid).or_insert(i);
                 }
             }
-            // Pin game-family rows to the top, preserving the user's sort order within
-            // each group. Uses stable_sort so relative order is unchanged.
-            if app.detector.tracked_game_tgid > 0 {
-                sorted_pids.sort_by(|a, b| {
-                    let gm_a = app.task_rows.get(a).is_some_and(|r| r.is_game_member);
-                    let gm_b = app.task_rows.get(b).is_some_and(|r| r.is_game_member);
-                    // true sorts before false (1 > 0), so game members come first.
-                    gm_b.cmp(&gm_a)
-                });
-            }
-
             sorted_pids.sort_by(|a, b| {
                 let r_a = app.task_rows.get(a).unwrap();
                 let r_b = app.task_rows.get(b).unwrap();
