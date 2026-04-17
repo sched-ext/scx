@@ -584,6 +584,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		 * enqueue), SCX_DSQ_LOCAL resolves to task_rq(p) -- not
 		 * the idle CPU we picked.
 		 */
+		tctx->vtime_charge_cell = tctx->cell;
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
 		if (kick)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -607,6 +608,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		if (cpu >= 0) {
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
+			tctx->vtime_charge_cell = tctx->cell;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
 			if (kick)
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -703,8 +705,10 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 		if (cpu < 0)
 			return prev_cpu;
 
-		if (idle_cpu_cleared || scx_bpf_test_and_clear_cpu_idle(cpu))
+		if (idle_cpu_cleared || scx_bpf_test_and_clear_cpu_idle(cpu)) {
+			tctx->vtime_charge_cell = tctx->cell;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		}
 		return cpu;
 	}
 
@@ -770,6 +774,19 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return;
+
+	/*
+	 * CPU -> cell mappings can change between enqueue() and stopping().
+	 * If that happens, the task's dsq_vtime may no longer belong to the
+	 * CPU-local or shared cell vtime domains visible at stopping(), and
+	 * advancing either one would charge the wrong domain.
+	 * Direct local insert paths snapshot the same state before inserting.
+	 *
+	 * Snapshot the cell whose vtime domain this placement expects to
+	 * charge. stopping() only advances local and cell vtime if the task
+	 * is not borrowed and the CPU it stops on is still in this same cell.
+	 */
+	tctx->vtime_charge_cell = tctx->cell;
 
 	/* Ensure this is done *AFTER* refreshing cell which might manipulate vtime */
 	vtime = p->scx.dsq_vtime;
@@ -1331,6 +1348,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 			return;
 	}
 
+	/* Record the running slice start time. */
 	tctx->started_running_at = scx_bpf_now();
 
 	/* Shrink our slice if a pinned task is queued on this CPU's DSQ. */
@@ -1382,32 +1400,29 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
 	/*
-	 * Advance this CPU's per-CPU DSQ vtime, UNLESS the task was
-	 * genuinely borrowed from another cell. Borrowed tasks' vtime
-	 * is in the borrowing cell's domain — writing it to the lending
-	 * CPU's vtime_now would contaminate that domain.
-	 *
-	 * For cell-reassigned tasks (tctx->cell != cidx but not borrowed),
-	 * the vtime was initialized in this CPU's cell domain, so
-	 * advancing cctx->vtime_now is correct and prevents staleness.
+	 * Only advance this CPU's local vtime when the slice ends on a CPU
+	 * whose cell matches this task's vtime charge cell and the task was
+	 * not borrowed. If execution ends in some other cell, drop the local
+	 * charge rather than risk charging an unexpected domain.
 	 */
-	if (!tctx->borrowed) {
+	if (!tctx->borrowed && tctx->vtime_charge_cell == cidx) {
 		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
 			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 	}
 
+	/*
+	 * Only advance cell vtime when the task stops on a CPU whose cell
+	 * still matches this task's vtime charge cell and the task was not
+	 * borrowed. If the CPU was retagged into a different cell after the
+	 * task was placed, drop the charge rather than advance the wrong cell
+	 * domain.
+	 */
+	if (!tctx->borrowed && tctx->vtime_charge_cell == cidx) {
+		advance_cell_llc_vtime(cell, tctx, p->scx.dsq_vtime);
+	}
+
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
-
-	struct cell *vtime_cell;
-	if (tctx->cell != cidx) {
-		vtime_cell = lookup_cell(tctx->cell);
-		if (!vtime_cell)
-			return;
-	} else {
-		vtime_cell = cell;
-	}
-	advance_cell_llc_vtime(vtime_cell, tctx, p->scx.dsq_vtime);
 
 	{
 		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);

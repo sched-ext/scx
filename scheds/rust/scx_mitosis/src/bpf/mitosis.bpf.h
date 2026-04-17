@@ -65,6 +65,8 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
+	/* Cell whose vtime domain should be charged for this task */
+	u32 vtime_charge_cell;
 	u64 basis_vtime;
 	/* For the sake of monitoring, each task is owned by a cell */
 	u32 cell;
