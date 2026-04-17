@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-// scx_cake - sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling
+// scx_cake - CAKE-inspired sched_ext scheduler for low-latency CPU scheduling
 
-mod detect;
 mod topology;
 mod tui;
 
@@ -45,44 +44,36 @@ pub enum Profile {
     Gaming,
     /// Balanced profile for general desktop use (same as gaming for now)
     Default,
-    /// Power-efficient profile for handhelds/laptops on battery (DVFS enabled)
+    /// Power-efficient profile for handhelds/laptops on battery
     Battery,
 }
 
 impl Profile {
-    /// Returns (quantum_us, new_flow_bonus_us, starvation_us)
-    fn values(&self) -> (u64, u64, u64) {
+    fn quantum_us(&self) -> u64 {
         match self {
-            // Esports: Ultra-aggressive, 1ms quantum for maximum responsiveness
-            Profile::Esports => (1000, 4000, 50000),
-            // Legacy: High efficiency, 4ms quantum to reduce overhead on older CPUs
-            Profile::Legacy => (4000, 12000, 200000),
-            // Gaming: Aggressive latency, 2ms quantum
-            Profile::Gaming => (2000, 8000, 100000),
+            Profile::Esports => 1000,
+            Profile::Legacy => 4000,
+            Profile::Gaming => 2000,
             // Default: Same as gaming for now
-            Profile::Default => (2000, 8000, 100000),
+            Profile::Default => 2000,
             // Battery: 4ms quantum — fewer context switches = less power
-            Profile::Battery => (4000, 12000, 200000),
+            Profile::Battery => 4000,
         }
     }
 
-    // DVFS — disabled (tick architecture removed, no runtime effect).
-    // RODATA symbols retained in BPF for loader compat; JIT eliminates.
+    // Older DVFS controls were removed. Profiles currently only select quantum.
 }
 
-/// 🍰 scx_cake: A sched_ext scheduler applying CAKE bufferbloat concepts
+/// 🍰 scx_cake: A CAKE-inspired sched_ext CPU scheduler
 ///
-/// This scheduler adapts CAKE's DRR++ (Deficit Round Robin++) algorithm
-/// for CPU scheduling, providing low-latency scheduling for gaming and
-/// interactive workloads while maintaining fairness.
+/// This scheduler adapts CAKE's low-latency scheduling ideas to CPU time.
+/// The current design centers on topology-aware CPU selection, per-LLC
+/// vtime-ordered DSQs, and lightweight per-task accounting in BPF.
 ///
 /// PROFILES set all tuning parameters at once. Individual options override profile defaults.
 ///
-/// 4-CLASS SYSTEM (classified by PELT utilization + game family detection):
-///   GAME:    game process tree + audio + compositor (during GAMING)
-///   NORMAL:  default class — interactive desktop tasks
-///   HOG:     high PELT utilization (≥78% CPU) non-game tasks
-///   BG:      low PELT utilization non-game tasks during GAMING
+/// Game detection and older multi-mode policy logic have been removed.
+/// The scheduler now runs one general low-latency policy for all tasks.
 ///
 /// EXAMPLES:
 ///   scx_cake                          # Run with gaming profile (default)
@@ -94,23 +85,23 @@ impl Profile {
     author,
     version,
     disable_version_flag = true,
-    about = "🍰 A sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling",
+    about = "🍰 A CAKE-inspired sched_ext scheduler for low-latency CPU scheduling",
     verbatim_doc_comment
 )]
 struct Args {
     /// Scheduler profile preset.
     ///
-    /// Profiles configure all tier thresholds, quantum multipliers, and wait budgets.
-    /// Individual CLI options (--quantum, etc.) override profile values.
+    /// Profiles configure the base quantum. Individual CLI options override
+    /// profile values.
     ///
     /// ESPORTS: Ultra-low-latency for competitive gaming.
-    ///   - Quantum: 1000µs, Starvation: 50ms
+    ///   - Quantum: 1000µs
     ///
     /// LEGACY: Optimized for older/lower-power hardware.
-    ///   - Quantum: 4000µs, Starvation: 200ms
+    ///   - Quantum: 4000µs
     ///
     /// GAMING: Optimized for low-latency gaming and interactive workloads.
-    ///   - Quantum: 2000µs, Starvation: 100ms
+    ///   - Quantum: 2000µs
     ///
     /// DEFAULT: Balanced profile for general desktop use.
     ///   - Currently same as gaming; will diverge in future versions
@@ -130,30 +121,10 @@ struct Args {
     #[arg(long, verbatim_doc_comment)]
     quantum: Option<u64>,
 
-    /// Bonus time for newly woken tasks in MICROSECONDS [default: 8000].
-    ///
-    /// Tasks waking from sleep get this extra time added to their deficit,
-    /// allowing them to run longer on first dispatch. Helps bursty workloads.
-    ///
-    /// Esports: 4000µs | Gaming: 8000µs
-    /// Recommended range: 4000-16000µs
-    #[arg(long, verbatim_doc_comment)]
-    new_flow_bonus: Option<u64>,
-
-    /// Max run time before forced preemption in MICROSECONDS [default: 100000].
-    ///
-    /// Safety limit: tasks running longer than this are forcibly preempted.
-    /// Prevents any single task from monopolizing the CPU.
-    ///
-    /// Esports: 50000µs (50ms) | Gaming: 100000µs (100ms) | Legacy: 200000µs (200ms)
-    /// Recommended range: 50000-200000µs
-    #[arg(long, verbatim_doc_comment)]
-    starvation: Option<u64>,
-
     /// Enable live TUI (Terminal User Interface) with real-time statistics.
     ///
-    /// Shows dispatch counts per tier, tier transitions,
-    /// wait time stats, and system topology information.
+    /// Shows live scheduler stats, wait/run timing, and system topology
+    /// information.
     /// Press 'q' to exit TUI mode.
     #[arg(long, short, verbatim_doc_comment)]
     verbose: bool,
@@ -180,14 +151,8 @@ struct Args {
 }
 
 impl Args {
-    /// Get effective values (profile defaults with CLI overrides applied)
-    fn effective_values(&self) -> (u64, u64, u64) {
-        let (q, nfb, starv) = self.profile.values();
-        (
-            self.quantum.unwrap_or(q),
-            self.new_flow_bonus.unwrap_or(nfb),
-            self.starvation.unwrap_or(starv),
-        )
+    fn quantum_us(&self) -> u64 {
+        self.quantum.unwrap_or(self.profile.quantum_us())
     }
 }
 
@@ -217,7 +182,7 @@ impl<'a> Scheduler<'a> {
             .open(open_object)
             .context("Failed to open BPF skeleton")?;
 
-        // Inject version suffix into ops name: "cake" → "cake_1.1.0_g<hash>_<target>"
+        // Inject version suffix into ops name: "cake" → "cake_1.1.1_g<hash>_<target>"
         // This is what scx_loader reads from /sys/kernel/sched_ext/root/ops
         {
             let ops = open_skel.struct_ops.cake_ops_mut();
@@ -272,21 +237,16 @@ impl<'a> Scheduler<'a> {
         let topo = topology::detect()?;
 
         // Get effective values (profile + CLI overrides)
-        let (quantum, _new_flow_bonus, _starvation) = args.effective_values();
+        let quantum = args.quantum_us();
 
         // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
         let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
 
-        // ALPHADEV Phase 7.3: Lockless Cache Definitions
-        let mut audio_tgids: Vec<u32> = Vec::new();
-        let mut compositor_tgids: Vec<u32> = Vec::new();
-
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
             rodata.quantum_ns = quantum * 1000;
-            // new_flow_bonus_ns REMOVED: zero BPF readers.
             // Stats/telemetry: only available in debug builds (CAKE_RELEASE omits the field).
-            // In release, --verbose is silently ignored — zero overhead for production gaming.
+            // In release, --verbose is silently ignored.
             #[cfg(debug_assertions)]
             {
                 rodata.enable_stats = args.verbose || args.testing;
@@ -372,21 +332,7 @@ impl<'a> Scheduler<'a> {
                     }
                 }
 
-                let fallback_llc = if rodata.nr_llcs > 1 {
-                    (best_llc + 1) % (rodata.nr_llcs as u8)
-                } else {
-                    best_llc
-                };
-
-                // ALPHADEV Phase 8: Oracle Array Fetch (Locks LLC bounds at startup)
-                rodata.oracle_llc_by_class[bpf_intf::cake_class_CAKE_CLASS_GAME as usize] =
-                    best_llc;
-                rodata.oracle_llc_by_class[bpf_intf::cake_class_CAKE_CLASS_NORMAL as usize] =
-                    best_llc;
-                rodata.oracle_llc_by_class[bpf_intf::cake_class_CAKE_CLASS_BG as usize] =
-                    fallback_llc;
-                rodata.oracle_llc_by_class[bpf_intf::cake_class_CAKE_CLASS_HOG as usize] =
-                    fallback_llc;
+                rodata.preferred_llc = best_llc;
 
                 // ALPHADEV Phase 8: Offset Map (Pre-calculating cross-CCD jumps)
                 for my_llc in 0..rodata.nr_llcs as usize {
@@ -403,8 +349,8 @@ impl<'a> Scheduler<'a> {
                 // Was: Asymmetric SIMD topological scan matrices
 
                 info!(
-                    "Topology Strategy: Primary Game LLC={}, Fallback BG LLC={}, Max Rank={}",
-                    best_llc, fallback_llc, max_rank
+                    "Topology Strategy: Preferred LLC={}, Max Rank={}",
+                    best_llc, max_rank
                 );
             }
 
@@ -480,200 +426,6 @@ impl<'a> Scheduler<'a> {
             // Arena library: nr_cpu_ids must be set before load() — arena_init
             // checks this and returns -ENODEV (errno 19) if uninitialized.
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
-
-            // ═══ Audio stack detection ═══
-            // Phase 1: Core audio daemons by comm name.
-            // Phase 2: PipeWire socket clients (mixers like goxlr-daemon).
-            // Both are session-persistent → populated to BSS cache post-load.
-            {
-                use std::collections::HashSet;
-
-                const AUDIO_COMMS: &[&str] = &[
-                    "pipewire",
-                    "wireplumber",
-                    "pipewire-pulse",
-                    "pulseaudio",
-                    "jackd",
-                    "jackdbus",
-                    "goxlr-daemon",
-                ];
-                let mut audio_tgid_set: HashSet<u32> = HashSet::new();
-
-                // Phase 1: comm-based detection
-                if let Ok(entries) = std::fs::read_dir("/proc") {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                            continue;
-                        }
-                        let pid: u32 = match name_str.parse() {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-                            let comm = comm.trim();
-                            if AUDIO_COMMS.contains(&comm) && audio_tgid_set.insert(pid) {
-                                audio_tgids.push(pid);
-                            }
-                        }
-                    }
-                }
-
-                // Phase 2: PipeWire socket client detection.
-                // Scan /proc/net/unix for pipewire-0 socket inodes, then find
-                // processes with fds pointing to those inodes. This catches any
-                // audio mixer daemon (goxlr-daemon, easyeffects, etc.) without
-                // brittle comm lists.
-                let core_count = audio_tgids.len();
-                'pw_detect: {
-                    let uid = unsafe { libc::getuid() };
-                    let pw_socket_path = format!("/run/user/{}/pipewire-0", uid);
-
-                    // Collect inodes for the PipeWire socket
-                    let unix_content = match std::fs::read_to_string("/proc/net/unix") {
-                        Ok(c) => c,
-                        Err(_) => break 'pw_detect,
-                    };
-                    let mut pw_inodes: HashSet<u64> = HashSet::new();
-                    for line in unix_content.lines().skip(1) {
-                        if line.ends_with(&pw_socket_path)
-                            || line.contains(&format!("{} ", pw_socket_path))
-                        {
-                            // Format: Num RefCount Protocol Flags Type St Inode Path
-                            let fields: Vec<&str> = line.split_whitespace().collect();
-                            if fields.len() >= 7 {
-                                if let Ok(inode) = fields[6].parse::<u64>() {
-                                    if inode > 0 {
-                                        pw_inodes.insert(inode);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if pw_inodes.is_empty() {
-                        break 'pw_detect;
-                    }
-
-                    // Scan /proc/*/fd for socket links matching PipeWire inodes.
-                    // Only check thread-group leaders (dirs in /proc with numeric names).
-                    if let Ok(proc_entries) = std::fs::read_dir("/proc") {
-                        for entry in proc_entries.flatten() {
-                            if audio_tgids.len() >= 8 {
-                                break;
-                            }
-                            let name = entry.file_name();
-                            let name_str = name.to_string_lossy();
-                            if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                                continue;
-                            }
-                            let pid: u32 = match name_str.parse() {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
-                            // Skip PIDs already detected as core audio
-                            if audio_tgid_set.contains(&pid) {
-                                continue;
-                            }
-                            let fd_dir = format!("/proc/{}/fd", pid);
-                            let fd_entries = match std::fs::read_dir(&fd_dir) {
-                                Ok(e) => e,
-                                Err(_) => continue,
-                            };
-                            for fd_entry in fd_entries.flatten() {
-                                if let Ok(link) = std::fs::read_link(fd_entry.path()) {
-                                    let link_str = link.to_string_lossy();
-                                    // Socket links look like "socket:[12345]"
-                                    if let Some(inode_str) = link_str
-                                        .strip_prefix("socket:[")
-                                        .and_then(|s| s.strip_suffix(']'))
-                                    {
-                                        if let Ok(inode) = inode_str.parse::<u64>() {
-                                            if pw_inodes.contains(&inode) {
-                                                if audio_tgid_set.insert(pid) {
-                                                    audio_tgids.push(pid);
-                                                }
-                                                break; // Found one match, move to next PID
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                /* Audio TGIDs populated into BSS post-load */
-                let client_count = audio_tgids.len() - core_count;
-                if !audio_tgids.is_empty() {
-                    info!(
-                        "Audio stack detected: {} daemons{} (TGIDs: {:?})",
-                        audio_tgids.len(),
-                        if client_count > 0 {
-                            format!(
-                                ", {} PipeWire client{}",
-                                client_count,
-                                if client_count == 1 { "" } else { "s" }
-                            )
-                        } else {
-                            String::new()
-                        },
-                        audio_tgids
-                    );
-                }
-            }
-
-            // ═══ Compositor detection ═══
-            // Wayland compositors present every frame to the display.
-            // Session-persistent → bake into RODATA.
-            {
-                const COMPOSITOR_COMMS: &[&str] = &[
-                    "kwin_wayland",
-                    "kwin_x11",
-                    "mutter",
-                    "gnome-shell",
-                    "sway",
-                    "Hyprland",
-                    "weston",
-                    "labwc",
-                    "wayfire",
-                    "river",
-                    "gamescope",
-                    "Xwayland", // Input routing for Proton/Wine games on Wayland
-                    "Xorg",     // X11 display server + input handler
-                    "X",        // Xorg alternate comm name
-                ];
-                if let Ok(entries) = std::fs::read_dir("/proc") {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                            continue;
-                        }
-                        let pid: u32 = match name_str.parse() {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-                            let comm = comm.trim();
-                            if COMPOSITOR_COMMS.contains(&comm) {
-                                compositor_tgids.push(pid);
-                                if compositor_tgids.len() >= 4 {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                /* Compositor TGIDs populated into BSS post-load */
-                if !compositor_tgids.is_empty() {
-                    info!(
-                        "Compositor detected: {} (TGIDs: {:?})",
-                        compositor_tgids.len(),
-                        compositor_tgids
-                    );
-                }
-            }
         }
 
         // ═══ scx_ops_load! equivalent ═══
@@ -696,14 +448,6 @@ impl<'a> Scheduler<'a> {
             "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
             task_ctx_size, topo.nr_cpus
         );
-
-        // Set initial BSS values before attach.
-        if let Some(_bss) = &mut skel.maps.bss_data {
-            // brain_class_cache REMOVED: 131KB BSS with zero BPF readers.
-            // Audio/compositor TGIDs are now classified inline in BPF
-            // via game_tgid/game_ppid comparison.
-            let _ = (&audio_tgids, &compositor_tgids); // suppress unused warnings
-        }
 
         Ok(Self {
             skel,
@@ -778,10 +522,10 @@ impl<'a> Scheduler<'a> {
             info!("Running in benchmarking mode for 10 seconds...");
             std::thread::sleep(std::time::Duration::from_secs(1)); // Warmup
 
-            let mut start_dispatches = 0u64;
+            let mut start_dsq_dispatches = 0u64;
             for cpu in 0..self.topology.nr_cpus {
                 let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
-                start_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
+                start_dsq_dispatches += stats.nr_local_dispatches + stats.nr_stolen_dispatches;
             }
 
             let start_time = std::time::Instant::now();
@@ -792,16 +536,18 @@ impl<'a> Scheduler<'a> {
             }
             let duration = start_time.elapsed().as_secs_f64();
 
-            let mut end_dispatches = 0u64;
+            let mut end_dsq_dispatches = 0u64;
             for cpu in 0..self.topology.nr_cpus {
                 let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
-                end_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
+                end_dsq_dispatches += stats.nr_local_dispatches + stats.nr_stolen_dispatches;
             }
 
-            let delta = end_dispatches.saturating_sub(start_dispatches);
+            let delta = end_dsq_dispatches.saturating_sub(start_dsq_dispatches);
             let throughput = delta as f64 / duration;
-            println!("{{\"duration_sec\": {:.2}, \"total_dispatches\": {}, \"dispatches_per_sec\": {:.2}}}",
-                     duration, delta, throughput);
+            println!(
+                "{{\"duration_sec\": {:.2}, \"total_dsq_dispatches\": {}, \"dsq_dispatches_per_sec\": {:.2}}}",
+                duration, delta, throughput
+            );
 
             shutdown.store(true, Ordering::Relaxed);
         } else if self.args.verbose && std::io::stdout().is_terminal() {
@@ -817,41 +563,10 @@ impl<'a> Scheduler<'a> {
             if self.args.verbose && !std::io::stdout().is_terminal() {
                 warn!("TUI disabled: no terminal detected (headless mode)");
             }
-            // Headless mode with game detection.
-            // Polls /proc every 1s for Steam/Wine/.exe game processes and
-            // compiler activity. Writes results to BPF BSS so the reclassifier
-            // can transition to GAMING state and activate the 4-class system.
-            let nr_cpus = self.topology.nr_cpus;
-            let mut detector = detect::GameDetector::new_headless();
             while !shutdown.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 if scx_utils::uei_exited!(&self.skel, uei) {
                     break;
-                }
-                // Run game + compiler detection
-                let result = detector.poll();
-                // Propagate to BPF BSS — drives reclassifier sched_state gate,
-                // class-aware kick guard, SYNC strip, and quantum ceiling.
-                if let Some(bss) = &mut self.skel.maps.bss_data {
-                    if bss.game_tgid != result.game_tgid {
-                        bss.game_tgid = result.game_tgid;
-                    }
-                    if bss.game_ppid != result.game_ppid {
-                        bss.game_ppid = result.game_ppid;
-                    }
-                    // game_confidence: only synced to Rust detector, not BPF BSS.
-                    let state_u32 = result.sched_state as u32;
-                    if bss.sched_state != state_u32 {
-                        bss.sched_state = state_u32;
-                    }
-                    // Per-CPU sched_state_local: eliminates remote global BSS
-                    // cache line fetch at 5 BPF hot-path sites.
-                    for i in 0..nr_cpus.min(bss.cpu_bss.len()) {
-                        if bss.cpu_bss[i].sched_state_local != result.sched_state {
-                            bss.cpu_bss[i].sched_state_local = result.sched_state;
-                        }
-                    }
-                    // quantum_ceiling_ns REMOVED: zero BPF readers.
                 }
             }
         }

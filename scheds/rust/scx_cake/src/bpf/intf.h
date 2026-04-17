@@ -19,28 +19,26 @@ typedef signed int     s32;
 typedef signed long    s64;
 #endif
 
-/* CAKE TIER SYSTEM — 4-tier classification
+/* CAKE TIER SYSTEM — legacy 4-tier latency buckets
  *
- * Tiers group tasks with similar scheduling needs. Classification uses
- * kernel PELT util_avg (0-1024). DRR++ deficit handles intra-tier
- * fairness (yield vs preempt). */
+ * These enum values are retained for telemetry, BenchLab, and older UI paths.
+ * The current scheduler does not classify hot-path work into these tiers. */
 enum cake_tier {
-	CAKE_TIER_CRITICAL = 0, /* <100µs:  IRQ, input, audio, network */
-	CAKE_TIER_INTERACT = 1, /* <2ms:    compositor, physics, AI */
-	CAKE_TIER_FRAME	   = 2, /* <8ms:    game render, encoding */
-	CAKE_TIER_BULK	   = 3, /* ≥8ms:    compilation, background */
+	CAKE_TIER_CRITICAL = 0, /* Lowest-latency legacy bucket */
+	CAKE_TIER_INTERACT = 1, /* Interactive legacy bucket */
+	CAKE_TIER_FRAME	   = 2, /* Medium-latency legacy bucket */
+	CAKE_TIER_BULK	   = 3, /* Highest-latency legacy bucket */
 	CAKE_TIER_MAX	   = 4,
 };
 
-/* ═══ TASK CLASS — Yield-gated classification ═══
- * Assigned by stopping_reclassify (BPF, every 64th stop).
- * Read by BPF hot path (enqueue, select_cpu, kick guard).
- * Determines: DSQ weight, kick guard protection, slice scaling. */
+/* ═══ TASK CLASS — legacy/debug classification labels ═══
+ * The hot path no longer promotes game families. These enums remain for
+ * telemetry, iter output, and compatibility with older debug tooling. */
 enum cake_class {
-	CAKE_CLASS_NORMAL  = 0, /* Default: no squeeze, no boost */
-	CAKE_CLASS_GAME    = 1, /* Game family: tgid/ppid match + kthread(gaming) */
-	CAKE_CLASS_HOG     = 2, /* BULK + squeeze: 6× vtime penalty (49152/8192) */
-	CAKE_CLASS_BG      = 3, /* Background noise: 4× vtime penalty (32768/8192) */
+	CAKE_CLASS_NORMAL  = 0, /* Default */
+	CAKE_CLASS_GAME    = 1, /* Reserved legacy class */
+	CAKE_CLASS_HOG     = 2, /* Reserved legacy class */
+	CAKE_CLASS_BG      = 3, /* Reserved legacy class */
 	CAKE_CLASS_MAX     = 4,
 };
 
@@ -51,22 +49,17 @@ enum cake_class {
 #define VTIME_MULT_CACHE_SIZE 2048
 
 /* brain_class_cache REMOVED: 131KB BSS array (16384×8B) was hydrated by Rust
- * every poll cycle but had zero BPF readers. Classification now done inline
- * from game_tgid/game_ppid BSS globals. */
+ * every poll cycle but had zero BPF readers. */
 
-/* ═══ TASK HOT FIELDS — BPF task_storage ═══
- * Per-task scheduling state in kernel task_storage (~10ns lookup).
- * Contains DRR++ state, yield detection, game family classification,
- * and EEVDF vtime. Arena CL0 still exists for debug telemetry.
- *
- * Accessed by: cake_running, cake_stopping, cake_select_cpu, cake_enqueue.
- * Allocated in: cake_init_task (BPF_LOCAL_STORAGE_GET_F_CREATE). */
+/* ═══ Per-Task Context ═══
+ * Scheduling state now lives in task_struct plus the arena-backed
+ * cake_task_ctx below. Release hot paths avoid arena access where possible;
+ * the arena copy exists primarily for iter output and debug telemetry. */
 
 
 /* ═══ PER-CPU BSS ═══
- * Written by cake_running (local CPU only), read by:
- *   - cake_stopping (same CPU, L1 hit)
- *   - enqueue_dsq_dispatch kick guard (remote CPU, MESI-S → L3 hit)
+ * Written by cake_running (local CPU only), read by cake_stopping and a
+ * small number of enqueue/dispatch helpers.
  *
  * 128-byte aligned for V-Cache sector isolation.
  * Single-writer (local running), multi-reader (no atomics needed). */
@@ -84,19 +77,10 @@ struct cake_cpu_bss {
 	u64 vtime_local;        /* 8B: per-CPU monotonic max vtime.
 				 *     Replaces global vtime_now to avoid
 				 *     cross-core cache line bouncing. */
-	u32 last_pid;           /* 4B: Fast path — skip get_task_hot if same pid */
-	u8  sched_state_local;  /* 1B: per-CPU sched_state mirror.
-				 *     Updated by Rust TUI on state transitions.
-				 *     SWAR: 4-byte load from this address reads
-				 *     sched_state_local + game_running + idle_hint
-				 *     in a single fetch for kick guard. */
-	u8  game_running;       /* 1B: class-aware kick guard flag.
-				 *     1 when CAKE_CLASS_GAME task runs.
-				 *     Written: cake_running (check-before-write).
-				 *     Read: enqueue_dsq_dispatch SWAR. */
-	u8  idle_hint;          /* 1B: 0=busy, 1=idle. Adjacent for SWAR fetch. */
-	u8  _pad_swar;          /* 1B: SWAR u32 read at &sched_state_local reads
-				 *     this byte as [3]; must be zero/benign. */
+	u32 last_pid;           /* 4B: Fast path — skip task-change work if same pid */
+	u8  idle_hint;          /* 1B: 0=busy, 1=idle */
+	u8  busy_wakeup_pending; /* 1B: busy wakeup fell back to DSQ for this CPU */
+	u8  _pad_status[2];     /* 2B: padding / future per-CPU state */
 #ifndef CAKE_RELEASE
 	u64 cake_clock;         /* 8B: BPF-native monotonic clock (ns).
 				 *     Debug-only accumulator. Advanced by consumed
@@ -166,18 +150,13 @@ typedef unsigned short cake_cpu_id_t;
 /* Physical core array sizing: MAX/2 assumes SMT=2 (AMD/Intel consumer).
  * _Static_assert fires if a non-SMT build exceeds this (future EPYC). */
 #define CAKE_MAX_CORES (CAKE_MAX_CPUS / 2)
-#define CAKE_MAX_AUDIO_TGIDS 8       /* Max tracked audio daemon TGIDs (RODATA) */
-#define CAKE_MAX_COMPOSITOR_TGIDS 4  /* Max tracked compositor TGIDs (RODATA) */
-
 /* Per-LLC DSQ base — DSQ IDs are LLC_DSQ_BASE + llc_index (0..nr_llcs-1).
- * V3: Single vtime-ordered DSQ per LLC. Priority encoded in vtime:
- * (vtime_tier << 56) | timestamp. T0 always has lowest vtime → dispatches
- * first. Eliminates 3 empty-DSQ probes vs old 4-tier split. */
+ * Current release code uses one vtime-ordered DSQ per LLC. */
 #define LLC_DSQ_BASE 200
 
 /* STAGED_BIT_* defines REMOVED: staged_vtime_bits field was dead.
- * All vtime/class state moved to p->scx.dsq_vtime (task_struct)
- * and inline classification from BSS globals. */
+ * Ordering state now lives in p->scx.dsq_vtime; legacy class/tier metadata
+ * remains only in packed_info/telemetry paths. */
 
 /* ── Kfunc BenchLab: extensible per-kfunc stopwatch ──
  * Each kfunc gets a slot. Run N iterations, capture min/max/avg + return value.
@@ -230,8 +209,8 @@ enum kfunc_bench_id {
 	BENCH_SCX_NR_NODE_IDS    = 34, /* scx_bpf_nr_node_ids() — NUMA node count */
 	BENCH_SCX_CPUPERF_CUR    = 35, /* scx_bpf_cpuperf_cur(cpu) — current perf level */
 
-	/* Task storage (what cake replaced with arena) */
-	BENCH_TASK_STORAGE_GET   = 36, /* bpf_task_storage_get() — standard per-task map */
+		/* Task storage baseline (kept for BenchLab comparison against arena) */
+		BENCH_TASK_STORAGE_GET   = 36, /* bpf_task_storage_get() — standard per-task map */
 
 	/* Idle probing alternatives */
 	BENCH_SCX_PICK_IDLE_CPU  = 37, /* scx_bpf_pick_idle_cpu() — kernel idle scan */
@@ -257,7 +236,7 @@ enum kfunc_bench_id {
 	BENCH_PELT_RUNNABLE_AVG  = 51, /* p->se.avg.runnable_avg — kernel runnable EWMA */
 	BENCH_SCHEDSTATS_WAKEUPS = 52, /* p->stats.nr_wakeups — cumulative wakeup count */
 	BENCH_TASK_POLICY_FLAGS  = 53, /* p->policy + p->in_iowait — free classification */
-	BENCH_PELT_VS_EWMA       = 54, /* PELT read + tier classify (was PELT vs EWMA comparison) */
+		BENCH_PELT_VS_EWMA       = 54, /* PELT read + legacy tier bucketing */
 
 	/* ═══ END-TO-END WORKFLOW COMPARISONS (55–62) ═══ */
 	BENCH_STORAGE_ROUNDTRIP  = 55, /* task_storage: write field → read back (full cycle) */
@@ -296,16 +275,18 @@ struct kfunc_bench_results {
 
 /* Gate cascade (simplified 3-gate design):
  *   Gate 1: prev_cpu idle (91% hit, L1/L2 warm, zero arena)
- *   Gate 2: perf-ordered idle scan (P/E topology, GAMING active)
+ *   Gate 2: perf-ordered idle scan (hybrid systems only)
  *   Gate 3: kernel scx_bpf_select_cpu_dfl (any idle)
  *   Tunnel: all CPUs busy → DSQ fallback (vtime ordering) */
 
-/* Flow state flags (packed_info bits 24-27) */
+/* Flow state flags (packed_info bits 24-27).
+ * Only NEW/YIELDER are still meaningful in current code; the rest are
+ * retained for debug/telemetry compatibility. */
 enum cake_flow_flags {
 	CAKE_FLOW_NEW          = 1 << 0, /* Task is newly created */
 	CAKE_FLOW_YIELDER      = 1 << 1, /* Task voluntarily yielded since last stop */
-	CAKE_FLOW_WAKER_BOOST  = 1 << 2, /* Waker was a yielder — propagate priority (1-cycle) */
-	CAKE_FLOW_HOG          = 1 << 3, /* Background hog: BULK + non-yielder + deprioritized */
+	CAKE_FLOW_WAKER_BOOST  = 1 << 2, /* Reserved legacy flag */
+	CAKE_FLOW_HOG          = 1 << 3, /* Reserved legacy flag */
 };
 
 /* Record emitted by SEC("iter/task") cake_task_iter program.
@@ -316,10 +297,10 @@ enum cake_flow_flags {
 struct cake_iter_record {
 	u32 pid;         /* pid of this task */
 	u32 ppid;        /* parent pid (promoted from tctx CL0) */
-	u32 packed_info; /* tier + flags — same field read in Rust telemetry loop */
+	u32 packed_info; /* class-slot + flags — same field read in Rust telemetry loop */
 	u16 pelt_util;       /* PELT util_avg (0-1024) from p->se.avg */
-	u16 _pad_iter_def;   /* was deficit_us */
-	u16 vtime_mult;      /* EEVDF vtime reciprocal (102400/weight, 1024=nice0) */
+	u16 legacy_slot_u16; /* Reserved legacy field */
+	u16 task_weight;     /* Raw task weight mirrored for iter/TUI display (100=nice0) */
 	u16 _pad_iter;       /* alignment */
 	/* telemetry block: everything the TUI currently reads from arena pointers */
 	struct {
@@ -372,14 +353,14 @@ struct cake_iter_record {
 		u32 pid_inner;  /* matches telemetry.pid */
 		u32 tgid;
 		char comm[16];
-		u32 gate_cascade_ns;
-		u32 idle_probe_ns;
-		u32 vtime_compute_ns;
-		u32 mbox_staging_ns;
-		u32 _pad_ewma;
-		u32 classify_ns;
-		u32 vtime_staging_ns;
-		u32 warm_history_ns;
+			u32 gate_cascade_ns;
+			u32 idle_probe_ns;
+			u32 vtime_compute_ns;
+			u32 mbox_staging_ns;
+			u32 _pad_ewma;
+			u32 legacy_classify_ns;
+			u32 vtime_staging_ns;
+			u32 warm_history_ns;
 		u16 quantum_full_count;
 		u16 quantum_yield_count;
 		u16 quantum_preempt_count;
@@ -417,12 +398,12 @@ struct cake_iter_record {
 #define CAKE_TCTX_ALIGN 512
 #endif
 
-/* Per-task flow state — conditional sizing (Release/Debug pattern).
+/* Per-task context — conditional sizing (Release/Debug pattern).
  *   RELEASE: 64B (1 CL) — iter-visible fields only, telemetry compiled out
- *   DEBUG:  512B (8 CL) — CL0 hot + CL1-7 telemetry for TUI analytics
+ *   DEBUG:  512B (8 CL) — iter-visible fields plus TUI telemetry
  *
  * CACHE LINE SEGREGATION:
- *   CL0 (bytes 0-63): Fields needed for iter + debug scheduling.
+ *   CL0 (bytes 0-63): Fields needed for iter output and debug bookkeeping.
  *     aligned(CAKE_TCTX_ALIGN) handles CL0 padding automatically —
  *     no manual _pad arrays needed.
  *   CL1+ (bytes 64+): Debug-only telemetry for TUI analytics.
@@ -431,7 +412,7 @@ struct cake_task_ctx {
 	/* ═══ CACHE LINE 0: RELEASE + ITER FIELDS ═══ */
 	u32 packed_info;       /* 4B: Bitfield flags (iter-visible) */
 	u32 ppid;              /* 4B: Parent PID (iter-visible) */
-	u16 vtime_mult;        /* 2B: EEVDF vtime reciprocal 102400/weight (iter-visible) */
+	u16 task_weight;       /* 2B: Raw task weight for iter/TUI display (100=nice0) */
 
 #ifndef CAKE_RELEASE
 	/* ── DEBUG-ONLY CL0 FIELDS ── */
@@ -515,15 +496,16 @@ struct cake_task_ctx {
 		u32 tgid;  /* Thread group ID (process) for TUI grouping */
 		char comm[16];
 
-		/* Per-callback sub-function stopwatch (verbose health) */
+		/* Per-callback sub-function stopwatch (verbose health).
+		 * Several slots are retained only so the iter/TUI layout stays stable. */
 		u32 gate_cascade_ns;       /* select_cpu: full gate cascade duration */
 		u32 idle_probe_ns;         /* select_cpu: winning gate idle probe cost */
-		u32 vtime_compute_ns;      /* enqueue: vtime calculation + tier weighting */
+		u32 vtime_compute_ns;      /* Reserved legacy enqueue timing slot */
 		u32 mbox_staging_ns;       /* running: mailbox CL0 write burst */
 		u32 _pad_ewma;             /* (was _deprecated_ewma_ns — removed) */
-		u32 classify_ns;           /* stopping: tier classify + squeeze fusion */
-		u32 vtime_staging_ns;      /* stopping: dsq_vtime bit packing + slice/vtime write */
-		u32 warm_history_ns;       /* stopping: warm CPU ring shift (migration-gated) */
+		u32 legacy_classify_ns;    /* Reserved legacy stopping timing slot */
+		u32 vtime_staging_ns;      /* stopping: dsq_vtime + slice telemetry staging */
+		u32 warm_history_ns;       /* Reserved legacy migration timing slot */
 
 		/* Quantum completion tracking */
 		u16 quantum_full_count;    /* Task consumed entire slice */
@@ -548,22 +530,20 @@ _Static_assert(
 /* packed_info bitfield layout (write-set co-located for mask fusion):
  * [Stable:2][Tier:2][Flags:4][KCR:1][BG:1][Rsvd:14][Rsvd:8]
  *  31-30     29-28   27-24    23     22    21-8       7-0
- * TIER+STABLE adjacent → fused 4-bit clear/set in reclassify.
+ * TIER+STABLE are retained legacy fields.
  * KCR = cached critical kernel thread (set once in cake_init_task).
- * BG  = background noise squeeze (toggled in cake_stopping). */
+ * BG  = reserved legacy bit. */
 #define SHIFT_FLAGS 24 /* 4 bits: flow flags */
 #define SHIFT_TIER 28 /* 2 bits: tier 0-3 (coalesced with STABLE) */
 #define SHIFT_STABLE 30 /* 2 bits: tier-stability counter (0-3) */
 #define BIT_KCRITICAL 23 /* 1 bit: latency-critical kthread (set in init_task) */
-#define BIT_BG_NOISE 22 /* 1 bit: background noise squeeze active */
+#define BIT_BG_NOISE 22 /* 1 bit: reserved legacy flag */
 
 #define MASK_TIER 0x03 /* 2 bits: 0-3 */
 #define MASK_FLAGS 0x0F /* 4 bits */
 
-/* HOG detection: rt_raw >= tick_slice * 3/4 (inline, no RODATA).
- * Task consumed ≥ 75% of allocated quantum = resource hog.
- * Both values already in BPF registers in cake_stopping.
- * Zero cold CL: replaces old PELT p->se.avg.util_avg read. */
+/* Legacy HOG detection threshold retained for debug/telemetry compatibility.
+ * Current release code does not actively reclassify tasks with it. */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: Per-CPU arena state
@@ -602,14 +582,14 @@ struct mega_mailbox_entry {
 
 	/* --- Tick staging (bytes 64-71) --- */
 	u8  is_yielder;        /* BenchLab: yielder flag snapshot */
-	u8  tick_tier;         /* BenchLab: tier snapshot */
+		u8  tick_tier;         /* BenchLab: legacy tier snapshot */
 	u16 cached_cpu;        /* BenchLab: CPU ID snapshot */
 	u32 tick_last_run_at;  /* BenchLab: run_start snapshot */
 
 	/* --- Cached fields (bytes 72-95) --- */
 	u64 tick_slice;        /* 8B — BenchLab: slice snapshot */
 	u64 cached_tctx_ptr;   /* 8B — BenchLab: arena tctx pointer */
-	u32 cached_deficit;    /* 4B — BenchLab: deficit snapshot */
+		u32 cached_deficit;    /* 4B — BenchLab: legacy deficit-style snapshot */
 	u32 cached_packed;     /* 4B — BenchLab: packed_info snapshot */
 
 	/* --- nvcsw (bytes 96-103) --- */
@@ -623,13 +603,18 @@ _Static_assert(
 	sizeof(struct mega_mailbox_entry) == CAKE_MBOX_SIZE,
 	"mega_mailbox_entry size mismatch (64B release, 128B debug)");
 
-/* Statistics shared with userspace */
+/* Statistics shared with userspace.
+ * Some legacy counters remain in the layout for TUI/testing compatibility
+ * even when current release code no longer increments them. */
 struct cake_stats {
-	u64 nr_new_flow_dispatches; /* Tasks dispatched from new-flow */
-	u64 nr_old_flow_dispatches; /* Tasks dispatched from old-flow */
-	u64 nr_tier_dispatches[CAKE_TIER_MAX]; /* Per-tier dispatch counts */
+	u64 nr_prev_cpu_tunnels; /* select_cpu() fell back to returning prev_cpu */
+	u64 nr_busy_handoff_dispatches; /* dispatch() later pulled DSQ work while a busy wakeup was pending */
+	u64 nr_busy_keep_suppressed; /* dispatch() skipped keep_running because a busy wakeup was pending */
+	u64 nr_wakeup_busy_local_target; /* Busy wakeup fallback where target CPU matched enqueue CPU */
+	u64 nr_wakeup_busy_remote_target; /* Busy wakeup fallback where target CPU differed from enqueue CPU */
+	u64 nr_tier_dispatches[CAKE_TIER_MAX]; /* Reserved legacy per-tier counters */
 	u64 nr_starvation_preempts_tier
-		[CAKE_TIER_MAX]; /* Per-tier starvation preempts */
+		[CAKE_TIER_MAX]; /* Reserved legacy per-tier counters */
 	u64 total_gate1_latency_ns; /* Total time spent in Gate 1 */
 	u64 total_gate2_latency_ns; /* Total time spent in Gate 2 */
 	u64 total_enqueue_latency_ns; /* Total time spent in enqueue */
@@ -652,56 +637,36 @@ struct cake_stats {
 	u64 max_running_ns;          /* Worst single cake_running */
 
 	/* Stopping path breakdown (invocation counts) */
-	u64 nr_stop_confidence_skip; /* Confidence skip — fast path (~4ns) */
-	u64 nr_stop_classify;        /* PELT classify path (~14ns, was nr_stop_ewma) */
-	u64 nr_stop_ramp;            /* Stability ramp (stable < 3) */
-	u64 nr_stop_miss;            /* Cold/self-seed miss path (~30ns) */
+	u64 nr_stop_deferred_skip;   /* Stops that skipped deferred telemetry */
+	u64 nr_stop_deferred;        /* Stops that ran deferred telemetry */
+	u64 nr_stop_ramp;            /* Reserved legacy counter */
+	u64 nr_stop_miss;            /* Reserved legacy counter */
 
 	/* Dispatch callback timing */
 	u64 total_dispatch_ns;       /* Total time in cake_dispatch */
 	u64 max_dispatch_ns;         /* Worst single cake_dispatch */
 
-	/* EEVDF topology telemetry */
-	u64 nr_vprot_suppressed;     /* Kicks suppressed by vprot guard */
-	u64 nr_lag_applied;          /* Enqueues where sleep_lag credit was used */
-	u64 nr_capacity_scaled;      /* Stops where CPU capacity < 1024 (P/E active) */
-} __attribute__((aligned(64)));
+		/* Wakeup enqueue gate counters */
+		u64 nr_wakeup_direct_dispatches; /* Wakeups that direct-dispatched to SCX_DSQ_LOCAL_ON */
+		u64 nr_wakeup_dsq_fallback_busy; /* Wakeups sent to DSQ because target CPU did not look idle */
+		u64 nr_wakeup_dsq_fallback_queued; /* Wakeups sent to DSQ because the target DSQ was already non-empty */
+	} __attribute__((aligned(64)));
 
-/* Default values (Gaming profile) */
+/* Current default values */
 #define CAKE_DEFAULT_QUANTUM_NS (2 * 1000 * 1000) /* 2ms */
-#define CAKE_DEFAULT_NEW_FLOW_BONUS_NS (3 * 1000 * 1000) /* 3ms — EEVDF half-slice */
+#define CAKE_DEFAULT_NEW_FLOW_BONUS_NS (3 * 1000 * 1000) /* Reserved legacy constant */
 
-/* ═══ ADAPTIVE QUANTUM — YIELD-GATED ═══
- * Per-task quantum modulated by voluntary yield signal.
- * Yielders (nvcsw > 0 since last stop) get generous headroom + high ceiling.
- * Non-yielders get tight headroom + low ceiling, forcing faster CPU release.
- *
- * Quantum = clamp(pelt_scaled × HEADROOM, MIN, MAX/CEILING)
- * Yielders: game render, audio, input, network → 50ms ceiling (cooperators)
- * Non-yielders: compilation, background tasks → PELT × 1, capped 2ms */
+/* Legacy adaptive-quantum constants retained for compatibility with older
+ * debug paths and BenchLab comparisons. Current release scheduling does not
+ * drive policy from these values. */
 #define AQ_BULK_HEADROOM     1               /* 1× PELT runtime for non-yielders */
-#define AQ_MIN_NS            (50 * 1000)     /* 50µs floor — below this overhead > work */
-#define AQ_YIELDER_CEILING_NS (50 * 1000000)  /* 50ms ceiling — yielders (covers 20fps+) */
-#define AQ_BULK_CEILING_NS        (2 * 1000000)   /* 2ms ceiling — non-yielders (forces release) */
-#define AQ_BULK_CEILING_COMPILE_NS (8 * 1000000)   /* 8ms ceiling — COMPILATION state only (reduce ctx-switch overhead) */
+#define AQ_MIN_NS            (50 * 1000)     /* 50µs legacy floor */
+#define AQ_YIELDER_CEILING_NS (50 * 1000000)  /* 50ms legacy yielder ceiling */
+#define AQ_BULK_CEILING_NS        (2 * 1000000)   /* 2ms legacy bulk ceiling */
+#define AQ_BULK_CEILING_COMPILE_NS (8 * 1000000)   /* 8ms legacy compile ceiling */
 
-/* Scheduler operating state — set by Rust TUI, read by BPF hot path.
- * Priority: GAMING > COMPILATION > IDLE.
- * Written to sched_state BSS u32 by userspace, read-only from BPF. */
-#define CAKE_STATE_IDLE        0  /* Fair, unthrottled — desktop/browsing */
-#define CAKE_STATE_COMPILATION 1  /* Compile jobs: 8ms bulk ceiling, no squeeze */
-#define CAKE_STATE_GAMING      2  /* Game mode: HOG+bg squeeze, Gate 1P active */
-
-/* Gate 1C-P / Gate 1P: adaptive preemption thresholds.
- * STANDARD: 100µs — hog has done meaningful work before yielding to normal tasks.
- *           Below this, preemption context-switch cost (~1.5µs) exceeds benefit.
- * VIP:       50µs — game-family threads (wineserver, WoW workers) get aggressive
- *           preemption to avoid cold-cache migration. WoW data showed wineserver
- *           at 125 MIG/s because the standard threshold blocked reclaiming its home
- *           CPU from hogs that ran <100µs. 50µs ensures the hog got a reasonable
- *           quantum while the VIP avoids the ~10-40ns L3 penalty of migration.
- *           Selected via hot->task_class == CAKE_CLASS_GAME (~0ns, L1-cached). */
-#define CAKE_PREEMPT_YIELDER_THRESHOLD_NS (100 * 1000) /* 100µs — normal tasks */
-#define CAKE_PREEMPT_VIP_THRESHOLD_NS      (50 * 1000) /*  50µs — game family VIPs */
+/* Legacy preemption thresholds retained for compatibility. */
+#define CAKE_PREEMPT_YIELDER_THRESHOLD_NS (100 * 1000) /* 100µs legacy threshold */
+#define CAKE_PREEMPT_VIP_THRESHOLD_NS      (50 * 1000) /*  50µs — reserved legacy */
 
 #endif /* __CAKE_INTF_H */
