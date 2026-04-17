@@ -104,7 +104,7 @@ struct Opts {
     #[clap(long = "performance", action = clap::ArgAction::SetTrue)]
     performance: bool,
 
-    /// Run the scheduler in powersave mode to minimize powr consumption.
+    /// Run the scheduler in powersave mode to minimize power consumption.
     /// This option cannot be used with other conflicting options (--autopilot,
     /// --autopower, --performance, --balanced, --no-core-compaction)
     /// affecting the use of core compaction.
@@ -923,7 +923,7 @@ impl<'a> Scheduler<'a> {
     fn update_power_profile(&mut self, prev_profile: PowerProfile) -> (bool, PowerProfile) {
         let profile = fetch_power_profile(false);
         if profile == prev_profile {
-            // If the profile is the same, skip updaring the profile for BPF.
+            // If the profile is the same, skip updating the profile for BPF.
             return (true, profile);
         }
 
