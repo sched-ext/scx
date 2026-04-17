@@ -117,7 +117,7 @@ enum consts_internal {
 							  performance mode when cpu util > 50% */
 
 	LAVD_CPDOM_MIG_SHIFT_UL		= 2, /* when under-loaded:  1/2**2 = [-25.0%, +25.0%] */
-	LAVD_CPDOM_MIG_SHIFT		= 3, /* when midely loaded: 1/2**3 = [-12.5%, +12.5%] */
+	LAVD_CPDOM_MIG_SHIFT		= 3, /* when mildly loaded: 1/2**3 = [-12.5%, +12.5%] */
 	LAVD_CPDOM_MIG_SHIFT_OL		= 4, /* when over-loaded:   1/2**4 = [-6.25%, +6.25%] */
 	LAVD_CPDOM_MIG_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS / LAVD_SLICE_MAX_NS_DFL), /* roughly twice per interval */
 

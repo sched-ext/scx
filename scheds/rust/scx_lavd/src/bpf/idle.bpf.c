@@ -257,7 +257,7 @@ static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 }
 
 static __always_inline
-s32 cpumask_any_dsitribute(struct pick_ctx *ctx)
+s32 cpumask_any_distribute(struct pick_ctx *ctx)
 {
 	const struct cpumask *mask;
 	s32 cpu;
