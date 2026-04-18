@@ -687,7 +687,7 @@ fn record_cgroup_init(cgid: u64) {
     };
     let idx = pos % DEBUG_EVENTS_BUF_SIZE;
     if let Some(event) = DEBUG_EVENTS.get_mut(idx) {
-        event.timestamp = kfuncs::now();
+        event.timestamp = unsafe { kfuncs::now() };
         event.event_type = DebugEventType::CgroupInit as u32;
         event.cgid = cgid;
         event.pid = 0;
@@ -707,7 +707,7 @@ fn record_init_task(cgid: u64, pid: u32) {
     };
     let idx = pos % DEBUG_EVENTS_BUF_SIZE;
     if let Some(event) = DEBUG_EVENTS.get_mut(idx) {
-        event.timestamp = kfuncs::now();
+        event.timestamp = unsafe { kfuncs::now() };
         event.event_type = DebugEventType::InitTask as u32;
         event.cgid = cgid;
         event.pid = pid;
@@ -727,7 +727,7 @@ fn record_cgroup_exit(cgid: u64) {
     };
     let idx = pos % DEBUG_EVENTS_BUF_SIZE;
     if let Some(event) = DEBUG_EVENTS.get_mut(idx) {
-        event.timestamp = kfuncs::now();
+        event.timestamp = unsafe { kfuncs::now() };
         event.event_type = DebugEventType::CgroupExit as u32;
         event.cgid = cgid;
         event.pid = 0;
@@ -739,7 +739,7 @@ fn record_cgroup_exit(cgid: u64) {
 /// Port of C lookup_cell_cpumask (mitosis.bpf.c:338-353).
 #[inline(always)]
 fn lookup_cell_cpumask(idx: u32) -> *const vmlinux::cpumask {
-    let wrapper = CELL_CPUMASKS.get_ptr_mut(idx);
+    let wrapper = unsafe { CELL_CPUMASKS.get_ptr_mut(idx) };
     if wrapper.is_null() {
         return core::ptr::null();
     }
@@ -1214,7 +1214,7 @@ fn update_timer_fn(
     _key: *mut i32,
     timer_ptr: *mut BpfTimer,
 ) -> i32 {
-    timer::timer_start(timer_ptr, TIMER_INTERVAL_NS, 0);
+    unsafe { timer::timer_start(timer_ptr, TIMER_INTERVAL_NS, 0) };
     update_timer_cb();
     0
 }
@@ -1351,7 +1351,7 @@ fn maybe_retag_stolen_task(
     }
 
     tctx.steal_count += 1;
-    tctx.last_stolen_at = kfuncs::now();
+    tctx.last_stolen_at = unsafe { kfuncs::now() };
     tctx.llc = cctx.llc as i32;
     tctx.dsq = DsqId::cell_llc(tctx.cell, cctx.llc);
 
@@ -1397,13 +1397,13 @@ fn try_stealing_work(cell_idx: u32, local_llc: u32) -> bool {
         }
 
         // Skip if empty (fast path)
-        if kfuncs::dsq_nr_queued(candidate_dsq.raw()) == 0 {
+        if unsafe { kfuncs::dsq_nr_queued(candidate_dsq.raw()) } == 0 {
             i += 1;
             continue;
         }
 
         // Attempt the steal — retag happens in running() via maybe_retag_stolen_task
-        if kfuncs::dsq_move_to_local(candidate_dsq.raw()) {
+        if unsafe { kfuncs::dsq_move_to_local(candidate_dsq.raw()) } {
             return true;
         }
 
@@ -1429,7 +1429,7 @@ fn try_stealing_work(cell_idx: u32, local_llc: u32) -> bool {
 /// Full C version: refresh cell, pick idle from cell cpumask with SMT
 /// awareness, handle per-CPU pinning, fall back to prev_cpu or
 /// bpf_cpumask_any_distribute.
-fn mitosis_select_cpu(p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i32 {
+fn mitosis_select_cpu(_ctx: &mut BpfCtx, p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i32 {
     // Refresh cell assignment if configuration_seq changed
     if let Some(tctx) = lookup_task_ctx(p) {
         maybe_refresh_cell(p, tctx);
@@ -1441,10 +1441,10 @@ fn mitosis_select_cpu(p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i
     // Without cell cpumasks, all tasks are all_cell_cpus_allowed and use
     // the cell+LLC DSQ. Try to find an idle CPU with the default helper.
     let mut is_idle = false;
-    let cpu = kfuncs::select_cpu_dfl(p, prev_cpu, 0, &mut is_idle);
+    let cpu = unsafe { kfuncs::select_cpu_dfl(p, prev_cpu, 0, &mut is_idle) };
     if is_idle {
         let slice = SLICE_NS.get();
-        kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0);
+        unsafe { kfuncs::dsq_insert(p, kfuncs::SCX_DSQ_LOCAL, slice, 0) };
     }
     cpu
 }
@@ -1457,7 +1457,7 @@ fn mitosis_select_cpu(p: *mut task_struct, prev_cpu: i32, _wake_flags: u64) -> i
 /// - Clamp vtime to [basis - slice, basis + 8192*slice] to prevent runaway
 /// - Insert with vtime ordering via dsq_insert_vtime
 /// - Kick idle CPU if we didn't get one from select_cpu
-fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
+fn mitosis_enqueue(_ctx: &mut BpfCtx, p: *mut task_struct, enq_flags: u64) {
     let tctx = match lookup_task_ctx(p) {
         Some(t) => t,
         None => return,
@@ -1514,14 +1514,14 @@ fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
         vtime = basis_vtime.wrapping_sub(slice);
     }
 
-    kfuncs::dsq_insert_vtime(p, dsq.raw(), slice, vtime, enq_flags);
+    unsafe { kfuncs::dsq_insert_vtime(p, dsq.raw(), slice, vtime, enq_flags) };
 
     // If select_cpu didn't pick a CPU, try to kick an idle one
     if enq_flags & SCX_ENQ_CPU_SELECTED == 0 {
         // Note: pick_idle_cpu from cell cpumask. For now just kick prev.
-        let task_cpu = kfuncs::task_cpu(p);
-        if kfuncs::test_and_clear_cpu_idle(task_cpu) {
-            kfuncs::kick_cpu(task_cpu, SCX_KICK_IDLE);
+        let task_cpu = unsafe { kfuncs::task_cpu(p) };
+        if unsafe { kfuncs::test_and_clear_cpu_idle(task_cpu) } {
+            unsafe { kfuncs::kick_cpu(task_cpu, SCX_KICK_IDLE) };
         }
     }
 }
@@ -1533,7 +1533,7 @@ fn mitosis_enqueue(p: *mut task_struct, enq_flags: u64) {
 /// - Peek both DSQs, dispatch from whichever has the lowest-vtime task
 /// - If both empty and LLC-aware + work stealing enabled, try stealing
 ///   from sibling LLC DSQs within the same cell
-fn mitosis_dispatch(cpu: i32, _prev: *mut task_struct) {
+fn mitosis_dispatch(_ctx: &mut BpfCtx, cpu: i32, _prev: *mut task_struct) {
     let cctx = match lookup_cpu_ctx(-1) {
         Some(c) => c,
         None => return,
@@ -1564,18 +1564,18 @@ fn mitosis_dispatch(cpu: i32, _prev: *mut task_struct) {
             .unwrap_or(u64::MAX);
 
         if time_before(cpu_vtime, cell_vtime) {
-            kfuncs::dsq_move_to_local(cpu_dsq.raw());
+            unsafe { kfuncs::dsq_move_to_local(cpu_dsq.raw()) };
             return;
         }
-        kfuncs::dsq_move_to_local(cell_dsq.raw());
+        unsafe { kfuncs::dsq_move_to_local(cell_dsq.raw()) };
         return;
     }
 
     // Only one (or neither) has tasks — try cell first, then CPU
-    if kfuncs::dsq_move_to_local(cell_dsq.raw()) {
+    if unsafe { kfuncs::dsq_move_to_local(cell_dsq.raw()) } {
         return;
     }
-    if kfuncs::dsq_move_to_local(cpu_dsq.raw()) {
+    if unsafe { kfuncs::dsq_move_to_local(cpu_dsq.raw()) } {
         return;
     }
 
@@ -1596,7 +1596,7 @@ fn mitosis_dispatch(cpu: i32, _prev: *mut task_struct) {
 /// Port of C mitosis_running (mitosis.bpf.c:1256-1272):
 /// - Handle stolen task retag (LLC-aware + work stealing mode)
 /// - Record scx_bpf_now() as started_running_at
-fn mitosis_running(p: *mut task_struct) {
+fn mitosis_running(_ctx: &mut BpfCtx, p: *mut task_struct) {
     let tctx = match lookup_task_ctx(p) {
         Some(t) => t,
         None => return,
@@ -1611,7 +1611,7 @@ fn mitosis_running(p: *mut task_struct) {
         }
     }
 
-    tctx.started_running_at = kfuncs::now();
+    tctx.started_running_at = unsafe { kfuncs::now() };
 }
 
 /// stopping: Charge vtime and advance DSQ watermarks.
@@ -1621,7 +1621,7 @@ fn mitosis_running(p: *mut task_struct) {
 /// - Charge vtime = used * 100 / weight (weight-proportional)
 /// - Advance cell and CPU DSQ vtimes
 /// - Track per-cell CPU cycles
-fn mitosis_stopping(p: *mut task_struct, _runnable: bool) {
+fn mitosis_stopping(_ctx: &mut BpfCtx, p: *mut task_struct, _runnable: bool) {
     let tctx = match lookup_task_ctx(p) {
         Some(t) => t,
         None => return,
@@ -1639,7 +1639,7 @@ fn mitosis_stopping(p: *mut task_struct, _runnable: bool) {
         None => return,
     };
 
-    let now = kfuncs::now();
+    let now = unsafe { kfuncs::now() };
     let used = now.wrapping_sub(tctx.started_running_at);
     tctx.started_running_at = now;
 
@@ -1681,7 +1681,7 @@ fn mitosis_stopping(p: *mut task_struct, _runnable: bool) {
 /// The `_cpumask` parameter is the new cpumask set by the kernel. The C
 /// version doesn't use it directly — update_task_cpumask reads p->cpus_ptr
 /// which is already updated by the time this callback fires.
-fn mitosis_set_cpumask(p: *mut task_struct, _cpumask: *mut core::ffi::c_void) {
+fn mitosis_set_cpumask(_ctx: &mut BpfCtx, p: *mut task_struct, _cpumask: *mut core::ffi::c_void) {
     let tctx = match lookup_task_ctx(p) {
         Some(t) => t,
         None => return,
@@ -1690,7 +1690,7 @@ fn mitosis_set_cpumask(p: *mut task_struct, _cpumask: *mut core::ffi::c_void) {
     update_task_cpumask(p, tctx);
 }
 
-fn mitosis_init() -> i32 {
+fn mitosis_init(_ctx: &mut BpfCtx) -> i32 {
     // ── Step 1: Validate configuration ──────────────────────────────
     let ret = validate_flags();
     if ret != 0 {
@@ -1744,7 +1744,7 @@ fn mitosis_init() -> i32 {
             if let Some(byte) = ALL_CPUS.get(byte_idx) {
                 if byte & (1 << bit_idx) != 0 {
                     let cpu_dsq = DsqId::cpu(cpu);
-                    let ret = kfuncs::create_dsq(cpu_dsq.raw(), -1);
+                    let ret = unsafe { kfuncs::create_dsq(cpu_dsq.raw(), -1) };
                     if ret != 0 {
                         scx_ebpf::scx_bpf_error!("mitosis: failed to create CPU DSQ");
                         return ret;
@@ -1802,7 +1802,7 @@ fn mitosis_init() -> i32 {
         let mut llc: u32 = 0;
         while llc < nr_llc && llc < MAX_LLCS {
             let dsq = DsqId::cell_llc(cell, llc);
-            let ret = kfuncs::create_dsq(dsq.raw(), -1);
+            let ret = unsafe { kfuncs::create_dsq(dsq.raw(), -1) };
             if ret != 0 {
                 scx_ebpf::scx_bpf_error!("mitosis: failed to create cell+LLC DSQ");
                 return ret;
@@ -1820,7 +1820,7 @@ fn mitosis_init() -> i32 {
     {
         let mut cell_i: u32 = 0;
         while cell_i < MAX_CELLS {
-            let wrapper = CELL_CPUMASKS.get_ptr_mut(cell_i);
+            let wrapper = unsafe { CELL_CPUMASKS.get_ptr_mut(cell_i) };
             if wrapper.is_null() {
                 scx_ebpf::scx_bpf_error!("mitosis: cell_cpumasks lookup fail");
                 return -2;
@@ -1828,29 +1828,29 @@ fn mitosis_init() -> i32 {
             let w = unsafe { &mut *wrapper };
 
             // Create primary cpumask
-            let mask = cpumask::create();
+            let mask = unsafe { cpumask::create() };
             if mask.is_null() {
                 scx_ebpf::scx_bpf_error!("mitosis: cpumask create failed");
                 return -12;
             }
             // Root cell starts with all CPUs enabled
             if cell_i == ROOT_CELL_ID {
-                cpumask::setall(mask);
+                unsafe { cpumask::setall(mask) };
             }
             let old = unsafe { kptr_xchg(&raw mut w.cpumask, mask) };
             if !old.is_null() {
-                cpumask::release(old);
+                unsafe { cpumask::release(old) };
             }
 
             // Create tmp cpumask (scratch for double-buffer swaps)
-            let tmp = cpumask::create();
+            let tmp = unsafe { cpumask::create() };
             if tmp.is_null() {
                 scx_ebpf::scx_bpf_error!("mitosis: tmp cpumask create failed");
                 return -12;
             }
             let old = unsafe { kptr_xchg(&raw mut w.tmp_cpumask, tmp) };
             if !old.is_null() {
-                cpumask::release(old);
+                unsafe { cpumask::release(old) };
             }
 
             cell_i += 1;
@@ -1875,13 +1875,13 @@ fn mitosis_init() -> i32 {
     // ── Step 12: Setup and arm bpf_timer for periodic reconfiguration ──
     // Port of C mitosis.bpf.c:2004-2014
     {
-        let timer_val = UPDATE_TIMER.get_ptr_mut(0);
+        let timer_val = unsafe { UPDATE_TIMER.get_ptr_mut(0) };
         if !timer_val.is_null() {
             let t = unsafe { &mut (*timer_val).timer as *mut BpfTimer };
             let map_ptr = core::ptr::from_ref(&UPDATE_TIMER).cast();
-            timer::timer_init(t, map_ptr, timer::CLOCK_BOOTTIME);
-            timer::timer_set_callback(t, update_timer_fn as *const () as u64);
-            let ret = timer::timer_start(t, TIMER_INTERVAL_NS, 0);
+            unsafe { timer::timer_init(t, map_ptr, timer::CLOCK_BOOTTIME) };
+            unsafe { timer::timer_set_callback(t, update_timer_fn as *const () as u64) };
+            let ret = unsafe { timer::timer_start(t, TIMER_INTERVAL_NS, 0) };
             if ret < 0 {
                 return ret as i32;
             }
@@ -1891,12 +1891,12 @@ fn mitosis_init() -> i32 {
     0
 }
 
-fn mitosis_exit(_ei: *mut scx_exit_info) {
+fn mitosis_exit(_ctx: &mut BpfCtx, _ei: *mut scx_exit_info) {
     // UEI_RECORD(uei, ei) — record exit info for userspace.
     // See C source mitosis.bpf.c:2015-2018
 }
 
-fn mitosis_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
+fn mitosis_init_task(_ctx: &mut BpfCtx, p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 {
     // Port of C mitosis_init_task (mitosis.bpf.c:1629-1652).
     //
     // When cpu_controller_disabled: get task's actual cgroup via task_cgroup(),
@@ -1928,7 +1928,7 @@ fn mitosis_init_task(p: *mut task_struct, _args: *mut core::ffi::c_void) -> i32 
     0
 }
 
-fn mitosis_exit_task(p: *mut task_struct, _args: *mut core::ffi::c_void) {
+fn mitosis_exit_task(_ctx: &mut BpfCtx, p: *mut task_struct, _args: *mut core::ffi::c_void) {
     let _ = TASK_CTX.delete(p as *mut u8);
 }
 
@@ -2058,7 +2058,7 @@ fn init_cgrp_ctx_with_ancestors(cgrp: *mut cgroup) -> i32 {
 /// cgroup_init: Called when a cgroup is created.
 ///
 /// Port of C mitosis_cgroup_init (mitosis.bpf.c:1436-1442).
-fn mitosis_cgroup_init(cgrp: *mut core::ffi::c_void, _args: *mut core::ffi::c_void) -> i32 {
+fn mitosis_cgroup_init(_ctx: &mut BpfCtx, cgrp: *mut core::ffi::c_void, _args: *mut core::ffi::c_void) -> i32 {
     if CPU_CONTROLLER_DISABLED.get() {
         return 0;
     }
@@ -2071,7 +2071,7 @@ fn mitosis_cgroup_init(cgrp: *mut core::ffi::c_void, _args: *mut core::ffi::c_vo
 /// - Looks up cgrp_ctx
 /// - If this cgroup owned a cell, frees it
 /// - Bumps configuration_seq to redistribute CPUs back to root cell
-fn mitosis_cgroup_exit(cgrp: *mut core::ffi::c_void) {
+fn mitosis_cgroup_exit(_ctx: &mut BpfCtx, cgrp: *mut core::ffi::c_void) {
     if CPU_CONTROLLER_DISABLED.get() {
         return;
     }
@@ -2105,7 +2105,7 @@ fn mitosis_cgroup_exit(cgrp: *mut core::ffi::c_void) {
 /// Port of C mitosis_cgroup_move (mitosis.bpf.c:1477-1489):
 /// - Looks up the task's context
 /// - Updates the task's cell assignment to match the destination cgroup
-fn mitosis_cgroup_move(p: *mut task_struct, _from: *mut core::ffi::c_void, to: *mut core::ffi::c_void) {
+fn mitosis_cgroup_move(_ctx: &mut BpfCtx, p: *mut task_struct, _from: *mut core::ffi::c_void, to: *mut core::ffi::c_void) {
     if CPU_CONTROLLER_DISABLED.get() {
         return;
     }
@@ -2135,7 +2135,7 @@ fn mitosis_cgroup_move(p: *mut task_struct, _from: *mut core::ffi::c_void, to: *
 ///
 /// Port of C mitosis_dump (mitosis.bpf.c:1690-1782).
 /// Stub — needs scx_bpf_dump() kfunc wrapper for formatted output.
-fn mitosis_dump(_dctx: *mut core::ffi::c_void) {
+fn mitosis_dump(_ctx: &mut BpfCtx, _dctx: *mut core::ffi::c_void) {
     // Needs scx_bpf_dump() kfunc wrapper for formatted output.
     // Would iterate CELLS and CPU contexts, printing vtime and nr_queued.
 }
@@ -2144,7 +2144,7 @@ fn mitosis_dump(_dctx: *mut core::ffi::c_void) {
 ///
 /// Port of C mitosis_dump_task (mitosis.bpf.c:1784-1799).
 /// Stub — needs scx_bpf_dump() kfunc wrapper for formatted output.
-fn mitosis_dump_task(_dctx: *mut core::ffi::c_void, p: *mut task_struct) {
+fn mitosis_dump_task(_ctx: &mut BpfCtx, _dctx: *mut core::ffi::c_void, p: *mut task_struct) {
     // Read task context to validate it exists (verifier path coverage)
     let _tctx = lookup_task_ctx(p);
     // Needs scx_bpf_dump() wrapper to print task vtime, cell, DSQ info.
