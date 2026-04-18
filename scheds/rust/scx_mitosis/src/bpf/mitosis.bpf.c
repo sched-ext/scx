@@ -234,6 +234,9 @@ static inline int allocate_cell()
 			return -1;
 
 		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
+			/* In timer-managed mode, only subcell 0 is used. */
+			c->subcells[0].id = 0;
+			c->subcells[0].in_use = 1;
 			zero_cell_vtimes(c);
 			return cell_idx;
 		}
@@ -244,6 +247,7 @@ static inline int allocate_cell()
 
 static inline int free_cell(int cell_idx)
 {
+	u32 subcell_id;
 	struct cell *c;
 
 	if (cell_idx < 0 || cell_idx >= MAX_CELLS) {
@@ -254,6 +258,11 @@ static inline int free_cell(int cell_idx)
 	if (!(c = lookup_cell(cell_idx)))
 		return -1;
 
+	bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+	{
+		c->subcells[subcell_id].id = subcell_id;
+		c->subcells[subcell_id].in_use = 0;
+	}
 	WRITE_ONCE(c->in_use, 0);
 	return 0;
 }
@@ -323,6 +332,7 @@ static inline void record_cgroup_exit(u64 cgid)
 }
 
 struct cell_cpumask_map cell_cpumasks SEC(".maps");
+struct subcell_cpumask_map subcell_cpumasks SEC(".maps");
 
 static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx)
 {
@@ -464,6 +474,7 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	tctx->configuration_seq = READ_ONCE(applied_configuration_seq);
 	barrier();
 	tctx->cell = cgc->cell;
+	tctx->subcell = 0;
 	tctx->cgid = cg->kn->id;
 
 	return update_task_cpumask(p, tctx);
@@ -2030,6 +2041,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	bpf_for(i, 0, MAX_CELLS)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
+		u32 subcell_id;
+		struct cell *cell;
 
 		if (enable_llc_awareness) {
 			u32 llc;
@@ -2056,6 +2069,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		if (!(cpumaskw = lookup_cell_cpumask_wrapper(i)))
 			return -ENOENT;
 
+		cell = lookup_cell(i);
+		if (!cell)
+			return -ENOENT;
+
+		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+		{
+			cell->subcells[subcell_id].id = subcell_id;
+			cell->subcells[subcell_id].in_use = 0;
+		}
+
 		/*
 		 * Start with full cpumask for all cells. The timer will set up
 		 * the correct cpumasks based on cgroup configuration.
@@ -2077,6 +2100,33 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 				return ret;
 			}
 		}
+
+		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+		{
+			struct cell_cpumask_wrapper *subcell_cpumaskw;
+
+			subcell_cpumaskw = lookup_subcell_cpumask_wrapper(i, subcell_id);
+			if (!subcell_cpumaskw)
+				return -ENOENT;
+
+			ret = init_cpumask_slot(&subcell_cpumaskw->primary, true);
+			if (ret) {
+				scx_bpf_error(
+					"failed to init primary cpumask slot for cell=%u subcell=%u: %d",
+					i, subcell_id, ret);
+				return ret;
+			}
+
+			if (enable_borrowing) {
+				ret = init_cpumask_slot(&subcell_cpumaskw->borrowable, false);
+				if (ret) {
+					scx_bpf_error(
+						"failed to init borrowable cpumask slot for cell=%u subcell=%u: %d",
+						i, subcell_id, ret);
+					return ret;
+				}
+			}
+		}
 	}
 
 	if (enable_llc_awareness) {
@@ -2093,6 +2143,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			return -ENOENT;
 
 		cell->in_use = true;
+		cell->subcells[0].in_use = 1;
 	}
 
 	/*
@@ -2148,7 +2199,7 @@ int apply_cell_config(void *ctx)
 	struct cell_cpumask_wrapper *cpumaskw;
 	struct cgroup_subsys_state *root_css, *pos;
 	struct cgroup *cur_cgrp;
-	u32 i, cell_id;
+	u32 i, cell_id, subcell_id;
 
 	/* Read configuration from global struct (populated by userspace) */
 	struct cell_config *config = &cell_config;
@@ -2169,7 +2220,8 @@ int apply_cell_config(void *ctx)
 	}
 
 	/*
-	 * Phase 2: Apply cell cpumasks and derive CPU-to-cell mappings.
+	 * Phase 2: Apply cell cpumasks, derive CPU-to-cell mappings, and store
+	 * subcell cpumasks for each cell.
 	 * For each cell, we update the cell's cpumask and set each CPU's
 	 * cell assignment based on which cell's cpumask contains it.
 	 *
@@ -2269,6 +2321,54 @@ int apply_cell_config(void *ctx)
 					      cell_id);
 				return -EINVAL;
 			}
+		}
+
+		cell = lookup_cell(cell_id);
+		if (!cell)
+			return -EINVAL;
+
+		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+		{
+			struct cell_cpumask_wrapper *subcell_cpumaskw;
+			struct subcell(*subcell_configs)[MAX_SUBCELLS_PER_CELL];
+			struct subcell *subcell_config;
+
+			subcell_cpumaskw = lookup_subcell_cpumask_wrapper(cell_id, subcell_id);
+			if (!subcell_cpumaskw)
+				return -EINVAL;
+
+			subcell_configs = MEMBER_VPTR(config->subcells, [cell_id]);
+			if (!subcell_configs) {
+				scx_bpf_error("cell_id %d out of bounds for subcells", cell_id);
+				return -EINVAL;
+			}
+
+			subcell_config = MEMBER_VPTR(*subcell_configs, [subcell_id]);
+			if (!subcell_config) {
+				scx_bpf_error("subcell_id %d out of bounds for cell_id %d",
+					      subcell_id, cell_id);
+				return -EINVAL;
+			}
+
+			if (set_cpumask_from_data(&subcell_cpumaskw->primary,
+						  &subcell_config->primary)) {
+				scx_bpf_error(
+					"failed to set primary subcell cpumask for cell=%u subcell=%u",
+					cell_id, subcell_id);
+				return -EINVAL;
+			}
+
+			if (enable_borrowing) {
+				if (set_cpumask_from_data(&subcell_cpumaskw->borrowable,
+							  &subcell_config->borrowable)) {
+					scx_bpf_error(
+						"failed to set borrowable subcell cpumask for cell=%u subcell=%u",
+						cell_id, subcell_id);
+					return -EINVAL;
+				}
+			}
+
+			cell->subcells[subcell_id] = config->subcells[cell_id][subcell_id];
 		}
 	}
 
