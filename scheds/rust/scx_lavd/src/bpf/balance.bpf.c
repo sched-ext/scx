@@ -485,7 +485,7 @@ bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 		return true;
 
 	/*
-	 * If there is no task in the assssociated DSQ, traverse neighbor
+	 * If there is no task in the associated DSQ, traverse neighbor
 	 * compute domains in distance order -- task stealing.
 	 * Skip force stealing when mig_delta_pct is set (> 0) to rely
 	 * only on the is_stealer/is_stealee thresholds.

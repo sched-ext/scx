@@ -678,7 +678,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		/*
 		 * If there is an idle cpu and its associated DSQs are empty,
-		 * disptach the task to the idle cpu right now.
+		 * dispatch the task to the idle cpu right now.
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {

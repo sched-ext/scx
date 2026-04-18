@@ -257,7 +257,7 @@ static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 }
 
 static __always_inline
-s32 cpumask_any_dsitribute(struct pick_ctx *ctx)
+s32 cpumask_any_distribute(struct pick_ctx *ctx)
 {
 	const struct cpumask *mask;
 	s32 cpu;
@@ -279,8 +279,8 @@ s32 pick_random_cpu(struct pick_ctx *ctx)
 	/*
 	 * Pick a less loaded CPU using the random of two choices technique.
 	 */
-	s32 cpu0 = cpumask_any_dsitribute(ctx);
-	s32 cpu1 = cpumask_any_dsitribute(ctx);
+	s32 cpu0 = cpumask_any_distribute(ctx);
+	s32 cpu1 = cpumask_any_distribute(ctx);
 	struct cpu_ctx *cpuc0, *cpuc1;
 
 	if (cpu0 == cpu1 && cpu0 != -ENOENT)
