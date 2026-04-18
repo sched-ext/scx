@@ -2517,8 +2517,9 @@ static bool try_drain_layer_node_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 	return false;
 }
 
-static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc,
-					      struct llc_ctx *llcc)
+static __always_inline bool try_consume_layer_rescue(u32 layer_id, struct cpu_ctx *cpuc,
+						     struct llc_ctx *llcc,
+						     bool rescue_stranded)
 {
 	struct llc_prox_map *llc_pmap = &llcc->prox_map;
 	struct layer *layer;
@@ -2531,10 +2532,13 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 		return false;
 
 	/*
-	 * If a layer is confined, and the CPU doesn't belong to it, we shouldn't
-	 * consume from it.
+	 * If a layer is confined, and the CPU doesn't belong to it, we
+	 * shouldn't consume from it — unless rescue_stranded is set,
+	 * which indicates fallback draining of stranded tasks on nodes
+	 * where the layer has no CPUs.
 	 */
-	if (layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer_id)
+	if (!rescue_stranded &&
+	    layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer_id)
 		return false;
 
 	skip_remote_node = layer->skip_remote_node;
@@ -2604,9 +2608,16 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 	return false;
 }
 
+static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc,
+					      struct llc_ctx *llcc)
+{
+	return try_consume_layer_rescue(layer_id, cpuc, llcc, false);
+}
+
 static __always_inline
-bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
-			struct cpu_ctx *cpuc, struct llc_ctx *llcc)
+bool try_consume_layers_rescue(u32 *layer_order, u32 nr, u32 exclude_layer_id,
+			       struct cpu_ctx *cpuc, struct llc_ctx *llcc,
+			       bool rescue_stranded)
 {
 	u32 u;
 
@@ -2621,11 +2632,19 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 		if (layer_id == exclude_layer_id)
 			continue;
 
-		if (try_consume_layer(layer_id, cpuc, llcc))
+		if (try_consume_layer_rescue(layer_id, cpuc, llcc, rescue_stranded))
 			return true;
 	}
 
 	return false;
+}
+
+static __always_inline
+bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
+			struct cpu_ctx *cpuc, struct llc_ctx *llcc)
+{
+	return try_consume_layers_rescue(layer_order, nr, exclude_layer_id,
+					cpuc, llcc, false);
 }
 
 bool __always_inline sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct layer *prev_layer,
@@ -2717,9 +2736,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (cpuc->node_id < MAX_NUMA_NODES &&
 	    cpuc->cpu == fallback_cpus[cpuc->node_id] &&
 	    (nodec = lookup_node_ctx(cpuc->node_id)) &&
-	    try_consume_layers(nodec->empty_layer_ids,
-			       nodec->nr_empty_layer_ids,
-			       MAX_LAYERS, cpuc, llcc)) {
+	    try_consume_layers_rescue(nodec->empty_layer_ids,
+				     nodec->nr_empty_layer_ids,
+				     MAX_LAYERS, cpuc, llcc, true)) {
 		trace("FALLBACK cpu=%d node=%d (node_cpus=0)",
 		      cpuc->cpu, cpuc->node_id);
 		cpuc->running_fallback = true;
