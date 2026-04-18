@@ -34,7 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parking_lot", "tracing-log"] }
 static_assertions = "1"
 plain = "0.2"
-gpoint = "0.2"
+gpoint = "0.3"
 combinations = "0.1"
 rlimit = "0.11"
 nix = "0.31"
