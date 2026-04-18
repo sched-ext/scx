@@ -435,8 +435,11 @@ fn allocate_budgets(
             } else {
                 0.0
             };
-            for n in 0..nr_nodes {
-                pinned_targets[i][n] = demands[i].raw_pinned[n] as f64 * scale;
+            for (pt, &rp) in pinned_targets[i]
+                .iter_mut()
+                .zip(demands[i].raw_pinned.iter())
+            {
+                *pt = rp as f64 * scale;
             }
         }
 
@@ -536,8 +539,8 @@ fn resolve_spread(allocs: &mut [LayerAlloc], demands: &[LayerDemand], node_caps:
         if demands[idx].spread {
             continue; // spread pinned is about to be zeroed
         }
-        for n in 0..nr_nodes {
-            spread_avail[n] = spread_avail[n].saturating_sub(alloc.pinned[n]);
+        for (sa, &p) in spread_avail.iter_mut().zip(alloc.pinned.iter()) {
+            *sa = sa.saturating_sub(p);
         }
     }
 
@@ -582,10 +585,10 @@ fn resolve_spread(allocs: &mut [LayerAlloc], demands: &[LayerDemand], node_caps:
             // Uncapped — distribute remainder to nodes with room.
             let remainder = total % nr_nodes;
             let mut rem_left = remainder;
-            for n in 0..nr_nodes {
-                allocs[idx].unpinned[n] = per_node;
-                if rem_left > 0 && spread_avail[n] > per_node {
-                    allocs[idx].unpinned[n] += 1;
+            for (up, &sa) in allocs[idx].unpinned.iter_mut().zip(spread_avail.iter()) {
+                *up = per_node;
+                if rem_left > 0 && sa > per_node {
+                    *up += 1;
                     rem_left -= 1;
                 }
             }
@@ -659,8 +662,13 @@ fn place_unpinned(
         if demands[idx].spread {
             continue;
         }
-        for n in 0..nr_nodes {
-            alloc.unpinned[n] = cur_node_cpus[idx][n].saturating_sub(alloc.pinned[n]);
+        for ((up, &cur), &p) in alloc
+            .unpinned
+            .iter_mut()
+            .zip(cur_node_cpus[idx].iter())
+            .zip(alloc.pinned.iter())
+        {
+            *up = cur.saturating_sub(p);
         }
     }
 
@@ -686,9 +694,12 @@ fn place_unpinned(
     // Remaining capacity per node after all pinned + current unpinned.
     let mut node_remaining = node_caps.to_vec();
     for alloc in allocs.iter() {
-        for n in 0..nr_nodes {
-            node_remaining[n] =
-                node_remaining[n].saturating_sub(alloc.pinned[n] + alloc.unpinned[n]);
+        for ((nr, &p), &u) in node_remaining
+            .iter_mut()
+            .zip(alloc.pinned.iter())
+            .zip(alloc.unpinned.iter())
+        {
+            *nr = nr.saturating_sub(p + u);
         }
     }
 

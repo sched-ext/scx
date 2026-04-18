@@ -290,7 +290,7 @@ impl LayerStats {
                         .iter()
                         .take(LAYER_USAGE_SUM_UPTO + 1)
                         .sum::<f64>()
-                        / ((*membw_limit_gb * (1024_u64.pow(3) as f64)) as f64)
+                        / (*membw_limit_gb * (1024_u64.pow(3) as f64))
                 } else {
                     0.0
                 }
@@ -319,7 +319,7 @@ impl LayerStats {
             enq_reenq: lstat_pct(LSTAT_ENQ_REENQ),
             enq_dsq: lstat_pct(LSTAT_ENQ_DSQ),
             min_exec: lstat_pct(LSTAT_MIN_EXEC),
-            min_exec_us: (lstat(LSTAT_MIN_EXEC_NS) / 1000) as u64,
+            min_exec_us: lstat(LSTAT_MIN_EXEC_NS) / 1000,
             open_idle: lstat_pct(LSTAT_OPEN_IDLE),
             preempt: lstat_pct(LSTAT_PREEMPT),
             preempt_xllc: lstat_pct(LSTAT_PREEMPT_XLLC),
@@ -335,7 +335,7 @@ impl LayerStats {
             excl_collision: lstat_pct(LSTAT_EXCL_COLLISION),
             excl_preempt: lstat_pct(LSTAT_EXCL_PREEMPT),
             yielded: lstat_pct(LSTAT_YIELD),
-            yield_ignore: lstat(LSTAT_YIELD_IGNORE) as u64,
+            yield_ignore: lstat(LSTAT_YIELD_IGNORE),
             migration: lstat_pct(LSTAT_MIGRATION),
             xnuma_migration: lstat_pct(LSTAT_XNUMA_MIGRATION),
             xlayer_wake: lstat_pct(LSTAT_XLAYER_WAKE),
@@ -645,6 +645,8 @@ pub struct SysStats {
     pub gpu_task_affinitization_ms: u64,
     #[stat(desc = "System CPU utilization EWMA (10s window)")]
     pub system_cpu_util_ewma: f64,
+    #[stat(desc = "Per-LLC utilization % EWMA")]
+    pub llc_utils: Vec<f64>,
 }
 
 impl SysStats {
@@ -712,6 +714,7 @@ impl SysStats {
             gpu_tasks_affinitized: stats.gpu_tasks_affinitized,
             gpu_task_affinitization_ms: stats.gpu_task_affinitization_ms,
             system_cpu_util_ewma: stats.system_cpu_util_ewma * 100.0,
+            llc_utils: stats.llc_utils.iter().map(|u| u * 100.0).collect(),
         })
     }
 
@@ -771,6 +774,16 @@ impl SysStats {
             self.gpu_tasks_affinitized, self.gpu_task_affinitization_ms
         )?;
 
+        if !self.llc_utils.is_empty() {
+            let llc_strs: Vec<String> = self
+                .llc_utils
+                .iter()
+                .enumerate()
+                .map(|(id, u)| format!("L{}:{:.1}", id, u))
+                .collect();
+            writeln!(w, "llc_util=[{}]", llc_strs.join(" "))?;
+        }
+
         Ok(())
     }
 
@@ -797,6 +810,7 @@ impl SysStats {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum StatsReq {
     Hello(ThreadId),
     Refresh(ThreadId, Stats),
@@ -804,6 +818,7 @@ pub enum StatsReq {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum StatsRes {
     Hello(Stats),
     Refreshed((Stats, SysStats)),

@@ -67,5 +67,39 @@ per layer. This is useful if a layer has more latency sensitive tasks, where
 timeslices should be shorter. Conversely if a layer is largely CPU bound with
 less concerns of latency it may be useful to increase the `slice_us` parameter.
 
+### Utilization Compensation
+
+On systems where external system work (e.g. softirq from network processing)
+concentrates on specific CPUs, layers on those CPUs see reduced effective
+capacity, but their own utilization metrics don't reflect the loss — because
+softirq/irq time isn't attributed to any layer. This causes layers to
+under-request CPUs.
+
+The `util_compensation` option addresses this by proportionally scaling a
+layer's utilization to account for unattributed CPU work. For each CPU, it
+compares `/proc/stat` busy time (which includes irq/softirq) against the
+total layer-attributed utilization on that CPU. The ratio gives a per-CPU
+scale factor that captures how much unattributed work is consuming capacity.
+Each CPU's layer usage delta is then multiplied by that CPU's scale factor
+before being summed into the layer total. This means the compensation is
+weighted by where the layer's actual work runs — a layer doing most of its
+work on hot CPUs gets more compensation than one on cold CPUs, even if both
+have the same total utilization.
+
+`util_compensation` is a float from 0.0 to 1.0:
+- **0.0** (default): no compensation, existing behavior
+- **1.0**: full proportional scaling — each CPU's layer usage is individually
+  scaled by that CPU's busy/attributed ratio before aggregation
+- **0.5**: half the gap is applied
+
+For example, if a layer runs 900ms on CPU 0 and 100ms on CPU 1 per second,
+and CPU 0 has a scale factor of 2.0x (50% unattributed work) while CPU 1 has
+1.0x, the compensated utilization is `900ms*2.0 + 100ms*1.0 = 1900ms = 1.9`
+vs unscaled `1.0`. With `util_compensation: 0.5`, the blended value is
+`1.0*0.5 + 1.9*0.5 = 1.45`, and the layer requests more CPUs via the normal
+`util_range` mechanism.
+
+See `examples/util_compensation.json` for a sample configuration.
+
 `scx_layered` can provide performance wins, for certain workloads when
 sufficient tuning on the layer config.
