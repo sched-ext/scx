@@ -278,10 +278,10 @@ impl CpuOrderCtx {
 
     /// Build a list of compute domains
     fn build_cpdom(cpu_ids: &Vec<CpuId>) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
-        // Note that building compute domain is independent to CPU orer
+        // Note that building compute domain is independent to CPU order
         // so it is okay to use any cpus_*.
 
-        // Creat a compute domain map, where a compute domain is a CPUs that
+        // Create a compute domain map, where a compute domain is a CPUs that
         // are under the same node and LLC (virtual and physical) and have the same core type.
         let mut cpdom_id = 0;
         let mut cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain> = BTreeMap::new();

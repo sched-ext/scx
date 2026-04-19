@@ -34,7 +34,7 @@ u64 calc_avg(u64 old_val, u64 new_val);
 int update_power_mode_time(void);
 
 /*
- * Timer for updating system-wide status periorically
+ * Timer for updating system-wide status periodically
  */
 struct update_timer {
 	struct bpf_timer timer;
