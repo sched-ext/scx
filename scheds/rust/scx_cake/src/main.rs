@@ -138,13 +138,6 @@ struct Args {
     #[arg(long, default_value_t = 1, verbatim_doc_comment)]
     interval: u64,
 
-    /// Live in-kernel testing mode for automated benchmarking.
-    ///
-    /// Runs the scheduler for 10 seconds, collects BPF data points,
-    /// and prints a structured JSON output to stdout.
-    #[arg(long, verbatim_doc_comment)]
-    testing: bool,
-
     /// Print scheduler version and exit.
     #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
@@ -249,7 +242,7 @@ impl<'a> Scheduler<'a> {
             // In release, --verbose is silently ignored.
             #[cfg(debug_assertions)]
             {
-                rodata.enable_stats = args.verbose || args.testing;
+                rodata.enable_stats = args.verbose;
             }
 
             // has_hybrid removed: smt_sibling now uses pre-filled cpu_sibling_map only
@@ -293,6 +286,9 @@ impl<'a> Scheduler<'a> {
             for i in 0..topo.cpu_sibling_map.len().min(rodata.cpu_sibling_map.len()) {
                 rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i] as _;
             }
+            for i in 0..topo.cpu_thread_bit.len().min(rodata.cpu_thread_bit.len()) {
+                rodata.cpu_thread_bit[i] = topo.cpu_thread_bit[i];
+            }
             for i in 0..topo.llc_cpu_mask.len().min(rodata.llc_cpu_mask.len()) {
                 rodata.llc_cpu_mask[i] = topo.llc_cpu_mask[i];
             }
@@ -301,58 +297,11 @@ impl<'a> Scheduler<'a> {
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
-
-            // ALPHADEV Phase 11: Multi-CCD Gaming Steer & Evict
-            {
-                let mut best_llc: u8 = 0;
-                let mut max_rank = 0;
-
-                if topo.has_vcache {
-                    for (i, &mask) in topo.llc_cpu_mask.iter().enumerate() {
-                        if mask == topo.vcache_llc_mask[0] && mask != 0 {
-                            best_llc = i as u8;
-                            break;
-                        }
-                    }
-                } else if topo.nr_cpus > 1 {
-                    // Fall back to amd_pstate_prefcore_ranking if symmetric.
-                    for cpu in 0..topo.nr_cpus {
-                        let path = format!(
-                            "/sys/devices/system/cpu/cpu{}/cpufreq/amd_pstate_prefcore_ranking",
-                            cpu
-                        );
-                        let rank = std::fs::read_to_string(&path)
-                            .ok()
-                            .and_then(|s| s.trim().parse::<u32>().ok())
-                            .unwrap_or(100);
-                        if rank > max_rank {
-                            max_rank = rank;
-                            best_llc = topo.cpu_llc_id[cpu] as u8;
-                        }
-                    }
-                }
-
-                rodata.preferred_llc = best_llc;
-
-                // ALPHADEV Phase 8: Offset Map (Pre-calculating cross-CCD jumps)
-                for my_llc in 0..rodata.nr_llcs as usize {
-                    for i in 1..rodata.nr_llcs as usize {
-                        let mut victim = my_llc + i;
-                        if victim >= rodata.nr_llcs as usize {
-                            victim -= rodata.nr_llcs as usize;
-                        }
-                        rodata.victim_scan_order[my_llc][i] = victim as u8;
-                    }
-                }
-
-                // llc_scan_order REMOVED from BPF: zero BPF readers.
-                // Was: Asymmetric SIMD topological scan matrices
-
-                info!(
-                    "Topology Strategy: Preferred LLC={}, Max Rank={}",
-                    best_llc, max_rank
-                );
+            for i in 0..topo.cpu_core_id.len().min(rodata.cpu_core_id.len()) {
+                rodata.cpu_core_id[i] = topo.cpu_core_id[i];
             }
+
+            info!("Topology Strategy: Per-CPU local-first dispatch");
 
             // Performance-ordered CPU scan arrays — HYBRID ONLY
             #[cfg(cake_has_hybrid)]
@@ -479,14 +428,13 @@ impl<'a> Scheduler<'a> {
                 .context("Failed to attach struct_ops BPF programs")?,
         );
 
-        // Release builds: --verbose and --testing are unavailable (stats compiled out).
-        // Warn early so user knows these flags require a debug build.
+        // Release builds: --verbose is unavailable (stats compiled out).
+        // Warn early so user knows this flag requires a debug build.
         #[cfg(not(debug_assertions))]
-        if self.args.verbose || self.args.testing {
-            warn!("--verbose and --testing require a debug build (telemetry is compiled out in release).");
+        if self.args.verbose {
+            warn!("--verbose requires a debug build (telemetry is compiled out in release).");
             warn!("Rebuild without --release: cargo build -p scx_cake");
             self.args.verbose = false;
-            self.args.testing = false;
         }
 
         // Standard startup banner: follows scx_cosmos/scx_bpfland convention
@@ -518,39 +466,7 @@ impl<'a> Scheduler<'a> {
                 .max(1),
             self.args.profile
         );
-        if self.args.testing {
-            info!("Running in benchmarking mode for 10 seconds...");
-            std::thread::sleep(std::time::Duration::from_secs(1)); // Warmup
-
-            let mut start_dsq_dispatches = 0u64;
-            for cpu in 0..self.topology.nr_cpus {
-                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
-                start_dsq_dispatches += stats.nr_local_dispatches + stats.nr_stolen_dispatches;
-            }
-
-            let start_time = std::time::Instant::now();
-            let mut elapsed = 0;
-            while elapsed < 10 && !shutdown.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                elapsed += 1;
-            }
-            let duration = start_time.elapsed().as_secs_f64();
-
-            let mut end_dsq_dispatches = 0u64;
-            for cpu in 0..self.topology.nr_cpus {
-                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
-                end_dsq_dispatches += stats.nr_local_dispatches + stats.nr_stolen_dispatches;
-            }
-
-            let delta = end_dsq_dispatches.saturating_sub(start_dsq_dispatches);
-            let throughput = delta as f64 / duration;
-            println!(
-                "{{\"duration_sec\": {:.2}, \"total_dsq_dispatches\": {}, \"dsq_dispatches_per_sec\": {:.2}}}",
-                duration, delta, throughput
-            );
-
-            shutdown.store(true, Ordering::Relaxed);
-        } else if self.args.verbose && std::io::stdout().is_terminal() {
+        if self.args.verbose && std::io::stdout().is_terminal() {
             // Run TUI mode
             tui::run_tui(
                 &mut self.skel,

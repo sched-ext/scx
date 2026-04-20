@@ -74,12 +74,14 @@ struct cake_cpu_bss {
 				 *     Eliminates indexed RODATA load in dispatch/tick. */
 	u16 _pad_6;             /* 2B: natural alignment for tick_slice */
 	u64 tick_slice;         /* 8B: p->scx.slice ?: quantum_ns */
-	u64 vtime_local;        /* 8B: per-CPU monotonic max vtime.
-				 *     Replaces global vtime_now to avoid
-				 *     cross-core cache line bouncing. */
+	u64 vtime_local;        /* 8B: per-CPU live vtime frontier.
+				 *     Tracks the most recently active runnable
+				 *     task on this CPU so wakeup rescue can
+				 *     clamp against the current workload
+				 *     instead of a historical max. */
 	u32 last_pid;           /* 4B: Fast path — skip task-change work if same pid */
 	u8  idle_hint;          /* 1B: 0=busy, 1=idle */
-	u8  busy_wakeup_pending; /* 1B: busy wakeup fell back to DSQ for this CPU */
+	u8  busy_wakeup_pending; /* 1B: reserved for future wake handoff policy */
 	u8  _pad_status[2];     /* 2B: padding / future per-CPU state */
 #ifndef CAKE_RELEASE
 	u64 cake_clock;         /* 8B: BPF-native monotonic clock (ns).
@@ -150,8 +152,8 @@ typedef unsigned short cake_cpu_id_t;
 /* Physical core array sizing: MAX/2 assumes SMT=2 (AMD/Intel consumer).
  * _Static_assert fires if a non-SMT build exceeds this (future EPYC). */
 #define CAKE_MAX_CORES (CAKE_MAX_CPUS / 2)
-/* Per-LLC DSQ base — DSQ IDs are LLC_DSQ_BASE + llc_index (0..nr_llcs-1).
- * Current release code uses one vtime-ordered DSQ per LLC. */
+/* Legacy shared-DSQ base retained only for dump / telemetry compatibility.
+ * The active scheduler now keeps runnable ownership per CPU. */
 #define LLC_DSQ_BASE 200
 
 /* STAGED_BIT_* defines REMOVED: staged_vtime_bits field was dead.
@@ -253,7 +255,7 @@ enum kfunc_bench_id {
 	BENCH_PELT_COLD          = 64, /* PELT util_avg after L1 eviction (cold p->se.avg) */
 	BENCH_EWMA_COLD          = 65, /* EWMA compute after L1 eviction (cold cpu_bss) */
 	BENCH_KICK_REMOTE        = 66, /* kick_cpu(sibling) — real IPI, not self-noop */
-	BENCH_SELECT_CPU_AND     = 67, /* scx_bpf_select_cpu_and/dfl latency */
+	BENCH_SELECT_CPU_AND     = 67, /* Reserved: select_cpu kfuncs are illegal from stopping BenchLab */
 
 	BENCH_MAX_ENTRIES        = 68,
 };
@@ -280,13 +282,76 @@ struct kfunc_bench_results {
  *   Tunnel: all CPUs busy → DSQ fallback (vtime ordering) */
 
 /* Flow state flags (packed_info bits 24-27).
- * Only NEW/YIELDER are still meaningful in current code; the rest are
- * retained for debug/telemetry compatibility. */
+ * packed_info is now primarily an iter/debug transport field.
+ * Only NEW/YIELDER and KCRITICAL have live readers; the rest are
+ * retained for telemetry / BenchLab compatibility. */
 enum cake_flow_flags {
 	CAKE_FLOW_NEW          = 1 << 0, /* Task is newly created */
 	CAKE_FLOW_YIELDER      = 1 << 1, /* Task voluntarily yielded since last stop */
 	CAKE_FLOW_WAKER_BOOST  = 1 << 2, /* Reserved legacy flag */
 	CAKE_FLOW_HOG          = 1 << 3, /* Reserved legacy flag */
+};
+
+enum cake_wake_reason {
+	CAKE_WAKE_REASON_NONE   = 0,
+	CAKE_WAKE_REASON_DIRECT = 1,
+	CAKE_WAKE_REASON_BUSY   = 2,
+	CAKE_WAKE_REASON_QUEUED = 3,
+	CAKE_WAKE_REASON_MAX    = 4,
+};
+
+enum cake_place_class {
+	CAKE_PLACE_HOME_CPU = 0,
+	CAKE_PLACE_HOME_CORE = 1,
+	CAKE_PLACE_HOME_LLC = 2,
+	CAKE_PLACE_REMOTE = 3,
+	CAKE_PLACE_CLASS_MAX = 4,
+};
+
+enum cake_select_path {
+	CAKE_SELECT_PATH_NONE = 0,
+	CAKE_SELECT_PATH_HOME_CPU = 1,
+	CAKE_SELECT_PATH_HOME_CORE = 2,
+	CAKE_SELECT_PATH_PRIMARY = 3,
+	CAKE_SELECT_PATH_IDLE = 4,
+	CAKE_SELECT_PATH_TUNNEL = 5,
+	CAKE_SELECT_PATH_MAX = 6,
+};
+
+enum cake_cb_idx {
+	CAKE_CB_SELECT   = 0,
+	CAKE_CB_ENQUEUE  = 1,
+	CAKE_CB_DISPATCH = 2,
+	CAKE_CB_RUNNING  = 3,
+	CAKE_CB_STOPPING = 4,
+	CAKE_CB_MAX      = 5,
+};
+
+enum cake_cb_bucket_idx {
+	CAKE_CB_BUCKET_LT250NS = 0,
+	CAKE_CB_BUCKET_LT500NS = 1,
+	CAKE_CB_BUCKET_LT1US   = 2,
+	CAKE_CB_BUCKET_LT2US   = 3,
+	CAKE_CB_BUCKET_LT5US   = 4,
+	CAKE_CB_BUCKET_LT10US  = 5,
+	CAKE_CB_BUCKET_GE10US  = 6,
+	CAKE_CB_BUCKET_MAX     = 7,
+};
+
+enum cake_dbg_event_kind {
+	CAKE_DBG_EVENT_CALLBACK = 1,
+	CAKE_DBG_EVENT_WAKEWAIT = 2,
+};
+
+struct cake_debug_event {
+	u64 ts_ns;
+	u64 value_ns;
+	u32 pid;
+	u32 aux;
+	u16 cpu;
+	u8 kind;
+	u8 slot;
+	char comm[16];
 };
 
 /* Record emitted by SEC("iter/task") cake_task_iter program.
@@ -297,7 +362,7 @@ enum cake_flow_flags {
 struct cake_iter_record {
 	u32 pid;         /* pid of this task */
 	u32 ppid;        /* parent pid (promoted from tctx CL0) */
-	u32 packed_info; /* class-slot + flags — same field read in Rust telemetry loop */
+	u32 packed_info; /* iter/debug packed flags — read in Rust telemetry loop */
 	u16 pelt_util;       /* PELT util_avg (0-1024) from p->se.avg */
 	u16 legacy_slot_u16; /* Reserved legacy field */
 	u16 task_weight;     /* Raw task weight mirrored for iter/TUI display (100=nice0) */
@@ -344,6 +409,7 @@ struct cake_iter_record {
 		u32 wait_hist_ge1ms;
 		u16 slice_util_pct;
 		u16 llc_id;
+		u16 llc_run_mask;
 		u16 same_cpu_streak;
 		u16 _pad_recomp;
 		u32 wakeup_source_pid;
@@ -368,6 +434,18 @@ struct cake_iter_record {
 		u16 waker_cpu;
 		u16 _pad_waker;
 		u32 waker_tgid;
+		u64 wake_reason_wait_ns[CAKE_WAKE_REASON_MAX - 1];
+		u32 wake_reason_count[CAKE_WAKE_REASON_MAX - 1];
+		u32 wake_reason_max_us[CAKE_WAKE_REASON_MAX - 1];
+		u8 pending_select_path;
+		u8 last_select_path;
+		u8 last_place_class;
+		u8 last_waker_place_class;
+		u32 wake_same_tgid_count;
+		u32 wake_cross_tgid_count;
+		u64 home_place_wait_ns[CAKE_PLACE_CLASS_MAX];
+		u32 home_place_wait_count[CAKE_PLACE_CLASS_MAX];
+		u32 home_place_wait_max_us[CAKE_PLACE_CLASS_MAX];
 		u16 cpu_run_count[CAKE_TELEM_MAX_CPUS];
 	} telemetry;
 };
@@ -383,7 +461,7 @@ struct cake_iter_record {
  *
  * Structs using this pattern:
  *   mega_mailbox_entry:  64B release (1 CL) / 128B debug (2 CL)
- *   cake_task_ctx:       64B release (1 CL) / 512B debug (8 CL)
+ *   cake_task_ctx:       64B release (1 CL) / 448B debug (7 CL)
  *   cake_per_cpu:        matches mailbox size
  * ═══════════════════════════════════════════════════════════════════════════ */
 #ifdef CAKE_RELEASE
@@ -394,25 +472,28 @@ struct cake_iter_record {
 #else
 #define CAKE_MBOX_SIZE  128
 #define CAKE_MBOX_ALIGN 128
-#define CAKE_TCTX_SIZE  512
-#define CAKE_TCTX_ALIGN 512
+#define CAKE_TCTX_SIZE  448
+#define CAKE_TCTX_ALIGN 64
 #endif
 
 /* Per-task context — conditional sizing (Release/Debug pattern).
  *   RELEASE: 64B (1 CL) — iter-visible fields only, telemetry compiled out
- *   DEBUG:  512B (8 CL) — iter-visible fields plus TUI telemetry
+ *   DEBUG:  448B (7 CL) — iter-visible fields plus TUI telemetry
  *
  * CACHE LINE SEGREGATION:
  *   CL0 (bytes 0-63): Fields needed for iter output and debug bookkeeping.
  *     aligned(CAKE_TCTX_ALIGN) handles CL0 padding automatically —
  *     no manual _pad arrays needed.
  *   CL1+ (bytes 64+): Debug-only telemetry for TUI analytics.
- *     Compiled out in release → struct shrinks from 512B to 64B. */
+ *     Compiled out in release → struct shrinks from 448B to 64B. */
 struct cake_task_ctx {
 	/* ═══ CACHE LINE 0: RELEASE + ITER FIELDS ═══ */
 	u32 packed_info;       /* 4B: Bitfield flags (iter-visible) */
 	u32 ppid;              /* 4B: Parent PID (iter-visible) */
 	u16 task_weight;       /* 2B: Raw task weight for iter/TUI display (100=nice0) */
+	u16 home_cpu;          /* 2B: Sticky preferred CPU (primary SMT lane) */
+	u8  home_score;        /* 1B: Hysteresis for updating home_cpu */
+	u8  home_core;         /* 1B: Sticky preferred physical core */
 
 #ifndef CAKE_RELEASE
 	/* ── DEBUG-ONLY CL0 FIELDS ── */
@@ -423,8 +504,8 @@ struct cake_task_ctx {
 	/* Compiler pads to CAKE_TCTX_ALIGN via aligned attribute. */
 
 #ifndef CAKE_RELEASE
-	/* ═══ CL1+ (bytes 64-511): DEBUG-ONLY TELEMETRY ═══
-	 * Compiled out in release → struct shrinks from 512B to 64B.
+	/* ═══ CL1+ (bytes 64-447): DEBUG-ONLY TELEMETRY ═══
+	 * Compiled out in release → struct shrinks from 448B to 64B.
 	 * Zero-cost pointer access via BPF Arena. User-space sweeps memory
 	 * asynchronously to build 1% Lows and average runtimes. */
 	struct {
@@ -483,6 +564,7 @@ struct cake_task_ctx {
 		/* Slice Utilization Metrics */
 		u16 slice_util_pct;        /* (actual_run / slice) * 100 */
 		u16 llc_id;                /* LLC node this task last ran on */
+		u16 llc_run_mask;          /* Bitmask of LLCs the task has run on */
 		u16 same_cpu_streak;       /* Consecutive runs on same CPU */
 		u16 _pad_recomp;           /* (was _deprecated_recomp — removed) */
 		u32 wakeup_source_pid;     /* PID that woke this task */
@@ -517,6 +599,19 @@ struct cake_task_ctx {
 		u16 waker_cpu;             /* CPU the waker was running on */
 		u16 _pad_waker;            /* Align to 4B */
 		u32 waker_tgid;            /* TGID of the waker (process group) */
+		u64 wake_reason_wait_ns[CAKE_WAKE_REASON_MAX - 1]; /* Wait by wake path */
+		u32 wake_reason_count[CAKE_WAKE_REASON_MAX - 1];   /* Samples by wake path */
+		u32 wake_reason_max_us[CAKE_WAKE_REASON_MAX - 1];  /* Worst wait by wake path */
+		u8 pending_wake_reason;    /* Wake path recorded at enqueue, consumed at run */
+		u8 pending_select_path;    /* select_cpu path recorded before the run */
+		u8 last_select_path;       /* Last select path that actually led to a run */
+		u8 last_place_class;       /* Last run vs sticky home: cpu/core/llc/remote */
+		u8 last_waker_place_class; /* Last run vs waker: cpu/core/llc/remote */
+		u32 wake_same_tgid_count;  /* Wake chain stayed inside the same process */
+		u32 wake_cross_tgid_count; /* Wake came from a different TGID */
+		u64 home_place_wait_ns[CAKE_PLACE_CLASS_MAX]; /* Wait totals by home locality */
+		u32 home_place_wait_count[CAKE_PLACE_CLASS_MAX]; /* Wait samples by home locality */
+		u32 home_place_wait_max_us[CAKE_PLACE_CLASS_MAX]; /* Worst wait by home locality */
 
 		/* CPU core distribution histogram */
 		u16 cpu_run_count[CAKE_TELEM_MAX_CPUS]; /* 128 bytes: per-CPU run count */
@@ -525,14 +620,14 @@ struct cake_task_ctx {
 } __attribute__((aligned(CAKE_TCTX_ALIGN)));
 _Static_assert(
 	sizeof(struct cake_task_ctx) == CAKE_TCTX_SIZE,
-	"cake_task_ctx size mismatch (64B release, 512B debug)");
+	"cake_task_ctx size mismatch (64B release, 448B debug)");
 
-/* packed_info bitfield layout (write-set co-located for mask fusion):
+/* packed_info bitfield layout (iter/debug transport field):
  * [Stable:2][Tier:2][Flags:4][KCR:1][BG:1][Rsvd:14][Rsvd:8]
  *  31-30     29-28   27-24    23     22    21-8       7-0
- * TIER+STABLE are retained legacy fields.
+ * TIER+STABLE+BG are retained legacy fields.
  * KCR = cached critical kernel thread (set once in cake_init_task).
- * BG  = reserved legacy bit. */
+ * The TUI no longer surfaces the legacy fields as live cake classes. */
 #define SHIFT_FLAGS 24 /* 4 bits: flow flags */
 #define SHIFT_TIER 28 /* 2 bits: tier 0-3 (coalesced with STABLE) */
 #define SHIFT_STABLE 30 /* 2 bits: tier-stability counter (0-3) */
@@ -604,10 +699,17 @@ _Static_assert(
 	"mega_mailbox_entry size mismatch (64B release, 128B debug)");
 
 /* Statistics shared with userspace.
- * Some legacy counters remain in the layout for TUI/testing compatibility
+ * Some legacy counters remain in the layout for TUI compatibility
  * even when current release code no longer increments them. */
 struct cake_stats {
 	u64 nr_prev_cpu_tunnels; /* select_cpu() fell back to returning prev_cpu */
+	u64 nr_steer_eligible; /* select_cpu() saw a task eligible for warm steering */
+	u64 nr_home_cpu_steers; /* select_cpu() placed a hot task back on its sticky home CPU */
+	u64 nr_home_core_steers; /* select_cpu() kept a sync wakeup on its sticky core */
+	u64 nr_primary_cpu_steers; /* select_cpu() steered a hot task onto an idle primary SMT lane */
+	u64 nr_home_cpu_busy_misses; /* home_cpu was valid but not idle */
+	u64 nr_prev_primary_busy_misses; /* prev core primary lane rescue was valid but not idle */
+	u64 nr_primary_scan_misses; /* primary-lane scan ran but found no idle candidate */
 	u64 nr_busy_handoff_dispatches; /* dispatch() later pulled DSQ work while a busy wakeup was pending */
 	u64 nr_busy_keep_suppressed; /* dispatch() skipped keep_running because a busy wakeup was pending */
 	u64 nr_wakeup_busy_local_target; /* Busy wakeup fallback where target CPU matched enqueue CPU */
@@ -621,10 +723,19 @@ struct cake_stats {
 	u64 nr_dropped_allocations; /* Count of failed scx_task_alloc requests */
 	u64 nr_local_dispatches;    /* Dispatched from local LLC DSQ */
 	u64 nr_stolen_dispatches;   /* Dispatched from remote LLC DSQ (steal) */
-	u64 nr_dispatch_misses;     /* dispatch() kfunc found no work (DSQ empty after probe) */
+	u64 nr_dispatch_misses;     /* dispatch() found no residual shared-queue work */
 	u64 nr_dispatch_hint_skip;  /* dispatch() skipped kfunc via dsq_pending hint (counter==0) */
-	u64 nr_dsq_queued;          /* Per-LLC DSQ enqueue count (for depth calc) */
-	u64 nr_dsq_consumed;        /* Per-LLC DSQ consume count (dispatched from DSQ) */
+	u64 nr_direct_local_inserts; /* Total SCX_DSQ_LOCAL_ON inserts performed by cake */
+	u64 nr_direct_affine_inserts; /* Direct local inserts used to keep restricted-affinity tasks off shared queues */
+	u64 nr_direct_kthread_inserts; /* Direct inserts from the kthread bypass path */
+	u64 nr_direct_other_inserts; /* Direct inserts that were neither wakeups nor kthread bypass */
+	u64 nr_dsq_queued;          /* Shared vtime DSQ enqueue count (for depth calc where used) */
+	u64 nr_dsq_consumed;        /* Shared DSQ consume count */
+	u64 nr_shared_vtime_inserts; /* Total shared vtime DSQ inserts performed by cake */
+	u64 nr_shared_wakeup_inserts; /* Shared vtime inserts from wakeups */
+	u64 nr_shared_requeue_inserts; /* Shared vtime inserts from the slice-halving requeue path */
+	u64 nr_shared_preserve_inserts; /* Shared vtime inserts preserving slice/deadline state */
+	u64 nr_shared_other_inserts; /* Shared vtime inserts that were neither wakeup nor requeue/preserve */
 
 	/* Callback aggregate timing (cumulative ns, system-wide) */
 	u64 total_select_cpu_ns;     /* Total time in cake_select_cpu */
@@ -645,11 +756,45 @@ struct cake_stats {
 	/* Dispatch callback timing */
 	u64 total_dispatch_ns;       /* Total time in cake_dispatch */
 	u64 max_dispatch_ns;         /* Worst single cake_dispatch */
+	u64 nr_select_cpu_calls;     /* Total cake_select_cpu invocations */
+	u64 nr_enqueue_calls;        /* Total cake_enqueue invocations */
+	u64 nr_dispatch_calls;       /* Total cake_dispatch invocations */
+	u64 nr_running_calls;        /* Total cake_running invocations */
+	u64 nr_stopping_calls;       /* Total cake_stopping invocations */
 
 		/* Wakeup enqueue gate counters */
 		u64 nr_wakeup_direct_dispatches; /* Wakeups that direct-dispatched to SCX_DSQ_LOCAL_ON */
-		u64 nr_wakeup_dsq_fallback_busy; /* Wakeups sent to DSQ because target CPU did not look idle */
-		u64 nr_wakeup_dsq_fallback_queued; /* Wakeups sent to DSQ because the target DSQ was already non-empty */
+		u64 nr_wakeup_dsq_fallback_busy; /* Wakeups that missed direct dispatch because target CPU did not look idle */
+		u64 nr_wakeup_dsq_fallback_queued; /* Wakeups that missed direct dispatch because the shared DSQ was already non-empty */
+	u64 callback_hist[CAKE_CB_MAX][CAKE_CB_BUCKET_MAX]; /* Callback duration histogram buckets */
+	u64 callback_slow[CAKE_CB_MAX]; /* Threshold breaches per callback */
+	u64 wake_reason_wait_ns[CAKE_WAKE_REASON_MAX]; /* Wait sums by wake path (0 unused) */
+	u64 wake_reason_wait_count[CAKE_WAKE_REASON_MAX]; /* Wait samples by wake path (0 unused) */
+	u64 wake_reason_wait_max_ns[CAKE_WAKE_REASON_MAX]; /* Worst wait by wake path (0 unused) */
+	u64 select_path_count[CAKE_SELECT_PATH_MAX]; /* Path chosen in select_cpu (0 unused) */
+	u64 home_place_wait_ns[CAKE_PLACE_CLASS_MAX]; /* Wait sums by task-home locality */
+	u64 home_place_wait_count[CAKE_PLACE_CLASS_MAX]; /* Wait samples by task-home locality */
+	u64 home_place_wait_max_ns[CAKE_PLACE_CLASS_MAX]; /* Worst wait by task-home locality */
+	u64 home_place_run_ns[CAKE_PLACE_CLASS_MAX]; /* First-run sums by task-home locality */
+	u64 home_place_run_count[CAKE_PLACE_CLASS_MAX]; /* First-run samples by task-home locality */
+	u64 home_place_run_max_ns[CAKE_PLACE_CLASS_MAX]; /* Worst first-run by task-home locality */
+	u64 waker_place_wait_ns[CAKE_PLACE_CLASS_MAX]; /* Wait sums by waker locality */
+	u64 waker_place_wait_count[CAKE_PLACE_CLASS_MAX]; /* Wait samples by waker locality */
+	u64 waker_place_wait_max_ns[CAKE_PLACE_CLASS_MAX]; /* Worst wait by waker locality */
+	u64 nr_wake_same_tgid; /* Wakes from the same TGID */
+	u64 nr_wake_cross_tgid; /* Wakes from a different TGID */
+	u64 nr_idle_hint_remote_reads; /* Cross-CPU idle_hint reads */
+	u64 nr_idle_hint_remote_busy; /* Remote idle_hint reads observing busy */
+	u64 nr_idle_hint_remote_idle; /* Remote idle_hint reads observing idle */
+	u64 nr_busy_pending_remote_sets; /* Cross-CPU busy_wakeup_pending writes for shared-fallback mode */
+	u64 nr_enqueue_requeue_fastpath; /* Non-wakeup requeues that bypassed direct-handoff logic */
+	u64 nr_enqueue_busy_local_skip_depth; /* Same-CPU busy wakeups that skipped DSQ depth query */
+	u64 nr_enqueue_busy_remote_skip_depth; /* Remote busy wakeups that skipped DSQ depth query */
+	u64 nr_busy_pending_set_skips; /* busy_wakeup_pending already 1 in shared-fallback mode */
+	u64 nr_idle_hint_set_writes; /* idle_hint 0->1 transitions */
+	u64 nr_idle_hint_clear_writes; /* idle_hint 1->0 transitions */
+	u64 nr_idle_hint_set_skips; /* idle_hint already 1 */
+	u64 nr_idle_hint_clear_skips; /* idle_hint already 0 */
 	} __attribute__((aligned(64)));
 
 /* Current default values */
