@@ -707,15 +707,20 @@ u64 cbw_get_cgroup_ctx_raw(u64 cgrp_id)
 }
 
 static __always_inline
+scx_cgroup_ctx_t *cbw_get_cgroup_ctx_with_id(u64 cgrp_id)
+{
+	return (scx_cgroup_ctx_t *)cbw_get_cgroup_ctx_raw(cgrp_id);
+}
+
+static __always_inline
 scx_cgroup_ctx_t *cbw_get_cgroup_ctx(struct cgroup *cgrp)
 {
 	return (scx_cgroup_ctx_t *)cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
 }
 
-long cbw_del_cgroup_ctx(struct cgroup *cgrp)
+long cbw_del_cgroup_ctx(u64 cgrp_id)
 {
-	u64 cgrp_id = cgroup_get_id(cgrp);
-	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx(cgrp);
+	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
 
 	if (cgx)
 		cbw_free_cgx(cgx);
@@ -1132,7 +1137,7 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 }
 
 __noinline
-int cbw_unthrottle_cgroup_for_exit(struct cgroup *cgrp __arg_trusted)
+int cbw_unthrottle_cgroup_for_exit(u64 cgrp_id)
 {
 	scx_cgroup_ctx_t *cgx;
 
@@ -1140,9 +1145,8 @@ int cbw_unthrottle_cgroup_for_exit(struct cgroup *cgrp __arg_trusted)
 	 * Stop throttling the cgroup by setting its upper bound and
 	 * budget remaining to infinite.
 	 */
-	if (!(cgx = cbw_get_cgroup_ctx(cgrp))) {
-		cbw_err("Failed to lookup a cgroup ctx: %llu",
-			cgroup_get_id(cgrp));
+	if (!(cgx = cbw_get_cgroup_ctx_with_id(cgrp_id))) {
+		cbw_err("Failed to lookup a cgroup ctx: %llu", cgrp_id);
 		return -ESRCH;
 	}
 
@@ -1200,6 +1204,7 @@ int cbw_cgroup_bw_offline(u64 cgrp_id)
 	 * chains.
 	 */
 	cbw_dbg("Offline a cgroup: %llu", cgrp_id);
+	cbw_unthrottle_cgroup_for_exit(cgrp_id);
 	return cbw_free_llc_ctx(NULL, cgrp_id);
 }
 
@@ -1216,6 +1221,7 @@ __hidden
 int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 {
 	int ret = 0;
+	u64 cgrp_id;
 
 	cbw_dbg_cgrp();
 
@@ -1227,10 +1233,11 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	 * are throttled. We first stop throttling the cgroup to prevent any
 	 * more tasks from being throttled. 
 	 */
-	cbw_unthrottle_cgroup_for_exit(cgrp);
+	cgrp_id = cgroup_get_id(cgrp);
 
-	cbw_del_cgroup_ctx(cgrp);
-	cbw_free_llc_ctx(NULL, cgroup_get_id(cgrp));
+	cbw_unthrottle_cgroup_for_exit(cgrp_id);
+	cbw_del_cgroup_ctx(cgrp_id);
+	cbw_free_llc_ctx(NULL, cgrp_id);
 	return ret;
 }
 
