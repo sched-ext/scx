@@ -296,7 +296,7 @@ static inline void __arena *cbw_freelist_pop(u64 *head)
 	u64 __arena *node;
 
 	old_head = *head;
-	while (old_head && can_loop) {
+	while (can_loop && old_head) {
 		node = (u64 __arena *)old_head;	/* first field is free_next */
 		new_head = *node;
 		if (__sync_bool_compare_and_swap(head, old_head, new_head))
@@ -340,7 +340,7 @@ static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
 {
 	int i;
 
-	for (i = 0; i < sizeof(*llcx) && can_loop; i++)
+	for (i = 0; can_loop && i < sizeof(*llcx); i++)
 		((char __arena *)llcx)[i] = 0;
 	cbw_freelist_push(&cbw_llcx_free_head, llcx);
 }
@@ -365,7 +365,7 @@ static inline void cbw_free_cgx(scx_cgroup_ctx_t *cgx)
 {
 	int i;
 
-	for (i = 0; i < sizeof(*cgx) && can_loop; i++)
+	for (i = 0; can_loop && i < sizeof(*cgx); i++)
 		((char __arena *)cgx)[i] = 0;
 	cbw_freelist_push(&cbw_cgx_free_head, cgx);
 }
@@ -503,7 +503,7 @@ void cbw_top_half_begin(void)
 		new.rp_seq++;
 		ret.val = __sync_val_compare_and_swap(&cbw_backlog_stat.val,
 						      old.val, new.val);
-	} while ((ret.val != old.val) && can_loop);
+	} while (can_loop && (ret.val != old.val));
 }
 
 static inline
@@ -531,7 +531,7 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
 		new.has_throttled_tasks = has_throttled_tasks;
 		ret.val = __sync_val_compare_and_swap(&cbw_backlog_stat.val,
 						      old.val, new.val);
-	} while ((ret.val != old.val) && can_loop);
+	} while (can_loop && (ret.val != old.val));
 }
 
 /*
@@ -914,7 +914,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		 * Then, delete the LLC context and its associated BTQ.
 		 */
 		if (cgrp_id != ROOT_CGID) {
-			while ((taskc = scx_atq_pop(btq)) && can_loop) {
+			while (can_loop && (taskc = scx_atq_pop(btq))) {
 				scx_task_cgroup_bw_t *t = (scx_task_cgroup_bw_t *)taskc;
 				/*
 				 * Invalidate the per-task cgx/llcx caches before
@@ -1398,7 +1398,7 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		 */
 		cur_cgrp = pos->cgroup;
 		cur_level = cur_cgrp->level;
-		if (cur_level == 0 && can_loop) /* cgroup_root */
+		if (can_loop && cur_level == 0) /* cgroup_root */
 			break;
 		if (cur_level >= CBW_CGRP_TREE_HEIGHT_MAX) {
 			ret = -E2BIG;
@@ -2376,10 +2376,9 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 	 * this field before destroying the ATQ; catching NULL between
 	 * iterations prevents operating on a freed ATQ.
 	 */
-	for (i = 0; i < CBW_REENQ_MAX_BATCH &&
+	for (i = 0; can_loop && i < CBW_REENQ_MAX_BATCH &&
 		    (btq = READ_ONCE(llcx->btq)) &&
-		    (taskc = (scx_task_common *)scx_atq_pop(btq)) &&
-		    can_loop; i++) {
+		    (taskc = (scx_task_common *)scx_atq_pop(btq)); i++) {
 		/*
 		 * Note that we do not worry about racing with .dequeue() here,
 		 * because even if we do, the callback's insert_vtime call will
