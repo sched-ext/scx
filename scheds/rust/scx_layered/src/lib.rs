@@ -191,12 +191,15 @@ impl CpuPool {
 
     fn update_fallback_cpus(&mut self) {
         for node in self.topo.nodes.values() {
-            let fb = self
+            let Some(fb) = self
                 .available_cpus
                 .and(&node.span)
                 .iter()
                 .next()
-                .unwrap_or_else(|| node.span.iter().next().unwrap());
+                .or_else(|| node.span.iter().next())
+            else {
+                continue;
+            };
             self.fallback_cpus.insert(node.id, fb);
         }
     }
