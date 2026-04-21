@@ -2347,7 +2347,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	/*
 	 * Initialize the current logical clock and service time.
 	 */
-	WRITE_ONCE(cur_logical_clk, 0);
+	WRITE_ONCE(cur_logical_clk, LAVD_DL_COMPETE_WINDOW);
 	WRITE_ONCE(cur_svc_time_iwgt, 0);
 
 	/*
