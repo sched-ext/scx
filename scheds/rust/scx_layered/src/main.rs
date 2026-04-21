@@ -24,7 +24,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use inotify::{Inotify, WatchMask};
-use libc;
 use std::os::unix::io::AsRawFd;
 
 use anyhow::anyhow;
@@ -46,7 +45,6 @@ use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
 use regex::Regex;
-use scx_bpf_compat;
 use scx_layered::alloc::{unified_alloc, LayerAlloc, LayerDemand};
 use scx_layered::*;
 use scx_raw_pmu::PMUManager;
@@ -242,7 +240,7 @@ lazy_static! {
 ///   When false, matches if the task is *not* the group leader (i.e. the rest).
 ///
 /// - CmdJoin: Matches when the task uses pthread_setname_np to send a join/leave
-/// command to the scheduler. See examples/cmdjoin.c for more details.
+///   command to the scheduler. See examples/cmdjoin.c for more details.
 ///
 /// - UsedGpuTid: Bool. When true, matches if the tasks which have used
 ///   gpus by tid.
@@ -728,6 +726,7 @@ fn copy_into_cstr(dst: &mut [i8], src: &str) {
     dst[0..bytes.len()].copy_from_slice(bytes);
 }
 
+#[allow(clippy::needless_range_loop)]
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     let mut cpu_ctxs = vec![];
     let cpu_ctxs_vec = skel
@@ -754,6 +753,7 @@ struct BpfStats {
 }
 
 impl BpfStats {
+    #[allow(clippy::needless_range_loop)]
     fn read(skel: &BpfSkel, cpu_ctxs: &[bpf_intf::cpu_ctx]) -> Self {
         let nr_layers = skel.maps.rodata_data.as_ref().unwrap().nr_layers as usize;
         let nr_llcs = skel.maps.rodata_data.as_ref().unwrap().nr_llcs as usize;
@@ -762,20 +762,20 @@ impl BpfStats {
         let mut llc_lstats = vec![vec![vec![0u64; NR_LLC_LSTATS]; nr_llcs]; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
-            for stat in 0..NR_GSTATS {
-                gstats[stat] += cpu_ctxs[cpu].gstats[stat];
+            for (stat, value) in gstats.iter_mut().enumerate() {
+                *value += cpu_ctxs[cpu].gstats[stat];
             }
-            for layer in 0..nr_layers {
-                for stat in 0..NR_LSTATS {
-                    lstats[layer][stat] += cpu_ctxs[cpu].lstats[layer][stat];
+            for (layer, layer_stats) in lstats.iter_mut().enumerate() {
+                for (stat, value) in layer_stats.iter_mut().enumerate() {
+                    *value += cpu_ctxs[cpu].lstats[layer][stat];
                 }
             }
         }
 
         let mut lstats_sums = vec![0u64; NR_LSTATS];
-        for layer in 0..nr_layers {
-            for stat in 0..NR_LSTATS {
-                lstats_sums[stat] += lstats[layer][stat];
+        for layer_stats in lstats.iter() {
+            for (stat, value) in lstats_sums.iter_mut().enumerate() {
+                *value += layer_stats[stat];
             }
         }
 
@@ -794,9 +794,9 @@ impl BpfStats {
             let llcc: &bpf_intf::llc_ctx =
                 plain::from_bytes(v.as_slice()).expect("llc_ctx: short or misaligned buffer");
 
-            for layer_id in 0..nr_layers {
-                for stat_id in 0..NR_LLC_LSTATS {
-                    llc_lstats[layer_id][llc_id][stat_id] = llcc.lstats[layer_id][stat_id];
+            for (layer_id, layer_llc_stats) in llc_lstats.iter_mut().enumerate() {
+                for (stat_id, stat_value) in layer_llc_stats[llc_id].iter_mut().enumerate() {
+                    *stat_value = llcc.lstats[layer_id][stat_id];
                 }
             }
         }
@@ -810,7 +810,7 @@ impl BpfStats {
     }
 }
 
-impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
+impl<'b> Sub<&'b BpfStats> for &BpfStats {
     type Output = BpfStats;
 
     fn sub(self, rhs: &'b BpfStats) -> BpfStats {
@@ -887,13 +887,14 @@ struct Stats {
 }
 
 impl Stats {
+    #[allow(clippy::needless_range_loop)]
     fn read_layer_usages(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<Vec<u64>> {
         let mut layer_usages = vec![vec![0u64; NR_LAYER_USAGES]; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
-            for layer in 0..nr_layers {
-                for usage in 0..NR_LAYER_USAGES {
-                    layer_usages[layer][usage] += cpu_ctxs[cpu].layer_usages[layer][usage];
+            for (layer, layer_usage) in layer_usages.iter_mut().enumerate() {
+                for (usage, value) in layer_usage.iter_mut().enumerate() {
+                    *value += cpu_ctxs[cpu].layer_usages[layer][usage];
                 }
             }
         }
@@ -902,13 +903,14 @@ impl Stats {
     }
 
     // Same as above, but for aggregate memory bandwidth consumption.
+    #[allow(clippy::needless_range_loop)]
     fn read_layer_membw_agg(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<Vec<u64>> {
         let mut layer_membw_agg = vec![vec![0u64; NR_LAYER_USAGES]; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
-            for layer in 0..nr_layers {
-                for usage in 0..NR_LAYER_USAGES {
-                    layer_membw_agg[layer][usage] += cpu_ctxs[cpu].layer_membw_agg[layer][usage];
+            for (layer, layer_membw) in layer_membw_agg.iter_mut().enumerate() {
+                for (usage, value) in layer_membw.iter_mut().enumerate() {
+                    *value += cpu_ctxs[cpu].layer_membw_agg[layer][usage];
                 }
             }
         }
@@ -916,6 +918,7 @@ impl Stats {
         layer_membw_agg
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn read_layer_node_pinned_usages(
         cpu_ctxs: &[bpf_intf::cpu_ctx],
         topo: &Topology,
@@ -926,14 +929,15 @@ impl Stats {
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             let node = topo.all_cpus.get(&cpu).map_or(0, |c| c.node_id);
-            for layer in 0..nr_layers {
-                usages[layer][node] += cpu_ctxs[cpu].node_pinned_usage[layer];
+            for (layer, layer_usages) in usages.iter_mut().enumerate().take(nr_layers) {
+                layer_usages[node] += cpu_ctxs[cpu].node_pinned_usage[layer];
             }
         }
 
         usages
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn read_layer_node_usages(
         cpu_ctxs: &[bpf_intf::cpu_ctx],
         topo: &Topology,
@@ -944,9 +948,9 @@ impl Stats {
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             let node = topo.all_cpus.get(&cpu).map_or(0, |c| c.node_id);
-            for layer in 0..nr_layers {
+            for (layer, layer_usages) in usages.iter_mut().enumerate().take(nr_layers) {
                 for usage in 0..=LAYER_USAGE_SUM_UPTO {
-                    usages[layer][node] += cpu_ctxs[cpu].layer_usages[layer][usage];
+                    layer_usages[node] += cpu_ctxs[cpu].layer_usages[layer][usage];
                 }
             }
         }
@@ -954,6 +958,7 @@ impl Stats {
         usages
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn read_layer_node_duty_raw(
         cpu_ctxs: &[bpf_intf::cpu_ctx],
         topo: &Topology,
@@ -964,8 +969,8 @@ impl Stats {
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             let node = topo.all_cpus.get(&cpu).map_or(0, |c| c.node_id);
-            for layer in 0..nr_layers {
-                sums[layer][node] += cpu_ctxs[cpu].layer_duty_sum[layer];
+            for (layer, layer_sums) in sums.iter_mut().enumerate().take(nr_layers) {
+                layer_sums[node] += cpu_ctxs[cpu].layer_duty_sum[layer];
             }
         }
 
@@ -975,10 +980,10 @@ impl Stats {
     /// Use the membw reported by resctrl to normalize the values reported by hw counters.
     /// We have the following problem:
     /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
-    /// less transparently, since we would require different RMID for each task.
+    ///    less transparently, since we would require different RMID for each task.
     /// 2) We want to directly use perf counters for tracking per-task memory bandwidth, but
-    /// we can't: Non-resctrl counters do not measure the right thing (e.g., they only measure
-    /// proxies like load operations),
+    ///    we can't: Non-resctrl counters do not measure the right thing (e.g., they only measure
+    ///    proxies like load operations),
     /// 3) Resctrl counters are not accessible directly so we cannot read them from the BPF side.
     ///
     /// Approximate per-task memory bandwidth using perf counters to measure _relative_ memory
@@ -1152,7 +1157,7 @@ impl Stats {
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| (*c as i64 - *p as i64) as f64 / (1024 as f64).powf(3.0))
+                        .map(|(c, p)| (*c as i64 - *p as i64) as f64 / 1024_f64.powf(3.0))
                         .collect()
                 })
                 .collect()
@@ -1500,7 +1505,7 @@ impl GpuTaskAffinitizer {
                 if (mask & inner_offset) != 0 {
                     return Ok((64 * chunk + u64::trailing_zeros(inner_offset) as usize) as u32);
                 }
-                inner_offset = inner_offset << 1;
+                inner_offset <<= 1;
             }
         }
         anyhow::bail!("unable to get CPU from NVML bitmask");
@@ -1508,7 +1513,7 @@ impl GpuTaskAffinitizer {
 
     fn node_to_cpuset(&self, node: &scx_utils::Node) -> Result<CpuSet> {
         let mut cpuset = CpuSet::new();
-        for (cpu_id, _cpu) in &node.all_cpus {
+        for cpu_id in node.all_cpus.keys() {
             cpuset.set(*cpu_id)?;
         }
         Ok(cpuset)
@@ -1594,7 +1599,7 @@ impl GpuTaskAffinitizer {
         for (pid, dev) in &self.gpu_pids_to_devs {
             let node_info = self
                 .gpu_devs_to_node_info
-                .get(&dev)
+                .get(dev)
                 .expect("Unable to get gpu pid node mask");
             for child in self.get_child_pids_and_tids(*pid) {
                 match nix::sched::sched_setaffinity(
@@ -1650,8 +1655,6 @@ impl GpuTaskAffinitizer {
         };
         self.last_process_time = Some(now);
         self.last_task_affinitization_ms = (Instant::now() - now).as_millis() as u64;
-
-        return;
     }
 
     pub fn init(&mut self, topo: Arc<Topology>) {
@@ -1666,7 +1669,6 @@ impl GpuTaskAffinitizer {
             }
         };
         self.sys = System::new_all();
-        return;
     }
 }
 
@@ -2046,13 +2048,13 @@ impl<'a> Scheduler<'a> {
                 let task_place = |place: u32| crate::types::layer_task_place(place);
                 layer.task_place = match placement {
                     LayerPlacement::Standard => {
-                        task_place(bpf_intf::layer_task_place_PLACEMENT_STD as u32)
+                        task_place(bpf_intf::layer_task_place_PLACEMENT_STD)
                     }
                     LayerPlacement::Sticky => {
-                        task_place(bpf_intf::layer_task_place_PLACEMENT_STICK as u32)
+                        task_place(bpf_intf::layer_task_place_PLACEMENT_STICK)
                     }
                     LayerPlacement::Floating => {
-                        task_place(bpf_intf::layer_task_place_PLACEMENT_FLOAT as u32)
+                        task_place(bpf_intf::layer_task_place_PLACEMENT_FLOAT)
                     }
                 };
             }
@@ -2066,7 +2068,7 @@ impl<'a> Scheduler<'a> {
 
             match &spec.cpuset {
                 Some(mask) => {
-                    Self::update_cpumask(&mask, &mut layer.cpuset);
+                    Self::update_cpumask(mask, &mut layer.cpuset);
                     layer.has_cpuset.write(true);
                 }
                 None => {
@@ -2668,9 +2670,9 @@ impl<'a> Scheduler<'a> {
 
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
 
-        if ext_sched_class_addr.is_ok() && idle_sched_class_addr.is_ok() {
-            rodata.ext_sched_class_addr = ext_sched_class_addr.unwrap();
-            rodata.idle_sched_class_addr = idle_sched_class_addr.unwrap();
+        if let (Ok(ext_addr), Ok(idle_addr)) = (ext_sched_class_addr, idle_sched_class_addr) {
+            rodata.ext_sched_class_addr = ext_addr;
+            rodata.idle_sched_class_addr = idle_addr;
         } else {
             warn!(
                 "Unable to get sched_class addresses from /proc/kallsyms, disabling skip_preempt."
@@ -2779,7 +2781,7 @@ impl<'a> Scheduler<'a> {
         let layered_task_hint_map_path = &opts.task_hint_map;
         let hint_map = &mut skel.maps.scx_layered_task_hint_map;
         // Only set pin path if a path is provided.
-        if layered_task_hint_map_path.is_empty() == false {
+        if !layered_task_hint_map_path.is_empty() {
             hint_map.set_pin_path(layered_task_hint_map_path).unwrap();
             rodata.task_hint_map_enabled = true;
         }
@@ -2797,7 +2799,7 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
         // Populate the mapping of hints to layer IDs for faster lookups
-        if hint_to_layer_map.len() != 0 {
+        if !hint_to_layer_map.is_empty() {
             for (k, v) in hint_to_layer_map.iter() {
                 let key: u32 = *k as u32;
 
@@ -2870,7 +2872,7 @@ impl<'a> Scheduler<'a> {
 
         // Allow all tasks to open and write to BPF task hint map, now that
         // we should have it pinned at the desired location.
-        if layered_task_hint_map_path.is_empty() == false {
+        if !layered_task_hint_map_path.is_empty() {
             let path = CString::new(layered_task_hint_map_path.as_bytes()).unwrap();
             let mode: libc::mode_t = 0o666;
             unsafe {
@@ -3008,8 +3010,8 @@ impl<'a> Scheduler<'a> {
         curtarget: u64,
     ) -> usize {
         let ncpu: u64 = layer.cpus.weight() as u64;
-        let membw = (membw * (1024 as f64).powf(3.0)).round() as u64;
-        let membw_limit = (membw_limit * (1024 as f64).powf(3.0)).round() as u64;
+        let membw = (membw * 1024_f64.powf(3.0)).round() as u64;
+        let membw_limit = (membw_limit * 1024_f64.powf(3.0)).round() as u64;
         let last_membw_percpu = if ncpu > 0 { membw / ncpu } else { 0 };
 
         // Either there is no memory bandwidth limit set, or the counters
@@ -3018,7 +3020,7 @@ impl<'a> Scheduler<'a> {
             return curtarget as usize;
         }
 
-        return (membw_limit / last_membw_percpu) as usize;
+        (membw_limit / last_membw_percpu) as usize
     }
 
     /// Decompose per-layer CPU targets into per-node pinned demand and
@@ -3074,7 +3076,7 @@ impl<'a> Scheduler<'a> {
                     }
                     let cpus = (pu / util_high).ceil() as usize;
                     // Round up to alloc units.
-                    let units = (cpus + au - 1) / au;
+                    let units = cpus.div_ceil(au);
                     raw_pinned[n] = units;
                 }
 
@@ -3168,12 +3170,8 @@ impl<'a> Scheduler<'a> {
                     ));
 
                     let target = target.clamp(cpus_range.0, cpus_range.1);
-                    let membw_target = self.clamp_target_by_membw(
-                        &layer,
-                        membw_limit as f64,
-                        membw as f64,
-                        target as u64,
-                    );
+                    let membw_target =
+                        self.clamp_target_by_membw(layer, membw_limit, membw, target as u64);
 
                     trace!("CPU target pre- and post-membw adjustment: {target} -> {membw_target}");
 
@@ -3976,8 +3974,8 @@ impl<'a> Scheduler<'a> {
                     bpf_layer.node[src].xnuma[dst].rate = result.rates[src][dst];
                 }
             }
-            for nid in 0..nr_nodes {
-                bpf_layer.node[nid].xnuma_is_mig_src.write(is_mig_src[nid]);
+            for (nid, is_src) in is_mig_src.iter().enumerate().take(nr_nodes) {
+                bpf_layer.node[nid].xnuma_is_mig_src.write(*is_src);
             }
         }
     }
@@ -4322,7 +4320,7 @@ impl<'a> Scheduler<'a> {
                         );
                         let stats =
                             Stats::new(&mut self.skel, &self.proc_reader, self.topo.clone(), &self.gpu_task_handler)?;
-                        res_ch.send(StatsRes::Hello(stats))?;
+                        res_ch.send(StatsRes::Hello(Box::new(stats)))?;
                     }
                     Ok(StatsReq::Refresh(tid, mut stats)) => {
                         // Propagate self's layer cpu ranges into each stat's.
@@ -4346,7 +4344,7 @@ impl<'a> Scheduler<'a> {
                         )?;
                         let sys_stats =
                             self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
-                        res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
+                        res_ch.send(StatsRes::Refreshed(Box::new((*stats, sys_stats))))?;
                     }
                     Ok(StatsReq::Bye(tid)) => {
                         cpus_ranges.remove(&tid);
@@ -4443,10 +4441,8 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
             if spec.matches.is_empty() {
                 bail!("Non-terminal spec {:?} has NULL matches", spec.name);
             }
-        } else {
-            if spec.matches.len() != 1 || !spec.matches[0].is_empty() {
-                bail!("Terminal spec {:?} must have an empty match", spec.name);
-            }
+        } else if spec.matches.len() != 1 || !spec.matches[0].is_empty() {
+            bail!("Terminal spec {:?} must have an empty match", spec.name);
         }
 
         if spec.matches.len() > MAX_LAYER_MATCH_ORS {
@@ -4707,11 +4703,13 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
 }
 
 fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
-    let mut attr = perf::bindings::perf_event_attr::default();
-    attr.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
-    attr.type_ = perf::bindings::PERF_TYPE_RAW;
-    attr.config = event;
-    attr.sample_type = 0u64;
+    let mut attr = perf::bindings::perf_event_attr {
+        size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
+        type_: perf::bindings::PERF_TYPE_RAW,
+        config: event,
+        sample_type: 0u64,
+        ..Default::default()
+    };
     attr.__bindgen_anon_1.sample_period = 0u64;
     attr.set_disabled(0);
 
@@ -4908,7 +4906,7 @@ fn main(opts: Opts) -> Result<()> {
         for spec in specs {
             match spec.template {
                 Some(ref rule) => {
-                    let matches = expand_template(&rule)?;
+                    let matches = expand_template(rule)?;
                     // in the absence of matching cgroups, have template layers
                     // behave as non-template layers do.
                     if matches.is_empty() {

@@ -354,6 +354,7 @@ pub fn unified_alloc(
 /// layer with per-node `pinned` counts and `unpinned_budget` set.
 /// Per-node `unpinned` distribution is NOT resolved here — that's done
 /// by `resolve_spread` and `place_unpinned`.
+#[allow(clippy::needless_range_loop)]
 fn allocate_budgets(
     total_units: usize,
     node_caps: &[usize],
@@ -523,6 +524,7 @@ fn allocate_budgets(
 ///    layers by weight.  Each layer gets at most `total / nr_nodes` per node.
 /// 4. Freed capacity (from capping) is redistributed to non-spread layers
 ///    proportionally via `water_fill`, increasing their `unpinned_budget`.
+#[allow(clippy::needless_range_loop)]
 fn resolve_spread(allocs: &mut [LayerAlloc], demands: &[LayerDemand], node_caps: &[usize]) {
     if allocs.is_empty() {
         return;
@@ -640,6 +642,7 @@ fn resolve_spread(allocs: &mut [LayerAlloc], demands: &[LayerDemand], node_caps:
 ///
 /// No-op when `cur_node_cpus` is empty (first cycle or tests without
 /// per-node state).
+#[allow(clippy::needless_range_loop)]
 fn place_unpinned(
     allocs: &mut [LayerAlloc],
     demands: &[LayerDemand],

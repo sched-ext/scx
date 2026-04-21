@@ -38,8 +38,10 @@ use crate::LayerSpec;
 /// within-node core ordering degenerates to the non-spread equivalent
 /// (e.g. NodeSpread uses Linear ordering within each node) since the
 /// even-split budget handles cross-node distribution.
+#[derive(Default)]
 pub enum LayerGrowthAlgo {
     /// Evenly space layers across cores within each node.
+    #[default]
     Sticky,
     /// Lowest-numbered CPUs first within each node.
     Linear,
@@ -128,12 +130,10 @@ fn parse_cpu_ranges(s: &str) -> Result<BTreeSet<usize>> {
 fn collect_cpuset_effective() -> Result<BTreeSet<BTreeSet<usize>>> {
     let mut result = BTreeSet::new();
 
-    for entry in WalkDir::new("/sys/fs/cgroup") {
-        if let Ok(entry) = entry {
-            if entry.file_name() == "cpuset.cpus.effective" {
-                if let Ok(content) = fs::read_to_string(entry.path()) {
-                    result.insert(parse_cpu_ranges(&content)?);
-                }
+    for entry in WalkDir::new("/sys/fs/cgroup").into_iter().flatten() {
+        if entry.file_name() == "cpuset.cpus.effective" {
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                result.insert(parse_cpu_ranges(&content)?);
             }
         }
     }
@@ -247,7 +247,7 @@ impl LayerGrowthAlgo {
             spec,
             layer_idx,
             topo,
-            cpusets: &get_cpusets(&topo)?,
+            cpusets: &get_cpusets(topo)?,
         };
         Ok(match self {
             LayerGrowthAlgo::Sticky => generator.grow_sticky(),
@@ -270,12 +270,6 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::RandomTopo => generator.grow_random_topo(),
             LayerGrowthAlgo::StickyDynamic => generator.grow_sticky_dynamic(),
         })
-    }
-}
-
-impl Default for LayerGrowthAlgo {
-    fn default() -> Self {
-        LayerGrowthAlgo::Sticky
     }
 }
 
@@ -331,7 +325,6 @@ struct LayerCoreOrderGenerator<'a> {
 
 impl<'a> LayerCoreOrderGenerator<'a> {
     #[allow(dead_code)]
-
     fn node_order(&self) -> Vec<usize> {
         let all: Vec<&[usize]> = self
             .layer_specs
@@ -353,7 +346,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     /// Per-node variant of rotate_layer_offset — rotates within a
     /// node-scoped core vec using node_cores.len() instead of
     /// all_cores.len().
-    fn rotate_node_layer_offset(&self, vec: &mut Vec<usize>) {
+    fn rotate_node_layer_offset(&self, vec: &mut [usize]) {
         if vec.is_empty() {
             return;
         }
@@ -363,6 +356,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_sticky(&self) -> Vec<Vec<usize>> {
+        #[allow(clippy::manual_is_multiple_of)]
         let is_left = self.layer_idx % 2 == 0;
         let rot_by = |layer_idx, len| -> usize {
             if layer_idx <= len {
