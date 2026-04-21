@@ -682,6 +682,16 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 
 		if (can_direct_dispatch(cpuc, true)) {
+			/*
+			 * The direct-dispatch path bypasses ops.enqueue(), so
+			 * the throttle check there is never reached.  Skip the
+			 * dispatch if the cgroup is throttled; the task will
+			 * fall through to ops.enqueue() which puts it in the BTQ.
+			 */
+			if (enable_cpu_bw && (p->pid != lavd_pid) &&
+			    (scx_cgroup_bw_throttled(ictx.taskc->cgrp_id, p,
+						     (u64)ictx.taskc) == -EAGAIN))
+				goto out;
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
