@@ -2227,22 +2227,14 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		cur_cgrp = bpf_cgroup_from_id(ids[0]);
 		if (!cur_cgrp) {
 			cbw_dbg("Failed to fetch a cgroup pointer: cgid%llu", ids[0]);
-			/*
-			 * This cgroup is already offline: its kernfs node is
-			 * deactivated so bpf_cgroup_from_id() returns NULL,
-			 * but css_offline() / ops.cgroup_exit() has not yet
-			 * run. Move all its throttled tasks to the root cgroup
-			 * for immediate draining.
-			 */
-			nr_moved += cbw_cgroup_bw_offline(ids[0]);
-			continue;
+			goto offline_cgroup;
 		}
 
 		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
 		if (!cur_cgx) {
 			cbw_dbg("Failed to lookup a cgroup ctx: cgid%llu", ids[0]);
 			bpf_cgroup_release(cur_cgrp);
-			continue;
+			goto offline_cgroup;
 		}
 
 		if (READ_ONCE(cur_cgx->is_throttled)) {
@@ -2272,6 +2264,22 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 				root_added = true;
 			nr_throttled++;
 		}
+		continue;
+
+offline_cgroup:
+		/*
+		 * The cgroup is going offline: either its kernfs node has been
+		 * deactivated (bpf_cgroup_from_id() returns NULL) or its BPF
+		 * map entry is already gone (cbw_get_cgroup_ctx() returns NULL)
+		 * while tasks may still be in its BTQ.  Move all backlogged
+		 * tasks to the root cgroup for immediate draining rather than
+		 * waiting for css_offline().
+		 *
+		 * cbw_cgroup_bw_offline() is __always_inline; keep it at a
+		 * single call site here to avoid doubling the BPF verifier's
+		 * instruction count and hitting the 1M-state limit.
+		 */
+		nr_moved += cbw_cgroup_bw_offline(ids[0]);
 	}
 	/*
 	 * At least one throttled task was moved to the root cgroup and the
