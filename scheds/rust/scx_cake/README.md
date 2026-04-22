@@ -89,11 +89,10 @@ sudo ./target/debug/scx_cake --verbose
 
 | Profile | Quantum | Intended use |
 | :-- | --: | :-- |
-| `esports` | `1000 us` | Lowest latency, highest scheduling frequency |
-| `gaming` | `2000 us` | Default low-latency desktop / gaming mode |
-| `default` | `2000 us` | Currently same as `gaming` |
+| `esports` | `750 us` | Most aggressive startup preset for competitive latency tuning |
+| `gaming` | `1000 us` | Default low-latency desktop / gaming mode |
+| `balanced` | `2000 us` | Balanced desktop / mixed-use preset with lower scheduling overhead |
 | `legacy` | `4000 us` | Older or lower-power hardware with a larger slice budget |
-| `battery` | `4000 us` | Lower scheduling overhead profile, even though power efficiency is not the mainline design goal |
 
 ## What scx_cake Is
 
@@ -146,7 +145,7 @@ That means `scx_cake` is willing to prefer:
 - a cache-warm or topology-friendly placement over abstract fairness
 - direct dispatch and cheap hot paths over richer but more expensive policy machinery
 
-The repository still exposes multiple profiles, including `battery`, but the core scheduler philosophy is performance-oriented rather than power-oriented.
+The built-in profiles are coarse quantum presets rather than separate policy modes. The core scheduler philosophy remains performance-oriented rather than power-oriented.
 
 ### Core Questions
 

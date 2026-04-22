@@ -64,7 +64,11 @@ const bool enable_stats __attribute__((used)) = false;
 
 #define CAKE_SLOW_CALLBACK_NS 10000ULL
 #define CAKE_SLOW_WAKEWAIT_NS 100000ULL
+#define CAKE_QUICK_WAKE_KICK_NS 200000ULL
 #define CAKE_TRACKED_WAKEWAIT_MAX_NS 5000000ULL
+#define CAKE_EVT_TARGET_MISS_NS 250000ULL
+#define CAKE_EVT_KICK_SLOW_NS 500000ULL
+#define CAKE_EVT_DISPATCH_GAP_NS 1000000ULL
 #define CAKE_STEER_UTIL_MIN 64U
 #define CAKE_HOME_SCORE_MAX 15U
 
@@ -261,15 +265,37 @@ static __always_inline void cake_record_cb(struct cake_stats *s, u32 cb_idx, u64
 }
 
 #ifndef CAKE_RELEASE
-static __always_inline void cake_record_wake_wait(struct cake_stats *s, u32 reason, u64 wait_ns)
+static __always_inline void cake_record_wake_wait(
+	u64 *sum, u64 *count, u64 *max_ns, u32 reason, u64 wait_ns)
 {
-	if (!s || reason == CAKE_WAKE_REASON_NONE || reason >= CAKE_WAKE_REASON_MAX)
+	if (!sum || !count || !max_ns || reason == CAKE_WAKE_REASON_NONE ||
+	    reason >= CAKE_WAKE_REASON_MAX)
 		return;
 
-	s->wake_reason_wait_ns[reason] += wait_ns;
-	s->wake_reason_wait_count[reason]++;
-	if (wait_ns > s->wake_reason_wait_max_ns[reason])
-		s->wake_reason_wait_max_ns[reason] = wait_ns;
+	sum[reason] += wait_ns;
+	count[reason]++;
+	if (wait_ns > max_ns[reason])
+		max_ns[reason] = wait_ns;
+}
+
+static __always_inline u32 cake_wake_bucket(u64 wait_ns)
+{
+	if (wait_ns < 50 * 1000ULL)
+		return CAKE_WAKE_BUCKET_LT50US;
+	if (wait_ns < 200 * 1000ULL)
+		return CAKE_WAKE_BUCKET_LT200US;
+	if (wait_ns < 1000 * 1000ULL)
+		return CAKE_WAKE_BUCKET_LT1MS;
+	if (wait_ns < 5000 * 1000ULL)
+		return CAKE_WAKE_BUCKET_LT5MS;
+	return CAKE_WAKE_BUCKET_GE5MS;
+}
+
+static __always_inline u8 cake_kick_kind_from_flags(u64 kick_flags)
+{
+	return kick_flags == SCX_KICK_PREEMPT
+		? CAKE_KICK_KIND_PREEMPT
+		: CAKE_KICK_KIND_IDLE;
 }
 
 static __always_inline u8 cake_classify_home_place(
@@ -2201,6 +2227,11 @@ static __noinline void enqueue_dsq_dispatch(
 #endif
 
 	if (is_wakeup) {
+		if (stats_on && tctx) {
+			tctx->telemetry.pending_target_cpu = (u16)enq_cpu;
+			tctx->telemetry.pending_kick_kind = CAKE_KICK_KIND_NONE;
+			tctx->telemetry.pending_kick_ts_ns = 0;
+		}
 		u32 current_cpu_idx = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 
 		if (current_cpu_idx == target_cpu_idx) {
@@ -2268,6 +2299,17 @@ static __noinline void enqueue_dsq_dispatch(
 				  enq_flags);
 		kick_cpu = enq_cpu;
 		kick_flags = idle_hint ? SCX_KICK_IDLE : SCX_KICK_PREEMPT;
+	}
+
+	if (kick_cpu >= 0) {
+		if (stats_on && tctx) {
+			tctx->telemetry.pending_kick_kind = cake_kick_kind_from_flags(kick_flags);
+			tctx->telemetry.pending_kick_ts_ns = bpf_ktime_get_ns();
+		}
+		if (kick_flags == SCX_KICK_IDLE)
+			stats->nr_wake_kick_idle++;
+		else
+			stats->nr_wake_kick_preempt++;
 	}
 
 	if (kick_cpu >= 0)
@@ -2484,6 +2526,13 @@ queue_affine_dispatch:
 		get_local_stats()->nr_wakeup_direct_dispatches++;
 	else
 		get_local_stats()->nr_direct_other_inserts++;
+#ifndef CAKE_RELEASE
+	if (stats_on && is_wakeup && tctx) {
+		tctx->telemetry.pending_target_cpu = (u16)target_cpu;
+		tctx->telemetry.pending_kick_kind = CAKE_KICK_KIND_NONE;
+		tctx->telemetry.pending_kick_ts_ns = 0;
+	}
+#endif
 	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, p->scx.slice,
 			  enq_flags);
 	goto queue_done;
@@ -2632,7 +2681,7 @@ static __noinline void running_telemetry(
 	/* Phase 8: mailbox staging stopwatch end (before arena work) */
 	u64 mbox_end = bpf_ktime_get_ns();
 
-	/* Phase 6: Deferred arena fetch — only in telemetry path */
+	/* Verbose builds keep per-task run-side telemetry exact. */
 	struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 	if (!tctx)
 		return;
@@ -2646,16 +2695,41 @@ static __noinline void running_telemetry(
 	u64 prev_run_start = tctx->telemetry.run_start_ns;
 	tctx->telemetry.run_start_ns = start;
 
-	/* Record wake-to-run outcome before the heavier sampled telemetry gate.
+	if (tctx->telemetry.postwake_watch &&
+	    tctx->telemetry.enqueue_start_ns == 0 &&
+	    prev_run_start > 0) {
+		u8 follow_reason = tctx->telemetry.postwake_reason;
+		if (follow_reason > CAKE_WAKE_REASON_NONE &&
+		    follow_reason < CAKE_WAKE_REASON_MAX) {
+			if ((u16)cpu == tctx->telemetry.postwake_first_cpu)
+				s_run->wake_followup_same_cpu_count[follow_reason]++;
+			else {
+				s_run->wake_followup_migrate_count[follow_reason]++;
+				cake_emit_dbg_event(
+					p, cpu, CAKE_DBG_EVENT_WAKE_FOLLOW_MIG, follow_reason,
+					start - prev_run_start,
+					((u32)tctx->telemetry.postwake_first_cpu << 16) | (u32)cpu);
+			}
+		}
+		tctx->telemetry.postwake_watch = 0;
+	}
+
+	/* Record wake-to-run outcome before dispatch-gap bookkeeping.
 	 * This is the core signal for warm-vs-cold placement decisions. */
 	if (tctx->telemetry.enqueue_start_ns > 0 && start > tctx->telemetry.enqueue_start_ns) {
 		u64 wait = start - tctx->telemetry.enqueue_start_ns;
 		u64 wait_us = wait >> 10;
 		u8 reason = tctx->telemetry.pending_wake_reason;
+		u16 target_cpu = tctx->telemetry.pending_target_cpu;
+		u8 kick_kind = tctx->telemetry.pending_kick_kind;
+		u64 kick_ts = tctx->telemetry.pending_kick_ts_ns;
 
 		tctx->telemetry.wait_duration_ns = wait;
 		tctx->telemetry.enqueue_start_ns = 0;
 		tctx->telemetry.pending_wake_reason = CAKE_WAKE_REASON_NONE;
+		tctx->telemetry.pending_target_cpu = CAKE_CPU_SENTINEL;
+		tctx->telemetry.pending_kick_kind = CAKE_KICK_KIND_NONE;
+		tctx->telemetry.pending_kick_ts_ns = 0;
 		tctx->telemetry.last_select_path = tctx->telemetry.pending_select_path;
 		tctx->telemetry.pending_select_path = CAKE_SELECT_PATH_NONE;
 
@@ -2668,6 +2742,48 @@ static __noinline void running_telemetry(
 		else
 			tctx->telemetry.wait_hist_ge1ms++;
 
+		if (reason > CAKE_WAKE_REASON_NONE && reason < CAKE_WAKE_REASON_MAX) {
+			if (target_cpu < nr_cpus) {
+				if ((u16)cpu == target_cpu)
+					s_run->wake_target_hit_count[reason]++;
+				else {
+					s_run->wake_target_miss_count[reason]++;
+					if (wait >= CAKE_EVT_TARGET_MISS_NS)
+						cake_emit_dbg_event(
+							p, cpu, CAKE_DBG_EVENT_WAKE_TARGET_MISS, reason,
+							wait,
+							((u32)target_cpu << 16) | (u32)cpu);
+				}
+			}
+			tctx->telemetry.postwake_watch = 1;
+			tctx->telemetry.postwake_first_cpu = (u16)cpu;
+			tctx->telemetry.postwake_reason = reason;
+			cake_record_wake_wait(
+				s_run->wake_reason_wait_all_ns,
+				s_run->wake_reason_wait_all_count,
+				s_run->wake_reason_wait_all_max_ns,
+				reason, wait);
+			s_run->wake_reason_bucket_count[reason][cake_wake_bucket(wait)]++;
+			if (kick_kind > CAKE_KICK_KIND_NONE &&
+			    kick_kind < CAKE_KICK_KIND_MAX &&
+			    kick_ts > 0 &&
+			    start > kick_ts) {
+				u64 kick_wait = start - kick_ts;
+				s_run->nr_wake_kick_observed[kick_kind]++;
+				if (kick_wait <= CAKE_QUICK_WAKE_KICK_NS)
+					s_run->nr_wake_kick_quick[kick_kind]++;
+				s_run->total_wake_kick_to_run_ns[kick_kind] += kick_wait;
+				if (kick_wait > s_run->max_wake_kick_to_run_ns[kick_kind])
+					s_run->max_wake_kick_to_run_ns[kick_kind] = kick_wait;
+				s_run->wake_kick_bucket_count[kick_kind][cake_wake_bucket(kick_wait)]++;
+				if (kick_wait >= CAKE_EVT_KICK_SLOW_NS)
+					cake_emit_dbg_event(
+						p, cpu, CAKE_DBG_EVENT_KICK_SLOW, kick_kind,
+						kick_wait,
+						((u32)reason << 16) | (u32)target_cpu);
+			}
+		}
+
 		if (reason > CAKE_WAKE_REASON_NONE && reason < CAKE_WAKE_REASON_MAX &&
 		    wait <= CAKE_TRACKED_WAKEWAIT_MAX_NS) {
 			u32 idx = reason - 1;
@@ -2676,7 +2792,11 @@ static __noinline void running_telemetry(
 			u32 max_wait = tctx->telemetry.wake_reason_max_us[idx];
 			if (wait_us > max_wait)
 				tctx->telemetry.wake_reason_max_us[idx] = (u32)wait_us;
-			cake_record_wake_wait(s_run, reason, wait);
+			cake_record_wake_wait(
+				s_run->wake_reason_wait_ns,
+				s_run->wake_reason_wait_count,
+				s_run->wake_reason_wait_max_ns,
+				reason, wait);
 			cake_record_place_wait(
 				s_run,
 				s_run->home_place_wait_ns,
@@ -2695,17 +2815,14 @@ static __noinline void running_telemetry(
 		}
 	}
 
-	/* Fetch hot internally (cold path, ~10ns). */
-	struct cake_task_ctx __arena *hot_tel = get_task_hot(p);
-	if (hot_tel && ((p->nvcsw + p->nivcsw) & 63) != 0)
-		return;
-
 	/* 1. DISPATCH GAP */
 	if (prev_run_start > 0 && start > prev_run_start) {
 		u64 gap = start - prev_run_start;
 		tctx->telemetry.dispatch_gap_ns = gap;
 		u64 old_max_g = tctx->telemetry.max_dispatch_gap_ns;
 		tctx->telemetry.max_dispatch_gap_ns = old_max_g + ((gap - old_max_g) & -(gap > old_max_g));
+		if (gap >= CAKE_EVT_DISPATCH_GAP_NS)
+			cake_emit_dbg_event(p, cpu, CAKE_DBG_EVENT_DISPATCH_GAP, 0, gap, 0);
 	}
 
 	tctx->telemetry.llc_id = (u16)cpu_bss[cpu & (CAKE_MAX_CPUS - 1)].llc_id;
@@ -2714,11 +2831,6 @@ static __noinline void running_telemetry(
 
 	u64 oh_run = bpf_ktime_get_ns() - overhead_start;
 	tctx->telemetry.running_duration_ns = (u32)oh_run;
-	s_run->total_running_ns += oh_run;
-	s_run->max_running_ns = s_run->max_running_ns + ((oh_run - s_run->max_running_ns) & -(oh_run > s_run->max_running_ns));
-	cake_record_cb(s_run, CAKE_CB_RUNNING, oh_run);
-	if (oh_run >= CAKE_SLOW_CALLBACK_NS)
-		cake_emit_dbg_event(p, cpu, CAKE_DBG_EVENT_CALLBACK, CAKE_CB_RUNNING, oh_run, 0);
 
 	/* Phase 8: mailbox staging duration (overhead_start == mbox_start) */
 	tctx->telemetry.mbox_staging_ns = (u32)(mbox_end - overhead_start);
@@ -2808,6 +2920,16 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 #ifndef CAKE_RELEASE
 	if (stats_on)
 		running_telemetry(p, cpu, running_overhead_start);
+	if (stats_on) {
+		struct cake_stats *s_run = get_local_stats_for(cpu);
+		u64 oh_run = bpf_ktime_get_ns() - running_overhead_start;
+		s_run->total_running_ns += oh_run;
+		s_run->max_running_ns =
+			s_run->max_running_ns + ((oh_run - s_run->max_running_ns) & -(oh_run > s_run->max_running_ns));
+		cake_record_cb(s_run, CAKE_CB_RUNNING, oh_run);
+		if (oh_run >= CAKE_SLOW_CALLBACK_NS)
+			cake_emit_dbg_event(p, cpu, CAKE_DBG_EVENT_CALLBACK, CAKE_CB_RUNNING, oh_run, 0);
+	}
 #endif
 #ifdef CAKE_RELEASE
 	#undef stats_on
@@ -2856,130 +2978,109 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	u64 stopping_overhead_start = 0;
 
 #ifndef CAKE_RELEASE
-	/* Debug-only: arena telemetry preserved behind compile gate */
-	struct cake_task_ctx __arena *hot = NULL;
-	u32 __maybe_unused nvcsw_accum = 0;
-	if (stats_on) {
-		stopping_overhead_start = bpf_ktime_get_ns();
-		per_cpu[cpu].mbox.last_stopped_pid = p->pid;
-
-		hot = get_task_hot(p);
-		if (hot) {
-			u8 tc = hot->task_class;
-			if (tc != CAKE_CLASS_GAME) {
-				u64 cur_nv = p->nvcsw;
-				u64 prev_nv = hot->nvcsw_snapshot;
-				if (prev_nv > 0)
-					nvcsw_accum = (u32)(cur_nv - prev_nv);
-				hot->nvcsw_snapshot = cur_nv;
-			}
-		}
-	}
+	struct cake_task_ctx __arena *tctx = NULL;
+	u32 nvcsw_accum = 0;
 #endif
 
-
-		/* Telemetry + aggregate profiling (verbose only).
-		 * Split into ALWAYS (lightweight CL0/BSS) + DEFERRED (heavier arena writes).
-		 * Deferred work runs every 64th stop. */
-
 	if (stats_on) {
+		stopping_overhead_start = bpf_ktime_get_ns();
 #ifndef CAKE_RELEASE
-		/* ALWAYS: nvcsw_delta accumulator (must not skip deltas) */
-		/* Note: nvcsw_delta write is on telemetry CL, but accumulator
-		 * correctness requires every-stop update. The CL fetch is
-		 * amortized since stopping already read nvcsw_snapshot from CL0. */
+		per_cpu[cpu].mbox.last_stopped_pid = p->pid;
 
-			/* DEFERRED TELEMETRY: heavier per-task writes every 64th stop.
-			 * Use a single get_task_ctx() and shared timestamp for the block. */
-			if (unlikely(((p->nvcsw + p->nivcsw) & 63) == 0)) {
-			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-			if (tctx) {
-				/* P3-2: Use pre-computed nvcsw_accum from above
-				 * (eliminates redundant p->nvcsw + hot->nvcsw_snapshot reads) */
-				if (nvcsw_accum)
-					tctx->telemetry.nvcsw_delta += nvcsw_accum;
+		tctx = get_task_ctx(p);
+		if (tctx) {
+			struct cake_stats *s_task = get_local_stats_for(cpu);
+			u8 tc = tctx->task_class;
+			if (tc != CAKE_CLASS_GAME) {
+				u64 cur_nv = p->nvcsw;
+				u64 prev_nv = tctx->nvcsw_snapshot;
+				if (prev_nv > 0)
+					nvcsw_accum = (u32)(cur_nv - prev_nv);
+				tctx->nvcsw_snapshot = cur_nv;
+			}
+			if (nvcsw_accum)
+				tctx->telemetry.nvcsw_delta += nvcsw_accum;
 
-				if (tctx->telemetry.run_start_ns > 0) {
-				struct cake_stats *s_deferred = get_local_stats_for(cpu);
-				/* SIMPLIFY #4: Single scx_bpf_now() for dur + stopping overhead */
-				u64 now_deferred = bpf_ktime_get_ns();
-				u64 dur = now_deferred - tctx->telemetry.run_start_ns;
+			if (tctx->telemetry.run_start_ns > 0) {
+				u64 now_stop = bpf_ktime_get_ns();
+				u64 dur = now_stop - tctx->telemetry.run_start_ns;
+				u32 raw_slice_used = (u32)(cpu_bss[cpu].tick_slice - p->scx.slice);
+				u64 expected_ns, d, mask, jitter;
+				u16 old_max_rt;
+				u64 dur_us;
+				u64 tslice;
+				bool same;
+
 				tctx->telemetry.run_duration_ns = dur;
 				cake_record_place_run(
-					s_deferred,
-					s_deferred->home_place_run_ns,
-					s_deferred->home_place_run_count,
-					s_deferred->home_place_run_max_ns,
+					s_task,
+					s_task->home_place_run_ns,
+					s_task->home_place_run_count,
+					s_task->home_place_run_max_ns,
 					tctx->telemetry.last_place_class, dur);
 
-				/* Branchless same-CPU streak */
-				bool same = ((u16)cpu == tctx->telemetry.core_placement);
-				tctx->telemetry.same_cpu_streak = (tctx->telemetry.same_cpu_streak + 1) & -(u16)same;
+				same = ((u16)cpu == tctx->telemetry.core_placement);
+				tctx->telemetry.same_cpu_streak =
+					(tctx->telemetry.same_cpu_streak + 1) & -(u16)same;
 				tctx->telemetry.core_placement = (u16)cpu;
 
-				u32 raw_slice_used = (u32)(cpu_bss[cpu].tick_slice - p->scx.slice);
-				raw_slice_used -= (raw_slice_used - (65535U << 10)) & -(raw_slice_used > (65535U << 10));
-
-				/* Jitter: |actual_run - PELT_expected| */
-				u64 expected_ns = (u64)(raw_slice_used >> 10) * 1000ULL;
-				u64 d = dur - expected_ns;
-				u64 mask = -(u64)(dur < expected_ns);
-				u64 jitter = (d ^ mask) - mask;
+				raw_slice_used -=
+					(raw_slice_used - (65535U << 10)) & -(raw_slice_used > (65535U << 10));
+				expected_ns = (u64)(raw_slice_used >> 10) * 1000ULL;
+				d = dur - expected_ns;
+				mask = -(u64)(dur < expected_ns);
+				jitter = (d ^ mask) - mask;
 				tctx->telemetry.jitter_accum_ns += jitter;
 				tctx->telemetry.total_runs++;
+				s_task->task_runtime_ns += dur;
+				s_task->task_run_count++;
 
-				/* Branchless max */
-				u16 old_max_rt = tctx->telemetry.max_runtime_us;
-				u64 dur_us = dur / 1000;
+				old_max_rt = tctx->telemetry.max_runtime_us;
+				dur_us = dur / 1000;
 				if (dur_us > 65535)
 					dur_us = 65535;
-				u16 ps = (u16)dur_us;
-				tctx->telemetry.max_runtime_us = old_max_rt + ((ps - old_max_rt) & -(u16)(ps > old_max_rt));
+				tctx->telemetry.max_runtime_us =
+					old_max_rt + (((u16)dur_us - old_max_rt) & -(u16)((u16)dur_us > old_max_rt));
 
-					/* Slice utilization for debug telemetry.
-					 * This is a real variable divide in debug builds. */
-					u64 tslice = cpu_bss[cpu].tick_slice ?: quantum_ns;
-					tctx->telemetry.slice_util_pct =
-						(u16)((dur << 7) / tslice);
+				tslice = cpu_bss[cpu].tick_slice ?: quantum_ns;
+				tctx->telemetry.slice_util_pct = (u16)((dur << 7) / tslice);
 
-				/* Involuntary context switch delta */
-				u64 cur_nivcsw = p->nivcsw;
-				u64 prev_nivcsw = tctx->telemetry.nivcsw_snapshot;
-				if (prev_nivcsw > 0)
-					tctx->telemetry.nivcsw_delta += (u32)(cur_nivcsw - prev_nivcsw);
-				tctx->telemetry.nivcsw_snapshot = cur_nivcsw;
-
-				/* Per-task stopping overhead — reuse now_deferred */
-				tctx->telemetry.stopping_duration_ns =
-					(u32)(now_deferred - stopping_overhead_start);
+				{
+					u64 cur_nivcsw = p->nivcsw;
+					u64 prev_nivcsw = tctx->telemetry.nivcsw_snapshot;
+					if (prev_nivcsw > 0)
+						tctx->telemetry.nivcsw_delta += (u32)(cur_nivcsw - prev_nivcsw);
+					tctx->telemetry.nivcsw_snapshot = cur_nivcsw;
 				}
 
-				/* Phase 8: quantum completion tracking */
-				u64 rem = p->scx.slice;
-				if (rem == 0)
-					tctx->telemetry.quantum_full_count++;
-				else if (!runnable)
-					tctx->telemetry.quantum_yield_count++;
-				else
-					tctx->telemetry.quantum_preempt_count++;
-
-				/* Phase 8: CPU core distribution histogram */
-				tctx->telemetry.cpu_run_count[cpu & (CAKE_TELEM_MAX_CPUS - 1)]++;
-
+				tctx->telemetry.stopping_duration_ns =
+					(u32)(now_stop - stopping_overhead_start);
 			}
+
+			if (p->scx.slice == 0)
+				tctx->telemetry.quantum_full_count++;
+			else if (!runnable)
+				tctx->telemetry.quantum_yield_count++;
+			else
+				tctx->telemetry.quantum_preempt_count++;
+
+			tctx->telemetry.cpu_run_count[cpu & (CAKE_TELEM_MAX_CPUS - 1)]++;
 		}
 #endif /* !CAKE_RELEASE */
 
 		/* Aggregate overhead timing (per-CPU BSS). */
 		struct cake_stats *s = get_local_stats_for(cpu);
+		if (p->scx.slice == 0)
+			s->nr_quantum_full++;
+		else if (!runnable)
+			s->nr_quantum_yield++;
+		else
+			s->nr_quantum_preempt++;
 		u64 oh_agg = bpf_ktime_get_ns() - stopping_overhead_start;
 		s->total_stopping_ns += oh_agg;
 		s->max_stopping_ns = s->max_stopping_ns + ((oh_agg - s->max_stopping_ns) & -(oh_agg > s->max_stopping_ns));
 		cake_record_cb(s, CAKE_CB_STOPPING, oh_agg);
-		if (unlikely(((p->nvcsw + p->nivcsw) & 63) == 0))
-			s->nr_stop_deferred++;
-		else
-			s->nr_stop_deferred_skip++;
+		s->nr_stop_deferred++;
 		if (oh_agg >= CAKE_SLOW_CALLBACK_NS)
 			cake_emit_dbg_event(p, cpu, CAKE_DBG_EVENT_CALLBACK, CAKE_CB_STOPPING, oh_agg,
 					    runnable ? 1 : 0);
@@ -3062,6 +3163,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 		comm_dst[0] = comm_src[0];
 		comm_dst[1] = comm_src[1];
 		tctx->telemetry.nivcsw_snapshot = p->nivcsw;
+		tctx->telemetry.pending_target_cpu = CAKE_CPU_SENTINEL;
 	}
 
 	if (CAKE_STATS_ENABLED)
@@ -3103,8 +3205,13 @@ void BPF_STRUCT_OPS(cake_set_cpumask, struct task_struct *p __arg_trusted,
 		u64 kick_flags = READ_ONCE(cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)].idle_hint)
 				       ? SCX_KICK_IDLE
 				       : SCX_KICK_PREEMPT;
+		struct cake_stats *s = get_local_stats();
 		p->scx.slice = quantum_ns;
 		cake_clamp_wakeup_vtime(p, target_cpu);
+		if (kick_flags == SCX_KICK_IDLE)
+			s->nr_affine_kick_idle++;
+		else
+			s->nr_affine_kick_preempt++;
 		scx_bpf_kick_cpu(target_cpu, kick_flags);
 	}
 #ifndef CAKE_RELEASE
@@ -3138,8 +3245,15 @@ void BPF_STRUCT_OPS(cake_runnable, struct task_struct *p, u64 enq_flags)
 	if (CAKE_STATS_ACTIVE) {
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 		if (tctx) {
-			if (enq_flags & SCX_ENQ_PREEMPT)
+			if (enq_flags & SCX_ENQ_PREEMPT) {
 				tctx->telemetry.preempt_count++;
+				if (tctx->telemetry.preempt_count >= 4 &&
+				    (tctx->telemetry.preempt_count & 3) == 0)
+					cake_emit_dbg_event(
+						p, bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1),
+						CAKE_DBG_EVENT_PREEMPT_CHAIN, 0, 0,
+						tctx->telemetry.preempt_count);
+			}
 			/* Wakeup source: the currently running task is the waker */
 			struct task_struct *waker = bpf_get_current_task_btf();
 			if (waker) {
