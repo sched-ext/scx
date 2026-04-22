@@ -417,12 +417,17 @@ impl<'a> Scheduler<'a> {
         }
         let cell_manager = if let Some(ref parent_cgroup) = opts.cell_parent_cgroup {
             let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
-            Some(CellManager::new(
-                parent_cgroup,
-                MAX_CELLS as u32,
-                topology.span.clone(),
-                exclude,
-            )?)
+            Some(
+                CellManager::new(
+                    parent_cgroup,
+                    MAX_CELLS as u32,
+                    topology.span.clone(),
+                    exclude,
+                )
+                .with_context(|| {
+                    format!("initializing cell manager for cgroup {}", parent_cgroup)
+                })?,
+            )
         } else {
             None
         };

@@ -309,7 +309,12 @@ impl CellManager {
                 if self.should_exclude(&path) {
                     continue;
                 }
-                let cgid = path.metadata()?.ino();
+                let cgid = path
+                    .metadata()
+                    .with_context(|| {
+                        format!("reading inode of cgroup directory {}", path.display())
+                    })?
+                    .ino();
                 let (cgid, cell_id) =
                     self.create_cell_for_cgroup(&path, cgid).with_context(|| {
                         format!("Failed to create cell for cgroup: {}", path.display())
@@ -418,7 +423,10 @@ impl CellManager {
 
         // Find new cgroups that we don't have cells for
         for path in current_paths {
-            let cgid = path.metadata()?.ino();
+            let cgid = path
+                .metadata()
+                .with_context(|| format!("reading inode of cgroup directory {}", path.display()))?
+                .ino();
             if self.cells.contains_key(&cgid) {
                 continue; // Already have a cell for this cgroup
             }
