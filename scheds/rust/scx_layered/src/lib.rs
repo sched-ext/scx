@@ -94,11 +94,11 @@ pub fn round_targets_to_alloc_units(
         .iter()
         .map(|&(target, min)| {
             // Round target up to next alloc_unit multiple.
-            let aligned = (target + alloc_unit - 1) / alloc_unit * alloc_unit;
+            let aligned = target.div_ceil(alloc_unit) * alloc_unit;
             // Cap at total_cpus.
             let aligned = aligned.min(total_cpus);
             // Round min up similarly.
-            let min_aligned = (min + alloc_unit - 1) / alloc_unit * alloc_unit;
+            let min_aligned = min.div_ceil(alloc_unit) * alloc_unit;
             let min_aligned = min_aligned.min(total_cpus);
             (aligned, min_aligned)
         })
@@ -191,12 +191,15 @@ impl CpuPool {
 
     fn update_fallback_cpus(&mut self) {
         for node in self.topo.nodes.values() {
-            let fb = self
+            let Some(fb) = self
                 .available_cpus
                 .and(&node.span)
                 .iter()
                 .next()
-                .unwrap_or_else(|| node.span.iter().next().unwrap());
+                .or_else(|| node.span.iter().next())
+            else {
+                continue;
+            };
             self.fallback_cpus.insert(node.id, fb);
         }
     }
@@ -237,7 +240,7 @@ impl CpuPool {
         for alloc_core in core_alloc_order {
             // Constrain CPUs by NUMA node or LLC. Since allowed_cpus is NUMA/LLC aligned,
             // this operation is guaranteed to produce either the core mask or an empty mask.
-            let core_cpus = &self.topo.all_cores[alloc_core].span.and(&allowed_cpus);
+            let core_cpus = &self.topo.all_cores[alloc_core].span.and(allowed_cpus);
             if core_cpus.is_empty() {
                 continue;
             }
@@ -286,7 +289,7 @@ impl CpuPool {
             bail!("Some of CPUs {} are already free", cpus_to_free);
         }
 
-        self.available_cpus = self.available_cpus.or(&cpus_to_free);
+        self.available_cpus = self.available_cpus.or(cpus_to_free);
         self.update_fallback_cpus();
 
         self.check_partial()?;
@@ -295,7 +298,7 @@ impl CpuPool {
     }
 
     pub fn mark_allocated(&mut self, cpus_to_alloc: &Cpumask) -> Result<()> {
-        if *&cpus_to_alloc.and(&self.available_cpus.not()).weight() > 0 {
+        if cpus_to_alloc.and(&self.available_cpus.not()).weight() > 0 {
             bail!(
                 "Some of CPUs {} are not available to allocate",
                 cpus_to_alloc
