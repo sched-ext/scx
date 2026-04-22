@@ -2,6 +2,8 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
+
+#[allow(clippy::unwrap_used)]
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
@@ -345,7 +347,11 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
-        let rodata = skel.maps.rodata_data.as_mut().unwrap();
+        let rodata = skel
+            .maps
+            .rodata_data
+            .as_mut()
+            .expect("BUG: rodata_data missing after skel open");
 
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
         rodata.debug_events_enabled = opts.debug_events;
@@ -478,7 +484,11 @@ impl<'a> Scheduler<'a> {
         // Apply initial cell configuration if CellManager is active
         self.apply_initial_cells()?;
 
-        let (res_ch, req_ch) = self.stats_server.as_ref().unwrap().channels();
+        let (res_ch, req_ch) = self
+            .stats_server
+            .as_ref()
+            .expect("BUG: stats_server missing after init")
+            .channels();
 
         // Spawn thread to bridge stats requests to eventfd.
         // The thread exits when the channel closes (stats_server dropped).
@@ -548,7 +558,10 @@ impl<'a> Scheduler<'a> {
 
         let cpu_assignments = self.compute_and_apply_cell_config(&[])?;
 
-        let cell_manager = self.cell_manager.as_ref().unwrap();
+        let cell_manager = self
+            .cell_manager
+            .as_ref()
+            .expect("BUG: cell_manager missing in apply_initial_cells");
         info!(
             "Applied initial cell configuration: {}",
             cell_manager.format_cell_config(&cpu_assignments)
@@ -587,7 +600,10 @@ impl<'a> Scheduler<'a> {
 
         let cpu_assignments = self.compute_and_apply_cell_config(&new_cell_ids)?;
 
-        let cell_manager = self.cell_manager.as_ref().unwrap();
+        let cell_manager = self
+            .cell_manager
+            .as_ref()
+            .expect("BUG: cell_manager missing in process_cell_events");
         info!(
             "Cell config updated ({} new, {} destroyed): {}",
             num_new,
@@ -611,7 +627,10 @@ impl<'a> Scheduler<'a> {
         new_cell_ids: &[u32],
     ) -> Result<Vec<CpuAssignment>> {
         let (cell_assignments, cpu_assignments) = {
-            let cell_manager = self.cell_manager.as_ref().unwrap();
+            let cell_manager = self
+                .cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing in compute_and_apply_cell_config");
             let active_cell_ids: Vec<u32> = cell_manager
                 .get_cell_assignments()
                 .iter()
@@ -707,7 +726,10 @@ impl<'a> Scheduler<'a> {
 
         // Compute new assignments and check if they differ from current
         let (cell_assignments, cpu_assignments) = {
-            let cell_manager = self.cell_manager.as_ref().unwrap();
+            let cell_manager = self
+                .cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing in maybe_rebalance");
             let cpu_assignments = cell_manager
                 .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)?;
 
@@ -730,7 +752,10 @@ impl<'a> Scheduler<'a> {
         self.rebalance_count += 1;
         self.metrics.rebalance_count = self.rebalance_count;
 
-        let cell_manager = self.cell_manager.as_ref().unwrap();
+        let cell_manager = self
+            .cell_manager
+            .as_ref()
+            .expect("BUG: cell_manager missing after apply_cell_config in maybe_rebalance");
         info!(
             "Rebalanced CPUs (spread={:.1}%, count={}): {}",
             spread,
@@ -1237,7 +1262,13 @@ impl<'a> Scheduler<'a> {
     /// Write applied_cpuset_seq to BSS, closing the rejection-skip window.
     fn update_applied_cpuset_seq(&mut self) {
         unsafe {
-            let ptr = &mut self.skel.maps.bss_data.as_mut().unwrap().applied_cpuset_seq as *mut u32;
+            let ptr = &mut self
+                .skel
+                .maps
+                .bss_data
+                .as_mut()
+                .expect("BUG: bss_data missing after scheduler load")
+                .applied_cpuset_seq as *mut u32;
             std::ptr::write_volatile(ptr, self.last_cpuset_seq);
         }
     }
@@ -1249,10 +1280,16 @@ impl<'a> Scheduler<'a> {
         };
 
         let current_seq = unsafe {
-            let ptr = &self.skel.maps.bss_data.as_ref().unwrap().cpuset_seq as *const u32;
+            let ptr = &self
+                .skel
+                .maps
+                .bss_data
+                .as_ref()
+                .expect("BUG: bss_data missing after scheduler load")
+                .cpuset_seq as *const u32;
             (ptr as *const AtomicU32)
                 .as_ref()
-                .unwrap()
+                .expect("BUG: cpuset_seq pointer cast yielded null")
                 .load(Ordering::Acquire)
         };
 
@@ -1269,7 +1306,10 @@ impl<'a> Scheduler<'a> {
 
         let cpu_assignments = self.compute_and_apply_cell_config(&[])?;
         self.update_applied_cpuset_seq();
-        let cell_manager = self.cell_manager.as_ref().unwrap();
+        let cell_manager = self
+            .cell_manager
+            .as_ref()
+            .expect("BUG: cell_manager missing in check_cpuset_changes");
         info!(
             "Cpuset change detected, recomputed config: {}",
             cell_manager.format_cell_config(&cpu_assignments)
@@ -1284,11 +1324,11 @@ impl<'a> Scheduler<'a> {
                 .maps
                 .bss_data
                 .as_ref()
-                .unwrap()
+                .expect("BUG: bss_data missing after scheduler load")
                 .applied_configuration_seq as *const u32;
             (ptr as *const std::sync::atomic::AtomicU32)
                 .as_ref()
-                .unwrap()
+                .expect("BUG: applied_configuration_seq pointer cast yielded null")
                 .load(std::sync::atomic::Ordering::Acquire)
         };
         if self
@@ -1367,7 +1407,7 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         .cpu_ctxs
         .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
         .context("Failed to lookup cpu_ctx")?
-        .unwrap();
+        .expect("BUG: cpu_ctxs lookup_percpu returned None for key 0");
     if cpu_ctxs_vec.len() < *NR_CPUS_POSSIBLE {
         bail!(
             "Percpu map returned {} entries but expected {}",
