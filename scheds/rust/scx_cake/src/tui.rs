@@ -33,6 +33,7 @@ use crate::topology::TopologyInfo;
 
 const STATS_HISTORY_MAX_AGE: Duration = Duration::from_secs(600);
 const STATS_HISTORY_MAX_SAMPLES: usize = 2048;
+const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(4);
 
 /// System hardware and kernel information, collected once at startup.
 #[derive(Clone, Debug)]
@@ -278,13 +279,73 @@ pub struct TuiApp {
     pub last_bench_timestamp: u64, // to detect new results
     pub system_info: SystemInfo,
     pub debug_events: VecDeque<DebugEventRow>,
+    per_cpu_work: Vec<CpuWorkCounters>,
     stats_history: VecDeque<StatsSnapshot>,
+    cpu_work_history: VecDeque<CpuWorkSnapshot>,
 }
 
 #[derive(Clone, Copy)]
 struct StatsSnapshot {
     at: Instant,
     stats: cake_stats,
+}
+
+#[derive(Clone, Copy)]
+struct TimelineSample {
+    start_ago_secs: u64,
+    end_ago_secs: u64,
+    elapsed: Duration,
+    stats: cake_stats,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CpuWorkCounters {
+    task_runtime_ns: u64,
+    task_run_count: u64,
+    local_dispatches: u64,
+    stolen_dispatches: u64,
+    quantum_full: u64,
+    quantum_yield: u64,
+    quantum_preempt: u64,
+}
+
+#[derive(Clone, Debug)]
+struct CpuWorkSnapshot {
+    at: Instant,
+    counters: Vec<CpuWorkCounters>,
+}
+
+#[derive(Clone, Debug)]
+struct SchedulerCpuRow {
+    cpu: usize,
+    core: usize,
+    llc: usize,
+    is_secondary_smt: bool,
+    share_pct: f64,
+    runs: u64,
+    runs_per_sec: f64,
+    total_runtime_ns: u64,
+    avg_run_us: u64,
+    dispatch_per_sec: f64,
+    local_pct: f64,
+    yield_pct: f64,
+    system_load: f32,
+    temp_c: f32,
+}
+
+#[derive(Clone, Debug)]
+struct SchedulerCoreRow {
+    core: usize,
+    cpu_label: String,
+    share_pct: f64,
+    runs: u64,
+    runs_per_sec: f64,
+    total_runtime_ns: u64,
+    avg_run_us: u64,
+    dispatch_per_sec: f64,
+    top_cpu_share_pct: f64,
+    secondary_smt_pct: f64,
+    avg_system_load: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -488,6 +549,8 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.total_select_cpu_ns += s.total_select_cpu_ns;
             total.total_stopping_ns += s.total_stopping_ns;
             total.total_running_ns += s.total_running_ns;
+            total.task_runtime_ns += s.task_runtime_ns;
+            total.task_run_count += s.task_run_count;
             total.max_select_cpu_ns = total.max_select_cpu_ns.max(s.max_select_cpu_ns);
             total.max_stopping_ns = total.max_stopping_ns.max(s.max_stopping_ns);
             total.max_running_ns = total.max_running_ns.max(s.max_running_ns);
@@ -542,10 +605,24 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
                 }
             }
             for reason in 0..4 {
+                total.wake_reason_wait_all_ns[reason] += s.wake_reason_wait_all_ns[reason];
+                total.wake_reason_wait_all_count[reason] += s.wake_reason_wait_all_count[reason];
+                total.wake_reason_wait_all_max_ns[reason] = total.wake_reason_wait_all_max_ns
+                    [reason]
+                    .max(s.wake_reason_wait_all_max_ns[reason]);
                 total.wake_reason_wait_ns[reason] += s.wake_reason_wait_ns[reason];
                 total.wake_reason_wait_count[reason] += s.wake_reason_wait_count[reason];
                 total.wake_reason_wait_max_ns[reason] =
                     total.wake_reason_wait_max_ns[reason].max(s.wake_reason_wait_max_ns[reason]);
+                for bucket in 0..5 {
+                    total.wake_reason_bucket_count[reason][bucket] +=
+                        s.wake_reason_bucket_count[reason][bucket];
+                }
+                total.wake_target_hit_count[reason] += s.wake_target_hit_count[reason];
+                total.wake_target_miss_count[reason] += s.wake_target_miss_count[reason];
+                total.wake_followup_same_cpu_count[reason] +=
+                    s.wake_followup_same_cpu_count[reason];
+                total.wake_followup_migrate_count[reason] += s.wake_followup_migrate_count[reason];
             }
             for path in 0..6 {
                 total.select_path_count[path] += s.select_path_count[path];
@@ -566,10 +643,67 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             }
             total.nr_wake_same_tgid += s.nr_wake_same_tgid;
             total.nr_wake_cross_tgid += s.nr_wake_cross_tgid;
+            total.nr_wake_kick_idle += s.nr_wake_kick_idle;
+            total.nr_wake_kick_preempt += s.nr_wake_kick_preempt;
+            total.nr_affine_kick_idle += s.nr_affine_kick_idle;
+            total.nr_affine_kick_preempt += s.nr_affine_kick_preempt;
+            total.nr_quantum_full += s.nr_quantum_full;
+            total.nr_quantum_yield += s.nr_quantum_yield;
+            total.nr_quantum_preempt += s.nr_quantum_preempt;
+            for kind in 0..3 {
+                total.nr_wake_kick_observed[kind] += s.nr_wake_kick_observed[kind];
+                total.nr_wake_kick_quick[kind] += s.nr_wake_kick_quick[kind];
+                total.total_wake_kick_to_run_ns[kind] += s.total_wake_kick_to_run_ns[kind];
+                total.max_wake_kick_to_run_ns[kind] =
+                    total.max_wake_kick_to_run_ns[kind].max(s.max_wake_kick_to_run_ns[kind]);
+                for bucket in 0..5 {
+                    total.wake_kick_bucket_count[kind][bucket] +=
+                        s.wake_kick_bucket_count[kind][bucket];
+                }
+            }
         }
     }
 
     total
+}
+
+fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
+    let mut work = vec![CpuWorkCounters::default(); nr_cpus];
+
+    if let Some(bss) = &skel.maps.bss_data {
+        for (idx, stats) in bss.global_stats.iter().take(nr_cpus).enumerate() {
+            work[idx] = CpuWorkCounters {
+                task_runtime_ns: stats.task_runtime_ns,
+                task_run_count: stats.task_run_count,
+                local_dispatches: stats.nr_local_dispatches,
+                stolen_dispatches: stats.nr_stolen_dispatches,
+                quantum_full: stats.nr_quantum_full,
+                quantum_yield: stats.nr_quantum_yield,
+                quantum_preempt: stats.nr_quantum_preempt,
+            };
+        }
+    }
+
+    work
+}
+
+fn cpu_work_delta(current: &[CpuWorkCounters], previous: &[CpuWorkCounters]) -> Vec<CpuWorkCounters> {
+    current
+        .iter()
+        .enumerate()
+        .map(|(idx, cur)| {
+            let prev = previous.get(idx).copied().unwrap_or_default();
+            CpuWorkCounters {
+                task_runtime_ns: cur.task_runtime_ns.saturating_sub(prev.task_runtime_ns),
+                task_run_count: cur.task_run_count.saturating_sub(prev.task_run_count),
+                local_dispatches: cur.local_dispatches.saturating_sub(prev.local_dispatches),
+                stolen_dispatches: cur.stolen_dispatches.saturating_sub(prev.stolen_dispatches),
+                quantum_full: cur.quantum_full.saturating_sub(prev.quantum_full),
+                quantum_yield: cur.quantum_yield.saturating_sub(prev.quantum_yield),
+                quantum_preempt: cur.quantum_preempt.saturating_sub(prev.quantum_preempt),
+            }
+        })
+        .collect()
 }
 
 fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
@@ -678,6 +812,8 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.total_running_ns = current
         .total_running_ns
         .saturating_sub(previous.total_running_ns);
+    delta.task_runtime_ns = current.task_runtime_ns.saturating_sub(previous.task_runtime_ns);
+    delta.task_run_count = current.task_run_count.saturating_sub(previous.task_run_count);
     delta.nr_stop_deferred_skip = current
         .nr_stop_deferred_skip
         .saturating_sub(previous.nr_stop_deferred_skip);
@@ -720,28 +856,46 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
             current.callback_slow[cb].saturating_sub(previous.callback_slow[cb]);
     }
     for reason in 0..current.wake_reason_wait_ns.len() {
+        delta.wake_reason_wait_all_ns[reason] = current.wake_reason_wait_all_ns[reason]
+            .saturating_sub(previous.wake_reason_wait_all_ns[reason]);
+        delta.wake_reason_wait_all_count[reason] = current.wake_reason_wait_all_count[reason]
+            .saturating_sub(previous.wake_reason_wait_all_count[reason]);
+        delta.wake_reason_wait_all_max_ns[reason] = current.wake_reason_wait_all_max_ns[reason];
         delta.wake_reason_wait_ns[reason] = current.wake_reason_wait_ns[reason]
             .saturating_sub(previous.wake_reason_wait_ns[reason]);
         delta.wake_reason_wait_count[reason] = current.wake_reason_wait_count[reason]
             .saturating_sub(previous.wake_reason_wait_count[reason]);
+        for bucket in 0..current.wake_reason_bucket_count[reason].len() {
+            delta.wake_reason_bucket_count[reason][bucket] = current.wake_reason_bucket_count
+                [reason][bucket]
+                .saturating_sub(previous.wake_reason_bucket_count[reason][bucket]);
+        }
+        delta.wake_target_hit_count[reason] = current.wake_target_hit_count[reason]
+            .saturating_sub(previous.wake_target_hit_count[reason]);
+        delta.wake_target_miss_count[reason] = current.wake_target_miss_count[reason]
+            .saturating_sub(previous.wake_target_miss_count[reason]);
+        delta.wake_followup_same_cpu_count[reason] = current.wake_followup_same_cpu_count[reason]
+            .saturating_sub(previous.wake_followup_same_cpu_count[reason]);
+        delta.wake_followup_migrate_count[reason] = current.wake_followup_migrate_count[reason]
+            .saturating_sub(previous.wake_followup_migrate_count[reason]);
     }
     for path in 0..current.select_path_count.len() {
-        delta.select_path_count[path] = current.select_path_count[path]
-            .saturating_sub(previous.select_path_count[path]);
+        delta.select_path_count[path] =
+            current.select_path_count[path].saturating_sub(previous.select_path_count[path]);
     }
     for cls in 0..current.home_place_wait_ns.len() {
-        delta.home_place_wait_ns[cls] = current.home_place_wait_ns[cls]
-            .saturating_sub(previous.home_place_wait_ns[cls]);
-        delta.home_place_wait_count[cls] = current.home_place_wait_count[cls]
-            .saturating_sub(previous.home_place_wait_count[cls]);
+        delta.home_place_wait_ns[cls] =
+            current.home_place_wait_ns[cls].saturating_sub(previous.home_place_wait_ns[cls]);
+        delta.home_place_wait_count[cls] =
+            current.home_place_wait_count[cls].saturating_sub(previous.home_place_wait_count[cls]);
         delta.home_place_wait_max_ns[cls] = current.home_place_wait_max_ns[cls];
-        delta.home_place_run_ns[cls] = current.home_place_run_ns[cls]
-            .saturating_sub(previous.home_place_run_ns[cls]);
-        delta.home_place_run_count[cls] = current.home_place_run_count[cls]
-            .saturating_sub(previous.home_place_run_count[cls]);
+        delta.home_place_run_ns[cls] =
+            current.home_place_run_ns[cls].saturating_sub(previous.home_place_run_ns[cls]);
+        delta.home_place_run_count[cls] =
+            current.home_place_run_count[cls].saturating_sub(previous.home_place_run_count[cls]);
         delta.home_place_run_max_ns[cls] = current.home_place_run_max_ns[cls];
-        delta.waker_place_wait_ns[cls] = current.waker_place_wait_ns[cls]
-            .saturating_sub(previous.waker_place_wait_ns[cls]);
+        delta.waker_place_wait_ns[cls] =
+            current.waker_place_wait_ns[cls].saturating_sub(previous.waker_place_wait_ns[cls]);
         delta.waker_place_wait_count[cls] = current.waker_place_wait_count[cls]
             .saturating_sub(previous.waker_place_wait_count[cls]);
         delta.waker_place_wait_max_ns[cls] = current.waker_place_wait_max_ns[cls];
@@ -788,6 +942,41 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.nr_idle_hint_clear_skips = current
         .nr_idle_hint_clear_skips
         .saturating_sub(previous.nr_idle_hint_clear_skips);
+    delta.nr_wake_kick_idle = current
+        .nr_wake_kick_idle
+        .saturating_sub(previous.nr_wake_kick_idle);
+    delta.nr_wake_kick_preempt = current
+        .nr_wake_kick_preempt
+        .saturating_sub(previous.nr_wake_kick_preempt);
+    delta.nr_affine_kick_idle = current
+        .nr_affine_kick_idle
+        .saturating_sub(previous.nr_affine_kick_idle);
+    delta.nr_affine_kick_preempt = current
+        .nr_affine_kick_preempt
+        .saturating_sub(previous.nr_affine_kick_preempt);
+    delta.nr_quantum_full = current
+        .nr_quantum_full
+        .saturating_sub(previous.nr_quantum_full);
+    delta.nr_quantum_yield = current
+        .nr_quantum_yield
+        .saturating_sub(previous.nr_quantum_yield);
+    delta.nr_quantum_preempt = current
+        .nr_quantum_preempt
+        .saturating_sub(previous.nr_quantum_preempt);
+    for kind in 0..current.nr_wake_kick_observed.len() {
+        delta.nr_wake_kick_observed[kind] = current.nr_wake_kick_observed[kind]
+            .saturating_sub(previous.nr_wake_kick_observed[kind]);
+        delta.nr_wake_kick_quick[kind] =
+            current.nr_wake_kick_quick[kind].saturating_sub(previous.nr_wake_kick_quick[kind]);
+        delta.total_wake_kick_to_run_ns[kind] = current.total_wake_kick_to_run_ns[kind]
+            .saturating_sub(previous.total_wake_kick_to_run_ns[kind]);
+        delta.max_wake_kick_to_run_ns[kind] = current.max_wake_kick_to_run_ns[kind];
+        for bucket in 0..current.wake_kick_bucket_count[kind].len() {
+            delta.wake_kick_bucket_count[kind][bucket] = current.wake_kick_bucket_count[kind]
+                [bucket]
+                .saturating_sub(previous.wake_kick_bucket_count[kind][bucket]);
+        }
+    }
 
     delta
 }
@@ -960,6 +1149,159 @@ fn top_core_distribution(
         parts.push(format!("+{}", entries.len() - limit));
     }
     parts.join(" ")
+}
+
+fn is_secondary_smt_cpu(topology: &TopologyInfo, cpu: usize) -> bool {
+    topology.smt_enabled
+        && topology.cpu_sibling_map[cpu] as usize != cpu
+        && topology.cpu_thread_bit[cpu] != 1
+}
+
+fn scheduler_cpu_rows(
+    counters: &[CpuWorkCounters],
+    topology: &TopologyInfo,
+    cpu_stats: &[(f32, f32)],
+    elapsed: Duration,
+) -> Vec<SchedulerCpuRow> {
+    let total_runtime_ns: u64 = counters.iter().map(|c| c.task_runtime_ns).sum();
+    let secs = elapsed.as_secs_f64();
+    let mut rows = Vec::new();
+
+    for (cpu, counter) in counters.iter().enumerate() {
+        let dispatches = counter.local_dispatches + counter.stolen_dispatches;
+        let quantum_total = counter.quantum_full + counter.quantum_yield + counter.quantum_preempt;
+        let avg_run_us = if counter.task_run_count > 0 {
+            counter.task_runtime_ns / counter.task_run_count / 1000
+        } else {
+            0
+        };
+        let (system_load, temp_c) = cpu_stats.get(cpu).copied().unwrap_or((0.0, 0.0));
+        rows.push(SchedulerCpuRow {
+            cpu,
+            core: topology.cpu_core_id[cpu] as usize,
+            llc: topology.cpu_llc_id[cpu] as usize,
+            is_secondary_smt: is_secondary_smt_cpu(topology, cpu),
+            share_pct: pct(counter.task_runtime_ns, total_runtime_ns),
+            runs: counter.task_run_count,
+            runs_per_sec: per_sec(counter.task_run_count, secs),
+            total_runtime_ns: counter.task_runtime_ns,
+            avg_run_us,
+            dispatch_per_sec: per_sec(dispatches, secs),
+            local_pct: pct(counter.local_dispatches, dispatches),
+            yield_pct: pct(counter.quantum_yield, quantum_total),
+            system_load,
+            temp_c,
+        });
+    }
+
+    rows.sort_by(|a, b| {
+        b.total_runtime_ns
+            .cmp(&a.total_runtime_ns)
+            .then_with(|| a.cpu.cmp(&b.cpu))
+    });
+    rows
+}
+
+fn cpu_label_for_core(cpus: &[usize]) -> String {
+    let mut ids: Vec<String> = cpus.iter().map(|cpu| cpu.to_string()).collect();
+    if ids.len() > 4 {
+        ids.truncate(4);
+        ids.push("+".to_string());
+    }
+    ids.join("/")
+}
+
+fn scheduler_core_rows(
+    counters: &[CpuWorkCounters],
+    topology: &TopologyInfo,
+    cpu_stats: &[(f32, f32)],
+    elapsed: Duration,
+) -> Vec<SchedulerCoreRow> {
+    let total_runtime_ns: u64 = counters.iter().map(|c| c.task_runtime_ns).sum();
+    let secs = elapsed.as_secs_f64();
+    let mut grouped: HashMap<usize, Vec<usize>> = HashMap::new();
+    for cpu in 0..counters.len() {
+        grouped
+            .entry(topology.cpu_core_id[cpu] as usize)
+            .or_default()
+            .push(cpu);
+    }
+
+    let mut rows = Vec::new();
+    for (core, cpus) in grouped {
+        let mut runtime_ns = 0u64;
+        let mut runs = 0u64;
+        let mut dispatches = 0u64;
+        let mut system_load = 0.0f32;
+        let mut top_cpu_runtime = 0u64;
+        let mut secondary_runtime = 0u64;
+
+        for &cpu in &cpus {
+            let counter = counters.get(cpu).copied().unwrap_or_default();
+            runtime_ns += counter.task_runtime_ns;
+            runs += counter.task_run_count;
+            dispatches += counter.local_dispatches + counter.stolen_dispatches;
+            system_load += cpu_stats.get(cpu).map(|(load, _)| *load).unwrap_or(0.0);
+            top_cpu_runtime = top_cpu_runtime.max(counter.task_runtime_ns);
+            if is_secondary_smt_cpu(topology, cpu) {
+                secondary_runtime += counter.task_runtime_ns;
+            }
+        }
+
+        let avg_run_us = if runs > 0 { runtime_ns / runs / 1000 } else { 0 };
+        let avg_system_load = if cpus.is_empty() {
+            0.0
+        } else {
+            system_load / cpus.len() as f32
+        };
+        rows.push(SchedulerCoreRow {
+            core,
+            cpu_label: cpu_label_for_core(&cpus),
+            share_pct: pct(runtime_ns, total_runtime_ns),
+            runs,
+            runs_per_sec: per_sec(runs, secs),
+            total_runtime_ns: runtime_ns,
+            avg_run_us,
+            dispatch_per_sec: per_sec(dispatches, secs),
+            top_cpu_share_pct: pct(top_cpu_runtime, runtime_ns),
+            secondary_smt_pct: pct(secondary_runtime, runtime_ns),
+            avg_system_load,
+        });
+    }
+
+    rows.sort_by(|a, b| {
+        b.total_runtime_ns
+            .cmp(&a.total_runtime_ns)
+            .then_with(|| a.core.cmp(&b.core))
+    });
+    rows
+}
+
+fn scheduler_share_by_cpu(counters: &[CpuWorkCounters]) -> Vec<f64> {
+    let total_runtime_ns: u64 = counters.iter().map(|c| c.task_runtime_ns).sum();
+    counters
+        .iter()
+        .map(|counter| pct(counter.task_runtime_ns, total_runtime_ns))
+        .collect()
+}
+
+fn scheduler_balance_ratio(counters: &[CpuWorkCounters]) -> f64 {
+    let mut active: Vec<u64> = counters
+        .iter()
+        .map(|counter| counter.task_runtime_ns)
+        .filter(|&runtime| runtime > 0)
+        .collect();
+    if active.len() < 2 {
+        return 1.0;
+    }
+    active.sort_unstable();
+    let min = active[0].max(1);
+    let max = *active.last().unwrap_or(&min);
+    max as f64 / min as f64
+}
+
+fn format_runtime_ms(runtime_ns: u64) -> String {
+    format!("{:.1}", runtime_ns as f64 / 1_000_000.0)
 }
 
 fn callback_hist_summary(stats: &cake_stats, idx: usize) -> String {
@@ -1254,7 +1596,17 @@ fn infer_tgid_roles(rows: &HashMap<u32, TaskTelemetryRow>) -> HashMap<u32, Workl
             || (state.thread_count >= 3
                 && !state.has_build
                 && !state.has_game_hint
-                && comm_has_any(&leader, &["steamwebhelper", "discord", "chrome", "chromium", "cef", "electron"]));
+                && comm_has_any(
+                    &leader,
+                    &[
+                        "steamwebhelper",
+                        "discord",
+                        "chrome",
+                        "chromium",
+                        "cef",
+                        "electron",
+                    ],
+                ));
         let probable_game = state.has_game_hint
             || leader.ends_with(".exe")
             || leader.contains("wow")
@@ -1306,9 +1658,10 @@ fn capacity_band(row: &TaskTelemetryRow, role: WorkloadRole) -> CapacityBand {
     }
 
     match role {
-        WorkloadRole::Critical | WorkloadRole::Game | WorkloadRole::Render | WorkloadRole::Audio => {
-            CapacityBand::HardLatency
-        }
+        WorkloadRole::Critical
+        | WorkloadRole::Game
+        | WorkloadRole::Render
+        | WorkloadRole::Audio => CapacityBand::HardLatency,
         WorkloadRole::Ui => {
             let comm = row.comm.to_ascii_lowercase();
             if critical_ui_hint(&comm) {
@@ -1468,19 +1821,58 @@ fn capacity_summary(app: &TuiApp, tgid_roles: &HashMap<u32, WorkloadRole>) -> Ca
 }
 
 fn debug_event_label(ev: &DebugEventRow) -> String {
-    let kind = match ev.kind {
-        1 => "cb",
-        2 => "wait",
-        _ => "evt",
-    };
-    format!(
-        "{}:{} {} {}us c{}",
-        kind,
-        ev.slot,
-        ev.comm,
-        ev.value_ns / 1000,
-        ev.cpu
-    )
+    match ev.kind {
+        1 => format!(
+            "cb:{} {} {}us c{}",
+            ev.slot,
+            ev.comm,
+            ev.value_ns / 1000,
+            ev.cpu
+        ),
+        2 => format!(
+            "wait:{} {} {}us c{}",
+            wake_reason_label(ev.slot as usize),
+            ev.comm,
+            ev.value_ns / 1000,
+            ev.cpu
+        ),
+        3 => format!(
+            "miss:{} {} {}us tgt={} run={} c{}",
+            wake_reason_label(ev.slot as usize),
+            ev.comm,
+            ev.value_ns / 1000,
+            ev.aux >> 16,
+            ev.aux & 0xffff,
+            ev.cpu
+        ),
+        4 => format!(
+            "kick:{} {} {}us reason={} tgt={} c{}",
+            kick_kind_label(ev.slot as usize),
+            ev.comm,
+            ev.value_ns / 1000,
+            ev.aux >> 16,
+            ev.aux & 0xffff,
+            ev.cpu
+        ),
+        5 => format!(
+            "mig:{} {} gap={}us first={} next={} c{}",
+            wake_reason_label(ev.slot as usize),
+            ev.comm,
+            ev.value_ns / 1000,
+            ev.aux >> 16,
+            ev.aux & 0xffff,
+            ev.cpu
+        ),
+        6 => format!("gap {} {}us c{}", ev.comm, ev.value_ns / 1000, ev.cpu),
+        7 => format!("preempt-chain {} n={} c{}", ev.comm, ev.aux, ev.cpu),
+        _ => format!(
+            "evt:{} {} {}us c{}",
+            ev.slot,
+            ev.comm,
+            ev.value_ns / 1000,
+            ev.cpu
+        ),
+    }
 }
 
 fn low_is_good_style(value: u64, good_max: u64, warn_max: u64) -> Style {
@@ -1515,6 +1907,41 @@ fn spread_style(cpu_count: usize, core_count: usize) -> Style {
             .fg(Color::LightRed)
             .add_modifier(Modifier::BOLD),
     }
+}
+
+fn dashboard_label(text: impl Into<String>) -> Span<'static> {
+    Span::styled(text.into(), Style::default().fg(Color::Gray))
+}
+
+fn dashboard_value(text: impl Into<String>, style: Style) -> Span<'static> {
+    Span::styled(text.into(), style.add_modifier(Modifier::BOLD))
+}
+
+fn dashboard_sep(text: impl Into<String>) -> Span<'static> {
+    Span::styled(text.into(), Style::default().fg(Color::DarkGray))
+}
+
+fn dashboard_note(text: impl Into<String>) -> Span<'static> {
+    Span::styled(text.into(), Style::default().fg(Color::DarkGray))
+}
+
+fn footer_key(text: impl Into<String>) -> Span<'static> {
+    Span::styled(
+        format!("[{}]", text.into()),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn push_dashboard_metric(
+    spans: &mut Vec<Span<'static>>,
+    label: impl Into<String>,
+    value: impl Into<String>,
+    style: Style,
+) {
+    spans.push(dashboard_label(label));
+    spans.push(dashboard_value(value, style));
 }
 
 impl TuiApp {
@@ -1565,7 +1992,9 @@ impl TuiApp {
             last_bench_timestamp: 0,
             system_info,
             debug_events: VecDeque::new(),
+            per_cpu_work: vec![CpuWorkCounters::default(); nr_cpus],
             stats_history: VecDeque::new(),
+            cpu_work_history: VecDeque::new(),
         }
     }
 
@@ -1588,7 +2017,7 @@ impl TuiApp {
     /// Get current status message if not expired
     fn get_status(&self) -> Option<&str> {
         match &self.status_message {
-            Some((msg, timestamp)) if timestamp.elapsed() < Duration::from_secs(2) => Some(msg),
+            Some((msg, timestamp)) if timestamp.elapsed() < STATUS_MESSAGE_TTL => Some(msg),
             _ => None,
         }
     }
@@ -1605,6 +2034,24 @@ impl TuiApp {
         while let Some(front) = self.stats_history.front() {
             if now.saturating_duration_since(front.at) > STATS_HISTORY_MAX_AGE {
                 self.stats_history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn record_cpu_work_snapshot(&mut self) {
+        let now = Instant::now();
+        self.cpu_work_history.push_back(CpuWorkSnapshot {
+            at: now,
+            counters: self.per_cpu_work.clone(),
+        });
+        while self.cpu_work_history.len() > STATS_HISTORY_MAX_SAMPLES {
+            self.cpu_work_history.pop_front();
+        }
+        while let Some(front) = self.cpu_work_history.front() {
+            if now.saturating_duration_since(front.at) > STATS_HISTORY_MAX_AGE {
+                self.cpu_work_history.pop_front();
             } else {
                 break;
             }
@@ -1629,6 +2076,72 @@ impl TuiApp {
             return None;
         }
         Some((elapsed, stats_delta(current, &baseline.stats)))
+    }
+
+    fn snapshot_at_or_before(&self, target: Instant) -> Option<&StatsSnapshot> {
+        self.stats_history
+            .iter()
+            .rev()
+            .find(|snap| snap.at <= target)
+    }
+
+    fn cpu_work_window(&self, window: Duration) -> Option<(Duration, Vec<CpuWorkCounters>)> {
+        let newest = self.cpu_work_history.back()?;
+        let target = newest.at.checked_sub(window).unwrap_or(newest.at);
+        let baseline = self
+            .cpu_work_history
+            .iter()
+            .rev()
+            .find(|snap| snap.at <= target)
+            .or_else(|| self.cpu_work_history.front())?;
+        let elapsed = newest.at.saturating_duration_since(baseline.at);
+        if elapsed < Duration::from_secs(1) {
+            return None;
+        }
+        Some((elapsed, cpu_work_delta(&self.per_cpu_work, &baseline.counters)))
+    }
+
+    fn timeline_samples(&self, window: Duration, step: Duration) -> Vec<TimelineSample> {
+        let newest = match self.stats_history.back() {
+            Some(snap) => snap,
+            None => return Vec::new(),
+        };
+        let step_secs = step.as_secs();
+        if step_secs == 0 {
+            return Vec::new();
+        }
+        let buckets = (window.as_secs() / step_secs).max(1);
+        let mut samples = Vec::new();
+
+        for start_ago_secs in (1..=buckets).rev() {
+            let end_ago_secs = start_ago_secs - 1;
+            let start_target = newest
+                .at
+                .checked_sub(step.saturating_mul(start_ago_secs as u32))
+                .unwrap_or(newest.at);
+            let end_target = newest
+                .at
+                .checked_sub(step.saturating_mul(end_ago_secs as u32))
+                .unwrap_or(newest.at);
+            let Some(start_snap) = self.snapshot_at_or_before(start_target) else {
+                continue;
+            };
+            let Some(end_snap) = self.snapshot_at_or_before(end_target) else {
+                continue;
+            };
+            let elapsed = end_snap.at.saturating_duration_since(start_snap.at);
+            if elapsed < step / 2 {
+                continue;
+            }
+            samples.push(TimelineSample {
+                start_ago_secs,
+                end_ago_secs,
+                elapsed,
+                stats: stats_delta(&end_snap.stats, &start_snap.stats),
+            });
+        }
+
+        samples
     }
 
     pub fn next_tab(&mut self) {
@@ -1746,12 +2259,15 @@ fn restore_terminal() -> Result<()> {
 fn build_cpu_topology_grid_compact<'a>(
     topo: &'a TopologyInfo,
     cpu_stats: &'a [(f32, f32)],
+    scheduler_share: &'a [f64],
+    scheduler_label: &'a str,
 ) -> impl Widget + 'a {
     let mut text = Vec::new();
 
     text.push(Line::from(vec![
         Span::styled("Node 0 Topology", Style::default().fg(Color::DarkGray)),
-        Span::styled("  [ Load% | Temp°C ]", Style::default().fg(Color::Yellow)),
+        Span::styled("  [ Load% | Temp°C | Cake% ]", Style::default().fg(Color::Yellow)),
+        Span::styled(format!("  {}", scheduler_label), Style::default().fg(Color::Cyan)),
     ]));
 
     // Group CPUs by LLC
@@ -1788,7 +2304,7 @@ fn build_cpu_topology_grid_compact<'a>(
         sorted_cpus.sort(); // Sort CPUs within LLC
 
         // Arrange CPUs in a compact grid
-        let cpus_per_row = 4;
+        let cpus_per_row = 3;
         for chunk in sorted_cpus.chunks(cpus_per_row) {
             let mut line_spans = vec![Span::raw("  ")]; // Indent
             for &cpu in chunk {
@@ -1804,6 +2320,7 @@ fn build_cpu_topology_grid_compact<'a>(
                 };
 
                 let (load, temp) = cpu_stats.get(cpu).copied().unwrap_or((0.0, 0.0));
+                let sched_share = scheduler_share.get(cpu).copied().unwrap_or(0.0);
 
                 // Color scaling based on load and temp
                 let load_color = if load > 90.0 {
@@ -1820,6 +2337,15 @@ fn build_cpu_topology_grid_compact<'a>(
                 } else {
                     Color::Cyan
                 };
+                let sched_color = if sched_share > 20.0 {
+                    Color::LightRed
+                } else if sched_share > 10.0 {
+                    Color::Yellow
+                } else if sched_share > 0.0 {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                };
 
                 line_spans.push(Span::styled(
                     format!("CPU{:02} ", cpu),
@@ -1835,6 +2361,11 @@ fn build_cpu_topology_grid_compact<'a>(
                     format!("{:<2.0}°C", temp),
                     Style::default().fg(temp_color),
                 ));
+                line_spans.push(Span::styled("|", Style::default().fg(Color::DarkGray)));
+                line_spans.push(Span::styled(
+                    format!("{:>3.0}%", sched_share),
+                    Style::default().fg(sched_color),
+                ));
                 line_spans.push(Span::styled("]  ", Style::default().fg(Color::DarkGray)));
             }
             text.push(Line::from(line_spans));
@@ -1849,6 +2380,143 @@ fn build_cpu_topology_grid_compact<'a>(
             .border_style(Style::default().fg(Color::Cyan).dim())
             .padding(Padding::horizontal(1)),
     )
+}
+
+fn build_scheduler_cpu_table<'a>(
+    rows: &'a [SchedulerCpuRow],
+    title: &'a str,
+    limit: usize,
+) -> Table<'a> {
+    let header = Row::new(vec![
+        Cell::from("CPU"),
+        Cell::from("C/L3"),
+        Cell::from("Sched%"),
+        Cell::from("Runs/s"),
+        Cell::from("Avgµs"),
+        Cell::from("Disp/s"),
+        Cell::from("Local%"),
+        Cell::from("Yld%"),
+        Cell::from("Load"),
+    ])
+    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+    let table_rows: Vec<Row<'a>> = rows
+        .iter()
+        .take(limit)
+        .map(|row| {
+            let cpu_style = if row.is_secondary_smt {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let share_style = if row.share_pct > 15.0 {
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
+            } else if row.share_pct > 5.0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            let load_style = if row.system_load > 90.0 {
+                Style::default().fg(Color::LightRed)
+            } else if row.system_load > 50.0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    format!("C{:02}", row.cpu),
+                    cpu_style.add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(format!("{}/{}", row.core, row.llc)),
+                Cell::from(Span::styled(format!("{:>5.1}", row.share_pct), share_style)),
+                Cell::from(format!("{:>6.1}", row.runs_per_sec)),
+                Cell::from(format!("{:>6}", row.avg_run_us)),
+                Cell::from(format!("{:>6.1}", row.dispatch_per_sec)),
+                Cell::from(format!("{:>5.0}", row.local_pct)),
+                Cell::from(format!("{:>4.0}", row.yield_pct)),
+                Cell::from(Span::styled(format!("{:>4.0}", row.system_load), load_style)),
+            ])
+        })
+        .collect();
+
+    Table::new(
+        table_rows,
+        [
+            Constraint::Length(4),
+            Constraint::Length(6),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(5),
+            Constraint::Length(5),
+        ],
+    )
+    .header(header)
+    .block(dashboard_block(title, Color::Yellow))
+}
+
+fn build_scheduler_core_table<'a>(
+    rows: &'a [SchedulerCoreRow],
+    title: &'a str,
+    limit: usize,
+) -> Table<'a> {
+    let header = Row::new(vec![
+        Cell::from("Core"),
+        Cell::from("CPUs"),
+        Cell::from("Sched%"),
+        Cell::from("Runs/s"),
+        Cell::from("Avgµs"),
+        Cell::from("TopCPU%"),
+        Cell::from("SMT2%"),
+        Cell::from("Load"),
+    ])
+    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+    let table_rows: Vec<Row<'a>> = rows
+        .iter()
+        .take(limit)
+        .map(|row| {
+            let share_style = if row.share_pct > 20.0 {
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
+            } else if row.share_pct > 8.0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    format!("K{:02}", row.core),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(row.cpu_label.clone()),
+                Cell::from(Span::styled(format!("{:>5.1}", row.share_pct), share_style)),
+                Cell::from(format!("{:>6.1}", row.runs_per_sec)),
+                Cell::from(format!("{:>6}", row.avg_run_us)),
+                Cell::from(format!("{:>7.0}", row.top_cpu_share_pct)),
+                Cell::from(format!("{:>5.0}", row.secondary_smt_pct)),
+                Cell::from(format!("{:>4.0}", row.avg_system_load)),
+            ])
+        })
+        .collect();
+
+    Table::new(
+        table_rows,
+        [
+            Constraint::Length(5),
+            Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Length(5),
+        ],
+    )
+    .header(header)
+    .block(dashboard_block(title, Color::Green))
 }
 
 /// Custom Widget for high-density Latency Heatmap
@@ -1959,88 +2627,6 @@ impl<'a> Widget for LatencyHeatmap<'a> {
                 "█ Cross-CCD",
                 Style::default().fg(Color::Rgb(255, 180, 0)),
             );
-        }
-    }
-}
-
-/// Custom Widget for numerical latency table
-struct LatencyTable<'a> {
-    matrix: &'a [Vec<f64>],
-    topology: &'a TopologyInfo,
-}
-
-impl<'a> LatencyTable<'a> {
-    fn new(matrix: &'a [Vec<f64>], topology: &'a TopologyInfo) -> Self {
-        Self { matrix, topology }
-    }
-}
-
-impl<'a> Widget for LatencyTable<'a> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let nr_cpus = self.matrix.len();
-
-        let block = Block::default()
-            .title(" Latency Data ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Cyan).dim());
-
-        let inner_area = block.inner(area);
-        block.render(area, buf);
-
-        if inner_area.width < 10 || inner_area.height < 5 {
-            return;
-        }
-
-        // Header for Target CPUs
-        for j in 0..nr_cpus {
-            let x = inner_area.x + 5 + (j as u16 * 3);
-            if x < inner_area.right() {
-                buf.set_string(
-                    x,
-                    inner_area.y,
-                    format!("{:>2}", j),
-                    Style::default().fg(Color::Cyan).dim(),
-                );
-            }
-        }
-
-        for i in 0..nr_cpus {
-            let y = inner_area.y + 1 + i as u16;
-            if y >= inner_area.bottom() {
-                break;
-            }
-
-            buf.set_string(
-                inner_area.x + 1,
-                y,
-                format!("C{:02}", i),
-                Style::default().fg(Color::Cyan).dim(),
-            );
-
-            for j in 0..nr_cpus {
-                let x = inner_area.x + 5 + (j as u16 * 3);
-                if x >= inner_area.right() - 2 {
-                    continue;
-                }
-
-                let val = self.matrix[i][j].min(999.0);
-                let is_self = i == j;
-                let is_smt = self.topology.cpu_sibling_map[i] as usize == j;
-                let same_ccd = self.topology.cpu_llc_id[i] == self.topology.cpu_llc_id[j];
-
-                let style = if is_self {
-                    Style::default().fg(Color::Rgb(40, 40, 40))
-                } else if is_smt {
-                    Style::default().fg(Color::Rgb(0, 255, 150))
-                } else if same_ccd {
-                    Style::default().fg(Color::Rgb(0, 200, 255))
-                } else {
-                    Style::default().fg(Color::Rgb(255, 180, 0))
-                };
-
-                buf.set_string(x, y, format!("{:>2.0}", val), style);
-            }
         }
     }
 }
@@ -2218,6 +2804,272 @@ fn per_sec(count: u64, secs: f64) -> f64 {
     }
 }
 
+fn slice_util_display_pct(raw_score: u16) -> u32 {
+    ((raw_score as u32) * 100 + 64) / 128
+}
+
+fn expected_timeline_samples(window: Duration, step: Duration) -> usize {
+    let step_secs = step.as_secs();
+    if step_secs == 0 {
+        0
+    } else {
+        (window.as_secs() / step_secs).max(1) as usize
+    }
+}
+
+fn percentile_f64(samples: &[f64], pct: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+fn summarize_timeline_samples(
+    samples: &[TimelineSample],
+    expected_samples: usize,
+) -> Option<[Line<'static>; 3]> {
+    if samples.is_empty() {
+        return None;
+    }
+
+    let mut run_rates = Vec::with_capacity(samples.len());
+    let mut wake_rates = Vec::with_capacity(samples.len());
+    let mut total_select_ns = 0u64;
+    let mut total_select_calls = 0u64;
+    let mut total_enqueue_ns = 0u64;
+    let mut total_enqueue_calls = 0u64;
+    let mut total_running_ns = 0u64;
+    let mut total_running_calls = 0u64;
+    let mut total_stopping_ns = 0u64;
+    let mut total_stopping_calls = 0u64;
+    let mut total_wait_ns = [0u64; 4];
+    let mut total_wait_count = [0u64; 4];
+    let mut total_paths = [0u64; 6];
+    let mut total_quantum = [0u64; 3];
+
+    for sample in samples {
+        let secs = sample.elapsed.as_secs_f64().max(0.1);
+        let wake_total = sample.stats.nr_wakeup_direct_dispatches
+            + sample.stats.nr_wakeup_dsq_fallback_busy
+            + sample.stats.nr_wakeup_dsq_fallback_queued;
+        run_rates.push(per_sec(sample.stats.nr_running_calls, secs));
+        wake_rates.push(per_sec(wake_total, secs));
+
+        total_select_ns += sample.stats.total_select_cpu_ns;
+        total_select_calls += sample.stats.nr_select_cpu_calls;
+        total_enqueue_ns += sample.stats.total_enqueue_latency_ns;
+        total_enqueue_calls += sample.stats.nr_enqueue_calls;
+        total_running_ns += sample.stats.total_running_ns;
+        total_running_calls += sample.stats.nr_running_calls;
+        total_stopping_ns += sample.stats.total_stopping_ns;
+        total_stopping_calls += sample.stats.nr_stopping_calls;
+
+        for reason in 1..4 {
+            total_wait_ns[reason] += sample.stats.wake_reason_wait_ns[reason];
+            total_wait_count[reason] += sample.stats.wake_reason_wait_count[reason];
+        }
+        for path in 1..6 {
+            total_paths[path] += sample.stats.select_path_count[path];
+        }
+
+        total_quantum[0] += sample.stats.nr_quantum_full;
+        total_quantum[1] += sample.stats.nr_quantum_yield;
+        total_quantum[2] += sample.stats.nr_quantum_preempt;
+    }
+
+    let mean = |values: &[f64]| -> f64 {
+        if values.is_empty() {
+            0.0
+        } else {
+            values.iter().sum::<f64>() / values.len() as f64
+        }
+    };
+    let path_total: u64 = total_paths[1..6].iter().sum();
+    let quantum_total: u64 = total_quantum.iter().sum();
+
+    let mut line1 = vec![dashboard_label("Runs/s ")];
+    push_dashboard_metric(
+        &mut line1,
+        "avg ",
+        format!("{:.1}", mean(&run_rates)),
+        Style::default().fg(Color::Green),
+    );
+    line1.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line1,
+        "1% low ",
+        format!("{:.1}", percentile_f64(&run_rates, 1.0)),
+        Style::default().fg(Color::LightCyan),
+    );
+    line1.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line1,
+        "median ",
+        format!("{:.1}", percentile_f64(&run_rates, 50.0)),
+        Style::default().fg(Color::Cyan),
+    );
+    line1.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line1,
+        "p99 ",
+        format!("{:.1}", percentile_f64(&run_rates, 99.0)),
+        Style::default().fg(Color::Yellow),
+    );
+    line1.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line1,
+        "wake/s ",
+        format!("{:.1}", mean(&wake_rates)),
+        Style::default().fg(Color::LightMagenta),
+    );
+    line1.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line1,
+        "samples ",
+        if expected_samples > 0 {
+            format!("{}/{}", samples.len(), expected_samples)
+        } else {
+            samples.len().to_string()
+        },
+        Style::default().fg(Color::Blue),
+    );
+
+    let sel_avg = avg_ns(total_select_ns, total_select_calls);
+    let enq_avg = avg_ns(total_enqueue_ns, total_enqueue_calls);
+    let run_avg = avg_ns(total_running_ns, total_running_calls);
+    let stop_avg = avg_ns(total_stopping_ns, total_stopping_calls);
+    let wait_dir = bucket_avg_us(total_wait_ns[1], total_wait_count[1]);
+    let wait_busy = bucket_avg_us(total_wait_ns[2], total_wait_count[2]);
+    let wait_queue = bucket_avg_us(total_wait_ns[3], total_wait_count[3]);
+
+    let mut line2 = vec![dashboard_label("Callback avg ")];
+    push_dashboard_metric(
+        &mut line2,
+        "select ",
+        format!("{}ns", sel_avg),
+        low_is_good_style(sel_avg, 1_000, 5_000),
+    );
+    line2.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line2,
+        "enqueue ",
+        format!("{}ns", enq_avg),
+        low_is_good_style(enq_avg, 1_000, 5_000),
+    );
+    line2.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line2,
+        "running ",
+        format!("{}ns", run_avg),
+        low_is_good_style(run_avg, 1_000, 5_000),
+    );
+    line2.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line2,
+        "stopping ",
+        format!("{}ns", stop_avg),
+        low_is_good_style(stop_avg, 1_000, 5_000),
+    );
+    line2.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line2,
+        "wake wait<=5ms ",
+        format!("{}/{}/{}", wait_dir, wait_busy, wait_queue),
+        low_is_good_style(wait_dir.max(wait_busy).max(wait_queue), 10, 100),
+    );
+
+    let mut line3 = vec![dashboard_label("Path share ")];
+    push_dashboard_metric(
+        &mut line3,
+        "home ",
+        format!("{:.0}%", pct(total_paths[1], path_total)),
+        Style::default().fg(Color::Green),
+    );
+    line3.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line3,
+        "same core ",
+        format!("{:.0}%", pct(total_paths[2], path_total)),
+        Style::default().fg(Color::Yellow),
+    );
+    line3.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line3,
+        "primary ",
+        format!("{:.0}%", pct(total_paths[3], path_total)),
+        Style::default().fg(Color::Magenta),
+    );
+    line3.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line3,
+        "idle ",
+        format!("{:.0}%", pct(total_paths[4], path_total)),
+        Style::default().fg(Color::Cyan),
+    );
+    line3.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line3,
+        "tunnel ",
+        format!("{:.0}%", pct(total_paths[5], path_total)),
+        Style::default().fg(Color::LightRed),
+    );
+    line3.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line3,
+        "quantum f/y/p ",
+        format!(
+            "{:.0}/{:.0}/{:.0}%",
+            pct(total_quantum[0], quantum_total),
+            pct(total_quantum[1], quantum_total),
+            pct(total_quantum[2], quantum_total),
+        ),
+        Style::default().fg(Color::LightMagenta),
+    );
+
+    Some([Line::from(line1), Line::from(line2), Line::from(line3)])
+}
+
+fn format_timeline_sample_row(sample: &TimelineSample) -> String {
+    let secs = sample.elapsed.as_secs_f64().max(0.1);
+    let wake_total = sample.stats.nr_wakeup_direct_dispatches
+        + sample.stats.nr_wakeup_dsq_fallback_busy
+        + sample.stats.nr_wakeup_dsq_fallback_queued;
+    let path_total: u64 = sample.stats.select_path_count[1..6].iter().sum();
+    let quantum_total = sample.stats.nr_quantum_full
+        + sample.stats.nr_quantum_yield
+        + sample.stats.nr_quantum_preempt;
+
+    format!(
+        "  t-{:>2}..{:>2}s span={:>4.2}s run/s={:>7.1} wake/s={:>7.1} wake%={:>4.0}/{:>4.0}/{:>4.0} path%={:>4.0}/{:>4.0}/{:>4.0}/{:>4.0}/{:>4.0} cbns={}/{}/{}/{} waitus<=5ms={}/{}/{} slice%={:.0}/{:.0}/{:.0}",
+        sample.start_ago_secs,
+        sample.end_ago_secs,
+        secs,
+        per_sec(sample.stats.nr_running_calls, secs),
+        per_sec(wake_total, secs),
+        pct(sample.stats.nr_wakeup_direct_dispatches, wake_total),
+        pct(sample.stats.nr_wakeup_dsq_fallback_busy, wake_total),
+        pct(sample.stats.nr_wakeup_dsq_fallback_queued, wake_total),
+        pct(sample.stats.select_path_count[1], path_total),
+        pct(sample.stats.select_path_count[2], path_total),
+        pct(sample.stats.select_path_count[3], path_total),
+        pct(sample.stats.select_path_count[4], path_total),
+        pct(sample.stats.select_path_count[5], path_total),
+        avg_ns(sample.stats.total_select_cpu_ns, sample.stats.nr_select_cpu_calls),
+        avg_ns(sample.stats.total_enqueue_latency_ns, sample.stats.nr_enqueue_calls),
+        avg_ns(sample.stats.total_running_ns, sample.stats.nr_running_calls),
+        avg_ns(sample.stats.total_stopping_ns, sample.stats.nr_stopping_calls),
+        bucket_avg_us(sample.stats.wake_reason_wait_ns[1], sample.stats.wake_reason_wait_count[1]),
+        bucket_avg_us(sample.stats.wake_reason_wait_ns[2], sample.stats.wake_reason_wait_count[2]),
+        bucket_avg_us(sample.stats.wake_reason_wait_ns[3], sample.stats.wake_reason_wait_count[3]),
+        pct(sample.stats.nr_quantum_full, quantum_total),
+        pct(sample.stats.nr_quantum_yield, quantum_total),
+        pct(sample.stats.nr_quantum_preempt, quantum_total),
+    )
+}
+
 fn place_class_label(cls: usize) -> &'static str {
     match cls {
         0 => "cpu",
@@ -2232,10 +3084,117 @@ fn select_path_label(path: usize) -> &'static str {
     match path {
         1 => "home",
         2 => "core",
-        3 => "prim",
+        3 => "primary",
         4 => "idle",
-        5 => "tun",
+        5 => "tunnel",
         _ => "-",
+    }
+}
+
+fn wake_reason_label(reason: usize) -> &'static str {
+    match reason {
+        1 => "direct",
+        2 => "busy",
+        3 => "queued",
+        _ => "?",
+    }
+}
+
+fn kick_kind_label(kind: usize) -> &'static str {
+    match kind {
+        1 => "idle",
+        2 => "preempt",
+        _ => "?",
+    }
+}
+
+fn format_wake_bucket_summary(buckets: &[[u64; 5]]) -> String {
+    let mut parts = Vec::new();
+    for reason in 1..buckets.len() {
+        let row = buckets[reason];
+        if row.iter().all(|count| *count == 0) {
+            continue;
+        }
+        parts.push(format!(
+            "{}={}/{}/{}/{}/{}",
+            wake_reason_label(reason),
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_wake_target_summary(hit: &[u64], miss: &[u64]) -> String {
+    let mut parts = Vec::new();
+    for reason in 1..hit.len() {
+        let total = hit[reason] + miss[reason];
+        if total == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{}={}/{}",
+            wake_reason_label(reason),
+            hit[reason],
+            miss[reason]
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_wake_followup_summary(same: &[u64], migrate: &[u64]) -> String {
+    let mut parts = Vec::new();
+    for reason in 1..same.len() {
+        let total = same[reason] + migrate[reason];
+        if total == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{}={}/{}",
+            wake_reason_label(reason),
+            same[reason],
+            migrate[reason]
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_kick_bucket_summary(buckets: &[[u64; 5]]) -> String {
+    let mut parts = Vec::new();
+    for kind in 1..buckets.len() {
+        let row = buckets[kind];
+        if row.iter().all(|count| *count == 0) {
+            continue;
+        }
+        parts.push(format!(
+            "{}={}/{}/{}/{}/{}",
+            kick_kind_label(kind),
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
     }
 }
 
@@ -2303,6 +3262,111 @@ fn format_row_place_wait_summary(row: &TaskTelemetryRow) -> String {
         "none".to_string()
     } else {
         parts.join(" ")
+    }
+}
+
+fn format_wakewait_summary(sum_ns: &[u64], count: &[u64], max_ns: &[u64]) -> String {
+    let mut parts = Vec::new();
+    for reason in 1..4 {
+        let samples = count[reason];
+        let avg_us = if samples > 0 {
+            sum_ns[reason] / samples / 1000
+        } else {
+            0
+        };
+        let max_us = max_ns[reason] / 1000;
+        parts.push(format!(
+            "{}={}/{}us({})",
+            ["dir", "busy", "queue"][reason - 1],
+            avg_us,
+            max_us,
+            samples
+        ));
+    }
+    parts.join(" ")
+}
+
+fn append_cpu_work_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    topology: &TopologyInfo,
+    cpu_stats: &[(f32, f32)],
+    elapsed: Duration,
+) {
+    let cpu_rows = scheduler_cpu_rows(counters, topology, cpu_stats, elapsed);
+    let core_rows = scheduler_core_rows(counters, topology, cpu_stats, elapsed);
+    let active_cpu_count = counters
+        .iter()
+        .filter(|counter| counter.task_runtime_ns > 0 || counter.task_run_count > 0)
+        .count();
+    let active_core_count = core_rows
+        .iter()
+        .filter(|row| row.total_runtime_ns > 0 || row.runs > 0)
+        .count();
+    let total_runtime_ns: u64 = counters.iter().map(|counter| counter.task_runtime_ns).sum();
+    let total_runs: u64 = counters.iter().map(|counter| counter.task_run_count).sum();
+    let top_cpu = cpu_rows
+        .first()
+        .map(|row| format!("C{:02} {:.1}%", row.cpu, row.share_pct))
+        .unwrap_or_else(|| "-".to_string());
+    let top_core = core_rows
+        .first()
+        .map(|row| format!("K{:02} {:.1}%", row.core, row.share_pct))
+        .unwrap_or_else(|| "-".to_string());
+
+    output.push_str(&format!(
+        "{}: sampled={:.1}s active_cpu={}/{} active_core={}/{} runtime_ms={} runs={} top_cpu={} top_core={} skew={:.1}x\n",
+        label,
+        elapsed.as_secs_f64(),
+        active_cpu_count,
+        counters.len(),
+        active_core_count,
+        topology.nr_phys_cpus,
+        format_runtime_ms(total_runtime_ns),
+        total_runs,
+        top_cpu,
+        top_core,
+        scheduler_balance_ratio(counters),
+    ));
+    output.push_str(&format!("{}.rows:\n", label));
+    for row in &cpu_rows {
+        output.push_str(&format!(
+            "  cpu=C{:02} core={} llc={} thr={} share={:.1}% runs={} runs/s={:.1} runtime_ms={} avg_run_us={} disp/s={:.1} local={:.0}% q[f/y/p]={}/{}/{} load={:.0}% temp={:.0}C\n",
+            row.cpu,
+            row.core,
+            row.llc,
+            if row.is_secondary_smt { "smt2" } else { "prim" },
+            row.share_pct,
+            row.runs,
+            row.runs_per_sec,
+            format_runtime_ms(row.total_runtime_ns),
+            row.avg_run_us,
+            row.dispatch_per_sec,
+            row.local_pct,
+            counters[row.cpu].quantum_full,
+            counters[row.cpu].quantum_yield,
+            counters[row.cpu].quantum_preempt,
+            row.system_load,
+            row.temp_c,
+        ));
+    }
+    output.push_str(&format!("{}.cores:\n", label));
+    for row in &core_rows {
+        output.push_str(&format!(
+            "  core=K{:02} cpus={} share={:.1}% runs={} runs/s={:.1} runtime_ms={} avg_run_us={} disp/s={:.1} top_cpu={:.0}% smt2={:.0}% load={:.0}%\n",
+            row.core,
+            row.cpu_label,
+            row.share_pct,
+            row.runs,
+            row.runs_per_sec,
+            format_runtime_ms(row.total_runtime_ns),
+            row.avg_run_us,
+            row.dispatch_per_sec,
+            row.top_cpu_share_pct,
+            row.secondary_smt_pct,
+            row.avg_system_load,
+        ));
     }
 }
 
@@ -2384,23 +3448,69 @@ fn append_window_stats(
         callback_hist_summary(stats, 3),
         callback_hist_summary(stats, 4),
     ));
-    output.push_str("win.wakewait<5ms:");
-    for reason in 1..4 {
-        let count = stats.wake_reason_wait_count[reason];
-        let avg_us = if count > 0 {
-            stats.wake_reason_wait_ns[reason] / count / 1000
-        } else {
-            0
-        };
-        output.push_str(&format!(
-            " {}={}/{}({:.1}/s)",
-            ["dir", "busy", "queue"][reason - 1],
-            avg_us,
-            count,
-            per_sec(count, secs),
-        ));
-    }
-    output.push('\n');
+    output.push_str(&format!(
+        "win.wakewait.all: {}\n",
+        format_wakewait_summary(
+            &stats.wake_reason_wait_all_ns,
+            &stats.wake_reason_wait_all_count,
+            &stats.wake_reason_wait_all_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "win.wakewait<=5ms: {}\n",
+        format_wakewait_summary(
+            &stats.wake_reason_wait_ns,
+            &stats.wake_reason_wait_count,
+            &stats.wake_reason_wait_max_ns,
+        )
+    ));
+    let quantum_total = stats.nr_quantum_full + stats.nr_quantum_yield + stats.nr_quantum_preempt;
+    output.push_str(&format!(
+        "win.slice: full={} ({:.1}%) yield={} ({:.1}%) preempt={} ({:.1}%) kick:wake[i/p]={}/{} affine[i/p]={}/{}\n",
+        stats.nr_quantum_full,
+        pct(stats.nr_quantum_full, quantum_total),
+        stats.nr_quantum_yield,
+        pct(stats.nr_quantum_yield, quantum_total),
+        stats.nr_quantum_preempt,
+        pct(stats.nr_quantum_preempt, quantum_total),
+        stats.nr_wake_kick_idle,
+        stats.nr_wake_kick_preempt,
+        stats.nr_affine_kick_idle,
+        stats.nr_affine_kick_preempt,
+    ));
+    output.push_str(&format!(
+        "win.wakebins: {}\n",
+        format_wake_bucket_summary(&stats.wake_reason_bucket_count)
+    ));
+    output.push_str(&format!(
+        "win.postwake.target_hit/miss: {}  win.postwake.follow_same/mig: {}\n",
+        format_wake_target_summary(&stats.wake_target_hit_count, &stats.wake_target_miss_count),
+        format_wake_followup_summary(
+            &stats.wake_followup_same_cpu_count,
+            &stats.wake_followup_migrate_count,
+        )
+    ));
+    output.push_str(&format!(
+        "win.kickrun: idle={}/{} avg={}us max={}us preempt={}/{} avg={}us max={}us\n",
+        stats.nr_wake_kick_quick[1],
+        stats.nr_wake_kick_observed[1],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[1],
+            stats.nr_wake_kick_observed[1]
+        ),
+        stats.max_wake_kick_to_run_ns[1] / 1000,
+        stats.nr_wake_kick_quick[2],
+        stats.nr_wake_kick_observed[2],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[2],
+            stats.nr_wake_kick_observed[2]
+        ),
+        stats.max_wake_kick_to_run_ns[2] / 1000,
+    ));
+    output.push_str(&format!(
+        "win.kickbins: {}\n",
+        format_kick_bucket_summary(&stats.wake_kick_bucket_count)
+    ));
     output.push_str(&format!(
         "win.path: {}  deps:same_tgid={} ({:.1}/s) cross_tgid={} ({:.1}/s)\n",
         format_path_summary(&stats.select_path_count),
@@ -2410,7 +3520,7 @@ fn append_window_stats(
         per_sec(stats.nr_wake_cross_tgid, secs),
     ));
     output.push_str(&format!(
-        "win.place.home: {}\n",
+        "win.place.home.wait<=5ms: {}\n",
         format_place_wait_summary(
             &stats.home_place_wait_ns,
             &stats.home_place_wait_count,
@@ -2426,7 +3536,7 @@ fn append_window_stats(
         )
     ));
     output.push_str(&format!(
-        "win.place.waker: {}\n",
+        "win.place.waker.wait<=5ms: {}\n",
         format_place_wait_summary(
             &stats.waker_place_wait_ns,
             &stats.waker_place_wait_count,
@@ -2454,7 +3564,6 @@ fn append_window_stats(
 /// Format stats as a copyable text string
 fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     let total_dsq_dispatches = stats.nr_local_dispatches + stats.nr_stolen_dispatches;
-    let wake_names = ["dir", "busy", "queue"];
     let tgid_roles = infer_tgid_roles(&app.task_rows);
     let cap = capacity_summary(app, &tgid_roles);
 
@@ -2466,6 +3575,12 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         app.format_uptime(),
     ));
     output.push_str("scope: lifetime\n");
+    output.push_str(
+        "capture: global=exact task.life=exact task.rate=delta_per_tick task.stage=latest_observed wakewait.all=exact wakewait<=5ms=bounded windows=delta_snapshots history=60s@1s nearest<=boundary\n",
+    );
+    output.push_str(
+        "task.fields: latest={LASTWus,SELns,ENQns,STOPns,RUNns,GAPus,path/place} rate={RUN/s,MIG/s} life={MAXRTus,JITus,wakeus<=5ms,WHIST,Qf/y/p,cpu/core spread}\n",
+    );
 
     // Compact dispatch stats
     let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
@@ -2508,16 +3623,19 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         stats.nr_primary_scan_misses,
     ));
 
-    // Compact callback profile (all on 2 lines)
+    // Compact callback profile (totals + averages)
     let stop_total = stats.nr_stop_deferred_skip + stats.nr_stop_deferred;
-    let stop_total_f = (stop_total as f64).max(1.0);
     output.push_str(&format!(
-        "cb.stop: tot_µs={} max_ns={} calls={} skip={:.1}% deferred={:.1}%\n",
+        "cb.stop: tot_µs={} max_ns={} calls={} task_telemetry={} sampled_skip={}\n",
         stats.total_stopping_ns / 1000,
         stats.max_stopping_ns,
         stop_total,
-        stats.nr_stop_deferred_skip as f64 / stop_total_f * 100.0,
-        stats.nr_stop_deferred as f64 / stop_total_f * 100.0,
+        if stats.nr_stop_deferred_skip == 0 {
+            "exact"
+        } else {
+            "mixed"
+        },
+        stats.nr_stop_deferred_skip,
     ));
     output.push_str(&format!(
         "cb.run: tot_µs={} max_ns={} calls={}  cb.enq: tot_µs={} calls={}  sel: tot_µs={} g1_µs={} g2_µs={} calls={}  cb.disp: tot_µs={} max_ns={} calls={}\n",
@@ -2527,6 +3645,14 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         stats.total_dispatch_ns / 1000, stats.max_dispatch_ns, stats.nr_dispatch_calls,
     ));
     output.push_str(&format!(
+        "cb.avg: sel={}ns enq={}ns disp={}ns run={}ns stop={}ns\n",
+        avg_ns(stats.total_select_cpu_ns, stats.nr_select_cpu_calls),
+        avg_ns(stats.total_enqueue_latency_ns, stats.nr_enqueue_calls),
+        avg_ns(stats.total_dispatch_ns, stats.nr_dispatch_calls),
+        avg_ns(stats.total_running_ns, stats.nr_running_calls),
+        avg_ns(stats.total_stopping_ns, stop_total),
+    ));
+    output.push_str(&format!(
         "cb.hist: sel[{}] enq[{}] disp[{}] run[{}] stop[{}]\n",
         callback_hist_summary(stats, 0),
         callback_hist_summary(stats, 1),
@@ -2534,24 +3660,69 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         callback_hist_summary(stats, 3),
         callback_hist_summary(stats, 4),
     ));
-    output.push_str("wakewait<5ms:");
-    for reason in 1..4 {
-        let count = stats.wake_reason_wait_count[reason];
-        let avg_us = if count > 0 {
-            stats.wake_reason_wait_ns[reason] / count / 1000
-        } else {
-            0
-        };
-        let max_us = stats.wake_reason_wait_max_ns[reason] / 1000;
-        output.push_str(&format!(
-            " {}={}/{}us({})",
-            wake_names[reason - 1],
-            avg_us,
-            max_us,
-            count
-        ));
-    }
-    output.push('\n');
+    output.push_str(&format!(
+        "wakewait.all: {}\n",
+        format_wakewait_summary(
+            &stats.wake_reason_wait_all_ns,
+            &stats.wake_reason_wait_all_count,
+            &stats.wake_reason_wait_all_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "wakewait<=5ms: {}\n",
+        format_wakewait_summary(
+            &stats.wake_reason_wait_ns,
+            &stats.wake_reason_wait_count,
+            &stats.wake_reason_wait_max_ns,
+        )
+    ));
+    let quantum_total = stats.nr_quantum_full + stats.nr_quantum_yield + stats.nr_quantum_preempt;
+    output.push_str(&format!(
+        "slice: full={} ({:.1}%) yield={} ({:.1}%) preempt={} ({:.1}%) kick:wake[i/p]={}/{} affine[i/p]={}/{}\n",
+        stats.nr_quantum_full,
+        pct(stats.nr_quantum_full, quantum_total),
+        stats.nr_quantum_yield,
+        pct(stats.nr_quantum_yield, quantum_total),
+        stats.nr_quantum_preempt,
+        pct(stats.nr_quantum_preempt, quantum_total),
+        stats.nr_wake_kick_idle,
+        stats.nr_wake_kick_preempt,
+        stats.nr_affine_kick_idle,
+        stats.nr_affine_kick_preempt,
+    ));
+    output.push_str(&format!(
+        "wakebins: {}\n",
+        format_wake_bucket_summary(&stats.wake_reason_bucket_count)
+    ));
+    output.push_str(&format!(
+        "postwake.target_hit/miss: {}  postwake.follow_same/mig: {}\n",
+        format_wake_target_summary(&stats.wake_target_hit_count, &stats.wake_target_miss_count),
+        format_wake_followup_summary(
+            &stats.wake_followup_same_cpu_count,
+            &stats.wake_followup_migrate_count,
+        )
+    ));
+    output.push_str(&format!(
+        "kickrun: idle={}/{} avg={}us max={}us  preempt={}/{} avg={}us max={}us\n",
+        stats.nr_wake_kick_quick[1],
+        stats.nr_wake_kick_observed[1],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[1],
+            stats.nr_wake_kick_observed[1]
+        ),
+        stats.max_wake_kick_to_run_ns[1] / 1000,
+        stats.nr_wake_kick_quick[2],
+        stats.nr_wake_kick_observed[2],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[2],
+            stats.nr_wake_kick_observed[2]
+        ),
+        stats.max_wake_kick_to_run_ns[2] / 1000,
+    ));
+    output.push_str(&format!(
+        "kickbins: {}\n",
+        format_kick_bucket_summary(&stats.wake_kick_bucket_count)
+    ));
     output.push_str(&format!(
         "place.path: {}  deps:same_tgid={} cross_tgid={}\n",
         format_path_summary(&stats.select_path_count),
@@ -2559,7 +3730,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         stats.nr_wake_cross_tgid,
     ));
     output.push_str(&format!(
-        "place.home.wait: {}\n",
+        "place.home.wait<=5ms: {}\n",
         format_place_wait_summary(
             &stats.home_place_wait_ns,
             &stats.home_place_wait_count,
@@ -2575,7 +3746,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         )
     ));
     output.push_str(&format!(
-        "place.waker.wait: {}\n",
+        "place.waker.wait<=5ms: {}\n",
         format_place_wait_summary(
             &stats.waker_place_wait_ns,
             &stats.waker_place_wait_count,
@@ -2601,7 +3772,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         stats.nr_busy_pending_set_skips,
     ));
     output.push_str(&format!(
-        "cap: hard={} hot={} soft={} hot={} build={} hot={} shared_top_cores={} build_shared={} hard_smt={} hard_scatter={} focus_scatter={}\n",
+        "cap: hard_tasks={} hard_hot={} soft_tasks={} soft_hot={} build_tasks={} build_hot={} shared_top_cores={} build_shared={} hard_smt={} hard_scatter={} focus_scatter={}\n",
         cap.hard_latency_tasks,
         cap.hard_latency_hot,
         cap.soft_latency_tasks,
@@ -2623,23 +3794,57 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         cap.build_tasks,
         cap.critical_tasks,
     ));
+    append_cpu_work_section(
+        &mut output,
+        "cpu.work.life",
+        &app.per_cpu_work,
+        &app.topology,
+        &app.cpu_stats,
+        app.start_time.elapsed(),
+    );
     if let Some((elapsed, delta)) = app.windowed_stats(stats, Duration::from_secs(30)) {
         append_window_stats(&mut output, "30s", elapsed, &delta, dsq_depth);
     }
     if let Some((elapsed, delta)) = app.windowed_stats(stats, Duration::from_secs(60)) {
         append_window_stats(&mut output, "60s", elapsed, &delta, dsq_depth);
     }
+    if let Some((elapsed, window)) = app.cpu_work_window(Duration::from_secs(60)) {
+        append_cpu_work_section(
+            &mut output,
+            "cpu.work.60s",
+            &window,
+            &app.topology,
+            &app.cpu_stats,
+            elapsed,
+        );
+    }
+    let timeline_window = Duration::from_secs(60);
+    let timeline_step = Duration::from_secs(1);
+    let timeline_samples = app.timeline_samples(timeline_window, timeline_step);
+    if let Some(summary_lines) = summarize_timeline_samples(
+        &timeline_samples,
+        expected_timeline_samples(timeline_window, timeline_step),
+    ) {
+        output.push_str("\nwindow: last60s sampled=1.0s buckets=nearest<=boundary\n");
+        for line in summary_lines {
+            output.push_str(&line.to_string());
+            output.push('\n');
+        }
+        output.push_str(
+            "timeline.cols: [age span run/s wake/s wake%=dir/busy/q path%=home/core/prim/idle/tun cbns=sel/enq/run/stop waitus<=5ms=dir/busy/q slice%=full/yield/preempt]\n",
+        );
+        for sample in &timeline_samples {
+            output.push_str(&format!("{}\n", format_timeline_sample_row(sample)));
+        }
+    }
     if !app.debug_events.is_empty() {
         output.push_str("events:\n");
         for ev in app.debug_events.iter().take(8) {
-            let kind = match ev.kind {
-                1 => "cb",
-                2 => "wait",
-                _ => "evt",
-            };
             output.push_str(&format!(
-                "  {} ts={} slot={} pid={} cpu={} val={}ns aux={} comm={}\n",
-                kind, ev.ts_ns, ev.slot, ev.pid, ev.cpu, ev.value_ns, ev.aux, ev.comm
+                "  ts={} pid={} {}\n",
+                ev.ts_ns,
+                ev.pid,
+                debug_event_label(ev)
             ));
         }
     }
@@ -2653,17 +3858,39 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         "\ntasks: [PPID PID ST COMM CLS PELT MAXRTus GAPus JITus LASTWus RUN/s CPU SPRD RES% SMT% SELns ENQns STOPns RUNns G1% G3% DSQ% MIG/s]\n",
     );
     output.push_str(
-        "       [detail: ROLE STEER(home/primary) DIRECT YIELD PRMPT MASK MAXGAPus DSQINSns RUNS SUTIL LLC/COUNT PLACE(cpu/core sampled) STREAK WAKER TGID CLS V/ICSW WAKEus(dir/busy/q) WHIST]\n",
+        "       [detail: ROLE STEER(home/primary) DIRECT Q[f/y/p] YIELD PRMPT MASK MAXGAPus DSQINSns RUNS SUTIL% LLC/COUNT PLACE(cpu/core dist) STREAK WAKER TGID CLS V/ICSW WAKEus<=5ms(dir/busy/q) HWAIT<=5ms WHIST]\n",
     );
 
-    const MAX_DUMP_ROWS: usize = 32;
-    // Dump captures the busiest BPF-tracked tasks only so exported files stay compact.
-    let mut dump_pids: Vec<u32> = app
+    let all_dump_pids: Vec<u32> = app
         .task_rows
         .iter()
         .filter(|(_, row)| row.is_bpf_tracked && row.total_runs > 0)
         .map(|(pid, _)| *pid)
         .collect();
+    let dead_hidden = all_dump_pids
+        .iter()
+        .filter(|pid| {
+            app.task_rows
+                .get(pid)
+                .map(|row| row.status == TaskStatus::Dead)
+                .unwrap_or(false)
+        })
+        .count();
+    // Prefer live rows so dump reviews stay benchmark-focused even if stale tasks are retained in TUI state.
+    let mut dump_pids: Vec<u32> = all_dump_pids
+        .iter()
+        .copied()
+        .filter(|pid| {
+            app.task_rows
+                .get(pid)
+                .map(|row| row.status != TaskStatus::Dead)
+                .unwrap_or(false)
+        })
+        .collect();
+    let live_only = !dump_pids.is_empty();
+    if !live_only {
+        dump_pids = all_dump_pids.clone();
+    }
     dump_pids.sort_by(|a, b| {
         let r_a = app.task_rows.get(a).unwrap();
         let r_b = app.task_rows.get(b).unwrap();
@@ -2689,13 +3916,14 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             .then_with(|| r_b.pelt_util.cmp(&r_a.pelt_util))
     });
     let dump_total_rows = dump_pids.len();
-    if dump_pids.len() > MAX_DUMP_ROWS {
-        dump_pids.truncate(MAX_DUMP_ROWS);
-    }
+    let dump_group_count = tgid_rank.len();
     output.push_str(&format!(
-        "dump: top {} of {} BPF-tracked rows by grouped PELT activity\n",
+        "dump: full {} of {} {} BPF-tracked rows across {} TGIDs ordered by grouped PELT activity dead_hidden={}\n",
         dump_pids.len(),
         dump_total_rows,
+        if live_only { "live" } else { "tracked" },
+        dump_group_count,
+        dead_hidden,
     ));
 
     // Pre-compute thread counts per tgid
@@ -2789,7 +4017,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             ));
             // detail-A: gate % (G1/G3/DSQ) + all extended fields, compact labels
             output.push_str(&format!(
-                "{}  role={}/{} steer={}/{} path={}/{} waker={} deps={}/{} dir={} yld={} prmpt={} mask={} maxgap={} dsqins={}ns runs={} sutil={}% llc=L{:02}/{} place=[{}|{} smt={}%] streak={} tgid={} cls={} v/icsw={}/{} wakeus={}/{}/{} hwait=[{}] whist={}/{}/{}/{}\n",
+                "{}  role={}/{} steer={}/{} path={}/{} waker={} deps={}/{} dir={} q={}/{}/{} yld={} prmpt={} mask={} maxgap={} dsqins={}ns runs={} sutil={}% llc=L{:02}/{} place=[{}|{} smt={}%] streak={} tgid={} cls={} v/icsw={}/{} wakeus<=5ms={}/{}/{} hwait<=5ms=[{}] whist={}/{}/{}/{}\n",
                 indent,
                 role.label(),
                 capacity_band(row, role).label(),
@@ -2800,10 +4028,15 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
                 place_class_label(row.last_waker_place_class as usize),
                 row.wake_same_tgid_count,
                 row.wake_cross_tgid_count,
-                row.direct_dispatch_count, row.yield_count,
-                row.preempt_count, row.cpumask_change_count,
+                row.direct_dispatch_count,
+                row.quantum_full_count,
+                row.quantum_yield_count,
+                row.quantum_preempt_count,
+                row.yield_count,
+                row.preempt_count,
+                row.cpumask_change_count,
                 display_gap_us(row.max_dispatch_gap_us), row.dsq_insert_ns, row.total_runs,
-                row.slice_util_pct,
+                slice_util_display_pct(row.slice_util_pct),
                 row.llc_id,
                 placement.active_llc_count,
                 top_cpu_distribution(&row.cpu_run_count, &app.topology, 3),
@@ -2863,7 +4096,7 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
         .constraints([
             Constraint::Length(3), // Tab bar (bordered)
             Constraint::Min(0),    // Active View
-            Constraint::Length(3), // Footer
+            Constraint::Length(4), // Footer
         ])
         .split(area);
 
@@ -2880,64 +4113,114 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
     // --- Footer (key bindings + status) ---
     let arrow = if app.sort_descending { "▼" } else { "▲" };
     let sort_label = match app.sort_column {
-        SortColumn::Pid => format!("[PID]{}", arrow),
-        SortColumn::Pelt => format!("[PELT]{}", arrow),
-        SortColumn::MaxRuntime => format!("[MAXµs]{}", arrow),
-        SortColumn::Jitter => format!("[JITµs]{}", arrow),
-        SortColumn::Wait => format!("[WAITµs]{}", arrow),
-        SortColumn::RunsPerSec => format!("[RUN/s]{}", arrow),
-        SortColumn::TargetCpu => format!("[CPU]{}", arrow),
-        SortColumn::Spread => format!("[SPRD]{}", arrow),
-        SortColumn::Residency => format!("[RES%]{}", arrow),
-        SortColumn::SelectCpu => format!("[SELns]{}", arrow),
-        SortColumn::Enqueue => format!("[ENQns]{}", arrow),
-        SortColumn::Gap => format!("[GAPµs]{}", arrow),
-        SortColumn::Gate1Pct => format!("[G1%]{}", arrow),
-        SortColumn::Class => format!("[CLS]{}", arrow),
-        SortColumn::Migrations => format!("[MIG/s]{}", arrow),
+        SortColumn::Pid => format!("PID {}", arrow),
+        SortColumn::Pelt => format!("PELT {}", arrow),
+        SortColumn::MaxRuntime => format!("MAXµs {}", arrow),
+        SortColumn::Jitter => format!("JITµs {}", arrow),
+        SortColumn::Wait => format!("WAITµs {}", arrow),
+        SortColumn::RunsPerSec => format!("RUN/s {}", arrow),
+        SortColumn::TargetCpu => format!("CPU {}", arrow),
+        SortColumn::Spread => format!("SPRD {}", arrow),
+        SortColumn::Residency => format!("RES% {}", arrow),
+        SortColumn::SelectCpu => format!("SELns {}", arrow),
+        SortColumn::Enqueue => format!("ENQns {}", arrow),
+        SortColumn::Gap => format!("GAPµs {}", arrow),
+        SortColumn::Gate1Pct => format!("G1% {}", arrow),
+        SortColumn::Class => format!("CLS {}", arrow),
+        SortColumn::Migrations => format!("MIG/s {}", arrow),
     };
 
-    let footer_text = match app.get_status() {
-        Some(status) => format!(
-            " {} [s]Sort [S]Rev [+/-]Rate [↑↓]Scrl [T]Top [⏎]Fold [␣]Grp [x]FoldAll [Tab]Tabs [f]Filt [r]Reset [b]Bench [c]Copy [d]Dump [q]Quit │ {}",
-            sort_label, status
-        ),
-        None => format!(
-            " {} [s]Sort [S]Rev [+/-]Rate [↑↓]Scrl [T]Top [⏎]Fold [␣]Grp [x]FoldAll [Tab]Tabs [f]Filt [r]Reset [b]Bench [c]Copy [d]Dump [q]Quit",
-            sort_label
-        ),
-    };
     let (fg_color, border_color) = if app.get_status().is_some() {
         (Color::Green, Color::Green)
     } else {
         (Color::DarkGray, Color::DarkGray)
     };
-    let footer = Paragraph::new(footer_text)
+
+    let footer_line1 = Line::from(vec![
+        dashboard_label("Sort "),
+        footer_key("s"),
+        dashboard_note(" next "),
+        footer_key("S"),
+        dashboard_note(" reverse "),
+        dashboard_sep("  "),
+        dashboard_label("Current "),
+        dashboard_value(sort_label, Style::default().fg(Color::Yellow)),
+        dashboard_sep("  |  "),
+        dashboard_label("Move "),
+        footer_key("↑↓"),
+        dashboard_note(" rows "),
+        footer_key("T"),
+        dashboard_note(" top "),
+        footer_key("Tab"),
+        dashboard_note(" views"),
+    ]);
+
+    let mut footer_line2 = Vec::new();
+    if let Some(status) = app.get_status() {
+        footer_line2.push(dashboard_label("Status "));
+        footer_line2.push(dashboard_value(status, Style::default().fg(Color::Green)));
+        footer_line2.push(dashboard_sep("  |  "));
+    }
+    footer_line2.extend([
+        dashboard_label("Groups "),
+        footer_key("Enter"),
+        dashboard_note(" parent "),
+        footer_key("Space"),
+        dashboard_note(" threads "),
+        footer_key("x"),
+        dashboard_note(" clear "),
+        dashboard_sep("  |  "),
+        dashboard_label("Data "),
+        footer_key("f"),
+        dashboard_note(" filter "),
+        footer_key("c"),
+        dashboard_note(" copy "),
+        footer_key("d"),
+        dashboard_note(" dump "),
+        footer_key("b"),
+        dashboard_note(" bench "),
+        footer_key("r"),
+        dashboard_note(" reset "),
+        footer_key("q"),
+        dashboard_note(" quit"),
+    ]);
+
+    let footer = Paragraph::new(vec![footer_line1, Line::from(footer_line2)])
         .style(Style::default().fg(fg_color))
+        .wrap(Wrap { trim: false })
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color)),
+                .border_style(Style::default().fg(border_color))
+                .border_type(BorderType::Rounded)
+                .padding(Padding::new(1, 1, 0, 0)),
         );
     frame.render_widget(footer, main_layout[2]);
 }
 
+fn dashboard_block<'a>(title: &'a str, accent: Color) -> Block<'a> {
+    Block::default()
+        .title(format!(" {} ", title))
+        .title_style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .border_type(BorderType::Rounded)
+        .padding(Padding::new(1, 1, 0, 0))
+}
+
 fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, area: Rect) {
     let tgid_roles = infer_tgid_roles(&app.task_rows);
-    let cap = capacity_summary(app, &tgid_roles);
+    let minute_window = Duration::from_secs(60);
+    let minute_step = Duration::from_secs(1);
+    let minute_samples = app.timeline_samples(minute_window, minute_step);
 
-    // Full-width stacked layout: compact header → tier performance → task matrix
-    let outer_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5), // Header: 3 content lines (stats + sched + state/game) + 2 borders
-            Constraint::Length(8), // Tier performance panel (4 rows + header + borders)
-            Constraint::Min(10),   // Full-width Task Matrix
-        ])
-        .split(area);
-
-    // --- Compact Header: system info + tier counts on one line ---
     let total_dsq_dispatches = stats.nr_local_dispatches + stats.nr_stolen_dispatches;
+    let wake_total = stats.nr_wakeup_direct_dispatches
+        + stats.nr_wakeup_dsq_fallback_busy
+        + stats.nr_wakeup_dsq_fallback_queued;
+    let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
+    let path_total: u64 = stats.select_path_count[1..6].iter().sum();
+    let quantum_total = stats.nr_quantum_full + stats.nr_quantum_yield + stats.nr_quantum_preempt;
 
     // PELT tier summary: count tasks by utilization bands
     let (mut wc0, mut wc1, mut wc2, mut wc3) = (0u32, 0u32, 0u32, 0u32);
@@ -2969,96 +4252,286 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         if app.topology.smt_enabled { " SMT" } else { "" },
     );
 
-    let drop_warn = if stats.nr_dropped_allocations > 0 {
-        format!("  ⚠ {}×ENOMEM", stats.nr_dropped_allocations)
+    let outer_layout = Layout::vertical([
+        Constraint::Length(10),
+        Constraint::Length(11),
+        Constraint::Min(10),
+    ])
+    .split(area);
+
+    let summary_rows =
+        Layout::vertical([Constraint::Length(5), Constraint::Length(5)]).split(outer_layout[0]);
+    let summary_top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(summary_rows[0]);
+    let summary_bottom =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(summary_rows[1]);
+
+    let queue_style = if dsq_depth <= 4 {
+        Style::default().fg(Color::Green)
+    } else if dsq_depth <= 10 {
+        Style::default().fg(Color::Yellow)
     } else {
-        String::new()
+        Style::default().fg(Color::LightRed)
     };
+    let runtime_panel = Paragraph::new(vec![
+        Line::from(vec![
+            dashboard_label("Topology "),
+            dashboard_value(topo_flags, Style::default().fg(Color::Cyan)),
+            dashboard_sep("  "),
+            dashboard_label("Uptime "),
+            dashboard_value(app.format_uptime(), Style::default().fg(Color::LightCyan)),
+        ]),
+        Line::from(vec![
+            dashboard_label("Tracked tasks "),
+            dashboard_value(
+                app.bpf_task_count.to_string(),
+                Style::default().fg(Color::Green),
+            ),
+            dashboard_sep("  "),
+            dashboard_label("Arena "),
+            dashboard_value(
+                app.arena_active.to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+            dashboard_sep("  "),
+            dashboard_label("View "),
+            dashboard_value(
+                app.task_filter.label(),
+                Style::default().fg(Color::LightMagenta),
+            ),
+        ]),
+        Line::from({
+            let mut spans = vec![
+                dashboard_label("Queue depth "),
+                dashboard_value(dsq_depth.to_string(), queue_style),
+                dashboard_sep("  "),
+                dashboard_label("PELT bands "),
+                dashboard_value(
+                    format!("idle {}", wc0),
+                    Style::default().fg(Color::LightCyan),
+                ),
+                dashboard_sep("  "),
+                dashboard_value(format!("light {}", wc1), Style::default().fg(Color::Green)),
+                dashboard_sep("  "),
+                dashboard_value(format!("busy {}", wc2), Style::default().fg(Color::Yellow)),
+                dashboard_sep("  "),
+                dashboard_value(format!("hot {}", wc3), Style::default().fg(Color::LightRed)),
+            ];
+            if stats.nr_dropped_allocations > 0 {
+                spans.push(dashboard_sep("  "));
+                spans.push(dashboard_label("ENOMEM "));
+                spans.push(dashboard_value(
+                    stats.nr_dropped_allocations.to_string(),
+                    Style::default().fg(Color::LightRed),
+                ));
+            }
+            spans
+        }),
+    ])
+    .style(Style::default().fg(Color::Gray))
+    .block(dashboard_block("Runtime", Color::Cyan))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(runtime_panel, summary_top[0]);
 
-    // CPU frequency from sysfs (best-effort, CPU 0 as representative)
-    let cpu_freq_str =
-        std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .map(|khz| format!(" {:.1}GHz", khz as f64 / 1_000_000.0))
-            .unwrap_or_default();
+    let dispatch_panel = Paragraph::new(vec![
+        Line::from(vec![
+            dashboard_label("Dispatches "),
+            dashboard_value(
+                total_dsq_dispatches.to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+            dashboard_sep("  "),
+            dashboard_label("local / steal / miss "),
+            dashboard_value(
+                format!(
+                    "{} / {} / {}",
+                    stats.nr_local_dispatches, stats.nr_stolen_dispatches, stats.nr_dispatch_misses
+                ),
+                Style::default().fg(Color::LightCyan),
+            ),
+        ]),
+        Line::from(vec![
+            dashboard_label("Wake routing direct / busy / queued "),
+            dashboard_value(
+                format!(
+                    "{:.0}% / {:.0}% / {:.0}%",
+                    pct(stats.nr_wakeup_direct_dispatches, wake_total),
+                    pct(stats.nr_wakeup_dsq_fallback_busy, wake_total),
+                    pct(stats.nr_wakeup_dsq_fallback_queued, wake_total)
+                ),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(vec![
+            dashboard_label("Path share "),
+            dashboard_value(
+                format!("home {:.0}%", pct(stats.select_path_count[1], path_total)),
+                Style::default().fg(Color::Green),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!("idle {:.0}%", pct(stats.select_path_count[4], path_total)),
+                Style::default().fg(Color::Cyan),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!("tunnel {:.0}%", pct(stats.select_path_count[5], path_total)),
+                Style::default().fg(Color::LightRed),
+            ),
+        ]),
+    ])
+    .style(Style::default().fg(Color::Gray))
+    .block(dashboard_block("Dispatch", Color::Yellow))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(dispatch_panel, summary_top[1]);
 
-    // Line 1: CPU | DSQ dispatches | Tier Distribution
-    let line1 = format!(
-        " CPU: {}{}  │  DSQ Dispatches: {}  │  Tiers: T0:{} T1:{} T2:{} T3:{}  │  {}{}",
-        topo_flags,
-        cpu_freq_str,
-        total_dsq_dispatches,
-        wc0,
-        wc1,
-        wc2,
-        wc3,
-        app.format_uptime(),
-        drop_warn,
+    let select_avg = avg_ns(stats.total_select_cpu_ns, stats.nr_select_cpu_calls);
+    let enqueue_avg = avg_ns(stats.total_enqueue_latency_ns, stats.nr_enqueue_calls);
+    let running_avg = avg_ns(stats.total_running_ns, stats.nr_running_calls);
+    let stopping_avg = avg_ns(stats.total_stopping_ns, stats.nr_stopping_calls);
+    let dir_wait_us = bucket_avg_us(
+        stats.wake_reason_wait_ns[1],
+        stats.wake_reason_wait_count[1],
     );
-
-    // Line 2: Dispatch locality | Queue depth | Tasks | Filter
-    let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
-    let _filter_label = app.task_filter.label();
-
-    // Queue depth warning: if tasks are piling up, fallback pressure is rising
-    let queue_str = if dsq_depth > 10 {
-        format!("⚠ Queue:{}", dsq_depth)
-    } else {
-        format!("Queue:{}", dsq_depth)
-    };
-
-    let line2 = format!(
-        " Dispatch: Local:{} Steal:{} Miss:{}  │  {}  │  Wake: Dir:{} Busy:{} Queued:{}  │  Flow: Tunnel:{} Handoff:{} Supp:{}  │  Steer: E:{} H:{} C:{} P:{} M:{}/{}/{}",
-        stats.nr_local_dispatches,
-        stats.nr_stolen_dispatches,
-        stats.nr_dispatch_misses,
-        queue_str,
-        stats.nr_wakeup_direct_dispatches,
-        stats.nr_wakeup_dsq_fallback_busy,
-        stats.nr_wakeup_dsq_fallback_queued,
-        stats.nr_prev_cpu_tunnels,
-        stats.nr_busy_handoff_dispatches,
-        stats.nr_busy_keep_suppressed,
-        stats.nr_steer_eligible,
-        stats.nr_home_cpu_steers,
-        stats.nr_home_core_steers,
-        stats.nr_primary_cpu_steers,
-        stats.nr_home_cpu_busy_misses,
-        stats.nr_prev_primary_busy_misses,
-        stats.nr_primary_scan_misses,
+    let busy_wait_us = bucket_avg_us(
+        stats.wake_reason_wait_ns[2],
+        stats.wake_reason_wait_count[2],
     );
-
-    let line3 = format!(
-        " State: IDLE | detector disabled  │  C2C idle={} pend={} set={}/{} clr={}/{}",
-        stats.nr_idle_hint_remote_reads,
-        stats.nr_busy_pending_remote_sets,
-        stats.nr_idle_hint_set_writes,
-        stats.nr_idle_hint_set_skips,
-        stats.nr_idle_hint_clear_writes,
-        stats.nr_idle_hint_clear_skips,
+    let queue_wait_us = bucket_avg_us(
+        stats.wake_reason_wait_ns[3],
+        stats.wake_reason_wait_count[3],
     );
+    let timing_panel = Paragraph::new(vec![
+        Line::from(vec![
+            dashboard_label("Callback avg "),
+            dashboard_value(
+                format!("select {}ns", select_avg),
+                low_is_good_style(select_avg, 1_000, 5_000),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!("enqueue {}ns", enqueue_avg),
+                low_is_good_style(enqueue_avg, 1_000, 5_000),
+            ),
+        ]),
+        Line::from(vec![
+            dashboard_label("Callback avg "),
+            dashboard_value(
+                format!("running {}ns", running_avg),
+                low_is_good_style(running_avg, 1_000, 5_000),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!("stopping {}ns", stopping_avg),
+                low_is_good_style(stopping_avg, 1_000, 5_000),
+            ),
+        ]),
+        Line::from(vec![
+            dashboard_label("Wake wait avg "),
+            dashboard_value(
+                format!("direct {}us", dir_wait_us),
+                low_is_good_style(dir_wait_us, 10, 100),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!("busy {}us", busy_wait_us),
+                low_is_good_style(busy_wait_us, 10, 100),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!("queue {}us", queue_wait_us),
+                low_is_good_style(queue_wait_us, 10, 100),
+            ),
+        ]),
+    ])
+    .style(Style::default().fg(Color::Gray))
+    .block(dashboard_block("Timing", Color::Green))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(timing_panel, summary_bottom[0]);
 
-    let header_text = format!("{}\n{}\n{}", line1, line2, line3);
-
-    let header_border_color = if stats.nr_dropped_allocations > 0 {
-        Color::Red
-    } else {
-        Color::Blue
-    };
-
-    let header = Paragraph::new(header_text).block(
-        Block::default()
-            .title(" scx_cake Dashboard ")
-            .title_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(header_border_color)),
-    );
-    frame.render_widget(header, outer_layout[0]);
+    let health_panel = Paragraph::new(vec![
+        Line::from(vec![
+            dashboard_label("Quantum outcome "),
+            dashboard_value(
+                format!("full {:.0}%", pct(stats.nr_quantum_full, quantum_total)),
+                Style::default().fg(Color::Green),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!("yield {:.0}%", pct(stats.nr_quantum_yield, quantum_total)),
+                Style::default().fg(Color::Yellow),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!(
+                    "preempt {:.0}%",
+                    pct(stats.nr_quantum_preempt, quantum_total)
+                ),
+                Style::default().fg(Color::LightRed),
+            ),
+        ]),
+        Line::from(vec![
+            dashboard_label("Kick-to-run avg "),
+            dashboard_value(
+                format!(
+                    "idle {}us",
+                    bucket_avg_us(
+                        stats.total_wake_kick_to_run_ns[1],
+                        stats.nr_wake_kick_observed[1]
+                    )
+                ),
+                low_is_good_style(
+                    bucket_avg_us(
+                        stats.total_wake_kick_to_run_ns[1],
+                        stats.nr_wake_kick_observed[1],
+                    ),
+                    10,
+                    100,
+                ),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!(
+                    "preempt {}us",
+                    bucket_avg_us(
+                        stats.total_wake_kick_to_run_ns[2],
+                        stats.nr_wake_kick_observed[2]
+                    )
+                ),
+                low_is_good_style(
+                    bucket_avg_us(
+                        stats.total_wake_kick_to_run_ns[2],
+                        stats.nr_wake_kick_observed[2],
+                    ),
+                    10,
+                    100,
+                ),
+            ),
+        ]),
+        Line::from(vec![
+            dashboard_label("Target hit / miss "),
+            dashboard_value(
+                format!(
+                    "direct {}/{}",
+                    stats.wake_target_hit_count[1], stats.wake_target_miss_count[1]
+                ),
+                Style::default().fg(Color::Cyan),
+            ),
+            dashboard_sep("  "),
+            dashboard_value(
+                format!(
+                    "busy {}/{}",
+                    stats.wake_target_hit_count[2], stats.wake_target_miss_count[2]
+                ),
+                Style::default().fg(Color::LightMagenta),
+            ),
+        ]),
+    ])
+    .style(Style::default().fg(Color::Gray))
+    .block(dashboard_block("Lifecycle", Color::LightMagenta))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(health_panel, summary_bottom[1]);
 
     // --- PELT Utilization Tier Panel ---
     // Aggregate by fixed PELT bands for display only.
@@ -3091,46 +4564,47 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
 
     let total_runs_sec: f64 = tier_runs_per_sec.iter().sum();
 
-    // Split tier row into two side-by-side panels
-    let tier_cols = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(outer_layout[1]);
+    let analysis_layout =
+        Layout::horizontal([Constraint::Percentage(56), Constraint::Percentage(44)])
+            .split(outer_layout[1]);
+    let analysis_right =
+        Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).split(analysis_layout[1]);
 
-    // ── Left: PELT Utilization Tiers ──
-    let tier_names = ["P0 <5%", "P1 5-25%", "P2 25-78%", "P3 >=78%"];
+    let tier_names = ["Idle <5%", "Light 5-25%", "Busy 25-78%", "Hot >=78%"];
     let tier_colors = [Color::LightCyan, Color::Green, Color::Yellow, Color::Red];
 
     let tier_header = Row::new(vec![
-        Cell::from("PELT").style(
+        Cell::from("Band").style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("PIDs").style(
+        Cell::from("Tasks").style(
             Style::default()
-                .fg(Color::White)
+                .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("AVG PELT").style(
+        Cell::from("Avg util").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("JIT µs").style(
+        Cell::from("Jitter").style(
             Style::default()
                 .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("LASTW µs").style(
+        Cell::from("Last wait").style(
             Style::default()
                 .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("RUNS/s").style(
+        Cell::from("Runs/s").style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("WORK%").style(
+        Cell::from("Work %").style(
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -3156,12 +4630,13 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                         .fg(tier_colors[t])
                         .add_modifier(Modifier::BOLD),
                 ),
-                Cell::from(format!("{}", tier_pids[t])),
-                Cell::from(format!("{}", avg_rt)),
+                Cell::from(format!("{}", tier_pids[t])).style(Style::default().fg(Color::Gray)),
+                Cell::from(format!("{}", avg_rt)).style(Style::default().fg(Color::Cyan)),
                 Cell::from(format!("{} µs", avg_jit)).style(low_is_good_style(avg_jit, 10, 100)),
                 Cell::from(format!("{}", avg_wait)).style(low_is_good_style(avg_wait, 10, 100)),
-                Cell::from(format!("{:.1}", tier_runs_per_sec[t])),
-                Cell::from(format!("{:.1}%", work_pct)),
+                Cell::from(format!("{:.1}", tier_runs_per_sec[t]))
+                    .style(Style::default().fg(Color::Green)),
+                Cell::from(format!("{:.1}%", work_pct)).style(Style::default().fg(Color::Magenta)),
             ])
         })
         .collect();
@@ -3169,33 +4644,22 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     let tier_table = Table::new(
         tier_rows,
         [
-            Constraint::Length(15), // TIER
-            Constraint::Length(6),  // PIDs
-            Constraint::Length(10), // AVG PELT
-            Constraint::Length(10), // JIT µs
-            Constraint::Length(10), // LASTW µs
+            Constraint::Length(15), // Band
+            Constraint::Length(6),  // Tasks
+            Constraint::Length(10), // Avg util
+            Constraint::Length(10), // Jitter
+            Constraint::Length(10), // Last wait
             Constraint::Length(9),  // RUNS/s
-            Constraint::Length(7),  // WORK%
+            Constraint::Length(7),  // Work %
         ],
     )
     .header(tier_header)
-    .block(
-        Block::default()
-            .title(" PELT Utilization Tiers ")
-            .title_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .border_type(BorderType::Rounded),
-    );
-    frame.render_widget(tier_table, tier_cols[0]);
+    .block(dashboard_block("PELT Utilization Bands", Color::Yellow));
+    frame.render_widget(tier_table, analysis_layout[0]);
 
     let wakewait_line = {
         let mut parts = Vec::new();
-        for (idx, label) in ["dir", "busy", "queue"].iter().enumerate() {
+        for (idx, label) in ["direct", "busy", "queued"].iter().enumerate() {
             let count = stats.wake_reason_wait_count[idx + 1];
             let avg_us = if count > 0 {
                 stats.wake_reason_wait_ns[idx + 1] / count / 1000
@@ -3205,120 +4669,123 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             let max_us = stats.wake_reason_wait_max_ns[idx + 1] / 1000;
             parts.push(format!("{} {}/{}us ({})", label, avg_us, max_us, count));
         }
-        format!("Wake<5ms: {}", parts.join("  "))
+        parts.join("  ")
     };
-    let callback_line = format!(
-        "CB Hist: sel[{}] enq[{}] disp[{}] run[{}] stop[{}]",
-        callback_hist_summary(stats, 0),
-        callback_hist_summary(stats, 1),
-        callback_hist_summary(stats, 2),
-        callback_hist_summary(stats, 3),
-        callback_hist_summary(stats, 4),
+    let minute_lines = summarize_timeline_samples(
+        &minute_samples,
+        expected_timeline_samples(minute_window, minute_step),
+    )
+        .map(|lines| lines.into_iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| {
+            vec![
+                Line::from(vec![
+                    dashboard_label("Runs/s "),
+                    dashboard_note("collecting samples"),
+                ]),
+                Line::from(vec![
+                    dashboard_label("Callback avg "),
+                    dashboard_note("waiting for enough history"),
+                ]),
+                Line::from(vec![
+                    dashboard_label("Path share "),
+                    dashboard_note("waiting for enough history"),
+                ]),
+            ]
+        });
+    let minute_panel = Paragraph::new(minute_lines)
+        .style(Style::default().fg(Color::Gray))
+        .block(dashboard_block("Last 60s @1s Samples", Color::Cyan))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(minute_panel, analysis_right[0]);
+
+    let target_line = format!(
+        "postwake target hit/miss {}  follow same/mig {}",
+        format_wake_target_summary(&stats.wake_target_hit_count, &stats.wake_target_miss_count),
+        format_wake_followup_summary(
+            &stats.wake_followup_same_cpu_count,
+            &stats.wake_followup_migrate_count,
+        )
+    );
+    let slice_line = format!(
+        "full={} ({:.1}%) yield={} ({:.1}%) preempt={} ({:.1}%) wake_kick i/p={}/{} affine i/p={}/{}",
+        stats.nr_quantum_full,
+        pct(stats.nr_quantum_full, quantum_total),
+        stats.nr_quantum_yield,
+        pct(stats.nr_quantum_yield, quantum_total),
+        stats.nr_quantum_preempt,
+        pct(stats.nr_quantum_preempt, quantum_total),
+        stats.nr_wake_kick_idle,
+        stats.nr_wake_kick_preempt,
+        stats.nr_affine_kick_idle,
+        stats.nr_affine_kick_preempt,
+    );
+    let kick_line = format!(
+        "idle {}/{} avg={}us max={}us  preempt {}/{} avg={}us max={}us bins {}",
+        stats.nr_wake_kick_quick[1],
+        stats.nr_wake_kick_observed[1],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[1],
+            stats.nr_wake_kick_observed[1]
+        ),
+        stats.max_wake_kick_to_run_ns[1] / 1000,
+        stats.nr_wake_kick_quick[2],
+        stats.nr_wake_kick_observed[2],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[2],
+            stats.nr_wake_kick_observed[2]
+        ),
+        stats.max_wake_kick_to_run_ns[2] / 1000,
+        format_kick_bucket_summary(&stats.wake_kick_bucket_count),
     );
     let place_path_line = format!(
-        "Placement: path[{}] deps same/cross={}/{}",
+        "path[{}] deps same/cross={}/{}",
         format_path_summary(&stats.select_path_count),
         stats.nr_wake_same_tgid,
         stats.nr_wake_cross_tgid,
     );
-    let place_cost_line = format!(
-        "WarmCost: home[{}] run[{}] waker[{}]",
-        format_place_wait_summary(
-            &stats.home_place_wait_ns,
-            &stats.home_place_wait_count,
-            &stats.home_place_wait_max_ns,
-        ),
-        format_place_wait_summary(
-            &stats.home_place_run_ns,
-            &stats.home_place_run_count,
-            &stats.home_place_run_max_ns,
-        ),
-        format_place_wait_summary(
-            &stats.waker_place_wait_ns,
-            &stats.waker_place_wait_count,
-            &stats.waker_place_wait_max_ns,
-        ),
-    );
-    let coh_line = format!(
-        "Coherency: idle_remote={} busy={} idle={} pend_remote={}",
-        stats.nr_idle_hint_remote_reads,
-        stats.nr_idle_hint_remote_busy,
-        stats.nr_idle_hint_remote_idle,
-        stats.nr_busy_pending_remote_sets,
-    );
-    let bypass_line = format!(
-        "Bypass: requeue={} busy_local={} busy_remote={} pend_skip={}",
-        stats.nr_enqueue_requeue_fastpath,
-        stats.nr_enqueue_busy_local_skip_depth,
-        stats.nr_enqueue_busy_remote_skip_depth,
-        stats.nr_busy_pending_set_skips,
-    );
-    let steer_line = format!(
-        "Steering: home_hits={} primary_hits={}",
-        stats.nr_home_cpu_steers, stats.nr_primary_cpu_steers,
-    );
-    let capacity_line = format!(
-        "Capacity: hard={} soft={} build={} shared_cores={} build_shared={} hard_smt={} hard_scatter={} focus_scatter={}",
-        cap.hard_latency_tasks,
-        cap.soft_latency_tasks,
-        cap.build_tasks,
-        cap.shared_top_cores,
-        cap.build_shared_tasks,
-        cap.hard_latency_smt_heavy,
-        cap.hard_latency_scattered,
-        cap.focus_scattered,
-    );
-    let role_line = format!(
-        "Roles: game={} render={} ui={} audio={} build={} kcritical={}",
-        cap.game_tasks,
-        cap.render_tasks,
-        cap.ui_tasks,
-        cap.audio_tasks,
-        cap.build_tasks,
-        cap.critical_tasks,
-    );
-    let write_line = format!(
-        "idle_hint writes/skips: set {}/{}  clear {}/{}",
-        stats.nr_idle_hint_set_writes,
-        stats.nr_idle_hint_set_skips,
-        stats.nr_idle_hint_clear_writes,
-        stats.nr_idle_hint_clear_skips,
-    );
-    let mut debug_lines = vec![
-        Line::from(wakewait_line),
-        Line::from(callback_line),
-        Line::from(place_path_line),
-        Line::from(place_cost_line),
-        Line::from(coh_line),
-        Line::from(bypass_line),
-        Line::from(steer_line),
-        Line::from(capacity_line),
-        Line::from(role_line),
-        Line::from(write_line),
+    let mut signal_lines = vec![
+        Line::from(vec![
+            dashboard_label("Wake wait (<5ms) "),
+            dashboard_value(wakewait_line, Style::default().fg(Color::LightCyan)),
+        ]),
+        Line::from(vec![
+            dashboard_label("Target accuracy "),
+            dashboard_value(target_line, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            dashboard_label("Kick to run "),
+            dashboard_value(kick_line, Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
+            dashboard_label("Placement paths "),
+            dashboard_value(place_path_line, Style::default().fg(Color::LightMagenta)),
+        ]),
+        Line::from(vec![
+            dashboard_label("Quantum outcomes "),
+            dashboard_value(slice_line, Style::default().fg(Color::Green)),
+        ]),
     ];
     if !app.debug_events.is_empty() {
-        debug_lines.push(Line::from("Recent events:"));
-        for ev in app.debug_events.iter().take(3) {
-            debug_lines.push(Line::from(format!("  {}", debug_event_label(ev))));
+        if let Some(ev) = app.debug_events.front() {
+            signal_lines.push(Line::from(vec![
+                dashboard_label("Latest event "),
+                dashboard_value(debug_event_label(ev), Style::default().fg(Color::LightRed)),
+            ]));
         }
     } else {
-        debug_lines.push(Line::from("Recent events: none"));
+        signal_lines.push(Line::from(vec![
+            dashboard_label("Latest event "),
+            dashboard_note("none"),
+        ]));
     }
-    let debug_panel = Paragraph::new(debug_lines)
-        .block(
-            Block::default()
-                .title(" Scheduler Signals ")
-                .title_style(
-                    Style::default()
-                        .fg(Color::LightMagenta)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .border_type(BorderType::Rounded),
-        )
+    let debug_panel = Paragraph::new(signal_lines)
+        .style(Style::default().fg(Color::Gray))
+        .block(dashboard_block(
+            "Scheduler Signals & Outliers",
+            Color::LightMagenta,
+        ))
         .wrap(Wrap { trim: false });
-    frame.render_widget(debug_panel, tier_cols[1]);
+    frame.render_widget(debug_panel, analysis_right[1]);
 
     let matrix_header = Row::new(vec![
         // ── Identity (DarkGray = secondary, Yellow = primary key) ──
@@ -3334,7 +4801,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         ),
         Cell::from("ST").style(
             Style::default()
-                .fg(Color::White)
+                .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("COMM").style(
@@ -3483,7 +4950,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
                 );
                 let header_cells = vec![Cell::from(header_text).style(
                     Style::default()
-                        .fg(Color::White)
+                        .fg(Color::LightBlue)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 )];
                 matrix_rows.push(Row::new(header_cells).height(1));
@@ -3512,12 +4979,13 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             low_is_good_style(row.dispatch_gap_us, 50, 500)
         };
         let cells = vec![
-            Cell::from(format!("{}{}", indent, row.ppid)),
-            Cell::from(format!("{}", row.pid)),
+            Cell::from(format!("{}{}", indent, row.ppid))
+                .style(Style::default().fg(Color::DarkGray)),
+            Cell::from(format!("{}", row.pid)).style(Style::default().fg(Color::Yellow)),
             Cell::from(row.status.short_label()).style(Style::default().fg(row.status.color())),
             Cell::from(row.comm.as_str()).style(Style::default().fg(role.color())),
             Cell::from(class_label(row)).style(Style::default().fg(class_color(row))),
-            Cell::from(format!("{}", row.pelt_util)),
+            Cell::from(format!("{}", row.pelt_util)).style(Style::default().fg(Color::Cyan)),
             Cell::from(display_runtime_us(row.max_runtime_us)).style(low_is_good_style(
                 row.max_runtime_us as u64,
                 500,
@@ -3526,8 +4994,9 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             Cell::from(display_gap_us(row.dispatch_gap_us)).style(gap_style),
             Cell::from(format!("{}", jitter_us)).style(low_is_good_style(jitter_us, 10, 100)),
             Cell::from(format!("{}", last_wait_us)).style(low_is_good_style(last_wait_us, 10, 100)),
-            Cell::from(format!("{:.1}", row.runs_per_sec)),
-            Cell::from(format!("C{:02}", row.core_placement)),
+            Cell::from(format!("{:.1}", row.runs_per_sec)).style(Style::default().fg(Color::Green)),
+            Cell::from(format!("C{:02}", row.core_placement))
+                .style(Style::default().fg(Color::Magenta)),
             Cell::from(placement_spread_label(&placement)).style(spread_style(
                 placement.active_cpu_count,
                 placement.active_core_count,
@@ -3589,6 +5058,12 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         matrix_rows.push(Row::new(cells).height(1));
     }
     let filter_label = app.task_filter.label();
+    let matrix_title = format!(
+        "Live Task Matrix  [{}]  rows={}  tracked={}  legend in Reference",
+        filter_label,
+        app.sorted_pids.len(),
+        app.bpf_task_count
+    );
 
     let matrix_table = Table::new(
         matrix_rows,
@@ -3619,15 +5094,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         ],
     )
     .header(matrix_header)
-    .block(
-        Block::default()
-            .title(format!(
-                " Live Task Matrix (PELT raw 0-1024 │ latency: µs │ callbacks: ns │ placement sampled) [{}] ",
-                filter_label
-            ))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue)),
-    )
+    .block(dashboard_block(&matrix_title, Color::Blue))
     .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
     .highlight_symbol(">> ");
 
@@ -3638,17 +5105,35 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
 fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
     let nr_cpus = app.latency_matrix.len();
     let heatmap_min_width = (6 + nr_cpus * 2 + 4) as u16;
-    let data_min_width = (5 + nr_cpus * 3 + 4) as u16;
+    let cpu_work_window = app.cpu_work_window(Duration::from_secs(60));
+    let (work_elapsed, cpu_work, work_label) = if let Some((elapsed, window)) = cpu_work_window {
+        (elapsed, window, format!("Cake share {}s", elapsed.as_secs()))
+    } else {
+        (
+            app.start_time.elapsed().max(Duration::from_secs(1)),
+            app.per_cpu_work.clone(),
+            "Cake share lifetime".to_string(),
+        )
+    };
+    let cpu_rows = scheduler_cpu_rows(&cpu_work, &app.topology, &app.cpu_stats, work_elapsed);
+    let core_rows = scheduler_core_rows(&cpu_work, &app.topology, &app.cpu_stats, work_elapsed);
+    let scheduler_share = scheduler_share_by_cpu(&cpu_work);
+    let right_min_width = 68u16;
 
     let layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(22),
             Constraint::Min(heatmap_min_width),
-            Constraint::Min(data_min_width),
+            Constraint::Min(right_min_width),
         ])
         .split(area);
-    let topology_grid = build_cpu_topology_grid_compact(&app.topology, &app.cpu_stats);
+    let topology_grid = build_cpu_topology_grid_compact(
+        &app.topology,
+        &app.cpu_stats,
+        &scheduler_share,
+        &work_label,
+    );
     frame.render_widget(topology_grid, layout[0]);
 
     // Dynamic heatmap title based on benchmark state
@@ -3666,8 +5151,28 @@ fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
     let heatmap = LatencyHeatmap::new(&app.latency_matrix, &app.topology, &heatmap_title);
     frame.render_widget(heatmap, layout[1]);
 
-    let data_table = LatencyTable::new(&app.latency_matrix, &app.topology);
-    frame.render_widget(data_table, layout[2]);
+    let right_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(layout[2]);
+    let cpu_title = format!(
+        "Scheduler CPU Work ({:.0}s, skew {:.1}x)",
+        work_elapsed.as_secs_f64(),
+        scheduler_balance_ratio(&cpu_work)
+    );
+    let core_title = format!("Scheduler Core Balance ({:.0}s)", work_elapsed.as_secs_f64());
+    let cpu_table = build_scheduler_cpu_table(
+        &cpu_rows,
+        &cpu_title,
+        right_layout[0].height.saturating_sub(3) as usize,
+    );
+    let core_table = build_scheduler_core_table(
+        &core_rows,
+        &core_title,
+        right_layout[1].height.saturating_sub(3) as usize,
+    );
+    frame.render_widget(cpu_table, right_layout[0]);
+    frame.render_widget(core_table, right_layout[1]);
 }
 
 fn draw_reference_tab(frame: &mut Frame, area: Rect) {
@@ -3823,7 +5328,10 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         ),
         col("SMT%", "Sampled residency on SMT secondary threads"),
         col("scope", "Lifetime totals plus rolling 30s/60s windows"),
-        col("cap", "Current hard-latency vs soft UI vs build overlap snapshot"),
+        col(
+            "cap",
+            "Current hard-latency vs soft UI vs build overlap snapshot",
+        ),
         col("roles", "Current live role counts from heuristics"),
         Line::from(""),
         subsection("── Per-Callback Stopwatch (ns) ──"),
@@ -3843,35 +5351,62 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         col("deps", "Wake source counts: same TGID / cross TGID"),
         col("DIRECT", "Direct dispatch count (bypassed DSQ)"),
         col("CLS", "Current cake role: KCR / N- / N0 / N+"),
-        col("SUTIL", "Slice util % (actual_run / slice)"),
+        col(
+            "SUTIL%",
+            "Approx slice occupancy percent from the 128-scale sample; >100 means runtime exceeded slice",
+        ),
         col("LLC", "Last LLC (L3 cache) node"),
         col("STREAK", "Consecutive same-CPU runs (locality)"),
         col("WHIST", "Wait histogram: <10µ/<100µ/<1m/≥1ms"),
-        col("hwait", "Per-task wait by home locality: avg/max/count"),
+        col("hwait<=5ms", "Per-task wait by home locality: avg/max/count"),
         Line::from(""),
-        section("═══ DASHBOARD SIGNALS ═══"),
+        section("═══ DASHBOARD PANELS ═══"),
         Line::from(""),
+        subsection("── Summary Cards ──"),
         col(
-            "Wake<5ms",
-            "Avg/max/count split by direct, busy, queued paths",
+            "Runtime",
+            "Topology, uptime, tracked tasks, queue depth, PELT band counts",
         ),
         col(
-            "CB Hist",
-            "How often callbacks stay <1us/<5us plus slow-call count",
+            "Dispatch",
+            "Dispatch volume, local/steal/miss counts, wake routing, path share",
         ),
         col(
-            "Coherency",
-            "Remote idle_hint reads + pending-flag remote sets",
+            "Timing",
+            "Average select/enqueue/running/stopping callback cost plus wake wait<=5ms",
         ),
         col(
-            "Capacity",
-            "Current hard-latency/build overlap, SMT pressure, scatter",
+            "Lifecycle",
+            "Quantum outcome mix, kick-to-run latency, and post-wake target/follow-up outcomes",
+        ),
+        Line::from(""),
+        subsection("── Analysis Panels ──"),
+        col(
+            "PELT band",
+            "Task counts and averages grouped by idle/light/busy/hot util bands",
         ),
         col(
-            "Roles",
-            "Current mix of build, render, UI, audio, game, kcritical",
+            "Last60s",
+            "1-second samples from the last minute: runs/s, 1% low, callback avg, path share, coverage",
         ),
-        col("Events", "Recent slow callback / wake-wait outliers"),
+        col(
+            "Signals",
+            "Wake waits<=5ms, post-wake target accuracy, kick latency, placement mix, latest anomaly event",
+        ),
+        Line::from(""),
+        subsection("── Topology Tab ──"),
+        col(
+            "Topology",
+            "Per-CPU system load/temperature plus scheduler runtime share over the latest 60s window",
+        ),
+        col(
+            "CPU work",
+            "Per-CPU scheduler distribution: share, runs/s, avg run time, dispatch rate, locality, yield mix",
+        ),
+        col(
+            "Core work",
+            "Per-core balance: combined share, SMT skew, hottest sibling share, average load",
+        ),
         Line::from(""),
         section("═══ KEY BINDINGS ═══"),
         Line::from(""),
@@ -4370,6 +5905,7 @@ pub fn run_tui(
 
         // Get current stats (aggregate from per-cpu BSS array)
         let stats = aggregate_stats(skel);
+        app.per_cpu_work = extract_cpu_work(skel, app.topology.nr_cpus);
 
         // Read bench results from BSS (for BenchLab tab)
         if let Some(bss) = &skel.maps.bss_data {
@@ -4573,7 +6109,7 @@ pub fn run_tui(
                                 .as_secs();
                             let filename = format!("tui_dump_{}.txt", secs);
                             match std::fs::write(&filename, &text) {
-                                Ok(_) => app.set_status(&format!("✓ Dumped to {}", filename)),
+                                Ok(_) => app.set_status(&format!("✓ Dump saved: {}", filename)),
                                 Err(e) => app.set_status(&format!("✗ Dump failed: {}", e)),
                             }
                         }
@@ -4584,6 +6120,10 @@ pub fn run_tui(
                                     *s = Default::default();
                                 }
                                 app.stats_history.clear();
+                                app.cpu_work_history.clear();
+                                app.per_cpu_work
+                                    .iter_mut()
+                                    .for_each(|counter| *counter = CpuWorkCounters::default());
                                 app.set_status("✓ Stats reset");
                             }
                         }
@@ -5190,6 +6730,7 @@ pub fn run_tui(
 
             app.sorted_pids = sorted_pids;
             app.record_stats_snapshot(&stats);
+            app.record_cpu_work_snapshot();
 
             last_tick = Instant::now();
         }

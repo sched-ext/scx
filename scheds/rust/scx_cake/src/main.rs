@@ -36,28 +36,23 @@ const SCHEDULER_NAME: &str = "scx_cake";
 /// Scheduler profile presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Profile {
-    /// Ultra-low-latency for competitive esports (1ms quantum)
+    /// Ultra-low-latency for competitive esports (750us quantum)
     Esports,
-    /// Optimized for older/lower-power hardware (4ms quantum)
-    Legacy,
     /// Low-latency profile optimized for gaming and interactive workloads
     Gaming,
-    /// Balanced profile for general desktop use (same as gaming for now)
-    Default,
-    /// Power-efficient profile for handhelds/laptops on battery
-    Battery,
+    /// Balanced profile for general desktop use
+    Balanced,
+    /// Optimized for older/lower-power hardware (4ms quantum)
+    Legacy,
 }
 
 impl Profile {
     fn quantum_us(&self) -> u64 {
         match self {
-            Profile::Esports => 1000,
+            Profile::Esports => 750,
+            Profile::Gaming => 1000,
+            Profile::Balanced => 2000,
             Profile::Legacy => 4000,
-            Profile::Gaming => 2000,
-            // Default: Same as gaming for now
-            Profile::Default => 2000,
-            // Battery: 4ms quantum — fewer context switches = less power
-            Profile::Battery => 4000,
         }
     }
 
@@ -78,6 +73,7 @@ impl Profile {
 /// EXAMPLES:
 ///   scx_cake                          # Run with gaming profile (default)
 ///   scx_cake -p esports               # Ultra-low-latency for competitive play
+///   scx_cake -p balanced              # Balanced desktop / mixed-use profile
 ///   scx_cake --quantum 1500           # Gaming profile with custom quantum
 ///   scx_cake -v                       # Run with live TUI stats display
 #[derive(Parser, Debug, Clone)]
@@ -95,28 +91,25 @@ struct Args {
     /// profile values.
     ///
     /// ESPORTS: Ultra-low-latency for competitive gaming.
+    ///   - Quantum: 750µs
+    ///
+    /// GAMING: Optimized for low-latency gaming and interactive workloads.
     ///   - Quantum: 1000µs
+    ///
+    /// BALANCED: Balanced profile for general desktop use.
+    ///   - Quantum: 2000µs
     ///
     /// LEGACY: Optimized for older/lower-power hardware.
     ///   - Quantum: 4000µs
-    ///
-    /// GAMING: Optimized for low-latency gaming and interactive workloads.
-    ///   - Quantum: 2000µs
-    ///
-    /// DEFAULT: Balanced profile for general desktop use.
-    ///   - Currently same as gaming; will diverge in future versions
-    ///
-    /// BATTERY: Power-efficient for handhelds/laptops on battery.
-    ///   - Quantum: 4000µs, reduced context switch overhead
     #[arg(long, short, value_enum, default_value_t = Profile::Gaming, verbatim_doc_comment)]
     profile: Profile,
 
-    /// Base scheduling time slice in MICROSECONDS [default: 2000].
+    /// Base scheduling time slice in MICROSECONDS [default: 1000].
     ///
     /// How long a task runs before potentially yielding.
     ///
     /// Smaller quantum = more responsive but higher overhead.
-    /// Esports: 1000µs | Gaming: 2000µs | Legacy: 4000µs
+    /// Esports: 750µs | Gaming: 1000µs | Balanced: 2000µs | Legacy: 4000µs
     /// Recommended range: 1000-8000µs
     #[arg(long, verbatim_doc_comment)]
     quantum: Option<u64>,
