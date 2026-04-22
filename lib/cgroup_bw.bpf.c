@@ -2707,9 +2707,17 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 		return 0;
 
 	if ((ret = scx_cgroup_bw_cancel(taskc))) {
-		cbw_err("Fail to cancel a throttled task (%s:%d) from a cgroup (cgid%llu): %d",
+		/*
+		 * Lock contention: the BTQ spinlock timed out. The task
+		 * remains in the old BTQ and will be re-enqueued naturally
+		 * when that BTQ drains at the next replenishment. Because the
+		 * caller (e.g., lavd_cgroup_move) updates taskc->cgrp_id to
+		 * @to before calling this function, the drain callback will
+		 * check throttle against the new cgroup. Not fatal.
+		 */
+		cbw_dbg("Failed to cancel task (%s:%d) from cgid%llu during move: %d, will drain naturally",
 			p->comm, p->pid, cgroup_get_id(from), ret);
-		return ret;
+		return 0;
 	}
 
 	if ((ret = scx_cgroup_bw_put_aside(p, taskc, p->scx.dsq_vtime, cgroup_get_id(to)))) {
