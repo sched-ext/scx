@@ -309,7 +309,12 @@ impl CellManager {
                 if self.should_exclude(&path) {
                     continue;
                 }
-                let cgid = path.metadata()?.ino();
+                let cgid = path
+                    .metadata()
+                    .with_context(|| {
+                        format!("reading inode of cgroup directory {}", path.display())
+                    })?
+                    .ino();
                 let (cgid, cell_id) =
                     self.create_cell_for_cgroup(&path, cgid).with_context(|| {
                         format!("Failed to create cell for cgroup: {}", path.display())
@@ -418,7 +423,10 @@ impl CellManager {
 
         // Find new cgroups that we don't have cells for
         for path in current_paths {
-            let cgid = path.metadata()?.ino();
+            let cgid = path
+                .metadata()
+                .with_context(|| format!("reading inode of cgroup directory {}", path.display()))?
+                .ino();
             if self.cells.contains_key(&cgid) {
                 continue; // Already have a cell for this cgroup
             }
@@ -432,9 +440,10 @@ impl CellManager {
     }
 
     fn create_cell_for_cgroup(&mut self, path: &Path, cgid: u64) -> Result<(u64, u32)> {
-        let cell_id = self.allocate_cell_id()?;
+        let cell_id = self.allocate_cell_id().context("allocating cell ID")?;
 
-        let cpuset = Self::read_cpuset(path)?;
+        let cpuset = Self::read_cpuset(path)
+            .with_context(|| format!("reading cpuset for cgroup {}", path.display()))?;
         if let Some(ref mask) = cpuset {
             debug!(
                 "Cell {} has cpuset: {} (from {})",
@@ -597,10 +606,12 @@ impl CellManager {
                 };
                 Ok((info.cell_id, weight))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()
+            .context("building cell demand weights map")?;
         all_cells_with_weights.sort_by_key(|(cell_id, _)| *cell_id);
 
-        let targets = compute_targets(total_cpu_count, &all_cells_with_weights)?;
+        let targets = compute_targets(total_cpu_count, &all_cells_with_weights)
+            .context("computing per-cell CPU targets")?;
 
         // Seed assigned_count from exclusive assignments
         let mut assigned_count: HashMap<u32, usize> = HashMap::new();
@@ -661,7 +672,8 @@ impl CellManager {
                 recipients = claimants.iter().map(|&cell_id| (cell_id, 1.0)).collect();
             }
 
-            let distribution = distribute_cpus_proportional(&cpus, &recipients)?;
+            let distribution = distribute_cpus_proportional(&cpus, &recipients)
+                .context("distributing contested CPUs among claimants")?;
             for (cell_id, assigned_cpus) in distribution {
                 let count = assigned_cpus.len();
                 for cpu in assigned_cpus {
@@ -712,7 +724,8 @@ impl CellManager {
                     .collect();
             }
 
-            let distribution = distribute_cpus_proportional(&unclaimed_cpus, &recipients)?;
+            let distribution = distribute_cpus_proportional(&unclaimed_cpus, &recipients)
+                .context("distributing unclaimed CPUs among unpinned cells")?;
             for (cell_id, assigned_cpus) in distribution {
                 let count = assigned_cpus.len();
                 for cpu in assigned_cpus {
@@ -823,7 +836,8 @@ impl CellManager {
             let Some(ref cgroup_path) = info.cgroup_path else {
                 continue; // cell 0 has no cgroup
             };
-            let new_cpuset = Self::read_cpuset(cgroup_path)?;
+            let new_cpuset = Self::read_cpuset(cgroup_path)
+                .with_context(|| format!("reading cpuset for cgroup {}", cgroup_path.display()))?;
             if new_cpuset != info.cpuset {
                 info!(
                     "Cell {} cpuset changed: {:?} -> {:?} ({})",
@@ -878,6 +892,7 @@ impl CellManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
