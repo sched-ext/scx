@@ -56,8 +56,11 @@ enum scx_cgroup_consts {
 	CBW_RUNTUME_INF			= ((s64)~((u64)1 << 63)),
 	/* maximum number of re-enqueue tasks in one dispatch */
 	CBW_REENQ_MAX_BATCH		= 2,
-	/* size of the deferred BTQ destroy queue */
-	CBW_DEFERRED_BTQ_SIZE		= 256,
+	/*
+	 * Size of the deferred BTQ destroy queue.
+	 * CBW_NR_CGRP_LLC_MAX * 2 = 131072 slots, 1024 KB.
+	 */
+	CBW_DEFERRED_BTQ_SIZE		= (CBW_NR_CGRP_LLC_MAX * 2),
 };
 
 /*
