@@ -74,7 +74,17 @@ enum scx_cgroup_consts {
 	CBW_PRESSURE_BUDGET_KNEE	= 256,
 	CBW_PRESSURE_BACKLOG_STEP	= 128,
 	CBW_PRESSURE_BACKLOG_CAP	= 128,
+	/*
+	 * Shift used to split the 64-bit BTQ key evenly into a wall-clock
+	 * epoch (upper 32 bits) and a scheduler vtime (lower 32 bits).
+	 * Tasks queued in the same ~4-second epoch (2^32 ns ~= 4.29 s)
+	 * compete by their vtime; tasks from an earlier epoch are always
+	 * dispatched first, bounding the maximum BTQ wait to ~4 seconds.
+	 */
+	CBW_BTQ_VTIME_MASK_SHIFT	= 32,
 };
+#define CBW_BTQ_VTIME_LOWER_MASK	((1ULL << CBW_BTQ_VTIME_MASK_SHIFT) - 1ULL)
+#define CBW_BTQ_VTIME_UPPER_MASK	((u64)~CBW_BTQ_VTIME_LOWER_MASK)
 
 /*
  * Root cgroup id.  This is the kernel-level cgroup_id of the
@@ -2548,9 +2558,10 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id)
 {
 	scx_task_common *taskc = (scx_task_common *)ctx;
 	scx_cgroup_llc_ctx_t *llcx;
-	scx_atq_t *btq;
 	scx_atq_t *task_atq;
 	int llc_id, ret;
+	scx_atq_t *btq;
+	u64 btq_vtime;
 
 	/*
 	 * @bill_id is the billing cgroup (the task's nearest managed ancestor),
@@ -2575,6 +2586,17 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id)
 
 	/* A mapped llcx always owns a live BTQ (BTQs are never destroyed). */
 	btq = READ_ONCE(llcx->btq);
+
+	/*
+	 * Build the BTQ sort key by blending the current wall-clock time
+	 * (upper 32 bits) with the scheduler-provided vtime (lower 32 bits).
+	 * Tasks enqueued within the same ~4-second window compete by their
+	 * vtime, preserving relative fairness.  Once the wall-clock epoch
+	 * advances, earlier-queued tasks take priority regardless of vtime,
+	 * guaranteeing forward progress for any task stalled in the BTQ.
+	 */
+	btq_vtime = (scx_bpf_now() & CBW_BTQ_VTIME_UPPER_MASK) |
+		    (vtime & CBW_BTQ_VTIME_LOWER_MASK);
 
 	ret = scx_atq_lock(btq);
 	if (ret) {
@@ -2615,7 +2637,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id)
 		return 0;
 	}
 
-	ret = scx_atq_insert_vtime_unlocked(btq, taskc, vtime);
+	ret = scx_atq_insert_vtime_unlocked(btq, taskc, btq_vtime);
 	scx_atq_unlock(btq);
 
 	if (unlikely(ret == -ECANCELED)) {
