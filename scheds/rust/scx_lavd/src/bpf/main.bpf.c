@@ -1819,6 +1819,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		taskc->svc_time_iwgt = sys_stat.avg_svc_time_iwgt;
 	}
 
+	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
