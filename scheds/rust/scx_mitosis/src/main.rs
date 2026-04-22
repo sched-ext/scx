@@ -326,9 +326,9 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
-        Self::validate_args(opts)?;
+        Self::validate_args(opts).context("validating scheduler options")?;
 
-        let topology = Topology::new()?;
+        let topology = Topology::new().context("detecting system topology")?;
 
         let nr_llc = topology.all_llcs.len().max(1);
 
@@ -343,7 +343,8 @@ impl<'a> Scheduler<'a> {
         );
 
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
-        let mut skel = scx_ops_open!(skel_builder, open_object, mitosis, open_opts)?;
+        let mut skel = scx_ops_open!(skel_builder, open_object, mitosis, open_opts)
+            .context("opening BPF skeleton")?;
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
@@ -400,16 +401,20 @@ impl<'a> Scheduler<'a> {
             &mut skel,
             mitosis_topology_utils::MapKind::CpuToLLC,
             None,
-        )?;
+        )
+        .context("populating CPU-to-LLC topology map")?;
         mitosis_topology_utils::populate_topology_maps(
             &mut skel,
             mitosis_topology_utils::MapKind::LLCToCpus,
             None,
-        )?;
+        )
+        .context("populating LLC-to-CPUs topology map")?;
 
-        let skel = scx_ops_load!(skel, mitosis, uei)?;
+        let skel = scx_ops_load!(skel, mitosis, uei).context("loading BPF skeleton")?;
 
-        let stats_server = StatsServer::new(stats::server_data()).launch()?;
+        let stats_server = StatsServer::new(stats::server_data())
+            .launch()
+            .context("launching stats server")?;
 
         // Initialize CellManager if --cell-parent-cgroup is specified
         if !opts.cell_exclude.is_empty() && opts.cell_parent_cgroup.is_none() {
@@ -433,26 +438,31 @@ impl<'a> Scheduler<'a> {
         };
 
         // Create epoll instance for event-driven main loop
-        let epoll = Epoll::new(EpollCreateFlags::empty())?;
+        let epoll = Epoll::new(EpollCreateFlags::empty()).context("creating epoll instance")?;
 
         // Create eventfd for stats wakeup (non-blocking, semaphore mode)
         let stats_waker = EventFd::from_value_and_flags(
             0,
             nix::sys::eventfd::EfdFlags::EFD_NONBLOCK | nix::sys::eventfd::EfdFlags::EFD_SEMAPHORE,
-        )?;
+        )
+        .context("creating stats-waker eventfd")?;
 
         // Register stats_waker with epoll
-        epoll.add(
-            &stats_waker,
-            EpollEvent::new(EpollFlags::EPOLLIN, STATS_TOKEN),
-        )?;
+        epoll
+            .add(
+                &stats_waker,
+                EpollEvent::new(EpollFlags::EPOLLIN, STATS_TOKEN),
+            )
+            .context("registering stats-waker with epoll")?;
 
         // Register inotify fd if cell_manager exists
         if let Some(ref cell_manager) = cell_manager {
-            epoll.add(
-                cell_manager,
-                EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
-            )?;
+            epoll
+                .add(
+                    cell_manager,
+                    EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
+                )
+                .context("registering cell manager inotify with epoll")?;
         }
 
         Ok(Self {
@@ -482,12 +492,13 @@ impl<'a> Scheduler<'a> {
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        let struct_ops = scx_ops_attach!(self.skel, mitosis)?;
+        let struct_ops = scx_ops_attach!(self.skel, mitosis).context("attaching BPF scheduler")?;
 
         info!("Mitosis Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
 
         // Apply initial cell configuration if CellManager is active
-        self.apply_initial_cells()?;
+        self.apply_initial_cells()
+            .context("applying initial cell configuration")?;
 
         let (res_ch, req_ch) = self
             .stats_server
@@ -498,7 +509,11 @@ impl<'a> Scheduler<'a> {
         // Spawn thread to bridge stats requests to eventfd.
         // The thread exits when the channel closes (stats_server dropped).
         // Clone the eventfd so the thread owns its own handle to the same kernel object.
-        let stats_waker_fd = self.stats_waker.as_fd().try_clone_to_owned()?;
+        let stats_waker_fd = self
+            .stats_waker
+            .as_fd()
+            .try_clone_to_owned()
+            .context("cloning stats-waker fd for bridge thread")?;
         let stats_waker = unsafe { EventFd::from_owned_fd(stats_waker_fd) };
         let stats_bridge = std::thread::spawn(move || {
             while req_ch.recv().is_ok() {
@@ -522,12 +537,15 @@ impl<'a> Scheduler<'a> {
                         match event.data() {
                             INOTIFY_TOKEN => {
                                 // Cgroup event - process immediately
-                                self.process_cell_events()?;
+                                self.process_cell_events()
+                                    .context("processing cell manager events")?;
                             }
                             STATS_TOKEN => {
                                 // Stats request - drain eventfd and send metrics
                                 let _ = self.stats_waker.read();
-                                res_ch.send(self.get_metrics())?;
+                                res_ch
+                                    .send(self.get_metrics())
+                                    .context("sending metrics response")?;
                             }
                             _ => {}
                         }
@@ -538,12 +556,14 @@ impl<'a> Scheduler<'a> {
             }
 
             // Periodic work on every iteration
-            self.refresh_bpf_cells()?;
-            self.check_cpuset_changes()?;
-            self.collect_metrics()?;
+            self.refresh_bpf_cells()
+                .context("refreshing BPF cell state")?;
+            self.check_cpuset_changes()
+                .context("checking cpuset changes")?;
+            self.collect_metrics().context("collecting metrics")?;
 
             if self.enable_rebalancing && self.cell_manager.is_some() {
-                self.maybe_rebalance()?;
+                self.maybe_rebalance().context("running rebalance check")?;
             }
         }
 
@@ -561,7 +581,9 @@ impl<'a> Scheduler<'a> {
             return Ok(());
         }
 
-        let cpu_assignments = self.compute_and_apply_cell_config(&[])?;
+        let cpu_assignments = self
+            .compute_and_apply_cell_config(&[])
+            .context("computing initial cell configuration")?;
 
         let cell_manager = self
             .cell_manager
@@ -582,7 +604,9 @@ impl<'a> Scheduler<'a> {
                 return Ok(());
             };
 
-            let (new_cells, destroyed_cells) = cell_manager.process_events()?;
+            let (new_cells, destroyed_cells) = cell_manager
+                .process_events()
+                .context("processing inotify events")?;
 
             if new_cells.is_empty() && destroyed_cells.is_empty() {
                 return Ok(());
@@ -603,7 +627,9 @@ impl<'a> Scheduler<'a> {
             self.smoothed_util[cell_id as usize] = 0.0;
         }
 
-        let cpu_assignments = self.compute_and_apply_cell_config(&new_cell_ids)?;
+        let cpu_assignments = self
+            .compute_and_apply_cell_config(&new_cell_ids)
+            .context("recomputing cell configuration for new cgroups")?;
 
         let cell_manager = self
             .cell_manager
@@ -676,19 +702,25 @@ impl<'a> Scheduler<'a> {
                         .collect();
 
                     cell_manager
-                        .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)?
+                        .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
+                        .context("computing demand-weighted CPU assignments")?
                 } else {
                     // No utilization data yet (e.g., initial startup) — equal weight
-                    cell_manager.compute_cpu_assignments(self.enable_borrowing)?
+                    cell_manager
+                        .compute_cpu_assignments(self.enable_borrowing)
+                        .context("computing equal-weight CPU assignments (no utilization data)")?
                 }
             } else {
-                cell_manager.compute_cpu_assignments(self.enable_borrowing)?
+                cell_manager
+                    .compute_cpu_assignments(self.enable_borrowing)
+                    .context("computing equal-weight CPU assignments (rebalancing disabled)")?
             };
 
             (cell_manager.get_cell_assignments(), cpu_assignments)
         };
 
-        self.apply_cell_config(&cell_assignments, &cpu_assignments)?;
+        self.apply_cell_config(&cell_assignments, &cpu_assignments)
+            .context("applying cell configuration to BPF")?;
 
         Ok(cpu_assignments)
     }
@@ -736,7 +768,8 @@ impl<'a> Scheduler<'a> {
                 .as_ref()
                 .expect("BUG: cell_manager missing in maybe_rebalance");
             let cpu_assignments = cell_manager
-                .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)?;
+                .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
+                .context("computing demand-weighted CPU assignments for rebalance")?;
 
             let changed = cpu_assignments.iter().any(|a| {
                 self.cells
@@ -751,7 +784,8 @@ impl<'a> Scheduler<'a> {
             (cell_manager.get_cell_assignments(), cpu_assignments)
         };
 
-        self.apply_cell_config(&cell_assignments, &cpu_assignments)?;
+        self.apply_cell_config(&cell_assignments, &cpu_assignments)
+            .context("applying rebalanced cell configuration to BPF")?;
 
         self.last_rebalance = Instant::now();
         self.rebalance_count += 1;
@@ -964,14 +998,16 @@ impl<'a> Scheduler<'a> {
             .sum::<u64>();
 
         // Special case where the number of scope decisions == number global decisions
-        let stats = self.calculate_distribution_stats(
-            &queue_counts,
-            global_queue_decisions,
-            global_queue_decisions,
-            scope_affn_viols,
-            scope_steals,
-            scope_pin_skips,
-        )?;
+        let stats = self
+            .calculate_distribution_stats(
+                &queue_counts,
+                global_queue_decisions,
+                global_queue_decisions,
+                scope_affn_viols,
+                scope_steals,
+                scope_pin_skips,
+            )
+            .context("calculating global queue distribution stats")?;
 
         self.metrics.update(&stats);
 
@@ -1031,14 +1067,18 @@ impl<'a> Scheduler<'a> {
             let scope_pin_skips: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize];
 
-            let stats = self.calculate_distribution_stats(
-                &queue_counts,
-                global_queue_decisions,
-                cell_queue_decisions,
-                scope_affn_viols,
-                scope_steals,
-                scope_pin_skips,
-            )?;
+            let stats = self
+                .calculate_distribution_stats(
+                    &queue_counts,
+                    global_queue_decisions,
+                    cell_queue_decisions,
+                    scope_affn_viols,
+                    scope_steals,
+                    scope_pin_skips,
+                )
+                .with_context(|| {
+                    format!("calculating queue distribution stats for cell {}", cell)
+                })?;
 
             let cell_metrics = self.metrics.cells.entry(cell as u32).or_default();
             cell_metrics.update(&stats);
@@ -1074,9 +1114,11 @@ impl<'a> Scheduler<'a> {
             return Ok(());
         }
 
-        self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+        self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)
+            .context("updating global queue stats")?;
 
-        self.update_and_log_cell_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+        self.update_and_log_cell_queue_stats(global_queue_decisions, &cell_stats_delta)
+            .context("updating per-cell queue stats")?;
 
         Ok(())
     }
@@ -1108,14 +1150,18 @@ impl<'a> Scheduler<'a> {
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
-        let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
+        let cpu_ctxs = read_cpu_ctxs(&self.skel).context("reading per-CPU contexts for metrics")?;
 
-        let cell_stats_delta = self.calculate_cell_stat_delta(&cpu_ctxs)?;
+        let cell_stats_delta = self
+            .calculate_cell_stat_delta(&cpu_ctxs)
+            .context("calculating cell stat deltas")?;
 
-        self.log_all_queue_stats(&cell_stats_delta)?;
+        self.log_all_queue_stats(&cell_stats_delta)
+            .context("logging queue stats")?;
 
         if self.cell_manager.is_some() {
-            self.collect_demand_metrics(&cpu_ctxs)?;
+            self.collect_demand_metrics(&cpu_ctxs)
+                .context("collecting demand metrics")?;
         }
 
         for (cell_id, cell) in &self.cells {
@@ -1303,13 +1349,15 @@ impl<'a> Scheduler<'a> {
         }
         self.last_cpuset_seq = current_seq;
 
-        if !cm.refresh_cpusets()? {
+        if !cm.refresh_cpusets().context("refreshing cell cpusets")? {
             // seq changed but no cpusets on our cells changed
             self.update_applied_cpuset_seq();
             return Ok(());
         }
 
-        let cpu_assignments = self.compute_and_apply_cell_config(&[])?;
+        let cpu_assignments = self
+            .compute_and_apply_cell_config(&[])
+            .context("recomputing cell configuration after cpuset change")?;
         self.update_applied_cpuset_seq();
         let cell_manager = self
             .cell_manager
@@ -1344,7 +1392,8 @@ impl<'a> Scheduler<'a> {
         }
         // collect all cpus per cell.
         let mut cell_to_cpus: HashMap<u32, Cpumask> = HashMap::new();
-        let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
+        let cpu_ctxs =
+            read_cpu_ctxs(&self.skel).context("reading per-CPU contexts for BPF cell refresh")?;
         for (i, cpu_ctx) in cpu_ctxs.iter().enumerate() {
             cell_to_cpus
                 .entry(cpu_ctx.cell)
@@ -1503,8 +1552,13 @@ fn main(opts: Opts) -> Result<()> {
 
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &mut open_object)?;
-        if !sched.run(shutdown.clone())?.should_restart() {
+        let mut sched =
+            Scheduler::init(&opts, &mut open_object).context("initializing scheduler")?;
+        if !sched
+            .run(shutdown.clone())
+            .context("running scheduler main loop")?
+            .should_restart()
+        {
             break;
         }
     }
