@@ -273,7 +273,7 @@ int scx_selftest_arena_topology_timer_timer_with_helpers(void)
 
 		child_data->magic_value = magic + i + 1;
 		child_data->access_count = i;
-		child_data->cpu_id = child->id;
+		child_data->cpu_id = child->level_ids[child->level];
 		child->data = (void __arena *)child_data;
 		i++;
 	}
@@ -411,10 +411,10 @@ int scx_selftest_arena_topology_timer_arena_data(void)
 
 		child_data->magic_value = magic + i + 2;
 		child_data->access_count = 0;
-		child_data->cpu_id = child->id;
+		child_data->cpu_id = child->level_ids[child->level];
 		child->data = (void __arena *)child_data;
 
-		ret = topo_update_data(child, magic + i + 2, child->id);
+		ret = topo_update_data(child, magic + i + 2, child->level_ids[child->level]);
 		if (ret) {
 			bpf_printk("TOPO ARENA DATA: failed to update child %d data", i);
 			return ret;

@@ -18,8 +18,12 @@ struct topology {
 	topo_ptr parent;
 	size_t nr_children;
 	scx_bitmap_t mask;
+	/*
+	 * level and level_ids are hot in the fast path; keep them adjacent
+	 * to ensure they land in the same cache line.
+	 */
 	enum topo_level level;
-	u64 id;
+	s16 level_ids[TOPO_MAX_LEVEL];
 
 	/* Generic pointer, can be used for anything. */
 	void __arena *data;
@@ -41,7 +45,7 @@ extern volatile topo_ptr topo_all;
  */
 extern u32 topo_max_children[TOPO_MAX_LEVEL];
 
-int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id);
+int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id);
 int topo_contains(topo_ptr topo, u32 cpu);
 int topo_cpu_to_llc_id(u32 cpu);
 
