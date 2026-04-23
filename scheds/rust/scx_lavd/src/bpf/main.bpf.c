@@ -285,8 +285,19 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	}
 }
 
+static u32 get_cgroup_pressure(task_ctx *taskc)
+{
+	if (!enable_cpu_bw)
+		return LAVD_SCALE;
+
+	return scx_cgroup_bw_pressure(taskc->cgrp_id, (u64)taskc);
+}
+
 static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 {
+	u64 slice_wall;
+	u32 pressure;
+
 	/*
 	 * Calculate the time slice of @taskc to run on @cpuc.
 	 */
@@ -294,14 +305,21 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 		return LAVD_SLICE_MAX_NS_DFL;
 
 	/*
+	 * Get the cgroup pressure to scale down the time slice when the
+	 * cgroup is throttled. A pressure greater than LAVD_SCALE reduces
+	 * the slice proportionally, making tasks yield the CPU more often.
+	 */
+	pressure = get_cgroup_pressure(taskc);
+
+	/*
 	 * If pinned_slice_ns is enabled and there are pinned tasks waiting
 	 * to run on this CPU, unconditionally reduce the time slice for
 	 * all tasks to ensure pinned tasks can run promptly.
 	 */
 	if (pinned_slice_ns && cpuc->nr_pinned_tasks) {
-		taskc->slice_wall = min(pinned_slice_ns, sys_stat.slice_wall);
+		slice_wall = min(pinned_slice_ns, sys_stat.slice_wall);
 		reset_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
-		return taskc->slice_wall;
+		goto out;
 	}
 
 	/*
@@ -316,8 +334,12 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * However, if there are pinned tasks waiting to run on this CPU,
 	 * we do not boost the task's time slice to avoid delaying the pinned
 	 * task that cannot be run on another CPU.
+	 *
+	 * Also, if a cgroup is under pressure (e.g., throttled), do not boost
+	 * time slice.
 	 */
-	if (!no_slice_boost && !cpuc->nr_pinned_tasks &&
+	if (!no_slice_boost && pressure <= LAVD_SCALE &&
+	    !cpuc->nr_pinned_tasks &&
 	    (taskc->avg_runtime_wall >= sys_stat.slice_wall)) {
 		/*
 		 * When the system is not heavily loaded, so it can serve all
@@ -339,10 +361,9 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 			 * bit longer than average, can still finish the job.
 			 */
 			u64 s = taskc->avg_runtime_wall + LAVD_SLICE_BOOST_BONUS;
-			taskc->slice_wall = clamp(s, slice_min_ns,
-					     LAVD_SLICE_BOOST_MAX);
+			slice_wall = clamp(s, slice_min_ns, LAVD_SLICE_BOOST_MAX);
 			set_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
-			return taskc->slice_wall;
+			goto out;
 		}
 
 		/*
@@ -356,12 +377,12 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 			u64 b = (sys_stat.slice_wall * taskc->lat_cri) /
 				(sys_stat.avg_lat_cri + 1);
 			u64 s = sys_stat.slice_wall + b;
-			taskc->slice_wall = clamp(s, slice_min_ns,
-					     min(taskc->avg_runtime_wall,
-						 sys_stat.slice_wall * 2));
+			slice_wall = clamp(s, slice_min_ns,
+					   min(taskc->avg_runtime_wall,
+					       sys_stat.slice_wall * 2));
 
 			set_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
-			return taskc->slice_wall;
+			goto out;
 		}
 	}
 
@@ -369,9 +390,11 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * If slice boost is either not possible, not necessary, or not
 	 * eligible, assign the regular time slice.
 	 */
-	taskc->slice_wall = sys_stat.slice_wall;
+	slice_wall = sys_stat.slice_wall;
 	reset_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
-	return taskc->slice_wall;
+
+out:
+	return taskc->slice_wall = max((slice_wall * LAVD_SCALE) / pressure, 1);
 }
 
 static void update_stat_for_running(struct task_struct *p,
