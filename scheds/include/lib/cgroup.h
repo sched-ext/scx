@@ -149,6 +149,21 @@ int scx_cgroup_bw_reenqueue(void);
 int scx_cgroup_bw_cancel(u64 taskc);
 
 /**
+ * scx_cgroup_bw_pressure - Return the scheduling pressure for a cgroup.
+ * @cgrp_id: cgroup id.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
+ *         pass 0 when no task context is available.
+ *
+ * Returns a 1024-scale pressure value computed at the last replenishment
+ * boundary.  The BPF scheduler should scale a task's time slice as:
+ *
+ *   slice = (base_slice * 1024) / pressure
+ *
+ * Return 1024 on error or when no throttle applies.
+ */
+int scx_cgroup_bw_pressure(u64 cgrp_id, u64 taskc);
+
+/**
  * REGISTER_SCX_CGROUP_BW_ENQUEUE_CB - Register an enqueue callback.
  * @eqcb: A function name with a prototype of
  *        'int fn(struct task_struct * __arg_trusted, u64)'.
