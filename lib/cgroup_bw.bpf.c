@@ -915,6 +915,14 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		/*
 		 * Move all the throttled exiting tasks into the root cgroup.
 		 * Then, delete the LLC context and its associated BTQ.
+		 *
+		 * scx_atq_pop() returns NULL both when the BTQ is empty and
+		 * when its bounded-retry spinlock fails under contention.
+		 * Here the two cases are indistinguishable, so a lock failure
+		 * mid-drain leaves tasks stranded in the BTQ: they will be
+		 * silently dropped by scx_atq_destroy() below. We flag that
+		 * outcome with an error print right before scheduling the
+		 * destroy, so such task loss does not go unnoticed.
 		 */
 		if (cgrp_id != ROOT_CGID) {
 			while (can_loop && (taskc = scx_atq_pop(btq))) {
@@ -979,6 +987,18 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 			 */
 			cbw_free_llcx(llcx);
 		}
+
+		/*
+		 * If any task is still queued in the BTQ at this point, the
+		 * drain loop above terminated early on a lock-contention NULL
+		 * instead of an empty-queue NULL. Those tasks will be dropped
+		 * by scx_atq_destroy() and never rescheduled -- report it so
+		 * the loss is visible.
+		 */
+		if (cgrp_id != ROOT_CGID && scx_atq_nr_queued(btq) > 0)
+			cbw_err("Dropping %d stranded task(s) in BTQ while "
+				"exiting cgid%llu/%d",
+				scx_atq_nr_queued(btq), cgrp_id, i);
 
 		/*
 		 * Defer scx_atq_destroy() to avoid a use-after-free in
@@ -1835,6 +1855,32 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	if (!btq)
 		return -ESRCH;
 
+	/*
+	 * If the task is still recorded as being in an ATQ, drop that
+	 * stale membership before the insert below. Otherwise the
+	 * duplicate rb-tree insert would corrupt the tree.
+	 *
+	 * A stale taskc->atq can arise when an earlier scx_atq_cancel()
+	 * (from scx_cgroup_bw_cancel(), a cgroup-move path, etc.) had
+	 * its bounded-retry spinlock fail under contention, leaving the
+	 * task still linked in an old ATQ. scx_cgroup_bw_is_task_throttled()
+	 * is a lock-free pointer check, so we pay the scx_atq_cancel()
+	 * lock cost only when a stale membership actually exists.
+	 *
+	 * If scx_atq_cancel() itself fails under contention, return
+	 * -EBUSY. The BPF scheduler will enqueue the task via the normal
+	 * path -- the cgroup will briefly overuse its budget, but the
+	 * stale ATQ membership will be cleaned up the next time the task
+	 * is throttled and cbw_put_aside() runs again.
+	 */
+	if (scx_cgroup_bw_is_task_throttled((u64)taskc)) {
+		ret = scx_atq_cancel(taskc);
+		if (ret) {
+			cbw_dbg("Failed to cancel stale ATQ membership: %d", ret);
+			return -EBUSY;
+		}
+	}
+
 	ret = scx_atq_lock(btq);
 	if (ret) {
 		cbw_err("Failed to lock ATQ.");
@@ -2394,6 +2440,11 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 		 * Note that we do not worry about racing with .dequeue() here,
 		 * because even if we do, the callback's insert_vtime call will
 		 * fail silently in the scx core. 
+		 *
+		 * scx_atq_pop() returns NULL both when the BTQ is empty and
+		 * when its bounded-retry spinlock fails under contention. Both
+		 * outcomes are safe here: any task we did not pop stays in the
+		 * BTQ and will be retried at the next replenish tick.
 		 */
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
