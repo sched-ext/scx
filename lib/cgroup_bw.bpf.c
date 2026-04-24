@@ -68,6 +68,15 @@ enum scx_cgroup_consts {
 	 * CBW_DEFERRED_BTQ_SIZE / 2 = 65536 slots, 512 KB.
 	 */
 	CBW_DEFERRED_DRAIN_SIZE		= (CBW_DEFERRED_BTQ_SIZE / 2),
+	/*
+	 * Slots for individual tasks that were popped from an exiting
+	 * cgroup's BTQ but whose move to the root cgroup failed both
+	 * via cbw_put_aside() and push-back into the old BTQ.  Requires
+	 * two lock failures on the same task, so sized even smaller
+	 * than the deferred-drain ring.
+	 * CBW_DEFERRED_DRAIN_SIZE / 2 = 32768 slots, 256 KB.
+	 */
+	CBW_DEFERRED_MOVE_SIZE		= (CBW_DEFERRED_DRAIN_SIZE / 2),
 };
 
 /*
@@ -423,6 +432,20 @@ static u64		cbw_deferred_drain_slots[CBW_DEFERRED_DRAIN_SIZE]
 static u64		cbw_deferred_drain_tail
 			__attribute__((aligned(SCX_CACHELINE_SIZE)));
 static u64		cbw_nr_deferred_drains
+			__attribute__((aligned(SCX_CACHELINE_SIZE)));
+
+/*
+ * Ring buffer of individual tasks whose move to the root cgroup failed
+ * in both cbw_put_aside() and the subsequent push-back into the old
+ * BTQ.  cbw_move_deferred_tasks() retries cbw_put_aside() on each
+ * replenish tick.  cbw_nr_deferred_moves is the fast-path gate that
+ * lets the timer skip the ring scan in the common case.
+ */
+static u64		cbw_deferred_move_slots[CBW_DEFERRED_MOVE_SIZE]
+			__attribute__((aligned(SCX_CACHELINE_SIZE)));
+static u64		cbw_deferred_move_tail
+			__attribute__((aligned(SCX_CACHELINE_SIZE)));
+static u64		cbw_nr_deferred_moves
 			__attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 /*
@@ -894,6 +917,8 @@ void schedule_atq_destroy(scx_atq_t *btq)
 	 */
 }
 
+static void schedule_task_move_to_root(u64 taskc_raw);
+
 static __always_inline
 void cbw_drain_atq_to_root(scx_atq_t *btq)
 {
@@ -929,10 +954,16 @@ void cbw_drain_atq_to_root(scx_atq_t *btq)
 		if (unlikely(ret)) {
 			/*
 			 * Push-back preserves the "popped tasks always
-			 * have a home" invariant.
+			 * have a home" invariant.  If push-back itself
+			 * fails (arena_spin_lock() contention on the
+			 * old BTQ), park the orphaned task on the
+			 * deferred-move ring so a later tick can retry
+			 * the move to root.
 			 */
-			scx_atq_insert_vtime(btq,
+			ret = scx_atq_insert_vtime(btq,
 				(scx_task_common *)taskc, 0);
+			if (unlikely(ret))
+				schedule_task_move_to_root(taskc_raw);
 			break;
 		}
 	}
@@ -978,6 +1009,95 @@ void schedule_atq_drain(scx_atq_t *btq)
 	cbw_err("deferred-drain ring exhausted; dropping btq with %d tasks",
 		scx_atq_nr_queued(btq));
 	schedule_atq_destroy(btq);
+}
+
+static void schedule_task_move_to_root(u64 taskc_raw)
+{
+	u64 slot, old, prev;
+
+	/*
+	 * Park an individual task that was popped from an exiting
+	 * cgroup's BTQ but could not be moved to the root cgroup --
+	 * both cbw_put_aside() to root and push-back into the old BTQ
+	 * failed due to arena_spin_lock() contention.
+	 *
+	 * Shape mirrors schedule_atq_drain() / schedule_atq_destroy():
+	 * the usual case is an empty slot, and a collision means the
+	 * ring is full enough that an older parked task is still
+	 * waiting.  Try to retire the occupant synchronously by
+	 * retrying cbw_put_aside() to root; if it succeeds, evict via
+	 * CAS and loop to retry parking our task.  Otherwise advance
+	 * to the next slot.
+	 *
+	 * The parked task is not in any ATQ (taskc->atq == NULL after
+	 * the pop) and not on any DSQ, so no other path races with us
+	 * on it until we either re-park or a future tick moves it
+	 * successfully.
+	 */
+	do {
+		slot = __sync_fetch_and_add(&cbw_deferred_move_tail, 1)
+			% CBW_DEFERRED_MOVE_SIZE;
+
+		/*
+		 * Fast path: slot empty, park taskc here.
+		 */
+		old = __sync_val_compare_and_swap(&cbw_deferred_move_slots[slot],
+						  0, taskc_raw);
+		if (!old) {
+			__sync_fetch_and_add(&cbw_nr_deferred_moves, 1);
+			return;
+		}
+
+		/*
+		 * Slot occupied by a still-parked task.  Try to move it
+		 * to root synchronously so the slot can be freed.
+		 */
+		if (cbw_put_aside(old, 0, ROOT_CGID) != 0)
+			continue;
+
+		/*
+		 * Occupant moved.  Atomically clear the slot and loop to
+		 * retry parking our task.  A lost CAS means another CPU
+		 * cleared it first -- retry on the next slot.
+		 */
+		prev = __sync_val_compare_and_swap(&cbw_deferred_move_slots[slot],
+						   old, 0);
+		if (likely(old == prev))
+			__sync_fetch_and_sub(&cbw_nr_deferred_moves, 1);
+	} while (can_loop);
+}
+
+static __always_inline
+void cbw_move_deferred_tasks(void)
+{
+	int i, ret;
+	u64 taskc_raw;
+
+	/*
+	 * Iterate the deferred-move ring once per replenish tick.  For
+	 * each slot that still holds a parked task, retry
+	 * cbw_put_aside() to root; on success, CAS the slot to 0.  On
+	 * failure, leave the task for another tick.
+	 */
+	bpf_for(i, 0, CBW_DEFERRED_MOVE_SIZE) {
+		taskc_raw = READ_ONCE(cbw_deferred_move_slots[i]);
+		if (!taskc_raw)
+			continue;
+
+		ret = cbw_put_aside(taskc_raw, 0, ROOT_CGID);
+		if (ret)
+			continue; /* leave for next tick */
+
+		/*
+		 * Successfully moved.  CAS the slot to 0.  A failing CAS
+		 * means schedule_task_move_to_root() already evicted this
+		 * slot via its own synchronous retry path; skip to avoid
+		 * double accounting.
+		 */
+		if (__sync_bool_compare_and_swap(&cbw_deferred_move_slots[i],
+						 taskc_raw, 0))
+			__sync_fetch_and_sub(&cbw_nr_deferred_moves, 1);
+	}
 }
 
 static __always_inline
@@ -1075,12 +1195,17 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 					 * old BTQ so the deferred-drain pass
 					 * can retry; the old BTQ is still alive
 					 * and exclusively owned by us here.
+					 * If push-back itself fails, park the
+					 * orphaned task on the deferred-move
+					 * ring for retry on a later tick.
 					 */
 					cbw_dbg("Failed to put aside a task "
 						"while exiting cgid%llu: %d",
 						cgrp_id, ret);
-					scx_atq_insert_vtime(btq,
+					ret = scx_atq_insert_vtime(btq,
 						(scx_task_common *)t, 0);
+					if (unlikely(ret))
+						schedule_task_move_to_root(taskc);
 					break;
 				}
 			}
@@ -2492,13 +2617,15 @@ offline_cgroup:
 	}
 	/*
 	 * The root cgroup may have received throttled tasks from the
-	 * offline-cgroup drain (nr_moved) or from BTQs parked on the
-	 * deferred-drain ring (cbw_nr_deferred_drains).  If so, and
-	 * root is not already in the table, add it so the bottom half
-	 * can dispatch those tasks.
+	 * offline-cgroup drain (nr_moved), from BTQs parked on the
+	 * deferred-drain ring (cbw_nr_deferred_drains), or from tasks
+	 * parked on the deferred-move ring (cbw_nr_deferred_moves).
+	 * If so, and root is not already in the table, add it so the
+	 * bottom half can dispatch those tasks.
 	 */
 	if (!root_added &&
-	    (nr_moved > 0 || READ_ONCE(cbw_nr_deferred_drains) > 0)) {
+	    (nr_moved > 0 || READ_ONCE(cbw_nr_deferred_drains) > 0 ||
+	     READ_ONCE(cbw_nr_deferred_moves) > 0)) {
 		ids = MEMBER_VPTR(cbw_throttled_cgroup_ids, [nr_throttled]);
 		if (ids) {
 			WRITE_ONCE(ids[0], ROOT_CGID);
@@ -2573,6 +2700,16 @@ rearm_out:
 	 */
 	if (unlikely(READ_ONCE(cbw_nr_deferred_drains)))
 		cbw_drain_deferred_atqs();
+
+	/*
+	 * Retry cbw_put_aside() for individual tasks whose move to
+	 * root failed both via cbw_put_aside() and push-back into the
+	 * old BTQ.  Runs after the drain pass so that any tasks parked
+	 * by push-back failures in cbw_drain_atq_to_root() are
+	 * immediately retried on this same tick.
+	 */
+	if (unlikely(READ_ONCE(cbw_nr_deferred_moves)))
+		cbw_move_deferred_tasks();
 
 	interval = time_delta(now, cbw_last_replenish_at);
 	jitter = time_delta(interval, CBW_REPLENISH_PERIOD);
