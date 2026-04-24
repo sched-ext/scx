@@ -81,8 +81,9 @@ struct cake_cpu_bss {
 				 *     instead of a historical max. */
 	u32 last_pid;           /* 4B: Fast path — skip task-change work if same pid */
 	u8  idle_hint;          /* 1B: 0=busy, 1=idle */
+	u8  cpu_pressure;       /* 1B: rolling lane pressure for same-core spill decisions */
 	u8  busy_wakeup_pending; /* 1B: reserved for future wake handoff policy */
-	u8  _pad_status[2];     /* 2B: padding / future per-CPU state */
+	u8  _pad_status;        /* 1B: padding / future per-CPU state */
 #ifndef CAKE_RELEASE
 	u64 cake_clock;         /* 8B: BPF-native monotonic clock (ns).
 				 *     Debug-only accumulator. Advanced by consumed
@@ -334,6 +335,45 @@ enum cake_select_path {
 	CAKE_SELECT_PATH_MAX = 6,
 };
 
+/* Debug-only select_cpu reason tracking.
+ * CAKE_SELECT_PATH keeps the historical high-level buckets used by the dump.
+ * These reasons split the coarse "idle" and "primary" paths into the exact
+ * winner that led to the CPU choice so debug builds can explain hot-core
+ * stickiness precisely. */
+enum cake_select_reason {
+	CAKE_SELECT_REASON_NONE = 0,
+	CAKE_SELECT_REASON_HOME_CPU = 1,
+	CAKE_SELECT_REASON_HOME_CORE = 2,
+	CAKE_SELECT_REASON_PREV_PRIMARY = 3,
+	CAKE_SELECT_REASON_PRIMARY_SCAN = 4,
+	CAKE_SELECT_REASON_HYBRID_SCAN = 5,
+	CAKE_SELECT_REASON_KERNEL_PREV = 6,
+	CAKE_SELECT_REASON_KERNEL_IDLE = 7,
+	CAKE_SELECT_REASON_TUNNEL = 8,
+	CAKE_SELECT_REASON_PRESSURE_CORE = 9,
+	CAKE_SELECT_REASON_MAX = 10,
+};
+
+/* Debug-only pressure spill diagnostics.
+ * "anchor" groups structural blockers where there is no usable same-core
+ * spill candidate: invalid anchor CPU, secondary lane anchor, missing sibling,
+ * or sibling excluded by affinity. */
+enum cake_pressure_probe_site {
+	CAKE_PRESSURE_PROBE_SITE_HOME = 0,
+	CAKE_PRESSURE_PROBE_SITE_PREV = 1,
+	CAKE_PRESSURE_PROBE_SITE_MAX = 2,
+};
+
+enum cake_pressure_probe_outcome {
+	CAKE_PRESSURE_PROBE_EVALUATED = 0,
+	CAKE_PRESSURE_PROBE_BLOCKED_ANCHOR = 1,
+	CAKE_PRESSURE_PROBE_BLOCKED_SCORE = 2,
+	CAKE_PRESSURE_PROBE_BLOCKED_DELTA = 3,
+	CAKE_PRESSURE_PROBE_BLOCKED_SIBLING_BUSY = 4,
+	CAKE_PRESSURE_PROBE_SUCCESS = 5,
+	CAKE_PRESSURE_PROBE_OUTCOME_MAX = 6,
+};
+
 enum cake_cb_idx {
 	CAKE_CB_SELECT   = 0,
 	CAKE_CB_ENQUEUE  = 1,
@@ -557,7 +597,7 @@ struct cake_task_ctx {
 		/* State Change Counters */
 		u16 migration_count; /* Inter-cpu bounces inside select_cpu */
 		u16 preempt_count;   /* Task kicked/preempted */
-		u16 yield_count;     /* Task willingly gave up execution */
+		u16 yield_count;     /* Explicit sched_yield callbacks */
 
 		/* Lifecycle Counters */
 		u16 direct_dispatch_count; /* SCX_DSQ_LOCAL_ON bypasses (no DSQ) */
@@ -611,9 +651,9 @@ struct cake_task_ctx {
 		u32 warm_history_ns;       /* Reserved legacy migration timing slot */
 
 		/* Quantum completion tracking */
-		u16 quantum_full_count;    /* Task consumed entire slice */
-		u16 quantum_yield_count;   /* Task yielded before slice exhaustion */
-		u16 quantum_preempt_count; /* Task was kicked/preempted mid-slice */
+		u16 quantum_full_count;    /* Task consumed the full slice */
+		u16 quantum_yield_count;   /* Task stopped with slice left and became non-runnable */
+		u16 quantum_preempt_count; /* Task was kicked/preempted while still runnable */
 		u16 _pad_quantum;          /* Align to 4B boundary */
 
 		/* Wake chain tracking */
@@ -733,7 +773,7 @@ struct cake_stats {
 	u64 nr_prev_cpu_tunnels; /* select_cpu() fell back to returning prev_cpu */
 	u64 nr_steer_eligible; /* select_cpu() saw a task eligible for warm steering */
 	u64 nr_home_cpu_steers; /* select_cpu() placed a hot task back on its sticky home CPU */
-	u64 nr_home_core_steers; /* select_cpu() kept a sync wakeup on its sticky core */
+	u64 nr_home_core_steers; /* select_cpu() kept a hot task on its sticky core */
 	u64 nr_primary_cpu_steers; /* select_cpu() steered a hot task onto an idle primary SMT lane */
 	u64 nr_home_cpu_busy_misses; /* home_cpu was valid but not idle */
 	u64 nr_prev_primary_busy_misses; /* prev core primary lane rescue was valid but not idle */
@@ -834,8 +874,9 @@ struct cake_stats {
 	u64 nr_affine_kick_idle; /* Affinity-change kicks that used SCX_KICK_IDLE */
 	u64 nr_affine_kick_preempt; /* Affinity-change kicks that used SCX_KICK_PREEMPT */
 	u64 nr_quantum_full; /* Stops that consumed the full slice */
-	u64 nr_quantum_yield; /* Stops that yielded before exhausting the slice */
+	u64 nr_quantum_yield; /* Stops that kept slice left but became non-runnable */
 	u64 nr_quantum_preempt; /* Stops that were preempted while still runnable */
+	u64 nr_sched_yield_calls; /* Explicit sched_yield callbacks observed by cake_yield() */
 		u64 wake_target_hit_count[CAKE_WAKE_REASON_MAX]; /* Post-wake subset: first run landed on the selected CPU */
 		u64 wake_target_miss_count[CAKE_WAKE_REASON_MAX]; /* Post-wake subset: first run landed on a different CPU */
 		u64 wake_followup_same_cpu_count[CAKE_WAKE_REASON_MAX]; /* Post-wake subset: first continuation stayed on the same CPU */
