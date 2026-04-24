@@ -61,6 +61,13 @@ enum scx_cgroup_consts {
 	 * CBW_NR_CGRP_LLC_MAX * 2 = 131072 slots, 1024 KB.
 	 */
 	CBW_DEFERRED_BTQ_SIZE		= (CBW_NR_CGRP_LLC_MAX * 2),
+	/*
+	 * Slots for BTQs whose drain in cbw_free_llc_ctx() was
+	 * interrupted by lock contention.  Much rarer than cgroup
+	 * destruction, so sized well below CBW_DEFERRED_BTQ_SIZE.
+	 * CBW_DEFERRED_BTQ_SIZE / 2 = 65536 slots, 512 KB.
+	 */
+	CBW_DEFERRED_DRAIN_SIZE		= (CBW_DEFERRED_BTQ_SIZE / 2),
 };
 
 /*
@@ -400,6 +407,23 @@ static u64		cbw_cgroup_ids[CBW_NR_CGRP_MAX];
  * An array of throttled cgroups that need to be reenqueued.
  */
 static u64		cbw_throttled_cgroup_ids[CBW_NR_CGRP_MAX];
+
+/*
+ * Ring buffer of BTQs whose cgroup-exit drain in cbw_free_llc_ctx() was
+ * interrupted by lock contention and therefore still hold tasks.
+ * cbw_drain_deferred_atqs() finishes the drain on each replenish tick
+ * and schedules destruction once empty.
+ *
+ * cbw_nr_deferred_drains counts currently parked BTQs.  The timer skips
+ * cbw_drain_deferred_atqs() entirely when the count is zero, avoiding
+ * a full ring scan in the (common) case of no deferred work.
+ */
+static u64		cbw_deferred_drain_slots[CBW_DEFERRED_DRAIN_SIZE]
+			__attribute__((aligned(SCX_CACHELINE_SIZE)));
+static u64		cbw_deferred_drain_tail
+			__attribute__((aligned(SCX_CACHELINE_SIZE)));
+static u64		cbw_nr_deferred_drains
+			__attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 /*
  * Timer to replenish time budget for all cgroups periodically.
@@ -828,7 +852,8 @@ int cbw_init_llc_ctx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 __hidden
 int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id);
 
-static void schedule_atq_destroy(scx_atq_t *btq)
+static __always_inline
+void schedule_atq_destroy(scx_atq_t *btq)
 {
 	static u64 slots[CBW_DEFERRED_BTQ_SIZE] __attribute__((aligned(SCX_CACHELINE_SIZE)));
 	static u64 tail __attribute__((aligned(SCX_CACHELINE_SIZE)));
@@ -867,6 +892,92 @@ static void schedule_atq_destroy(scx_atq_t *btq)
 	 * unlikely that real-world workloads will continuously and concurrently
 	 * destroy cgroups. So, let’s keep the design simple for now.
 	 */
+}
+
+static __always_inline
+void cbw_drain_atq_to_root(scx_atq_t *btq)
+{
+	u64 taskc_raw;
+	int ret;
+
+	/*
+	 * Finish the drain of one BTQ whose cgroup has exited: pop each
+	 * task and put it aside into the root cgroup.  On lock
+	 * contention in cbw_put_aside(), push the popped task back into
+	 * the old BTQ so it has a home, and stop.  The caller should
+	 * either leave the BTQ on the deferred-drain ring for another
+	 * tick, or (if the queue drained empty) schedule its destruction.
+	 *
+	 * Used by both schedule_atq_drain() (synchronous eviction on
+	 * slot collision) and cbw_drain_deferred_atqs() (timer-driven
+	 * pass).
+	 */
+	while (can_loop && (taskc_raw = scx_atq_pop(btq))) {
+		scx_task_cgroup_bw_t *taskc =
+			(scx_task_cgroup_bw_t *)taskc_raw;
+
+		/*
+		 * Invalidate the per-task cgx/llcx caches before handing
+		 * the task to the root cgroup; the old cgroup context may
+		 * already be freed.  Same reasoning as the main drain in
+		 * cbw_free_llc_ctx().
+		 */
+		WRITE_ONCE(taskc->cgx_raw, 0);
+		WRITE_ONCE(taskc->llcx_raw, 0);
+
+		ret = cbw_put_aside(taskc_raw, 0, ROOT_CGID);
+		if (unlikely(ret)) {
+			/*
+			 * Push-back preserves the "popped tasks always
+			 * have a home" invariant.
+			 */
+			scx_atq_insert_vtime(btq,
+				(scx_task_common *)taskc, 0);
+			break;
+		}
+	}
+}
+
+static __always_inline
+void schedule_atq_drain(scx_atq_t *btq)
+{
+	u64 slot, old;
+
+	/*
+	 * Park a BTQ whose cgroup-exit drain was cut short onto the
+	 * deferred-drain ring.  On collision, advance to the next slot.
+	 * The timer pass (cbw_drain_deferred_atqs) handles the drain +
+	 * destroy of parked BTQs -- we don't do synchronous drain here
+	 * because calling schedule_atq_destroy() on eviction would push
+	 * the call-graph depth past BPF's 8-frame limit on the chain
+	 * that flows through replenish_timerfn -> cbw_cgroup_bw_offline
+	 * -> cbw_free_llc_ctx.
+	 *
+	 * With CBW_DEFERRED_DRAIN_SIZE = 65536 slots and a replenish
+	 * period of ~100 ms (which drains and frees slots), wrap-around
+	 * is practically unreachable; can_loop bounds the worst case.
+	 */
+	do {
+		slot = __sync_fetch_and_add(&cbw_deferred_drain_tail, 1)
+			% CBW_DEFERRED_DRAIN_SIZE;
+
+		old = __sync_val_compare_and_swap(&cbw_deferred_drain_slots[slot],
+						  0, (u64)btq);
+		if (!old) {
+			__sync_fetch_and_add(&cbw_nr_deferred_drains, 1);
+			return;
+		}
+	} while (can_loop);
+
+	/*
+	 * Ring exhausted (all CBW_DEFERRED_DRAIN_SIZE slots occupied).
+	 * Extraordinarily rare; log and accept drop so the BTQ does not
+	 * leak.  Task loss here is equivalent to what the pre-defense
+	 * code did on any exit-drain contention.
+	 */
+	cbw_err("deferred-drain ring exhausted; dropping btq with %d tasks",
+		scx_atq_nr_queued(btq));
+	schedule_atq_destroy(btq);
 }
 
 static __always_inline
@@ -918,11 +1029,10 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		 *
 		 * scx_atq_pop() returns NULL both when the BTQ is empty and
 		 * when its bounded-retry spinlock fails under contention.
-		 * Here the two cases are indistinguishable, so a lock failure
-		 * mid-drain leaves tasks stranded in the BTQ: they will be
-		 * silently dropped by scx_atq_destroy() below. We flag that
-		 * outcome with an error print right before scheduling the
-		 * destroy, so such task loss does not go unnoticed.
+		 * Either case exits the loop; if any task remains in the BTQ
+		 * afterwards, we route the BTQ to the deferred-drain ring
+		 * (see below) so a later replenish tick can finish the drain
+		 * without losing tasks.
 		 */
 		if (cgrp_id != ROOT_CGID) {
 			while (can_loop && (taskc = scx_atq_pop(btq))) {
@@ -959,9 +1069,19 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 				if (likely(!ret)) {
 					nr_moved++;
 				} else {
-					cbw_err("Failed to put aside a task "
+					/*
+					 * Put-aside to root hit lock contention.
+					 * Push the popped task back into the
+					 * old BTQ so the deferred-drain pass
+					 * can retry; the old BTQ is still alive
+					 * and exclusively owned by us here.
+					 */
+					cbw_dbg("Failed to put aside a task "
 						"while exiting cgid%llu: %d",
 						cgrp_id, ret);
+					scx_atq_insert_vtime(btq,
+						(scx_task_common *)t, 0);
+					break;
 				}
 			}
 		}
@@ -989,27 +1109,64 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		}
 
 		/*
-		 * If any task is still queued in the BTQ at this point, the
-		 * drain loop above terminated early on a lock-contention NULL
-		 * instead of an empty-queue NULL. Those tasks will be dropped
-		 * by scx_atq_destroy() and never rescheduled -- report it so
-		 * the loss is visible.
+		 * If any task is still queued in the BTQ, the drain loop
+		 * above terminated early on a lock-contention NULL from
+		 * scx_atq_pop() or a push-back from a failed cbw_put_aside()
+		 * to root. Park the BTQ on the deferred-drain ring so a
+		 * later replenish tick can finish without losing tasks.
+		 * Otherwise, defer scx_atq_destroy() to avoid a
+		 * use-after-free in cbw_drain_btq_batch(): that function
+		 * snapshots llcx->btq under READ_ONCE(), and
+		 * cbw_free_llc_ctx() may destroy the BTQ in the window
+		 * between the snapshot and scx_atq_pop().
 		 */
-		if (cgrp_id != ROOT_CGID && scx_atq_nr_queued(btq) > 0)
-			cbw_err("Dropping %d stranded task(s) in BTQ while "
-				"exiting cgid%llu/%d",
-				scx_atq_nr_queued(btq), cgrp_id, i);
-
-		/*
-		 * Defer scx_atq_destroy() to avoid a use-after-free in
-		 * cbw_drain_btq_batch(): that function snapshots llcx->btq
-		 * under READ_ONCE(), and cbw_free_llc_ctx() may destroy the
-		 * BTQ in the window between the snapshot and scx_atq_pop().
-		 */
-		schedule_atq_destroy(btq);
+		if (unlikely(cgrp_id != ROOT_CGID && scx_atq_nr_queued(btq) > 0))
+			schedule_atq_drain(btq);
+		else
+			schedule_atq_destroy(btq);
 	}
 
 	return nr_moved;
+}
+
+static __always_inline
+void cbw_drain_deferred_atqs(void)
+{
+	int i;
+	u64 btq_raw;
+	scx_atq_t *btq;
+
+	/*
+	 * Iterate the deferred-drain ring once per replenish tick.  For
+	 * each slot that still holds a BTQ, drain it towards the root
+	 * cgroup via cbw_drain_atq_to_root().  Slots that drain empty
+	 * are CAS-cleared and their BTQ scheduled for destruction;
+	 * slots that still hold tasks are left for another tick.
+	 */
+	bpf_for(i, 0, CBW_DEFERRED_DRAIN_SIZE) {
+		btq_raw = READ_ONCE(cbw_deferred_drain_slots[i]);
+		if (!btq_raw)
+			continue;
+
+		btq = (scx_atq_t *)btq_raw;
+
+		cbw_drain_atq_to_root(btq);
+
+		if (scx_atq_nr_queued(btq) != 0)
+			continue; /* leave for next tick */
+
+		/*
+		 * Fully drained.  CAS the slot to 0 and destroy.  A
+		 * failing CAS means schedule_atq_drain() already evicted
+		 * this slot via its own synchronous drain path; skip to
+		 * avoid double-destroy.
+		 */
+		if (__sync_bool_compare_and_swap(&cbw_deferred_drain_slots[i],
+						 btq_raw, 0)) {
+			__sync_fetch_and_sub(&cbw_nr_deferred_drains, 1);
+			schedule_atq_destroy(btq);
+		}
+	}
 }
 
 __noinline
@@ -1956,8 +2113,11 @@ bool cbw_has_backlogged_tasks(scx_cgroup_ctx_t *cgx)
 static
 bool cbw_replenish_cgroup(scx_cgroup_ctx_t *cgx, u64 now)
 {
-	s64 burst_credit = 0, debt = 0, budget;
-	bool period_end, was_throttled, keep_throttled = false;
+	static s64 burst_credit, debt, budget; /* Add `static` to work around the verifier error (-E2BIG) */
+	bool period_end, was_throttled, keep_throttled;
+
+	burst_credit = debt = 0;
+	keep_throttled = false;
 
 	/*
 	 * If the nquota_ub is infinite, we don’t need to replenish the cgroup.
@@ -2331,11 +2491,14 @@ offline_cgroup:
 		nr_moved += cbw_cgroup_bw_offline(ids[0]);
 	}
 	/*
-	 * At least one throttled task was moved to the root cgroup and the
-	 * root cgroup is not in the table. So we should add the root cgroup
-	 * to the table.
+	 * The root cgroup may have received throttled tasks from the
+	 * offline-cgroup drain (nr_moved) or from BTQs parked on the
+	 * deferred-drain ring (cbw_nr_deferred_drains).  If so, and
+	 * root is not already in the table, add it so the bottom half
+	 * can dispatch those tasks.
 	 */
-	if (nr_moved > 0 && !root_added) {
+	if (!root_added &&
+	    (nr_moved > 0 || READ_ONCE(cbw_nr_deferred_drains) > 0)) {
 		ids = MEMBER_VPTR(cbw_throttled_cgroup_ids, [nr_throttled]);
 		if (ids) {
 			WRITE_ONCE(ids[0], ROOT_CGID);
@@ -2400,6 +2563,17 @@ offline_cgroup:
 	 * for the delay of the timer execution, CBW_REPLENISH_PERIOD.
 	 */
 rearm_out:
+	/*
+	 * Finish draining BTQs that were parked on the deferred-drain
+	 * ring by a prior cbw_free_llc_ctx() whose drain was cut short
+	 * by lock contention.  Placed under rearm_out: so it still runs
+	 * when the main replenish path bails out on an error.  Gated on
+	 * cbw_nr_deferred_drains to skip the ring scan in the common
+	 * case of no deferred work.
+	 */
+	if (unlikely(READ_ONCE(cbw_nr_deferred_drains)))
+		cbw_drain_deferred_atqs();
+
 	interval = time_delta(now, cbw_last_replenish_at);
 	jitter = time_delta(interval, CBW_REPLENISH_PERIOD);
 	period = max(time_delta(CBW_REPLENISH_PERIOD, jitter), CBW_REPLENISH_PERIOD_MIN);
