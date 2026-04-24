@@ -33,7 +33,16 @@ use crate::topology::TopologyInfo;
 
 const STATS_HISTORY_MAX_AGE: Duration = Duration::from_secs(600);
 const STATS_HISTORY_MAX_SAMPLES: usize = 2048;
+const TIMELINE_HISTORY_MAX_SAMPLES: usize = 3600;
+const TIMELINE_SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(4);
+const DEAD_TASK_RETENTION: Duration = Duration::from_secs(300);
+const FULL_SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const SELECT_REASON_MAX: usize = 10;
+const PRESSURE_SITE_MAX: usize = 2;
+const PRESSURE_OUTCOME_MAX: usize = 6;
+const WAKE_REASON_MAX: usize = 4;
+const WAKE_BUCKET_MAX: usize = 5;
 
 /// System hardware and kernel information, collected once at startup.
 #[derive(Clone, Debug)]
@@ -250,6 +259,7 @@ pub struct TuiApp {
     pub latency_matrix: Vec<Vec<f64>>,
     pub task_rows: HashMap<u32, TaskTelemetryRow>,
     pub sorted_pids: Vec<u32>,
+    pub sorted_pids_dirty: bool,
     pub table_state: TableState,
     pub bench_table_state: TableState,
     pub active_tab: TuiTab,
@@ -262,7 +272,7 @@ pub struct TuiApp {
     pub task_filter: TaskFilter,
     pub arena_active: usize,                   // Arena slots with tid != 0
     pub arena_max: usize,                      // Arena pool max_elems
-    pub bpf_task_count: usize,                 // Tasks with total_runs > 0
+    pub bpf_task_count: usize,                 // Live BPF-tracked tasks with total_runs > 0
     pub prev_deltas: HashMap<u32, (u32, u16)>, // (total_runs, migration_count) — lightweight delta snapshot
     pub active_pids_buf: std::collections::HashSet<u32>, // Reused per-tick to avoid alloc
     pub collapsed_tgids: std::collections::HashSet<u32>, // Collapsed process groups
@@ -280,13 +290,24 @@ pub struct TuiApp {
     pub system_info: SystemInfo,
     pub debug_events: VecDeque<DebugEventRow>,
     per_cpu_work: Vec<CpuWorkCounters>,
+    pressure_probe: PressureProbeCounters,
     stats_history: VecDeque<StatsSnapshot>,
     cpu_work_history: VecDeque<CpuWorkSnapshot>,
+    pressure_probe_history: VecDeque<PressureProbeSnapshot>,
+    timeline_history: VecDeque<TimelineBucket>,
+    timeline_last_sample: Option<StatsSnapshot>,
+    timeline_next_sample_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
 struct StatsSnapshot {
     at: Instant,
+    stats: cake_stats,
+}
+
+#[derive(Clone, Copy)]
+struct TimelineBucket {
+    elapsed: Duration,
     stats: cake_stats,
 }
 
@@ -307,12 +328,41 @@ struct CpuWorkCounters {
     quantum_full: u64,
     quantum_yield: u64,
     quantum_preempt: u64,
+    select_target_total: u64,
+    select_prev_total: u64,
+    select_target_reason: [u64; SELECT_REASON_MAX],
+    select_prev_reason: [u64; SELECT_REASON_MAX],
+    pressure_probe: [[u64; PRESSURE_OUTCOME_MAX]; PRESSURE_SITE_MAX],
+    cpu_pressure: u8,
+    local_pending: u32,
+    local_pending_max: u32,
+    local_pending_inserts: u64,
+    local_pending_runs: u64,
+    wake_direct_target: u64,
+    wake_busy_target: u64,
+    wake_busy_local_target: u64,
+    wake_busy_remote_target: u64,
+    target_wait_ns: [u64; WAKE_REASON_MAX],
+    target_wait_count: [u64; WAKE_REASON_MAX],
+    target_wait_max_ns: [u64; WAKE_REASON_MAX],
+    target_wait_bucket: [[u64; WAKE_BUCKET_MAX]; WAKE_REASON_MAX],
 }
 
 #[derive(Clone, Debug)]
 struct CpuWorkSnapshot {
     at: Instant,
     counters: Vec<CpuWorkCounters>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PressureProbeCounters {
+    total: [[u64; PRESSURE_OUTCOME_MAX]; PRESSURE_SITE_MAX],
+}
+
+#[derive(Clone, Copy)]
+struct PressureProbeSnapshot {
+    at: Instant,
+    counters: PressureProbeCounters,
 }
 
 #[derive(Clone, Debug)]
@@ -326,9 +376,9 @@ struct SchedulerCpuRow {
     runs_per_sec: f64,
     total_runtime_ns: u64,
     avg_run_us: u64,
-    dispatch_per_sec: f64,
-    local_pct: f64,
+    full_pct: f64,
     yield_pct: f64,
+    preempt_pct: f64,
     system_load: f32,
     temp_c: f32,
 }
@@ -342,10 +392,74 @@ struct SchedulerCoreRow {
     runs_per_sec: f64,
     total_runtime_ns: u64,
     avg_run_us: u64,
-    dispatch_per_sec: f64,
+    full_pct: f64,
+    yield_pct: f64,
+    preempt_pct: f64,
     top_cpu_share_pct: f64,
     secondary_smt_pct: f64,
     avg_system_load: f32,
+}
+
+#[derive(Clone, Debug)]
+struct SelectCpuRow {
+    cpu: usize,
+    target_total: u64,
+    target_pct: f64,
+    prev_total: u64,
+    prev_pct: f64,
+    target_reason: [u64; SELECT_REASON_MAX],
+    prev_reason: [u64; SELECT_REASON_MAX],
+}
+
+#[derive(Clone, Debug)]
+struct PressureProbeRow {
+    cpu: usize,
+    eval_total: u64,
+    eval_pct: f64,
+    outcome: [u64; PRESSURE_OUTCOME_MAX],
+}
+
+#[derive(Clone, Debug)]
+struct LocalQueueRow {
+    cpu: usize,
+    pressure: u8,
+    pending: u32,
+    pending_max: u32,
+    inserts: u64,
+    runs: u64,
+    direct: u64,
+    busy: u64,
+    busy_local: u64,
+    busy_remote: u64,
+    wait_ns: [u64; WAKE_REASON_MAX],
+    wait_count: [u64; WAKE_REASON_MAX],
+    wait_max_ns: [u64; WAKE_REASON_MAX],
+    wait_bucket: [[u64; WAKE_BUCKET_MAX]; WAKE_REASON_MAX],
+}
+
+#[derive(Clone, Debug, Default)]
+struct BalanceDiagnosis {
+    top_cpu_share_label: String,
+    top_cpu_share_pct: f64,
+    top_cpu_avg_run_us: u64,
+    top_cpu_runs_per_sec: f64,
+    top_cpu_rate_label: String,
+    top_cpu_rate_runs_per_sec: f64,
+    top_cpu_rate_avg_run_us: u64,
+    top_core_share_label: String,
+    top_core_share_pct: f64,
+    top_core_hot_thr_pct: f64,
+    top_core_sib_pct: f64,
+    top_core_rate_label: String,
+    top_core_rate_runs_per_sec: f64,
+    cpu_skew: f64,
+    core_skew: f64,
+    hot_cpu_count: usize,
+    cold_cpu_count: usize,
+    hot_core_count: usize,
+    cold_core_count: usize,
+    driver: &'static str,
+    sticky_core: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -394,6 +508,7 @@ pub struct TaskTelemetryRow {
     pub status: TaskStatus,
     pub is_bpf_tracked: bool,
     pub tgid: u32,
+    pub last_seen_at: Instant,
     // Phase B: blind spot metrics
     pub slice_util_pct: u16,
     pub llc_id: u16,
@@ -416,9 +531,9 @@ pub struct TaskTelemetryRow {
     pub vtime_staging_ns: u32, // stopping: dsq_vtime bit packing + writes
     pub warm_history_ns: u32,  // stopping: warm CPU ring shift
     // Quantum completion tracking
-    pub quantum_full_count: u16,    // Task consumed entire slice
-    pub quantum_yield_count: u16,   // Task yielded before slice exhaustion
-    pub quantum_preempt_count: u16, // Task was kicked/preempted mid-slice
+    pub quantum_full_count: u16,    // Task consumed the full slice
+    pub quantum_yield_count: u16,   // Task stopped with slice left and became non-runnable
+    pub quantum_preempt_count: u16, // Task was kicked/preempted while still runnable
     // Wake chain tracking
     pub waker_cpu: u16,  // CPU the waker was running on
     pub waker_tgid: u32, // TGID of the waker (process group)
@@ -471,6 +586,7 @@ impl Default for TaskTelemetryRow {
             status: TaskStatus::Idle,
             is_bpf_tracked: false,
             tgid: 0,
+            last_seen_at: Instant::now(),
             slice_util_pct: 0,
             llc_id: 0,
             llc_run_mask: 0,
@@ -650,6 +766,7 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.nr_quantum_full += s.nr_quantum_full;
             total.nr_quantum_yield += s.nr_quantum_yield;
             total.nr_quantum_preempt += s.nr_quantum_preempt;
+            total.nr_sched_yield_calls += s.nr_sched_yield_calls;
             for kind in 0..3 {
                 total.nr_wake_kick_observed[kind] += s.nr_wake_kick_observed[kind];
                 total.nr_wake_kick_quick[kind] += s.nr_wake_kick_quick[kind];
@@ -672,6 +789,107 @@ fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
 
     if let Some(bss) = &skel.maps.bss_data {
         for (idx, stats) in bss.global_stats.iter().take(nr_cpus).enumerate() {
+            #[cfg(debug_assertions)]
+            let (
+                select_target_reason,
+                select_prev_reason,
+                pressure_probe,
+                target_wait_ns,
+                target_wait_count,
+                target_wait_max_ns,
+                target_wait_bucket,
+            ) = {
+                let mut select_target_reason = [0; SELECT_REASON_MAX];
+                let mut select_prev_reason = [0; SELECT_REASON_MAX];
+                let mut pressure_probe = [[0; PRESSURE_OUTCOME_MAX]; PRESSURE_SITE_MAX];
+                let mut target_wait_ns = [0; WAKE_REASON_MAX];
+                let mut target_wait_count = [0; WAKE_REASON_MAX];
+                let mut target_wait_max_ns = [0; WAKE_REASON_MAX];
+                let mut target_wait_bucket = [[0; WAKE_BUCKET_MAX]; WAKE_REASON_MAX];
+
+                for reason in 0..SELECT_REASON_MAX {
+                    select_target_reason[reason] = bss.select_reason_target_count[reason][idx];
+                    select_prev_reason[reason] = bss.select_reason_prev_count[reason][idx];
+                }
+
+                for site in 0..PRESSURE_SITE_MAX {
+                    for outcome in 0..PRESSURE_OUTCOME_MAX {
+                        pressure_probe[site][outcome] =
+                            bss.pressure_probe_cpu_count[site][outcome][idx];
+                    }
+                }
+
+                for reason in 0..WAKE_REASON_MAX {
+                    target_wait_ns[reason] = bss.wake_target_wait_ns[reason][idx];
+                    target_wait_count[reason] = bss.wake_target_wait_count[reason][idx];
+                    target_wait_max_ns[reason] = bss.wake_target_wait_max_ns[reason][idx];
+                    for bucket in 0..WAKE_BUCKET_MAX {
+                        target_wait_bucket[reason][bucket] =
+                            bss.wake_target_wait_bucket_count[reason][idx][bucket];
+                    }
+                }
+
+                (
+                    select_target_reason,
+                    select_prev_reason,
+                    pressure_probe,
+                    target_wait_ns,
+                    target_wait_count,
+                    target_wait_max_ns,
+                    target_wait_bucket,
+                )
+            };
+            #[cfg(not(debug_assertions))]
+            let (
+                select_target_reason,
+                select_prev_reason,
+                pressure_probe,
+                target_wait_ns,
+                target_wait_count,
+                target_wait_max_ns,
+                target_wait_bucket,
+            ) = (
+                [0; SELECT_REASON_MAX],
+                [0; SELECT_REASON_MAX],
+                [[0; PRESSURE_OUTCOME_MAX]; PRESSURE_SITE_MAX],
+                [0; WAKE_REASON_MAX],
+                [0; WAKE_REASON_MAX],
+                [0; WAKE_REASON_MAX],
+                [[0; WAKE_BUCKET_MAX]; WAKE_REASON_MAX],
+            );
+            #[cfg(debug_assertions)]
+            let local_pending = bss.local_pending_est[idx];
+            #[cfg(not(debug_assertions))]
+            let local_pending = 0;
+            #[cfg(debug_assertions)]
+            let local_pending_max = bss.local_pending_max[idx];
+            #[cfg(not(debug_assertions))]
+            let local_pending_max = 0;
+            #[cfg(debug_assertions)]
+            let local_pending_inserts = bss.local_pending_insert_count[idx];
+            #[cfg(not(debug_assertions))]
+            let local_pending_inserts = 0;
+            #[cfg(debug_assertions)]
+            let local_pending_runs = bss.local_pending_run_count[idx];
+            #[cfg(not(debug_assertions))]
+            let local_pending_runs = 0;
+            #[cfg(debug_assertions)]
+            let wake_direct_target = bss.wake_direct_target_count[idx];
+            #[cfg(not(debug_assertions))]
+            let wake_direct_target = 0;
+            #[cfg(debug_assertions)]
+            let wake_busy_target = bss.wake_busy_target_count[idx];
+            #[cfg(not(debug_assertions))]
+            let wake_busy_target = 0;
+            #[cfg(debug_assertions)]
+            let wake_busy_local_target = bss.wake_busy_local_target_count[idx];
+            #[cfg(not(debug_assertions))]
+            let wake_busy_local_target = 0;
+            #[cfg(debug_assertions)]
+            let wake_busy_remote_target = bss.wake_busy_remote_target_count[idx];
+            #[cfg(not(debug_assertions))]
+            let wake_busy_remote_target = 0;
+
             work[idx] = CpuWorkCounters {
                 task_runtime_ns: stats.task_runtime_ns,
                 task_run_count: stats.task_run_count,
@@ -680,6 +898,24 @@ fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
                 quantum_full: stats.nr_quantum_full,
                 quantum_yield: stats.nr_quantum_yield,
                 quantum_preempt: stats.nr_quantum_preempt,
+                select_target_total: select_target_reason[1..].iter().sum(),
+                select_prev_total: select_prev_reason[1..].iter().sum(),
+                select_target_reason,
+                select_prev_reason,
+                pressure_probe,
+                cpu_pressure: bss.cpu_bss[idx].cpu_pressure,
+                local_pending,
+                local_pending_max,
+                local_pending_inserts,
+                local_pending_runs,
+                wake_direct_target,
+                wake_busy_target,
+                wake_busy_local_target,
+                wake_busy_remote_target,
+                target_wait_ns,
+                target_wait_count,
+                target_wait_max_ns,
+                target_wait_bucket,
             };
         }
     }
@@ -687,7 +923,30 @@ fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
     work
 }
 
-fn cpu_work_delta(current: &[CpuWorkCounters], previous: &[CpuWorkCounters]) -> Vec<CpuWorkCounters> {
+#[cfg(debug_assertions)]
+fn extract_pressure_probe(skel: &BpfSkel) -> PressureProbeCounters {
+    let mut pressure_probe = PressureProbeCounters::default();
+
+    if let Some(bss) = &skel.maps.bss_data {
+        for site in 0..PRESSURE_SITE_MAX {
+            for outcome in 0..PRESSURE_OUTCOME_MAX {
+                pressure_probe.total[site][outcome] = bss.pressure_probe_total[site][outcome];
+            }
+        }
+    }
+
+    pressure_probe
+}
+
+#[cfg(not(debug_assertions))]
+fn extract_pressure_probe(_skel: &BpfSkel) -> PressureProbeCounters {
+    PressureProbeCounters::default()
+}
+
+fn cpu_work_delta(
+    current: &[CpuWorkCounters],
+    previous: &[CpuWorkCounters],
+) -> Vec<CpuWorkCounters> {
     current
         .iter()
         .enumerate()
@@ -701,9 +960,71 @@ fn cpu_work_delta(current: &[CpuWorkCounters], previous: &[CpuWorkCounters]) -> 
                 quantum_full: cur.quantum_full.saturating_sub(prev.quantum_full),
                 quantum_yield: cur.quantum_yield.saturating_sub(prev.quantum_yield),
                 quantum_preempt: cur.quantum_preempt.saturating_sub(prev.quantum_preempt),
+                select_target_total: cur
+                    .select_target_total
+                    .saturating_sub(prev.select_target_total),
+                select_prev_total: cur.select_prev_total.saturating_sub(prev.select_prev_total),
+                select_target_reason: std::array::from_fn(|reason| {
+                    cur.select_target_reason[reason]
+                        .saturating_sub(prev.select_target_reason[reason])
+                }),
+                select_prev_reason: std::array::from_fn(|reason| {
+                    cur.select_prev_reason[reason].saturating_sub(prev.select_prev_reason[reason])
+                }),
+                pressure_probe: std::array::from_fn(|site| {
+                    std::array::from_fn(|outcome| {
+                        cur.pressure_probe[site][outcome]
+                            .saturating_sub(prev.pressure_probe[site][outcome])
+                    })
+                }),
+                cpu_pressure: cur.cpu_pressure,
+                local_pending: cur.local_pending,
+                local_pending_max: cur.local_pending_max,
+                local_pending_inserts: cur
+                    .local_pending_inserts
+                    .saturating_sub(prev.local_pending_inserts),
+                local_pending_runs: cur
+                    .local_pending_runs
+                    .saturating_sub(prev.local_pending_runs),
+                wake_direct_target: cur
+                    .wake_direct_target
+                    .saturating_sub(prev.wake_direct_target),
+                wake_busy_target: cur.wake_busy_target.saturating_sub(prev.wake_busy_target),
+                wake_busy_local_target: cur
+                    .wake_busy_local_target
+                    .saturating_sub(prev.wake_busy_local_target),
+                wake_busy_remote_target: cur
+                    .wake_busy_remote_target
+                    .saturating_sub(prev.wake_busy_remote_target),
+                target_wait_ns: std::array::from_fn(|reason| {
+                    cur.target_wait_ns[reason].saturating_sub(prev.target_wait_ns[reason])
+                }),
+                target_wait_count: std::array::from_fn(|reason| {
+                    cur.target_wait_count[reason].saturating_sub(prev.target_wait_count[reason])
+                }),
+                target_wait_max_ns: cur.target_wait_max_ns,
+                target_wait_bucket: std::array::from_fn(|reason| {
+                    std::array::from_fn(|bucket| {
+                        cur.target_wait_bucket[reason][bucket]
+                            .saturating_sub(prev.target_wait_bucket[reason][bucket])
+                    })
+                }),
             }
         })
         .collect()
+}
+
+fn pressure_probe_delta(
+    current: PressureProbeCounters,
+    previous: PressureProbeCounters,
+) -> PressureProbeCounters {
+    PressureProbeCounters {
+        total: std::array::from_fn(|site| {
+            std::array::from_fn(|outcome| {
+                current.total[site][outcome].saturating_sub(previous.total[site][outcome])
+            })
+        }),
+    }
 }
 
 fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
@@ -812,8 +1133,12 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.total_running_ns = current
         .total_running_ns
         .saturating_sub(previous.total_running_ns);
-    delta.task_runtime_ns = current.task_runtime_ns.saturating_sub(previous.task_runtime_ns);
-    delta.task_run_count = current.task_run_count.saturating_sub(previous.task_run_count);
+    delta.task_runtime_ns = current
+        .task_runtime_ns
+        .saturating_sub(previous.task_runtime_ns);
+    delta.task_run_count = current
+        .task_run_count
+        .saturating_sub(previous.task_run_count);
     delta.nr_stop_deferred_skip = current
         .nr_stop_deferred_skip
         .saturating_sub(previous.nr_stop_deferred_skip);
@@ -865,6 +1190,7 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
             .saturating_sub(previous.wake_reason_wait_ns[reason]);
         delta.wake_reason_wait_count[reason] = current.wake_reason_wait_count[reason]
             .saturating_sub(previous.wake_reason_wait_count[reason]);
+        delta.wake_reason_wait_max_ns[reason] = current.wake_reason_wait_max_ns[reason];
         for bucket in 0..current.wake_reason_bucket_count[reason].len() {
             delta.wake_reason_bucket_count[reason][bucket] = current.wake_reason_bucket_count
                 [reason][bucket]
@@ -963,6 +1289,9 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.nr_quantum_preempt = current
         .nr_quantum_preempt
         .saturating_sub(previous.nr_quantum_preempt);
+    delta.nr_sched_yield_calls = current
+        .nr_sched_yield_calls
+        .saturating_sub(previous.nr_sched_yield_calls);
     for kind in 0..current.nr_wake_kick_observed.len() {
         delta.nr_wake_kick_observed[kind] = current.nr_wake_kick_observed[kind]
             .saturating_sub(previous.nr_wake_kick_observed[kind]);
@@ -1168,7 +1497,6 @@ fn scheduler_cpu_rows(
     let mut rows = Vec::new();
 
     for (cpu, counter) in counters.iter().enumerate() {
-        let dispatches = counter.local_dispatches + counter.stolen_dispatches;
         let quantum_total = counter.quantum_full + counter.quantum_yield + counter.quantum_preempt;
         let avg_run_us = if counter.task_run_count > 0 {
             counter.task_runtime_ns / counter.task_run_count / 1000
@@ -1186,9 +1514,9 @@ fn scheduler_cpu_rows(
             runs_per_sec: per_sec(counter.task_run_count, secs),
             total_runtime_ns: counter.task_runtime_ns,
             avg_run_us,
-            dispatch_per_sec: per_sec(dispatches, secs),
-            local_pct: pct(counter.local_dispatches, dispatches),
+            full_pct: pct(counter.quantum_full, quantum_total),
             yield_pct: pct(counter.quantum_yield, quantum_total),
+            preempt_pct: pct(counter.quantum_preempt, quantum_total),
             system_load,
             temp_c,
         });
@@ -1231,7 +1559,9 @@ fn scheduler_core_rows(
     for (core, cpus) in grouped {
         let mut runtime_ns = 0u64;
         let mut runs = 0u64;
-        let mut dispatches = 0u64;
+        let mut quantum_full = 0u64;
+        let mut quantum_yield = 0u64;
+        let mut quantum_preempt = 0u64;
         let mut system_load = 0.0f32;
         let mut top_cpu_runtime = 0u64;
         let mut secondary_runtime = 0u64;
@@ -1240,7 +1570,9 @@ fn scheduler_core_rows(
             let counter = counters.get(cpu).copied().unwrap_or_default();
             runtime_ns += counter.task_runtime_ns;
             runs += counter.task_run_count;
-            dispatches += counter.local_dispatches + counter.stolen_dispatches;
+            quantum_full += counter.quantum_full;
+            quantum_yield += counter.quantum_yield;
+            quantum_preempt += counter.quantum_preempt;
             system_load += cpu_stats.get(cpu).map(|(load, _)| *load).unwrap_or(0.0);
             top_cpu_runtime = top_cpu_runtime.max(counter.task_runtime_ns);
             if is_secondary_smt_cpu(topology, cpu) {
@@ -1248,7 +1580,12 @@ fn scheduler_core_rows(
             }
         }
 
-        let avg_run_us = if runs > 0 { runtime_ns / runs / 1000 } else { 0 };
+        let avg_run_us = if runs > 0 {
+            runtime_ns / runs / 1000
+        } else {
+            0
+        };
+        let quantum_total = quantum_full + quantum_yield + quantum_preempt;
         let avg_system_load = if cpus.is_empty() {
             0.0
         } else {
@@ -1262,7 +1599,9 @@ fn scheduler_core_rows(
             runs_per_sec: per_sec(runs, secs),
             total_runtime_ns: runtime_ns,
             avg_run_us,
-            dispatch_per_sec: per_sec(dispatches, secs),
+            full_pct: pct(quantum_full, quantum_total),
+            yield_pct: pct(quantum_yield, quantum_total),
+            preempt_pct: pct(quantum_preempt, quantum_total),
             top_cpu_share_pct: pct(top_cpu_runtime, runtime_ns),
             secondary_smt_pct: pct(secondary_runtime, runtime_ns),
             avg_system_load,
@@ -1298,6 +1637,390 @@ fn scheduler_balance_ratio(counters: &[CpuWorkCounters]) -> f64 {
     let min = active[0].max(1);
     let max = *active.last().unwrap_or(&min);
     max as f64 / min as f64
+}
+
+fn select_balance_ratio(counters: &[CpuWorkCounters], prev_side: bool) -> f64 {
+    let mut active: Vec<u64> = counters
+        .iter()
+        .map(|counter| {
+            if prev_side {
+                counter.select_prev_total
+            } else {
+                counter.select_target_total
+            }
+        })
+        .filter(|&count| count > 0)
+        .collect();
+    if active.len() < 2 {
+        return 1.0;
+    }
+    active.sort_unstable();
+    let min = active[0].max(1);
+    let max = *active.last().unwrap_or(&min);
+    max as f64 / min as f64
+}
+
+fn select_reason_short_label(reason: usize) -> &'static str {
+    match reason {
+        1 => "hm",
+        2 => "hc",
+        3 => "pp",
+        4 => "ps",
+        5 => "hy",
+        6 => "kp",
+        7 => "ki",
+        8 => "tn",
+        9 => "pc",
+        _ => "-",
+    }
+}
+
+fn pressure_probe_site_label(site: usize) -> &'static str {
+    match site {
+        0 => "home",
+        1 => "prev",
+        _ => "unknown",
+    }
+}
+
+fn pressure_probe_outcome_short_label(outcome: usize) -> &'static str {
+    match outcome {
+        0 => "ev",
+        1 => "ba",
+        2 => "bs",
+        3 => "bd",
+        4 => "bb",
+        5 => "ok",
+        _ => "-",
+    }
+}
+
+fn select_reason_totals(counters: &[CpuWorkCounters], prev_side: bool) -> [u64; SELECT_REASON_MAX] {
+    let mut total = [0; SELECT_REASON_MAX];
+    for counter in counters {
+        for reason in 0..SELECT_REASON_MAX {
+            total[reason] += if prev_side {
+                counter.select_prev_reason[reason]
+            } else {
+                counter.select_target_reason[reason]
+            };
+        }
+    }
+    total
+}
+
+fn pressure_probe_balance_ratio(counters: &[CpuWorkCounters], site: usize) -> f64 {
+    let mut active: Vec<u64> = counters
+        .iter()
+        .map(|counter| counter.pressure_probe[site][0])
+        .filter(|&count| count > 0)
+        .collect();
+    if active.len() < 2 {
+        return 1.0;
+    }
+    active.sort_unstable();
+    let min = active[0].max(1);
+    let max = *active.last().unwrap_or(&min);
+    max as f64 / min as f64
+}
+
+fn format_select_reason_summary(counts: &[u64]) -> String {
+    let total: u64 = counts[1..].iter().sum();
+    let mut parts = Vec::new();
+    for reason in 1..counts.len() {
+        if counts[reason] == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{}={:.0}%({})",
+            select_reason_short_label(reason),
+            pct(counts[reason], total),
+            counts[reason]
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_pressure_probe_summary(counts: &[u64]) -> String {
+    let evaluated = counts[0];
+    if evaluated == 0 {
+        return "none".to_string();
+    }
+
+    let mut parts = vec![format!("ev={}", evaluated)];
+    for outcome in 1..counts.len() {
+        if counts[outcome] == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{}={:.0}%({})",
+            pressure_probe_outcome_short_label(outcome),
+            pct(counts[outcome], evaluated),
+            counts[outcome]
+        ));
+    }
+    parts.join(" ")
+}
+
+fn format_select_reason_mix(counts: &[u64], total: u64) -> String {
+    let mut parts = Vec::new();
+    for reason in 1..counts.len() {
+        if counts[reason] == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{}:{:.0}",
+            select_reason_short_label(reason),
+            pct(counts[reason], total)
+        ));
+    }
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_pressure_probe_mix(counts: &[u64], evaluated: u64) -> String {
+    if evaluated == 0 {
+        return "-".to_string();
+    }
+
+    let mut parts = Vec::new();
+    for outcome in 1..counts.len() {
+        if counts[outcome] == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{}:{:.0}",
+            pressure_probe_outcome_short_label(outcome),
+            pct(counts[outcome], evaluated)
+        ));
+    }
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn select_cpu_rows(counters: &[CpuWorkCounters]) -> Vec<SelectCpuRow> {
+    let total_target: u64 = counters
+        .iter()
+        .map(|counter| counter.select_target_total)
+        .sum();
+    let total_prev: u64 = counters
+        .iter()
+        .map(|counter| counter.select_prev_total)
+        .sum();
+    let mut rows: Vec<SelectCpuRow> = counters
+        .iter()
+        .enumerate()
+        .filter_map(|(cpu, counter)| {
+            if counter.select_target_total == 0 && counter.select_prev_total == 0 {
+                return None;
+            }
+            Some(SelectCpuRow {
+                cpu,
+                target_total: counter.select_target_total,
+                target_pct: pct(counter.select_target_total, total_target),
+                prev_total: counter.select_prev_total,
+                prev_pct: pct(counter.select_prev_total, total_prev),
+                target_reason: counter.select_target_reason,
+                prev_reason: counter.select_prev_reason,
+            })
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        b.target_total
+            .cmp(&a.target_total)
+            .then_with(|| b.prev_total.cmp(&a.prev_total))
+            .then_with(|| a.cpu.cmp(&b.cpu))
+    });
+    rows
+}
+
+fn pressure_probe_rows(counters: &[CpuWorkCounters], site: usize) -> Vec<PressureProbeRow> {
+    let total_eval: u64 = counters
+        .iter()
+        .map(|counter| counter.pressure_probe[site][0])
+        .sum();
+    let mut rows: Vec<PressureProbeRow> = counters
+        .iter()
+        .enumerate()
+        .filter_map(|(cpu, counter)| {
+            let eval_total = counter.pressure_probe[site][0];
+            if eval_total == 0 {
+                return None;
+            }
+            Some(PressureProbeRow {
+                cpu,
+                eval_total,
+                eval_pct: pct(eval_total, total_eval),
+                outcome: counter.pressure_probe[site],
+            })
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        b.eval_total
+            .cmp(&a.eval_total)
+            .then_with(|| a.cpu.cmp(&b.cpu))
+    });
+    rows
+}
+
+fn target_wait_total_count(counter: &CpuWorkCounters) -> u64 {
+    counter.target_wait_count[1..].iter().sum()
+}
+
+fn target_wait_total_ns(counter: &CpuWorkCounters) -> u64 {
+    counter.target_wait_ns[1..].iter().sum()
+}
+
+fn local_queue_rows(counters: &[CpuWorkCounters]) -> Vec<LocalQueueRow> {
+    let mut rows: Vec<LocalQueueRow> = counters
+        .iter()
+        .enumerate()
+        .filter_map(|(cpu, counter)| {
+            let active = counter.local_pending > 0
+                || counter.local_pending_max > 0
+                || counter.local_pending_inserts > 0
+                || counter.local_pending_runs > 0
+                || counter.wake_direct_target > 0
+                || counter.wake_busy_target > 0
+                || target_wait_total_count(counter) > 0
+                || counter.cpu_pressure > 0;
+            if !active {
+                return None;
+            }
+            Some(LocalQueueRow {
+                cpu,
+                pressure: counter.cpu_pressure,
+                pending: counter.local_pending,
+                pending_max: counter.local_pending_max,
+                inserts: counter.local_pending_inserts,
+                runs: counter.local_pending_runs,
+                direct: counter.wake_direct_target,
+                busy: counter.wake_busy_target,
+                busy_local: counter.wake_busy_local_target,
+                busy_remote: counter.wake_busy_remote_target,
+                wait_ns: counter.target_wait_ns,
+                wait_count: counter.target_wait_count,
+                wait_max_ns: counter.target_wait_max_ns,
+                wait_bucket: counter.target_wait_bucket,
+            })
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        b.pending
+            .cmp(&a.pending)
+            .then_with(|| b.pending_max.cmp(&a.pending_max))
+            .then_with(|| b.busy.cmp(&a.busy))
+            .then_with(|| {
+                let b_wait: u64 = b.wait_ns[1..].iter().sum();
+                let a_wait: u64 = a.wait_ns[1..].iter().sum();
+                b_wait.cmp(&a_wait)
+            })
+            .then_with(|| b.pressure.cmp(&a.pressure))
+            .then_with(|| a.cpu.cmp(&b.cpu))
+    });
+    rows
+}
+
+fn share_balance_ratio(shares: &[f64]) -> f64 {
+    let mut active: Vec<f64> = shares
+        .iter()
+        .copied()
+        .filter(|share| *share > 0.0)
+        .collect();
+    if active.len() < 2 {
+        return 1.0;
+    }
+    active.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let min = active[0].max(0.0001);
+    let max = *active.last().unwrap_or(&min);
+    max / min
+}
+
+fn balance_counts(shares: &[f64]) -> (usize, usize) {
+    let active: Vec<f64> = shares
+        .iter()
+        .copied()
+        .filter(|share| *share > 0.0)
+        .collect();
+    if active.is_empty() {
+        return (0, 0);
+    }
+    let avg = 100.0 / active.len() as f64;
+    let hot = active.iter().filter(|share| **share > avg * 1.5).count();
+    let cold = active.iter().filter(|share| **share < avg * 0.5).count();
+    (hot, cold)
+}
+
+fn balance_driver(top_share_cpu: &SchedulerCpuRow, top_rate_cpu: &SchedulerCpuRow) -> &'static str {
+    if top_share_cpu.avg_run_us > top_rate_cpu.avg_run_us.saturating_mul(2)
+        && top_share_cpu.runs_per_sec < top_rate_cpu.runs_per_sec * 0.5
+    {
+        "long_runs"
+    } else if top_share_cpu.cpu == top_rate_cpu.cpu {
+        "rate+runtime"
+    } else {
+        "high_rate"
+    }
+}
+
+fn build_balance_diagnosis(
+    cpu_rows: &[SchedulerCpuRow],
+    core_rows: &[SchedulerCoreRow],
+) -> Option<BalanceDiagnosis> {
+    let top_share_cpu = cpu_rows.first()?;
+    let top_rate_cpu = cpu_rows.iter().max_by(|a, b| {
+        a.runs_per_sec
+            .partial_cmp(&b.runs_per_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let top_share_core = core_rows.first()?;
+    let top_rate_core = core_rows.iter().max_by(|a, b| {
+        a.runs_per_sec
+            .partial_cmp(&b.runs_per_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let cpu_shares: Vec<f64> = cpu_rows.iter().map(|row| row.share_pct).collect();
+    let core_shares: Vec<f64> = core_rows.iter().map(|row| row.share_pct).collect();
+    let (hot_cpu_count, cold_cpu_count) = balance_counts(&cpu_shares);
+    let (hot_core_count, cold_core_count) = balance_counts(&core_shares);
+
+    Some(BalanceDiagnosis {
+        top_cpu_share_label: format!("C{:02}", top_share_cpu.cpu),
+        top_cpu_share_pct: top_share_cpu.share_pct,
+        top_cpu_avg_run_us: top_share_cpu.avg_run_us,
+        top_cpu_runs_per_sec: top_share_cpu.runs_per_sec,
+        top_cpu_rate_label: format!("C{:02}", top_rate_cpu.cpu),
+        top_cpu_rate_runs_per_sec: top_rate_cpu.runs_per_sec,
+        top_cpu_rate_avg_run_us: top_rate_cpu.avg_run_us,
+        top_core_share_label: format!("K{:02}", top_share_core.core),
+        top_core_share_pct: top_share_core.share_pct,
+        top_core_hot_thr_pct: top_share_core.top_cpu_share_pct,
+        top_core_sib_pct: top_share_core.secondary_smt_pct,
+        top_core_rate_label: format!("K{:02}", top_rate_core.core),
+        top_core_rate_runs_per_sec: top_rate_core.runs_per_sec,
+        cpu_skew: share_balance_ratio(&cpu_shares),
+        core_skew: share_balance_ratio(&core_shares),
+        hot_cpu_count,
+        cold_cpu_count,
+        hot_core_count,
+        cold_core_count,
+        driver: balance_driver(top_share_cpu, top_rate_cpu),
+        sticky_core: top_share_core.top_cpu_share_pct >= 85.0
+            && top_share_core.secondary_smt_pct <= 15.0,
+    })
 }
 
 fn format_runtime_ms(runtime_ns: u64) -> String {
@@ -1964,6 +2687,7 @@ impl TuiApp {
             latency_matrix,
             task_rows: HashMap::new(),
             sorted_pids: Vec::new(),
+            sorted_pids_dirty: true,
             table_state: TableState::default(),
             bench_table_state: TableState::default(),
             active_tab: TuiTab::Dashboard,
@@ -1993,8 +2717,13 @@ impl TuiApp {
             system_info,
             debug_events: VecDeque::new(),
             per_cpu_work: vec![CpuWorkCounters::default(); nr_cpus],
+            pressure_probe: PressureProbeCounters::default(),
             stats_history: VecDeque::new(),
             cpu_work_history: VecDeque::new(),
+            pressure_probe_history: VecDeque::new(),
+            timeline_history: VecDeque::new(),
+            timeline_last_sample: None,
+            timeline_next_sample_at: None,
         }
     }
 
@@ -2024,10 +2753,11 @@ impl TuiApp {
 
     fn record_stats_snapshot(&mut self, stats: &cake_stats) {
         let now = Instant::now();
-        self.stats_history.push_back(StatsSnapshot {
+        let snapshot = StatsSnapshot {
             at: now,
             stats: *stats,
-        });
+        };
+        self.stats_history.push_back(snapshot);
         while self.stats_history.len() > STATS_HISTORY_MAX_SAMPLES {
             self.stats_history.pop_front();
         }
@@ -2036,6 +2766,32 @@ impl TuiApp {
                 self.stats_history.pop_front();
             } else {
                 break;
+            }
+        }
+
+        match self.timeline_last_sample {
+            None => {
+                self.timeline_last_sample = Some(snapshot);
+                self.timeline_next_sample_at = Some(now + TIMELINE_SAMPLE_PERIOD);
+            }
+            Some(prev) => {
+                let next_at = self
+                    .timeline_next_sample_at
+                    .unwrap_or(prev.at + TIMELINE_SAMPLE_PERIOD);
+                if now >= next_at {
+                    let elapsed = now.saturating_duration_since(prev.at);
+                    if elapsed >= TIMELINE_SAMPLE_PERIOD / 2 {
+                        self.timeline_history.push_back(TimelineBucket {
+                            elapsed,
+                            stats: stats_delta(stats, &prev.stats),
+                        });
+                        while self.timeline_history.len() > TIMELINE_HISTORY_MAX_SAMPLES {
+                            self.timeline_history.pop_front();
+                        }
+                    }
+                    self.timeline_last_sample = Some(snapshot);
+                    self.timeline_next_sample_at = Some(now + TIMELINE_SAMPLE_PERIOD);
+                }
             }
         }
     }
@@ -2052,6 +2808,25 @@ impl TuiApp {
         while let Some(front) = self.cpu_work_history.front() {
             if now.saturating_duration_since(front.at) > STATS_HISTORY_MAX_AGE {
                 self.cpu_work_history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn record_pressure_probe_snapshot(&mut self) {
+        let now = Instant::now();
+        self.pressure_probe_history
+            .push_back(PressureProbeSnapshot {
+                at: now,
+                counters: self.pressure_probe,
+            });
+        while self.pressure_probe_history.len() > STATS_HISTORY_MAX_SAMPLES {
+            self.pressure_probe_history.pop_front();
+        }
+        while let Some(front) = self.pressure_probe_history.front() {
+            if now.saturating_duration_since(front.at) > STATS_HISTORY_MAX_AGE {
+                self.pressure_probe_history.pop_front();
             } else {
                 break;
             }
@@ -2078,13 +2853,6 @@ impl TuiApp {
         Some((elapsed, stats_delta(current, &baseline.stats)))
     }
 
-    fn snapshot_at_or_before(&self, target: Instant) -> Option<&StatsSnapshot> {
-        self.stats_history
-            .iter()
-            .rev()
-            .find(|snap| snap.at <= target)
-    }
-
     fn cpu_work_window(&self, window: Duration) -> Option<(Duration, Vec<CpuWorkCounters>)> {
         let newest = self.cpu_work_history.back()?;
         let target = newest.at.checked_sub(window).unwrap_or(newest.at);
@@ -2098,50 +2866,52 @@ impl TuiApp {
         if elapsed < Duration::from_secs(1) {
             return None;
         }
-        Some((elapsed, cpu_work_delta(&self.per_cpu_work, &baseline.counters)))
+        Some((
+            elapsed,
+            cpu_work_delta(&self.per_cpu_work, &baseline.counters),
+        ))
+    }
+
+    fn pressure_probe_window(&self, window: Duration) -> Option<(Duration, PressureProbeCounters)> {
+        let newest = self.pressure_probe_history.back()?;
+        let target = newest.at.checked_sub(window).unwrap_or(newest.at);
+        let baseline = self
+            .pressure_probe_history
+            .iter()
+            .rev()
+            .find(|snap| snap.at <= target)
+            .or_else(|| self.pressure_probe_history.front())?;
+        let elapsed = newest.at.saturating_duration_since(baseline.at);
+        if elapsed < Duration::from_secs(1) {
+            return None;
+        }
+        Some((
+            elapsed,
+            pressure_probe_delta(self.pressure_probe, baseline.counters),
+        ))
     }
 
     fn timeline_samples(&self, window: Duration, step: Duration) -> Vec<TimelineSample> {
-        let newest = match self.stats_history.back() {
-            Some(snap) => snap,
-            None => return Vec::new(),
-        };
         let step_secs = step.as_secs();
         if step_secs == 0 {
             return Vec::new();
         }
         let buckets = (window.as_secs() / step_secs).max(1);
-        let mut samples = Vec::new();
-
-        for start_ago_secs in (1..=buckets).rev() {
-            let end_ago_secs = start_ago_secs - 1;
-            let start_target = newest
-                .at
-                .checked_sub(step.saturating_mul(start_ago_secs as u32))
-                .unwrap_or(newest.at);
-            let end_target = newest
-                .at
-                .checked_sub(step.saturating_mul(end_ago_secs as u32))
-                .unwrap_or(newest.at);
-            let Some(start_snap) = self.snapshot_at_or_before(start_target) else {
-                continue;
-            };
-            let Some(end_snap) = self.snapshot_at_or_before(end_target) else {
-                continue;
-            };
-            let elapsed = end_snap.at.saturating_duration_since(start_snap.at);
-            if elapsed < step / 2 {
-                continue;
-            }
-            samples.push(TimelineSample {
-                start_ago_secs,
-                end_ago_secs,
-                elapsed,
-                stats: stats_delta(&end_snap.stats, &start_snap.stats),
-            });
-        }
-
-        samples
+        let start_idx = self.timeline_history.len().saturating_sub(buckets as usize);
+        self.timeline_history
+            .iter()
+            .skip(start_idx)
+            .enumerate()
+            .map(|(idx, bucket)| {
+                let remaining = (buckets as usize).saturating_sub(idx);
+                TimelineSample {
+                    start_ago_secs: remaining as u64,
+                    end_ago_secs: remaining.saturating_sub(1) as u64,
+                    elapsed: bucket.elapsed,
+                    stats: bucket.stats,
+                }
+            })
+            .collect()
     }
 
     pub fn next_tab(&mut self) {
@@ -2170,6 +2940,7 @@ impl TuiApp {
             SortColumn::Class => SortColumn::Migrations,
             SortColumn::Migrations => SortColumn::Pid,
         };
+        self.sorted_pids_dirty = true;
     }
 
     pub fn scroll_table_down(&mut self) {
@@ -2232,6 +3003,7 @@ impl TuiApp {
 
     pub fn toggle_filter(&mut self) {
         self.task_filter = self.task_filter.next();
+        self.sorted_pids_dirty = true;
     }
 }
 
@@ -2265,9 +3037,20 @@ fn build_cpu_topology_grid_compact<'a>(
     let mut text = Vec::new();
 
     text.push(Line::from(vec![
-        Span::styled("Node 0 Topology", Style::default().fg(Color::DarkGray)),
-        Span::styled("  [ Load% | Temp°C | Cake% ]", Style::default().fg(Color::Yellow)),
-        Span::styled(format!("  {}", scheduler_label), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "Node 0 Topology",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  cells = Ck runtime share | Ld system load | temp",
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled(
+            format!("  {}", scheduler_label),
+            Style::default().fg(Color::Cyan),
+        ),
     ]));
 
     // Group CPUs by LLC
@@ -2353,18 +3136,18 @@ fn build_cpu_topology_grid_compact<'a>(
                 ));
                 line_spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
                 line_spans.push(Span::styled(
-                    format!("{:>3.0}%", load),
+                    format!("Ck{:>2.0}", sched_share),
+                    Style::default().fg(sched_color),
+                ));
+                line_spans.push(Span::styled("|", Style::default().fg(Color::DarkGray)));
+                line_spans.push(Span::styled(
+                    format!("L{:>2.0}", load),
                     Style::default().fg(load_color),
                 ));
                 line_spans.push(Span::styled("|", Style::default().fg(Color::DarkGray)));
                 line_spans.push(Span::styled(
-                    format!("{:<2.0}°C", temp),
+                    format!("{:>2.0}°", temp),
                     Style::default().fg(temp_color),
-                ));
-                line_spans.push(Span::styled("|", Style::default().fg(Color::DarkGray)));
-                line_spans.push(Span::styled(
-                    format!("{:>3.0}%", sched_share),
-                    Style::default().fg(sched_color),
                 ));
                 line_spans.push(Span::styled("]  ", Style::default().fg(Color::DarkGray)));
             }
@@ -2374,7 +3157,7 @@ fn build_cpu_topology_grid_compact<'a>(
 
     Paragraph::new(text).block(
         Block::default()
-            .title(" Topology ")
+            .title(" Topology [Ck | Ld | Temp] ")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan).dim())
@@ -2390,15 +3173,19 @@ fn build_scheduler_cpu_table<'a>(
     let header = Row::new(vec![
         Cell::from("CPU"),
         Cell::from("C/L3"),
-        Cell::from("Sched%"),
+        Cell::from("Cake%"),
         Cell::from("Runs/s"),
         Cell::from("Avgµs"),
-        Cell::from("Disp/s"),
-        Cell::from("Local%"),
-        Cell::from("Yld%"),
-        Cell::from("Load"),
+        Cell::from("Full%"),
+        Cell::from("Blk%"),
+        Cell::from("Pre%"),
+        Cell::from("Sys%"),
     ])
-    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let table_rows: Vec<Row<'a>> = rows
         .iter()
@@ -2410,7 +3197,9 @@ fn build_scheduler_cpu_table<'a>(
                 Style::default().fg(Color::White)
             };
             let share_style = if row.share_pct > 15.0 {
-                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD)
             } else if row.share_pct > 5.0 {
                 Style::default().fg(Color::Yellow)
             } else {
@@ -2432,10 +3221,13 @@ fn build_scheduler_cpu_table<'a>(
                 Cell::from(Span::styled(format!("{:>5.1}", row.share_pct), share_style)),
                 Cell::from(format!("{:>6.1}", row.runs_per_sec)),
                 Cell::from(format!("{:>6}", row.avg_run_us)),
-                Cell::from(format!("{:>6.1}", row.dispatch_per_sec)),
-                Cell::from(format!("{:>5.0}", row.local_pct)),
+                Cell::from(format!("{:>5.0}", row.full_pct)),
                 Cell::from(format!("{:>4.0}", row.yield_pct)),
-                Cell::from(Span::styled(format!("{:>4.0}", row.system_load), load_style)),
+                Cell::from(format!("{:>4.0}", row.preempt_pct)),
+                Cell::from(Span::styled(
+                    format!("{:>4.0}", row.system_load),
+                    load_style,
+                )),
             ])
         })
         .collect();
@@ -2448,8 +3240,8 @@ fn build_scheduler_cpu_table<'a>(
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(7),
+            Constraint::Length(5),
+            Constraint::Length(5),
             Constraint::Length(5),
             Constraint::Length(5),
         ],
@@ -2466,21 +3258,27 @@ fn build_scheduler_core_table<'a>(
     let header = Row::new(vec![
         Cell::from("Core"),
         Cell::from("CPUs"),
-        Cell::from("Sched%"),
+        Cell::from("Cake%"),
         Cell::from("Runs/s"),
         Cell::from("Avgµs"),
-        Cell::from("TopCPU%"),
-        Cell::from("SMT2%"),
-        Cell::from("Load"),
+        Cell::from("HotThr%"),
+        Cell::from("Sib%"),
+        Cell::from("Sys%"),
     ])
-    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let table_rows: Vec<Row<'a>> = rows
         .iter()
         .take(limit)
         .map(|row| {
             let share_style = if row.share_pct > 20.0 {
-                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD)
             } else if row.share_pct > 8.0 {
                 Style::default().fg(Color::Yellow)
             } else {
@@ -2489,7 +3287,9 @@ fn build_scheduler_core_table<'a>(
             Row::new(vec![
                 Cell::from(Span::styled(
                     format!("K{:02}", row.core),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(row.cpu_label.clone()),
                 Cell::from(Span::styled(format!("{:>5.1}", row.share_pct), share_style)),
@@ -2804,6 +3604,10 @@ fn per_sec(count: u64, secs: f64) -> f64 {
     }
 }
 
+fn signed_diff_u64(lhs: u64, rhs: u64) -> i128 {
+    i128::from(lhs) - i128::from(rhs)
+}
+
 fn slice_util_display_pct(raw_score: u16) -> u32 {
     ((raw_score as u32) * 100 + 64) / 128
 }
@@ -2814,6 +3618,24 @@ fn expected_timeline_samples(window: Duration, step: Duration) -> usize {
         0
     } else {
         (window.as_secs() / step_secs).max(1) as usize
+    }
+}
+
+fn timeline_history_span(samples: &VecDeque<TimelineBucket>) -> Duration {
+    samples
+        .iter()
+        .fold(Duration::ZERO, |acc, sample| acc + sample.elapsed)
+}
+
+fn average_timeline_sample_secs(samples: &[TimelineSample]) -> f64 {
+    if samples.is_empty() {
+        0.0
+    } else {
+        samples
+            .iter()
+            .map(|sample| sample.elapsed.as_secs_f64())
+            .sum::<f64>()
+            / samples.len() as f64
     }
 }
 
@@ -2849,12 +3671,15 @@ fn summarize_timeline_samples(
     let mut total_wait_count = [0u64; 4];
     let mut total_paths = [0u64; 6];
     let mut total_quantum = [0u64; 3];
+    let mut total_sched_yield_calls = 0u64;
+    let mut total_sample_secs = 0.0f64;
 
     for sample in samples {
         let secs = sample.elapsed.as_secs_f64().max(0.1);
         let wake_total = sample.stats.nr_wakeup_direct_dispatches
             + sample.stats.nr_wakeup_dsq_fallback_busy
             + sample.stats.nr_wakeup_dsq_fallback_queued;
+        total_sample_secs += secs;
         run_rates.push(per_sec(sample.stats.nr_running_calls, secs));
         wake_rates.push(per_sec(wake_total, secs));
 
@@ -2878,6 +3703,7 @@ fn summarize_timeline_samples(
         total_quantum[0] += sample.stats.nr_quantum_full;
         total_quantum[1] += sample.stats.nr_quantum_yield;
         total_quantum[2] += sample.stats.nr_quantum_preempt;
+        total_sched_yield_calls += sample.stats.nr_sched_yield_calls;
     }
 
     let mean = |values: &[f64]| -> f64 {
@@ -3019,7 +3845,7 @@ fn summarize_timeline_samples(
     line3.push(dashboard_sep("  "));
     push_dashboard_metric(
         &mut line3,
-        "quantum f/y/p ",
+        "quantum f/b/p ",
         format!(
             "{:.0}/{:.0}/{:.0}%",
             pct(total_quantum[0], quantum_total),
@@ -3027,6 +3853,13 @@ fn summarize_timeline_samples(
             pct(total_quantum[2], quantum_total),
         ),
         Style::default().fg(Color::LightMagenta),
+    );
+    line3.push(dashboard_sep("  "));
+    push_dashboard_metric(
+        &mut line3,
+        "sched_yield/s ",
+        format!("{:.1}", per_sec(total_sched_yield_calls, total_sample_secs)),
+        Style::default().fg(Color::Yellow),
     );
 
     Some([Line::from(line1), Line::from(line2), Line::from(line3)])
@@ -3043,7 +3876,7 @@ fn format_timeline_sample_row(sample: &TimelineSample) -> String {
         + sample.stats.nr_quantum_preempt;
 
     format!(
-        "  t-{:>2}..{:>2}s span={:>4.2}s run/s={:>7.1} wake/s={:>7.1} wake%={:>4.0}/{:>4.0}/{:>4.0} path%={:>4.0}/{:>4.0}/{:>4.0}/{:>4.0}/{:>4.0} cbns={}/{}/{}/{} waitus<=5ms={}/{}/{} slice%={:.0}/{:.0}/{:.0}",
+        "  slot-{:>2}..{:>2} span={:>4.2}s run/s={:>7.1} wake/s={:>7.1} wake%={:>4.0}/{:>4.0}/{:>4.0} path%={:>4.0}/{:>4.0}/{:>4.0}/{:>4.0}/{:>4.0} cbns={}/{}/{}/{} waitus<=5ms={}/{}/{} slice%={:.0}/{:.0}/{:.0}",
         sample.start_ago_secs,
         sample.end_ago_secs,
         secs,
@@ -3097,6 +3930,65 @@ fn wake_reason_label(reason: usize) -> &'static str {
         2 => "busy",
         3 => "queued",
         _ => "?",
+    }
+}
+
+fn wake_reason_short_label(reason: usize) -> &'static str {
+    match reason {
+        1 => "dir",
+        2 => "busy",
+        3 => "queue",
+        _ => "?",
+    }
+}
+
+fn wake_bucket_label(bucket: usize) -> &'static str {
+    match bucket {
+        0 => "<50us",
+        1 => "<200us",
+        2 => "<1ms",
+        3 => "<5ms",
+        4 => ">=5ms",
+        _ => "?",
+    }
+}
+
+fn wake_bucket_p99_label(buckets: &[u64; WAKE_BUCKET_MAX]) -> &'static str {
+    let total: u64 = buckets.iter().sum();
+    if total == 0 {
+        return "-";
+    }
+    let target = total.saturating_mul(99).saturating_add(99) / 100;
+    let mut seen = 0;
+    for (bucket, count) in buckets.iter().enumerate() {
+        seen += *count;
+        if seen >= target {
+            return wake_bucket_label(bucket);
+        }
+    }
+    wake_bucket_label(WAKE_BUCKET_MAX - 1)
+}
+
+fn format_local_queue_wait(row: &LocalQueueRow) -> String {
+    let mut parts = Vec::new();
+    for reason in 1..WAKE_REASON_MAX {
+        let samples = row.wait_count[reason];
+        if samples == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{}={}/{}us/{}({})",
+            wake_reason_short_label(reason),
+            row.wait_ns[reason] / samples / 1000,
+            row.wait_max_ns[reason] / 1000,
+            wake_bucket_p99_label(&row.wait_bucket[reason]),
+            samples,
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
     }
 }
 
@@ -3242,6 +4134,274 @@ fn format_path_summary(count: &[u64]) -> String {
     }
 }
 
+fn append_select_cpu_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    elapsed: Duration,
+) {
+    let rows = select_cpu_rows(counters);
+    let target_total: u64 = counters
+        .iter()
+        .map(|counter| counter.select_target_total)
+        .sum();
+    let prev_total: u64 = counters
+        .iter()
+        .map(|counter| counter.select_prev_total)
+        .sum();
+    if target_total == 0 && prev_total == 0 {
+        return;
+    }
+
+    let target_reason = select_reason_totals(counters, false);
+    let prev_reason = select_reason_totals(counters, true);
+    let top_target = rows
+        .iter()
+        .max_by_key(|row| row.target_total)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_target_pct = rows
+        .iter()
+        .max_by_key(|row| row.target_total)
+        .map(|row| row.target_pct)
+        .unwrap_or(0.0);
+    let top_prev = rows
+        .iter()
+        .max_by_key(|row| row.prev_total)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_prev_pct = rows
+        .iter()
+        .max_by_key(|row| row.prev_total)
+        .map(|row| row.prev_pct)
+        .unwrap_or(0.0);
+
+    output.push_str(&format!(
+        "{}: sampled={:.1}s target_total={} prev_total={} top_target={} {:.1}% top_prev={} {:.1}% target_skew={:.1}x prev_skew={:.1}x\n",
+        label,
+        elapsed.as_secs_f64(),
+        target_total,
+        prev_total,
+        top_target,
+        top_target_pct,
+        top_prev,
+        top_prev_pct,
+        select_balance_ratio(counters, false),
+        select_balance_ratio(counters, true),
+    ));
+    output.push_str(&format!(
+        "{}.legend: hm=home_cpu hc=home_core pp=prev_primary ps=primary_scan hy=hybrid_scan kp=kernel_prev ki=kernel_idle tn=tunnel pc=pressure_core\n",
+        label
+    ));
+    output.push_str(&format!(
+        "{}.reasons.target: {}\n",
+        label,
+        format_select_reason_summary(&target_reason)
+    ));
+    output.push_str(&format!(
+        "{}.reasons.prev: {}\n",
+        label,
+        format_select_reason_summary(&prev_reason)
+    ));
+    output.push_str(&format!("{}.rows:\n", label));
+    for row in rows {
+        output.push_str(&format!(
+            "  cpu=C{:02} target={} ({:.1}%) prev={} ({:.1}%) tgt={} prev={}\n",
+            row.cpu,
+            row.target_total,
+            row.target_pct,
+            row.prev_total,
+            row.prev_pct,
+            format_select_reason_mix(&row.target_reason, row.target_total),
+            format_select_reason_mix(&row.prev_reason, row.prev_total),
+        ));
+    }
+}
+
+fn append_pressure_probe_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    totals: &PressureProbeCounters,
+    elapsed: Duration,
+) {
+    let total_eval: u64 = totals.total.iter().map(|site| site[0]).sum();
+    if total_eval == 0 {
+        return;
+    }
+
+    output.push_str(&format!(
+        "{}.legend: ev=evaluated ba=anchor(structural blocker) bs=score bd=delta bb=sibling_busy ok=success\n",
+        label
+    ));
+
+    for site in 0..PRESSURE_SITE_MAX {
+        let rows = pressure_probe_rows(counters, site);
+        let eval_total = totals.total[site][0];
+        if eval_total == 0 {
+            continue;
+        }
+
+        let accounted_eval: u64 = rows.iter().map(|row| row.eval_total).sum();
+        let unattributed = eval_total.saturating_sub(accounted_eval);
+        let top_anchor = rows
+            .iter()
+            .max_by_key(|row| row.eval_total)
+            .map(|row| format!("C{:02}", row.cpu))
+            .unwrap_or_else(|| "-".to_string());
+        let top_anchor_pct = rows
+            .iter()
+            .max_by_key(|row| row.eval_total)
+            .map(|row| row.eval_pct)
+            .unwrap_or(0.0);
+
+        output.push_str(&format!(
+            "{}.{}: sampled={:.1}s eval={} unattributed={} top_anchor={} {:.1}% eval_skew={:.1}x outcomes={}\n",
+            label,
+            pressure_probe_site_label(site),
+            elapsed.as_secs_f64(),
+            eval_total,
+            unattributed,
+            top_anchor,
+            top_anchor_pct,
+            pressure_probe_balance_ratio(counters, site),
+            format_pressure_probe_summary(&totals.total[site]),
+        ));
+        output.push_str(&format!(
+            "{}.{}.rows:\n",
+            label,
+            pressure_probe_site_label(site)
+        ));
+        for row in rows {
+            output.push_str(&format!(
+                "  cpu=C{:02} eval={} ({:.1}%) outcomes={}\n",
+                row.cpu,
+                row.eval_total,
+                row.eval_pct,
+                format_pressure_probe_mix(&row.outcome, row.eval_total),
+            ));
+        }
+    }
+}
+
+fn append_local_queue_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    elapsed: Duration,
+) {
+    let rows = local_queue_rows(counters);
+    if rows.is_empty() {
+        return;
+    }
+
+    let secs = elapsed.as_secs_f64().max(0.1);
+    let inserts: u64 = counters
+        .iter()
+        .map(|counter| counter.local_pending_inserts)
+        .sum();
+    let runs: u64 = counters
+        .iter()
+        .map(|counter| counter.local_pending_runs)
+        .sum();
+    let pending_now: u64 = counters
+        .iter()
+        .map(|counter| counter.local_pending as u64)
+        .sum();
+    let max_cpu_pending = counters
+        .iter()
+        .map(|counter| counter.local_pending_max)
+        .max()
+        .unwrap_or(0);
+    let direct: u64 = counters
+        .iter()
+        .map(|counter| counter.wake_direct_target)
+        .sum();
+    let busy: u64 = counters
+        .iter()
+        .map(|counter| counter.wake_busy_target)
+        .sum();
+    let busy_local: u64 = counters
+        .iter()
+        .map(|counter| counter.wake_busy_local_target)
+        .sum();
+    let busy_remote: u64 = counters
+        .iter()
+        .map(|counter| counter.wake_busy_remote_target)
+        .sum();
+    let top_pending = rows
+        .iter()
+        .max_by_key(|row| row.pending)
+        .filter(|row| row.pending > 0)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_busy = rows
+        .iter()
+        .max_by_key(|row| row.busy)
+        .filter(|row| row.busy > 0)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_wait = counters
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, counter)| target_wait_total_ns(counter))
+        .filter(|(_, counter)| target_wait_total_ns(counter) > 0)
+        .map(|(cpu, _)| format!("C{:02}", cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_pressure = rows
+        .iter()
+        .max_by_key(|row| row.pressure)
+        .filter(|row| row.pressure > 0)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+
+    output.push_str(&format!(
+        "{}: sampled={:.1}s inserts={} ({:.1}/s) runs_seen={} ({:.1}/s) pending_now={} max_cpu_pending={} wake_target:direct={} busy={} busy_local={} busy_remote={} top_pending={} top_busy={} top_wait={} top_pressure={}\n",
+        label,
+        elapsed.as_secs_f64(),
+        inserts,
+        per_sec(inserts, secs),
+        runs,
+        per_sec(runs, secs),
+        pending_now,
+        max_cpu_pending,
+        direct,
+        busy,
+        busy_local,
+        busy_remote,
+        top_pending,
+        top_busy,
+        top_wait,
+        top_pressure,
+    ));
+    output.push_str(&format!(
+        "{}.legend: pend=estimated SCX_DSQ_LOCAL_ON inserts not yet observed running max=per-cpu peak since reset press=cpu_pressure wait=target wake-to-run avg/max/p99bucket(samples)\n",
+        label
+    ));
+    output.push_str(&format!("{}.rows:\n", label));
+    for row in rows.iter().take(32) {
+        output.push_str(&format!(
+            "  cpu=C{:02} press={} pend={} max={} ins={} ({:.1}/s) run_seen={} ({:.1}/s) wake_target[d/b/l/r]={}/{}/{}/{} wait={}\n",
+            row.cpu,
+            row.pressure,
+            row.pending,
+            row.pending_max,
+            row.inserts,
+            per_sec(row.inserts, secs),
+            row.runs,
+            per_sec(row.runs, secs),
+            row.direct,
+            row.busy,
+            row.busy_local,
+            row.busy_remote,
+            format_local_queue_wait(row),
+        ));
+    }
+    if rows.len() > 32 {
+        output.push_str(&format!("  ... +{} more CPUs\n", rows.len() - 32));
+    }
+}
+
 fn format_row_place_wait_summary(row: &TaskTelemetryRow) -> String {
     let mut parts = Vec::new();
     for cls in 0..4 {
@@ -3316,7 +4476,7 @@ fn append_cpu_work_section(
         .unwrap_or_else(|| "-".to_string());
 
     output.push_str(&format!(
-        "{}: sampled={:.1}s active_cpu={}/{} active_core={}/{} runtime_ms={} runs={} top_cpu={} top_core={} skew={:.1}x\n",
+        "{}: sampled={:.1}s active_cpu={}/{} active_core={}/{} runtime_ms={} runs={} top_cpu_cake={} top_core_cake={} skew={:.1}x\n",
         label,
         elapsed.as_secs_f64(),
         active_cpu_count,
@@ -3329,10 +4489,14 @@ fn append_cpu_work_section(
         top_core,
         scheduler_balance_ratio(counters),
     ));
+    output.push_str(&format!(
+        "{}.legend: cake=tracked runtime share sys=system cpu load hot_thr=share on the busier sibling sib=share on the SMT sibling q%[f/b/p]=quantum full/blocked/preempt mix\n",
+        label
+    ));
     output.push_str(&format!("{}.rows:\n", label));
     for row in &cpu_rows {
         output.push_str(&format!(
-            "  cpu=C{:02} core={} llc={} thr={} share={:.1}% runs={} runs/s={:.1} runtime_ms={} avg_run_us={} disp/s={:.1} local={:.0}% q[f/y/p]={}/{}/{} load={:.0}% temp={:.0}C\n",
+            "  cpu=C{:02} core={} llc={} thr={} cake={:.1}% runs={} runs/s={:.1} runtime_ms={} avg_run_us={} q%[f/b/p]={:.0}/{:.0}/{:.0} q[f/b/p]={}/{}/{} sys={:.0}% temp={:.0}C\n",
             row.cpu,
             row.core,
             row.llc,
@@ -3342,8 +4506,9 @@ fn append_cpu_work_section(
             row.runs_per_sec,
             format_runtime_ms(row.total_runtime_ns),
             row.avg_run_us,
-            row.dispatch_per_sec,
-            row.local_pct,
+            row.full_pct,
+            row.yield_pct,
+            row.preempt_pct,
             counters[row.cpu].quantum_full,
             counters[row.cpu].quantum_yield,
             counters[row.cpu].quantum_preempt,
@@ -3354,7 +4519,7 @@ fn append_cpu_work_section(
     output.push_str(&format!("{}.cores:\n", label));
     for row in &core_rows {
         output.push_str(&format!(
-            "  core=K{:02} cpus={} share={:.1}% runs={} runs/s={:.1} runtime_ms={} avg_run_us={} disp/s={:.1} top_cpu={:.0}% smt2={:.0}% load={:.0}%\n",
+            "  core=K{:02} cpus={} cake={:.1}% runs={} runs/s={:.1} runtime_ms={} avg_run_us={} q%[f/b/p]={:.0}/{:.0}/{:.0} hot_thr={:.0}% sib={:.0}% sys={:.0}%\n",
             row.core,
             row.cpu_label,
             row.share_pct,
@@ -3362,7 +4527,9 @@ fn append_cpu_work_section(
             row.runs_per_sec,
             format_runtime_ms(row.total_runtime_ns),
             row.avg_run_us,
-            row.dispatch_per_sec,
+            row.full_pct,
+            row.yield_pct,
+            row.preempt_pct,
             row.top_cpu_share_pct,
             row.secondary_smt_pct,
             row.avg_system_load,
@@ -3384,6 +4551,7 @@ fn append_window_stats(
         + stats.nr_wakeup_dsq_fallback_queued;
     let direct_total = stats.nr_direct_local_inserts;
     let shared_total = stats.nr_shared_vtime_inserts;
+    let queue_net = signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed);
 
     output.push_str(&format!("\nwindow: {} sampled={:.1}s\n", label, secs));
     output.push_str(&format!(
@@ -3428,6 +4596,16 @@ fn append_window_stats(
         stats.nr_primary_scan_misses,
     ));
     output.push_str(&format!(
+        "win.queue.shared: depth_now={} in={} ({:.1}/s) out={} ({:.1}/s) net={:+} ({:+.1}/s)\n",
+        queue_now,
+        stats.nr_dsq_queued,
+        per_sec(stats.nr_dsq_queued, secs),
+        stats.nr_dsq_consumed,
+        per_sec(stats.nr_dsq_consumed, secs),
+        queue_net,
+        queue_net as f64 / secs,
+    ));
+    output.push_str(&format!(
         "win.cb: sel_avg_ns={} enq_avg_ns={} disp_avg_ns={} run_avg_ns={} stop_avg_ns={} slow=sel:{} enq:{} disp:{} run:{} stop:{}\n",
         avg_ns(stats.total_select_cpu_ns, stats.nr_select_cpu_calls),
         avg_ns(stats.total_enqueue_latency_ns, stats.nr_enqueue_calls),
@@ -3466,13 +4644,14 @@ fn append_window_stats(
     ));
     let quantum_total = stats.nr_quantum_full + stats.nr_quantum_yield + stats.nr_quantum_preempt;
     output.push_str(&format!(
-        "win.slice: full={} ({:.1}%) yield={} ({:.1}%) preempt={} ({:.1}%) kick:wake[i/p]={}/{} affine[i/p]={}/{}\n",
+        "win.slice: full={} ({:.1}%) blocked={} ({:.1}%) preempt={} ({:.1}%) sched_yield={} kick:wake[i/p]={}/{} affine[i/p]={}/{}\n",
         stats.nr_quantum_full,
         pct(stats.nr_quantum_full, quantum_total),
         stats.nr_quantum_yield,
         pct(stats.nr_quantum_yield, quantum_total),
         stats.nr_quantum_preempt,
         pct(stats.nr_quantum_preempt, quantum_total),
+        stats.nr_sched_yield_calls,
         stats.nr_wake_kick_idle,
         stats.nr_wake_kick_preempt,
         stats.nr_affine_kick_idle,
@@ -3576,14 +4755,37 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     ));
     output.push_str("scope: lifetime\n");
     output.push_str(
-        "capture: global=exact task.life=exact task.rate=delta_per_tick task.stage=latest_observed wakewait.all=exact wakewait<=5ms=bounded windows=delta_snapshots history=60s@1s nearest<=boundary\n",
+        "capture: global=exact task.life=exact task.rate=delta_per_tick task.stage=latest_observed wakewait.all=exact wakewait<=5ms=bounded localq=debug_estimate windows=delta_snapshots history=rolling_1s_samples\n",
     );
     output.push_str(
-        "task.fields: latest={LASTWus,SELns,ENQns,STOPns,RUNns,GAPus,path/place} rate={RUN/s,MIG/s} life={MAXRTus,JITus,wakeus<=5ms,WHIST,Qf/y/p,cpu/core spread}\n",
+        "task.fields: latest={LASTWus,SELns,ENQns,STOPns,RUNns,GAPus,path/place} rate={RUN/s,MIG/s} life={MAXRTus,JITus,wakeus<=5ms,WHIST,Qf/b/p,SYLD,cpu/core spread}\n",
     );
+    output.push_str(
+        "slice.meaning: blocked=task stopped with slice left and was not runnable; sched_yield=explicit cake_yield callback count\n",
+    );
+    let life_elapsed = app.start_time.elapsed().max(Duration::from_secs(1));
+    let life_cpu_rows = scheduler_cpu_rows(
+        &app.per_cpu_work,
+        &app.topology,
+        &app.cpu_stats,
+        life_elapsed,
+    );
+    let life_core_rows = scheduler_core_rows(
+        &app.per_cpu_work,
+        &app.topology,
+        &app.cpu_stats,
+        life_elapsed,
+    );
+    let life_balance = build_balance_diagnosis(&life_cpu_rows, &life_core_rows);
+    let timeline_window = Duration::from_secs(60);
+    let timeline_step = Duration::from_secs(1);
+    let timeline_samples = app.timeline_samples(timeline_window, timeline_step);
+    let timeline_expected = expected_timeline_samples(timeline_window, timeline_step);
+    let timeline_span = timeline_history_span(&app.timeline_history);
 
     // Compact dispatch stats
     let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
+    let queue_net = signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed);
     let wake_total = stats.nr_wakeup_direct_dispatches
         + stats.nr_wakeup_dsq_fallback_busy
         + stats.nr_wakeup_dsq_fallback_queued;
@@ -3621,6 +4823,10 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         stats.nr_home_cpu_busy_misses,
         stats.nr_prev_primary_busy_misses,
         stats.nr_primary_scan_misses,
+    ));
+    output.push_str(&format!(
+        "queue.shared: depth_now={} in={} out={} net={:+}\n",
+        dsq_depth, stats.nr_dsq_queued, stats.nr_dsq_consumed, queue_net,
     ));
 
     // Compact callback profile (totals + averages)
@@ -3678,13 +4884,14 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     ));
     let quantum_total = stats.nr_quantum_full + stats.nr_quantum_yield + stats.nr_quantum_preempt;
     output.push_str(&format!(
-        "slice: full={} ({:.1}%) yield={} ({:.1}%) preempt={} ({:.1}%) kick:wake[i/p]={}/{} affine[i/p]={}/{}\n",
+        "slice: full={} ({:.1}%) blocked={} ({:.1}%) preempt={} ({:.1}%) sched_yield={} kick:wake[i/p]={}/{} affine[i/p]={}/{}\n",
         stats.nr_quantum_full,
         pct(stats.nr_quantum_full, quantum_total),
         stats.nr_quantum_yield,
         pct(stats.nr_quantum_yield, quantum_total),
         stats.nr_quantum_preempt,
         pct(stats.nr_quantum_preempt, quantum_total),
+        stats.nr_sched_yield_calls,
         stats.nr_wake_kick_idle,
         stats.nr_wake_kick_preempt,
         stats.nr_affine_kick_idle,
@@ -3794,12 +5001,74 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         cap.build_tasks,
         cap.critical_tasks,
     ));
+    output.push_str(&format!(
+        "context: lifetime_sampled={:.1}s cpu_work_life={:.1}s timeline_history={} timeline_span={:.1}s avg_step={:.2}s last60s_coverage={}/{}\n",
+        app.start_time.elapsed().as_secs_f64(),
+        life_elapsed.as_secs_f64(),
+        app.timeline_history.len(),
+        timeline_span.as_secs_f64(),
+        if app.timeline_history.is_empty() {
+            0.0
+        } else {
+            timeline_span.as_secs_f64() / app.timeline_history.len() as f64
+        },
+        timeline_samples.len(),
+        timeline_expected,
+    ));
+    if let Some(diag) = &life_balance {
+        output.push_str(&format!(
+            "balance.life: driver={} top_cpu={} {:.1}% {}us {:.1}/s top_rate_cpu={} {:.1}/s {}us top_core={} {:.1}% hot_thr={:.0}% sib={:.0}% top_rate_core={} {:.1}/s cpu_skew={:.1}x core_skew={:.1}x hot/cold cpu={}/{} core={}/{} sticky_core={} hard_scatter={} focus_scatter={} hard_smt={}\n",
+            diag.driver,
+            diag.top_cpu_share_label,
+            diag.top_cpu_share_pct,
+            diag.top_cpu_avg_run_us,
+            diag.top_cpu_runs_per_sec,
+            diag.top_cpu_rate_label,
+            diag.top_cpu_rate_runs_per_sec,
+            diag.top_cpu_rate_avg_run_us,
+            diag.top_core_share_label,
+            diag.top_core_share_pct,
+            diag.top_core_hot_thr_pct,
+            diag.top_core_sib_pct,
+            diag.top_core_rate_label,
+            diag.top_core_rate_runs_per_sec,
+            diag.cpu_skew,
+            diag.core_skew,
+            diag.hot_cpu_count,
+            diag.cold_cpu_count,
+            diag.hot_core_count,
+            diag.cold_core_count,
+            if diag.sticky_core { "yes" } else { "no" },
+            cap.hard_latency_scattered,
+            cap.focus_scattered,
+            cap.hard_latency_smt_heavy,
+        ));
+    }
     append_cpu_work_section(
         &mut output,
         "cpu.work.life",
         &app.per_cpu_work,
         &app.topology,
         &app.cpu_stats,
+        app.start_time.elapsed(),
+    );
+    append_local_queue_section(
+        &mut output,
+        "localq.life",
+        &app.per_cpu_work,
+        app.start_time.elapsed(),
+    );
+    append_select_cpu_section(
+        &mut output,
+        "select.life",
+        &app.per_cpu_work,
+        app.start_time.elapsed(),
+    );
+    append_pressure_probe_section(
+        &mut output,
+        "pressure.life",
+        &app.per_cpu_work,
+        &app.pressure_probe,
         app.start_time.elapsed(),
     );
     if let Some((elapsed, delta)) = app.windowed_stats(stats, Duration::from_secs(30)) {
@@ -3809,6 +5078,35 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         append_window_stats(&mut output, "60s", elapsed, &delta, dsq_depth);
     }
     if let Some((elapsed, window)) = app.cpu_work_window(Duration::from_secs(60)) {
+        let cpu_rows_60 = scheduler_cpu_rows(&window, &app.topology, &app.cpu_stats, elapsed);
+        let core_rows_60 = scheduler_core_rows(&window, &app.topology, &app.cpu_stats, elapsed);
+        if let Some(diag) = build_balance_diagnosis(&cpu_rows_60, &core_rows_60) {
+            output.push_str(&format!(
+                "balance.60s: sampled={:.1}s driver={} top_cpu={} {:.1}% {}us {:.1}/s top_rate_cpu={} {:.1}/s {}us top_core={} {:.1}% hot_thr={:.0}% sib={:.0}% top_rate_core={} {:.1}/s cpu_skew={:.1}x core_skew={:.1}x hot/cold cpu={}/{} core={}/{} sticky_core={}\n",
+                elapsed.as_secs_f64(),
+                diag.driver,
+                diag.top_cpu_share_label,
+                diag.top_cpu_share_pct,
+                diag.top_cpu_avg_run_us,
+                diag.top_cpu_runs_per_sec,
+                diag.top_cpu_rate_label,
+                diag.top_cpu_rate_runs_per_sec,
+                diag.top_cpu_rate_avg_run_us,
+                diag.top_core_share_label,
+                diag.top_core_share_pct,
+                diag.top_core_hot_thr_pct,
+                diag.top_core_sib_pct,
+                diag.top_core_rate_label,
+                diag.top_core_rate_runs_per_sec,
+                diag.cpu_skew,
+                diag.core_skew,
+                diag.hot_cpu_count,
+                diag.cold_cpu_count,
+                diag.hot_core_count,
+                diag.cold_core_count,
+                if diag.sticky_core { "yes" } else { "no" },
+            ));
+        }
         append_cpu_work_section(
             &mut output,
             "cpu.work.60s",
@@ -3817,21 +5115,28 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             &app.cpu_stats,
             elapsed,
         );
+        append_local_queue_section(&mut output, "localq.60s", &window, elapsed);
+        append_select_cpu_section(&mut output, "select.60s", &window, elapsed);
+        if let Some((pressure_elapsed, pressure_window)) =
+            app.pressure_probe_window(Duration::from_secs(60))
+        {
+            append_pressure_probe_section(
+                &mut output,
+                "pressure.60s",
+                &window,
+                &pressure_window,
+                pressure_elapsed,
+            );
+        }
     }
-    let timeline_window = Duration::from_secs(60);
-    let timeline_step = Duration::from_secs(1);
-    let timeline_samples = app.timeline_samples(timeline_window, timeline_step);
-    if let Some(summary_lines) = summarize_timeline_samples(
-        &timeline_samples,
-        expected_timeline_samples(timeline_window, timeline_step),
-    ) {
-        output.push_str("\nwindow: last60s sampled=1.0s buckets=nearest<=boundary\n");
+    if let Some(summary_lines) = summarize_timeline_samples(&timeline_samples, timeline_expected) {
+        output.push_str("\nwindow: last60s sampled=rolling_1s history=latest_60\n");
         for line in summary_lines {
             output.push_str(&line.to_string());
             output.push('\n');
         }
         output.push_str(
-            "timeline.cols: [age span run/s wake/s wake%=dir/busy/q path%=home/core/prim/idle/tun cbns=sel/enq/run/stop waitus<=5ms=dir/busy/q slice%=full/yield/preempt]\n",
+            "timeline.cols: [slot span run/s wake/s wake%=dir/busy/q path%=home/core/prim/idle/tun cbns=sel/enq/run/stop waitus<=5ms=dir/busy/q slice%=full/block/preempt]\n",
         );
         for sample in &timeline_samples {
             output.push_str(&format!("{}\n", format_timeline_sample_row(sample)));
@@ -3858,7 +5163,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         "\ntasks: [PPID PID ST COMM CLS PELT MAXRTus GAPus JITus LASTWus RUN/s CPU SPRD RES% SMT% SELns ENQns STOPns RUNns G1% G3% DSQ% MIG/s]\n",
     );
     output.push_str(
-        "       [detail: ROLE STEER(home/primary) DIRECT Q[f/y/p] YIELD PRMPT MASK MAXGAPus DSQINSns RUNS SUTIL% LLC/COUNT PLACE(cpu/core dist) STREAK WAKER TGID CLS V/ICSW WAKEus<=5ms(dir/busy/q) HWAIT<=5ms WHIST]\n",
+        "       [detail: ROLE STEER(home/primary) DIRECT Q[f/b/p] SYLD PRMPT MASK MAXGAPus DSQINSns RUNS SUTIL% LLC/COUNT PLACE(cpu/core dist) STREAK WAKER TGID CLS V/ICSW WAKEus<=5ms(dir/busy/q) HWAIT<=5ms WHIST]\n",
     );
 
     let all_dump_pids: Vec<u32> = app
@@ -4017,7 +5322,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
             ));
             // detail-A: gate % (G1/G3/DSQ) + all extended fields, compact labels
             output.push_str(&format!(
-                "{}  role={}/{} steer={}/{} path={}/{} waker={} deps={}/{} dir={} q={}/{}/{} yld={} prmpt={} mask={} maxgap={} dsqins={}ns runs={} sutil={}% llc=L{:02}/{} place=[{}|{} smt={}%] streak={} tgid={} cls={} v/icsw={}/{} wakeus<=5ms={}/{}/{} hwait<=5ms=[{}] whist={}/{}/{}/{}\n",
+                "{}  role={}/{} steer={}/{} path={}/{} waker={} deps={}/{} dir={} q={}/{}/{} syld={} prmpt={} mask={} maxgap={} dsqins={}ns runs={} sutil={}% llc=L{:02}/{} place=[{}|{} smt={}%] streak={} tgid={} cls={} v/icsw={}/{} wakeus<=5ms={}/{}/{} hwait<=5ms=[{}] whist={}/{}/{}/{}\n",
                 indent,
                 role.label(),
                 capacity_band(row, role).label(),
@@ -4213,6 +5518,28 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     let minute_window = Duration::from_secs(60);
     let minute_step = Duration::from_secs(1);
     let minute_samples = app.timeline_samples(minute_window, minute_step);
+    let minute_expected = expected_timeline_samples(minute_window, minute_step);
+    let minute_avg_step = average_timeline_sample_secs(&minute_samples);
+    let minute_history_span = timeline_history_span(&app.timeline_history);
+    let (balance_scope, balance_diag) =
+        if let Some((elapsed, window)) = app.cpu_work_window(Duration::from_secs(60)) {
+            let cpu_rows = scheduler_cpu_rows(&window, &app.topology, &app.cpu_stats, elapsed);
+            let core_rows = scheduler_core_rows(&window, &app.topology, &app.cpu_stats, elapsed);
+            (
+                format!("{:.0}s", elapsed.as_secs_f64()),
+                build_balance_diagnosis(&cpu_rows, &core_rows),
+            )
+        } else {
+            let elapsed = app.start_time.elapsed().max(Duration::from_secs(1));
+            let cpu_rows =
+                scheduler_cpu_rows(&app.per_cpu_work, &app.topology, &app.cpu_stats, elapsed);
+            let core_rows =
+                scheduler_core_rows(&app.per_cpu_work, &app.topology, &app.cpu_stats, elapsed);
+            (
+                "life".to_string(),
+                build_balance_diagnosis(&cpu_rows, &core_rows),
+            )
+        };
 
     let total_dsq_dispatches = stats.nr_local_dispatches + stats.nr_stolen_dispatches;
     let wake_total = stats.nr_wakeup_direct_dispatches
@@ -4273,6 +5600,14 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::LightRed)
+    };
+    let shared_queue_net = signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed);
+    let shared_queue_net_style = if shared_queue_net > 0 {
+        Style::default().fg(Color::Yellow)
+    } else if shared_queue_net < 0 {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::Cyan)
     };
     let runtime_panel = Paragraph::new(vec![
         Line::from(vec![
@@ -4352,32 +5687,45 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             ),
         ]),
         Line::from(vec![
-            dashboard_label("Wake routing direct / busy / queued "),
+            dashboard_label("Shared Q depth/in/out/net "),
             dashboard_value(
                 format!(
-                    "{:.0}% / {:.0}% / {:.0}%",
+                    "{} / {} / {} / {:+}",
+                    dsq_depth, stats.nr_dsq_queued, stats.nr_dsq_consumed, shared_queue_net
+                ),
+                shared_queue_net_style,
+            ),
+        ]),
+        Line::from(vec![
+            dashboard_label("Wake d/b/q "),
+            dashboard_value(
+                format!(
+                    "{:.0}/{:.0}/{:.0}%",
                     pct(stats.nr_wakeup_direct_dispatches, wake_total),
                     pct(stats.nr_wakeup_dsq_fallback_busy, wake_total),
                     pct(stats.nr_wakeup_dsq_fallback_queued, wake_total)
                 ),
                 Style::default().fg(Color::Green),
             ),
-        ]),
-        Line::from(vec![
-            dashboard_label("Path share "),
-            dashboard_value(
-                format!("home {:.0}%", pct(stats.select_path_count[1], path_total)),
-                Style::default().fg(Color::Green),
-            ),
             dashboard_sep("  "),
+            dashboard_label("Path h/i/t "),
             dashboard_value(
-                format!("idle {:.0}%", pct(stats.select_path_count[4], path_total)),
+                format!(
+                    "{:.0}/{:.0}/{:.0}%",
+                    pct(stats.select_path_count[1], path_total),
+                    pct(stats.select_path_count[4], path_total),
+                    pct(stats.select_path_count[5], path_total)
+                ),
                 Style::default().fg(Color::Cyan),
             ),
             dashboard_sep("  "),
+            dashboard_label("steer home "),
             dashboard_value(
-                format!("tunnel {:.0}%", pct(stats.select_path_count[5], path_total)),
-                Style::default().fg(Color::LightRed),
+                format!(
+                    "{:.0}%",
+                    pct(stats.nr_home_cpu_steers, stats.nr_steer_eligible)
+                ),
+                Style::default().fg(Color::Yellow),
             ),
         ]),
     ])
@@ -4459,7 +5807,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             ),
             dashboard_sep("  "),
             dashboard_value(
-                format!("yield {:.0}%", pct(stats.nr_quantum_yield, quantum_total)),
+                format!("block {:.0}%", pct(stats.nr_quantum_yield, quantum_total)),
                 Style::default().fg(Color::Yellow),
             ),
             dashboard_sep("  "),
@@ -4472,6 +5820,12 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             ),
         ]),
         Line::from(vec![
+            dashboard_label("Literal sched_yield "),
+            dashboard_value(
+                stats.nr_sched_yield_calls.to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+            dashboard_sep("  "),
             dashboard_label("Kick-to-run avg "),
             dashboard_value(
                 format!(
@@ -4671,13 +6025,35 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         }
         parts.join("  ")
     };
-    let minute_lines = summarize_timeline_samples(
-        &minute_samples,
-        expected_timeline_samples(minute_window, minute_step),
-    )
-        .map(|lines| lines.into_iter().collect::<Vec<_>>())
+    let coverage_style = if minute_samples.len() >= minute_expected && minute_avg_step <= 1.25 {
+        Style::default().fg(Color::Green)
+    } else if minute_samples.len() >= minute_expected.saturating_sub(2) {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::LightRed)
+    };
+    let coverage_line = Line::from(vec![
+        dashboard_label("Coverage "),
+        dashboard_value(
+            format!(
+                "{}/{}  avg step {:.2}s  history {:.0}s",
+                minute_samples.len(),
+                minute_expected,
+                minute_avg_step,
+                minute_history_span.as_secs_f64()
+            ),
+            coverage_style,
+        ),
+    ]);
+    let minute_lines = summarize_timeline_samples(&minute_samples, minute_expected)
+        .map(|lines| {
+            let mut collected = vec![coverage_line.clone()];
+            collected.extend(lines);
+            collected
+        })
         .unwrap_or_else(|| {
             vec![
+                coverage_line,
                 Line::from(vec![
                     dashboard_label("Runs/s "),
                     dashboard_note("collecting samples"),
@@ -4707,13 +6083,14 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         )
     );
     let slice_line = format!(
-        "full={} ({:.1}%) yield={} ({:.1}%) preempt={} ({:.1}%) wake_kick i/p={}/{} affine i/p={}/{}",
+        "full={} ({:.1}%) block={} ({:.1}%) preempt={} ({:.1}%) sched_yield={} wake_kick i/p={}/{} affine i/p={}/{}",
         stats.nr_quantum_full,
         pct(stats.nr_quantum_full, quantum_total),
         stats.nr_quantum_yield,
         pct(stats.nr_quantum_yield, quantum_total),
         stats.nr_quantum_preempt,
         pct(stats.nr_quantum_preempt, quantum_total),
+        stats.nr_sched_yield_calls,
         stats.nr_wake_kick_idle,
         stats.nr_wake_kick_preempt,
         stats.nr_affine_kick_idle,
@@ -4743,7 +6120,55 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
         stats.nr_wake_same_tgid,
         stats.nr_wake_cross_tgid,
     );
-    let mut signal_lines = vec![
+    let mut signal_lines = Vec::new();
+    if let Some(diag) = &balance_diag {
+        let balance_style = if diag.cpu_skew <= 4.0 {
+            Style::default().fg(Color::Green)
+        } else if diag.cpu_skew <= 10.0 {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::LightRed)
+        };
+        signal_lines.push(Line::from(vec![
+            dashboard_label("Balance "),
+            dashboard_value(
+                format!(
+                    "{} top {} {:.1}% {}us {:.1}/s  core {} {:.1}% hot {:.0}% sib {:.0}%  {}",
+                    balance_scope,
+                    diag.top_cpu_share_label,
+                    diag.top_cpu_share_pct,
+                    diag.top_cpu_avg_run_us,
+                    diag.top_cpu_runs_per_sec,
+                    diag.top_core_share_label,
+                    diag.top_core_share_pct,
+                    diag.top_core_hot_thr_pct,
+                    diag.top_core_sib_pct,
+                    diag.driver,
+                ),
+                balance_style,
+            ),
+        ]));
+        signal_lines.push(Line::from(vec![
+            dashboard_label("Balance "),
+            dashboard_value(
+                format!(
+                    "rate leader {} {:.1}/s {}us  skew c/c {:.1}x/{:.1}x  hot/cold cpu {}/{} core {}/{}  sticky {}",
+                    diag.top_cpu_rate_label,
+                    diag.top_cpu_rate_runs_per_sec,
+                    diag.top_cpu_rate_avg_run_us,
+                    diag.cpu_skew,
+                    diag.core_skew,
+                    diag.hot_cpu_count,
+                    diag.cold_cpu_count,
+                    diag.hot_core_count,
+                    diag.cold_core_count,
+                    if diag.sticky_core { "yes" } else { "no" },
+                ),
+                Style::default().fg(Color::LightCyan),
+            ),
+        ]));
+    }
+    signal_lines.extend([
         Line::from(vec![
             dashboard_label("Wake wait (<5ms) "),
             dashboard_value(wakewait_line, Style::default().fg(Color::LightCyan)),
@@ -4764,7 +6189,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
             dashboard_label("Quantum outcomes "),
             dashboard_value(slice_line, Style::default().fg(Color::Green)),
         ]),
-    ];
+    ]);
     if !app.debug_events.is_empty() {
         if let Some(ev) = app.debug_events.front() {
             signal_lines.push(Line::from(vec![
@@ -4781,7 +6206,7 @@ fn draw_dashboard_tab(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats, a
     let debug_panel = Paragraph::new(signal_lines)
         .style(Style::default().fg(Color::Gray))
         .block(dashboard_block(
-            "Scheduler Signals & Outliers",
+            "Scheduler Health, Balance & Outliers",
             Color::LightMagenta,
         ))
         .wrap(Wrap { trim: false });
@@ -5107,12 +6532,16 @@ fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
     let heatmap_min_width = (6 + nr_cpus * 2 + 4) as u16;
     let cpu_work_window = app.cpu_work_window(Duration::from_secs(60));
     let (work_elapsed, cpu_work, work_label) = if let Some((elapsed, window)) = cpu_work_window {
-        (elapsed, window, format!("Cake share {}s", elapsed.as_secs()))
+        (
+            elapsed,
+            window,
+            format!("Cake runtime share {}s", elapsed.as_secs()),
+        )
     } else {
         (
             app.start_time.elapsed().max(Duration::from_secs(1)),
             app.per_cpu_work.clone(),
-            "Cake share lifetime".to_string(),
+            "Cake runtime share lifetime".to_string(),
         )
     };
     let cpu_rows = scheduler_cpu_rows(&cpu_work, &app.topology, &app.cpu_stats, work_elapsed);
@@ -5156,11 +6585,14 @@ fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(layout[2]);
     let cpu_title = format!(
-        "Scheduler CPU Work ({:.0}s, skew {:.1}x)",
+        "Scheduler CPU Work [Cake | Sys] ({:.0}s, skew {:.1}x)",
         work_elapsed.as_secs_f64(),
         scheduler_balance_ratio(&cpu_work)
     );
-    let core_title = format!("Scheduler Core Balance ({:.0}s)", work_elapsed.as_secs_f64());
+    let core_title = format!(
+        "Scheduler Core Balance [Cake | HotThr | Sib | Sys] ({:.0}s)",
+        work_elapsed.as_secs_f64()
+    );
     let cpu_table = build_scheduler_cpu_table(
         &cpu_rows,
         &cpu_title,
@@ -5332,6 +6764,10 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
             "cap",
             "Current hard-latency vs soft UI vs build overlap snapshot",
         ),
+        col(
+            "queue.shared",
+            "Shared DSQ depth plus cumulative enqueue/consume net flow",
+        ),
         col("roles", "Current live role counts from heuristics"),
         Line::from(""),
         subsection("── Per-Callback Stopwatch (ns) ──"),
@@ -5350,6 +6786,12 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         col("waker", "Last waker locality vs chosen CPU"),
         col("deps", "Wake source counts: same TGID / cross TGID"),
         col("DIRECT", "Direct dispatch count (bypassed DSQ)"),
+        col(
+            "Q[f/b/p]",
+            "Per-task stop outcomes: full slice / blocked-slept with slice left / preempted runnable",
+        ),
+        col("SYLD", "Explicit sched_yield callbacks for this task"),
+        col("PRMPT", "Explicit enqueue-preempt callbacks for this task"),
         col("CLS", "Current cake role: KCR / N- / N0 / N+"),
         col(
             "SUTIL%",
@@ -5369,7 +6811,7 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         ),
         col(
             "Dispatch",
-            "Dispatch volume, local/steal/miss counts, wake routing, path share",
+            "Dispatch volume, local/steal/miss counts, shared queue flow, wake routing, and path share",
         ),
         col(
             "Timing",
@@ -5377,7 +6819,7 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         ),
         col(
             "Lifecycle",
-            "Quantum outcome mix, kick-to-run latency, and post-wake target/follow-up outcomes",
+            "Quantum stop mix (full / blocked / preempt), literal sched_yield count, kick-to-run latency, and post-wake target/follow-up outcomes",
         ),
         Line::from(""),
         subsection("── Analysis Panels ──"),
@@ -5387,25 +6829,25 @@ fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         ),
         col(
             "Last60s",
-            "1-second samples from the last minute: runs/s, 1% low, callback avg, path share, coverage",
+            "Rolling 1-second samples: runs/s, 1% low, callback avg, path share, quantum f/b/p, sched_yield/s, coverage, and retained history span",
         ),
         col(
             "Signals",
-            "Wake waits<=5ms, post-wake target accuracy, kick latency, placement mix, latest anomaly event",
+            "Balance diagnosis, wake waits<=5ms, post-wake target accuracy, kick latency, placement mix, latest anomaly event",
         ),
         Line::from(""),
         subsection("── Topology Tab ──"),
         col(
             "Topology",
-            "Per-CPU system load/temperature plus scheduler runtime share over the latest 60s window",
+            "Per-CPU cells read as Ck runtime share, Ld system load, and temperature over the latest 60s window",
         ),
         col(
             "CPU work",
-            "Per-CPU scheduler distribution: share, runs/s, avg run time, dispatch rate, locality, yield mix",
+            "Per-CPU scheduler distribution: Cake runtime share, runs/s, avg run time, quantum full/blocked/preempt mix, system load",
         ),
         col(
             "Core work",
-            "Per-core balance: combined share, SMT skew, hottest sibling share, average load",
+            "Per-core balance: combined Cake share, hottest thread share, SMT sibling share, quantum mix in dump, average system load",
         ),
         Line::from(""),
         section("═══ KEY BINDINGS ═══"),
@@ -5881,6 +7323,9 @@ pub fn run_tui(
     let mut last_tick = Instant::now()
         .checked_sub(tick_rate)
         .unwrap_or(Instant::now());
+    let mut last_full_sweep = Instant::now()
+        .checked_sub(FULL_SWEEP_MIN_INTERVAL)
+        .unwrap_or(Instant::now());
 
     // Initialize clipboard (may fail on headless systems)
     let mut clipboard = Clipboard::new().ok();
@@ -5906,6 +7351,7 @@ pub fn run_tui(
         // Get current stats (aggregate from per-cpu BSS array)
         let stats = aggregate_stats(skel);
         app.per_cpu_work = extract_cpu_work(skel, app.topology.nr_cpus);
+        app.pressure_probe = extract_pressure_probe(skel);
 
         // Read bench results from BSS (for BenchLab tab)
         if let Some(bss) = &skel.maps.bss_data {
@@ -6060,6 +7506,7 @@ pub fn run_tui(
                         }
                         KeyCode::Char('S') => {
                             app.sort_descending = !app.sort_descending;
+                            app.sorted_pids_dirty = true;
                             let dir = if app.sort_descending {
                                 "descending"
                             } else {
@@ -6119,11 +7566,51 @@ pub fn run_tui(
                                 for s in &mut bss.global_stats {
                                     *s = Default::default();
                                 }
+                                #[cfg(debug_assertions)]
+                                {
+                                    for reason in &mut bss.select_reason_target_count {
+                                        *reason = Default::default();
+                                    }
+                                    for reason in &mut bss.select_reason_prev_count {
+                                        *reason = Default::default();
+                                    }
+                                    for site in &mut bss.pressure_probe_total {
+                                        *site = Default::default();
+                                    }
+                                    for site in &mut bss.pressure_probe_cpu_count {
+                                        *site = Default::default();
+                                    }
+                                    bss.wake_direct_target_count = Default::default();
+                                    bss.wake_busy_target_count = Default::default();
+                                    bss.wake_busy_local_target_count = Default::default();
+                                    bss.wake_busy_remote_target_count = Default::default();
+                                    for reason in &mut bss.wake_target_wait_ns {
+                                        *reason = Default::default();
+                                    }
+                                    for reason in &mut bss.wake_target_wait_count {
+                                        *reason = Default::default();
+                                    }
+                                    for reason in &mut bss.wake_target_wait_max_ns {
+                                        *reason = Default::default();
+                                    }
+                                    for reason in &mut bss.wake_target_wait_bucket_count {
+                                        *reason = Default::default();
+                                    }
+                                    bss.local_pending_est = Default::default();
+                                    bss.local_pending_max = Default::default();
+                                    bss.local_pending_insert_count = Default::default();
+                                    bss.local_pending_run_count = Default::default();
+                                }
                                 app.stats_history.clear();
                                 app.cpu_work_history.clear();
+                                app.pressure_probe_history.clear();
+                                app.timeline_history.clear();
+                                app.timeline_last_sample = None;
+                                app.timeline_next_sample_at = None;
                                 app.per_cpu_work
                                     .iter_mut()
                                     .for_each(|counter| *counter = CpuWorkCounters::default());
+                                app.pressure_probe = PressureProbeCounters::default();
                                 app.set_status("✓ Stats reset");
                             }
                         }
@@ -6165,572 +7652,613 @@ pub fn run_tui(
                 terminal.draw(|frame| draw_ui(frame, &mut app, &Default::default()))?;
                 continue;
             }
+            let do_full_sweep = last_full_sweep.elapsed() >= FULL_SWEEP_MIN_INTERVAL;
             // Hardware Poll Vector
             app.sys.refresh_cpu_usage();
-            app.sys
-                .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-            app.components.refresh(true);
-
-            // Map thermals by sorting them (assuming matching logical order, or picking the best reading per CPU)
-            // On AMD/Intel, core temps usually align with `core_id`. Let's grab Tdie or Core X temps.
-            let mut temp_map: HashMap<usize, f32> = HashMap::new();
-            for comp in &app.components {
-                let name = comp.label().to_lowercase();
-                if name.contains("core") || name.contains("tctl") || name.contains("cpu") {
-                    // Try to extract core number (e.g. "core 0" or "Tctl")
-                    if let Some(core_id) = name
-                        .split_whitespace()
-                        .next_back()
-                        .and_then(|s| s.parse::<usize>().ok())
-                    {
-                        if let Some(temp) = comp.temperature() {
-                            temp_map.insert(core_id, temp);
-                        }
-                    } else if temp_map.is_empty() {
-                        // If we can't parse core ID, stash a global fallback temp at ID 0
-                        if let Some(temp) = comp.temperature() {
-                            temp_map.insert(0, temp);
-                        }
-                    }
-                }
-            }
-
             for (i, cpu) in app.sys.cpus().iter().enumerate() {
                 if i < app.topology.nr_cpus {
                     let load = cpu.cpu_usage();
-                    // If per-core temp is missing, fallback to 0 (global) or 0.0
-                    let temp = temp_map
-                        .get(&(i / 2))
-                        .copied()
-                        .or_else(|| temp_map.get(&0).copied())
-                        .unwrap_or(0.0);
+                    let temp = app.cpu_stats[i].1;
                     app.cpu_stats[i] = (load, temp);
                 }
             }
 
-            // --- Attach cake_task_iter BPF iterator (once, at first tick) ---
-            // cake_task_iter is SEC("iter/task") — no map_fd needed.
-            // We store the raw *mut bpf_link as usize in a static to avoid lifetime issues.
-            // bpf_program__attach_iter(prog, NULL) → *mut bpf_link (NULL = task iter, no map).
-            static mut TASK_ITER_LINK_RAW: usize = 0; // 0 = uninit, 1 = failed, else ptr
-            if unsafe { TASK_ITER_LINK_RAW } == 0 {
-                // AsRawLibbpf trait: as_libbpf_object() → NonNull<bpf_program> → .as_ptr()
-                use libbpf_rs::AsRawLibbpf;
-                let link_ptr = unsafe {
-                    libbpf_rs::libbpf_sys::bpf_program__attach_iter(
-                        skel.progs.cake_task_iter.as_libbpf_object().as_ptr(),
-                        std::ptr::null(),
-                    )
-                };
-                unsafe {
-                    TASK_ITER_LINK_RAW = if link_ptr.is_null() {
-                        1 // sentinel: attach failed, don't retry
-                    } else {
-                        link_ptr as usize
-                    };
-                }
-            }
+            if do_full_sweep {
+                app.sys
+                    .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                app.components.refresh(true);
 
-            // --- Arena Telemetry Sweep (via cake_task_iter bpf_iter_task) ---
-            // Track currently active PIDs in this sweep to prune dead tasks
-            app.active_pids_buf.clear();
-
-            let link_raw = unsafe { TASK_ITER_LINK_RAW };
-            if link_raw > 1 {
-                // bpf_iter_create(link_fd: c_int) — get fd from the stored *mut bpf_link
-                let link_fd_c = unsafe {
-                    libbpf_rs::libbpf_sys::bpf_link__fd(
-                        link_raw as *mut libbpf_rs::libbpf_sys::bpf_link,
-                    )
-                };
-                let iter_fd = unsafe { libbpf_rs::libbpf_sys::bpf_iter_create(link_fd_c) };
-                if iter_fd >= 0 {
-                    // Read cake_iter_record structs sequentially from the iter fd
-                    use std::os::unix::io::FromRawFd;
-                    let mut f = unsafe { std::fs::File::from_raw_fd(iter_fd) };
-                    let rec_size = std::mem::size_of::<crate::bpf_intf::cake_iter_record>();
-                    let mut buf = vec![0u8; rec_size];
-                    use std::io::Read;
-                    while f.read_exact(&mut buf).is_ok() {
-                        let rec: crate::bpf_intf::cake_iter_record =
-                            unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const _) };
-
-                        let pid = rec.telemetry.pid_inner;
-                        let ppid = rec.ppid;
-                        let packed = rec.packed_info;
-                        let is_kcritical = ((packed >> 23) & 1) != 0;
-
-                        if pid == 0 {
-                            continue;
+                // Map thermals by sorting them (assuming matching logical order, or picking the best reading per CPU)
+                // On AMD/Intel, core temps usually align with `core_id`. Let's grab Tdie or Core X temps.
+                let mut temp_map: HashMap<usize, f32> = HashMap::new();
+                for comp in &app.components {
+                    let name = comp.label().to_lowercase();
+                    if name.contains("core") || name.contains("tctl") || name.contains("cpu") {
+                        // Try to extract core number (e.g. "core 0" or "Tctl")
+                        if let Some(core_id) = name
+                            .split_whitespace()
+                            .next_back()
+                            .and_then(|s| s.parse::<usize>().ok())
+                        {
+                            if let Some(temp) = comp.temperature() {
+                                temp_map.insert(core_id, temp);
+                            }
+                        } else if temp_map.is_empty() {
+                            // If we can't parse core ID, stash a global fallback temp at ID 0
+                            if let Some(temp) = comp.temperature() {
+                                temp_map.insert(0, temp);
+                            }
                         }
+                    }
+                }
 
-                        app.active_pids_buf.insert(pid);
+                for (i, cpu) in app.sys.cpus().iter().enumerate() {
+                    if i < app.topology.nr_cpus {
+                        let load = cpu.cpu_usage();
+                        // If per-core temp is missing, fallback to 0 (global) or 0.0
+                        let temp = temp_map
+                            .get(&(i / 2))
+                            .copied()
+                            .or_else(|| temp_map.get(&0).copied())
+                            .unwrap_or(0.0);
+                        app.cpu_stats[i] = (load, temp);
+                    }
+                }
 
-                        let comm_bytes: [u8; 16] =
-                            unsafe { std::mem::transmute(rec.telemetry.comm) };
-                        let comm = match std::ffi::CStr::from_bytes_until_nul(&comm_bytes) {
-                            Ok(c) => c.to_string_lossy().into_owned(),
-                            Err(_) => String::from_utf8_lossy(&comm_bytes)
-                                .trim_end_matches('\0')
-                                .to_string(),
-                        };
-                        let pelt_util = rec.pelt_util as u32;
-
-                        let g1 = rec.telemetry.gate_1_hits;
-                        let g2 = rec.telemetry.gate_2_hits;
-                        let g1w = rec.telemetry.gate_1w_hits;
-                        let g3 = rec.telemetry.gate_3_hits;
-                        let g1p = rec.telemetry.gate_1p_hits;
-                        let g1c = rec.telemetry.gate_1c_hits;
-                        let g1cp = rec.telemetry.gate_1cp_hits;
-                        let g1d = rec.telemetry.gate_1d_hits;
-                        let g1wc = rec.telemetry.gate_1wc_hits;
-                        let g5 = rec.telemetry.gate_tun_hits;
-                        let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g1cp + g1d + g1wc + g5;
-                        let gate_hit_pcts = if total_sel > 0 {
-                            [
-                                (g1 as f64 / total_sel as f64) * 100.0,
-                                (g2 as f64 / total_sel as f64) * 100.0,
-                                (g1w as f64 / total_sel as f64) * 100.0,
-                                (g3 as f64 / total_sel as f64) * 100.0,
-                                (g1p as f64 / total_sel as f64) * 100.0,
-                                (g1c as f64 / total_sel as f64) * 100.0,
-                                (g1cp as f64 / total_sel as f64) * 100.0,
-                                (g1d as f64 / total_sel as f64) * 100.0,
-                                (g1wc as f64 / total_sel as f64) * 100.0,
-                                (g5 as f64 / total_sel as f64) * 100.0,
-                            ]
+                // --- Attach cake_task_iter BPF iterator (once, at first tick) ---
+                // cake_task_iter is SEC("iter/task") — no map_fd needed.
+                // We store the raw *mut bpf_link as usize in a static to avoid lifetime issues.
+                // bpf_program__attach_iter(prog, NULL) → *mut bpf_link (NULL = task iter, no map).
+                static mut TASK_ITER_LINK_RAW: usize = 0; // 0 = uninit, 1 = failed, else ptr
+                if unsafe { TASK_ITER_LINK_RAW } == 0 {
+                    // AsRawLibbpf trait: as_libbpf_object() → NonNull<bpf_program> → .as_ptr()
+                    use libbpf_rs::AsRawLibbpf;
+                    let link_ptr = unsafe {
+                        libbpf_rs::libbpf_sys::bpf_program__attach_iter(
+                            skel.progs.cake_task_iter.as_libbpf_object().as_ptr(),
+                            std::ptr::null(),
+                        )
+                    };
+                    unsafe {
+                        TASK_ITER_LINK_RAW = if link_ptr.is_null() {
+                            1 // sentinel: attach failed, don't retry
                         } else {
-                            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                            link_ptr as usize
                         };
-                        let total_runs = rec.telemetry.total_runs;
-                        let jitter_accum_ns = rec.telemetry.jitter_accum_ns;
-
-                        let row = app
-                            .task_rows
-                            .entry(pid)
-                            .or_insert_with(|| TaskTelemetryRow {
-                                pid,
-                                comm: comm.clone(),
-                                pelt_util,
-                                wait_duration_ns: rec.telemetry.wait_duration_ns,
-                                select_cpu_ns: rec.telemetry.select_cpu_duration_ns,
-                                enqueue_ns: rec.telemetry.enqueue_duration_ns,
-                                gate_hit_pcts,
-                                home_steer_hits: rec.telemetry.gate_1c_hits,
-                                primary_steer_hits: rec.telemetry.gate_1cp_hits,
-                                core_placement: rec.telemetry.core_placement,
-                                dsq_insert_ns: rec.telemetry.dsq_insert_ns,
-                                migration_count: rec.telemetry.migration_count,
-                                preempt_count: rec.telemetry.preempt_count,
-                                yield_count: rec.telemetry.yield_count,
-                                total_runs,
-                                jitter_accum_ns,
-                                direct_dispatch_count: rec.telemetry.direct_dispatch_count,
-                                cpumask_change_count: rec.telemetry.cpumask_change_count,
-                                stopping_duration_ns: rec.telemetry.stopping_duration_ns,
-                                running_duration_ns: rec.telemetry.running_duration_ns,
-                                max_runtime_us: rec.telemetry.max_runtime_us,
-                                dispatch_gap_us: rec.telemetry.dispatch_gap_ns / 1000,
-                                max_dispatch_gap_us: rec.telemetry.max_dispatch_gap_ns / 1000,
-                                wait_hist: [
-                                    rec.telemetry.wait_hist_lt10us,
-                                    rec.telemetry.wait_hist_lt100us,
-                                    rec.telemetry.wait_hist_lt1ms,
-                                    rec.telemetry.wait_hist_ge1ms,
-                                ],
-                                runs_per_sec: 0.0,
-                                migrations_per_sec: 0.0,
-                                status: TaskStatus::Alive,
-                                is_bpf_tracked: true,
-                                tgid: rec.telemetry.tgid,
-                                slice_util_pct: rec.telemetry.slice_util_pct,
-                                llc_id: rec.telemetry.llc_id,
-                                llc_run_mask: rec.telemetry.llc_run_mask,
-                                same_cpu_streak: rec.telemetry.same_cpu_streak,
-                                wakeup_source_pid: rec.telemetry.wakeup_source_pid,
-                                nvcsw_delta: rec.telemetry.nvcsw_delta,
-                                nivcsw_delta: rec.telemetry.nivcsw_delta,
-                                _pad_recomp: rec.telemetry._pad_recomp,
-                                is_kcritical,
-                                ppid,
-                                gate_cascade_ns: rec.telemetry.gate_cascade_ns,
-                                idle_probe_ns: rec.telemetry.idle_probe_ns,
-                                vtime_compute_ns: rec.telemetry.vtime_compute_ns,
-                                mbox_staging_ns: rec.telemetry.mbox_staging_ns,
-                                _pad_ewma: rec.telemetry._pad_ewma,
-                                legacy_classify_ns: rec.telemetry.legacy_classify_ns,
-                                vtime_staging_ns: rec.telemetry.vtime_staging_ns,
-                                warm_history_ns: rec.telemetry.warm_history_ns,
-                                quantum_full_count: rec.telemetry.quantum_full_count,
-                                quantum_yield_count: rec.telemetry.quantum_yield_count,
-                                quantum_preempt_count: rec.telemetry.quantum_preempt_count,
-                                waker_cpu: rec.telemetry.waker_cpu,
-                                waker_tgid: rec.telemetry.waker_tgid,
-                                wake_reason_wait_ns: rec.telemetry.wake_reason_wait_ns,
-                                wake_reason_count: rec.telemetry.wake_reason_count,
-                                wake_reason_max_us: rec.telemetry.wake_reason_max_us,
-                                last_select_path: rec.telemetry.last_select_path,
-                                last_place_class: rec.telemetry.last_place_class,
-                                last_waker_place_class: rec.telemetry.last_waker_place_class,
-                                wake_same_tgid_count: rec.telemetry.wake_same_tgid_count,
-                                wake_cross_tgid_count: rec.telemetry.wake_cross_tgid_count,
-                                home_place_wait_ns: rec.telemetry.home_place_wait_ns,
-                                home_place_wait_count: rec.telemetry.home_place_wait_count,
-                                home_place_wait_max_us: rec.telemetry.home_place_wait_max_us,
-                                cpu_run_count: rec.telemetry.cpu_run_count,
-                                task_weight: rec.task_weight,
-                            });
-
-                        // Update dynamic row elements
-                        row.pelt_util = pelt_util;
-                        row.wait_duration_ns = rec.telemetry.wait_duration_ns;
-                        row.select_cpu_ns = rec.telemetry.select_cpu_duration_ns;
-                        row.enqueue_ns = rec.telemetry.enqueue_duration_ns;
-                        row.gate_hit_pcts = gate_hit_pcts;
-                        row.home_steer_hits = rec.telemetry.gate_1c_hits;
-                        row.primary_steer_hits = rec.telemetry.gate_1cp_hits;
-                        row.core_placement = rec.telemetry.core_placement;
-                        row.dsq_insert_ns = rec.telemetry.dsq_insert_ns;
-                        row.migration_count = rec.telemetry.migration_count;
-                        row.preempt_count = rec.telemetry.preempt_count;
-                        row.yield_count = rec.telemetry.yield_count;
-                        row.total_runs = total_runs;
-                        row.jitter_accum_ns = jitter_accum_ns;
-                        row.direct_dispatch_count = rec.telemetry.direct_dispatch_count;
-                        row.cpumask_change_count = rec.telemetry.cpumask_change_count;
-                        row.stopping_duration_ns = rec.telemetry.stopping_duration_ns;
-                        row.running_duration_ns = rec.telemetry.running_duration_ns;
-                        row.max_runtime_us = rec.telemetry.max_runtime_us;
-                        row.dispatch_gap_us = rec.telemetry.dispatch_gap_ns / 1000;
-                        row.max_dispatch_gap_us = rec.telemetry.max_dispatch_gap_ns / 1000;
-                        row.wait_hist = [
-                            rec.telemetry.wait_hist_lt10us,
-                            rec.telemetry.wait_hist_lt100us,
-                            rec.telemetry.wait_hist_lt1ms,
-                            rec.telemetry.wait_hist_ge1ms,
-                        ];
-                        row.is_bpf_tracked = true;
-                        row.slice_util_pct = rec.telemetry.slice_util_pct;
-                        row.llc_id = rec.telemetry.llc_id;
-                        row.llc_run_mask = rec.telemetry.llc_run_mask;
-                        row.same_cpu_streak = rec.telemetry.same_cpu_streak;
-                        row.wakeup_source_pid = rec.telemetry.wakeup_source_pid;
-                        row._pad_recomp = rec.telemetry._pad_recomp;
-                        row.is_kcritical = is_kcritical;
-                        row.ppid = ppid;
-                        row.task_weight = rec.task_weight;
-                        row.gate_cascade_ns = rec.telemetry.gate_cascade_ns;
-                        row.idle_probe_ns = rec.telemetry.idle_probe_ns;
-                        row.vtime_compute_ns = rec.telemetry.vtime_compute_ns;
-                        row.mbox_staging_ns = rec.telemetry.mbox_staging_ns;
-                        row._pad_ewma = rec.telemetry._pad_ewma;
-                        row.legacy_classify_ns = rec.telemetry.legacy_classify_ns;
-                        row.vtime_staging_ns = rec.telemetry.vtime_staging_ns;
-                        row.warm_history_ns = rec.telemetry.warm_history_ns;
-                        row.quantum_full_count = rec.telemetry.quantum_full_count;
-                        row.quantum_yield_count = rec.telemetry.quantum_yield_count;
-                        row.quantum_preempt_count = rec.telemetry.quantum_preempt_count;
-                        row.waker_cpu = rec.telemetry.waker_cpu;
-                        row.waker_tgid = rec.telemetry.waker_tgid;
-                        row.wake_reason_wait_ns = rec.telemetry.wake_reason_wait_ns;
-                        row.wake_reason_count = rec.telemetry.wake_reason_count;
-                        row.wake_reason_max_us = rec.telemetry.wake_reason_max_us;
-                        row.last_select_path = rec.telemetry.last_select_path;
-                        row.last_place_class = rec.telemetry.last_place_class;
-                        row.last_waker_place_class = rec.telemetry.last_waker_place_class;
-                        row.wake_same_tgid_count = rec.telemetry.wake_same_tgid_count;
-                        row.wake_cross_tgid_count = rec.telemetry.wake_cross_tgid_count;
-                        row.home_place_wait_ns = rec.telemetry.home_place_wait_ns;
-                        row.home_place_wait_count = rec.telemetry.home_place_wait_count;
-                        row.home_place_wait_max_us = rec.telemetry.home_place_wait_max_us;
-                        row.cpu_run_count = rec.telemetry.cpu_run_count;
-                    } // end read loop
-                      // f drops here, closing the iter fd automatically
-                } // end if iter_fd >= 0
-            } // end if link_ptr > 0
-
-            // --- Inject ALL System PIDs (Fallback) ---
-            // Ensures visibility for PIDs that never triggered cake_init_task
-            let sysinfo_pids: std::collections::HashSet<u32> =
-                app.sys.processes().keys().map(|p| p.as_u32()).collect();
-
-            for (pid, process) in app.sys.processes() {
-                let pid_u32 = pid.as_u32();
-                app.task_rows
-                    .entry(pid_u32)
-                    .or_insert_with(|| TaskTelemetryRow {
-                        pid: pid_u32,
-                        comm: process.name().to_string_lossy().to_string(),
-                        ..Default::default()
-                    });
-            }
-
-            // --- Liveness Detection: cross-reference arena with sysinfo ---
-            let mut bpf_count = 0usize;
-            for (pid, row) in app.task_rows.iter_mut() {
-                let in_sysinfo = sysinfo_pids.contains(pid);
-                row.status = if row.is_bpf_tracked && in_sysinfo {
-                    TaskStatus::Alive
-                } else if in_sysinfo {
-                    TaskStatus::Idle
-                } else {
-                    TaskStatus::Dead
-                };
-                if row.is_bpf_tracked && row.total_runs > 0 {
-                    bpf_count += 1;
+                    }
                 }
-            }
-            app.bpf_task_count = bpf_count;
 
-            // --- Delta Mode: compute per-second rates ---
-            let actual_elapsed = last_tick.elapsed().as_secs_f64().max(0.1);
-            for (pid, row) in app.task_rows.iter_mut() {
-                if let Some(&(prev_runs, prev_migr)) = app.prev_deltas.get(pid) {
-                    let d_runs = row.total_runs.saturating_sub(prev_runs);
-                    let d_migr = row.migration_count.saturating_sub(prev_migr);
-                    row.runs_per_sec = d_runs as f64 / actual_elapsed;
-                    row.migrations_per_sec = d_migr as f64 / actual_elapsed;
+                // --- Arena Telemetry Sweep (via cake_task_iter bpf_iter_task) ---
+                // Track currently active PIDs in this sweep to prune dead tasks
+                let sweep_seen_at = Instant::now();
+                app.active_pids_buf.clear();
+
+                let link_raw = unsafe { TASK_ITER_LINK_RAW };
+                if link_raw > 1 {
+                    // bpf_iter_create(link_fd: c_int) — get fd from the stored *mut bpf_link
+                    let link_fd_c = unsafe {
+                        libbpf_rs::libbpf_sys::bpf_link__fd(
+                            link_raw as *mut libbpf_rs::libbpf_sys::bpf_link,
+                        )
+                    };
+                    let iter_fd = unsafe { libbpf_rs::libbpf_sys::bpf_iter_create(link_fd_c) };
+                    if iter_fd >= 0 {
+                        // Read cake_iter_record structs sequentially from the iter fd
+                        use std::os::unix::io::FromRawFd;
+                        let mut f = unsafe { std::fs::File::from_raw_fd(iter_fd) };
+                        let rec_size = std::mem::size_of::<crate::bpf_intf::cake_iter_record>();
+                        let mut buf = vec![0u8; rec_size];
+                        use std::io::Read;
+                        while f.read_exact(&mut buf).is_ok() {
+                            let rec: crate::bpf_intf::cake_iter_record =
+                                unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const _) };
+
+                            let pid = rec.telemetry.pid_inner;
+                            let ppid = rec.ppid;
+                            let packed = rec.packed_info;
+                            let is_kcritical = ((packed >> 23) & 1) != 0;
+
+                            if pid == 0 {
+                                continue;
+                            }
+
+                            app.active_pids_buf.insert(pid);
+
+                            let comm_bytes: [u8; 16] =
+                                unsafe { std::mem::transmute(rec.telemetry.comm) };
+                            let comm = match std::ffi::CStr::from_bytes_until_nul(&comm_bytes) {
+                                Ok(c) => c.to_string_lossy().into_owned(),
+                                Err(_) => String::from_utf8_lossy(&comm_bytes)
+                                    .trim_end_matches('\0')
+                                    .to_string(),
+                            };
+                            let pelt_util = rec.pelt_util as u32;
+
+                            let g1 = rec.telemetry.gate_1_hits;
+                            let g2 = rec.telemetry.gate_2_hits;
+                            let g1w = rec.telemetry.gate_1w_hits;
+                            let g3 = rec.telemetry.gate_3_hits;
+                            let g1p = rec.telemetry.gate_1p_hits;
+                            let g1c = rec.telemetry.gate_1c_hits;
+                            let g1cp = rec.telemetry.gate_1cp_hits;
+                            let g1d = rec.telemetry.gate_1d_hits;
+                            let g1wc = rec.telemetry.gate_1wc_hits;
+                            let g5 = rec.telemetry.gate_tun_hits;
+                            let total_sel = g1 + g2 + g1w + g3 + g1p + g1c + g1cp + g1d + g1wc + g5;
+                            let gate_hit_pcts = if total_sel > 0 {
+                                [
+                                    (g1 as f64 / total_sel as f64) * 100.0,
+                                    (g2 as f64 / total_sel as f64) * 100.0,
+                                    (g1w as f64 / total_sel as f64) * 100.0,
+                                    (g3 as f64 / total_sel as f64) * 100.0,
+                                    (g1p as f64 / total_sel as f64) * 100.0,
+                                    (g1c as f64 / total_sel as f64) * 100.0,
+                                    (g1cp as f64 / total_sel as f64) * 100.0,
+                                    (g1d as f64 / total_sel as f64) * 100.0,
+                                    (g1wc as f64 / total_sel as f64) * 100.0,
+                                    (g5 as f64 / total_sel as f64) * 100.0,
+                                ]
+                            } else {
+                                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                            };
+                            let total_runs = rec.telemetry.total_runs;
+                            let jitter_accum_ns = rec.telemetry.jitter_accum_ns;
+
+                            let row =
+                                app.task_rows
+                                    .entry(pid)
+                                    .or_insert_with(|| TaskTelemetryRow {
+                                        pid,
+                                        comm: comm.clone(),
+                                        pelt_util,
+                                        wait_duration_ns: rec.telemetry.wait_duration_ns,
+                                        select_cpu_ns: rec.telemetry.select_cpu_duration_ns,
+                                        enqueue_ns: rec.telemetry.enqueue_duration_ns,
+                                        gate_hit_pcts,
+                                        home_steer_hits: rec.telemetry.gate_1c_hits,
+                                        primary_steer_hits: rec.telemetry.gate_1cp_hits,
+                                        core_placement: rec.telemetry.core_placement,
+                                        dsq_insert_ns: rec.telemetry.dsq_insert_ns,
+                                        migration_count: rec.telemetry.migration_count,
+                                        preempt_count: rec.telemetry.preempt_count,
+                                        yield_count: rec.telemetry.yield_count,
+                                        total_runs,
+                                        jitter_accum_ns,
+                                        direct_dispatch_count: rec.telemetry.direct_dispatch_count,
+                                        cpumask_change_count: rec.telemetry.cpumask_change_count,
+                                        stopping_duration_ns: rec.telemetry.stopping_duration_ns,
+                                        running_duration_ns: rec.telemetry.running_duration_ns,
+                                        max_runtime_us: rec.telemetry.max_runtime_us,
+                                        dispatch_gap_us: rec.telemetry.dispatch_gap_ns / 1000,
+                                        max_dispatch_gap_us: rec.telemetry.max_dispatch_gap_ns
+                                            / 1000,
+                                        wait_hist: [
+                                            rec.telemetry.wait_hist_lt10us,
+                                            rec.telemetry.wait_hist_lt100us,
+                                            rec.telemetry.wait_hist_lt1ms,
+                                            rec.telemetry.wait_hist_ge1ms,
+                                        ],
+                                        runs_per_sec: 0.0,
+                                        migrations_per_sec: 0.0,
+                                        status: TaskStatus::Alive,
+                                        is_bpf_tracked: true,
+                                        tgid: rec.telemetry.tgid,
+                                        last_seen_at: sweep_seen_at,
+                                        slice_util_pct: rec.telemetry.slice_util_pct,
+                                        llc_id: rec.telemetry.llc_id,
+                                        llc_run_mask: rec.telemetry.llc_run_mask,
+                                        same_cpu_streak: rec.telemetry.same_cpu_streak,
+                                        wakeup_source_pid: rec.telemetry.wakeup_source_pid,
+                                        nvcsw_delta: rec.telemetry.nvcsw_delta,
+                                        nivcsw_delta: rec.telemetry.nivcsw_delta,
+                                        _pad_recomp: rec.telemetry._pad_recomp,
+                                        is_kcritical,
+                                        ppid,
+                                        gate_cascade_ns: rec.telemetry.gate_cascade_ns,
+                                        idle_probe_ns: rec.telemetry.idle_probe_ns,
+                                        vtime_compute_ns: rec.telemetry.vtime_compute_ns,
+                                        mbox_staging_ns: rec.telemetry.mbox_staging_ns,
+                                        _pad_ewma: rec.telemetry._pad_ewma,
+                                        legacy_classify_ns: rec.telemetry.legacy_classify_ns,
+                                        vtime_staging_ns: rec.telemetry.vtime_staging_ns,
+                                        warm_history_ns: rec.telemetry.warm_history_ns,
+                                        quantum_full_count: rec.telemetry.quantum_full_count,
+                                        quantum_yield_count: rec.telemetry.quantum_yield_count,
+                                        quantum_preempt_count: rec.telemetry.quantum_preempt_count,
+                                        waker_cpu: rec.telemetry.waker_cpu,
+                                        waker_tgid: rec.telemetry.waker_tgid,
+                                        wake_reason_wait_ns: rec.telemetry.wake_reason_wait_ns,
+                                        wake_reason_count: rec.telemetry.wake_reason_count,
+                                        wake_reason_max_us: rec.telemetry.wake_reason_max_us,
+                                        last_select_path: rec.telemetry.last_select_path,
+                                        last_place_class: rec.telemetry.last_place_class,
+                                        last_waker_place_class: rec
+                                            .telemetry
+                                            .last_waker_place_class,
+                                        wake_same_tgid_count: rec.telemetry.wake_same_tgid_count,
+                                        wake_cross_tgid_count: rec.telemetry.wake_cross_tgid_count,
+                                        home_place_wait_ns: rec.telemetry.home_place_wait_ns,
+                                        home_place_wait_count: rec.telemetry.home_place_wait_count,
+                                        home_place_wait_max_us: rec
+                                            .telemetry
+                                            .home_place_wait_max_us,
+                                        cpu_run_count: rec.telemetry.cpu_run_count,
+                                        task_weight: rec.task_weight,
+                                    });
+
+                            // Update dynamic row elements
+                            row.pelt_util = pelt_util;
+                            row.wait_duration_ns = rec.telemetry.wait_duration_ns;
+                            row.select_cpu_ns = rec.telemetry.select_cpu_duration_ns;
+                            row.enqueue_ns = rec.telemetry.enqueue_duration_ns;
+                            row.gate_hit_pcts = gate_hit_pcts;
+                            row.home_steer_hits = rec.telemetry.gate_1c_hits;
+                            row.primary_steer_hits = rec.telemetry.gate_1cp_hits;
+                            row.core_placement = rec.telemetry.core_placement;
+                            row.dsq_insert_ns = rec.telemetry.dsq_insert_ns;
+                            row.migration_count = rec.telemetry.migration_count;
+                            row.preempt_count = rec.telemetry.preempt_count;
+                            row.yield_count = rec.telemetry.yield_count;
+                            row.total_runs = total_runs;
+                            row.jitter_accum_ns = jitter_accum_ns;
+                            row.direct_dispatch_count = rec.telemetry.direct_dispatch_count;
+                            row.cpumask_change_count = rec.telemetry.cpumask_change_count;
+                            row.stopping_duration_ns = rec.telemetry.stopping_duration_ns;
+                            row.running_duration_ns = rec.telemetry.running_duration_ns;
+                            row.max_runtime_us = rec.telemetry.max_runtime_us;
+                            row.dispatch_gap_us = rec.telemetry.dispatch_gap_ns / 1000;
+                            row.max_dispatch_gap_us = rec.telemetry.max_dispatch_gap_ns / 1000;
+                            row.wait_hist = [
+                                rec.telemetry.wait_hist_lt10us,
+                                rec.telemetry.wait_hist_lt100us,
+                                rec.telemetry.wait_hist_lt1ms,
+                                rec.telemetry.wait_hist_ge1ms,
+                            ];
+                            row.is_bpf_tracked = true;
+                            row.last_seen_at = sweep_seen_at;
+                            row.slice_util_pct = rec.telemetry.slice_util_pct;
+                            row.llc_id = rec.telemetry.llc_id;
+                            row.llc_run_mask = rec.telemetry.llc_run_mask;
+                            row.same_cpu_streak = rec.telemetry.same_cpu_streak;
+                            row.wakeup_source_pid = rec.telemetry.wakeup_source_pid;
+                            row._pad_recomp = rec.telemetry._pad_recomp;
+                            row.is_kcritical = is_kcritical;
+                            row.ppid = ppid;
+                            row.task_weight = rec.task_weight;
+                            row.gate_cascade_ns = rec.telemetry.gate_cascade_ns;
+                            row.idle_probe_ns = rec.telemetry.idle_probe_ns;
+                            row.vtime_compute_ns = rec.telemetry.vtime_compute_ns;
+                            row.mbox_staging_ns = rec.telemetry.mbox_staging_ns;
+                            row._pad_ewma = rec.telemetry._pad_ewma;
+                            row.legacy_classify_ns = rec.telemetry.legacy_classify_ns;
+                            row.vtime_staging_ns = rec.telemetry.vtime_staging_ns;
+                            row.warm_history_ns = rec.telemetry.warm_history_ns;
+                            row.quantum_full_count = rec.telemetry.quantum_full_count;
+                            row.quantum_yield_count = rec.telemetry.quantum_yield_count;
+                            row.quantum_preempt_count = rec.telemetry.quantum_preempt_count;
+                            row.waker_cpu = rec.telemetry.waker_cpu;
+                            row.waker_tgid = rec.telemetry.waker_tgid;
+                            row.wake_reason_wait_ns = rec.telemetry.wake_reason_wait_ns;
+                            row.wake_reason_count = rec.telemetry.wake_reason_count;
+                            row.wake_reason_max_us = rec.telemetry.wake_reason_max_us;
+                            row.last_select_path = rec.telemetry.last_select_path;
+                            row.last_place_class = rec.telemetry.last_place_class;
+                            row.last_waker_place_class = rec.telemetry.last_waker_place_class;
+                            row.wake_same_tgid_count = rec.telemetry.wake_same_tgid_count;
+                            row.wake_cross_tgid_count = rec.telemetry.wake_cross_tgid_count;
+                            row.home_place_wait_ns = rec.telemetry.home_place_wait_ns;
+                            row.home_place_wait_count = rec.telemetry.home_place_wait_count;
+                            row.home_place_wait_max_us = rec.telemetry.home_place_wait_max_us;
+                            row.cpu_run_count = rec.telemetry.cpu_run_count;
+                        } // end read loop
+                          // f drops here, closing the iter fd automatically
+                    } // end if iter_fd >= 0
+                } // end if link_ptr > 0
+
+                // --- Inject ALL System PIDs (Fallback) ---
+                // Ensures visibility for PIDs that never triggered cake_init_task
+                let sysinfo_pids: std::collections::HashSet<u32> =
+                    app.sys.processes().keys().map(|p| p.as_u32()).collect();
+
+                if app.task_filter != TaskFilter::BpfTracked {
+                    for (pid, process) in app.sys.processes() {
+                        let pid_u32 = pid.as_u32();
+                        let row =
+                            app.task_rows
+                                .entry(pid_u32)
+                                .or_insert_with(|| TaskTelemetryRow {
+                                    pid: pid_u32,
+                                    comm: process.name().to_string_lossy().to_string(),
+                                    ..Default::default()
+                                });
+                        row.last_seen_at = sweep_seen_at;
+                    }
                 }
-            }
-            // Lightweight delta snapshot: only (total_runs, migration_count)
-            // Eliminates ~500 String allocs/drops per tick from deep-cloning task_rows
-            app.prev_deltas.clear();
-            for (pid, row) in app.task_rows.iter() {
+
+                // --- Liveness Detection: cross-reference arena with sysinfo ---
+                let mut bpf_count = 0usize;
+                for (pid, row) in app.task_rows.iter_mut() {
+                    let in_sysinfo = sysinfo_pids.contains(pid);
+                    row.status = if row.is_bpf_tracked && in_sysinfo {
+                        TaskStatus::Alive
+                    } else if in_sysinfo {
+                        TaskStatus::Idle
+                    } else {
+                        TaskStatus::Dead
+                    };
+                    if row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead {
+                        bpf_count += 1;
+                    }
+                }
+                app.bpf_task_count = bpf_count;
+
+                // --- Delta Mode: compute per-second rates ---
+                let actual_elapsed = last_tick.elapsed().as_secs_f64().max(0.1);
+                for (pid, row) in app.task_rows.iter_mut() {
+                    if let Some(&(prev_runs, prev_migr)) = app.prev_deltas.get(pid) {
+                        let d_runs = row.total_runs.saturating_sub(prev_runs);
+                        let d_migr = row.migration_count.saturating_sub(prev_migr);
+                        row.runs_per_sec = d_runs as f64 / actual_elapsed;
+                        row.migrations_per_sec = d_migr as f64 / actual_elapsed;
+                    }
+                }
+                // Lightweight delta snapshot: only (total_runs, migration_count)
+                // Eliminates ~500 String allocs/drops per tick from deep-cloning task_rows
+                app.prev_deltas.clear();
+                for (pid, row) in app.task_rows.iter() {
+                    app.prev_deltas
+                        .insert(*pid, (row.total_runs, row.migration_count));
+                }
+
+                // --- Arena diagnostics ---
+                app.arena_max = 0; // arena max not tracked via iter path
+                app.arena_active = app.active_pids_buf.len();
+
+                let prune_before = Instant::now();
+                app.task_rows.retain(|_, row| {
+                    row.status != TaskStatus::Dead
+                        || prune_before.saturating_duration_since(row.last_seen_at)
+                            <= DEAD_TASK_RETENTION
+                });
                 app.prev_deltas
-                    .insert(*pid, (row.total_runs, row.migration_count));
+                    .retain(|pid, _| app.task_rows.contains_key(pid));
+                app.sorted_pids_dirty = true;
             }
 
-            // --- Arena diagnostics ---
-            app.arena_max = 0; // arena max not tracked via iter path
-            app.arena_active = app.active_pids_buf.len();
-
-            /* EXPLICITLY DISABLED: Dead Tasks are no longer removed so users can view
-             * the absolute hardware scheduling history of all tasks on the system.
-             * app.task_rows.retain(|pid, _| active_pids.contains(pid)); */
-
-            // Re-sort with smart ordering:
-            //   - Primary: BPF-tracked (is_bpf_tracked) descending
-            //   - Secondary: current sort column
-            //   - Dead tasks always last
-            let mut sorted_pids: Vec<u32> = match app.task_filter {
-                TaskFilter::AllTasks => app.task_rows.keys().copied().collect(),
-                TaskFilter::LiveOnly => app
-                    .task_rows
-                    .iter()
-                    .filter(|(_, row)| row.status == TaskStatus::Alive)
-                    .map(|(pid, _)| *pid)
-                    .collect(),
-                TaskFilter::BpfTracked => app
-                    .task_rows
-                    .iter()
-                    .filter(|(_, row)| row.is_bpf_tracked && row.total_runs > 0)
-                    .map(|(pid, _)| *pid)
-                    .collect(),
-            };
-            // Apply sort with direction support
-            let desc = app.sort_descending;
-            match app.sort_column {
-                SortColumn::Pid => sorted_pids.sort_by(|a, b| {
-                    let cmp = a.cmp(b);
-                    if desc {
-                        cmp.reverse()
-                    } else {
-                        cmp
-                    }
-                }),
-                SortColumn::Pelt => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.pelt_util.cmp(&r_a.pelt_util);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::MaxRuntime => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.max_runtime_us.cmp(&r_a.max_runtime_us);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::Jitter => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = avg_jitter_us(r_b).cmp(&avg_jitter_us(r_a));
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::Wait => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.wait_duration_ns.cmp(&r_a.wait_duration_ns);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::RunsPerSec => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b
-                        .runs_per_sec
-                        .partial_cmp(&r_a.runs_per_sec)
-                        .unwrap_or(std::cmp::Ordering::Equal);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::TargetCpu => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_a.core_placement.cmp(&r_b.core_placement);
-                    if desc {
-                        cmp.reverse()
-                    } else {
-                        cmp
-                    }
-                }),
-                SortColumn::Spread => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let p_a = placement_summary(r_a, &app.topology);
-                    let p_b = placement_summary(r_b, &app.topology);
-                    let spread_a = (p_a.active_core_count, p_a.active_cpu_count);
-                    let spread_b = (p_b.active_core_count, p_b.active_cpu_count);
-                    let cmp = spread_b.cmp(&spread_a);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::Residency => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let p_a = placement_summary(r_a, &app.topology);
-                    let p_b = placement_summary(r_b, &app.topology);
-                    let res_a = p_a
-                        .top_core
-                        .map(|(_, count)| (count * 100) / p_a.total_samples.max(1))
-                        .unwrap_or(0);
-                    let res_b = p_b
-                        .top_core
-                        .map(|(_, count)| (count * 100) / p_b.total_samples.max(1))
-                        .unwrap_or(0);
-                    let cmp = res_b.cmp(&res_a);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::SelectCpu => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.select_cpu_ns.cmp(&r_a.select_cpu_ns);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::Enqueue => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.enqueue_ns.cmp(&r_a.enqueue_ns);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::Gap => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.dispatch_gap_us.cmp(&r_a.dispatch_gap_us);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::Gate1Pct => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b.gate_hit_pcts[0]
-                        .partial_cmp(&r_a.gate_hit_pcts[0])
-                        .unwrap_or(std::cmp::Ordering::Equal);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::Class => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = class_rank(r_a).cmp(&class_rank(r_b));
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-                SortColumn::Migrations => sorted_pids.sort_by(|a, b| {
-                    let r_a = app.task_rows.get(a).unwrap();
-                    let r_b = app.task_rows.get(b).unwrap();
-                    let cmp = r_b
-                        .migrations_per_sec
-                        .partial_cmp(&r_a.migrations_per_sec)
-                        .unwrap_or(std::cmp::Ordering::Equal);
-                    if desc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                }),
-            }
-
-            // TGID grouping: stable-sort by tgid so threads of the
-            // same process stay adjacent. The first thread in each
-            // group (after the primary sort) defines the group rank,
-            // so processes with high-priority threads sort first.
-            let mut tgid_rank: std::collections::HashMap<u32, usize> =
-                std::collections::HashMap::new();
-            for (i, pid) in sorted_pids.iter().enumerate() {
-                if let Some(row) = app.task_rows.get(pid) {
-                    let tgid = if row.tgid > 0 { row.tgid } else { *pid };
-                    tgid_rank.entry(tgid).or_insert(i);
+            if app.sorted_pids_dirty {
+                // Re-sort with smart ordering:
+                //   - Primary: BPF-tracked (is_bpf_tracked) descending
+                //   - Secondary: current sort column
+                //   - Dead tasks always last
+                let mut sorted_pids: Vec<u32> = match app.task_filter {
+                    TaskFilter::AllTasks => app.task_rows.keys().copied().collect(),
+                    TaskFilter::LiveOnly => app
+                        .task_rows
+                        .iter()
+                        .filter(|(_, row)| row.status == TaskStatus::Alive)
+                        .map(|(pid, _)| *pid)
+                        .collect(),
+                    TaskFilter::BpfTracked => app
+                        .task_rows
+                        .iter()
+                        .filter(|(_, row)| {
+                            row.is_bpf_tracked
+                                && row.total_runs > 0
+                                && row.status != TaskStatus::Dead
+                        })
+                        .map(|(pid, _)| *pid)
+                        .collect(),
+                };
+                // Apply sort with direction support
+                let desc = app.sort_descending;
+                match app.sort_column {
+                    SortColumn::Pid => sorted_pids.sort_by(|a, b| {
+                        let cmp = a.cmp(b);
+                        if desc {
+                            cmp.reverse()
+                        } else {
+                            cmp
+                        }
+                    }),
+                    SortColumn::Pelt => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.pelt_util.cmp(&r_a.pelt_util);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::MaxRuntime => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.max_runtime_us.cmp(&r_a.max_runtime_us);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Jitter => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = avg_jitter_us(r_b).cmp(&avg_jitter_us(r_a));
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Wait => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.wait_duration_ns.cmp(&r_a.wait_duration_ns);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::RunsPerSec => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b
+                            .runs_per_sec
+                            .partial_cmp(&r_a.runs_per_sec)
+                            .unwrap_or(std::cmp::Ordering::Equal);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::TargetCpu => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_a.core_placement.cmp(&r_b.core_placement);
+                        if desc {
+                            cmp.reverse()
+                        } else {
+                            cmp
+                        }
+                    }),
+                    SortColumn::Spread => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let p_a = placement_summary(r_a, &app.topology);
+                        let p_b = placement_summary(r_b, &app.topology);
+                        let spread_a = (p_a.active_core_count, p_a.active_cpu_count);
+                        let spread_b = (p_b.active_core_count, p_b.active_cpu_count);
+                        let cmp = spread_b.cmp(&spread_a);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Residency => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let p_a = placement_summary(r_a, &app.topology);
+                        let p_b = placement_summary(r_b, &app.topology);
+                        let res_a = p_a
+                            .top_core
+                            .map(|(_, count)| (count * 100) / p_a.total_samples.max(1))
+                            .unwrap_or(0);
+                        let res_b = p_b
+                            .top_core
+                            .map(|(_, count)| (count * 100) / p_b.total_samples.max(1))
+                            .unwrap_or(0);
+                        let cmp = res_b.cmp(&res_a);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::SelectCpu => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.select_cpu_ns.cmp(&r_a.select_cpu_ns);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Enqueue => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.enqueue_ns.cmp(&r_a.enqueue_ns);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Gap => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.dispatch_gap_us.cmp(&r_a.dispatch_gap_us);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Gate1Pct => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b.gate_hit_pcts[0]
+                            .partial_cmp(&r_a.gate_hit_pcts[0])
+                            .unwrap_or(std::cmp::Ordering::Equal);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Class => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = class_rank(r_a).cmp(&class_rank(r_b));
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
+                    SortColumn::Migrations => sorted_pids.sort_by(|a, b| {
+                        let r_a = app.task_rows.get(a).unwrap();
+                        let r_b = app.task_rows.get(b).unwrap();
+                        let cmp = r_b
+                            .migrations_per_sec
+                            .partial_cmp(&r_a.migrations_per_sec)
+                            .unwrap_or(std::cmp::Ordering::Equal);
+                        if desc {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        }
+                    }),
                 }
-            }
-            sorted_pids.sort_by(|a, b| {
-                let r_a = app.task_rows.get(a).unwrap();
-                let r_b = app.task_rows.get(b).unwrap();
-                let tgid_a = if r_a.tgid > 0 { r_a.tgid } else { *a };
-                let tgid_b = if r_b.tgid > 0 { r_b.tgid } else { *b };
-                let rank_a = tgid_rank.get(&tgid_a).copied().unwrap_or(usize::MAX);
-                let rank_b = tgid_rank.get(&tgid_b).copied().unwrap_or(usize::MAX);
-                rank_a.cmp(&rank_b).then_with(|| {
-                    // Within same tgid group, keep original sort order
-                    r_b.pelt_util.cmp(&r_a.pelt_util)
-                })
-            });
 
-            app.sorted_pids = sorted_pids;
+                // TGID grouping: stable-sort by tgid so threads of the
+                // same process stay adjacent. The first thread in each
+                // group (after the primary sort) defines the group rank,
+                // so processes with high-priority threads sort first.
+                let mut tgid_rank: std::collections::HashMap<u32, usize> =
+                    std::collections::HashMap::new();
+                for (i, pid) in sorted_pids.iter().enumerate() {
+                    if let Some(row) = app.task_rows.get(pid) {
+                        let tgid = if row.tgid > 0 { row.tgid } else { *pid };
+                        tgid_rank.entry(tgid).or_insert(i);
+                    }
+                }
+                sorted_pids.sort_by(|a, b| {
+                    let r_a = app.task_rows.get(a).unwrap();
+                    let r_b = app.task_rows.get(b).unwrap();
+                    let tgid_a = if r_a.tgid > 0 { r_a.tgid } else { *a };
+                    let tgid_b = if r_b.tgid > 0 { r_b.tgid } else { *b };
+                    let rank_a = tgid_rank.get(&tgid_a).copied().unwrap_or(usize::MAX);
+                    let rank_b = tgid_rank.get(&tgid_b).copied().unwrap_or(usize::MAX);
+                    rank_a.cmp(&rank_b).then_with(|| {
+                        // Within same tgid group, keep original sort order
+                        r_b.pelt_util.cmp(&r_a.pelt_util)
+                    })
+                });
+
+                app.sorted_pids = sorted_pids;
+                app.sorted_pids_dirty = false;
+            }
+
+            if do_full_sweep {
+                last_full_sweep = Instant::now();
+            }
             app.record_stats_snapshot(&stats);
             app.record_cpu_work_snapshot();
+            app.record_pressure_probe_snapshot();
 
             last_tick = Instant::now();
         }

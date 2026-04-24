@@ -71,6 +71,13 @@ const bool enable_stats __attribute__((used)) = false;
 #define CAKE_EVT_DISPATCH_GAP_NS 1000000ULL
 #define CAKE_STEER_UTIL_MIN 64U
 #define CAKE_HOME_SCORE_MAX 15U
+#define CAKE_CPU_PRESSURE_SAMPLE_SHIFT 13U
+#define CAKE_CPU_PRESSURE_DECAY_SHIFT 2U
+#define CAKE_CPU_PRESSURE_IDLE_DECAY_SHIFT 1U
+#define CAKE_CPU_PRESSURE_SAMPLE_MAX 63U
+#define CAKE_CPU_PRESSURE_SPILL_MIN 24U
+#define CAKE_CPU_PRESSURE_SPILL_DELTA 12U
+#define CAKE_CPU_PRESSURE_HOME_SCORE_MIN 8U
 
 /* Topology config - JIT eliminates unused SMT steering when nr_cpus <= nr_phys_cpus.
  * has_hybrid removed: Rust loader pre-fills cpu_sibling_map for ALL topologies
@@ -169,6 +176,50 @@ struct cake_per_cpu __arena *per_cpu;
  * Direct indexing keeps the hot path simple and avoids helper indirection. */
 struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss")
 	__attribute__((aligned(256)));
+
+#ifndef CAKE_RELEASE
+/* Debug-only exact select_cpu attribution.
+ * target_count answers "which CPU got picked?"
+ * prev_count answers "which previous lane fed that reason?"
+ *
+ * The target view excludes tunnel because tunnel does not choose an idle CPU;
+ * the prev view includes it so busy-all fallbacks still show where stickiness
+ * originated. */
+u64 select_reason_target_count[CAKE_SELECT_REASON_MAX][CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 select_reason_prev_count[CAKE_SELECT_REASON_MAX][CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 pressure_probe_total[CAKE_PRESSURE_PROBE_SITE_MAX][CAKE_PRESSURE_PROBE_OUTCOME_MAX]
+	SEC(".bss") __attribute__((aligned(256)));
+u64 pressure_probe_cpu_count[CAKE_PRESSURE_PROBE_SITE_MAX]
+			   [CAKE_PRESSURE_PROBE_OUTCOME_MAX][CAKE_MAX_CPUS]
+	SEC(".bss") __attribute__((aligned(256)));
+u64 wake_direct_target_count[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 wake_busy_target_count[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 wake_busy_local_target_count[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 wake_busy_remote_target_count[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 wake_target_wait_ns[CAKE_WAKE_REASON_MAX][CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 wake_target_wait_count[CAKE_WAKE_REASON_MAX][CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 wake_target_wait_max_ns[CAKE_WAKE_REASON_MAX][CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 wake_target_wait_bucket_count[CAKE_WAKE_REASON_MAX][CAKE_MAX_CPUS]
+				 [CAKE_WAKE_BUCKET_MAX] SEC(".bss")
+	__attribute__((aligned(256)));
+u32 local_pending_est[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u32 local_pending_max[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 local_pending_insert_count[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+u64 local_pending_run_count[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+#endif
 
 /* DSQ Work Hint: DELETED.
  * dsq_gen was a unidirectional generation counter that caused CPUs to
@@ -436,6 +487,159 @@ u32 bench_request = 0;
 u32 bench_active = 0;  /* 1 while benchmark is running — suppresses telemetry */
 struct kfunc_bench_results bench_results = {};
 
+#ifndef CAKE_RELEASE
+static __always_inline void cake_debug_atomic_inc(u64 *ptr)
+{
+	__sync_fetch_and_add(ptr, 1);
+}
+
+static __always_inline void cake_record_select_choice(u8 reason, s32 prev_cpu,
+						      s32 target_cpu)
+{
+	if (!CAKE_STATS_ACTIVE || reason == CAKE_SELECT_REASON_NONE ||
+	    reason >= CAKE_SELECT_REASON_MAX)
+		return;
+
+	if (prev_cpu >= 0 && prev_cpu < CAKE_MAX_CPUS)
+		cake_debug_atomic_inc(
+			&select_reason_prev_count[reason][prev_cpu & (CAKE_MAX_CPUS - 1)]);
+
+	if (reason == CAKE_SELECT_REASON_TUNNEL || target_cpu < 0 ||
+	    target_cpu >= CAKE_MAX_CPUS)
+		return;
+
+	cake_debug_atomic_inc(
+		&select_reason_target_count[reason][target_cpu & (CAKE_MAX_CPUS - 1)]);
+}
+
+static __always_inline void cake_record_pressure_probe(u8 site, u8 outcome,
+						      s32 anchor_cpu)
+{
+	if (!CAKE_STATS_ACTIVE || site >= CAKE_PRESSURE_PROBE_SITE_MAX ||
+	    outcome >= CAKE_PRESSURE_PROBE_OUTCOME_MAX)
+		return;
+
+	cake_debug_atomic_inc(&pressure_probe_total[site][outcome]);
+
+	if (anchor_cpu < 0 || anchor_cpu >= CAKE_MAX_CPUS)
+		return;
+
+	cake_debug_atomic_inc(
+		&pressure_probe_cpu_count[site][outcome]
+					 [anchor_cpu & (CAKE_MAX_CPUS - 1)]);
+}
+
+static __always_inline void cake_record_local_insert(u64 dsq_id)
+{
+	u32 target_cpu;
+	u32 pending;
+	u32 max_seen;
+
+	if (!CAKE_STATS_ACTIVE ||
+	    (dsq_id & SCX_DSQ_LOCAL_ON) != SCX_DSQ_LOCAL_ON)
+		return;
+
+	target_cpu = (u32)(dsq_id & SCX_DSQ_LOCAL_CPU_MASK);
+	if (target_cpu >= nr_cpus || target_cpu >= CAKE_MAX_CPUS)
+		return;
+
+	target_cpu &= (CAKE_MAX_CPUS - 1);
+	cake_debug_atomic_inc(&local_pending_insert_count[target_cpu]);
+	pending = __sync_fetch_and_add(&local_pending_est[target_cpu], 1) + 1;
+	max_seen = READ_ONCE(local_pending_max[target_cpu]);
+	if (pending > max_seen)
+		WRITE_ONCE(local_pending_max[target_cpu], pending);
+}
+
+static __always_inline void cake_record_local_run(u32 cpu)
+{
+	u32 pending;
+
+	if (!CAKE_STATS_ACTIVE || cpu >= nr_cpus)
+		return;
+
+	cpu &= (CAKE_MAX_CPUS - 1);
+	cake_debug_atomic_inc(&local_pending_run_count[cpu]);
+	pending = READ_ONCE(local_pending_est[cpu]);
+	if (pending > 0)
+		__sync_fetch_and_add(&local_pending_est[cpu], (u32)-1);
+}
+
+static __always_inline void cake_record_wake_target_insert(
+	u32 target_cpu, bool direct, bool same_cpu)
+{
+	if (!CAKE_STATS_ACTIVE || target_cpu >= nr_cpus || target_cpu >= CAKE_MAX_CPUS)
+		return;
+
+	target_cpu &= (CAKE_MAX_CPUS - 1);
+	if (direct) {
+		cake_debug_atomic_inc(&wake_direct_target_count[target_cpu]);
+		return;
+	}
+
+	cake_debug_atomic_inc(&wake_busy_target_count[target_cpu]);
+	if (same_cpu)
+		cake_debug_atomic_inc(&wake_busy_local_target_count[target_cpu]);
+	else
+		cake_debug_atomic_inc(&wake_busy_remote_target_count[target_cpu]);
+}
+
+static __always_inline void cake_record_target_wait(
+	u8 reason, u16 target_cpu, u64 wait_ns)
+{
+	u32 cpu;
+	u32 bucket;
+	u64 max_seen;
+
+	if (!CAKE_STATS_ACTIVE || target_cpu >= nr_cpus ||
+	    target_cpu >= CAKE_MAX_CPUS)
+		return;
+
+	cpu = target_cpu & (CAKE_MAX_CPUS - 1);
+	bucket = cake_wake_bucket(wait_ns);
+	if (bucket >= CAKE_WAKE_BUCKET_MAX)
+		return;
+
+#define CAKE_RECORD_TARGET_WAIT_REASON(reason_idx)				\
+	do {									\
+		cake_debug_atomic_inc(&wake_target_wait_count[reason_idx][cpu]); \
+		__sync_fetch_and_add(&wake_target_wait_ns[reason_idx][cpu], \
+				     wait_ns);				\
+		cake_debug_atomic_inc(					\
+			&wake_target_wait_bucket_count[reason_idx][cpu][bucket]); \
+		max_seen = READ_ONCE(wake_target_wait_max_ns[reason_idx][cpu]); \
+		if (wait_ns > max_seen)					\
+			WRITE_ONCE(wake_target_wait_max_ns[reason_idx][cpu], wait_ns); \
+	} while (0)
+
+	switch (reason) {
+	case CAKE_WAKE_REASON_DIRECT:
+		CAKE_RECORD_TARGET_WAIT_REASON(CAKE_WAKE_REASON_DIRECT);
+		break;
+	case CAKE_WAKE_REASON_BUSY:
+		CAKE_RECORD_TARGET_WAIT_REASON(CAKE_WAKE_REASON_BUSY);
+		break;
+	case CAKE_WAKE_REASON_QUEUED:
+		CAKE_RECORD_TARGET_WAIT_REASON(CAKE_WAKE_REASON_QUEUED);
+		break;
+	default:
+		break;
+	}
+
+#undef CAKE_RECORD_TARGET_WAIT_REASON
+}
+#else
+static __always_inline void cake_record_select_choice(u8 reason, s32 prev_cpu,
+						      s32 target_cpu)
+{
+}
+
+static __always_inline void cake_record_pressure_probe(u8 site, u8 outcome,
+						      s32 anchor_cpu)
+{
+}
+#endif
+
 /* vtime_now REMOVED: replaced by per-CPU bss->vtime_local.
  * The global was written by every CPU on every context switch,
  * causing 15-core MESI invalidation storms. */
@@ -453,6 +657,103 @@ struct kfunc_bench_results bench_results = {};
  * Write pattern: cake_running writes, cake_stopping reads (same CPU).
  * Cross-CPU reads are limited to idle_hint and vtime-local lookups. */
 struct cake_cpu_bss cpu_bss[CAKE_MAX_CPUS];
+
+static __always_inline u8 cake_read_cpu_pressure(u32 cpu)
+{
+	if (cpu >= nr_cpus)
+		return 0;
+
+	return READ_ONCE(cpu_bss[cpu & (CAKE_MAX_CPUS - 1)].cpu_pressure);
+}
+
+static __always_inline void cake_update_cpu_pressure(
+	struct cake_cpu_bss *bss, u32 slice_consumed)
+{
+	u32 pressure = READ_ONCE(bss->cpu_pressure);
+	u32 sample = slice_consumed >> CAKE_CPU_PRESSURE_SAMPLE_SHIFT;
+
+	if (!sample && slice_consumed)
+		sample = 1;
+	if (sample > CAKE_CPU_PRESSURE_SAMPLE_MAX)
+		sample = CAKE_CPU_PRESSURE_SAMPLE_MAX;
+
+	pressure -= pressure >> CAKE_CPU_PRESSURE_DECAY_SHIFT;
+	pressure += sample;
+	if (pressure > 255U)
+		pressure = 255U;
+	WRITE_ONCE(bss->cpu_pressure, (u8)pressure);
+}
+
+static __always_inline void cake_decay_cpu_pressure_idle(struct cake_cpu_bss *bss)
+{
+	u32 pressure = READ_ONCE(bss->cpu_pressure);
+
+	pressure -= pressure >> CAKE_CPU_PRESSURE_IDLE_DECAY_SHIFT;
+	WRITE_ONCE(bss->cpu_pressure, (u8)pressure);
+}
+
+static __always_inline s32 cake_pick_pressure_sibling(
+	struct cake_task_ctx __arena *tctx, s32 anchor_cpu,
+	const struct cpumask *cpumask, u8 site)
+{
+	s32 sibling_cpu;
+	u8 anchor_pressure, sibling_pressure;
+
+	cake_record_pressure_probe(site, CAKE_PRESSURE_PROBE_EVALUATED, anchor_cpu);
+
+	if (!tctx || anchor_cpu < 0 || anchor_cpu >= nr_cpus) {
+		cake_record_pressure_probe(site,
+					  CAKE_PRESSURE_PROBE_BLOCKED_ANCHOR,
+					  anchor_cpu);
+		return -1;
+	}
+	if (cpu_thread_bit[anchor_cpu & (CAKE_MAX_CPUS - 1)] != 1) {
+		cake_record_pressure_probe(site,
+					  CAKE_PRESSURE_PROBE_BLOCKED_ANCHOR,
+					  anchor_cpu);
+		return -1;
+	}
+
+	sibling_cpu = (s32)cpu_sibling_map[anchor_cpu & (CAKE_MAX_CPUS - 1)];
+	if (sibling_cpu < 0 || sibling_cpu >= nr_cpus || sibling_cpu == anchor_cpu) {
+		cake_record_pressure_probe(site,
+					  CAKE_PRESSURE_PROBE_BLOCKED_ANCHOR,
+					  anchor_cpu);
+		return -1;
+	}
+	if (!bpf_cpumask_test_cpu((u32)sibling_cpu, cpumask)) {
+		cake_record_pressure_probe(site,
+					  CAKE_PRESSURE_PROBE_BLOCKED_ANCHOR,
+					  anchor_cpu);
+		return -1;
+	}
+	if (tctx->home_score < CAKE_CPU_PRESSURE_HOME_SCORE_MIN) {
+		cake_record_pressure_probe(site,
+					  CAKE_PRESSURE_PROBE_BLOCKED_SCORE,
+					  anchor_cpu);
+		return -1;
+	}
+
+	anchor_pressure = cake_read_cpu_pressure((u32)anchor_cpu);
+	sibling_pressure = cake_read_cpu_pressure((u32)sibling_cpu);
+	if (anchor_pressure < CAKE_CPU_PRESSURE_SPILL_MIN ||
+	    anchor_pressure < sibling_pressure + CAKE_CPU_PRESSURE_SPILL_DELTA) {
+		cake_record_pressure_probe(site,
+					  CAKE_PRESSURE_PROBE_BLOCKED_DELTA,
+					  anchor_cpu);
+		return -1;
+	}
+	if (!scx_bpf_test_and_clear_cpu_idle(sibling_cpu)) {
+		cake_record_pressure_probe(site,
+					  CAKE_PRESSURE_PROBE_BLOCKED_SIBLING_BUSY,
+					  anchor_cpu);
+		return -1;
+	}
+
+	cake_record_pressure_probe(site, CAKE_PRESSURE_PROBE_SUCCESS, anchor_cpu);
+
+	return sibling_cpu;
+}
 
 
 /* BenchLab ringbuf: tiny ringbuf for measuring reserve+submit overhead.
@@ -1867,8 +2168,11 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	bool __maybe_unused used_gate2 = false;
 	bool __maybe_unused used_home = false;
 	bool __maybe_unused used_home_core = false;
-	bool __maybe_unused used_primary = false;
+	bool __maybe_unused used_pressure_core = false;
+	bool __maybe_unused used_prev_primary = false;
+	bool __maybe_unused used_scan_primary = false;
 	u8 selected_path = CAKE_SELECT_PATH_NONE;
+	u8 selected_reason = CAKE_SELECT_REASON_NONE;
 	u64 gate2_start = 0;
 	s32 cpu = -1;
 	bool steer_hot = cake_should_steer(p, wake_flags);
@@ -1885,6 +2189,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		if (steer_stats)
 			steer_stats->nr_steer_eligible++;
+
+		cpu = cake_pick_pressure_sibling(
+			steer_tctx, (s32)home_cpu, p->cpus_ptr,
+			CAKE_PRESSURE_PROBE_SITE_HOME);
+		if (cpu >= 0) {
+			used_pressure_core = true;
+			goto idle_found;
+		}
 
 		if (home_cpu < nr_cpus && home_cpu != prev_cpu &&
 		    bpf_cpumask_test_cpu(home_cpu, p->cpus_ptr)) {
@@ -1913,26 +2225,34 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 					used_home_core = true;
 					goto idle_found;
 				}
+				}
 			}
-		}
 
-		/* If the task last ran on an SMT secondary lane and the primary
-		 * sibling is idle, pull it back onto the primary lane before
-		 * widening the search. This improves same-core warmth without
+			cpu = cake_pick_pressure_sibling(
+				steer_tctx, prev_cpu, p->cpus_ptr,
+				CAKE_PRESSURE_PROBE_SITE_PREV);
+			if (cpu >= 0) {
+				used_pressure_core = true;
+				goto idle_found;
+			}
+
+			/* If the task last ran on an SMT secondary lane and the primary
+			 * sibling is idle, pull it back onto the primary lane before
+			 * widening the search. This improves same-core warmth without
 		 * forcing the task to wait behind a busy primary. */
 			{
 				u16 prev_primary = cake_primary_cpu((u16)prev_cpu);
 				if (prev_primary < nr_cpus && prev_primary != prev_cpu &&
 				    prev_primary != home_cpu &&
 				    bpf_cpumask_test_cpu(prev_primary, p->cpus_ptr)) {
-					if (scx_bpf_test_and_clear_cpu_idle(prev_primary)) {
-						cpu = prev_primary;
-						used_primary = true;
-						goto idle_found;
-					}
-					if (steer_stats)
-						steer_stats->nr_prev_primary_busy_misses++;
+				if (scx_bpf_test_and_clear_cpu_idle(prev_primary)) {
+					cpu = prev_primary;
+					used_prev_primary = true;
+					goto idle_found;
 				}
+				if (steer_stats)
+					steer_stats->nr_prev_primary_busy_misses++;
+			}
 			}
 
 			if (cpu_sibling_map[prev_cpu & (CAKE_MAX_CPUS - 1)] != prev_cpu) {
@@ -1950,7 +2270,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 						primary_scan_attempted = true;
 						if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
 							cpu = candidate;
-							used_primary = true;
+							used_scan_primary = true;
 							goto idle_found;
 						}
 					}
@@ -2017,12 +2337,29 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 idle_found: __attribute__((unused));
 		if (used_home)
 			selected_path = CAKE_SELECT_PATH_HOME_CPU;
-		else if (used_home_core)
+		else if (used_home_core || used_pressure_core)
 			selected_path = CAKE_SELECT_PATH_HOME_CORE;
-		else if (used_primary)
+		else if (used_prev_primary || used_scan_primary)
 			selected_path = CAKE_SELECT_PATH_PRIMARY;
 		else
 			selected_path = CAKE_SELECT_PATH_IDLE;
+		if (used_home)
+			selected_reason = CAKE_SELECT_REASON_HOME_CPU;
+		else if (used_home_core)
+			selected_reason = CAKE_SELECT_REASON_HOME_CORE;
+		else if (used_pressure_core)
+			selected_reason = CAKE_SELECT_REASON_PRESSURE_CORE;
+		else if (used_prev_primary)
+			selected_reason = CAKE_SELECT_REASON_PREV_PRIMARY;
+		else if (used_scan_primary)
+			selected_reason = CAKE_SELECT_REASON_PRIMARY_SCAN;
+		else if (used_gate2)
+			selected_reason = CAKE_SELECT_REASON_HYBRID_SCAN;
+		else if (cpu == prev_cpu)
+			selected_reason = CAKE_SELECT_REASON_KERNEL_PREV;
+		else
+			selected_reason = CAKE_SELECT_REASON_KERNEL_IDLE;
+		cake_record_select_choice(selected_reason, prev_cpu, cpu);
 		if (stats_on) {
 			u64 now = bpf_ktime_get_ns();
 			u64 dur = now - start_time;
@@ -2032,13 +2369,13 @@ idle_found: __attribute__((unused));
 				s->total_gate2_latency_ns += now - gate2_start;
 			} else {
 				s->total_gate1_latency_ns += dur;
-			}
-			if (used_home)
-				s->nr_home_cpu_steers++;
-			else if (used_home_core)
-				s->nr_home_core_steers++;
-			else if (used_primary)
-				s->nr_primary_cpu_steers++;
+				}
+				if (used_home)
+					s->nr_home_cpu_steers++;
+				else if (used_home_core || used_pressure_core)
+					s->nr_home_core_steers++;
+				else if (used_prev_primary || used_scan_primary)
+					s->nr_primary_cpu_steers++;
 			s->select_path_count[selected_path]++;
 			s->total_select_cpu_ns += dur;
 			s->max_select_cpu_ns =
@@ -2052,13 +2389,15 @@ idle_found: __attribute__((unused));
 				tctx->telemetry.pending_select_path = selected_path;
 				tctx->telemetry.last_place_class =
 					cake_classify_home_place(tctx, cpu & (CAKE_MAX_CPUS - 1));
-				tctx->telemetry.last_waker_place_class =
-					cake_classify_waker_place(tctx, cpu & (CAKE_MAX_CPUS - 1));
-				if (used_home)
-					tctx->telemetry.gate_1c_hits++;
-				else if (used_home_core)
-					tctx->telemetry.gate_1c_hits++;
-				else if (used_primary)
+					tctx->telemetry.last_waker_place_class =
+						cake_classify_waker_place(tctx, cpu & (CAKE_MAX_CPUS - 1));
+					if (used_home)
+						tctx->telemetry.gate_1c_hits++;
+					else if (used_home_core || used_pressure_core)
+						tctx->telemetry.gate_1c_hits++;
+					else if (used_prev_primary)
+						tctx->telemetry.gate_1cp_hits++;
+				else if (used_scan_primary)
 					tctx->telemetry.gate_1cp_hits++;
 				else if (used_gate2)
 					tctx->telemetry.gate_2_hits++;
@@ -2111,9 +2450,11 @@ tunnel:
 	 * instead of manually forcing slice shrinking or migrating within the lockless scan. */
 	{
 		selected_path = CAKE_SELECT_PATH_TUNNEL;
+		selected_reason = CAKE_SELECT_REASON_TUNNEL;
 		struct cake_stats *s = get_local_stats();
 		s->nr_prev_cpu_tunnels++;
 		s->select_path_count[selected_path]++;
+		cake_record_select_choice(selected_reason, prev_cpu, -1);
 		if (stats_on) {
 			u64 dur = bpf_ktime_get_ns() - start_time;
 			if (gate2_start) {
@@ -2197,6 +2538,10 @@ static __noinline void dsq_insert_wrapper(
 		scx_bpf_dsq_insert___v1(p, dsq_id, slice, enq_flags);
 	else
 		scx_bpf_dispatch___compat(p, dsq_id, slice, enq_flags);
+
+#ifndef CAKE_RELEASE
+	cake_record_local_insert(dsq_id);
+#endif
 }
 
 static __noinline s64 calc_nice_adj(u32 weight)
@@ -2219,6 +2564,7 @@ static __noinline void enqueue_dsq_dispatch(
 	struct cake_stats *stats = get_local_stats();
 #ifndef CAKE_RELEASE
 	bool stats_on = CAKE_STATS_ACTIVE;
+	bool wake_target_local = false;
 	struct cake_task_ctx __arena *tctx = NULL;
 	if (stats_on)
 		tctx = get_task_ctx(p);
@@ -2227,12 +2573,17 @@ static __noinline void enqueue_dsq_dispatch(
 #endif
 
 	if (is_wakeup) {
+#ifndef CAKE_RELEASE
 		if (stats_on && tctx) {
 			tctx->telemetry.pending_target_cpu = (u16)enq_cpu;
 			tctx->telemetry.pending_kick_kind = CAKE_KICK_KIND_NONE;
 			tctx->telemetry.pending_kick_ts_ns = 0;
 		}
+#endif
 		u32 current_cpu_idx = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+#ifndef CAKE_RELEASE
+		wake_target_local = current_cpu_idx == target_cpu_idx;
+#endif
 
 		if (current_cpu_idx == target_cpu_idx) {
 			stats->nr_wakeup_dsq_fallback_busy++;
@@ -2280,6 +2631,8 @@ static __noinline void enqueue_dsq_dispatch(
 		else
 			stats->nr_direct_other_inserts++;
 #ifndef CAKE_RELEASE
+		if (is_wakeup)
+			cake_record_wake_target_insert(enq_cpu, true, wake_target_local);
 		if (is_wakeup && tctx)
 			tctx->telemetry.pending_wake_reason = CAKE_WAKE_REASON_DIRECT;
 #endif
@@ -2295,6 +2648,10 @@ static __noinline void enqueue_dsq_dispatch(
 		 * local instead of falling back to any shared queue. */
 		stats->nr_direct_local_inserts++;
 		stats->nr_direct_other_inserts++;
+#ifndef CAKE_RELEASE
+		if (is_wakeup)
+			cake_record_wake_target_insert(enq_cpu, false, wake_target_local);
+#endif
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | enq_cpu, p->scx.slice,
 				  enq_flags);
 		kick_cpu = enq_cpu;
@@ -2302,10 +2659,12 @@ static __noinline void enqueue_dsq_dispatch(
 	}
 
 	if (kick_cpu >= 0) {
+#ifndef CAKE_RELEASE
 		if (stats_on && tctx) {
 			tctx->telemetry.pending_kick_kind = cake_kick_kind_from_flags(kick_flags);
 			tctx->telemetry.pending_kick_ts_ns = bpf_ktime_get_ns();
 		}
+#endif
 		if (kick_flags == SCX_KICK_IDLE)
 			stats->nr_wake_kick_idle++;
 		else
@@ -2529,8 +2888,14 @@ queue_affine_dispatch:
 #ifndef CAKE_RELEASE
 	if (stats_on && is_wakeup && tctx) {
 		tctx->telemetry.pending_target_cpu = (u16)target_cpu;
+		tctx->telemetry.pending_wake_reason = CAKE_WAKE_REASON_DIRECT;
 		tctx->telemetry.pending_kick_kind = CAKE_KICK_KIND_NONE;
 		tctx->telemetry.pending_kick_ts_ns = 0;
+	}
+	if (stats_on && is_wakeup) {
+		u32 current_cpu_idx = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+		cake_record_wake_target_insert(
+			target_cpu, true, current_cpu_idx == (target_cpu & (CAKE_MAX_CPUS - 1)));
 	}
 #endif
 	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, p->scx.slice,
@@ -2641,6 +3006,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	 * Avoids unnecessary cache line dirtying. */
 	if (!READ_ONCE(cpu_bss[cpu_idx].idle_hint)) {
 		cpu_bss[cpu_idx].idle_hint = 1;
+		cake_decay_cpu_pressure_idle(&cpu_bss[cpu_idx]);
 		if (stats_on)
 			get_local_stats_for(cpu_idx)->nr_idle_hint_set_writes++;
 	} else {
@@ -2754,6 +3120,7 @@ static __noinline void running_telemetry(
 							wait,
 							((u32)target_cpu << 16) | (u32)cpu);
 				}
+				cake_record_target_wait(reason, target_cpu, wait);
 			}
 			tctx->telemetry.postwake_watch = 1;
 			tctx->telemetry.postwake_first_cpu = (u16)cpu;
@@ -2867,6 +3234,11 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	struct cake_cpu_bss *bss = &cpu_bss[cpu];
 
 #ifndef CAKE_RELEASE
+	if (stats_on)
+		cake_record_local_run(cpu);
+#endif
+
+#ifndef CAKE_RELEASE
 	/* BPF-Native Clock: debug-only monotonic accumulator.
 	 * Feeds run_start + running_telemetry (both debug-gated).
 	 * In release, now_full has zero consumers → entire clock
@@ -2961,6 +3333,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 	/* Branchless math bounding */
 	u32 rt_raw = slice_consumed - ((slice_consumed - (65535U << 10)) & -(slice_consumed > (65535U << 10)));
+
+	cake_update_cpu_pressure(bss, slice_consumed);
 
 	if (runnable) {
 		/* Additive fairness from task weight in task_struct.
@@ -3223,13 +3597,17 @@ void BPF_STRUCT_OPS(cake_set_cpumask, struct task_struct *p __arg_trusted,
 }
 
 /* Handle manual yields (e.g. sched_yield syscall).
- * yield_count is TUI-only telemetry (stats-gated).
- * Cost in debug: 1 get_task_ctx (~16ns) per yield. Zero cost in release. */
+ * Global stats keep an exact count, while per-task yield_count is TUI-only
+ * telemetry (stats-gated). */
 bool BPF_STRUCT_OPS(cake_yield, struct task_struct *p)
 {
+	if (CAKE_STATS_ACTIVE) {
+		struct cake_stats *s = get_local_stats();
+		s->nr_sched_yield_calls++;
+	}
 #ifndef CAKE_RELEASE
-	/* F3: Gate behind CAKE_STATS_ENABLED — yield_count is TUI-only.
-	 * Saves ~16ns get_task_ctx per sched_yield() in release builds. */
+	/* Per-task yield_count remains TUI-only and debug-gated so release does not
+	 * pay arena lookup cost beyond the exact global counter above. */
 	if (CAKE_STATS_ACTIVE) {
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 		if (tctx) tctx->telemetry.yield_count++;
