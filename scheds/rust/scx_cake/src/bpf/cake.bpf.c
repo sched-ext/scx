@@ -3058,6 +3058,115 @@ static __noinline s64 calc_nice_adj(u32 weight)
 	return ((s64)wd << 14) + ((s64)wd << 12);
 }
 
+#ifndef CAKE_RELEASE
+static __always_inline u32 cake_class_reason_bit(u32 reason)
+{
+	if (reason >= CAKE_WAKE_CLASS_REASON_MAX)
+		return 0;
+	return 1U << reason;
+}
+
+static __always_inline void cake_record_wake_class_reasons(
+	struct cake_stats *stats, u32 reason_mask)
+{
+#pragma unroll
+	for (u32 reason = 0; reason < CAKE_WAKE_CLASS_REASON_MAX; reason++) {
+		if (reason_mask & cake_class_reason_bit(reason))
+			stats->wake_class_reason_count[reason]++;
+	}
+}
+
+static __always_inline u8 cake_shadow_classify_task(
+	struct task_struct *p,
+	struct cake_task_ctx __arena *tctx,
+	u32 *reason_mask)
+{
+	u32 mask = 0;
+
+	if (p->se.avg.util_avg < 64)
+		mask |= cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_LOW_UTIL);
+	if (p->prio < 120 || p->scx.weight > 120)
+		mask |= cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_LATENCY_PRIO);
+
+	if (tctx) {
+		u64 runs = tctx->telemetry.total_runs;
+		u64 runtime = tctx->telemetry.total_runtime_ns;
+		u64 full = tctx->telemetry.quantum_full_count;
+		u64 preempt = tctx->telemetry.quantum_preempt_count;
+		u64 q_total = full + tctx->telemetry.quantum_yield_count + preempt;
+
+		if (runs) {
+			u64 avg_runtime = runtime / runs;
+
+			if (avg_runtime) {
+				if (runs >= 32 && avg_runtime <= 100000)
+					mask |= cake_class_reason_bit(
+						CAKE_WAKE_CLASS_REASON_SHORT_RUN);
+				if (runs >= 256 && avg_runtime <= 250000)
+					mask |= cake_class_reason_bit(
+						CAKE_WAKE_CLASS_REASON_WAKE_DENSE);
+			}
+		}
+
+		if (q_total >= 32) {
+			if (full * 100 >= q_total * 20)
+				mask |= cake_class_reason_bit(
+					CAKE_WAKE_CLASS_REASON_RUNTIME_HEAVY);
+			if (preempt * 100 >= q_total * 10)
+				mask |= cake_class_reason_bit(
+					CAKE_WAKE_CLASS_REASON_PREEMPT_HEAVY);
+		}
+	}
+
+	if (reason_mask)
+		*reason_mask = mask;
+
+	if (mask & (cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_RUNTIME_HEAVY) |
+		    cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_PREEMPT_HEAVY)))
+		return CAKE_WAKE_CLASS_CONTAIN;
+	if ((mask & cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_LATENCY_PRIO)) ||
+	    ((mask & cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_SHORT_RUN)) &&
+	     (mask & cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_WAKE_DENSE))))
+		return CAKE_WAKE_CLASS_SHIELD;
+	return CAKE_WAKE_CLASS_NORMAL;
+}
+
+static __always_inline u8 cake_shadow_busy_preempt_decision(
+	u8 wakee_class, u8 owner_class, u8 target_pressure)
+{
+	if (target_pressure >= 64 || wakee_class == CAKE_WAKE_CLASS_CONTAIN)
+		return CAKE_BUSY_PREEMPT_SHADOW_SKIP;
+	if (wakee_class == CAKE_WAKE_CLASS_SHIELD)
+		return owner_class == CAKE_WAKE_CLASS_SHIELD ?
+			CAKE_BUSY_PREEMPT_SHADOW_SKIP :
+			CAKE_BUSY_PREEMPT_SHADOW_ALLOW;
+	if (owner_class == CAKE_WAKE_CLASS_CONTAIN)
+		return CAKE_BUSY_PREEMPT_SHADOW_ALLOW;
+	return CAKE_BUSY_PREEMPT_SHADOW_SKIP;
+}
+
+static __always_inline void cake_record_busy_preempt_shadow(
+	struct cake_stats *stats,
+	u8 decision,
+	u8 wakee_class,
+	u8 owner_class,
+	bool wake_target_local)
+{
+	if (!stats)
+		return;
+	if (decision < CAKE_BUSY_PREEMPT_SHADOW_MAX)
+		stats->busy_preempt_shadow_count[decision]++;
+	if (wakee_class < CAKE_WAKE_CLASS_MAX)
+		stats->busy_preempt_shadow_wakee_class_count[wakee_class]++;
+	if (owner_class < CAKE_WAKE_CLASS_MAX)
+		stats->busy_preempt_shadow_owner_class_count[owner_class]++;
+	if (wake_target_local)
+		stats->busy_preempt_shadow_local++;
+	else
+		stats->busy_preempt_shadow_remote++;
+}
+#endif
+
 static __noinline void enqueue_dsq_dispatch(
 	struct task_struct *p,
 	u64 enq_flags,
@@ -3186,6 +3295,27 @@ static __noinline void enqueue_dsq_dispatch(
 				  enq_flags);
 		kick_cpu = enq_cpu;
 		kick_flags = idle_hint ? SCX_KICK_IDLE : SCX_KICK_PREEMPT;
+#ifndef CAKE_RELEASE
+		if (is_wakeup && stats_on && tctx) {
+			u32 reason_mask = 0;
+			u8 wakee_class = cake_shadow_classify_task(p, tctx, &reason_mask);
+			u8 owner_class = READ_ONCE(cpu_bss[target_cpu_idx].last_wake_class);
+			u8 target_pressure = READ_ONCE(cpu_bss[target_cpu_idx].cpu_pressure);
+			u8 decision;
+
+			if (target_pressure >= 64)
+				reason_mask |= cake_class_reason_bit(
+					CAKE_WAKE_CLASS_REASON_PRESSURE_HIGH);
+			decision = cake_shadow_busy_preempt_decision(
+				wakee_class, owner_class, target_pressure);
+			if (wakee_class < CAKE_WAKE_CLASS_MAX) {
+				stats->wake_class_sample_count[wakee_class]++;
+				cake_record_wake_class_reasons(stats, reason_mask);
+			}
+			cake_record_busy_preempt_shadow(
+				stats, decision, wakee_class, owner_class, wake_target_local);
+		}
+#endif
 	}
 
 	if (kick_cpu >= 0) {
@@ -3885,6 +4015,22 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 		bss->vtime_local = p->scx.dsq_vtime;
 
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
+#ifndef CAKE_RELEASE
+		if (stats_on) {
+			struct cake_stats *stats = get_local_stats_for(cpu);
+			u32 reason_mask = 0;
+			u8 old_class = READ_ONCE(bss->last_wake_class);
+			u8 new_class = cake_shadow_classify_task(p, tctx, &reason_mask);
+
+			if (new_class < CAKE_WAKE_CLASS_MAX) {
+				stats->wake_class_sample_count[new_class]++;
+				if (old_class < CAKE_WAKE_CLASS_MAX)
+					stats->wake_class_transition_count[old_class][new_class]++;
+				cake_record_wake_class_reasons(stats, reason_mask);
+				WRITE_ONCE(bss->last_wake_class, new_class);
+			}
+		}
+#endif
 		if (tctx) {
 #ifndef CAKE_RELEASE
 			bool first_home = stats_on && tctx->home_cpu == CAKE_CPU_SENTINEL;
