@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 // scx_cake - CAKE-inspired sched_ext scheduler for low-latency CPU scheduling
 
+mod dump_compare;
 mod topology;
 mod tui;
 
 use core::sync::atomic::Ordering;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -134,6 +136,10 @@ struct Args {
     /// Print scheduler version and exit.
     #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Compare two scx_cake TUI dump files and exit without loading BPF.
+    #[arg(long, value_names = ["BASELINE", "CANDIDATE"], num_args = 2)]
+    compare_dump: Option<Vec<PathBuf>>,
 }
 
 impl Args {
@@ -520,6 +526,11 @@ fn main() -> Result<()> {
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
+        return Ok(());
+    }
+
+    if let Some(paths) = args.compare_dump.as_ref() {
+        dump_compare::run_compare(&paths[0], &paths[1])?;
         return Ok(());
     }
 
