@@ -365,8 +365,10 @@ impl CellManager {
     fn reconcile_cells(&mut self) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
         let mut new_cells = Vec::new();
 
-        // Find current cgroups on disk
-        let mut current_paths: HashSet<PathBuf> = HashSet::new();
+        // Snapshot current child cgroups by path and inode.
+        // Reconcile by identity, not path alone, so path reuse doesn't keep
+        // the old cell and create a second one for the new inode.
+        let mut current_entries: HashMap<PathBuf, u64> = HashMap::new();
         let entries = std::fs::read_dir(&self.cell_parent_path).with_context(|| {
             format!(
                 "Failed to read cell parent directory: {}",
@@ -385,9 +387,25 @@ impl CellManager {
             })?;
             if file_type.is_dir() {
                 let path = entry.path();
-                if !self.should_exclude(&path) {
-                    current_paths.insert(path);
+                if self.should_exclude(&path) {
+                    continue;
                 }
+
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Directory disappeared after readdir(); retry on the
+                        // next reconcile instead of failing this scan.
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!("reading inode of cgroup directory {}", path.display())
+                        });
+                    }
+                };
+
+                current_entries.insert(path, metadata.ino());
             }
         }
 
@@ -402,7 +420,9 @@ impl CellManager {
                 .cgroup_path
                 .as_ref()
                 .expect("BUG: non-zero cell missing cgroup_path");
-            if current_paths.contains(cgroup_path) {
+            // Same path with a different inode means the old cgroup was
+            // replaced and this tracked cell must be dropped.
+            if current_entries.get(cgroup_path) == Some(&cgid) {
                 true
             } else {
                 info!(
@@ -422,11 +442,7 @@ impl CellManager {
         self.free_cell_ids.extend(destroyed_cells.iter().copied());
 
         // Find new cgroups that we don't have cells for
-        for path in current_paths {
-            let cgid = path
-                .metadata()
-                .with_context(|| format!("reading inode of cgroup directory {}", path.display()))?
-                .ino();
+        for (path, cgid) in current_entries {
             if self.cells.contains_key(&cgid) {
                 continue; // Already have a cell for this cgroup
             }
@@ -995,6 +1011,43 @@ mod tests {
         assert_eq!(new_cells.len(), 0);
         assert_eq!(destroyed_cells.len(), 1);
         assert_eq!(mgr.cell_count(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_replaces_reused_path_with_new_inode() {
+        let tmp = TempDir::new().unwrap();
+        let parked = TempDir::new().unwrap();
+
+        let original_path = tmp.path().join("container-a");
+        std::fs::create_dir(&original_path).unwrap();
+
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(mgr.cell_count(), 1);
+
+        let old_info = mgr.find_cell_by_name("container-a").unwrap();
+        let old_cell_id = old_info.cell_id;
+        let old_cgid = old_info.cgid.unwrap();
+
+        // Move the original cgroup out of the watched directory so the inode
+        // stays alive while a new cgroup is created at the same path.
+        std::fs::rename(&original_path, parked.path().join("container-a-old")).unwrap();
+        std::fs::create_dir(&original_path).unwrap();
+
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+
+        assert_eq!(new_cells.len(), 1);
+        assert_eq!(destroyed_cells, vec![old_cell_id]);
+        assert_eq!(mgr.cell_count(), 1);
+
+        let new_info = mgr.find_cell_by_name("container-a").unwrap();
+        assert_eq!(new_info.cell_id, old_cell_id);
+        assert_ne!(new_info.cgid.unwrap(), old_cgid);
     }
 
     #[test]
