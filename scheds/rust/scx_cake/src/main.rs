@@ -465,6 +465,7 @@ impl<'a> Scheduler<'a> {
                 &mut self.skel,
                 shutdown.clone(),
                 self.args.interval,
+                self.args.quantum_us(),
                 self.topology.clone(),
                 self.latency_matrix.clone(),
             )?;
