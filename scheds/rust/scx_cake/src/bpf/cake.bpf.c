@@ -3121,26 +3121,24 @@ static __always_inline u8 cake_shadow_classify_task(
 	if (reason_mask)
 		*reason_mask = mask;
 
-	if (mask & (cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_RUNTIME_HEAVY) |
-		    cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_PREEMPT_HEAVY)))
-		return CAKE_WAKE_CLASS_CONTAIN;
 	if ((mask & cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_LATENCY_PRIO)) ||
 	    ((mask & cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_SHORT_RUN)) &&
 	     (mask & cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_WAKE_DENSE))))
 		return CAKE_WAKE_CLASS_SHIELD;
+	if (mask & (cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_RUNTIME_HEAVY) |
+		    cake_class_reason_bit(CAKE_WAKE_CLASS_REASON_PREEMPT_HEAVY)))
+		return CAKE_WAKE_CLASS_CONTAIN;
 	return CAKE_WAKE_CLASS_NORMAL;
 }
 
 static __always_inline u8 cake_shadow_busy_preempt_decision(
 	u8 wakee_class, u8 owner_class, u8 target_pressure)
 {
-	if (target_pressure >= 64 || wakee_class == CAKE_WAKE_CLASS_CONTAIN)
-		return CAKE_BUSY_PREEMPT_SHADOW_SKIP;
 	if (wakee_class == CAKE_WAKE_CLASS_SHIELD)
-		return owner_class == CAKE_WAKE_CLASS_SHIELD ?
-			CAKE_BUSY_PREEMPT_SHADOW_SKIP :
-			CAKE_BUSY_PREEMPT_SHADOW_ALLOW;
+		return CAKE_BUSY_PREEMPT_SHADOW_ALLOW;
 	if (owner_class == CAKE_WAKE_CLASS_CONTAIN)
+		return CAKE_BUSY_PREEMPT_SHADOW_ALLOW;
+	if (target_pressure >= 64)
 		return CAKE_BUSY_PREEMPT_SHADOW_ALLOW;
 	return CAKE_BUSY_PREEMPT_SHADOW_SKIP;
 }
