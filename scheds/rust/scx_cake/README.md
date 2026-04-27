@@ -85,6 +85,16 @@ sudo ./target/release/scx_cake --quantum 1500
 sudo ./target/debug/scx_cake --verbose
 ```
 
+Debug dumps also include `wakepolicy.life` and `win.wakepolicy.*` lines in debug builds. These are dry-run classifier counters for latency shielding and busy-wake preempt experiments. They report how often the experimental wake-policy classes would have matched, but they do not change scheduling behavior by themselves.
+
+#### Compare Dumps
+
+```bash
+cargo run -p scx_cake -- --compare-dump baseline.txt candidate.txt
+```
+
+`--compare-dump` reads two TUI dump files and exits without loading BPF. Use it to compare busy wake counts, busy preempt shadow decisions, wake wait tails, SMT contention, and wake-policy class counts before enabling policy experiments.
+
 ### Profiles
 
 | Profile | Quantum | Intended use |
