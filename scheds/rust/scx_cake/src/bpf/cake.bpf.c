@@ -2824,12 +2824,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	/* ALPHADEV Phase 10: BPF-Native Sharded Lockless Scanner
 	 * 1. Pre-Flight Affinity Bypass: The kernel strictly enforces task pinning.
 	 *    If a task is pinned (e.g., Proton limits) or migration is disabled,
-	 *    we MUST bypass the native scanner and fallback to the kernel tracking. 
-	 *    is_bpf_migration_disabled is true for ALL current tasks under BPF sandbox, 
+	 *    we MUST bypass the native scanner and fallback to the kernel tracking.
+	 *    is_bpf_migration_disabled is true for ALL current tasks under BPF sandbox,
 	 *    so we rely purely on nr_cpus_allowed. */
 	/* ALPHADEV Phase 17/19: Ghost Branch Annihilation
 	 * Unrestricted or pinned, the kernel native wrapper natively honors bounds.
-	 * Removing the redundant wrapper branch completely flattens the execution tree 
+	 * Removing the redundant wrapper branch completely flattens the execution tree
 	 * and preserves Zen 4 Branch Predictor slots from dead-code evaluation. */
 	cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
 	if (cpu >= 0) goto idle_found;

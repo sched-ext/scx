@@ -63,7 +63,7 @@ echo "--------------------------------------------------------" | tee -a "$LOG_F
 for i in "${!FOUND_IDS[@]}"; do
     ID="${FOUND_IDS[$i]}"
     NAME="${FOUND_NAMES[$i]}"
-    
+
     echo "" | tee -a "$LOG_FILE"
     echo "► Profiling $NAME for 5 seconds..." | tee -a "$LOG_FILE"
     bpftool prog profile id $ID duration 5 cycles instructions 2>&1 | tee -a "$LOG_FILE"
