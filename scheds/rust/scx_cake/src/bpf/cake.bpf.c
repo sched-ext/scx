@@ -3994,11 +3994,30 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 #ifndef CAKE_RELEASE
 	if (stats_on)
 		cake_smt_record_run_start(bss, cpu, running_overhead_start);
+
+	struct cake_task_ctx __arena *running_tctx = NULL;
+	if (stats_on) {
+		struct cake_stats *stats = get_local_stats_for(cpu);
+		u32 reason_mask = 0;
+		u8 old_class = READ_ONCE(bss->last_wake_class);
+		u8 new_class;
+
+		running_tctx = get_task_ctx(p);
+		new_class = cake_shadow_classify_task(p, running_tctx, &reason_mask);
+		if (new_class < CAKE_WAKE_CLASS_MAX) {
+			stats->wake_class_sample_count[new_class]++;
+			if (old_class < CAKE_WAKE_CLASS_MAX && old_class != new_class)
+				stats->wake_class_transition_count[old_class][new_class]++;
+			cake_record_wake_class_reasons(stats, reason_mask);
+			WRITE_ONCE(bss->last_wake_class, new_class);
+		}
+	}
 #endif
 
 	/* FAST PATH: same task re-running on the same CPU.
 	 * Slice load is deferred into the task-change block.
-	 * On same-task re-runs: zero kfunc calls, zero BSS writes beyond idle_hint. */
+	 * Release/stats-off same-task re-runs keep zero kfunc calls and zero BSS
+	 * writes beyond idle_hint; debug stats refresh the shadow owner class. */
 	if (bss->last_pid != p->pid) {
 		/* ── TASK CHANGE: Zero-MESI Arena-Free (Phase 12) ──
 		 * Zero arena, zero division, zero get_task_hot. */
@@ -4014,22 +4033,10 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 		 * wakeup rescue stays anchored to currently active work. */
 		bss->vtime_local = p->scx.dsq_vtime;
 
-		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 #ifndef CAKE_RELEASE
-		if (stats_on) {
-			struct cake_stats *stats = get_local_stats_for(cpu);
-			u32 reason_mask = 0;
-			u8 old_class = READ_ONCE(bss->last_wake_class);
-			u8 new_class = cake_shadow_classify_task(p, tctx, &reason_mask);
-
-			if (new_class < CAKE_WAKE_CLASS_MAX) {
-				stats->wake_class_sample_count[new_class]++;
-				if (old_class < CAKE_WAKE_CLASS_MAX)
-					stats->wake_class_transition_count[old_class][new_class]++;
-				cake_record_wake_class_reasons(stats, reason_mask);
-				WRITE_ONCE(bss->last_wake_class, new_class);
-			}
-		}
+		struct cake_task_ctx __arena *tctx = stats_on ? running_tctx : get_task_ctx(p);
+#else
+		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 #endif
 		if (tctx) {
 #ifndef CAKE_RELEASE
