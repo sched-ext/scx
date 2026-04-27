@@ -6981,8 +6981,10 @@ fn append_blocked_behind_section(output: &mut String, label: &str, app: &TuiApp)
 }
 
 fn format_wake_class_counts(counts: &[u64]) -> String {
-    (1..counts.len())
-        .map(|class| format!("{}={}", wake_class_label(class), counts[class]))
+    counts
+        .iter()
+        .enumerate()
+        .map(|(class, count)| format!("{}={}", wake_class_label(class), count))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -6995,6 +6997,32 @@ fn format_wake_class_reasons(counts: &[u64]) -> String {
         .map(|(reason, count)| format!("{}={}", wake_class_reason_label(reason), count))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn format_wake_class_transitions<const TO: usize>(counts: &[[u64; TO]]) -> String {
+    let parts: Vec<_> = counts
+        .iter()
+        .enumerate()
+        .flat_map(|(from, row)| {
+            row.iter().enumerate().filter_map(move |(to, count)| {
+                if *count > 0 {
+                    Some(format!(
+                        "{}->{}={}",
+                        wake_class_label(from),
+                        wake_class_label(to),
+                        count
+                    ))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 fn format_busy_preempt_shadow(stats: &cake_stats) -> String {
@@ -7015,10 +7043,11 @@ fn format_busy_preempt_shadow(stats: &cake_stats) -> String {
 
 fn append_wake_policy_section(output: &mut String, label: &str, stats: &cake_stats) {
     output.push_str(&format!(
-        "{}: class=[{}] reasons=[{}] busy_shadow:{}\n",
+        "{}: class=[{}] reasons=[{}] transitions=[{}] busy_shadow:{}\n",
         label,
         format_wake_class_counts(&stats.wake_class_sample_count),
         format_wake_class_reasons(&stats.wake_class_reason_count),
+        format_wake_class_transitions(&stats.wake_class_transition_count),
         format_busy_preempt_shadow(stats),
     ));
 }
