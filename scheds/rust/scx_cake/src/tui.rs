@@ -1044,6 +1044,25 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.nr_wake_cross_tgid += s.nr_wake_cross_tgid;
             total.nr_wake_kick_idle += s.nr_wake_kick_idle;
             total.nr_wake_kick_preempt += s.nr_wake_kick_preempt;
+            for class in 0..total.wake_class_sample_count.len() {
+                total.wake_class_sample_count[class] += s.wake_class_sample_count[class];
+                total.busy_preempt_shadow_wakee_class_count[class] +=
+                    s.busy_preempt_shadow_wakee_class_count[class];
+                total.busy_preempt_shadow_owner_class_count[class] +=
+                    s.busy_preempt_shadow_owner_class_count[class];
+                for next in 0..total.wake_class_transition_count[class].len() {
+                    total.wake_class_transition_count[class][next] +=
+                        s.wake_class_transition_count[class][next];
+                }
+            }
+            for reason in 0..total.wake_class_reason_count.len() {
+                total.wake_class_reason_count[reason] += s.wake_class_reason_count[reason];
+            }
+            for decision in 0..total.busy_preempt_shadow_count.len() {
+                total.busy_preempt_shadow_count[decision] += s.busy_preempt_shadow_count[decision];
+            }
+            total.busy_preempt_shadow_local += s.busy_preempt_shadow_local;
+            total.busy_preempt_shadow_remote += s.busy_preempt_shadow_remote;
             total.nr_affine_kick_idle += s.nr_affine_kick_idle;
             total.nr_affine_kick_preempt += s.nr_affine_kick_preempt;
             total.nr_quantum_full += s.nr_quantum_full;
@@ -1773,6 +1792,35 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.nr_wake_kick_preempt = current
         .nr_wake_kick_preempt
         .saturating_sub(previous.nr_wake_kick_preempt);
+    for class in 0..current.wake_class_sample_count.len() {
+        delta.wake_class_sample_count[class] = current.wake_class_sample_count[class]
+            .saturating_sub(previous.wake_class_sample_count[class]);
+        delta.busy_preempt_shadow_wakee_class_count[class] = current
+            .busy_preempt_shadow_wakee_class_count[class]
+            .saturating_sub(previous.busy_preempt_shadow_wakee_class_count[class]);
+        delta.busy_preempt_shadow_owner_class_count[class] = current
+            .busy_preempt_shadow_owner_class_count[class]
+            .saturating_sub(previous.busy_preempt_shadow_owner_class_count[class]);
+        for next in 0..current.wake_class_transition_count[class].len() {
+            delta.wake_class_transition_count[class][next] = current.wake_class_transition_count
+                [class][next]
+                .saturating_sub(previous.wake_class_transition_count[class][next]);
+        }
+    }
+    for reason in 0..current.wake_class_reason_count.len() {
+        delta.wake_class_reason_count[reason] = current.wake_class_reason_count[reason]
+            .saturating_sub(previous.wake_class_reason_count[reason]);
+    }
+    for decision in 0..current.busy_preempt_shadow_count.len() {
+        delta.busy_preempt_shadow_count[decision] = current.busy_preempt_shadow_count[decision]
+            .saturating_sub(previous.busy_preempt_shadow_count[decision]);
+    }
+    delta.busy_preempt_shadow_local = current
+        .busy_preempt_shadow_local
+        .saturating_sub(previous.busy_preempt_shadow_local);
+    delta.busy_preempt_shadow_remote = current
+        .busy_preempt_shadow_remote
+        .saturating_sub(previous.busy_preempt_shadow_remote);
     delta.nr_affine_kick_idle = current
         .nr_affine_kick_idle
         .saturating_sub(previous.nr_affine_kick_idle);
@@ -5073,6 +5121,28 @@ fn wake_reason_short_label(reason: usize) -> &'static str {
     }
 }
 
+fn wake_class_label(class: usize) -> &'static str {
+    match class {
+        1 => "normal",
+        2 => "shield",
+        3 => "contain",
+        _ => "none",
+    }
+}
+
+fn wake_class_reason_label(reason: usize) -> &'static str {
+    match reason {
+        0 => "low_util",
+        1 => "short_run",
+        2 => "wake_dense",
+        3 => "latency_prio",
+        4 => "runtime_heavy",
+        5 => "preempt_heavy",
+        6 => "pressure_high",
+        _ => "unknown",
+    }
+}
+
 fn wake_bucket_label(bucket: usize) -> &'static str {
     match bucket {
         0 => "<50us",
@@ -6910,6 +6980,49 @@ fn append_blocked_behind_section(output: &mut String, label: &str, app: &TuiApp)
     }
 }
 
+fn format_wake_class_counts(counts: &[u64]) -> String {
+    (1..counts.len())
+        .map(|class| format!("{}={}", wake_class_label(class), counts[class]))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_wake_class_reasons(counts: &[u64]) -> String {
+    counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .map(|(reason, count)| format!("{}={}", wake_class_reason_label(reason), count))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_busy_preempt_shadow(stats: &cake_stats) -> String {
+    format!(
+        "allow={} skip={} local={} remote={} wakee=[{}] owner=[{}]",
+        stats
+            .busy_preempt_shadow_count
+            .first()
+            .copied()
+            .unwrap_or(0),
+        stats.busy_preempt_shadow_count.get(1).copied().unwrap_or(0),
+        stats.busy_preempt_shadow_local,
+        stats.busy_preempt_shadow_remote,
+        format_wake_class_counts(&stats.busy_preempt_shadow_wakee_class_count),
+        format_wake_class_counts(&stats.busy_preempt_shadow_owner_class_count),
+    )
+}
+
+fn append_wake_policy_section(output: &mut String, label: &str, stats: &cake_stats) {
+    output.push_str(&format!(
+        "{}: class=[{}] reasons=[{}] busy_shadow:{}\n",
+        label,
+        format_wake_class_counts(&stats.wake_class_sample_count),
+        format_wake_class_reasons(&stats.wake_class_reason_count),
+        format_busy_preempt_shadow(stats),
+    ));
+}
+
 fn append_window_stats(
     output: &mut String,
     label: &str,
@@ -7030,6 +7143,7 @@ fn append_window_stats(
         stats.nr_affine_kick_idle,
         stats.nr_affine_kick_preempt,
     ));
+    append_wake_policy_section(output, &format!("win.wakepolicy.{}", label), stats);
     let smt_runtime_ns = stats.smt_solo_runtime_ns + stats.smt_contended_runtime_ns;
     let smt_runs = stats.smt_solo_run_count + stats.smt_contended_run_count;
     output.push_str(&format!(
@@ -7303,6 +7417,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
         stats.nr_affine_kick_idle,
         stats.nr_affine_kick_preempt,
     ));
+    append_wake_policy_section(&mut output, "wakepolicy.life", stats);
     let smt_runtime_ns = stats.smt_solo_runtime_ns + stats.smt_contended_runtime_ns;
     let smt_runs = stats.smt_solo_run_count + stats.smt_contended_run_count;
     output.push_str(&format!(
