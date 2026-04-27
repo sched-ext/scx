@@ -42,6 +42,17 @@ enum cake_class {
 	CAKE_CLASS_MAX     = 4,
 };
 
+enum cake_startup_phase {
+	CAKE_STARTUP_PHASE_NONE    = 0,
+	CAKE_STARTUP_PHASE_ENQUEUE = 1,
+	CAKE_STARTUP_PHASE_SELECT  = 2,
+	CAKE_STARTUP_PHASE_RUNNING = 3,
+};
+
+#define CAKE_STARTUP_MASK_ENQUEUE (1u << 0)
+#define CAKE_STARTUP_MASK_SELECT  (1u << 1)
+#define CAKE_STARTUP_MASK_RUNNING (1u << 2)
+
 /* ═══ Additive Fairness Model ═══
  * Hot path reads p->scx.weight directly from task_struct (L1-hot).
  * vtime_mult_cache[] BSS array DELETED. -4KB BSS, -64 cache lines.
@@ -85,6 +96,10 @@ struct cake_cpu_bss {
 	u8  busy_wakeup_pending; /* 1B: reserved for future wake handoff policy */
 	u8  _pad_status;        /* 1B: padding / future per-CPU state */
 #ifndef CAKE_RELEASE
+	u64 smt_run_start_ns;   /* Wall-clock start for SMT overlap accounting */
+	u64 smt_last_stop_ns;   /* Last observed stop for sibling overlap accounting */
+	u8  smt_sibling_active_start; /* 1 if sibling lane was active at run start */
+	u8  _pad_smt[7];
 	u64 cake_clock;         /* 8B: BPF-native monotonic clock (ns).
 				 *     Debug-only accumulator. Advanced by consumed
 				 *     slice in cake_stopping. Resynced from
@@ -354,10 +369,36 @@ enum cake_select_reason {
 	CAKE_SELECT_REASON_MAX = 10,
 };
 
+#define CAKE_WAKE_EDGE_SLOTS 512
+#define CAKE_WAKE_EDGE_PROBES 8
+
+struct cake_wake_edge_record {
+	u32 waker_pid;
+	u32 waker_tgid;
+	u32 wakee_pid;
+	u32 wakee_tgid;
+	u64 wake_count;
+	u64 same_tgid_count;
+	u64 cross_tgid_count;
+	u64 wait_ns;
+	u64 wait_count;
+	u64 wait_max_ns;
+	u64 wait_bucket_count[CAKE_WAKE_BUCKET_MAX];
+	u64 target_hit_count;
+	u64 target_miss_count;
+	u64 follow_same_cpu_count;
+	u64 follow_migrate_count;
+	u64 waker_place_count[CAKE_PLACE_CLASS_MAX];
+	u64 home_place_count[CAKE_PLACE_CLASS_MAX];
+	u64 reason_count[CAKE_WAKE_REASON_MAX];
+	u64 path_count[CAKE_SELECT_PATH_MAX];
+	u64 last_seen_ns;
+};
+
 /* Debug-only pressure spill diagnostics.
  * "anchor" groups structural blockers where there is no usable same-core
- * spill candidate: invalid anchor CPU, secondary lane anchor, missing sibling,
- * or sibling excluded by affinity. */
+ * spill candidate. The companion anchor-block enum breaks that aggregate
+ * down so dumps can distinguish bad inputs from intentional topology gates. */
 enum cake_pressure_probe_site {
 	CAKE_PRESSURE_PROBE_SITE_HOME = 0,
 	CAKE_PRESSURE_PROBE_SITE_PREV = 1,
@@ -372,6 +413,14 @@ enum cake_pressure_probe_outcome {
 	CAKE_PRESSURE_PROBE_BLOCKED_SIBLING_BUSY = 4,
 	CAKE_PRESSURE_PROBE_SUCCESS = 5,
 	CAKE_PRESSURE_PROBE_OUTCOME_MAX = 6,
+};
+
+enum cake_pressure_anchor_block_reason {
+	CAKE_PRESSURE_ANCHOR_INVALID = 0,
+	CAKE_PRESSURE_ANCHOR_SECONDARY = 1,
+	CAKE_PRESSURE_ANCHOR_NO_SIBLING = 2,
+	CAKE_PRESSURE_ANCHOR_AFFINITY = 3,
+	CAKE_PRESSURE_ANCHOR_REASON_MAX = 4,
 };
 
 enum cake_cb_idx {
@@ -425,13 +474,14 @@ struct cake_iter_record {
 	u32 ppid;        /* parent pid (promoted from tctx CL0) */
 	u32 packed_info; /* iter/debug packed flags — read in Rust telemetry loop */
 	u16 pelt_util;       /* PELT util_avg (0-1024) from p->se.avg */
-	u16 legacy_slot_u16; /* Reserved legacy field */
+	u16 allowed_cpus;    /* p->nr_cpus_allowed, capped to u16 */
 	u16 task_weight;     /* Raw task weight mirrored for iter/TUI display (100=nice0) */
-	u16 _pad_iter;       /* alignment */
+	u16 home_cpu;        /* Current sticky home CPU, or CAKE_CPU_SENTINEL */
 	/* telemetry block: everything the TUI currently reads from arena pointers */
 	struct {
 		u64 run_start_ns;
 		u64 run_duration_ns;
+		u64 total_runtime_ns;
 		u64 enqueue_start_ns;
 		u64 wait_duration_ns;
 		u32 select_cpu_duration_ns;
@@ -484,21 +534,22 @@ struct cake_iter_record {
 			u32 idle_probe_ns;
 			u32 vtime_compute_ns;
 			u32 mbox_staging_ns;
-			u32 _pad_ewma;
-			u32 legacy_classify_ns;
+			u32 startup_latency_us;
+			u32 startup_enqueue_us;
 			u32 vtime_staging_ns;
-			u32 warm_history_ns;
-		u16 quantum_full_count;
-		u16 quantum_yield_count;
-		u16 quantum_preempt_count;
-		u16 _pad_quantum;
+			u32 startup_select_us;
+		u64 quantum_full_count;
+		u64 quantum_yield_count;
+		u64 quantum_preempt_count;
+		u8 startup_first_phase;
+		u8 startup_phase_mask;
 		u16 waker_cpu;
 		u16 _pad_waker;
 		u32 waker_tgid;
 		u64 wake_reason_wait_ns[CAKE_WAKE_REASON_MAX - 1];
 		u32 wake_reason_count[CAKE_WAKE_REASON_MAX - 1];
 		u32 wake_reason_max_us[CAKE_WAKE_REASON_MAX - 1];
-		u8 pending_select_path;
+		u8 last_select_reason;
 		u8 last_select_path;
 		u8 last_place_class;
 		u8 last_waker_place_class;
@@ -573,6 +624,7 @@ struct cake_task_ctx {
 		/* Timing Metrics */
 		u64 run_start_ns;
 		u64 run_duration_ns; /* Last observed runtime (stop - run_start) */
+		u64 total_runtime_ns; /* Cumulative runtime charged to this task */
 		u64 enqueue_start_ns; /* Internal wake-to-run staging timestamp */
 		u64 wait_duration_ns; /* Last observed wake-to-run wait */
 		u32 select_cpu_duration_ns; /* Last observed select_cpu overhead */
@@ -645,16 +697,17 @@ struct cake_task_ctx {
 		u32 idle_probe_ns;         /* select_cpu: winning gate idle probe cost */
 		u32 vtime_compute_ns;      /* Reserved legacy enqueue timing slot */
 		u32 mbox_staging_ns;       /* running: mailbox CL0 write burst */
-		u32 _pad_ewma;             /* (was _deprecated_ewma_ns — removed) */
-		u32 legacy_classify_ns;    /* Reserved legacy stopping timing slot */
+		u32 startup_latency_us;    /* task init to first observed run, us */
+		u32 startup_enqueue_us;    /* task init to first observed enqueue, us */
 		u32 vtime_staging_ns;      /* stopping: dsq_vtime + slice telemetry staging */
-		u32 warm_history_ns;       /* Reserved legacy migration timing slot */
+		u32 startup_select_us;     /* task init to first observed select_cpu, us */
 
 		/* Quantum completion tracking */
-		u16 quantum_full_count;    /* Task consumed the full slice */
-		u16 quantum_yield_count;   /* Task stopped with slice left and became non-runnable */
-		u16 quantum_preempt_count; /* Task was kicked/preempted while still runnable */
-		u16 _pad_quantum;          /* Align to 4B boundary */
+		u64 quantum_full_count;    /* Task consumed the full slice */
+		u64 quantum_yield_count;   /* Task stopped with slice left and became non-runnable */
+		u64 quantum_preempt_count; /* Task was kicked/preempted while still runnable */
+		u8 startup_first_phase;    /* enum cake_startup_phase: first observed scheduler phase */
+		u8 startup_phase_mask;     /* CAKE_STARTUP_MASK_* phases observed before first run */
 
 		/* Wake chain tracking */
 		u16 waker_cpu;             /* CPU the waker was running on */
@@ -670,9 +723,10 @@ struct cake_task_ctx {
 		u16 pending_target_cpu;    /* CPU chosen at enqueue for the current wake */
 		u16 postwake_first_cpu;    /* CPU used for the first run after the wake */
 		u8 postwake_reason;        /* Wake reason associated with postwake_first_cpu */
-		u8 _pad_phase2;            /* Keep pending_kick_ts_ns naturally aligned */
+		u8 pending_select_reason;  /* select_cpu reason that fed the next run */
 		u64 pending_kick_ts_ns;    /* Timestamp when the last wake kick was issued */
 		u8 last_select_path;       /* Last select path that actually led to a run */
+		u8 last_select_reason;     /* Last select_cpu reason that fed an observed run */
 		u8 last_place_class;       /* Last run vs sticky home: cpu/core/llc/remote */
 		u8 last_waker_place_class; /* Last run vs waker: cpu/core/llc/remote */
 		u32 wake_same_tgid_count;  /* Wake chain stayed inside the same process */
@@ -680,6 +734,9 @@ struct cake_task_ctx {
 		u64 home_place_wait_ns[CAKE_PLACE_CLASS_MAX]; /* Wait totals by home locality */
 		u32 home_place_wait_count[CAKE_PLACE_CLASS_MAX]; /* Wait samples by home locality */
 		u32 home_place_wait_max_us[CAKE_PLACE_CLASS_MAX]; /* Worst wait by home locality */
+		u32 pending_blocker_pid;  /* CPU owner observed when enqueue hit busy target */
+		u16 pending_blocker_cpu;  /* Busy target CPU for pending wake */
+		u16 _pad_blocker;
 
 		/* CPU core distribution histogram */
 		u16 cpu_run_count[CAKE_TELEM_MAX_CPUS]; /* 128 bytes: per-CPU run count */
@@ -688,7 +745,7 @@ struct cake_task_ctx {
 } __attribute__((aligned(CAKE_TCTX_ALIGN)));
 _Static_assert(
 	sizeof(struct cake_task_ctx) == CAKE_TCTX_SIZE,
-	"cake_task_ctx size mismatch (64B release, 448B debug)");
+	"cake_task_ctx size mismatch (64B release, 512B debug)");
 
 /* packed_info bitfield layout (iter/debug transport field):
  * [Stable:2][Tier:2][Flags:4][KCR:1][BG:1][Rsvd:14][Rsvd:8]
@@ -811,6 +868,16 @@ struct cake_stats {
 	u64 total_running_ns;        /* Total time in cake_running */
 	u64 task_runtime_ns;         /* Total scheduled task runtime completed on this CPU */
 	u64 task_run_count;          /* Completed task run segments on this CPU */
+	u64 smt_solo_runtime_ns;     /* Runtime completed while sibling lane appeared idle */
+	u64 smt_contended_runtime_ns; /* Runtime completed with observed sibling overlap */
+	u64 smt_overlap_runtime_ns;  /* Estimated sibling-overlap runtime charged to this CPU */
+	u64 smt_solo_run_count;      /* Run segments without observed sibling overlap */
+	u64 smt_contended_run_count; /* Run segments with observed sibling overlap */
+	u64 smt_sibling_active_start_count; /* Runs whose sibling was active at start */
+	u64 smt_sibling_active_stop_count;  /* Runs whose sibling was active at stop */
+	u64 smt_wake_wait_ns[2];     /* Wake wait by sibling-active-at-run-start bucket */
+	u64 smt_wake_wait_count[2];  /* Wake wait samples by SMT bucket */
+	u64 smt_wake_wait_max_ns[2]; /* Worst wake wait by SMT bucket */
 
 	/* Callback max tracking (worst single invocation, ns) */
 	u64 max_select_cpu_ns;       /* Worst single cake_select_cpu */
@@ -846,6 +913,13 @@ struct cake_stats {
 	u64 wake_reason_wait_max_ns[CAKE_WAKE_REASON_MAX]; /* Worst wait by wake path (0 unused) */
 	u64 wake_reason_bucket_count[CAKE_WAKE_REASON_MAX][CAKE_WAKE_BUCKET_MAX]; /* Wake-to-run buckets by wake path (0 unused) */
 	u64 select_path_count[CAKE_SELECT_PATH_MAX]; /* Path chosen in select_cpu (0 unused) */
+	u64 select_reason_wait_ns[CAKE_SELECT_REASON_MAX]; /* Wake-to-run wait after each select_cpu decision reason */
+	u64 select_reason_wait_count[CAKE_SELECT_REASON_MAX]; /* Wait samples after each select_cpu decision reason */
+	u64 select_reason_wait_max_ns[CAKE_SELECT_REASON_MAX]; /* Worst wait after each select_cpu decision reason */
+	u64 select_reason_bucket_count[CAKE_SELECT_REASON_MAX][CAKE_WAKE_BUCKET_MAX]; /* Wait buckets after each select_cpu decision reason */
+	u64 select_reason_select_ns[CAKE_SELECT_REASON_MAX]; /* select_cpu overhead by decision reason */
+	u64 select_reason_select_count[CAKE_SELECT_REASON_MAX]; /* select_cpu samples by decision reason */
+	u64 select_reason_select_max_ns[CAKE_SELECT_REASON_MAX]; /* Worst select_cpu overhead by decision reason */
 	u64 home_place_wait_ns[CAKE_PLACE_CLASS_MAX]; /* Wait sums by task-home locality */
 	u64 home_place_wait_count[CAKE_PLACE_CLASS_MAX]; /* Wait samples by task-home locality */
 	u64 home_place_wait_max_ns[CAKE_PLACE_CLASS_MAX]; /* Worst wait by task-home locality */
