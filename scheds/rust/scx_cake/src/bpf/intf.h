@@ -94,7 +94,7 @@ struct cake_cpu_bss {
 	u8  idle_hint;          /* 1B: 0=busy, 1=idle */
 	u8  cpu_pressure;       /* 1B: rolling lane pressure for same-core spill decisions */
 	u8  busy_wakeup_pending; /* 1B: reserved for future wake handoff policy */
-	u8  _pad_status;        /* 1B: padding / future per-CPU state */
+	u8  last_wake_class;    /* 1B: last running task's shadow wake class */
 #ifndef CAKE_RELEASE
 	u64 smt_run_start_ns;   /* Wall-clock start for SMT overlap accounting */
 	u64 smt_last_stop_ns;   /* Last observed stop for sibling overlap accounting */
@@ -330,6 +330,31 @@ enum cake_kick_kind {
 	CAKE_KICK_KIND_IDLE    = 1,
 	CAKE_KICK_KIND_PREEMPT = 2,
 	CAKE_KICK_KIND_MAX     = 3,
+};
+
+enum cake_wake_class {
+	CAKE_WAKE_CLASS_NONE    = 0,
+	CAKE_WAKE_CLASS_NORMAL  = 1,
+	CAKE_WAKE_CLASS_SHIELD  = 2,
+	CAKE_WAKE_CLASS_CONTAIN = 3,
+	CAKE_WAKE_CLASS_MAX     = 4,
+};
+
+enum cake_wake_class_reason {
+	CAKE_WAKE_CLASS_REASON_LOW_UTIL      = 0,
+	CAKE_WAKE_CLASS_REASON_SHORT_RUN     = 1,
+	CAKE_WAKE_CLASS_REASON_WAKE_DENSE    = 2,
+	CAKE_WAKE_CLASS_REASON_LATENCY_PRIO  = 3,
+	CAKE_WAKE_CLASS_REASON_RUNTIME_HEAVY = 4,
+	CAKE_WAKE_CLASS_REASON_PREEMPT_HEAVY = 5,
+	CAKE_WAKE_CLASS_REASON_PRESSURE_HIGH = 6,
+	CAKE_WAKE_CLASS_REASON_MAX           = 7,
+};
+
+enum cake_busy_preempt_shadow {
+	CAKE_BUSY_PREEMPT_SHADOW_ALLOW = 0,
+	CAKE_BUSY_PREEMPT_SHADOW_SKIP  = 1,
+	CAKE_BUSY_PREEMPT_SHADOW_MAX   = 2,
 };
 
 enum cake_place_class {
@@ -945,6 +970,14 @@ struct cake_stats {
 	u64 nr_idle_hint_clear_skips; /* idle_hint already 0 */
 	u64 nr_wake_kick_idle; /* Wake-driven kicks that used SCX_KICK_IDLE */
 	u64 nr_wake_kick_preempt; /* Wake-driven kicks that used SCX_KICK_PREEMPT */
+	u64 wake_class_sample_count[CAKE_WAKE_CLASS_MAX]; /* Shadow wake class samples */
+	u64 wake_class_reason_count[CAKE_WAKE_CLASS_REASON_MAX]; /* Shadow class reason hits */
+	u64 wake_class_transition_count[CAKE_WAKE_CLASS_MAX][CAKE_WAKE_CLASS_MAX]; /* Per-CPU owner class transitions */
+	u64 busy_preempt_shadow_count[CAKE_BUSY_PREEMPT_SHADOW_MAX]; /* Shadow busy-wake decision counts */
+	u64 busy_preempt_shadow_wakee_class_count[CAKE_WAKE_CLASS_MAX]; /* Busy shadow by wakee class */
+	u64 busy_preempt_shadow_owner_class_count[CAKE_WAKE_CLASS_MAX]; /* Busy shadow by owner class */
+	u64 busy_preempt_shadow_local; /* Busy shadow decisions where waker CPU matched target CPU */
+	u64 busy_preempt_shadow_remote; /* Busy shadow decisions where target CPU was remote */
 	u64 nr_affine_kick_idle; /* Affinity-change kicks that used SCX_KICK_IDLE */
 	u64 nr_affine_kick_preempt; /* Affinity-change kicks that used SCX_KICK_PREEMPT */
 	u64 nr_quantum_full; /* Stops that consumed the full slice */
