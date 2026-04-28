@@ -293,9 +293,6 @@ extern int			nr_cpdoms;
 
 typedef struct task_ctx __arena task_ctx;
 
-u64 get_task_ctx_internal(struct task_struct *p);
-#define get_task_ctx(p) ((task_ctx *)get_task_ctx_internal((p)))
-
 struct cpu_ctx *get_cpu_ctx(void);
 struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id);
 struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
@@ -368,6 +365,29 @@ struct cpu_ctx {
 	volatile u32	nr_sched;	/* number of schedules */
 	volatile u32	nr_preempt;
 
+	/*
+	 * Per-CPU task_ctx lookup cache. Local-only writes/reads, never
+	 * accessed remotely. Used by get_task_ctx_curcpu() / get_task_ctx()
+	 * to skip bpf_task_storage_get() when consecutive ops callbacks
+	 * reference the same task on the same CPU.
+	 *
+	 * Keyed by (task_struct *, pid). Either alone is unsafe:
+	 *  - task_struct * alone: SLUB can recycle a freed task_struct
+	 *    address; a stale cache entry on an idle CPU would then alias
+	 *    the new task and return the freed taskc.
+	 *  - pid alone: a non-leader thread's pid changes when it calls
+	 *    execve() -- de_thread() / exchange_tids() swaps the calling
+	 *    thread's pid with the leader's, and the leader is then
+	 *    released; entries keyed on the old pid would become stale
+	 *    hits for the surviving thread.
+	 *
+	 * Together: ABA defeated by pid mismatch, execve swap defeated
+	 * by address mismatch. cached_pid == 0 means invalid.
+	 */
+	u64		cached_task;		/* (struct task_struct *) as u64 */
+	u64		cached_taskc_raw;	/* (task_ctx __arena *) as u64 */
+	u32		cached_pid;
+
 	/* --- cacheline 2 boundary (128 bytes): per-interval results --- */
 	/*
 	 * Updated once per sys_stat collection interval. Read by userspace
@@ -403,7 +423,6 @@ struct cpu_ctx {
 	u32		avg_dom_pinned_util_wall;
 	u32		cur_dom_pinned_util_invr;
 	u32		avg_dom_pinned_util_invr;
-	u32		__pad1;
 
 	/* --- cacheline 3 boundary (192 bytes): sys_stat raw inputs --- */
 	/*

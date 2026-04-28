@@ -63,9 +63,17 @@ struct {
 } cpu_ctx_stor SEC(".maps");
 
 __hidden
-u64 get_task_ctx_internal(struct task_struct __arg_trusted *p)
+u64 __get_task_ctx_slowpath(struct task_struct __arg_trusted *p,
+			    struct cpu_ctx *cpuc)
 {
-	return (u64)scx_task_data(p);
+	u64 raw = (u64)scx_task_data(p);
+
+	if (cpuc && raw) {
+		cpuc->cached_task = (u64)p;
+		cpuc->cached_pid = p->pid;
+		cpuc->cached_taskc_raw = raw;
+	}
+	return raw;
 }
 
 __hidden
