@@ -154,9 +154,6 @@ struct cell {
 	// Number of CPUs in this cell
 	u32 cpu_cnt;
 
-	// Number of LLCs with at least one CPU in this cell
-	u32 llc_present_cnt;
-
 	// Per-LLC data (cacheline-aligned)
 	struct cell_llc llcs[MAX_LLCS];
 
