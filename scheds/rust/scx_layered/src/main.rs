@@ -312,7 +312,11 @@ lazy_static! {
 ///
 /// - Grouped: Similar to Confined but tasks may spill outside if there are
 ///   idle CPUs outside the allocated ones. The range can optionally be
-///   restricted with the "cpus_range" property.
+///   restricted with the "cpus_range" property. The optional
+///   "idle_confined" flag restricts idle selection to
+///   the layer's CPUs until the layer becomes saturated, providing
+///   Confined-style cache locality under normal load with Grouped-style
+///   overflow under pressure.
 ///
 /// - Open: Prefer the CPUs which are not occupied by Confined or Grouped
 ///   layers. Tasks in this group will spill into occupied CPUs if there are
@@ -2064,6 +2068,11 @@ impl<'a> Scheduler<'a> {
                 LayerKind::Confined { protected, .. } | LayerKind::Grouped { protected, .. } => {
                     protected
                 }
+            });
+
+            layer.idle_confined.write(match spec.kind {
+                LayerKind::Grouped { idle_confined, .. } => idle_confined,
+                _ => false,
             });
 
             match &spec.cpuset {

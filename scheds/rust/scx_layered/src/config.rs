@@ -198,6 +198,15 @@ pub enum LayerKind {
         #[serde(default)]
         protected: bool,
 
+        /// When true, idle CPU selection only considers the layer's own
+        /// CPUs until the layer becomes saturated (i.e., no idle CPU is
+        /// found and check_no_idle is set). At that point, idle search
+        /// falls back to unprotected CPUs like a normal Grouped layer.
+        /// Provides Confined-style cache locality under normal load with
+        /// Grouped-style overflow under pressure.
+        #[serde(default)]
+        idle_confined: bool,
+
         #[serde(flatten)]
         common: LayerCommon,
     },
