@@ -536,13 +536,8 @@ static void account_task_runtime(struct task_struct *p,
 	 * Under CPU bandwidth control using cpu.max, we also need to report
 	 * how much time was actually consumed compared to the reserved time.
 	 */
-	if (enable_cpu_bw && (p->pid != lavd_pid)) {
-		struct cgroup *cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
-		if (cgrp) {
-			scx_cgroup_bw_consume(cgrp, task_time_wall);
-			bpf_cgroup_release(cgrp);
-		}
-	}
+	if (enable_cpu_bw && (p->pid != lavd_pid))
+		scx_cgroup_bw_consume(taskc->cgrp_id, task_time_wall, (u64)taskc);
 }
 
 static void update_stat_for_stopping(struct task_struct *p,
@@ -687,6 +682,16 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 
 		if (can_direct_dispatch(cpuc, true)) {
+			/*
+			 * The direct-dispatch path bypasses ops.enqueue(), so
+			 * the throttle check there is never reached.  Skip the
+			 * dispatch if the cgroup is throttled; the task will
+			 * fall through to ops.enqueue() which puts it in the BTQ.
+			 */
+			if (enable_cpu_bw && (p->pid != lavd_pid) &&
+			    (scx_cgroup_bw_throttled(ictx.taskc->cgrp_id, p,
+						     (u64)ictx.taskc) == -EAGAIN))
+				goto out;
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
@@ -701,7 +706,6 @@ out:
 
 static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
 {
-	struct cgroup *cgrp;
 	int ret, ret2;
 
 	/*
@@ -714,21 +718,13 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	 * Note that we cannot use scx_bpf_task_cgroup() here because this can
 	 * be called only from ops.enqueue() and ops.dispatch().
 	 */
-	cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
-	if (!cgrp) {
-		debugln("Failed to lookup a cgroup: %llu", taskc->cgrp_id);
-		return -ESRCH;
-	}
-
-	ret = scx_cgroup_bw_throttled(cgrp, p);
+	ret = scx_cgroup_bw_throttled(taskc->cgrp_id, p, (u64)taskc);
 	if ((ret == -EAGAIN) && put_aside) {
-		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime, cgrp);
-		if (ret2) {
-			bpf_cgroup_release(cgrp);
+		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime,
+					       taskc->cgrp_id);
+		if (ret2)
 			return ret2;
-		}
 	}
-	bpf_cgroup_release(cgrp);
 	return ret;
 }
 
@@ -1823,6 +1819,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		taskc->svc_time_iwgt = sys_stat.avg_svc_time_iwgt;
 	}
 
+	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
@@ -2361,7 +2358,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	/*
 	 * Initialize the current logical clock and service time.
 	 */
-	WRITE_ONCE(cur_logical_clk, 0);
+	WRITE_ONCE(cur_logical_clk, LAVD_DL_COMPETE_WINDOW);
 	WRITE_ONCE(cur_svc_time_iwgt, 0);
 
 	/*

@@ -11,6 +11,7 @@
 #include <lib/ravg.h>
 #include <lib/sdt_task.h>
 #include <lib/atq.h>
+#include <lib/cgroup.h>
 
 /*
  * common macros
@@ -163,7 +164,7 @@ struct task_ctx {
 	 * Do NOT change the position of atq. It should be at the beginning
 	 * of the task_ctx.
 	 */
-	struct scx_task_common atq __attribute__((aligned(CACHELINE_SIZE)));
+	struct scx_task_cgroup_bw atq __attribute__((aligned(CACHELINE_SIZE)));
 
 	/* --- cacheline 1 boundary (64 bytes): running/stopping hot --- */
 	/*
