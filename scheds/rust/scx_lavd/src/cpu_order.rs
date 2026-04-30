@@ -981,10 +981,19 @@ impl<'a> EnergyModelOptimizer<'a> {
     ) -> bool {
         match pdsi_map.get_mut(&new_pdsi.performance) {
             Some(v) => {
-                let pdsi = v.iter().next().unwrap();
-                if pdsi.power == new_pdsi.power {
-                    v.insert(new_pdsi)
-                } else if pdsi.power > new_pdsi.power {
+                let (pdsi_power, pdsi_pd_len) = {
+                    let pdsi = v.iter().next().unwrap();
+                    (pdsi.power, pdsi.pd_id_set.len())
+                };
+                if pdsi_power == new_pdsi.power {
+                    if new_pdsi.pd_id_set.len() < pdsi_pd_len {
+                        v.clear();
+                        v.insert(new_pdsi);
+                        true
+                    } else {
+                        false
+                    }
+                } else if pdsi_power > new_pdsi.power {
                     v.clear();
                     v.insert(new_pdsi);
                     true
@@ -1015,13 +1024,19 @@ impl<'a> EnergyModelOptimizer<'a> {
                 // There are already PDSetInfo in the list.
                 Some(v) => {
                     let mut v = v.borrow_mut();
-                    let pdsi = &v.iter().next().unwrap();
-                    if pdsi.power == new_pdsi.power {
-                        // If the power consumptions are the same, keep both.
-                        if v.insert(new_pdsi.clone()) {
+                    let (pdsi_power, pdsi_pd_len) = {
+                        let pdsi = v.iter().next().unwrap();
+                        (pdsi.power, pdsi.pd_id_set.len())
+                    };
+                    if pdsi_power == new_pdsi.power {
+                        // If the power consumptions are the same, keep the one with fewer PDs
+                        // to minimize leakage power and improve locality.
+                        if new_pdsi.pd_id_set.len() < pdsi_pd_len {
+                            v.clear();
+                            v.insert(new_pdsi.clone());
                             found_new = true;
                         }
-                    } else if pdsi.power > new_pdsi.power {
+                    } else if pdsi_power > new_pdsi.power {
                         // If the new one takes less power, keep the new one.
                         v.clear();
                         v.insert(new_pdsi.clone());
