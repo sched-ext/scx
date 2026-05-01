@@ -86,9 +86,6 @@ const u32  legacy_tier_base[4]    = { 250000000, 0, 750000000, 500000000 };
 #ifndef CAKE_HOT_TELEMETRY
 #define CAKE_HOT_TELEMETRY 0
 #endif
-#ifndef CAKE_PATH_TELEMETRY
-#define CAKE_PATH_TELEMETRY 0
-#endif
 #if defined(CAKE_RELEASE) || !CAKE_HOT_TELEMETRY
 #define CAKE_LEAN_SCHED 1
 #else
@@ -110,11 +107,7 @@ const bool enable_stats __attribute__((used)) = false;
 #else
 #define CAKE_STATS_ENABLED 0
 #define CAKE_STATS_ACTIVE 0
-#if CAKE_PATH_TELEMETRY
 #define CAKE_PATH_STATS_ACTIVE (*(volatile const bool *)&enable_stats)
-#else
-#define CAKE_PATH_STATS_ACTIVE 0
-#endif
 #endif
 #endif
 /* enable_dvfs REMOVED: dead — zero BPF readers. */
@@ -1366,11 +1359,11 @@ static __always_inline u64 cake_llc_dsq_for_cpu(u32 cpu)
 }
 
 static __always_inline void cake_record_shared_vtime_insert(
-	u64 enq_flags, bool preserve_state)
+	u64 enq_flags, bool preserve_state, u32 stats_cpu)
 {
 #ifndef CAKE_RELEASE
 	if (CAKE_PATH_STATS_ACTIVE) {
-		struct cake_stats *stats = get_local_stats();
+		struct cake_stats *stats = get_local_stats_for(stats_cpu);
 
 		stats->nr_shared_vtime_inserts++;
 		stats->nr_dsq_queued++;
@@ -1392,6 +1385,7 @@ static __always_inline void cake_record_shared_vtime_insert(
 #else
 	(void)enq_flags;
 	(void)preserve_state;
+	(void)stats_cpu;
 #endif
 }
 
@@ -1410,7 +1404,7 @@ static __always_inline void cake_insert_llc_vtime(
 		if (idle_hint) {
 #ifndef CAKE_RELEASE
 			if (CAKE_PATH_STATS_ACTIVE) {
-				struct cake_stats *stats = get_local_stats();
+				struct cake_stats *stats = get_local_stats_for(target_cpu);
 
 				stats->nr_llc_vtime_wake_idle_direct++;
 				stats->nr_direct_local_inserts++;
@@ -1424,14 +1418,14 @@ static __always_inline void cake_insert_llc_vtime(
 
 		dsq_insert_vtime_wrapper(p, cake_llc_dsq_for_cpu(target_cpu), slice,
 					p->scx.dsq_vtime, enq_flags);
-		cake_record_shared_vtime_insert(enq_flags, preserve_state);
+		cake_record_shared_vtime_insert(enq_flags, preserve_state, target_cpu);
 		scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
 		return;
 	}
 
 	dsq_insert_vtime_wrapper(p, cake_llc_dsq_for_cpu(target_cpu), slice,
 				p->scx.dsq_vtime, enq_flags);
-	cake_record_shared_vtime_insert(enq_flags, preserve_state);
+	cake_record_shared_vtime_insert(enq_flags, preserve_state, target_cpu);
 }
 
 #if CAKE_LEAN_SCHED
@@ -1462,7 +1456,7 @@ static __noinline void enqueue_dsq_dispatch(
 
 #ifndef CAKE_RELEASE
 	if (CAKE_PATH_STATS_ACTIVE) {
-		struct cake_stats *stats = get_local_stats();
+		struct cake_stats *stats = get_local_stats_for(enq_cpu);
 
 		stats->nr_direct_local_inserts++;
 		if (enq_flags & (u64)SCX_ENQ_WAKEUP) {
@@ -1767,7 +1761,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	u64 slice = quantum_ns;
 #ifndef CAKE_RELEASE
 	struct cake_stats *path_stats =
-		CAKE_PATH_STATS_ACTIVE ? get_local_stats() : NULL;
+		CAKE_PATH_STATS_ACTIVE ? get_local_stats_for(target_cpu) : NULL;
 #else
 	#define path_stats ((struct cake_stats *)0)
 #endif

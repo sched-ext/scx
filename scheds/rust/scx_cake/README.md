@@ -13,8 +13,8 @@ The active `1.1.1` design is centered on:
 - per-LLC virtual-time fallback queues when all CPUs are busy
 - lean release hot paths with learned locality compiled out
 - lightweight virtual-time accounting through `p->scx.dsq_vtime`
-- debug TUI/task snapshots, with path counters and stack-heavy hot telemetry
-  opt-in at build time
+- debug TUI/task snapshots with exact path counters, plus stack-heavy hot
+  telemetry opt-in at build time
 
 > [!WARNING]
 > `scx_cake` is experimental scheduler code. It requires a Linux kernel with `sched_ext` support and root privileges to run.
@@ -39,9 +39,6 @@ cargo build --release -p scx_cake
 
 # Default debug build for low-latency TUI/capture work
 cargo build -p scx_cake
-
-# Debug path-frequency capture build
-CAKE_PATH_TELEMETRY=1 cargo build -p scx_cake
 
 # Full debug lab build with hot callback telemetry / locality A/B knobs
 CAKE_HOT_TELEMETRY=1 CAKE_LOCALITY_EXPERIMENTS=1 CAKE_BENCHLAB=1 cargo build -p scx_cake
@@ -267,8 +264,7 @@ default queue policy.
 | Build | Intended use | Telemetry | TUI |
 | :-- | :-- | :-- | :-- |
 | `cargo build --release -p scx_cake` | normal use and performance measurement | compiled out | unavailable |
-| `cargo build -p scx_cake` | low-latency debug capture | task snapshots only | available |
-| `CAKE_PATH_TELEMETRY=1 cargo build -p scx_cake` | path-frequency capture | exact hot-path counters with `--verbose` | available |
+| `cargo build -p scx_cake` | low-latency debug capture | task snapshots and exact hot-path counters with `--verbose` | available |
 | `CAKE_HOT_TELEMETRY=1 CAKE_LOCALITY_EXPERIMENTS=1 CAKE_BENCHLAB=1 cargo build -p scx_cake` | debug-lab instrumentation | enabled with `--verbose` | available |
 
 Release and default debug builds keep the latency-first scheduling policy but
@@ -283,11 +279,10 @@ sudo ./target/debug/scx_cake --verbose
 ```
 
 Default debug dumps include task snapshots, topology, app summaries, and
-userspace-derived coverage without compiling stack-heavy scheduler telemetry
-into hot callbacks. `CAKE_PATH_TELEMETRY=1` adds exact hot-path frequency
-counters such as `hotpath:` / `win.hotpath:` without enabling full callback
-stopwatches. Full wake wait, SMT, ringbuf, BenchLab, and locality A/B telemetry
-requires the debug-lab build flags above.
+userspace-derived coverage plus exact hot-path frequency counters such as
+`hotpath:` / `win.hotpath:`. Full callback stopwatches, wake wait, SMT,
+ringbuf, BenchLab, and locality A/B telemetry require the debug-lab build flags
+above.
 
 The TUI `Graphs` tab shows the userspace wake graph view: top wake edges, latency-heavy edges, app wake neighborhoods, recent debug events, and coverage gaps. The ringbuf wake graph is sampled by one-second epochs in BPF and weighted in userspace, so `*_est` fields describe estimated shape while `observed` and `weight_sum` show the actual sampled payload. Pressing `d` in the TUI writes both a text dump and a JSON sidecar (`tui_dump_<seconds>.txt` and `tui_dump_<seconds>.json`) so larger offline analysis can use structured coverage and graph metadata without adding more BPF instruction pressure.
 
