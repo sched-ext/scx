@@ -200,10 +200,9 @@ struct Args {
     /// Enable live TUI (Terminal User Interface) with real-time statistics.
     ///
     /// Shows live scheduler stats, wait/run timing, and system topology
-    /// information. The default debug build keeps hot BPF telemetry compiled
-    /// out for a zero-stack capture object. Exact hot-path frequency counters
-    /// require rebuilding with CAKE_PATH_TELEMETRY=1; full callback timing
-    /// requires rebuilding with CAKE_HOT_TELEMETRY=1.
+    /// information. The default debug build includes exact hot-path frequency
+    /// counters while keeping stack-heavy callback timing compiled out. Full
+    /// callback timing requires rebuilding with CAKE_HOT_TELEMETRY=1.
     /// Press 'q' to exit TUI mode.
     #[arg(long, short, verbatim_doc_comment)]
     verbose: bool,
@@ -255,16 +254,10 @@ impl<'a> Scheduler<'a> {
         // so we inline the critical functionality.
         scx_utils::compat::check_min_requirements()?;
 
-        #[cfg(all(debug_assertions, not(cake_path_telemetry)))]
+        #[cfg(all(debug_assertions, not(cake_hot_telemetry)))]
         if args.verbose {
             warn!(
-                "default debug build uses zero-stack BPF capture; exact hot-path counters require CAKE_PATH_TELEMETRY=1 and full callback timing requires CAKE_HOT_TELEMETRY=1"
-            );
-        }
-        #[cfg(all(debug_assertions, cake_path_telemetry, not(cake_hot_telemetry)))]
-        if args.verbose {
-            warn!(
-                "hot-path frequency counters are enabled; full callback timing still requires CAKE_HOT_TELEMETRY=1"
+                "default debug build includes hot-path frequency counters; full callback timing requires CAKE_HOT_TELEMETRY=1"
             );
         }
         #[cfg(all(debug_assertions, not(cake_locality_experiments)))]

@@ -92,9 +92,6 @@ fn main() {
     let enable_hot_telemetry = std::env::var("CAKE_HOT_TELEMETRY")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
-    let enable_path_telemetry = std::env::var("CAKE_PATH_TELEMETRY")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
     let needs_arena = profile != "release"
         && (enable_hot_telemetry || enable_benchlab || enable_locality_experiments);
 
@@ -121,7 +118,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CAKE_BENCHLAB");
     println!("cargo:rerun-if-env-changed=CAKE_LOCALITY_EXPERIMENTS");
     println!("cargo:rerun-if-env-changed=CAKE_HOT_TELEMETRY");
-    println!("cargo:rerun-if-env-changed=CAKE_PATH_TELEMETRY");
 
     // Register custom cfg names to suppress unexpected_cfgs warnings
     println!("cargo::rustc-check-cfg=cfg(cake_bpf_release)");
@@ -130,7 +126,6 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(cake_benchlab)");
     println!("cargo::rustc-check-cfg=cfg(cake_locality_experiments)");
     println!("cargo::rustc-check-cfg=cfg(cake_hot_telemetry)");
-    println!("cargo::rustc-check-cfg=cfg(cake_path_telemetry)");
     println!("cargo::rustc-check-cfg=cfg(cake_needs_arena)");
 
     // Emit rustc-cfg flags for true conditional compilation (Rust #[cfg] guards)
@@ -167,12 +162,6 @@ fn main() {
         println!("cargo:rustc-cfg=cake_hot_telemetry");
     } else {
         cflags.push_str(" -DCAKE_HOT_TELEMETRY=0");
-    }
-    if profile != "release" && enable_path_telemetry {
-        cflags.push_str(" -DCAKE_PATH_TELEMETRY=1");
-        println!("cargo:rustc-cfg=cake_path_telemetry");
-    } else {
-        cflags.push_str(" -DCAKE_PATH_TELEMETRY=0");
     }
     if needs_arena {
         cflags.push_str(" -DCAKE_NEEDS_ARENA=1");
