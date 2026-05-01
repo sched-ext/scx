@@ -830,8 +830,13 @@ static __always_inline void cake_update_home_cpu(
  * Was: const volatile u8 llc_scan_order[CAKE_CLASS_MAX][CAKE_MAX_LLCS][CAKE_MAX_LLCS]; */
 
 #if CAKE_LEAN_SCHED
-static struct scx_bpf_select_cpu_and_args
-	select_cpu_and_args_scratch[CAKE_MAX_CPUS];
+u32 select_cpu_and_args_key SEC(".bss");
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct scx_bpf_select_cpu_and_args);
+	__uint(max_entries, 1);
+} select_cpu_and_args_scratch SEC(".maps");
 #endif
 
 /* Returns cpu if idle found, -1 otherwise. */
@@ -853,19 +858,22 @@ static __always_inline s32 select_cpu_and_idle(
 	struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 	u64 enq_flags)
 {
+	if (bpf_ksym_exists(scx_bpf_select_cpu_and___compat))
+		return scx_bpf_select_cpu_and___compat(p, prev_cpu, wake_flags,
+						       p->cpus_ptr, enq_flags);
+
 	if (bpf_core_type_exists(struct scx_bpf_select_cpu_and_args)) {
-		u32 idx = cake_task_cpu(p) & (CAKE_MAX_CPUS - 1);
 		struct scx_bpf_select_cpu_and_args *args =
-			&select_cpu_and_args_scratch[idx];
+			bpf_map_lookup_elem(&select_cpu_and_args_scratch,
+					    &select_cpu_and_args_key);
+		if (!args)
+			return -1;
 
 		args->prev_cpu = prev_cpu;
 		args->wake_flags = wake_flags;
 		args->flags = enq_flags;
 		return __scx_bpf_select_cpu_and(p, p->cpus_ptr, args);
 	}
-	if (bpf_ksym_exists(scx_bpf_select_cpu_and___compat))
-		return scx_bpf_select_cpu_and___compat(p, prev_cpu, wake_flags,
-						       p->cpus_ptr, enq_flags);
 	return -1;
 }
 #else
