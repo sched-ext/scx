@@ -48,7 +48,7 @@ pub(super) fn draw_dashboard_tab(
     // PELT tier summary: count tasks by utilization bands
     let (mut wc0, mut wc1, mut wc2, mut wc3) = (0u32, 0u32, 0u32, 0u32);
     for row in app.task_rows.values() {
-        if !row.is_bpf_tracked || row.total_runs == 0 {
+        if !row_has_bpf_matrix_data(row) {
             continue;
         }
         match row.pelt_util {
@@ -457,7 +457,7 @@ pub(super) fn draw_dashboard_tab(
     let mut tier_active = [0u32; 4];
 
     for row in app.task_rows.values() {
-        if !row.is_bpf_tracked || row.total_runs == 0 {
+        if !row_has_bpf_matrix_data(row) {
             continue;
         }
         // PELT tier aggregation

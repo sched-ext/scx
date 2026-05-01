@@ -893,7 +893,7 @@ fn append_long_run_owner_section(
     let total_runtime_ns: u64 = app
         .task_rows
         .values()
-        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .filter(|row| row_has_runtime_telemetry(row))
         .map(|row| row.total_runtime_ns)
         .sum();
     output.push_str(&format!(
@@ -1041,7 +1041,7 @@ pub(super) fn build_app_health_rows(
     for row in app
         .task_rows
         .values()
-        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .filter(|row| row_has_runtime_telemetry(row))
     {
         let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
         let role = task_role(row, tgid_roles);
@@ -1374,7 +1374,7 @@ fn append_wake_chain_section(output: &mut String, app: &TuiApp) {
     let mut rows: Vec<(&TaskTelemetryRow, crate::task_anatomy::WakeChainScore)> = app
         .task_rows
         .values()
-        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .filter(|row| row_has_runtime_telemetry(row))
         .map(|row| {
             let input = task_anatomy_input_from_row(row, app.topology.nr_cpus as u16);
             (row, derive_wake_chain_score(&input))
@@ -1498,7 +1498,7 @@ fn append_task_anatomy_section(output: &mut String, app: &TuiApp) {
     let mut rows: Vec<&TaskTelemetryRow> = app
         .task_rows
         .values()
-        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .filter(|row| row_has_bpf_matrix_data(row))
         .collect();
     rows.sort_by(|a, b| {
         b.total_runtime_ns
@@ -1556,7 +1556,7 @@ fn append_gaming_qos_section(output: &mut String, app: &TuiApp) {
     for row in app
         .task_rows
         .values()
-        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .filter(|row| row_has_bpf_matrix_data(row))
     {
         let input = task_anatomy_input_from_row(row, app.topology.nr_cpus as u16);
         let anatomy = derive_task_anatomy(&input, None);
@@ -1639,7 +1639,7 @@ fn derive_strict_wake_policy_snapshot(app: &TuiApp) -> DerivedStrictWakePolicy {
     let mut rows: Vec<&TaskTelemetryRow> = app
         .task_rows
         .values()
-        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .filter(|row| row_has_runtime_telemetry(row))
         .collect();
     rows.sort_by(|a, b| {
         b.total_runtime_ns
@@ -2791,7 +2791,7 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
     let all_dump_pids: Vec<u32> = app
         .task_rows
         .iter()
-        .filter(|(_, row)| row.is_bpf_tracked && row.total_runs > 0)
+        .filter(|(_, row)| row_has_bpf_matrix_data(row))
         .map(|(pid, _)| *pid)
         .collect();
     let dead_hidden = all_dump_pids

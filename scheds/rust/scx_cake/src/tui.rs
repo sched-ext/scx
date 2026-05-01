@@ -242,7 +242,7 @@ impl TuiTab {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TaskStatus {
-    Alive, // In sysinfo + has BPF telemetry (total_runs > 0)
+    Alive, // In sysinfo + visible in the BPF task iterator
     Idle,  // In sysinfo but no BPF telemetry (sleeping/background)
     Dead,  // Not in sysinfo, stale arena entry
 }
@@ -332,7 +332,7 @@ pub struct TuiApp {
     pub task_filter: TaskFilter,
     pub arena_active: usize,   // Arena slots with tid != 0
     pub arena_max: usize,      // Arena pool max_elems
-    pub bpf_task_count: usize, // Live BPF-tracked tasks with total_runs > 0
+    pub bpf_task_count: usize, // Live rows visible through the BPF task iterator
     #[cfg(debug_assertions)]
     pub debug_cost: crate::task_anatomy::DebugTelemetryCost,
     pub prev_deltas: HashMap<u32, (u32, u16, u64)>, // (total_runs, migration_count, total_runtime_ns)
@@ -2429,6 +2429,25 @@ fn avg_task_runtime_us(row: &TaskTelemetryRow) -> u64 {
     }
 }
 
+fn row_has_bpf_matrix_data(row: &TaskTelemetryRow) -> bool {
+    if !row.is_bpf_tracked || row.status == TaskStatus::Dead {
+        return false;
+    }
+
+    #[cfg(cake_needs_arena)]
+    {
+        row.total_runs > 0
+    }
+    #[cfg(not(cake_needs_arena))]
+    {
+        true
+    }
+}
+
+fn row_has_runtime_telemetry(row: &TaskTelemetryRow) -> bool {
+    row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead
+}
+
 fn task_smt_contended_pct(row: &TaskTelemetryRow) -> f64 {
     pct(row.smt_contended_runtime_ns, row.total_runtime_ns)
 }
@@ -2730,7 +2749,7 @@ fn build_long_run_owner_rows(
     let total_runtime_ns: u64 = app
         .task_rows
         .values()
-        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .filter(|row| row_has_runtime_telemetry(row))
         .map(|row| row.total_runtime_ns)
         .sum();
 
@@ -2742,10 +2761,7 @@ fn build_long_run_owner_rows(
         .task_rows
         .values()
         .filter(|row| {
-            row.is_bpf_tracked
-                && row.total_runs > 0
-                && row.total_runtime_ns > 0
-                && row.status != TaskStatus::Dead
+            row_has_runtime_telemetry(row) && row.total_runtime_ns > 0
         })
         .map(|row| {
             let placement = placement_summary(row, &app.topology);
@@ -4001,7 +4017,7 @@ fn infer_tgid_roles(rows: &HashMap<u32, TaskTelemetryRow>) -> HashMap<u32, Workl
     let mut states = HashMap::<u32, TgidRoleState>::new();
 
     for row in rows.values() {
-        if !row.is_bpf_tracked || row.total_runs == 0 || row.status == TaskStatus::Dead {
+        if !row_has_bpf_matrix_data(row) {
             continue;
         }
         let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
@@ -4183,7 +4199,7 @@ fn capacity_summary(app: &TuiApp, tgid_roles: &HashMap<u32, WorkloadRole>) -> Ca
     let mut core_role_mask = HashMap::<usize, u8>::new();
 
     for row in app.task_rows.values() {
-        if !row.is_bpf_tracked || row.total_runs == 0 || row.status == TaskStatus::Dead {
+        if !row_has_runtime_telemetry(row) {
             continue;
         }
         let role = task_role(row, tgid_roles);
@@ -4241,7 +4257,7 @@ fn capacity_summary(app: &TuiApp, tgid_roles: &HashMap<u32, WorkloadRole>) -> Ca
         .count() as u32;
 
     for row in app.task_rows.values() {
-        if !row.is_bpf_tracked || row.total_runs == 0 || row.status == TaskStatus::Dead {
+        if !row_has_runtime_telemetry(row) {
             continue;
         }
         if task_role(row, tgid_roles) != WorkloadRole::Build {
@@ -6685,9 +6701,7 @@ fn app_top_cpu_entries(app: &TuiApp, tgid: u32, limit: usize) -> Vec<(usize, u64
     let mut total = 0u64;
 
     for row in app.task_rows.values().filter(|row| {
-        row.is_bpf_tracked
-            && row.total_runs > 0
-            && row.status != TaskStatus::Dead
+        row_has_runtime_telemetry(row)
             && if row.tgid > 0 {
                 row.tgid == tgid
             } else {
@@ -6727,9 +6741,7 @@ fn app_top_core_entries(app: &TuiApp, tgid: u32, limit: usize) -> Vec<(usize, u6
     let mut total = 0u64;
 
     for row in app.task_rows.values().filter(|row| {
-        row.is_bpf_tracked
-            && row.total_runs > 0
-            && row.status != TaskStatus::Dead
+        row_has_runtime_telemetry(row)
             && if row.tgid > 0 {
                 row.tgid == tgid
             } else {
@@ -6809,9 +6821,7 @@ fn app_task_rows<'a>(app: &'a TuiApp, tgid: u32) -> Vec<&'a TaskTelemetryRow> {
         .task_rows
         .values()
         .filter(|row| {
-            row.is_bpf_tracked
-                && row.total_runs > 0
-                && row.status != TaskStatus::Dead
+            row_has_runtime_telemetry(row)
                 && if row.tgid > 0 {
                     row.tgid == tgid
                 } else {
@@ -7775,7 +7785,7 @@ pub fn run_tui(
                     } else {
                         TaskStatus::Dead
                     };
-                    if row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead {
+                    if row_has_bpf_matrix_data(row) {
                         bpf_count += 1;
                     }
                 }
@@ -7840,11 +7850,7 @@ pub fn run_tui(
                     TaskFilter::BpfTracked => app
                         .task_rows
                         .iter()
-                        .filter(|(_, row)| {
-                            row.is_bpf_tracked
-                                && row.total_runs > 0
-                                && row.status != TaskStatus::Dead
-                        })
+                        .filter(|(_, row)| row_has_bpf_matrix_data(row))
                         .map(|(pid, _)| *pid)
                         .collect(),
                 };
