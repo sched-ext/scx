@@ -83,6 +83,17 @@ fn main() {
     let max_llcs = detect_max_llcs();
     let is_single_llc = max_llcs == 1;
     let has_hybrid = detect_hybrid();
+    let enable_benchlab = std::env::var("CAKE_BENCHLAB")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    let enable_locality_experiments = std::env::var("CAKE_LOCALITY_EXPERIMENTS")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    let enable_hot_telemetry = std::env::var("CAKE_HOT_TELEMETRY")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    let needs_arena = profile != "release"
+        && (enable_hot_telemetry || enable_benchlab || enable_locality_experiments);
 
     // Generate Rust constants file — avoids unstable option_env! str matching.
     let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -100,10 +111,22 @@ fn main() {
     )
     .expect("Failed to write cake_constants.rs");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
+    println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
+    println!("cargo:rerun-if-changed=src/bpf/benchlab.bpf.h");
+    println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
+    println!("cargo:rerun-if-env-changed=CAKE_BENCHLAB");
+    println!("cargo:rerun-if-env-changed=CAKE_LOCALITY_EXPERIMENTS");
+    println!("cargo:rerun-if-env-changed=CAKE_HOT_TELEMETRY");
 
     // Register custom cfg names to suppress unexpected_cfgs warnings
+    println!("cargo::rustc-check-cfg=cfg(cake_bpf_release)");
     println!("cargo::rustc-check-cfg=cfg(cake_has_hybrid)");
     println!("cargo::rustc-check-cfg=cfg(cake_single_llc)");
+    println!("cargo::rustc-check-cfg=cfg(cake_benchlab)");
+    println!("cargo::rustc-check-cfg=cfg(cake_locality_experiments)");
+    println!("cargo::rustc-check-cfg=cfg(cake_hot_telemetry)");
+    println!("cargo::rustc-check-cfg=cfg(cake_needs_arena)");
 
     // Emit rustc-cfg flags for true conditional compilation (Rust #[cfg] guards)
     if has_hybrid {
@@ -120,6 +143,31 @@ fn main() {
     );
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
+        println!("cargo:rustc-cfg=cake_bpf_release");
+    }
+    if profile != "release" && enable_benchlab {
+        cflags.push_str(" -DCAKE_BENCHLAB_ENABLED=1");
+        println!("cargo:rustc-cfg=cake_benchlab");
+    } else {
+        cflags.push_str(" -DCAKE_BENCHLAB_ENABLED=0");
+    }
+    if profile != "release" && enable_locality_experiments {
+        cflags.push_str(" -DCAKE_LOCALITY_EXPERIMENTS=1");
+        println!("cargo:rustc-cfg=cake_locality_experiments");
+    } else {
+        cflags.push_str(" -DCAKE_LOCALITY_EXPERIMENTS=0");
+    }
+    if profile != "release" && enable_hot_telemetry {
+        cflags.push_str(" -DCAKE_HOT_TELEMETRY=1");
+        println!("cargo:rustc-cfg=cake_hot_telemetry");
+    } else {
+        cflags.push_str(" -DCAKE_HOT_TELEMETRY=0");
+    }
+    if needs_arena {
+        cflags.push_str(" -DCAKE_NEEDS_ARENA=1");
+        println!("cargo:rustc-cfg=cake_needs_arena");
+    } else {
+        cflags.push_str(" -DCAKE_NEEDS_ARENA=0");
     }
     // Gate 1: Single-LLC — eliminates cake_tick body from verifier
     if is_single_llc {
@@ -137,18 +185,22 @@ fn main() {
     );
 
     std::env::set_var("BPF_EXTRA_CFLAGS_PRE_INCL", &cflags);
-    scx_cargo::BpfBuilder::new()
-        .unwrap()
+    let mut builder = scx_cargo::BpfBuilder::new().unwrap();
+    builder
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
-        .enable_skel("src/bpf/cake.bpf.c", "bpf")
-        .add_source("../../../lib/arena.bpf.c")
-        .add_source("../../../lib/rbtree.bpf.c")
-        .add_source("../../../lib/atq.bpf.c")
-        .add_source("../../../lib/sdt_alloc.bpf.c")
-        .add_source("../../../lib/sdt_task.bpf.c")
-        .add_source("../../../lib/bitmap.bpf.c")
-        .add_source("../../../lib/cpumask.bpf.c")
-        .add_source("../../../lib/topology.bpf.c")
-        .compile_link_gen()
-        .unwrap();
+        .enable_skel("src/bpf/cake.bpf.c", "bpf");
+
+    if needs_arena {
+        builder
+            .add_source("../../../lib/arena.bpf.c")
+            .add_source("../../../lib/rbtree.bpf.c")
+            .add_source("../../../lib/atq.bpf.c")
+            .add_source("../../../lib/sdt_alloc.bpf.c")
+            .add_source("../../../lib/sdt_task.bpf.c")
+            .add_source("../../../lib/bitmap.bpf.c")
+            .add_source("../../../lib/cpumask.bpf.c")
+            .add_source("../../../lib/topology.bpf.c");
+    }
+
+    builder.compile_link_gen().unwrap();
 }
