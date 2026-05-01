@@ -30,6 +30,32 @@ struct {
 	__uint(max_entries, 16 * 1024 /* 16 KB */);
 } introspec_msg SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+	__type(key, u32);
+	__uint(max_entries, LAVD_CPU_ID_MAX);
+	__array(values, struct {
+		__uint(type, BPF_MAP_TYPE_RINGBUF);
+		__uint(max_entries, LAVD_INTROSPEC_STREAM_RINGBUF_SIZE);
+	});
+} introspec_stream_rbs SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, LAVD_CPU_ID_MAX);
+} introspec_stream_drops SEC(".maps");
+
+static __always_inline void count_stream_drop(u32 cpu_id)
+{
+	u64 *drops;
+
+	drops = bpf_map_lookup_elem(&introspec_stream_drops, &cpu_id);
+	if (drops)
+		(*drops)++;
+}
+
 static __always_inline
 int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_id)
 {
@@ -132,6 +158,45 @@ static void proc_introspec_sched_n(struct task_struct *p,
 	}
 }
 
+static void proc_introspec_stream(struct task_struct *p,
+				  task_ctx __arg_arena *taskc)
+{
+	struct cpdom_ctx *cpdomc;
+	struct lavd_stream_sample *sample;
+	void *rb;
+	u32 cpu_id;
+
+	if (bpf_strncmp(p->comm, 8, "scx_lavd") == 0)
+		return;
+
+	cpu_id = bpf_get_smp_processor_id();
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [taskc->cpdom_id]);
+	if (!cpdomc)
+		return;
+
+	rb = bpf_map_lookup_elem(&introspec_stream_rbs, &cpu_id);
+	if (!rb) {
+		count_stream_drop(cpu_id);
+		return;
+	}
+
+	sample = bpf_ringbuf_reserve(rb, sizeof(*sample), 0);
+	if (!sample) {
+		count_stream_drop(cpu_id);
+		return;
+	}
+
+	sample->timestamp_ns = bpf_ktime_get_ns();
+	sample->cpu_id = cpu_id;
+	sample->pid = taskc->pid;
+	sample->lat_cri = taskc->lat_cri;
+	sample->perf_cri = taskc->perf_cri;
+	sample->slice_ns = taskc->slice_wall;
+	sample->dsq_id = cpdomc->id;
+
+	bpf_ringbuf_submit(sample, BPF_RB_NO_WAKEUP);
+}
+
 __hidden
 void try_proc_introspec_cmd(struct task_struct *p, task_ctx __arg_arena *taskc)
 {
@@ -142,6 +207,9 @@ void try_proc_introspec_cmd(struct task_struct *p, task_ctx __arg_arena *taskc)
 	case LAVD_CMD_SCHED_N:
 		proc_introspec_sched_n(p, taskc);
 		break;
+	case LAVD_CMD_STREAM:
+		proc_introspec_stream(p, taskc);
+		break;
 	case LAVD_CMD_NOP:
 		/* do nothing */
 		break;
@@ -150,5 +218,4 @@ void try_proc_introspec_cmd(struct task_struct *p, task_ctx __arg_arena *taskc)
 		break;
 	}
 }
-
 
