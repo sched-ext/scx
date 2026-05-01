@@ -1,5 +1,6 @@
 .agent/
-docs/
+docs/*
+!docs/queue_policy_latency_findings.md
 
 # Benchmark binaries
 bench/

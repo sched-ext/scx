@@ -4,42 +4,19 @@
 [![Kernel: 6.12+](https://img.shields.io/badge/kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
 [![sched_ext](https://img.shields.io/badge/sched_ext-BPF-orange.svg?style=flat-square)](https://github.com/sched-ext/scx)
 
-`scx_cake` is a `sched_ext` CPU scheduler for Linux that applies CAKE-inspired low-latency ideas to CPU time instead of network packets. The current design is performance-oriented: it prioritizes responsiveness and delivered throughput over fairness as a primary objective.
+`scx_cake` is a performance-oriented `sched_ext` CPU scheduler. It applies CAKE-inspired low-latency ideas to CPU time: keep wakeups short, dispatch directly to idle CPUs, use per-LLC vtime fallback queues when every CPU is busy, and make the common path cheap.
 
-Version `1.1.1` is not the older DRR++ / game-detection scheduler that some comments and historical docs referred to. The current design is centered on:
+The active `1.1.1` design is centered on:
 
-- topology-aware CPU selection
-- direct dispatch to idle CPUs when possible
-- per-CPU local queue ownership as the normal fallback
-- lean per-task accounting in BPF
-- optional debug telemetry in non-release builds
-
-This README is written for three audiences:
-
-- users who want to build and run it
-- students who want to understand how a `sched_ext` scheduler is structured
-- researchers who want a concise map from policy to code path
+- idle-first CPU selection
+- direct dispatch to idle CPUs
+- per-LLC virtual-time fallback queues when all CPUs are busy
+- lean release hot paths with learned locality compiled out
+- lightweight virtual-time accounting through `p->scx.dsq_vtime`
+- debug TUI/task snapshots with stack-heavy hot telemetry opt-in at build time
 
 > [!WARNING]
-> `scx_cake` is experimental scheduler code. It requires a Linux kernel with `sched_ext` support and should be treated like development software.
-
-> [!IMPORTANT]
-> The current `1.1.1` scheduler no longer uses the old game-family detector or the old hot-path `GAME / NORMAL / HOG / BG` classifier. Legacy enums and telemetry fields still exist in some debug paths for tooling compatibility, but they are not the active release policy.
-
-## Navigation
-
-- [Quick Start](#quick-start)
-- [What scx_cake Is](#what-scx_cake-is)
-- [Scheduler Philosophy](#scheduler-philosophy)
-- [v2 Design Note](docs/scx_cake_v2_design.md)
-- [How It Fits Into sched_ext](#how-it-fits-into-sched_ext)
-- [Scheduling Paths](#scheduling-paths)
-- [Core Mechanics](#core-mechanics)
-- [Topology Model](#topology-model)
-- [Build Modes](#build-modes)
-- [Measuring Performance](#measuring-performance)
-- [Source Tour](#source-tour)
-- [Current Status](#current-status)
+> `scx_cake` is experimental scheduler code. It requires a Linux kernel with `sched_ext` support and root privileges to run.
 
 ## Quick Start
 
@@ -48,7 +25,7 @@ This README is written for three audiences:
 - Linux kernel `6.12+` with `sched_ext`
 - Rust toolchain
 - build dependencies required by the main `scx` repository
-- root privileges to actually run the scheduler
+- root privileges to run the scheduler
 
 ### Build
 
@@ -56,17 +33,20 @@ This README is written for three audiences:
 git clone https://github.com/sched-ext/scx.git
 cd scx
 
-# Production-oriented build
+# Release build for normal use and performance measurement
 cargo build --release -p scx_cake
 
-# Debug build with optional telemetry and TUI
+# Default debug build for low-latency TUI/capture work
 cargo build -p scx_cake
+
+# Full debug lab build with hot callback telemetry / locality A/B knobs
+CAKE_HOT_TELEMETRY=1 CAKE_LOCALITY_EXPERIMENTS=1 CAKE_BENCHLAB=1 cargo build -p scx_cake
 ```
 
 ### Run
 
 ```bash
-# Default profile: gaming
+# Default profile: gaming, learned locality gates off
 sudo ./target/release/scx_cake
 
 # Explicit profile
@@ -74,28 +54,47 @@ sudo ./target/release/scx_cake --profile esports
 
 # Custom base quantum in microseconds
 sudo ./target/release/scx_cake --quantum 1500
-```
 
-### Debug TUI
+# A/B test 1.1.1 local-only fallback queues
+sudo ./target/release/scx_cake --queue-policy local
 
-`--verbose` requires a debug build. In release builds, telemetry is compiled out and the flag is disabled at runtime.
-
-```bash
-# Live TUI
+# Start the zero-stack debug TUI/capture build
 sudo ./target/debug/scx_cake --verbose
+
+# A/B enable the learned wake-chain locality guard in a debug-lab build
+sudo ./target/debug/scx_cake --verbose --wake-chain-locality=true
+
+# A/B enable all learned locality steering in a debug-lab build
+sudo ./target/debug/scx_cake --verbose --learned-locality=true
+
+# A/B force same-CPU busy wakeups to preempt in a debug-lab build
+sudo ./target/debug/scx_cake --verbose --busy-wake-kick=preempt
 ```
-
-Debug dumps also include `wakepolicy.life` and `win.wakepolicy.*` lines in debug builds. These are dry-run classifier counters for latency shielding and busy-wake preempt experiments. They report how often the experimental wake-policy classes would have matched, but they do not change scheduling behavior by themselves.
-
-#### Compare Dumps
-
-```bash
-cargo run -p scx_cake -- --compare-dump baseline.txt candidate.txt
-```
-
-`--compare-dump` reads two TUI dump files and exits without loading BPF. Use it to compare busy wake counts, busy preempt shadow decisions, wake wait tails, SMT contention, and wake-policy class counts before enabling policy experiments.
 
 ### Profiles
+
+Profiles are quantum presets. They do not switch the scheduler into separate policy modes.
+
+`--queue-policy local|llc-vtime` is an explicit A/B policy switch, not a
+profile. The default `llc-vtime` keeps current CPU selection and task
+accounting, but routes busy fallback work through per-LLC vtime DSQs. `local`
+keeps the 1.1.1 local-only fallback path available for comparison.
+
+See [Queue Policy Latency Findings](docs/queue_policy_latency_findings.md) for
+the Splitgate 2 / MangoHud captures that motivated this default.
+
+The default policy is latency-first. Release builds and default debug builds
+compile out learned locality, wake-chain locality, busy-wake A/B overrides, hot
+callback telemetry, and arena task storage so the linked BPF object stays on the
+lean path. The `--wake-chain-locality`, `--learned-locality`, and
+`--busy-wake-kick` knobs are debug-lab A/B controls and require rebuilding with
+`CAKE_LOCALITY_EXPERIMENTS=1`. In that opt-in build they remain
+debug/telemetry A/B controls.
+
+`--wake-chain-locality=false` and `--learned-locality=false` are explicit forms
+of the default and are useful when keeping A/B command lines comparable.
+`--busy-wake-kick=preempt` makes same-CPU busy wakeups preempt immediately in
+debug builds instead of using Cake's owner-runtime guard.
 
 | Profile | Quantum | Intended use |
 | :-- | --: | :-- |
@@ -104,224 +103,82 @@ cargo run -p scx_cake -- --compare-dump baseline.txt candidate.txt
 | `balanced` | `2000 us` | Balanced desktop / mixed-use preset with lower scheduling overhead |
 | `legacy` | `4000 us` | Older or lower-power hardware with a larger slice budget |
 
-## What scx_cake Is
+## Design
 
-At a high level, `scx_cake` tries to keep the common case short:
+`scx_cake` optimizes for responsiveness and game-oriented throughput. Fairness is treated as a bounded safety property, not the main objective.
 
-1. If an idle CPU is available, place the task there directly.
-2. If no CPU is idle, keep runnable ownership local to a chosen CPU instead of pushing work into a shared fallback queue.
-3. When a task runs or stops, update just enough local state to keep future enqueue decisions cheap.
+The scheduler tries to keep each decision simple:
 
-That is the central design bias of the scheduler: do as little work as possible in the common case, and only pay for more machinery when the machine is already busy enough to require it.
+1. If a good idle CPU is available, run the task there directly.
+2. If all CPUs are busy, route fallback work through the target LLC's vtime queue.
+3. If a wakeup targets the same busy CPU, avoid preempting a stable short-running owner.
+4. When a task runs or stops, update local state for the next decision.
 
-The current design is intentionally simpler than the historical versions:
-
-- no userspace game detector driving BPF state
-- no hot-path 4-class promotion logic
-- no reciprocal `vtime_mult` cache in the release fast path
-- no task-storage based hot-path bookkeeping
-
-Instead, the fast path mostly works from:
+The release fast path mostly works from:
 
 - `task_struct`
-- small per-CPU BSS state
+- per-CPU BSS state
 - loader-populated topology RODATA
+- arena-backed task context for optional learned locality steering after a task has enough history
 
-## Scheduler Philosophy
+The old DRR++ / game-detection design is not the active release policy. Legacy enum names and telemetry fields can still appear in debug-facing code for compatibility, but release scheduling is not driven by `GAME / NORMAL / HOG / BG` classification.
 
-At a high level, a CPU scheduler is the subsystem that allocates scarce CPU execution slots across runnable work. In practice it decides:
+## Vocabulary
 
-- which runnable work gets CPU time
-- which CPU that work should run on
-- how long it should run before the next decision point
-- when migration is worth the cost
+| Term | Meaning in `scx_cake` |
+| :-- | :-- |
+| `sched_ext` | Kernel framework that lets this BPF scheduler provide scheduling callbacks. |
+| `cake_select_cpu` | Chooses an idle CPU when possible and returns a target CPU for enqueue. |
+| queue policy | CLI-selected fallback queue mode: `local` or `llc-vtime`. |
+| direct dispatch | Inserting directly to a target CPU with `SCX_DSQ_LOCAL_ON` when it still looks idle. |
+| local ownership | A/B fallback mode where busy work stays assigned to a chosen CPU instead of entering an LLC-shared queue. |
+| local DSQ | The kernel dispatch queue for work targeted at a specific CPU. |
+| per-LLC vtime DSQ | Default fallback queue keyed by `p->scx.dsq_vtime`, one DSQ per LLC. |
+| `idle_hint` | Per-CPU hint updated by Cake to avoid unnecessary remote idle checks. |
+| `cpu_pressure` | Small per-CPU pressure signal derived from recent consumed slice time. |
+| owner runtime EWMA | Per-CPU moving average of the current owner's recent runtime, used by busy-wake policy. |
+| busy local wake | A wakeup where the waker is on the same CPU that the wakee is targeting, but that CPU is busy. |
+| `SCX_KICK_IDLE` | Gentle kick used when the current owner should be allowed to continue briefly. |
+| `SCX_KICK_PREEMPT` | Stronger kick used when the wakee should preempt the current owner. |
+| `dsq_vtime` | Per-task virtual time used as lightweight ordering and runtime accounting. |
+| quantum | Base time slice selected by profile or `--quantum`. |
+| topology RODATA | CPU topology loaded by userspace before BPF attach: CPU count, LLC IDs, SMT siblings, and hybrid ordering. |
+| arena task context | Per-task BPF arena storage used for learned locality state and debug telemetry. |
+| debug telemetry | TUI, iter records, counters, and timing data available in debug builds only. |
 
-`scx_cake` is not trying to be a neutral "share everything evenly" scheduler. Its mainline design goal is to improve game performance and system responsiveness, and it treats fairness as a bounded safety property rather than the primary thing to optimize.
+## Scheduling Flow
 
-### Priority order
-
-For the current `scx_cake` design, the practical priorities are:
-
-- responsiveness first
-- throughput and delivered performance second
-- locality when it improves performance
-- predictability when it improves frame-time stability or throughput
-- fairness only to the extent needed to avoid pathological starvation or collapse
-- power efficiency is not a mainline goal
-
-That means `scx_cake` is willing to prefer:
-
-- a shorter wakeup-to-run path over perfectly even CPU sharing
-- a cache-warm or topology-friendly placement over abstract fairness
-- direct dispatch and cheap hot paths over richer but more expensive policy machinery
-
-The built-in profiles are coarse quantum presets rather than separate policy modes. The core scheduler philosophy remains performance-oriented rather than power-oriented.
-
-### Core Questions
-
-`scx_cake` answers the standard scheduler questions like this:
-
-#### Which tasks run next?
-
-- if a waking task can be sent directly to an idle CPU, do that first
-- otherwise queue work directly onto a chosen CPU instead of an LLC-scoped shared queue
-- avoid shared intermediate runnable pools when a local queue will do
-
-In other words, the preferred order is:
-
-1. direct idle dispatch
-2. direct local ownership of fallback work on a specific CPU
-3. keep the current task running if there is no better local queued work to justify a switch
-
-#### Which CPU should a task run on?
-
-- prefer an idle CPU
-- prefer locality-friendly placement when it helps performance
-- respect hard affinity constraints from `p->cpus_ptr`
-- fall back to a specific target CPU rather than an LLC-shared pool when there is no obviously good idle target
-
-The CPU-choice logic is therefore performance-first, but still bounded by the kernel's affinity and scheduling constraints.
-
-#### How long should a task run?
-
-- the base answer is the configured quantum from the selected profile or `--quantum`
-- the scheduler may preserve or shrink slices depending on whether the path is a wakeup, requeue, or same-task continuation
-- runtime consumed is charged back into `p->scx.dsq_vtime` so future ordering reflects recent CPU use
-
-So Cake is not "run forever until something breaks." It is a bounded-slice scheduler with cheap runtime feedback.
-
-#### When should tasks migrate?
-
-- when wakeup placement finds a better idle target
-- when locality-aware steering suggests a better idle target
-- otherwise migration is not forced just for the sake of movement
-
-The default bias is that migration is useful only when it buys lower latency or better execution placement. Movement itself is treated as a cost.
-
-#### How do affinity, priority, deadlines, and blocking affect placement?
-
-- affinity: hard constraint; tasks must run within their allowed CPU mask
-- priority / weight: affects `p->scx.dsq_vtime` advancement, so weight changes ordering pressure
-- deadlines: Cake does not implement hard real-time deadlines; virtual time is still used as a lightweight ordering and accounting signal, without making shared fallback queues the center of the design
-- blocking / waking: sleeping tasks can benefit from direct wakeup dispatch and re-enter with less contention than a purely fairness-driven queueing model
-
-### Policy, Mechanism, Feedback
-
-#### Policy
-
-The active policy can be summarized as:
-
-- keep wakeup-to-run latency low
-- keep the hot path short
-- favor direct dispatch and per-CPU local ownership over shared fallback queuing
-- use topology only when it helps delivered performance
-- use virtual time to keep fallback behavior bounded where needed
-- avoid paying for complex machinery in the common case
-
-#### Mechanism
-
-The current mechanisms used to realize that policy are:
-
-- `cake_select_cpu` for fast idle-first CPU selection
-- `SCX_DSQ_LOCAL_ON` for direct dispatch to an idle target CPU
-- per-CPU local queue ownership for fallback on single-LLC systems
-- `p->scx.dsq_vtime` as a lightweight ordering and accounting key
-- per-CPU BSS state such as `idle_hint`, `tick_slice`, `last_pid`, and `vtime_local`
-- compile-gated debug telemetry so release builds do not pay for debug machinery
-
-#### Feedback / control
-
-The scheduler updates itself from a small set of repeated signals:
-
-- wakeup events and enqueue flags
-- whether a CPU is idle right now
-- task weight from `p->scx.weight`
-- runtime actually consumed from the current slice
-- recent local per-CPU state stored in BSS
-- topology information loaded into RODATA at startup
-
-Conceptually, `cake_running` and `cake_stopping` are the control loop:
-
-- `cake_running` refreshes local execution state cheaply
-- `cake_stopping` charges consumed runtime back into virtual time
-- later enqueue and dispatch decisions reuse that state instead of recomputing everything from scratch
-
-## How It Fits Into sched_ext
-
-```mermaid
-flowchart LR
-    U[Userspace loader<br/>main.rs] --> R[Populate RODATA<br/>quantum, LLCs, topology]
-    R --> B[Load and attach BPF programs]
-    B --> S[sched_ext core]
-
-    S --> SC[cake_select_cpu]
-    S --> EQ[cake_enqueue]
-    S --> DP[cake_dispatch]
-    S --> RN[cake_running]
-    S --> ST[cake_stopping]
-
-    EQ --> CPU[Local CPU runqueue]
-    RN --> BSS[Per-CPU BSS]
-    ST --> VT[p->scx.dsq_vtime]
-```
-
-The Rust side does three main jobs:
-
-- detects topology and populates BPF RODATA
-- initializes the BPF arena
-- optionally runs the debug TUI
-
-The BPF side implements the performance-first policy through `sched_ext` struct_ops callbacks.
-
-At startup, the loader opens and loads the BPF skeleton, populates RODATA, initializes the arena, and then attaches the non-struct_ops and struct_ops programs. On shutdown, `scx_cake` exits its run loop, drops the struct_ops link, reports UEI state, and follows the normal `sched_ext` restart path for conditions such as hotplug.
-
-## Scheduling Paths
-
-### Path 1: wakeup to direct dispatch
-
-This is the preferred fast path.
+### Wakeup Path
 
 ```mermaid
 flowchart TD
     W[Task wakes] --> SC[cake_select_cpu]
-    SC --> G1{Idle CPU found?}
-    G1 -->|yes| CPU[Return target CPU]
-    G1 -->|no| PREV[Return prev_cpu<br/>and let enqueue choose a local fallback CPU]
-    CPU --> EQ[cake_enqueue]
-    EQ --> DD{Target CPU still idle?}
-    DD -->|yes| LOCAL[scx_bpf_dsq_insert<br/>SCX_DSQ_LOCAL_ON]
-    DD -->|no| LOCALQ[Insert into target CPU local queue]
+    SC --> I{Idle CPU found?}
+    I -->|yes| C[Return target CPU]
+    I -->|no| P[Return prev_cpu]
+    C --> E[cake_enqueue]
+    P --> E
+    E --> D{Target still idle?}
+    D -->|yes| L[Direct local insert]
+    D -->|no| Q[Insert into target LLC vtime queue]
+    Q --> B{Busy local wake?}
+    B -->|short stable owner| KI[SCX_KICK_IDLE]
+    B -->|pressure or priority| KP[SCX_KICK_PREEMPT]
 ```
 
-`cake_select_cpu` currently follows this order:
+`cake_select_cpu` follows this order:
 
-1. learned locality steering for eligible wakeups such as home CPU, home core, or primary sibling
+1. optional learned locality steering for eligible warm tasks when enabled
 2. kernel-assisted idle selection
-3. topology-specific fallback scan when that support is compiled in
-4. return `prev_cpu` and let DSQ routing handle the fully busy case
+3. topology-specific idle scan when compiled in
+4. return `prev_cpu` when no idle CPU is found
 
-### Path 2: local fallback when all CPUs are busy
+`cake_enqueue` then computes slice and virtual time. The default `llc-vtime`
+policy inserts busy fallback work into the target LLC's vtime DSQ and lets
+`cake_dispatch` pull from that shared arbiter. `--queue-policy local` preserves
+the 1.1.1 local-only fallback path for A/B testing.
 
-```mermaid
-flowchart TD
-    ENQ[cake_enqueue] --> KIND{Task state}
-    KIND -->|first dispatch| NOSTAGED[Seed dsq_vtime from local vtime]
-    KIND -->|requeue| REQUEUE[halve slice, keep progress local]
-    KIND -->|wakeup| WAKE[pressure-aware slice shrink]
-
-    NOSTAGED --> VT[Add weight-aware vtime adjustment]
-    REQUEUE --> VT
-    WAKE --> VT
-
-    VT --> ROUTE[Choose target CPU]
-    ROUTE --> INS{CPU still idle?}
-    INS -->|yes| DIRECT[Direct local insert]
-    INS -->|no| LOCALQ[Insert into target CPU local queue]
-```
-
-### Path 3: run-stop feedback loop
-
-`cake_running` and `cake_stopping` form the feedback loop that keeps future enqueue decisions cheap.
+### Run / Stop Feedback
 
 ```mermaid
 sequenceDiagram
@@ -334,181 +191,147 @@ sequenceDiagram
     K->>R: task starts running
     R->>B: idle_hint = 0
     R->>B: cache tick_slice
-    R->>B: update vtime_local max
+    R->>B: refresh vtime_local
+    R->>B: reset owner-runtime state on task change
 
     K->>S: task stops
-    S->>B: read cached tick_slice
+    S->>B: read tick_slice
     S->>T: read remaining slice and weight
     S->>T: advance p->scx.dsq_vtime
-    S->>B: optional debug stats only in non-release builds
+    S->>B: update cpu_pressure
+    S->>B: update owner-runtime EWMA
 ```
+
+This loop is the scheduler's feedback path. It keeps future enqueue decisions cheap by storing recent CPU-local state instead of rebuilding a full task model on each wakeup.
 
 ## Core Mechanics
 
-### 1. CPU selection
+### CPU Selection
 
-`cake_select_cpu` tries to find an idle CPU first. The current code combines scheduler-specific locality steering with kernel helpers for idle selection and affinity handling.
+CPU selection is idle-first. Release builds use the kernel idle-selection helper
+and route busy fallback work by LLC without reading arena-backed task context.
+Debug builds can enable learned home/core locality steering for A/B analysis.
 
-Important properties:
+Affinity remains a hard constraint. Cake relies on kernel masks and helper paths to keep placement legal.
 
-- release fast path avoids arena dereferences
-- affinity restrictions are still enforced by the kernel mask and helper path
-- hybrid-only scan order is precomputed in userspace and passed as RODATA
+### Local Ownership
 
-### 2. Direct dispatch before broader fallback
+If direct dispatch is not safe, Cake now normally inserts fallback work into a
+per-LLC vtime queue. This restores a shared arbiter inside the cache domain while
+keeping CPU selection, task accounting, and direct idle dispatch unchanged.
 
-If the chosen CPU still looks idle, `cake_enqueue` inserts directly with `SCX_DSQ_LOCAL_ON`. On current single-LLC systems, even the non-idle fallback stays local to a chosen CPU instead of going through a shared LLC queue. That reduces latency and avoids shared head-of-line blocking.
+`cake_dispatch` pulls from the local LLC first, then tries other LLCs before
+falling back to the local bookkeeping path. With `--queue-policy local`, fallback
+work is inserted into the selected CPU's local queue instead, preserving the
+1.1.1 local-only comparison mode.
 
-### 3. Virtual-time accounting
+### Virtual-Time Accounting
 
-Cake still uses `p->scx.dsq_vtime` as a lightweight ordering and accounting signal, but the current single-LLC design no longer depends on an LLC-shared fallback queue to make progress.
+Cake uses `p->scx.dsq_vtime` as a small ordering and accounting signal. Consumed runtime advances virtual time, and task weight adjusts how fast virtual time moves.
 
-The current source uses an additive weight adjustment derived from `p->scx.weight`:
+The source-level model is:
 
 ```text
 vtime += runtime + (100 - weight) * 20480
 ```
 
-That description is about source-level policy. It is not a guarantee about the final generated BPF instructions. In optimized builds, the compiler may lower the shift-and-add form into a constant multiply.
+Optimized BPF may lower that expression differently, so the source formula describes policy rather than final instruction shape.
 
-### 4. Per-CPU BSS instead of global hot state
+### Busy Local Wake Policy
 
-Small per-CPU BSS state is used for:
+When a wakeup targets a CPU that appears busy, release builds keep the task on
+the target LLC's vtime queue and use a preempt kick for the busy-target case. The
+owner-runtime guard remains a debug A/B policy so it can be measured without
+adding stack-heavy branches to the release object.
 
-- `idle_hint`
-- `tick_slice`
-- `last_pid`
-- `vtime_local`
-- local dispatch bookkeeping
+## Topology
 
-That keeps the hot path close to CPU-local state instead of bouncing a single global cache line.
-
-### 5. Debug telemetry is compile-gated
-
-In debug builds, `scx_cake` exposes richer telemetry through arena-backed task context and the iter program used by the TUI. In release builds, that machinery is compiled out so the production scheduler does not pay for it.
-
-## Topology Model
-
-`scx_cake` is topology-aware. The Rust loader detects:
+The Rust loader detects topology and writes it into BPF RODATA before attach:
 
 - CPU count
-- LLC count
-- SMT sibling relationships
-- hybrid P/E layout when present
-- preferred LLC on asymmetric AMD systems
+- LLC count and `cpu_llc_id`
+- SMT sibling map
+- hybrid P/E ordering when present
+- preferred LLC information on asymmetric AMD systems
 
-The loader then writes those results into BPF RODATA before attach.
+The current build keeps per-CPU local DSQs non-stealable. Cross-LLC fallback
+movement happens only through the explicit per-LLC vtime DSQs used by the
+default queue policy.
 
-### LLC behavior in 1.1.1
-
-The code still detects LLC topology and computes LLC metadata at startup.
-
-However, the current source also sets:
-
-```c
-#define CAKE_LOCAL_CPU_ONLY 1
-```
-
-That means the cross-LLC steal path in `cake_dispatch` is compiled out in the current build. In addition, the current single-LLC fallback path is per-CPU local-first rather than LLC-shared. The README reflects the behavior that exists today, not the older design space around shared LLC queues or cross-CCD stealing.
-
-### sched_ext + topology diagram
-
-```mermaid
-flowchart LR
-    TOPO[topology.rs] --> LLC[LLC masks and cpu_llc_id]
-    TOPO --> SMT[cpu_sibling_map]
-    TOPO --> HYB[fast-to-slow CPU order]
-    LLC --> RODATA[BPF RODATA]
-    SMT --> RODATA
-    HYB --> RODATA
-    RODATA --> SC[cake_select_cpu]
-    RODATA --> EQ[cake_enqueue]
-    RODATA --> DP[cake_dispatch]
-```
-
-## Build Modes
+## Release And Debug Builds
 
 | Build | Intended use | Telemetry | TUI |
 | :-- | :-- | :-- | :-- |
 | `cargo build --release -p scx_cake` | normal use and performance measurement | compiled out | unavailable |
-| `cargo build -p scx_cake` | development, study, and instrumentation | enabled when requested | available |
+| `cargo build -p scx_cake` | low-latency debug capture | task snapshots only | available |
+| `CAKE_HOT_TELEMETRY=1 CAKE_LOCALITY_EXPERIMENTS=1 CAKE_BENCHLAB=1 cargo build -p scx_cake` | debug-lab instrumentation | enabled with `--verbose` | available |
 
-Notes:
+Release and default debug builds keep the latency-first scheduling policy but
+compile out stack-heavy debug counters, arena task storage, and timing
+instrumentation. Both linked BPF objects are intended to stay zero-stack by the
+strict `r10` disassembly audit.
 
-- release builds warn and disable `--verbose`
-- debug builds expose iter-based task telemetry to the TUI
-- the BPF arena is initialized in both modes, but debug mode carries much more task telemetry
+Debug builds can run the live TUI:
+
+```bash
+sudo ./target/debug/scx_cake --verbose
+```
+
+Default debug dumps include task snapshots, topology, app summaries, and
+userspace-derived coverage without compiling stack-heavy scheduler telemetry
+into hot callbacks. Full wake wait, SMT, ringbuf, BenchLab, and locality A/B
+telemetry requires the debug-lab build flags above.
+
+The TUI `Graphs` tab shows the userspace wake graph view: top wake edges, latency-heavy edges, app wake neighborhoods, recent debug events, and coverage gaps. The ringbuf wake graph is sampled by one-second epochs in BPF and weighted in userspace, so `*_est` fields describe estimated shape while `observed` and `weight_sum` show the actual sampled payload. Pressing `d` in the TUI writes both a text dump and a JSON sidecar (`tui_dump_<seconds>.txt` and `tui_dump_<seconds>.json`) so larger offline analysis can use structured coverage and graph metadata without adding more BPF instruction pressure.
+
+Dump files can be compared without loading BPF:
+
+```bash
+cargo run -p scx_cake -- --compare-dump baseline.txt candidate.txt
+```
 
 ## Measuring Performance
 
-Performance claims for this scheduler should be grounded in measurement, not just source shape.
-
-This repository includes:
-
-- [perf_stat_cake.sh](./perf_stat_cake.sh)
-- [bench/baselines](./bench/baselines)
-
-Example:
+Performance claims should be tied to repeated measurements on the same machine and workload.
 
 ```bash
 sudo scheds/rust/scx_cake/perf_stat_cake.sh 5 both
 ```
 
-That collects:
+Useful signals include:
 
 - system-wide `perf stat`
-- `perf stat --bpf-prog` for the active `scx_cake` BPF programs
-
-Recommended workflow for changes:
-
-1. keep workload, duration, and machine fixed
-2. capture a baseline first
-3. compare `BPF cycles`, `BPF instructions`, branch misses, and relevant system counters
-4. treat run-to-run noise as real unless repeated measurements show a stable delta
+- `perf stat --bpf-prog` for active `scx_cake` BPF programs
+- BPF cycles and instructions
+- branch misses
+- workload-specific latency or frame-time metrics
 
 ## Source Tour
 
 | File | Role |
 | :-- | :-- |
-| [src/main.rs](./src/main.rs) | userspace loader, CLI, RODATA setup, attach logic |
-| [src/bpf/cake.bpf.c](./src/bpf/cake.bpf.c) | `sched_ext` callbacks and scheduler policy |
-| [src/bpf/intf.h](./src/bpf/intf.h) | shared structs, constants, telemetry layout |
+| [src/main.rs](./src/main.rs) | userspace loader, CLI, profile/quantum setup, RODATA setup, attach logic |
+| [src/bpf/cake.bpf.c](./src/bpf/cake.bpf.c) | scheduler policy and `sched_ext` callbacks |
+| [src/bpf/intf.h](./src/bpf/intf.h) | shared structs, constants, and telemetry layout |
 | [src/topology.rs](./src/topology.rs) | topology detection and mask construction |
 | [src/tui.rs](./src/tui.rs) | debug TUI and iter-driven telemetry consumer |
 | [perf_stat_cake.sh](./perf_stat_cake.sh) | `perf stat` helper for live scheduler measurement |
 | [docs](./docs) | research notes and design analysis |
 
-### Main callbacks
+### Main Callbacks
 
 | Callback | Purpose |
 | :-- | :-- |
-| `cake_select_cpu` | choose an idle CPU when possible |
-| `cake_enqueue` | compute slice / vtime and route to direct insert or a chosen CPU's local queue |
-| `cake_dispatch` | handle the residual shared-queue path when it exists |
-| `cake_running` | mark CPU busy and cache local run metadata |
-| `cake_stopping` | account consumed runtime back into `dsq_vtime` |
-| `cake_tick` | optional load-balance hint path |
+| `cake_select_cpu` | choose an idle or locality-friendly target CPU |
+| `cake_enqueue` | compute slice / virtual time and route work through the selected queue policy |
+| `cake_dispatch` | pull optional LLC-vtime work, then keep local bookkeeping / same-task continuation |
+| `cake_running` | mark CPU busy and refresh local run metadata |
+| `cake_stopping` | charge runtime into virtual time, pressure, and owner-runtime state |
+| `cake_tick` | intentionally idle in the current pull-driven fallback design |
 | `cake_init_task` / `cake_exit_task` | allocate and free per-task arena state |
-| `cake_set_weight` | mirror weight into debug-visible state |
-
-## Current Status
-
-`scx_cake 1.1.1` should be understood as:
-
-- a CAKE-inspired low-latency `sched_ext` scheduler
-- a scheduler that prioritizes responsiveness and game-oriented performance over fairness as a primary objective
-- a topology-aware per-CPU local-first scheduler
-- a codebase that still carries some legacy debug and telemetry vocabulary from earlier experiments
-
-It should not be described today as:
-
-- a hot-path DRR++ scheduler
-- a game-family detector in BPF
-- a release scheduler driven by a 4-class `GAME / NORMAL / HOG / BG` policy
+| `cake_set_weight` | mirror weight into debug-visible state in non-release builds |
 
 ## Related Notes
-
-If you want the deeper design history or experiments behind the current code, start with:
 
 - [docs/hot_path_optimization_analysis.md](./docs/hot_path_optimization_analysis.md)
 - [docs/idle_path_bubble_reduction_proposal.md](./docs/idle_path_bubble_reduction_proposal.md)

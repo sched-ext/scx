@@ -2,6 +2,9 @@
 // scx_cake - CAKE-inspired sched_ext scheduler for low-latency CPU scheduling
 
 mod dump_compare;
+#[cfg(debug_assertions)]
+mod task_anatomy;
+mod telemetry_report;
 mod topology;
 mod tui;
 
@@ -16,9 +19,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use log::{info, warn};
 
+#[cfg(cake_needs_arena)]
 use scx_arena::ArenaLib;
 use scx_utils::build_id;
 use scx_utils::UserExitInfo;
+#[cfg(cake_needs_arena)]
 use scx_utils::NR_CPU_IDS;
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
@@ -61,13 +66,33 @@ impl Profile {
     // Older DVFS controls were removed. Profiles currently only select quantum.
 }
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BusyWakeKickMode {
+    /// Use Cake's owner-runtime pressure policy.
+    Policy = 0,
+    /// Always preempt on same-CPU busy wakeups.
+    Preempt = 1,
+    /// Always use an idle kick on same-CPU busy wakeups.
+    Idle = 2,
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum QueuePolicy {
+    /// 1.1.1 local-first fallback policy retained for A/B testing.
+    Local = 0,
+    /// Default per-LLC vtime fallback queues similar to the 1.1.0 queue shape.
+    LlcVtime = 1,
+}
+
 /// 🍰 scx_cake: A CAKE-inspired sched_ext CPU scheduler
 ///
 /// This scheduler adapts CAKE's low-latency scheduling ideas to CPU time.
 /// The current design centers on topology-aware CPU selection, per-LLC
-/// vtime-ordered DSQs, and lightweight per-task accounting in BPF.
+/// vtime fallback queues, and lightweight per-task accounting in BPF.
 ///
-/// PROFILES set all tuning parameters at once. Individual options override profile defaults.
+/// Profiles choose the base quantum. Individual options override profile defaults.
 ///
 /// Game detection and older multi-mode policy logic have been removed.
 /// The scheduler now runs one general low-latency policy for all tasks.
@@ -77,6 +102,10 @@ impl Profile {
 ///   scx_cake -p esports               # Ultra-low-latency for competitive play
 ///   scx_cake -p balanced              # Balanced desktop / mixed-use profile
 ///   scx_cake --quantum 1500           # Gaming profile with custom quantum
+///   scx_cake --wake-chain-locality=true # A/B enable learned wake-chain guard
+///   scx_cake --learned-locality=true # A/B enable learned locality steering
+///   scx_cake --busy-wake-kick=preempt # A/B force same-CPU busy wake preemption
+///   scx_cake --queue-policy local # A/B use 1.1.1 local fallback queues
 ///   scx_cake -v                       # Run with live TUI stats display
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -116,10 +145,64 @@ struct Args {
     #[arg(long, verbatim_doc_comment)]
     quantum: Option<u64>,
 
+    /// Enable learned wake-chain locality guard.
+    ///
+    /// This generic behavior-based guard keeps hot short blocking wake chains
+    /// near their learned CPU instead of broadening every idle scan. It defaults
+    /// off because latency tails are worse than migration for the current policy.
+    /// Requires a build with CAKE_LOCALITY_EXPERIMENTS=1.
+    #[arg(
+        long,
+        default_value_t = false,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        verbatim_doc_comment
+    )]
+    wake_chain_locality: bool,
+
+    /// Enable learned locality steering.
+    ///
+    /// This controls the arena-backed home/core/primary steering policy used
+    /// after a task has enough history. It defaults off so the baseline stays
+    /// latency-first and idle-selector driven.
+    /// Requires a build with CAKE_LOCALITY_EXPERIMENTS=1.
+    #[arg(
+        long,
+        default_value_t = false,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        verbatim_doc_comment
+    )]
+    learned_locality: bool,
+
+    /// Same-CPU busy wake kick behavior.
+    ///
+    /// POLICY uses Cake's current owner-runtime/pressure policy.
+    /// PREEMPT forces immediate preempt kicks for local busy wakeups.
+    /// IDLE forces gentler idle kicks for local busy wakeups.
+    /// Non-policy A/B behavior requires a build with CAKE_LOCALITY_EXPERIMENTS=1.
+    #[arg(long, value_enum, default_value_t = BusyWakeKickMode::Policy, verbatim_doc_comment)]
+    busy_wake_kick: BusyWakeKickMode,
+
+    /// Queueing policy for busy fallback work.
+    ///
+    /// LLC-VTIME keeps the default 1.1.0-style shape: fallback work is inserted
+    /// into a per-LLC vtime DSQ that dispatch() pulls from.
+    /// LOCAL A/B tests the 1.1.1 local-only shape: fallback work is inserted
+    /// into the selected CPU's local DSQ.
+    #[arg(long, value_enum, default_value_t = QueuePolicy::LlcVtime, verbatim_doc_comment)]
+    queue_policy: QueuePolicy,
+
     /// Enable live TUI (Terminal User Interface) with real-time statistics.
     ///
     /// Shows live scheduler stats, wait/run timing, and system topology
-    /// information.
+    /// information. The default debug build keeps hot BPF telemetry compiled
+    /// out for a zero-stack capture object; full callback timing requires
+    /// rebuilding with CAKE_HOT_TELEMETRY=1.
     /// Press 'q' to exit TUI mode.
     #[arg(long, short, verbatim_doc_comment)]
     verbose: bool,
@@ -161,13 +244,31 @@ impl<'a> Scheduler<'a> {
         args: Args,
         open_object: &'a mut std::mem::MaybeUninit<libbpf_rs::OpenObject>,
     ) -> Result<Self> {
-        use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+        #[cfg(cake_needs_arena)]
+        use libbpf_rs::skel::Skel;
+        use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 
         // ═══ scx_ops_open! equivalent ═══
         // Matches scx_ops_open!(skel_builder, open_object, cake_ops, None)
         // Cake can't use the macro directly (custom arena architecture),
         // so we inline the critical functionality.
         scx_utils::compat::check_min_requirements()?;
+
+        #[cfg(all(debug_assertions, not(cake_hot_telemetry)))]
+        if args.verbose {
+            warn!(
+                "default debug build uses zero-stack BPF capture; hot callback telemetry requires CAKE_HOT_TELEMETRY=1"
+            );
+        }
+        #[cfg(all(debug_assertions, not(cake_locality_experiments)))]
+        if args.learned_locality
+            || args.wake_chain_locality
+            || args.busy_wake_kick != BusyWakeKickMode::Policy
+        {
+            warn!(
+                "locality and busy-wake A/B knobs require rebuilding with CAKE_LOCALITY_EXPERIMENTS=1"
+            );
+        }
 
         let skel_builder = BpfSkelBuilder::default();
         let mut open_skel = skel_builder
@@ -237,6 +338,13 @@ impl<'a> Scheduler<'a> {
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
             rodata.quantum_ns = quantum * 1000;
+            rodata.queue_policy = args.queue_policy as u32;
+            #[cfg(not(cake_bpf_release))]
+            {
+                rodata.enable_learned_locality = args.learned_locality;
+                rodata.enable_wake_chain_locality = args.wake_chain_locality;
+                rodata.busy_wake_kick_mode = args.busy_wake_kick as u32;
+            }
             // Stats/telemetry: only available in debug builds (CAKE_RELEASE omits the field).
             // In release, --verbose is silently ignored.
             #[cfg(debug_assertions)]
@@ -244,8 +352,7 @@ impl<'a> Scheduler<'a> {
                 rodata.enable_stats = args.verbose;
             }
 
-            // has_hybrid removed: smt_sibling now uses pre-filled cpu_sibling_map only
-            // Per-LLC DSQ partitioning: populate CPU→LLC mapping
+            // Populate topology metadata used by local-first steering and telemetry.
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
             rodata.nr_cpus = topo.nr_cpus.min(topology::MAX_CPUS) as u32;
@@ -359,6 +466,7 @@ impl<'a> Scheduler<'a> {
 
             // cpuperf_cap_table: kept for BenchLab but no scheduling reads.
             // Still populate for bench competitor comparison.
+            #[cfg(not(cake_bpf_release))]
             {
                 let nr = topo.nr_cpus.min(topology::MAX_CPUS);
                 for cpu in 0..nr {
@@ -371,31 +479,40 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            // Arena library: nr_cpu_ids must be set before load() — arena_init
-            // checks this and returns -ENODEV (errno 19) if uninitialized.
-            rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
+            #[cfg(cake_needs_arena)]
+            {
+                // Arena library: nr_cpu_ids must be set before load() — arena_init
+                // checks this and returns -ENODEV (errno 19) if uninitialized.
+                rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
+            }
         }
 
         // ═══ scx_ops_load! equivalent ═══
         // Set UEI dump buffer size before load (matches scx_ops_load! behavior)
         scx_utils::uei_set_size!(open_skel, cake_ops, uei);
 
+        #[cfg(cake_needs_arena)]
         let mut skel = open_skel.load().context("Failed to load BPF program")?;
+        #[cfg(not(cake_needs_arena))]
+        let skel = open_skel.load().context("Failed to load BPF program")?;
 
-        // Initialize the BPF arena library.
-        // Must happen after load() (BPF maps are now live) but before attach_struct_ops()
-        // (scheduler not yet running, so init_task hasn't fired yet).
-        // ArenaLib::setup() runs SEC("syscall") probes:
-        //   1. arena_init: allocates static pages, inits task stack allocator
-        //   2. arena_topology_node_init: registers topology nodes for arena traversal
-        let task_ctx_size = std::mem::size_of::<bpf_intf::cake_task_ctx>();
-        let arena = ArenaLib::init(skel.object_mut(), task_ctx_size, topo.nr_cpus)
-            .context("Failed to create ArenaLib")?;
-        arena.setup().context("Failed to initialize BPF arena")?;
-        info!(
-            "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
-            task_ctx_size, topo.nr_cpus
-        );
+        #[cfg(cake_needs_arena)]
+        {
+            // Initialize the BPF arena library.
+            // Must happen after load() (BPF maps are now live) but before attach_struct_ops()
+            // (scheduler not yet running, so init_task hasn't fired yet).
+            // ArenaLib::setup() runs SEC("syscall") probes:
+            //   1. arena_init: allocates static pages, inits task stack allocator
+            //   2. arena_topology_node_init: registers topology nodes for arena traversal
+            let task_ctx_size = std::mem::size_of::<bpf_intf::cake_task_ctx>();
+            let arena = ArenaLib::init(skel.object_mut(), task_ctx_size, topo.nr_cpus)
+                .context("Failed to create ArenaLib")?;
+            arena.setup().context("Failed to initialize BPF arena")?;
+            info!(
+                "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
+                task_ctx_size, topo.nr_cpus
+            );
+        }
 
         Ok(Self {
             skel,
@@ -558,4 +675,23 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_policy_defaults_to_llc_vtime() {
+        let args = Args::try_parse_from(["scx_cake"]).unwrap();
+
+        assert_eq!(args.queue_policy, QueuePolicy::LlcVtime);
+    }
+
+    #[test]
+    fn queue_policy_parses_local() {
+        let args = Args::try_parse_from(["scx_cake", "--queue-policy", "local"]).unwrap();
+
+        assert_eq!(args.queue_policy, QueuePolicy::Local);
+    }
 }

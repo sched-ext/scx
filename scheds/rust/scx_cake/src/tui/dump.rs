@@ -1,0 +1,2966 @@
+// SPDX-License-Identifier: GPL-2.0
+
+use super::report::build_telemetry_report;
+use super::*;
+
+fn append_wake_graph_section(output: &mut String, app: &TuiApp) {
+    if app.wake_edges.is_empty()
+        && app.wake_edge_slots_used == 0
+        && app.wake_edge_missed_updates == 0
+    {
+        return;
+    }
+
+    let wake_total: u64 = app.wake_edges.iter().map(|edge| edge.wake_count).sum();
+    let wait_total: u64 = app.wake_edges.iter().map(|edge| edge.wait_count).sum();
+    let wait_ns: u64 = app.wake_edges.iter().map(|edge| edge.wait_ns).sum();
+    let wait_max_ns: u64 = app
+        .wake_edges
+        .iter()
+        .map(|edge| edge.wait_max_ns)
+        .max()
+        .unwrap_or(0);
+    let target_hit: u64 = app
+        .wake_edges
+        .iter()
+        .map(|edge| edge.target_hit_count)
+        .sum();
+    let target_miss: u64 = app
+        .wake_edges
+        .iter()
+        .map(|edge| edge.target_miss_count)
+        .sum();
+    let follow_same: u64 = app
+        .wake_edges
+        .iter()
+        .map(|edge| edge.follow_same_cpu_count)
+        .sum();
+    let follow_migrate: u64 = app
+        .wake_edges
+        .iter()
+        .map(|edge| edge.follow_migrate_count)
+        .sum();
+
+    output.push_str(&format!(
+        "wakegraph: capture={} source=ringbuf_sampled edges={} wake_est={} observed={} weight_sum={} important={} wait_est={}/{}us({}) target_est[h/m]={}/{} follow_est[s/m]={}/{} event_drops={} drop_est={:.1}%\n",
+        wake_graph_capture_label(app),
+        app.wake_edges.len(),
+        wake_total,
+        app.wake_edge_observed_events,
+        app.wake_edge_sample_weight_sum,
+        app.wake_edge_important_events,
+        bucket_avg_us(wait_ns, wait_total),
+        wait_max_ns / 1000,
+        wait_total,
+        target_hit,
+        target_miss,
+        follow_same,
+        follow_migrate,
+        app.wake_edge_missed_updates,
+        wake_graph_miss_pct(app),
+    ));
+    output.push_str(
+        "wakegraph.legend: sampled graph uses one-second epoch sampling; *_est counts are sample-weighted estimates, observed is actual ringbuf events, important events are unsampled slow/miss/migrate facts\n",
+    );
+    output.push_str("wakegraph.tgids:\n");
+    for summary in wake_tgid_summaries(app).iter().take(16) {
+        output.push_str(&format!("  {}\n", wake_tgid_line(app, summary)));
+    }
+    output.push_str("wakegraph.top:\n");
+    for edge in app.wake_edges.iter().take(24) {
+        output.push_str(&format!("  {}\n", wake_edge_line(app, edge)));
+    }
+    let mut latency_edges: Vec<&WakeEdgeRow> = app
+        .wake_edges
+        .iter()
+        .filter(|edge| edge.wait_count > 0)
+        .collect();
+    latency_edges.sort_by(|a, b| {
+        b.wait_max_ns
+            .cmp(&a.wait_max_ns)
+            .then_with(|| wake_edge_avg_us(b).cmp(&wake_edge_avg_us(a)))
+            .then_with(|| b.wait_count.cmp(&a.wait_count))
+            .then_with(|| b.wake_count.cmp(&a.wake_count))
+    });
+    output.push_str("wakegraph.latency:\n");
+    for edge in latency_edges.iter().take(12) {
+        output.push_str(&format!("  {}\n", wake_edge_line(app, edge)));
+    }
+}
+
+#[cfg(debug_assertions)]
+fn append_derived_wake_graph_section(output: &mut String, app: &TuiApp) {
+    let graph = derive_wake_graph_from_task_rows(app);
+    let wake_total: u64 = graph.edges.iter().map(|edge| edge.wake_count).sum();
+    let wait_total: u64 = graph.edges.iter().map(|edge| edge.wait_count).sum();
+    let wait_ns: u64 = graph.edges.iter().map(|edge| edge.wait_ns).sum();
+    let wait_max_ns: u64 = graph
+        .edges
+        .iter()
+        .map(|edge| edge.wait_max_ns)
+        .max()
+        .unwrap_or(0);
+
+    output.push_str(&format!(
+        "wakegraph.derived: source=task_iter quality=debug_derived_latest_waker attribution=latest_waker approximate_edges=yes edges={} wake={} wait={}/{}us({})\n",
+        graph.edges.len(),
+        wake_total,
+        bucket_avg_us(wait_ns, wait_total),
+        wait_max_ns / 1000,
+        wait_total,
+    ));
+    output.push_str(
+        "wakegraph.derived.legend: task rows keep cumulative wake counts but only latest waker identity, so edge attribution is approximate; wait/path/place come from task_iter snapshots\n",
+    );
+    if graph.edges.is_empty() {
+        return;
+    }
+
+    output.push_str("wakegraph.derived.tgids:\n");
+    for summary in wake_tgid_summaries_from_edges(&graph.edges).iter().take(16) {
+        output.push_str(&format!("  {}\n", wake_tgid_line(app, summary)));
+    }
+    output.push_str("wakegraph.derived.top:\n");
+    for edge in graph.edges.iter().take(24) {
+        output.push_str(&format!("  {}\n", wake_edge_line(app, edge)));
+    }
+
+    let mut latency_edges: Vec<&WakeEdgeRow> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.wait_count > 0)
+        .collect();
+    latency_edges.sort_by(|a, b| {
+        b.wait_max_ns
+            .cmp(&a.wait_max_ns)
+            .then_with(|| wake_edge_avg_us(b).cmp(&wake_edge_avg_us(a)))
+            .then_with(|| b.wait_count.cmp(&a.wait_count))
+            .then_with(|| b.wake_count.cmp(&a.wake_count))
+    });
+    output.push_str("wakegraph.derived.latency:\n");
+    for edge in latency_edges.iter().take(12) {
+        output.push_str(&format!("  {}\n", wake_edge_line(app, edge)));
+    }
+}
+
+fn format_tgid_wake_graph(app: &TuiApp, tgid: u32) -> Option<String> {
+    let mut edges: Vec<&WakeEdgeRow> = app
+        .wake_edges
+        .iter()
+        .filter(|edge| edge.waker_tgid == tgid || edge.wakee_tgid == tgid)
+        .collect();
+    if edges.is_empty() {
+        return None;
+    }
+
+    edges.sort_by(|a, b| {
+        b.wait_count
+            .cmp(&a.wait_count)
+            .then_with(|| b.wake_count.cmp(&a.wake_count))
+            .then_with(|| b.wait_ns.cmp(&a.wait_ns))
+    });
+
+    let internal_wakes: u64 = edges
+        .iter()
+        .filter(|edge| edge.waker_tgid == tgid && edge.wakee_tgid == tgid)
+        .map(|edge| edge.wake_count)
+        .sum();
+    let outbound_wakes: u64 = edges
+        .iter()
+        .filter(|edge| edge.waker_tgid == tgid && edge.wakee_tgid != tgid)
+        .map(|edge| edge.wake_count)
+        .sum();
+    let inbound_wakes: u64 = edges
+        .iter()
+        .filter(|edge| edge.waker_tgid != tgid && edge.wakee_tgid == tgid)
+        .map(|edge| edge.wake_count)
+        .sum();
+    let self_wait_total: u64 = edges
+        .iter()
+        .filter(|edge| edge.wakee_tgid == tgid)
+        .map(|edge| edge.wait_count)
+        .sum();
+    let self_wait_ns: u64 = edges
+        .iter()
+        .filter(|edge| edge.wakee_tgid == tgid)
+        .map(|edge| edge.wait_ns)
+        .sum();
+    let self_wait_max_ns: u64 = edges
+        .iter()
+        .filter(|edge| edge.wakee_tgid == tgid)
+        .map(|edge| edge.wait_max_ns)
+        .max()
+        .unwrap_or(0);
+    let out_wait_total: u64 = edges
+        .iter()
+        .filter(|edge| edge.waker_tgid == tgid && edge.wakee_tgid != tgid)
+        .map(|edge| edge.wait_count)
+        .sum();
+    let out_wait_ns: u64 = edges
+        .iter()
+        .filter(|edge| edge.waker_tgid == tgid && edge.wakee_tgid != tgid)
+        .map(|edge| edge.wait_ns)
+        .sum();
+    let out_wait_max_ns: u64 = edges
+        .iter()
+        .filter(|edge| edge.waker_tgid == tgid && edge.wakee_tgid != tgid)
+        .map(|edge| edge.wait_max_ns)
+        .max()
+        .unwrap_or(0);
+    let self_target_hit: u64 = edges
+        .iter()
+        .filter(|edge| edge.wakee_tgid == tgid)
+        .map(|edge| edge.target_hit_count)
+        .sum();
+    let self_target_miss: u64 = edges
+        .iter()
+        .filter(|edge| edge.wakee_tgid == tgid)
+        .map(|edge| edge.target_miss_count)
+        .sum();
+    let self_follow_same: u64 = edges
+        .iter()
+        .filter(|edge| edge.wakee_tgid == tgid)
+        .map(|edge| edge.follow_same_cpu_count)
+        .sum();
+    let self_follow_migrate: u64 = edges
+        .iter()
+        .filter(|edge| edge.wakee_tgid == tgid)
+        .map(|edge| edge.follow_migrate_count)
+        .sum();
+    let observed_events: u64 = edges.iter().map(|edge| edge.observed_event_count).sum();
+    let sample_weight_sum: u64 = edges.iter().map(|edge| edge.sample_weight_sum).sum();
+
+    let mut out = format!(
+        "  wakegraph: cap={} edges={} observed={} weight_sum={} wake_est[in/int/out]={}/{}/{} wait_est_self={}/{}us({}) wait_est_out={}/{}us({}) target_est_self[h/m]={}/{} follow_est_self[s/m]={}/{}\n",
+        wake_graph_capture_label(app),
+        edges.len(),
+        observed_events,
+        sample_weight_sum,
+        inbound_wakes,
+        internal_wakes,
+        outbound_wakes,
+        bucket_avg_us(self_wait_ns, self_wait_total),
+        self_wait_max_ns / 1000,
+        self_wait_total,
+        bucket_avg_us(out_wait_ns, out_wait_total),
+        out_wait_max_ns / 1000,
+        out_wait_total,
+        self_target_hit,
+        self_target_miss,
+        self_follow_same,
+        self_follow_migrate,
+    );
+    for edge in edges.iter().take(6) {
+        out.push_str(&format!("    {}\n", wake_edge_line(app, edge)));
+    }
+    Some(out)
+}
+
+fn append_select_cpu_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    elapsed: Duration,
+) {
+    let rows = select_cpu_rows(counters);
+    let target_total: u64 = counters
+        .iter()
+        .map(|counter| counter.select_target_total)
+        .sum();
+    let prev_total: u64 = counters
+        .iter()
+        .map(|counter| counter.select_prev_total)
+        .sum();
+    if target_total == 0 && prev_total == 0 {
+        return;
+    }
+
+    let target_reason = select_reason_totals(counters, false);
+    let prev_reason = select_reason_totals(counters, true);
+    let top_target = rows
+        .iter()
+        .max_by_key(|row| row.target_total)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_target_pct = rows
+        .iter()
+        .max_by_key(|row| row.target_total)
+        .map(|row| row.target_pct)
+        .unwrap_or(0.0);
+    let top_prev = rows
+        .iter()
+        .max_by_key(|row| row.prev_total)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_prev_pct = rows
+        .iter()
+        .max_by_key(|row| row.prev_total)
+        .map(|row| row.prev_pct)
+        .unwrap_or(0.0);
+
+    output.push_str(&format!(
+        "{}: sampled={:.1}s target_total={} prev_total={} top_target={} {:.1}% top_prev={} {:.1}% target_skew={:.1}x prev_skew={:.1}x\n",
+        label,
+        elapsed.as_secs_f64(),
+        target_total,
+        prev_total,
+        top_target,
+        top_target_pct,
+        top_prev,
+        top_prev_pct,
+        select_balance_ratio(counters, false),
+        select_balance_ratio(counters, true),
+    ));
+    output.push_str(&format!(
+        "{}.legend: hm=home_cpu hc=home_core pp=prev_primary ps=primary_scan hy=hybrid_scan kp=kernel_prev ki=kernel_idle tn=tunnel pc=pressure_core\n",
+        label
+    ));
+    output.push_str(&format!(
+        "{}.reasons.target: {}\n",
+        label,
+        format_select_reason_summary(&target_reason)
+    ));
+    output.push_str(&format!(
+        "{}.reasons.prev: {}\n",
+        label,
+        format_select_reason_summary(&prev_reason)
+    ));
+    output.push_str(&format!("{}.rows:\n", label));
+    for row in rows {
+        output.push_str(&format!(
+            "  cpu=C{:02} target={} ({:.1}%) prev={} ({:.1}%) tgt={} prev={}\n",
+            row.cpu,
+            row.target_total,
+            row.target_pct,
+            row.prev_total,
+            row.prev_pct,
+            format_select_reason_mix(&row.target_reason, row.target_total),
+            format_select_reason_mix(&row.prev_reason, row.prev_total),
+        ));
+    }
+}
+
+fn append_home_seed_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    elapsed: Duration,
+) {
+    let rows = home_seed_rows(counters);
+    if rows.is_empty() {
+        return;
+    }
+
+    let secs = elapsed.as_secs_f64().max(0.1);
+    let total: u64 = counters.iter().map(|counter| counter.home_seed_total).sum();
+    let reason_total = home_seed_reason_totals(counters);
+    let attributed: u64 = reason_total[1..].iter().sum();
+    let unattributed = total.saturating_sub(attributed);
+    let top = rows
+        .iter()
+        .max_by_key(|row| row.seeds)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_pct = rows
+        .iter()
+        .max_by_key(|row| row.seeds)
+        .map(|row| row.seed_pct)
+        .unwrap_or(0.0);
+
+    output.push_str(&format!(
+        "{}: sampled={:.1}s seeds={} ({:.1}/s) top={} {:.1}% skew={:.1}x unattributed={} reasons={}\n",
+        label,
+        elapsed.as_secs_f64(),
+        total,
+        per_sec(total, secs),
+        top,
+        top_pct,
+        home_seed_balance_ratio(counters),
+        unattributed,
+        format_select_reason_summary(&reason_total),
+    ));
+    output.push_str(&format!(
+        "{}.legend: first time cake_running converts sentinel home_cpu into learned primary CPU; reason=last select_cpu reason before first run\n",
+        label
+    ));
+    output.push_str(&format!("{}.rows:\n", label));
+    for row in rows.iter().take(32) {
+        output.push_str(&format!(
+            "  cpu=C{:02} seeds={} ({:.1}%, {:.1}/s) reason={}\n",
+            row.cpu,
+            row.seeds,
+            row.seed_pct,
+            per_sec(row.seeds, secs),
+            format_select_reason_mix(&row.reason, row.seeds),
+        ));
+    }
+    if rows.len() > 32 {
+        output.push_str(&format!("  ... +{} more CPUs\n", rows.len() - 32));
+    }
+}
+
+fn append_pressure_probe_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    totals: &PressureProbeCounters,
+    elapsed: Duration,
+) {
+    let total_eval: u64 = totals.total.iter().map(|site| site[0]).sum();
+    if total_eval == 0 {
+        return;
+    }
+
+    output.push_str(&format!(
+        "{}.legend: ev=evaluated ba=anchor(structural blocker) bs=score bd=delta bb=sibling_busy ok=success anchor=inv(invalid_cpu) sec(smt_secondary_anchor) nosib(no_sibling) aff(affinity)\n",
+        label
+    ));
+
+    for site in 0..PRESSURE_SITE_MAX {
+        let rows = pressure_probe_rows(counters, site);
+        let eval_total = totals.total[site][0];
+        if eval_total == 0 {
+            continue;
+        }
+
+        let accounted_eval: u64 = rows.iter().map(|row| row.eval_total).sum();
+        let unattributed = eval_total.saturating_sub(accounted_eval);
+        let top_anchor = rows
+            .iter()
+            .max_by_key(|row| row.eval_total)
+            .map(|row| format!("C{:02}", row.cpu))
+            .unwrap_or_else(|| "-".to_string());
+        let top_anchor_pct = rows
+            .iter()
+            .max_by_key(|row| row.eval_total)
+            .map(|row| row.eval_pct)
+            .unwrap_or(0.0);
+
+        output.push_str(&format!(
+            "{}.{}: sampled={:.1}s eval={} unattributed={} top_anchor={} {:.1}% eval_skew={:.1}x outcomes={} anchor={}\n",
+            label,
+            pressure_probe_site_label(site),
+            elapsed.as_secs_f64(),
+            eval_total,
+            unattributed,
+            top_anchor,
+            top_anchor_pct,
+            pressure_probe_balance_ratio(counters, site),
+            format_pressure_probe_summary(&totals.total[site]),
+            format_pressure_anchor_summary(&totals.anchor_block[site], totals.total[site][1]),
+        ));
+        output.push_str(&format!(
+            "{}.{}.rows:\n",
+            label,
+            pressure_probe_site_label(site)
+        ));
+        for row in rows {
+            output.push_str(&format!(
+                "  cpu=C{:02} eval={} ({:.1}%) outcomes={} anchor={}\n",
+                row.cpu,
+                row.eval_total,
+                row.eval_pct,
+                format_pressure_probe_mix(&row.outcome, row.eval_total),
+                format_pressure_anchor_summary(&row.anchor_block, row.outcome[1]),
+            ));
+        }
+    }
+}
+
+fn append_local_queue_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    elapsed: Duration,
+) {
+    let rows = local_queue_rows(counters);
+    if rows.is_empty() {
+        return;
+    }
+
+    let secs = elapsed.as_secs_f64().max(0.1);
+    let inserts: u64 = counters
+        .iter()
+        .map(|counter| counter.local_pending_inserts)
+        .sum();
+    let runs: u64 = counters
+        .iter()
+        .map(|counter| counter.local_pending_runs)
+        .sum();
+    let pending_now: u64 = counters
+        .iter()
+        .map(|counter| counter.local_pending as u64)
+        .sum();
+    let max_cpu_pending = counters
+        .iter()
+        .map(|counter| counter.local_pending_max)
+        .max()
+        .unwrap_or(0);
+    let direct: u64 = counters
+        .iter()
+        .map(|counter| counter.wake_direct_target)
+        .sum();
+    let busy: u64 = counters
+        .iter()
+        .map(|counter| counter.wake_busy_target)
+        .sum();
+    let busy_local: u64 = counters
+        .iter()
+        .map(|counter| counter.wake_busy_local_target)
+        .sum();
+    let busy_remote: u64 = counters
+        .iter()
+        .map(|counter| counter.wake_busy_remote_target)
+        .sum();
+    let top_pending = rows
+        .iter()
+        .max_by_key(|row| row.pending)
+        .filter(|row| row.pending > 0)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_busy = rows
+        .iter()
+        .max_by_key(|row| row.busy)
+        .filter(|row| row.busy > 0)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_wait = counters
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, counter)| target_wait_total_ns(counter))
+        .filter(|(_, counter)| target_wait_total_ns(counter) > 0)
+        .map(|(cpu, _)| format!("C{:02}", cpu))
+        .unwrap_or_else(|| "-".to_string());
+    let top_pressure = rows
+        .iter()
+        .max_by_key(|row| row.pressure)
+        .filter(|row| row.pressure > 0)
+        .map(|row| format!("C{:02}", row.cpu))
+        .unwrap_or_else(|| "-".to_string());
+
+    output.push_str(&format!(
+        "{}: sampled={:.1}s inserts={} ({:.1}/s) runs_seen={} ({:.1}/s) pending_now={} max_cpu_pending={} wake_target:direct={} busy={} busy_local={} busy_remote={} top_pending={} top_busy={} top_wait={} top_pressure={}\n",
+        label,
+        elapsed.as_secs_f64(),
+        inserts,
+        per_sec(inserts, secs),
+        runs,
+        per_sec(runs, secs),
+        pending_now,
+        max_cpu_pending,
+        direct,
+        busy,
+        busy_local,
+        busy_remote,
+        top_pending,
+        top_busy,
+        top_wait,
+        top_pressure,
+    ));
+    output.push_str(&format!(
+        "{}.legend: pend=estimated SCX_DSQ_LOCAL_ON inserts not yet observed running max=per-cpu peak since reset press=cpu_pressure wait=target wake-to-run avg/max/p99bucket(samples)\n",
+        label
+    ));
+    output.push_str(&format!("{}.rows:\n", label));
+    for row in rows.iter().take(32) {
+        output.push_str(&format!(
+            "  cpu=C{:02} press={} pend={} max={} ins={} ({:.1}/s) run_seen={} ({:.1}/s) wake_target[d/b/l/r]={}/{}/{}/{} wait={}\n",
+            row.cpu,
+            row.pressure,
+            row.pending,
+            row.pending_max,
+            row.inserts,
+            per_sec(row.inserts, secs),
+            row.runs,
+            per_sec(row.runs, secs),
+            row.direct,
+            row.busy,
+            row.busy_local,
+            row.busy_remote,
+            format_local_queue_wait(row),
+        ));
+    }
+    if rows.len() > 32 {
+        output.push_str(&format!("  ... +{} more CPUs\n", rows.len() - 32));
+    }
+}
+
+fn format_row_place_wait_summary(row: &TaskTelemetryRow) -> String {
+    let mut parts = Vec::new();
+    for cls in 0..4 {
+        let count = row.home_place_wait_count[cls];
+        if count == 0 {
+            continue;
+        }
+        let avg_us = row.home_place_wait_ns[cls] / count as u64 / 1000;
+        parts.push(format!(
+            "{}={}/{}/{}",
+            place_class_label(cls),
+            avg_us,
+            row.home_place_wait_max_us[cls],
+            count
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_wakewait_summary(sum_ns: &[u64], count: &[u64], max_ns: &[u64]) -> String {
+    let mut parts = Vec::new();
+    for reason in 1..4 {
+        let samples = count[reason];
+        let avg_us = if samples > 0 {
+            sum_ns[reason] / samples / 1000
+        } else {
+            0
+        };
+        let max_us = max_ns[reason] / 1000;
+        parts.push(format!(
+            "{}={}/{}us({})",
+            ["dir", "busy", "queue"][reason - 1],
+            avg_us,
+            max_us,
+            samples
+        ));
+    }
+    parts.join(" ")
+}
+
+pub(super) fn format_tgid_health_summary(app: &TuiApp, tgid: u32, dump_pids: &[u32]) -> String {
+    let mut threads = 0u32;
+    let mut hot_threads = 0u32;
+    let mut run_rate = 0.0;
+    let mut max_wait_us = 0u64;
+    let mut max_gap_us = 0u64;
+    let mut max_start_us = 0u32;
+    let mut max_hot_start_us = 0u32;
+    let mut cpu_seen = [false; crate::topology::MAX_CPUS];
+    let mut core_seen = [false; crate::topology::MAX_CORES];
+    let mut smt_samples = 0u64;
+    let mut run_samples = 0u64;
+    let mut enqueue_first = 0u32;
+    let mut select_first = 0u32;
+    let mut running_first = 0u32;
+    let mut full_startup_phase = 0u32;
+
+    for pid in dump_pids {
+        let Some(row) = app.task_rows.get(pid) else {
+            continue;
+        };
+        let row_tgid = if row.tgid > 0 { row.tgid } else { row.pid };
+        if row_tgid != tgid {
+            continue;
+        }
+
+        threads += 1;
+        let is_hot = row.runs_per_sec >= 10.0 || row.pelt_util > 0;
+        if is_hot {
+            hot_threads += 1;
+            max_hot_start_us = max_hot_start_us.max(row.startup_latency_us);
+        }
+        run_rate += row.runs_per_sec;
+        max_wait_us = max_wait_us.max(row.wait_duration_ns / 1000);
+        max_gap_us = max_gap_us.max(row.max_dispatch_gap_us);
+        max_start_us = max_start_us.max(row.startup_latency_us);
+        match row.startup_first_phase {
+            STARTUP_PHASE_ENQUEUE => enqueue_first += 1,
+            STARTUP_PHASE_SELECT => select_first += 1,
+            STARTUP_PHASE_RUNNING => running_first += 1,
+            _ => {}
+        }
+        if row.startup_phase_mask
+            & (STARTUP_MASK_ENQUEUE | STARTUP_MASK_SELECT | STARTUP_MASK_RUNNING)
+            == (STARTUP_MASK_ENQUEUE | STARTUP_MASK_SELECT | STARTUP_MASK_RUNNING)
+        {
+            full_startup_phase += 1;
+        }
+
+        let nr_cpus = app.topology.nr_cpus.min(crate::topology::MAX_CPUS);
+        for cpu in 0..nr_cpus {
+            let samples = row.cpu_run_count[cpu] as u64;
+            if samples == 0 {
+                continue;
+            }
+            cpu_seen[cpu] = true;
+            let core = app.topology.cpu_core_id[cpu] as usize;
+            if core < crate::topology::MAX_CORES {
+                core_seen[core] = true;
+            }
+            run_samples += samples;
+            if is_secondary_smt_cpu(&app.topology, cpu) {
+                smt_samples += samples;
+            }
+        }
+    }
+
+    let active_cpus = cpu_seen.iter().filter(|seen| **seen).count();
+    let active_cores = core_seen.iter().filter(|seen| **seen).count();
+    format!(
+        "health run/s={:.1} hot_threads={}/{} wait={}us gap={} lifecycle_run_max_us[hot/all]={}/{} lifecycle_first[e/s/r]={}/{}/{} lifecycle_full={}/{} spread={}/{} smt={:.0}%",
+        run_rate,
+        hot_threads,
+        threads,
+        max_wait_us,
+        display_gap_us(max_gap_us),
+        max_hot_start_us,
+        max_start_us,
+        enqueue_first,
+        select_first,
+        running_first,
+        full_startup_phase,
+        threads,
+        active_cpus,
+        active_cores,
+        pct(smt_samples, run_samples),
+    )
+}
+
+fn append_cpu_work_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    topology: &TopologyInfo,
+    cpu_stats: &[(f32, f32)],
+    elapsed: Duration,
+) {
+    let cpu_rows = scheduler_cpu_rows(counters, topology, cpu_stats, elapsed);
+    let core_rows = scheduler_core_rows(counters, topology, cpu_stats, elapsed);
+    let active_cpu_count = counters
+        .iter()
+        .filter(|counter| counter.task_runtime_ns > 0 || counter.task_run_count > 0)
+        .count();
+    let active_core_count = core_rows
+        .iter()
+        .filter(|row| row.total_runtime_ns > 0 || row.runs > 0)
+        .count();
+    let total_runtime_ns: u64 = counters.iter().map(|counter| counter.task_runtime_ns).sum();
+    let total_runs: u64 = counters.iter().map(|counter| counter.task_run_count).sum();
+    let smt_solo_runtime_ns: u64 = counters
+        .iter()
+        .map(|counter| counter.smt_solo_runtime_ns)
+        .sum();
+    let smt_contended_runtime_ns: u64 = counters
+        .iter()
+        .map(|counter| counter.smt_contended_runtime_ns)
+        .sum();
+    let smt_overlap_runtime_ns: u64 = counters
+        .iter()
+        .map(|counter| counter.smt_overlap_runtime_ns)
+        .sum();
+    let smt_solo_runs: u64 = counters
+        .iter()
+        .map(|counter| counter.smt_solo_run_count)
+        .sum();
+    let smt_contended_runs: u64 = counters
+        .iter()
+        .map(|counter| counter.smt_contended_run_count)
+        .sum();
+    let smt_active_start: u64 = counters
+        .iter()
+        .map(|counter| counter.smt_sibling_active_start_count)
+        .sum();
+    let smt_active_stop: u64 = counters
+        .iter()
+        .map(|counter| counter.smt_sibling_active_stop_count)
+        .sum();
+    let smt_wait_ns = [
+        counters
+            .iter()
+            .map(|counter| counter.smt_wake_wait_ns[0])
+            .sum::<u64>(),
+        counters
+            .iter()
+            .map(|counter| counter.smt_wake_wait_ns[1])
+            .sum::<u64>(),
+    ];
+    let smt_wait_count = [
+        counters
+            .iter()
+            .map(|counter| counter.smt_wake_wait_count[0])
+            .sum::<u64>(),
+        counters
+            .iter()
+            .map(|counter| counter.smt_wake_wait_count[1])
+            .sum::<u64>(),
+    ];
+    let smt_runtime_ns = smt_solo_runtime_ns + smt_contended_runtime_ns;
+    let smt_runs = smt_solo_runs + smt_contended_runs;
+    let top_cpu = cpu_rows
+        .first()
+        .map(|row| format!("C{:02} {:.1}%", row.cpu, row.share_pct))
+        .unwrap_or_else(|| "-".to_string());
+    let top_core = core_rows
+        .first()
+        .map(|row| format!("K{:02} {:.1}%", row.core, row.share_pct))
+        .unwrap_or_else(|| "-".to_string());
+
+    output.push_str(&format!(
+        "{}: sampled={:.1}s active_cpu={}/{} active_core={}/{} runtime_ms={} runs={} top_cpu_cake={} top_core_cake={} skew={:.1}x\n",
+        label,
+        elapsed.as_secs_f64(),
+        active_cpu_count,
+        counters.len(),
+        active_core_count,
+        topology.nr_phys_cpus,
+        format_runtime_ms(total_runtime_ns),
+        total_runs,
+        top_cpu,
+        top_core,
+        scheduler_balance_ratio(counters),
+    ));
+    output.push_str(&format!(
+        "{}.smt: runtime_contended={:.1}% overlap={:.1}% runs_contended={:.1}% active_start={} active_stop={} avg_run_us[s/c]={}/{} wake_avg_us[s/c]={}/{}\n",
+        label,
+        pct(smt_contended_runtime_ns, smt_runtime_ns),
+        pct(smt_overlap_runtime_ns, smt_runtime_ns),
+        pct(smt_contended_runs, smt_runs),
+        smt_active_start,
+        smt_active_stop,
+        avg_ns(smt_solo_runtime_ns, smt_solo_runs) / 1000,
+        avg_ns(smt_contended_runtime_ns, smt_contended_runs) / 1000,
+        avg_ns(smt_wait_ns[0], smt_wait_count[0]) / 1000,
+        avg_ns(smt_wait_ns[1], smt_wait_count[1]) / 1000,
+    ));
+    output.push_str(&format!(
+        "{}.legend: cake=tracked runtime share sys=system cpu load hot_thr=share on the busier sibling sib=share on the SMT sibling smt%=runtime with observed sibling overlap ov%=estimated overlap q%[f/b/p]=quantum full/blocked/preempt mix\n",
+        label
+    ));
+    output.push_str(&format!("{}.rows:\n", label));
+    for row in &cpu_rows {
+        output.push_str(&format!(
+            "  cpu=C{:02} core={} llc={} thr={} cake={:.1}% runs={} runs/s={:.1} runtime_ms={} avg_run_us={} smt%={:.0} ov%={:.0} cavg_us={} wait_us[s/c]={}/{} q%[f/b/p]={:.0}/{:.0}/{:.0} q[f/b/p]={}/{}/{} sys={:.0}% temp={:.0}C\n",
+            row.cpu,
+            row.core,
+            row.llc,
+            if row.is_secondary_smt { "smt2" } else { "prim" },
+            row.share_pct,
+            row.runs,
+            row.runs_per_sec,
+            format_runtime_ms(row.total_runtime_ns),
+            row.avg_run_us,
+            row.smt_contended_pct,
+            row.smt_overlap_pct,
+            row.smt_contended_avg_run_us,
+            row.smt_wait_solo_us,
+            row.smt_wait_contended_us,
+            row.full_pct,
+            row.yield_pct,
+            row.preempt_pct,
+            counters[row.cpu].quantum_full,
+            counters[row.cpu].quantum_yield,
+            counters[row.cpu].quantum_preempt,
+            row.system_load,
+            row.temp_c,
+        ));
+    }
+    output.push_str(&format!("{}.cores:\n", label));
+    for row in &core_rows {
+        output.push_str(&format!(
+            "  core=K{:02} cpus={} cake={:.1}% runs={} runs/s={:.1} runtime_ms={} avg_run_us={} smt_ov%={:.0} primary_cont%={:.0} smt_cont%={:.0} p_impact={:.2} wait_us[s/c]={}/{} q%[f/b/p]={:.0}/{:.0}/{:.0} hot_thr={:.0}% sib={:.0}% sys={:.0}%\n",
+            row.core,
+            row.cpu_label,
+            row.share_pct,
+            row.runs,
+            row.runs_per_sec,
+            format_runtime_ms(row.total_runtime_ns),
+            row.avg_run_us,
+            row.smt_overlap_pct,
+            row.primary_contended_pct,
+            row.secondary_contended_pct,
+            row.primary_smt_impact,
+            row.smt_wait_solo_us,
+            row.smt_wait_contended_us,
+            row.full_pct,
+            row.yield_pct,
+            row.preempt_pct,
+            row.top_cpu_share_pct,
+            row.secondary_smt_pct,
+            row.avg_system_load,
+        ));
+    }
+}
+
+fn append_long_run_owner_section(
+    output: &mut String,
+    label: &str,
+    app: &TuiApp,
+    tgid_roles: &HashMap<u32, WorkloadRole>,
+) {
+    let rows = build_long_run_owner_rows(app, tgid_roles, usize::MAX);
+    let total_runtime_ns: u64 = app
+        .task_rows
+        .values()
+        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .map(|row| row.total_runtime_ns)
+        .sum();
+    output.push_str(&format!(
+        "{}: owners={} total_runtime_ms={} source=task_total_runtime place=top_run_residency share=tracked_task_runtime\n",
+        label,
+        rows.len(),
+        format_runtime_ms(total_runtime_ns),
+    ));
+    if rows.is_empty() {
+        return;
+    }
+
+    output.push_str(&format!("{}.top:\n", label));
+    for row in rows.iter().take(16) {
+        output.push_str(&format!(
+            "  pid={} tgid={} ppid={} comm={} role={} pelt={} cpu={} core={} spread={}/{} smt={} allowed={} home={} score={} hbusy={:.1}% hchg={} tsmt={:.1}%/{:.1}% behind=max{}us/n{} runtime_ms={} share={:.1}% rt_ms_s={:.1} runs={} run_s={:.1} avg_run_us={} max_run_us={}\n",
+            row.pid,
+            row.tgid,
+            row.ppid,
+            row.comm,
+            row.role.label(),
+            row.pelt_util,
+            cpu_owner_label(row),
+            core_owner_label(row),
+            row.active_cpu_count,
+            row.active_core_count,
+            row.smt_secondary_pct,
+            row.allowed_cpus,
+            if row.home_cpu == 0xff {
+                "-".to_string()
+            } else {
+                format!("C{:02}", row.home_cpu)
+            },
+            row.home_score,
+            row.home_busy_pct,
+            row.home_change_count,
+            row.smt_contended_pct,
+            row.smt_overlap_pct,
+            row.blocked_wait_max_us,
+            row.blocked_count,
+            format_runtime_ms(row.total_runtime_ns),
+            row.runtime_share_pct,
+            row.runtime_ns_per_sec / 1_000_000.0,
+            row.runs,
+            row.runs_per_sec,
+            row.avg_run_us,
+            display_runtime_us(row.max_runtime_us),
+        ));
+    }
+
+    let mut by_cpu: HashMap<usize, Vec<&LongRunOwnerRow>> = HashMap::new();
+    let mut by_core: HashMap<usize, Vec<&LongRunOwnerRow>> = HashMap::new();
+    for row in &rows {
+        if let Some(cpu) = row.top_cpu {
+            by_cpu.entry(cpu).or_default().push(row);
+        }
+        if let Some(core) = row.top_core {
+            by_core.entry(core).or_default().push(row);
+        }
+    }
+
+    let mut cpu_heads: Vec<(usize, &LongRunOwnerRow)> = by_cpu
+        .iter_mut()
+        .filter_map(|(cpu, owners)| {
+            owners.sort_by(|a, b| {
+                b.total_runtime_ns
+                    .cmp(&a.total_runtime_ns)
+                    .then_with(|| a.pid.cmp(&b.pid))
+            });
+            owners.first().copied().map(|owner| (*cpu, owner))
+        })
+        .collect();
+    cpu_heads.sort_by(|a, b| {
+        b.1.total_runtime_ns
+            .cmp(&a.1.total_runtime_ns)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    output.push_str(&format!("{}.cpu:\n", label));
+    for (cpu, owner) in cpu_heads.iter().take(8) {
+        output.push_str(&format!(
+            "  cpu=C{:02} owner={} pid={} role={} runtime_ms={} share={:.1}% res={} allowed={} home_score={} hbusy={:.1}% tsmt={:.1}% avg_run_us={} max_run_us={} run_s={:.1}\n",
+            cpu,
+            owner.comm,
+            owner.pid,
+            owner.role.label(),
+            format_runtime_ms(owner.total_runtime_ns),
+            owner.runtime_share_pct,
+            cpu_owner_label(owner),
+            owner.allowed_cpus,
+            owner.home_score,
+            owner.home_busy_pct,
+            owner.smt_contended_pct,
+            owner.avg_run_us,
+            display_runtime_us(owner.max_runtime_us),
+            owner.runs_per_sec,
+        ));
+    }
+
+    let mut core_heads: Vec<(usize, &LongRunOwnerRow)> = by_core
+        .iter_mut()
+        .filter_map(|(core, owners)| {
+            owners.sort_by(|a, b| {
+                b.total_runtime_ns
+                    .cmp(&a.total_runtime_ns)
+                    .then_with(|| a.pid.cmp(&b.pid))
+            });
+            owners.first().copied().map(|owner| (*core, owner))
+        })
+        .collect();
+    core_heads.sort_by(|a, b| {
+        b.1.total_runtime_ns
+            .cmp(&a.1.total_runtime_ns)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    output.push_str(&format!("{}.core:\n", label));
+    for (core, owner) in core_heads.iter().take(8) {
+        output.push_str(&format!(
+            "  core=K{:02} owner={} pid={} role={} runtime_ms={} share={:.1}% res={} allowed={} home_score={} hbusy={:.1}% tsmt={:.1}% avg_run_us={} max_run_us={} run_s={:.1}\n",
+            core,
+            owner.comm,
+            owner.pid,
+            owner.role.label(),
+            format_runtime_ms(owner.total_runtime_ns),
+            owner.runtime_share_pct,
+            core_owner_label(owner),
+            owner.allowed_cpus,
+            owner.home_score,
+            owner.home_busy_pct,
+            owner.smt_contended_pct,
+            owner.avg_run_us,
+            display_runtime_us(owner.max_runtime_us),
+            owner.runs_per_sec,
+        ));
+    }
+}
+
+pub(super) fn build_app_health_rows(
+    app: &TuiApp,
+    tgid_roles: &HashMap<u32, WorkloadRole>,
+) -> Vec<AppHealthRow> {
+    let mut rows: HashMap<u32, AppHealthRow> = HashMap::new();
+    let nr_cpus = app.topology.nr_cpus.max(1) as u16;
+    let identities = build_tgid_identities(app);
+
+    for row in app
+        .task_rows
+        .values()
+        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+    {
+        let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
+        let role = task_role(row, tgid_roles);
+        let identity = identities
+            .get(&tgid)
+            .cloned()
+            .unwrap_or_else(|| fallback_tgid_identity(tgid, row));
+        let entry = rows.entry(tgid).or_insert_with(|| AppHealthRow {
+            tgid,
+            comm: identity.app_comm.clone(),
+            leader_comm: identity.leader_comm.clone(),
+            dominant_runtime_comm: identity.dominant_runtime_comm.clone(),
+            dominant_runtime_ns: identity.dominant_runtime_ns,
+            dominant_thread_comm: identity.dominant_thread_comm.clone(),
+            dominant_thread_count: identity.dominant_thread_count,
+            comm_kinds: identity.comm_kinds,
+            role,
+            min_allowed_cpus: nr_cpus,
+            ..Default::default()
+        });
+
+        entry.role = tgid_roles.get(&tgid).copied().unwrap_or(role);
+        entry.tasks += 1;
+        if row.pelt_util >= 128 || row.runtime_ns_per_sec >= 10_000_000.0 {
+            entry.hot_tasks += 1;
+        }
+        entry.pelt_max = entry.pelt_max.max(row.pelt_util);
+        entry.runtime_ns += row.total_runtime_ns;
+        entry.runtime_ns_per_sec += row.runtime_ns_per_sec;
+        entry.runs_per_sec += row.runs_per_sec;
+        entry.runs += row.total_runs as u64;
+        entry.migrations_per_sec += row.migrations_per_sec;
+        entry.quantum_full += row.quantum_full_count as u64;
+        entry.quantum_yield += row.quantum_yield_count as u64;
+        entry.quantum_preempt += row.quantum_preempt_count as u64;
+        entry.yield_count += row.yield_count as u64;
+        entry.max_runtime_us = entry.max_runtime_us.max(row.max_runtime_us);
+        entry.smt_contended_runtime_ns += row.smt_contended_runtime_ns;
+        entry.smt_overlap_runtime_ns += row.smt_overlap_runtime_ns;
+        entry.blocked_count += row.blocked_count as u64;
+        entry.blocked_wait_max_us = entry.blocked_wait_max_us.max(row.blocked_wait_max_us);
+
+        let allowed = if row.allowed_cpus == 0 {
+            nr_cpus
+        } else {
+            row.allowed_cpus
+        };
+        entry.min_allowed_cpus = entry.min_allowed_cpus.min(allowed);
+        entry.max_allowed_cpus = entry.max_allowed_cpus.max(allowed);
+        if allowed < nr_cpus {
+            entry.restricted_tasks += 1;
+        }
+
+        let placement = placement_summary(row, &app.topology);
+        let top_cpu_pct = placement
+            .top_cpu
+            .map(|(_, count)| (count * 100) / placement.total_samples.max(1))
+            .unwrap_or(0);
+        let quantum_total = row.quantum_full_count as u64
+            + row.quantum_yield_count as u64
+            + row.quantum_preempt_count as u64;
+        let full_pct = pct(row.quantum_full_count as u64, quantum_total);
+        if allowed > 1
+            && placement.active_cpu_count <= 1
+            && top_cpu_pct >= 90
+            && row.pelt_util >= 512
+            && full_pct >= 50.0
+        {
+            entry.sticky_hogs += 1;
+        }
+    }
+
+    for counter in &app.per_cpu_work {
+        if counter.blocked_owner_wait_count == 0 || counter.blocked_waiter_pid == 0 {
+            continue;
+        }
+        let Some(waiter) = app.task_rows.get(&counter.blocked_waiter_pid) else {
+            continue;
+        };
+        let tgid = if waiter.tgid > 0 {
+            waiter.tgid
+        } else {
+            waiter.pid
+        };
+        if let Some(entry) = rows.get_mut(&tgid) {
+            entry.blocked_count += counter.blocked_owner_wait_count;
+            entry.blocked_wait_max_us = entry
+                .blocked_wait_max_us
+                .max((counter.blocked_owner_wait_max_ns / 1000).min(u32::MAX as u64) as u32);
+        }
+    }
+
+    for edge in &app.wake_edges {
+        if edge.waker_tgid == 0 || edge.wakee_tgid == 0 {
+            continue;
+        }
+        if edge.waker_tgid == edge.wakee_tgid {
+            if let Some(row) = rows.get_mut(&edge.wakee_tgid) {
+                row.wake_self += edge.wake_count;
+                row.wait_self_ns += edge.wait_ns;
+                row.wait_self_count += edge.wait_count;
+                row.wait_self_max_ns = row.wait_self_max_ns.max(edge.wait_max_ns);
+            }
+        } else {
+            if let Some(row) = rows.get_mut(&edge.wakee_tgid) {
+                row.wake_in += edge.wake_count;
+                row.wait_self_ns += edge.wait_ns;
+                row.wait_self_count += edge.wait_count;
+                row.wait_self_max_ns = row.wait_self_max_ns.max(edge.wait_max_ns);
+            }
+            if let Some(row) = rows.get_mut(&edge.waker_tgid) {
+                row.wake_out += edge.wake_count;
+                row.wait_out_ns += edge.wait_ns;
+                row.wait_out_count += edge.wait_count;
+                row.wait_out_max_ns = row.wait_out_max_ns.max(edge.wait_max_ns);
+            }
+        }
+    }
+
+    let mut out: Vec<AppHealthRow> = rows.into_values().collect();
+    out.sort_by(|a, b| {
+        b.runtime_ns
+            .cmp(&a.runtime_ns)
+            .then_with(|| b.pelt_max.cmp(&a.pelt_max))
+            .then_with(|| a.tgid.cmp(&b.tgid))
+    });
+    out
+}
+
+fn append_app_health_section(
+    output: &mut String,
+    label: &str,
+    app: &TuiApp,
+    tgid_roles: &HashMap<u32, WorkloadRole>,
+) {
+    let rows = build_app_health_rows(app, tgid_roles);
+    let total_runtime_ns: u64 = rows.iter().map(|row| row.runtime_ns).sum();
+    let secs = app.start_time.elapsed().as_secs_f64().max(0.1);
+    output.push_str(&format!(
+        "{}: apps={} total_runtime_ms={} source=task_rollup quantum=exact_u64/{}us wake=debug_bounded syld=debug_u16_sat\n",
+        label,
+        rows.len(),
+        format_runtime_ms(total_runtime_ns),
+        app.quantum_us,
+    ));
+    for row in rows.iter().take(16) {
+        let quantum_total = row.quantum_full + row.quantum_yield + row.quantum_preempt;
+        let avg_run_us = if row.runs > 0 {
+            row.runtime_ns / row.runs / 1000
+        } else {
+            0
+        };
+        let avg_quantum_pct = if app.quantum_us > 0 {
+            (avg_run_us as f64 * 100.0) / app.quantum_us as f64
+        } else {
+            0.0
+        };
+        let leader = if row.leader_comm.is_empty() || row.leader_comm == row.comm {
+            "-"
+        } else {
+            row.leader_comm.as_str()
+        };
+        let dominant_runtime = if row.dominant_runtime_comm.is_empty() {
+            "-"
+        } else {
+            row.dominant_runtime_comm.as_str()
+        };
+        let dominant_thread = if row.dominant_thread_comm.is_empty() {
+            "-"
+        } else {
+            row.dominant_thread_comm.as_str()
+        };
+        output.push_str(&format!(
+            "  tgid={} comm={} leader={} dom_rt={}:{:.0}% dom_active_threads={}:{}/{} active_comms={} role={} hot_tasks={}/{} pelt_max={} runtime_ms={} share={:.1}% rtms/s={:.1} run={} avg_run_us={} avg_run/q={:.1}% max_run_us={} syld={} q%[f/b/p]={:.0}/{:.0}/{:.0} q={}/{}/{} qps[f/b/p]={:.1}/{:.1}/{:.1} aff[min/max/r]={}/{}/{} sticky_hogs={} mig/s={:.1} tsmt={:.1}%/{:.1}% blocked=max{}us/n{} wake[self/in/out]={}/{}/{} wait_self={}/{}us({}) wait_out={}/{}us({})\n",
+            row.tgid,
+            row.comm,
+            leader,
+            dominant_runtime,
+            pct(row.dominant_runtime_ns, row.runtime_ns),
+            dominant_thread,
+            row.dominant_thread_count,
+            row.tasks,
+            row.comm_kinds,
+            row.role.label(),
+            row.hot_tasks,
+            row.tasks,
+            row.pelt_max,
+            format_runtime_ms(row.runtime_ns),
+            pct(row.runtime_ns, total_runtime_ns),
+            row.runtime_ns_per_sec / 1_000_000.0,
+            row.runs,
+            avg_run_us,
+            avg_quantum_pct,
+            display_runtime_us(row.max_runtime_us),
+            row.yield_count,
+            pct(row.quantum_full, quantum_total),
+            pct(row.quantum_yield, quantum_total),
+            pct(row.quantum_preempt, quantum_total),
+            row.quantum_full,
+            row.quantum_yield,
+            row.quantum_preempt,
+            per_sec(row.quantum_full, secs),
+            per_sec(row.quantum_yield, secs),
+            per_sec(row.quantum_preempt, secs),
+            row.min_allowed_cpus,
+            row.max_allowed_cpus,
+            row.restricted_tasks,
+            row.sticky_hogs,
+            row.migrations_per_sec,
+            pct(row.smt_contended_runtime_ns, row.runtime_ns),
+            pct(row.smt_overlap_runtime_ns, row.runtime_ns),
+            row.blocked_wait_max_us,
+            row.blocked_count,
+            row.wake_self,
+            row.wake_in,
+            row.wake_out,
+            avg_ns(row.wait_self_ns, row.wait_self_count) / 1000,
+            row.wait_self_max_ns / 1000,
+            row.wait_self_count,
+            avg_ns(row.wait_out_ns, row.wait_out_count) / 1000,
+            row.wait_out_max_ns / 1000,
+            row.wait_out_count,
+        ));
+    }
+}
+
+fn append_focused_app_section(
+    output: &mut String,
+    app: &TuiApp,
+    tgid_roles: &HashMap<u32, WorkloadRole>,
+) {
+    let Some(focused_tgid) = app.focused_tgid else {
+        return;
+    };
+    let Some((row, total_runtime_ns)) = focused_app_with_total(app, tgid_roles) else {
+        output.push_str(&format!(
+            "focus: tgid={} state=stale reason=no_live_bpf_rows\n",
+            focused_tgid
+        ));
+        return;
+    };
+
+    let (state, _) = app_health_state(&row);
+    let quantum_total = row.quantum_full + row.quantum_yield + row.quantum_preempt;
+    let avg_run_us = if row.runs > 0 {
+        row.runtime_ns / row.runs / 1000
+    } else {
+        0
+    };
+    output.push_str(&format!(
+        "focus: tgid={} comm={} state={} role={} tasks={}/{} runtime_ms={} share={:.1}% rtms/s={:.1} run/s={:.1} avg_run_us={} max_run_us={} syld={} wait_self={}/{}us({}) q%[f/b/p]={:.0}/{:.0}/{:.0} smt={:.1}%/{:.1}% wake[self/in/out]={}/{}/{} blocked=max{}us/n{} cpus={} cores={}\n",
+        row.tgid,
+        row.comm,
+        state,
+        row.role.label(),
+        row.hot_tasks,
+        row.tasks,
+        format_runtime_ms(row.runtime_ns),
+        pct(row.runtime_ns, total_runtime_ns),
+        row.runtime_ns_per_sec / 1_000_000.0,
+        row.runs_per_sec,
+        avg_run_us,
+        display_runtime_us(row.max_runtime_us),
+        row.yield_count,
+        avg_ns(row.wait_self_ns, row.wait_self_count) / 1000,
+        row.wait_self_max_ns / 1000,
+        row.wait_self_count,
+        pct(row.quantum_full, quantum_total),
+        pct(row.quantum_yield, quantum_total),
+        pct(row.quantum_preempt, quantum_total),
+        pct(row.smt_contended_runtime_ns, row.runtime_ns),
+        pct(row.smt_overlap_runtime_ns, row.runtime_ns),
+        row.wake_self,
+        row.wake_in,
+        row.wake_out,
+        row.blocked_wait_max_us,
+        row.blocked_count,
+        app_cpu_distribution_label(app, row.tgid, 6),
+        app_core_distribution_label(app, row.tgid, 6),
+    ));
+
+    let tasks = app_task_rows(app, row.tgid);
+    let pids: Vec<u32> = tasks.iter().map(|task| task.pid).collect();
+    output.push_str(&format!(
+        "focus.startup: {}\n",
+        format_tgid_health_summary(app, row.tgid, &pids)
+    ));
+    if let Some(wake_graph) = format_tgid_wake_graph(app, row.tgid) {
+        output.push_str(&format!("focus.wakegraph: {}\n", wake_graph));
+    }
+    output.push_str("focus.threads:\n");
+    for task in tasks.iter().take(10) {
+        let placement = placement_summary(task, &app.topology);
+        let task_quantum_total =
+            task.quantum_full_count + task.quantum_yield_count + task.quantum_preempt_count;
+        output.push_str(&format!(
+            "  pid={} comm={} role={} pelt={} rtms/s={:.1} run/s={:.1} avg/max_us={}/{} wait={}us blocked=max{}us q%[f/b/p]={:.0}/{:.0}/{:.0} place={}/{} res={} smt={:.1}%\n",
+            task.pid,
+            task.comm,
+            task_role(task, tgid_roles).label(),
+            task.pelt_util,
+            runtime_rate_ms(task),
+            task.runs_per_sec,
+            avg_task_runtime_us(task),
+            display_runtime_us(task.max_runtime_us),
+            task.wait_duration_ns / 1000,
+            task.blocked_wait_max_us,
+            pct(task.quantum_full_count, task_quantum_total),
+            pct(task.quantum_yield_count, task_quantum_total),
+            pct(task.quantum_preempt_count, task_quantum_total),
+            placement.active_cpu_count,
+            placement.active_core_count,
+            placement_residency_label(&placement),
+            task_smt_contended_pct(task),
+        ));
+    }
+}
+
+#[cfg(debug_assertions)]
+fn append_wake_chain_section(output: &mut String, app: &TuiApp) {
+    use crate::task_anatomy::{
+        derive_task_anatomy, derive_wake_chain_score, wake_chain_decay_labels,
+        wake_chain_reason_labels, WAKE_CHAIN_DECAY_FULL_QUANTUM, WAKE_CHAIN_DECAY_LONG_RUN,
+        WAKE_CHAIN_DECAY_LOW_ACTIVITY, WAKE_CHAIN_REASON_BLOCKS_EARLY,
+        WAKE_CHAIN_REASON_LATENCY_PRIO, WAKE_CHAIN_REASON_MIGRATION_PAIN,
+        WAKE_CHAIN_REASON_SHORT_RUN, WAKE_CHAIN_REASON_SMT_PAIN, WAKE_CHAIN_REASON_WAIT_TAIL,
+        WAKE_CHAIN_REASON_WAKE_DENSE, WAKE_CHAIN_SCORE_HIGH,
+    };
+
+    let mut rows: Vec<(&TaskTelemetryRow, crate::task_anatomy::WakeChainScore)> = app
+        .task_rows
+        .values()
+        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .map(|row| {
+            let input = task_anatomy_input_from_row(row, app.topology.nr_cpus as u16);
+            (row, derive_wake_chain_score(&input))
+        })
+        .collect();
+
+    let mut buckets = [0u32; 16];
+    let mut reason_counts = [0u32; 7];
+    let mut decay_counts = [0u32; 3];
+    let mut high_count = 0u32;
+    let mut total_score = 0u64;
+
+    for (_, score) in &rows {
+        let idx = usize::from(score.score.min(15));
+        buckets[idx] += 1;
+        total_score += u64::from(score.score);
+        if score.score >= WAKE_CHAIN_SCORE_HIGH {
+            high_count += 1;
+        }
+        for (slot, bit) in [
+            WAKE_CHAIN_REASON_SHORT_RUN,
+            WAKE_CHAIN_REASON_WAKE_DENSE,
+            WAKE_CHAIN_REASON_BLOCKS_EARLY,
+            WAKE_CHAIN_REASON_WAIT_TAIL,
+            WAKE_CHAIN_REASON_MIGRATION_PAIN,
+            WAKE_CHAIN_REASON_SMT_PAIN,
+            WAKE_CHAIN_REASON_LATENCY_PRIO,
+        ]
+        .iter()
+        .enumerate()
+        {
+            if score.reason_mask & bit != 0 {
+                reason_counts[slot] += 1;
+            }
+        }
+        for (slot, bit) in [
+            WAKE_CHAIN_DECAY_FULL_QUANTUM,
+            WAKE_CHAIN_DECAY_LONG_RUN,
+            WAKE_CHAIN_DECAY_LOW_ACTIVITY,
+        ]
+        .iter()
+        .enumerate()
+        {
+            if score.decay_mask & bit != 0 {
+                decay_counts[slot] += 1;
+            }
+        }
+    }
+
+    let avg_score = if rows.is_empty() {
+        0.0
+    } else {
+        total_score as f64 / rows.len() as f64
+    };
+    let bucket_text = buckets
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .map(|(score, count)| format!("{}={}", score, count))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    output.push_str(&format!(
+        "wake.chain: source=debug_derived policy_effect=bpf_locality_guard candidates={} high={} threshold={} avg_score={:.1} reasons=[short_run={} wake_dense={} blocks_early={} wait_tail={} migration_pain={} smt_pain={} latency_prio={}] decay=[full_quantum={} long_run={} low_activity={}] buckets=[{}]\n",
+        rows.len(),
+        high_count,
+        WAKE_CHAIN_SCORE_HIGH,
+        avg_score,
+        reason_counts[0],
+        reason_counts[1],
+        reason_counts[2],
+        reason_counts[3],
+        reason_counts[4],
+        reason_counts[5],
+        reason_counts[6],
+        decay_counts[0],
+        decay_counts[1],
+        decay_counts[2],
+        if bucket_text.is_empty() { "-".to_string() } else { bucket_text },
+    ));
+
+    rows.sort_by(|(a, a_score), (b, b_score)| {
+        b_score
+            .score
+            .cmp(&a_score.score)
+            .then_with(|| b.total_runtime_ns.cmp(&a.total_runtime_ns))
+            .then_with(|| b.total_runs.cmp(&a.total_runs))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+
+    output.push_str("wake.chain.top:\n");
+    for (row, score) in rows.iter().filter(|(_, score)| score.score > 0).take(24) {
+        let input = task_anatomy_input_from_row(row, app.topology.nr_cpus as u16);
+        let anatomy = derive_task_anatomy(&input, None);
+        output.push_str(&format!(
+            "  pid={} tgid={} comm={} chain={} policy_score={} reasons={} decay={} risk={} rtms/s={:.1} runs/s={:.1} avg_run_us={} wait_us={} mig/s={:.1} smt={:.1}% place={} path={}\n",
+            row.pid,
+            row.tgid,
+            row.comm,
+            score.score,
+            row.wake_chain_policy_score,
+            wake_chain_reason_labels(score.reason_mask),
+            wake_chain_decay_labels(score.decay_mask),
+            anatomy.risk_label(),
+            runtime_rate_ms(row),
+            row.runs_per_sec,
+            avg_task_runtime_us(row),
+            row.wait_duration_ns / 1000,
+            row.migrations_per_sec,
+            task_smt_contended_pct(row),
+            row.last_place_class,
+            row.last_select_path,
+        ));
+    }
+}
+
+#[cfg(debug_assertions)]
+fn append_task_anatomy_section(output: &mut String, app: &TuiApp) {
+    use crate::task_anatomy::{derive_task_anatomy, lane_labels, shape_labels};
+
+    let mut rows: Vec<&TaskTelemetryRow> = app
+        .task_rows
+        .values()
+        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .collect();
+    rows.sort_by(|a, b| {
+        b.total_runtime_ns
+            .cmp(&a.total_runtime_ns)
+            .then_with(|| b.total_runs.cmp(&a.total_runs))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+
+    output.push_str(
+        "task.anatomy: source=debug_derived labels=candidate raw_source=bpf_iter proc_source=missing\n",
+    );
+    for row in rows.iter().take(32) {
+        let input = task_anatomy_input_from_row(row, app.topology.nr_cpus as u16);
+        let anatomy = derive_task_anatomy(&input, None);
+        output.push_str(&format!(
+            "  pid={} tgid={} comm={} policy={} prio={}/{}/{} user={} kthread={} aff={}/{} shape={} lane_candidate={} risk={} raw_source=bpf_iter shape_source=derived lane_source={} proc_source=missing\n",
+            row.pid,
+            row.tgid,
+            row.comm,
+            row.task_policy,
+            row.task_prio,
+            row.task_static_prio,
+            row.task_normal_prio,
+            row.task_has_mm as u8,
+            row.task_is_kthread as u8,
+            row.allowed_cpus,
+            app.topology.nr_cpus,
+            shape_labels(&anatomy),
+            lane_labels(&anatomy),
+            anatomy.risk_label(),
+            anatomy.lane_source.label(),
+        ));
+    }
+}
+
+#[cfg(debug_assertions)]
+fn append_gaming_qos_section(output: &mut String, app: &TuiApp) {
+    use crate::task_anatomy::{
+        derive_task_anatomy, LANE_INPUT, LANE_NETWORK, LANE_RENDER_FRAME, LANE_SHADER_IO,
+        LANE_THROUGHPUT,
+    };
+
+    let mut input_count = 0u32;
+    let mut render_count = 0u32;
+    let mut network_count = 0u32;
+    let mut shader_io_count = 0u32;
+    let mut throughput_count = 0u32;
+    let mut input_wait_risk = 0u32;
+    let mut input_gap_lifetime = 0u32;
+    let mut input_gap_5_50ms = 0u32;
+    let mut input_gap_50_100ms = 0u32;
+    let mut input_gap_100ms_plus = 0u32;
+    let mut input_gap_sleep = 0u32;
+
+    for row in app
+        .task_rows
+        .values()
+        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+    {
+        let input = task_anatomy_input_from_row(row, app.topology.nr_cpus as u16);
+        let anatomy = derive_task_anatomy(&input, None);
+        if anatomy.has_lane(LANE_INPUT) {
+            input_count += 1;
+            if row.wait_duration_ns / 1000 >= 1000 {
+                input_wait_risk += 1;
+            }
+            if row.max_dispatch_gap_us >= 5000 {
+                input_gap_lifetime += 1;
+                if row.max_dispatch_gap_us > 1_000_000 {
+                    input_gap_sleep += 1;
+                } else if row.max_dispatch_gap_us >= 100_000 {
+                    input_gap_100ms_plus += 1;
+                } else if row.max_dispatch_gap_us >= 50_000 {
+                    input_gap_50_100ms += 1;
+                } else {
+                    input_gap_5_50ms += 1;
+                }
+            }
+        }
+        if anatomy.has_lane(LANE_RENDER_FRAME) {
+            render_count += 1;
+        }
+        if anatomy.has_lane(LANE_NETWORK) {
+            network_count += 1;
+        }
+        if anatomy.has_lane(LANE_SHADER_IO) {
+            shader_io_count += 1;
+        }
+        if anatomy.has_lane(LANE_THROUGHPUT) {
+            throughput_count += 1;
+        }
+    }
+
+    let input_state = if input_count == 0 {
+        "unknown"
+    } else if input_wait_risk == 0 {
+        "clear"
+    } else {
+        "watch"
+    };
+
+    output.push_str(&format!(
+        "gaming.qos: source=scheduler_telemetry benchmark=external_only labels=candidate input_latency={} input_candidates={} input_wait_risk={} input_gap_lifetime={} input_gap_5_50ms={} input_gap_50_100ms={} input_gap_100ms_plus={} input_gap_sleep={} render_candidates={} network_candidates={} shader_io_candidates={} throughput_candidates={}\n",
+        input_state,
+        input_count,
+        input_wait_risk,
+        input_gap_lifetime,
+        input_gap_5_50ms,
+        input_gap_50_100ms,
+        input_gap_100ms_plus,
+        input_gap_sleep,
+        render_count,
+        network_count,
+        shader_io_count,
+        throughput_count,
+    ));
+}
+
+#[cfg(debug_assertions)]
+fn strict_busy_preempt_decision(wakee_class: u8, owner_class: u8, target_pressure: u8) -> usize {
+    if wakee_class == crate::task_anatomy::STRICT_WAKE_CLASS_SHIELD
+        || owner_class == crate::task_anatomy::STRICT_WAKE_CLASS_CONTAIN
+        || target_pressure >= 64
+    {
+        BUSY_PREEMPT_SHADOW_ALLOW
+    } else {
+        BUSY_PREEMPT_SHADOW_SKIP
+    }
+}
+
+#[cfg(debug_assertions)]
+fn derive_strict_wake_policy_snapshot(app: &TuiApp) -> DerivedStrictWakePolicy {
+    use crate::task_anatomy::derive_strict_wake_policy;
+
+    let mut derived = DerivedStrictWakePolicy::default();
+    let mut class_by_pid: HashMap<u32, u8> = HashMap::new();
+
+    let mut rows: Vec<&TaskTelemetryRow> = app
+        .task_rows
+        .values()
+        .filter(|row| row.is_bpf_tracked && row.total_runs > 0 && row.status != TaskStatus::Dead)
+        .collect();
+    rows.sort_by(|a, b| {
+        b.total_runtime_ns
+            .cmp(&a.total_runtime_ns)
+            .then_with(|| b.total_runs.cmp(&a.total_runs))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+
+    for row in rows {
+        let input = strict_wake_policy_input_from_row(row);
+        let decision = derive_strict_wake_policy(&input);
+        let class = decision.class as usize;
+        if class >= WAKE_CLASS_MAX {
+            continue;
+        }
+
+        derived.source_rows = derived.source_rows.saturating_add(1);
+        derived.class_sample_count[class] = derived.class_sample_count[class].saturating_add(1);
+        class_by_pid.insert(row.pid, decision.class);
+
+        for reason in 0..WAKE_CLASS_REASON_MAX {
+            if decision.reason_mask & (1u32 << reason) != 0 {
+                derived.reason_count[reason] = derived.reason_count[reason].saturating_add(1);
+            }
+        }
+
+        let mut saw_wait_sample = false;
+        for idx in 0..row.wake_reason_count.len() {
+            let count = row.wake_reason_count[idx] as u64;
+            if count == 0 {
+                continue;
+            }
+            saw_wait_sample = true;
+            let wait_ns = row.wake_reason_wait_ns[idx];
+            let max_ns = row.wake_reason_max_us[idx] as u64 * 1000;
+            derived.wait_ns[class] = derived.wait_ns[class].saturating_add(wait_ns);
+            derived.wait_count[class] = derived.wait_count[class].saturating_add(count);
+            derived.wait_max_ns[class] = derived.wait_max_ns[class].max(max_ns);
+            let avg_ns = if count > 0 { wait_ns / count } else { 0 };
+            let bucket = wake_bucket_index(avg_ns.max(max_ns));
+            derived.bucket_count[class][bucket] =
+                derived.bucket_count[class][bucket].saturating_add(count);
+        }
+
+        if !saw_wait_sample && row.wait_duration_ns > 0 {
+            derived.wait_ns[class] = derived.wait_ns[class].saturating_add(row.wait_duration_ns);
+            derived.wait_count[class] = derived.wait_count[class].saturating_add(1);
+            derived.wait_max_ns[class] = derived.wait_max_ns[class].max(row.wait_duration_ns);
+            let bucket = wake_bucket_index(row.wait_duration_ns);
+            derived.bucket_count[class][bucket] =
+                derived.bucket_count[class][bucket].saturating_add(1);
+        }
+    }
+
+    for (cpu, counter) in app.per_cpu_work.iter().enumerate() {
+        if counter.blocked_owner_wait_count == 0 || counter.blocked_waiter_pid == 0 {
+            continue;
+        }
+        let samples = counter.blocked_owner_wait_count.max(1);
+        let wakee_class = class_by_pid
+            .get(&counter.blocked_waiter_pid)
+            .copied()
+            .unwrap_or(crate::task_anatomy::STRICT_WAKE_CLASS_NONE);
+        let owner_class = class_by_pid
+            .get(&counter.blocked_owner_pid)
+            .copied()
+            .unwrap_or(crate::task_anatomy::STRICT_WAKE_CLASS_NONE);
+        let decision = strict_busy_preempt_decision(wakee_class, owner_class, counter.cpu_pressure);
+        if decision < BUSY_PREEMPT_SHADOW_MAX {
+            derived.busy_shadow_count[decision] =
+                derived.busy_shadow_count[decision].saturating_add(samples);
+        }
+
+        let wakee_idx = wakee_class as usize;
+        if wakee_idx < WAKE_CLASS_MAX {
+            derived.busy_shadow_wakee_class_count[wakee_idx] =
+                derived.busy_shadow_wakee_class_count[wakee_idx].saturating_add(samples);
+        }
+        let owner_idx = owner_class as usize;
+        if owner_idx < WAKE_CLASS_MAX {
+            derived.busy_shadow_owner_class_count[owner_idx] =
+                derived.busy_shadow_owner_class_count[owner_idx].saturating_add(samples);
+        }
+
+        let wake_target_local = app
+            .task_rows
+            .get(&counter.blocked_waiter_pid)
+            .map(|row| row.waker_cpu as usize == cpu)
+            .unwrap_or(false);
+        if wake_target_local {
+            derived.busy_shadow_local = derived.busy_shadow_local.saturating_add(samples);
+        } else {
+            derived.busy_shadow_remote = derived.busy_shadow_remote.saturating_add(samples);
+        }
+    }
+
+    derived
+}
+
+#[cfg(debug_assertions)]
+fn append_debug_cost_section(output: &mut String, cost: crate::task_anatomy::DebugTelemetryCost) {
+    output.push_str(&format!(
+        "debug.cost: iter_read_us={} proc_refresh_us={} anatomy_derive_us={} render_us={} dump_us={} iter_rows={} proc_refreshes={} proc_cache_hits={}\n",
+        cost.iter_read_us,
+        cost.proc_refresh_us,
+        cost.anatomy_derive_us,
+        cost.render_us,
+        cost.dump_us,
+        cost.iter_rows,
+        cost.proc_refreshes,
+        cost.proc_cache_hits,
+    ));
+}
+
+fn append_blocked_behind_section(output: &mut String, label: &str, app: &TuiApp) {
+    let mut rows: Vec<(usize, &CpuWorkCounters)> = app
+        .per_cpu_work
+        .iter()
+        .enumerate()
+        .filter(|(_, counter)| {
+            counter.blocked_owner_wait_count > 0 && counter.blocked_owner_pid > 0
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.1.blocked_owner_wait_max_ns
+            .cmp(&a.1.blocked_owner_wait_max_ns)
+            .then_with(|| {
+                b.1.blocked_owner_wait_count
+                    .cmp(&a.1.blocked_owner_wait_count)
+            })
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    output.push_str(&format!("{}: cpus={}\n", label, rows.len()));
+    for (cpu, counter) in rows.iter().take(16) {
+        let blocker = app
+            .task_rows
+            .get(&counter.blocked_owner_pid)
+            .map(|task| format!("{}[{}]", task.comm, task.pid))
+            .unwrap_or_else(|| format!("unknown[{}]", counter.blocked_owner_pid));
+        let waiter = app
+            .task_rows
+            .get(&counter.blocked_waiter_pid)
+            .map(|task| format!("{}[{}] tgid={}", task.comm, task.pid, task.tgid))
+            .unwrap_or_else(|| format!("unknown[{}] tgid=0", counter.blocked_waiter_pid));
+        output.push_str(&format!(
+            "  cpu=C{:02} owner={} waiter={} total={}us avg={}us max={}us count={}\n",
+            cpu,
+            blocker,
+            waiter,
+            counter.blocked_owner_wait_ns / 1000,
+            avg_ns(
+                counter.blocked_owner_wait_ns,
+                counter.blocked_owner_wait_count
+            ) / 1000,
+            counter.blocked_owner_wait_max_ns / 1000,
+            counter.blocked_owner_wait_count,
+        ));
+    }
+}
+
+fn format_wake_class_counts(counts: &[u64]) -> String {
+    counts
+        .iter()
+        .enumerate()
+        .map(|(class, count)| format!("{}={}", wake_class_label(class), count))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_wake_class_reasons(counts: &[u64]) -> String {
+    counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .map(|(reason, count)| format!("{}={}", wake_class_reason_label(reason), count))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_wake_class_transitions<const TO: usize>(counts: &[[u64; TO]]) -> String {
+    let parts: Vec<_> = counts
+        .iter()
+        .enumerate()
+        .flat_map(|(from, row)| {
+            row.iter().enumerate().filter_map(move |(to, count)| {
+                if *count > 0 {
+                    Some(format!(
+                        "{}->{}={}",
+                        wake_class_label(from),
+                        wake_class_label(to),
+                        count
+                    ))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_busy_preempt_shadow(stats: &cake_stats) -> String {
+    format!(
+        "allow={} skip={} local={} remote={} wakee=[{}] owner=[{}]",
+        stats
+            .busy_preempt_shadow_count
+            .first()
+            .copied()
+            .unwrap_or(0),
+        stats.busy_preempt_shadow_count.get(1).copied().unwrap_or(0),
+        stats.busy_preempt_shadow_local,
+        stats.busy_preempt_shadow_remote,
+        format_wake_class_counts(&stats.busy_preempt_shadow_wakee_class_count),
+        format_wake_class_counts(&stats.busy_preempt_shadow_owner_class_count),
+    )
+}
+
+#[cfg(debug_assertions)]
+fn format_derived_strict_busy_preempt_shadow(derived: &DerivedStrictWakePolicy) -> String {
+    format!(
+        "allow={} skip={} local={} remote={} wakee=[{}] owner=[{}]",
+        derived
+            .busy_shadow_count
+            .get(BUSY_PREEMPT_SHADOW_ALLOW)
+            .copied()
+            .unwrap_or(0),
+        derived
+            .busy_shadow_count
+            .get(BUSY_PREEMPT_SHADOW_SKIP)
+            .copied()
+            .unwrap_or(0),
+        derived.busy_shadow_local,
+        derived.busy_shadow_remote,
+        format_wake_class_counts(&derived.busy_shadow_wakee_class_count),
+        format_wake_class_counts(&derived.busy_shadow_owner_class_count),
+    )
+}
+
+#[cfg(debug_assertions)]
+fn format_derived_strict_wake_class_wait(derived: &DerivedStrictWakePolicy) -> String {
+    derived
+        .wait_count
+        .iter()
+        .enumerate()
+        .map(|(class, count)| {
+            format!(
+                "{}={}/{}us({})",
+                wake_class_label(class),
+                avg_ns(derived.wait_ns[class], *count) / 1000,
+                derived.wait_max_ns[class] / 1000,
+                count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(debug_assertions)]
+fn format_derived_strict_wake_class_buckets(derived: &DerivedStrictWakePolicy) -> String {
+    let parts: Vec<_> = derived
+        .bucket_count
+        .iter()
+        .enumerate()
+        .filter_map(|(class, buckets)| {
+            if buckets.iter().all(|count| *count == 0) {
+                None
+            } else {
+                Some(format!(
+                    "{}={}/{}/{}/{}/{}",
+                    wake_class_label(class),
+                    buckets[0],
+                    buckets[1],
+                    buckets[2],
+                    buckets[3],
+                    buckets[4]
+                ))
+            }
+        })
+        .collect();
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn append_wake_policy_section(output: &mut String, label: &str, stats: &cake_stats) {
+    output.push_str(&format!(
+        "{}: class=[{}] reasons=[{}] transitions=[{}] busy_shadow:{}\n",
+        label,
+        format_wake_class_counts(&stats.wake_class_sample_count),
+        format_wake_class_reasons(&stats.wake_class_reason_count),
+        format_wake_class_transitions(&stats.wake_class_transition_count),
+        format_busy_preempt_shadow(stats),
+    ));
+}
+
+#[cfg(debug_assertions)]
+fn append_strict_wake_policy_derived_section(
+    output: &mut String,
+    label: &str,
+    derived: &DerivedStrictWakePolicy,
+) {
+    output.push_str(&format!(
+        "{}: source=task_anatomy quality=debug_derived_shadow snapshot=latest policy_effect=none rows={} class=[{}] reasons=[{}] wait=[{}] buckets=[{}] transitions=[{}] busy_shadow:{}\n",
+        label,
+        derived.source_rows,
+        format_wake_class_counts(&derived.class_sample_count),
+        format_wake_class_reasons(&derived.reason_count),
+        format_derived_strict_wake_class_wait(derived),
+        format_derived_strict_wake_class_buckets(derived),
+        format_wake_class_transitions(&derived.transition_count),
+        format_derived_strict_busy_preempt_shadow(derived),
+    ));
+}
+
+fn append_window_stats(
+    output: &mut String,
+    label: &str,
+    elapsed: Duration,
+    stats: &cake_stats,
+    queue_now: u64,
+) {
+    let secs = elapsed.as_secs_f64().max(0.1);
+    let total_dsq_dispatches = stats.nr_local_dispatches + stats.nr_stolen_dispatches;
+    let wake_total = stats.nr_wakeup_direct_dispatches
+        + stats.nr_wakeup_dsq_fallback_busy
+        + stats.nr_wakeup_dsq_fallback_queued;
+    let direct_total = stats.nr_direct_local_inserts;
+    let shared_total = stats.nr_shared_vtime_inserts;
+    let queue_net = signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed);
+
+    output.push_str(&format!("\nwindow: {} sampled={:.1}s\n", label, secs));
+    output.push_str(&format!(
+        "win.disp: dsq_total={} ({:.1}/s) local={} steal={} miss={} ({:.1}/s) queue_now={} ins:direct={} ({:.1}/s) affine={} ({:.1}/s) shared={} ({:.1}/s) shared[w/r/p/o]={}/{}/{}/{} direct[k/o]={}/{} wake:direct={} ({:.1}%) busy={} ({:.1}%) queued={} ({:.1}%) total={} ({:.1}/s) steer:elig={} ({:.1}/s) home={} ({:.1}/s) core={} ({:.1}/s) primary={} ({:.1}/s) miss:home_busy={} prev_busy={} scan={} guard:primary_scan={} hot_guard:primary_scan={} credit:primary_scan={} chain:guard={} chain:credit={}\n",
+        total_dsq_dispatches,
+        per_sec(total_dsq_dispatches, secs),
+        stats.nr_local_dispatches,
+        stats.nr_stolen_dispatches,
+        stats.nr_dispatch_misses,
+        per_sec(stats.nr_dispatch_misses, secs),
+        queue_now,
+        direct_total,
+        per_sec(direct_total, secs),
+        stats.nr_direct_affine_inserts,
+        per_sec(stats.nr_direct_affine_inserts, secs),
+        shared_total,
+        per_sec(shared_total, secs),
+        stats.nr_shared_wakeup_inserts,
+        stats.nr_shared_requeue_inserts,
+        stats.nr_shared_preserve_inserts,
+        stats.nr_shared_other_inserts,
+        stats.nr_direct_kthread_inserts,
+        stats.nr_direct_other_inserts,
+        stats.nr_wakeup_direct_dispatches,
+        pct(stats.nr_wakeup_direct_dispatches, wake_total),
+        stats.nr_wakeup_dsq_fallback_busy,
+        pct(stats.nr_wakeup_dsq_fallback_busy, wake_total),
+        stats.nr_wakeup_dsq_fallback_queued,
+        pct(stats.nr_wakeup_dsq_fallback_queued, wake_total),
+        wake_total,
+        per_sec(wake_total, secs),
+        stats.nr_steer_eligible,
+        per_sec(stats.nr_steer_eligible, secs),
+        stats.nr_home_cpu_steers,
+        per_sec(stats.nr_home_cpu_steers, secs),
+        stats.nr_home_core_steers,
+        per_sec(stats.nr_home_core_steers, secs),
+        stats.nr_primary_cpu_steers,
+        per_sec(stats.nr_primary_cpu_steers, secs),
+        stats.nr_home_cpu_busy_misses,
+        stats.nr_prev_primary_busy_misses,
+        stats.nr_primary_scan_misses,
+        stats.nr_primary_scan_guarded,
+        stats.nr_primary_scan_hot_guarded,
+        stats.nr_primary_scan_credit_used,
+        stats.nr_wake_chain_locality_guarded,
+        stats.nr_wake_chain_locality_credit_used,
+    ));
+    output.push_str(&format!(
+        "win.queue.shared: depth_now={} in={} ({:.1}/s) out={} ({:.1}/s) net={:+} ({:+.1}/s)\n",
+        queue_now,
+        stats.nr_dsq_queued,
+        per_sec(stats.nr_dsq_queued, secs),
+        stats.nr_dsq_consumed,
+        per_sec(stats.nr_dsq_consumed, secs),
+        queue_net,
+        queue_net as f64 / secs,
+    ));
+    output.push_str(&format!(
+        "win.cb: sel_avg_ns={} enq_avg_ns={} disp_avg_ns={} run_avg_ns={} stop_avg_ns={} slow=sel:{} enq:{} disp:{} run:{} stop:{}\n",
+        avg_ns(stats.total_select_cpu_ns, stats.nr_select_cpu_calls),
+        avg_ns(stats.total_enqueue_latency_ns, stats.nr_enqueue_calls),
+        avg_ns(stats.total_dispatch_ns, stats.nr_dispatch_calls),
+        avg_ns(stats.total_running_ns, stats.nr_running_calls),
+        avg_ns(stats.total_stopping_ns, stats.nr_stopping_calls),
+        stats.callback_slow[0],
+        stats.callback_slow[1],
+        stats.callback_slow[2],
+        stats.callback_slow[3],
+        stats.callback_slow[4],
+    ));
+    output.push_str(&format!(
+        "win.cbhist: sel[{}] enq[{}] disp[{}] run[{}] stop[{}]\n",
+        callback_hist_summary(stats, 0),
+        callback_hist_summary(stats, 1),
+        callback_hist_summary(stats, 2),
+        callback_hist_summary(stats, 3),
+        callback_hist_summary(stats, 4),
+    ));
+    output.push_str(&format!(
+        "win.wakewait.all: {}\n",
+        format_wakewait_summary(
+            &stats.wake_reason_wait_all_ns,
+            &stats.wake_reason_wait_all_count,
+            &stats.wake_reason_wait_all_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "win.wakewait<=5ms: {}\n",
+        format_wakewait_summary(
+            &stats.wake_reason_wait_ns,
+            &stats.wake_reason_wait_count,
+            &stats.wake_reason_wait_max_ns,
+        )
+    ));
+    let quantum_total = stats.nr_quantum_full + stats.nr_quantum_yield + stats.nr_quantum_preempt;
+    output.push_str(&format!(
+        "win.slice: full={} ({:.1}%) blocked={} ({:.1}%) preempt={} ({:.1}%) sched_yield={} kick:wake[i/p]={}/{} affine[i/p]={}/{}\n",
+        stats.nr_quantum_full,
+        pct(stats.nr_quantum_full, quantum_total),
+        stats.nr_quantum_yield,
+        pct(stats.nr_quantum_yield, quantum_total),
+        stats.nr_quantum_preempt,
+        pct(stats.nr_quantum_preempt, quantum_total),
+        stats.nr_sched_yield_calls,
+        stats.nr_wake_kick_idle,
+        stats.nr_wake_kick_preempt,
+        stats.nr_affine_kick_idle,
+        stats.nr_affine_kick_preempt,
+    ));
+    append_wake_policy_section(output, &format!("win.wakepolicy.{}", label), stats);
+    let smt_runtime_ns = stats.smt_solo_runtime_ns + stats.smt_contended_runtime_ns;
+    let smt_runs = stats.smt_solo_run_count + stats.smt_contended_run_count;
+    output.push_str(&format!(
+        "win.smt: runtime_contended={:.1}% overlap={:.1}% runs_contended={:.1}% avg_run_us[s/c]={}/{} wake_avg_us[s/c]={}/{} active_start/stop={}/{}\n",
+        pct(stats.smt_contended_runtime_ns, smt_runtime_ns),
+        pct(stats.smt_overlap_runtime_ns, smt_runtime_ns),
+        pct(stats.smt_contended_run_count, smt_runs),
+        avg_ns(stats.smt_solo_runtime_ns, stats.smt_solo_run_count) / 1000,
+        avg_ns(stats.smt_contended_runtime_ns, stats.smt_contended_run_count) / 1000,
+        avg_ns(stats.smt_wake_wait_ns[0], stats.smt_wake_wait_count[0]) / 1000,
+        avg_ns(stats.smt_wake_wait_ns[1], stats.smt_wake_wait_count[1]) / 1000,
+        stats.smt_sibling_active_start_count,
+        stats.smt_sibling_active_stop_count,
+    ));
+    output.push_str(&format!(
+        "win.wakebins: {}\n",
+        format_wake_bucket_summary(&stats.wake_reason_bucket_count)
+    ));
+    output.push_str(&format!(
+        "win.decision.wait: {}\n",
+        format_select_decision_wait_summary(
+            &stats.select_reason_wait_ns,
+            &stats.select_reason_wait_count,
+            &stats.select_reason_wait_max_ns,
+            &stats.select_reason_bucket_count,
+        )
+    ));
+    output.push_str(&format!(
+        "win.decision.select: {}\n",
+        format_select_decision_cost_summary(
+            &stats.select_reason_select_ns,
+            &stats.select_reason_select_count,
+            &stats.select_reason_select_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "win.decision.migrate: {}\n",
+        format_select_migration_summary(
+            &stats.select_path_migration_count,
+            &stats.select_reason_migration_count,
+        )
+    ));
+    output.push_str(&format!(
+        "win.postwake.target_hit/miss: {}  win.postwake.follow_same/mig: {}\n",
+        format_wake_target_summary(&stats.wake_target_hit_count, &stats.wake_target_miss_count),
+        format_wake_followup_summary(
+            &stats.wake_followup_same_cpu_count,
+            &stats.wake_followup_migrate_count,
+        )
+    ));
+    output.push_str(&format!(
+        "win.kickrun: idle={}/{} avg={}us max={}us preempt={}/{} avg={}us max={}us\n",
+        stats.nr_wake_kick_quick[1],
+        stats.nr_wake_kick_observed[1],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[1],
+            stats.nr_wake_kick_observed[1]
+        ),
+        stats.max_wake_kick_to_run_ns[1] / 1000,
+        stats.nr_wake_kick_quick[2],
+        stats.nr_wake_kick_observed[2],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[2],
+            stats.nr_wake_kick_observed[2]
+        ),
+        stats.max_wake_kick_to_run_ns[2] / 1000,
+    ));
+    output.push_str(&format!(
+        "win.kickbins: {}\n",
+        format_kick_bucket_summary(&stats.wake_kick_bucket_count)
+    ));
+    output.push_str(&format!(
+        "win.path: {}  deps:same_tgid={} ({:.1}/s) cross_tgid={} ({:.1}/s)\n",
+        format_path_summary(&stats.select_path_count),
+        stats.nr_wake_same_tgid,
+        per_sec(stats.nr_wake_same_tgid, secs),
+        stats.nr_wake_cross_tgid,
+        per_sec(stats.nr_wake_cross_tgid, secs),
+    ));
+    output.push_str(&format!(
+        "win.place.home.wait<=5ms: {}\n",
+        format_place_wait_summary(
+            &stats.home_place_wait_ns,
+            &stats.home_place_wait_count,
+            &stats.home_place_wait_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "win.place.run: {}\n",
+        format_place_wait_summary(
+            &stats.home_place_run_ns,
+            &stats.home_place_run_count,
+            &stats.home_place_run_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "win.place.waker.wait<=5ms: {}\n",
+        format_place_wait_summary(
+            &stats.waker_place_wait_ns,
+            &stats.waker_place_wait_count,
+            &stats.waker_place_wait_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "win.coh/s: idle_remote={:.1} busy={:.1} idle={:.1} pend_remote={:.1} set={:.1} clr={:.1}\n",
+        per_sec(stats.nr_idle_hint_remote_reads, secs),
+        per_sec(stats.nr_idle_hint_remote_busy, secs),
+        per_sec(stats.nr_idle_hint_remote_idle, secs),
+        per_sec(stats.nr_busy_pending_remote_sets, secs),
+        per_sec(stats.nr_idle_hint_set_writes + stats.nr_idle_hint_set_skips, secs),
+        per_sec(stats.nr_idle_hint_clear_writes + stats.nr_idle_hint_clear_skips, secs),
+    ));
+    output.push_str(&format!(
+        "win.bypass/s: requeue_fast={:.1} busy_local_skip={:.1} busy_remote_skip={:.1} busy_pending_skip={:.1}\n",
+        per_sec(stats.nr_enqueue_requeue_fastpath, secs),
+        per_sec(stats.nr_enqueue_busy_local_skip_depth, secs),
+        per_sec(stats.nr_enqueue_busy_remote_skip_depth, secs),
+        per_sec(stats.nr_busy_pending_set_skips, secs),
+    ));
+}
+
+/// Format stats as a copyable text string
+pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
+    #[cfg(debug_assertions)]
+    let dump_start = Instant::now();
+
+    let total_dsq_dispatches = stats.nr_local_dispatches + stats.nr_stolen_dispatches;
+    let tgid_roles = infer_tgid_roles(&app.task_rows);
+    let cap = capacity_summary(app, &tgid_roles);
+    let report = build_telemetry_report(stats, app);
+
+    let mut output = String::new();
+    output.push_str(&app.system_info.format_header());
+
+    output.push_str(&format!(
+        "cake: uptime={} state=IDLE detector=disabled\n",
+        app.format_uptime(),
+    ));
+    output.push_str("scope: lifetime\n");
+    output.push_str(
+        "capture: global=exact task.life=exact task.rate=delta_per_tick task.stage=latest_observed task.affinity=exact task.home=debug_exact task.quantum=exact_u64 task.behind=latest_observed wakewait.all=exact wakewait<=5ms=bounded wakegraph.ringbuf=debug_sampled_weighted homeseed=debug_exact localq=debug_estimate windows=delta_snapshots history=rolling_1s_samples",
+    );
+    #[cfg(debug_assertions)]
+    output.push_str(" wakegraph.derived=debug_derived_latest_waker task.anatomy=debug_derived gaming.qos=debug_derived wake.chain=debug_derived+bpf_locality_guard wakepolicy.strict.derived=debug_shadow");
+    output.push('\n');
+    output.push_str(&report.coverage_text());
+    output.push_str(
+        "task.fields: latest={LASTWus,SELns,ENQns,STOPns,RUNns,GAPus,path/place,life=i0/e/s/r/x:first/seen,behind} rate={RUN/s,MIG/s,RTms/s} life={RTms,AVGRTus(run_stop),MAXRTus,JITus,wakeus<=5ms,WHIST,Qf/b/p exact_u64,SYLD,affinity,home,cpu/core spread,task_smt}",
+    );
+    #[cfg(debug_assertions)]
+    output.push_str(" anatomy={policy,prio,flags,shape,lane_candidate,source,risk} wake_chain={chain,policy_score,reasons,decay}");
+    output.push('\n');
+    output.push_str(
+        "slice.meaning: blocked=task stopped with slice left and was not runnable; sched_yield=explicit cake_yield callback count\n",
+    );
+    append_focused_app_section(&mut output, app, &tgid_roles);
+    #[cfg(debug_assertions)]
+    {
+        append_wake_chain_section(&mut output, app);
+        append_gaming_qos_section(&mut output, app);
+        append_task_anatomy_section(&mut output, app);
+    }
+    let life_elapsed = app.start_time.elapsed().max(Duration::from_secs(1));
+    let life_cpu_rows = scheduler_cpu_rows(
+        &app.per_cpu_work,
+        &app.topology,
+        &app.cpu_stats,
+        life_elapsed,
+    );
+    let life_core_rows = scheduler_core_rows(
+        &app.per_cpu_work,
+        &app.topology,
+        &app.cpu_stats,
+        life_elapsed,
+    );
+    let life_balance = build_balance_diagnosis(&life_cpu_rows, &life_core_rows);
+    let timeline_window = Duration::from_secs(60);
+    let timeline_step = Duration::from_secs(1);
+    let timeline_samples = app.timeline_samples(timeline_window, timeline_step);
+    let timeline_expected = expected_timeline_samples(timeline_window, timeline_step);
+    let timeline_span = timeline_history_span(&app.timeline_history);
+
+    // Compact dispatch stats
+    let dsq_depth = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
+    let queue_net = signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed);
+    let wake_total = stats.nr_wakeup_direct_dispatches
+        + stats.nr_wakeup_dsq_fallback_busy
+        + stats.nr_wakeup_dsq_fallback_queued;
+    let direct_total = stats.nr_direct_local_inserts;
+    let shared_total = stats.nr_shared_vtime_inserts;
+    output.push_str(&format!(
+        "disp: dsq_total={} local={} steal={} miss={} queue={} ins:direct={} affine={} shared={} shared[w/r/p/o]={}/{}/{}/{} direct[k/o]={}/{} wake:direct={} busy={} queued={} total={} busy_local={} busy_remote={} flow:tunnel_prev={} handoff={} supp={} steer:elig={} home={} core={} primary={} miss:home_busy={} prev_busy={} scan={} guard:primary_scan={} hot_guard:primary_scan={} credit:primary_scan={} chain:guard={} chain:credit={}\n",
+        total_dsq_dispatches,
+        stats.nr_local_dispatches,
+        stats.nr_stolen_dispatches,
+        stats.nr_dispatch_misses,
+        dsq_depth,
+        direct_total,
+        stats.nr_direct_affine_inserts,
+        shared_total,
+        stats.nr_shared_wakeup_inserts,
+        stats.nr_shared_requeue_inserts,
+        stats.nr_shared_preserve_inserts,
+        stats.nr_shared_other_inserts,
+        stats.nr_direct_kthread_inserts,
+        stats.nr_direct_other_inserts,
+        stats.nr_wakeup_direct_dispatches,
+        stats.nr_wakeup_dsq_fallback_busy,
+        stats.nr_wakeup_dsq_fallback_queued,
+        wake_total,
+        stats.nr_wakeup_busy_local_target,
+        stats.nr_wakeup_busy_remote_target,
+        stats.nr_prev_cpu_tunnels,
+        stats.nr_busy_handoff_dispatches,
+        stats.nr_busy_keep_suppressed,
+        stats.nr_steer_eligible,
+        stats.nr_home_cpu_steers,
+        stats.nr_home_core_steers,
+        stats.nr_primary_cpu_steers,
+        stats.nr_home_cpu_busy_misses,
+        stats.nr_prev_primary_busy_misses,
+        stats.nr_primary_scan_misses,
+        stats.nr_primary_scan_guarded,
+        stats.nr_primary_scan_hot_guarded,
+        stats.nr_primary_scan_credit_used,
+        stats.nr_wake_chain_locality_guarded,
+        stats.nr_wake_chain_locality_credit_used,
+    ));
+    output.push_str(&format!(
+        "queue.shared: depth_now={} in={} out={} net={:+}\n",
+        dsq_depth, stats.nr_dsq_queued, stats.nr_dsq_consumed, queue_net,
+    ));
+
+    // Compact callback profile (totals + averages)
+    let stop_total = stats.nr_stop_deferred_skip + stats.nr_stop_deferred;
+    output.push_str(&format!(
+        "cb.stop: tot_µs={} max_ns={} calls={} task_telemetry={} sampled_skip={}\n",
+        stats.total_stopping_ns / 1000,
+        stats.max_stopping_ns,
+        stop_total,
+        if stats.nr_stop_deferred_skip == 0 {
+            "exact"
+        } else {
+            "mixed"
+        },
+        stats.nr_stop_deferred_skip,
+    ));
+    output.push_str(&format!(
+        "cb.run: tot_µs={} max_ns={} calls={}  cb.enq: tot_µs={} calls={}  sel: tot_µs={} g1_µs={} g2_µs={} calls={}  cb.disp: tot_µs={} max_ns={} calls={}\n",
+        stats.total_running_ns / 1000, stats.max_running_ns, stats.nr_running_calls,
+        stats.total_enqueue_latency_ns / 1000, stats.nr_enqueue_calls,
+        stats.total_select_cpu_ns / 1000, stats.total_gate1_latency_ns / 1000, stats.total_gate2_latency_ns / 1000, stats.nr_select_cpu_calls,
+        stats.total_dispatch_ns / 1000, stats.max_dispatch_ns, stats.nr_dispatch_calls,
+    ));
+    output.push_str(&format!(
+        "cb.avg: sel={}ns enq={}ns disp={}ns run={}ns stop={}ns\n",
+        avg_ns(stats.total_select_cpu_ns, stats.nr_select_cpu_calls),
+        avg_ns(stats.total_enqueue_latency_ns, stats.nr_enqueue_calls),
+        avg_ns(stats.total_dispatch_ns, stats.nr_dispatch_calls),
+        avg_ns(stats.total_running_ns, stats.nr_running_calls),
+        avg_ns(stats.total_stopping_ns, stop_total),
+    ));
+    output.push_str(&format!(
+        "cb.hist: sel[{}] enq[{}] disp[{}] run[{}] stop[{}]\n",
+        callback_hist_summary(stats, 0),
+        callback_hist_summary(stats, 1),
+        callback_hist_summary(stats, 2),
+        callback_hist_summary(stats, 3),
+        callback_hist_summary(stats, 4),
+    ));
+    output.push_str(&format!(
+        "lifecycle.avg: init_enqueue={}us({}) init_select={}us({}) init_run={}us({}) run_stop={}us({}) init_exit={}us({})\n",
+        avg_us(
+            stats.lifecycle_init_enqueue_us,
+            stats.lifecycle_init_enqueue_count,
+        ),
+        stats.lifecycle_init_enqueue_count,
+        avg_us(
+            stats.lifecycle_init_select_us,
+            stats.lifecycle_init_select_count,
+        ),
+        stats.lifecycle_init_select_count,
+        avg_us(stats.lifecycle_init_run_us, stats.lifecycle_init_run_count),
+        stats.lifecycle_init_run_count,
+        avg_ns(stats.task_runtime_ns, stats.task_run_count) / 1000,
+        stats.task_run_count,
+        avg_us(stats.lifecycle_init_exit_us, stats.lifecycle_init_exit_count),
+        stats.lifecycle_init_exit_count,
+    ));
+    output.push_str(&format!(
+        "wakewait.all: {}\n",
+        format_wakewait_summary(
+            &stats.wake_reason_wait_all_ns,
+            &stats.wake_reason_wait_all_count,
+            &stats.wake_reason_wait_all_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "wakewait<=5ms: {}\n",
+        format_wakewait_summary(
+            &stats.wake_reason_wait_ns,
+            &stats.wake_reason_wait_count,
+            &stats.wake_reason_wait_max_ns,
+        )
+    ));
+    let quantum_total = stats.nr_quantum_full + stats.nr_quantum_yield + stats.nr_quantum_preempt;
+    output.push_str(&format!(
+        "slice: quantum={}us full={} ({:.1}%) blocked={} ({:.1}%) preempt={} ({:.1}%) sched_yield={} kick:wake[i/p]={}/{} affine[i/p]={}/{}\n",
+        app.quantum_us,
+        stats.nr_quantum_full,
+        pct(stats.nr_quantum_full, quantum_total),
+        stats.nr_quantum_yield,
+        pct(stats.nr_quantum_yield, quantum_total),
+        stats.nr_quantum_preempt,
+        pct(stats.nr_quantum_preempt, quantum_total),
+        stats.nr_sched_yield_calls,
+        stats.nr_wake_kick_idle,
+        stats.nr_wake_kick_preempt,
+        stats.nr_affine_kick_idle,
+        stats.nr_affine_kick_preempt,
+    ));
+    append_wake_policy_section(&mut output, "wakepolicy.life", stats);
+    #[cfg(debug_assertions)]
+    {
+        let strict_derived = derive_strict_wake_policy_snapshot(app);
+        append_strict_wake_policy_derived_section(
+            &mut output,
+            "wakepolicy.strict.derived.life",
+            &strict_derived,
+        );
+    }
+    let smt_runtime_ns = stats.smt_solo_runtime_ns + stats.smt_contended_runtime_ns;
+    let smt_runs = stats.smt_solo_run_count + stats.smt_contended_run_count;
+    output.push_str(&format!(
+        "smt: runtime_contended={:.1}% overlap={:.1}% runs_contended={:.1}% avg_run_us[s/c]={}/{} wake_avg_us[s/c]={}/{} active_start/stop={}/{}\n",
+        pct(stats.smt_contended_runtime_ns, smt_runtime_ns),
+        pct(stats.smt_overlap_runtime_ns, smt_runtime_ns),
+        pct(stats.smt_contended_run_count, smt_runs),
+        avg_ns(stats.smt_solo_runtime_ns, stats.smt_solo_run_count) / 1000,
+        avg_ns(stats.smt_contended_runtime_ns, stats.smt_contended_run_count) / 1000,
+        avg_ns(stats.smt_wake_wait_ns[0], stats.smt_wake_wait_count[0]) / 1000,
+        avg_ns(stats.smt_wake_wait_ns[1], stats.smt_wake_wait_count[1]) / 1000,
+        stats.smt_sibling_active_start_count,
+        stats.smt_sibling_active_stop_count,
+    ));
+    output.push_str(&format!(
+        "wakebins: {}\n",
+        format_wake_bucket_summary(&stats.wake_reason_bucket_count)
+    ));
+    output.push_str(&format!(
+        "decision.wait: {}\n",
+        format_select_decision_wait_summary(
+            &stats.select_reason_wait_ns,
+            &stats.select_reason_wait_count,
+            &stats.select_reason_wait_max_ns,
+            &stats.select_reason_bucket_count,
+        )
+    ));
+    output.push_str(&format!(
+        "decision.select: {}\n",
+        format_select_decision_cost_summary(
+            &stats.select_reason_select_ns,
+            &stats.select_reason_select_count,
+            &stats.select_reason_select_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "decision.migrate: {}\n",
+        format_select_migration_summary(
+            &stats.select_path_migration_count,
+            &stats.select_reason_migration_count,
+        )
+    ));
+    output.push_str(&format!(
+        "postwake.target_hit/miss: {}  postwake.follow_same/mig: {}\n",
+        format_wake_target_summary(&stats.wake_target_hit_count, &stats.wake_target_miss_count),
+        format_wake_followup_summary(
+            &stats.wake_followup_same_cpu_count,
+            &stats.wake_followup_migrate_count,
+        )
+    ));
+    output.push_str(&format!(
+        "kickrun: idle={}/{} avg={}us max={}us  preempt={}/{} avg={}us max={}us\n",
+        stats.nr_wake_kick_quick[1],
+        stats.nr_wake_kick_observed[1],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[1],
+            stats.nr_wake_kick_observed[1]
+        ),
+        stats.max_wake_kick_to_run_ns[1] / 1000,
+        stats.nr_wake_kick_quick[2],
+        stats.nr_wake_kick_observed[2],
+        bucket_avg_us(
+            stats.total_wake_kick_to_run_ns[2],
+            stats.nr_wake_kick_observed[2]
+        ),
+        stats.max_wake_kick_to_run_ns[2] / 1000,
+    ));
+    output.push_str(&format!(
+        "kickbins: {}\n",
+        format_kick_bucket_summary(&stats.wake_kick_bucket_count)
+    ));
+    output.push_str(&format!(
+        "place.path: {}  deps:same_tgid={} cross_tgid={}\n",
+        format_path_summary(&stats.select_path_count),
+        stats.nr_wake_same_tgid,
+        stats.nr_wake_cross_tgid,
+    ));
+    output.push_str(&format!(
+        "place.home.wait<=5ms: {}\n",
+        format_place_wait_summary(
+            &stats.home_place_wait_ns,
+            &stats.home_place_wait_count,
+            &stats.home_place_wait_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "place.home.run: {}\n",
+        format_place_wait_summary(
+            &stats.home_place_run_ns,
+            &stats.home_place_run_count,
+            &stats.home_place_run_max_ns,
+        )
+    ));
+    output.push_str(&format!(
+        "place.waker.wait<=5ms: {}\n",
+        format_place_wait_summary(
+            &stats.waker_place_wait_ns,
+            &stats.waker_place_wait_count,
+            &stats.waker_place_wait_max_ns,
+        )
+    ));
+    append_wake_graph_section(&mut output, app);
+    #[cfg(debug_assertions)]
+    append_derived_wake_graph_section(&mut output, app);
+    output.push_str(&format!(
+        "coh: idle_remote={} busy={} idle={} pend_remote={} set_w/s={}/{} clr_w/s={}/{}\n",
+        stats.nr_idle_hint_remote_reads,
+        stats.nr_idle_hint_remote_busy,
+        stats.nr_idle_hint_remote_idle,
+        stats.nr_busy_pending_remote_sets,
+        stats.nr_idle_hint_set_writes,
+        stats.nr_idle_hint_set_skips,
+        stats.nr_idle_hint_clear_writes,
+        stats.nr_idle_hint_clear_skips,
+    ));
+    output.push_str(&format!(
+        "bypass: requeue_fast={} busy_local_skip_depth={} busy_remote_skip_depth={} busy_pending_skip={}\n",
+        stats.nr_enqueue_requeue_fastpath,
+        stats.nr_enqueue_busy_local_skip_depth,
+        stats.nr_enqueue_busy_remote_skip_depth,
+        stats.nr_busy_pending_set_skips,
+    ));
+    output.push_str(&format!(
+        "cap: hard_tasks={} hard_hot={} soft_tasks={} soft_hot={} build_tasks={} build_hot={} shared_top_cores={} build_shared={} hard_smt={} hard_scatter={} focus_scatter={}\n",
+        cap.hard_latency_tasks,
+        cap.hard_latency_hot,
+        cap.soft_latency_tasks,
+        cap.soft_latency_hot,
+        cap.build_tasks,
+        cap.build_hot,
+        cap.shared_top_cores,
+        cap.build_shared_tasks,
+        cap.hard_latency_smt_heavy,
+        cap.hard_latency_scattered,
+        cap.focus_scattered,
+    ));
+    output.push_str(&format!(
+        "roles: game={} render={} ui={} audio={} build={} kcritical={}\n",
+        cap.game_tasks,
+        cap.render_tasks,
+        cap.ui_tasks,
+        cap.audio_tasks,
+        cap.build_tasks,
+        cap.critical_tasks,
+    ));
+    output.push_str(&format!(
+        "context: lifetime_sampled={:.1}s cpu_work_life={:.1}s timeline_history={} timeline_span={:.1}s avg_step={:.2}s last60s_coverage={}/{}\n",
+        app.start_time.elapsed().as_secs_f64(),
+        life_elapsed.as_secs_f64(),
+        app.timeline_history.len(),
+        timeline_span.as_secs_f64(),
+        if app.timeline_history.is_empty() {
+            0.0
+        } else {
+            timeline_span.as_secs_f64() / app.timeline_history.len() as f64
+        },
+        timeline_samples.len(),
+        timeline_expected,
+    ));
+    if let Some(diag) = &life_balance {
+        output.push_str(&format!(
+            "balance.life: driver={} top_cpu={} {:.1}% {}us {:.1}/s top_rate_cpu={} {:.1}/s {}us top_core={} {:.1}% hot_thr={:.0}% sib={:.0}% top_rate_core={} {:.1}/s cpu_skew={:.1}x core_skew={:.1}x hot/cold cpu={}/{} core={}/{} sticky_core={} hard_scatter={} focus_scatter={} hard_smt={}\n",
+            diag.driver,
+            diag.top_cpu_share_label,
+            diag.top_cpu_share_pct,
+            diag.top_cpu_avg_run_us,
+            diag.top_cpu_runs_per_sec,
+            diag.top_cpu_rate_label,
+            diag.top_cpu_rate_runs_per_sec,
+            diag.top_cpu_rate_avg_run_us,
+            diag.top_core_share_label,
+            diag.top_core_share_pct,
+            diag.top_core_hot_thr_pct,
+            diag.top_core_sib_pct,
+            diag.top_core_rate_label,
+            diag.top_core_rate_runs_per_sec,
+            diag.cpu_skew,
+            diag.core_skew,
+            diag.hot_cpu_count,
+            diag.cold_cpu_count,
+            diag.hot_core_count,
+            diag.cold_core_count,
+            if diag.sticky_core { "yes" } else { "no" },
+            cap.hard_latency_scattered,
+            cap.focus_scattered,
+            cap.hard_latency_smt_heavy,
+        ));
+    }
+    append_cpu_work_section(
+        &mut output,
+        "cpu.work.life",
+        &app.per_cpu_work,
+        &app.topology,
+        &app.cpu_stats,
+        app.start_time.elapsed(),
+    );
+    append_long_run_owner_section(&mut output, "longrun.life", app, &tgid_roles);
+    append_app_health_section(&mut output, "app.health.life", app, &tgid_roles);
+    append_blocked_behind_section(&mut output, "blocked.behind.life", app);
+    append_local_queue_section(
+        &mut output,
+        "localq.life",
+        &app.per_cpu_work,
+        app.start_time.elapsed(),
+    );
+    append_select_cpu_section(
+        &mut output,
+        "select.life",
+        &app.per_cpu_work,
+        app.start_time.elapsed(),
+    );
+    append_home_seed_section(
+        &mut output,
+        "homeseed.life",
+        &app.per_cpu_work,
+        app.start_time.elapsed(),
+    );
+    append_pressure_probe_section(
+        &mut output,
+        "pressure.life",
+        &app.per_cpu_work,
+        &app.pressure_probe,
+        app.start_time.elapsed(),
+    );
+    if let Some((elapsed, delta)) = app.windowed_stats(stats, Duration::from_secs(30)) {
+        append_window_stats(&mut output, "30s", elapsed, &delta, dsq_depth);
+    }
+    if let Some((elapsed, delta)) = app.windowed_stats(stats, Duration::from_secs(60)) {
+        append_window_stats(&mut output, "60s", elapsed, &delta, dsq_depth);
+    }
+    if let Some((elapsed, window)) = app.cpu_work_window(Duration::from_secs(60)) {
+        let cpu_rows_60 = scheduler_cpu_rows(&window, &app.topology, &app.cpu_stats, elapsed);
+        let core_rows_60 = scheduler_core_rows(&window, &app.topology, &app.cpu_stats, elapsed);
+        if let Some(diag) = build_balance_diagnosis(&cpu_rows_60, &core_rows_60) {
+            output.push_str(&format!(
+                "balance.60s: sampled={:.1}s driver={} top_cpu={} {:.1}% {}us {:.1}/s top_rate_cpu={} {:.1}/s {}us top_core={} {:.1}% hot_thr={:.0}% sib={:.0}% top_rate_core={} {:.1}/s cpu_skew={:.1}x core_skew={:.1}x hot/cold cpu={}/{} core={}/{} sticky_core={}\n",
+                elapsed.as_secs_f64(),
+                diag.driver,
+                diag.top_cpu_share_label,
+                diag.top_cpu_share_pct,
+                diag.top_cpu_avg_run_us,
+                diag.top_cpu_runs_per_sec,
+                diag.top_cpu_rate_label,
+                diag.top_cpu_rate_runs_per_sec,
+                diag.top_cpu_rate_avg_run_us,
+                diag.top_core_share_label,
+                diag.top_core_share_pct,
+                diag.top_core_hot_thr_pct,
+                diag.top_core_sib_pct,
+                diag.top_core_rate_label,
+                diag.top_core_rate_runs_per_sec,
+                diag.cpu_skew,
+                diag.core_skew,
+                diag.hot_cpu_count,
+                diag.cold_cpu_count,
+                diag.hot_core_count,
+                diag.cold_core_count,
+                if diag.sticky_core { "yes" } else { "no" },
+            ));
+        }
+        append_cpu_work_section(
+            &mut output,
+            "cpu.work.60s",
+            &window,
+            &app.topology,
+            &app.cpu_stats,
+            elapsed,
+        );
+        append_local_queue_section(&mut output, "localq.60s", &window, elapsed);
+        append_select_cpu_section(&mut output, "select.60s", &window, elapsed);
+        append_home_seed_section(&mut output, "homeseed.60s", &window, elapsed);
+        if let Some((pressure_elapsed, pressure_window)) =
+            app.pressure_probe_window(Duration::from_secs(60))
+        {
+            append_pressure_probe_section(
+                &mut output,
+                "pressure.60s",
+                &window,
+                &pressure_window,
+                pressure_elapsed,
+            );
+        }
+    }
+    if let Some(summary_lines) = summarize_timeline_samples(&timeline_samples, timeline_expected) {
+        output.push_str("\nwindow: last60s sampled=rolling_1s history=latest_60\n");
+        for line in summary_lines {
+            output.push_str(&line.to_string());
+            output.push('\n');
+        }
+        output.push_str(
+            "timeline.cols: [slot span run/s wake/s wake%=dir/busy/q path%=home/core/prim/idle/tun cbns=sel/enq/run/stop waitus<=5ms=dir/busy/q slice%=full/block/preempt]\n",
+        );
+        for sample in &timeline_samples {
+            output.push_str(&format!("{}\n", format_timeline_sample_row(sample)));
+        }
+    }
+    if !app.debug_events.is_empty() {
+        output.push_str("events:\n");
+        for ev in app.debug_events.iter().take(8) {
+            output.push_str(&format!(
+                "  ts={} pid={} {}\n",
+                ev.ts_ns,
+                ev.pid,
+                debug_event_label(ev)
+            ));
+        }
+    }
+
+    if app.bench_run_count > 0 {
+        output.push_str(&format_bench_for_clipboard(app));
+    }
+
+    // Task matrix header — compact column key
+    output.push_str(
+        "\ntask.scope: rows=live_bpf_tracked life=since_task_first_tracked_this_run rate=latest_tui_tick latest=last_observed windows=separate_30s_60s recent=bounded_debug_events\n",
+    );
+    output.push_str(
+        "tasks: [PPID PID ST COMM CLS PELT MAXRTus GAPus JITus LASTWus LIFE RUN/s CPU SPRD RES% SMT% SELns ENQns STOPns RUNns G1% G3% DSQ% MIG/s]\n",
+    );
+    output.push_str(
+        "       [detail: ROLE STEER(home/primary) DIRECT Q[f/b/p] SYLD PRMPT LIFE(i0/e/s/r/x:first/seen) MAXGAPus DSQINSns RUNS RTms AVGRTus RTms/s SLICEOCC% LLC/COUNT PLACE(cpu/core dist) STREAK WAKER TGID CLS V/ICSW WAKEus<=5ms(dir/busy/q) HWAIT<=5ms WHIST]\n",
+    );
+
+    let all_dump_pids: Vec<u32> = app
+        .task_rows
+        .iter()
+        .filter(|(_, row)| row.is_bpf_tracked && row.total_runs > 0)
+        .map(|(pid, _)| *pid)
+        .collect();
+    let dead_hidden = all_dump_pids
+        .iter()
+        .filter(|pid| {
+            app.task_rows
+                .get(pid)
+                .map(|row| row.status == TaskStatus::Dead)
+                .unwrap_or(false)
+        })
+        .count();
+    // Prefer live rows so dump reviews stay benchmark-focused even if stale tasks are retained in TUI state.
+    let mut dump_pids: Vec<u32> = all_dump_pids
+        .iter()
+        .copied()
+        .filter(|pid| {
+            app.task_rows
+                .get(pid)
+                .map(|row| row.status != TaskStatus::Dead)
+                .unwrap_or(false)
+        })
+        .collect();
+    let live_only = !dump_pids.is_empty();
+    if !live_only {
+        dump_pids = all_dump_pids.clone();
+    }
+    dump_pids.sort_by(|a, b| {
+        let r_a = app.task_rows.get(a).unwrap();
+        let r_b = app.task_rows.get(b).unwrap();
+        r_b.pelt_util.cmp(&r_a.pelt_util)
+    });
+    // TGID grouping (same logic as TUI)
+    let mut tgid_rank: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (i, pid) in dump_pids.iter().enumerate() {
+        if let Some(row) = app.task_rows.get(pid) {
+            let tgid = if row.tgid > 0 { row.tgid } else { *pid };
+            tgid_rank.entry(tgid).or_insert(i);
+        }
+    }
+    dump_pids.sort_by(|a, b| {
+        let r_a = app.task_rows.get(a).unwrap();
+        let r_b = app.task_rows.get(b).unwrap();
+        let tgid_a = if r_a.tgid > 0 { r_a.tgid } else { *a };
+        let tgid_b = if r_b.tgid > 0 { r_b.tgid } else { *b };
+        let rank_a = tgid_rank.get(&tgid_a).copied().unwrap_or(usize::MAX);
+        let rank_b = tgid_rank.get(&tgid_b).copied().unwrap_or(usize::MAX);
+        rank_a
+            .cmp(&rank_b)
+            .then_with(|| r_b.pelt_util.cmp(&r_a.pelt_util))
+    });
+    let dump_total_rows = dump_pids.len();
+    let dump_group_count = tgid_rank.len();
+    output.push_str(&format!(
+        "dump: full {} of {} {} BPF-tracked rows across {} TGIDs ordered by grouped PELT activity dead_hidden={}\n",
+        dump_pids.len(),
+        dump_total_rows,
+        if live_only { "live" } else { "tracked" },
+        dump_group_count,
+        dead_hidden,
+    ));
+
+    // Pre-compute thread counts per tgid
+    let mut tgid_counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for &pid in &dump_pids {
+        if let Some(row) = app.task_rows.get(&pid) {
+            let tgid = if row.tgid > 0 { row.tgid } else { pid };
+            *tgid_counts.entry(tgid).or_insert(0) += 1;
+        }
+    }
+    let tgid_identities = build_tgid_identities(app);
+
+    let mut last_tgid: u32 = 0;
+    for &pid in &dump_pids {
+        if let Some(row) = app.task_rows.get(&pid) {
+            let tgid = if row.tgid > 0 { row.tgid } else { pid };
+
+            // Process group header
+            if tgid != last_tgid {
+                let count = tgid_counts.get(&tgid).copied().unwrap_or(1);
+                let identity = tgid_identities
+                    .get(&tgid)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_tgid_identity(tgid, row));
+                let proc_name = tgid_header_name(&identity);
+                let group_role = tgid_roles
+                    .get(&tgid)
+                    .copied()
+                    .unwrap_or(WorkloadRole::Other);
+                if count > 1 || tgid != pid {
+                    let health = format_tgid_health_summary(app, tgid, &dump_pids);
+                    output.push_str(&format!(
+                        "\n▼ {} (PID {} PPID {}) — {} threads [{}] {}\n",
+                        proc_name,
+                        tgid,
+                        row.ppid,
+                        count,
+                        group_role.label(),
+                        health,
+                    ));
+                    if let Some(wake_graph) = format_tgid_wake_graph(app, tgid) {
+                        output.push_str(&wake_graph);
+                    }
+                }
+                last_tgid = tgid;
+            }
+
+            let j_us = avg_jitter_us(row);
+            let status_str = match row.status {
+                TaskStatus::Alive => "●",
+                TaskStatus::Idle => "○",
+                TaskStatus::Dead => "✗",
+            };
+            let indent = if tgid != pid { "  " } else { "" };
+            let cls_str = class_label(row);
+            let last_wait_us = row.wait_duration_ns / 1000;
+            let placement = placement_summary(row, &app.topology);
+            let role = task_role(row, &tgid_roles);
+            let wake_avg = |idx: usize| -> u64 {
+                if row.wake_reason_count[idx] > 0 {
+                    row.wake_reason_wait_ns[idx] / row.wake_reason_count[idx] as u64 / 1000
+                } else {
+                    0
+                }
+            };
+            let wait_str = if row.status == TaskStatus::Dead && last_wait_us > 10000 {
+                format!("{}†", last_wait_us)
+            } else {
+                format!("{}", last_wait_us)
+            };
+            output.push_str(&format!(
+                "{}{:<5} {:<7} {:<3} {:<15} {:<4} {:<4} {:<7} {:<7} {:<6} {:<7} {:<18} {:<7.1} C{:<3} {:<5} {:<7} {:<5} {:<5} {:<6} {:<6} {:<6} {:<4.0} {:<4.0} {:<4.0} {:<7.1}\n",
+                indent,
+                row.ppid,
+                row.pid,
+                status_str,
+                row.comm,
+                cls_str,
+                row.pelt_util,  // PELT utilization (0-1024)
+                display_runtime_us(row.max_runtime_us),
+                display_gap_us(row.dispatch_gap_us),
+                j_us,
+                wait_str,
+                format_lifecycle_compact(row),
+                row.runs_per_sec,
+                row.core_placement,
+                placement_spread_label(&placement),
+                placement_residency_label(&placement),
+                placement.smt_secondary_pct,
+                row.select_cpu_ns,
+                row.enqueue_ns,
+                row.stopping_duration_ns,
+                row.running_duration_ns,
+                row.gate_hit_pcts[0],  // G1
+                row.gate_hit_pcts[3],  // G3
+                row.gate_hit_pcts[9],  // DSQ
+                row.migrations_per_sec,
+            ));
+            // detail-A: gate % (G1/G3/DSQ) + all extended fields, compact labels
+            output.push_str(&format!(
+                "{}  role={}/{} steer={}/{} path={}/{}/{} waker={} deps={}/{} dir={} q={}/{}/{} syld={} prmpt={} aff={} home=[{}] behind={} tsmt={:.1}%/{:.1}% sruns={}/{} life={} maxgap={} dsqins={}ns runs={} rt={}ms avgrt={}us rtms/s={:.1} slice_occ={}% llc=L{:02}/{} place=[{}|{} smt={}%] streak={} tgid={} cls={} v/icsw={}/{} wakeus<=5ms={}/{}/{} hwait<=5ms=[{}] whist={}/{}/{}/{}\n",
+                indent,
+                role.label(),
+                capacity_band(row, role).label(),
+                row.home_steer_hits,
+                row.primary_steer_hits,
+                select_path_label(row.last_select_path as usize),
+                select_reason_short_label(row.last_select_reason as usize),
+                place_class_label(row.last_place_class as usize),
+                place_class_label(row.last_waker_place_class as usize),
+                row.wake_same_tgid_count,
+                row.wake_cross_tgid_count,
+                row.direct_dispatch_count,
+                row.quantum_full_count,
+                row.quantum_yield_count,
+                row.quantum_preempt_count,
+                row.yield_count,
+                row.preempt_count,
+                affinity_label(row, &app.topology),
+                home_quality_label(row),
+                blocker_label(row, &app.task_rows),
+                task_smt_contended_pct(row),
+                task_smt_overlap_pct(row),
+                row.smt_solo_runs,
+                row.smt_contended_runs,
+                format_startup_phase(row),
+                display_gap_us(row.max_dispatch_gap_us), row.dsq_insert_ns, row.total_runs,
+                format_runtime_ms(row.total_runtime_ns),
+                avg_task_runtime_us(row),
+                runtime_rate_ms(row),
+                slice_occupancy_display_pct(row.slice_util_pct),
+                row.llc_id,
+                placement.active_llc_count,
+                top_cpu_distribution(&row.cpu_run_count, &app.topology, 3),
+                top_core_distribution(&row.cpu_run_count, &app.topology, 3),
+                placement.smt_secondary_pct,
+                row.same_cpu_streak,
+                row.tgid,
+                class_label(row),
+                row.nvcsw_delta,
+                row.nivcsw_delta,
+                wake_avg(0), wake_avg(1), wake_avg(2),
+                format_row_place_wait_summary(row),
+                row.wait_hist[0], row.wait_hist[1], row.wait_hist[2], row.wait_hist[3],
+            ));
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let mut cost = app.debug_cost;
+        cost.dump_us = dump_start.elapsed().as_micros() as u64;
+        append_debug_cost_section(&mut output, cost);
+    }
+
+    output
+}
+
+pub(super) fn format_stats_json(stats: &cake_stats, app: &TuiApp) -> String {
+    build_telemetry_report(stats, app).to_json()
+}
