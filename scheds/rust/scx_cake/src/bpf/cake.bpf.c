@@ -286,6 +286,7 @@ static __always_inline u8 cake_read_cpu_pressure(u32 cpu)
 	return READ_ONCE(cpu_bss[cpu & (CAKE_MAX_CPUS - 1)].cpu_pressure);
 }
 
+#if !CAKE_LEAN_SCHED
 static __always_inline void cake_update_cpu_pressure(
 	struct cake_cpu_bss *bss, u32 slice_consumed)
 {
@@ -339,6 +340,7 @@ static __always_inline void cake_owner_runtime_policy_update(
 	WRITE_ONCE(bss->owner_avg_runtime_ns, avg);
 	WRITE_ONCE(bss->owner_run_count, (u16)runs);
 }
+#endif
 
 static __always_inline u8 cake_score_add(u8 score, u32 add)
 {
@@ -1336,11 +1338,16 @@ static __noinline void dsq_insert_vtime_wrapper(
 
 static __always_inline u32 cake_llc_id_for_cpu(u32 cpu)
 {
+#ifdef CAKE_SINGLE_LLC
+	(void)cpu;
+	return 0;
+#else
 	u32 llc = cpu_llc_id[cpu & (CAKE_MAX_CPUS - 1)];
 
 	if (llc >= nr_llcs)
 		llc = 0;
 	return llc;
+#endif
 }
 
 static __always_inline u64 cake_llc_dsq_for_cpu(u32 cpu)
@@ -1380,20 +1387,26 @@ static __always_inline void cake_insert_llc_vtime(
 	bool preserve_state,
 	bool is_wakeup)
 {
-	u32 target_cpu_idx = target_cpu & (CAKE_MAX_CPUS - 1);
-	u8 idle_hint = READ_ONCE(cpu_bss[target_cpu_idx].idle_hint);
+	if (is_wakeup) {
+		u32 target_cpu_idx = target_cpu & (CAKE_MAX_CPUS - 1);
+		u8 idle_hint = READ_ONCE(cpu_bss[target_cpu_idx].idle_hint);
 
-	if (is_wakeup && idle_hint) {
-		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
-				  enq_flags);
+		if (idle_hint) {
+			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+					  enq_flags);
+			return;
+		}
+
+		dsq_insert_vtime_wrapper(p, cake_llc_dsq_for_cpu(target_cpu), slice,
+					p->scx.dsq_vtime, enq_flags);
+		cake_record_shared_vtime_insert(enq_flags, preserve_state);
+		scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
 		return;
 	}
 
 	dsq_insert_vtime_wrapper(p, cake_llc_dsq_for_cpu(target_cpu), slice,
 				p->scx.dsq_vtime, enq_flags);
 	cake_record_shared_vtime_insert(enq_flags, preserve_state);
-	if (is_wakeup && !idle_hint)
-		scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
 }
 
 #if CAKE_LEAN_SCHED
@@ -1413,14 +1426,14 @@ static __noinline void enqueue_dsq_dispatch(
 	u32 enq_cpu)
 {
 #if CAKE_LEAN_SCHED
-	u32 target_cpu_idx = enq_cpu & (CAKE_MAX_CPUS - 1);
-	u8 idle_hint = READ_ONCE(cpu_bss[target_cpu_idx].idle_hint);
-
-	if (unlikely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 		cake_insert_llc_vtime(p, enq_flags, enq_cpu, p->scx.slice,
-				     false, !!(enq_flags & (u64)SCX_ENQ_WAKEUP));
+					 false, !!(enq_flags & (u64)SCX_ENQ_WAKEUP));
 		return;
 	}
+
+	u32 target_cpu_idx = enq_cpu & (CAKE_MAX_CPUS - 1);
+	u8 idle_hint = READ_ONCE(cpu_bss[target_cpu_idx].idle_hint);
 
 	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | enq_cpu, p->scx.slice,
 			  enq_flags);
@@ -1446,9 +1459,9 @@ static __noinline void enqueue_dsq_dispatch(
 	#define stats ((struct cake_stats *)0)
 #endif
 
-	if (unlikely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 		cake_insert_llc_vtime(p, enq_flags, enq_cpu, p->scx.slice,
-				     false, is_wakeup);
+					 false, is_wakeup);
 		return;
 	}
 
@@ -1730,7 +1743,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 
 	if (preserve_state) {
 		p->scx.slice = quantum_ns;
-		if (unlikely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+		if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 			cake_insert_llc_vtime(p, enq_flags, target_cpu,
 					     quantum_ns, true, is_wakeup);
 			return;
@@ -1750,7 +1763,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		slice += (200000 - slice) & -(slice < 200000);
 		p->scx.slice = slice;
 		p->scx.dsq_vtime += slice + nice_adj;
-		if (unlikely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+		if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 			cake_insert_llc_vtime(p, enq_flags, target_cpu, slice,
 					     false, false);
 			return;
@@ -1960,7 +1973,7 @@ queue_affine_dispatch:
 queue_preserve:
 	p->scx.slice = slice;
 	target_cpu = cake_task_cpu(p);
-	if (unlikely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 #ifndef CAKE_RELEASE
 		if (stats_on)
 			dsq_insert_start = bpf_ktime_get_ns();
@@ -1985,7 +1998,7 @@ queue_requeue:
 	p->scx.slice = slice;
 	p->scx.dsq_vtime += slice + nice_adj;
 	target_cpu = cake_task_cpu(p);
-	if (unlikely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 #ifndef CAKE_RELEASE
 		if (stats_on)
 			dsq_insert_start = bpf_ktime_get_ns();
@@ -2069,7 +2082,17 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	u64 dispatch_start = 0;
 #endif
 
-	if (unlikely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+#ifdef CAKE_SINGLE_LLC
+		if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE, 0)) {
+			if (stats_on) {
+				struct cake_stats *s = get_local_stats_for(cpu_idx);
+				s->nr_local_dispatches++;
+				s->nr_dsq_consumed++;
+			}
+			return;
+		}
+#else
 		u32 my_llc = cake_llc_id_for_cpu(cpu_idx);
 
 		if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE + my_llc, 0)) {
@@ -2101,6 +2124,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 				}
 			}
 		}
+#endif
 	}
 
 	if (stats_on) get_local_stats_for(cpu_idx)->nr_dispatch_misses++;
@@ -2118,8 +2142,10 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	/* Check-before-write: only mark idle if not already idle.
 	 * Avoids unnecessary cache line dirtying. */
 	if (!READ_ONCE(cpu_bss[cpu_idx].idle_hint)) {
-		cpu_bss[cpu_idx].idle_hint = 1;
+		WRITE_ONCE(cpu_bss[cpu_idx].idle_hint, 1);
+#if !CAKE_LEAN_SCHED
 		cake_decay_cpu_pressure_idle(&cpu_bss[cpu_idx]);
+#endif
 		if (stats_on)
 			get_local_stats_for(cpu_idx)->nr_idle_hint_set_writes++;
 	} else {
@@ -2464,7 +2490,9 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 		u64 slice = p->scx.slice;
 		bss->last_pid = p->pid;
 		bss->tick_slice = slice ?: quantum_ns;
+#if !CAKE_LEAN_SCHED
 		cake_owner_runtime_policy_reset(bss);
+#endif
 
 		/* Keep a live local frontier instead of a historical max so
 		 * wakeup rescue stays anchored to currently active work. */
@@ -2542,8 +2570,10 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	/* Branchless math bounding */
 	u32 rt_raw = slice_consumed - ((slice_consumed - (65535U << 10)) & -(slice_consumed > (65535U << 10)));
 
+#if !CAKE_LEAN_SCHED
 	cake_update_cpu_pressure(bss, slice_consumed);
 	cake_owner_runtime_policy_update(bss, slice_consumed);
+#endif
 	struct cake_task_ctx __arena *policy_tctx = NULL;
 	if (CAKE_LEARNED_LOCALITY_ENABLED && CAKE_WAKE_CHAIN_LOCALITY_ENABLED) {
 		policy_tctx = get_task_ctx(p);
@@ -2695,12 +2725,13 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
  * allocation must happen here, not in hot paths.
  * Called before any scheduling ops fire for this task.
  *
- * Release builds keep this as a no-op so the performance object does not
- * link arena task-storage code. Debug builds allocate full telemetry state. */
+ * Debug builds allocate full telemetry state; release builds omit this
+ * callback from cake_ops entirely. */
+#ifndef CAKE_RELEASE
 s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
-#if defined(CAKE_RELEASE) || !CAKE_NEEDS_ARENA
+#if !CAKE_NEEDS_ARENA
 	return 0;
 #else
 	struct cake_task_ctx __arena *tctx;
@@ -2781,6 +2812,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	return 0;
 #endif
 }
+#endif
 
 /* cake_enable: initialize task vtime when it becomes schedulable. */
 void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
@@ -2792,6 +2824,7 @@ void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
 
 /* cake_set_cpumask: event-driven affinity update — telemetry counter only.
  * Cached cpumask removed: kernel handles affinity natively. */
+#ifndef CAKE_RELEASE
 void BPF_STRUCT_OPS(cake_set_cpumask, struct task_struct *p __arg_trusted,
 		    const struct cpumask *cpumask __arg_trusted)
 {
@@ -2838,10 +2871,12 @@ void BPF_STRUCT_OPS(cake_set_cpumask, struct task_struct *p __arg_trusted,
 #endif
 #endif
 }
+#endif
 
 /* Handle manual yields (e.g. sched_yield syscall).
  * Global stats keep an exact count, while per-task yield_count is TUI-only
  * telemetry (stats-gated). */
+#ifndef CAKE_RELEASE
 bool BPF_STRUCT_OPS(cake_yield, struct task_struct *p)
 {
 	if (CAKE_STATS_ACTIVE) {
@@ -2862,11 +2897,12 @@ bool BPF_STRUCT_OPS(cake_yield, struct task_struct *p)
 #endif
 	return false;
 }
+#endif
 
 /* Handle preemption when a task is pushed off the CPU. */
+#ifndef CAKE_RELEASE
 void BPF_STRUCT_OPS(cake_runnable, struct task_struct *p, u64 enq_flags)
 {
-#ifndef CAKE_RELEASE
 	if (CAKE_STATS_ACTIVE) {
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 		if (tctx) {
@@ -2904,14 +2940,14 @@ void BPF_STRUCT_OPS(cake_runnable, struct task_struct *p, u64 enq_flags)
 			}
 		}
 	}
-#endif
 }
+#endif
 
 /* Free per-task arena storage on task exit. */
+#ifndef CAKE_RELEASE
 void BPF_STRUCT_OPS(cake_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
-#ifndef CAKE_RELEASE
 	if (CAKE_STATS_ACTIVE) {
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 
@@ -2925,18 +2961,18 @@ void BPF_STRUCT_OPS(cake_exit_task, struct task_struct *p,
 						 (u64)alive_ms * 1000ULL);
 		}
 	}
-#endif
 #if CAKE_NEEDS_ARENA
 	/* Remove from PID→tctx map: removed — iter/task program handles visibility
 	 * without explicit cleanup. Task storage freed below. */
 	scx_task_free(p);
 #endif
 }
+#endif
 
 /* Initialize the scheduler */
 s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 {
-	if (unlikely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 		for (u32 i = 0; i < CAKE_MAX_LLCS; i++) {
 			s32 ret;
 
@@ -2977,6 +3013,7 @@ void BPF_STRUCT_OPS(cake_exit, struct scx_exit_info *ei)
 #include "iter.bpf.h"
 /* cake_tick: LLC-vtime fallback dispatch is pull-driven from cake_dispatch,
  * so the tick hook is intentionally idle. */
+#ifndef CAKE_RELEASE
 void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
 {
 	(void)p;
@@ -3003,20 +3040,37 @@ void BPF_STRUCT_OPS(cake_set_weight, struct task_struct *p, u32 weight)
 	}
 #endif
 }
+#endif
 
+#ifdef CAKE_RELEASE
 SCX_OPS_DEFINE(cake_ops, .select_cpu = (void *)cake_select_cpu,
-	       .enqueue	 = (void *)cake_enqueue,
+	       .enqueue = (void *)cake_enqueue,
 	       .dispatch = (void *)cake_dispatch,
-	       .tick         = (void *)cake_tick,
-	       .running	    = (void *)cake_running,
-	       .stopping    = (void *)cake_stopping,
-	       .yield = (void *)cake_yield,
-	       .runnable = (void *)cake_runnable,
-	       .set_weight   = (void *)cake_set_weight,
-	       .enable       = (void *)cake_enable,
-	       .set_cpumask = (void *)cake_set_cpumask,
-	       .init_task   = (void *)cake_init_task,
-	       .exit_task = (void *)cake_exit_task, .init = (void *)cake_init,
-	       .exit = (void *)cake_exit, .flags = SCX_OPS_KEEP_BUILTIN_IDLE,
+	       .running = (void *)cake_running,
+	       .stopping = (void *)cake_stopping,
+	       .enable = (void *)cake_enable,
+	       .init = (void *)cake_init,
+	       .exit = (void *)cake_exit,
+	       .flags = SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms = 5000, /* Override with SCX_TIMEOUT_MS when needed */
 	       .name = "cake");
+#else
+SCX_OPS_DEFINE(cake_ops, .select_cpu = (void *)cake_select_cpu,
+	       .enqueue = (void *)cake_enqueue,
+	       .dispatch = (void *)cake_dispatch,
+	       .tick = (void *)cake_tick,
+	       .running = (void *)cake_running,
+	       .stopping = (void *)cake_stopping,
+	       .yield = (void *)cake_yield,
+	       .runnable = (void *)cake_runnable,
+	       .set_weight = (void *)cake_set_weight,
+	       .enable = (void *)cake_enable,
+	       .set_cpumask = (void *)cake_set_cpumask,
+	       .init_task = (void *)cake_init_task,
+	       .exit_task = (void *)cake_exit_task,
+	       .init = (void *)cake_init,
+	       .exit = (void *)cake_exit,
+	       .flags = SCX_OPS_KEEP_BUILTIN_IDLE,
+	       .timeout_ms = 5000, /* Override with SCX_TIMEOUT_MS when needed */
+	       .name = "cake");
+#endif
