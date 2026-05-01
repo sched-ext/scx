@@ -86,6 +86,9 @@ const u32  legacy_tier_base[4]    = { 250000000, 0, 750000000, 500000000 };
 #ifndef CAKE_HOT_TELEMETRY
 #define CAKE_HOT_TELEMETRY 0
 #endif
+#ifndef CAKE_PATH_TELEMETRY
+#define CAKE_PATH_TELEMETRY 0
+#endif
 #if defined(CAKE_RELEASE) || !CAKE_HOT_TELEMETRY
 #define CAKE_LEAN_SCHED 1
 #else
@@ -95,6 +98,7 @@ const u32  legacy_tier_base[4]    = { 250000000, 0, 750000000, 500000000 };
 #ifdef CAKE_RELEASE
 #define CAKE_STATS_ENABLED 0
 #define CAKE_STATS_ACTIVE 0
+#define CAKE_PATH_STATS_ACTIVE 0
 #else
 const bool enable_stats __attribute__((used)) = false;
 #if CAKE_HOT_TELEMETRY
@@ -102,9 +106,15 @@ const bool enable_stats __attribute__((used)) = false;
 /* CAKE_STATS_ACTIVE: suppressed during BenchLab runs to avoid polluting
  * kfunc latency measurements with ~15 extra scx_bpf_now() calls. */
 #define CAKE_STATS_ACTIVE (CAKE_STATS_ENABLED && !bench_active)
+#define CAKE_PATH_STATS_ACTIVE CAKE_STATS_ACTIVE
 #else
 #define CAKE_STATS_ENABLED 0
 #define CAKE_STATS_ACTIVE 0
+#if CAKE_PATH_TELEMETRY
+#define CAKE_PATH_STATS_ACTIVE (*(volatile const bool *)&enable_stats)
+#else
+#define CAKE_PATH_STATS_ACTIVE 0
+#endif
 #endif
 #endif
 /* enable_dvfs REMOVED: dead — zero BPF readers. */
@@ -1359,19 +1369,25 @@ static __always_inline void cake_record_shared_vtime_insert(
 	u64 enq_flags, bool preserve_state)
 {
 #ifndef CAKE_RELEASE
-	if (CAKE_STATS_ACTIVE) {
+	if (CAKE_PATH_STATS_ACTIVE) {
 		struct cake_stats *stats = get_local_stats();
 
 		stats->nr_shared_vtime_inserts++;
 		stats->nr_dsq_queued++;
-		if (enq_flags & (u64)SCX_ENQ_WAKEUP)
+		if (enq_flags & (u64)SCX_ENQ_WAKEUP) {
 			stats->nr_shared_wakeup_inserts++;
-		else if (preserve_state)
+			stats->nr_wakeup_dsq_fallback_busy++;
+			stats->nr_llc_vtime_wake_busy_shared++;
+		} else if (preserve_state) {
+			stats->nr_llc_vtime_nonwake_shared++;
 			stats->nr_shared_preserve_inserts++;
-		else if (enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT))
+		} else if (enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT)) {
+			stats->nr_llc_vtime_nonwake_shared++;
 			stats->nr_shared_requeue_inserts++;
-		else
+		} else {
+			stats->nr_llc_vtime_nonwake_shared++;
 			stats->nr_shared_other_inserts++;
+		}
 	}
 #else
 	(void)enq_flags;
@@ -1392,6 +1408,15 @@ static __always_inline void cake_insert_llc_vtime(
 		u8 idle_hint = READ_ONCE(cpu_bss[target_cpu_idx].idle_hint);
 
 		if (idle_hint) {
+#ifndef CAKE_RELEASE
+			if (CAKE_PATH_STATS_ACTIVE) {
+				struct cake_stats *stats = get_local_stats();
+
+				stats->nr_llc_vtime_wake_idle_direct++;
+				stats->nr_direct_local_inserts++;
+				stats->nr_wakeup_direct_dispatches++;
+			}
+#endif
 			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 					  enq_flags);
 			return;
@@ -1435,6 +1460,21 @@ static __noinline void enqueue_dsq_dispatch(
 	u32 target_cpu_idx = enq_cpu & (CAKE_MAX_CPUS - 1);
 	u8 idle_hint = READ_ONCE(cpu_bss[target_cpu_idx].idle_hint);
 
+#ifndef CAKE_RELEASE
+	if (CAKE_PATH_STATS_ACTIVE) {
+		struct cake_stats *stats = get_local_stats();
+
+		stats->nr_direct_local_inserts++;
+		if (enq_flags & (u64)SCX_ENQ_WAKEUP) {
+			if (idle_hint)
+				stats->nr_wakeup_direct_dispatches++;
+			else
+				stats->nr_wakeup_dsq_fallback_busy++;
+		} else {
+			stats->nr_direct_other_inserts++;
+		}
+	}
+#endif
 	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | enq_cpu, p->scx.slice,
 			  enq_flags);
 	if ((enq_flags & (u64)SCX_ENQ_WAKEUP) && !idle_hint)
@@ -1725,8 +1765,19 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 					      (u64)SCX_ENQ_PREEMPT));
 	u32 target_cpu = cake_task_cpu(p);
 	u64 slice = quantum_ns;
+#ifndef CAKE_RELEASE
+	struct cake_stats *path_stats =
+		CAKE_PATH_STATS_ACTIVE ? get_local_stats() : NULL;
+#else
+	#define path_stats ((struct cake_stats *)0)
+#endif
 
 	if ((p->flags & PF_KTHREAD) && p->prio < 120) {
+		if (path_stats) {
+			path_stats->nr_enqueue_path_kthread++;
+			path_stats->nr_direct_local_inserts++;
+			path_stats->nr_direct_kthread_inserts++;
+		}
 		p->scx.slice = quantum_ns;
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, quantum_ns,
 				  enq_flags);
@@ -1734,6 +1785,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	}
 
 	if (unlikely(p->scx.dsq_vtime == 0)) {
+		if (path_stats)
+			path_stats->nr_enqueue_path_initial++;
 		p->scx.dsq_vtime =
 			cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)].vtime_local;
 		p->scx.slice = quantum_ns;
@@ -1742,6 +1795,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	}
 
 	if (preserve_state) {
+		if (path_stats)
+			path_stats->nr_enqueue_path_preserve++;
 		p->scx.slice = quantum_ns;
 		if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 			cake_insert_llc_vtime(p, enq_flags, target_cpu,
@@ -1759,6 +1814,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		nice_adj = calc_nice_adj(weight);
 
 	if (!is_wakeup) {
+		if (path_stats)
+			path_stats->nr_enqueue_path_requeue++;
 		slice >>= 1;
 		slice += (200000 - slice) & -(slice < 200000);
 		p->scx.slice = slice;
@@ -1773,10 +1830,15 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
+	if (path_stats)
+		path_stats->nr_enqueue_path_wakeup++;
 	p->scx.slice = slice;
 	p->scx.dsq_vtime += slice + nice_adj;
 	cake_clamp_wakeup_vtime(p, target_cpu);
 	enqueue_dsq_dispatch(p, enq_flags, target_cpu);
+#ifdef CAKE_RELEASE
+	#undef path_stats
+#endif
 	return;
 #else
 #ifndef CAKE_RELEASE
@@ -1812,6 +1874,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		u32 task_cpu = cake_task_cpu(p);
 #ifndef CAKE_RELEASE
 		if (stats) {
+			stats->nr_enqueue_path_kthread++;
 			stats->nr_direct_local_inserts++;
 			stats->nr_direct_kthread_inserts++;
 		}
@@ -1851,6 +1914,10 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		 * of pressure across the unlikely branch. */
 	if (unlikely(p->scx.dsq_vtime == 0)) {
 		target_cpu = cake_task_cpu(p);
+#ifndef CAKE_RELEASE
+		if (stats)
+			stats->nr_enqueue_path_initial++;
+#endif
 		if (affinitized)
 			target_cpu = cake_pick_allowed_cpu(p, target_cpu);
 		p->scx.dsq_vtime = cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)].vtime_local;
@@ -1864,6 +1931,10 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	 * Never inherit a larger leftover slice from prior SCX state. */
 	if (preserve_state) {
 		slice = quantum_ns;
+#ifndef CAKE_RELEASE
+		if (stats)
+			stats->nr_enqueue_path_preserve++;
+#endif
 		if (affinitized) {
 			target_cpu = cake_pick_allowed_cpu(p, cake_task_cpu(p));
 			goto queue_affine_preserve;
@@ -1883,6 +1954,10 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	/* ── REQUEUE PATH (~10%) ── */
 	if (!is_wakeup) {
 		slice = quantum_ns;
+#ifndef CAKE_RELEASE
+		if (stats)
+			stats->nr_enqueue_path_requeue++;
+#endif
 
 		/* Flat 50% requeue slice for all classes. */
 		slice >>= 1;
@@ -1895,6 +1970,10 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	}
 
 	p->scx.slice = slice;
+#ifndef CAKE_RELEASE
+	if (stats)
+		stats->nr_enqueue_path_wakeup++;
+#endif
 
 	/* EEVDF Deadline Projection (additive fairness)
 	 * Replaces: vslice = (slice * vm) >> 10
@@ -1912,6 +1991,7 @@ queue_affine_preserve:
 	p->scx.slice = slice;
 #ifndef CAKE_RELEASE
 	if (stats) {
+		stats->nr_enqueue_path_affine_preserve++;
 		stats->nr_direct_local_inserts++;
 		stats->nr_direct_affine_inserts++;
 	}
@@ -1927,6 +2007,7 @@ queue_affine_requeue:
 	p->scx.dsq_vtime += slice + nice_adj;
 #ifndef CAKE_RELEASE
 	if (stats) {
+		stats->nr_enqueue_path_affine_requeue++;
 		stats->nr_direct_local_inserts++;
 		stats->nr_direct_affine_inserts++;
 		stats->nr_direct_other_inserts++;
@@ -1941,6 +2022,7 @@ queue_affine_requeue:
 queue_affine_dispatch:
 #ifndef CAKE_RELEASE
 	if (stats) {
+		stats->nr_enqueue_path_affine_dispatch++;
 		stats->nr_direct_local_inserts++;
 		stats->nr_direct_affine_inserts++;
 		if (is_wakeup)
@@ -2076,33 +2158,41 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	 * Explicit gate keeps source truthful. */
 #ifndef CAKE_RELEASE
 	bool stats_on = CAKE_STATS_ACTIVE;
+	bool path_stats_on = CAKE_PATH_STATS_ACTIVE;
 	u64 dispatch_start = stats_on ? bpf_ktime_get_ns() : 0;
 #else
 	#define stats_on 0
+	#define path_stats_on 0
 	u64 dispatch_start = 0;
 #endif
 
 	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 #ifdef CAKE_SINGLE_LLC
 		if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE, 0)) {
-			if (stats_on) {
+			if (stats_on || path_stats_on) {
 				struct cake_stats *s = get_local_stats_for(cpu_idx);
 				s->nr_local_dispatches++;
+				s->nr_dispatch_llc_local_hit++;
 				s->nr_dsq_consumed++;
 			}
 			return;
 		}
+		if (stats_on || path_stats_on)
+			get_local_stats_for(cpu_idx)->nr_dispatch_llc_local_miss++;
 #else
 		u32 my_llc = cake_llc_id_for_cpu(cpu_idx);
 
 		if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE + my_llc, 0)) {
-			if (stats_on) {
+			if (stats_on || path_stats_on) {
 				struct cake_stats *s = get_local_stats_for(cpu_idx);
 				s->nr_local_dispatches++;
+				s->nr_dispatch_llc_local_hit++;
 				s->nr_dsq_consumed++;
 			}
 			return;
 		}
+		if (stats_on || path_stats_on)
+			get_local_stats_for(cpu_idx)->nr_dispatch_llc_local_miss++;
 
 		if (nr_llcs > 1) {
 			for (u32 off = 1; off < CAKE_MAX_LLCS; off++) {
@@ -2114,10 +2204,11 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 				if (victim >= nr_llcs)
 					victim -= nr_llcs;
 				if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE + victim, 0)) {
-					if (stats_on) {
+					if (stats_on || path_stats_on) {
 						struct cake_stats *s =
 							get_local_stats_for(cpu_idx);
 						s->nr_stolen_dispatches++;
+						s->nr_dispatch_llc_steal_hit++;
 						s->nr_dsq_consumed++;
 					}
 					return;
@@ -2127,12 +2218,15 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 #endif
 	}
 
-	if (stats_on) get_local_stats_for(cpu_idx)->nr_dispatch_misses++;
+	if (stats_on || path_stats_on)
+		get_local_stats_for(cpu_idx)->nr_dispatch_misses++;
 
 	/* G3 keep_running: if no DSQ work is available and prev still wants to run,
 	 * replenish its slice instead of forcing an avoidable context switch. */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
 		prev->scx.slice = quantum_ns;
+		if (stats_on || path_stats_on)
+			get_local_stats_for(cpu_idx)->nr_dispatch_keep_running++;
 		/* Keep the stopping() baseline aligned with the replenished
 		 * slice so same-task continuations charge the next run from the
 		 * correct starting budget. */
@@ -2165,6 +2259,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	}
 #ifdef CAKE_RELEASE
 	#undef stats_on
+	#undef path_stats_on
 #endif
 }
 
@@ -2414,11 +2509,13 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 #ifndef CAKE_RELEASE
 	ARENA_ASSOC();
 	bool stats_on = CAKE_STATS_ACTIVE;
+	bool path_stats_on = CAKE_PATH_STATS_ACTIVE;
 	u64 running_overhead_start = 0;
 	if (stats_on)
 		running_overhead_start = bpf_ktime_get_ns();
 #else
 	#define stats_on 0
+	#define path_stats_on 0
 #endif
 
 	/* Batch kfuncs first: only p=r6 survives both calls (1 callee-save).
@@ -2480,7 +2577,15 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * Slice load is deferred into the task-change block.
 	 * Release/stats-off same-task re-runs keep zero kfunc calls and zero BSS
 	 * writes beyond idle_hint; debug stats refresh the shadow owner class. */
-	if (bss->last_pid != p->pid) {
+	bool task_changed = bss->last_pid != p->pid;
+	if (stats_on || path_stats_on) {
+		struct cake_stats *s_run = get_local_stats_for(cpu);
+		if (task_changed)
+			s_run->nr_running_task_change++;
+		else
+			s_run->nr_running_same_task++;
+	}
+	if (task_changed) {
 		/* Task change: refresh local CPU state and learned home placement.
 		 * Release reads task context here to maintain locality history. */
 #ifndef CAKE_RELEASE
@@ -2542,6 +2647,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 #endif
 #ifdef CAKE_RELEASE
 	#undef stats_on
+	#undef path_stats_on
 #endif
 }
 
@@ -2593,6 +2699,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	}
 
 	bool stats_on = CAKE_STATS_ACTIVE;
+	bool path_stats_on = CAKE_PATH_STATS_ACTIVE;
 	u64 stopping_overhead_start = 0;
 
 #ifndef CAKE_RELEASE
@@ -2601,6 +2708,21 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		tctx = get_task_ctx(p);
 	u32 nvcsw_accum = 0;
 #endif
+
+	if (path_stats_on && !stats_on) {
+		struct cake_stats *s = get_local_stats_for(cpu);
+
+		if (runnable)
+			s->nr_stopping_runnable++;
+		else
+			s->nr_stopping_blocked++;
+		if (p->scx.slice == 0)
+			s->nr_quantum_full++;
+		else if (!runnable)
+			s->nr_quantum_yield++;
+		else
+			s->nr_quantum_preempt++;
+	}
 
 	if (stats_on) {
 		stopping_overhead_start = bpf_ktime_get_ns();
@@ -2695,6 +2817,10 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 #ifndef CAKE_RELEASE
 		cake_smt_charge_runtime(s, bss, cpu, bpf_ktime_get_ns());
 #endif
+		if (runnable)
+			s->nr_stopping_runnable++;
+		else
+			s->nr_stopping_blocked++;
 		if (p->scx.slice == 0)
 			s->nr_quantum_full++;
 		else if (!runnable)

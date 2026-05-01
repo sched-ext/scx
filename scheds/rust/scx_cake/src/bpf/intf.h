@@ -954,6 +954,25 @@ struct cake_stats {
 	u64 nr_dispatch_calls;       /* Total cake_dispatch invocations */
 	u64 nr_running_calls;        /* Total cake_running invocations */
 	u64 nr_stopping_calls;       /* Total cake_stopping invocations */
+	u64 nr_running_same_task;    /* running(): last_pid matched current task */
+	u64 nr_running_task_change;  /* running(): observed a new task on this CPU */
+	u64 nr_stopping_runnable;    /* stopping(): task remained runnable */
+	u64 nr_stopping_blocked;     /* stopping(): task blocked / slept */
+	u64 nr_enqueue_path_kthread; /* enqueue(): high-priority kthread bypass */
+	u64 nr_enqueue_path_initial; /* enqueue(): first vtime seed path */
+	u64 nr_enqueue_path_preserve; /* enqueue(): preserve slice/vtime state */
+	u64 nr_enqueue_path_requeue; /* enqueue(): non-wakeup requeue path */
+	u64 nr_enqueue_path_wakeup;  /* enqueue(): normal wakeup path */
+	u64 nr_enqueue_path_affine_preserve; /* enqueue(): affinity-restricted preserve */
+	u64 nr_enqueue_path_affine_requeue; /* enqueue(): affinity-restricted requeue */
+	u64 nr_enqueue_path_affine_dispatch; /* enqueue(): affinity-restricted dispatch */
+	u64 nr_llc_vtime_wake_idle_direct; /* llc-vtime: wake found target idle, local insert */
+	u64 nr_llc_vtime_wake_busy_shared; /* llc-vtime: wake target busy, shared insert + kick */
+	u64 nr_llc_vtime_nonwake_shared; /* llc-vtime: non-wakeup shared insert */
+	u64 nr_dispatch_llc_local_hit; /* dispatch(): local LLC DSQ had work */
+	u64 nr_dispatch_llc_local_miss; /* dispatch(): local LLC DSQ was empty */
+	u64 nr_dispatch_llc_steal_hit; /* dispatch(): remote LLC steal succeeded */
+	u64 nr_dispatch_keep_running;  /* dispatch(): replenished prev queued task */
 
 	/* Task lifecycle timing (cumulative us, debug builds) */
 	u64 lifecycle_init_enqueue_us; /* Sum of task init to first enqueue */

@@ -1273,6 +1273,25 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.nr_dispatch_calls += s.nr_dispatch_calls;
             total.nr_running_calls += s.nr_running_calls;
             total.nr_stopping_calls += s.nr_stopping_calls;
+            total.nr_running_same_task += s.nr_running_same_task;
+            total.nr_running_task_change += s.nr_running_task_change;
+            total.nr_stopping_runnable += s.nr_stopping_runnable;
+            total.nr_stopping_blocked += s.nr_stopping_blocked;
+            total.nr_enqueue_path_kthread += s.nr_enqueue_path_kthread;
+            total.nr_enqueue_path_initial += s.nr_enqueue_path_initial;
+            total.nr_enqueue_path_preserve += s.nr_enqueue_path_preserve;
+            total.nr_enqueue_path_requeue += s.nr_enqueue_path_requeue;
+            total.nr_enqueue_path_wakeup += s.nr_enqueue_path_wakeup;
+            total.nr_enqueue_path_affine_preserve += s.nr_enqueue_path_affine_preserve;
+            total.nr_enqueue_path_affine_requeue += s.nr_enqueue_path_affine_requeue;
+            total.nr_enqueue_path_affine_dispatch += s.nr_enqueue_path_affine_dispatch;
+            total.nr_llc_vtime_wake_idle_direct += s.nr_llc_vtime_wake_idle_direct;
+            total.nr_llc_vtime_wake_busy_shared += s.nr_llc_vtime_wake_busy_shared;
+            total.nr_llc_vtime_nonwake_shared += s.nr_llc_vtime_nonwake_shared;
+            total.nr_dispatch_llc_local_hit += s.nr_dispatch_llc_local_hit;
+            total.nr_dispatch_llc_local_miss += s.nr_dispatch_llc_local_miss;
+            total.nr_dispatch_llc_steal_hit += s.nr_dispatch_llc_steal_hit;
+            total.nr_dispatch_keep_running += s.nr_dispatch_keep_running;
             total.lifecycle_init_enqueue_us += s.lifecycle_init_enqueue_us;
             total.lifecycle_init_enqueue_count += s.lifecycle_init_enqueue_count;
             total.lifecycle_init_select_us += s.lifecycle_init_select_us;
@@ -1998,6 +2017,63 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.nr_stopping_calls = current
         .nr_stopping_calls
         .saturating_sub(previous.nr_stopping_calls);
+    delta.nr_running_same_task = current
+        .nr_running_same_task
+        .saturating_sub(previous.nr_running_same_task);
+    delta.nr_running_task_change = current
+        .nr_running_task_change
+        .saturating_sub(previous.nr_running_task_change);
+    delta.nr_stopping_runnable = current
+        .nr_stopping_runnable
+        .saturating_sub(previous.nr_stopping_runnable);
+    delta.nr_stopping_blocked = current
+        .nr_stopping_blocked
+        .saturating_sub(previous.nr_stopping_blocked);
+    delta.nr_enqueue_path_kthread = current
+        .nr_enqueue_path_kthread
+        .saturating_sub(previous.nr_enqueue_path_kthread);
+    delta.nr_enqueue_path_initial = current
+        .nr_enqueue_path_initial
+        .saturating_sub(previous.nr_enqueue_path_initial);
+    delta.nr_enqueue_path_preserve = current
+        .nr_enqueue_path_preserve
+        .saturating_sub(previous.nr_enqueue_path_preserve);
+    delta.nr_enqueue_path_requeue = current
+        .nr_enqueue_path_requeue
+        .saturating_sub(previous.nr_enqueue_path_requeue);
+    delta.nr_enqueue_path_wakeup = current
+        .nr_enqueue_path_wakeup
+        .saturating_sub(previous.nr_enqueue_path_wakeup);
+    delta.nr_enqueue_path_affine_preserve = current
+        .nr_enqueue_path_affine_preserve
+        .saturating_sub(previous.nr_enqueue_path_affine_preserve);
+    delta.nr_enqueue_path_affine_requeue = current
+        .nr_enqueue_path_affine_requeue
+        .saturating_sub(previous.nr_enqueue_path_affine_requeue);
+    delta.nr_enqueue_path_affine_dispatch = current
+        .nr_enqueue_path_affine_dispatch
+        .saturating_sub(previous.nr_enqueue_path_affine_dispatch);
+    delta.nr_llc_vtime_wake_idle_direct = current
+        .nr_llc_vtime_wake_idle_direct
+        .saturating_sub(previous.nr_llc_vtime_wake_idle_direct);
+    delta.nr_llc_vtime_wake_busy_shared = current
+        .nr_llc_vtime_wake_busy_shared
+        .saturating_sub(previous.nr_llc_vtime_wake_busy_shared);
+    delta.nr_llc_vtime_nonwake_shared = current
+        .nr_llc_vtime_nonwake_shared
+        .saturating_sub(previous.nr_llc_vtime_nonwake_shared);
+    delta.nr_dispatch_llc_local_hit = current
+        .nr_dispatch_llc_local_hit
+        .saturating_sub(previous.nr_dispatch_llc_local_hit);
+    delta.nr_dispatch_llc_local_miss = current
+        .nr_dispatch_llc_local_miss
+        .saturating_sub(previous.nr_dispatch_llc_local_miss);
+    delta.nr_dispatch_llc_steal_hit = current
+        .nr_dispatch_llc_steal_hit
+        .saturating_sub(previous.nr_dispatch_llc_steal_hit);
+    delta.nr_dispatch_keep_running = current
+        .nr_dispatch_keep_running
+        .saturating_sub(previous.nr_dispatch_keep_running);
     delta.lifecycle_init_enqueue_us = current
         .lifecycle_init_enqueue_us
         .saturating_sub(previous.lifecycle_init_enqueue_us);
