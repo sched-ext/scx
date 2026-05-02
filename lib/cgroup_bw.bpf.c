@@ -998,6 +998,56 @@ scx_cgroup_llc_ctx_t *cbw_get_llc_ctx(struct cgroup *cgrp, int llc_id)
 	return cbw_get_llc_ctx_with_id(cgroup_get_id(cgrp), llc_id);
 }
 
+static __always_inline
+u64 cbw_taskc_get_cgx_raw(scx_task_cgroup_bw_t *taskc, u64 cgrp_id)
+{
+	u64 cgx_raw;
+
+	/*
+	 * On cache hit, return taskc->cgx_raw directly.  On miss, look up
+	 * via cbw_get_cgroup_ctx_raw() and populate taskc->cgx_raw if
+	 * @taskc is non-NULL.  A miss means the CPU controller is disabled
+	 * for this cgroup, or the cgroup is mid-teardown -- the caller
+	 * chooses how to react (-ESRCH vs silent skip).
+	 */
+	if (taskc && taskc->cgx_raw)
+		return taskc->cgx_raw;
+
+	cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
+	if (!cgx_raw)
+		return 0;
+
+	if (taskc)
+		taskc->cgx_raw = cgx_raw;
+
+	return cgx_raw;
+}
+
+static __always_inline
+u64 cbw_taskc_get_llcx_raw(scx_task_cgroup_bw_t *taskc, u64 cgrp_id, int llc_id)
+{
+	u64 llcx_raw;
+
+	/*
+	 * Cache key is (cgrp_id, llc_id); cgrp_id is implicit because
+	 * @taskc is invalidated on cgroup migration (scx_cgroup_bw_move),
+	 * so a non-zero llcx_raw always belongs to the current cgroup.
+	 * On LLC change, re-look-up via cbw_get_llc_ctx_raw_with_id() and
+	 * refresh both fields.
+	 */
+	if (taskc->llcx_raw && taskc->last_llc_id == llc_id)
+		return taskc->llcx_raw;
+
+	llcx_raw = cbw_get_llc_ctx_raw_with_id(cgrp_id, llc_id);
+	if (!llcx_raw)
+		return 0;
+
+	taskc->llcx_raw = llcx_raw;
+	taskc->last_llc_id = llc_id;
+
+	return llcx_raw;
+}
+
 static
 long cbw_del_llc_ctx_with_id(u64 cgrp_id, int llc_id)
 {
@@ -2414,21 +2464,10 @@ int scx_cgroup_bw_consume(struct task_struct *p __arg_trusted __arg_nullable, u6
 		return -EINVAL;
 	}
 
-	/*
-	 * Use the cached llcx if the LLC id matches; otherwise look up by
-	 * cgx->id (avoids cgroup_get_id() pointer dereferences) and update
-	 * the cache.
-	 */
-	if (taskc->llcx_raw && taskc->last_llc_id == llc_id) {
-		llcx = (scx_cgroup_llc_ctx_t *)taskc->llcx_raw;
-	} else {
-		llcx_raw = cbw_get_llc_ctx_raw_with_id(cgx->id, llc_id);
-		if (!llcx_raw)
-			return 0;
-		taskc->llcx_raw = llcx_raw;
-		taskc->last_llc_id = llc_id;
-		llcx = (scx_cgroup_llc_ctx_t *)llcx_raw;
-	}
+	llcx_raw = cbw_taskc_get_llcx_raw(taskc, cgx->id, llc_id);
+	if (!llcx_raw)
+		return 0;
+	llcx = (scx_cgroup_llc_ctx_t *)llcx_raw;
 
 	/*
 	 * Update the budget usage.
@@ -3408,7 +3447,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 		       struct cgroup *from __arg_trusted,
 		       struct cgroup *to __arg_trusted)
 {
-	volatile scx_task_cgroup_bw_t *tc; /* Add `volatile` to work around the verifier error */
+	scx_task_cgroup_bw_t *tc;
 	scx_task_common *taskc = (scx_task_common *)task_ptr;
 	bool cancelled;
 	int ret;
