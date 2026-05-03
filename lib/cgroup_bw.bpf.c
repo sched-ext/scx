@@ -47,9 +47,8 @@ enum scx_cgroup_consts {
 	CBW_NR_CGRP_MAX			= 2048,
 	/* maximum number of scx_cgroup_llc_ctx: 2048 cgroups * 32 LLCs */
 	CBW_NR_CGRP_LLC_MAX		= (CBW_NR_CGRP_MAX * 32),
-	/* The maximum height of a cgroup tree.
-	 * cgroupv2 default maximum depth is 32 (kernel CGROUPS_DEPTH_MAX). */
-	CBW_CGRP_TREE_HEIGHT_MAX	= 32,
+	/* The maximum height of a cgroup tree. */
+	CBW_CGRP_TREE_HEIGHT_MAX	= 64,
 	/* unlimited quota ("max") from scx_cgroup_init_args and scx_cgroup_bw_set() */
 	CBW_RUNTUME_INF_RAW		= ((u64)~0ULL),
 	/* unlimited quota ("max"); This is for easier comparison between signed vs. unsigned integers. */
@@ -1102,6 +1101,11 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	u64 cgrp_id;
 
 	cgrp_id = cgroup_get_id(cgrp);
+	if (unlikely(cgrp->level >= CBW_CGRP_TREE_HEIGHT_MAX)) {
+		cbw_err("cgroup is too deep: cgid:  %llu, level: %d",
+			cgrp_id, cgrp->level);
+		return -ENOMEM;
+	}
 
 	/*
 	 * Allocate and initialize scx_cgroup_ctx for @cgrp.
