@@ -2455,7 +2455,11 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_llc_prox_map(skel: &mut BpfSkel, topo: &Topology) -> Result<()> {
+    fn init_single_prox_map_per_llc(
+        skel: &mut BpfSkel,
+        topo: &Topology,
+        prox_map_idx: &usize,
+    ) -> Result<()> {
         for (&llc_id, llc) in &topo.all_llcs {
             // Collect the orders.
             let mut node_order: Vec<usize> =
@@ -2468,7 +2472,7 @@ impl<'a> Scheduler<'a> {
 
             // Shuffle so that different LLCs follow different orders. See
             // init_cpu_prox_map().
-            fastrand::seed(llc_id as u64);
+            fastrand::seed((*prox_map_idx as u64) << 32 | llc_id as u64);
             fastrand::shuffle(&mut sys_order);
             fastrand::shuffle(&mut node_order);
 
@@ -2488,8 +2492,8 @@ impl<'a> Scheduler<'a> {
             let sys_end = idx;
 
             debug!(
-                "LLC[{}] proximity map[{}/{}]: {:?}",
-                llc_id, node_end, sys_end, &order
+                "LLC[{}] proximity map {}[{}/{}]: {:?}",
+                llc_id, prox_map_idx, node_end, sys_end, &order
             );
 
             // Record in llc_ctx.
@@ -2506,7 +2510,7 @@ impl<'a> Scheduler<'a> {
             let mut llcc: bpf_intf::llc_ctx =
                 *plain::from_bytes(v.as_slice()).expect("llc_ctx: short or misaligned buffer");
 
-            let pmap = &mut llcc.prox_map;
+            let pmap = &mut llcc.prox_maps[*prox_map_idx];
             for (i, &llc_id) in order.iter().enumerate() {
                 pmap.llcs[i] = llc_id as u16;
             }
@@ -2518,6 +2522,15 @@ impl<'a> Scheduler<'a> {
                 unsafe { plain::as_bytes(&llcc) },
                 libbpf_rs::MapFlags::ANY,
             )?
+        }
+
+        Ok(())
+    }
+
+    fn init_llc_prox_map(skel: &mut BpfSkel, topo: &Topology) -> Result<()> {
+        let num_proximity_maps = bpf_intf::consts_NUM_PROXIMITY_MAPS as usize;
+        for prox_map_idx in 0..num_proximity_maps {
+            Self::init_single_prox_map_per_llc(skel, topo, &prox_map_idx)?;
         }
 
         Ok(())

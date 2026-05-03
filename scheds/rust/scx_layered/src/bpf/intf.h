@@ -45,6 +45,7 @@ enum consts {
 	DUTY_CYCLE_SHIFT	= 20,		/* duty_cycle 1.0 = 1 << 20 */
 	LAYER_LAT_DECAY_FACTOR	= 32,
 	CLEAR_PREEMPTING_AFTER	= 10000000,	/* 10ms */
+	NUM_PROXIMITY_MAPS = 32,
 
 	DSQ_ID_SPECIAL_MASK	= 0xc0000000,
 	HI_FB_DSQ_BASE		= 0x40000000,
@@ -241,7 +242,7 @@ struct llc_ctx {
 	u64			queued_runtime[MAX_LAYERS];
 	u64			lo_fb_seq;
 	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
-	struct llc_prox_map	prox_map;
+	struct llc_prox_map	prox_maps[NUM_PROXIMITY_MAPS];
 };
 
 struct node_prox_map {
