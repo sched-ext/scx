@@ -4004,14 +4004,24 @@ mod lifecycle_format_tests {
             "i0/e12us/s34us/r56us/xlive:first=e seen=esr"
         );
     }
+
+    #[test]
+    fn avg_jitter_us_tolerates_zero_run_rows() {
+        let row = TaskTelemetryRow {
+            jitter_accum_ns: 42_000,
+            total_runs: 0,
+            ..TaskTelemetryRow::default()
+        };
+
+        assert_eq!(avg_jitter_us(&row), 0);
+    }
 }
 
 fn avg_jitter_us(row: &TaskTelemetryRow) -> u64 {
-    if row.total_runs > 0 {
-        row.jitter_accum_ns / row.total_runs as u64 / 1000
-    } else {
-        0
-    }
+    row.jitter_accum_ns
+        .checked_div(row.total_runs as u64)
+        .unwrap_or(0)
+        / 1000
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
