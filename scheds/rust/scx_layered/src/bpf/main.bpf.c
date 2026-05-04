@@ -1437,6 +1437,15 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (!idle_smtmask)
 		return -1;
 
+	/*
+	 * Grouped layers may opt to act like Confined for idle selection
+	 * until the layer becomes saturated (check_no_idle is set), at
+	 * which point they fall back to searching unprotected CPUs.
+	 */
+	bool can_use_open = layer->kind != LAYER_KIND_CONFINED &&
+		(!layer->idle_confined ||
+		 READ_ONCE(layer->check_no_idle));
+
 	if (is_float)
 		goto no_locality;
 
@@ -1499,7 +1508,7 @@ no_locality:
 	 * masks which respect p->cpus_ptr.
 	 */
 	if (nr_nodes > 1 && taskc->all_cpus_allowed) {
-		bool is_open = layer->kind != LAYER_KIND_CONFINED;
+		bool is_open = can_use_open;
 		u32 src_nid = prev_cpuc->node_id;
 		struct node_ctx *src_nodec;
 		s32 i;
@@ -1588,7 +1597,7 @@ xnuma_done: ;
 					     idle_smtmask, layer)) >= 0)
 			goto out;
 
-		if (layer->kind != LAYER_KIND_CONFINED) {
+		if (can_use_open) {
 			maybe_refresh_layered_cpus_unprotected(p, taskc,
 							       layered_cpumask);
 			unprot_mask = taskc->layered_unprotected_mask;

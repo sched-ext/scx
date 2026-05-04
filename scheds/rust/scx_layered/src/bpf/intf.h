@@ -395,6 +395,7 @@ struct layer {
 	bool			has_cpuset;
 	bool			skip_remote_node;
 	bool			prev_over_idle_core;
+	bool			idle_confined;
 	int			growth_algo;
 
 	u64			nr_tasks;
