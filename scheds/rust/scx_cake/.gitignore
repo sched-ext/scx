@@ -1,5 +1,6 @@
 .agent/
 docs/*
+!docs/flight_recorder_telemetry.md
 !docs/queue_policy_latency_findings.md
 
 # Benchmark binaries

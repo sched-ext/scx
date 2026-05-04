@@ -79,7 +79,6 @@ u64 blocked_owner_wait_max_ns[CAKE_MAX_CPUS] SEC(".bss")
 #ifndef CAKE_RELEASE
 static __always_inline struct cake_stats *get_local_stats(void)
 {
-	asm volatile("" : : "r"(enable_stats) : "memory");
 	u32 cpu = bpf_get_smp_processor_id();
 	return &global_stats[cpu & (CAKE_MAX_CPUS - 1)];
 }
@@ -103,8 +102,6 @@ static __always_inline struct cake_stats *get_local_stats_for(u32 cpu __maybe_un
 #endif
 
 #ifndef CAKE_RELEASE
-extern u32 bench_active;
-
 #define CAKE_DEBUG_RINGBUF_SIZE (512 * 1024)
 
 struct {
@@ -130,7 +127,7 @@ static __always_inline u32 cake_cb_bucket(u64 dur_ns)
 	return CAKE_CB_BUCKET_GE10US;
 }
 
-static __always_inline void cake_record_cb(struct cake_stats *s, u32 cb_idx, u64 dur_ns)
+static __noinline void cake_record_cb(struct cake_stats *s, u32 cb_idx, u64 dur_ns)
 {
 	if (!s || cb_idx >= CAKE_CB_MAX)
 		return;
@@ -212,7 +209,7 @@ static __always_inline void cake_record_select_decision_cost(
 		s->select_reason_select_max_ns[reason] = dur_ns;
 }
 
-static __always_inline void cake_record_select_migration(
+static __noinline void cake_record_select_migration(
 	struct cake_stats *s, u8 path, u8 reason)
 {
 	if (!s)
@@ -338,8 +335,8 @@ static __always_inline void cake_debug_atomic_inc(u64 *ptr)
 #include "debug_events.bpf.h"
 
 #ifndef CAKE_RELEASE
-static __always_inline void cake_record_select_choice(u8 reason, s32 prev_cpu,
-						      s32 target_cpu)
+static __noinline void cake_record_select_choice(u8 reason, s32 prev_cpu,
+						 s32 target_cpu)
 {
 	if (!CAKE_STATS_ACTIVE || reason == CAKE_SELECT_REASON_NONE ||
 	    reason >= CAKE_SELECT_REASON_MAX)
@@ -369,8 +366,9 @@ static __always_inline void cake_record_home_seed(u16 home_cpu, u8 reason)
 		cake_debug_atomic_inc(&home_seed_reason_count[reason][home_cpu]);
 }
 
-static __always_inline void cake_record_pressure_probe(u8 site, u8 outcome,
-						      s32 anchor_cpu)
+#if !CAKE_LEAN_SCHED
+static __noinline void cake_record_pressure_probe(u8 site, u8 outcome,
+						  s32 anchor_cpu)
 {
 	if (!CAKE_STATS_ACTIVE || site >= CAKE_PRESSURE_PROBE_SITE_MAX ||
 	    outcome >= CAKE_PRESSURE_PROBE_OUTCOME_MAX)
@@ -386,7 +384,7 @@ static __always_inline void cake_record_pressure_probe(u8 site, u8 outcome,
 					 [anchor_cpu & (CAKE_MAX_CPUS - 1)]);
 }
 
-static __always_inline void cake_record_pressure_anchor_block(
+static __noinline void cake_record_pressure_anchor_block(
 	u8 site, u8 reason, s32 anchor_cpu)
 {
 	if (!CAKE_STATS_ACTIVE || site >= CAKE_PRESSURE_PROBE_SITE_MAX ||
@@ -402,6 +400,7 @@ static __always_inline void cake_record_pressure_anchor_block(
 		&pressure_anchor_block_cpu_count[site][reason]
 						[anchor_cpu & (CAKE_MAX_CPUS - 1)]);
 }
+#endif
 
 static __always_inline void cake_record_local_insert(u64 dsq_id)
 {
@@ -439,7 +438,8 @@ static __always_inline void cake_record_local_run(u32 cpu)
 		__sync_fetch_and_add(&local_pending_est[cpu], (u32)-1);
 }
 
-static __always_inline void cake_record_wake_target_insert(
+#if !CAKE_LEAN_SCHED
+static __noinline void cake_record_wake_target_insert(
 	u32 target_cpu, bool direct, bool same_cpu)
 {
 	if (!CAKE_STATS_ACTIVE || target_cpu >= CAKE_MAX_CPUS)
@@ -457,8 +457,9 @@ static __always_inline void cake_record_wake_target_insert(
 	else
 		cake_debug_atomic_inc(&wake_busy_remote_target_count[target_cpu]);
 }
+#endif
 
-static __always_inline void cake_record_target_wait(
+static __noinline void cake_record_target_wait(
 	u8 reason, u16 target_cpu, u64 wait_ns)
 {
 	u32 cpu;
@@ -560,8 +561,10 @@ static __always_inline void cake_record_startup_phase(
 		tctx->telemetry.startup_first_phase = phase;
 }
 
-static __always_inline void cake_record_startup_enqueue(
+#if !CAKE_LEAN_SCHED
+static __noinline void cake_record_startup_enqueue(
 	struct cake_task_ctx __arena *tctx,
+	struct cake_stats *s,
 	u64 enqueue_start_ns)
 {
 	bool first_enqueue;
@@ -575,7 +578,6 @@ static __always_inline void cake_record_startup_enqueue(
 				  CAKE_STARTUP_MASK_ENQUEUE);
 	if (first_enqueue) {
 		u32 delta_us = cake_startup_delta_us(tctx, enqueue_start_ns);
-		struct cake_stats *s = get_local_stats();
 
 		tctx->telemetry.startup_enqueue_us = delta_us;
 		cake_record_lifecycle_us(&s->lifecycle_init_enqueue_us,
@@ -583,9 +585,11 @@ static __always_inline void cake_record_startup_enqueue(
 					 delta_us);
 	}
 }
+#endif
 
-static __always_inline void cake_record_startup_select(
+static __noinline void cake_record_startup_select(
 	struct cake_task_ctx __arena *tctx,
+	struct cake_stats *s,
 	u64 select_start_ns)
 {
 	bool first_select;
@@ -599,7 +603,6 @@ static __always_inline void cake_record_startup_select(
 				  CAKE_STARTUP_MASK_SELECT);
 	if (first_select) {
 		u32 delta_us = cake_startup_delta_us(tctx, select_start_ns);
-		struct cake_stats *s = get_local_stats();
 
 		tctx->telemetry.startup_select_us = delta_us;
 		cake_record_lifecycle_us(&s->lifecycle_init_select_us,
@@ -628,7 +631,7 @@ static __always_inline void cake_record_wake_class_reasons(
 	}
 }
 
-static __always_inline u8 cake_shadow_classify_task(
+static __noinline u8 cake_shadow_classify_task(
 	struct task_struct *p,
 	struct cake_task_ctx __arena *tctx,
 	u32 *reason_mask)
@@ -697,7 +700,8 @@ static __always_inline u8 cake_shadow_busy_preempt_decision(
 
 #define CAKE_BUSY_WAKE_WAIT_TAIL_NS 200000ULL
 
-static __always_inline void cake_record_busy_preempt_shadow(
+#if !CAKE_LEAN_SCHED
+static __noinline void cake_record_busy_preempt_shadow(
 	struct cake_stats *stats,
 	u8 decision,
 	u8 wakee_class,
@@ -717,6 +721,7 @@ static __always_inline void cake_record_busy_preempt_shadow(
 	else
 		stats->busy_preempt_shadow_remote++;
 }
+#endif
 
 #endif
 

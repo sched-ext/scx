@@ -83,17 +83,9 @@ fn main() {
     let max_llcs = detect_max_llcs();
     let is_single_llc = max_llcs == 1;
     let has_hybrid = detect_hybrid();
-    let enable_benchlab = std::env::var("CAKE_BENCHLAB")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-    let enable_locality_experiments = std::env::var("CAKE_LOCALITY_EXPERIMENTS")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-    let enable_hot_telemetry = std::env::var("CAKE_HOT_TELEMETRY")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-    let needs_arena = profile != "release"
-        && (enable_hot_telemetry || enable_benchlab || enable_locality_experiments);
+    let enable_locality_experiments = profile != "release";
+    let enable_hot_telemetry = profile != "release";
+    let needs_arena = profile != "release" && (enable_hot_telemetry || enable_locality_experiments);
 
     // Generate Rust constants file — avoids unstable option_env! str matching.
     let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -113,17 +105,12 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
-    println!("cargo:rerun-if-changed=src/bpf/benchlab.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
-    println!("cargo:rerun-if-env-changed=CAKE_BENCHLAB");
-    println!("cargo:rerun-if-env-changed=CAKE_LOCALITY_EXPERIMENTS");
-    println!("cargo:rerun-if-env-changed=CAKE_HOT_TELEMETRY");
 
     // Register custom cfg names to suppress unexpected_cfgs warnings
     println!("cargo::rustc-check-cfg=cfg(cake_bpf_release)");
     println!("cargo::rustc-check-cfg=cfg(cake_has_hybrid)");
     println!("cargo::rustc-check-cfg=cfg(cake_single_llc)");
-    println!("cargo::rustc-check-cfg=cfg(cake_benchlab)");
     println!("cargo::rustc-check-cfg=cfg(cake_locality_experiments)");
     println!("cargo::rustc-check-cfg=cfg(cake_hot_telemetry)");
     println!("cargo::rustc-check-cfg=cfg(cake_needs_arena)");
@@ -144,12 +131,6 @@ fn main() {
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
         println!("cargo:rustc-cfg=cake_bpf_release");
-    }
-    if profile != "release" && enable_benchlab {
-        cflags.push_str(" -DCAKE_BENCHLAB_ENABLED=1");
-        println!("cargo:rustc-cfg=cake_benchlab");
-    } else {
-        cflags.push_str(" -DCAKE_BENCHLAB_ENABLED=0");
     }
     if profile != "release" && enable_locality_experiments {
         cflags.push_str(" -DCAKE_LOCALITY_EXPERIMENTS=1");

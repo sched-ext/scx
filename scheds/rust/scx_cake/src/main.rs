@@ -86,6 +86,119 @@ enum QueuePolicy {
     LlcVtime = 1,
 }
 
+const LLC_DSQ_BASE: u64 = 200;
+const CPU_FAST_SCAN_SLOTS: usize = 4;
+const CPU_FAST_PROBE_SLOTS: usize = 4;
+const CPU_META_PRIMARY: u64 = 1u64 << 48;
+const CPU_META_SMT: u64 = 1u64 << 49;
+
+#[inline]
+fn pack_cpu_meta(
+    sibling_cpu: u16,
+    primary_cpu: u16,
+    llc_id: u32,
+    core_id: u32,
+    is_primary: bool,
+    has_smt_sibling: bool,
+) -> u64 {
+    let mut meta = (u64::from(sibling_cpu) & 0xffff)
+        | ((u64::from(primary_cpu) & 0xffff) << 16)
+        | ((u64::from(llc_id) & 0xff) << 32)
+        | ((u64::from(core_id) & 0xff) << 40);
+
+    if is_primary {
+        meta |= CPU_META_PRIMARY;
+    }
+    if has_smt_sibling {
+        meta |= CPU_META_SMT;
+    }
+    meta
+}
+
+#[inline]
+fn precompute_cpu_llc_dsq_id(llc_id: u32) -> u64 {
+    LLC_DSQ_BASE + u64::from(llc_id)
+}
+
+#[inline]
+fn primary_cpu_for(topo: &topology::TopologyInfo, cpu: usize, nr_cpus: usize) -> u16 {
+    if cpu >= nr_cpus {
+        return u16::MAX;
+    }
+    if topo.cpu_thread_bit[cpu] == 1 {
+        return cpu as u16;
+    }
+
+    let sibling = topo.cpu_sibling_map[cpu] as usize;
+    if sibling < nr_cpus && topo.cpu_thread_bit[sibling] == 1 {
+        return sibling as u16;
+    }
+
+    cpu as u16
+}
+
+fn build_fast_scan_slots(
+    cpu: usize,
+    nr_cpus: usize,
+    cpu_sibling_map: &[u16],
+    cpu_thread_bit: &[u8],
+    cpu_llc_id: &[u8],
+) -> [u16; CPU_FAST_SCAN_SLOTS] {
+    fn push_unique(slots: &mut [u16; CPU_FAST_SCAN_SLOTS], next: &mut usize, cpu: usize, nr: usize) {
+        if cpu >= nr || *next >= CPU_FAST_SCAN_SLOTS {
+            return;
+        }
+        let cpu = cpu as u16;
+        if slots.iter().take(*next).any(|&seen| seen == cpu) {
+            return;
+        }
+        slots[*next] = cpu;
+        *next += 1;
+    }
+
+    let mut slots = [u16::MAX; CPU_FAST_SCAN_SLOTS];
+    let mut next = 0;
+    if cpu >= nr_cpus {
+        return slots;
+    }
+
+    push_unique(&mut slots, &mut next, cpu, nr_cpus);
+
+    let sibling = cpu_sibling_map.get(cpu).copied().unwrap_or(u16::MAX) as usize;
+    let primary = if cpu_thread_bit.get(cpu).copied().unwrap_or(0) == 1 {
+        cpu
+    } else if sibling < nr_cpus && cpu_thread_bit.get(sibling).copied().unwrap_or(0) == 1 {
+        sibling
+    } else {
+        cpu
+    };
+    push_unique(&mut slots, &mut next, primary, nr_cpus);
+
+    let llc = cpu_llc_id.get(cpu).copied().unwrap_or(0);
+    for candidate in 0..nr_cpus {
+        if cpu_llc_id.get(candidate).copied().unwrap_or(u8::MAX) != llc {
+            continue;
+        }
+        if cpu_thread_bit.get(candidate).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        push_unique(&mut slots, &mut next, candidate, nr_cpus);
+        if next >= CPU_FAST_SCAN_SLOTS {
+            break;
+        }
+    }
+    push_unique(&mut slots, &mut next, sibling, nr_cpus);
+
+    slots
+}
+
+#[inline]
+fn active_fast_scan_probe_slots(
+    slots: [u16; CPU_FAST_SCAN_SLOTS],
+) -> [u16; CPU_FAST_PROBE_SLOTS] {
+    [slots[0], slots[1], slots[2], slots[3]]
+}
+
 /// 🍰 scx_cake: A CAKE-inspired sched_ext CPU scheduler
 ///
 /// This scheduler adapts CAKE's low-latency scheduling ideas to CPU time.
@@ -150,7 +263,6 @@ struct Args {
     /// This generic behavior-based guard keeps hot short blocking wake chains
     /// near their learned CPU instead of broadening every idle scan. It defaults
     /// off because latency tails are worse than migration for the current policy.
-    /// Requires a build with CAKE_LOCALITY_EXPERIMENTS=1.
     #[arg(
         long,
         default_value_t = false,
@@ -167,7 +279,6 @@ struct Args {
     /// This controls the arena-backed home/core/primary steering policy used
     /// after a task has enough history. It defaults off so the baseline stays
     /// latency-first and idle-selector driven.
-    /// Requires a build with CAKE_LOCALITY_EXPERIMENTS=1.
     #[arg(
         long,
         default_value_t = false,
@@ -184,7 +295,6 @@ struct Args {
     /// POLICY uses Cake's current owner-runtime/pressure policy.
     /// PREEMPT forces immediate preempt kicks for local busy wakeups.
     /// IDLE forces gentler idle kicks for local busy wakeups.
-    /// Non-policy A/B behavior requires a build with CAKE_LOCALITY_EXPERIMENTS=1.
     #[arg(long, value_enum, default_value_t = BusyWakeKickMode::Policy, verbatim_doc_comment)]
     busy_wake_kick: BusyWakeKickMode,
 
@@ -200,9 +310,8 @@ struct Args {
     /// Enable live TUI (Terminal User Interface) with real-time statistics.
     ///
     /// Shows live scheduler stats, wait/run timing, and system topology
-    /// information. The default debug build includes exact hot-path frequency
-    /// counters while keeping stack-heavy callback timing compiled out. Full
-    /// callback timing requires rebuilding with CAKE_HOT_TELEMETRY=1.
+    /// information. Debug builds compile the full verbose capture surface by
+    /// default; release builds compile telemetry out.
     /// Press 'q' to exit TUI mode.
     #[arg(long, short, verbatim_doc_comment)]
     verbose: bool,
@@ -253,22 +362,6 @@ impl<'a> Scheduler<'a> {
         // Cake can't use the macro directly (custom arena architecture),
         // so we inline the critical functionality.
         scx_utils::compat::check_min_requirements()?;
-
-        #[cfg(all(debug_assertions, not(cake_hot_telemetry)))]
-        if args.verbose {
-            warn!(
-                "default debug build includes hot-path frequency counters; full callback timing requires CAKE_HOT_TELEMETRY=1"
-            );
-        }
-        #[cfg(all(debug_assertions, not(cake_locality_experiments)))]
-        if args.learned_locality
-            || args.wake_chain_locality
-            || args.busy_wake_kick != BusyWakeKickMode::Policy
-        {
-            warn!(
-                "locality and busy-wake A/B knobs require rebuilding with CAKE_LOCALITY_EXPERIMENTS=1"
-            );
-        }
 
         let skel_builder = BpfSkelBuilder::default();
         let mut open_skel = skel_builder
@@ -407,6 +500,33 @@ impl<'a> Scheduler<'a> {
                 rodata.cpu_core_id[i] = topo.cpu_core_id[i];
             }
 
+            let nr = topo.nr_cpus.min(topology::MAX_CPUS);
+            for i in 0..nr.min(rodata.cpu_meta.len()) {
+                let sibling = topo.cpu_sibling_map[i];
+                let has_smt_sibling = (sibling as usize) < nr && sibling as usize != i;
+                let primary = primary_cpu_for(&topo, i, nr);
+                let is_primary = primary as usize == i;
+                let llc_id = topo.cpu_llc_id[i] as u32;
+
+                rodata.cpu_meta[i] = pack_cpu_meta(
+                    sibling,
+                    primary,
+                    llc_id,
+                    topo.cpu_core_id[i] as u32,
+                    is_primary,
+                    has_smt_sibling,
+                );
+                rodata.cpu_llc_dsq[i] = precompute_cpu_llc_dsq_id(llc_id);
+                let fast_scan = build_fast_scan_slots(
+                    i,
+                    nr,
+                    &topo.cpu_sibling_map,
+                    &topo.cpu_thread_bit,
+                    &topo.cpu_llc_id,
+                );
+                rodata.cpu_fast_probe[i] = active_fast_scan_probe_slots(fast_scan);
+            }
+
             info!("Topology Strategy: Per-CPU local-first dispatch");
 
             // Performance-ordered CPU scan arrays — HYBRID ONLY
@@ -462,21 +582,6 @@ impl<'a> Scheduler<'a> {
                     "Core steering: fast→slow order {:?} ({} CPUs)",
                     top_cpus, nr
                 );
-            }
-
-            // cpuperf_cap_table: kept for BenchLab but no scheduling reads.
-            // Still populate for bench competitor comparison.
-            #[cfg(not(cake_bpf_release))]
-            {
-                let nr = topo.nr_cpus.min(topology::MAX_CPUS);
-                for cpu in 0..nr {
-                    let path = format!("/sys/devices/system/cpu/cpu{}/cpu_capacity", cpu);
-                    let cap = std::fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|s| s.trim().parse::<u32>().ok())
-                        .unwrap_or(1024);
-                    rodata.cpuperf_cap_table[cpu] = cap;
-                }
             }
 
             #[cfg(cake_needs_arena)]
@@ -693,5 +798,44 @@ mod tests {
         let args = Args::try_parse_from(["scx_cake", "--queue-policy", "local"]).unwrap();
 
         assert_eq!(args.queue_policy, QueuePolicy::Local);
+    }
+
+    #[test]
+    fn cpu_meta_packs_static_topology_fact() {
+        let meta = pack_cpu_meta(300, 260, 12, 44, true, true);
+
+        assert_eq!(meta & 0xffff, 300);
+        assert_eq!((meta >> 16) & 0xffff, 260);
+        assert_eq!((meta >> 32) & 0xff, 12);
+        assert_eq!((meta >> 40) & 0xff, 44);
+        assert_ne!(meta & CPU_META_PRIMARY, 0);
+        assert_ne!(meta & CPU_META_SMT, 0);
+    }
+
+    #[test]
+    fn precomputed_dsq_ids_match_bpf_layout() {
+        assert_eq!(precompute_cpu_llc_dsq_id(2), 202);
+    }
+
+    #[test]
+    fn fast_scan_slots_are_init_built_nearby_cpu_order() {
+        let siblings = [1, 0, 3, 2];
+        let thread_bits = [1, 2, 1, 2];
+        let llcs = [0, 0, 0, 0];
+
+        let slots = build_fast_scan_slots(1, 4, &siblings, &thread_bits, &llcs);
+
+        assert_eq!(slots, [1, 0, 2, u16::MAX]);
+
+        let primary_slots = build_fast_scan_slots(0, 4, &siblings, &thread_bits, &llcs);
+
+        assert_eq!(primary_slots, [0, 2, 1, u16::MAX]);
+    }
+
+    #[test]
+    fn active_fast_scan_probe_slots_are_prev_then_primary() {
+        let slots = [7, 4, 2, u16::MAX];
+
+        assert_eq!(active_fast_scan_probe_slots(slots), [7, 4, 2, u16::MAX]);
     }
 }
