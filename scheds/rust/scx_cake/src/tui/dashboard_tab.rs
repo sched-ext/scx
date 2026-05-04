@@ -470,8 +470,7 @@ pub(super) fn draw_dashboard_tab(
         tier_pids[t] += 1;
         tier_avg_rt_sum[t] += row.pelt_util as u64;
         tier_active[t] += 1;
-        let j = row.jitter_accum_ns / row.total_runs as u64;
-        tier_jitter_sum[t] += j / 1000;
+        tier_jitter_sum[t] += avg_jitter_us(row);
         tier_runs_per_sec[t] += row.runs_per_sec;
         tier_wait_sum[t] += row.wait_duration_ns / 1000;
     }

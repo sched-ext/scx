@@ -50,9 +50,9 @@ pub(super) fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
     );
     frame.render_widget(topology_grid, layout[0]);
 
-    // Dynamic heatmap title based on benchmark state
-    let heatmap_title = if app.bench_latency_handle.is_some() {
-        " Latency Heatmap ⏱ Benchmarking... ".to_string()
+    // Dynamic heatmap title based on latency measurement state
+    let heatmap_title = if app.latency_probe_handle.is_some() {
+        " Latency Heatmap Measuring... ".to_string()
     } else if app
         .latency_matrix
         .iter()
@@ -60,7 +60,7 @@ pub(super) fn draw_topology_tab(frame: &mut Frame, app: &TuiApp, area: Rect) {
     {
         " Latency Heatmap (ns) ".to_string()
     } else {
-        " Latency Heatmap [b] Benchmark ".to_string()
+        " Latency Heatmap [b] Measure ".to_string()
     };
     let heatmap = LatencyHeatmap::new(&app.latency_matrix, &app.topology, &heatmap_title);
     frame.render_widget(heatmap, layout[1]);

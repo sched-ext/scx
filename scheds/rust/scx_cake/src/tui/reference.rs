@@ -232,7 +232,7 @@ pub(super) fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         ),
         col(
             "Last60s",
-            "Rolling 1-second samples: runs/s, 1% low, callback avg, path share, quantum f/b/p, sched_yield/s, coverage, and retained history span",
+            "Rolling 1-second samples plus retained flight rows: runs/s, 1% low, callback avg, path share, load/temp, anomaly seconds, and history span",
         ),
         col(
             "Signals",
@@ -308,7 +308,7 @@ pub(super) fn draw_reference_tab(frame: &mut Frame, area: Rect) {
         section("═══ KEY BINDINGS ═══"),
         Line::from(""),
         col("←/→ Tab", "Switch tabs"),
-        col("↑/↓ j/k", "Scroll task, app, or benchmark rows"),
+        col("↑/↓ j/k", "Scroll task or app rows"),
         col("s / S", "Cycle sort column / reverse direction"),
         col("+ / -", "Adjust refresh rate"),
         col("f", "Cycle filters: BPF-tracked -> live-only -> all"),
@@ -325,7 +325,7 @@ pub(super) fn draw_reference_tab(frame: &mut Frame, area: Rect) {
             "d",
             "Dump dashboard to tui_dump_*.txt plus tui_dump_*.json coverage sidecar",
         ),
-        col("b", "Run BenchLab benchmark iteration"),
+        col("b", "Topology: measure core-to-core latency"),
         col("r", "Reset state"),
         col("q / Esc", "Quit scx_cake"),
         Line::from(""),

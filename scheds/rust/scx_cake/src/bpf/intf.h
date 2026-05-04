@@ -21,7 +21,7 @@ typedef signed long    s64;
 
 /* CAKE TIER SYSTEM — legacy 4-tier latency buckets
  *
- * These enum values are retained for telemetry, BenchLab, and older UI paths.
+ * These enum values are retained for telemetry and older UI paths.
  * The current scheduler does not classify hot-path work into these tiers. */
 enum cake_tier {
 	CAKE_TIER_CRITICAL = 0, /* Lowest-latency legacy bucket */
@@ -69,17 +69,17 @@ enum cake_startup_phase {
 
 
 /* ═══ PER-CPU BSS ═══
- * Written by cake_running (local CPU only), read by cake_stopping and a
- * small number of enqueue/dispatch helpers.
+ * Written by local CPU callbacks, read by cake_stopping and a small number of
+ * same-CPU enqueue/dispatch helpers. Release remote wake placement reads the
+ * owner-published cpu_status/cpu_frontier lanes instead of these private hints.
  *
- * 128-byte aligned for V-Cache sector isolation.
+ * Page aligned for cache/TLB isolation across CPUs.
  * Single-writer (local running), multi-reader (no atomics needed). */
 struct cake_cpu_bss {
 #ifndef CAKE_RELEASE
 	u32 run_start;          /* 4B: (u32)cake_clock when task started.
 				 *     Written: cake_running (debug only).
-				 *     Read: running_telemetry (debug only).
-				 *     Kept in debug: BenchLab bench 55 references it. */
+				 *     Read: running_telemetry (debug only). */
 	u8  tick_count;         /* 1B: cake_tick throttle counter */
 	u8  llc_id;             /* 1B: per-CPU LLC ID cache.
 				 *     Set once at init from cpu_llc_id RODATA.
@@ -93,15 +93,21 @@ struct cake_cpu_bss {
 				 *     clamp against the current workload
 				 *     instead of a historical max. */
 	u32 last_pid;           /* 4B: Fast path — skip task-change work if same pid */
-	u8  idle_hint;          /* 1B: 0=busy, 1=idle */
-	u8  cpu_pressure;       /* 1B: rolling lane pressure for same-core spill decisions */
+#ifndef CAKE_RELEASE
+	u8  idle_hint;          /* 1B: debug-only private mirror of idle state */
+#endif
+#ifndef CAKE_RELEASE
+	u8  cpu_pressure;       /* 1B: debug/non-lean raw pressure; release publishes
+				 *     pressure bucket in cpu_status. */
+#endif
 #ifndef CAKE_RELEASE
 	u8  busy_wakeup_pending; /* 1B: reserved for future wake handoff policy */
 	u8  last_wake_class;    /* 1B: last running task's shadow wake class */
 #endif
 	u32 owner_avg_runtime_ns; /* 4B: release policy EWMA for current CPU owner */
 	u16 owner_run_count;    /* 2B: samples behind owner_avg_runtime_ns */
-	u16 _pad_owner_policy;  /* 2B: keep debug-only fields aligned */
+	u16 _pad_owner_policy;  /* 2B: keep owner policy fields aligned */
+	u64 decision_confidence; /* Packed confidence for accelerator paths */
 #ifndef CAKE_RELEASE
 	u8  last_strict_wake_class; /* Strict dry-run class for busy-preempt experiments */
 	u8  _pad_strict[7];
@@ -122,6 +128,44 @@ struct cake_cpu_bss {
  * Hardware page boundary isolation ensures L2 hardware prefetchers cannot
  * speculatively load adjacent CPU states, absolutely eradicating MESI
  * snoop invalidation storms across dual-CCD topologies. */
+
+/* Owner-written, remotely-readable CPU publication lanes.
+ *
+ * cpu_bss is private scheduling bookkeeping: tick baselines, last_pid, owner
+ * runtime, and local vtime integration. Wake placement only needs a compact
+ * hint surface, so release paths publish status/frontier separately and keep
+ * cross-CPU reads away from the private BSS line.
+ */
+#define CAKE_CPU_STATUS_IDLE          (1ULL << 0)
+#define CAKE_CPU_STATUS_ACCEPT_WAKE   (1ULL << 1)
+
+#define CAKE_CPU_STATUS_OWNER_SHIFT   8U
+#define CAKE_CPU_STATUS_OWNER_MASK    0x7ULL
+#define CAKE_CPU_STATUS_PRESS_SHIFT   12U
+#define CAKE_CPU_STATUS_PRESS_MASK    0x3ULL
+
+#define CAKE_CPU_OWNER_UNKNOWN        0U
+#define CAKE_CPU_OWNER_SHORT          1U
+#define CAKE_CPU_OWNER_INTERACTIVE    2U
+#define CAKE_CPU_OWNER_FRAME          3U
+#define CAKE_CPU_OWNER_BULK           4U
+
+#define CAKE_CPU_PRESSURE_LOW         0U
+#define CAKE_CPU_PRESSURE_MED         1U
+#define CAKE_CPU_PRESSURE_HIGH        2U
+#define CAKE_CPU_PRESSURE_FULL        3U
+
+struct cake_cpu_status {
+	u64 flags;              /* CAKE_CPU_STATUS_* plus owner/pressure buckets */
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct cake_cpu_status) == 64,
+	       "cake_cpu_status must stay one cache line");
+
+struct cake_cpu_frontier {
+	u64 vtime;              /* Published vtime frontier for wake clamp/seeding */
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct cake_cpu_frontier) == 64,
+	       "cake_cpu_frontier must stay one cache line");
 
 
 
@@ -189,121 +233,6 @@ typedef unsigned short cake_cpu_id_t;
  * Ordering state now lives in p->scx.dsq_vtime; legacy class/tier metadata
  * remains only in packed_info/telemetry paths. */
 
-/* ── Kfunc BenchLab: extensible per-kfunc stopwatch ──
- * Each kfunc gets a slot. Run N iterations, capture min/max/avg + return value.
- * Triggered from TUI via bench_request BSS variable. */
-#define BENCH_ITERATIONS 8
-
-enum kfunc_bench_id {
-	/* ── Existing entries (0–23) ── */
-	BENCH_KTIME_GET_NS       = 0, /* bpf_ktime_get_ns() */
-	BENCH_SCX_BPF_NOW        = 1, /* scx_bpf_now() */
-	BENCH_GET_SMP_PROC_ID    = 2, /* bpf_get_smp_processor_id() */
-	BENCH_TASK_FROM_PID      = 3, /* bpf_task_from_pid() */
-	BENCH_TEST_CLEAR_IDLE    = 4, /* scx_bpf_test_and_clear_cpu_idle() */
-	BENCH_NR_CPU_IDS         = 5, /* scx_bpf_nr_cpu_ids() */
-	BENCH_GET_TASK_CTX       = 6, /* get_task_ctx() → arena deref */
-	BENCH_DSQ_NR_QUEUED      = 7, /* scx_bpf_dsq_nr_queued() */
-	BENCH_BSS_ARRAY_ACCESS   = 8, /* Raw BSS global_stats[cpu] access */
-	BENCH_ARENA_DEREF        = 9, /* Arena per_cpu[cpu].mbox field read */
-	BENCH_NOW_PAIR           = 10, /* Back-to-back scx_bpf_now() pair (calibration) */
-	BENCH_MBOX_CPU_READ      = 11, /* Read cached CPU from mailbox CL0 (alternative) */
-	BENCH_TCTX_FROM_MBOX     = 12, /* Read cached tctx ptr from mailbox CL0 (alternative) */
-	BENCH_RINGBUF_CYCLE      = 13, /* bpf_ringbuf_reserve + discard cycle */
-	BENCH_TASK_STRUCT_READ   = 14, /* p->scx.slice + p->nvcsw (task_struct fields) */
-	BENCH_RODATA_LOOKUP      = 15, /* cpu_llc_id[cpu] + tier_slice_ns[tier] RODATA */
-	BENCH_BITFLAG_OPS        = 16, /* Shift+mask+branchless yielder pattern */
-	BENCH_RESERVED_17        = 17, /* (was compute_ewma — removed in PELT transition) */
-	BENCH_PSYCHIC_HIT_SIM    = 18, /* Psychic cache pointer compare + fused read */
-	BENCH_IDLE_REMOTE        = 19, /* scx_bpf_test_and_clear_cpu_idle(sibling) — cross-CPU */
-	BENCH_IDLE_SMTMASK       = 20, /* cpumask_test_cpu on smtmask — read-only, no atomic */
-	BENCH_DISRUPTOR_READ     = 21, /* Full CL0 Disruptor handoff read (cake_stopping sim) */
-	BENCH_TCTX_COLD_SIM      = 22, /* get_task_ctx + arena CL0 read (cake_running sim) */
-	BENCH_ARENA_STRIDE       = 23, /* Stride across arena per_cpu array to test TLB/hugepage */
-
-	/* ── New entries (24–42): eBPF helpers + SCX kfuncs ── */
-	/* Timing variants */
-	BENCH_KTIME_BOOT_NS      = 24, /* bpf_ktime_get_boot_ns() — suspend-aware */
-	BENCH_KTIME_COARSE_NS    = 25, /* bpf_ktime_get_coarse_ns() — jiffies-based low-res */
-	BENCH_JIFFIES64           = 26, /* bpf_jiffies64() — raw jiffies */
-	BENCH_KTIME_TAI_NS       = 27, /* bpf_ktime_get_tai_ns() — TAI clock */
-
-	/* Process info */
-	BENCH_CURRENT_PID_TGID   = 28, /* bpf_get_current_pid_tgid() — PID+TGID in one */
-	BENCH_CURRENT_TASK_BTF   = 29, /* bpf_get_current_task_btf() — direct task ptr */
-	BENCH_CURRENT_COMM       = 30, /* bpf_get_current_comm() — task comm name */
-
-	/* CPU / topology info */
-	BENCH_NUMA_NODE_ID       = 31, /* bpf_get_numa_node_id() — NUMA node */
-	BENCH_SCX_TASK_RUNNING   = 32, /* scx_bpf_task_running(p) — task running check */
-	BENCH_SCX_TASK_CPU       = 33, /* scx_bpf_task_cpu(p) — task's current CPU */
-	BENCH_SCX_NR_NODE_IDS    = 34, /* scx_bpf_nr_node_ids() — NUMA node count */
-	BENCH_SCX_CPUPERF_CUR    = 35, /* scx_bpf_cpuperf_cur(cpu) — current perf level */
-
-		/* Task storage baseline (kept for BenchLab comparison against arena) */
-		BENCH_TASK_STORAGE_GET   = 36, /* bpf_task_storage_get() — standard per-task map */
-
-	/* Idle probing alternatives */
-	BENCH_SCX_PICK_IDLE_CPU  = 37, /* scx_bpf_pick_idle_cpu() — kernel idle scan */
-	BENCH_SCX_IDLE_CPUMASK   = 38, /* scx_bpf_get_idle_cpumask() + put cycle */
-	BENCH_SCX_KICK_CPU       = 39, /* scx_bpf_kick_cpu() — IPI preemption cost */
-
-	/* Utility */
-	BENCH_PRANDOM_U32        = 40, /* bpf_get_prandom_u32() — RNG cost */
-	BENCH_SPIN_LOCK          = 41, /* bpf_spin_lock + unlock cycle */
-	BENCH_SCX_CPUPERF_CAP    = 42, /* scx_bpf_cpuperf_cap(cpu) — max perf capacity */
-
-	/* ── Cake competitor entries (43–49) ── */
-	BENCH_RODATA_NR_CPUS     = 43, /* RODATA const nr_cpus read (vs nr_cpu_ids kfunc) */
-	BENCH_RODATA_NR_NODES    = 44, /* RODATA const nr_nodes read (vs nr_node_ids kfunc) */
-	BENCH_RODATA_CPUPERF_CAP = 45, /* RODATA cpuperf_cap[cpu] read (vs kfunc) */
-	BENCH_ARENA_PID_TGID     = 46, /* Arena tctx.pid+tgid read (vs current_pid_tgid kfunc) */
-	BENCH_MBOX_TASK_CPU      = 47, /* Mbox CL0 cached_cpu (vs scx_bpf_task_cpu kfunc) */
-	BENCH_CL0_LOCKFREE       = 48, /* CL0 lock-free atomic read (vs bpf_spin_lock cycle) */
-	BENCH_BSS_XORSHIFT       = 49, /* BSS xorshift32 PRNG (vs bpf_get_prandom_u32 kfunc) */
-
-	/* ═══ KERNEL FREE DATA PROBES (50–54) ═══ */
-	BENCH_PELT_UTIL_AVG      = 50, /* p->se.avg.util_avg — kernel EWMA (0-1024) */
-	BENCH_PELT_RUNNABLE_AVG  = 51, /* p->se.avg.runnable_avg — kernel runnable EWMA */
-	BENCH_SCHEDSTATS_WAKEUPS = 52, /* p->stats.nr_wakeups — cumulative wakeup count */
-	BENCH_TASK_POLICY_FLAGS  = 53, /* p->policy + p->in_iowait — free classification */
-		BENCH_PELT_VS_EWMA       = 54, /* PELT read + legacy tier bucketing */
-
-	/* ═══ END-TO-END WORKFLOW COMPARISONS (55–62) ═══ */
-	BENCH_STORAGE_ROUNDTRIP  = 55, /* task_storage: write field → read back (full cycle) */
-	BENCH_ARENA_ROUNDTRIP    = 56, /* Arena: write field → read back (full cycle) */
-	BENCH_CASCADE_VS_PICK    = 57, /* 6-gate cascade sim: prev→sib→home BSS vs pick_idle */
-	BENCH_PICK_IDLE_FULL     = 58, /* pick_idle_cpu full: kfunc + affinity check + result */
-	BENCH_CLASSIFY_WEIGHT    = 59, /* bpfland-style: p->scx.weight → vtime calc */
-	BENCH_CLASSIFY_LATCRI    = 60, /* lavd-style: wakeup_sync + run_freq → score */
-	BENCH_SMT_CAKE_PROBE     = 61, /* cake SMT: test_and_clear(sib) + BSS[sib].idle_hint */
-	BENCH_SMT_CPUMASK_PROBE  = 62, /* bpfland SMT: is_smt_contended via cpumask scan */
-
-	/* ═══ FAIRNESS FIXES (63–66) ═══ */
-	BENCH_STORAGE_GET_COLD   = 63, /* task_storage_get after L1 eviction (cold task) */
-	BENCH_PELT_COLD          = 64, /* PELT util_avg after L1 eviction (cold p->se.avg) */
-	BENCH_EWMA_COLD          = 65, /* EWMA compute after L1 eviction (cold cpu_bss) */
-	BENCH_KICK_REMOTE        = 66, /* kick_cpu(sibling) — real IPI, not self-noop */
-	BENCH_SELECT_CPU_AND     = 67, /* Reserved: select_cpu kfuncs are illegal from stopping BenchLab */
-
-	BENCH_MAX_ENTRIES        = 68,
-};
-
-struct kfunc_bench_entry {
-	u64 min_ns;         /* Best-case cost */
-	u64 max_ns;         /* Worst-case cost */
-	u64 total_ns;       /* Sum for avg calc */
-	u64 last_value;     /* Last return value from the helper */
-	u64 samples[BENCH_ITERATIONS]; /* Raw per-iteration ns for percentile calc */
-};
-
-struct kfunc_bench_results {
-	struct kfunc_bench_entry entries[BENCH_MAX_ENTRIES];
-	u32 cpu;            /* CPU that ran the bench */
-	u32 iterations;     /* Iterations per helper */
-	u64 bench_timestamp; /* When bench completed (ktime_ns) */
-};
-
 /* Gate cascade (simplified 3-gate design):
  *   Gate 1: prev_cpu idle
  *   Gate 2: perf-ordered idle scan (hybrid systems only)
@@ -313,7 +242,7 @@ struct kfunc_bench_results {
 /* Flow state flags (packed_info bits 24-27).
  * packed_info is now primarily an iter/debug transport field.
  * Only NEW/YIELDER and KCRITICAL have live readers; the rest are
- * retained for telemetry / BenchLab compatibility. */
+ * retained for telemetry compatibility. */
 enum cake_flow_flags {
 	CAKE_FLOW_NEW          = 1 << 0, /* Task is newly created */
 	CAKE_FLOW_YIELDER      = 1 << 1, /* Task voluntarily yielded since last stop */
@@ -603,6 +532,11 @@ struct cake_iter_record {
 		u64 home_place_wait_ns[CAKE_PLACE_CLASS_MAX];
 		u32 home_place_wait_count[CAKE_PLACE_CLASS_MAX];
 		u32 home_place_wait_max_us[CAKE_PLACE_CLASS_MAX];
+		u64 smt_solo_runtime_ns;
+		u64 smt_contended_runtime_ns;
+		u64 smt_overlap_runtime_ns;
+		u32 smt_solo_run_count;
+		u32 smt_contended_run_count;
 		u16 cpu_run_count[CAKE_TELEM_MAX_CPUS];
 	} telemetry;
 };
@@ -611,31 +545,25 @@ struct cake_iter_record {
  * CONDITIONAL SIZE MACROS — Release/Debug struct sizing pattern
  *
  * DESIGN PHILOSOPHY: In release (CAKE_RELEASE=1, CAKE_STATS_ENABLED=0),
- * Clang dead-code eliminates every telemetry/BenchLab access. Structs
+ * Clang dead-code eliminates every telemetry access. Structs
  * shrink to their scheduling-essential footprint by #ifdef-gating
  * debug-only fields. This saves arena memory, TLB footprint, and
  * cache pollution in production builds.
  *
  * Structs using this pattern:
- *   mega_mailbox_entry:  64B release (1 CL) / 128B debug (2 CL)
- *   cake_task_ctx:       64B release (1 CL) / 512B debug (8 CL)
- *   cake_per_cpu:        matches mailbox size
+ *   cake_task_ctx:       64B release (1 CL) / 576B debug (9 CL)
  * ═══════════════════════════════════════════════════════════════════════════ */
 #ifdef CAKE_RELEASE
-#define CAKE_MBOX_SIZE  64
-#define CAKE_MBOX_ALIGN 64
 #define CAKE_TCTX_SIZE  64
 #define CAKE_TCTX_ALIGN 64
 #else
-#define CAKE_MBOX_SIZE  128
-#define CAKE_MBOX_ALIGN 128
-#define CAKE_TCTX_SIZE  512
+#define CAKE_TCTX_SIZE  576
 #define CAKE_TCTX_ALIGN 64
 #endif
 
 /* Per-task context — conditional sizing (Release/Debug pattern).
  *   RELEASE: 64B (1 CL) — iter-visible fields only, telemetry compiled out
- *   DEBUG:  512B (8 CL) — iter-visible fields plus TUI telemetry
+ *   DEBUG:  576B (9 CL) — iter-visible fields plus TUI telemetry
  *
  * CACHE LINE SEGREGATION:
  *   CL0 (bytes 0-63): Fields needed for iter output and debug bookkeeping.
@@ -664,7 +592,7 @@ struct cake_task_ctx {
 
 #ifndef CAKE_RELEASE
 	/* ═══ CL1+ (bytes 64-447): DEBUG-ONLY TELEMETRY ═══
-	 * Compiled out in release → struct shrinks from 512B to 64B.
+	 * Compiled out in release → struct shrinks from 576B to 64B.
 	 * Zero-cost pointer access via BPF Arena. User-space sweeps memory
 	 * asynchronously to build 1% Lows and average runtimes. */
 	struct {
@@ -786,6 +714,13 @@ struct cake_task_ctx {
 		u8 pending_strict_owner_class; /* Strict owner class on busy target */
 		u8 pending_target_pressure;    /* Pressure observed on busy target */
 
+		/* Task-local SMT overlap attribution */
+		u64 smt_solo_runtime_ns;       /* Runtime completed without sibling overlap */
+		u64 smt_contended_runtime_ns;  /* Runtime completed with sibling overlap */
+		u64 smt_overlap_runtime_ns;    /* Estimated overlap charged to this task */
+		u32 smt_solo_run_count;        /* Runs without observed sibling overlap */
+		u32 smt_contended_run_count;   /* Runs with observed sibling overlap */
+
 		/* CPU core distribution histogram */
 		u16 cpu_run_count[CAKE_TELEM_MAX_CPUS]; /* 128 bytes: per-CPU run count */
 	} telemetry;
@@ -793,7 +728,7 @@ struct cake_task_ctx {
 } __attribute__((aligned(CAKE_TCTX_ALIGN)));
 _Static_assert(
 	sizeof(struct cake_task_ctx) == CAKE_TCTX_SIZE,
-	"cake_task_ctx size mismatch (64B release, 512B debug)");
+	"cake_task_ctx size mismatch (64B release, 576B debug)");
 
 /* packed_info bitfield layout (iter/debug transport field):
  * [Stable:2][Tier:2][Flags:4][KCR:1][BG:1][Rsvd:2][WCS:4][Rsvd:8]
@@ -815,64 +750,6 @@ _Static_assert(
 
 /* Legacy HOG detection threshold retained for debug/telemetry compatibility.
  * Current release code does not actively reclassify tasks with it. */
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * MEGA-MAILBOX: Per-CPU arena state
- *   RELEASE: 64B (1 CL) — all fields DCE'd, struct is dead stub
- *   DEBUG:  128B (2 CL) — CL0 telemetry + CL1 BenchLab handoff
- *
- * In release, Clang dead-code eliminates every mbox read/write.
- * The struct exists only for type correctness.
- *
- * In debug, CL0 holds telemetry + hints. CL1 holds BenchLab
- * snapshot fields for kfunc benchmarking.
- * ═══════════════════════════════════════════════════════════════════════════ */
-struct mega_mailbox_entry {
-	/* ═══ CACHE LINE 0 (bytes 0-63): TELEMETRY + HINTS ═══
-	 * In release: entire struct is DCE'd (zero scheduling reads from mbox).
-	 * In debug: stats_on telemetry + shadow hints for BenchLab validation.
-	 * Scheduling hot paths read idle_hint/last_tgid from cpu_bss, not mbox. */
-
-	/* --- Telemetry (stats-gated) --- */
-	u32 last_stopped_pid;  /* PID of last task that stopped on this CPU */
-
-	/* --- Idle shadow hint --- */
-	u32 idle_hint;         /* 0=busy (default), 1=likely idle */
-
-	/* --- Cluster hint --- */
-	u32 last_tgid;         /* tgid of last task that ran on this CPU */
-
-	/* --- Padding CL0 --- */
-	u8  _pad_cl0[52];     /* 52B pad to end of CL0 */
-
-#ifndef CAKE_RELEASE
-	/* ═══ CACHE LINE 1 (bytes 64-127): BENCHLAB HANDOFF (DEBUG ONLY) ═══
-	 * These fields are ONLY read by BenchLab instrumentation (run_kfunc_bench).
-	 * All scheduling hot paths read equivalent data from cpu_bss or task_hot.
-	 * Compiled out in release → struct shrinks to 64B (1 CL). */
-
-	/* --- Tick staging (bytes 64-71) --- */
-	u8  is_yielder;        /* BenchLab: yielder flag snapshot */
-		u8  tick_tier;         /* BenchLab: legacy tier snapshot */
-	u16 cached_cpu;        /* BenchLab: CPU ID snapshot */
-	u32 tick_last_run_at;  /* BenchLab: run_start snapshot */
-
-	/* --- Cached fields (bytes 72-95) --- */
-	u64 tick_slice;        /* 8B — BenchLab: slice snapshot */
-	u64 cached_tctx_ptr;   /* 8B — BenchLab: arena tctx pointer */
-		u32 cached_deficit;    /* 4B — BenchLab: legacy deficit-style snapshot */
-	u32 cached_packed;     /* 4B — BenchLab: packed_info snapshot */
-
-	/* --- nvcsw (bytes 96-103) --- */
-	u64 cached_nvcsw;      /* 8B — BenchLab: nvcsw_snapshot */
-
-	/* --- Padding CL1 (bytes 104-127) --- */
-	u8  _pad_cl1[24];     /* 24B pad to end of CL1 */
-#endif /* !CAKE_RELEASE */
-} __attribute__((aligned(CAKE_MBOX_ALIGN)));
-_Static_assert(
-	sizeof(struct mega_mailbox_entry) == CAKE_MBOX_SIZE,
-	"mega_mailbox_entry size mismatch (64B release, 128B debug)");
 
 /* Statistics shared with userspace.
  * Some legacy counters remain in the layout for TUI compatibility
@@ -1074,8 +951,8 @@ struct cake_stats {
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS (3 * 1000 * 1000) /* Reserved legacy constant */
 
 /* Legacy adaptive-quantum constants retained for compatibility with older
- * debug paths and BenchLab comparisons. Current release scheduling does not
- * drive policy from these values. */
+ * debug paths. Current release scheduling does not drive policy from these
+ * values. */
 #define AQ_BULK_HEADROOM     1               /* 1× PELT runtime for non-yielders */
 #define AQ_MIN_NS            (50 * 1000)     /* 50µs legacy floor */
 #define AQ_YIELDER_CEILING_NS (50 * 1000000)  /* 50ms legacy yielder ceiling */

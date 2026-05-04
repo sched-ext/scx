@@ -2,7 +2,7 @@
 // TUI module - ratatui-based terminal UI for real-time scheduler statistics
 
 use std::io::{self, Stdout};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,29 +32,29 @@ use crate::bpf_skel::BpfSkel;
 use crate::topology::TopologyInfo;
 
 mod apps_tab;
-mod bench;
 mod dashboard_tab;
 mod dump;
 mod graphs_tab;
+mod latency_probe;
 mod reference;
 mod report;
 mod topology_tab;
 
 use apps_tab::draw_apps_tab;
-use bench::{draw_bench_tab, run_core_latency_bench};
 use dashboard_tab::draw_dashboard_tab;
 use dump::{
     build_app_health_rows, format_stats_for_clipboard, format_stats_json,
     format_tgid_health_summary,
 };
 use graphs_tab::draw_graphs_tab;
+use latency_probe::run_core_latency_probe;
 use reference::draw_reference_tab;
 use report::build_telemetry_report;
 use topology_tab::draw_topology_tab;
 
 const STATS_HISTORY_MAX_AGE: Duration = Duration::from_secs(600);
 const STATS_HISTORY_MAX_SAMPLES: usize = 2048;
-const TIMELINE_HISTORY_MAX_SAMPLES: usize = 3600;
+const TIMELINE_HISTORY_MAX_SAMPLES: usize = 7200;
 const TIMELINE_SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(4);
 const DEAD_TASK_RETENTION: Duration = Duration::from_secs(300);
@@ -65,11 +65,21 @@ const PRESSURE_OUTCOME_MAX: usize = 6;
 const PRESSURE_ANCHOR_REASON_MAX: usize = 4;
 const WAKE_REASON_MAX: usize = 4;
 const WAKE_BUCKET_MAX: usize = 5;
+#[cfg(cake_bpf_release)]
+const CAKE_CPU_STATUS_PRESS_SHIFT: u64 = 12;
+#[cfg(cake_bpf_release)]
+const CAKE_CPU_STATUS_PRESS_MASK: u64 = 0x3;
 
 fn zero_cake_stats() -> cake_stats {
     // cake_stats is a C POD shared with BPF. Zero is its reset/default state.
     unsafe { std::mem::zeroed() }
 }
+
+#[cfg(cake_bpf_release)]
+fn cake_cpu_status_pressure_bucket(flags: u64) -> u8 {
+    ((flags >> CAKE_CPU_STATUS_PRESS_SHIFT) & CAKE_CPU_STATUS_PRESS_MASK) as u8
+}
+
 #[cfg(debug_assertions)]
 const WAKE_CLASS_MAX: usize = 4;
 #[cfg(debug_assertions)]
@@ -212,8 +222,7 @@ pub enum TuiTab {
     Apps = 1,
     Topology = 2,
     Graphs = 3,
-    BenchLab = 4,
-    ReferenceGuide = 5,
+    ReferenceGuide = 4,
 }
 
 impl TuiTab {
@@ -222,8 +231,7 @@ impl TuiTab {
             TuiTab::Dashboard => TuiTab::Apps,
             TuiTab::Apps => TuiTab::Topology,
             TuiTab::Topology => TuiTab::Graphs,
-            TuiTab::Graphs => TuiTab::BenchLab,
-            TuiTab::BenchLab => TuiTab::ReferenceGuide,
+            TuiTab::Graphs => TuiTab::ReferenceGuide,
             TuiTab::ReferenceGuide => TuiTab::Dashboard,
         }
     }
@@ -234,8 +242,7 @@ impl TuiTab {
             TuiTab::Apps => TuiTab::Dashboard,
             TuiTab::Topology => TuiTab::Apps,
             TuiTab::Graphs => TuiTab::Topology,
-            TuiTab::BenchLab => TuiTab::Graphs,
-            TuiTab::ReferenceGuide => TuiTab::BenchLab,
+            TuiTab::ReferenceGuide => TuiTab::Graphs,
         }
     }
 }
@@ -320,7 +327,6 @@ pub struct TuiApp {
     pub sorted_pids_dirty: bool,
     pub table_state: TableState,
     pub app_table_state: TableState,
-    pub bench_table_state: TableState,
     pub focused_tgid: Option<u32>,
     pub active_tab: TuiTab,
     pub sort_column: SortColumn,
@@ -339,18 +345,9 @@ pub struct TuiApp {
     pub active_pids_buf: std::collections::HashSet<u32>, // Reused per-tick to avoid alloc
     pub collapsed_tgids: std::collections::HashSet<u32>, // Collapsed process groups
     pub collapsed_ppids: std::collections::HashSet<u32>, // Collapsed PPID groups
-    pub bench_latency_handle: Option<thread::JoinHandle<Vec<Vec<f64>>>>, // Background c2c bench
-    pub _prev_stats: Option<cake_stats>,            // Previous global stats for rate calc
+    pub latency_probe_handle: Option<thread::JoinHandle<Vec<Vec<f64>>>>,
+    pub _prev_stats: Option<cake_stats>, // Previous global stats for rate calc
     pub quantum_us: u64,
-    // BenchLab cached results
-    pub bench_entries: [(u64, u64, u64, u64); 67], // (min_ns, max_ns, total_ns, last_value)
-    pub bench_samples: Vec<Vec<u64>>, // Per-entry accumulated raw samples for percentiles
-    pub bench_cpu: u32,
-    pub bench_iterations: u32,
-    pub bench_timestamp: u64,
-    pub bench_run_count: u32,
-    #[cfg(not(cake_bpf_release))]
-    pub last_bench_timestamp: u64, // to detect new results
     pub system_info: SystemInfo,
     pub debug_events: VecDeque<DebugEventRow>,
     wake_edges: Vec<WakeEdgeRow>,
@@ -375,18 +372,33 @@ struct StatsSnapshot {
     stats: cake_stats,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct TimelineSystemSample {
+    cpu_load_avg_pct: f32,
+    cpu_load_max_pct: f32,
+    cpu_load_hot_cpu: Option<u16>,
+    cpu_temp_avg_c: f32,
+    cpu_temp_max_c: f32,
+    cpu_temp_hot_cpu: Option<u16>,
+}
+
 #[derive(Clone, Copy)]
 struct TimelineBucket {
     elapsed: Duration,
+    end_elapsed: Duration,
     stats: cake_stats,
+    system: TimelineSystemSample,
 }
 
 #[derive(Clone, Copy)]
 struct TimelineSample {
     start_ago_secs: u64,
     end_ago_secs: u64,
+    start_elapsed: Duration,
+    end_elapsed: Duration,
     elapsed: Duration,
     stats: cake_stats,
+    system: TimelineSystemSample,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -955,6 +967,7 @@ pub struct DebugEventRow {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct TaskTelemetryRow {
     pub pid: u32,
     pub comm: String,
@@ -1068,6 +1081,10 @@ pub struct TaskTelemetryRow {
     pub task_has_mm: bool,
     #[cfg(debug_assertions)]
     pub task_is_kthread: bool,
+    #[cfg(debug_assertions)]
+    pub proc_snapshot_seen: bool,
+    #[cfg(debug_assertions)]
+    pub proc_schedstat_seen: bool,
 }
 
 impl Default for TaskTelemetryRow {
@@ -1176,6 +1193,10 @@ impl Default for TaskTelemetryRow {
             task_has_mm: false,
             #[cfg(debug_assertions)]
             task_is_kthread: false,
+            #[cfg(debug_assertions)]
+            proc_snapshot_seen: false,
+            #[cfg(debug_assertions)]
+            proc_schedstat_seen: false,
         }
     }
 }
@@ -1650,8 +1671,8 @@ fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
     let mut work = vec![CpuWorkCounters::default(); nr_cpus];
 
     if let Some(bss) = &skel.maps.bss_data {
-        for idx in 0..nr_cpus.min(bss.cpu_bss.len()) {
-            work[idx].cpu_pressure = bss.cpu_bss[idx].cpu_pressure;
+        for idx in 0..nr_cpus.min(bss.cpu_status.len()) {
+            work[idx].cpu_pressure = cake_cpu_status_pressure_bucket(bss.cpu_status[idx].flags);
         }
     }
 
@@ -2429,6 +2450,146 @@ fn avg_task_runtime_us(row: &TaskTelemetryRow) -> u64 {
     }
 }
 
+#[cfg(debug_assertions)]
+fn read_thread_schedstat(tgid: u32, pid: u32) -> Option<(u64, u64, u64)> {
+    let owner = if tgid > 0 { tgid } else { pid };
+    let primary = format!("/proc/{}/task/{}/schedstat", owner, pid);
+    let fallback = format!("/proc/{}/schedstat", pid);
+    let data = std::fs::read_to_string(&primary)
+        .or_else(|_| std::fs::read_to_string(&fallback))
+        .ok()?;
+    let mut fields = data.split_whitespace();
+    let runtime_ns = fields.next()?.parse().ok()?;
+    let wait_ns = fields.next()?.parse().ok()?;
+    let slices = fields.next()?.parse().ok()?;
+
+    Some((runtime_ns, wait_ns, slices))
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Debug, Default)]
+struct ProcThreadSnapshot {
+    status_seen: bool,
+    stat_seen: bool,
+    tgid: u32,
+    ppid: u32,
+    comm: Option<String>,
+    processor: Option<u16>,
+    allowed_cpus: Option<u16>,
+    task_policy: Option<u32>,
+    task_prio: Option<u32>,
+    task_static_prio: Option<u32>,
+    task_normal_prio: Option<u32>,
+}
+
+#[cfg(debug_assertions)]
+fn parse_cpu_list_count(value: &str) -> Option<u16> {
+    let mut total = 0u32;
+
+    for part in value.trim().split(',').filter(|part| !part.is_empty()) {
+        let mut ends = part.splitn(2, '-');
+        let start = ends.next()?.trim().parse::<u32>().ok()?;
+        let end = ends
+            .next()
+            .map(|raw| raw.trim().parse::<u32>().ok())
+            .unwrap_or(Some(start))?;
+        if end < start {
+            continue;
+        }
+        total = total.saturating_add(end - start + 1);
+    }
+
+    Some(total.min(u16::MAX as u32) as u16)
+}
+
+#[cfg(debug_assertions)]
+impl ProcThreadSnapshot {
+    fn seen(&self) -> bool {
+        self.status_seen || self.stat_seen
+    }
+}
+
+#[cfg(debug_assertions)]
+fn read_thread_status_snapshot(tgid: u32, pid: u32, snap: &mut ProcThreadSnapshot) -> bool {
+    let owner = if tgid > 0 { tgid } else { pid };
+    let primary = format!("/proc/{}/task/{}/status", owner, pid);
+    let fallback = format!("/proc/{}/status", pid);
+    let Ok(data) =
+        std::fs::read_to_string(&primary).or_else(|_| std::fs::read_to_string(&fallback))
+    else {
+        return false;
+    };
+    snap.status_seen = true;
+
+    for line in data.lines() {
+        if let Some(value) = line.strip_prefix("Tgid:") {
+            snap.tgid = value.trim().parse().unwrap_or(snap.tgid);
+        } else if let Some(value) = line.strip_prefix("PPid:") {
+            snap.ppid = value.trim().parse().unwrap_or(snap.ppid);
+        } else if let Some(value) = line.strip_prefix("Cpus_allowed_list:") {
+            snap.allowed_cpus = parse_cpu_list_count(value);
+        }
+    }
+    true
+}
+
+#[cfg(debug_assertions)]
+fn read_thread_stat_snapshot(tgid: u32, pid: u32, snap: &mut ProcThreadSnapshot) -> bool {
+    let owner = if tgid > 0 { tgid } else { pid };
+    let primary = format!("/proc/{}/task/{}/stat", owner, pid);
+    let fallback = format!("/proc/{}/stat", pid);
+    let Ok(data) =
+        std::fs::read_to_string(&primary).or_else(|_| std::fs::read_to_string(&fallback))
+    else {
+        return false;
+    };
+    let Some(open) = data.find('(') else {
+        return false;
+    };
+    let Some(close) = data.rfind(')') else {
+        return false;
+    };
+    snap.stat_seen = true;
+    if close > open + 1 {
+        snap.comm = Some(data[open + 1..close].to_string());
+    }
+    let fields: Vec<&str> = data[close + 1..].split_whitespace().collect();
+
+    if snap.ppid == 0 {
+        snap.ppid = fields
+            .get(1)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+    }
+    snap.task_prio = fields.get(15).and_then(|value| value.parse().ok());
+    snap.task_static_prio = fields
+        .get(16)
+        .and_then(|value| value.parse::<i32>().ok())
+        .map(|nice| (nice + 120).clamp(0, 255) as u32);
+    snap.task_normal_prio = snap.task_prio;
+    snap.processor = fields
+        .get(36)
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(|cpu| cpu.min(u16::MAX as u32) as u16);
+    snap.task_policy = fields.get(38).and_then(|value| value.parse().ok());
+    true
+}
+
+#[cfg(debug_assertions)]
+fn read_thread_proc_snapshot(tgid: u32, pid: u32) -> ProcThreadSnapshot {
+    let mut snap = ProcThreadSnapshot {
+        tgid: if tgid > 0 { tgid } else { pid },
+        ..Default::default()
+    };
+
+    let _ = read_thread_status_snapshot(tgid, pid, &mut snap);
+    let _ = read_thread_stat_snapshot(snap.tgid, pid, &mut snap);
+    if snap.tgid == 0 {
+        snap.tgid = if tgid > 0 { tgid } else { pid };
+    }
+    snap
+}
+
 fn row_has_bpf_matrix_data(row: &TaskTelemetryRow) -> bool {
     if !row.is_bpf_tracked || row.status == TaskStatus::Dead {
         return false;
@@ -2436,7 +2597,7 @@ fn row_has_bpf_matrix_data(row: &TaskTelemetryRow) -> bool {
 
     #[cfg(cake_needs_arena)]
     {
-        row.total_runs > 0
+        row.pid > 0
     }
     #[cfg(not(cake_needs_arena))]
     {
@@ -2567,6 +2728,53 @@ fn blocker_label(row: &TaskTelemetryRow, tasks: &HashMap<u32, TaskTelemetryRow>)
         row.blocked_wait_max_us,
         row.blocked_count
     )
+}
+
+fn apply_blocked_wait_attribution(app: &mut TuiApp) {
+    let blocked: Vec<(u32, u32, u16, u32, u32, u16)> = app
+        .per_cpu_work
+        .iter()
+        .enumerate()
+        .filter_map(|(cpu, counter)| {
+            if counter.blocked_waiter_pid == 0 || counter.blocked_owner_wait_count == 0 {
+                return None;
+            }
+
+            let avg_wait_us =
+                (counter.blocked_owner_wait_ns / counter.blocked_owner_wait_count.max(1) / 1000)
+                    .min(u32::MAX as u64) as u32;
+            let max_wait_us =
+                (counter.blocked_owner_wait_max_ns / 1000).min(u32::MAX as u64) as u32;
+            let count = counter.blocked_owner_wait_count.min(u16::MAX as u64) as u16;
+
+            Some((
+                counter.blocked_waiter_pid,
+                counter.blocked_owner_pid,
+                cpu.min(u16::MAX as usize) as u16,
+                avg_wait_us,
+                max_wait_us,
+                count,
+            ))
+        })
+        .collect();
+
+    for row in app.task_rows.values_mut() {
+        row.last_blocker_pid = 0;
+        row.last_blocker_cpu = 0;
+        row.blocked_wait_last_us = 0;
+        row.blocked_wait_max_us = 0;
+        row.blocked_count = 0;
+    }
+
+    for (waiter_pid, owner_pid, cpu, avg_wait_us, max_wait_us, count) in blocked {
+        if let Some(row) = app.task_rows.get_mut(&waiter_pid) {
+            row.last_blocker_pid = owner_pid;
+            row.last_blocker_cpu = cpu;
+            row.blocked_wait_last_us = avg_wait_us;
+            row.blocked_wait_max_us = row.blocked_wait_max_us.max(max_wait_us);
+            row.blocked_count = row.blocked_count.saturating_add(count);
+        }
+    }
 }
 
 fn is_game_identity_comm(comm: &str) -> bool {
@@ -2760,9 +2968,7 @@ fn build_long_run_owner_rows(
     let mut rows: Vec<LongRunOwnerRow> = app
         .task_rows
         .values()
-        .filter(|row| {
-            row_has_runtime_telemetry(row) && row.total_runtime_ns > 0
-        })
+        .filter(|row| row_has_runtime_telemetry(row) && row.total_runtime_ns > 0)
         .map(|row| {
             let placement = placement_summary(row, &app.topology);
             let tgid = if row.tgid > 0 { row.tgid } else { row.pid };
@@ -4460,7 +4666,6 @@ impl TuiApp {
             sorted_pids_dirty: true,
             table_state: TableState::default(),
             app_table_state: TableState::default(),
-            bench_table_state: TableState::default(),
             focused_tgid: None,
             active_tab: TuiTab::Dashboard,
             sort_column: SortColumn::Pelt,
@@ -4479,17 +4684,9 @@ impl TuiApp {
             active_pids_buf: std::collections::HashSet::new(),
             collapsed_tgids: std::collections::HashSet::new(),
             collapsed_ppids: std::collections::HashSet::new(),
-            bench_latency_handle: None,
+            latency_probe_handle: None,
             _prev_stats: None,
             quantum_us,
-            bench_entries: [(0, 0, 0, 0); 67],
-            bench_samples: vec![Vec::new(); 67],
-            bench_cpu: 0,
-            bench_iterations: 0,
-            bench_timestamp: 0,
-            bench_run_count: 0,
-            #[cfg(not(cake_bpf_release))]
-            last_bench_timestamp: 0,
             system_info,
             debug_events: VecDeque::new(),
             wake_edges: Vec::new(),
@@ -4565,7 +4762,9 @@ impl TuiApp {
                     if elapsed >= TIMELINE_SAMPLE_PERIOD / 2 {
                         self.timeline_history.push_back(TimelineBucket {
                             elapsed,
+                            end_elapsed: now.saturating_duration_since(self.start_time),
                             stats: stats_delta(stats, &prev.stats),
+                            system: timeline_system_sample(&self.cpu_stats),
                         });
                         while self.timeline_history.len() > TIMELINE_HISTORY_MAX_SAMPLES {
                             self.timeline_history.pop_front();
@@ -4683,17 +4882,29 @@ impl TuiApp {
         self.timeline_history
             .iter()
             .skip(start_idx)
-            .enumerate()
-            .map(|(idx, bucket)| {
-                let remaining = (buckets as usize).saturating_sub(idx);
-                TimelineSample {
-                    start_ago_secs: remaining as u64,
-                    end_ago_secs: remaining.saturating_sub(1) as u64,
-                    elapsed: bucket.elapsed,
-                    stats: bucket.stats,
-                }
-            })
+            .map(|bucket| self.timeline_sample_from_bucket(bucket))
             .collect()
+    }
+
+    fn retained_timeline_samples(&self) -> Vec<TimelineSample> {
+        self.timeline_history
+            .iter()
+            .map(|bucket| self.timeline_sample_from_bucket(bucket))
+            .collect()
+    }
+
+    fn timeline_sample_from_bucket(&self, bucket: &TimelineBucket) -> TimelineSample {
+        let now_elapsed = self.start_time.elapsed();
+        let start_elapsed = bucket.end_elapsed.saturating_sub(bucket.elapsed);
+        TimelineSample {
+            start_ago_secs: now_elapsed.saturating_sub(start_elapsed).as_secs(),
+            end_ago_secs: now_elapsed.saturating_sub(bucket.end_elapsed).as_secs(),
+            start_elapsed,
+            end_elapsed: bucket.end_elapsed,
+            elapsed: bucket.elapsed,
+            stats: bucket.stats,
+            system: bucket.system,
+        }
     }
 
     pub fn next_tab(&mut self) {
@@ -4795,36 +5006,6 @@ impl TuiApp {
     pub fn clear_app_focus(&mut self) {
         self.focused_tgid = None;
         self.set_status("Cleared app focus");
-    }
-
-    pub fn scroll_bench_down(&mut self) {
-        let max = 32; // bench rows + category headers
-        let i = match self.bench_table_state.selected() {
-            Some(i) => {
-                if i >= max {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.bench_table_state.select(Some(i));
-    }
-
-    pub fn scroll_bench_up(&mut self) {
-        let max = 32;
-        let i = match self.bench_table_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    max
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.bench_table_state.select(Some(i));
     }
 
     pub fn toggle_filter(&mut self) {
@@ -5299,155 +5480,6 @@ impl<'a> Widget for LatencyHeatmap<'a> {
     }
 }
 
-/// Format BenchLab results as a copyable text string (tab-specific copy)
-fn format_bench_for_clipboard(app: &TuiApp) -> String {
-    // (index, name, category, source: K=kernel kfunc, C=cake custom code)
-    // Groups: kfunc baseline first, then cake replacements. SPEED is per-group.
-    let bench_items: &[(usize, &str, &str, &str)] = &[
-        // Timing: all available clock sources
-        (0, "bpf_ktime_get_ns()", "Timing", "K"),
-        (1, "scx_bpf_now()", "Timing", "K"),
-        (24, "bpf_ktime_get_boot_ns()", "Timing", "K"),
-        (10, "Timing harness (cal)", "Timing", "C"),
-        // Task Lookup: kfunc vs arena direct access
-        (3, "bpf_task_from_pid()", "Task Lookup", "K"),
-        (29, "bpf_get_current_task_btf()", "Task Lookup", "K"),
-        (36, "bpf_task_storage_get()", "Task Lookup", "K"),
-        (6, "get_task_ctx() [arena]", "Task Lookup", "C"),
-        (22, "get_task_ctx+arena CL0", "Task Lookup", "C"),
-        // Process Info: kfunc alternatives
-        (28, "bpf_get_current_pid_tgid()", "Process Info", "K"),
-        (30, "bpf_get_current_comm()", "Process Info", "K"),
-        (14, "task_struct p->scx+nvcsw", "Process Info", "K"),
-        (32, "scx_bpf_task_running(p)", "Process Info", "K"),
-        (33, "scx_bpf_task_cpu(p)", "Process Info", "K"),
-        (46, "Arena tctx.pid+tgid", "Process Info", "C"),
-        (47, "Mbox CL0 cached_cpu", "Process Info", "C"),
-        // CPU Identification: kfunc vs mailbox cached
-        (2, "bpf_get_smp_proc_id()", "CPU ID", "K"),
-        (31, "bpf_get_numa_node_id()", "CPU ID", "K"),
-        (11, "Mbox CL0 cached CPU", "CPU ID", "C"),
-        // Idle Probing: kfunc vs cake probes
-        (4, "test_and_clear_idle()", "Idle Probing", "K"),
-        (37, "scx_bpf_pick_idle_cpu()", "Idle Probing", "K"),
-        (38, "idle_cpumask get+put", "Idle Probing", "K"),
-        (19, "idle_probe(remote) MESI", "Idle Probing", "C"),
-        (20, "smtmask read-only check", "Idle Probing", "C"),
-        // Data Read: kernel struct vs cake data paths
-        (8, "BSS global_stats[cpu]", "Data Read", "C"),
-        (9, "Arena per_cpu.mbox", "Data Read", "C"),
-        (15, "RODATA llc+quantum_ns", "Data Read", "C"),
-        // Mailbox CL0: cake's Disruptor handoff variants
-        (12, "Mbox CL0 tctx+deref", "Mailbox CL0", "C"),
-        (18, "CL0 ptr+fused+packed", "Mailbox CL0", "C"),
-        (21, "Disruptor CL0 full read", "Mailbox CL0", "C"),
-        // Composite: cake-only multi-step operations
-        (16, "Bitflag shift+mask+brless", "Composite Ops", "C"),
-        (17, "(reserved, was compute_ewma)", "Composite Ops", "C"),
-        // DVFS / Performance: CPU frequency queries
-        (35, "scx_bpf_cpuperf_cur(cpu)", "DVFS / Perf", "K"),
-        (42, "scx_bpf_cpuperf_cap(cpu)", "DVFS / Perf", "K"),
-        (45, "RODATA cpuperf_cap[cpu]", "DVFS / Perf", "C"),
-        // Topology Constants: kfunc vs RODATA
-        (5, "scx_bpf_nr_cpu_ids()", "Topology", "K"),
-        (34, "scx_bpf_nr_node_ids()", "Topology", "K"),
-        (43, "RODATA nr_cpus const", "Topology", "C"),
-        (44, "RODATA nr_nodes const", "Topology", "C"),
-        // Standalone Kfuncs: reference costs
-        (7, "scx_bpf_dsq_nr_queued()", "Standalone Kfuncs", "K"),
-        (13, "ringbuf reserve+discard", "Standalone Kfuncs", "K"),
-        (39, "scx_bpf_kick_cpu(self)", "Standalone Kfuncs", "K"),
-        // Synchronization: lock/RNG costs
-        (41, "bpf_spin_lock+unlock", "Synchronization", "K"),
-        (40, "bpf_get_prandom_u32()", "Synchronization", "K"),
-        (48, "CL0 lock-free 3-field", "Synchronization", "C"),
-        (49, "BSS xorshift32 PRNG", "Synchronization", "C"),
-        // TLB/Memory: arena access pattern cost
-        (23, "Arena stride (TLB/hugepage)", "TLB/Memory", "C"),
-        // Kernel Free Data: zero-cost task_struct field reads
-        (50, "PELT util+runnable_avg", "Kernel Free Data", "K"),
-        (51, "PELT runnable_avg only", "Kernel Free Data", "K"),
-        (52, "schedstats nr_wakeups", "Kernel Free Data", "K"),
-        (53, "p->policy+prio+flags", "Kernel Free Data", "K"),
-        (54, "PELT read+legacy bucket", "Kernel Free Data", "K"),
-        // End-to-End Workflow Comparisons
-        (55, "task_storage write+read", "Storage Roundtrip", "C"),
-        (56, "Arena write+read", "Storage Roundtrip", "C"),
-        (57, "3-probe cascade (cake)", "Idle Selection", "C"),
-        (58, "pick_idle_cpu full", "Idle Selection", "K"),
-        (59, "Weight-vtime calc (bpfland)", "Classification", "C"),
-        (60, "Latency score calc (lavd)", "Classification", "C"),
-        (61, "SMT: cake sib probe", "SMT Probing", "C"),
-        (62, "SMT: cpumask probe", "SMT Probing", "K"),
-        // ═══ Fairness Fixes (cold-cache + remote) ═══
-        // Note: cold probes use arena-stride L1 pollution. storage_get cold
-        // can't evict task_struct — add ~10ns (L3 hit) conservatively.
-        // kick_cpu remote measures bit-set only — add ~100ns for IPI delivery.
-        (63, "storage_get COLD ~est", "Cold Cache", "K"),
-        (64, "PELT bucket COLD", "Cold Cache", "K"),
-        (65, "legacy EWMA COLD", "Cold Cache", "C"),
-        (66, "kick_cpu REMOTE ~est", "Cold Cache", "K"),
-    ];
-
-    let percentile = |samples: &[u64], pct: f64| -> u64 {
-        if samples.is_empty() {
-            return 0;
-        }
-        let mut sorted = samples.to_vec();
-        sorted.sort_unstable();
-        let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
-        sorted[idx.min(sorted.len() - 1)]
-    };
-
-    let mut output = String::new();
-    // System hardware context header
-    output.push_str(&app.system_info.format_header());
-    output.push('\n');
-    output.push_str(&format!(
-        "=== BenchLab ({} runs, {} samples, CPU {}) ===\n\n",
-        app.bench_run_count, app.bench_iterations, app.bench_cpu
-    ));
-    output.push_str(&format!(
-        "{:<30} {:>7} {:>7} {:>7} {:>7} {:>8} {:>7} {:>8} {:>7}\n",
-        "HELPER", "MIN", "P1 LOW", "P50", "AVG", "P1 HIGH", "MAX", "JITTER", "SPEED"
-    ));
-    output.push_str(&format!("{}\n", "─".repeat(100)));
-
-    let mut last_cat = "";
-    let mut cat_baseline: u64 = 1; // per-category baseline AVG
-    for &(idx, name, cat, src) in bench_items {
-        if cat != last_cat {
-            last_cat = cat;
-            // Reset baseline for new category — first entry with data becomes base
-            cat_baseline = 0;
-            output.push_str(&format!("\n▸ {}\n", cat));
-        }
-        let (min_ns, max_ns, total_ns, _) = app.bench_entries[idx];
-        if app.bench_iterations > 0 && total_ns > 0 {
-            let avg_ns = total_ns / app.bench_iterations as u64;
-            let samples = &app.bench_samples[idx];
-            let p1 = percentile(samples, 1.0);
-            let p50 = percentile(samples, 50.0);
-            let p99 = percentile(samples, 99.0);
-            let jitter = max_ns.saturating_sub(min_ns);
-            let speedup = if cat_baseline == 0 {
-                cat_baseline = avg_ns.max(1);
-                "base".to_string()
-            } else if avg_ns > 0 {
-                format!("{:.1}×", cat_baseline as f64 / avg_ns as f64)
-            } else {
-                "--".to_string()
-            };
-            let tagged = format!("[{}] {}", src, name);
-            output.push_str(&format!(
-                "  {:<30} {:>5}ns {:>5}ns {:>5}ns {:>5}ns {:>6}ns {:>5}ns {:>6}ns {:>5}\n",
-                tagged, min_ns, p1, p50, avg_ns, p99, max_ns, jitter, speedup
-            ));
-        }
-    }
-    output
-}
-
 fn avg_ns(total_ns: u64, calls: u64) -> u64 {
     if calls > 0 {
         total_ns / calls
@@ -5503,6 +5535,53 @@ fn timeline_history_span(samples: &VecDeque<TimelineBucket>) -> Duration {
         .fold(Duration::ZERO, |acc, sample| acc + sample.elapsed)
 }
 
+fn timeline_system_sample(cpu_stats: &[(f32, f32)]) -> TimelineSystemSample {
+    let mut load_sum = 0.0f32;
+    let mut load_count = 0usize;
+    let mut load_max = 0.0f32;
+    let mut load_hot_cpu = None;
+    let mut temp_sum = 0.0f32;
+    let mut temp_count = 0usize;
+    let mut temp_max = 0.0f32;
+    let mut temp_hot_cpu = None;
+
+    for (cpu, (load, temp)) in cpu_stats.iter().copied().enumerate() {
+        if load.is_finite() {
+            load_sum += load;
+            load_count += 1;
+            if load >= load_max {
+                load_max = load;
+                load_hot_cpu = Some(cpu as u16);
+            }
+        }
+        if temp.is_finite() && temp > 0.0 {
+            temp_sum += temp;
+            temp_count += 1;
+            if temp >= temp_max {
+                temp_max = temp;
+                temp_hot_cpu = Some(cpu as u16);
+            }
+        }
+    }
+
+    TimelineSystemSample {
+        cpu_load_avg_pct: if load_count > 0 {
+            load_sum / load_count as f32
+        } else {
+            0.0
+        },
+        cpu_load_max_pct: load_max,
+        cpu_load_hot_cpu: load_hot_cpu,
+        cpu_temp_avg_c: if temp_count > 0 {
+            temp_sum / temp_count as f32
+        } else {
+            0.0
+        },
+        cpu_temp_max_c: temp_max,
+        cpu_temp_hot_cpu: temp_hot_cpu,
+    }
+}
+
 fn average_timeline_sample_secs(samples: &[TimelineSample]) -> f64 {
     if samples.is_empty() {
         0.0
@@ -5523,6 +5602,23 @@ fn percentile_f64(samples: &[f64], pct: f64) -> f64 {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
+}
+
+fn timeline_elapsed_label(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn timeline_cpu_label(cpu: Option<u16>) -> String {
+    cpu.map(|cpu| cpu.to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn summarize_timeline_samples(
@@ -5752,7 +5848,9 @@ fn format_timeline_sample_row(sample: &TimelineSample) -> String {
         + sample.stats.nr_quantum_preempt;
 
     format!(
-        "  slot-{:>2}..{:>2} span={:>4.2}s run/s={:>7.1} wake/s={:>7.1} wake%={:>4.0}/{:>4.0}/{:>4.0} path%={:>4.0}/{:>4.0}/{:>4.0}/{:>4.0}/{:>4.0} cbns={}/{}/{}/{} waitus<=5ms={}/{}/{} slice%={:.0}/{:.0}/{:.0}",
+        "  t+{}..{} ago={:>4}..{:>4}s span={:>4.2}s run/s={:>7.1} wake/s={:>7.1} wake%={:>4.0}/{:>4.0}/{:>4.0} path%={:>4.0}/{:>4.0}/{:>4.0}/{:>4.0}/{:>4.0} cbns={}/{}/{}/{} waitus<=5ms={}/{}/{} slice%={:.0}/{:.0}/{:.0} load={:.0}/{:.0}%@{} temp={:.1}/{:.1}C@{}",
+        timeline_elapsed_label(sample.start_elapsed),
+        timeline_elapsed_label(sample.end_elapsed),
         sample.start_ago_secs,
         sample.end_ago_secs,
         secs,
@@ -5776,6 +5874,12 @@ fn format_timeline_sample_row(sample: &TimelineSample) -> String {
         pct(sample.stats.nr_quantum_full, quantum_total),
         pct(sample.stats.nr_quantum_yield, quantum_total),
         pct(sample.stats.nr_quantum_preempt, quantum_total),
+        sample.system.cpu_load_avg_pct,
+        sample.system.cpu_load_max_pct,
+        timeline_cpu_label(sample.system.cpu_load_hot_cpu),
+        sample.system.cpu_temp_avg_c,
+        sample.system.cpu_temp_max_c,
+        timeline_cpu_label(sample.system.cpu_temp_hot_cpu),
     )
 }
 
@@ -6480,7 +6584,6 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
         " Apps ",
         " Topology ",
         " Graphs ",
-        " BenchLab ",
         " Reference ",
     ];
     let tabs = Tabs::new(tab_titles)
@@ -6489,8 +6592,7 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
             TuiTab::Apps => 1,
             TuiTab::Topology => 2,
             TuiTab::Graphs => 3,
-            TuiTab::BenchLab => 4,
-            TuiTab::ReferenceGuide => 5,
+            TuiTab::ReferenceGuide => 4,
         })
         .style(Style::default().fg(Color::DarkGray))
         .highlight_style(
@@ -6530,7 +6632,6 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
         TuiTab::Apps => draw_apps_tab(frame, app, main_layout[1]),
         TuiTab::Topology => draw_topology_tab(frame, app, main_layout[1]),
         TuiTab::Graphs => draw_graphs_tab(frame, app, stats, main_layout[1]),
-        TuiTab::BenchLab => draw_bench_tab(frame, app, main_layout[1]),
         TuiTab::ReferenceGuide => draw_reference_tab(frame, main_layout[1]),
     }
 
@@ -6610,7 +6711,7 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
         footer_key("d"),
         dashboard_note(" dump "),
         footer_key("b"),
-        dashboard_note(" bench "),
+        dashboard_note(" measure "),
         footer_key("r"),
         dashboard_note(" reset "),
         footer_key("q"),
@@ -6918,7 +7019,6 @@ fn handle_tui_key(
                     let len = app_health_row_count(app);
                     app.scroll_app_down(len);
                 }
-                TuiTab::BenchLab => app.scroll_bench_down(),
                 _ => app.scroll_table_down(),
             }
         }
@@ -6928,7 +7028,6 @@ fn handle_tui_key(
                     let len = app_health_row_count(app);
                     app.scroll_app_up(len);
                 }
-                TuiTab::BenchLab => app.scroll_bench_up(),
                 _ => app.scroll_table_up(),
             }
         }
@@ -6938,7 +7037,6 @@ fn handle_tui_key(
         {
             match app.active_tab {
                 TuiTab::Apps => app.app_table_state.select(Some(0)),
-                TuiTab::BenchLab => app.bench_table_state.select(Some(0)),
                 _ => app.table_state.select(Some(0)),
             }
         }
@@ -7010,10 +7108,7 @@ fn handle_tui_key(
             }
         }
         KeyCode::Char('c') => {
-            let text = match app.active_tab {
-                TuiTab::BenchLab => format_bench_for_clipboard(app),
-                _ => format_stats_for_clipboard(stats, app),
-            };
+            let text = format_stats_for_clipboard(stats, app);
             match clipboard {
                 Some(cb) => match cb.set_text(text) {
                     Ok(_) => {
@@ -7129,24 +7224,13 @@ fn handle_tui_key(
             }
         }
         KeyCode::Char('b') => {
-            if app.active_tab == TuiTab::Topology && app.bench_latency_handle.is_none() {
+            if app.active_tab == TuiTab::Topology && app.latency_probe_handle.is_none() {
                 let nr_cpus = app.topology.nr_cpus;
-                app.bench_latency_handle =
-                    Some(thread::spawn(move || run_core_latency_bench(nr_cpus)));
-                app.set_status("⏱ Running core-to-core latency benchmark...");
+                app.latency_probe_handle =
+                    Some(thread::spawn(move || run_core_latency_probe(nr_cpus)));
+                app.set_status("Running core-to-core latency measurement...");
             } else if app.active_tab != TuiTab::Topology {
-                #[cfg(cake_benchlab)]
-                if let Some(bss) = &mut skel.maps.bss_data {
-                    bss.bench_request = 1;
-                    app.set_status(&format!(
-                        "⚡ BenchLab: run #{} queued...",
-                        app.bench_run_count + 1
-                    ));
-                }
-                #[cfg(all(not(cake_bpf_release), not(cake_benchlab)))]
-                app.set_status("BenchLab is opt-in; rebuild with CAKE_BENCHLAB=1");
-                #[cfg(cake_bpf_release)]
-                app.set_status("BenchLab BPF microbenchmarks are debug-build only");
+                app.set_status("Open Topology and press b to measure core-to-core latency");
             }
         }
         KeyCode::Char('f') => {
@@ -7276,66 +7360,32 @@ pub fn run_tui(
         app.wake_edge_sample_weight_sum = wake_graph.sample_weight_sum;
         app.wake_edge_important_events = wake_graph.important_events;
 
-        #[cfg(not(cake_bpf_release))]
-        {
-            // Read bench results from BSS (for BenchLab tab)
-            if let Some(bss) = &skel.maps.bss_data {
-                let br = &bss.bench_results;
-                if br.bench_timestamp > 0 && br.bench_timestamp != app.last_bench_timestamp {
-                    // New bench results — accumulate (merge min/max, sum totals)
-                    app.last_bench_timestamp = br.bench_timestamp;
-                    app.bench_cpu = br.cpu;
-                    app.bench_run_count += 1;
-                    app.bench_timestamp = br.bench_timestamp;
-                    for i in 0..67 {
-                        let new_min = br.entries[i].min_ns;
-                        let new_max = br.entries[i].max_ns;
-                        let new_total = br.entries[i].total_ns;
-                        let new_value = br.entries[i].last_value;
-                        let (old_min, old_max, old_total, _) = app.bench_entries[i];
-                        app.bench_entries[i] = (
-                            if app.bench_run_count == 1 {
-                                new_min
-                            } else {
-                                old_min.min(new_min)
-                            },
-                            old_max.max(new_max),
-                            old_total + new_total,
-                            new_value,
-                        );
-                        // Accumulate raw samples for percentile computation
-                        for s in 0..8 {
-                            let sample = br.entries[i].samples[s];
-                            if sample > 0 {
-                                app.bench_samples[i].push(sample);
-                            }
-                        }
-                    }
-                    app.bench_iterations += br.iterations;
-                }
-            }
-        }
-
-        // Poll for core-to-core latency benchmark completion
-        if let Some(handle) = app.bench_latency_handle.take() {
+        // Poll for core-to-core latency measurement completion
+        if let Some(handle) = app.latency_probe_handle.take() {
             if handle.is_finished() {
                 match handle.join() {
                     Ok(matrix) => {
                         app.latency_matrix = matrix;
-                        app.set_status("✓ Core-to-core latency benchmark complete");
+                        app.set_status("Core-to-core latency measurement complete");
                     }
                     Err(_) => {
-                        app.set_status("✗ Latency benchmark failed");
+                        app.set_status("Latency measurement failed");
                     }
                 }
             } else {
                 // Not done yet, put it back
-                app.bench_latency_handle = Some(handle);
+                app.latency_probe_handle = Some(handle);
             }
         }
 
         // Draw UI
+        #[cfg(debug_assertions)]
+        let render_start = Instant::now();
         terminal.draw(|frame| draw_ui(frame, &mut app, &stats))?;
+        #[cfg(debug_assertions)]
+        {
+            app.debug_cost.render_us = render_start.elapsed().as_micros() as u64;
+        }
 
         // Handle events with timeout through the same key path used by drain polling.
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
@@ -7357,12 +7407,18 @@ pub fn run_tui(
         }
 
         if last_tick.elapsed() >= tick_rate {
-            // Skip dashboard updates while c2c benchmark is running —
+            // Skip dashboard updates while c2c latency measurement is running —
             // avoids BPF map reads and sysinfo polls that could create noise
-            if app.bench_latency_handle.is_some() {
+            if app.latency_probe_handle.is_some() {
                 last_tick = std::time::Instant::now();
                 let empty_stats = zero_cake_stats();
+                #[cfg(debug_assertions)]
+                let render_start = Instant::now();
                 terminal.draw(|frame| draw_ui(frame, &mut app, &empty_stats))?;
+                #[cfg(debug_assertions)]
+                {
+                    app.debug_cost.render_us = render_start.elapsed().as_micros() as u64;
+                }
                 continue;
             }
             let do_full_sweep = last_full_sweep.elapsed() >= FULL_SWEEP_MIN_INTERVAL;
@@ -7425,6 +7481,10 @@ pub fn run_tui(
 
                 #[cfg(debug_assertions)]
                 let iter_read_us;
+                #[cfg(debug_assertions)]
+                let mut proc_refresh_us = 0u64;
+                #[cfg(debug_assertions)]
+                let mut proc_refreshes = 0u32;
 
                 #[cfg(not(cake_bpf_release))]
                 {
@@ -7496,6 +7556,58 @@ pub fn run_tui(
                                         .to_string(),
                                 };
                                 let pelt_util = rec.pelt_util as u32;
+                                #[cfg(debug_assertions)]
+                                let proc_snapshot = {
+                                    let proc_read_start = Instant::now();
+                                    let snapshot =
+                                        read_thread_proc_snapshot(rec.telemetry.tgid, pid);
+                                    proc_refresh_us = proc_refresh_us.saturating_add(
+                                        proc_read_start.elapsed().as_micros() as u64,
+                                    );
+                                    proc_refreshes = proc_refreshes.saturating_add(1);
+                                    snapshot
+                                };
+                                #[cfg(debug_assertions)]
+                                let row_tgid = if rec.telemetry.tgid > 0 {
+                                    rec.telemetry.tgid
+                                } else {
+                                    proc_snapshot.tgid
+                                };
+                                #[cfg(not(debug_assertions))]
+                                let row_tgid = rec.telemetry.tgid;
+                                #[cfg(debug_assertions)]
+                                let row_ppid = if ppid > 0 { ppid } else { proc_snapshot.ppid };
+                                #[cfg(not(debug_assertions))]
+                                let row_ppid = ppid;
+                                #[cfg(debug_assertions)]
+                                let row_comm = if comm.is_empty() {
+                                    proc_snapshot
+                                        .comm
+                                        .clone()
+                                        .unwrap_or_else(|| format!("pid{}", pid))
+                                } else {
+                                    comm.clone()
+                                };
+                                #[cfg(not(debug_assertions))]
+                                let row_comm = comm.clone();
+                                #[cfg(debug_assertions)]
+                                let row_allowed_cpus = if rec.allowed_cpus > 0 {
+                                    rec.allowed_cpus
+                                } else {
+                                    proc_snapshot.allowed_cpus.unwrap_or(0)
+                                };
+                                #[cfg(not(debug_assertions))]
+                                let row_allowed_cpus = rec.allowed_cpus;
+                                #[cfg(debug_assertions)]
+                                let row_core_placement = if rec.telemetry.total_runs == 0 {
+                                    proc_snapshot
+                                        .processor
+                                        .unwrap_or(rec.telemetry.core_placement)
+                                } else {
+                                    rec.telemetry.core_placement
+                                };
+                                #[cfg(not(debug_assertions))]
+                                let row_core_placement = rec.telemetry.core_placement;
 
                                 let g1 = rec.telemetry.gate_1_hits;
                                 let g2 = rec.telemetry.gate_2_hits;
@@ -7525,16 +7637,33 @@ pub fn run_tui(
                                 } else {
                                     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                                 };
-                                let total_runs = rec.telemetry.total_runs;
-                                let total_runtime_ns = rec.telemetry.total_runtime_ns;
+                                let mut total_runs = rec.telemetry.total_runs;
+                                let mut total_runtime_ns = rec.telemetry.total_runtime_ns;
                                 let jitter_accum_ns = rec.telemetry.jitter_accum_ns;
+                                #[cfg(debug_assertions)]
+                                let mut proc_schedstat_seen = false;
+                                if total_runs == 0 || total_runtime_ns == 0 {
+                                    #[cfg(debug_assertions)]
+                                    if let Some((runtime_ns, _wait_ns, slices)) = {
+                                        let proc_read_start = Instant::now();
+                                        let schedstat = read_thread_schedstat(row_tgid, pid);
+                                        proc_refresh_us = proc_refresh_us.saturating_add(
+                                            proc_read_start.elapsed().as_micros() as u64,
+                                        );
+                                        schedstat
+                                    } {
+                                        proc_schedstat_seen = true;
+                                        total_runtime_ns = runtime_ns;
+                                        total_runs = slices.min(u32::MAX as u64) as u32;
+                                    }
+                                }
 
                                 let row =
                                     app.task_rows
                                         .entry(pid)
                                         .or_insert_with(|| TaskTelemetryRow {
                                             pid,
-                                            comm: comm.clone(),
+                                            comm: row_comm.clone(),
                                             pelt_util,
                                             wait_duration_ns: rec.telemetry.wait_duration_ns,
                                             select_cpu_ns: rec.telemetry.select_cpu_duration_ns,
@@ -7542,7 +7671,7 @@ pub fn run_tui(
                                             gate_hit_pcts,
                                             home_steer_hits: rec.telemetry.gate_1c_hits,
                                             primary_steer_hits: rec.telemetry.gate_1cp_hits,
-                                            core_placement: rec.telemetry.core_placement,
+                                            core_placement: row_core_placement,
                                             dsq_insert_ns: rec.telemetry.dsq_insert_ns,
                                             migration_count: rec.telemetry.migration_count,
                                             preempt_count: rec.telemetry.preempt_count,
@@ -7556,17 +7685,23 @@ pub fn run_tui(
                                             cpumask_change_count: rec
                                                 .telemetry
                                                 .cpumask_change_count,
-                                            allowed_cpus: rec.allowed_cpus,
+                                            allowed_cpus: row_allowed_cpus,
                                             home_cpu: rec.home_cpu,
                                             home_score,
                                             home_core,
                                             home_try_count: 0,
                                             home_busy_count: 0,
                                             home_change_count: 0,
-                                            smt_contended_runs: 0,
-                                            smt_solo_runs: 0,
-                                            smt_contended_runtime_ns: 0,
-                                            smt_overlap_runtime_ns: 0,
+                                            smt_contended_runs: rec
+                                                .telemetry
+                                                .smt_contended_run_count,
+                                            smt_solo_runs: rec.telemetry.smt_solo_run_count,
+                                            smt_contended_runtime_ns: rec
+                                                .telemetry
+                                                .smt_contended_runtime_ns,
+                                            smt_overlap_runtime_ns: rec
+                                                .telemetry
+                                                .smt_overlap_runtime_ns,
                                             last_blocker_pid: 0,
                                             last_blocker_cpu: 0,
                                             blocked_wait_last_us: 0,
@@ -7591,7 +7726,7 @@ pub fn run_tui(
                                             runtime_ns_per_sec: 0.0,
                                             status: TaskStatus::Alive,
                                             is_bpf_tracked: true,
-                                            tgid: rec.telemetry.tgid,
+                                            tgid: row_tgid,
                                             last_seen_at: sweep_seen_at,
                                             slice_util_pct: rec.telemetry.slice_util_pct,
                                             llc_id: rec.telemetry.llc_id,
@@ -7602,7 +7737,7 @@ pub fn run_tui(
                                             nivcsw_delta: rec.telemetry.nivcsw_delta,
                                             _pad_recomp: rec.telemetry._pad_recomp,
                                             is_kcritical,
-                                            ppid,
+                                            ppid: row_ppid,
                                             gate_cascade_ns: rec.telemetry.gate_cascade_ns,
                                             lifecycle_init_ms: rec.telemetry.lifecycle_init_ms,
                                             vtime_compute_ns: rec.telemetry.vtime_compute_ns,
@@ -7648,20 +7783,33 @@ pub fn run_tui(
                                             #[cfg(debug_assertions)]
                                             task_flags: rec.telemetry._pad2,
                                             #[cfg(debug_assertions)]
-                                            task_policy: rec.telemetry._pad3 as u32,
+                                            task_policy: proc_snapshot
+                                                .task_policy
+                                                .unwrap_or(rec.telemetry._pad3 as u32),
                                             #[cfg(debug_assertions)]
-                                            task_prio: rec.telemetry._pad4 & 0xff,
+                                            task_prio: proc_snapshot
+                                                .task_prio
+                                                .unwrap_or(rec.telemetry._pad4 & 0xff),
                                             #[cfg(debug_assertions)]
-                                            task_static_prio: (rec.telemetry._pad4 >> 8) & 0xff,
+                                            task_static_prio: proc_snapshot
+                                                .task_static_prio
+                                                .unwrap_or((rec.telemetry._pad4 >> 8) & 0xff),
                                             #[cfg(debug_assertions)]
-                                            task_normal_prio: (rec.telemetry._pad4 >> 16) & 0xff,
+                                            task_normal_prio: proc_snapshot
+                                                .task_normal_prio
+                                                .unwrap_or((rec.telemetry._pad4 >> 16) & 0xff),
                                             #[cfg(debug_assertions)]
                                             task_has_mm: (rec.telemetry._pad_recomp & 1) != 0,
                                             #[cfg(debug_assertions)]
                                             task_is_kthread: (rec.telemetry._pad_recomp & 2) != 0,
+                                            #[cfg(debug_assertions)]
+                                            proc_snapshot_seen: proc_snapshot.seen(),
+                                            #[cfg(debug_assertions)]
+                                            proc_schedstat_seen,
                                         });
 
                                 // Update dynamic row elements
+                                row.comm = row_comm;
                                 row.pelt_util = pelt_util;
                                 row.wait_duration_ns = rec.telemetry.wait_duration_ns;
                                 row.select_cpu_ns = rec.telemetry.select_cpu_duration_ns;
@@ -7669,7 +7817,7 @@ pub fn run_tui(
                                 row.gate_hit_pcts = gate_hit_pcts;
                                 row.home_steer_hits = rec.telemetry.gate_1c_hits;
                                 row.primary_steer_hits = rec.telemetry.gate_1cp_hits;
-                                row.core_placement = rec.telemetry.core_placement;
+                                row.core_placement = row_core_placement;
                                 row.dsq_insert_ns = rec.telemetry.dsq_insert_ns;
                                 row.migration_count = rec.telemetry.migration_count;
                                 row.preempt_count = rec.telemetry.preempt_count;
@@ -7679,7 +7827,7 @@ pub fn run_tui(
                                 row.jitter_accum_ns = jitter_accum_ns;
                                 row.direct_dispatch_count = rec.telemetry.direct_dispatch_count;
                                 row.cpumask_change_count = rec.telemetry.cpumask_change_count;
-                                row.allowed_cpus = rec.allowed_cpus;
+                                row.allowed_cpus = row_allowed_cpus;
                                 row.home_cpu = rec.home_cpu;
                                 row.home_score = home_score;
                                 row.home_core = home_core;
@@ -7695,6 +7843,7 @@ pub fn run_tui(
                                     rec.telemetry.wait_hist_ge1ms,
                                 ];
                                 row.is_bpf_tracked = true;
+                                row.tgid = row_tgid;
                                 row.last_seen_at = sweep_seen_at;
                                 row.slice_util_pct = rec.telemetry.slice_util_pct;
                                 row.llc_id = rec.telemetry.llc_id;
@@ -7703,7 +7852,7 @@ pub fn run_tui(
                                 row.wakeup_source_pid = rec.telemetry.wakeup_source_pid;
                                 row._pad_recomp = rec.telemetry._pad_recomp;
                                 row.is_kcritical = is_kcritical;
-                                row.ppid = ppid;
+                                row.ppid = row_ppid;
                                 row.task_weight = rec.task_weight;
                                 row.gate_cascade_ns = rec.telemetry.gate_cascade_ns;
                                 row.lifecycle_init_ms = rec.telemetry.lifecycle_init_ms;
@@ -7718,6 +7867,11 @@ pub fn run_tui(
                                 row.quantum_full_count = rec.telemetry.quantum_full_count;
                                 row.quantum_yield_count = rec.telemetry.quantum_yield_count;
                                 row.quantum_preempt_count = rec.telemetry.quantum_preempt_count;
+                                row.smt_contended_runs = rec.telemetry.smt_contended_run_count;
+                                row.smt_solo_runs = rec.telemetry.smt_solo_run_count;
+                                row.smt_contended_runtime_ns =
+                                    rec.telemetry.smt_contended_runtime_ns;
+                                row.smt_overlap_runtime_ns = rec.telemetry.smt_overlap_runtime_ns;
                                 row.waker_cpu = rec.telemetry.waker_cpu;
                                 row.waker_tgid = rec.telemetry.waker_tgid;
                                 row.wake_reason_wait_ns = rec.telemetry.wake_reason_wait_ns;
@@ -7737,12 +7891,22 @@ pub fn run_tui(
                                 #[cfg(debug_assertions)]
                                 {
                                     row.task_flags = rec.telemetry._pad2;
-                                    row.task_policy = rec.telemetry._pad3 as u32;
-                                    row.task_prio = rec.telemetry._pad4 & 0xff;
-                                    row.task_static_prio = (rec.telemetry._pad4 >> 8) & 0xff;
-                                    row.task_normal_prio = (rec.telemetry._pad4 >> 16) & 0xff;
+                                    row.task_policy = proc_snapshot
+                                        .task_policy
+                                        .unwrap_or(rec.telemetry._pad3 as u32);
+                                    row.task_prio = proc_snapshot
+                                        .task_prio
+                                        .unwrap_or(rec.telemetry._pad4 & 0xff);
+                                    row.task_static_prio = proc_snapshot
+                                        .task_static_prio
+                                        .unwrap_or((rec.telemetry._pad4 >> 8) & 0xff);
+                                    row.task_normal_prio = proc_snapshot
+                                        .task_normal_prio
+                                        .unwrap_or((rec.telemetry._pad4 >> 16) & 0xff);
                                     row.task_has_mm = (rec.telemetry._pad_recomp & 1) != 0;
                                     row.task_is_kthread = (rec.telemetry._pad_recomp & 2) != 0;
+                                    row.proc_snapshot_seen = proc_snapshot.seen();
+                                    row.proc_schedstat_seen = proc_schedstat_seen;
                                 }
                             } // end read loop
                               // f drops here, closing the iter fd automatically
@@ -7762,6 +7926,25 @@ pub fn run_tui(
                 if app.task_filter != TaskFilter::BpfTracked {
                     for (pid, process) in app.sys.processes() {
                         let pid_u32 = pid.as_u32();
+                        #[cfg(debug_assertions)]
+                        let proc_snapshot = {
+                            let proc_read_start = Instant::now();
+                            let snapshot = read_thread_proc_snapshot(pid_u32, pid_u32);
+                            proc_refresh_us = proc_refresh_us
+                                .saturating_add(proc_read_start.elapsed().as_micros() as u64);
+                            proc_refreshes = proc_refreshes.saturating_add(1);
+                            snapshot
+                        };
+                        #[cfg(debug_assertions)]
+                        let schedstat = {
+                            let proc_read_start = Instant::now();
+                            let schedstat = read_thread_schedstat(proc_snapshot.tgid, pid_u32);
+                            proc_refresh_us = proc_refresh_us
+                                .saturating_add(proc_read_start.elapsed().as_micros() as u64);
+                            schedstat
+                        };
+                        #[cfg(debug_assertions)]
+                        let proc_schedstat_seen = schedstat.is_some();
                         let row =
                             app.task_rows
                                 .entry(pid_u32)
@@ -7770,15 +7953,54 @@ pub fn run_tui(
                                     comm: process.name().to_string_lossy().to_string(),
                                     ..Default::default()
                                 });
+                        #[cfg(debug_assertions)]
+                        {
+                            row.tgid = if proc_snapshot.tgid > 0 {
+                                proc_snapshot.tgid
+                            } else {
+                                pid_u32
+                            };
+                            row.ppid = proc_snapshot.ppid;
+                            if let Some(comm) = proc_snapshot.comm.clone() {
+                                row.comm = comm;
+                            }
+                            if let Some(cpu) = proc_snapshot.processor {
+                                row.core_placement = cpu;
+                            }
+                            if let Some(allowed) = proc_snapshot.allowed_cpus {
+                                row.allowed_cpus = allowed;
+                            }
+                            if let Some((runtime_ns, _wait_ns, slices)) = schedstat {
+                                row.total_runtime_ns = runtime_ns;
+                                row.total_runs = slices.min(u32::MAX as u64) as u32;
+                            }
+                            if let Some(policy) = proc_snapshot.task_policy {
+                                row.task_policy = policy;
+                            }
+                            if let Some(prio) = proc_snapshot.task_prio {
+                                row.task_prio = prio;
+                            }
+                            if let Some(prio) = proc_snapshot.task_static_prio {
+                                row.task_static_prio = prio;
+                            }
+                            if let Some(prio) = proc_snapshot.task_normal_prio {
+                                row.task_normal_prio = prio;
+                            }
+                            row.proc_snapshot_seen = proc_snapshot.seen();
+                            row.proc_schedstat_seen = proc_schedstat_seen;
+                        }
                         row.last_seen_at = sweep_seen_at;
                     }
                 }
 
+                apply_blocked_wait_attribution(&mut app);
+
                 // --- Liveness Detection: cross-reference arena with sysinfo ---
                 let mut bpf_count = 0usize;
                 for (pid, row) in app.task_rows.iter_mut() {
+                    let in_bpf_iter = app.active_pids_buf.contains(pid);
                     let in_sysinfo = sysinfo_pids.contains(pid);
-                    row.status = if row.is_bpf_tracked && in_sysinfo {
+                    row.status = if row.is_bpf_tracked && in_bpf_iter {
                         TaskStatus::Alive
                     } else if in_sysinfo {
                         TaskStatus::Idle
@@ -7794,6 +8016,9 @@ pub fn run_tui(
                 {
                     app.debug_cost.iter_read_us = iter_read_us;
                     app.debug_cost.iter_rows = bpf_count as u32;
+                    app.debug_cost.proc_refresh_us = proc_refresh_us;
+                    app.debug_cost.proc_refreshes = proc_refreshes;
+                    app.debug_cost.proc_cache_hits = 0;
                 }
 
                 // --- Delta Mode: compute per-second rates ---

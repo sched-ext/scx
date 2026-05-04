@@ -3,6 +3,79 @@
 use super::report::build_telemetry_report;
 use super::*;
 
+const FLIGHT_SPIKE_ROWS: usize = 24;
+
+#[derive(Default)]
+struct FlightMinuteSummary {
+    start_elapsed: Duration,
+    end_elapsed: Duration,
+    sample_secs: f64,
+    samples: usize,
+    run_total: u64,
+    run_rate_low: f64,
+    wake_total: u64,
+    wait_ge5ms: u64,
+    cb_ge10us: u64,
+    dispatch_misses: u64,
+    queue_net: i128,
+    load_avg_sum: f32,
+    load_count: usize,
+    load_max_pct: f32,
+    load_hot_cpu: Option<u16>,
+    temp_avg_sum: f32,
+    temp_count: usize,
+    temp_max_c: f32,
+    temp_hot_cpu: Option<u16>,
+    path_count: [u64; SELECT_PATH_MAX],
+    quantum_count: [u64; 3],
+}
+
+impl FlightMinuteSummary {
+    fn new(sample: &TimelineSample) -> Self {
+        Self {
+            start_elapsed: sample.start_elapsed,
+            end_elapsed: sample.end_elapsed,
+            run_rate_low: f64::MAX,
+            ..Self::default()
+        }
+    }
+
+    fn record(&mut self, sample: &TimelineSample) {
+        let secs = sample.elapsed.as_secs_f64().max(0.1);
+        let run_rate = per_sec(sample.stats.nr_running_calls, secs);
+        self.end_elapsed = sample.end_elapsed;
+        self.sample_secs += secs;
+        self.samples += 1;
+        self.run_total += sample.stats.nr_running_calls;
+        self.run_rate_low = self.run_rate_low.min(run_rate);
+        self.wake_total += flight_wake_total(&sample.stats);
+        self.wait_ge5ms += flight_wait_ge5ms(&sample.stats);
+        self.cb_ge10us += flight_cb_ge10us(&sample.stats);
+        self.dispatch_misses += sample.stats.nr_dispatch_misses;
+        self.queue_net += signed_diff_u64(sample.stats.nr_dsq_queued, sample.stats.nr_dsq_consumed);
+        self.load_avg_sum += sample.system.cpu_load_avg_pct;
+        self.load_count += 1;
+        if sample.system.cpu_load_max_pct >= self.load_max_pct {
+            self.load_max_pct = sample.system.cpu_load_max_pct;
+            self.load_hot_cpu = sample.system.cpu_load_hot_cpu;
+        }
+        if sample.system.cpu_temp_avg_c > 0.0 {
+            self.temp_avg_sum += sample.system.cpu_temp_avg_c;
+            self.temp_count += 1;
+        }
+        if sample.system.cpu_temp_max_c >= self.temp_max_c {
+            self.temp_max_c = sample.system.cpu_temp_max_c;
+            self.temp_hot_cpu = sample.system.cpu_temp_hot_cpu;
+        }
+        for path in 1..SELECT_PATH_MAX {
+            self.path_count[path] += sample.stats.select_path_count[path];
+        }
+        self.quantum_count[0] += sample.stats.nr_quantum_full;
+        self.quantum_count[1] += sample.stats.nr_quantum_yield;
+        self.quantum_count[2] += sample.stats.nr_quantum_preempt;
+    }
+}
+
 fn append_wake_graph_section(output: &mut String, app: &TuiApp) {
     if app.wake_edges.is_empty()
         && app.wake_edge_slots_used == 0
@@ -1492,6 +1565,16 @@ fn append_wake_chain_section(output: &mut String, app: &TuiApp) {
 }
 
 #[cfg(debug_assertions)]
+fn row_proc_source_label(row: &TaskTelemetryRow) -> &'static str {
+    match (row.proc_snapshot_seen, row.proc_schedstat_seen) {
+        (true, true) => "proc+schedstat",
+        (true, false) => "proc",
+        (false, true) => "schedstat",
+        (false, false) => "missing",
+    }
+}
+
+#[cfg(debug_assertions)]
 fn append_task_anatomy_section(output: &mut String, app: &TuiApp) {
     use crate::task_anatomy::{derive_task_anatomy, lane_labels, shape_labels};
 
@@ -1507,14 +1590,21 @@ fn append_task_anatomy_section(output: &mut String, app: &TuiApp) {
             .then_with(|| a.pid.cmp(&b.pid))
     });
 
-    output.push_str(
-        "task.anatomy: source=debug_derived labels=candidate raw_source=bpf_iter proc_source=missing\n",
-    );
+    let proc_rows = rows.iter().filter(|row| row.proc_snapshot_seen).count();
+    let schedstat_rows = rows.iter().filter(|row| row.proc_schedstat_seen).count();
+    let missing_rows = rows
+        .iter()
+        .filter(|row| !row.proc_snapshot_seen && !row.proc_schedstat_seen)
+        .count();
+    output.push_str(&format!(
+        "task.anatomy: source=debug_derived labels=candidate raw_source=bpf_iter proc_source=mixed proc_rows={} schedstat_rows={} missing_rows={}\n",
+        proc_rows, schedstat_rows, missing_rows,
+    ));
     for row in rows.iter().take(32) {
         let input = task_anatomy_input_from_row(row, app.topology.nr_cpus as u16);
         let anatomy = derive_task_anatomy(&input, None);
         output.push_str(&format!(
-            "  pid={} tgid={} comm={} policy={} prio={}/{}/{} user={} kthread={} aff={}/{} shape={} lane_candidate={} risk={} raw_source=bpf_iter shape_source=derived lane_source={} proc_source=missing\n",
+            "  pid={} tgid={} comm={} policy={} prio={}/{}/{} user={} kthread={} aff={}/{} shape={} lane_candidate={} risk={} raw_source=bpf_iter shape_source=derived lane_source={} proc_source={}\n",
             row.pid,
             row.tgid,
             row.comm,
@@ -1530,6 +1620,7 @@ fn append_task_anatomy_section(output: &mut String, app: &TuiApp) {
             lane_labels(&anatomy),
             anatomy.risk_label(),
             anatomy.lane_source.label(),
+            row_proc_source_label(row),
         ));
     }
 }
@@ -1752,6 +1843,266 @@ fn append_debug_cost_section(output: &mut String, cost: crate::task_anatomy::Deb
         cost.proc_refreshes,
         cost.proc_cache_hits,
     ));
+}
+
+fn flight_wake_total(stats: &cake_stats) -> u64 {
+    stats.nr_wakeup_direct_dispatches
+        + stats.nr_wakeup_dsq_fallback_busy
+        + stats.nr_wakeup_dsq_fallback_queued
+}
+
+fn flight_wait_ge5ms(stats: &cake_stats) -> u64 {
+    stats
+        .wake_reason_bucket_count
+        .iter()
+        .skip(1)
+        .map(|buckets| buckets[WAKE_BUCKET_MAX - 1])
+        .sum()
+}
+
+fn flight_cb_ge10us(stats: &cake_stats) -> u64 {
+    stats
+        .callback_hist
+        .iter()
+        .map(|buckets| buckets[buckets.len() - 1])
+        .sum()
+}
+
+fn flight_spike_score(sample: &TimelineSample) -> u64 {
+    let stats = &sample.stats;
+    let wait_tail = flight_wait_ge5ms(stats);
+    let cb_tail = flight_cb_ge10us(stats);
+    let queue_build = stats.nr_dsq_queued.saturating_sub(stats.nr_dsq_consumed);
+    let busy_wake = stats.nr_wakeup_dsq_fallback_busy + stats.nr_wakeup_busy_local_target;
+    let load_pressure = if sample.system.cpu_load_max_pct >= 90.0 {
+        ((sample.system.cpu_load_max_pct - 89.0) * 10.0) as u64
+    } else {
+        0
+    };
+    let thermal_pressure = if sample.system.cpu_temp_max_c >= 85.0 {
+        ((sample.system.cpu_temp_max_c - 84.0) * 10.0) as u64
+    } else {
+        0
+    };
+
+    wait_tail.saturating_mul(10_000)
+        + cb_tail.saturating_mul(1_000)
+        + stats.nr_dispatch_misses.saturating_mul(500)
+        + busy_wake.saturating_mul(100)
+        + queue_build.saturating_mul(50)
+        + load_pressure
+        + thermal_pressure
+}
+
+fn flight_spike_reason(sample: &TimelineSample) -> &'static str {
+    let stats = &sample.stats;
+    if flight_wait_ge5ms(stats) > 0 {
+        "wake_tail"
+    } else if flight_cb_ge10us(stats) > 0 {
+        "callback_tail"
+    } else if stats.nr_dispatch_misses > 0 {
+        "dispatch_miss"
+    } else if stats.nr_dsq_queued > stats.nr_dsq_consumed {
+        "queue_build"
+    } else if stats.nr_wakeup_dsq_fallback_busy > 0 || stats.nr_wakeup_busy_local_target > 0 {
+        "busy_wake"
+    } else if sample.system.cpu_load_max_pct >= 90.0 {
+        "cpu_load"
+    } else if sample.system.cpu_temp_max_c >= 85.0 {
+        "cpu_temp"
+    } else {
+        "mixed"
+    }
+}
+
+fn flight_minute_rows(samples: &[TimelineSample]) -> Vec<FlightMinuteSummary> {
+    let mut rows = Vec::new();
+    let mut current_minute = None;
+    let mut current = None;
+
+    for sample in samples {
+        let minute = sample.end_elapsed.as_secs() / 60;
+        if current_minute != Some(minute) {
+            if let Some(row) = current.take() {
+                rows.push(row);
+            }
+            current_minute = Some(minute);
+            current = Some(FlightMinuteSummary::new(sample));
+        }
+        if let Some(row) = &mut current {
+            row.record(sample);
+        }
+    }
+
+    if let Some(row) = current {
+        rows.push(row);
+    }
+    rows
+}
+
+fn format_flight_minute_row(row: &FlightMinuteSummary) -> String {
+    let path_total: u64 = row.path_count[1..SELECT_PATH_MAX].iter().sum();
+    let quantum_total: u64 = row.quantum_count.iter().sum();
+    let load_avg = if row.load_count > 0 {
+        row.load_avg_sum / row.load_count as f32
+    } else {
+        0.0
+    };
+    let temp_avg = if row.temp_count > 0 {
+        row.temp_avg_sum / row.temp_count as f32
+    } else {
+        0.0
+    };
+    let run_low = if row.run_rate_low.is_finite() {
+        row.run_rate_low
+    } else {
+        0.0
+    };
+
+    format!(
+        "  t+{}..{} span={:.0}s n={} run/s={:.1} low={:.1} wake/s={:.1} wait>=5ms={} cb>=10us={} miss/s={:.1} qnet={:+} load={:.0}/{:.0}%@{} temp={:.1}/{:.1}C@{} path%={:.0}/{:.0}/{:.0}/{:.0}/{:.0} slice%={:.0}/{:.0}/{:.0}",
+        timeline_elapsed_label(row.start_elapsed),
+        timeline_elapsed_label(row.end_elapsed),
+        row.sample_secs,
+        row.samples,
+        per_sec(row.run_total, row.sample_secs),
+        run_low,
+        per_sec(row.wake_total, row.sample_secs),
+        row.wait_ge5ms,
+        row.cb_ge10us,
+        per_sec(row.dispatch_misses, row.sample_secs),
+        row.queue_net,
+        load_avg,
+        row.load_max_pct,
+        timeline_cpu_label(row.load_hot_cpu),
+        temp_avg,
+        row.temp_max_c,
+        timeline_cpu_label(row.temp_hot_cpu),
+        pct(row.path_count[1], path_total),
+        pct(row.path_count[2], path_total),
+        pct(row.path_count[3], path_total),
+        pct(row.path_count[4], path_total),
+        pct(row.path_count[5], path_total),
+        pct(row.quantum_count[0], quantum_total),
+        pct(row.quantum_count[1], quantum_total),
+        pct(row.quantum_count[2], quantum_total),
+    )
+}
+
+fn format_flight_spike_row(score: u64, sample: &TimelineSample) -> String {
+    let secs = sample.elapsed.as_secs_f64().max(0.1);
+    let stats = &sample.stats;
+    let queue_net = signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed);
+
+    format!(
+        "  score={} t+{}..{} ago={:>4}..{:>4}s reason={} run/s={:.1} wake/s={:.1} wait>=5ms={} cb>=10us={} miss={} qnet={:+} load={:.0}/{:.0}%@{} temp={:.1}/{:.1}C@{}",
+        score,
+        timeline_elapsed_label(sample.start_elapsed),
+        timeline_elapsed_label(sample.end_elapsed),
+        sample.start_ago_secs,
+        sample.end_ago_secs,
+        flight_spike_reason(sample),
+        per_sec(stats.nr_running_calls, secs),
+        per_sec(flight_wake_total(stats), secs),
+        flight_wait_ge5ms(stats),
+        flight_cb_ge10us(stats),
+        stats.nr_dispatch_misses,
+        queue_net,
+        sample.system.cpu_load_avg_pct,
+        sample.system.cpu_load_max_pct,
+        timeline_cpu_label(sample.system.cpu_load_hot_cpu),
+        sample.system.cpu_temp_avg_c,
+        sample.system.cpu_temp_max_c,
+        timeline_cpu_label(sample.system.cpu_temp_hot_cpu),
+    )
+}
+
+fn format_flight_second_row(sample: &TimelineSample) -> String {
+    let secs = sample.elapsed.as_secs_f64().max(0.1);
+    let stats = &sample.stats;
+    let path_total: u64 = stats.select_path_count[1..SELECT_PATH_MAX].iter().sum();
+    let quantum_total = stats.nr_quantum_full + stats.nr_quantum_yield + stats.nr_quantum_preempt;
+    let queue_net = signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed);
+
+    format!(
+        "  t+{}..{} run/s={:.1} wake/s={:.1} wait>=5ms={} cb>=10us={} miss={} qnet={:+} load={:.0}/{:.0}%@{} temp={:.1}/{:.1}C@{} path%={:.0}/{:.0}/{:.0}/{:.0}/{:.0} slice%={:.0}/{:.0}/{:.0}",
+        timeline_elapsed_label(sample.start_elapsed),
+        timeline_elapsed_label(sample.end_elapsed),
+        per_sec(stats.nr_running_calls, secs),
+        per_sec(flight_wake_total(stats), secs),
+        flight_wait_ge5ms(stats),
+        flight_cb_ge10us(stats),
+        stats.nr_dispatch_misses,
+        queue_net,
+        sample.system.cpu_load_avg_pct,
+        sample.system.cpu_load_max_pct,
+        timeline_cpu_label(sample.system.cpu_load_hot_cpu),
+        sample.system.cpu_temp_avg_c,
+        sample.system.cpu_temp_max_c,
+        timeline_cpu_label(sample.system.cpu_temp_hot_cpu),
+        pct(stats.select_path_count[1], path_total),
+        pct(stats.select_path_count[2], path_total),
+        pct(stats.select_path_count[3], path_total),
+        pct(stats.select_path_count[4], path_total),
+        pct(stats.select_path_count[5], path_total),
+        pct(stats.nr_quantum_full, quantum_total),
+        pct(stats.nr_quantum_yield, quantum_total),
+        pct(stats.nr_quantum_preempt, quantum_total),
+    )
+}
+
+fn append_flight_recorder_section(output: &mut String, app: &TuiApp) {
+    let samples = app.retained_timeline_samples();
+    if samples.is_empty() {
+        return;
+    }
+
+    let span = timeline_history_span(&app.timeline_history);
+    let first = samples.first().unwrap();
+    let last = samples.last().unwrap();
+    let minute_rows = flight_minute_rows(&samples);
+    let mut spike_rows: Vec<(u64, TimelineSample)> = samples
+        .iter()
+        .copied()
+        .map(|sample| (flight_spike_score(&sample), sample))
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    spike_rows.sort_by(|a, b| b.0.cmp(&a.0));
+    spike_rows.truncate(FLIGHT_SPIKE_ROWS);
+
+    output.push_str(&format!(
+        "\nflight: source=userspace_1s retained={} span={:.1}s first=t+{} last=t+{} minutes={} spikes={} load_temp=sampled_from_sysinfo\n",
+        samples.len(),
+        span.as_secs_f64(),
+        timeline_elapsed_label(first.start_elapsed),
+        timeline_elapsed_label(last.end_elapsed),
+        minute_rows.len(),
+        spike_rows.len(),
+    ));
+    output.push_str(
+        "flight.guide: for a lag time, match t+MM:SS or t+HH:MM:SS in flight.minute, then inspect flight.spikes and timeline.last60 if the issue was recent\n",
+    );
+    output.push_str(
+        "flight.minute.cols: [time span n run/s low wake/s wait>=5ms cb>=10us dispatch_miss/s qnet load=avg/max@cpu temp=avg/max@cpu path%=home/core/prim/idle/tun slice%=full/block/preempt]\n",
+    );
+    for row in &minute_rows {
+        output.push_str(&format!("{}\n", format_flight_minute_row(row)));
+    }
+
+    if !spike_rows.is_empty() {
+        output.push_str(
+            "flight.spikes.cols: [score time ago reason run/s wake/s wait>=5ms cb>=10us dispatch_miss qnet load temp]\n",
+        );
+        for (score, sample) in &spike_rows {
+            output.push_str(&format!("{}\n", format_flight_spike_row(*score, sample)));
+        }
+    }
+    output.push_str(
+        "flight.second.cols: [time run/s wake/s wait>=5ms cb>=10us dispatch_miss qnet load temp path%=home/core/prim/idle/tun slice%=full/block/preempt]\n",
+    );
+    for sample in &samples {
+        output.push_str(&format!("{}\n", format_flight_second_row(sample)));
+    }
 }
 
 fn append_blocked_behind_section(output: &mut String, label: &str, app: &TuiApp) {
@@ -2237,6 +2588,8 @@ fn append_window_stats(
 pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> String {
     #[cfg(debug_assertions)]
     let dump_start = Instant::now();
+    #[cfg(debug_assertions)]
+    let anatomy_derive_us;
 
     let total_dsq_dispatches = stats.nr_local_dispatches + stats.nr_stolen_dispatches;
     let tgid_roles = infer_tgid_roles(&app.task_rows);
@@ -2252,7 +2605,7 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
     ));
     output.push_str("scope: lifetime\n");
     output.push_str(
-        "capture: global=exact task.life=exact task.rate=delta_per_tick task.stage=latest_observed task.affinity=exact task.home=debug_exact task.quantum=exact_u64 task.behind=latest_observed wakewait.all=exact wakewait<=5ms=bounded wakegraph.ringbuf=debug_sampled_weighted homeseed=debug_exact localq=debug_estimate windows=delta_snapshots history=rolling_1s_samples",
+        "capture: global=exact task.life=exact task.rate=delta_per_tick task.stage=latest_observed task.affinity=exact task.home=debug_exact task.quantum=exact_u64 task.behind=latest_observed wakewait.all=exact wakewait<=5ms=bounded wakegraph.ringbuf=debug_sampled_weighted homeseed=debug_exact localq=debug_estimate windows=delta_snapshots history=rolling_1s_samples flight=userspace_1s_retained",
     );
     #[cfg(debug_assertions)]
     output.push_str(" wakegraph.derived=debug_derived_latest_waker task.anatomy=debug_derived gaming.qos=debug_derived wake.chain=debug_derived+bpf_locality_guard wakepolicy.strict.derived=debug_shadow");
@@ -2270,9 +2623,11 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
     append_focused_app_section(&mut output, app, &tgid_roles);
     #[cfg(debug_assertions)]
     {
+        let anatomy_start = Instant::now();
         append_wake_chain_section(&mut output, app);
         append_gaming_qos_section(&mut output, app);
         append_task_anatomy_section(&mut output, app);
+        anatomy_derive_us = anatomy_start.elapsed().as_micros() as u64;
     }
     let life_elapsed = app.start_time.elapsed().max(Duration::from_secs(1));
     let life_cpu_rows = scheduler_cpu_rows(
@@ -2755,12 +3110,13 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
             output.push('\n');
         }
         output.push_str(
-            "timeline.cols: [slot span run/s wake/s wake%=dir/busy/q path%=home/core/prim/idle/tun cbns=sel/enq/run/stop waitus<=5ms=dir/busy/q slice%=full/block/preempt]\n",
+            "timeline.cols: [time ago span run/s wake/s wake%=dir/busy/q path%=home/core/prim/idle/tun cbns=sel/enq/run/stop waitus<=5ms=dir/busy/q slice%=full/block/preempt load=avg/max@cpu temp=avg/max@cpu]\n",
         );
         for sample in &timeline_samples {
             output.push_str(&format!("{}\n", format_timeline_sample_row(sample)));
         }
     }
+    append_flight_recorder_section(&mut output, app);
     if !app.debug_events.is_empty() {
         output.push_str("events:\n");
         for ev in app.debug_events.iter().take(8) {
@@ -2771,10 +3127,6 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
                 debug_event_label(ev)
             ));
         }
-    }
-
-    if app.bench_run_count > 0 {
-        output.push_str(&format_bench_for_clipboard(app));
     }
 
     // Task matrix header — compact column key
@@ -3003,6 +3355,7 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
     {
         let mut cost = app.debug_cost;
         cost.dump_us = dump_start.elapsed().as_micros() as u64;
+        cost.anatomy_derive_us = anatomy_derive_us;
         append_debug_cost_section(&mut output, cost);
     }
 

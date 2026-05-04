@@ -154,8 +154,13 @@ static __noinline void iter_copy_substage(
 		rec->telemetry.home_place_wait_count[_pi] = tctx->telemetry.home_place_wait_count[_pi];
 		rec->telemetry.home_place_wait_max_us[_pi] = tctx->telemetry.home_place_wait_max_us[_pi];
 	}
+	rec->telemetry.smt_solo_runtime_ns = tctx->telemetry.smt_solo_runtime_ns;
+	rec->telemetry.smt_contended_runtime_ns = tctx->telemetry.smt_contended_runtime_ns;
+	rec->telemetry.smt_overlap_runtime_ns = tctx->telemetry.smt_overlap_runtime_ns;
+	rec->telemetry.smt_solo_run_count = tctx->telemetry.smt_solo_run_count;
+	rec->telemetry.smt_contended_run_count = tctx->telemetry.smt_contended_run_count;
 	/* cpu_run_count: per-element arena reads */
-for (int _ci = 0; _ci < CAKE_TELEM_MAX_CPUS; _ci++)
+	for (int _ci = 0; _ci < CAKE_TELEM_MAX_CPUS; _ci++)
 		rec->telemetry.cpu_run_count[_ci] = tctx->telemetry.cpu_run_count[_ci];
 }
 #endif /* CAKE_NEEDS_ARENA */

@@ -1038,7 +1038,7 @@ mod tests {
         assert!(src.contains("nr_primary_scan_hot_guarded"));
 
         let hot_guard_body = src
-            .split_once("static __always_inline bool cake_should_guard_hot_primary_scan")
+            .split_once("static __noinline bool cake_should_guard_hot_primary_scan")
             .and_then(|(_, rest)| {
                 rest.split_once("static __always_inline bool cake_should_hold_wake_chain_locality")
             })
@@ -1089,7 +1089,7 @@ mod tests {
         assert!(main.contains("wake_chain_locality"));
         assert!(main.contains("#[cfg(not(cake_bpf_release))]"));
         assert!(main.contains("rodata.enable_wake_chain_locality = args.wake_chain_locality"));
-        assert!(readme.contains("debug/telemetry A/B controls"));
+        assert!(readme.contains("runtime A/B controls"));
     }
 
     #[test]
@@ -1126,7 +1126,8 @@ mod tests {
 
         assert!(src.contains("const volatile bool enable_learned_locality"));
         assert!(src.contains("CAKE_LEARNED_LOCALITY_ENABLED"));
-        assert!(src.contains("CAKE_LEARNED_LOCALITY_ENABLED && cake_should_steer"));
+        assert!(src.contains("cake_select_learned_locality("));
+        assert!(src.contains("!CAKE_LEARNED_LOCALITY_ENABLED || !cake_should_steer"));
         assert!(src.contains("const volatile u32 busy_wake_kick_mode"));
         assert!(src.contains("#define CAKE_BUSY_WAKE_KICK_MODE CAKE_BUSY_WAKE_KICK_POLICY"));
         assert!(src.contains("CAKE_BUSY_WAKE_KICK_PREEMPT"));
@@ -1137,8 +1138,125 @@ mod tests {
         assert!(main.contains("#[cfg(not(cake_bpf_release))]"));
         assert!(main.contains("rodata.enable_learned_locality = args.learned_locality"));
         assert!(main.contains("rodata.busy_wake_kick_mode = args.busy_wake_kick as u32"));
-        assert!(readme.contains("debug/telemetry A/B controls"));
+        assert!(readme.contains("runtime A/B controls"));
         assert!(readme.contains("--busy-wake-kick=preempt"));
+    }
+
+    #[test]
+    fn bpf_release_fast_probe_uses_slot_specific_quality_gates() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("cake_idle_scoreboard_clean("));
+        assert!(src.contains("cake_status_pressure("));
+        assert!(src.contains("owner_class >= CAKE_CPU_OWNER_BULK"));
+        assert!(src.contains("pressure >= CAKE_CPU_PRESSURE_FULL"));
+        assert!(src.contains("cake_smt_interactive_neighbor_busy(candidate)"));
+        assert!(src.contains("selected = cake_try_clean_idle_candidate(candidate);"));
+        assert!(src.contains("selected = cake_try_smt_idle_candidate(candidate);"));
+    }
+
+    #[test]
+    fn bpf_release_fast_probe_is_task_biased() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("cake_task_latency_biased("));
+        assert!(src.contains("wake_flags & SCX_WAKE_SYNC"));
+        assert!(src.contains("p->prio < 120"));
+        assert!(src.contains("p->scx.weight > 120"));
+        assert!(src.contains("latency_biased = cake_task_latency_biased(p, wake_flags);"));
+        assert!(src.contains("cake_select_fast_scan_limit(local_bss, latency_biased)"));
+        assert!(src.contains("cake_select_cpu_fast_scan(p, prev_cpu, wake_flags, select_bss)"));
+    }
+
+    #[test]
+    fn bpf_release_decision_accelerator_uses_packed_confidence() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let intf = include_str!("bpf/intf.h");
+
+        assert!(intf.contains("decision_confidence"));
+        assert!(src.contains("CAKE_CONF_SELECT_EARLY_SHIFT"));
+        assert!(src.contains("CAKE_CONF_SELECT_ROW4_SHIFT"));
+        assert!(src.contains("CAKE_CONF_DISPATCH_EMPTY_SHIFT"));
+        assert!(src.contains("cake_conf_update(local_bss, CAKE_CONF_SELECT_EARLY_SHIFT, true)"));
+        assert!(src.contains("scx_bpf_dsq_nr_queued(dsq_id)"));
+    }
+
+    #[test]
+    fn bpf_release_scoreboard_has_kick_and_pull_confidence_lanes() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("CAKE_CONF_KICK_SHAPE_SHIFT"));
+        assert!(src.contains("CAKE_CONF_PULL_SHAPE_SHIFT"));
+        assert!(src.contains("cake_kick_shape_mode("));
+        assert!(src.contains("cake_pull_shape_mode("));
+        assert!(src.contains("cake_conf_update(bss, CAKE_CONF_KICK_SHAPE_SHIFT"));
+        assert!(src.contains("cake_conf_update(bss, CAKE_CONF_PULL_SHAPE_SHIFT"));
+    }
+
+    #[test]
+    fn bpf_release_scoreboard_shapes_wake_kicks() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("CAKE_KICK_SHAPE_NONE"));
+        assert!(src.contains("CAKE_KICK_SHAPE_IDLE"));
+        assert!(src.contains("CAKE_KICK_SHAPE_PREEMPT"));
+        assert!(src.contains("cake_scoreboard_kick_cpu("));
+        assert!(src.contains("owner_class >= CAKE_CPU_OWNER_BULK"));
+        assert!(src.contains("cake_scoreboard_kick_cpu(target_cpu);"));
+    }
+
+    #[test]
+    fn bpf_release_scoreboard_shapes_dsq_pulls() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("cake_dispatch_dsq_should_pull("));
+        assert!(src.contains("cake_pull_shape_mode("));
+        assert!(src.contains("CAKE_PULL_SHAPE_PROBE"));
+        assert!(src.contains("scx_bpf_dsq_nr_queued(dsq_id)"));
+        assert!(src.contains("cake_conf_update(bss, CAKE_CONF_PULL_SHAPE_SHIFT"));
+    }
+
+    #[test]
+    fn bpf_release_fallback_confidence_ladder_filters_native_selection() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("CAKE_CONF_SELECT_AUDIT_SHIFT"));
+        assert!(src.contains("CAKE_SELECT_FALLBACK_FULL"));
+        assert!(src.contains("CAKE_SELECT_FALLBACK_CORE"));
+        assert!(src.contains("CAKE_SELECT_FALLBACK_NODE_CORE"));
+        assert!(src.contains("CAKE_SELECT_FALLBACK_SKIP"));
+        assert!(src.contains("cake_select_fallback_mode("));
+        assert!(src.contains("cake_select_fallback_audit_due("));
+        assert!(src.contains("SCX_PICK_IDLE_CORE"));
+        assert!(src.contains("SCX_PICK_IDLE_IN_NODE"));
+        assert!(src.contains("select_cpu_and_idle(p, prev_cpu, wake_flags, SCX_PICK_IDLE_CORE)"));
+        assert!(src.contains("SCX_PICK_IDLE_CORE | SCX_PICK_IDLE_IN_NODE"));
+        assert!(src.contains("if (fallback_mode == CAKE_SELECT_FALLBACK_SKIP)"));
+    }
+
+    #[test]
+    fn bpf_release_scoreboard_obsoletes_legacy_bss_hint_lanes() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let intf = include_str!("bpf/intf.h");
+        let tui = include_str!("tui.rs");
+        let readme = include_str!("../README.md");
+        let bss_body = intf
+            .split_once("struct cake_cpu_bss {")
+            .and_then(|(_, rest)| rest.split_once("} __attribute__((aligned(4096)));"))
+            .map(|(body, _)| body)
+            .expect("cake_cpu_bss body should be present");
+
+        assert!(bss_body.contains("#ifndef CAKE_RELEASE\n\tu8  idle_hint"));
+        assert!(bss_body.contains("#ifndef CAKE_RELEASE\n\tu8  cpu_pressure"));
+        assert!(src.contains("Release wake placement reads cpu_status/cpu_frontier"));
+        assert!(src.contains("u8 scoreboard_idle = !!(target_status & CAKE_CPU_STATUS_IDLE);"));
+        assert!(!src.contains("u8 idle_hint = !!(target_status & CAKE_CPU_STATUS_IDLE);"));
+        assert!(src.contains("cake_publish_cpu_idle(cpu_idx);"));
+        assert!(src.contains("cake_publish_cpu_running(cpu, task_changed);"));
+        assert!(tui.contains("fn cake_cpu_status_pressure_bucket(flags: u64) -> u8"));
+        assert!(tui.contains("bss.cpu_status[idx].flags"));
+        assert!(readme.contains("debug-only private mirror"));
+        assert!(readme.contains("release scoreboard publishes pressure"));
     }
 
     #[test]
@@ -1172,8 +1290,10 @@ mod tests {
         assert!(!bpf.contains("CAKE_STRICT_WAKE_POLICY_BPF_TELEMETRY"));
         assert!(bpf.contains("#if CAKE_DEBUG_EVENT_STREAM"));
         assert!(bpf.contains("cake_debug_should_sample_wake_edge"));
-        assert!(bpf.contains("ev->aux = sample_weight"));
+        assert!(bpf.contains("ev->aux = cake_debug_wake_edge_sample_weight(important)"));
+        assert!(bpf.contains("ev->aux = CAKE_WAKE_EDGE_SAMPLE_DENOM"));
         assert!(bpf.contains("if (!important && !cake_debug_should_sample_wake_edge"));
+        assert!(bpf.contains("if (same_cpu && !cake_debug_should_sample_wake_edge"));
         assert!(bpf.contains("cake_emit_wake_edge_run_event"));
         assert!(!bpf.contains("cake_wake_edge_lookup"));
         assert!(!bpf.contains("cake_shadow_classify_task_strict"));
