@@ -46,12 +46,12 @@ use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
+use libbpf_rs::libbpf_sys;
+use libbpf_rs::skel::Skel;
 use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use libbpf_rs::MapHandle;
 use libbpf_rs::MapType;
-use libbpf_rs::libbpf_sys;
-use libbpf_rs::skel::Skel;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
@@ -469,7 +469,10 @@ struct StreamSummary {
 impl StreamCapture {
     fn new(skel: &mut BpfSkel<'_>, path: &Path) -> Result<Self> {
         let mut writer = BufWriter::new(File::create(path)?);
-        writeln!(writer, "timestamp_ns,cpu_id,pid,lat_cri,perf_cri,slice_ns,dsq_id")?;
+        writeln!(
+            writer,
+            "timestamp_ns,cpu_id,pid,lat_cri,perf_cri,slice_ns,dsq_id"
+        )?;
 
         let writer = Arc::new(Mutex::new(writer));
         let rows_written = Arc::new(AtomicU64::new(0));
@@ -493,11 +496,7 @@ impl StreamCapture {
             .with_context(|| format!("failed to create ringbuf for CPU {cpu_id}"))?;
             let rb_fd = map.as_fd().as_raw_fd();
             outer_map
-                .update(
-                    &cpu_id.to_ne_bytes(),
-                    &rb_fd.to_ne_bytes(),
-                    MapFlags::ANY,
-                )
+                .update(&cpu_id.to_ne_bytes(), &rb_fd.to_ne_bytes(), MapFlags::ANY)
                 .with_context(|| format!("failed to register ringbuf for CPU {cpu_id}"))?;
             ringbuf_maps.push(map);
         }
@@ -1056,8 +1055,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn stop_monitoring(&mut self) {
-        if !self.streaming_enabled && self.skel.maps.bss_data.as_ref().unwrap().is_monitored
-        {
+        if !self.streaming_enabled && self.skel.maps.bss_data.as_ref().unwrap().is_monitored {
             self.skel.maps.bss_data.as_mut().unwrap().is_monitored = false;
         }
     }
