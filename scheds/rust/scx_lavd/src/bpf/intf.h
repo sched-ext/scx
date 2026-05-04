@@ -27,8 +27,6 @@ enum {
 
 #endif
 
-#include "introspec.bpf.h"
-
 /*
  * common constants
  */
@@ -130,7 +128,6 @@ struct task_ctx_x {
 enum {
        LAVD_CMD_NOP		= 0x0,
        LAVD_CMD_SCHED_N		= 0x1,
-       LAVD_CMD_STREAM		= 0x2,
 };
 
 enum {

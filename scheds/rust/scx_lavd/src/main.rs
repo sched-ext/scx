@@ -16,22 +16,12 @@ use scx_utils::init_libbpf_logging;
 mod stats;
 use std::ffi::c_int;
 use std::ffi::CStr;
-use std::fs::File;
-use std::io::BufWriter;
-use std::io::Write;
 use std::mem;
 use std::mem::MaybeUninit;
-use std::os::fd::AsFd;
-use std::os::fd::AsRawFd;
-use std::path::Path;
-use std::path::PathBuf;
 use std::str;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread::JoinHandle;
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -46,12 +36,7 @@ use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
-use libbpf_rs::libbpf_sys;
 use libbpf_rs::skel::Skel;
-use libbpf_rs::MapCore;
-use libbpf_rs::MapFlags;
-use libbpf_rs::MapHandle;
-use libbpf_rs::MapType;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
@@ -268,10 +253,6 @@ struct Opts {
     #[clap(long)]
     monitor_sched_samples: Option<u64>,
 
-    /// Continuously capture slim scheduling samples to the specified CSV file.
-    #[clap(long, value_name = "PATH")]
-    stream_stats: Option<PathBuf>,
-
     /// Specify the logging level. Accepts rust's envfilter syntax for modular
     /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
     #[clap(long, default_value = "info")]
@@ -432,16 +413,9 @@ impl Opts {
 }
 
 unsafe impl Plain for msg_task_ctx {}
-unsafe impl Plain for lavd_stream_sample {}
 
 impl msg_task_ctx {
     fn from_bytes(buf: &[u8]) -> &msg_task_ctx {
-        plain::from_bytes(buf).expect("The buffer is either too short or not aligned!")
-    }
-}
-
-impl lavd_stream_sample {
-    fn from_bytes(buf: &[u8]) -> &lavd_stream_sample {
         plain::from_bytes(buf).expect("The buffer is either too short or not aligned!")
     }
 }
@@ -453,93 +427,10 @@ impl introspec {
     }
 }
 
-struct StreamCapture {
-    output_path: PathBuf,
-    rows_written: Arc<AtomicU64>,
-    writer: Arc<Mutex<BufWriter<File>>>,
-    _ringbuf_maps: Vec<MapHandle>,
-    rb_mgr: libbpf_rs::RingBuffer<'static>,
-}
-
-struct StreamSummary {
-    output_path: PathBuf,
-    rows_written: u64,
-}
-
-impl StreamCapture {
-    fn new(skel: &mut BpfSkel<'_>, path: &Path) -> Result<Self> {
-        let mut writer = BufWriter::new(File::create(path)?);
-        writeln!(
-            writer,
-            "timestamp_ns,cpu_id,pid,lat_cri,perf_cri,slice_ns,dsq_id"
-        )?;
-
-        let writer = Arc::new(Mutex::new(writer));
-        let rows_written = Arc::new(AtomicU64::new(0));
-        let mut ringbuf_maps = Vec::with_capacity(*NR_CPU_IDS);
-        let mut builder = libbpf_rs::RingBufferBuilder::new();
-        let outer_map = &skel.maps.introspec_stream_rbs;
-        let create_opts = libbpf_sys::bpf_map_create_opts {
-            sz: std::mem::size_of::<libbpf_sys::bpf_map_create_opts>() as libbpf_sys::size_t,
-            ..Default::default()
-        };
-
-        for cpu_id in 0..(*NR_CPU_IDS as u32) {
-            let map = MapHandle::create(
-                MapType::RingBuf,
-                Some(format!("lavd_stream_cpu{cpu_id}")),
-                0,
-                0,
-                LAVD_INTROSPEC_STREAM_RINGBUF_SIZE,
-                &create_opts,
-            )
-            .with_context(|| format!("failed to create ringbuf for CPU {cpu_id}"))?;
-            let rb_fd = map.as_fd().as_raw_fd();
-            outer_map
-                .update(&cpu_id.to_ne_bytes(), &rb_fd.to_ne_bytes(), MapFlags::ANY)
-                .with_context(|| format!("failed to register ringbuf for CPU {cpu_id}"))?;
-            ringbuf_maps.push(map);
-        }
-
-        for map in ringbuf_maps.iter() {
-            let writer = writer.clone();
-            let rows_written = rows_written.clone();
-            builder.add(map, move |data| {
-                Scheduler::relay_stream_sample(data, &writer, &rows_written)
-            })?;
-        }
-        let rb_mgr = builder.build()?;
-
-        Ok(Self {
-            output_path: path.to_path_buf(),
-            rows_written,
-            writer,
-            _ringbuf_maps: ringbuf_maps,
-            rb_mgr,
-        })
-    }
-
-    fn run(self, shutdown: Arc<AtomicBool>) -> Result<StreamSummary> {
-        while !shutdown.load(Ordering::Relaxed) {
-            self.rb_mgr.poll(Duration::from_millis(100))?;
-        }
-
-        self.rb_mgr.consume()?;
-        self.writer.lock().unwrap().flush()?;
-
-        Ok(StreamSummary {
-            output_path: self.output_path,
-            rows_written: self.rows_written.load(Ordering::Relaxed),
-        })
-    }
-}
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     rb_mgr: libbpf_rs::RingBuffer<'static>,
-    stream_capture: Option<StreamCapture>,
-    streaming_enabled: bool,
     intrspc: introspec,
     intrspc_rx: Receiver<SchedSample>,
     monitor_tid: Option<ThreadId>,
@@ -618,31 +509,17 @@ impl<'a> Scheduler<'a> {
             })
             .unwrap();
         let rb_mgr = builder.build().unwrap();
-        let stream_capture = if let Some(path) = opts.stream_stats.as_deref() {
-            Some(StreamCapture::new(&mut skel, path)?)
-        } else {
-            None
-        };
-        let streaming_enabled = stream_capture.is_some();
 
-        let mut sched = Self {
+        Ok(Self {
             skel,
             struct_ops,
             rb_mgr,
-            stream_capture,
-            streaming_enabled,
             intrspc: introspec::new(),
             intrspc_rx,
             monitor_tid: None,
             stats_server,
             mseq_id: 0,
-        };
-
-        if sched.streaming_enabled {
-            sched.enable_streaming();
-        }
-
-        Ok(sched)
+        })
     }
 
     fn attach_futex_ftraces(skel: &mut OpenBpfSkel) -> Result<bool> {
@@ -903,44 +780,6 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn relay_stream_sample(
-        data: &[u8],
-        writer: &Arc<Mutex<BufWriter<File>>>,
-        rows_written: &Arc<AtomicU64>,
-    ) -> i32 {
-        let sample = lavd_stream_sample::from_bytes(data);
-        let rows = rows_written.fetch_add(1, Ordering::Relaxed) + 1;
-        let mut writer = writer.lock().unwrap();
-
-        if writeln!(
-            writer,
-            "{},{},{},{},{},{},{}",
-            sample.timestamp_ns,
-            sample.cpu_id,
-            sample.pid,
-            sample.lat_cri,
-            sample.perf_cri,
-            sample.slice_ns,
-            sample.dsq_id,
-        )
-        .is_err()
-        {
-            return -1;
-        }
-
-        if rows % 1024 == 0 {
-            let _ = writer.flush();
-        }
-
-        0
-    }
-
-    fn enable_streaming(&mut self) {
-        self.intrspc.cmd = LAVD_CMD_STREAM;
-        self.intrspc.arg = 0;
-        self.prep_introspec();
-    }
-
     fn prep_introspec(&mut self) {
         if !self.skel.maps.bss_data.as_ref().unwrap().is_monitored {
             self.skel.maps.bss_data.as_mut().unwrap().is_monitored = true;
@@ -950,12 +789,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn cleanup_introspec(&mut self) {
-        if self.streaming_enabled {
-            self.enable_streaming();
-        } else {
-            self.skel.maps.bss_data.as_mut().unwrap().intrspc.cmd = LAVD_CMD_NOP;
-            self.skel.maps.bss_data.as_mut().unwrap().intrspc.arg = 0;
-        }
+        self.skel.maps.bss_data.as_mut().unwrap().intrspc.cmd = LAVD_CMD_NOP;
     }
 
     fn get_pc(x: u64, y: u64) -> f64 {
@@ -1055,42 +889,9 @@ impl<'a> Scheduler<'a> {
     }
 
     fn stop_monitoring(&mut self) {
-        if !self.streaming_enabled && self.skel.maps.bss_data.as_ref().unwrap().is_monitored {
+        if self.skel.maps.bss_data.as_ref().unwrap().is_monitored {
             self.skel.maps.bss_data.as_mut().unwrap().is_monitored = false;
         }
-    }
-
-    fn log_stream_drop_counts(&self) {
-        if !self.streaming_enabled {
-            return;
-        }
-
-        let drop_map = &self.skel.maps.introspec_stream_drops;
-        let mut total_drops = 0u64;
-        let mut active_cpus = 0u64;
-
-        for cpu_id in 0..(*NR_CPU_IDS as u32) {
-            let Ok(Some(bytes)) = drop_map.lookup(&cpu_id.to_ne_bytes(), MapFlags::ANY) else {
-                continue;
-            };
-            if bytes.len() < std::mem::size_of::<u64>() {
-                continue;
-            }
-
-            let mut raw = [0u8; std::mem::size_of::<u64>()];
-            raw.copy_from_slice(&bytes[..std::mem::size_of::<u64>()]);
-            let drops = u64::from_ne_bytes(raw);
-            if drops > 0 {
-                total_drops += drops;
-                active_cpus += 1;
-                debug!("stream stats drops on CPU {}: {}", cpu_id, drops);
-            }
-        }
-
-        info!(
-            "stream stats drop summary: {} drops across {} CPUs",
-            total_drops, active_cpus
-        );
     }
 
     pub fn exited(&mut self) -> bool {
@@ -1145,12 +946,6 @@ impl<'a> Scheduler<'a> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut autopower = opts.autopower;
         let mut profile = PowerProfile::Unknown;
-        let stream_enabled = self.stream_capture.is_some();
-        let stream_thread: Option<JoinHandle<Result<StreamSummary>>> =
-            self.stream_capture.take().map(|capture| {
-                let shutdown = shutdown.clone();
-                std::thread::spawn(move || capture.run(shutdown))
-            });
 
         if opts.performance {
             let _ = self.set_power_profile(LAVD_PM_PERFORMANCE);
@@ -1171,9 +966,7 @@ impl<'a> Scheduler<'a> {
                     res_ch.send(res)?;
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    if !stream_enabled {
-                        self.stop_monitoring();
-                    }
+                    self.stop_monitoring();
                 }
                 Err(e) => {
                     self.stop_monitoring();
@@ -1183,15 +976,6 @@ impl<'a> Scheduler<'a> {
             self.cleanup_introspec();
         }
         self.rb_mgr.consume().unwrap();
-        if let Some(jh) = stream_thread {
-            let summary = jh.join().unwrap()?;
-            info!(
-                "stream stats capture wrote {} samples to {}",
-                summary.rows_written,
-                summary.output_path.display()
-            );
-            self.log_stream_drop_counts();
-        }
 
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
