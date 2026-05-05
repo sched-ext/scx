@@ -97,13 +97,13 @@ int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena
 {
 	int ret;
 
-	ret = arena_spin_lock(&atq->lock);
+	ret = scx_atq_lock(atq);
 	if (ret)
 		return ret;
 
 	ret = scx_atq_insert_vtime_unlocked(atq, taskc, vtime);
 
-	arena_spin_unlock(&atq->lock);
+	scx_atq_unlock(atq);
 
 	return ret;
 }
@@ -140,13 +140,13 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
        int ret;
 
-       ret = arena_spin_lock(&atq->lock);
+       ret = scx_atq_lock(atq);
        if (ret)
                return ret;
 
        ret = scx_atq_remove_unlocked(atq, taskc);
 
-       arena_spin_unlock(&atq->lock);
+       scx_atq_unlock(atq);
 
        return ret;
 }
@@ -158,12 +158,12 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	u64 vtime, taskc_ptr;
 	int ret;
 
-	ret = arena_spin_lock(&atq->lock);
+	ret = scx_atq_lock(atq);
 	if (ret)
 		return (u64)NULL;
 
 	if (!scx_atq_nr_queued(atq)) {
-		arena_spin_unlock(&atq->lock);
+		scx_atq_unlock(atq);
 		return (u64)NULL;
 	}
 
@@ -174,7 +174,7 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	taskc = (scx_task_common *)taskc_ptr;
 	taskc->atq = NULL;
 
-	arena_spin_unlock(&atq->lock);
+	scx_atq_unlock(atq);
 
 	if (ret) {
 		if (ret != -ENOENT)
@@ -191,18 +191,18 @@ u64 scx_atq_peek(scx_atq_t *atq)
 	u64 vtime, taskc_ptr;
 	int ret;
 
-	ret = arena_spin_lock(&atq->lock);
+	ret = scx_atq_lock(atq);
 	if (ret)
 		return (u64)NULL;
 
 	if (!scx_atq_nr_queued(atq)) {
-		arena_spin_unlock(&atq->lock);
+		scx_atq_unlock(atq);
 		return (u64)NULL;
 	}
 
 	ret = rb_least(atq->tree, &vtime, &taskc_ptr);
 
-	arena_spin_unlock(&atq->lock);
+	scx_atq_unlock(atq);
 
 	return taskc_ptr;
 }
