@@ -14,6 +14,25 @@
 #define U64_MAX		((u64)~0ULL)
 #endif
 
+/*
+ * Kernel signal/jobctl flag bits.  Mirror of include/linux/sched/signal.h
+ * and include/linux/sched/jobctl.h; vmlinux.h only carries types, not CPP
+ * macros, so we redeclare the bits we read here.  These are stable ABI in
+ * practice — the kernel exposes them to userspace via task state and ptrace
+ * interfaces.
+ */
+#ifndef SIGNAL_GROUP_EXIT
+#define SIGNAL_GROUP_EXIT	0x00000004
+#endif
+#ifndef JOBCTL_STOP_PENDING
+#define JOBCTL_STOP_PENDING	(1UL << 17)
+#define JOBCTL_TRAP_STOP	(1UL << 19)
+#define JOBCTL_TRAP_NOTIFY	(1UL << 20)
+#define JOBCTL_TRAP_FREEZE	(1UL << 23)
+#define JOBCTL_TRAP_MASK	(JOBCTL_TRAP_STOP | JOBCTL_TRAP_NOTIFY)
+#define JOBCTL_PENDING_MASK	(JOBCTL_STOP_PENDING | JOBCTL_TRAP_MASK)
+#endif
+
 extern int scx_cgroup_bw_enqueue_cb(u64 taskc);
 
 enum scx_cgroup_consts {
@@ -1804,16 +1823,76 @@ int scx_cgroup_bw_throttled(u64 cgrp_id,
 			     struct task_struct *p __arg_trusted, u64 taskc)
 {
 	/*
-	 * Never throttle an exiting task. In do_exit(), a task is removed from
-	 * the PID map by __unhash_process() (called from exit_notify()) in the
-	 * window between PF_EXITING being set and TASK_DEAD being set. If the
-	 * task is preempted in this window and throttled into the BTQ, the BTQ
-	 * drain calls scx_cgroup_bw_enqueue_cb() to reenqueue it. The callback
-	 * looks up the task pointer via bpf_task_from_pid(), which returns NULL
-	 * for an unhashed task. With no way to reenqueue it, the task is
-	 * permanently lost from all runqueues, causing a watchdog timeout.
+	 * Bypass throttling for tasks the kernel is about to take out of
+	 * SCX, or that will run only briefly to complete a kernel-mediated
+	 * transition.  Parking such a task in the BTQ either loses it
+	 * (PF_EXITING / SIGNAL_GROUP_EXIT — kernel unhashes the task before
+	 * drain can find it) or makes a kernel-visible operation (signal
+	 * stop, ptrace trap, cgroup-v2 freeze) appear to stall.  Quota
+	 * impact is negligible: these tasks consume essentially no CPU
+	 * before leaving SCX.
 	 */
-	if (p->flags & PF_EXITING)
+
+	/*
+	 * PF_EXITING: task is in do_exit(), being unhashed from the PID
+	 * hash and torn down.  __unhash_process() runs between PF_EXITING
+	 * being set and TASK_DEAD being set; if we park the task in the BTQ
+	 * during that window, the drain's bpf_task_from_pid() returns NULL,
+	 * the task is lost from all runqueues, and the watchdog stalls.
+	 */
+	if (unlikely(p->flags & PF_EXITING))
+		return 0;
+
+	/*
+	 * SIGNAL_GROUP_EXIT: the thread group is exiting (SIGKILL or
+	 * exit_group()) and is propagating the exit to every thread.
+	 * Narrow window where the group flag is set but PF_EXITING has not
+	 * yet landed on a given sibling; throttling here has the same
+	 * "lost task" risk as PF_EXITING.
+	 */
+	if (unlikely(READ_ONCE(p->signal->flags) & SIGNAL_GROUP_EXIT))
+		return 0;
+
+	/*
+	 * Jobctl bits — kernel says "this task is about to make a brief
+	 * kernel-mediated transition; let it run long enough to observe
+	 * and act on the pending event."  Throttling here doesn't lose the
+	 * task, but delays the user-visible effect of the operation.
+	 *
+	 *   JOBCTL_PENDING_MASK = JOBCTL_STOP_PENDING | JOBCTL_TRAP_MASK
+	 *   JOBCTL_TRAP_MASK    = JOBCTL_TRAP_STOP    | JOBCTL_TRAP_NOTIFY
+	 *
+	 *   JOBCTL_STOP_PENDING:  group SIGSTOP is pending — siblings have
+	 *                         been signal_wake_up()'d so they can
+	 *                         observe the stop and transition to
+	 *                         TASK_STOPPED.  Throttling delays SIGSTOP
+	 *                         delivery by the throttle window.
+	 *
+	 *   JOBCTL_TRAP_STOP:     ptrace stop trap pending — debugger is
+	 *                         waiting for the tracee to stop.
+	 *                         Throttling makes the debugger appear hung.
+	 *
+	 *   JOBCTL_TRAP_NOTIFY:   ptrace notify trap pending (e.g. seccomp,
+	 *                         PTRACE_EVENT_*); same shape as TRAP_STOP.
+	 *
+	 *   JOBCTL_TRAP_FREEZE:   cgroup-v2 freezer is engaging and every
+	 *                         thread under the cgroup must trap into
+	 *                         the freezer.  Throttling delays
+	 *                         convergence — `cgroup.freeze` write
+	 *                         appears to hang.  This bit is outside
+	 *                         JOBCTL_PENDING_MASK, so it needs its own
+	 *                         test alongside the mask.
+	 *
+	 * Using the mask (rather than spelling out STOP/NOTIFY individually)
+	 * keeps this aligned with the kernel's own grouping; new bits added
+	 * to JOBCTL_PENDING_MASK get picked up automatically.
+	 *
+	 * READ_ONCE: p->jobctl and p->signal->flags are written under
+	 * siglock on a different CPU; without the barrier the BPF compiler
+	 * may reorder or fold the load.
+	 */
+	if (unlikely(READ_ONCE(p->jobctl) &
+		     (JOBCTL_PENDING_MASK | JOBCTL_TRAP_FREEZE)))
 		return 0;
 
 	return cbw_cgroup_bw_throttled(cgrp_id, taskc);
