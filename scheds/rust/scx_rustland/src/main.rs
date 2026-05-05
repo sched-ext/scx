@@ -277,6 +277,10 @@ impl<'a> Scheduler<'a> {
     ///
     /// Return true if dispatching succeeded or there was no task to dispatch, or false if
     /// dispatching failed (the task is automatically re-enqueued in that case).
+    ///
+    /// Note: this is the scheduler-level entry point. It selects the next
+    /// [`Task`] from the internal pool and delegates BPF submission to
+    /// [`BpfScheduler::dispatch_task`].
     fn dispatch_task(&mut self) -> bool {
         // Retrieve the next task to dispatch, if any.
         let Some(task) = self.tasks.pop_first() else {

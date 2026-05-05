@@ -540,7 +540,12 @@ impl<'cb> BpfScheduler<'cb> {
         }
     }
 
-    // Send a task to the dispatcher.
+    /// Serialize a [`DispatchedTask`] into the user ring buffer for the
+    /// BPF program to consume and execute on the target CPU.
+    ///
+    /// Note: this is the low-level BPF submission layer. For the scheduler-level
+    /// entry point that selects which task to dispatch, see
+    /// `Scheduler::dispatch_task` in `scx_rustland`.
     pub fn dispatch_task(&mut self, task: &DispatchedTask) -> Result<(), libbpf_rs::Error> {
         // Reserve a slot in the user ring buffer.
         let mut urb_sample = self
