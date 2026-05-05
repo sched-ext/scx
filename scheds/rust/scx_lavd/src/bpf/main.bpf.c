@@ -1962,10 +1962,12 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 void BPF_STRUCT_OPS(lavd_dump, struct scx_dump_ctx *dctx)
 {
 	/*
-	 * Dump the cpu.max status of the entire cgroup hierarchy.
+	 * Dump the cpu.max status of the entire cgroup hierarchy
+	 * through bpf_printk.
 	 */
 	if (enable_cpu_bw) {
-		scx_cgroup_bw_dump(1, true, true, true);
+		scx_cgroup_bw_dump(1, true, true, true,
+				   SCX_CGROUP_BW_DUMP_PRINTK);
 	}
 }
 
@@ -2006,6 +2008,11 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 		     cgrp_name, taskc->cgrp_id,
 		     (cgroup_throttled) ? "throttled" : "not throttled",
 		     (task_throttled) ? "throttled" : "not throttled");
+
+	if (enable_cpu_bw && (cgroup_throttled || task_throttled)) {
+		scx_cgroup_bw_dump(taskc->cgrp_id, false, true, false,
+				   SCX_CGROUP_BW_DUMP_SCX);
+	}
 }
 
 static s32 init_cpdoms(u64 now)
