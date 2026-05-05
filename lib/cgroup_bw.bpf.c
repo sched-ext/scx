@@ -2774,8 +2774,17 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 	return ret;
 }
 
+#define cbw_dump_line(mode, fmt, args...)				\
+	do {								\
+		if ((mode) == SCX_CGROUP_BW_DUMP_SCX)			\
+			scx_bpf_dump(fmt "\n", ##args);			\
+		else							\
+			bpf_printk(fmt, ##args);			\
+	} while (0)
+
 static __noinline
-int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
+int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent,
+		    enum scx_cgroup_bw_dump_mode mode)
 {
 	static const char indent_strs[][64] = {
 		"",
@@ -2831,7 +2840,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	indent_str = indent_strs[ clamp((u32)cgrp->level, 0, indent_max - 1) ];
 
 	bpf_probe_read_kernel_str(name, sizeof(name), BPF_CORE_READ(cgrp->kn, name));
-	bpf_printk("%s +-- %s (id: %llu, level: %d)", indent_str,
+	cbw_dump_line(mode, "%s +-- %s (id: %llu, level: %d)", indent_str,
 			name, cgroup_get_id(cgrp), (u32)cgrp->level);
 
 	if (cgx->nquota_ub == CBW_RUNTUME_INF)
@@ -2846,17 +2855,17 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 		}
 	}
 
-	bpf_printk("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
+	cbw_dump_line(mode, "%s   \\_ quota: %llu, period: %llu, burst: %llu", indent_str,
 			cgx->quota, cgx->period, cgx->burst);
-	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
+	cbw_dump_line(mode, "%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
 			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
-	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
+	cbw_dump_line(mode, "%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
 			nr_throttled_tasks);
-	bpf_printk("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
+	cbw_dump_line(mode, "%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
 			cgx->period_budget, cgx->burst_remaining);
-	bpf_printk("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
+	cbw_dump_line(mode, "%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
 			cgx->runtime_total_sloppy, cgx->runtime_total_last);
 					
 	return 0;
@@ -2872,14 +2881,20 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
  * get more accurate information. Otherwise, dump the currently collected
  * snapshot of runtime values.
  * @indent: If true, indent the output. Otherwise, do not indent the output.
+ * @mode: Output sink (see enum scx_cgroup_bw_dump_mode).
  *
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
+int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent,
+		       enum scx_cgroup_bw_dump_mode mode)
 {
 	struct cgroup_subsys_state *start_css, *pos;
 	struct cgroup *start_cgrp, *cur_cgrp;
+
+	/* Resolve the hard-coded root cgroup id. */
+	if (cgrp_id == 1)
+		cgrp_id = ROOT_CGID;
 
 	start_cgrp = bpf_cgroup_from_id(cgrp_id);
 	if (!start_cgrp) {
@@ -2890,7 +2905,7 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
 		cbw_update_runtime_total_sloppy(start_cgrp);
 
 	if (!descendent) {
-		cbw_dump_cgroup(start_cgrp, indent);
+		cbw_dump_cgroup(start_cgrp, indent, mode);
 		goto release_out;
 	}
 
@@ -2898,7 +2913,7 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
 	start_css = &start_cgrp->self;
 	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
 		cur_cgrp = pos->cgroup;
-		cbw_dump_cgroup(cur_cgrp, indent);
+		cbw_dump_cgroup(cur_cgrp, indent, mode);
 	}
 	bpf_rcu_read_unlock();
 

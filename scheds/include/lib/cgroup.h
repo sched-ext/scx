@@ -211,6 +211,24 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 		       struct cgroup *to __arg_trusted);
 
 /**
+ * Output sink selector for scx_cgroup_bw_dump().
+ *
+ * SCX_CGROUP_BW_DUMP_PRINTK: route lines through bpf_printk(); the output
+ *   appears in the kernel trace pipe (e.g. trace_pipe / bpftool prog
+ *   tracelog).  Usable from any BPF context.
+ *
+ * SCX_CGROUP_BW_DUMP_SCX: route lines through scx_bpf_dump(); the output
+ *   becomes part of the SCX dump buffer surfaced on scheduler error/exit
+ *   or via the SCX dump-on-error machinery.  MUST only be called from an
+ *   ops.dump*() callback -- the BPF verifier rejects scx_bpf_dump_bstr()
+ *   from other contexts.
+ */
+enum scx_cgroup_bw_dump_mode {
+	SCX_CGROUP_BW_DUMP_PRINTK = 0,
+	SCX_CGROUP_BW_DUMP_SCX    = 1,
+};
+
+/**
  * scx_cgroup_bw_dump - Dump the cgroup status
  *
  * @cgrp_id: cgroup id
@@ -220,10 +238,12 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
  * get more accurate information. Otherwise, dump the currently collected
  * snapshot of runtime values.
  * @indent: If true, indent the output. Otherwise, do not indent the output.
+ * @mode: Output sink (see enum scx_cgroup_bw_dump_mode).
  *
  * Return 0 for success, -errno for failure.
  */
-int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent);
+int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent,
+		       enum scx_cgroup_bw_dump_mode mode);
 
 /**
  * Per-task context for CPU bandwidth control.
