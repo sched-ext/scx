@@ -2530,7 +2530,12 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 					      struct llc_ctx *llcc,
 					      bool rescue_stranded)
 {
-	struct llc_prox_map *llc_pmap = &llcc->prox_map;
+	/*
+	 * Select random proximity map from NUM_PROXIMITY_MAPS to avoid
+	 * bias in proximity map ordering of LLCs with same locality.
+	 */
+	u32 pmap_idx = bpf_get_prandom_u32() % NUM_PROXIMITY_MAPS;
+	struct llc_prox_map *llc_pmap = &llcc->prox_maps[pmap_idx];
 	struct layer *layer;
 	u32 nid = llc_node_id(llcc->id);
 	bool xllc_mig_skipped = false;
@@ -3456,7 +3461,7 @@ static s32 create_llc(u32 llc_id)
 
 	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
 
-	pmap = &llcc->prox_map;
+	pmap = &llcc->prox_maps[0];
 	dbg("CFG: LLC[%d] prox_map node/sys=%d/%d",
 	    llc_id, pmap->node_end, pmap->sys_end);
 	if (pmap->sys_end > nr_possible_cpus || pmap->sys_end > MAX_CPUS) {
