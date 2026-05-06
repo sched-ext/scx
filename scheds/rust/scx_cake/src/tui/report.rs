@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::telemetry_report::{
-    CoverageItem, CoverageQuality, GraphSummary, HealthSummary, LifecycleSummary, TelemetryReport,
+    AcceleratorSummary, CoverageItem, CoverageQuality, GraphSummary, HealthSummary,
+    LifecycleSummary, TelemetryReport,
 };
 
 pub(super) fn build_telemetry_report(stats: &cake_stats, app: &TuiApp) -> TelemetryReport {
@@ -23,6 +24,7 @@ pub(super) fn build_telemetry_report(stats: &cake_stats, app: &TuiApp) -> Teleme
         .map(|edge| edge.wait_max_ns / 1000)
         .max()
         .unwrap_or(0);
+    let accelerator = build_accelerator_summary(stats, app);
 
     let mut coverage = Vec::new();
     coverage.push(CoverageItem::new(
@@ -122,6 +124,22 @@ pub(super) fn build_telemetry_report(stats: &cake_stats, app: &TuiApp) -> Teleme
         0,
         format!("recent_events={}", app.debug_events.len()),
     ));
+    coverage.push(CoverageItem::new(
+        "accelerator.confidence",
+        "cpu_bss.decision_confidence+bpf_stats",
+        CoverageQuality::Exact,
+        "lifetime+60s",
+        0,
+        format!(
+            "source={} trained_cpus={} route_ready_cpus={} floor_ready_cpus={} trust_prev_active_cpus={} trust_prev_blocked_cpus={}",
+            accelerator.source,
+            accelerator.trained_cpus,
+            accelerator.route_ready_cpus,
+            accelerator.floor_ready_cpus,
+            accelerator.trust_prev_active_cpus,
+            accelerator.trust_prev_blocked_cpus
+        ),
+    ));
 
     TelemetryReport::new(
         coverage,
@@ -166,4 +184,145 @@ pub(super) fn build_telemetry_report(stats: &cake_stats, app: &TuiApp) -> Teleme
         ),
         init_exit_count: stats.lifecycle_init_exit_count,
     })
+    .with_accelerator(accelerator)
+}
+
+fn report_conf_value(confidence: u64, shift: u32) -> u64 {
+    (confidence >> shift) & CAKE_CONF_NIBBLE_MASK
+}
+
+fn report_conf_effective_value(confidence: u64, shift: u32) -> u64 {
+    let value = report_conf_value(confidence, shift);
+    if value == 0 {
+        8
+    } else {
+        value
+    }
+}
+
+fn report_load_shock_value(confidence: u64) -> u64 {
+    report_conf_value(confidence, CAKE_CONF_LOAD_SHOCK_SHIFT)
+}
+
+fn report_floor_owner_ready(confidence: u64) -> bool {
+    let owner_stable = report_conf_effective_value(confidence, CAKE_CONF_OWNER_STABLE_SHIFT);
+    let route = report_conf_effective_value(confidence, CAKE_CONF_ROUTE_SHIFT);
+    let trust = report_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT);
+    let pull = report_conf_effective_value(confidence, CAKE_CONF_PULL_SHAPE_SHIFT);
+    let shock = report_load_shock_value(confidence);
+
+    owner_stable >= 12 || (route == 15 && trust == 15 && pull >= 12 && shock < 8)
+}
+
+fn report_floor_ready(confidence: u64) -> bool {
+    report_conf_value(confidence, CAKE_CONF_FLOOR_GEAR_SHIFT) == 3
+        && report_conf_effective_value(confidence, CAKE_CONF_ROUTE_SHIFT) >= 12
+        && report_conf_effective_value(confidence, CAKE_CONF_SELECT_EARLY_SHIFT) >= 12
+        && report_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT) >= 12
+        && report_floor_owner_ready(confidence)
+        && report_load_shock_value(confidence) < 8
+        && report_conf_effective_value(confidence, CAKE_CONF_PULL_SHAPE_SHIFT) >= 8
+}
+
+fn report_route_ready(confidence: u64) -> bool {
+    report_conf_effective_value(confidence, CAKE_CONF_ROUTE_SHIFT) >= 12
+        && report_conf_effective_value(confidence, CAKE_CONF_SELECT_EARLY_SHIFT) >= 12
+        && report_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT) >= 12
+        && report_load_shock_value(confidence) < 12
+}
+
+fn report_accelerator_source() -> &'static str {
+    #[cfg(cake_bpf_release)]
+    {
+        "release"
+    }
+    #[cfg(all(not(cake_bpf_release), cake_hot_telemetry))]
+    {
+        "debug-hot-telemetry"
+    }
+    #[cfg(all(not(cake_bpf_release), not(cake_hot_telemetry)))]
+    {
+        "debug-no-hot-telemetry"
+    }
+}
+
+fn build_accelerator_summary(stats: &cake_stats, app: &TuiApp) -> AcceleratorSummary {
+    let mut summary = AcceleratorSummary {
+        source: report_accelerator_source().to_string(),
+        select_tunnel: stats.select_path_count[5],
+        select_idle: stats.select_path_count[4],
+        wake_target_hit: stats.wake_target_hit_count[1..].iter().sum(),
+        wake_target_miss: stats.wake_target_miss_count[1..].iter().sum(),
+        wake_direct: stats.nr_wakeup_direct_dispatches,
+        wake_busy: stats.nr_wakeup_dsq_fallback_busy,
+        wake_queued: stats.nr_wakeup_dsq_fallback_queued,
+        dispatch_hit: stats.nr_dispatch_llc_local_hit + stats.nr_dispatch_llc_steal_hit,
+        dispatch_miss: stats.nr_dispatch_misses,
+        route_attempt_counts: stats.accel_route_attempt_count,
+        route_hit_counts: stats.accel_route_hit_count,
+        route_miss_counts: stats.accel_route_miss_count,
+        fast_attempt_counts: stats.accel_fast_attempt_count,
+        fast_hit_counts: stats.accel_fast_hit_count,
+        fast_miss_counts: stats.accel_fast_miss_count,
+        route_block_counts: stats.accel_route_block_count,
+        scoreboard_probe_counts: stats.accel_scoreboard_probe_count,
+        pull_mode_counts: stats.accel_pull_mode_count,
+        pull_probe_counts: stats.accel_pull_probe_count,
+        native_fallback_counts: stats.accel_native_fallback_count,
+        accounting_relaxed: stats.accel_accounting_relaxed,
+        accounting_audit: stats.accel_accounting_audit,
+        trust_prev_attempts: stats.accel_trust_prev_attempt,
+        trust_prev_hits: stats.accel_trust_prev_hit,
+        trust_prev_misses: stats.accel_trust_prev_miss,
+        ..AcceleratorSummary::default()
+    };
+
+    for counter in app
+        .per_cpu_work
+        .iter()
+        .filter(|counter| counter.decision_confidence != 0)
+    {
+        let confidence = counter.decision_confidence;
+        let gear = report_conf_value(confidence, CAKE_CONF_FLOOR_GEAR_SHIFT) as usize;
+        let route = report_conf_value(confidence, CAKE_CONF_ROUTE_KIND_SHIFT) as usize;
+
+        summary.trained_cpus += 1;
+        if gear < summary.gear_counts.len() {
+            summary.gear_counts[gear] += 1;
+        }
+        if route < summary.route_counts.len() {
+            summary.route_counts[route] += 1;
+        }
+        if report_route_ready(confidence) {
+            summary.route_ready_cpus += 1;
+        }
+        if report_floor_ready(confidence) {
+            summary.floor_ready_cpus += 1;
+        }
+        if report_load_shock_value(confidence) >= 8 {
+            summary.shock_cpus += 1;
+        }
+        if report_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT) < 12 {
+            summary.trust_low_cpus += 1;
+        }
+        if report_conf_effective_value(confidence, CAKE_CONF_OWNER_STABLE_SHIFT) < 12 {
+            summary.owner_low_cpus += 1;
+        }
+    }
+    for counter in &app.per_cpu_work {
+        if counter.trust.prev_direct_enabled() {
+            summary.trust_prev_enabled_cpus += 1;
+        }
+        if counter.trust.prev_direct_active() {
+            summary.trust_prev_active_cpus += 1;
+        }
+        if counter.trust.prev_direct_blocked() {
+            summary.trust_prev_blocked_cpus += 1;
+        }
+        summary.trust_prev_demotions = summary
+            .trust_prev_demotions
+            .saturating_add(counter.trust.demotion_count as u64);
+    }
+
+    summary
 }

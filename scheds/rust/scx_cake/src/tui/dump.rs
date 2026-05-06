@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 
+use super::diagnostics::{
+    build_service_report, format_service_report_json, format_service_report_text,
+};
 use super::report::build_telemetry_report;
 use super::*;
 
@@ -385,7 +388,7 @@ fn append_select_cpu_section(
         select_balance_ratio(counters, true),
     ));
     output.push_str(&format!(
-        "{}.legend: hm=home_cpu hc=home_core pp=prev_primary ps=primary_scan hy=hybrid_scan kp=kernel_prev ki=kernel_idle tn=tunnel pc=pressure_core\n",
+        "{}.legend: hm=home_cpu hc=home_core pp=prev_primary ps=primary_scan hy=hybrid_scan kp=kernel_prev ki=kernel_idle tn=tunnel pc=pressure_core sbp=scoreboard_prev sbs=scoreboard_scan\n",
         label
     ));
     output.push_str(&format!(
@@ -540,6 +543,554 @@ fn append_pressure_probe_section(
     }
 }
 
+fn decision_conf_value(confidence: u64, shift: u32) -> u64 {
+    (confidence >> shift) & CAKE_CONF_NIBBLE_MASK
+}
+
+fn decision_conf_effective_value(confidence: u64, shift: u32) -> u64 {
+    let value = decision_conf_value(confidence, shift);
+    if value == 0 {
+        8
+    } else {
+        value
+    }
+}
+
+fn decision_load_shock_value(confidence: u64) -> u64 {
+    decision_conf_value(confidence, CAKE_CONF_LOAD_SHOCK_SHIFT)
+}
+
+fn decision_floor_owner_ready(confidence: u64) -> bool {
+    let owner_stable = decision_conf_effective_value(confidence, CAKE_CONF_OWNER_STABLE_SHIFT);
+    let route = decision_conf_effective_value(confidence, CAKE_CONF_ROUTE_SHIFT);
+    let trust = decision_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT);
+    let pull = decision_conf_effective_value(confidence, CAKE_CONF_PULL_SHAPE_SHIFT);
+    let shock = decision_load_shock_value(confidence);
+
+    owner_stable >= 12 || (route == 15 && trust == 15 && pull >= 12 && shock < 8)
+}
+
+fn decision_route_label(kind: u64) -> &'static str {
+    match kind {
+        1 => "prev",
+        2 => "slot0",
+        3 => "slot1",
+        4 => "slot2",
+        5 => "slot3",
+        6 => "tunnel",
+        _ => "none",
+    }
+}
+
+fn accel_route_label(kind: usize) -> &'static str {
+    match kind {
+        1 => "prev",
+        2 => "s0",
+        3 => "s1",
+        4 => "s2",
+        5 => "s3",
+        6 => "tun",
+        _ => "none",
+    }
+}
+
+fn accel_block_label(reason: usize) -> &'static str {
+    match reason {
+        0 => "invalid_prev",
+        1 => "affinity",
+        2 => "kthread",
+        3 => "route_low",
+        4 => "select_low",
+        5 => "trust_low",
+        6 => "load_shock",
+        7 => "floor_low",
+        8 => "owner_low",
+        9 => "pull_low",
+        10 => "audit",
+        11 => "latency_gate",
+        12 => "unknown_route",
+        _ => "?",
+    }
+}
+
+fn accel_probe_label(outcome: usize) -> &'static str {
+    match outcome {
+        0 => "hit",
+        1 => "busy",
+        2 => "dirty",
+        3 => "smt_busy",
+        4 => "claim_fail",
+        5 => "invalid",
+        _ => "?",
+    }
+}
+
+fn decision_floor_label(gear: u64) -> &'static str {
+    match gear {
+        1 => "audit",
+        2 => "narrow",
+        3 => "floor",
+        _ => "recovery",
+    }
+}
+
+fn format_trust_state(trust: CpuTrustSnapshot) -> String {
+    if trust.policy == 0 && trust.blocked == 0 && trust.demotion_count == 0 {
+        return "off".to_string();
+    }
+
+    let prev = if trust.prev_direct_active() {
+        "prev=active"
+    } else if trust.prev_direct_blocked() {
+        "prev=blocked"
+    } else if trust.prev_direct_enabled() {
+        "prev=enabled"
+    } else {
+        "prev=off"
+    };
+
+    format!(
+        "{} gen={} bgen={} block=0x{:x} demote={} reason={}",
+        prev,
+        trust.generation,
+        trust.blocked_generation,
+        trust.blocked,
+        trust.demotion_count,
+        crate::trust::trust_demotion_label(trust.reason),
+    )
+}
+
+fn format_decision_confidence(confidence: u64) -> String {
+    if confidence == 0 {
+        return "untrained".to_string();
+    }
+
+    format!(
+        "sel={}/{} disp={} kick={} pull={} route={}:{} gear={} trust={} stable={} shock={} aud={}/{} acct_audit={}",
+        decision_conf_value(confidence, CAKE_CONF_SELECT_EARLY_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_SELECT_ROW4_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_DISPATCH_EMPTY_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_KICK_SHAPE_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_PULL_SHAPE_SHIFT),
+        decision_route_label(decision_conf_value(confidence, CAKE_CONF_ROUTE_KIND_SHIFT)),
+        decision_conf_value(confidence, CAKE_CONF_ROUTE_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_FLOOR_GEAR_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_OWNER_STABLE_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_LOAD_SHOCK_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_ROUTE_AUDIT_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_PULL_AUDIT_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_ACCOUNT_AUDIT_SHIFT),
+    )
+}
+
+fn decision_floor_ready(confidence: u64) -> bool {
+    decision_conf_value(confidence, CAKE_CONF_FLOOR_GEAR_SHIFT) == 3
+        && decision_conf_effective_value(confidence, CAKE_CONF_ROUTE_SHIFT) >= 12
+        && decision_conf_effective_value(confidence, CAKE_CONF_SELECT_EARLY_SHIFT) >= 12
+        && decision_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT) >= 12
+        && decision_floor_owner_ready(confidence)
+        && decision_load_shock_value(confidence) < 8
+        && decision_conf_effective_value(confidence, CAKE_CONF_PULL_SHAPE_SHIFT) >= 8
+}
+
+fn decision_route_ready(confidence: u64) -> bool {
+    decision_conf_effective_value(confidence, CAKE_CONF_ROUTE_SHIFT) >= 12
+        && decision_conf_effective_value(confidence, CAKE_CONF_SELECT_EARLY_SHIFT) >= 12
+        && decision_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT) >= 12
+        && decision_load_shock_value(confidence) < 12
+}
+
+fn decision_fail_flags(confidence: u64) -> String {
+    if confidence == 0 {
+        return "untrained".to_string();
+    }
+
+    let mut flags = Vec::new();
+    if decision_conf_effective_value(confidence, CAKE_CONF_ROUTE_SHIFT) < 12 {
+        flags.push("route_low");
+    }
+    if decision_conf_effective_value(confidence, CAKE_CONF_SELECT_EARLY_SHIFT) < 12 {
+        flags.push("select_low");
+    }
+    if decision_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT) < 12 {
+        flags.push("status_trust_low");
+    }
+    if !decision_floor_owner_ready(confidence) {
+        flags.push("owner_unstable_floor_only");
+    }
+    let load_shock = decision_load_shock_value(confidence);
+    if load_shock >= 12 {
+        flags.push("load_shock");
+    } else if load_shock >= 8 {
+        flags.push("load_shock_floor_only");
+    }
+    if decision_conf_effective_value(confidence, CAKE_CONF_PULL_SHAPE_SHIFT) < 8 {
+        flags.push("pull_low");
+    }
+    if flags.is_empty() {
+        "clear".to_string()
+    } else {
+        flags.join("|")
+    }
+}
+
+fn format_accel_route_triplet(
+    attempt: &[u64; ACCEL_ROUTE_MAX],
+    hit: &[u64; ACCEL_ROUTE_MAX],
+    miss: &[u64; ACCEL_ROUTE_MAX],
+) -> String {
+    let mut parts = Vec::new();
+    for route in 1..ACCEL_ROUTE_MAX {
+        if attempt[route] == 0 && hit[route] == 0 && miss[route] == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{}={}/{}/{}({:.1}%)",
+            accel_route_label(route),
+            attempt[route],
+            hit[route],
+            miss[route],
+            pct(hit[route], hit[route] + miss[route]),
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_accel_route_blocks(blocks: &[u64; ACCEL_ROUTE_BLOCK_MAX]) -> String {
+    let mut parts = Vec::new();
+    for (reason, count) in blocks.iter().enumerate().take(ACCEL_ROUTE_BLOCK_MAX) {
+        if *count == 0 {
+            continue;
+        }
+        parts.push(format!("{}={}", accel_block_label(reason), count));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_accel_probe_matrix(probes: &[[u64; ACCEL_PROBE_OUTCOME_MAX]; ACCEL_ROUTE_MAX]) -> String {
+    let mut parts = Vec::new();
+    for (route, route_probes) in probes.iter().enumerate().take(ACCEL_ROUTE_MAX).skip(1) {
+        let total: u64 = route_probes.iter().sum();
+        if total == 0 {
+            continue;
+        }
+        let outcomes = (0..ACCEL_PROBE_OUTCOME_MAX)
+            .filter(|outcome| route_probes[*outcome] > 0)
+            .map(|outcome| format!("{}={}", accel_probe_label(outcome), route_probes[outcome]))
+            .collect::<Vec<_>>()
+            .join("/");
+        parts.push(format!("{}[{}]", accel_route_label(route), outcomes));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_accel_fallback_summary(stats: &cake_stats) -> String {
+    format!(
+        "native[entry/dfl/and]={}/{}/{} pull[pull/probe/skip]={}/{}/{} pull_probe[empty/work]={}/{} acct[relaxed/audit]={}/{}",
+        stats.accel_native_fallback_count[0],
+        stats.accel_native_fallback_count[1],
+        stats.accel_native_fallback_count[2],
+        stats.accel_pull_mode_count[0],
+        stats.accel_pull_mode_count[1],
+        stats.accel_pull_mode_count[2],
+        stats.accel_pull_probe_count[0],
+        stats.accel_pull_probe_count[1],
+        stats.accel_accounting_relaxed,
+        stats.accel_accounting_audit,
+    )
+}
+
+fn format_trust_last_reason_cpus(counters: &[CpuWorkCounters]) -> String {
+    let mut none = 0_u64;
+    let mut claim_miss = 0_u64;
+    let mut unknown = 0_u64;
+
+    for counter in counters {
+        if counter.trust.demotion_count == 0 {
+            continue;
+        }
+        match counter.trust.reason {
+            crate::trust::CAKE_TRUST_DEMOTE_NONE => none += 1,
+            crate::trust::CAKE_TRUST_DEMOTE_PREV_CLAIM_MISS => claim_miss += 1,
+            _ => unknown += 1,
+        }
+    }
+
+    let mut parts = Vec::new();
+    if none > 0 {
+        parts.push(format!("none={}", none));
+    }
+    if claim_miss > 0 {
+        parts.push(format!("prev_claim_miss={}", claim_miss));
+    }
+    if unknown > 0 {
+        parts.push(format!("unknown={}", unknown));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn accelerator_capture_label() -> &'static str {
+    #[cfg(cake_bpf_release)]
+    {
+        "release"
+    }
+    #[cfg(all(not(cake_bpf_release), cake_hot_telemetry))]
+    {
+        "debug-hot-telemetry"
+    }
+    #[cfg(all(not(cake_bpf_release), not(cake_hot_telemetry)))]
+    {
+        "debug-no-hot-telemetry"
+    }
+}
+
+fn append_accelerator_section(
+    output: &mut String,
+    label: &str,
+    counters: &[CpuWorkCounters],
+    stats: &cake_stats,
+    elapsed: Duration,
+) {
+    let secs = elapsed.as_secs_f64().max(0.1);
+    let conf_rows: Vec<(usize, &CpuWorkCounters)> = counters
+        .iter()
+        .enumerate()
+        .filter(|(_, counter)| counter.decision_confidence != 0)
+        .collect();
+    let mut gear_count = [0_u64; 4];
+    let mut route_count = [0_u64; 7];
+    let mut route_ready = 0_u64;
+    let mut floor_ready = 0_u64;
+    let mut shock = 0_u64;
+    let mut trust_low = 0_u64;
+    let mut owner_low = 0_u64;
+    let mut trust_prev_enabled = 0_u64;
+    let mut trust_prev_active = 0_u64;
+    let mut trust_prev_blocked = 0_u64;
+    let mut trust_prev_demotions = 0_u64;
+
+    for (_, counter) in &conf_rows {
+        let confidence = counter.decision_confidence;
+        let gear = decision_conf_value(confidence, CAKE_CONF_FLOOR_GEAR_SHIFT) as usize;
+        let route = decision_conf_value(confidence, CAKE_CONF_ROUTE_KIND_SHIFT) as usize;
+
+        if gear < gear_count.len() {
+            gear_count[gear] += 1;
+        }
+        if route < route_count.len() {
+            route_count[route] += 1;
+        }
+        if decision_route_ready(confidence) {
+            route_ready += 1;
+        }
+        if decision_floor_ready(confidence) {
+            floor_ready += 1;
+        }
+        if decision_load_shock_value(confidence) >= 8 {
+            shock += 1;
+        }
+        if decision_conf_effective_value(confidence, CAKE_CONF_STATUS_TRUST_SHIFT) < 12 {
+            trust_low += 1;
+        }
+        if decision_conf_effective_value(confidence, CAKE_CONF_OWNER_STABLE_SHIFT) < 12 {
+            owner_low += 1;
+        }
+    }
+    for counter in counters {
+        if counter.trust.prev_direct_enabled() {
+            trust_prev_enabled += 1;
+        }
+        if counter.trust.prev_direct_active() {
+            trust_prev_active += 1;
+        }
+        if counter.trust.prev_direct_blocked() {
+            trust_prev_blocked += 1;
+        }
+        trust_prev_demotions =
+            trust_prev_demotions.saturating_add(counter.trust.demotion_count as u64);
+    }
+
+    let path_total: u64 = stats.select_path_count[1..SELECT_PATH_MAX].iter().sum();
+    let wake_target_hit: u64 = stats.wake_target_hit_count[1..].iter().sum();
+    let wake_target_miss: u64 = stats.wake_target_miss_count[1..].iter().sum();
+    let wake_target_total = wake_target_hit + wake_target_miss;
+    let dispatch_hit = stats.nr_dispatch_llc_local_hit + stats.nr_dispatch_llc_steal_hit;
+    let dispatch_total = dispatch_hit + stats.nr_dispatch_misses;
+    let wake_direct = stats.nr_wakeup_direct_dispatches;
+    let wake_busy = stats.nr_wakeup_dsq_fallback_busy;
+    let wake_queued = stats.nr_wakeup_dsq_fallback_queued;
+    let wake_total = wake_direct + wake_busy + wake_queued;
+
+    output.push_str(&format!(
+        "{}: sampled={:.1}s source={} cpus={} trained={} route_ready={} ({:.1}%) floor_ready={} ({:.1}%) gear[recovery/audit/narrow/floor]={}/{}/{}/{} route[none/prev/s0/s1/s2/s3/tunnel]={}/{}/{}/{}/{}/{}/{} shock={} trust_low={} owner_low={}\n",
+        label,
+        elapsed.as_secs_f64(),
+        accelerator_capture_label(),
+        counters.len(),
+        conf_rows.len(),
+        route_ready,
+        pct(route_ready, conf_rows.len() as u64),
+        floor_ready,
+        pct(floor_ready, conf_rows.len() as u64),
+        gear_count[0],
+        gear_count[1],
+        gear_count[2],
+        gear_count[3],
+        route_count[0],
+        route_count[1],
+        route_count[2],
+        route_count[3],
+        route_count[4],
+        route_count[5],
+        route_count[6],
+        shock,
+        trust_low,
+        owner_low,
+    ));
+    output.push_str(&format!(
+        "{}.prediction: select_paths={} tunnel={} ({:.1}%) idle={} ({:.1}%) target_hit/miss={}/{} ({:.1}% hit) wake[d/b/q]={}/{}/{} ({:.1}% direct) dispatch_hit/miss={}/{} ({:.1}% hit)\n",
+        label,
+        format_path_summary(&stats.select_path_count),
+        stats.select_path_count[5],
+        pct(stats.select_path_count[5], path_total),
+        stats.select_path_count[4],
+        pct(stats.select_path_count[4], path_total),
+        wake_target_hit,
+        wake_target_miss,
+        pct(wake_target_hit, wake_target_total),
+        wake_direct,
+        wake_busy,
+        wake_queued,
+        pct(wake_direct, wake_total),
+        dispatch_hit,
+        stats.nr_dispatch_misses,
+        pct(dispatch_hit, dispatch_total),
+    ));
+    output.push_str(&format!(
+        "{}.scoreboard: queue_net={} wake_target={} smt_solo/contended={}/{} localq_ins/run={}/{} ({:.1}/s/{:.1}/s)\n",
+        label,
+        signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed),
+        format_wake_target_summary(&stats.wake_target_hit_count, &stats.wake_target_miss_count),
+        stats.smt_solo_run_count,
+        stats.smt_contended_run_count,
+        counters.iter().map(|counter| counter.local_pending_inserts).sum::<u64>(),
+        counters.iter().map(|counter| counter.local_pending_runs).sum::<u64>(),
+        per_sec(counters.iter().map(|counter| counter.local_pending_inserts).sum::<u64>(), secs),
+        per_sec(counters.iter().map(|counter| counter.local_pending_runs).sum::<u64>(), secs),
+    ));
+    output.push_str(&format!(
+        "{}.route_pred: route[attempt/hit/miss(hit%)]={} block={}\n",
+        label,
+        format_accel_route_triplet(
+            &stats.accel_route_attempt_count,
+            &stats.accel_route_hit_count,
+            &stats.accel_route_miss_count,
+        ),
+        format_accel_route_blocks(&stats.accel_route_block_count),
+    ));
+    output.push_str(&format!(
+        "{}.fastscan: route[attempt/hit/miss(hit%)]={} probe={}\n",
+        label,
+        format_accel_route_triplet(
+            &stats.accel_fast_attempt_count,
+            &stats.accel_fast_hit_count,
+            &stats.accel_fast_miss_count,
+        ),
+        format_accel_probe_matrix(&stats.accel_scoreboard_probe_count),
+    ));
+    output.push_str(&format!(
+        "{}.fallback: {}\n",
+        label,
+        format_accel_fallback_summary(stats),
+    ));
+    output.push_str(&format!(
+        "{}.trust: prev_direct[state active/enabled/blocked]={}/{}/{} demotions={} ({:.2}/s) last_reason_cpus={} trusted_prev[attempt/hit/miss(hit%)]={}/{}/{}({:.1}%) rate[a/h/m]={:.1}/{:.1}/{:.1}/s\n",
+        label,
+        trust_prev_active,
+        trust_prev_enabled,
+        trust_prev_blocked,
+        trust_prev_demotions,
+        per_sec(trust_prev_demotions, secs),
+        format_trust_last_reason_cpus(counters),
+        stats.accel_trust_prev_attempt,
+        stats.accel_trust_prev_hit,
+        stats.accel_trust_prev_miss,
+        pct(stats.accel_trust_prev_hit, stats.accel_trust_prev_attempt),
+        per_sec(stats.accel_trust_prev_attempt, secs),
+        per_sec(stats.accel_trust_prev_hit, secs),
+        per_sec(stats.accel_trust_prev_miss, secs),
+    ));
+    output.push_str(&format!(
+        "{}.legend: trained=CPUs whose packed confidence has been updated route_ready=prediction can replay a learned route before fallback floor_ready=tunnel tier shock/trust are route gates owner is a floor-only gate fallback is the safe kernel baseline trust.prev_direct is the userspace-governed BPF branch shedder route_pred shows peak floor-path attempts block names why prediction refused fastscan shows scoreboard claims before native fallback probe names scoreboard reality after prediction\n",
+        label
+    ));
+
+    let mut rows = conf_rows;
+    rows.sort_by(|a, b| {
+        let a_conf = a.1.decision_confidence;
+        let b_conf = b.1.decision_confidence;
+        decision_floor_ready(b_conf)
+            .cmp(&decision_floor_ready(a_conf))
+            .then_with(|| {
+                decision_conf_value(b_conf, CAKE_CONF_FLOOR_GEAR_SHIFT)
+                    .cmp(&decision_conf_value(a_conf, CAKE_CONF_FLOOR_GEAR_SHIFT))
+            })
+            .then_with(|| {
+                decision_conf_effective_value(b_conf, CAKE_CONF_ROUTE_SHIFT).cmp(
+                    &decision_conf_effective_value(a_conf, CAKE_CONF_ROUTE_SHIFT),
+                )
+            })
+    });
+    output.push_str(&format!("{}.rows:\n", label));
+    if rows.is_empty() {
+        output.push_str("  none yet: no CPU has trained confidence state in this capture\n");
+    }
+    for (cpu, counter) in rows.iter().take(24) {
+        let confidence = counter.decision_confidence;
+        output.push_str(&format!(
+            "  cpu=C{:02} floor={} route_ready={} floor_ready={} route={} fail_flags={} trust={} press={} pending={} conf={}\n",
+            cpu,
+            decision_floor_label(decision_conf_value(confidence, CAKE_CONF_FLOOR_GEAR_SHIFT)),
+            if decision_route_ready(confidence) {
+                "yes"
+            } else {
+                "no"
+            },
+            if decision_floor_ready(confidence) {
+                "yes"
+            } else {
+                "no"
+            },
+            decision_route_label(decision_conf_value(confidence, CAKE_CONF_ROUTE_KIND_SHIFT)),
+            decision_fail_flags(confidence),
+            format_trust_state(counter.trust),
+            counter.cpu_pressure,
+            counter.local_pending,
+            format_decision_confidence(confidence),
+        ));
+    }
+    if rows.len() > 24 {
+        output.push_str(&format!("  ... +{} more CPUs\n", rows.len() - 24));
+    }
+}
+
 fn append_local_queue_section(
     output: &mut String,
     label: &str,
@@ -631,15 +1182,17 @@ fn append_local_queue_section(
         top_pressure,
     ));
     output.push_str(&format!(
-        "{}.legend: pend=estimated SCX_DSQ_LOCAL_ON inserts not yet observed running max=per-cpu peak since reset press=cpu_pressure wait=target wake-to-run avg/max/p99bucket(samples)\n",
+        "{}.legend: pend=estimated SCX_DSQ_LOCAL_ON inserts not yet observed running max=per-cpu peak since reset press=cpu_pressure trust=userspace governor/BPF demotion state conf=packed confidence sel=early/row4 route=kind:confidence gear=floor mode trust=status stable=owner shock=load aud=route/pull acct_audit=account wait=target wake-to-run avg/max/p99bucket(samples)\n",
         label
     ));
     output.push_str(&format!("{}.rows:\n", label));
     for row in rows.iter().take(32) {
         output.push_str(&format!(
-            "  cpu=C{:02} press={} pend={} max={} ins={} ({:.1}/s) run_seen={} ({:.1}/s) wake_target[d/b/l/r]={}/{}/{}/{} wait={}\n",
+            "  cpu=C{:02} press={} trust={} conf={} pend={} max={} ins={} ({:.1}/s) run_seen={} ({:.1}/s) wake_target[d/b/l/r]={}/{}/{}/{} wait={}\n",
             row.cpu,
             row.pressure,
+            format_trust_state(row.trust),
+            format_decision_confidence(row.decision_confidence),
             row.pending,
             row.pending_max,
             row.inserts,
@@ -752,12 +1305,12 @@ pub(super) fn format_tgid_health_summary(app: &TuiApp, tgid: u32, dump_pids: &[u
         }
 
         let nr_cpus = app.topology.nr_cpus.min(crate::topology::MAX_CPUS);
-        for cpu in 0..nr_cpus {
+        for (cpu, seen) in cpu_seen.iter_mut().enumerate().take(nr_cpus) {
             let samples = row.cpu_run_count[cpu] as u64;
             if samples == 0 {
                 continue;
             }
-            cpu_seen[cpu] = true;
+            *seen = true;
             let core = app.topology.cpu_core_id[cpu] as usize;
             if core < crate::topology::MAX_CORES {
                 core_seen[core] = true;
@@ -982,13 +1535,13 @@ fn append_long_run_owner_section(
     output.push_str(&format!("{}.top:\n", label));
     for row in rows.iter().take(16) {
         output.push_str(&format!(
-            "  pid={} tgid={} ppid={} comm={} role={} pelt={} cpu={} core={} spread={}/{} smt={} allowed={} home={} score={} hbusy={:.1}% hchg={} tsmt={:.1}%/{:.1}% behind=max{}us/n{} runtime_ms={} share={:.1}% rt_ms_s={:.1} runs={} run_s={:.1} avg_run_us={} max_run_us={}\n",
+            "  pid={} tgid={} ppid={} comm={} role={} util_pct={:.1} cpu={} core={} spread={}/{} smt2={} allowed={} home={} score={} hbusy={:.1}% hchg={} tsmt={:.1}%/{:.1}% behind=max{}us/n{} runtime_ms={} share={:.1}% rt_ms_s={:.1} runs={} run_s={:.1} avg_run_us={} max_run_us={}\n",
             row.pid,
             row.tgid,
             row.ppid,
             row.comm,
             row.role.label(),
-            row.pelt_util,
+            pelt_util_pct(row.pelt_util as u64),
             cpu_owner_label(row),
             core_owner_label(row),
             row.active_cpu_count,
@@ -1147,9 +1700,9 @@ pub(super) fn build_app_health_rows(
         entry.runs_per_sec += row.runs_per_sec;
         entry.runs += row.total_runs as u64;
         entry.migrations_per_sec += row.migrations_per_sec;
-        entry.quantum_full += row.quantum_full_count as u64;
-        entry.quantum_yield += row.quantum_yield_count as u64;
-        entry.quantum_preempt += row.quantum_preempt_count as u64;
+        entry.quantum_full += row.quantum_full_count;
+        entry.quantum_yield += row.quantum_yield_count;
+        entry.quantum_preempt += row.quantum_preempt_count;
         entry.yield_count += row.yield_count as u64;
         entry.max_runtime_us = entry.max_runtime_us.max(row.max_runtime_us);
         entry.smt_contended_runtime_ns += row.smt_contended_runtime_ns;
@@ -1173,10 +1726,9 @@ pub(super) fn build_app_health_rows(
             .top_cpu
             .map(|(_, count)| (count * 100) / placement.total_samples.max(1))
             .unwrap_or(0);
-        let quantum_total = row.quantum_full_count as u64
-            + row.quantum_yield_count as u64
-            + row.quantum_preempt_count as u64;
-        let full_pct = pct(row.quantum_full_count as u64, quantum_total);
+        let quantum_total =
+            row.quantum_full_count + row.quantum_yield_count + row.quantum_preempt_count;
+        let full_pct = pct(row.quantum_full_count, quantum_total);
         if allowed > 1
             && placement.active_cpu_count <= 1
             && top_cpu_pct >= 90
@@ -1411,11 +1963,11 @@ fn append_focused_app_section(
         let task_quantum_total =
             task.quantum_full_count + task.quantum_yield_count + task.quantum_preempt_count;
         output.push_str(&format!(
-            "  pid={} comm={} role={} pelt={} rtms/s={:.1} run/s={:.1} avg/max_us={}/{} wait={}us blocked=max{}us q%[f/b/p]={:.0}/{:.0}/{:.0} place={}/{} res={} smt={:.1}%\n",
+            "  pid={} comm={} role={} util_pct={:.1} rtms/s={:.1} run/s={:.1} avg/max_us={}/{} wait={}us blocked=max{}us q%[f/b/p]={:.0}/{:.0}/{:.0} place={}/{} res={} smt={:.1}%\n",
             task.pid,
             task.comm,
             task_role(task, tgid_roles).label(),
-            task.pelt_util,
+            pelt_util_pct(task.pelt_util as u64),
             runtime_rate_ms(task),
             task.runs_per_sec,
             avg_task_runtime_us(task),
@@ -2605,14 +3157,16 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
     ));
     output.push_str("scope: lifetime\n");
     output.push_str(
-        "capture: global=exact task.life=exact task.rate=delta_per_tick task.stage=latest_observed task.affinity=exact task.home=debug_exact task.quantum=exact_u64 task.behind=latest_observed wakewait.all=exact wakewait<=5ms=bounded wakegraph.ringbuf=debug_sampled_weighted homeseed=debug_exact localq=debug_estimate windows=delta_snapshots history=rolling_1s_samples flight=userspace_1s_retained",
+        "capture: global=exact task.life=exact task.rate=delta_per_tick task.stage=latest_observed task.affinity=exact task.home=debug_exact task.quantum=exact_u64 task.behind=latest_observed wakewait.all=exact wakewait<=5ms=bounded wakegraph.ringbuf=debug_sampled_weighted homeseed=debug_exact localq=debug_estimate accelerator=cpu_bss_confidence+bpf_stats windows=delta_snapshots history=rolling_1s_samples flight=userspace_1s_retained",
     );
     #[cfg(debug_assertions)]
     output.push_str(" wakegraph.derived=debug_derived_latest_waker task.anatomy=debug_derived gaming.qos=debug_derived wake.chain=debug_derived+bpf_locality_guard wakepolicy.strict.derived=debug_shadow");
     output.push('\n');
+    let service_report = build_service_report(stats, app, &report);
+    output.push_str(&format_service_report_text(&service_report));
     output.push_str(&report.coverage_text());
     output.push_str(
-        "task.fields: latest={LASTWus,SELns,ENQns,STOPns,RUNns,GAPus,path/place,life=i0/e/s/r/x:first/seen,behind} rate={RUN/s,MIG/s,RTms/s} life={RTms,AVGRTus(run_stop),MAXRTus,JITus,wakeus<=5ms,WHIST,Qf/b/p exact_u64,SYLD,affinity,home,cpu/core spread,task_smt}",
+        "task.fields: latest={LASTWus,SELns,ENQns,STOPns,RUNns,LASTGAPus,path/place,life=i0/e/s/r/x:first/seen,behind} rate={RUN/s,MIG/s,RTms/s} life={RTms,AVGRTus(run_stop),MAXRUNus,RJITus,wakeus<=5ms,WHIST,Qf/b/p exact_u64,SYLD,affinity,home,cpu/core spread,task_smt}",
     );
     #[cfg(debug_assertions)]
     output.push_str(" anatomy={policy,prio,flags,shape,lane_candidate,source,risk} wake_chain={chain,policy_score,reasons,decay}");
@@ -3025,6 +3579,13 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
         &app.per_cpu_work,
         app.start_time.elapsed(),
     );
+    append_accelerator_section(
+        &mut output,
+        "accelerator.life",
+        &app.per_cpu_work,
+        stats,
+        app.start_time.elapsed(),
+    );
     append_select_cpu_section(
         &mut output,
         "select.life",
@@ -3089,6 +3650,17 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
             elapsed,
         );
         append_local_queue_section(&mut output, "localq.60s", &window, elapsed);
+        if let Some((_stats_elapsed, stats_window)) =
+            app.windowed_stats(stats, Duration::from_secs(60))
+        {
+            append_accelerator_section(
+                &mut output,
+                "accelerator.60s",
+                &window,
+                &stats_window,
+                elapsed,
+            );
+        }
         append_select_cpu_section(&mut output, "select.60s", &window, elapsed);
         append_home_seed_section(&mut output, "homeseed.60s", &window, elapsed);
         if let Some((pressure_elapsed, pressure_window)) =
@@ -3134,7 +3706,7 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
         "\ntask.scope: rows=live_bpf_tracked life=since_task_first_tracked_this_run rate=latest_tui_tick latest=last_observed windows=separate_30s_60s recent=bounded_debug_events\n",
     );
     output.push_str(
-        "tasks: [PPID PID ST COMM CLS PELT MAXRTus GAPus JITus LASTWus LIFE RUN/s CPU SPRD RES% SMT% SELns ENQns STOPns RUNns G1% G3% DSQ% MIG/s]\n",
+        "tasks: [PPID PID ST COMM CLS UTIL% MAXRUNus LASTGAPus RJITus LASTWus LIFE RUN/s CPU SPRD RES% SMT2% SELns ENQns STOPns RUNns FAST% NAT% TUN% MIG/s]\n",
     );
     output.push_str(
         "       [detail: ROLE STEER(home/primary) DIRECT Q[f/b/p] SYLD PRMPT LIFE(i0/e/s/r/x:first/seen) MAXGAPus DSQINSns RUNS RTms AVGRTus RTms/s SLICEOCC% LLC/COUNT PLACE(cpu/core dist) STREAK WAKER TGID CLS V/ICSW WAKEus<=5ms(dir/busy/q) HWAIT<=5ms WHIST]\n",
@@ -3274,14 +3846,14 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
                 format!("{}", last_wait_us)
             };
             output.push_str(&format!(
-                "{}{:<5} {:<7} {:<3} {:<15} {:<4} {:<4} {:<7} {:<7} {:<6} {:<7} {:<18} {:<7.1} C{:<3} {:<5} {:<7} {:<5} {:<5} {:<6} {:<6} {:<6} {:<4.0} {:<4.0} {:<4.0} {:<7.1}\n",
+                "{}{:<5} {:<7} {:<3} {:<15} {:<4} {:<6.1} {:<8} {:<9} {:<6} {:<7} {:<18} {:<7.1} C{:<3} {:<5} {:<7} {:<5} {:<5} {:<6} {:<6} {:<6} {:<5.0} {:<4.0} {:<4.0} {:<7.1}\n",
                 indent,
                 row.ppid,
                 row.pid,
                 status_str,
                 row.comm,
                 cls_str,
-                row.pelt_util,  // PELT utilization (0-1024)
+                pelt_util_pct(row.pelt_util as u64),
                 display_runtime_us(row.max_runtime_us),
                 display_gap_us(row.dispatch_gap_us),
                 j_us,
@@ -3296,12 +3868,12 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
                 row.enqueue_ns,
                 row.stopping_duration_ns,
                 row.running_duration_ns,
-                row.gate_hit_pcts[0],  // G1
-                row.gate_hit_pcts[3],  // G3
-                row.gate_hit_pcts[9],  // DSQ
+                row.gate_hit_pcts[0],
+                row.gate_hit_pcts[3],
+                row.gate_hit_pcts[9],
                 row.migrations_per_sec,
             ));
-            // detail-A: gate % (G1/G3/DSQ) + all extended fields, compact labels
+            // detail-A: gate % (FAST/NAT/TUN) + all extended fields, compact labels
             output.push_str(&format!(
                 "{}  role={}/{} steer={}/{} path={}/{}/{} waker={} deps={}/{} dir={} q={}/{}/{} syld={} prmpt={} aff={} home=[{}] behind={} tsmt={:.1}%/{:.1}% sruns={}/{} life={} maxgap={} dsqins={}ns runs={} rt={}ms avgrt={}us rtms/s={:.1} slice_occ={}% llc=L{:02}/{} place=[{}|{} smt={}%] streak={} tgid={} cls={} v/icsw={}/{} wakeus<=5ms={}/{}/{} hwait<=5ms=[{}] whist={}/{}/{}/{}\n",
                 indent,
@@ -3363,5 +3935,6 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
 }
 
 pub(super) fn format_stats_json(stats: &cake_stats, app: &TuiApp) -> String {
-    build_telemetry_report(stats, app).to_json()
+    let report = build_telemetry_report(stats, app);
+    format_service_report_json(&build_service_report(stats, app, &report))
 }

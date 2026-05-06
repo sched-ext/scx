@@ -3654,6 +3654,9 @@ dependencies = [
  "scx_arena",
  "scx_cargo",
  "scx_utils",
+ "serde",
+ "serde_json",
+ "strum",
  "sysinfo",
  "tachyonfx",
 ]

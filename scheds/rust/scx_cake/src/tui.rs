@@ -2,6 +2,7 @@
 // TUI module - ratatui-based terminal UI for real-time scheduler statistics
 
 use std::io::{self, Stdout};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -30,9 +31,11 @@ use crate::bpf_intf::cake_debug_event;
 use crate::bpf_intf::cake_stats;
 use crate::bpf_skel::BpfSkel;
 use crate::topology::TopologyInfo;
+use crate::trust::{self, CpuTrustSnapshot};
 
 mod apps_tab;
 mod dashboard_tab;
+mod diagnostics;
 mod dump;
 mod graphs_tab;
 mod latency_probe;
@@ -42,6 +45,7 @@ mod topology_tab;
 
 use apps_tab::draw_apps_tab;
 use dashboard_tab::draw_dashboard_tab;
+use diagnostics::{draw_codes_tab, draw_live_data_tab, draw_monitors_tab};
 use dump::{
     build_app_health_rows, format_stats_for_clipboard, format_stats_json,
     format_tgid_health_summary,
@@ -59,7 +63,10 @@ const TIMELINE_SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(4);
 const DEAD_TASK_RETENTION: Duration = Duration::from_secs(300);
 const FULL_SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(1);
-const SELECT_REASON_MAX: usize = 10;
+const SELECT_REASON_MAX: usize = 12;
+const ACCEL_ROUTE_MAX: usize = 7;
+const ACCEL_ROUTE_BLOCK_MAX: usize = 13;
+const ACCEL_PROBE_OUTCOME_MAX: usize = 6;
 const PRESSURE_SITE_MAX: usize = 2;
 const PRESSURE_OUTCOME_MAX: usize = 6;
 const PRESSURE_ANCHOR_REASON_MAX: usize = 4;
@@ -99,6 +106,21 @@ const WAKE_EDGE_EVENT_FLAG_IMPORTANT: u8 = 4;
 #[cfg(test)]
 const CAKE_WAKE_EDGE_SAMPLE_DENOM: u32 = 64;
 const SELECT_PATH_MAX: usize = 6;
+const CAKE_CONF_SELECT_EARLY_SHIFT: u32 = 0;
+const CAKE_CONF_SELECT_ROW4_SHIFT: u32 = 4;
+const CAKE_CONF_DISPATCH_EMPTY_SHIFT: u32 = 12;
+const CAKE_CONF_KICK_SHAPE_SHIFT: u32 = 20;
+const CAKE_CONF_PULL_SHAPE_SHIFT: u32 = 24;
+const CAKE_CONF_ROUTE_SHIFT: u32 = 28;
+const CAKE_CONF_ROUTE_KIND_SHIFT: u32 = 32;
+const CAKE_CONF_ROUTE_AUDIT_SHIFT: u32 = 36;
+const CAKE_CONF_PULL_AUDIT_SHIFT: u32 = 40;
+const CAKE_CONF_ACCOUNT_AUDIT_SHIFT: u32 = 44;
+const CAKE_CONF_FLOOR_GEAR_SHIFT: u32 = 48;
+const CAKE_CONF_STATUS_TRUST_SHIFT: u32 = 52;
+const CAKE_CONF_OWNER_STABLE_SHIFT: u32 = 56;
+const CAKE_CONF_LOAD_SHOCK_SHIFT: u32 = 60;
+const CAKE_CONF_NIBBLE_MASK: u64 = 0xf;
 const STARTUP_PHASE_ENQUEUE: u8 = 1;
 const STARTUP_PHASE_SELECT: u8 = 2;
 const STARTUP_PHASE_RUNNING: u8 = 3;
@@ -218,31 +240,40 @@ impl SystemInfo {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TuiTab {
-    Dashboard = 0,
-    Apps = 1,
-    Topology = 2,
-    Graphs = 3,
-    ReferenceGuide = 4,
+    Overview = 0,
+    LiveData = 1,
+    Monitors = 2,
+    Codes = 3,
+    Apps = 4,
+    Topology = 5,
+    Trends = 6,
+    ReferenceGuide = 7,
 }
 
 impl TuiTab {
     fn next(self) -> Self {
         match self {
-            TuiTab::Dashboard => TuiTab::Apps,
+            TuiTab::Overview => TuiTab::LiveData,
+            TuiTab::LiveData => TuiTab::Monitors,
+            TuiTab::Monitors => TuiTab::Codes,
+            TuiTab::Codes => TuiTab::Apps,
             TuiTab::Apps => TuiTab::Topology,
-            TuiTab::Topology => TuiTab::Graphs,
-            TuiTab::Graphs => TuiTab::ReferenceGuide,
-            TuiTab::ReferenceGuide => TuiTab::Dashboard,
+            TuiTab::Topology => TuiTab::Trends,
+            TuiTab::Trends => TuiTab::ReferenceGuide,
+            TuiTab::ReferenceGuide => TuiTab::Overview,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            TuiTab::Dashboard => TuiTab::ReferenceGuide,
-            TuiTab::Apps => TuiTab::Dashboard,
+            TuiTab::Overview => TuiTab::ReferenceGuide,
+            TuiTab::LiveData => TuiTab::Overview,
+            TuiTab::Monitors => TuiTab::LiveData,
+            TuiTab::Codes => TuiTab::Monitors,
+            TuiTab::Apps => TuiTab::Codes,
             TuiTab::Topology => TuiTab::Apps,
-            TuiTab::Graphs => TuiTab::Topology,
-            TuiTab::ReferenceGuide => TuiTab::Graphs,
+            TuiTab::Trends => TuiTab::Topology,
+            TuiTab::ReferenceGuide => TuiTab::Trends,
         }
     }
 }
@@ -364,6 +395,7 @@ pub struct TuiApp {
     timeline_history: VecDeque<TimelineBucket>,
     timeline_last_sample: Option<StatsSnapshot>,
     timeline_next_sample_at: Option<Instant>,
+    diagnostic_recorder: diagnostics::DiagnosticRecorder,
 }
 
 #[derive(Clone, Copy)]
@@ -429,6 +461,8 @@ struct CpuWorkCounters {
     pressure_probe: [[u64; PRESSURE_OUTCOME_MAX]; PRESSURE_SITE_MAX],
     pressure_anchor_block: [[u64; PRESSURE_ANCHOR_REASON_MAX]; PRESSURE_SITE_MAX],
     cpu_pressure: u8,
+    decision_confidence: u64,
+    trust: CpuTrustSnapshot,
     local_pending: u32,
     local_pending_max: u32,
     local_pending_inserts: u64,
@@ -907,6 +941,8 @@ struct HomeSeedRow {
 struct LocalQueueRow {
     cpu: usize,
     pressure: u8,
+    decision_confidence: u64,
+    trust: CpuTrustSnapshot,
     pending: u32,
     pending_max: u32,
     inserts: u64,
@@ -1363,7 +1399,7 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
                 total.select_path_count[path] += s.select_path_count[path];
                 total.select_path_migration_count[path] += s.select_path_migration_count[path];
             }
-            for reason in 0..10 {
+            for reason in 0..SELECT_REASON_MAX {
                 total.select_reason_migration_count[reason] +=
                     s.select_reason_migration_count[reason];
                 total.select_reason_wait_ns[reason] += s.select_reason_wait_ns[reason];
@@ -1380,6 +1416,35 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
                     [reason]
                     .max(s.select_reason_select_max_ns[reason]);
             }
+            for route in 0..ACCEL_ROUTE_MAX {
+                total.accel_route_attempt_count[route] += s.accel_route_attempt_count[route];
+                total.accel_route_hit_count[route] += s.accel_route_hit_count[route];
+                total.accel_route_miss_count[route] += s.accel_route_miss_count[route];
+                total.accel_fast_attempt_count[route] += s.accel_fast_attempt_count[route];
+                total.accel_fast_hit_count[route] += s.accel_fast_hit_count[route];
+                total.accel_fast_miss_count[route] += s.accel_fast_miss_count[route];
+                for outcome in 0..ACCEL_PROBE_OUTCOME_MAX {
+                    total.accel_scoreboard_probe_count[route][outcome] +=
+                        s.accel_scoreboard_probe_count[route][outcome];
+                }
+            }
+            for reason in 0..ACCEL_ROUTE_BLOCK_MAX {
+                total.accel_route_block_count[reason] += s.accel_route_block_count[reason];
+            }
+            for mode in 0..total.accel_pull_mode_count.len() {
+                total.accel_pull_mode_count[mode] += s.accel_pull_mode_count[mode];
+            }
+            for outcome in 0..total.accel_pull_probe_count.len() {
+                total.accel_pull_probe_count[outcome] += s.accel_pull_probe_count[outcome];
+            }
+            for kind in 0..total.accel_native_fallback_count.len() {
+                total.accel_native_fallback_count[kind] += s.accel_native_fallback_count[kind];
+            }
+            total.accel_accounting_relaxed += s.accel_accounting_relaxed;
+            total.accel_accounting_audit += s.accel_accounting_audit;
+            total.accel_trust_prev_attempt += s.accel_trust_prev_attempt;
+            total.accel_trust_prev_hit += s.accel_trust_prev_hit;
+            total.accel_trust_prev_miss += s.accel_trust_prev_miss;
             for cls in 0..4 {
                 total.home_place_wait_ns[cls] += s.home_place_wait_ns[cls];
                 total.home_place_wait_count[cls] += s.home_place_wait_count[cls];
@@ -1471,6 +1536,7 @@ fn aggregate_stats(_skel: &BpfSkel) -> cake_stats {
 #[cfg(not(cake_bpf_release))]
 fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
     let mut work = vec![CpuWorkCounters::default(); nr_cpus];
+    let trust_rows = trust::extract_trust_snapshots(skel, nr_cpus);
 
     if let Some(bss) = &skel.maps.bss_data {
         for (idx, stats) in bss.global_stats.iter().take(nr_cpus).enumerate() {
@@ -1503,24 +1569,35 @@ fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
                     home_seed_reason[reason] = bss.home_seed_reason_count[reason][idx];
                 }
 
-                for site in 0..PRESSURE_SITE_MAX {
-                    for outcome in 0..PRESSURE_OUTCOME_MAX {
-                        pressure_probe[site][outcome] =
-                            bss.pressure_probe_cpu_count[site][outcome][idx];
+                for (site, outcomes) in pressure_probe
+                    .iter_mut()
+                    .enumerate()
+                    .take(PRESSURE_SITE_MAX)
+                {
+                    for (outcome, slot) in
+                        outcomes.iter_mut().enumerate().take(PRESSURE_OUTCOME_MAX)
+                    {
+                        *slot = bss.pressure_probe_cpu_count[site][outcome][idx];
                     }
-                    for reason in 0..PRESSURE_ANCHOR_REASON_MAX {
-                        pressure_anchor_block[site][reason] =
-                            bss.pressure_anchor_block_cpu_count[site][reason][idx];
+                    for (reason, slot) in pressure_anchor_block[site]
+                        .iter_mut()
+                        .enumerate()
+                        .take(PRESSURE_ANCHOR_REASON_MAX)
+                    {
+                        *slot = bss.pressure_anchor_block_cpu_count[site][reason][idx];
                     }
                 }
 
-                for reason in 0..WAKE_REASON_MAX {
+                for (reason, buckets) in target_wait_bucket
+                    .iter_mut()
+                    .enumerate()
+                    .take(WAKE_REASON_MAX)
+                {
                     target_wait_ns[reason] = bss.wake_target_wait_ns[reason][idx];
                     target_wait_count[reason] = bss.wake_target_wait_count[reason][idx];
                     target_wait_max_ns[reason] = bss.wake_target_wait_max_ns[reason][idx];
-                    for bucket in 0..WAKE_BUCKET_MAX {
-                        target_wait_bucket[reason][bucket] =
-                            bss.wake_target_wait_bucket_count[reason][idx][bucket];
+                    for (bucket, slot) in buckets.iter_mut().enumerate().take(WAKE_BUCKET_MAX) {
+                        *slot = bss.wake_target_wait_bucket_count[reason][idx][bucket];
                     }
                 }
 
@@ -1642,6 +1719,8 @@ fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
                 pressure_probe,
                 pressure_anchor_block,
                 cpu_pressure: bss.cpu_bss[idx].cpu_pressure,
+                decision_confidence: bss.cpu_bss[idx].decision_confidence,
+                trust: trust_rows.get(idx).copied().unwrap_or_default(),
                 local_pending,
                 local_pending_max,
                 local_pending_inserts,
@@ -1669,10 +1748,13 @@ fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
 #[cfg(cake_bpf_release)]
 fn extract_cpu_work(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuWorkCounters> {
     let mut work = vec![CpuWorkCounters::default(); nr_cpus];
+    let trust_rows = trust::extract_trust_snapshots(skel, nr_cpus);
 
     if let Some(bss) = &skel.maps.bss_data {
         for idx in 0..nr_cpus.min(bss.cpu_status.len()) {
             work[idx].cpu_pressure = cake_cpu_status_pressure_bucket(bss.cpu_status[idx].flags);
+            work[idx].decision_confidence = bss.cpu_bss[idx].decision_confidence;
+            work[idx].trust = trust_rows.get(idx).copied().unwrap_or_default();
         }
     }
 
@@ -1731,6 +1813,11 @@ fn cpu_work_delta(
         .enumerate()
         .map(|(idx, cur)| {
             let prev = previous.get(idx).copied().unwrap_or_default();
+            let mut trust = cur.trust;
+            trust.demotion_count = cur
+                .trust
+                .demotion_count
+                .saturating_sub(prev.trust.demotion_count);
             CpuWorkCounters {
                 task_runtime_ns: cur.task_runtime_ns.saturating_sub(prev.task_runtime_ns),
                 task_run_count: cur.task_run_count.saturating_sub(prev.task_run_count),
@@ -1795,6 +1882,8 @@ fn cpu_work_delta(
                     })
                 }),
                 cpu_pressure: cur.cpu_pressure,
+                decision_confidence: cur.decision_confidence,
+                trust,
                 local_pending: cur.local_pending,
                 local_pending_max: cur.local_pending_max,
                 local_pending_inserts: cur
@@ -2186,6 +2275,56 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
             .saturating_sub(previous.select_reason_select_count[reason]);
         delta.select_reason_select_max_ns[reason] = current.select_reason_select_max_ns[reason];
     }
+    for route in 0..current.accel_route_attempt_count.len() {
+        delta.accel_route_attempt_count[route] = current.accel_route_attempt_count[route]
+            .saturating_sub(previous.accel_route_attempt_count[route]);
+        delta.accel_route_hit_count[route] = current.accel_route_hit_count[route]
+            .saturating_sub(previous.accel_route_hit_count[route]);
+        delta.accel_route_miss_count[route] = current.accel_route_miss_count[route]
+            .saturating_sub(previous.accel_route_miss_count[route]);
+        delta.accel_fast_attempt_count[route] = current.accel_fast_attempt_count[route]
+            .saturating_sub(previous.accel_fast_attempt_count[route]);
+        delta.accel_fast_hit_count[route] = current.accel_fast_hit_count[route]
+            .saturating_sub(previous.accel_fast_hit_count[route]);
+        delta.accel_fast_miss_count[route] = current.accel_fast_miss_count[route]
+            .saturating_sub(previous.accel_fast_miss_count[route]);
+        for outcome in 0..current.accel_scoreboard_probe_count[route].len() {
+            delta.accel_scoreboard_probe_count[route][outcome] = current
+                .accel_scoreboard_probe_count[route][outcome]
+                .saturating_sub(previous.accel_scoreboard_probe_count[route][outcome]);
+        }
+    }
+    for reason in 0..current.accel_route_block_count.len() {
+        delta.accel_route_block_count[reason] = current.accel_route_block_count[reason]
+            .saturating_sub(previous.accel_route_block_count[reason]);
+    }
+    for mode in 0..current.accel_pull_mode_count.len() {
+        delta.accel_pull_mode_count[mode] = current.accel_pull_mode_count[mode]
+            .saturating_sub(previous.accel_pull_mode_count[mode]);
+    }
+    for outcome in 0..current.accel_pull_probe_count.len() {
+        delta.accel_pull_probe_count[outcome] = current.accel_pull_probe_count[outcome]
+            .saturating_sub(previous.accel_pull_probe_count[outcome]);
+    }
+    for kind in 0..current.accel_native_fallback_count.len() {
+        delta.accel_native_fallback_count[kind] = current.accel_native_fallback_count[kind]
+            .saturating_sub(previous.accel_native_fallback_count[kind]);
+    }
+    delta.accel_accounting_relaxed = current
+        .accel_accounting_relaxed
+        .saturating_sub(previous.accel_accounting_relaxed);
+    delta.accel_accounting_audit = current
+        .accel_accounting_audit
+        .saturating_sub(previous.accel_accounting_audit);
+    delta.accel_trust_prev_attempt = current
+        .accel_trust_prev_attempt
+        .saturating_sub(previous.accel_trust_prev_attempt);
+    delta.accel_trust_prev_hit = current
+        .accel_trust_prev_hit
+        .saturating_sub(previous.accel_trust_prev_hit);
+    delta.accel_trust_prev_miss = current
+        .accel_trust_prev_miss
+        .saturating_sub(previous.accel_trust_prev_miss);
     for cls in 0..current.home_place_wait_ns.len() {
         delta.home_place_wait_ns[cls] =
             current.home_place_wait_ns[cls].saturating_sub(previous.home_place_wait_ns[cls]);
@@ -3389,6 +3528,8 @@ fn select_reason_short_label(reason: usize) -> &'static str {
         7 => "ki",
         8 => "tn",
         9 => "pc",
+        10 => "sbp",
+        11 => "sbs",
         _ => "-",
     }
 }
@@ -3426,8 +3567,8 @@ fn pressure_anchor_reason_short_label(reason: usize) -> &'static str {
 fn select_reason_totals(counters: &[CpuWorkCounters], prev_side: bool) -> [u64; SELECT_REASON_MAX] {
     let mut total = [0; SELECT_REASON_MAX];
     for counter in counters {
-        for reason in 0..SELECT_REASON_MAX {
-            total[reason] += if prev_side {
+        for (reason, slot) in total.iter_mut().enumerate().take(SELECT_REASON_MAX) {
+            *slot += if prev_side {
                 counter.select_prev_reason[reason]
             } else {
                 counter.select_target_reason[reason]
@@ -3455,15 +3596,15 @@ fn pressure_probe_balance_ratio(counters: &[CpuWorkCounters], site: usize) -> f6
 fn format_select_reason_summary(counts: &[u64]) -> String {
     let total: u64 = counts[1..].iter().sum();
     let mut parts = Vec::new();
-    for reason in 1..counts.len() {
-        if counts[reason] == 0 {
+    for (reason, count) in counts.iter().enumerate().skip(1) {
+        if *count == 0 {
             continue;
         }
         parts.push(format!(
             "{}={:.0}%({})",
             select_reason_short_label(reason),
-            pct(counts[reason], total),
-            counts[reason]
+            pct(*count, total),
+            count
         ));
     }
     if parts.is_empty() {
@@ -3475,15 +3616,11 @@ fn format_select_reason_summary(counts: &[u64]) -> String {
 
 fn format_select_reason_count_summary(counts: &[u64]) -> String {
     let mut parts = Vec::new();
-    for reason in 1..counts.len() {
-        if counts[reason] == 0 {
+    for (reason, count) in counts.iter().enumerate().skip(1) {
+        if *count == 0 {
             continue;
         }
-        parts.push(format!(
-            "{}={}",
-            select_reason_short_label(reason),
-            counts[reason]
-        ));
+        parts.push(format!("{}={}", select_reason_short_label(reason), count));
     }
     if parts.is_empty() {
         "none".to_string()
@@ -3499,15 +3636,15 @@ fn format_pressure_probe_summary(counts: &[u64]) -> String {
     }
 
     let mut parts = vec![format!("ev={}", evaluated)];
-    for outcome in 1..counts.len() {
-        if counts[outcome] == 0 {
+    for (outcome, count) in counts.iter().enumerate().skip(1) {
+        if *count == 0 {
             continue;
         }
         parts.push(format!(
             "{}={:.0}%({})",
             pressure_probe_outcome_short_label(outcome),
-            pct(counts[outcome], evaluated),
-            counts[outcome]
+            pct(*count, evaluated),
+            count
         ));
     }
     parts.join(" ")
@@ -3519,15 +3656,15 @@ fn format_pressure_anchor_summary(counts: &[u64], blocked_anchor: u64) -> String
     }
 
     let mut parts = Vec::new();
-    for reason in 0..counts.len() {
-        if counts[reason] == 0 {
+    for (reason, count) in counts.iter().enumerate() {
+        if *count == 0 {
             continue;
         }
         parts.push(format!(
             "{}={:.0}%({})",
             pressure_anchor_reason_short_label(reason),
-            pct(counts[reason], blocked_anchor),
-            counts[reason]
+            pct(*count, blocked_anchor),
+            count
         ));
     }
     if parts.is_empty() {
@@ -3539,14 +3676,14 @@ fn format_pressure_anchor_summary(counts: &[u64], blocked_anchor: u64) -> String
 
 fn format_select_reason_mix(counts: &[u64], total: u64) -> String {
     let mut parts = Vec::new();
-    for reason in 1..counts.len() {
-        if counts[reason] == 0 {
+    for (reason, count) in counts.iter().enumerate().skip(1) {
+        if *count == 0 {
             continue;
         }
         parts.push(format!(
             "{}:{:.0}",
             select_reason_short_label(reason),
-            pct(counts[reason], total)
+            pct(*count, total)
         ));
     }
     if parts.is_empty() {
@@ -3562,14 +3699,14 @@ fn format_pressure_probe_mix(counts: &[u64], evaluated: u64) -> String {
     }
 
     let mut parts = Vec::new();
-    for outcome in 1..counts.len() {
-        if counts[outcome] == 0 {
+    for (outcome, count) in counts.iter().enumerate().skip(1) {
+        if *count == 0 {
             continue;
         }
         parts.push(format!(
             "{}:{:.0}",
             pressure_probe_outcome_short_label(outcome),
-            pct(counts[outcome], evaluated)
+            pct(*count, evaluated)
         ));
     }
     if parts.is_empty() {
@@ -3641,8 +3778,8 @@ fn home_seed_rows(counters: &[CpuWorkCounters]) -> Vec<HomeSeedRow> {
 fn home_seed_reason_totals(counters: &[CpuWorkCounters]) -> [u64; SELECT_REASON_MAX] {
     let mut total = [0; SELECT_REASON_MAX];
     for counter in counters {
-        for reason in 0..SELECT_REASON_MAX {
-            total[reason] += counter.home_seed_reason[reason];
+        for (reason, slot) in total.iter_mut().enumerate().take(SELECT_REASON_MAX) {
+            *slot += counter.home_seed_reason[reason];
         }
     }
     total
@@ -3699,6 +3836,10 @@ fn local_queue_rows(counters: &[CpuWorkCounters]) -> Vec<LocalQueueRow> {
                 || counter.wake_direct_target > 0
                 || counter.wake_busy_target > 0
                 || target_wait_total_count(counter) > 0
+                || counter.decision_confidence > 0
+                || counter.trust.policy > 0
+                || counter.trust.blocked > 0
+                || counter.trust.demotion_count > 0
                 || counter.cpu_pressure > 0;
             if !active {
                 return None;
@@ -3706,6 +3847,8 @@ fn local_queue_rows(counters: &[CpuWorkCounters]) -> Vec<LocalQueueRow> {
             Some(LocalQueueRow {
                 cpu,
                 pressure: counter.cpu_pressure,
+                decision_confidence: counter.decision_confidence,
+                trust: counter.trust,
                 pending: counter.local_pending,
                 pending_max: counter.local_pending_max,
                 inserts: counter.local_pending_inserts,
@@ -4396,7 +4539,7 @@ fn inferred_top_cpu(summary: &PlacementSummary, row: &TaskTelemetryRow) -> Optio
     summary
         .top_cpu
         .map(|(cpu, _)| cpu)
-        .or_else(|| Some(row.core_placement as usize))
+        .or(Some(row.core_placement as usize))
 }
 
 fn inferred_top_core(
@@ -4677,7 +4820,7 @@ impl TuiApp {
             table_state: TableState::default(),
             app_table_state: TableState::default(),
             focused_tgid: None,
-            active_tab: TuiTab::Dashboard,
+            active_tab: TuiTab::Overview,
             sort_column: SortColumn::Pelt,
             sort_descending: true,
 
@@ -4713,6 +4856,7 @@ impl TuiApp {
             timeline_history: VecDeque::new(),
             timeline_last_sample: None,
             timeline_next_sample_at: None,
+            diagnostic_recorder: diagnostics::DiagnosticRecorder::default(),
         }
     }
 
@@ -4822,6 +4966,12 @@ impl TuiApp {
                 break;
             }
         }
+    }
+
+    fn record_diagnostic_snapshot(&mut self, stats: &cake_stats) {
+        let report = build_telemetry_report(stats, self);
+        let evaluation = diagnostics::evaluate_diagnostics(stats, self, &report);
+        self.diagnostic_recorder.update(evaluation.current_codes);
     }
 
     fn windowed_stats(
@@ -5514,6 +5664,10 @@ fn pct(part: u64, total: u64) -> f64 {
     }
 }
 
+fn pelt_util_pct(raw_util: u64) -> f64 {
+    pct(raw_util, 1024)
+}
+
 fn per_sec(count: u64, secs: f64) -> f64 {
     if secs > 0.0 {
         count as f64 / secs
@@ -5678,8 +5832,8 @@ fn summarize_timeline_samples(
             total_wait_ns[reason] += sample.stats.wake_reason_wait_ns[reason];
             total_wait_count[reason] += sample.stats.wake_reason_wait_count[reason];
         }
-        for path in 1..6 {
-            total_paths[path] += sample.stats.select_path_count[path];
+        for (path, slot) in total_paths.iter_mut().enumerate().skip(1).take(5) {
+            *slot += sample.stats.select_path_count[path];
         }
 
         total_quantum[0] += sample.stats.nr_quantum_full;
@@ -6016,8 +6170,7 @@ fn kick_kind_label(kind: usize) -> &'static str {
 
 fn format_wake_bucket_summary(buckets: &[[u64; 5]]) -> String {
     let mut parts = Vec::new();
-    for reason in 1..buckets.len() {
-        let row = buckets[reason];
+    for (reason, row) in buckets.iter().enumerate().skip(1) {
         if row.iter().all(|count| *count == 0) {
             continue;
         }
@@ -6150,8 +6303,7 @@ fn format_wake_followup_summary(same: &[u64], migrate: &[u64]) -> String {
 
 fn format_kick_bucket_summary(buckets: &[[u64; 5]]) -> String {
     let mut parts = Vec::new();
-    for kind in 1..buckets.len() {
-        let row = buckets[kind];
+    for (kind, row) in buckets.iter().enumerate().skip(1) {
         if row.iter().all(|count| *count == 0) {
             continue;
         }
@@ -6218,11 +6370,11 @@ fn format_place_wait_summary(sum_ns: &[u64], count: &[u64], max_ns: &[u64]) -> S
 
 fn format_path_summary(count: &[u64]) -> String {
     let mut parts = Vec::new();
-    for path in 1..count.len() {
-        if count[path] == 0 {
+    for (path, value) in count.iter().enumerate().skip(1) {
+        if *value == 0 {
             continue;
         }
-        parts.push(format!("{}={}", select_path_label(path), count[path]));
+        parts.push(format!("{}={}", select_path_label(path), value));
     }
     if parts.is_empty() {
         "none".to_string()
@@ -6590,19 +6742,25 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
 
     // --- Tab Bar ---
     let tab_titles = vec![
-        " Dashboard ",
+        " Overview ",
+        " Live Data ",
+        " Monitors ",
+        " Codes ",
         " Apps ",
         " Topology ",
-        " Graphs ",
+        " Trends ",
         " Reference ",
     ];
     let tabs = Tabs::new(tab_titles)
         .select(match app.active_tab {
-            TuiTab::Dashboard => 0,
-            TuiTab::Apps => 1,
-            TuiTab::Topology => 2,
-            TuiTab::Graphs => 3,
-            TuiTab::ReferenceGuide => 4,
+            TuiTab::Overview => 0,
+            TuiTab::LiveData => 1,
+            TuiTab::Monitors => 2,
+            TuiTab::Codes => 3,
+            TuiTab::Apps => 4,
+            TuiTab::Topology => 5,
+            TuiTab::Trends => 6,
+            TuiTab::ReferenceGuide => 7,
         })
         .style(Style::default().fg(Color::DarkGray))
         .highlight_style(
@@ -6638,10 +6796,13 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
 
     // Render active view
     match app.active_tab {
-        TuiTab::Dashboard => draw_dashboard_tab(frame, app, stats, main_layout[1]),
+        TuiTab::Overview => draw_dashboard_tab(frame, app, stats, main_layout[1]),
+        TuiTab::LiveData => draw_live_data_tab(frame, app, stats, main_layout[1]),
+        TuiTab::Monitors => draw_monitors_tab(frame, app, stats, main_layout[1]),
+        TuiTab::Codes => draw_codes_tab(frame, app, stats, main_layout[1]),
         TuiTab::Apps => draw_apps_tab(frame, app, main_layout[1]),
         TuiTab::Topology => draw_topology_tab(frame, app, main_layout[1]),
-        TuiTab::Graphs => draw_graphs_tab(frame, app, stats, main_layout[1]),
+        TuiTab::Trends => draw_graphs_tab(frame, app, stats, main_layout[1]),
         TuiTab::ReferenceGuide => draw_reference_tab(frame, main_layout[1]),
     }
 
@@ -6649,18 +6810,18 @@ fn draw_ui(frame: &mut Frame, app: &mut TuiApp, stats: &cake_stats) {
     let arrow = if app.sort_descending { "▼" } else { "▲" };
     let sort_label = match app.sort_column {
         SortColumn::Pid => format!("PID {}", arrow),
-        SortColumn::Pelt => format!("PELT {}", arrow),
-        SortColumn::MaxRuntime => format!("MAXµs {}", arrow),
-        SortColumn::Jitter => format!("JITµs {}", arrow),
-        SortColumn::Wait => format!("WAITµs {}", arrow),
+        SortColumn::Pelt => format!("UTIL% {}", arrow),
+        SortColumn::MaxRuntime => format!("MAXRµs {}", arrow),
+        SortColumn::Jitter => format!("RJITµs {}", arrow),
+        SortColumn::Wait => format!("LASTWµs {}", arrow),
         SortColumn::RunsPerSec => format!("RUN/s {}", arrow),
         SortColumn::TargetCpu => format!("CPU {}", arrow),
         SortColumn::Spread => format!("SPRD {}", arrow),
         SortColumn::Residency => format!("RES% {}", arrow),
         SortColumn::SelectCpu => format!("SELns {}", arrow),
         SortColumn::Enqueue => format!("ENQns {}", arrow),
-        SortColumn::Gap => format!("GAPµs {}", arrow),
-        SortColumn::Gate1Pct => format!("G1% {}", arrow),
+        SortColumn::Gap => format!("LGAPµs {}", arrow),
+        SortColumn::Gate1Pct => format!("FAST% {}", arrow),
         SortColumn::Class => format!("CLS {}", arrow),
         SortColumn::Migrations => format!("MIG/s {}", arrow),
     };
@@ -6927,7 +7088,7 @@ fn app_focus_cpu_mask(app: &TuiApp, tgid: u32, limit: usize) -> Vec<bool> {
     mask
 }
 
-fn app_task_rows<'a>(app: &'a TuiApp, tgid: u32) -> Vec<&'a TaskTelemetryRow> {
+fn app_task_rows(app: &TuiApp, tgid: u32) -> Vec<&TaskTelemetryRow> {
     let mut rows: Vec<&TaskTelemetryRow> = app
         .task_rows
         .values()
@@ -6949,39 +7110,76 @@ fn app_task_rows<'a>(app: &'a TuiApp, tgid: u32) -> Vec<&'a TaskTelemetryRow> {
     rows
 }
 
+fn app_trust_summary(app: &TuiApp) -> (usize, usize, usize, u64) {
+    let mut enabled = 0;
+    let mut active = 0;
+    let mut blocked = 0;
+    let mut demotions = 0_u64;
+
+    for row in &app.per_cpu_work {
+        if row.trust.prev_direct_enabled() {
+            enabled += 1;
+        }
+        if row.trust.prev_direct_active() {
+            active += 1;
+        }
+        if row.trust.prev_direct_blocked() {
+            blocked += 1;
+        }
+        demotions = demotions.saturating_add(row.trust.demotion_count as u64);
+    }
+
+    (enabled, active, blocked, demotions)
+}
+
 fn app_data_quality_line(app: &TuiApp) -> Line<'static> {
     let capture_style = if app.wake_edge_missed_updates > 0 {
         Style::default().fg(Color::LightRed)
     } else {
         Style::default().fg(Color::Green)
     };
+    let (trust_enabled, trust_active, trust_blocked, trust_demotions) = app_trust_summary(app);
     Line::from(vec![
         dashboard_label("Data "),
         dashboard_value(
             format!(
-                "tasks=exact rates=delta/tick wakegraph={} edges={} obs={} weight={} drops={} drop~{:.0}%",
+                "tasks=exact rates=delta/tick wakegraph={} edges={} obs={} weight={} drops={} drop~{:.0}% trust_prev={}/{}/{} demote={}",
                 wake_graph_capture_label(app),
                 app.wake_edges.len(),
                 app.wake_edge_observed_events,
                 app.wake_edge_sample_weight_sum,
                 app.wake_edge_missed_updates,
-                wake_graph_miss_pct(app)
+                wake_graph_miss_pct(app),
+                trust_active,
+                trust_enabled,
+                trust_blocked,
+                trust_demotions
             ),
             capture_style,
         ),
     ])
 }
 
-fn handle_tui_key(
-    key: crossterm::event::KeyEvent,
-    app: &mut TuiApp,
-    skel: &mut BpfSkel,
-    stats: &cake_stats,
-    shutdown: &Arc<AtomicBool>,
-    wake_graph_state: &Arc<Mutex<WakeGraphState>>,
-    tick_rate: &mut Duration,
-    clipboard: &mut Option<Clipboard>,
-) -> Result<bool> {
+struct TuiKeyContext<'a, 'skel> {
+    app: &'a mut TuiApp,
+    skel: &'a mut BpfSkel<'skel>,
+    stats: &'a cake_stats,
+    shutdown: &'a Arc<AtomicBool>,
+    wake_graph_state: &'a Arc<Mutex<WakeGraphState>>,
+    tick_rate: &'a mut Duration,
+    clipboard: &'a mut Option<Clipboard>,
+}
+
+fn handle_tui_key(key: crossterm::event::KeyEvent, ctx: TuiKeyContext<'_, '_>) -> Result<bool> {
+    let TuiKeyContext {
+        app,
+        skel,
+        stats,
+        shutdown,
+        wake_graph_state,
+        tick_rate,
+        clipboard,
+    } = ctx;
     #[cfg(cake_bpf_release)]
     {
         let _ = &skel;
@@ -6993,13 +7191,13 @@ fn handle_tui_key(
     }
 
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => {
+        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
             shutdown.store(true, Ordering::Relaxed);
             return Ok(true);
         }
         KeyCode::Enter => match app.active_tab {
             TuiTab::Apps => app.toggle_selected_app_focus(),
-            TuiTab::Dashboard => {
+            TuiTab::Overview => {
                 if let Some(i) = app.table_state.selected() {
                     if let Some(pid) = app.sorted_pids.get(i) {
                         if let Some(row) = app.task_rows.get(pid) {
@@ -7051,7 +7249,7 @@ fn handle_tui_key(
             }
         }
         KeyCode::Char(' ') => {
-            if app.active_tab == TuiTab::Dashboard {
+            if app.active_tab == TuiTab::Overview {
                 if let Some(i) = app.table_state.selected() {
                     if let Some(pid) = app.sorted_pids.get(i) {
                         if let Some(row) = app.task_rows.get(pid) {
@@ -7068,7 +7266,7 @@ fn handle_tui_key(
         }
         KeyCode::Char('x') => match app.active_tab {
             TuiTab::Apps => app.clear_app_focus(),
-            TuiTab::Dashboard => {
+            TuiTab::Overview => {
                 if app.collapsed_ppids.is_empty() {
                     let ppids: Vec<u32> = app
                         .task_rows
@@ -7205,6 +7403,8 @@ fn handle_tui_key(
                         bss.blocked_owner_wait_ns = Default::default();
                         bss.blocked_owner_wait_count = Default::default();
                         bss.blocked_owner_wait_max_ns = Default::default();
+                        bss.trust_user = Default::default();
+                        bss.trust_bpf = Default::default();
                     }
                     app.stats_history.clear();
                     app.cpu_work_history.clear();
@@ -7212,6 +7412,7 @@ fn handle_tui_key(
                     app.timeline_history.clear();
                     app.timeline_last_sample = None;
                     app.timeline_next_sample_at = None;
+                    app.diagnostic_recorder.clear();
                     app.per_cpu_work
                         .iter_mut()
                         .for_each(|counter| *counter = CpuWorkCounters::default());
@@ -7253,9 +7454,189 @@ fn handle_tui_key(
     Ok(false)
 }
 
+fn write_diag_pair(dir: &Path, stem: &str, stats: &cake_stats, app: &TuiApp) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create diagnostic directory {}", dir.display()))?;
+    let text_path = dir.join(format!("{stem}.txt"));
+    let json_path = dir.join(format!("{stem}.json"));
+    std::fs::write(&text_path, format_stats_for_clipboard(stats, app))
+        .with_context(|| format!("failed to write {}", text_path.display()))?;
+    std::fs::write(&json_path, format_stats_json(stats, app))
+        .with_context(|| format!("failed to write {}", json_path.display()))?;
+    Ok(())
+}
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn refresh_headless_snapshot(
+    skel: &BpfSkel,
+    app: &mut TuiApp,
+    wake_graph_state: &Arc<Mutex<WakeGraphState>>,
+) -> cake_stats {
+    let stats = aggregate_stats(skel);
+    app.per_cpu_work = extract_cpu_work(skel, app.topology.nr_cpus);
+    app.pressure_probe = extract_pressure_probe(skel);
+    let wake_graph = extract_wake_graph(skel, wake_graph_state);
+    app.wake_edges = wake_graph.edges;
+    app.wake_edge_slots_used = wake_graph.slots_used;
+    app.wake_edge_missed_updates = wake_graph.missed_updates;
+    app.wake_edge_observed_events = wake_graph.observed_events;
+    app.wake_edge_sample_weight_sum = wake_graph.sample_weight_sum;
+    app.wake_edge_important_events = wake_graph.important_events;
+
+    app.sys.refresh_cpu_usage();
+    for (i, cpu) in app.sys.cpus().iter().enumerate() {
+        if i < app.topology.nr_cpus {
+            let temp = app.cpu_stats[i].1;
+            app.cpu_stats[i] = (cpu.cpu_usage(), temp);
+        }
+    }
+
+    app.record_stats_snapshot(&stats);
+    app.record_cpu_work_snapshot();
+    app.record_pressure_probe_snapshot();
+    app.record_diagnostic_snapshot(&stats);
+    stats
+}
+
+/// Run --verbose without an interactive terminal as a low-rate diagnostic recorder.
+pub struct HeadlessRecorderConfig {
+    pub shutdown: Arc<AtomicBool>,
+    pub interval_secs: u64,
+    pub quantum_us: u64,
+    pub topology: TopologyInfo,
+    pub latency_matrix: Vec<Vec<f64>>,
+    pub diag_dir: PathBuf,
+    pub diag_period_secs: u64,
+}
+
+pub fn run_headless_recorder(
+    skel: &mut BpfSkel,
+    trust_governor: &mut trust::TrustGovernor,
+    config: HeadlessRecorderConfig,
+) -> Result<()> {
+    let HeadlessRecorderConfig {
+        shutdown,
+        interval_secs,
+        quantum_us,
+        topology,
+        latency_matrix,
+        diag_dir,
+        diag_period_secs,
+    } = config;
+    let tick_rate = Duration::from_secs(interval_secs.max(1));
+    let diag_period = (diag_period_secs > 0).then(|| Duration::from_secs(diag_period_secs));
+    let mut app = TuiApp::new(topology, latency_matrix, quantum_us);
+    app.set_status("headless diagnostic recorder");
+    let debug_events = Arc::new(Mutex::new(VecDeque::with_capacity(32)));
+    let wake_graph_state = Arc::new(Mutex::new(WakeGraphState::default()));
+    #[cfg(not(cake_bpf_release))]
+    let mut debug_ringbuf = {
+        let queue = debug_events.clone();
+        let wake_graph = wake_graph_state.clone();
+        let mut builder = libbpf_rs::RingBufferBuilder::new();
+        builder
+            .add(&skel.maps.debug_ringbuf, move |data: &[u8]| {
+                if data.len() < std::mem::size_of::<cake_debug_event>() {
+                    return 0;
+                }
+                let ev = unsafe { *(data.as_ptr() as *const cake_debug_event) };
+                if let Ok(mut graph) = wake_graph.lock() {
+                    graph.record_event(&ev);
+                }
+                push_debug_event(
+                    &queue,
+                    DebugEventRow {
+                        ts_ns: ev.ts_ns,
+                        value_ns: ev.value_ns,
+                        pid: ev.pid,
+                        aux: ev.aux,
+                        tgid: ev.tgid,
+                        peer_pid: ev.peer_pid,
+                        peer_tgid: ev.peer_tgid,
+                        cpu: ev.cpu,
+                        target_cpu: ev.target_cpu,
+                        peer_cpu: ev.peer_cpu,
+                        kind: ev.kind,
+                        slot: ev.slot,
+                        reason: ev.reason,
+                        path: ev.path,
+                        flags: ev.flags,
+                        comm: cstr_comm(&ev.comm),
+                    },
+                );
+                0
+            })
+            .context("failed to add debug ringbuf callback")?;
+        Some(builder.build().context("failed to build debug ringbuf")?)
+    };
+    let mut latest_stats = aggregate_stats(skel);
+    let mut last_diag_write = Instant::now()
+        .checked_sub(diag_period.unwrap_or(Duration::ZERO))
+        .unwrap_or_else(Instant::now);
+
+    std::fs::create_dir_all(&diag_dir).with_context(|| {
+        format!(
+            "failed to create diagnostic directory {}",
+            diag_dir.display()
+        )
+    })?;
+    log::info!(
+        "headless --verbose recorder writing diagnostics to {}",
+        diag_dir.display()
+    );
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        if scx_utils::uei_exited!(skel, uei) {
+            break;
+        }
+
+        #[cfg(not(cake_bpf_release))]
+        {
+            if let Some(rb) = debug_ringbuf.as_mut() {
+                let _ = rb.consume();
+            }
+        }
+        if let Ok(queue) = debug_events.lock() {
+            app.debug_events = queue.clone();
+        }
+
+        trust_governor.tick(skel, app.topology.nr_cpus);
+        latest_stats = refresh_headless_snapshot(skel, &mut app, &wake_graph_state);
+
+        if diag_period
+            .map(|period| last_diag_write.elapsed() >= period)
+            .unwrap_or(false)
+        {
+            write_diag_pair(&diag_dir, "cake_diag_latest", &latest_stats, &app)?;
+            last_diag_write = Instant::now();
+        }
+
+        std::thread::sleep(tick_rate);
+    }
+
+    write_diag_pair(&diag_dir, "cake_diag_latest", &latest_stats, &app)?;
+    write_diag_pair(
+        &diag_dir,
+        &format!("cake_diag_{}", epoch_secs()),
+        &latest_stats,
+        &app,
+    )?;
+    Ok(())
+}
+
 /// Run the TUI event loop
 pub fn run_tui(
     skel: &mut BpfSkel,
+    trust_governor: &mut trust::TrustGovernor,
     shutdown: Arc<AtomicBool>,
     interval_secs: u64,
     quantum_us: u64,
@@ -7334,13 +7715,15 @@ pub fn run_tui(
             if let Event::Key(key) = event::read()? {
                 if handle_tui_key(
                     key,
-                    &mut app,
-                    skel,
-                    &latest_stats,
-                    &shutdown,
-                    &wake_graph_state,
-                    &mut tick_rate,
-                    &mut clipboard,
+                    TuiKeyContext {
+                        app: &mut app,
+                        skel,
+                        stats: &latest_stats,
+                        shutdown: &shutdown,
+                        wake_graph_state: &wake_graph_state,
+                        tick_rate: &mut tick_rate,
+                        clipboard: &mut clipboard,
+                    },
                 )? {
                     break 'tui_loop;
                 }
@@ -7356,6 +7739,8 @@ pub fn run_tui(
         if let Ok(queue) = debug_events.lock() {
             app.debug_events = queue.clone();
         }
+
+        trust_governor.tick(skel, app.topology.nr_cpus);
 
         // Get current stats (aggregate from per-cpu BSS array)
         latest_stats = aggregate_stats(skel);
@@ -7403,13 +7788,15 @@ pub fn run_tui(
             if let Event::Key(key) = event::read()? {
                 if handle_tui_key(
                     key,
-                    &mut app,
-                    skel,
-                    &stats,
-                    &shutdown,
-                    &wake_graph_state,
-                    &mut tick_rate,
-                    &mut clipboard,
+                    TuiKeyContext {
+                        app: &mut app,
+                        skel,
+                        stats: &stats,
+                        shutdown: &shutdown,
+                        wake_graph_state: &wake_graph_state,
+                        tick_rate: &mut tick_rate,
+                        clipboard: &mut clipboard,
+                    },
                 )? {
                     break;
                 }
@@ -8299,6 +8686,7 @@ pub fn run_tui(
             app.record_stats_snapshot(&stats);
             app.record_cpu_work_snapshot();
             app.record_pressure_probe_snapshot();
+            app.record_diagnostic_snapshot(&stats);
 
             last_tick = Instant::now();
         }
