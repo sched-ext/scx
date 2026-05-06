@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 // TUI module - ratatui-based terminal UI for real-time scheduler statistics
 
-use std::io::{self, Stdout};
+use std::fs::OpenOptions;
+use std::io::{self, Stdout, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -7455,16 +7462,96 @@ fn handle_tui_key(key: crossterm::event::KeyEvent, ctx: TuiKeyContext<'_, '_>) -
     Ok(false)
 }
 
-fn write_diag_pair(dir: &Path, stem: &str, stats: &cake_stats, app: &TuiApp) -> Result<()> {
+fn write_diag_file_atomic(path: &Path, contents: &str) -> Result<()> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .context("diagnostic path has no parent directory")?;
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create diagnostic directory {}", dir.display()))?;
+
+    #[cfg(unix)]
+    {
+        let file_name_os = path
+            .file_name()
+            .context("diagnostic path has no file name")?;
+        let file_name = std::ffi::CString::new(file_name_os.as_bytes())
+            .context("diagnostic file name contains a NUL byte")?;
+        let tmp_name_string = format!(
+            ".{}.tmp.{}.{}",
+            file_name_os.to_string_lossy(),
+            std::process::id(),
+            epoch_nanos()
+        );
+        let tmp_name = std::ffi::CString::new(tmp_name_string.as_bytes())
+            .context("temporary diagnostic file name contains a NUL byte")?;
+        let dir_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(dir)
+            .with_context(|| format!("failed to open diagnostic directory {}", dir.display()))?;
+        let raw_fd = unsafe {
+            libc::openat(
+                dir_file.as_raw_fd(),
+                tmp_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o644,
+            )
+        };
+        if raw_fd < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("failed to create temporary diagnostic in {}", dir.display())
+            });
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+        if let Err(err) = file.write_all(contents.as_bytes()) {
+            let _ = unsafe { libc::unlinkat(dir_file.as_raw_fd(), tmp_name.as_ptr(), 0) };
+            return Err(err).with_context(|| {
+                format!("failed to write temporary diagnostic in {}", dir.display())
+            });
+        }
+        if let Err(err) = file.flush() {
+            let _ = unsafe { libc::unlinkat(dir_file.as_raw_fd(), tmp_name.as_ptr(), 0) };
+            return Err(err).with_context(|| {
+                format!("failed to flush temporary diagnostic in {}", dir.display())
+            });
+        }
+        if unsafe {
+            libc::renameat(
+                dir_file.as_raw_fd(),
+                tmp_name.as_ptr(),
+                dir_file.as_raw_fd(),
+                file_name.as_ptr(),
+            )
+        } != 0
+        {
+            let err = std::io::Error::last_os_error();
+            let _ = unsafe { libc::unlinkat(dir_file.as_raw_fd(), tmp_name.as_ptr(), 0) };
+            return Err(err).with_context(|| format!("failed to replace {}", path.display()));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))
+    }
+}
+
+fn write_diag_pair(dir: &Path, stem: &str, stats: &cake_stats, app: &TuiApp) -> Result<()> {
     let text_path = dir.join(format!("{stem}.txt"));
     let json_path = dir.join(format!("{stem}.json"));
-    std::fs::write(&text_path, format_stats_for_clipboard(stats, app))
-        .with_context(|| format!("failed to write {}", text_path.display()))?;
-    std::fs::write(&json_path, format_stats_json(stats, app))
-        .with_context(|| format!("failed to write {}", json_path.display()))?;
+    write_diag_file_atomic(&text_path, &format_stats_for_clipboard(stats, app))?;
+    write_diag_file_atomic(&json_path, &format_stats_json(stats, app))?;
     Ok(())
+}
+
+fn epoch_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 fn epoch_secs() -> u64 {
@@ -7472,6 +7559,63 @@ fn epoch_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(all(test, unix))]
+mod diag_write_tests {
+    use super::*;
+
+    struct CleanupDir(PathBuf);
+
+    impl Drop for CleanupDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn diagnostic_write_replaces_symlink_without_clobbering_target() {
+        let base = std::env::temp_dir().join(format!(
+            "scx_cake_diag_test_{}_{}",
+            std::process::id(),
+            epoch_nanos()
+        ));
+        let _cleanup = CleanupDir(base.clone());
+        std::fs::create_dir_all(&base).unwrap();
+        let victim = base.join("victim");
+        let output = base.join("cake_diag_latest.txt");
+        std::fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, &output).unwrap();
+
+        write_diag_file_atomic(&output, "new diagnostic").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "new diagnostic");
+        assert!(!std::fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn diagnostic_write_rejects_symlink_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "scx_cake_diag_dir_test_{}_{}",
+            std::process::id(),
+            epoch_nanos()
+        ));
+        let _cleanup = CleanupDir(base.clone());
+        let real_dir = base.join("real");
+        let link_dir = base.join("link");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+
+        let err = write_diag_file_atomic(&link_dir.join("cake_diag_latest.txt"), "nope")
+            .expect_err("symlinked diagnostic directory should be rejected");
+        assert!(err
+            .to_string()
+            .contains("failed to open diagnostic directory"));
+    }
 }
 
 fn refresh_headless_snapshot(

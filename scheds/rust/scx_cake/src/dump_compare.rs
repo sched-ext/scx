@@ -1425,7 +1425,7 @@ mod tests {
     fn bpf_release_scoreboard_precedes_native_idle_helpers() {
         let src = include_str!("bpf/cake.bpf.c");
         let route_predict = src
-            .find("cpu = cake_select_route_predict(p, prev_cpu, wake_flags, select_bss);")
+            .find("cpu = cake_select_route_predict(p, prev_cpu, wake_flags,")
             .expect("route predictor call exists");
         let fast_scan = src
             .find("cpu = cake_select_cpu_fast_scan(p, prev_cpu, wake_flags, select_bss);")
@@ -1499,10 +1499,23 @@ mod tests {
         assert!(src.contains("CAKE_CONF_CLAIM_HEALTH_SHIFT"));
         assert!(src.contains("CAKE_ROUTE_PREV"));
         assert!(src.contains("CAKE_ROUTE_SLOT0"));
+        assert!(src.contains("CAKE_ROUTE_SLOT2"));
+        assert!(src.contains("CAKE_ROUTE_SLOT3"));
         assert!(src.contains("CAKE_ROUTE_TUNNEL"));
         assert!(src.contains("cake_select_route_predict("));
+        assert!(src.contains("!= local_cpu"));
         assert!(src.contains("cake_route_update(local_bss, CAKE_ROUTE_PREV"));
+        assert!(src.contains("cake_conf_update_select_route(local_bss, CAKE_ROUTE_SLOT2"));
+        assert!(src.contains("cake_conf_update_select_route(local_bss, CAKE_ROUTE_SLOT3"));
         assert!(source_contains(src, "CAKE_ROUTE_PREV, true, false, false"));
+        assert!(source_contains(
+            src,
+            "CAKE_ROUTE_SLOT2,\n\t\t\t\t\t      true, true, true"
+        ));
+        assert!(source_contains(
+            src,
+            "CAKE_ROUTE_SLOT3,\n\t\t\t\t\t      true, true, true"
+        ));
         assert!(src.contains("if (cpu == CAKE_ROUTE_PREDICT_TUNNEL)"));
         assert!(src.contains("cake_route_update(select_bss, CAKE_ROUTE_TUNNEL, true);"));
     }
@@ -1522,13 +1535,14 @@ mod tests {
     }
 
     #[test]
-    fn bpf_release_pull_confidence_can_skip_probe_itself() {
+    fn bpf_release_pull_confidence_probes_before_skip() {
         let src = include_str!("bpf/cake.bpf.c");
 
         assert!(src.contains("CAKE_PULL_SHAPE_SKIP"));
         assert!(src.contains("CAKE_CONF_PULL_AUDIT_SHIFT"));
         assert!(src.contains("cake_pull_audit_due("));
-        assert!(src.contains("if (mode == CAKE_PULL_SHAPE_SKIP)"));
+        assert!(src.contains("scx_bpf_dsq_nr_queued(dsq_id)"));
+        assert!(!src.contains("if (mode == CAKE_PULL_SHAPE_SKIP)\n\t\treturn false;"));
     }
 
     #[test]
@@ -1537,6 +1551,13 @@ mod tests {
 
         assert!(src.contains("cake_scoreboard_kick_cpu_known("));
         assert!(src.contains("cake_scoreboard_kick_cpu_known(target_cpu, target_status);"));
+        assert!(source_contains(
+            src,
+            "u32 local_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+             struct cake_cpu_bss *bss = &cpu_bss[local_cpu];"
+        ));
+        assert!(src.contains("(target_cpu & (CAKE_MAX_CPUS - 1)) != local_cpu"));
+        assert!(src.contains("scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);"));
     }
 
     #[test]
@@ -1548,7 +1569,28 @@ mod tests {
         assert!(src.contains("cake_accounting_relaxed("));
         assert!(src.contains("owner_run_count) < CAKE_ACCOUNT_RELAX_MIN_RUNS"));
         assert!(src.contains("bool relaxed = cake_accounting_relaxed(bss);"));
-        assert!(src.contains("if (!relaxed)"));
+        assert!(source_contains(
+            src,
+            "u32 owner_avg_runtime_ns = cake_update_owner_avg(bss, rt_raw);
+             cake_publish_cpu_owner(cpu, owner_avg_runtime_ns);
+             if (!relaxed)
+                     cake_scoreboard_owner_result(bss, owner_avg_runtime_ns);"
+        ));
+    }
+
+    #[test]
+    fn bpf_release_select_confidence_uses_executing_cpu_row() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(source_contains(
+            src,
+            "u32 local_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);"
+        ));
+        assert!(source_contains(
+            src,
+            "struct cake_cpu_bss *select_bss = &cpu_bss[local_cpu];"
+        ));
+        assert!(!src.contains("select_cpu_idx"));
     }
 
     #[test]

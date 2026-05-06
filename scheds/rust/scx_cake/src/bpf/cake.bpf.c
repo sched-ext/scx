@@ -1081,8 +1081,6 @@ cake_dispatch_dsq_should_pull(struct cake_cpu_bss *bss, u64 dsq_id)
 	cake_record_accel_pull_mode(mode);
 	if (mode == CAKE_PULL_SHAPE_PULL)
 		return true;
-	if (mode == CAKE_PULL_SHAPE_SKIP)
-		return false;
 
 	queued = scx_bpf_dsq_nr_queued(dsq_id);
 	if (queued == 0) {
@@ -1811,12 +1809,22 @@ static __always_inline bool cake_task_latency_biased(struct task_struct *p,
 static __always_inline void cake_scoreboard_kick_cpu_known(u32 target_cpu,
 							   u64 target_status)
 {
-	struct cake_cpu_bss *bss = &cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)];
+	u32 local_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+	struct cake_cpu_bss *bss = &cpu_bss[local_cpu];
 	bool known_status	 = !!(target_status & CAKE_CPU_STATUS_IDLE) ||
 				   cake_status_owner_class(target_status) !=
 					   CAKE_CPU_OWNER_UNKNOWN;
-	u32  mode		 = cake_kick_shape_mode(bss, target_status);
+	u32  mode;
 
+	if ((target_cpu & (CAKE_MAX_CPUS - 1)) != local_cpu) {
+		if (target_status & CAKE_CPU_STATUS_IDLE)
+			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+		else
+			scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
+		return;
+	}
+
+	mode = cake_kick_shape_mode(bss, target_status);
 	cake_conf_update(bss, CAKE_CONF_KICK_SHAPE_SHIFT, known_status);
 	if (mode == CAKE_KICK_SHAPE_NONE)
 		return;
@@ -2134,7 +2142,8 @@ static __noinline s32 cake_select_cpu_fast_scan(struct task_struct *p,
 						      CAKE_ROUTE_SLOT2);
 	cake_record_accel_fast_result(CAKE_ROUTE_SLOT2, selected >= 0);
 	if (selected >= 0) {
-		cake_conf_update_select(local_bss, false, true, true);
+		cake_conf_update_select_route(local_bss, CAKE_ROUTE_SLOT2, true,
+					      true, true);
 		return selected;
 	}
 
@@ -2144,7 +2153,8 @@ static __noinline s32 cake_select_cpu_fast_scan(struct task_struct *p,
 						      CAKE_ROUTE_SLOT3);
 	cake_record_accel_fast_result(CAKE_ROUTE_SLOT3, selected >= 0);
 	if (selected >= 0) {
-		cake_conf_update_select(local_bss, false, true, true);
+		cake_conf_update_select_route(local_bss, CAKE_ROUTE_SLOT3, true,
+					      true, true);
 		return selected;
 	}
 
@@ -2325,13 +2335,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 #else
 #define stats_on 0
 	u64 start_time = 0;
-	u32 local_cpu  = ((u32)prev_cpu) & (CAKE_MAX_CPUS - 1);
+	u32 local_cpu  = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 #endif
 #if CAKE_ACCEL_PATH
-	u32 select_cpu_idx = prev_cpu >= 0 ?
-				     (((u32)prev_cpu) & (CAKE_MAX_CPUS - 1)) :
-				     local_cpu;
-	struct cake_cpu_bss *select_bss = &cpu_bss[select_cpu_idx];
+	struct cake_cpu_bss *select_bss = &cpu_bss[local_cpu];
 #endif
 	u16 select_flags = 0;
 	u64 gate2_start	 = 0;
@@ -2341,7 +2348,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * This is the latency floor path. Native helpers are deliberately behind
 	 * it and act as the safe fallback when prediction or cheap claims miss. */
 #if CAKE_ACCEL_PATH
-	cpu = cake_select_route_predict(p, prev_cpu, wake_flags, select_bss);
+	if (prev_cpu >= 0 &&
+	    (((u32)prev_cpu) & (CAKE_MAX_CPUS - 1)) == local_cpu) {
+		cpu = cake_select_route_predict(p, prev_cpu, wake_flags,
+						select_bss);
+	} else {
+		cpu = CAKE_ROUTE_PREDICT_NONE;
+		cake_record_accel_route_block(CAKE_ACCEL_BLOCK_UNKNOWN_ROUTE);
+	}
 	if (cpu == CAKE_ROUTE_PREDICT_TUNNEL)
 		goto tunnel;
 	if (cpu >= 0) {
@@ -4351,12 +4365,12 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 #if CAKE_ACCEL_PATH
 #ifdef CAKE_RELEASE
-	bool relaxed = cake_accounting_relaxed(bss);
-	if (!relaxed) {
-		u32 owner_avg_runtime_ns = cake_update_owner_avg(bss, rt_raw);
-		cake_publish_cpu_owner(cpu, owner_avg_runtime_ns);
+	bool relaxed		  = cake_accounting_relaxed(bss);
+	u32  owner_avg_runtime_ns = cake_update_owner_avg(bss, rt_raw);
+
+	cake_publish_cpu_owner(cpu, owner_avg_runtime_ns);
+	if (!relaxed)
 		cake_scoreboard_owner_result(bss, owner_avg_runtime_ns);
-	}
 #else
 	bool relaxed = cake_accounting_relaxed(bss);
 	cake_record_accel_accounting(relaxed);
