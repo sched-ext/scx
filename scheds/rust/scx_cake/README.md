@@ -459,7 +459,10 @@ sudo ./target/debug/scx_cake --verbose --diag-dir /tmp/scx_cake --diag-period 30
 
 The recorder writes `cake_diag_latest.txt` / `cake_diag_latest.json` on the
 configured period and a final timestamped `cake_diag_<seconds>.txt` /
-`cake_diag_<seconds>.json` pair on shutdown. This is meant for systemd,
+`cake_diag_<seconds>.json` pair on shutdown. On Unix, the diagnostic directory is
+opened with `O_DIRECTORY | O_NOFOLLOW`, and files are written with a
+dirfd-relative temporary file plus `renameat()` so an existing symlink at the
+final output name is replaced, not followed. This is meant for systemd,
 tmux/logging wrappers, and quick gameplay captures where the live TUI is not
 attached.
 
