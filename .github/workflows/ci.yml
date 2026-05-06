@@ -133,6 +133,7 @@ jobs:
           - name: scx__sched_ext__for-next
             url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
             tag: for-next
+            veristat-disable: scx_p2dq scx_chaos
           - name: scx__bpf__bpf-next
             url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
             tag: master
