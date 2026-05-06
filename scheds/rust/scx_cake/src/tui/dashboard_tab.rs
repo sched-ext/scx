@@ -13,6 +13,8 @@ pub(super) fn draw_dashboard_tab(
     let minute_step = Duration::from_secs(1);
     let minute_samples = app.timeline_samples(minute_window, minute_step);
     let minute_expected = expected_timeline_samples(minute_window, minute_step);
+    let minute_ready_expected =
+        ready_timeline_samples(app.start_time.elapsed(), minute_window, minute_step);
     let minute_avg_step = average_timeline_sample_secs(&minute_samples);
     let minute_history_span = timeline_history_span(&app.timeline_history);
     let (balance_scope, balance_diag) =
@@ -60,7 +62,8 @@ pub(super) fn draw_dashboard_tab(
     }
 
     let topo_flags = format!(
-        "{}C{}{}{}",
+        "{}C/{}T{}{}{}",
+        app.topology.nr_phys_cpus,
         app.topology.nr_cpus,
         if app.topology.has_dual_ccd {
             " 2CCD"
@@ -89,6 +92,7 @@ pub(super) fn draw_dashboard_tab(
     let summary_bottom =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(summary_rows[1]);
+    let life_secs = app.start_time.elapsed().as_secs_f64().max(0.1);
 
     let queue_style = if dsq_depth <= 4 {
         Style::default().fg(Color::Green)
@@ -167,13 +171,13 @@ pub(super) fn draw_dashboard_tab(
 
     let dispatch_panel = Paragraph::new(vec![
         Line::from(vec![
-            dashboard_label("Dispatches "),
+            dashboard_label("Dispatch hits "),
             dashboard_value(
                 total_dsq_dispatches.to_string(),
                 Style::default().fg(Color::Yellow),
             ),
             dashboard_sep("  "),
-            dashboard_label("local / steal / miss "),
+            dashboard_label("local / steal / empty "),
             dashboard_value(
                 format!(
                     "{} / {} / {}",
@@ -193,10 +197,10 @@ pub(super) fn draw_dashboard_tab(
             ),
         ]),
         Line::from(vec![
-            dashboard_label("Wake d/b/q "),
+            dashboard_label("Wake d/b/q% "),
             dashboard_value(
                 format!(
-                    "{:.0}/{:.0}/{:.0}%",
+                    "{:.0}/{:.0}/{:.0}",
                     pct(stats.nr_wakeup_direct_dispatches, wake_total),
                     pct(stats.nr_wakeup_dsq_fallback_busy, wake_total),
                     pct(stats.nr_wakeup_dsq_fallback_queued, wake_total)
@@ -204,11 +208,13 @@ pub(super) fn draw_dashboard_tab(
                 Style::default().fg(Color::Green),
             ),
             dashboard_sep("  "),
-            dashboard_label("Path h/i/t "),
+            dashboard_label("Path h/c/p/i/t% "),
             dashboard_value(
                 format!(
-                    "{:.0}/{:.0}/{:.0}%",
+                    "{:.0}/{:.0}/{:.0}/{:.0}/{:.0}",
                     pct(stats.select_path_count[1], path_total),
+                    pct(stats.select_path_count[2], path_total),
+                    pct(stats.select_path_count[3], path_total),
                     pct(stats.select_path_count[4], path_total),
                     pct(stats.select_path_count[5], path_total)
                 ),
@@ -295,7 +301,7 @@ pub(super) fn draw_dashboard_tab(
             ),
         ]),
         Line::from(vec![
-            dashboard_label("Wake wait avg "),
+            dashboard_label("Wake<=5ms avg "),
             dashboard_value(
                 format!("direct {}us", dir_wait_us),
                 low_is_good_style(dir_wait_us, 10, 100),
@@ -312,29 +318,29 @@ pub(super) fn draw_dashboard_tab(
             ),
         ]),
         Line::from(vec![
-            dashboard_label("Lifecycle avg "),
+            dashboard_label("Startup avg "),
             dashboard_value(
-                format!("e {}us", lifecycle_enqueue_avg),
+                format!("enq {}us", lifecycle_enqueue_avg),
                 low_is_good_style(lifecycle_enqueue_avg, 100, 1_000),
             ),
             dashboard_sep("  "),
             dashboard_value(
-                format!("s {}us", lifecycle_select_avg),
+                format!("sel {}us", lifecycle_select_avg),
                 low_is_good_style(lifecycle_select_avg, 100, 1_000),
             ),
             dashboard_sep("  "),
             dashboard_value(
-                format!("r {}us", lifecycle_run_avg),
+                format!("run {}us", lifecycle_run_avg),
                 low_is_good_style(lifecycle_run_avg, 100, 1_000),
             ),
             dashboard_sep("  "),
             dashboard_value(
-                format!("rs {}us", lifecycle_run_stop_avg),
+                format!("runstop {}us", lifecycle_run_stop_avg),
                 low_is_good_style(lifecycle_run_stop_avg, 500, 2_000),
             ),
             dashboard_sep("  "),
             dashboard_value(
-                format!("x {}us", lifecycle_exit_avg),
+                format!("exit {}us", lifecycle_exit_avg),
                 Style::default().fg(Color::LightCyan),
             ),
         ]),
@@ -366,9 +372,9 @@ pub(super) fn draw_dashboard_tab(
             ),
         ]),
         Line::from(vec![
-            dashboard_label("Literal sched_yield "),
+            dashboard_label("sched_yield/s "),
             dashboard_value(
-                stats.nr_sched_yield_calls.to_string(),
+                format!("{:.1}", per_sec(stats.nr_sched_yield_calls, life_secs)),
                 Style::default().fg(Color::Yellow),
             ),
             dashboard_sep("  "),
@@ -410,19 +416,21 @@ pub(super) fn draw_dashboard_tab(
             ),
         ]),
         Line::from(vec![
-            dashboard_label("Target hit / miss "),
+            dashboard_label("Target hit% "),
             dashboard_value(
-                format!(
-                    "direct {}/{}",
-                    stats.wake_target_hit_count[1], stats.wake_target_miss_count[1]
+                format_wake_target_pct(
+                    stats.wake_target_hit_count[1],
+                    stats.wake_target_miss_count[1],
+                    "direct",
                 ),
                 Style::default().fg(Color::Cyan),
             ),
             dashboard_sep("  "),
             dashboard_value(
-                format!(
-                    "busy {}/{}",
-                    stats.wake_target_hit_count[2], stats.wake_target_miss_count[2]
+                format_wake_target_pct(
+                    stats.wake_target_hit_count[2],
+                    stats.wake_target_miss_count[2],
+                    "busy",
                 ),
                 Style::default().fg(Color::LightMagenta),
             ),
@@ -443,7 +451,7 @@ pub(super) fn draw_dashboard_tab(
         ]),
     ])
     .style(Style::default().fg(Color::Gray))
-    .block(dashboard_block("Lifecycle", Color::LightMagenta))
+    .block(dashboard_block("Scheduler Flow", Color::LightMagenta))
     .wrap(Wrap { trim: false });
     frame.render_widget(health_panel, summary_bottom[1]);
 
@@ -497,7 +505,7 @@ pub(super) fn draw_dashboard_tab(
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("Avg util").style(
+        Cell::from("Avg util%").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -507,7 +515,7 @@ pub(super) fn draw_dashboard_tab(
                 .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("Last wait").style(
+        Cell::from("Wait µs").style(
             Style::default()
                 .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD),
@@ -517,7 +525,7 @@ pub(super) fn draw_dashboard_tab(
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("Work %").style(
+        Cell::from("Runs%").style(
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -544,7 +552,8 @@ pub(super) fn draw_dashboard_tab(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Cell::from(format!("{}", tier_pids[t])).style(Style::default().fg(Color::Gray)),
-                Cell::from(format!("{}", avg_rt)).style(Style::default().fg(Color::Cyan)),
+                Cell::from(format!("{:.1}", pelt_util_pct(avg_rt)))
+                    .style(Style::default().fg(Color::Cyan)),
                 Cell::from(format!("{} µs", avg_jit)).style(low_is_good_style(avg_jit, 10, 100)),
                 Cell::from(format!("{}", avg_wait)).style(low_is_good_style(avg_wait, 10, 100)),
                 Cell::from(format!("{:.1}", tier_runs_per_sec[t]))
@@ -584,27 +593,41 @@ pub(super) fn draw_dashboard_tab(
         }
         parts.join("  ")
     };
-    let coverage_style = if minute_samples.len() >= minute_expected && minute_avg_step <= 1.25 {
+    let coverage_style = if minute_samples.len() >= minute_ready_expected && minute_avg_step <= 1.25
+    {
         Style::default().fg(Color::Green)
-    } else if minute_samples.len() >= minute_expected.saturating_sub(2) {
+    } else if minute_samples.len() >= minute_ready_expected.saturating_sub(2) {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::LightRed)
+    };
+    let coverage_suffix = if minute_ready_expected < minute_expected {
+        format!(
+            "  warming {:.0}/{:.0}s",
+            app.start_time
+                .elapsed()
+                .as_secs_f64()
+                .min(minute_window.as_secs_f64()),
+            minute_window.as_secs_f64()
+        )
+    } else {
+        String::new()
     };
     let coverage_line = Line::from(vec![
         dashboard_label("Coverage "),
         dashboard_value(
             format!(
-                "{}/{}  avg step {:.2}s  history {:.0}s",
+                "{}/{}  avg step {:.2}s  history {:.0}s{}",
                 minute_samples.len(),
-                minute_expected,
+                minute_ready_expected,
                 minute_avg_step,
-                minute_history_span.as_secs_f64()
+                minute_history_span.as_secs_f64(),
+                coverage_suffix
             ),
             coverage_style,
         ),
     ]);
-    let minute_lines = summarize_timeline_samples(&minute_samples, minute_expected)
+    let minute_lines = summarize_timeline_samples(&minute_samples, minute_ready_expected)
         .map(|lines| {
             let mut collected = vec![coverage_line.clone()];
             collected.extend(lines);
@@ -890,27 +913,27 @@ pub(super) fn draw_dashboard_tab(
                 .add_modifier(Modifier::BOLD),
         ),
         // ── Activity / latency (Cyan) ──
-        Cell::from("PELT").style(
+        Cell::from("UTIL%").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("MAXµs").style(
+        Cell::from("MAXRµs").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("GAPµs").style(
+        Cell::from("LGAPµs").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("JITµs").style(
+        Cell::from("RJITµs").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("WAITµs").style(
+        Cell::from("LASTWµs").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -941,7 +964,7 @@ pub(super) fn draw_dashboard_tab(
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("SMT%").style(
+        Cell::from("SMT2%").style(
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -968,17 +991,17 @@ pub(super) fn draw_dashboard_tab(
                 .add_modifier(Modifier::BOLD),
         ),
         // ── Gate Distribution (Green) ──
-        Cell::from("G1%").style(
+        Cell::from("FAST%").style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("G3%").style(
+        Cell::from("NAT%").style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("DSQ%").style(
+        Cell::from("TUN%").style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -1065,7 +1088,8 @@ pub(super) fn draw_dashboard_tab(
             Cell::from(row.status.short_label()).style(Style::default().fg(row.status.color())),
             Cell::from(row.comm.as_str()).style(Style::default().fg(role.color())),
             Cell::from(class_label(row)).style(Style::default().fg(class_color(row))),
-            Cell::from(format!("{}", row.pelt_util)).style(Style::default().fg(Color::Cyan)),
+            Cell::from(format!("{:.1}", pelt_util_pct(row.pelt_util as u64)))
+                .style(Style::default().fg(Color::Cyan)),
             Cell::from(display_runtime_us(row.max_runtime_us)).style(low_is_good_style(
                 row.max_runtime_us as u64,
                 500,
@@ -1154,24 +1178,24 @@ pub(super) fn draw_dashboard_tab(
             Constraint::Length(3),  // ST
             Constraint::Length(15), // COMM
             Constraint::Length(5),  // CLS
-            Constraint::Length(6),  // PELT
-            Constraint::Length(7),  // MAXµs
-            Constraint::Length(7),  // GAPµs
-            Constraint::Length(7),  // JITµs
-            Constraint::Length(8),  // WAITµs
+            Constraint::Length(6),  // UTIL%
+            Constraint::Length(7),  // MAXRµs
+            Constraint::Length(7),  // LGAPµs
+            Constraint::Length(7),  // RJITµs
+            Constraint::Length(8),  // LASTWµs
             Constraint::Length(18), // LIFE
             Constraint::Length(7),  // RUNS/s
             Constraint::Length(4),  // CPU
             Constraint::Length(5),  // SPRD
             Constraint::Length(7),  // RES%
-            Constraint::Length(5),  // SMT%
+            Constraint::Length(5),  // SMT2%
             Constraint::Length(6),  // SELns
             Constraint::Length(6),  // ENQns
             Constraint::Length(7),  // STOPns
             Constraint::Length(6),  // RUNns
-            Constraint::Length(4),  // G1%
-            Constraint::Length(4),  // G3%
-            Constraint::Length(4),  // DSQ%
+            Constraint::Length(5),  // FAST%
+            Constraint::Length(4),  // NAT%
+            Constraint::Length(4),  // TUN%
             Constraint::Length(7),  // MIGR/s
         ],
     )
@@ -1182,4 +1206,23 @@ pub(super) fn draw_dashboard_tab(
 
     // Using render_stateful_widget instead of render_widget to manage scroll table state
     frame.render_stateful_widget(matrix_table, outer_layout[2], &mut app.table_state);
+}
+
+fn ready_timeline_samples(uptime: Duration, window: Duration, step: Duration) -> usize {
+    let step_secs = step.as_secs_f64();
+    if step_secs <= 0.0 {
+        return 0;
+    }
+    let expected = expected_timeline_samples(window, step);
+    let ready = (uptime.as_secs_f64().min(window.as_secs_f64()) / step_secs).floor() as usize;
+    ready.clamp(1, expected.max(1))
+}
+
+fn format_wake_target_pct(hit: u64, miss: u64, label: &str) -> String {
+    let total = hit + miss;
+    if total == 0 {
+        format!("{label} -")
+    } else {
+        format!("{label} {:.0}%({}/{})", pct(hit, total), hit, total)
+    }
 }

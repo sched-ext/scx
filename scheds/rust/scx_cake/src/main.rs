@@ -6,6 +6,7 @@ mod dump_compare;
 mod task_anatomy;
 mod telemetry_report;
 mod topology;
+mod trust;
 mod tui;
 
 use core::sync::atomic::Ordering;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use log::{info, warn};
+use log::info;
 
 #[cfg(cake_needs_arena)]
 use scx_arena::ArenaLib;
@@ -54,12 +55,23 @@ pub enum Profile {
 }
 
 impl Profile {
+    #[cfg(not(cake_bpf_release))]
     fn quantum_us(&self) -> u64 {
         match self {
             Profile::Esports => 750,
             Profile::Gaming => 1000,
             Profile::Balanced => 2000,
             Profile::Legacy => 4000,
+        }
+    }
+
+    #[cfg(not(cake_bpf_release))]
+    fn as_str(&self) -> &'static str {
+        match self {
+            Profile::Esports => "esports",
+            Profile::Gaming => "gaming",
+            Profile::Balanced => "balanced",
+            Profile::Legacy => "legacy",
         }
     }
 
@@ -84,6 +96,16 @@ enum QueuePolicy {
     Local = 0,
     /// Default per-LLC vtime fallback queues similar to the 1.1.0 queue shape.
     LlcVtime = 1,
+}
+
+impl QueuePolicy {
+    #[cfg(not(cake_bpf_release))]
+    fn as_str(&self) -> &'static str {
+        match self {
+            QueuePolicy::Local => "local",
+            QueuePolicy::LlcVtime => "llc-vtime",
+        }
+    }
 }
 
 const LLC_DSQ_BASE: u64 = 200;
@@ -144,7 +166,12 @@ fn build_fast_scan_slots(
     cpu_thread_bit: &[u8],
     cpu_llc_id: &[u8],
 ) -> [u16; CPU_FAST_SCAN_SLOTS] {
-    fn push_unique(slots: &mut [u16; CPU_FAST_SCAN_SLOTS], next: &mut usize, cpu: usize, nr: usize) {
+    fn push_unique(
+        slots: &mut [u16; CPU_FAST_SCAN_SLOTS],
+        next: &mut usize,
+        cpu: usize,
+        nr: usize,
+    ) {
         if cpu >= nr || *next >= CPU_FAST_SCAN_SLOTS {
             return;
         }
@@ -193,9 +220,7 @@ fn build_fast_scan_slots(
 }
 
 #[inline]
-fn active_fast_scan_probe_slots(
-    slots: [u16; CPU_FAST_SCAN_SLOTS],
-) -> [u16; CPU_FAST_PROBE_SLOTS] {
+fn active_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> [u16; CPU_FAST_PROBE_SLOTS] {
     [slots[0], slots[1], slots[2], slots[3]]
 }
 
@@ -205,7 +230,8 @@ fn active_fast_scan_probe_slots(
 /// The current design centers on topology-aware CPU selection, per-LLC
 /// vtime fallback queues, and lightweight per-task accounting in BPF.
 ///
-/// Profiles choose the base quantum. Individual options override profile defaults.
+/// Release builds bake profile, quantum, and queue policy at compile time.
+/// Debug builds keep those options as runtime A/B controls.
 ///
 /// Game detection and older multi-mode policy logic have been removed.
 /// The scheduler now runs one general low-latency policy for all tasks.
@@ -220,6 +246,7 @@ fn active_fast_scan_probe_slots(
 ///   scx_cake --busy-wake-kick=preempt # A/B force same-CPU busy wake preemption
 ///   scx_cake --queue-policy local # A/B use 1.1.1 local fallback queues
 ///   scx_cake -v                       # Run with live TUI stats display
+///   scx_cake -v --diag-dir /tmp/cake  # Headless diagnostic recorder if no TTY
 #[derive(Parser, Debug, Clone)]
 #[command(
     author,
@@ -231,8 +258,8 @@ fn active_fast_scan_probe_slots(
 struct Args {
     /// Scheduler profile preset.
     ///
-    /// Profiles configure the base quantum. Individual CLI options override
-    /// profile values.
+    /// Profiles configure the base quantum in debug builds. Release builds use
+    /// SCX_CAKE_PROFILE at build time.
     ///
     /// ESPORTS: Ultra-low-latency for competitive gaming.
     ///   - Quantum: 750µs
@@ -249,6 +276,9 @@ struct Args {
     profile: Profile,
 
     /// Base scheduling time slice in MICROSECONDS [default: 1000].
+    ///
+    /// Debug builds patch this at startup. Release builds use
+    /// SCX_CAKE_QUANTUM_US at build time.
     ///
     /// How long a task runs before potentially yielding.
     ///
@@ -300,6 +330,9 @@ struct Args {
 
     /// Queueing policy for busy fallback work.
     ///
+    /// Debug builds patch this at startup. Release builds use
+    /// SCX_CAKE_QUEUE_POLICY at build time.
+    ///
     /// LLC-VTIME keeps the default 1.1.0-style shape: fallback work is inserted
     /// into a per-LLC vtime DSQ that dispatch() pulls from.
     /// LOCAL A/B tests the 1.1.1 local-only shape: fallback work is inserted
@@ -325,6 +358,20 @@ struct Args {
     #[arg(long, default_value_t = 1, verbatim_doc_comment)]
     interval: u64,
 
+    /// Directory for headless --verbose diagnostic snapshots.
+    ///
+    /// When --verbose is used without an interactive terminal, scx_cake records
+    /// text and JSON diagnostic dumps here instead of trying to draw the TUI.
+    #[arg(long, default_value = ".", verbatim_doc_comment)]
+    diag_dir: PathBuf,
+
+    /// Headless --verbose diagnostic write interval in SECONDS.
+    ///
+    /// A value of 0 disables periodic latest writes. A timestamped final dump
+    /// is still written when scx_cake exits.
+    #[arg(long, default_value_t = 60, verbatim_doc_comment)]
+    diag_period: u64,
+
     /// Print scheduler version and exit.
     #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
@@ -335,9 +382,53 @@ struct Args {
 }
 
 impl Args {
+    #[cfg(not(cake_bpf_release))]
     fn quantum_us(&self) -> u64 {
         self.quantum.unwrap_or(self.profile.quantum_us())
     }
+
+    fn effective_quantum_us(&self) -> u64 {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_QUANTUM_US
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            self.quantum_us()
+        }
+    }
+
+    fn effective_profile(&self) -> &'static str {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_PROFILE
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            self.profile.as_str()
+        }
+    }
+
+    fn effective_queue_policy(&self) -> &'static str {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_QUEUE_POLICY
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            self.queue_policy.as_str()
+        }
+    }
+}
+
+#[cfg(cake_bpf_release)]
+fn cli_arg_present(long: &str, short: Option<&str>) -> bool {
+    let long_with_value = format!("{long}=");
+    std::env::args().skip(1).any(|arg| {
+        arg == long
+            || arg.starts_with(&long_with_value)
+            || short.map_or(false, |short| arg == short)
+    })
 }
 
 struct Scheduler<'a> {
@@ -422,18 +513,20 @@ impl<'a> Scheduler<'a> {
         // Detect system topology (CCDs, P/E cores)
         let topo = topology::detect()?;
 
-        // Get effective values (profile + CLI overrides)
-        let quantum = args.quantum_us();
+        // Get effective values. Release bakes these in build.rs; debug keeps
+        // profile + CLI overrides for runtime A/B.
+        #[cfg(not(cake_bpf_release))]
+        let quantum = args.effective_quantum_us();
 
         // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
         let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
 
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
-            rodata.quantum_ns = quantum * 1000;
-            rodata.queue_policy = args.queue_policy as u32;
             #[cfg(not(cake_bpf_release))]
             {
+                rodata.quantum_ns = quantum * 1000;
+                rodata.queue_policy = args.queue_policy as u32;
                 rodata.enable_learned_locality = args.learned_locality;
                 rodata.enable_wake_chain_locality = args.wake_chain_locality;
                 rodata.busy_wake_kick_mode = args.busy_wake_kick as u32;
@@ -653,9 +746,22 @@ impl<'a> Scheduler<'a> {
         // Warn early so user knows this flag requires a debug build.
         #[cfg(not(debug_assertions))]
         if self.args.verbose {
-            warn!("--verbose requires a debug build (telemetry is compiled out in release).");
-            warn!("Rebuild without --release: cargo build -p scx_cake");
+            log::warn!("--verbose requires a debug build (telemetry is compiled out in release).");
+            log::warn!("Rebuild without --release: cargo build -p scx_cake");
             self.args.verbose = false;
+        }
+
+        #[cfg(cake_bpf_release)]
+        if self.args.quantum.is_some()
+            || cli_arg_present("--profile", Some("-p"))
+            || cli_arg_present("--queue-policy", None)
+        {
+            log::warn!(
+                "release build uses baked profile={}, quantum={}us, queue-policy={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, or SCX_CAKE_QUEUE_POLICY to change hot-path knobs",
+                topology::BAKED_PROFILE,
+                topology::BAKED_QUANTUM_US,
+                topology::BAKED_QUEUE_POLICY
+            );
         }
 
         // Standard startup banner: follows scx_cosmos/scx_bpfland convention
@@ -677,7 +783,7 @@ impl<'a> Scheduler<'a> {
         );
 
         info!(
-            "{} CPUs, {} LLCs, profile: {:?}",
+            "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}",
             self.topology.nr_cpus,
             self.topology
                 .llc_cpu_mask
@@ -685,23 +791,38 @@ impl<'a> Scheduler<'a> {
                 .filter(|&&m| m != 0)
                 .count()
                 .max(1),
-            self.args.profile
+            self.args.effective_profile(),
+            self.args.effective_quantum_us(),
+            self.args.effective_queue_policy()
         );
+        let mut trust_governor = trust::TrustGovernor::new(self.topology.nr_cpus);
         if self.args.verbose && std::io::stdout().is_terminal() {
-            // Run TUI mode
             tui::run_tui(
                 &mut self.skel,
+                &mut trust_governor,
                 shutdown.clone(),
                 self.args.interval,
-                self.args.quantum_us(),
+                self.args.effective_quantum_us(),
                 self.topology.clone(),
                 self.latency_matrix.clone(),
             )?;
+        } else if self.args.verbose {
+            tui::run_headless_recorder(
+                &mut self.skel,
+                &mut trust_governor,
+                tui::HeadlessRecorderConfig {
+                    shutdown: shutdown.clone(),
+                    interval_secs: self.args.interval,
+                    quantum_us: self.args.effective_quantum_us(),
+                    topology: self.topology.clone(),
+                    latency_matrix: self.latency_matrix.clone(),
+                    diag_dir: self.args.diag_dir.clone(),
+                    diag_period_secs: self.args.diag_period,
+                },
+            )?;
         } else {
-            if self.args.verbose && !std::io::stdout().is_terminal() {
-                warn!("TUI disabled: no terminal detected (headless mode)");
-            }
             while !shutdown.load(Ordering::Relaxed) {
+                trust_governor.tick(&mut self.skel, self.topology.nr_cpus);
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 if scx_utils::uei_exited!(&self.skel, uei) {
                     break;

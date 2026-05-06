@@ -71,6 +71,49 @@ fn detect_hybrid() -> bool {
     false
 }
 
+fn profile_quantum_us(profile: &str) -> Option<u64> {
+    match profile {
+        "esports" => Some(750),
+        "gaming" => Some(1000),
+        "balanced" => Some(2000),
+        "legacy" => Some(4000),
+        _ => None,
+    }
+}
+
+fn baked_profile() -> (String, u64) {
+    let profile = std::env::var("SCX_CAKE_PROFILE")
+        .unwrap_or_else(|_| "gaming".into())
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let profile_quantum = profile_quantum_us(&profile).unwrap_or_else(|| {
+        panic!("SCX_CAKE_PROFILE must be one of esports, gaming, balanced, legacy (got {profile})")
+    });
+    let quantum = std::env::var("SCX_CAKE_QUANTUM_US")
+        .ok()
+        .map(|value| {
+            value.parse::<u64>().unwrap_or_else(|_| {
+                panic!("SCX_CAKE_QUANTUM_US must be an integer microsecond value (got {value})")
+            })
+        })
+        .unwrap_or(profile_quantum);
+    assert!(quantum > 0, "SCX_CAKE_QUANTUM_US must be greater than 0");
+
+    (profile, quantum)
+}
+
+fn baked_queue_policy() -> (&'static str, u32) {
+    let policy = std::env::var("SCX_CAKE_QUEUE_POLICY")
+        .unwrap_or_else(|_| "llc-vtime".into())
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    match policy.as_str() {
+        "local" => ("local", 0),
+        "llc" | "llc-vtime" => ("llc-vtime", 1),
+        _ => panic!("SCX_CAKE_QUEUE_POLICY must be one of local, llc-vtime (got {policy})"),
+    }
+}
+
 fn main() {
     // Detect build profile: release builds pass CAKE_RELEASE=1 to BPF Clang,
     // which eliminates ALL stats/telemetry code at compile time (zero overhead).
@@ -86,6 +129,8 @@ fn main() {
     let enable_locality_experiments = profile != "release";
     let enable_hot_telemetry = profile != "release";
     let needs_arena = profile != "release" && (enable_hot_telemetry || enable_locality_experiments);
+    let (baked_profile, baked_quantum_us) = baked_profile();
+    let (baked_queue_policy, baked_queue_policy_value) = baked_queue_policy();
 
     // Generate Rust constants file — avoids unstable option_env! str matching.
     let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -97,12 +142,26 @@ fn main() {
              pub const MAX_CPUS: usize = {};\n\
              pub const MAX_LLCS: usize = {};\n\
              pub const MASK_WORDS: usize = {}usize.div_ceil(64);\n\
-             pub const MAX_CORES: usize = {} / 2;\n",
-            max_cpus, max_llcs, max_cpus, max_cpus
+             pub const MAX_CORES: usize = {} / 2;\n\
+             pub const BAKED_PROFILE: &str = {:?};\n\
+             pub const BAKED_QUANTUM_US: u64 = {};\n\
+             pub const BAKED_QUEUE_POLICY: &str = {:?};\n\
+             pub const BAKED_QUEUE_POLICY_VALUE: u32 = {};\n",
+            max_cpus,
+            max_llcs,
+            max_cpus,
+            max_cpus,
+            baked_profile,
+            baked_quantum_us,
+            baked_queue_policy,
+            baked_queue_policy_value
         ),
     )
     .expect("Failed to write cake_constants.rs");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_PROFILE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_QUANTUM_US");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_QUEUE_POLICY");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -125,8 +184,12 @@ fn main() {
 
     // Build cflags with hardware gates
     let mut cflags = format!(
-        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={}",
-        base_flags, max_cpus, max_llcs
+        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={}",
+        base_flags,
+        max_cpus,
+        max_llcs,
+        baked_quantum_us * 1000,
+        baked_queue_policy_value
     );
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
@@ -161,8 +224,14 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} SINGLE_LLC={} HAS_HYBRID={}",
-        max_cpus, max_llcs, is_single_llc, has_hybrid
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={}",
+        max_cpus,
+        max_llcs,
+        is_single_llc,
+        has_hybrid,
+        baked_profile,
+        baked_quantum_us,
+        baked_queue_policy
     );
 
     std::env::set_var("BPF_EXTRA_CFLAGS_PRE_INCL", &cflags);

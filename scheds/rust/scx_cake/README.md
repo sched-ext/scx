@@ -4,15 +4,18 @@
 [![Kernel: 6.12+](https://img.shields.io/badge/kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
 [![sched_ext](https://img.shields.io/badge/sched_ext-BPF-orange.svg?style=flat-square)](https://github.com/sched-ext/scx)
 
-`scx_cake` is a performance-oriented `sched_ext` CPU scheduler. It applies CAKE-inspired low-latency ideas to CPU time: keep wakeups short, dispatch directly to idle CPUs, use per-LLC vtime fallback queues when every CPU is busy, and make the common path cheap.
+`scx_cake` is a performance-oriented `sched_ext` CPU scheduler. It applies CAKE-inspired low-latency ideas to CPU time: keep wakeups short, dispatch directly to good local targets, use per-LLC vtime fallback queues when local handoff is not selected, and make the common path cheap.
 
 The active `1.1.1` design is centered on:
 
 - Cake Scoreboard Dispatch: init-built topology candidates, owner-written CPU
-  status lanes, and task-biased release fast probes
+  status lanes, packed confidence, prediction, and task-biased release fast
+  probes
 - idle-first CPU selection
-- direct dispatch to idle CPUs
-- per-LLC virtual-time fallback queues when all CPUs are busy
+- direct local inserts for clean idle targets and guarded busy-wake handoff
+- per-LLC virtual-time fallback queues when direct local handoff is not selected
+- confidence-shaped fast paths that can narrow or skip broad helper work when
+  the scorecard is healthy
 - lean release hot paths with learned locality compiled out
 - lightweight virtual-time accounting through `p->scx.dsq_vtime`
 - debug TUI/task snapshots with exact path counters, callback timing, wake/run
@@ -39,6 +42,10 @@ cd scx
 # Release build for normal use and performance measurement
 cargo build --release -p scx_cake
 
+# Release build with baked hot-path knobs
+SCX_CAKE_PROFILE=esports cargo build --release -p scx_cake
+SCX_CAKE_QUANTUM_US=1500 SCX_CAKE_QUEUE_POLICY=local cargo build --release -p scx_cake
+
 # Debug build for TUI/capture and runtime A/B work
 cargo build -p scx_cake
 ```
@@ -46,20 +53,22 @@ cargo build -p scx_cake
 ### Run
 
 ```bash
-# Default profile: gaming, learned locality gates off
+# Release uses the profile, quantum, and queue policy baked at build time
 sudo ./target/release/scx_cake
 
-# Explicit profile
-sudo ./target/release/scx_cake --profile esports
+# Debug default profile: gaming, learned locality gates off
+sudo ./target/debug/scx_cake
 
-# Custom base quantum in microseconds
-sudo ./target/release/scx_cake --quantum 1500
-
-# A/B test 1.1.1 local-only fallback queues
-sudo ./target/release/scx_cake --queue-policy local
+# Debug runtime profile / quantum / queue-policy A/B
+sudo ./target/debug/scx_cake --profile esports
+sudo ./target/debug/scx_cake --quantum 1500
+sudo ./target/debug/scx_cake --queue-policy local
 
 # Start the debug TUI/capture surface
 sudo ./target/debug/scx_cake --verbose
+
+# Headless debug capture when stdout is not an interactive terminal
+sudo ./target/debug/scx_cake --verbose --diag-dir /tmp/scx_cake --diag-period 30
 
 # A/B enable the learned wake-chain locality guard in a debug build
 sudo ./target/debug/scx_cake --verbose --wake-chain-locality=true
@@ -74,11 +83,15 @@ sudo ./target/debug/scx_cake --verbose --busy-wake-kick=preempt
 ### Profiles
 
 Profiles are quantum presets. They do not switch the scheduler into separate policy modes.
+Release builds bake profile, quantum, and queue policy at compile time. Use
+`SCX_CAKE_PROFILE`, `SCX_CAKE_QUANTUM_US`, and `SCX_CAKE_QUEUE_POLICY` when
+building release objects. Debug builds keep `--profile`, `--quantum`, and
+`--queue-policy` as runtime A/B controls.
 
 `--queue-policy local|llc-vtime` is an explicit A/B policy switch, not a
 profile. The default `llc-vtime` keeps current CPU selection and task
 accounting, but routes busy fallback work through per-LLC vtime DSQs. `local`
-keeps the 1.1.1 local-only fallback path available for comparison.
+keeps the older local-only fallback path available for comparison.
 
 See [Queue Policy Latency Findings](docs/queue_policy_latency_findings.md) for
 the Splitgate 2 / MangoHud captures that motivated this default.
@@ -116,11 +129,15 @@ touching another CPU's private bookkeeping.
 
 The scheduler tries to keep each decision simple:
 
-1. Probe a small init-built CPU candidate list using the scoreboard.
-2. If a clean idle CPU is available, run the task there directly.
-3. If the fast probes miss, use fallback confidence to choose full, filtered, or skipped kernel idle selection.
-4. If all CPUs are busy, route fallback work through the target LLC's vtime queue.
-5. When a task runs, stops, or goes idle, that CPU updates its published state.
+1. If confidence says the floor path is healthy, replay the predicted route or
+   tunnel directly when the route audit is not due.
+2. Probe a small init-built CPU candidate list using the scoreboard.
+3. If a clean idle CPU is available, run the task there directly.
+4. If the fast probes miss, call the kernel default idle helper as the trusted
+   safe fallback.
+5. At enqueue, keep clean idle and accepted busy-wake targets local; otherwise
+   route fallback work through the target LLC's vtime queue.
+6. When a task runs, stops, or goes idle, that CPU updates its published state.
 
 The release fast path works from:
 
@@ -162,17 +179,58 @@ The loader builds the fast-probe table once:
 Release can activate up to four candidates. Slot 0 is the clean idle probe
 available to all tasks. Slot 1 is the SMT-aware second probe, and latency-shaped
 tasks can use slots 2-3 when row confidence says the extra reads are worth it.
-When the probes miss, Cake does not always call the broad kernel helper. A small
-fallback confidence ladder keeps unknown or useful fallback paths full, filters
-cold paths through `SCX_PICK_IDLE_CORE` / `SCX_PICK_IDLE_IN_NODE`, and skips very
-cold unrestricted fallback paths except for audit samples.
+When the probes miss, Cake calls the broad kernel helper. That fallback is not a
+learned trust target; it is the known-correct baseline. Confidence decides
+whether Cake can avoid paying for it by replaying a successful prediction first,
+not whether the fallback itself is safe.
 
 Release also uses the scoreboard after placement. Wake kicks reread the target
-CPU status after enqueue: unknown or bulk owners can receive
-`SCX_KICK_PREEMPT`, frame/interactive/short owners are protected with
-`SCX_KICK_IDLE` or no kick as confidence rises. Dispatch pulls use a separate
-confidence lane to decide when a cheap `scx_bpf_dsq_nr_queued()` probe is worth
-doing before `scx_bpf_dsq_move_to_local()`.
+CPU status after enqueue. Clean idle targets avoid a strong kick, accepted busy
+wake targets can stay local when the owner status says that is safe, and
+unknown or bulk owners can receive `SCX_KICK_PREEMPT`. Frame owners get a
+gentler idle kick, while high-confidence short or interactive owners can avoid a
+kick. Dispatch pulls use a separate confidence lane to decide when a cheap
+`scx_bpf_dsq_nr_queued()` probe is worth doing before
+`scx_bpf_dsq_move_to_local()`.
+
+The scoreboard also feeds the release predictor. Each CPU row carries a packed
+`decision_confidence` value in private BSS. Selection uses the previous CPU's
+row as the local scorecard for that wakeup, while dispatch/run/stop callbacks
+update the row owned by the CPU that is actually executing. The field is a
+single 64-bit word split into 4-bit lanes, so release can read and update
+multiple policy signals without chasing larger state.
+
+Each confidence lane starts from a neutral value of `8` when it has not been
+written. Successful predictions climb toward `15`; misses drop faster, by two
+steps, so stale predictions lose privilege quickly. Small audit counters share
+the same packed word and periodically force the scheduler back through the
+broader path even when confidence is high.
+
+| Lane | What It Learns | Release Effect |
+| :-- | :-- | :-- |
+| `sel=early/row4` | Whether early fast probes and the wider four-slot row are paying off. | Chooses two versus four scoreboard probes. Prediction misses go to the kernel default helper. |
+| `route=kind:confidence` | Which scoreboard route last succeeded: `prev`, `slot0`, `slot1`, `slot2`, `slot3`, or `tunnel`. | Lets route-ready mode replay the known route before scanning the row again. Native fallback does not overwrite this token. |
+| `gear` | Current floor-path gear: recovery, audit, narrow, or floor. | Gates the most aggressive prediction path. |
+| `trust/stable/shock` | Whether published CPU status is useful, owner runtime is stable, and the system has seen load shock. | Keeps prediction conservative when ownership changes, pressure rises, or status looks unknown. |
+| `disp/pull/kick` | Whether dispatch finds empty queues, whether pull prechecks are useful, and how target owners respond to kicks. | Shapes `scx_bpf_dsq_nr_queued()` prechecks, pull skipping, and idle/no/preempt kick behavior. |
+| `aud` / `acct_audit` | Route, pull, and accounting audit cadence. | Rechecks broad paths often enough to detect drift instead of getting stuck in a stale fast path. |
+
+Route-ready mode is the first accelerator tier. It requires high route,
+early-select, and status-trust confidence without severe load shock. When those
+signals line up, `cake_select_route_predict()` can try the cached slot directly
+before doing the wider scan or broad native idle helper. Floor mode is stricter:
+it additionally requires owner stability and useful pull confidence before Cake
+can take the tunnel shortcut. Restricted-affinity tasks,
+kthreads, invalid `prev_cpu` values, audit samples, and route misses all drop
+back to the normal scoreboard scan and then the kernel default fallback.
+
+Above that sits the userspace confidence governor. When a CPU's route token is
+peak-stable on `prev`, userspace can enable `trust.prev_direct` for that CPU.
+The BPF hot path then checks only the legal gates and the mandatory idle claim
+kfunc before returning `prev_cpu`, skipping the packed-confidence unpack and
+scoreboard status precheck on the theoretical floor path. A failed claim is a
+hard tripwire: BPF blocks that trust generation immediately, and userspace can
+only re-promote after a cooldown and a fresh high-confidence generation.
 
 The runtime feedback loop is intentionally small:
 
@@ -194,8 +252,14 @@ slightly better chance to avoid the general fallback path.
 | `sched_ext` | Kernel framework that lets this BPF scheduler provide scheduling callbacks. |
 | `cake_select_cpu` | Chooses an idle CPU when possible and returns a target CPU for enqueue. |
 | Cake Scoreboard Dispatch | Release placement system using init-built candidates plus owner-written CPU status/frontier lanes. |
+| `decision_confidence` | Packed per-CPU scorecard used by release prediction and fallback shaping. |
+| confidence lane | One 4-bit field inside `decision_confidence`; neutral is `8`, high is `12+`, and success/failure nudges it up or down. |
+| route prediction | Attempt to replay the previous-CPU idle route, last successful fast-probe slot, or the stricter floor-mode tunnel route before wider scanning. |
+| floor gear | Compact mode derived from the confidence lanes: recovery, audit, narrow, or floor. |
+| audit sample | Periodic forced broad-path check used to keep high-confidence shortcuts honest. |
+| load shock | Confidence signal raised by unknown owners, bulk owners, high pressure, failed claims, or owner resets. |
 | queue policy | CLI-selected fallback queue mode: `local` or `llc-vtime`. |
-| direct dispatch | Inserting directly to a target CPU with `SCX_DSQ_LOCAL_ON` when it still looks idle. |
+| direct dispatch | Inserting directly to a target CPU with `SCX_DSQ_LOCAL_ON` when it still looks clean-idle or a busy wake is accepted by published owner status. |
 | local ownership | A/B fallback mode where busy work stays assigned to a chosen CPU instead of entering an LLC-shared queue. |
 | local DSQ | The kernel dispatch queue for work targeted at a specific CPU. |
 | per-LLC vtime DSQ | Default fallback queue keyed by `p->scx.dsq_vtime`, one DSQ per LLC. |
@@ -209,9 +273,9 @@ slightly better chance to avoid the general fallback path.
 | `SCX_KICK_IDLE` | Gentle kick used when the current owner should be allowed to continue briefly. |
 | `SCX_KICK_PREEMPT` | Stronger kick used when the wakee should preempt the current owner. |
 | `dsq_vtime` | Per-task virtual time used as lightweight ordering and runtime accounting. |
-| quantum | Base time slice selected by profile or `--quantum`. |
+| quantum | Base time slice. Release bakes it at compile time; debug selects it by profile or `--quantum`. |
 | topology RODATA | CPU topology loaded by userspace before BPF attach: CPU count, LLC IDs, SMT siblings, and hybrid ordering. |
-| arena task context | Per-task BPF arena storage used for learned locality state and debug telemetry. |
+| arena task context | Debug/non-release per-task BPF arena storage used for learned locality experiments and telemetry. |
 | debug telemetry | TUI, iter records, counters, and timing data available in debug builds only. |
 
 ## Scheduling Flow
@@ -221,7 +285,10 @@ slightly better chance to avoid the general fallback path.
 ```mermaid
 flowchart TD
     W[Task wakes] --> SC[cake_select_cpu]
-    SC --> FP{Scoreboard fast probe hit?}
+    SC --> RP{Floor route prediction?}
+    RP -->|hit| C[Return target CPU]
+    RP -->|tunnel| P[Return prev_cpu]
+    RP -->|miss or audit| FP{Scoreboard fast probe hit?}
     FP -->|yes| C[Return target CPU]
     FP -->|no| KI[Kernel idle helper]
     KI --> I{Idle CPU found?}
@@ -229,26 +296,29 @@ flowchart TD
     I -->|no| P[Return prev_cpu]
     C --> E[cake_enqueue]
     P --> E
-    E --> D{Target still idle?}
-    D -->|yes| L[Direct local insert]
-    D -->|no| Q[Insert into target LLC vtime queue]
-    Q --> B{Target owner class?}
+    E --> D{Local insert safe?}
+    D -->|clean idle or accepted busy| L[Direct local insert]
+    D -->|fallback| Q[Insert into target LLC vtime queue]
+    L --> B{Busy wake?}
+    Q --> B
+    B -->|clean idle| NK[No strong kick]
     B -->|frame/interactive/short| KIDLE[SCX_KICK_IDLE or no kick]
     B -->|unknown/bulk| KP[SCX_KICK_PREEMPT]
 ```
 
 `cake_select_cpu` follows this order:
 
-1. release scoreboard fast probes from the init-built `cpu_fast_probe` table
-2. task-biased second probe for sync/priority/weight-shaped wakeups
-3. confidence-shaped kernel-assisted idle selection: full, filtered, or skipped
-4. topology-specific idle scan when compiled in
-5. return `prev_cpu` when no idle CPU is found
+1. floor route prediction when packed confidence says the shortcut is healthy
+2. release scoreboard fast probes from the init-built `cpu_fast_probe` table
+3. task-biased row expansion for sync/priority/weight-shaped wakeups
+4. kernel default idle helper for the safe native fallback
+5. topology-specific idle scan when compiled in
+6. return `prev_cpu` when no idle CPU is found
 
 `cake_enqueue` then computes slice and virtual time. The default `llc-vtime`
 policy inserts busy fallback work into the target LLC's vtime DSQ and lets
 `cake_dispatch` pull from that shared arbiter. `--queue-policy local` preserves
-the 1.1.1 local-only fallback path for A/B testing.
+the older local-only fallback path for A/B testing.
 
 ### Run / Stop Feedback
 
@@ -282,13 +352,14 @@ This loop is the scheduler's feedback path. It keeps future enqueue decisions ch
 
 ### CPU Selection
 
-CPU selection is idle-first. Release builds try the Cake scoreboard probes
+CPU selection is idle-first. Release builds first ask the confidence scorecard
+whether the route predictor is allowed to replay a known route. If
+that is not allowed or the prediction misses, Cake tries the scoreboard probes
 before consulting the kernel idle-selection helper. The first probe checks a
 clean published idle candidate. Later probes are SMT-aware and task-biased, so
 latency-shaped wakeups can get extra nearby candidates. If those probes miss,
-fallback confidence decides whether the kernel helper runs broadly, only looks
-for a fully idle core, only looks inside the target node, or is skipped for that
-unrestricted task until the next audit sample.
+Cake calls the kernel default helper broadly. The helper is safe and does not
+need a confidence ladder.
 
 Busy fallback work is routed by LLC without reading arena-backed task context.
 Debug builds can enable learned home/core locality steering for A/B analysis.
@@ -297,14 +368,15 @@ Affinity remains a hard constraint. Cake relies on kernel masks and helper paths
 
 ### Local Ownership
 
-If direct dispatch is not safe, Cake now normally inserts fallback work into a
-per-LLC vtime queue. This restores a shared arbiter inside the cache domain while
-keeping CPU selection, task accounting, and direct idle dispatch unchanged.
+If direct local handoff is not selected, Cake now normally inserts fallback work
+into a per-LLC vtime queue. This restores a shared arbiter inside the cache
+domain while keeping CPU selection, task accounting, and direct clean-idle
+dispatch unchanged.
 
 `cake_dispatch` pulls from the local LLC first, then tries other LLCs before
 falling back to the local bookkeeping path. With `--queue-policy local`, fallback
 work is inserted into the selected CPU's local queue instead, preserving the
-1.1.1 local-only comparison mode.
+older local-only comparison mode.
 
 ### Virtual-Time Accounting
 
@@ -320,14 +392,19 @@ Optimized BPF may lower that expression differently, so the source formula descr
 
 ### Busy Local Wake Policy
 
-When a wakeup targets a CPU that appears busy, release builds keep the task on
-the target LLC's vtime queue and use a preempt kick for the busy-target case. The
-owner-runtime guard remains a debug A/B policy so it can be measured without
-adding stack-heavy branches to the release object.
+When a wakeup targets a CPU that appears busy, release builds reread the
+published `cpu_status`. If the owner class and pressure say the busy CPU can
+accept the wake without harming latency, Cake can keep the task local and use
+the scoreboard-shaped kick. Otherwise the task falls back to the target LLC's
+vtime queue and unknown or bulk owners can receive a preempt kick. The
+owner-runtime guard in the older local-only path remains a debug A/B policy.
 
 ## Topology
 
-The Rust loader detects topology and writes it into BPF RODATA before attach:
+The Rust loader detects topology with `scx_utils` and writes the BPF-read fields
+into RODATA before attach. `build.rs` also bakes `CAKE_MAX_CPUS`,
+`CAKE_MAX_LLCS`, single-LLC, and hybrid-core gates from the build host so the BPF
+object does not carry dead array width or topology loops.
 
 - CPU count
 - LLC count and `cpu_llc_id`
@@ -336,7 +413,10 @@ The Rust loader detects topology and writes it into BPF RODATA before attach:
 - per-CPU `cpu_fast_probe` candidate rows
 - per-CPU precomputed `cpu_llc_dsq` IDs
 - hybrid P/E ordering when present
-- preferred LLC information on asymmetric AMD systems
+
+Asymmetric LLC / V-Cache information is still detected on the Rust side for
+display and analysis, but BPF no longer receives a preferred-LLC mask because
+there are no hot-path readers for it.
 
 The current build keeps per-CPU local DSQs non-stealable. Cross-LLC fallback
 movement happens only through the explicit per-LLC vtime DSQs used by the
@@ -350,10 +430,19 @@ default queue policy.
 | `cargo build -p scx_cake` | full debug capture and runtime A/B | task snapshots, exact hot-path counters, callback stopwatches, wake/run timing, runtime A/B knobs, and TUI dumps with `--verbose` | available |
 
 Release builds keep the latency-first scheduling policy and compile out
-stack-heavy debug counters, hot-path arena telemetry reads, and timing
-instrumentation. The release linked BPF object is intended to stay zero-stack by
-the strict `r10` disassembly audit. Debug builds intentionally compile the full
-capture surface so `--verbose` is the one switch needed at runtime.
+stack-heavy debug counters, hot-path arena telemetry reads, timing
+instrumentation, and runtime hot-path knob loads. The release linked BPF object
+is intended to stay zero-stack by the strict `r10` disassembly audit. Debug
+builds intentionally compile the full capture surface so `--verbose` is the one
+switch needed at runtime.
+
+Release build-time knobs:
+
+```bash
+SCX_CAKE_PROFILE=esports cargo build --release -p scx_cake
+SCX_CAKE_QUANTUM_US=1500 cargo build --release -p scx_cake
+SCX_CAKE_QUEUE_POLICY=local cargo build --release -p scx_cake
+```
 
 Debug builds can run the live TUI:
 
@@ -361,20 +450,80 @@ Debug builds can run the live TUI:
 sudo ./target/debug/scx_cake --verbose
 ```
 
+If `--verbose` is launched without an interactive terminal, scx_cake now runs a
+headless diagnostic recorder instead of dropping the capture surface:
+
+```bash
+sudo ./target/debug/scx_cake --verbose --diag-dir /tmp/scx_cake --diag-period 30
+```
+
+The recorder writes `cake_diag_latest.txt` / `cake_diag_latest.json` on the
+configured period and a final timestamped `cake_diag_<seconds>.txt` /
+`cake_diag_<seconds>.json` pair on shutdown. This is meant for systemd,
+tmux/logging wrappers, and quick gameplay captures where the live TUI is not
+attached.
+
 Default debug dumps include task snapshots, topology, app summaries,
 userspace-derived coverage, exact hot-path frequency counters such as
 `hotpath:` / `win.hotpath:`, callback stopwatches, wake wait, SMT, ringbuf, and
-long-run flight recorder rows. Locality and busy-wake experiments are runtime
-A/B controls: they are compiled into debug builds, but the latency-first
-baseline stays active until you pass the corresponding option.
+long-run flight recorder rows. Debug hot telemetry also compiles and runs the
+scoreboard, prediction, and confidence accelerator path, so `--verbose` and TUI
+dumps can observe the same machinery being tuned for release.
 
-The TUI `Graphs` tab shows the userspace wake graph view: top wake edges, latency-heavy edges, app wake neighborhoods, recent debug events, and coverage gaps. The ringbuf wake graph is sampled by one-second epochs in BPF and weighted in userspace, so `*_est` fields describe estimated shape while `observed` and `weight_sum` show the actual sampled payload. Pressing `d` in the TUI writes both a text dump and a JSON sidecar (`tui_dump_<seconds>.txt` and `tui_dump_<seconds>.json`) so larger offline analysis can use structured coverage and graph metadata without adding more BPF instruction pressure.
+Each dump starts with an OBD-style service report generated in userspace:
+`service.header`, `readiness`, `readiness.monitors`, `dtc.active`,
+`freeze_frames`, `live_data.snapshot`, and `history.*`. These lines summarize
+whether the scheduler's diagnostic monitors are passing, warning, failing, or
+not ready. Diagnostic codes such as `CAKE-PRED-001`, `CAKE-TRUST-010`, and
+`CAKE-FALL-030` point to the exact prediction, trust, fallback, wake-latency,
+or telemetry subsystem that needs review. The raw dump still includes
+`accelerator.life` / `accelerator.60s` sections for trained CPUs,
+route-readiness, floor-readiness, route shape, scoreboard gates, wake target
+hit/miss, dispatch hit/miss, and lane-level `fail_flags` explaining what is
+preventing route or floor mode.
+
+Per-CPU local queue rows label packed confidence as `conf=...`:
+`sel=early/row4`, `route=kind:confidence`, `gear` as the floor mode,
+`trust=status`, `stable=owner`, `shock=load`, `aud=route/pull`, and
+`acct_audit=account`. Trust governor state is shown separately as `trust=...`
+and summarized in `accelerator.*.trust` as active/enabled/blocked CPUs,
+demotions, demotion reasons, and trusted-prev attempt/hit/miss counts. A CPU
+with no confidence history is shown as `untrained`, not as unpredictable.
+Locality and busy-wake experiments are runtime A/B controls: they are compiled
+into debug builds, but the latency-first baseline stays active until you pass
+the corresponding option.
+
+The JSON sidecar is schema version 7 and is serialized from typed Rust structs
+with `serde_json`. It carries the same high-level accelerator summary under
+`accelerator`, including trained CPUs, route-ready CPUs, floor-ready CPUs,
+route/gear counts, trust-prev state, wake target hit/miss, dispatch hit/miss,
+and wake direct/busy/queued totals. It also includes `monitors`,
+`active_codes`, `freeze_frames`, `live_data`, and tiered `history` buckets so
+longer gameplay captures can be reviewed without parsing the whole text dump.
+
+The TUI is organized around a car-diagnostics shape: `Overview` for the main
+scheduler dash, `Live Data` for fast-path readiness and current rates,
+`Monitors` for pass/warn/fail readiness checks, `Codes` for active diagnostic
+codes and freeze frames, `Apps` for per-process health, `Topology` for CPU
+layout/probing, `Trends` for wake graph and recent history, and `Reference` for
+field meanings. The `Trends` tab shows the userspace wake graph view: top wake
+edges, latency-heavy edges, app wake neighborhoods, recent debug events, and
+coverage gaps. The ringbuf wake graph is sampled by one-second epochs in BPF
+and weighted in userspace, so `*_est` fields describe estimated shape while
+`observed` and `weight_sum` show the actual sampled payload. Pressing `d` in
+the TUI writes both a text dump and a JSON sidecar (`tui_dump_<seconds>.txt` and
+`tui_dump_<seconds>.json`) so larger offline analysis can use structured
+coverage and graph metadata without adding more BPF instruction pressure.
 
 Dump files can be compared without loading BPF:
 
 ```bash
 cargo run -p scx_cake -- --compare-dump baseline.txt candidate.txt
 ```
+
+The comparison output includes the service header, readiness monitor counts,
+active diagnostic code counts, freeze-frame counts, and DTC warn/fail totals
+before the lower-level lifetime/window counters.
 
 ## Measuring Performance
 
@@ -408,14 +557,16 @@ Useful signals include:
 
 | Callback | Purpose |
 | :-- | :-- |
-| `cake_select_cpu` | choose an idle or locality-friendly target CPU |
+| `cake_select_cpu` | release route prediction, scoreboard probes, native idle fallback, and optional hybrid scan; debug can add learned locality steering |
 | `cake_enqueue` | compute slice / virtual time and route work through the selected queue policy |
-| `cake_dispatch` | pull optional LLC-vtime work, then keep local bookkeeping / same-task continuation |
+| `cake_dispatch` | pull LLC-vtime work with release confidence prechecks, steal across LLCs when enabled, then keep-running / idle bookkeeping |
 | `cake_running` | mark CPU busy and refresh local run metadata |
 | `cake_stopping` | charge runtime into virtual time, pressure, and owner-runtime state |
-| `cake_tick` | intentionally idle in the current pull-driven fallback design |
-| `cake_init_task` / `cake_exit_task` | allocate and free per-task arena state |
-| `cake_set_weight` | mirror weight into debug-visible state in non-release builds |
+| `cake_enable` | seed `dsq_vtime` and slice when a task becomes schedulable |
+| `cake_init` / `cake_exit` | create per-LLC DSQs when needed and record scheduler exit info |
+| `cake_tick` | debug-only no-op; release does not register the tick callback |
+| `cake_init_task` / `cake_exit_task` | debug/non-release arena allocation and cleanup; release omits these callbacks |
+| `cake_set_weight` | debug/non-release telemetry mirror only; hot paths read `p->scx.weight` directly |
 
 ## Related Notes
 

@@ -3,355 +3,228 @@
 use super::*;
 
 pub(super) fn draw_reference_tab(frame: &mut Frame, area: Rect) {
-    // 2-column layout: left = matrix columns, right = dump/profile/keys
-    let cols =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+    let layout = Layout::vertical([
+        Constraint::Length(8),
+        Constraint::Min(18),
+        Constraint::Length(7),
+    ])
+    .split(area);
 
-    // Helper: styled section header
-    fn section(text: &str) -> Line<'_> {
-        Line::from(Span::styled(
-            text,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ))
-    }
-    // Helper: styled subsection header
-    fn subsection(text: &str) -> Line<'_> {
-        Line::from(Span::styled(
-            text,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-    }
-    // Helper: column definition entry
-    fn col(name: &str, desc: &str) -> Line<'static> {
-        Line::from(vec![
-            Span::styled(
-                format!("{:<8}", name),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(desc.to_string()),
-        ])
-    }
-    // Helper: indented sub-entry
-    fn sub(prefix: &str, desc: &str, color: Color) -> Line<'static> {
-        Line::from(vec![
-            Span::styled(format!("          {}", prefix), Style::default().fg(color)),
-            Span::raw(format!(" {}", desc)),
-        ])
-    }
+    let body = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[1]);
 
-    // ═══ LEFT PANEL: Matrix Columns ═══
-    let left_text = vec![
-        section("═══ LIVE MATRIX COLUMNS ═══"),
-        Line::from(""),
-        subsection("── Identity & Current Slot ──"),
-        col("PPID", "Parent PID — groups threads by launcher"),
-        col("PID", "Thread ID (per-thread, not process)"),
-        col("ST", "Task status:"),
-        sub(
-            "●LIVE",
-            "Alive — actively scheduled, has telemetry",
+    let hero = vec![
+        guide_title("scx_cake in one screen"),
+        guide_text(
+            "scx_cake is a sched_ext scheduler tuned for low wake-to-run latency, stable game/input threads, and fast recovery when prediction is wrong.",
+        ),
+        guide_text(
+            "The policy tries the cheapest trustworthy answer first: scoreboard and confidence, then direct/local placement, then the safe native/kernel fallback.",
+        ),
+        guide_rule(
+            "How to read this TUI",
+            "use Overview for the instrument cluster, Monitors for health codes, Apps for process groups, Trends for history, and dumps for reproducible research.",
+            Color::LightCyan,
+        ),
+        guide_rule(
+            "Research rule",
+            "compare counters only within the same scope: latest, rate, lifetime, 30s, or 60s. Mixed scopes create fake conclusions.",
+            Color::Yellow,
+        ),
+        guide_text(
+            "Tabs: Overview=now | Live Data=plain read | Monitors=scorecard | Codes=evidence | Apps=processes | Topology=CPUs | Trends=time.",
+        ),
+    ];
+
+    let matrix = vec![
+        guide_section("Live Matrix"),
+        guide_text(
+            "Each row is a task/thread. The matrix is built for triage: find hot threads, slow waits, placement churn, and fallback-heavy paths quickly.",
+        ),
+        guide_subsection("Identity"),
+        guide_item("PPID / PID", "parent process and thread ID"),
+        guide_item("ST / COMM", "task state and thread name from /proc"),
+        guide_item("CLS", "Cake class: KCR, N-, N0, or N+"),
+        guide_subsection("Activity And Latency"),
+        guide_item("UTIL% / RUNS/s", "PELT util percent and scheduling frequency"),
+        guide_item("MAXR / LGAP", "largest run and last run-start gap in µs"),
+        guide_item("RJIT / LASTW", "run-duration deviation and last wake wait in µs"),
+        guide_item("LIFE", "startup e/s/r timings plus live age"),
+        guide_subsection("Placement"),
+        guide_item("CPU / MIGR/s", "last CPU and migration rate"),
+        guide_item("SPRD / RES%", "CPU/core spread and top CPU/core residency"),
+        guide_item("SMT2%", "share of runs on secondary SMT siblings"),
+        guide_subsection("Cost And Path Shape"),
+        guide_item("SEL / ENQ", "last select_cpu and enqueue cost in ns"),
+        guide_item("STOP / RUN", "last stopping and running cost in ns"),
+        guide_item("FAST/NAT/TUN", "fast Cake, native fallback, and tunnel shares"),
+        guide_subsection("Color Reading"),
+        guide_item("Green", "healthy, low cost, or good locality"),
+        guide_item("Yellow", "watch this value; it may explain feel"),
+        guide_item("Red", "expensive, slow-path, or churn-heavy signal"),
+    ];
+
+    let guide = vec![
+        guide_section("How Cake Thinks"),
+        guide_rule(
+            "1. Predict",
+            "confidence lanes and the scoreboard try to reuse known-good CPU choices before broader work is needed.",
             Color::Green,
         ),
-        sub(
-            "○IDLE",
-            "Idle — in sysinfo but no BPF telemetry",
-            Color::DarkGray,
+        guide_rule(
+            "2. Place",
+            "direct dispatch and local DSQs keep wakeups close to their target when the CPU can run them immediately.",
+            Color::LightCyan,
         ),
-        sub("✗DEAD", "Dead — exited since last refresh", Color::DarkGray),
-        col("COMM", "Thread name (first 15 chars, from /proc)"),
-        col("CLS", "Current cake role:"),
-        sub("KCR", "Kernel-critical helper thread", Color::LightRed),
-        sub("N-", "Raised weight / negative nice task", Color::Yellow),
-        sub("N0", "Default nice-0 task", Color::Blue),
-        sub("N+", "Reduced weight / positive nice task", Color::DarkGray),
-        Line::from(""),
-        subsection("── Activity & Latency ──"),
-        col(
-            "PELT",
-            "Kernel PELT util_avg (0-1024), not a cake-private metric",
+        guide_rule(
+            "3. Fall Back",
+            "native/kernel fallback is always safe. It is only bad when it becomes the common path for latency-sensitive work.",
+            Color::Yellow,
         ),
-        col(
-            "MAXµs",
-            "Largest runtime seen for the task in this interval",
-        ),
-        col(
-            "GAPµs",
-            "Time since previous run start ('sleep' = long sleeper)",
-        ),
-        col("JITµs", "Average inter-run jitter in this interval"),
-        col("WAITµs", "Last enqueue→run wait before the current run"),
-        col(
-            "LIFE",
-            "Per-task lifecycle: init→enqueue / select / run, plus live age",
-        ),
-        col("RUNS/s", "Runs per second — scheduling frequency"),
-        Line::from(""),
-        subsection("── Placement ──"),
-        col("CPU", "Last CPU this task ran on"),
-        col(
-            "SPRD",
-            "Sampled logical CPU / physical-core spread (e.g. 6/3)",
-        ),
-        col(
-            "RES%",
-            "Sampled residency on top logical CPU / top physical core",
-        ),
-        col("SMT%", "Sampled share of runs on non-primary SMT threads"),
-        col(
-            "COMM color",
-            "Heuristic role: GAME / RENDER / UI / AUDIO / BUILD / KCRIT",
+        guide_rule(
+            "4. Learn",
+            "running/stopping telemetry feeds placement history, quantum outcomes, wake waits, and confidence health.",
+            Color::LightMagenta,
         ),
         Line::from(""),
-        subsection("── Callback Overhead (ns) ──"),
-        col("SELns", "select_cpu callback wall time"),
-        col("ENQns", "enqueue callback wall time"),
-        col("STOPns", "stopping callback wall time"),
-        col("RUNns", "running callback wall time"),
+        guide_section("Who This Helps"),
+        guide_item("Users", "watch LASTW, FAST%, NAT%, wake latency, and app focus health"),
+        guide_item("Students", "map select/enqueue/running/stopping to sched_ext callbacks"),
+        guide_item("Researchers", "use dumps, scopes, and monitors to explain regressions"),
         Line::from(""),
-        subsection("── Wake / Placement Shape (%) ──"),
-        col("G1%", "Fast local/idle gate hit rate"),
-        col("G3%", "Kernel select fallback gate hit rate"),
-        col("DSQ%", "Shared DSQ / tunnel fallback rate"),
-        col("MIGR/s", "CPU migrations per second"),
-        Line::from(""),
-        subsection("── Color Semantics ──"),
-        col("Green", "Healthy / low latency / good locality"),
-        col("Yellow", "Watch value / moderate cost"),
-        col("Red", "Poor latency / churn / high callback cost"),
+        guide_section("Monitors And Data"),
+        guide_item("pass/warn/action", "100, 60, or 20 point monitor state"),
+        guide_item("not_ready", "warmup or too few samples; do not tune from it yet"),
+        guide_item("floor_ready", "CPUs ready for the fastest confidence floor path"),
+        guide_item("route_ready", "route predictor has enough signal to be trusted"),
+        guide_item("scoreboard", "claim success/failure for predicted CPU slots"),
+        guide_item("fallback", "native fallback rate; safe but expensive"),
+        guide_item("scope", "latest, rate, life, 30s, and 60s mean different things"),
+        guide_item("source", "exact, bounded, sampled, or derived tells data quality"),
     ];
 
-    let left_paragraph = Paragraph::new(left_text)
+    let footer = vec![
+        guide_section("Keys"),
+        guide_key(
+            "Tabs",
+            "←/→ switch tabs; T jumps to first task row; f cycles filters",
+        ),
+        guide_key(
+            "Rows",
+            "↑/↓/j/k move; Enter folds or pins; Space folds process groups",
+        ),
+        guide_key("Sort", "s cycles sort; S reverses; + / - changes refresh"),
+        guide_key("Output", "c copies current view; d writes text/json dumps"),
+        guide_key(
+            "Control",
+            "b measures topology latency; r resets; q/Q or Esc quits",
+        ),
+    ];
+
+    frame.render_widget(
+        guide_paragraph(" Field Guide ", Color::LightCyan, hero),
+        layout[0],
+    );
+    frame.render_widget(
+        guide_paragraph(" Live Matrix Legend ", Color::Blue, matrix),
+        body[0],
+    );
+    frame.render_widget(
+        guide_paragraph(" Scheduler Research Notes ", Color::LightMagenta, guide),
+        body[1],
+    );
+    frame.render_widget(
+        guide_paragraph(" Key Bindings ", Color::Green, footer),
+        layout[2],
+    );
+}
+
+fn guide_paragraph(
+    title: &'static str,
+    border_color: Color,
+    lines: Vec<Line<'static>>,
+) -> Paragraph<'static> {
+    Paragraph::new(lines)
         .block(
             Block::default()
-                .title(" Matrix Columns ")
+                .title(title)
                 .title_style(
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 )
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
-                .border_type(BorderType::Rounded),
+                .border_style(Style::default().fg(border_color))
+                .border_type(BorderType::Rounded)
+                .padding(Padding::horizontal(1)),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+}
 
-    // ═══ RIGHT PANEL: Dump Fields + Units + Keys ═══
-    let right_text = vec![
-        section("═══ DUMP / COPY FIELDS ═══"),
-        Line::from(""),
-        subsection("── Unit Conventions ──"),
-        col("PELT", "Kernel util_avg raw scale 0-1024"),
-        col("...µs", "Task latency/runtime/jitter values"),
-        col("...ns", "Callback stopwatch values"),
-        col(
-            "SPRD",
-            "Sampled logical CPU / physical-core spread in the interval",
-        ),
-        col(
-            "RES%",
-            "Sampled top logical/top physical residency percentages",
-        ),
-        col("SMT%", "Sampled residency on SMT secondary threads"),
-        col("scope", "Lifetime totals plus rolling 30s/60s windows"),
-        col(
-            "cap",
-            "Current hard-latency vs soft UI vs build overlap snapshot",
-        ),
-        col(
-            "queue.shared",
-            "Shared DSQ depth plus cumulative enqueue/consume net flow",
-        ),
-        col("roles", "Current live role counts from heuristics"),
-        Line::from(""),
-        subsection("── Per-Callback Stopwatch (ns) ──"),
-        col("gate_cas", "select_cpu: full gate cascade duration"),
-        col("life_init", "BPF monotonic task-init timestamp for lifecycle math"),
-        col("vtime_cm", "enqueue: vtime adjustment overhead"),
-        col("mbox", "running: per-CPU mailbox CL0 write burst"),
-        col("classify", "reserved legacy timing slot"),
-        col("life_live", "Live task age at the iterator snapshot"),
-        col("warm", "stopping: warm CPU ring shift (migration)"),
-        Line::from(""),
-        subsection("── Extended Detail Fields ──"),
-        col("ROLE", "Heuristic workload role plus capacity band"),
-        col("STEER", "Per-thread home/primary steering hit counters"),
-        col("path/place", "Last select path and home-locality outcome"),
-        col("waker", "Last waker locality vs chosen CPU"),
-        col("deps", "Wake source counts: same TGID / cross TGID"),
-        col("DIRECT", "Direct dispatch count (bypassed DSQ)"),
-        col(
-            "Q[f/b/p]",
-            "Per-task stop outcomes: full slice / blocked-slept with slice left / preempted runnable",
-        ),
-        col("SYLD", "Explicit sched_yield callbacks for this task"),
-        col("PRMPT", "Explicit enqueue-preempt callbacks for this task"),
-        col(
-            "LIFE",
-            "init→first enqueue/select/run in µs; x is live task age until exit; AVGRTus is run→stop average",
-        ),
-        col("CLS", "Current cake role: KCR / N- / N0 / N+"),
-        col(
-            "SLICEOCC%",
-            "Approx slice occupancy percent from the 128-scale sample; >100 means runtime exceeded slice",
-        ),
-        col("LLC", "Last LLC (L3 cache) node"),
-        col("STREAK", "Consecutive same-CPU runs (locality)"),
-        col("WHIST", "Wait histogram: <10µ/<100µ/<1m/≥1ms"),
-        col("hwait<=5ms", "Per-task wait by home locality: avg/max/count"),
-        Line::from(""),
-        section("═══ DASHBOARD PANELS ═══"),
-        Line::from(""),
-        subsection("── Summary Cards ──"),
-        col(
-            "Runtime",
-            "Topology, uptime, tracked tasks, queue depth, PELT band counts",
-        ),
-        col(
-            "Dispatch",
-            "Dispatch volume, local/steal/miss counts, shared queue flow, wake routing, and path share",
-        ),
-        col(
-            "Timing",
-            "Average callback cost, wake wait<=5ms, and lifecycle init→enqueue/select/run, run→stop, init→exit",
-        ),
-        col(
-            "Lifecycle",
-            "Quantum stop mix (full / blocked / preempt), literal sched_yield count, kick-to-run latency, and post-wake target/follow-up outcomes",
-        ),
-        Line::from(""),
-        subsection("── Analysis Panels ──"),
-        col(
-            "PELT band",
-            "Task counts and averages grouped by idle/light/busy/hot util bands",
-        ),
-        col(
-            "Last60s",
-            "Rolling 1-second samples plus retained flight rows: runs/s, 1% low, callback avg, path share, load/temp, anomaly seconds, and history span",
-        ),
-        col(
-            "Signals",
-            "Balance diagnosis, wake waits<=5ms, post-wake target accuracy, kick latency, placement mix, latest anomaly event",
-        ),
-        Line::from(""),
-        subsection("── Apps Tab ──"),
-        col(
-            "Apps",
-            "TGID-level health view for games, launchers, browser workers, helper daemons, and other process groups",
-        ),
-        col(
-            "Health",
-            "Runtime share, ms/s, run/s, wait avg/max, quantum blocked share, SMT contention, and wakegraph coverage",
-        ),
-        col(
-            "Top Threads",
-            "Selected app's hottest threads with role, PELT, runtime rate, wait, placement spread, and quantum mix",
-        ),
-        col(
-            "Wake Chain",
-            "Selected app inbound/internal/outbound wake edges, wait cost, target hit/miss, and follow-up locality",
-        ),
-        col(
-            "Focus",
-            "Enter or p pins selected app; Dashboard/Topology/Dump add focused-app health and placement",
-        ),
-        col(
-            "healthy",
-            "Focused app has low wait, low preempt pressure, and no sticky hot threads",
-        ),
-        col(
-            "warm",
-            "Focused app has moderate wait or preempt pressure worth watching",
-        ),
-        col(
-            "watch",
-            "Focused app has high wait/preempt pressure or a sticky hot thread",
-        ),
-        Line::from(""),
-        subsection("── Topology Tab ──"),
-        col(
-            "Topology",
-            "Per-CPU cells read as Ck runtime share, Ld system load, and temperature over the latest 60s window",
-        ),
-        col(
-            "CPU work",
-            "Per-CPU scheduler distribution: Cake runtime share, runs/s, avg run time, SMT contention/overlap, quantum mix, system load",
-        ),
-        col(
-            "Core work",
-            "Per-core balance: combined Cake share, hottest thread share, SMT sibling share, overlap/primary contention, average system load",
-        ),
-        Line::from(""),
-        subsection("── Graphs Tab ──"),
-        col(
-            "Coverage",
-            "Fail-loud source status for exact, sampled, bounded, derived, dropped, or missing telemetry",
-        ),
-        col(
-            "Wake edges",
-            "Userspace wake graph: top edges, latency-heavy edges, target hit/miss, and wait buckets",
-        ),
-        col(
-            "App graph",
-            "TGID wake neighborhoods showing internal and outbound wake pressure",
-        ),
-        col(
-            "Events",
-            "Recent ringbuf debug events when available; missing event streams are reported as coverage gaps",
-        ),
-        Line::from(""),
-        section("═══ KEY BINDINGS ═══"),
-        Line::from(""),
-        col("←/→ Tab", "Switch tabs"),
-        col("↑/↓ j/k", "Scroll task or app rows"),
-        col("s / S", "Cycle sort column / reverse direction"),
-        col("+ / -", "Adjust refresh rate"),
-        col("f", "Cycle filters: BPF-tracked -> live-only -> all"),
-        col("T", "Jump to first task row"),
-        col("Enter", "Fold PPID on Dashboard; pin selected app on Apps"),
-        col("Space", "Fold / unfold process thread group"),
-        col("p", "Pin / unpin selected app on Apps"),
-        col("x", "Clear folds on Dashboard; clear app focus on Apps"),
-        col(
-            "c",
-            "Copy current tab (includes lifetime + 30s/60s windows)",
-        ),
-        col(
-            "d",
-            "Dump dashboard to tui_dump_*.txt plus tui_dump_*.json coverage sidecar",
-        ),
-        col("b", "Topology: measure core-to-core latency"),
-        col("r", "Reset state"),
-        col("q / Esc", "Quit scx_cake"),
-        Line::from(""),
-        subsection("── Scheduler State ──"),
-        sub(
-            "IDLE",
-            "General low-latency mode; detector removed",
-            Color::DarkGray,
-        ),
-    ];
+fn guide_title(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
 
-    let right_paragraph = Paragraph::new(right_text)
-        .block(
-            Block::default()
-                .title(" Fields & Keybindings ")
-                .title_style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
-                .border_type(BorderType::Rounded),
-        )
-        .wrap(Wrap { trim: false });
+fn guide_section(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("═══ {} ═══", text),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
 
-    frame.render_widget(left_paragraph, cols[0]);
-    frame.render_widget(right_paragraph, cols[1]);
+fn guide_subsection(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── {} ──", text),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn guide_text(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(Color::Gray),
+    ))
+}
+
+fn guide_item(name: &str, desc: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{:<12}", name),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(desc.to_string(), Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn guide_key(name: &str, desc: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{:<11}", name),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(desc.to_string(), Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn guide_rule(name: &str, desc: &str, color: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{:<14}", name),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(desc.to_string(), Style::default().fg(Color::Gray)),
+    ])
 }

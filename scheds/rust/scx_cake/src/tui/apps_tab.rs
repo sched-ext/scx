@@ -308,7 +308,7 @@ pub(super) fn draw_apps_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
                 .fg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("PELT").style(
+        Cell::from("UTIL%").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -368,7 +368,8 @@ pub(super) fn draw_apps_tab(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
                 Cell::from(row.pid.to_string()).style(Style::default().fg(Color::Yellow)),
                 Cell::from(row.comm.clone()).style(Style::default().fg(role.color())),
                 Cell::from(role.label()).style(Style::default().fg(role.color())),
-                Cell::from(row.pelt_util.to_string()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(format!("{:.1}", pelt_util_pct(row.pelt_util as u64)))
+                    .style(Style::default().fg(Color::Cyan)),
                 Cell::from(format!("{:.1}", row.runs_per_sec))
                     .style(Style::default().fg(Color::Green)),
                 Cell::from(format!("{:.1}", runtime_rate_ms(row)))
