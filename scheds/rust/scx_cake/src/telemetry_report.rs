@@ -124,7 +124,7 @@ pub struct AcceleratorSummary {
     pub fast_hit_counts: [u64; 7],
     pub fast_miss_counts: [u64; 7],
     pub route_block_counts: [u64; 13],
-    pub scoreboard_probe_counts: [[u64; 6]; 7],
+    pub scoreboard_probe_counts: [[u64; 7]; 7],
     pub pull_mode_counts: [u64; 3],
     pub pull_probe_counts: [u64; 2],
     pub native_fallback_counts: [u64; 3],
@@ -337,13 +337,13 @@ mod tests {
                     fast_miss_counts: [0, 2, 3, 1, 0, 0, 0],
                     route_block_counts: [0, 0, 0, 5, 0, 0, 1, 0, 0, 0, 2, 0, 0],
                     scoreboard_probe_counts: [
-                        [0; 6],
-                        [18, 2, 0, 0, 1, 0],
-                        [1, 2, 1, 0, 0, 0],
-                        [1, 0, 0, 1, 0, 0],
-                        [0; 6],
-                        [0; 6],
-                        [0; 6],
+                        [0; 7],
+                        [18, 2, 0, 0, 1, 3, 0],
+                        [1, 2, 1, 0, 0, 1, 0],
+                        [1, 0, 0, 1, 0, 0, 0],
+                        [0; 7],
+                        [0; 7],
+                        [0; 7],
                     ],
                     pull_mode_counts: [3, 4, 5],
                     pull_probe_counts: [6, 7],
@@ -382,7 +382,7 @@ mod tests {
         );
         assert_eq!(
             json["accelerator"]["scoreboard_probe_counts"][1],
-            serde_json::json!([18, 2, 0, 0, 1, 0])
+            serde_json::json!([18, 2, 0, 0, 1, 3, 0])
         );
         assert_eq!(
             json["accelerator"]["native_fallback_counts"],

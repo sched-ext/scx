@@ -620,7 +620,8 @@ fn accel_probe_label(outcome: usize) -> &'static str {
         2 => "dirty",
         3 => "smt_busy",
         4 => "claim_fail",
-        5 => "invalid",
+        5 => "claim_skip",
+        6 => "invalid",
         _ => "?",
     }
 }
@@ -666,9 +667,10 @@ fn format_decision_confidence(confidence: u64) -> String {
     }
 
     format!(
-        "sel={}/{} disp={} kick={} pull={} route={}:{} gear={} trust={} stable={} shock={} aud={}/{} acct_audit={}",
+        "sel={}/{} claim={} disp={} kick={} pull={} route={}:{} gear={} trust={} stable={} shock={} aud={}/{} acct_audit={}",
         decision_conf_value(confidence, CAKE_CONF_SELECT_EARLY_SHIFT),
         decision_conf_value(confidence, CAKE_CONF_SELECT_ROW4_SHIFT),
+        decision_conf_value(confidence, CAKE_CONF_CLAIM_HEALTH_SHIFT),
         decision_conf_value(confidence, CAKE_CONF_DISPATCH_EMPTY_SHIFT),
         decision_conf_value(confidence, CAKE_CONF_KICK_SHAPE_SHIFT),
         decision_conf_value(confidence, CAKE_CONF_PULL_SHAPE_SHIFT),

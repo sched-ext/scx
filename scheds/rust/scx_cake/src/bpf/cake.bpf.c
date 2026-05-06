@@ -182,6 +182,7 @@ const bool enable_stats __attribute__((used)) = false;
 #define CAKE_FAST_PROBE_SLOTS 4U
 #define CAKE_CONF_SELECT_EARLY_SHIFT 0U
 #define CAKE_CONF_SELECT_ROW4_SHIFT 4U
+#define CAKE_CONF_CLAIM_HEALTH_SHIFT 8U
 #define CAKE_CONF_DISPATCH_EMPTY_SHIFT 12U
 #define CAKE_CONF_KICK_SHAPE_SHIFT 20U
 #define CAKE_CONF_PULL_SHAPE_SHIFT 24U
@@ -565,6 +566,13 @@ static __always_inline u64 cake_read_cpu_frontier(u32 cpu)
 }
 
 #if CAKE_ACCEL_PATH
+#define CAKE_CLAIM_HEALTH_INIT 8U
+#define CAKE_CLAIM_HEALTH_MIN 4U
+#define CAKE_CLAIM_HEALTH_MAX 15U
+#define CAKE_CLAIM_HEALTH_HIT_STEP 1U
+#define CAKE_CLAIM_HEALTH_MISS_STEP 4U
+#define CAKE_CLAIM_HEALTH_RECOVERY_STEP 1U
+
 static __always_inline u8 cake_conf_value(u64 confidence, u32 shift)
 {
 	u8 value = (u8)((confidence >> shift) & CAKE_CONF_NIBBLE_MASK);
@@ -575,6 +583,51 @@ static __always_inline u8 cake_conf_value(u64 confidence, u32 shift)
 static __always_inline u8 cake_conf_raw_value(u64 confidence, u32 shift)
 {
 	return (u8)((confidence >> shift) & CAKE_CONF_NIBBLE_MASK);
+}
+
+static __always_inline u8 cake_claim_health_value(u64 confidence)
+{
+	return cake_conf_value(confidence, CAKE_CONF_CLAIM_HEALTH_SHIFT);
+}
+
+static __always_inline u64 cake_claim_health_store(u64 confidence, u8 value)
+{
+	u64 mask = CAKE_CONF_NIBBLE_MASK << CAKE_CONF_CLAIM_HEALTH_SHIFT;
+
+	return (confidence & ~mask) |
+	       (((u64)value) << CAKE_CONF_CLAIM_HEALTH_SHIFT);
+}
+
+static __always_inline bool cake_claim_health_allows(struct cake_cpu_bss *bss)
+{
+	u64 confidence = READ_ONCE(bss->decision_confidence);
+	u8  value      = cake_claim_health_value(confidence);
+
+	if (value >= CAKE_CLAIM_HEALTH_MIN)
+		return true;
+	if (value < CAKE_CLAIM_HEALTH_MAX) {
+		confidence = cake_claim_health_store(
+			confidence, value + CAKE_CLAIM_HEALTH_RECOVERY_STEP);
+		WRITE_ONCE(bss->decision_confidence, confidence);
+	}
+	return false;
+}
+
+static __always_inline u64 cake_claim_health_update(u64	 confidence,
+						    bool success)
+{
+	u8 value = cake_claim_health_value(confidence);
+
+	if (success) {
+		value = value + CAKE_CLAIM_HEALTH_HIT_STEP;
+		if (value > CAKE_CLAIM_HEALTH_MAX)
+			value = CAKE_CLAIM_HEALTH_MAX;
+	} else {
+		value = value > CAKE_CLAIM_HEALTH_MISS_STEP ?
+				value - CAKE_CLAIM_HEALTH_MISS_STEP :
+				1;
+	}
+	return cake_claim_health_store(confidence, value);
 }
 
 static __always_inline u8 cake_load_shock_value(u64 confidence)
@@ -901,6 +954,7 @@ cake_scoreboard_claim_result(struct cake_cpu_bss *bss, u64 status, bool success)
 	bool shock	  = !success || owner_class >= CAKE_CPU_OWNER_BULK ||
 			    pressure >= CAKE_CPU_PRESSURE_HIGH;
 
+	confidence	  = cake_claim_health_update(confidence, success);
 	confidence = cake_conf_update_packed(confidence,
 					     CAKE_CONF_STATUS_TRUST_SHIFT,
 					     known_status && success);
@@ -1821,6 +1875,11 @@ static __noinline s32 cake_try_clean_idle_candidate(
 		cake_scoreboard_status_result(local_bss, status);
 		return -1;
 	}
+	if (!cake_claim_health_allows(local_bss)) {
+		cake_record_accel_probe(route_kind,
+					CAKE_ACCEL_PROBE_CLAIM_SKIP);
+		return -1;
+	}
 	claimed = scx_bpf_test_and_clear_cpu_idle(candidate);
 	cake_scoreboard_claim_result(local_bss, status, claimed);
 	if (claimed) {
@@ -1863,6 +1922,11 @@ static __noinline s32 cake_try_smt_idle_candidate(
 	if (cake_smt_interactive_neighbor_busy(candidate)) {
 		cake_record_accel_probe(route_kind, CAKE_ACCEL_PROBE_SMT_BUSY);
 		cake_scoreboard_status_result(local_bss, status);
+		return -1;
+	}
+	if (!cake_claim_health_allows(local_bss)) {
+		cake_record_accel_probe(route_kind,
+					CAKE_ACCEL_PROBE_CLAIM_SKIP);
 		return -1;
 	}
 	claimed = scx_bpf_test_and_clear_cpu_idle(candidate);
