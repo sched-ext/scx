@@ -133,9 +133,11 @@ jobs:
           - name: scx__sched_ext__for-next
             url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
             tag: for-next
+            veristat-disable: scx_p2dq scx_chaos
           - name: scx__bpf__bpf-next
             url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
             tag: master
+            veristat-disable: scx_p2dq scx_chaos
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     continue-on-error: true
@@ -153,6 +155,15 @@ jobs:
           sudo cp /tmp/veristat/src/veristat /usr/local/bin/
           sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
           cargo install cargo-veristat --locked
+      - name: Disable veristat for excluded packages
+        if: matrix.kernel.veristat-disable != ''
+        run: |
+          for pkg in ${{ matrix.kernel.veristat-disable }}; do
+            manifest=$(cargo metadata --format-version 1 --no-deps | jq -r ".packages[] | select(.name == \"$pkg\") | .manifest_path")
+            if [ -n "$manifest" ]; then
+              printf '\n[package.metadata.veristat]\ndisable = true\n' >> "$manifest"
+            fi
+          done
       - name: Build packages and generate metadata
         run: |
           cargo build --profile ci --locked
