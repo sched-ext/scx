@@ -1496,6 +1496,7 @@ mod tests {
         let src = include_str!("bpf/cake.bpf.c");
 
         assert!(src.contains("CAKE_CONF_ROUTE_SHIFT"));
+        assert!(src.contains("CAKE_CONF_CLAIM_HEALTH_SHIFT"));
         assert!(src.contains("CAKE_ROUTE_PREV"));
         assert!(src.contains("CAKE_ROUTE_SLOT0"));
         assert!(src.contains("CAKE_ROUTE_TUNNEL"));
@@ -1611,6 +1612,90 @@ mod tests {
     }
 
     #[test]
+    fn bpf_release_scoreboard_claim_health_skips_before_idle_claim() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("CAKE_CONF_CLAIM_HEALTH_SHIFT 8U"));
+        assert!(src.contains("cake_claim_health_allows(local_bss)"));
+
+        let clean_body = source_body_between(
+            src,
+            "static __noinline s32 cake_try_clean_idle_candidate(",
+            "static __noinline s32 cake_try_smt_idle_candidate(",
+        )
+        .expect("clean idle candidate body should be present");
+        let clean_gate = clean_body
+            .find("if (!cake_claim_health_allows(local_bss))")
+            .expect("clean candidate should gate stale claim lanes");
+        let clean_claim = clean_body
+            .find("claimed = scx_bpf_test_and_clear_cpu_idle(candidate);")
+            .expect("clean candidate should still claim native idle state");
+        assert!(clean_gate < clean_claim);
+
+        let smt_body = source_body_between(
+            src,
+            "static __noinline s32 cake_try_smt_idle_candidate(",
+            "#define cake_try_clean_idle_candidate_record",
+        )
+        .expect("SMT idle candidate body should be present");
+        let smt_gate = smt_body
+            .find("if (!cake_claim_health_allows(local_bss))")
+            .expect("SMT candidate should gate stale claim lanes");
+        let smt_claim = smt_body
+            .find("claimed = scx_bpf_test_and_clear_cpu_idle(candidate);")
+            .expect("SMT candidate should still claim native idle state");
+        assert!(smt_gate < smt_claim);
+    }
+
+    #[test]
+    fn bpf_release_scoreboard_claim_health_updates_after_claim_result() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("#define CAKE_CLAIM_HEALTH_MISS_STEP"));
+        assert!(src.contains("static __always_inline u64 cake_claim_health_update("));
+        assert!(src.contains("cake_claim_health_update(confidence, success);"));
+        assert!(src.contains("cake_scoreboard_claim_result(local_bss, status, claimed);"));
+    }
+
+    #[test]
+    fn bpf_release_scoreboard_claim_health_records_claim_skips() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let intf = include_str!("bpf/intf.h");
+        let dump = include_str!("tui/dump.rs");
+
+        assert!(intf.contains("CAKE_ACCEL_PROBE_CLAIM_SKIP"));
+        assert!(dump.contains("claim_skip"));
+
+        let clean_body = source_body_between(
+            src,
+            "static __noinline s32 cake_try_clean_idle_candidate(",
+            "static __noinline s32 cake_try_smt_idle_candidate(",
+        )
+        .expect("clean idle candidate body should be present");
+        assert!(source_contains(
+            clean_body,
+            "if (!cake_claim_health_allows(local_bss)) {
+                cake_record_accel_probe(route_kind, CAKE_ACCEL_PROBE_CLAIM_SKIP);
+                return -1;
+            }"
+        ));
+
+        let smt_body = source_body_between(
+            src,
+            "static __noinline s32 cake_try_smt_idle_candidate(",
+            "#define cake_try_clean_idle_candidate_record",
+        )
+        .expect("SMT idle candidate body should be present");
+        assert!(source_contains(
+            smt_body,
+            "if (!cake_claim_health_allows(local_bss)) {
+                cake_record_accel_probe(route_kind, CAKE_ACCEL_PROBE_CLAIM_SKIP);
+                return -1;
+            }"
+        ));
+    }
+
+    #[test]
     fn tui_dump_decodes_release_confidence_lanes() {
         let tui = include_str!("tui.rs");
         let dump = include_str!("tui/dump.rs");
@@ -1632,6 +1717,7 @@ mod tests {
         assert!(dump.contains("conf={}"));
         assert!(dump.contains("format_decision_confidence(row.decision_confidence)"));
         assert!(dump.contains("route={}"));
+        assert!(dump.contains("claim={}"));
         assert!(dump.contains("acct_audit={}"));
         assert!(report.contains("trust_prev_active_cpus"));
         assert!(report.contains("trust_prev_attempts"));
@@ -1660,6 +1746,7 @@ mod tests {
         assert!(bpf.contains("cake_record_accel_accounting"));
         assert!(bpf.contains("CAKE_ACCEL_BLOCK_LATENCY_GATE"));
         assert!(bpf.contains("CAKE_ACCEL_PROBE_CLAIM_FAIL"));
+        assert!(bpf.contains("CAKE_ACCEL_PROBE_CLAIM_SKIP"));
         assert!(tui.contains("for reason in 0..SELECT_REASON_MAX"));
         assert!(!tui.contains("for reason in 0..10"));
         assert!(dump.contains(".route_pred: route[attempt/hit/miss(hit%)]"));
