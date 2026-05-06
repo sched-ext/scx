@@ -613,11 +613,12 @@ static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
+	struct cpu_ctx *cpuc_cur = get_cpu_ctx();
 	struct pick_ctx ictx = {
 		.p = p,
-		.taskc = get_task_ctx(p),
+		.taskc = get_task_ctx_curcpu(p, cpuc_cur),
 		.prev_cpu = prev_cpu,
-		.cpuc_cur = get_cpu_ctx(),
+		.cpuc_cur = cpuc_cur,
 		.wake_flags = wake_flags,
 	};
 	struct task_struct *waker;
@@ -736,8 +737,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	task_ctx *taskc;
 	u64 dsq_id;
 
-	taskc = get_task_ctx(p);
 	cpuc_cur = get_cpu_ctx();
+	taskc = get_task_ctx_curcpu(p, cpuc_cur);
 	if (!taskc || !cpuc_cur) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
@@ -1331,6 +1332,14 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	task_ctx *taskc;
 	u64 now = scx_bpf_now();
 
+	/*
+	 * lavd_running() may run on a CPU other than @p's: the kernel
+	 * invokes this op with @p's rq lock held, but the calling CPU
+	 * isn't necessarily @p's CPU. For example, scx_enable_workfn()
+	 * iterates over every rq from a worker thread, locks each in
+	 * turn, and triggers set_next_task_scx() on it -- so the op
+	 * fires for tasks on remote rqs.
+	 */
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc) {
@@ -1387,7 +1396,14 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	u64 now;
 
 	/*
-	 * Update task statistics
+	 * Update task statistics.
+	 *
+	 * lavd_tick() may run on a CPU other than @p's: the kernel
+	 * invokes this op with @p's rq lock held, but the calling CPU
+	 * isn't necessarily @p's CPU. In NOHZ_FULL mode,
+	 * sched_tick_remote() runs as a delayed_work on a worker
+	 * thread, locks the remote rq, and calls task_tick_scx() on
+	 * its curr task -- so the op fires for tasks on remote rqs.
 	 */
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
@@ -1421,7 +1437,14 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	task_ctx *taskc;
 
 	/*
-	 * Update task statistics
+	 * Update task statistics.
+	 *
+	 * lavd_stopping() may run on a CPU other than @p's: the kernel
+	 * invokes this op with @p's rq lock held, but the calling CPU
+	 * isn't necessarily @p's CPU. The kernel calls it from both
+	 * put_prev_task_scx() (always on @p's CPU) and
+	 * dequeue_task_scx() (which can run on a different CPU during
+	 * migration paths).
 	 */
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
@@ -1439,6 +1462,13 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	task_ctx *taskc;
 	u64 now, interval;
 
+	/*
+	 * lavd_quiescent() may run on a CPU other than @p's: the kernel
+	 * invokes this op with @p's rq lock held, but the calling CPU
+	 * isn't necessarily @p's CPU. dequeue_task_scx() can be called
+	 * from migration paths on a different CPU than where @p was
+	 * running.
+	 */
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc) {
@@ -1839,6 +1869,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 		   struct scx_exit_task_args *args)
 {
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+
+	/*
+	 * Drop the local CPU's task_ctx cache entry if it points at @p.
+	 * Remote CPUs that may have cached @p rely on natural eviction by
+	 * subsequent lookups -- by design, no cross-CPU sweep here.
+	 */
+	if (cpuc && (cpuc->cached_task == (u64)p ||
+		     cpuc->cached_pid == p->pid))
+		cpuc->cached_pid = 0;
+
 	scx_task_free(p);
 	return 0;
 }
@@ -2407,9 +2448,10 @@ int set_aggressive_migration(void)
 		return 0;
 
 	cpu = bpf_get_smp_processor_id();
-	if ((curr = bpf_get_current_task_btf()) &&
-	    (taskc = get_task_ctx(curr)) &&
-	    (cpuc = get_cpu_ctx_id(cpu)) &&
+	cpuc = get_cpu_ctx();
+	if (cpuc &&
+	    (curr = bpf_get_current_task_btf()) &&
+	    (taskc = get_task_ctx_curcpu(curr, cpuc)) &&
 	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])) &&
 	    READ_ONCE(cpdc->is_stealee)) {
 		set_task_flag(taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE);
