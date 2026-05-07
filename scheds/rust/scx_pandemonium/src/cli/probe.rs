@@ -9,15 +9,11 @@ const MAX_SAMPLES: usize = 16384;
 /// When PANDEMONIUM is running, BPF records latencies to ring buffer.
 /// For EEVDF baseline, we measure in userspace.
 /// Either way: ZERO I/O during measurement, bulk output at end.
-pub fn run_probe(death_pipe_fd: Option<i32>) {
+pub fn run_probe() {
     ctrlc::set_handler(move || {
         RUNNING.store(false, Ordering::Relaxed);
     })
     .ok();
-
-    if let Some(fd) = death_pipe_fd {
-        super::death_pipe::spawn_death_watcher(fd, &RUNNING);
-    }
 
     let mut samples: Vec<i64> = Vec::with_capacity(MAX_SAMPLES);
 

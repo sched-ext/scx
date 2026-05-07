@@ -41,7 +41,11 @@ pub fn monitor_loop(
     let mut prev_hist = [[0u64; HIST_BUCKETS]; 3];
     let mut prev_sleep = [0u64; SLEEP_BUCKETS];
     let mut regime = Regime::Mixed;
-    let mut mwu = MwuController::new(scaled_regime_knobs(regime, nr_cpus));
+    // READ CURRENT tau SNAPSHOT FROM THE BPF-SIDE KNOB MAP. main.rs WROTE IT
+    // ONCE AT TOPOLOGY DETECT; THE ADAPTIVE LOOP RE-READS SO TAU-SCALED REGIME
+    // KNOBS AGREE WITH TAU-SCALED BPF INIT AT FIRST TICK AND EVERY REGIME CHANGE.
+    let mut tau_ns = sched.read_tuning_knobs().topology_tau_ns;
+    let mut mwu = MwuController::new(scaled_regime_knobs(regime, nr_cpus, tau_ns));
     let mut pending_regime = regime;
     let mut regime_hold: u32 = 0;
     let mut light_ticks: u64 = 0;
@@ -58,13 +62,53 @@ pub fn monitor_loop(
         }
     };
 
-    // APPLY INITIAL REGIME
-    sched.write_tuning_knobs(&scaled_regime_knobs(regime, nr_cpus))?;
+    // APPLY INITIAL REGIME. scaled_regime_knobs RETURNS topology_tau_ns/codel_eq_ns=0;
+    // OVERLAY THE LIVE BPF VALUES SO THE FIRST WRITE DOESN'T CLOBBER WHAT
+    // write_topology_fields() PUT IN THE MAP. Mirrors the regime-change path at line 230.
+    let live = sched.read_tuning_knobs();
+    let mut rk = scaled_regime_knobs(regime, nr_cpus, tau_ns);
+    rk.topology_tau_ns = tau_ns;
+    rk.codel_eq_ns = live.codel_eq_ns;
+    sched.write_tuning_knobs(&rk)?;
 
     while !shutdown.load(Ordering::Relaxed) && !sched.exited() {
+        crate::watchdog::LOOP_HEARTBEAT.fetch_add(1, Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(1));
 
         let stats = sched.read_stats();
+        let cur_hist = sched.read_wake_lat_hist();
+        let cur_sleep = sched.read_sleep_hist();
+
+        // WRAP GUARD: BPF RELOAD, UEI RECOVERY, OR HOTPLUG CAN RESET KERNEL-SIDE
+        // CUMULATIVE COUNTERS WHILE RUST'S PREV STILL HOLDS OLD VALUES. WITHOUT
+        // THIS CHECK, WRAPPING_SUB PRODUCES A GARBAGE POSITIVE DELTA THAT POISONS
+        // P99 AND FEEDS NONSENSE TO MWU. RESET BASELINE AND SKIP THE TICK.
+        let mut wrapped = stats.nr_dispatches < prev.nr_dispatches;
+        if !wrapped {
+            'wrap: for tier in 0..3 {
+                for b in 0..HIST_BUCKETS {
+                    if cur_hist[tier][b] < prev_hist[tier][b] {
+                        wrapped = true;
+                        break 'wrap;
+                    }
+                }
+            }
+        }
+        if !wrapped {
+            for i in 0..SLEEP_BUCKETS {
+                if cur_sleep[i] < prev_sleep[i] {
+                    wrapped = true;
+                    break;
+                }
+            }
+        }
+        if wrapped {
+            log_warn!("WRAP DETECTED: BASELINE RESET, SKIPPING ADAPTIVE UPDATE");
+            prev = stats;
+            prev_hist = cur_hist;
+            prev_sleep = cur_sleep;
+            continue;
+        }
 
         // COMPUTE DELTAS
         let delta_d = stats.nr_dispatches.wrapping_sub(prev.nr_dispatches);
@@ -141,12 +185,11 @@ pub fn monitor_loop(
             0
         };
 
-        // READ HISTOGRAMS (CUMULATIVE, COMPUTE DELTAS)
-        let cur_hist = sched.read_wake_lat_hist();
+        // COMPUTE HISTOGRAM DELTAS (cur_hist READ AT TOP FOR WRAP GUARD)
         let mut delta_hist = [[0u64; HIST_BUCKETS]; 3];
         for tier in 0..3 {
             for b in 0..HIST_BUCKETS {
-                delta_hist[tier][b] = cur_hist[tier][b].wrapping_sub(prev_hist[tier][b]);
+                delta_hist[tier][b] = cur_hist[tier][b] - prev_hist[tier][b];
             }
         }
 
@@ -164,11 +207,10 @@ pub fn monitor_loop(
         }
         let p99_ns = tuning::compute_p99_from_histogram(&agg);
 
-        // SLEEP HISTOGRAM
-        let cur_sleep = sched.read_sleep_hist();
+        // SLEEP HISTOGRAM DELTAS (cur_sleep READ AT TOP FOR WRAP GUARD)
         let mut delta_sleep = [0u64; SLEEP_BUCKETS];
         for i in 0..SLEEP_BUCKETS {
-            delta_sleep[i] = cur_sleep[i].wrapping_sub(prev_sleep[i]);
+            delta_sleep[i] = cur_sleep[i] - prev_sleep[i];
         }
         let sleep_total: u64 = delta_sleep.iter().sum();
         let io_pct = if sleep_total > 0 {
@@ -190,7 +232,14 @@ pub fn monitor_loop(
             }
             if regime_hold >= 2 {
                 regime = detected;
-                let rk = scaled_regime_knobs(regime, nr_cpus);
+                // REFRESH tau IN CASE HOTPLUG/TOPOLOGY CHANGED.
+                // scaled_regime_knobs RETURNS topology_tau_ns/codel_eq_ns=0;
+                // OVERLAY THE LIVE BPF VALUES (BOTH OWNED BY TOPOLOGY LAYER).
+                let live = sched.read_tuning_knobs();
+                tau_ns = live.topology_tau_ns;
+                let mut rk = scaled_regime_knobs(regime, nr_cpus, tau_ns);
+                rk.topology_tau_ns = tau_ns;
+                rk.codel_eq_ns = live.codel_eq_ns;
                 sched.write_tuning_knobs(&rk)?;
                 regime_changed_this_tick = true;
                 mwu.set_baseline(rk);
@@ -209,9 +258,26 @@ pub fn monitor_loop(
                 interactive_p99_ns: tp99_i_ns,
                 io_pct,
                 rescue_count: delta_rescue,
-                wakeup_rate: delta_enq_wake / nr_cpus.max(1),
+                // RAW total wakes/sec; the MWU fork-storm gate compares against
+                // a tau-derived total threshold (scale_tau_u64 * K_FORK_STORM_RATE).
+                // Per-CPU normalization here re-introduced an nr_cpus^2 effective
+                // threshold and latched on quiet 2-4C systems.
+                wakeup_rate: delta_enq_wake,
             };
-            let knobs = mwu.update(&signals, regime.p99_ceiling(), nr_cpus);
+            // OSCILLATOR-AWARE GATING: READ THE BPF DAMPED-HARMONIC
+            // OSCILLATOR'S CURRENT STATE BEFORE MWU DECIDES. PATHWAYS
+            // 2 AND 4 (RESCUE-DRIVEN) DEFER WHEN THE OSCILLATOR HAS
+            // ALREADY MOVED. WITHOUT THIS, MWU AND THE OSCILLATOR
+            // INDEPENDENTLY ADAPT ON global_rescue_count AND THE TWO
+            // CONTROLLERS DOUBLE-CORRECT.
+            let osc_state = sched.read_oscillator_state();
+            let mut knobs = mwu.update(&signals, regime.p99_ceiling(), nr_cpus, tau_ns, &osc_state);
+            // PRESERVE TOPOLOGY-OWNED FIELDS (tau_ns, codel_eq_ns) -- MWU
+            // DOESN'T TOUCH THEM. WITHOUT THIS, THE ADAPTIVE LOOP'S 1HZ
+            // WRITES WOULD CLOBBER VALUES main.rs SET AT TOPOLOGY DETECT.
+            let live = sched.read_tuning_knobs();
+            knobs.topology_tau_ns = live.topology_tau_ns;
+            knobs.codel_eq_ns = live.codel_eq_ns;
             sched.write_tuning_knobs(&knobs)?;
         }
 
@@ -243,8 +309,6 @@ pub fn monitor_loop(
 
         let sojourn_ms = stats.batch_sojourn_ns / 1_000_000;
         let sojourn_thresh_ms = knobs.sojourn_thresh_ns / 1_000_000;
-        let delta_burst = stats.burst_mode_active.wrapping_sub(prev.burst_mode_active);
-        let burst_label = if delta_burst > 0 { " BURST" } else { "" };
         let longrun_label = if stats.longrun_mode_active > 0 {
             " LONGRUN"
         } else {
@@ -253,7 +317,7 @@ pub fn monitor_loop(
 
         if verbose && tuning::should_print_telemetry(tick_counter, stability_score) {
             println!(
-                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us procdb: {}/{} sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms rescue: {} l2: B={}% I={}% L={}% [{}{}{}]",
+                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us procdb: {}/{} sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms rescue: {} l2: B={}% I={}% L={}% [{}{}]",
                 delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
                 delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
                 wake_avg_us, p99_us, tp99_b, tp99_i, tp99_l,
@@ -262,7 +326,7 @@ pub fn monitor_loop(
                 io_pct, knobs.slice_ns / 1000, knobs.batch_slice_ns / 1000,
                 delta_reenq, sojourn_ms, sojourn_thresh_ms,
                 delta_rescue,
-                l2_pct_b, l2_pct_i, l2_pct_l, regime.label(), burst_label, longrun_label,
+                l2_pct_b, l2_pct_i, l2_pct_l, regime.label(), longrun_label,
             );
         }
 
@@ -330,9 +394,9 @@ pub fn monitor_loop(
         0
     };
     println!(
-        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} demotion_ns={} lag={} mwu={:.3} ticks=L:{}/M:{}/H:{} l2_hit=B:{}%/I:{}%/L:{}%",
+        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} lag={} mwu={:.3} ticks=L:{}/M:{}/H:{} l2_hit=B:{}%/I:{}%/L:{}%",
         regime.label(), final_knobs.slice_ns, final_knobs.batch_slice_ns,
-        final_knobs.preempt_thresh_ns, final_knobs.cpu_bound_thresh_ns,
+        final_knobs.preempt_thresh_ns,
         final_knobs.lag_scale, mwu.scale(),
         light_ticks, mixed_ticks, heavy_ticks,
         l2_cum_b, l2_cum_i, l2_cum_l,
