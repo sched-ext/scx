@@ -517,14 +517,14 @@ struct cpu_ctx {
 	 */
 	u64		prev_pelt_clk;
 
-	/* --- cacheline 4 boundary (256 bytes): cpumask temps --- */
-	struct bpf_cpumask __kptr *tmp_a_mask; /* for active set */
-	struct bpf_cpumask __kptr *tmp_o_mask; /* for overflow set */
-	struct bpf_cpumask __kptr *tmp_l_mask; /* for online cpumask */
-	struct bpf_cpumask __kptr *tmp_i_mask; /* for idle cpumask */
-	struct bpf_cpumask __kptr *tmp_t_mask;
-	struct bpf_cpumask __kptr *tmp_t2_mask;
-	struct bpf_cpumask __kptr *tmp_t3_mask;
+	/* --- cacheline 4 boundary (256 bytes): cpumask scratch --- */
+	struct bpf_cpumask __kptr *a_mask;	/* scratch: task & active */
+	struct bpf_cpumask __kptr *o_mask;	/* scratch: task & overflow */
+	struct bpf_cpumask __kptr *temp_mask;	/* scratch: general-purpose */
+	struct bpf_cpumask __kptr *i_mask;	/* scratch: task & idle */
+	struct bpf_cpumask __kptr *ia_mask;	/* scratch: idle & active */
+	struct bpf_cpumask __kptr *io_mask;	/* scratch: idle & overflow */
+	struct bpf_cpumask __kptr *iat_mask;	/* scratch: idle & active & turbo */
 
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
 	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */

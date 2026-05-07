@@ -406,7 +406,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 	if (!cpuc_cur)
 		return;
 
-	cpumask = cpuc_cur->tmp_l_mask;
+	cpumask = cpuc_cur->temp_mask;
 	cpdom_id = dsq_to_cpdom(dsq_id);
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
