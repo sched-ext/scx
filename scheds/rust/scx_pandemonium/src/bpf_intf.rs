@@ -1,0 +1,8 @@
+#![allow(dead_code)]
+// MIRROR OF src/bpf/intf.h CONSTANTS. KEEP IN SYNC WITH THE C HEADER.
+// THE STATIC ASSERT IN scheduler.rs CATCHES MAX_AFFINITY_CANDIDATES
+// DRIFT AT COMPILE TIME.
+
+pub const MAX_CPUS: u32 = 1024;
+pub const MAX_AFFINITY_CANDIDATES: u32 = MAX_CPUS >> 3;
+pub const MAX_NODES: u32 = 32;

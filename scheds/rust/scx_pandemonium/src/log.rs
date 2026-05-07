@@ -23,9 +23,3 @@ macro_rules! log_warn {
         println!("{} [WARN]   {}", crate::log::_timestamp(), format!($($arg)*))
     };
 }
-
-macro_rules! log_error {
-    ($($arg:tt)*) => {
-        println!("{} [ERROR]  {}", crate::log::_timestamp(), format!($($arg)*))
-    };
-}

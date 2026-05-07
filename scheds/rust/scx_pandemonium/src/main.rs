@@ -10,6 +10,8 @@
 #[allow(dead_code)]
 mod bpf_skel;
 
+mod bpf_intf;
+
 #[macro_use]
 mod log;
 mod adaptive;
@@ -18,6 +20,7 @@ mod procdb;
 mod scheduler;
 mod topology;
 mod tuning;
+mod watchdog;
 
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,11 +52,12 @@ struct Cli {
     #[arg(long)]
     version: bool,
 
-    #[arg(long)]
+    /// Internal: dump in-memory ring log on shutdown
+    #[arg(long, hide = true)]
     dump_log: bool,
 
-    /// Override CPU count for scaling formulas (default: auto-detect)
-    #[arg(long)]
+    /// Internal: override CPU count for scaling formulas (test harness use)
+    #[arg(long, hide = true)]
     nr_cpus: Option<u64>,
 
     /// Run BPF scheduler only, disable Rust adaptive control loop
@@ -67,36 +71,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum SubCmd {
-    /// Check dependencies and kernel config
-    Check,
+    /// Internal: interactive wakeup probe (Python test harness use)
+    #[command(hide = true)]
+    Probe,
 
-    /// Run interactive wakeup probe (stdout: overshoot_us per line)
-    Probe(ProbeArgs),
-
-    /// Build, run with sudo, capture output + dmesg, save logs
-    Start(StartArgs),
-
-    /// Show filtered kernel dmesg for sched_ext/pandemonium
-    Dmesg,
-
-    /// A/B benchmark (EEVDF baseline vs PANDEMONIUM)
-    Bench(BenchArgs),
-
-    /// Build release then run bench (logs to /tmp/pandemonium)
-    BenchRun(BenchRunArgs),
-
-    /// Run test gate (unit + integration)
-    Test,
-
-    /// CPU-pinned stress worker for bench-scale (internal use)
+    /// Internal: CPU-pinned stress worker (Python test harness use)
+    #[command(hide = true)]
     StressWorker(StressWorkerArgs),
-}
-
-#[derive(Parser)]
-struct ProbeArgs {
-    /// Death pipe FD for orphan detection (internal use)
-    #[arg(long)]
-    death_pipe_fd: Option<i32>,
 }
 
 #[derive(Parser)]
@@ -104,63 +85,6 @@ struct StressWorkerArgs {
     /// CPU to pin the stress worker to
     #[arg(long)]
     cpu: u32,
-}
-
-#[derive(Parser)]
-struct StartArgs {
-    /// Run with --verbose --dump-log
-    #[arg(long)]
-    observe: bool,
-
-    /// Extra args forwarded to `pandemonium run`
-    #[arg(last = true)]
-    sched_args: Vec<String>,
-}
-
-#[derive(Parser)]
-struct BenchArgs {
-    /// Benchmark mode
-    #[arg(long, value_enum)]
-    mode: cli::bench::BenchMode,
-
-    /// Command to benchmark (for --mode cmd)
-    #[arg(long)]
-    cmd: Option<String>,
-
-    /// Number of iterations per phase
-    #[arg(long, default_value_t = 3)]
-    iterations: usize,
-
-    /// Clean command between iterations (for --mode cmd)
-    #[arg(long)]
-    clean_cmd: Option<String>,
-
-    /// Extra args forwarded to `pandemonium run`
-    #[arg(last = true)]
-    sched_args: Vec<String>,
-}
-
-#[derive(Parser)]
-struct BenchRunArgs {
-    /// Benchmark mode
-    #[arg(long, value_enum)]
-    mode: cli::bench::BenchMode,
-
-    /// Command to benchmark (for --mode cmd)
-    #[arg(long)]
-    cmd: Option<String>,
-
-    /// Number of iterations per phase
-    #[arg(long, default_value_t = 3)]
-    iterations: usize,
-
-    /// Clean command between iterations (for --mode cmd)
-    #[arg(long)]
-    clean_cmd: Option<String>,
-
-    /// Extra args forwarded to `pandemonium run`
-    #[arg(last = true)]
-    sched_args: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -182,28 +106,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive, &extra_compositors),
-        Some(SubCmd::Check) => cli::check::run_check(),
-        Some(SubCmd::Probe(args)) => {
-            cli::probe::run_probe(args.death_pipe_fd);
+        Some(SubCmd::Probe) => {
+            cli::probe::run_probe();
             Ok(())
         }
-        Some(SubCmd::Start(args)) => cli::run::run_start(args.observe, &args.sched_args),
-        Some(SubCmd::Dmesg) => cli::run::run_dmesg(),
-        Some(SubCmd::Bench(args)) => cli::bench::run_bench(
-            args.mode,
-            args.cmd.as_deref(),
-            args.iterations,
-            args.clean_cmd.as_deref(),
-            &args.sched_args,
-        ),
-        Some(SubCmd::BenchRun(args)) => cli::bench::run_bench_run(
-            args.mode,
-            args.cmd.as_deref(),
-            args.iterations,
-            args.clean_cmd.as_deref(),
-            &args.sched_args,
-        ),
-        Some(SubCmd::Test) => cli::test_gate::run_test_gate(),
         Some(SubCmd::StressWorker(args)) => {
             cli::stress::run_stress_worker(args.cpu);
             Ok(())
@@ -223,7 +129,6 @@ const DEFAULT_COMPOSITORS: &[&str] = &[
     "labwc",
     "wayfire",
     "niri",
-    "pandemonium",
 ];
 
 fn run_scheduler(
@@ -236,6 +141,11 @@ fn run_scheduler(
     ctrlc::set_handler(move || {
         SHUTDOWN.store(true, Ordering::Relaxed);
     })?;
+
+    // WATCHDOG: ABORTS IF THE CONTROL LOOP STALLS FOR MORE THAN 10 SECONDS.
+    // LIBBPF MAP OPERATIONS CAN HANG ON KERNEL STALL / VERIFIER RELOAD /
+    // PERCPU CONTENTION; WITHOUT THIS, TELEMETRY AND KNOB WRITES STOP SILENTLY.
+    watchdog::spawn(&SHUTDOWN, Duration::from_secs(10));
 
     let nr_cpus_display =
         nr_cpus.unwrap_or_else(|| libbpf_rs::num_possible_cpus().unwrap_or(1) as u64);
@@ -287,11 +197,18 @@ fn run_scheduler(
                     log_warn!("L2 SIBLINGS MAP WRITE FAILED: {}", e);
                 }
                 // RESISTANCE AFFINITY: COMPUTE R_EFF VIA LAPLACIAN PSEUDOINVERSE
-                // AND POPULATE BPF AFFINITY RANK MAP
-                let (reff, rank) = topo.compute_resistance_affinity();
-                topo.log_resistance_affinity(&reff, &rank);
+                // AND POPULATE BPF AFFINITY RANK MAP. SPECTRUM CARRIES lambda_2
+                // AND tau_ns FOR UNIVERSAL TOPOLOGY-DERIVED SCALING.
+                let (reff, rank, spectrum) = topo.compute_resistance_affinity();
+                topo.log_resistance_affinity(&reff, &rank, spectrum);
                 if let Err(e) = topo.populate_affinity_rank_map(&sched, &rank) {
                     log_warn!("AFFINITY RANK MAP WRITE FAILED: {}", e);
+                }
+                // WRITE tau_ns + codel_eq_ns INTO tuning_knobs. BPF'S tick() ON
+                // CPU 0 PICKS THESE UP AND DERIVES THE TAU-SCALED TIMING STATICS
+                // AND THE R_eff-DERIVED CODEL EQUILIBRIUM TARGET.
+                if let Err(e) = sched.write_topology_fields(spectrum.tau_ns, spectrum.codel_eq_ns) {
+                    log_warn!("TOPOLOGY KNOB WRITE FAILED: {}", e);
                 }
             }
             Err(e) => log_warn!("CACHE TOPOLOGY DETECT FAILED: {}", e),
@@ -315,6 +232,7 @@ fn run_scheduler(
             log_info!("PANDEMONIUM IS ACTIVE (BPF ONLY, CTRL+C TO EXIT)");
             let mut prev = scheduler::PandemoniumStats::default();
             while !SHUTDOWN.load(Ordering::Relaxed) && !sched.exited() {
+                watchdog::LOOP_HEARTBEAT.fetch_add(1, Ordering::Relaxed);
                 std::thread::sleep(Duration::from_secs(1));
 
                 let stats = sched.read_stats();
@@ -350,7 +268,6 @@ fn run_scheduler(
                 } else {
                     0
                 };
-                let delta_procdb = stats.nr_procdb_hits.wrapping_sub(prev.nr_procdb_hits);
                 let delta_reenq = stats.nr_reenqueue.wrapping_sub(prev.nr_reenqueue);
 
                 // L2 CACHE AFFINITY DELTAS
@@ -391,8 +308,6 @@ fn run_scheduler(
                 };
 
                 let sojourn_ms = stats.batch_sojourn_ns / 1_000_000;
-                let delta_burst = stats.burst_mode_active.wrapping_sub(prev.burst_mode_active);
-                let burst_label = if delta_burst > 0 { " BURST" } else { "" };
                 let longrun_label = if stats.longrun_mode_active > 0 {
                     " LONGRUN"
                 } else {
@@ -401,12 +316,12 @@ fn run_scheduler(
 
                 if verbose {
                     println!(
-                        "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us lat_idle: {}us lat_kick: {}us procdb: {} reenq: {} sjrn: {}ms l2: B={}% I={}% L={}% [BPF{}{}]",
+                        "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us lat_idle: {}us lat_kick: {}us reenq: {} sjrn: {}ms l2: B={}% I={}% L={}% [BPF{}]",
                         delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
                         delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
-                        wake_avg_us, lat_idle_us, lat_kick_us, delta_procdb,
+                        wake_avg_us, lat_idle_us, lat_kick_us,
                         delta_reenq, sojourn_ms, l2_pct_b, l2_pct_i, l2_pct_l,
-                        burst_label, longrun_label,
+                        longrun_label,
                     );
                 }
 
@@ -448,9 +363,9 @@ fn run_scheduler(
                 0
             };
             println!(
-                "[KNOBS] regime=BPF slice_ns={} batch_ns={} preempt_ns={} demotion_ns={} lag={} l2_hit=B:{}%/I:{}%/L:{}%",
+                "[KNOBS] regime=BPF slice_ns={} batch_ns={} preempt_ns={} lag={} l2_hit=B:{}%/I:{}%/L:{}%",
                 knobs.slice_ns, knobs.batch_slice_ns,
-                knobs.preempt_thresh_ns, knobs.cpu_bound_thresh_ns,
+                knobs.preempt_thresh_ns,
                 knobs.lag_scale, l2_cum_b, l2_cum_i, l2_cum_l,
             );
 
