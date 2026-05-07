@@ -2169,31 +2169,31 @@ static s32 init_per_cpu_ctx(u64 now)
 			goto unlock_out;
 		}
 
-		err = calloc_cpumask(&cpuc->tmp_a_mask);
+		err = calloc_cpumask(&cpuc->a_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_o_mask);
+		err = calloc_cpumask(&cpuc->o_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_l_mask);
+		err = calloc_cpumask(&cpuc->temp_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_i_mask);
+		err = calloc_cpumask(&cpuc->i_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_t_mask);
+		err = calloc_cpumask(&cpuc->ia_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_t2_mask);
+		err = calloc_cpumask(&cpuc->io_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_t3_mask);
+		err = calloc_cpumask(&cpuc->iat_mask);
 		if (err)
 			goto unlock_out;
 
