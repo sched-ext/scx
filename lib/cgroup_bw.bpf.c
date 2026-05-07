@@ -61,10 +61,25 @@ enum scx_cgroup_consts {
 };
 
 /*
- * Root cgroup id; Inside a cgroup namespace
- * (e.g., within a container), root cgroup id won't be 1.
+ * Root cgroup id.  This is the kernel-level cgroup_id of the
+ * cgroup-v2 default hierarchy root, which is always 1 on a
+ * standard kernel configuration (kernfs allocates the root with
+ * inode 1 in cgrp_dfl_root.kf_root).  Cgroup namespaces do not
+ * change this value -- they create a virtual root *view* but the
+ * underlying struct cgroup objects keep their kernel-level ids.
+ *
+ * Kept as a named constant rather than a literal 1 so future
+ * cgroup-namespace-aware support (where the scheduler's effective
+ * scope is some non-root cgroup) has a clear hook to plug into.
  */
-static u64 ROOT_CGID = 1;
+#define ROOT_CGID	1ULL
+
+/*
+ * TGID of the loader process (e.g., scx_lavd) captured at
+ * scx_cgroup_bw_lib_init() time.  Used by cbw_get_root_cgrp() to
+ * resolve the root cgroup pointer; see that function for details.
+ */
+static u32 cbw_loader_tgid;
 
 /**
  * Per-cgroup data structure containing cpu.max-related information.
@@ -653,6 +668,9 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 		return -EINVAL;
 	cbw_config = *config;
 
+	/* Capture the loader's TGID; see cbw_get_root_cgrp(). */
+	cbw_loader_tgid = (u32)(bpf_get_current_pid_tgid() >> 32);
+
 	/* Initialize the replenish timer. */
 	rp_timer = bpf_map_lookup_elem(&replenish_timer, &key);
 	if (!rp_timer) {
@@ -875,6 +893,13 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 	scx_atq_t *btq;
 	u64 taskc;
 
+	/*
+	 * Root's LLC contexts are invariant for the scheduler's
+	 * lifetime; refuse to tear them down regardless of caller.
+	 */
+	if (unlikely(cgrp_id == ROOT_CGID))
+		return 0;
+
 	if (cgx) {
 		if (!cgx->has_llcx)
 			return 0;
@@ -1077,8 +1102,6 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
 
 	cgrp_id = cgroup_get_id(cgrp);
-	if (unlikely(cgrp->level == 0))
-		ROOT_CGID = cgrp_id;
 
 	/*
 	 * Allocate and initialize scx_cgroup_ctx for @cgrp.
@@ -1848,6 +1871,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 		 */
 		cbw_dbg("Possible double enqueue detected.");
 		scx_atq_unlock(btq);
+		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
 		return 0;
 	}
 
@@ -2048,6 +2072,61 @@ int scx_cgroup_bw_cancel(u64 ctx)
 	return scx_atq_cancel((scx_task_common *)ctx);
 }
 
+static struct cgroup *cbw_get_root_cgrp(void)
+{
+	struct task_struct *task;
+	struct cgroup *cgrp, *root = NULL;
+
+	/*
+	 * Resolve the root cgroup pointer through the BPF scheduler's
+	 * loader task (whose tgid was captured by scx_cgroup_bw_lib_init).
+	 *
+	 * Why not bpf_cgroup_from_id(ROOT_CGID)?  On kernels < v6.18,
+	 * bpf_cgroup_from_id() routes through cgroup_get_from_id() which
+	 * filters against `current`'s cgroup namespace.  When called from
+	 * BPF timers (softirq) or ops.dispatch, `current` is whichever
+	 * task happened to be on the CPU -- frequently a containerised
+	 * service whose cgroup namespace root is not the host root.  The
+	 * lookup then returns NULL even though ROOT_CGID is valid.
+	 * Upstream commit 2c8951339506 ("bpf: Do not limit
+	 * bpf_cgroup_from_id to current's namespace") fixes this in
+	 * v6.18+.
+	 *
+	 * Resolving via the loader task avoids the issue on every
+	 * kernel: bpf_task_from_pid() looks up against init_pid_ns
+	 * regardless of `current`, and bpf_cgroup_ancestor() walks the
+	 * kernel-side cgrp->ancestors[] array which is not namespace-
+	 * aware.
+	 *
+	 * Caller owns the returned reference and must release it via
+	 * bpf_cgroup_release().
+	 */
+
+	if (unlikely(!cbw_loader_tgid))
+		goto out;
+
+	task = bpf_task_from_pid((s32)cbw_loader_tgid);
+	if (!task)
+		goto out;
+
+	bpf_rcu_read_lock();
+	cgrp = task->cgroups->dfl_cgrp;
+	if (cgrp)
+		root = bpf_cgroup_ancestor(cgrp, 0);
+	bpf_rcu_read_unlock();
+
+	bpf_task_release(task);
+
+out:
+	if (unlikely(!root)) {
+		cbw_err("Failed to resolve root cgroup via loader task "
+			"(tgid=%u)", cbw_loader_tgid);
+	}
+
+	return root;
+}
+
+
 /*
  * A handler function for the accounting timer.
  */
@@ -2065,11 +2144,9 @@ int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * half will replenish and unthrottle all the cgroups anyway; use the
 	 * maximum interval so we do not busy-wait.
 	 */
-	root_cgrp = bpf_cgroup_from_id(ROOT_CGID);
-	if (unlikely(!root_cgrp)) {
-		cbw_err("Failed to fetch the root cgroup pointer.");
+	root_cgrp = cbw_get_root_cgrp();
+	if (unlikely(!root_cgrp))
 		goto rearm_out;
-	}
 
 	if (unlikely(cbw_top_half_running()))
 		goto release_out;
@@ -2121,9 +2198,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	/*
 	 * Update the runtime total before replenishing budgets.
 	 */
-	root_cgrp = bpf_cgroup_from_id(ROOT_CGID);
+	root_cgrp = cbw_get_root_cgrp();
 	if (!root_cgrp) {
-		cbw_err("Failed to fetch the root cgroup pointer.");
 		cbw_top_half_abort();
 		goto rearm_out;
 	}
@@ -2313,7 +2389,7 @@ offline_cgroup:
 		 * cbw_throttle_cgroups() only sets is_throttled (never clears
 		 * it), so two concurrent calls are idempotent.
 		 */
-		root_cgrp = bpf_cgroup_from_id(ROOT_CGID);
+		root_cgrp = cbw_get_root_cgrp();
 		if (root_cgrp) {
 			cbw_throttle_cgroups(root_cgrp);
 			bpf_cgroup_release(root_cgrp);
@@ -2522,6 +2598,9 @@ int scx_cgroup_bw_reenqueue(void)
 
 		cur_cgrp = bpf_cgroup_from_id(cur_cgrp_id);
 		if (!cur_cgrp) {
+			/* Never tear down root; see cbw_get_root_cgrp(). */
+			if (cur_cgrp_id == ROOT_CGID)
+				continue;
 			cbw_dbg("Failed to fetch a cgroup pointer: %llu", ids[0]);
 
 			/*
