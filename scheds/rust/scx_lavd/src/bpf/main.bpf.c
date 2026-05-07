@@ -932,30 +932,41 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 static
 int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 {
-	struct cpu_ctx *cpuc, *cpuc_cur;
+	struct cpu_ctx *cpuc;
 	u64 dsq_id;
 	s32 cpu;
 
-	cpuc_cur = get_cpu_ctx();
-	if (!taskc || !cpuc_cur) {
+	if (!taskc) {
 		scx_bpf_error("Failed to lookup a task context: %d", p->pid);
 		return 0;
 	}
 
 	/*
-	 * Calculate when a task can be scheduled.
+	 * Note that we don't need to calculate p->scx.dsq_vtime again
+	 * since it was already calculated and assigned to p->scx.dsq_vtime
+	 * before the task was throttled.
 	 */
-	p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 
 	/*
-	 * Fetch the chosen CPU and DSQ for the task.
+	 * Validate the cached CPU choice. The cache may have gone stale
+	 * during throttle (e.g., affinity changed). If suggested_cpu_id is
+	 * no longer in p->cpus_ptr, fall back to the kernel's task_cpu --
+	 * the kernel keeps task_cpu consistent with affinity, and a full
+	 * pick_idle_cpu() refresh from this BTQ-drain context would push
+	 * the call chain past the verifier's combined-stack budget.
 	 */
 	cpu = taskc->suggested_cpu_id;
+	if (cpu < 0 || cpu >= nr_cpu_ids ||
+	    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		cpu = scx_bpf_task_cpu(p);
+
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return 0;
 	}
+	taskc->suggested_cpu_id = cpu;
+	taskc->cpdom_id = cpuc->cpdom_id;
 
 	/*
 	 * Mirror the lavd_enqueue() accounting: count effectively pinned
@@ -974,7 +985,8 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	/*
 	 * Kick the target CPU if it is idle.
 	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (scx_bpf_test_and_clear_cpu_idle(cpu))
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	return 0;
 }
 
