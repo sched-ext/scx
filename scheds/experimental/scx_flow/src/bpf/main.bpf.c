@@ -1370,8 +1370,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				 has_wake_profile(tctx, WAKE_PROFILE_PREEMPT_READY));
 
 			use_local_reserved = should_preempt || direct_local_wakeup ||
-				ipc_confidence_wakeup ||
-				(tctx->wake_cpu_idle && is_wakeup);
+				ipc_confidence_wakeup;
 			ordinary_local_reserved = use_local_reserved && !should_preempt;
 
 			if (ordinary_local_reserved &&
