@@ -266,6 +266,18 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 	return ret;
 }
 
+u64 __attribute__((noinline)) dsq_peek_task_load(u64 dsq_id)
+{
+	struct task_struct *peek_p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+
+	if (peek_p) {
+		task_ctx *peek_taskc = get_task_ctx(peek_p);
+		if (peek_taskc)
+			return task_load_metric(peek_taskc);
+	}
+	return 0;
+}
+
 u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 {
 	u64 pick_dsq_id = -ENOENT;
@@ -382,14 +394,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			 * because the next LB round recomputes budgets from
 			 * scratch.
 			 */
-			u64 task_load = 0;
-			struct task_struct *peek_p =
-				__COMPAT_scx_bpf_dsq_peek(dsq_id);
-			if (peek_p) {
-				task_ctx *peek_taskc = get_task_ctx(peek_p);
-				if (peek_taskc)
-					task_load = task_load_metric(peek_taskc);
-			}
+			u64 task_load = dsq_peek_task_load(dsq_id);
 
 			/*
 			 * On success, decrement both egress and ingress
@@ -465,14 +470,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			/*
 			 * Peek at the head task to get its size.
 			 */
-			u64 task_load = 0;
-			struct task_struct *peek_p =
-				__COMPAT_scx_bpf_dsq_peek(dsq_id);
-			if (peek_p) {
-				task_ctx *peek_taskc = get_task_ctx(peek_p);
-				if (peek_taskc)
-					task_load = task_load_metric(peek_taskc);
-			}
+			u64 task_load = dsq_peek_task_load(dsq_id);
 
 			/*
 			 * Force steal is unconditional for work
