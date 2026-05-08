@@ -694,9 +694,10 @@ static __always_inline void recompute_wake_profile(const struct task_struct *p,
 	pressure_ready = !containment_active &&
 		has_urgent_latency_pressure(tctx);
 	rt_sensitive_ready = !containment_active &&
-		p->nr_cpus_allowed == 1 &&
 		tctx->last_refill_ns > 0 &&
-		tctx->last_refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS;
+		(p->nr_cpus_allowed == 1 ||
+		 p->prio < 100 ||
+		 tctx->last_refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS);
 	preempt_ready = !containment_active &&
 		(p->nr_cpus_allowed == 1 ||
 		 tctx->budget_ns >= (s64)preempt_budget_min_ns);
@@ -1360,31 +1361,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 
 		if (is_wakeup && !containment_active)
 			enq_flags |= SCX_ENQ_HEAD;
-
-		/*
-		 * Short-sleep fast path: tasks that have been sleeping for less
-		 * than FLOW_INTERACTIVE_SLEEP_MIN_NS are extremely high-frequency
-		 * wakeups (e.g. cyclictest, timer-driven periodic work).  They
-		 * should bypass all lane analysis and be dispatched directly to
-		 * the target CPU's local DSQ with a minimal slice.
-		 *
-		 * A positive accumulated budget is sufficient evidence of
-		 * responsiveness — the refill and lane gates only add per-wakeup
-		 * BPF overhead without changing the outcome for such tasks.
-		 */
-		if (is_wakeup && tctx && tctx->budget_ns > 0 &&
-		    !containment_active &&
-		    tctx->last_sleep_ns > 0 &&
-		    tctx->last_sleep_ns <= FLOW_INTERACTIVE_SLEEP_MIN_NS &&
-		    (has_wake_target ||
-		     (target_cpu >= 0 && bpf_cpumask_test_cpu(target_cpu, p->cpus_ptr)))) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | target_cpu,
-					   FLOW_SLICE_MIN_NS,
-					   enq_flags | SCX_ENQ_HEAD);
-			FLOW_CPUSTAT_INC(cstate, local_fast_dispatches);
-			clear_wake_target(tctx);
-			return;
-		}
 
 		if (has_wake_target ||
 		    (target_cpu >= 0 && bpf_cpumask_test_cpu(target_cpu, p->cpus_ptr))) {
