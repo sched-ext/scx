@@ -972,8 +972,10 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 * Mirror the lavd_enqueue() accounting: count effectively pinned
 	 * tasks (permanent or migrate_disable) for slice shrinking.
 	 */
-	if (is_effectively_pinned(taskc))
+	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
+		taskc->pinned_cpu_id = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+	}
 
 	/*
 	 * Enqueue the task to a DSQ.
@@ -1796,7 +1798,10 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
+	struct cpu_ctx *cpuc, *cpuc_cur;
 	task_ctx *taskc;
+	bool is_idle = false;
+	s32 cpu;
 
 	taskc = get_task_ctx(p);
 	if (!taskc) {
@@ -1805,6 +1810,38 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 	}
 
 	set_affinity_flags(taskc, cpumask);
+
+	/*
+	 * Refresh the cached CPU pick when this task is currently parked
+	 * in the BTQ -- enqueue_cb() will dispatch using the cached value.
+	 * Both this path and enqueue_cb() may run concurrently on different
+	 * CPUs, so each writes all three placement fields independently.
+	 * volatile on the fields keeps the writes single-copy-atomic.
+	 */
+	if (!enable_cpu_bw || !scx_cgroup_bw_is_task_throttled((u64)taskc))
+		return;
+
+	cpuc_cur = get_cpu_ctx();
+	if (!cpuc_cur)
+		return;
+
+	struct pick_ctx ictx = {
+		.p = p,
+		.taskc = taskc,
+		.prev_cpu = taskc->prev_cpu_id,
+		.cpuc_cur = cpuc_cur,
+		.wake_flags = 0,
+	};
+	cpu = pick_idle_cpu(&ictx, &is_idle);
+	cpuc = (cpu >= 0 && cpu < nr_cpu_ids) ? get_cpu_ctx_id(cpu) : NULL;
+	if (cpuc) {
+		taskc->suggested_cpu_id = cpu;
+		taskc->cpdom_id = cpuc->cpdom_id;
+	} else {
+		taskc->suggested_cpu_id = (u32)-ENOENT;
+		taskc->cpdom_id = (u32)-ENOENT;
+	}
+	taskc->pinned_cpu_id = -ENOENT;   /* throttled => not actively waiting */
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
