@@ -1361,6 +1361,31 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (is_wakeup && !containment_active)
 			enq_flags |= SCX_ENQ_HEAD;
 
+		/*
+		 * Short-sleep fast path: tasks that have been sleeping for less
+		 * than FLOW_INTERACTIVE_SLEEP_MIN_NS are extremely high-frequency
+		 * wakeups (e.g. cyclictest, timer-driven periodic work).  They
+		 * should bypass all lane analysis and be dispatched directly to
+		 * the target CPU's local DSQ with a minimal slice.
+		 *
+		 * A positive accumulated budget is sufficient evidence of
+		 * responsiveness — the refill and lane gates only add per-wakeup
+		 * BPF overhead without changing the outcome for such tasks.
+		 */
+		if (is_wakeup && tctx && tctx->budget_ns > 0 &&
+		    !containment_active &&
+		    tctx->last_sleep_ns > 0 &&
+		    tctx->last_sleep_ns <= FLOW_INTERACTIVE_SLEEP_MIN_NS &&
+		    (has_wake_target ||
+		     (target_cpu >= 0 && bpf_cpumask_test_cpu(target_cpu, p->cpus_ptr)))) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | target_cpu,
+					   FLOW_SLICE_MIN_NS,
+					   enq_flags | SCX_ENQ_HEAD);
+			FLOW_CPUSTAT_INC(cstate, local_fast_dispatches);
+			clear_wake_target(tctx);
+			return;
+		}
+
 		if (has_wake_target ||
 		    (target_cpu >= 0 && bpf_cpumask_test_cpu(target_cpu, p->cpus_ptr))) {
 			bool should_preempt;
