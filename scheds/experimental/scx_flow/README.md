@@ -54,7 +54,7 @@ Benchmark scripts, validation helpers, and archived result bundles used during
 development are available at:
 https://github.com/galpt/testing-scx_flow
 
-Direct `v2.2.2` benchmark snapshot:
+Direct `v2.2.3` benchmark snapshot:
 https://github.com/galpt/testing-scx_flow/tree/benchmark-archives/20260409_scx_flow_v2.2.0_release
 
 In practice, the stronger results there usually translate to better foreground
