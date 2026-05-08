@@ -193,6 +193,12 @@ struct Opts {
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
     no_futex_boost: bool,
 
+    /// Default: --no-fast-lb is deactivated (fast load balancer is on).
+    /// Disable the fast (batch-migration) load balancer and fall back to
+    /// the pre-fast-lb load-balancer behavior.
+    #[clap(long = "no-fast-lb", action = clap::ArgAction::SetTrue)]
+    no_fast_lb: bool,
+
     /// Disable preemption.
     #[clap(long = "no-preemption", action = clap::ArgAction::SetTrue)]
     no_preemption: bool,
@@ -686,6 +692,7 @@ impl<'a> Scheduler<'a> {
         rodata.lb_low_util_wall = ((opts.lb_low_util_pct as u64) << 10) / 100;
         rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
         rodata.no_use_em = opts.no_use_em as u8;
+        rodata.no_fast_lb = opts.no_fast_lb as u8;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;

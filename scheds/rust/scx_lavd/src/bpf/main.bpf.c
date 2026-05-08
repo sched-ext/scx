@@ -218,6 +218,9 @@ const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
  */
 const volatile u8	mig_delta_pct = 0;
 
+/* Disable batch-migration load balancer; set via --no-fast-lb. */
+const volatile u8	no_fast_lb = 0;
+
 /*
  * Skip periodic load balancing when average system utilization is below this
  * threshold. The value is pre-scaled by userspace. 0 = disabled.

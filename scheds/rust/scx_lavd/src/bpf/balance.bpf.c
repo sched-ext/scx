@@ -18,6 +18,7 @@
 
 
 extern const volatile u8	mig_delta_pct;
+extern const volatile u8	no_fast_lb;
 extern const volatile u64	lb_low_util_wall;
 
 u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen,
@@ -56,7 +57,12 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 	if (!cpdomc)
 		return 0;
 
-	if (cpdomc->nr_active_cpus && total_cap_sum > 0) {
+	if (no_fast_lb && sys_stat.nr_active_cpdoms) {
+		u64 avg = total_load_invr / sys_stat.nr_active_cpdoms;
+		x_mig_delta = calc_mig_delta(avg, nz_qlen, mig_delta_factor);
+		stealer_threshold = avg - x_mig_delta;
+		stealee_threshold = avg + x_mig_delta;
+	} else if (cpdomc->nr_active_cpus && total_cap_sum > 0) {
 		fair_share_invr = total_load_invr *
 			     cpdomc->cap_sum_active_cpus /
 			     total_cap_sum;
@@ -169,13 +175,21 @@ int plan_x_cpdom_migration(void)
 		 * and queued load (qload_invr, tracked atomically via
 		 * account/unaccount at enqueue/running).
 		 */
-		cpdomc->load_invr = cpdomc->avg_util_invr_sum +
-				    cpdomc->qload_invr;
+		if (no_fast_lb) {
+			u64 qlen = cpdomc->nr_queued_task;
+			u64 qlen_invr = (qlen << (LAVD_SHIFT * 3)) /
+					cpdomc->cap_sum_active_cpus;
+			cpdomc->load_invr = util + qlen_invr;
+			if (qlen)
+				nz_qlen++;
+		} else {
+			cpdomc->load_invr = cpdomc->avg_util_invr_sum +
+					    cpdomc->qload_invr;
+			if (cpdomc->qload_invr)
+				nz_qlen++;
+		}
 		total_load_invr += cpdomc->load_invr;
 		total_cap_sum += cpdomc->cap_sum_active_cpus;
-
-		if (cpdomc->qload_invr)
-			nz_qlen++;
 	}
 
 	/*
@@ -317,6 +331,10 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 	if (!cpdomc->nr_active_cpus)
 		return false;
 
+	if (no_fast_lb &&
+	    !prob_x_out_of_y(1, cpdomc->nr_active_cpus * LAVD_CPDOM_MIG_PROB_FT))
+		return false;
+
 	/*
 	 * Traverse neighbor compute domains in distance order.
 	 */
@@ -381,8 +399,13 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			 * helpers.
 			 */
 			if (consume_dsq(cpdomc_pick, dsq_id)) {
-				decrement_stealee_budget(cpdomc_pick, task_load);
-				decrement_stealer_budget(cpdomc, task_load);
+				if (no_fast_lb) {
+					WRITE_ONCE(cpdomc_pick->is_stealee, false);
+					WRITE_ONCE(cpdomc->is_stealer, false);
+				} else {
+					decrement_stealee_budget(cpdomc_pick, task_load);
+					decrement_stealer_budget(cpdomc, task_load);
+				}
 				return true;
 			}
 		}

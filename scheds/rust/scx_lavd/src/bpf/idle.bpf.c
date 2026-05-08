@@ -17,6 +17,8 @@
 #include <bpf/bpf_tracing.h>
 #include <lib/cgroup.h>
 
+extern const volatile u8	no_fast_lb;
+
 struct sticky_ctx {
 	/*
 	 * For test_cpu_stickable().
@@ -612,6 +614,10 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 				 * budget. Flags are cleared only by budget
 				 * exhaustion in the stealing path.
 				 */
+				if (no_fast_lb) {
+					WRITE_ONCE(mig_cpdc->is_stealer, false);
+					WRITE_ONCE(cpdc->is_stealee, false);
+				}
 				*sticky_cpdom = mig_cpdom;
 				break;
 			}
