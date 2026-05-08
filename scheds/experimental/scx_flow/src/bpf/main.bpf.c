@@ -699,8 +699,7 @@ static __always_inline void recompute_wake_profile(const struct task_struct *p,
 		tctx->last_refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS;
 	preempt_ready = !containment_active &&
 		(p->nr_cpus_allowed == 1 ||
-		 (tctx->last_refill_ns >= (s64)preempt_refill_min_ns &&
-		  tctx->budget_ns >= (s64)preempt_budget_min_ns));
+		 tctx->budget_ns >= (s64)preempt_budget_min_ns);
 	latency_lane_ready = (allowance_ready || pressure_ready) &&
 		!rt_sensitive_ready;
 
@@ -1371,7 +1370,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				 has_wake_profile(tctx, WAKE_PROFILE_PREEMPT_READY));
 
 			use_local_reserved = should_preempt || direct_local_wakeup ||
-				ipc_confidence_wakeup;
+				ipc_confidence_wakeup ||
+				(tctx->wake_cpu_idle && is_wakeup);
 			ordinary_local_reserved = use_local_reserved && !should_preempt;
 
 			if (ordinary_local_reserved &&
