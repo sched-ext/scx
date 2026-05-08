@@ -57,6 +57,22 @@ https://github.com/galpt/testing-scx_flow
 Direct `v2.2.3` benchmark snapshot:
 https://github.com/galpt/testing-scx_flow/tree/benchmark-archives/20260409_scx_flow_v2.2.0_release
 
+## Changelog
+
+### v2.2.4 — fix rt_sensitive_ready predicate regression
+
+The v2.2.3 change that relaxed the rt_sensitive_ready condition contained
+a logical error: any task with 80 us or more of recent refill qualified as
+RT-sensitive, regardless of whether it was genuinely RT-classified
+(SCHED_FIFO/RR or pinned to a single CPU). This caused regular periodic
+tasks such as cyclictest to be blocked from the latency lane and forced
+into the preemption-based RT path with 50 us slices, regressing max
+latency from 173 us (v2.2.0) to 476 us (v2.2.3) in the 100 us benchmark.
+
+The refill threshold is now properly ANDed with the genuine RT
+classification instead of being a standalone OR condition, restoring the
+intended behaviour:
+
 In practice, the stronger results there usually translate to better foreground
 responsiveness, steadier behavior under background load, and fewer obvious
 hiccups when interactive and CPU-heavy work happen at the same time.

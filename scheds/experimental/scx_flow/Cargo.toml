@@ -1,6 +1,6 @@
 [package]
 name = "scx_flow"
-version = "2.2.3"
+version = "2.2.4"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
 description = "A multi-lane budget-based sched_ext scheduler for interactive responsiveness and general-purpose throughput. https://github.com/sched-ext/scx/tree/main"

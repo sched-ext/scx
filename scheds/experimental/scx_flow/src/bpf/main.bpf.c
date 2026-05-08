@@ -695,9 +695,8 @@ static __always_inline void recompute_wake_profile(const struct task_struct *p,
 		has_urgent_latency_pressure(tctx);
 	rt_sensitive_ready = !containment_active &&
 		tctx->last_refill_ns > 0 &&
-		(p->nr_cpus_allowed == 1 ||
-		 p->prio < 100 ||
-		 tctx->last_refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS);
+		(p->nr_cpus_allowed == 1 || p->prio < 100) &&
+		tctx->last_refill_ns >= (s64)FLOW_INTERACTIVE_FLOOR_MIN_NS;
 	preempt_ready = !containment_active &&
 		(p->nr_cpus_allowed == 1 ||
 		 tctx->budget_ns >= (s64)preempt_budget_min_ns);
