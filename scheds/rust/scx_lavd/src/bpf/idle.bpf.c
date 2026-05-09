@@ -17,6 +17,8 @@
 #include <bpf/bpf_tracing.h>
 #include <lib/cgroup.h>
 
+extern const volatile u8	no_fast_lb;
+
 struct sticky_ctx {
 	/*
 	 * For test_cpu_stickable().
@@ -605,16 +607,17 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
 			if (cpu >= 0) {
 				/*
-				 * If task donation is successful, mark the stealer
-				 * and the stealee's job done. By marking done,
-				 * those compute domains would not be involved in
-				 * load balancing until the end of this round,
-				 * so this helps gradual migration. It is racy
-				 * in task stealings and donations, but we don't
-				 * care because a slight over-migration does not matter.
+				 * Leave both stealer and stealee flags
+				 * active for the round. Donation redirects
+				 * a waking task — it was never queued in
+				 * the stealee domain, so don't touch the
+				 * budget. Flags are cleared only by budget
+				 * exhaustion in the stealing path.
 				 */
-				WRITE_ONCE(mig_cpdc->is_stealer, false);
-				WRITE_ONCE(cpdc->is_stealee, false);
+				if (no_fast_lb) {
+					WRITE_ONCE(mig_cpdc->is_stealer, false);
+					WRITE_ONCE(cpdc->is_stealee, false);
+				}
 				*sticky_cpdom = mig_cpdom;
 				break;
 			}

@@ -226,6 +226,8 @@ struct task_ctx {
 	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
 	u32	cpu_id;			/* where a task is running now */
 	u32	prev_cpu_id;		/* where a task ran last time */
+	u8	queued_in_cpdom_id;	/* cpdom this task's load is counted in; LAVD_CPDOM_MAX_NR = not queued */
+	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 
@@ -256,7 +258,8 @@ struct cpdom_ctx {
 	u8	is_stealee;			    /* stealer domain should steal tasks from this domain */
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
-	u32	load_invr;			    /* invariant load considering DSQ length and invariant CPU utilization */
+	u64	qload_invr;			    /* queued load: sum of task_load_metric() for all queued tasks, tracked atomically */
+	u64	load_invr;			    /* domain load for balancing: avg_util_invr_sum + qload_invr */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
 	u32	avg_util_wall_sum;		    /* the sum of average CPU utilization */
@@ -283,9 +286,42 @@ struct cpdom_ctx {
 	u16	nr_steady_cpus;		    /* count of steady CPUs in this cpdom */
 	u16	nr_turb_cpus;		    /* count of turbulent CPUs in this cpdom */
 
+	s64	stealee_budget_invr;		    /* egress budget: how much load can leave this domain per round */
+	s64	stealer_budget_invr;		    /* ingress budget: how much additional load this stealer can accept */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
+
+/*
+ * Atomically subtract @amount from the stealee's egress budget. Concurrent
+ * stealers on other CPUs may call this in parallel, so use __sync_fetch_and_sub
+ * to avoid race conditions. The signed s64 field lets the counter go slightly
+ * negative on underflow; once it happens, the <= 0 check clears the stealee
+ * flag so further stealers skip this domain for the rest of the round. Budgets
+ * are recomputed from scratch each LB round. Hopefully, transient negativity is
+ * harmless.
+ */
+static __always_inline void decrement_stealee_budget(struct cpdom_ctx *cpdomc,
+						     u64 amount)
+{
+	__sync_fetch_and_sub(&cpdomc->stealee_budget_invr, amount);
+
+	if (READ_ONCE(cpdomc->stealee_budget_invr) <= 0)
+		WRITE_ONCE(cpdomc->is_stealee, false);
+}
+
+/*
+ * Atomically subtract @amount from the stealer's ingress budget.
+ * Same rationale as decrement_stealee_budget().
+ */
+static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
+						     u64 amount)
+{
+	__sync_fetch_and_sub(&cpdomc->stealer_budget_invr, amount);
+
+	if (READ_ONCE(cpdomc->stealer_budget_invr) <= 0)
+		WRITE_ONCE(cpdomc->is_stealer, false);
+}
 
 extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
@@ -640,6 +676,19 @@ u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
 	u32 lat_step = normalized_lat_cri / LAVD_VULN_THRESH_STEP_SIZE;
 	u32 util_step = util_est / LAVD_VULN_THRESH_STEP_SIZE;
 	return lat_step * LAVD_VULN_THRESH_UTIL_STEPS + util_step;
+}
+
+/*
+ * Return the task's load contribution for queued load tracking.
+ * Uses RAVG util_est: [0, 1024], 128ms half-life, tracks duty cycle.
+ * Updated in lavd_runnable/lavd_quiescent — active under sched_ext.
+ *
+ * Note: kernel PELT p->se.avg.util_avg is NOT updated when sched_ext
+ * is enabled (tasks bypass CFS), so it cannot be used here.
+ */
+static __always_inline u32 task_load_metric(task_ctx *taskc)
+{
+	return taskc->util_est;
 }
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */

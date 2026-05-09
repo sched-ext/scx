@@ -218,6 +218,9 @@ const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
  */
 const volatile u8	mig_delta_pct = 0;
 
+/* Disable batch-migration load balancer; set via --no-fast-lb. */
+const volatile u8	no_fast_lb = 0;
+
 /*
  * Skip periodic load balancing when average system utilization is below this
  * threshold. The value is pre-scaled by userspace. 0 = disabled.
@@ -610,6 +613,59 @@ static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 		cpuc->avg_util_wall < lb_local_dsq_util_wall);
 }
 
+/*
+ * qload_invr is incremented/decremented atomically at every enqueue and
+ * dequeue, unlike other cpdom stats that are aggregated from per-CPU
+ * counters at the sys_stat interval. Migration decisions in
+ * plan_x_cpdom_migration() and try_to_steal_task() need the fresh
+ * per-domain queued-load value (sum of task sizes currently queued) at
+ * steal time; a sys_stat snapshot would be up to one interval (10 ms)
+ * stale and could misclassify a domain that just drained or absorbed
+ * a burst.
+ */
+static __always_inline void account_queued_load(task_ctx *taskc,
+						u8 cpdom_id)
+{
+	struct cpdom_ctx *cpdomc;
+
+	if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+		return;
+
+	/*
+	 * Skip if already accounted: prevent double-add when a task
+	 * walks through multiple enqueue paths before running.
+	 */
+	if (READ_ONCE(taskc->queued_in_cpdom_id) < LAVD_CPDOM_MAX_NR)
+		return;
+
+	/*
+	 * Snapshot the load value at enqueue time. The unaccount path
+	 * subtracts this exact snapshot, preventing drift when util_est
+	 * changes between enqueue and dequeue.
+	 */
+	u32 load = task_load_metric(taskc);
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	if (cpdomc)
+		__sync_fetch_and_add(&cpdomc->qload_invr, load);
+	taskc->queued_load_snapshot = load;
+	WRITE_ONCE(taskc->queued_in_cpdom_id, cpdom_id);
+}
+
+static __always_inline void unaccount_queued_load(task_ctx *taskc)
+{
+	struct cpdom_ctx *cpdomc;
+	u8 cpdom_id = READ_ONCE(taskc->queued_in_cpdom_id);
+
+	if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+		return;
+
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	if (cpdomc)
+		__sync_fetch_and_sub(&cpdomc->qload_invr,
+				     taskc->queued_load_snapshot);
+	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -695,6 +751,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 				goto out;
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
+			account_queued_load(ictx.taskc, cpuc->cpdom_id);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 			goto out;
 		}
@@ -846,6 +903,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	}
+	account_queued_load(taskc, cpuc->cpdom_id);
 
 	/*
 	 * If a new overflow CPU was assigned while finding a proper DSQ,
@@ -907,6 +965,7 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 */
 	dsq_id = get_target_dsq_id(p, cpuc, taskc);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
+	account_queued_load(taskc, cpuc->cpdom_id);
 
 	/*
 	 * Kick the target CPU if it is idle.
@@ -920,18 +979,22 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 	task_ctx *taskc;
 	int ret;
 
-	/*
-	 * ATQ is used only when enable_cpu_bw is on.
-	 * So, we don't need to cancel an ATQ operation if it is not on.
-	 */
-	if (!enable_cpu_bw)
-		return;
-
 	taskc = get_task_ctx(p);
 	if (!taskc) {
 		debugln("Failed to lookup task_ctx for task %d", p->pid);
 		return;
 	}
+
+	/*
+	 * If the task is currently running, it was already unaccounted
+	 * in lavd_running(). Skip for non-running dequeues only
+	 * (SCX_DEQ_CORE_SCHED_EXEC, migration, etc.).
+	 */
+	if (p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p)))
+		unaccount_queued_load(taskc);
+
+	if (!enable_cpu_bw)
+		return;
 
 	if ((ret = scx_cgroup_bw_cancel((u64)taskc)))
 		debugln("Failed to cancel task %d with %d", p->pid, ret);
@@ -1346,6 +1409,8 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 		scx_bpf_error("Failed to lookup context for task %d", p->pid);
 		return;
 	}
+
+	unaccount_queued_load(taskc);
 
 	/*
 	 * If the sched_ext core directly dispatched a task, calculating the
@@ -1851,6 +1916,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
+	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
 
@@ -1870,6 +1936,7 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 		   struct scx_exit_task_args *args)
 {
 	struct cpu_ctx *cpuc = get_cpu_ctx();
+	task_ctx *taskc = get_task_ctx(p);
 
 	/*
 	 * Drop the local CPU's task_ctx cache entry if it points at @p.
@@ -1879,6 +1946,14 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	if (cpuc && (cpuc->cached_task == (u64)p ||
 		     cpuc->cached_pid == p->pid))
 		cpuc->cached_pid = 0;
+
+	/*
+	 * If the task is not the current task on its CPU, it may
+	 * still be queued. Unaccount its load. If running,
+	 * lavd_running() already unaccounted it.
+	 */
+	if (taskc && p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p)))
+		unaccount_queued_load(taskc);
 
 	scx_task_free(p);
 	return 0;
