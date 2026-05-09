@@ -84,13 +84,8 @@ struct cake_cpu_bss {
 				 *     Set once at init from cpu_llc_id RODATA.
 				 *     Eliminates indexed RODATA load in dispatch/tick. */
 	u16 _pad_6; /* 2B: natural alignment for tick_slice */
-#endif
+	#endif
 	u64 tick_slice; /* 8B: p->scx.slice ?: quantum_ns */
-	u64 vtime_local; /* 8B: per-CPU live vtime frontier.
-				 *     Tracks the most recently active runnable
-				 *     task on this CPU so wakeup rescue can
-				 *     clamp against the current workload
-				 *     instead of a historical max. */
 	u32 last_pid; /* 4B: Fast path — skip task-change work if same pid */
 #ifndef CAKE_RELEASE
 	u8 idle_hint; /* 1B: debug-only private mirror of idle state */
@@ -106,6 +101,7 @@ struct cake_cpu_bss {
 	u32 owner_avg_runtime_ns; /* 4B: release policy EWMA for current CPU owner */
 	u16 owner_run_count; /* 2B: samples behind owner_avg_runtime_ns */
 	u16 _pad_owner_policy; /* 2B: keep owner policy fields aligned */
+	u64 throughput_decision; /* Packed cache/mem throughput owner + dispatch state */
 	u64 decision_confidence; /* Packed confidence for accelerator paths */
 #ifndef CAKE_RELEASE
 	u8 last_strict_wake_class; /* Strict dry-run class for busy-preempt experiments */
@@ -137,6 +133,7 @@ struct cake_cpu_bss {
  */
 #define CAKE_CPU_STATUS_IDLE (1ULL << 0)
 #define CAKE_CPU_STATUS_ACCEPT_WAKE (1ULL << 1)
+#define CAKE_CPU_STATUS_SAT_CACHE_MEM (1ULL << 2)
 
 #define CAKE_CPU_STATUS_OWNER_SHIFT 8U
 #define CAKE_CPU_STATUS_OWNER_MASK 0x7ULL
@@ -169,11 +166,23 @@ struct cake_cpu_status {
 _Static_assert(sizeof(struct cake_cpu_status) == 64,
 	       "cake_cpu_status must stay one cache line");
 
+struct cake_scoreboard_summary {
+	u64 idle_clean_mask; /* bit cpu = published idle and scoreboard-clean */
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct cake_scoreboard_summary) == 64,
+	       "cake_scoreboard_summary must stay one cache line");
+
 struct cake_cpu_frontier {
 	u64 vtime; /* Published vtime frontier for wake clamp/seeding */
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct cake_cpu_frontier) == 64,
 	       "cake_cpu_frontier must stay one cache line");
+
+struct cake_throughput_lane {
+	u64 pending; /* Advisory per-owner throughput DSQ has work */
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct cake_throughput_lane) == 64,
+	       "cake_throughput_lane must stay one cache line");
 
 /* Userspace confidence governor.
  *
@@ -207,6 +216,27 @@ struct cake_trust_bpf {
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct cake_trust_bpf) == 64,
 	       "cake_trust_bpf must stay one cache line");
+
+enum cake_storm_guard_mode {
+	CAKE_STORM_GUARD_OFF	= 0,
+	CAKE_STORM_GUARD_SHADOW = 1,
+	CAKE_STORM_GUARD_SHIELD = 2,
+	CAKE_STORM_GUARD_FULL	= 3,
+	CAKE_STORM_GUARD_MAX	= 4,
+};
+
+enum cake_storm_guard_decision {
+	CAKE_STORM_GUARD_CANDIDATE	 = 0,
+	CAKE_STORM_GUARD_BASE_ALLOW	 = 1,
+	CAKE_STORM_GUARD_SHADOW_ONLY	 = 2,
+	CAKE_STORM_GUARD_SHIELD_ALLOW	 = 3,
+	CAKE_STORM_GUARD_FULL_ALLOW	 = 4,
+	CAKE_STORM_GUARD_SMT_BLOCKED	 = 5,
+	CAKE_STORM_GUARD_UNKNOWN_OWNER	 = 6,
+	CAKE_STORM_GUARD_MODE_DISABLED	 = 7,
+	CAKE_STORM_GUARD_POLICY_REJECTED = 8,
+	CAKE_STORM_GUARD_DECISION_MAX	 = 9,
+};
 
 /* ═══ COMPILE-TIME HARDWARE SCALING ═══
  * build.rs detects host CPU/LLC count from sysfs at compile time,
@@ -267,6 +297,7 @@ typedef unsigned short cake_cpu_id_t;
 /* Shared-DSQ base used by the default per-LLC vtime fallback policy.
  * The local queue policy remains available as an explicit A/B mode. */
 #define LLC_DSQ_BASE 200
+#define CAKE_THROUGHPUT_DSQ_BASE 1024
 
 /* STAGED_BIT_* defines REMOVED: staged_vtime_bits field was dead.
  * Ordering state now lives in p->scx.dsq_vtime; legacy class/tier metadata
@@ -896,7 +927,7 @@ struct cake_stats {
 	u64 nr_dsq_consumed; /* Shared DSQ consume count */
 	u64 nr_shared_vtime_inserts; /* Total shared vtime DSQ inserts performed by cake */
 	u64 nr_shared_wakeup_inserts; /* Shared vtime inserts from wakeups */
-	u64 nr_shared_requeue_inserts; /* Shared vtime inserts from the slice-halving requeue path */
+	u64 nr_shared_requeue_inserts; /* Shared vtime inserts from adaptive requeue path */
 	u64 nr_shared_preserve_inserts; /* Shared vtime inserts preserving slice/deadline state */
 	u64 nr_shared_other_inserts; /* Shared vtime inserts that were neither wakeup nor requeue/preserve */
 
@@ -956,6 +987,16 @@ struct cake_stats {
 	u64 nr_dispatch_llc_local_miss; /* dispatch(): local LLC DSQ was empty */
 	u64 nr_dispatch_llc_steal_hit; /* dispatch(): remote LLC steal succeeded */
 	u64 nr_dispatch_keep_running; /* dispatch(): replenished prev queued task */
+	u64 nr_cache_throughput_requeue; /* Requeued cache/mem-sat work with throughput slice */
+	u64 nr_cache_throughput_keep_running; /* keep_running used throughput slice */
+	u64 nr_cache_throughput_lane_insert; /* Enqueued into per-CPU throughput lane */
+	u64 nr_cache_throughput_lane_spill; /* Throughput lane busy, spilled to LLC DSQ */
+	u64 nr_cache_throughput_lane_local_hit; /* Dispatch pulled own throughput lane */
+	u64 nr_cache_throughput_lane_steal_hit; /* Dispatch stole fast-probe throughput lane */
+	u64 nr_cache_throughput_lane_stale; /* Pending lane had no movable task */
+	u64 nr_initial_shared_escape; /* Initial local-policy task escaped to shared LLC queue */
+	u64 nr_busy_wake_slice_shrink; /* Busy wake clamped the current task slice */
+	u64 nr_busy_wake_shared_escape; /* Busy wake escaped local target to shared LLC queue */
 
 	/* Task lifecycle timing (cumulative us, debug builds) */
 	u64 lifecycle_init_enqueue_us; /* Sum of task init to first enqueue */
@@ -1112,6 +1153,10 @@ struct cake_stats {
 	u64 strict_wake_class_bucket_count
 		[CAKE_WAKE_CLASS_MAX]
 		[CAKE_WAKE_BUCKET_MAX]; /* Strict wake wait buckets by class */
+	u64 storm_guard_mode_count
+		[CAKE_STORM_GUARD_MAX]; /* Runtime storm-guard mode samples */
+	u64 storm_guard_decision_count
+		[CAKE_STORM_GUARD_DECISION_MAX]; /* Storm-guard busy-wake decisions */
 	u64 nr_affine_kick_idle; /* Affinity-change kicks that used SCX_KICK_IDLE */
 	u64 nr_affine_kick_preempt; /* Affinity-change kicks that used SCX_KICK_PREEMPT */
 	u64 nr_quantum_full; /* Stops that consumed the full slice */

@@ -63,6 +63,15 @@ pub struct ScopeMetrics {
     pub strict_contain_samples: u64,
     pub strict_shield_wait_max_us: u64,
     pub strict_contain_wait_max_us: u64,
+    pub storm_candidate: u64,
+    pub storm_base_allow: u64,
+    pub storm_shadow: u64,
+    pub storm_shield_allow: u64,
+    pub storm_full_allow: u64,
+    pub storm_smt_block: u64,
+    pub storm_unknown_owner: u64,
+    pub storm_disabled: u64,
+    pub storm_reject: u64,
     pub direct_wake_bins: [u64; 5],
     pub busy_wake_bins: [u64; 5],
     pub queued_wake_bins: [u64; 5],
@@ -281,6 +290,16 @@ fn parse_metrics(dump: &str) -> DumpMetrics {
             continue;
         }
 
+        if line.starts_with("accelerator.life.storm_guard:") {
+            parse_storm_guard_line(&mut metrics.life, line);
+            continue;
+        }
+
+        if line.starts_with("accelerator.60s.storm_guard:") {
+            parse_storm_guard_line(&mut metrics.win60, line);
+            continue;
+        }
+
         if line.starts_with("win.wakepolicy.strict.") {
             if let Some(scope) = strict_wakepolicy_window_scope(line)
                 .and_then(|scope| scope_for_window(&mut metrics, Some(scope)))
@@ -447,6 +466,60 @@ fn print_scope(name: &str, baseline: &ScopeMetrics, candidate: &ScopeMetrics) {
         candidate.strict_contain_wait_max_us,
         "us",
     );
+    print_metric(
+        "storm_candidate",
+        baseline.storm_candidate,
+        candidate.storm_candidate,
+        "",
+    );
+    print_metric(
+        "storm_base_allow",
+        baseline.storm_base_allow,
+        candidate.storm_base_allow,
+        "",
+    );
+    print_metric(
+        "storm_shadow",
+        baseline.storm_shadow,
+        candidate.storm_shadow,
+        "",
+    );
+    print_metric(
+        "storm_shield_allow",
+        baseline.storm_shield_allow,
+        candidate.storm_shield_allow,
+        "",
+    );
+    print_metric(
+        "storm_full_allow",
+        baseline.storm_full_allow,
+        candidate.storm_full_allow,
+        "",
+    );
+    print_metric(
+        "storm_smt_block",
+        baseline.storm_smt_block,
+        candidate.storm_smt_block,
+        "",
+    );
+    print_metric(
+        "storm_unknown_owner",
+        baseline.storm_unknown_owner,
+        candidate.storm_unknown_owner,
+        "",
+    );
+    print_metric(
+        "storm_disabled",
+        baseline.storm_disabled,
+        candidate.storm_disabled,
+        "",
+    );
+    print_metric(
+        "storm_reject",
+        baseline.storm_reject,
+        candidate.storm_reject,
+        "",
+    );
     print_bins(
         "wakebins.direct",
         &baseline.direct_wake_bins,
@@ -493,6 +566,15 @@ impl ScopeMetrics {
             || self.strict_contain_samples != 0
             || self.strict_shield_wait_max_us != 0
             || self.strict_contain_wait_max_us != 0
+            || self.storm_candidate != 0
+            || self.storm_base_allow != 0
+            || self.storm_shadow != 0
+            || self.storm_shield_allow != 0
+            || self.storm_full_allow != 0
+            || self.storm_smt_block != 0
+            || self.storm_unknown_owner != 0
+            || self.storm_disabled != 0
+            || self.storm_reject != 0
             || self.direct_wake_bins.iter().any(|count| *count != 0)
             || self.busy_wake_bins.iter().any(|count| *count != 0)
             || self.queued_wake_bins.iter().any(|count| *count != 0)
@@ -698,6 +780,20 @@ fn parse_strict_wakepolicy_line(metrics: &mut ScopeMetrics, line: &str) {
     if let Some(wait) = bracket_body(line, "wait=[") {
         metrics.strict_shield_wait_max_us = wakewait_avg_max_us(wait, "shield=").1;
         metrics.strict_contain_wait_max_us = wakewait_avg_max_us(wait, "contain=").1;
+    }
+}
+
+fn parse_storm_guard_line(metrics: &mut ScopeMetrics, line: &str) {
+    if let Some(decisions) = bracket_body(line, "decisions=[") {
+        metrics.storm_candidate = field_u64(decisions, "candidate=").unwrap_or(0);
+        metrics.storm_base_allow = field_u64(decisions, "base_allow=").unwrap_or(0);
+        metrics.storm_shadow = field_u64(decisions, "shadow=").unwrap_or(0);
+        metrics.storm_shield_allow = field_u64(decisions, "shield_allow=").unwrap_or(0);
+        metrics.storm_full_allow = field_u64(decisions, "full_allow=").unwrap_or(0);
+        metrics.storm_smt_block = field_u64(decisions, "smt_block=").unwrap_or(0);
+        metrics.storm_unknown_owner = field_u64(decisions, "unknown_owner=").unwrap_or(0);
+        metrics.storm_disabled = field_u64(decisions, "disabled=").unwrap_or(0);
+        metrics.storm_reject = field_u64(decisions, "reject=").unwrap_or(0);
     }
 }
 
@@ -1242,13 +1338,17 @@ mod tests {
         assert!(build.contains("SCX_CAKE_PROFILE"));
         assert!(build.contains("SCX_CAKE_QUANTUM_US"));
         assert!(build.contains("SCX_CAKE_QUEUE_POLICY"));
+        assert!(build.contains("SCX_CAKE_STORM_GUARD"));
         assert!(build.contains("-DCAKE_QUANTUM_NS="));
         assert!(build.contains("-DCAKE_QUEUE_POLICY_VALUE="));
+        assert!(build.contains("-DCAKE_STORM_GUARD_VALUE="));
         assert!(build.contains("BAKED_QUANTUM_US"));
         assert!(build.contains("BAKED_QUEUE_POLICY"));
+        assert!(build.contains("BAKED_STORM_GUARD"));
 
         assert!(src.contains("const u64 quantum_ns = CAKE_QUANTUM_NS;"));
         assert!(src.contains("#define CAKE_QUEUE_POLICY CAKE_QUEUE_POLICY_VALUE"));
+        assert!(src.contains("#define CAKE_STORM_GUARD_MODE CAKE_STORM_GUARD_VALUE"));
         assert!(source_contains(
             src,
             "const volatile u64 quantum_ns = CAKE_DEFAULT_QUANTUM_NS;"
@@ -1257,16 +1357,25 @@ mod tests {
             src,
             "const volatile u32 queue_policy = CAKE_QUEUE_POLICY_LLC_VTIME;"
         ));
+        assert!(source_contains(
+            src,
+            "const volatile u32 storm_guard_mode = CAKE_STORM_GUARD_OFF;"
+        ));
 
         assert!(main.contains("#[cfg(not(cake_bpf_release))]"));
         assert!(main.contains("rodata.quantum_ns = quantum * 1000"));
         assert!(main.contains("rodata.queue_policy = args.queue_policy as u32"));
+        assert!(main.contains("rodata.storm_guard_mode = args.storm_guard as u32"));
         assert!(main.contains("topology::BAKED_QUANTUM_US"));
         assert!(main.contains("topology::BAKED_QUEUE_POLICY"));
+        assert!(main.contains("topology::BAKED_STORM_GUARD"));
 
         assert!(readme.contains("SCX_CAKE_PROFILE=esports"));
         assert!(readme.contains("SCX_CAKE_QUEUE_POLICY=local"));
-        assert!(readme.contains("Release builds bake profile, quantum, and queue policy"));
+        assert!(readme.contains("SCX_CAKE_STORM_GUARD=shadow"));
+        assert!(
+            readme.contains("Release builds bake profile, quantum, queue policy, and storm guard")
+        );
     }
 
     #[test]
@@ -1318,14 +1427,20 @@ mod tests {
         assert!(src.contains("#define CAKE_BUSY_WAKE_KICK_MODE CAKE_BUSY_WAKE_KICK_POLICY"));
         assert!(src.contains("CAKE_BUSY_WAKE_KICK_PREEMPT"));
         assert!(src.contains("CAKE_BUSY_WAKE_KICK_IDLE"));
+        assert!(src.contains("CAKE_STORM_GUARD_SHADOW"));
+        assert!(src.contains("cake_storm_guard_accept_busy_wake("));
         assert!(main.contains("enum BusyWakeKickMode"));
+        assert!(main.contains("enum StormGuardMode"));
         assert!(main.contains("learned_locality"));
         assert!(main.contains("busy_wake_kick"));
+        assert!(main.contains("storm_guard"));
         assert!(main.contains("#[cfg(not(cake_bpf_release))]"));
         assert!(main.contains("rodata.enable_learned_locality = args.learned_locality"));
         assert!(main.contains("rodata.busy_wake_kick_mode = args.busy_wake_kick as u32"));
+        assert!(main.contains("rodata.storm_guard_mode = args.storm_guard as u32"));
         assert!(readme.contains("runtime A/B controls"));
         assert!(readme.contains("--busy-wake-kick=preempt"));
+        assert!(readme.contains("--storm-guard=shadow"));
     }
 
     #[test]
@@ -1351,7 +1466,10 @@ mod tests {
         assert!(src.contains("p->scx.weight > 120"));
         assert!(src.contains("latency_biased = cake_task_latency_biased(p, wake_flags);"));
         assert!(src.contains("cake_select_fast_scan_limit(local_bss)"));
-        assert!(src.contains("cake_select_cpu_fast_scan(p, prev_cpu, wake_flags, select_bss)"));
+        assert!(source_contains(
+            src,
+            "cake_select_cpu_fast_scan(p, prev_cpu, wake_flags, select_bss)"
+        ));
     }
 
     #[test]
@@ -1424,16 +1542,17 @@ mod tests {
     #[test]
     fn bpf_release_scoreboard_precedes_native_idle_helpers() {
         let src = include_str!("bpf/cake.bpf.c");
-        let route_predict = src
+        let compact = compact_source(src);
+        let route_predict = compact
             .find("cpu = cake_select_route_predict(p, prev_cpu, wake_flags,")
             .expect("route predictor call exists");
-        let fast_scan = src
+        let fast_scan = compact
             .find("cpu = cake_select_cpu_fast_scan(p, prev_cpu, wake_flags, select_bss);")
             .expect("scoreboard fast scan call exists");
-        let native_dfl = src
+        let native_dfl = compact
             .find("cpu = select_cpu_dfl_idle(p, prev_cpu, wake_flags);")
             .expect("native dfl fallback call exists");
-        let native_and = src
+        let native_and = compact
             .find("cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);")
             .expect("native and fallback call exists");
 
@@ -1503,7 +1622,7 @@ mod tests {
         assert!(src.contains("CAKE_ROUTE_SLOT3"));
         assert!(src.contains("CAKE_ROUTE_TUNNEL"));
         assert!(src.contains("cake_select_route_predict("));
-        assert!(src.contains("!= local_cpu"));
+        assert!(src.contains("== local_cpu"));
         assert!(src.contains("cake_route_update(local_bss, CAKE_ROUTE_PREV"));
         assert!(src.contains("cake_conf_update_select_route(local_bss, CAKE_ROUTE_SLOT2"));
         assert!(src.contains("cake_conf_update_select_route(local_bss, CAKE_ROUTE_SLOT3"));
@@ -1535,19 +1654,25 @@ mod tests {
     }
 
     #[test]
-    fn bpf_release_pull_confidence_probes_before_skip() {
+    fn bpf_release_pull_confidence_audits_before_pull() {
         let src = include_str!("bpf/cake.bpf.c");
 
-        assert!(src.contains("CAKE_PULL_SHAPE_SKIP"));
+        assert!(src.contains("CAKE_PULL_SHAPE_AUDIT"));
         assert!(src.contains("CAKE_CONF_PULL_AUDIT_SHIFT"));
         assert!(src.contains("cake_pull_audit_due("));
         assert!(src.contains("scx_bpf_dsq_nr_queued(dsq_id)"));
-        assert!(!src.contains("if (mode == CAKE_PULL_SHAPE_SKIP)\n\t\treturn false;"));
+        assert!(!src.contains("if (mode == CAKE_PULL_SHAPE_AUDIT)\n\t\treturn false;"));
     }
 
     #[test]
     fn bpf_release_kick_reuses_known_scoreboard_status() {
         let src = include_str!("bpf/cake.bpf.c");
+        let body = source_body_between(
+            src,
+            "static __always_inline void cake_scoreboard_kick_cpu_known",
+            "static __always_inline __maybe_unused void",
+        )
+        .expect("known kick helper body exists");
 
         assert!(src.contains("cake_scoreboard_kick_cpu_known("));
         assert!(src.contains("cake_scoreboard_kick_cpu_known(target_cpu, target_status);"));
@@ -1556,8 +1681,12 @@ mod tests {
             "u32 local_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
              struct cake_cpu_bss *bss = &cpu_bss[local_cpu];"
         ));
-        assert!(src.contains("(target_cpu & (CAKE_MAX_CPUS - 1)) != local_cpu"));
-        assert!(src.contains("scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);"));
+        assert!(source_contains(
+            body,
+            "mode = cake_kick_shape_mode(bss, target_status);"
+        ));
+        assert!(!body.contains("(target_cpu & (CAKE_MAX_CPUS - 1)) != local_cpu"));
+        assert!(body.contains("scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);"));
     }
 
     #[test]
@@ -1581,6 +1710,15 @@ mod tests {
     #[test]
     fn bpf_release_select_confidence_uses_executing_cpu_row() {
         let src = include_str!("bpf/cake.bpf.c");
+        let select_body = source_body_between(
+            src,
+            "s32 BPF_STRUCT_OPS(cake_select_cpu",
+            "cake_record_accel_native(CAKE_ACCEL_NATIVE_ENTRY);",
+        )
+        .expect("select_cpu body before native fallback exists");
+        let guarded_scoreboard =
+            source_body_between(select_body, "if (prev_cpu >= 0 &&", "} else {")
+                .expect("scoreboard predictor is guarded by executing CPU row");
 
         assert!(source_contains(
             src,
@@ -1590,6 +1728,19 @@ mod tests {
             src,
             "struct cake_cpu_bss *select_bss = &cpu_bss[local_cpu];"
         ));
+        assert!(source_contains(
+            src,
+            "if (prev_cpu >= 0 &&
+             (((u32)prev_cpu) & (CAKE_MAX_CPUS - 1)) == local_cpu) {
+                     cpu = cake_select_route_predict(p, prev_cpu, wake_flags,
+                                                     select_bss);"
+        ));
+        assert!(source_contains(
+            src,
+            "cpu = cake_select_cpu_fast_scan(p, prev_cpu, wake_flags,
+                                             select_bss);"
+        ));
+        assert!(guarded_scoreboard.contains("cake_select_cpu_fast_scan("));
         assert!(!src.contains("select_cpu_idx"));
     }
 
@@ -1796,7 +1947,7 @@ mod tests {
         assert!(dump.contains(".fallback: {}"));
         assert!(dump.contains("format_service_report_text"));
         assert!(dump.contains("format_service_report_json"));
-        assert!(diagnostics.contains("SERVICE_SCHEMA_VERSION: u32 = 7"));
+        assert!(diagnostics.contains("SERVICE_SCHEMA_VERSION: u32 = 8"));
         assert!(diagnostics.contains("CAKE-TRUST-010"));
         assert!(diagnostics.contains("MonitorSnapshot"));
         assert!(diagnostics.contains("FreezeFrame"));
@@ -1893,7 +2044,7 @@ mod tests {
     #[test]
     fn parses_core_dump_metrics_by_scope() {
         let dump = "\
-service.header: schema=7 text=4 status=warn uptime=61s degraded=2 monitors=9 active_codes=2 freeze_frames=3
+service.header: schema=8 text=4 status=warn uptime=61s degraded=2 monitors=9 active_codes=2 freeze_frames=3
 readiness: pass=5 warn=2 action=1 warmup=1
 readiness.monitors:
   id=prediction state=pass score=100 window=60s source=accel cpus=- tasks=- summary=route predictor 99.9% over 1000 attempts
@@ -1911,6 +2062,7 @@ decision.migrate: path=[home=21 core=22 primary=23 idle=24 tunnel=25] reason=[hm
 place.path: home=16 core=17 primary=18 idle=19 tunnel=20 deps:same_tgid=1 cross_tgid=2
 wakepolicy.life: class=[none=1 normal=2 shield=3 contain=4] reasons=[none=0] transitions=[none->normal=1] busy_shadow:allow=11 skip=12 owner_class=[none=0 normal=0 shield=0 contain=0]
 wakepolicy.strict.life: class=[none=5 normal=6 shield=7 contain=8] reasons=[yield_heavy=9] wait=[normal=1/101us(6) shield=2/202us(7) contain=3/303us(8)] transitions=[normal->contain=2] busy_shadow:allow=13 skip=14 owner_class=[none=0 normal=0 shield=0 contain=0]
+accelerator.life.storm_guard: mode=[shadow=10] decisions=[candidate=11 base_allow=12 shadow=13 shield_allow=14 full_allow=15 smt_block=16 unknown_owner=17 disabled=18 reject=19]
 app.health.life: apps=2 total_runtime_ms=10 source=task_rollup quantum=exact_u64/1000us wake=debug_bounded
   tgid=42 comm=Game leader=- role=GAME runtime_ms=100.0 share=55.5% run=10 avg_run_us=1 max_run_us=10 syld=77 mig/s=12.3 wake[self/in/out]=1/2/3 wait_self=4/500us(1) wait_out=5/600us(2)
   tgid=43 comm=Browser leader=- role=UI runtime_ms=90.0 share=44.4% run=10 avg_run_us=1 max_run_us=10 syld=88 mig/s=1.2 wake[self/in/out]=10/20/30 wait_self=4/100us(1) wait_out=5/200us(2)
@@ -1936,6 +2088,7 @@ win.decision.migrate: path=[home=61 core=62 primary=63 idle=64 tunnel=65] reason
 win.path: home=56 core=57 primary=58 idle=59 tunnel=60 deps:same_tgid=1 (1.0/s) cross_tgid=2 (2.0/s)
 win.wakepolicy.60s: class=[none=100 normal=200 shield=300 contain=400] reasons=[none=0] transitions=[normal->shield=1] busy_shadow:allow=31 skip=32 owner_class=[none=0 normal=0 shield=0 contain=0]
 win.wakepolicy.strict.60s: class=[none=101 normal=202 shield=303 contain=404] reasons=[yield_heavy=505] wait=[normal=7/707us(202) shield=8/808us(303) contain=9/909us(404)] transitions=[normal->contain=4] busy_shadow:allow=33 skip=34 owner_class=[none=0 normal=0 shield=0 contain=0]
+accelerator.60s.storm_guard: mode=[full=20] decisions=[candidate=21 base_allow=22 shadow=23 shield_allow=24 full_allow=25 smt_block=26 unknown_owner=27 disabled=28 reject=29]
 ";
 
         let metrics = parse_metrics(dump);
@@ -1979,6 +2132,15 @@ win.wakepolicy.strict.60s: class=[none=101 normal=202 shield=303 contain=404] re
         assert_eq!(metrics.life.strict_contain_samples, 8);
         assert_eq!(metrics.life.strict_shield_wait_max_us, 202);
         assert_eq!(metrics.life.strict_contain_wait_max_us, 303);
+        assert_eq!(metrics.life.storm_candidate, 11);
+        assert_eq!(metrics.life.storm_base_allow, 12);
+        assert_eq!(metrics.life.storm_shadow, 13);
+        assert_eq!(metrics.life.storm_shield_allow, 14);
+        assert_eq!(metrics.life.storm_full_allow, 15);
+        assert_eq!(metrics.life.storm_smt_block, 16);
+        assert_eq!(metrics.life.storm_unknown_owner, 17);
+        assert_eq!(metrics.life.storm_disabled, 18);
+        assert_eq!(metrics.life.storm_reject, 19);
         assert_eq!(metrics.life.direct_wake_bins, [1, 2, 3, 4, 5]);
         assert_eq!(metrics.life.busy_wake_bins, [6, 7, 8, 9, 10]);
         assert_eq!(metrics.life.queued_wake_bins, [11, 12, 13, 14, 15]);
@@ -2055,6 +2217,15 @@ win.wakepolicy.strict.60s: class=[none=101 normal=202 shield=303 contain=404] re
         assert_eq!(metrics.win60.strict_contain_samples, 404);
         assert_eq!(metrics.win60.strict_shield_wait_max_us, 808);
         assert_eq!(metrics.win60.strict_contain_wait_max_us, 909);
+        assert_eq!(metrics.win60.storm_candidate, 21);
+        assert_eq!(metrics.win60.storm_base_allow, 22);
+        assert_eq!(metrics.win60.storm_shadow, 23);
+        assert_eq!(metrics.win60.storm_shield_allow, 24);
+        assert_eq!(metrics.win60.storm_full_allow, 25);
+        assert_eq!(metrics.win60.storm_smt_block, 26);
+        assert_eq!(metrics.win60.storm_unknown_owner, 27);
+        assert_eq!(metrics.win60.storm_disabled, 28);
+        assert_eq!(metrics.win60.storm_reject, 29);
         assert_eq!(metrics.win60.direct_wake_bins, [41, 42, 43, 44, 45]);
         assert_eq!(metrics.win60.busy_wake_bins, [46, 47, 48, 49, 50]);
         assert_eq!(metrics.win60.queued_wake_bins, [51, 52, 53, 54, 55]);

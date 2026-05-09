@@ -2,9 +2,15 @@
 docs/*
 !docs/flight_recorder_telemetry.md
 !docs/queue_policy_latency_findings.md
+!docs/benchmark_capture_workflow.md
 
-# Benchmark binaries
-bench/
+# Benchmark binaries and local captures
+bench/*
+!bench/.gitignore
+!bench/*.sh
+!bench/scx_cake_bench_capture.sh
+!bench/scx_cake_bench_suite.sh
+!bench/scx_cake_policy_bench.sh
 
 # MangoHud performance logs
 mangohud/

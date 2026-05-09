@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 // TUI module - ratatui-based terminal UI for real-time scheduler statistics
 
-use std::fs::OpenOptions;
 use std::io::{self, Stdout, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -74,6 +71,8 @@ const SELECT_REASON_MAX: usize = 12;
 const ACCEL_ROUTE_MAX: usize = 7;
 const ACCEL_ROUTE_BLOCK_MAX: usize = 13;
 const ACCEL_PROBE_OUTCOME_MAX: usize = 7;
+const STORM_GUARD_MAX: usize = 4;
+const STORM_GUARD_DECISION_MAX: usize = 9;
 const PRESSURE_SITE_MAX: usize = 2;
 const PRESSURE_OUTCOME_MAX: usize = 6;
 const PRESSURE_ANCHOR_REASON_MAX: usize = 4;
@@ -1509,6 +1508,13 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
                 total.strict_busy_preempt_shadow_count[decision] +=
                     s.strict_busy_preempt_shadow_count[decision];
             }
+            for mode in 0..total.storm_guard_mode_count.len() {
+                total.storm_guard_mode_count[mode] += s.storm_guard_mode_count[mode];
+            }
+            for decision in 0..total.storm_guard_decision_count.len() {
+                total.storm_guard_decision_count[decision] +=
+                    s.storm_guard_decision_count[decision];
+            }
             total.busy_preempt_shadow_local += s.busy_preempt_shadow_local;
             total.busy_preempt_shadow_remote += s.busy_preempt_shadow_remote;
             total.strict_busy_preempt_shadow_local += s.strict_busy_preempt_shadow_local;
@@ -2447,6 +2453,14 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
         delta.strict_busy_preempt_shadow_count[decision] = current.strict_busy_preempt_shadow_count
             [decision]
             .saturating_sub(previous.strict_busy_preempt_shadow_count[decision]);
+    }
+    for mode in 0..current.storm_guard_mode_count.len() {
+        delta.storm_guard_mode_count[mode] = current.storm_guard_mode_count[mode]
+            .saturating_sub(previous.storm_guard_mode_count[mode]);
+    }
+    for decision in 0..current.storm_guard_decision_count.len() {
+        delta.storm_guard_decision_count[decision] = current.storm_guard_decision_count[decision]
+            .saturating_sub(previous.storm_guard_decision_count[decision]);
     }
     delta.busy_preempt_shadow_local = current
         .busy_preempt_shadow_local
@@ -7462,13 +7476,76 @@ fn handle_tui_key(key: crossterm::event::KeyEvent, ctx: TuiKeyContext<'_, '_>) -
     Ok(false)
 }
 
+#[cfg(unix)]
+fn open_diag_dir_no_symlinks(path: &Path) -> Result<std::fs::File> {
+    let mut dir = if path.is_absolute() {
+        std::fs::File::open("/").context("failed to open filesystem root")?
+    } else {
+        std::fs::File::open(".").context("failed to open current directory")?
+    };
+
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                anyhow::bail!(
+                    "diagnostic directory must not contain '..': {}",
+                    path.display()
+                );
+            }
+            std::path::Component::Normal(component_name) => {
+                let component_cstr = std::ffi::CString::new(component_name.as_bytes())
+                    .context("diagnostic directory component contains a NUL byte")?;
+                let raw_fd = unsafe {
+                    libc::openat(
+                        dir.as_raw_fd(),
+                        component_cstr.as_ptr(),
+                        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                    )
+                };
+                if raw_fd < 0 {
+                    return Err(std::io::Error::last_os_error()).with_context(|| {
+                        format!(
+                            "failed to open diagnostic directory component {} in {}",
+                            component_name.to_string_lossy(),
+                            path.display()
+                        )
+                    });
+                }
+                dir = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+            }
+            _ => {
+                anyhow::bail!("unsupported diagnostic directory path: {}", path.display());
+            }
+        }
+    }
+
+    Ok(dir)
+}
+
+fn ensure_diag_dir_ready(diag_dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = open_diag_dir_no_symlinks(diag_dir)?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(diag_dir).with_context(|| {
+            format!(
+                "failed to create diagnostic directory {}",
+                diag_dir.display()
+            )
+        })
+    }
+}
+
 fn write_diag_file_atomic(path: &Path, contents: &str) -> Result<()> {
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .context("diagnostic path has no parent directory")?;
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create diagnostic directory {}", dir.display()))?;
 
     #[cfg(unix)]
     {
@@ -7485,11 +7562,7 @@ fn write_diag_file_atomic(path: &Path, contents: &str) -> Result<()> {
         );
         let tmp_name = std::ffi::CString::new(tmp_name_string.as_bytes())
             .context("temporary diagnostic file name contains a NUL byte")?;
-        let dir_file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(dir)
-            .with_context(|| format!("failed to open diagnostic directory {}", dir.display()))?;
+        let dir_file = open_diag_dir_no_symlinks(dir)?;
         let raw_fd = unsafe {
             libc::openat(
                 dir_file.as_raw_fd(),
@@ -7534,6 +7607,8 @@ fn write_diag_file_atomic(path: &Path, contents: &str) -> Result<()> {
 
     #[cfg(not(unix))]
     {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create diagnostic directory {}", dir.display()))?;
         std::fs::write(path, contents)
             .with_context(|| format!("failed to write {}", path.display()))
     }
@@ -7612,6 +7687,26 @@ mod diag_write_tests {
 
         let err = write_diag_file_atomic(&link_dir.join("cake_diag_latest.txt"), "nope")
             .expect_err("symlinked diagnostic directory should be rejected");
+        assert!(err
+            .to_string()
+            .contains("failed to open diagnostic directory"));
+    }
+
+    #[test]
+    fn diagnostic_write_rejects_intermediate_symlink_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "scx_cake_diag_midlink_test_{}_{}",
+            std::process::id(),
+            epoch_nanos()
+        ));
+        let _cleanup = CleanupDir(base.clone());
+        let real_dir = base.join("real");
+        let link_dir = base.join("link");
+        std::fs::create_dir_all(real_dir.join("diag")).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+
+        let err = write_diag_file_atomic(&link_dir.join("diag/cake_diag_latest.txt"), "nope")
+            .expect_err("intermediate symlinked diagnostic directory should be rejected");
         assert!(err
             .to_string()
             .contains("failed to open diagnostic directory"));
@@ -7725,9 +7820,9 @@ pub fn run_headless_recorder(
         .checked_sub(diag_period.unwrap_or(Duration::ZERO))
         .unwrap_or_else(Instant::now);
 
-    std::fs::create_dir_all(&diag_dir).with_context(|| {
+    ensure_diag_dir_ready(&diag_dir).with_context(|| {
         format!(
-            "failed to create diagnostic directory {}",
+            "diagnostic directory {} must exist and contain no symlink components",
             diag_dir.display()
         )
     })?;

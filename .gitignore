@@ -19,3 +19,14 @@ CLAUDE.md
 .agent/
 .agents/
 /docs/
+
+# Local agent/review state and benchmark scratch artifacts
+.codex
+.codex/
+.superpowers/
+.sashiko-submit/
+.semcode.db/
+.scx_cake_bench/
+sashiko*.db*
+test-sashiko*.db*
+tui_dump_*

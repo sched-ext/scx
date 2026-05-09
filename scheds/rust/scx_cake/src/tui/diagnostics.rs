@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 use strum::{Display, EnumIter};
 
-const SERVICE_SCHEMA_VERSION: u32 = 7;
+const SERVICE_SCHEMA_VERSION: u32 = 8;
 const SERVICE_TEXT_VERSION: u32 = 4;
 const ACCEL_NATIVE_ENTRY_IDX: usize = 0;
 
