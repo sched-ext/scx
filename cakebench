@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Compatibility shim: the benchmark project lives next to this scx checkout.
+set -Eeuo pipefail
+
+SCX_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BENCH_REPO_ROOT="${SCX_CAKE_BENCH_REPO:-${SCX_REPO_ROOT}/../scx_cake_bench_assets}"
+BENCH_LAUNCHER="${BENCH_REPO_ROOT}/cakebench"
+
+if [[ ! -x "${BENCH_LAUNCHER}" ]]; then
+    echo "error: benchmark launcher not found: ${BENCH_LAUNCHER}" >&2
+    echo "set SCX_CAKE_BENCH_REPO=/path/to/scx_cake_bench_assets if it moved" >&2
+    exit 1
+fi
+
+export SCX_REPO_ROOT
+exec "${BENCH_LAUNCHER}" "$@"

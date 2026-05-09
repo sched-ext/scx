@@ -89,6 +89,42 @@ enum BusyWakeKickMode {
     Idle = 2,
 }
 
+#[cfg(not(cake_bpf_release))]
+impl BusyWakeKickMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BusyWakeKickMode::Policy => "policy",
+            BusyWakeKickMode::Preempt => "preempt",
+            BusyWakeKickMode::Idle => "idle",
+        }
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum StormGuardMode {
+    /// Keep the baseline busy-wake policy.
+    Off = 0,
+    /// Count storm-guard candidates without changing placement.
+    Shadow = 1,
+    /// Allow conservative extra local busy handoff for saturated owners.
+    Shield = 2,
+    /// Allow broad local busy handoff for wake-storm A/B testing.
+    Full = 3,
+}
+
+impl StormGuardMode {
+    #[cfg(not(cake_bpf_release))]
+    fn as_str(&self) -> &'static str {
+        match self {
+            StormGuardMode::Off => "off",
+            StormGuardMode::Shadow => "shadow",
+            StormGuardMode::Shield => "shield",
+            StormGuardMode::Full => "full",
+        }
+    }
+}
+
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum QueuePolicy {
@@ -230,7 +266,7 @@ fn active_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> [u16; CPU_
 /// The current design centers on topology-aware CPU selection, per-LLC
 /// vtime fallback queues, and lightweight per-task accounting in BPF.
 ///
-/// Release builds bake profile, quantum, and queue policy at compile time.
+/// Release builds bake profile, quantum, queue policy, and storm guard at compile time.
 /// Debug builds keep those options as runtime A/B controls.
 ///
 /// Game detection and older multi-mode policy logic have been removed.
@@ -246,7 +282,7 @@ fn active_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> [u16; CPU_
 ///   scx_cake --busy-wake-kick=preempt # A/B force same-CPU busy wake preemption
 ///   scx_cake --queue-policy local # A/B use 1.1.1 local fallback queues
 ///   scx_cake -v                       # Run with live TUI stats display
-///   scx_cake -v --diag-dir /tmp/cake  # Headless diagnostic recorder if no TTY
+///   scx_cake -v --diag-dir /tmp/cake  # Headless recorder; directory must exist
 #[derive(Parser, Debug, Clone)]
 #[command(
     author,
@@ -327,6 +363,15 @@ struct Args {
     /// IDLE forces gentler idle kicks for local busy wakeups.
     #[arg(long, value_enum, default_value_t = BusyWakeKickMode::Policy, verbatim_doc_comment)]
     busy_wake_kick: BusyWakeKickMode,
+
+    /// Storm-guard busy-wake handoff policy.
+    ///
+    /// OFF keeps the baseline policy.
+    /// SHADOW records storm-guard candidates without changing placement.
+    /// SHIELD allows conservative extra local handoff for saturated owners.
+    /// FULL allows broad local handoff during wake-storm A/B testing.
+    #[arg(long, value_enum, default_value_t = StormGuardMode::Off, verbatim_doc_comment)]
+    storm_guard: StormGuardMode,
 
     /// Queueing policy for busy fallback work.
     ///
@@ -417,6 +462,28 @@ impl Args {
         #[cfg(not(cake_bpf_release))]
         {
             self.queue_policy.as_str()
+        }
+    }
+
+    fn effective_storm_guard(&self) -> &'static str {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_STORM_GUARD
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            self.storm_guard.as_str()
+        }
+    }
+
+    fn effective_busy_wake_kick(&self) -> &'static str {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_BUSY_WAKE_KICK
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            self.busy_wake_kick.as_str()
         }
     }
 }
@@ -530,6 +597,7 @@ impl<'a> Scheduler<'a> {
                 rodata.enable_learned_locality = args.learned_locality;
                 rodata.enable_wake_chain_locality = args.wake_chain_locality;
                 rodata.busy_wake_kick_mode = args.busy_wake_kick as u32;
+                rodata.storm_guard_mode = args.storm_guard as u32;
             }
             // Stats/telemetry: only available in debug builds (CAKE_RELEASE omits the field).
             // In release, --verbose is silently ignored.
@@ -755,12 +823,16 @@ impl<'a> Scheduler<'a> {
         if self.args.quantum.is_some()
             || cli_arg_present("--profile", Some("-p"))
             || cli_arg_present("--queue-policy", None)
+            || cli_arg_present("--storm-guard", None)
+            || cli_arg_present("--busy-wake-kick", None)
         {
             log::warn!(
-                "release build uses baked profile={}, quantum={}us, queue-policy={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, or SCX_CAKE_QUEUE_POLICY to change hot-path knobs",
+                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, or SCX_CAKE_BUSY_WAKE_KICK to change hot-path knobs",
                 topology::BAKED_PROFILE,
                 topology::BAKED_QUANTUM_US,
-                topology::BAKED_QUEUE_POLICY
+                topology::BAKED_QUEUE_POLICY,
+                topology::BAKED_STORM_GUARD,
+                topology::BAKED_BUSY_WAKE_KICK
             );
         }
 
@@ -783,7 +855,7 @@ impl<'a> Scheduler<'a> {
         );
 
         info!(
-            "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}",
+            "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}, storm-guard: {}, busy-wake-kick: {}",
             self.topology.nr_cpus,
             self.topology
                 .llc_cpu_mask
@@ -793,7 +865,9 @@ impl<'a> Scheduler<'a> {
                 .max(1),
             self.args.effective_profile(),
             self.args.effective_quantum_us(),
-            self.args.effective_queue_policy()
+            self.args.effective_queue_policy(),
+            self.args.effective_storm_guard(),
+            self.args.effective_busy_wake_kick()
         );
         let mut trust_governor = trust::TrustGovernor::new(self.topology.nr_cpus);
         if self.args.verbose && std::io::stdout().is_terminal() {
@@ -919,6 +993,15 @@ mod tests {
         let args = Args::try_parse_from(["scx_cake", "--queue-policy", "local"]).unwrap();
 
         assert_eq!(args.queue_policy, QueuePolicy::Local);
+    }
+
+    #[test]
+    fn storm_guard_defaults_to_off_and_parses_full() {
+        let args = Args::try_parse_from(["scx_cake"]).unwrap();
+        assert_eq!(args.storm_guard, StormGuardMode::Off);
+
+        let args = Args::try_parse_from(["scx_cake", "--storm-guard", "full"]).unwrap();
+        assert_eq!(args.storm_guard, StormGuardMode::Full);
     }
 
     #[test]

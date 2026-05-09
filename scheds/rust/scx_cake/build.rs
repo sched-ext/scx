@@ -114,6 +114,35 @@ fn baked_queue_policy() -> (&'static str, u32) {
     }
 }
 
+fn baked_storm_guard() -> (&'static str, u32) {
+    let mode = std::env::var("SCX_CAKE_STORM_GUARD")
+        .unwrap_or_else(|_| "off".into())
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    match mode.as_str() {
+        "off" => ("off", 0),
+        "shadow" => ("shadow", 1),
+        "shield" => ("shield", 2),
+        "full" => ("full", 3),
+        _ => panic!("SCX_CAKE_STORM_GUARD must be one of off, shadow, shield, full (got {mode})"),
+    }
+}
+
+fn baked_busy_wake_kick() -> (&'static str, u32) {
+    let mode = std::env::var("SCX_CAKE_BUSY_WAKE_KICK")
+        .unwrap_or_else(|_| "policy".into())
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    match mode.as_str() {
+        "policy" => ("policy", 0),
+        "preempt" => ("preempt", 1),
+        "idle" => ("idle", 2),
+        _ => {
+            panic!("SCX_CAKE_BUSY_WAKE_KICK must be one of policy, preempt, idle (got {mode})")
+        }
+    }
+}
+
 fn main() {
     // Detect build profile: release builds pass CAKE_RELEASE=1 to BPF Clang,
     // which eliminates ALL stats/telemetry code at compile time (zero overhead).
@@ -131,6 +160,8 @@ fn main() {
     let needs_arena = profile != "release" && (enable_hot_telemetry || enable_locality_experiments);
     let (baked_profile, baked_quantum_us) = baked_profile();
     let (baked_queue_policy, baked_queue_policy_value) = baked_queue_policy();
+    let (baked_storm_guard, baked_storm_guard_value) = baked_storm_guard();
+    let (baked_busy_wake_kick, baked_busy_wake_kick_value) = baked_busy_wake_kick();
 
     // Generate Rust constants file — avoids unstable option_env! str matching.
     let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -146,7 +177,11 @@ fn main() {
              pub const BAKED_PROFILE: &str = {:?};\n\
              pub const BAKED_QUANTUM_US: u64 = {};\n\
              pub const BAKED_QUEUE_POLICY: &str = {:?};\n\
-             pub const BAKED_QUEUE_POLICY_VALUE: u32 = {};\n",
+             pub const BAKED_QUEUE_POLICY_VALUE: u32 = {};\n\
+             pub const BAKED_STORM_GUARD: &str = {:?};\n\
+             pub const BAKED_STORM_GUARD_VALUE: u32 = {};\n\
+             pub const BAKED_BUSY_WAKE_KICK: &str = {:?};\n\
+             pub const BAKED_BUSY_WAKE_KICK_VALUE: u32 = {};\n",
             max_cpus,
             max_llcs,
             max_cpus,
@@ -154,7 +189,11 @@ fn main() {
             baked_profile,
             baked_quantum_us,
             baked_queue_policy,
-            baked_queue_policy_value
+            baked_queue_policy_value,
+            baked_storm_guard,
+            baked_storm_guard_value,
+            baked_busy_wake_kick,
+            baked_busy_wake_kick_value
         ),
     )
     .expect("Failed to write cake_constants.rs");
@@ -162,6 +201,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_PROFILE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_QUANTUM_US");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_QUEUE_POLICY");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_STORM_GUARD");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_BUSY_WAKE_KICK");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -184,12 +225,14 @@ fn main() {
 
     // Build cflags with hardware gates
     let mut cflags = format!(
-        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={}",
+        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={} -DCAKE_STORM_GUARD_VALUE={} -DCAKE_BUSY_WAKE_KICK_VALUE={}",
         base_flags,
         max_cpus,
         max_llcs,
         baked_quantum_us * 1000,
-        baked_queue_policy_value
+        baked_queue_policy_value,
+        baked_storm_guard_value,
+        baked_busy_wake_kick_value
     );
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
@@ -224,14 +267,16 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={}",
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={}",
         max_cpus,
         max_llcs,
         is_single_llc,
         has_hybrid,
         baked_profile,
         baked_quantum_us,
-        baked_queue_policy
+        baked_queue_policy,
+        baked_storm_guard,
+        baked_busy_wake_kick
     );
 
     std::env::set_var("BPF_EXTRA_CFLAGS_PRE_INCL", &cflags);

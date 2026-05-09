@@ -801,7 +801,7 @@ fn format_accel_probe_matrix(probes: &[[u64; ACCEL_PROBE_OUTCOME_MAX]; ACCEL_ROU
 
 fn format_accel_fallback_summary(stats: &cake_stats) -> String {
     format!(
-        "native[entry/dfl/and]={}/{}/{} pull[pull/probe/skip]={}/{}/{} pull_probe[empty/work]={}/{} acct[relaxed/audit]={}/{}",
+        "native[entry/dfl/and]={}/{}/{} pull[pull/probe/audit]={}/{}/{} pull_probe[empty/work]={}/{} acct[relaxed/audit]={}/{}",
         stats.accel_native_fallback_count[0],
         stats.accel_native_fallback_count[1],
         stats.accel_native_fallback_count[2],
@@ -813,6 +813,63 @@ fn format_accel_fallback_summary(stats: &cake_stats) -> String {
         stats.accel_accounting_relaxed,
         stats.accel_accounting_audit,
     )
+}
+
+fn storm_guard_mode_label(mode: usize) -> &'static str {
+    match mode {
+        0 => "off",
+        1 => "shadow",
+        2 => "shield",
+        3 => "full",
+        _ => "unknown",
+    }
+}
+
+fn storm_guard_decision_label(decision: usize) -> &'static str {
+    match decision {
+        0 => "candidate",
+        1 => "base_allow",
+        2 => "shadow",
+        3 => "shield_allow",
+        4 => "full_allow",
+        5 => "smt_block",
+        6 => "unknown_owner",
+        7 => "disabled",
+        8 => "reject",
+        _ => "unknown",
+    }
+}
+
+fn format_storm_guard_modes(counts: &[u64; STORM_GUARD_MAX]) -> String {
+    let mut parts = Vec::new();
+    for (mode, count) in counts.iter().enumerate().take(STORM_GUARD_MAX) {
+        if *count > 0 {
+            parts.push(format!("{}={}", storm_guard_mode_label(mode), count));
+        }
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_storm_guard_decisions(counts: &[u64; STORM_GUARD_DECISION_MAX]) -> String {
+    let mut parts = Vec::new();
+    for (decision, count) in counts.iter().enumerate().take(STORM_GUARD_DECISION_MAX) {
+        if *count > 0 {
+            parts.push(format!(
+                "{}={}",
+                storm_guard_decision_label(decision),
+                count
+            ));
+        }
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 fn format_trust_last_reason_cpus(counters: &[CpuWorkCounters]) -> String {
@@ -1021,6 +1078,12 @@ fn append_accelerator_section(
         "{}.fallback: {}\n",
         label,
         format_accel_fallback_summary(stats),
+    ));
+    output.push_str(&format!(
+        "{}.storm_guard: mode=[{}] decisions=[{}]\n",
+        label,
+        format_storm_guard_modes(&stats.storm_guard_mode_count),
+        format_storm_guard_decisions(&stats.storm_guard_decision_count),
     ));
     output.push_str(&format!(
         "{}.trust: prev_direct[state active/enabled/blocked]={}/{}/{} demotions={} ({:.2}/s) last_reason_cpus={} trusted_prev[attempt/hit/miss(hit%)]={}/{}/{}({:.1}%) rate[a/h/m]={:.1}/{:.1}/{:.1}/s\n",

@@ -271,6 +271,8 @@ fn build_accelerator_summary(stats: &cake_stats, app: &TuiApp) -> AcceleratorSum
         native_fallback_counts: stats.accel_native_fallback_count,
         accounting_relaxed: stats.accel_accounting_relaxed,
         accounting_audit: stats.accel_accounting_audit,
+        storm_guard_mode_counts: stats.storm_guard_mode_count,
+        storm_guard_decision_counts: stats.storm_guard_decision_count,
         trust_prev_attempts: stats.accel_trust_prev_attempt,
         trust_prev_hits: stats.accel_trust_prev_hit,
         trust_prev_misses: stats.accel_trust_prev_miss,

@@ -49,8 +49,8 @@ if [[ "${MODE}" == "latency" || "${MODE}" == "both" ]]; then
 fi
 
 if [[ "${MODE}" == "timehist" || "${MODE}" == "both" ]]; then
-    echo "== perf sched timehist (wakeups) =="
-    perf sched timehist -i "${TRACE_FILE}" --summary --wakeups
+    echo "== perf sched timehist summary =="
+    perf sched timehist -i "${TRACE_FILE}" --summary
     echo
 fi
 

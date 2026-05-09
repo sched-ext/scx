@@ -13,6 +13,7 @@ The active `1.1.1` design is centered on:
   probes
 - idle-first CPU selection
 - direct local inserts for clean idle targets and guarded busy-wake handoff
+- optional storm-guard busy-wake A/B policy for wake-storm benchmark work
 - per-LLC virtual-time fallback queues when direct local handoff is not selected
 - confidence-shaped fast paths that can narrow or skip broad helper work when
   the scorecard is healthy
@@ -45,6 +46,7 @@ cargo build --release -p scx_cake
 # Release build with baked hot-path knobs
 SCX_CAKE_PROFILE=esports cargo build --release -p scx_cake
 SCX_CAKE_QUANTUM_US=1500 SCX_CAKE_QUEUE_POLICY=local cargo build --release -p scx_cake
+SCX_CAKE_STORM_GUARD=shadow cargo build --release -p scx_cake
 
 # Debug build for TUI/capture and runtime A/B work
 cargo build -p scx_cake
@@ -53,7 +55,7 @@ cargo build -p scx_cake
 ### Run
 
 ```bash
-# Release uses the profile, quantum, and queue policy baked at build time
+# Release uses the profile, quantum, queue policy, and storm guard baked at build time
 sudo ./target/release/scx_cake
 
 # Debug default profile: gaming, learned locality gates off
@@ -68,6 +70,7 @@ sudo ./target/debug/scx_cake --queue-policy local
 sudo ./target/debug/scx_cake --verbose
 
 # Headless debug capture when stdout is not an interactive terminal
+sudo install -d -m 0700 /tmp/scx_cake
 sudo ./target/debug/scx_cake --verbose --diag-dir /tmp/scx_cake --diag-period 30
 
 # A/B enable the learned wake-chain locality guard in a debug build
@@ -78,15 +81,20 @@ sudo ./target/debug/scx_cake --verbose --learned-locality=true
 
 # A/B force same-CPU busy wakeups to preempt in a debug build
 sudo ./target/debug/scx_cake --verbose --busy-wake-kick=preempt
+
+# A/B record or enable storm-guard busy-wake handoff in a debug build
+sudo ./target/debug/scx_cake --verbose --storm-guard=shadow
+sudo ./target/debug/scx_cake --verbose --storm-guard=full
 ```
 
 ### Profiles
 
 Profiles are quantum presets. They do not switch the scheduler into separate policy modes.
-Release builds bake profile, quantum, and queue policy at compile time. Use
-`SCX_CAKE_PROFILE`, `SCX_CAKE_QUANTUM_US`, and `SCX_CAKE_QUEUE_POLICY` when
-building release objects. Debug builds keep `--profile`, `--quantum`, and
-`--queue-policy` as runtime A/B controls.
+Release builds bake profile, quantum, queue policy, and storm guard at compile
+time. Use `SCX_CAKE_PROFILE`, `SCX_CAKE_QUANTUM_US`, `SCX_CAKE_QUEUE_POLICY`,
+and `SCX_CAKE_STORM_GUARD` when building release objects. Debug builds keep
+`--profile`, `--quantum`, `--queue-policy`, and `--storm-guard` as runtime A/B
+controls.
 
 `--queue-policy local|llc-vtime` is an explicit A/B policy switch, not a
 profile. The default `llc-vtime` keeps current CPU selection and task
@@ -101,13 +109,17 @@ stay on the lean production path. Debug builds compile the full `--verbose`
 capture surface by default: hot callback counters, wake/run timing, task arena
 snapshots, runtime A/B knobs, and the live TUI are all available
 without special build flags. The `--wake-chain-locality`, `--learned-locality`,
-and `--busy-wake-kick` knobs remain runtime A/B controls and default to the
-latency-first baseline unless explicitly enabled.
+`--busy-wake-kick`, and `--storm-guard` knobs remain runtime A/B controls and
+default to the latency-first baseline unless explicitly enabled.
 
 `--wake-chain-locality=false` and `--learned-locality=false` are explicit forms
 of the default and are useful when keeping A/B command lines comparable.
 `--busy-wake-kick=preempt` makes same-CPU busy wakeups preempt immediately in
 debug builds instead of using Cake's owner-runtime guard.
+`--storm-guard=shadow` records busy-wake storm candidates without changing
+placement, `--storm-guard=shield` enables conservative extra local handoff, and
+`--storm-guard=full` enables the broad wake-storm A/B path meant for benchmarks
+such as `perf sched messaging`.
 
 | Profile | Quantum | Intended use |
 | :-- | --: | :-- |
@@ -194,11 +206,13 @@ kick. Dispatch pulls use a separate confidence lane to decide when a cheap
 `scx_bpf_dsq_move_to_local()`.
 
 The scoreboard also feeds the release predictor. Each CPU row carries a packed
-`decision_confidence` value in private BSS. Selection uses the previous CPU's
-row as the local scorecard for that wakeup, while dispatch/run/stop callbacks
-update the row owned by the CPU that is actually executing. The field is a
-single 64-bit word split into 4-bit lanes, so release can read and update
-multiple policy signals without chasing larger state.
+`decision_confidence` value in private BSS. Selection only trains and replays
+the previous CPU row when the wakeup is executing on that CPU; remote wakeups
+fall back to the broader learned/native paths so they do not poison another
+CPU's local scorecard. Dispatch/run/stop callbacks update the row owned by the
+CPU that is actually executing. The field is a single 64-bit word split into
+4-bit lanes, so release can read and update multiple policy signals without
+chasing larger state.
 
 Each confidence lane starts from a neutral value of `8` when it has not been
 written. Successful predictions climb toward `15`; misses drop faster, by two
@@ -212,7 +226,7 @@ broader path even when confidence is high.
 | `route=kind:confidence` | Which scoreboard route last succeeded: `prev`, `slot0`, `slot1`, `slot2`, `slot3`, or `tunnel`. | Lets route-ready mode replay the known route before scanning the row again. Native fallback does not overwrite this token. |
 | `gear` | Current floor-path gear: recovery, audit, narrow, or floor. | Gates the most aggressive prediction path. |
 | `trust/stable/shock` | Whether published CPU status is useful, owner runtime is stable, and the system has seen load shock. | Keeps prediction conservative when ownership changes, pressure rises, or status looks unknown. |
-| `disp/pull/kick` | Whether dispatch finds empty queues, whether pull prechecks are useful, and how target owners respond to kicks. | Shapes `scx_bpf_dsq_nr_queued()` prechecks, pull skipping, and idle/no/preempt kick behavior. |
+| `disp/pull/kick` | Whether dispatch finds empty queues, whether pull prechecks are useful, and how target owners respond to kicks. | Shapes `scx_bpf_dsq_nr_queued()` prechecks, pull audits, and idle/no/preempt kick behavior. |
 | `aud` / `acct_audit` | Route, pull, and accounting audit cadence. | Rechecks broad paths often enough to detect drift instead of getting stuck in a stale fast path. |
 
 Route-ready mode is the first accelerator tier. It requires high route,
@@ -334,7 +348,6 @@ sequenceDiagram
     K->>R: task starts running
     R->>P: publish busy status
     R->>B: cache tick_slice
-    R->>B: refresh vtime_local
     R->>P: publish current vtime frontier
     R->>B: reset owner-runtime state on task change
 
@@ -442,6 +455,7 @@ Release build-time knobs:
 SCX_CAKE_PROFILE=esports cargo build --release -p scx_cake
 SCX_CAKE_QUANTUM_US=1500 cargo build --release -p scx_cake
 SCX_CAKE_QUEUE_POLICY=local cargo build --release -p scx_cake
+SCX_CAKE_STORM_GUARD=shadow cargo build --release -p scx_cake
 ```
 
 Debug builds can run the live TUI:
@@ -454,17 +468,18 @@ If `--verbose` is launched without an interactive terminal, scx_cake now runs a
 headless diagnostic recorder instead of dropping the capture surface:
 
 ```bash
+sudo install -d -m 0700 /tmp/scx_cake
 sudo ./target/debug/scx_cake --verbose --diag-dir /tmp/scx_cake --diag-period 30
 ```
 
 The recorder writes `cake_diag_latest.txt` / `cake_diag_latest.json` on the
 configured period and a final timestamped `cake_diag_<seconds>.txt` /
-`cake_diag_<seconds>.json` pair on shutdown. On Unix, the diagnostic directory is
-opened with `O_DIRECTORY | O_NOFOLLOW`, and files are written with a
-dirfd-relative temporary file plus `renameat()` so an existing symlink at the
-final output name is replaced, not followed. This is meant for systemd,
-tmux/logging wrappers, and quick gameplay captures where the live TUI is not
-attached.
+`cake_diag_<seconds>.json` pair on shutdown. On Unix, the diagnostic directory
+must already exist. The recorder opens each directory path component with
+`O_DIRECTORY | O_NOFOLLOW`, then writes files with a dirfd-relative temporary
+file plus `renameat()` so an existing symlink at the final output name is
+replaced, not followed. This is meant for systemd, tmux/logging wrappers, and
+quick gameplay captures where the live TUI is not attached.
 
 Default debug dumps include task snapshots, topology, app summaries,
 userspace-derived coverage, exact hot-path frequency counters such as
@@ -492,15 +507,15 @@ Per-CPU local queue rows label packed confidence as `conf=...`:
 and summarized in `accelerator.*.trust` as active/enabled/blocked CPUs,
 demotions, demotion reasons, and trusted-prev attempt/hit/miss counts. A CPU
 with no confidence history is shown as `untrained`, not as unpredictable.
-Locality and busy-wake experiments are runtime A/B controls: they are compiled
-into debug builds, but the latency-first baseline stays active until you pass
-the corresponding option.
+Locality, busy-wake, and storm-guard experiments are runtime A/B controls: they
+are compiled into debug builds, but the latency-first baseline stays active
+until you pass the corresponding option.
 
-The JSON sidecar is schema version 7 and is serialized from typed Rust structs
+The JSON sidecar is schema version 8 and is serialized from typed Rust structs
 with `serde_json`. It carries the same high-level accelerator summary under
 `accelerator`, including trained CPUs, route-ready CPUs, floor-ready CPUs,
 route/gear counts, trust-prev state, wake target hit/miss, dispatch hit/miss,
-and wake direct/busy/queued totals. It also includes `monitors`,
+storm-guard mode/decision counts, and wake direct/busy/queued totals. It also includes `monitors`,
 `active_codes`, `freeze_frames`, `live_data`, and tiered `history` buckets so
 longer gameplay captures can be reviewed without parsing the whole text dump.
 
@@ -535,6 +550,18 @@ Performance claims should be tied to repeated measurements on the same machine a
 ```bash
 sudo scheds/rust/scx_cake/perf_stat_cake.sh 5 both
 ```
+
+For benchmark-driven policy work, start the debug recorder and use the capture
+harness so one workload produces one reviewable evidence bundle:
+
+```bash
+sudo install -d -m 0700 /tmp/scx_cake
+sudo ./target/debug/scx_cake --verbose --diag-dir /tmp/scx_cake --diag-period 5
+sudo scheds/rust/scx_cake/bench/scx_cake_bench_capture.sh perf-sched-thread
+```
+
+See [docs/benchmark_capture_workflow.md](./docs/benchmark_capture_workflow.md)
+for the full benchmark capture workflow.
 
 Useful signals include:
 

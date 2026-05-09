@@ -130,6 +130,8 @@ pub struct AcceleratorSummary {
     pub native_fallback_counts: [u64; 3],
     pub accounting_relaxed: u64,
     pub accounting_audit: u64,
+    pub storm_guard_mode_counts: [u64; 4],
+    pub storm_guard_decision_counts: [u64; 9],
     pub trust_prev_enabled_cpus: u64,
     pub trust_prev_active_cpus: u64,
     pub trust_prev_blocked_cpus: u64,
@@ -153,7 +155,7 @@ pub struct TelemetryReport {
 impl TelemetryReport {
     pub fn new(coverage: Vec<CoverageItem>, health: HealthSummary, graph: GraphSummary) -> Self {
         Self {
-            schema_version: 6,
+            schema_version: 7,
             text_version: 1,
             coverage,
             health,
@@ -354,7 +356,7 @@ mod tests {
                 });
 
         let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
-        assert_eq!(json["schema_version"], 6);
+        assert_eq!(json["schema_version"], 7);
         assert_eq!(json["accelerator"]["source"], "debug-hot-telemetry");
         assert_eq!(json["accelerator"]["trained_cpus"], 2);
         assert_eq!(json["accelerator"]["route_ready_cpus"], 2);
