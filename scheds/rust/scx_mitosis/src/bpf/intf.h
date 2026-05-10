@@ -19,6 +19,9 @@ enum consts {
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 256,
 	MAX_SUBCELLS_PER_CELL = 8,
+	MAX_COMM = 16,
+	MAX_SUBCELL_MATCH_ORS = 4,
+	MAX_SUBCELL_MATCH_ANDS = 4,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 	TIMER_INTERVAL_NS = 100000000, /* 100 ms */
 	CLOCK_BOOTTIME = 7,
@@ -82,6 +85,11 @@ enum cell_stat_idx {
 	NR_CSTATS,
 };
 
+enum subcell_match_kind {
+	SUBCELL_MATCH_NONE,
+	SUBCELL_MATCH_COMM_PREFIX,
+};
+
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
@@ -115,10 +123,22 @@ struct cell_cpumask_data {
 	unsigned char mask[MAX_CPUS_U8];
 };
 
+struct subcell_match {
+	u32 kind;
+	char value[MAX_COMM];
+};
+
+struct subcell_match_and_group {
+	u32 nr_matches;
+	struct subcell_match matches[MAX_SUBCELL_MATCH_ANDS];
+};
+
 /* Serialized subcell config shared between userspace and BPF. */
 struct subcell_config {
 	u32 id;
 	u32 in_use;
+	u32 nr_match_ors;
+	struct subcell_match_and_group matches[MAX_SUBCELL_MATCH_ORS];
 	struct cell_cpumask_data primary;
 	struct cell_cpumask_data borrowable;
 };
@@ -128,6 +148,8 @@ struct subcell {
 	u32 id;
 	u32 in_use;
 	u32 cpu_cnt;
+	u32 nr_match_ors;
+	struct subcell_match_and_group matches[MAX_SUBCELL_MATCH_ORS];
 	struct cell_cpumask_data primary;
 	struct cell_cpumask_data borrowable;
 	struct subcell_llc llcs[MAX_LLCS];
