@@ -20,6 +20,8 @@ use crate::DistributionStats;
 #[stat(_om_prefix = "s_")]
 #[stat(top)]
 pub struct SubcellMetrics {
+    #[stat(desc = "Subcell name")]
+    pub name: String,
     #[stat(desc = "Number of cpus")]
     pub num_cpus: u32,
     #[stat(desc = "CPU utilization %")]
@@ -39,6 +41,11 @@ pub struct SubcellMetrics {
 }
 
 impl SubcellMetrics {
+    pub fn update_name_and_cpus(&mut self, name: &str, num_cpus: u32) {
+        self.name = name.to_string();
+        self.num_cpus = num_cpus;
+    }
+
     pub fn update_demand(
         &mut self,
         util_pct: f64,
