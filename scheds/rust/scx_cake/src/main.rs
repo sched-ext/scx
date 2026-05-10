@@ -147,6 +147,8 @@ impl QueuePolicy {
 const LLC_DSQ_BASE: u64 = 200;
 const CPU_FAST_SCAN_SLOTS: usize = 4;
 const CPU_FAST_PROBE_SLOTS: usize = 4;
+const CPU_FAST_PROBE_PACK_SLOT_BITS: usize = if topology::MAX_CPUS < 256 { 8 } else { 16 };
+const CPU_FAST_PROBE_PACK_SLOT_MASK: u64 = (1u64 << CPU_FAST_PROBE_PACK_SLOT_BITS) - 1;
 const CPU_META_PRIMARY: u64 = 1u64 << 48;
 const CPU_META_SMT: u64 = 1u64 << 49;
 
@@ -258,6 +260,23 @@ fn build_fast_scan_slots(
 #[inline]
 fn active_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> [u16; CPU_FAST_PROBE_SLOTS] {
     [slots[0], slots[1], slots[2], slots[3]]
+}
+
+#[inline]
+fn pack_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> u64 {
+    let mut packed = 0u64;
+
+    for (slot, &cpu) in slots.iter().take(CPU_FAST_PROBE_SLOTS).enumerate() {
+        let shift = slot * CPU_FAST_PROBE_PACK_SLOT_BITS;
+
+        if usize::from(cpu) < topology::MAX_CPUS {
+            packed |= (u64::from(cpu) & CPU_FAST_PROBE_PACK_SLOT_MASK) << shift;
+        } else {
+            packed |= CPU_FAST_PROBE_PACK_SLOT_MASK << shift;
+        }
+    }
+
+    packed
 }
 
 /// 🍰 scx_cake: A CAKE-inspired sched_ext CPU scheduler
@@ -686,6 +705,7 @@ impl<'a> Scheduler<'a> {
                     &topo.cpu_llc_id,
                 );
                 rodata.cpu_fast_probe[i] = active_fast_scan_probe_slots(fast_scan);
+                rodata.cpu_fast_probe_pack[i] = pack_fast_scan_probe_slots(fast_scan) as _;
             }
 
             info!("Topology Strategy: Per-CPU local-first dispatch");
@@ -1041,5 +1061,25 @@ mod tests {
         let slots = [7, 4, 2, u16::MAX];
 
         assert_eq!(active_fast_scan_probe_slots(slots), [7, 4, 2, u16::MAX]);
+    }
+
+    #[test]
+    fn packed_fast_scan_probe_preserves_valid_slots_and_invalid_tail() {
+        let slots = [7, 4, 2, u16::MAX];
+        let packed = pack_fast_scan_probe_slots(slots);
+
+        assert_eq!(packed & CPU_FAST_PROBE_PACK_SLOT_MASK, 7);
+        assert_eq!(
+            (packed >> CPU_FAST_PROBE_PACK_SLOT_BITS) & CPU_FAST_PROBE_PACK_SLOT_MASK,
+            4
+        );
+        assert_eq!(
+            (packed >> (CPU_FAST_PROBE_PACK_SLOT_BITS * 2)) & CPU_FAST_PROBE_PACK_SLOT_MASK,
+            2
+        );
+        assert_eq!(
+            (packed >> (CPU_FAST_PROBE_PACK_SLOT_BITS * 3)) & CPU_FAST_PROBE_PACK_SLOT_MASK,
+            CPU_FAST_PROBE_PACK_SLOT_MASK
+        );
     }
 }
