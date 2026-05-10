@@ -3891,6 +3891,7 @@ dependencies = [
  "libc",
  "maplit",
  "nix 0.31.2",
+ "regex",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
