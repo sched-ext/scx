@@ -47,6 +47,9 @@ const volatile bool debug;
 /* Enable round-robin mode */
 const volatile bool rr_sched;
 
+/* Throttle tasks that abuse the wakeup-frequency boost */
+const volatile bool wakeup_throttle;
+
 /* Primary domain includes all CPU */
 const volatile bool primary_all = true;
 
@@ -393,7 +396,8 @@ static u64 task_dl(struct task_struct *p, struct task_ctx *tctx, u64 enq_flags)
 	 * by charging them @slice_lag, excluding per-CPU kthreads, which may
 	 * legitimately exhibit sleep-intensive behavior.
 	 */
-	if ((!is_kthread(p) || p->nr_cpus_allowed > 1) &&
+	if (wakeup_throttle &&
+	    (!is_kthread(p) || p->nr_cpus_allowed > 1) &&
 	    tctx->slice_ns_ewma && tctx->slice_ns_ewma < SLICE_MIN_NS)
 		vtime += slice_lag;
 

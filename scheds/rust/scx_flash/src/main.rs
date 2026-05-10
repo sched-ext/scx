@@ -194,6 +194,15 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
 
+    /// Throttle tasks that abuse the wakeup-frequency prioritization.
+    ///
+    /// When enabled, tasks whose exponentially weighted moving average (EWMA) of the time slice
+    /// used falls below the minimum slice are charged an extra `slice_lag` of vruntime, reducing
+    /// the priority boost they receive from frequent wakeups. This mechanism prevents giving too
+    /// much priority to tasks that may abuse the sleep/wakeup frequency prioritization.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    wakeup_throttle: bool,
+
     /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
     /// tasks may overflow to other available CPUs.
@@ -337,6 +346,7 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.numa_disabled = numa_disabled;
         rodata.rr_sched = opts.rr_sched;
+        rodata.wakeup_throttle = opts.wakeup_throttle;
         rodata.tickless_sched = opts.tickless;
         rodata.slice_max = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
