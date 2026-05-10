@@ -249,6 +249,8 @@ impl BpfBuilder {
     /// configure and `build` method to compile and generate bindings. See
     /// the struct documentation for details.
     pub fn new() -> Result<Self> {
+        crate::pahole_info::check()?;
+
         let out_dir = PathBuf::from(env::var("OUT_DIR")?);
 
         let clang = ClangInfo::new()?;
