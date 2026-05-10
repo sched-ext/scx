@@ -5,7 +5,7 @@
  *
  * This header defines the 64-bit dispatch queue (DSQ) ID encoding
  * scheme for scx_mitosis, using type fields to distinguish between
- * per-CPU and cell+LLC domain queues. It includes helper functions to
+ * per-CPU and subcell+LLC queues. It includes helper functions to
  * construct, validate, and parse these DSQ IDs for queue management.
  */
 #pragma once
@@ -50,10 +50,13 @@
  *       [ 0001 ] [          CPU#            ]
  *       [Q-TYPE:1]
  *
- *     QTYPE = 0x2 -> Cell+LLC Q
+ *     QTYPE = 0x2 -> Subcell+LLC Q
  *       [31..28] [27 .. 16] [15      ..    0]
- *       [ 0010 ] [  CELL# ] [     LLCID     ]
+ *       [ 0010 ] [ SUBCELL] [     LLCID     ]
  *       [Q-TYPE:2]
+ *
+ *       SUBCELL is a packed subcell ID:
+ *         cell * MAX_SUBCELLS_PER_CELL + subcell
  *
  */
 /*
@@ -71,14 +74,15 @@
 /* ---- Bitfield widths (bits) ---- */
 #define CPU_B 28
 #define LLC_B 16
-#define CELL_B 12
+#define SUBCELL_B 12
 #define TYPE_B 4
 #define DATA_B 28
 #define RSVD_B 32
 
 /* Sum checks (in bits) */
 _Static_assert(CPU_B + TYPE_B == 32, "CPU layout low half must be 32 bits");
-_Static_assert(LLC_B + CELL_B + TYPE_B == 32, "CELL+LLC layout low half must be 32 bits");
+_Static_assert(LLC_B + SUBCELL_B + TYPE_B == 32,
+	       "subcell+LLC layout low half must be 32 bits");
 _Static_assert(DATA_B + TYPE_B == 32, "Common layout low half must be 32 bits");
 
 typedef union {
@@ -91,13 +95,13 @@ typedef union {
 		u64 rsvd : RSVD_B;
 	} cpu_dsq;
 
-	/* Cell+LLC user DSQ */
+	/* Subcell+LLC user DSQ */
 	struct {
 		u64 llc : LLC_B;
-		u64 cell : CELL_B;
+		u64 subcell : SUBCELL_B;
 		u64 type : TYPE_B;
 		u64 rsvd : RSVD_B;
-	} cell_llc_dsq;
+	} subcell_llc_dsq;
 
 	/* Generic user view */
 	struct {
@@ -124,8 +128,8 @@ typedef union {
 #define DSQ_INVALID ((dsq_id_t){ 0 })
 
 _Static_assert(sizeof(((dsq_id_t){ 0 }).cpu_dsq) == sizeof(u64), "cpu view must be 8 bytes");
-_Static_assert(sizeof(((dsq_id_t){ 0 }).cell_llc_dsq) == sizeof(u64),
-	       "cell+LLC view must be 8 bytes");
+_Static_assert(sizeof(((dsq_id_t){ 0 }).subcell_llc_dsq) == sizeof(u64),
+	       "subcell+LLC view must be 8 bytes");
 _Static_assert(sizeof(((dsq_id_t){ 0 }).user_dsq) == sizeof(u64),
 	       "user common view must be 8 bytes");
 _Static_assert(sizeof(((dsq_id_t){ 0 }).builtin_dsq) == sizeof(u64),
@@ -139,14 +143,15 @@ _Static_assert(_Alignof(dsq_id_t) == sizeof(u64), "dsq_id_t must be 8-byte align
 enum dsq_type {
 	DSQ_TYPE_NONE,
 	DSQ_TYPE_CPU,
-	DSQ_TYPE_CELL_LLC,
+	DSQ_TYPE_SUBCELL_LLC,
 };
 
 /* Range guards */
 _Static_assert(MAX_CPUS <= (1u << CPU_B), "MAX_CPUS must fit in field");
 _Static_assert(MAX_LLCS <= (1u << LLC_B), "MAX_LLCS must fit in field");
-_Static_assert(MAX_CELLS <= (1u << CELL_B), "MAX_CELLS must fit in field");
-_Static_assert(DSQ_TYPE_CELL_LLC < (1u << TYPE_B), "DSQ_TYPE_CELL_LLC must fit in field");
+_Static_assert(MAX_CELLS * MAX_SUBCELLS_PER_CELL <= (1u << SUBCELL_B),
+	       "packed subcell count must fit in field");
+_Static_assert(DSQ_TYPE_SUBCELL_LLC < (1u << TYPE_B), "DSQ_TYPE_SUBCELL_LLC must fit in field");
 
 static inline bool dsq_is_invalid(dsq_id_t dsq_id)
 {
@@ -187,13 +192,30 @@ static inline dsq_id_t get_cpu_dsq_id(u32 cpu)
 	return (dsq_id_t){ .cpu_dsq = { .cpu = cpu, .type = DSQ_TYPE_CPU } };
 }
 
-static inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
+static inline s32 pack_subcell_id(u32 cell, u32 subcell)
 {
-	if (cell >= MAX_CELLS || llc >= MAX_LLCS) {
-		scx_bpf_error("cell %u or llc %u too large", cell, llc);
+	if (cell >= MAX_CELLS || subcell >= MAX_SUBCELLS_PER_CELL) {
+		scx_bpf_error("cell %u or subcell %u too large", cell, subcell);
+		return -EINVAL;
+	}
+
+	return (cell * MAX_SUBCELLS_PER_CELL) + subcell;
+}
+
+static inline dsq_id_t get_subcell_llc_dsq_id(u32 cell, u32 subcell, u32 llc)
+{
+	s32 packed_subcell;
+
+	if (llc >= MAX_LLCS) {
+		scx_bpf_error("llc %u too large", llc);
 		return DSQ_INVALID;
 	}
 
-	return (dsq_id_t){ .cell_llc_dsq = {
-				   .llc = llc, .cell = cell, .type = DSQ_TYPE_CELL_LLC } };
+	packed_subcell = pack_subcell_id(cell, subcell);
+	if (packed_subcell < 0)
+		return DSQ_INVALID;
+
+	return (dsq_id_t){ .subcell_llc_dsq = { .llc = llc,
+						.subcell = packed_subcell,
+						.type = DSQ_TYPE_SUBCELL_LLC } };
 }
