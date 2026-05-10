@@ -237,6 +237,7 @@ static inline int allocate_cell()
 			/* In timer-managed mode, only subcell 0 is used. */
 			c->subcells[0].id = 0;
 			c->subcells[0].in_use = 1;
+			c->subcells[0].nr_match_ors = 0;
 			zero_subcell_vtimes(&c->subcells[0]);
 			return cell_idx;
 		}
@@ -263,6 +264,7 @@ static inline int free_cell(int cell_idx)
 		c->subcells[subcell_id].id = subcell_id;
 		c->subcells[subcell_id].cpu_cnt = 0;
 		c->subcells[subcell_id].in_use = 0;
+		c->subcells[subcell_id].nr_match_ors = 0;
 	}
 	c->cpu_cnt = 0;
 	WRITE_ONCE(c->in_use, 0);
@@ -446,6 +448,94 @@ static __always_inline int set_vtime_charge_subcell(struct task_ctx *tctx)
 	return 0;
 }
 
+static __always_inline bool match_comm_prefix(const char *prefix, const char *comm)
+{
+	u32 i;
+
+	bpf_for(i, 0, MAX_COMM)
+	{
+		if (prefix[i] == '\0')
+			return true;
+		if (comm[i] != prefix[i])
+			return false;
+	}
+
+	return true;
+}
+
+static __always_inline bool match_subcell_match(struct subcell_match *match, const char *comm)
+{
+	switch (match->kind) {
+	case SUBCELL_MATCH_COMM_PREFIX:
+		return match_comm_prefix(match->value, comm);
+	default:
+		return false;
+	}
+}
+
+static __always_inline bool task_matches_subcell(struct subcell *subcell, const char *comm)
+{
+	u32 or_idx;
+
+	bpf_for(or_idx, 0, MAX_SUBCELL_MATCH_ORS)
+	{
+		struct subcell_match_and_group *and_group;
+		bool matches = true;
+		u32 and_idx;
+
+		if (or_idx >= subcell->nr_match_ors)
+			break;
+
+		and_group = MEMBER_VPTR(subcell->matches, [or_idx]);
+		if (!and_group)
+			return false;
+
+		if (and_group->nr_matches == 0)
+			return true;
+
+		bpf_for(and_idx, 0, MAX_SUBCELL_MATCH_ANDS)
+		{
+			struct subcell_match *match;
+
+			if (and_idx >= and_group->nr_matches)
+				break;
+
+			match = MEMBER_VPTR(and_group->matches, [and_idx]);
+			if (!match || !match_subcell_match(match, comm)) {
+				matches = false;
+				break;
+			}
+		}
+
+		if (matches)
+			return true;
+	}
+
+	return false;
+}
+
+static __always_inline u32 pick_task_subcell(struct task_struct *p, u32 cell_id)
+{
+	char comm[MAX_COMM];
+	u32 subcell_id;
+
+	__builtin_memcpy(comm, p->comm, MAX_COMM);
+
+	bpf_for(subcell_id, 1, MAX_SUBCELLS_PER_CELL)
+	{
+		struct subcell *subcell = lookup_subcell(cell_id, subcell_id);
+
+		if (!subcell)
+			break;
+		if (!subcell->in_use)
+			continue;
+		if (task_matches_subcell(subcell, comm))
+			return subcell_id;
+	}
+
+	return 0;
+}
+
 /*
  * Figure out the task's cell, dsq and store the corresponding cpumask in the
  * task_ctx.
@@ -491,7 +581,7 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	tctx->configuration_seq = READ_ONCE(applied_configuration_seq);
 	barrier();
 	tctx->cell = cgc->cell;
-	tctx->subcell = 0;
+	tctx->subcell = pick_task_subcell(p, tctx->cell);
 	tctx->cgid = cg->kn->id;
 
 	return update_task_cpumask(p, tctx);
@@ -2170,6 +2260,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			cell->subcells[subcell_id].id = subcell_id;
 			cell->subcells[subcell_id].cpu_cnt = 0;
 			cell->subcells[subcell_id].in_use = 0;
+			cell->subcells[subcell_id].nr_match_ors = 0;
 		}
 		cell->cpu_cnt = 0;
 
@@ -2238,6 +2329,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 		cell->in_use = true;
 		cell->subcells[0].in_use = 1;
+		cell->subcells[0].nr_match_ors = 0;
 	}
 
 	/*
@@ -2384,6 +2476,7 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 	struct subcell_config(*subcell_configs)[MAX_SUBCELLS_PER_CELL];
 	struct cell *cell;
 	u32 subcell_id;
+	u32 cpu;
 
 	if (!config || cell_id >= MAX_CELLS)
 		return -EINVAL;
@@ -2440,8 +2533,50 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 		}
 		subcell->id = subcell_config->id;
 		subcell->in_use = subcell_config->in_use;
+		subcell->nr_match_ors = subcell_config->nr_match_ors;
+		__builtin_memcpy(subcell->matches, subcell_config->matches,
+				 sizeof(subcell->matches));
 		subcell->primary = subcell_config->primary;
 		subcell->borrowable = subcell_config->borrowable;
+
+		if (!subcell_config->in_use)
+			continue;
+
+		bpf_for(cpu, 0, nr_possible_cpus)
+		{
+			struct cpu_ctx *cctx;
+			bool cpu_in_subcell;
+
+			if (cell_cpumask_data_test_cpu(&subcell_config->primary, cpu,
+						       &cpu_in_subcell)) {
+				scx_bpf_error(
+					"failed to decode subcell cpumask for cell=%u subcell=%u",
+					cell_id, subcell_id);
+				return -EINVAL;
+			}
+
+			if (!cpu_in_subcell)
+				continue;
+
+			cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
+			if (!cctx)
+				return -ENOENT;
+
+			if (cctx->cell != cell_id || cctx->subcell != subcell_id) {
+				u32 llc_idx;
+
+				llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ?
+						  cctx->llc :
+						  FAKE_FLAT_SUBCELL_LLC;
+				if (time_before(READ_ONCE(subcell->llcs[llc_idx].vtime_now),
+						cctx->vtime_now))
+					WRITE_ONCE(subcell->llcs[llc_idx].vtime_now,
+						   cctx->vtime_now);
+			}
+
+			cctx->cell = cell_id;
+			cctx->subcell = subcell_id;
+		}
 	}
 
 	return 0;
@@ -2514,17 +2649,34 @@ int apply_cell_config(void *ctx)
 			return ret;
 	}
 
-	/* Phase 2.5: Recompute per-LLC CPU counts for default subcells */
+	/* Phase 2.5: Recompute per-LLC CPU counts for configured subcells */
 	if (enable_llc_awareness) {
 		u32 c;
 		scoped_guard(rcu)
 		{
 			bpf_for(c, 0, MAX_CELLS)
 			{
+				u32 subcell_id;
+				struct cell *cur_cell;
+
 				if (c >= config->num_cells)
 					break;
-				if (recalc_subcell_llc_counts(c, 0, NULL))
+
+				cur_cell = lookup_cell(c);
+				if (!cur_cell)
 					return -EINVAL;
+
+				bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+				{
+					struct subcell *subcell =
+						MEMBER_VPTR(cur_cell->subcells, [subcell_id]);
+					if (!subcell)
+						return -EINVAL;
+					if (!subcell->in_use)
+						continue;
+					if (recalc_subcell_llc_counts(c, subcell_id, NULL))
+						return -EINVAL;
+				}
 			}
 		}
 	}
