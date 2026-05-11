@@ -190,9 +190,7 @@ const bool enable_stats __attribute__((used)) = false;
 #define CAKE_THROUGHPUT_FAIR_DISPATCH_BUDGET 2U
 #define CAKE_BUSY_WAKE_SHRINK_MIN_NS 500000ULL
 #define CAKE_TP_DEC_PULL_MASK 0x0fULL
-#define CAKE_TP_DEC_FAIR_HINT (1ULL << 4)
-#define CAKE_TP_DEC_OVERFLOW_HINT (1ULL << 5)
-#define CAKE_TP_DEC_DISPATCH_MASK 0x3fULL
+#define CAKE_TP_DEC_DISPATCH_MASK CAKE_TP_DEC_PULL_MASK
 #define CAKE_TP_DEC_RUNTIME_SCALE_SHIFT 14U
 #define CAKE_TP_DEC_RUNTIME_BUCKET_SHIFT 8U
 #define CAKE_TP_DEC_RUN_BUCKET_SHIFT 16U
@@ -655,17 +653,6 @@ cake_throughput_reset_dispatch_budget(struct cake_cpu_bss *bss)
 {
 	u64 old_dec = READ_ONCE(bss->throughput_decision);
 	u64 next    = old_dec & ~CAKE_TP_DEC_DISPATCH_MASK;
-
-	if (next != old_dec)
-		WRITE_ONCE(bss->throughput_decision, next);
-}
-
-static __always_inline void
-cake_throughput_mark_shared_miss(struct cake_cpu_bss *bss)
-{
-	u64 old_dec = READ_ONCE(bss->throughput_decision);
-	u64 next    = old_dec | CAKE_TP_DEC_FAIR_HINT |
-		   CAKE_TP_DEC_OVERFLOW_HINT;
 
 	if (next != old_dec)
 		WRITE_ONCE(bss->throughput_decision, next);
@@ -1644,9 +1631,16 @@ cake_decay_cpu_pressure_idle(struct cake_cpu_bss *bss)
 static __always_inline void
 cake_owner_runtime_policy_reset(struct cake_cpu_bss *bss)
 {
-	WRITE_ONCE(bss->owner_avg_runtime_ns, 0);
-	WRITE_ONCE(bss->owner_run_count, 0);
-	cake_throughput_reset_owner_decision(bss);
+	/* Decay on task rotation rather than zero-reset so SAT classification
+	 * can carry across brief preemptions. Avg halves drop below bulk_min
+	 * within one rotation, so SAT clears naturally via the next
+	 * cake_owner_runtime_policy_update when the new task isn't itself a
+	 * long-runtime owner. */
+	u32 avg  = READ_ONCE(bss->owner_avg_runtime_ns);
+	u16 runs = READ_ONCE(bss->owner_run_count);
+
+	WRITE_ONCE(bss->owner_avg_runtime_ns, avg >> 1);
+	WRITE_ONCE(bss->owner_run_count, runs >> 1);
 }
 
 static __always_inline void
@@ -3481,24 +3475,15 @@ cake_try_insert_throughput_lane(struct task_struct *p, u32 target_cpu,
 }
 
 static __always_inline void
-cake_insert_throughput_overflow(struct task_struct *p,
-			       struct cake_cpu_bss *target_bss,
-			       u32 target_cpu, u64 slice, u64 enq_flags,
-			       bool preserve_state)
+cake_insert_throughput_overflow(struct task_struct *p, u32 target_cpu,
+			       u64 slice, u64 enq_flags)
 {
-	if (CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LOCAL) {
-		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
-				   enq_flags);
-		return;
-	}
-
 #ifndef CAKE_RELEASE
 	if (CAKE_PATH_STATS_ACTIVE)
 		get_local_stats_for(target_cpu)
 			->nr_cache_throughput_lane_spill++;
 #endif
-	cake_throughput_mark_shared_miss(target_bss);
-	cake_insert_shared_escape(p, enq_flags, target_cpu, slice, preserve_state);
+	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice, enq_flags);
 }
 
 static __always_inline bool
@@ -3507,9 +3492,14 @@ cake_throughput_fairness_due(struct cake_cpu_bss *bss, u32 cpu)
 	u64 dec = READ_ONCE(bss->throughput_decision);
 	s32 queued;
 
-	if (dec & CAKE_TP_DEC_FAIR_HINT)
-		return true;
 	if (!(dec & (CAKE_TP_DEC_PULL_MASK & ~1ULL)))
+		return false;
+
+	/* SAT_CACHE_MEM owner on this CPU: defer the fairness-driven LLC pull
+	 * so the local throughput lane drains first and keep-running can pin
+	 * the cache-warm worker. Budget is intentionally not reset — once SAT
+	 * lifts, the next dispatch fires immediately to catch up on LLC drain. */
+	if (dec & CAKE_TP_DEC_SAT_CACHE_MEM)
 		return false;
 
 	queued = scx_bpf_dsq_nr_queued(cake_llc_dsq_for_cpu(cpu));
@@ -4180,9 +4170,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 						    enq_flags))
 			return;
 		if (throughput_slice) {
-			cake_insert_throughput_overflow(p, target_bss,
-							target_cpu, slice,
-							enq_flags, false);
+			cake_insert_throughput_overflow(p, target_cpu, slice,
+							enq_flags);
 			return;
 		}
 		if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
@@ -4367,8 +4356,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 					    p, target_cpu, slice, enq_flags))
 					goto queue_done;
 				cake_insert_throughput_overflow(
-					p, target_bss, target_cpu, slice,
-					enq_flags, false);
+					p, target_cpu, slice, enq_flags);
 				goto queue_done;
 			}
 			goto queue_requeue;
@@ -5259,8 +5247,13 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 #if !CAKE_LEAN_SCHED
 		cake_owner_runtime_policy_reset(bss);
 #else
-		WRITE_ONCE(bss->owner_avg_runtime_ns, 0);
-		WRITE_ONCE(bss->owner_run_count, 0);
+		/* Decay rather than zero so SAT classification survives brief
+		 * preemptions; cake_throughput_update_owner_decision recomputes
+		 * the SAT bit each accounting tick from the decayed (avg, runs). */
+		WRITE_ONCE(bss->owner_avg_runtime_ns,
+			   READ_ONCE(bss->owner_avg_runtime_ns) >> 1);
+		WRITE_ONCE(bss->owner_run_count,
+			   READ_ONCE(bss->owner_run_count) >> 1);
 #endif
 #if CAKE_ACCEL_PATH
 		cake_scoreboard_owner_reset(bss);
