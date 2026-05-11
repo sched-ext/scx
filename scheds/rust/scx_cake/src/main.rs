@@ -285,7 +285,8 @@ fn pack_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> u64 {
 /// The current design centers on topology-aware CPU selection, per-LLC
 /// vtime fallback queues, and lightweight per-task accounting in BPF.
 ///
-/// Release builds bake profile, quantum, queue policy, and storm guard at compile time.
+/// Release builds bake profile, quantum, queue policy, storm guard, busy-wake
+/// kick, learned locality, and wake-chain locality at compile time.
 /// Debug builds keep those options as runtime A/B controls.
 ///
 /// Game detection and older multi-mode policy logic have been removed.
@@ -347,7 +348,8 @@ struct Args {
     ///
     /// This generic behavior-based guard keeps hot short blocking wake chains
     /// near their learned CPU instead of broadening every idle scan. It defaults
-    /// off because latency tails are worse than migration for the current policy.
+    /// off in debug builds for A/B work. Release builds use
+    /// SCX_CAKE_WAKE_CHAIN_LOCALITY at build time.
     #[arg(
         long,
         default_value_t = false,
@@ -362,8 +364,8 @@ struct Args {
     /// Enable learned locality steering.
     ///
     /// This controls the arena-backed home/core/primary steering policy used
-    /// after a task has enough history. It defaults off so the baseline stays
-    /// latency-first and idle-selector driven.
+    /// after a task has enough history. It defaults off in debug builds for A/B
+    /// work. Release builds use SCX_CAKE_LEARNED_LOCALITY at build time.
     #[arg(
         long,
         default_value_t = false,
@@ -503,6 +505,28 @@ impl Args {
         #[cfg(not(cake_bpf_release))]
         {
             self.busy_wake_kick.as_str()
+        }
+    }
+
+    fn effective_learned_locality(&self) -> &'static str {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_LEARNED_LOCALITY
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            if self.learned_locality { "on" } else { "off" }
+        }
+    }
+
+    fn effective_wake_chain_locality(&self) -> &'static str {
+        #[cfg(cake_bpf_release)]
+        {
+            topology::BAKED_WAKE_CHAIN_LOCALITY
+        }
+        #[cfg(not(cake_bpf_release))]
+        {
+            if self.wake_chain_locality { "on" } else { "off" }
         }
     }
 }
@@ -845,14 +869,18 @@ impl<'a> Scheduler<'a> {
             || cli_arg_present("--queue-policy", None)
             || cli_arg_present("--storm-guard", None)
             || cli_arg_present("--busy-wake-kick", None)
+            || cli_arg_present("--learned-locality", None)
+            || cli_arg_present("--wake-chain-locality", None)
         {
             log::warn!(
-                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, or SCX_CAKE_BUSY_WAKE_KICK to change hot-path knobs",
+                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}, learned-locality={}, wake-chain-locality={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, SCX_CAKE_BUSY_WAKE_KICK, SCX_CAKE_LEARNED_LOCALITY, or SCX_CAKE_WAKE_CHAIN_LOCALITY to change hot-path knobs",
                 topology::BAKED_PROFILE,
                 topology::BAKED_QUANTUM_US,
                 topology::BAKED_QUEUE_POLICY,
                 topology::BAKED_STORM_GUARD,
-                topology::BAKED_BUSY_WAKE_KICK
+                topology::BAKED_BUSY_WAKE_KICK,
+                topology::BAKED_LEARNED_LOCALITY,
+                topology::BAKED_WAKE_CHAIN_LOCALITY
             );
         }
 
@@ -875,7 +903,7 @@ impl<'a> Scheduler<'a> {
         );
 
         info!(
-            "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}, storm-guard: {}, busy-wake-kick: {}",
+            "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}, storm-guard: {}, busy-wake-kick: {}, learned-locality: {}, wake-chain-locality: {}",
             self.topology.nr_cpus,
             self.topology
                 .llc_cpu_mask
@@ -887,7 +915,9 @@ impl<'a> Scheduler<'a> {
             self.args.effective_quantum_us(),
             self.args.effective_queue_policy(),
             self.args.effective_storm_guard(),
-            self.args.effective_busy_wake_kick()
+            self.args.effective_busy_wake_kick(),
+            self.args.effective_learned_locality(),
+            self.args.effective_wake_chain_locality()
         );
         let mut trust_governor = trust::TrustGovernor::new(self.topology.nr_cpus);
         if self.args.verbose && std::io::stdout().is_terminal() {

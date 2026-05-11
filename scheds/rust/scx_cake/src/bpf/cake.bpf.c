@@ -13,7 +13,7 @@
 #ifndef CAKE_NEEDS_ARENA
 #define CAKE_NEEDS_ARENA 0
 #endif
-#if defined(CAKE_RELEASE) || !CAKE_NEEDS_ARENA
+#if !CAKE_NEEDS_ARENA
 #ifndef __arena
 #define __arena __attribute__((address_space(1)))
 #endif
@@ -48,6 +48,12 @@ char _license[] SEC("license") = "GPL";
 #ifndef CAKE_BUSY_WAKE_KICK_VALUE
 #define CAKE_BUSY_WAKE_KICK_VALUE CAKE_BUSY_WAKE_KICK_POLICY
 #endif
+#ifndef CAKE_LEARNED_LOCALITY_VALUE
+#define CAKE_LEARNED_LOCALITY_VALUE 1
+#endif
+#ifndef CAKE_WAKE_CHAIN_LOCALITY_VALUE
+#define CAKE_WAKE_CHAIN_LOCALITY_VALUE 1
+#endif
 #ifdef CAKE_RELEASE
 const u64 quantum_ns = CAKE_QUANTUM_NS; /* Base time slice per dispatch */
 #define CAKE_QUEUE_POLICY CAKE_QUEUE_POLICY_VALUE
@@ -68,14 +74,20 @@ const volatile bool enable_wake_chain_locality = false;
 const volatile u32  busy_wake_kick_mode	       = 0;
 #endif
 #if defined(CAKE_RELEASE)
-#define CAKE_LEARNED_LOCALITY_ENABLED 0
-#define CAKE_WAKE_CHAIN_LOCALITY_ENABLED 0
+#define CAKE_LEARNED_LOCALITY_COMPILED CAKE_LEARNED_LOCALITY_VALUE
+#define CAKE_WAKE_CHAIN_LOCALITY_COMPILED CAKE_WAKE_CHAIN_LOCALITY_VALUE
+#define CAKE_LEARNED_LOCALITY_ENABLED CAKE_LEARNED_LOCALITY_VALUE
+#define CAKE_WAKE_CHAIN_LOCALITY_ENABLED CAKE_WAKE_CHAIN_LOCALITY_VALUE
 #define CAKE_BUSY_WAKE_KICK_MODE CAKE_BUSY_WAKE_KICK_VALUE
 #elif !CAKE_LOCALITY_EXPERIMENTS
+#define CAKE_LEARNED_LOCALITY_COMPILED 0
+#define CAKE_WAKE_CHAIN_LOCALITY_COMPILED 0
 #define CAKE_LEARNED_LOCALITY_ENABLED 0
 #define CAKE_WAKE_CHAIN_LOCALITY_ENABLED 0
 #define CAKE_BUSY_WAKE_KICK_MODE CAKE_BUSY_WAKE_KICK_POLICY
 #else
+#define CAKE_LEARNED_LOCALITY_COMPILED 1
+#define CAKE_WAKE_CHAIN_LOCALITY_COMPILED 1
 #define CAKE_LEARNED_LOCALITY_ENABLED \
 	(*(volatile const bool *)&enable_learned_locality)
 #define CAKE_WAKE_CHAIN_LOCALITY_ENABLED \
@@ -113,7 +125,7 @@ const u32 legacy_tier_base[4] = { 250000000, 0, 750000000, 500000000 };
 #endif
 /* Release stays on the lean production path. Debug builds compile the
  * experiment-aware path so runtime A/B knobs work without a rebuild. */
-#if defined(CAKE_RELEASE) || !CAKE_LOCALITY_EXPERIMENTS
+#if !CAKE_LOCALITY_EXPERIMENTS
 #define CAKE_LEAN_SCHED 1
 #else
 #define CAKE_LEAN_SCHED 0
@@ -507,18 +519,25 @@ static __always_inline u64 cake_make_cpu_status(bool idle, u8 owner_class,
 static __always_inline bool cake_status_scoreboard_clean(u64 status)
 {
 	u32 op = cake_status_owner_pressure(status);
-	u32 owner_class = op & CAKE_CPU_STATUS_OWNER_MASK;
-	u32 pressure = op >> (CAKE_CPU_STATUS_PRESS_SHIFT -
-			      CAKE_CPU_STATUS_OWNER_SHIFT);
+	u32 key = (op & CAKE_CPU_STATUS_OWNER_MASK) | ((op >> 1) & 0x18U);
 
-	return !(((0xf0U >> (owner_class & 7U)) |
-		  (pressure & (pressure >> 1))) &
-		 1U);
+	return (0x000F0F0FU >> key) & 1U;
 }
 
 static __always_inline void cake_scoreboard_summary_publish(u32 cpu, u64 status)
 {
 #if CAKE_SCOREBOARD_SUMMARY
+#if defined(CAKE_RELEASE) && defined(CAKE_SINGLE_LLC)
+	u64 bit = 1ULL << (cpu & 63U);
+
+	if ((status & CAKE_CPU_STATUS_IDLE) &&
+	    cake_status_scoreboard_clean(status))
+		__sync_fetch_and_or(&scoreboard_summary[0].idle_clean_mask,
+				    bit);
+	else
+		__sync_fetch_and_and(&scoreboard_summary[0].idle_clean_mask,
+				     ~bit);
+#else
 	u32 llc = cpu_llc_id[cpu & (CAKE_MAX_CPUS - 1)] & (CAKE_MAX_LLCS - 1);
 	u64 bit = 1ULL << (cpu & 63U);
 
@@ -529,6 +548,7 @@ static __always_inline void cake_scoreboard_summary_publish(u32 cpu, u64 status)
 	else
 		__sync_fetch_and_and(&scoreboard_summary[llc].idle_clean_mask,
 				     ~bit);
+#endif
 #else
 	(void)cpu;
 	(void)status;
@@ -684,7 +704,10 @@ cake_cache_throughput_slice_for(struct cake_cpu_bss *bss,
 
 static __always_inline u64 cake_min_requeue_slice(u64 slice)
 {
-	slice += (200000ULL - slice) & -(slice < 200000ULL);
+	u64 floor = quantum_ns >> 1;
+
+	floor += (200000ULL - floor) & -(floor < 200000ULL);
+	slice += (floor - slice) & -(slice < floor);
 	return slice;
 }
 
@@ -700,7 +723,8 @@ static __always_inline u64 cake_requeue_base_slice(u64 slice, u64 target_status)
 
 static __always_inline u64 cake_preserve_slice(u64 slice)
 {
-	return cake_min_requeue_slice(slice);
+	(void)slice;
+	return quantum_ns;
 }
 
 #if CAKE_LEAN_SCHED
@@ -764,13 +788,9 @@ static __always_inline void cake_publish_cpu_running(u32 cpu, bool task_changed)
 			   ~(CAKE_CPU_STATUS_IDLE | CAKE_CPU_STATUS_ACCEPT_WAKE);
 		u32 op = cake_status_owner_pressure(old);
 		u32 owner_class = op & CAKE_CPU_STATUS_OWNER_MASK;
-		u32 pressure = (op >> (CAKE_CPU_STATUS_PRESS_SHIFT -
-				       CAKE_CPU_STATUS_OWNER_SHIFT)) &
-			       CAKE_CPU_STATUS_PRESS_MASK;
-		u32 heavy = (owner_class >= CAKE_CPU_OWNER_FRAME) &
-			    (pressure >= CAKE_CPU_PRESSURE_HIGH);
+		u32 heavy = ((0x1F0U >> owner_class) & (op >> 4)) & 2U;
 
-		next |= CAKE_CPU_STATUS_ACCEPT_WAKE & -(u64)heavy;
+		next |= (u64)heavy;
 		WRITE_ONCE(cpu_status[idx].flags, next);
 		cake_scoreboard_summary_publish(cpu, next);
 	}
@@ -856,13 +876,6 @@ static __always_inline u64 cake_read_cpu_frontier(u32 cpu)
 #define CAKE_CLAIM_HEALTH_MISS_STEP 4U
 #define CAKE_CLAIM_HEALTH_RECOVERY_STEP 1U
 
-static __always_inline u8 cake_conf_value(u64 confidence, u32 shift)
-{
-	u8 value = (u8)((confidence >> shift) & CAKE_CONF_NIBBLE_MASK);
-
-	return value ?: CAKE_CONF_INIT;
-}
-
 static __always_inline u8 cake_conf_raw_value(u64 confidence, u32 shift)
 {
 	return (u8)((confidence >> shift) & CAKE_CONF_NIBBLE_MASK);
@@ -879,11 +892,6 @@ static __always_inline u64 cake_conf_high_lanes(u64 confidence)
 	       0x1111111111111111ULL;
 }
 
-static __always_inline u8 cake_claim_health_value(u64 confidence)
-{
-	return cake_conf_value(confidence, CAKE_CONF_CLAIM_HEALTH_SHIFT);
-}
-
 static __always_inline u64 cake_claim_health_store(u64 confidence, u8 value)
 {
 	u64 mask = CAKE_CONF_NIBBLE_MASK << CAKE_CONF_CLAIM_HEALTH_SHIFT;
@@ -892,35 +900,36 @@ static __always_inline u64 cake_claim_health_store(u64 confidence, u8 value)
 	       (((u64)value) << CAKE_CONF_CLAIM_HEALTH_SHIFT);
 }
 
+static __always_inline u8 cake_claim_health_adjust(u8 value, bool success)
+{
+	u32 shift = (value & 0xfU) * 4U;
+
+	if (success)
+		return (u8)((0xFFEDCBA987654329ULL >> shift) & 0xfU);
+	return (u8)((0xBA98765432111114ULL >> shift) & 0xfU);
+}
+
 static __always_inline bool cake_claim_health_allows(struct cake_cpu_bss *bss)
 {
 	u64 confidence = READ_ONCE(bss->decision_confidence);
-	u8  value      = cake_claim_health_value(confidence);
+	u8  value =
+		cake_conf_raw_value(confidence, CAKE_CONF_CLAIM_HEALTH_SHIFT);
 
-	if (value >= CAKE_CLAIM_HEALTH_MIN)
+	if (!value || value >= CAKE_CLAIM_HEALTH_MIN)
 		return true;
-	if (value < CAKE_CLAIM_HEALTH_MAX) {
-		confidence = cake_claim_health_store(
-			confidence, value + CAKE_CLAIM_HEALTH_RECOVERY_STEP);
-		WRITE_ONCE(bss->decision_confidence, confidence);
-	}
+	confidence = cake_claim_health_store(
+		confidence, value + CAKE_CLAIM_HEALTH_RECOVERY_STEP);
+	WRITE_ONCE(bss->decision_confidence, confidence);
 	return false;
 }
 
 static __always_inline u64 cake_claim_health_update(u64	 confidence,
 						    bool success)
 {
-	u8 value = cake_claim_health_value(confidence);
+	u8 value =
+		cake_conf_raw_value(confidence, CAKE_CONF_CLAIM_HEALTH_SHIFT);
 
-	if (success) {
-		value = value + CAKE_CLAIM_HEALTH_HIT_STEP;
-		if (value > CAKE_CLAIM_HEALTH_MAX)
-			value = CAKE_CLAIM_HEALTH_MAX;
-	} else {
-		value = value > CAKE_CLAIM_HEALTH_MISS_STEP ?
-				value - CAKE_CLAIM_HEALTH_MISS_STEP :
-				1;
-	}
+	value = cake_claim_health_adjust(value, success);
 	return cake_claim_health_store(confidence, value);
 }
 
@@ -979,12 +988,12 @@ static __always_inline bool cake_floor_mode_ready(u64 confidence)
 
 static __always_inline bool cake_route_predict_ready(u64 confidence)
 {
-	u64 high = cake_conf_high_lanes(confidence);
-	u64 want = (1ULL << CAKE_CONF_ROUTE_SHIFT) |
-		   (1ULL << CAKE_CONF_SELECT_EARLY_SHIFT) |
-		   (1ULL << CAKE_CONF_STATUS_TRUST_SHIFT);
+	u64 ready = (0xcULL << CAKE_CONF_ROUTE_SHIFT) |
+		    (0xcULL << CAKE_CONF_SELECT_EARLY_SHIFT) |
+		    (0xcULL << CAKE_CONF_STATUS_TRUST_SHIFT);
+	u64 shock = 0xcULL << CAKE_CONF_LOAD_SHOCK_SHIFT;
 
-	return (high & (want | (1ULL << CAKE_CONF_LOAD_SHOCK_SHIFT))) == want;
+	return (confidence & (ready | shock)) == ready;
 }
 
 static __always_inline u32 cake_route_predict_block_reason(u64 confidence)
@@ -1181,7 +1190,11 @@ static __always_inline void cake_route_update(struct cake_cpu_bss *bss,
 	u64 confidence = READ_ONCE(bss->decision_confidence);
 
 	confidence = cake_route_update_packed(confidence, route_kind, success);
+#if defined(CAKE_RELEASE) && defined(CAKE_SINGLE_LLC)
+	confidence = cake_refresh_floor_gear_packed_slow(confidence);
+#else
 	confidence = cake_refresh_floor_gear_packed(confidence);
+#endif
 	WRITE_ONCE(bss->decision_confidence, confidence);
 }
 
@@ -1216,31 +1229,31 @@ cake_conf_update_select_route(struct cake_cpu_bss *bss, u32 route_kind,
 	WRITE_ONCE(bss->decision_confidence, confidence);
 }
 
-static __always_inline void
+static __noinline void
 cake_scoreboard_claim_result(struct cake_cpu_bss *bss, u64 status, bool success)
 {
 	u64  confidence	  = READ_ONCE(bss->decision_confidence);
 	u32  op	  = cake_status_owner_pressure(status);
-	u8   owner_class  = op & CAKE_CPU_STATUS_OWNER_MASK;
 	u8   pressure	  = (op >> (CAKE_CPU_STATUS_PRESS_SHIFT -
 				     CAKE_CPU_STATUS_OWNER_SHIFT)) &
 			    CAKE_CPU_STATUS_PRESS_MASK;
-	bool known_status = !!(status & CAKE_CPU_STATUS_IDLE) ||
-			    owner_class != CAKE_CPU_OWNER_UNKNOWN;
-	bool shock	  = !success || owner_class >= CAKE_CPU_OWNER_BULK ||
-			    pressure >= CAKE_CPU_PRESSURE_HIGH;
+	/* claim_result is reached only after idle + scoreboard-clean gates. */
+	bool shock	  = !success || pressure >= CAKE_CPU_PRESSURE_HIGH;
 
 	confidence	  = cake_claim_health_update(confidence, success);
 	confidence = cake_conf_update_packed(confidence,
-					     CAKE_CONF_STATUS_TRUST_SHIFT,
-					     known_status && success);
+					     CAKE_CONF_STATUS_TRUST_SHIFT, success);
 	confidence = cake_conf_update_packed(confidence,
 					     CAKE_CONF_LOAD_SHOCK_SHIFT, shock);
+#if defined(CAKE_RELEASE) && defined(CAKE_SINGLE_LLC)
+	confidence = cake_refresh_floor_gear_packed_slow(confidence);
+#else
 	confidence = cake_refresh_floor_gear_packed(confidence);
+#endif
 	WRITE_ONCE(bss->decision_confidence, confidence);
 }
 
-static __always_inline void
+static __noinline void
 cake_scoreboard_status_result(struct cake_cpu_bss *bss, u64 status)
 {
 	u64  confidence	  = READ_ONCE(bss->decision_confidence);
@@ -1259,7 +1272,11 @@ cake_scoreboard_status_result(struct cake_cpu_bss *bss, u64 status)
 		confidence, CAKE_CONF_STATUS_TRUST_SHIFT, known_status);
 	confidence = cake_conf_update_packed(confidence,
 					     CAKE_CONF_LOAD_SHOCK_SHIFT, shock);
+#if defined(CAKE_RELEASE) && defined(CAKE_SINGLE_LLC)
+	confidence = cake_refresh_floor_gear_packed_slow(confidence);
+#else
 	confidence = cake_refresh_floor_gear_packed(confidence);
+#endif
 	WRITE_ONCE(bss->decision_confidence, confidence);
 }
 
@@ -1438,7 +1455,7 @@ static __always_inline bool cake_smt_latency_neighbor_busy(u32 target_cpu)
 	return (0x6U >> owner) & 1U;
 }
 
-static __always_inline bool cake_smt_interactive_neighbor_busy(u32 target_cpu)
+static __noinline bool cake_smt_interactive_neighbor_busy(u32 target_cpu)
 {
 	u64 meta    = cake_cpu_meta_for(target_cpu);
 	u32 sibling = cake_meta_sibling_cpu(meta);
@@ -1578,15 +1595,27 @@ static __always_inline u32 cake_kick_shape_mode(struct cake_cpu_bss *bss,
 }
 #endif
 
-#if !CAKE_LEAN_SCHED
+#if CAKE_LEARNED_LOCALITY_COMPILED || !CAKE_LEAN_SCHED
 static __always_inline u8 cake_read_cpu_pressure(u32 cpu)
 {
+#ifdef CAKE_RELEASE
+	u64 status;
+
+	if (cpu >= nr_cpus)
+		return 0;
+	status = cake_read_cpu_status(cpu);
+	return (status >> CAKE_CPU_STATUS_PRESS_SHIFT) &
+	       CAKE_CPU_STATUS_PRESS_MASK;
+#else
 	if (cpu >= nr_cpus)
 		return 0;
 
 	return READ_ONCE(cpu_bss[cpu & (CAKE_MAX_CPUS - 1)].cpu_pressure);
+#endif
 }
+#endif
 
+#if !CAKE_LEAN_SCHED
 static __always_inline void cake_update_cpu_pressure(struct cake_cpu_bss *bss,
 						     u32 slice_consumed)
 {
@@ -1818,7 +1847,7 @@ static __noinline u64 cake_smt_charge_runtime(struct cake_stats	  *s,
 }
 #endif
 
-#if !CAKE_LEAN_SCHED
+#if CAKE_LEARNED_LOCALITY_COMPILED || !CAKE_LEAN_SCHED
 static __noinline
 	s32 cake_pick_pressure_sibling(struct cake_task_ctx __arena *tctx,
 				       s32			     anchor_cpu,
@@ -1899,7 +1928,7 @@ static __noinline
 static __always_inline struct cake_task_ctx __arena *
 get_task_ctx(struct task_struct *p)
 {
-#if defined(CAKE_RELEASE) || !CAKE_NEEDS_ARENA
+#if !CAKE_NEEDS_ARENA
 	return (struct cake_task_ctx __arena *)0;
 #else
 	return (struct cake_task_ctx __arena *)scx_task_data(p);
@@ -1909,7 +1938,7 @@ get_task_ctx(struct task_struct *p)
 /* get_task_hot: returns the task's Arena storage (~1ns).
  * All callers are behind #ifndef CAKE_RELEASE (telemetry, reclassifier). */
 #if CAKE_NEEDS_ARENA
-static __always_inline struct cake_task_ctx __arena *
+static __always_inline __maybe_unused struct cake_task_ctx __arena *
 get_task_hot(struct task_struct *p)
 {
 	return get_task_ctx(p);
@@ -1917,7 +1946,7 @@ get_task_hot(struct task_struct *p)
 
 #endif
 
-#if !CAKE_LEAN_SCHED
+#if CAKE_LEARNED_LOCALITY_COMPILED || !CAKE_LEAN_SCHED
 static __always_inline bool cake_should_steer(struct task_struct *p,
 					      u64		  wake_flags)
 {
@@ -2207,6 +2236,20 @@ static __always_inline bool cake_task_latency_biased(struct task_struct *p,
 	return false;
 }
 
+static __always_inline bool
+cake_message_wake_candidate(const struct task_struct *p, u64 wake_flags)
+{
+	if (!(wake_flags & SCX_WAKE_SYNC))
+		return false;
+	if (cake_task_is_affinitized(p))
+		return false;
+	if (p->flags & PF_KTHREAD)
+		return false;
+	if (p->prio < 120 || p->scx.weight > 120)
+		return false;
+	return true;
+}
+
 static __always_inline void cake_scoreboard_kick_cpu_known(u32 target_cpu,
 							   u64 target_status)
 {
@@ -2219,10 +2262,31 @@ static __always_inline void cake_scoreboard_kick_cpu_known(u32 target_cpu,
 	u32  mode;
 
 	if ((target_cpu & (CAKE_MAX_CPUS - 1)) != local_cpu) {
-		if (target_status & CAKE_CPU_STATUS_IDLE)
+		if (target_status & CAKE_CPU_STATUS_IDLE) {
 			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
-		else
-			scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
+			return;
+		}
+		if (!(target_status & CAKE_CPU_STATUS_IDLE)) {
+			u32 busy_mode = CAKE_BUSY_WAKE_KICK_MODE;
+
+			if (busy_mode == CAKE_BUSY_WAKE_KICK_IDLE) {
+				scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+				return;
+			}
+			if (busy_mode == CAKE_BUSY_WAKE_KICK_PREEMPT) {
+				scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
+				return;
+			}
+		}
+		mode = cake_kick_shape_mode(bss, target_status);
+		cake_conf_update(bss, CAKE_CONF_KICK_SHAPE_SHIFT, known_status);
+		if (mode == CAKE_KICK_SHAPE_NONE)
+			return;
+		if (mode == CAKE_KICK_SHAPE_IDLE) {
+			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+			return;
+		}
+		scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
 		return;
 	}
 
@@ -2262,7 +2326,13 @@ static __always_inline bool cake_idle_scoreboard_clean(u64 status)
 	return cake_status_scoreboard_clean(status);
 }
 
-static __noinline s32 cake_try_idle_candidate(
+#ifdef CAKE_RELEASE
+#define CAKE_TRY_IDLE_ATTR __always_inline
+#else
+#define CAKE_TRY_IDLE_ATTR __noinline
+#endif
+
+static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(
 	struct cake_cpu_bss *local_bss, u32 candidate, bool smt_check
 #ifndef CAKE_RELEASE
 	,
@@ -2282,9 +2352,12 @@ static __noinline s32 cake_try_idle_candidate(
 	}
 	status = cake_read_cpu_status(candidate);
 #ifdef CAKE_RELEASE
-	if (!(status & CAKE_CPU_STATUS_IDLE) ||
-	    !cake_idle_scoreboard_clean(status) ||
-	    (smt_check && cake_smt_interactive_neighbor_busy(candidate))) {
+	u32 eligible = !!(status & CAKE_CPU_STATUS_IDLE) &
+		       cake_idle_scoreboard_clean(status);
+
+	if (smt_check && eligible)
+		eligible &= !cake_smt_interactive_neighbor_busy(candidate);
+	if (!eligible) {
 		cake_scoreboard_status_result(local_bss, status);
 		return -1;
 	}
@@ -2321,16 +2394,31 @@ static __noinline s32 cake_try_idle_candidate(
 }
 
 #ifdef CAKE_RELEASE
+static __noinline s32
+cake_try_clean_idle_candidate_release(struct cake_cpu_bss *local_bss,
+				      u32		   candidate)
+{
+	return cake_try_idle_candidate(local_bss, candidate, false);
+}
+
+static __noinline s32
+cake_try_smt_idle_candidate_release(struct cake_cpu_bss *local_bss,
+				    u32			 candidate)
+{
+	return cake_try_idle_candidate(local_bss, candidate, true);
+}
+
 #define cake_try_clean_idle_candidate_record(local_bss, candidate, route_kind) \
-	cake_try_idle_candidate(local_bss, candidate, false)
+	cake_try_clean_idle_candidate_release(local_bss, candidate)
 #define cake_try_smt_idle_candidate_record(local_bss, candidate, route_kind) \
-	cake_try_idle_candidate(local_bss, candidate, true)
+	cake_try_smt_idle_candidate_release(local_bss, candidate)
 #else
 #define cake_try_clean_idle_candidate_record(local_bss, candidate, route_kind) \
 	cake_try_idle_candidate(local_bss, candidate, false, route_kind)
 #define cake_try_smt_idle_candidate_record(local_bss, candidate, route_kind) \
 	cake_try_idle_candidate(local_bss, candidate, true, route_kind)
 #endif
+#undef CAKE_TRY_IDLE_ATTR
 
 static __noinline s32 cake_select_route_predict(struct task_struct *p,
 						s32 prev_cpu, u64 wake_flags,
@@ -2339,7 +2427,6 @@ static __noinline s32 cake_select_route_predict(struct task_struct *p,
 	u64 confidence;
 	u8  route_kind;
 	u8  slot;
-	bool smt_route = false;
 	cake_fast_probe_pack_t probe_pack;
 	u32 row;
 	u32 candidate;
@@ -2403,6 +2490,17 @@ static __noinline s32 cake_select_route_predict(struct task_struct *p,
 		goto claim_clean_route;
 	}
 
+#ifdef CAKE_RELEASE
+	if ((u8)(route_kind - CAKE_ROUTE_SLOT1) >
+	    (CAKE_ROUTE_SLOT3 - CAKE_ROUTE_SLOT1))
+		return CAKE_ROUTE_PREDICT_NONE;
+	if (!cake_task_latency_biased(p, wake_flags)) {
+		return CAKE_ROUTE_PREDICT_NONE;
+	}
+	slot = route_kind - CAKE_ROUTE_SLOT0;
+	candidate = cake_fast_probe_slot_from_pack(probe_pack, slot);
+	goto claim_smt_route;
+#else
 	if (!cake_task_latency_biased(p, wake_flags)) {
 		cake_record_accel_route_block(CAKE_ACCEL_BLOCK_LATENCY_GATE);
 		return CAKE_ROUTE_PREDICT_NONE;
@@ -2412,12 +2510,12 @@ static __noinline s32 cake_select_route_predict(struct task_struct *p,
 	    (CAKE_ROUTE_SLOT3 - CAKE_ROUTE_SLOT1)) {
 		slot = route_kind - CAKE_ROUTE_SLOT0;
 		candidate = cake_fast_probe_slot_from_pack(probe_pack, slot);
-		smt_route = true;
 		goto claim_smt_route;
 	}
 
 	cake_record_accel_route_block(CAKE_ACCEL_BLOCK_UNKNOWN_ROUTE);
 	return CAKE_ROUTE_PREDICT_NONE;
+#endif
 
 claim_clean_route:
 	cake_record_accel_route_attempt(route_kind);
@@ -2431,7 +2529,6 @@ claim_smt_route:
 						     route_kind);
 
 route_claim_done:
-	(void)smt_route;
 	cake_route_update(local_bss, route_kind, selected >= 0);
 	cake_record_accel_route_result(route_kind, selected >= 0);
 	return selected >= 0 ? selected : CAKE_ROUTE_PREDICT_NONE;
@@ -2550,13 +2647,15 @@ fast_hit_row4:
 #define CAKE_SELECT_RESULT_CPU(result) ((s32)(u32)(result))
 #define CAKE_SELECT_RESULT_FLAGS(result) ((u16)((result) >> 32))
 
-#if !CAKE_LEAN_SCHED
+#if CAKE_LEARNED_LOCALITY_COMPILED || !CAKE_LEAN_SCHED
 static __noinline
 	u64 cake_select_primary_scan(struct cake_task_ctx __arena *tctx,
 				     struct task_struct *p, s32 prev_cpu,
 				     u64 wake_flags, u32 local_cpu)
 {
+#ifndef CAKE_RELEASE
 	struct cake_stats *stats    = get_local_stats_for(local_cpu);
+#endif
 	u16		   home_cpu = tctx->home_cpu;
 	u16		   start_cpu;
 	u16		   select_flags = 0;
@@ -2571,12 +2670,20 @@ static __noinline
 
 	if (cake_should_guard_primary_scan(tctx, p, wake_flags)) {
 		if (cake_primary_scan_credit_allows(tctx))
+#ifndef CAKE_RELEASE
 			stats->nr_primary_scan_credit_used++;
+#else
+			;
+#endif
 		else
 			select_flags |= CAKE_SEL_PRIMARY_SCAN_GUARDED;
 	} else if (cake_should_guard_hot_primary_scan(tctx, p, wake_flags)) {
 		if (cake_hot_primary_scan_credit_allows(tctx))
+#ifndef CAKE_RELEASE
 			stats->nr_primary_scan_credit_used++;
+#else
+			;
+#endif
 		else
 			select_flags |= CAKE_SEL_HOT_PRIMARY_SCAN_GUARDED;
 	}
@@ -2608,6 +2715,7 @@ static __noinline
 		}
 	}
 
+#ifndef CAKE_RELEASE
 	if (select_flags & CAKE_SEL_PRIMARY_SCAN_GUARDED)
 		stats->nr_primary_scan_guarded++;
 	if (select_flags & CAKE_SEL_HOT_PRIMARY_SCAN_GUARDED)
@@ -2618,6 +2726,7 @@ static __noinline
 		stats->nr_wake_chain_locality_credit_used++;
 	if (select_flags & CAKE_SEL_PRIMARY_SCAN_ATTEMPTED)
 		stats->nr_primary_scan_misses++;
+#endif
 
 	return CAKE_SELECT_RESULT(-1, select_flags);
 }
@@ -2627,7 +2736,9 @@ static __noinline u64 cake_select_learned_locality(struct task_struct *p,
 						   u32 local_cpu)
 {
 	struct cake_task_ctx __arena *steer_tctx;
+#ifndef CAKE_RELEASE
 	struct cake_stats	     *steer_stats;
+#endif
 	u16			      select_flags = 0;
 	s32			      cpu	   = -1;
 
@@ -2638,11 +2749,13 @@ static __noinline u64 cake_select_learned_locality(struct task_struct *p,
 	if (!steer_tctx)
 		return CAKE_SELECT_RESULT(-1, 0);
 
-	steer_stats   = get_local_stats_for(local_cpu);
 	u16 home_cpu  = steer_tctx->home_cpu;
 	u8  home_core = steer_tctx->home_core;
 
+#ifndef CAKE_RELEASE
+	steer_stats = get_local_stats_for(local_cpu);
 	steer_stats->nr_steer_eligible++;
+#endif
 
 	cpu = cake_pick_pressure_sibling(steer_tctx, (s32)home_cpu, p->cpus_ptr,
 					 CAKE_PRESSURE_PROBE_SITE_HOME);
@@ -2653,7 +2766,9 @@ static __noinline u64 cake_select_learned_locality(struct task_struct *p,
 	    bpf_cpumask_test_cpu(home_cpu, p->cpus_ptr)) {
 		if (scx_bpf_test_and_clear_cpu_idle(home_cpu))
 			return CAKE_SELECT_RESULT(home_cpu, CAKE_SEL_HOME);
+#ifndef CAKE_RELEASE
 		steer_stats->nr_home_cpu_busy_misses++;
+#endif
 	}
 
 	if ((wake_flags & SCX_WAKE_SYNC) && home_core < 0xFF &&
@@ -2683,7 +2798,9 @@ static __noinline u64 cake_select_learned_locality(struct task_struct *p,
 		if (scx_bpf_test_and_clear_cpu_idle(prev_primary))
 			return CAKE_SELECT_RESULT(prev_primary,
 						  CAKE_SEL_PREV_PRIMARY);
+#ifndef CAKE_RELEASE
 		steer_stats->nr_prev_primary_busy_misses++;
+#endif
 	}
 
 	{
@@ -2703,10 +2820,8 @@ static __noinline u64 cake_select_learned_locality(struct task_struct *p,
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	/* Release uses arena-backed task context only after cake_should_steer()
-	 * says the task has enough history to benefit from learned locality.
-	 * ARENA_ASSOC is still debug-only bookkeeping. */
-#ifndef CAKE_RELEASE
+	/* Associate the arena map only in builds that actually use task context. */
+#if CAKE_NEEDS_ARENA
 	ARENA_ASSOC();
 #endif
 
@@ -2725,6 +2840,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	u16 select_flags = 0;
 	u64 gate2_start	 = 0;
 	s32 cpu		 = -1;
+
+#if CAKE_ACCEL_PATH
+	if (cake_message_wake_candidate(p, wake_flags) && prev_cpu >= 0 &&
+	    prev_cpu < nr_cpus)
+		return prev_cpu;
+#endif
 
 	/* ── CAKE SCOREBOARD / PREDICTION ──
 	 * This is the latency floor path. Native helpers are deliberately behind
@@ -2754,7 +2875,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 #endif
 
-#if !CAKE_LEAN_SCHED
+#if CAKE_LEARNED_LOCALITY_COMPILED || !CAKE_LEAN_SCHED
 	{
 		u64 learned = cake_select_learned_locality(
 			p, prev_cpu, wake_flags, local_cpu);
@@ -3125,11 +3246,7 @@ static __always_inline u64 cake_llc_dsq_for_cpu(u32 cpu)
 
 static __always_inline bool cake_dsq_move_to_local(u64 dsq_id, u64 enq_flags)
 {
-#ifdef CAKE_RELEASE
-	return scx_bpf_dsq_move_to_local___v2(dsq_id, enq_flags);
-#else
 	return scx_bpf_dsq_move_to_local(dsq_id, enq_flags);
-#endif
 }
 
 static __always_inline void cake_record_shared_vtime_insert(u64	 enq_flags,
@@ -3268,6 +3385,33 @@ static __always_inline void cake_kick_busy_wake_shared_escape(u32 target_cpu,
 		   (((u64)SCX_KICK_IDLE ^ (u64)SCX_KICK_PREEMPT) & -preempt);
 
 	scx_bpf_kick_cpu(target_cpu, kick);
+}
+
+static __always_inline bool
+cake_message_busy_handoff_candidate(const struct task_struct *wakee,
+				    u64 target_status)
+{
+	u32 op;
+	u32 owner_class;
+	u32 pressure;
+
+	if (target_status & CAKE_CPU_STATUS_IDLE)
+		return false;
+	if (!cake_message_wake_candidate(wakee, SCX_WAKE_SYNC))
+		return false;
+	if (target_status & CAKE_CPU_STATUS_SAT_CACHE_MEM)
+		return false;
+
+	op = cake_status_owner_pressure(target_status);
+	owner_class = op & CAKE_CPU_STATUS_OWNER_MASK;
+	pressure = (op >> (CAKE_CPU_STATUS_PRESS_SHIFT -
+			   CAKE_CPU_STATUS_OWNER_SHIFT)) &
+		   CAKE_CPU_STATUS_PRESS_MASK;
+
+	if (owner_class == CAKE_CPU_OWNER_SHORT)
+		return true;
+	return pressure <= CAKE_CPU_PRESSURE_LOW &&
+	       owner_class == CAKE_CPU_OWNER_INTERACTIVE;
 }
 
 static __noinline bool
@@ -3473,17 +3617,21 @@ static __noinline void cake_insert_llc_vtime(struct task_struct *p,
 					     u64 enq_flags, u32 target_cpu,
 					     u64 slice)
 {
+	bool is_wakeup = !!(enq_flags & (u64)SCX_ENQ_WAKEUP);
+#ifndef CAKE_RELEASE
 	bool preserve_state =
 		!!(enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT));
-	bool is_wakeup = !!(enq_flags & (u64)SCX_ENQ_WAKEUP);
+#endif
+	u64 target_status = cake_read_cpu_status(target_cpu);
 
-	if (is_wakeup) {
-		u64 target_status   = cake_read_cpu_status(target_cpu);
-		u8  scoreboard_idle = !!(target_status & CAKE_CPU_STATUS_IDLE);
-
-		if (scoreboard_idle) {
+	if (target_status & CAKE_CPU_STATUS_IDLE) {
+#if CAKE_ACCEL_PATH
+		if (is_wakeup || cake_idle_scoreboard_clean(target_status)) {
+#else
+		if (is_wakeup) {
+#endif
 #ifndef CAKE_RELEASE
-			if (CAKE_PATH_STATS_ACTIVE) {
+			if (is_wakeup && CAKE_PATH_STATS_ACTIVE) {
 				struct cake_stats *stats =
 					get_local_stats_for(target_cpu);
 
@@ -3496,8 +3644,16 @@ static __noinline void cake_insert_llc_vtime(struct task_struct *p,
 					   slice, enq_flags);
 			return;
 		}
+	}
 
+	if (is_wakeup) {
 #if CAKE_ACCEL_PATH
+		if (cake_message_busy_handoff_candidate(p, target_status)) {
+			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu,
+					   slice, enq_flags);
+			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+			return;
+		}
 		if (cake_accept_busy_wake(target_cpu, target_status)) {
 			cake_record_busy_local_insert(target_cpu);
 			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu,
@@ -3519,8 +3675,10 @@ static __noinline void cake_insert_llc_vtime(struct task_struct *p,
 
 		dsq_insert_vtime_wrapper(p, cake_llc_dsq_for_cpu(target_cpu),
 					 slice, p->scx.dsq_vtime, enq_flags);
+#ifndef CAKE_RELEASE
 		cake_record_shared_vtime_insert(enq_flags, preserve_state,
 						target_cpu);
+#endif
 #if CAKE_ACCEL_PATH
 		cake_scoreboard_kick_cpu_known(target_cpu, target_status);
 #else
@@ -3529,22 +3687,11 @@ static __noinline void cake_insert_llc_vtime(struct task_struct *p,
 		return;
 	}
 
-#if CAKE_ACCEL_PATH
-	{
-		u64 target_status = cake_read_cpu_status(target_cpu);
-
-		if ((target_status & CAKE_CPU_STATUS_IDLE) &&
-		    cake_idle_scoreboard_clean(target_status)) {
-			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu,
-					   slice, enq_flags);
-			return;
-		}
-	}
-#endif
-
 	dsq_insert_vtime_wrapper(p, cake_llc_dsq_for_cpu(target_cpu), slice,
 				 p->scx.dsq_vtime, enq_flags);
+#ifndef CAKE_RELEASE
 	cake_record_shared_vtime_insert(enq_flags, preserve_state, target_cpu);
+#endif
 }
 
 #if CAKE_LEAN_SCHED
@@ -3799,7 +3946,7 @@ static __noinline void enqueue_dsq_dispatch(struct task_struct *p,
 				   enq_flags);
 		kick_cpu   = enq_cpu;
 		kick_flags = idle_hint ? SCX_KICK_IDLE : SCX_KICK_PREEMPT;
-		if (is_wakeup && !idle_hint && wake_target_local) {
+		if (is_wakeup && !idle_hint) {
 			u32 mode = CAKE_BUSY_WAKE_KICK_MODE;
 
 			if (mode == CAKE_BUSY_WAKE_KICK_IDLE) {
@@ -5010,8 +5157,10 @@ static __noinline void running_telemetry(struct task_struct *p, u32 cpu,
  * via last_pid check — minimal work: 2 kfuncs + 3 stores + 1 branch. */
 void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 {
-#ifndef CAKE_RELEASE
+#if CAKE_NEEDS_ARENA
 	ARENA_ASSOC();
+#endif
+#ifndef CAKE_RELEASE
 	bool stats_on		    = CAKE_STATS_ACTIVE;
 	bool path_stats_on	    = CAKE_PATH_STATS_ACTIVE;
 	u64  running_overhead_start = 0;
@@ -5182,7 +5331,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
  * task_struct and per-CPU BSS state. Debug builds add per-task telemetry. */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
-#ifndef CAKE_RELEASE
+#if CAKE_NEEDS_ARENA
 	ARENA_ASSOC();
 #endif
 
@@ -5226,9 +5375,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		 * Source uses shifts and adds, but the compiler may lower that
 		 * expression to a multiply in generated BPF. */
 		u32 weight   = p->scx.weight;
-		s64 nice_adj = 0;
-		if (unlikely(weight != 100))
-			nice_adj = calc_nice_adj(weight);
+		s64 nice_adj = calc_nice_adj(weight);
 		p->scx.dsq_vtime += (u64)rt_raw + nice_adj;
 		cake_publish_cpu_frontier(cpu, p->scx.dsq_vtime);
 	}
@@ -5431,16 +5578,15 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
  * allocation must happen here, not in hot paths.
  * Called before any scheduling ops fire for this task.
  *
- * Debug builds allocate full telemetry state; release builds omit this
- * callback from cake_ops entirely. */
-#ifndef CAKE_RELEASE
+ * Debug builds allocate full telemetry state; release builds include this
+ * callback only when a baked locality policy needs task-local state. */
+#if CAKE_NEEDS_ARENA
 s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
-#if !CAKE_NEEDS_ARENA
-	return 0;
-#else
 	struct cake_task_ctx __arena *tctx;
+
+	(void)args;
 
 	tctx = (struct cake_task_ctx __arena *)scx_task_alloc(p);
 	if (!tctx) {
@@ -5488,6 +5634,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 	}
 	tctx->packed_info = packed;
 
+#ifndef CAKE_RELEASE
 	/* ── DEBUG-ONLY FIELD INITIALIZATION ──
 	 * All of these are read only by debug telemetry paths. */
 	if (CAKE_STATS_ENABLED) {
@@ -5518,9 +5665,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
 		tctx->nvcsw_snapshot = p->nvcsw;
 
 	tctx->task_class = CAKE_CLASS_NORMAL;
+#endif
 
 	return 0;
-#endif
 }
 #endif
 
@@ -5656,10 +5803,12 @@ void BPF_STRUCT_OPS(cake_runnable, struct task_struct *p, u64 enq_flags)
 #endif
 
 /* Free per-task arena storage on task exit. */
-#ifndef CAKE_RELEASE
+#if CAKE_NEEDS_ARENA
 void BPF_STRUCT_OPS(cake_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
+	(void)args;
+#ifndef CAKE_RELEASE
 	if (CAKE_STATS_ACTIVE) {
 		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 
@@ -5674,11 +5823,10 @@ void BPF_STRUCT_OPS(cake_exit_task, struct task_struct *p,
 						 (u64)alive_ms * 1000ULL);
 		}
 	}
-#if CAKE_NEEDS_ARENA
+#endif
 	/* Remove from PID→tctx map: removed — iter/task program handles visibility
 	 * without explicit cleanup. Task storage freed below. */
 	scx_task_free(p);
-#endif
 }
 #endif
 
@@ -5763,6 +5911,17 @@ void BPF_STRUCT_OPS(cake_set_weight, struct task_struct *p, u32 weight)
 #endif
 
 #ifdef CAKE_RELEASE
+#if CAKE_NEEDS_ARENA
+SCX_OPS_DEFINE(
+	cake_ops, .select_cpu = (void *)cake_select_cpu,
+	.enqueue = (void *)cake_enqueue, .dispatch = (void *)cake_dispatch,
+	.running = (void *)cake_running, .stopping = (void *)cake_stopping,
+	.enable = (void *)cake_enable, .init_task = (void *)cake_init_task,
+	.exit_task = (void *)cake_exit_task, .init = (void *)cake_init,
+	.exit = (void *)cake_exit, .flags = SCX_OPS_KEEP_BUILTIN_IDLE,
+	.timeout_ms = 5000, /* Override with SCX_TIMEOUT_MS when needed */
+	.name	    = "cake");
+#else
 SCX_OPS_DEFINE(
 	cake_ops, .select_cpu = (void *)cake_select_cpu,
 	.enqueue = (void *)cake_enqueue, .dispatch = (void *)cake_dispatch,
@@ -5771,6 +5930,7 @@ SCX_OPS_DEFINE(
 	.exit = (void *)cake_exit, .flags = SCX_OPS_KEEP_BUILTIN_IDLE,
 	.timeout_ms = 5000, /* Override with SCX_TIMEOUT_MS when needed */
 	.name	    = "cake");
+#endif
 #else
 SCX_OPS_DEFINE(
 	cake_ops, .select_cpu = (void *)cake_select_cpu,

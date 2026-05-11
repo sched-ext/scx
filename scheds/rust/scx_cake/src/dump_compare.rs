@@ -1260,6 +1260,7 @@ mod tests {
         let src = include_str!("bpf/cake.bpf.c");
 
         assert!(src.contains("cake_busy_wake_policy_should_preempt("));
+        assert!(!src.contains("if (is_wakeup && !idle_hint && wake_target_local)"));
         assert!(src.contains("CAKE_BUSY_OWNER_SHORT_RUN_NS 100000U"));
         assert!(src.contains("CAKE_BUSY_OWNER_MIN_RUNS 32U"));
         assert!(src.contains("CAKE_PRIMARY_SCAN_CREDIT_PERIOD 8U"));
@@ -1312,20 +1313,35 @@ mod tests {
     }
 
     #[test]
-    fn bpf_wake_chain_locality_policy_has_runtime_disable() {
+    fn bpf_wake_chain_locality_policy_has_release_bake_and_debug_disable() {
         let src = include_str!("bpf/cake.bpf.c");
         let main = include_str!("main.rs");
         let readme = include_str!("../README.md");
 
-        assert!(src.contains("#ifdef CAKE_RELEASE"));
-        assert!(src.contains("#define CAKE_WAKE_CHAIN_LOCALITY_ENABLED 0"));
+        assert!(src.contains("#if defined(CAKE_RELEASE)"));
+        assert!(source_contains(
+            src,
+            "#if defined(CAKE_RELEASE)
+             #define CAKE_LEARNED_LOCALITY_COMPILED CAKE_LEARNED_LOCALITY_VALUE
+             #define CAKE_WAKE_CHAIN_LOCALITY_COMPILED CAKE_WAKE_CHAIN_LOCALITY_VALUE
+             #define CAKE_LEARNED_LOCALITY_ENABLED CAKE_LEARNED_LOCALITY_VALUE
+             #define CAKE_WAKE_CHAIN_LOCALITY_ENABLED CAKE_WAKE_CHAIN_LOCALITY_VALUE"
+        ));
+        assert!(source_contains(
+            src,
+            "#elif !CAKE_LOCALITY_EXPERIMENTS
+             #define CAKE_LEARNED_LOCALITY_COMPILED 0
+             #define CAKE_WAKE_CHAIN_LOCALITY_COMPILED 0
+             #define CAKE_LEARNED_LOCALITY_ENABLED 0
+             #define CAKE_WAKE_CHAIN_LOCALITY_ENABLED 0"
+        ));
         assert!(src.contains("const volatile bool enable_wake_chain_locality"));
         assert!(src.contains("CAKE_WAKE_CHAIN_LOCALITY_ENABLED"));
         assert!(src.contains("if (!CAKE_WAKE_CHAIN_LOCALITY_ENABLED)"));
         assert!(main.contains("wake_chain_locality"));
         assert!(main.contains("#[cfg(not(cake_bpf_release))]"));
         assert!(main.contains("rodata.enable_wake_chain_locality = args.wake_chain_locality"));
-        assert!(readme.contains("runtime A/B controls"));
+        assert!(readme.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY"));
     }
 
     #[test]
@@ -1339,12 +1355,18 @@ mod tests {
         assert!(build.contains("SCX_CAKE_QUANTUM_US"));
         assert!(build.contains("SCX_CAKE_QUEUE_POLICY"));
         assert!(build.contains("SCX_CAKE_STORM_GUARD"));
+        assert!(build.contains("SCX_CAKE_LEARNED_LOCALITY"));
+        assert!(build.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY"));
         assert!(build.contains("-DCAKE_QUANTUM_NS="));
         assert!(build.contains("-DCAKE_QUEUE_POLICY_VALUE="));
         assert!(build.contains("-DCAKE_STORM_GUARD_VALUE="));
+        assert!(build.contains("-DCAKE_LEARNED_LOCALITY_VALUE="));
+        assert!(build.contains("-DCAKE_WAKE_CHAIN_LOCALITY_VALUE="));
         assert!(build.contains("BAKED_QUANTUM_US"));
         assert!(build.contains("BAKED_QUEUE_POLICY"));
         assert!(build.contains("BAKED_STORM_GUARD"));
+        assert!(build.contains("BAKED_LEARNED_LOCALITY"));
+        assert!(build.contains("BAKED_WAKE_CHAIN_LOCALITY"));
 
         assert!(src.contains("const u64 quantum_ns = CAKE_QUANTUM_NS;"));
         assert!(src.contains("#define CAKE_QUEUE_POLICY CAKE_QUEUE_POLICY_VALUE"));
@@ -1369,18 +1391,23 @@ mod tests {
         assert!(main.contains("topology::BAKED_QUANTUM_US"));
         assert!(main.contains("topology::BAKED_QUEUE_POLICY"));
         assert!(main.contains("topology::BAKED_STORM_GUARD"));
+        assert!(main.contains("topology::BAKED_LEARNED_LOCALITY"));
+        assert!(main.contains("topology::BAKED_WAKE_CHAIN_LOCALITY"));
 
         assert!(readme.contains("SCX_CAKE_PROFILE=esports"));
         assert!(readme.contains("SCX_CAKE_QUEUE_POLICY=local"));
         assert!(readme.contains("SCX_CAKE_STORM_GUARD=shadow"));
+        assert!(readme.contains("SCX_CAKE_LEARNED_LOCALITY=off"));
+        assert!(readme.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY=off"));
         assert!(
-            readme.contains("Release builds bake profile, quantum, queue policy, and storm guard")
+            readme.contains("Release builds bake profile, quantum, queue policy, storm guard")
         );
     }
 
     #[test]
-    fn locality_ab_knobs_default_off_for_latency_first_policy() {
+    fn locality_ab_knobs_debug_default_off_release_build_tunable() {
         let src = include_str!("bpf/cake.bpf.c");
+        let build = include_str!("../build.rs");
         let main = include_str!("main.rs");
         let readme = include_str!("../README.md");
         let wake_chain_arg = main
@@ -1402,12 +1429,33 @@ mod tests {
             src,
             "const volatile bool enable_wake_chain_locality = false;"
         ));
-        assert!(src.contains("#define CAKE_LEARNED_LOCALITY_ENABLED 0"));
-        assert!(src.contains("#define CAKE_WAKE_CHAIN_LOCALITY_ENABLED 0"));
+        assert!(source_contains(
+            src,
+            "#if defined(CAKE_RELEASE)
+             #define CAKE_LEARNED_LOCALITY_COMPILED CAKE_LEARNED_LOCALITY_VALUE
+             #define CAKE_WAKE_CHAIN_LOCALITY_COMPILED CAKE_WAKE_CHAIN_LOCALITY_VALUE
+             #define CAKE_LEARNED_LOCALITY_ENABLED CAKE_LEARNED_LOCALITY_VALUE
+             #define CAKE_WAKE_CHAIN_LOCALITY_ENABLED CAKE_WAKE_CHAIN_LOCALITY_VALUE"
+        ));
+        assert!(source_contains(
+            src,
+            "#elif !CAKE_LOCALITY_EXPERIMENTS
+             #define CAKE_LEARNED_LOCALITY_COMPILED 0
+             #define CAKE_WAKE_CHAIN_LOCALITY_COMPILED 0
+             #define CAKE_LEARNED_LOCALITY_ENABLED 0
+             #define CAKE_WAKE_CHAIN_LOCALITY_ENABLED 0"
+        ));
+        assert!(build.contains("baked_bool(\"SCX_CAKE_LEARNED_LOCALITY\", false)"));
+        assert!(build.contains("baked_bool(\"SCX_CAKE_WAKE_CHAIN_LOCALITY\", false)"));
+        assert!(build.contains("release_learned_locality || release_wake_chain_locality"));
         assert!(wake_chain_arg.contains("default_value_t = false"));
         assert!(learned_arg.contains("default_value_t = false"));
         assert!(readme.contains("--learned-locality=true"));
         assert!(readme.contains("--wake-chain-locality=true"));
+        assert!(readme.contains("SCX_CAKE_LEARNED_LOCALITY=off"));
+        assert!(readme.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY=off"));
+        assert!(readme.contains("SCX_CAKE_LEARNED_LOCALITY=on"));
+        assert!(readme.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY=on"));
     }
 
     #[test]
@@ -1448,9 +1496,9 @@ mod tests {
         let src = include_str!("bpf/cake.bpf.c");
 
         assert!(src.contains("cake_idle_scoreboard_clean("));
-        assert!(src.contains("cake_status_pressure("));
+        assert!(src.contains("cake_status_owner_pressure("));
         assert!(src.contains("owner_class >= CAKE_CPU_OWNER_BULK"));
-        assert!(src.contains("pressure >= CAKE_CPU_PRESSURE_FULL"));
+        assert!(src.contains("pressure >= CAKE_CPU_PRESSURE_HIGH"));
         assert!(src.contains("cake_smt_interactive_neighbor_busy(candidate)"));
         assert!(src.contains("cake_try_clean_idle_candidate_record("));
         assert!(src.contains("cake_try_smt_idle_candidate_record("));
@@ -1586,7 +1634,7 @@ mod tests {
         assert!(src.contains("cake_trust_demote(cpu, CAKE_TRUST_FLAG_PREV_DIRECT"));
 
         let affinity_gate = src
-            .find("if (p->nr_cpus_allowed && p->nr_cpus_allowed < nr_cpus)")
+            .find("if (cake_task_is_affinitized(p))")
             .expect("affinity gate exists");
         let trusted_claim = src
             .find("selected = cake_trust_prev_direct_claim(prev_cpu);")
@@ -1623,17 +1671,16 @@ mod tests {
         assert!(src.contains("CAKE_ROUTE_TUNNEL"));
         assert!(src.contains("cake_select_route_predict("));
         assert!(src.contains("== local_cpu"));
-        assert!(src.contains("cake_route_update(local_bss, CAKE_ROUTE_PREV"));
-        assert!(src.contains("cake_conf_update_select_route(local_bss, CAKE_ROUTE_SLOT2"));
-        assert!(src.contains("cake_conf_update_select_route(local_bss, CAKE_ROUTE_SLOT3"));
-        assert!(source_contains(src, "CAKE_ROUTE_PREV, true, false, false"));
+        assert!(src.contains("route_kind = cake_route_kind_value(confidence);"));
+        assert!(src.contains("cake_route_update(local_bss, route_kind, selected >= 0);"));
+        assert!(src.contains("cake_conf_update_select_route(local_bss, hit_route"));
         assert!(source_contains(
             src,
-            "CAKE_ROUTE_SLOT2,\n\t\t\t\t\t      true, true, true"
+            "cake_try_clean_idle_candidate_record(local_bss, candidate"
         ));
         assert!(source_contains(
             src,
-            "CAKE_ROUTE_SLOT3,\n\t\t\t\t\t      true, true, true"
+            "cake_try_smt_idle_candidate_record(local_bss, candidate"
         ));
         assert!(src.contains("if (cpu == CAKE_ROUTE_PREDICT_TUNNEL)"));
         assert!(src.contains("cake_route_update(select_bss, CAKE_ROUTE_TUNNEL, true);"));
@@ -1657,9 +1704,10 @@ mod tests {
     fn bpf_release_pull_confidence_audits_before_pull() {
         let src = include_str!("bpf/cake.bpf.c");
 
-        assert!(src.contains("CAKE_PULL_SHAPE_AUDIT"));
+        assert!(!src.contains("CAKE_PULL_SHAPE_AUDIT"));
         assert!(src.contains("CAKE_CONF_PULL_AUDIT_SHIFT"));
         assert!(src.contains("cake_pull_audit_due("));
+        assert!(src.contains("pull_conf >= CAKE_CONF_HIGH && !cake_pull_audit_due(bss)"));
         assert!(src.contains("scx_bpf_dsq_nr_queued(dsq_id)"));
         assert!(!src.contains("if (mode == CAKE_PULL_SHAPE_AUDIT)\n\t\treturn false;"));
     }
@@ -1685,8 +1733,17 @@ mod tests {
             body,
             "mode = cake_kick_shape_mode(bss, target_status);"
         ));
-        assert!(!body.contains("(target_cpu & (CAKE_MAX_CPUS - 1)) != local_cpu"));
-        assert!(body.contains("scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);"));
+        assert!(body.contains("(target_cpu & (CAKE_MAX_CPUS - 1)) != local_cpu"));
+        assert!(source_contains(
+            body,
+            "if ((target_cpu & (CAKE_MAX_CPUS - 1)) != local_cpu) {
+                     if (target_status & CAKE_CPU_STATUS_IDLE) {
+                             scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+                             return;
+                     }
+                     if (!(target_status & CAKE_CPU_STATUS_IDLE)) {
+                             u32 busy_mode = CAKE_BUSY_WAKE_KICK_MODE;"
+        ));
     }
 
     #[test]
@@ -1701,7 +1758,7 @@ mod tests {
         assert!(source_contains(
             src,
             "u32 owner_avg_runtime_ns = cake_update_owner_avg(bss, rt_raw);
-             cake_publish_cpu_owner(cpu, owner_avg_runtime_ns);
+             cake_publish_cpu_owner(cpu, bss, owner_avg_runtime_ns);
              if (!relaxed)
                      cake_scoreboard_owner_result(bss, owner_avg_runtime_ns);"
         ));
@@ -1740,7 +1797,8 @@ mod tests {
             "cpu = cake_select_cpu_fast_scan(p, prev_cpu, wake_flags,
                                              select_bss);"
         ));
-        assert!(guarded_scoreboard.contains("cake_select_cpu_fast_scan("));
+        assert!(guarded_scoreboard.contains("cake_select_route_predict("));
+        assert!(src.contains("cpu = cake_select_cpu_fast_scan(p, prev_cpu, wake_flags,"));
         assert!(!src.contains("select_cpu_idx"));
     }
 
@@ -1784,11 +1842,12 @@ mod tests {
 
         assert!(src.contains("cake_floor_mode_ready("));
         assert!(src.contains("CAKE_FLOOR_GEAR_FLOOR"));
-        assert!(src.contains("status_trust < CAKE_CONF_HIGH"));
-        assert!(src.contains("owner_stable >= CAKE_CONF_HIGH ||"));
-        assert!(src.contains("route_conf == 15 && status_trust == 15"));
+        assert!(src.contains("status_trust && !(status_trust & 8U)"));
+        assert!(src.contains("high & (1ULL << CAKE_CONF_OWNER_STABLE_SHIFT)"));
+        assert!(src.contains("0xfULL << CAKE_CONF_ROUTE_SHIFT"));
+        assert!(src.contains("0xfULL << CAKE_CONF_STATUS_TRUST_SHIFT"));
         assert!(src.contains("return gear == CAKE_FLOOR_GEAR_FLOOR;"));
-        assert!(src.contains("load_shock >= CAKE_CONF_INIT"));
+        assert!(src.contains("confidence & (8ULL << CAKE_CONF_LOAD_SHOCK_SHIFT)"));
         assert!(!src.contains("fallback_conf >= CAKE_CONF_INIT"));
         assert!(src.contains("if (!cake_floor_mode_ready(confidence))"));
     }
@@ -1800,8 +1859,8 @@ mod tests {
         assert!(src.contains("cake_scoreboard_claim_result("));
         assert!(src.contains("CAKE_CONF_STATUS_TRUST_SHIFT"));
         assert!(src.contains("CAKE_CONF_LOAD_SHOCK_SHIFT"));
-        assert!(src.contains("cake_try_clean_idle_candidate(local_bss"));
-        assert!(src.contains("cake_try_smt_idle_candidate(local_bss"));
+        assert!(src.contains("cake_try_clean_idle_candidate_release(local_bss"));
+        assert!(src.contains("cake_try_smt_idle_candidate_release(local_bss"));
     }
 
     #[test]
@@ -1811,33 +1870,22 @@ mod tests {
         assert!(src.contains("CAKE_CONF_CLAIM_HEALTH_SHIFT 8U"));
         assert!(src.contains("cake_claim_health_allows(local_bss)"));
 
-        let clean_body = source_body_between(
+        let candidate_body = source_body_between(
             src,
-            "static __noinline s32 cake_try_clean_idle_candidate(",
-            "static __noinline s32 cake_try_smt_idle_candidate(",
+            "static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(",
+            "static __noinline s32\ncake_try_clean_idle_candidate_release",
         )
-        .expect("clean idle candidate body should be present");
-        let clean_gate = clean_body
+        .expect("idle candidate core body should be present");
+        let clean_gate = candidate_body
             .find("if (!cake_claim_health_allows(local_bss))")
             .expect("clean candidate should gate stale claim lanes");
-        let clean_claim = clean_body
+        let clean_claim = candidate_body
             .find("claimed = scx_bpf_test_and_clear_cpu_idle(candidate);")
             .expect("clean candidate should still claim native idle state");
         assert!(clean_gate < clean_claim);
 
-        let smt_body = source_body_between(
-            src,
-            "static __noinline s32 cake_try_smt_idle_candidate(",
-            "#define cake_try_clean_idle_candidate_record",
-        )
-        .expect("SMT idle candidate body should be present");
-        let smt_gate = smt_body
-            .find("if (!cake_claim_health_allows(local_bss))")
-            .expect("SMT candidate should gate stale claim lanes");
-        let smt_claim = smt_body
-            .find("claimed = scx_bpf_test_and_clear_cpu_idle(candidate);")
-            .expect("SMT candidate should still claim native idle state");
-        assert!(smt_gate < smt_claim);
+        assert!(src.contains("cake_try_clean_idle_candidate_release("));
+        assert!(src.contains("cake_try_smt_idle_candidate_release("));
     }
 
     #[test]
@@ -1859,30 +1907,18 @@ mod tests {
         assert!(intf.contains("CAKE_ACCEL_PROBE_CLAIM_SKIP"));
         assert!(dump.contains("claim_skip"));
 
-        let clean_body = source_body_between(
+        let candidate_body = source_body_between(
             src,
-            "static __noinline s32 cake_try_clean_idle_candidate(",
-            "static __noinline s32 cake_try_smt_idle_candidate(",
+            "static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(",
+            "static __noinline s32\ncake_try_clean_idle_candidate_release",
         )
-        .expect("clean idle candidate body should be present");
+        .expect("idle candidate core body should be present");
+        assert!(candidate_body.contains("CAKE_ACCEL_PROBE_CLAIM_SKIP"));
         assert!(source_contains(
-            clean_body,
+            candidate_body,
             "if (!cake_claim_health_allows(local_bss)) {
-                cake_record_accel_probe(route_kind, CAKE_ACCEL_PROBE_CLAIM_SKIP);
-                return -1;
-            }"
-        ));
-
-        let smt_body = source_body_between(
-            src,
-            "static __noinline s32 cake_try_smt_idle_candidate(",
-            "#define cake_try_clean_idle_candidate_record",
-        )
-        .expect("SMT idle candidate body should be present");
-        assert!(source_contains(
-            smt_body,
-            "if (!cake_claim_health_allows(local_bss)) {
-                cake_record_accel_probe(route_kind, CAKE_ACCEL_PROBE_CLAIM_SKIP);
+                cake_record_accel_probe(route_kind,
+                                        CAKE_ACCEL_PROBE_CLAIM_SKIP);
                 return -1;
             }"
         ));

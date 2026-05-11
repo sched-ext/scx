@@ -47,6 +47,7 @@ cargo build --release -p scx_cake
 SCX_CAKE_PROFILE=esports cargo build --release -p scx_cake
 SCX_CAKE_QUANTUM_US=1500 SCX_CAKE_QUEUE_POLICY=local cargo build --release -p scx_cake
 SCX_CAKE_STORM_GUARD=shadow cargo build --release -p scx_cake
+SCX_CAKE_LEARNED_LOCALITY=off SCX_CAKE_WAKE_CHAIN_LOCALITY=off cargo build --release -p scx_cake
 
 # Debug build for TUI/capture and runtime A/B work
 cargo build -p scx_cake
@@ -55,7 +56,7 @@ cargo build -p scx_cake
 ### Run
 
 ```bash
-# Release uses the profile, quantum, queue policy, and storm guard baked at build time
+# Release uses the profile, quantum, queue, storm, kick, and locality knobs baked at build time
 sudo ./target/release/scx_cake
 
 # Debug default profile: gaming, learned locality gates off
@@ -90,11 +91,14 @@ sudo ./target/debug/scx_cake --verbose --storm-guard=full
 ### Profiles
 
 Profiles are quantum presets. They do not switch the scheduler into separate policy modes.
-Release builds bake profile, quantum, queue policy, and storm guard at compile
-time. Use `SCX_CAKE_PROFILE`, `SCX_CAKE_QUANTUM_US`, `SCX_CAKE_QUEUE_POLICY`,
-and `SCX_CAKE_STORM_GUARD` when building release objects. Debug builds keep
-`--profile`, `--quantum`, `--queue-policy`, and `--storm-guard` as runtime A/B
-controls.
+Release builds bake profile, quantum, queue policy, storm guard, busy-wake kick,
+learned locality, and wake-chain locality at compile time. Use
+`SCX_CAKE_PROFILE`, `SCX_CAKE_QUANTUM_US`, `SCX_CAKE_QUEUE_POLICY`,
+`SCX_CAKE_STORM_GUARD`, `SCX_CAKE_BUSY_WAKE_KICK`,
+`SCX_CAKE_LEARNED_LOCALITY`, and `SCX_CAKE_WAKE_CHAIN_LOCALITY` when building
+release objects. Debug builds keep `--profile`, `--quantum`, `--queue-policy`,
+`--storm-guard`, `--busy-wake-kick`, `--learned-locality`, and
+`--wake-chain-locality` as runtime A/B controls.
 
 `--queue-policy local|llc-vtime` is an explicit A/B policy switch, not a
 profile. The default `llc-vtime` keeps current CPU selection and task
@@ -104,22 +108,28 @@ keeps the older local-only fallback path available for comparison.
 See [Queue Policy Latency Findings](docs/queue_policy_latency_findings.md) for
 the Splitgate 2 / MangoHud captures that motivated this default.
 
-The default policy is latency-first. Release builds compile telemetry out and
-stay on the lean production path. Debug builds compile the full `--verbose`
+The default policy is latency-first. Release builds compile telemetry out,
+keep scoreboard confidence/prediction enabled, bake `storm-guard=shadow` plus
+`busy-wake-kick=idle`, and leave learned locality plus wake-chain locality off
+unless explicitly enabled. Set `SCX_CAKE_LEARNED_LOCALITY=on` and/or
+`SCX_CAKE_WAKE_CHAIN_LOCALITY=on` to benchmark the arena-backed locality path.
+Debug builds compile the full `--verbose`
 capture surface by default: hot callback counters, wake/run timing, task arena
-snapshots, runtime A/B knobs, and the live TUI are all available
-without special build flags. The `--wake-chain-locality`, `--learned-locality`,
-`--busy-wake-kick`, and `--storm-guard` knobs remain runtime A/B controls and
-default to the latency-first baseline unless explicitly enabled.
+snapshots, runtime A/B knobs, and the live TUI are all available without special
+build flags. The `--wake-chain-locality`, `--learned-locality`,
+`--busy-wake-kick`, and `--storm-guard` knobs remain runtime A/B controls in
+debug builds and default to the latency-first baseline unless explicitly
+enabled.
 
 `--wake-chain-locality=false` and `--learned-locality=false` are explicit forms
 of the default and are useful when keeping A/B command lines comparable.
-`--busy-wake-kick=preempt` makes same-CPU busy wakeups preempt immediately in
+`--busy-wake-kick=idle` is the release default; `--busy-wake-kick=preempt`
+makes same-CPU busy wakeups preempt immediately in
 debug builds instead of using Cake's owner-runtime guard.
-`--storm-guard=shadow` records busy-wake storm candidates without changing
-placement, `--storm-guard=shield` enables conservative extra local handoff, and
-`--storm-guard=full` enables the broad wake-storm A/B path meant for benchmarks
-such as `perf sched messaging`.
+`--storm-guard=shadow` is the release default and records busy-wake storm
+candidates without changing placement, `--storm-guard=shield` enables
+conservative extra local handoff, and `--storm-guard=full` enables the broad
+wake-storm A/B path meant for benchmarks such as `perf sched messaging`.
 
 | Profile | Quantum | Intended use |
 | :-- | --: | :-- |
@@ -507,9 +517,10 @@ Per-CPU local queue rows label packed confidence as `conf=...`:
 and summarized in `accelerator.*.trust` as active/enabled/blocked CPUs,
 demotions, demotion reasons, and trusted-prev attempt/hit/miss counts. A CPU
 with no confidence history is shown as `untrained`, not as unpredictable.
-Locality, busy-wake, and storm-guard experiments are runtime A/B controls: they
-are compiled into debug builds, but the latency-first baseline stays active
-until you pass the corresponding option.
+Locality, busy-wake, and storm-guard experiments are runtime A/B controls in
+debug builds. Release builds bake those hot-path choices with the matching
+`SCX_CAKE_*` environment variables so the linked object and benchmark label
+stay aligned.
 
 The JSON sidecar is schema version 8 and is serialized from typed Rust structs
 with `serde_json`. It carries the same high-level accelerator summary under

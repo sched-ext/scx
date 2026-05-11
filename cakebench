@@ -4,7 +4,590 @@ set -Eeuo pipefail
 
 SCX_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_REPO_ROOT="${SCX_CAKE_BENCH_REPO:-${SCX_REPO_ROOT}/../scx_cake_bench_assets}"
+BENCH_REPO_ROOT="$(cd "${BENCH_REPO_ROOT}" 2>/dev/null && pwd || printf '%s' "${BENCH_REPO_ROOT}")"
 BENCH_LAUNCHER="${BENCH_REPO_ROOT}/cakebench"
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  ./cakebench --bench cake_only [--matrix none|quick|search|all] [extra options]
+  ./cakebench --bench cake_all [--matrix quick|search|all] [extra options]
+  ./cakebench --bench all_scheds [--matrix search|all] [extra options]
+  ./cakebench [normal cakebench command/options]
+
+Bench presets:
+  cake_only   current release scx_cake only, core suite, stat capture
+  cake_all    scx_cake release-policy matrix, defaulting to 24-run search
+  all_scheds  scx_cake matrix plus all schedulers, defaulting to 24-run search
+
+Matrix modes:
+  none   single current release scx_cake run; default for cake_only
+  quick  4-run Cake sanity matrix, core suite, default gaming 1000us quantum
+  search 24-run Cake policy search, full suite, default gaming 1000us quantum
+  all    Cake release matrix, full suite, default gaming 1000us quantum
+
+The presets create their own timestamped output directory under:
+  ../scx_cake_bench_assets/runs/full
+
+Extra options are appended after the preset defaults, so simple overrides like
+--dry-run, --queues local, --storms shadow, or --matrix all still work.
+Preset runs stop an already-active sched_ext scheduler first. Use
+--no-stop-active to fail/skip exactly like the raw benchmark helpers.
+USAGE
+}
+
+preset_out_dir() {
+    local slug="$1"
+    local stamp
+
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    printf '%s/runs/full/%s_%s\n' "${BENCH_REPO_ROOT}" "${stamp}" "${slug}"
+}
+
+detect_out_override() {
+    local out=""
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --out=*)
+                out="${1#*=}"
+                ;;
+            --out)
+                shift
+                [[ "$#" -gt 0 ]] || break
+                out="$1"
+                ;;
+        esac
+        shift || break
+    done
+
+    printf '%s' "${out}"
+}
+
+has_arg() {
+    local needle="$1"
+    shift
+
+    while [[ "$#" -gt 0 ]]; do
+        [[ "$1" == "${needle}" ]] && return 0
+        shift
+    done
+    return 1
+}
+
+active_ops() {
+    cat /sys/kernel/sched_ext/root/ops 2>/dev/null || true
+}
+
+wait_for_sched_ext_empty() {
+    local i
+
+    for ((i = 0; i < 15; i++)); do
+        if [[ -z "$(active_ops)" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    [[ -z "$(active_ops)" ]]
+}
+
+stop_active_sched_ext_for_preset() {
+    local ops stop_status
+
+    ops="$(active_ops)"
+    [[ -n "${ops}" ]] || return 0
+
+    echo "stopping active sched_ext scheduler before benchmark: ${ops}" >&2
+    if ! command -v scxctl >/dev/null 2>&1; then
+        echo "error: scxctl is required to stop the active scheduler automatically" >&2
+        echo "run: sudo scxctl stop" >&2
+        exit 1
+    fi
+
+    stop_status=0
+    if [[ "${EUID}" -eq 0 ]]; then
+        scxctl stop >/dev/null 2>&1 || stop_status=$?
+    else
+        sudo -E scxctl stop >/dev/null 2>&1 || stop_status=$?
+    fi
+
+    wait_for_sched_ext_empty && return 0
+
+    ops="$(active_ops)"
+    if [[ "${ops}" == cake* ]]; then
+        echo "active Cake scheduler is still attached; stopping scx_cake process" >&2
+        if [[ "${EUID}" -eq 0 ]]; then
+            pkill -TERM -x scx_cake >/dev/null 2>&1 || true
+        else
+            sudo -E pkill -TERM -x scx_cake >/dev/null 2>&1 || true
+        fi
+        wait_for_sched_ext_empty && return 0
+    fi
+
+    if [[ "${stop_status}" -ne 0 ]]; then
+        echo "error: scxctl stop failed with status ${stop_status}" >&2
+    fi
+    echo "error: sched_ext is still active after stop attempt: $(active_ops)" >&2
+    echo "stop the current scheduler, then rerun ./cakebench" >&2
+    exit 1
+}
+
+maybe_stop_active_sched_ext() {
+    local stop_active="$1"
+    shift
+
+    [[ "${stop_active}" == "1" ]] || return 0
+    has_arg --dry-run "$@" && return 0
+    stop_active_sched_ext_for_preset
+}
+
+git_value() {
+    local fallback="$1"
+    shift
+
+    git -C "${SCX_REPO_ROOT}" "$@" 2>/dev/null || printf '%s\n' "${fallback}"
+}
+
+write_preset_metadata() {
+    local out_dir="$1"
+    local preset="$2"
+    local matrix="$3"
+    local suite="$4"
+    local capture="$5"
+    local variants="$6"
+    local profiles="$7"
+    local quantums="$8"
+    local queues="$9"
+    local storms="${10}"
+    local kicks="${11}"
+    local learned="${12}"
+    local wake_chain="${13}"
+    local override_out="${14}"
+    shift 14
+
+    local created_utc created_local branch commit status_count dirty_state
+    created_utc="$(date -u --iso-8601=seconds)"
+    created_local="$(date --iso-8601=seconds)"
+    branch="$(git_value unknown rev-parse --abbrev-ref HEAD)"
+    commit="$(git_value unknown rev-parse --short HEAD)"
+    status_count="$(git -C "${SCX_REPO_ROOT}" status --short 2>/dev/null | wc -l | tr -d ' ')"
+    dirty_state="clean"
+    [[ "${status_count}" == "0" ]] || dirty_state="dirty:${status_count}"
+
+    mkdir -p -m 0700 "${out_dir}"
+
+    {
+        echo "# cakebench Run"
+        echo
+        echo "- Created UTC: ${created_utc}"
+        echo "- Created local: ${created_local}"
+        echo "- Preset: ${preset}"
+        echo "- Matrix: ${matrix}"
+        echo "- Suite: ${suite}"
+        echo "- Capture: ${capture}"
+        echo "- Estimated variants: ${variants}"
+        echo "- Output: ${out_dir}"
+        echo "- Output override: ${override_out:-<auto>}"
+        echo
+        echo "## Axes"
+        echo
+        echo "- Profiles: ${profiles}"
+        echo "- Quantums: ${quantums}"
+        echo "- Queues: ${queues}"
+        echo "- Storm guards: ${storms}"
+        echo "- Busy wake kicks: ${kicks}"
+        echo "- Learned locality: ${learned}"
+        echo "- Wake-chain locality: ${wake_chain}"
+        echo
+        echo "## Source"
+        echo
+        echo "- scx repo: ${SCX_REPO_ROOT}"
+        echo "- Benchmark repo: ${BENCH_REPO_ROOT}"
+        echo "- Git branch: ${branch}"
+        echo "- Git commit: ${commit}"
+        echo "- Git state: ${dirty_state}"
+        echo
+        echo "## Command Argv"
+        echo
+        echo '```text'
+        printf '%s\n' "$0" "$@"
+        echo '```'
+    } >"${out_dir}/cakebench_run.md"
+
+    {
+        printf 'key\tvalue\n'
+        printf 'created_utc\t%s\n' "${created_utc}"
+        printf 'created_local\t%s\n' "${created_local}"
+        printf 'preset\t%s\n' "${preset}"
+        printf 'matrix\t%s\n' "${matrix}"
+        printf 'suite\t%s\n' "${suite}"
+        printf 'capture\t%s\n' "${capture}"
+        printf 'estimated_variants\t%s\n' "${variants}"
+        printf 'profiles\t%s\n' "${profiles}"
+        printf 'quantums\t%s\n' "${quantums}"
+        printf 'queues\t%s\n' "${queues}"
+        printf 'storms\t%s\n' "${storms}"
+        printf 'kicks\t%s\n' "${kicks}"
+        printf 'learned_locality\t%s\n' "${learned}"
+        printf 'wake_chain_locality\t%s\n' "${wake_chain}"
+        printf 'out_dir\t%s\n' "${out_dir}"
+        printf 'out_override\t%s\n' "${override_out:-}"
+        printf 'scx_repo\t%s\n' "${SCX_REPO_ROOT}"
+        printf 'bench_repo\t%s\n' "${BENCH_REPO_ROOT}"
+        printf 'git_branch\t%s\n' "${branch}"
+        printf 'git_commit\t%s\n' "${commit}"
+        printf 'git_state\t%s\n' "${dirty_state}"
+    } >"${out_dir}/cakebench_run.tsv"
+}
+
+expand_bench_preset() {
+    local preset="$1"
+    local matrix=""
+    local stop_active=1
+    local -a args=()
+    shift
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --matrix=*)
+                matrix="${1#*=}"
+                ;;
+            --matrix)
+                shift
+                [[ "$#" -gt 0 ]] || {
+                    usage >&2
+                    echo "error: --matrix requires none, quick, search, or all" >&2
+                    exit 1
+                }
+                matrix="$1"
+                ;;
+            --no-stop-active)
+                stop_active=0
+                ;;
+            --stop-active)
+                stop_active=1
+                ;;
+            *)
+                args+=("$1")
+                ;;
+        esac
+        shift
+    done
+    set -- "${args[@]}"
+
+    case "${preset}" in
+        cake_only|cake-only)
+            case "${matrix:-none}" in
+                none|off|single)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_only_single_core_stat_release)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "none" "core" "stat" "1" \
+                        "release-default" "release-default" "release-default" \
+                        "release-default" "release-default" "release-default" \
+                        "release-default" "${override}" \
+                        "${BENCH_LAUNCHER}" cake --core --capture stat --plan quick \
+                        --allow-missing-optional --release "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        cake \
+                        --core \
+                        --capture stat \
+                        --plan quick \
+                        --allow-missing-optional \
+                        --release \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                quick|core)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_only_quick_4x_core_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "quick" "core" "stat" "4" \
+                        "gaming" "<profile default>" "llc-vtime,local" "shadow" \
+                        "policy,idle" "on" "on" "${override}" \
+                        "${BENCH_LAUNCHER}" release-matrix --core --capture stat \
+                        --allow-missing-optional --profiles gaming --queues llc-vtime,local \
+                        --storms shadow --kicks policy,idle --learned-localities on \
+                        --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --core \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms shadow \
+                        --kicks policy,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                search)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_only_search_24x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "search" "all" "stat" "24" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on" "on" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --capture stat --allow-missing-optional --profiles gaming \
+                        --queues llc-vtime,local --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle --learned-localities on \
+                        --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                all|full)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_only_all_96x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "all" "all" "stat" "96" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on,off" "on,off" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --capture stat --allow-missing-optional --profiles gaming \
+                        --queues llc-vtime,local --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle --learned-localities on,off \
+                        --wake-chain-localities on,off "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on,off \
+                        --wake-chain-localities on,off \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                *)
+                    usage >&2
+                    echo "error: --matrix must be none, quick, search, or all for cake_only" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        cake_all|cake-all)
+            case "${matrix:-search}" in
+                quick|core)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_all_quick_4x_core_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "quick" "core" "stat" "4" \
+                        "gaming" "<profile default>" "llc-vtime,local" "shadow" \
+                        "policy,idle" "on" "on" "${override}" \
+                        "${BENCH_LAUNCHER}" release-matrix --core --capture stat \
+                        --allow-missing-optional --profiles gaming --queues llc-vtime,local \
+                        --storms shadow --kicks policy,idle --learned-localities on \
+                        --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --core \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms shadow \
+                        --kicks policy,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                search)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_all_search_24x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "search" "all" "stat" "24" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on" "on" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --capture stat --allow-missing-optional --profiles gaming \
+                        --queues llc-vtime,local --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle --learned-localities on \
+                        --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                all|full)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_all_all_96x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "all" "all" "stat" "96" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on,off" "on,off" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --capture stat --allow-missing-optional --profiles gaming \
+                        --queues llc-vtime,local --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle --learned-localities on,off \
+                        --wake-chain-localities on,off "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on,off \
+                        --wake-chain-localities on,off \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                *)
+                    usage >&2
+                    echo "error: --matrix must be quick, search, or all for cake_all" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        all_scheds|all-scheds|all_schedulers|all-schedulers)
+            case "${matrix:-search}" in
+                search)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir all_scheds_search_24x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "search" "all" "stat" "24 + scheduler baseline" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on" "on" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --all-schedulers --capture stat --allow-missing-optional \
+                        --profiles gaming --queues llc-vtime,local \
+                        --storms off,shadow,shield,full --kicks policy,preempt,idle \
+                        --learned-localities on --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --all-schedulers \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                all|full)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir all_scheds_all_96x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "all" "all" "stat" "96 + scheduler baseline" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on,off" "on,off" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --all-schedulers --capture stat --allow-missing-optional \
+                        --profiles gaming --queues llc-vtime,local \
+                        --storms off,shadow,shield,full --kicks policy,preempt,idle \
+                        --learned-localities on,off --wake-chain-localities on,off "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --all-schedulers \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on,off \
+                        --wake-chain-localities on,off \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                *)
+                    usage >&2
+                    echo "error: --matrix must be search or all for all_scheds" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            echo "error: unknown --bench preset: ${preset}" >&2
+            exit 1
+            ;;
+    esac
+}
 
 if [[ ! -x "${BENCH_LAUNCHER}" ]]; then
     echo "error: benchmark launcher not found: ${BENCH_LAUNCHER}" >&2
@@ -13,4 +596,29 @@ if [[ ! -x "${BENCH_LAUNCHER}" ]]; then
 fi
 
 export SCX_REPO_ROOT
+
+if [[ "$#" -gt 0 ]]; then
+    case "$1" in
+        --bench)
+            shift
+            [[ "$#" -gt 0 ]] || {
+                usage >&2
+                echo "error: --bench requires a preset" >&2
+                exit 1
+            }
+            expand_bench_preset "$@"
+            ;;
+        --bench=*)
+            preset="${1#*=}"
+            shift
+            expand_bench_preset "${preset}" "$@"
+            ;;
+        -h|--help|help)
+            usage
+            echo
+            exec "${BENCH_LAUNCHER}" --help
+            ;;
+    esac
+fi
+
 exec "${BENCH_LAUNCHER}" "$@"
