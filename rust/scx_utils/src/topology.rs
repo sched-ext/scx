@@ -124,6 +124,40 @@ pub enum CoreType {
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Powermode {
+    Turbo,
+    Performance,
+    Powersave,
+    Any,
+}
+
+/// Return the list of CPU IDs matching the requested power mode.
+///
+/// Selects CPUs from the system topology based on [`Powermode`]:
+/// - [`Powermode::Turbo`]: only turbo-capable big cores
+/// - [`Powermode::Performance`]: all big cores
+/// - [`Powermode::Powersave`]: only little cores
+/// - [`Powermode::Any`]: all CPUs
+pub fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
+    let topo = Topology::new().unwrap();
+
+    let cpus: Vec<usize> = topo
+        .all_cores
+        .values()
+        .flat_map(|core| &core.cpus)
+        .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
+            (Powermode::Turbo, CoreType::Big { turbo: true })
+            | (Powermode::Performance, CoreType::Big { .. })
+            | (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
+            (Powermode::Any, ..) => Some(*cpu_id),
+            _ => None,
+        })
+        .collect();
+
+    Ok(cpus)
+}
+
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Cpu {
     pub id: usize,
     pub min_freq: usize,

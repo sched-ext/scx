@@ -32,6 +32,7 @@ use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
 use scx_utils::compat;
+use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::scx_ops_attach;
@@ -40,44 +41,14 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
 use scx_utils::Cpumask;
+use scx_utils::Powermode;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_flash";
-
-#[derive(PartialEq)]
-enum Powermode {
-    Turbo,
-    Performance,
-    Powersave,
-    Any,
-}
-
-fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
-    let topo = Topology::new().unwrap();
-
-    let cpus: Vec<usize> = topo
-        .all_cores
-        .values()
-        .flat_map(|core| &core.cpus)
-        .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
-            // Turbo mode: prioritize CPUs with the highest max frequency
-            (Powermode::Turbo, CoreType::Big { turbo: true }) |
-            // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
-            (Powermode::Performance, CoreType::Big { .. }) |
-            // Powersave mode: add all the Little CPUs
-            (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
-            (Powermode::Any, ..) => Some(*cpu_id),
-            _ => None,
-        })
-        .collect();
-
-    Ok(cpus)
-}
 
 // Convert an array of CPUs to the corresponding cpumask of any arbitrary size.
 fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {

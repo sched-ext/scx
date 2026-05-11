@@ -32,6 +32,7 @@ use log::{debug, info, warn};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
+use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -39,7 +40,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
+use scx_utils::Powermode;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
@@ -132,39 +133,6 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
-}
-
-#[derive(PartialEq)]
-enum Powermode {
-    Turbo,
-    Performance,
-    Powersave,
-    Any,
-}
-
-/*
- * TODO: this code is shared between scx_bpfland, scx_flash and scx_cosmos; consder to move it to
- * scx_utils.
- */
-fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
-    let cpus: Vec<usize> = Topology::new()
-        .unwrap()
-        .all_cores
-        .values()
-        .flat_map(|core| &core.cpus)
-        .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
-            // Turbo mode: prioritize CPUs with the highest max frequency
-            (Powermode::Turbo, CoreType::Big { turbo: true }) |
-            // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
-            (Powermode::Performance, CoreType::Big { .. }) |
-            // Powersave mode: add all the Little CPUs
-            (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
-            (Powermode::Any, ..) => Some(*cpu_id),
-            _ => None,
-        })
-        .collect();
-
-    Ok(cpus)
 }
 
 pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
