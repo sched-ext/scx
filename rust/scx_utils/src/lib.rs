@@ -62,15 +62,15 @@ pub mod libbpf_clap_opts;
 pub mod ravg;
 
 mod topology;
+pub use topology::get_primary_cpus;
 #[cfg(any(test, feature = "testutils"))]
 pub use topology::testutils;
 pub use topology::Core;
 pub use topology::CoreType;
-pub use topology::Powermode;
-pub use topology::get_primary_cpus;
 pub use topology::Cpu;
 pub use topology::Llc;
 pub use topology::Node;
+pub use topology::Powermode;
 pub use topology::Topology;
 pub use topology::NR_CPUS_POSSIBLE;
 pub use topology::NR_CPU_IDS;

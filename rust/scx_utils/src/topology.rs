@@ -146,9 +146,9 @@ pub fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
         .values()
         .flat_map(|core| &core.cpus)
         .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
-            (Powermode::Turbo, CoreType::Big { turbo: true }) |
-            (Powermode::Performance, CoreType::Big { .. }) |
-            (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
+            (Powermode::Turbo, CoreType::Big { turbo: true })
+            | (Powermode::Performance, CoreType::Big { .. })
+            | (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
             (Powermode::Any, ..) => Some(*cpu_id),
             _ => None,
         })
