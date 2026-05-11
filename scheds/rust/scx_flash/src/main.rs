@@ -37,12 +37,12 @@ use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_la
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
+use scx_utils::get_primary_cpus;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::get_primary_cpus;
-use scx_utils::Powermode;
 use scx_utils::Cpumask;
+use scx_utils::Powermode;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
