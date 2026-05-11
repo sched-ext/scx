@@ -680,10 +680,20 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 */
 	if (!init_active_ovrflw_masks(ctx))
 		goto err_out;
-	if (is_pinned(ctx->p) || is_migration_disabled(ctx->p)) {
+	/*
+	 * Use effective pinning here so we cover both permanent pinning
+	 * (nr_cpus_allowed == 1) and transient migrate_disable narrowing
+	 * (cpus_ptr weight == 1, cached via ops.set_cpumask).
+	 */
+	if (is_effectively_pinned(ctx->taskc) || is_migration_disabled(ctx->p)) {
 		cpu = ctx->prev_cpu;
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(ctx->active))) {
-			if (is_pinned(ctx->p))
+			/*
+			 * Extend the overflow set only for permanent pinning;
+			 * migrate_disable is transient, so we don't want to
+			 * pollute the overflow set with short-lived restrictions.
+			 */
+			if (is_permanently_pinned(ctx->p))
 				bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
 		}
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
