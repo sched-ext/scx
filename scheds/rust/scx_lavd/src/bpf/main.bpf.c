@@ -666,6 +666,37 @@ static __always_inline void unaccount_queued_load(task_ctx *taskc)
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 }
 
+static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
+{
+	int ret, ret2;
+
+	/*
+	 * Never throttle the scheduler process itself, so it can always
+	 * make forward progress.
+	 */
+	if (p->pid == lavd_pid)
+		return 0;
+
+	/*
+	 * Under CPU bandwidth control using cpu.max, we should first check
+	 * if the cgroup is throttled or not. If not, we will go ahead.
+	 * Otherwise, we should put the task aside for later execution.
+	 * In the forced mode, we should enqueue the task even if the cgroup
+	 * is throttled (-EAGAIN).
+	 *
+	 * Note that we cannot use scx_bpf_task_cgroup() here because this can
+	 * be called only from ops.enqueue() and ops.dispatch().
+	 */
+	ret = scx_cgroup_bw_throttled(taskc->cgrp_id, p, (u64)taskc);
+	if ((ret == -EAGAIN) && put_aside) {
+		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime,
+					       taskc->cgrp_id);
+		if (ret2)
+			return ret2;
+	}
+	return ret;
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -745,9 +776,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			 * dispatch if the cgroup is throttled; the task will
 			 * fall through to ops.enqueue() which puts it in the BTQ.
 			 */
-			if (enable_cpu_bw && (p->pid != lavd_pid) &&
-			    (scx_cgroup_bw_throttled(ictx.taskc->cgrp_id, p,
-						     (u64)ictx.taskc) == -EAGAIN))
+			if (enable_cpu_bw &&
+			    (cgroup_throttled(p, ictx.taskc, false) == -EAGAIN))
 				goto out;
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
@@ -760,30 +790,6 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 out:
 	return cpu_id;
-}
-
-static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
-{
-	int ret, ret2;
-
-	/*
-	 * Under CPU bandwidth control using cpu.max, we should first check
-	 * if the cgroup is throttled or not. If not, we will go ahead.
-	 * Otherwise, we should put the task aside for later execution.
-	 * In the forced mode, we should enqueue the task even if the cgroup
-	 * is throttled (-EAGAIN).
-	 *
-	 * Note that we cannot use scx_bpf_task_cgroup() here because this can
-	 * be called only from ops.enqueue() and ops.dispatch().
-	 */
-	ret = scx_cgroup_bw_throttled(taskc->cgrp_id, p, (u64)taskc);
-	if ((ret == -EAGAIN) && put_aside) {
-		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime,
-					       taskc->cgrp_id);
-		if (ret2)
-			return ret2;
-	}
-	return ret;
 }
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
@@ -864,12 +870,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Note that we calculate the task's deadline before checking the
 	 * cgroup, as we need the deadline to put aside the task when the
 	 * cgroup is throttled.
-	 *
-	 * Also, we do not throttle the scheduler process itself to
-	 * guarantee forward progress.
 	 */
-	if (enable_cpu_bw && (p->pid != lavd_pid) &&
-	    (cgroup_throttled(p, taskc, true) == -EAGAIN)) {
+	if (enable_cpu_bw && (cgroup_throttled(p, taskc, true) == -EAGAIN)) {
 		debugln("Task %s[pid%d/cgid%llu] is throttled.",
 			p->comm, p->pid, taskc->cgrp_id);
 		return;
@@ -1039,8 +1041,7 @@ void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx
 	 * check if the cgroup is throttled before executing
 	 * the task.
 	 */
-	if (enable_cpu_bw && (prev->pid != lavd_pid) &&
-		(cgroup_throttled(prev, taskc_prev, false) == -EAGAIN))
+	if (enable_cpu_bw && (cgroup_throttled(prev, taskc_prev, false) == -EAGAIN))
 		return;
 
 	/*
