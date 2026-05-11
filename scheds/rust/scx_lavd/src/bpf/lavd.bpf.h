@@ -142,6 +142,7 @@ enum consts_flags {
 	LAVD_FLAG_WOKEN_BY_SOFTIRQ	= (0x1 << 13), /* woken by a softirq */
 	LAVD_FLAG_MIGRATION_AGGRESSIVE  = (0x1 << 14), /* immediate task migration is necessary. */
 	LAVD_FLAG_DOMAIN_PINNED		= (0x1 << 15), /* task's cpumask is confined to a single compute domain */
+	LAVD_FLAG_IS_EFFECTIVELY_PINNED	= (0x1 << 16), /* effective cpumask weight is 1 (permanent or migrate-disable) */
 };
 
 #define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)

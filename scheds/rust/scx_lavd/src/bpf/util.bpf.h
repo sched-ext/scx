@@ -34,7 +34,8 @@ u32 calc_avg32(u32 old_val, u32 new_val);
 bool is_kernel_task(struct task_struct *p);
 bool is_kernel_worker(struct task_struct *p);
 bool is_ksoftirqd(struct task_struct *p);
-bool is_pinned(const struct task_struct *p);
+bool is_permanently_pinned(const struct task_struct *p);
+bool is_effectively_pinned(task_ctx __arg_arena *taskc);
 bool use_full_cpus(void);
 void set_affinity_flags(task_ctx __arg_arena *taskc,
 			const struct cpumask *cpumask);

@@ -92,10 +92,11 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	/*
-	 * Prioritize a pinned task since it has restrictions in placement
-	 * so it tends to be delayed.
+	 * Prioritize an effectively pinned task (permanent pinning or
+	 * migrate_disable) since its restricted placement tends to delay
+	 * it; boost its latency criticality.
 	 */
-	if (is_pinned(p) || is_migration_disabled(p))
+	if (is_effectively_pinned(taskc) || is_migration_disabled(p))
 		weight_boost += LAVD_LC_WEIGHT_BOOST_MEDIUM;
 
 	/*

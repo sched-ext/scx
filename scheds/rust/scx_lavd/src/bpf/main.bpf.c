@@ -876,9 +876,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Increase the number of pinned tasks waiting for execution.
+	 * Track tasks that are effectively pinned (permanent pinning or
+	 * migrate_disable) so nr_pinned_tasks drives slice shrinking for
+	 * both cases. The matching decrement in lavd_quiescent() uses the
+	 * same predicate.
 	 */
-	if (is_pinned(p) && (taskc->pinned_cpu_id == -ENOENT)) {
+	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
 		taskc->pinned_cpu_id = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
 
@@ -955,9 +958,10 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	}
 
 	/*
-	 * Increase the number of pinned tasks waiting for execution.
+	 * Mirror the lavd_enqueue() accounting: count effectively pinned
+	 * tasks (permanent or migrate_disable) for slice shrinking.
 	 */
-	if (is_pinned(p))
+	if (is_effectively_pinned(taskc))
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
 
 	/*
@@ -1131,10 +1135,12 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (prev) {
 		/*
-		 * If the previous task is pinned to this CPU,
-		 * extend the overflow set and go.
+		 * If the previous task is permanently pinned to this CPU,
+		 * extend the overflow set so future picks keep it serviced.
+		 * Use permanent pinning here: migrate_disable is transient
+		 * and handled in the else-if branch without overflow churn.
 		 */
-		if (is_pinned(prev)) {
+		if (is_permanently_pinned(prev)) {
 			bpf_cpumask_set_cpu(cpu, ovrflw);
 			bpf_rcu_read_unlock();
 			goto consume_out;
@@ -1192,11 +1198,12 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			continue; /* ignore the lookup error */
 
 		/*
-		 * if the task is pinned to this cpu,
-		 * extend the overflow set and go.
-		 * but not on this cpu, try another task.
+		 * If the task is permanently pinned to its CPU, extend the
+		 * overflow set (and kick if it's a remote CPU). Same rationale
+		 * as the prev-task branch above: migrate_disable is transient,
+		 * so its handling is split into the else-if below.
 		 */
-		if (is_pinned(p)) {
+		if (is_permanently_pinned(p)) {
 			new_cpu = scx_bpf_task_cpu(p);
 			if (new_cpu == cpu) {
 				bpf_cpumask_set_cpu(new_cpu, ovrflw);
@@ -1543,9 +1550,11 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	cpuc->flags = 0;
 
 	/*
-	 * Decrease the number of pinned tasks waiting for execution.
+	 * Mirror the lavd_enqueue() increment: decrement when the task
+	 * is effectively pinned (permanent pinning or migrate_disable)
+	 * and was tracked at enqueue time (pinned_cpu_id set).
 	 */
-	if (is_pinned(p) && (taskc->pinned_cpu_id != -ENOENT)) {
+	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id != -ENOENT)) {
 		__sync_fetch_and_sub(&cpuc->nr_pinned_tasks, 1);
 		taskc->pinned_cpu_id = -ENOENT;
 
