@@ -41,7 +41,8 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
+use scx_utils::get_primary_cpus;
+use scx_utils::Powermode;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -49,34 +50,6 @@ use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_bpfland";
-
-#[derive(PartialEq)]
-enum Powermode {
-    Turbo,
-    Performance,
-    Powersave,
-    Any,
-}
-
-fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
-    let topo = Topology::new().unwrap();
-
-    let cpus: Vec<usize> = topo
-        .all_cores
-        .values()
-        .flat_map(|core| &core.cpus)
-        .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
-            // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
-            (Powermode::Performance, CoreType::Big { .. }) |
-            // Powersave mode: add all the Little CPUs
-            (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
-            (Powermode::Any, ..) => Some(*cpu_id),
-            _ => None,
-        })
-        .collect();
-
-    Ok(cpus)
-}
 
 // Convert an array of CPUs to the corresponding cpumask of any arbitrary size.
 fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
