@@ -23,6 +23,7 @@ use crate::cell_manager::CpuRecipient;
 #[derive(Clone, Debug)]
 pub struct ConfiguredSubcell {
     pub id: u32,
+    pub name: String,
     pub matches: Vec<Vec<SubcellMatch>>,
 }
 
@@ -61,8 +62,7 @@ struct CellSpec {
 
 #[derive(Clone, Debug, Deserialize)]
 struct SubcellSpec {
-    #[serde(rename = "name")]
-    _name: String,
+    name: String,
     #[serde(default = "default_subcell_matches")]
     matches: Vec<Vec<SubcellMatch>>,
 }
@@ -393,6 +393,7 @@ fn normalize_subcells(subcells: Vec<SubcellSpec>) -> Result<Vec<ConfiguredSubcel
             }
             catch_all = Some(ConfiguredSubcell {
                 id: 0,
+                name: subcell.name,
                 matches: subcell.matches,
             });
             continue;
@@ -400,6 +401,7 @@ fn normalize_subcells(subcells: Vec<SubcellSpec>) -> Result<Vec<ConfiguredSubcel
 
         normalized.push(ConfiguredSubcell {
             id: next_id,
+            name: subcell.name,
             matches: subcell.matches,
         });
         next_id += 1;
@@ -430,6 +432,7 @@ fn default_configured_subcells() -> Vec<ConfiguredSubcell> {
 fn default_catch_all_subcell() -> ConfiguredSubcell {
     ConfiguredSubcell {
         id: 0,
+        name: "rest".to_string(),
         matches: vec![Vec::new()],
     }
 }
@@ -572,8 +575,11 @@ mod tests {
         assert_eq!(configured.root_spec_idx, Some(2));
         let subcells = &configured.specs[0].subcells;
         assert_eq!(subcells[0].id, 0);
+        assert_eq!(subcells[0].name, "rest");
         assert_eq!(subcells[1].id, 1);
+        assert_eq!(subcells[1].name, "hhvmworker");
         assert_eq!(subcells[2].id, 2);
+        assert_eq!(subcells[2].name, "mcrpxy-web");
     }
 
     #[test]
