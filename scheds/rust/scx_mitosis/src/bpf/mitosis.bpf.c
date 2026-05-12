@@ -2172,6 +2172,175 @@ void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 	UEI_RECORD(uei, ei);
 }
 
+int reset_configured_cells(void)
+{
+	u32 cell_id;
+
+	bpf_for(cell_id, 1, MAX_CELLS)
+	{
+		struct cell *cell = lookup_cell(cell_id);
+		if (!cell)
+			return -EINVAL;
+
+		WRITE_ONCE(cell->in_use, 0);
+		cell->owner_cgid = 0;
+	}
+
+	return 0;
+}
+
+int apply_configured_cell_cpumask(u32 cell_id, struct cell_config *config)
+{
+	struct cell_cpumask_data *cpumask_data;
+	struct cell_cpumask_wrapper *cpumaskw;
+	struct cell *cell;
+	u32 cpu;
+
+	if (!config || cell_id >= MAX_CELLS)
+		return -EINVAL;
+
+	cpumaskw = lookup_cell_cpumask_wrapper(cell_id);
+	if (!cpumaskw)
+		return -EINVAL;
+
+	cpumask_data = MEMBER_VPTR(config->cpumasks, [cell_id]);
+	if (!cpumask_data) {
+		scx_bpf_error("cell_id %d out of bounds", cell_id);
+		return -EINVAL;
+	}
+
+	/* Get the tmp_cpumask to build the new mask */
+	struct bpf_cpumask *new_cpumask __free(bpf_cpumask) = get_tmp_cpumask(&cpumaskw->primary);
+	if (!new_cpumask) {
+		scx_bpf_error("tmp cpumask is NULL for cell_id %d", cell_id);
+		return -EINVAL;
+	}
+
+	bpf_cpumask_clear(new_cpumask);
+
+	/* Build the mask and update CPU-to-cell mappings in one pass. */
+	bpf_for(cpu, 0, nr_possible_cpus)
+	{
+		struct cpu_ctx *cctx;
+		bool cpu_in_cell;
+
+		if (cell_cpumask_data_test_cpu(cpumask_data, cpu, &cpu_in_cell)) {
+			scx_bpf_error("failed to decode cpumask for cell_id %d", cell_id);
+			return -EINVAL;
+		}
+
+		if (!cpu_in_cell)
+			continue;
+
+		bpf_cpumask_set_cpu(cpu, new_cpumask);
+
+		cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
+		if (!cctx)
+			return -ENOENT;
+		/*
+		 * If the CPU is changing cells, advance the new cell's vtime to
+		 * at least match this CPU's per-CPU vtime. Otherwise the per-CPU
+		 * DSQ and cell DSQ are in different vtime domains and dispatch
+		 * will starve the per-CPU DSQ tasks.
+		 */
+		if (cctx->cell != cell_id) {
+			u32 llc_idx;
+
+			cell = lookup_cell(cell_id);
+			if (!cell)
+				return -ENOENT;
+			llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ?
+					  cctx->llc :
+					  FAKE_FLAT_CELL_LLC;
+			if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now), cctx->vtime_now))
+				WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
+		}
+		cctx->cell = cell_id;
+	}
+
+	/* Swap the new cpumask into place */
+	if (publish_prepared_cpumask(&cpumaskw->primary, &new_cpumask)) {
+		scx_bpf_error("failed to publish cpumask for cell_id %d", cell_id);
+		return -EINVAL;
+	}
+
+	/* Apply borrowable cpumask for this cell */
+	if (enable_borrowing) {
+		struct cell_cpumask_data *borrowable_data;
+
+		borrowable_data = MEMBER_VPTR(config->borrowable_cpumasks, [cell_id]);
+		if (!borrowable_data) {
+			scx_bpf_error("cell_id %d out of bounds for borrowable", cell_id);
+			return -EINVAL;
+		}
+
+		if (set_cpumask_from_data(&cpumaskw->borrowable, borrowable_data)) {
+			scx_bpf_error("failed to set borrowable cpumask for cell_id %d", cell_id);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
+{
+	struct subcell(*subcell_configs)[MAX_SUBCELLS_PER_CELL];
+	struct cell *cell;
+	u32 subcell_id;
+
+	if (!config || cell_id >= MAX_CELLS)
+		return -EINVAL;
+
+	cell = lookup_cell(cell_id);
+	if (!cell)
+		return -EINVAL;
+
+	subcell_configs = MEMBER_VPTR(config->subcells, [cell_id]);
+	if (!subcell_configs) {
+		scx_bpf_error("cell_id %d out of bounds for subcells", cell_id);
+		return -EINVAL;
+	}
+
+	bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+	{
+		struct cell_cpumask_wrapper *subcell_cpumaskw;
+		struct subcell *subcell_config;
+
+		subcell_cpumaskw = lookup_subcell_cpumask_wrapper(cell_id, subcell_id);
+		if (!subcell_cpumaskw)
+			return -EINVAL;
+
+		subcell_config = MEMBER_VPTR(*subcell_configs, [subcell_id]);
+		if (!subcell_config) {
+			scx_bpf_error("subcell_id %d out of bounds for cell_id %d", subcell_id,
+				      cell_id);
+			return -EINVAL;
+		}
+
+		if (set_cpumask_from_data(&subcell_cpumaskw->primary, &subcell_config->primary)) {
+			scx_bpf_error(
+				"failed to set primary subcell cpumask for cell=%u subcell=%u",
+				cell_id, subcell_id);
+			return -EINVAL;
+		}
+
+		if (enable_borrowing) {
+			if (set_cpumask_from_data(&subcell_cpumaskw->borrowable,
+						  &subcell_config->borrowable)) {
+				scx_bpf_error(
+					"failed to set borrowable subcell cpumask for cell=%u subcell=%u",
+					cell_id, subcell_id);
+				return -EINVAL;
+			}
+		}
+
+		cell->subcells[subcell_id] = *subcell_config;
+	}
+
+	return 0;
+}
+
 /*
  * Apply a complete cell configuration.
  *
@@ -2195,11 +2364,9 @@ int apply_cell_config(void *ctx)
 {
 	struct cgrp_ctx *cgc;
 	struct cell *cell;
-	struct cpu_ctx *cctx;
-	struct cell_cpumask_wrapper *cpumaskw;
 	struct cgroup_subsys_state *root_css, *pos;
 	struct cgroup *cur_cgrp;
-	u32 i, cell_id, subcell_id;
+	u32 i, cell_id;
 
 	/* Read configuration from global struct (populated by userspace) */
 	struct cell_config *config = &cell_config;
@@ -2209,15 +2376,8 @@ int apply_cell_config(void *ctx)
 	 * This handles cell destruction - cells not in the new config
 	 * will remain marked as not in use.
 	 */
-	bpf_for(i, 1, MAX_CELLS)
-	{
-		cell = lookup_cell(i);
-		if (!cell)
-			return -EINVAL;
-
-		WRITE_ONCE(cell->in_use, 0);
-		cell->owner_cgid = 0;
-	}
+	if (reset_configured_cells())
+		return -EINVAL;
 
 	/*
 	 * Phase 2: Apply cell cpumasks, derive CPU-to-cell mappings, and store
@@ -2234,142 +2394,18 @@ int apply_cell_config(void *ctx)
 
 	bpf_for(cell_id, 0, MAX_CELLS)
 	{
-		struct cell_cpumask_data *cpumask_data;
+		int ret;
 
 		if (cell_id >= config->num_cells)
 			break;
 
-		cpumaskw = lookup_cell_cpumask_wrapper(cell_id);
-		if (!cpumaskw)
-			return -EINVAL;
+		ret = apply_configured_cell_cpumask(cell_id, config);
+		if (ret)
+			return ret;
 
-		cpumask_data = MEMBER_VPTR(config->cpumasks, [cell_id]);
-		if (!cpumask_data) {
-			scx_bpf_error("cell_id %d out of bounds", cell_id);
-			return -EINVAL;
-		}
-
-		/* Get the tmp_cpumask to build the new mask */
-		struct bpf_cpumask *new_cpumask __free(bpf_cpumask) =
-			get_tmp_cpumask(&cpumaskw->primary);
-		if (!new_cpumask) {
-			scx_bpf_error("tmp cpumask is NULL for cell_id %d", cell_id);
-			return -EINVAL;
-		}
-
-		bpf_cpumask_clear(new_cpumask);
-
-		/* Build the mask and update CPU-to-cell mappings in one pass. */
-		u32 cpu;
-		bpf_for(cpu, 0, nr_possible_cpus)
-		{
-			bool cpu_in_cell;
-
-			if (cell_cpumask_data_test_cpu(cpumask_data, cpu, &cpu_in_cell)) {
-				scx_bpf_error("failed to decode cpumask for cell_id %d", cell_id);
-				return -EINVAL;
-			}
-
-			if (!cpu_in_cell)
-				continue;
-
-			bpf_cpumask_set_cpu(cpu, new_cpumask);
-
-			cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
-			if (!cctx)
-				return -ENOENT;
-			/*
-			 * If the CPU is changing cells, advance the
-			 * new cell's vtime to at least match this
-			 * CPU's per-CPU vtime. Otherwise the per-CPU
-			 * DSQ and cell DSQ are in different vtime
-			 * domains and dispatch will starve the
-			 * per-CPU DSQ tasks.
-			 */
-			if (cctx->cell != cell_id) {
-				cell = lookup_cell(cell_id);
-				if (!cell)
-					return -ENOENT;
-				u32 llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ?
-						      cctx->llc :
-						      FAKE_FLAT_CELL_LLC;
-				if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now),
-						cctx->vtime_now))
-					WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
-			}
-			cctx->cell = cell_id;
-		}
-
-		/* Swap the new cpumask into place */
-		if (publish_prepared_cpumask(&cpumaskw->primary, &new_cpumask)) {
-			scx_bpf_error("failed to publish cpumask for cell_id %d", cell_id);
-			return -EINVAL;
-		}
-
-		/* Apply borrowable cpumask for this cell */
-		if (enable_borrowing) {
-			struct cell_cpumask_data *borrowable_data;
-
-			borrowable_data = MEMBER_VPTR(config->borrowable_cpumasks, [cell_id]);
-			if (!borrowable_data) {
-				scx_bpf_error("cell_id %d out of bounds for borrowable", cell_id);
-				return -EINVAL;
-			}
-
-			if (set_cpumask_from_data(&cpumaskw->borrowable, borrowable_data)) {
-				scx_bpf_error("failed to set borrowable cpumask for cell_id %d",
-					      cell_id);
-				return -EINVAL;
-			}
-		}
-
-		cell = lookup_cell(cell_id);
-		if (!cell)
-			return -EINVAL;
-
-		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
-		{
-			struct cell_cpumask_wrapper *subcell_cpumaskw;
-			struct subcell(*subcell_configs)[MAX_SUBCELLS_PER_CELL];
-			struct subcell *subcell_config;
-
-			subcell_cpumaskw = lookup_subcell_cpumask_wrapper(cell_id, subcell_id);
-			if (!subcell_cpumaskw)
-				return -EINVAL;
-
-			subcell_configs = MEMBER_VPTR(config->subcells, [cell_id]);
-			if (!subcell_configs) {
-				scx_bpf_error("cell_id %d out of bounds for subcells", cell_id);
-				return -EINVAL;
-			}
-
-			subcell_config = MEMBER_VPTR(*subcell_configs, [subcell_id]);
-			if (!subcell_config) {
-				scx_bpf_error("subcell_id %d out of bounds for cell_id %d",
-					      subcell_id, cell_id);
-				return -EINVAL;
-			}
-
-			if (set_cpumask_from_data(&subcell_cpumaskw->primary,
-						  &subcell_config->primary)) {
-				scx_bpf_error(
-					"failed to set primary subcell cpumask for cell=%u subcell=%u",
-					cell_id, subcell_id);
-				return -EINVAL;
-			}
-
-			if (enable_borrowing) {
-				if (set_cpumask_from_data(&subcell_cpumaskw->borrowable,
-							  &subcell_config->borrowable)) {
-					scx_bpf_error(
-						"failed to set borrowable subcell cpumask for cell=%u subcell=%u",
-						cell_id, subcell_id);
-					return -EINVAL;
-				}
-			}
-
-			cell->subcells[subcell_id] = config->subcells[cell_id][subcell_id];
-		}
+		ret = apply_configured_cell_subcells(cell_id, config);
+		if (ret)
+			return ret;
 	}
 
 	/* Phase 2.5: Recompute per-LLC CPU counts for all cells */
