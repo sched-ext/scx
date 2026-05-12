@@ -629,6 +629,19 @@ impl CellManager {
         let targets = compute_targets(total_cpu_count, &all_cells_with_weights)
             .context("computing per-cell CPU targets")?;
 
+        for (cell_id, mask) in &mut cell_cpus {
+            let target = targets.get(cell_id).copied().unwrap_or(1);
+            let current = mask.weight();
+            if current > target {
+                let excess = current - target;
+                let cpus_to_remove: Vec<usize> = mask.iter().take(excess).collect();
+                for cpu in cpus_to_remove {
+                    mask.clear_cpu(cpu).ok();
+                    unclaimed_cpus.push(cpu);
+                }
+            }
+        }
+
         // Seed assigned_count from exclusive assignments
         let mut assigned_count: HashMap<u32, usize> = HashMap::new();
         for (cell_id, mask) in &cell_cpus {
