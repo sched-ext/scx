@@ -1,6 +1,6 @@
 [package]
 name = "scx_cosmos"
-version = "1.1.0"
+version = "1.1.1"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
 edition = "2021"
 description = "Lightweight scheduler optimized for preserving task-to-CPU locality. https://github.com/sched-ext/scx/tree/main"
@@ -16,14 +16,14 @@ log = "0.4"
 nvml-wrapper = "0.12"
 nvml-wrapper-sys = "0.9"
 perf-event-open-sys = "6"
-scx_stats = { path = "../../../rust/scx_stats", version = "1.1.0" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.0" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.1.0", features = ["autopower", "gpu-topology"] }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.1.1" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.1" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.1", features = ["autopower", "gpu-topology"] }
 serde = { version = "1", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.0" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.1" }
 
 [features]
 enable_backtrace = []

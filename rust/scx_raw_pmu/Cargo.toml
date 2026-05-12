@@ -1,6 +1,6 @@
 [package]
 name = "scx_raw_pmu"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Utilities to handle raw PMU counters in sched_ext schedulers"
 license = "GPL-2.0-only"
@@ -11,7 +11,7 @@ csv = "1"
 include_dir = "0.7"
 procfs = "0.18"
 regex = "1"
-scx_utils = { path = "../scx_utils", version = "1.1.0" }
+scx_utils = { path = "../scx_utils", version = "1.1.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -19,4 +19,4 @@ serde_json = "1"
 tempfile = "3"
 
 [build-dependencies]
-scx_utils = { path = "../scx_utils", version = "1.1.0" }
+scx_utils = { path = "../scx_utils", version = "1.1.1" }
