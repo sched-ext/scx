@@ -40,3 +40,26 @@ fn lavd_cpus_max_stall(ctx: &Ctx) -> Result<AssertResult> {
             })],
     )
 }
+
+#[ktstr_test(
+    scheduler = LAVD_PAYLOAD, duration_s = 30, watchdog_timeout_s = 10,
+    required_flags = ["alpha"],
+)]
+fn lavd_reclaim_stall(ctx: &Ctx) -> Result<AssertResult> {
+    execute_defs(
+        ctx,
+        vec![CgroupDef::named("reclaim_stall")
+            .workers(8)
+            .work_type(WorkType::PageFaultChurn {
+                region_kb: 65536,
+                touches_per_cycle: 4096,
+                spin_iters: 0,
+            })
+            .work(
+                WorkSpec::default()
+                    .workers(32)
+                    .work_type(WorkType::FutexPingPong { spin_iters: 1024 })
+                    .nice(19),
+            )],
+    )
+}
