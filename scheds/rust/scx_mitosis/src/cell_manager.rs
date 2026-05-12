@@ -58,6 +58,20 @@ pub(crate) struct CpuRecipient {
 }
 
 impl CpuRecipient {
+    /// Create a recipient restricted to and preferentially claiming `cpus`.
+    pub(crate) fn pinned(id: u32, weight: f64, cpus: &Cpumask) -> Self {
+        Self {
+            id,
+            weight,
+            allowed: cpus.clone(),
+            claimed: Some(cpus.clone()),
+            minimum: CpuMinimum {
+                protected: 1,
+                requested: 0,
+            },
+        }
+    }
+
     /// Create an unpinned recipient over the complete allocation domain.
     ///
     /// It may run anywhere in `domain`, claims no CPU preferentially, and
