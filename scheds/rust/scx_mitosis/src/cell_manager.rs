@@ -1254,7 +1254,8 @@ mod tests {
     fn test_cpu_assignments_cpusets_cover_all_cpus() {
         let tmp = TempDir::new().unwrap();
 
-        // Create cgroups that cover all CPUs - cell 0 gets nothing, which is an error
+        // Create cgroups that cover all CPUs. Reclamation trims each
+        // cell's exclusive count to its target, giving cell 0 a share.
         let cell1_path = tmp.path().join("cell1");
         std::fs::create_dir(&cell1_path).unwrap();
         std::fs::write(cell1_path.join("cpuset.cpus"), "0-7\n").unwrap();
@@ -1272,15 +1273,16 @@ mod tests {
         .unwrap();
         let result = mgr.compute_cpu_assignments(false);
 
-        // Should error because cell 0 has no CPUs
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let err_msg = format!("{:#}", err);
+        // Reclamation gives cell 0 CPUs from over-allocated cells
+        let assignments = result.unwrap();
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
         assert!(
-            err_msg.contains("Cell 0 has no CPUs assigned"),
-            "Expected 'Cell 0 has no CPUs assigned' error, got: {}",
-            err_msg
+            cell0.primary.weight() >= 1,
+            "cell 0 should get CPUs from reclamation, got {}",
+            cell0.primary.weight()
         );
+        let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
+        assert_eq!(total, 16);
     }
 
     #[test]
@@ -2187,9 +2189,23 @@ mod tests {
             cell_b.primary.weight()
         );
 
-        // Both should have at least their exclusive CPUs
-        assert!(cell_a.primary.weight() >= 4);
-        assert!(cell_b.primary.weight() >= 4);
+        // cell_a (demand 90) should dominate; cell_b (demand 10) keeps
+        // at least its reclamation-trimmed exclusive share.
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        assert!(
+            cell_a.primary.weight() >= 8,
+            "cell_a (demand 90/110) should get majority of 16 CPUs, got {}",
+            cell_a.primary.weight()
+        );
+        assert!(
+            cell_b.primary.weight() >= 2,
+            "cell_b should keep at least its trimmed exclusive CPUs, got {}",
+            cell_b.primary.weight()
+        );
+        assert_eq!(
+            cell0.primary.weight() + cell_a.primary.weight() + cell_b.primary.weight(),
+            16
+        );
     }
 
     #[test]
@@ -2381,20 +2397,18 @@ mod tests {
             .unwrap();
 
         // Targets (equal weight, 3 cells, 16 CPUs): cell0=6, cell1=5, cell2=5
-        // cell1 has 8 exclusive (exceeds target of 5), deficit = 0
-        // 8 unclaimed CPUs split by deficit: cell0 deficit=6, cell2 deficit=5
-        // cell0 gets ceil(6/11*8) ~= 4, cell2 gets floor(5/11*8) ~= 4
-        // But exact split: 6/11*8 = 4.36, 5/11*8 = 3.63
-        // floor: cell0=4, cell2=3 -> assigned=7, remainder=1 -> cell0 gets it
-        // Result: cell0=5, cell1=8, cell2=3
+        // cell1 had 8 exclusive, reclamation trims to target 5, releasing 3.
+        // 11 unclaimed (8 original + 3 reclaimed) split by deficit:
+        //   cell0 deficit=6-0=6, cell2 deficit=5-0=5 → cell0 gets 6, cell2 gets 5.
+        // Result: cell0=6, cell1=5, cell2=5.
 
-        assert_eq!(cell1.primary.weight(), 8); // Gets all its exclusive CPUs
+        assert_eq!(cell1.primary.weight(), 5);
         assert_eq!(
             cell0.primary.weight() + cell1.primary.weight() + cell2.primary.weight(),
             16,
         );
 
-        // cell0 should get more unclaimed CPUs than cell2 (higher deficit)
+        // cell0 should get a fair share
         assert!(
             cell0.primary.weight() >= cell2.primary.weight(),
             "cell0 ({}) should have >= CPUs than cell2 ({})",
