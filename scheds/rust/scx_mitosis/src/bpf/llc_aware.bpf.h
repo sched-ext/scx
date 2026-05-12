@@ -74,7 +74,7 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 		return -ENOMEM;
 	}
 
-	u32 llc, llcs_present = 0, total_cpus = 0;
+	u32 llc, total_cpus = 0;
 	// Just so we don't hold the lock longer than necessary
 	u32 llc_cpu_cnt_tmp[MAX_LLCS] = { 0 };
 
@@ -102,9 +102,6 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 		// These are counted across the whole cell
 		total_cpus += cnt;
 
-		// Number of non-empty LLCs in this cell
-		if (cnt)
-			llcs_present++;
 	}
 
 	// Write to cell
@@ -114,7 +111,6 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 			cell->llcs[llc_idx].cpu_cnt = llc_cpu_cnt_tmp[llc_idx];
 		}
 
-		cell->llc_present_cnt = llcs_present;
 		cell->cpu_cnt = total_cpus;
 	}
 	return 0;
