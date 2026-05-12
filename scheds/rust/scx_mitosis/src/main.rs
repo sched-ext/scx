@@ -13,6 +13,7 @@ mod mitosis_topology_utils;
 mod stats;
 
 use cell_manager::{CellManager, CpuAssignment, CpuRecipient};
+use config::{ConfiguredCells, SubcellMatch};
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -20,6 +21,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
@@ -27,7 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -147,8 +148,21 @@ struct Opts {
     /// Parent cgroup path whose direct children become cells.
     /// Scheduler startup requires this unless running in --monitor or --version mode.
     /// Example: --cell-parent-cgroup /workloads
-    #[clap(long, required_unless_present_any = ["monitor", "version"])]
+    #[clap(
+        long,
+        required_unless_present_any = ["monitor", "version", "cell_config"],
+        conflicts_with = "cell_config"
+    )]
     cell_parent_cgroup: Option<String>,
+
+    /// JSON cell configuration file. Each matching cgroup becomes a cell and
+    /// inherits the subcell layout from its matching cell spec.
+    #[clap(long, value_name = "PATH")]
+    cell_config: Option<PathBuf>,
+
+    /// Interval for rescanning cgroups matched by --cell-config.
+    #[clap(long, default_value_t = 10)]
+    reconfiguration_interval_s: u64,
 
     /// Exact directory name of a direct child cgroup to exclude from cell creation
     /// (excluded cgroups remain in cell 0). Matched against the directory basename,
@@ -167,7 +181,7 @@ struct Opts {
     cell0_min_cpus: usize,
 
     /// Enable CPU borrowing: cells can use idle CPUs from other cells.
-    /// Only meaningful with --cell-parent-cgroup and multiple cells.
+    /// Only meaningful when either cell mode creates multiple cells.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_borrowing: bool,
 
@@ -240,6 +254,7 @@ struct Subcell {
     id: u32,
     primary: Cpumask,
     borrowable: Option<Cpumask>,
+    matches: Vec<Vec<SubcellMatch>>,
 }
 
 impl Cell {
@@ -257,6 +272,7 @@ impl Subcell {
             id,
             primary: Cpumask::new(),
             borrowable: None,
+            matches: Vec::new(),
         }
     }
 }
@@ -277,8 +293,16 @@ struct Scheduler<'a> {
     last_configuration_seq: Option<u32>,
     /// Last observed cpuset_seq for cpuset change detection
     last_cpuset_seq: u32,
-    /// Cell manager for the cgroup passed via --cell-parent-cgroup.
-    cell_manager: CellManager,
+    /// Optional cell manager for --cell-parent-cgroup mode.
+    cell_manager: Option<CellManager>,
+    /// Optional configured cell manager for --cell-config mode.
+    configured_cells: Option<ConfiguredCells>,
+    /// CPU-to-LLC mapping used to steer configured-cell holdout selection.
+    cpu_to_llc: HashMap<usize, usize>,
+    /// Best-effort number of CPUs reserved for cell 0.
+    cell0_min_cpus: usize,
+    /// Sticky configured-mode indication that the holdout displaced a claim.
+    configured_enforced_holdout: bool,
     /// Whether CPU borrowing is enabled
     enable_borrowing: bool,
     /// Whether demand-based rebalancing is enabled
@@ -299,6 +323,10 @@ struct Scheduler<'a> {
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
+    /// Interval for rescanning configured cgroups
+    reconfiguration_interval: Duration,
+    /// Last time configured cgroups were rescanned
+    last_config_refresh: Instant,
 }
 
 struct DistributionStats {
@@ -348,13 +376,16 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
-    fn managed_cell_parent<'b>(opts: &'b Opts) -> Result<&'b str> {
-        opts.cell_parent_cgroup
-            .as_deref()
-            .ok_or_else(|| anyhow!("--cell-parent-cgroup is required to run the scheduler"))
-    }
-
-    fn validate_args(_opts: &Opts) -> Result<()> {
+    fn validate_args(opts: &Opts) -> Result<()> {
+        if opts.cell_parent_cgroup.is_some() && opts.cell_config.is_some() {
+            bail!("--cell-parent-cgroup and --cell-config are mutually exclusive");
+        }
+        if opts.cell_parent_cgroup.is_none() && opts.cell_config.is_none() {
+            bail!("either --cell-parent-cgroup or --cell-config is required");
+        }
+        if !opts.cell_exclude.is_empty() && opts.cell_parent_cgroup.is_none() {
+            bail!("--cell-exclude requires --cell-parent-cgroup");
+        }
         Ok(())
     }
 
@@ -446,22 +477,42 @@ impl<'a> Scheduler<'a> {
             .launch()
             .context("launching stats server")?;
 
-        let parent_cgroup = Self::managed_cell_parent(opts)?;
-        let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
         let cpu_to_llc: HashMap<usize, usize> = topology
             .all_cpus
             .iter()
             .map(|(&cpu, c)| (cpu, c.llc_id))
             .collect();
-        let cell_manager = CellManager::new(
-            parent_cgroup,
-            MAX_CELLS as u32,
-            topology.span.clone(),
-            exclude,
-            opts.cell0_min_cpus,
-            cpu_to_llc,
-        )
-        .with_context(|| format!("initializing cell manager for cgroup {}", parent_cgroup))?;
+        let cell_manager = if let Some(ref parent_cgroup) = opts.cell_parent_cgroup {
+            let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
+            Some(
+                CellManager::new(
+                    parent_cgroup,
+                    MAX_CELLS as u32,
+                    topology.span.clone(),
+                    exclude,
+                    opts.cell0_min_cpus,
+                    cpu_to_llc.clone(),
+                )
+                .with_context(|| {
+                    format!("initializing cell manager for cgroup {}", parent_cgroup)
+                })?,
+            )
+        } else {
+            None
+        };
+        let configured_cells = if let Some(ref cell_config) = opts.cell_config {
+            Some(
+                ConfiguredCells::load(cell_config, MAX_CELLS as u32, topology.span.clone())
+                    .with_context(|| {
+                        format!(
+                            "initializing configured cells from {}",
+                            cell_config.display()
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
 
         // Create epoll instance for event-driven main loop
         let epoll = Epoll::new(EpollCreateFlags::empty()).context("creating epoll instance")?;
@@ -481,12 +532,14 @@ impl<'a> Scheduler<'a> {
             )
             .context("registering stats-waker with epoll")?;
 
-        epoll
-            .add(
-                &cell_manager,
-                EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
-            )
-            .context("registering cell manager inotify with epoll")?;
+        if let Some(ref cell_manager) = cell_manager {
+            epoll
+                .add(
+                    cell_manager,
+                    EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
+                )
+                .context("registering cell manager inotify with epoll")?;
+        }
 
         Ok(Self {
             skel,
@@ -501,6 +554,10 @@ impl<'a> Scheduler<'a> {
             last_configuration_seq: None,
             last_cpuset_seq: 0,
             cell_manager,
+            configured_cells,
+            cpu_to_llc,
+            cell0_min_cpus: opts.cell0_min_cpus,
+            configured_enforced_holdout: false,
             enable_borrowing: opts.enable_borrowing,
             enable_rebalancing: opts.enable_rebalancing,
             rebalance_threshold: opts.rebalance_threshold,
@@ -511,6 +568,8 @@ impl<'a> Scheduler<'a> {
             rebalance_count: 0,
             epoll,
             stats_waker,
+            reconfiguration_interval: Duration::from_secs(opts.reconfiguration_interval_s),
+            last_config_refresh: Instant::now(),
         })
     }
 
@@ -583,9 +642,13 @@ impl<'a> Scheduler<'a> {
                 .context("refreshing BPF cell state")?;
             self.check_cpuset_changes()
                 .context("checking cpuset changes")?;
+            self.maybe_refresh_configured_cells()
+                .context("refreshing configured cells")?;
             self.collect_metrics().context("collecting metrics")?;
 
-            if self.enable_rebalancing {
+            if self.enable_rebalancing
+                && (self.cell_manager.is_some() || self.configured_cells.is_some())
+            {
                 self.maybe_rebalance().context("running rebalance check")?;
             }
         }
@@ -600,13 +663,36 @@ impl<'a> Scheduler<'a> {
 
     /// Apply initial cell assignments discovered at startup
     fn apply_initial_cells(&mut self) -> Result<()> {
+        if self.configured_cells.is_some() {
+            let cpu_assignments = self
+                .compute_and_apply_configured_cell_config()
+                .context("computing initial configured cell configuration")?;
+            self.last_config_refresh = Instant::now();
+
+            let configured_cells = self
+                .configured_cells
+                .as_ref()
+                .expect("BUG: configured_cells missing in apply_initial_cells");
+            info!(
+                "Applied initial configured cell configuration: {}",
+                configured_cells.format_cell_config(&cpu_assignments)
+            );
+            return Ok(());
+        }
+
+        if self.cell_manager.is_none() {
+            return Ok(());
+        }
         let cpu_assignments = self
             .compute_and_apply_cell_config(&[])
             .context("computing initial cell configuration")?;
 
         info!(
             "Applied initial cell configuration: {}",
-            self.cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing in apply_initial_cells")
+                .format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -615,8 +701,11 @@ impl<'a> Scheduler<'a> {
     /// Process cell manager events (new/destroyed cgroups)
     fn process_cell_events(&mut self) -> Result<()> {
         let (num_new, num_destroyed, new_cell_ids, destroyed_cell_ids) = {
-            let (new_cells, destroyed_cells) = self
+            let cell_manager = self
                 .cell_manager
+                .as_mut()
+                .expect("BUG: cell_manager missing in process_cell_events");
+            let (new_cells, destroyed_cells) = cell_manager
                 .process_events()
                 .context("processing inotify events")?;
 
@@ -647,7 +736,10 @@ impl<'a> Scheduler<'a> {
             "Cell config updated ({} new, {} destroyed): {}",
             num_new,
             num_destroyed,
-            self.cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing after processing events")
+                .format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -665,9 +757,15 @@ impl<'a> Scheduler<'a> {
         &mut self,
         new_cell_ids: &[u32],
     ) -> Result<Vec<CpuAssignment>> {
-        let (cell_assignments, cpu_assignments, subcell_assignments) = {
+        let (cell_assignments, cpu_assignments) = {
+            let cell_manager = self
+                .cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing in parent-cell configuration");
             let active_cell_ids: Vec<u32> = self
                 .cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing while listing cells")
                 .get_cell_assignments()
                 .iter()
                 .map(|(_, cell_id)| *cell_id)
@@ -706,36 +804,93 @@ impl<'a> Scheduler<'a> {
                         .map(|&id| (id, self.smoothed_util[id as usize]))
                         .collect();
 
-                    self.cell_manager
+                    cell_manager
                         .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
                         .context("computing demand-weighted CPU assignments")?
                 } else {
                     // No utilization data yet (e.g., initial startup) — equal weight
-                    self.cell_manager
+                    cell_manager
                         .compute_cpu_assignments(self.enable_borrowing)
                         .context("computing equal-weight CPU assignments (no utilization data)")?
                 }
             } else {
-                self.cell_manager
+                cell_manager
                     .compute_cpu_assignments(self.enable_borrowing)
                     .context("computing equal-weight CPU assignments (rebalancing disabled)")?
             };
 
-            // TODO(kkd): Plug in demand weighted subcell assignments once
-            // supported.
-            let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
-
-            (
-                self.cell_manager.get_cell_assignments(),
-                cpu_assignments,
-                subcell_assignments,
-            )
+            (cell_manager.get_cell_assignments(), cpu_assignments)
         };
+
+        // TODO(kkd): Plug in demand weighted subcell assignments once
+        // supported.
+        let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)
             .context("applying cell configuration to BPF")?;
 
         Ok(cpu_assignments)
+    }
+
+    /// Compute cell configuration from --cell-config and apply it to BPF.
+    fn compute_and_apply_configured_cell_config(&mut self) -> Result<Vec<CpuAssignment>> {
+        let cell_demands = if self.enable_rebalancing {
+            Some(self.active_cell_demands())
+        } else {
+            None
+        };
+
+        let (resolution, all_cpus) = {
+            let configured_cells = self.configured_cells.as_mut().expect(
+                "BUG: configured_cells missing in compute_and_apply_configured_cell_config",
+            );
+            let resolution = configured_cells
+                .resolve(cell_demands.as_ref(), self.cell0_min_cpus)
+                .context("resolving configured cells")?;
+            (resolution, configured_cells.all_cpus().clone())
+        };
+
+        for configured_cell in &resolution.cells {
+            let cell = self
+                .cells
+                .entry(configured_cell.id)
+                .or_insert_with(Cell::new);
+            cell.subcells = configured_cell
+                .subcells
+                .iter()
+                .map(|subcell| Subcell {
+                    id: subcell.id,
+                    primary: Cpumask::new(),
+                    borrowable: None,
+                    matches: subcell.matches.clone(),
+                })
+                .collect();
+        }
+
+        let (cpu_assignments, displaced_claim) =
+            CellManager::compute_configured_cell_cpu_assignments(
+                &all_cpus,
+                &resolution.cell_recipients,
+                self.enable_borrowing,
+                &self.cpu_to_llc,
+            )
+            .context("computing configured cell CPU assignments")?;
+        self.configured_enforced_holdout |= displaced_claim;
+        let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
+
+        let cell_assignments = resolution.cell_assignments;
+
+        self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)
+            .context("applying configured cell configuration to BPF")?;
+
+        Ok(cpu_assignments)
+    }
+
+    fn active_cell_demands(&self) -> HashMap<u32, f64> {
+        self.cells
+            .keys()
+            .map(|&id| (id, self.smoothed_util[id as usize]))
+            .collect()
     }
 
     /// Check if rebalancing should be triggered and apply demand-weighted CPU assignments.
@@ -768,6 +923,29 @@ impl<'a> Scheduler<'a> {
             return Ok(());
         }
 
+        if self.configured_cells.is_some() {
+            let cpu_assignments = self
+                .compute_and_apply_configured_cell_config()
+                .context("recomputing configured cell configuration for rebalance")?;
+            self.last_rebalance = Instant::now();
+            self.last_config_refresh = Instant::now();
+            self.rebalance_count += 1;
+            self.metrics.rebalance_count = self.rebalance_count;
+
+            let configured_cells = self
+                .configured_cells
+                .as_ref()
+                .expect("BUG: configured_cells missing in maybe_rebalance");
+            info!(
+                "Rebalanced configured cells (spread={:.1}%, count={}): {}",
+                spread,
+                self.rebalance_count,
+                configured_cells.format_cell_config(&cpu_assignments)
+            );
+
+            return Ok(());
+        }
+
         // Build demand map from smoothed utilization
         let cell_demands: HashMap<u32, f64> = active_cells
             .iter()
@@ -775,9 +953,12 @@ impl<'a> Scheduler<'a> {
             .collect();
 
         // Compute new assignments and check if they differ from current
-        let (cell_assignments, cpu_assignments, subcell_assignments) = {
-            let cpu_assignments = self
+        let (cell_assignments, cpu_assignments) = {
+            let cell_manager = self
                 .cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing in maybe_rebalance");
+            let cpu_assignments = cell_manager
                 .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
                 .context("computing demand-weighted CPU assignments for rebalance")?;
 
@@ -794,14 +975,10 @@ impl<'a> Scheduler<'a> {
                 return Ok(());
             }
 
-            let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
-
-            (
-                self.cell_manager.get_cell_assignments(),
-                cpu_assignments,
-                subcell_assignments,
-            )
+            (cell_manager.get_cell_assignments(), cpu_assignments)
         };
+
+        let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)
             .context("applying rebalanced cell configuration to BPF")?;
@@ -814,7 +991,10 @@ impl<'a> Scheduler<'a> {
             "Rebalanced CPUs (spread={:.1}%, count={}): {}",
             spread,
             self.rebalance_count,
-            self.cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing after rebalance")
+                .format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -867,6 +1047,7 @@ impl<'a> Scheduler<'a> {
                         } else {
                             None
                         },
+                        matches: Vec::new(),
                     })
                 })
                 .collect::<Result<_>>()?;
@@ -894,6 +1075,16 @@ impl<'a> Scheduler<'a> {
         cpu_assignments: &[CpuAssignment],
         subcell_assignments: &[Vec<CpuAssignment>],
     ) -> Result<()> {
+        let subcell_matches: HashMap<(u32, u32), Vec<Vec<SubcellMatch>>> = self
+            .cells
+            .iter()
+            .flat_map(|(&cell_id, cell)| {
+                cell.subcells
+                    .iter()
+                    .map(move |subcell| ((cell_id, subcell.id), subcell.matches.clone()))
+            })
+            .collect();
+
         let bss_data = self
             .skel
             .maps
@@ -973,6 +1164,16 @@ impl<'a> Scheduler<'a> {
                 let slot = subcell.id as usize;
                 config.subcells[a.id as usize][slot].id = subcell.id;
                 config.subcells[a.id as usize][slot].in_use = 1;
+                let matches = subcell_matches
+                    .get(&(a.id, subcell.id))
+                    .map_or(&[][..], |matches| matches.as_slice());
+                write_subcell_matches(matches, &mut config.subcells[a.id as usize][slot])
+                    .with_context(|| {
+                        format!(
+                            "writing subcell matches for cell {} subcell {}",
+                            a.id, subcell.id
+                        )
+                    })?;
                 write_cpumask_to_config(
                     &subcell.primary,
                     &mut config.subcells[a.id as usize][slot].primary.mask,
@@ -1309,7 +1510,12 @@ impl<'a> Scheduler<'a> {
 
         // Mirror the sticky holdout flag on every collection, independent of the
         // zero-decisions early return inside log_all_queue_stats above.
-        self.metrics.enforced_holdout = self.cell_manager.enforced_holdout() as u64;
+        let enforced_holdout = self
+            .cell_manager
+            .as_ref()
+            .map(CellManager::enforced_holdout)
+            .unwrap_or(self.configured_enforced_holdout);
+        self.metrics.enforced_holdout = enforced_holdout as u64;
 
         self.collect_demand_metrics(&cpu_ctxs)
             .context("collecting demand metrics")?;
@@ -1476,6 +1682,9 @@ impl<'a> Scheduler<'a> {
 
     /// Check if any cell's cpuset was modified and recompute if so.
     fn check_cpuset_changes(&mut self) -> Result<()> {
+        if self.cell_manager.is_none() && self.configured_cells.is_none() {
+            return Ok(());
+        }
         let current_seq = unsafe {
             let ptr = &self
                 .skel
@@ -1495,23 +1704,63 @@ impl<'a> Scheduler<'a> {
         }
         self.last_cpuset_seq = current_seq;
 
-        if !self
-            .cell_manager
-            .refresh_cpusets()
-            .context("refreshing cell cpusets")?
-        {
-            // seq changed but no cpusets on our cells changed
+        if let Some(ref mut cm) = self.cell_manager {
+            if !cm.refresh_cpusets().context("refreshing cell cpusets")? {
+                // seq changed but no cpusets on our cells changed
+                self.update_applied_cpuset_seq();
+                return Ok(());
+            }
+
+            let cpu_assignments = self
+                .compute_and_apply_cell_config(&[])
+                .context("recomputing cell configuration after cpuset change")?;
             self.update_applied_cpuset_seq();
+            let cell_manager = self
+                .cell_manager
+                .as_ref()
+                .expect("BUG: cell_manager missing in check_cpuset_changes");
+            info!(
+                "Cpuset change detected, recomputed config: {}",
+                cell_manager.format_cell_config(&cpu_assignments)
+            );
             return Ok(());
         }
 
         let cpu_assignments = self
-            .compute_and_apply_cell_config(&[])
-            .context("recomputing cell configuration after cpuset change")?;
+            .compute_and_apply_configured_cell_config()
+            .context("recomputing configured cell configuration after cpuset change")?;
+        self.last_config_refresh = Instant::now();
         self.update_applied_cpuset_seq();
+        let configured_cells = self
+            .configured_cells
+            .as_ref()
+            .expect("BUG: configured_cells missing in check_cpuset_changes");
         info!(
-            "Cpuset change detected, recomputed config: {}",
-            self.cell_manager.format_cell_config(&cpu_assignments)
+            "Cpuset change detected, recomputed configured cells: {}",
+            configured_cells.format_cell_config(&cpu_assignments)
+        );
+        Ok(())
+    }
+
+    fn maybe_refresh_configured_cells(&mut self) -> Result<()> {
+        if self.configured_cells.is_none()
+            || self.last_config_refresh.elapsed() < self.reconfiguration_interval
+        {
+            return Ok(());
+        }
+
+        let cpu_assignments = self
+            .compute_and_apply_configured_cell_config()
+            .context("recomputing configured cells")?;
+        self.last_config_refresh = Instant::now();
+
+        let configured_cells = self
+            .configured_cells
+            .as_ref()
+            .expect("BUG: configured_cells missing in maybe_refresh_configured_cells");
+        info!(
+            "Refreshed configured cells: {}",
+            configured_cells.format_cell_config(&cpu_assignments)
         );
         Ok(())
     }
@@ -1689,6 +1938,63 @@ fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
     }
 }
 
+fn write_subcell_matches(
+    matches: &[Vec<SubcellMatch>],
+    dest: &mut types::subcell_config,
+) -> Result<()> {
+    if matches.len() > bpf_intf::consts_MAX_SUBCELL_MATCH_ORS as usize {
+        bail!(
+            "Too many subcell match OR groups: {} > {}",
+            matches.len(),
+            bpf_intf::consts_MAX_SUBCELL_MATCH_ORS
+        );
+    }
+
+    dest.nr_match_ors = matches.len() as u32;
+    for (or_idx, ands) in matches.iter().enumerate() {
+        if ands.len() > bpf_intf::consts_MAX_SUBCELL_MATCH_ANDS as usize {
+            bail!(
+                "Too many subcell match AND terms: {} > {}",
+                ands.len(),
+                bpf_intf::consts_MAX_SUBCELL_MATCH_ANDS
+            );
+        }
+
+        dest.matches[or_idx].nr_matches = ands.len() as u32;
+        for (and_idx, subcell_match) in ands.iter().enumerate() {
+            match subcell_match {
+                SubcellMatch::CommPrefix(prefix) => {
+                    dest.matches[or_idx].matches[and_idx].kind =
+                        bpf_intf::subcell_match_kind_SUBCELL_MATCH_COMM_PREFIX;
+                    copy_cstr(&mut dest.matches[or_idx].matches[and_idx].value, prefix)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_cstr(dest: &mut [i8], src: &str) -> Result<()> {
+    if dest.is_empty() {
+        return Ok(());
+    }
+    if src.as_bytes().contains(&0) {
+        bail!("subcell match string contains NUL byte");
+    }
+
+    for value in dest.iter_mut() {
+        *value = 0;
+    }
+
+    let len = src.len().min(dest.len() - 1);
+    for (dst, src) in dest.iter_mut().zip(src.as_bytes().iter()).take(len) {
+        *dst = *src as i8;
+    }
+
+    Ok(())
+}
+
 fn read_cpumask_from_bytes(src: &[u8]) -> Result<Cpumask> {
     let mut cpumask = Cpumask::new();
 
@@ -1860,6 +2166,23 @@ mod tests {
     #[test]
     fn requires_cell_parent_cgroup_for_scheduler_mode() {
         assert!(Opts::try_parse_from(["scx_mitosis"]).is_err());
+    }
+
+    #[test]
+    fn allows_cell_config_for_scheduler_mode() {
+        assert!(Opts::try_parse_from(["scx_mitosis", "--cell-config", "/tmp/cells.json"]).is_ok());
+    }
+
+    #[test]
+    fn rejects_both_cell_modes() {
+        assert!(Opts::try_parse_from([
+            "scx_mitosis",
+            "--cell-parent-cgroup",
+            "/workloads",
+            "--cell-config",
+            "/tmp/cells.json"
+        ])
+        .is_err());
     }
 
     #[test]

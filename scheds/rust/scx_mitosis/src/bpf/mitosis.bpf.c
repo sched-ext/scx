@@ -1777,6 +1777,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			cell->subcells[subcell_id].in_use = 0;
 			cell->subcells[subcell_id].llcs_to_drain = 0;
 			cell->subcells[subcell_id].llcs_with_cpus = 0;
+			cell->subcells[subcell_id].nr_match_ors = 0;
 		}
 
 		/*
@@ -2031,6 +2032,9 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 		}
 		subcell->id = subcell_config->id;
 		subcell->in_use = subcell_config->in_use;
+		subcell->nr_match_ors = subcell_config->nr_match_ors;
+		__builtin_memcpy(subcell->matches, subcell_config->matches,
+				 sizeof(subcell->matches));
 		subcell->primary = subcell_config->primary;
 		subcell->borrowable = subcell_config->borrowable;
 	}

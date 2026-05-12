@@ -146,6 +146,7 @@ impl ConfiguredCells {
     pub fn resolve(
         &mut self,
         cell_demands: Option<&HashMap<u32, f64>>,
+        cell0_min_cpus: usize,
     ) -> Result<ConfiguredCellResolution> {
         let cgroups = collect_cgroups(&self.cgroup_root)?;
         let matched = self.match_cgroups(&cgroups);
@@ -159,10 +160,11 @@ impl ConfiguredCells {
             id: 0,
             subcells: self.root_subcells(),
         });
-        cell_recipients.push(CpuRecipient::unpinned(
+        cell_recipients.push(CpuRecipient::root(
             0,
             demand_weight(cell_demands, 0),
             &self.all_cpus,
+            cell0_min_cpus,
         ));
 
         let mut matched_paths: Vec<_> = matched.keys().cloned().collect();
@@ -597,7 +599,7 @@ mod tests {
             Cpumask::new(),
         )
         .unwrap();
-        let resolution = configured.resolve(None).unwrap();
+        let resolution = configured.resolve(None, 0).unwrap();
 
         assert_eq!(resolution.cell_assignments.len(), 1);
     }
@@ -624,7 +626,7 @@ mod tests {
             Cpumask::new(),
         )
         .unwrap();
-        let resolution = configured.resolve(None).unwrap();
+        let resolution = configured.resolve(None, 0).unwrap();
 
         assert_eq!(resolution.cell_assignments.len(), 2);
     }
