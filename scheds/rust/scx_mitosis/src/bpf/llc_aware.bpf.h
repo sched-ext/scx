@@ -55,22 +55,29 @@ static inline const struct cpumask *lookup_llc_cpumask(u32 llc)
 }
 
 /*
- * Recompute cell->llc_cpu_cnt[] for a cell cpumask.
+ * Recompute subcell->llcs[].cpu_cnt for a subcell cpumask.
  *
  * @cell_idx: The cell index to update LLC counts for
+ * @subcell_idx: The subcell index to update LLC counts for
  * @explicit_mask: If non-NULL, use this cpumask instead of looking up current
- *                 cell cpumask. This allows pre-calculating counts for a new
+ *                 subcell cpumask. This allows pre-calculating counts for a new
  *                 cpumask BEFORE swapping it in, avoiding race conditions.
  */
-static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
+static __always_inline int recalc_subcell_llc_counts(u32 cell_idx, u32 subcell_idx,
+						     const struct cpumask *explicit_mask)
 {
 	struct cell *cell = lookup_cell(cell_idx);
+	struct subcell *subcell;
 	if (!cell)
+		return -ENOENT;
+
+	subcell = lookup_subcell(cell_idx, subcell_idx);
+	if (!subcell)
 		return -ENOENT;
 
 	struct bpf_cpumask *tmp_mask __free(bpf_cpumask) = bpf_cpumask_create();
 	if (!tmp_mask) {
-		scx_bpf_error("recalc_cell_llc_counts: failed to create tmp mask");
+		scx_bpf_error("recalc_subcell_llc_counts: failed to create tmp mask");
 		return -ENOMEM;
 	}
 
@@ -82,7 +89,7 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 	if (explicit_mask) {
 		cell_mask = explicit_mask;
 	} else {
-		cell_mask = lookup_cell_cpumask(cell_idx); // RCU ptr
+		cell_mask = lookup_subcell_cpumask(cell_idx, subcell_idx); // RCU ptr
 		if (!cell_mask)
 			return -EINVAL;
 	}
@@ -99,19 +106,20 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 
 		llc_cpu_cnt_tmp[llc] = cnt;
 
-		// These are counted across the whole cell
+		// These are counted across the whole subcell.
 		total_cpus += cnt;
-
 	}
 
-	// Write to cell
+	// Write to subcell
 	scoped_guard(spin_lock, &cell->lock)
 	{
 		for (u32 llc_idx = 0; llc_idx < nr_llc; llc_idx++) {
-			cell->llcs[llc_idx].cpu_cnt = llc_cpu_cnt_tmp[llc_idx];
+			subcell->llcs[llc_idx].cpu_cnt = llc_cpu_cnt_tmp[llc_idx];
 		}
 
-		cell->cpu_cnt = total_cpus;
+		if (subcell_idx == 0)
+			cell->cpu_cnt = total_cpus;
+		subcell->cpu_cnt = total_cpus;
 	}
 	return 0;
 }
@@ -119,19 +127,24 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 /**
  * Weighted random selection of an LLC cache domain for a task.
  *
- * Uses the CPU count in each LLC domain within the cell as weights to
- * probabilistically select an LLC. LLC domains with more CPUs in the cell
+ * Uses the CPU count in each LLC domain within the subcell as weights to
+ * probabilistically select an LLC. LLCs with more CPUs in the subcell
  * have higher probability of being selected.
  *
  * @cell_id: The cell ID to select an LLC from
+ * @subcell_id: The subcell ID to select an LLC from
  * @return: LLC ID on success, LLC_INVALID on error
  */
-static inline s32 pick_llc_for_task(u32 cell_id)
+static inline s32 pick_llc_for_task(u32 cell_id, u32 subcell_id)
 {
 	struct cell *cell;
+	struct subcell *subcell;
 
 	/* Look up the cell structure */
 	if (!(cell = lookup_cell(cell_id)))
+		return LLC_INVALID;
+	subcell = lookup_subcell(cell_id, subcell_id);
+	if (!subcell)
 		return LLC_INVALID;
 
 	/*
@@ -144,13 +157,14 @@ static inline s32 pick_llc_for_task(u32 cell_id)
 	scoped_guard(spin_lock, &cell->lock)
 	{
 		for (u32 i = 0; i < MAX_LLCS; i++)
-			llc_cpu_cnt[i] = cell->llcs[i].cpu_cnt;
+			llc_cpu_cnt[i] = subcell->llcs[i].cpu_cnt;
 
-		total_cpu_cnt = cell->cpu_cnt;
+		total_cpu_cnt = subcell->cpu_cnt;
 	}
 
 	if (!total_cpu_cnt) {
-		scx_bpf_error("pick_llc_for_task: cell %d has no CPUs accounted yet", cell_id);
+		scx_bpf_error("pick_llc_for_task: cell %d subcell %d has no CPUs accounted yet",
+			      cell_id, subcell_id);
 		return LLC_INVALID;
 	}
 
@@ -180,16 +194,16 @@ static inline s32 pick_llc_for_task(u32 cell_id)
 	return ret;
 }
 
-static void zero_cell_vtimes(struct cell *cell)
+static void zero_subcell_vtimes(struct subcell *subcell)
 {
 	if (enable_llc_awareness) {
 		u32 llc_idx;
 		bpf_for(llc_idx, 0, MAX_LLCS)
 		{
-			WRITE_ONCE(cell->llcs[llc_idx].vtime_now, 0);
+			WRITE_ONCE(subcell->llcs[llc_idx].vtime_now, 0);
 		}
 	} else {
-		WRITE_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now, 0);
+		WRITE_ONCE(subcell->llcs[FAKE_FLAT_SUBCELL_LLC].vtime_now, 0);
 	}
 }
 
@@ -216,27 +230,29 @@ static inline int maybe_retag_stolen_task(struct task_struct *p, struct task_ctx
 
 	/*
 	 * New LLC, need new cpumask. This updates the task vtime
-	 * to that of the new cell-LLC DSQ.
+	 * to that of the new subcell+LLC DSQ.
 	 */
 	return update_task_cpumask(p, tctx);
 }
 
-/* Work stealing:
- * Scan sibling (cell,LLC) DSQs in the same cell and steal the first queued task if it can run on this cpu
+/*
+ * Work stealing:
+ * Scan sibling subcell+LLC DSQs in the same subcell and steal the first queued
+ * task if it can run on this CPU.
  * Returns:
  *  true == 1;  task was stolen
  *  false == 0; no tasks were stolen
  *  error <0;   error encountered
 */
-static inline s32 try_stealing_work(u32 cell, s32 local_llc)
+static inline s32 try_stealing_work(u32 cell, u32 subcell_id, s32 local_llc)
 {
 	if (!llc_is_valid(local_llc)) {
 		scx_bpf_error("try_stealing_work: invalid local_llc: %d", local_llc);
 		return -EINVAL;
 	}
 
-	struct cell *cell_ptr = lookup_cell(cell);
-	if (!cell_ptr)
+	struct subcell *subcell = lookup_subcell(cell, subcell_id);
+	if (!subcell)
 		return -EINVAL;
 
 	// Loop over all other LLCs, looking for a queued task to steal
@@ -254,18 +270,17 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 			continue;
 
 		/*
-    * Skip if the cell doesn't have CPUs in this LLC.
-    * Note: rechecking cell_ptr for verifier.
-    * This is racy with try_stealing_this_task, but we don't care -
-    * if the LLC actually doesn't have CPUs come steal time,
-    * we will fail the steal and continue to the next LLC.
-    */
-		if (cell_ptr && READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
+		 * Skip if the subcell doesn't have CPUs in this LLC.
+		 * This is racy with try_stealing_this_task, but we don't care -
+		 * if the LLC actually doesn't have CPUs come steal time,
+		 * we will fail the steal and continue to the next LLC.
+		 */
+		if (READ_ONCE(subcell->llcs[candidate_llc].cpu_cnt) == 0)
 			continue;
 
-		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell, candidate_llc);
+		dsq_id_t candidate_dsq = get_subcell_llc_dsq_id(cell, subcell_id, candidate_llc);
 		if (dsq_is_invalid(candidate_dsq))
-			return -EINVAL; // already errored in get_cell_llc_dsq_id
+			return -EINVAL; // already errored in get_subcell_llc_dsq_id
 
 		// Optimization: skip if faster than constructing an iterator
 		// Not redundant with later checking if task found (race)
@@ -298,7 +313,7 @@ static inline int update_task_llc_assignment(struct task_struct *p, struct task_
 	const struct cpumask *llc_mask = NULL;
 
 	// Let's get a new LLC for this task
-	s32 new_llc = pick_llc_for_task(tctx->cell);
+	s32 new_llc = pick_llc_for_task(tctx->cell, 0);
 	if (new_llc < 0)
 		return -EINVAL;
 
@@ -323,14 +338,14 @@ static inline int update_task_llc_assignment(struct task_struct *p, struct task_
 	}
 
 	/* --- Point to the correct (cell,LLC) DSQ and set vtime baseline --- */
-	tctx->dsq = get_cell_llc_dsq_id(tctx->cell, tctx->llc);
+	tctx->dsq = get_subcell_llc_dsq_id(tctx->cell, 0, tctx->llc);
 	if (dsq_is_invalid(tctx->dsq))
 		return -EINVAL;
 
-	struct cell *cell = lookup_cell(tctx->cell);
-	if (!cell)
+	struct subcell *subcell = lookup_subcell(tctx->cell, 0);
+	if (!subcell)
 		return -ENOENT;
 
-	p->scx.dsq_vtime = READ_ONCE(cell->llcs[new_llc].vtime_now);
+	p->scx.dsq_vtime = READ_ONCE(subcell->llcs[new_llc].vtime_now);
 	return 0;
 }

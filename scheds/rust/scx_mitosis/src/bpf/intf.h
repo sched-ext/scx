@@ -88,6 +88,7 @@ struct cpu_ctx {
 	u64 running_ns[MAX_CELLS];
 	u64 vtime_now;
 	u32 cell;
+	u32 subcell;
 	u32 llc;
 };
 
@@ -100,26 +101,36 @@ struct cgrp_ctx {
  * Per-LLC data is cacheline-aligned to prevent false sharing when
  * CPUs on different LLCs update their vtime concurrently.
  */
-struct cell_llc {
+struct subcell_llc {
 	u64 vtime_now;
 	u32 cpu_cnt;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 // Ensure we don't have multiple of these on the same cacheline.
-_Static_assert(sizeof(struct cell_llc) >= CACHELINE_SIZE,
-	       "cell_llc must be at least one cache line");
+_Static_assert(sizeof(struct subcell_llc) >= CACHELINE_SIZE,
+	       "subcell_llc must be at least one cache line");
 
 /* Cell cpumask data for a single cell or subcell */
 struct cell_cpumask_data {
 	unsigned char mask[MAX_CPUS_U8];
 };
 
-/* Subcell state shared between kernel and userspace. */
-struct subcell {
+/* Serialized subcell config shared between userspace and BPF. */
+struct subcell_config {
 	u32 id;
 	u32 in_use;
 	struct cell_cpumask_data primary;
 	struct cell_cpumask_data borrowable;
+};
+
+/* Subcell state shared between kernel and userspace. */
+struct subcell {
+	u32 id;
+	u32 in_use;
+	u32 cpu_cnt;
+	struct cell_cpumask_data primary;
+	struct cell_cpumask_data borrowable;
+	struct subcell_llc llcs[MAX_LLCS];
 };
 
 // CELL_LOCK_T is a lock for kernel and padding for user.
@@ -154,9 +165,6 @@ struct cell {
 	// Number of CPUs in this cell
 	u32 cpu_cnt;
 
-	// Per-LLC data (cacheline-aligned)
-	struct cell_llc llcs[MAX_LLCS];
-
 	// Fixed-size subcell state owned by this cell.
 	struct subcell subcells[MAX_SUBCELLS_PER_CELL];
 };
@@ -173,8 +181,8 @@ _Static_assert(sizeof(((struct cell *)0)->lock) == 4, "lock/padding must be 4 by
 _Static_assert(_Alignof(CELL_LOCK_T) == 4, "lock/padding must be 4-byte aligned");
 
 // Verify these are the same size in both BPF and Rust.
-_Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS) +
-				       (sizeof(struct subcell) * MAX_SUBCELLS_PER_CELL)),
+_Static_assert(sizeof(struct cell) ==
+		       (CACHELINE_SIZE + (sizeof(struct subcell) * MAX_SUBCELLS_PER_CELL)),
 	       "struct cell size must be stable for Rust bindings");
 
 /* Cell assignment entry: maps a cgroup to a cell */
@@ -198,7 +206,7 @@ struct cell_config {
 	struct cell_assignment assignments[MAX_CELLS];
 	struct cell_cpumask_data cpumasks[MAX_CELLS];
 	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
-	struct subcell subcells[MAX_CELLS][MAX_SUBCELLS_PER_CELL];
+	struct subcell_config subcells[MAX_CELLS][MAX_SUBCELLS_PER_CELL];
 };
 
 #endif /* __INTF_H */
