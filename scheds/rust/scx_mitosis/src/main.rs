@@ -975,6 +975,12 @@ impl<'a> Scheduler<'a> {
         }
         config.num_cell_assignments = cell_assignments.len() as u32;
 
+        for cell_id in 0..MAX_CELLS {
+            for subcell_id in 0..MAX_SUBCELLS_PER_CELL {
+                config.subcells[cell_id][subcell_id].id = subcell_id as u32;
+            }
+        }
+
         for (i, (cgid, cell_id)) in cell_assignments.iter().enumerate() {
             config.assignments[i].cgid = *cgid;
             config.assignments[i].cell_id = *cell_id;
