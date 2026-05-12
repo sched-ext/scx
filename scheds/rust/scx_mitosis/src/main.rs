@@ -76,7 +76,7 @@ fn parse_ewma_factor(s: &str) -> Result<f64, String> {
 /// scx_mitosis: A dynamic affinity scheduler
 ///
 /// Cgroups are assigned to a dynamic number of Cells which are assigned to a
-/// dynamic set of CPUs. The BPF part does simple vtime scheduling for each cell.
+/// dynamic set of CPUs. The BPF part does simple vtime scheduling for each subcell.
 ///
 /// Userspace makes the dynamic decisions of which Cells should be merged or
 /// split and which CPUs they should be assigned to.
