@@ -63,6 +63,7 @@ const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const MAX_SUBCELLS_PER_CELL: usize = bpf_intf::consts_MAX_SUBCELLS_PER_CELL as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
+const SHARE_SIBLING_SUBCELL_CPUS: bool = true;
 /// Epoll token for inotify events (cgroup creation/destruction)
 const INOTIFY_TOKEN: u64 = 1;
 /// Epoll token for stats request wakeups
@@ -180,8 +181,8 @@ struct Opts {
     #[clap(long, default_value_t = 0)]
     cell0_min_cpus: usize,
 
-    /// Enable CPU borrowing: cells can use idle CPUs from other cells.
-    /// Only meaningful when either cell mode creates multiple cells.
+    /// Enable cross-cell CPU borrowing. Subcells always share idle CPUs with
+    /// sibling subcells inside their own cell.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_borrowing: bool,
 
@@ -1025,7 +1026,7 @@ impl<'a> Scheduler<'a> {
                 CellManager::compute_subcell_cpu_assignments(
                     &cell_assignment.primary,
                     &recipients,
-                    self.enable_borrowing,
+                    SHARE_SIBLING_SUBCELL_CPUS,
                 )
             })
             .collect()
@@ -1042,11 +1043,7 @@ impl<'a> Scheduler<'a> {
                     Ok(Subcell {
                         id: subcell.id,
                         primary: read_cpumask_from_bytes(&subcell.primary.mask)?,
-                        borrowable: if self.enable_borrowing {
-                            Some(read_cpumask_from_bytes(&subcell.borrowable.mask)?)
-                        } else {
-                            None
-                        },
+                        borrowable: Some(read_cpumask_from_bytes(&subcell.borrowable.mask)?),
                         matches: Vec::new(),
                     })
                 })
@@ -1140,7 +1137,7 @@ impl<'a> Scheduler<'a> {
         // Set cell cpumasks and borrowable cpumasks
         let mut max_cell_id: u32 = 0;
         for (a, cell_subcells) in cpu_assignments.iter().zip(subcell_assignments.iter()) {
-            validate_subcell_assignments(a, cell_subcells, self.enable_borrowing)?;
+            validate_subcell_assignments(a, cell_subcells, SHARE_SIBLING_SUBCELL_CPUS)?;
 
             if a.id >= bpf_intf::consts_MAX_CELLS {
                 bail!(
@@ -1835,7 +1832,7 @@ impl<'a> Scheduler<'a> {
 fn validate_subcell_assignments(
     cell: &CpuAssignment,
     subcells: &[CpuAssignment],
-    enable_borrowing: bool,
+    share_sibling_cpus: bool,
 ) -> Result<()> {
     if subcells.is_empty() {
         bail!("Cell {} has no subcell assignments", cell.id);
@@ -1890,7 +1887,7 @@ fn validate_subcell_assignments(
             );
         }
 
-        if enable_borrowing {
+        if share_sibling_cpus {
             let expected = cell.primary.and(&subcell.primary.not());
             let borrowable = subcell.borrowable.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(

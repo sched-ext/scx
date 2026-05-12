@@ -203,6 +203,44 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cctx;
 }
 
+/* DSQs must be created from struct_ops init, which has scheduler context. */
+static __always_inline int create_subcell_dsqs(u32 cell_id, u32 subcell_id)
+{
+	int ret;
+
+	if (enable_llc_awareness) {
+		u32 llc;
+
+		bpf_for(llc, 0, MAX_LLCS)
+		{
+			dsq_id_t dsq_id;
+
+			if (llc >= nr_llc)
+				break;
+
+			dsq_id = get_subcell_llc_dsq_id(cell_id, subcell_id, llc);
+			if (dsq_is_invalid(dsq_id))
+				return -EINVAL;
+
+			ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
+			if (ret < 0)
+				return ret;
+		}
+	} else {
+		dsq_id_t dsq_id =
+			get_subcell_llc_dsq_id(cell_id, subcell_id, FAKE_FLAT_SUBCELL_LLC);
+
+		if (dsq_is_invalid(dsq_id))
+			return -EINVAL;
+
+		ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}
+
 /*
  * Record debug events to the circular buffer
  */
@@ -398,6 +436,94 @@ static __always_inline int set_vtime_charge_subcell(struct task_ctx *tctx)
 	return 0;
 }
 
+static __always_inline bool match_comm_prefix(const char *prefix, const char *comm)
+{
+	u32 i;
+
+	bpf_for(i, 0, MAX_COMM)
+	{
+		if (prefix[i] == '\0')
+			return true;
+		if (comm[i] != prefix[i])
+			return false;
+	}
+
+	return true;
+}
+
+static __always_inline bool match_subcell_match(struct subcell_match *match, const char *comm)
+{
+	switch (match->kind) {
+	case SUBCELL_MATCH_COMM_PREFIX:
+		return match_comm_prefix(match->value, comm);
+	default:
+		return false;
+	}
+}
+
+static __always_inline bool task_matches_subcell(struct subcell *subcell, const char *comm)
+{
+	u32 or_idx;
+
+	bpf_for(or_idx, 0, MAX_SUBCELL_MATCH_ORS)
+	{
+		struct subcell_match_and_group *and_group;
+		bool matches = true;
+		u32 and_idx;
+
+		if (or_idx >= subcell->nr_match_ors)
+			break;
+
+		and_group = MEMBER_VPTR(subcell->matches, [or_idx]);
+		if (!and_group)
+			return false;
+
+		if (and_group->nr_matches == 0)
+			return true;
+
+		bpf_for(and_idx, 0, MAX_SUBCELL_MATCH_ANDS)
+		{
+			struct subcell_match *match;
+
+			if (and_idx >= and_group->nr_matches)
+				break;
+
+			match = MEMBER_VPTR(and_group->matches, [and_idx]);
+			if (!match || !match_subcell_match(match, comm)) {
+				matches = false;
+				break;
+			}
+		}
+
+		if (matches)
+			return true;
+	}
+
+	return false;
+}
+
+static __always_inline u32 pick_task_subcell(struct task_struct *p, u32 cell_id)
+{
+	char comm[MAX_COMM];
+	u32 subcell_id;
+
+	__builtin_memcpy(comm, p->comm, MAX_COMM);
+
+	bpf_for(subcell_id, 1, MAX_SUBCELLS_PER_CELL)
+	{
+		struct subcell *subcell = lookup_subcell(cell_id, subcell_id);
+
+		if (!subcell)
+			break;
+		if (!subcell->in_use)
+			continue;
+		if (task_matches_subcell(subcell, comm))
+			return subcell_id;
+	}
+
+	return 0;
+}
+
 /*
  * Figure out the task's cell, dsq and store the corresponding cpumask in the
  * task_ctx.
@@ -443,7 +569,7 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	tctx->configuration_seq = READ_ONCE(applied_configuration_seq);
 	barrier();
 	tctx->cell = cgc->cell;
-	tctx->subcell = 0;
+	tctx->subcell = pick_task_subcell(p, tctx->cell);
 	tctx->cgid = cg->kn->id;
 
 	return update_task_cpumask(p, tctx);
@@ -593,7 +719,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		return -1; /* error from pick_idle_cpu, propagate */
 
 	/* No idle CPU in the subcell: try sibling subcells, then other cells. */
-	if (enable_borrowing) {
+	{
 		const struct cpumask *idle_smtmask __free(idle_cpumask) = NULL;
 		const struct cpumask *subcell_borrowable;
 
@@ -607,7 +733,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 			return -1;
 		}
 		cpu = pick_idle_cpu_from(p, subcell_borrowable, prev_cpu, idle_smtmask);
-		if (cpu < 0) {
+		if (cpu < 0 && enable_borrowing) {
 			const struct cpumask *cell_borrowable;
 
 			cell_borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
@@ -1742,26 +1868,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		u32 subcell_id;
 		struct cell *cell;
 
-		if (enable_llc_awareness) {
-			u32 llc;
-			bpf_for(llc, 0, nr_llc)
-			{
-				dsq_id_t dsq_id = get_subcell_llc_dsq_id(i, 0, llc);
-				if (dsq_is_invalid(dsq_id))
-					return -EINVAL; // scx_bpf_error called in get_subcell_llc_dsq_id
-
-				ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
-				if (ret < 0)
-					return ret;
-			}
-		} else {
-			dsq_id_t dsq_id = get_subcell_llc_dsq_id(i, 0, FAKE_FLAT_SUBCELL_LLC);
-			if (dsq_is_invalid(dsq_id))
-				return -EINVAL; // scx_bpf_error called in get_subcell_llc_dsq_id
-
-			ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
-			if (ret < 0)
+		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+		{
+			ret = create_subcell_dsqs(i, subcell_id);
+			if (ret) {
+				scx_bpf_error("failed to create DSQs for cell=%u subcell=%u: %d", i,
+					      subcell_id, ret);
 				return ret;
+			}
 		}
 
 		if (!(cpumaskw = lookup_cell_cpumask_wrapper(i)))
@@ -1818,14 +1932,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 				return ret;
 			}
 
-			if (enable_borrowing) {
-				ret = init_cpumask_slot(&subcell_cpumaskw->borrowable, false);
-				if (ret) {
-					scx_bpf_error(
-						"failed to init borrowable cpumask slot for cell=%u subcell=%u: %d",
-						i, subcell_id, ret);
-					return ret;
-				}
+			ret = init_cpumask_slot(&subcell_cpumaskw->borrowable, false);
+			if (ret) {
+				scx_bpf_error(
+					"failed to init borrowable cpumask slot for cell=%u subcell=%u: %d",
+					i, subcell_id, ret);
+				return ret;
 			}
 		}
 	}
@@ -1967,6 +2079,7 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 	struct subcell_config(*subcell_configs)[MAX_SUBCELLS_PER_CELL];
 	struct cell *cell;
 	u32 subcell_id;
+	u32 cpu;
 
 	if (!config || cell_id >= MAX_CELLS)
 		return -EINVAL;
@@ -2014,14 +2127,12 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 			}
 		}
 
-		if (enable_borrowing) {
-			if (set_cpumask_from_data(&subcell_cpumaskw->borrowable,
-						  &subcell_config->borrowable)) {
-				scx_bpf_error(
-					"failed to set borrowable subcell cpumask for cell=%u subcell=%u",
-					cell_id, subcell_id);
-				return -EINVAL;
-			}
+		if (set_cpumask_from_data(&subcell_cpumaskw->borrowable,
+					  &subcell_config->borrowable)) {
+			scx_bpf_error(
+				"failed to set borrowable subcell cpumask for cell=%u subcell=%u",
+				cell_id, subcell_id);
+			return -EINVAL;
 		}
 
 		subcell = MEMBER_VPTR(cell->subcells, [subcell_id]);
@@ -2037,6 +2148,47 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 				 sizeof(subcell->matches));
 		subcell->primary = subcell_config->primary;
 		subcell->borrowable = subcell_config->borrowable;
+
+		if (!subcell_config->in_use)
+			continue;
+
+		bpf_for(cpu, 0, nr_possible_cpus)
+		{
+			struct cpu_ctx *cctx;
+			bool cpu_in_subcell;
+
+			if (cell_cpumask_data_test_cpu(&subcell_config->primary, cpu,
+						       &cpu_in_subcell)) {
+				scx_bpf_error(
+					"failed to decode subcell cpumask for cell=%u subcell=%u",
+					cell_id, subcell_id);
+				return -EINVAL;
+			}
+
+			if (!cpu_in_subcell)
+				continue;
+
+			cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
+			if (!cctx)
+				return -ENOENT;
+
+			if (cctx->cell != cell_id || cctx->subcell != subcell_id) {
+				struct subcell_llc *llc_state;
+				u32 llc_idx;
+
+				llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ?
+						  cctx->llc :
+						  FAKE_FLAT_SUBCELL_LLC;
+				llc_state = lookup_subcell_llc(subcell, llc_idx);
+				if (!llc_state)
+					return -EINVAL;
+				if (time_before(READ_ONCE(llc_state->vtime_now), cctx->vtime_now))
+					WRITE_ONCE(llc_state->vtime_now, cctx->vtime_now);
+			}
+
+			cctx->cell = cell_id;
+			cctx->subcell = subcell_id;
+		}
 	}
 
 	return 0;
