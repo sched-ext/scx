@@ -803,4 +803,12 @@ SpacesInSquareBrackets: false
 Standard: Cpp03
 TabWidth: 8
 UseTab: Always
+WhitespaceSensitiveMacros:
+  - '__uint'
+  - '_Static_assert'
+  - 'BOOST_PP_STRINGIZE'
+  - 'CF_SWIFT_NAME'
+  - 'NS_SWIFT_NAME'
+  - 'PP_STRINGIZE'
+  - 'STRINGIZE'
 ...

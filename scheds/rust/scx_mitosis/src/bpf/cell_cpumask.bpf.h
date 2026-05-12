@@ -66,7 +66,7 @@ struct subcell_cpumask_map {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct cell_cpumask_wrapper);
-	__uint(max_entries, MAX_CELLS *MAX_SUBCELLS_PER_CELL);
+	__uint(max_entries, MAX_CELLS * MAX_SUBCELLS_PER_CELL);
 	__uint(map_flags, 0);
 };
 
