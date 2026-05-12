@@ -55,6 +55,47 @@ static inline struct cell *lookup_cell(int idx)
 	return cell;
 }
 
+static inline struct subcell *lookup_subcell(u32 cell_idx, u32 subcell_idx)
+{
+	struct cell *cell;
+	struct subcell *subcell;
+
+	if (subcell_idx >= MAX_SUBCELLS_PER_CELL) {
+		scx_bpf_error("invalid subcell %u for cell %u", subcell_idx, cell_idx);
+		return NULL;
+	}
+
+	cell = lookup_cell(cell_idx);
+	if (!cell)
+		return NULL;
+
+	subcell = MEMBER_VPTR(cell->subcells, [subcell_idx]);
+	if (!subcell) {
+		scx_bpf_error("subcell %u out of bounds for cell %u", subcell_idx, cell_idx);
+		return NULL;
+	}
+
+	return subcell;
+}
+
+static inline struct subcell_llc *lookup_subcell_llc(struct subcell *subcell, u32 llc)
+{
+	struct subcell_llc *subcell_llc;
+
+	if (!subcell || llc >= MAX_LLCS) {
+		scx_bpf_error("invalid subcell LLC %u", llc);
+		return NULL;
+	}
+
+	subcell_llc = MEMBER_VPTR(subcell->llcs, [llc]);
+	if (!subcell_llc) {
+		scx_bpf_error("subcell LLC %u out of bounds", llc);
+		return NULL;
+	}
+
+	return subcell_llc;
+}
+
 /*
  * task_ctx is the per-task information kept by scx_mitosis
  */
