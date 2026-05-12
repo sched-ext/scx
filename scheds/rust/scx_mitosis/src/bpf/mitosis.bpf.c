@@ -273,6 +273,7 @@ struct subcell_cpumask_map subcell_cpumasks SEC(".maps");
 static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx)
 {
 	const struct cpumask *cell_cpumask;
+	const struct cpumask *subcell_cpumask;
 	struct cpu_ctx *cpu_ctx;
 	bool all_cell_cpus_allowed;
 	u32 cpu;
@@ -280,11 +281,13 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 
 	if (!(cell_cpumask = lookup_cell_cpumask(tctx->cell)))
 		return -ENOENT;
+	if (!(subcell_cpumask = lookup_subcell_cpumask(tctx->cell, tctx->subcell)))
+		return -ENOENT;
 
 	if (!tctx->cpumask)
 		return -EINVAL;
 
-	bpf_cpumask_and(tctx->cpumask, cell_cpumask, p->cpus_ptr);
+	bpf_cpumask_and(tctx->cpumask, subcell_cpumask, p->cpus_ptr);
 	if (enable_llc_awareness)
 		invalidate_task_llc_cpumask(tctx);
 
@@ -368,18 +371,30 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	}
 
 	/* Non-LLC aware version */
-	tctx->dsq = get_subcell_llc_dsq_id(tctx->cell, 0, FAKE_FLAT_SUBCELL_LLC);
+	tctx->dsq =
+		get_subcell_llc_dsq_id(tctx->cell, tctx->subcell, FAKE_FLAT_SUBCELL_LLC);
 	if (dsq_is_invalid(tctx->dsq))
 		return -EINVAL;
 
 	struct subcell *subcell;
-	if (!(subcell = lookup_subcell(tctx->cell, 0)))
+	if (!(subcell = lookup_subcell(tctx->cell, tctx->subcell)))
 		return -ENOENT;
 
 	scx_bpf_task_set_dsq_vtime(
 		p, READ_ONCE(subcell->llcs[FAKE_FLAT_SUBCELL_LLC].vtime_now));
 	tctx->all_cell_cpus_allowed = true;
 
+	return 0;
+}
+
+static __always_inline int set_vtime_charge_subcell(struct task_ctx *tctx)
+{
+	s32 packed_subcell = pack_subcell_id(tctx->cell, tctx->subcell);
+
+	if (packed_subcell < 0)
+		return -EINVAL;
+
+	tctx->vtime_charge_subcell = packed_subcell;
 	return 0;
 }
 
@@ -542,8 +557,8 @@ static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, st
 }
 
 /*
- * Try to find an idle CPU for a task. First searches within the cell's
- * own CPUs, then tries borrowing from other cells if enabled.
+ * Try to find an idle CPU for a task. Search its subcell first, then sibling
+ * subcells, and finally CPUs borrowable from other cells.
  *
  * On success, bumps CSTAT_LOCAL or CSTAT_BORROWED as appropriate and
  * dispatches the task to SCX_DSQ_LOCAL. If @kick is true, the idle CPU
@@ -567,7 +582,8 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		 * enqueue), SCX_DSQ_LOCAL resolves to task_rq(p) -- not
 		 * the idle CPU we picked.
 		 */
-		tctx->vtime_charge_cell = tctx->cell;
+		if (set_vtime_charge_subcell(tctx))
+			return -1;
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
 		if (kick)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -576,22 +592,34 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 	if (cpu == -1)
 		return -1; /* error from pick_idle_cpu, propagate */
 
-	/* cpu == -EBUSY: no idle CPU in cell, try borrowing */
+	/* No idle CPU in the subcell: try sibling subcells, then other cells. */
 	if (enable_borrowing) {
-		const struct cpumask *borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
-		if (!borrowable)
+		const struct cpumask *idle_smtmask __free(idle_cpumask) = NULL;
+		const struct cpumask *subcell_borrowable;
+
+		subcell_borrowable =
+			lookup_subcell_borrowable_cpumask(tctx->cell, tctx->subcell);
+		if (!subcell_borrowable)
 			return -1;
-		const struct cpumask *idle_smtmask __free(idle_cpumask) =
-			scx_bpf_get_idle_smtmask();
+		idle_smtmask = scx_bpf_get_idle_smtmask();
 		if (!idle_smtmask) {
 			scx_bpf_error("Failed to get idle smtmask");
 			return -1;
 		}
-		cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
+		cpu = pick_idle_cpu_from(p, subcell_borrowable, prev_cpu, idle_smtmask);
+		if (cpu < 0) {
+			const struct cpumask *cell_borrowable;
+
+			cell_borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
+			if (!cell_borrowable)
+				return -1;
+			cpu = pick_idle_cpu_from(p, cell_borrowable, prev_cpu, idle_smtmask);
+		}
 		if (cpu >= 0) {
+			if (set_vtime_charge_subcell(tctx))
+				return -1;
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
-			tctx->vtime_charge_cell = tctx->cell;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
 			if (kick)
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -655,8 +683,8 @@ static __always_inline s32 select_pinned_cpu(struct task_struct *p, s32 prev_cpu
 }
 
 /*
- * select_cpu is where we update each task's cell assignment and then try to
- * dispatch to an idle core in the cell if possible
+ * select_cpu updates each task's placement and then tries to dispatch to an
+ * idle core in the assigned subcell.
  */
 s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
@@ -689,7 +717,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 			return prev_cpu;
 
 		if (idle_cpu_cleared || scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			tctx->vtime_charge_cell = tctx->cell;
+			if (set_vtime_charge_subcell(tctx))
+				return prev_cpu;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
 		return cpu;
@@ -759,17 +788,18 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * CPU -> cell mappings can change between enqueue() and stopping().
+	 * CPU -> subcell mappings can change between enqueue() and stopping().
 	 * If that happens, the task's dsq_vtime may no longer belong to the
-	 * CPU-local or shared cell vtime visible at stopping(), and
-	 * advancing either one would charge the wrong cell.
+	 * CPU-local or shared subcell vtime visible at stopping(), and
+	 * advancing either one would charge the wrong subcell.
 	 * Direct local insert paths snapshot the same state before inserting.
 	 *
-	 * Snapshot the cell whose vtime this placement expects to charge.
+	 * Snapshot the subcell whose vtime this placement expects to charge.
 	 * stopping() only advances local and shared vtime if the task is not
-	 * borrowed and the CPU it stops on is still in this same cell.
+	 * borrowed and the CPU it stops on is still in this same subcell.
 	 */
-	tctx->vtime_charge_cell = tctx->cell;
+	if (set_vtime_charge_subcell(tctx))
+		return;
 
 	if (!tctx->all_cell_cpus_allowed) {
 		if (dynamic_affinity_cpu_selection) {
@@ -810,8 +840,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (tctx->all_cell_cpus_allowed) {
 		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
-		/* Task can use any CPU in its cell, so use the default subcell DSQ */
-		if (!(subcell = lookup_subcell(tctx->cell, 0)))
+		/* Cell-wide affinity tasks use their assigned subcell DSQ. */
+		if (!(subcell = lookup_subcell(tctx->cell, tctx->subcell)))
 			return;
 
 		if (enable_llc_awareness) {
@@ -855,9 +885,10 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx->basis_vtime = basis_vtime;
 
 	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
-		scx_bpf_error("vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u",
-			      p->pid, p->scx.dsq_vtime, basis_vtime, p->scx.dsq_vtime - basis_vtime,
-			      tctx->cell);
+		scx_bpf_error(
+			"vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u subcell=%u",
+			p->pid, p->scx.dsq_vtime, basis_vtime, p->scx.dsq_vtime - basis_vtime,
+			tctx->cell, tctx->subcell);
 		return;
 	}
 	/*
@@ -875,7 +906,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	 * with refresh_subcell_llc_draining() and enable draining if needed.
 	 */
 	if (enable_llc_awareness && tctx->all_cell_cpus_allowed) {
-		if (account_subcell_llc_enqueue(tctx->cell, 0, (u32)tctx->llc))
+		if (account_subcell_llc_enqueue(tctx->cell, tctx->subcell, (u32)tctx->llc))
 			return;
 	}
 
@@ -897,11 +928,13 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
 	u32 cell;
+	u32 subcell_id;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
 
 	cell = READ_ONCE(cctx->cell);
+	subcell_id = READ_ONCE(cctx->subcell);
 
 	bool found = false;
 	dsq_id_t min_vtime_dsq = DSQ_INVALID;
@@ -909,22 +942,22 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	struct task_struct *p;
 
-	/* Check the default subcell DSQ. */
+	/* Check the CPU's subcell-LLC DSQ. */
 	u32 llc = enable_llc_awareness ? cctx->llc : FAKE_FLAT_SUBCELL_LLC;
-	dsq_id_t subcell_dsq = get_subcell_llc_dsq_id(cell, 0, llc);
+	dsq_id_t subcell_dsq = get_subcell_llc_dsq_id(cell, subcell_id, llc);
 	dsq_id_t cpu_dsq = get_cpu_dsq_id(cpu);
 
 	if (dsq_is_invalid(subcell_dsq) || dsq_is_invalid(cpu_dsq))
 		return;
 
 	if (enable_llc_awareness) {
-		struct subcell *subcell = lookup_subcell(cell, 0);
+		struct subcell *subcell = lookup_subcell(cell, subcell_id);
 
 		if (!subcell)
 			return;
 
 		if (READ_ONCE(subcell->llcs_to_drain)) {
-			s32 ret = try_draining_work(cell, 0, llc);
+			s32 ret = try_draining_work(cell, subcell_id, llc);
 
 			if (ret >= 0) {
 				cstat_inc(CSTAT_DRAIN_CNT, cell, cctx);
@@ -955,7 +988,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
 	 */
 	if (!found) {
-		if (enable_llc_awareness && !try_stealing_work(cell, 0, llc))
+		if (enable_llc_awareness && !try_stealing_work(cell, subcell_id, llc))
 			cstat_inc(CSTAT_STEAL, cell, cctx);
 		return;
 	}
@@ -968,7 +1001,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	/* Try the winner first */
 	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
 		if (enable_llc_awareness && min_vtime_dsq.raw == subcell_dsq.raw) {
-			struct subcell *subcell = lookup_subcell(cell, 0);
+			struct subcell *subcell = lookup_subcell(cell, subcell_id);
 
 			if (subcell)
 				subcell_llc_nr_queued_dec(subcell, llc);
@@ -1016,7 +1049,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 
 		s32 llc = tctx->llc;
 		if (llc >= 0 && llc < MAX_LLCS &&
-		    (subcell = lookup_subcell(tctx->cell, 0)))
+		    (subcell = lookup_subcell(tctx->cell, tctx->subcell)))
 			advance_subcell_llc_vtime(subcell, (u32)llc, p->scx.dsq_vtime);
 	}
 
@@ -1038,6 +1071,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	struct subcell *subcell;
 	u64 now, used;
 	u32 cidx;
+	u32 subcell_idx;
+	s32 packed_subcell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1048,7 +1083,11 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	 * E.g. a cell 0 kworker pinned to a cell 1 CPU.
 	 */
 	cidx = cctx->cell;
-	if (!(subcell = lookup_subcell(cidx, 0)))
+	subcell_idx = cctx->subcell;
+	if (!(subcell = lookup_subcell(cidx, subcell_idx)))
+		return;
+	packed_subcell = pack_subcell_id(cidx, subcell_idx);
+	if (packed_subcell < 0)
 		return;
 
 	now = scx_bpf_now();
@@ -1073,23 +1112,22 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 
 	/*
 	 * Only advance this CPU's local vtime when the slice ends on a CPU
-	 * whose cell matches this task's vtime charge cell and the task was
-	 * not borrowed. If execution ends in some other cell, drop the local
-	 * charge rather than risk charging an unexpected cell.
+	 * whose subcell matches this task's vtime charge subcell and the task
+	 * was not borrowed. If execution ends in some other subcell, drop the
+	 * local charge rather than risk charging an unexpected subcell.
 	 */
-	if (!tctx->borrowed && tctx->vtime_charge_cell == cidx) {
+	if (!tctx->borrowed && tctx->vtime_charge_subcell == packed_subcell) {
 		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
 			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 	}
 
 	/*
-	 * Only advance subcell vtime when the task stops on a CPU whose cell
-	 * still matches this task's vtime charge cell and the task was not
-	 * borrowed. If the CPU was retagged into a different cell after the
-	 * task was placed, drop the charge rather than advance the wrong
-	 * subcell domain.
+	 * Only advance subcell vtime when the task stops on a CPU whose subcell
+	 * still matches this task's vtime charge subcell and the task was not
+	 * borrowed. If the CPU was retagged into a different subcell after the
+	 * task was placed, drop the charge rather than advance the wrong domain.
 	 */
-	if (!tctx->borrowed && tctx->vtime_charge_cell == cidx) {
+	if (!tctx->borrowed && tctx->vtime_charge_subcell == packed_subcell) {
 		u32 llc_idx = FAKE_FLAT_SUBCELL_LLC;
 
 		if (enable_llc_awareness) {
@@ -1571,9 +1609,9 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx, struct task_st
 		return;
 
 	scx_bpf_dump(
-		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u llc=%d dsq=%llx all_cell_cpus_allowed=%d\n",
-		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell, tctx->llc, tctx->dsq.raw,
-		tctx->all_cell_cpus_allowed);
+		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u subcell=%u llc=%d dsq=%llx all_cell_cpus_allowed=%d\n",
+		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell, tctx->subcell,
+		tctx->llc, tctx->dsq.raw, tctx->all_cell_cpus_allowed);
 	scx_bpf_dump("Task[%d] CPUS=", p->pid);
 	dump_cpumask(p->cpus_ptr);
 	scx_bpf_dump("\n");

@@ -538,10 +538,11 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 		return -EINVAL;
 	}
 
-	struct subcell *subcell = lookup_subcell(tctx->cell, 0);
+	struct subcell *subcell = lookup_subcell(tctx->cell, tctx->subcell);
 	struct subcell_llc *new_llc_state;
 	if (!subcell) {
-		scx_bpf_error("failed to lookup cell %u subcell 0 for LLC assignment", tctx->cell);
+		scx_bpf_error("failed to lookup cell %u subcell %u for LLC assignment",
+			      tctx->cell, tctx->subcell);
 		return -ENOENT;
 	}
 	new_llc_state = lookup_subcell_llc(subcell, new_llc);
@@ -555,10 +556,8 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 		return -EINVAL;
 	}
 
-	/*
-	 * This writes the default subcell's LLC DSQ. Pinned tasks keep CPU DSQs.
-	 */
-	tctx->dsq = get_subcell_llc_dsq_id(tctx->cell, 0, new_llc);
+	/* Pinned tasks keep CPU DSQs. */
+	tctx->dsq = get_subcell_llc_dsq_id(tctx->cell, tctx->subcell, new_llc);
 	if (dsq_is_invalid(tctx->dsq))
 		return -EINVAL;
 
