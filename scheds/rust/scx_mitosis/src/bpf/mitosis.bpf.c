@@ -624,17 +624,26 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 
 	/* cpu == -EBUSY: no idle CPU in subcell, try borrowing */
 	if (enable_borrowing) {
-		const struct cpumask *borrowable =
-			lookup_subcell_borrowable_cpumask(tctx->cell, tctx->subcell);
-		if (!borrowable)
+		const struct cpumask *idle_smtmask __free(idle_cpumask) = NULL;
+		const struct cpumask *subcell_borrowable;
+
+		subcell_borrowable = lookup_subcell_borrowable_cpumask(tctx->cell, tctx->subcell);
+		if (!subcell_borrowable)
 			return -1;
-		const struct cpumask *idle_smtmask __free(idle_cpumask) =
-			scx_bpf_get_idle_smtmask();
+		idle_smtmask = scx_bpf_get_idle_smtmask();
 		if (!idle_smtmask) {
 			scx_bpf_error("Failed to get idle smtmask");
 			return -1;
 		}
-		cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
+		cpu = pick_idle_cpu_from(p, subcell_borrowable, prev_cpu, idle_smtmask);
+		if (cpu < 0) {
+			const struct cpumask *cell_borrowable;
+
+			cell_borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
+			if (!cell_borrowable)
+				return -1;
+			cpu = pick_idle_cpu_from(p, cell_borrowable, prev_cpu, idle_smtmask);
+		}
 		if (cpu >= 0) {
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
