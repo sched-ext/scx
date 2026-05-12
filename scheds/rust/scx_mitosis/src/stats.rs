@@ -17,6 +17,48 @@ use crate::DistributionStats;
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(_om_prefix = "s_")]
+#[stat(top)]
+pub struct SubcellMetrics {
+    #[stat(desc = "Number of cpus")]
+    pub num_cpus: u32,
+    #[stat(desc = "CPU utilization %")]
+    pub util_pct: f64,
+    #[stat(desc = "Borrowed CPU time % of running")]
+    pub demand_borrow_pct: f64,
+    #[stat(desc = "Lent CPU time %")]
+    pub lent_pct: f64,
+    #[stat(desc = "EWMA-smoothed utilization %")]
+    pub smoothed_util_pct: f64,
+    #[stat(desc = "Running time in this interval")]
+    pub running_ns: u64,
+    #[stat(desc = "Borrowed running time in this interval")]
+    pub borrowed_ns: u64,
+    #[stat(desc = "Lent running time in this interval")]
+    pub lent_ns: u64,
+}
+
+impl SubcellMetrics {
+    pub fn update_demand(
+        &mut self,
+        util_pct: f64,
+        demand_borrow_pct: f64,
+        lent_pct: f64,
+        running_ns: u64,
+        borrowed_ns: u64,
+        lent_ns: u64,
+    ) {
+        self.util_pct = util_pct;
+        self.demand_borrow_pct = demand_borrow_pct;
+        self.lent_pct = lent_pct;
+        self.running_ns = running_ns;
+        self.borrowed_ns = borrowed_ns;
+        self.lent_ns = lent_ns;
+    }
+}
+
+#[stat_doc]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "c_")]
 #[stat(top)]
 pub struct CellMetrics {
@@ -56,6 +98,8 @@ pub struct CellMetrics {
     pub lent_pct: f64,
     #[stat(desc = "EWMA-smoothed utilization %")]
     pub smoothed_util_pct: f64,
+    #[stat(desc = "Per-subcell metrics")]
+    pub subcells: BTreeMap<u32, SubcellMetrics>,
 }
 
 impl CellMetrics {
@@ -170,6 +214,7 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
     StatsServerData::new()
         .add_meta(Metrics::meta())
         .add_meta(CellMetrics::meta())
+        .add_meta(SubcellMetrics::meta())
         .add_ops("top", StatsOps { open, close: None })
 }
 
