@@ -202,6 +202,13 @@ struct {
 	__uint(max_entries, 1);
 } cpu_ctxs SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, MAX_CELLS * MAX_SUBCELLS_PER_CELL);
+} subcell_running_ns SEC(".maps");
+
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
 	struct cpu_ctx *cctx;
@@ -1547,6 +1554,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	u32 cidx;
 	u32 subcell_idx;
 	s32 packed_subcell;
+	s32 task_packed_subcell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1562,6 +1570,9 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 		return;
 	packed_subcell = pack_subcell_id(cidx, subcell_idx);
 	if (packed_subcell < 0)
+		return;
+	task_packed_subcell = pack_subcell_id(tctx->cell, tctx->subcell);
+	if (task_packed_subcell < 0)
 		return;
 
 	now = scx_bpf_now();
@@ -1611,11 +1622,20 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 
 	{
 		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
+		u32 subcell_running_key = task_packed_subcell;
+		u64 *subcell_running =
+			bpf_map_lookup_elem(&subcell_running_ns, &subcell_running_key);
 		if (!running) {
 			scx_bpf_error("Task cell index too large: %d", tctx->cell);
 			return;
 		}
+		if (!subcell_running) {
+			scx_bpf_error("Task cell or subcell index too large: %d, %d", tctx->cell,
+				      tctx->subcell);
+			return;
+		}
 		*running += used;
+		*subcell_running += used;
 	}
 }
 
