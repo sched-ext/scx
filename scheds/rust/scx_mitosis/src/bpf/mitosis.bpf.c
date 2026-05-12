@@ -1200,7 +1200,8 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	}
 
 	guard(rcu)();
-	if (!all_cpumask) {
+	const struct cpumask *all_mask = (const struct cpumask *)all_cpumask;
+	if (!all_mask) {
 		scx_bpf_error("NULL all_cpumask");
 		return 0;
 	}
@@ -1209,8 +1210,8 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	 * Initialize root cell cpumask to all cpus, and then remove from it as we
 	 * go
 	 */
-	bpf_cpumask_copy(root_cell_bpf_cpumask, (const struct cpumask *)all_cpumask);
-	bpf_cpumask_copy(root_subcell_bpf_cpumask, (const struct cpumask *)all_cpumask);
+	bpf_cpumask_copy(root_cell_bpf_cpumask, all_mask);
+	bpf_cpumask_copy(root_subcell_bpf_cpumask, all_mask);
 
 	struct cgroup_subsys_state *root_css, *pos;
 	struct cgroup *cur_cgrp;
