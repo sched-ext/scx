@@ -62,7 +62,16 @@ struct cell_cpumask_map {
 	__uint(map_flags, 0);
 };
 
+struct subcell_cpumask_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cell_cpumask_wrapper);
+	__uint(max_entries, MAX_CELLS *MAX_SUBCELLS_PER_CELL);
+	__uint(map_flags, 0);
+};
+
 extern struct cell_cpumask_map cell_cpumasks;
+extern struct subcell_cpumask_map subcell_cpumasks;
 extern const volatile u32 nr_possible_cpus;
 
 /* Strict lookup of the per-cell cpumask pair group stored in the cell_cpumasks map. */
@@ -107,6 +116,70 @@ static inline const struct cpumask *lookup_cell_borrowable_cpumask(int idx)
 	cpumask = (const struct cpumask *)cpumaskw->borrowable.cpumask;
 	if (!cpumask)
 		scx_bpf_error("borrowable cpumask is NULL for cell %d", idx);
+
+	return cpumask;
+}
+
+static inline int subcell_cpumask_idx(u32 cell_id, u32 subcell_id)
+{
+	if (cell_id >= MAX_CELLS || subcell_id >= MAX_SUBCELLS_PER_CELL)
+		return -EINVAL;
+	return (cell_id * MAX_SUBCELLS_PER_CELL) + subcell_id;
+}
+
+static inline struct cell_cpumask_wrapper *lookup_subcell_cpumask_wrapper(u32 cell_id,
+									  u32 subcell_id)
+{
+	int idx;
+	u32 key;
+	struct cell_cpumask_wrapper *cpumaskw;
+
+	idx = subcell_cpumask_idx(cell_id, subcell_id);
+	if (idx < 0) {
+		scx_bpf_error("invalid subcell cpumask index cell=%u subcell=%u", cell_id,
+			      subcell_id);
+		return NULL;
+	}
+
+	key = idx;
+	cpumaskw = bpf_map_lookup_elem(&subcell_cpumasks, &key);
+	if (!cpumaskw)
+		scx_bpf_error("no subcell cpumask wrapper for cell=%u subcell=%u", cell_id,
+			      subcell_id);
+
+	return cpumaskw;
+}
+
+static inline const struct cpumask *lookup_subcell_cpumask(u32 cell_id, u32 subcell_id)
+{
+	struct cell_cpumask_wrapper *cpumaskw;
+	const struct cpumask *cpumask;
+
+	cpumaskw = lookup_subcell_cpumask_wrapper(cell_id, subcell_id);
+	if (!cpumaskw)
+		return NULL;
+
+	cpumask = (const struct cpumask *)cpumaskw->primary.cpumask;
+	if (!cpumask)
+		scx_bpf_error("subcell cpumask is NULL for cell=%u subcell=%u", cell_id,
+			      subcell_id);
+
+	return cpumask;
+}
+
+static inline const struct cpumask *lookup_subcell_borrowable_cpumask(u32 cell_id, u32 subcell_id)
+{
+	struct cell_cpumask_wrapper *cpumaskw;
+	const struct cpumask *cpumask;
+
+	cpumaskw = lookup_subcell_cpumask_wrapper(cell_id, subcell_id);
+	if (!cpumaskw)
+		return NULL;
+
+	cpumask = (const struct cpumask *)cpumaskw->borrowable.cpumask;
+	if (!cpumask)
+		scx_bpf_error("subcell borrowable cpumask is NULL for cell=%u subcell=%u", cell_id,
+			      subcell_id);
 
 	return cpumask;
 }
