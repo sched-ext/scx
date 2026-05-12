@@ -313,7 +313,7 @@ static inline int update_task_llc_assignment(struct task_struct *p, struct task_
 	const struct cpumask *llc_mask = NULL;
 
 	// Let's get a new LLC for this task
-	s32 new_llc = pick_llc_for_task(tctx->cell, 0);
+	s32 new_llc = pick_llc_for_task(tctx->cell, tctx->subcell);
 	if (new_llc < 0)
 		return -EINVAL;
 
@@ -338,11 +338,11 @@ static inline int update_task_llc_assignment(struct task_struct *p, struct task_
 	}
 
 	/* --- Point to the correct (cell,LLC) DSQ and set vtime baseline --- */
-	tctx->dsq = get_subcell_llc_dsq_id(tctx->cell, 0, tctx->llc);
+	tctx->dsq = get_subcell_llc_dsq_id(tctx->cell, tctx->subcell, tctx->llc);
 	if (dsq_is_invalid(tctx->dsq))
 		return -EINVAL;
 
-	struct subcell *subcell = lookup_subcell(tctx->cell, 0);
+	struct subcell *subcell = lookup_subcell(tctx->cell, tctx->subcell);
 	if (!subcell)
 		return -ENOENT;
 
