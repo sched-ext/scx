@@ -1680,6 +1680,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
 		u32 subcell_id;
+		struct cell *cell;
 
 		if (enable_llc_awareness) {
 			u32 llc;
@@ -1705,6 +1706,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 		if (!(cpumaskw = lookup_cell_cpumask_wrapper(i)))
 			return -ENOENT;
+
+		cell = lookup_cell(i);
+		if (!cell)
+			return -ENOENT;
+
+		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+		{
+			cell->subcells[subcell_id].id = subcell_id;
+			cell->subcells[subcell_id].in_use = 0;
+		}
 
 		/*
 		 * Start with full cpumasks until userspace pushes the first
@@ -1762,6 +1773,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			return -ENOENT;
 
 		cell->in_use = true;
+		cell->subcells[0].in_use = 1;
 	}
 
 	return 0;
