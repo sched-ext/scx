@@ -49,12 +49,31 @@ struct CpuMinimum {
 /// the unclaimed pool. Keeping eligibility separate from claims allows an
 /// unpinned recipient to request a minimum from anywhere in its allowed mask.
 #[derive(Debug, Clone)]
-struct CpuRecipient {
+pub(crate) struct CpuRecipient {
     id: u32,
     weight: f64,
     allowed: Cpumask,
     claimed: Option<Cpumask>,
     minimum: CpuMinimum,
+}
+
+impl CpuRecipient {
+    /// Create an unpinned recipient over the complete allocation domain.
+    ///
+    /// It may run anywhere in `domain`, claims no CPU preferentially, and
+    /// protects one primary CPU from later redistribution.
+    pub(crate) fn unpinned(id: u32, weight: f64, domain: &Cpumask) -> Self {
+        Self {
+            id,
+            weight,
+            allowed: domain.clone(),
+            claimed: None,
+            minimum: CpuMinimum {
+                protected: 1,
+                requested: 0,
+            },
+        }
+    }
 }
 
 /// Result of CPU assignment computation, containing both primary and optional borrowable masks.
@@ -74,7 +93,6 @@ struct CpuManager<'a> {
 }
 
 impl<'a> CpuManager<'a> {
-    #[cfg(test)]
     fn new(domain: &'a Cpumask) -> Self {
         Self {
             domain,
@@ -1121,6 +1139,18 @@ impl CellManager {
         compute_borrowable: bool,
     ) -> Result<Vec<CpuAssignment>> {
         self.compute_cpu_assignments_inner(Some(cell_demands), compute_borrowable)
+    }
+
+    /// Compute CPU assignments for subcells inside a cell's primary CPU domain.
+    ///
+    /// Subcells are treated as recipients over `domain`, which is expected to be
+    /// the parent cell's exclusive CPU allocation.
+    pub(crate) fn compute_subcell_cpu_assignments(
+        domain: &Cpumask,
+        subcells: &[CpuRecipient],
+        compute_borrowable: bool,
+    ) -> Result<Vec<CpuAssignment>> {
+        CpuManager::new(domain).compute_assignments(subcells, compute_borrowable)
     }
 
     /// Internal implementation shared by equal-weight and demand-weighted assignment.
@@ -3467,6 +3497,49 @@ mod tests {
             union = union.or(&assignment.primary);
         }
         assert_eq!(union, domain, "Primary masks should cover the whole domain");
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_matches_domain() {
+        let domain = cpumask_from_cpulist(32, "8-9,12,14-15");
+        let recipients = vec![CpuRecipient::unpinned(0, 1.0, &domain)];
+
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, false).unwrap();
+
+        assert_eq!(assignments.len(), 1);
+        let subcell0 = find_assignment(&assignments, 0);
+        assert_eq!(subcell0.primary, domain);
+        assert!(subcell0.borrowable.is_none());
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_borrowable_is_empty_when_enabled() {
+        let domain = cpumask_from_cpulist(32, "3-4,8,10-11");
+        let recipients = vec![CpuRecipient::unpinned(0, 1.0, &domain)];
+
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, true).unwrap();
+        let subcell0 = find_assignment(&assignments, 0);
+
+        assert_eq!(subcell0.primary, domain);
+        assert_eq!(subcell0.borrowable.as_ref().unwrap().weight(), 0);
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_preserves_existing_custom_subcells() {
+        let domain = cpumask_from_cpulist(32, "8-15");
+        let recipients = vec![
+            CpuRecipient::unpinned(0, 1.0, &domain),
+            CpuRecipient::unpinned(2, 1.0, &domain),
+        ];
+
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, false).unwrap();
+
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(find_assignment(&assignments, 0).primary.weight(), 4);
+        assert_eq!(find_assignment(&assignments, 2).primary.weight(), 4);
     }
 
     /// Symmetric pairwise overlaps must produce equal cell sizes regardless
