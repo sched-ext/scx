@@ -227,6 +227,43 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cctx;
 }
 
+static __always_inline int create_subcell_dsqs(u32 cell_id, u32 subcell_id)
+{
+	int ret;
+
+	if (enable_llc_awareness) {
+		u32 llc;
+
+		bpf_for(llc, 0, MAX_LLCS)
+		{
+			dsq_id_t dsq_id;
+
+			if (llc >= nr_llc)
+				break;
+
+			dsq_id = get_subcell_llc_dsq_id(cell_id, subcell_id, llc);
+			if (dsq_is_invalid(dsq_id))
+				return -EINVAL;
+
+			ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
+			if (ret < 0 && ret != -EEXIST)
+				return ret;
+		}
+	} else {
+		dsq_id_t dsq_id =
+			get_subcell_llc_dsq_id(cell_id, subcell_id, FAKE_FLAT_SUBCELL_LLC);
+
+		if (dsq_is_invalid(dsq_id))
+			return -EINVAL;
+
+		ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
+		if (ret < 0 && ret != -EEXIST)
+			return ret;
+	}
+
+	return 0;
+}
+
 /*
  * Cells are allocated in the timer callback and freed in cgroup exit handlers.
  * allocate_cell and free_cell use atomic operations to handle concurrent access.
@@ -2497,6 +2534,7 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 	struct cell *cell;
 	u32 subcell_id;
 	u32 cpu;
+	int ret;
 
 	if (!config || cell_id >= MAX_CELLS)
 		return -EINVAL;
@@ -2561,6 +2599,12 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 
 		if (!subcell_config->in_use)
 			continue;
+
+		if ((ret = create_subcell_dsqs(cell_id, subcell_id))) {
+			scx_bpf_error("failed to create DSQs for cell=%u subcell=%u: %d", cell_id,
+				      subcell_id, ret);
+			return ret;
+		}
 
 		bpf_for(cpu, 0, nr_possible_cpus)
 		{
