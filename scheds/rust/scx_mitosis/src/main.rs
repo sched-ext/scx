@@ -773,7 +773,7 @@ impl<'a> Scheduler<'a> {
 
             let changed = cpu_assignments.iter().any(|a| {
                 self.cells
-                    .get(&a.cell_id)
+                    .get(&a.id)
                     .map_or(true, |cell| cell.cpus != a.primary)
             });
 
@@ -855,21 +855,21 @@ impl<'a> Scheduler<'a> {
         // Set cell cpumasks and borrowable cpumasks
         let mut max_cell_id: u32 = 0;
         for a in cpu_assignments {
-            if a.cell_id >= bpf_intf::consts_MAX_CELLS {
+            if a.id >= bpf_intf::consts_MAX_CELLS {
                 bail!(
                     "Cell ID {} exceeds MAX_CELLS ({})",
-                    a.cell_id,
+                    a.id,
                     bpf_intf::consts_MAX_CELLS
                 );
             }
-            max_cell_id = max_cell_id.max(a.cell_id + 1);
+            max_cell_id = max_cell_id.max(a.id + 1);
 
-            write_cpumask_to_config(&a.primary, &mut config.cpumasks[a.cell_id as usize].mask);
+            write_cpumask_to_config(&a.primary, &mut config.cpumasks[a.id as usize].mask);
 
             if let Some(ref borrowable) = a.borrowable {
                 write_cpumask_to_config(
                     borrowable,
-                    &mut config.borrowable_cpumasks[a.cell_id as usize].mask,
+                    &mut config.borrowable_cpumasks[a.id as usize].mask,
                 );
             }
         }
