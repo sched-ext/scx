@@ -84,19 +84,20 @@ static inline struct subcell *lookup_subcell(u32 cell_idx, u32 subcell_idx)
  */
 struct task_ctx {
 	/* cpumask is the set of valid cpus this task can schedule on */
-	/* (task's cpumask and-ed with its cell cpumask) */
+	/* (task's cpumask and-ed with its subcell cpumask) */
 	struct bpf_cpumask __kptr *cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
-	/* Cell whose vtime domain should be charged for this task */
-	u32 vtime_charge_cell;
+	/* Packed subcell whose vtime should be charged for this task. */
+	u32 vtime_charge_subcell;
 	u64 basis_vtime;
 	/* For the sake of monitoring, each task is owned by a cell */
 	u32 cell;
 	/* Subcell within the task's cell. Defaults to subcell 0 for now. */
 	u32 subcell;
-	/* For the sake of scheduling, a task is exclusively owned by either a cell
-	 * or a cpu */
+	/* For the sake of scheduling, a task is exclusively owned by either a
+	 * subcell or a cpu.
+	 */
 	dsq_id_t dsq;
 	/* latest configuration that was applied for this task */
 	/* (to know if it has to be re-applied) */
@@ -104,8 +105,8 @@ struct task_ctx {
 	/* Is this task allowed on all cores of its cell? */
 	bool all_cell_cpus_allowed;
 	/* Set when task is dispatched to a borrowed CPU from another cell.
-	 * Consumed and cleared in mitosis_stopping to avoid advancing the
-	 * lending cell's per-CPU DSQ vtime with this task's execution.
+	 * Consumed and cleared in mitosis_stopping to avoid advancing the CPU
+	 * or subcell vtime with this task's borrowed execution.
 	 */
 	bool borrowed;
 	/* Last known cgroup ID for detecting cgroup moves (used when cpu_controller_disabled) */
