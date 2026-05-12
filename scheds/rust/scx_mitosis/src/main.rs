@@ -1626,7 +1626,13 @@ impl<'a> Scheduler<'a> {
 
             let nr_cpus = cell_info.cpus.weight() as u64;
             if nr_cpus == 0 {
-                bail!("Cell {} has 0 CPUs assigned", cell);
+                self.smoothed_util[cell] = 0.0;
+                self.metrics
+                    .cells
+                    .entry(cell as u32)
+                    .or_default()
+                    .smoothed_util_pct = 0.0;
+                continue;
             }
 
             // capacity = total available CPU-time this interval
@@ -1766,7 +1772,16 @@ impl<'a> Scheduler<'a> {
                     continue;
                 };
                 if nr_cpus == 0 {
-                    bail!("Cell {} subcell {} has 0 CPUs assigned", cell, subcell);
+                    self.smoothed_subcell_util[cell][subcell] = 0.0;
+                    self.metrics
+                        .cells
+                        .entry(cell as u32)
+                        .or_default()
+                        .subcells
+                        .entry(subcell as u32)
+                        .or_default()
+                        .smoothed_util_pct = 0.0;
+                    continue;
                 }
 
                 let capacity = (nr_cpus as u64) * interval_ns;
