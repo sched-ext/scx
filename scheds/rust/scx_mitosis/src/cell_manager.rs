@@ -835,7 +835,16 @@ impl CellManager {
         subcells: &[CpuRecipient],
         compute_borrowable: bool,
     ) -> Result<Vec<CpuAssignment>> {
-        CpuManager::new(domain).compute_assignments(subcells, compute_borrowable)
+        Self::compute_cpu_assignments_for(domain, subcells, compute_borrowable)
+    }
+
+    /// Compute CPU assignments over `domain` for an explicit recipient list.
+    pub(crate) fn compute_cpu_assignments_for(
+        domain: &Cpumask,
+        recipients: &[CpuRecipient],
+        compute_borrowable: bool,
+    ) -> Result<Vec<CpuAssignment>> {
+        CpuManager::new(domain).compute_assignments(recipients, compute_borrowable)
     }
 
     /// Internal implementation shared by equal-weight and demand-weighted assignment.
