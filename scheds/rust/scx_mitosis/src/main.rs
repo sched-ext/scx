@@ -1719,14 +1719,14 @@ impl<'a> Scheduler<'a> {
         let mut total_running_ns = [[0u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS];
         let mut on_own_ns = [[0u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS];
         let mut lent_ns = [[0u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS];
-        let active_subcells: HashMap<(usize, usize), usize> = self
+        let active_subcells: HashMap<(usize, usize), (usize, String)> = self
             .cells
             .iter()
             .flat_map(|(&cell_id, cell)| {
                 cell.subcells.iter().map(move |subcell| {
                     (
                         (cell_id as usize, subcell.id as usize),
-                        subcell.primary.weight(),
+                        (subcell.primary.weight(), subcell.name.clone()),
                     )
                 })
             })
@@ -1785,11 +1785,19 @@ impl<'a> Scheduler<'a> {
                     continue;
                 }
 
-                let Some(&nr_cpus) = active_subcells.get(&(cell, subcell)) else {
+                let Some((nr_cpus, name)) = active_subcells.get(&(cell, subcell)) else {
                     continue;
                 };
-                if nr_cpus == 0 {
+                if *nr_cpus == 0 {
                     self.smoothed_subcell_util[cell][subcell] = 0.0;
+                    self.metrics
+                        .cells
+                        .entry(cell as u32)
+                        .or_default()
+                        .subcells
+                        .entry(subcell as u32)
+                        .or_default()
+                        .update_name_and_cpus(name, 0);
                     self.metrics
                         .cells
                         .entry(cell as u32)
@@ -1801,7 +1809,7 @@ impl<'a> Scheduler<'a> {
                     continue;
                 }
 
-                let capacity = (nr_cpus as u64) * interval_ns;
+                let capacity = (*nr_cpus as u64) * interval_ns;
                 let delta_borrowed = delta_running.saturating_sub(delta_on_own);
                 let util_pct = 100.0 * (delta_running as f64) / (capacity as f64);
                 let demand_borrow_pct = if delta_running > 0 {
@@ -1832,7 +1840,7 @@ impl<'a> Scheduler<'a> {
                     delta_borrowed,
                     delta_lent,
                 );
-                subcell_metrics.num_cpus = nr_cpus as u32;
+                subcell_metrics.update_name_and_cpus(name, *nr_cpus as u32);
                 if self.enable_rebalancing {
                     subcell_metrics.smoothed_util_pct = self.smoothed_subcell_util[cell][subcell];
                 }
