@@ -188,10 +188,13 @@ const bool enable_stats __attribute__((used)) = false;
 #define CAKE_CACHE_THROUGHPUT_FULL_SLICE_SHIFT 2U
 #define CAKE_LLC_VTIME_LOCAL_RESCUE_DEPTH 2
 #define CAKE_CACHE_THROUGHPUT_SHIFT_LUT 0x5555555544332210ULL
-#define CAKE_THROUGHPUT_FAIR_DISPATCH_BUDGET 2U
+#define CAKE_THROUGHPUT_FAIR_DISPATCH_BUDGET 8U
 #define CAKE_BUSY_WAKE_SHRINK_MIN_NS 500000ULL
 #define CAKE_TP_DEC_PULL_MASK 0x0fULL
 #define CAKE_TP_DEC_DISPATCH_MASK CAKE_TP_DEC_PULL_MASK
+#define CAKE_THROUGHPUT_FAIR_DISPATCH_LIMIT \
+	((CAKE_THROUGHPUT_FAIR_DISPATCH_BUDGET > 15U) ? 15U : \
+	 CAKE_THROUGHPUT_FAIR_DISPATCH_BUDGET)
 #define CAKE_TP_DEC_RUNTIME_SCALE_SHIFT 14U
 #define CAKE_TP_DEC_RUNTIME_BUCKET_SHIFT 8U
 #define CAKE_TP_DEC_RUN_BUCKET_SHIFT 16U
@@ -3539,9 +3542,10 @@ static __always_inline bool
 cake_throughput_fairness_due(struct cake_cpu_bss *bss, u32 cpu)
 {
 	u64 dec = READ_ONCE(bss->throughput_decision);
+	u64 dispatches = dec & CAKE_TP_DEC_PULL_MASK;
 	s32 queued;
 
-	if (!(dec & (CAKE_TP_DEC_PULL_MASK & ~1ULL)))
+	if (dispatches < CAKE_THROUGHPUT_FAIR_DISPATCH_LIMIT)
 		return false;
 
 	/* Once local/SAT continuations spend the small dispatch budget, force an
@@ -3559,9 +3563,11 @@ static __always_inline void
 cake_throughput_charge_dispatch(struct cake_cpu_bss *bss)
 {
 	u64 dec = READ_ONCE(bss->throughput_decision);
+	u64 dispatches = dec & CAKE_TP_DEC_PULL_MASK;
 
-	if (!(dec & (CAKE_TP_DEC_PULL_MASK & ~1ULL))) {
-		u64 next = dec + 1;
+	if (dispatches < CAKE_THROUGHPUT_FAIR_DISPATCH_LIMIT) {
+		u64 next = (dec & ~CAKE_TP_DEC_DISPATCH_MASK) |
+			   ((dispatches + 1) & CAKE_TP_DEC_PULL_MASK);
 
 		WRITE_ONCE(bss->throughput_decision, next);
 	}
