@@ -176,7 +176,7 @@ static inline s32 get_cpu_from_dsq(dsq_id_t dsq_id)
 }
 
 /* Helper functions to construct DSQ IDs */
-static inline dsq_id_t get_cpu_dsq_id(u32 cpu)
+static __always_inline dsq_id_t get_cpu_dsq_id(u32 cpu)
 {
 	// Check for valid CPU range, 0 indexed so >=.
 	if (cpu >= MAX_CPUS) {
@@ -187,7 +187,8 @@ static inline dsq_id_t get_cpu_dsq_id(u32 cpu)
 	return (dsq_id_t){ .cpu_dsq = { .cpu = cpu, .type = DSQ_TYPE_CPU } };
 }
 
-static inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
+/* __always_inline is technically required for a fn w/ aggregate return */
+static __always_inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
 {
 	if (cell >= MAX_CELLS || llc >= MAX_LLCS) {
 		scx_bpf_error("cell %u or llc %u too large", cell, llc);

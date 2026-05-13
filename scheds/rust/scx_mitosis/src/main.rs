@@ -209,6 +209,23 @@ struct Opts {
     #[clap(long, default_value = "500")]
     slice_shrink_min_us: u64,
 
+    /// Enable adaptive steal threshold controller. Modulates per-cell queue
+    /// depth threshold to target --steal-target-pct. Requires --enable-work-stealing.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_adaptive_stealing: bool,
+
+    /// Minimum value for adaptive steal queue depth threshold.
+    #[clap(long, default_value = "0")]
+    steal_queued_min: u32,
+
+    /// Maximum value for adaptive steal queue depth threshold.
+    #[clap(long, default_value = "20")]
+    steal_queued_max: u32,
+
+    /// Target steal percentage for adaptive threshold controller.
+    #[clap(long, default_value = "2.0")]
+    steal_target_pct: f64,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -264,10 +281,19 @@ struct Scheduler<'a> {
     last_rebalance: Instant,
     /// Number of rebalancing events
     rebalance_count: u64,
+    /// Previous nr_drained_tasks value for per-rebalance delta reporting
+    prev_drained_tasks: u64,
     /// Epoll instance for waiting on multiple fds (inotify, stats wakeup)
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
+    /// Previous migration counters (2x3 cross-product)
+    prev_mig: [u64; 6], // same_{select,enqueue,dispatch}, cross_{select,enqueue,dispatch}
+    /// Adaptive steal threshold range
+    enable_adaptive_stealing: bool,
+    steal_queued_min: u32,
+    steal_queued_max: u32,
+    steal_target_pct: f64,
 }
 
 struct DistributionStats {
@@ -320,6 +346,9 @@ impl<'a> Scheduler<'a> {
     fn validate_args(opts: &Opts) -> Result<()> {
         if opts.enable_work_stealing && !opts.enable_llc_awareness {
             bail!("Work stealing requires LLC-aware mode (--enable-llc-awareness)");
+        }
+        if opts.enable_adaptive_stealing && !opts.enable_work_stealing {
+            bail!("--enable-adaptive-stealing requires --enable-work-stealing");
         }
 
         Ok(())
@@ -486,8 +515,14 @@ impl<'a> Scheduler<'a> {
             smoothed_util: [0.0; MAX_CELLS],
             last_rebalance: Instant::now(),
             rebalance_count: 0,
+            prev_drained_tasks: 0,
             epoll,
             stats_waker,
+            prev_mig: [0; 6],
+            enable_adaptive_stealing: opts.enable_adaptive_stealing,
+            steal_queued_min: opts.steal_queued_min,
+            steal_queued_max: opts.steal_queued_max,
+            steal_target_pct: opts.steal_target_pct,
         })
     }
 
@@ -791,14 +826,19 @@ impl<'a> Scheduler<'a> {
         self.rebalance_count += 1;
         self.metrics.rebalance_count = self.rebalance_count;
 
+        let cur_drained = self.skel.maps.bss_data.as_ref().unwrap().nr_drained_tasks;
+        let drained_this_event = cur_drained - self.prev_drained_tasks;
+        self.prev_drained_tasks = cur_drained;
+
         let cell_manager = self
             .cell_manager
             .as_ref()
             .expect("BUG: cell_manager missing after apply_cell_config in maybe_rebalance");
         info!(
-            "Rebalanced CPUs (spread={:.1}%, count={}): {}",
+            "Rebalanced CPUs (spread={:.1}%, count={}, drained={}): {}",
             spread,
             self.rebalance_count,
+            drained_this_event,
             cell_manager.format_cell_config(&cpu_assignments)
         );
 
@@ -1094,6 +1134,35 @@ impl<'a> Scheduler<'a> {
                 + cell_metrics.slice_shrink_proportional
                 + cell_metrics.slice_shrink_min;
 
+            let steal_pct = stats.steal_pct;
+
+            if self.enable_adaptive_stealing {
+                let bss = self.skel.maps.bss_data.as_mut().unwrap();
+                let cur = bss.per_cell_steal_min_queued[cell];
+                let new_val = if steal_pct > self.steal_target_pct {
+                    (cur + 1).min(self.steal_queued_max)
+                } else if steal_pct < self.steal_target_pct && cur > self.steal_queued_min {
+                    cur - 1
+                } else {
+                    cur
+                };
+                if new_val != cur {
+                    unsafe {
+                        let ptr = &mut bss.per_cell_steal_min_queued[cell] as *mut u32;
+                        std::ptr::write_volatile(ptr, new_val);
+                    }
+                }
+                cell_metrics.steal_threshold = new_val;
+                trace!(
+                    "  Cell {:>2} steal: S%={:.1}% thresh={}",
+                    cell,
+                    steal_pct,
+                    new_val
+                );
+            } else {
+                trace!("  Cell {:>2} steal: S%={:.1}%", cell, steal_pct);
+            }
+
             trace!("{} {}", prefix, stats);
         }
         Ok(())
@@ -1162,6 +1231,43 @@ impl<'a> Scheduler<'a> {
         if self.cell_manager.is_some() {
             self.collect_demand_metrics(&cpu_ctxs)
                 .context("collecting demand metrics")?;
+        }
+
+        // Log migration counters (2x3 cross-product)
+        {
+            let bss = self.skel.maps.bss_data.as_ref().unwrap();
+            let cur = [
+                bss.nr_mig_same_select,
+                bss.nr_mig_same_enqueue,
+                bss.nr_mig_same_dispatch,
+                bss.nr_mig_cross_select,
+                bss.nr_mig_cross_enqueue,
+                bss.nr_mig_cross_dispatch,
+            ];
+            let d: Vec<u64> = cur
+                .iter()
+                .zip(self.prev_mig.iter())
+                .map(|(c, p)| c - p)
+                .collect();
+            self.prev_mig = cur;
+
+            // d[0..3] = same_{select,enqueue,dispatch}, d[3..6] = cross_{select,enqueue,dispatch}
+            let same = d[0] + d[1] + d[2];
+            let cross = d[3] + d[4] + d[5];
+            let total = same + cross;
+            let sel = d[0] + d[3];
+            let enq = d[1] + d[4];
+            let dis = d[2] + d[5];
+
+            let k = |n: u64| n / 1000;
+            let pct = |n: u64, of: u64| if of > 0 { (100 * n / of) as u64 } else { 0 };
+
+            trace!("Migrations:{:>5}k        select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(total), k(sel), pct(sel, total), k(enq), pct(enq, total), k(dis), pct(dis, total));
+            trace!("  same_llc:{:>5}k ({:>2}%)  select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(same), pct(same, total), k(d[0]), pct(d[0], same), k(d[1]), pct(d[1], same), k(d[2]), pct(d[2], same));
+            trace!("  cross_llc:{:>4}k ({:>2}%)  select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(cross), pct(cross, total), k(d[3]), pct(d[3], cross), k(d[4]), pct(d[4], cross), k(d[5]), pct(d[5], cross));
         }
 
         for (cell_id, cell) in &self.cells {
