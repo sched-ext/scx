@@ -33,8 +33,8 @@ extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const vo
 	___ret;										\
 })
 
-#define arena_stdout(fmt, ...) bpf_stream_printk(1, (fmt), ##__VA_ARGS__)
-#define arena_stderr(fmt, ...) bpf_stream_printk(2, (fmt), ##__VA_ARGS__)
+#define scx_out(fmt, ...) bpf_stream_printk(1, (fmt), ##__VA_ARGS__)
+#define scx_err(fmt, ...) bpf_stream_printk(2, (fmt), ##__VA_ARGS__)
 
-#define arena_stdout_linfo(fmt, ...) bpf_stream_printk(1, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
-#define arena_stderr_linfo(fmt, ...) bpf_stream_printk(2, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
+#define scx_out_loc(fmt, ...) bpf_stream_printk(1, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
+#define scx_err_loc(fmt, ...) bpf_stream_printk(2, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)

@@ -8,6 +8,7 @@
 #include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
+#include <lib/alloc/bpf_helpers_local.h>
 #include <lib/sdt_task.h>
 #include <scx/arena_userspace_interrop.bpf.h>
 
@@ -30,7 +31,7 @@ static __u64 zero = 0;
  * checking LD.IMM instruction operands for an arena and populating
  * the program state with the first instance it finds. This requires
  * accessing our global arena variable, but scx methods do not necessarily
- * do so while still using pointers from that arena. Insert a bpf_printk
+ * do so while still using pointers from that arena. Insert a scx_err_loc
  * statement that triggers at most once to generate an LD.IMM instruction
  * to access the arena and help the verifier.
  */
@@ -41,7 +42,7 @@ __hidden void scx_arena_subprog_init(void)
 	if (scx_arena_verify_once)
 		return;
 
-	bpf_printk("%s: arena pointer %p", __func__, &arena);
+	scx_err_loc("arena pointer %p", &arena);
 	scx_arena_verify_once = true;
 }
 
@@ -241,12 +242,12 @@ static sdt_desc_t *scx_alloc_chunk(struct scx_alloc_stack __arena *stack)
 static int pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
 {
 	if (unlikely(data_size % 8)) {
-		bpf_printk("%s: allocation size %llu not word aligned", __func__, data_size);
+		scx_err_loc("allocation size %llu not word aligned", data_size);
 		return -EINVAL;
 	}
 
 	if (unlikely(nr_pages == 0)) {
-		bpf_printk("%s: allocation size is 0", __func__);
+		scx_err_loc("allocation size is 0");
 		return -EINVAL;
 	}
 
@@ -374,7 +375,7 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 	desc = alloc->root;
 	if (unlikely(!desc)) {
 		bpf_spin_unlock(&alloc_lock);
-		bpf_printk("%s: root not allocated", __func__);
+		scx_err_loc("root not allocated");
 		return -EINVAL;
 	}
 
@@ -401,8 +402,8 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 
 		if (unlikely(!desc)) {
 			bpf_spin_unlock(&alloc_lock);
-			bpf_printk("%s: freeing nonexistent idx [0x%llx] (level %llu)",
-				__func__, idx, level);
+			scx_err_loc("freeing nonexistent idx [0x%llx] (level %llu)",
+				idx, level);
 			return -EINVAL;
 		}
 	}
@@ -526,13 +527,17 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 	__u64 idx, pos;
 	int ret;
 
-	if (!alloc)
+	if (!alloc) {
+		scx_err_loc("No allocator found\n");
 		return (u64)NULL;
+	}
 
 	/* On success, call returns with the lock taken. */
 	ret = scx_alloc_attempt(stack);
-	if (ret != 0)
+	if (ret != 0) {
+		scx_err_loc("scx_alloc_attempt failed with %d\n", ret);
 		return (u64)NULL;
+	}
 
 	/* We unlock if we encounter an error in the function. */
 	desc = desc_find_empty(alloc->root, stack, &idx);
@@ -540,7 +545,7 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 	bpf_spin_unlock(&alloc_lock);
 
 	if (unlikely(desc == NULL)) {
-		bpf_printk("%s: failed to find empty tree key", __func__);
+		scx_err_loc("failed to find empty tree key");
 		return (u64)NULL;
 	}
 
@@ -553,7 +558,7 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 		data = scx_alloc_from_pool_sleepable(&alloc->pool);
 		if (!data) {
 			scx_alloc_free_idx(alloc, idx);
-			bpf_printk("%s: failed to allocate data from pool", __func__);
+			scx_err_loc("failed to allocate data from pool");
 			return (u64)NULL;
 		}
 	}
@@ -595,7 +600,7 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 
 	if (alloc_bytes > scx_static.max_alloc_bytes) {
 		bpf_spin_unlock(&alloc_lock);
-		bpf_printk("invalid request %ld, max is %ld\n", alloc_bytes,
+		scx_err_loc("invalid request %ld, max is %ld\n", alloc_bytes,
 			      scx_static.max_alloc_bytes);
 		return (u64)NULL;
 	}
@@ -629,7 +634,7 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 			bpf_spin_unlock(&alloc_lock);
 			bpf_arena_free_pages(&arena, memory, scx_static.max_alloc_bytes);
 
-			bpf_printk("concurrent static memory allocations unsupported");
+			scx_err_loc("concurrent static memory allocations unsupported");
 			return (u64)NULL;
 		}
 
@@ -688,7 +693,7 @@ int scx_stk_init(struct scx_stk *stack, __u64 data_size, __u64 nr_pages_per_allo
 
 	stack->lock = scx_static_alloc(sizeof(*stack->lock), 1);
 	if (!stack->lock) {
-		bpf_printk("failed to allocate lock");
+		scx_err_loc("failed to allocate lock");
 		return -ENOMEM;
 	}
 
@@ -825,7 +830,7 @@ int scx_stk_free_internal(struct scx_stk *stack, __u64 elem)
 		return -EINVAL;
 
 	if ((ret = arena_spin_lock(stack->lock))) {
-		bpf_printk("spinlock error %d", ret);
+		scx_err_loc("spinlock error %d", ret);
 		return ret;
 	}
 
@@ -867,7 +872,7 @@ int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nstk_s
 
 	if ((ret = arena_spin_lock(stack->lock))) {
 		bpf_arena_free_pages(&arena, (void __arena *)mem, nr_pages);
-		bpf_printk("spinlock error %d", ret);
+		scx_err_loc("spinlock error %d", ret);
 		return ret;
 	}
 
@@ -899,7 +904,7 @@ int scx_stk_fill_new_elems(struct scx_stk *stack)
 	nelems = (nr_pages * PAGE_SIZE) / stack->data_size;
 	if (nelems > SCX_STK_SEG_MAX) {
 		arena_spin_unlock(stack->lock);
-		bpf_printk("new elements must fit into a single segment");
+		scx_err_loc("new elements must fit into a single segment");
 		return -EINVAL;
 	}
 
@@ -963,12 +968,12 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 	int ret;
 
 	if (!stack) {
-		bpf_printk("using uninitialized stack allocator");
+		scx_err_loc("using uninitialized stack allocator");
 		return 0ULL;
 	}
 
 	if ((ret = arena_spin_lock(stack->lock))) {
-		bpf_printk("spinlock error %d", ret);
+		scx_err_loc("spinlock error %d", ret);
 		return 0ULL;
 	}
 
@@ -977,7 +982,7 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 		/* The call drops the lock on error. */
 		ret = scx_stk_fill_new_elems(stack);
 		if (ret) {
-			bpf_printk("elem creation failed");
+			scx_err_loc("elem creation failed");
 			return 0ULL;
 		}
 	}
@@ -992,12 +997,12 @@ static
 int header_set_order(scx_buddy_chunk_t *chunk, u64 offset, u8 order)
 {
 	if (order >= SCX_BUDDY_CHUNK_MAX_ORDER) {
-		bpf_printk("setting invalid order");
+		scx_err_loc("setting invalid order");
 		return -EINVAL;
 	}
 
 	if (offset >= SCX_BUDDY_CHUNK_ITEMS) {
-		bpf_printk("setting order of invalid offset");
+		scx_err_loc("setting order of invalid offset");
 		return -EINVAL;
 	}
 
@@ -1019,7 +1024,7 @@ u8 header_get_order(scx_buddy_chunk_t *chunk, u64 offset)
 	_Static_assert(SCX_BUDDY_CHUNK_MAX_ORDER <= 16, "order must fit in 4 bits");
 
 	if (offset >= SCX_BUDDY_CHUNK_ITEMS) {
-		bpf_printk("setting order of invalid offset");
+		scx_err_loc("setting order of invalid offset");
 		return SCX_BUDDY_CHUNK_MAX_ORDER;
 	}
 
@@ -1034,8 +1039,8 @@ u64 size_to_order(size_t size)
 	u64 order;
 
 	if (unlikely(!size)) {
-		bpf_printk("size 0 has no order");
-		bpf_printk("size 0 has no order");
+		scx_err_loc("size 0 has no order");
+		scx_err_loc("size 0 has no order");
 		return 64;
 	}
 
@@ -1122,7 +1127,7 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 	while(left && can_loop) {
 		power2 = scx_ffs(left);
 		if (unlikely(power2 >= SCX_BUDDY_CHUNK_MAX_ORDER)) {
-			bpf_printk("buddy chunk metadata require allocation of order %d", power2);
+			scx_err_loc("buddy chunk metadata require allocation of order %d", power2);
 			return NULL;
 		}
 
@@ -1249,7 +1254,7 @@ u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
 
 	order = size_to_order(size);
 	if (order >= SCX_BUDDY_CHUNK_MAX_ORDER - 1) {
-		bpf_printk("Allocation size %lu too large", size);
+		scx_err_loc("Allocation size %lu too large", size);
 		return (u64)NULL;
 	}
 
@@ -1292,7 +1297,7 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 	u8 order;
 
 	if (addr & (SCX_BUDDY_MIN_ALLOC_BYTES - 1)) {
-		bpf_printk("Freeing unaligned address %llx", addr);
+		scx_err_loc("Freeing unaligned address %llx", addr);
 		return;
 	}
 
@@ -1309,7 +1314,7 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 
 	if (chunk == NULL) {
 		bpf_spin_unlock(&buddy->lock);
-		bpf_printk("could not find chunk for address %llx", addr);
+		scx_err_loc("could not find chunk for address %llx", addr);
 		return;
 	}
 

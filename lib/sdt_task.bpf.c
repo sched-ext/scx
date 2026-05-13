@@ -7,6 +7,7 @@
 
 #include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
+#include <lib/alloc/bpf_helpers_local.h>
 #include <lib/sdt_task.h>
 
 /*
@@ -37,13 +38,13 @@ void __arena *scx_task_alloc(struct task_struct *p)
 	mval = bpf_task_storage_get(&scx_task_map, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!mval) {
-		bpf_printk("%s:%d bpf_task_storage_get failed", __func__, __LINE__);
+		scx_err_loc("bpf_task_storage_get failed");
 		return NULL;
 	}
 
 	data = scx_alloc(&scx_task_allocator);
 	if (unlikely(!data)) {
-		bpf_printk("%s:%d scx_alloc failed", __func__, __LINE__);
+		scx_err_loc("scx_alloc failed");
 		return NULL;
 	}
 
@@ -69,8 +70,10 @@ void __arena *scx_task_data(struct task_struct *p)
 	scx_arena_subprog_init();
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
-	if (!mval)
+	if (!mval) {
+		scx_err_loc("bpf_task_storage_get failed");
 		return NULL;
+	}
 
 	data = mval->data;
 
@@ -85,8 +88,10 @@ void scx_task_free(struct task_struct *p)
 	scx_arena_subprog_init();
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
-	if (!mval)
+	if (!mval) {
+		scx_err_loc("bpf_task_storage_get failed");
 		return;
+	}
 
 	scx_alloc_free_idx(&scx_task_allocator, mval->tid.idx);
 	bpf_task_storage_delete(&scx_task_map, p);
