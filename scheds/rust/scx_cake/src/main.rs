@@ -279,6 +279,19 @@ fn pack_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> u64 {
     packed
 }
 
+#[inline]
+fn fast_scan_probe_bits(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> u64 {
+    let mut bits = 0u64;
+
+    for &cpu in slots.iter().take(CPU_FAST_PROBE_SLOTS) {
+        if usize::from(cpu) < topology::MAX_CPUS {
+            bits |= 1u64 << (u32::from(cpu) & 63);
+        }
+    }
+
+    bits
+}
+
 /// 🍰 scx_cake: A CAKE-inspired sched_ext CPU scheduler
 ///
 /// This scheduler adapts CAKE's low-latency scheduling ideas to CPU time.
@@ -730,6 +743,7 @@ impl<'a> Scheduler<'a> {
                 );
                 rodata.cpu_fast_probe[i] = active_fast_scan_probe_slots(fast_scan);
                 rodata.cpu_fast_probe_pack[i] = pack_fast_scan_probe_slots(fast_scan) as _;
+                rodata.cpu_fast_probe_bits[i] = fast_scan_probe_bits(fast_scan);
             }
 
             info!("Topology Strategy: Per-CPU local-first dispatch");
@@ -1111,5 +1125,13 @@ mod tests {
             (packed >> (CPU_FAST_PROBE_PACK_SLOT_BITS * 3)) & CPU_FAST_PROBE_PACK_SLOT_MASK,
             CPU_FAST_PROBE_PACK_SLOT_MASK
         );
+    }
+
+    #[test]
+    fn fast_scan_probe_bits_omits_invalid_tail_slots() {
+        let slots = [7, 4, 2, u16::MAX];
+        let bits = fast_scan_probe_bits(slots);
+
+        assert_eq!(bits, (1u64 << 7) | (1u64 << 4) | (1u64 << 2));
     }
 }
