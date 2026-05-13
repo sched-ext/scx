@@ -150,10 +150,6 @@ impl<'a> Scheduler<'a> {
             let init_pin = "/sys/fs/bpf/pandemonium/task_class_init";
             std::fs::remove_file(init_pin).ok();
             skel.maps.task_class_init.pin(init_pin).ok();
-
-            let compositor_pin = "/sys/fs/bpf/pandemonium/compositor_map";
-            std::fs::remove_file(compositor_pin).ok();
-            skel.maps.compositor_map.pin(compositor_pin).ok();
         } else {
             log_warn!("BPFFS NOT AVAILABLE: map pinning skipped (scheduler still functional)");
         }
@@ -372,20 +368,6 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    // POPULATE COMPOSITOR MAP ENTRY
-    pub fn write_compositor(&self, name: &str) -> Result<()> {
-        let mut key = [0u8; 16];
-        let bytes = name.as_bytes();
-        let len = bytes.len().min(15);
-        key[..len].copy_from_slice(&bytes[..len]);
-        let val = [1u8];
-        self.skel
-            .maps
-            .compositor_map
-            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
-        Ok(())
-    }
-
     // READ UEI EXIT INFO. RETURNS (should_restart).
     pub fn read_exit_info(&self) -> bool {
         let data = self.skel.maps.data_data.as_ref().unwrap();
@@ -440,11 +422,6 @@ impl Drop for Scheduler<'_> {
             .maps
             .task_class_init
             .unpin("/sys/fs/bpf/pandemonium/task_class_init");
-        let _ = self
-            .skel
-            .maps
-            .compositor_map
-            .unpin("/sys/fs/bpf/pandemonium/compositor_map");
         let _ = std::fs::remove_dir("/sys/fs/bpf/pandemonium");
     }
 }

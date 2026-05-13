@@ -1,6 +1,6 @@
 # PANDEMONIUM
 
-A Linux kernel scheduler for sched_ext, built in Rust and C23. PANDEMONIUM classifies every task by behavior — wakeup frequency, context switch rate, runtime, sleep patterns — and adapts scheduling decisions in real time. A critically-damped harmonic oscillator drives CoDel-inspired stall detection with the literal RFC 8289 sojourn metric and an R_eff-derived equilibrium reference. Resistance affinity (effective resistance from the Laplacian pseudoinverse of the CPU topology graph) provides topology-aware task placement for pipe/IPC storms. Multiplicative Weight Updates (MWU) balance six competing expert profiles across four loss pathways.
+A Linux kernel scheduler for sched_ext, built in Rust and C23. PANDEMONIUM classifies every task by behavior — wakeup frequency, context switch rate, runtime, sleep patterns — and adapts scheduling decisions in real time. A damped harmonic oscillator drives CoDel-inspired stall detection with the literal RFC 8289 sojourn metric and an R_eff-derived equilibrium reference. Resistance affinity (effective resistance from the Laplacian pseudoinverse of the CPU topology graph) provides topology-aware task placement for pipe/IPC storms. Multiplicative Weight Updates (MWU) balance six competing expert profiles across four loss pathways.
 
 Three-tier behavioral dispatch, overflow sojourn rescue, longrun detection, tier-aware preempt scaling, sleep-informed batch tuning, classification-gated DSQ routing, workload regime detection, vtime ceiling with new-task lag penalty, hard starvation rescue, and a persistent process database that learns task classifications across lifetimes.
 
@@ -8,120 +8,129 @@ PANDEMONIUM is included in the [sched-ext/scx](https://github.com/sched-ext/scx)
 
 ## Performance
 
-12 AMD Zen CPUs, kernel 6.18+, clang 21. The tables below report v5.8.0 PANDEMONIUM numbers from a single-iteration bench-scale run across 2C/4C/8C/12C; the v5.9.0 deltas at 12C are summarized in the next subsection. EEVDF and scx_bpfland baselines are best-3-of-N historical (28 and 26 complete runs across 75 bench-scale sessions) — those baselines don't drift across PANDEMONIUM versions. v5.8.0 closed the 2C structural starvation class via the rescue-fairness fix and the missing CPU-bound demotion in stopping() that was leaving long-runners stuck at TIER_INTERACTIVE (longrun WORST 19s -> 13ms at 2C, mixed WORST 29s -> 16ms at 2C). Bench-fork-thread lands within 1% of EEVDF and ~40% ahead of scx_bpfland.
+12 AMD Zen CPUs, kernel 6.18+, clang 21. PANDEMONIUM and scx_cake numbers below are from a single 3-iteration bench-scale run (2026-05-13, v5.10.0 with chaos primitives + 16-sample raw windows + no Schmitt-streak confirmation in MWU). EEVDF and scx_bpfland baselines are best-3-of-N historical (28 and 26 complete runs across 75 bench-scale sessions) — those baselines don't drift across PANDEMONIUM versions. scx_cake is at nightly `dbdbd4f5` (RitzDaCat/scx_cake-nightly), built locally.
 
-### v5.9.0 Deltas (12C, single iteration vs v5.8.0 24-run mean)
+### v5.10.0 vs v5.9.0 (best-mode deltas)
 
-| Metric            | v5.8.0 mean | v5.9.0     | Delta              |
-|-------------------|-------------|------------|--------------------|
-| Burst P99         | 392us       | **83us**   | -4.7x              |
-| Longrun P99       | 489us       | **244us**  | -2.0x              |
-| Mixed P99         | 724us       | **139us**  | -5.2x              |
-| IPC P99           | 107us       | **36us**   | -3.0x              |
-| Deadline miss     | 3.56%       | **0.1%**   | -35x               |
-| Schbench P99      | 75us        | 77us       | hold               |
-| App launch P99    | 2,983us     | 4,692us    | regression (n=1)   |
+| Metric (best mode)         | Core | v5.9.0  | v5.10.0 | Δ            |
+|----------------------------|------|---------|---------|--------------|
+| Latency P99 (ADAPTIVE)     | 2C   | 167us   | 98us    | 1.7x faster  |
+| Burst P99 (BPF)            | 4C   | 123us   | 83us    | 1.5x faster  |
+| Burst P99 (ADAPTIVE)       | 8C   | 111us   | 77us    | 1.4x faster  |
+| Burst P99 (ADAPTIVE)       | 12C  | 132us   | 79us    | 1.7x faster  |
+| Longrun P99 (BPF)          | 4C   | 627us   | 143us   | 4.4x faster  |
+| Mixed P99 (BPF)            | 4C   | 581us   | 390us   | 1.5x faster  |
+| Mixed P99 (BPF)            | 8C   | 240us   | 153us   | 1.6x faster  |
+| Mixed P99 (ADAPTIVE)       | 4C   | 432us   | 246us   | 1.8x faster  |
+| Mixed P99 (ADAPTIVE)       | 12C  | 462us   | 271us   | 1.7x faster  |
+| IPC P99 (ADAPTIVE)         | 2C   | 5,266us | 935us   | 5.6x faster  |
+| IPC P99 (ADAPTIVE)         | 8C   | 144us   | 72us    | 2.0x faster  |
+| Deadline miss (BPF)        | 4C   | 0.7%    | 0.1%    | 7x better    |
+| Deadline miss (ADAPTIVE)   | 12C  | 0.1%    | 0.0%    | better       |
+| Longrun P99 (ADAPTIVE)     | 12C  | 99us    | 220us   | 2.2x slower  |
+| Mixed P99 (BPF)            | 12C  | 94us    | 320us   | 3.4x slower  |
+| IPC P99 (BPF)              | 12C  | 27us    | 349us   | 12.9x slower |
 
-Architectural changes in v5.9.0 (affinity threading through the R_eff spill chain, `MAX_AFFINITY_CANDIDATES = MAX_CPUS >> 3` topology coverage, slice-relative INTERACTIVE→BATCH demotion, tier-priority tick preempt) address structural classes that did not show on the v5.8.0 12C single-iteration cells. The 32C affinity-stranding class closure was confirmed by a 3.5+ hour real-workload run on Threadripper (game + KVM + libvirt, no watchdog kills, no stalls); multi-iteration sweeps across 2C/4C/8C/12C are pending. The app-launch regression is single-iteration and likely under-sampled — to be retested under multi-run aggregation.
+Wins concentrated at 2C/4C/8C across burst, mixed, and deadline-miss. ADAPTIVE picks up 1.4-1.7x wins on burst and mixed at 8C/12C from the chaos primitives (HVG-λ + Bandt-Pompe over 16-sample raw windows replacing the Schmitt-trigger regime detector). 12C carries the remaining regression cluster — longrun ADAPTIVE and IPC BPF. Throughput run-to-run stddev: under 1s at 4C+, 0.39-4.58s at 2C.
 
 ### P99 Wakeup Latency (interactive probe under CPU saturation)
 
-| Cores | EEVDF    | scx_bpfland | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
-|-------|----------|-------------|-------------------|------------------------|
-| 2     | 2,058us  | 2,004us     | **87us**          | 93us                   |
-| 4     | 1,246us  | 2,003us     | **65us**          | 68us                   |
-| 8     | 425us    | 2,003us     | **66us**          | 68us                   |
-| 12    | 344us    | 2,002us     | **68us**          | 70us                   |
+| Cores | EEVDF    | scx_bpfland | scx_cake  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|-------------|-----------|-------------------|------------------------|
+| 2     | 2,058us  | 2,004us     | 2,628us   | 206us             | **98us**               |
+| 4     | 1,246us  | 2,003us     | 2,054us   | **76us**          | 77us                   |
+| 8     | 425us    | 2,003us     | 2,073us   | 77us              | **76us**               |
+| 12    | 344us    | 2,002us     | 2,097us   | **76us**          | 76us                   |
 
-Sub-95us in both modes at every core count.
+Sub-210us at every core count. scx_cake parked at ~2ms throughout — its predictive route cache misses on this saturation probe and falls back to the native idle scan every wake.
 
 ### Burst P99 (fork/exec storm under CPU saturation)
 
-| Cores | EEVDF    | scx_bpfland | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
-|-------|----------|-------------|-------------------|------------------------|
-| 2     | 2,262us  | 2,006us     | 189us             | **69us**               |
-| 4     | 3,223us  | 2,003us     | 687us             | **207us**              |
-| 8     | 2,331us  | 2,004us     | 611us             | **93us**               |
-| 12    | 1,891us  | 2,001us     | **79us**          | 196us                  |
+| Cores | EEVDF    | scx_bpfland | scx_cake  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|-------------|-----------|-------------------|------------------------|
+| 2     | 2,262us  | 2,006us     | 2,543us   | **192us**         | 396us                  |
+| 4     | 3,223us  | 2,003us     | 2,068us   | 83us              | **75us**               |
+| 8     | 2,331us  | 2,004us     | 2,170us   | 80us              | **77us**               |
+| 12    | 1,891us  | 2,001us     | 2,084us   | 142us             | **79us**               |
 
-Both modes beat EEVDF and scx_bpfland by a wide margin. Burst-storm cost is workload-sensitive across iterations.
+Best PANDEMONIUM mode under 200us at every core count. scx_cake at ~2ms on burst at every core count.
 
 ### Longrun P99 (interactive latency with sustained CPU-bound long-runners)
 
-| Cores | EEVDF    | scx_bpfland | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
-|-------|----------|-------------|-------------------|------------------------|
-| 2     | 2,293us  | 2,000us     | 2,327us           | **559us**              |
-| 4     | 1,421us  | 2,003us     | 870us             | **68us**               |
-| 8     | **60us** | 2,003us     | **439us**         | 655us                  |
-| 12    | 126us    | 2,002us     | 674us             | **80us**               |
+| Cores | EEVDF    | scx_bpfland | scx_cake  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|-------------|-----------|-------------------|------------------------|
+| 2     | 2,293us  | 2,000us     | 1,929us   | 862us             | **834us**              |
+| 4     | 1,421us  | 2,003us     | 1,054us   | 143us             | **134us**              |
+| 8     | **60us** | 2,003us     | 2,001us   | 161us             | 194us                  |
+| 12    | **126us**| 2,002us     | 2,002us   | 152us             | 220us                  |
 
-ADAPTIVE 4C/12C sub-100us — the CPU-bound demotion fix in stopping() finally lets INTERACTIVE long-runners reclassify to BATCH so tick() can preempt them on prober wakeups. WORST tails bounded: longrun WORST 13ms at 2C (vs 19s pre-v5.8.0).
+PANDEMONIUM leads at 2C/4C. 8C and 12C above EEVDF — the longrun regression cluster. scx_cake parks at the 2ms wake quantum on the sustained-load workload.
 
 ### Mixed Latency P99 (interactive + batch concurrent)
 
-| Cores | EEVDF    | scx_bpfland | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
-|-------|----------|-------------|-------------------|------------------------|
-| 2     | 2,412us  | 2,000us     | 1,993us           | **876us**              |
-| 4     | 1,683us  | 2,003us     | 217us             | **72us**               |
-| 8     | 348us    | 2,003us     | 572us             | **326us**              |
-| 12    | 494us    | 2,002us     | 644us             | **81us**               |
+| Cores | EEVDF    | scx_bpfland | scx_cake  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|-------------|-----------|-------------------|------------------------|
+| 2     | 2,412us  | 2,000us     | 2,003us   | **809us**         | 864us                  |
+| 4     | 1,683us  | 2,003us     | 1,078us   | 390us             | **246us**              |
+| 8     | 348us    | 2,003us     | 2,001us   | **153us**         | 320us                  |
+| 12    | 494us    | 2,002us     | 2,002us   | 320us             | **271us**              |
 
-ADAPTIVE under EEVDF at every core count, sub-100us at 4C and 12C. Mixed WORST 16ms at 2C (vs 29s pre-v5.8.0); deadline miss collapsed to ≤0.1% in every ADAPTIVE cell (table below).
+PANDEMONIUM under EEVDF at every core count. scx_cake at ~2ms on 3 of 4 core counts; its predictive cache pays off only at 4C on this mix.
 
 ### Deadline Miss Ratio (16.6ms frame target)
 
-| Cores | EEVDF   | scx_bpfland | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
-|-------|---------|-------------|-------------------|------------------------|
-| 2     | 13.1%   | 69.4%       | 0.2%              | **0.1%**               |
-| 4     | 8.6%    | 60.4%       | 0.1%              | **0.0%**               |
-| 8     | 10.8%   | 53.8%       | 0.1%              | **0.0%**               |
-| 12    | 10.4%   | 54.7%       | 0.1%              | **0.0%**               |
+| Cores | EEVDF   | scx_bpfland | scx_cake | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|---------|-------------|----------|-------------------|------------------------|
+| 2     | 13.1%   | 69.4%       | 59.0%    | **0.3%**          | **0.3%**               |
+| 4     | 8.6%    | 60.4%       | 60.9%    | **0.1%**          | 0.2%                   |
+| 8     | 10.8%   | 53.8%       | 69.1%    | **0.1%**          | **0.1%**               |
+| 12    | 10.4%   | 54.7%       | 70.6%    | 0.1%              | **0.0%**               |
 
-Sub-1% at every core count, 0.0% in every ADAPTIVE cell at 4C and above. v5.7.0's 4C bimodal pattern (0.2%–20% across runs) is gone.
+PANDEMONIUM sub-1% at every core count, 0.0% in 12C ADAPTIVE. scx_cake misses the 16.6ms frame target on **59-70%** of frames at every core count — the headline failure mode of its predictive cache + reactive cycling design.
 
 ### Burst Recovery P99 (latency after storm subsides)
 
 | Cores | PANDEMONIUM (bench-contention burst-recovery phase) |
 |-------|------------------------------------------------------|
-| 2     | burst 65us / recovery 62us                          |
-| 4     | burst 73us / recovery 73us                          |
-| 8     | burst 76us / recovery 76us                          |
-| 12    | burst 77us / recovery 76us                          |
+| 2     | base 75us / burst 84us / recovery 82us              |
+| 4     | base 73us / burst 73us / recovery 66us              |
+| 8     | base 67us / burst 70us / recovery 69us              |
+| 12    | base 76us / burst 64us / recovery 74us              |
 
-Sub-80us recovery at every core count.
+Recovery sub-85us at every core count. Numbers from bench-contention v5.10.0 (2026-05-12).
 
 ### App Launch P99
 
-| Cores | EEVDF    | scx_bpfland | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
-|-------|----------|-------------|-------------------|------------------------|
-| 2     | **2,899us**| 2,194us   | 12,601us          | 3,595us                |
-| 4     | 4,058us  | **2,199us** | 4,516us           | 2,722us                |
-| 8     | 4,092us  | **1,723us** | 2,700us           | 4,405us                |
-| 12    | 3,552us  | **1,520us** | 6,177us           | 2,994us                |
+| Cores | EEVDF    | scx_bpfland | scx_cake    | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|-------------|-------------|-------------------|------------------------|
+| 2     | 2,899us  | **2,194us** | 2,354us     | 10,999us          | 6,577us                |
+| 4     | 4,058us  | 2,199us     | **1,367us** | 6,973us           | 5,398us                |
+| 8     | 4,092us  | 1,723us     | **1,352us** | 5,970us           | 2,711us                |
+| 12    | 3,552us  | 1,520us     | **1,214us** | 16,495us          | 3,633us                |
 
-scx_bpfland keeps the dense-end edge here. ADAPTIVE app-launch dropped substantially across all core counts after the CPU-bound demotion fix removed long-runner head-of-queue contention.
+scx_cake wins app launch at 4C/8C/12C — its `cake_message_wake_candidate` SYNC fast-path bypasses routing for short SYNC wakes, which is exactly the app-launch pattern. scx_bpfland wins 2C. PANDEMONIUM ADAPTIVE closest to the leaders at 12C (3,633us). App-launch remains a known trade-off — the cold-start cost from procdb warm-up vs flat predicate-driven policies.
 
 ### IPC Round-Trip P99
 
-| Cores | EEVDF    | scx_bpfland | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
-|-------|----------|-------------|-------------------|------------------------|
-| 2     | **12us** | 18us        | 751us             | 4,240us                |
-| 4     | 118us    | 23us        | 3,952us           | **58us**               |
-| 8     | **23us** | 71us        | 109us             | **68us**               |
-| 12    | **15us** | 57us        | 32us              | **25us**               |
+| Cores | EEVDF    | scx_bpfland | scx_cake  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|-------------|-----------|-------------------|------------------------|
+| 2     | **12us** | 18us        | 999us     | 891us             | 935us                  |
+| 4     | 118us    | **23us**    | 1,005us   | 1,199us           | 124us                  |
+| 8     | **23us** | 71us        | 999us     | 93us              | 72us                   |
+| 12    | **15us** | 57us        | 873us     | 349us             | 329us                  |
 
-12C ADAPTIVE within 10us of EEVDF. 2C and BPF 4C still show the pipe-partner placement tail at saturation — the resistance-affinity gap on thin topologies where R_eff peer counts are limited.
+EEVDF leads on every cell. scx_cake parks at ~1ms across all core counts — its predictive cache misses on the pipe ping-pong pattern and falls back to the native idle scan, same as on wake-up P99. PANDEMONIUM closest at 8C ADAPTIVE (72us) and 4C ADAPTIVE (124us).
 
-### Fork/Thread IPC (`perf bench sched messaging`, 12C, v5.8.0)
+### Fork/Thread IPC (`perf bench sched messaging`, 12C, v5.10.0)
 
-| Scheduler | Time | vs EEVDF | Cache Misses | IPC |
-|-----------|------|----------|--------------|-----|
-| EEVDF                    | 16.38s | baseline  | 29M  | 0.44 |
-| PANDEMONIUM (BPF)        | 16.51s | +0.8%     | 35M  | 0.44 |
-| PANDEMONIUM (ADAPTIVE)   | 16.53s | +0.9%     | 33M  | 0.45 |
-| scx_bpfland              | 23.04s | +40.6%    | 57M  | 0.42 |
+| Scheduler                | Time     | vs EEVDF  | Cache Misses | IPC   |
+|--------------------------|----------|-----------|--------------|-------|
+| EEVDF                    | 16.987s  | baseline  | 39.88M       | 0.411 |
+| PANDEMONIUM (BPF)        | 17.011s  | +0.1%     | 35.75M       | 0.413 |
+| PANDEMONIUM (ADAPTIVE)   | 17.025s  | +0.2%     | 35.24M       | 0.411 |
+| scx_bpfland              | 23.447s  | +38.0%    | 68.27M       | 0.394 |
 
-BPF and ADAPTIVE land within 0.1% of each other and ~40% ahead of scx_bpfland. ADAPTIVE actually edges out EEVDF on IPC (0.45 vs 0.44) despite the slightly longer wall-time, reflecting the cache-locality benefit from resistance affinity.
+BPF and ADAPTIVE land within 0.2% of EEVDF wall-time and ~38% ahead of scx_bpfland. Both PANDEMONIUM modes carry ~10% lower cache miss count than EEVDF (35.75M / 35.24M vs 39.88M), and BPF edges out EEVDF on IPC (0.413 vs 0.411) — the cache-locality benefit from resistance affinity.
 
 ### Energy Efficiency (`bench-power`, 12C, v5.9.0)
 
@@ -258,7 +267,6 @@ No burst detector. Prior versions layered three (CUSUM on enqueue-interval EWMA,
 - **CPU-Bound Demotion**: avg_runtime above `cpu_bound_thresh_ns` demotes INTERACTIVE to BATCH
 - **Kworker Floor**: PF_WQ_WORKER floors at INTERACTIVE
 - **High-Priority Kthread Override** (v5.8.0): `PF_KTHREAD` at `static_prio <= 110` (`task_nice <= -10`) forced to BATCH regardless of behavioral score. ZFS workers (`z_rd_int_*`, `arc_*`), kopia helpers, and similar storage kthreads no longer compete with userspace LAT_CRITICAL. The kworker floor wins for `PF_WQ_WORKER` (a `PF_KTHREAD` subset), so workqueue workers continue to be treated as latency-adjacent.
-- **Compositor Boosting**: BPF hash map, default compositors always LAT_CRITICAL, user-extensible via `--compositor`
 
 ### Process Database (procdb)
 
@@ -401,10 +409,10 @@ pacman -S clang libbpf bpf rust
 ./pandemonium.py clean          # Wipe build artifacts
 
 # Manual
-CARGO_TARGET_DIR=/tmp/pandemonium-build cargo build --release
+CARGO_TARGET_DIR=$HOME/.cache/pandemonium-build cargo build --release
 ```
 
-vmlinux.h is generated from the running kernel's BTF via bpftool on first build and cached at `~/.cache/pandemonium/vmlinux.h`. The source directory path contains spaces, so `CARGO_TARGET_DIR=/tmp/pandemonium-build` is required for the vendored libbpf Makefile.
+vmlinux.h is generated from the running kernel's BTF via bpftool on first build and cached at `~/.cache/pandemonium/vmlinux.h`. The cargo target tree lives at `~/.cache/pandemonium-build` (alongside the log and vmlinux caches under `~/.cache/pandemonium`), so all per-user pandemonium state sits in one place. The `CARGO_TARGET_DIR=$HOME/.cache/pandemonium-build` override is also what lets the vendored libbpf Makefile build cleanly when the source tree path contains spaces.
 
 After install:
 
@@ -416,11 +424,17 @@ sudo systemctl enable pandemonium         # Start on boot
 ## Usage
 
 ```bash
-sudo scx_pandemonium                            # Default: adaptive mode
-sudo scx_pandemonium --no-adaptive              # BPF-only (no Rust control loop)
-sudo scx_pandemonium --compositor gamescope     # Boost an additional compositor to LAT_CRITICAL
-sudo scx_pandemonium -v                         # Verbose telemetry on stdout
+sudo scx_pandemonium                  # Default: adaptive mode
+sudo scx_pandemonium --no-adaptive    # BPF-only (no Rust control loop)
+sudo scx_pandemonium -v               # Verbose telemetry on stdout
 ```
+
+There is no compositor allowlist. Compositors land at `LAT_CRITICAL` naturally
+through the behavioral classifier (high wakeup frequency × high context-switch
+rate × short avg runtime → `lat_cri` peaks), and procdb warm-starts known
+names from prior sessions. The earlier hardcoded comm boost was scaffolding
+from when the classifier was less reliable on cold-start; the current
+classifier no longer needs the safety net.
 
 ### Monitoring
 
@@ -466,8 +480,8 @@ All benchmarks compare across core counts via CPU hotplug (2, 4, 8, ..., max). R
 ## Testing
 
 ```bash
-CARGO_TARGET_DIR=/tmp/pandemonium-build cargo test --release   # Unit tests (no root)
-sudo CARGO_TARGET_DIR=/tmp/pandemonium-build \
+CARGO_TARGET_DIR=$HOME/.cache/pandemonium-build cargo test --release   # Unit tests (no root)
+sudo CARGO_TARGET_DIR=$HOME/.cache/pandemonium-build \
      cargo test --release --test gate -- --ignored \
      --test-threads=1 full_gate                                 # Integration gate (requires root)
 ```

@@ -3,8 +3,10 @@
 //
 // ONE THREAD: MONITOR LOOP (1-SECOND CONTROL LOOP)
 //   READS BPF PER-CPU HISTOGRAMS FOR P99 COMPUTATION.
-//   DETECTS WORKLOAD REGIME VIA SCHMITT TRIGGER.
-//   MWU ORCHESTRATOR TUNES ALL 11 KNOBS WITHIN REGIME.
+//   MAINTAINS RAW 64-SAMPLE WINDOWS (idle_pct, wakeup_rate).
+//   DETECTS WORKLOAD REGIME VIA HVG MEAN DEGREE + BANDT-POMPE D=3
+//   PERMUTATION ENTROPY OVER THOSE WINDOWS (NO SCHMITT, NO EWMA).
+//   MWU ORCHESTRATOR (5 PATHWAYS) TUNES ALL 11 KNOBS WITHIN REGIME.
 //
 // BPF PRODUCES HISTOGRAMS, RUST READS AND REACTS. RUST WRITES KNOBS,
 // BPF READS THEM ON THE VERY NEXT SCHEDULING DECISION.
@@ -14,11 +16,20 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::chaos::{self, RawWindow};
 use crate::procdb::ProcessDb;
 use crate::scheduler::{PandemoniumStats, Scheduler};
 use crate::tuning::{
     self, detect_regime, scaled_regime_knobs, MwuController, MwuSignals, Regime, HIST_BUCKETS,
 };
+
+// CHAOS WINDOW SIZE. 16 SAMPLES AT 1HZ = 16-SECOND REGIME MEMORY.
+// SIZED FOR BENCH-SCALE RESPONSIVENESS (16-30s iterations) RATHER THAN
+// MINUTE-SCALE DESKTOP STEADY STATE. HVG IS O(N^2) = 256 COMPARISONS
+// PER TICK; BP D=3 GETS 14 LENGTH-3 PATTERNS OVER 6 BUCKETS -- LIMITED
+// RESOLUTION BUT ENOUGH TO DISTINGUISH PERIODIC FROM RANDOM IN ONE
+// BENCH ITERATION.
+const CHAOS_WIN: usize = 16;
 
 // REGIME THRESHOLDS, PROFILES, AND KNOB COMPUTATION LIVE IN tuning.rs
 // (ZERO BPF DEPENDENCIES, TESTABLE OFFLINE)
@@ -41,6 +52,15 @@ pub fn monitor_loop(
     let mut prev_hist = [[0u64; HIST_BUCKETS]; 3];
     let mut prev_sleep = [0u64; SLEEP_BUCKETS];
     let mut regime = Regime::Mixed;
+
+    // CHAOS RAW WINDOWS. idle_pct DRIVES REGIME DETECTION; wakeup_rate
+    // DRIVES THE MWU CHAOS-TRANSITION PATHWAY (BANDT-POMPE IS ORDINAL,
+    // SO ABSOLUTE RATE SCALE DOES NOT MATTER -- THE PATTERN DOES).
+    let mut idle_win: RawWindow<CHAOS_WIN> = RawWindow::new();
+    let mut wake_win: RawWindow<CHAOS_WIN> = RawWindow::new();
+    let mut prev_bp_h: f64 = 0.0;
+    let chaos_count = chaos::ChaosCounter::new();
+    let mut prev_lambda_above: bool = false;
     // READ CURRENT tau SNAPSHOT FROM THE BPF-SIDE KNOB MAP. main.rs WROTE IT
     // ONCE AT TOPOLOGY DETECT; THE ADAPTIVE LOOP RE-READS SO TAU-SCALED REGIME
     // KNOBS AGREE WITH TAU-SCALED BPF INIT AT FIRST TICK AND EVERY REGIME CHANGE.
@@ -219,8 +239,27 @@ pub fn monitor_loop(
             0
         };
 
-        // DETECT REGIME (SCHMITT TRIGGER + 2-TICK HOLD)
-        let detected = detect_regime(regime, idle_pct);
+        // CHAOS UPDATE: PUSH RAW SAMPLES INTO WINDOWS BEFORE COMPUTING
+        // ANY DERIVED FEATURES. WAKE WINDOW USES THE PER-SECOND DELTA
+        // (delta_enq_wake) RATHER THAN AN INSTANTANEOUS RATE.
+        idle_win.push(idle_pct as f64);
+        wake_win.push(delta_enq_wake as f64);
+
+        // CHAOS PRIMITIVES. ONE O(N^2) HVG PASS PER WINDOW; BP IS O(N).
+        let (idle_lambda, _idle_hvg_s) = chaos::hvg_stats(&idle_win);
+        let wake_bp_h = chaos::bandt_pompe_d3(&wake_win);
+        let bp_delta = wake_bp_h - prev_bp_h;
+        let mean_idle = chaos::mean(&idle_win);
+
+        // CHAOS CROSSING DIAGNOSTIC: BUMP COUNTER ON EITHER GATE FIRING.
+        let lambda_above = idle_lambda >= chaos::HVG_LAMBDA_CHAOTIC_MIN;
+        if (lambda_above && !prev_lambda_above) || bp_delta > 0.10 {
+            chaos_count.bump();
+        }
+        prev_lambda_above = lambda_above;
+
+        // DETECT REGIME (CHAOS-DRIVEN + 2-TICK HOLD)
+        let detected = detect_regime(mean_idle, idle_lambda, wake_bp_h);
 
         let mut regime_changed_this_tick = false;
         if detected != regime {
@@ -263,6 +302,8 @@ pub fn monitor_loop(
                 // Per-CPU normalization here re-introduced an nr_cpus^2 effective
                 // threshold and latched on quiet 2-4C systems.
                 wakeup_rate: delta_enq_wake,
+                hvg_lambda: idle_lambda,
+                bp_h_delta: bp_delta,
             };
             // OSCILLATOR-AWARE GATING: READ THE BPF DAMPED-HARMONIC
             // OSCILLATOR'S CURRENT STATE BEFORE MWU DECIDES. PATHWAYS
@@ -317,7 +358,7 @@ pub fn monitor_loop(
 
         if verbose && tuning::should_print_telemetry(tick_counter, stability_score) {
             println!(
-                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us procdb: {}/{} sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms rescue: {} l2: B={}% I={}% L={}% [{}{}]",
+                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us procdb: {}/{} sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms rescue: {} l2: B={}% I={}% L={}% chaos: lam={:.2} H={:.2} x={} [{}{}]",
                 delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
                 delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
                 wake_avg_us, p99_us, tp99_b, tp99_i, tp99_l,
@@ -326,7 +367,9 @@ pub fn monitor_loop(
                 io_pct, knobs.slice_ns / 1000, knobs.batch_slice_ns / 1000,
                 delta_reenq, sojourn_ms, sojourn_thresh_ms,
                 delta_rescue,
-                l2_pct_b, l2_pct_i, l2_pct_l, regime.label(), longrun_label,
+                l2_pct_b, l2_pct_i, l2_pct_l,
+                idle_lambda, wake_bp_h, chaos_count.load(),
+                regime.label(), longrun_label,
             );
         }
 
@@ -353,6 +396,7 @@ pub fn monitor_loop(
         prev_hist = cur_hist;
         prev_sleep = cur_sleep;
         prev = stats;
+        prev_bp_h = wake_bp_h;
     }
 
     // PROCDB: SAVE LEARNED CLASSIFICATIONS TO DISK

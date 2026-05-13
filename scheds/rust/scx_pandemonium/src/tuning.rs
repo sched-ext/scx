@@ -2,14 +2,15 @@
 // PURE-RUST MODULE: ZERO BPF DEPENDENCIES
 // SHARED BETWEEN BINARY CRATE (scheduler.rs, adaptive.rs) AND LIB CRATE (tests)
 
-// REGIME THRESHOLDS (SCHMITT TRIGGER)
-// DIRECTIONAL HYSTERESIS PREVENTS OSCILLATION AT REGIME BOUNDARIES.
-// WIDE DEAD ZONES: MUST CLEARLY ENTER A REGIME AND CLEARLY LEAVE IT.
+// REGIME THRESHOLDS (CHAOS-DRIVEN BANDS)
+// THE SCHMITT-TRIGGER ENTER/EXIT PAIR IS GONE. THESE TWO THRESHOLDS
+// DEFINE THE HIGH/LOW BANDS OF mean_idle_pct USED BY THE CHAOS-DRIVEN
+// REGIME DETECTOR: BOTH ENTRY AND EXIT GO THROUGH THE SAME WINDOWED
+// MEAN, AND THE HVG/BP PRIMITIVES DECIDE WHEN ORDER IS SUFFICIENT TO
+// LATCH LIGHT OR HEAVY (OTHERWISE MIXED).
 
-pub const HEAVY_ENTER_PCT: u64 = 10; // ENTER HEAVY: IDLE < 10%
-pub const HEAVY_EXIT_PCT: u64 = 25; // LEAVE HEAVY: IDLE > 25%
-pub const LIGHT_ENTER_PCT: u64 = 50; // ENTER LIGHT: IDLE > 50%
-pub const LIGHT_EXIT_PCT: u64 = 30; // LEAVE LIGHT: IDLE < 30%
+pub const HEAVY_ENTER_PCT: u64 = 10; // mean_idle <= THIS BAND -> CANDIDATE HEAVY
+pub const LIGHT_ENTER_PCT: u64 = 50; // mean_idle >= THIS BAND -> CANDIDATE LIGHT
 
 // REGIME PROFILES
 // PREEMPT_THRESH CONTROLS WHEN TICK PREEMPTS BATCH TASKS (IF INTERACTIVE WAITING).
@@ -210,35 +211,34 @@ pub fn scaled_regime_knobs(r: Regime, _nr_cpus: u64, tau_ns: u64) -> TuningKnobs
     knobs
 }
 
-// REGIME DETECTION (SCHMITT TRIGGER)
-// DIRECTION-AWARE: CURRENT REGIME DETERMINES WHICH THRESHOLDS APPLY.
-// DEAD ZONES PREVENT OSCILLATION THAT SINGLE-BOUNDARY DETECTION CAUSED.
+// REGIME DETECTION (CHAOS-DRIVEN)
+// THE SCHMITT TRIGGER IS GONE. REGIME IS A FUNCTION OF:
+//   - mean_idle_pct: WINDOWED MEAN OVER THE LAST N TICKS
+//   - hvg_lambda:    HVG MEAN DEGREE OF THE idle_pct WINDOW
+//   - bp_h:          BANDT-POMPE D=3 PERMUTATION ENTROPY OF THE WINDOW
+// HYSTERESIS IS BUILT INTO THE WINDOW: SAMPLES MUST FLOW IN BEFORE THE
+// MEAN MOVES. THE 2-TICK HOLD IN THE MONITOR LOOP STAYS AS ADDITIONAL
+// SMOOTHING.
+//
+// LIGHT  := mean_idle HIGH  AND CHAOS-LOW (PERIODIC / IDLE-DOMINATED)
+// HEAVY  := mean_idle LOW   AND CHAOS-LOW (PERIODIC / SATURATED)
+// MIXED  := ANYTHING ELSE (REGIME IS UNSTABLE OR IN MID-BAND)
+//
+// THE chaos_low PREDICATE IS lambda < CHAOTIC_MIN OR bp_h < BP_H_HIGH.
+// EITHER PRIMITIVE INDICATING ORDER IS ENOUGH; THEY MEASURE DIFFERENT
+// THINGS (AMPLITUDE-AWARE VS AMPLITUDE-INVARIANT) AND THE FIRST TO
+// FIRE LATCHES THE REGIME TO LIGHT/HEAVY INSTEAD OF MIXED.
 
-pub fn detect_regime(current: Regime, idle_pct: u64) -> Regime {
-    match current {
-        Regime::Light => {
-            if idle_pct < LIGHT_EXIT_PCT {
-                Regime::Mixed
-            } else {
-                Regime::Light
-            }
-        }
-        Regime::Mixed => {
-            if idle_pct > LIGHT_ENTER_PCT {
-                Regime::Light
-            } else if idle_pct < HEAVY_ENTER_PCT {
-                Regime::Heavy
-            } else {
-                Regime::Mixed
-            }
-        }
-        Regime::Heavy => {
-            if idle_pct > HEAVY_EXIT_PCT {
-                Regime::Mixed
-            } else {
-                Regime::Heavy
-            }
-        }
+pub fn detect_regime(mean_idle_pct: f64, hvg_lambda: f64, bp_h: f64) -> Regime {
+    let chaos_low =
+        hvg_lambda < crate::chaos::HVG_LAMBDA_CHAOTIC_MIN || bp_h < crate::chaos::BP_H_HIGH;
+
+    if chaos_low && mean_idle_pct >= LIGHT_ENTER_PCT as f64 {
+        Regime::Light
+    } else if chaos_low && mean_idle_pct <= HEAVY_ENTER_PCT as f64 {
+        Regime::Heavy
+    } else {
+        Regime::Mixed
     }
 }
 
@@ -306,17 +306,17 @@ pub fn compute_p99_from_histogram(counts: &[u64; HIST_BUCKETS]) -> u64 {
 }
 
 // MWU ORCHESTRATOR
-// SCHMITT-GATED MULTIPLICATIVE WEIGHT UPDATES ACROSS ALL 11 TUNING KNOBS.
+// MULTIPLICATIVE WEIGHT UPDATES ACROSS ALL 11 TUNING KNOBS.
 // 6 EXPERT PROFILES, EACH A SCALE FACTOR ON THE REGIME BASELINE.
 // CORRECTED SCALE FACTORS: sum(EQ[i] * SCALE[i]) = 1.0 FOR EACH CONTINUOUS KNOB.
 // DISCRETE KNOBS (LAG, AFFINITY, DEPTH) USE MAJORITY VOTE, NOT WEIGHTED AVERAGE.
-// 4 LOSS PATHWAYS: P99 SPIKE, RESCUE DELTA, IO DELTA, FORK STORM.
+// 5 LOSS PATHWAYS: P99 SPIKE, RESCUE DELTA, IO DELTA, FORK STORM, CHAOS TRANSITION.
 // 1e-6 WEIGHT FLOOR PREVENTS UNDERFLOW (DEAD WEIGHTS CAN'T RECOVER).
+// PATHWAYS FIRE IMMEDIATELY -- NO SCHMITT-STYLE STREAK CONFIRMATION.
 
 const N_EXPERTS: usize = 6;
 const ETA: f64 = 8.0;
 const RELAX_RATE: f64 = 0.80;
-const SPIKE_CONFIRM: u32 = 2;
 const RELAX_HOLD: u32 = 2;
 const RELAX_CEIL_PCT: f64 = 0.70;
 const EQUILIBRIUM: [f64; N_EXPERTS] = [0.08, 0.44, 0.12, 0.12, 0.12, 0.12];
@@ -395,6 +395,15 @@ pub struct MwuSignals {
     pub io_pct: u64,
     pub rescue_count: u64,
     pub wakeup_rate: u64,
+    // CHAOS PRIMITIVES (RAW-WINDOW DERIVED, NO EWMA, NO SCHMITT).
+    // hvg_lambda     := HVG MEAN DEGREE OF THE idle_pct WINDOW
+    // bp_h_delta     := bp_h(THIS TICK) - bp_h(PREVIOUS TICK), WHERE
+    //                   bp_h IS BANDT-POMPE D=3 PERMUTATION ENTROPY ON
+    //                   THE wakeup_rate WINDOW, NORMALIZED TO [0, 1].
+    //                   POSITIVE = WORKLOAD ENTERED A MORE-DISORDERED
+    //                   ORDINAL REGIME WITHIN THE LAST SECOND.
+    pub hvg_lambda: f64,
+    pub bp_h_delta: f64,
 }
 
 // SNAPSHOT OF THE BPF DAMPED-HARMONIC OSCILLATOR'S ADAPTIVE STATE.
@@ -430,11 +439,10 @@ impl OscillatorState {
 pub struct MwuController {
     weights: [f64; N_EXPERTS],
     baseline: TuningKnobs,
-    spike_streak: u32,
     healthy_streak: u32,
-    fork_streak: u32,
     prev_io_bucket: IoBucket,
     prev_rescuing: bool,
+    prev_lambda_chaotic: bool,
     losses_applied: bool,
 }
 
@@ -443,22 +451,20 @@ impl MwuController {
         Self {
             weights: EQUILIBRIUM,
             baseline,
-            spike_streak: 0,
             healthy_streak: 0,
-            fork_streak: 0,
             prev_io_bucket: IoBucket::Mid,
             prev_rescuing: false,
+            prev_lambda_chaotic: false,
             losses_applied: false,
         }
     }
 
     pub fn reset(&mut self) {
         self.weights = EQUILIBRIUM;
-        self.spike_streak = 0;
         self.healthy_streak = 0;
-        self.fork_streak = 0;
         self.prev_io_bucket = IoBucket::Mid;
         self.prev_rescuing = false;
+        self.prev_lambda_chaotic = false;
         self.losses_applied = false;
     }
 
@@ -496,21 +502,16 @@ impl MwuController {
         let mut losses = [0.0f64; N_EXPERTS];
         let mut has_loss = false;
 
-        // PATHWAY 1: P99 SPIKE (SCHMITT-GATED)
+        // PATHWAY 1: P99 SPIKE (FIRES IMMEDIATELY)
         if above {
             self.healthy_streak = 0;
-            self.spike_streak += 1;
-            if self.spike_streak >= SPIKE_CONFIRM {
-                let v = ((worst - ceiling) as f64 / ceiling as f64).min(3.0);
-                losses[EX_BALANCED] += v * 0.5;
-                losses[EX_THROUGHPUT] += v * 1.0;
-                losses[EX_IO_HEAVY] += v * 0.6;
-                losses[EX_FORK_STORM] += v * 0.3;
-                losses[EX_SATURATED] += v * 0.9;
-                has_loss = true;
-            }
-        } else {
-            self.spike_streak = 0;
+            let v = ((worst - ceiling) as f64 / ceiling as f64).min(3.0);
+            losses[EX_BALANCED] += v * 0.5;
+            losses[EX_THROUGHPUT] += v * 1.0;
+            losses[EX_IO_HEAVY] += v * 0.6;
+            losses[EX_FORK_STORM] += v * 0.3;
+            losses[EX_SATURATED] += v * 0.9;
+            has_loss = true;
         }
 
         // PATHWAY 2: RESCUE DELTA (0 -> NONZERO TRANSITION)
@@ -553,13 +554,14 @@ impl MwuController {
         }
         self.prev_io_bucket = cur_io;
 
-        // PATHWAY 4: FORK STORM (SCHMITT-GATED, PRESSURE-CONFIRMED).
+        // PATHWAY 4: FORK STORM (PRESSURE-CONFIRMED, FIRES IMMEDIATELY).
         // GATE THRESHOLD IS TAU-DERIVED. sig.wakeup_rate IS THE RAW TOTAL
         // WAKES/SEC; scale_tau_u64(tau, K_FORK_STORM_RATE_Q16) PRODUCES
         // THE COMPARISON THRESHOLD. AT THE 12C REFERENCE (tau=40MS) THE
         // THRESHOLD IS ~8000/SEC; AT 4C IT TIGHTENS TO ~1200/SEC. A FORK
         // STORM ALSO REQUIRES ACTIVE RESCUES (rescue_count > 0) AS GROUND-
-        // TRUTH PRESSURE.
+        // TRUTH PRESSURE -- THE PRESSURE PREDICATE IS THE CONFIRMATION;
+        // NO ADDITIONAL STREAK COUNTER.
         //
         // FORK_STORM EXPERT (SC_SLICE=0.49, SC_PREEMPT=0.49, SC_BATCH=0.52,
         // SC_SOJOURN=0.53, SC_BURST=0.49) DOMINATES THE BLEND DURING A REAL
@@ -567,20 +569,61 @@ impl MwuController {
         // / batch_slice_ns DOWN END-TO-END.
         let fork_thresh = scale_tau_u64(tau_ns, K_FORK_STORM_RATE_Q16).max(FORK_STORM_RATE_FLOOR);
         let fork_storm = sig.wakeup_rate > fork_thresh && sig.rescue_count > 0;
-        if fork_storm {
-            self.fork_streak += 1;
-            if self.fork_streak >= SPIKE_CONFIRM && !defer_to_oscillator {
-                let denom = fork_thresh.max(1) as f64;
-                let v = ((sig.wakeup_rate as f64 / denom) - 1.0).clamp(0.0, 3.0);
-                losses[EX_BALANCED] += v * 0.30;
-                losses[EX_THROUGHPUT] += v * 1.00;
-                losses[EX_IO_HEAVY] += v * 0.50;
-                losses[EX_SATURATED] += v * 0.80;
+        if fork_storm && !defer_to_oscillator {
+            let denom = fork_thresh.max(1) as f64;
+            let v = ((sig.wakeup_rate as f64 / denom) - 1.0).clamp(0.0, 3.0);
+            losses[EX_BALANCED] += v * 0.30;
+            losses[EX_THROUGHPUT] += v * 1.00;
+            losses[EX_IO_HEAVY] += v * 0.50;
+            losses[EX_SATURATED] += v * 0.80;
+            has_loss = true;
+        }
+
+        // PATHWAY 5: CHAOS TRANSITION (RAW-WINDOW, NO EWMA, NO SCHMITT)
+        // FIRES WHEN THE WORKLOAD'S ORDINAL OR AMPLITUDE-DEGREE STRUCTURE
+        // SHIFTS WITHIN THE LAST WINDOW. THE FAILED-PREDICTION INTERPRETATION
+        // IS: WHICHEVER EXPERT IS CURRENTLY DOMINANT WAS PRICED FOR THE
+        // PREVIOUS WINDOW; PENALIZE IT PROPORTIONAL TO THE TRANSITION SIZE
+        // SO THE BLEND RAPIDLY RE-WEIGHTS TOWARD BALANCED / SATURATED.
+        // EX_BALANCED IS EXEMPT (IT IS THE REGIME-AGNOSTIC BASELINE).
+        //
+        // GATE CONDITIONS (EITHER FIRES):
+        //   - bp_h_delta > 0.10   (>10% NORMALIZED PERMUTATION-ENTROPY JUMP)
+        //   - hvg_lambda CROSSED CHAOTIC_MIN UPWARD
+        let bp_jump = sig.bp_h_delta > 0.10;
+        let lambda_cross =
+            sig.hvg_lambda >= crate::chaos::HVG_LAMBDA_CHAOTIC_MIN && !self.prev_lambda_chaotic;
+        let chaos_transition = bp_jump || lambda_cross;
+        if chaos_transition {
+            // SIZE OF THE LOSS: SCALES WITH WHICHEVER GATE TRIGGERED HARDER.
+            let v_bp = (sig.bp_h_delta / 0.10).clamp(0.0, 3.0);
+            let v_l = if lambda_cross {
+                ((sig.hvg_lambda - crate::chaos::HVG_LAMBDA_CHAOTIC_MIN)
+                    / (4.0 - crate::chaos::HVG_LAMBDA_CHAOTIC_MIN))
+                    .clamp(0.0, 1.5)
+            } else {
+                0.0
+            };
+            let v = v_bp.max(v_l);
+            // FIND THE DOMINANT EXPERT (HIGHEST WEIGHT) AND PENALIZE IT.
+            // EX_BALANCED IS EXEMPT.
+            let mut dom_idx = EX_BALANCED;
+            let mut dom_w = 0.0f64;
+            for i in 0..N_EXPERTS {
+                if i == EX_BALANCED {
+                    continue;
+                }
+                if self.weights[i] > dom_w {
+                    dom_w = self.weights[i];
+                    dom_idx = i;
+                }
+            }
+            if dom_idx != EX_BALANCED && dom_w > 0.0 {
+                losses[dom_idx] += v * 0.8;
                 has_loss = true;
             }
-        } else {
-            self.fork_streak = 0;
         }
+        self.prev_lambda_chaotic = sig.hvg_lambda >= crate::chaos::HVG_LAMBDA_CHAOTIC_MIN;
 
         // APPLY LOSSES WITH WEIGHT FLOOR
         if has_loss {

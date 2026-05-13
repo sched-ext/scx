@@ -15,6 +15,7 @@ mod bpf_intf;
 #[macro_use]
 mod log;
 mod adaptive;
+mod chaos;
 mod cli;
 mod procdb;
 mod scheduler;
@@ -63,10 +64,6 @@ struct Cli {
     /// Run BPF scheduler only, disable Rust adaptive control loop
     #[arg(long)]
     no_adaptive: bool,
-
-    /// Additional compositor process names to boost to LAT_CRITICAL
-    #[arg(long)]
-    compositor: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -94,7 +91,6 @@ fn main() -> Result<()> {
     let dump_log = cli.dump_log;
     let nr_cpus = cli.nr_cpus;
     let no_adaptive = cli.no_adaptive;
-    let extra_compositors = cli.compositor;
 
     if cli.version {
         println!(
@@ -105,7 +101,7 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive, &extra_compositors),
+        None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive),
         Some(SubCmd::Probe) => {
             cli::probe::run_probe();
             Ok(())
@@ -117,26 +113,11 @@ fn main() -> Result<()> {
     }
 }
 
-// DEFAULT COMPOSITORS: BOOSTED TO LAT_CRITICAL VIA BPF MAP LOOKUP
-const DEFAULT_COMPOSITORS: &[&str] = &[
-    "kwin",
-    "gnome-shell",
-    "mutter",
-    "sway",
-    "Hyprland",
-    "picom",
-    "weston",
-    "labwc",
-    "wayfire",
-    "niri",
-];
-
 fn run_scheduler(
     verbose: bool,
     dump_log: bool,
     nr_cpus: Option<u64>,
     no_adaptive: bool,
-    extra_compositors: &[String],
 ) -> Result<()> {
     ctrlc::set_handler(move || {
         SHUTDOWN.store(true, Ordering::Relaxed);
@@ -212,18 +193,6 @@ fn run_scheduler(
                 }
             }
             Err(e) => log_warn!("CACHE TOPOLOGY DETECT FAILED: {}", e),
-        }
-
-        // POPULATE COMPOSITOR MAP: DEFAULT + USER-SUPPLIED NAMES
-        for name in DEFAULT_COMPOSITORS {
-            if let Err(e) = sched.write_compositor(name) {
-                log_warn!("COMPOSITOR MAP WRITE FAILED: {} ({})", name, e);
-            }
-        }
-        for name in extra_compositors {
-            if let Err(e) = sched.write_compositor(name) {
-                log_warn!("COMPOSITOR MAP WRITE FAILED: {} ({})", name, e);
-            }
         }
 
         let should_restart = if no_adaptive {
