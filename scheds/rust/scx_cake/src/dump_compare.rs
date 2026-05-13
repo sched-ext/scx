@@ -1859,8 +1859,9 @@ mod tests {
         assert!(src.contains("cake_scoreboard_claim_result("));
         assert!(src.contains("CAKE_CONF_STATUS_TRUST_SHIFT"));
         assert!(src.contains("CAKE_CONF_LOAD_SHOCK_SHIFT"));
-        assert!(src.contains("cake_try_clean_idle_candidate_release(local_bss"));
-        assert!(src.contains("cake_try_smt_idle_candidate_release(local_bss"));
+        assert!(src.contains("cake_try_idle_candidate_release(local_bss"));
+        assert!(src.contains("candidate_mode & 0x80000000U"));
+        assert!(src.contains("(candidate) | 0x80000000U"));
     }
 
     #[test]
@@ -1873,7 +1874,7 @@ mod tests {
         let candidate_body = source_body_between(
             src,
             "static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(",
-            "static __noinline s32\ncake_try_clean_idle_candidate_release",
+            "static __noinline s32\ncake_try_idle_candidate_release",
         )
         .expect("idle candidate core body should be present");
         let clean_gate = candidate_body
@@ -1884,8 +1885,7 @@ mod tests {
             .expect("clean candidate should still claim native idle state");
         assert!(clean_gate < clean_claim);
 
-        assert!(src.contains("cake_try_clean_idle_candidate_release("));
-        assert!(src.contains("cake_try_smt_idle_candidate_release("));
+        assert!(src.contains("cake_try_idle_candidate_release("));
     }
 
     #[test]
@@ -1910,7 +1910,7 @@ mod tests {
         let candidate_body = source_body_between(
             src,
             "static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(",
-            "static __noinline s32\ncake_try_clean_idle_candidate_release",
+            "static __noinline s32\ncake_try_idle_candidate_release",
         )
         .expect("idle candidate core body should be present");
         assert!(candidate_body.contains("CAKE_ACCEL_PROBE_CLAIM_SKIP"));

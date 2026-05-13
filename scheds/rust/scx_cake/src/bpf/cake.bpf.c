@@ -186,6 +186,7 @@ const bool enable_stats __attribute__((used)) = false;
 #define CAKE_CACHE_THROUGHPUT_FULL_MIN_RUNS 32U
 #define CAKE_CACHE_THROUGHPUT_SLICE_SHIFT 1U
 #define CAKE_CACHE_THROUGHPUT_FULL_SLICE_SHIFT 2U
+#define CAKE_LLC_VTIME_LOCAL_RESCUE_DEPTH 2
 #define CAKE_CACHE_THROUGHPUT_SHIFT_LUT 0x5555555544332210ULL
 #define CAKE_THROUGHPUT_FAIR_DISPATCH_BUDGET 2U
 #define CAKE_BUSY_WAKE_SHRINK_MIN_NS 500000ULL
@@ -305,11 +306,22 @@ typedef u64 cake_fast_probe_pack_t;
 
 const volatile cake_fast_probe_pack_t cpu_fast_probe_pack[CAKE_MAX_CPUS] = {};
 
+/* Precomputed `(1 << s0) | (1 << s1) | (1 << s2) | (1 << s3)` for each row.
+ * Used as a SWAR precheck against `clean_mask` to short-circuit the per-slot
+ * probe loop when no candidate CPU is idle. Valid CPU ids are folded by & 63,
+ * matching cake_fast_clean_mask_has(); invalid tail slots are omitted. */
+const volatile u64 cpu_fast_probe_bits[CAKE_MAX_CPUS] = {};
+
 static __always_inline u32
 cake_fast_probe_slot_from_pack(cake_fast_probe_pack_t packed, u32 slot)
 {
-	u32 lane = slot & (CAKE_FAST_PROBE_SLOTS - 1U);
-	u32 cpu	 = (packed >> (lane << CAKE_FAST_PROBE_LANE_SHIFT)) &
+	/* All callers in cake_select_route_predict pass slot in [0..3] (range-
+	 * checked via the SLOT1..SLOT3 gate or constant 0). The defensive
+	 * `slot & (CAKE_FAST_PROBE_SLOTS - 1U)` mask was preventing the JIT
+	 * from collapsing `(route_kind - SLOT0) << 3` into a clean
+	 * subtract+shift; the compiler ended up emitting an extra AND+XOR
+	 * to fold the mask through the subtract. */
+	u32 cpu	 = (packed >> (slot << CAKE_FAST_PROBE_LANE_SHIFT)) &
 		   CAKE_FAST_PROBE_LANE_MASK;
 
 	return cpu;
@@ -575,7 +587,7 @@ static __always_inline u64 cake_fast_clean_mask_snapshot(void)
 
 static __always_inline bool cake_fast_clean_mask_has(u64 mask, u32 cpu)
 {
-	return mask & (1ULL << (cpu & 63U));
+	return (mask >> (cpu & 63U)) & 1U;
 }
 
 #else
@@ -659,11 +671,20 @@ cake_throughput_reset_dispatch_budget(struct cake_cpu_bss *bss)
 }
 
 static __always_inline bool
-cake_task_is_affinitized(const struct task_struct *p)
+cake_task_is_affinitized_n(const struct task_struct *p, u32 ncpus)
 {
 	u32 allowed = (u32)p->nr_cpus_allowed;
 
-	return (allowed - 1U) < (nr_cpus - 1U);
+	return (allowed - 1U) < (ncpus - 1U);
+}
+
+static __always_inline bool
+cake_task_is_affinitized(const struct task_struct *p)
+{
+	/* Re-reads `nr_cpus` (volatile rodata). Callers that already have
+	 * the value in hand should call cake_task_is_affinitized_n() directly
+	 * to skip the second load. */
+	return cake_task_is_affinitized_n(p, nr_cpus);
 }
 
 static __always_inline u64
@@ -2180,9 +2201,8 @@ static __noinline s32 select_cpu_dfl_idle(struct task_struct *p, s32 prev_cpu,
  * Compat-First CO-RE Dispatch: same wrapper strategy as local DSQ insert.
  * Prefers register-arg compat (0 stack) over struct-arg (24B on stack). */
 #if CAKE_LEAN_SCHED
-static __always_inline s32 select_cpu_and_idle(struct task_struct *p,
-					       s32 prev_cpu, u64 wake_flags,
-					       u64 enq_flags)
+static __noinline s32 select_cpu_and_idle(struct task_struct *p, s32 prev_cpu,
+					  u64 wake_flags, u64 enq_flags)
 {
 	if (bpf_ksym_exists(scx_bpf_select_cpu_and___compat))
 		return scx_bpf_select_cpu_and___compat(p, prev_cpu, wake_flags,
@@ -2243,6 +2263,24 @@ cake_message_wake_candidate(const struct task_struct *p, u64 wake_flags)
 		return false;
 	return true;
 }
+
+#if defined(CAKE_RELEASE) && CAKE_SCOREBOARD_SUMMARY && defined(CAKE_SINGLE_LLC)
+static __noinline s32 cake_fast_scan_probe_precheck(struct task_struct *p,
+						    s32 prev_cpu)
+{
+	u32 ncpus;
+	u32 row;
+
+	ncpus = nr_cpus;
+	if ((u32)prev_cpu >= ncpus)
+		return -1;
+	if (cake_task_is_affinitized_n(p, ncpus))
+		return -1;
+
+	row = ((u32)prev_cpu) & (CAKE_MAX_CPUS - 1);
+	return !!(cpu_fast_probe_bits[row] & cake_fast_clean_mask_snapshot());
+}
+#endif
 
 static __always_inline void cake_scoreboard_kick_cpu_known(u32 target_cpu,
 							   u64 target_status)
@@ -2349,9 +2387,11 @@ static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(
 	u32 eligible = !!(status & CAKE_CPU_STATUS_IDLE) &
 		       cake_idle_scoreboard_clean(status);
 
-	if (smt_check && eligible)
-		eligible &= !cake_smt_interactive_neighbor_busy(candidate);
 	if (!eligible) {
+		cake_scoreboard_status_result(local_bss, status);
+		return -1;
+	}
+	if (smt_check && cake_smt_interactive_neighbor_busy(candidate)) {
 		cake_scoreboard_status_result(local_bss, status);
 		return -1;
 	}
@@ -2389,23 +2429,19 @@ static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(
 
 #ifdef CAKE_RELEASE
 static __noinline s32
-cake_try_clean_idle_candidate_release(struct cake_cpu_bss *local_bss,
-				      u32		   candidate)
+cake_try_idle_candidate_release(struct cake_cpu_bss *local_bss,
+				u32 candidate_mode)
 {
-	return cake_try_idle_candidate(local_bss, candidate, false);
-}
+	bool smt_check = candidate_mode & 0x80000000U;
+	u32 candidate = candidate_mode & 0x7fffffffU;
 
-static __noinline s32
-cake_try_smt_idle_candidate_release(struct cake_cpu_bss *local_bss,
-				    u32			 candidate)
-{
-	return cake_try_idle_candidate(local_bss, candidate, true);
+	return cake_try_idle_candidate(local_bss, candidate, smt_check);
 }
 
 #define cake_try_clean_idle_candidate_record(local_bss, candidate, route_kind) \
-	cake_try_clean_idle_candidate_release(local_bss, candidate)
+	cake_try_idle_candidate_release(local_bss, candidate)
 #define cake_try_smt_idle_candidate_record(local_bss, candidate, route_kind) \
-	cake_try_smt_idle_candidate_release(local_bss, candidate)
+	cake_try_idle_candidate_release(local_bss, (candidate) | 0x80000000U)
 #else
 #define cake_try_clean_idle_candidate_record(local_bss, candidate, route_kind) \
 	cake_try_idle_candidate(local_bss, candidate, false, route_kind)
@@ -2420,17 +2456,19 @@ static __noinline s32 cake_select_route_predict(struct task_struct *p,
 {
 	u64 confidence;
 	u8  route_kind;
-	u8  slot;
+	u32 slot;
 	cake_fast_probe_pack_t probe_pack;
 	u32 row;
 	u32 candidate;
 	s32 selected;
 
-	if (prev_cpu < 0 || prev_cpu >= nr_cpus) {
+	u32 ncpus = nr_cpus;
+
+	if (prev_cpu < 0 || (u32)prev_cpu >= ncpus) {
 		cake_record_accel_route_block(CAKE_ACCEL_BLOCK_INVALID_PREV);
 		return CAKE_ROUTE_PREDICT_NONE;
 	}
-	if (cake_task_is_affinitized(p)) {
+	if (cake_task_is_affinitized_n(p, ncpus)) {
 		cake_record_accel_route_block(CAKE_ACCEL_BLOCK_AFFINITY);
 		return CAKE_ROUTE_PREDICT_NONE;
 	}
@@ -2536,42 +2574,53 @@ static __noinline s32 cake_select_cpu_fast_scan(struct task_struct *p,
 	u64  clean_mask;
 	u32  candidate;
 	u32  hit_route;
+	u32  ncpus;
+	u32  prev;
 	u32  scan_limit;
 	u32  row;
 	s32  selected;
 
-	if (prev_cpu < 0 || prev_cpu >= nr_cpus)
+	ncpus = nr_cpus;
+	if ((u32)prev_cpu >= ncpus)
 		return -1;
-	if (cake_task_is_affinitized(p))
+	if (cake_task_is_affinitized_n(p, ncpus))
 		return -1;
 
-	row	       = ((u32)prev_cpu) & (CAKE_MAX_CPUS - 1);
+	prev	       = (u32)prev_cpu;
+	row	       = prev & (CAKE_MAX_CPUS - 1);
 	latency_biased = cake_task_latency_biased(p, wake_flags);
 	clean_mask     = cake_fast_clean_mask_snapshot();
 
 	cake_record_accel_fast_attempt(CAKE_ROUTE_PREV);
 	selected = -1;
-	if (cake_fast_clean_mask_has(clean_mask, (u32)prev_cpu))
+	if (cake_fast_clean_mask_has(clean_mask, prev)) {
 		selected = cake_try_clean_idle_candidate_record(
-			local_bss, (u32)prev_cpu, CAKE_ROUTE_PREV);
-	cake_record_accel_fast_result(CAKE_ROUTE_PREV, selected >= 0);
-	if (selected >= 0) {
-		hit_route = CAKE_ROUTE_PREV;
-		goto fast_hit;
-	}
-
-	candidate = cpu_fast_probe[row][0];
-	if (candidate != (u32)prev_cpu) {
-		cake_record_accel_fast_attempt(CAKE_ROUTE_SLOT0);
-		selected = -1;
-		if (cake_fast_clean_mask_has(clean_mask, candidate))
-			selected = cake_try_clean_idle_candidate_record(
-				local_bss, candidate, CAKE_ROUTE_SLOT0);
-		cake_record_accel_fast_result(CAKE_ROUTE_SLOT0, selected >= 0);
+			local_bss, prev, CAKE_ROUTE_PREV);
+		cake_record_accel_fast_result(CAKE_ROUTE_PREV, selected >= 0);
 		if (selected >= 0) {
-			hit_route = CAKE_ROUTE_SLOT0;
+			hit_route = CAKE_ROUTE_PREV;
 			goto fast_hit;
 		}
+		goto fast_miss;
+	}
+	cake_record_accel_fast_result(CAKE_ROUTE_PREV, false);
+
+	candidate = cpu_fast_probe[row][0];
+	if (candidate != prev) {
+		cake_record_accel_fast_attempt(CAKE_ROUTE_SLOT0);
+		selected = -1;
+		if (cake_fast_clean_mask_has(clean_mask, candidate)) {
+			selected = cake_try_clean_idle_candidate_record(
+				local_bss, candidate, CAKE_ROUTE_SLOT0);
+			cake_record_accel_fast_result(CAKE_ROUTE_SLOT0,
+						      selected >= 0);
+			if (selected >= 0) {
+				hit_route = CAKE_ROUTE_SLOT0;
+				goto fast_hit;
+			}
+			goto fast_miss;
+		}
+		cake_record_accel_fast_result(CAKE_ROUTE_SLOT0, false);
 	}
 
 	if (!latency_biased) {
@@ -2581,13 +2630,17 @@ static __noinline s32 cake_select_cpu_fast_scan(struct task_struct *p,
 	candidate = cpu_fast_probe[row][1];
 	cake_record_accel_fast_attempt(CAKE_ROUTE_SLOT1);
 	selected = -1;
-	if (cake_fast_clean_mask_has(clean_mask, candidate))
+	if (cake_fast_clean_mask_has(clean_mask, candidate)) {
 		selected = cake_try_smt_idle_candidate_record(local_bss, candidate,
 							      CAKE_ROUTE_SLOT1);
-	cake_record_accel_fast_result(CAKE_ROUTE_SLOT1, selected >= 0);
-	if (selected >= 0) {
-		hit_route = CAKE_ROUTE_SLOT1;
-		goto fast_hit;
+		cake_record_accel_fast_result(CAKE_ROUTE_SLOT1, selected >= 0);
+		if (selected >= 0) {
+			hit_route = CAKE_ROUTE_SLOT1;
+			goto fast_hit;
+		}
+		goto fast_miss;
+	} else {
+		cake_record_accel_fast_result(CAKE_ROUTE_SLOT1, false);
 	}
 
 	scan_limit = cake_select_fast_scan_limit(local_bss);
@@ -2598,27 +2651,36 @@ static __noinline s32 cake_select_cpu_fast_scan(struct task_struct *p,
 	candidate = cpu_fast_probe[row][2];
 	cake_record_accel_fast_attempt(CAKE_ROUTE_SLOT2);
 	selected = -1;
-	if (cake_fast_clean_mask_has(clean_mask, candidate))
+	if (cake_fast_clean_mask_has(clean_mask, candidate)) {
 		selected = cake_try_smt_idle_candidate_record(local_bss, candidate,
 							      CAKE_ROUTE_SLOT2);
-	cake_record_accel_fast_result(CAKE_ROUTE_SLOT2, selected >= 0);
-	if (selected >= 0) {
-		hit_route = CAKE_ROUTE_SLOT2;
-		goto fast_hit_row4;
+		cake_record_accel_fast_result(CAKE_ROUTE_SLOT2, selected >= 0);
+		if (selected >= 0) {
+			hit_route = CAKE_ROUTE_SLOT2;
+			goto fast_hit_row4;
+		}
+		goto fast_miss_row4;
+	} else {
+		cake_record_accel_fast_result(CAKE_ROUTE_SLOT2, false);
 	}
 
 	candidate = cpu_fast_probe[row][3];
 	cake_record_accel_fast_attempt(CAKE_ROUTE_SLOT3);
 	selected = -1;
-	if (cake_fast_clean_mask_has(clean_mask, candidate))
+	if (cake_fast_clean_mask_has(clean_mask, candidate)) {
 		selected = cake_try_smt_idle_candidate_record(local_bss, candidate,
 							      CAKE_ROUTE_SLOT3);
-	cake_record_accel_fast_result(CAKE_ROUTE_SLOT3, selected >= 0);
-	if (selected >= 0) {
-		hit_route = CAKE_ROUTE_SLOT3;
-		goto fast_hit_row4;
+		cake_record_accel_fast_result(CAKE_ROUTE_SLOT3, selected >= 0);
+		if (selected >= 0) {
+			hit_route = CAKE_ROUTE_SLOT3;
+			goto fast_hit_row4;
+		}
+		goto fast_miss_row4;
+	} else {
+		cake_record_accel_fast_result(CAKE_ROUTE_SLOT3, false);
 	}
 
+fast_miss_row4:
 	cake_conf_update_select(local_bss, false, true, false);
 	return -1;
 
@@ -2861,7 +2923,21 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto idle_found;
 	}
 
+#if defined(CAKE_RELEASE) && CAKE_SCOREBOARD_SUMMARY && defined(CAKE_SINGLE_LLC)
+	{
+		s32 precheck = cake_fast_scan_probe_precheck(p, prev_cpu);
+
+		cpu = -1;
+		if (precheck == 0) {
+			cake_conf_update_select(select_bss, false, false, false);
+		} else if (precheck > 0) {
+			cpu = cake_select_cpu_fast_scan(p, prev_cpu, wake_flags,
+							select_bss);
+		}
+	}
+#else
 	cpu = cake_select_cpu_fast_scan(p, prev_cpu, wake_flags, select_bss);
+#endif
 	if (cpu >= 0) {
 		select_flags |= cpu == prev_cpu ? CAKE_SEL_SCOREBOARD_PREV :
 						  CAKE_SEL_SCOREBOARD_SCAN;
@@ -3238,7 +3314,7 @@ static __always_inline u64 cake_llc_dsq_for_cpu(u32 cpu)
 #endif
 }
 
-static __always_inline bool cake_dsq_move_to_local(u64 dsq_id, u64 enq_flags)
+static __noinline bool cake_dsq_move_to_local(u64 dsq_id, u64 enq_flags)
 {
 	return scx_bpf_dsq_move_to_local(dsq_id, enq_flags);
 }
@@ -3381,33 +3457,6 @@ static __always_inline void cake_kick_busy_wake_shared_escape(u32 target_cpu,
 	scx_bpf_kick_cpu(target_cpu, kick);
 }
 
-static __always_inline bool
-cake_message_busy_handoff_candidate(const struct task_struct *wakee,
-				    u64 target_status)
-{
-	u32 op;
-	u32 owner_class;
-	u32 pressure;
-
-	if (target_status & CAKE_CPU_STATUS_IDLE)
-		return false;
-	if (!cake_message_wake_candidate(wakee, SCX_WAKE_SYNC))
-		return false;
-	if (target_status & CAKE_CPU_STATUS_SAT_CACHE_MEM)
-		return false;
-
-	op = cake_status_owner_pressure(target_status);
-	owner_class = op & CAKE_CPU_STATUS_OWNER_MASK;
-	pressure = (op >> (CAKE_CPU_STATUS_PRESS_SHIFT -
-			   CAKE_CPU_STATUS_OWNER_SHIFT)) &
-		   CAKE_CPU_STATUS_PRESS_MASK;
-
-	if (owner_class == CAKE_CPU_OWNER_SHORT)
-		return true;
-	return pressure <= CAKE_CPU_PRESSURE_LOW &&
-	       owner_class == CAKE_CPU_OWNER_INTERACTIVE;
-}
-
 static __noinline bool
 cake_busy_wake_shrink_current(u32 target_cpu, struct task_struct *wakee,
 			      u64 target_status)
@@ -3495,13 +3544,9 @@ cake_throughput_fairness_due(struct cake_cpu_bss *bss, u32 cpu)
 	if (!(dec & (CAKE_TP_DEC_PULL_MASK & ~1ULL)))
 		return false;
 
-	/* SAT_CACHE_MEM owner on this CPU: defer the fairness-driven LLC pull
-	 * so the local throughput lane drains first and keep-running can pin
-	 * the cache-warm worker. Budget is intentionally not reset — once SAT
-	 * lifts, the next dispatch fires immediately to catch up on LLC drain. */
-	if (dec & CAKE_TP_DEC_SAT_CACHE_MEM)
-		return false;
-
+	/* Once local/SAT continuations spend the small dispatch budget, force an
+	 * LLC check. CPU-affine kernel work can otherwise strand on the shared DSQ
+	 * while cache-heavy workers keep refilling local queues. */
 	queued = scx_bpf_dsq_nr_queued(cake_llc_dsq_for_cpu(cpu));
 	if (queued > 0)
 		return true;
@@ -3603,6 +3648,33 @@ cake_dispatch_try_single_llc_pull(struct cake_cpu_bss *dispatch_bss)
 }
 #endif
 
+static __noinline bool
+cake_dispatch_try_sat_keep_running(struct cake_cpu_bss *dispatch_bss, u32 cpu_idx)
+{
+	struct task_struct *keep_prev = bpf_get_current_task_btf();
+	u64 slice;
+	u64 throughput_slice;
+
+	if (!keep_prev || !(keep_prev->scx.flags & SCX_TASK_QUEUED))
+		return false;
+
+	slice = quantum_ns;
+	throughput_slice = cake_cache_throughput_slice_for(dispatch_bss, keep_prev);
+	if (throughput_slice)
+		slice = throughput_slice;
+	keep_prev->scx.slice = slice;
+#ifndef CAKE_RELEASE
+	if (CAKE_STATS_ACTIVE || CAKE_PATH_STATS_ACTIVE)
+		get_local_stats_for(cpu_idx)->nr_dispatch_keep_running++;
+	if (CAKE_PATH_STATS_ACTIVE && throughput_slice)
+		get_local_stats_for(cpu_idx)->nr_cache_throughput_keep_running++;
+#endif
+	/* Keep the stopping() baseline aligned with the replenished slice so
+	 * same-task continuations charge the next run from the correct budget. */
+	dispatch_bss->tick_slice = slice;
+	return true;
+}
+
 static __noinline void cake_insert_llc_vtime(struct task_struct *p,
 					     u64 enq_flags, u32 target_cpu,
 					     u64 slice)
@@ -3638,12 +3710,6 @@ static __noinline void cake_insert_llc_vtime(struct task_struct *p,
 
 	if (is_wakeup) {
 #if CAKE_ACCEL_PATH
-		if (cake_message_busy_handoff_candidate(p, target_status)) {
-			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu,
-					   slice, enq_flags);
-			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
-			return;
-		}
 		if (cake_accept_busy_wake(target_cpu, target_status)) {
 			cake_record_busy_local_insert(target_cpu);
 			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu,
@@ -4093,7 +4159,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 #define path_stats ((struct cake_stats *)0)
 #endif
 
-	if ((p->flags & PF_KTHREAD) && p->prio < 120) {
+	if ((p->flags & PF_KTHREAD) &&
+	    (p->prio < 120 || cake_task_is_affinitized(p))) {
 		if (path_stats) {
 			path_stats->nr_enqueue_path_kthread++;
 			path_stats->nr_direct_local_inserts++;
@@ -4102,6 +4169,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		p->scx.slice = quantum_ns;
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, quantum_ns,
 				   enq_flags);
+		if (p->prio >= 120)
+			scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
 		return;
 	}
 
@@ -4130,6 +4199,13 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 			path_stats->nr_enqueue_path_preserve++;
 		p->scx.slice = preserved;
 		if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+			if (enq_flags & (u64)SCX_ENQ_PREEMPT) {
+				if (path_stats)
+					path_stats->nr_direct_local_inserts++;
+				dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu,
+						   preserved, enq_flags);
+				return;
+			}
 			cake_insert_llc_vtime(p, enq_flags, target_cpu,
 					      preserved);
 			return;
@@ -4165,17 +4241,17 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 			slice = throughput_slice;
 		p->scx.slice = slice;
 		p->scx.dsq_vtime += slice + nice_adj;
-		if (throughput_slice &&
-		    cake_try_insert_throughput_lane(p, target_cpu, slice,
-						    enq_flags))
-			return;
 		if (throughput_slice) {
+			if (cake_try_insert_throughput_lane(
+				    p, target_cpu, slice, enq_flags))
+				return;
 			cake_insert_throughput_overflow(p, target_cpu, slice,
 							enq_flags);
 			return;
 		}
 		if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
-			cake_insert_llc_vtime(p, enq_flags, target_cpu, slice);
+			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+					   enq_flags);
 			return;
 		}
 		if (cake_requeue_shared_escape_candidate(
@@ -4191,6 +4267,24 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 
 	if (path_stats)
 		path_stats->nr_enqueue_path_wakeup++;
+	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME) &&
+	    !(p->flags & PF_KTHREAD) && p->prio >= 120 && weight == 100) {
+		if (!cake_task_is_affinitized(p)) {
+			s32 local_depth = scx_bpf_dsq_nr_queued(
+				SCX_DSQ_LOCAL_ON | target_cpu);
+
+			if (local_depth >=
+			    (s32)CAKE_LLC_VTIME_LOCAL_RESCUE_DEPTH)
+				scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
+		}
+		if (path_stats)
+			path_stats->nr_direct_local_inserts++;
+		p->scx.slice = slice;
+		p->scx.dsq_vtime += slice + nice_adj;
+		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+				   enq_flags);
+		return;
+	}
 	p->scx.slice = slice;
 	p->scx.dsq_vtime += slice + nice_adj;
 	cake_clamp_wakeup_vtime(p, target_cpu);
@@ -4594,11 +4688,24 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	u64 dispatch_start = 0;
 #endif
 	struct cake_cpu_bss *dispatch_bss = &cpu_bss[cpu_idx];
+	bool fairness_due = cake_throughput_fairness_due(dispatch_bss, cpu_idx);
 
-	if (!cake_throughput_fairness_due(dispatch_bss, cpu_idx) &&
-	    cake_dispatch_try_throughput_lane(cpu_idx)) {
+	if (!fairness_due && cake_dispatch_try_throughput_lane(cpu_idx)) {
 		cake_throughput_charge_dispatch(dispatch_bss);
 		return;
+	}
+
+	/* Adaptive SAT locality: cache/mem-saturated owners are the one case
+	 * where a shared LLC pull is often more expensive than keeping the
+	 * current cache-warm worker. Normal wake-heavy workloads stay on the
+	 * llc-vtime path below. */
+	if (!fairness_due &&
+	    (READ_ONCE(dispatch_bss->throughput_decision) &
+	     CAKE_TP_DEC_SAT_CACHE_MEM)) {
+		if (cake_dispatch_try_sat_keep_running(dispatch_bss, cpu_idx)) {
+			cake_throughput_charge_dispatch(dispatch_bss);
+			goto idle_bookkeeping;
+		}
 	}
 
 	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME) ||
@@ -4741,6 +4848,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 		cpu_bss[cpu_idx].tick_slice = slice;
 	}
 
+idle_bookkeeping:
 	/* Check-before-write: only mark idle if not already idle.
 	 * Avoids unnecessary cache line dirtying. Debug still mirrors the legacy
 	 * BSS hint for telemetry; release publishes the owner-written status lane. */
@@ -5247,13 +5355,8 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 #if !CAKE_LEAN_SCHED
 		cake_owner_runtime_policy_reset(bss);
 #else
-		/* Decay rather than zero so SAT classification survives brief
-		 * preemptions; cake_throughput_update_owner_decision recomputes
-		 * the SAT bit each accounting tick from the decayed (avg, runs). */
-		WRITE_ONCE(bss->owner_avg_runtime_ns,
-			   READ_ONCE(bss->owner_avg_runtime_ns) >> 1);
-		WRITE_ONCE(bss->owner_run_count,
-			   READ_ONCE(bss->owner_run_count) >> 1);
+		WRITE_ONCE(bss->owner_avg_runtime_ns, 0);
+		WRITE_ONCE(bss->owner_run_count, 0);
 #endif
 #if CAKE_ACCEL_PATH
 		cake_scoreboard_owner_reset(bss);
@@ -5368,7 +5471,9 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		 * Source uses shifts and adds, but the compiler may lower that
 		 * expression to a multiply in generated BPF. */
 		u32 weight   = p->scx.weight;
-		s64 nice_adj = calc_nice_adj(weight);
+		s64 nice_adj = 0;
+		if (unlikely(weight != 100))
+			nice_adj = calc_nice_adj(weight);
 		p->scx.dsq_vtime += (u64)rt_raw + nice_adj;
 		cake_publish_cpu_frontier(cpu, p->scx.dsq_vtime);
 	}
