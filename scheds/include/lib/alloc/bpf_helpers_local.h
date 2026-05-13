@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
-#ifndef __BPF_HELPERS_LOCAL__
-#define __BPF_HELPERS_LOCAL__
+#pragma once
 
 /*
  * This header provides additional BPF helpers not in the standard bpf_helpers.h.
@@ -10,17 +9,32 @@
 extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const void *args,
 				   __u32 len__sz, void *aux__prog) __weak __ksym;
 
+#ifdef bpf_stream_printk
+#undef bpf_stream_printk
+#endif
+
 #define bpf_stream_printk(stream_id, fmt, args...)					\
 ({											\
-	static const char ___fmt[] = fmt;						\
-	unsigned long long ___param[___bpf_narg(args)];					\
+	int ___ret = 0;									\
 											\
-	_Pragma("GCC diagnostic push")							\
-	_Pragma("GCC diagnostic ignored \"-Wint-conversion\"")				\
-	___bpf_fill(___param, args);							\
-	_Pragma("GCC diagnostic pop")							\
+	if (bpf_ksym_exists(bpf_stream_vprintk_impl)) {				\
+		static const char ___fmt[] = fmt;					\
+		unsigned long long ___param[___bpf_narg(args)];				\
 											\
-	bpf_stream_vprintk_impl(stream_id, ___fmt, ___param, sizeof(___param), NULL);	\
+		_Pragma("GCC diagnostic push")						\
+		_Pragma("GCC diagnostic ignored \"-Wint-conversion\"")			\
+		___bpf_fill(___param, args);						\
+		_Pragma("GCC diagnostic pop")						\
+											\
+		___ret = bpf_stream_vprintk_impl(stream_id, ___fmt, ___param,		\
+						 sizeof(___param), NULL);		\
+	}										\
+											\
+	___ret;										\
 })
 
-#endif /* __BPF_HELPERS_LOCAL__ */
+#define arena_stdout(fmt, ...) bpf_stream_printk(1, (fmt), ##__VA_ARGS__)
+#define arena_stderr(fmt, ...) bpf_stream_printk(2, (fmt), ##__VA_ARGS__)
+
+#define arena_stdout_linfo(fmt, ...) bpf_stream_printk(1, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
+#define arena_stderr_linfo(fmt, ...) bpf_stream_printk(2, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
