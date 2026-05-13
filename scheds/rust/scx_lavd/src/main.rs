@@ -9,6 +9,7 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+mod bpf_streams;
 pub use bpf_intf::*;
 
 mod cpu_order;
@@ -984,6 +985,7 @@ impl<'a> Scheduler<'a> {
         }
         self.rb_mgr.consume().unwrap();
 
+        bpf_streams::dump_bpf_streams(&mut self.skel);
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
     }
