@@ -16,6 +16,17 @@
 
 extern int scx_cgroup_bw_enqueue_cb(u64 taskc);
 
+enum scxsim_cbw_yield_site {
+	CBW_YIELD_AFTER_MIN_TTT_SAMPLE		= 1,
+	CBW_YIELD_AFTER_TOP_HALF_BEGIN		= 2,
+	CBW_YIELD_AFTER_TOP_HALF_END_PUBLISH	= 3,
+};
+
+#ifndef scxsim_cbw_yield
+#define scxsim_cbw_yield(site, cgid, remaining, time_to_throttle, min_time_to_throttle) \
+	do { } while (0)
+#endif
+
 enum scx_cgroup_consts {
 	/* clock boottime constant */
 	CBW_CLOCK_BOOTTIME		= 7,
@@ -2225,6 +2236,14 @@ u64 cbw_throttle_cgroups(struct cgroup *cgrp)
 						   cur_cgx->avg_consumption_rate;
 				if (time_to_throttle < min_time_to_throttle)
 					min_time_to_throttle = time_to_throttle;
+				if (time_to_throttle / CBW_ACCOUNTING_PERIOD_DIVISOR <=
+				    CBW_ACCOUNTING_PERIOD_MIN &&
+				    !cbw_top_half_running()) {
+					scxsim_cbw_yield(CBW_YIELD_AFTER_MIN_TTT_SAMPLE,
+							 cur_cgx->id, remaining,
+							 time_to_throttle,
+							 min_time_to_throttle);
+				}
 			}
 		}
 	}
@@ -2917,6 +2936,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	now = scx_bpf_now();
 	cbw_top_half_begin();
+	scxsim_cbw_yield(CBW_YIELD_AFTER_TOP_HALF_BEGIN, ROOT_CGID,
+			 0, 0, 0);
 	cbw_dbg("at %llu", now);
 
 	/*
@@ -3076,6 +3097,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	if (nr_throttled > 0) {
 		cbw_top_half_end(nr_throttled, true);
+		scxsim_cbw_yield(CBW_YIELD_AFTER_TOP_HALF_END_PUBLISH,
+				 ROOT_CGID, nr_throttled, 0, 0);
 
 		/*
 		 * Propagate is_throttled to descendants of cgroups that were
