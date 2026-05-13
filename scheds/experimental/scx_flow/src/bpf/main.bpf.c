@@ -1114,10 +1114,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	s32 cpu;
 	s32 ret;
 
-	ret = scx_lib_init();
-	if (ret)
-		return ret;
-
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	bpf_for(cpu, 0, nr_cpu_ids) {

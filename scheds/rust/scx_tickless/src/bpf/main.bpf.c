@@ -691,10 +691,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(tickless_init)
 {
 	int ret;
 
-	ret = scx_lib_init();
-	if (ret)
-		return ret;
-
 	ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
 	if (ret < 0)
 		return ret;

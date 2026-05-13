@@ -547,16 +547,6 @@ int scx_lib_init_probe(void *ctx)
 }
 
 /*
- * scx_lib_init - deprecated no-op stub; the probe now runs from
- * scx_lib_init_probe. Kept for source compatibility; remove once all
- * in-tree schedulers have migrated.
- */
-static inline int scx_lib_init(void)
-{
-	return 0;
-}
-
-/*
  * Return true if task @p cannot migrate to a different CPU, false
  * otherwise.
  *
@@ -590,7 +580,7 @@ static inline bool is_migration_disabled(const struct task_struct *p)
 	 * A slow path handles pre-v6.18 kernels without CONFIG_PREEMPT_RCU,
 	 * where the prolog historically called migrate_disable() unconditionally
 	 * but a cherry-picked downstream kernel may not. The runtime-probed flag
-	 * __scx_prolog_disables_migration (set by scx_lib_init()) distinguishes
+	 * __scx_prolog_disables_migration (set by scx_lib_init_probe) distinguishes
 	 * the two cases without relying on the kernel version alone.
 	 */
 	if (bpf_core_field_exists(p->migration_disabled)) {
