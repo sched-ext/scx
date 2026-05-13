@@ -383,7 +383,9 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 
 			/*
 			 * Peek at the head task to get its size for budget
-			 * accounting.
+			 * accounting. Skip the peek when no_fast_lb is set
+			 * since the budget path below is bypassed and the
+			 * value would be unused.
 			 *
 			 * TOCTOU: the task peeked here may not be the one
 			 * actually consumed by consume_dsq() below. To be more
@@ -394,7 +396,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			 * because the next LB round recomputes budgets from
 			 * scratch.
 			 */
-			u64 task_load = dsq_peek_task_load(dsq_id);
+			u64 task_load = no_fast_lb ? 0 : dsq_peek_task_load(dsq_id);
 
 			/*
 			 * On success, decrement both egress and ingress
@@ -468,9 +470,12 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
 			/*
-			 * Peek at the head task to get its size.
+			 * Peek at the head task to get its size. Skip the
+			 * peek when no_fast_lb is set since the budget
+			 * accounting below is bypassed and the value would
+			 * be unused.
 			 */
-			u64 task_load = dsq_peek_task_load(dsq_id);
+			u64 task_load = no_fast_lb ? 0 : dsq_peek_task_load(dsq_id);
 
 			/*
 			 * Force steal is unconditional for work
@@ -478,8 +483,10 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			 * the accounting consistent.
 			 */
 			if (consume_dsq(cpdomc_pick, dsq_id)) {
-				decrement_stealee_budget(cpdomc_pick, task_load);
-				decrement_stealer_budget(cpdomc, task_load);
+				if (!no_fast_lb) {
+					decrement_stealee_budget(cpdomc_pick, task_load);
+					decrement_stealer_budget(cpdomc, task_load);
+				}
 				return true;
 			}
 		}
