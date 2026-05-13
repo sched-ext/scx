@@ -2419,10 +2419,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	u64 now = scx_bpf_now();
 	int err;
 
-	err = scx_lib_init();
-	if (err)
-		return err;
-
 	/*
 	 * Create compute domains.
 	 */
