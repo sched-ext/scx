@@ -95,8 +95,8 @@ void *scx_test_map_lookup_percpu_elem(void *map, const void *key, int cpu)
 	}
 
 	for (int i = 0; i < test_map->nr; i++) {
-		if (memcmp(&test_map->keys[i], key, test_map->key_size) == 0) {
-			return &test_map->values[i];
+		if (memcmp((char *)test_map->keys + i * test_map->key_size, key, test_map->key_size) == 0) {
+			return (char *)test_map->values + i * test_map->value_size;
 		}
 	}
 
@@ -111,8 +111,8 @@ void *scx_test_map_lookup_elem(void *map, const void *key)
 	}
 
 	for (int i = 0; i < test_map->nr; i++) {
-		if (memcmp(&test_map->keys[i], key, test_map->key_size) == 0) {
-			return &test_map->values[i];
+		if (memcmp((char *)test_map->keys + i * test_map->key_size, key, test_map->key_size) == 0) {
+			return (char *)test_map->values + i * test_map->value_size;
 		}
 	}
 
@@ -125,11 +125,11 @@ static int map_update_elem(struct scx_test_map *test_map, const void *key,
 	int index;
 
 	for (int i = 0; i < test_map->nr; i++) {
-		if (memcmp(&test_map->keys[i], key, test_map->key_size) == 0) {
+		if (memcmp((char *)test_map->keys + i * test_map->key_size, key, test_map->key_size) == 0) {
 			if (flags & BPF_NOEXIST) {
 				return -1;
 			}
-			memcpy(&test_map->values[i], value, test_map->value_size);
+			memcpy((char *)test_map->values + i * test_map->value_size, value, test_map->value_size);
 			return 0;
 		}
 	}
@@ -158,8 +158,8 @@ static int map_update_elem(struct scx_test_map *test_map, const void *key,
 		perror("Failed to allocate memory for values");
 		exit(EXIT_FAILURE);
 	}
-	memcpy(&test_map->keys[index], key, test_map->key_size);
-	memcpy(&test_map->values[index], value, test_map->value_size);
+	memcpy((char *)test_map->keys + index * test_map->key_size, key, test_map->key_size);
+	memcpy((char *)test_map->values + index * test_map->value_size, value, test_map->value_size);
 	return 0;
 }
 
