@@ -403,9 +403,13 @@ __hidden
 u64 peek_dsq_vtime(u64 dsq_id)
 {
 	struct task_struct *p;
+	u64 vtime;
 
+	bpf_rcu_read_lock();
 	p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
-	return p ? p->scx.dsq_vtime : U64_MAX;
+	vtime = p ? p->scx.dsq_vtime : U64_MAX;
+	bpf_rcu_read_unlock();
+	return vtime;
 }
 
 __hidden
