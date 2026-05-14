@@ -43,3 +43,7 @@ scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.1" }
 
 [features]
 enable_backtrace = []
+ktstr-tests = []
+
+[dev-dependencies]
+ktstr = "0.4"
