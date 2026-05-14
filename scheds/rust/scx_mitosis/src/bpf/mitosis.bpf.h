@@ -24,6 +24,7 @@
 #include <lib/cleanup.bpf.h>
 
 extern const volatile u32 nr_llc;
+extern const volatile u64 slice_ns;
 
 extern struct cell_map cells;
 
@@ -89,6 +90,8 @@ struct task_ctx {
 	s32 llc;
 
 	u64 avg_runtime_ns; /* EWMA of per-wake runtimes (ns), init to 0 */
+	s32 last_ran_cpu; /* CPU this task last ran on (-1 = never) */
+	u32 last_cpu_source; /* enum migration_source: who picked the CPU */
 
 	u32 steal_count; /* how many times this task has been stolen */
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
@@ -142,6 +145,19 @@ static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *c
 static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 {
 	cstat_add(idx, cell, cctx, 1);
+}
+
+/* Common dispatch ritual: charge cell vtime to this cell, insert onto
+ * cpu's local DSQ, optionally kick the CPU. Caller is responsible for
+ * any per-path bookkeeping (cstat counters, tctx->borrowed) BEFORE
+ * invoking this. */
+static __always_inline void place_task_on_cpu(struct task_struct *p, struct task_ctx *tctx, s32 cpu,
+					      bool kick)
+{
+	tctx->vtime_charge_cell = tctx->cell;
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
+	if (kick)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 struct cell_map {
