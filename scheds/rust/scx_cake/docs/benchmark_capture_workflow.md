@@ -235,3 +235,12 @@ evidence. NAMD should lead us toward long CPU-bound worker placement, cache
 locality, SMT/LLC behavior, and avoidable migrations. x265/xz should lead us
 toward throughput, migration, and cache-fill evidence rather than interactive
 latency assumptions.
+
+Before judging a score delta, compare host-noise state. The `cakebench` history
+layer records noise severity and top outside processes because noise can change
+the benchmark balance, not merely depress all scores. A noisy cache/mem run can
+make a mutation appear to improve memcpy while a clean rerun shows the policy is
+actually worse. Treat `clean`/`low` versus `clean`/`low` comparisons as
+decision-grade, `warn` as rerun-worthy for close calls, and `noisy` as evidence
+only. See `CAKEBENCH_HISTORY.md` for the comparability rule and the 2026-05-14
+v10 noisy-versus-clean example.

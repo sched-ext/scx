@@ -1378,6 +1378,13 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.nr_idle_hint_clear_skips += s.nr_idle_hint_clear_skips;
             for cb in 0..5 {
                 total.callback_slow[cb] += s.callback_slow[cb];
+                total.callback_release_est_ns[cb] += s.callback_release_est_ns[cb];
+                total.callback_debug_tax_ns[cb] += s.callback_debug_tax_ns[cb];
+                total.callback_release_est_max_ns[cb] =
+                    total.callback_release_est_max_ns[cb].max(s.callback_release_est_max_ns[cb]);
+                total.callback_debug_tax_max_ns[cb] =
+                    total.callback_debug_tax_max_ns[cb].max(s.callback_debug_tax_max_ns[cb]);
+                total.callback_split_count[cb] += s.callback_split_count[cb];
                 for bucket in 0..7 {
                     total.callback_hist[cb][bucket] += s.callback_hist[cb][bucket];
                 }
@@ -1452,6 +1459,28 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.accel_trust_prev_attempt += s.accel_trust_prev_attempt;
             total.accel_trust_prev_hit += s.accel_trust_prev_hit;
             total.accel_trust_prev_miss += s.accel_trust_prev_miss;
+            total.frontier_pending_set += s.frontier_pending_set;
+            total.frontier_observe_count += s.frontier_observe_count;
+            total.frontier_observe_good += s.frontier_observe_good;
+            total.frontier_observe_bad += s.frontier_observe_bad;
+            total.frontier_conf_promote += s.frontier_conf_promote;
+            total.frontier_conf_decay += s.frontier_conf_decay;
+            total.frontier_conf_high += s.frontier_conf_high;
+            for mode in 0..total.frontier_mode_count.len() {
+                total.frontier_mode_count[mode] += s.frontier_mode_count[mode];
+            }
+            total.frontier_dispatch_trusted_attempt += s.frontier_dispatch_trusted_attempt;
+            total.frontier_dispatch_trusted_hit += s.frontier_dispatch_trusted_hit;
+            total.frontier_dispatch_trusted_fail += s.frontier_dispatch_trusted_fail;
+            total.frontier_dispatch_audit_skip += s.frontier_dispatch_audit_skip;
+            total.frontier_dispatch_audit_due += s.frontier_dispatch_audit_due;
+            total.frontier_select_prev_attempt += s.frontier_select_prev_attempt;
+            total.frontier_select_prev_hit += s.frontier_select_prev_hit;
+            total.frontier_select_prev_miss += s.frontier_select_prev_miss;
+            total.frontier_enqueue_fact_attempt += s.frontier_enqueue_fact_attempt;
+            total.frontier_enqueue_fact_hit += s.frontier_enqueue_fact_hit;
+            total.frontier_enqueue_fact_miss += s.frontier_enqueue_fact_miss;
+            total.frontier_token_clear += s.frontier_token_clear;
             for cls in 0..4 {
                 total.home_place_wait_ns[cls] += s.home_place_wait_ns[cls];
                 total.home_place_wait_count[cls] += s.home_place_wait_count[cls];
@@ -2238,6 +2267,14 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
         }
         delta.callback_slow[cb] =
             current.callback_slow[cb].saturating_sub(previous.callback_slow[cb]);
+        delta.callback_release_est_ns[cb] = current.callback_release_est_ns[cb]
+            .saturating_sub(previous.callback_release_est_ns[cb]);
+        delta.callback_debug_tax_ns[cb] =
+            current.callback_debug_tax_ns[cb].saturating_sub(previous.callback_debug_tax_ns[cb]);
+        delta.callback_release_est_max_ns[cb] = current.callback_release_est_max_ns[cb];
+        delta.callback_debug_tax_max_ns[cb] = current.callback_debug_tax_max_ns[cb];
+        delta.callback_split_count[cb] =
+            current.callback_split_count[cb].saturating_sub(previous.callback_split_count[cb]);
     }
     for reason in 0..current.wake_reason_wait_ns.len() {
         delta.wake_reason_wait_all_ns[reason] = current.wake_reason_wait_all_ns[reason]
@@ -2339,6 +2376,67 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.accel_trust_prev_miss = current
         .accel_trust_prev_miss
         .saturating_sub(previous.accel_trust_prev_miss);
+    delta.frontier_pending_set = current
+        .frontier_pending_set
+        .saturating_sub(previous.frontier_pending_set);
+    delta.frontier_observe_count = current
+        .frontier_observe_count
+        .saturating_sub(previous.frontier_observe_count);
+    delta.frontier_observe_good = current
+        .frontier_observe_good
+        .saturating_sub(previous.frontier_observe_good);
+    delta.frontier_observe_bad = current
+        .frontier_observe_bad
+        .saturating_sub(previous.frontier_observe_bad);
+    delta.frontier_conf_promote = current
+        .frontier_conf_promote
+        .saturating_sub(previous.frontier_conf_promote);
+    delta.frontier_conf_decay = current
+        .frontier_conf_decay
+        .saturating_sub(previous.frontier_conf_decay);
+    delta.frontier_conf_high = current
+        .frontier_conf_high
+        .saturating_sub(previous.frontier_conf_high);
+    for mode in 0..current.frontier_mode_count.len() {
+        delta.frontier_mode_count[mode] =
+            current.frontier_mode_count[mode].saturating_sub(previous.frontier_mode_count[mode]);
+    }
+    delta.frontier_dispatch_trusted_attempt = current
+        .frontier_dispatch_trusted_attempt
+        .saturating_sub(previous.frontier_dispatch_trusted_attempt);
+    delta.frontier_dispatch_trusted_hit = current
+        .frontier_dispatch_trusted_hit
+        .saturating_sub(previous.frontier_dispatch_trusted_hit);
+    delta.frontier_dispatch_trusted_fail = current
+        .frontier_dispatch_trusted_fail
+        .saturating_sub(previous.frontier_dispatch_trusted_fail);
+    delta.frontier_dispatch_audit_skip = current
+        .frontier_dispatch_audit_skip
+        .saturating_sub(previous.frontier_dispatch_audit_skip);
+    delta.frontier_dispatch_audit_due = current
+        .frontier_dispatch_audit_due
+        .saturating_sub(previous.frontier_dispatch_audit_due);
+    delta.frontier_select_prev_attempt = current
+        .frontier_select_prev_attempt
+        .saturating_sub(previous.frontier_select_prev_attempt);
+    delta.frontier_select_prev_hit = current
+        .frontier_select_prev_hit
+        .saturating_sub(previous.frontier_select_prev_hit);
+    delta.frontier_select_prev_miss = current
+        .frontier_select_prev_miss
+        .saturating_sub(previous.frontier_select_prev_miss);
+    delta.frontier_enqueue_fact_attempt = current
+        .frontier_enqueue_fact_attempt
+        .saturating_sub(previous.frontier_enqueue_fact_attempt);
+    delta.frontier_enqueue_fact_hit = current
+        .frontier_enqueue_fact_hit
+        .saturating_sub(previous.frontier_enqueue_fact_hit);
+    delta.frontier_enqueue_fact_miss = current
+        .frontier_enqueue_fact_miss
+        .saturating_sub(previous.frontier_enqueue_fact_miss);
+    delta.frontier_token_clear = current
+        .frontier_token_clear
+        .saturating_sub(previous.frontier_token_clear);
     for cls in 0..current.home_place_wait_ns.len() {
         delta.home_place_wait_ns[cls] =
             current.home_place_wait_ns[cls].saturating_sub(previous.home_place_wait_ns[cls]);
@@ -4010,6 +4108,26 @@ fn callback_hist_summary(stats: &cake_stats, idx: usize) -> String {
         (sub_1us * 100) / total,
         (sub_5us * 100) / total,
         slow
+    )
+}
+
+fn callback_split_summary(stats: &cake_stats, idx: usize) -> String {
+    let samples = stats.callback_split_count[idx];
+    if samples == 0 {
+        return "n/a".to_string();
+    }
+    let release_avg = avg_ns(stats.callback_release_est_ns[idx], samples);
+    let debug_avg = avg_ns(stats.callback_debug_tax_ns[idx], samples);
+    let total = release_avg.saturating_add(debug_avg).max(1);
+    let debug_pct = debug_avg.saturating_mul(100) / total;
+    format!(
+        "rel:{}ns dbg:{}ns/{}% max:{}/{}ns n:{}",
+        release_avg,
+        debug_avg,
+        debug_pct,
+        stats.callback_release_est_max_ns[idx],
+        stats.callback_debug_tax_max_ns[idx],
+        samples
     )
 }
 

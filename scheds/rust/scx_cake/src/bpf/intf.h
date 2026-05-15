@@ -103,6 +103,7 @@ struct cake_cpu_bss {
 	u16 _pad_owner_policy; /* 2B: keep owner policy fields aligned */
 	u64 throughput_decision; /* Packed cache/mem throughput owner + dispatch state */
 	u64 decision_confidence; /* Packed confidence for accelerator paths */
+	u64 route_prediction_last;		       /* CPU-owned keep-run outcome predictor */
 #ifndef CAKE_RELEASE
 	u8 last_strict_wake_class; /* Strict dry-run class for busy-preempt experiments */
 	u8  _pad_strict[7];
@@ -179,7 +180,7 @@ _Static_assert(sizeof(struct cake_cpu_frontier) == 64,
 	       "cake_cpu_frontier must stay one cache line");
 
 struct cake_throughput_lane {
-	u64 pending; /* Advisory per-owner throughput DSQ has work */
+	u64 pending; /* Advisory per-owner cache-throughput DSQ has work */
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct cake_throughput_lane) == 64,
 	       "cake_throughput_lane must stay one cache line");
@@ -465,6 +466,14 @@ enum cake_accel_native_fallback {
 	CAKE_ACCEL_NATIVE_DFL	= 1,
 	CAKE_ACCEL_NATIVE_AND	= 2,
 	CAKE_ACCEL_NATIVE_MAX	= 3,
+};
+
+enum cake_frontier_mode_stat {
+	CAKE_FRONTIER_MODE_NONE  = 0,
+	CAKE_FRONTIER_MODE_CACHE = 1,
+	CAKE_FRONTIER_MODE_FAIR  = 2,
+	CAKE_FRONTIER_MODE_MIXED = 3,
+	CAKE_FRONTIER_MODE_MAX   = 4,
 };
 
 /* Debug coverage uses compact ringbuf events as its BPF/userspace boundary.
@@ -1016,6 +1025,16 @@ struct cake_stats {
 		[CAKE_CB_MAX]
 		[CAKE_CB_BUCKET_MAX]; /* Callback duration histogram buckets */
 	u64 callback_slow[CAKE_CB_MAX]; /* Threshold breaches per callback */
+	u64 callback_release_est_ns
+		[CAKE_CB_MAX]; /* Stopwatch-estimated release-shaped work */
+	u64 callback_debug_tax_ns
+		[CAKE_CB_MAX]; /* Stopwatch-estimated debug-only work */
+	u64 callback_release_est_max_ns
+		[CAKE_CB_MAX]; /* Worst release-shaped stopwatch sample */
+	u64 callback_debug_tax_max_ns
+		[CAKE_CB_MAX]; /* Worst debug-only stopwatch sample */
+	u64 callback_split_count
+		[CAKE_CB_MAX]; /* Samples with release/debug split accounting */
 	u64 wake_reason_wait_all_ns
 		[CAKE_WAKE_REASON_MAX]; /* Full-pop wake-to-run wait sums by wake path (0 unused) */
 	u64 wake_reason_wait_all_count
@@ -1080,6 +1099,27 @@ struct cake_stats {
 	u64 accel_trust_prev_attempt; /* Trusted userspace-governed direct prev claims */
 	u64 accel_trust_prev_hit; /* Trusted direct prev claims that got the CPU */
 	u64 accel_trust_prev_miss; /* Trusted direct prev claims that self-demoted */
+	u64 frontier_pending_set; /* Frontier token marked pending after a shortcut succeeded */
+	u64 frontier_observe_count; /* Pending token observations consumed in stopping */
+	u64 frontier_observe_good; /* Observations that promoted cache-hot confidence */
+	u64 frontier_observe_bad; /* Observations that decayed or rejected confidence */
+	u64 frontier_conf_promote; /* Observation raised confidence */
+	u64 frontier_conf_decay; /* Observation or failed trusted action reduced confidence */
+	u64 frontier_conf_high; /* Observation reached high confidence */
+	u64 frontier_mode_count
+		[CAKE_FRONTIER_MODE_MAX]; /* Post-observe predictor mode distribution */
+	u64 frontier_dispatch_trusted_attempt; /* Dispatch tried a trusted cache-hot shortcut */
+	u64 frontier_dispatch_trusted_hit; /* Trusted dispatch keep-running succeeded */
+	u64 frontier_dispatch_trusted_fail; /* Trusted dispatch keep-running failed and decayed */
+	u64 frontier_dispatch_audit_skip; /* Trusted dispatch skipped fairness due to audit cadence */
+	u64 frontier_dispatch_audit_due; /* Trusted dispatch hit audit cadence and asked fairness */
+	u64 frontier_select_prev_attempt; /* Select path evaluated token-approved prev CPU */
+	u64 frontier_select_prev_hit; /* Token-approved prev CPU claim succeeded */
+	u64 frontier_select_prev_miss; /* Token-approved prev CPU claim failed */
+	u64 frontier_enqueue_fact_attempt; /* Enqueue path tried token fact reuse */
+	u64 frontier_enqueue_fact_hit; /* Enqueue token facts avoided affinity re-check */
+	u64 frontier_enqueue_fact_miss; /* Enqueue token facts were unavailable or stale */
+	u64 frontier_token_clear; /* running() cleared stale CPU token on task change */
 	u64 home_place_wait_ns
 		[CAKE_PLACE_CLASS_MAX]; /* Wait sums by task-home locality */
 	u64 home_place_wait_count

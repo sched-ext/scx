@@ -1399,9 +1399,7 @@ mod tests {
         assert!(readme.contains("SCX_CAKE_STORM_GUARD=shadow"));
         assert!(readme.contains("SCX_CAKE_LEARNED_LOCALITY=off"));
         assert!(readme.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY=off"));
-        assert!(
-            readme.contains("Release builds bake profile, quantum, queue policy, storm guard")
-        );
+        assert!(readme.contains("Release builds bake profile, quantum, queue policy, storm guard"));
     }
 
     #[test]
@@ -1758,8 +1756,9 @@ mod tests {
         assert!(source_contains(
             src,
             "u32 owner_avg_runtime_ns = cake_update_owner_avg(bss, rt_raw);
+             cake_route_pred_observe(bss, p, rt_raw, runnable);
              cake_publish_cpu_owner(cpu, bss, owner_avg_runtime_ns);
-             if (!relaxed)
+             if (!cake_accounting_relaxed(bss))
                      cake_scoreboard_owner_result(bss, owner_avg_runtime_ns);"
         ));
     }

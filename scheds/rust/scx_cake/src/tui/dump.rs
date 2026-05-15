@@ -815,6 +815,54 @@ fn format_accel_fallback_summary(stats: &cake_stats) -> String {
     )
 }
 
+fn frontier_mode_label(mode: usize) -> &'static str {
+    match mode {
+        1 => "cache",
+        2 => "fair",
+        3 => "mixed",
+        _ => "none",
+    }
+}
+
+fn format_frontier_modes(counts: &[u64; 4]) -> String {
+    let mut parts = Vec::new();
+    for (mode, count) in counts.iter().enumerate() {
+        if *count > 0 {
+            parts.push(format!("{}={}", frontier_mode_label(mode), count));
+        }
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_frontier_summary(stats: &cake_stats) -> String {
+    format!(
+        "pending={} observe[g/b]={}/{} promote/decay/high={}/{}/{} mode=[{}] dispatch[a/h/f]={}/{}/{} audit[skip/due]={}/{} select_prev[a/h/m]={}/{}/{} enqueue_fact[a/h/m]={}/{}/{} clear={}",
+        stats.frontier_pending_set,
+        stats.frontier_observe_good,
+        stats.frontier_observe_bad,
+        stats.frontier_conf_promote,
+        stats.frontier_conf_decay,
+        stats.frontier_conf_high,
+        format_frontier_modes(&stats.frontier_mode_count),
+        stats.frontier_dispatch_trusted_attempt,
+        stats.frontier_dispatch_trusted_hit,
+        stats.frontier_dispatch_trusted_fail,
+        stats.frontier_dispatch_audit_skip,
+        stats.frontier_dispatch_audit_due,
+        stats.frontier_select_prev_attempt,
+        stats.frontier_select_prev_hit,
+        stats.frontier_select_prev_miss,
+        stats.frontier_enqueue_fact_attempt,
+        stats.frontier_enqueue_fact_hit,
+        stats.frontier_enqueue_fact_miss,
+        stats.frontier_token_clear,
+    )
+}
+
 fn storm_guard_mode_label(mode: usize) -> &'static str {
     match mode {
         0 => "off",
@@ -1063,6 +1111,11 @@ fn append_accelerator_section(
             &stats.accel_route_miss_count,
         ),
         format_accel_route_blocks(&stats.accel_route_block_count),
+    ));
+    output.push_str(&format!(
+        "{}.frontier: {}\n",
+        label,
+        format_frontier_summary(stats),
     ));
     output.push_str(&format!(
         "{}.fastscan: route[attempt/hit/miss(hit%)]={} probe={}\n",
@@ -3023,6 +3076,14 @@ fn append_window_stats(
         callback_hist_summary(stats, 4),
     ));
     output.push_str(&format!(
+        "win.cbsplit: sel[{}] enq[{}] disp[{}] run[{}] stop[{}]\n",
+        callback_split_summary(stats, 0),
+        callback_split_summary(stats, 1),
+        callback_split_summary(stats, 2),
+        callback_split_summary(stats, 3),
+        callback_split_summary(stats, 4),
+    ));
+    output.push_str(&format!(
         "win.hotpath: run=same:{}/chg:{} ({:.1}/{:.1}/s) stop=run:{}/blk:{} ({:.1}/{:.1}/s) enq=kth:{} init:{} preserve:{} requeue:{} wake:{} affine[p/r/d]={}/{}/{} llc=wake_idle:{} wake_busy:{} nonwake:{} disp=lhit:{} lmiss:{} steal:{} keep:{}\n",
         stats.nr_running_same_task,
         stats.nr_running_task_change,
@@ -3355,6 +3416,14 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
         callback_hist_summary(stats, 2),
         callback_hist_summary(stats, 3),
         callback_hist_summary(stats, 4),
+    ));
+    output.push_str(&format!(
+        "cb.split: sel[{}] enq[{}] disp[{}] run[{}] stop[{}]\n",
+        callback_split_summary(stats, 0),
+        callback_split_summary(stats, 1),
+        callback_split_summary(stats, 2),
+        callback_split_summary(stats, 3),
+        callback_split_summary(stats, 4),
     ));
     output.push_str(&format!(
         "hotpath: run=same:{} change:{} stop=runnable:{} blocked:{} enq=kthread:{} initial:{} preserve:{} requeue:{} wakeup:{} affine[p/r/d]={}/{}/{} llc=wake_idle:{} wake_busy:{} nonwake:{} dispatch=local_hit:{} local_miss:{} steal_hit:{} keep_running:{}\n",
