@@ -7,10 +7,9 @@
 // size — zero wasted BSS, zero dead loop iterations.
 
 /// Detect online logical CPU count from /sys/devices/system/cpu/online.
-/// Returns next power-of-2, clamped [16, 512].
 ///
-/// Parses range format: "0-15" → 16, "0-7,16-23" → 24 → next_pow2 = 32.
-fn detect_max_cpus() -> u32 {
+/// Parses range format: "0-15" → 16, "0-7,16-23" → 24.
+fn detect_online_cpu_count() -> u32 {
     let online =
         std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap_or_else(|_| "0-7".into());
     let max_id = online
@@ -19,15 +18,19 @@ fn detect_max_cpus() -> u32 {
         .filter_map(|range| range.split('-').next_back()?.parse::<u32>().ok())
         .max()
         .unwrap_or(7);
-    (max_id + 1).next_power_of_two().clamp(16, 512)
+    max_id + 1
+}
+
+/// Detect online logical CPU count from /sys/devices/system/cpu/online.
+/// Returns next power-of-2, clamped [16, 512].
+fn detect_max_cpus() -> u32 {
+    detect_online_cpu_count().next_power_of_two().clamp(16, 512)
 }
 
 /// Detect unique LLC (L3 cache) count from sysfs.
-/// Returns next power-of-2, clamped [1, 16].
-///
 /// Reads /sys/devices/system/cpu/cpu*/cache/index3/id for each online CPU,
 /// collects unique LLC IDs.  Falls back to 1 if sysfs unavailable.
-fn detect_max_llcs() -> u32 {
+fn detect_llc_count() -> u32 {
     let mut ids = std::collections::HashSet::new();
     if let Ok(entries) = std::fs::read_dir("/sys/devices/system/cpu") {
         for entry in entries.flatten() {
@@ -42,7 +45,13 @@ fn detect_max_llcs() -> u32 {
             }
         }
     }
-    (ids.len() as u32).max(1).next_power_of_two().clamp(1, 16)
+    (ids.len() as u32).max(1)
+}
+
+/// Detect unique LLC (L3 cache) count from sysfs.
+/// Returns next power-of-2, clamped [1, 16].
+fn detect_max_llcs() -> u32 {
+    detect_llc_count().next_power_of_two().clamp(1, 16)
 }
 
 /// Detect if the system has heterogeneous (P/E) cores.
@@ -164,6 +173,8 @@ fn main() {
     let base_flags = "-O2 -mcpu=v4 -fno-stack-protector -fno-asynchronous-unwind-tables -Wno-missing-declarations";
 
     // Compile-time hardware scaling: detect CPU/LLC topology and pass to BPF.
+    let nr_cpus = detect_online_cpu_count();
+    let nr_llcs = detect_llc_count();
     let max_cpus = detect_max_cpus();
     let max_llcs = detect_max_llcs();
     let is_single_llc = max_llcs == 1;
@@ -256,10 +267,12 @@ fn main() {
 
     // Build cflags with hardware gates
     let mut cflags = format!(
-        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={} -DCAKE_STORM_GUARD_VALUE={} -DCAKE_BUSY_WAKE_KICK_VALUE={} -DCAKE_LEARNED_LOCALITY_VALUE={} -DCAKE_WAKE_CHAIN_LOCALITY_VALUE={}",
+        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_NR_CPUS={} -DCAKE_NR_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={} -DCAKE_STORM_GUARD_VALUE={} -DCAKE_BUSY_WAKE_KICK_VALUE={} -DCAKE_LEARNED_LOCALITY_VALUE={} -DCAKE_WAKE_CHAIN_LOCALITY_VALUE={}",
         base_flags,
         max_cpus,
         max_llcs,
+        nr_cpus,
+        nr_llcs,
         baked_quantum_us * 1000,
         baked_queue_policy_value,
         baked_storm_guard_value,
@@ -300,9 +313,11 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} NEEDS_ARENA={}",
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} NEEDS_ARENA={}",
         max_cpus,
         max_llcs,
+        nr_cpus,
+        nr_llcs,
         is_single_llc,
         has_hybrid,
         baked_profile,
