@@ -128,9 +128,9 @@ impl StormGuardMode {
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum QueuePolicy {
-    /// 1.1.1 local-first fallback policy retained for A/B testing.
+    /// Default local-first fallback policy used by the benchmark-guided release path.
     Local = 0,
-    /// Default per-LLC vtime fallback queues similar to the 1.1.0 queue shape.
+    /// Per-LLC vtime fallback queues similar to the 1.1.0 queue shape.
     LlcVtime = 1,
 }
 
@@ -404,7 +404,7 @@ struct Args {
     /// SHADOW records storm-guard candidates without changing placement.
     /// SHIELD allows conservative extra local handoff for saturated owners.
     /// FULL allows broad local handoff during wake-storm A/B testing.
-    #[arg(long, value_enum, default_value_t = StormGuardMode::Off, verbatim_doc_comment)]
+    #[arg(long, value_enum, default_value_t = StormGuardMode::Shield, verbatim_doc_comment)]
     storm_guard: StormGuardMode,
 
     /// Queueing policy for busy fallback work.
@@ -412,11 +412,10 @@ struct Args {
     /// Debug builds patch this at startup. Release builds use
     /// SCX_CAKE_QUEUE_POLICY at build time.
     ///
-    /// LLC-VTIME keeps the default 1.1.0-style shape: fallback work is inserted
+    /// LOCAL keeps busy fallback work in the selected CPU's local DSQ.
+    /// LLC-VTIME A/B tests the 1.1.0-style shape: fallback work is inserted
     /// into a per-LLC vtime DSQ that dispatch() pulls from.
-    /// LOCAL A/B tests the 1.1.1 local-only shape: fallback work is inserted
-    /// into the selected CPU's local DSQ.
-    #[arg(long, value_enum, default_value_t = QueuePolicy::LlcVtime, verbatim_doc_comment)]
+    #[arg(long, value_enum, default_value_t = QueuePolicy::Local, verbatim_doc_comment)]
     queue_policy: QueuePolicy,
 
     /// Enable live TUI (Terminal User Interface) with real-time statistics.
@@ -1054,10 +1053,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn queue_policy_defaults_to_llc_vtime() {
+    fn queue_policy_defaults_to_local() {
         let args = Args::try_parse_from(["scx_cake"]).unwrap();
 
-        assert_eq!(args.queue_policy, QueuePolicy::LlcVtime);
+        assert_eq!(args.queue_policy, QueuePolicy::Local);
     }
 
     #[test]
@@ -1068,9 +1067,9 @@ mod tests {
     }
 
     #[test]
-    fn storm_guard_defaults_to_off_and_parses_full() {
+    fn storm_guard_defaults_to_shield_and_parses_full() {
         let args = Args::try_parse_from(["scx_cake"]).unwrap();
-        assert_eq!(args.storm_guard, StormGuardMode::Off);
+        assert_eq!(args.storm_guard, StormGuardMode::Shield);
 
         let args = Args::try_parse_from(["scx_cake", "--storm-guard", "full"]).unwrap();
         assert_eq!(args.storm_guard, StormGuardMode::Full);

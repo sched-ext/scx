@@ -2,8 +2,10 @@
 
 ## Purpose
 
-This note captures the April 30, 2026 queue-policy A/B result that led to
-making `llc-vtime` the default fallback queue path.
+This note captures the April 30, 2026 queue-policy A/B result that made
+`llc-vtime` the historical default fallback queue path for game-latency work.
+It is retained as context now that later stress-ng score work moved the release
+benchmark tuple back to `local`.
 
 The important finding is simple: the local-only fallback path preserved average
 FPS, but badly hurt low-percentile FPS. Restoring a per-LLC vtime fallback queue
@@ -86,11 +88,12 @@ can pull the next eligible fallback task.
 
 ## Decision
 
-`llc-vtime` is the default queue policy for now.
+`llc-vtime` was the default queue policy for this game-latency checkpoint. As of
+the later benchmark-guided stress-ng work, release builds default to `local`
+while retaining `llc-vtime` as a compile-time/runtime A/B mode.
 
-`--queue-policy local` remains available as an explicit A/B mode. It is useful
-for regression testing and for checking whether a future change has made
-local-only fallback viable again.
+`--queue-policy llc-vtime` remains useful for regression testing and for
+checking whether a future change needs the shared fallback arbiter again.
 
 ## Follow-Up Checks
 

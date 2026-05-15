@@ -3,7 +3,8 @@
  *
  * Core design:
  *   - direct dispatch when an idle CPU is available
- *   - per-LLC vtime fallback queues when no idle CPU is available
+ *   - local fallback queues by default, with per-LLC vtime fallback available
+ *     as a compile-time A/B policy
  *   - topology-aware CPU selection (V-Cache, hybrid P/E, SMT siblings)
  *   - lean hot paths with task-local vtime accounting
  */
@@ -24,8 +25,8 @@
 #include "intf.h"
 #include "bpf_compat.h"
 
-/* Local CPU DSQs remain non-stealable; the default LLC-vtime policy uses
- * explicit per-LLC DSQs as the fallback arbiter instead. */
+/* Local CPU DSQs remain non-stealable. The LLC-vtime A/B policy uses explicit
+ * per-LLC DSQs as the fallback arbiter instead. */
 #define CAKE_LOCAL_CPU_ONLY 1
 
 char _license[] SEC("license") = "GPL";
@@ -40,10 +41,10 @@ char _license[] SEC("license") = "GPL";
 #define CAKE_QUANTUM_NS CAKE_DEFAULT_QUANTUM_NS
 #endif
 #ifndef CAKE_QUEUE_POLICY_VALUE
-#define CAKE_QUEUE_POLICY_VALUE CAKE_QUEUE_POLICY_LLC_VTIME
+#define CAKE_QUEUE_POLICY_VALUE CAKE_QUEUE_POLICY_LOCAL
 #endif
 #ifndef CAKE_STORM_GUARD_VALUE
-#define CAKE_STORM_GUARD_VALUE CAKE_STORM_GUARD_OFF
+#define CAKE_STORM_GUARD_VALUE CAKE_STORM_GUARD_SHIELD
 #endif
 #ifndef CAKE_BUSY_WAKE_KICK_VALUE
 #define CAKE_BUSY_WAKE_KICK_VALUE CAKE_BUSY_WAKE_KICK_POLICY
@@ -60,8 +61,8 @@ const u64 quantum_ns = CAKE_QUANTUM_NS; /* Base time slice per dispatch */
 #define CAKE_STORM_GUARD_MODE CAKE_STORM_GUARD_VALUE
 #else
 const volatile u64 quantum_ns	    = CAKE_DEFAULT_QUANTUM_NS;
-const volatile u32 queue_policy	    = CAKE_QUEUE_POLICY_LLC_VTIME;
-const volatile u32 storm_guard_mode = CAKE_STORM_GUARD_OFF;
+const volatile u32 queue_policy	    = CAKE_QUEUE_POLICY_LOCAL;
+const volatile u32 storm_guard_mode = CAKE_STORM_GUARD_SHIELD;
 #define CAKE_QUEUE_POLICY (*(volatile const u32 *)&queue_policy)
 #define CAKE_STORM_GUARD_MODE (*(volatile const u32 *)&storm_guard_mode)
 #endif

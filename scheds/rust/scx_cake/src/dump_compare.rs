@@ -1355,16 +1355,19 @@ mod tests {
         assert!(build.contains("SCX_CAKE_QUANTUM_US"));
         assert!(build.contains("SCX_CAKE_QUEUE_POLICY"));
         assert!(build.contains("SCX_CAKE_STORM_GUARD"));
+        assert!(build.contains("SCX_CAKE_BUSY_WAKE_KICK"));
         assert!(build.contains("SCX_CAKE_LEARNED_LOCALITY"));
         assert!(build.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY"));
         assert!(build.contains("-DCAKE_QUANTUM_NS="));
         assert!(build.contains("-DCAKE_QUEUE_POLICY_VALUE="));
         assert!(build.contains("-DCAKE_STORM_GUARD_VALUE="));
+        assert!(build.contains("-DCAKE_BUSY_WAKE_KICK_VALUE="));
         assert!(build.contains("-DCAKE_LEARNED_LOCALITY_VALUE="));
         assert!(build.contains("-DCAKE_WAKE_CHAIN_LOCALITY_VALUE="));
         assert!(build.contains("BAKED_QUANTUM_US"));
         assert!(build.contains("BAKED_QUEUE_POLICY"));
         assert!(build.contains("BAKED_STORM_GUARD"));
+        assert!(build.contains("BAKED_BUSY_WAKE_KICK"));
         assert!(build.contains("BAKED_LEARNED_LOCALITY"));
         assert!(build.contains("BAKED_WAKE_CHAIN_LOCALITY"));
 
@@ -1377,11 +1380,11 @@ mod tests {
         ));
         assert!(source_contains(
             src,
-            "const volatile u32 queue_policy = CAKE_QUEUE_POLICY_LLC_VTIME;"
+            "const volatile u32 queue_policy = CAKE_QUEUE_POLICY_LOCAL;"
         ));
         assert!(source_contains(
             src,
-            "const volatile u32 storm_guard_mode = CAKE_STORM_GUARD_OFF;"
+            "const volatile u32 storm_guard_mode = CAKE_STORM_GUARD_SHIELD;"
         ));
 
         assert!(main.contains("#[cfg(not(cake_bpf_release))]"));
@@ -1391,12 +1394,14 @@ mod tests {
         assert!(main.contains("topology::BAKED_QUANTUM_US"));
         assert!(main.contains("topology::BAKED_QUEUE_POLICY"));
         assert!(main.contains("topology::BAKED_STORM_GUARD"));
+        assert!(main.contains("topology::BAKED_BUSY_WAKE_KICK"));
         assert!(main.contains("topology::BAKED_LEARNED_LOCALITY"));
         assert!(main.contains("topology::BAKED_WAKE_CHAIN_LOCALITY"));
 
         assert!(readme.contains("SCX_CAKE_PROFILE=esports"));
         assert!(readme.contains("SCX_CAKE_QUEUE_POLICY=local"));
-        assert!(readme.contains("SCX_CAKE_STORM_GUARD=shadow"));
+        assert!(readme.contains("SCX_CAKE_STORM_GUARD=shield"));
+        assert!(readme.contains("SCX_CAKE_BUSY_WAKE_KICK=policy"));
         assert!(readme.contains("SCX_CAKE_LEARNED_LOCALITY=off"));
         assert!(readme.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY=off"));
         assert!(readme.contains("Release builds bake profile, quantum, queue policy, storm guard"));

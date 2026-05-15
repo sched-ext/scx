@@ -146,8 +146,8 @@ write_options() {
 axis	values	default	notes
 profile	esports,gaming,balanced,legacy	gaming	Debug runtime preset; release builds bake this at compile time.
 quantum	750,1000,1500,2000,4000	auto from profile	Debug runtime override; release builds bake SCX_CAKE_QUANTUM_US.
-queue-policy	llc-vtime,local	llc-vtime	Debug runtime A/B; release builds bake SCX_CAKE_QUEUE_POLICY.
-storm-guard	off,shadow,shield,full	off	shadow records candidates; shield is conservative enforcement; full is broad benchmark-only enforcement.
+queue-policy	local,llc-vtime	local	Debug runtime A/B; release builds bake SCX_CAKE_QUEUE_POLICY.
+storm-guard	off,shadow,shield,full	shield	shadow records candidates; shield is conservative enforcement; full is broad benchmark-only enforcement.
 busy-wake-kick	policy,preempt,idle	policy	Same-CPU busy wake kick behavior.
 wake-chain-locality	false,true	false	Learned wake-chain locality guard.
 learned-locality	false,true	false	Arena-backed home/core/primary steering after enough task history.
@@ -253,7 +253,7 @@ safe_write_file "${REPORT}" <<EOF
 
 ## Important Boundary
 
-Debug builds can change profile, quantum, queue policy, and storm guard at runtime. Release builds bake the hot-path values at compile time, so release A/B work must rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, or SCX_CAKE_STORM_GUARD.
+Debug builds can change profile, quantum, queue policy, storm guard, and busy-wake kick at runtime. Release builds bake the hot-path values at compile time, so release A/B work must rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, or SCX_CAKE_BUSY_WAKE_KICK.
 
 ## Recommended First Pass
 
