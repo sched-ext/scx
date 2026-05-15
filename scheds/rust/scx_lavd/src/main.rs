@@ -39,6 +39,7 @@ use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
@@ -718,6 +719,26 @@ impl<'a> Scheduler<'a> {
         if !ksym_exists("scx_group_set_bandwidth").unwrap() {
             skel.struct_ops.lavd_ops_mut().cgroup_set_bandwidth = std::ptr::null_mut();
             warn!("Kernel does not support ops.cgroup_set_bandwidth(), so disable it.");
+        }
+
+        /*
+         * Two-way selection for "drain the local DSQ when a
+         * higher-priority class takes the CPU":
+         *
+         *   kernel >= 6.19 (call-from-anywhere reenqueue):
+         *     -> drop ops.cpu_release; enable sched_switch hook.
+         *
+         *   kernel < 6.19 (cpu_release-restricted reenqueue only):
+         *     -> keep ops.cpu_release; sched_switch stays disabled.
+         */
+        if ksym_exists("scx_bpf_reenqueue_local___v2").unwrap() {
+            skel.struct_ops.lavd_ops_mut().cpu_release = std::ptr::null_mut();
+            unsafe {
+                libbpf_rs::libbpf_sys::bpf_program__set_autoload(
+                    skel.progs.lavd_sched_switch.as_libbpf_object().as_ptr(),
+                    true,
+                );
+            }
         }
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
