@@ -38,6 +38,7 @@ use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
 use libbpf_rs::skel::Skel;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
@@ -151,15 +152,6 @@ struct Opts {
     /// Set to 0 to disable. Set to 100 to always skip periodic LB.
     #[clap(long = "lb-low-util-pct", default_value = "25", value_parser=Opts::lb_low_util_pct_range)]
     lb_low_util_pct: u8,
-
-    /// Low utilization threshold percentage (0-100) for bypassing deadline
-    /// scheduling. When set to a non-zero value, tasks are dispatched directly
-    /// to the local DSQ (FIFO) instead of using deadline-based ordering when
-    /// the per-CPU utilization is below this percentage.
-    /// Default is 10 (bypass deadline scheduling below 10% utilization).
-    /// Set to 0 to disable. Set to 100 to always bypass deadline scheduling.
-    #[clap(long = "lb-local-dsq-util-pct", default_value = "10", value_parser=Opts::lb_local_dsq_util_pct_range)]
-    lb_local_dsq_util_pct: u8,
 
     /// Slice duration in microseconds to use for all tasks when pinned tasks
     /// are running on a CPU. Must be between slice-min-us and slice-max-us.
@@ -411,10 +403,6 @@ impl Opts {
     }
 
     fn lb_low_util_pct_range(s: &str) -> Result<u8, String> {
-        number_range(s, 0, 100)
-    }
-
-    fn lb_local_dsq_util_pct_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 100)
     }
 }
@@ -691,7 +679,6 @@ impl<'a> Scheduler<'a> {
         rodata.lat_load_target_pct = opts.lat_load_target_pct;
         rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.lb_low_util_wall = ((opts.lb_low_util_pct as u64) << 10) / 100;
-        rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_fast_lb = opts.no_fast_lb as u8;
         rodata.no_wake_sync = opts.no_wake_sync;
@@ -704,10 +691,37 @@ impl<'a> Scheduler<'a> {
             warn!("Kernel does not support ops.cgroup_set_bandwidth(), so disable it.");
         }
 
+        /*
+         * Three-way selection for "drain the local DSQ when a
+         * higher-priority class takes the CPU":
+         *
+         *   kernel >= 7.1 (SCX_OPS_ALWAYS_ENQ_IMMED):
+         *     kernel handles draining natively
+         *     -> drop ops.cpu_release; sched_switch stays disabled.
+         *
+         *   kernel 6.19..7.0 (call-from-anywhere reenqueue):
+         *     -> drop ops.cpu_release; enable sched_switch hook.
+         *
+         *   kernel < 6.19 (cpu_release-restricted reenqueue only):
+         *     -> keep ops.cpu_release; sched_switch stays disabled.
+         */
+        if *compat::SCX_OPS_ALWAYS_ENQ_IMMED != 0 {
+            skel.struct_ops.lavd_ops_mut().cpu_release = std::ptr::null_mut();
+        } else if ksym_exists("scx_bpf_reenqueue_local___v2").unwrap() {
+            skel.struct_ops.lavd_ops_mut().cpu_release = std::ptr::null_mut();
+            unsafe {
+                libbpf_rs::libbpf_sys::bpf_program__set_autoload(
+                    skel.progs.lavd_sched_switch.as_libbpf_object().as_ptr(),
+                    true,
+                );
+            }
+        }
+
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
+            | *compat::SCX_OPS_KEEP_BUILTIN_IDLE
+            | *compat::SCX_OPS_ALWAYS_ENQ_IMMED;
 
         if opts.partial {
             skel.struct_ops.lavd_ops_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;

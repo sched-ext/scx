@@ -833,16 +833,6 @@ int update_cpuperf_target(struct cpu_ctx *cpuc)
 	return 0;
 }
 
-__hidden
-int reset_cpuperf_target(struct cpu_ctx *cpuc)
-{
-	if (!no_freq_scaling) {
-		cpuc->cpuperf_cur = 0;
-	}
-
-	return 0;
-}
-
 u16 get_cpuperf_cap(s32 cpu)
 {
 	const volatile u16 *cap;

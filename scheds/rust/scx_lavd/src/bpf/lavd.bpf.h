@@ -724,7 +724,7 @@ void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc);
 
 u64 get_est_stopping_clk(task_ctx *taskc, u64 now);
 void try_proc_introspec_cmd(struct task_struct *p, task_ctx *taskc);
-void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released);
+void reset_cpu_preemption_info(struct cpu_ctx *cpuc);
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
 void shrink_boosted_slice_at_tick(struct task_struct *p,
 					 struct cpu_ctx *cpuc, u64 now);
