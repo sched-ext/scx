@@ -104,7 +104,7 @@ fn baked_profile() -> (String, u64) {
 
 fn baked_queue_policy() -> (&'static str, u32) {
     let policy = std::env::var("SCX_CAKE_QUEUE_POLICY")
-        .unwrap_or_else(|_| "llc-vtime".into())
+        .unwrap_or_else(|_| "local".into())
         .to_ascii_lowercase()
         .replace('_', "-");
     match policy.as_str() {
@@ -116,7 +116,7 @@ fn baked_queue_policy() -> (&'static str, u32) {
 
 fn baked_storm_guard() -> (&'static str, u32) {
     let mode = std::env::var("SCX_CAKE_STORM_GUARD")
-        .unwrap_or_else(|_| "shadow".into())
+        .unwrap_or_else(|_| "shield".into())
         .to_ascii_lowercase()
         .replace('_', "-");
     match mode.as_str() {
@@ -130,7 +130,7 @@ fn baked_storm_guard() -> (&'static str, u32) {
 
 fn baked_busy_wake_kick() -> (&'static str, u32) {
     let mode = std::env::var("SCX_CAKE_BUSY_WAKE_KICK")
-        .unwrap_or_else(|_| "idle".into())
+        .unwrap_or_else(|_| "policy".into())
         .to_ascii_lowercase()
         .replace('_', "-");
     match mode.as_str() {

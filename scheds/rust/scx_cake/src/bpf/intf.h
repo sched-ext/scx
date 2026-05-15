@@ -295,8 +295,8 @@ typedef unsigned short cake_cpu_id_t;
 #define CAKE_QUEUE_POLICY_LOCAL 0U
 #define CAKE_QUEUE_POLICY_LLC_VTIME 1U
 
-/* Shared-DSQ base used by the default per-LLC vtime fallback policy.
- * The local queue policy remains available as an explicit A/B mode. */
+/* Shared-DSQ base used by the per-LLC vtime fallback A/B policy.
+ * The default local queue policy does not pull from these fallback DSQs. */
 #define LLC_DSQ_BASE 200
 #define CAKE_THROUGHPUT_DSQ_BASE 1024
 
