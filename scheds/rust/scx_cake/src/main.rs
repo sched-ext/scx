@@ -528,7 +528,11 @@ impl Args {
         }
         #[cfg(not(cake_bpf_release))]
         {
-            if self.learned_locality { "on" } else { "off" }
+            if self.learned_locality {
+                "on"
+            } else {
+                "off"
+            }
         }
     }
 
@@ -539,7 +543,11 @@ impl Args {
         }
         #[cfg(not(cake_bpf_release))]
         {
-            if self.wake_chain_locality { "on" } else { "off" }
+            if self.wake_chain_locality {
+                "on"
+            } else {
+                "off"
+            }
         }
     }
 }

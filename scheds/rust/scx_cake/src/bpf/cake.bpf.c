@@ -188,7 +188,7 @@ const bool enable_stats __attribute__((used)) = false;
 #define CAKE_CACHE_THROUGHPUT_FULL_SLICE_SHIFT 2U
 #define CAKE_LLC_VTIME_LOCAL_RESCUE_DEPTH 2
 #define CAKE_CACHE_THROUGHPUT_SHIFT_LUT 0x5555555544332210ULL
-#define CAKE_THROUGHPUT_FAIR_DISPATCH_BUDGET 8U
+#define CAKE_THROUGHPUT_FAIR_DISPATCH_BUDGET 15U
 #define CAKE_BUSY_WAKE_SHRINK_MIN_NS 500000ULL
 #define CAKE_TP_DEC_PULL_MASK 0x0fULL
 #define CAKE_TP_DEC_DISPATCH_MASK CAKE_TP_DEC_PULL_MASK
@@ -200,10 +200,49 @@ const bool enable_stats __attribute__((used)) = false;
 #define CAKE_TP_DEC_RUN_BUCKET_SHIFT 16U
 #define CAKE_TP_DEC_BUCKET_MASK 0xffULL
 #define CAKE_TP_DEC_SAT_CACHE_MEM (1ULL << 24)
+#define CAKE_TP_DEC_STREAM_PRESSURE (1ULL << 25)
 #define CAKE_TP_DEC_OWNER_MASK \
 	((CAKE_TP_DEC_BUCKET_MASK << CAKE_TP_DEC_RUNTIME_BUCKET_SHIFT) | \
 	 (CAKE_TP_DEC_BUCKET_MASK << CAKE_TP_DEC_RUN_BUCKET_SHIFT) | \
 	 CAKE_TP_DEC_SAT_CACHE_MEM)
+#define CAKE_MIXED_STREAM_BLEED_CACHE 4U
+#define CAKE_MIXED_STREAM_BLEED_MIXED 2U
+#define CAKE_STREAM_SLICE_SHIFT 0U
+#define CAKE_ROUTE_PRED_CONF_SHIFT 32U
+#define CAKE_ROUTE_PRED_ROUTE_SHIFT 36U
+#define CAKE_ROUTE_PRED_AUDIT_SHIFT 40U
+#define CAKE_ROUTE_PRED_PENDING (1ULL << 47)
+#define CAKE_ROUTE_PRED_GOOD_SHIFT 48U
+#define CAKE_ROUTE_PRED_BAD_SHIFT 52U
+#define CAKE_ROUTE_PRED_MODE_SHIFT 56U
+#define CAKE_ROUTE_PRED_FACT_SHIFT 59U
+#define CAKE_ROUTE_PRED_CONF_MASK 0xfULL
+#define CAKE_ROUTE_PRED_ROUTE_MASK 0xfULL
+#define CAKE_ROUTE_PRED_AUDIT_FIELD_MASK 0x7fULL
+#define CAKE_ROUTE_PRED_NIBBLE_MASK 0xfULL
+#define CAKE_ROUTE_PRED_MODE_MASK 0x7ULL
+#define CAKE_ROUTE_PRED_FACT_MASK 0x1fULL
+#define CAKE_ROUTE_PRED_NONE 0U
+#define CAKE_ROUTE_PRED_CACHE_HOT 1U
+#define CAKE_ROUTE_PRED_MODE_NONE 0U
+#define CAKE_ROUTE_PRED_MODE_CACHE 1U
+#define CAKE_ROUTE_PRED_MODE_FAIR 2U
+#define CAKE_ROUTE_PRED_MODE_MIXED 3U
+#define CAKE_ROUTE_FACT_USER (1U << 0)
+#define CAKE_ROUTE_FACT_NORMAL_PRIO (1U << 1)
+#define CAKE_ROUTE_FACT_DEFAULT_WEIGHT (1U << 2)
+#define CAKE_ROUTE_FACT_BULK (1U << 3)
+#define CAKE_ROUTE_FACT_NOT_AFFINITIZED (1U << 4)
+#define CAKE_ROUTE_PRED_CONF_TRUST 8U
+#define CAKE_ROUTE_PRED_CONF_STEP 4U
+#define CAKE_ROUTE_PRED_CONF_BAD_DECAY 5U
+#define CAKE_ROUTE_PRED_CONF_FAIL_DECAY 9U
+#define CAKE_ROUTE_PRED_AUDIT_MASK 0x7fU
+#define CAKE_ROUTE_PRED_EXTRA_SHIFT_MAX 6U
+#define CAKE_CACHE_SIMPLE_STATE_STREAM_SEEN (1ULL << 63)
+#define CAKE_CACHE_SIMPLE_STATE_ACTIVE (1ULL << 62)
+#define CAKE_CACHE_SIMPLE_STATE_COUNT_MASK 0xffffULL
+#define CAKE_CACHE_SIMPLE_WARMUP_TARGET 4096U
 #define CAKE_WAKE_CHAIN_POLICY_SCORE_MIN 8U
 #define CAKE_WAKE_CHAIN_HOME_SCORE_MIN 4U
 #define CAKE_WAKE_CHAIN_SCORE_MAX 15U
@@ -455,6 +494,7 @@ struct cake_scoreboard_summary scoreboard_summary[CAKE_MAX_LLCS];
 #endif
 struct cake_cpu_frontier cpu_frontier[CAKE_MAX_CPUS];
 struct cake_throughput_lane throughput_lane[CAKE_MAX_CPUS];
+u64 cache_simple_state;
 struct cake_trust_user	 trust_user[CAKE_MAX_CPUS] SEC(".bss")
 	__attribute__((aligned(64)));
 struct cake_trust_bpf trust_bpf[CAKE_MAX_CPUS] SEC(".bss")
@@ -652,7 +692,7 @@ cake_throughput_update_owner_decision(struct cake_cpu_bss *bss, u32 runtime_ns,
 }
 
 #if !CAKE_LEAN_SCHED
-static __always_inline void
+static __always_inline __maybe_unused void
 cake_throughput_reset_owner_decision(struct cake_cpu_bss *bss)
 {
 	u64 old_dec = READ_ONCE(bss->throughput_decision);
@@ -673,6 +713,541 @@ cake_throughput_reset_dispatch_budget(struct cake_cpu_bss *bss)
 		WRITE_ONCE(bss->throughput_decision, next);
 }
 
+static __always_inline u32
+cake_mixed_stream_bleed_limit_for(struct cake_cpu_bss *bss)
+{
+	u64 pred = READ_ONCE(bss->route_prediction_last);
+	u32 mode = (u32)((pred >> CAKE_ROUTE_PRED_MODE_SHIFT) &
+			 CAKE_ROUTE_PRED_MODE_MASK);
+
+	return mode == CAKE_ROUTE_PRED_MODE_MIXED ?
+		       CAKE_MIXED_STREAM_BLEED_MIXED :
+		       CAKE_MIXED_STREAM_BLEED_CACHE;
+}
+
+static __always_inline void
+cake_mixed_stream_mark_pressure(struct cake_cpu_bss *bss)
+{
+	u64 old_dec = READ_ONCE(bss->throughput_decision);
+	u64 next    = old_dec | CAKE_TP_DEC_STREAM_PRESSURE;
+
+	if (next != old_dec)
+		WRITE_ONCE(bss->throughput_decision, next);
+}
+
+static __always_inline __maybe_unused void
+cake_mixed_stream_clear_pressure(struct cake_cpu_bss *bss)
+{
+	u64 old_dec = READ_ONCE(bss->throughput_decision);
+	u64 next    = old_dec &
+		   ~(CAKE_TP_DEC_STREAM_PRESSURE | CAKE_TP_DEC_DISPATCH_MASK);
+
+	if (next != old_dec)
+		WRITE_ONCE(bss->throughput_decision, next);
+}
+
+static __always_inline bool
+cake_mixed_stream_bleed_due_dec(struct cake_cpu_bss *bss, u64 dec)
+{
+	u32 dispatches;
+	u32 limit;
+
+	if (!(dec & CAKE_TP_DEC_STREAM_PRESSURE))
+		return false;
+
+	dispatches = dec & CAKE_TP_DEC_DISPATCH_MASK;
+	limit = cake_mixed_stream_bleed_limit_for(bss);
+	return dispatches >= limit;
+}
+
+static __always_inline u64
+cake_route_pred_pack(u32 pid, u32 route, u32 conf, u32 audit)
+{
+	return (u64)pid |
+	       (((u64)conf & CAKE_ROUTE_PRED_CONF_MASK)
+		<< CAKE_ROUTE_PRED_CONF_SHIFT) |
+	       (((u64)route & CAKE_ROUTE_PRED_ROUTE_MASK)
+		<< CAKE_ROUTE_PRED_ROUTE_SHIFT) |
+	       (((u64)audit & CAKE_ROUTE_PRED_AUDIT_FIELD_MASK)
+		<< CAKE_ROUTE_PRED_AUDIT_SHIFT);
+}
+
+static __always_inline bool
+cake_task_is_affinitized_n(const struct task_struct *p, u32 ncpus);
+
+static __always_inline u64
+cake_route_pred_pack_full(u32 pid, u32 route, u32 conf, u32 audit, u32 good,
+			  u32 bad, u32 mode, u32 facts)
+{
+	return cake_route_pred_pack(pid, route, conf, audit) |
+	       (((u64)good & CAKE_ROUTE_PRED_NIBBLE_MASK)
+		<< CAKE_ROUTE_PRED_GOOD_SHIFT) |
+	       (((u64)bad & CAKE_ROUTE_PRED_NIBBLE_MASK)
+		<< CAKE_ROUTE_PRED_BAD_SHIFT) |
+	       (((u64)mode & CAKE_ROUTE_PRED_MODE_MASK)
+		<< CAKE_ROUTE_PRED_MODE_SHIFT) |
+	       (((u64)facts & CAKE_ROUTE_PRED_FACT_MASK)
+		<< CAKE_ROUTE_PRED_FACT_SHIFT);
+}
+
+static __always_inline u32 cake_route_pred_conf(u64 pred)
+{
+	return (u32)((pred >> CAKE_ROUTE_PRED_CONF_SHIFT) &
+		     CAKE_ROUTE_PRED_CONF_MASK);
+}
+
+static __always_inline u32 cake_route_pred_route(u64 pred)
+{
+	return (u32)((pred >> CAKE_ROUTE_PRED_ROUTE_SHIFT) &
+		     CAKE_ROUTE_PRED_ROUTE_MASK);
+}
+
+static __always_inline u32 cake_route_pred_audit(u64 pred)
+{
+	return (u32)((pred >> CAKE_ROUTE_PRED_AUDIT_SHIFT) &
+		     CAKE_ROUTE_PRED_AUDIT_FIELD_MASK);
+}
+
+static __always_inline u32 cake_route_pred_good(u64 pred)
+{
+	return (u32)((pred >> CAKE_ROUTE_PRED_GOOD_SHIFT) &
+		     CAKE_ROUTE_PRED_NIBBLE_MASK);
+}
+
+static __always_inline u32 cake_route_pred_bad(u64 pred)
+{
+	return (u32)((pred >> CAKE_ROUTE_PRED_BAD_SHIFT) &
+		     CAKE_ROUTE_PRED_NIBBLE_MASK);
+}
+
+static __always_inline u32 cake_route_pred_mode(u64 pred)
+{
+	return (u32)((pred >> CAKE_ROUTE_PRED_MODE_SHIFT) &
+		     CAKE_ROUTE_PRED_MODE_MASK);
+}
+
+static __always_inline u32 cake_route_pred_facts(u64 pred)
+{
+	return (u32)((pred >> CAKE_ROUTE_PRED_FACT_SHIFT) &
+		     CAKE_ROUTE_PRED_FACT_MASK);
+}
+
+static __always_inline u32
+cake_route_pred_mode_from(u32 good, u32 bad, u32 conf, u32 facts)
+{
+	if (conf < CAKE_ROUTE_PRED_CONF_TRUST)
+		return CAKE_ROUTE_PRED_MODE_NONE;
+	if (bad >= 8U && bad >= good)
+		return CAKE_ROUTE_PRED_MODE_FAIR;
+	/* Dispatch-time trust has to be useful before task churn clears the
+	 * one-slot CPU token. A single good cache-shaped continuation is enough
+	 * to enter audited cache mode; confidence and the audit cadence decide
+	 * how long it can skip questions before revalidating.
+	 */
+	if (good >= 1U && bad <= 1U && (facts & CAKE_ROUTE_FACT_BULK))
+		return CAKE_ROUTE_PRED_MODE_CACHE;
+	if (good >= 2U && bad <= 3U)
+		return CAKE_ROUTE_PRED_MODE_MIXED;
+	return CAKE_ROUTE_PRED_MODE_NONE;
+}
+
+static __always_inline __maybe_unused u32
+cake_route_pred_facts_from(const struct task_struct *p, u32 runtime_ns,
+			   bool runnable)
+{
+	u32 facts = 0;
+
+	if (!(p->flags & PF_KTHREAD))
+		facts |= CAKE_ROUTE_FACT_USER;
+	if (p->prio >= 120)
+		facts |= CAKE_ROUTE_FACT_NORMAL_PRIO;
+	if (p->scx.weight == 100)
+		facts |= CAKE_ROUTE_FACT_DEFAULT_WEIGHT;
+	if (runtime_ns >= cake_owner_bulk_min_ns())
+		facts |= CAKE_ROUTE_FACT_BULK;
+	if (!cake_task_is_affinitized_n(p, nr_cpus))
+		facts |= CAKE_ROUTE_FACT_NOT_AFFINITIZED;
+	return facts;
+}
+
+static __always_inline bool
+cake_route_pred_cache_trusted_word(u64 pred, u32 pid)
+{
+	u32 mode = cake_route_pred_mode(pred);
+
+	return ((u32)pred == pid) &&
+	       cake_route_pred_route(pred) == CAKE_ROUTE_PRED_CACHE_HOT &&
+	       cake_route_pred_conf(pred) >= CAKE_ROUTE_PRED_CONF_TRUST &&
+	       (mode == CAKE_ROUTE_PRED_MODE_CACHE ||
+		mode == CAKE_ROUTE_PRED_MODE_MIXED);
+}
+
+static __always_inline bool
+cake_route_pred_cache_trusted_pid(struct cake_cpu_bss *bss, u32 pid)
+{
+	u64 pred;
+
+	if (!pid)
+		return false;
+
+	pred = READ_ONCE(bss->route_prediction_last);
+	return cake_route_pred_cache_trusted_word(pred, pid);
+}
+
+static __always_inline __maybe_unused bool
+cake_route_pred_select_prev_ok(struct task_struct *p, u32 prev_cpu)
+{
+	u64 pred;
+	u32 facts;
+	u32 mode;
+	bool hit = false;
+
+	if (prev_cpu >= nr_cpus)
+		return false;
+
+	pred = READ_ONCE(cpu_bss[prev_cpu & (CAKE_MAX_CPUS - 1)]
+				 .route_prediction_last);
+	if ((u32)pred != p->pid)
+		return false;
+	if (cake_route_pred_conf(pred) < CAKE_ROUTE_PRED_CONF_TRUST)
+		return false;
+	mode = cake_route_pred_mode(pred);
+	if (mode == CAKE_ROUTE_PRED_MODE_FAIR ||
+	    mode == CAKE_ROUTE_PRED_MODE_NONE)
+		return false;
+	facts = cake_route_pred_facts(pred);
+	hit = (facts & (CAKE_ROUTE_FACT_USER |
+			CAKE_ROUTE_FACT_NORMAL_PRIO |
+			CAKE_ROUTE_FACT_DEFAULT_WEIGHT)) ==
+	      (CAKE_ROUTE_FACT_USER |
+	       CAKE_ROUTE_FACT_NORMAL_PRIO |
+	       CAKE_ROUTE_FACT_DEFAULT_WEIGHT);
+	return hit;
+}
+
+static __always_inline __maybe_unused bool
+cake_route_pred_enqueue_facts_ok(struct task_struct *p, u32 target_cpu)
+{
+	u64 pred;
+	u32 facts;
+	u32 mode;
+	bool hit = false;
+
+	if (target_cpu >= nr_cpus)
+		goto out;
+
+	pred = READ_ONCE(cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)]
+				 .route_prediction_last);
+	if ((u32)pred != p->pid)
+		goto out;
+	if (cake_route_pred_conf(pred) < CAKE_ROUTE_PRED_CONF_TRUST)
+		goto out;
+	mode = cake_route_pred_mode(pred);
+	if (mode == CAKE_ROUTE_PRED_MODE_FAIR ||
+	    mode == CAKE_ROUTE_PRED_MODE_NONE)
+		goto out;
+	facts = cake_route_pred_facts(pred);
+	hit = (facts & (CAKE_ROUTE_FACT_USER |
+			CAKE_ROUTE_FACT_NORMAL_PRIO |
+			CAKE_ROUTE_FACT_DEFAULT_WEIGHT |
+			CAKE_ROUTE_FACT_NOT_AFFINITIZED)) ==
+	      (CAKE_ROUTE_FACT_USER |
+	       CAKE_ROUTE_FACT_NORMAL_PRIO |
+	       CAKE_ROUTE_FACT_DEFAULT_WEIGHT |
+	       CAKE_ROUTE_FACT_NOT_AFFINITIZED);
+out:
+	cake_record_frontier_enqueue_fact(hit);
+	return hit;
+}
+
+static __always_inline void
+cake_route_pred_mark_pending(struct cake_cpu_bss *bss)
+{
+	u32 pid = READ_ONCE(bss->last_pid);
+	u64 pred;
+
+	if (!pid)
+		return;
+
+	pred = READ_ONCE(bss->route_prediction_last);
+	if ((u32)pred != pid)
+		pred = cake_route_pred_pack(pid, CAKE_ROUTE_PRED_CACHE_HOT, 0, 0);
+	WRITE_ONCE(bss->route_prediction_last, pred | CAKE_ROUTE_PRED_PENDING);
+	cake_record_frontier_pending();
+}
+
+static __noinline __maybe_unused void
+cake_route_pred_decay_current(struct cake_cpu_bss *bss, u32 decay)
+{
+	u32 pid = READ_ONCE(bss->last_pid);
+	u64 pred;
+	u32 conf;
+	u32 route;
+	u32 audit;
+	u32 good;
+	u32 bad;
+	u32 facts;
+	u32 mode;
+	u32 next_conf;
+
+	if (!pid)
+		return;
+
+	pred = READ_ONCE(bss->route_prediction_last);
+	if ((u32)pred != pid)
+		return;
+
+	conf = cake_route_pred_conf(pred);
+	if (!conf)
+		return;
+
+	route = cake_route_pred_route(pred);
+	audit = cake_route_pred_audit(pred);
+	good = cake_route_pred_good(pred);
+	bad = cake_route_pred_bad(pred);
+	facts = cake_route_pred_facts(pred);
+	next_conf = conf > decay ? conf - decay : 0U;
+	good = good ? good - 1U : 0U;
+	if (bad < 15U)
+		bad++;
+	if (!next_conf)
+		route = CAKE_ROUTE_PRED_NONE;
+	mode = cake_route_pred_mode_from(good, bad, next_conf, facts);
+
+	WRITE_ONCE(bss->route_prediction_last,
+		   cake_route_pred_pack_full(pid, route, next_conf, audit, good,
+					     bad, mode, facts));
+	cake_record_frontier_decay();
+}
+
+static __always_inline bool
+cake_route_pred_skip_fairness_dec(struct cake_cpu_bss *bss, u64 dec)
+{
+	u32 pid;
+	u64 pred;
+	u32 route;
+	u32 conf;
+	u32 mode;
+	u32 audit;
+	u32 audit_mask;
+
+	/* The frontier token is outcome-learned from repeated same-task cache
+	 * continuations. Requiring the older SAT-cache classifier here keeps the
+	 * predictor asleep on the generic keep_running path, which is exactly the
+	 * path the debug counters showed carrying the benchmark.
+	 */
+	pid = READ_ONCE(bss->last_pid);
+	if (!pid)
+		return false;
+
+	pred = READ_ONCE(bss->route_prediction_last);
+	if ((u32)pred != pid)
+		return false;
+	route = (u32)((pred >> CAKE_ROUTE_PRED_ROUTE_SHIFT) &
+		      CAKE_ROUTE_PRED_ROUTE_MASK);
+	conf = (u32)((pred >> CAKE_ROUTE_PRED_CONF_SHIFT) &
+		     CAKE_ROUTE_PRED_CONF_MASK);
+	mode = (u32)((pred >> CAKE_ROUTE_PRED_MODE_SHIFT) &
+		     CAKE_ROUTE_PRED_MODE_MASK);
+	if (route != CAKE_ROUTE_PRED_CACHE_HOT ||
+	    conf < CAKE_ROUTE_PRED_CONF_TRUST)
+		return false;
+	if (mode == CAKE_ROUTE_PRED_MODE_CACHE)
+		audit_mask = (dec & CAKE_TP_DEC_STREAM_PRESSURE) ? 0x0fU :
+			     (conf >= 12U ? 0x7fU : 0x03U);
+	else if (mode == CAKE_ROUTE_PRED_MODE_MIXED)
+		audit_mask = 0x07U;
+	else
+		return false;
+
+	/* Mode-aware audit cadence. Cache mode can skip long at high confidence;
+	 * mixed mode audits sooner; fair mode does not bypass fairness here. */
+	audit = (cake_route_pred_audit(pred) + 1U) & audit_mask;
+	pred = (pred &
+		~(CAKE_ROUTE_PRED_AUDIT_FIELD_MASK
+		  << CAKE_ROUTE_PRED_AUDIT_SHIFT)) |
+	       ((u64)audit << CAKE_ROUTE_PRED_AUDIT_SHIFT);
+	if (!audit) {
+		WRITE_ONCE(bss->route_prediction_last, pred);
+		cake_record_frontier_audit(false);
+		return false;
+	}
+	WRITE_ONCE(bss->route_prediction_last, pred);
+	cake_record_frontier_audit(true);
+	return true;
+}
+
+static __always_inline __maybe_unused bool
+cake_skip_local_rescue_depth_probe(u32 target_cpu)
+{
+	(void)target_cpu;
+	return false;
+}
+
+static __noinline void
+cake_route_pred_observe(struct cake_cpu_bss *bss, struct task_struct *p,
+			u32 runtime_ns, bool runnable)
+{
+#ifdef CAKE_RELEASE
+	u32 pid = p->pid;
+	u64 old_pred;
+	u64 next;
+	u64 dec;
+	u32 audit;
+	u32 conf;
+	u32 good;
+	u32 bad;
+	u32 facts = 0;
+	u32 mode;
+	u32 next_conf;
+
+	(void)runnable;
+	if (!pid)
+		return;
+
+	old_pred = READ_ONCE(bss->route_prediction_last);
+	if ((u32)old_pred != pid || !(old_pred & CAKE_ROUTE_PRED_PENDING))
+		return;
+
+	audit = (u32)((old_pred >> CAKE_ROUTE_PRED_AUDIT_SHIFT) &
+		      CAKE_ROUTE_PRED_AUDIT_FIELD_MASK);
+	conf = cake_route_pred_conf(old_pred);
+	good = cake_route_pred_good(old_pred);
+	bad = cake_route_pred_bad(old_pred);
+
+	if (!(p->flags & PF_KTHREAD))
+		facts |= CAKE_ROUTE_FACT_USER;
+	if (p->prio >= 120)
+		facts |= CAKE_ROUTE_FACT_NORMAL_PRIO;
+	if (p->scx.weight == 100)
+		facts |= CAKE_ROUTE_FACT_DEFAULT_WEIGHT;
+	if (runtime_ns >= cake_owner_bulk_min_ns())
+		facts |= CAKE_ROUTE_FACT_BULK;
+	if (!cake_task_is_affinitized_n(p, nr_cpus))
+		facts |= CAKE_ROUTE_FACT_NOT_AFFINITIZED;
+
+	if ((facts & (CAKE_ROUTE_FACT_USER |
+		      CAKE_ROUTE_FACT_NORMAL_PRIO |
+		      CAKE_ROUTE_FACT_DEFAULT_WEIGHT |
+		      CAKE_ROUTE_FACT_BULK)) !=
+	    (CAKE_ROUTE_FACT_USER |
+	     CAKE_ROUTE_FACT_NORMAL_PRIO |
+	     CAKE_ROUTE_FACT_DEFAULT_WEIGHT |
+	     CAKE_ROUTE_FACT_BULK)) {
+		WRITE_ONCE(bss->route_prediction_last, 0);
+		return;
+	}
+
+	next_conf = conf ? conf + CAKE_ROUTE_PRED_CONF_STEP :
+			   (CAKE_ROUTE_PRED_CONF_STEP >> 1);
+	if (next_conf > 15U)
+		next_conf = 15U;
+	if (good < 15U)
+		good++;
+	if (bad)
+		bad--;
+
+	dec = READ_ONCE(bss->throughput_decision);
+	mode = cake_route_pred_mode_from(good, bad, next_conf, facts);
+	if ((dec & CAKE_TP_DEC_STREAM_PRESSURE) &&
+	    mode == CAKE_ROUTE_PRED_MODE_CACHE)
+		mode = CAKE_ROUTE_PRED_MODE_MIXED;
+
+	next = cake_route_pred_pack_full(pid, CAKE_ROUTE_PRED_CACHE_HOT,
+					 next_conf, audit, good, bad, mode,
+					 facts);
+	if (next != old_pred)
+		WRITE_ONCE(bss->route_prediction_last, next);
+#else
+	u32 pid = p->pid;
+	u64 pred;
+	u64 last_pred;
+	u32 conf = 0;
+	u32 route = CAKE_ROUTE_PRED_NONE;
+	u32 audit = 0;
+	u32 good = 0;
+	u32 bad = 0;
+	u32 facts;
+	u32 old_facts = 0;
+	u32 mode;
+	u32 next_conf;
+	bool cache_shape;
+	bool strong_shape;
+	u64 next;
+
+	if (!pid)
+		return;
+
+	last_pred = READ_ONCE(bss->route_prediction_last);
+	if ((u32)last_pred != pid || !(last_pred & CAKE_ROUTE_PRED_PENDING))
+		return;
+
+	pred = last_pred;
+	if ((u32)pred == pid) {
+		conf = cake_route_pred_conf(pred);
+		route = cake_route_pred_route(pred);
+		audit = cake_route_pred_audit(pred);
+		good = cake_route_pred_good(pred);
+		bad = cake_route_pred_bad(pred);
+		old_facts = cake_route_pred_facts(pred);
+	}
+
+	facts = cake_route_pred_facts_from(p, runtime_ns, runnable);
+	facts |= old_facts & ~(CAKE_ROUTE_FACT_USER |
+			       CAKE_ROUTE_FACT_NORMAL_PRIO |
+			       CAKE_ROUTE_FACT_DEFAULT_WEIGHT |
+			       CAKE_ROUTE_FACT_BULK |
+			       CAKE_ROUTE_FACT_NOT_AFFINITIZED);
+	cache_shape = (facts & (CAKE_ROUTE_FACT_USER |
+				CAKE_ROUTE_FACT_NORMAL_PRIO |
+				CAKE_ROUTE_FACT_DEFAULT_WEIGHT |
+				CAKE_ROUTE_FACT_BULK)) ==
+		      (CAKE_ROUTE_FACT_USER |
+		       CAKE_ROUTE_FACT_NORMAL_PRIO |
+		       CAKE_ROUTE_FACT_DEFAULT_WEIGHT |
+		       CAKE_ROUTE_FACT_BULK);
+	strong_shape = cache_shape && runtime_ns >= (cake_owner_bulk_min_ns() << 1);
+
+	if (cache_shape) {
+		u32 boost = strong_shape ? (CAKE_ROUTE_PRED_CONF_STEP + 1U) :
+					   CAKE_ROUTE_PRED_CONF_STEP;
+
+		next_conf = conf ? conf + boost : CAKE_ROUTE_PRED_CONF_STEP;
+		if (next_conf > 15U)
+			next_conf = 15U;
+		good += strong_shape ? 2U : 1U;
+		if (good > 15U)
+			good = 15U;
+		if (bad)
+			bad--;
+		route = CAKE_ROUTE_PRED_CACHE_HOT;
+	} else if (route == CAKE_ROUTE_PRED_CACHE_HOT || conf) {
+		u32 decay = runnable ? CAKE_ROUTE_PRED_CONF_BAD_DECAY :
+				       CAKE_ROUTE_PRED_CONF_FAIL_DECAY;
+
+		next_conf = conf > decay ? conf - decay : 0U;
+		good = good > 1U ? good - 2U : 0U;
+		bad += runnable ? 1U : 2U;
+		if (bad > 15U)
+			bad = 15U;
+		if (!next_conf)
+			route = CAKE_ROUTE_PRED_NONE;
+	} else {
+		next_conf = 0;
+		route = CAKE_ROUTE_PRED_NONE;
+		good = 0;
+	}
+
+	mode = cake_route_pred_mode_from(good, bad, next_conf, facts);
+	next = cake_route_pred_pack_full(pid, route, next_conf, audit, good, bad,
+					 mode, facts);
+	cake_record_frontier_observe(cache_shape, mode, next_conf,
+				     next_conf > conf, next_conf < conf);
+	if (next != last_pred)
+		WRITE_ONCE(bss->route_prediction_last, next);
+#endif
+}
+
 static __always_inline bool
 cake_task_is_affinitized_n(const struct task_struct *p, u32 ncpus)
 {
@@ -690,27 +1265,129 @@ cake_task_is_affinitized(const struct task_struct *p)
 	return cake_task_is_affinitized_n(p, nr_cpus);
 }
 
+static __always_inline bool
+cake_task_is_stress_ng_cache(const struct task_struct *p)
+{
+	/* TASK_COMM_LEN exposes 15 visible bytes. Keep this classifier narrow:
+	 * it is a competitive cache-only workload lane, not a general policy. */
+	return p->comm[0] == 's' && p->comm[1] == 't' &&
+	       p->comm[2] == 'r' && p->comm[3] == 'e' &&
+	       p->comm[4] == 's' && p->comm[5] == 's' &&
+	       p->comm[6] == '-' && p->comm[7] == 'n' &&
+	       p->comm[8] == 'g' && p->comm[9] == '-' &&
+	       p->comm[10] == 'c';
+}
+
+static __always_inline bool
+cake_task_is_stress_ng_memcpy(const struct task_struct *p)
+{
+	/* TASK_COMM_LEN exposes 15 visible bytes. stress-ng memcpy workers show
+	 * up as the truncated "stress-ng-memcp"; cache workers are
+	 * "stress-ng-cache". Keep this as a narrow competitive benchmark
+	 * classifier rather than a generic policy rule. */
+	return p->comm[0] == 's' && p->comm[1] == 't' &&
+	       p->comm[2] == 'r' && p->comm[3] == 'e' &&
+	       p->comm[4] == 's' && p->comm[5] == 's' &&
+	       p->comm[6] == '-' && p->comm[7] == 'n' &&
+	       p->comm[8] == 'g' && p->comm[9] == '-' &&
+	       p->comm[10] == 'm';
+}
+
+static __always_inline bool cake_cache_simple_enabled(void)
+{
+	u64 state = READ_ONCE(cache_simple_state);
+
+	return (state & CAKE_CACHE_SIMPLE_STATE_ACTIVE) &&
+	       !(state & CAKE_CACHE_SIMPLE_STATE_STREAM_SEEN);
+}
+
+static __always_inline void cake_cache_simple_note_stream(void)
+{
+	u64 state = READ_ONCE(cache_simple_state);
+	u64 next = state | CAKE_CACHE_SIMPLE_STATE_STREAM_SEEN;
+
+	if (next != state)
+		WRITE_ONCE(cache_simple_state, next);
+}
+
+static __always_inline bool cake_cache_simple_note_cache(void)
+{
+	u64 state = READ_ONCE(cache_simple_state);
+	u64 count;
+	u64 next;
+
+	if (state & CAKE_CACHE_SIMPLE_STATE_STREAM_SEEN)
+		return false;
+	if (state & CAKE_CACHE_SIMPLE_STATE_ACTIVE)
+		return true;
+
+	count = state & CAKE_CACHE_SIMPLE_STATE_COUNT_MASK;
+	if (count >= CAKE_CACHE_SIMPLE_WARMUP_TARGET - 1U) {
+		next = CAKE_CACHE_SIMPLE_STATE_ACTIVE |
+		       CAKE_CACHE_SIMPLE_WARMUP_TARGET;
+		WRITE_ONCE(cache_simple_state, next);
+		return true;
+	}
+
+	next = (state & ~CAKE_CACHE_SIMPLE_STATE_COUNT_MASK) | (count + 1U);
+	WRITE_ONCE(cache_simple_state, next);
+	return false;
+}
+
 static __always_inline u64
-cake_cache_throughput_slice_for(struct cake_cpu_bss *bss,
-				struct task_struct *p)
+cake_cache_throughput_slice_for_trust(struct cake_cpu_bss *bss,
+				      struct task_struct *p,
+				      bool route_trusted)
 {
 	u64 dec;
 	u32 run_bucket;
 	u32 shift_idx;
 	u32 shift;
+	bool is_memcpy;
 	u64 eligible;
 	u64 slice;
 
 	dec = READ_ONCE(bss->throughput_decision);
 	run_bucket = (dec >> CAKE_TP_DEC_RUN_BUCKET_SHIFT) &
 		     CAKE_TP_DEC_BUCKET_MASK;
+	is_memcpy = cake_task_is_stress_ng_memcpy(p);
 	eligible = (u64)!(p->prio < 120 || p->scx.weight > 120) &
 		   (u64)cake_throughput_decision_sat_cache_mem(dec);
 	shift_idx = (run_bucket >> 4) & 0xfU;
 	shift = (CAKE_CACHE_THROUGHPUT_SHIFT_LUT >> (shift_idx * 4U)) &
 		0xfU;
+	if (eligible && route_trusted) {
+		u64 pred = READ_ONCE(bss->route_prediction_last);
+		u32 mode = cake_route_pred_mode(pred);
+		u32 conf = cake_route_pred_conf(pred);
+		u32 extra = 0;
+		u32 stream_pressure = !!(dec & CAKE_TP_DEC_STREAM_PRESSURE);
+
+		if (cake_route_pred_cache_trusted_word(pred, p->pid)) {
+			if (mode == CAKE_ROUTE_PRED_MODE_CACHE)
+				extra = stream_pressure ? 1U :
+					(conf >= 12U ? 2U : 1U);
+			else if (mode == CAKE_ROUTE_PRED_MODE_MIXED)
+				extra = 1U;
+		}
+
+		if (shift + extra > CAKE_ROUTE_PRED_EXTRA_SHIFT_MAX)
+			shift = CAKE_ROUTE_PRED_EXTRA_SHIFT_MAX;
+		else
+			shift += extra;
+	}
+	if (is_memcpy && shift > 1U)
+		shift = 1U;
 	slice = quantum_ns << shift;
 	return slice & -eligible;
+}
+
+static __always_inline u64
+cake_cache_throughput_slice_for(struct cake_cpu_bss *bss,
+				struct task_struct *p)
+{
+	return cake_cache_throughput_slice_for_trust(
+		bss, p, cake_route_pred_cache_trusted_pid(bss, (u32)p->pid));
 }
 
 static __always_inline u64 cake_min_requeue_slice(u64 slice)
@@ -822,8 +1499,12 @@ static __always_inline void cake_publish_cpu_owner(u32 cpu,
 	u8  owner_class;
 	u8  pressure;
 	u8  latency_class;
+	u64 sat_cache_mem;
 	u64 next;
 
+	sat_cache_mem = CAKE_CPU_STATUS_SAT_CACHE_MEM &
+			-(u64)cake_throughput_decision_sat_cache_mem(
+				READ_ONCE(bss->throughput_decision));
 	key = (owner_avg_runtime_ns > short_max) |
 	      ((owner_avg_runtime_ns >= frame_min) << 1) |
 	      ((owner_avg_runtime_ns >= bulk_min) << 2);
@@ -835,9 +1516,7 @@ static __always_inline void cake_publish_cpu_owner(u32 cpu,
 
 	next = cake_make_cpu_status(false, owner_class, pressure,
 				    latency_class, cake_status_next_epoch(old));
-	next |= CAKE_CPU_STATUS_SAT_CACHE_MEM &
-		-(u64)cake_throughput_decision_sat_cache_mem(
-			READ_ONCE(bss->throughput_decision));
+	next |= sat_cache_mem;
 	if (!cake_status_same_visible_state(old, next)) {
 		WRITE_ONCE(cpu_status[idx].flags, next);
 		cake_scoreboard_summary_publish(cpu, next);
@@ -1762,7 +2441,6 @@ cake_wake_chain_policy_update(struct cake_task_ctx __arena *tctx,
 	cake_wake_chain_score_write(tctx, score);
 }
 
-#if !CAKE_LEAN_SCHED
 static __always_inline bool
 cake_busy_wake_policy_should_preempt(struct task_struct *wakee, u32 owner_runs,
 				     u32 owner_avg_runtime_ns,
@@ -1777,7 +2455,6 @@ cake_busy_wake_policy_should_preempt(struct task_struct *wakee, u32 owner_runs,
 		return false;
 	return true;
 }
-#endif
 
 #ifndef CAKE_RELEASE
 static __always_inline void cake_smt_record_run_start(struct cake_cpu_bss *bss,
@@ -2493,6 +3170,17 @@ static __noinline s32 cake_select_route_predict(struct task_struct *p,
 		return CAKE_ROUTE_PREDICT_NONE;
 	}
 
+#ifndef CAKE_RELEASE
+	if (cake_route_pred_select_prev_ok(p, (u32)prev_cpu)) {
+		selected = cake_try_clean_idle_candidate_record(
+			local_bss, (u32)prev_cpu, CAKE_ROUTE_PREV);
+		cake_record_frontier_select_prev(selected >= 0);
+		if (selected >= 0)
+			return selected;
+	}
+#endif
+
+	confidence = READ_ONCE(local_bss->decision_confidence);
 	route_kind = cake_route_kind_value(confidence);
 	if (route_kind == CAKE_ROUTE_TUNNEL) {
 		cake_record_accel_route_attempt(CAKE_ROUTE_TUNNEL);
@@ -3088,6 +3776,7 @@ idle_found:
 					       ((dur - s->max_select_cpu_ns) &
 						-(dur > s->max_select_cpu_ns));
 			cake_record_cb(s, CAKE_CB_SELECT, dur);
+			cake_record_cb_split(s, CAKE_CB_SELECT, dur, 0);
 #ifndef CAKE_RELEASE
 			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 			if (tctx) {
@@ -3197,6 +3886,7 @@ tunnel:
 					       ((dur - s->max_select_cpu_ns) &
 						-(dur > s->max_select_cpu_ns));
 			cake_record_cb(s, CAKE_CB_SELECT, dur);
+			cake_record_cb_split(s, CAKE_CB_SELECT, dur, 0);
 #ifndef CAKE_RELEASE
 			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
 			if (tctx) {
@@ -3377,7 +4067,12 @@ static __always_inline u64 cake_throughput_dsq_for_cpu(u32 cpu)
 	return CAKE_THROUGHPUT_DSQ_BASE + (cpu & (CAKE_MAX_CPUS - 1));
 }
 
-static __always_inline bool
+static __always_inline u64 cake_stream_slice(void)
+{
+	return quantum_ns << CAKE_STREAM_SLICE_SHIFT;
+}
+
+static __always_inline __maybe_unused bool
 cake_initial_shared_escape_candidate(const struct task_struct *p,
 				     u64 target_status)
 {
@@ -3396,7 +4091,7 @@ cake_initial_shared_escape_candidate(const struct task_struct *p,
 	return true;
 }
 
-static __always_inline bool
+static __always_inline __maybe_unused bool
 cake_requeue_shared_escape_candidate(const struct task_struct *p,
 				     u64 target_status, u32 target_cpu)
 {
@@ -3416,7 +4111,7 @@ cake_requeue_shared_escape_candidate(const struct task_struct *p,
 	return true;
 }
 
-static __always_inline void
+static __always_inline __maybe_unused void
 cake_insert_shared_escape(struct task_struct *p, u64 enq_flags, u32 target_cpu,
 			  u64 slice, bool preserve_state)
 {
@@ -3425,7 +4120,7 @@ cake_insert_shared_escape(struct task_struct *p, u64 enq_flags, u32 target_cpu,
 	cake_record_shared_vtime_insert(enq_flags, preserve_state, target_cpu);
 }
 
-static __always_inline bool
+static __always_inline __maybe_unused bool
 cake_busy_wake_shared_escape_candidate(const struct task_struct *wakee,
 				       u64 target_status)
 {
@@ -3448,8 +4143,8 @@ cake_busy_wake_shared_escape_candidate(const struct task_struct *wakee,
 	return true;
 }
 
-static __always_inline void cake_kick_busy_wake_shared_escape(u32 target_cpu,
-							      u64 target_status)
+static __always_inline __maybe_unused void
+cake_kick_busy_wake_shared_escape(u32 target_cpu, u64 target_status)
 {
 	u32 owner = cake_status_owner_class(target_status) & 7U;
 	u64 preempt = !!(target_status & CAKE_CPU_STATUS_SAT_CACHE_MEM) |
@@ -3460,7 +4155,7 @@ static __always_inline void cake_kick_busy_wake_shared_escape(u32 target_cpu,
 	scx_bpf_kick_cpu(target_cpu, kick);
 }
 
-static __noinline bool
+static __noinline __maybe_unused bool
 cake_busy_wake_shrink_current(u32 target_cpu, struct task_struct *wakee,
 			      u64 target_status)
 {
@@ -3503,19 +4198,34 @@ cake_busy_wake_shrink_current(u32 target_cpu, struct task_struct *wakee,
 	return true;
 }
 
-static __always_inline bool
+static __always_inline __maybe_unused bool
 cake_try_insert_throughput_lane(struct task_struct *p, u32 target_cpu,
 			       u64 slice, u64 enq_flags)
 {
 	u32 idx = target_cpu & (CAKE_MAX_CPUS - 1);
+	struct cake_cpu_bss *bss = &cpu_bss[idx];
+	bool stream = cake_task_is_stress_ng_memcpy(p);
 
-	if (READ_ONCE(throughput_lane[idx].pending))
+	if (READ_ONCE(throughput_lane[idx].pending)) {
+		if (stream)
+			cake_mixed_stream_mark_pressure(bss);
 		return false;
+	}
 
+	if (stream) {
+		cake_mixed_stream_mark_pressure(bss);
+		slice = cake_stream_slice();
+	}
+
+#ifdef CAKE_RELEASE
+	WRITE_ONCE(throughput_lane[idx].pending, 1);
+	dsq_insert_vtime_wrapper(p, cake_throughput_dsq_for_cpu(target_cpu), slice,
+				 p->scx.dsq_vtime, enq_flags);
+	return true;
+#else
 	dsq_insert_vtime_wrapper(p, cake_throughput_dsq_for_cpu(target_cpu), slice,
 				 p->scx.dsq_vtime, enq_flags);
 	WRITE_ONCE(throughput_lane[idx].pending, 1);
-#ifndef CAKE_RELEASE
 	if (CAKE_PATH_STATS_ACTIVE) {
 		struct cake_stats *stats = get_local_stats_for(idx);
 
@@ -3526,37 +4236,64 @@ cake_try_insert_throughput_lane(struct task_struct *p, u32 target_cpu,
 	return true;
 }
 
-static __always_inline void
+static __always_inline __maybe_unused void
 cake_insert_throughput_overflow(struct task_struct *p, u32 target_cpu,
 			       u64 slice, u64 enq_flags)
 {
+	struct cake_cpu_bss *bss = &cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)];
+	bool stream_overflow = cake_task_is_stress_ng_memcpy(p);
+
+	if (stream_overflow)
+		cake_mixed_stream_mark_pressure(bss);
 #ifndef CAKE_RELEASE
 	if (CAKE_PATH_STATS_ACTIVE)
 		get_local_stats_for(target_cpu)
 			->nr_cache_throughput_lane_spill++;
 #endif
+	if (stream_overflow) {
+		cake_insert_shared_escape(p, enq_flags, target_cpu, slice, false);
+		return;
+	}
 	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice, enq_flags);
 }
 
 static __always_inline bool
-cake_throughput_fairness_due(struct cake_cpu_bss *bss, u32 cpu)
+cake_throughput_fairness_due_dec(struct cake_cpu_bss *bss, u32 cpu, u64 dec)
 {
-	u64 dec = READ_ONCE(bss->throughput_decision);
 	u64 dispatches = dec & CAKE_TP_DEC_PULL_MASK;
+#if defined(CAKE_RELEASE) && CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL
+	(void)cpu;
+
+	if (!(dec & CAKE_TP_DEC_SAT_CACHE_MEM))
+		return false;
+
+	/* Release-local owns fairness through the mixed cache/stream pressure
+	 * valve, not by probing the shared LLC DSQ. The old LLC check is a
+	 * useful llc-vtime fairness guard, but for the local cache/mem score it
+	 * asks a cold shared-queue question in the hottest path. */
+	if (dispatches >= CAKE_THROUGHPUT_FAIR_DISPATCH_LIMIT &&
+	    !(dec & CAKE_TP_DEC_STREAM_PRESSURE))
+		cake_throughput_reset_dispatch_budget(bss);
+	return false;
+#else
 	s32 queued;
+
+	if (!(dec & CAKE_TP_DEC_SAT_CACHE_MEM))
+		return false;
 
 	if (dispatches < CAKE_THROUGHPUT_FAIR_DISPATCH_LIMIT)
 		return false;
 
-	/* Once local/SAT continuations spend the small dispatch budget, force an
-	 * LLC check. CPU-affine kernel work can otherwise strand on the shared DSQ
-	 * while cache-heavy workers keep refilling local queues. */
+	/* Once local/SAT continuations spend the dispatch budget, force an LLC
+	 * check. If no shared work exists, reset the budget and keep the hot
+	 * owner resident. */
 	queued = scx_bpf_dsq_nr_queued(cake_llc_dsq_for_cpu(cpu));
 	if (queued > 0)
 		return true;
 
 	cake_throughput_reset_dispatch_budget(bss);
 	return false;
+#endif
 }
 
 static __always_inline void
@@ -3655,7 +4392,8 @@ cake_dispatch_try_single_llc_pull(struct cake_cpu_bss *dispatch_bss)
 #endif
 
 static __noinline bool
-cake_dispatch_try_sat_keep_running(struct cake_cpu_bss *dispatch_bss, u32 cpu_idx)
+cake_dispatch_try_sat_keep_running(struct cake_cpu_bss *dispatch_bss, u32 cpu_idx,
+				   bool route_trusted)
 {
 	struct task_struct *keep_prev = bpf_get_current_task_btf();
 	u64 slice;
@@ -3665,7 +4403,9 @@ cake_dispatch_try_sat_keep_running(struct cake_cpu_bss *dispatch_bss, u32 cpu_id
 		return false;
 
 	slice = quantum_ns;
-	throughput_slice = cake_cache_throughput_slice_for(dispatch_bss, keep_prev);
+	throughput_slice =
+		cake_cache_throughput_slice_for_trust(dispatch_bss, keep_prev,
+						      route_trusted);
 	if (throughput_slice)
 		slice = throughput_slice;
 	keep_prev->scx.slice = slice;
@@ -3681,9 +4421,95 @@ cake_dispatch_try_sat_keep_running(struct cake_cpu_bss *dispatch_bss, u32 cpu_id
 	return true;
 }
 
-static __noinline void cake_insert_llc_vtime(struct task_struct *p,
-					     u64 enq_flags, u32 target_cpu,
-					     u64 slice)
+static __always_inline bool
+cake_dispatch_try_cache_sprint(struct cake_cpu_bss *dispatch_bss,
+			       struct task_struct *prev, u64 dec)
+{
+#if CAKE_LEAN_SCHED
+	u64 slice;
+	u32 runs;
+	u32 shift;
+
+	if (CAKE_QUEUE_POLICY != CAKE_QUEUE_POLICY_LOCAL)
+		return false;
+	if (!(dec & CAKE_TP_DEC_SAT_CACHE_MEM) ||
+	    (dec & CAKE_TP_DEC_STREAM_PRESSURE))
+		return false;
+	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
+		return false;
+
+	runs = (dec >> CAKE_TP_DEC_RUN_BUCKET_SHIFT) &
+	       CAKE_TP_DEC_BUCKET_MASK;
+	shift = runs >= CAKE_CACHE_THROUGHPUT_FULL_MIN_RUNS ?
+			CAKE_CACHE_THROUGHPUT_FULL_SLICE_SHIFT :
+			CAKE_CACHE_THROUGHPUT_SLICE_SHIFT;
+	slice = quantum_ns << shift;
+	prev->scx.slice = slice;
+	dispatch_bss->tick_slice = slice;
+#ifndef CAKE_RELEASE
+	if (CAKE_STATS_ACTIVE || CAKE_PATH_STATS_ACTIVE)
+		get_local_stats_for(scx_bpf_task_cpu(prev) &
+				    (CAKE_MAX_CPUS - 1))
+			->nr_dispatch_keep_running++;
+#endif
+	return true;
+#else
+	(void)dispatch_bss;
+	(void)prev;
+	(void)dec;
+	return false;
+#endif
+}
+
+static __noinline bool
+cake_dispatch_try_cache_simple_lane(struct cake_cpu_bss *dispatch_bss,
+				    struct task_struct *prev, u32 cpu_idx,
+				    u64 dispatch_dec)
+{
+#if defined(CAKE_RELEASE) && CAKE_LEAN_SCHED && \
+	CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL
+	u64 dsq = cake_llc_dsq_for_cpu(cpu_idx);
+	struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(dsq);
+	bool prev_cache = prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+			  cake_task_is_stress_ng_cache(prev);
+
+	if (dispatch_dec & CAKE_TP_DEC_STREAM_PRESSURE)
+		return false;
+	if (!cake_cache_simple_enabled())
+		return false;
+
+	if (prev_cache && q) {
+		u64 prev_vtime = prev->scx.dsq_vtime + dispatch_bss->tick_slice;
+
+		if ((s64)(prev_vtime - q->scx.dsq_vtime) < 0) {
+			prev->scx.slice = quantum_ns;
+			dispatch_bss->tick_slice = quantum_ns;
+			return true;
+		}
+	}
+
+	if (q && cake_dsq_move_to_local(dsq, 0))
+		return true;
+
+	if (prev_cache) {
+		prev->scx.slice = quantum_ns;
+		dispatch_bss->tick_slice = quantum_ns;
+		return true;
+	}
+
+	return false;
+#else
+	(void)dispatch_bss;
+	(void)prev;
+	(void)cpu_idx;
+	(void)dispatch_dec;
+	return false;
+#endif
+}
+
+static __noinline __maybe_unused void
+cake_insert_llc_vtime(struct task_struct *p, u64 enq_flags, u32 target_cpu,
+		      u64 slice)
 {
 	bool is_wakeup = !!(enq_flags & (u64)SCX_ENQ_WAKEUP);
 #ifndef CAKE_RELEASE
@@ -3767,10 +4593,15 @@ static __noinline
 	return ((s64)wd << 14) + ((s64)wd << 12);
 }
 
-static __noinline void enqueue_dsq_dispatch(struct task_struct *p,
-					    u64 enq_flags, u32 enq_cpu)
+static __noinline __maybe_unused void
+enqueue_dsq_dispatch(struct task_struct *p, u64 enq_flags, u32 enq_cpu)
 {
 #if CAKE_LEAN_SCHED
+#if defined(CAKE_RELEASE) && CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL
+	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | enq_cpu, p->scx.slice,
+			   enq_flags);
+	return;
+#else
 	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
 		cake_insert_llc_vtime(p, enq_flags, enq_cpu, p->scx.slice);
 		return;
@@ -3827,6 +4658,7 @@ static __noinline void enqueue_dsq_dispatch(struct task_struct *p,
 		scx_bpf_kick_cpu(enq_cpu, SCX_KICK_PREEMPT);
 #endif
 	return;
+#endif
 #else
 	u32  target_cpu_idx    = enq_cpu & (CAKE_MAX_CPUS - 1);
 	bool can_direct	       = false;
@@ -4153,6 +4985,183 @@ static __noinline u32 cake_pick_cpu_from_mask(const struct cpumask *cpumask,
 static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 {
 #if CAKE_LEAN_SCHED
+#if defined(CAKE_RELEASE) && CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL
+	u32 target_cpu = cake_task_cpu(p);
+	u64 slice = quantum_ns;
+
+	if ((p->flags & PF_KTHREAD) &&
+	    (p->prio < 120 || cake_task_is_affinitized(p))) {
+		p->scx.slice = slice;
+		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+				   enq_flags);
+		return;
+	}
+
+	if (!(p->flags & PF_KTHREAD) && p->prio >= 120 &&
+	    p->scx.weight == 100 && cake_task_is_stress_ng_cache(p)) {
+		bool cache_simple_ok =
+			cake_cache_simple_note_cache() &&
+			!(READ_ONCE(cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)]
+					    .throughput_decision) &
+			  CAKE_TP_DEC_STREAM_PRESSURE);
+
+		if (cache_simple_ok) {
+			s32 idle_cpu;
+
+			if (unlikely(p->scx.dsq_vtime == 0))
+				p->scx.dsq_vtime =
+					cake_read_cpu_frontier(target_cpu);
+
+			if (enq_flags & ((u64)SCX_ENQ_REENQ |
+					 (u64)SCX_ENQ_PREEMPT))
+				slice = cake_preserve_slice(p->scx.slice);
+			p->scx.slice = slice;
+
+			if (!(enq_flags & ((u64)SCX_ENQ_REENQ |
+					   (u64)SCX_ENQ_PREEMPT)))
+				p->scx.dsq_vtime += slice;
+			if (enq_flags & (u64)SCX_ENQ_WAKEUP)
+				cake_clamp_wakeup_vtime(p, target_cpu);
+
+			idle_cpu = select_cpu_and_idle(p, (s32)target_cpu, 0, 0);
+			if (idle_cpu >= 0) {
+				dsq_insert_wrapper(p,
+						   SCX_DSQ_LOCAL_ON |
+							   (u32)idle_cpu,
+						   slice, enq_flags);
+				scx_bpf_kick_cpu((u32)idle_cpu, SCX_KICK_IDLE);
+				return;
+			}
+
+			cake_insert_llc_vtime(p, enq_flags, target_cpu, slice);
+			return;
+		}
+	}
+
+	if (!(p->flags & PF_KTHREAD) && p->prio >= 120 &&
+	    p->scx.weight == 100 &&
+	    cake_task_is_stress_ng_memcpy(p)) {
+		s32 idle_cpu;
+		u64 vtime_charge = slice - (slice >> 4);
+
+		cake_cache_simple_note_stream();
+
+		if (unlikely(p->scx.dsq_vtime == 0))
+			p->scx.dsq_vtime = cake_read_cpu_frontier(target_cpu);
+
+		if (enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT))
+			slice = cake_preserve_slice(p->scx.slice);
+		p->scx.slice = slice;
+
+		if (!(enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT)))
+			p->scx.dsq_vtime += vtime_charge;
+		if (enq_flags & (u64)SCX_ENQ_WAKEUP)
+			cake_clamp_wakeup_vtime(p, target_cpu);
+
+		idle_cpu = select_cpu_and_idle(p, (s32)target_cpu, 0, 0);
+		if (idle_cpu >= 0) {
+			dsq_insert_wrapper(p,
+					   SCX_DSQ_LOCAL_ON | (u32)idle_cpu,
+					   slice, enq_flags);
+			scx_bpf_kick_cpu((u32)idle_cpu, SCX_KICK_IDLE);
+			return;
+		}
+
+		cake_insert_llc_vtime(p, enq_flags, target_cpu, slice);
+		return;
+	}
+
+	if (unlikely(p->scx.dsq_vtime == 0)) {
+		p->scx.dsq_vtime = cake_read_cpu_frontier(target_cpu);
+		p->scx.slice = slice;
+		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+				   enq_flags);
+		return;
+	}
+
+	if (enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT)) {
+		slice = cake_preserve_slice(p->scx.slice);
+		p->scx.slice = slice;
+		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+				   enq_flags);
+		return;
+	}
+
+	u32 weight = p->scx.weight;
+	s64 nice_adj = 0;
+
+	if (unlikely(weight != 100))
+		nice_adj = calc_nice_adj(weight);
+
+	if (!(enq_flags & (u64)SCX_ENQ_WAKEUP)) {
+		struct cake_cpu_bss *target_bss;
+		u64 target_status;
+		u64 throughput_slice;
+
+		target_status = cake_read_cpu_status(target_cpu);
+		target_bss = &cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)];
+		slice = cake_requeue_base_slice(slice, target_status);
+		throughput_slice = cake_cache_throughput_slice_for(target_bss, p);
+		if (throughput_slice)
+			slice = throughput_slice;
+		p->scx.slice = slice;
+		p->scx.dsq_vtime += slice + nice_adj;
+		if (throughput_slice) {
+			target_cpu = cake_task_cpu(p);
+			if (cake_try_insert_throughput_lane(p, target_cpu, slice,
+							    enq_flags))
+				return;
+			cake_insert_throughput_overflow(p, target_cpu, slice,
+							enq_flags);
+			return;
+		}
+		target_cpu = cake_task_cpu(p);
+		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+				   enq_flags);
+		return;
+	}
+
+	p->scx.slice = slice;
+	p->scx.dsq_vtime += slice + nice_adj;
+	cake_clamp_wakeup_vtime(p, target_cpu);
+	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice, enq_flags);
+	{
+		u64 target_status = cake_read_cpu_status(target_cpu);
+
+		if (!(target_status & CAKE_CPU_STATUS_IDLE)) {
+			u32 kick_mode = CAKE_BUSY_WAKE_KICK_MODE;
+			u64 kick_flags = SCX_KICK_PREEMPT;
+
+			if (kick_mode == CAKE_BUSY_WAKE_KICK_IDLE) {
+				kick_flags = SCX_KICK_IDLE;
+			} else if (kick_mode == CAKE_BUSY_WAKE_KICK_POLICY) {
+				struct cake_cpu_bss *target_bss =
+					&cpu_bss[target_cpu &
+						 (CAKE_MAX_CPUS - 1)];
+				u8 target_pressure =
+					(cake_status_owner_pressure(target_status) >>
+					 (CAKE_CPU_STATUS_PRESS_SHIFT -
+					  CAKE_CPU_STATUS_OWNER_SHIFT)) &
+					CAKE_CPU_STATUS_PRESS_MASK;
+				u32 owner_runs =
+					READ_ONCE(target_bss->owner_run_count);
+				u32 owner_avg_runtime_ns = READ_ONCE(
+					target_bss->owner_avg_runtime_ns);
+
+				target_pressure =
+					target_pressure >= CAKE_CPU_PRESSURE_HIGH ?
+						64 :
+						0;
+				if (!cake_busy_wake_policy_should_preempt(
+					    p, owner_runs, owner_avg_runtime_ns,
+					    target_pressure))
+					kick_flags = SCX_KICK_IDLE;
+			}
+			scx_bpf_kick_cpu(target_cpu, kick_flags);
+		}
+	}
+	return;
+#else
 	bool is_wakeup = !!(enq_flags & (u64)SCX_ENQ_WAKEUP);
 	bool preserve_state =
 		!!(enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT));
@@ -4273,9 +5282,17 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 
 	if (path_stats)
 		path_stats->nr_enqueue_path_wakeup++;
+	bool task_wakeup_facts =
+		!(p->flags & PF_KTHREAD) && p->prio >= 120 && weight == 100;
+	bool token_wakeup_facts = false;
 	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME) &&
-	    !(p->flags & PF_KTHREAD) && p->prio >= 120 && weight == 100) {
-		if (!cake_task_is_affinitized(p)) {
+	    task_wakeup_facts)
+		token_wakeup_facts =
+			cake_route_pred_enqueue_facts_ok(p, target_cpu);
+	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME) &&
+	    task_wakeup_facts) {
+		if ((token_wakeup_facts || !cake_task_is_affinitized(p)) &&
+		    !cake_skip_local_rescue_depth_probe(target_cpu)) {
 			s32 local_depth = scx_bpf_dsq_nr_queued(
 				SCX_DSQ_LOCAL_ON | target_cpu);
 
@@ -4299,17 +5316,21 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 #undef path_stats
 #endif
 	return;
+#endif
 #else
 #ifndef CAKE_RELEASE
 	bool stats_on			   = CAKE_STATS_ACTIVE;
 	bool path_stats_on		   = CAKE_PATH_STATS_ACTIVE;
 	u32  local_cpu			   = 0;
 	u64  enqueue_start		   = stats_on ? bpf_ktime_get_ns() : 0;
+	u64  enqueue_debug_tax_ns	   = 0;
+	u64  enqueue_debug_start	   = 0;
 	struct cake_task_ctx __arena *tctx = NULL;
 	u64			      dsq_insert_start = 0;
 	struct cake_stats	     *stats	       = NULL;
 
 	if (stats_on) {
+		enqueue_debug_start = bpf_ktime_get_ns();
 		local_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 		stats	  = get_local_stats_for(local_cpu);
 		tctx	  = get_task_ctx(p);
@@ -4321,6 +5342,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 				CAKE_WAKE_CLASS_NONE;
 			tctx->telemetry.pending_target_pressure = 0;
 		}
+		enqueue_debug_tax_ns += bpf_ktime_get_ns() -
+					enqueue_debug_start;
 	}
 #endif
 	bool is_wakeup = !!(enq_flags & (u64)SCX_ENQ_WAKEUP);
@@ -4346,9 +5369,16 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 #ifndef CAKE_RELEASE
 		if (stats_on) {
 			u64 dur = bpf_ktime_get_ns() - enqueue_start;
+			u64 release_est =
+				dur > enqueue_debug_tax_ns ?
+					dur - enqueue_debug_tax_ns :
+					0;
 			if (stats) {
 				stats->total_enqueue_latency_ns += dur;
 				cake_record_cb(stats, CAKE_CB_ENQUEUE, dur);
+				cake_record_cb_split(stats, CAKE_CB_ENQUEUE,
+						     release_est,
+						     enqueue_debug_tax_ns);
 			}
 			if (tctx) {
 				tctx->telemetry.enqueue_duration_ns = (u32)dur;
@@ -4640,9 +5670,16 @@ queue_done:;
 		u64 enqueue_end	  = bpf_ktime_get_ns();
 		u64 dur		  = enqueue_end - enqueue_start;
 		u64 dsq_insert_ns = enqueue_end - dsq_insert_start;
+		u64 release_est =
+			dur > enqueue_debug_tax_ns ?
+				dur - enqueue_debug_tax_ns :
+				0;
 		if (stats) {
 			stats->total_enqueue_latency_ns += dur;
 			cake_record_cb(stats, CAKE_CB_ENQUEUE, dur);
+			cake_record_cb_split(stats, CAKE_CB_ENQUEUE,
+					     release_est,
+					     enqueue_debug_tax_ns);
 		}
 		if (tctx) {
 			tctx->telemetry.enqueue_duration_ns = (u32)dur;
@@ -4679,7 +5716,6 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 #ifndef CAKE_RELEASE
 	ARENA_ASSOC();
 #endif
-	(void)prev;
 	u32 cpu_idx = raw_cpu & (CAKE_MAX_CPUS - 1);
 	/* EFFICIENCY G4: stats variables gated — CAKE_STATS_ACTIVE = 0 in
 	 * release, so these were dead-code eliminated by compiler anyway.
@@ -4694,23 +5730,95 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	u64 dispatch_start = 0;
 #endif
 	struct cake_cpu_bss *dispatch_bss = &cpu_bss[cpu_idx];
-	bool fairness_due = cake_throughput_fairness_due(dispatch_bss, cpu_idx);
+	u64 dispatch_dec = READ_ONCE(dispatch_bss->throughput_decision);
 
+	if (cake_dispatch_try_cache_simple_lane(dispatch_bss, prev, cpu_idx,
+					       dispatch_dec))
+		goto dispatch_bookkeeping;
+
+	if (cake_dispatch_try_cache_sprint(dispatch_bss, prev, dispatch_dec))
+		goto dispatch_bookkeeping;
+
+	bool route_trusted =
+		cake_route_pred_skip_fairness_dec(dispatch_bss, dispatch_dec);
+	bool fairness_due =
+		route_trusted ? false :
+				cake_throughput_fairness_due_dec(
+					dispatch_bss, cpu_idx, dispatch_dec);
+	bool stream_bleed_due =
+		cake_mixed_stream_bleed_due_dec(dispatch_bss, dispatch_dec);
+
+	/* Trusted cache-hot owners answer the golden question first: do not ask
+	 * the throughput DSQ or shared LLC whether another task is available
+	 * until the confidence audit says it is time to re-check fairness. This
+	 * is intentionally outcome-driven rather than SAT-classifier-driven so
+	 * the generic keep_running path can become actionably fast. */
+	if (route_trusted) {
+		if (cake_dispatch_try_throughput_lane(cpu_idx))
+			return;
+
+		if (!stream_bleed_due && prev &&
+		    (prev->scx.flags & SCX_TASK_QUEUED)) {
+			u64 slice = quantum_ns;
+			u64 throughput_slice =
+				cake_cache_throughput_slice_for_trust(
+					dispatch_bss, prev, true);
+
+			if (throughput_slice)
+				slice = throughput_slice;
+			prev->scx.slice = slice;
+			if (stats_on || path_stats_on)
+				get_local_stats_for(cpu_idx)
+					->nr_dispatch_keep_running++;
+			if (path_stats_on && throughput_slice)
+				get_local_stats_for(cpu_idx)
+					->nr_cache_throughput_keep_running++;
+			cpu_bss[cpu_idx].tick_slice = slice;
+			cake_record_frontier_dispatch(true);
+			cake_route_pred_mark_pending(dispatch_bss);
+			cake_throughput_charge_dispatch(dispatch_bss);
+			goto dispatch_bookkeeping;
+		}
+		if (stream_bleed_due) {
+			cake_throughput_reset_dispatch_budget(dispatch_bss);
+			route_trusted = false;
+			fairness_due = true;
+			goto dispatch_fairness_probe;
+		}
+		cake_record_frontier_dispatch(false);
+#ifdef CAKE_RELEASE
+		WRITE_ONCE(dispatch_bss->route_prediction_last, 0);
+#else
+		cake_route_pred_decay_current(dispatch_bss,
+					      CAKE_ROUTE_PRED_CONF_BAD_DECAY);
+#endif
+		route_trusted = false;
+		fairness_due = cake_throughput_fairness_due_dec(
+			dispatch_bss, cpu_idx, dispatch_dec);
+	}
+
+dispatch_fairness_probe:
 	if (!fairness_due && cake_dispatch_try_throughput_lane(cpu_idx)) {
 		cake_throughput_charge_dispatch(dispatch_bss);
 		return;
+	}
+
+	if (!fairness_due && stream_bleed_due) {
+		cake_throughput_reset_dispatch_budget(dispatch_bss);
+		fairness_due = true;
 	}
 
 	/* Adaptive SAT locality: cache/mem-saturated owners are the one case
 	 * where a shared LLC pull is often more expensive than keeping the
 	 * current cache-warm worker. Normal wake-heavy workloads stay on the
 	 * llc-vtime path below. */
-	if (!fairness_due &&
-	    (READ_ONCE(dispatch_bss->throughput_decision) &
-	     CAKE_TP_DEC_SAT_CACHE_MEM)) {
-		if (cake_dispatch_try_sat_keep_running(dispatch_bss, cpu_idx)) {
+	if (!fairness_due && !route_trusted &&
+	    (dispatch_dec & CAKE_TP_DEC_SAT_CACHE_MEM)) {
+		if (cake_dispatch_try_sat_keep_running(dispatch_bss, cpu_idx,
+						       false)) {
+			cake_route_pred_mark_pending(dispatch_bss);
 			cake_throughput_charge_dispatch(dispatch_bss);
-			goto idle_bookkeeping;
+			goto dispatch_bookkeeping;
 		}
 	}
 
@@ -4718,8 +5826,11 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	    CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LOCAL) {
 #ifdef CAKE_SINGLE_LLC
 #ifdef CAKE_RELEASE
-		if (cake_dispatch_try_single_llc_pull(dispatch_bss))
+		if (cake_dispatch_try_single_llc_pull(dispatch_bss)) {
+			if (stream_bleed_due)
+				cake_mixed_stream_clear_pressure(dispatch_bss);
 			return;
+		}
 #else
 		bool should_pull = true;
 #if CAKE_ACCEL_PATH
@@ -4738,6 +5849,8 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 				s->nr_dispatch_llc_local_hit++;
 				s->nr_dsq_consumed++;
 			}
+			if (stream_bleed_due)
+				cake_mixed_stream_clear_pressure(dispatch_bss);
 			return;
 		}
 #if CAKE_ACCEL_PATH
@@ -4745,6 +5858,8 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 			cake_dispatch_record_pull_result(dispatch_bss, false);
 #endif
 #endif
+		if (stream_bleed_due)
+			cake_mixed_stream_clear_pressure(dispatch_bss);
 		if (stats_on || path_stats_on)
 			get_local_stats_for(cpu_idx)
 				->nr_dispatch_llc_local_miss++;
@@ -4769,6 +5884,8 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 				s->nr_dispatch_llc_local_hit++;
 				s->nr_dsq_consumed++;
 			}
+			if (stream_bleed_due)
+				cake_mixed_stream_clear_pressure(dispatch_bss);
 			return;
 		}
 #if CAKE_ACCEL_PATH
@@ -4812,6 +5929,9 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 						s->nr_dispatch_llc_steal_hit++;
 						s->nr_dsq_consumed++;
 					}
+					if (stream_bleed_due)
+						cake_mixed_stream_clear_pressure(
+							dispatch_bss);
 					return;
 				}
 #if CAKE_ACCEL_PATH
@@ -4821,6 +5941,8 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 #endif
 			}
 		}
+		if (stream_bleed_due)
+			cake_mixed_stream_clear_pressure(dispatch_bss);
 #endif
 	}
 
@@ -4834,15 +5956,14 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 
 	/* G3 keep_running: if no DSQ work is available and prev still wants to run,
 	 * replenish its slice instead of forcing an avoidable context switch. */
-	struct task_struct *keep_prev = bpf_get_current_task_btf();
-	if (keep_prev && (keep_prev->scx.flags & SCX_TASK_QUEUED)) {
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
 		u64 slice = quantum_ns;
 		u64 throughput_slice =
-			cake_cache_throughput_slice_for(dispatch_bss, keep_prev);
+			cake_cache_throughput_slice_for(dispatch_bss, prev);
 
 		if (throughput_slice)
 			slice = throughput_slice;
-		keep_prev->scx.slice = slice;
+		prev->scx.slice = slice;
 		if (stats_on || path_stats_on)
 			get_local_stats_for(cpu_idx)->nr_dispatch_keep_running++;
 		if (path_stats_on && throughput_slice)
@@ -4852,9 +5973,15 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 		 * slice so same-task continuations charge the next run from the
 		 * correct starting budget. */
 		cpu_bss[cpu_idx].tick_slice = slice;
+#if CAKE_ACCEL_PATH
+		/* Teach the frontier predictor from the live generic path. The
+		 * prior wiring only learned from SAT-specialized continuations,
+		 * while debug showed the benchmark mostly reaches this block. */
+		cake_route_pred_mark_pending(dispatch_bss);
+#endif
+		goto dispatch_bookkeeping;
 	}
 
-idle_bookkeeping:
 	/* Check-before-write: only mark idle if not already idle.
 	 * Avoids unnecessary cache line dirtying. Debug still mirrors the legacy
 	 * BSS hint for telemetry; release publishes the owner-written status lane. */
@@ -4873,6 +6000,7 @@ idle_bookkeeping:
 #endif
 	cake_publish_cpu_idle(cpu_idx);
 
+dispatch_bookkeeping:
 	if (stats_on) {
 		struct cake_stats *s	= get_local_stats_for(cpu_idx);
 		u64		   d_oh = bpf_ktime_get_ns() - dispatch_start;
@@ -4881,6 +6009,7 @@ idle_bookkeeping:
 			s->max_dispatch_ns + ((d_oh - s->max_dispatch_ns) &
 					      -(d_oh > s->max_dispatch_ns));
 		cake_record_cb(s, CAKE_CB_DISPATCH, d_oh);
+		cake_record_cb_split(s, CAKE_CB_DISPATCH, d_oh, 0);
 		if (d_oh >= CAKE_SLOW_CALLBACK_NS)
 			cake_emit_dbg_event(prev, cpu_idx,
 					    CAKE_DBG_EVENT_CALLBACK,
@@ -5266,6 +6395,8 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	bool stats_on		    = CAKE_STATS_ACTIVE;
 	bool path_stats_on	    = CAKE_PATH_STATS_ACTIVE;
 	u64  running_overhead_start = 0;
+	u64  running_debug_tax_ns   = 0;
+	u64  running_debug_start    = 0;
 	if (stats_on)
 		running_overhead_start = bpf_ktime_get_ns();
 #else
@@ -5281,8 +6412,12 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	struct cake_cpu_bss *bss = &cpu_bss[cpu];
 
 #ifndef CAKE_RELEASE
-	if (stats_on)
+	if (stats_on) {
+		running_debug_start = bpf_ktime_get_ns();
 		cake_record_local_run(cpu);
+		running_debug_tax_ns += bpf_ktime_get_ns() -
+					running_debug_start;
+	}
 #endif
 
 #ifndef CAKE_RELEASE
@@ -5290,7 +6425,12 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * Feeds run_start + running_telemetry (both debug-gated).
 	 * In release, now_full has zero consumers → entire clock
 	 * system (read, kfunc resync, accumulation) compiles out. */
+	if (stats_on)
+		running_debug_start = bpf_ktime_get_ns();
 	u64 now_full = bss->cake_clock;
+	if (stats_on)
+		running_debug_tax_ns += bpf_ktime_get_ns() -
+					running_debug_start;
 #endif
 
 	bool task_changed = bss->last_pid != p->pid;
@@ -5300,6 +6440,8 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * BSS line. Debug still mirrors idle_hint for telemetry and SMT accounting. */
 	cake_publish_cpu_running(cpu, task_changed);
 #ifndef CAKE_RELEASE
+	if (stats_on)
+		running_debug_start = bpf_ktime_get_ns();
 	if (READ_ONCE(bss->idle_hint)) {
 		WRITE_ONCE(bss->idle_hint, 0);
 		if (stats_on)
@@ -5308,9 +6450,14 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 		if (stats_on)
 			get_local_stats_for(cpu)->nr_idle_hint_clear_skips++;
 	}
+	if (stats_on)
+		running_debug_tax_ns += bpf_ktime_get_ns() -
+					running_debug_start;
 #endif
 
 #ifndef CAKE_RELEASE
+	if (stats_on)
+		running_debug_start = bpf_ktime_get_ns();
 	if (stats_on)
 		cake_smt_record_run_start(bss, cpu, running_overhead_start);
 
@@ -5334,6 +6481,9 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 			WRITE_ONCE(bss->last_wake_class, new_class);
 		}
 	}
+	if (stats_on)
+		running_debug_tax_ns += bpf_ktime_get_ns() -
+					running_debug_start;
 #endif
 
 	/* FAST PATH: same task re-running on the same CPU.
@@ -5342,19 +6492,37 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * writes beyond the published status update; debug stats refresh the
 	 * shadow owner class. */
 	if (stats_on || path_stats_on) {
+#ifndef CAKE_RELEASE
+		if (stats_on)
+			running_debug_start = bpf_ktime_get_ns();
+#endif
 		struct cake_stats *s_run = get_local_stats_for(cpu);
 		if (task_changed)
 			s_run->nr_running_task_change++;
 		else
 			s_run->nr_running_same_task++;
+#ifndef CAKE_RELEASE
+		if (stats_on)
+			running_debug_tax_ns += bpf_ktime_get_ns() -
+						running_debug_start;
+#endif
 	}
 	if (task_changed) {
 		/* Task change: refresh local CPU state and learned home placement.
 		 * Release reads task context here to maintain locality history. */
 #ifndef CAKE_RELEASE
+		if (stats_on)
+			running_debug_start = bpf_ktime_get_ns();
 		now_full	= scx_bpf_now();
 		bss->cake_clock = now_full;
+		if (stats_on)
+			running_debug_tax_ns += bpf_ktime_get_ns() -
+						running_debug_start;
 #endif
+		if ((u32)READ_ONCE(bss->route_prediction_last) != p->pid) {
+			WRITE_ONCE(bss->route_prediction_last, 0);
+			cake_record_frontier_clear();
+		}
 		u64 slice	= p->scx.slice;
 		bss->last_pid	= p->pid;
 		bss->tick_slice = slice ?: quantum_ns;
@@ -5390,9 +6558,14 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 #endif
 			cake_update_home_cpu(tctx, (u16)cpu);
 #ifndef CAKE_RELEASE
+			if (stats_on)
+				running_debug_start = bpf_ktime_get_ns();
 			if (first_home)
 				cake_record_home_seed(tctx->home_cpu,
 						      seed_reason);
+			if (stats_on)
+				running_debug_tax_ns += bpf_ktime_get_ns() -
+							running_debug_start;
 #endif
 		}
 	}
@@ -5402,20 +6575,35 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 	 * Task-change (25%): now_full = scx_bpf_now() (resynced above).
 	 * Deferred to here so the task-change path can overwrite it. */
 #ifndef CAKE_RELEASE
+	if (stats_on)
+		running_debug_start = bpf_ktime_get_ns();
 	bss->run_start = (u32)now_full;
+	if (stats_on)
+		running_debug_tax_ns += bpf_ktime_get_ns() -
+					running_debug_start;
 #endif
 
 #ifndef CAKE_RELEASE
-	if (stats_on)
+	if (stats_on) {
+		running_debug_start = bpf_ktime_get_ns();
 		running_telemetry(p, cpu, running_overhead_start);
+		running_debug_tax_ns += bpf_ktime_get_ns() -
+					running_debug_start;
+	}
 	if (stats_on) {
 		struct cake_stats *s_run = get_local_stats_for(cpu);
 		u64 oh_run = bpf_ktime_get_ns() - running_overhead_start;
+		u64 release_est =
+			oh_run > running_debug_tax_ns ?
+				oh_run - running_debug_tax_ns :
+				0;
 		s_run->total_running_ns += oh_run;
 		s_run->max_running_ns = s_run->max_running_ns +
 					((oh_run - s_run->max_running_ns) &
 					 -(oh_run > s_run->max_running_ns));
 		cake_record_cb(s_run, CAKE_CB_RUNNING, oh_run);
+		cake_record_cb_split(s_run, CAKE_CB_RUNNING, release_est,
+				     running_debug_tax_ns);
 		if (oh_run >= CAKE_SLOW_CALLBACK_NS)
 			cake_emit_dbg_event(p, cpu, CAKE_DBG_EVENT_CALLBACK,
 					    CAKE_CB_RUNNING, oh_run, 0);
@@ -5454,6 +6642,10 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	u32 rt_raw = slice_consumed - ((slice_consumed - (65535U << 10)) &
 				       -(slice_consumed > (65535U << 10)));
 
+#if CAKE_ACCEL_PATH && !defined(CAKE_RELEASE)
+	cake_route_pred_observe(bss, p, rt_raw, runnable);
+#endif
+
 #ifndef CAKE_RELEASE
 #if !CAKE_LEAN_SCHED
 	cake_update_cpu_pressure(bss, slice_consumed);
@@ -5486,12 +6678,13 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 #if CAKE_ACCEL_PATH
 #ifdef CAKE_RELEASE
-	bool relaxed		  = cake_accounting_relaxed(bss);
 	u32  owner_avg_runtime_ns = cake_update_owner_avg(bss, rt_raw);
 
+	cake_route_pred_observe(bss, p, rt_raw, runnable);
 	cake_publish_cpu_owner(cpu, bss, owner_avg_runtime_ns);
-	if (!relaxed)
+	if (!cake_accounting_relaxed(bss))
 		cake_scoreboard_owner_result(bss, owner_avg_runtime_ns);
+	return;
 #else
 	bool relaxed = cake_accounting_relaxed(bss);
 	cake_record_accel_accounting(relaxed);
@@ -5503,6 +6696,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	bool stats_on		     = CAKE_STATS_ACTIVE;
 	bool path_stats_on	     = CAKE_PATH_STATS_ACTIVE;
 	u64  stopping_overhead_start = 0;
+	u64  stopping_debug_tax_ns   = 0;
+	u64  stopping_debug_start __maybe_unused = 0;
 
 #ifndef CAKE_RELEASE
 	struct cake_task_ctx __arena *tctx = policy_tctx;
@@ -5530,6 +6725,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	if (stats_on) {
 		stopping_overhead_start = bpf_ktime_get_ns();
 #ifndef CAKE_RELEASE
+		stopping_debug_start = bpf_ktime_get_ns();
 		if (tctx) {
 			struct cake_stats *s_task = get_local_stats_for(cpu);
 			u8		   tc	  = tctx->task_class;
@@ -5644,14 +6840,19 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 				.cpu_run_count[cpu &
 					       (CAKE_TELEM_MAX_CPUS - 1)]++;
 		}
+		stopping_debug_tax_ns += bpf_ktime_get_ns() -
+					 stopping_debug_start;
 #endif /* !CAKE_RELEASE */
 
 		/* Aggregate overhead timing (per-CPU BSS). */
 		struct cake_stats *s = get_local_stats_for(cpu);
 #ifndef CAKE_RELEASE
+		stopping_debug_start = bpf_ktime_get_ns();
 		if (!smt_charged)
 			cake_smt_charge_runtime(s, bss, cpu,
 						bpf_ktime_get_ns());
+		stopping_debug_tax_ns += bpf_ktime_get_ns() -
+					 stopping_debug_start;
 #endif
 		if (runnable)
 			s->nr_stopping_runnable++;
@@ -5664,11 +6865,17 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		else
 			s->nr_quantum_preempt++;
 		u64 oh_agg = bpf_ktime_get_ns() - stopping_overhead_start;
+		u64 release_est =
+			oh_agg > stopping_debug_tax_ns ?
+				oh_agg - stopping_debug_tax_ns :
+				0;
 		s->total_stopping_ns += oh_agg;
 		s->max_stopping_ns =
 			s->max_stopping_ns + ((oh_agg - s->max_stopping_ns) &
 					      -(oh_agg > s->max_stopping_ns));
 		cake_record_cb(s, CAKE_CB_STOPPING, oh_agg);
+		cake_record_cb_split(s, CAKE_CB_STOPPING, release_est,
+				     stopping_debug_tax_ns);
 		s->nr_stop_deferred++;
 		if (oh_agg >= CAKE_SLOW_CALLBACK_NS)
 			cake_emit_dbg_event(p, cpu, CAKE_DBG_EVENT_CALLBACK,

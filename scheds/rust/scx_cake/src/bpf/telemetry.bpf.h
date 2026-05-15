@@ -153,6 +153,26 @@ static __noinline void cake_record_cb(struct cake_stats *s, u32 cb_idx,
 	}
 }
 
+static __noinline void cake_record_cb_split(struct cake_stats *s, u32 cb_idx,
+					    u64 release_est_ns,
+					    u64 debug_tax_ns)
+{
+	if (!s || cb_idx >= CAKE_CB_MAX)
+		return;
+
+	s->callback_release_est_ns[cb_idx] += release_est_ns;
+	s->callback_debug_tax_ns[cb_idx] += debug_tax_ns;
+	s->callback_release_est_max_ns[cb_idx] =
+		s->callback_release_est_max_ns[cb_idx] +
+		((release_est_ns - s->callback_release_est_max_ns[cb_idx]) &
+		 -(release_est_ns > s->callback_release_est_max_ns[cb_idx]));
+	s->callback_debug_tax_max_ns[cb_idx] =
+		s->callback_debug_tax_max_ns[cb_idx] +
+		((debug_tax_ns - s->callback_debug_tax_max_ns[cb_idx]) &
+		 -(debug_tax_ns > s->callback_debug_tax_max_ns[cb_idx]));
+	s->callback_split_count[cb_idx]++;
+}
+
 #ifndef CAKE_RELEASE
 static __always_inline void cake_record_wake_wait(u64 *sum, u64 *count,
 						  u64 *max_ns, u32 reason,
@@ -330,6 +350,111 @@ static __always_inline void cake_record_accel_trust_prev(bool hit)
 		s->accel_trust_prev_miss++;
 }
 
+static __always_inline struct cake_stats *cake_frontier_stats(void)
+{
+	if (!(CAKE_STATS_ACTIVE || CAKE_PATH_STATS_ACTIVE))
+		return NULL;
+	return get_local_stats();
+}
+
+static __always_inline void cake_record_frontier_pending(void)
+{
+	struct cake_stats *s = cake_frontier_stats();
+
+	if (s)
+		s->frontier_pending_set++;
+}
+
+static __always_inline void
+cake_record_frontier_observe(bool good, u32 mode, u32 conf, bool promoted,
+			     bool decayed)
+{
+	struct cake_stats *s = cake_frontier_stats();
+
+	if (!s)
+		return;
+	s->frontier_observe_count++;
+	if (good)
+		s->frontier_observe_good++;
+	else
+		s->frontier_observe_bad++;
+	if (promoted)
+		s->frontier_conf_promote++;
+	if (decayed)
+		s->frontier_conf_decay++;
+	if (conf >= 12U)
+		s->frontier_conf_high++;
+	if (mode < CAKE_FRONTIER_MODE_MAX)
+		s->frontier_mode_count[mode]++;
+}
+
+static __always_inline void cake_record_frontier_decay(void)
+{
+	struct cake_stats *s = cake_frontier_stats();
+
+	if (s)
+		s->frontier_conf_decay++;
+}
+
+static __always_inline void cake_record_frontier_dispatch(bool hit)
+{
+	struct cake_stats *s = cake_frontier_stats();
+
+	if (!s)
+		return;
+	s->frontier_dispatch_trusted_attempt++;
+	if (hit)
+		s->frontier_dispatch_trusted_hit++;
+	else
+		s->frontier_dispatch_trusted_fail++;
+}
+
+static __always_inline void cake_record_frontier_audit(bool skipped)
+{
+	struct cake_stats *s = cake_frontier_stats();
+
+	if (!s)
+		return;
+	if (skipped)
+		s->frontier_dispatch_audit_skip++;
+	else
+		s->frontier_dispatch_audit_due++;
+}
+
+static __always_inline void cake_record_frontier_select_prev(bool hit)
+{
+	struct cake_stats *s = cake_frontier_stats();
+
+	if (!s)
+		return;
+	s->frontier_select_prev_attempt++;
+	if (hit)
+		s->frontier_select_prev_hit++;
+	else
+		s->frontier_select_prev_miss++;
+}
+
+static __always_inline void cake_record_frontier_enqueue_fact(bool hit)
+{
+	struct cake_stats *s = cake_frontier_stats();
+
+	if (!s)
+		return;
+	s->frontier_enqueue_fact_attempt++;
+	if (hit)
+		s->frontier_enqueue_fact_hit++;
+	else
+		s->frontier_enqueue_fact_miss++;
+}
+
+static __always_inline void cake_record_frontier_clear(void)
+{
+	struct cake_stats *s = cake_frontier_stats();
+
+	if (s)
+		s->frontier_token_clear++;
+}
+
 static __noinline void cake_record_select_migration(struct cake_stats *s,
 						    u8 path, u8 reason)
 {
@@ -498,6 +623,44 @@ cake_record_accel_accounting(bool relaxed __maybe_unused)
 
 static __always_inline void
 cake_record_accel_trust_prev(bool hit __maybe_unused)
+{
+}
+
+static __always_inline void cake_record_frontier_pending(void)
+{
+}
+
+static __always_inline void
+cake_record_frontier_observe(bool good __maybe_unused, u32 mode __maybe_unused,
+			     u32 conf __maybe_unused,
+			     bool promoted __maybe_unused,
+			     bool decayed __maybe_unused)
+{
+}
+
+static __always_inline void cake_record_frontier_decay(void)
+{
+}
+
+static __always_inline void cake_record_frontier_dispatch(bool hit __maybe_unused)
+{
+}
+
+static __always_inline void cake_record_frontier_audit(bool skipped __maybe_unused)
+{
+}
+
+static __always_inline void
+cake_record_frontier_select_prev(bool hit __maybe_unused)
+{
+}
+
+static __always_inline void
+cake_record_frontier_enqueue_fact(bool hit __maybe_unused)
+{
+}
+
+static __always_inline void cake_record_frontier_clear(void)
 {
 }
 #endif
