@@ -7,7 +7,6 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
-use combinations::Combinations;
 use itertools::iproduct;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
@@ -469,12 +468,6 @@ struct EnergyModelOptimizer<'a> {
 
     // CPU orders indexed by performance
     perf_cpu_order: RefCell<BTreeMap<usize, PerfCpuOrder>>,
-}
-
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
-struct PDS<'a> {
-    pd: &'a PerfDomain,
-    ps: &'a PerfState,
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
@@ -941,22 +934,80 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     fn gen_pds_combinations(&'a self, util: f32) -> Vec<PDSetInfo<'a>> {
-        let mut pdsi_vec = Vec::new();
+        /*
+         * Build unique performance-domain / CPU-count combinations.
+         *
+         * The previous implementation expanded a performance domain with N
+         * CPUs into N identical PDS entries and then generated every subset of
+         * the expanded vector. That turns a 20 CPU system into almost 2^20
+         * intermediate combinations per utilization point, most of which
+         * collapse to the same "use K CPUs from this domain" result.
+         *
+         * Keep the same model, but generate those count choices directly and
+         * do dynamic programming across domains. For the same accumulated
+         * performance, a lower-power partial result always dominates a
+         * higher-power one because later domain choices add the same
+         * performance and power regardless of the earlier path.
+         */
+        let mut states: BTreeMap<usize, HashSet<PDSetInfo<'a>>> = BTreeMap::new();
+        Self::insert_best_pdsi(&mut states, PDSetInfo::empty());
 
-        let pds_set = self.gen_pds_set(util);
-        let n = pds_set.len();
-        for k in 1..n {
-            let pdss = pds_set.clone();
-            let pds_cmbs: Vec<_> = Combinations::new(pdss, k)
-                .map(|cmb| PDSetInfo::new(cmb.clone()))
-                .collect();
-            pdsi_vec.extend(pds_cmbs);
+        for (_, pd) in self.em.perf_doms.iter() {
+            let ps = pd.select_perf_state(util).unwrap();
+            let mut next: BTreeMap<usize, HashSet<PDSetInfo<'a>>> = BTreeMap::new();
+
+            for pdsi_set in states.values() {
+                for pdsi in pdsi_set {
+                    for nr_cpus in 0..=pd.span.weight() {
+                        let choice = PDSetInfo::from_pd_cpu_count(pd, ps, nr_cpus);
+                        Self::insert_best_pdsi(&mut next, pdsi.combine(&choice));
+                    }
+                }
+            }
+
+            states = next;
         }
 
-        let pdsi = PDSetInfo::new(pds_set.clone());
-        pdsi_vec.push(pdsi);
+        states
+            .into_values()
+            .flat_map(|pdsi_set| pdsi_set.into_iter())
+            .filter(|pdsi| !pdsi.pdcpu_set.is_empty())
+            .collect()
+    }
 
-        pdsi_vec
+    fn insert_best_pdsi(
+        pdsi_map: &mut BTreeMap<usize, HashSet<PDSetInfo<'a>>>,
+        new_pdsi: PDSetInfo<'a>,
+    ) -> bool {
+        match pdsi_map.get_mut(&new_pdsi.performance) {
+            Some(v) => {
+                let (pdsi_power, pdsi_pd_len) = {
+                    let pdsi = v.iter().next().unwrap();
+                    (pdsi.power, pdsi.pd_id_set.len())
+                };
+                if pdsi_power == new_pdsi.power {
+                    if new_pdsi.pd_id_set.len() < pdsi_pd_len {
+                        v.clear();
+                        v.insert(new_pdsi);
+                        true
+                    } else {
+                        false
+                    }
+                } else if pdsi_power > new_pdsi.power {
+                    v.clear();
+                    v.insert(new_pdsi);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                let mut v = HashSet::new();
+                v.insert(new_pdsi.clone());
+                pdsi_map.insert(new_pdsi.performance, v);
+                true
+            }
+        }
     }
 
     fn insert_pds_combinations(&self, new_pdsi_vec: &Vec<PDSetInfo<'a>>) -> bool {
@@ -973,13 +1024,19 @@ impl<'a> EnergyModelOptimizer<'a> {
                 // There are already PDSetInfo in the list.
                 Some(v) => {
                     let mut v = v.borrow_mut();
-                    let pdsi = &v.iter().next().unwrap();
-                    if pdsi.power == new_pdsi.power {
-                        // If the power consumptions are the same, keep both.
-                        if v.insert(new_pdsi.clone()) {
+                    let (pdsi_power, pdsi_pd_len) = {
+                        let pdsi = v.iter().next().unwrap();
+                        (pdsi.power, pdsi.pd_id_set.len())
+                    };
+                    if pdsi_power == new_pdsi.power {
+                        // If the power consumptions are the same, keep the one with fewer PDs
+                        // to minimize leakage power and improve locality.
+                        if new_pdsi.pd_id_set.len() < pdsi_pd_len {
+                            v.clear();
+                            v.insert(new_pdsi.clone());
                             found_new = true;
                         }
-                    } else if pdsi.power > new_pdsi.power {
+                    } else if pdsi_power > new_pdsi.power {
                         // If the new one takes less power, keep the new one.
                         v.clear();
                         v.insert(new_pdsi.clone());
@@ -998,50 +1055,6 @@ impl<'a> EnergyModelOptimizer<'a> {
         }
         found_new
     }
-
-    /// Get a vector of (performance domain, performance state) to achieve
-    /// the given CPU utilization, @util.
-    fn gen_pds_set(&self, util: f32) -> Vec<PDS<'_>> {
-        let mut pds_set = vec![];
-        for (_, pd) in self.em.perf_doms.iter() {
-            let ps = pd.select_perf_state(util).unwrap();
-            let pds = PDS::new(pd, ps);
-            pds_set.push(pds);
-        }
-        self.expand_pds_set(&mut pds_set);
-        pds_set
-    }
-
-    /// Expand a PDS vector such that a performance domain with X CPUs
-    /// has N elements in the vector. This is purely for generating
-    /// combinations easy.
-    fn expand_pds_set(&self, pds_set: &mut Vec<PDS<'_>>) {
-        let mut xset = vec![];
-        // For a performance domain having nr_cpus, add nr_cpus-1 more
-        // PDS to make the PDS nr_cpus in the vector.
-        for pds in pds_set.iter() {
-            let nr_cpus = pds.pd.span.weight();
-            for _ in 1..nr_cpus {
-                xset.push(pds.clone());
-            }
-        }
-        pds_set.append(&mut xset);
-
-        // Sort the pds_set for easy comparison.
-        pds_set.sort();
-    }
-}
-
-impl<'a> PDS<'_> {
-    fn new(pd: &'a PerfDomain, ps: &'a PerfState) -> PDS<'a> {
-        PDS { pd, ps }
-    }
-}
-
-impl PartialEq for PDS<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.pd == other.pd && self.ps == other.ps
-    }
 }
 
 impl<'a> PDCpu<'_> {
@@ -1056,64 +1069,46 @@ impl PartialEq for PDCpu<'_> {
     }
 }
 
-impl fmt::Display for PDS<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "pd:id:{}/pd:weight:{}/ps:cap:{}/ps:power:{}",
-            self.pd.id,
-            self.pd.span.weight(),
-            self.ps.performance,
-            self.ps.power,
-        )?;
-        Ok(())
+impl<'a> PDSetInfo<'a> {
+    fn empty() -> PDSetInfo<'a> {
+        PDSetInfo {
+            performance: 0,
+            power: 0,
+            pdcpu_set: BTreeSet::new(),
+            pd_id_set: BTreeSet::new(),
+        }
     }
-}
 
-impl<'a> PDSetInfo<'_> {
-    fn new(pds_set: Vec<PDS<'a>>) -> PDSetInfo<'a> {
-        // Create a pd_id_set and calculate performance and power.
-        let mut performance = 0;
-        let mut power = 0;
-        let mut pd_id_set: BTreeSet<usize> = BTreeSet::new();
+    fn from_pd_cpu_count(pd: &'a PerfDomain, ps: &'a PerfState, nr_cpus: usize) -> PDSetInfo<'a> {
+        let mut pdcpu_set = BTreeSet::new();
+        let mut pd_id_set = BTreeSet::new();
 
-        for pds in pds_set.iter() {
-            performance += pds.ps.performance;
-            power += pds.ps.power;
-            pd_id_set.insert(pds.pd.id);
+        for cpu_vid in 0..nr_cpus {
+            pdcpu_set.insert(PDCpu::new(pd, cpu_vid));
         }
 
-        // Create a pdcpu_set, so first gather the same PDS entries.
-        let mut pds_map: BTreeMap<PDS<'a>, RefCell<Vec<PDS<'a>>>> = BTreeMap::new();
-
-        for pds in pds_set.iter() {
-            let v = pds_map.get(&pds);
-            match v {
-                Some(v) => {
-                    let mut v = v.borrow_mut();
-                    v.push(pds.clone());
-                }
-                None => {
-                    let mut v: Vec<PDS<'a>> = Vec::new();
-                    v.push(pds.clone());
-                    pds_map.insert(pds.clone(), v.into());
-                }
-            }
-        }
-        // Then assign cpu virtual ids to pdcpu_set.
-        let mut pdcpu_set: BTreeSet<PDCpu<'a>> = BTreeSet::new();
-        let pds_map = pds_map;
-
-        for (_, v) in pds_map.iter() {
-            for (cpu_vid, pds) in v.borrow().iter().enumerate() {
-                let pdcpu = PDCpu::new(pds.pd, cpu_vid);
-                pdcpu_set.insert(pdcpu);
-            }
+        if nr_cpus > 0 {
+            pd_id_set.insert(pd.id);
         }
 
         PDSetInfo {
-            performance,
-            power,
+            performance: ps.performance * nr_cpus,
+            power: ps.power * nr_cpus,
+            pdcpu_set,
+            pd_id_set,
+        }
+    }
+
+    fn combine(&self, other: &PDSetInfo<'a>) -> PDSetInfo<'a> {
+        let mut pdcpu_set = self.pdcpu_set.clone();
+        pdcpu_set.extend(other.pdcpu_set.iter().cloned());
+
+        let mut pd_id_set = self.pd_id_set.clone();
+        pd_id_set.extend(other.pd_id_set.iter().cloned());
+
+        PDSetInfo {
+            performance: self.performance + other.performance,
+            power: self.power + other.power,
             pdcpu_set,
             pd_id_set,
         }
