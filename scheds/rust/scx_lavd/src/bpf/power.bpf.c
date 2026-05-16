@@ -173,9 +173,6 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	} else {
 		cpuc->effective_capacity = capacity_observed;
 	}
-
-	debugln("[cpu%d] effective_capacity: %d -- capacity_policy: %d -- capacity_observed: %d -- maximum_freq_observed: %d -- hw_pressure: %u",
-		cpu, cpuc->effective_capacity, capacity_policy, capacity_observed, mfo, pressure);
 }
 
 bool is_perf_cri(task_ctx __arg_arena *taskc)

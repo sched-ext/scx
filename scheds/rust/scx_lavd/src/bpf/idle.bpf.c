@@ -666,6 +666,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 	s32 cpu = -ENOENT;
 	bool ct_enabled = xmig_min_gain_ns > 0; /* Userspace forces this to 0 on a homogeneous machine. */
 	u64 ct_s;
+	bool via_idle = false;
 	int i, j;
 
 	/*
@@ -720,8 +721,10 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			}
 
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
-			if (cpu >= 0)
+			if (cpu >= 0) {
+				via_idle = true;
 				goto found;
+			}
 
 			if (ct_enabled) {
 				cpu = find_sticky_cpu_at_cpdom(ctx, -ENOENT, mig_cpdom);
@@ -743,6 +746,9 @@ found:
 		WRITE_ONCE(mig_cpdc->is_stealer, false);
 		WRITE_ONCE(cpdc->is_stealee, false);
 	}
+	debugln("migrate: neighbor %s[pid%d] cpdom%llu -> cpdom%llu cpu%d via=%s",
+		ctx->p->comm, ctx->p->pid, cpdc->id, mig_cpdc->id, cpu,
+		via_idle ? "idle-cpu" : "queue");
 	*sticky_cpdom = mig_cpdom;
 	return cpu;
 }
