@@ -8,7 +8,7 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .add_source("../../../lib/pmu.bpf.c")
+        .add_source("src/bpf/lib/pmu.bpf.c")
         .compile_link_gen()
         .unwrap();
 }
