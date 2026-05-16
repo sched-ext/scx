@@ -584,6 +584,17 @@ comp_time_gain(u64 svc_invr, u64 ct_s, struct cpdom_ctx *sticky,
 	return (s64)ct_s - (s64)calc_comp_time_on_cpdom(svc_invr, target);
 }
 
+/*
+ * Out of line, so that the print's argument array stays out of
+ * migrate_to_neighbor()'s frame, which is on the picker's deepest stack chain.
+ */
+static __noinline
+void debug_neighbor_migration(u32 pid, u64 from, u64 to, s32 cid, bool via_idle)
+{
+	debugln("migrate: neighbor pid%d cpdom%llu -> cpdom%llu cpu%d via=%s", pid, from, to,
+		scx_bpf_cid_to_cpu(cid), via_idle ? "idle-cpu" : "queue");
+}
+
 static
 s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc, u64 scope,
 			s64 *sticky_cpdom, bool *is_idle)
@@ -593,6 +604,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc, u64 scope,
 	s32 cpu = -ENOENT;
 	bool ct_enabled = xmig_min_gain_ns > 0; /* Userspace forces this to 0 on a homogeneous machine. */
 	u64 ct_s;
+	bool via_idle = false;
 	int i, j;
 
 	/*
@@ -642,8 +654,10 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc, u64 scope,
 			}
 
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
-			if (cpu >= 0)
+			if (cpu >= 0) {
+				via_idle = true;
 				goto found;
+			}
 
 			if (ct_enabled) {
 				cpu = find_sticky_cpu_at_cpdom(ctx, -ENOENT, mig_cpdom);
@@ -665,6 +679,7 @@ found:
 		WRITE_ONCE(mig_cpdc->is_stealer, false);
 		WRITE_ONCE(cpdc->is_stealee, false);
 	}
+	debug_neighbor_migration(ctx->taskc->pid, cpdc->id, mig_cpdc->id, cpu, via_idle);
 	*sticky_cpdom = mig_cpdom;
 	return cpu;
 }
