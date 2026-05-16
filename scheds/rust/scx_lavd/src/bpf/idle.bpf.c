@@ -741,6 +741,10 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 					WRITE_ONCE(mig_cpdc->is_stealer, false);
 					WRITE_ONCE(cpdc->is_stealee, false);
 				}
+				debugln("migrate: neighbor %s[pid%d] cpdom%llu -> cpdom%llu cpu%d via=%s",
+					ctx->p->comm, ctx->p->pid,
+					cpdc->id, mig_cpdc->id, cpu,
+					via_stealer ? "stealer" : "completion-time");
 				*sticky_cpdom = mig_cpdom;
 				break;
 			}
