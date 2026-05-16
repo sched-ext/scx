@@ -84,6 +84,7 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 		WRITE_ONCE(cpdomc->stealee_budget_invr, 0);
 		WRITE_ONCE(cpdomc->is_stealer, true);
 		WRITE_ONCE(cpdomc->is_stealee, false);
+		debugln("load_balance: cpdom%llu becomes a stealer", cpdomc->id);
 		return 0;
 	}
 
@@ -121,6 +122,7 @@ classify_cpdom(struct cpdom_ctx *cpdomc, u64 total_load_invr,
 		WRITE_ONCE(cpdomc->stealer_budget_invr, 0);
 		WRITE_ONCE(cpdomc->is_stealer, false);
 		WRITE_ONCE(cpdomc->is_stealee, true);
+		debugln("load_balance: cpdom%llu becomes a stealee", cpdomc->id);
 		return 1;
 	}
 
@@ -530,6 +532,9 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 					decrement_stealee_budget(cpdomc_pick, task_load);
 					decrement_stealer_budget(cpdomc, task_load);
 				}
+				debugln("migrate: try_steal stealer=cpdom%llu stealee=cpdom%llu load=%llu cpu=%d",
+					cpdomc->id, cpdomc_pick->id, task_load,
+					bpf_get_smp_processor_id());
 				return true;
 			}
 		}
@@ -610,6 +615,9 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 					decrement_stealee_budget(cpdomc_pick, task_load);
 					decrement_stealer_budget(cpdomc, task_load);
 				}
+				debugln("migrate: force_steal stealer=cpdom%llu stealee=cpdom%llu load=%llu cpu=%d",
+					cpdomc->id, cpdomc_pick->id, task_load,
+					bpf_get_smp_processor_id());
 				return true;
 			}
 		}
