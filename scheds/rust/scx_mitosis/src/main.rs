@@ -19,6 +19,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
@@ -353,6 +354,14 @@ impl<'a> Scheduler<'a> {
             .rodata_data
             .as_mut()
             .expect("BUG: rodata_data missing after skel open");
+
+        // Set root_cgid to the kernfs node ID of the cgroup root visible
+        // to this process. On the host this is 1; inside a cgroup namespace
+        // it's the namespace root's ID, which is what bpf_cgroup_from_id()
+        // expects given its namespace visibility check.
+        rodata.root_cgid = std::fs::metadata("/sys/fs/cgroup/")
+            .map(|metadata| metadata.ino())
+            .unwrap_or(1);
 
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
         rodata.debug_events_enabled = opts.debug_events;
