@@ -14,6 +14,25 @@
 #define U64_MAX		((u64)~0ULL)
 #endif
 
+/*
+ * Kernel signal/jobctl flag bits.  Mirror of include/linux/sched/signal.h
+ * and include/linux/sched/jobctl.h; vmlinux.h only carries types, not CPP
+ * macros, so we redeclare the bits we read here.  These are stable ABI in
+ * practice — the kernel exposes them to userspace via task state and ptrace
+ * interfaces.
+ */
+#ifndef SIGNAL_GROUP_EXIT
+#define SIGNAL_GROUP_EXIT	0x00000004
+#endif
+#ifndef JOBCTL_STOP_PENDING
+#define JOBCTL_STOP_PENDING	(1UL << 17)
+#define JOBCTL_TRAP_STOP	(1UL << 19)
+#define JOBCTL_TRAP_NOTIFY	(1UL << 20)
+#define JOBCTL_TRAP_FREEZE	(1UL << 23)
+#define JOBCTL_TRAP_MASK	(JOBCTL_TRAP_STOP | JOBCTL_TRAP_NOTIFY)
+#define JOBCTL_PENDING_MASK	(JOBCTL_STOP_PENDING | JOBCTL_TRAP_MASK)
+#endif
+
 extern int scx_cgroup_bw_enqueue_cb(u64 taskc);
 
 enum scx_cgroup_consts {
@@ -47,18 +66,51 @@ enum scx_cgroup_consts {
 	CBW_NR_CGRP_MAX			= 2048,
 	/* maximum number of scx_cgroup_llc_ctx: 2048 cgroups * 32 LLCs */
 	CBW_NR_CGRP_LLC_MAX		= (CBW_NR_CGRP_MAX * 32),
-	/* The maximum height of a cgroup tree.
-	 * cgroupv2 default maximum depth is 32 (kernel CGROUPS_DEPTH_MAX). */
-	CBW_CGRP_TREE_HEIGHT_MAX	= 32,
+	/* The maximum height of a cgroup tree. */
+	CBW_CGRP_TREE_HEIGHT_MAX	= 64,
 	/* unlimited quota ("max") from scx_cgroup_init_args and scx_cgroup_bw_set() */
 	CBW_RUNTUME_INF_RAW		= ((u64)~0ULL),
 	/* unlimited quota ("max"); This is for easier comparison between signed vs. unsigned integers. */
 	CBW_RUNTUME_INF			= ((s64)~((u64)1 << 63)),
 	/* maximum number of re-enqueue tasks in one dispatch */
 	CBW_REENQ_MAX_BATCH		= 2,
-	/* size of the deferred BTQ destroy queue */
-	CBW_DEFERRED_BTQ_SIZE		= 256,
+	/*
+	 * Size of the deferred BTQ destroy queue.
+	 * CBW_NR_CGRP_LLC_MAX * 2 = 131072 slots, 1024 KB.
+	 */
+	CBW_DEFERRED_BTQ_SIZE		= (CBW_NR_CGRP_LLC_MAX * 2),
+	/*
+	 * Scheduling pressure hint, 1024-scale.  The BPF scheduler scales a
+	 * task's time slice as:
+	 *
+	 *   slice = (base_slice * CBW_PRESSURE_SCALE) / pressure
+	 *
+	 * CBW_PRESSURE_NORMAL (== CBW_PRESSURE_SCALE) means no reduction.
+	 * CBW_PRESSURE_MAX caps the reduction at 1/16 of the base slice.
+	 *
+	 * Two signals combine via max():
+	 *   Budget pressure:  hyperbolic below CBW_PRESSURE_BUDGET_KNEE (25%).
+	 *   Backlog pressure: linear with BTQ depth, capped at
+	 *                     CBW_PRESSURE_BACKLOG_CAP tasks.
+	 *                     1024 + 128 * 128 = 17408 → clamped to MAX.
+	 */
+	CBW_PRESSURE_SCALE		= 1024,
+	CBW_PRESSURE_NORMAL		= CBW_PRESSURE_SCALE,
+	CBW_PRESSURE_MAX		= 16384,
+	CBW_PRESSURE_BUDGET_KNEE	= 256,
+	CBW_PRESSURE_BACKLOG_STEP	= 128,
+	CBW_PRESSURE_BACKLOG_CAP	= 128,
+	/*
+	 * Shift used to split the 64-bit BTQ key evenly into a wall-clock
+	 * epoch (upper 32 bits) and a scheduler vtime (lower 32 bits).
+	 * Tasks queued in the same ~4-second epoch (2^32 ns ~= 4.29 s)
+	 * compete by their vtime; tasks from an earlier epoch are always
+	 * dispatched first, bounding the maximum BTQ wait to ~4 seconds.
+	 */
+	CBW_BTQ_VTIME_MASK_SHIFT	= 32,
 };
+#define CBW_BTQ_VTIME_LOWER_MASK	((1ULL << CBW_BTQ_VTIME_MASK_SHIFT) - 1ULL)
+#define CBW_BTQ_VTIME_UPPER_MASK	((u64)~CBW_BTQ_VTIME_LOWER_MASK)
 
 /*
  * Root cgroup id.  This is the kernel-level cgroup_id of the
@@ -126,6 +178,14 @@ struct scx_cgroup_ctx {
 		 * treated as read-only in the hot path.
 		 */
 		bool		has_llcx;
+
+		/*
+		 * Scheduling pressure hint (CBW_PRESSURE_SCALE = 1024 means no
+		 * reduction). Written at ~10 Hz by cbw_replenish_cgroup(); fits
+		 * in the 7-byte natural padding after has_llcx so this cache
+		 * line stays at 64 bytes.
+		 */
+		u32		pressure;
 	} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 	/* read-write cache line */
@@ -202,6 +262,16 @@ struct scx_cgroup_ctx {
 		 * meaningful consumption rate to track.
 		 */
 		u64		avg_consumption_rate;
+
+		/*
+		 * Total number of tasks queued in the BTQs across all LLC
+		 * domains, sampled at the last replenishment boundary by
+		 * cbw_replenish_cgroup(). Feeds the backlog component of
+		 * cbw_compute_pressure(); also exported through
+		 * cbw_dump_cgroup() so operators can see the per-cgroup
+		 * backlog alongside the throttle counters.
+		 */
+		u32		nr_pending;
 	} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
@@ -809,6 +879,71 @@ scx_cgroup_llc_ctx_t *cbw_get_llc_ctx(struct cgroup *cgrp, int llc_id)
 	return cbw_get_llc_ctx_with_id(cgroup_get_id(cgrp), llc_id);
 }
 
+static __always_inline
+u64 cbw_taskc_get_cgx_raw(scx_task_cgroup_bw_t *taskc, u64 cgrp_id)
+{
+	u64 cgx_raw;
+
+	/*
+	 * On cache hit, return taskc->cgx_raw directly.  On miss, look up
+	 * via cbw_get_cgroup_ctx_raw() and populate taskc->cgx_raw if
+	 * @taskc is non-NULL.  A miss means the CPU controller is disabled
+	 * for this cgroup, or the cgroup is mid-teardown -- the caller
+	 * chooses how to react (-ESRCH vs silent skip).
+	 */
+	if (taskc && taskc->cgx_raw)
+		return taskc->cgx_raw;
+
+	cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
+	if (!cgx_raw)
+		return 0;
+
+	if (taskc)
+		taskc->cgx_raw = cgx_raw;
+
+	return cgx_raw;
+}
+
+static __always_inline
+u64 cbw_taskc_get_llcx_raw(scx_task_cgroup_bw_t *taskc, u64 cgrp_id, int llc_id)
+{
+	u64 llcx_raw;
+
+	/*
+	 * Cache key is (cgrp_id, llc_id); cgrp_id is implicit because
+	 * @taskc is invalidated on cgroup migration (scx_cgroup_bw_move),
+	 * so a non-zero llcx_raw always belongs to the current cgroup.
+	 * On LLC change, re-look-up via cbw_get_llc_ctx_raw_with_id() and
+	 * refresh both fields.
+	 */
+	if (taskc->llcx_raw && taskc->last_llc_id == llc_id)
+		return taskc->llcx_raw;
+
+	llcx_raw = cbw_get_llc_ctx_raw_with_id(cgrp_id, llc_id);
+	if (!llcx_raw)
+		return 0;
+
+	taskc->llcx_raw = llcx_raw;
+	taskc->last_llc_id = llc_id;
+
+	return llcx_raw;
+}
+
+static __always_inline
+void cbw_taskc_invalidate(scx_task_cgroup_bw_t *taskc)
+{
+	/*
+	 * Called on cgroup migration (scx_cgroup_bw_move) and on cgroup
+	 * teardown scans.  Use __sync_lock_test_and_set instead of plain
+	 * stores: LLVM may fold constant stores into base+offset addressing
+	 * and omit addr_space_cast for the arena pointer, which the BPF
+	 * verifier rejects.  Atomics always emit addr_space_cast for the
+	 * base register regardless of offset.
+	 */
+	__sync_lock_test_and_set(&taskc->cgx_raw, 0);
+	__sync_lock_test_and_set(&taskc->llcx_raw, 0);
+}
+
 static
 long cbw_del_llc_ctx_with_id(u64 cgrp_id, int llc_id)
 {
@@ -957,8 +1092,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 				 * path's lock-acquire provides the matching
 				 * load-acquire.
 				 */
-				WRITE_ONCE(t->cgx_raw, 0);
-				WRITE_ONCE(t->llcx_raw, 0);
+				cbw_taskc_invalidate(t);
 				/*
 				 * Set task's vtime to zero so we can reap the
 				 * the throttled exiting task as soon as possible.
@@ -1098,10 +1232,12 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	struct cgroup *parent;
 	u64 cgrp_id;
 
-	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
-		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
-
 	cgrp_id = cgroup_get_id(cgrp);
+	if (unlikely(cgrp->level >= CBW_CGRP_TREE_HEIGHT_MAX)) {
+		cbw_err("cgroup is too deep: cgid:  %llu, level: %d",
+			cgrp_id, cgrp->level);
+		return -ENOMEM;
+	}
 
 	/*
 	 * Allocate and initialize scx_cgroup_ctx for @cgrp.
@@ -1130,6 +1266,8 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	cgx->runtime_total_sloppy = 0;
 	cgx->period_budget = cgx->nquota_ub;
 	cgx->is_throttled = false;
+	cgx->pressure = CBW_PRESSURE_NORMAL;
+	cgx->nr_pending = 0;
 
 	/*
 	 * The parent of @cgrp becomes non-leaf. If the parent is not
@@ -1226,7 +1364,6 @@ int cbw_cgroup_bw_offline(u64 cgrp_id)
 	 * scx_cgroup_bw_reenqueue(), both of which already have deep call
 	 * chains.
 	 */
-	cbw_dbg("Offline a cgroup: %llu", cgrp_id);
 	cbw_unthrottle_cgroup_for_exit(cgrp_id);
 	return cbw_free_llc_ctx(NULL, cgrp_id);
 }
@@ -1245,8 +1382,6 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 {
 	int ret = 0;
 	u64 cgrp_id;
-
-	cbw_dbg_cgrp();
 
 	/*
 	 * A cgroup can exit when there are exiting tasks (TASK_DEAD) under it,
@@ -1291,8 +1426,6 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	u64 cgx_raw, cur_cgx_raw;
 	struct cgroup_subsys_state *start_css, *pos;
 	int ret = 0;
-
-	cbw_dbg_cgrp();
 
 	/* Update the cgroup's bandwidth. */
 	cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
@@ -1499,9 +1632,6 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		
 		/* Update the previous level. */
 		prev_level = cur_level;
-
-		cbw_dbg("cgid%llu -- rt_llcx: %lld -- runtime_total_sloppy: %lld",
-			cur_cgx->id, rt_llcx, cur_cgx->runtime_total_sloppy);
 	}
 	bpf_rcu_read_unlock();
 
@@ -1661,24 +1791,16 @@ int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 	if (unlikely(cgrp_id == 0))
 		return 0;
 
-	if (taskc && taskc->cgx_raw) {
-		cgx_raw = taskc->cgx_raw;
-	} else {
-		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
-		if (!cgx_raw) {
-			/*
-			 * The CPU controller is not enabled for this cgroup.
-			 */
-			cbw_dbg("Failed to lookup a cgroup ctx: %llu", cgrp_id);
-			return -ESRCH;
-		}
-		if (taskc)
-			taskc->cgx_raw = cgx_raw;
+	cgx_raw = cbw_taskc_get_cgx_raw(taskc, cgrp_id);
+	if (!cgx_raw) {
+		/*
+		 * The CPU controller is not enabled for this cgroup.
+		 */
+		return -ESRCH;
 	}
 
 	cgx = (scx_cgroup_ctx_t *)cgx_raw;
 	if (READ_ONCE(cgx->is_throttled)) {
-		dbg_cgx(cgx, "throttled: ");
 		return -EAGAIN;
 	}
 
@@ -1701,16 +1823,76 @@ int scx_cgroup_bw_throttled(u64 cgrp_id,
 			     struct task_struct *p __arg_trusted, u64 taskc)
 {
 	/*
-	 * Never throttle an exiting task. In do_exit(), a task is removed from
-	 * the PID map by __unhash_process() (called from exit_notify()) in the
-	 * window between PF_EXITING being set and TASK_DEAD being set. If the
-	 * task is preempted in this window and throttled into the BTQ, the BTQ
-	 * drain calls scx_cgroup_bw_enqueue_cb() to reenqueue it. The callback
-	 * looks up the task pointer via bpf_task_from_pid(), which returns NULL
-	 * for an unhashed task. With no way to reenqueue it, the task is
-	 * permanently lost from all runqueues, causing a watchdog timeout.
+	 * Bypass throttling for tasks the kernel is about to take out of
+	 * SCX, or that will run only briefly to complete a kernel-mediated
+	 * transition.  Parking such a task in the BTQ either loses it
+	 * (PF_EXITING / SIGNAL_GROUP_EXIT — kernel unhashes the task before
+	 * drain can find it) or makes a kernel-visible operation (signal
+	 * stop, ptrace trap, cgroup-v2 freeze) appear to stall.  Quota
+	 * impact is negligible: these tasks consume essentially no CPU
+	 * before leaving SCX.
 	 */
-	if (p->flags & PF_EXITING)
+
+	/*
+	 * PF_EXITING: task is in do_exit(), being unhashed from the PID
+	 * hash and torn down.  __unhash_process() runs between PF_EXITING
+	 * being set and TASK_DEAD being set; if we park the task in the BTQ
+	 * during that window, the drain's bpf_task_from_pid() returns NULL,
+	 * the task is lost from all runqueues, and the watchdog stalls.
+	 */
+	if (unlikely(p->flags & PF_EXITING))
+		return 0;
+
+	/*
+	 * SIGNAL_GROUP_EXIT: the thread group is exiting (SIGKILL or
+	 * exit_group()) and is propagating the exit to every thread.
+	 * Narrow window where the group flag is set but PF_EXITING has not
+	 * yet landed on a given sibling; throttling here has the same
+	 * "lost task" risk as PF_EXITING.
+	 */
+	if (unlikely(READ_ONCE(p->signal->flags) & SIGNAL_GROUP_EXIT))
+		return 0;
+
+	/*
+	 * Jobctl bits — kernel says "this task is about to make a brief
+	 * kernel-mediated transition; let it run long enough to observe
+	 * and act on the pending event."  Throttling here doesn't lose the
+	 * task, but delays the user-visible effect of the operation.
+	 *
+	 *   JOBCTL_PENDING_MASK = JOBCTL_STOP_PENDING | JOBCTL_TRAP_MASK
+	 *   JOBCTL_TRAP_MASK    = JOBCTL_TRAP_STOP    | JOBCTL_TRAP_NOTIFY
+	 *
+	 *   JOBCTL_STOP_PENDING:  group SIGSTOP is pending — siblings have
+	 *                         been signal_wake_up()'d so they can
+	 *                         observe the stop and transition to
+	 *                         TASK_STOPPED.  Throttling delays SIGSTOP
+	 *                         delivery by the throttle window.
+	 *
+	 *   JOBCTL_TRAP_STOP:     ptrace stop trap pending — debugger is
+	 *                         waiting for the tracee to stop.
+	 *                         Throttling makes the debugger appear hung.
+	 *
+	 *   JOBCTL_TRAP_NOTIFY:   ptrace notify trap pending (e.g. seccomp,
+	 *                         PTRACE_EVENT_*); same shape as TRAP_STOP.
+	 *
+	 *   JOBCTL_TRAP_FREEZE:   cgroup-v2 freezer is engaging and every
+	 *                         thread under the cgroup must trap into
+	 *                         the freezer.  Throttling delays
+	 *                         convergence — `cgroup.freeze` write
+	 *                         appears to hang.  This bit is outside
+	 *                         JOBCTL_PENDING_MASK, so it needs its own
+	 *                         test alongside the mask.
+	 *
+	 * Using the mask (rather than spelling out STOP/NOTIFY individually)
+	 * keeps this aligned with the kernel's own grouping; new bits added
+	 * to JOBCTL_PENDING_MASK get picked up automatically.
+	 *
+	 * READ_ONCE: p->jobctl and p->signal->flags are written under
+	 * siglock on a different CPU; without the barrier the BPF compiler
+	 * may reorder or fold the load.
+	 */
+	if (unlikely(READ_ONCE(p->jobctl) &
+		     (JOBCTL_PENDING_MASK | JOBCTL_TRAP_FREEZE)))
 		return 0;
 
 	return cbw_cgroup_bw_throttled(cgrp_id, taskc);
@@ -1756,17 +1938,9 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 		goto accounting_out;
 	}
 
-	/*
-	 * Ensure cgx_raw is cached; populate it on the first call.
-	 */
-	if (taskc->cgx_raw) {
-		cgx_raw = taskc->cgx_raw;
-	} else {
-		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
-		if (!cgx_raw)
-			return 0;
-		taskc->cgx_raw = cgx_raw;
-	}
+	cgx_raw = cbw_taskc_get_cgx_raw(taskc, cgrp_id);
+	if (!cgx_raw)
+		return 0;
 	cgx = (scx_cgroup_ctx_t *)cgx_raw;
 
 	/*
@@ -1782,21 +1956,10 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 		return -EINVAL;
 	}
 
-	/*
-	 * Use the cached llcx if the LLC id matches; otherwise look up by
-	 * cgx->id (avoids cgroup_get_id() pointer dereferences) and update
-	 * the cache.
-	 */
-	if (taskc->llcx_raw && taskc->last_llc_id == llc_id) {
-		llcx = (scx_cgroup_llc_ctx_t *)taskc->llcx_raw;
-	} else {
-		llcx_raw = cbw_get_llc_ctx_raw_with_id(cgx->id, llc_id);
-		if (!llcx_raw)
-			return 0;
-		taskc->llcx_raw = llcx_raw;
-		taskc->last_llc_id = llc_id;
-		llcx = (scx_cgroup_llc_ctx_t *)llcx_raw;
-	}
+	llcx_raw = cbw_taskc_get_llcx_raw(taskc, cgx->id, llc_id);
+	if (!llcx_raw)
+		return 0;
+	llcx = (scx_cgroup_llc_ctx_t *)llcx_raw;
 
 accounting_out:
 	/*
@@ -1817,9 +1980,6 @@ accounting_out:
 	 * bandwidth correct.
 	 */
 	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
-
-	cbw_dbg("  cgrp_id: %llu -- llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
-		cgrp_id, llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
 	return 0;
 }
 
@@ -1828,8 +1988,9 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 {
 	scx_task_common *taskc = (scx_task_common *)ctx;
 	scx_cgroup_llc_ctx_t *llcx;
-	scx_atq_t *btq;
 	int llc_id, ret;
+	scx_atq_t *btq;
+	u64 btq_vtime;
 
 	/* Get the current LLC ID. */
 	if ((llc_id = cbw_get_current_llc_id()) < 0) {
@@ -1855,6 +2016,17 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	if (!btq)
 		return -ESRCH;
 
+	/*
+	 * Build the BTQ sort key by blending the current wall-clock time
+	 * (upper 32 bits) with the scheduler-provided vtime (lower 32 bits).
+	 * Tasks enqueued within the same ~4-second window compete by their
+	 * vtime, preserving relative fairness.  Once the wall-clock epoch
+	 * advances, earlier-queued tasks take priority regardless of vtime,
+	 * guaranteeing forward progress for any task stalled in the BTQ.
+	 */
+	btq_vtime = (scx_bpf_now() & CBW_BTQ_VTIME_UPPER_MASK) |
+		    (vtime & CBW_BTQ_VTIME_LOWER_MASK);
+
 	ret = scx_atq_lock(btq);
 	if (ret) {
 		cbw_err("Failed to lock ATQ.");
@@ -1869,13 +2041,12 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 		 * for the task. This should be rare, but possible.
 		 * The spinlock turns the race into a benign one.
 		 */
-		cbw_dbg("Possible double enqueue detected.");
 		scx_atq_unlock(btq);
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
 		return 0;
 	}
 
-	ret = scx_atq_insert_vtime_unlocked(btq, taskc, vtime);
+	ret = scx_atq_insert_vtime_unlocked(btq, taskc, btq_vtime);
 	if (ret)
 		cbw_err("Failed to insert a task to BTQ: %d", ret);
 
@@ -1903,7 +2074,6 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 __hidden
 int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, u64 cgrp_id)
 {
-	cbw_dbg(" [%s/%d]", p->comm, p->pid);
 	return cbw_put_aside(ctx, vtime, cgrp_id);
 }
 
@@ -1928,11 +2098,87 @@ bool cbw_has_backlogged_tasks(scx_cgroup_ctx_t *cgx)
 	return false;
 }
 
+static u32 cbw_compute_pressure(scx_cgroup_ctx_t *cgx, u32 nr_pending)
+{
+	/*
+	 * Returns a CBW_PRESSURE_SCALE (1024) based value that the BPF scheduler
+	 * uses to shorten a task's time slice:
+	 *
+	 *   slice = (base_slice * CBW_PRESSURE_SCALE) / pressure
+	 *
+	 * When a cgroup is throttled, tasks that are already running hold the CPU
+	 * for the full base slice before yielding.  This delays the scheduler from
+	 * rechecking the throttle state and causes task-stall latency.  Shorter
+	 * slices make running tasks yield more often, giving the scheduler more
+	 * opportunities to move them to the BTQ once the budget is exhausted.
+	 */
+	u64 budget_frac, budget_pressure, backlog_pressure;
+
+	/*
+	 * Budget pressure
+	 * ---------------
+	 * Reflects how much of the newly replenished period_budget remains.  When
+	 * period_budget is close to nquota_ub the cgroup has plenty of headroom and
+	 * pressure stays at CBW_PRESSURE_NORMAL (1024).  Below CBW_PRESSURE_BUDGET_KNEE
+	 * (25% of quota) the curve turns hyperbolic: halving the remaining budget
+	 * doubles the pressure, so time slices shrink proportionally.  This ensures
+	 * that the last few nanoseconds of quota are consumed in small steps rather
+	 * than one long task run that overshoots the limit.
+	 *
+	 * A small period_budget also indicates accumulated debt from previous
+	 * periods (carried_debt reduced the new budget).  High pressure in this
+	 * case is correct: the cgroup already owes CPU time and should not be
+	 * allowed to accumulate more debt through long slices.
+	 */
+	budget_frac = min((u64)max(cgx->period_budget, 0LL) *
+			  CBW_PRESSURE_SCALE / cgx->nquota_ub,
+			  (u64)CBW_PRESSURE_SCALE);
+	if (budget_frac >= CBW_PRESSURE_BUDGET_KNEE)
+		budget_pressure = CBW_PRESSURE_NORMAL;
+	else
+		budget_pressure = (u64)CBW_PRESSURE_NORMAL * CBW_PRESSURE_BUDGET_KNEE /
+				  max(budget_frac, (u64)1);
+
+	/*
+	 * Backlog pressure
+	 * ----------------
+	 * Counts tasks queued in the BTQs of all LLC domains.  Each pending task
+	 * adds CBW_PRESSURE_BACKLOG_STEP (128) to the pressure floor.  A growing
+	 * backlog means the reenqueue path cannot drain the BTQ fast enough; making
+	 * running tasks yield sooner reduces the time any single task holds the CPU
+	 * and allows the scheduler to interleave reenqueued tasks more quickly.
+	 *
+	 * @nr_pending is computed by the caller (cbw_replenish_cgroup), so we
+	 * don't iterate the LLC list a second time here.
+	 */
+	backlog_pressure = CBW_PRESSURE_NORMAL +
+			   CBW_PRESSURE_BACKLOG_STEP *
+			   min(nr_pending, (u32)CBW_PRESSURE_BACKLOG_CAP);
+
+	/*
+	 * Two independent signals are combined by addition:
+	 *
+	 *   pressure = (budget_pressure - NORMAL) + (backlog_pressure - NORMAL) + NORMAL
+	 *
+	 * Each signal contributes its excess above the NORMAL baseline.  The two
+	 * signals reflect orthogonal stress factors: low budget AND a deep queue
+	 * is genuinely more urgent than either condition alone, so their effects
+	 * should compound.
+	 */
+	return (u32)clamp(budget_pressure + backlog_pressure - CBW_PRESSURE_NORMAL,
+			  (u64)CBW_PRESSURE_NORMAL, (u64)CBW_PRESSURE_MAX);
+}
+
 static
 bool cbw_replenish_cgroup(scx_cgroup_ctx_t *cgx, u64 now)
 {
-	s64 burst_credit = 0, debt = 0, budget;
-	bool period_end, was_throttled, keep_throttled = false;
+	s64 burst_credit, debt, budget;
+	bool period_end, was_throttled, keep_throttled;
+	u32 nr_pending;
+	int i;
+
+	burst_credit = debt = 0;
+	keep_throttled = false;
 
 	/*
 	 * If the nquota_ub is infinite, we don’t need to replenish the cgroup.
@@ -1989,6 +2235,24 @@ bool cbw_replenish_cgroup(scx_cgroup_ctx_t *cgx, u64 now)
 
 	budget = (s64)cgx->nquota_ub + burst_credit - debt;
 	WRITE_ONCE(cgx->period_budget, budget);
+
+	/*
+	 * Sum BTQ depth across LLCs to feed cbw_compute_pressure() and
+	 * publish both cgx->nr_pending and cgx->pressure for this period.
+	 * @nr_pending is also surfaced via cbw_dump_cgroup() so operators
+	 * can see backlog alongside the throttle counters.
+	 */
+	nr_pending = 0;
+	if (cgx->has_llcx) {
+		bpf_for(i, 0, TOPO_NR(LLC)) {
+			scx_cgroup_llc_ctx_t *llcx =
+				cbw_get_llc_ctx_with_id(cgx->id, i);
+			if (llcx)
+				nr_pending += scx_atq_nr_queued(llcx->btq);
+		}
+	}
+	WRITE_ONCE(cgx->nr_pending, nr_pending);
+	WRITE_ONCE(cgx->pressure, cbw_compute_pressure(cgx, nr_pending));
 
 	/*
 	 * If budget <= 0, the cgroup's debt exceeds its quota and burst for
@@ -2126,6 +2390,37 @@ out:
 	return root;
 }
 
+/**
+ * scx_cgroup_bw_pressure - Return the scheduling pressure for a cgroup.
+ * @cgrp_id: cgroup id.
+ * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
+ *             pass 0 when no task context is available.
+ *
+ * Returns a 1024-scale pressure value computed at the last replenishment
+ * boundary.  The BPF scheduler should scale a task's time slice as:
+ *
+ *   slice = (base_slice * 1024) / pressure
+ *
+ * Return 1024 on error or when no throttle applies.
+ */
+__hidden
+int scx_cgroup_bw_pressure(u64 cgrp_id, u64 taskc_raw)
+{
+	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
+	scx_cgroup_ctx_t *cgx;
+	u64 cgx_raw;
+
+	if (cgrp_id == ROOT_CGID)
+		return CBW_PRESSURE_NORMAL;
+
+	cgx_raw = cbw_taskc_get_cgx_raw(taskc, cgrp_id);
+	if (!cgx_raw)
+		return CBW_PRESSURE_NORMAL;
+	cgx = (scx_cgroup_ctx_t *)cgx_raw;
+
+	return (int)READ_ONCE(cgx->pressure);
+}
+
 
 /*
  * A handler function for the accounting timer.
@@ -2134,7 +2429,7 @@ static
 int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
 	struct cgroup *root_cgrp;
-	u64 now, next_interval = CBW_ACCOUNTING_PERIOD_MAX;
+	u64 next_interval = CBW_ACCOUNTING_PERIOD_MAX;
 	int ret;
 
 	/*
@@ -2150,9 +2445,6 @@ int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 
 	if (unlikely(cbw_top_half_running()))
 		goto release_out;
-
-	now = scx_bpf_now();
-	cbw_dbg("at %llu", now);
 
 	cbw_update_runtime_total_sloppy(root_cgrp);
 	next_interval = cbw_throttle_cgroups(root_cgrp);
@@ -2193,7 +2485,6 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	now = scx_bpf_now();
 	cbw_top_half_begin();
-	cbw_dbg("at %llu", now);
 
 	/*
 	 * Update the runtime total before replenishing budgets.
@@ -2287,7 +2578,6 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * the burst time. However, relaxing some accuracy in burst time
 	 * calculation has more benefits than drawbacks.
 	 */
-	cbw_dbg("Start replenish %llu cgroups.", cbw_nr_cgroups);
 	nr_throttled = 0;
 	bpf_for(i, 0, cbw_nr_cgroups) {
 		ids = MEMBER_VPTR(cbw_cgroup_ids, [i]);
@@ -2302,13 +2592,11 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		 */
 		cur_cgrp = bpf_cgroup_from_id(ids[0]);
 		if (!cur_cgrp) {
-			cbw_dbg("Failed to fetch a cgroup pointer: cgid%llu", ids[0]);
 			goto offline_cgroup;
 		}
 
 		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
 		if (!cur_cgx) {
-			cbw_dbg("Failed to lookup a cgroup ctx: cgid%llu", ids[0]);
 			bpf_cgroup_release(cur_cgrp);
 			goto offline_cgroup;
 		}
@@ -2470,7 +2758,6 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 		 */
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
-		cbw_dbg("cgid%llu", cgx->id);
 	}
 
 	return i;
@@ -2492,7 +2779,6 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx,
 	 */
 	if (!cgx->has_llcx)
 		return false;
-	cbw_dbg("cgid%llu", cgrp_id);
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		idx = (nuance + i) % TOPO_NR(LLC);
@@ -2576,7 +2862,6 @@ int scx_cgroup_bw_reenqueue(void)
 	 * Note that we intentionally ignore the error to reenqueue all the
 	 * tasks, ensuring it always returns 0.
 	 */
-	cbw_dbg();
 	nuance = bpf_get_prandom_u32();
 	nr_tcgs = backlog_stat.nr_throttled_cgroups;
 	bpf_for(i, 0, nr_tcgs) {
@@ -2601,7 +2886,6 @@ int scx_cgroup_bw_reenqueue(void)
 			/* Never tear down root; see cbw_get_root_cgrp(). */
 			if (cur_cgrp_id == ROOT_CGID)
 				continue;
-			cbw_dbg("Failed to fetch a cgroup pointer: %llu", ids[0]);
 
 			/*
 			 * This cgroup is already offline: its kernfs node is
@@ -2752,24 +3036,17 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 		       struct cgroup *from __arg_trusted,
 		       struct cgroup *to __arg_trusted)
 {
-	volatile scx_task_cgroup_bw_t *tc; /* Add `volatile` to work around the verifier error */
+	scx_task_cgroup_bw_t *tc;
 	int ret;
 
 	scx_arena_subprog_init();
 	/*
 	 * Invalidate the per-task cache: cgx_raw and llcx_raw belong to the
 	 * old cgroup and will be repopulated on the next throttle/consume call.
-	 *
-	 * Use atomic exchanges instead of plain stores: LLVM folds constant
-	 * stores into base+offset addressing and omits addr_space_cast for the
-	 * arena pointer, which the BPF verifier rejects.  Atomics always emit
-	 * addr_space_cast for the base register regardless of offset.
 	 */
 	tc = (scx_task_cgroup_bw_t *)taskc;
-	if (tc) {
-		__sync_lock_test_and_set(&tc->cgx_raw, 0);
-		__sync_lock_test_and_set(&tc->llcx_raw, 0);
-	}
+	if (tc)
+		cbw_taskc_invalidate(tc);
 
 	/*
 	 * If a task is throttled, remove it from the @from cgroup,
@@ -2796,8 +3073,17 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 	return ret;
 }
 
+#define cbw_dump_line(mode, fmt, args...)				\
+	do {								\
+		if ((mode) == SCX_CGROUP_BW_DUMP_SCX)			\
+			scx_bpf_dump(fmt "\n", ##args);			\
+		else							\
+			bpf_printk(fmt, ##args);			\
+	} while (0)
+
 static __noinline
-int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
+int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent,
+		    enum scx_cgroup_bw_dump_mode mode)
 {
 	static const char indent_strs[][64] = {
 		"",
@@ -2847,17 +3133,16 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 
 	cgx = cbw_get_cgroup_ctx(cgrp);
 	if (!cgx) {
-		cbw_dbg("Failed to lookup a cgroup context: %llu", cgroup_get_id(cgrp));
 		return -ESRCH;
 	}
 
 	indent_str = indent_strs[ clamp((u32)cgrp->level, 0, indent_max - 1) ];
 
 	bpf_probe_read_kernel_str(name, sizeof(name), BPF_CORE_READ(cgrp->kn, name));
-	bpf_printk("%s +-- %s (id: %llu, level: %d)", indent_str,
+	cbw_dump_line(mode, "%s +-- %s (id: %llu, level: %d)", indent_str,
 			name, cgroup_get_id(cgrp), (u32)cgrp->level);
 
-	if (cgx->nquota_ub == CBW_RUNTUME_INF)
+	if (cgx->nquota == CBW_RUNTUME_INF)
 		return 0;
 
 	if (cgx->has_llcx) {
@@ -2869,18 +3154,18 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 		}
 	}
 
-	bpf_printk("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
+	cbw_dump_line(mode, "%s   \\_ quota: %llu, period: %llu, burst: %llu", indent_str,
 			cgx->quota, cgx->period, cgx->burst);
-	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
+	cbw_dump_line(mode, "%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
 			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
-	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
+	cbw_dump_line(mode, "%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
 			nr_throttled_tasks);
-	bpf_printk("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
-			cgx->period_budget, cgx->burst_remaining);
-	bpf_printk("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
-			cgx->runtime_total_sloppy, cgx->runtime_total_last);
+	cbw_dump_line(mode, "%s   \\_ period_budget: %lld, burst_remaining: %lld, avg_consumption_rate: %llu", indent_str,
+			cgx->period_budget, cgx->burst_remaining, cgx->avg_consumption_rate);
+	cbw_dump_line(mode, "%s   \\_ pressure: %u, nr_pending: %u, runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
+			cgx->pressure, cgx->nr_pending, cgx->runtime_total_sloppy, cgx->runtime_total_last);
 					
 	return 0;
 }
@@ -2895,18 +3180,23 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
  * get more accurate information. Otherwise, dump the currently collected
  * snapshot of runtime values.
  * @indent: If true, indent the output. Otherwise, do not indent the output.
+ * @mode: Output sink (see enum scx_cgroup_bw_dump_mode).
  *
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
+int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent,
+		       enum scx_cgroup_bw_dump_mode mode)
 {
 	struct cgroup_subsys_state *start_css, *pos;
 	struct cgroup *start_cgrp, *cur_cgrp;
 
+	/* Resolve the hard-coded root cgroup id. */
+	if (cgrp_id == 1)
+		cgrp_id = ROOT_CGID;
+
 	start_cgrp = bpf_cgroup_from_id(cgrp_id);
 	if (!start_cgrp) {
-		cbw_dbg("Failed to fetch a cgroup pointer: cgid%llu", cgrp_id);
 		return -ESRCH;
 	}
 
@@ -2914,7 +3204,7 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
 		cbw_update_runtime_total_sloppy(start_cgrp);
 
 	if (!descendent) {
-		cbw_dump_cgroup(start_cgrp, indent);
+		cbw_dump_cgroup(start_cgrp, indent, mode);
 		goto release_out;
 	}
 
@@ -2922,7 +3212,7 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
 	start_css = &start_cgrp->self;
 	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
 		cur_cgrp = pos->cgroup;
-		cbw_dump_cgroup(cur_cgrp, indent);
+		cbw_dump_cgroup(cur_cgrp, indent, mode);
 	}
 	bpf_rcu_read_unlock();
 

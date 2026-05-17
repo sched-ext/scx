@@ -72,11 +72,14 @@ int scx_atq_lock(scx_atq_t __arg_arena *atq)
 	 * just bails, leaving the MCS chain with stale ->next links and any
 	 * waiters queued behind it stuck on their own bounded spins.
 	 * Subsequent acquires race against an inconsistent queue; retrying
-	 * is unsafe.  Treat the timeout as a fatal scheduler error so the
-	 * system tears down cleanly.
+	 * is unsafe.  Tear down via scx_bpf_exit(SCX_ECODE_ACT_RESTART, ...)
+	 * so user-space orchestration can respawn the scheduler -- a fresh
+	 * load reinitialises the MCS state.
 	 */
-	if (ret == -ETIMEDOUT)
-		scx_bpf_error("scx_atq: arena_spin_lock timed out");
+	if (ret == -ETIMEDOUT) {
+		scx_bpf_exit(SCX_ECODE_ACT_RESTART,
+			     "scx_atq: arena_spin_lock timed out");
+	}
 
 	return ret;
 }
