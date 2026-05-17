@@ -4580,10 +4580,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	int i, nr_online_cpus, ret;
 
-	ret = scx_lib_init();
-	if (ret)
-		return ret;
-
 	struct bpf_cpumask *cpumask __free(bpf_cpumask) = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
