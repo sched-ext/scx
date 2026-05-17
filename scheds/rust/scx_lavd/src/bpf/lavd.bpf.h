@@ -142,6 +142,7 @@ enum consts_flags {
 	LAVD_FLAG_WOKEN_BY_SOFTIRQ	= (0x1 << 13), /* woken by a softirq */
 	LAVD_FLAG_MIGRATION_AGGRESSIVE  = (0x1 << 14), /* immediate task migration is necessary. */
 	LAVD_FLAG_DOMAIN_PINNED		= (0x1 << 15), /* task's cpumask is confined to a single compute domain */
+	LAVD_FLAG_IS_EFFECTIVELY_PINNED	= (0x1 << 16), /* effective cpumask weight is 1 (permanent or migrate-disable) */
 };
 
 #define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)
@@ -199,9 +200,9 @@ struct task_ctx {
 	u16	lat_cri_waker;		/* waker's latency criticality */
 	u16	lat_cri_wakee;		/* wakee's latency criticality */
 	u16	perf_cri;		/* performance criticality of a task */
-	u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
-	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
-	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
+	volatile u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
+	volatile u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
+	volatile s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	u32	__pad0;
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	run_freq;		/* scheduling frequency in a second */
@@ -516,14 +517,14 @@ struct cpu_ctx {
 	 */
 	u64		prev_pelt_clk;
 
-	/* --- cacheline 4 boundary (256 bytes): cpumask temps --- */
-	struct bpf_cpumask __kptr *tmp_a_mask; /* for active set */
-	struct bpf_cpumask __kptr *tmp_o_mask; /* for overflow set */
-	struct bpf_cpumask __kptr *tmp_l_mask; /* for online cpumask */
-	struct bpf_cpumask __kptr *tmp_i_mask; /* for idle cpumask */
-	struct bpf_cpumask __kptr *tmp_t_mask;
-	struct bpf_cpumask __kptr *tmp_t2_mask;
-	struct bpf_cpumask __kptr *tmp_t3_mask;
+	/* --- cacheline 4 boundary (256 bytes): cpumask scratch --- */
+	struct bpf_cpumask __kptr *a_mask;	/* scratch: task & active */
+	struct bpf_cpumask __kptr *o_mask;	/* scratch: task & overflow */
+	struct bpf_cpumask __kptr *temp_mask;	/* scratch: general-purpose */
+	struct bpf_cpumask __kptr *i_mask;	/* scratch: task & idle */
+	struct bpf_cpumask __kptr *ia_mask;	/* scratch: idle & active */
+	struct bpf_cpumask __kptr *io_mask;	/* scratch: idle & overflow */
+	struct bpf_cpumask __kptr *iat_mask;	/* scratch: idle & active & turbo */
 
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
 	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */

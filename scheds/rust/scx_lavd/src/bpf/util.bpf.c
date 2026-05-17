@@ -161,9 +161,15 @@ bool is_ksoftirqd(struct task_struct *p)
 }
 
 __hidden
-bool is_pinned(const struct task_struct *p)
+bool is_permanently_pinned(const struct task_struct *p)
 {
 	return p->nr_cpus_allowed == 1;
+}
+
+__hidden
+bool is_effectively_pinned(task_ctx __arg_arena *taskc)
+{
+	return test_task_flag(taskc, LAVD_FLAG_IS_EFFECTIVELY_PINNED);
 }
 
 __hidden
@@ -269,12 +275,18 @@ void set_affinity_flags(task_ctx __arg_arena *taskc,
 	bool on_big = false, on_little = false;
 	s32 first_cpdom_id = -ENOENT;
 	struct cpu_ctx *cpuc;
+	u32 weight;
 	int cpu;
 
 	if (!cpumask)
 		return;
 
-	is_affinitized = bpf_cpumask_weight(cpumask) != nr_cpu_ids;
+	weight = bpf_cpumask_weight(cpumask);
+	is_affinitized = weight != nr_cpu_ids;
+	if (weight == 1)
+		set_task_flag(taskc, LAVD_FLAG_IS_EFFECTIVELY_PINNED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_EFFECTIVELY_PINNED);
 	if (nr_cpdoms == 1) {
 		dom_pinned = false;
 		dom_pinned_settled = true;
@@ -424,7 +436,13 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 {
 	struct cpdom_ctx *cpdomc;
 
-	if (per_cpu_dsq || (pinned_slice_ns && is_pinned(p)))
+	/*
+	 * Route effectively pinned tasks (permanent pinning or
+	 * migrate_disable) to the per-CPU DSQ when pinned_slice_ns is
+	 * enabled, so the slice-shrinking heuristic in preempt.bpf.c can
+	 * act on them consistently.
+	 */
+	if (per_cpu_dsq || (pinned_slice_ns && is_effectively_pinned(taskc)))
 		return cpu_to_dsq(cpuc->cpu_id);
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
