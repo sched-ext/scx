@@ -3,7 +3,11 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 mod bpf_skel;
+mod irq_protect;
 mod stats;
+
+use crate::irq_protect::IrqFallback;
+use crate::irq_protect::IrqProtector;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -606,6 +610,17 @@ struct Opts {
     /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
     #[clap(long, default_value = "false")]
     netdev_irq_balance: bool,
+
+    /// Fallback policy for IRQs whose home affinity is fully covered by
+    /// `irq_protect` layers (or when every CPU on the system is protected).
+    ///
+    /// * `spread` (default) — keeps each IRQ's locality where possible and,
+    ///   when every CPU is protected, pins each IRQ to a single CPU
+    ///   round-robin so the IRQ load is distributed.
+    /// * `all` — gives every IRQ the same affinity: the system-wide
+    ///   unprotected set (or every CPU when nothing is unprotected).
+    #[clap(long, value_enum, default_value_t = IrqFallback::Spread)]
+    irq_protect_fallback: IrqFallback,
 
     /// Disable queued wakeup optimization.
     #[clap(long, default_value = "false")]
@@ -1815,6 +1830,7 @@ struct Scheduler<'a> {
 
     topo: Arc<Topology>,
     netdevs: BTreeMap<String, NetDev>,
+    irq_protector: Option<IrqProtector>,
     stats_server: StatsServer<StatsReq, StatsRes>,
     gpu_task_handler: GpuTaskAffinitizer,
 }
@@ -3040,6 +3056,39 @@ impl<'a> Scheduler<'a> {
             GpuTaskAffinitizer::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
         gpu_task_handler.init(topo.clone());
 
+        let irq_protector = {
+            let irq_layers: Vec<&str> = layer_specs
+                .iter()
+                .filter(|s| s.kind.common().irq_protect)
+                .map(|s| s.name.as_str())
+                .collect();
+            if irq_layers.is_empty() {
+                None
+            } else {
+                if irq_layers.len() == layer_specs.len() {
+                    warn!(
+                        "irq_protect: every configured layer ({}) has irq_protect=true; \
+                         protection will fall back to even IRQ spread across all CPUs",
+                        irq_layers.len(),
+                    );
+                }
+                match IrqProtector::new(opts.irq_protect_fallback) {
+                    Ok(p) => {
+                        info!(
+                            "irq_protect: enabled for layer(s): [{}] (fallback={:?})",
+                            irq_layers.join(", "),
+                            opts.irq_protect_fallback,
+                        );
+                        Some(p)
+                    }
+                    Err(e) => {
+                        warn!("irq_protect: initialization failed ({e:#}); continuing without it");
+                        None
+                    }
+                }
+            }
+        };
+
         let sched = Self {
             struct_ops: Some(struct_ops),
             layer_specs,
@@ -3070,6 +3119,7 @@ impl<'a> Scheduler<'a> {
 
             topo,
             netdevs,
+            irq_protector,
             stats_server,
             gpu_task_handler,
         };
@@ -4054,6 +4104,27 @@ impl<'a> Scheduler<'a> {
         if let Err(e) = self.update_netdev_cpumasks() {
             warn!("Failed to update netdev IRQ cpumasks: {:#}", e);
         }
+
+        if self.irq_protector.is_some() {
+            let mut protected = Cpumask::new();
+            for (idx, spec) in self.layer_specs.iter().enumerate() {
+                if !spec.kind.common().irq_protect {
+                    continue;
+                }
+                protected = protected.or(&self.layers[idx].cpus);
+            }
+            let all_cpus = self.topo.span.clone();
+            if let Some(p) = self.irq_protector.as_mut() {
+                let changed = p.apply(&protected, &all_cpus);
+                if changed > 0 {
+                    debug!(
+                        "irq_protect: rewrote {changed} IRQ mask(s); protected={} of {} CPU(s)",
+                        protected.weight(),
+                        all_cpus.weight(),
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -4553,6 +4624,11 @@ impl Drop for Scheduler<'_> {
                 }
             }
             info!("Restored original netdev IRQ affinity");
+        }
+
+        if let Some(p) = self.irq_protector.as_mut() {
+            p.restore();
+            info!("Restored original IRQ affinity (irq_protect)");
         }
 
         if let Some(struct_ops) = self.struct_ops.take() {
