@@ -189,6 +189,26 @@ fn main() {
         baked_bool("SCX_CAKE_LEARNED_LOCALITY", false);
     let (baked_wake_chain_locality, baked_wake_chain_locality_value, release_wake_chain_locality) =
         baked_bool("SCX_CAKE_WAKE_CHAIN_LOCALITY", false);
+    let (baked_release_route_pred, baked_release_route_pred_value, _release_route_pred) =
+        baked_bool("SCX_CAKE_RELEASE_ROUTE_PRED", false);
+    let (baked_release_confidence, baked_release_confidence_value, _release_confidence) =
+        baked_bool("SCX_CAKE_RELEASE_CONFIDENCE", false);
+    let (baked_release_llc_pending, baked_release_llc_pending_value, _release_llc_pending) =
+        baked_bool("SCX_CAKE_RELEASE_LLC_PENDING", true);
+    let (baked_release_local_waiter, baked_release_local_waiter_value, _release_local_waiter) =
+        baked_bool("SCX_CAKE_RELEASE_LOCAL_WAITER", true);
+    let (baked_release_domain_drr, baked_release_domain_drr_value, _release_domain_drr) =
+        baked_bool("SCX_CAKE_RELEASE_DOMAIN_DRR", false);
+    let (baked_release_planck_local, baked_release_planck_local_value, _release_planck_local) =
+        baked_bool("SCX_CAKE_RELEASE_PLANCK_LOCAL", true);
+    let baked_release_trust_maps_value =
+        baked_release_route_pred_value & baked_release_confidence_value;
+    let baked_release_trust_maps = if baked_release_trust_maps_value != 0 {
+        "on"
+    } else {
+        "off"
+    };
+    let has_trust_maps = profile != "release" || baked_release_trust_maps_value != 0;
     let needs_arena = if profile == "release" {
         release_learned_locality || release_wake_chain_locality
     } else {
@@ -217,7 +237,21 @@ fn main() {
              pub const BAKED_LEARNED_LOCALITY: &str = {:?};\n\
              pub const BAKED_LEARNED_LOCALITY_VALUE: u32 = {};\n\
              pub const BAKED_WAKE_CHAIN_LOCALITY: &str = {:?};\n\
-             pub const BAKED_WAKE_CHAIN_LOCALITY_VALUE: u32 = {};\n",
+             pub const BAKED_WAKE_CHAIN_LOCALITY_VALUE: u32 = {};\n\
+             pub const BAKED_RELEASE_ROUTE_PRED: &str = {:?};\n\
+             pub const BAKED_RELEASE_ROUTE_PRED_VALUE: u32 = {};\n\
+             pub const BAKED_RELEASE_CONFIDENCE: &str = {:?};\n\
+             pub const BAKED_RELEASE_CONFIDENCE_VALUE: u32 = {};\n\
+             pub const BAKED_RELEASE_LLC_PENDING: &str = {:?};\n\
+             pub const BAKED_RELEASE_LLC_PENDING_VALUE: u32 = {};\n\
+             pub const BAKED_RELEASE_LOCAL_WAITER: &str = {:?};\n\
+             pub const BAKED_RELEASE_LOCAL_WAITER_VALUE: u32 = {};\n\
+             pub const BAKED_RELEASE_DOMAIN_DRR: &str = {:?};\n\
+             pub const BAKED_RELEASE_DOMAIN_DRR_VALUE: u32 = {};\n\
+             pub const BAKED_RELEASE_PLANCK_LOCAL: &str = {:?};\n\
+             pub const BAKED_RELEASE_PLANCK_LOCAL_VALUE: u32 = {};\n\
+             pub const BAKED_RELEASE_TRUST_MAPS: &str = {:?};\n\
+             pub const BAKED_RELEASE_TRUST_MAPS_VALUE: u32 = {};\n",
             max_cpus,
             max_llcs,
             max_cpus,
@@ -233,7 +267,21 @@ fn main() {
             baked_learned_locality,
             baked_learned_locality_value,
             baked_wake_chain_locality,
-            baked_wake_chain_locality_value
+            baked_wake_chain_locality_value,
+            baked_release_route_pred,
+            baked_release_route_pred_value,
+            baked_release_confidence,
+            baked_release_confidence_value,
+            baked_release_llc_pending,
+            baked_release_llc_pending_value,
+            baked_release_local_waiter,
+            baked_release_local_waiter_value,
+            baked_release_domain_drr,
+            baked_release_domain_drr_value,
+            baked_release_planck_local,
+            baked_release_planck_local_value,
+            baked_release_trust_maps,
+            baked_release_trust_maps_value
         ),
     )
     .expect("Failed to write cake_constants.rs");
@@ -245,6 +293,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_BUSY_WAKE_KICK");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_LEARNED_LOCALITY");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_CHAIN_LOCALITY");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_ROUTE_PRED");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_CONFIDENCE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_LLC_PENDING");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_LOCAL_WAITER");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_DOMAIN_DRR");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_PLANCK_LOCAL");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -256,6 +310,7 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(cake_locality_experiments)");
     println!("cargo::rustc-check-cfg=cfg(cake_hot_telemetry)");
     println!("cargo::rustc-check-cfg=cfg(cake_needs_arena)");
+    println!("cargo::rustc-check-cfg=cfg(cake_trust_maps)");
 
     // Emit rustc-cfg flags for true conditional compilation (Rust #[cfg] guards)
     if has_hybrid {
@@ -267,7 +322,7 @@ fn main() {
 
     // Build cflags with hardware gates
     let mut cflags = format!(
-        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_NR_CPUS={} -DCAKE_NR_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={} -DCAKE_STORM_GUARD_VALUE={} -DCAKE_BUSY_WAKE_KICK_VALUE={} -DCAKE_LEARNED_LOCALITY_VALUE={} -DCAKE_WAKE_CHAIN_LOCALITY_VALUE={}",
+        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_NR_CPUS={} -DCAKE_NR_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={} -DCAKE_STORM_GUARD_VALUE={} -DCAKE_BUSY_WAKE_KICK_VALUE={} -DCAKE_LEARNED_LOCALITY_VALUE={} -DCAKE_WAKE_CHAIN_LOCALITY_VALUE={} -DCAKE_RELEASE_ROUTE_PRED={} -DCAKE_RELEASE_CONFIDENCE={} -DCAKE_RELEASE_LLC_PENDING={} -DCAKE_RELEASE_LOCAL_WAITER={} -DCAKE_RELEASE_DOMAIN_DRR={} -DCAKE_RELEASE_PLANCK_LOCAL={}",
         base_flags,
         max_cpus,
         max_llcs,
@@ -278,7 +333,13 @@ fn main() {
         baked_storm_guard_value,
         baked_busy_wake_kick_value,
         baked_learned_locality_value,
-        baked_wake_chain_locality_value
+        baked_wake_chain_locality_value,
+        baked_release_route_pred_value,
+        baked_release_confidence_value,
+        baked_release_llc_pending_value,
+        baked_release_local_waiter_value,
+        baked_release_domain_drr_value,
+        baked_release_planck_local_value
     );
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
@@ -302,6 +363,13 @@ fn main() {
     } else {
         cflags.push_str(" -DCAKE_NEEDS_ARENA=0");
     }
+    if has_trust_maps {
+        println!("cargo:rustc-cfg=cake_trust_maps");
+    }
+    cflags.push_str(&format!(
+        " -DCAKE_RELEASE_TRUST_MAPS={}",
+        baked_release_trust_maps_value
+    ));
     // Gate 1: Single-LLC — eliminates cake_tick body from verifier
     if is_single_llc {
         cflags.push_str(" -DCAKE_SINGLE_LLC=1");
@@ -313,7 +381,7 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} NEEDS_ARENA={}",
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} NEEDS_ARENA={}",
         max_cpus,
         max_llcs,
         nr_cpus,
@@ -327,6 +395,13 @@ fn main() {
         baked_busy_wake_kick,
         baked_learned_locality,
         baked_wake_chain_locality,
+        baked_release_route_pred,
+        baked_release_confidence,
+        baked_release_llc_pending,
+        baked_release_local_waiter,
+        baked_release_domain_drr,
+        baked_release_planck_local,
+        baked_release_trust_maps,
         needs_arena
     );
 

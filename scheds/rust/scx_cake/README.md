@@ -42,6 +42,8 @@ cd scx
 
 # Release build for normal use and performance measurement.
 # Defaults: gaming / 1000us / queue-policy=local / storm-guard=shield / busy-wake-kick=policy
+#           learned-locality=off / wake-chain-locality=off / release-route-pred=off / release-confidence=off
+#           release-llc-pending=off / release-local-waiter=on / release-domain-drr=on
 cargo build --release -p scx_cake
 
 # Release build with explicit baked hot-path knobs or A/B overrides
@@ -49,6 +51,9 @@ SCX_CAKE_PROFILE=esports cargo build --release -p scx_cake
 SCX_CAKE_QUANTUM_US=1500 SCX_CAKE_QUEUE_POLICY=local cargo build --release -p scx_cake
 SCX_CAKE_STORM_GUARD=shield SCX_CAKE_BUSY_WAKE_KICK=policy cargo build --release -p scx_cake
 SCX_CAKE_LEARNED_LOCALITY=off SCX_CAKE_WAKE_CHAIN_LOCALITY=off cargo build --release -p scx_cake
+SCX_CAKE_RELEASE_ROUTE_PRED=off SCX_CAKE_RELEASE_CONFIDENCE=off cargo build --release -p scx_cake
+SCX_CAKE_RELEASE_LLC_PENDING=on cargo build --release -p scx_cake
+SCX_CAKE_RELEASE_LOCAL_WAITER=off cargo build --release -p scx_cake
 
 # Debug build for TUI/capture and runtime A/B work
 cargo build -p scx_cake
@@ -57,7 +62,7 @@ cargo build -p scx_cake
 ### Run
 
 ```bash
-# Release uses the profile, quantum, queue, storm, kick, and locality knobs baked at build time
+# Release uses the profile, quantum, queue, storm, kick, locality, and accelerator knobs baked at build time
 sudo ./target/release/scx_cake
 
 # Debug defaults mirror the release benchmark tuple, with learned locality gates off
@@ -94,11 +99,15 @@ sudo ./target/debug/scx_cake --verbose --storm-guard=full
 
 Profiles are quantum presets. They do not switch the scheduler into separate policy modes.
 Release builds bake profile, quantum, queue policy, storm guard, busy-wake kick,
-learned locality, and wake-chain locality at compile time. Use
+learned locality, wake-chain locality, release route prediction, and release
+confidence, the experimental release LLC-pending service arbiter, and the
+release local-waiter service contract at compile time. Use
 `SCX_CAKE_PROFILE`, `SCX_CAKE_QUANTUM_US`, `SCX_CAKE_QUEUE_POLICY`,
 `SCX_CAKE_STORM_GUARD`, `SCX_CAKE_BUSY_WAKE_KICK`,
-`SCX_CAKE_LEARNED_LOCALITY`, and `SCX_CAKE_WAKE_CHAIN_LOCALITY` when building
-release objects. Debug builds keep `--profile`, `--quantum`, `--queue-policy`,
+`SCX_CAKE_LEARNED_LOCALITY`, `SCX_CAKE_WAKE_CHAIN_LOCALITY`,
+`SCX_CAKE_RELEASE_ROUTE_PRED`, `SCX_CAKE_RELEASE_CONFIDENCE`, and
+`SCX_CAKE_RELEASE_LLC_PENDING`, and `SCX_CAKE_RELEASE_LOCAL_WAITER` when
+building release objects. Debug builds keep `--profile`, `--quantum`, `--queue-policy`,
 `--storm-guard`, `--busy-wake-kick`, `--learned-locality`, and
 `--wake-chain-locality` as runtime A/B controls.
 
@@ -112,9 +121,17 @@ the Splitgate 2 / MangoHud captures that motivated keeping the LLC-vtime path
 as a first-class A/B option.
 
 The default policy is latency-first. Release builds compile telemetry out,
-keep scoreboard confidence/prediction enabled, bake `queue-policy=local`,
-`storm-guard=shield`, and `busy-wake-kick=policy`, and leave learned locality
-plus wake-chain locality off unless explicitly enabled. Set
+compile the route predictor, packed-confidence governor, and userspace trust
+maps out by default for the current benchmark release diet, bake
+`queue-policy=local`, `storm-guard=shield`, and `busy-wake-kick=policy`, and
+leave learned locality plus wake-chain locality off unless explicitly enabled. Set
+`SCX_CAKE_RELEASE_ROUTE_PRED=on` and `SCX_CAKE_RELEASE_CONFIDENCE=on` to
+re-enable the opt-in release predictor/confidence/trust-map path for A/B work. Set
+`SCX_CAKE_RELEASE_LLC_PENDING=on` to test the opt-in conservative shared-DSQ
+pending arbiter; it is off by default because the current historical data says
+shared-service advisory bits are a regression-risk lane until same-hash guardrail
+benchmarks prove otherwise. Set `SCX_CAKE_RELEASE_LOCAL_WAITER=off` to A/B the
+lean pre-waiter release diet. Set
 `SCX_CAKE_LEARNED_LOCALITY=on` and/or
 `SCX_CAKE_WAKE_CHAIN_LOCALITY=on` to benchmark the arena-backed locality path.
 Debug builds compile the full `--verbose`
@@ -188,7 +205,8 @@ Cake Scoreboard Dispatch splits scheduler knowledge into three layers:
 | Layer | Writer | Reader | Purpose |
 | :-- | :-- | :-- | :-- |
 | Static topology RODATA | userspace loader at attach | BPF hot path | Precomputed CPU facts: sibling, primary CPU, LLC ID, core ID, per-CPU LLC DSQ, and fast-probe candidates. |
-| CPU publication lanes | owning CPU only | remote wake placement | One cache-line `cpu_status` and one cache-line `cpu_frontier` per CPU. These carry idle/accept flags, owner class, pressure bucket, and vtime frontier. |
+| CPU publication lanes | owning CPU only | remote wake placement | One cache-line `cpu_status` and one cache-line `cpu_frontier` per CPU. These carry idle/accept flags, the owner-published wake-preempt bit, owner class, pressure bucket, and vtime frontier. |
+| LLC pending lane | LLC enqueue side, cleared by dispatch miss | dispatch service order | Conservative cache-line `llc_pending` hint saying the shared LLC DSQ may have work. Release-local dispatch uses it to avoid empty helper pulls and to service shared work after bounded cache-residency debt. |
 | Private CPU BSS | owning CPU hot callbacks | same CPU hot callbacks | Tick slice, last PID, owner runtime average, and local vtime integration. Remote placement should avoid this line in release. |
 
 This is not "no sharing" in the literal hardware sense. Other CPUs still read a
@@ -213,22 +231,39 @@ whether Cake can avoid paying for it by replaying a successful prediction first,
 not whether the fallback itself is safe.
 
 Release also uses the scoreboard after placement. Wake kicks reread the target
-CPU status after enqueue. Clean idle targets avoid a strong kick, accepted busy
-wake targets can stay local when the owner status says that is safe, and
-unknown or bulk owners can receive `SCX_KICK_PREEMPT`. Frame owners get a
-gentler idle kick, while high-confidence short or interactive owners can avoid a
-kick. Dispatch pulls use a separate confidence lane to decide when a cheap
+CPU status after enqueue. Clean idle targets avoid a strong kick, and accepted
+busy wake targets use the target CPU's owner-published wake-preempt bit instead
+of rereading private owner runtime fields from the remote CPU. SAT cache/mem or
+short-owner rows can stay local with an idle kick; high-priority wakees,
+policy-forced preempt mode, or owner-published preempt rows receive
+`SCX_KICK_PREEMPT`. Release-local normal/default busy wakees whose target owner
+publishes `PREEMPT_WAKE` also receive a bounded local-waiter service contract:
+the wakee is inserted at the head of the existing local DSQ, a small per-CPU
+waiter debt is charged, and the current owner slice is quenched unless the owner
+is SAT cache/mem protected. This turns the status bit into service order rather
+than a kick-only hint while avoiding wake-inbox DSQs or LLC-pending machinery.
+Dispatch pulls use a separate confidence lane to decide when a cheap
 `scx_bpf_dsq_nr_queued()` probe is worth doing before
-`scx_bpf_dsq_move_to_local()`.
+`scx_bpf_dsq_move_to_local()`. In the default release diet where confidence and
+LLC-pending are compiled out, Cake uses the lean direct shared-DSQ pull shape and
+does not maintain a shared-service pending cacheline. The opt-in
+`SCX_CAKE_RELEASE_LLC_PENDING=on` build adds an `llc_pending` lane that gates
+shared-DSQ pull attempts: inserts set the hint, pulls clear before probing, and
+the hint is rearmed from queue depth after a pull/refresh. SAT cache/mem owners
+then keep running until their local dispatch debt expires, after which pending
+shared work receives a bounded service attempt.
 
-The scoreboard also feeds the release predictor. Each CPU row carries a packed
-`decision_confidence` value in private BSS. Selection only trains and replays
-the previous CPU row when the wakeup is executing on that CPU; remote wakeups
-fall back to the broader learned/native paths so they do not poison another
-CPU's local scorecard. Dispatch/run/stop callbacks update the row owned by the
-CPU that is actually executing. The field is a single 64-bit word split into
-4-bit lanes, so release can read and update multiple policy signals without
-chasing larger state.
+When enabled in debug or opt-in release builds, the scoreboard also feeds the
+route predictor. Each CPU row carries a packed `decision_confidence` value in
+private BSS. Selection only trains and replays the previous CPU row when the
+wakeup is executing on that CPU; remote wakeups fall back to the broader
+learned/native paths so they do not poison another CPU's local scorecard.
+Dispatch/run/stop callbacks update the row owned by the CPU that is actually
+executing. The field is a single 64-bit word split into 4-bit lanes, so the
+accelerator can read and update multiple policy signals without chasing larger
+state. The benchmark release default currently compiles this machinery out;
+it remains available behind `SCX_CAKE_RELEASE_ROUTE_PRED=on` plus
+`SCX_CAKE_RELEASE_CONFIDENCE=on` for falsification runs.
 
 Each confidence lane starts from a neutral value of `8` when it has not been
 written. Successful predictions climb toward `15`; misses drop faster, by two
@@ -254,13 +289,16 @@ can take the tunnel shortcut. Restricted-affinity tasks,
 kthreads, invalid `prev_cpu` values, audit samples, and route misses all drop
 back to the normal scoreboard scan and then the kernel default fallback.
 
-Above that sits the userspace confidence governor. When a CPU's route token is
-peak-stable on `prev`, userspace can enable `trust.prev_direct` for that CPU.
-The BPF hot path then checks only the legal gates and the mandatory idle claim
-kfunc before returning `prev_cpu`, skipping the packed-confidence unpack and
-scoreboard status precheck on the theoretical floor path. A failed claim is a
-hard tripwire: BPF blocks that trust generation immediately, and userspace can
-only re-promote after a cooldown and a fresh high-confidence generation.
+Above that sits the userspace confidence governor in debug or opt-in release
+builds. When a CPU's route token is peak-stable on `prev`, userspace can enable
+`trust.prev_direct` for that CPU. The BPF hot path then checks only the legal
+gates and the mandatory idle claim kfunc before returning `prev_cpu`, skipping
+the packed-confidence unpack and scoreboard status precheck on the theoretical
+floor path. A failed claim is a hard tripwire: BPF blocks that trust generation
+immediately, and userspace can only re-promote after a cooldown and a fresh
+high-confidence generation. In the default release diet, the governor exits
+without polling or writing trust maps because the release predictor/confidence
+machinery is compiled out.
 
 The runtime feedback loop is intentionally small:
 
@@ -282,6 +320,8 @@ slightly better chance to avoid the general fallback path.
 | `sched_ext` | Kernel framework that lets this BPF scheduler provide scheduling callbacks. |
 | `cake_select_cpu` | Chooses an idle CPU when possible and returns a target CPU for enqueue. |
 | Cake Scoreboard Dispatch | Release placement system using init-built candidates plus owner-written CPU status/frontier lanes. |
+| `cpu_status` | Owner-published per-CPU status lane carrying idle/accept, SAT cache/mem, wake-preempt, owner class, pressure, epoch, and latency-class bits for remote wake decisions. |
+| `llc_pending` | Conservative per-LLC shared-DSQ pending hint used by release-local dispatch to avoid empty shared pulls while still servicing domain work after bounded residency debt. |
 | `decision_confidence` | Packed per-CPU scorecard used by release prediction and fallback shaping. |
 | confidence lane | One 4-bit field inside `decision_confidence`; neutral is `8`, high is `12+`, and success/failure nudges it up or down. |
 | route prediction | Attempt to replay the previous-CPU idle route, last successful fast-probe slot, or the stricter floor-mode tunnel route before wider scanning. |
@@ -471,6 +511,11 @@ SCX_CAKE_QUANTUM_US=1500 cargo build --release -p scx_cake
 SCX_CAKE_QUEUE_POLICY=local cargo build --release -p scx_cake
 SCX_CAKE_STORM_GUARD=shield cargo build --release -p scx_cake
 SCX_CAKE_BUSY_WAKE_KICK=policy cargo build --release -p scx_cake
+SCX_CAKE_RELEASE_ROUTE_PRED=off cargo build --release -p scx_cake
+SCX_CAKE_RELEASE_CONFIDENCE=off cargo build --release -p scx_cake
+SCX_CAKE_RELEASE_LLC_PENDING=off cargo build --release -p scx_cake
+SCX_CAKE_RELEASE_LOCAL_WAITER=on cargo build --release -p scx_cake
+SCX_CAKE_RELEASE_DOMAIN_DRR=on cargo build --release -p scx_cake
 ```
 
 Debug builds can run the live TUI:
@@ -502,6 +547,21 @@ userspace-derived coverage, exact hot-path frequency counters such as
 long-run flight recorder rows. Debug hot telemetry also compiles and runs the
 scoreboard, prediction, and confidence accelerator path, so `--verbose` and TUI
 dumps can observe the same machinery being tuned for release.
+When the local-waiter service contract is enabled at build time, debug dumps
+also include `local_waiter:` / `win.local_waiter:` counters and
+`live_data.snapshot` local-waiter 60s fields. These prove whether busy wakeups
+are being admitted, rejected, inserted at local head, quenching the current
+owner, and draining waiter debt before a release benchmark is treated as a
+score signal.
+
+When the domain-DRR service ledger is enabled at build time, release and debug
+builds replace the older stress cache/mem `cache_simple_state` +
+`throughput_lane` path with per-LLC custom service DSQs for cache and stream
+work. Debug dumps add `domain_drr:` / `win.domain_drr:` counters and
+`live_data.snapshot` domain-DRR 60s fields so benchmark captures can prove
+cache inserts, stream inserts, cache pulls, stream pulls, stale pending hints,
+and stream-due arbitration before the wider suite decides whether the
+structural rewrite beats the previous path.
 
 Each dump starts with an OBD-style service report generated in userspace:
 `service.header`, `readiness`, `readiness.monitors`, `dtc.active`,
@@ -527,7 +587,7 @@ debug builds. Release builds bake those hot-path choices with the matching
 `SCX_CAKE_*` environment variables so the linked object and benchmark label
 stay aligned.
 
-The JSON sidecar is schema version 8 and is serialized from typed Rust structs
+The JSON sidecar is schema version 10 and is serialized from typed Rust structs
 with `serde_json`. It carries the same high-level accelerator summary under
 `accelerator`, including trained CPUs, route-ready CPUs, floor-ready CPUs,
 route/gear counts, trust-prev state, wake target hit/miss, dispatch hit/miss,

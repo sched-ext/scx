@@ -2996,6 +2996,10 @@ fn append_window_stats(
     let direct_total = stats.nr_direct_local_inserts;
     let shared_total = stats.nr_shared_vtime_inserts;
     let queue_net = signed_diff_u64(stats.nr_dsq_queued, stats.nr_dsq_consumed);
+    let core_spread_hits = stats
+        .nr_core_spread_hit
+        .max(stats.select_reason_select_count[SELECT_REASON_CORE_SPREAD]);
+    let core_spread_attempts = stats.nr_core_spread_attempt.max(core_spread_hits);
 
     output.push_str(&format!("\nwindow: {} sampled={:.1}s\n", label, secs));
     output.push_str(&format!(
@@ -3055,6 +3059,16 @@ fn append_window_stats(
         queue_net as f64 / secs,
     ));
     output.push_str(&format!(
+        "win.core_spread: attempt={} ({:.1}/s) vtime_skip={} candidate={} full_idle_reject={} hit={} hit_rate={:.1}%\n",
+        core_spread_attempts,
+        per_sec(core_spread_attempts, secs),
+        stats.nr_core_spread_vtime_skip,
+        stats.nr_core_spread_candidate,
+        stats.nr_core_spread_full_idle_reject,
+        core_spread_hits,
+        pct(core_spread_hits, core_spread_attempts),
+    ));
+    output.push_str(&format!(
         "win.cb: sel_avg_ns={} enq_avg_ns={} disp_avg_ns={} run_avg_ns={} stop_avg_ns={} slow=sel:{} enq:{} disp:{} run:{} stop:{}\n",
         avg_ns(stats.total_select_cpu_ns, stats.nr_select_cpu_calls),
         avg_ns(stats.total_enqueue_latency_ns, stats.nr_enqueue_calls),
@@ -3108,6 +3122,41 @@ fn append_window_stats(
         stats.nr_dispatch_llc_local_miss,
         stats.nr_dispatch_llc_steal_hit,
         stats.nr_dispatch_keep_running,
+    ));
+    output.push_str(&format!(
+        "win.throughput_lane: requeue={} keep={} insert={} spill={} local_hit={} steal_hit={} stale={} steal/s={:.1}\n",
+        stats.nr_cache_throughput_requeue,
+        stats.nr_cache_throughput_keep_running,
+        stats.nr_cache_throughput_lane_insert,
+        stats.nr_cache_throughput_lane_spill,
+        stats.nr_cache_throughput_lane_local_hit,
+        stats.nr_cache_throughput_lane_steal_hit,
+        stats.nr_cache_throughput_lane_stale,
+        per_sec(stats.nr_cache_throughput_lane_steal_hit, secs),
+    ));
+    output.push_str(&format!(
+        "win.local_waiter: attempt={} ({:.1}/s) reject={} insert={} quench_current={} debt_seen={} debt_consume={} same_task_quench={}\n",
+        stats.nr_local_waiter_attempt,
+        per_sec(stats.nr_local_waiter_attempt, secs),
+        stats.nr_local_waiter_reject,
+        stats.nr_local_waiter_insert,
+        stats.nr_local_waiter_quench_current,
+        stats.nr_local_waiter_debt_seen,
+        stats.nr_local_waiter_debt_consume,
+        stats.nr_local_waiter_same_task_quench,
+    ));
+    output.push_str(&format!(
+        "win.domain_drr: cache_insert={} stream_insert={} cache_pull={} stream_pull={} stale={} stream_due={} pull/s={:.1}\n",
+        stats.nr_domain_drr_cache_insert,
+        stats.nr_domain_drr_stream_insert,
+        stats.nr_domain_drr_cache_pull,
+        stats.nr_domain_drr_stream_pull,
+        stats.nr_domain_drr_stale,
+        stats.nr_domain_drr_stream_due,
+        per_sec(
+            stats.nr_domain_drr_cache_pull + stats.nr_domain_drr_stream_pull,
+            secs,
+        ),
     ));
     output.push_str(&format!(
         "win.wakewait.all: {}\n",
@@ -3337,6 +3386,10 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
         + stats.nr_wakeup_dsq_fallback_queued;
     let direct_total = stats.nr_direct_local_inserts;
     let shared_total = stats.nr_shared_vtime_inserts;
+    let core_spread_hits = stats
+        .nr_core_spread_hit
+        .max(stats.select_reason_select_count[SELECT_REASON_CORE_SPREAD]);
+    let core_spread_attempts = stats.nr_core_spread_attempt.max(core_spread_hits);
     output.push_str(&format!(
         "disp: dsq_total={} local={} steal={} miss={} queue={} ins:direct={} affine={} shared={} shared[w/r/p/o]={}/{}/{}/{} direct[k/o]={}/{} wake:direct={} busy={} queued={} total={} busy_local={} busy_remote={} flow:tunnel_prev={} handoff={} supp={} steer:elig={} home={} core={} primary={} miss:home_busy={} prev_busy={} scan={} guard:primary_scan={} hot_guard:primary_scan={} credit:primary_scan={} chain:guard={} chain:credit={}\n",
         total_dsq_dispatches,
@@ -3378,6 +3431,15 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
     output.push_str(&format!(
         "queue.shared: depth_now={} in={} out={} net={:+}\n",
         dsq_depth, stats.nr_dsq_queued, stats.nr_dsq_consumed, queue_net,
+    ));
+    output.push_str(&format!(
+        "core_spread: attempt={} vtime_skip={} candidate={} full_idle_reject={} hit={} hit_rate={:.1}%\n",
+        core_spread_attempts,
+        stats.nr_core_spread_vtime_skip,
+        stats.nr_core_spread_candidate,
+        stats.nr_core_spread_full_idle_reject,
+        core_spread_hits,
+        pct(core_spread_hits, core_spread_attempts),
     ));
 
     // Compact callback profile (totals + averages)
@@ -3446,6 +3508,35 @@ pub(super) fn format_stats_for_clipboard(stats: &cake_stats, app: &TuiApp) -> St
         stats.nr_dispatch_llc_local_miss,
         stats.nr_dispatch_llc_steal_hit,
         stats.nr_dispatch_keep_running,
+    ));
+    output.push_str(&format!(
+        "local_waiter: attempt={} reject={} insert={} quench_current={} debt_seen={} debt_consume={} same_task_quench={}\n",
+        stats.nr_local_waiter_attempt,
+        stats.nr_local_waiter_reject,
+        stats.nr_local_waiter_insert,
+        stats.nr_local_waiter_quench_current,
+        stats.nr_local_waiter_debt_seen,
+        stats.nr_local_waiter_debt_consume,
+        stats.nr_local_waiter_same_task_quench,
+    ));
+    output.push_str(&format!(
+        "throughput_lane: requeue={} keep={} insert={} spill={} local_hit={} steal_hit={} stale={}\n",
+        stats.nr_cache_throughput_requeue,
+        stats.nr_cache_throughput_keep_running,
+        stats.nr_cache_throughput_lane_insert,
+        stats.nr_cache_throughput_lane_spill,
+        stats.nr_cache_throughput_lane_local_hit,
+        stats.nr_cache_throughput_lane_steal_hit,
+        stats.nr_cache_throughput_lane_stale,
+    ));
+    output.push_str(&format!(
+        "domain_drr: cache_insert={} stream_insert={} cache_pull={} stream_pull={} stale={} stream_due={}\n",
+        stats.nr_domain_drr_cache_insert,
+        stats.nr_domain_drr_stream_insert,
+        stats.nr_domain_drr_cache_pull,
+        stats.nr_domain_drr_stream_pull,
+        stats.nr_domain_drr_stale,
+        stats.nr_domain_drr_stream_due,
     ));
     output.push_str(&format!(
         "lifecycle.avg: init_enqueue={}us({}) init_select={}us({}) init_run={}us({}) run_stop={}us({}) init_exit={}us({})\n",

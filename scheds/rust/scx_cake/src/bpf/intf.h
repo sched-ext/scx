@@ -135,6 +135,7 @@ struct cake_cpu_bss {
 #define CAKE_CPU_STATUS_IDLE (1ULL << 0)
 #define CAKE_CPU_STATUS_ACCEPT_WAKE (1ULL << 1)
 #define CAKE_CPU_STATUS_SAT_CACHE_MEM (1ULL << 2)
+#define CAKE_CPU_STATUS_PREEMPT_WAKE (1ULL << 3)
 
 #define CAKE_CPU_STATUS_OWNER_SHIFT 8U
 #define CAKE_CPU_STATUS_OWNER_MASK 0x7ULL
@@ -184,6 +185,59 @@ struct cake_throughput_lane {
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct cake_throughput_lane) == 64,
 	       "cake_throughput_lane must stay one cache line");
+
+#ifndef CAKE_RELEASE_LOCAL_WAITER
+#define CAKE_RELEASE_LOCAL_WAITER 1
+#endif
+#if CAKE_RELEASE_LOCAL_WAITER
+#define CAKE_HAS_LOCAL_WAITER 1
+#else
+#define CAKE_HAS_LOCAL_WAITER 0
+#endif
+
+#if CAKE_HAS_LOCAL_WAITER
+struct cake_local_waiter {
+	u64 debt; /* Remote wake admitted a local waiter for owner quench */
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct cake_local_waiter) == 64,
+	       "cake_local_waiter must stay one cache line");
+#endif
+
+#ifndef CAKE_RELEASE_DOMAIN_DRR
+#define CAKE_RELEASE_DOMAIN_DRR 1
+#endif
+#if CAKE_RELEASE_DOMAIN_DRR
+#define CAKE_HAS_DOMAIN_DRR 1
+#else
+#define CAKE_HAS_DOMAIN_DRR 0
+#endif
+
+#if CAKE_HAS_DOMAIN_DRR
+struct cake_domain_drr {
+	u64 cache_pending;  /* cache-service DSQ probably has work */
+	u64 stream_pending; /* stream/memcpy-service DSQ probably has work */
+	u64 cache_burst;    /* cache pulls since last stream service */
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct cake_domain_drr) == 64,
+	       "cake_domain_drr must stay one cache line");
+#endif
+
+#ifndef CAKE_RELEASE_LLC_PENDING
+#define CAKE_RELEASE_LLC_PENDING 0
+#endif
+#if defined(CAKE_RELEASE) && CAKE_RELEASE_LLC_PENDING
+#define CAKE_HAS_LLC_PENDING 1
+#else
+#define CAKE_HAS_LLC_PENDING 0
+#endif
+
+#if CAKE_HAS_LLC_PENDING
+struct cake_llc_pending {
+	u64 pending; /* Conservative per-LLC shared DSQ has-work hint */
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct cake_llc_pending) == 64,
+	       "cake_llc_pending must stay one cache line");
+#endif
 
 /* Userspace confidence governor.
  *
@@ -299,6 +353,10 @@ typedef unsigned short cake_cpu_id_t;
  * The default local queue policy does not pull from these fallback DSQs. */
 #define LLC_DSQ_BASE 200
 #define CAKE_THROUGHPUT_DSQ_BASE 1024
+#define CAKE_DOMAIN_DRR_DSQ_BASE 2048
+#define CAKE_DOMAIN_DRR_CLASS_CACHE 0U
+#define CAKE_DOMAIN_DRR_CLASS_STREAM 1U
+#define CAKE_DOMAIN_DRR_CLASS_MAX 2U
 
 /* STAGED_BIT_* defines REMOVED: staged_vtime_bits field was dead.
  * Ordering state now lives in p->scx.dsq_vtime; legacy class/tier metadata
@@ -410,7 +468,8 @@ enum cake_select_reason {
 	CAKE_SELECT_REASON_PRESSURE_CORE   = 9,
 	CAKE_SELECT_REASON_SCOREBOARD_PREV = 10,
 	CAKE_SELECT_REASON_SCOREBOARD_SCAN = 11,
-	CAKE_SELECT_REASON_MAX		   = 12,
+	CAKE_SELECT_REASON_CORE_SPREAD	   = 12,
+	CAKE_SELECT_REASON_MAX		   = 13,
 };
 
 /* Debug-only accelerator attribution. These counters are userspace-facing
@@ -912,6 +971,11 @@ struct cake_stats {
 	u64 nr_primary_scan_hot_guarded; /* primary-lane scan skipped for hot same-TGID micro-workers */
 	u64 nr_wake_chain_locality_guarded; /* wake-chain locality held placement on learned/previous CPU */
 	u64 nr_wake_chain_locality_credit_used; /* wake-chain locality guard allowed a periodic wide probe */
+	u64 nr_core_spread_attempt; /* select_cpu(): vtime/core route considered preferred full-core spread */
+	u64 nr_core_spread_vtime_skip; /* select_cpu(): route skipped because task was too far ahead in vtime */
+	u64 nr_core_spread_candidate; /* select_cpu(): checked a preferred full-core candidate */
+	u64 nr_core_spread_full_idle_reject; /* select_cpu(): candidate CPU or SMT sibling was not clean idle */
+	u64 nr_core_spread_hit; /* select_cpu(): preferred full-core spread claimed an idle primary */
 	u64 nr_busy_handoff_dispatches; /* dispatch() later pulled DSQ work while a busy wakeup was pending */
 	u64 nr_busy_keep_suppressed; /* dispatch() skipped keep_running because a busy wakeup was pending */
 	u64 nr_wakeup_busy_local_target; /* Busy wakeup fallback where target CPU matched enqueue CPU */
@@ -1006,6 +1070,19 @@ struct cake_stats {
 	u64 nr_initial_shared_escape; /* Initial local-policy task escaped to shared LLC queue */
 	u64 nr_busy_wake_slice_shrink; /* Busy wake clamped the current task slice */
 	u64 nr_busy_wake_shared_escape; /* Busy wake escaped local target to shared LLC queue */
+	u64 nr_local_waiter_attempt; /* local-waiter: wake tried owner-local service contract */
+	u64 nr_local_waiter_reject; /* local-waiter: admission rejected before insert */
+	u64 nr_local_waiter_insert; /* local-waiter: wake inserted at target local DSQ head */
+	u64 nr_local_waiter_quench_current; /* local-waiter: current owner slice was quenched */
+	u64 nr_local_waiter_debt_seen; /* running(): saw outstanding local-waiter debt */
+	u64 nr_local_waiter_debt_consume; /* running(): next task consumed waiter debt */
+	u64 nr_local_waiter_same_task_quench; /* running(): same owner was slice-quenched */
+	u64 nr_domain_drr_cache_insert; /* domain-drr: cache-class task inserted */
+	u64 nr_domain_drr_stream_insert; /* domain-drr: stream-class task inserted */
+	u64 nr_domain_drr_cache_pull; /* domain-drr: dispatch pulled cache-class task */
+	u64 nr_domain_drr_stream_pull; /* domain-drr: dispatch pulled stream-class task */
+	u64 nr_domain_drr_stale; /* domain-drr: pending hint was stale */
+	u64 nr_domain_drr_stream_due; /* domain-drr: stream service cut cache burst */
 
 	/* Task lifecycle timing (cumulative us, debug builds) */
 	u64 lifecycle_init_enqueue_us; /* Sum of task init to first enqueue */

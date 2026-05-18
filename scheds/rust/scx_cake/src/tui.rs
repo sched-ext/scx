@@ -67,7 +67,8 @@ const TIMELINE_SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(4);
 const DEAD_TASK_RETENTION: Duration = Duration::from_secs(300);
 const FULL_SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(1);
-const SELECT_REASON_MAX: usize = 12;
+const SELECT_REASON_MAX: usize = 13;
+const SELECT_REASON_CORE_SPREAD: usize = 12;
 const ACCEL_ROUTE_MAX: usize = 7;
 const ACCEL_ROUTE_BLOCK_MAX: usize = 13;
 const ACCEL_PROBE_OUTCOME_MAX: usize = 7;
@@ -1356,6 +1357,26 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.nr_dispatch_llc_local_miss += s.nr_dispatch_llc_local_miss;
             total.nr_dispatch_llc_steal_hit += s.nr_dispatch_llc_steal_hit;
             total.nr_dispatch_keep_running += s.nr_dispatch_keep_running;
+            total.nr_cache_throughput_requeue += s.nr_cache_throughput_requeue;
+            total.nr_cache_throughput_keep_running += s.nr_cache_throughput_keep_running;
+            total.nr_cache_throughput_lane_insert += s.nr_cache_throughput_lane_insert;
+            total.nr_cache_throughput_lane_spill += s.nr_cache_throughput_lane_spill;
+            total.nr_cache_throughput_lane_local_hit += s.nr_cache_throughput_lane_local_hit;
+            total.nr_cache_throughput_lane_steal_hit += s.nr_cache_throughput_lane_steal_hit;
+            total.nr_cache_throughput_lane_stale += s.nr_cache_throughput_lane_stale;
+            total.nr_local_waiter_attempt += s.nr_local_waiter_attempt;
+            total.nr_local_waiter_reject += s.nr_local_waiter_reject;
+            total.nr_local_waiter_insert += s.nr_local_waiter_insert;
+            total.nr_local_waiter_quench_current += s.nr_local_waiter_quench_current;
+            total.nr_local_waiter_debt_seen += s.nr_local_waiter_debt_seen;
+            total.nr_local_waiter_debt_consume += s.nr_local_waiter_debt_consume;
+            total.nr_local_waiter_same_task_quench += s.nr_local_waiter_same_task_quench;
+            total.nr_domain_drr_cache_insert += s.nr_domain_drr_cache_insert;
+            total.nr_domain_drr_stream_insert += s.nr_domain_drr_stream_insert;
+            total.nr_domain_drr_cache_pull += s.nr_domain_drr_cache_pull;
+            total.nr_domain_drr_stream_pull += s.nr_domain_drr_stream_pull;
+            total.nr_domain_drr_stale += s.nr_domain_drr_stale;
+            total.nr_domain_drr_stream_due += s.nr_domain_drr_stream_due;
             total.lifecycle_init_enqueue_us += s.lifecycle_init_enqueue_us;
             total.lifecycle_init_enqueue_count += s.lifecycle_init_enqueue_count;
             total.lifecycle_init_select_us += s.lifecycle_init_select_us;
@@ -2227,6 +2248,66 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.nr_dispatch_keep_running = current
         .nr_dispatch_keep_running
         .saturating_sub(previous.nr_dispatch_keep_running);
+    delta.nr_cache_throughput_requeue = current
+        .nr_cache_throughput_requeue
+        .saturating_sub(previous.nr_cache_throughput_requeue);
+    delta.nr_cache_throughput_keep_running = current
+        .nr_cache_throughput_keep_running
+        .saturating_sub(previous.nr_cache_throughput_keep_running);
+    delta.nr_cache_throughput_lane_insert = current
+        .nr_cache_throughput_lane_insert
+        .saturating_sub(previous.nr_cache_throughput_lane_insert);
+    delta.nr_cache_throughput_lane_spill = current
+        .nr_cache_throughput_lane_spill
+        .saturating_sub(previous.nr_cache_throughput_lane_spill);
+    delta.nr_cache_throughput_lane_local_hit = current
+        .nr_cache_throughput_lane_local_hit
+        .saturating_sub(previous.nr_cache_throughput_lane_local_hit);
+    delta.nr_cache_throughput_lane_steal_hit = current
+        .nr_cache_throughput_lane_steal_hit
+        .saturating_sub(previous.nr_cache_throughput_lane_steal_hit);
+    delta.nr_cache_throughput_lane_stale = current
+        .nr_cache_throughput_lane_stale
+        .saturating_sub(previous.nr_cache_throughput_lane_stale);
+    delta.nr_local_waiter_attempt = current
+        .nr_local_waiter_attempt
+        .saturating_sub(previous.nr_local_waiter_attempt);
+    delta.nr_local_waiter_reject = current
+        .nr_local_waiter_reject
+        .saturating_sub(previous.nr_local_waiter_reject);
+    delta.nr_local_waiter_insert = current
+        .nr_local_waiter_insert
+        .saturating_sub(previous.nr_local_waiter_insert);
+    delta.nr_local_waiter_quench_current = current
+        .nr_local_waiter_quench_current
+        .saturating_sub(previous.nr_local_waiter_quench_current);
+    delta.nr_local_waiter_debt_seen = current
+        .nr_local_waiter_debt_seen
+        .saturating_sub(previous.nr_local_waiter_debt_seen);
+    delta.nr_local_waiter_debt_consume = current
+        .nr_local_waiter_debt_consume
+        .saturating_sub(previous.nr_local_waiter_debt_consume);
+    delta.nr_local_waiter_same_task_quench = current
+        .nr_local_waiter_same_task_quench
+        .saturating_sub(previous.nr_local_waiter_same_task_quench);
+    delta.nr_domain_drr_cache_insert = current
+        .nr_domain_drr_cache_insert
+        .saturating_sub(previous.nr_domain_drr_cache_insert);
+    delta.nr_domain_drr_stream_insert = current
+        .nr_domain_drr_stream_insert
+        .saturating_sub(previous.nr_domain_drr_stream_insert);
+    delta.nr_domain_drr_cache_pull = current
+        .nr_domain_drr_cache_pull
+        .saturating_sub(previous.nr_domain_drr_cache_pull);
+    delta.nr_domain_drr_stream_pull = current
+        .nr_domain_drr_stream_pull
+        .saturating_sub(previous.nr_domain_drr_stream_pull);
+    delta.nr_domain_drr_stale = current
+        .nr_domain_drr_stale
+        .saturating_sub(previous.nr_domain_drr_stale);
+    delta.nr_domain_drr_stream_due = current
+        .nr_domain_drr_stream_due
+        .saturating_sub(previous.nr_domain_drr_stream_due);
     delta.lifecycle_init_enqueue_us = current
         .lifecycle_init_enqueue_us
         .saturating_sub(previous.lifecycle_init_enqueue_us);
@@ -3650,6 +3731,7 @@ fn select_reason_short_label(reason: usize) -> &'static str {
         9 => "pc",
         10 => "sbp",
         11 => "sbs",
+        12 => "cs",
         _ => "-",
     }
 }
@@ -7543,8 +7625,11 @@ fn handle_tui_key(key: crossterm::event::KeyEvent, ctx: TuiKeyContext<'_, '_>) -
                         bss.blocked_owner_wait_ns = Default::default();
                         bss.blocked_owner_wait_count = Default::default();
                         bss.blocked_owner_wait_max_ns = Default::default();
-                        bss.trust_user = Default::default();
-                        bss.trust_bpf = Default::default();
+                        #[cfg(cake_trust_maps)]
+                        {
+                            bss.trust_user = Default::default();
+                            bss.trust_bpf = Default::default();
+                        }
                     }
                     app.stats_history.clear();
                     app.cpu_work_history.clear();

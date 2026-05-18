@@ -1358,18 +1358,33 @@ mod tests {
         assert!(build.contains("SCX_CAKE_BUSY_WAKE_KICK"));
         assert!(build.contains("SCX_CAKE_LEARNED_LOCALITY"));
         assert!(build.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY"));
+        assert!(build.contains("SCX_CAKE_RELEASE_ROUTE_PRED"));
+        assert!(build.contains("SCX_CAKE_RELEASE_CONFIDENCE"));
+        assert!(build.contains("SCX_CAKE_RELEASE_LLC_PENDING"));
+        assert!(build.contains("SCX_CAKE_RELEASE_LOCAL_WAITER"));
+        assert!(build.contains("SCX_CAKE_RELEASE_DOMAIN_DRR"));
         assert!(build.contains("-DCAKE_QUANTUM_NS="));
         assert!(build.contains("-DCAKE_QUEUE_POLICY_VALUE="));
         assert!(build.contains("-DCAKE_STORM_GUARD_VALUE="));
         assert!(build.contains("-DCAKE_BUSY_WAKE_KICK_VALUE="));
         assert!(build.contains("-DCAKE_LEARNED_LOCALITY_VALUE="));
         assert!(build.contains("-DCAKE_WAKE_CHAIN_LOCALITY_VALUE="));
+        assert!(build.contains("-DCAKE_RELEASE_ROUTE_PRED="));
+        assert!(build.contains("-DCAKE_RELEASE_CONFIDENCE="));
+        assert!(build.contains("-DCAKE_RELEASE_LLC_PENDING="));
+        assert!(build.contains("-DCAKE_RELEASE_LOCAL_WAITER="));
+        assert!(build.contains("-DCAKE_RELEASE_DOMAIN_DRR="));
         assert!(build.contains("BAKED_QUANTUM_US"));
         assert!(build.contains("BAKED_QUEUE_POLICY"));
         assert!(build.contains("BAKED_STORM_GUARD"));
         assert!(build.contains("BAKED_BUSY_WAKE_KICK"));
         assert!(build.contains("BAKED_LEARNED_LOCALITY"));
         assert!(build.contains("BAKED_WAKE_CHAIN_LOCALITY"));
+        assert!(build.contains("BAKED_RELEASE_ROUTE_PRED"));
+        assert!(build.contains("BAKED_RELEASE_CONFIDENCE"));
+        assert!(build.contains("BAKED_RELEASE_LLC_PENDING"));
+        assert!(build.contains("BAKED_RELEASE_LOCAL_WAITER"));
+        assert!(build.contains("BAKED_RELEASE_DOMAIN_DRR"));
 
         assert!(src.contains("const u64 quantum_ns = CAKE_QUANTUM_NS;"));
         assert!(src.contains("#define CAKE_QUEUE_POLICY CAKE_QUEUE_POLICY_VALUE"));
@@ -1397,6 +1412,11 @@ mod tests {
         assert!(main.contains("topology::BAKED_BUSY_WAKE_KICK"));
         assert!(main.contains("topology::BAKED_LEARNED_LOCALITY"));
         assert!(main.contains("topology::BAKED_WAKE_CHAIN_LOCALITY"));
+        assert!(main.contains("topology::BAKED_RELEASE_ROUTE_PRED"));
+        assert!(main.contains("topology::BAKED_RELEASE_CONFIDENCE"));
+        assert!(main.contains("topology::BAKED_RELEASE_LLC_PENDING"));
+        assert!(main.contains("topology::BAKED_RELEASE_LOCAL_WAITER"));
+        assert!(main.contains("topology::BAKED_RELEASE_DOMAIN_DRR"));
 
         assert!(readme.contains("SCX_CAKE_PROFILE=esports"));
         assert!(readme.contains("SCX_CAKE_QUEUE_POLICY=local"));
@@ -1404,6 +1424,11 @@ mod tests {
         assert!(readme.contains("SCX_CAKE_BUSY_WAKE_KICK=policy"));
         assert!(readme.contains("SCX_CAKE_LEARNED_LOCALITY=off"));
         assert!(readme.contains("SCX_CAKE_WAKE_CHAIN_LOCALITY=off"));
+        assert!(readme.contains("SCX_CAKE_RELEASE_ROUTE_PRED=off"));
+        assert!(readme.contains("SCX_CAKE_RELEASE_CONFIDENCE=off"));
+        assert!(readme.contains("SCX_CAKE_RELEASE_LLC_PENDING=on"));
+        assert!(readme.contains("SCX_CAKE_RELEASE_LOCAL_WAITER=off"));
+        assert!(readme.contains("SCX_CAKE_RELEASE_DOMAIN_DRR=on"));
         assert!(readme.contains("Release builds bake profile, quantum, queue policy, storm guard"));
     }
 
@@ -1450,6 +1475,8 @@ mod tests {
         ));
         assert!(build.contains("baked_bool(\"SCX_CAKE_LEARNED_LOCALITY\", false)"));
         assert!(build.contains("baked_bool(\"SCX_CAKE_WAKE_CHAIN_LOCALITY\", false)"));
+        assert!(build.contains("baked_bool(\"SCX_CAKE_RELEASE_ROUTE_PRED\", false)"));
+        assert!(build.contains("baked_bool(\"SCX_CAKE_RELEASE_CONFIDENCE\", false)"));
         assert!(build.contains("release_learned_locality || release_wake_chain_locality"));
         assert!(wake_chain_arg.contains("default_value_t = false"));
         assert!(learned_arg.contains("default_value_t = false"));
@@ -1515,12 +1542,13 @@ mod tests {
         assert!(src.contains("wake_flags & SCX_WAKE_SYNC"));
         assert!(src.contains("p->prio < 120"));
         assert!(src.contains("p->scx.weight > 120"));
-        assert!(src.contains("latency_biased = cake_task_latency_biased(p, wake_flags);"));
+        assert!(src.contains("if (!cake_task_latency_biased(p, wake_flags))"));
         assert!(src.contains("cake_select_fast_scan_limit(local_bss)"));
         assert!(source_contains(
             src,
             "cake_select_cpu_fast_scan(p, prev_cpu, wake_flags, select_bss)"
         ));
+        assert!(src.contains("CAKE_USE_SCOREBOARD_SUMMARY && defined(CAKE_SINGLE_LLC)"));
     }
 
     #[test]
@@ -1620,10 +1648,14 @@ mod tests {
         let intf = include_str!("bpf/intf.h");
         let trust = include_str!("trust.rs");
         let tui = include_str!("tui.rs");
+        let build = include_str!("../build.rs");
 
         assert!(intf.contains("struct cake_trust_user"));
         assert!(intf.contains("struct cake_trust_bpf"));
         assert!(intf.contains("CAKE_TRUST_FLAG_PREV_DIRECT"));
+        assert!(src.contains("#if CAKE_HAS_TRUST_MAPS"));
+        assert!(build.contains("BAKED_RELEASE_TRUST_MAPS"));
+        assert!(build.contains("cargo::rustc-check-cfg=cfg(cake_trust_maps)"));
         assert!(source_contains(
             src,
             "struct cake_trust_user trust_user[CAKE_MAX_CPUS]"
@@ -1656,6 +1688,7 @@ mod tests {
             trust.contains("bss.trust_user[idx].generation = generation.wrapping_add(1).max(1);")
         );
         assert!(trust.contains("if !ready || cooling_down"));
+        assert!(trust.contains("#[cfg(not(cake_trust_maps))]"));
         assert!(!trust.contains("if !ready || cooling_down || bpf_blocked"));
         assert!(tui.contains("bss.trust_user = Default::default();"));
         assert!(tui.contains("bss.trust_bpf = Default::default();"));
@@ -1813,14 +1846,234 @@ mod tests {
 
         assert!(intf.contains("CAKE_CPU_STATUS_EPOCH_SHIFT"));
         assert!(intf.contains("CAKE_CPU_STATUS_LATENCY_SHIFT"));
+        assert!(intf.contains("CAKE_CPU_STATUS_PREEMPT_WAKE"));
         assert!(intf.contains("CAKE_CPU_LATENCY_LATENCY"));
         assert!(src.contains("cake_status_epoch("));
         assert!(src.contains("cake_status_next_epoch("));
         assert!(src.contains("cake_owner_latency_class("));
+        assert!(src.contains("cake_busy_wake_kick_from_status("));
+        assert!(src.contains("next |= CAKE_CPU_STATUS_PREEMPT_WAKE;"));
         assert!(source_contains(
             src,
             "cake_make_cpu_status(false, owner_class, pressure, latency_class"
         ));
+    }
+
+    #[test]
+    fn bpf_release_busy_wake_uses_owner_published_status() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let body = source_body_between(
+            src,
+            "static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)",
+            "#else\n\tbool is_wakeup",
+        )
+        .expect("release lean enqueue body exists");
+
+        assert!(source_contains(
+            body,
+            "cake_insert_local_kick_idle(p, target_cpu, slice, enq_flags,
+                                            target_status);"
+        ));
+        assert!(source_contains(
+            body,
+            "scx_bpf_kick_cpu(
+                                target_cpu,
+                                cake_busy_wake_kick_from_status_service(
+                                    p, target_status, service_kind));"
+        ));
+        assert!(!body.contains("owner_avg_runtime_ns = READ_ONCE("));
+        assert!(!body.contains("owner_run_count)"));
+        assert!(!body.contains("cake_busy_wake_policy_should_preempt(\n\t\t\t\t\t    p"));
+    }
+
+    #[test]
+    fn bpf_release_owner_wake_drives_local_waiter_service() {
+        let intf = include_str!("bpf/intf.h");
+        let src = include_str!("bpf/cake.bpf.c");
+        let build = include_str!("../build.rs");
+        let readme = include_str!("../README.md");
+
+        assert!(build.contains("SCX_CAKE_RELEASE_LOCAL_WAITER"));
+        assert!(build.contains("BAKED_RELEASE_LOCAL_WAITER"));
+        assert!(build.contains("-DCAKE_RELEASE_LOCAL_WAITER="));
+        assert!(intf.contains("#define CAKE_HAS_LOCAL_WAITER 1"));
+        assert!(intf.contains("#define CAKE_HAS_LOCAL_WAITER 0"));
+        assert!(intf.contains("struct cake_local_waiter"));
+        assert!(source_contains(
+            src,
+            "#if CAKE_HAS_LOCAL_WAITER
+struct cake_local_waiter local_waiter[CAKE_MAX_CPUS];"
+        ));
+        assert!(source_contains(
+            src,
+            "struct cake_local_waiter local_waiter[CAKE_MAX_CPUS];"
+        ));
+        assert!(src.contains("CAKE_LOCAL_WAITER_DEBT_MAX"));
+        assert!(src.contains("cake_local_waiter_admit("));
+        assert!(source_contains(
+            src,
+            "if ((wakee->flags & PF_KTHREAD) || wakee->prio < 120 ||
+            wakee->scx.weight != 100)
+                return false;"
+        ));
+        assert!(source_contains(
+            src,
+            "if (target_status &
+            (CAKE_CPU_STATUS_IDLE | CAKE_CPU_STATUS_SAT_CACHE_MEM))
+                return false;"
+        ));
+        assert!(source_contains(
+            src,
+            "if (!(target_status & CAKE_CPU_STATUS_PREEMPT_WAKE))
+                return false;"
+        ));
+        assert!(source_contains(
+            src,
+            "cake_local_waiter_mark_cpu(target_cpu);"
+        ));
+        assert!(src.contains("nr_local_waiter_attempt"));
+        assert!(src.contains("nr_local_waiter_insert"));
+        assert!(src.contains("nr_local_waiter_quench_current"));
+        assert!(source_contains(
+            src,
+            "dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+                           enq_flags | SCX_ENQ_HEAD);"
+        ));
+        assert!(source_contains(
+            src,
+            "if (normal_default &&
+                    cake_try_insert_local_waiter_normal_service(
+                        p, target_cpu, slice, enq_flags, target_status,
+                        service_kind))
+                        return;"
+        ));
+        assert!(source_contains(
+            src,
+            "if (READ_ONCE(local_waiter[cpu].debt))"
+        ));
+        assert!(src.contains("bool consumed = cake_local_waiter_consume_cpu(cpu);"));
+        assert!(src.contains("nr_local_waiter_debt_seen"));
+        assert!(src.contains("nr_local_waiter_debt_consume"));
+        assert!(src.contains("nr_local_waiter_same_task_quench"));
+        assert!(readme.contains("SCX_CAKE_RELEASE_LOCAL_WAITER=off"));
+        assert!(readme.contains("local-waiter service contract"));
+    }
+
+    #[test]
+    fn bpf_release_domain_drr_replaces_cache_stream_lane_stack() {
+        let intf = include_str!("bpf/intf.h");
+        let src = include_str!("bpf/cake.bpf.c");
+        let build = include_str!("../build.rs");
+        let dump = include_str!("tui/dump.rs");
+        let diagnostics = include_str!("tui/diagnostics.rs");
+        let readme = include_str!("../README.md");
+
+        assert!(build.contains("SCX_CAKE_RELEASE_DOMAIN_DRR"));
+        assert!(build.contains("BAKED_RELEASE_DOMAIN_DRR"));
+        assert!(build.contains("-DCAKE_RELEASE_DOMAIN_DRR="));
+        assert!(intf.contains("#define CAKE_HAS_DOMAIN_DRR 1"));
+        assert!(intf.contains("#define CAKE_HAS_DOMAIN_DRR 0"));
+        assert!(intf.contains("struct cake_domain_drr"));
+        assert!(intf.contains("CAKE_DOMAIN_DRR_DSQ_BASE"));
+        assert!(intf.contains("nr_domain_drr_cache_insert"));
+        assert!(source_contains(
+            src,
+            "#if CAKE_HAS_DOMAIN_DRR
+struct cake_domain_drr domain_drr[CAKE_MAX_LLCS];"
+        ));
+        assert!(source_contains(
+            src,
+            "#if !CAKE_HAS_DOMAIN_DRR
+u64 cache_simple_state;"
+        ));
+        assert!(source_contains(
+            src,
+            "#if !CAKE_HAS_DOMAIN_DRR
+struct cake_throughput_lane throughput_lane[CAKE_MAX_CPUS];"
+        ));
+        assert!(src.contains("cake_domain_drr_enqueue_stress("));
+        assert!(src.contains("cake_dispatch_try_domain_drr("));
+        assert!(src.contains("CAKE_DOMAIN_DRR_CACHE_BURST_LIMIT"));
+        assert!(source_contains(
+            src,
+            "if (cake_dispatch_try_domain_drr(cpu_idx))
+                return;"
+        ));
+        assert!(source_contains(
+            src,
+            "cake_domain_drr_enqueue_stress(p, target_cpu, slice, enq_flags,
+                                           stress_kind, target_status);"
+        ));
+        assert!(src.contains("ret = scx_bpf_create_dsq(dsq, -1);"));
+        assert!(dump.contains("win.domain_drr:"));
+        assert!(dump.contains("domain_drr: cache_insert="));
+        assert!(diagnostics.contains("domain_drr60[ci/si/cp/sp/stale/sdue]"));
+        assert!(readme.contains("domain-DRR service ledger"));
+        assert!(readme.contains("SCX_CAKE_RELEASE_DOMAIN_DRR=on"));
+    }
+
+    #[test]
+    fn bpf_release_llc_pending_summary_gates_shared_pulls() {
+        let intf = include_str!("bpf/intf.h");
+        let src = include_str!("bpf/cake.bpf.c");
+        let build = include_str!("../build.rs");
+        let readme = include_str!("../README.md");
+
+        assert!(build.contains("SCX_CAKE_RELEASE_LLC_PENDING"));
+        assert!(build.contains("BAKED_RELEASE_LLC_PENDING"));
+        assert!(build.contains("-DCAKE_RELEASE_LLC_PENDING="));
+        assert!(intf.contains("#define CAKE_HAS_LLC_PENDING 1"));
+        assert!(intf.contains("#define CAKE_HAS_LLC_PENDING 0"));
+        assert!(intf.contains("struct cake_llc_pending"));
+        assert!(source_contains(
+            src,
+            "#if CAKE_HAS_LLC_PENDING
+struct cake_llc_pending llc_pending[CAKE_MAX_LLCS];"
+        ));
+        assert!(source_contains(
+            src,
+            "struct cake_llc_pending llc_pending[CAKE_MAX_LLCS];"
+        ));
+        assert!(src.contains("cake_llc_pending_mark_cpu(target_cpu);"));
+        assert!(source_contains(
+            src,
+            "q = cake_llc_pending_maybe_cpu(cpu_idx) ?
+                    __COMPAT_scx_bpf_dsq_peek(dsq) :
+                    NULL;"
+        ));
+        assert!(src.contains("q = __COMPAT_scx_bpf_dsq_peek(dsq);"));
+        assert!(source_contains(
+            src,
+            "return cake_dsq_move_to_local(LLC_DSQ_BASE, 0);"
+        ));
+        assert!(source_contains(
+            src,
+            "hit = cake_llc_pending_pull_cpu(cpu_idx, LLC_DSQ_BASE);"
+        ));
+        assert!(source_contains(
+            src,
+            "WRITE_ONCE(llc_pending[idx].pending, 0);
+        hit = cake_dsq_move_to_local(dsq_id, 0);
+        if (scx_bpf_dsq_nr_queued(dsq_id) > 0)
+                WRITE_ONCE(llc_pending[idx].pending, 1);"
+        ));
+        assert!(source_contains(
+            src,
+            "cake_llc_pending_refresh_cpu(cpu_idx, LLC_DSQ_BASE);"
+        ));
+        assert!(!src.contains("cake_llc_pending_clear_cpu("));
+        assert!(source_contains(
+            src,
+            "if (hit)
+                    cake_throughput_reset_dispatch_budget(dispatch_bss);"
+        ));
+        assert!(source_contains(
+            src,
+            "if (cake_llc_pending_maybe_cpu(cpu))
+                    return true;"
+        ));
+        assert!(readme.contains("SCX_CAKE_RELEASE_LLC_PENDING=on"));
+        assert!(readme.contains("off by default"));
     }
 
     #[test]
@@ -1897,7 +2150,7 @@ mod tests {
         let src = include_str!("bpf/cake.bpf.c");
 
         assert!(src.contains("#define CAKE_CLAIM_HEALTH_MISS_STEP"));
-        assert!(src.contains("static __always_inline u64 cake_claim_health_update("));
+        assert!(src.contains("cake_claim_health_update(u64 confidence, bool success)"));
         assert!(src.contains("cake_claim_health_update(confidence, success);"));
         assert!(src.contains("cake_scoreboard_claim_result(local_bss, status, claimed);"));
     }
@@ -1987,7 +2240,7 @@ mod tests {
         assert!(dump.contains(".fallback: {}"));
         assert!(dump.contains("format_service_report_text"));
         assert!(dump.contains("format_service_report_json"));
-        assert!(diagnostics.contains("SERVICE_SCHEMA_VERSION: u32 = 8"));
+        assert!(diagnostics.contains("SERVICE_SCHEMA_VERSION: u32 = 10"));
         assert!(diagnostics.contains("CAKE-TRUST-010"));
         assert!(diagnostics.contains("MonitorSnapshot"));
         assert!(diagnostics.contains("FreezeFrame"));

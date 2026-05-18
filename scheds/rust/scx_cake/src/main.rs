@@ -257,6 +257,94 @@ fn build_fast_scan_slots(
     slots
 }
 
+#[allow(dead_code)]
+fn read_cpu_perf_score(cpu: usize) -> u32 {
+    let highest_perf = format!("/sys/devices/system/cpu/cpu{cpu}/acpi_cppc/highest_perf");
+    if let Ok(raw) = std::fs::read_to_string(&highest_perf) {
+        if let Ok(score) = raw.trim().parse::<u32>() {
+            return score.max(1);
+        }
+    }
+
+    let pref_rank = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/amd_pstate_prefcore_ranking");
+    if let Ok(raw) = std::fs::read_to_string(&pref_rank) {
+        if let Ok(rank) = raw.trim().parse::<u32>() {
+            /*
+             * amd_pstate_prefcore_ranking polarity has changed across kernel
+             * discussions and vendor docs, while ACPI CPPC highest_perf is
+             * directly "larger is faster". If highest_perf is unavailable,
+             * keep the ranking useful but conservative by inverting the common
+             * small-is-fast form into a larger-is-better score.
+             */
+            return 1024u32.saturating_sub(rank.min(1023)).max(1);
+        }
+    }
+
+    1
+}
+
+#[allow(dead_code)]
+fn cpu_perf_scores(nr_cpus: usize) -> [u32; topology::MAX_CPUS] {
+    let mut scores = [1u32; topology::MAX_CPUS];
+
+    for (cpu, score) in scores
+        .iter_mut()
+        .enumerate()
+        .take(nr_cpus.min(topology::MAX_CPUS))
+    {
+        *score = read_cpu_perf_score(cpu);
+    }
+
+    scores
+}
+
+#[allow(dead_code)]
+fn build_core_spread_slots(
+    cpu: usize,
+    nr_cpus: usize,
+    cpu_sibling_map: &[u16],
+    cpu_thread_bit: &[u8],
+    cpu_llc_id: &[u8],
+    cpu_perf_score: &[u32],
+) -> [u16; CPU_FAST_SCAN_SLOTS] {
+    let mut slots = [u16::MAX; CPU_FAST_SCAN_SLOTS];
+    if cpu >= nr_cpus {
+        return slots;
+    }
+
+    let llc = cpu_llc_id.get(cpu).copied().unwrap_or(0);
+    let sibling = cpu_sibling_map.get(cpu).copied().unwrap_or(u16::MAX) as usize;
+    let prev_primary = if cpu_thread_bit.get(cpu).copied().unwrap_or(0) == 1 {
+        cpu
+    } else if sibling < nr_cpus && cpu_thread_bit.get(sibling).copied().unwrap_or(0) == 1 {
+        sibling
+    } else {
+        cpu
+    };
+
+    let mut candidates: Vec<(usize, u32, usize)> = (0..nr_cpus)
+        .filter(|&candidate| {
+            candidate != cpu
+                && candidate != prev_primary
+                && cpu_llc_id.get(candidate).copied().unwrap_or(u8::MAX) == llc
+                && cpu_thread_bit.get(candidate).copied().unwrap_or(0) == 1
+        })
+        .map(|candidate| {
+            let score = cpu_perf_score.get(candidate).copied().unwrap_or(1);
+            let distance = candidate.abs_diff(cpu);
+            (candidate, score, distance)
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)));
+
+    for (slot, (candidate, _, _)) in candidates.into_iter().take(CPU_FAST_SCAN_SLOTS).enumerate() {
+        slots[slot] = candidate as u16;
+    }
+
+    slots
+}
+
 #[inline]
 fn active_fast_scan_probe_slots(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> [u16; CPU_FAST_PROBE_SLOTS] {
     [slots[0], slots[1], slots[2], slots[3]]
@@ -725,6 +813,7 @@ impl<'a> Scheduler<'a> {
             }
 
             let nr = topo.nr_cpus.min(topology::MAX_CPUS);
+            let cpu_perf_score = cpu_perf_scores(nr);
             for i in 0..nr.min(rodata.cpu_meta.len()) {
                 let sibling = topo.cpu_sibling_map[i];
                 let has_smt_sibling = (sibling as usize) < nr && sibling as usize != i;
@@ -751,9 +840,26 @@ impl<'a> Scheduler<'a> {
                 rodata.cpu_fast_probe[i] = active_fast_scan_probe_slots(fast_scan);
                 rodata.cpu_fast_probe_pack[i] = pack_fast_scan_probe_slots(fast_scan) as _;
                 rodata.cpu_fast_probe_bits[i] = fast_scan_probe_bits(fast_scan);
+
+                let core_spread = build_core_spread_slots(
+                    i,
+                    nr,
+                    &topo.cpu_sibling_map,
+                    &topo.cpu_thread_bit,
+                    &topo.cpu_llc_id,
+                    &cpu_perf_score,
+                );
+                rodata.cpu_core_spread_pack[i] = pack_fast_scan_probe_slots(core_spread) as _;
             }
 
             info!("Topology Strategy: Per-CPU local-first dispatch");
+            let mut perf_order: Vec<(usize, u32)> =
+                (0..nr).map(|cpu| (cpu, cpu_perf_score[cpu])).collect();
+            perf_order.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            info!(
+                "Core spread route table: top CPUs {:?}",
+                perf_order.iter().take(6).collect::<Vec<_>>()
+            );
 
             // Performance-ordered CPU scan arrays — HYBRID ONLY
             #[cfg(cake_has_hybrid)]
@@ -894,14 +1000,19 @@ impl<'a> Scheduler<'a> {
             || cli_arg_present("--wake-chain-locality", None)
         {
             log::warn!(
-                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}, learned-locality={}, wake-chain-locality={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, SCX_CAKE_BUSY_WAKE_KICK, SCX_CAKE_LEARNED_LOCALITY, or SCX_CAKE_WAKE_CHAIN_LOCALITY to change hot-path knobs",
+                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}, learned-locality={}, wake-chain-locality={}, release-route-pred={}, release-confidence={}, release-llc-pending={}, release-local-waiter={}, release-domain-drr={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, SCX_CAKE_BUSY_WAKE_KICK, SCX_CAKE_LEARNED_LOCALITY, SCX_CAKE_WAKE_CHAIN_LOCALITY, SCX_CAKE_RELEASE_ROUTE_PRED, SCX_CAKE_RELEASE_CONFIDENCE, SCX_CAKE_RELEASE_LLC_PENDING, SCX_CAKE_RELEASE_LOCAL_WAITER, or SCX_CAKE_RELEASE_DOMAIN_DRR to change hot-path knobs",
                 topology::BAKED_PROFILE,
                 topology::BAKED_QUANTUM_US,
                 topology::BAKED_QUEUE_POLICY,
                 topology::BAKED_STORM_GUARD,
                 topology::BAKED_BUSY_WAKE_KICK,
                 topology::BAKED_LEARNED_LOCALITY,
-                topology::BAKED_WAKE_CHAIN_LOCALITY
+                topology::BAKED_WAKE_CHAIN_LOCALITY,
+                topology::BAKED_RELEASE_ROUTE_PRED,
+                topology::BAKED_RELEASE_CONFIDENCE,
+                topology::BAKED_RELEASE_LLC_PENDING,
+                topology::BAKED_RELEASE_LOCAL_WAITER,
+                topology::BAKED_RELEASE_DOMAIN_DRR
             );
         }
 
@@ -923,6 +1034,17 @@ impl<'a> Scheduler<'a> {
             std::env::args().collect::<Vec<_>>().join(" ")
         );
 
+        #[cfg(cake_bpf_release)]
+        info!(
+            "release accelerators: route-pred={}, confidence={}, llc-pending={}, local-waiter={}, domain-drr={}, trust-maps={}",
+            topology::BAKED_RELEASE_ROUTE_PRED,
+            topology::BAKED_RELEASE_CONFIDENCE,
+            topology::BAKED_RELEASE_LLC_PENDING,
+            topology::BAKED_RELEASE_LOCAL_WAITER,
+            topology::BAKED_RELEASE_DOMAIN_DRR,
+            topology::BAKED_RELEASE_TRUST_MAPS
+        );
+
         info!(
             "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}, storm-guard: {}, busy-wake-kick: {}, learned-locality: {}, wake-chain-locality: {}",
             self.topology.nr_cpus,
@@ -940,7 +1062,12 @@ impl<'a> Scheduler<'a> {
             self.args.effective_learned_locality(),
             self.args.effective_wake_chain_locality()
         );
-        let mut trust_governor = trust::TrustGovernor::new(self.topology.nr_cpus);
+        let trust_governor_enabled = cfg!(cake_trust_maps)
+            && (!cfg!(cake_bpf_release)
+                || (topology::BAKED_RELEASE_ROUTE_PRED_VALUE != 0
+                    && topology::BAKED_RELEASE_CONFIDENCE_VALUE != 0));
+        let mut trust_governor =
+            trust::TrustGovernor::new(self.topology.nr_cpus, trust_governor_enabled);
         if self.args.verbose && std::io::stdout().is_terminal() {
             tui::run_tui(
                 &mut self.skel,
@@ -1105,6 +1232,30 @@ mod tests {
         let primary_slots = build_fast_scan_slots(0, 4, &siblings, &thread_bits, &llcs);
 
         assert_eq!(primary_slots, [0, 2, 1, u16::MAX]);
+    }
+
+    #[test]
+    fn core_spread_slots_prefer_perf_ranked_full_cores() {
+        let siblings = [4, 5, 6, 7, 0, 1, 2, 3];
+        let thread_bits = [1, 1, 1, 1, 2, 2, 2, 2];
+        let llcs = [0; 8];
+        let perf = [176, 186, 181, 191, 176, 186, 181, 191];
+
+        let slots = build_core_spread_slots(0, 8, &siblings, &thread_bits, &llcs, &perf);
+
+        assert_eq!(slots, [3, 1, 2, u16::MAX]);
+    }
+
+    #[test]
+    fn core_spread_slots_stay_in_llc_and_skip_prev_core() {
+        let siblings = [4, 5, 6, 7, 0, 1, 2, 3];
+        let thread_bits = [1, 1, 1, 1, 2, 2, 2, 2];
+        let llcs = [0, 0, 1, 1, 0, 0, 1, 1];
+        let perf = [10, 30, 100, 90, 10, 30, 100, 90];
+
+        let slots = build_core_spread_slots(5, 8, &siblings, &thread_bits, &llcs, &perf);
+
+        assert_eq!(slots, [0, u16::MAX, u16::MAX, u16::MAX]);
     }
 
     #[test]

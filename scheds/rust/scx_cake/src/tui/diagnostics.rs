@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 use strum::{Display, EnumIter};
 
-const SERVICE_SCHEMA_VERSION: u32 = 8;
+const SERVICE_SCHEMA_VERSION: u32 = 10;
 const SERVICE_TEXT_VERSION: u32 = 4;
 const ACCEL_NATIVE_ENTRY_IDX: usize = 0;
 
@@ -174,6 +174,19 @@ pub(super) struct LiveData {
     pub enqueue_avg_ns_60s: u64,
     pub running_avg_ns_60s: u64,
     pub stopping_avg_ns_60s: u64,
+    pub local_waiter_attempt_60s: u64,
+    pub local_waiter_insert_60s: u64,
+    pub local_waiter_reject_60s: u64,
+    pub local_waiter_quench_current_60s: u64,
+    pub local_waiter_debt_seen_60s: u64,
+    pub local_waiter_debt_consume_60s: u64,
+    pub local_waiter_same_task_quench_60s: u64,
+    pub domain_drr_cache_insert_60s: u64,
+    pub domain_drr_stream_insert_60s: u64,
+    pub domain_drr_cache_pull_60s: u64,
+    pub domain_drr_stream_pull_60s: u64,
+    pub domain_drr_stale_60s: u64,
+    pub domain_drr_stream_due_60s: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -558,6 +571,21 @@ pub(super) fn draw_live_data_tab(frame: &mut Frame, app: &TuiApp, stats: &cake_s
             ),
         ]),
         Line::from(vec![
+            dashboard_label("Local waiter "),
+            dashboard_value(
+                format!(
+                    "ins/rej/qcur/seen/cons/same {}/{}/{}/{}/{}/{}",
+                    compact_count(live.local_waiter_insert_60s),
+                    compact_count(live.local_waiter_reject_60s),
+                    compact_count(live.local_waiter_quench_current_60s),
+                    compact_count(live.local_waiter_debt_seen_60s),
+                    compact_count(live.local_waiter_debt_consume_60s),
+                    compact_count(live.local_waiter_same_task_quench_60s)
+                ),
+                Style::default().fg(Color::LightCyan),
+            ),
+        ]),
+        Line::from(vec![
             dashboard_label("Read as "),
             dashboard_value(fast_path_takeaway(live), Style::default().fg(Color::Gray)),
         ]),
@@ -897,7 +925,7 @@ pub(super) fn format_service_report_text(report: &ServiceReport) -> String {
         }
     }
     out.push_str(&format!(
-        "live_data.snapshot: trained={} route_ready={} floor_ready={} route_pred60={}/{}/{}({:.1}%) trust_prev[state active/enabled/blocked]={}/{}/{} trust_prev60={}/{}/{}({:.1}%) demote60={}({:.2}/s) native60={}({:.1}/s) score_claim_fail60={}/{:.1}% wake_ge5ms60={} wake_max60={}us cbns[sel/enq/run/stop]={}/{}/{}/{}\n",
+        "live_data.snapshot: trained={} route_ready={} floor_ready={} route_pred60={}/{}/{}({:.1}%) trust_prev[state active/enabled/blocked]={}/{}/{} trust_prev60={}/{}/{}({:.1}%) demote60={}({:.2}/s) native60={}({:.1}/s) score_claim_fail60={}/{:.1}% local_waiter60[att/ins/rej/qcur/seen/cons/same]={}/{}/{}/{}/{}/{}/{} domain_drr60[ci/si/cp/sp/stale/sdue]={}/{}/{}/{}/{}/{} wake_ge5ms60={} wake_max60={}us cbns[sel/enq/run/stop]={}/{}/{}/{}\n",
         report.live_data.trained_cpus,
         report.live_data.route_ready_cpus,
         report.live_data.floor_ready_cpus,
@@ -918,6 +946,19 @@ pub(super) fn format_service_report_text(report: &ServiceReport) -> String {
         report.live_data.native_fallback_per_sec,
         report.live_data.scoreboard_claim_fail_60s,
         report.live_data.scoreboard_claim_fail_pct_60s,
+        report.live_data.local_waiter_attempt_60s,
+        report.live_data.local_waiter_insert_60s,
+        report.live_data.local_waiter_reject_60s,
+        report.live_data.local_waiter_quench_current_60s,
+        report.live_data.local_waiter_debt_seen_60s,
+        report.live_data.local_waiter_debt_consume_60s,
+        report.live_data.local_waiter_same_task_quench_60s,
+        report.live_data.domain_drr_cache_insert_60s,
+        report.live_data.domain_drr_stream_insert_60s,
+        report.live_data.domain_drr_cache_pull_60s,
+        report.live_data.domain_drr_stream_pull_60s,
+        report.live_data.domain_drr_stale_60s,
+        report.live_data.domain_drr_stream_due_60s,
         report.live_data.wake_ge5ms_60s,
         report.live_data.wake_wait_max_us,
         report.live_data.select_avg_ns_60s,
@@ -1007,6 +1048,19 @@ fn build_live_data(stats: &cake_stats, app: &TuiApp, accelerator: &AcceleratorSu
             stats_window.total_stopping_ns,
             stats_window.nr_stopping_calls,
         ),
+        local_waiter_attempt_60s: stats_window.nr_local_waiter_attempt,
+        local_waiter_insert_60s: stats_window.nr_local_waiter_insert,
+        local_waiter_reject_60s: stats_window.nr_local_waiter_reject,
+        local_waiter_quench_current_60s: stats_window.nr_local_waiter_quench_current,
+        local_waiter_debt_seen_60s: stats_window.nr_local_waiter_debt_seen,
+        local_waiter_debt_consume_60s: stats_window.nr_local_waiter_debt_consume,
+        local_waiter_same_task_quench_60s: stats_window.nr_local_waiter_same_task_quench,
+        domain_drr_cache_insert_60s: stats_window.nr_domain_drr_cache_insert,
+        domain_drr_stream_insert_60s: stats_window.nr_domain_drr_stream_insert,
+        domain_drr_cache_pull_60s: stats_window.nr_domain_drr_cache_pull,
+        domain_drr_stream_pull_60s: stats_window.nr_domain_drr_stream_pull,
+        domain_drr_stale_60s: stats_window.nr_domain_drr_stale,
+        domain_drr_stream_due_60s: stats_window.nr_domain_drr_stream_due,
     }
 }
 

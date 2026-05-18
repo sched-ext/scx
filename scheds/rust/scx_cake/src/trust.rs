@@ -1,3 +1,4 @@
+#[cfg(cake_trust_maps)]
 use std::time::{Duration, Instant};
 
 use crate::bpf_skel::BpfSkel;
@@ -6,21 +7,36 @@ pub(crate) const CAKE_TRUST_FLAG_PREV_DIRECT: u32 = 1 << 0;
 pub(crate) const CAKE_TRUST_DEMOTE_NONE: u32 = 0;
 pub(crate) const CAKE_TRUST_DEMOTE_PREV_CLAIM_MISS: u32 = 1;
 
+#[cfg(cake_trust_maps)]
 const CAKE_CONF_SELECT_EARLY_SHIFT: u32 = 0;
+#[cfg(cake_trust_maps)]
 const CAKE_CONF_PULL_SHAPE_SHIFT: u32 = 24;
+#[cfg(cake_trust_maps)]
 const CAKE_CONF_ROUTE_SHIFT: u32 = 28;
+#[cfg(cake_trust_maps)]
 const CAKE_CONF_ROUTE_KIND_SHIFT: u32 = 32;
+#[cfg(cake_trust_maps)]
 const CAKE_CONF_STATUS_TRUST_SHIFT: u32 = 52;
+#[cfg(cake_trust_maps)]
 const CAKE_CONF_LOAD_SHOCK_SHIFT: u32 = 60;
+#[cfg(cake_trust_maps)]
 const CAKE_CONF_NIBBLE_MASK: u64 = 0xf;
+#[cfg(cake_trust_maps)]
 const CAKE_ROUTE_PREV: u64 = 1;
 
+#[cfg(cake_trust_maps)]
 const TRUST_TICK_PERIOD: Duration = Duration::from_millis(250);
+#[cfg(cake_trust_maps)]
 const TRUST_COOLDOWN: Duration = Duration::from_secs(2);
+#[cfg(cake_trust_maps)]
 const TRUST_ROUTE_MIN: u64 = 15;
+#[cfg(cake_trust_maps)]
 const TRUST_SELECT_MIN: u64 = 14;
+#[cfg(cake_trust_maps)]
 const TRUST_STATUS_MIN: u64 = 15;
+#[cfg(cake_trust_maps)]
 const TRUST_PULL_MIN: u64 = 12;
+#[cfg(cake_trust_maps)]
 const TRUST_SHOCK_MAX: u64 = 7;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -50,21 +66,51 @@ impl CpuTrustSnapshot {
 }
 
 pub(crate) struct TrustGovernor {
+    #[cfg(cake_trust_maps)]
+    enabled: bool,
+    #[cfg(cake_trust_maps)]
     cooldown_until: Vec<Instant>,
+    #[cfg(cake_trust_maps)]
     last_seen_demotions: Vec<u32>,
+    #[cfg(cake_trust_maps)]
     last_tick: Option<Instant>,
 }
 
 impl TrustGovernor {
-    pub(crate) fn new(nr_cpus: usize) -> Self {
-        Self {
-            cooldown_until: vec![Instant::now(); nr_cpus],
-            last_seen_demotions: vec![0; nr_cpus],
-            last_tick: None,
+    pub(crate) fn new(nr_cpus: usize, enabled: bool) -> Self {
+        #[cfg(not(cake_trust_maps))]
+        {
+            let _ = (nr_cpus, enabled);
+            Self {}
+        }
+        #[cfg(cake_trust_maps)]
+        {
+            Self {
+                enabled,
+                cooldown_until: if enabled {
+                    vec![Instant::now(); nr_cpus]
+                } else {
+                    Vec::new()
+                },
+                last_seen_demotions: if enabled {
+                    vec![0; nr_cpus]
+                } else {
+                    Vec::new()
+                },
+                last_tick: None,
+            }
         }
     }
 
+    #[cfg(not(cake_trust_maps))]
+    pub(crate) fn tick(&mut self, _skel: &mut BpfSkel, _nr_cpus: usize) {}
+
+    #[cfg(cake_trust_maps)]
     pub(crate) fn tick(&mut self, skel: &mut BpfSkel, nr_cpus: usize) {
+        if !self.enabled {
+            return;
+        }
+
         let now = Instant::now();
         if self
             .last_tick
@@ -110,6 +156,7 @@ impl TrustGovernor {
         }
     }
 
+    #[cfg(cake_trust_maps)]
     fn ensure_cpu_capacity(&mut self, nr_cpus: usize, now: Instant) {
         if self.cooldown_until.len() < nr_cpus {
             self.cooldown_until.resize(nr_cpus, now);
@@ -120,6 +167,12 @@ impl TrustGovernor {
     }
 }
 
+#[cfg(not(cake_trust_maps))]
+pub(crate) fn extract_trust_snapshots(_skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuTrustSnapshot> {
+    vec![CpuTrustSnapshot::default(); nr_cpus]
+}
+
+#[cfg(cake_trust_maps)]
 pub(crate) fn extract_trust_snapshots(skel: &BpfSkel, nr_cpus: usize) -> Vec<CpuTrustSnapshot> {
     let mut rows = vec![CpuTrustSnapshot::default(); nr_cpus];
     let Some(bss) = &skel.maps.bss_data else {
@@ -146,10 +199,12 @@ pub(crate) fn trust_demotion_label(reason: u32) -> &'static str {
     }
 }
 
+#[cfg(cake_trust_maps)]
 fn conf_value(confidence: u64, shift: u32) -> u64 {
     (confidence >> shift) & CAKE_CONF_NIBBLE_MASK
 }
 
+#[cfg(cake_trust_maps)]
 fn confidence_trust_prev_ready(confidence: u64) -> bool {
     confidence != 0
         && conf_value(confidence, CAKE_CONF_ROUTE_KIND_SHIFT) == CAKE_ROUTE_PREV

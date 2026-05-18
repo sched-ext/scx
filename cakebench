@@ -23,6 +23,9 @@ Usage:
   ./cakebench one [benchmark] --scheduler scx_pandemonium [--capture stat]
   ./cakebench history import-old [--dry-run]
   ./cakebench history rebuild
+  ./cakebench goal-score --baseline <analysis_metrics.tsv|dir> --candidate <analysis_metrics.tsv|dir>
+  ./cakebench mutation-report [--out-md docs/goal_scores/mutation_style_summary.md]
+  ./cakebench bpf-audit --obj target/.../cake.bpf.o
   ./cakebench noise [--sample-secs 1] [--out-dir DIR]
   ./cakebench [normal cakebench command/options]
 
@@ -178,23 +181,7 @@ sudo_reexec() {
     shift
 
     if [[ "${SCX_CAKE_AI_NONINTERACTIVE:-0}" == "1" ]]; then
-        if ! sudo -n -E "${SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"; then
-            cat >&2 <<'EOF'
-error: sudo credentials are not available for non-interactive AI benchmark mode.
-
-Either warm sudo from your shell:
-  sudo -v
-
-or allow this exact command with NOPASSWD:
-  /home/ritz/Documents/Repo/scx/cakebench *
-
-The AI-safe path uses sudo -n -E directly on cakebench so it matches a narrow
-sudoers rule and fails fast instead of waiting at a password prompt the agent
-cannot answer.
-EOF
-            exit 1
-        fi
-        exit 0
+        exec sudo -n -E "${SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"
     fi
 
     exec sudo -E "${LAUNCHER_SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"
@@ -479,6 +466,8 @@ stop_benchmark_helper_processes() {
 	pids="$(ps -eo pid=,args= | awk \
 		-v repo="${SCX_REPO_ROOT}" \
 		-v bench="${BENCH_REPO_ROOT}" '
+		$0 ~ bench "/bench/scx_cake_scheduler_matrix.sh" ||
+		$0 ~ bench "/bench/scx_cake_bench_suite.sh" ||
 		$0 ~ repo "/tools/cakebench_noise.py monitor" ||
 		$0 ~ bench "/bench/scx_cake_noise_sampler.py" ||
 		$0 ~ bench "/bench/scx_cake_bench_capture.sh" {
@@ -498,6 +487,8 @@ stop_benchmark_helper_processes() {
 		pids="$(ps -eo pid=,args= | awk \
 			-v repo="${SCX_REPO_ROOT}" \
 			-v bench="${BENCH_REPO_ROOT}" '
+			$0 ~ bench "/bench/scx_cake_scheduler_matrix.sh" ||
+			$0 ~ bench "/bench/scx_cake_bench_suite.sh" ||
 			$0 ~ repo "/tools/cakebench_noise.py monitor" ||
 			$0 ~ bench "/bench/scx_cake_noise_sampler.py" ||
 			$0 ~ bench "/bench/scx_cake_bench_capture.sh" {
@@ -2094,6 +2085,43 @@ USAGE
     echo "noise output: ${out_dir}/noise"
 }
 
+run_goal_score_command() {
+    python3 "${SCX_REPO_ROOT}/tools/cakebench_goal_score.py" "$@"
+}
+
+run_mutation_report_command() {
+    python3 "${SCX_REPO_ROOT}/tools/cakebench_mutation_report.py" "$@"
+}
+
+run_bpf_audit_command() {
+    python3 "${SCX_REPO_ROOT}/tools/cakebench_bpf_audit.py" "$@"
+}
+
+run_stop_active_command() {
+    export SCX_CAKE_AI_NONINTERACTIVE=1
+    if [[ "${EUID}" -ne 0 ]]; then
+        sudo_reexec stop-bench "$@"
+    fi
+    stop_benchmark_helper_processes 2 || true
+    stop_active_sched_ext_for_preset
+    stop_benchmark_helper_processes 2 || true
+}
+
+run_matrix_command() {
+    local subcommand="$1"
+    shift
+
+    if has_arg --help "$@" || has_arg -h "$@"; then
+        exec "${BENCH_LAUNCHER}" "${subcommand}" "$@"
+    fi
+
+    export SCX_CAKE_AI_NONINTERACTIVE=1
+    if [[ "${EUID}" -ne 0 ]]; then
+        sudo_reexec "${subcommand}" "$@"
+    fi
+    exec "${BENCH_LAUNCHER}" "${subcommand}" "$@"
+}
+
 if [[ ! -x "${BENCH_LAUNCHER}" ]]; then
     echo "error: benchmark launcher not found: ${BENCH_LAUNCHER}" >&2
     echo "set SCX_CAKE_BENCH_REPO=/path/to/scx_cake_bench_assets if it moved" >&2
@@ -2147,6 +2175,32 @@ if [[ "$#" -gt 0 ]]; then
         noise|noise-check|host-noise)
             shift
             run_noise_command "$@"
+            exit $?
+            ;;
+        goal-score|goal_score|goalscore)
+            shift
+            run_goal_score_command "$@"
+            exit $?
+            ;;
+        mutation-report|mutation_report|mutation-summary|mutation_summary)
+            shift
+            run_mutation_report_command "$@"
+            exit $?
+            ;;
+        bpf-audit|bpf_audit|codegen-audit|codegen_audit)
+            shift
+            run_bpf_audit_command "$@"
+            exit $?
+            ;;
+        stop-bench|stop-active|stop_active)
+            shift
+            run_stop_active_command "$@"
+            exit $?
+            ;;
+        cake|all|native|suite|release-matrix)
+            subcommand="$1"
+            shift
+            run_matrix_command "${subcommand}" "$@"
             exit $?
             ;;
         --bench)
