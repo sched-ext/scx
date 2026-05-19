@@ -932,30 +932,65 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 static
 int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 {
-	struct cpu_ctx *cpuc, *cpuc_cur;
+	struct cpu_ctx *cpuc;
 	u64 dsq_id;
 	s32 cpu;
 
-	cpuc_cur = get_cpu_ctx();
-	if (!taskc || !cpuc_cur) {
+	if (!taskc) {
 		scx_bpf_error("Failed to lookup a task context: %d", p->pid);
 		return 0;
 	}
 
 	/*
-	 * Calculate when a task can be scheduled.
+	 * Note that we don't need to calculate p->scx.dsq_vtime again
+	 * since it was already calculated and assigned to p->scx.dsq_vtime
+	 * before the task was throttled.
 	 */
-	p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 
 	/*
-	 * Fetch the chosen CPU and DSQ for the task.
+	 * Validate the cached CPU choice before dispatch.
+	 *
+	 * sched_setaffinity() on a runnable SCX task runs a four-step
+	 * sched_change sequence under the task's rq lock:
+	 *   1. ops.dequeue (lavd_dequeue) -- for a put-aside task, our
+	 *      scx_cgroup_bw_cancel clears taskc->atq.
+	 *   2. set_cpus_allowed_common() writes p->cpus_mask, so the
+	 *      contents of *p->cpus_ptr now reflect the new affinity.
+	 *   3. ops.set_cpumask (lavd_set_cpumask) fires, but any refresh
+	 *      path would gate on atq != NULL, which is now false after
+	 *      step 1.
+	 *   4. ops.enqueue (lavd_enqueue) recomputes
+	 *      taskc->suggested_cpu_id against the new mask and put_aside
+	 *      the task back into the BTQ.
+	 *
+	 * enqueue_cb() runs from the BTQ drain (cbw_drain_btq_batch ->
+	 * scx_cgroup_bw_enqueue_cb) holding only the atq spinlock, NOT
+	 * the task's rq lock. If the drain has already popped this taskc
+	 * (clearing atq) and a sched_setaffinity() on another CPU
+	 * interleaves, p->cpus_ptr (updated at step 2) may already be
+	 * the new mask while taskc->suggested_cpu_id (only refreshed at
+	 * step 4) is still the stale pre-change pick.
+	 *
+	 * Fall back to scx_bpf_task_cpu(p) when the cached pick is no
+	 * longer in p->cpus_ptr -- the kernel keeps task_cpu consistent
+	 * with affinity. A full pick_idle_cpu() refresh would be more
+	 * accurate but extends the call chain (lavd_dispatch ->
+	 * scx_cgroup_bw_reenqueue -> cbw_reenqueue_cgroup ->
+	 * cbw_drain_btq_batch -> enqueue_cb -> pick_idle_cpu) past the
+	 * BPF verifier's combined-stack budget.
 	 */
 	cpu = taskc->suggested_cpu_id;
+	if (cpu < 0 || cpu >= nr_cpu_ids ||
+	    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		cpu = scx_bpf_task_cpu(p);
+
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return 0;
 	}
+	taskc->suggested_cpu_id = cpu;
+	taskc->cpdom_id = cpuc->cpdom_id;
 
 	/*
 	 * Account effectively pinned tasks (permanent pinning or
@@ -987,9 +1022,12 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	account_queued_load(taskc, cpuc->cpdom_id);
 
 	/*
-	 * Kick the target CPU if it is idle.
+	 * Kick the target CPU if it is idle. Test-and-clear avoids
+	 * waking a CPU that is already busy with another task and
+	 * generating a spurious reschedule IPI.
 	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (scx_bpf_test_and_clear_cpu_idle(cpu))
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	return 0;
 }
 

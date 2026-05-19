@@ -200,9 +200,9 @@ struct task_ctx {
 	u16	lat_cri_waker;		/* waker's latency criticality */
 	u16	lat_cri_wakee;		/* wakee's latency criticality */
 	u16	perf_cri;		/* performance criticality of a task */
-	u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
-	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
-	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
+	volatile u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
+	volatile u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
+	volatile s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	u32	__pad0;
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	run_freq;		/* scheduling frequency in a second */
