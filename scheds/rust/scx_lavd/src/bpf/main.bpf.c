@@ -958,11 +958,26 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	}
 
 	/*
-	 * Mirror the lavd_enqueue() accounting: count effectively pinned
-	 * tasks (permanent or migrate_disable) for slice shrinking.
+	 * Account effectively pinned tasks (permanent pinning or
+	 * migrate_disable) so nr_pinned_tasks drives slice shrinking.
+	 *
+	 * For tasks that hit the BTQ, this is the first increment:
+	 * lavd_enqueue() returns early at its cgroup_throttled() check
+	 * before reaching its own pinned-accounting block, so the
+	 * throttled path skips the increment there. enqueue_cb() (which
+	 * runs when the BTQ drains) is where it actually gets counted.
+	 *
+	 * pinned_cpu_id is the single marker for "this task currently
+	 * holds +1 in cpuc[pinned_cpu_id].nr_pinned_tasks", paired with
+	 * the matching decrement in lavd_quiescent(). The
+	 * pinned_cpu_id == -ENOENT guard ensures one increment per
+	 * accounting cycle and defends against the rare sequence where
+	 * a prior non-throttled lavd_enqueue() already set the marker.
 	 */
-	if (is_effectively_pinned(taskc))
+	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
+		taskc->pinned_cpu_id = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+	}
 
 	/*
 	 * Enqueue the task to a DSQ.
@@ -1550,17 +1565,25 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	cpuc->flags = 0;
 
 	/*
-	 * Mirror the lavd_enqueue() increment: decrement when the task
-	 * is effectively pinned (permanent pinning or migrate_disable)
-	 * and was tracked at enqueue time (pinned_cpu_id set).
+	 * Mirror the lavd_enqueue() / enqueue_cb() increment. Decrement
+	 * on cpuc[pinned_cpu_id] -- the CPU recorded when the increment
+	 * happened -- not on the current task_cpu. The two can briefly
+	 * disagree when an enqueue_cb() pick differs from the kernel's
+	 * eventual task_cpu (e.g., the BTQ-drain race with
+	 * sched_setaffinity). Pairing the decrement with the recorded
+	 * pinned_cpu_id keeps the per-CPU nr_pinned_tasks exact.
 	 */
 	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id != -ENOENT)) {
-		__sync_fetch_and_sub(&cpuc->nr_pinned_tasks, 1);
-		taskc->pinned_cpu_id = -ENOENT;
+		struct cpu_ctx *cpuc_pinned =
+			get_cpu_ctx_id(taskc->pinned_cpu_id);
 
-		debugln("%d [%d] -- %s:%d -- %s:%d", cpuc->cpu_id,
-			cpuc->nr_pinned_tasks, p->comm, p->pid, __func__,
-			__LINE__);
+		if (cpuc_pinned) {
+			__sync_fetch_and_sub(&cpuc_pinned->nr_pinned_tasks, 1);
+			debugln("%d [%d] -- %s:%d -- %s:%d", cpuc_pinned->cpu_id,
+				cpuc_pinned->nr_pinned_tasks, p->comm, p->pid,
+				__func__, __LINE__);
+		}
+		taskc->pinned_cpu_id = -ENOENT;
 	}
 
 	/*
