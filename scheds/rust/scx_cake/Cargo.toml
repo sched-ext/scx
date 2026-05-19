@@ -1,6 +1,6 @@
 [package]
 name = "scx_cake"
-version = "1.1.1"
+version = "1.1.2"
 authors = ["RitzDaCat"]
 edition = "2021"
 description = "A sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling"
