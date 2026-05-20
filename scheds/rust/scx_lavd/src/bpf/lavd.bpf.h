@@ -560,6 +560,11 @@ extern const volatile bool	no_wake_sync;
 extern const volatile bool	no_slice_boost;
 extern const volatile u8	verbose;
 
+/* Cache-aware scheduling knobs (declared in main.bpf.c). */
+extern const volatile bool	cache_aware;
+extern const volatile u32	cache_aware_max_threads;
+extern const volatile u64	llc_size_pages;
+
 #define debugln(fmt, ...)						\
 ({									\
 	if (verbose > 0)						\

@@ -737,6 +737,50 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/* NOTE: There is a sticky domain. */
 
 	/*
+	 * Cache-aware: if the task has a valid preferred domain that differs
+	 * from the sticky domain and the affinity is strong enough, check
+	 * whether there is an idle CPU in the preferred domain before falling
+	 * through to the normal sticky logic.  This inserts a new priority
+	 * tier between "sticky domain" and "any active domain" without
+	 * disturbing any of the existing ordering guarantees.
+	 *
+	 * We only do this when:
+	 *  1. cache_aware is enabled and the task is eligible.
+	 *  2. The preferred domain is different from the sticky domain
+	 *     (same domain: normal sticky path is already optimal).
+	 *  3. Affinity exceeds LAVD_CA_ENQUEUE_THRESH (50%) – weak affinity
+	 *     is not worth paying the extra cache miss on the waker side.
+	 *  4. The preferred domain is an active domain (not inactive/overflow).
+	 */
+	if (cache_aware &&
+	    ctx->taskc->preferred_cpdom_id != (u8)LAVD_CA_UNSET_CPDOM &&
+	    ctx->taskc->preferred_cpdom_id != (u8)sticky_cpdom &&
+	    ctx->taskc->preferred_cpdom_affinity >= LAVD_CA_ENQUEUE_THRESH) {
+		s64 pref_cpdom = ctx->taskc->preferred_cpdom_id;
+		struct cpdom_ctx *pref_cpdc;
+
+		pref_cpdc = MEMBER_VPTR(cpdom_ctxs, [pref_cpdom]);
+		if (pref_cpdc && pref_cpdc->is_valid && pref_cpdc->nr_active_cpus) {
+			bool dummy_idle = false;
+			s32 pref_cpu = pick_idle_cpu_at_cpdom(ctx, pref_cpdom,
+							      SCX_PICK_IDLE_CORE,
+							      &dummy_idle);
+			if (pref_cpu >= 0) {
+				/*
+				 * Found a fully idle core in the preferred
+				 * domain; migrate and adopt the new sticky
+				 * domain for subsequent CPO selection.
+				 */
+				cpu = pref_cpu;
+				*is_idle = dummy_idle;
+				sticky_cpdom = pref_cpdom;
+				goto unlock_out;
+			}
+		}
+	}
+	/* NOTE: preferred-domain fast-path missed or not applicable. */
+
+	/*
 	 * If there is no idle CPU, stay on the sticky CPU or domain.
 	 */
 	idle_cpumask = scx_bpf_get_idle_cpumask();
