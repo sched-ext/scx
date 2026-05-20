@@ -243,6 +243,19 @@ const volatile u64	lb_local_dsq_util_wall = 0;
  */
 const volatile u64	pinned_slice_ns = 0;
 
+/*
+ * Cache-aware scheduling knobs.
+ *
+ * cache_aware: master switch (default off).
+ * cache_aware_max_threads: tasks whose process has more threads than this
+ *   are excluded (complex sharing patterns make LLC preference unreliable).
+ * llc_size_pages: LLC size in pages, set by userspace from sysfs; used by
+ *   the over-aggregation guard in step 4.
+ */
+const volatile bool	cache_aware = false;
+const volatile u32	cache_aware_max_threads = 16;
+const volatile u64	llc_size_pages = 0;
+
 static volatile u64	nr_cpus_big;
 
 /*
@@ -543,6 +556,80 @@ static void account_task_runtime(struct task_struct *p,
 		scx_cgroup_bw_consume(taskc->cgrp_id, task_time_wall, (u64)taskc);
 }
 
+/*
+ * is_cache_aware_eligible - check whether cache-aware logic applies to @p.
+ *
+ * Returns false for:
+ *   - tasks whose process is multi-threaded beyond cache_aware_max_threads
+ *   - kernel threads (no mm)
+ */
+static __always_inline bool is_cache_aware_eligible(struct task_struct *p)
+{
+	struct task_struct *leader;
+	int nr_threads;
+
+	if (!cache_aware)
+		return false;
+
+	/* Kernel threads have no LLC footprint worth tracking. */
+	if (!p->mm)
+		return false;
+
+	/*
+	 * Processes with many threads tend to share data across all LLCs;
+	 * forcing them onto one LLC hurts rather than helps.
+	 */
+	leader = p->group_leader;
+	if (!leader)
+		return false;
+	nr_threads = leader->nr_threads;
+	if (nr_threads > (int)cache_aware_max_threads)
+		return false;
+
+	return true;
+}
+
+/*
+ * update_preferred_cpdom - update the task's preferred LLC domain EWMA.
+ *
+ * Called from update_stat_for_stopping() after every scheduling slice.
+ * Uses calc_asym_avg(): fast-rise when on preferred domain, slow-decay
+ * when migrated away.
+ *
+ * When affinity drops below LAVD_CA_SWITCH_THRESH (25%) the preferred
+ * domain is switched to the current cpdom, with affinity reset to 50%
+ * so the next few slices settle the new preference.
+ */
+static __always_inline void update_preferred_cpdom(task_ctx *taskc,
+						   struct cpu_ctx *cpuc)
+{
+	u8 cur_cpdom = cpuc->cpdom_id;
+	u64 on_preferred;
+
+	/*
+	 * Guard: preferred_cpdom_id is initialised in lavd_running().
+	 * Skip if the first lavd_running() hasn't fired yet.
+	 */
+	if (taskc->preferred_cpdom_id == (u8)LAVD_CA_UNSET_CPDOM)
+		return;
+
+	on_preferred = (cur_cpdom == taskc->preferred_cpdom_id) ?
+		       LAVD_SCALE : 0;
+
+	taskc->preferred_cpdom_affinity =
+		calc_asym_avg(taskc->preferred_cpdom_affinity, on_preferred);
+
+	/*
+	 * Affinity has decayed: adopt the current domain as the new preferred
+	 * one.  Start with 50% so a single unlucky migration doesn't
+	 * immediately flip the preference again.
+	 */
+	if (taskc->preferred_cpdom_affinity < LAVD_CA_SWITCH_THRESH) {
+		taskc->preferred_cpdom_id = cur_cpdom;
+		taskc->preferred_cpdom_affinity = LAVD_SCALE / 2;
+	}
+}
+
 static void update_stat_for_stopping(struct task_struct *p,
 				     task_ctx *taskc,
 				     struct cpu_ctx *cpuc)
@@ -583,6 +670,13 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * for a lock holder to be boosted only once.
 	 */
 	reset_lock_futex_boost(taskc, cpuc);
+
+	/*
+	 * Update the task's preferred LLC domain affinity.
+	 * Called last so it sees the fully-updated taskc.
+	 */
+	if (is_cache_aware_eligible(p))
+		update_preferred_cpdom(taskc, cpuc);
 }
 
 static void update_stat_for_refill(struct task_struct *p,
@@ -1441,6 +1535,19 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	update_stat_for_running(p, taskc, cpuc, now);
 
 	/*
+	 * Cache-aware preferred LLC domain initialisation.
+	 *
+	 * On the very first lavd_running() for this task the field is still
+	 * LAVD_CA_UNSET_CPDOM.  Pin it to the current cpdom with full
+	 * affinity so subsequent slices have a valid baseline to EWMA against.
+	 */
+	if (cache_aware && is_cache_aware_eligible(p) &&
+	    taskc->preferred_cpdom_id == (u8)LAVD_CA_UNSET_CPDOM) {
+		taskc->preferred_cpdom_id = cpuc->cpdom_id;
+		taskc->preferred_cpdom_affinity = LAVD_SCALE;
+	}
+
+	/*
 	 * Calculate the task's CPU performance target and update if the new
 	 * target is higher than the current one. The CPU's performance target
 	 * urgently increases according to task's target but it decreases
@@ -1919,6 +2026,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
+
+	/*
+	 * Cache-aware scheduling: mark preferred domain as uninitialised.
+	 * lavd_running() will set the real value on the first schedule.
+	 */
+	taskc->preferred_cpdom_id = (u8)LAVD_CA_UNSET_CPDOM;
+	taskc->preferred_cpdom_affinity = 0;
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);

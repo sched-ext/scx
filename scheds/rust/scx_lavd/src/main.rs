@@ -225,6 +225,19 @@ struct Opts {
     #[clap(long = "enable-cpu-bw", action = clap::ArgAction::SetTrue)]
     enable_cpu_bw: bool,
 
+    /// Enable cache-aware scheduling: track each task's preferred LLC domain
+    /// and bias CPU selection / load-balance decisions to keep tasks on the
+    /// LLC where they are hottest.  Disabled by default.
+    #[clap(long = "cache-aware", action = clap::ArgAction::SetTrue)]
+    cache_aware: bool,
+
+    /// Maximum thread count for a process to be eligible for cache-aware
+    /// scheduling.  Processes with more threads are excluded because their
+    /// working-set is typically spread across all LLCs anyway.
+    /// Default: 16.
+    #[clap(long = "cache-aware-max-threads", default_value = "16")]
+    cache_aware_max_threads: u32,
+
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
@@ -698,6 +711,33 @@ impl<'a> Scheduler<'a> {
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
+        rodata.cache_aware = opts.cache_aware;
+        rodata.cache_aware_max_threads = opts.cache_aware_max_threads;
+
+        // Provide LLC size in pages so the BPF over-aggregation guard can
+        // compare a task's RSS against the LLC capacity.  Read from the
+        // first online CPU's cache info via sysfs; fall back to 0 (guard
+        // disabled) if unavailable.
+        rodata.llc_size_pages = {
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+            let llc_bytes: u64 = std::fs::read_to_string(
+                "/sys/devices/system/cpu/cpu0/cache/index3/size",
+            )
+            .ok()
+            .and_then(|s| {
+                let s = s.trim();
+                // sysfs reports e.g. "32768K"
+                if let Some(kb) = s.strip_suffix('K') {
+                    kb.parse::<u64>().ok().map(|v| v * 1024)
+                } else if let Some(mb) = s.strip_suffix('M') {
+                    mb.parse::<u64>().ok().map(|v| v * 1024 * 1024)
+                } else {
+                    s.parse::<u64>().ok()
+                }
+            })
+            .unwrap_or(0);
+            if page_size > 0 { llc_bytes / page_size } else { 0 }
+        };
 
         if !ksym_exists("scx_group_set_bandwidth").unwrap() {
             skel.struct_ops.lavd_ops_mut().cgroup_set_bandwidth = std::ptr::null_mut();

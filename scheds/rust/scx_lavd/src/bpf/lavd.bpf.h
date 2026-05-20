@@ -235,6 +235,22 @@ struct task_ctx {
 	u32	util_est;		/* Estimated task util using ravg duty cycle */
 	struct ravg_data avg_util_ravg;	/* Running average of task utilization using ravg */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
+
+	/* --- cache-aware preferred LLC domain tracking --- */
+	/*
+	 * preferred_cpdom_id: the LLC compute domain where this task has been
+	 * running most recently.  Initialised to LAVD_CA_UNSET_CPDOM (0xFF)
+	 * at task creation and set on the first lavd_running() call.
+	 *
+	 * preferred_cpdom_affinity: EWMA (LAVD_SHIFT-scaled) of the fraction
+	 * of time this task runs on its preferred domain.  Ranges [0, 1024].
+	 * Updated in update_preferred_cpdom() called from lavd_stopping().
+	 * When affinity drops below LAVD_CA_SWITCH_THRESH (25%) the preferred
+	 * domain is switched to the current domain.
+	 */
+	u8	preferred_cpdom_id;	  /* preferred LLC domain, LAVD_CA_UNSET_CPDOM = unset */
+	u8	__ca_pad[3];		  /* explicit padding for alignment */
+	u32	preferred_cpdom_affinity; /* EWMA [0, LAVD_SCALE] */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 /*

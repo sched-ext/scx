@@ -42,6 +42,17 @@ enum {
 						 {HI: performance-Hungry, performance-Insensitive}
 						 {BT: Big, liTtle}
 						 {EG: Eligible, Greedy} */
+
+	/*
+	 * Cache-aware scheduling constants (LAVD_CA_*)
+	 *
+	 * preferred_cpdom_affinity is a LAVD_SHIFT-scaled EWMA of "fraction of
+	 * time spent on the preferred LLC domain".  1024 = LAVD_SCALE = 100%.
+	 */
+	LAVD_CA_UNSET_CPDOM		= 0xFF,  /* preferred_cpdom_id sentinel: not yet initialised */
+	LAVD_CA_SWITCH_THRESH		= 256,   /* 25% – switch preferred domain when affinity drops here */
+	LAVD_CA_RESIST_THRESH		= 614,   /* 60% – resist cross-domain migration above this */
+	LAVD_CA_ENQUEUE_THRESH		= 512,   /* 50% – bias enqueue to preferred domain above this */
 };
 
 /*
@@ -162,6 +173,3 @@ enum {
 
 struct power_arg {
 	s32	power_mode;
-};
-
-#endif /* __INTF_H */
