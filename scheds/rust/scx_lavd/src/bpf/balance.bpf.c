@@ -294,8 +294,24 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 	 * in this domain.
 	 */
 	if (use_cpdom_dsq()) {
-		pick_dsq_id = cpdom_to_dsq(cpdomc->id);
-		highest_queued = scx_bpf_dsq_nr_queued(pick_dsq_id);
+		u64 dsq1 = cpdom_to_dsq(cpdomc->id);
+		u64 dsq2 = cpdom_to_turb_dsq(cpdomc->id);
+		s32 q1 = scx_bpf_dsq_nr_queued(dsq1);
+		s32 q2 = scx_bpf_dsq_nr_queued(dsq2);
+
+		/*
+		 * When the counts tie, prefer the non-turbulent DSQ -- that's
+		 * where latency-critical tasks live, so draining it first
+		 * matches the existing priority of non-turbulent over turbulent
+		 * within consume order.
+		 */
+		if (q1 >= q2) {
+			pick_dsq_id = dsq1;
+			highest_queued = q1;
+		} else {
+			pick_dsq_id = dsq2;
+			highest_queued = q2;
+		}
 	}
 
 	/*
