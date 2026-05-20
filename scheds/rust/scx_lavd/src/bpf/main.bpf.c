@@ -560,8 +560,13 @@ static void account_task_runtime(struct task_struct *p,
  * is_cache_aware_eligible - check whether cache-aware logic applies to @p.
  *
  * Returns false for:
- *   - tasks whose process is multi-threaded beyond cache_aware_max_threads
- *   - kernel threads (no mm)
+ *   - kernel threads (no mm → no LLC footprint to track)
+ *   - tasks whose process exceeds cache_aware_max_threads thread count
+ *   - tasks whose process virtual footprint exceeds 4× the LLC size
+ *     (over-aggregation guard, step 4)
+ *
+ * Fast-path predicate; must be cheap enough to call on every enqueue,
+ * stopping, and running event.
  */
 static __always_inline bool is_cache_aware_eligible(struct task_struct *p)
 {
@@ -585,6 +590,21 @@ static __always_inline bool is_cache_aware_eligible(struct task_struct *p)
 	nr_threads = leader->nr_threads;
 	if (nr_threads > (int)cache_aware_max_threads)
 		return false;
+
+	/*
+	 * Over-aggregation guard: tasks whose virtual footprint exceeds
+	 * 4× the LLC size are unlikely to benefit from LLC affinity.
+	 * total_vm is a conservative over-estimate of RSS (always >= RSS)
+	 * and is cheap to read without per-page accounting.
+	 * The 4× factor gives headroom for anonymous mappings that are
+	 * sparsely faulted.  llc_size_pages == 0 disables this check.
+	 */
+	if (llc_size_pages > 0) {
+		unsigned long total_vm = BPF_CORE_READ(p->mm, total_vm);
+
+		if (total_vm > llc_size_pages * 4)
+			return false;
+	}
 
 	return true;
 }
