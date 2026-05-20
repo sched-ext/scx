@@ -988,10 +988,53 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 *
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
+	 *
+	 * Cache-aware step 3: if the task was placed on a domain that differs
+	 * from its preferred LLC domain, and the affinity exceeds the resist
+	 * threshold (60%), re-route it to the preferred domain's cpdom DSQ.
+	 * This prevents the stealer/stealee load balancer from constantly
+	 * pulling the task away from its hot LLC.  Conditions that prevent
+	 * the redirect:
+	 *   - direct dispatch (task is already going to an idle CPU): skip;
+	 *     direct dispatch is low-cost and we trust step 2 already picked
+	 *     the preferred domain when one was available.
+	 *   - per-cpu DSQ mode: redirect would be a no-op anyway.
+	 *   - task is pinned / affinitised to a specific domain.
 	 */
 	if (can_direct_dispatch(cpuc, is_idle)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
+	} else if (cache_aware &&
+		   is_cache_aware_eligible(p) &&
+		   !use_per_cpu_dsq() &&
+		   !test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) &&
+		   !test_task_flag(taskc, LAVD_FLAG_DOMAIN_PINNED) &&
+		   taskc->preferred_cpdom_id != (u8)LAVD_CA_UNSET_CPDOM &&
+		   taskc->preferred_cpdom_id != taskc->cpdom_id &&
+		   taskc->preferred_cpdom_affinity >= LAVD_CA_RESIST_THRESH) {
+		/*
+		 * Redirect to preferred domain's DSQ.  Keep the same vtime
+		 * so relative scheduling order is preserved.  A CPU in the
+		 * preferred domain will pick this up via consume_task().
+		 */
+		u8 pref_id = taskc->preferred_cpdom_id;
+		struct cpdom_ctx *pref_cpdc = MEMBER_VPTR(cpdom_ctxs, [pref_id]);
+
+		if (pref_cpdc && pref_cpdc->is_valid && pref_cpdc->nr_active_cpus) {
+			dsq_id = cpdom_to_dsq(pref_id);
+			scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+						 p->scx.dsq_vtime, enq_flags);
+			/*
+			 * Update cpdom_id so downstream code (preemption,
+			 * introspection) uses the actual destination domain.
+			 */
+			taskc->cpdom_id = pref_id;
+		} else {
+			/* Preferred domain inactive; fall back to normal path. */
+			dsq_id = get_target_dsq_id(p, cpuc, taskc);
+			scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+						 p->scx.dsq_vtime, enq_flags);
+		}
 	} else {
 		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
