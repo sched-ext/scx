@@ -523,33 +523,28 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 }
 
 __hidden
-bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
+bool consume_task(u64 cpdom_id)
 {
 	struct cpdom_ctx *cpdomc;
 	struct cpu_ctx *cpuc;
-	u64 cpdom_turb_dsq_id;
-	bool turbulent;
+	u64 cpu_dsq_id, cpdom_dsq_id, cpdom_turb_dsq_id;
 	struct dsq_entry dsqs[3];
+	int i;
 
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 	if (!cpdomc) {
-		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_to_cpdom(cpdom_dsq_id));
+		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
 		return false;
 	}
 
-	cpdom_turb_dsq_id = cpdom_to_turb_dsq(dsq_to_cpdom(cpdom_dsq_id));
-
-	/*
-	 * Determine if this CPU is turbulent (high IRQ/steal time).
-	 * A turbulent CPU is a poor home for latency-critical tasks, which
-	 * live on the steady DSQ, so it primarily consumes the turbulent
-	 * DSQ (non-latency-critical tasks). A steady CPU is not IRQ-
-	 * disturbed and consumes from all DSQs.
-	 */
 	cpuc = get_cpu_ctx();
-	if (!cpuc)
+	if (!cpuc) {
 		return false;
-	turbulent = is_turbulent_cpu(cpuc);
+	}
+
+	cpu_dsq_id        = cpu_to_dsq(cpuc->cpu_id);
+	cpdom_dsq_id      = cpdom_to_dsq(cpdom_id);
+	cpdom_turb_dsq_id = cpdom_to_turb_dsq(cpdom_id);
 
 	/*
 	 * If the current compute domain is a stealer, try to steal
@@ -560,34 +555,34 @@ bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 		goto x_domain_migration_out;
 
 	/*
-	 * Collect eligible DSQs and consume in lowest-vtime-first order.
-	 * A steady CPU always sees the steady cpdom DSQ. A turbulent CPU
-	 * pulls latency-critical tasks off it only to prevent starvation:
-	 * when it has more queued tasks than the turbulent DSQ, or there
-	 * is no steady CPU to drain it.
+	 * Collect the DSQs this CPU may consume and take them in
+	 * lowest-vtime-first order. Each entry is seeded with its head-task
+	 * vtime, or U64_MAX when this CPU should not consume it (sorts last
+	 * and is skipped). can_consume_steady_dsq() gates the steady cpdom
+	 * DSQ on the steady/turbulent policy.
 	 */
-	dsqs[0] = (struct dsq_entry){ cpu_dsq_id,       U64_MAX, use_per_cpu_dsq() };
-	dsqs[1] = (struct dsq_entry){ cpdom_dsq_id,     U64_MAX, use_cpdom_dsq() &&
-		(!turbulent ||
-		 scx_bpf_dsq_nr_queued(cpdom_dsq_id) > scx_bpf_dsq_nr_queued(cpdom_turb_dsq_id) ||
-		 cpdomc->nr_steady_cpus == 0) };
-	dsqs[2] = (struct dsq_entry){ cpdom_turb_dsq_id, U64_MAX, use_cpdom_dsq() };
-
-	if (dsqs[0].eligible)
-		dsqs[0].vtime = peek_dsq_vtime(dsqs[0].dsq_id);
-	if (dsqs[1].eligible)
-		dsqs[1].vtime = peek_dsq_vtime(dsqs[1].dsq_id);
-	if (dsqs[2].eligible)
-		dsqs[2].vtime = peek_dsq_vtime(dsqs[2].dsq_id);
+	dsqs[0] = (struct dsq_entry){
+			cpu_dsq_id,
+			use_per_cpu_dsq() ?
+				peek_dsq_vtime(cpu_dsq_id) : U64_MAX };
+	dsqs[1] = (struct dsq_entry){
+			cpdom_dsq_id,
+			(use_cpdom_dsq() && can_consume_steady_dsq(cpdomc)) ?
+				peek_dsq_vtime(cpdom_dsq_id) : U64_MAX };
+	dsqs[2] = (struct dsq_entry){
+			cpdom_turb_dsq_id,
+			use_cpdom_dsq() ?
+				peek_dsq_vtime(cpdom_turb_dsq_id) : U64_MAX };
 
 	sort_dsqs(&dsqs[0], &dsqs[1], &dsqs[2]);
 
-	if (dsqs[0].eligible && consume_dsq(cpdomc, dsqs[0].dsq_id))
-		return true;
-	if (dsqs[1].eligible && consume_dsq(cpdomc, dsqs[1].dsq_id))
-		return true;
-	if (dsqs[2].eligible && consume_dsq(cpdomc, dsqs[2].dsq_id))
-		return true;
+	/* Consume in lowest-vtime-first order; U64_MAX vtime marks skip. */
+	for (i = 0; i < 3; i++) {
+		if (dsqs[i].vtime != U64_MAX &&
+		    consume_dsq(cpdomc, dsqs[i].dsq_id)) {
+			return true;
+		}
+	}
 
 	/*
 	 * If there is no task in the associated DSQ, traverse neighbor

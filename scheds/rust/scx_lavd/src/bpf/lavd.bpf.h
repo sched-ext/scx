@@ -809,8 +809,8 @@ extern struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent 
 
 struct dsq_entry {
 	u64 dsq_id;
-	u64 vtime;
-	bool eligible;
+	u64 vtime;	/* head-task vtime, or U64_MAX when this CPU should
+			 * not consume this DSQ (sorts last, skipped). */
 };
 
 u64 peek_dsq_vtime(u64 dsq_id);
@@ -922,7 +922,7 @@ struct pick_ctx {
 s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle);
 
-bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id);
+bool consume_task(u64 cpdom_id);
 
 extern u64 cur_logical_clk;
 u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc);
