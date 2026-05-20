@@ -512,21 +512,29 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 }
 
 __hidden
-bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
+bool consume_task(u64 cpdom_id)
 {
 	struct cpdom_ctx *cpdomc;
 	struct cpu_ctx *cpuc;
-	u64 cpdom_turb_dsq_id;
+	u64 cpu_dsq_id, cpdom_dsq_id, cpdom_turb_dsq_id;
 	bool turbulent;
 	struct dsq_entry dsqs[3];
+	int i;
 
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 	if (!cpdomc) {
-		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_to_cpdom(cpdom_dsq_id));
+		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
 		return false;
 	}
 
-	cpdom_turb_dsq_id = cpdom_to_turb_dsq(dsq_to_cpdom(cpdom_dsq_id));
+	cpuc = get_cpu_ctx();
+	if (!cpuc) {
+		return false;
+	}
+
+	cpu_dsq_id        = cpu_to_dsq(cpuc->cpu_id);
+	cpdom_dsq_id      = cpdom_to_dsq(cpdom_id);
+	cpdom_turb_dsq_id = cpdom_to_turb_dsq(cpdom_id);
 
 	/*
 	 * Determine if this CPU is turbulent (high IRQ/steal time).
@@ -534,9 +542,6 @@ bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 	 * Turbulent CPUs only consume from the turbulent DSQ
 	 * (which holds non-latency-critical tasks).
 	 */
-	cpuc = get_cpu_ctx();
-	if (!cpuc)
-		return false;
 	turbulent = cpuc->lat_headroom < LAVD_LC_LATENCY_SENSITIVE_THRESH;
 
 	/*
@@ -561,21 +566,21 @@ bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 		 cpdomc->nr_steady_cpus == 0) };
 	dsqs[2] = (struct dsq_entry){ cpdom_turb_dsq_id, U64_MAX, use_cpdom_dsq() };
 
-	if (dsqs[0].eligible)
-		dsqs[0].vtime = peek_dsq_vtime(dsqs[0].dsq_id);
-	if (dsqs[1].eligible)
-		dsqs[1].vtime = peek_dsq_vtime(dsqs[1].dsq_id);
-	if (dsqs[2].eligible)
-		dsqs[2].vtime = peek_dsq_vtime(dsqs[2].dsq_id);
+	/* Peek vtimes of eligible DSQs so sort_dsqs() can order them. */
+	for (i = 0; i < 3; i++) {
+		if (dsqs[i].eligible) {
+			dsqs[i].vtime = peek_dsq_vtime(dsqs[i].dsq_id);
+		}
+	}
 
 	sort_dsqs(&dsqs[0], &dsqs[1], &dsqs[2]);
 
-	if (dsqs[0].eligible && consume_dsq(cpdomc, dsqs[0].dsq_id))
-		return true;
-	if (dsqs[1].eligible && consume_dsq(cpdomc, dsqs[1].dsq_id))
-		return true;
-	if (dsqs[2].eligible && consume_dsq(cpdomc, dsqs[2].dsq_id))
-		return true;
+	/* Consume in lowest-vtime-first order. */
+	for (i = 0; i < 3; i++) {
+		if (dsqs[i].eligible && consume_dsq(cpdomc, dsqs[i].dsq_id)) {
+			return true;
+		}
+	}
 
 	/*
 	 * If there is no task in the associated DSQ, traverse neighbor
