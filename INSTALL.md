@@ -50,9 +50,9 @@ $ sudo pacman -Sy cargo bpf pahole
 
 ## Gentoo Linux
 Make sure you build the kernel with the right configuration, installation
-should be easy:
+should be easy (pahole is required for BTF):
 ```
-emerge sys-kernel/scx
+emerge sys-kernel/scx dev-util/pahole
 ```
 The kernel config used for CI can be used as a reference for required configs.
 See [kernel.config](kernel.config) for reference.
