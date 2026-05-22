@@ -972,16 +972,11 @@ kick_cpu_out:
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	/*
-	 * If there is no idle CPU for an eligible task, try to preempt a task.
-	 * Try to find and kick a victim CPU, which runs a less urgent task,
-	 * from dsq_id. The kick will be done asynchronously.
-	 *
-	 * In the case of the forced enqueue mode, we don't try preemption
-	 * since it is a batch of bulk enqueues.
+	 * If there is no idle CPU, try to preempt a task. Find and kick a
+	 * victim CPU, which runs a less urgent task.
 	 */
 	if (!is_idle && !no_preemption) {
-		try_find_and_kick_victim_cpu(p, taskc, cpu,
-					     cpdom_to_dsq(cpuc->cpdom_id));
+		try_find_and_kick_victim_cpu(p, taskc, cpu, cpuc->cpdom_id);
 	}
 }
 

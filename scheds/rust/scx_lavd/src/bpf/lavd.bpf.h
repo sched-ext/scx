@@ -732,7 +732,7 @@ void preempt_at_tick(struct task_struct *p, struct cpu_ctx *cpuc);
 void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 task_ctx *taskc,
 					 s32 preferred_cpu,
-					 u64 dsq_id);
+					 u64 cpdom_id);
 
 extern volatile bool is_monitored;
 

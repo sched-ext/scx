@@ -340,14 +340,14 @@ __hidden
 void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 task_ctx *taskc,
 					 s32 preferred_cpu,
-					 u64 dsq_id)
+					 u64 cpdom_id)
 {
 	struct preemption_info prm_t, prm_c;
 	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
 	struct cpu_ctx *cpuc_victim;
 	struct cpu_ctx *cpuc_cur = NULL;
-	u64 now, duration_wall, cpdom_id, new_slice_wall = 0;
+	u64 now, duration_wall, new_slice_wall = 0;
 
 	/*
 	 * Don't even try to perform expensive preemption for greedy tasks.
@@ -407,7 +407,6 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 		return;
 
 	cpumask = cpuc_cur->temp_mask;
-	cpdom_id = dsq_to_cpdom(dsq_id);
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
 	if (!cpdomc || !cd_cpumask || !cpumask)
