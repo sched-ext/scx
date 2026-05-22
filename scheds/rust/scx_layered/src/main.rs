@@ -314,9 +314,9 @@ lazy_static! {
 ///   idle CPUs outside the allocated ones. The range can optionally be
 ///   restricted with the "cpus_range" property. The optional
 ///   "idle_confined" flag restricts idle selection to
-///   the layer's CPUs until the layer becomes saturated, providing
-///   Confined-style cache locality under normal load with Grouped-style
-///   overflow under pressure.
+///   the layer's CPUs until the layer becomes saturated or the system
+///   is fully allocated, providing Confined-style cache locality under
+///   normal load with Grouped-style overflow under pressure.
 ///
 /// - Open: Prefer the CPUs which are not occupied by Confined or Grouped
 ///   layers. Tasks in this group will spill into occupied CPUs if there are
@@ -3904,6 +3904,20 @@ impl<'a> Scheduler<'a> {
                     &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx],
                 );
                 updated = true;
+            }
+        }
+
+        // Tell BPF whether all CPUs are allocated.  When the system is
+        // fully allocated, idle_confined layers have nowhere to grow, so
+        // they should be allowed to use open (unprotected) idle CPUs from
+        // other layers.
+        let total_allocated: usize = self.layers.iter().map(|l| l.nr_cpus).sum();
+        let fully_allocated = total_allocated >= total_cpus;
+        for (idx, layer) in self.layers.iter().enumerate() {
+            if !layer_is_open(layer) {
+                self.skel.maps.bss_data.as_mut().unwrap().layers[idx]
+                    .fully_allocated
+                    .write(fully_allocated);
             }
         }
 
