@@ -35,7 +35,7 @@ bool init_idle_i_mask(struct pick_ctx *ctx, const struct cpumask *idle_cpumask)
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		ctx->i_mask = idle_cpumask;
 	else {
-		struct bpf_cpumask *_i_mask = ctx->cpuc_cur->tmp_i_mask;
+		struct bpf_cpumask *_i_mask = ctx->cpuc_cur->i_mask;
 		if (!_i_mask)
 			return false;
 		bpf_cpumask_and(_i_mask, ctx->p->cpus_ptr, idle_cpumask);
@@ -69,8 +69,8 @@ bool init_ao_masks(struct pick_ctx *ctx)
 		return true;
 	}
 
-	ctx->a_mask = ctx->cpuc_cur->tmp_a_mask;
-	ctx->o_mask = ctx->cpuc_cur->tmp_o_mask;
+	ctx->a_mask = ctx->cpuc_cur->a_mask;
+	ctx->o_mask = ctx->cpuc_cur->o_mask;
 	if (!ctx->a_mask || !ctx->o_mask)
 		return false;
 
@@ -106,8 +106,8 @@ bool is_preemption_vulnerable(struct pick_ctx *ctx)
 static __always_inline
 bool repartition_masks_for_latency(struct pick_ctx *ctx)
 {
-	struct bpf_cpumask *steady_set = ctx->cpuc_cur->tmp_a_mask;
-	struct bpf_cpumask *turb_set = ctx->cpuc_cur->tmp_o_mask;
+	struct bpf_cpumask *steady_set = ctx->cpuc_cur->a_mask;
+	struct bpf_cpumask *turb_set = ctx->cpuc_cur->o_mask;
 	struct bpf_cpumask *steady = steady_cpumask;
 
 	if (!steady_set || !turb_set || !steady)
@@ -116,7 +116,7 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 	/*
 	 * Start from the unfiltered active/overflow masks and apply
 	 * affinity if needed. We can't reuse a_mask/o_mask from
-	 * init_ao_masks() because they share the same tmp buffers
+	 * init_ao_masks() because they share the same scratch buffers
 	 * we're about to overwrite.
 	 *
 	 * steady_set = eligible_cpus ∩ steady
@@ -146,10 +146,15 @@ bool repartition_masks_for_latency(struct pick_ctx *ctx)
 static __always_inline
 bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 {
-	ctx->ia_mask = ctx->cpuc_cur->tmp_t_mask;
-	ctx->io_mask = ctx->cpuc_cur->tmp_t2_mask;
-	ctx->iat_mask = ctx->cpuc_cur->tmp_t3_mask;
-	ctx->temp_mask = ctx->cpuc_cur->tmp_l_mask; /* l_mask is no longer used, recycle it. */
+	/*
+	 * temp_mask is also used by find_cpu_in() earlier in pick_idle_cpu(),
+	 * but find_cpu_in()'s caller goes straight to unlock_out, so the
+	 * scratch is free by the time we reach here.
+	 */
+	ctx->ia_mask = ctx->cpuc_cur->ia_mask;
+	ctx->io_mask = ctx->cpuc_cur->io_mask;
+	ctx->iat_mask = ctx->cpuc_cur->iat_mask;
+	ctx->temp_mask = ctx->cpuc_cur->temp_mask;
 	if (!ctx->ia_mask || !ctx->io_mask || !ctx->iat_mask || !ctx->temp_mask)
 		return false;
 
@@ -189,7 +194,7 @@ s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 	/*
 	 * online_src_mask = src_mask ∩ online_mask
 	 */
-	online_src_mask = cpuc_cur->tmp_l_mask;
+	online_src_mask = cpuc_cur->temp_mask;
 	if (!online_src_mask)
 		return -ENOENT;
 
@@ -680,10 +685,20 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 */
 	if (!init_active_ovrflw_masks(ctx))
 		goto err_out;
-	if (is_pinned(ctx->p) || is_migration_disabled(ctx->p)) {
+	/*
+	 * Use effective pinning here so we cover both permanent pinning
+	 * (nr_cpus_allowed == 1) and transient migrate_disable narrowing
+	 * (cpus_ptr weight == 1, cached via ops.set_cpumask).
+	 */
+	if (is_effectively_pinned(ctx->taskc) || is_migration_disabled(ctx->p)) {
 		cpu = ctx->prev_cpu;
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(ctx->active))) {
-			if (is_pinned(ctx->p))
+			/*
+			 * Extend the overflow set only for permanent pinning;
+			 * migrate_disable is transient, so we don't want to
+			 * pollute the overflow set with short-lived restrictions.
+			 */
+			if (is_permanently_pinned(ctx->p))
 				bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
 		}
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);

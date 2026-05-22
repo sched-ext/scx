@@ -666,6 +666,35 @@ static __always_inline void unaccount_queued_load(task_ctx *taskc)
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 }
 
+static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
+{
+	int ret, ret2;
+
+	/*
+	 * Never throttle the scheduler process itself, so it can always
+	 * make forward progress.
+	 */
+	if (p->pid == lavd_pid)
+		return 0;
+
+	/*
+	 * Under CPU bandwidth control using cpu.max, we should first check
+	 * if the cgroup is throttled or not. If not, we will go ahead.
+	 * Otherwise, we should put the task aside for later execution.
+	 *
+	 * Note that we cannot use scx_bpf_task_cgroup() here because this can
+	 * be called only from ops.enqueue() and ops.dispatch().
+	 */
+	ret = scx_cgroup_bw_throttled(taskc->cgrp_id, p, (u64)taskc);
+	if ((ret == -EAGAIN) && put_aside) {
+		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime,
+					       taskc->cgrp_id);
+		if (ret2)
+			return ret2;
+	}
+	return ret;
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -745,9 +774,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			 * dispatch if the cgroup is throttled; the task will
 			 * fall through to ops.enqueue() which puts it in the BTQ.
 			 */
-			if (enable_cpu_bw && (p->pid != lavd_pid) &&
-			    (scx_cgroup_bw_throttled(ictx.taskc->cgrp_id, p,
-						     (u64)ictx.taskc) == -EAGAIN))
+			if (enable_cpu_bw &&
+			    (cgroup_throttled(p, ictx.taskc, false) == -EAGAIN))
 				goto out;
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
@@ -760,30 +788,6 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 out:
 	return cpu_id;
-}
-
-static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
-{
-	int ret, ret2;
-
-	/*
-	 * Under CPU bandwidth control using cpu.max, we should first check
-	 * if the cgroup is throttled or not. If not, we will go ahead.
-	 * Otherwise, we should put the task aside for later execution.
-	 * In the forced mode, we should enqueue the task even if the cgroup
-	 * is throttled (-EAGAIN).
-	 *
-	 * Note that we cannot use scx_bpf_task_cgroup() here because this can
-	 * be called only from ops.enqueue() and ops.dispatch().
-	 */
-	ret = scx_cgroup_bw_throttled(taskc->cgrp_id, p, (u64)taskc);
-	if ((ret == -EAGAIN) && put_aside) {
-		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime,
-					       taskc->cgrp_id);
-		if (ret2)
-			return ret2;
-	}
-	return ret;
 }
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
@@ -864,21 +868,20 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Note that we calculate the task's deadline before checking the
 	 * cgroup, as we need the deadline to put aside the task when the
 	 * cgroup is throttled.
-	 *
-	 * Also, we do not throttle the scheduler process itself to
-	 * guarantee forward progress.
 	 */
-	if (enable_cpu_bw && (p->pid != lavd_pid) &&
-	    (cgroup_throttled(p, taskc, true) == -EAGAIN)) {
+	if (enable_cpu_bw && (cgroup_throttled(p, taskc, true) == -EAGAIN)) {
 		debugln("Task %s[pid%d/cgid%llu] is throttled.",
 			p->comm, p->pid, taskc->cgrp_id);
 		return;
 	}
 
 	/*
-	 * Increase the number of pinned tasks waiting for execution.
+	 * Track tasks that are effectively pinned (permanent pinning or
+	 * migrate_disable) so nr_pinned_tasks drives slice shrinking for
+	 * both cases. The matching decrement in lavd_quiescent() uses the
+	 * same predicate.
 	 */
-	if (is_pinned(p) && (taskc->pinned_cpu_id == -ENOENT)) {
+	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
 		taskc->pinned_cpu_id = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
 
@@ -929,36 +932,87 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 static
 int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 {
-	struct cpu_ctx *cpuc, *cpuc_cur;
+	struct cpu_ctx *cpuc;
 	u64 dsq_id;
 	s32 cpu;
 
-	cpuc_cur = get_cpu_ctx();
-	if (!taskc || !cpuc_cur) {
+	if (!taskc) {
 		scx_bpf_error("Failed to lookup a task context: %d", p->pid);
 		return 0;
 	}
 
 	/*
-	 * Calculate when a task can be scheduled.
+	 * Note that we don't need to calculate p->scx.dsq_vtime again
+	 * since it was already calculated and assigned to p->scx.dsq_vtime
+	 * before the task was throttled.
 	 */
-	p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 
 	/*
-	 * Fetch the chosen CPU and DSQ for the task.
+	 * Validate the cached CPU choice before dispatch.
+	 *
+	 * sched_setaffinity() on a runnable SCX task runs a four-step
+	 * sched_change sequence under the task's rq lock:
+	 *   1. ops.dequeue (lavd_dequeue) -- for a put-aside task, our
+	 *      scx_cgroup_bw_cancel clears taskc->atq.
+	 *   2. set_cpus_allowed_common() writes p->cpus_mask, so the
+	 *      contents of *p->cpus_ptr now reflect the new affinity.
+	 *   3. ops.set_cpumask (lavd_set_cpumask) fires, but any refresh
+	 *      path would gate on atq != NULL, which is now false after
+	 *      step 1.
+	 *   4. ops.enqueue (lavd_enqueue) recomputes
+	 *      taskc->suggested_cpu_id against the new mask and put_aside
+	 *      the task back into the BTQ.
+	 *
+	 * enqueue_cb() runs from the BTQ drain (cbw_drain_btq_batch ->
+	 * scx_cgroup_bw_enqueue_cb) holding only the atq spinlock, NOT
+	 * the task's rq lock. If the drain has already popped this taskc
+	 * (clearing atq) and a sched_setaffinity() on another CPU
+	 * interleaves, p->cpus_ptr (updated at step 2) may already be
+	 * the new mask while taskc->suggested_cpu_id (only refreshed at
+	 * step 4) is still the stale pre-change pick.
+	 *
+	 * Fall back to scx_bpf_task_cpu(p) when the cached pick is no
+	 * longer in p->cpus_ptr -- the kernel keeps task_cpu consistent
+	 * with affinity. A full pick_idle_cpu() refresh would be more
+	 * accurate but extends the call chain (lavd_dispatch ->
+	 * scx_cgroup_bw_reenqueue -> cbw_reenqueue_cgroup ->
+	 * cbw_drain_btq_batch -> enqueue_cb -> pick_idle_cpu) past the
+	 * BPF verifier's combined-stack budget.
 	 */
 	cpu = taskc->suggested_cpu_id;
+	if (cpu < 0 || cpu >= nr_cpu_ids ||
+	    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		cpu = scx_bpf_task_cpu(p);
+
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return 0;
 	}
+	taskc->suggested_cpu_id = cpu;
+	taskc->cpdom_id = cpuc->cpdom_id;
 
 	/*
-	 * Increase the number of pinned tasks waiting for execution.
+	 * Account effectively pinned tasks (permanent pinning or
+	 * migrate_disable) so nr_pinned_tasks drives slice shrinking.
+	 *
+	 * For tasks that hit the BTQ, this is the first increment:
+	 * lavd_enqueue() returns early at its cgroup_throttled() check
+	 * before reaching its own pinned-accounting block, so the
+	 * throttled path skips the increment there. enqueue_cb() (which
+	 * runs when the BTQ drains) is where it actually gets counted.
+	 *
+	 * pinned_cpu_id is the single marker for "this task currently
+	 * holds +1 in cpuc[pinned_cpu_id].nr_pinned_tasks", paired with
+	 * the matching decrement in lavd_quiescent(). The
+	 * pinned_cpu_id == -ENOENT guard ensures one increment per
+	 * accounting cycle and defends against the rare sequence where
+	 * a prior non-throttled lavd_enqueue() already set the marker.
 	 */
-	if (is_pinned(p))
+	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id == -ENOENT)) {
+		taskc->pinned_cpu_id = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+	}
 
 	/*
 	 * Enqueue the task to a DSQ.
@@ -968,9 +1022,12 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	account_queued_load(taskc, cpuc->cpdom_id);
 
 	/*
-	 * Kick the target CPU if it is idle.
+	 * Kick the target CPU if it is idle. Test-and-clear avoids
+	 * waking a CPU that is already busy with another task and
+	 * generating a spurious reschedule IPI.
 	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (scx_bpf_test_and_clear_cpu_idle(cpu))
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	return 0;
 }
 
@@ -1021,8 +1078,7 @@ void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx
 	 * check if the cgroup is throttled before executing
 	 * the task.
 	 */
-	if (enable_cpu_bw && (prev->pid != lavd_pid) &&
-		(cgroup_throttled(prev, taskc_prev, false) == -EAGAIN))
+	if (enable_cpu_bw && (cgroup_throttled(prev, taskc_prev, false) == -EAGAIN))
 		return;
 
 	/*
@@ -1131,10 +1187,12 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (prev) {
 		/*
-		 * If the previous task is pinned to this CPU,
-		 * extend the overflow set and go.
+		 * If the previous task is permanently pinned to this CPU,
+		 * extend the overflow set so future picks keep it serviced.
+		 * Use permanent pinning here: migrate_disable is transient
+		 * and handled in the else-if branch without overflow churn.
 		 */
-		if (is_pinned(prev)) {
+		if (is_permanently_pinned(prev)) {
 			bpf_cpumask_set_cpu(cpu, ovrflw);
 			bpf_rcu_read_unlock();
 			goto consume_out;
@@ -1192,11 +1250,12 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			continue; /* ignore the lookup error */
 
 		/*
-		 * if the task is pinned to this cpu,
-		 * extend the overflow set and go.
-		 * but not on this cpu, try another task.
+		 * If the task is permanently pinned to its CPU, extend the
+		 * overflow set (and kick if it's a remote CPU). Same rationale
+		 * as the prev-task branch above: migrate_disable is transient,
+		 * so its handling is split into the else-if below.
 		 */
-		if (is_pinned(p)) {
+		if (is_permanently_pinned(p)) {
 			new_cpu = scx_bpf_task_cpu(p);
 			if (new_cpu == cpu) {
 				bpf_cpumask_set_cpu(new_cpu, ovrflw);
@@ -1543,15 +1602,25 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	cpuc->flags = 0;
 
 	/*
-	 * Decrease the number of pinned tasks waiting for execution.
+	 * Mirror the lavd_enqueue() / enqueue_cb() increment. Decrement
+	 * on cpuc[pinned_cpu_id] -- the CPU recorded when the increment
+	 * happened -- not on the current task_cpu. The two can briefly
+	 * disagree when an enqueue_cb() pick differs from the kernel's
+	 * eventual task_cpu (e.g., the BTQ-drain race with
+	 * sched_setaffinity). Pairing the decrement with the recorded
+	 * pinned_cpu_id keeps the per-CPU nr_pinned_tasks exact.
 	 */
-	if (is_pinned(p) && (taskc->pinned_cpu_id != -ENOENT)) {
-		__sync_fetch_and_sub(&cpuc->nr_pinned_tasks, 1);
-		taskc->pinned_cpu_id = -ENOENT;
+	if (is_effectively_pinned(taskc) && (taskc->pinned_cpu_id != -ENOENT)) {
+		struct cpu_ctx *cpuc_pinned =
+			get_cpu_ctx_id(taskc->pinned_cpu_id);
 
-		debugln("%d [%d] -- %s:%d -- %s:%d", cpuc->cpu_id,
-			cpuc->nr_pinned_tasks, p->comm, p->pid, __func__,
-			__LINE__);
+		if (cpuc_pinned) {
+			__sync_fetch_and_sub(&cpuc_pinned->nr_pinned_tasks, 1);
+			debugln("%d [%d] -- %s:%d -- %s:%d", cpuc_pinned->cpu_id,
+				cpuc_pinned->nr_pinned_tasks, p->comm, p->pid,
+				__func__, __LINE__);
+		}
+		taskc->pinned_cpu_id = -ENOENT;
 	}
 
 	/*
@@ -2160,31 +2229,31 @@ static s32 init_per_cpu_ctx(u64 now)
 			goto unlock_out;
 		}
 
-		err = calloc_cpumask(&cpuc->tmp_a_mask);
+		err = calloc_cpumask(&cpuc->a_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_o_mask);
+		err = calloc_cpumask(&cpuc->o_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_l_mask);
+		err = calloc_cpumask(&cpuc->temp_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_i_mask);
+		err = calloc_cpumask(&cpuc->i_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_t_mask);
+		err = calloc_cpumask(&cpuc->ia_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_t2_mask);
+		err = calloc_cpumask(&cpuc->io_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->tmp_t3_mask);
+		err = calloc_cpumask(&cpuc->iat_mask);
 		if (err)
 			goto unlock_out;
 
