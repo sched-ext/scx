@@ -36,6 +36,7 @@
 #   scx_smoke_test.py run      [--manifest FILE]     [--duration SEC]
 #                              [--out-dir DIR]       [--schedulers "a b c"]
 #                              [--no-fallback]       [--no-color]
+#                              [--vm [--kernel PATH]]
 #   scx_smoke_test.py list     [--manifest FILE]
 #
 # The default ``run`` flow with no --manifest auto-runs discover first.
@@ -45,6 +46,17 @@
 # PATH. Only one scheduler can be attached at a time, so runs are strictly
 # sequential. A SIGINT/SIGTERM/EXIT handler detaches any leftover scheduler so
 # Ctrl+C never leaves the host in a degraded state.
+#
+# VM mode (--vm): when the host kernel rejects 1.1.x BPF skeletons (e.g. a
+# hardened 6.9 kernel rejecting 6.16-era BPF features), the install pass runs
+# on the host (cargo + crates.io) and the run pass is delegated to a single
+# `vng` (virtme-ng) session booted with the requested --kernel image. Inside
+# the VM the script re-execs itself with --in-vm so it skips the install pass
+# and runs binaries directly as root (no sudo). The output directory is bound
+# RW into the VM via `vng --rwdir` so the per-crate logs and SUMMARY.tsv
+# persist on the host. Requires: `vng` on PATH (apt/pip install virtme-ng);
+# a host-readable kernel image; cargo on the host; sched_ext-capable kernel
+# image (we do NOT require sched_ext on the host kernel in --vm mode).
 
 from __future__ import annotations
 
@@ -327,9 +339,42 @@ class RunContext:
     results: list[RunResult] = field(default_factory=list)
 
 
-def preflight() -> None:
+def preflight(*, in_vm: bool = False, vm_mode: bool = False, kernel_path: Path | None = None) -> None:
+    """Pre-flight checks.
+
+    Three modes (mutually exclusive):
+
+    - bare-metal (default): host kernel must have sched_ext attached and be
+      disabled; passwordless sudo required; cargo on PATH.
+    - vm_mode (``--vm`` on the host): vng must be present; kernel image must
+      exist and be readable; cargo on PATH (install happens on host); host
+      sched_ext is NOT required and we do NOT need sudo (the VM runs as root).
+    - in_vm (``--in-vm`` inside the VM): sched_ext must be present and
+      disabled inside the VM; we run as root so no sudo required; cargo not
+      required (binaries pre-installed on host and visible via 9p overlay).
+    """
     kernel = subprocess.run(["uname", "-r"], capture_output=True, text=True, check=False).stdout.strip()
     print(f"kernel:    {kernel}")
+
+    if vm_mode:
+        if shutil.which("vng") is None:
+            raise SystemExit(
+                f"{Color.wrap(Color.RED, 'ERROR:')} vng (virtme-ng) not found on PATH. "
+                f"Install with 'pip install virtme-ng' or your distro package manager."
+            )
+        if kernel_path is None or not kernel_path.is_file():
+            raise SystemExit(
+                f"{Color.wrap(Color.RED, 'ERROR:')} --kernel must point at a readable "
+                f"kernel image (got: {kernel_path})."
+            )
+        print(f"vm kernel: {kernel_path}")
+        if shutil.which("cargo") is None:
+            raise SystemExit(
+                f"{Color.wrap(Color.RED, 'ERROR:')} cargo not found in PATH "
+                f"(install happens on the host even in --vm mode)."
+            )
+        return
+
     if not Path("/sys/kernel/sched_ext").is_dir():
         raise SystemExit(
             f"{Color.wrap(Color.RED, 'ERROR:')} /sys/kernel/sched_ext missing. "
@@ -342,6 +387,14 @@ def preflight() -> None:
             f"{Color.wrap(Color.RED, 'ERROR:')} sched_ext is already active "
             f"('{state}'). Disable it first."
         )
+    if in_vm:
+        # Inside the VM we're already root (vng default); no sudo needed.
+        if os.geteuid() != 0:
+            raise SystemExit(
+                f"{Color.wrap(Color.RED, 'ERROR:')} --in-vm expected to run as root "
+                f"inside the VM (got uid={os.geteuid()})."
+            )
+        return
     if subprocess.run(["sudo", "-n", "true"], check=False).returncode != 0:
         raise SystemExit(
             f"{Color.wrap(Color.RED, 'ERROR:')} passwordless sudo required "
@@ -432,9 +485,21 @@ def install_one(crate: dict[str, Any], ctx: RunContext) -> str | None:
 _PANIC_RE = re.compile(r"BPF program load failed|panicked at|FATAL|libbpf:.*error")
 
 
-def run_one(crate: dict[str, Any], installed_version: str, ctx: RunContext) -> RunResult:
+def run_one(crate: dict[str, Any], installed_version: str, ctx: RunContext,
+            *, use_sudo: bool = True, bin_dir: Path | None = None) -> RunResult:
+    """Run a single scheduler binary and classify the outcome.
+
+    ``use_sudo``: prefix the timeout-wrapped command with ``sudo`` (bare-metal
+    default). Inside the VM we already run as root, so the in-VM caller sets
+    ``use_sudo=False``.
+
+    ``bin_dir``: directory holding the cargo-installed scheduler binaries.
+    Defaults to ``~/.cargo/bin``. Inside the VM ``$HOME`` is /run/tmp/roothome,
+    so the host user's cargo bin must be passed explicitly.
+    """
     name = crate["name"]
-    bin_path = Path.home() / ".cargo" / "bin" / name
+    bin_root = bin_dir if bin_dir is not None else Path.home() / ".cargo" / "bin"
+    bin_path = bin_root / name
     out_log = ctx.out_dir / f"{name}.stdout.log"
     err_log = ctx.out_dir / f"{name}.stderr.log"
 
@@ -464,7 +529,8 @@ def run_one(crate: dict[str, Any], installed_version: str, ctx: RunContext) -> R
     if extra:
         print(f"  args: {' '.join(shlex.quote(a) for a in extra)}")
 
-    cmd = ["sudo", "timeout", "--signal=TERM", "--kill-after=10", str(run_dur), str(bin_path), *extra]
+    prefix: list[str] = ["sudo"] if use_sudo else []
+    cmd = [*prefix, "timeout", "--signal=TERM", "--kill-after=10", str(run_dur), str(bin_path), *extra]
     ctx.current_sched_bin = bin_path
     t0 = time.monotonic()
     try:
@@ -576,6 +642,76 @@ def print_summary(ctx: RunContext, manifest_version_label: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# VM mode: install on host, then re-exec inside vng for the actual run pass.
+# ---------------------------------------------------------------------------
+
+
+def detect_vm_kernel_release(kernel_path: Path) -> str:
+    """Pull the kernel version string out of a bzImage with ``file(1)``.
+
+    Returns the empty string on failure. Used purely for the run dir name +
+    summary header — the actual uname inside the VM is the source of truth.
+    """
+    try:
+        out = subprocess.run(
+            ["file", str(kernel_path)], capture_output=True, text=True,
+            timeout=5, check=False,
+        ).stdout
+        m = re.search(r"version (\S+)", out)
+        return m.group(1) if m else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def launch_in_vm(
+    crates: list[dict[str, Any]],
+    ctx: RunContext,
+    kernel_path: Path,
+    vng_extra: list[str],
+) -> int:
+    """Boot ``vng`` once, re-exec this script inside it with ``--in-vm``.
+
+    The output directory is mounted RW into the VM via ``--rwdir`` so the
+    in-VM run pass can write per-crate logs and SUMMARY.tsv that persist on
+    the host. The host user's cargo bin path is passed explicitly so the
+    in-VM script knows where to find the pre-installed scheduler binaries
+    (it can't rely on ``~/.cargo`` because vng resets HOME to
+    /run/tmp/roothome).
+    """
+    # Selected schedulers, by name; the in-VM invocation reads the same
+    # manifest the host wrote into ``out_dir`` and applies the same filter.
+    selected = " ".join(c["name"] for c in crates)
+    host_cargo_bin = (Path.home() / ".cargo" / "bin").resolve()
+
+    inner_cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        # global flags must come BEFORE the subcommand name.
+        "--no-color",
+        "run",
+        "--in-vm",
+        "--manifest", str((ctx.out_dir / "manifest.json").resolve()),
+        "--out-dir", str(ctx.out_dir.resolve()),
+        "--duration", str(ctx.duration_s),
+        "--schedulers", selected,
+        "--bin-dir", str(host_cargo_bin),
+    ]
+    inner_str = " ".join(shlex.quote(s) for s in inner_cmd)
+
+    vng_cmd = [
+        "vng",
+        "--run", str(kernel_path),
+        "--rwdir", str(ctx.out_dir.resolve()),
+        *vng_extra,
+        "--exec", inner_str,
+    ]
+    Color.section(f"vm phase (vng → {kernel_path.name})")
+    print("  $ " + " ".join(shlex.quote(c) for c in vng_cmd))
+    proc = subprocess.run(vng_cmd, check=False)
+    return proc.returncode
+
+
+# ---------------------------------------------------------------------------
 # Cleanup trap — make sure no scheduler is left attached on Ctrl+C / abort.
 # ---------------------------------------------------------------------------
 
@@ -676,18 +812,61 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     duration = args.duration if args.duration is not None else manifest.get("default_duration_s", DEFAULT_DURATION_S)
 
-    # Phase 2 pre-flight.
+    # --- in-VM path (re-exec'd inside vng by the host launcher) -----------
+    if args.in_vm:
+        Color.section("pre-flight (in-VM)")
+        print(f"manifest:  {manifest_source}")
+        preflight(in_vm=True)
+        out_dir = Path(args.out_dir) if args.out_dir else Path.cwd()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # The host-launcher already wrote a SUMMARY.tsv header; append to it
+        # so the host invocation sees a single canonical file. Truncate only
+        # if it's missing (defensive).
+        summary = out_dir / "SUMMARY.tsv"
+        if not summary.exists():
+            summary.write_text("scheduler\tstatus\texit_code\truntime_s\tinstalled_version\tnotes\n")
+        print(f"out_dir:   {out_dir}")
+        print(f"duration:  {duration}s")
+        print(f"crates ({len(crates)}): {' '.join(c['name'] for c in crates)}")
+        ctx = RunContext(out_dir=out_dir, duration_s=duration,
+                         use_fallback=False, summary_path=summary)
+        # No cleanup trap inside the VM — the VM tears down on exec exit.
+        bin_dir = Path(args.bin_dir) if args.bin_dir else Path.home() / ".cargo" / "bin"
+        for idx, crate in enumerate(crates, 1):
+            Color.section(f"[{idx}/{len(crates)}] {crate['name']}")
+            installed = crate.get("version", "?")
+            r = run_one(crate, installed, ctx, use_sudo=False, bin_dir=bin_dir)
+            ctx.results.append(r)
+            write_summary_row(ctx, r)
+        # Don't print the host-style summary box — the host launcher will
+        # render the final table after vng returns.
+        bad = any(r.status in ("FAIL", "ERROR") for r in ctx.results)
+        return 1 if bad else 0
+
+    # --- host path (bare-metal OR vm-mode launcher) -----------------------
+    kernel_path: Path | None = None
+    if args.vm:
+        if not args.kernel:
+            print(f"{Color.wrap(Color.RED, '--vm requires --kernel PATH')}", file=sys.stderr)
+            return 2
+        kernel_path = Path(args.kernel).resolve()
+
     Color.section("pre-flight")
     print(f"manifest:  {manifest_source}")
-    preflight()
+    preflight(vm_mode=bool(args.vm), kernel_path=kernel_path)
 
-    # Output dir.
+    # Output dir. Include kernel release label in --vm mode so reruns against
+    # different kernels don't collide.
     if args.out_dir:
         out_dir = Path(args.out_dir)
     else:
         stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         label = args.version or _label_for_manifest(crates)
-        out_dir = Path(f"./scx-smoke-{label}-{stamp}")
+        if args.vm and kernel_path is not None:
+            release = detect_vm_kernel_release(kernel_path) or kernel_path.stem
+            out_dir = Path(f"./scx-smoke-{label}-vm-{release}-{stamp}")
+        else:
+            out_dir = Path(f"./scx-smoke-{label}-{stamp}")
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = out_dir / "SUMMARY.tsv"
     summary.write_text("scheduler\tstatus\texit_code\truntime_s\tinstalled_version\tnotes\n")
@@ -697,6 +876,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"out_dir:   {out_dir}")
     print(f"duration:  {duration}s  (KNOWN_FRAGILE crates use their per-crate duration)")
     print(f"crates ({len(crates)}): {' '.join(c['name'] for c in crates)}")
+    if args.vm:
+        print(f"mode:      VM (vng) — install on host, run inside vng({kernel_path})")
 
     ctx = RunContext(
         out_dir=out_dir,
@@ -706,28 +887,86 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     install_cleanup_trap(ctx)
 
-    # Phase 2 main loop.
-    for idx, crate in enumerate(crates, 1):
-        Color.section(f"[{idx}/{len(crates)}] {crate['name']}")
-        installed = install_one(crate, ctx)
-        if installed is None:
-            r = RunResult(crate["name"], "ERROR", None, 0, "",
-                          notes=f"cargo install failed (primary={crate.get('version')}"
-                                + (f", fallback={crate.get('fallback_version')}" if crate.get('fallback_version') else "")
-                                + ")")
+    if args.vm:
+        # Phase 2a: install on host. Skip published=false crates only if the
+        # user did not whitelist them via --schedulers (already filtered above).
+        Color.section("install phase (host)")
+        installed_map: dict[str, str | None] = {}
+        for idx, crate in enumerate(crates, 1):
+            print(f"  [{idx}/{len(crates)}] {crate['name']}")
+            installed_map[crate["name"]] = install_one(crate, ctx)
+
+        # Record ERROR rows on host for any install failure; subset crates list
+        # passed to VM to those that have a binary.
+        runnable: list[dict[str, Any]] = []
+        for crate in crates:
+            v = installed_map[crate["name"]]
+            if v is None:
+                r = RunResult(
+                    crate["name"], "ERROR", None, 0, "",
+                    notes=f"cargo install failed (primary={crate.get('version')}"
+                          + (f", fallback={crate.get('fallback_version')}" if crate.get('fallback_version') else "")
+                          + ")",
+                )
+                ctx.results.append(r)
+                write_summary_row(ctx, r)
+            else:
+                runnable.append(crate)
+
+        # Phase 2b: launch vng with --in-vm re-exec.
+        assert kernel_path is not None  # vm_mode preflight already validated
+        rc = launch_in_vm(runnable, ctx, kernel_path, vng_extra=args.vng_arg or [])
+        Color.section(f"vng exited rc={rc}")
+        # Read back the SUMMARY.tsv rows that the in-VM pass wrote and
+        # rebuild ctx.results so the host summary box renders.
+        ctx.results = _reload_results_from_summary(ctx)
+    else:
+        # Phase 2 main loop (bare-metal): interleave install + run per crate.
+        for idx, crate in enumerate(crates, 1):
+            Color.section(f"[{idx}/{len(crates)}] {crate['name']}")
+            installed = install_one(crate, ctx)
+            if installed is None:
+                r = RunResult(crate["name"], "ERROR", None, 0, "",
+                              notes=f"cargo install failed (primary={crate.get('version')}"
+                                    + (f", fallback={crate.get('fallback_version')}" if crate.get('fallback_version') else "")
+                                    + ")")
+                ctx.results.append(r)
+                write_summary_row(ctx, r)
+                continue
+            r = run_one(crate, installed, ctx)
             ctx.results.append(r)
             write_summary_row(ctx, r)
-            continue
-        r = run_one(crate, installed, ctx)
-        ctx.results.append(r)
-        write_summary_row(ctx, r)
 
     label = args.version or _label_for_manifest(crates)
-    print_summary(ctx, manifest_version_label=f"v{label}")
+    label_with_mode = f"v{label}" + (f", vm:{kernel_path.name}" if args.vm and kernel_path else "")
+    print_summary(ctx, manifest_version_label=label_with_mode)
 
     # Exit non-zero only on real FAIL or ERROR. KNOWN_FRAGILE is soft-pass.
     bad = any(r.status in ("FAIL", "ERROR") for r in ctx.results)
     return 1 if bad else 0
+
+
+def _reload_results_from_summary(ctx: RunContext) -> list[RunResult]:
+    """After the VM in-VM pass appends rows, re-parse SUMMARY.tsv.
+
+    Used to render the host-side final summary box.
+    """
+    out: list[RunResult] = []
+    for line in ctx.summary_path.read_text().splitlines()[1:]:
+        fields = line.split("\t")
+        if len(fields) < 6:
+            continue
+        name, status, rc_s, rt_s, ver, *rest = fields
+        try:
+            rc = int(rc_s) if rc_s != "-" else None
+        except ValueError:
+            rc = None
+        try:
+            rt = int(rt_s) if rt_s != "-" else 0
+        except ValueError:
+            rt = 0
+        out.append(RunResult(name, status, rc, rt, ver, "\t".join(rest)))
+    return out
 
 
 def _label_for_manifest(crates: list[dict[str, Any]]) -> str:
@@ -780,6 +1019,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="scx workspace root for on-the-fly discovery")
     r.add_argument("--no-fallback", action="store_true",
                    help="disable per-crate fallback-version retries")
+    r.add_argument("--vm", action="store_true",
+                   help="run schedulers inside a vng (virtme-ng) VM instead of "
+                        "directly on the host (install still happens on host)")
+    r.add_argument("--kernel", default=None,
+                   help="path to a kernel image (bzImage / vmlinuz-*) for --vm mode")
+    r.add_argument("--vng-arg", action="append", default=None,
+                   help="additional flag to pass to `vng` (repeatable, e.g. "
+                        "--vng-arg --memory --vng-arg 4G)")
+    # Hidden self-invocation flags used by --vm to re-exec inside the VM.
+    r.add_argument("--in-vm", action="store_true",
+                   help=argparse.SUPPRESS)
+    r.add_argument("--bin-dir", default=None,
+                   help=argparse.SUPPRESS)
 
     lst = sub.add_parser("list", help="print the manifest in human form")
     lst.add_argument("--manifest", default=None,
