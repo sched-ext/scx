@@ -162,6 +162,13 @@ struct Opts {
     #[clap(long)]
     cell_exclude: Vec<String>,
 
+    /// Keep the scheduler running when a cell would otherwise receive zero
+    /// CPUs from the assignment. With this flag, an empty cell is rescued
+    /// by stealing one CPU from the largest cell. Without it, the
+    /// assignment bails and the scheduler exits.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    cell_no_cpus_fix: bool,
+
     /// Enable CPU borrowing: cells can use idle CPUs from other cells.
     /// Only meaningful with --cell-parent-cgroup and multiple cells.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -428,6 +435,7 @@ impl<'a> Scheduler<'a> {
                     MAX_CELLS as u32,
                     topology.span.clone(),
                     exclude,
+                    opts.cell_no_cpus_fix,
                 )
                 .with_context(|| {
                     format!("initializing cell manager for cgroup {}", parent_cgroup)
