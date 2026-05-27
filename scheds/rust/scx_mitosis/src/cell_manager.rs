@@ -220,6 +220,13 @@ pub struct CellManager {
     all_cpus: Cpumask,
     /// Cgroup directory names to exclude from cell creation
     exclude_names: HashSet<String>,
+    /// Number of CPUs to hold out for cell 0 before child cpusets are
+    /// applied. 0 disables the holdout.
+    cell0_min_cpus: usize,
+    /// CPU -> LLC id. Steers holdout selection toward the LLC split across the
+    /// most cells once unclaimed CPUs run out; empty falls back to lowest CPU
+    /// number.
+    cpu_to_llc: HashMap<usize, usize>,
 }
 
 impl CellManager {
@@ -228,12 +235,21 @@ impl CellManager {
         max_cells: u32,
         all_cpus: Cpumask,
         exclude: HashSet<String>,
+        cell0_min_cpus: usize,
+        cpu_to_llc: HashMap<usize, usize>,
     ) -> Result<Self> {
         let path = PathBuf::from(format!("/sys/fs/cgroup{}", cell_parent_path));
         if !path.exists() {
             bail!("Cell parent cgroup path does not exist: {}", path.display());
         }
-        Self::new_with_path(path, max_cells, all_cpus, exclude)
+        Self::new_with_path(
+            path,
+            max_cells,
+            all_cpus,
+            exclude,
+            cell0_min_cpus,
+            cpu_to_llc,
+        )
     }
 
     fn new_with_path(
@@ -241,6 +257,8 @@ impl CellManager {
         max_cells: u32,
         all_cpus: Cpumask,
         exclude: HashSet<String>,
+        cell0_min_cpus: usize,
+        cpu_to_llc: HashMap<usize, usize>,
     ) -> Result<Self> {
         let inotify = Inotify::init().context("Failed to initialize inotify")?;
         inotify
@@ -258,6 +276,8 @@ impl CellManager {
             max_cells,
             all_cpus,
             exclude_names: exclude,
+            cell0_min_cpus,
+            cpu_to_llc,
         };
 
         // Insert cell 0 as a permanent entry. cgid 0 is a safe sentinel —
@@ -585,15 +605,137 @@ impl CellManager {
             }
         }
 
+        // Holdout: reserve up to `cell0_min_cpus` CPUs for cell 0 before the
+        // cpuset-based assignment below. Prefer CPUs no child cpuset claims;
+        // when those run out, steal from cells — largest cell first, but never a
+        // cell's last CPU — so no child is starved (cell 0 may end up with fewer
+        // than requested). Reserved CPUs are skipped by the phases below and
+        // pre-seeded onto cell 0.
+        let mut holdout = Cpumask::new();
+        if self.cell0_min_cpus > 0 {
+            let mut unclaimed: Vec<usize> = self
+                .all_cpus
+                .iter()
+                .filter(|cpu| !contention.contains_key(cpu))
+                .collect();
+            unclaimed.sort_unstable();
+
+            // Distinct cells claiming a CPU in each LLC.
+            let mut llc_cells: HashMap<usize, HashSet<u32>> = HashMap::new();
+            for (cpu, claimants) in &contention {
+                if let Some(&llc) = self.cpu_to_llc.get(cpu) {
+                    llc_cells.entry(llc).or_default().extend(claimants);
+                }
+            }
+            let partition = |cpu: &usize| -> usize {
+                self.cpu_to_llc
+                    .get(cpu)
+                    .and_then(|llc| llc_cells.get(llc))
+                    .map_or(0, |cells| cells.len())
+            };
+
+            // Take unclaimed CPUs first — they cost no cell anything.
+            let mut taken = 0usize;
+            for cpu in unclaimed.into_iter().take(self.cell0_min_cpus) {
+                holdout.set_cpu(cpu).ok();
+                taken += 1;
+            }
+
+            // Steal the remainder from cells round-robin: each cell yields one CPU
+            // in turn, largest cell first, so the reservation is spread across
+            // cells rather than draining one. A CPU is reservable only if every
+            // cell claiming it keeps at least one CPU afterward -- otherwise the
+            // reservation would zero that cell and re-trigger the Phase 5 "no CPUs
+            // assigned" bail this holdout exists to prevent (mirrors
+            // distribute_cpus_proportional's anti-starvation floor). Within the
+            // donor, prefer an exclusive CPU, then the LLC split across the most
+            // cells, then the lowest CPU. When no CPU is reservable, stop -- cell 0
+            // receives fewer than cell0_min_cpus rather than starving a child.
+            let mut cell_claimed: HashMap<u32, Vec<usize>> = HashMap::new();
+            for (&cpu, claimants) in &contention {
+                for &cell_id in claimants {
+                    cell_claimed.entry(cell_id).or_default().push(cpu);
+                }
+            }
+            // CPUs yielded to the holdout per cell, for round-robin selection.
+            let mut taken_from: HashMap<u32, usize> =
+                cell_claimed.keys().map(|&id| (id, 0usize)).collect();
+            while taken < self.cell0_min_cpus {
+                // Unreserved EXCLUSIVE CPUs per cell, recomputed as the holdout
+                // grows. Only exclusive CPUs count toward survival: a contested CPU
+                // may be awarded to a co-claimant in Phase 3, so it cannot be what
+                // keeps a cell alive -- counting it would let the steal take a
+                // cell's last exclusive CPU and zero the cell (the Phase-5 bail).
+                let remaining: HashMap<u32, usize> = cell_claimed
+                    .iter()
+                    .map(|(&cell_id, cpus)| {
+                        (
+                            cell_id,
+                            cpus.iter()
+                                .filter(|&&c| !holdout.test_cpu(c) && contention[&c].len() == 1)
+                                .count(),
+                        )
+                    })
+                    .collect();
+                // Reservable iff every cell claiming the CPU keeps >=1 exclusive CPU.
+                let reservable = |cpu: usize| {
+                    contention
+                        .get(&cpu)
+                        .is_some_and(|claimants| claimants.iter().all(|c| remaining[c] >= 2))
+                };
+                // Donor = cell that has yielded the fewest CPUs so far
+                // (round-robin); ties break toward the larger cell, then the
+                // lowest cell id. Only cells with a reservable CPU are eligible.
+                let donor = cell_claimed
+                    .iter()
+                    .filter(|(_, cpus)| {
+                        cpus.iter()
+                            .any(|&cpu| !holdout.test_cpu(cpu) && reservable(cpu))
+                    })
+                    .map(|(&cell_id, _)| cell_id)
+                    .min_by(|&a, &b| {
+                        taken_from[&a]
+                            .cmp(&taken_from[&b])
+                            .then(remaining[&b].cmp(&remaining[&a]))
+                            .then(a.cmp(&b))
+                    });
+                let Some(donor) = donor else {
+                    break; // no CPU can be reserved without starving a child cell
+                };
+                let cpu = cell_claimed[&donor]
+                    .iter()
+                    .copied()
+                    .filter(|&cpu| !holdout.test_cpu(cpu) && reservable(cpu))
+                    .min_by(|&a, &b| {
+                        let contested =
+                            |cpu: usize| contention.get(&cpu).map_or(0, |v| v.len()) > 1;
+                        contested(a)
+                            .cmp(&contested(b))
+                            .then_with(|| partition(&b).cmp(&partition(&a)))
+                            .then(a.cmp(&b))
+                    })
+                    .expect("donor has a reservable CPU");
+                holdout.set_cpu(cpu).ok();
+                *taken_from.entry(donor).or_insert(0) += 1;
+                taken += 1;
+            }
+        }
+
         // Phase 2: Categorize CPUs and build initial assignments
         // - Exclusive: claimed by exactly 1 cell -> assigned directly
         // - Contested: claimed by 2+ cells -> distributed by weight
         // - Unclaimed: no cpuset claims it -> shared among cell 0 + unpinned cells
         let mut cell_cpus: HashMap<u32, Cpumask> = HashMap::new();
+        if holdout.weight() > 0 {
+            cell_cpus.insert(0, holdout.clone());
+        }
         let mut contested_cpus: Vec<usize> = Vec::new();
         let mut unclaimed_cpus: Vec<usize> = Vec::new();
 
         for cpu in self.all_cpus.iter() {
+            if holdout.test_cpu(cpu) {
+                continue; // reserved for cell 0 by the holdout above
+            }
             match contention.get(&cpu) {
                 None => unclaimed_cpus.push(cpu),
                 Some(claimants) if claimants.len() == 1 => {
@@ -932,6 +1074,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -951,6 +1095,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -973,6 +1119,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -999,6 +1147,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2);
@@ -1026,6 +1176,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -1064,6 +1216,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -1093,6 +1247,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -1114,6 +1270,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1139,6 +1297,8 @@ mod tests {
             256,
             cpumask_for_range(10),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1163,6 +1323,8 @@ mod tests {
             256,
             cpumask_for_range(4),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let result = mgr.compute_cpu_assignments(false);
@@ -1194,6 +1356,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1241,7 +1405,9 @@ mod tests {
     fn test_cpu_assignments_cpusets_cover_all_cpus() {
         let tmp = TempDir::new().unwrap();
 
-        // Create cgroups that cover all CPUs - cell 0 gets nothing, which is an error
+        // Cell 1 and cell 2's cpusets together claim every CPU. Cell 0
+        // (the catch-all for unclaimed CPUs) would otherwise get nothing,
+        // which is an error when cell0_min_cpus is 0 (the default).
         let cell1_path = tmp.path().join("cell1");
         std::fs::create_dir(&cell1_path).unwrap();
         std::fs::write(cell1_path.join("cpuset.cpus"), "0-7\n").unwrap();
@@ -1255,6 +1421,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let result = mgr.compute_cpu_assignments(false);
@@ -1267,6 +1435,310 @@ mod tests {
             err_msg.contains("Cell 0 has no CPUs assigned"),
             "Expected 'Cell 0 has no CPUs assigned' error, got: {}",
             err_msg
+        );
+    }
+
+    #[test]
+    fn test_cpu_assignments_cpusets_cover_all_cpus_with_holdout() {
+        let tmp = TempDir::new().unwrap();
+
+        // Same as test_cpu_assignments_cpusets_cover_all_cpus, but with
+        // cell0_min_cpus=1: the holdout reserves one CPU for cell 0 before
+        // assignment. Every CPU is claimed, so the holdout falls back to the
+        // lowest-numbered claimed CPU (CPU 0, from cell 1).
+        let cell1_path = tmp.path().join("cell1");
+        std::fs::create_dir(&cell1_path).unwrap();
+        std::fs::write(cell1_path.join("cpuset.cpus"), "0-7\n").unwrap();
+
+        let cell2_path = tmp.path().join("cell2");
+        std::fs::create_dir(&cell2_path).unwrap();
+        std::fs::write(cell2_path.join("cpuset.cpus"), "8-15\n").unwrap();
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+            1,
+            HashMap::new(),
+        )
+        .unwrap();
+        let assignments = mgr
+            .compute_cpu_assignments(false)
+            .expect("holdout should populate cell 0");
+
+        let cell0 = assignments
+            .iter()
+            .find(|a| a.cell_id == 0)
+            .expect("cell 0 present");
+        assert_eq!(cell0.primary.weight(), 1);
+
+        let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
+        assert_eq!(total, 16);
+
+        // Every cell has at least one CPU; cell 1 yielded its lowest CPU to
+        // the holdout.
+        for assignment in &assignments {
+            assert!(
+                assignment.primary.weight() >= 1,
+                "cell {} starved after holdout: {:?}",
+                assignment.cell_id,
+                assignment.primary
+            );
+        }
+        let donor_weights: Vec<usize> = assignments
+            .iter()
+            .filter(|a| a.cell_id != 0)
+            .map(|a| a.primary.weight())
+            .collect();
+        assert!(donor_weights.contains(&7));
+        assert!(donor_weights.contains(&8));
+    }
+
+    #[test]
+    fn test_cpu_assignments_holdout_takes_from_largest_cell() {
+        let tmp = TempDir::new().unwrap();
+
+        // 16 CPUs. cell1 claims 8 (0-7), cell2 and cell3 four each. With cpusets
+        // covering every CPU and cell0_min_cpus=1, the holdout steals from the
+        // largest cell first -> cell1, its lowest CPU -> CPU 0. (cpu_to_llc is
+        // set but does not change the pick here: it is only the inner tie-break
+        // among a donor's CPUs, and cell1's all share one LLC.)
+        let cell1_path = tmp.path().join("cell1");
+        std::fs::create_dir(&cell1_path).unwrap();
+        std::fs::write(cell1_path.join("cpuset.cpus"), "0-7\n").unwrap();
+
+        let cell2_path = tmp.path().join("cell2");
+        std::fs::create_dir(&cell2_path).unwrap();
+        std::fs::write(cell2_path.join("cpuset.cpus"), "8-11\n").unwrap();
+
+        let cell3_path = tmp.path().join("cell3");
+        std::fs::create_dir(&cell3_path).unwrap();
+        std::fs::write(cell3_path.join("cpuset.cpus"), "12-15\n").unwrap();
+
+        let cpu_to_llc: HashMap<usize, usize> = (0..16usize).map(|cpu| (cpu, cpu / 8)).collect();
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+            1,
+            cpu_to_llc,
+        )
+        .unwrap();
+        let assignments = mgr
+            .compute_cpu_assignments(false)
+            .expect("holdout should populate cell 0");
+
+        let cell0 = assignments
+            .iter()
+            .find(|a| a.cell_id == 0)
+            .expect("cell 0 present");
+        assert_eq!(cell0.primary.weight(), 1);
+        assert!(
+            cell0.primary.test_cpu(0),
+            "holdout should take CPU 0 (lowest CPU of the largest cell), got {:?}",
+            cell0.primary
+        );
+
+        let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
+        assert_eq!(total, 16);
+
+        // The largest cell yields exactly one CPU to the holdout (8 -> 7); the
+        // two smaller cells are untouched.
+        let mut child_weights: Vec<usize> = assignments
+            .iter()
+            .filter(|a| a.cell_id != 0)
+            .map(|a| a.primary.weight())
+            .collect();
+        child_weights.sort_unstable();
+        assert_eq!(child_weights, vec![4, 4, 7]);
+
+        // No child cell still holds the held-out CPU.
+        for a in assignments.iter().filter(|a| a.cell_id != 0) {
+            assert!(
+                !a.primary.test_cpu(0),
+                "cell {} still holds held-out CPU 0",
+                a.cell_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_cpu_assignments_holdout_steals_evenly_across_cells() {
+        let tmp = TempDir::new().unwrap();
+
+        // Three equal cells with disjoint cpusets covering all 24 CPUs, one LLC
+        // (no LLC steering), cell0_min_cpus=6. Every CPU is claimed, so the
+        // holdout must steal six. An even steal takes two from each cell, leaving
+        // each at six — not six from a single cell (which a global lowest-CPU
+        // prefix would do, draining cell1 to two while cell2/cell3 keep eight).
+        for (name, range) in [("cell1", "0-7"), ("cell2", "8-15"), ("cell3", "16-23")] {
+            let p = tmp.path().join(name);
+            std::fs::create_dir(&p).unwrap();
+            std::fs::write(p.join("cpuset.cpus"), format!("{range}\n")).unwrap();
+        }
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(24),
+            HashSet::new(),
+            6,
+            HashMap::new(),
+        )
+        .unwrap();
+        let assignments = mgr
+            .compute_cpu_assignments(false)
+            .expect("holdout should populate cell 0");
+
+        let cell0 = assignments
+            .iter()
+            .find(|a| a.cell_id == 0)
+            .expect("cell 0 present");
+        assert_eq!(
+            cell0.primary.weight(),
+            6,
+            "cell 0 holds the six reserved CPUs"
+        );
+
+        // The steal is spread evenly: each of the three equal cells yields
+        // exactly two, ending at six.
+        let mut donor_weights: Vec<usize> = assignments
+            .iter()
+            .filter(|a| a.cell_id != 0)
+            .map(|a| a.primary.weight())
+            .collect();
+        donor_weights.sort_unstable();
+        assert_eq!(
+            donor_weights,
+            vec![6, 6, 6],
+            "holdout should steal evenly (two from each cell), got {donor_weights:?}"
+        );
+
+        // Concretely, cell 0 holds two CPUs from each cell's range.
+        let count_in =
+            |lo: usize, hi: usize| (lo..hi).filter(|&c| cell0.primary.test_cpu(c)).count();
+        assert_eq!(count_in(0, 8), 2, "two CPUs taken from cell1");
+        assert_eq!(count_in(8, 16), 2, "two CPUs taken from cell2");
+        assert_eq!(count_in(16, 24), 2, "two CPUs taken from cell3");
+    }
+
+    #[test]
+    fn test_cpu_assignments_holdout_never_starves_a_child() {
+        let tmp = TempDir::new().unwrap();
+
+        // 4 CPUs fully claimed by two 2-CPU children, cell0_min_cpus=3 -- more
+        // than the 2 CPUs that can be reserved while each child keeps one. Without
+        // a per-donor floor the steal drains a child to zero and re-triggers the
+        // Phase 5 "no CPUs assigned" bail this holdout exists to prevent. The floor
+        // caps the reservation so every child keeps >=1 CPU and cell 0 receives as
+        // many as it safely can (2, not the requested 3).
+        let cell1_path = tmp.path().join("cell1");
+        std::fs::create_dir(&cell1_path).unwrap();
+        std::fs::write(cell1_path.join("cpuset.cpus"), "0-1\n").unwrap();
+
+        let cell2_path = tmp.path().join("cell2");
+        std::fs::create_dir(&cell2_path).unwrap();
+        std::fs::write(cell2_path.join("cpuset.cpus"), "2-3\n").unwrap();
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(4),
+            HashSet::new(),
+            3,
+            HashMap::new(),
+        )
+        .unwrap();
+        let assignments = mgr
+            .compute_cpu_assignments(false)
+            .expect("holdout must not starve a child cell");
+
+        let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
+        assert_eq!(total, 4);
+
+        // Every child keeps at least one CPU -- no Phase 5 bail.
+        for a in assignments.iter().filter(|a| a.cell_id != 0) {
+            assert!(
+                a.primary.weight() >= 1,
+                "cell {} starved by the holdout: {:?}",
+                a.cell_id,
+                a.primary
+            );
+        }
+
+        // Cell 0 received the floor-capped count (2), not the requested 3.
+        let cell0 = assignments
+            .iter()
+            .find(|a| a.cell_id == 0)
+            .expect("cell 0 present");
+        assert_eq!(
+            cell0.primary.weight(),
+            2,
+            "holdout should cap at total - num_children, got {:?}",
+            cell0.primary
+        );
+    }
+
+    #[test]
+    fn test_cpu_assignments_holdout_overlapping_cpusets_no_starvation() {
+        let tmp = TempDir::new().unwrap();
+
+        // Overlapping cpusets: cell1 claims only CPU 0; cell2 claims CPUs 0-1, so
+        // CPU 0 is contested. 5 CPUs total (2,3,4 unclaimed). With cell0_min_cpus=4
+        // the holdout must dip past the unclaimed CPUs into a claimed one. It must
+        // NOT take cell2's exclusive CPU 1: that would leave cell2 holding only the
+        // contested CPU 0, which Phase 3 awards to cell1, zeroing cell2 -> the
+        // Phase-5 bail. The exclusive-only floor refuses to steal a cell's last
+        // exclusive CPU, so cell 0 gets only the 3 unclaimed CPUs (capped below 4)
+        // and every cell keeps >=1.
+        let cell1_path = tmp.path().join("cell1");
+        std::fs::create_dir(&cell1_path).unwrap();
+        std::fs::write(cell1_path.join("cpuset.cpus"), "0\n").unwrap();
+
+        let cell2_path = tmp.path().join("cell2");
+        std::fs::create_dir(&cell2_path).unwrap();
+        std::fs::write(cell2_path.join("cpuset.cpus"), "0-1\n").unwrap();
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(5),
+            HashSet::new(),
+            4,
+            HashMap::new(),
+        )
+        .unwrap();
+        let assignments = mgr
+            .compute_cpu_assignments(false)
+            .expect("holdout must not starve a cell that shares a contested CPU");
+
+        let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
+        assert_eq!(total, 5);
+
+        // Every child keeps at least one CPU -- no Phase 5 bail.
+        for a in assignments.iter().filter(|a| a.cell_id != 0) {
+            assert!(
+                a.primary.weight() >= 1,
+                "cell {} starved by the holdout: {:?}",
+                a.cell_id,
+                a.primary
+            );
+        }
+
+        // The holdout could not safely steal a claimed CPU, so cell 0 holds only
+        // the 3 unclaimed CPUs -- capped below the requested 4.
+        let cell0 = assignments
+            .iter()
+            .find(|a| a.cell_id == 0)
+            .expect("cell 0 present");
+        assert_eq!(
+            cell0.primary.weight(),
+            3,
+            "holdout should cap at the 3 unclaimed CPUs, got {:?}",
+            cell0.primary
         );
     }
 
@@ -1284,6 +1756,8 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1320,6 +1794,8 @@ mod tests {
             256,
             cpumask_for_range(32),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -1355,6 +1831,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -1412,6 +1890,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1503,6 +1983,8 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1565,6 +2047,8 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1614,6 +2098,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1667,6 +2153,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1712,6 +2200,8 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -1740,6 +2230,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -1786,6 +2278,8 @@ mod tests {
             3,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2); // cell1 + cell2
@@ -1817,6 +2311,8 @@ mod tests {
             3,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2);
@@ -1849,6 +2345,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             exclude,
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -1873,6 +2371,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             exclude,
+            0,
+            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -1907,6 +2407,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -1950,6 +2452,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -1985,6 +2489,8 @@ mod tests {
             256,
             cpumask_for_range(32),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -2044,6 +2550,8 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -2080,6 +2588,8 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -2140,6 +2650,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -2190,6 +2702,8 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -2242,6 +2756,8 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -2284,6 +2800,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -2349,6 +2867,8 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -2417,6 +2937,8 @@ mod tests {
             256,
             cpumask_for_range(20),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 
@@ -2603,6 +3125,8 @@ mod tests {
             256,
             cpumask_for_range(56),
             HashSet::new(),
+            0,
+            HashMap::new(),
         )
         .unwrap();
 

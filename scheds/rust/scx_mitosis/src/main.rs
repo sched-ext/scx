@@ -155,6 +155,15 @@ struct Opts {
     #[clap(long)]
     cell_exclude: Vec<String>,
 
+    /// Reserve up to this many CPUs for cell 0 (the root/catch-all cell)
+    /// before child cpusets are applied (the holdout). A non-zero value keeps
+    /// cell 0 from being starved to zero when child cgroups' cpusets cover
+    /// every CPU. The reservation never takes a child cell's last CPU, so cell 0
+    /// may receive fewer than requested. 0 (the default) disables the holdout;
+    /// the assignment then bails if cell 0 would receive no CPUs.
+    #[clap(long, default_value_t = 0)]
+    cell0_min_cpus: usize,
+
     /// Enable CPU borrowing: cells can use idle CPUs from other cells.
     /// Only meaningful with --cell-parent-cgroup and multiple cells.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -410,11 +419,18 @@ impl<'a> Scheduler<'a> {
 
         let parent_cgroup = Self::managed_cell_parent(opts)?;
         let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
+        let cpu_to_llc: HashMap<usize, usize> = topology
+            .all_cpus
+            .iter()
+            .map(|(&cpu, c)| (cpu, c.llc_id))
+            .collect();
         let cell_manager = CellManager::new(
             parent_cgroup,
             MAX_CELLS as u32,
             topology.span.clone(),
             exclude,
+            opts.cell0_min_cpus,
+            cpu_to_llc,
         )
         .with_context(|| format!("initializing cell manager for cgroup {}", parent_cgroup))?;
 
