@@ -807,6 +807,27 @@ void BPF_STRUCT_OPS(maestro_running, struct task_struct *p)
 		vtime_now = p->scx.dsq_vtime;
 }
 
+void BPF_STRUCT_OPS(maestro_tick, struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Force preemption if the task has exceeded its time slice and there's
+	 * contention on its current CPU.
+	 */
+	if (smt_enabled &&
+	    time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > task_slice(p)) {
+		s32 cpu = scx_bpf_task_cpu(p);
+
+		if (is_smt_contended(cpu))
+			p->scx.slice = 0;
+	}
+}
+
 /*
  * Update task statistics when the task is releasing the CPU (either
  * voluntarily or because it expires its assigned time slice).
@@ -1224,6 +1245,7 @@ SCX_OPS_DEFINE(maestro_ops,
 	       .enqueue			= (void *)maestro_enqueue,
 	       .dispatch		= (void *)maestro_dispatch,
 	       .running			= (void *)maestro_running,
+	       .tick			= (void *)maestro_tick,
 	       .stopping		= (void *)maestro_stopping,
 	       .runnable		= (void *)maestro_runnable,
 	       .enable			= (void *)maestro_enable,
