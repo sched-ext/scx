@@ -468,23 +468,6 @@ static void update_cpufreq(s32 cpu)
 }
 
 /*
- * Timer used to defer idle CPU wakeups.
- *
- * Instead of triggering wake-up events directly from hot paths, such as
- * ops.enqueue(), idle CPUs are kicked using the wake-up timer.
- */
-struct wakeup_timer {
-	struct bpf_timer timer;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct wakeup_timer);
-} wakeup_timer SEC(".maps");
-
-/*
  * Return the global system shared DSQ.
  */
 static inline u64 shared_dsq(s32 cpu)
