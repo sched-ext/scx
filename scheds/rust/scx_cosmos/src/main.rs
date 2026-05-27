@@ -371,11 +371,7 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
-    /// SMT contention avoidance.
-    ///
-    /// When enabled, the scheduler aggressively avoids placing tasks on sibling SMT threads.
-    /// This may increase task migrations and lower overall throughput, but can lead to more
-    /// consistent performance by reducing contention on shared SMT cores.
+    /// ***DEPRECATED*** SMT contention avoidance.
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     avoid_smt: bool,
 
@@ -785,7 +781,6 @@ impl<'a> Scheduler<'a> {
         rodata.numa_enabled = numa_enabled;
         rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
-        rodata.avoid_smt = opts.avoid_smt;
         rodata.no_early_clear = opts.no_early_clear;
         rodata.tick_preempt = !opts.no_tick_preempt;
         rodata.mm_affinity = opts.mm_affinity;

@@ -101,13 +101,6 @@ const volatile bool numa_enabled;
 const volatile bool gpu_enabled = true;
 
 /*
- * Aggressively try to avoid SMT contention.
- *
- * Default to true here, so veristat takes the more complicated path.
- */
-const volatile bool avoid_smt = true;
-
-/*
  * Enable address space affinity.
  */
 const volatile bool mm_affinity;
@@ -895,12 +888,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 	}
 
 	/*
-	 * If a primary domain is defined, try to pick an idle CPU from
-	 * there first.
+	 * If a primary domain is defined, try to pick an idle CPU from there
+	 * first.
 	 */
 	if (!primary_all && mask) {
-		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask,
-					     avoid_smt ? SCX_PICK_IDLE_CORE : 0);
+		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask, 0);
 		if (cpu >= 0)
 			return cpu;
 	}
@@ -1137,11 +1129,10 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	 */
 	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > task_slice(p)) {
 		s32 cpu = scx_bpf_task_cpu(p);
-		bool smt_contention = avoid_smt && is_smt_contended(cpu);
 		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
 				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
 
-		if (smt_contention || (is_cpu_busy(cpu) && cpu_busy))
+		if (is_smt_contended(cpu) || (is_cpu_busy(cpu) && cpu_busy))
 			p->scx.slice = 0;
 	}
 }
@@ -1184,7 +1175,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_sticky_event_heavy(tctx) &&
 	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p)) &&
-	    (!avoid_smt || !is_smt_contended(prev_cpu))) {
+	    !is_smt_contended(prev_cpu)) {
 		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(shared_dsq(prev_cpu));
 
 		/*
@@ -1207,7 +1198,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (task_should_migrate(p, enq_flags) ||
 	    !is_cpu_idle(prev_cpu) ||
-	    (avoid_smt && is_smt_contended(prev_cpu)) ||
+	    is_smt_contended(prev_cpu) ||
 	    (!is_pcpu_task(p) && (is_event_heavy(tctx) || !is_primary_cpu(prev_cpu)))) {
 		if (is_pcpu_task(p))
 			cpu = test_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
@@ -1270,7 +1261,7 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	 * full-idle SMT cores available in the system, give it a chance to
 	 * migrate elsewhere.
 	 */
-	if (avoid_smt && is_smt_contended(cpu))
+	if (is_smt_contended(cpu))
 		return false;
 
 	/*
