@@ -584,6 +584,33 @@ static s32 smt_sibling(s32 cpu)
 }
 
 /*
+ * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_cpumask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_cpumask();
+
+	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
+ * Return the cpumask of idle SMT cores within the NUMA node that contains
+ * @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_smtmask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_smtmask();
+
+	return __COMPAT_scx_bpf_get_idle_smtmask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
  * Return true if the CPU is part of a fully busy SMT core, false
  * otherwise.
  *
@@ -602,7 +629,7 @@ static bool is_smt_contended(s32 cpu)
 	 * If the sibling SMT CPU is not idle and there are other full-idle
 	 * SMT cores available, consider the current CPU as contended.
 	 */
-	idle_mask = scx_bpf_get_idle_cpumask();
+	idle_mask = get_idle_cpumask(cpu);
 	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
 		       !bpf_cpumask_empty(idle_mask);
 	scx_bpf_put_cpumask(idle_mask);
@@ -741,7 +768,7 @@ static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
 	s32 cpu;
 
 	primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
-	smt = smt_enabled ? scx_bpf_get_idle_smtmask() : NULL;
+	smt = smt_enabled ? get_idle_smtmask(prev_cpu) : NULL;
 
 	/*
 	 * If the task can't migrate, there's no point looking for other
