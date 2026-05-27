@@ -34,33 +34,6 @@ char _license[] SEC("license") = "GPL";
 const volatile bool debug;
 
 /*
- * Sub-scheduler support.
- */
-#define MAX_SUB_SCHEDS		8
-
-/*
- * Sub-scheduler context.
- */
-struct sub_sched_ctx {
-	u64 cgroup_id;
-	u32 weight;
-	u64 cvtime;
-};
-static struct sub_sched_ctx sub_scheds[MAX_SUB_SCHEDS];
-
-/*
- * Sub-scheduler vruntime (to implement sub-scheduler fair dispatch).
- */
-static u64 sub_cvtime_now;
-
-/*
- * Set from userspace (see main.rs): enable nested sub-scheduler dispatch in
- * maestro_dispatch(). False for leaf sub-scheduler instances; true for root-level
- * scheduler instances (const volatile rodata, no per-attach atomics).
- */
-const volatile bool sub_sched_enabled = true;
-
-/*
  * Default task time slice.
  */
 const volatile u64 slice_ns = 700ULL * NSEC_PER_USEC;
@@ -679,7 +652,6 @@ void BPF_STRUCT_OPS(maestro_dispatch, s32 cpu, struct task_struct *prev)
 {
 	int llc, curr_llc = cpu_llc(cpu);
 	int curr_node = llc_node(curr_llc);
-	int i;
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
@@ -736,47 +708,6 @@ void BPF_STRUCT_OPS(maestro_dispatch, s32 cpu, struct task_struct *prev)
 			continue;
 		if (scx_bpf_dsq_move_to_local(llc, 0))
 			return;
-	}
-
-	/*
-	 * Try to consume tasks from sub-scheduler instances, picking the
-	 * one with the lowest cvtime first (weighted fair dispatch).
-	 *
-	 * Skip when userspace disables nested sub-dispatch (sub_sched_enabled).
-	 */
-	if (sub_sched_enabled && bpf_ksym_exists(scx_bpf_sub_dispatch)) {
-		int tried = 0;
-
-		bpf_for(i, 0, MAX_SUB_SCHEDS) {
-			int best = -1, j;
-			u64 min_cvt = (u64)-1;
-
-			bpf_for(j, 0, MAX_SUB_SCHEDS) {
-				if (!sub_scheds[j].cgroup_id ||
-				    (tried & (1 << j)))
-					continue;
-
-				if (sub_scheds[j].cvtime < min_cvt) {
-					min_cvt = sub_scheds[j].cvtime;
-					best = j;
-				}
-			}
-
-			if (best < 0)
-				break;
-
-			tried |= (1 << best);
-
-			if (scx_bpf_sub_dispatch(sub_scheds[best].cgroup_id)) {
-				u32 w = sub_scheds[best].weight ?: 1;
-
-				if (time_before(sub_cvtime_now, sub_scheds[best].cvtime))
-					sub_cvtime_now = sub_scheds[best].cvtime;
-
-				sub_scheds[best].cvtime += slice_ns / w;
-				return;
-			}
-		}
 	}
 
 	/*
@@ -935,50 +866,6 @@ s32 BPF_STRUCT_OPS(maestro_init_task, struct task_struct *p,
 	return 0;
 }
 
-s32 BPF_STRUCT_OPS(maestro_sub_attach, struct scx_sub_attach_args *args)
-{
-	s32 i;
-
-	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
-		if (!sub_scheds[i].cgroup_id) {
-			struct cgroup *cgrp;
-			struct cgrp_ctx *cgc;
-			u32 weight = 100;
-
-			cgrp = bpf_cgroup_from_id(args->ops->sub_cgroup_id);
-			if (cgrp) {
-				cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
-				if (cgc)
-					weight = cgc->weight;
-				bpf_cgroup_release(cgrp);
-			}
-
-			sub_scheds[i].cgroup_id = args->ops->sub_cgroup_id;
-			sub_scheds[i].weight = weight;
-			sub_scheds[i].cvtime = sub_cvtime_now;
-			bpf_printk("attach sub-sched[%d] on %s weight %u", i, args->cgroup_path, weight);
-			return 0;
-		}
-	}
-
-	return -ENOSPC;
-}
-
-void BPF_STRUCT_OPS(maestro_sub_detach, struct scx_sub_detach_args *args)
-{
-	s32 i;
-
-	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
-		if (sub_scheds[i].cgroup_id == args->ops->sub_cgroup_id) {
-			sub_scheds[i].cgroup_id = 0;
-			sub_scheds[i].weight = 0;
-			sub_scheds[i].cvtime = 0;
-			bpf_printk("detach sub-sched[%d] on %s", i, args->cgroup_path);
-			break;
-		}
-	}
-}
-
 s32 BPF_STRUCT_OPS(maestro_cgroup_init, struct cgroup *cgrp,
 		   struct scx_cgroup_init_args *args)
 {
@@ -996,24 +883,6 @@ s32 BPF_STRUCT_OPS(maestro_cgroup_init, struct cgroup *cgrp,
 
 void BPF_STRUCT_OPS(maestro_cgroup_exit, struct cgroup *cgrp)
 {
-}
-
-void BPF_STRUCT_OPS(maestro_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
-{
-	struct cgrp_ctx *cgc;
-	u64 cgid = cgrp->kn->id;
-	s32 i;
-
-	cgc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
-	if (cgc)
-		cgc->weight = weight;
-
-	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
-		if (sub_scheds[i].cgroup_id == cgid) {
-			sub_scheds[i].weight = weight;
-			return;
-		}
-	}
 }
 
 void BPF_STRUCT_OPS(maestro_cgroup_move, struct task_struct *p,
@@ -1252,10 +1121,7 @@ SCX_OPS_DEFINE(maestro_ops,
 	       .init_task		= (void *)maestro_init_task,
 	       .cgroup_init		= (void *)maestro_cgroup_init,
 	       .cgroup_exit		= (void *)maestro_cgroup_exit,
-	       .cgroup_set_weight	= (void *)maestro_cgroup_set_weight,
 	       .cgroup_move		= (void *)maestro_cgroup_move,
-	       .sub_attach		= (void *)maestro_sub_attach,
-	       .sub_detach		= (void *)maestro_sub_detach,
 	       .init			= (void *)maestro_init,
 	       .exit			= (void *)maestro_exit,
 	       .timeout_ms		= 5000ULL,
