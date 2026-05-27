@@ -115,10 +115,6 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     fair: bool,
 
-    /// Attach the scheduler to a specified cgroup (by path).
-    #[clap(short = 'c', long)]
-    cgroup: Option<String>,
-
     /// Enable verbose output, including libbpf details.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
@@ -294,14 +290,6 @@ impl<'a> Scheduler<'a> {
             warn!("kernel doesn't support ops.cgroup_move(), disabling");
             skel.struct_ops.maestro_ops_mut().cgroup_move = std::ptr::null_mut();
         }
-        if !compat::struct_has_field("sched_ext_ops", "sub_attach").unwrap_or(false) {
-            warn!("kernel doesn't support ops.sub_attach(), disabling");
-            skel.struct_ops.maestro_ops_mut().sub_attach = std::ptr::null_mut();
-        }
-        if !compat::struct_has_field("sched_ext_ops", "sub_detach").unwrap_or(false) {
-            warn!("kernel doesn't support ops.sub_detach(), disabling");
-            skel.struct_ops.maestro_ops_mut().sub_detach = std::ptr::null_mut();
-        }
 
         skel.struct_ops.maestro_ops_mut().exit_dump_len = opts.exit_dump_len;
 
@@ -316,24 +304,6 @@ impl<'a> Scheduler<'a> {
         rodata.compaction = opts.compaction;
         rodata.lowlatency = opts.lowlatency;
         rodata.fair = opts.fair;
-
-        let is_subsched = if let Some(ref cgroup_path) = opts.cgroup {
-            let meta = std::fs::metadata(cgroup_path)
-                .with_context(|| format!("failed to stat cgroup path: {}", cgroup_path))?;
-            let ino = std::os::unix::fs::MetadataExt::ino(&meta);
-            skel.struct_ops.maestro_ops_mut().sub_cgroup_id = ino;
-            let subsched = ino != 1;
-            info!(
-                "Limiting to cgroup {} (inode {}, sub-scheduler: {})",
-                cgroup_path, ino, subsched,
-            );
-            subsched
-        } else {
-            false
-        };
-
-        // Skip scx_bpf_sub_dispatch() in maestro_dispatch() on leaf sub-scheduler instances.
-        rodata.sub_sched_enabled = !is_subsched;
 
         // Normalize CPU capacities to 1..1024 so the highest capacity is always 1024 (Rust-only).
         let mut cpus: Vec<_> = topo.all_cpus.values().collect();
@@ -437,7 +407,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Attach the scheduler.
-        let struct_ops = Some(scx_ops_attach!(skel, maestro_ops, is_subsched)?);
+        let struct_ops = Some(scx_ops_attach!(skel, maestro_ops, false)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self {
