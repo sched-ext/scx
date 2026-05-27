@@ -396,12 +396,13 @@ struct Opts {
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     no_deferred_wakeup: bool,
 
-    /// Disable tick-based preemption enforcement.
+    /// Enable high-resolution timer preemption.
     ///
-    /// By default, the scheduler preempts tasks that exceed their time slice when the system is
-    /// busy or SMT contention is detected. Use this flag to disable this behavior.
+    /// By default, the scheduler preempts tasks that exceed their time slice, measuing the time
+    /// slice via the tick handler. Add an option to enforce preemption based on the high-precision
+    /// timer and CPU occupancy. Enable this option to improve latency-sensitive workloads.
     #[clap(long, action = clap::ArgAction::SetTrue)]
-    no_tick_preempt: bool,
+    time_preemption: bool,
 
     /// Enable address space affinity.
     ///
@@ -782,7 +783,7 @@ impl<'a> Scheduler<'a> {
         rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_early_clear = opts.no_early_clear;
-        rodata.tick_preempt = !opts.no_tick_preempt;
+        rodata.time_preemption = opts.time_preemption;
         rodata.mm_affinity = opts.mm_affinity;
 
         // Enable perf event scheduling settings.

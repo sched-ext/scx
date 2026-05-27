@@ -127,9 +127,9 @@ const volatile u64 perf_sticky;
 volatile u64 perf_sticky_threshold;
 
 /*
- * Enable tick-based preemption enforcement.
+ * Disable high-resolution preemption enforcement.
  */
-const volatile bool tick_preempt = true;
+const volatile bool time_preemption;
 
 /*
  * Ignore synchronous wakeup events.
@@ -1111,7 +1111,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
-	if (!tick_preempt)
+	if (!time_preemption)
 		return;
 
 	tctx = try_lookup_task_ctx(p);
