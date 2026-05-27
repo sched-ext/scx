@@ -100,7 +100,16 @@ struct cake_cpu_bss {
 #endif
 	u32 owner_avg_runtime_ns; /* 4B: release policy EWMA for current CPU owner */
 	u16 owner_run_count; /* 2B: samples behind owner_avg_runtime_ns */
-	u16 _pad_owner_policy; /* 2B: keep owner policy fields aligned */
+	u8 owner_service_kind; /* 1B: service token for current CPU owner.
+				*     Written on running() task change, then read
+				*     by stopping() so owner SAT/cache residency can
+				*     stay service-gated without parsing comm every
+				*     stop callback. */
+	u8 service_reset_kind; /* 1B: last explicit service that scrubbed stale
+				*     per-CPU/global residue for this target CPU.
+				*     This is intentionally separate from
+				*     owner_service_kind: transitions need a one-shot
+				*     cleanup before the new service has run. */
 	u64 throughput_decision; /* Packed cache/mem throughput owner + dispatch state */
 	u64 decision_confidence; /* Packed confidence for accelerator paths */
 	u64 route_prediction_last;		       /* CPU-owned keep-run outcome predictor */
@@ -168,6 +177,73 @@ struct cake_cpu_status {
 _Static_assert(sizeof(struct cake_cpu_status) == 64,
 	       "cake_cpu_status must stay one cache line");
 
+#if CAKE_FUTEX_TRACE
+#define CAKE_FUTEX_TASK_TRACE_SLOTS 32U
+struct cake_futex_trace {
+	u64 select_enter;
+	u64 select_futex;
+	u64 idle_found;
+	u64 idle_scoreboard;
+	u64 idle_core_spread;
+	u64 idle_native;
+	u64 native_noidle;
+	u64 direct_clean_enter;
+	u64 direct_clean_futex;
+	u64 direct_clean_lane_active;
+	u64 direct_clean_first;
+	u64 tunnel_enter;
+	u64 tunnel_futex;
+	u64 tunnel_futex_insert;
+	u64 enqueue_futex;
+	u64 local_waiter_futex_insert;
+	u64 local_waiter_futex_reject;
+	u64 running_futex;
+	u64 running_futex_changed;
+	u64 running_futex_same;
+	u64 stopping_futex;
+	u64 stopping_futex_runnable;
+	u64 stopping_futex_blocked;
+	u64 schbench_direct_reset;
+	u64 schbench_enqueue_reset;
+	u64 schbench_stopping_reset;
+	u64 schbench_stopping_runnable;
+	u64 schbench_stopping_blocked;
+	u64 latency_reset_enter;
+	u64 latency_reset_decision;
+	u64 latency_reset_owner_avg;
+	u64 latency_reset_owner_runs;
+	u64 latency_reset_cache_simple;
+	u64 latency_reset_stream_pending;
+	u64 latency_reset_status;
+	u64 first_select_pid;
+	u64 first_select_order;
+	u64 first_idle_pid;
+	u64 first_idle_order;
+	u64 first_tunnel_pid;
+	u64 first_tunnel_order;
+	u64 first_enqueue_pid;
+	u64 first_enqueue_order;
+	u64 first_run_pid;
+	u64 first_run_order;
+} __attribute__((aligned(256)));
+
+struct cake_futex_task_trace {
+	u64 pid;
+	u64 first_order;
+	u64 first_cpu;
+	u64 select_count;
+	u64 idle_count;
+	u64 tunnel_count;
+	u64 enqueue_count;
+	u64 run_count;
+	u64 select_cpu_mask;
+	u64 idle_cpu_mask;
+	u64 tunnel_cpu_mask;
+	u64 enqueue_cpu_mask;
+	u64 run_cpu_mask;
+} __attribute__((aligned(128)));
+#endif
+
 struct cake_scoreboard_summary {
 	u64 idle_clean_mask; /* bit cpu = published idle and scoreboard-clean */
 } __attribute__((aligned(64)));
@@ -182,6 +258,7 @@ _Static_assert(sizeof(struct cake_cpu_frontier) == 64,
 
 struct cake_throughput_lane {
 	u64 pending; /* Advisory per-owner cache-throughput DSQ has work */
+	u64 stream; /* Pending item is known stress-ng-memcpy service work */
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct cake_throughput_lane) == 64,
 	       "cake_throughput_lane must stay one cache line");
@@ -238,6 +315,12 @@ struct cake_llc_pending {
 _Static_assert(sizeof(struct cake_llc_pending) == 64,
 	       "cake_llc_pending must stay one cache line");
 #endif
+
+struct cake_core_steal_pending {
+	u64 pending; /* Conservative per-primary-CPU steal DSQ has-work hint */
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct cake_core_steal_pending) == 64,
+	       "cake_core_steal_pending must stay one cache line");
 
 /* Userspace confidence governor.
  *
@@ -345,6 +428,41 @@ typedef unsigned short cake_cpu_id_t;
 /* Physical core array sizing: MAX/2 assumes SMT=2 (AMD/Intel consumer).
  * _Static_assert fires if a non-SMT build exceeds this (future EPYC). */
 #define CAKE_MAX_CORES (CAKE_MAX_CPUS / 2)
+#ifdef __BPF__
+#if CAKE_NEEDS_ARENA
+#ifndef __arena
+#define __arena __attribute__((address_space(1)))
+#endif
+
+#define LFDEQ_CAPACITY 128
+
+struct lfdeq_slot {
+	u64 pid;
+	u64 pad[7];
+} __attribute__((aligned(64)));
+
+struct lfdeq_ring {
+	u64 head __attribute__((aligned(64)));
+	u64 tail __attribute__((aligned(64)));
+	struct lfdeq_slot tasks[LFDEQ_CAPACITY] __attribute__((aligned(64)));
+} __attribute__((aligned(64)));
+
+struct scx_lfdeq {
+	// Local Chase-Lev deque (single producer, multi consumer)
+	u64 head __attribute__((aligned(64)));
+	u64 tail __attribute__((aligned(64)));
+	struct lfdeq_slot tasks[LFDEQ_CAPACITY] __attribute__((aligned(64)));
+
+	// Enqueue (write) buffer (multi producer, single consumer)
+	struct lfdeq_ring eq_buf __attribute__((aligned(64)));
+} __attribute__((aligned(64)));
+
+extern struct scx_lfdeq __arena *cpu_lfdeqs[CAKE_MAX_CPUS];
+
+struct scx_dhq;
+extern struct scx_dhq __arena *core_dhqs[CAKE_MAX_CORES];
+#endif
+#endif
 /* Queue policy selected by loader through RODATA. */
 #define CAKE_QUEUE_POLICY_LOCAL 0U
 #define CAKE_QUEUE_POLICY_LLC_VTIME 1U
@@ -354,6 +472,8 @@ typedef unsigned short cake_cpu_id_t;
 #define LLC_DSQ_BASE 200
 #define CAKE_THROUGHPUT_DSQ_BASE 1024
 #define CAKE_DOMAIN_DRR_DSQ_BASE 2048
+/* Per-primary-CPU user DSQs used for work-stealable busy-wake fallback. */
+#define CAKE_CORE_STEAL_DSQ_BASE 4096
 #define CAKE_DOMAIN_DRR_CLASS_CACHE 0U
 #define CAKE_DOMAIN_DRR_CLASS_STREAM 1U
 #define CAKE_DOMAIN_DRR_CLASS_MAX 2U
