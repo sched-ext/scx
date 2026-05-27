@@ -5909,25 +5909,25 @@ cake_core_steal_pull_primary(u32 primary)
 			prim_sib_lfdeq = get_cpu_lfdeq(primary_sibling);
 		}
 
+		bool is_local = (own_cpu == primary || own_cpu == primary_sibling);
+		struct scx_lfdeq __arena *target_a = is_local ? lfdeq : prim_lfdeq;
+		struct scx_lfdeq __arena *target_b = is_local ? sib_lfdeq : prim_sib_lfdeq;
+
 		#pragma unroll
 		for (int iter = 0; iter < 2; iter++) {
-			if (own_cpu == primary || own_cpu == primary_sibling) {
-				if (lfdeq) {
-					scx_lfdeq_flush(lfdeq);
-					pid = scx_lfdeq_pop_local(lfdeq);
-				}
-				if (!pid) {
-					if (sib_lfdeq)
-						pid = scx_lfdeq_steal(sib_lfdeq);
+			if (is_local) {
+				if (target_a) {
+					scx_lfdeq_flush(target_a);
+					pid = scx_lfdeq_pop_local(target_a);
 				}
 			} else {
-				if (prim_lfdeq) {
-					pid = scx_lfdeq_steal(prim_lfdeq);
+				if (target_a) {
+					pid = scx_lfdeq_steal(target_a);
 				}
-				if (!pid) {
-					if (prim_sib_lfdeq)
-						pid = scx_lfdeq_steal(prim_sib_lfdeq);
-				}
+			}
+
+			if (!pid && target_b) {
+				pid = scx_lfdeq_steal(target_b);
 			}
 
 			if (!pid)
