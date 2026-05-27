@@ -11,6 +11,7 @@ declare_scheduler!(MITOSIS, {
         "--cpu-controller-disabled",
         "--cell-parent-cgroup", "/ktstr",
         "--enable-borrowing",
+        "--cell0-min-cpus", "1",
     ],
 });
 
