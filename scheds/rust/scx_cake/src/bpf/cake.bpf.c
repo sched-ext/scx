@@ -2614,6 +2614,10 @@ cake_route_predict_block_reason(u64 confidence)
 	return (u32)((0x63435343c3435343ULL >> (key * 4U)) & 0xfU);
 }
 
+#define CAKE_TRUST_BASE_COOLDOWN_NS 5000000ULL   // 5ms
+#define CAKE_TRUST_MAX_COOLDOWN_NS  200000000ULL  // 200ms
+#define CAKE_TRUST_BACKOFF_WINDOW_NS 50000000ULL  // 50ms
+
 static __always_inline __maybe_unused bool cake_trust_active(u32 cpu, u32 flag)
 {
 #if !CAKE_HAS_TRUST_MAPS
@@ -2623,17 +2627,16 @@ static __always_inline __maybe_unused bool cake_trust_active(u32 cpu, u32 flag)
 #else
 	u32 idx	   = cpu & (CAKE_MAX_CPUS - 1);
 	u32 policy = READ_ONCE(trust_user[idx].policy);
-	u32 generation;
-	u32 blocked;
-	u32 blocked_generation;
+	u64 cooldown_until;
 
 	if (!(policy & flag))
 		return false;
 
-	generation	   = READ_ONCE(trust_user[idx].generation);
-	blocked		   = READ_ONCE(trust_bpf[idx].blocked);
-	blocked_generation = READ_ONCE(trust_bpf[idx].generation);
-	return blocked_generation != generation || !(blocked & flag);
+	cooldown_until = READ_ONCE(trust_bpf[idx].cooldown_until);
+	if (cooldown_until && bpf_ktime_get_ns() < cooldown_until)
+		return false;
+
+	return true;
 #endif
 }
 
@@ -2646,14 +2649,25 @@ cake_trust_demote(u32 cpu, u32 flag, u32 reason)
 	(void)reason;
 #else
 	u32 idx	       = cpu & (CAKE_MAX_CPUS - 1);
-	u32 generation = READ_ONCE(trust_user[idx].generation);
-	u32 blocked    = READ_ONCE(trust_bpf[idx].blocked);
+	u64 now        = bpf_ktime_get_ns();
+	u64 last_miss  = READ_ONCE(trust_bpf[idx].last_miss_ns);
+	u64 cooldown   = READ_ONCE(trust_bpf[idx].cooldown_ns);
 	u32 count      = READ_ONCE(trust_bpf[idx].demotion_count);
 
+	// If a miss occurs shortly after the last one, back off exponentially
+	if (last_miss && (now - last_miss) < (cooldown + CAKE_TRUST_BACKOFF_WINDOW_NS)) {
+		cooldown = cooldown * 2;
+		if (cooldown > CAKE_TRUST_MAX_COOLDOWN_NS)
+			cooldown = CAKE_TRUST_MAX_COOLDOWN_NS;
+	} else {
+		cooldown = CAKE_TRUST_BASE_COOLDOWN_NS;
+	}
+
 	WRITE_ONCE(trust_bpf[idx].reason, reason);
-	WRITE_ONCE(trust_bpf[idx].generation, generation);
 	WRITE_ONCE(trust_bpf[idx].demotion_count, count + 1);
-	WRITE_ONCE(trust_bpf[idx].blocked, blocked | flag);
+	WRITE_ONCE(trust_bpf[idx].cooldown_ns, cooldown);
+	WRITE_ONCE(trust_bpf[idx].cooldown_until, now + cooldown);
+	WRITE_ONCE(trust_bpf[idx].last_miss_ns, now);
 #endif
 }
 
@@ -2671,8 +2685,12 @@ static __always_inline __maybe_unused s32 cake_trust_prev_direct_claim(s32 prev_
 
 	claimed = scx_bpf_test_and_clear_cpu_idle(cpu);
 	cake_record_accel_trust_prev(claimed);
-	if (claimed)
+	if (claimed) {
+		u32 idx = cpu & (CAKE_MAX_CPUS - 1);
+		WRITE_ONCE(trust_bpf[idx].cooldown_ns, CAKE_TRUST_BASE_COOLDOWN_NS);
+		WRITE_ONCE(trust_bpf[idx].cooldown_until, 0);
 		return prev_cpu;
+	}
 
 	cake_trust_demote(cpu, CAKE_TRUST_FLAG_PREV_DIRECT,
 			  CAKE_TRUST_DEMOTE_PREV_CLAIM_MISS);
@@ -3481,10 +3499,27 @@ cake_service_avoids_busy_preempt(u32 service_kind)
 }
 
 static __always_inline __maybe_unused bool
-cake_busy_wake_policy_should_preempt(struct task_struct *wakee, u32 owner_runs,
+cake_busy_wake_policy_should_preempt(struct task_struct *wakee,
+				     struct cake_cpu_bss *target_bss,
+				     u32 owner_runs,
 				     u32 owner_avg_runtime_ns,
 				     u8	 target_pressure)
 {
+	/* Enforce an adaptive preemption grace period (250us to 4ms) depending on core pressure */
+	if (wakee->prio >= 120 && wakee->scx.weight <= 120) {
+		u64 grace_period = 250000ULL; /* 250us base */
+		if (target_pressure >= 64)
+			grace_period = 4000000ULL; /* 4ms under high pressure */
+		else if (target_pressure >= 32)
+			grace_period = 2000000ULL; /* 2ms under medium-high pressure */
+		else if (target_pressure >= 16)
+			grace_period = 1000000ULL; /* 1ms under medium pressure */
+
+		u64 elapsed = bpf_ktime_get_ns() - READ_ONCE(target_bss->run_start_ns);
+		if (elapsed < grace_period)
+			return false;
+	}
+
 	if (wakee->comm[0] == 's') {
 		u64 comm0 = cake_task_comm_word(wakee, 0);
 		if (comm0 == CAKE_COMM_SCHED0) {
@@ -7289,8 +7324,14 @@ cake_dispatch_try_sat_keep_running(struct cake_cpu_bss *dispatch_bss, u32 cpu_id
 	throughput_slice =
 		cake_cache_throughput_slice_for_trust(dispatch_bss, prev,
 						      route_trusted);
-	if (throughput_slice)
+	if (throughput_slice) {
 		slice = throughput_slice;
+	} else if (prev->prio >= 120 && prev->scx.weight <= 120) {
+		u32 avg_rt = READ_ONCE(dispatch_bss->owner_avg_runtime_ns);
+		if (avg_rt >= 800000U) { /* Average runtime is >= 800us */
+			slice = quantum_ns << 6; /* 64ms dynamic slice */
+		}
+	}
 	prev->scx.slice = slice;
 #ifndef CAKE_RELEASE
 	if (CAKE_STATS_ACTIVE || CAKE_PATH_STATS_ACTIVE)
@@ -7777,7 +7818,7 @@ enqueue_dsq_dispatch(struct task_struct *p, u64 enq_flags, u32 enq_cpu)
 					target_bss->owner_avg_runtime_ns);
 
 				if (!cake_busy_wake_policy_should_preempt(
-					    p, owner_runs, owner_avg_runtime_ns,
+					    p, target_bss, owner_runs, owner_avg_runtime_ns,
 					    target_pressure))
 					kick_flags = SCX_KICK_IDLE;
 			}
@@ -9805,6 +9846,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 		u64 slice	= p->scx.slice;
 		bss->last_pid	= p->pid;
 		bss->tick_slice = slice ?: quantum_ns;
+		WRITE_ONCE(bss->run_start_ns, bpf_ktime_get_ns());
 #if !CAKE_LEAN_SCHED
 		cake_owner_runtime_policy_reset(bss);
 #else

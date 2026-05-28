@@ -113,6 +113,7 @@ struct cake_cpu_bss {
 	u64 throughput_decision; /* Packed cache/mem throughput owner + dispatch state */
 	u64 decision_confidence; /* Packed confidence for accelerator paths */
 	u64 route_prediction_last;		       /* CPU-owned keep-run outcome predictor */
+	u64 run_start_ns;			       /* Wall-clock start for preemption grace period */
 #ifndef CAKE_RELEASE
 	u8 last_strict_wake_class; /* Strict dry-run class for busy-preempt experiments */
 	u8  _pad_strict[7];
@@ -351,6 +352,9 @@ struct cake_trust_bpf {
 	u32 generation; /* User generation observed when blocked */
 	u32 reason; /* enum cake_trust_demotion_reason */
 	u32 demotion_count; /* Rare hard misses, cumulative */
+	u64 cooldown_until; /* BPF clock (ns) when cooldown ends */
+	u64 cooldown_ns; /* Current cooldown duration (ns) */
+	u64 last_miss_ns; /* Timestamp of the last demotion */
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct cake_trust_bpf) == 64,
 	       "cake_trust_bpf must stay one cache line");

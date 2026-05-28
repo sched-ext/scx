@@ -623,17 +623,34 @@ before the lower-level lifetime/window counters.
 
 Performance claims should be tied to repeated measurements on the same machine and workload.
 
+The primary entry point for benchmarking and policy sweeps is the `./cakebench` launcher script in the repository root:
+
+```bash
+# Run a single benchmark (automatically elevates using sudo -E)
+./cakebench one stress-ng-cpu-cache-mem
+
+# Run the full suite/matrix
+./cakebench cake
+```
+
+> [!IMPORTANT]
+> **Environment Preservation is Required for GPU Acceleration (e.g. `blender-render`):**
+> - **Do NOT run `sudo ./cakebench` directly.** Direct `sudo` resets the `$HOME` environment to `/root`, which breaks Wayland/X11 session socket credentials. This forces Blender to silently fall back to slow CPU software rendering (LLVMpipe).
+> - **Execute `./cakebench` directly.** The script automatically executes `sudo -E` for you, preserving the environment.
+> - If executing with `sudo` explicitly, always pass the `-E` flag: `sudo -E ./cakebench`.
+
+For raw capture:
 ```bash
 sudo scheds/rust/scx_cake/perf_stat_cake.sh 5 both
 ```
 
-For benchmark-driven policy work, start the debug recorder and use the capture
-harness so one workload produces one reviewable evidence bundle:
+For manual benchmark-driven policy work, start the debug recorder and use the capture
+harness:
 
 ```bash
 sudo install -d -m 0700 /tmp/scx_cake
 sudo ./target/debug/scx_cake --verbose --diag-dir /tmp/scx_cake --diag-period 5
-sudo scheds/rust/scx_cake/bench/scx_cake_bench_capture.sh perf-sched-thread
+sudo -E scheds/rust/scx_cake/bench/scx_cake_bench_capture.sh perf-sched-thread
 ```
 
 See [docs/benchmark_capture_workflow.md](./docs/benchmark_capture_workflow.md)

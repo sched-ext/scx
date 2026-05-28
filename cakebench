@@ -2,6 +2,26 @@
 # Compatibility shim: the benchmark project lives next to this scx checkout.
 set -Eeuo pipefail
 
+check_sudo_env() {
+    if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${HOME:-}" == "/root" ]]; then
+        cat >&2 <<'EOF'
+
+================================================================================
+WARNING: cakebench was run with direct 'sudo' which resets $HOME to /root.
+This can break GPU acceleration and local configuration access for GUI/GPU-bound
+benchmarks (like 'blender-render') by losing Wayland/X11 socket credentials.
+
+Please run cakebench without 'sudo' (it elevates automatically via 'sudo -E')
+or execute it as:
+  sudo -E ./cakebench
+================================================================================
+
+EOF
+    fi
+}
+check_sudo_env
+
+
 LAUNCHER_SCX_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCX_REPO_ROOT="${SCX_CAKE_SOURCE_ROOT:-${LAUNCHER_SCX_REPO_ROOT}}"
 SCX_REPO_ROOT="$(cd "${SCX_REPO_ROOT}" && pwd)"
@@ -337,7 +357,8 @@ validate_direct_one_benchmark() {
 		perf-sched-fork|perf-sched-thread|perf-sched-both|perf-sched-pipe|perf-memcpy|\
 		schbench|schbench-light|schbench-saturated|\
 		stress-ng-cache|stress-ng-memcpy|stress-ng-futex|stress-ng-cpu-cache-mem|\
-		kernel-defconfig|xz-compress|x265|namd|custom)
+		kernel-defconfig|xz-compress|x265|namd|custom|\
+		blender-render|ffmpeg-compilation|argon2-hashing|y-cruncher-pi-1b|prime-numbers)
 			return 0
 			;;
 	esac
@@ -349,7 +370,8 @@ The one-shot path uses bench/scx_cake_bench_capture.sh and must validate the
 benchmark before loading a sched_ext scheduler. Supported direct slugs:
   stress-ng-cpu-cache-mem, stress-ng-cache, stress-ng-memcpy, stress-ng-futex
   perf-sched-fork, perf-sched-thread, perf-sched-both, perf-sched-pipe, perf-memcpy
-  schbench, schbench-light, schbench-saturated, kernel-defconfig, xz-compress, x265, namd, custom
+  schbench, schbench-light, schbench-saturated, kernel-defconfig, xz-compress, x265, namd, custom,
+  blender-render, ffmpeg-compilation, argon2-hashing, y-cruncher-pi-1b, prime-numbers
 
 Aliases accepted by the wrapper:
   xz-compression -> xz-compress

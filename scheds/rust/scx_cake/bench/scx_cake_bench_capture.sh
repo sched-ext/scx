@@ -3,6 +3,22 @@
 set -Eeuo pipefail
 umask 077
 
+if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${HOME:-}" == "/root" ]]; then
+    cat >&2 <<'EOF'
+
+================================================================================
+WARNING: scx_cake_bench_capture.sh is running in a direct 'sudo' environment
+where $HOME is reset to /root.
+This will break GPU/Wayland display credentials and cause GPU-bound benchmarks
+(like 'blender-render') to silently fall back to slow CPU software rendering.
+
+Please run cakebench without 'sudo' (it elevates via 'sudo -E') or call it as:
+  sudo -E ./cakebench ...
+================================================================================
+
+EOF
+fi
+
 usage() {
     cat <<'USAGE'
 Usage:

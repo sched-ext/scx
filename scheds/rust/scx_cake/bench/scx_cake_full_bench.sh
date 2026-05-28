@@ -258,9 +258,15 @@ if [[ "${BUILD}" == "1" && "${DRY_RUN}" != "1" ]]; then
     echo
     echo "building schedulers: ${packages[*]}"
     if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        BUILD_ENV=(
+            "HOME=$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
+            "PATH=${PATH}"
+        )
+        for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+            BUILD_ENV+=("${var}=${!var}")
+        done
         sudo -u "${SUDO_USER}" env \
-            HOME="$(getent passwd "${SUDO_USER}" | cut -d: -f6)" \
-            PATH="${PATH}" \
+            "${BUILD_ENV[@]}" \
             "${build_cmd[@]}"
     else
         "${build_cmd[@]}"
@@ -312,7 +318,7 @@ echo "running scheduler matrix"
 if [[ "${DRY_RUN}" == "1" || "${EUID}" -eq 0 ]]; then
     env "${MATRIX_ENV[@]}" "${MATRIX}" "${MATRIX_ARGS[@]}"
 else
-    sudo env "${MATRIX_ENV[@]}" "${MATRIX}" "${MATRIX_ARGS[@]}"
+    sudo -E env "${MATRIX_ENV[@]}" "${MATRIX}" "${MATRIX_ARGS[@]}"
 fi
 
 echo

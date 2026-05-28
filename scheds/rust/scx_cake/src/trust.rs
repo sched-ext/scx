@@ -27,8 +27,6 @@ const CAKE_ROUTE_PREV: u64 = 1;
 #[cfg(cake_trust_maps)]
 const TRUST_TICK_PERIOD: Duration = Duration::from_millis(250);
 #[cfg(cake_trust_maps)]
-const TRUST_COOLDOWN: Duration = Duration::from_secs(2);
-#[cfg(cake_trust_maps)]
 const TRUST_ROUTE_MIN: u64 = 15;
 #[cfg(cake_trust_maps)]
 const TRUST_SELECT_MIN: u64 = 14;
@@ -69,10 +67,6 @@ pub(crate) struct TrustGovernor {
     #[cfg(cake_trust_maps)]
     enabled: bool,
     #[cfg(cake_trust_maps)]
-    cooldown_until: Vec<Instant>,
-    #[cfg(cake_trust_maps)]
-    last_seen_demotions: Vec<u32>,
-    #[cfg(cake_trust_maps)]
     last_tick: Option<Instant>,
 }
 
@@ -85,18 +79,9 @@ impl TrustGovernor {
         }
         #[cfg(cake_trust_maps)]
         {
+            let _ = nr_cpus;
             Self {
                 enabled,
-                cooldown_until: if enabled {
-                    vec![Instant::now(); nr_cpus]
-                } else {
-                    Vec::new()
-                },
-                last_seen_demotions: if enabled {
-                    vec![0; nr_cpus]
-                } else {
-                    Vec::new()
-                },
                 last_tick: None,
             }
         }
@@ -119,7 +104,6 @@ impl TrustGovernor {
             return;
         }
         self.last_tick = Some(now);
-        self.ensure_cpu_capacity(nr_cpus, now);
 
         let Some(bss) = &mut skel.maps.bss_data else {
             return;
@@ -127,22 +111,13 @@ impl TrustGovernor {
 
         let limit = nr_cpus
             .min(bss.cpu_bss.len())
-            .min(bss.trust_user.len())
-            .min(bss.trust_bpf.len());
+            .min(bss.trust_user.len());
         for idx in 0..limit {
             let confidence = bss.cpu_bss[idx].decision_confidence;
-            let bpf_demotions = bss.trust_bpf[idx].demotion_count;
-            if bpf_demotions != self.last_seen_demotions[idx] {
-                self.cooldown_until[idx] = now + TRUST_COOLDOWN;
-                self.last_seen_demotions[idx] = bpf_demotions;
-            }
-
             let ready = confidence_trust_prev_ready(confidence);
-            let generation = bss.trust_user[idx].generation;
-            let cooling_down = now < self.cooldown_until[idx];
             let policy = bss.trust_user[idx].policy;
 
-            if !ready || cooling_down {
+            if !ready {
                 if policy & CAKE_TRUST_FLAG_PREV_DIRECT != 0 {
                     bss.trust_user[idx].policy = policy & !CAKE_TRUST_FLAG_PREV_DIRECT;
                 }
@@ -150,19 +125,8 @@ impl TrustGovernor {
             }
 
             if policy & CAKE_TRUST_FLAG_PREV_DIRECT == 0 {
-                bss.trust_user[idx].generation = generation.wrapping_add(1).max(1);
                 bss.trust_user[idx].policy = policy | CAKE_TRUST_FLAG_PREV_DIRECT;
             }
-        }
-    }
-
-    #[cfg(cake_trust_maps)]
-    fn ensure_cpu_capacity(&mut self, nr_cpus: usize, now: Instant) {
-        if self.cooldown_until.len() < nr_cpus {
-            self.cooldown_until.resize(nr_cpus, now);
-        }
-        if self.last_seen_demotions.len() < nr_cpus {
-            self.last_seen_demotions.resize(nr_cpus, 0);
         }
     }
 }
