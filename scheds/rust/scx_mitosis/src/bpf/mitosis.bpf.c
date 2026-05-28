@@ -45,6 +45,7 @@ const volatile u64 root_cgid = 1;
 const volatile bool debug_events_enabled = false;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool cpu_controller_disabled = false;
+const volatile bool fix_ignore_cg_v1 = false;
 const volatile bool reject_multicpu_pinning = false;
 const volatile bool userspace_managed_cell_mode = false;
 const volatile bool enable_borrowing = false;
@@ -1621,6 +1622,47 @@ int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 	int ret;
 	if (!cpu_controller_disabled)
 		return 0;
+
+	/*
+	 * tp_btf/cgroup_mkdir fires for every cgroup created
+	 * system-wide, including cgroups in cgroupv1 named
+	 * hierarchies and cgroupv1 subsystem mounts. Only cgroups
+	 * sharing root_cgrp's hierarchy (the cgroupv2 default root
+	 * that mitosis_init initialized via
+	 * bpf_cgroup_from_id(root_cgid=1)) have cgrp_ctx storage to
+	 * walk; foreign-hierarchy cgroups have no storage on their
+	 * ancestor chain and walking them bails the scheduler when
+	 * init_cgrp_ctx looks up the foreign root's missing
+	 * cgrp_ctx at mitosis.bpf.c:1510.
+	 *
+	 * Gated on fix_ignore_cg_v1 (off by default) so the
+	 * for-realsies bail (mitosis.bpf.c:148 cgrp_ctx lookup
+	 * failed for cgid 1) is still observable on hosts with
+	 * cgroupv1 hierarchies until the operator opts in to the
+	 * skip path. Compare cgrp's top-of-hierarchy cgroup pointer
+	 * to root_cgrp's. bpf_cgroup_ancestor(cgrp, 0) returns the
+	 * actual struct cgroup of cgrp's hierarchy root; for v2
+	 * cgroups it equals root_cgrp's pointer, for v1 cgroups
+	 * (or any other non-default hierarchy) it differs.
+	 */
+	if (fix_ignore_cg_v1) {
+		struct cgroup *cgrp_top __free(cgroup) = bpf_cgroup_ancestor(cgrp, 0);
+		if (!cgrp_top)
+			return 0;
+		bool same_hierarchy = false;
+		scoped_guard(rcu)
+		{
+			if (root_cgrp) {
+				struct cgroup *rc = bpf_cgroup_acquire(root_cgrp);
+				if (rc) {
+					same_hierarchy = (rc == cgrp_top);
+					bpf_cgroup_release(rc);
+				}
+			}
+		}
+		if (!same_hierarchy)
+			return 0;
+	}
 
 	ret = init_cgrp_ctx_with_ancestors(cgrp);
 	if (ret) {
