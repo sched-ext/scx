@@ -259,7 +259,7 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "1000")]
+    #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
 
     /// Maximum runtime (since last sleep) that can be charged to a task in microseconds.
@@ -371,11 +371,7 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
-    /// SMT contention avoidance.
-    ///
-    /// When enabled, the scheduler aggressively avoids placing tasks on sibling SMT threads.
-    /// This may increase task migrations and lower overall throughput, but can lead to more
-    /// consistent performance by reducing contention on shared SMT cores.
+    /// ***DEPRECATED*** SMT contention avoidance.
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
     avoid_smt: bool,
 
@@ -400,12 +396,13 @@ struct Opts {
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     no_deferred_wakeup: bool,
 
-    /// Disable tick-based preemption enforcement.
+    /// Enable high-resolution timer preemption.
     ///
-    /// By default, the scheduler preempts tasks that exceed their time slice when the system is
-    /// busy or SMT contention is detected. Use this flag to disable this behavior.
+    /// By default, the scheduler preempts tasks that exceed their time slice, measuing the time
+    /// slice via the tick handler. Add an option to enforce preemption based on the high-precision
+    /// timer and CPU occupancy. Enable this option to improve latency-sensitive workloads.
     #[clap(long, action = clap::ArgAction::SetTrue)]
-    no_tick_preempt: bool,
+    time_preemption: bool,
 
     /// Enable address space affinity.
     ///
@@ -785,9 +782,8 @@ impl<'a> Scheduler<'a> {
         rodata.numa_enabled = numa_enabled;
         rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
-        rodata.avoid_smt = opts.avoid_smt;
         rodata.no_early_clear = opts.no_early_clear;
-        rodata.tick_preempt = !opts.no_tick_preempt;
+        rodata.time_preemption = opts.time_preemption;
         rodata.mm_affinity = opts.mm_affinity;
 
         // Enable perf event scheduling settings.
@@ -861,7 +857,12 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.cosmos_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+            | if numa_enabled {
+                *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
+            } else {
+                0
+            };
 
         info!(
             "scheduler flags: {:#x}",
