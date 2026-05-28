@@ -25,19 +25,25 @@ use crate::LayerSpec;
 /// nodes. Within each node, the algorithm determines core selection order.
 /// Cross-node budget distribution is handled by `unified_alloc`.
 ///
-/// Algorithms fall into two categories:
+/// Algorithms fall into three placement classes:
 ///
 /// **Locality algorithms** prefer the layer's home NUMA node(s) and only
 /// spill to remote nodes when local capacity is exhausted. Most algorithms
-/// are locality algorithms.
+/// are locality algorithms. They emit strict tier groups (one node per
+/// tier) so `place_unpinned` packs rank 0 first, then spills to rank 1.
 ///
-/// **NUMA-spread algorithms** (marked `[spread]` below) enforce equal CPU
-/// counts across all NUMA nodes via `unified_alloc`, capped at the least
-/// available node capacity. Use these when the workload should be balanced
-/// across nodes rather than concentrated on the preferred node. Their
-/// within-node core ordering degenerates to the non-spread equivalent
-/// (e.g. NodeSpread uses Linear ordering within each node) since the
-/// even-split budget handles cross-node distribution.
+/// **Balanced algorithms** (marked `[balanced]` below) emit a single-tier
+/// node group containing all nodes. `place_unpinned` distributes
+/// proportionally across the tier via cap-weighted water_fill, so freed
+/// capacity from less-loaded nodes is absorbed — no bottleneck cap.
+///
+/// **NUMA-spread algorithms** (marked `[spread]` below) enforce strictly
+/// equal CPU counts across all NUMA nodes via `resolve_spread`, capped at
+/// the least available node capacity. Use these when the workload needs
+/// strictly equal per-node CPU counts (memory-bandwidth-bound or
+/// replicated work). Their within-node core ordering degenerates to the
+/// non-spread equivalent (e.g. NodeSpread uses Linear ordering within
+/// each node) since the even-split budget handles cross-node distribution.
 #[derive(Default)]
 pub enum LayerGrowthAlgo {
     /// Evenly space layers across cores within each node.
@@ -52,8 +58,12 @@ pub enum LayerGrowthAlgo {
     /// Follow the `llcs`/`nodes` layer config to determine core order.
     /// Preferred LLCs first, then remaining LLCs in node order.
     Topo,
-    /// `[spread]` Interleave cores across LLCs within each node, with
-    /// equal per-node CPU budget.
+    /// `[balanced]` Interleave cores across LLCs within each node.
+    /// Emits a single-tier node group containing all nodes; the
+    /// allocator distributes the layer's CPU budget proportionally to
+    /// remaining capacity across all NUMA nodes via cap-weighted
+    /// water_fill.  Congestion on one node reduces its share but does
+    /// not cap the total.
     RoundRobin,
     /// Big cores first, then little cores within each node.
     BigLittle,
@@ -314,6 +324,35 @@ pub fn node_order(
     }
 }
 
+/// Tiered node groups for unpinned placement. Each inner Vec is one tier;
+/// within a tier, the allocator distributes a layer's growth proportionally
+/// to remaining capacity. Spillover to the next tier happens only when
+/// every node in the current tier is full.
+///
+/// Default shape is one-node-per-tier (strict ranking), identical in
+/// behavior to passing the flat `node_order()` to today's `place_unpinned`.
+/// Growth algorithms that want balanced cross-node placement (currently
+/// only `RoundRobin`) return a single tier containing all nodes.
+///
+/// `NodeSpread*` algorithms also fall through to the default strict shape,
+/// but their tiers are unused: those layers go through `resolve_spread` via
+/// the `LayerDemand::spread` flag instead of `place_unpinned`.
+pub fn node_groups(
+    spec_nodes: &[usize],
+    topo: &Topology,
+    layer_idx: usize,
+    all_layer_nodes: &[&[usize]],
+    growth_algo: &LayerGrowthAlgo,
+) -> Vec<Vec<usize>> {
+    let flat = node_order(spec_nodes, topo, layer_idx, all_layer_nodes);
+    match growth_algo {
+        // Single tier: balance across all nodes proportionally to capacity.
+        LayerGrowthAlgo::RoundRobin => vec![flat],
+        // Strict ranking: pack tier 0, spill to tier 1, etc.
+        _ => flat.into_iter().map(|n| vec![n]).collect(),
+    }
+}
+
 struct LayerCoreOrderGenerator<'a> {
     cpu_pool: &'a CpuPool,
     layer_specs: &'a [LayerSpec],
@@ -332,6 +371,22 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             .map(|s| s.nodes().as_slice())
             .collect();
         node_order(self.spec.nodes(), self.topo, self.layer_idx, &all)
+    }
+
+    #[allow(dead_code)]
+    fn node_groups(&self) -> Vec<Vec<usize>> {
+        let all: Vec<&[usize]> = self
+            .layer_specs
+            .iter()
+            .map(|s| s.nodes().as_slice())
+            .collect();
+        node_groups(
+            self.spec.nodes(),
+            self.topo,
+            self.layer_idx,
+            &all,
+            &self.spec.kind.common().growth_algo,
+        )
     }
 
     /// Sequential core indices (core_seq) belonging to a given node.
@@ -879,6 +934,316 @@ mod tests {
         let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
 
         assert_eq!(gen.node_order(), vec![1, 2, 3, 0]);
+    }
+
+    // --- node_groups ---
+    //
+    // Strict-tier algos (G01-G22) lift node_order() into one-node-per-tier.
+    // RoundRobin (G23-G27) collapses node_order() into a single tier.
+    // NodeSpread* (G19-G21) get strict tiers too (they bypass tier-placement
+    // via the spread:bool path; their tiers are functionally unused).
+
+    fn strict(ord: Vec<usize>) -> Vec<Vec<usize>> {
+        ord.into_iter().map(|n| vec![n]).collect()
+    }
+
+    // G01: Sticky on 1 NUMA — single node, single tier.
+    #[test]
+    fn test_node_groups_g01_sticky_default_1n() {
+        let topo = topo_1n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Sticky)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), vec![vec![0]]);
+    }
+
+    // G02: Sticky on 4 NUMA, no spec — strict tiers in node order.
+    #[test]
+    fn test_node_groups_g02_sticky_default_4n() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Sticky)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    // G03: Sticky on 4 NUMA, layer_idx=2 — rotation preserved per-tier.
+    #[test]
+    fn test_node_groups_g03_sticky_default_rotated() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Sticky)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 2, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![2, 3, 0, 1]));
+    }
+
+    // G04: Sticky on 4 NUMA, layer_idx=5 — rotation wraps (5 % 4 = 1).
+    #[test]
+    fn test_node_groups_g04_sticky_default_rotation_wraps() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Sticky)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 5, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![1, 2, 3, 0]));
+    }
+
+    // G05: Sticky with spec_nodes=[1] — hard limit, single tier on N1.
+    #[test]
+    fn test_node_groups_g05_sticky_spec_single() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Sticky, vec![1])];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), vec![vec![1]]);
+    }
+
+    // G06: Sticky with spec_nodes=[1,3] — strict tiers preserved (design).
+    #[test]
+    fn test_node_groups_g06_sticky_spec_multi_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Sticky, vec![1, 3])];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), vec![vec![1], vec![3]]);
+    }
+
+    // G07-G09: Linear, Reverse, Random — strict tiers.
+    #[test]
+    fn test_node_groups_g07_linear_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_node_groups_g08_reverse_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Reverse)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_node_groups_g09_random_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Random)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    // G10: Topo with spec_nodes=[0,2] — strict tiers respecting hard limit.
+    #[test]
+    fn test_node_groups_g10_topo_spec_multi() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Topo, vec![0, 2])];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), vec![vec![0], vec![2]]);
+    }
+
+    // G11: Topo without spec_nodes — default strict tiers.
+    #[test]
+    fn test_node_groups_g11_topo_default() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Topo)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    // G12-G14: BigLittle, LittleBig, RandomTopo — strict tiers.
+    #[test]
+    fn test_node_groups_g12_big_little_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::BigLittle)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_node_groups_g13_little_big_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::LittleBig)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_node_groups_g14_random_topo_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::RandomTopo)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    // G15-G17: CpuSetSpread variants — strict tiers.
+    #[test]
+    fn test_node_groups_g15_cpuset_spread_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::CpuSetSpread)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_node_groups_g16_cpuset_spread_reverse_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::CpuSetSpreadReverse)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_node_groups_g17_cpuset_spread_random_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::CpuSetSpreadRandom)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    // G18: StickyDynamic — strict tiers (delegates to grow_sticky internally).
+    #[test]
+    fn test_node_groups_g18_sticky_dynamic_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::StickyDynamic)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    // G19-G21: NodeSpread* — strict tiers (groups irrelevant; spread:bool path).
+    #[test]
+    fn test_node_groups_g19_node_spread_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::NodeSpread)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_node_groups_g20_node_spread_reverse_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::NodeSpreadReverse)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn test_node_groups_g21_node_spread_random_strict() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::NodeSpreadRandom)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), strict(vec![0, 1, 2, 3]));
+    }
+
+    // G22: claim_rank deprioritization carries through to tiers.
+    // Mirrors test_node_order_4n_deprioritize_ranked, just lifted.
+    #[test]
+    fn test_node_groups_g22_claim_rank_deprioritizes() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![0, 1]),
+            test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![2]),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[2], 2, &topo, &cpusets);
+        // Same expected ordering as node_order, lifted to one-per-tier.
+        assert_eq!(gen.node_groups(), strict(vec![3, 1, 2, 0]));
+    }
+
+    // G23: RoundRobin on 1 NUMA — single tier, single node (degenerate).
+    #[test]
+    fn test_node_groups_g23_round_robin_1n() {
+        let topo = topo_1n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::RoundRobin)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), vec![vec![0]]);
+    }
+
+    // G24: RoundRobin on 4 NUMA — single tier with all nodes.
+    #[test]
+    fn test_node_groups_g24_round_robin_4n_single_tier() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::RoundRobin)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), vec![vec![0, 1, 2, 3]]);
+    }
+
+    // G25: RoundRobin with spec_nodes=[2] — single tier, single node.
+    #[test]
+    fn test_node_groups_g25_round_robin_spec_single() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::RoundRobin, vec![2])];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), vec![vec![2]]);
+    }
+
+    // G26: RoundRobin with spec_nodes=[0,2] — single tier, restricted.
+    #[test]
+    fn test_node_groups_g26_round_robin_spec_multi() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(
+            LayerGrowthAlgo::RoundRobin,
+            vec![0, 2],
+        )];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+        assert_eq!(gen.node_groups(), vec![vec![0, 2]]);
+    }
+
+    // G27: RoundRobin layer_idx=7 — post-rotation, still single tier.
+    #[test]
+    fn test_node_groups_g27_round_robin_rotation_ignored() {
+        let topo = topo_4n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::RoundRobin)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 7, &topo, &cpusets);
+        // 7 % 4 = 3, rotation produces [3, 0, 1, 2].
+        assert_eq!(gen.node_groups(), vec![vec![3, 0, 1, 2]]);
     }
 
     // --- node_core_seqs ---

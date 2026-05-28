@@ -376,10 +376,20 @@ lazy_static! {
 ///
 /// - growth_algo: Determines the order in which CPUs are allocated to the
 ///   layer as it grows. All algorithms are NUMA-aware and produce per-node
-///   core orderings. Most are locality algorithms that prefer the layer's
-///   home node and spill to remote nodes only when local capacity is
-///   exhausted. NUMA-spread algorithms (RoundRobin, NodeSpread*) instead
-///   enforce equal CPU counts across all NUMA nodes. Default: Sticky.
+///   core orderings. Three placement classes exist:
+///
+///   * Locality (most algorithms): prefer the layer's home NUMA node and
+///     spill to remote nodes only when local capacity is exhausted.
+///   * Balanced (RoundRobin): distribute proportionally across all NUMA
+///     nodes via cap-weighted water_fill. A congested node reduces its
+///     share but does not cap the total — freed capacity flows to less
+///     loaded nodes.
+///   * Strict spread (NodeSpread*): enforce equal CPU counts across all
+///     NUMA nodes, capped at the least available node. Use when the
+///     workload needs strictly equal per-node CPU counts (memory-
+///     bandwidth-bound or replicated work).
+///
+///   Default: Sticky.
 ///
 /// - perf: CPU performance target. 0 means no configuration. A value
 ///   between 1 and 1024 indicates the performance level CPUs running tasks
@@ -3191,12 +3201,15 @@ impl<'a> Scheduler<'a> {
                     };
                 }
 
+                // Only NodeSpread* keeps strict equal-per-node placement
+                // via the spread:bool path.  RoundRobin migrated to a
+                // single-tier node_groups (balanced via cap-weighted
+                // water_fill in place_unpinned, no bottleneck cap).
                 let spread = matches!(
                     layer.growth_algo,
                     LayerGrowthAlgo::NodeSpread
                         | LayerGrowthAlgo::NodeSpreadReverse
                         | LayerGrowthAlgo::NodeSpreadRandom
-                        | LayerGrowthAlgo::RoundRobin
                 );
 
                 let util_high = match &layer.kind {
@@ -3730,18 +3743,18 @@ impl<'a> Scheduler<'a> {
                 )
             })
             .collect();
-        let cur_node_cpus: Vec<Vec<usize>> = self
-            .layers
-            .iter()
-            .map(|layer| (0..nr_nodes).map(|n| layer.nr_node_cpus[n] / au).collect())
+        let node_groups: Vec<Vec<Vec<usize>>> = (0..self.layers.len())
+            .map(|idx| {
+                layer_core_growth::node_groups(
+                    self.layer_specs[idx].nodes(),
+                    &self.topo,
+                    idx,
+                    &all_layer_nodes,
+                    &self.layer_specs[idx].kind.common().growth_algo,
+                )
+            })
             .collect();
-        let layer_allocs = unified_alloc(
-            total_cpus / au,
-            &node_caps,
-            &demands,
-            &cur_node_cpus,
-            &norders,
-        );
+        let layer_allocs = unified_alloc(total_cpus / au, &node_caps, &demands, &node_groups);
 
         // Convert allocations back to CPU counts. Shrink dampening is
         // already applied to the targets fed into unified_alloc above.
