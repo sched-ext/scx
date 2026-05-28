@@ -21,9 +21,11 @@ Usage:
   ./cakebench ai-one [benchmark] [--capture stat] [--hypothesis text]
   ./cakebench one [benchmark] --debug [--capture stat] [debug/diag options]
   ./cakebench one [benchmark] --scheduler scx_pandemonium [--capture stat]
+  ./cakebench sequence [benchmark ...] --scheduler scx_cake [--capture stat]
   ./cakebench history import-old [--dry-run]
   ./cakebench history rebuild
   ./cakebench noise [--sample-secs 1] [--out-dir DIR]
+  ./cakebench code-patterns [scoreboard/code-pattern options]
   ./cakebench [normal cakebench command/options]
 
 Bench presets:
@@ -55,11 +57,22 @@ Debug diagnostics:
     ./cakebench debug-one stress-ng-memcpy --capture stat --queue-policy local
     ./cakebench debug-suite --capture stat --queue-policy local --storm-guard shield --busy-wake-kick policy
 
+Sequence diagnostics:
+  sequence starts one release scheduler instance and runs direct captures
+  back-to-back under that same scheduler. Default sequence:
+    stress-ng-cache stress-ng-memcpy stress-ng-futex
+  Useful for reproducing suite-order state carry-over without the full suite.
+
 Noise capture:
   Single-run commands capture host process noise automatically unless disabled:
     SCX_CAKE_BENCH_NOISE=0
   Artifacts are written under <out>/noise. Manual check:
     ./cakebench noise --sample-secs 2
+
+Code-pattern analysis:
+  Delegates to the benchmark-suite code-pattern command, joining best-by-
+  benchmark rows with captured source snapshots:
+    ./cakebench code-patterns --since 20260521 --cake-only --include-singles --include-captures --out /tmp/cake_patterns
 USAGE
 }
 
@@ -163,9 +176,15 @@ stop_noise_monitor() {
 
 run_as_sudo_user() {
     if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local -a extra_envs=()
+        local var
+        for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+            extra_envs+=("${var}=${!var}")
+        done
         sudo -u "${SUDO_USER}" env \
             "HOME=$(getent passwd "${SUDO_USER}" | cut -d: -f6)" \
             "PATH=${PATH}" \
+            "${extra_envs[@]}" \
             GIT_OPTIONAL_LOCKS=0 \
             "$@"
     else
@@ -177,8 +196,14 @@ sudo_reexec() {
     local subcommand="$1"
     shift
 
+    local -a extra_envs=()
+    local var
+    for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+        extra_envs+=("${var}=${!var}")
+    done
+
     if [[ "${SCX_CAKE_AI_NONINTERACTIVE:-0}" == "1" ]]; then
-        if ! sudo -n -E "${SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"; then
+        if ! sudo -n -E "${extra_envs[@]}" "${SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"; then
             cat >&2 <<'EOF'
 error: sudo credentials are not available for non-interactive AI benchmark mode.
 
@@ -197,7 +222,7 @@ EOF
         exit 0
     fi
 
-    exec sudo -E "${LAUNCHER_SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"
+    exec sudo -E "${extra_envs[@]}" "${LAUNCHER_SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"
 }
 
 record_cakebench_history() {
@@ -290,6 +315,9 @@ normalize_one_benchmark() {
 		x265-encoding)
 			printf '%s' "x265"
 			;;
+		schbench/default)
+			printf '%s' "schbench"
+			;;
 		stress-ng-cpu-cache-mem/cache)
 			printf '%s' "stress-ng-cache"
 			;;
@@ -306,8 +334,9 @@ validate_direct_one_benchmark() {
 	local benchmark="$1"
 
 	case "${benchmark}" in
-		perf-sched-fork|perf-sched-thread|perf-sched-both|perf-memcpy|\
-		schbench|stress-ng-cache|stress-ng-memcpy|stress-ng-cpu-cache-mem|\
+		perf-sched-fork|perf-sched-thread|perf-sched-both|perf-sched-pipe|perf-memcpy|\
+		schbench|schbench-light|schbench-saturated|\
+		stress-ng-cache|stress-ng-memcpy|stress-ng-futex|stress-ng-cpu-cache-mem|\
 		kernel-defconfig|xz-compress|x265|namd|custom)
 			return 0
 			;;
@@ -318,13 +347,14 @@ error: benchmark '${benchmark}' is not supported by './cakebench one'.
 
 The one-shot path uses bench/scx_cake_bench_capture.sh and must validate the
 benchmark before loading a sched_ext scheduler. Supported direct slugs:
-  stress-ng-cpu-cache-mem, stress-ng-cache, stress-ng-memcpy
-  perf-sched-fork, perf-sched-thread, perf-sched-both, perf-memcpy
-  schbench, kernel-defconfig, xz-compress, x265, namd, custom
+  stress-ng-cpu-cache-mem, stress-ng-cache, stress-ng-memcpy, stress-ng-futex
+  perf-sched-fork, perf-sched-thread, perf-sched-both, perf-sched-pipe, perf-memcpy
+  schbench, schbench-light, schbench-saturated, kernel-defconfig, xz-compress, x265, namd, custom
 
 Aliases accepted by the wrapper:
   xz-compression -> xz-compress
   x265-encoding  -> x265
+  schbench/default -> schbench
   stress-ng-cpu-cache-mem/cache  -> stress-ng-cache
   stress-ng-cpu-cache-mem/memcpy -> stress-ng-memcpy
 
@@ -564,9 +594,15 @@ build_debug_cake() {
     local -a build_cmd=(cargo build -p scx_cake)
 
     if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local -a extra_envs=()
+        local var
+        for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+            extra_envs+=("${var}=${!var}")
+        done
         sudo -u "${SUDO_USER}" env \
             "HOME=$(getent passwd "${SUDO_USER}" | cut -d: -f6)" \
             "PATH=${PATH}" \
+            "${extra_envs[@]}" \
             "${build_cmd[@]}"
     else
         "${build_cmd[@]}"
@@ -578,9 +614,15 @@ build_release_scheduler() {
     local -a build_cmd=(cargo build -p "${scheduler}" --release)
 
     if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local -a extra_envs=()
+        local var
+        for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+            extra_envs+=("${var}=${!var}")
+        done
         sudo -u "${SUDO_USER}" env \
             "HOME=$(getent passwd "${SUDO_USER}" | cut -d: -f6)" \
             "PATH=${PATH}" \
+            "${extra_envs[@]}" \
             "${build_cmd[@]}"
     else
         "${build_cmd[@]}"
@@ -591,12 +633,13 @@ normalize_scheduler_name() {
     local scheduler="$1"
 
     case "${scheduler}" in
+        native|none|kernel|cfs) scheduler="native" ;;
         cake) scheduler="scx_cake" ;;
         pandemonium|pandamonium) scheduler="scx_pandemonium" ;;
         cosmos) scheduler="scx_cosmos" ;;
         flash) scheduler="scx_flash" ;;
     esac
-    if [[ "${scheduler}" != scx_* ]]; then
+    if [[ "${scheduler}" != "native" && "${scheduler}" != scx_* ]]; then
         scheduler="scx_${scheduler}"
     fi
     printf '%s' "${scheduler}"
@@ -734,6 +777,9 @@ run_scheduler_one() {
     expected_ops="${scheduler#scx_}"
     if [[ "${scheduler}" == "scx_cake" ]]; then
         expected_ops="cake"
+    elif [[ "${scheduler}" == "native" ]]; then
+        expected_ops=""
+        sched_bin=""
     fi
 
     [[ -x "${capture_helper}" ]] || {
@@ -777,11 +823,11 @@ run_scheduler_one() {
         exit 1
     fi
 
-    if [[ "${build}" == "1" ]]; then
+    if [[ "${scheduler}" != "native" && "${build}" == "1" ]]; then
         echo "building release ${scheduler}"
         build_release_scheduler "${scheduler}"
     fi
-    [[ -x "${sched_bin}" ]] || {
+    [[ "${scheduler}" == "native" || -x "${sched_bin}" ]] || {
         echo "error: missing release binary: ${sched_bin}" >&2
         exit 1
     }
@@ -796,18 +842,26 @@ run_scheduler_one() {
         echo
         echo "## Scheduler Command"
         echo
-        printf '%q ' "${sched_bin}"
-        echo
+        if [[ "${scheduler}" == "native" ]]; then
+            echo "native kernel scheduler (sched_ext disabled)"
+        else
+            printf '%q ' "${sched_bin}"
+            echo
+        fi
     } >"${out_dir}/scheduler_one.md"
 
-    echo "starting release ${scheduler}"
-    setsid "${sched_bin}" >"${log_dir}/${scheduler}.log" 2>&1 &
-    sched_pid=$!
-    CAKEBENCH_CLEANUP_SCHED_PID="${sched_pid}"
+    if [[ "${scheduler}" == "native" ]]; then
+        echo "using native scheduler; sched_ext disabled"
+    else
+        echo "starting release ${scheduler}"
+        setsid "${sched_bin}" >"${log_dir}/${scheduler}.log" 2>&1 &
+        sched_pid=$!
+        CAKEBENCH_CLEANUP_SCHED_PID="${sched_pid}"
 
-    if ! wait_for_scheduler "${sched_pid}" "${expected_ops}" "${start_wait}" "${log_dir}/${scheduler}.log"; then
-        echo "error: ${scheduler} did not become active; see ${log_dir}/${scheduler}.log" >&2
-        exit 1
+        if ! wait_for_scheduler "${sched_pid}" "${expected_ops}" "${start_wait}" "${log_dir}/${scheduler}.log"; then
+            echo "error: ${scheduler} did not become active; see ${log_dir}/${scheduler}.log" >&2
+            exit 1
+        fi
     fi
 
     echo "active ops: $(active_ops)"
@@ -829,10 +883,12 @@ run_scheduler_one() {
     CAKEBENCH_CLEANUP_NOISE_PID=""
     run_noise_snapshot "${out_dir}" post "${benchmark}" "${scheduler}"
 
-    stop_debug_scheduler "${sched_pid}" "${term_wait}" || true
-    sched_pid=""
-    CAKEBENCH_CLEANUP_SCHED_PID=""
-    stop_sched_ext_if_expected "${expected_ops}" || true
+    if [[ "${scheduler}" != "native" ]]; then
+        stop_debug_scheduler "${sched_pid}" "${term_wait}" || true
+        sched_pid=""
+        CAKEBENCH_CLEANUP_SCHED_PID=""
+        stop_sched_ext_if_expected "${expected_ops}" || true
+    fi
     scx_bench_give_tree_to_sudo_user "${out_dir}" || true
     trap - EXIT
     unset CAKEBENCH_CLEANUP_SCHED_PID CAKEBENCH_CLEANUP_NOISE_PID \
@@ -845,6 +901,288 @@ run_scheduler_one() {
         "${SCX_CAKE_BENCH_HYPOTHESIS:-}" "${SCX_CAKE_BENCH_MUTATION_ID:-}" \
         "${SCX_CAKE_BENCH_MUTATION_KIND:-}" \
         "${SCX_REPO_ROOT}/cakebench" one "${benchmark}" --scheduler "${scheduler}" --capture "${capture}"
+}
+
+run_scheduler_sequence() {
+	if has_arg --help "$@" || has_arg -h "$@"; then
+		cat <<'USAGE'
+Usage:
+  ./cakebench sequence [benchmark ...] --scheduler scx_cake [options]
+
+Runs several direct benchmark captures under one scheduler instance so scheduler
+state carries across rows. If no benchmark is provided, the default sequence is:
+  stress-ng-cache stress-ng-memcpy stress-ng-futex
+
+Options:
+  --scheduler NAME       scheduler to run; default: scx_cake
+  --capture MODE         both, stat, sched, time, or none; default: stat
+  --bench-root DIR       benchmark output root
+  --out DIR              exact sequence output directory
+  --pause-secs N         cooldown between captures; default: 10
+  --no-build             reuse existing release scheduler binary
+  --build                rebuild release scheduler binary
+  --stop-active          stop an active sched_ext scheduler first; default
+  --no-stop-active       fail if sched_ext is already active
+USAGE
+		exit 0
+	fi
+
+	local -a orig_args=("$@")
+	local -a benchmarks=()
+	local scheduler="scx_cake"
+	local capture="${SCX_CAKE_BENCH_CAPTURE:-stat}"
+	local bench_root="${SCX_CAKE_BENCH_ROOT:-${BENCH_REPO_ROOT}/runs}"
+	local out_dir=""
+	local build=1
+	local start_wait="${SCX_CAKE_ONE_BENCH_START_WAIT:-10}"
+	local term_wait="${SCX_CAKE_ONE_BENCH_TERM_WAIT:-10}"
+	local pause_secs="${SCX_CAKE_SEQUENCE_PAUSE_SECS:-10}"
+	local stop_active=1
+	local safe_sequence sched_safe stamp runs_dir log_dir capture_helper sched_bin sched_pid expected_ops
+
+	while [[ "$#" -gt 0 ]]; do
+		case "$1" in
+			--scheduler=*)
+				scheduler="${1#*=}"
+				;;
+			--scheduler)
+				shift
+				scheduler="$(need_value --scheduler "$@")"
+				;;
+			--capture=*)
+				capture="${1#*=}"
+				;;
+			--capture)
+				shift
+				capture="$(need_value --capture "$@")"
+				;;
+			--bench-root=*)
+				bench_root="${1#*=}"
+				;;
+			--bench-root)
+				shift
+				bench_root="$(need_value --bench-root "$@")"
+				;;
+			--out=*)
+				out_dir="${1#*=}"
+				;;
+			--out)
+				shift
+				out_dir="$(need_value --out "$@")"
+				;;
+			--pause-secs=*)
+				pause_secs="${1#*=}"
+				;;
+			--pause-secs|--pause)
+				shift
+				pause_secs="$(need_value --pause-secs "$@")"
+				;;
+			--start-wait=*)
+				start_wait="${1#*=}"
+				;;
+			--start-wait)
+				shift
+				start_wait="$(need_value --start-wait "$@")"
+				;;
+			--term-wait=*)
+				term_wait="${1#*=}"
+				;;
+			--term-wait)
+				shift
+				term_wait="$(need_value --term-wait "$@")"
+				;;
+			--no-build)
+				build=0
+				;;
+			--build)
+				build=1
+				;;
+			--stop-active)
+				stop_active=1
+				;;
+			--no-stop-active)
+				stop_active=0
+				;;
+			--)
+				shift
+				while [[ "$#" -gt 0 ]]; do
+					benchmarks+=("$1")
+					shift
+				done
+				break
+				;;
+			-h|--help)
+				run_scheduler_sequence --help
+				exit 0
+				;;
+			--*)
+				echo "error: unknown sequence option: $1" >&2
+				exit 1
+				;;
+			*)
+				benchmarks+=("$1")
+				;;
+		esac
+		shift
+	done
+
+	if [[ "${#benchmarks[@]}" -eq 0 ]]; then
+		benchmarks=(stress-ng-cache stress-ng-memcpy stress-ng-futex)
+	fi
+
+	scheduler="$(normalize_scheduler_name "${scheduler}")"
+	case "${capture}" in
+		both|stat|sched|time|none) ;;
+		*) echo "error: --capture must be one of: both, stat, sched, time, none" >&2; exit 1 ;;
+	esac
+	require_uint SCX_CAKE_ONE_BENCH_START_WAIT "${start_wait}"
+	require_uint SCX_CAKE_ONE_BENCH_TERM_WAIT "${term_wait}"
+	require_uint SCX_CAKE_SEQUENCE_PAUSE_SECS "${pause_secs}"
+
+	local i
+	for i in "${!benchmarks[@]}"; do
+		benchmarks[$i]="$(normalize_one_benchmark "${benchmarks[$i]}")"
+		validate_direct_one_benchmark "${benchmarks[$i]}" || exit 1
+	done
+
+	if [[ "${EUID}" -ne 0 ]]; then
+		sudo_reexec sequence "${orig_args[@]}"
+	fi
+
+	safe_sequence="$(safe_name "$(IFS=+; echo "${benchmarks[*]}")")"
+	sched_safe="$(safe_name "${scheduler}")"
+	stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+	out_dir="${out_dir:-${bench_root}/sequence/${stamp}_${safe_sequence}_release-${sched_safe}}"
+	runs_dir="${out_dir}/runs"
+	log_dir="${out_dir}/logs"
+	capture_helper="${BENCH_REPO_ROOT}/bench/scx_cake_bench_capture.sh"
+	sched_bin="${SCX_REPO_ROOT}/target/release/${scheduler}"
+	sched_pid=""
+	expected_ops="${scheduler#scx_}"
+	if [[ "${scheduler}" == "scx_cake" ]]; then
+		expected_ops="cake"
+	elif [[ "${scheduler}" == "native" ]]; then
+		expected_ops=""
+		sched_bin=""
+	fi
+
+	[[ -x "${capture_helper}" ]] || {
+		echo "error: missing capture helper: ${capture_helper}" >&2
+		exit 1
+	}
+
+	mkdir -p -m 0700 "${runs_dir}" "${log_dir}"
+	local SCRIPT_DIR="${BENCH_REPO_ROOT}/bench"
+	# shellcheck disable=SC1091
+	source "${SCRIPT_DIR}/scx_cake_bench_paths.sh"
+	scx_bench_give_output_path_to_sudo_user "${out_dir}" "${bench_root}"
+	local asset_env="${SCX_CAKE_BENCH_ASSET_ENV:-${BENCH_REPO_ROOT}/scx_cake_bench.env}"
+	if [[ "${SCX_CAKE_BENCH_LOAD_ASSET_ENV:-1}" == "1" && -f "${asset_env}" ]]; then
+		# shellcheck disable=SC1090
+		source "${asset_env}"
+	fi
+
+	CAKEBENCH_CLEANUP_SCHED_PID=""
+	CAKEBENCH_CLEANUP_EXPECTED_OPS="${expected_ops}"
+	CAKEBENCH_CLEANUP_TERM_WAIT="${term_wait}"
+	CAKEBENCH_CLEANUP_OUT_DIR="${out_dir}"
+
+	cleanup_scheduler_sequence() {
+		local status=$?
+		stop_debug_scheduler "${CAKEBENCH_CLEANUP_SCHED_PID:-}" "${CAKEBENCH_CLEANUP_TERM_WAIT:-10}" || true
+		stop_sched_ext_if_expected "${CAKEBENCH_CLEANUP_EXPECTED_OPS:-}" || true
+		if [[ -n "${CAKEBENCH_CLEANUP_OUT_DIR:-}" ]]; then
+			scx_bench_give_tree_to_sudo_user "${CAKEBENCH_CLEANUP_OUT_DIR}" || true
+		fi
+		return "${status}"
+	}
+	trap cleanup_scheduler_sequence EXIT
+
+	if [[ "${stop_active}" == "1" ]]; then
+		stop_active_sched_ext_for_preset
+	elif [[ -n "$(active_ops)" ]]; then
+		echo "error: sched_ext is already active: $(active_ops)" >&2
+		exit 1
+	fi
+
+	if [[ "${scheduler}" != "native" && "${build}" == "1" ]]; then
+		echo "building release ${scheduler}"
+		build_release_scheduler "${scheduler}"
+	fi
+	[[ "${scheduler}" == "native" || -x "${sched_bin}" ]] || {
+		echo "error: missing release binary: ${sched_bin}" >&2
+		exit 1
+	}
+
+	{
+		echo "# cakebench sequence"
+		echo
+		echo "- Scheduler: ${scheduler}"
+		echo "- Capture: ${capture}"
+		echo "- Pause between captures: ${pause_secs}s"
+		echo "- Output: ${out_dir}"
+		echo
+		echo "## Benchmarks"
+		printf -- "- %s\n" "${benchmarks[@]}"
+		echo
+		echo "## Scheduler Command"
+		echo
+		if [[ "${scheduler}" == "native" ]]; then
+			echo "native kernel scheduler (sched_ext disabled)"
+		else
+			printf '%q ' "${sched_bin}"
+			echo
+		fi
+	} >"${out_dir}/sequence.md"
+
+	if [[ "${scheduler}" == "native" ]]; then
+		echo "using native scheduler; sched_ext disabled"
+	else
+		echo "starting release ${scheduler}"
+		setsid "${sched_bin}" >"${log_dir}/${scheduler}.log" 2>&1 &
+		sched_pid=$!
+		CAKEBENCH_CLEANUP_SCHED_PID="${sched_pid}"
+
+		if ! wait_for_scheduler "${sched_pid}" "${expected_ops}" "${start_wait}" "${log_dir}/${scheduler}.log"; then
+			echo "error: ${scheduler} did not become active; see ${log_dir}/${scheduler}.log" >&2
+			exit 1
+		fi
+	fi
+
+	echo "active ops: $(active_ops)"
+	echo "sequence output: ${out_dir}"
+	for benchmark in "${benchmarks[@]}"; do
+		local label
+		label="$(safe_name "${benchmark}")_sequence-${sched_safe}"
+		echo
+		echo "== sequence benchmark: ${benchmark} =="
+		SCX_CAKE_BENCH_ROOT="${out_dir}" \
+		SCX_CAKE_BENCH_OUT="${runs_dir}" \
+		SCX_CAKE_BENCH_LABEL="${label}" \
+		SCX_CAKE_BENCH_CAPTURE="${capture}" \
+		SCX_CAKE_BENCH_REQUIRE_CAKE=0 \
+		SCX_CAKE_BENCH_REQUIRE_OPS="${SCX_CAKE_BENCH_REQUIRE_OPS:-${expected_ops}}" \
+			"${capture_helper}" "${benchmark}"
+		if [[ "${pause_secs}" -gt 0 ]]; then
+			echo "cooldown: ${pause_secs}s"
+			sleep "${pause_secs}"
+		fi
+	done
+
+	if [[ "${scheduler}" != "native" ]]; then
+		stop_debug_scheduler "${sched_pid}" "${term_wait}" || true
+		sched_pid=""
+		CAKEBENCH_CLEANUP_SCHED_PID=""
+		stop_sched_ext_if_expected "${expected_ops}" || true
+	fi
+	scx_bench_give_tree_to_sudo_user "${out_dir}" || true
+	trap - EXIT
+	unset CAKEBENCH_CLEANUP_SCHED_PID CAKEBENCH_CLEANUP_EXPECTED_OPS \
+		CAKEBENCH_CLEANUP_TERM_WAIT CAKEBENCH_CLEANUP_OUT_DIR
+
+	echo
+	echo "sequence benchmark complete"
+	echo "output: ${out_dir}"
 }
 
 copy_final_debug_diag() {
@@ -2137,6 +2475,11 @@ if [[ "$#" -gt 0 ]]; then
             fi
             shift
             run_plain_one "$@"
+            exit $?
+            ;;
+        sequence|seq|scheduler-sequence|scheduler_seq)
+            shift
+            run_scheduler_sequence "$@"
             exit $?
             ;;
         history)

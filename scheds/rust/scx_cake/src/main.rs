@@ -152,6 +152,201 @@ const CPU_FAST_PROBE_PACK_SLOT_MASK: u64 = (1u64 << CPU_FAST_PROBE_PACK_SLOT_BIT
 const CPU_META_PRIMARY: u64 = 1u64 << 48;
 const CPU_META_SMT: u64 = 1u64 << 49;
 
+#[cfg(cake_futex_trace)]
+fn log_futex_trace(skel: &BpfSkel, nr_cpus: usize) {
+    let Some(bss) = skel.maps.bss_data.as_ref() else {
+        return;
+    };
+
+    let mut total = [0u64; 23];
+    let mut service = [0u64; 12];
+    for row in bss
+        .futex_trace
+        .iter()
+        .take(nr_cpus.min(bss.futex_trace.len()))
+    {
+        total[0] += row.select_enter;
+        total[1] += row.select_futex;
+        total[2] += row.idle_found;
+        total[3] += row.idle_scoreboard;
+        total[4] += row.idle_core_spread;
+        total[5] += row.idle_native;
+        total[6] += row.native_noidle;
+        total[7] += row.direct_clean_enter;
+        total[8] += row.direct_clean_futex;
+        total[9] += row.direct_clean_lane_active;
+        total[10] += row.direct_clean_first;
+        total[11] += row.tunnel_enter;
+        total[12] += row.tunnel_futex;
+        total[13] += row.tunnel_futex_insert;
+        total[14] += row.enqueue_futex;
+        total[15] += row.local_waiter_futex_insert;
+        total[16] += row.local_waiter_futex_reject;
+        total[17] += row.running_futex;
+        total[18] += row.running_futex_changed;
+        total[19] += row.running_futex_same;
+        total[20] += row.stopping_futex;
+        total[21] += row.stopping_futex_runnable;
+        total[22] += row.stopping_futex_blocked;
+        service[0] += row.schbench_direct_reset;
+        service[1] += row.schbench_enqueue_reset;
+        service[2] += row.schbench_stopping_reset;
+        service[3] += row.schbench_stopping_runnable;
+        service[4] += row.schbench_stopping_blocked;
+        service[5] += row.latency_reset_enter;
+        service[6] += row.latency_reset_decision;
+        service[7] += row.latency_reset_owner_avg;
+        service[8] += row.latency_reset_owner_runs;
+        service[9] += row.latency_reset_cache_simple;
+        service[10] += row.latency_reset_stream_pending;
+        service[11] += row.latency_reset_status;
+    }
+
+    info!(
+        "futex_trace total select_enter={} select_futex={} idle_found={} idle_scoreboard={} idle_core_spread={} idle_native={} native_noidle={} direct_enter={} direct_futex={} direct_active={} direct_first={} tunnel_enter={} tunnel_futex={} tunnel_insert={} enqueue_futex={} waiter_insert={} waiter_reject={} running_futex={} running_changed={} running_same={} stopping_futex={} stopping_runnable={} stopping_blocked={}",
+        total[0],
+        total[1],
+        total[2],
+        total[3],
+        total[4],
+        total[5],
+        total[6],
+        total[7],
+        total[8],
+        total[9],
+        total[10],
+        total[11],
+        total[12],
+        total[13],
+        total[14],
+        total[15],
+        total[16],
+        total[17],
+        total[18],
+        total[19],
+        total[20],
+        total[21],
+        total[22],
+    );
+    info!(
+        "service_trace total schbench_direct_reset={} schbench_enqueue_reset={} schbench_stopping_reset={} schbench_stopping_runnable={} schbench_stopping_blocked={} latency_reset_enter={} latency_reset_decision={} latency_reset_owner_avg={} latency_reset_owner_runs={} latency_reset_cache_simple={} latency_reset_stream_pending={} latency_reset_status={}",
+        service[0],
+        service[1],
+        service[2],
+        service[3],
+        service[4],
+        service[5],
+        service[6],
+        service[7],
+        service[8],
+        service[9],
+        service[10],
+        service[11],
+    );
+
+    for (cpu, row) in bss
+        .futex_trace
+        .iter()
+        .take(nr_cpus.min(bss.futex_trace.len()))
+        .enumerate()
+    {
+        let cpu_total = row.select_futex
+            + row.idle_found
+            + row.native_noidle
+            + row.tunnel_futex
+            + row.tunnel_futex_insert
+            + row.enqueue_futex
+            + row.running_futex
+            + row.stopping_futex
+            + row.schbench_direct_reset
+            + row.schbench_enqueue_reset
+            + row.schbench_stopping_reset
+            + row.latency_reset_enter;
+        if cpu_total == 0 {
+            continue;
+        }
+        info!(
+            "futex_trace cpu={} sf={} idle={} sb={} core={} native={} noidle={} df={} da={} first={} tun={} tins={} enq={} wi={} wr={} run={} run_chg={} run_same={} stop={} stop_run={} stop_blk={} fs_pid={} fs_ord={} fi_pid={} fi_ord={} ft_pid={} ft_ord={} fe_pid={} fe_ord={} fr_pid={} fr_ord={}",
+            cpu,
+            row.select_futex,
+            row.idle_found,
+            row.idle_scoreboard,
+            row.idle_core_spread,
+            row.idle_native,
+            row.native_noidle,
+            row.direct_clean_futex,
+            row.direct_clean_lane_active,
+            row.direct_clean_first,
+            row.tunnel_futex,
+            row.tunnel_futex_insert,
+            row.enqueue_futex,
+            row.local_waiter_futex_insert,
+            row.local_waiter_futex_reject,
+            row.running_futex,
+            row.running_futex_changed,
+            row.running_futex_same,
+            row.stopping_futex,
+            row.stopping_futex_runnable,
+            row.stopping_futex_blocked,
+            row.first_select_pid,
+            row.first_select_order,
+            row.first_idle_pid,
+            row.first_idle_order,
+            row.first_tunnel_pid,
+            row.first_tunnel_order,
+            row.first_enqueue_pid,
+            row.first_enqueue_order,
+            row.first_run_pid,
+            row.first_run_order,
+        );
+        if row.schbench_direct_reset
+            + row.schbench_enqueue_reset
+            + row.schbench_stopping_reset
+            + row.latency_reset_enter
+            > 0
+        {
+            info!(
+                "service_trace cpu={} sch_dir={} sch_enq={} sch_stop={} sch_stop_run={} sch_stop_blk={} reset={} dec={} avg={} runs={} cache={} stream={} status={}",
+                cpu,
+                row.schbench_direct_reset,
+                row.schbench_enqueue_reset,
+                row.schbench_stopping_reset,
+                row.schbench_stopping_runnable,
+                row.schbench_stopping_blocked,
+                row.latency_reset_enter,
+                row.latency_reset_decision,
+                row.latency_reset_owner_avg,
+                row.latency_reset_owner_runs,
+                row.latency_reset_cache_simple,
+                row.latency_reset_stream_pending,
+                row.latency_reset_status,
+            );
+        }
+    }
+
+    for row in bss.futex_task_trace.iter() {
+        if row.pid == 0 {
+            continue;
+        }
+        info!(
+            "futex_task pid={} order={} first_cpu={} sel={} idle={} tun={} enq={} run={} sel_mask={:#x} idle_mask={:#x} tun_mask={:#x} enq_mask={:#x} run_mask={:#x}",
+            row.pid,
+            row.first_order,
+            row.first_cpu,
+            row.select_count,
+            row.idle_count,
+            row.tunnel_count,
+            row.enqueue_count,
+            row.run_count,
+            row.select_cpu_mask,
+            row.idle_cpu_mask,
+            row.tunnel_cpu_mask,
+            row.enqueue_cpu_mask,
+            row.run_cpu_mask,
+        );
+    }
+}
+
 #[inline]
 fn pack_cpu_meta(
     sibling_cpu: u16,
@@ -677,7 +872,7 @@ impl<'a> Scheduler<'a> {
             .open(open_object)
             .context("Failed to open BPF skeleton")?;
 
-        // Inject version suffix into ops name: "cake" → "cake_1.1.1_g<hash>_<target>"
+        // Inject version suffix into ops name: "cake" → "cake_<version>_g<hash>_<target>"
         // This is what scx_loader reads from /sys/kernel/sched_ext/root/ops
         {
             let ops = open_skel.struct_ops.cake_ops_mut();
@@ -1036,17 +1231,18 @@ impl<'a> Scheduler<'a> {
 
         #[cfg(cake_bpf_release)]
         info!(
-            "release accelerators: route-pred={}, confidence={}, llc-pending={}, local-waiter={}, domain-drr={}, trust-maps={}",
+            "release accelerators: route-pred={}, confidence={}, llc-pending={}, local-waiter={}, domain-drr={}, trust-maps={}, core-steal-dhq={}",
             topology::BAKED_RELEASE_ROUTE_PRED,
             topology::BAKED_RELEASE_CONFIDENCE,
             topology::BAKED_RELEASE_LLC_PENDING,
             topology::BAKED_RELEASE_LOCAL_WAITER,
             topology::BAKED_RELEASE_DOMAIN_DRR,
-            topology::BAKED_RELEASE_TRUST_MAPS
+            topology::BAKED_RELEASE_TRUST_MAPS,
+            topology::BAKED_CORE_STEAL_DHQ
         );
 
         info!(
-            "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}, storm-guard: {}, busy-wake-kick: {}, learned-locality: {}, wake-chain-locality: {}",
+            "{} CPUs, {} LLCs, profile: {}, quantum: {}us, queue-policy: {}, storm-guard: {}, busy-wake-kick: {}, learned-locality: {}, wake-chain-locality: {}, core-steal-dhq: {}",
             self.topology.nr_cpus,
             self.topology
                 .llc_cpu_mask
@@ -1060,7 +1256,8 @@ impl<'a> Scheduler<'a> {
             self.args.effective_storm_guard(),
             self.args.effective_busy_wake_kick(),
             self.args.effective_learned_locality(),
-            self.args.effective_wake_chain_locality()
+            self.args.effective_wake_chain_locality(),
+            topology::BAKED_CORE_STEAL_DHQ
         );
         let trust_governor_enabled = cfg!(cake_trust_maps)
             && (!cfg!(cake_bpf_release)
@@ -1103,6 +1300,8 @@ impl<'a> Scheduler<'a> {
         }
 
         info!("{SCHEDULER_NAME} scheduler shutting down");
+        #[cfg(cake_futex_trace)]
+        log_futex_trace(&self.skel, self.topology.nr_cpus);
 
         // Drop struct_ops link BEFORE uei_report — this triggers the kernel to
         // set UEI kind=SCX_EXIT_UNREG. Matches scx_bpfland/scx_cosmos/scx_lavd

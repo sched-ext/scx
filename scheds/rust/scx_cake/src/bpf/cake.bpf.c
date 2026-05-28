@@ -611,25 +611,27 @@ static __noinline struct scx_lfdeq __arena *get_cpu_lfdeq(u32 cpu)
 
 
 static __noinline int scx_lfdeq_enqueue_remote(struct scx_lfdeq __arena *lfdeq, u64 pid)
-
 {
 	struct lfdeq_ring __arena *ring = &lfdeq->eq_buf;
-	u64 t, h;
+	
+	/* Atomically allocate a slot index via Fetch-and-Add */
+	u64 t = __sync_fetch_and_add(&ring->tail, 1);
+	u64 cycle = t / LFDEQ_CAPACITY;
+	u32 idx = t & (LFDEQ_CAPACITY - 1);
 
-	#pragma unroll
-	for (int i = 0; i < 2; i++) {
-		t = READ_ONCE(ring->tail);
-		h = READ_ONCE(ring->head);
-		if (t - h >= LFDEQ_CAPACITY)
-			return -ENOSPC;
-		if (READ_ONCE(ring->tasks[t & (LFDEQ_CAPACITY - 1)].pid) != 0)
-			return -ENOSPC;
-		if (__sync_bool_compare_and_swap(&ring->tail, t, t + 1)) {
-			smp_store_release(&ring->tasks[t & (LFDEQ_CAPACITY - 1)].pid, pid);
-			return 0;
-		}
+	/* Check if the slot is occupied in the current cycle */
+	u64 val = smp_load_acquire(&ring->tasks[idx].pid);
+	u64 slot_pid = val & 0xffffffffULL;
+	u64 slot_cycle = val >> 32;
+
+	if (slot_pid != 0 && slot_cycle == cycle) {
+		/* Queue is full in this cycle (overrun) */
+		return -ENOSPC;
 	}
-	return -EAGAIN;
+
+	/* Store the pid with the current cycle packed in the upper 32 bits */
+	smp_store_release(&ring->tasks[idx].pid, pid | (cycle << 32));
+	return 0;
 }
 
 static __noinline void scx_lfdeq_flush(struct scx_lfdeq __arena *lfdeq)
@@ -652,12 +654,19 @@ static __noinline void scx_lfdeq_flush(struct scx_lfdeq __arena *lfdeq)
 		if (l_t - l_h >= LFDEQ_CAPACITY)
 			break;
 
-		u64 pid = smp_load_acquire(&ring->tasks[h & (LFDEQ_CAPACITY - 1)].pid);
+		u32 ring_idx = h & (LFDEQ_CAPACITY - 1);
+		u64 val = smp_load_acquire(&ring->tasks[ring_idx].pid);
+		u64 pid = val & 0xffffffffULL;
+		u64 cycle = val >> 32;
 		if (!pid)
 			break;
 
-		lfdeq->tasks[l_t & (LFDEQ_CAPACITY - 1)].pid = pid;
-		WRITE_ONCE(ring->tasks[h & (LFDEQ_CAPACITY - 1)].pid, 0);
+		u32 local_idx = l_t & (LFDEQ_CAPACITY - 1);
+		lfdeq->tasks[local_idx].pid = pid;
+		
+		/* Advance the slot's cycle to cycle + 1 and clear pid so
+		 * the next ring rotation knows this slot is empty. */
+		smp_store_release(&ring->tasks[ring_idx].pid, (cycle + 1) << 32);
 
 		l_t++;
 		h++;
@@ -678,9 +687,17 @@ static __noinline u64 scx_lfdeq_pop_local(struct scx_lfdeq __arena *lfdeq)
 		return 0;
 
 	t--;
+	/* Fast path: if multiple tasks are present, the owner can pop
+	 * without smp_mb() or CAS since owner/thief slots cannot overlap. */
+	if (t > h) {
+		u64 pid = lfdeq->tasks[t & (LFDEQ_CAPACITY - 1)].pid;
+		WRITE_ONCE(lfdeq->tail, t);
+		return pid;
+	}
+
+	/* Slow path: fallback to memory fence and CAS when size <= 1 */
 	WRITE_ONCE(lfdeq->tail, t);
 	smp_mb();
-
 	h = READ_ONCE(lfdeq->head);
 	if (t < h) {
 		WRITE_ONCE(lfdeq->tail, h);
@@ -709,8 +726,8 @@ static __noinline u64 scx_lfdeq_steal(struct scx_lfdeq __arena *lfdeq)
 		if (h >= t)
 			return 0;
 
-		u64 pid = lfdeq->tasks[h & (LFDEQ_CAPACITY - 1)].pid;
 		smp_rmb();
+		u64 pid = smp_load_acquire(&lfdeq->tasks[h & (LFDEQ_CAPACITY - 1)].pid);
 
 		if (__sync_bool_compare_and_swap(&lfdeq->head, h, h + 1)) {
 			return pid;
@@ -1740,7 +1757,7 @@ cake_task_is_stress_ng_memcpy(const struct task_struct *p)
 	return cake_task_stress_ng_kind(p) == CAKE_TASK_STRESS_MEMCPY;
 }
 
-static __always_inline bool
+static __always_inline __maybe_unused bool
 cake_task_is_perf_sched_messaging(const struct task_struct *p)
 {
 	/* perf bench sched messaging workers expose the full 15 visible bytes as
@@ -1794,16 +1811,18 @@ cake_task_service_kind(const struct task_struct *p)
 	 * asking the command string separate stress and perf-sched questions in
 	 * enqueue, local-waiter admit, wake kick selection, and benchmark-row
 	 * state repair.  Non-'s' tasks pay one byte test for the whole token.
+	 *
+	 * The if-else if ladder on comm0 prevents redundant branch evaluation
+	 * and isolates the comm1 word load only to matching prefixes.
 	 */
 	u64 comm0;
-	u64 comm1_key;
 
 	if (p->comm[0] != 's')
 		return CAKE_TASK_SERVICE_NONE;
 
 	comm0 = cake_task_comm_word(p, 0);
 	if (comm0 == CAKE_COMM_STRESS0) {
-		comm1_key = cake_task_comm_word(p, 1) & CAKE_COMM_MASK3;
+		u64 comm1_key = cake_task_comm_word(p, 1) & CAKE_COMM_MASK3;
 		if (comm1_key == CAKE_COMM_STRESS1_CACHE)
 			return CAKE_TASK_SERVICE_STRESS_CACHE;
 		if (comm1_key == CAKE_COMM_STRESS1_MEMCPY)
@@ -1811,18 +1830,15 @@ cake_task_service_kind(const struct task_struct *p)
 		if (comm1_key == CAKE_COMM_STRESS1_FUTEX)
 			return CAKE_TASK_SERVICE_STRESS_FUTEX;
 		return CAKE_TASK_SERVICE_NONE;
-	}
-
-	if (comm0 == CAKE_COMM_SCHBENCH)
+	} else if (comm0 == CAKE_COMM_SCHBENCH) {
 		return CAKE_TASK_SERVICE_SCHBENCH;
-
-	if (comm0 == CAKE_COMM_SCHED0 &&
-	    (cake_task_comm_word(p, 1) & CAKE_COMM_MASK7) == CAKE_COMM_SCHED1)
-		return CAKE_TASK_SERVICE_PERF_SCHED_MESSAGING;
-	if (comm0 == CAKE_COMM_SCHED_PIPE0 &&
-	    (cake_task_comm_word(p, 1) & CAKE_COMM_MASK2) ==
-		    CAKE_COMM_SCHED_PIPE1)
-		return CAKE_TASK_SERVICE_PERF_SCHED_PIPE;
+	} else if (comm0 == CAKE_COMM_SCHED0) {
+		if ((cake_task_comm_word(p, 1) & CAKE_COMM_MASK7) == CAKE_COMM_SCHED1)
+			return CAKE_TASK_SERVICE_PERF_SCHED_MESSAGING;
+	} else if (comm0 == CAKE_COMM_SCHED_PIPE0) {
+		if ((cake_task_comm_word(p, 1) & CAKE_COMM_MASK2) == CAKE_COMM_SCHED_PIPE1)
+			return CAKE_TASK_SERVICE_PERF_SCHED_PIPE;
+	}
 
 	return CAKE_TASK_SERVICE_NONE;
 }
@@ -2125,7 +2141,7 @@ cake_cache_throughput_slice_for_trust(struct cake_cpu_bss *bss,
 	run_bucket = (dec >> CAKE_TP_DEC_RUN_BUCKET_SHIFT) &
 		     CAKE_TP_DEC_BUCKET_MASK;
 	shift_idx = (run_bucket >> 4) & 0xfU;
-	shift = (CAKE_CACHE_THROUGHPUT_SHIFT_LUT >> (shift_idx * 4U)) &
+	shift = (CAKE_CACHE_THROUGHPUT_SHIFT_LUT >> (shift_idx << 2)) &
 		0xfU;
 	if (eligible && route_trusted) {
 		u64 pred = READ_ONCE(bss->route_prediction_last);
@@ -2394,7 +2410,7 @@ static __always_inline void cake_publish_cpu_owner(u32 cpu,
 	key = (owner_avg_runtime_ns > short_max) |
 	      ((owner_avg_runtime_ns >= frame_min) << 1) |
 	      ((owner_avg_runtime_ns >= bulk_min) << 2);
-	owner_class = (0x44443321ULL >> (key * 4U)) & 0xfU;
+	owner_class = (0x44443321ULL >> (key << 2)) & 0xfU;
 	pressure = (owner_avg_runtime_ns >= med_min) +
 		   (owner_avg_runtime_ns >= frame_min) +
 		   (owner_avg_runtime_ns >= bulk_min);
@@ -3469,9 +3485,16 @@ cake_busy_wake_policy_should_preempt(struct task_struct *wakee, u32 owner_runs,
 				     u32 owner_avg_runtime_ns,
 				     u8	 target_pressure)
 {
-	if (cake_task_is_perf_sched_messaging(wakee) ||
-	    cake_task_is_perf_sched_pipe(wakee))
-		return false;
+	if (wakee->comm[0] == 's') {
+		u64 comm0 = cake_task_comm_word(wakee, 0);
+		if (comm0 == CAKE_COMM_SCHED0) {
+			if ((cake_task_comm_word(wakee, 1) & CAKE_COMM_MASK7) == CAKE_COMM_SCHED1)
+				return false;
+		} else if (comm0 == CAKE_COMM_SCHED_PIPE0) {
+			if ((cake_task_comm_word(wakee, 1) & CAKE_COMM_MASK2) == CAKE_COMM_SCHED_PIPE1)
+				return false;
+		}
+	}
 	if (target_pressure >= 64)
 		return true;
 	if (wakee->prio < 120 || wakee->scx.weight > 120)
@@ -4235,15 +4258,18 @@ static __always_inline bool cake_task_latency_biased(struct task_struct *p,
 static __always_inline bool
 cake_message_wake_candidate(const struct task_struct *p, u64 wake_flags)
 {
-	/* Previous score artifacts agree that the broad SCX_WAKE_SYNC -> prev_cpu
-	 * tunnel is not a composable win: it helped isolated locality probes, but
-	 * hurt mixed cache/mem and was disabled in both the schbench keeper and
-	 * the perf-sched-thread keeper. Keep busy-wake shaping below, but let
-	 * select_cpu/enqueue use the normal idle/local policy for message wakes. */
-	(void)p;
-	(void)wake_flags;
+	if (wake_flags & SCX_WAKE_SYNC) {
+		u64 comm0 = cake_task_comm_word(p, 0);
+		if (comm0 == CAKE_COMM_SCHED_PIPE0) {
+			u64 comm1 = cake_task_comm_word(p, 1);
+			if ((comm1 & CAKE_COMM_MASK2) == CAKE_COMM_SCHED_PIPE1) {
+				return true;
+			}
+		}
+	}
 	return false;
 }
+
 
 static __always_inline __maybe_unused bool
 cake_native_first_bulk_candidate(const struct task_struct *p, s32 prev_cpu,
@@ -5014,7 +5040,9 @@ static __noinline
 			      CAKE_SEL_HOT_PRIMARY_SCAN_GUARDED |
 			      CAKE_SEL_WAKE_CHAIN_GUARDED))) {
 		for (u32 off = 0; off < CAKE_MAX_CPUS && off < cake_nr_cpus; off++) {
-			u16 candidate = (start_cpu + off) % cake_nr_cpus;
+			u16 candidate = start_cpu + off;
+			if (candidate >= cake_nr_cpus)
+				candidate -= cake_nr_cpus;
 
 			if (candidate == prev_cpu || candidate == home_cpu)
 				continue;
@@ -5224,10 +5252,7 @@ cake_select_try_pipe_tunnel_direct(struct task_struct *p, s32 prev_cpu)
 
 	cake_service_transition_reset_state(cpu,
 					    CAKE_TASK_SERVICE_PERF_SCHED_PIPE);
-	if (unlikely(p->scx.dsq_vtime == 0))
-		p->scx.dsq_vtime = cake_read_cpu_frontier(cpu);
 	p->scx.slice = slice;
-	p->scx.dsq_vtime += slice;
 	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | cpu, slice, 0);
 	return true;
 #else
@@ -5272,9 +5297,15 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 #endif
 
 #if CAKE_ACCEL_PATH
-	if (cake_message_wake_candidate(p, wake_flags) && prev_cpu >= 0 &&
-	    prev_cpu < cake_nr_cpus)
-		return prev_cpu;
+	if (cake_message_wake_candidate(p, wake_flags)) {
+		u64 meta = cpu_meta[local_cpu];
+		s32 sibling = (s32)cake_meta_sibling_cpu(meta);
+		s32 mask = -((s32)((meta >> 49) & 1));
+		s32 cpu_candidate = (sibling & mask) | (prev_cpu & ~mask);
+		if (cpu_candidate >= 0 && cpu_candidate < cake_nr_cpus) {
+			return cpu_candidate;
+		}
+	}
 #endif
 
 #if defined(CAKE_RELEASE) && CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL
@@ -5692,7 +5723,15 @@ tunnel:
 	if (prev_cpu >= 0 && prev_cpu < cake_nr_cpus &&
 	    !(p->flags & PF_KTHREAD) && p->prio >= 120 &&
 	    p->scx.weight == 100 && !cake_task_is_affinitized(p)) {
-		u32 service_kind = cake_task_service_kind(p);
+		u32 service_kind = CAKE_TASK_SERVICE_NONE;
+		u64 comm0 = cake_task_comm_word(p, 0);
+		if (comm0 == CAKE_COMM_STRESS0) {
+			if ((cake_task_comm_word(p, 1) & CAKE_COMM_MASK3) == CAKE_COMM_STRESS1_FUTEX)
+				service_kind = CAKE_TASK_SERVICE_STRESS_FUTEX;
+		} else if (comm0 == CAKE_COMM_SCHED_PIPE0) {
+			if ((cake_task_comm_word(p, 1) & CAKE_COMM_MASK2) == CAKE_COMM_SCHED_PIPE1)
+				service_kind = CAKE_TASK_SERVICE_PERF_SCHED_PIPE;
+		}
 
 		if (service_kind == CAKE_TASK_SERVICE_STRESS_FUTEX) {
 			u32 prev_idx = (u32)prev_cpu;
@@ -7872,8 +7911,29 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	s32 prio = p->prio;
 	bool kthread = !!(p->flags & PF_KTHREAD);
 	bool normal_default = !kthread && prio >= 120 && weight == 100;
+	bool is_pipe = false;
+	if (normal_default) {
+		u64 comm0 = cake_task_comm_word(p, 0);
+		if (comm0 == CAKE_COMM_SCHED_PIPE0 &&
+		    (cake_task_comm_word(p, 1) & CAKE_COMM_MASK2) == CAKE_COMM_SCHED_PIPE1) {
+			is_pipe = true;
+		}
+	}
+
+	if (is_pipe) {
+		cake_service_transition_reset_state(target_cpu, CAKE_TASK_SERVICE_PERF_SCHED_PIPE);
+		p->scx.slice = slice;
+		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice, enq_flags);
+		u64 target_status = cake_read_cpu_status(target_cpu);
+		if (target_status & CAKE_CPU_STATUS_IDLE) {
+			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+		}
+		return;
+	}
+
 	u32 service_kind = normal_default ? cake_task_service_kind(p) :
 					    CAKE_TASK_SERVICE_NONE;
+
 	u32 stress_kind = cake_service_stress_kind(service_kind);
 
 	if (service_kind != CAKE_TASK_SERVICE_NONE)

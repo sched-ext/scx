@@ -201,6 +201,10 @@ fn main() {
         baked_bool("SCX_CAKE_RELEASE_DOMAIN_DRR", false);
     let (baked_release_planck_local, baked_release_planck_local_value, _release_planck_local) =
         baked_bool("SCX_CAKE_RELEASE_PLANCK_LOCAL", true);
+    let (baked_core_steal_dhq, baked_core_steal_dhq_value, release_core_steal_dhq) =
+        baked_bool("SCX_CAKE_CORE_STEAL_DHQ", false);
+    let (_futex_trace_label, futex_trace_value, futex_trace_enabled) =
+        baked_bool("SCX_CAKE_FUTEX_TRACE", false);
     let baked_release_trust_maps_value =
         baked_release_route_pred_value & baked_release_confidence_value;
     let baked_release_trust_maps = if baked_release_trust_maps_value != 0 {
@@ -210,9 +214,9 @@ fn main() {
     };
     let has_trust_maps = profile != "release" || baked_release_trust_maps_value != 0;
     let needs_arena = if profile == "release" {
-        release_learned_locality || release_wake_chain_locality
+        release_learned_locality || release_wake_chain_locality || release_core_steal_dhq
     } else {
-        enable_hot_telemetry || enable_locality_experiments
+        enable_hot_telemetry || enable_locality_experiments || release_core_steal_dhq
     };
 
     // Generate Rust constants file — avoids unstable option_env! str matching.
@@ -251,7 +255,9 @@ fn main() {
              pub const BAKED_RELEASE_PLANCK_LOCAL: &str = {:?};\n\
              pub const BAKED_RELEASE_PLANCK_LOCAL_VALUE: u32 = {};\n\
              pub const BAKED_RELEASE_TRUST_MAPS: &str = {:?};\n\
-             pub const BAKED_RELEASE_TRUST_MAPS_VALUE: u32 = {};\n",
+             pub const BAKED_RELEASE_TRUST_MAPS_VALUE: u32 = {};\n\
+             pub const BAKED_CORE_STEAL_DHQ: &str = {:?};\n\
+             pub const BAKED_CORE_STEAL_DHQ_VALUE: u32 = {};\n",
             max_cpus,
             max_llcs,
             max_cpus,
@@ -281,7 +287,9 @@ fn main() {
             baked_release_planck_local,
             baked_release_planck_local_value,
             baked_release_trust_maps,
-            baked_release_trust_maps_value
+            baked_release_trust_maps_value,
+            baked_core_steal_dhq,
+            baked_core_steal_dhq_value
         ),
     )
     .expect("Failed to write cake_constants.rs");
@@ -299,6 +307,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_LOCAL_WAITER");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_DOMAIN_DRR");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_PLANCK_LOCAL");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_CORE_STEAL_DHQ");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_FUTEX_TRACE");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -311,6 +321,8 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(cake_hot_telemetry)");
     println!("cargo::rustc-check-cfg=cfg(cake_needs_arena)");
     println!("cargo::rustc-check-cfg=cfg(cake_trust_maps)");
+    println!("cargo::rustc-check-cfg=cfg(cake_futex_trace)");
+    println!("cargo::rustc-check-cfg=cfg(cake_core_steal_dhq)");
 
     // Emit rustc-cfg flags for true conditional compilation (Rust #[cfg] guards)
     if has_hybrid {
@@ -322,7 +334,7 @@ fn main() {
 
     // Build cflags with hardware gates
     let mut cflags = format!(
-        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_NR_CPUS={} -DCAKE_NR_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={} -DCAKE_STORM_GUARD_VALUE={} -DCAKE_BUSY_WAKE_KICK_VALUE={} -DCAKE_LEARNED_LOCALITY_VALUE={} -DCAKE_WAKE_CHAIN_LOCALITY_VALUE={} -DCAKE_RELEASE_ROUTE_PRED={} -DCAKE_RELEASE_CONFIDENCE={} -DCAKE_RELEASE_LLC_PENDING={} -DCAKE_RELEASE_LOCAL_WAITER={} -DCAKE_RELEASE_DOMAIN_DRR={} -DCAKE_RELEASE_PLANCK_LOCAL={}",
+        "{} -DCAKE_MAX_CPUS={} -DCAKE_MAX_LLCS={} -DCAKE_NR_CPUS={} -DCAKE_NR_LLCS={} -DCAKE_QUANTUM_NS={} -DCAKE_QUEUE_POLICY_VALUE={} -DCAKE_STORM_GUARD_VALUE={} -DCAKE_BUSY_WAKE_KICK_VALUE={} -DCAKE_LEARNED_LOCALITY_VALUE={} -DCAKE_WAKE_CHAIN_LOCALITY_VALUE={} -DCAKE_RELEASE_ROUTE_PRED={} -DCAKE_RELEASE_CONFIDENCE={} -DCAKE_RELEASE_LLC_PENDING={} -DCAKE_RELEASE_LOCAL_WAITER={} -DCAKE_RELEASE_DOMAIN_DRR={} -DCAKE_RELEASE_PLANCK_LOCAL={} -DCAKE_CORE_STEAL_DHQ_VALUE={}",
         base_flags,
         max_cpus,
         max_llcs,
@@ -339,8 +351,10 @@ fn main() {
         baked_release_llc_pending_value,
         baked_release_local_waiter_value,
         baked_release_domain_drr_value,
-        baked_release_planck_local_value
+        baked_release_planck_local_value,
+        baked_core_steal_dhq_value
     );
+    cflags.push_str(&format!(" -DCAKE_FUTEX_TRACE={}", futex_trace_value));
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
         println!("cargo:rustc-cfg=cake_bpf_release");
@@ -366,6 +380,12 @@ fn main() {
     if has_trust_maps {
         println!("cargo:rustc-cfg=cake_trust_maps");
     }
+    if futex_trace_enabled {
+        println!("cargo:rustc-cfg=cake_futex_trace");
+    }
+    if release_core_steal_dhq {
+        println!("cargo:rustc-cfg=cake_core_steal_dhq");
+    }
     cflags.push_str(&format!(
         " -DCAKE_RELEASE_TRUST_MAPS={}",
         baked_release_trust_maps_value
@@ -381,7 +401,7 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} NEEDS_ARENA={}",
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} NEEDS_ARENA={} FUTEX_TRACE={} CORE_STEAL_DHQ={}",
         max_cpus,
         max_llcs,
         nr_cpus,
@@ -402,7 +422,9 @@ fn main() {
         baked_release_domain_drr,
         baked_release_planck_local,
         baked_release_trust_maps,
-        needs_arena
+        needs_arena,
+        futex_trace_enabled,
+        baked_core_steal_dhq
     );
 
     std::env::set_var("BPF_EXTRA_CFLAGS_PRE_INCL", &cflags);
@@ -420,7 +442,9 @@ fn main() {
             .add_source("src/bpf/lib/sdt_task.bpf.c")
             .add_source("src/bpf/lib/bitmap.bpf.c")
             .add_source("src/bpf/lib/cpumask.bpf.c")
-            .add_source("src/bpf/lib/topology.bpf.c");
+            .add_source("src/bpf/lib/topology.bpf.c")
+            .add_source("src/bpf/lib/minheap.bpf.c")
+            .add_source("src/bpf/lib/dhq.bpf.c");
     }
 
     builder.compile_link_gen().unwrap();

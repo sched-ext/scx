@@ -1,4 +1,4 @@
-# scx_cake 1.1.1
+# scx_cake 1.1.2
 
 [![License: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg?style=flat-square)](https://opensource.org/licenses/GPL-2.0)
 [![Kernel: 6.12+](https://img.shields.io/badge/kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
@@ -6,7 +6,7 @@
 
 `scx_cake` is a performance-oriented `sched_ext` CPU scheduler. It applies CAKE-inspired low-latency ideas to CPU time: keep wakeups short, dispatch directly to good local targets, use per-LLC vtime fallback queues when local handoff is not selected, and make the common path cheap.
 
-The active `1.1.1` design is centered on:
+The active `1.1.2` design is centered on:
 
 - Cake Scoreboard Dispatch: init-built topology candidates, owner-written CPU
   status lanes, packed confidence, prediction, and task-biased release fast
