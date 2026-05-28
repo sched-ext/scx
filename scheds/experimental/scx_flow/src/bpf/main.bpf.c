@@ -971,7 +971,8 @@ static __always_inline void note_local_reserved_fast(struct flow_cpu_state *csta
 		cstate->local_reserved_burst_rounds++;
 }
 
-static __always_inline void note_urgent_latency_dispatch(struct flow_cpu_state *cstate)
+static __always_inline void note_urgent_latency_dispatch(struct flow_cpu_state *cstate,
+							  s32 cpu)
 {
 	if (cstate && cstate->urgent_latency_burst_rounds > 0)
 		FLOW_CPUSTAT_INC(cstate, urgent_latency_burst_continuations);
@@ -982,6 +983,7 @@ static __always_inline void note_urgent_latency_dispatch(struct flow_cpu_state *
 	FLOW_CPUSTAT_INC(cstate, urgent_latency_burst_grants);
 	reset_reserved_lane_burst(cstate);
 	note_high_priority_dispatch(cstate);
+	scx_bpf_cpuperf_set(cpu, SCX_CPUPERF_ONE);
 }
 
 static __always_inline void note_reserved_dispatch(struct flow_cpu_state *cstate)
@@ -1614,7 +1616,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	if (urgent_burst_rounds < tuned_urgent_latency_burst_max() &&
 	    scx_bpf_dsq_move_to_local(URGENT_LATENCY_DSQ, 0)) {
 		reset_local_reserved_burst(cstate);
-		note_urgent_latency_dispatch(cstate);
+		note_urgent_latency_dispatch(cstate, cpu);
 		return;
 	}
 
@@ -1624,6 +1626,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		reset_local_reserved_burst(cstate);
 		FLOW_CPUSTAT_INC(cstate, latency_dispatches);
 		note_high_priority_dispatch(cstate);
+		scx_bpf_cpuperf_set(cpu, SCX_CPUPERF_ONE);
 		return;
 	}
 
