@@ -397,6 +397,7 @@ struct layer {
 	bool			skip_remote_node;
 	bool			prev_over_idle_core;
 	bool			idle_confined;
+	bool			fully_allocated;
 	int			growth_algo;
 
 	u64			nr_tasks;

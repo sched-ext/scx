@@ -1439,12 +1439,20 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 
 	/*
 	 * Grouped layers may opt to act like Confined for idle selection
-	 * until the layer becomes saturated (check_no_idle is set), at
+	 * until the layer becomes saturated (check_no_idle is set) or
+	 * the system is fully allocated (no free CPUs to grow into), at
 	 * which point they fall back to searching unprotected CPUs.
+	 *
+	 * check_no_idle alone is too restrictive: CPUs degraded by
+	 * softirq/IRQ overhead still appear briefly idle between bursts,
+	 * keeping check_no_idle cleared even though the CPUs are
+	 * effectively saturated.  fully_allocated lets userspace override
+	 * when there's no room to grow.
 	 */
 	bool can_use_open = layer->kind != LAYER_KIND_CONFINED &&
 		(!layer->idle_confined ||
-		 READ_ONCE(layer->check_no_idle));
+		 READ_ONCE(layer->check_no_idle) ||
+		 READ_ONCE(layer->fully_allocated));
 
 	if (is_float)
 		goto no_locality;
