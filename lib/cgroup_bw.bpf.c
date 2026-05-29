@@ -1074,7 +1074,7 @@ int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, u64 cgx_raw)
 			return -ESRCH;
 		}
 
-		cgx->nquota_ub = min(cgx->nquota_ub, parentx->nquota);
+		cgx->nquota_ub = min(cgx->nquota_ub, parentx->nquota_ub);
 		bpf_cgroup_release(parent);
 	}
 	return 0;
