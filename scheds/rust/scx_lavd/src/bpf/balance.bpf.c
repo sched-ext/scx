@@ -281,7 +281,7 @@ u64 __attribute__((noinline)) dsq_peek_task_load(u64 dsq_id)
 u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 {
 	u64 pick_dsq_id = -ENOENT;
-	s32 highest_queued = -1;
+	u64 highest_load = 0;
 
 	if (!cpdomc) {
 		scx_bpf_error("Invalid cpdom context");
@@ -289,13 +289,12 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 	}
 
 	/*
-	 * For simplicity, try to just steal from the (either per-CPU or
-	 * per-domain) DSQs with the highest number of queued_tasks
-	 * in this domain.
+	 * Pick the (per-CPU or per-domain) DSQ in this compute domain
+	 * with the highest RAVG-weighted queued load.
 	 */
 	if (use_cpdom_dsq()) {
 		pick_dsq_id = cpdom_to_dsq(cpdomc->id);
-		highest_queued = scx_bpf_dsq_nr_queued(pick_dsq_id);
+		highest_load = READ_ONCE(cpdomc->qload_invr);
 	}
 
 	/*
@@ -309,17 +308,20 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
 			u64 cpumask = cpdomc->__cpumask[i];
 			bpf_for(k, 0, 64) {
-				s32 queued;
+				struct cpu_ctx *cpuc;
+				u64 load;
+
 				j = cpumask_next_set_bit(&cpumask);
 				if (j < 0)
 					break;
 				cpu = (i * 64) + j;
 				if (cpu >= nr_cpu_ids)
 					break;
-				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
-					 scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
-				if (queued > highest_queued) {
-					highest_queued = queued;
+
+				cpuc = get_cpu_ctx_id(cpu);
+				load = cpuc ? READ_ONCE(cpuc->qload_invr) : 0;
+				if (load > highest_load) {
+					highest_load = load;
 					pick_cpu = cpu;
 				}
 			}
@@ -380,6 +382,15 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 				continue;
 
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
+
+			/*
+			 * No DSQ in cpdomc_pick has any queued load.
+			 * Move on to the next neighbor rather than passing
+			 * -ENOENT to dsq_peek_task_load() / consume_dsq(),
+			 * which would abort the scheduler.
+			 */
+			if ((s64)dsq_id < 0)
+				continue;
 
 			/*
 			 * Peek at the head task to get its size for budget
@@ -468,6 +479,12 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 				continue;
 
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
+			/*
+			 * Same defensive check as the try_to_steal_task
+			 * path above.
+			 */
+			if ((s64)dsq_id < 0)
+				continue;
 
 			/*
 			 * Peek at the head task to get its size. Skip the
