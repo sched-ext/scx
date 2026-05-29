@@ -167,6 +167,19 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_borrowing: bool,
 
+    /// Apply vtime drift fixes for borrowed and cross-cell-pinned tasks.
+    /// mitosis_stopping advances a task's charge-cell vtime on every stop
+    /// (not only in-cell, un-borrowed runs), so a borrowed task still
+    /// advances its home cell. A task pinned outside its home cell is
+    /// charged to the cell of the CPU it actually runs on (mitosis_enqueue
+    /// and mitosis_select_cpu), so that cell and that CPU's vtime_now track
+    /// it and it stays comparable to that cell's tasks at dispatch. Without
+    /// this flag, dsq_vtime drifts past its basis until the enqueue "vtime
+    /// too far ahead" check fires, or a pinned task loses every dispatch and
+    /// the watchdog kills the scheduler.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    vtime_borrow_fixes: bool,
+
     /// Use lockless scx_bpf_dsq_peek() instead of the default iterator-based peek.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     use_lockless_peek: bool,
@@ -389,6 +402,7 @@ impl<'a> Scheduler<'a> {
         rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
 
         rodata.enable_borrowing = opts.enable_borrowing;
+        rodata.vtime_borrow_fixes = opts.vtime_borrow_fixes;
         rodata.use_lockless_peek = opts.use_lockless_peek;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {

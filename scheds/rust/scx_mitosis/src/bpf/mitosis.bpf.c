@@ -50,6 +50,7 @@ const volatile bool userspace_managed_cell_mode = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
 const volatile bool dynamic_affinity_cpu_selection = false;
+const volatile bool vtime_borrow_fixes = false;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
