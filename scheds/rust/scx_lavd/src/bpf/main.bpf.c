@@ -379,6 +379,7 @@ static void update_stat_for_running(struct task_struct *p,
 				    struct cpu_ctx *cpuc, u64 now)
 {
 	u64 wait_period, interval;
+	u64 task_clk = 0, pelt_clk = 0;
 	struct ravg_data local_ravg;
 	struct cpu_ctx *prev_cpuc;
 
@@ -433,8 +434,38 @@ static void update_stat_for_running(struct task_struct *p,
 	reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	taskc->last_running_clk = now;
 	taskc->last_measured_wall_clk = now;
-	taskc->last_measured_task_clk = scx_clock_task(cpuc->cpu_id);
-	taskc->last_measured_pelt_clk = scx_clock_pelt(cpuc->cpu_id);
+
+	/*
+	 * ops.running() can fire while the BPF callback runs on a CPU other
+	 * than the task's own rq. This happens in any sched_change path that
+	 * dequeues and re-enqueues a task under its rq lock from a possibly
+	 * remote CPU. Common examples:
+	 *
+	 *   - sched_setaffinity()       (taskset, kernel affinity adjusts)
+	 *   - sched_setscheduler()      (chrt, sched_setattr(2))
+	 *   - sched_move_task()         (cgroup task migration)
+	 *   - scx_root_enable_workfn()  (scx attach worker iterating rqs)
+	 *
+	 * In that case scx_clock_task() reads a remote rq->clock_task --
+	 * which the kernel does not refresh while the CPU is NO_HZ-idle, so
+	 * it may be stale. The next account_task_runtime() reads a fresh
+	 * post-jump clock and computes a delta containing the entire idle gap
+	 * as phantom task runtime, poisoning runtime_total, and debt ->
+	 * period_budget if the cpu bandwidth control is enabled.
+	 *
+	 * Hence, when we access remote clocks, we defer setting the baseline;
+	 * account_task_runtime() will reseed it from a fresh local read and
+	 * skip this measurement's accounting. This does not significantly
+	 * affect accuracy: accessing a remote rq clock is rare, and the missed
+	 * measurement is bounded to at most one tick (or the task's run length,
+	 * whichever is shorter).
+	 */
+	if (bpf_get_smp_processor_id() == cpuc->cpu_id) {
+		task_clk = scx_clock_task(cpuc->cpu_id);
+		pelt_clk = scx_clock_pelt(cpuc->cpu_id);
+	}
+	taskc->last_measured_task_clk = task_clk;
+	taskc->last_measured_pelt_clk = pelt_clk;
 
 	/*
 	 * Mark this CPU as busy in the duty-cycle ravg.
@@ -510,10 +541,19 @@ static void account_task_runtime(struct task_struct *p,
 	 * execution duration since the last measured time.
 	 */
 	now_task = scx_clock_task(cpuc->cpu_id);
-	task_time_wall = time_delta(now_task, taskc->last_measured_task_clk);
-
 	now_pelt = scx_clock_pelt(cpuc->cpu_id);
-	task_time_invr = time_delta(now_pelt, taskc->last_measured_pelt_clk);
+
+	/*
+	 * When last_measured_*_clk == 0, it means that ops.running() was
+	 * called on a CPU other than the task's, so we could not reliably
+	 * get task_clk and pelt_clk. In this case, let's ignore the
+	 * accounting for this tick and reseed the baseline from the
+	 * now-local fresh clock.
+	 */
+	task_time_wall = unlikely(!taskc->last_measured_task_clk) ? 0 :
+		time_delta(now_task, taskc->last_measured_task_clk);
+	task_time_invr = unlikely(!taskc->last_measured_pelt_clk) ? 0 :
+		time_delta(now_pelt, taskc->last_measured_pelt_clk);
 
 	task_time_iwgt = task_time_invr / p->scx.weight;
 
