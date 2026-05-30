@@ -24,6 +24,7 @@ members = [
     "scheds/rust/scx_rustland",
     "scheds/rust/scx_rusty",
     "scheds/rust/scx_tickless",
+    "scheds/rust/scx_soft_domain",
     "scheds/experimental/scx_flow",
     "scheds/experimental/scx_rlfifo",
     "tools/scxcash",
