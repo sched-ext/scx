@@ -91,14 +91,6 @@ enum AutoTuneMode {
 }
 
 impl AutoTuneMode {
-    fn as_u64(self) -> u64 {
-        match self {
-            Self::Balanced => 0,
-            Self::Latency => 1,
-            Self::Throughput => 2,
-        }
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Self::Balanced => "balanced",
@@ -115,9 +107,6 @@ struct RuntimeTunables {
     interactive_floor_ns: u64,
     preempt_budget_min_ns: u64,
     preempt_refill_min_ns: u64,
-    latency_credit_grant: u64,
-    latency_credit_decay: u64,
-    latency_debt_urgent_min: u64,
     urgent_latency_burst_max: u64,
     reserved_quota_burst_max: u64,
     reserved_lane_burst_max: u64,
@@ -135,9 +124,6 @@ impl Default for RuntimeTunables {
             interactive_floor_ns: u64::from(consts_FLOW_INTERACTIVE_FLOOR_NS),
             preempt_budget_min_ns: u64::from(consts_FLOW_PREEMPT_BUDGET_MIN_NS),
             preempt_refill_min_ns: u64::from(consts_FLOW_PREEMPT_REFILL_MIN_NS),
-            latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
-            latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
-            latency_debt_urgent_min: u64::from(consts_FLOW_LATENCY_DEBT_URGENT_MIN),
             urgent_latency_burst_max: u64::from(consts_FLOW_URGENT_LATENCY_BURST_MAX),
             reserved_quota_burst_max: u64::from(consts_FLOW_RESERVED_QUOTA_BURST_MAX),
             reserved_lane_burst_max: u64::from(consts_FLOW_RESERVED_LANE_BURST_MAX),
@@ -171,18 +157,6 @@ impl RuntimeTunables {
             preempt_refill_min_ns: self.preempt_refill_min_ns.clamp(
                 u64::from(consts_FLOW_PREEMPT_REFILL_MIN_NS),
                 u64::from(consts_FLOW_PREEMPT_REFILL_MAX_NS),
-            ),
-            latency_credit_grant: self.latency_credit_grant.clamp(
-                u64::from(consts_FLOW_LATENCY_CREDIT_GRANT_MIN),
-                u64::from(consts_FLOW_LATENCY_CREDIT_GRANT_MAX),
-            ),
-            latency_credit_decay: self.latency_credit_decay.clamp(
-                u64::from(consts_FLOW_LATENCY_CREDIT_DECAY_MIN),
-                u64::from(consts_FLOW_LATENCY_CREDIT_DECAY_MAX),
-            ),
-            latency_debt_urgent_min: self.latency_debt_urgent_min.clamp(
-                u64::from(consts_FLOW_LATENCY_DEBT_URGENT_MIN_MIN),
-                u64::from(consts_FLOW_LATENCY_DEBT_URGENT_MIN_MAX),
             ),
             urgent_latency_burst_max: self.urgent_latency_burst_max.clamp(
                 u64::from(consts_FLOW_URGENT_LATENCY_BURST_MIN),
@@ -224,9 +198,6 @@ impl RuntimeTunables {
                 interactive_floor_ns: 140 * 1000,
                 preempt_budget_min_ns: 225 * 1000,
                 preempt_refill_min_ns: 250 * 1000,
-                latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
-                latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
-                latency_debt_urgent_min: u64::from(consts_FLOW_LATENCY_DEBT_URGENT_MIN),
                 urgent_latency_burst_max: 3,
                 reserved_quota_burst_max: u64::from(consts_FLOW_RESERVED_QUOTA_BURST_MAX),
                 reserved_lane_burst_max: 4,
@@ -242,9 +213,6 @@ impl RuntimeTunables {
                 interactive_floor_ns: 80 * 1000,
                 preempt_budget_min_ns: 300 * 1000,
                 preempt_refill_min_ns: 325 * 1000,
-                latency_credit_grant: u64::from(consts_FLOW_LATENCY_CREDIT_GRANT),
-                latency_credit_decay: u64::from(consts_FLOW_LATENCY_CREDIT_DECAY),
-                latency_debt_urgent_min: 2,
                 urgent_latency_burst_max: 1,
                 reserved_quota_burst_max: 3,
                 reserved_lane_burst_max: 6,
@@ -280,21 +248,6 @@ impl RuntimeTunables {
             &mut self.preempt_refill_min_ns,
             target.preempt_refill_min_ns,
             25 * 1000,
-        );
-        changed |= step_u64(
-            &mut self.latency_credit_grant,
-            target.latency_credit_grant,
-            1,
-        );
-        changed |= step_u64(
-            &mut self.latency_credit_decay,
-            target.latency_credit_decay,
-            1,
-        );
-        changed |= step_u64(
-            &mut self.latency_debt_urgent_min,
-            target.latency_debt_urgent_min,
-            1,
         );
         changed |= step_u64(
             &mut self.urgent_latency_burst_max,
@@ -370,9 +323,6 @@ struct CpuPolicyStateAgg {
     urgent_latency_enqueues: u64,
     urgent_latency_misses: u64,
     latency_dispatches: u64,
-    latency_debt_raises: u64,
-    latency_debt_decays: u64,
-    latency_debt_urgent_enqueues: u64,
     reserved_dispatches: u64,
     shared_dispatches: u64,
     contained_dispatches: u64,
@@ -385,7 +335,6 @@ struct CpuPolicyStateAgg {
     latency_lane_candidates: u64,
     latency_lane_enqueues: u64,
     latency_candidate_local_enqueues: u64,
-    latency_candidate_hog_blocks: u64,
     positive_budget_wakeups: u64,
     rt_sensitive_wakeups: u64,
     reserved_local_enqueues: u64,
@@ -411,13 +360,13 @@ struct CpuPolicyStateAgg {
     direct_local_mismatches: u64,
     ipc_wake_candidates: u64,
     ipc_local_enqueues: u64,
-    ipc_score_raises: u64,
     ipc_boosts: u64,
     contained_enqueues: u64,
     contained_starved_head_enqueues: u64,
     hog_containment_enqueues: u64,
     hog_recoveries: u64,
-    cpu_migrations: u64,
+	cpu_migrations: u64,
+	temporal_promotions: u64,
 }
 
 #[derive(Debug)]
@@ -661,15 +610,6 @@ impl<'a> Scheduler<'a> {
             agg.latency_dispatches = agg
                 .latency_dispatches
                 .saturating_add(state.latency_dispatches);
-            agg.latency_debt_raises = agg
-                .latency_debt_raises
-                .saturating_add(state.latency_debt_raises);
-            agg.latency_debt_decays = agg
-                .latency_debt_decays
-                .saturating_add(state.latency_debt_decays);
-            agg.latency_debt_urgent_enqueues = agg
-                .latency_debt_urgent_enqueues
-                .saturating_add(state.latency_debt_urgent_enqueues);
             agg.reserved_dispatches = agg
                 .reserved_dispatches
                 .saturating_add(state.reserved_dispatches);
@@ -704,9 +644,6 @@ impl<'a> Scheduler<'a> {
             agg.latency_candidate_local_enqueues = agg
                 .latency_candidate_local_enqueues
                 .saturating_add(state.latency_candidate_local_enqueues);
-            agg.latency_candidate_hog_blocks = agg
-                .latency_candidate_hog_blocks
-                .saturating_add(state.latency_candidate_hog_blocks);
             agg.positive_budget_wakeups = agg
                 .positive_budget_wakeups
                 .saturating_add(state.positive_budget_wakeups);
@@ -782,7 +719,6 @@ impl<'a> Scheduler<'a> {
             agg.ipc_local_enqueues = agg
                 .ipc_local_enqueues
                 .saturating_add(state.ipc_local_enqueues);
-            agg.ipc_score_raises = agg.ipc_score_raises.saturating_add(state.ipc_score_raises);
             agg.ipc_boosts = agg.ipc_boosts.saturating_add(state.ipc_boosts);
             agg.contained_enqueues = agg
                 .contained_enqueues
@@ -795,6 +731,8 @@ impl<'a> Scheduler<'a> {
                 .saturating_add(state.hog_containment_enqueues);
             agg.hog_recoveries = agg.hog_recoveries.saturating_add(state.hog_recoveries);
             agg.cpu_migrations = agg.cpu_migrations.saturating_add(state.cpu_migrations);
+            agg.temporal_promotions = agg.temporal_promotions
+                .saturating_add(state.temporal_promotions);
         }
 
         agg
@@ -821,8 +759,6 @@ impl<'a> Scheduler<'a> {
         Self::write_runtime_tunables(
             &mut skel,
             RuntimeTunables::default(),
-            AutoTuneMode::Balanced,
-            0,
         );
 
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
@@ -873,14 +809,6 @@ impl<'a> Scheduler<'a> {
                 + cpu_policy_state.latency_lane_candidates,
             latency_candidate_local_enqueues: bss_data.latency_candidate_local_enqueues
                 + cpu_policy_state.latency_candidate_local_enqueues,
-            latency_candidate_hog_blocks: bss_data.latency_candidate_hog_blocks
-                + cpu_policy_state.latency_candidate_hog_blocks,
-            latency_debt_raises: bss_data.latency_debt_raises
-                + cpu_policy_state.latency_debt_raises,
-            latency_debt_decays: bss_data.latency_debt_decays
-                + cpu_policy_state.latency_debt_decays,
-            latency_debt_urgent_enqueues: bss_data.latency_debt_urgent_enqueues
-                + cpu_policy_state.latency_debt_urgent_enqueues,
             urgent_latency_misses: bss_data.urgent_latency_misses
                 + cpu_policy_state.urgent_latency_misses,
             reserved_local_enqueues: bss_data.reserved_local_enqueues
@@ -912,6 +840,8 @@ impl<'a> Scheduler<'a> {
                 + cpu_policy_state.cpu_stability_biases,
             last_cpu_matches: bss_data.last_cpu_matches + cpu_policy_state.last_cpu_matches,
             cpu_migrations: bss_data.cpu_migrations + cpu_policy_state.cpu_migrations,
+            temporal_promotions: bss_data.temporal_promotions
+                + cpu_policy_state.temporal_promotions,
             rt_sensitive_wakeups: bss_data.rt_sensitive_wakeups
                 + cpu_policy_state.rt_sensitive_wakeups,
             rt_sensitive_local_enqueues: bss_data.rt_sensitive_local_enqueues
@@ -948,7 +878,6 @@ impl<'a> Scheduler<'a> {
             ipc_wake_candidates: bss_data.ipc_wake_candidates
                 + cpu_policy_state.ipc_wake_candidates,
             ipc_local_enqueues: bss_data.ipc_local_enqueues + cpu_policy_state.ipc_local_enqueues,
-            ipc_score_raises: bss_data.ipc_score_raises + cpu_policy_state.ipc_score_raises,
             ipc_boosts: bss_data.ipc_boosts + cpu_policy_state.ipc_boosts,
             contained_enqueues: bss_data.contained_enqueues + cpu_policy_state.contained_enqueues,
             hog_containment_enqueues: bss_data.hog_containment_enqueues
@@ -960,9 +889,6 @@ impl<'a> Scheduler<'a> {
                 + cpu_policy_state.contained_rescue_dispatches,
             shared_rescue_dispatches: bss_data.shared_rescue_dispatches
                 + cpu_policy_state.shared_rescue_dispatches,
-            tune_latency_credit_grant: data.tune_latency_credit_grant,
-            tune_latency_credit_decay: data.tune_latency_credit_decay,
-            tune_latency_debt_urgent_min: data.tune_latency_debt_urgent_min,
             tune_urgent_latency_burst_max: data.tune_urgent_latency_burst_max,
             tune_reserved_quota_burst_max: data.tune_reserved_quota_burst_max,
             tune_contained_starvation_max: data.tune_contained_starvation_max,
@@ -970,8 +896,6 @@ impl<'a> Scheduler<'a> {
             tune_local_fast_nr_running_max: data.tune_local_fast_nr_running_max,
             tune_local_reserved_burst_max: data.tune_local_reserved_burst_max,
             tune_reserved_lane_burst_max: data.tune_reserved_lane_burst_max,
-            autotune_generation: bss_data.autotune_generation,
-            autotune_mode: bss_data.autotune_mode,
             tune_reserved_max_ns: data.tune_reserved_max_ns,
             tune_shared_slice_ns: data.tune_shared_slice_ns,
             tune_interactive_floor_ns: data.tune_interactive_floor_ns,
@@ -983,8 +907,6 @@ impl<'a> Scheduler<'a> {
     fn write_runtime_tunables(
         skel: &mut BpfSkel<'a>,
         tunables: RuntimeTunables,
-        mode: AutoTuneMode,
-        generation: u64,
     ) {
         let data = skel.maps.data_data.as_mut().unwrap();
         data.tune_reserved_max_ns = tunables.reserved_max_ns;
@@ -992,9 +914,6 @@ impl<'a> Scheduler<'a> {
         data.tune_interactive_floor_ns = tunables.interactive_floor_ns;
         data.tune_preempt_budget_min_ns = tunables.preempt_budget_min_ns;
         data.tune_preempt_refill_min_ns = tunables.preempt_refill_min_ns;
-        data.tune_latency_credit_grant = tunables.latency_credit_grant;
-        data.tune_latency_credit_decay = tunables.latency_credit_decay;
-        data.tune_latency_debt_urgent_min = tunables.latency_debt_urgent_min;
         data.tune_urgent_latency_burst_max = tunables.urgent_latency_burst_max;
         data.tune_reserved_quota_burst_max = tunables.reserved_quota_burst_max;
         data.tune_contained_starvation_max = tunables.contained_starvation_max;
@@ -1002,19 +921,15 @@ impl<'a> Scheduler<'a> {
         data.tune_local_fast_nr_running_max = tunables.local_fast_nr_running_max;
         data.tune_local_reserved_burst_max = tunables.local_reserved_burst_max;
         data.tune_reserved_lane_burst_max = tunables.reserved_lane_burst_max;
-
-        let bss_data = skel.maps.bss_data.as_mut().unwrap();
-        bss_data.autotune_mode = mode.as_u64();
-        bss_data.autotune_generation = generation;
     }
 
     fn apply_runtime_tunables(
         &mut self,
         tunables: RuntimeTunables,
-        mode: AutoTuneMode,
-        generation: u64,
+        _mode: AutoTuneMode,
+        _generation: u64,
     ) {
-        Self::write_runtime_tunables(&mut self.skel, tunables, mode, generation);
+        Self::write_runtime_tunables(&mut self.skel, tunables);
     }
 
     fn exited(&self) -> bool {
@@ -1039,7 +954,7 @@ impl<'a> Scheduler<'a> {
                     if let Some((mode, tunables, generation)) = autotuner.update(&current) {
                         self.apply_runtime_tunables(tunables, mode, generation);
                         info!(
-                            "autotune={} gen={} reserve_cap={}us shared_slice={}us refill_floor={}us preempt_budget={}us preempt_refill={}us debt_min={} urgent_burst_max={} reserved_quota_max={} reserved_lane_max={} local_burst_max={}",
+                            "autotune={} gen={} reserve_cap={}us shared_slice={}us refill_floor={}us preempt_budget={}us preempt_refill={}us urgent_burst_max={} reserved_quota_max={} reserved_lane_max={} local_burst_max={}",
                             mode.as_str(),
                             generation,
                             tunables.reserved_max_ns / 1000,
@@ -1047,7 +962,6 @@ impl<'a> Scheduler<'a> {
                             tunables.interactive_floor_ns / 1000,
                             tunables.preempt_budget_min_ns / 1000,
                             tunables.preempt_refill_min_ns / 1000,
-                            tunables.latency_debt_urgent_min,
                             tunables.urgent_latency_burst_max,
                             tunables.reserved_quota_burst_max,
                             tunables.reserved_lane_burst_max,
