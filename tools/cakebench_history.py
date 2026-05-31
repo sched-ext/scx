@@ -131,6 +131,48 @@ def parse_stress_ng_log(path: Path) -> dict[str, float | int]:
     return metrics
 
 
+def parse_schbench_log(path: Path) -> dict[str, float | int]:
+    """Parse schbench's Wakeup/Request latency percentile tables + RPS.
+
+    schbench prints incremental tables every 10s plus a final cumulative
+    summary; last-write-wins yields the final (runtime 60s) values. Keys
+    match the suite path: schbench_{wakeup,request}_{p50,p90,p99,p99_9},
+    schbench_average_rps. Returns {} for non-schbench logs."""
+    metrics: dict[str, float | int] = {}
+    if not path.is_file():
+        return metrics
+    pct_map = {"50.0": "p50", "90.0": "p90", "99.0": "p99", "99.9": "p99_9"}
+    section: str | None = None
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        s = raw.strip()
+        if s.startswith("Wakeup Latencies"):
+            section = "wakeup"
+            continue
+        if s.startswith("Request Latencies"):
+            section = "request"
+            continue
+        if s.startswith("RPS percentiles"):
+            section = "rps"
+            continue
+        m = re.match(r"average rps:\s*([\d.]+)", s)
+        if m:
+            try:
+                metrics["schbench_average_rps"] = float(m.group(1))
+            except ValueError:
+                pass
+            continue
+        if section in ("wakeup", "request"):
+            m = re.match(r"\*?\s*([\d.]+)th:\s*(\d+)", s)
+            if m:
+                pct = pct_map.get(m.group(1))
+                if pct:
+                    try:
+                        metrics[f"schbench_{section}_{pct}"] = int(m.group(2))
+                    except ValueError:
+                        pass
+    return metrics
+
+
 def parse_perf_csv(path: Path) -> dict[str, float | int]:
     metrics: dict[str, float | int] = {}
     if not path.is_file():
@@ -254,6 +296,7 @@ def parse_run_artifacts(out_dir: Path | str) -> dict[str, Any]:
 
     metrics: dict[str, Any] = {}
     metrics.update(parse_stress_ng_log(run_dir / "logs" / "repeat_1_stat.log"))
+    metrics.update(parse_schbench_log(run_dir / "logs" / "repeat_1_stat.log"))
     metrics.update(parse_perf_csv(run_dir / "perf" / "repeat_1_stat.perf_stat.csv"))
     add_dual_score_metrics(metrics)
 
