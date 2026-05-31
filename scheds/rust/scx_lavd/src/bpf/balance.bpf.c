@@ -294,7 +294,10 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 	 */
 	if (use_cpdom_dsq()) {
 		pick_dsq_id = cpdom_to_dsq(cpdomc->id);
-		highest_load = READ_ONCE(cpdomc->qload_invr);
+		if (no_fast_lb)
+			highest_load = scx_bpf_dsq_nr_queued(pick_dsq_id);
+		else
+			highest_load = READ_ONCE(cpdomc->qload_invr);
 	}
 
 	/*
@@ -308,7 +311,6 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
 			u64 cpumask = cpdomc->__cpumask[i];
 			bpf_for(k, 0, 64) {
-				struct cpu_ctx *cpuc;
 				u64 load;
 
 				j = cpumask_next_set_bit(&cpumask);
@@ -318,8 +320,13 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 				if (cpu >= nr_cpu_ids)
 					break;
 
-				cpuc = get_cpu_ctx_id(cpu);
-				load = cpuc ? READ_ONCE(cpuc->qload_invr) : 0;
+				if (no_fast_lb) {
+					load = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
+					       scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+				} else {
+					struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+					load = cpuc ? READ_ONCE(cpuc->qload_invr) : 0;
+				}
 				if (load > highest_load) {
 					highest_load = load;
 					pick_cpu = cpu;
