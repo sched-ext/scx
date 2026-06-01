@@ -25,7 +25,7 @@ pub struct Metrics {
     #[stat(desc = "Total CPU runtime in ns")]
     pub total_runtime: u64,
     #[stat(desc = "Tasks dispatched from the Quick lane (per-CPU wakeup DSQ)")]
-    pub quick_dispatches: u64,
+    pub prio_dispatches: u64,
     #[stat(desc = "Tasks dispatched from the Normal lane (global DSQ)")]
     pub normal_dispatches: u64,
     #[stat(desc = "Wakeups that refilled task budget")]
@@ -46,7 +46,7 @@ impl Metrics {
             crate::SCHEDULER_NAME,
             self.nr_running,
             self.total_runtime,
-            self.quick_dispatches,
+            self.prio_dispatches,
             self.normal_dispatches,
             self.budget_refill_events,
             self.budget_exhaustions,
@@ -60,7 +60,7 @@ impl Metrics {
         Self {
             nr_running: self.nr_running,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
-            quick_dispatches: self.quick_dispatches.wrapping_sub(rhs.quick_dispatches),
+            prio_dispatches: self.prio_dispatches.wrapping_sub(rhs.prio_dispatches),
             normal_dispatches: self.normal_dispatches.wrapping_sub(rhs.normal_dispatches),
             budget_refill_events: self
                 .budget_refill_events

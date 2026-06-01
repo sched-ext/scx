@@ -9,8 +9,9 @@
 #define __INTF_H
 
 /*
- * Quick and Normal lane BPF constants for scx_flow.
+ * Shared BPF constants for scx_flow.
  */
+#define FLOW_DSQ_LOCAL_ON(cpu)	(0xC000000000000000ULL | (u32)(cpu))
 enum consts {
 	NSEC_PER_USEC = 1000ULL,
 	NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),
@@ -31,8 +32,32 @@ enum consts {
 	FLOW_REFILL_DIV = 100ULL,
 
 	/* DSQ IDs */
-	FLOW_QUICK_CPU_DSQ_BASE = 0x100000ULL,
-	FLOW_NORMAL_DSQ = 1025ULL,
+	FLOW_NORMAL_HIGH_DSQ = 1025ULL,  /* vtime DSQ for budget > FLOW_BUDGET_TIER_NS */
+	FLOW_NORMAL_LOW_DSQ = 1026ULL,   /* vtime DSQ for budget <= FLOW_BUDGET_TIER_NS */
+
+	/* Budget tier threshold: tasks with budget above this value go to
+	 * the high-priority DSQ, below it to the low-priority DSQ.  Set at
+	 * FLOW_SLICE_MIN_NS (50 us) — the minimum quantum — so tasks with
+	 * less budget than a single slice are near exhaustion and belong
+	 * in the lower tier.  This corresponds to roughly 5 ms of sleep
+	 * before the interactive floor lifts budget above the boundary. */
+	FLOW_BUDGET_TIER_NS = (50ULL * NSEC_PER_USEC),
+
+	/* Enqueue flags (defined directly to bypass weak-volatile compat) */
+	FLOW_ENQ_WAKEUP  = 0x0000000000000001ULL,  /* SCX_ENQ_WAKEUP */
+	FLOW_ENQ_HEAD    = 0x0000000000010000ULL,  /* SCX_ENQ_HEAD */
+	FLOW_ENQ_PREEMPT = 0x0000000100000000ULL,  /* SCX_ENQ_PREEMPT */
+
+	/* Kick flags (weak volatiles default to 0 on BTF-unavailable systems) */
+	FLOW_KICK_IDLE    = 0x0000000000000001ULL, /* SCX_KICK_IDLE */
+	FLOW_KICK_PREEMPT = 0x0000000000000002ULL, /* SCX_KICK_PREEMPT */
+
+	/* Built-in DSQ IDs (kernel ABI, stable):
+	 *   SCX_DSQ_LOCAL   = 0x8000000000000002  — per-CPU local DSQ
+	 *   SCX_DSQ_GLOBAL  = 0x8000000000000001  — global FIFO DSQ
+	 *   SCX_DSQ_LOCAL_ON = 0xC000000000000000 | cpu — local DSQ + atomic reschedule */
+	FLOW_DSQ_LOCAL     = 0x8000000000000002ULL,
+	FLOW_DSQ_LOCAL_ON  = 0xC000000000000000ULL,
 
 };
 
@@ -53,7 +78,7 @@ typedef int pid_t;
 struct flow_cpu_state {
 	u64 budget_exhaustions;
 	u64 runnable_wakeups;
-	u64 quick_dispatches;
+	u64 prio_dispatches;
 	u64 normal_dispatches;
 	u64 cpu_migrations;
 };

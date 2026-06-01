@@ -86,7 +86,7 @@ struct Scheduler<'a> {
 struct CpuPolicyStateAgg {
     budget_exhaustions: u64,
     runnable_wakeups: u64,
-    quick_dispatches: u64,
+    prio_dispatches: u64,
     normal_dispatches: u64,
     cpu_migrations: u64,
 }
@@ -119,9 +119,7 @@ impl<'a> Scheduler<'a> {
                 .budget_exhaustions
                 .saturating_add(state.budget_exhaustions);
             agg.runnable_wakeups = agg.runnable_wakeups.saturating_add(state.runnable_wakeups);
-            agg.quick_dispatches = agg
-                .quick_dispatches
-                .saturating_add(state.quick_dispatches);
+            agg.prio_dispatches = agg.prio_dispatches.saturating_add(state.prio_dispatches);
             agg.normal_dispatches = agg
                 .normal_dispatches
                 .saturating_add(state.normal_dispatches);
@@ -168,7 +166,7 @@ impl<'a> Scheduler<'a> {
         Metrics {
             nr_running: bss_data.nr_running,
             total_runtime: bss_data.total_runtime,
-            quick_dispatches: bss_data.quick_dispatches + cpu_policy_state.quick_dispatches,
+            prio_dispatches: bss_data.prio_dispatches + cpu_policy_state.prio_dispatches,
             normal_dispatches: bss_data.normal_dispatches + cpu_policy_state.normal_dispatches,
             budget_refill_events: bss_data.budget_refill_events,
             budget_exhaustions: bss_data.budget_exhaustions + cpu_policy_state.budget_exhaustions,
