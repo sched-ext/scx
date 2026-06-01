@@ -3722,7 +3722,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flow"
-version = "2.2.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -36,8 +36,6 @@ pub struct Metrics {
     pub latency_dispatches: u64,
     #[stat(desc = "Tasks dispatched from the shared DSQ")]
     pub shared_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the contained throughput/background DSQ")]
-    pub contained_dispatches: u64,
     #[stat(desc = "Tasks fast-dispatched to local DSQs")]
     pub local_fast_dispatches: u64,
     #[stat(desc = "Positive-budget wakeups sent to local DSQs with preempt kicks")]
@@ -56,6 +54,18 @@ pub struct Metrics {
     pub latency_lane_candidates: u64,
     #[stat(desc = "Latency-lane candidates that were consumed by the local reserved fast path")]
     pub latency_candidate_local_enqueues: u64,
+    #[stat(desc = "Soft latency-lane candidates blocked because they were already contained hogs")]
+    pub latency_candidate_hog_blocks: u64,
+    #[stat(desc = "Interactive budget exhaustions that raised per-task latency debt")]
+    pub latency_debt_raises: u64,
+    #[stat(
+        desc = "Times latency debt decayed after the scheduler gave a debt-bearing task latency service"
+    )]
+    pub latency_debt_decays: u64,
+    #[stat(
+        desc = "Latency-lane enqueues driven by accumulated latency debt rather than fresh wake credit alone"
+    )]
+    pub latency_debt_urgent_enqueues: u64,
     #[stat(
         desc = "Urgent-debt wakeups that still missed the urgent lane and fell back to ordinary routing"
     )]
@@ -98,8 +108,6 @@ pub struct Metrics {
     pub reserved_quota_skips: u64,
     #[stat(desc = "Shared-lane dispatches forced early by the bounded quota")]
     pub quota_shared_forces: u64,
-    #[stat(desc = "Contained-lane dispatches forced early by the bounded quota")]
-    pub quota_contained_forces: u64,
     #[stat(desc = "Tasks initialized through init_task task storage setup")]
     pub init_task_events: u64,
     #[stat(desc = "Tasks explicitly initialized on entry into scx_flow")]
@@ -112,8 +120,6 @@ pub struct Metrics {
     pub last_cpu_matches: u64,
     #[stat(desc = "Observed task migrations between successive runs")]
     pub cpu_migrations: u64,
-    #[stat(desc = "Dispatch promotions granted by the temporal urgency signal")]
-    pub temporal_promotions: u64,
     #[stat(desc = "Pinned positive-budget wakeups classified into the RT-sensitive lane")]
     pub rt_sensitive_wakeups: u64,
     #[stat(desc = "RT-sensitive wakeups inserted directly into selected local DSQs")]
@@ -138,20 +144,12 @@ pub struct Metrics {
     pub reserved_lane_skips: u64,
     #[stat(desc = "Shared-lane dispatches forced by the reserved-lane burst cap")]
     pub reserved_lane_shared_forces: u64,
-    #[stat(desc = "Contained-lane dispatches forced by the reserved-lane burst cap")]
-    pub reserved_lane_contained_forces: u64,
+    
     #[stat(
         desc = "Reserved-lane cap attempts that wanted shared service but found no immediately dispatchable shared work"
     )]
     pub reserved_lane_shared_misses: u64,
-    #[stat(
-        desc = "Reserved-lane cap attempts that wanted contained service but found no immediately dispatchable contained work"
-    )]
-    pub reserved_lane_contained_misses: u64,
-    #[stat(
-        desc = "Contained-lane enqueues promoted to the head because the contained lane was already meaningfully starved"
-    )]
-    pub contained_starved_head_enqueues: u64,
+    
     #[stat(
         desc = "Shared-lane enqueues promoted to the head because the shared lane was already meaningfully starved"
     )]
@@ -176,35 +174,33 @@ pub struct Metrics {
     pub ipc_wake_candidates: u64,
     #[stat(desc = "IPC-confidence wakeups inserted directly into selected local DSQs")]
     pub ipc_local_enqueues: u64,
-
+    #[stat(
+        desc = "Times the decayed IPC-confidence score strengthened after a short blocking run"
+    )]
+    pub ipc_score_raises: u64,
     #[stat(desc = "Local slice boosts granted through the IPC-confidence path")]
     pub ipc_boosts: u64,
-    #[stat(desc = "Tasks routed into the dedicated contained throughput/background DSQ")]
-    pub contained_enqueues: u64,
-    #[stat(desc = "Enqueues where a persistent hog-like task had latency privileges reduced")]
-    pub hog_containment_enqueues: u64,
-    #[stat(desc = "Times a previously contained hog-like task decayed back below containment")]
-    pub hog_recoveries: u64,
-    #[stat(
-        desc = "Maximum current consecutive dispatch rounds since a contained/background task last ran across CPUs"
-    )]
-    pub contained_starvation_rounds: u64,
+    
     #[stat(
         desc = "Maximum current consecutive dispatch rounds since a shared-fallback task last ran across CPUs"
     )]
     pub shared_starvation_rounds: u64,
-    #[stat(desc = "Contained/background tasks rescued early by the fairness floor")]
-    pub contained_rescue_dispatches: u64,
     #[stat(desc = "Shared-fallback tasks rescued early by the fairness floor")]
     pub shared_rescue_dispatches: u64,
+    #[stat(desc = "Current latency-credit grant per strong interactive refill")]
+    pub tune_latency_credit_grant: u64,
+    #[stat(desc = "Current latency-credit decay applied when credit is consumed or exhausted")]
+    pub tune_latency_credit_decay: u64,
+    #[stat(
+        desc = "Current debt threshold required before a wakeup qualifies for the urgent latency lane"
+    )]
+    pub tune_latency_debt_urgent_min: u64,
     #[stat(desc = "Current maximum consecutive urgent-latency dispatches allowed in one burst")]
     pub tune_urgent_latency_burst_max: u64,
     #[stat(
         desc = "Current maximum consecutive high-priority dispatches before lower-lane quota checks engage"
     )]
     pub tune_reserved_quota_burst_max: u64,
-    #[stat(desc = "Current contained-lane fairness-floor threshold")]
-    pub tune_contained_starvation_max: u64,
     #[stat(desc = "Current shared-lane fairness-floor threshold")]
     pub tune_shared_starvation_max: u64,
     #[stat(desc = "Current runnable-pressure cap for the ordinary local fast path")]
@@ -217,6 +213,10 @@ pub struct Metrics {
         desc = "Current maximum consecutive dispatches allowed from the reserved global DSQ before forcing a lower-lane rotation"
     )]
     pub tune_reserved_lane_burst_max: u64,
+    #[stat(desc = "Adaptive tuning generation counter")]
+    pub autotune_generation: u64,
+    #[stat(desc = "Adaptive tuning mode (0=balanced, 1=latency, 2=throughput)")]
+    pub autotune_mode: u64,
     #[stat(desc = "Current reserved slice cap in ns")]
     pub tune_reserved_max_ns: u64,
     #[stat(desc = "Current shared slice in ns")]
@@ -230,18 +230,27 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    fn autotune_mode_name(&self) -> &'static str {
+        match self.autotune_mode {
+            1 => "latency",
+            2 => "throughput",
+            _ => "balanced",
+        }
+    }
+
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] run={} urgent_lat_disp={} urgent_grant={} urgent_cont={} latency_disp={} reserve_disp={} contained_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} urgent_lat_enq={} latency_enq={} latency_cand={} latency_local={} urgent_miss={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} urgent_burst={} high_prio_burst={} reserved_burst={} reserved_grant={} reserved_cont={} reserved_skip={} reserved_shared={} reserved_contained={} reserved_miss_shared={} reserved_miss_contained={} contained_head={} shared_head={} local_burst={} local_grant={} local_cont={} local_quota_skip={} quota_skip={} quota_shared={} quota_contained={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} temporal_prom={} rt_wake={} rt_local={} rt_preempt={} direct_cand={} direct_local={} direct_reject={} direct_mismatch={} ipc_wake={} ipc_local={} ipc_boost={} contained_enq={} hog_contain={} hog_recover={} contained_starve={} shared_starve={} contained_rescue={} shared_rescue={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={} urgent_burst_max={} reserved_quota_max={} reserved_lane_max={} contained_floor={} shared_floor={} local_fast_cap={} local_burst_max={}",
+            "[{}] mode={} gen={} run={} urgent_lat_disp={} urgent_grant={} urgent_cont={} latency_disp={} reserve_disp={} shared_disp={} local_fast={} wake_preempt={} refill={} exhaust={} pos_wake={} urgent_lat_enq={} latency_enq={} latency_cand={} latency_local={} latency_hog_block={} debt_raise={} debt_decay={} debt_urgent={} urgent_miss={} reserve_local={} reserve_global={} shared_wake={} runnable={} cpu_release={} urgent_burst={} high_prio_burst={} reserved_burst={} reserved_grant={} reserved_cont={} reserved_skip={} reserved_shared={} reserved_miss_shared={} shared_head={} local_burst={} local_grant={} local_cont={} local_quota_skip={} quota_skip={} quota_shared={} init_task={} enable={} exit_task={} cpu_bias={} last_cpu_hit={} migrations={} rt_wake={} rt_local={} rt_preempt={} direct_cand={} direct_local={} direct_reject={} direct_mismatch={} ipc_wake={} ipc_local={} ipc_raise={} ipc_boost={} shared_starve={} shared_rescue={} reserve_cap_us={} shared_slice_us={} refill_floor_us={} preempt_budget_us={} preempt_refill_us={} credit_grant={} credit_decay={} debt_min={} urgent_burst_max={} reserved_quota_max={} reserved_lane_max={} shared_floor={} local_fast_cap={} local_burst_max={}",
             crate::SCHEDULER_NAME,
+            self.autotune_mode_name(),
+            self.autotune_generation,
             self.nr_running,
             self.urgent_latency_dispatches,
             self.urgent_latency_burst_grants,
             self.urgent_latency_burst_continuations,
             self.latency_dispatches,
             self.reserved_dispatches,
-            self.contained_dispatches,
             self.shared_dispatches,
             self.local_fast_dispatches,
             self.wake_preempt_dispatches,
@@ -252,6 +261,10 @@ impl Metrics {
             self.latency_lane_enqueues,
             self.latency_lane_candidates,
             self.latency_candidate_local_enqueues,
+            self.latency_candidate_hog_blocks,
+            self.latency_debt_raises,
+            self.latency_debt_decays,
+            self.latency_debt_urgent_enqueues,
             self.urgent_latency_misses,
             self.reserved_local_enqueues,
             self.reserved_global_enqueues,
@@ -265,10 +278,7 @@ impl Metrics {
             self.reserved_lane_burst_continuations,
             self.reserved_lane_skips,
             self.reserved_lane_shared_forces,
-            self.reserved_lane_contained_forces,
             self.reserved_lane_shared_misses,
-            self.reserved_lane_contained_misses,
-            self.contained_starved_head_enqueues,
             self.shared_starved_head_enqueues,
             self.local_reserved_burst_rounds,
             self.local_reserved_fast_grants,
@@ -276,14 +286,12 @@ impl Metrics {
             self.local_quota_skips,
             self.reserved_quota_skips,
             self.quota_shared_forces,
-            self.quota_contained_forces,
             self.init_task_events,
             self.enable_events,
             self.exit_task_events,
             self.cpu_stability_biases,
             self.last_cpu_matches,
             self.cpu_migrations,
-            self.temporal_promotions,
             self.rt_sensitive_wakeups,
             self.rt_sensitive_local_enqueues,
             self.rt_sensitive_preempts,
@@ -293,23 +301,21 @@ impl Metrics {
             self.direct_local_mismatches,
             self.ipc_wake_candidates,
             self.ipc_local_enqueues,
+            self.ipc_score_raises,
             self.ipc_boosts,
-            self.contained_enqueues,
-            self.hog_containment_enqueues,
-            self.hog_recoveries,
-            self.contained_starvation_rounds,
             self.shared_starvation_rounds,
-            self.contained_rescue_dispatches,
             self.shared_rescue_dispatches,
             self.tune_reserved_max_ns / 1000,
             self.tune_shared_slice_ns / 1000,
             self.tune_interactive_floor_ns / 1000,
             self.tune_preempt_budget_min_ns / 1000,
             self.tune_preempt_refill_min_ns / 1000,
+            self.tune_latency_credit_grant,
+            self.tune_latency_credit_decay,
+            self.tune_latency_debt_urgent_min,
             self.tune_urgent_latency_burst_max,
             self.tune_reserved_quota_burst_max,
             self.tune_reserved_lane_burst_max,
-            self.tune_contained_starvation_max,
             self.tune_shared_starvation_max,
             self.tune_local_fast_nr_running_max,
             self.tune_local_reserved_burst_max,
@@ -334,9 +340,6 @@ impl Metrics {
                 .urgent_latency_burst_continuations
                 .wrapping_sub(rhs.urgent_latency_burst_continuations),
             latency_dispatches: self.latency_dispatches.wrapping_sub(rhs.latency_dispatches),
-            contained_dispatches: self
-                .contained_dispatches
-                .wrapping_sub(rhs.contained_dispatches),
             shared_dispatches: self.shared_dispatches.wrapping_sub(rhs.shared_dispatches),
             local_fast_dispatches: self
                 .local_fast_dispatches
@@ -363,6 +366,18 @@ impl Metrics {
             latency_candidate_local_enqueues: self
                 .latency_candidate_local_enqueues
                 .wrapping_sub(rhs.latency_candidate_local_enqueues),
+            latency_candidate_hog_blocks: self
+                .latency_candidate_hog_blocks
+                .wrapping_sub(rhs.latency_candidate_hog_blocks),
+            latency_debt_raises: self
+                .latency_debt_raises
+                .wrapping_sub(rhs.latency_debt_raises),
+            latency_debt_decays: self
+                .latency_debt_decays
+                .wrapping_sub(rhs.latency_debt_decays),
+            latency_debt_urgent_enqueues: self
+                .latency_debt_urgent_enqueues
+                .wrapping_sub(rhs.latency_debt_urgent_enqueues),
             urgent_latency_misses: self
                 .urgent_latency_misses
                 .wrapping_sub(rhs.urgent_latency_misses),
@@ -395,9 +410,6 @@ impl Metrics {
             quota_shared_forces: self
                 .quota_shared_forces
                 .wrapping_sub(rhs.quota_shared_forces),
-            quota_contained_forces: self
-                .quota_contained_forces
-                .wrapping_sub(rhs.quota_contained_forces),
             init_task_events: self.init_task_events.wrapping_sub(rhs.init_task_events),
             enable_events: self.enable_events.wrapping_sub(rhs.enable_events),
             exit_task_events: self.exit_task_events.wrapping_sub(rhs.exit_task_events),
@@ -406,9 +418,6 @@ impl Metrics {
                 .wrapping_sub(rhs.cpu_stability_biases),
             last_cpu_matches: self.last_cpu_matches.wrapping_sub(rhs.last_cpu_matches),
             cpu_migrations: self.cpu_migrations.wrapping_sub(rhs.cpu_migrations),
-            temporal_promotions: self
-                .temporal_promotions
-                .wrapping_sub(rhs.temporal_promotions),
             rt_sensitive_wakeups: self
                 .rt_sensitive_wakeups
                 .wrapping_sub(rhs.rt_sensitive_wakeups),
@@ -431,18 +440,9 @@ impl Metrics {
             reserved_lane_shared_forces: self
                 .reserved_lane_shared_forces
                 .wrapping_sub(rhs.reserved_lane_shared_forces),
-            reserved_lane_contained_forces: self
-                .reserved_lane_contained_forces
-                .wrapping_sub(rhs.reserved_lane_contained_forces),
             reserved_lane_shared_misses: self
                 .reserved_lane_shared_misses
                 .wrapping_sub(rhs.reserved_lane_shared_misses),
-            reserved_lane_contained_misses: self
-                .reserved_lane_contained_misses
-                .wrapping_sub(rhs.reserved_lane_contained_misses),
-            contained_starved_head_enqueues: self
-                .contained_starved_head_enqueues
-                .wrapping_sub(rhs.contained_starved_head_enqueues),
             shared_starved_head_enqueues: self
                 .shared_starved_head_enqueues
                 .wrapping_sub(rhs.shared_starved_head_enqueues),
@@ -462,27 +462,23 @@ impl Metrics {
                 .ipc_wake_candidates
                 .wrapping_sub(rhs.ipc_wake_candidates),
             ipc_local_enqueues: self.ipc_local_enqueues.wrapping_sub(rhs.ipc_local_enqueues),
+            ipc_score_raises: self.ipc_score_raises.wrapping_sub(rhs.ipc_score_raises),
             ipc_boosts: self.ipc_boosts.wrapping_sub(rhs.ipc_boosts),
-            contained_enqueues: self.contained_enqueues.wrapping_sub(rhs.contained_enqueues),
-            hog_containment_enqueues: self
-                .hog_containment_enqueues
-                .wrapping_sub(rhs.hog_containment_enqueues),
-            hog_recoveries: self.hog_recoveries.wrapping_sub(rhs.hog_recoveries),
-            contained_starvation_rounds: self.contained_starvation_rounds,
             shared_starvation_rounds: self.shared_starvation_rounds,
-            contained_rescue_dispatches: self
-                .contained_rescue_dispatches
-                .wrapping_sub(rhs.contained_rescue_dispatches),
             shared_rescue_dispatches: self
                 .shared_rescue_dispatches
                 .wrapping_sub(rhs.shared_rescue_dispatches),
+            tune_latency_credit_grant: self.tune_latency_credit_grant,
+            tune_latency_credit_decay: self.tune_latency_credit_decay,
+            tune_latency_debt_urgent_min: self.tune_latency_debt_urgent_min,
             tune_urgent_latency_burst_max: self.tune_urgent_latency_burst_max,
             tune_reserved_quota_burst_max: self.tune_reserved_quota_burst_max,
-            tune_contained_starvation_max: self.tune_contained_starvation_max,
             tune_shared_starvation_max: self.tune_shared_starvation_max,
             tune_local_fast_nr_running_max: self.tune_local_fast_nr_running_max,
             tune_local_reserved_burst_max: self.tune_local_reserved_burst_max,
             tune_reserved_lane_burst_max: self.tune_reserved_lane_burst_max,
+            autotune_generation: self.autotune_generation,
+            autotune_mode: self.autotune_mode,
             tune_reserved_max_ns: self.tune_reserved_max_ns,
             tune_shared_slice_ns: self.tune_shared_slice_ns,
             tune_interactive_floor_ns: self.tune_interactive_floor_ns,
