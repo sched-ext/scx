@@ -40,7 +40,6 @@ struct {
 
 volatile u64 nr_running;
 volatile u64 total_runtime;
-volatile u64 reserved_dispatches;
 volatile u64 quick_dispatches;
 volatile u64 normal_dispatches;
 volatile u64 budget_refill_events;
@@ -227,7 +226,7 @@ static __always_inline void update_budget_on_wakeup(const struct task_struct *p,
 	tctx->sleep_started_at = 0;
 
 	if (refill_ns > 0)
-		FLOW_CPUSTAT_INC(lookup_cpu_state(), budget_refill_events);
+		__sync_fetch_and_add(&budget_refill_events, 1);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
@@ -248,7 +247,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 
 	ret = scx_bpf_create_dsq(FLOW_NORMAL_DSQ, -1);
 	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create Normal DSQ %lu: %d", FLOW_NORMAL_DSQ, ret);
+		scx_bpf_error("failed to create Normal DSQ %d: %d", FLOW_NORMAL_DSQ, ret);
 		return ret;
 	}
 

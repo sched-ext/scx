@@ -16,7 +16,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use anyhow::Result;
 use clap::CommandFactory;
@@ -65,7 +64,7 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
-    /// Disable adaptive runtime tuning and keep fixed default policy values.
+    /// Disable adaptive runtime tuning (no-op, kept for backward compatibility).
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_autotune: bool,
 
@@ -83,217 +82,13 @@ struct Scheduler<'a> {
     stats_server: StatsServer<(), Metrics>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AutoTuneMode {
-    Balanced,
-    Latency,
-    Throughput,
-}
-
-impl AutoTuneMode {
-    fn as_u64(self) -> u64 {
-        match self {
-            Self::Balanced => 0,
-            Self::Latency => 1,
-            Self::Throughput => 2,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Balanced => "balanced",
-            Self::Latency => "latency",
-            Self::Throughput => "throughput",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RuntimeTunables {
-    reserved_max_ns: u64,
-    shared_slice_ns: u64,
-    interactive_floor_ns: u64,
-}
-
-impl Default for RuntimeTunables {
-    fn default() -> Self {
-        Self {
-            reserved_max_ns: u64::from(consts_FLOW_SLICE_RESERVED_MAX_NS),
-            shared_slice_ns: u64::from(consts_FLOW_SLICE_SHARED_NS),
-            interactive_floor_ns: u64::from(consts_FLOW_INTERACTIVE_FLOOR_NS),
-        }
-    }
-}
-
-impl RuntimeTunables {
-    fn clamp(self) -> Self {
-        Self {
-            reserved_max_ns: self.reserved_max_ns.clamp(
-                u64::from(consts_FLOW_SLICE_MIN_NS),
-                u64::from(consts_FLOW_SLICE_RESERVED_TUNE_MAX_NS),
-            ),
-            shared_slice_ns: self.shared_slice_ns.clamp(
-                u64::from(consts_FLOW_SLICE_SHARED_MIN_NS),
-                u64::from(consts_FLOW_SLICE_SHARED_MAX_NS),
-            ),
-            interactive_floor_ns: self.interactive_floor_ns.clamp(
-                u64::from(consts_FLOW_INTERACTIVE_FLOOR_MIN_NS),
-                u64::from(consts_FLOW_INTERACTIVE_FLOOR_MAX_NS),
-            ),
-        }
-    }
-
-    fn target_for(mode: AutoTuneMode) -> Self {
-        match mode {
-            AutoTuneMode::Balanced => Self::default(),
-            AutoTuneMode::Latency => Self {
-                reserved_max_ns: 300 * 1000,
-                shared_slice_ns: 900 * 1000,
-                interactive_floor_ns: 140 * 1000,
-            }
-            .clamp(),
-            AutoTuneMode::Throughput => Self {
-                reserved_max_ns: 200 * 1000,
-                shared_slice_ns: 1200 * 1000,
-                interactive_floor_ns: 80 * 1000,
-            }
-            .clamp(),
-        }
-    }
-
-    fn step_towards(&mut self, target: Self) -> bool {
-        let mut changed = false;
-
-        changed |= step_u64(&mut self.reserved_max_ns, target.reserved_max_ns, 25 * 1000);
-        changed |= step_u64(
-            &mut self.shared_slice_ns,
-            target.shared_slice_ns,
-            100 * 1000,
-        );
-        changed |= step_u64(
-            &mut self.interactive_floor_ns,
-            target.interactive_floor_ns,
-            20 * 1000,
-        );
-
-        *self = self.clamp();
-        changed
-    }
-}
-
-fn step_u64(value: &mut u64, target: u64, step: u64) -> bool {
-    if *value == target {
-        return false;
-    }
-
-    if *value < target {
-        *value = (*value + step).min(target);
-    } else {
-        *value = value.saturating_sub(step).max(target);
-    }
-
-    true
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CpuPolicyStateAgg {
-    budget_refill_events: u64,
     budget_exhaustions: u64,
     runnable_wakeups: u64,
-    reserved_dispatches: u64,
     quick_dispatches: u64,
     normal_dispatches: u64,
     cpu_migrations: u64,
-}
-
-#[derive(Debug)]
-struct AutoTuner {
-    tunables: RuntimeTunables,
-    mode: AutoTuneMode,
-    pending_mode: AutoTuneMode,
-    pending_steps: u8,
-    latency_cooldown: u8,
-    generation: u64,
-    prev_metrics: Metrics,
-}
-
-impl AutoTuner {
-    fn new(initial_metrics: Metrics) -> Self {
-        Self {
-            tunables: RuntimeTunables::default(),
-            mode: AutoTuneMode::Balanced,
-            pending_mode: AutoTuneMode::Balanced,
-            pending_steps: 0,
-            latency_cooldown: 0,
-            generation: 0,
-            prev_metrics: initial_metrics,
-        }
-    }
-
-    fn evaluate_mode(&self, _current: &Metrics, delta: &Metrics) -> AutoTuneMode {
-        let refill_events = delta.budget_refill_events;
-        let exhaustions = delta.budget_exhaustions;
-
-        if refill_events < 3 {
-            return self.mode;
-        }
-
-        let exhaustion_ratio = exhaustions as f64 / refill_events as f64;
-
-        if exhaustion_ratio > 0.40 {
-            AutoTuneMode::Latency
-        } else if exhaustion_ratio < 0.15 {
-            AutoTuneMode::Throughput
-        } else {
-            AutoTuneMode::Balanced
-        }
-    }
-
-    fn update(&mut self, current: &Metrics) -> Option<(AutoTuneMode, RuntimeTunables, u64)> {
-        let delta = current.delta(&self.prev_metrics);
-        self.prev_metrics = current.clone();
-
-        let desired_mode = self.evaluate_mode(current, &delta);
-        let mut next_mode = self.mode;
-
-        if desired_mode == AutoTuneMode::Latency {
-            self.latency_cooldown = 3;
-        } else if self.latency_cooldown > 0 {
-            self.latency_cooldown -= 1;
-        }
-
-        if desired_mode == self.mode {
-            self.pending_mode = self.mode;
-            self.pending_steps = 0;
-        } else {
-            if desired_mode == self.pending_mode {
-                self.pending_steps = self.pending_steps.saturating_add(1);
-            } else {
-                self.pending_mode = desired_mode;
-                self.pending_steps = 1;
-            }
-
-            let required_steps = if self.latency_cooldown > 0 { 4 } else { 2 };
-
-            if self.pending_steps >= required_steps {
-                next_mode = desired_mode;
-                self.pending_mode = desired_mode;
-                self.pending_steps = 0;
-            }
-        }
-
-        let target = RuntimeTunables::target_for(next_mode);
-        let mode_changed = next_mode != self.mode;
-        let tunables_changed = self.tunables.step_towards(target);
-
-        if !mode_changed && !tunables_changed {
-            return None;
-        }
-
-        self.mode = next_mode;
-        self.generation += 1;
-        Some((self.mode, self.tunables, self.generation))
-    }
 }
 
 impl<'a> Scheduler<'a> {
@@ -320,16 +115,10 @@ impl<'a> Scheduler<'a> {
                 std::ptr::read_unaligned(cpu_val.as_ptr() as *const bpf_intf::flow_cpu_state)
             };
 
-            agg.budget_refill_events = agg
-                .budget_refill_events
-                .saturating_add(state.budget_refill_events);
             agg.budget_exhaustions = agg
                 .budget_exhaustions
                 .saturating_add(state.budget_exhaustions);
             agg.runnable_wakeups = agg.runnable_wakeups.saturating_add(state.runnable_wakeups);
-            agg.reserved_dispatches = agg
-                .reserved_dispatches
-                .saturating_add(state.reserved_dispatches);
             agg.quick_dispatches = agg
                 .quick_dispatches
                 .saturating_add(state.quick_dispatches);
@@ -360,12 +149,6 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
 
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
-        Self::write_runtime_tunables(
-            &mut skel,
-            RuntimeTunables::default(),
-            AutoTuneMode::Balanced,
-            0,
-        );
 
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
 
@@ -381,89 +164,31 @@ impl<'a> Scheduler<'a> {
 
     fn get_metrics(&self) -> Metrics {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
-        let data = self.skel.maps.data_data.as_ref().unwrap();
         let cpu_policy_state = self.read_cpu_policy_state();
         Metrics {
             nr_running: bss_data.nr_running,
             total_runtime: bss_data.total_runtime,
-            reserved_dispatches: bss_data.reserved_dispatches
-                + cpu_policy_state.reserved_dispatches,
             quick_dispatches: bss_data.quick_dispatches + cpu_policy_state.quick_dispatches,
             normal_dispatches: bss_data.normal_dispatches + cpu_policy_state.normal_dispatches,
-            budget_refill_events: bss_data.budget_refill_events
-                + cpu_policy_state.budget_refill_events,
+            budget_refill_events: bss_data.budget_refill_events,
             budget_exhaustions: bss_data.budget_exhaustions + cpu_policy_state.budget_exhaustions,
             runnable_wakeups: bss_data.runnable_wakeups + cpu_policy_state.runnable_wakeups,
-            cpu_release_reenqueues: bss_data.cpu_release_reenqueues,
-            init_task_events: bss_data.init_task_events,
-            enable_events: bss_data.enable_events,
-            exit_task_events: bss_data.exit_task_events,
             cpu_migrations: bss_data.cpu_migrations + cpu_policy_state.cpu_migrations,
-            autotune_generation: bss_data.autotune_generation,
-            autotune_mode: bss_data.autotune_mode,
-            tune_reserved_max_ns: data.tune_reserved_max_ns,
-            tune_shared_slice_ns: data.tune_shared_slice_ns,
-            tune_interactive_floor_ns: data.tune_interactive_floor_ns,
         }
-    }
-
-    fn write_runtime_tunables(
-        skel: &mut BpfSkel<'a>,
-        tunables: RuntimeTunables,
-        mode: AutoTuneMode,
-        generation: u64,
-    ) {
-        let data = skel.maps.data_data.as_mut().unwrap();
-        data.tune_reserved_max_ns = tunables.reserved_max_ns;
-        data.tune_shared_slice_ns = tunables.shared_slice_ns;
-        data.tune_interactive_floor_ns = tunables.interactive_floor_ns;
-
-        let bss_data = skel.maps.bss_data.as_mut().unwrap();
-        bss_data.autotune_mode = mode.as_u64();
-        bss_data.autotune_generation = generation;
-    }
-
-    fn apply_runtime_tunables(
-        &mut self,
-        tunables: RuntimeTunables,
-        mode: AutoTuneMode,
-        generation: u64,
-    ) {
-        Self::write_runtime_tunables(&mut self.skel, tunables, mode, generation);
     }
 
     fn exited(&self) -> bool {
         uei_exited!(&self.skel, uei)
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>, autotune_enabled: bool) -> Result<UserExitInfo> {
+    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
-        let mut autotuner = autotune_enabled.then(|| AutoTuner::new(self.get_metrics()));
-        let mut next_tune_at = Instant::now() + Duration::from_secs(1);
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_millis(250)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,
-            }
-
-            if let Some(autotuner) = autotuner.as_mut() {
-                if Instant::now() >= next_tune_at {
-                    let current = self.get_metrics();
-                    if let Some((mode, tunables, generation)) = autotuner.update(&current) {
-                        self.apply_runtime_tunables(tunables, mode, generation);
-                        info!(
-                            "autotune={} gen={} reserve_cap={}us shared_slice={}us refill_floor={}us",
-                            mode.as_str(),
-                            generation,
-                            tunables.reserved_max_ns / 1000,
-                            tunables.shared_slice_ns / 1000,
-                            tunables.interactive_floor_ns / 1000,
-                        );
-                    }
-                    next_tune_at = Instant::now() + Duration::from_secs(1);
-                }
             }
         }
 
@@ -529,7 +254,7 @@ fn main() -> Result<()> {
 
     let mut open_object = MaybeUninit::<libbpf_rs::OpenObject>::uninit();
     let mut sched = Scheduler::init(&opts, &mut open_object)?;
-    sched.run(shutdown, !opts.no_autotune)?;
+    sched.run(shutdown)?;
 
     info!("Scheduler exited");
 
