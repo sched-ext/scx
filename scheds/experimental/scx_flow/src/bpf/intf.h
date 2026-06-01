@@ -9,7 +9,7 @@
 #define __INTF_H
 
 /*
- * Shared BPF constants for scx_flow.
+ * Quick and Normal lane BPF constants for scx_flow.
  */
 enum consts {
 	NSEC_PER_USEC = 1000ULL,
@@ -29,7 +29,19 @@ enum consts {
 	FLOW_INTERACTIVE_FLOOR_MIN_NS = (80ULL * NSEC_PER_USEC),
 	FLOW_INTERACTIVE_FLOOR_MAX_NS = (200ULL * NSEC_PER_USEC),
 	FLOW_REFILL_DIV = 100ULL,
+
+	/* DSQ IDs */
+	FLOW_QUICK_CPU_DSQ_BASE = 0x100000ULL,
+	FLOW_NORMAL_DSQ = 1025ULL,
+	FLOW_DSQ_LOCAL = 0x8000000000000002ULL,
+
+	/* Enqueue flag constants */
+	FLOW_ENQ_WAKEUP = 1ULL,
+	FLOW_ENQ_LAST = 0x20000000000ULL,
 };
+
+/* Backward compatibility alias */
+#define SHARED_DSQ 1025
 
 #ifndef __VMLINUX_H__
 typedef unsigned char u8;
@@ -50,7 +62,8 @@ struct flow_cpu_state {
 	u64 budget_exhaustions;
 	u64 runnable_wakeups;
 	u64 reserved_dispatches;
-	u64 shared_dispatches;
+	u64 quick_dispatches;
+	u64 normal_dispatches;
 	u64 cpu_migrations;
 };
 

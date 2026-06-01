@@ -41,7 +41,8 @@ struct {
 volatile u64 nr_running;
 volatile u64 total_runtime;
 volatile u64 reserved_dispatches;
-volatile u64 shared_dispatches;
+volatile u64 quick_dispatches;
+volatile u64 normal_dispatches;
 volatile u64 budget_refill_events;
 volatile u64 budget_exhaustions;
 volatile u64 runnable_wakeups;
@@ -57,9 +58,6 @@ volatile u64 autotune_generation;
 volatile u64 autotune_mode;
 
 static u64 nr_cpu_ids;
-
-#define SHARED_DSQ 1025
-#define SHARED_CPU_DSQ_BASE 0x50000000ULL
 
 static inline struct task_ctx *lookup_task_ctx(const struct task_struct *p)
 {
@@ -144,18 +142,9 @@ static __always_inline bool valid_sched_cpu(s32 cpu)
 	return cpu >= 0 && (u64)cpu < nr_cpu_ids;
 }
 
-static __always_inline u64 shared_cpu_dsq_id(s32 cpu)
+static __always_inline u64 quick_cpu_dsq_id(s32 cpu)
 {
-	return SHARED_CPU_DSQ_BASE | (u32)cpu;
-}
-
-static __always_inline bool move_shared_lane_to_local(s32 cpu)
-{
-	if (valid_sched_cpu(cpu) &&
-	    scx_bpf_dsq_move_to_local(shared_cpu_dsq_id(cpu), 0))
-		return true;
-
-	return scx_bpf_dsq_move_to_local(SHARED_DSQ, 0);
+	return FLOW_QUICK_CPU_DSQ_BASE | (u32)cpu;
 }
 
 static __always_inline void clear_wake_target(struct task_ctx *tctx)
@@ -249,17 +238,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		ret = scx_bpf_create_dsq(shared_cpu_dsq_id(cpu), -1);
+		ret = scx_bpf_create_dsq(quick_cpu_dsq_id(cpu), -1);
 		if (ret < 0 && ret != -EEXIST) {
-			scx_bpf_error("failed to create shared cpu DSQ %d: %d",
+			scx_bpf_error("failed to create Quick per-CPU DSQ %d: %d",
 				      cpu, ret);
 			return ret;
 		}
 	}
 
-	ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
+	ret = scx_bpf_create_dsq(FLOW_NORMAL_DSQ, -1);
 	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create shared DSQ %d: %d", SHARED_DSQ, ret);
+		scx_bpf_error("failed to create Normal DSQ %lu: %d", FLOW_NORMAL_DSQ, ret);
 		return ret;
 	}
 
@@ -397,21 +386,29 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		enq_flags |= SCX_ENQ_HEAD;
 
 	if (is_wakeup && has_wake_target && valid_sched_cpu(target_cpu)) {
-		scx_bpf_dsq_insert(p, shared_cpu_dsq_id(target_cpu), slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, quick_cpu_dsq_id(target_cpu), slice_ns, enq_flags);
 		if (tctx && tctx->wake_cpu_idle)
 			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 		clear_wake_target(tctx);
 		return;
 	}
 
-	scx_bpf_dsq_insert(p, SHARED_DSQ, slice_ns, enq_flags);
+	scx_bpf_dsq_insert(p, FLOW_NORMAL_DSQ, slice_ns, enq_flags);
 	clear_wake_target(tctx);
 }
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
-	if (move_shared_lane_to_local(cpu)) {
-		FLOW_CPUSTAT_INC(lookup_cpu_state(), shared_dispatches);
+	/* Quick lane: per-CPU DSQ for recently-woken tasks */
+	if (valid_sched_cpu(cpu) &&
+	    scx_bpf_dsq_move_to_local(quick_cpu_dsq_id(cpu), 0)) {
+		FLOW_CPUSTAT_INC(lookup_cpu_state(), quick_dispatches);
+		return;
+	}
+
+	/* Normal lane: global DSQ for everything else */
+	if (scx_bpf_dsq_move_to_local(FLOW_NORMAL_DSQ, 0)) {
+		FLOW_CPUSTAT_INC(lookup_cpu_state(), normal_dispatches);
 		return;
 	}
 

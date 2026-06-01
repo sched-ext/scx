@@ -201,7 +201,8 @@ struct CpuPolicyStateAgg {
     budget_exhaustions: u64,
     runnable_wakeups: u64,
     reserved_dispatches: u64,
-    shared_dispatches: u64,
+    quick_dispatches: u64,
+    normal_dispatches: u64,
     cpu_migrations: u64,
 }
 
@@ -329,9 +330,12 @@ impl<'a> Scheduler<'a> {
             agg.reserved_dispatches = agg
                 .reserved_dispatches
                 .saturating_add(state.reserved_dispatches);
-            agg.shared_dispatches = agg
-                .shared_dispatches
-                .saturating_add(state.shared_dispatches);
+            agg.quick_dispatches = agg
+                .quick_dispatches
+                .saturating_add(state.quick_dispatches);
+            agg.normal_dispatches = agg
+                .normal_dispatches
+                .saturating_add(state.normal_dispatches);
             agg.cpu_migrations = agg.cpu_migrations.saturating_add(state.cpu_migrations);
         }
 
@@ -384,7 +388,8 @@ impl<'a> Scheduler<'a> {
             total_runtime: bss_data.total_runtime,
             reserved_dispatches: bss_data.reserved_dispatches
                 + cpu_policy_state.reserved_dispatches,
-            shared_dispatches: bss_data.shared_dispatches + cpu_policy_state.shared_dispatches,
+            quick_dispatches: bss_data.quick_dispatches + cpu_policy_state.quick_dispatches,
+            normal_dispatches: bss_data.normal_dispatches + cpu_policy_state.normal_dispatches,
             budget_refill_events: bss_data.budget_refill_events
                 + cpu_policy_state.budget_refill_events,
             budget_exhaustions: bss_data.budget_exhaustions + cpu_policy_state.budget_exhaustions,

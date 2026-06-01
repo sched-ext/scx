@@ -26,8 +26,10 @@ pub struct Metrics {
     pub total_runtime: u64,
     #[stat(desc = "Tasks dispatched from the reserved DSQ")]
     pub reserved_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the shared DSQ")]
-    pub shared_dispatches: u64,
+    #[stat(desc = "Tasks dispatched from the Quick lane (per-CPU wakeup DSQ)")]
+    pub quick_dispatches: u64,
+    #[stat(desc = "Tasks dispatched from the Normal lane (global DSQ)")]
+    pub normal_dispatches: u64,
     #[stat(desc = "Wakeups that refilled task budget")]
     pub budget_refill_events: u64,
     #[stat(desc = "Times a task ran its budget down to zero or below")]
@@ -68,13 +70,14 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] mode={} gen={} run={} reserve_disp={} shared_disp={} refill={} exhaust={} runnable={} cpu_release={} init_task={} enable={} exit_task={} migrations={} reserve_cap_us={} shared_slice_us={} refill_floor_us={}",
+            "[{}] mode={} gen={} run={} reserve_disp={} quick_disp={} normal_disp={} refill={} exhaust={} runnable={} cpu_release={} init_task={} enable={} exit_task={} migrations={} reserve_cap_us={} shared_slice_us={} refill_floor_us={}",
             crate::SCHEDULER_NAME,
             self.autotune_mode_name(),
             self.autotune_generation,
             self.nr_running,
             self.reserved_dispatches,
-            self.shared_dispatches,
+            self.quick_dispatches,
+            self.normal_dispatches,
             self.budget_refill_events,
             self.budget_exhaustions,
             self.runnable_wakeups,
@@ -97,7 +100,8 @@ impl Metrics {
             reserved_dispatches: self
                 .reserved_dispatches
                 .wrapping_sub(rhs.reserved_dispatches),
-            shared_dispatches: self.shared_dispatches.wrapping_sub(rhs.shared_dispatches),
+            quick_dispatches: self.quick_dispatches.wrapping_sub(rhs.quick_dispatches),
+            normal_dispatches: self.normal_dispatches.wrapping_sub(rhs.normal_dispatches),
             budget_refill_events: self
                 .budget_refill_events
                 .wrapping_sub(rhs.budget_refill_events),
