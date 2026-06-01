@@ -1485,14 +1485,29 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		int node;
 
 		bpf_for(node, 0, nr_node_ids) {
-			err = scx_bpf_create_dsq(node, node);
-			if (err) {
-				scx_bpf_error("failed to create node DSQ %d: %d", node, err);
-				return err;
-			}
+			struct node_ctx *nctx;
+
 			err = init_node(node);
 			if (err) {
 				scx_bpf_error("failed to initialize NUMA node %d: %d", node, err);
+				return err;
+			}
+
+			/*
+			 * Skip per-node DSQ creation for CPU-less NUMA nodes
+			 * (e.g. GPU-memory or CXL-memory nodes): with no CPU
+			 * to consume from it, the DSQ would never be used.
+			 * init_node() already populated nctx->cpumask, so an
+			 * empty mask means the node has no CPU.
+			 */
+			nctx = try_lookup_node_ctx(node);
+			if (!nctx || !nctx->cpumask ||
+			    bpf_cpumask_empty(cast_mask(nctx->cpumask)))
+				continue;
+
+			err = scx_bpf_create_dsq(node, node);
+			if (err) {
+				scx_bpf_error("failed to create node DSQ %d: %d", node, err);
 				return err;
 			}
 		}
