@@ -50,6 +50,7 @@ const volatile bool userspace_managed_cell_mode = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
 const volatile bool dynamic_affinity_cpu_selection = false;
+const volatile bool vtime_borrow_fixes = false;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -706,7 +707,16 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 			return prev_cpu;
 
 		if (idle_cpu_cleared || scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			tctx->vtime_charge_cell = tctx->cell;
+			/*
+			 * Charge this run to the cell of the CPU it lands on, so
+			 * a task pinned outside its home cell is accounted in the
+			 * foreign cell where it actually runs (matching
+			 * mitosis_enqueue and mitosis_stopping) rather than a home
+			 * cell it never touches.
+			 */
+			struct cpu_ctx *run_cctx = lookup_cpu_ctx(cpu);
+			tctx->vtime_charge_cell =
+				(vtime_borrow_fixes && run_cctx) ? run_cctx->cell : tctx->cell;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
 		return cpu;
@@ -854,7 +864,21 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if (!(cctx = lookup_cpu_ctx(cpu)))
 			return;
-		/* Task is pinned to specific CPUs, use per-CPU DSQ */
+		/*
+		 * Task is pinned; cctx is the ctx of the CPU it is pinned to.
+		 * Charge its runtime to that CPU's cell. For a task pinned
+		 * OUTSIDE its home cell this is the foreign cell where it
+		 * actually runs, so mitosis_stopping's gates (which key on
+		 * vtime_charge_cell == cidx) advance that CPU's vtime_now and
+		 * that cell's vtime for this task. cctx->vtime_now is then a
+		 * live basis, and the task's dsq_vtime stays in the domain the
+		 * foreign cell's tasks -- and mitosis_dispatch -- compare
+		 * against. Charging to the home cell (which the task never runs
+		 * on) would leave dsq_vtime drifting in an unrelated domain
+		 * until it loses every dispatch and the watchdog fires.
+		 */
+		if (vtime_borrow_fixes)
+			tctx->vtime_charge_cell = cctx->cell;
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
 
@@ -1410,14 +1434,13 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 	}
 
-	/*
-	 * Only advance cell vtime when the task stops on a CPU whose cell
-	 * still matches this task's vtime charge cell and the task was not
-	 * borrowed. If the CPU was retagged into a different cell after the
-	 * task was placed, drop the charge rather than advance the wrong cell
-	 * domain.
-	 */
-	if (!tctx->borrowed && tctx->vtime_charge_cell == cidx) {
+	if (vtime_borrow_fixes) {
+		struct cell *home_cell = (tctx->vtime_charge_cell == cidx) ?
+						 cell :
+						 lookup_cell(tctx->vtime_charge_cell);
+		if (home_cell)
+			advance_cell_llc_vtime(home_cell, tctx, p->scx.dsq_vtime);
+	} else if (!tctx->borrowed && tctx->vtime_charge_cell == cidx) {
 		advance_cell_llc_vtime(cell, tctx, p->scx.dsq_vtime);
 	}
 
