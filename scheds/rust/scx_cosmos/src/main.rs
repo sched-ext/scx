@@ -262,7 +262,18 @@ struct Opts {
     #[clap(short = 's', long, default_value = "1000")]
     slice_us: u64,
 
-    /// Maximum runtime (since last sleep) that can be charged to a task in microseconds.
+    /// Maximum scheduling budget that a task can accumulate while sleeping, in microseconds.
+    ///
+    /// Tasks that sleep frequently (e.g., interactive or I/O-bound tasks) build up a scheduling
+    /// advantage that lets them run sooner after waking up. This value caps how large that
+    /// advantage can grow, preventing long-sleeping tasks from monopolizing the CPU when they
+    /// eventually wake.
+    ///
+    /// Increasing this value gives sleeping tasks a bigger head start on wakeup, improving
+    /// responsiveness for latency-sensitive workloads at the cost of reduced fairness toward
+    /// CPU-intensive tasks. Decreasing it makes scheduling more uniform and fair, which can
+    /// improve throughput for CPU-bound workloads, but may reduce responsiveness for interactive
+    /// tasks.
     #[clap(short = 'l', long, default_value = "20000")]
     slice_lag_us: u64,
 
