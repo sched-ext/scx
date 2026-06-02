@@ -144,7 +144,7 @@ const volatile bool no_early_clear;
 /*
  * Default time slice.
  */
-const volatile u64 slice_ns = 20000000ULL;
+const volatile u64 slice_ns = 1000000ULL;
 
 /*
  * Maximum runtime that can be charged to a task.
