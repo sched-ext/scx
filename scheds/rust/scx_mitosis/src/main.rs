@@ -150,9 +150,9 @@ struct Opts {
     enable_work_stealing: bool,
 
     /// Parent cgroup path whose direct children become cells.
-    /// When specified, cells are created for each direct child cgroup of this parent,
-    /// with CPUs divided equally among cells. Example: --cell-parent-cgroup /workloads
-    #[clap(long)]
+    /// Scheduler startup requires this unless running in --monitor or --version mode.
+    /// Example: --cell-parent-cgroup /workloads
+    #[clap(long, required_unless_present_any = ["monitor", "version"])]
     cell_parent_cgroup: Option<String>,
 
     /// Exact directory name of a direct child cgroup to exclude from cell creation
@@ -1584,4 +1584,25 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Opts;
+    use clap::Parser;
+
+    #[test]
+    fn requires_cell_parent_cgroup_for_scheduler_mode() {
+        assert!(Opts::try_parse_from(["scx_mitosis"]).is_err());
+    }
+
+    #[test]
+    fn allows_monitor_without_cell_parent_cgroup() {
+        assert!(Opts::try_parse_from(["scx_mitosis", "--monitor", "1"]).is_ok());
+    }
+
+    #[test]
+    fn allows_version_without_cell_parent_cgroup() {
+        assert!(Opts::try_parse_from(["scx_mitosis", "--version"]).is_ok());
+    }
 }
