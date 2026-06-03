@@ -135,6 +135,15 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     cpu_controller_disabled: bool,
 
+    /// Skip cgroups created outside root_cgrp's hierarchy in tp_cgroup_mkdir.
+    /// Off by default so the bail (mitosis.bpf.c:148 cgrp_ctx lookup failed
+    /// for cgid 1) still fires when a cgroup is mkdir'd in a foreign cgroup
+    /// hierarchy (cgroupv1 named hierarchy, cgroupv1 subsystem mount). With
+    /// this flag set, init_cgrp_ctx_with_ancestors is skipped for those
+    /// foreign-hierarchy mkdirs and the scheduler stays up.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    fix_ignore_cg_v1: bool,
+
     /// Reject tasks with multi-CPU pinning that doesn't cover the entire cell.
     /// By default, these tasks are allowed but may have degraded performance.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -358,6 +367,7 @@ impl<'a> Scheduler<'a> {
         rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
+        rodata.fix_ignore_cg_v1 = opts.fix_ignore_cg_v1;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
 
         // Slice shrinking configuration
