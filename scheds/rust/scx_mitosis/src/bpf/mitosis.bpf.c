@@ -46,7 +46,6 @@ const volatile bool debug_events_enabled = false;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool cpu_controller_disabled = false;
 const volatile bool reject_multicpu_pinning = false;
-const volatile bool userspace_managed_cell_mode = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
 const volatile bool dynamic_affinity_cpu_selection = false;
@@ -370,8 +369,7 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	 */
 	if (tctx->cell != 0 && reject_multicpu_pinning && !all_cell_cpus_allowed &&
 	    bpf_cpumask_weight(p->cpus_ptr) > 1) {
-		if (userspace_managed_cell_mode &&
-		    READ_ONCE(cpuset_seq) != READ_ONCE(applied_cpuset_seq)) {
+		if (READ_ONCE(cpuset_seq) != READ_ONCE(applied_cpuset_seq)) {
 			struct cpu_ctx *cctx = lookup_cpu_ctx(-1);
 			if (cctx)
 				cstat_inc(CSTAT_PIN_SKIP, tctx->cell, cctx);
@@ -1511,17 +1509,10 @@ int BPF_PROG(fentry_cpuset_write_resmask, struct kernfs_open_file *of, char *buf
 	     loff_t off, ssize_t retval)
 {
 	/*
-	 * On a write to cpuset.cpus, we'll need to reconfigure cells.
-	 *
-	 * In userspace-managed mode, bump cpuset_seq so userspace re-reads
-	 * cpusets and recomputes CPU assignments.
-	 *
-	 * In auto mode, bump configuration_seq so tick() reconfigures cells.
+	 * On a write to cpuset.cpus, userspace must re-read cpusets and push a
+	 * fresh cell configuration.
 	 */
-	if (userspace_managed_cell_mode)
-		__atomic_add_fetch(&cpuset_seq, 1, __ATOMIC_RELEASE);
-	else
-		__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
+	__atomic_add_fetch(&cpuset_seq, 1, __ATOMIC_RELEASE);
 	return 0;
 }
 
@@ -1540,8 +1531,8 @@ static bool cgrp_is_dying(struct cgroup *cgrp)
 
 /*
  * Cgroup initialization - creates cgrp_ctx. Root cgroup is assigned cell 0.
- * Other cgroups inherit parent's cell, and if a cpuset is configured,
- * configuration_seq is bumped so the timer assigns a dedicated cell.
+ * Other cgroups inherit their parent's cell until userspace assigns them
+ * explicitly via apply_cell_config().
  */
 static int init_cgrp_ctx(struct cgroup *cgrp)
 {
@@ -1557,20 +1548,6 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 	if (cgrp->kn->id == root_cgid) {
 		WRITE_ONCE(cgc->cell, 0);
 		return 0;
-	}
-
-	struct cpumask_entry *entry __free(cpumask_entry) = allocate_cpumask_entry();
-	if (!entry)
-		return -EINVAL;
-	int rc = get_cgroup_cpumask(cgrp, entry);
-	if (rc < 0)
-		return rc;
-	else if (rc > 0) {
-		/*
-		 * This cgroup has a cpuset, bump configuration_seq so tick()
-		 * configures it.
-		 */
-		__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
 	}
 
 	/* Initialize to parent's cell */
@@ -1635,37 +1612,10 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp, struct scx_cgroup_i
 
 s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 {
-	struct cgrp_ctx *cgc;
-	int ret;
-
 	if (cpu_controller_disabled)
 		return 0;
 
-	if (userspace_managed_cell_mode)
-		return 0;
-
 	record_cgroup_exit(cgrp->kn->id);
-
-	/*
-	 * Use lookup without CREATE since this is the exit path. If the cgroup
-	 * doesn't have storage, it's not a cell owner anyway.
-	 */
-	if (!(cgc = lookup_cgrp_ctx(cgrp))) {
-		/* Errors above on failure, verifier. */
-		return 0;
-	}
-
-	if (cgc->cell_owner) {
-		if ((ret = free_cell(cgc->cell)))
-			return ret;
-		/*
-		 * Need to make sure the cpus of this cell are freed back to the root
-		 * cell and the root cell cpumask can be expanded. Bump
-		 * configuration_seq so tick() does that.
-		 */
-		__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
-	}
-
 	return 0;
 }
 
@@ -1706,36 +1656,10 @@ int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 SEC("tp_btf/cgroup_rmdir")
 int BPF_PROG(tp_cgroup_rmdir, struct cgroup *cgrp, const char *cgrp_path)
 {
-	struct cgrp_ctx *cgc;
-
 	if (!cpu_controller_disabled)
 		return 0;
 
-	if (userspace_managed_cell_mode)
-		return 0;
-
-	/*
-	 * Use fallible lookup since this tracepoint fires for ALL cgroups,
-	 * including ones created after scheduler attach that never had tasks.
-	 * If the cgroup doesn't have storage, it's not a cell owner anyway.
-	 */
-	if (!(cgc = lookup_cgrp_ctx_fallible(cgrp)))
-		return 0;
-
 	record_cgroup_exit(cgrp->kn->id);
-
-	if (cgc->cell_owner) {
-		int ret;
-		if ((ret = free_cell(cgc->cell)))
-			scx_bpf_error("Failed to free cell %d: %d", cgc->cell, ret);
-		/*
-		 * Need to make sure the cpus of this cell are freed back to the root
-		 * cell and the root cell cpumask can be expanded. Bump
-		 * configuration_seq so tick() does that.
-		 */
-		__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
-	}
-
 	return 0;
 }
 
@@ -2037,8 +1961,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	u32 i;
 	s32 ret;
 
-	u32 key = 0;
-
 	/* Sanity check the flags we get from userspace. */
 	if ((ret = validate_flags()))
 		return ret;
@@ -2051,7 +1973,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if (!rootcg)
 		return -ENOENT;
 
-	/* initialize cgrp storage for rootcg so that it is always available in the timer */
+	/* Initialize root cgroup storage so tasks can always fall back to cell 0. */
 	if (!bpf_cgrp_storage_get(&cgrp_ctxs, rootcg, 0, BPF_LOCAL_STORAGE_GET_F_CREATE)) {
 		scx_bpf_error("cgrp_ctx creation failed for rootcg");
 		return -ENOENT;
@@ -2181,8 +2103,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			return -ENOENT;
 
 		/*
-		 * Start with full cpumask for all cells. The timer will set up
-		 * the correct cpumasks based on cgroup configuration.
+		 * Start with full cpumasks until userspace pushes the first
+		 * explicit cell configuration immediately after attach.
 		 */
 		ret = init_cpumask_slot(&cpumaskw->primary, true);
 		if (ret) {
@@ -2209,24 +2131,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			return -ENOENT;
 
 		cell->in_use = true;
-	}
-
-	/*
-	 * Only start the update timer if not in userspace managed cell mode.
-	 * In userspace managed mode, configuration is applied via apply_cell_config.
-	 */
-	if (!userspace_managed_cell_mode) {
-		struct bpf_timer *timer = bpf_map_lookup_elem(&update_timer, &key);
-		if (!timer) {
-			scx_bpf_error("Failed to lookup update timer");
-			return -ESRCH;
-		}
-		bpf_timer_init(timer, &update_timer, CLOCK_BOOTTIME);
-		bpf_timer_set_callback(timer, update_timer_cb);
-		if ((ret = bpf_timer_start(timer, TIMER_INTERVAL_NS, 0))) {
-			scx_bpf_error("Failed to arm update timer");
-			return ret;
-		}
 	}
 
 	return 0;

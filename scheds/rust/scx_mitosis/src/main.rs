@@ -95,14 +95,6 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Interval to consider reconfiguring the Cells (e.g. merge or split)
-    #[clap(long, default_value = "10")]
-    reconfiguration_interval_s: u64,
-
-    /// Interval to consider rebalancing CPUs to Cells
-    #[clap(long, default_value = "5")]
-    rebalance_cpus_interval_s: u64,
-
     /// Interval to report monitoring information
     #[clap(long, default_value = "1")]
     monitor_interval_s: u64,
@@ -387,8 +379,6 @@ impl<'a> Scheduler<'a> {
         // Set nr_llc in rodata
         rodata.nr_llc = nr_llc as u32;
         rodata.enable_llc_awareness = opts.enable_llc_awareness;
-
-        rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
 
         rodata.enable_borrowing = opts.enable_borrowing;
         rodata.use_lockless_peek = opts.use_lockless_peek;
