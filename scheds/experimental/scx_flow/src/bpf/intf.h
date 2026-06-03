@@ -11,7 +11,6 @@
 /*
  * Shared BPF constants for scx_flow.
  */
-#define FLOW_DSQ_LOCAL_ON(cpu)	(0xC000000000000000ULL | (u32)(cpu))
 enum consts {
 	NSEC_PER_USEC = 1000ULL,
 	NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),

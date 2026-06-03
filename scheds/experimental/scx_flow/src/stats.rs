@@ -24,9 +24,9 @@ pub struct Metrics {
     pub nr_running: u64,
     #[stat(desc = "Total CPU runtime in ns")]
     pub total_runtime: u64,
-    #[stat(desc = "Tasks dispatched from the Quick lane (per-CPU wakeup DSQ)")]
+    #[stat(desc = "Tasks enqueued via the wakeup fast path (FLOW_DSQ_LOCAL_ON)")]
     pub prio_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the Pinned DSQ (per-CPU for non-migratable tasks)")]
+    #[stat(desc = "Tasks dispatched from the per-CPU pinned DSQ (non-migratable tasks)")]
     pub pinned_dispatches: u64,
     #[stat(desc = "Tasks dispatched from the Normal lane (global DSQ)")]
     pub normal_dispatches: u64,

@@ -417,7 +417,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_dsq_insert(p,
 				FLOW_PINNED_DSQ_BASE | (u32)pin_cpu,
 				task_slice_ns(tctx), enq_flags);
-			__sync_fetch_and_add(&pinned_dispatches, 1);
 			return;
 		}
 	}
@@ -502,7 +501,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	 * kernel picks them from the local DSQ before calling dispatch.
 	 */
 	if (scx_bpf_dsq_move_to_local(FLOW_PINNED_DSQ_BASE | (u32)cpu, 0)) {
-		FLOW_CPUSTAT_INC(cstate, normal_dispatches);
+		__sync_fetch_and_add(&pinned_dispatches, 1);
 		return;
 	}
 
