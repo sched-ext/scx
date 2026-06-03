@@ -384,7 +384,11 @@ impl PerfettoTraceManager {
             + self.processes.len()
             + self.threads.len()
             + self.dsq_lat_events.values().map(|v| v.len()).sum::<usize>()
-            + self.dsq_nr_queued_events.values().map(|v| v.len()).sum::<usize>()
+            + self
+                .dsq_nr_queued_events
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>()
             + self.sys_stats.values().map(|v| v.len()).sum::<usize>()
             + self.mem_events.values().map(|v| v.len()).sum::<usize>()
             + self.ftrace_events.len()
@@ -517,21 +521,19 @@ impl PerfettoTraceManager {
         // mem events
         for events in self.mem_events.values_mut() {
             let mem_sequence_id = self.rng.next_u32();
-            self.trace
-                .packet
-                .extend(events.drain(..).map(|mem_event| {
-                    let ts: u64 = timestamp_absolute_us(&mem_event) as u64 * 1_000;
-                    TracePacket {
-                        data: Some(trace_packet::Data::TrackEvent(mem_event)),
-                        timestamp: Some(ts),
-                        optional_trusted_packet_sequence_id: Some(
-                            trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
-                                mem_sequence_id,
-                            ),
+            self.trace.packet.extend(events.drain(..).map(|mem_event| {
+                let ts: u64 = timestamp_absolute_us(&mem_event) as u64 * 1_000;
+                TracePacket {
+                    data: Some(trace_packet::Data::TrackEvent(mem_event)),
+                    timestamp: Some(ts),
+                    optional_trusted_packet_sequence_id: Some(
+                        trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
+                            mem_sequence_id,
                         ),
-                        ..TracePacket::default()
-                    }
-                }));
+                    ),
+                    ..TracePacket::default()
+                }
+            }));
         }
 
         // ftrace events
@@ -1188,5 +1190,173 @@ impl ActionHandler for PerfettoTraceManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SchedSwitchAction;
+    use perfetto_protos::trace::Trace;
+    use protobuf::Message;
+
+    /// Builds a minimal SchedSwitchAction for testing.
+    fn sched_switch(
+        ts: u64,
+        cpu: u32,
+        next_pid: u32,
+        next_tgid: u32,
+        next_comm: &str,
+        prev_pid: u32,
+        prev_tgid: u32,
+        prev_comm: &str,
+    ) -> SchedSwitchAction {
+        SchedSwitchAction {
+            ts,
+            cpu,
+            preempt: false,
+            next_dsq_id: scx_enums.SCX_DSQ_INVALID,
+            next_dsq_lat_us: 0,
+            next_dsq_nr_queued: 0,
+            next_dsq_vtime: 0,
+            next_slice_ns: 0,
+            next_pid,
+            next_tgid,
+            next_prio: 120,
+            next_layer_id: -1,
+            next_comm: next_comm.into(),
+            prev_dsq_id: 0,
+            prev_used_slice_ns: 0,
+            prev_slice_ns: 0,
+            prev_pid,
+            prev_tgid,
+            prev_prio: 120,
+            prev_comm: prev_comm.into(),
+            prev_state: 0,
+            prev_layer_id: -1,
+        }
+    }
+
+    fn new_manager() -> PerfettoTraceManager {
+        PerfettoTraceManager::new("test_trace".to_string(), Some(42))
+    }
+
+    /// A process should be recorded exactly once; a later sighting with a
+    /// different comm must not overwrite the cached descriptor. This guards
+    /// the cache-on-first-sight behavior that keeps procfs reads off the
+    /// per-event hot path.
+    #[test]
+    fn test_record_process_thread_caches_first_sighting() {
+        let mut mgr = new_manager();
+        let pid = 1234;
+
+        mgr.record_process_thread(pid, pid, "first".to_string());
+        let key = mgr.generate_key(pid, pid);
+        assert_eq!(mgr.process_descriptors.len(), 1);
+        assert_eq!(
+            mgr.process_descriptors.get(&key).unwrap().process_name(),
+            "first"
+        );
+
+        // Second sighting with a different comm must be a no-op (cache hit).
+        mgr.record_process_thread(pid, pid, "second".to_string());
+        assert_eq!(mgr.process_descriptors.len(), 1);
+        assert_eq!(
+            mgr.process_descriptors.get(&key).unwrap().process_name(),
+            "first"
+        );
+    }
+
+    /// A thread (tid != pid) should create both a thread descriptor and a
+    /// process descriptor for its parent pid.
+    #[test]
+    fn test_record_process_thread_records_thread_and_parent() {
+        let mut mgr = new_manager();
+        let pid = 4321;
+        let tid = 4322;
+
+        mgr.record_process_thread(pid, tid, "worker".to_string());
+
+        let thread_key = mgr.generate_key(pid, tid);
+        let proc_key = mgr.generate_key(pid, pid);
+        assert!(mgr.threads.contains_key(&thread_key));
+        assert!(mgr.process_descriptors.contains_key(&proc_key));
+        assert_eq!(
+            mgr.threads.get(&thread_key).unwrap().thread_name(),
+            "worker"
+        );
+    }
+
+    /// on_sched_switch should add a per-CPU ftrace event for the switch.
+    #[test]
+    fn test_on_sched_switch_records_ftrace_event() {
+        let mut mgr = new_manager();
+        let action = sched_switch(1_000, 3, 100, 100, "next", 200, 200, "prev");
+        mgr.on_sched_switch(&action);
+
+        let events = mgr.ftrace_events.get(&3).expect("cpu 3 should have events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, Some(1_000));
+    }
+
+    /// stop() should write a trace file that parses back into a valid Trace
+    /// proto containing the recorded ftrace events.
+    #[test]
+    fn test_stop_writes_parseable_trace() {
+        let mut mgr = new_manager();
+        mgr.on_sched_switch(&sched_switch(1_000, 0, 100, 100, "a", 200, 200, "b"));
+        mgr.on_sched_switch(&sched_switch(2_000, 0, 100, 100, "a", 300, 300, "c"));
+
+        let path = std::env::temp_dir().join("scxtop_test_stop_writes_parseable_trace.proto");
+        let path_str = path.to_str().unwrap().to_string();
+        mgr.stop(Some(path_str.clone()), None).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let trace = Trace::parse_from_bytes(&bytes).unwrap();
+        assert!(!trace.packet.is_empty());
+
+        // Exactly one ftrace bundle (single CPU) carrying both events.
+        let ftrace_event_count: usize = trace
+            .packet
+            .iter()
+            .filter_map(|p| match &p.data {
+                Some(trace_packet::Data::FtraceEvents(bundle)) => Some(bundle.event.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(ftrace_event_count, 2);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// ftrace events within a CPU bundle must be sorted by timestamp in the
+    /// emitted trace, even when recorded out of order.
+    #[test]
+    fn test_stop_sorts_ftrace_events_by_timestamp() {
+        let mut mgr = new_manager();
+        mgr.on_sched_switch(&sched_switch(3_000, 7, 100, 100, "a", 200, 200, "b"));
+        mgr.on_sched_switch(&sched_switch(1_000, 7, 100, 100, "a", 200, 200, "b"));
+        mgr.on_sched_switch(&sched_switch(2_000, 7, 100, 100, "a", 200, 200, "b"));
+
+        let path = std::env::temp_dir().join("scxtop_test_stop_sorts_ftrace.proto");
+        let path_str = path.to_str().unwrap().to_string();
+        mgr.stop(Some(path_str.clone()), None).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let trace = Trace::parse_from_bytes(&bytes).unwrap();
+
+        let bundle = trace
+            .packet
+            .iter()
+            .find_map(|p| match &p.data {
+                Some(trace_packet::Data::FtraceEvents(bundle)) => Some(bundle),
+                _ => None,
+            })
+            .expect("should have an ftrace bundle");
+
+        let timestamps: Vec<u64> = bundle.event.iter().map(|e| e.timestamp.unwrap()).collect();
+        assert_eq!(timestamps, vec![1_000, 2_000, 3_000]);
+
+        std::fs::remove_file(&path).ok();
     }
 }
