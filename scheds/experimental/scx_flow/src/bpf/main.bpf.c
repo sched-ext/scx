@@ -41,6 +41,7 @@ struct {
 
 volatile u64 nr_running;
 volatile u64 total_runtime;
+volatile u64 pinned_dispatches;
 volatile u64 prio_dispatches;
 volatile u64 normal_dispatches;
 volatile u64 budget_refill_events;
@@ -56,6 +57,7 @@ volatile u64 tune_shared_slice_ns = FLOW_SLICE_SHARED_NS;
 volatile u64 tune_interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_NS;
 volatile u64 autotune_generation;
 volatile u64 autotune_mode;
+
 
 static u64 nr_cpu_ids;
 
@@ -123,23 +125,19 @@ static __always_inline u64 task_slice_ns(const struct task_ctx *tctx)
 		else if (reserved_max_ns > FLOW_SLICE_RESERVED_TUNE_MAX_NS)
 			reserved_max_ns = FLOW_SLICE_RESERVED_TUNE_MAX_NS;
 
-		/* Floor at tune_shared_slice_ns for tiny budgets.  The wakeup
-		 * path overrides to FLOW_SLICE_MIN_NS independently of this
-		 * function, so this only affects re-enqueues in the normal
-		 * DSQ, where a 50 us slice would cause excessive context
-		 * switching on workloads such as hackbench. */
+		/* Exhausted tasks (budget < 50 us) get a 50 us slice.
+		 * A fixed minimum quantum bounds worst-case wakeup
+		 * latency — bulk workers yield at least this often,
+		 * preventing them from delaying latency-sensitive
+		 * wakeups beyond the slice plus context-switch cost. */
 		if (budget_ns < FLOW_SLICE_MIN_NS)
-			return tune_shared_slice_ns;
+			return FLOW_SLICE_MIN_NS;
 		if (budget_ns > reserved_max_ns)
 			return reserved_max_ns;
 		return budget_ns;
 	}
 
-	if (tune_shared_slice_ns < FLOW_SLICE_SHARED_MIN_NS)
-		return FLOW_SLICE_SHARED_MIN_NS;
-	if (tune_shared_slice_ns > FLOW_SLICE_SHARED_MAX_NS)
-		return FLOW_SLICE_SHARED_MAX_NS;
-	return tune_shared_slice_ns;
+	return FLOW_SLICE_MIN_NS;
 }
 
 static __always_inline bool valid_sched_cpu(s32 cpu)
@@ -162,7 +160,7 @@ static __always_inline void reset_task_ctx(struct task_ctx *tctx, u64 now, bool 
 	if (!tctx)
 		return;
 
-	tctx->budget_ns = FLOW_BUDGET_TIER_NS;
+	tctx->budget_ns = (s64)FLOW_SLICE_MIN_NS;
 	tctx->last_refill_ns = 0;
 	tctx->last_run_at = 0;
 	tctx->last_sleep_ns = 0;
@@ -234,25 +232,29 @@ static __always_inline void update_budget_on_wakeup(const struct task_struct *p,
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
 	s32 ret;
+	s32 cpu;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
-	/* High-priority vtime DSQ for tasks with budget > FLOW_BUDGET_TIER_NS.
-	 * Low-priority vtime DSQ for tasks with budget <= FLOW_BUDGET_TIER_NS.
-	 * The tier boundary at 50 us separates interactive tasks (longer
-	 * sleep, higher budget) from bulk workers (brief sleep, low budget),
-	 * giving the former priority at dispatch time without requiring
-	 * heuristic classification.  Wakeup tasks bypass both and use the
-	 * built-in FLOW_DSQ_LOCAL_ON mechanism. */
-	ret = scx_bpf_create_dsq(FLOW_NORMAL_HIGH_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create High DSQ: %d", ret);
-		return ret;
+	/* Per-CPU pinned DSQs: one FIFO DSQ per CPU for non-migratable
+	 * userspace tasks.  Checked first in dispatch so pinned tasks
+	 * (e.g. cyclictest pinned to CPU 0) bypass global vtime contention. */
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		ret = scx_bpf_create_dsq(FLOW_PINNED_DSQ_BASE | (u32)cpu, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("failed to create pinned DSQ for CPU %d: %d",
+				      cpu, ret);
+			return ret;
+		}
 	}
 
-	ret = scx_bpf_create_dsq(FLOW_NORMAL_LOW_DSQ, -1);
+	/* Single vtime-ordered DSQ for all non-wakeup re-enqueues.
+	 * Vtime = FLOW_BUDGET_MAX_NS - max(0, budget_ns) bounds vtime
+	 * to [0, 2500us].  Wakeup tasks bypass this DSQ and use the
+	 * built-in FLOW_DSQ_LOCAL_ON mechanism instead. */
+	ret = scx_bpf_create_dsq(FLOW_NORMAL_DSQ, -1);
 	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create Low DSQ: %d", ret);
+		scx_bpf_error("failed to create Normal DSQ: %d", ret);
 		return ret;
 	}
 
@@ -396,13 +398,34 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Two-lane dispatch:
-	 *   Priority lane (per-CPU FIFO, SCX_ENQ_HEAD): wakeup tasks
-	 *   Normal lane (global vtime): all other tasks
+	 * Pinned userspace tasks: route non-wakeup re-enqueues to a per-CPU
+	 * FIFO DSQ for their pinned CPU.  This DSQ is checked first in
+	 * dispatch, giving pinned latency-sensitive tasks (e.g. cyclictest
+	 * pinned to CPU 0 via -a 0) priority over bulk workers from the
+	 * global vtime DSQs.  WAKEUP enqueues still use FLOW_DSQ_LOCAL_ON
+	 * (below) for immediate dispatch via IPI + local DSQ; this handler
+	 * only catches non-wakeup re-enqueues where a task's quantum ended
+	 * before it went back to sleep.
 	 *
+	 * The per-CPU DSQ is safe because a pinned task cannot migrate, so
+	 * it will never need to be dispatched by another CPU.
+	 */
+	if (!is_wakeup && tctx && is_non_migratable(p)) {
+		s32 pin_cpu = scx_bpf_task_cpu(p);
+		if (pin_cpu >= 0 && valid_sched_cpu(pin_cpu)) {
+			clear_wake_target(tctx);
+			scx_bpf_dsq_insert(p,
+				FLOW_PINNED_DSQ_BASE | (u32)pin_cpu,
+				task_slice_ns(tctx), enq_flags);
+			__sync_fetch_and_add(&pinned_dispatches, 1);
+			return;
+		}
+	}
+
+	/*
 	 * Wakeup tasks are inserted to their target CPU's priority DSQ
-	 * with SCX_ENQ_HEAD (front of queue).  Only wakeups with sufficient
-	 * budget (≥ FLOW_BUDGET_TIER_NS) set SCX_ENQ_PREEMPT, requesting
+	 * with SCX_ENQ_HEAD (front of queue).  Only wakeups with budget
+	 * ≥ FLOW_SLICE_MIN_NS (50 us) set SCX_ENQ_PREEMPT, requesting
 	 * the kernel to preempt the currently running task on the target
 	 * CPU.  This gives interactive tasks (cyclictest, audio) immediate
 	 * dispatch while preventing bulk workers (hackbench) from causing
@@ -426,13 +449,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 
 		/* All wakeups go to the target CPU local DSQ with head-of-
 		 * queue priority (FIFO within the local DSQ).  Only wakeups
-		 * with budget ≥ FLOW_BUDGET_TIER_NS (50 us) send an IPI to
-		 * preempt the currently running task — this matches the
-		 * classification that v2.3.0 achieved via its urgent-latency
-		 * lane, using the budget signal directly. */
+		 * with budget ≥ FLOW_SLICE_MIN_NS (50 us) send an IPI to
+		 * preempt the currently running task.  Budget below this
+		 * threshold indicates an exhausted bulk worker that would
+		 * not benefit from forcing a context switch. */
 		wake_enq_flags = enq_flags | FLOW_ENQ_HEAD;
 		if (tctx && (tctx->first_run ||
-			     tctx->budget_ns >= (s64)FLOW_BUDGET_TIER_NS))
+			     tctx->budget_ns >= (s64)FLOW_SLICE_MIN_NS))
 			wake_enq_flags |= FLOW_ENQ_PREEMPT;
 
 		scx_bpf_cpuperf_set(target_cpu, SCX_CPUPERF_ONE);
@@ -444,27 +467,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Budget-based vtime with budget-tiered DSQs.  Tasks with remaining
-	 * budget at or above FLOW_BUDGET_TIER_NS go to the high-priority
-	 * DSQ (checked first at dispatch), below it to the low-priority DSQ.
-	 * This separates interactive tasks (longer sleep, higher budget)
-	 * from bulk workers (brief sleep, low budget) without heuristic
-	 * classification — the budget signal itself determines the tier.
-	 *
-	 * Within each tier, tasks are ordered by vtime so that a task with
-	 * more budget is dispatched sooner within its tier.
+	 * Single vtime-ordered DSQ for all non-wakeup re-enqueues.
+	 * Vtime = FLOW_BUDGET_MAX_NS - max(0, budget_ns), giving
+	 * higher-budget tasks (longer sleep) lower vtime and earlier
+	 * dispatch.  Tasks without task_ctx go to a FIFO fallback.
 	 */
 	if (tctx) {
 		s64 effective_budget = tctx->budget_ns > 0 ? tctx->budget_ns : 0;
 		u64 vtime = FLOW_BUDGET_MAX_NS - (u64)effective_budget;
-		u64 dsq_id = (u64)effective_budget >= FLOW_BUDGET_TIER_NS
-			   ? FLOW_NORMAL_HIGH_DSQ
-			   : FLOW_NORMAL_LOW_DSQ;
 
-		scx_bpf_dsq_insert_vtime(p, dsq_id, slice_ns,
+		scx_bpf_dsq_insert_vtime(p, FLOW_NORMAL_DSQ, slice_ns,
 					  vtime, enq_flags);
 	} else {
-		scx_bpf_dsq_insert(p, FLOW_NORMAL_LOW_DSQ, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, FLOW_NORMAL_DSQ, slice_ns, enq_flags);
 	}
 	clear_wake_target(tctx);
 }
@@ -478,22 +493,20 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
+	 * Dispatch order:
+	 *   1. Per-CPU pinned DSQ: non-migratable userspace tasks
+	 *   2. Normal vtime DSQ:    all non-wakeup tasks, ordered by budget
+	 *
 	 * Wakeup tasks use FLOW_DSQ_LOCAL_ON which inserts directly to
 	 * the target CPU's local DSQ with immediate reschedule.  The
 	 * kernel picks them from the local DSQ before calling dispatch.
-	 *
-	 * This dispatch function handles the Normal lane split into two
-	 * budget tiers: high-priority (budget > FLOW_BUDGET_TIER_NS) and
-	 * low-priority (budget <= FLOW_BUDGET_TIER_NS).  The high tier is
-	 * checked first so interactive tasks (longer sleep, higher budget)
-	 * are dispatched before bulk workers.
 	 */
-	if (scx_bpf_dsq_move_to_local(FLOW_NORMAL_HIGH_DSQ, 0)) {
+	if (scx_bpf_dsq_move_to_local(FLOW_PINNED_DSQ_BASE | (u32)cpu, 0)) {
 		FLOW_CPUSTAT_INC(cstate, normal_dispatches);
 		return;
 	}
 
-	if (scx_bpf_dsq_move_to_local(FLOW_NORMAL_LOW_DSQ, 0)) {
+	if (scx_bpf_dsq_move_to_local(FLOW_NORMAL_DSQ, 0)) {
 		FLOW_CPUSTAT_INC(cstate, normal_dispatches);
 		return;
 	}

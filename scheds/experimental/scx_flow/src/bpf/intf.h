@@ -31,17 +31,19 @@ enum consts {
 	FLOW_INTERACTIVE_FLOOR_MAX_NS = (200ULL * NSEC_PER_USEC),
 	FLOW_REFILL_DIV = 100ULL,
 
-	/* DSQ IDs */
-	FLOW_NORMAL_HIGH_DSQ = 1025ULL,  /* vtime DSQ for budget > FLOW_BUDGET_TIER_NS */
-	FLOW_NORMAL_LOW_DSQ = 1026ULL,   /* vtime DSQ for budget <= FLOW_BUDGET_TIER_NS */
+	/* Per-CPU pinned DSQ base: each CPU gets FLOW_PINNED_DSQ_BASE | cpu.
+	 * Non-migratable userspace tasks (nr_cpus_allowed == 1) are routed
+	 * here on non-wakeup re-enqueue, checked first in dispatch so that
+	 * pinned latency-sensitive tasks bypass global vtime DSQ contention.
+	 * The nr_cpus_allowed signal is kernel-enforced, not a heuristic. */
+	FLOW_PINNED_DSQ_BASE = 2048ULL,
 
-	/* Budget tier threshold: tasks with budget above this value go to
-	 * the high-priority DSQ, below it to the low-priority DSQ.  Set at
-	 * FLOW_SLICE_MIN_NS (50 us) — the minimum quantum — so tasks with
-	 * less budget than a single slice are near exhaustion and belong
-	 * in the lower tier.  This corresponds to roughly 5 ms of sleep
-	 * before the interactive floor lifts budget above the boundary. */
-	FLOW_BUDGET_TIER_NS = (50ULL * NSEC_PER_USEC),
+	/* Single vtime-ordered DSQ for all non-wakeup re-enqueues.
+	 * Vtime = FLOW_BUDGET_MAX_NS - max(0, budget_ns), giving tasks
+	 * that slept longer (higher budget) lower vtime and earlier
+	 * dispatch.  The budget range [-500us, 2000us] bounds vtime
+	 * to [0, 2500us] — it cannot grow indefinitely. */
+	FLOW_NORMAL_DSQ = 1025ULL,
 
 	/* Enqueue flags (defined directly to bypass weak-volatile compat) */
 	FLOW_ENQ_WAKEUP  = 0x0000000000000001ULL,  /* SCX_ENQ_WAKEUP */

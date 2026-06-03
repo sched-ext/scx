@@ -167,6 +167,7 @@ impl<'a> Scheduler<'a> {
             nr_running: bss_data.nr_running,
             total_runtime: bss_data.total_runtime,
             prio_dispatches: bss_data.prio_dispatches + cpu_policy_state.prio_dispatches,
+            pinned_dispatches: bss_data.pinned_dispatches,
             normal_dispatches: bss_data.normal_dispatches + cpu_policy_state.normal_dispatches,
             budget_refill_events: bss_data.budget_refill_events,
             budget_exhaustions: bss_data.budget_exhaustions + cpu_policy_state.budget_exhaustions,

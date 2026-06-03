@@ -26,6 +26,8 @@ pub struct Metrics {
     pub total_runtime: u64,
     #[stat(desc = "Tasks dispatched from the Quick lane (per-CPU wakeup DSQ)")]
     pub prio_dispatches: u64,
+    #[stat(desc = "Tasks dispatched from the Pinned DSQ (per-CPU for non-migratable tasks)")]
+    pub pinned_dispatches: u64,
     #[stat(desc = "Tasks dispatched from the Normal lane (global DSQ)")]
     pub normal_dispatches: u64,
     #[stat(desc = "Wakeups that refilled task budget")]
@@ -42,11 +44,12 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] run={} runtime_ns={} quick_disp={} normal_disp={} refill={} exhaust={} runnable={} migrations={}",
+            "[{}] run={} runtime_ns={} quick_disp={} pinned_disp={} normal_disp={} refill={} exhaust={} runnable={} migrations={}",
             crate::SCHEDULER_NAME,
             self.nr_running,
             self.total_runtime,
             self.prio_dispatches,
+            self.pinned_dispatches,
             self.normal_dispatches,
             self.budget_refill_events,
             self.budget_exhaustions,
@@ -61,6 +64,7 @@ impl Metrics {
             nr_running: self.nr_running,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
             prio_dispatches: self.prio_dispatches.wrapping_sub(rhs.prio_dispatches),
+            pinned_dispatches: self.pinned_dispatches.wrapping_sub(rhs.pinned_dispatches),
             normal_dispatches: self.normal_dispatches.wrapping_sub(rhs.normal_dispatches),
             budget_refill_events: self
                 .budget_refill_events
