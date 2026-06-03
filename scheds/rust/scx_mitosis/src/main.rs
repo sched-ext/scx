@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -246,8 +247,8 @@ struct Scheduler<'a> {
     last_configuration_seq: Option<u32>,
     /// Last observed cpuset_seq for cpuset change detection
     last_cpuset_seq: u32,
-    /// Optional cell manager for --cell-parent-cgroup mode
-    cell_manager: Option<CellManager>,
+    /// Cell manager for the cgroup passed via --cell-parent-cgroup.
+    cell_manager: CellManager,
     /// Whether CPU borrowing is enabled
     enable_borrowing: bool,
     /// Whether demand-based rebalancing is enabled
@@ -317,6 +318,12 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
+    fn managed_cell_parent<'b>(opts: &'b Opts) -> Result<&'b str> {
+        opts.cell_parent_cgroup
+            .as_deref()
+            .ok_or_else(|| anyhow!("--cell-parent-cgroup is required to run the scheduler"))
+    }
+
     fn validate_args(_opts: &Opts) -> Result<()> {
         Ok(())
     }
@@ -411,26 +418,15 @@ impl<'a> Scheduler<'a> {
             .launch()
             .context("launching stats server")?;
 
-        // Initialize CellManager if --cell-parent-cgroup is specified
-        if !opts.cell_exclude.is_empty() && opts.cell_parent_cgroup.is_none() {
-            bail!("--cell-exclude requires --cell-parent-cgroup");
-        }
-        let cell_manager = if let Some(ref parent_cgroup) = opts.cell_parent_cgroup {
-            let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
-            Some(
-                CellManager::new(
-                    parent_cgroup,
-                    MAX_CELLS as u32,
-                    topology.span.clone(),
-                    exclude,
-                )
-                .with_context(|| {
-                    format!("initializing cell manager for cgroup {}", parent_cgroup)
-                })?,
-            )
-        } else {
-            None
-        };
+        let parent_cgroup = Self::managed_cell_parent(opts)?;
+        let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
+        let cell_manager = CellManager::new(
+            parent_cgroup,
+            MAX_CELLS as u32,
+            topology.span.clone(),
+            exclude,
+        )
+        .with_context(|| format!("initializing cell manager for cgroup {}", parent_cgroup))?;
 
         // Create epoll instance for event-driven main loop
         let epoll = Epoll::new(EpollCreateFlags::empty()).context("creating epoll instance")?;
@@ -450,15 +446,12 @@ impl<'a> Scheduler<'a> {
             )
             .context("registering stats-waker with epoll")?;
 
-        // Register inotify fd if cell_manager exists
-        if let Some(ref cell_manager) = cell_manager {
-            epoll
-                .add(
-                    cell_manager,
-                    EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
-                )
-                .context("registering cell manager inotify with epoll")?;
-        }
+        epoll
+            .add(
+                &cell_manager,
+                EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
+            )
+            .context("registering cell manager inotify with epoll")?;
 
         Ok(Self {
             skel,
@@ -557,7 +550,7 @@ impl<'a> Scheduler<'a> {
                 .context("checking cpuset changes")?;
             self.collect_metrics().context("collecting metrics")?;
 
-            if self.enable_rebalancing && self.cell_manager.is_some() {
+            if self.enable_rebalancing {
                 self.maybe_rebalance().context("running rebalance check")?;
             }
         }
@@ -572,21 +565,13 @@ impl<'a> Scheduler<'a> {
 
     /// Apply initial cell assignments discovered at startup
     fn apply_initial_cells(&mut self) -> Result<()> {
-        if self.cell_manager.is_none() {
-            return Ok(());
-        }
-
         let cpu_assignments = self
             .compute_and_apply_cell_config(&[])
             .context("computing initial cell configuration")?;
 
-        let cell_manager = self
-            .cell_manager
-            .as_ref()
-            .expect("BUG: cell_manager missing in apply_initial_cells");
         info!(
             "Applied initial cell configuration: {}",
-            cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager.format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -595,11 +580,8 @@ impl<'a> Scheduler<'a> {
     /// Process cell manager events (new/destroyed cgroups)
     fn process_cell_events(&mut self) -> Result<()> {
         let (num_new, num_destroyed, new_cell_ids, destroyed_cell_ids) = {
-            let Some(ref mut cell_manager) = self.cell_manager else {
-                return Ok(());
-            };
-
-            let (new_cells, destroyed_cells) = cell_manager
+            let (new_cells, destroyed_cells) = self
+                .cell_manager
                 .process_events()
                 .context("processing inotify events")?;
 
@@ -626,15 +608,11 @@ impl<'a> Scheduler<'a> {
             .compute_and_apply_cell_config(&new_cell_ids)
             .context("recomputing cell configuration for new cgroups")?;
 
-        let cell_manager = self
-            .cell_manager
-            .as_ref()
-            .expect("BUG: cell_manager missing in process_cell_events");
         info!(
             "Cell config updated ({} new, {} destroyed): {}",
             num_new,
             num_destroyed,
-            cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager.format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -653,11 +631,8 @@ impl<'a> Scheduler<'a> {
         new_cell_ids: &[u32],
     ) -> Result<Vec<CpuAssignment>> {
         let (cell_assignments, cpu_assignments) = {
-            let cell_manager = self
+            let active_cell_ids: Vec<u32> = self
                 .cell_manager
-                .as_ref()
-                .expect("BUG: cell_manager missing in compute_and_apply_cell_config");
-            let active_cell_ids: Vec<u32> = cell_manager
                 .get_cell_assignments()
                 .iter()
                 .map(|(_, cell_id)| *cell_id)
@@ -696,22 +671,22 @@ impl<'a> Scheduler<'a> {
                         .map(|&id| (id, self.smoothed_util[id as usize]))
                         .collect();
 
-                    cell_manager
+                    self.cell_manager
                         .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
                         .context("computing demand-weighted CPU assignments")?
                 } else {
                     // No utilization data yet (e.g., initial startup) — equal weight
-                    cell_manager
+                    self.cell_manager
                         .compute_cpu_assignments(self.enable_borrowing)
                         .context("computing equal-weight CPU assignments (no utilization data)")?
                 }
             } else {
-                cell_manager
+                self.cell_manager
                     .compute_cpu_assignments(self.enable_borrowing)
                     .context("computing equal-weight CPU assignments (rebalancing disabled)")?
             };
 
-            (cell_manager.get_cell_assignments(), cpu_assignments)
+            (self.cell_manager.get_cell_assignments(), cpu_assignments)
         };
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments)
@@ -758,11 +733,8 @@ impl<'a> Scheduler<'a> {
 
         // Compute new assignments and check if they differ from current
         let (cell_assignments, cpu_assignments) = {
-            let cell_manager = self
+            let cpu_assignments = self
                 .cell_manager
-                .as_ref()
-                .expect("BUG: cell_manager missing in maybe_rebalance");
-            let cpu_assignments = cell_manager
                 .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
                 .context("computing demand-weighted CPU assignments for rebalance")?;
 
@@ -776,7 +748,7 @@ impl<'a> Scheduler<'a> {
                 return Ok(());
             }
 
-            (cell_manager.get_cell_assignments(), cpu_assignments)
+            (self.cell_manager.get_cell_assignments(), cpu_assignments)
         };
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments)
@@ -786,15 +758,11 @@ impl<'a> Scheduler<'a> {
         self.rebalance_count += 1;
         self.metrics.rebalance_count = self.rebalance_count;
 
-        let cell_manager = self
-            .cell_manager
-            .as_ref()
-            .expect("BUG: cell_manager missing after apply_cell_config in maybe_rebalance");
         info!(
             "Rebalanced CPUs (spread={:.1}%, count={}): {}",
             spread,
             self.rebalance_count,
-            cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager.format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -1179,10 +1147,8 @@ impl<'a> Scheduler<'a> {
         self.log_all_queue_stats(&cell_stats_delta)
             .context("logging queue stats")?;
 
-        if self.cell_manager.is_some() {
-            self.collect_demand_metrics(&cpu_ctxs)
-                .context("collecting demand metrics")?;
-        }
+        self.collect_demand_metrics(&cpu_ctxs)
+            .context("collecting demand metrics")?;
 
         for (cell_id, cell) in &self.cells {
             trace!("CELL[{}]: {}", cell_id, cell.cpus);
@@ -1346,10 +1312,6 @@ impl<'a> Scheduler<'a> {
 
     /// Check if any cell's cpuset was modified and recompute if so.
     fn check_cpuset_changes(&mut self) -> Result<()> {
-        let Some(ref mut cm) = self.cell_manager else {
-            return Ok(());
-        };
-
         let current_seq = unsafe {
             let ptr = &self
                 .skel
@@ -1369,7 +1331,11 @@ impl<'a> Scheduler<'a> {
         }
         self.last_cpuset_seq = current_seq;
 
-        if !cm.refresh_cpusets().context("refreshing cell cpusets")? {
+        if !self
+            .cell_manager
+            .refresh_cpusets()
+            .context("refreshing cell cpusets")?
+        {
             // seq changed but no cpusets on our cells changed
             self.update_applied_cpuset_seq();
             return Ok(());
@@ -1379,13 +1345,9 @@ impl<'a> Scheduler<'a> {
             .compute_and_apply_cell_config(&[])
             .context("recomputing cell configuration after cpuset change")?;
         self.update_applied_cpuset_seq();
-        let cell_manager = self
-            .cell_manager
-            .as_ref()
-            .expect("BUG: cell_manager missing in check_cpuset_changes");
         info!(
             "Cpuset change detected, recomputed config: {}",
-            cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager.format_cell_config(&cpu_assignments)
         );
         Ok(())
     }
