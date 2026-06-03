@@ -22,6 +22,7 @@ struct task_ctx {
 	s32 wake_cpu;
 	bool wake_cpu_idle;
 	bool wake_cpu_valid;
+	bool first_run;
 };
 
 struct {
@@ -161,12 +162,13 @@ static __always_inline void reset_task_ctx(struct task_ctx *tctx, u64 now, bool 
 	if (!tctx)
 		return;
 
-	tctx->budget_ns = 0;
+	tctx->budget_ns = FLOW_BUDGET_TIER_NS;
 	tctx->last_refill_ns = 0;
 	tctx->last_run_at = 0;
 	tctx->last_sleep_ns = 0;
 	tctx->sleep_started_at = sleeping ? now : 0;
 	tctx->last_cpu = -1;
+	tctx->first_run = true;
 	clear_wake_target(tctx);
 }
 
@@ -316,6 +318,15 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	if (non_migratable) {
 		cpu = preferred_cpu;
 		is_idle = scx_bpf_test_and_clear_cpu_idle(preferred_cpu);
+	} else if (tctx && tctx->first_run) {
+		/* First-run task: prefer idle core, then any idle CPU, then default. */
+		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, FLOW_PICK_IDLE_CORE);
+		if (cpu < 0)
+			cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (cpu >= 0)
+			is_idle = true;
+		else
+			cpu = scx_bpf_select_cpu_dfl(p, preferred_cpu, wake_flags, &is_idle);
 	} else {
 		cpu = scx_bpf_select_cpu_dfl(p, preferred_cpu, wake_flags, &is_idle);
 	}
@@ -420,7 +431,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		 * classification that v2.3.0 achieved via its urgent-latency
 		 * lane, using the budget signal directly. */
 		wake_enq_flags = enq_flags | FLOW_ENQ_HEAD;
-		if (tctx && tctx->budget_ns >= (s64)FLOW_BUDGET_TIER_NS)
+		if (tctx && (tctx->first_run ||
+			     tctx->budget_ns >= (s64)FLOW_BUDGET_TIER_NS))
 			wake_enq_flags |= FLOW_ENQ_PREEMPT;
 
 		scx_bpf_cpuperf_set(target_cpu, SCX_CPUPERF_ONE);
@@ -509,6 +521,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 			FLOW_CPUSTAT_INC(lookup_cpu_state(), cpu_migrations);
 		tctx->last_cpu = current_cpu;
 		tctx->last_run_at = now;
+		tctx->first_run = false;
 	}
 
 	__sync_fetch_and_add(&nr_running, 1);

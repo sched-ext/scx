@@ -52,6 +52,9 @@ enum consts {
 	FLOW_KICK_IDLE    = 0x0000000000000001ULL, /* SCX_KICK_IDLE */
 	FLOW_KICK_PREEMPT = 0x0000000000000002ULL, /* SCX_KICK_PREEMPT */
 
+	/* CPU selection flags */
+	FLOW_PICK_IDLE_CORE = 0x01ULL,  /* scx_bpf_pick_idle_cpu: both SMT siblings idle */
+
 	/* Built-in DSQ IDs (kernel ABI, stable):
 	 *   SCX_DSQ_LOCAL   = 0x8000000000000002  — per-CPU local DSQ
 	 *   SCX_DSQ_GLOBAL  = 0x8000000000000001  — global FIFO DSQ
