@@ -3,7 +3,8 @@
 # and how --dynamic-affinity-cpu-selection resolves it.
 #
 # Strategy:
-# 1. Create multiple CPU-bound tasks in the root cgroup (cell has all CPUs)
+# 1. Start scx_mitosis in CellManager mode with an empty managed parent
+# 2. Create multiple CPU-bound tasks in the root cgroup (cell 0 has all CPUs)
 # 2. Use taskset to restrict each task's affinity to a subset of CPUs
 # 3. This triggers the affinity violation path in select_cpu/enqueue
 # 4. With legacy behavior: tasks may pile onto one CPU (imbalanced)
@@ -27,6 +28,9 @@ AFFINITY_CPUS="${AFFINITY_CPUS:-0-3}"       # CPU mask for all workers (subset o
 WORK_DURATION="${WORK_DURATION:-5}"         # Seconds to run workload
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.5}"   # Seconds between CPU utilization samples
 WORKLOAD_TYPE="${1:-both}"                  # "cpu-bound", "wakeup-heavy", or "both"
+SCHEDULER_BIN="${SCHEDULER_BIN:-./target/release/scx_mitosis}"
+CGROUP_BASE="/sys/fs/cgroup/test.slice"
+SCHED_PID=""
 
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Must run as root${NC}"
@@ -63,21 +67,19 @@ if [ "$TOTAL_SYSTEM_CPUS" -le "$NUM_CPUS" ]; then
     exit 1
 fi
 
-# Check if scx_mitosis is running
-if ! pgrep -x scx_mitosis > /dev/null; then
-    echo -e "${RED}scx_mitosis not running${NC}"
-    echo -e "${YELLOW}Usage:${NC}"
-    echo -e "  1. Run: sudo target/release/scx_mitosis"
-    echo -e "  2. Then run this test in another terminal"
-    echo -e ""
-    echo -e "To test with new feature:"
-    echo -e "  sudo target/release/scx_mitosis --dynamic-affinity-cpu-selection"
+# Check scheduler binary availability
+if [[ ! -x "$SCHEDULER_BIN" ]]; then
+    echo -e "${RED}Scheduler binary not found: $SCHEDULER_BIN${NC}"
+    echo -e "${RED}Please build with: cargo build --release -p scx_mitosis${NC}"
     exit 1
 fi
 
-# Check if dynamic-affinity-cpu-selection is enabled
-MITOSIS_CMDLINE=$(cat /proc/$(pgrep -x scx_mitosis)/cmdline | tr '\0' ' ')
-if echo "$MITOSIS_CMDLINE" | grep -q "dynamic-affinity-cpu-selection"; then
+if [[ ! -f "/sys/kernel/sched_ext/state" ]]; then
+    echo -e "${RED}sched_ext not available (missing /sys/kernel/sched_ext/state)${NC}"
+    exit 1
+fi
+
+if [[ "$SCX_MITOSIS_ARGS" == *"--dynamic-affinity-cpu-selection"* ]]; then
     MODE="dynamic"
 else
     MODE="legacy"
@@ -90,10 +92,49 @@ cleanup() {
     for pid in "${WORKER_PIDS[@]}"; do
         kill -9 "$pid" 2>/dev/null || true
     done
+    if [[ -n "$SCHED_PID" ]]; then
+        kill -INT "$SCHED_PID" 2>/dev/null || true
+        wait "$SCHED_PID" 2>/dev/null || true
+    else
+        pkill -9 scx_mitosis 2>/dev/null || true
+    fi
+    if [[ -d "$CGROUP_BASE" ]]; then
+        rmdir "$CGROUP_BASE" 2>/dev/null || true
+    fi
     wait 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
+
+start_scheduler() {
+    mkdir -p "$CGROUP_BASE"
+    if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
+        echo "+cpu" > "$CGROUP_BASE/cgroup.subtree_control"
+    fi
+
+    local scheduler_args=("--cell-parent-cgroup" "/test.slice")
+    if [[ -n "${SCX_MITOSIS_ARGS:-}" ]]; then
+        # shellcheck disable=SC2206
+        local extra_args=( ${SCX_MITOSIS_ARGS} )
+        scheduler_args+=("${extra_args[@]}")
+    fi
+
+    "$SCHEDULER_BIN" "${scheduler_args[@]}" > /tmp/scx_mitosis_affinity.log 2>&1 &
+    SCHED_PID=$!
+    sleep 3
+
+    if ! ps -p "$SCHED_PID" > /dev/null 2>&1; then
+        echo -e "${RED}Failed to start scx_mitosis${NC}"
+        cat /tmp/scx_mitosis_affinity.log
+        exit 1
+    fi
+
+    if [[ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" != "enabled" ]]; then
+        echo -e "${RED}sched_ext did not enable${NC}"
+        cat /tmp/scx_mitosis_affinity.log
+        exit 1
+    fi
+}
 
 # Get CPU utilization for specific CPUs
 get_cpu_utils() {
@@ -307,11 +348,13 @@ run_test() {
     for pid in "${WORKER_PIDS[@]}"; do
         kill -9 "$pid" 2>/dev/null || true
     done
-    wait 2>/dev/null || true
+    sleep 1
     WORKER_PIDS=()
 }
 
 # Run tests based on workload type
+start_scheduler
+
 case "$WORKLOAD_TYPE" in
     cpu-bound)
         run_test "cpu-bound" "CPU-bound tasks (tests enqueue() path)"
