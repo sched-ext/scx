@@ -220,6 +220,9 @@ pub struct CellManager {
     all_cpus: Cpumask,
     /// Cgroup directory names to exclude from cell creation
     exclude_names: HashSet<String>,
+    /// When true, rescue cells that would otherwise have zero CPUs by
+    /// stealing one CPU from the largest cell instead of bailing.
+    cell_no_cpus_fix: bool,
 }
 
 impl CellManager {
@@ -228,12 +231,13 @@ impl CellManager {
         max_cells: u32,
         all_cpus: Cpumask,
         exclude: HashSet<String>,
+        cell_no_cpus_fix: bool,
     ) -> Result<Self> {
         let path = PathBuf::from(format!("/sys/fs/cgroup{}", cell_parent_path));
         if !path.exists() {
             bail!("Cell parent cgroup path does not exist: {}", path.display());
         }
-        Self::new_with_path(path, max_cells, all_cpus, exclude)
+        Self::new_with_path(path, max_cells, all_cpus, exclude, cell_no_cpus_fix)
     }
 
     fn new_with_path(
@@ -241,6 +245,7 @@ impl CellManager {
         max_cells: u32,
         all_cpus: Cpumask,
         exclude: HashSet<String>,
+        cell_no_cpus_fix: bool,
     ) -> Result<Self> {
         let inotify = Inotify::init().context("Failed to initialize inotify")?;
         inotify
@@ -258,6 +263,7 @@ impl CellManager {
             max_cells,
             all_cpus,
             exclude_names: exclude,
+            cell_no_cpus_fix,
         };
 
         // Insert cell 0 as a permanent entry. cgid 0 is a safe sentinel —
@@ -755,6 +761,60 @@ impl CellManager {
             }
         }
 
+        // Phase 4.5 (gated on --cell-no-cpus-fix): Rescue cells with zero
+        // CPUs by stealing one from the largest cell. Phases 2-4 can leave
+        // a cell empty when other cells' cpusets collectively cover every
+        // CPU (e.g. cell 0, the catch-all for unclaimed CPUs, when every
+        // CPU is claimed) or when the proportional allocator rounds a
+        // small share down to zero. Stealing one CPU keeps the scheduler
+        // running at the cost of a transient imbalance; the next
+        // reconfigure recomputes from the updated state.
+        let mut starved_cells: Vec<u32> = if self.cell_no_cpus_fix {
+            self.cells
+                .values()
+                .map(|info| info.cell_id)
+                .filter(|cell_id| cell_cpus.get(cell_id).map_or(true, |m| m.weight() == 0))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        starved_cells.sort();
+        for starved_id in starved_cells {
+            // Pick the donor: the cell with the most CPUs assigned, ties
+            // broken by lowest cell_id for determinism. Skip cells that
+            // would be reduced to zero by the steal.
+            let donor_id = cell_cpus
+                .iter()
+                .filter(|(_, mask)| mask.weight() >= 2)
+                .max_by(|(a_id, a_mask), (b_id, b_mask)| {
+                    a_mask
+                        .weight()
+                        .cmp(&b_mask.weight())
+                        .then_with(|| b_id.cmp(a_id))
+                })
+                .map(|(id, _)| *id);
+
+            let donor_id = match donor_id {
+                Some(id) => id,
+                None => continue, // no donor available; Phase 5 will bail
+            };
+            let donor_mask = cell_cpus
+                .get_mut(&donor_id)
+                .expect("donor mask just located by max_by");
+            let donated_cpu = donor_mask
+                .iter()
+                .next()
+                .expect("donor has weight >= 2 so iter() is non-empty");
+            donor_mask.clear_cpu(donated_cpu).ok();
+            cell_cpus
+                .entry(starved_id)
+                .or_insert_with(Cpumask::new)
+                .set_cpu(donated_cpu)
+                .ok();
+            *assigned_count.entry(donor_id).or_insert(0) -= 1;
+            *assigned_count.entry(starved_id).or_insert(0) += 1;
+        }
+
         // Phase 5: Verify all cells have at least one CPU assigned
         for info in self.cells.values() {
             if !cell_cpus.contains_key(&info.cell_id)
@@ -932,6 +992,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -951,6 +1012,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -973,6 +1035,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -999,6 +1062,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2);
@@ -1026,6 +1090,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -1064,6 +1129,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -1093,6 +1159,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -1114,6 +1181,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1139,6 +1207,7 @@ mod tests {
             256,
             cpumask_for_range(10),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1163,6 +1232,7 @@ mod tests {
             256,
             cpumask_for_range(4),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let result = mgr.compute_cpu_assignments(false);
@@ -1194,6 +1264,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1241,7 +1312,9 @@ mod tests {
     fn test_cpu_assignments_cpusets_cover_all_cpus() {
         let tmp = TempDir::new().unwrap();
 
-        // Create cgroups that cover all CPUs - cell 0 gets nothing, which is an error
+        // Cell 1 and cell 2's cpusets together claim every CPU. Cell 0
+        // (the catch-all for unclaimed CPUs) would otherwise get nothing,
+        // which is an error without --cell-no-cpus-fix.
         let cell1_path = tmp.path().join("cell1");
         std::fs::create_dir(&cell1_path).unwrap();
         std::fs::write(cell1_path.join("cpuset.cpus"), "0-7\n").unwrap();
@@ -1255,6 +1328,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let result = mgr.compute_cpu_assignments(false);
@@ -1271,6 +1345,60 @@ mod tests {
     }
 
     #[test]
+    fn test_cpu_assignments_cpusets_cover_all_cpus_with_fix() {
+        let tmp = TempDir::new().unwrap();
+
+        // Same as test_cpu_assignments_cpusets_cover_all_cpus, but with
+        // --cell-no-cpus-fix set: Phase 4.5 steals one CPU from the largest
+        // cell to keep cell 0 non-empty.
+        let cell1_path = tmp.path().join("cell1");
+        std::fs::create_dir(&cell1_path).unwrap();
+        std::fs::write(cell1_path.join("cpuset.cpus"), "0-7\n").unwrap();
+
+        let cell2_path = tmp.path().join("cell2");
+        std::fs::create_dir(&cell2_path).unwrap();
+        std::fs::write(cell2_path.join("cpuset.cpus"), "8-15\n").unwrap();
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+            true,
+        )
+        .unwrap();
+        let assignments = mgr
+            .compute_cpu_assignments(false)
+            .expect("rescue should populate cell 0");
+
+        let cell0 = assignments
+            .iter()
+            .find(|a| a.cell_id == 0)
+            .expect("cell 0 present");
+        assert_eq!(cell0.primary.weight(), 1);
+
+        let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
+        assert_eq!(total, 16);
+
+        // Every cell has at least one CPU; the donor lost exactly one.
+        for assignment in &assignments {
+            assert!(
+                assignment.primary.weight() >= 1,
+                "cell {} starved after rescue: {:?}",
+                assignment.cell_id,
+                assignment.primary
+            );
+        }
+        let donor_weights: Vec<usize> = assignments
+            .iter()
+            .filter(|a| a.cell_id != 0)
+            .map(|a| a.primary.weight())
+            .collect();
+        assert!(donor_weights.contains(&7));
+        assert!(donor_weights.contains(&8));
+    }
+
+    #[test]
     fn test_cpu_assignments_single_cpuset() {
         let tmp = TempDir::new().unwrap();
 
@@ -1284,6 +1412,7 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1320,6 +1449,7 @@ mod tests {
             256,
             cpumask_for_range(32),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -1355,6 +1485,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -1412,6 +1543,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1503,6 +1635,7 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1565,6 +1698,7 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1614,6 +1748,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1667,6 +1802,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1712,6 +1848,7 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -1740,6 +1877,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -1786,6 +1924,7 @@ mod tests {
             3,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2); // cell1 + cell2
@@ -1817,6 +1956,7 @@ mod tests {
             3,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2);
@@ -1849,6 +1989,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             exclude,
+            false,
         )
         .unwrap();
 
@@ -1873,6 +2014,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             exclude,
+            false,
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -1907,6 +2049,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -1950,6 +2093,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -1985,6 +2129,7 @@ mod tests {
             256,
             cpumask_for_range(32),
             HashSet::new(),
+            false,
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -2044,6 +2189,7 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -2080,6 +2226,7 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -2140,6 +2287,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -2190,6 +2338,7 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -2242,6 +2391,7 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -2284,6 +2434,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -2349,6 +2500,7 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -2417,6 +2569,7 @@ mod tests {
             256,
             cpumask_for_range(20),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
@@ -2603,6 +2756,7 @@ mod tests {
             256,
             cpumask_for_range(56),
             HashSet::new(),
+            false,
         )
         .unwrap();
 
