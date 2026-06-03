@@ -131,23 +131,6 @@ static inline int refresh_task_llc_cpumask(struct task_ctx *tctx, u32 llc)
 	return 0;
 }
 
-static void zero_cell_vtimes(struct cell *cell)
-{
-	WRITE_ONCE(cell->llcs_to_drain, 0);
-	WRITE_ONCE(cell->llcs_with_cpus, 0);
-
-	if (enable_llc_awareness) {
-		u32 llc_idx;
-		bpf_for(llc_idx, 0, MAX_LLCS)
-		{
-			WRITE_ONCE(cell->llcs[llc_idx].vtime_now, 0);
-			WRITE_ONCE(cell->llcs[llc_idx].nr_queued, 0);
-		}
-	} else {
-		WRITE_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now, 0);
-	}
-}
-
 static inline void cell_llc_drain_enable(struct cell *cell, u32 llc)
 {
 	if (llc >= MAX_LLCS)
