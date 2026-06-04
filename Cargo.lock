@@ -334,7 +334,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "miniz_oxide 0.8.9",
- "object 0.37.3",
+ "object",
  "rustc-demangle",
  "windows-link",
 ]
@@ -2681,17 +2681,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "object"
-version = "0.39.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
-dependencies = [
- "flate2",
- "memchr",
- "ruzstd",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3603,16 +3592,6 @@ dependencies = [
  "once_cell",
  "scx_cargo",
  "scx_utils",
-]
-
-[[package]]
-name = "scx_bpf_unittests"
-version = "1.1.1"
-dependencies = [
- "cc",
- "indoc",
- "libbpf-sys",
- "object 0.39.1",
 ]
 
 [[package]]
