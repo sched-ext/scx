@@ -1,4 +1,3 @@
-#include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
 #include <lib/sdt_task.h>
 
