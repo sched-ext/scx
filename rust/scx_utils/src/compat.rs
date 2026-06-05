@@ -134,6 +134,25 @@ pub fn read_enum(type_name: &str, name: &str) -> Result<u64> {
     Err(anyhow!("{:?} doesn't exist in {:?}", name, type_name))
 }
 
+/// Read an enum value from the first BTF enum type that contains it.
+pub fn read_enum_any(type_names: &[&str], name: &str) -> Result<u64> {
+    let mut errors = Vec::new();
+
+    for type_name in type_names {
+        match read_enum(type_name, name) {
+            Ok(val) => return Ok(val),
+            Err(err) => errors.push(format!("{}: {:#}", type_name, err)),
+        }
+    }
+
+    bail!(
+        "{:?} doesn't exist in any of {:?}: {}",
+        name,
+        type_names,
+        errors.join("; ")
+    )
+}
+
 pub fn struct_has_field(type_name: &str, field: &str) -> Result<bool> {
     let btf: &btf = *VMLINUX_BTF;
 
@@ -537,6 +556,15 @@ mod tests {
     #[test]
     fn test_read_enum() {
         assert_eq!(super::read_enum("pid_type", "PIDTYPE_TGID").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_read_enum_any() {
+        assert_eq!(
+            super::read_enum_any(&["NO_SUCH_TYPE", "pid_type"], "PIDTYPE_TGID").unwrap(),
+            1
+        );
+        assert!(super::read_enum_any(&["NO_SUCH_TYPE", "pid_type"], "NO_SUCH_ENUM").is_err());
     }
 
     #[test]
