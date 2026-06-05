@@ -706,6 +706,41 @@ static __always_inline void unaccount_queued_load(task_ctx *taskc)
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
 }
 
+static __always_inline void account_queued_load_pcpu(task_ctx *taskc,
+						     s32 primary_cpu)
+{
+	struct cpu_ctx *cpuc;
+	u32 load;
+
+	if (primary_cpu < 0 || primary_cpu >= LAVD_CPU_ID_MAX)
+		return;
+
+	if (READ_ONCE(taskc->queued_on_cpu_id) >= 0)
+		return;
+
+	load = task_load_metric(taskc);
+	cpuc = get_cpu_ctx_id(primary_cpu);
+	if (cpuc)
+		__sync_fetch_and_add(&cpuc->qload_invr, load);
+	taskc->queued_load_snapshot_cpu = load;
+	WRITE_ONCE(taskc->queued_on_cpu_id, (s16)primary_cpu);
+}
+
+static __always_inline void unaccount_queued_load_pcpu(task_ctx *taskc)
+{
+	struct cpu_ctx *cpuc;
+	s16 primary_cpu = READ_ONCE(taskc->queued_on_cpu_id);
+
+	if (primary_cpu < 0)
+		return;
+
+	cpuc = get_cpu_ctx_id(primary_cpu);
+	if (cpuc)
+		__sync_fetch_and_sub(&cpuc->qload_invr,
+				     taskc->queued_load_snapshot_cpu);
+	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
+}
+
 static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
 {
 	int ret, ret2;
@@ -820,6 +855,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 			account_queued_load(ictx.taskc, cpuc->cpdom_id);
+			account_queued_load_pcpu(ictx.taskc,
+						 get_primary_cpu(cpuc->cpu_id));
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 			goto out;
 		}
@@ -941,10 +978,13 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	if (can_direct_dispatch(cpuc, is_idle)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
+		account_queued_load_pcpu(taskc, get_primary_cpu(cpu));
 	} else {
 		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
+		if (dsq_type(dsq_id) == LAVD_DSQ_TYPE_CPU)
+			account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id));
 	}
 	account_queued_load(taskc, cpuc->cpdom_id);
 
@@ -1060,6 +1100,8 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	dsq_id = get_target_dsq_id(p, cpuc, taskc);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
 	account_queued_load(taskc, cpuc->cpdom_id);
+	if (dsq_type(dsq_id) == LAVD_DSQ_TYPE_CPU)
+		account_queued_load_pcpu(taskc, dsq_to_cpu(dsq_id));
 
 	/*
 	 * Kick the target CPU if it is idle. Test-and-clear avoids
@@ -1087,8 +1129,10 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 	 * in lavd_running(). Skip for non-running dequeues only
 	 * (SCX_DEQ_CORE_SCHED_EXEC, migration, etc.).
 	 */
-	if (p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p)))
+	if (p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p))) {
 		unaccount_queued_load(taskc);
+		unaccount_queued_load_pcpu(taskc);
+	}
 
 	if (!enable_cpu_bw)
 		return;
@@ -1510,6 +1554,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	}
 
 	unaccount_queued_load(taskc);
+	unaccount_queued_load_pcpu(taskc);
 
 	/*
 	 * If the sched_ext core directly dispatched a task, calculating the
@@ -2026,6 +2071,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
+	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
 
@@ -2061,8 +2107,10 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 	 * still be queued. Unaccount its load. If running,
 	 * lavd_running() already unaccounted it.
 	 */
-	if (taskc && p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p)))
+	if (taskc && p != __COMPAT_scx_bpf_cpu_curr(scx_bpf_task_cpu(p))) {
 		unaccount_queued_load(taskc);
+		unaccount_queued_load_pcpu(taskc);
+	}
 
 	scx_task_free(p);
 	return 0;
@@ -2301,6 +2349,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->idle_start_clk = 0;
 		cpuc->lat_cri = 0;
 		cpuc->running_clk = 0;
+		cpuc->qload_invr = 0;
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
 		cpuc->max_capacity = cpu_capacity[cpu];
