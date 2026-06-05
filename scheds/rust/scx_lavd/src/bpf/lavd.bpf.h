@@ -121,6 +121,7 @@ enum consts_internal {
 	LAVD_CPDOM_MIG_SHIFT		= 3, /* when mildly loaded: 1/2**3 = [-12.5%, +12.5%] */
 	LAVD_CPDOM_MIG_SHIFT_OL		= 4, /* when over-loaded:   1/2**4 = [-6.25%, +6.25%] */
 	LAVD_CPDOM_MIG_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS / LAVD_SLICE_MAX_NS_DFL), /* roughly twice per interval */
+	LAVD_CPU_CONGESTED_THRES	= 1, /* the CPU is congested when one or more tasks are waiting across its DSQs */
 
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
@@ -697,6 +698,7 @@ static __always_inline bool use_cpdom_dsq(void)
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
+bool is_cpu_congested(struct cpu_ctx *cpuc);
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
 u16 normalize_lat_cri(u16 lat_cri);
 
