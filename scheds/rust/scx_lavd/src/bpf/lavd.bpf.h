@@ -340,7 +340,25 @@ struct cpdom_cpumask_wrapper {
 	struct bpf_cpumask __kptr *mask;
 };
 
-struct bpf_cpumask *lookup_cpdom_cpumask(u32 cpdom_id);
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpdom_cpumask_wrapper);
+	__uint(max_entries, LAVD_CPDOM_MAX_NR);
+} cpdom_cpumasks __weak SEC(".maps");
+
+static __always_inline
+struct bpf_cpumask *lookup_cpdom_cpumask(u32 cpdom_id)
+{
+	struct cpdom_cpumask_wrapper *w;
+
+	w = bpf_map_lookup_elem(&cpdom_cpumasks, &cpdom_id);
+	if (!w)
+		return NULL;
+
+	return w->mask;
+}
+
 int init_cpdom_cpumasks(void);
 
 typedef struct task_ctx __arena task_ctx;

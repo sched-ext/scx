@@ -1705,29 +1705,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	}
 }
 
-/*
- * Per-compute-domain online CPU masks, stored as kptr cpumasks in an array
- * map. See struct cpdom_cpumask_wrapper in lavd.bpf.h for why.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpdom_cpumask_wrapper);
-	__uint(max_entries, LAVD_CPDOM_MAX_NR);
-} cpdom_cpumasks SEC(".maps");
-
-__hidden
-struct bpf_cpumask *lookup_cpdom_cpumask(u32 cpdom_id)
-{
-	struct cpdom_cpumask_wrapper *w;
-
-	w = bpf_map_lookup_elem(&cpdom_cpumasks, &cpdom_id);
-	if (!w)
-		return NULL;
-
-	return w->mask;
-}
-
 __hidden
 int init_cpdom_cpumasks(void)
 {
