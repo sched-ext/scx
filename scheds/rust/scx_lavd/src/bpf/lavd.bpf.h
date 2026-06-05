@@ -325,8 +325,23 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
 }
 
 extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
-extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 extern int			nr_cpdoms;
+
+/*
+ * Per-compute-domain online CPU mask.
+ *
+ * Stored as a kptr cpumask (allocated via bpf_cpumask_create() at init) rather
+ * than an embedded "struct bpf_cpumask" so its storage is sized by the kernel
+ * for the running nr_cpu_ids, independent of the NR_CPUS the scheduler was
+ * built against. The wrapper lives in a BPF_MAP_TYPE_ARRAY because kptrs may
+ * not be placed in mmap-able global (.bss/.data) storage.
+ */
+struct cpdom_cpumask_wrapper {
+	struct bpf_cpumask __kptr *mask;
+};
+
+struct bpf_cpumask *lookup_cpdom_cpumask(u32 cpdom_id);
+int init_cpdom_cpumasks(void);
 
 typedef struct task_ctx __arena task_ctx;
 

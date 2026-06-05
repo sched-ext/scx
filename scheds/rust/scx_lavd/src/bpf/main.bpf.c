@@ -1705,12 +1705,59 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	}
 }
 
+/*
+ * Per-compute-domain online CPU masks, stored as kptr cpumasks in an array
+ * map. See struct cpdom_cpumask_wrapper in lavd.bpf.h for why.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpdom_cpumask_wrapper);
+	__uint(max_entries, LAVD_CPDOM_MAX_NR);
+} cpdom_cpumasks SEC(".maps");
+
+__hidden
+struct bpf_cpumask *lookup_cpdom_cpumask(u32 cpdom_id)
+{
+	struct cpdom_cpumask_wrapper *w;
+
+	w = bpf_map_lookup_elem(&cpdom_cpumasks, &cpdom_id);
+	if (!w)
+		return NULL;
+
+	return w->mask;
+}
+
+__hidden
+int init_cpdom_cpumasks(void)
+{
+	struct cpdom_cpumask_wrapper *w;
+	struct bpf_cpumask *cpumask;
+	u32 cpdom_id;
+
+	bpf_for(cpdom_id, 0, LAVD_CPDOM_MAX_NR) {
+		w = bpf_map_lookup_elem(&cpdom_cpumasks, &cpdom_id);
+		if (!w)
+			return -ESRCH;
+
+		cpumask = bpf_cpumask_create();
+		if (!cpumask)
+			return -ENOMEM;
+
+		cpumask = bpf_kptr_xchg(&w->mask, cpumask);
+		if (cpumask)
+			bpf_cpumask_release(cpumask);
+	}
+
+	return 0;
+}
+
 static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id)
 {
 	struct bpf_cpumask *cd_cpumask;
 
 	bpf_rcu_read_lock();
-	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	cd_cpumask = lookup_cpdom_cpumask(cpuc->cpdom_id);
 	if (!cd_cpumask)
 		goto unlock_out;
 	bpf_cpumask_set_cpu(cpu_id, cd_cpumask);
@@ -1735,7 +1782,7 @@ static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id)
 	struct bpf_cpumask *cd_cpumask;
 
 	bpf_rcu_read_lock();
-	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	cd_cpumask = lookup_cpdom_cpumask(cpuc->cpdom_id);
 	if (!cd_cpumask)
 		goto unlock_out;
 	bpf_cpumask_clear_cpu(cpu_id, cd_cpumask);
@@ -2353,7 +2400,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			break;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-		cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+		cd_cpumask = lookup_cpdom_cpumask(cpdom_id);
 		if (!cpdomc || !cd_cpumask) {
 			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
 			err = -ESRCH;
@@ -2542,6 +2589,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 *    is no idle active CPUs.
 	 */
 	err = init_cpumasks();
+	if (err)
+		return err;
+
+	/*
+	 * Allocate the per-compute-domain online cpumasks before the per-CPU
+	 * context init populates them.
+	 */
+	err = init_cpdom_cpumasks();
 	if (err)
 		return err;
 
