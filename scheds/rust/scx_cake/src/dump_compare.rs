@@ -1614,7 +1614,11 @@ mod tests {
         assert!(src.contains("cake_status_owner_pressure("));
         assert!(src.contains("owner_class >= CAKE_CPU_OWNER_BULK"));
         assert!(src.contains("pressure >= CAKE_CPU_PRESSURE_HIGH"));
-        assert!(src.contains("cake_smt_interactive_neighbor_busy(candidate)"));
+        /* SMT gate is a baked dispatch: interactive-only by default,
+         * any-neighbor-busy under SCX_CAKE_SMT_CLEAN_SELECT=1. */
+        assert!(src.contains("cake_smt_select_neighbor_busy(candidate)"));
+        assert!(src.contains("cake_smt_interactive_neighbor_busy(cpu)"));
+        assert!(src.contains("cake_smt_any_neighbor_busy(cpu)"));
         assert!(src.contains("cake_try_clean_idle_candidate_record("));
         assert!(src.contains("cake_try_smt_idle_candidate_record("));
     }
@@ -2596,12 +2600,14 @@ cake_service_transition_reset_state",
         assert!(affinity_gate < trusted_claim);
         assert!(trusted_claim < confidence_read);
         assert!(trusted_claim < native_fallback);
-        assert!(
-            trust.contains("bss.trust_user[idx].generation = generation.wrapping_add(1).max(1);")
-        );
-        assert!(trust.contains("if !ready || cooling_down"));
+        /* Cooldown ownership moved from userspace to BPF: trust.rs only
+         * mirrors confidence into the policy flag, while cake_trust_demote /
+         * cake_trust_active enforce the cooldown window on the hot path. */
+        assert!(trust.contains("if !ready"));
+        assert!(!trust.contains("cooling_down"));
         assert!(trust.contains("#[cfg(not(cake_trust_maps))]"));
-        assert!(!trust.contains("if !ready || cooling_down || bpf_blocked"));
+        assert!(src.contains("WRITE_ONCE(trust_bpf[idx].cooldown_until, now + cooldown);"));
+        assert!(src.contains("cooldown_until = READ_ONCE(trust_bpf[idx].cooldown_until);"));
         assert!(tui.contains("bss.trust_user = Default::default();"));
         assert!(tui.contains("bss.trust_bpf = Default::default();"));
     }

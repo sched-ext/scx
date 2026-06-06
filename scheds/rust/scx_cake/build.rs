@@ -205,6 +205,16 @@ fn main() {
         baked_bool("SCX_CAKE_CORE_STEAL_DHQ", false);
     let (_futex_trace_label, futex_trace_value, futex_trace_enabled) =
         baked_bool("SCX_CAKE_FUTEX_TRACE", false);
+    let (_busy_wake_grace_label, busy_wake_grace_value, _busy_wake_grace) =
+        baked_bool("SCX_CAKE_BUSY_WAKE_GRACE", true);
+    let (_smt_clean_select_label, smt_clean_select_value, _smt_clean_select) =
+        baked_bool("SCX_CAKE_SMT_CLEAN_SELECT", false);
+    let (_frame_owner_shield_label, frame_owner_shield_value, _frame_owner_shield) =
+        baked_bool("SCX_CAKE_FRAME_OWNER_SHIELD", false);
+    let (_prev_idle_override_label, prev_idle_override_value, _prev_idle_override) =
+        baked_bool("SCX_CAKE_PREV_IDLE_OVERRIDE", false);
+    let (_lean_wake_kick_label, lean_wake_kick_value, _lean_wake_kick) =
+        baked_bool("SCX_CAKE_LEAN_WAKE_KICK", false);
     let baked_release_trust_maps_value =
         baked_release_route_pred_value & baked_release_confidence_value;
     let baked_release_trust_maps = if baked_release_trust_maps_value != 0 {
@@ -309,6 +319,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_RELEASE_PLANCK_LOCAL");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_CORE_STEAL_DHQ");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_FUTEX_TRACE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_BUSY_WAKE_GRACE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_SMT_CLEAN_SELECT");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_FRAME_OWNER_SHIELD");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_PREV_IDLE_OVERRIDE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_LEAN_WAKE_KICK");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -355,6 +370,26 @@ fn main() {
         baked_core_steal_dhq_value
     );
     cflags.push_str(&format!(" -DCAKE_FUTEX_TRACE={}", futex_trace_value));
+    cflags.push_str(&format!(
+        " -DCAKE_BUSY_WAKE_GRACE_VALUE={}",
+        busy_wake_grace_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_SMT_CLEAN_SELECT_VALUE={}",
+        smt_clean_select_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_FRAME_OWNER_SHIELD_VALUE={}",
+        frame_owner_shield_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_PREV_IDLE_OVERRIDE_VALUE={}",
+        prev_idle_override_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_LEAN_WAKE_KICK_VALUE={}",
+        lean_wake_kick_value
+    ));
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
         println!("cargo:rustc-cfg=cake_bpf_release");

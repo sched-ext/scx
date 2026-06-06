@@ -206,6 +206,21 @@ const bool enable_stats __attribute__((used)) = false;
 #define CAKE_BULK_STEAL_UTIL_MIN 256U
 #define CAKE_ENABLE_GUARDED_SHARED_STEAL 0
 #define CAKE_ENABLE_CORE_STEAL_BUSY_FALLBACK 1
+#ifndef CAKE_BUSY_WAKE_GRACE_VALUE
+#define CAKE_BUSY_WAKE_GRACE_VALUE 1
+#endif
+#ifndef CAKE_SMT_CLEAN_SELECT_VALUE
+#define CAKE_SMT_CLEAN_SELECT_VALUE 0
+#endif
+#ifndef CAKE_FRAME_OWNER_SHIELD_VALUE
+#define CAKE_FRAME_OWNER_SHIELD_VALUE 0
+#endif
+#ifndef CAKE_PREV_IDLE_OVERRIDE_VALUE
+#define CAKE_PREV_IDLE_OVERRIDE_VALUE 0
+#endif
+#ifndef CAKE_LEAN_WAKE_KICK_VALUE
+#define CAKE_LEAN_WAKE_KICK_VALUE 0
+#endif
 #define CAKE_HOME_SCORE_MAX 15U
 #define CAKE_CPU_PRESSURE_SAMPLE_SHIFT 13U
 #define CAKE_CPU_PRESSURE_DECAY_SHIFT 2U
@@ -3201,6 +3216,34 @@ static __noinline bool cake_smt_interactive_neighbor_busy(u32 target_cpu)
 	       ((u64)CAKE_CPU_OWNER_INTERACTIVE << CAKE_CPU_STATUS_OWNER_SHIFT);
 }
 
+/* Strict full-idle-core preference (SCX_CAKE_SMT_CLEAN_SELECT): reject an
+ * idle candidate whose SMT sibling is running anything at all.  Cosmos-style
+ * placement for lightly loaded frame workloads — landing a wakee on the
+ * sibling of a busy frame thread steals core resources at the worst moment.
+ * Fast-scan misses fall through to native idle selection, which already
+ * prefers whole idle cores, so rejection here only redirects, never strands. */
+static __noinline __maybe_unused bool cake_smt_any_neighbor_busy(u32 target_cpu)
+{
+	u64 meta    = cake_cpu_meta_for(target_cpu);
+	u32 sibling = cake_meta_sibling_cpu(meta);
+	u64 sibling_status;
+
+	if (!(meta & CAKE_CPU_META_SMT_FLAG))
+		return false;
+	barrier_var(sibling);
+	if (sibling >= cake_nr_cpus || sibling == target_cpu)
+		return false;
+	sibling_status = cake_read_cpu_status(sibling);
+	return !(sibling_status & CAKE_CPU_STATUS_IDLE);
+}
+
+#if CAKE_SMT_CLEAN_SELECT_VALUE
+#define cake_smt_select_neighbor_busy(cpu) cake_smt_any_neighbor_busy(cpu)
+#else
+#define cake_smt_select_neighbor_busy(cpu) \
+	cake_smt_interactive_neighbor_busy(cpu)
+#endif
+
 static __always_inline bool cake_accept_busy_wake(u32 target_cpu,
 						  u64 target_status)
 {
@@ -3503,9 +3546,31 @@ cake_busy_wake_policy_should_preempt(struct task_struct *wakee,
 				     struct cake_cpu_bss *target_bss,
 				     u32 owner_runs,
 				     u32 owner_avg_runtime_ns,
-				     u8	 target_pressure)
+				     u8	 target_pressure,
+				     u64 target_status)
 {
-	/* Enforce an adaptive preemption grace period (250us to 4ms) depending on core pressure */
+	/* Class-based owner protection (SCX_CAKE_FRAME_OWNER_SHIELD): a
+	 * FRAME/INTERACTIVE owner keeps its core against default-user wakees;
+	 * the wake takes an IDLE kick instead.  Replaces the time-based grace
+	 * window with the owner classification the status lane already
+	 * publishes, so bulk/short owners stay preemptible. */
+#if CAKE_FRAME_OWNER_SHIELD_VALUE
+	if (wakee->prio >= 120 && wakee->scx.weight <= 120) {
+		u32 owner = (u32)((target_status >>
+				   CAKE_CPU_STATUS_OWNER_SHIFT) &
+				  CAKE_CPU_STATUS_OWNER_MASK);
+
+		if (owner == CAKE_CPU_OWNER_INTERACTIVE ||
+		    owner == CAKE_CPU_OWNER_FRAME)
+			return false;
+	}
+#else
+	(void)target_status;
+#endif
+	/* Enforce an adaptive preemption grace period (250us to 4ms) depending on core pressure.
+	 * Baked A/B knob: SCX_CAKE_BUSY_WAKE_GRACE=0 compiles this gate out so
+	 * frame-critical wakees preempt without the grace delay (game builds). */
+#if CAKE_BUSY_WAKE_GRACE_VALUE
 	if (wakee->prio >= 120 && wakee->scx.weight <= 120) {
 		u64 grace_period = 250000ULL; /* 250us base */
 		if (target_pressure >= 64)
@@ -3519,6 +3584,7 @@ cake_busy_wake_policy_should_preempt(struct task_struct *wakee,
 		if (elapsed < grace_period)
 			return false;
 	}
+#endif
 
 	if (wakee->comm[0] == 's') {
 		u64 comm0 = cake_task_comm_word(wakee, 0);
@@ -3555,6 +3621,23 @@ cake_busy_wake_kick_from_status_service(struct task_struct *wakee,
 	if ((target_status & CAKE_CPU_STATUS_PREEMPT_WAKE) || wakee->prio < 120 ||
 	    wakee->scx.weight > 120)
 		return SCX_KICK_PREEMPT;
+	/* Lean wake kick (SCX_CAKE_LEAN_WAKE_KICK): default-user wakees
+	 * normally take an IDLE kick on busy targets and wait out the
+	 * owner's scheduling point.  Under the knob, preempt instead unless
+	 * the owner is FRAME/INTERACTIVE class — those bursts feed the GPU,
+	 * and stealing their core mid-burst costs more than the wakee's
+	 * wait.  Collision-only path, so idle targets pay nothing. */
+#if CAKE_LEAN_WAKE_KICK_VALUE
+	{
+		u32 owner = (u32)((target_status >>
+				   CAKE_CPU_STATUS_OWNER_SHIFT) &
+				  CAKE_CPU_STATUS_OWNER_MASK);
+
+		if (owner != CAKE_CPU_OWNER_INTERACTIVE &&
+		    owner != CAKE_CPU_OWNER_FRAME)
+			return SCX_KICK_PREEMPT;
+	}
+#endif
 	return SCX_KICK_IDLE;
 }
 
@@ -4467,7 +4550,7 @@ static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(
 		cake_scoreboard_status_result(local_bss, status);
 		return -1;
 	}
-	if (smt_check && cake_smt_interactive_neighbor_busy(candidate)) {
+	if (smt_check && cake_smt_select_neighbor_busy(candidate)) {
 		cake_scoreboard_status_result(local_bss, status);
 		return -1;
 	}
@@ -4482,7 +4565,7 @@ static CAKE_TRY_IDLE_ATTR s32 cake_try_idle_candidate(
 		cake_scoreboard_status_result(local_bss, status);
 		return -1;
 	}
-	if (smt_check && cake_smt_interactive_neighbor_busy(candidate)) {
+	if (smt_check && cake_smt_select_neighbor_busy(candidate)) {
 		cake_record_accel_probe(route_kind, CAKE_ACCEL_PROBE_SMT_BUSY);
 		cake_scoreboard_status_result(local_bss, status);
 		return -1;
@@ -4514,13 +4597,24 @@ cake_try_idle_candidate_release(struct cake_cpu_bss *local_bss,
 	return cake_try_idle_candidate(local_bss, candidate, smt_check);
 }
 
+#if CAKE_SMT_CLEAN_SELECT_VALUE
+/* Full-core preference: prev/slot0 routes also take the sibling-busy check. */
 #define cake_try_clean_idle_candidate_record(local_bss, candidate, route_kind) \
-	cake_try_idle_candidate_release(local_bss, candidate)
-#define cake_try_smt_idle_candidate_record(local_bss, candidate, route_kind) \
 	cake_try_idle_candidate_release(local_bss, (candidate) | 0x80000000U)
 #else
 #define cake_try_clean_idle_candidate_record(local_bss, candidate, route_kind) \
+	cake_try_idle_candidate_release(local_bss, candidate)
+#endif
+#define cake_try_smt_idle_candidate_record(local_bss, candidate, route_kind) \
+	cake_try_idle_candidate_release(local_bss, (candidate) | 0x80000000U)
+#else
+#if CAKE_SMT_CLEAN_SELECT_VALUE
+#define cake_try_clean_idle_candidate_record(local_bss, candidate, route_kind) \
+	cake_try_idle_candidate(local_bss, candidate, true, route_kind)
+#else
+#define cake_try_clean_idle_candidate_record(local_bss, candidate, route_kind) \
 	cake_try_idle_candidate(local_bss, candidate, false, route_kind)
+#endif
 #define cake_try_smt_idle_candidate_record(local_bss, candidate, route_kind) \
 	cake_try_idle_candidate(local_bss, candidate, true, route_kind)
 #endif
@@ -4916,6 +5010,27 @@ static __noinline s32 cake_select_cpu_fast_scan(struct task_struct *p,
 
 	cake_record_accel_fast_attempt(CAKE_ROUTE_PREV);
 	selected = -1;
+#if CAKE_PREV_IDLE_OVERRIDE_VALUE
+	/* Prev affinity outranks scoreboard cleanliness: the wakee's cache
+	 * history lives on prev and a just-vacated core is shallow-idle, but
+	 * its status keeps the recent owner_class/pressure for a while and
+	 * fails the clean gate, which would migrate a frame thread on nearly
+	 * every wake.  Claim prev on the raw IDLE bit; fall through to the
+	 * probe slots only when prev is genuinely busy. */
+	{
+		u64 prev_status = cake_read_cpu_status(prev);
+
+		if ((prev_status & CAKE_CPU_STATUS_IDLE) &&
+		    cake_claim_health_allows(local_bss) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev)) {
+			selected = (s32)prev;
+			cake_record_accel_fast_result(CAKE_ROUTE_PREV, true);
+			hit_route = CAKE_ROUTE_PREV;
+			goto fast_hit;
+		}
+	}
+	cake_record_accel_fast_result(CAKE_ROUTE_PREV, false);
+#else
 	if (cake_fast_clean_mask_has(clean_mask, prev)) {
 		selected = cake_try_clean_idle_candidate_record(
 			local_bss, prev, CAKE_ROUTE_PREV);
@@ -4927,6 +5042,7 @@ static __noinline s32 cake_select_cpu_fast_scan(struct task_struct *p,
 		goto fast_miss;
 	}
 	cake_record_accel_fast_result(CAKE_ROUTE_PREV, false);
+#endif
 
 	candidate = cake_fast_probe_slot_from_pack(probe_pack, 0);
 	if (candidate != prev) {
@@ -5201,7 +5317,9 @@ static __always_inline bool
 cake_select_direct_dispatch_clean(struct task_struct *p, s32 cpu,
 				  u16 select_flags)
 {
-#if defined(CAKE_RELEASE) && CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL
+#if defined(CAKE_RELEASE) && \
+	(CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL || \
+	 CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LLC_VTIME)
 	u64 slice = quantum_ns;
 	u32 service_kind;
 #if CAKE_FUTEX_TRACE
@@ -5214,7 +5332,13 @@ cake_select_direct_dispatch_clean(struct task_struct *p, s32 cpu,
 	 * Stress tasks still pass through enqueue so cache-simple/service lanes
 	 * remain intact. Schbench, sched-messaging, and sched-pipe also stay on
 	 * enqueue so local-waiter/reset/busy-wake service contracts are not
-	 * bypassed by a clean idle hit. */
+	 * bypassed by a clean idle hit.
+	 *
+	 * LLC-vtime keeps its shared arbitration when enqueue sees a busy target,
+	 * but a scoreboard/core-spread hit has already reserved a clean idle CPU.
+	 * Let that path skip the enqueue callback just like local policy so
+	 * wake-heavy default-user game workers avoid a redundant status read and
+	 * LLC-vtime insertion branch on the common clean-idle handoff. */
 	if (cpu < 0 || cpu >= cake_nr_cpus)
 		return false;
 	if ((p->flags & PF_KTHREAD) || p->prio < 120 || p->scx.weight != 100)
@@ -7816,10 +7940,15 @@ enqueue_dsq_dispatch(struct task_struct *p, u64 enq_flags, u32 enq_cpu)
 					READ_ONCE(target_bss->owner_run_count);
 				u32 owner_avg_runtime_ns = READ_ONCE(
 					target_bss->owner_avg_runtime_ns);
+				u64 kick_target_status = 0;
 
+#if CAKE_FRAME_OWNER_SHIELD_VALUE
+				kick_target_status =
+					cake_read_cpu_status(enq_cpu);
+#endif
 				if (!cake_busy_wake_policy_should_preempt(
 					    p, target_bss, owner_runs, owner_avg_runtime_ns,
-					    target_pressure))
+					    target_pressure, kick_target_status))
 					kick_flags = SCX_KICK_IDLE;
 			}
 		}
