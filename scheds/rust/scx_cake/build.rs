@@ -233,6 +233,13 @@ fn main() {
         baked_bool("SCX_CAKE_WAKE_PREEMPT_ELAPSED", false);
     let (_wake_preempt_adaptive_label, wake_preempt_adaptive_value, _wake_preempt_adaptive) =
         baked_bool("SCX_CAKE_WAKE_PREEMPT_ADAPTIVE", false);
+    let wake_preempt_elapsed_us: u64 = std::env::var("SCX_CAKE_WAKE_PREEMPT_ELAPSED_US")
+        .ok()
+        .map(|v| {
+            v.parse()
+                .expect("SCX_CAKE_WAKE_PREEMPT_ELAPSED_US must be an integer microsecond value")
+        })
+        .unwrap_or(600);
     let baked_release_trust_maps_value =
         baked_release_route_pred_value & baked_release_confidence_value;
     let baked_release_trust_maps = if baked_release_trust_maps_value != 0 {
@@ -351,6 +358,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_LEAN_ACCOUNTING");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ELAPSED");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ADAPTIVE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ELAPSED_US");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -452,6 +460,10 @@ fn main() {
     cflags.push_str(&format!(
         " -DCAKE_WAKE_PREEMPT_ADAPTIVE={}",
         wake_preempt_adaptive_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_WAKE_PREEMPT_ELAPSED_NS={}ULL",
+        wake_preempt_elapsed_us * 1000
     ));
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
