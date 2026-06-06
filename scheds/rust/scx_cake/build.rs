@@ -227,6 +227,12 @@ fn main() {
         baked_bool("SCX_CAKE_FAST_ENQUEUE", false);
     let (_nfw_miss_shared_label, nfw_miss_shared_value, _nfw_miss_shared) =
         baked_bool("SCX_CAKE_NFW_MISS_SHARED", false);
+    let (_lean_accounting_label, lean_accounting_value, _lean_accounting) =
+        baked_bool("SCX_CAKE_LEAN_ACCOUNTING", false);
+    let (_wake_preempt_elapsed_label, wake_preempt_elapsed_value, _wake_preempt_elapsed) =
+        baked_bool("SCX_CAKE_WAKE_PREEMPT_ELAPSED", false);
+    let (_wake_preempt_adaptive_label, wake_preempt_adaptive_value, _wake_preempt_adaptive) =
+        baked_bool("SCX_CAKE_WAKE_PREEMPT_ADAPTIVE", false);
     let baked_release_trust_maps_value =
         baked_release_route_pred_value & baked_release_confidence_value;
     let baked_release_trust_maps = if baked_release_trust_maps_value != 0 {
@@ -342,6 +348,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_FAST_ENQUEUE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_NFW_MISS_SHARED");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_LEAN_ACCOUNTING");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ELAPSED");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ADAPTIVE");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -431,6 +440,18 @@ fn main() {
     cflags.push_str(&format!(
         " -DCAKE_NFW_MISS_SHARED={}",
         nfw_miss_shared_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_LEAN_ACCOUNTING_VALUE={}",
+        lean_accounting_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_WAKE_PREEMPT_ELAPSED_VALUE={}",
+        wake_preempt_elapsed_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_WAKE_PREEMPT_ADAPTIVE={}",
+        wake_preempt_adaptive_value
     ));
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");

@@ -239,6 +239,24 @@ const bool enable_stats __attribute__((used)) = false;
 #ifndef CAKE_NFW_MISS_SHARED
 #define CAKE_NFW_MISS_SHARED 0
 #endif
+#ifndef CAKE_LEAN_ACCOUNTING_VALUE
+#define CAKE_LEAN_ACCOUNTING_VALUE 0
+#endif
+#ifndef CAKE_WAKE_PREEMPT_ELAPSED_VALUE
+#define CAKE_WAKE_PREEMPT_ELAPSED_VALUE 0
+#endif
+#ifndef CAKE_WAKE_PREEMPT_ELAPSED_NS
+#define CAKE_WAKE_PREEMPT_ELAPSED_NS 600000ULL
+#endif
+#ifndef CAKE_WAKE_PREEMPT_ADAPTIVE
+#define CAKE_WAKE_PREEMPT_ADAPTIVE 0
+#endif
+#ifndef CAKE_WAKE_PREEMPT_MIN_NS
+#define CAKE_WAKE_PREEMPT_MIN_NS 200000ULL
+#endif
+#ifndef CAKE_WAKE_PREEMPT_OWNER_MIN_AVG_NS
+#define CAKE_WAKE_PREEMPT_OWNER_MIN_AVG_NS 800000ULL
+#endif
 #define CAKE_HOME_SCORE_MAX 15U
 #define CAKE_CPU_PRESSURE_SAMPLE_SHIFT 13U
 #define CAKE_CPU_PRESSURE_DECAY_SHIFT 2U
@@ -3629,7 +3647,8 @@ cake_busy_wake_policy_should_preempt(struct task_struct *wakee,
 
 static __always_inline __maybe_unused u64
 cake_busy_wake_kick_from_status_service(struct task_struct *wakee,
-					u64 target_status, u32 service_kind)
+					u64 target_status, u32 service_kind,
+					u32 target_cpu)
 {
 	u32 mode = CAKE_BUSY_WAKE_KICK_MODE;
 
@@ -3646,6 +3665,40 @@ cake_busy_wake_kick_from_status_service(struct task_struct *wakee,
 #if CAKE_KTHREAD_WAKE_PREEMPT_VALUE
 	if (wakee->flags & PF_KTHREAD)
 		return SCX_KICK_PREEMPT;
+#endif
+	/* Elapsed-gated wake preempt (SCX_CAKE_WAKE_PREEMPT_ELAPSED):
+	 * EEVDF-eligibility-like decision without per-task deadlines — an
+	 * owner that already ran most of a typical burst yields to the
+	 * wakee; a fresh burst keeps its core.  Unlike the blunt FRAME
+	 * shield this lets RenderThread preempt GameThread's tail, which IS
+	 * the pipeline handoff in the GPU-heavy regime where parked wakees
+	 * otherwise wait out multi-ms owner bursts. */
+#if CAKE_WAKE_PREEMPT_ELAPSED_VALUE
+	{
+		struct cake_cpu_bss *kick_bss =
+			&cpu_bss[target_cpu & (CAKE_MAX_CPUS - 1)];
+		u64 anchor = READ_ONCE(kick_bss->run_start_ns);
+		u64 threshold = CAKE_WAKE_PREEMPT_ELAPSED_NS;
+
+#if CAKE_WAKE_PREEMPT_ADAPTIVE
+		/* Regime gate: elapsed preemption helps when owner bursts are
+		 * long (GPU-heavy regime: parked wakees wait out multi-ms
+		 * bursts) and hurts when they are short (light regime: the
+		 * owner finishes sooner than the preempt churn costs).
+		 * owner_avg_runtime is the live discriminator — long average
+		 * bursts arm the gate, short ones leave the no-preempt
+		 * behavior that wins the light regime. */
+		{
+			u64 oa = READ_ONCE(kick_bss->owner_avg_runtime_ns);
+
+			if (oa < CAKE_WAKE_PREEMPT_OWNER_MIN_AVG_NS)
+				threshold = ~0ULL;
+		}
+#endif
+		if (anchor && threshold != ~0ULL &&
+		    bpf_ktime_get_ns() - anchor > threshold)
+			return SCX_KICK_PREEMPT;
+	}
 #endif
 	if (cake_service_avoids_busy_preempt(service_kind))
 		return SCX_KICK_IDLE;
@@ -3673,12 +3726,14 @@ cake_busy_wake_kick_from_status_service(struct task_struct *wakee,
 }
 
 static __always_inline __maybe_unused u64
-cake_busy_wake_kick_from_status(struct task_struct *wakee, u64 target_status)
+cake_busy_wake_kick_from_status(struct task_struct *wakee, u64 target_status,
+				u32 target_cpu)
 {
 	u32 service_kind = cake_task_service_kind(wakee);
 
 	return cake_busy_wake_kick_from_status_service(wakee, target_status,
-						       service_kind);
+						       service_kind,
+						       target_cpu);
 }
 
 #if CAKE_HAS_LOCAL_WAITER
@@ -8211,7 +8266,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 				target_cpu,
 				cake_busy_wake_kick_from_status_service(
 					p, fe_status,
-					CAKE_TASK_SERVICE_NONE));
+					CAKE_TASK_SERVICE_NONE,
+					target_cpu));
 		return;
 	}
 #endif
@@ -8519,7 +8575,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 			scx_bpf_kick_cpu(
 				target_cpu,
 				cake_busy_wake_kick_from_status_service(
-					p, target_status, service_kind));
+					p, target_status, service_kind,
+					target_cpu));
 	}
 	return;
 #else
@@ -10294,6 +10351,16 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 #if CAKE_ACCEL_PATH
 #ifdef CAKE_RELEASE
+#if CAKE_LEAN_ACCOUNTING_VALUE
+	/* Lean accounting (SCX_CAKE_LEAN_ACCOUNTING, game A/B): skip the
+	 * owner-average update, service classification effects, and
+	 * confidence bookkeeping on every stop; keep the vtime integration,
+	 * frontier publish, and a stable-status owner publish so the IDLE
+	 * bit and kick decisions stay fresh. */
+	cake_publish_cpu_owner(cpu, bss,
+			       READ_ONCE(bss->owner_avg_runtime_ns));
+	return;
+#endif
 	u32  owner_avg_runtime_ns =
 		cake_update_owner_avg(bss, rt_raw, owner_service_kind);
 	bool schbench_service =
