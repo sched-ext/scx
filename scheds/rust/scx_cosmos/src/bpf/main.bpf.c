@@ -35,15 +35,6 @@ char _license[] SEC("license") = "GPL";
 #define SHARED_DSQ		0
 
 /*
- * Maximum rate of task wakeups/sec (tasks with a higher rate are capped to this
- * value).
- *
- * Note that the wakeup rate is evaluated over a period of 100ms, so this number
- * must be multiplied by 10 to determine the actual limit in wakeups/sec.
- */
-#define MAX_WAKEUP_FREQ                1000ULL
-
-/*
  * Thresholds for applying hysteresis to CPU performance scaling:
  *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
  *  - CPUFREQ_HIGH_THRESH: above this level, raise performance to maximum
@@ -209,7 +200,7 @@ static u64 vtime_now;
 struct task_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u64 last_run_at;
-	s64 sleep_vlag;
+	u64 exec_runtime;
 	u64 wakeup_freq;
 	u64 last_woke_at;
 	u64 perf_events;
@@ -402,14 +393,10 @@ static u64 calc_avg(u64 old_val, u64 new_val)
  */
 static u64 update_freq(u64 freq, u64 interval)
 {
-	u64 new_freq;
+        u64 new_freq;
 
-	if (!interval)
-		interval = 1;
-	new_freq = (100 * NSEC_PER_MSEC) / interval;
-	new_freq = MIN(new_freq, MAX_WAKEUP_FREQ);
-
-	return calc_avg(freq, new_freq);
+        new_freq = (100 * NSEC_PER_MSEC) / interval;
+        return calc_avg(freq, new_freq);
 }
 
 /*
@@ -917,69 +904,50 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 }
 
 /*
- * Return @slice_lag scaled by task's wakeup frequency.
+ * Return a time slice scaled by the task's weight.
  */
-static u64 task_slice_lag(const struct task_ctx *tctx)
+static u64 task_slice(const struct task_struct *p)
 {
-	return slice_lag * MAX(1, tctx->wakeup_freq);
+	return scale_by_task_weight(p, slice_ns);
 }
 
 /*
- * Clamp saved virtual lag so sleepers carry bounded credit or debt.
- */
-static s64 task_clamp_sleep_vlag(const struct task_struct *p,
-				 const struct task_ctx *tctx, s64 vlag)
-{
-	s64 max_vlag = scale_by_task_weight_inverse(p, task_slice_lag(tctx));
-
-	return CLAMP(vlag, -max_vlag, max_vlag);
-}
-
-/*
- * Save bounded virtual lag for voluntary sleepers.
+ * Calculate and return the virtual deadline for the given task.
  *
- * Positive lag means the task slept behind vtime_now (credit), negative lag
- * means it slept ahead of vtime_now (debt).
+ *  The deadline is defined as:
  *
- * Credit remains represented in p->scx.dsq_vtime and is bounded in task_dl().
- * Debt is re-aligned to vtime_now before shared-DSQ insertion, or in
- * ops.running() for direct local dispatches that bypass task_dl().
- */
-static void task_save_sleep_vlag(struct task_struct *p, struct task_ctx *tctx)
-{
-	s64 vlag = (s64)(vtime_now - p->scx.dsq_vtime);
-
-	tctx->sleep_vlag = task_clamp_sleep_vlag(p, tctx, vlag);
-}
-
-/*
- * Re-align task's vruntime to the current vtime_now, applying its lag debt.
- */
-static void task_apply_sleep_debt(struct task_struct *p, struct task_ctx *tctx)
-{
-	if (tctx->sleep_vlag >= 0)
-		return;
-
-	scx_bpf_task_set_dsq_vtime(p, vtime_now - tctx->sleep_vlag);
-	tctx->sleep_vlag = 0;
-}
-
-/*
- * Return task's deadline, bounding sleeper credit, so long sleeps don't
- * accumulate an unbounded head start.
+ *    deadline = vruntime + exec_vruntime
+ *
+ * Here, `vruntime` represents the task's total accumulated runtime,
+ * inversely scaled by its weight, while `exec_vruntime` accounts the
+ * runtime accumulated since the last sleep event, also inversely scaled by
+ * the task's weight.
+ *
+ * Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize
+ * tasks that sleep frequently and use the CPU in short bursts (resulting
+ * in a small `exec_vruntime` value), which are typically latency critical.
+ *
+ * Additionally, to prevent over-prioritizing tasks that sleep for long
+ * periods of time, the vruntime credit they can accumulate while sleeping
+ * is limited by @slice_lag, which is also scaled based on the task's
+ * weight.
+ *
+ * To prioritize tasks that sleep frequently over those with long sleep
+ * intervals, @slice_lag is also adjusted in function of the task's wakeup
+ * frequency: tasks that sleep often have a bigger slice lag, allowing them
+ * to accumulate more time-slice credit than tasks with infrequent, long
+ * sleeps.
  */
 static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 vsleep_max, vtime_min;
+	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
+	u64 vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale);
+	u64 vtime_min = vtime_now - vsleep_max;
 
-	task_apply_sleep_debt(p, tctx);
-
-	vsleep_max = scale_by_task_weight_inverse(p, task_slice_lag(tctx));
-	vtime_min = vtime_now - vsleep_max;
 	if (time_before(p->scx.dsq_vtime, vtime_min))
-		return vtime_min;
+		p->scx.dsq_vtime = vtime_min;
 
-	return p->scx.dsq_vtime;
+	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
 }
 
 /*
@@ -1105,7 +1073,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 */
 	if (is_wake_affine(current, p) && !is_busy) {
 		if (this_cpu == prev_cpu) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 			return this_cpu;
 		}
 	}
@@ -1118,7 +1086,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 		cpu = pick_cpu_on_gpu_node(p, cpu_node(prev_cpu), tctx);
 		if (cpu >= 0) {
 			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 			return cpu;
 		}
 	}
@@ -1134,7 +1102,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
 			    wake_flags, false);
 	if (cpu >= 0 || !is_busy)
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 
 	return cpu >= 0 ? cpu : prev_cpu;
 }
@@ -1159,13 +1127,13 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	 * - the system is busy and there are tasks waiting in the
 	 *   local or shared DSQ.
 	 */
-	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > slice_ns) {
+	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > task_slice(p)) {
 		s32 cpu = scx_bpf_task_cpu(p);
 		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
 				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
 
 		if (is_smt_contended(cpu) || (is_cpu_busy(cpu) && cpu_busy))
-			scx_bpf_task_set_slice(p, 0);
+			p->scx.slice = 0;
 	}
 }
 
@@ -1194,7 +1162,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		if (cpu >= 0) {
 			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					   slice_ns, enq_flags);
+					   task_slice(p), enq_flags);
 			if (cpu != prev_cpu || !scx_bpf_task_running(p))
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
@@ -1215,7 +1183,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		 * direct dispatch to prevent starvation.
 		 */
 		if (!q || q->nr_cpus_allowed > 1) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
 			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
 
 			if (!scx_bpf_task_running(p))
@@ -1237,7 +1205,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		else
 			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
 		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
 			if (is_event_heavy(tctx) && cpu != prev_cpu)
 				__sync_fetch_and_add(&nr_event_dispatches, 1);
 
@@ -1252,7 +1220,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!is_cpu_busy(prev_cpu) &&
 	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 		if (task_should_migrate(p, enq_flags))
 			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 		return;
@@ -1261,8 +1229,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Dispatch the task to the shared DSQ.
 	 */
-	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu), slice_ns,
-				 task_dl(p, tctx), enq_flags);
+	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
+				 task_slice(p), task_dl(p, tctx), enq_flags);
 
 	if (task_should_migrate(p, enq_flags))
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
@@ -1322,7 +1290,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * is on the primary domain.
 	 */
 	if (prev && keep_running(prev, cpu))
-		scx_bpf_task_set_slice(prev, slice_ns);
+		prev->scx.slice = task_slice(prev);
 }
 
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
@@ -1335,11 +1303,19 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Update the task's wakeup frequency based on the time since the last
-	 * wakeup.
+	 * Reset exec runtime (accumulated execution time since last
+	 * sleep).
+	 */
+	tctx->exec_runtime = 0;
+
+	/*
+	 * Update the task's wakeup frequency based on the time since
+	 * the last wakeup, then cap the result at 1024 to avoid large
+	 * spikes.
 	 */
 	delta_t = now - tctx->last_woke_at;
 	tctx->wakeup_freq = update_freq(tctx->wakeup_freq, delta_t);
+	tctx->wakeup_freq = MIN(tctx->wakeup_freq, 1024);
 	tctx->last_woke_at = now;
 }
 
@@ -1356,9 +1332,6 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	 * the used time slice).
 	 */
 	tctx->last_run_at = bpf_ktime_get_ns();
-
-	/* Direct local dispatches bypass task_dl(). */
-	task_apply_sleep_debt(p, tctx);
 
 	/*
 	 * Update current system's vruntime.
@@ -1393,7 +1366,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
-	u64 vtime, slice;
+	u64 slice;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1417,10 +1390,14 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	slice = scale_by_cpu_capacity(slice, cpu);
 
 	/*
-	 * Update task's vruntime adding its used weighted time slice.
+	 * Update the vruntime and the total accumulated runtime since last
+	 * sleep.
+	 *
+	 * Cap the maximum accumulated time since last sleep to @slice_lag,
+	 * to prevent starving CPU-intensive tasks.
 	 */
-	vtime = p->scx.dsq_vtime + scale_by_task_weight_inverse(p, slice);
-	scx_bpf_task_set_dsq_vtime(p, vtime);
+	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
+	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
 
 	/*
 	 * Update per-CPU statistics.
@@ -1428,25 +1405,9 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	update_cpu_load(p, slice);
 }
 
-void BPF_STRUCT_OPS(cosmos_quiescent, struct task_struct *p, u64 deq_flags)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	if (!(deq_flags & SCX_DEQ_SLEEP)) {
-		tctx->sleep_vlag = 0;
-		return;
-	}
-
-	task_save_sleep_vlag(p, tctx);
-}
-
 void BPF_STRUCT_OPS(cosmos_enable, struct task_struct *p)
 {
-	scx_bpf_task_set_dsq_vtime(p, vtime_now);
+	p->scx.dsq_vtime = vtime_now;
 }
 
 s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
@@ -1600,7 +1561,6 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .runnable		= (void *)cosmos_runnable,
 	       .running			= (void *)cosmos_running,
 	       .stopping		= (void *)cosmos_stopping,
-	       .quiescent		= (void *)cosmos_quiescent,
 	       .enable			= (void *)cosmos_enable,
 	       .init_task		= (void *)cosmos_init_task,
 	       .exit_task		= (void *)cosmos_exit_task,
