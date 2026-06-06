@@ -221,6 +221,24 @@ const bool enable_stats __attribute__((used)) = false;
 #ifndef CAKE_LEAN_WAKE_KICK_VALUE
 #define CAKE_LEAN_WAKE_KICK_VALUE 0
 #endif
+#ifndef CAKE_KTHREAD_WAKE_PREEMPT_VALUE
+#define CAKE_KTHREAD_WAKE_PREEMPT_VALUE 0
+#endif
+#ifndef CAKE_NATIVE_FAST_WAKE_VALUE
+#define CAKE_NATIVE_FAST_WAKE_VALUE 0
+#endif
+#ifndef CAKE_NATIVE_FAST_WAKE_WIDE
+#define CAKE_NATIVE_FAST_WAKE_WIDE 0
+#endif
+#ifndef CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL
+#define CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL 0
+#endif
+#ifndef CAKE_FAST_ENQUEUE_VALUE
+#define CAKE_FAST_ENQUEUE_VALUE 0
+#endif
+#ifndef CAKE_NFW_MISS_SHARED
+#define CAKE_NFW_MISS_SHARED 0
+#endif
 #define CAKE_HOME_SCORE_MAX 15U
 #define CAKE_CPU_PRESSURE_SAMPLE_SHIFT 13U
 #define CAKE_CPU_PRESSURE_DECAY_SHIFT 2U
@@ -3534,6 +3552,9 @@ static __noinline void dsq_insert_wrapper(struct task_struct *p, u64 dsq_id,
 					  u64 slice, u64 enq_flags);
 static __noinline void cake_clamp_wakeup_vtime(struct task_struct *p,
 					       u32		   target_cpu);
+static __noinline void cake_insert_llc_vtime(struct task_struct *p,
+					     u64 enq_flags, u32 target_cpu,
+					     u64 slice);
 static __always_inline __maybe_unused bool
 cake_service_avoids_busy_preempt(u32 service_kind)
 {
@@ -3616,6 +3637,16 @@ cake_busy_wake_kick_from_status_service(struct task_struct *wakee,
 		return SCX_KICK_IDLE;
 	if (mode == CAKE_BUSY_WAKE_KICK_PREEMPT)
 		return SCX_KICK_PREEMPT;
+	/* Kthread wake preempt (SCX_CAKE_KTHREAD_WAKE_PREEMPT): GPU present
+	 * paths run through kworkers/IRQ threads; one queued behind a frame
+	 * thread's 1ms slice stalls the whole submit chain.  Kthread bursts
+	 * are short, so preempting for them is cheap — EEVDF effectively runs
+	 * fresh-woken kworkers immediately, and the GPU-feed gap (~25us/frame)
+	 * matches this wait. */
+#if CAKE_KTHREAD_WAKE_PREEMPT_VALUE
+	if (wakee->flags & PF_KTHREAD)
+		return SCX_KICK_PREEMPT;
+#endif
 	if (cake_service_avoids_busy_preempt(service_kind))
 		return SCX_KICK_IDLE;
 	if ((target_status & CAKE_CPU_STATUS_PREEMPT_WAKE) || wakee->prio < 120 ||
@@ -5468,6 +5499,62 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 #endif
 
 #if defined(CAKE_RELEASE) && CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL
+#if CAKE_NATIVE_FAST_WAKE_VALUE
+	/* Native fast wake (SCX_CAKE_NATIVE_FAST_WAKE): route default-user
+	 * wakeups through the kernel idle pick and select-side direct
+	 * dispatch, skipping Cake's scoreboard/service machinery entirely.
+	 * A/B probe for the constant per-wake transit cost vs EEVDF/cosmos
+	 * (~32us/frame avg-fps gap across all policy arms).  Game-A/B only:
+	 * bench service contracts (sched-pipe/schbench resets) are bypassed,
+	 * so do not promote without re-running the bench suite. */
+	if (p->prio >= 120 && p->scx.weight == 100
+#if !CAKE_NATIVE_FAST_WAKE_WIDE
+	    && !(p->flags & PF_KTHREAD) && !cake_task_is_affinitized(p)
+#endif
+	) {
+		s32 nfw_cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
+
+		if (nfw_cpu >= 0) {
+			u64 nfw_slice = quantum_ns;
+
+			p->scx.slice = nfw_slice;
+			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | (u32)nfw_cpu,
+					   nfw_slice, 0);
+			return nfw_cpu;
+		}
+#if CAKE_NFW_MISS_SHARED
+		/* Work-conserving miss: no idle CPU exists, so park the wakee
+		 * in the shared per-LLC vtime queue instead of prev's local
+		 * queue — the FIRST core to hit a dispatch point pulls it,
+		 * rather than waiting specifically for prev.  This is the
+		 * cosmos-style work conservation at the frame-overlap edge. */
+		{
+			u32 ms_cpu = (u32)prev_cpu < (u32)cake_nr_cpus ?
+					     (u32)prev_cpu :
+					     0;
+			u64 ms_slice = quantum_ns;
+
+			if (unlikely(p->scx.dsq_vtime == 0))
+				p->scx.dsq_vtime =
+					cake_read_cpu_frontier(ms_cpu);
+			p->scx.slice = ms_slice;
+			p->scx.dsq_vtime += ms_slice;
+			cake_clamp_wakeup_vtime(p, ms_cpu);
+			cake_insert_llc_vtime(p, 0, ms_cpu, ms_slice);
+			return prev_cpu;
+		}
+#elif CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL
+		/* A miss here is authoritative: select_cpu_and searched every
+		 * allowed CPU, so no idle CPU exists and every later idle
+		 * probe in this callback would re-discover the same nothing.
+		 * Tunnel straight to prev — at the GameThread→RenderThread
+		 * overlap edge this miss fires every frame, so the skipped
+		 * machinery is per-frame serial cost. */
+		goto tunnel;
+#endif
+		/* Miss: fall through to Cake's guarded machinery. */
+	}
+#endif
 	/* Generic bulk escape: for non-service, non-sync, default-user work,
 	 * ask native idle selection before Cake's narrow scoreboard probes.  A
 	 * native hit falls through enqueue instead of select-side direct dispatch,
@@ -8101,6 +8188,34 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
+	/* Fast enqueue (SCX_CAKE_FAST_ENQUEUE, game A/B): ordinary
+	 * default-user wakeups skip service classification and the
+	 * bulk-owner/local-waiter/steal candidacy machinery — straight local
+	 * insert plus the status-based busy kick that carries the tails.
+	 * Bench service contracts are bypassed; do not promote without
+	 * re-running the suite. */
+#if CAKE_FAST_ENQUEUE_VALUE
+	if (normal_default && (enq_flags & (u64)SCX_ENQ_WAKEUP) &&
+	    !(enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT))) {
+		u64 fe_status = cake_read_cpu_status(target_cpu);
+
+		if (unlikely(p->scx.dsq_vtime == 0))
+			p->scx.dsq_vtime = cake_read_cpu_frontier(target_cpu);
+		p->scx.slice = slice;
+		p->scx.dsq_vtime += slice;
+		cake_clamp_wakeup_vtime(p, target_cpu);
+		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+				   enq_flags);
+		if (!(fe_status & CAKE_CPU_STATUS_IDLE))
+			scx_bpf_kick_cpu(
+				target_cpu,
+				cake_busy_wake_kick_from_status_service(
+					p, fe_status,
+					CAKE_TASK_SERVICE_NONE));
+		return;
+	}
+#endif
+
 	u32 service_kind = normal_default ? cake_task_service_kind(p) :
 					    CAKE_TASK_SERVICE_NONE;
 
@@ -8120,6 +8235,19 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		p->scx.slice = slice;
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 				   enq_flags);
+		/* Bound/high-prio kthreads (per-CPU kworkers, IRQ threads)
+		 * otherwise wait out the owner's slice with no kick at all —
+		 * fatal for GPU present chains.  See
+		 * SCX_CAKE_KTHREAD_WAKE_PREEMPT. */
+#if CAKE_KTHREAD_WAKE_PREEMPT_VALUE
+		if (enq_flags & (u64)SCX_ENQ_WAKEUP) {
+			u64 kts = cake_read_cpu_status(target_cpu);
+
+			if (!(kts & CAKE_CPU_STATUS_IDLE))
+				scx_bpf_kick_cpu(target_cpu,
+						 SCX_KICK_PREEMPT);
+		}
+#endif
 		return;
 	}
 

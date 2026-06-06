@@ -215,6 +215,18 @@ fn main() {
         baked_bool("SCX_CAKE_PREV_IDLE_OVERRIDE", false);
     let (_lean_wake_kick_label, lean_wake_kick_value, _lean_wake_kick) =
         baked_bool("SCX_CAKE_LEAN_WAKE_KICK", false);
+    let (_kthread_wake_preempt_label, kthread_wake_preempt_value, _kthread_wake_preempt) =
+        baked_bool("SCX_CAKE_KTHREAD_WAKE_PREEMPT", false);
+    let (_native_fast_wake_label, native_fast_wake_value, _native_fast_wake) =
+        baked_bool("SCX_CAKE_NATIVE_FAST_WAKE", false);
+    let (_native_fast_wake_wide_label, native_fast_wake_wide_value, _native_fast_wake_wide) =
+        baked_bool("SCX_CAKE_NATIVE_FAST_WAKE_WIDE", false);
+    let (_nfw_miss_tunnel_label, nfw_miss_tunnel_value, _nfw_miss_tunnel) =
+        baked_bool("SCX_CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL", false);
+    let (_fast_enqueue_label, fast_enqueue_value, _fast_enqueue) =
+        baked_bool("SCX_CAKE_FAST_ENQUEUE", false);
+    let (_nfw_miss_shared_label, nfw_miss_shared_value, _nfw_miss_shared) =
+        baked_bool("SCX_CAKE_NFW_MISS_SHARED", false);
     let baked_release_trust_maps_value =
         baked_release_route_pred_value & baked_release_confidence_value;
     let baked_release_trust_maps = if baked_release_trust_maps_value != 0 {
@@ -324,6 +336,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_FRAME_OWNER_SHIELD");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_PREV_IDLE_OVERRIDE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_LEAN_WAKE_KICK");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_KTHREAD_WAKE_PREEMPT");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_NATIVE_FAST_WAKE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_NATIVE_FAST_WAKE_WIDE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_FAST_ENQUEUE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_NFW_MISS_SHARED");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -389,6 +407,30 @@ fn main() {
     cflags.push_str(&format!(
         " -DCAKE_LEAN_WAKE_KICK_VALUE={}",
         lean_wake_kick_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_KTHREAD_WAKE_PREEMPT_VALUE={}",
+        kthread_wake_preempt_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_NATIVE_FAST_WAKE_VALUE={}",
+        native_fast_wake_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_NATIVE_FAST_WAKE_WIDE={}",
+        native_fast_wake_wide_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_NATIVE_FAST_WAKE_MISS_TUNNEL={}",
+        nfw_miss_tunnel_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_FAST_ENQUEUE_VALUE={}",
+        fast_enqueue_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_NFW_MISS_SHARED={}",
+        nfw_miss_shared_value
     ));
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
