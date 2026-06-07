@@ -107,6 +107,12 @@ Besides schedulers, the workspace includes several tools:
   cargo build --release -p scxtop
   ```
 
+- **scx_characterize** – Workload characterization tool:
+
+  ```bash
+  cargo build --release -p scx_characterize
+  ```
+
 - **vmlinux_docify** – Kernel documentation generator:
 
   ```bash

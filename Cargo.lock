@@ -3700,6 +3700,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_characterize"
+version = "1.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+]
+
+[[package]]
 name = "scx_cosmos"
 version = "1.1.4"
 dependencies = [

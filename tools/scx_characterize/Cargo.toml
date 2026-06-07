@@ -1,0 +1,12 @@
+[package]
+name = "scx_characterize"
+version = "1.1.1"
+edition = "2021"
+authors = ["Kumar Kartikeya Dwivedi <memxor@gmail.com>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/sched-ext/scx"
+description = "Workload characterization tool for sched_ext schedulers"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
