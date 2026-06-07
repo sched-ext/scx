@@ -4079,24 +4079,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scxcash"
-version = "1.1.1"
-dependencies = [
- "anyhow",
- "clap",
- "ctrlc",
- "libbpf-rs",
- "libc",
- "log",
- "num_cpus",
- "scx_cargo",
- "scx_utils",
- "serde",
- "serde_json",
- "simplelog",
-]
-
-[[package]]
 name = "scxtop"
 version = "1.1.1"
 dependencies = [
