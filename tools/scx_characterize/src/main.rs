@@ -7,6 +7,7 @@ use anyhow::{bail, Context as _, Result};
 use clap::{Parser, Subcommand};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
+mod process;
 mod record;
 
 pub mod bpf_intf;
@@ -64,6 +65,8 @@ struct Opts {
 enum Commands {
     /// Record workload profile using perf
     Record(record::RecordOpts),
+    /// Process a recorded profile
+    Process(process::ProcessOpts),
 }
 
 fn main() -> Result<()> {
@@ -72,5 +75,6 @@ fn main() -> Result<()> {
 
     match opts.command {
         Commands::Record(record_opts) => record::cmd_record(&ctx, record_opts),
+        Commands::Process(process_opts) => process::cmd_process(process_opts),
     }
 }

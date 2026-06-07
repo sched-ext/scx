@@ -3708,9 +3708,11 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "libc",
+ "regex",
  "scx_cargo",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

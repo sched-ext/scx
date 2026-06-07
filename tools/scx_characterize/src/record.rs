@@ -46,8 +46,10 @@ const SCHED_TRACE_EVENTS: &[&str] = &[
 
 pub const PERF_MEM_DATA_FILE: &str = "perf.mem.data";
 pub const PERF_MEM_SCRIPT_FILE: &str = "perf.mem.script";
+pub const PERF_MEM_JSONL_FILE: &str = "perf.mem.jsonl";
 pub const PERF_SCHED_DATA_FILE: &str = "perf.sched.data";
 pub const PERF_SCHED_SCRIPT_FILE: &str = "perf.sched.script";
+pub const PERF_SCHED_JSONL_FILE: &str = "perf.sched.jsonl";
 const DEFAULT_PERF_MMAP_SIZE: &str = "8M";
 const PERF_SCHED_CLOCKID: &str = "CLOCK_MONOTONIC";
 
