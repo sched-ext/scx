@@ -10,6 +10,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 mod extract;
 mod process;
 mod record;
+mod sched_util;
 
 pub mod bpf_intf;
 pub mod bpf_skel;

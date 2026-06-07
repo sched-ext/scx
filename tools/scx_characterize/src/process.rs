@@ -69,6 +69,12 @@ pub struct PerfSchedScriptRecord {
     sample_time_ns: Option<u64>,
 }
 
+impl PerfSchedScriptRecord {
+    pub fn sample_time_ns(&self) -> Option<u64> {
+        self.sample_time_ns
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct HintRecord {
     pid: i32,

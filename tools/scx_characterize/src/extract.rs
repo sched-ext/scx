@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use crate::process::PerfMemRecord;
+use crate::sched_util::cmd_extract_sched_util;
 use anyhow::{Context as _, Result};
 use clap::{ArgAction, Parser, Subcommand};
 use regex::Regex;
@@ -49,6 +50,39 @@ pub struct ExtractOpts {
 pub enum ExtractCommand {
     /// Extract workload cell config from perf.mem.jsonl
     Mem(ExtractMemOpts),
+    /// Extract derived metrics from perf.sched.jsonl
+    Sched(ExtractSchedOpts),
+}
+
+#[derive(Debug, Parser)]
+pub struct ExtractSchedOpts {
+    #[clap(subcommand)]
+    pub command: ExtractSchedCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExtractSchedCommand {
+    /// Compute time-weighted CPU busy utilization from perf.sched.jsonl
+    Util(ExtractSchedUtilOpts),
+}
+
+#[derive(Debug, Parser)]
+pub struct ExtractSchedUtilOpts {
+    /// Path to perf.sched.jsonl file
+    #[clap(short = 'f', long)]
+    pub file: PathBuf,
+
+    /// Aggregation window size in milliseconds
+    #[clap(long, default_value = "1")]
+    pub window_ms: u64,
+
+    /// Comma-separated mutually exclusive categories, e.g. "worker-a@hint=0,worker-a@hint=640,svc-*,perf"
+    #[clap(long, default_value = "")]
+    pub categories: String,
+
+    /// Print extra summary information to stderr
+    #[clap(short, long)]
+    pub verbose: bool,
 }
 
 fn classify_cgroup<'a>(cgroup: &'a str, workload_cgroup: &'a str, allotment_re: &Regex) -> &'a str {
@@ -487,6 +521,13 @@ pub fn cmd_extract_mem(opts: ExtractMemOpts) -> Result<()> {
 pub fn cmd_extract(opts: ExtractOpts) -> Result<()> {
     match opts.command {
         ExtractCommand::Mem(opts) => cmd_extract_mem(opts),
+        ExtractCommand::Sched(opts) => cmd_extract_sched(opts),
+    }
+}
+
+pub fn cmd_extract_sched(opts: ExtractSchedOpts) -> Result<()> {
+    match opts.command {
+        ExtractSchedCommand::Util(opts) => cmd_extract_sched_util(opts),
     }
 }
 
