@@ -99,7 +99,13 @@ struct scx_cgroup_ctx {
 
 		/* cgroup id */
 		u64		id;
-	
+
+		/* parent cgroup id (0 for root); set once at init */
+		u64		parent_id;
+
+		/* cgroup tree depth (root = 0); set once at init */
+		u32		level;
+
 		/*
 		 * Given @quota, @period, and @burst in nanoseconds.
 		 */
@@ -1040,7 +1046,7 @@ int cbw_set_bandwidth(u64 cgx_raw, u64 period_us, u64 quota_us, u64 burst_us)
 }
 
 __noinline
-int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, u64 cgx_raw)
+int cbw_update_nquota_ub(u64 cgx_raw)
 {
 	/*
 	 * Accept cgx as u64 rather than scx_cgroup_ctx_t * to avoid a BPF
@@ -1052,30 +1058,27 @@ int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, u64 cgx_raw)
 	 */
 	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
 	scx_cgroup_ctx_t *parentx;
-	struct cgroup *parent;
 
-	if (!cgx || !cgrp)
+	if (!cgx)
 		return -EINVAL;
 
 	/*
 	 * We assume that all its ancestors' nquota_ub are already updated
 	 * (e.g., pre-order traversal of the cgroup tree). Hence, we don't
 	 * need to walk up all its ancestors to get the minimum, so we compare
-	 * against its parent's nquota_ub.
+	 * against its parent's nquota_ub. The parent is identified by
+	 * cgx->parent_id, which is cached at init.
 	 */
 	cgx->nquota_ub = cgx->nquota;
-	if ((cgrp->level > 1) &&
-	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
-		parentx = cbw_get_cgroup_ctx(parent);
+	if (cgx->level > 1) {
+		parentx = cbw_get_cgroup_ctx_with_id(cgx->parent_id);
 		if (!parentx) {
-			cbw_err("Fail to lookup a cgroup context: %llu",
-				cgroup_get_id(parent));
-			bpf_cgroup_release(parent);
+			cbw_err("Fail to lookup parent ctx: %llu",
+				cgx->parent_id);
 			return -ESRCH;
 		}
 
 		cgx->nquota_ub = min(cgx->nquota_ub, parentx->nquota_ub);
-		bpf_cgroup_release(parent);
 	}
 	return 0;
 }
@@ -1124,9 +1127,17 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	}
 
 	cgx->id = cgroup_get_id(cgrp);
+	cgx->level = cgrp->level;
+	if (cgrp->level > 0 &&
+	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
+		cgx->parent_id = cgroup_get_id(parent);
+		bpf_cgroup_release(parent);
+	} else {
+		cgx->parent_id = 0;
+	}
 	cbw_set_bandwidth((u64)cgx, args->bw_period_us, args->bw_quota_us,
 			  args->bw_burst_us);
-	cbw_update_nquota_ub(cgrp, (u64)cgx);
+	cbw_update_nquota_ub((u64)cgx);
 	cgx->runtime_total_sloppy = 0;
 	cgx->period_budget = cgx->nquota_ub;
 	cgx->is_throttled = false;
@@ -1196,41 +1207,6 @@ int cbw_unthrottle_cgroup_for_exit(u64 cgrp_id)
 	return 0;
 }
 
-static __always_inline
-int cbw_cgroup_bw_offline(u64 cgrp_id)
-{
-	/*
-	 * The cgroup destruction path is asynchronous: after rmdir(2) removes
-	 * the cgroup's sysfs entry (kernfs_remove()), the kernel must complete
-	 * an RCU grace period and a workqueue hop on cgroup_offline_wq before
-	 * css_offline() - and thus scx_cgroup_bw_exit() - is invoked.
-	 *
-	 * This creates a gap between:
-	 *   1) kernfs_remove(): bpf_cgroup_from_id() starts returning NULL
-	 *      because the kernfs node is deactivated.
-	 *   2) scx_cgroup_bw_exit() called from css_offline() on
-	 *      cgroup_offline_wq: the normal safety net that drains the
-	 *      BTQ to the root cgroup.
-	 *
-	 * If a cgroup has throttled tasks in its BTQ during this window and
-	 * the window exceeds 30 s, those tasks stall long enough to trigger
-	 * the SCX watchdog. To close the gap, as soon as we observe that
-	 * bpf_cgroup_from_id() fails for a cgroup, we proactively drain its
-	 * BTQ to the root cgroup here, rather than waiting for css_offline().
-	 */
-
-	/*
-	 * Note that this function and cbw_free_llc_ctx() must be
-	 * __always_inline to stay within BPF's 8-frame call-stack limit.
-	 * This function is called from replenish_timerfn() and
-	 * scx_cgroup_bw_reenqueue(), both of which already have deep call
-	 * chains.
-	 */
-	cbw_dbg("Offline a cgroup: %llu", cgrp_id);
-	cbw_unthrottle_cgroup_for_exit(cgrp_id);
-	return cbw_free_llc_ctx(NULL, cgrp_id);
-}
-
 /**
  * scx_cgroup_bw_exit - Exit a cgroup.
  * @cgrp: cgroup being exited
@@ -1287,7 +1263,7 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 __hidden
 int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quota_us, u64 burst_us)
 {
-	struct cgroup *cur_cgrp, *cur_cgrp_trusted;
+	struct cgroup *cur_cgrp;
 	u64 cgx_raw, cur_cgx_raw;
 	struct cgroup_subsys_state *start_css, *pos;
 	int ret = 0;
@@ -1312,22 +1288,13 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	start_css = &cgrp->self;
 	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
 		cur_cgrp = pos->cgroup;
-		cur_cgrp_trusted = bpf_cgroup_from_id(cgroup_get_id(cur_cgrp));
-		if (!cur_cgrp_trusted)
-			continue;
-
-		cur_cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cur_cgrp_trusted));
+		cur_cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cur_cgrp));
 		if (!cur_cgx_raw) {
-			/*
-			 * The CPU controller is not enabled for this cgroup.
-			 * Let's move on.
-			 */
-			bpf_cgroup_release(cur_cgrp_trusted);
+			/* The CPU controller is not enabled for this cgroup. */
 			continue;
 		}
 
-		ret = cbw_update_nquota_ub(cur_cgrp_trusted, cur_cgx_raw);
-		bpf_cgroup_release(cur_cgrp_trusted);
+		ret = cbw_update_nquota_ub(cur_cgx_raw);
 		if (ret)
 			goto unlock_out;
 	}
@@ -1861,6 +1828,23 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 		return -EBUSY;
 	}
 
+	scx_atq_t *btq_now = READ_ONCE(llcx->btq);
+	if (btq_now != btq) {
+		/*
+		 * If this happens, that means there is a race between
+		 * cbw_put_aside() and cbw_free_llc_ctx() since only
+		 * cbw_free_llc_ctx() can concurrently change llcx->btq.
+		 * If we continue here, we park a task in a detached BTQ,
+		 * causing a task stall. Hence, stop here after printing
+		 * the log.
+		 */
+		scx_atq_unlock(btq);
+		cbw_warn("put_aside skipped: BTQ has changed in the middle: "
+			 "cgid=%llu, btq1=%llx, btq2=%llx",
+			 cgrp_id, (u64)btq, (u64)btq_now);
+		return -ESRCH;
+	}
+
 	if (taskc->atq != NULL) {
 		/*
 		 * Not really a bug: The initial .enqueue() may race with
@@ -2180,8 +2164,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	scx_cgroup_llc_ctx_t *cur_llcx;
 	const struct cpumask *online_mask;
 	s64 interval, jitter, period;
-	int i, ret, nr_moved = 0;
-	bool root_added = false;
+	int i, ret;
 	s32 idle_cpu;
 
 	/* Attach the timer function to the BPF area context. */
@@ -2297,27 +2280,24 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		}
 
 		/*
-		 * Fetch the cgroup context. A cgroup can exit during the
-		 * replenishment process, leading to context-lookup failures.
+		 * Fetch the cgroup context by id. A cgroup can exit during
+		 * the replenishment process, leading to context-lookup
+		 * failures.
 		 */
-		cur_cgrp = bpf_cgroup_from_id(ids[0]);
-		if (!cur_cgrp) {
-			cbw_dbg("Failed to fetch a cgroup pointer: cgid%llu", ids[0]);
-			goto offline_cgroup;
-		}
-
-		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
+		cur_cgx = cbw_get_cgroup_ctx_with_id(ids[0]);
 		if (!cur_cgx) {
 			cbw_dbg("Failed to lookup a cgroup ctx: cgid%llu", ids[0]);
-			bpf_cgroup_release(cur_cgrp);
-			goto offline_cgroup;
+			/*
+			 * The cgroup is on its way out -- scx_cgroup_bw_exit()
+			 * has removed the map entry and will drain its BTQ.
+			 * Skip this cycle.
+			 */
+			continue;
 		}
 
 		if (READ_ONCE(cur_cgx->is_throttled)) {
 			cur_cgx->nr_throttled_periods++;
 		}
-
-		bpf_cgroup_release(cur_cgrp);
 
 		/*
 		 * Replenish the cgroup. If it was throttled, add it to the
@@ -2336,39 +2316,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 				continue;
 			}
 			WRITE_ONCE(ids[0], cur_cgx->id);
-			if (cur_cgx->id == ROOT_CGID)
-				root_added = true;
 			nr_throttled++;
-		}
-		continue;
-
-offline_cgroup:
-		/*
-		 * The cgroup is going offline: either its kernfs node has been
-		 * deactivated (bpf_cgroup_from_id() returns NULL) or its BPF
-		 * map entry is already gone (cbw_get_cgroup_ctx() returns NULL)
-		 * while tasks may still be in its BTQ.  Move all backlogged
-		 * tasks to the root cgroup for immediate draining rather than
-		 * waiting for css_offline().
-		 *
-		 * cbw_cgroup_bw_offline() is __always_inline; keep it at a
-		 * single call site here to avoid doubling the BPF verifier's
-		 * instruction count and hitting the 1M-state limit.
-		 */
-		nr_moved += cbw_cgroup_bw_offline(ids[0]);
-	}
-	/*
-	 * At least one throttled task was moved to the root cgroup and the
-	 * root cgroup is not in the table. So we should add the root cgroup
-	 * to the table.
-	 */
-	if (nr_moved > 0 && !root_added) {
-		ids = MEMBER_VPTR(cbw_throttled_cgroup_ids, [nr_throttled]);
-		if (ids) {
-			WRITE_ONCE(ids[0], ROOT_CGID);
-			nr_throttled++;
-		} else {
-			cbw_err("Failed to fetch a throttled cgroup table.");
 		}
 	}
 
@@ -2477,8 +2425,7 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 }
 
 static
-int cbw_reenqueue_cgroup(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx,
-			 u64 cgrp_id, u64 nuance)
+int cbw_reenqueue_cgroup(scx_cgroup_ctx_t *cgx, u64 cgrp_id, u64 nuance)
 {
 	scx_cgroup_llc_ctx_t *llcx;
 	int i, idx, nr_enq = 0;
@@ -2506,7 +2453,7 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx,
 		 * If the cgroup is throttled, all its LLC contexts are
 		 * throttled too. Stop draining immediately.
 		 */
-		if (cbw_cgroup_bw_throttled(cgroup_get_id(cgrp), 0) == -EAGAIN)
+		if (cbw_cgroup_bw_throttled(cgrp_id, 0) == -EAGAIN)
 			break;
 
 		nr_enq += cbw_drain_btq_batch(cgx, llcx);
@@ -2554,11 +2501,9 @@ int scx_cgroup_bw_reenqueue(void)
 {
 	union backlog_stat backlog_stat;
 	scx_cgroup_ctx_t *cur_cgx;
-	struct cgroup *cur_cgrp;
 	int i, idx, n, nr_enq = 0;
 	u64 nuance, nuance2, nr_tcgs;
 	u64 *ids, cur_cgrp_id;
-	bool root_added = false;
 
 	/*
 	 * If there are throttled tasks in BTQ, let’s reenqueue them.
@@ -2596,61 +2541,27 @@ int scx_cgroup_bw_reenqueue(void)
 		if (cur_cgrp_id == 0)
 			continue;
 
-		cur_cgrp = bpf_cgroup_from_id(cur_cgrp_id);
-		if (!cur_cgrp) {
+		cur_cgx = cbw_get_cgroup_ctx_with_id(cur_cgrp_id);
+		if (!cur_cgx) {
 			/* Never tear down root; see cbw_get_root_cgrp(). */
 			if (cur_cgrp_id == ROOT_CGID)
 				continue;
-			cbw_dbg("Failed to fetch a cgroup pointer: %llu", ids[0]);
+			cbw_dbg("Failed to lookup a cgroup ctx: cgid%llu",
+				cur_cgrp_id);
 
 			/*
-			 * This cgroup is already offline: its kernfs node is
-			 * deactivated so bpf_cgroup_from_id() returns NULL,
-			 * but css_offline() / ops.cgroup_exit() has not yet
-			 * run. Move all its throttled tasks to the root cgroup
-			 * for immediate draining.
+			 * The cgroup is on its way out: scx_cgroup_bw_exit()
+			 * has deleted its map entry and will drain its BTQ.
+			 * Purge the dead slot via CAS. If the replenish timer
+			 * concurrently overwrote this slot with a new cgroup
+			 * ID, the CAS fails and leaves that new ID intact.
 			 */
-			if (cbw_cgroup_bw_offline(cur_cgrp_id) > 0) {
-				/*
-				 * At least one throttled task was moved to
-				 * the root cgroup. So we should not transition
-				 * to the empty state to stop reenqueue
-				 * operations.
-				 */
-				root_added = true;
-			}
-
-			/*
-			 * Drain the offline cgroup's BTQ to the root cgroup.
-			 * Replace this slot with the root cgroup ID (1) so
-			 * the next reenqueue cycle drains the root BTQ
-			 * immediately, rather than waiting for the next
-			 * replenish timer tick.
-			 *
-			 * Use CAS rather than a plain write: the replenish
-			 * timer may have concurrently overwritten this slot
-			 * with a new cgroup ID. If so, the CAS fails and
-			 * leaves the new ID intact. This is safe: the root
-			 * cgroup always has LLC contexts (has_llcx is
-			 * permanently true), so the replenish timer will
-			 * detect its backlogged tasks via
-			 * cbw_has_backlogged_tasks() and add it to
-			 * cbw_throttled_cgroup_ids at the next interval anyway.
-			 */
-			__sync_bool_compare_and_swap(ids, cur_cgrp_id, ROOT_CGID);
-			continue;
-		}
-
-		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
-		if (!cur_cgx) {
-			cbw_err("Failed to lookup a cgroup ctx");
-			bpf_cgroup_release(cur_cgrp);
+			__sync_bool_compare_and_swap(ids, cur_cgrp_id, 0);
 			continue;
 		}
 
 		/* Reqneueue backlogged tasks. */
-		n = cbw_reenqueue_cgroup(cur_cgrp, cur_cgx, cur_cgrp_id, nuance2);
-		bpf_cgroup_release(cur_cgrp);
+		n = cbw_reenqueue_cgroup(cur_cgx, cur_cgrp_id, nuance2);
 
 		/*
 		 * When there are no more backlogged tasks under the cgroup,
@@ -2686,7 +2597,7 @@ int scx_cgroup_bw_reenqueue(void)
 	 * rp_seq in cbw_backlog_stat.val will have changed and the CAS will
 	 * fail safely, leaving has_throttled_tasks for the new cycle to manage.
 	 */
-	if ((nr_enq == 0) && !root_added && !cbw_top_half_running()) {
+	if ((nr_enq == 0) && !cbw_top_half_running()) {
 		cbw_update_backlog_stat_cas(&backlog_stat,
 					    backlog_stat.rp_seq,
 					    backlog_stat.nr_throttled_cgroups,
@@ -2706,14 +2617,8 @@ __hidden
 int scx_cgroup_bw_is_cgroup_throttled(u64 cgrp_id)
 {
 	scx_cgroup_ctx_t *cgx;
-	struct cgroup *cgrp;
 
-	cgrp = bpf_cgroup_from_id(cgrp_id);
-	if (!cgrp)
-		return 0;
-
-	cgx = cbw_get_cgroup_ctx(cgrp);
-	bpf_cgroup_release(cgrp);
+	cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
 	if (!cgx)
 		return 0;
 
@@ -2904,7 +2809,15 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
 	struct cgroup_subsys_state *start_css, *pos;
 	struct cgroup *start_cgrp, *cur_cgrp;
 
-	start_cgrp = bpf_cgroup_from_id(cgrp_id);
+	/*
+	 * Resolve the start cgroup. Dumping from the root is the common
+	 * case; cbw_get_root_cgrp() handles it. Other ids fall through
+	 * to bpf_cgroup_from_id().
+	 */
+	if (cgrp_id == ROOT_CGID)
+		start_cgrp = cbw_get_root_cgrp();
+	else
+		start_cgrp = bpf_cgroup_from_id(cgrp_id);
 	if (!start_cgrp) {
 		cbw_dbg("Failed to fetch a cgroup pointer: cgid%llu", cgrp_id);
 		return -ESRCH;

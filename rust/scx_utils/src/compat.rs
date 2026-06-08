@@ -88,6 +88,11 @@ fn btf_members(t: &btf_type) -> &[btf_member] {
     unsafe { from_raw_parts(ptr as *const btf_member, btf_vlen(t) as usize) }
 }
 
+fn btf_params(t: &btf_type) -> &[btf_param] {
+    let ptr = btf_type_plus_1(t);
+    unsafe { from_raw_parts(ptr as *const btf_param, btf_vlen(t) as usize) }
+}
+
 fn btf_name_str_by_offset(btf: &btf, name_off: u32) -> Result<&str> {
     let n = unsafe { btf__name_by_offset(btf, name_off) };
     if n.is_null() {
@@ -134,6 +139,25 @@ pub fn read_enum(type_name: &str, name: &str) -> Result<u64> {
     Err(anyhow!("{:?} doesn't exist in {:?}", name, type_name))
 }
 
+/// Read an enum value from the first BTF enum type that contains it.
+pub fn read_enum_any(type_names: &[&str], name: &str) -> Result<u64> {
+    let mut errors = Vec::new();
+
+    for type_name in type_names {
+        match read_enum(type_name, name) {
+            Ok(val) => return Ok(val),
+            Err(err) => errors.push(format!("{}: {:#}", type_name, err)),
+        }
+    }
+
+    bail!(
+        "{:?} doesn't exist in any of {:?}: {}",
+        name,
+        type_names,
+        errors.join("; ")
+    )
+}
+
 pub fn struct_has_field(type_name: &str, field: &str) -> Result<bool> {
     let btf: &btf = *VMLINUX_BTF;
 
@@ -164,6 +188,66 @@ pub fn ksym_exists(ksym: &str) -> Result<bool> {
     let ksym_name = CString::new(ksym).unwrap();
     let tid = unsafe { btf__find_by_name(btf, ksym_name.as_ptr()) };
     Ok(tid >= 0)
+}
+
+/// Scan the running kernel's vmlinux BTF for scx kfuncs whose public-facing
+/// prototype still carries the implicit `aux` (struct bpf_prog_aux *) argument.
+///
+/// This is the KF_IMPLICIT_ARGS-on-pahole-<1.26 bug: pahole < 1.26 fails to
+/// split such kfuncs into a public prototype (without `aux`) and an `_impl`
+/// variant (with it), so the visible prototype keeps `aux`. BPF programs that
+/// declare the kfunc without it then fail to load with the confusing
+/// 'func_proto incompatible with vmlinux' error. Returns the names of the
+/// affected kfuncs, so a clear diagnostic can be produced on load failure.
+pub fn malformed_scx_kfuncs() -> Vec<String> {
+    let btf: &btf = *VMLINUX_BTF;
+    let mut bad = Vec::new();
+    let cnt = unsafe { btf__type_cnt(btf) };
+
+    for id in 1..cnt {
+        let t = unsafe { btf__type_by_id(btf, id) };
+        if t.is_null() {
+            continue;
+        }
+        let t = unsafe { &*t };
+        if btf_kind(t) != BTF_KIND_FUNC {
+            continue;
+        }
+
+        let Ok(name) = btf_name_str_by_offset(btf, t.name_off) else {
+            continue;
+        };
+        if !(name.starts_with("scx_bpf_") || name.starts_with("__scx_bpf_")) {
+            continue;
+        }
+        // The implicit `aux` argument legitimately appears on the `_impl`
+        // variant that resolve_btfids splits off; only the public-facing name
+        // (without the `_impl` suffix) should be free of it. On a broken kernel
+        // the split never happens, so there is no `_impl` variant and the
+        // public name itself keeps `aux`.
+        if name.ends_with("_impl") {
+            continue;
+        }
+
+        // FUNC -> FUNC_PROTO
+        let proto_id = unsafe { t.__bindgen_anon_1.type_ };
+        let pt = unsafe { btf__type_by_id(btf, proto_id) };
+        if pt.is_null() {
+            continue;
+        }
+        let pt = unsafe { &*pt };
+        if btf_kind(pt) != BTF_KIND_FUNC_PROTO {
+            continue;
+        }
+
+        if btf_params(pt).iter().any(|p| {
+            p.name_off != 0 && matches!(btf_name_str_by_offset(btf, p.name_off), Ok("aux"))
+        }) {
+            bad.push(name.to_string());
+        }
+    }
+
+    bad
 }
 
 pub fn in_kallsyms(ksym: &str) -> Result<bool> {
@@ -498,7 +582,27 @@ macro_rules! scx_ops_load {
             }
 
             scx_utils::uei_set_size!($skel, $ops, $uei);
-            $skel.load().context("Failed to load BPF program")
+            $skel.load().context("Failed to load BPF program").map_err(|e| {
+                let bad = scx_utils::compat::malformed_scx_kfuncs();
+                if bad.is_empty() {
+                    e
+                } else {
+                    e.context(format!(
+                        "the running kernel's BTF has malformed scx kfunc prototype(s): {}.\n\
+                         \n\
+                         These kfuncs are KF_IMPLICIT_ARGS but their public BTF prototype\n\
+                         still carries the implicit 'struct bpf_prog_aux *' argument, which\n\
+                         makes BPF programs fail to load with 'func_proto incompatible with\n\
+                         vmlinux'. This happens when the kernel was built with pahole < 1.26.\n\
+                         \n\
+                         Fix: boot a kernel whose BTF was generated with pahole >= 1.26.\n\
+                         Affected distros include Ubuntu 24.04 LTS. See kernel commit\n\
+                         9edd04c4189e (\"docs: Raise minimum pahole version to 1.26 for\n\
+                         KF_IMPLICIT_ARGS kfuncs\").",
+                        bad.join(", ")
+                    ))
+                }
+            })
         }
     }};
 }
@@ -540,6 +644,15 @@ mod tests {
     }
 
     #[test]
+    fn test_read_enum_any() {
+        assert_eq!(
+            super::read_enum_any(&["NO_SUCH_TYPE", "pid_type"], "PIDTYPE_TGID").unwrap(),
+            1
+        );
+        assert!(super::read_enum_any(&["NO_SUCH_TYPE", "pid_type"], "NO_SUCH_ENUM").is_err());
+    }
+
+    #[test]
     fn test_struct_has_field() {
         assert!(super::struct_has_field("task_struct", "flags").unwrap());
         assert!(!super::struct_has_field("task_struct", "NO_SUCH_FIELD").unwrap());
@@ -550,5 +663,14 @@ mod tests {
     fn test_ksym_exists() {
         assert!(super::ksym_exists("bpf_task_acquire").unwrap());
         assert!(!super::ksym_exists("NO_SUCH_KFUNC").unwrap());
+    }
+
+    #[test]
+    fn test_malformed_scx_kfuncs() {
+        // Just exercise the BTF walk; a correctly built running kernel reports
+        // no malformed kfuncs, but we don't assert emptiness since the test may
+        // run on an affected kernel.
+        let bad = super::malformed_scx_kfuncs();
+        assert!(bad.iter().all(|n| !n.ends_with("_impl")));
     }
 }

@@ -11,8 +11,11 @@ use rand::SeedableRng;
 use scx_utils::scx_enums;
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use rayon::prelude::*;
 
 use crate::edm::ActionHandler;
 use crate::util::get_clock_value;
@@ -294,25 +297,24 @@ impl PerfettoTraceManager {
                 });
         }
 
-        // Let's check if this is the first time we've seen this process.
         let parent_key = self.generate_key(pid, pid);
-        // Get the values before calling entry() to avoid borrow checker issues
-        let process_name = if pid == tid {
-            Some(comm)
-        } else {
-            self.get_comm(pid)
-        };
-        let cmdline = self.get_cmdline(pid);
+        if !self.process_descriptors.contains_key(&parent_key) {
+            let process_name = if pid == tid {
+                Some(comm)
+            } else {
+                self.get_comm(pid)
+            };
+            let cmdline = self.get_cmdline(pid);
 
-        if let std::collections::hash_map::Entry::Vacant(e) =
-            self.process_descriptors.entry(parent_key)
-        {
-            e.insert(ProcessDescriptor {
-                pid: Some(pid as i32),
-                cmdline: cmdline.clone(),
-                process_name,
-                ..ProcessDescriptor::default()
-            });
+            self.process_descriptors.insert(
+                parent_key,
+                ProcessDescriptor {
+                    pid: Some(pid as i32),
+                    cmdline: cmdline.clone(),
+                    process_name,
+                    ..ProcessDescriptor::default()
+                },
+            );
 
             self.processes.insert(
                 parent_key,
@@ -351,7 +353,6 @@ impl PerfettoTraceManager {
         // written by a given TraceWriter are seen in-order, without gaps or duplicates.
         // https://perfetto.dev/docs/reference/trace-packet-proto
 
-        let trace_cpus: Vec<u32> = self.ftrace_events.keys().cloned().collect();
         let trace_dsqs: Vec<u64> = self.dsq_nr_queued_events.keys().cloned().collect();
         let stat_ts: Vec<u64> = self.sys_stats.keys().cloned().collect();
 
@@ -379,6 +380,21 @@ impl PerfettoTraceManager {
                 .for_each(|(_, v)| v.retain(|e| e.timestamp.unwrap_or(0) < ns));
         };
 
+        let estimated_packets = self.process_descriptors.len()
+            + self.processes.len()
+            + self.threads.len()
+            + self.dsq_lat_events.values().map(|v| v.len()).sum::<usize>()
+            + self
+                .dsq_nr_queued_events
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>()
+            + self.sys_stats.values().map(|v| v.len()).sum::<usize>()
+            + self.mem_events.values().map(|v| v.len()).sum::<usize>()
+            + self.ftrace_events.len()
+            + 64;
+        self.trace.packet.reserve(estimated_packets);
+
         for (_, process) in self.process_descriptors.drain() {
             let uuid = self.rng.next_u64();
             self.process_uuids.insert(process.pid(), uuid);
@@ -396,18 +412,15 @@ impl PerfettoTraceManager {
             self.trace.packet.push(packet);
         }
 
-        for (_, process) in self.processes.drain() {
-            let tree = ProcessTree {
-                processes: vec![process],
-                ..ProcessTree::default()
-            };
-
-            let packet = TracePacket {
-                data: Some(trace_packet::Data::ProcessTree(tree)),
+        self.trace
+            .packet
+            .extend(self.processes.drain().map(|(_, process)| TracePacket {
+                data: Some(trace_packet::Data::ProcessTree(ProcessTree {
+                    processes: vec![process],
+                    ..ProcessTree::default()
+                })),
                 ..TracePacket::default()
-            };
-            self.trace.packet.push(packet);
-        }
+            }));
 
         for (_, thread) in self.threads.drain() {
             let uuid = self.rng.next_u64();
@@ -453,19 +466,20 @@ impl PerfettoTraceManager {
         let dsq_lat_trusted_packet_seq_uuid = self.rng.next_u32();
         for dsq in &trace_dsqs {
             if let Some(events) = self.dsq_lat_events.remove(dsq) {
-                for dsq_lat_event in events {
-                    let ts: u64 = timestamp_absolute_us(&dsq_lat_event) as u64 * 1_000;
-                    self.trace.packet.push(TracePacket {
-                        data: Some(trace_packet::Data::TrackEvent(dsq_lat_event)),
+                let seq_id = dsq_lat_trusted_packet_seq_uuid;
+                self.trace.packet.extend(events.into_iter().map(|e| {
+                    let ts: u64 = timestamp_absolute_us(&e) as u64 * 1_000;
+                    TracePacket {
+                        data: Some(trace_packet::Data::TrackEvent(e)),
                         timestamp: Some(ts),
                         optional_trusted_packet_sequence_id: Some(
                             trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
-                                dsq_lat_trusted_packet_seq_uuid,
+                                seq_id,
                             ),
                         ),
                         ..TracePacket::default()
-                    });
-                }
+                    }
+                }));
             }
         }
 
@@ -473,41 +487,43 @@ impl PerfettoTraceManager {
         let dsq_nr_queued_trusted_packet_seq_uuid = self.rng.next_u32();
         for dsq in &trace_dsqs {
             if let Some(events) = self.dsq_nr_queued_events.remove(dsq) {
-                for dsq_nr_queued_event in events {
-                    let ts: u64 = timestamp_absolute_us(&dsq_nr_queued_event) as u64 * 1_000;
-                    self.trace.packet.push(TracePacket {
-                        data: Some(trace_packet::Data::TrackEvent(dsq_nr_queued_event)),
+                let seq_id = dsq_nr_queued_trusted_packet_seq_uuid;
+                self.trace.packet.extend(events.into_iter().map(|e| {
+                    let ts: u64 = timestamp_absolute_us(&e) as u64 * 1_000;
+                    TracePacket {
+                        data: Some(trace_packet::Data::TrackEvent(e)),
                         timestamp: Some(ts),
                         optional_trusted_packet_sequence_id: Some(
                             trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
-                                dsq_nr_queued_trusted_packet_seq_uuid,
+                                seq_id,
                             ),
                         ),
                         ..TracePacket::default()
-                    });
-                }
+                    }
+                }));
             }
         }
 
         // system stat events
         for ts in &stat_ts {
             if let Some(events) = self.sys_stats.remove(ts) {
-                for sys_stat_event in events {
-                    self.trace.packet.push(TracePacket {
-                        data: Some(trace_packet::Data::SysStats(sys_stat_event)),
-                        timestamp: Some(*ts),
+                let ts_val = *ts;
+                self.trace
+                    .packet
+                    .extend(events.into_iter().map(|e| TracePacket {
+                        data: Some(trace_packet::Data::SysStats(e)),
+                        timestamp: Some(ts_val),
                         ..TracePacket::default()
-                    });
-                }
+                    }));
             }
         }
 
         // mem events
         for events in self.mem_events.values_mut() {
             let mem_sequence_id = self.rng.next_u32();
-            for mem_event in events.drain(..) {
+            self.trace.packet.extend(events.drain(..).map(|mem_event| {
                 let ts: u64 = timestamp_absolute_us(&mem_event) as u64 * 1_000;
-                self.trace.packet.push(TracePacket {
+                TracePacket {
                     data: Some(trace_packet::Data::TrackEvent(mem_event)),
                     timestamp: Some(ts),
                     optional_trusted_packet_sequence_id: Some(
@@ -516,40 +532,45 @@ impl PerfettoTraceManager {
                         ),
                     ),
                     ..TracePacket::default()
-                });
-            }
+                }
+            }));
         }
 
         // ftrace events
-        for cpu in &trace_cpus {
-            self.trace.packet.push(TracePacket {
-                trusted_pid: Some(self.trusted_pid),
+        let mut ftrace_bundles: Vec<(u32, Vec<FtraceEvent>)> = self
+            .ftrace_events
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|cpu| self.ftrace_events.remove(&cpu).map(|events| (cpu, events)))
+            .collect();
+        ftrace_bundles.par_iter_mut().for_each(|(_, events)| {
+            events.sort_unstable_by_key(|event| event.timestamp.unwrap_or(0));
+        });
+        let trusted_pid = self.trusted_pid;
+        self.trace
+            .packet
+            .extend(ftrace_bundles.into_iter().map(|(cpu, events)| TracePacket {
+                trusted_pid: Some(trusted_pid),
                 data: Some(trace_packet::Data::FtraceEvents(FtraceEventBundle {
-                    cpu: Some(*cpu),
-                    event: self
-                        .ftrace_events
-                        .remove(cpu)
-                        .map(|mut events| {
-                            // sort by timestamp just to make sure.
-                            events.sort_by_key(|event| event.timestamp.unwrap_or(0));
-                            events
-                        })
-                        .unwrap_or_default(),
+                    cpu: Some(cpu),
+                    event: events,
                     ..FtraceEventBundle::default()
                 })),
                 ..TracePacket::default()
-            });
-        }
+            }));
 
-        let out_bytes: Vec<u8> = self.trace.write_to_bytes()?;
-        match output_file {
-            Some(trace_file) => {
-                fs::write(trace_file, out_bytes)?;
-            }
-            None => {
-                fs::write(self.trace_file(), out_bytes)?;
-            }
-        }
+        // Stream serialized trace directly to disk instead of buffering in memory
+        let trace_path = match output_file {
+            Some(ref f) => f.clone(),
+            None => self.trace_file(),
+        };
+        const TRACE_WRITE_BUF_SIZE: usize = 4 * 1024 * 1024;
+        let file = File::create(&trace_path)?;
+        let mut writer = BufWriter::with_capacity(TRACE_WRITE_BUF_SIZE, file);
+        self.trace.write_to_writer(&mut writer)?;
+        writer.flush()?;
 
         self.clear();
         self.trace_id += 1;
@@ -1169,5 +1190,173 @@ impl ActionHandler for PerfettoTraceManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SchedSwitchAction;
+    use perfetto_protos::trace::Trace;
+    use protobuf::Message;
+
+    /// Builds a minimal SchedSwitchAction for testing.
+    fn sched_switch(
+        ts: u64,
+        cpu: u32,
+        next_pid: u32,
+        next_tgid: u32,
+        next_comm: &str,
+        prev_pid: u32,
+        prev_tgid: u32,
+        prev_comm: &str,
+    ) -> SchedSwitchAction {
+        SchedSwitchAction {
+            ts,
+            cpu,
+            preempt: false,
+            next_dsq_id: scx_enums.SCX_DSQ_INVALID,
+            next_dsq_lat_us: 0,
+            next_dsq_nr_queued: 0,
+            next_dsq_vtime: 0,
+            next_slice_ns: 0,
+            next_pid,
+            next_tgid,
+            next_prio: 120,
+            next_layer_id: -1,
+            next_comm: next_comm.into(),
+            prev_dsq_id: 0,
+            prev_used_slice_ns: 0,
+            prev_slice_ns: 0,
+            prev_pid,
+            prev_tgid,
+            prev_prio: 120,
+            prev_comm: prev_comm.into(),
+            prev_state: 0,
+            prev_layer_id: -1,
+        }
+    }
+
+    fn new_manager() -> PerfettoTraceManager {
+        PerfettoTraceManager::new("test_trace".to_string(), Some(42))
+    }
+
+    /// A process should be recorded exactly once; a later sighting with a
+    /// different comm must not overwrite the cached descriptor. This guards
+    /// the cache-on-first-sight behavior that keeps procfs reads off the
+    /// per-event hot path.
+    #[test]
+    fn test_record_process_thread_caches_first_sighting() {
+        let mut mgr = new_manager();
+        let pid = 1234;
+
+        mgr.record_process_thread(pid, pid, "first".to_string());
+        let key = mgr.generate_key(pid, pid);
+        assert_eq!(mgr.process_descriptors.len(), 1);
+        assert_eq!(
+            mgr.process_descriptors.get(&key).unwrap().process_name(),
+            "first"
+        );
+
+        // Second sighting with a different comm must be a no-op (cache hit).
+        mgr.record_process_thread(pid, pid, "second".to_string());
+        assert_eq!(mgr.process_descriptors.len(), 1);
+        assert_eq!(
+            mgr.process_descriptors.get(&key).unwrap().process_name(),
+            "first"
+        );
+    }
+
+    /// A thread (tid != pid) should create both a thread descriptor and a
+    /// process descriptor for its parent pid.
+    #[test]
+    fn test_record_process_thread_records_thread_and_parent() {
+        let mut mgr = new_manager();
+        let pid = 4321;
+        let tid = 4322;
+
+        mgr.record_process_thread(pid, tid, "worker".to_string());
+
+        let thread_key = mgr.generate_key(pid, tid);
+        let proc_key = mgr.generate_key(pid, pid);
+        assert!(mgr.threads.contains_key(&thread_key));
+        assert!(mgr.process_descriptors.contains_key(&proc_key));
+        assert_eq!(
+            mgr.threads.get(&thread_key).unwrap().thread_name(),
+            "worker"
+        );
+    }
+
+    /// on_sched_switch should add a per-CPU ftrace event for the switch.
+    #[test]
+    fn test_on_sched_switch_records_ftrace_event() {
+        let mut mgr = new_manager();
+        let action = sched_switch(1_000, 3, 100, 100, "next", 200, 200, "prev");
+        mgr.on_sched_switch(&action);
+
+        let events = mgr.ftrace_events.get(&3).expect("cpu 3 should have events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, Some(1_000));
+    }
+
+    /// stop() should write a trace file that parses back into a valid Trace
+    /// proto containing the recorded ftrace events.
+    #[test]
+    fn test_stop_writes_parseable_trace() {
+        let mut mgr = new_manager();
+        mgr.on_sched_switch(&sched_switch(1_000, 0, 100, 100, "a", 200, 200, "b"));
+        mgr.on_sched_switch(&sched_switch(2_000, 0, 100, 100, "a", 300, 300, "c"));
+
+        let path = std::env::temp_dir().join("scxtop_test_stop_writes_parseable_trace.proto");
+        let path_str = path.to_str().unwrap().to_string();
+        mgr.stop(Some(path_str.clone()), None).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let trace = Trace::parse_from_bytes(&bytes).unwrap();
+        assert!(!trace.packet.is_empty());
+
+        // Exactly one ftrace bundle (single CPU) carrying both events.
+        let ftrace_event_count: usize = trace
+            .packet
+            .iter()
+            .filter_map(|p| match &p.data {
+                Some(trace_packet::Data::FtraceEvents(bundle)) => Some(bundle.event.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(ftrace_event_count, 2);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// ftrace events within a CPU bundle must be sorted by timestamp in the
+    /// emitted trace, even when recorded out of order.
+    #[test]
+    fn test_stop_sorts_ftrace_events_by_timestamp() {
+        let mut mgr = new_manager();
+        mgr.on_sched_switch(&sched_switch(3_000, 7, 100, 100, "a", 200, 200, "b"));
+        mgr.on_sched_switch(&sched_switch(1_000, 7, 100, 100, "a", 200, 200, "b"));
+        mgr.on_sched_switch(&sched_switch(2_000, 7, 100, 100, "a", 200, 200, "b"));
+
+        let path = std::env::temp_dir().join("scxtop_test_stop_sorts_ftrace.proto");
+        let path_str = path.to_str().unwrap().to_string();
+        mgr.stop(Some(path_str.clone()), None).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let trace = Trace::parse_from_bytes(&bytes).unwrap();
+
+        let bundle = trace
+            .packet
+            .iter()
+            .find_map(|p| match &p.data {
+                Some(trace_packet::Data::FtraceEvents(bundle)) => Some(bundle),
+                _ => None,
+            })
+            .expect("should have an ftrace bundle");
+
+        let timestamps: Vec<u64> = bundle.event.iter().map(|e| e.timestamp.unwrap()).collect();
+        assert_eq!(timestamps, vec![1_000, 2_000, 3_000]);
+
+        std::fs::remove_file(&path).ok();
     }
 }

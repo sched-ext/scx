@@ -133,7 +133,7 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 	 * We should temporarily suspend the macro expansion of
 	 * 'SCX_ENQ_CPU_SELECTED'. This avoids 'SCX_ENQ_CPU_SELECTED' being
 	 * rewritten to '__SCX_ENQ_CPU_SELECTED' when 'SCX_ENQ_CPU_SELECTED'
-	 * is defined in 'scripts/gen_enums.py'.
+	 * is defined as a relocatable enum in enums.autogen.bpf.h.
 	 */
 #pragma push_macro("SCX_ENQ_CPU_SELECTED")
 #undef SCX_ENQ_CPU_SELECTED

@@ -5,7 +5,6 @@
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
 #include <lib/alloc/bpf_helpers_local.h>
 #include <lib/sdt_task.h>

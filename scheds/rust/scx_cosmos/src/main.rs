@@ -398,7 +398,7 @@ struct Opts {
 
     /// Enable high-resolution timer preemption.
     ///
-    /// By default, the scheduler preempts tasks that exceed their time slice, measuing the time
+    /// By default, the scheduler preempts tasks that exceed their time slice, measuring the time
     /// slice via the tick handler. Add an option to enforce preemption based on the high-precision
     /// timer and CPU occupancy. Enable this option to improve latency-sensitive workloads.
     #[clap(long, action = clap::ArgAction::SetTrue)]

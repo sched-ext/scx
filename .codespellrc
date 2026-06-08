@@ -10,4 +10,7 @@ skip =
     ./rust/scx_utils/src/enums.rs
 
 # Regex of lines to ignore (project-specific terms / proper nouns).
-ignore-regex = .*(ratatui|Affinitized|affinitized).*
+ignore-regex = .*(ratatui|Affinitized|affinitized|nd).*
+
+# Words to ignore.
+ignore-words-list = dota,statics
