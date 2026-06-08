@@ -31,7 +31,7 @@ enum {
  * common constants
  */
 enum {
-	LAVD_CPU_ID_MAX			= 512,
+	LAVD_CPU_ID_MAX			= 8192,
 
 	LAVD_CPDOM_MAX_NR		= 128, /* maximum number of compute domain */
 	LAVD_CPDOM_MAX_DIST		= 3,  /* maximum distance from one compute domain to another */
