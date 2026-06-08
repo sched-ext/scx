@@ -63,11 +63,8 @@ volatile u64 init_task_events;
 volatile u64 enable_events;
 volatile u64 exit_task_events;
 volatile u64 cpu_migrations;
-volatile u64 tune_shared_slice_ns = FLOW_SLICE_SHARED_NS;
 volatile u64 tune_reserved_max_ns = FLOW_SLICE_RESERVED_MAX_NS;
 volatile u64 tune_interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_NS;
-volatile u64 autotune_generation;
-volatile u64 autotune_mode;
 
 static u64 nr_cpu_ids;
 
