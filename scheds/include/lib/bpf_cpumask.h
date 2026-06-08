@@ -34,3 +34,20 @@ static s32 create_save_bpfmask(struct bpf_cpumask __kptr **kptr)
 
 	return 0;
 }
+
+/*
+ * Idempotent variant: allocate a bpf_cpumask into the slot only if it is empty.
+ *
+ * Use this when the same slot is populated incrementally across multiple calls
+ * (e.g. a "syscall" prog invoked once per CPU to set bits in a shared mask):
+ * the guard ensures the mask is allocated once and subsequent calls accumulate
+ * into it, rather than replacing it with a fresh empty mask and dropping the
+ * bits set so far.
+ */
+static s32 init_bpfmask(struct bpf_cpumask __kptr **kptr)
+{
+	if (*kptr)
+		return 0;
+
+	return create_save_bpfmask(kptr);
+}

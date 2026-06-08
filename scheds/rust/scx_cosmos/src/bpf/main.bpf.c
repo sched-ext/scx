@@ -3,6 +3,7 @@
  * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
  */
 #include <scx/common.bpf.h>
+#include <lib/bpf_cpumask.h>
 #include <scx/percpu.bpf.h>
 #include <lib/pmu.h>
 #include "intf.h"
@@ -986,24 +987,6 @@ static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
  * Initialize a new cpumask, return 0 in case of success or a negative
  * value otherwise.
  */
-static int init_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *mask;
-
-	mask = *p_cpumask;
-	if (mask)
-		return 0;
-
-	mask = bpf_cpumask_create();
-	if (!mask)
-		return -ENOMEM;
-
-	mask = bpf_kptr_xchg(p_cpumask, mask);
-	if (mask)
-		bpf_cpumask_release(mask);
-
-	return *p_cpumask ? 0 : -ENOMEM;
-}
 
 SEC("syscall")
 int enable_sibling_cpu(struct domain_arg *input)
@@ -1017,7 +1000,7 @@ int enable_sibling_cpu(struct domain_arg *input)
 		return -ENOENT;
 
 	pmask = &cctx->smt;
-	err = init_cpumask(pmask);
+	err = init_bpfmask(pmask);
 	if (err)
 		return err;
 
@@ -1039,7 +1022,7 @@ int enable_primary_cpu(struct cpu_arg *input)
 	struct bpf_cpumask *mask;
 	int err = 0;
 
-	err = init_cpumask(&primary_cpumask);
+	err = init_bpfmask(&primary_cpumask);
 	if (err)
 		return err;
 
@@ -1463,7 +1446,7 @@ s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
 	if ((ret = scx_pmu_task_init(p)))
 		return ret;
 
-	ret = init_cpumask(&tctx->cpumask);
+	ret = init_bpfmask(&tctx->cpumask);
 	if (ret)
 		return ret;
 
@@ -1490,7 +1473,7 @@ static int init_node(int node)
 	if (!nctx)
 		return -ENOENT;
 
-	ret = init_cpumask(&nctx->cpumask);
+	ret = init_bpfmask(&nctx->cpumask);
 	if (ret)
 		return ret;
 

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
 #include <scx/common.bpf.h>
+#include <lib/bpf_cpumask.h>
 #include <scx/percpu.bpf.h>
 #include "intf.h"
 
@@ -376,24 +377,6 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
  * Initialize a new cpumask, return 0 in case of success or a negative
  * value otherwise.
  */
-static int init_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *mask;
-
-	mask = *p_cpumask;
-	if (mask)
-		return 0;
-
-	mask = bpf_cpumask_create();
-	if (!mask)
-		return -ENOMEM;
-
-	mask = bpf_kptr_xchg(p_cpumask, mask);
-	if (mask)
-		bpf_cpumask_release(mask);
-
-	return *p_cpumask ? 0 : -ENOMEM;
-}
 
 SEC("syscall")
 int enable_sibling_cpu(struct domain_arg *input)
@@ -409,7 +392,7 @@ int enable_sibling_cpu(struct domain_arg *input)
 	pmask = &cctx->smt;
 
 	/* Make sure the target CPU mask is initialized */
-	err = init_cpumask(pmask);
+	err = init_bpfmask(pmask);
 	if (err)
 		return err;
 
@@ -431,7 +414,7 @@ int enable_primary_cpu(struct cpu_arg *input)
 	struct bpf_cpumask *mask;
 	int err = 0;
 
-	err = init_cpumask(&primary_cpumask);
+	err = init_bpfmask(&primary_cpumask);
 	if (err)
 		return err;
 

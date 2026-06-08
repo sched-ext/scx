@@ -962,28 +962,6 @@ void BPF_STRUCT_OPS(flash_cgroup_move, struct task_struct *p,
 	tctx->cgweight = cgc ? cgc->weight : CGROUP_WEIGHT_DFL;
 }
 
-static int init_cpumask(struct bpf_cpumask **cpumask)
-{
-	struct bpf_cpumask *mask;
-	int err = 0;
-
-	/*
-	 * Do nothing if the mask is already initialized.
-	 */
-	mask = *cpumask;
-	if (mask)
-		return 0;
-	/*
-	 * Create the CPU mask.
-	 */
-	err = create_save_bpfmask(cpumask);
-	if (!err)
-		mask = *cpumask;
-	if (!mask)
-		err = -ENOMEM;
-
-	return err;
-}
 
 s32 BPF_STRUCT_OPS(flash_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
@@ -1039,7 +1017,7 @@ int enable_sibling_cpu(struct domain_arg *input)
 	default:
 		return -EINVAL;
 	}
-	err = init_cpumask(pmask);
+	err = init_bpfmask(pmask);
 	if (err)
 		return err;
 
@@ -1059,7 +1037,7 @@ int enable_primary_cpu(struct cpu_arg *input)
 	int err = 0;
 
 	/* Make sure the primary CPU mask is initialized */
-	err = init_cpumask(&primary_cpumask);
+	err = init_bpfmask(&primary_cpumask);
 	if (err)
 		return err;
 	/*
@@ -1230,7 +1208,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 	}
 
 	/* Initialize the primary scheduling domain */
-	err = init_cpumask(&primary_cpumask);
+	err = init_bpfmask(&primary_cpumask);
 	if (err)
 		return err;
 
