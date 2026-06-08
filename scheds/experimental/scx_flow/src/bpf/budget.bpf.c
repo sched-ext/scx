@@ -22,9 +22,9 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	u64 now;
 
 	tctx = lookup_task_ctx(p);
-	current_cpu = bpf_get_smp_processor_id();
-	now = bpf_ktime_get_ns();
 	if (tctx) {
+		current_cpu = bpf_get_smp_processor_id();
+		now = bpf_ktime_get_ns();
 		if (tctx->last_cpu >= 0 && tctx->last_cpu != current_cpu)
 			FLOW_CPUSTAT_INC(lookup_cpu_state(), cpu_migrations);
 		tctx->last_cpu = current_cpu;
@@ -42,9 +42,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	u64 runtime_ns = 0;
 
 	tctx = lookup_task_ctx(p);
-	now = bpf_ktime_get_ns();
 
 	if (tctx) {
+		now = bpf_ktime_get_ns();
 		if (tctx->last_run_at && now > tctx->last_run_at)
 			runtime_ns = now - tctx->last_run_at;
 

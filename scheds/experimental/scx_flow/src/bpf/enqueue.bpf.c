@@ -34,12 +34,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (is_pinned_kthread(p)) {
 		clear_wake_target(tctx);
-		scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL, task_slice_ns(NULL), enq_flags);
+		scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL, FLOW_SLICE_MIN_NS, enq_flags);
 		return;
 	}
 
 	if (!is_wakeup && tctx && is_non_migratable(p)) {
-		s32 pin_cpu = scx_bpf_task_cpu(p);
+		s32 pin_cpu = task_cpu;
 		if (pin_cpu >= 0 && valid_sched_cpu(pin_cpu)) {
 			clear_wake_target(tctx);
 			scx_bpf_dsq_insert(p,
