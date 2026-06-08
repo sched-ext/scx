@@ -83,7 +83,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		ret = scx_bpf_create_dsq(FLOW_PINNED_DSQ_BASE | (u32)cpu, -1);
+		ret = scx_bpf_create_dsq(FLOW_PINNED_DSQ_BASE + (u32)cpu, -1);
 		if (ret < 0 && ret != -EEXIST) {
 			scx_bpf_error("failed to create pinned DSQ for CPU %d: %d",
 				      cpu, ret);

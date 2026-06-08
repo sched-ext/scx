@@ -27,11 +27,13 @@ enum consts {
 	FLOW_INTERACTIVE_FLOOR_MAX_NS = (200ULL * NSEC_PER_USEC),
 	FLOW_REFILL_DIV = 100ULL,
 
-	/* Per-CPU pinned DSQ base: each CPU gets FLOW_PINNED_DSQ_BASE | cpu.
+	/* Per-CPU pinned DSQ base: each CPU gets FLOW_PINNED_DSQ_BASE + cpu.
 	 * Non-migratable userspace tasks (nr_cpus_allowed == 1) are routed
 	 * here on non-wakeup re-enqueue, checked first in dispatch so that
 	 * pinned latency-sensitive tasks bypass global vtime DSQ contention.
-	 * The nr_cpus_allowed signal is kernel-enforced, not a heuristic. */
+	 * The nr_cpus_allowed signal is kernel-enforced, not a heuristic.
+	 * Addition used instead of bitwise-OR to avoid DSQ ID collisions on
+	 * systems with cpu >= FLOW_PINNED_DSQ_BASE (reviewer comment). */
 	FLOW_PINNED_DSQ_BASE = 2048ULL,
 
 	/* Single vtime-ordered DSQ for all non-wakeup re-enqueues.

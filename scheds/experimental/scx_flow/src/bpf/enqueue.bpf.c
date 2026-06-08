@@ -43,7 +43,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (pin_cpu >= 0 && valid_sched_cpu(pin_cpu)) {
 			clear_wake_target(tctx);
 			scx_bpf_dsq_insert(p,
-				FLOW_PINNED_DSQ_BASE | (u32)pin_cpu,
+				FLOW_PINNED_DSQ_BASE + (u32)pin_cpu,
 				task_slice_ns(tctx), enq_flags);
 			return;
 		}
