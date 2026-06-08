@@ -3,6 +3,7 @@
  * Copyright (c) 2024 Andrea Righi <andrea.righi@linux.dev>
  */
 #include <scx/common.bpf.h>
+#include <lib/bpf_cpumask.h>
 #include <scx/percpu.bpf.h>
 #include "intf.h"
 
@@ -656,20 +657,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 /*
  * Allocate/re-allocate a new cpumask.
  */
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
 
 /*
  * Calculate and return the virtual deadline for the given task.
@@ -1251,7 +1238,7 @@ static int init_cpumask(struct bpf_cpumask **cpumask)
 	/*
 	 * Create the CPU mask.
 	 */
-	err = calloc_cpumask(cpumask);
+	err = create_save_bpfmask(cpumask);
 	if (!err)
 		mask = *cpumask;
 	if (!mask)

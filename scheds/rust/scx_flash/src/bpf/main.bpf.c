@@ -3,6 +3,7 @@
  * Copyright (c) 2024 Andrea Righi <andrea.righi@linux.dev>
  */
 #include <scx/common.bpf.h>
+#include <lib/bpf_cpumask.h>
 #include "intf.h"
 
 #define MAX_VTIME	(~0ULL)
@@ -344,20 +345,6 @@ static inline u64 scale_by_weight_inverse(const struct task_struct *p, u64 value
 /*
  * Allocate/re-allocate a new cpumask.
  */
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
 
 /*
  * Return the time slice that can be assigned to a task.
@@ -989,7 +976,7 @@ static int init_cpumask(struct bpf_cpumask **cpumask)
 	/*
 	 * Create the CPU mask.
 	 */
-	err = calloc_cpumask(cpumask);
+	err = create_save_bpfmask(cpumask);
 	if (!err)
 		mask = *cpumask;
 	if (!mask)

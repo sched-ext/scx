@@ -3,6 +3,7 @@
  * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
  */
 #include <scx/common.bpf.h>
+#include <lib/bpf_cpumask.h>
 #include "intf.h"
 
 #define MAX_CPUS		1024
@@ -612,20 +613,6 @@ s32 BPF_STRUCT_OPS(tickless_init_task, struct task_struct *p,
 /*
  * Allocate/re-allocate a new cpumask.
  */
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
 
 /*
  * Initialize a cpumask (if not already initialized).
@@ -645,7 +632,7 @@ static int init_cpumask(struct bpf_cpumask **cpumask)
 	/*
 	 * Create the CPU mask.
 	 */
-	err = calloc_cpumask(cpumask);
+	err = create_save_bpfmask(cpumask);
 	if (!err)
 		mask = *cpumask;
 	if (!mask)
