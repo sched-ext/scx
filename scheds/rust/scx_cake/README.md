@@ -95,6 +95,37 @@ sudo ./target/debug/scx_cake --verbose --storm-guard=off
 sudo ./target/debug/scx_cake --verbose --storm-guard=full
 ```
 
+### Live game capture
+
+For Kovaak's/Diablo-style live game captures, the canonical workflow is the
+bench-assets MangoHud socket harness, not keyboard injection:
+
+```text
+docs/game_capture_mangohud_socket_workflow.md
+/home/ritz/Documents/Repo/scx_cake_bench_assets/docs/kovaaks-mangohud-socket-capture.md
+```
+
+Use `control=mangohud-%p`, `--trigger mangohud-socket`, and
+`--mangohud-socket auto`. Do not fall back to `ydotool` for scheduler benchmark
+captures; if no CSV is produced, debug the game-specific MangoHud socket path.
+When running Cake with `--verbose --diag-dir <dir> --diag-period 5`, attach the
+matching `cake_diag_latest.json` to the MangoHud CSV with:
+
+```bash
+python3 scheds/rust/scx_cake/bench/scx_cake_game_diag_extract.py \
+  --diag-json <diag-dir>/cake_diag_latest.json \
+  --game <game> \
+  --scheduler <scheduler-label> \
+  --scenario <scene-or-drill-label> \
+  --capture-id <capture-id> \
+  --mangohud-csv <mangohud.csv> \
+  --binary target/release/scx_cake \
+  --bpf-object <target/release/build/scx_cake-*/out/cake.bpf.o> \
+  --repo . \
+  --out-json <capture>_cake_action_features.json \
+  --out-tsv <capture>_cake_action_features.tsv
+```
+
 ### Profiles
 
 Profiles are quantum presets. They do not switch the scheduler into separate policy modes.

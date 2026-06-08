@@ -80,6 +80,26 @@ fn detect_hybrid() -> bool {
     false
 }
 
+fn file_contains_bytes(path: &str, needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+
+    std::fs::read(path)
+        .map(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+        .unwrap_or(false)
+}
+
+/// Detect whether the running kernel exposes the v6.19+ bool-returning DSQ
+/// insert kfunc. scx_cake already bakes host topology into release BPF; this
+/// is the same host-specialization principle for a hot sched_ext ABI branch.
+fn detect_scx_dsq_insert_v2_kfunc() -> bool {
+    const NEEDLE: &[u8] = b"scx_bpf_dsq_insert___v2";
+
+    file_contains_bytes("/proc/kallsyms", NEEDLE)
+        || file_contains_bytes("/sys/kernel/btf/vmlinux", NEEDLE)
+}
+
 fn profile_quantum_us(profile: &str) -> Option<u64> {
     match profile {
         "esports" => Some(750),
@@ -217,12 +237,34 @@ fn main() {
         baked_bool("SCX_CAKE_LEAN_WAKE_KICK", false);
     let (_kthread_wake_preempt_label, kthread_wake_preempt_value, _kthread_wake_preempt) =
         baked_bool("SCX_CAKE_KTHREAD_WAKE_PREEMPT", false);
+    // === Default-ON gaming "smtstrict" stack (promoted 2026-06-08) ===
+    // Measured Kovaaks n=3 rotated medians, CPU-bound ~1240fps scene, 9800X3D:
+    //   vs last-pushed nightly (31c3ec2b3): 8/8 — avg +4.3%, 1%low +2.8%,
+    //     .1%low +12.8%, FTstd -20%, p99 -2.7%, p99.9 -10.4%, maxFT/jitMax tie.
+    //   vs scx_cosmos: 6/6.  vs EEVDF: wins lows (.1%low +29%), avg parity.
+    // The four knobs (NATIVE_FAST_WAKE, MISS_TUNNEL, NFW_STRICT_SIBLING,
+    // DISPATCH_SKIP_RESCUE) now default true so a plain `cargo build` IS the
+    // validated champion. Override any with SCX_CAKE_<NAME>=0 for A/B.
+    // NFW_LEAN_PREV stays false on purpose: it was the frame-time-variance
+    // culprit (maxFT swung 1.22<->10.96). Gaming-profile tuned; non-game
+    // workloads (blender/compile) not yet revalidated under this default.
     let (_native_fast_wake_label, native_fast_wake_value, _native_fast_wake) =
-        baked_bool("SCX_CAKE_NATIVE_FAST_WAKE", false);
+        baked_bool("SCX_CAKE_NATIVE_FAST_WAKE", true);
     let (_native_fast_wake_wide_label, native_fast_wake_wide_value, _native_fast_wake_wide) =
         baked_bool("SCX_CAKE_NATIVE_FAST_WAKE_WIDE", false);
     let (_nfw_miss_tunnel_label, nfw_miss_tunnel_value, _nfw_miss_tunnel) =
-        baked_bool("SCX_CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL", false);
+        baked_bool("SCX_CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL", true);
+    // stays false: frame-time-variance culprit, see smtstrict note above.
+    let (_nfw_lean_prev_label, nfw_lean_prev_value, _nfw_lean_prev) =
+        baked_bool("SCX_CAKE_NFW_LEAN_PREV", false);
+    let (_nfw_strict_sibling_label, nfw_strict_sibling_value, _nfw_strict_sibling) =
+        baked_bool("SCX_CAKE_NFW_STRICT_SIBLING", true);
+    let (_enq_skip_busy_kick_label, enq_skip_busy_kick_value, _enq_skip_busy_kick) =
+        baked_bool("SCX_CAKE_ENQ_SKIP_BUSY_KICK", false);
+    let (_enq_skip_idle_kick_label, enq_skip_idle_kick_value, _enq_skip_idle_kick) =
+        baked_bool("SCX_CAKE_ENQ_SKIP_IDLE_KICK", false);
+    let (_dispatch_skip_rescue_label, dispatch_skip_rescue_value, _dispatch_skip_rescue) =
+        baked_bool("SCX_CAKE_DISPATCH_SKIP_RESCUE", true);
     let (_fast_enqueue_label, fast_enqueue_value, _fast_enqueue) =
         baked_bool("SCX_CAKE_FAST_ENQUEUE", false);
     let (_nfw_miss_shared_label, nfw_miss_shared_value, _nfw_miss_shared) =
@@ -233,6 +275,13 @@ fn main() {
         baked_bool("SCX_CAKE_WAKE_PREEMPT_ELAPSED", false);
     let (_wake_preempt_adaptive_label, wake_preempt_adaptive_value, _wake_preempt_adaptive) =
         baked_bool("SCX_CAKE_WAKE_PREEMPT_ADAPTIVE", false);
+    let (_game_diag_label, game_diag_value, game_diag_enabled) =
+        baked_bool("SCX_CAKE_GAME_DIAG", false);
+    let dsq_insert_v2_fastpath_value = if detect_scx_dsq_insert_v2_kfunc() {
+        1
+    } else {
+        0
+    };
     let wake_preempt_elapsed_us: u64 = std::env::var("SCX_CAKE_WAKE_PREEMPT_ELAPSED_US")
         .ok()
         .map(|v| {
@@ -292,7 +341,8 @@ fn main() {
              pub const BAKED_RELEASE_TRUST_MAPS: &str = {:?};\n\
              pub const BAKED_RELEASE_TRUST_MAPS_VALUE: u32 = {};\n\
              pub const BAKED_CORE_STEAL_DHQ: &str = {:?};\n\
-             pub const BAKED_CORE_STEAL_DHQ_VALUE: u32 = {};\n",
+             pub const BAKED_CORE_STEAL_DHQ_VALUE: u32 = {};\n\
+             pub const BAKED_GAME_DIAG_VALUE: u32 = {};\n",
             max_cpus,
             max_llcs,
             max_cpus,
@@ -324,7 +374,8 @@ fn main() {
             baked_release_trust_maps,
             baked_release_trust_maps_value,
             baked_core_steal_dhq,
-            baked_core_steal_dhq_value
+            baked_core_steal_dhq_value,
+            game_diag_value
         ),
     )
     .expect("Failed to write cake_constants.rs");
@@ -353,12 +404,20 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_NATIVE_FAST_WAKE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_NATIVE_FAST_WAKE_WIDE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_NFW_LEAN_PREV");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_NFW_STRICT_SIBLING");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_ENQ_SKIP_BUSY_KICK");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_ENQ_SKIP_IDLE_KICK");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_DISPATCH_SKIP_RESCUE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_FAST_ENQUEUE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_NFW_MISS_SHARED");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_LEAN_ACCOUNTING");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ELAPSED");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ADAPTIVE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ELAPSED_US");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_GAME_DIAG");
+    println!("cargo:rerun-if-changed=/proc/kallsyms");
+    println!("cargo:rerun-if-changed=/sys/kernel/btf/vmlinux");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
@@ -373,6 +432,7 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(cake_trust_maps)");
     println!("cargo::rustc-check-cfg=cfg(cake_futex_trace)");
     println!("cargo::rustc-check-cfg=cfg(cake_core_steal_dhq)");
+    println!("cargo::rustc-check-cfg=cfg(cake_game_diag)");
 
     // Emit rustc-cfg flags for true conditional compilation (Rust #[cfg] guards)
     if has_hybrid {
@@ -442,6 +502,26 @@ fn main() {
         nfw_miss_tunnel_value
     ));
     cflags.push_str(&format!(
+        " -DCAKE_NFW_LEAN_PREV={}",
+        nfw_lean_prev_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_NFW_STRICT_SIBLING={}",
+        nfw_strict_sibling_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_ENQ_SKIP_BUSY_KICK={}",
+        enq_skip_busy_kick_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_ENQ_SKIP_IDLE_KICK={}",
+        enq_skip_idle_kick_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_DISPATCH_SKIP_RESCUE={}",
+        dispatch_skip_rescue_value
+    ));
+    cflags.push_str(&format!(
         " -DCAKE_FAST_ENQUEUE_VALUE={}",
         fast_enqueue_value
     ));
@@ -465,6 +545,11 @@ fn main() {
         " -DCAKE_WAKE_PREEMPT_ELAPSED_NS={}ULL",
         wake_preempt_elapsed_us * 1000
     ));
+    cflags.push_str(&format!(
+        " -DCAKE_DSQ_INSERT_V2_FASTPATH={}",
+        dsq_insert_v2_fastpath_value
+    ));
+    cflags.push_str(&format!(" -DCAKE_GAME_DIAG={}", game_diag_value));
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
         println!("cargo:rustc-cfg=cake_bpf_release");
@@ -496,6 +581,9 @@ fn main() {
     if release_core_steal_dhq {
         println!("cargo:rustc-cfg=cake_core_steal_dhq");
     }
+    if game_diag_enabled {
+        println!("cargo:rustc-cfg=cake_game_diag");
+    }
     cflags.push_str(&format!(
         " -DCAKE_RELEASE_TRUST_MAPS={}",
         baked_release_trust_maps_value
@@ -511,7 +599,7 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} NEEDS_ARENA={} FUTEX_TRACE={} CORE_STEAL_DHQ={}",
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} NEEDS_ARENA={} FUTEX_TRACE={} CORE_STEAL_DHQ={} DSQ_INSERT_V2_FASTPATH={} GAME_DIAG={}",
         max_cpus,
         max_llcs,
         nr_cpus,
@@ -534,7 +622,9 @@ fn main() {
         baked_release_trust_maps,
         needs_arena,
         futex_trace_enabled,
-        baked_core_steal_dhq
+        baked_core_steal_dhq,
+        dsq_insert_v2_fastpath_value != 0,
+        game_diag_enabled
     );
 
     std::env::set_var("BPF_EXTRA_CFLAGS_PRE_INCL", &cflags);

@@ -10,11 +10,21 @@ mod trust;
 mod tui;
 
 use core::sync::atomic::Ordering;
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+use std::ffi::CString;
 use std::io::IsTerminal;
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+use std::path::Path;
 use std::path::PathBuf;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -151,6 +161,800 @@ const CPU_FAST_PROBE_PACK_SLOT_BITS: usize = if topology::MAX_CPUS < 256 { 8 } e
 const CPU_FAST_PROBE_PACK_SLOT_MASK: u64 = (1u64 << CPU_FAST_PROBE_PACK_SLOT_BITS) - 1;
 const CPU_META_PRIMARY: u64 = 1u64 << 48;
 const CPU_META_SMT: u64 = 1u64 << 49;
+
+#[derive(Debug, Default, Clone, serde::Serialize)]
+struct ReleaseGameDiagTotals {
+    nfw_entry: u64,
+    nfw_hit: u64,
+    nfw_hit_prev_cpu: u64,
+    nfw_hit_other_cpu: u64,
+    nfw_hit_select_cpu: u64,
+    nfw_hit_prev_primary: u64,
+    nfw_hit_other_primary: u64,
+    nfw_hit_game_thread: u64,
+    nfw_hit_render_thread: u64,
+    nfw_hit_taskgraph_thread: u64,
+    nfw_hit_pool_thread: u64,
+    nfw_hit_fpsaim_thread: u64,
+    nfw_hit_chrome_thread: u64,
+    nfw_hit_crgpu_thread: u64,
+    nfw_hit_dxvk_thread: u64,
+    nfw_hit_audio_thread: u64,
+    nfw_hit_other_thread: u64,
+    nfw_hit_local_depth_sample: u64,
+    nfw_hit_local_depth_nonzero: u64,
+    nfw_hit_local_depth_gt1: u64,
+    nfw_hit_local_depth_gt3: u64,
+    nfw_prev_idle_attempt: u64,
+    nfw_prev_idle_sibling_block: u64,
+    nfw_prev_idle_claim: u64,
+    nfw_prev_idle_fallback_attempt: u64,
+    nfw_prev_idle_fallback_hit: u64,
+    nfw_prev_idle_fallback_prev: u64,
+    nfw_prev_idle_fallback_other: u64,
+    nfw_miss: u64,
+    nfw_miss_shared: u64,
+    nfw_miss_tunnel: u64,
+    nfw_fallthrough: u64,
+    nfw_direct_insert: u64,
+    select_tunnel: u64,
+    enqueue_call: u64,
+    enqueue_wakeup: u64,
+    enqueue_initial: u64,
+    enqueue_requeue: u64,
+    enqueue_preserve: u64,
+    enqueue_non_wakeup: u64,
+    enqueue_direct_local: u64,
+    enqueue_wake_direct: u64,
+    enqueue_wake_idle: u64,
+    enqueue_wake_busy: u64,
+    enqueue_wake_busy_local: u64,
+    enqueue_wake_busy_remote: u64,
+    wake_kick_idle: u64,
+    wake_kick_preempt: u64,
+    kthread_direct_insert: u64,
+    kthread_wake_preempt: u64,
+    local_waiter_attempt: u64,
+    local_waiter_insert: u64,
+    local_waiter_reject: u64,
+    local_waiter_quench: u64,
+    shared_escape: u64,
+    shared_vtime_insert: u64,
+    dispatch_call: u64,
+    dispatch_idle_core_rescue_hit: u64,
+    dispatch_idle_llc_rescue_hit: u64,
+    dispatch_cache_hit: u64,
+    dispatch_throughput_hit: u64,
+    dispatch_core_steal_hit: u64,
+    dispatch_llc_pull_hit: u64,
+    dispatch_keep_running: u64,
+    dispatch_idle: u64,
+    publish_idle_call: u64,
+    publish_idle_write: u64,
+    publish_idle_noop: u64,
+    publish_running_call: u64,
+    publish_running_write: u64,
+    publish_running_noop: u64,
+    publish_owner_call: u64,
+    publish_owner_write: u64,
+    publish_owner_noop: u64,
+    stopping_call: u64,
+    stopping_runnable: u64,
+    stopping_blocked: u64,
+    stopping_owner_update: u64,
+    stopping_route_observe: u64,
+    stopping_route_pending: u64,
+    stopping_route_no_pending: u64,
+    stopping_account_relaxed: u64,
+    stopping_account_audit: u64,
+    stopping_scoreboard_owner_result: u64,
+    stopping_lean_return: u64,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize)]
+#[cfg_attr(not(all(cake_bpf_release, cake_game_diag)), allow(dead_code))]
+struct ReleaseGameDiagCpuSnapshot {
+    cpu: usize,
+    #[serde(flatten)]
+    totals: ReleaseGameDiagTotals,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize)]
+#[cfg_attr(not(all(cake_bpf_release, cake_game_diag)), allow(dead_code))]
+struct ReleaseGameDiagDerived {
+    nfw_hit_pct: f64,
+    nfw_hit_prev_cpu_pct: f64,
+    nfw_hit_other_cpu_pct: f64,
+    nfw_hit_select_cpu_pct: f64,
+    nfw_hit_prev_primary_pct: f64,
+    nfw_hit_other_primary_pct: f64,
+    nfw_hit_game_thread_pct: f64,
+    nfw_hit_render_thread_pct: f64,
+    nfw_hit_taskgraph_thread_pct: f64,
+    nfw_hit_pool_thread_pct: f64,
+    nfw_hit_fpsaim_thread_pct: f64,
+    nfw_hit_chrome_thread_pct: f64,
+    nfw_hit_crgpu_thread_pct: f64,
+    nfw_hit_dxvk_thread_pct: f64,
+    nfw_hit_audio_thread_pct: f64,
+    nfw_hit_other_thread_pct: f64,
+    nfw_hit_local_depth_nonzero_pct: f64,
+    nfw_hit_local_depth_gt1_pct: f64,
+    nfw_hit_local_depth_gt3_pct: f64,
+    nfw_prev_idle_attempt_pct: f64,
+    nfw_prev_idle_sibling_block_pct: f64,
+    nfw_prev_idle_claim_pct: f64,
+    nfw_prev_idle_fallback_hit_pct: f64,
+    nfw_prev_idle_fallback_prev_pct: f64,
+    nfw_prev_idle_fallback_other_pct: f64,
+    nfw_miss_pct: f64,
+    nfw_miss_shared_pct: f64,
+    nfw_miss_tunnel_pct: f64,
+    nfw_fallthrough_pct: f64,
+    enqueue_wakeup_pct: f64,
+    enqueue_wake_direct_pct: f64,
+    enqueue_wake_busy_pct: f64,
+    enqueue_wake_busy_local_pct: f64,
+    enqueue_wake_busy_remote_pct: f64,
+    wake_kick_idle_pct: f64,
+    wake_kick_preempt_pct: f64,
+    local_waiter_insert_pct: f64,
+    local_waiter_reject_pct: f64,
+    local_waiter_quench_pct: f64,
+    shared_escape_pct: f64,
+    stopping_runnable_pct: f64,
+    stopping_blocked_pct: f64,
+    stopping_owner_update_pct: f64,
+    stopping_route_observe_pct: f64,
+    stopping_route_pending_pct: f64,
+    stopping_route_no_pending_pct: f64,
+    stopping_account_relaxed_pct: f64,
+    stopping_account_audit_pct: f64,
+    stopping_scoreboard_owner_result_pct: f64,
+    stopping_lean_return_pct: f64,
+    dispatch_idle_core_rescue_hit_pct: f64,
+    dispatch_idle_llc_rescue_hit_pct: f64,
+    dispatch_cache_hit_pct: f64,
+    dispatch_throughput_hit_pct: f64,
+    dispatch_core_steal_hit_pct: f64,
+    dispatch_llc_pull_hit_pct: f64,
+    dispatch_keep_running_pct: f64,
+    dispatch_idle_pct: f64,
+    publish_idle_write_pct: f64,
+    publish_idle_noop_pct: f64,
+    publish_running_write_pct: f64,
+    publish_running_noop_pct: f64,
+    publish_owner_write_pct: f64,
+    publish_owner_noop_pct: f64,
+}
+
+impl ReleaseGameDiagDerived {
+    #[cfg_attr(not(all(cake_bpf_release, cake_game_diag)), allow(dead_code))]
+    fn from_totals(totals: &ReleaseGameDiagTotals) -> Self {
+        let stopping_account_total =
+            totals.stopping_account_relaxed + totals.stopping_account_audit;
+        let stopping_route_total = totals.stopping_route_pending + totals.stopping_route_no_pending;
+
+        Self {
+            nfw_hit_pct: pct_u64(totals.nfw_hit, totals.nfw_entry),
+            nfw_hit_prev_cpu_pct: pct_u64(totals.nfw_hit_prev_cpu, totals.nfw_hit),
+            nfw_hit_other_cpu_pct: pct_u64(totals.nfw_hit_other_cpu, totals.nfw_hit),
+            nfw_hit_select_cpu_pct: pct_u64(totals.nfw_hit_select_cpu, totals.nfw_hit),
+            nfw_hit_prev_primary_pct: pct_u64(totals.nfw_hit_prev_primary, totals.nfw_hit),
+            nfw_hit_other_primary_pct: pct_u64(totals.nfw_hit_other_primary, totals.nfw_hit),
+            nfw_hit_game_thread_pct: pct_u64(totals.nfw_hit_game_thread, totals.nfw_hit),
+            nfw_hit_render_thread_pct: pct_u64(totals.nfw_hit_render_thread, totals.nfw_hit),
+            nfw_hit_taskgraph_thread_pct: pct_u64(totals.nfw_hit_taskgraph_thread, totals.nfw_hit),
+            nfw_hit_pool_thread_pct: pct_u64(totals.nfw_hit_pool_thread, totals.nfw_hit),
+            nfw_hit_fpsaim_thread_pct: pct_u64(totals.nfw_hit_fpsaim_thread, totals.nfw_hit),
+            nfw_hit_chrome_thread_pct: pct_u64(totals.nfw_hit_chrome_thread, totals.nfw_hit),
+            nfw_hit_crgpu_thread_pct: pct_u64(totals.nfw_hit_crgpu_thread, totals.nfw_hit),
+            nfw_hit_dxvk_thread_pct: pct_u64(totals.nfw_hit_dxvk_thread, totals.nfw_hit),
+            nfw_hit_audio_thread_pct: pct_u64(totals.nfw_hit_audio_thread, totals.nfw_hit),
+            nfw_hit_other_thread_pct: pct_u64(totals.nfw_hit_other_thread, totals.nfw_hit),
+            nfw_hit_local_depth_nonzero_pct: pct_u64(
+                totals.nfw_hit_local_depth_nonzero,
+                totals.nfw_hit_local_depth_sample,
+            ),
+            nfw_hit_local_depth_gt1_pct: pct_u64(
+                totals.nfw_hit_local_depth_gt1,
+                totals.nfw_hit_local_depth_sample,
+            ),
+            nfw_hit_local_depth_gt3_pct: pct_u64(
+                totals.nfw_hit_local_depth_gt3,
+                totals.nfw_hit_local_depth_sample,
+            ),
+            nfw_prev_idle_attempt_pct: pct_u64(totals.nfw_prev_idle_attempt, totals.nfw_entry),
+            nfw_prev_idle_sibling_block_pct: pct_u64(
+                totals.nfw_prev_idle_sibling_block,
+                totals.nfw_prev_idle_attempt,
+            ),
+            nfw_prev_idle_claim_pct: pct_u64(
+                totals.nfw_prev_idle_claim,
+                totals.nfw_prev_idle_attempt,
+            ),
+            nfw_prev_idle_fallback_hit_pct: pct_u64(
+                totals.nfw_prev_idle_fallback_hit,
+                totals.nfw_prev_idle_fallback_attempt,
+            ),
+            nfw_prev_idle_fallback_prev_pct: pct_u64(
+                totals.nfw_prev_idle_fallback_prev,
+                totals.nfw_prev_idle_fallback_hit,
+            ),
+            nfw_prev_idle_fallback_other_pct: pct_u64(
+                totals.nfw_prev_idle_fallback_other,
+                totals.nfw_prev_idle_fallback_hit,
+            ),
+            nfw_miss_pct: pct_u64(totals.nfw_miss, totals.nfw_entry),
+            nfw_miss_shared_pct: pct_u64(totals.nfw_miss_shared, totals.nfw_miss),
+            nfw_miss_tunnel_pct: pct_u64(totals.nfw_miss_tunnel, totals.nfw_miss),
+            nfw_fallthrough_pct: pct_u64(totals.nfw_fallthrough, totals.nfw_miss),
+            enqueue_wakeup_pct: pct_u64(totals.enqueue_wakeup, totals.enqueue_call),
+            enqueue_wake_direct_pct: pct_u64(totals.enqueue_wake_direct, totals.enqueue_wakeup),
+            enqueue_wake_busy_pct: pct_u64(totals.enqueue_wake_busy, totals.enqueue_wakeup),
+            enqueue_wake_busy_local_pct: pct_u64(
+                totals.enqueue_wake_busy_local,
+                totals.enqueue_wake_busy,
+            ),
+            enqueue_wake_busy_remote_pct: pct_u64(
+                totals.enqueue_wake_busy_remote,
+                totals.enqueue_wake_busy,
+            ),
+            wake_kick_idle_pct: pct_u64(totals.wake_kick_idle, totals.enqueue_wakeup),
+            wake_kick_preempt_pct: pct_u64(totals.wake_kick_preempt, totals.enqueue_wake_busy),
+            local_waiter_insert_pct: pct_u64(
+                totals.local_waiter_insert,
+                totals.local_waiter_attempt,
+            ),
+            local_waiter_reject_pct: pct_u64(
+                totals.local_waiter_reject,
+                totals.local_waiter_attempt,
+            ),
+            local_waiter_quench_pct: pct_u64(
+                totals.local_waiter_quench,
+                totals.local_waiter_insert,
+            ),
+            shared_escape_pct: pct_u64(totals.shared_escape, totals.enqueue_wakeup),
+            stopping_runnable_pct: pct_u64(totals.stopping_runnable, totals.stopping_call),
+            stopping_blocked_pct: pct_u64(totals.stopping_blocked, totals.stopping_call),
+            stopping_owner_update_pct: pct_u64(totals.stopping_owner_update, totals.stopping_call),
+            stopping_route_observe_pct: pct_u64(
+                totals.stopping_route_observe,
+                totals.stopping_call,
+            ),
+            stopping_route_pending_pct: pct_u64(
+                totals.stopping_route_pending,
+                stopping_route_total,
+            ),
+            stopping_route_no_pending_pct: pct_u64(
+                totals.stopping_route_no_pending,
+                stopping_route_total,
+            ),
+            stopping_account_relaxed_pct: pct_u64(
+                totals.stopping_account_relaxed,
+                stopping_account_total,
+            ),
+            stopping_account_audit_pct: pct_u64(
+                totals.stopping_account_audit,
+                stopping_account_total,
+            ),
+            stopping_scoreboard_owner_result_pct: pct_u64(
+                totals.stopping_scoreboard_owner_result,
+                totals.stopping_call,
+            ),
+            stopping_lean_return_pct: pct_u64(totals.stopping_lean_return, totals.stopping_call),
+            dispatch_idle_core_rescue_hit_pct: pct_u64(
+                totals.dispatch_idle_core_rescue_hit,
+                totals.dispatch_call,
+            ),
+            dispatch_idle_llc_rescue_hit_pct: pct_u64(
+                totals.dispatch_idle_llc_rescue_hit,
+                totals.dispatch_call,
+            ),
+            dispatch_cache_hit_pct: pct_u64(totals.dispatch_cache_hit, totals.dispatch_call),
+            dispatch_throughput_hit_pct: pct_u64(
+                totals.dispatch_throughput_hit,
+                totals.dispatch_call,
+            ),
+            dispatch_core_steal_hit_pct: pct_u64(
+                totals.dispatch_core_steal_hit,
+                totals.dispatch_call,
+            ),
+            dispatch_llc_pull_hit_pct: pct_u64(totals.dispatch_llc_pull_hit, totals.dispatch_call),
+            dispatch_keep_running_pct: pct_u64(totals.dispatch_keep_running, totals.dispatch_call),
+            dispatch_idle_pct: pct_u64(totals.dispatch_idle, totals.dispatch_call),
+            publish_idle_write_pct: pct_u64(totals.publish_idle_write, totals.publish_idle_call),
+            publish_idle_noop_pct: pct_u64(totals.publish_idle_noop, totals.publish_idle_call),
+            publish_running_write_pct: pct_u64(
+                totals.publish_running_write,
+                totals.publish_running_call,
+            ),
+            publish_running_noop_pct: pct_u64(
+                totals.publish_running_noop,
+                totals.publish_running_call,
+            ),
+            publish_owner_write_pct: pct_u64(totals.publish_owner_write, totals.publish_owner_call),
+            publish_owner_noop_pct: pct_u64(totals.publish_owner_noop, totals.publish_owner_call),
+        }
+    }
+}
+
+impl ReleaseGameDiagTotals {
+    #[cfg_attr(not(all(cake_bpf_release, cake_game_diag)), allow(dead_code))]
+    fn add_assign(&mut self, other: &ReleaseGameDiagTotals) {
+        self.nfw_entry += other.nfw_entry;
+        self.nfw_hit += other.nfw_hit;
+        self.nfw_hit_prev_cpu += other.nfw_hit_prev_cpu;
+        self.nfw_hit_other_cpu += other.nfw_hit_other_cpu;
+        self.nfw_hit_select_cpu += other.nfw_hit_select_cpu;
+        self.nfw_hit_prev_primary += other.nfw_hit_prev_primary;
+        self.nfw_hit_other_primary += other.nfw_hit_other_primary;
+        self.nfw_hit_game_thread += other.nfw_hit_game_thread;
+        self.nfw_hit_render_thread += other.nfw_hit_render_thread;
+        self.nfw_hit_taskgraph_thread += other.nfw_hit_taskgraph_thread;
+        self.nfw_hit_pool_thread += other.nfw_hit_pool_thread;
+        self.nfw_hit_fpsaim_thread += other.nfw_hit_fpsaim_thread;
+        self.nfw_hit_chrome_thread += other.nfw_hit_chrome_thread;
+        self.nfw_hit_crgpu_thread += other.nfw_hit_crgpu_thread;
+        self.nfw_hit_dxvk_thread += other.nfw_hit_dxvk_thread;
+        self.nfw_hit_audio_thread += other.nfw_hit_audio_thread;
+        self.nfw_hit_other_thread += other.nfw_hit_other_thread;
+        self.nfw_hit_local_depth_sample += other.nfw_hit_local_depth_sample;
+        self.nfw_hit_local_depth_nonzero += other.nfw_hit_local_depth_nonzero;
+        self.nfw_hit_local_depth_gt1 += other.nfw_hit_local_depth_gt1;
+        self.nfw_hit_local_depth_gt3 += other.nfw_hit_local_depth_gt3;
+        self.nfw_prev_idle_attempt += other.nfw_prev_idle_attempt;
+        self.nfw_prev_idle_sibling_block += other.nfw_prev_idle_sibling_block;
+        self.nfw_prev_idle_claim += other.nfw_prev_idle_claim;
+        self.nfw_prev_idle_fallback_attempt += other.nfw_prev_idle_fallback_attempt;
+        self.nfw_prev_idle_fallback_hit += other.nfw_prev_idle_fallback_hit;
+        self.nfw_prev_idle_fallback_prev += other.nfw_prev_idle_fallback_prev;
+        self.nfw_prev_idle_fallback_other += other.nfw_prev_idle_fallback_other;
+        self.nfw_miss += other.nfw_miss;
+        self.nfw_miss_shared += other.nfw_miss_shared;
+        self.nfw_miss_tunnel += other.nfw_miss_tunnel;
+        self.nfw_fallthrough += other.nfw_fallthrough;
+        self.nfw_direct_insert += other.nfw_direct_insert;
+        self.select_tunnel += other.select_tunnel;
+        self.enqueue_call += other.enqueue_call;
+        self.enqueue_wakeup += other.enqueue_wakeup;
+        self.enqueue_initial += other.enqueue_initial;
+        self.enqueue_requeue += other.enqueue_requeue;
+        self.enqueue_preserve += other.enqueue_preserve;
+        self.enqueue_non_wakeup += other.enqueue_non_wakeup;
+        self.enqueue_direct_local += other.enqueue_direct_local;
+        self.enqueue_wake_direct += other.enqueue_wake_direct;
+        self.enqueue_wake_idle += other.enqueue_wake_idle;
+        self.enqueue_wake_busy += other.enqueue_wake_busy;
+        self.enqueue_wake_busy_local += other.enqueue_wake_busy_local;
+        self.enqueue_wake_busy_remote += other.enqueue_wake_busy_remote;
+        self.wake_kick_idle += other.wake_kick_idle;
+        self.wake_kick_preempt += other.wake_kick_preempt;
+        self.kthread_direct_insert += other.kthread_direct_insert;
+        self.kthread_wake_preempt += other.kthread_wake_preempt;
+        self.local_waiter_attempt += other.local_waiter_attempt;
+        self.local_waiter_insert += other.local_waiter_insert;
+        self.local_waiter_reject += other.local_waiter_reject;
+        self.local_waiter_quench += other.local_waiter_quench;
+        self.shared_escape += other.shared_escape;
+        self.shared_vtime_insert += other.shared_vtime_insert;
+        self.dispatch_call += other.dispatch_call;
+        self.dispatch_idle_core_rescue_hit += other.dispatch_idle_core_rescue_hit;
+        self.dispatch_idle_llc_rescue_hit += other.dispatch_idle_llc_rescue_hit;
+        self.dispatch_cache_hit += other.dispatch_cache_hit;
+        self.dispatch_throughput_hit += other.dispatch_throughput_hit;
+        self.dispatch_core_steal_hit += other.dispatch_core_steal_hit;
+        self.dispatch_llc_pull_hit += other.dispatch_llc_pull_hit;
+        self.dispatch_keep_running += other.dispatch_keep_running;
+        self.dispatch_idle += other.dispatch_idle;
+        self.publish_idle_call += other.publish_idle_call;
+        self.publish_idle_write += other.publish_idle_write;
+        self.publish_idle_noop += other.publish_idle_noop;
+        self.publish_running_call += other.publish_running_call;
+        self.publish_running_write += other.publish_running_write;
+        self.publish_running_noop += other.publish_running_noop;
+        self.publish_owner_call += other.publish_owner_call;
+        self.publish_owner_write += other.publish_owner_write;
+        self.publish_owner_noop += other.publish_owner_noop;
+        self.stopping_call += other.stopping_call;
+        self.stopping_runnable += other.stopping_runnable;
+        self.stopping_blocked += other.stopping_blocked;
+        self.stopping_owner_update += other.stopping_owner_update;
+        self.stopping_route_observe += other.stopping_route_observe;
+        self.stopping_route_pending += other.stopping_route_pending;
+        self.stopping_route_no_pending += other.stopping_route_no_pending;
+        self.stopping_account_relaxed += other.stopping_account_relaxed;
+        self.stopping_account_audit += other.stopping_account_audit;
+        self.stopping_scoreboard_owner_result += other.stopping_scoreboard_owner_result;
+        self.stopping_lean_return += other.stopping_lean_return;
+    }
+}
+
+#[cfg_attr(not(all(cake_bpf_release, cake_game_diag)), allow(dead_code))]
+fn pct_u64(num: u64, den: u64) -> f64 {
+    if den == 0 {
+        0.0
+    } else {
+        ((num as f64 * 100_000.0 / den as f64).round()) / 1_000.0
+    }
+}
+
+#[cfg_attr(not(all(cake_bpf_release, cake_game_diag)), allow(dead_code))]
+fn format_release_game_diag_json(
+    uptime_secs: f64,
+    totals: &ReleaseGameDiagTotals,
+    per_cpu: Vec<ReleaseGameDiagCpuSnapshot>,
+) -> serde_json::Value {
+    let derived = ReleaseGameDiagDerived::from_totals(totals);
+
+    serde_json::json!({
+        "schema_version": 1,
+        "artifact_kind": "scx_cake_release_game_diag",
+        "uptime_secs": ((uptime_secs * 1_000.0).round()) / 1_000.0,
+        "release_game_diag": {
+            "totals": totals,
+            "derived": derived,
+            "per_cpu": per_cpu,
+        },
+    })
+}
+
+#[cfg_attr(not(all(cake_bpf_release, cake_game_diag)), allow(dead_code))]
+fn format_release_game_diag_text(uptime_secs: f64, totals: &ReleaseGameDiagTotals) -> String {
+    format!(
+        concat!(
+            "release_game_diag: uptime_secs={:.3} ",
+            "nfw_entry={} nfw_hit={} nfw_hit_prev_cpu={} nfw_hit_other_cpu={} ",
+            "nfw_hit_select_cpu={} nfw_hit_prev_primary={} nfw_hit_other_primary={} ",
+            "nfw_hit_game_thread={} nfw_hit_render_thread={} nfw_hit_pool_thread={} ",
+            "nfw_hit_taskgraph_thread={} nfw_hit_chrome_thread={} nfw_hit_dxvk_thread={} ",
+            "nfw_hit_local_depth_sample={} nfw_hit_local_depth_nonzero={} ",
+            "nfw_hit_local_depth_gt1={} nfw_hit_local_depth_gt3={} ",
+            "nfw_prev_idle_attempt={} nfw_prev_idle_sibling_block={} ",
+            "nfw_prev_idle_claim={} nfw_prev_idle_fallback_attempt={} ",
+            "nfw_prev_idle_fallback_hit={} nfw_prev_idle_fallback_prev={} ",
+            "nfw_prev_idle_fallback_other={} ",
+            "nfw_miss={} nfw_miss_shared={} nfw_miss_tunnel={} ",
+            "enqueue_call={} enqueue_wakeup={} enqueue_wake_busy={} ",
+            "enqueue_wake_busy_local={} enqueue_wake_busy_remote={} ",
+            "wake_kick_idle={} wake_kick_preempt={} ",
+            "local_waiter_attempt={} local_waiter_insert={} local_waiter_reject={} ",
+            "shared_escape={} shared_vtime_insert={} ",
+            "dispatch_call={} dispatch_idle_core_rescue_hit={} ",
+            "dispatch_idle_llc_rescue_hit={} dispatch_cache_hit={} ",
+            "dispatch_throughput_hit={} dispatch_core_steal_hit={} ",
+            "dispatch_llc_pull_hit={} dispatch_keep_running={} dispatch_idle={} ",
+            "publish_idle_call={} publish_idle_write={} publish_idle_noop={} ",
+            "publish_running_call={} publish_running_write={} publish_running_noop={} ",
+            "publish_owner_call={} publish_owner_write={} publish_owner_noop={} ",
+            "stopping_call={} stopping_runnable={} stopping_blocked={} ",
+            "stopping_owner_update={} stopping_route_observe={} ",
+            "stopping_route_pending={} stopping_route_no_pending={} ",
+            "stopping_account_relaxed={} stopping_account_audit={} ",
+            "stopping_scoreboard_owner_result={} stopping_lean_return={}\n"
+        ),
+        uptime_secs,
+        totals.nfw_entry,
+        totals.nfw_hit,
+        totals.nfw_hit_prev_cpu,
+        totals.nfw_hit_other_cpu,
+        totals.nfw_hit_select_cpu,
+        totals.nfw_hit_prev_primary,
+        totals.nfw_hit_other_primary,
+        totals.nfw_hit_game_thread,
+        totals.nfw_hit_render_thread,
+        totals.nfw_hit_pool_thread,
+        totals.nfw_hit_taskgraph_thread,
+        totals.nfw_hit_chrome_thread,
+        totals.nfw_hit_dxvk_thread,
+        totals.nfw_hit_local_depth_sample,
+        totals.nfw_hit_local_depth_nonzero,
+        totals.nfw_hit_local_depth_gt1,
+        totals.nfw_hit_local_depth_gt3,
+        totals.nfw_prev_idle_attempt,
+        totals.nfw_prev_idle_sibling_block,
+        totals.nfw_prev_idle_claim,
+        totals.nfw_prev_idle_fallback_attempt,
+        totals.nfw_prev_idle_fallback_hit,
+        totals.nfw_prev_idle_fallback_prev,
+        totals.nfw_prev_idle_fallback_other,
+        totals.nfw_miss,
+        totals.nfw_miss_shared,
+        totals.nfw_miss_tunnel,
+        totals.enqueue_call,
+        totals.enqueue_wakeup,
+        totals.enqueue_wake_busy,
+        totals.enqueue_wake_busy_local,
+        totals.enqueue_wake_busy_remote,
+        totals.wake_kick_idle,
+        totals.wake_kick_preempt,
+        totals.local_waiter_attempt,
+        totals.local_waiter_insert,
+        totals.local_waiter_reject,
+        totals.shared_escape,
+        totals.shared_vtime_insert,
+        totals.dispatch_call,
+        totals.dispatch_idle_core_rescue_hit,
+        totals.dispatch_idle_llc_rescue_hit,
+        totals.dispatch_cache_hit,
+        totals.dispatch_throughput_hit,
+        totals.dispatch_core_steal_hit,
+        totals.dispatch_llc_pull_hit,
+        totals.dispatch_keep_running,
+        totals.dispatch_idle,
+        totals.publish_idle_call,
+        totals.publish_idle_write,
+        totals.publish_idle_noop,
+        totals.publish_running_call,
+        totals.publish_running_write,
+        totals.publish_running_noop,
+        totals.publish_owner_call,
+        totals.publish_owner_write,
+        totals.publish_owner_noop,
+        totals.stopping_call,
+        totals.stopping_runnable,
+        totals.stopping_blocked,
+        totals.stopping_owner_update,
+        totals.stopping_route_observe,
+        totals.stopping_route_pending,
+        totals.stopping_route_no_pending,
+        totals.stopping_account_relaxed,
+        totals.stopping_account_audit,
+        totals.stopping_scoreboard_owner_result,
+        totals.stopping_lean_return
+    )
+}
+
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+fn release_game_diag_from_bpf(
+    cpu: usize,
+    row: &bpf_skel::types::cake_game_diag,
+) -> ReleaseGameDiagCpuSnapshot {
+    ReleaseGameDiagCpuSnapshot {
+        cpu,
+        totals: ReleaseGameDiagTotals {
+            nfw_entry: row.nfw_entry,
+            nfw_hit: row.nfw_hit,
+            nfw_hit_prev_cpu: row.nfw_hit_prev_cpu,
+            nfw_hit_other_cpu: row.nfw_hit_other_cpu,
+            nfw_hit_select_cpu: row.nfw_hit_select_cpu,
+            nfw_hit_prev_primary: row.nfw_hit_prev_primary,
+            nfw_hit_other_primary: row.nfw_hit_other_primary,
+            nfw_hit_game_thread: row.nfw_hit_game_thread,
+            nfw_hit_render_thread: row.nfw_hit_render_thread,
+            nfw_hit_taskgraph_thread: row.nfw_hit_taskgraph_thread,
+            nfw_hit_pool_thread: row.nfw_hit_pool_thread,
+            nfw_hit_fpsaim_thread: row.nfw_hit_fpsaim_thread,
+            nfw_hit_chrome_thread: row.nfw_hit_chrome_thread,
+            nfw_hit_crgpu_thread: row.nfw_hit_crgpu_thread,
+            nfw_hit_dxvk_thread: row.nfw_hit_dxvk_thread,
+            nfw_hit_audio_thread: row.nfw_hit_audio_thread,
+            nfw_hit_other_thread: row.nfw_hit_other_thread,
+            nfw_hit_local_depth_sample: row.nfw_hit_local_depth_sample,
+            nfw_hit_local_depth_nonzero: row.nfw_hit_local_depth_nonzero,
+            nfw_hit_local_depth_gt1: row.nfw_hit_local_depth_gt1,
+            nfw_hit_local_depth_gt3: row.nfw_hit_local_depth_gt3,
+            nfw_prev_idle_attempt: row.nfw_prev_idle_attempt,
+            nfw_prev_idle_sibling_block: row.nfw_prev_idle_sibling_block,
+            nfw_prev_idle_claim: row.nfw_prev_idle_claim,
+            nfw_prev_idle_fallback_attempt: row.nfw_prev_idle_fallback_attempt,
+            nfw_prev_idle_fallback_hit: row.nfw_prev_idle_fallback_hit,
+            nfw_prev_idle_fallback_prev: row.nfw_prev_idle_fallback_prev,
+            nfw_prev_idle_fallback_other: row.nfw_prev_idle_fallback_other,
+            nfw_miss: row.nfw_miss,
+            nfw_miss_shared: row.nfw_miss_shared,
+            nfw_miss_tunnel: row.nfw_miss_tunnel,
+            nfw_fallthrough: row.nfw_fallthrough,
+            nfw_direct_insert: row.nfw_direct_insert,
+            select_tunnel: row.select_tunnel,
+            enqueue_call: row.enqueue_call,
+            enqueue_wakeup: row.enqueue_wakeup,
+            enqueue_initial: row.enqueue_initial,
+            enqueue_requeue: row.enqueue_requeue,
+            enqueue_preserve: row.enqueue_preserve,
+            enqueue_non_wakeup: row.enqueue_non_wakeup,
+            enqueue_direct_local: row.enqueue_direct_local,
+            enqueue_wake_direct: row.enqueue_wake_direct,
+            enqueue_wake_idle: row.enqueue_wake_idle,
+            enqueue_wake_busy: row.enqueue_wake_busy,
+            enqueue_wake_busy_local: row.enqueue_wake_busy_local,
+            enqueue_wake_busy_remote: row.enqueue_wake_busy_remote,
+            wake_kick_idle: row.wake_kick_idle,
+            wake_kick_preempt: row.wake_kick_preempt,
+            kthread_direct_insert: row.kthread_direct_insert,
+            kthread_wake_preempt: row.kthread_wake_preempt,
+            local_waiter_attempt: row.local_waiter_attempt,
+            local_waiter_insert: row.local_waiter_insert,
+            local_waiter_reject: row.local_waiter_reject,
+            local_waiter_quench: row.local_waiter_quench,
+            shared_escape: row.shared_escape,
+            shared_vtime_insert: row.shared_vtime_insert,
+            dispatch_call: row.dispatch_call,
+            dispatch_idle_core_rescue_hit: row.dispatch_idle_core_rescue_hit,
+            dispatch_idle_llc_rescue_hit: row.dispatch_idle_llc_rescue_hit,
+            dispatch_cache_hit: row.dispatch_cache_hit,
+            dispatch_throughput_hit: row.dispatch_throughput_hit,
+            dispatch_core_steal_hit: row.dispatch_core_steal_hit,
+            dispatch_llc_pull_hit: row.dispatch_llc_pull_hit,
+            dispatch_keep_running: row.dispatch_keep_running,
+            dispatch_idle: row.dispatch_idle,
+            publish_idle_call: row.publish_idle_call,
+            publish_idle_write: row.publish_idle_write,
+            publish_idle_noop: row.publish_idle_noop,
+            publish_running_call: row.publish_running_call,
+            publish_running_write: row.publish_running_write,
+            publish_running_noop: row.publish_running_noop,
+            publish_owner_call: row.publish_owner_call,
+            publish_owner_write: row.publish_owner_write,
+            publish_owner_noop: row.publish_owner_noop,
+            stopping_call: row.stopping_call,
+            stopping_runnable: row.stopping_runnable,
+            stopping_blocked: row.stopping_blocked,
+            stopping_owner_update: row.stopping_owner_update,
+            stopping_route_observe: row.stopping_route_observe,
+            stopping_route_pending: row.stopping_route_pending,
+            stopping_route_no_pending: row.stopping_route_no_pending,
+            stopping_account_relaxed: row.stopping_account_relaxed,
+            stopping_account_audit: row.stopping_account_audit,
+            stopping_scoreboard_owner_result: row.stopping_scoreboard_owner_result,
+            stopping_lean_return: row.stopping_lean_return,
+        },
+    }
+}
+
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+fn collect_release_game_diag(
+    skel: &BpfSkel,
+    nr_cpus: usize,
+) -> (ReleaseGameDiagTotals, Vec<ReleaseGameDiagCpuSnapshot>) {
+    let Some(bss) = skel.maps.bss_data.as_ref() else {
+        return (ReleaseGameDiagTotals::default(), Vec::new());
+    };
+    let mut totals = ReleaseGameDiagTotals::default();
+    let mut per_cpu = Vec::new();
+    let limit = nr_cpus.min(bss.game_diag.len());
+    for (cpu, row) in bss.game_diag.iter().enumerate().take(limit) {
+        let snap = release_game_diag_from_bpf(cpu, row);
+        totals.add_assign(&snap.totals);
+        per_cpu.push(snap);
+    }
+    (totals, per_cpu)
+}
+
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+fn sudo_invoking_owner() -> Option<(libc::uid_t, libc::gid_t)> {
+    let uid = std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|value| value.parse::<libc::uid_t>().ok())?;
+    let gid = std::env::var("SUDO_GID")
+        .ok()
+        .and_then(|value| value.parse::<libc::gid_t>().ok())?;
+    (uid != 0).then_some((uid, gid))
+}
+
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+fn restore_diag_path_owner(path: &Path, is_dir: bool) {
+    let Some((uid, gid)) = sudo_invoking_owner() else {
+        return;
+    };
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        log::warn!(
+            "release game diag ownership handoff skipped for non-C path {}",
+            path.display()
+        );
+        return;
+    };
+    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        log::warn!(
+            "release game diag chown failed for {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+    let mode = if is_dir { 0o755 } else { 0o644 };
+    if let Err(err) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+        log::warn!(
+            "release game diag chmod failed for {}: {err}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+fn atomic_write_text(path: &Path, text: &str) -> Result<()> {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "cake_diag".into());
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
+    restore_diag_path_owner(&tmp, false);
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} to {}", tmp.display(), path.display()))?;
+    restore_diag_path_owner(path, false);
+    Ok(())
+}
+
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+fn release_game_diag_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+fn write_release_game_diag_snapshot(
+    skel: &BpfSkel,
+    nr_cpus: usize,
+    diag_dir: &Path,
+    started: Instant,
+    timestamped: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(diag_dir)
+        .with_context(|| format!("create diag dir {}", diag_dir.display()))?;
+    restore_diag_path_owner(diag_dir, true);
+    let uptime_secs = started.elapsed().as_secs_f64();
+    let (totals, per_cpu) = collect_release_game_diag(skel, nr_cpus);
+    let json_obj = format_release_game_diag_json(uptime_secs, &totals, per_cpu);
+    let json_text = serde_json::to_string_pretty(&json_obj)? + "\n";
+    let text = format_release_game_diag_text(uptime_secs, &totals);
+
+    atomic_write_text(&diag_dir.join("cake_diag_latest.json"), &json_text)?;
+    atomic_write_text(&diag_dir.join("cake_diag_latest.txt"), &text)?;
+
+    if timestamped {
+        let stamp = release_game_diag_timestamp();
+        atomic_write_text(
+            &diag_dir.join(format!("cake_diag_{stamp}.json")),
+            &json_text,
+        )?;
+        atomic_write_text(&diag_dir.join(format!("cake_diag_{stamp}.txt")), &text)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(cake_bpf_release, cake_game_diag))]
+fn run_release_game_diag_recorder(
+    skel: &mut BpfSkel,
+    trust_governor: &mut trust::TrustGovernor,
+    shutdown: Arc<AtomicBool>,
+    interval_secs: u64,
+    diag_dir: PathBuf,
+    diag_period_secs: u64,
+    nr_cpus: usize,
+) -> Result<()> {
+    let interval = Duration::from_secs(interval_secs.max(1));
+    let period = (diag_period_secs > 0).then(|| Duration::from_secs(diag_period_secs));
+    let started = Instant::now();
+    let mut last_write: Option<Instant> = None;
+
+    info!(
+        "release game diagnostic recorder active: dir={} period={}s",
+        diag_dir.display(),
+        diag_period_secs
+    );
+
+    while !shutdown.load(Ordering::Relaxed) {
+        trust_governor.tick(skel, nr_cpus);
+        if let Some(period) = period {
+            let due = last_write
+                .map(|last| last.elapsed() >= period)
+                .unwrap_or(true);
+            if due {
+                write_release_game_diag_snapshot(skel, nr_cpus, &diag_dir, started, false)?;
+                last_write = Some(Instant::now());
+            }
+        }
+        if scx_utils::uei_exited!(skel, uei) {
+            break;
+        }
+        std::thread::sleep(interval);
+    }
+
+    write_release_game_diag_snapshot(skel, nr_cpus, &diag_dir, started, true)
+}
 
 #[cfg(cake_futex_trace)]
 fn log_futex_trace(skel: &BpfSkel, nr_cpus: usize) {
@@ -1180,9 +1984,20 @@ impl<'a> Scheduler<'a> {
         // Warn early so user knows this flag requires a debug build.
         #[cfg(not(debug_assertions))]
         if self.args.verbose {
-            log::warn!("--verbose requires a debug build (telemetry is compiled out in release).");
-            log::warn!("Rebuild without --release: cargo build -p scx_cake");
-            self.args.verbose = false;
+            #[cfg(all(cake_bpf_release, cake_game_diag))]
+            {
+                log::warn!(
+                    "--verbose using SCX_CAKE_GAME_DIAG release recorder; full TUI telemetry remains compiled out"
+                );
+            }
+            #[cfg(not(all(cake_bpf_release, cake_game_diag)))]
+            {
+                log::warn!(
+                    "--verbose requires a debug build (telemetry is compiled out in release)."
+                );
+                log::warn!("Rebuild without --release: cargo build -p scx_cake");
+                self.args.verbose = false;
+            }
         }
 
         #[cfg(cake_bpf_release)]
@@ -1265,7 +2080,34 @@ impl<'a> Scheduler<'a> {
                     && topology::BAKED_RELEASE_CONFIDENCE_VALUE != 0));
         let mut trust_governor =
             trust::TrustGovernor::new(self.topology.nr_cpus, trust_governor_enabled);
-        if self.args.verbose && std::io::stdout().is_terminal() {
+
+        let ran_release_game_diag = {
+            #[cfg(all(cake_bpf_release, cake_game_diag))]
+            {
+                if self.args.verbose {
+                    run_release_game_diag_recorder(
+                        &mut self.skel,
+                        &mut trust_governor,
+                        shutdown.clone(),
+                        self.args.interval,
+                        self.args.diag_dir.clone(),
+                        self.args.diag_period,
+                        self.topology.nr_cpus,
+                    )?;
+                    true
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(all(cake_bpf_release, cake_game_diag)))]
+            {
+                false
+            }
+        };
+
+        if ran_release_game_diag {
+            // Snapshot loop already ran until shutdown or UEI exit.
+        } else if self.args.verbose && std::io::stdout().is_terminal() {
             tui::run_tui(
                 &mut self.skel,
                 &mut trust_governor,
@@ -1490,5 +2332,210 @@ mod tests {
         let bits = fast_scan_probe_bits(slots);
 
         assert_eq!(bits, (1u64 << 7) | (1u64 << 4) | (1u64 << 2));
+    }
+
+    #[test]
+    fn release_game_diag_json_includes_totals_and_derived_rates() {
+        let mut totals = ReleaseGameDiagTotals::default();
+        totals.nfw_entry = 100;
+        totals.nfw_hit = 25;
+        totals.nfw_hit_prev_cpu = 10;
+        totals.nfw_hit_other_cpu = 15;
+        totals.nfw_hit_select_cpu = 5;
+        totals.nfw_hit_prev_primary = 12;
+        totals.nfw_hit_other_primary = 13;
+        totals.nfw_hit_game_thread = 7;
+        totals.nfw_hit_render_thread = 3;
+        totals.nfw_hit_taskgraph_thread = 4;
+        totals.nfw_hit_pool_thread = 5;
+        totals.nfw_hit_fpsaim_thread = 2;
+        totals.nfw_hit_chrome_thread = 1;
+        totals.nfw_hit_crgpu_thread = 1;
+        totals.nfw_hit_dxvk_thread = 1;
+        totals.nfw_hit_audio_thread = 1;
+        totals.nfw_hit_local_depth_sample = 25;
+        totals.nfw_hit_local_depth_nonzero = 5;
+        totals.nfw_hit_local_depth_gt1 = 2;
+        totals.nfw_hit_local_depth_gt3 = 1;
+        totals.nfw_prev_idle_attempt = 80;
+        totals.nfw_prev_idle_sibling_block = 20;
+        totals.nfw_prev_idle_claim = 30;
+        totals.nfw_prev_idle_fallback_attempt = 50;
+        totals.nfw_prev_idle_fallback_hit = 40;
+        totals.nfw_prev_idle_fallback_prev = 10;
+        totals.nfw_prev_idle_fallback_other = 30;
+        totals.nfw_miss = 75;
+        totals.nfw_miss_tunnel = 60;
+        totals.enqueue_wakeup = 200;
+        totals.enqueue_wake_busy = 150;
+        totals.wake_kick_preempt = 45;
+        totals.local_waiter_attempt = 20;
+        totals.local_waiter_reject = 15;
+        totals.stopping_call = 100;
+        totals.stopping_runnable = 40;
+        totals.stopping_blocked = 60;
+        totals.stopping_owner_update = 90;
+        totals.stopping_route_observe = 80;
+        totals.stopping_route_pending = 30;
+        totals.stopping_route_no_pending = 50;
+        totals.stopping_account_relaxed = 75;
+        totals.stopping_account_audit = 25;
+        totals.stopping_scoreboard_owner_result = 25;
+        totals.stopping_lean_return = 10;
+        totals.dispatch_call = 200;
+        totals.dispatch_idle_core_rescue_hit = 10;
+        totals.dispatch_idle_llc_rescue_hit = 5;
+        totals.dispatch_cache_hit = 20;
+        totals.dispatch_throughput_hit = 30;
+        totals.dispatch_core_steal_hit = 15;
+        totals.dispatch_llc_pull_hit = 40;
+        totals.dispatch_keep_running = 60;
+        totals.dispatch_idle = 20;
+        totals.publish_idle_call = 100;
+        totals.publish_idle_write = 25;
+        totals.publish_idle_noop = 75;
+        totals.publish_running_call = 200;
+        totals.publish_running_write = 50;
+        totals.publish_running_noop = 150;
+        totals.publish_owner_call = 400;
+        totals.publish_owner_write = 100;
+        totals.publish_owner_noop = 300;
+
+        let json = format_release_game_diag_json(60.0, &totals, Vec::new());
+
+        assert_eq!(json["artifact_kind"], "scx_cake_release_game_diag");
+        assert_eq!(json["release_game_diag"]["totals"]["nfw_entry"], 100);
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_hit_prev_cpu_pct"],
+            40.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_hit_other_primary_pct"],
+            52.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_hit_game_thread_pct"],
+            28.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_hit_pool_thread_pct"],
+            20.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_hit_local_depth_nonzero_pct"],
+            20.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_hit_local_depth_gt1_pct"],
+            8.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_hit_local_depth_gt3_pct"],
+            4.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_prev_idle_attempt_pct"],
+            80.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_prev_idle_sibling_block_pct"],
+            25.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_prev_idle_claim_pct"],
+            37.5
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_prev_idle_fallback_hit_pct"],
+            80.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_prev_idle_fallback_prev_pct"],
+            25.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_prev_idle_fallback_other_pct"],
+            75.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["nfw_miss_tunnel_pct"],
+            80.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["enqueue_wake_busy_pct"],
+            75.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["local_waiter_reject_pct"],
+            75.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["stopping_runnable_pct"],
+            40.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["stopping_account_relaxed_pct"],
+            75.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["stopping_route_pending_pct"],
+            37.5
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["stopping_route_no_pending_pct"],
+            62.5
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["stopping_account_audit_pct"],
+            25.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["stopping_scoreboard_owner_result_pct"],
+            25.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["stopping_lean_return_pct"],
+            10.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["dispatch_idle_core_rescue_hit_pct"],
+            5.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["dispatch_llc_pull_hit_pct"],
+            20.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["dispatch_keep_running_pct"],
+            30.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["dispatch_idle_pct"],
+            10.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["publish_idle_write_pct"],
+            25.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["publish_idle_noop_pct"],
+            75.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["publish_running_write_pct"],
+            25.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["publish_running_noop_pct"],
+            75.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["publish_owner_write_pct"],
+            25.0
+        );
+        assert_eq!(
+            json["release_game_diag"]["derived"]["publish_owner_noop_pct"],
+            75.0
+        );
     }
 }

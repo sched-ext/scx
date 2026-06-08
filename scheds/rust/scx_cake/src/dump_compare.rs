@@ -1708,6 +1708,384 @@ mod tests {
     }
 
     #[test]
+    fn bpf_release_game_diag_samples_nfw_local_dsq_depth() {
+        let intf = include_str!("bpf/intf.h");
+        let src = include_str!("bpf/cake.bpf.c");
+        let nfw_body = source_body_between(
+            src,
+            "Native fast wake (SCX_CAKE_NATIVE_FAST_WAKE)",
+            "CAKE_GAME_DIAG_INC(local_cpu, nfw_miss);",
+        )
+        .expect("native fast wake hit body should be present");
+
+        assert!(intf.contains("u64 nfw_hit_local_depth_sample;"));
+        assert!(intf.contains("u64 nfw_hit_local_depth_nonzero;"));
+        assert!(intf.contains("u64 nfw_hit_local_depth_gt1;"));
+        assert!(intf.contains("u64 nfw_hit_local_depth_gt3;"));
+        assert!(source_contains(
+            nfw_body,
+            "s32 local_depth = scx_bpf_dsq_nr_queued(
+                    SCX_DSQ_LOCAL_ON | (u32)nfw_cpu);"
+        ));
+        assert!(source_contains(
+            nfw_body,
+            "cake_nfw_dsq_insert(
+                    p, SCX_DSQ_LOCAL_ON | (u32)nfw_cpu, nfw_slice);"
+        ));
+        assert!(nfw_body.contains("nfw_hit_local_depth_sample"));
+        assert!(nfw_body.contains("if (local_depth > 0)"));
+        assert!(nfw_body.contains("nfw_hit_local_depth_nonzero"));
+        assert!(nfw_body.contains("if (local_depth > 1)"));
+        assert!(nfw_body.contains("nfw_hit_local_depth_gt1"));
+        assert!(nfw_body.contains("if (local_depth > 3)"));
+        assert!(nfw_body.contains("nfw_hit_local_depth_gt3"));
+    }
+
+    #[test]
+    fn bpf_release_native_fast_wake_uses_kernel_v2_dsq_insert_fastpath() {
+        let build_rs = include_str!("../build.rs");
+        let src = include_str!("bpf/cake.bpf.c");
+        let nfw_body = source_body_between(
+            src,
+            "Native fast wake (SCX_CAKE_NATIVE_FAST_WAKE)",
+            "CAKE_GAME_DIAG_INC(local_cpu, nfw_miss);",
+        )
+        .expect("native fast wake hit body should be present");
+        let helper = source_body_between(
+            src,
+            "static __always_inline void cake_nfw_dsq_insert",
+            "static __always_inline __maybe_unused bool",
+        )
+        .expect("native fast wake DSQ insert helper should be present");
+
+        assert!(build_rs.contains("detect_scx_dsq_insert_v2_kfunc"));
+        assert!(build_rs.contains("-DCAKE_DSQ_INSERT_V2_FASTPATH={}"));
+        assert!(source_contains(
+            helper,
+            "#if CAKE_DSQ_INSERT_V2_FASTPATH
+                    scx_bpf_dsq_insert___v2___compat(p, dsq_id, slice, 0);
+            #else
+                    dsq_insert_wrapper(p, dsq_id, slice, 0);
+            #endif"
+        ));
+        assert!(source_contains(
+            nfw_body,
+            "cake_nfw_dsq_insert(
+                    p, SCX_DSQ_LOCAL_ON | (u32)nfw_cpu, nfw_slice);"
+        ));
+        assert!(
+            !source_contains(
+                nfw_body,
+                "dsq_insert_wrapper(
+                        p, SCX_DSQ_LOCAL_ON | (u32)nfw_cpu,
+                        nfw_slice, 0);"
+            ),
+            "NFW hit path should not call the generic DSQ insert wrapper when a v2 fastpath is legal"
+        );
+    }
+
+    #[test]
+    fn bpf_release_native_fast_wake_claims_prev_idle_before_broad_pick() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let nfw_body = source_body_between(
+            src,
+            "Native fast wake (SCX_CAKE_NATIVE_FAST_WAKE)",
+            "CAKE_GAME_DIAG_INC(local_cpu, nfw_miss);",
+        )
+        .expect("native fast wake hit body should be present");
+        let prev_claim_pos = nfw_body
+            .find("scx_bpf_test_and_clear_cpu_idle(prev_cpu)")
+            .expect("native fast wake should attempt a cheap prev idle claim");
+        let broad_pick_pos = nfw_body
+            .find("select_cpu_and_idle(p, prev_cpu, wake_flags, 0)")
+            .expect("native fast wake broad idle pick should remain as fallback");
+
+        assert!(nfw_body.contains("!cake_task_is_affinitized(p)"));
+        assert!(source_contains(
+            nfw_body,
+            "if (prev_cpu >= 0 && prev_cpu < cake_nr_cpus &&
+            #if CAKE_NATIVE_FAST_WAKE_WIDE
+                    bpf_cpumask_test_cpu((u32)prev_cpu, p->cpus_ptr) &&
+            #endif
+                    cake_nfw_prev_idle_sibling_clear((u32)prev_cpu) &&
+                    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+                    nfw_cpu = prev_cpu;"
+        ));
+        assert!(
+            prev_claim_pos < broad_pick_pos,
+            "prev idle claim should precede the broad native idle picker"
+        );
+        assert!(source_contains(
+            nfw_body,
+            "if (nfw_cpu < 0)
+                    nfw_cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);"
+        ));
+    }
+
+    #[test]
+    fn bpf_release_native_fast_wake_prev_idle_avoids_busy_smt_sibling() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let nfw_body = source_body_between(
+            src,
+            "Native fast wake (SCX_CAKE_NATIVE_FAST_WAKE)",
+            "CAKE_GAME_DIAG_INC(local_cpu, nfw_miss);",
+        )
+        .expect("native fast wake hit body should be present");
+        let sibling_gate_pos = nfw_body
+            .find("cake_nfw_prev_idle_sibling_clear((u32)prev_cpu)")
+            .expect("prev idle claim should reject busy SMT siblings first");
+        let idle_claim_pos = nfw_body
+            .find("scx_bpf_test_and_clear_cpu_idle(prev_cpu)")
+            .expect("native fast wake should attempt a cheap prev idle claim");
+
+        assert!(src.contains("static __always_inline bool cake_nfw_prev_idle_sibling_clear"));
+        assert!(source_contains(
+            src,
+            "return !cake_smt_latency_neighbor_busy(target_cpu);"
+        ));
+        assert!(source_contains(
+            nfw_body,
+            "#if CAKE_NATIVE_FAST_WAKE_WIDE
+                    bpf_cpumask_test_cpu((u32)prev_cpu, p->cpus_ptr) &&
+            #endif
+                    cake_nfw_prev_idle_sibling_clear((u32)prev_cpu) &&
+                    scx_bpf_test_and_clear_cpu_idle(prev_cpu)"
+        ));
+        assert!(
+            sibling_gate_pos < idle_claim_pos,
+            "SMT sibling gate should run before claiming prev idle"
+        );
+    }
+
+    #[test]
+    fn bpf_release_game_diag_samples_nfw_prev_idle_branch_shape() {
+        let intf = include_str!("bpf/intf.h");
+        let src = include_str!("bpf/cake.bpf.c");
+        let nfw_body = source_body_between(
+            src,
+            "Native fast wake (SCX_CAKE_NATIVE_FAST_WAKE)",
+            "CAKE_GAME_DIAG_INC(local_cpu, nfw_miss);",
+        )
+        .expect("native fast wake hit body should be present");
+
+        assert!(intf.contains("u64 nfw_prev_idle_attempt;"));
+        assert!(intf.contains("u64 nfw_prev_idle_sibling_block;"));
+        assert!(intf.contains("u64 nfw_prev_idle_claim;"));
+        assert!(intf.contains("u64 nfw_prev_idle_fallback_attempt;"));
+        assert!(intf.contains("u64 nfw_prev_idle_fallback_hit;"));
+        assert!(intf.contains("u64 nfw_prev_idle_fallback_prev;"));
+        assert!(intf.contains("u64 nfw_prev_idle_fallback_other;"));
+
+        let attempt_pos = nfw_body
+            .find("CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_attempt);")
+            .expect("prev-idle branch should count attempts");
+        let sibling_block_pos = nfw_body
+            .find("CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_sibling_block);")
+            .expect("prev-idle branch should count sibling-gate blocks");
+        let claim_pos = nfw_body
+            .find("CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_claim);")
+            .expect("prev-idle branch should count successful cheap claims");
+        let fallback_attempt_pos = nfw_body
+            .find("CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_fallback_attempt);")
+            .expect("native fallback should count attempts after cheap path misses");
+        let fallback_hit_pos = nfw_body
+            .find("CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_fallback_hit);")
+            .expect("native fallback should count hits");
+
+        assert!(
+            attempt_pos < sibling_block_pos,
+            "sibling blocks should be counted under a concrete prev-idle attempt"
+        );
+        assert!(
+            attempt_pos < claim_pos && claim_pos < fallback_attempt_pos,
+            "cheap prev-idle claim should be attributed before native fallback"
+        );
+        assert!(
+            fallback_attempt_pos < fallback_hit_pos,
+            "native fallback hits should be counted after fallback attempts"
+        );
+        assert!(nfw_body.contains("nfw_prev_idle_fallback_prev"));
+        assert!(nfw_body.contains("nfw_prev_idle_fallback_other"));
+    }
+
+    #[test]
+    fn bpf_release_native_fast_wake_prev_cpumask_test_is_wide_only() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let nfw_body = source_body_between(
+            src,
+            "Native fast wake (SCX_CAKE_NATIVE_FAST_WAKE)",
+            "CAKE_GAME_DIAG_INC(local_cpu, nfw_miss);",
+        )
+        .expect("native fast wake hit body should be present");
+        let wide_guard_count = nfw_body.matches("#if CAKE_NATIVE_FAST_WAKE_WIDE").count();
+        let cpumask_count = nfw_body.matches("bpf_cpumask_test_cpu((u32)prev_cpu").count();
+
+        assert!(nfw_body.contains("!cake_task_is_affinitized(p)"));
+        assert_eq!(
+            cpumask_count, wide_guard_count,
+            "default non-affinitized NFW path should not pay the prev cpumask helper"
+        );
+        assert!(
+            wide_guard_count >= 2,
+            "both diagnostic and release prev-idle branches should preserve WIDE affinity safety"
+        );
+    }
+
+    #[test]
+    fn bpf_release_game_diag_samples_stopping_accounting_cadence() {
+        let intf = include_str!("bpf/intf.h");
+        let src = include_str!("bpf/cake.bpf.c");
+        let stopping_body =
+            source_body_between(src, "void BPF_STRUCT_OPS(cake_stopping", "return;\n#else")
+                .expect("release stopping fast path should be present");
+
+        for field in [
+            "u64 stopping_call;",
+            "u64 stopping_runnable;",
+            "u64 stopping_blocked;",
+            "u64 stopping_owner_update;",
+            "u64 stopping_route_observe;",
+            "u64 stopping_route_pending;",
+            "u64 stopping_route_no_pending;",
+            "u64 stopping_account_relaxed;",
+            "u64 stopping_account_audit;",
+            "u64 stopping_scoreboard_owner_result;",
+            "u64 stopping_lean_return;",
+        ] {
+            assert!(intf.contains(field), "missing game diag field {field}");
+        }
+
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_call);"));
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_runnable);"));
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_blocked);"));
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_owner_update);"));
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_route_observe);"));
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_route_pending);"));
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_route_no_pending);"));
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_account_relaxed);"));
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_account_audit);"));
+        assert!(
+            stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_scoreboard_owner_result);")
+        );
+        assert!(stopping_body.contains("CAKE_GAME_DIAG_INC(cpu, stopping_lean_return);"));
+    }
+
+    #[test]
+    fn bpf_release_game_diag_samples_dispatch_outcome_cadence() {
+        let intf = include_str!("bpf/intf.h");
+        let src = include_str!("bpf/cake.bpf.c");
+        let dispatch_body = source_body_between(
+            src,
+            "void BPF_STRUCT_OPS(cake_dispatch",
+            "#ifdef CAKE_RELEASE\n#undef stats_on",
+        )
+        .expect("release dispatch body should be present");
+
+        for field in [
+            "u64 dispatch_call;",
+            "u64 dispatch_idle_core_rescue_hit;",
+            "u64 dispatch_idle_llc_rescue_hit;",
+            "u64 dispatch_cache_hit;",
+            "u64 dispatch_throughput_hit;",
+            "u64 dispatch_core_steal_hit;",
+            "u64 dispatch_llc_pull_hit;",
+            "u64 dispatch_keep_running;",
+            "u64 dispatch_idle;",
+        ] {
+            assert!(intf.contains(field), "missing game diag field {field}");
+        }
+
+        for counter in [
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_call);",
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_idle_core_rescue_hit);",
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_idle_llc_rescue_hit);",
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_cache_hit);",
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);",
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_core_steal_hit);",
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_llc_pull_hit);",
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_keep_running);",
+            "CAKE_GAME_DIAG_INC(cpu_idx, dispatch_idle);",
+        ] {
+            assert!(
+                dispatch_body.contains(counter),
+                "missing release dispatch diag counter {counter}"
+            );
+        }
+    }
+
+    #[test]
+    fn bpf_release_game_diag_samples_status_publish_cadence() {
+        let intf = include_str!("bpf/intf.h");
+        let src = include_str!("bpf/cake.bpf.c");
+        let idle_body = source_body_between(
+            src,
+            "static __always_inline void cake_publish_cpu_idle",
+            "static __always_inline void cake_publish_cpu_running",
+        )
+        .expect("idle publish body should be present");
+        let running_body = source_body_between(
+            src,
+            "static __always_inline void cake_publish_cpu_running",
+            "static __always_inline void cake_publish_cpu_owner",
+        )
+        .expect("running publish body should be present");
+        let owner_body = source_body_between(
+            src,
+            "static __always_inline void cake_publish_cpu_owner",
+            "static __always_inline u64 cake_read_cpu_status",
+        )
+        .expect("owner publish body should be present");
+
+        for field in [
+            "u64 publish_idle_call;",
+            "u64 publish_idle_write;",
+            "u64 publish_idle_noop;",
+            "u64 publish_running_call;",
+            "u64 publish_running_write;",
+            "u64 publish_running_noop;",
+            "u64 publish_owner_call;",
+            "u64 publish_owner_write;",
+            "u64 publish_owner_noop;",
+        ] {
+            assert!(intf.contains(field), "missing game diag field {field}");
+        }
+
+        assert!(idle_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_idle_call);"));
+        assert!(idle_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_idle_write);"));
+        assert!(idle_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_idle_noop);"));
+        assert!(running_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_running_call);"));
+        assert!(running_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_running_write);"));
+        assert!(running_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_running_noop);"));
+        assert!(owner_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_owner_call);"));
+        assert!(owner_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_owner_write);"));
+        assert!(owner_body.contains("CAKE_GAME_DIAG_INC(cpu, publish_owner_noop);"));
+    }
+
+    #[test]
+    fn bpf_release_route_observe_is_pending_gated_before_noinline_call() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let stopping_body =
+            source_body_between(src, "void BPF_STRUCT_OPS(cake_stopping", "return;\n#else")
+                .expect("release stopping fast path should be present");
+
+        assert!(source_contains(
+            stopping_body,
+            "u64 route_pred = READ_ONCE(bss->route_prediction_last);"
+        ));
+        assert!(source_contains(
+            stopping_body,
+            "bool route_pending = p->pid &&
+                    (u32)route_pred == p->pid &&
+                    (route_pred & CAKE_ROUTE_PRED_PENDING);"
+        ));
+        assert!(source_contains(
+            stopping_body,
+            "if (route_pending)
+                    cake_route_pred_observe(bss, p, rt_raw, runnable);"
+        ));
+    }
+
+    #[test]
     fn bpf_release_native_first_bulk_escape_is_service_guarded() {
         let src = include_str!("bpf/cake.bpf.c");
         let compact = compact_source(src);
@@ -1812,6 +2190,7 @@ mod tests {
                     slice = default_bulk_slice;
             p->scx.slice = slice;
             p->scx.dsq_vtime += slice + nice_adj;
+            CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
             dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
                                enq_flags);"
         ));
@@ -1933,7 +2312,8 @@ mod tests {
         assert!(source_contains(
             enqueue_body,
             "cake_busy_wake_kick_from_status_service(
-                                    p, target_status, service_kind)"
+                                    p, target_status, service_kind,
+                                    target_cpu)"
         ));
     }
 
@@ -2232,7 +2612,8 @@ mod tests {
              cake_core_steal_pending_maybe_cpu(cpu_idx)) &&
             cake_dispatch_try_core_steal_ordered(dispatch_bss, prev, cpu_idx,
                                                 fairness_due,
-                                                stream_bleed_due))
+                                                stream_bleed_due)) {
+                CAKE_GAME_DIAG_INC(cpu_idx, dispatch_core_steal_hit);
                 return;"
         ));
         assert!(core_steal_dispatch_pos < llc_pull_pos);
@@ -2319,6 +2700,13 @@ mod tests {
     #[test]
     fn bpf_release_perf_sched_pipe_avoids_busy_preempt_contract() {
         let src = include_str!("bpf/cake.bpf.c");
+        let kick_body = source_body_between(
+            src,
+            "cake_busy_wake_kick_from_status_service",
+            "static __always_inline __maybe_unused u64
+cake_busy_wake_kick_from_status(",
+        )
+        .expect("busy wake kick helper should be present");
 
         assert!(src.contains("#define CAKE_TASK_SERVICE_PERF_SCHED_PIPE 6U"));
         assert!(src.contains("CAKE_COMM_SCHED_PIPE0"));
@@ -2342,6 +2730,11 @@ mod tests {
             "if (cake_service_avoids_busy_preempt(service_kind))
                     return SCX_KICK_IDLE;"
         ));
+        assert!(
+            kick_body.find("if (cake_service_avoids_busy_preempt(service_kind))")
+                < kick_body.find("#if CAKE_WAKE_PREEMPT_ELAPSED_VALUE"),
+            "service classes that avoid busy preempt must bypass elapsed preempt too"
+        );
         assert!(source_contains(
             src,
             "if (cake_service_avoids_busy_preempt(service_kind))
@@ -2723,9 +3116,16 @@ cake_service_transition_reset_state",
             stopping_body,
             "cake_route_pred_observe(bss, p, rt_raw, runnable);
              cake_publish_cpu_owner(cpu, bss, owner_avg_runtime_ns);
-             if (!cake_accounting_relaxed(bss))
-                     cake_scoreboard_owner_result(bss, owner_avg_runtime_ns);"
+             bool relaxed = cake_accounting_relaxed(bss);"
         ));
+        assert_eq!(
+            compact_source(stopping_body)
+                .matches("cake_accounting_relaxed(bss)")
+                .count(),
+            1
+        );
+        assert!(stopping_body.contains("if (!relaxed) {"));
+        assert!(stopping_body.contains("cake_scoreboard_owner_result(bss, owner_avg_runtime_ns);"));
     }
 
     #[test]
@@ -2803,11 +3203,10 @@ cake_service_transition_reset_state",
         ));
         assert!(source_contains(
             body,
-            "scx_bpf_kick_cpu(
-                                target_cpu,
-                                cake_busy_wake_kick_from_status_service(
-                                    p, target_status, service_kind));"
+            "u64 kick = cake_busy_wake_kick_from_status_service(
+                                    p, target_status, service_kind, target_cpu);"
         ));
+        assert!(source_contains(body, "scx_bpf_kick_cpu(target_cpu, kick);"));
         assert!(!body.contains("owner_avg_runtime_ns = READ_ONCE("));
         assert!(!body.contains("owner_run_count)"));
         assert!(!body.contains("cake_busy_wake_policy_should_preempt(\n\t\t\t\t\t    p"));
@@ -3018,6 +3417,7 @@ struct cake_throughput_lane throughput_lane[CAKE_MAX_CPUS];"
                 (!cache_simple_active || stream_bleed_due) &&
                 cake_dispatch_try_stream_service()) {
                     cake_mixed_stream_note_service(dispatch_bss);
+                    CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);
                     return;"
         ));
     }
@@ -3054,7 +3454,8 @@ struct cake_throughput_lane throughput_lane[CAKE_MAX_CPUS];"
         assert!(source_contains(
             dispatch_body,
             "if (cake_mixed_stream_debt_saturated(dispatch_dec) &&
-                cake_dispatch_try_saturated_stream_debt(dispatch_bss, cpu_idx))
+                cake_dispatch_try_saturated_stream_debt(dispatch_bss, cpu_idx)) {
+                    CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);
                     return;"
         ));
         assert!(source_contains(
@@ -3126,6 +3527,7 @@ cake_dispatch_try_sat_keep_running",
             dispatch_body,
             "cake_dispatch_try_stream_service()) {
                     cake_mixed_stream_note_service(dispatch_bss);
+                    CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);
                     return;"
         ));
         assert!(source_contains(

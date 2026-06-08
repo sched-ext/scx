@@ -11,6 +11,7 @@ bench/*
 !bench/scx_cake_bench_capture.sh
 !bench/scx_cake_bench_suite.sh
 !bench/scx_cake_policy_bench.sh
+!bench/scx_cake_game_diag_extract.py
 
 # MangoHud performance logs
 mangohud/

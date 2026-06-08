@@ -109,9 +109,7 @@ impl TrustGovernor {
             return;
         };
 
-        let limit = nr_cpus
-            .min(bss.cpu_bss.len())
-            .min(bss.trust_user.len());
+        let limit = nr_cpus.min(bss.cpu_bss.len()).min(bss.trust_user.len());
         for idx in 0..limit {
             let confidence = bss.cpu_bss[idx].decision_confidence;
             let ready = confidence_trust_prev_ready(confidence);

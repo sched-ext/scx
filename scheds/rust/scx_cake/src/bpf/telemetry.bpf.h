@@ -4,6 +4,29 @@
 
 /* Per-CPU global stats — BSS array, 256B aligned per entry.
  * Direct indexing keeps the hot path simple and avoids helper indirection. */
+#ifndef CAKE_GAME_DIAG
+#define CAKE_GAME_DIAG 0
+#endif
+
+#if CAKE_GAME_DIAG
+struct cake_game_diag game_diag[CAKE_MAX_CPUS] SEC(".bss")
+	__attribute__((aligned(256)));
+
+static __always_inline struct cake_game_diag *cake_game_diag_for(u32 cpu)
+{
+	return &game_diag[cpu & (CAKE_MAX_CPUS - 1)];
+}
+
+#define CAKE_GAME_DIAG_INC(cpu, field)                                  \
+	do {                                                            \
+		struct cake_game_diag *__gd = cake_game_diag_for(cpu);  \
+		__sync_fetch_and_add(&__gd->field, 1);                  \
+	} while (0)
+#else
+#define CAKE_GAME_DIAG_INC(cpu, field) \
+	do { (void)(cpu); } while (0)
+#endif
+
 #ifndef CAKE_RELEASE
 struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss")
 	__attribute__((aligned(256)));

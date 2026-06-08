@@ -1749,9 +1749,13 @@ cake_task_is_affinitized(const struct task_struct *p)
 #define CAKE_COMM3(c0, c1, c2) \
 	(((u64)(u8)(c0)) | (((u64)(u8)(c1)) << 8) | \
 	 (((u64)(u8)(c2)) << 16))
+#define CAKE_COMM4(c0, c1, c2, c3) \
+	(((u64)(u8)(c0)) | (((u64)(u8)(c1)) << 8) | \
+	 (((u64)(u8)(c2)) << 16) | (((u64)(u8)(c3)) << 24))
 
 #define CAKE_COMM_MASK2 0x0000ffffULL
 #define CAKE_COMM_MASK3 0x00ffffffULL
+#define CAKE_COMM_MASK4 0x00000000ffffffffULL
 #define CAKE_COMM_MASK7 0x00ffffffffffffffULL
 #define CAKE_COMM_STRESS0 CAKE_COMM8('s', 't', 'r', 'e', 's', 's', '-', 'n')
 #define CAKE_COMM_STRESS1_CACHE CAKE_COMM3('g', '-', 'c')
@@ -1762,12 +1766,71 @@ cake_task_is_affinitized(const struct task_struct *p)
 #define CAKE_COMM_SCHED1 CAKE_COMM7('s', 's', 'a', 'g', 'i', 'n', 'g')
 #define CAKE_COMM_SCHED_PIPE0 CAKE_COMM8('s', 'c', 'h', 'e', 'd', '-', 'p', 'i')
 #define CAKE_COMM_SCHED_PIPE1 CAKE_COMM2('p', 'e')
+#define CAKE_COMM_GAME_THREAD CAKE_COMM8('G', 'a', 'm', 'e', 'T', 'h', 'r', 'e')
+#define CAKE_COMM_RENDER_THREAD CAKE_COMM8('R', 'e', 'n', 'd', 'e', 'r', 'T', 'h')
+#define CAKE_COMM_TASKGRAPH_THREAD CAKE_COMM8('T', 'a', 's', 'k', 'G', 'r', 'a', 'p')
+#define CAKE_COMM_POOL_THREAD CAKE_COMM8('P', 'o', 'o', 'l', 'T', 'h', 'r', 'e')
+#define CAKE_COMM_FPSAIM_THREAD CAKE_COMM8('F', 'P', 'S', 'A', 'i', 'm', 'T', 'r')
+#define CAKE_COMM_CHROME_THREAD CAKE_COMM7('C', 'h', 'r', 'o', 'm', 'e', '_')
+#define CAKE_COMM_CRGPU_THREAD CAKE_COMM8('C', 'r', 'G', 'p', 'u', 'M', 'a', 'i')
+#define CAKE_COMM_DXVK_THREAD CAKE_COMM4('d', 'x', 'v', 'k')
+#define CAKE_COMM_AUDIO_THREAD CAKE_COMM8('A', 'u', 'd', 'i', 'o', 'T', 'h', 'r')
+#define CAKE_COMM_AUDIO_MIXER CAKE_COMM8('A', 'u', 'd', 'i', 'o', 'M', 'i', 'x')
+#define CAKE_COMM_FAUDIO_THREAD CAKE_COMM8('F', 'A', 'u', 'd', 'i', 'o', '_', 'A')
 
 static __always_inline u64 cake_task_comm_word(const struct task_struct *p,
 					       u32 word)
 {
 	return ((const u64 *)p->comm)[word];
 }
+
+#if CAKE_GAME_DIAG
+static __always_inline void
+cake_game_diag_count_nfw_hit_comm(const struct task_struct *p, u32 cpu)
+{
+	u64 comm0 = cake_task_comm_word(p, 0);
+
+	if (comm0 == CAKE_COMM_GAME_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_game_thread);
+		return;
+	}
+	if (comm0 == CAKE_COMM_RENDER_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_render_thread);
+		return;
+	}
+	if (comm0 == CAKE_COMM_TASKGRAPH_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_taskgraph_thread);
+		return;
+	}
+	if (comm0 == CAKE_COMM_POOL_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_pool_thread);
+		return;
+	}
+	if (comm0 == CAKE_COMM_FPSAIM_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_fpsaim_thread);
+		return;
+	}
+	if ((comm0 & CAKE_COMM_MASK7) == CAKE_COMM_CHROME_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_chrome_thread);
+		return;
+	}
+	if (comm0 == CAKE_COMM_CRGPU_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_crgpu_thread);
+		return;
+	}
+	if ((comm0 & CAKE_COMM_MASK4) == CAKE_COMM_DXVK_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_dxvk_thread);
+		return;
+	}
+	if (comm0 == CAKE_COMM_AUDIO_THREAD ||
+	    comm0 == CAKE_COMM_AUDIO_MIXER ||
+	    comm0 == CAKE_COMM_FAUDIO_THREAD) {
+		CAKE_GAME_DIAG_INC(cpu, nfw_hit_audio_thread);
+		return;
+	}
+	CAKE_GAME_DIAG_INC(cpu, nfw_hit_other_thread);
+}
+#endif
 
 static __always_inline u32
 cake_task_stress_ng_kind(const struct task_struct *p)
@@ -2392,12 +2455,16 @@ static __always_inline void cake_publish_cpu_idle(u32 cpu)
 	u32 idx = cpu & (CAKE_MAX_CPUS - 1);
 	u64 old = READ_ONCE(cpu_status[idx].flags);
 
+	CAKE_GAME_DIAG_INC(cpu, publish_idle_call);
 	if (!(old & CAKE_CPU_STATUS_IDLE)) {
 		u64 next = cake_status_bump_epoch(old) | CAKE_CPU_STATUS_IDLE |
 			   CAKE_CPU_STATUS_ACCEPT_WAKE;
 
 		WRITE_ONCE(cpu_status[idx].flags, next);
 		cake_scoreboard_summary_publish(cpu, next);
+		CAKE_GAME_DIAG_INC(cpu, publish_idle_write);
+	} else {
+		CAKE_GAME_DIAG_INC(cpu, publish_idle_noop);
 	}
 }
 
@@ -2406,6 +2473,7 @@ static __always_inline void cake_publish_cpu_running(u32 cpu, bool task_changed)
 	u32 idx = cpu & (CAKE_MAX_CPUS - 1);
 	u64 old = READ_ONCE(cpu_status[idx].flags);
 
+	CAKE_GAME_DIAG_INC(cpu, publish_running_call);
 	if (task_changed) {
 		u64 next = cake_make_cpu_status(false, CAKE_CPU_OWNER_UNKNOWN,
 						CAKE_CPU_PRESSURE_LOW,
@@ -2416,6 +2484,9 @@ static __always_inline void cake_publish_cpu_running(u32 cpu, bool task_changed)
 		if (!cake_status_same_visible_state(old, next)) {
 			WRITE_ONCE(cpu_status[idx].flags, next);
 			cake_scoreboard_summary_publish(cpu, next);
+			CAKE_GAME_DIAG_INC(cpu, publish_running_write);
+		} else {
+			CAKE_GAME_DIAG_INC(cpu, publish_running_noop);
 		}
 		return;
 	}
@@ -2429,6 +2500,9 @@ static __always_inline void cake_publish_cpu_running(u32 cpu, bool task_changed)
 		next |= (u64)heavy;
 		WRITE_ONCE(cpu_status[idx].flags, next);
 		cake_scoreboard_summary_publish(cpu, next);
+		CAKE_GAME_DIAG_INC(cpu, publish_running_write);
+	} else {
+		CAKE_GAME_DIAG_INC(cpu, publish_running_noop);
 	}
 }
 
@@ -2453,6 +2527,7 @@ static __always_inline void cake_publish_cpu_owner(u32 cpu,
 	u64 wake_preempt;
 	u64 next;
 
+	CAKE_GAME_DIAG_INC(cpu, publish_owner_call);
 	owner_runs = READ_ONCE(bss->owner_run_count);
 	owner_service_kind = READ_ONCE(bss->owner_service_kind);
 	sat_cache_mem = CAKE_CPU_STATUS_SAT_CACHE_MEM &
@@ -2481,6 +2556,9 @@ static __always_inline void cake_publish_cpu_owner(u32 cpu,
 	if (!cake_status_same_visible_state(old, next)) {
 		WRITE_ONCE(cpu_status[idx].flags, next);
 		cake_scoreboard_summary_publish(cpu, next);
+		CAKE_GAME_DIAG_INC(cpu, publish_owner_write);
+	} else {
+		CAKE_GAME_DIAG_INC(cpu, publish_owner_noop);
 	}
 }
 
@@ -3273,6 +3351,41 @@ static __noinline __maybe_unused bool cake_smt_any_neighbor_busy(u32 target_cpu)
 	return !(sibling_status & CAKE_CPU_STATUS_IDLE);
 }
 
+static __always_inline __maybe_unused bool
+cake_nfw_prev_idle_sibling_clear(u32 target_cpu)
+{
+	return !cake_smt_latency_neighbor_busy(target_cpu);
+}
+
+/* Lean prev-claim (SCX_CAKE_NFW_LEAN_PREV): per-wake cost cut. The default
+ * nfw warm-prev path gates the idle claim on a remote SMT-sibling status read
+ * (cake_nfw_prev_idle_sibling_clear). That read costs a cross-core cacheline
+ * fetch every wake, and when it reports the sibling busy it BLOCKS reusing the
+ * cache-warm prev_cpu and forces the expensive fallback (select_cpu_dfl scan +
+ * cold-core migration). Under the knob we drop the sibling gate and take prev
+ * whenever it is idle (single test_and_clear), trading a little SMT-contention
+ * latency for a cheaper wake and more cache warmth — an avg-fps lever. */
+#ifndef CAKE_NFW_LEAN_PREV
+#define CAKE_NFW_LEAN_PREV 0
+#endif
+#ifndef CAKE_NFW_STRICT_SIBLING
+#define CAKE_NFW_STRICT_SIBLING 0
+#endif
+#if CAKE_NFW_LEAN_PREV
+#define cake_nfw_prev_take_ok(cpu) (true)
+#elif CAKE_NFW_STRICT_SIBLING
+/* Strict full-idle-core prev (SCX_CAKE_NFW_STRICT_SIBLING): take the warm
+ * prev_cpu only if its SMT sibling is FULLY idle — reject even dxvk/bulk
+ * siblings (the default latency check ignores them, which is why cake parks
+ * GameThread/RenderThread on dxvk-busy siblings ~12x more than EEVDF). A
+ * busy-sibling prev falls through to the builtin idle pick, which prefers
+ * whole idle cores like EEVDF's select_idle_core — driving SMT contention
+ * down toward EEVDF's ~0.3%. */
+#define cake_nfw_prev_take_ok(cpu) (!cake_smt_any_neighbor_busy(cpu))
+#else
+#define cake_nfw_prev_take_ok(cpu) cake_nfw_prev_idle_sibling_clear(cpu)
+#endif
+
 #if CAKE_SMT_CLEAN_SELECT_VALUE
 #define cake_smt_select_neighbor_busy(cpu) cake_smt_any_neighbor_busy(cpu)
 #else
@@ -3573,6 +3686,16 @@ static __noinline void cake_clamp_wakeup_vtime(struct task_struct *p,
 static __noinline void cake_insert_llc_vtime(struct task_struct *p,
 					     u64 enq_flags, u32 target_cpu,
 					     u64 slice);
+static __always_inline void cake_nfw_dsq_insert(struct task_struct *p,
+						u64 dsq_id, u64 slice)
+{
+#if CAKE_DSQ_INSERT_V2_FASTPATH
+	scx_bpf_dsq_insert___v2___compat(p, dsq_id, slice, 0);
+#else
+	dsq_insert_wrapper(p, dsq_id, slice, 0);
+#endif
+}
+
 static __always_inline __maybe_unused bool
 cake_service_avoids_busy_preempt(u32 service_kind)
 {
@@ -3666,6 +3789,8 @@ cake_busy_wake_kick_from_status_service(struct task_struct *wakee,
 	if (wakee->flags & PF_KTHREAD)
 		return SCX_KICK_PREEMPT;
 #endif
+	if (cake_service_avoids_busy_preempt(service_kind))
+		return SCX_KICK_IDLE;
 	/* Elapsed-gated wake preempt (SCX_CAKE_WAKE_PREEMPT_ELAPSED):
 	 * EEVDF-eligibility-like decision without per-task deadlines — an
 	 * owner that already ran most of a typical burst yields to the
@@ -3700,8 +3825,6 @@ cake_busy_wake_kick_from_status_service(struct task_struct *wakee,
 			return SCX_KICK_PREEMPT;
 	}
 #endif
-	if (cake_service_avoids_busy_preempt(service_kind))
-		return SCX_KICK_IDLE;
 	if ((target_status & CAKE_CPU_STATUS_PREEMPT_WAKE) || wakee->prio < 120 ||
 	    wakee->scx.weight > 120)
 		return SCX_KICK_PREEMPT;
@@ -3878,6 +4001,7 @@ cake_try_insert_local_waiter_normal_service(struct task_struct *p,
 		lw_stats->nr_local_waiter_attempt++;
 	}
 #endif
+	CAKE_GAME_DIAG_INC(target_cpu, local_waiter_attempt);
 	if (service_kind == CAKE_TASK_SERVICE_STRESS_FUTEX) {
 		if (!cake_local_waiter_admit_futex_service(p, target_status)) {
 			CAKE_FUTEX_TRACE_INC(target_cpu,
@@ -3886,6 +4010,7 @@ cake_try_insert_local_waiter_normal_service(struct task_struct *p,
 			if (lw_stats)
 				lw_stats->nr_local_waiter_reject++;
 #endif
+			CAKE_GAME_DIAG_INC(target_cpu, local_waiter_reject);
 			return false;
 		}
 		CAKE_FUTEX_TRACE_INC(target_cpu, local_waiter_futex_insert);
@@ -3893,6 +4018,7 @@ cake_try_insert_local_waiter_normal_service(struct task_struct *p,
 		if (lw_stats)
 			lw_stats->nr_local_waiter_insert++;
 #endif
+		CAKE_GAME_DIAG_INC(target_cpu, local_waiter_insert);
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 				   enq_flags | SCX_ENQ_HEAD | SCX_ENQ_IMMED);
 		return true;
@@ -3904,6 +4030,7 @@ cake_try_insert_local_waiter_normal_service(struct task_struct *p,
 		if (lw_stats)
 			lw_stats->nr_local_waiter_reject++;
 #endif
+		CAKE_GAME_DIAG_INC(target_cpu, local_waiter_reject);
 		return false;
 	}
 
@@ -3914,10 +4041,13 @@ cake_try_insert_local_waiter_normal_service(struct task_struct *p,
 	if (cake_local_waiter_quench_current(target_cpu, p, target_status)) {
 		if (lw_stats)
 			lw_stats->nr_local_waiter_quench_current++;
+		CAKE_GAME_DIAG_INC(target_cpu, local_waiter_quench);
 	}
 #else
-	cake_local_waiter_quench_current(target_cpu, p, target_status);
+	if (cake_local_waiter_quench_current(target_cpu, p, target_status))
+		CAKE_GAME_DIAG_INC(target_cpu, local_waiter_quench);
 #endif
+	CAKE_GAME_DIAG_INC(target_cpu, local_waiter_insert);
 	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 			   enq_flags | SCX_ENQ_HEAD);
 	scx_bpf_kick_cpu(target_cpu, SCX_KICK_PREEMPT);
@@ -3939,6 +4069,8 @@ cake_try_insert_local_waiter_service(struct task_struct *p, u32 target_cpu,
 			lw_stats->nr_local_waiter_reject++;
 		}
 #endif
+		CAKE_GAME_DIAG_INC(target_cpu, local_waiter_attempt);
+		CAKE_GAME_DIAG_INC(target_cpu, local_waiter_reject);
 		return false;
 	}
 
@@ -3966,10 +4098,26 @@ static __always_inline void
 cake_insert_local_kick_idle(struct task_struct *p, u32 target_cpu, u64 slice,
 			    u64 enq_flags, u64 target_status)
 {
+	CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
 	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice, enq_flags);
 
-	if (target_status & CAKE_CPU_STATUS_IDLE)
+	if (target_status & CAKE_CPU_STATUS_IDLE) {
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_direct);
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_idle);
+		CAKE_GAME_DIAG_INC(target_cpu, wake_kick_idle);
+		/* Redundant-idle-kick ablation (SCX_CAKE_ENQ_SKIP_IDLE_KICK):
+		 * the kernel's local_dsq_post_enq() already reschedules an idle
+		 * target on the deferred insert (wakeup_preempt -> resched_curr,
+		 * kernel/sched/ext.c), so this explicit kick may be a redundant
+		 * kfunc-entry (rcu + scx_prog_sched + validation) on every idle
+		 * wake. Knob drops it; measure enqueue ns + FPS to confirm. */
+#ifndef CAKE_ENQ_SKIP_IDLE_KICK
+#define CAKE_ENQ_SKIP_IDLE_KICK 0
+#endif
+#if !CAKE_ENQ_SKIP_IDLE_KICK
 		scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+#endif
+	}
 }
 
 #endif
@@ -5567,16 +5715,116 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	    && !(p->flags & PF_KTHREAD) && !cake_task_is_affinitized(p)
 #endif
 	) {
-		s32 nfw_cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
+		s32 nfw_cpu = -1;
+
+#if CAKE_GAME_DIAG
+		if (prev_cpu >= 0 && prev_cpu < cake_nr_cpus
+#if CAKE_NATIVE_FAST_WAKE_WIDE
+		    && bpf_cpumask_test_cpu((u32)prev_cpu, p->cpus_ptr)
+#endif
+		) {
+			CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_attempt);
+			if (cake_nfw_prev_take_ok((u32)prev_cpu)) {
+				if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+					CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_claim);
+					nfw_cpu = prev_cpu;
+				}
+			} else {
+				CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_sibling_block);
+			}
+		}
+#else
+		if (prev_cpu >= 0 && prev_cpu < cake_nr_cpus &&
+#if CAKE_NATIVE_FAST_WAKE_WIDE
+		    bpf_cpumask_test_cpu((u32)prev_cpu, p->cpus_ptr) &&
+#endif
+		    cake_nfw_prev_take_ok((u32)prev_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			nfw_cpu = prev_cpu;
+#endif
+#if CAKE_GAME_DIAG
+		if (nfw_cpu < 0) {
+			CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_fallback_attempt);
+			nfw_cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
+			if (nfw_cpu >= 0) {
+				CAKE_GAME_DIAG_INC(local_cpu, nfw_prev_idle_fallback_hit);
+				if (nfw_cpu == prev_cpu)
+					CAKE_GAME_DIAG_INC(
+						local_cpu,
+						nfw_prev_idle_fallback_prev);
+				else
+					CAKE_GAME_DIAG_INC(
+						local_cpu,
+						nfw_prev_idle_fallback_other);
+			}
+		}
+#else
+		if (nfw_cpu < 0)
+			nfw_cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
+#endif
+		CAKE_GAME_DIAG_INC(local_cpu, nfw_entry);
 
 		if (nfw_cpu >= 0) {
 			u64 nfw_slice = quantum_ns;
 
+			CAKE_GAME_DIAG_INC(local_cpu, nfw_hit);
+#if CAKE_GAME_DIAG
+			cake_game_diag_count_nfw_hit_comm(p, local_cpu);
+			if (prev_cpu >= 0 && prev_cpu < cake_nr_cpus) {
+				u32 prev_u = (u32)prev_cpu;
+				u16 prev_primary;
+				u16 nfw_primary;
+
+				if (nfw_cpu == prev_cpu)
+					CAKE_GAME_DIAG_INC(local_cpu,
+							   nfw_hit_prev_cpu);
+				else
+					CAKE_GAME_DIAG_INC(local_cpu,
+							   nfw_hit_other_cpu);
+				if ((u32)nfw_cpu == local_cpu)
+					CAKE_GAME_DIAG_INC(local_cpu,
+							   nfw_hit_select_cpu);
+				prev_primary = cake_primary_cpu((u16)prev_u);
+				nfw_primary = cake_primary_cpu((u16)nfw_cpu);
+				if (prev_primary != CAKE_CPU_SENTINEL &&
+				    nfw_primary != CAKE_CPU_SENTINEL) {
+					if (prev_primary == nfw_primary)
+						CAKE_GAME_DIAG_INC(
+							local_cpu,
+							nfw_hit_prev_primary);
+					else
+						CAKE_GAME_DIAG_INC(
+							local_cpu,
+							nfw_hit_other_primary);
+				}
+			} else {
+				CAKE_GAME_DIAG_INC(local_cpu, nfw_hit_other_cpu);
+			}
+			{
+				s32 local_depth = scx_bpf_dsq_nr_queued(
+					SCX_DSQ_LOCAL_ON | (u32)nfw_cpu);
+
+				CAKE_GAME_DIAG_INC(local_cpu,
+						   nfw_hit_local_depth_sample);
+				if (local_depth > 0)
+					CAKE_GAME_DIAG_INC(
+						local_cpu,
+						nfw_hit_local_depth_nonzero);
+				if (local_depth > 1)
+					CAKE_GAME_DIAG_INC(local_cpu,
+							   nfw_hit_local_depth_gt1);
+				if (local_depth > 3)
+					CAKE_GAME_DIAG_INC(local_cpu,
+							   nfw_hit_local_depth_gt3);
+			}
+#endif
+			CAKE_GAME_DIAG_INC(local_cpu, nfw_direct_insert);
 			p->scx.slice = nfw_slice;
-			dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | (u32)nfw_cpu,
-					   nfw_slice, 0);
+			cake_nfw_dsq_insert(
+				p, SCX_DSQ_LOCAL_ON | (u32)nfw_cpu, nfw_slice);
 			return nfw_cpu;
 		}
+		CAKE_GAME_DIAG_INC(local_cpu, nfw_miss);
 #if CAKE_NFW_MISS_SHARED
 		/* Work-conserving miss: no idle CPU exists, so park the wakee
 		 * in the shared per-LLC vtime queue instead of prev's local
@@ -5595,6 +5843,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			p->scx.slice = ms_slice;
 			p->scx.dsq_vtime += ms_slice;
 			cake_clamp_wakeup_vtime(p, ms_cpu);
+			CAKE_GAME_DIAG_INC(local_cpu, nfw_miss_shared);
 			cake_insert_llc_vtime(p, 0, ms_cpu, ms_slice);
 			return prev_cpu;
 		}
@@ -5605,9 +5854,11 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * Tunnel straight to prev — at the GameThread→RenderThread
 		 * overlap edge this miss fires every frame, so the skipped
 		 * machinery is per-frame serial cost. */
+		CAKE_GAME_DIAG_INC(local_cpu, nfw_miss_tunnel);
 		goto tunnel;
 #endif
 		/* Miss: fall through to Cake's guarded machinery. */
+		CAKE_GAME_DIAG_INC(local_cpu, nfw_fallthrough);
 	}
 #endif
 	/* Generic bulk escape: for non-service, non-sync, default-user work,
@@ -5953,6 +6204,7 @@ tunnel:
 	 * enqueue route the task through the normal per-CPU local path. */
 	{
 		CAKE_FUTEX_TRACE_INC(local_cpu, tunnel_enter);
+		CAKE_GAME_DIAG_INC(local_cpu, select_tunnel);
 #if CAKE_FUTEX_TRACE
 		if (cake_task_service_kind(p) == CAKE_TASK_SERVICE_STRESS_FUTEX)
 			CAKE_FUTEX_TRACE_INC(local_cpu, tunnel_futex);
@@ -6486,7 +6738,8 @@ cake_dispatch_try_idle_core_steal_rescue(struct cake_cpu_bss *dispatch_bss,
 		}
 		u32 sibling = (u32)cpu_sibling_map[idx & (CAKE_MAX_CPUS - 1)];
 		if (sibling < cake_nr_cpus && sibling != idx) {
-			struct scx_lfdeq __arena *prim_sib_lfdeq = get_cpu_lfdeq(sibling);
+			struct scx_lfdeq __arena *prim_sib_lfdeq =
+				get_cpu_lfdeq(sibling);
 			if (prim_sib_lfdeq) {
 				u64 h = READ_ONCE(prim_sib_lfdeq->head);
 				u64 t = READ_ONCE(prim_sib_lfdeq->tail);
@@ -6597,6 +6850,7 @@ static __always_inline __maybe_unused void
 cake_insert_llc_pending_vtime(struct task_struct *p, u64 enq_flags,
 			      u32 target_cpu, u64 slice)
 {
+	CAKE_GAME_DIAG_INC(target_cpu, shared_vtime_insert);
 #if CAKE_HAS_LLC_PENDING
 	cake_llc_pending_mark_cpu(target_cpu);
 #endif
@@ -6984,6 +7238,7 @@ static __always_inline __maybe_unused void
 cake_insert_shared_escape(struct task_struct *p, u64 enq_flags, u32 target_cpu,
 			  u64 slice, bool preserve_state)
 {
+	CAKE_GAME_DIAG_INC(target_cpu, shared_escape);
 	cake_insert_llc_pending_vtime(p, enq_flags, target_cpu, slice);
 	cake_record_shared_vtime_insert(enq_flags, preserve_state, target_cpu);
 }
@@ -6992,6 +7247,7 @@ static __noinline __maybe_unused void
 cake_insert_default_bulk_shared_escape(struct task_struct *p, u64 enq_flags,
 				       u32 target_cpu, u64 slice)
 {
+	CAKE_GAME_DIAG_INC(target_cpu, shared_escape);
 	cake_insert_llc_pending_vtime(p, enq_flags, target_cpu, slice);
 	cake_record_shared_vtime_insert(enq_flags, false, target_cpu);
 }
@@ -7120,6 +7376,7 @@ cake_insert_work_steal_busy_fallback(struct task_struct *p, u64 enq_flags,
 				     u32 target_cpu, u64 slice,
 				     u64 target_status)
 {
+	CAKE_GAME_DIAG_INC(target_cpu, shared_escape);
 	cake_insert_llc_pending_vtime(p, enq_flags, target_cpu, slice);
 	cake_record_shared_vtime_insert(enq_flags, false, target_cpu);
 	cake_kick_busy_wake_shared_escape(target_cpu, target_status);
@@ -8218,12 +8475,22 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 #if CAKE_LEAN_SCHED
 #if defined(CAKE_RELEASE) && CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL
 	u32 target_cpu = cake_task_cpu(p);
+	u32 enqueue_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 	u64 slice = quantum_ns;
 	u32 weight = p->scx.weight;
 	s32 prio = p->prio;
 	bool kthread = !!(p->flags & PF_KTHREAD);
 	bool normal_default = !kthread && prio >= 120 && weight == 100;
 	bool is_pipe = false;
+	CAKE_GAME_DIAG_INC(enqueue_cpu, enqueue_call);
+	if (enq_flags & (u64)SCX_ENQ_WAKEUP)
+		CAKE_GAME_DIAG_INC(enqueue_cpu, enqueue_wakeup);
+	else
+		CAKE_GAME_DIAG_INC(enqueue_cpu, enqueue_non_wakeup);
+	if (enq_flags & (u64)SCX_ENQ_REENQ)
+		CAKE_GAME_DIAG_INC(enqueue_cpu, enqueue_requeue);
+	if (enq_flags & (u64)SCX_ENQ_PREEMPT)
+		CAKE_GAME_DIAG_INC(enqueue_cpu, enqueue_preserve);
 	if (normal_default) {
 		u64 comm0 = cake_task_comm_word(p, 0);
 		if (comm0 == CAKE_COMM_SCHED_PIPE0 &&
@@ -8235,9 +8502,11 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	if (is_pipe) {
 		cake_service_transition_reset_state(target_cpu, CAKE_TASK_SERVICE_PERF_SCHED_PIPE);
 		p->scx.slice = slice;
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice, enq_flags);
 		u64 target_status = cake_read_cpu_status(target_cpu);
 		if (target_status & CAKE_CPU_STATUS_IDLE) {
+			CAKE_GAME_DIAG_INC(target_cpu, wake_kick_idle);
 			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 		}
 		return;
@@ -8259,15 +8528,27 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		p->scx.slice = slice;
 		p->scx.dsq_vtime += slice;
 		cake_clamp_wakeup_vtime(p, target_cpu);
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 				   enq_flags);
-		if (!(fe_status & CAKE_CPU_STATUS_IDLE))
-			scx_bpf_kick_cpu(
-				target_cpu,
-				cake_busy_wake_kick_from_status_service(
-					p, fe_status,
-					CAKE_TASK_SERVICE_NONE,
-					target_cpu));
+		if (fe_status & CAKE_CPU_STATUS_IDLE) {
+			CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_direct);
+		} else {
+			u64 kick;
+
+			CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_busy);
+			if (enqueue_cpu == target_cpu)
+				CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_busy_local);
+			else
+				CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_busy_remote);
+			kick = cake_busy_wake_kick_from_status_service(
+				p, fe_status, CAKE_TASK_SERVICE_NONE, target_cpu);
+			if (kick == SCX_KICK_PREEMPT)
+				CAKE_GAME_DIAG_INC(target_cpu, wake_kick_preempt);
+			else
+				CAKE_GAME_DIAG_INC(target_cpu, wake_kick_idle);
+			scx_bpf_kick_cpu(target_cpu, kick);
+		}
 		return;
 	}
 #endif
@@ -8289,6 +8570,8 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 
 	if (kthread && (prio < 120 || cake_task_is_affinitized(p))) {
 		p->scx.slice = slice;
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
+		CAKE_GAME_DIAG_INC(target_cpu, kthread_direct_insert);
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 				   enq_flags);
 		/* Bound/high-prio kthreads (per-CPU kworkers, IRQ threads)
@@ -8299,9 +8582,12 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		if (enq_flags & (u64)SCX_ENQ_WAKEUP) {
 			u64 kts = cake_read_cpu_status(target_cpu);
 
-			if (!(kts & CAKE_CPU_STATUS_IDLE))
+			if (!(kts & CAKE_CPU_STATUS_IDLE)) {
+				CAKE_GAME_DIAG_INC(target_cpu, wake_kick_preempt);
+				CAKE_GAME_DIAG_INC(target_cpu, kthread_wake_preempt);
 				scx_bpf_kick_cpu(target_cpu,
 						 SCX_KICK_PREEMPT);
+			}
 		}
 #endif
 		return;
@@ -8433,6 +8719,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 #endif
 
 	if (unlikely(p->scx.dsq_vtime == 0)) {
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_initial);
 		p->scx.dsq_vtime = cake_read_cpu_frontier(target_cpu);
 		p->scx.slice = slice;
 #if CAKE_HAS_LOCAL_WAITER
@@ -8447,6 +8734,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 				return;
 		}
 #endif
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 				   enq_flags);
 		return;
@@ -8455,6 +8743,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 	if (enq_flags & ((u64)SCX_ENQ_REENQ | (u64)SCX_ENQ_PREEMPT)) {
 		slice = cake_preserve_slice(p->scx.slice);
 		p->scx.slice = slice;
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 				   enq_flags);
 		return;
@@ -8479,6 +8768,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 			slice = default_bulk_slice;
 		p->scx.slice = slice;
 		p->scx.dsq_vtime += slice + nice_adj;
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 				   enq_flags);
 		return;
@@ -8512,6 +8802,7 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 			return;
 		}
 		target_cpu = cake_task_cpu(p);
+		CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
 		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
 				   enq_flags);
 		return;
@@ -8537,6 +8828,13 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		cake_clamp_wakeup_vtime(p, target_cpu);
 		if (default_bulk_protected)
 			target_status &= ~CAKE_CPU_STATUS_PREEMPT_WAKE;
+		if (!(target_status & CAKE_CPU_STATUS_IDLE)) {
+			CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_busy);
+			if (enqueue_cpu == target_cpu)
+				CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_busy_local);
+			else
+				CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_busy_remote);
+		}
 		if (CAKE_ENABLE_GUARDED_SHARED_STEAL &&
 		    cake_default_bulk_shared_escape_candidate(
 			    p, target_status, default_bulk_protected, target_cpu)) {
@@ -8571,12 +8869,25 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		}
 		cake_insert_local_kick_idle(p, target_cpu, slice, enq_flags,
 					    target_status);
-		if (!(target_status & CAKE_CPU_STATUS_IDLE))
-			scx_bpf_kick_cpu(
-				target_cpu,
-				cake_busy_wake_kick_from_status_service(
-					p, target_status, service_kind,
-					target_cpu));
+		/* Busy-kick ablation (SCX_CAKE_ENQ_SKIP_BUSY_KICK): measure the
+		 * cost of the busy-wake scx_bpf_kick_cpu kfunc and whether the
+		 * preempt-kick matters for FPS. Skipping it leaves the wakee in
+		 * the local DSQ until the target reschedules on its own. */
+#ifndef CAKE_ENQ_SKIP_BUSY_KICK
+#define CAKE_ENQ_SKIP_BUSY_KICK 0
+#endif
+#if !CAKE_ENQ_SKIP_BUSY_KICK
+		if (!(target_status & CAKE_CPU_STATUS_IDLE)) {
+			u64 kick = cake_busy_wake_kick_from_status_service(
+				p, target_status, service_kind, target_cpu);
+
+			if (kick == SCX_KICK_PREEMPT)
+				CAKE_GAME_DIAG_INC(target_cpu, wake_kick_preempt);
+			else
+				CAKE_GAME_DIAG_INC(target_cpu, wake_kick_idle);
+			scx_bpf_kick_cpu(target_cpu, kick);
+		}
+#endif
 	}
 	return;
 #else
@@ -9233,11 +9544,27 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	u64 dispatch_dec = READ_ONCE(dispatch_bss->throughput_decision);
 	bool cache_simple_active = false;
 
-	if (cake_dispatch_try_idle_core_steal_rescue(dispatch_bss, prev, cpu_idx))
-		return;
+	CAKE_GAME_DIAG_INC(cpu_idx, dispatch_call);
 
-	if (cake_dispatch_try_idle_llc_rescue(dispatch_bss, prev, cpu_idx))
+	/* Lean-dispatch rescue skip (SCX_CAKE_DISPATCH_SKIP_RESCUE): the two
+	 * idle-rescue work-conservation pulls below measured 0 hits across
+	 * 10.5M game dispatches — pure per-dispatch branch+helper cost in the
+	 * game regime. Knob compiles them out; default keeps them for loaded
+	 * (bench/contended) workloads where the steal/pull does fire. */
+#ifndef CAKE_DISPATCH_SKIP_RESCUE
+#define CAKE_DISPATCH_SKIP_RESCUE 0
+#endif
+#if !CAKE_DISPATCH_SKIP_RESCUE
+	if (cake_dispatch_try_idle_core_steal_rescue(dispatch_bss, prev, cpu_idx)) {
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_idle_core_rescue_hit);
 		return;
+	}
+
+	if (cake_dispatch_try_idle_llc_rescue(dispatch_bss, prev, cpu_idx)) {
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_idle_llc_rescue_hit);
+		return;
+	}
+#endif
 
 #if CAKE_PLANCK_LOCAL && CAKE_PLANCK_DISPATCH_GATE && !CAKE_HAS_DOMAIN_DRR
 	/* Planck v2 keeps the proven stress/cache shared-service machinery, but
@@ -9277,18 +9604,24 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	 * another residency turn, but do not throttle cache for ordinary mixed
 	 * pressure or untyped LLC work. */
 	if (cake_mixed_stream_debt_saturated(dispatch_dec) &&
-	    cake_dispatch_try_saturated_stream_debt(dispatch_bss, cpu_idx))
+	    cake_dispatch_try_saturated_stream_debt(dispatch_bss, cpu_idx)) {
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);
 		return;
+	}
 
 	cache_simple_active = !!(cache_simple & CAKE_CACHE_SIMPLE_STATE_ACTIVE);
 	if (cache_simple_active &&
 	    cake_dispatch_try_cache_simple_lane(dispatch_bss, prev, cpu_idx,
-					       cache_simple, dispatch_dec))
+					       cache_simple, dispatch_dec)) {
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_cache_hit);
 		goto dispatch_bookkeeping;
+	}
 #endif
 
-	if (cake_dispatch_try_cache_sprint(dispatch_bss, prev, dispatch_dec))
+	if (cake_dispatch_try_cache_sprint(dispatch_bss, prev, dispatch_dec)) {
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_cache_hit);
 		goto dispatch_bookkeeping;
+	}
 
 	bool route_trusted =
 		cake_route_pred_skip_fairness_dec(dispatch_bss, dispatch_dec);
@@ -9305,8 +9638,10 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	 * is intentionally outcome-driven rather than SAT-classifier-driven so
 	 * the generic keep_running path can become actionably fast. */
 	if (route_trusted) {
-		if (cake_dispatch_try_throughput_lane(cpu_idx))
+		if (cake_dispatch_try_throughput_lane(cpu_idx)) {
+			CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);
 			return;
+		}
 
 		if (!stream_bleed_due && prev &&
 		    (prev->scx.flags & SCX_TASK_QUEUED)) {
@@ -9336,6 +9671,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 			cake_record_frontier_dispatch(true);
 			cake_route_pred_mark_pending(dispatch_bss);
 			cake_throughput_charge_dispatch(dispatch_bss);
+			CAKE_GAME_DIAG_INC(cpu_idx, dispatch_keep_running);
 			goto dispatch_bookkeeping;
 		}
 		if (stream_bleed_due) {
@@ -9359,6 +9695,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 dispatch_fairness_probe:
 	if (!fairness_due && cake_dispatch_try_throughput_lane(cpu_idx)) {
 		cake_throughput_charge_dispatch(dispatch_bss);
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);
 		return;
 	}
 
@@ -9372,6 +9709,7 @@ dispatch_fairness_probe:
 	 * before deciding to keep a cache/mem-saturated owner running. */
 	if (cake_dispatch_try_core_steal_own(cpu_idx)) {
 		cake_throughput_reset_dispatch_budget(dispatch_bss);
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_core_steal_hit);
 		return;
 	}
 #endif
@@ -9386,6 +9724,7 @@ dispatch_fairness_probe:
 						       prev, false)) {
 			cake_route_pred_mark_pending(dispatch_bss);
 			cake_throughput_charge_dispatch(dispatch_bss);
+			CAKE_GAME_DIAG_INC(cpu_idx, dispatch_keep_running);
 			goto dispatch_bookkeeping;
 		}
 	}
@@ -9394,6 +9733,7 @@ dispatch_fairness_probe:
 	    (!cache_simple_active || stream_bleed_due) &&
 	    cake_dispatch_try_stream_service()) {
 		cake_mixed_stream_note_service(dispatch_bss);
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);
 		return;
 	}
 
@@ -9402,8 +9742,10 @@ dispatch_fairness_probe:
 	     cake_core_steal_pending_maybe_cpu(cpu_idx)) &&
 	    cake_dispatch_try_core_steal_ordered(dispatch_bss, prev, cpu_idx,
 						fairness_due,
-						stream_bleed_due))
+						stream_bleed_due)) {
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_core_steal_hit);
 		return;
+	}
 
 	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME) ||
 	    CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LOCAL) {
@@ -9411,6 +9753,7 @@ dispatch_fairness_probe:
 #ifdef CAKE_RELEASE
 		if (cake_dispatch_try_single_llc_pull(
 			    dispatch_bss, cpu_idx, stream_bleed_due)) {
+			CAKE_GAME_DIAG_INC(cpu_idx, dispatch_llc_pull_hit);
 			return;
 		}
 #else
@@ -9424,6 +9767,7 @@ dispatch_fairness_probe:
 #if CAKE_ACCEL_PATH
 			cake_dispatch_record_pull_result(dispatch_bss, true);
 #endif
+			CAKE_GAME_DIAG_INC(cpu_idx, dispatch_llc_pull_hit);
 			if (stats_on || path_stats_on) {
 				struct cake_stats *s =
 					get_local_stats_for(cpu_idx);
@@ -9460,6 +9804,7 @@ dispatch_fairness_probe:
 #if CAKE_ACCEL_PATH
 			cake_dispatch_record_pull_result(dispatch_bss, true);
 #endif
+			CAKE_GAME_DIAG_INC(cpu_idx, dispatch_llc_pull_hit);
 			if (stats_on || path_stats_on) {
 				struct cake_stats *s =
 					get_local_stats_for(cpu_idx);
@@ -9505,6 +9850,8 @@ dispatch_fairness_probe:
 					cake_dispatch_record_pull_result(
 						dispatch_bss, true);
 #endif
+					CAKE_GAME_DIAG_INC(cpu_idx,
+							   dispatch_llc_pull_hit);
 					if (stats_on || path_stats_on) {
 						struct cake_stats *s =
 							get_local_stats_for(
@@ -9533,6 +9880,7 @@ dispatch_fairness_probe:
 #if !(defined(CAKE_RELEASE) && CAKE_QUEUE_POLICY_VALUE == CAKE_QUEUE_POLICY_LOCAL)
 	if (cake_dispatch_try_throughput_lane(cpu_idx)) {
 		cake_throughput_charge_dispatch(dispatch_bss);
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_throughput_hit);
 		return;
 	}
 #endif
@@ -9573,6 +9921,7 @@ dispatch_fairness_probe:
 		 * while debug showed the benchmark mostly reaches this block. */
 		cake_route_pred_mark_pending(dispatch_bss);
 #endif
+		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_keep_running);
 		goto dispatch_bookkeeping;
 	}
 
@@ -9593,6 +9942,7 @@ dispatch_fairness_probe:
 	}
 #endif
 	cake_publish_cpu_idle(cpu_idx);
+	CAKE_GAME_DIAG_INC(cpu_idx, dispatch_idle);
 
 dispatch_bookkeeping:
 	if (stats_on) {
@@ -10279,6 +10629,14 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	u32		     cpu = cake_task_cpu(p) & (CAKE_MAX_CPUS - 1);
 	struct cake_cpu_bss *bss = &cpu_bss[cpu];
 
+#if CAKE_GAME_DIAG
+	CAKE_GAME_DIAG_INC(cpu, stopping_call);
+	if (runnable)
+		CAKE_GAME_DIAG_INC(cpu, stopping_runnable);
+	else
+		CAKE_GAME_DIAG_INC(cpu, stopping_blocked);
+#endif
+
 	/* Vtime integration.
 	 * Release fast path uses task_struct, private BSS, and owner-published
 	 * status/frontier lanes.
@@ -10359,7 +10717,13 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 	 * bit and kick decisions stay fresh. */
 	cake_publish_cpu_owner(cpu, bss,
 			       READ_ONCE(bss->owner_avg_runtime_ns));
+#if CAKE_GAME_DIAG
+	CAKE_GAME_DIAG_INC(cpu, stopping_lean_return);
+#endif
 	return;
+#endif
+#if CAKE_GAME_DIAG
+	CAKE_GAME_DIAG_INC(cpu, stopping_owner_update);
 #endif
 	u32  owner_avg_runtime_ns =
 		cake_update_owner_avg(bss, rt_raw, owner_service_kind);
@@ -10380,10 +10744,36 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 			CAKE_FUTEX_TRACE_INC(cpu, schbench_stopping_blocked);
 		cake_latency_service_reset_state(cpu, false);
 	}
-	cake_route_pred_observe(bss, p, rt_raw, runnable);
+#if CAKE_RELEASE_ROUTE_PRED
+	u64 route_pred = READ_ONCE(bss->route_prediction_last);
+	bool route_pending = p->pid && (u32)route_pred == p->pid &&
+			     (route_pred & CAKE_ROUTE_PRED_PENDING);
+#else
+	bool route_pending = false;
+#endif
+#if CAKE_GAME_DIAG
+	CAKE_GAME_DIAG_INC(cpu, stopping_route_observe);
+	if (route_pending)
+		CAKE_GAME_DIAG_INC(cpu, stopping_route_pending);
+	else
+		CAKE_GAME_DIAG_INC(cpu, stopping_route_no_pending);
+#endif
+	if (route_pending)
+		cake_route_pred_observe(bss, p, rt_raw, runnable);
 	cake_publish_cpu_owner(cpu, bss, owner_avg_runtime_ns);
-	if (!cake_accounting_relaxed(bss))
+	bool relaxed = cake_accounting_relaxed(bss);
+#if CAKE_GAME_DIAG
+	if (relaxed)
+		CAKE_GAME_DIAG_INC(cpu, stopping_account_relaxed);
+	else
+		CAKE_GAME_DIAG_INC(cpu, stopping_account_audit);
+#endif
+	if (!relaxed) {
+#if CAKE_GAME_DIAG
+		CAKE_GAME_DIAG_INC(cpu, stopping_scoreboard_owner_result);
+#endif
 		cake_scoreboard_owner_result(bss, owner_avg_runtime_ns);
+	}
 	return;
 #else
 	bool relaxed = cake_accounting_relaxed(bss);

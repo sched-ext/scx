@@ -1081,6 +1081,101 @@ _Static_assert(sizeof(struct cake_task_ctx) == CAKE_TCTX_SIZE,
 /* Statistics shared with userspace.
  * Some legacy counters remain in the layout for TUI compatibility
  * even when current release code no longer increments them. */
+struct cake_game_diag {
+	u64 nfw_entry; /* Native-fast-wake candidate entered */
+	u64 nfw_hit; /* Native idle pick hit */
+	u64 nfw_hit_prev_cpu; /* NFW hit kept the wakee on prev_cpu */
+	u64 nfw_hit_other_cpu; /* NFW hit migrated away from prev_cpu */
+	u64 nfw_hit_select_cpu; /* NFW hit targeted the select/waker CPU */
+	u64 nfw_hit_prev_primary; /* NFW hit stayed on prev's primary core */
+	u64 nfw_hit_other_primary; /* NFW hit moved to another primary core */
+	u64 nfw_hit_game_thread; /* NFW hit for Unreal GameThread */
+	u64 nfw_hit_render_thread; /* NFW hit for Unreal RenderThread */
+	u64 nfw_hit_taskgraph_thread; /* NFW hit for TaskGraphThread workers */
+	u64 nfw_hit_pool_thread; /* NFW hit for PoolThread workers */
+	u64 nfw_hit_fpsaim_thread; /* NFW hit for FPSAimTrainer-W* threads */
+	u64 nfw_hit_chrome_thread; /* NFW hit for Chromium/CEF helper threads */
+	u64 nfw_hit_crgpu_thread; /* NFW hit for CEF CrGpuMain threads */
+	u64 nfw_hit_dxvk_thread; /* NFW hit for dxvk worker threads */
+	u64 nfw_hit_audio_thread; /* NFW hit for audio mixer/audio threads */
+	u64 nfw_hit_other_thread; /* NFW hit for uncategorized comm */
+	u64 nfw_hit_local_depth_sample; /* NFW hit sampled target local DSQ depth */
+	u64 nfw_hit_local_depth_nonzero; /* NFW hit target local DSQ already had work */
+	u64 nfw_hit_local_depth_gt1; /* NFW hit target local DSQ depth > 1 */
+	u64 nfw_hit_local_depth_gt3; /* NFW hit target local DSQ depth > 3 */
+	u64 nfw_prev_idle_attempt; /* NFW considered a cheap prev_cpu idle claim */
+	u64 nfw_prev_idle_sibling_block; /* Prev claim blocked by SMT sibling gate */
+	u64 nfw_prev_idle_claim; /* Prev claim won before native broad pick */
+	u64 nfw_prev_idle_fallback_attempt; /* Broad native pick after prev path missed */
+	u64 nfw_prev_idle_fallback_hit; /* Broad native fallback found an idle CPU */
+	u64 nfw_prev_idle_fallback_prev; /* Fallback still picked prev_cpu */
+	u64 nfw_prev_idle_fallback_other; /* Fallback picked another CPU */
+	u64 nfw_miss; /* Native idle pick missed */
+	u64 nfw_miss_shared; /* NFW miss routed to shared LLC/vtime */
+	u64 nfw_miss_tunnel; /* NFW miss tunneled to prev CPU */
+	u64 nfw_fallthrough; /* NFW miss fell through to Cake machinery */
+	u64 nfw_direct_insert; /* NFW hit inserted directly from select_cpu */
+	u64 select_tunnel; /* select_cpu returned prev_cpu tunnel */
+
+	u64 enqueue_call; /* enqueue_body entered */
+	u64 enqueue_wakeup; /* enqueue callback for SCX_ENQ_WAKEUP */
+	u64 enqueue_initial; /* first runnable placement */
+	u64 enqueue_requeue; /* SCX_ENQ_REENQ observed */
+	u64 enqueue_preserve; /* SCX_ENQ_PREEMPT observed */
+	u64 enqueue_non_wakeup; /* enqueue without wakeup flag */
+
+	u64 enqueue_direct_local; /* direct local DSQ insert on lean path */
+	u64 enqueue_wake_direct; /* wake inserted while target looked idle */
+	u64 enqueue_wake_idle; /* wake sent SCX_KICK_IDLE */
+	u64 enqueue_wake_busy; /* wake found busy target */
+	u64 enqueue_wake_busy_local; /* enqueue CPU == target CPU on busy wake */
+	u64 enqueue_wake_busy_remote; /* enqueue CPU != target CPU on busy wake */
+
+	u64 wake_kick_idle; /* explicit idle kick */
+	u64 wake_kick_preempt; /* explicit preempt kick */
+	u64 kthread_direct_insert; /* kthread bypass local insert */
+	u64 kthread_wake_preempt; /* kthread wake forced preempt */
+
+	u64 local_waiter_attempt; /* local-waiter considered */
+	u64 local_waiter_insert; /* local-waiter inserted */
+	u64 local_waiter_reject; /* local-waiter rejected */
+	u64 local_waiter_quench; /* local-waiter shortened current slice */
+
+	u64 shared_escape; /* guarded shared escape insert */
+	u64 shared_vtime_insert; /* LLC/vtime insert */
+	u64 dispatch_call; /* dispatch(): callback entered */
+	u64 dispatch_idle_core_rescue_hit; /* dispatch(): idle core rescue found work */
+	u64 dispatch_idle_llc_rescue_hit; /* dispatch(): idle LLC rescue found work */
+	u64 dispatch_cache_hit; /* dispatch(): cache-simple/cache-sprint path hit */
+	u64 dispatch_throughput_hit; /* dispatch(): throughput lane path hit */
+	u64 dispatch_core_steal_hit; /* dispatch(): core-steal path hit */
+	u64 dispatch_llc_pull_hit; /* dispatch(): shared LLC pull hit */
+	u64 dispatch_keep_running; /* dispatch(): replenished prev queued task */
+	u64 dispatch_idle; /* dispatch(): no work, published idle */
+	u64 publish_idle_call; /* publish idle helper entered */
+	u64 publish_idle_write; /* publish idle changed visible state */
+	u64 publish_idle_noop; /* publish idle found already-idle state */
+	u64 publish_running_call; /* publish running helper entered */
+	u64 publish_running_write; /* publish running changed visible state */
+	u64 publish_running_noop; /* publish running found same visible state */
+	u64 publish_owner_call; /* publish owner helper entered */
+	u64 publish_owner_write; /* publish owner changed visible state */
+	u64 publish_owner_noop; /* publish owner found same visible state */
+	u64 stopping_call; /* stopping(): callback entered */
+	u64 stopping_runnable; /* stopping(): task remained runnable */
+	u64 stopping_blocked; /* stopping(): task blocked / slept */
+	u64 stopping_owner_update; /* stopping(): owner avg update executed */
+	u64 stopping_route_observe; /* stopping(): route predictor observation executed */
+	u64 stopping_route_pending; /* stopping(): route observe had pending pid */
+	u64 stopping_route_no_pending; /* stopping(): route observe was early no-op */
+	u64 stopping_account_relaxed; /* stopping(): confidence allowed scoreboard skip */
+	u64 stopping_account_audit; /* stopping(): confidence forced scoreboard audit */
+	u64 stopping_scoreboard_owner_result; /* stopping(): owner result updated confidence */
+	u64 stopping_lean_return; /* stopping(): lean-accounting early return */
+	u64 reserved0;
+	u64 reserved1;
+} __attribute__((aligned(256)));
+
 struct cake_stats {
 	u64 nr_prev_cpu_tunnels; /* select_cpu() fell back to returning prev_cpu */
 	u64 nr_steer_eligible; /* select_cpu() saw a task eligible for warm steering */

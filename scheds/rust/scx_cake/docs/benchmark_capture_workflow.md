@@ -4,6 +4,14 @@ This workflow is for the benchmark loop we need before making policy changes:
 run `scx_cake` in debug mode, run one targeted workload, then review the perf
 trace and the scheduler dump from the same window.
 
+For live game captures using MangoHud socket control, use the bench-assets
+workflow instead of the synthetic/local perf harness:
+
+```text
+docs/game_capture_mangohud_socket_workflow.md
+/home/ritz/Documents/Repo/scx_cake_bench_assets/docs/kovaaks-mangohud-socket-capture.md
+```
+
 ## 1. Build and start the debug recorder
 
 ```bash
@@ -244,3 +252,142 @@ actually worse. Treat `clean`/`low` versus `clean`/`low` comparisons as
 decision-grade, `warn` as rerun-worthy for close calls, and `noisy` as evidence
 only. See `CAKEBENCH_HISTORY.md` for the comparability rule and the 2026-05-14
 v10 noisy-versus-clean example.
+
+## 6. 2026-06-05 AC6 live-game checkpoint
+
+Armored Core VI was tested live with MangoHud 60s captures on `DP-2`
+`3840x2160@240.02Hz`, HDR enabled, VRR automatic.  AC6's direct MangoHud socket
+was left in a `LISTEN 1 1` state and had failed to emit CSVs earlier, so these
+captures used the AC6-proven `mangohud-autostart` trigger with focus and scene
+guards enabled.  The active scene was accepted as `unclassified_game_scene`;
+exact in-game location was not inferred.
+
+The tested build family isolated the AC6 queue/wake shape:
+
+| Label | Build knobs | Decision |
+|---|---|---|
+| `ac6_gaming_idle_v1` | `SCX_CAKE_BUSY_WAKE_KICK=idle`, local queue, 1000us | Reject for AC6 tails; one run hit 15.4ms max / 67 FPS 0.1% low. |
+| `ac6_idle_llcvtime_v3` | `idle`, `SCX_CAKE_QUEUE_POLICY=llc-vtime`, 1000us | Park; fixed local-tail risk but jitter avg/p95 stayed high. |
+| `ac6_policy_llcvtime_v4` | `policy`, `llc-vtime`, `SCX_CAKE_STORM_GUARD=shield`, 1000us | Current AC6 keeper/champion candidate. |
+| `ac6_policy_llcvtime_shadow_v5` | v4 plus `SCX_CAKE_STORM_GUARD=shadow` | Reject; worsened lows, p99.9/max, stddev, and jitter. |
+| `ac6_policy_llcvtime_q750_v6` | v4 plus `SCX_CAKE_QUANTUM_US=750` | Park/reject for now; reduced one max-jitter metric but lost avg FPS and worsened jitter avg/p95 versus v4. |
+| `ac6_nativefirst_llcvtime_v7` | v4 plus broadening release native-first generic-bulk select to `llc-vtime` | Reject; v7 lost avg FPS/1% low and doubled max jitter versus v4 in the 18:51 three-way follow-up. |
+| `ac6_fullcoreprev_llcvtime_v8` | v4 plus requiring full SMT-core idle for release `llc-vtime` default-user `prev` fastscan | Reject/unsafe; it activated, but AC6 exited during the v8 capture window and no MangoHud CSV was produced. |
+
+Aggregate after the 19:01 incomplete v8 attempt.  The native and v4 captures
+from that attempt were imported; v8 is excluded because it produced no valid
+CSV.
+
+| Label | Runs | Avg FPS | 1% low | 0.1% low | p99.9 ms | Max ms | Jitter avg | Jitter p95 | Jitter max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| native | 7 | 120.526 | 105.217 | 98.023 | 10.250 | 10.845 | 0.444 | 1.288 | 3.049 |
+| `ac6_policy_llcvtime_v4` | 6 | 120.598 | 104.791 | 94.420 | 10.779 | 11.030 | 0.529 | 1.410 | 3.387 |
+
+The 18:51 three-way follow-up report is:
+
+```text
+/home/ritz/Documents/Repo/scx_cake_bench_assets/runs/game_experiments/ac6_nativefirst_llcvtime_v7_20260605T1851/armoredcore6/2026-06-05/reports/report.md
+```
+
+Single-run deltas from that follow-up:
+
+| Label | Avg FPS | 1% low | 0.1% low | p99.9 ms | Max ms | FT stddev | Jitter avg | Jitter p95 | Jitter max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| native | 120.140 | 105.456 | 95.191 | 10.664 | 12.298 | 0.436 | 0.383 | 1.212 | 5.171 |
+| `ac6_policy_llcvtime_v4` | 120.545 | 105.168 | 71.158 | 14.054 | 14.133 | 0.623 | 0.536 | 1.305 | 5.684 |
+| `ac6_nativefirst_llcvtime_v7` | 120.411 | 104.138 | 78.674 | 14.056 | 19.712 | 0.751 | 0.647 | 1.490 | 11.413 |
+
+The 19:01 v8 attempt report is:
+
+```text
+/home/ritz/Documents/Repo/scx_cake_bench_assets/runs/game_experiments/ac6_fullcoreprev_llcvtime_v8_20260605T1901/armoredcore6/2026-06-05/reports/report.md
+```
+
+Single-run results before the v8 failure:
+
+| Label | Avg FPS | 1% low | 0.1% low | p99.9 ms | Max ms | FT stddev | Jitter avg | Jitter p95 | Jitter max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| native | 121.165 | 105.790 | 100.671 | 9.948 | 10.426 | 0.484 | 0.425 | 1.245 | 2.600 |
+| `ac6_policy_llcvtime_v4` | 120.214 | 103.841 | 91.282 | 10.977 | 11.587 | 0.618 | 0.585 | 1.736 | 3.882 |
+| `ac6_fullcoreprev_llcvtime_v8` | no valid capture | no valid capture | no valid capture | no valid capture | no valid capture | no valid capture | no valid capture | no valid capture | no valid capture |
+
+The v8 binary identity was:
+
+```text
+binary sha256 d846b5890bdf52b34b1602aa3bb0ad4fc0ed9b34fbec7fd6ee75adca09aed458
+BPF sha256    211cf50cc7dbb77c2aaf6e5a32233b0e3e8f334a4a007ee09e20f14883d7b217
+build UUID    51ec6a2e-2bc2-53b9-8221-165417d07d30
+```
+
+Runner evidence shows v8 started cleanly at local `2026-06-05 19:03:17`
+and was unregistered at `19:05:55`, but Steam recorded AC6 leaving the running
+list during that target window at local `19:04:24`.  Treat v8 as unsafe until a
+fresh focused run disproves it; do not use it as performance evidence.
+
+The durable signal is that the local fallback queue can strand frame-adjacent
+work behind one CPU.  `llc-vtime` improves the worst AC6 tails and 0.1% lows,
+but the 18:51 and 19:01 v4 repeats show the win is not robust enough to call
+complete.  Native is currently smoother on aggregate; v4 remains the best valid
+Cake candidate from this AC6 series but is incomplete.
+The remaining weakness is small-frame jitter avg/p95 and occasional 0.1% tail
+losses.  Do not continue profile roulette after v5/v6/v7; the next useful step
+is low-overhead wake/dispatch instrumentation around SMT sibling placement,
+fastscan `prev` hits, and native fallback shape so jitter can be attributed to a
+specific action path.  Release route prediction was already off for these builds,
+so do not chase route-predictor toggles for this AC6 result.
+
+Current AC6 candidate rebuild:
+
+```bash
+SCX_CAKE_BUSY_WAKE_KICK=policy \
+SCX_CAKE_QUEUE_POLICY=llc-vtime \
+SCX_CAKE_STORM_GUARD=shield \
+SCX_CAKE_QUANTUM_US=1000 \
+cargo build -p scx_cake --release
+```
+
+For the next AC6/Kovaak's run, collect frame outcome and Cake action-path shape
+as separate artifacts.  MangoHud remains the frame-time source.  Cake diagnostics
+should run headless next to the same capture window:
+
+```bash
+sudo ./target/release/scx_cake \
+  --verbose \
+  --diag-dir /tmp/scx_cake_game_diag/<capture-id> \
+  --diag-period 5
+```
+
+After the 60s MangoHud capture completes, convert the latest Cake diagnostic
+snapshot into a stable ML feature packet:
+
+```bash
+BPF_OBJECT=$(find target/release/build -path '*/out/cake.bpf.o' -type f -printf '%T@ %p\n' \
+  | sort -nr \
+  | head -n1 \
+  | cut -d' ' -f2-)
+
+python3 scheds/rust/scx_cake/bench/scx_cake_game_diag_extract.py \
+  --diag-json /tmp/scx_cake_game_diag/<capture-id>/cake_diag_latest.json \
+  --game armoredcore6 \
+  --scheduler ac6_policy_llcvtime_v4 \
+  --scenario ac6_live_4k240_focused \
+  --capture-id <capture-id> \
+  --mangohud-csv /home/ritz/Benchmarks/<mangohud-capture>.csv \
+  --binary target/release/scx_cake \
+  --bpf-object "$BPF_OBJECT" \
+  --repo . \
+  --out-json /tmp/scx_cake_game_diag/<capture-id>/cake_action_features.json \
+  --out-tsv /tmp/scx_cake_game_diag/<capture-id>/cake_action_features.tsv
+```
+
+The extractor records scheduler label, game/scenario/capture labels, MangoHud
+CSV path, git head/dirty state, dirty scheduler-source diff hash,
+`target/release/scx_cake` SHA-256, `cake.bpf.o` SHA-256, a deterministic
+source UUID, and a deterministic build UUID.  The build UUID is derived from
+binary/BPF/source identity, not from the scheduler label, so relabeling a run
+does not invent a new build.  The feature body is kept off the BPF hot path: it
+reuses existing debug/service-report counters such as fastscan route
+hits/misses, scoreboard probe outcomes, native fallback rate, local-waiter
+admission/reject rate, wake tail buckets, monitor states, and AC6-focused
+interpretation tags.  Use this to learn *why* a game capture changed, not
+merely whether average FPS moved.
