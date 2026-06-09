@@ -1439,11 +1439,15 @@ void BPF_STRUCT_OPS(cosmos_exit_task, struct task_struct *p,
 
 /*
  * Initialize a NUMA node context.
+ *
+ * Return 0 if @node contains at least one CPU, -ENODEV if it is CPU-less, or
+ * another negative errno on failure.
  */
 static int init_node(int node)
 {
 	struct bpf_cpumask *cpumask;
 	struct node_ctx *nctx;
+	bool has_cpus = false;
 	u32 cpu;
 	int ret;
 
@@ -1461,13 +1465,18 @@ static int init_node(int node)
 		ret = -EINVAL;
 		goto out_unlock;
 	}
-	bpf_for(cpu, 0, nr_cpu_ids)
-		if (cpu_node(cpu) == node)
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		if (cpu_node(cpu) == node) {
 			bpf_cpumask_set_cpu(cpu, cpumask);
+			has_cpus = true;
+		}
+	}
 out_unlock:
 	bpf_rcu_read_unlock();
 
-	return ret;
+	if (ret)
+		return ret;
+	return has_cpus ? 0 : -ENODEV;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
@@ -1486,24 +1495,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		int node;
 
 		bpf_for(node, 0, nr_node_ids) {
-			struct node_ctx *nctx;
-
-			err = init_node(node);
-			if (err) {
-				scx_bpf_error("failed to initialize NUMA node %d: %d", node, err);
-				return err;
-			}
-
 			/*
-			 * Skip per-node DSQ creation for CPU-less NUMA nodes
-			 * (e.g. GPU-memory or CXL-memory nodes): with no CPU
-			 * to consume from it, the DSQ would never be used.
-			 * init_node() already populated nctx->cpumask, so an
-			 * empty mask means the node has no CPU.
+			 * Skip per-node DSQ creation for nodes that failed to
+			 * initialize, including CPU-less NUMA nodes (e.g.,
+			 * GPU-memory or CXL-memory nodes): with no CPU to
+			 * consume from it, the DSQ would never be used.
 			 */
-			nctx = try_lookup_node_ctx(node);
-			if (!nctx || !nctx->cpumask ||
-			    bpf_cpumask_empty(cast_mask(nctx->cpumask)))
+			err = init_node(node);
+			if (err)
 				continue;
 
 			err = scx_bpf_create_dsq(node, node);
