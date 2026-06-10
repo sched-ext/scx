@@ -68,6 +68,15 @@ int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __
 		return -EINVAL;
 
 	/*
+	 * The ->atq field is not protected by the ATQ
+	 * lock, since multiple callers may be trying to
+	 * add the same task to differnt ATQs. Use atomic
+	 * cmpxchg so that races have a single winner.
+	 */
+	if (cmpxchg(&taskc->atq, 0, atq))
+		return -EALREADY;
+
+	/*
 	 * For FIFO, "Leak" the seq on error. We only want
 	 * sequence numbers to be monotonic, not
 	 * consecutive.
@@ -76,10 +85,11 @@ int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __
 	node->value = (u64)taskc;
 
 	ret = rb_insert_node(atq->tree, node);
-	if (ret)
+	if (ret) {
+		taskc->atq = NULL;
 		return ret;
+	}
 
-	taskc->atq = atq;
 	atq->size += 1;
 
 	return 0;
@@ -124,7 +134,12 @@ int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
 	int ret;
 
-       /* Are we in this ATQ in the first place? */
+       /*
+	* Are we in this ATQ in the first place?
+	*
+	* Note: Unlike in the insert path, the ATQ
+	* lock is valid enough protection here.
+	*/
        if (taskc->atq != atq)
 	       return -EINVAL;
 
