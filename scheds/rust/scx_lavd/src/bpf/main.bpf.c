@@ -983,8 +983,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 *
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
+	 *
+	 * The cpu == task_cpu gate gets the lavd_misplaced_local_on test
+	 * to pass.
 	 */
-	if (can_direct_dispatch(cpuc, is_idle)) {
+	if (can_direct_dispatch(cpuc, is_idle) && cpu == task_cpu) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 		account_queued_load_pcpu(taskc, get_primary_cpu(cpu));
