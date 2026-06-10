@@ -129,9 +129,14 @@ int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 	       return -EINVAL;
 
        ret = rb_remove_node(atq->tree, &taskc->node);
+       if (ret)
+	       return ret;
+
        taskc->atq = NULL;
 
-       return ret;
+       atq->size -= 1;
+
+       return 0;
 }
 
 __hidden
@@ -167,19 +172,20 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	}
 
 	ret = rb_pop(atq->tree, &vtime, &taskc_ptr);
-	if (!ret)
-		atq->size -= 1;
+	if (ret) {
+		scx_atq_unlock(atq);
+
+		if (ret != -ENOENT)
+			bpf_printk("%s: error %d", __func__, ret);
+		return (u64)NULL;
+	}
+
+	atq->size -= 1;
 
 	taskc = (scx_task_common *)taskc_ptr;
 	taskc->atq = NULL;
 
 	scx_atq_unlock(atq);
-
-	if (ret) {
-		if (ret != -ENOENT)
-			bpf_printk("%s: error %d", __func__, ret);
-		return (u64)NULL;
-	}
 
 	return taskc_ptr;
 }
