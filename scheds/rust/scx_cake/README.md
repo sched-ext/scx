@@ -10,7 +10,7 @@
 > - **Zero Global Atomics** — Per-CPU BSS arrays with MESI-guarded writes eliminate bus locking
 > - **3-Gate select_cpu** — prev_cpu idle → performance-ordered scan → kernel fallback → tunnel
 > - **Per-LLC DSQ Sharding** — Eliminates cross-CCD lock contention on multi-chiplet CPUs
-> - **EEVDF-Inspired Weighting** — Virtual runtime with sleep lag credit, nice scaling, and tiered DSQ ordering
+> - **EEVDF-Inspired Weighting** — Virtual runtime with nice scaling and tiered DSQ ordering
 
 ---
 
@@ -75,22 +75,21 @@ This is the same insight behind network CAKE: short flows (DNS, gaming packets) 
 
 ### Class Hierarchy
 
-| Class      | DSQ Weight Range | Typical Workload                                                     |
-| :--------- | :--------------- | :------------------------------------------------------------------- |
-| **GAME**   | [0, 5120]        | Game process tree + audio daemons + compositor (during GAMING state) |
-| **NORMAL** | [8192, 13312]    | Default — interactive desktop tasks                                  |
-| **HOG**    | [16384, 21504]   | High PELT utilization (≥78% CPU) non-game tasks                      |
-| **BG**     | [49152, 54272]   | Low PELT utilization non-game tasks during GAMING                    |
+| Class      | DSQ Weight Base | Typical Workload                                                     |
+| :--------- | :-------------- | :------------------------------------------------------------------- |
+| **GAME**   | 0               | Game process tree + audio daemons + compositor (during GAMING state) |
+| **NORMAL** | 8192            | Default — interactive desktop tasks                                  |
+| **BG**     | 32768           | Low PELT utilization non-game tasks during GAMING                    |
+| **HOG**    | 49152           | High PELT utilization (≥78% CPU) non-game tasks                      |
 
 > [!TIP]
-> **Lower weight = dispatches first.** Non-overlapping weight ranges guarantee class ordering: all GAME tasks dispatch before any NORMAL task, all NORMAL before any HOG, etc.
+> **Lower weight = dispatches first.** Non-overlapping weight ranges (`tier_base[]` in `cake.bpf.c`) guarantee class ordering: all GAME tasks dispatch before any NORMAL task, all NORMAL before any BG, and all BG before any HOG.
 
 ### How Classification Works
 
 1. **Game detection**: Two-phase detection scans for Steam environment variables and Wine `.exe` processes. Detected game TGIDs and their parent PID are written to BPF BSS. The entire process family (game + wineserver + audio + compositor) is promoted to GAME class.
 2. **PELT-based classification**: Every 64th stop, the scheduler reads the kernel's `util_avg` for each task. Tasks with ≥78% CPU utilization are classified as HOG; lower-utilization non-game tasks become BG during GAMING state, or NORMAL otherwise.
 3. **Audio/Compositor protection**: PipeWire daemons and Wayland compositors are detected at startup and baked into RODATA. During GAMING state, they receive GAME-level priority for latency parity with game threads.
-4. **Waker-boost chain**: Tasks woken by GAME threads inherit GAME priority for one scheduling cycle. This automatically promotes game pipeline threads (sim→render→present) without explicit classification.
 
 ### Game Detection Deep Dive
 
@@ -127,19 +126,22 @@ The BPF classification engine in `cake_init_task` and `cake_stopping` reads `gam
 
 ### DRR++ Deficit Tracking
 
-Adapted from network CAKE's flow fairness:
+Adapted from network CAKE's flow fairness. In the current code this is only
+partially wired up:
 
-- Each task starts with a **deficit** (quantum + new-flow bonus ≈ 10ms credit)
-- Each execution bout consumes deficit proportional to runtime
-- When deficit exhausts → new-flow bonus removed → task competes normally
-- GAME tasks skip deficit drain entirely — their new-flow bonus persists forever
+- Each task is flagged as a **new flow** at init and receives a new-flow
+  vtime bonus when enqueued
+- The new-flow flag is never cleared, so the bonus currently applies to every
+  task equally
+- The per-task **deficit** field is initialized but never drained or consulted
+  by scheduling decisions
 
 ### EEVDF-Inspired Weighting
 
 scx_cake uses a virtual runtime system inspired by EEVDF:
 
-- **Sleep lag credit**: Tasks that yield voluntarily (game threads at vsync, audio callbacks) accumulate credit that reduces their DSQ weight on the next wakeup — dispatching them ahead of continuous consumers.
-- **Nice scaling**: Per-task `nice_shift` (0-12) scales runtime cost. High `nice` priority → less vruntime cost → dispatches sooner. Computed once per 64 stops from `p->scx.weight`.
+- **Implicit sleeper credit**: A sleeping task's vtime does not advance, so it naturally dispatches ahead of continuous consumers in its class on wakeup. There is no separate sleep-lag accounting.
+- **Nice scaling**: A per-task vtime multiplier (`vtime_mult`, recomputed once per 64 stops from `p->scx.weight`) scales runtime cost. High `nice` priority → less vruntime cost → dispatches sooner.
 - **Capacity scaling**: On heterogeneous CPUs (P/E cores), E-core runtime is scaled by CPU capacity so tasks running on slower cores accumulate proportionally less vruntime.
 - **CPUPERF steering**: During GAMING state, GAME tasks signal max CPU frequency boost (1024); non-GAME tasks use reduced boost (768). Check-before-write avoids redundant kfunc calls.
 
@@ -168,8 +170,7 @@ flowchart TD
     end
 
     subgraph CLASSIFY["Classification Engine (cake_stopping)"]
-        EVERY["Every stop"] --> DEFICIT["DRR++ deficit drain"]
-        EVERY --> WFREQ["Wake frequency EWMA"]
+        EVERY["Every stop"] --> WFREQ["Wake frequency EWMA"]
         EVERY --> VTIME["Vtime staging<br/>(staged_vtime_bits)"]
         GATE64["Every 64th stop<br/>(confidence gate)"] --> RECLASS["PELT reclassify<br/>GAME / NORMAL / HOG / BG"]
         GATE64 --> NICE["Nice shift recompute"]
@@ -193,7 +194,7 @@ flowchart TD
 
 | Callback                  | Role                                                       | Hot/Cold          |
 | :------------------------ | :--------------------------------------------------------- | :---------------- |
-| `cake_select_cpu`         | 3-gate idle CPU selection + kfunc tunneling                | **Hot**           |
+| `cake_select_cpu`         | 3-gate idle CPU selection + all-busy fallback to enqueue   | **Hot**           |
 | `cake_enqueue`            | Weighted vtime insert into per-LLC DSQ                     | **Hot**           |
 | `cake_dispatch`           | Local LLC → cross-LLC steal                                | **Hot**           |
 | `cake_running`            | BSS staging: run_start, is_yielder, game_cpu_mask, cpuperf | **Hot** (minimal) |
@@ -209,9 +210,9 @@ flowchart TD
 
 **Dual-storage architecture**:
 
-- **`cake_task_hot`** (BPF task_storage, ~10ns lookup) — CL0 scheduling-critical fields used every stop: `task_class`, `deficit_u16`, `packed_info`, `warm_cpus`, `staged_vtime_bits`, `nice_shift`, `sleep_lag`, `cached_cpumask`
+- **`cake_task_hot`** (BPF task_storage, ~10ns lookup) — CL0 scheduling-critical fields used every stop: `task_class`, `deficit_u16`, `packed_info`, `warm_cpus`, `staged_vtime_bits`, `vtime_mult`, `dsq_vtime`
 - **`cake_task_ctx`** (BPF Arena, ~29ns TLB walk) — Telemetry-only fields, gated behind `CAKE_STATS_ACTIVE`. Dead in release builds.
-- **`cake_cpu_bss`** (BSS array, L1-cached) — Per-CPU hot fields: `run_start`, `tick_slice`, `is_yielder`, `cached_now`, `idle_hint`, `waker_boost`, `cached_perf`
+- **`cake_cpu_bss`** (BSS array, L1-cached) — Per-CPU hot fields: `run_start`, `tick_slice`, `is_yielder`, `idle_hint`, `vtime_local`, `sched_state_local`
 
 **Per-CPU arena** (`cake_per_cpu`, conditional sizing):
 
@@ -244,33 +245,22 @@ flowchart LR
 | Global vtime writes         | **0** (per-task only)                         |
 | RCU lock/unlock in hot path | **0**                                         |
 
-### Kfunc Tunneling
+### Priority Without Preemption
 
-`select_cpu` caches `scx_bpf_now()` in per-CPU BSS (`cpu_bss[cpu].cached_now`). `enqueue` reuses this value, saving ~15ns (1 kfunc trampoline entry) on the all-busy path.
-
-### VPROT: Preemption Protection
-
-When a GAME task enters the DSQ during GAMING state and all CPUs are busy, `cake_enqueue` actively preempts a non-GAME task:
-
-1. **O(1) victim finding**: `__builtin_ctzll(~game_cpu_mask)` — single `tzcnt` instruction (1 cycle on Zen 4). Bits set in `~game_cpu_mask` correspond to CPUs running non-GAME tasks.
-2. **VPROT guard**: Before preempting, check if the victim has run long enough to justify interruption. The protection threshold is computed as:
-   - **Base**: `tick_slice >> 4`, clamped to [125µs, 500µs]
-   - **Per-class scaling**:
-     - **NORMAL**: 75% (×3>>2) — useful interactive work, strong protection
-     - **BG**: 50% (>>1) — background tasks, moderate protection
-     - **HOG**: 25% (>>2) — bulk CPU consumers, minimal protection
-3. **Preempt decision**: If `elapsed >= vprot_ns` → `scx_bpf_kick_cpu(victim, SCX_KICK_PREEMPT)`. Otherwise → suppressed (counted as `nr_vprot_suppressed` in stats).
-
-This ensures GAME tasks never wait in the DSQ for a natural context switch while still protecting tasks from micro-slicing. The per-class scaling means HOG tasks (compilers, render farms) get preempted quickly while NORMAL desktop tasks get reasonable protection.
+`scx_cake` does not preempt running tasks. No preemption kick is issued
+anywhere in the executable BPF code (`SCX_KICK_PREEMPT` is never used; the
+only kicks are `SCX_KICK_IDLE` hints to idle CPUs). Class priority is
+enforced entirely by the tiered vtime ordering in the DSQ — as the in-code
+comment in `cake_select_cpu` puts it: "DSQ ordering handles all priority — no
+preemption or kicks needed." A GAME task enqueued while all CPUs are busy
+waits for the next natural context switch on its target CPU.
 
 ### Starvation Guard
 
 The tiered DSQ weight system intrinsically prevents starvation:
 
 - **Non-overlapping weight ranges** guarantee that within each class, tasks compete fairly on vtime (runtime cost determines ordering)
-- **New-flow bonus** gives newly-woken tasks a vtime advantage, preventing permanent queue-back
-- **Deficit drain** ensures long-running tasks lose their new-flow bonus and compete normally
-- **Sleep lag credit** rewards voluntary yielders, preventing inversion where a yielding task falls behind a continuous consumer
+- **Implicit sleeper credit**: a sleeping task's vtime does not advance, so it cannot fall arbitrarily behind continuous consumers in its class
 
 The clock domain fix in `cake_running` (using `scx_bpf_now()` instead of `p->se.exec_start`) prevents a subtle starvation bug: after ~22 minutes, accumulated IRQ time drift in `exec_start` would exceed the u32 wrap boundary, corrupting elapsed-time checks and causing unconditional preemption (priority inversion).
 
@@ -335,8 +325,8 @@ The Rust loader (`main.rs`) performs significant one-time work at startup, bakin
 | `--profile, -p <PROFILE>` | `gaming` | Select preset profile                   |
 | `--quantum <µs>`          | profile  | Base time slice in microseconds         |
 | `--new-flow-bonus <µs>`   | profile  | Extra deficit for newly woken tasks     |
-| `--starvation <µs>`       | profile  | Max run time before forced preemption   |
-| `--verbose, -v`           | `false`  | Enable live TUI stats display           |
+| `--starvation <µs>`       | profile  | Accepted but currently unused — not passed to the BPF side |
+| `--verbose, -v`           | `false`  | Enable live TUI stats display (debug builds only) |
 | `--interval <secs>`       | `1`      | TUI refresh interval                    |
 | `--testing`               | `false`  | Automated benchmarking mode (see below) |
 
@@ -368,7 +358,7 @@ Instead of per-tier multipliers, scx_cake uses a **yield-gated quantum** system:
 - **HOG/BG during GAMING**: Halved caps (forces more preemption points for GAME tasks)
 
 > [!NOTE]
-> **Higher weight = dispatches later.** GAME [0-5120] dispatches before NORMAL [8192-13312] dispatches before HOG [16384-21504] dispatches before BG [49152-54272]. Within each class, PELT utilization and runtime cost provide fine-grained ordering.
+> **Higher weight = dispatches later.** GAME (base 0) dispatches before NORMAL (8192), which dispatches before BG (32768), which dispatches before HOG (49152). Within each class, PELT utilization and runtime cost provide fine-grained ordering.
 
 ### Examples
 
@@ -398,7 +388,7 @@ sudo scx_cake -p battery
 - **All `#ifndef CAKE_RELEASE` blocks are dead-code eliminated** — arena telemetry, per-task counters, gate hit tracking, BenchLab, and the entire `cake_task_ctx` arena struct are compiled out
 - `CAKE_STATS_ENABLED` is a compile-time constant `0` — Clang eliminates all telemetry branches at BPF compile time
 - Per-CPU arena blocks shrink from 128B (debug) to 64B (release)
-- **TUI still works** but only shows aggregate BSS stats (gate latencies, dispatch counts). Per-task arena fields (gate hit %, callback durations, quantum breakdown) are unavailable
+- **`--verbose` and `--testing` are force-disabled** — the loader warns and clears both flags at startup, so release builds always run headless; the TUI requires a debug build
 
 > [!TIP]
 > Use `--release` for production gaming. The telemetry overhead is small (~2-5%), but eliminating it gives the tightest possible scheduling latency.
@@ -425,7 +415,7 @@ sudo ./target/debug/scx_cake -v
 
 ## 7. TUI Guide
 
-The TUI is activated with `--verbose` / `-v` and provides real-time visibility into every scheduling decision. It requires a **debug build** for full per-task telemetry.
+The TUI is activated with `--verbose` / `-v` and provides real-time visibility into every scheduling decision. It requires a **debug build** — in release builds `--verbose` is disabled at startup.
 
 ### Tabs
 
@@ -446,7 +436,7 @@ The top section shows system-wide scheduling statistics aggregated from per-CPU 
 - **Dispatch stats**: DSQ queued, consumed, local dispatches, cross-LLC steals, dispatch misses
 - **Flow stats**: New flow dispatches, old flow dispatches, DRR++ deficit activity
 - **Game state**: Detected game name, TGID, PPID, thread count, sched_state (IDLE/COMPILATION/GAMING)
-- **EEVDF stats**: Sleep lag applications, vprot suppression count, nice shift distribution
+- **EEVDF stats**: Nice shift distribution
 
 ### Dashboard: Live Task Matrix
 
@@ -552,7 +542,7 @@ Two export methods are available from any tab:
 
 ### Benchmarks
 
-- [schbench](https://github.com/brendangregg/schbench) — Scheduler latency microbenchmark
+- [schbench](https://github.com/masoncl/schbench) — Scheduler latency microbenchmark
 - Arc Raiders — AAA game stress testing (frame rates, 1% lows)
 - Splitgate 2 — Competitive FPS latency testing
 
@@ -568,7 +558,7 @@ Two export methods are available from any tab:
 | **Game detection**      | Automatic (Steam/Wine/process tree) | None                           | Behavioral (latency patterns)  | None                              |
 | **DSQ structure**       | Per-LLC vtime-ordered               | Per-LLC + shared               | Global ordered                 | Per-LLC                           |
 | **Idle CPU selection**  | 3-gate custom + kernel fallback     | Kernel default                 | Custom idle scan               | Kernel default + LLC preference   |
-| **EEVDF features**      | Sleep lag, nice scaling, vprot      | None                           | Urgency scoring                | None                              |
+| **EEVDF features**      | Nice scaling, tiered vtime          | None                           | Urgency scoring                | None                              |
 | **Core steering**       | Prefcore-aware (P/E, V-Cache)       | LLC-aware                      | LLC-aware                      | LLC-aware                         |
 | **Global atomics**      | 0 (MESI-guarded BSS)                | Minimal                        | Some                           | Minimal                           |
 | **When to choose**      | Gaming-first, multi-game families   | Desktop daily driver           | Mixed interactive + throughput | Desktop with gaming needs         |
@@ -588,10 +578,8 @@ Two export methods are available from any tab:
 | **DRR++**       | Deficit Round Robin++. Network algorithm balancing fair queuing with strict priority.                                                    |
 | **PELT**        | Per-Entity Load Tracking. Kernel mechanism providing exponentially-decayed CPU utilization per task (`util_avg`).                        |
 | **Class**       | Classification level (GAME/NORMAL/HOG/BG). Controls DSQ weight, quantum cap, and preemption policy.                                      |
-| **Deficit**     | Per-task credit from DRR++. New tasks get bonus credit; GAME tasks skip deficit drain entirely.                                          |
+| **Deficit**     | Per-task credit from DRR++. Currently initialized but never drained by the scheduler.                                                    |
 | **Quantum**     | Base time slice a task is allotted before a scheduling decision.                                                                         |
-| **Sleep Lag**   | EEVDF credit for voluntary yields. Reduces DSQ weight on next wakeup, so yielders dispatch first.                                        |
-| **Waker Boost** | Transitive priority inheritance: tasks woken by GAME threads get GAME-level priority for one cycle.                                      |
 | **Staged Bits** | Pre-computed scheduling state packed into a single u64 by `cake_stopping`, consumed by `cake_enqueue` to avoid redundant computation.    |
 | **Jitter**      | Variance in scheduling latency between consecutive events. Low jitter = consistent frame delivery.                                       |
 
@@ -602,7 +590,6 @@ Two export methods are available from any tab:
 | **Task Storage**        | BPF local storage attached to each task. 10ns lookup; holds CL0 hot scheduling fields.         |
 | **Arena**               | BPF memory region for per-task telemetry data. 29ns TLB walk; dead in release builds.          |
 | **BSS**                 | Zero-initialized BPF global data. Per-CPU arrays (`cpu_bss`) provide L1-cached hot fields.     |
-| **Kfunc Tunneling**     | Caching kfunc return values in per-CPU BSS to avoid redundant trampoline calls.                |
 | **MESI Guard**          | Read-before-write pattern: skip store if value unchanged, preventing cache invalidation.       |
 | **RODATA Gate**         | Compile-time constant that eliminates entire code paths (e.g., single-CCD skips stealing).     |
 | **Confidence Gate**     | Reclassification runs every 64th stop. 63/64 stops reuse cached task_class from task_storage.  |
