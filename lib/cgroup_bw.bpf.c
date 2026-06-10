@@ -1845,14 +1845,14 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 		return -ESRCH;
 	}
 
-	if (taskc->atq != NULL) {
-		/*
-		 * Not really a bug: The initial .enqueue() may race with
-		 * a pair of .dequeue()/.enqueue() calls, and cause two
-		 * instances of this function to happen simultaneously
-		 * for the task. This should be rare, but possible.
-		 * The spinlock turns the race into a benign one.
-		 */
+	/*
+	 * A task can be claimed by only one BTQ at a time. The atomic cmpxchg
+	 * of ->atq inside scx_atq_insert_vtime_unlocked() elects a single
+	 * winner; the loser sees the task already queued. That benign case is
+	 * detected either here on the fast path or as EALREADY returned by the
+	 * insert below.
+	 */
+	if (READ_ONCE(taskc->atq) != NULL) {
 		cbw_dbg("Possible double enqueue detected.");
 		scx_atq_unlock(btq);
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
@@ -1860,10 +1860,14 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	}
 
 	ret = scx_atq_insert_vtime_unlocked(btq, taskc, vtime);
-	if (ret)
-		cbw_err("Failed to insert a task to BTQ: %d", ret);
-
 	scx_atq_unlock(btq);
+
+	if (unlikely(ret == -EALREADY)) {
+		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
+		return 0;
+	} else if (unlikely(ret)) {
+		cbw_err("Failed to insert a task to BTQ: %d", ret);
+	}
 
 	return ret;
 }
@@ -2638,7 +2642,7 @@ __hidden
 int scx_cgroup_bw_is_task_throttled(u64 taskc)
 {
 	scx_task_common *ctx = (scx_task_common *)taskc;
-	return ctx && (ctx->atq != NULL);
+	return ctx && (READ_ONCE(ctx->atq) != NULL);
 }
 
 /**
