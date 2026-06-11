@@ -221,13 +221,24 @@ static inline int maybe_retag_stolen_task(struct task_struct *p, struct task_ctx
 	return update_task_cpumask(p, tctx);
 }
 
-/* Work stealing:
- * Scan sibling (cell,LLC) DSQs in the same cell and steal the first queued task if it can run on this cpu
+enum steal_work_result {
+	STEAL_WORK_NONE = 0,
+	STEAL_WORK_STOLEN = 1,
+	STEAL_WORK_DRAINED = 2,
+};
+
+/* Work stealing / orphan rescue:
+ * Scan sibling (cell,LLC) DSQs in the same cell and steal the first queued task
+ * if it can run on this cpu. Orphaned LLC DSQs are also scanned because CPU
+ * reconfiguration can otherwise leave queued tasks in an old LLC DSQ that no
+ * dispatching CPU will naturally check.
+ *
  * Returns:
- *  true == 1;  task was stolen
- *  false == 0; no tasks were stolen
- *  error <0;   error encountered
-*/
+ *  STEAL_WORK_DRAINED; drained an orphaned LLC DSQ
+ *  STEAL_WORK_STOLEN;  task was stolen from a non-orphaned LLC DSQ
+ *  STEAL_WORK_NONE;    no tasks were moved
+ *  error <0;           error encountered
+ */
 static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 {
 	if (!llc_is_valid(local_llc)) {
@@ -253,15 +264,7 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		if (candidate_llc >= MAX_LLCS)
 			continue;
 
-		/*
-		 * Skip if the cell doesn't have CPUs in this LLC.
-		 * Note: rechecking cell_ptr for verifier.
-		 * This is racy with try_stealing_this_task, but we don't care -
-		 * if the LLC actually doesn't have CPUs come steal time,
-		 * we will fail the steal and continue to the next LLC.
-		 */
-		if (cell_ptr && READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
-			continue;
+		u32 candidate_cpu_cnt = READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt);
 
 		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell, candidate_llc);
 		if (dsq_is_invalid(candidate_dsq))
@@ -282,10 +285,9 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
 			continue;
 
-		// Success, we got a task
-		return true;
+		return candidate_cpu_cnt == 0 ? STEAL_WORK_DRAINED : STEAL_WORK_STOLEN;
 	}
-	return false;
+	return STEAL_WORK_NONE;
 }
 
 static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx)

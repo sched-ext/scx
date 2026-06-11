@@ -932,6 +932,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	/*
 	 * If we failed to find an eligible task, try the sibling LLC DSQs.
+	 * This also rescues orphaned LLC DSQs: CPU reconfiguration can leave
+	 * queued tasks in a cell+LLC DSQ whose LLC no longer has CPUs in this
+	 * cell, and no CPU naturally checks it.
 	 * Otherwise, scx will keep running prev if prev->scx.flags &
 	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
 	 */
@@ -941,7 +944,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 			s32 ret = try_stealing_work(cell, llc);
 			if (ret < 0)
 				return;
-			if (ret > 0) {
+			if (ret == STEAL_WORK_DRAINED) {
+				cstat_inc(CSTAT_DRAIN_CNT, cell, cctx);
+			} else if (ret == STEAL_WORK_STOLEN) {
 				cstat_inc(CSTAT_STEAL, cell, cctx);
 			}
 		}
