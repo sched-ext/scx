@@ -435,6 +435,38 @@ lavd recorded 4–5 ms worst-frames in two of its three runs in this scene; its
 strengths may lie elsewhere — these numbers describe this workload on this
 machine, nothing broader.
 
+### scx_cake (hybrid4) vs EEVDF — World of Warcraft, 4-cycle ABBA, n=4/arm
+
+A second-title check on a very different workload: an MMO (vkd3d-proton,
+player-housing scene, ~475 fps) with naturally heavy tails — the scene
+streams in 4–8 ms hitch waves that arrive game-side in alternating cycles and
+hit whichever scheduler is up, so extremes are read as medians.
+
+| metric | scx_cake | EEVDF | Δmean | Δmedian | cycles won (cake) |
+| :-- | --: | --: | :-- | :-- | :-- |
+| avg FPS | 473.1 | 473.4 | −0.1% | −0.3% | 2/4 — parity |
+| 1% low | 260.2 | 248.8 | +4.6% | +4.0% | 3/4 |
+| p99 frametime | 3.85 ms | 4.03 ms | −4.5% | −3.7% | 3/4 |
+| 0.1% low | 195.5 | 183.2 | +6.7% | +7.9% | 2/4 (hitch-wave bimodal) |
+| max frametime | 5.79 ms | 6.01 ms | −3.7% | −3.1% | 3/4 |
+| frametime stddev | 0.459 | 0.499 | −8.1% | −12.0% | 3/4 |
+| jitter (max Δ) | 3.76 ms | 3.95 ms | −4.8% | −3.1% | 3/4 |
+
+Honest grade: at n=4 in a hitch-wave scene none of these pass the
+slot-consistency bar the KovaaK's claims meet — read this as "the same
+profile, favored" rather than proven: average at parity, tail and smoothness
+metrics ahead in three of four cycles each, nothing lost. The shape of the
+KovaaK's result generalized to a different engine and workload class.
+
+Reproducibility note: measuring WoW at all required patching MangoHud —
+stock 0.8.4's control socket wedges from launch under vkd3d (an early
+non-presenting Vulkan instance binds the per-pid socket and never services
+it; instance teardown then closes it; the fd also leaks into child
+processes). The fix (process-global control socket + teardown guard +
+`SOCK_CLOEXEC`) is in the bench-assets repository under `mangohud-patches/`
+and is being prepared for upstream. WoW's MangoHud capture prefix is `WoW`,
+not `wow`.
+
 ### Mechanism measurements
 
 - Enq-kick-idle fold: `cake_enqueue` 164.6 → 46.8 ns/call in-game (−72%) at
