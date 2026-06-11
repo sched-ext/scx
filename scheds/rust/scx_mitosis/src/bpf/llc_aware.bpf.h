@@ -4,9 +4,8 @@
  * GNU General Public License version 2.
  *
  * This header assists adding LLC cache awareness to scx_mitosis by defining
- * maps and fns for managing CPU-to-LLC domain mappings. It provides code to
- * recalculate per-LLC CPU counts within cells and maintain per-task LLC
- * candidate masks derived from the task's base cpumask.
+ * maps and fns for managing CPU-to-LLC domain mappings and maintaining
+ * per-task LLC candidate masks derived from the task's base cpumask.
  */
 #pragma once
 
@@ -129,72 +128,6 @@ static inline int refresh_task_llc_cpumask(struct task_ctx *tctx, u32 llc)
 	return 0;
 }
 
-/*
- * Recompute cell->llc_cpu_cnt[] for a cell cpumask.
- *
- * @cell_idx: The cell index to update LLC counts for
- * @explicit_mask: If non-NULL, use this cpumask instead of looking up current
- *                 cell cpumask. This allows pre-calculating counts for a new
- *                 cpumask BEFORE swapping it in, avoiding race conditions.
- */
-static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
-{
-	struct cell *cell = lookup_cell(cell_idx);
-	if (!cell)
-		return -ENOENT;
-
-	struct bpf_cpumask *tmp_mask __free(bpf_cpumask) = bpf_cpumask_create();
-	if (!tmp_mask) {
-		scx_bpf_error("recalc_cell_llc_counts: failed to create tmp mask");
-		return -ENOMEM;
-	}
-
-	u32 llc, llcs_present = 0, total_cpus = 0;
-	// Just so we don't hold the lock longer than necessary
-	u32 llc_cpu_cnt_tmp[MAX_LLCS] = { 0 };
-
-	const struct cpumask *cell_mask;
-	if (explicit_mask) {
-		cell_mask = explicit_mask;
-	} else {
-		cell_mask = lookup_cell_cpumask(cell_idx); // RCU ptr
-		if (!cell_mask)
-			return -EINVAL;
-	}
-
-	bpf_for(llc, 0, nr_llc)
-	{
-		const struct cpumask *llc_mask = lookup_llc_cpumask(llc);
-		if (!llc_mask)
-			return -ENOENT;
-
-		bpf_cpumask_and(tmp_mask, cell_mask, llc_mask);
-
-		u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp_mask);
-
-		llc_cpu_cnt_tmp[llc] = cnt;
-
-		// These are counted across the whole cell
-		total_cpus += cnt;
-
-		// Number of non-empty LLCs in this cell
-		if (cnt)
-			llcs_present++;
-	}
-
-	// Write to cell
-	scoped_guard(spin_lock, &cell->lock)
-	{
-		for (u32 llc_idx = 0; llc_idx < nr_llc; llc_idx++) {
-			cell->llcs[llc_idx].cpu_cnt = llc_cpu_cnt_tmp[llc_idx];
-		}
-
-		cell->llc_present_cnt = llcs_present;
-		cell->cpu_cnt = total_cpus;
-	}
-	return 0;
-}
-
 static void zero_cell_vtimes(struct cell *cell)
 {
 	if (enable_llc_awareness) {
@@ -218,7 +151,8 @@ enum steal_work_result {
  * Scan sibling (cell,LLC) DSQs in the same cell and steal the first queued task
  * if it can run on this cpu. Orphaned LLC DSQs are also scanned because CPU
  * reconfiguration can otherwise leave queued tasks in an old LLC DSQ that no
- * dispatching CPU will naturally check.
+ * dispatching CPU will naturally check. An LLC is orphaned for a cell when the
+ * current published cell cpumask no longer intersects that LLC's topology mask.
  *
  * Returns:
  *  STEAL_WORK_DRAINED; drained an orphaned LLC DSQ
@@ -233,8 +167,8 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		return -EINVAL;
 	}
 
-	struct cell *cell_ptr = lookup_cell(cell);
-	if (!cell_ptr)
+	const struct cpumask *cell_mask = lookup_cell_cpumask(cell);
+	if (!cell_mask)
 		return -EINVAL;
 
 	// Loop over all other LLCs, looking for a queued task to steal
@@ -251,8 +185,6 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		if (candidate_llc >= MAX_LLCS)
 			continue;
 
-		u32 candidate_cpu_cnt = READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt);
-
 		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell, candidate_llc);
 		if (dsq_is_invalid(candidate_dsq))
 			return -EINVAL; // already errored in get_cell_llc_dsq_id
@@ -262,6 +194,17 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		if (!scx_bpf_dsq_nr_queued(candidate_dsq.raw))
 			continue;
 
+		const struct cpumask *candidate_mask = lookup_llc_cpumask(candidate_llc);
+		if (!candidate_mask)
+			return -EINVAL;
+
+		/*
+		 * Classify drains from the same cpumask state dispatch uses for
+		 * CPU ownership. This avoids a separate cached counter that could
+		 * lag a cell reconfiguration and hide orphaned LLC DSQs.
+		 */
+		bool orphaned_llc = !bpf_cpumask_intersects(cell_mask, candidate_mask);
+
 		/*
 		 * Attempt the steal - can fail because it's a race. The task's
 		 * LLC is updated from the CPU it actually runs on in running().
@@ -269,7 +212,7 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
 			continue;
 
-		return candidate_cpu_cnt == 0 ? STEAL_WORK_DRAINED : STEAL_WORK_STOLEN;
+		return orphaned_llc ? STEAL_WORK_DRAINED : STEAL_WORK_STOLEN;
 	}
 	return STEAL_WORK_NONE;
 }
