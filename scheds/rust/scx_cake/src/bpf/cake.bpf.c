@@ -51,6 +51,23 @@ char _license[] SEC("license") = "GPL";
 #ifndef CAKE_QUEUE_POLICY_VALUE
 #define CAKE_QUEUE_POLICY_VALUE CAKE_QUEUE_POLICY_LOCAL
 #endif
+#ifndef CAKE_HYBRID_QUEUE_VALUE
+#define CAKE_HYBRID_QUEUE_VALUE 0
+#endif
+/* Hybrid gate membership: 1=GT+RT, 2=GT only, 3=RT only, 4=RT + GT-conditional.
+ * Measured 6-10 2x2: GT+RT both-LOCAL = STABLE 1%low (σ10.5) + p99 win but
+ * avg −0.4%; RT-only = extreme-tail sweep (.1%low +10%, maxFT −14%, jitMax
+ * −27%) at avg parity but 1%low unstable (σ83); either partial gate
+ * destabilizes the GT↔RT handoff. Value 4 merges: RT always LOCAL; GT LOCAL
+ * only when the busy target is FRAME/INTERACTIVE-owned (the handoff case —
+ * keep pair coherence), else GT escapes to the arbiter (avoid bulk pileups,
+ * the suspected .1%low/maxFT mechanism). */
+#define CAKE_HYBRID_GATE_GT \
+	(CAKE_HYBRID_QUEUE_VALUE == 1 || CAKE_HYBRID_QUEUE_VALUE == 2)
+#define CAKE_HYBRID_GATE_RT \
+	(CAKE_HYBRID_QUEUE_VALUE == 1 || CAKE_HYBRID_QUEUE_VALUE == 3 || \
+	 CAKE_HYBRID_QUEUE_VALUE == 4)
+#define CAKE_HYBRID_GATE_GT_COND (CAKE_HYBRID_QUEUE_VALUE == 4)
 #ifndef CAKE_STORM_GUARD_VALUE
 #define CAKE_STORM_GUARD_VALUE CAKE_STORM_GUARD_SHIELD
 #endif
@@ -114,6 +131,39 @@ const volatile u32  busy_wake_kick_mode	       = 0;
 	(*(volatile const bool *)&enable_wake_chain_locality)
 #define CAKE_BUSY_WAKE_KICK_MODE (*(volatile const u32 *)&busy_wake_kick_mode)
 #endif
+
+/* SCX_ENQ_KICK_IDLE bit resolved from the BOOTED kernel's BTF (kernel for-7.2+,
+ * arighi aee94395c1f7). Non-zero => cake folds the enqueue idle-kick into the
+ * insert's enq_flags so the kernel issues SCX_KICK_IDLE from local_dsq_post_enq()
+ * — one kfunc crossing instead of dsq_insert + scx_bpf_kick_cpu. Userspace
+ * (main.rs) sets this via read_enum() ONLY when the running kernel exposes the
+ * flag AND SCX_CAKE_ENQ_KICK_IDLE=1; otherwise 0, which is byte-identical to the
+ * explicit-kick fallback (enq_flags | 0). Runtime rodata, not a build knob,
+ * because flag support is a property of the booted kernel. */
+const volatile u64 cake_enq_kick_idle_flag = 0;
+
+/* Frame-anchor core reservation (SCX_CAKE_FRAME_RESERVE / --frame-reserve).
+ * Measured 2026-06-10: GameThread eats ~411-680 involuntary RT-sandwich
+ * preemptions/s (frame_preempt_by_self=99.7%) and core-noise avoidance can
+ * NOT dodge them — the FIFO compositor/audio wakes are issued by the game's
+ * own present chain and land sync wherever the pipeline runs. Cake's warm
+ * prev-cpu co-location (75k/s prev hits) concentrates those landings on the
+ * frame core; EEVDF's migration churn diffuses them. Fix: give the anchor
+ * (GameThread) one exclusive clean core. reserve=top post-noise-demotion
+ * primary, alt=second; both ~0 when the knob is off. Anchor routes TO
+ * reserve in select; non-anchor user tasks bounce OFF it at the
+ * direct-local insert choke; reserve's dispatch skips shared-lane pulls so
+ * it stays empty while the anchor sleeps. Bound kthreads still run there
+ * (unavoidable). */
+const volatile u32 cake_frame_reserve_on = 0; /* rodata: guards DCE when off */
+/* DYNAMIC (v2): static reservation measured WORSE (nvCtx 411->5718/s) — an RT
+ * thread drifted onto the fixed reserve core and the immobile anchor couldn't
+ * escape; EEVDF's real defense is mobility. Userspace governor rescans RT
+ * residency + IRQ rates every ~2s and republishes the anchor's safe core
+ * here. Encoding: value = cpu + 1, 0 = none-yet. BSS so it's runtime-writable
+ * through bss_data (trust-lane pattern). */
+volatile u32 cake_frame_reserve_cpu_dyn;
+volatile u32 cake_frame_reserve_alt_dyn;
 #define cake_task_cpu(p) ((p)->thread_info.cpu)
 /* new_flow_bonus_ns REMOVED: zero BPF readers. */
 
@@ -4098,10 +4148,36 @@ static __always_inline void
 cake_insert_local_kick_idle(struct task_struct *p, u32 target_cpu, u64 slice,
 			    u64 enq_flags, u64 target_status)
 {
-	CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
-	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice, enq_flags);
+	/* Frame-anchor reservation: bounce non-anchor user work off the
+	 * reserve core at the direct-local insert choke (all release LOCAL
+	 * enqueue paths funnel here). See cake_frame_reserve_cpu_dyn. */
+	if (cake_frame_reserve_on) {
+		u32 rsv = cake_frame_reserve_cpu_dyn;
 
-	if (target_status & CAKE_CPU_STATUS_IDLE) {
+		if (rsv && target_cpu == rsv - 1 &&
+		    !(p->flags & PF_KTHREAD) &&
+		    cake_task_comm_word(p, 0) != CAKE_COMM_GAME_THREAD) {
+			u32 alt = cake_frame_reserve_alt_dyn;
+
+			if (alt && alt <= CAKE_MAX_CPUS &&
+			    bpf_cpumask_test_cpu(alt - 1, p->cpus_ptr)) {
+				target_cpu    = alt - 1;
+				target_status = cake_read_cpu_status(alt - 1);
+			}
+		}
+	}
+
+	bool idle = !!(target_status & CAKE_CPU_STATUS_IDLE);
+	/* SCX_ENQ_KICK_IDLE bit when the booted kernel + knob allow folding the
+	 * idle wake into the insert; 0 otherwise. Gated on idle so the fold's
+	 * condition matches the explicit kick's exactly. */
+	u64 fold = idle ? cake_enq_kick_idle_flag : 0;
+
+	CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
+	dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+			   enq_flags | fold);
+
+	if (idle) {
 		CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_direct);
 		CAKE_GAME_DIAG_INC(target_cpu, enqueue_wake_idle);
 		CAKE_GAME_DIAG_INC(target_cpu, wake_kick_idle);
@@ -4110,12 +4186,15 @@ cake_insert_local_kick_idle(struct task_struct *p, u32 target_cpu, u64 slice,
 		 * target on the deferred insert (wakeup_preempt -> resched_curr,
 		 * kernel/sched/ext.c), so this explicit kick may be a redundant
 		 * kfunc-entry (rcu + scx_prog_sched + validation) on every idle
-		 * wake. Knob drops it; measure enqueue ns + FPS to confirm. */
+		 * wake. Knob drops it; measure enqueue ns + FPS to confirm.
+		 * When fold != 0 the insert above already carried SCX_ENQ_KICK_IDLE,
+		 * so the explicit kfunc is skipped — the two ops folded into one. */
 #ifndef CAKE_ENQ_SKIP_IDLE_KICK
 #define CAKE_ENQ_SKIP_IDLE_KICK 0
 #endif
 #if !CAKE_ENQ_SKIP_IDLE_KICK
-		scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+		if (!fold)
+			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 #endif
 	}
 }
@@ -5679,6 +5758,19 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	u64 gate2_start	 = 0;
 	s32 cpu		 = -1;
 
+	/* Frame-anchor reservation: the anchor always selects its (dynamic)
+	 * reserved core; claim the idle bit so builtin idle stays coherent. */
+	if (cake_frame_reserve_on) {
+		u32 rsv = cake_frame_reserve_cpu_dyn;
+
+		if (rsv && rsv <= CAKE_MAX_CPUS &&
+		    cake_task_comm_word(p, 0) == CAKE_COMM_GAME_THREAD &&
+		    bpf_cpumask_test_cpu(rsv - 1, p->cpus_ptr)) {
+			scx_bpf_test_and_clear_cpu_idle((s32)(rsv - 1));
+			return (s32)(rsv - 1);
+		}
+	}
+
 	CAKE_FUTEX_TRACE_INC(local_cpu, select_enter);
 #if CAKE_FUTEX_TRACE
 	if (cake_task_service_kind(p) == CAKE_TASK_SERVICE_STRESS_FUTEX) {
@@ -6851,6 +6943,28 @@ cake_insert_llc_pending_vtime(struct task_struct *p, u64 enq_flags,
 			      u32 target_cpu, u64 slice)
 {
 	CAKE_GAME_DIAG_INC(target_cpu, shared_vtime_insert);
+#ifndef CAKE_VTIME_WAKE_FLOOR
+#define CAKE_VTIME_WAKE_FLOOR 0
+#endif
+#if CAKE_VTIME_WAKE_FLOOR
+	/* EEVDF-style wake-lag FLOOR (SCX_CAKE_VTIME_WAKE_FLOOR, 2026-06-10):
+	 * cake_clamp_wakeup_vtime caps the CEILING (don't rejoin behind
+	 * CPU-bound progress) but nothing bounded the floor — a long-sleeper
+	 * keeps arbitrarily stale vtime and queue-jumps the whole arbiter
+	 * ahead of frame-adjacent work. EEVDF clamps sleep credit (vlag /
+	 * DELAY_ZERO); mirror it: at most half a quantum of earned credit
+	 * below the target's frontier. Tail-event-shaped fix: arbiter depth
+	 * is ~0 normally, so queue-jumps are rare == exactly .1%low/maxFT
+	 * texture. */
+	if (enq_flags & (u64)SCX_ENQ_WAKEUP) {
+		u64 frontier = cake_read_cpu_frontier(target_cpu);
+		u64 floor    = frontier - (quantum_ns >> 1);
+
+		if (frontier > (quantum_ns >> 1) &&
+		    p->scx.dsq_vtime < floor)
+			p->scx.dsq_vtime = floor;
+	}
+#endif
 #if CAKE_HAS_LLC_PENDING
 	cake_llc_pending_mark_cpu(target_cpu);
 #endif
@@ -7690,6 +7804,10 @@ cake_dispatch_pull_throughput_cpu(u32 consumer_cpu, u32 owner_cpu, bool steal)
 
 static __noinline bool cake_dispatch_try_throughput_lane(u32 cpu_idx)
 {
+	/* Frame-anchor reservation: the reserve core never pulls shared-lane
+	 * work — it stays empty for the anchor's next wake. */
+	if (cake_frame_reserve_on && cpu_idx + 1 == cake_frame_reserve_cpu_dyn)
+		return false;
 #if CAKE_HAS_DOMAIN_DRR
 	(void)cpu_idx;
 	return false;
@@ -7757,6 +7875,9 @@ static __noinline bool
 cake_dispatch_try_single_llc_pull(struct cake_cpu_bss *dispatch_bss, u32 cpu_idx,
 				  bool stream_bleed_due)
 {
+	/* Frame-anchor reservation: see cake_dispatch_try_throughput_lane. */
+	if (cake_frame_reserve_on && cpu_idx + 1 == cake_frame_reserve_cpu_dyn)
+		return false;
 #if !CAKE_HAS_LLC_PENDING && !CAKE_RELEASE_CONFIDENCE
 	bool stream_head = false;
 	bool hit;
@@ -8079,6 +8200,40 @@ enqueue_dsq_dispatch(struct task_struct *p, u64 enq_flags, u32 enq_cpu)
 	return;
 #else
 	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+#if CAKE_HYBRID_QUEUE_VALUE && defined(CAKE_RELEASE)
+		/* Service-gated hybrid (SCX_CAKE_HYBRID_QUEUE, 2026-06-10):
+		 * measured same-day on 7.1-rc7 — LOCAL fallback wins tail
+		 * extremes (maxFT -6.5%, jitMax -14%) but loses avg -1.5%
+		 * zero-overlap; LLC-VTIME wins avg (+0.3%, first EEVDF avg
+		 * beat) but cedes 1%low/p99. Frame-family threads keep the
+		 * LOCAL shape; everything else takes the shared arbiter. */
+		u64 comm0 = cake_task_comm_word(p, 0);
+
+		if ((CAKE_HYBRID_GATE_GT &&
+		     comm0 == CAKE_COMM_GAME_THREAD) ||
+		    (CAKE_HYBRID_GATE_RT &&
+		     comm0 == CAKE_COMM_RENDER_THREAD)) {
+			cake_insert_local_kick_idle(
+				p, enq_cpu, p->scx.slice, enq_flags,
+				cake_read_cpu_status(enq_cpu));
+			return;
+		}
+		if (CAKE_HYBRID_GATE_GT_COND &&
+		    comm0 == CAKE_COMM_GAME_THREAD) {
+			u64 ts	  = cake_read_cpu_status(enq_cpu);
+			u32 owner = (u32)((ts >> CAKE_CPU_STATUS_OWNER_SHIFT) &
+					  CAKE_CPU_STATUS_OWNER_MASK);
+
+			if ((ts & CAKE_CPU_STATUS_IDLE) ||
+			    owner == CAKE_CPU_OWNER_FRAME ||
+			    owner == CAKE_CPU_OWNER_INTERACTIVE) {
+				cake_insert_local_kick_idle(
+					p, enq_cpu, p->scx.slice, enq_flags,
+					ts);
+				return;
+			}
+		}
+#endif
 		cake_insert_llc_vtime(p, enq_flags, enq_cpu, p->scx.slice);
 		return;
 	}
@@ -8163,6 +8318,35 @@ enqueue_dsq_dispatch(struct task_struct *p, u64 enq_flags, u32 enq_cpu)
 #endif
 
 	if (likely(CAKE_QUEUE_POLICY == CAKE_QUEUE_POLICY_LLC_VTIME)) {
+#if CAKE_HYBRID_QUEUE_VALUE && defined(CAKE_RELEASE)
+		/* Service-gated hybrid: see the lean-branch comment above. */
+		u64 hybrid_comm0 = cake_task_comm_word(p, 0);
+
+		if ((CAKE_HYBRID_GATE_GT &&
+		     hybrid_comm0 == CAKE_COMM_GAME_THREAD) ||
+		    (CAKE_HYBRID_GATE_RT &&
+		     hybrid_comm0 == CAKE_COMM_RENDER_THREAD)) {
+			cake_insert_local_kick_idle(
+				p, enq_cpu, p->scx.slice, enq_flags,
+				cake_read_cpu_status(enq_cpu));
+			return;
+		}
+		if (CAKE_HYBRID_GATE_GT_COND &&
+		    hybrid_comm0 == CAKE_COMM_GAME_THREAD) {
+			u64 hts	   = cake_read_cpu_status(enq_cpu);
+			u32 howner = (u32)((hts >> CAKE_CPU_STATUS_OWNER_SHIFT) &
+					   CAKE_CPU_STATUS_OWNER_MASK);
+
+			if ((hts & CAKE_CPU_STATUS_IDLE) ||
+			    howner == CAKE_CPU_OWNER_FRAME ||
+			    howner == CAKE_CPU_OWNER_INTERACTIVE) {
+				cake_insert_local_kick_idle(
+					p, enq_cpu, p->scx.slice, enq_flags,
+					hts);
+				return;
+			}
+		}
+#endif
 		cake_insert_llc_vtime(p, enq_flags, enq_cpu, p->scx.slice);
 		return;
 	}
@@ -8503,11 +8687,17 @@ static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
 		cake_service_transition_reset_state(target_cpu, CAKE_TASK_SERVICE_PERF_SCHED_PIPE);
 		p->scx.slice = slice;
 		CAKE_GAME_DIAG_INC(target_cpu, enqueue_direct_local);
-		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice, enq_flags);
 		u64 target_status = cake_read_cpu_status(target_cpu);
-		if (target_status & CAKE_CPU_STATUS_IDLE) {
+		bool idle = !!(target_status & CAKE_CPU_STATUS_IDLE);
+		/* Fold the idle wake into the insert when the booted kernel + knob
+		 * support SCX_ENQ_KICK_IDLE; 0 => explicit-kick fallback. */
+		u64 fold = idle ? cake_enq_kick_idle_flag : 0;
+		dsq_insert_wrapper(p, SCX_DSQ_LOCAL_ON | target_cpu, slice,
+				   enq_flags | fold);
+		if (idle) {
 			CAKE_GAME_DIAG_INC(target_cpu, wake_kick_idle);
-			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+			if (!fold)
+				scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 		}
 		return;
 	}
@@ -10355,6 +10545,35 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 
 	struct cake_cpu_bss *bss = &cpu_bss[cpu];
 
+#if CAKE_GAME_DIAG
+	/* Frame-preemptor attribution consumer (see intf.h): classify who
+	 * runs right after a frame thread was stopped-while-runnable. */
+	{
+		u32 vpid = READ_ONCE(bss->frame_victim_pid);
+
+		if (vpid) {
+			WRITE_ONCE(bss->frame_victim_pid, 0);
+			if ((u32)p->pid == vpid) {
+				CAKE_GAME_DIAG_INC(cpu, frame_preempt_by_self);
+			} else if (p->flags & PF_KTHREAD) {
+				if (cake_task_comm_word(p, 0) ==
+				    CAKE_COMM8('k', 'w', 'o', 'r', 'k', 'e', 'r', '/'))
+					CAKE_GAME_DIAG_INC(cpu, frame_preempt_by_kworker);
+				else
+					CAKE_GAME_DIAG_INC(cpu, frame_preempt_by_kthread);
+			} else {
+				u64 c0 = cake_task_comm_word(p, 0);
+
+				if (c0 == CAKE_COMM_GAME_THREAD ||
+				    c0 == CAKE_COMM_RENDER_THREAD)
+					CAKE_GAME_DIAG_INC(cpu, frame_preempt_by_game);
+				else
+					CAKE_GAME_DIAG_INC(cpu, frame_preempt_by_user);
+			}
+		}
+	}
+#endif
+
 #ifndef CAKE_RELEASE
 	if (stats_on) {
 		running_debug_start = bpf_ktime_get_ns();
@@ -10631,10 +10850,20 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 #if CAKE_GAME_DIAG
 	CAKE_GAME_DIAG_INC(cpu, stopping_call);
-	if (runnable)
+	if (runnable) {
+		u64 comm0 = cake_task_comm_word(p, 0);
+
 		CAKE_GAME_DIAG_INC(cpu, stopping_runnable);
-	else
+		/* Frame-preemptor attribution: latch the victim; the next
+		 * running() on this CPU names the thief (see intf.h). */
+		if (comm0 == CAKE_COMM_GAME_THREAD ||
+		    comm0 == CAKE_COMM_RENDER_THREAD) {
+			CAKE_GAME_DIAG_INC(cpu, frame_stop_runnable);
+			WRITE_ONCE(bss->frame_victim_pid, (u32)p->pid);
+		}
+	} else {
 		CAKE_GAME_DIAG_INC(cpu, stopping_blocked);
+	}
 #endif
 
 	/* Vtime integration.

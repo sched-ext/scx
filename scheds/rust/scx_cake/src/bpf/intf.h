@@ -87,6 +87,10 @@ struct cake_cpu_bss {
 	#endif
 	u64 tick_slice; /* 8B: p->scx.slice ?: quantum_ns */
 	u32 last_pid; /* 4B: Fast path — skip task-change work if same pid */
+	u32 frame_victim_pid; /* 4B: diag-only frame-preemptor attribution latch;
+				 *     written only in CAKE_GAME_DIAG builds,
+				 *     unconditional here so intf.h layout never
+				 *     depends on the diag define. */
 #ifndef CAKE_RELEASE
 	u8 idle_hint; /* 1B: debug-only private mirror of idle state */
 #endif
@@ -1135,6 +1139,20 @@ struct cake_game_diag {
 	u64 wake_kick_preempt; /* explicit preempt kick */
 	u64 kthread_direct_insert; /* kthread bypass local insert */
 	u64 kthread_wake_preempt; /* kthread wake forced preempt */
+
+	/* Frame-preemptor attribution (2026-06-10): GameThread eats ~425
+	 * involuntary switches/s under cake vs ~54 under EEVDF and the source
+	 * is NOT cake's wake kicks (disabling them made it worse). These
+	 * counters name the thief: stopping(runnable) of a frame thread arms
+	 * frame_victim_pid; the next running() on that CPU classifies who
+	 * took over. by_self = the victim itself resumed, meaning a non-scx
+	 * (RT/stop-class) task ran in the gap — scx never sees it. */
+	u64 frame_stop_runnable; /* GameThread/RenderThread preempted while runnable */
+	u64 frame_preempt_by_self; /* victim resumed next: RT/non-scx preemptor */
+	u64 frame_preempt_by_kworker; /* kworker took the CPU */
+	u64 frame_preempt_by_kthread; /* other kthread took the CPU */
+	u64 frame_preempt_by_game; /* another frame-family thread took the CPU */
+	u64 frame_preempt_by_user; /* other user thread took the CPU */
 
 	u64 local_waiter_attempt; /* local-waiter considered */
 	u64 local_waiter_insert; /* local-waiter inserted */

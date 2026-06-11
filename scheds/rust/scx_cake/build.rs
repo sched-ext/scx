@@ -132,8 +132,13 @@ fn baked_profile() -> (String, u64) {
 }
 
 fn baked_queue_policy() -> (&'static str, u32) {
+    // Default flipped local -> llc-vtime 2026-06-10: the measured champion.
+    // LOCAL lost avg -1.5% zero-overlap vs EEVDF on 7.1-rc7; llc-vtime (with
+    // the hybrid frame gate below) beat EEVDF on all seven Kovaaks MangoHud
+    // metrics on a fresh instance. SCX_CAKE_QUEUE_POLICY=local restores the
+    // old shape for A/B.
     let policy = std::env::var("SCX_CAKE_QUEUE_POLICY")
-        .unwrap_or_else(|_| "local".into())
+        .unwrap_or_else(|_| "llc-vtime".into())
         .to_ascii_lowercase()
         .replace('_', "-");
     match policy.as_str() {
@@ -277,6 +282,25 @@ fn main() {
         baked_bool("SCX_CAKE_WAKE_PREEMPT_ADAPTIVE", false);
     let (_game_diag_label, game_diag_value, game_diag_enabled) =
         baked_bool("SCX_CAKE_GAME_DIAG", false);
+    // Service-gated hybrid queue policy (2026-06-10): frame threads keep the
+    // LOCAL busy-fallback shape, everything else takes the per-LLC vtime
+    // arbiter. Only meaningful with SCX_CAKE_QUEUE_POLICY=llc-vtime.
+    // 0=off, 1=GameThread+RenderThread LOCAL, 2=GT-only, 3=RT-only,
+    // 4=RT always + GT only onto idle/frame-owned targets (CHAMPION).
+    // Default flipped 0 -> 4 with the llc-vtime default: gate4 is the config
+    // that beat EEVDF on all seven Kovaaks metrics (fresh-instance, 2026-06-10);
+    // gates 2/3 destabilize 1%low (sigma 83-104 vs 10-40) — measured, avoid.
+    let hybrid_queue_value: u32 = std::env::var("SCX_CAKE_HYBRID_QUEUE")
+        .ok()
+        .map(|v| match v.trim() {
+            "0" | "false" => 0,
+            "1" | "true" => 1,
+            "2" => 2,
+            "3" => 3,
+            "" | "4" => 4,
+            other => panic!("SCX_CAKE_HYBRID_QUEUE must be 0..4 (got {other})"),
+        })
+        .unwrap_or(4);
     let dsq_insert_v2_fastpath_value = if detect_scx_dsq_insert_v2_kfunc() {
         1
     } else {
@@ -416,6 +440,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ADAPTIVE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ELAPSED_US");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_GAME_DIAG");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_HYBRID_QUEUE");
     println!("cargo:rerun-if-changed=/proc/kallsyms");
     println!("cargo:rerun-if-changed=/sys/kernel/btf/vmlinux");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
@@ -550,6 +575,11 @@ fn main() {
         dsq_insert_v2_fastpath_value
     ));
     cflags.push_str(&format!(" -DCAKE_GAME_DIAG={}", game_diag_value));
+    cflags.push_str(&format!(" -DCAKE_HYBRID_QUEUE_VALUE={}", hybrid_queue_value));
+    let (_vtime_floor_label, vtime_floor_value, _vtime_floor) =
+        baked_bool("SCX_CAKE_VTIME_WAKE_FLOOR", false);
+    cflags.push_str(&format!(" -DCAKE_VTIME_WAKE_FLOOR={}", vtime_floor_value));
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_VTIME_WAKE_FLOOR");
     if profile == "release" {
         cflags.push_str(" -DCAKE_RELEASE=1");
         println!("cargo:rustc-cfg=cake_bpf_release");

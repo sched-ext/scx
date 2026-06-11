@@ -214,6 +214,12 @@ struct ReleaseGameDiagTotals {
     wake_kick_preempt: u64,
     kthread_direct_insert: u64,
     kthread_wake_preempt: u64,
+    frame_stop_runnable: u64,
+    frame_preempt_by_self: u64,
+    frame_preempt_by_kworker: u64,
+    frame_preempt_by_kthread: u64,
+    frame_preempt_by_game: u64,
+    frame_preempt_by_user: u64,
     local_waiter_attempt: u64,
     local_waiter_insert: u64,
     local_waiter_reject: u64,
@@ -567,6 +573,12 @@ impl ReleaseGameDiagTotals {
         self.stopping_account_audit += other.stopping_account_audit;
         self.stopping_scoreboard_owner_result += other.stopping_scoreboard_owner_result;
         self.stopping_lean_return += other.stopping_lean_return;
+        self.frame_stop_runnable += other.frame_stop_runnable;
+        self.frame_preempt_by_self += other.frame_preempt_by_self;
+        self.frame_preempt_by_kworker += other.frame_preempt_by_kworker;
+        self.frame_preempt_by_kthread += other.frame_preempt_by_kthread;
+        self.frame_preempt_by_game += other.frame_preempt_by_game;
+        self.frame_preempt_by_user += other.frame_preempt_by_user;
     }
 }
 
@@ -631,7 +643,10 @@ fn format_release_game_diag_text(uptime_secs: f64, totals: &ReleaseGameDiagTotal
             "stopping_owner_update={} stopping_route_observe={} ",
             "stopping_route_pending={} stopping_route_no_pending={} ",
             "stopping_account_relaxed={} stopping_account_audit={} ",
-            "stopping_scoreboard_owner_result={} stopping_lean_return={}\n"
+            "stopping_scoreboard_owner_result={} stopping_lean_return={} ",
+            "frame_stop_runnable={} frame_preempt_by_self={} ",
+            "frame_preempt_by_kworker={} frame_preempt_by_kthread={} ",
+            "frame_preempt_by_game={} frame_preempt_by_user={}\n"
         ),
         uptime_secs,
         totals.nfw_entry,
@@ -701,7 +716,13 @@ fn format_release_game_diag_text(uptime_secs: f64, totals: &ReleaseGameDiagTotal
         totals.stopping_account_relaxed,
         totals.stopping_account_audit,
         totals.stopping_scoreboard_owner_result,
-        totals.stopping_lean_return
+        totals.stopping_lean_return,
+        totals.frame_stop_runnable,
+        totals.frame_preempt_by_self,
+        totals.frame_preempt_by_kworker,
+        totals.frame_preempt_by_kthread,
+        totals.frame_preempt_by_game,
+        totals.frame_preempt_by_user
     )
 }
 
@@ -798,6 +819,12 @@ fn release_game_diag_from_bpf(
             stopping_account_audit: row.stopping_account_audit,
             stopping_scoreboard_owner_result: row.stopping_scoreboard_owner_result,
             stopping_lean_return: row.stopping_lean_return,
+            frame_stop_runnable: row.frame_stop_runnable,
+            frame_preempt_by_self: row.frame_preempt_by_self,
+            frame_preempt_by_kworker: row.frame_preempt_by_kworker,
+            frame_preempt_by_kthread: row.frame_preempt_by_kthread,
+            frame_preempt_by_game: row.frame_preempt_by_game,
+            frame_preempt_by_user: row.frame_preempt_by_user,
         },
     }
 }
@@ -1297,6 +1324,323 @@ fn cpu_perf_scores(nr_cpus: usize) -> [u32; topology::MAX_CPUS] {
     scores
 }
 
+/// Per-CPU hardirq rates from two /proc/interrupts samples `gap_ms` apart.
+/// Row format: "NNN:  <count per cpu>...  <desc>"; non-numeric rows (ERR/MIS)
+/// and the header are skipped.
+fn sample_irq_rates(nr_cpus: usize, gap_ms: u64) -> Vec<u64> {
+    fn per_cpu_totals(nr_cpus: usize) -> Vec<u64> {
+        let mut totals = vec![0u64; nr_cpus];
+        if let Ok(raw) = std::fs::read_to_string("/proc/interrupts") {
+            for line in raw.lines().skip(1) {
+                let mut cols = line.split_whitespace();
+                let Some(label) = cols.next() else { continue };
+                if !label.ends_with(':') || !label[..label.len() - 1].chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                for (cpu, col) in cols.take(nr_cpus).enumerate() {
+                    if let Ok(n) = col.parse::<u64>() {
+                        totals[cpu] += n;
+                    }
+                }
+            }
+        }
+        totals
+    }
+    let a = per_cpu_totals(nr_cpus);
+    std::thread::sleep(std::time::Duration::from_millis(gap_ms));
+    let b = per_cpu_totals(nr_cpus);
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| y.saturating_sub(*x) * 1000 / gap_ms.max(1))
+        .collect()
+}
+
+/// Voluntary-ctxt-switch counts for a set of threads from /proc status.
+fn rt_thread_wake_counts(tids: &[(u32, u32)]) -> Vec<u64> {
+    tids.iter()
+        .map(|(tid, _)| {
+            std::fs::read_to_string(format!("/proc/{tid}/status"))
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("voluntary_ctxt_switches"))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .and_then(|v| v.parse::<u64>().ok())
+                })
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Find user-competing RT (FIFO/RR) threads and their resident CPUs.
+/// Per-CPU kernel housekeeping (migration/N, idle_inject/N, cpuhp/N) is
+/// excluded: bound to its own CPU, dormant or stop-class, not a residency
+/// signal worth demoting a core over.
+fn rt_resident_threads() -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else { return out };
+    for pid_entry in proc_dir.flatten() {
+        let Some(pid_name) = pid_entry.file_name().to_str().map(String::from) else { continue };
+        if !pid_name.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid_name}/task")) else { continue };
+        for task in tasks.flatten() {
+            let Some(tid) = task.file_name().to_str().and_then(|t| t.parse::<u32>().ok()) else { continue };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{tid}/stat")) else { continue };
+            // Fields after the parenthesized comm: split on the LAST ')'.
+            let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else { continue };
+            let cols: Vec<&str> = rest.split_whitespace().collect();
+            // rest[0]=state(field 3) ... psr=field 39 -> rest[36], policy=field 41 -> rest[38]
+            let (Some(psr), Some(policy)) = (
+                cols.get(36).and_then(|v| v.parse::<u32>().ok()),
+                cols.get(38).and_then(|v| v.parse::<u32>().ok()),
+            ) else { continue };
+            if policy != 1 && policy != 2 {
+                continue; // not SCHED_FIFO/SCHED_RR
+            }
+            let comm = std::fs::read_to_string(format!("/proc/{tid}/comm")).unwrap_or_default();
+            let comm = comm.trim();
+            if comm.starts_with("migration/")
+                || comm.starts_with("idle_inject/")
+                || comm.starts_with("cpuhp/")
+            {
+                continue;
+            }
+            out.push((tid, psr));
+        }
+    }
+    out
+}
+
+/// Dynamic frame-anchor reserve governor (--frame-reserve).
+///
+/// Static reservation failed (GameThread nvCtx 411->5718/s when an RT thread
+/// drifted onto the fixed core); RT residency moves, so the safe core must
+/// too. Every ~2s: rescan FIFO/RR thread residency + per-CPU hardirq rates,
+/// pick the highest-perf PRIMARY core that is RT-free and irq-quiet, publish
+/// to BPF bss (cake_frame_reserve_cpu_dyn, cpu+1 encoding). Hysteresis: keep
+/// the current reserve while it stays clean (cache warmth beats a marginally
+/// better core).
+struct FrameReserveGovernor {
+    enabled: bool,
+    tick: u64,
+    prev_irq_totals: Vec<u64>,
+    prev_rt_wakes: std::collections::HashMap<u32, u64>,
+    reserve: u32, // cpu+1, 0=none
+    alt: u32,
+}
+
+impl FrameReserveGovernor {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            tick: 0,
+            prev_irq_totals: Vec::new(),
+            prev_rt_wakes: std::collections::HashMap::new(),
+            reserve: 0,
+            alt: 0,
+        }
+    }
+
+    fn tick(&mut self, skel: &mut BpfSkel, nr_cpus: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.tick += 1;
+        if self.tick % 2 != 1 {
+            return; // every 2nd second
+        }
+        let irq_totals = {
+            let mut totals = vec![0u64; nr_cpus];
+            if let Ok(raw) = std::fs::read_to_string("/proc/interrupts") {
+                for line in raw.lines().skip(1) {
+                    let mut cols = line.split_whitespace();
+                    let Some(label) = cols.next() else { continue };
+                    if !label.ends_with(':')
+                        || !label[..label.len() - 1].chars().all(|c| c.is_ascii_digit())
+                    {
+                        continue;
+                    }
+                    for (cpu, col) in cols.take(nr_cpus).enumerate() {
+                        if let Ok(n) = col.parse::<u64>() {
+                            totals[cpu] += n;
+                        }
+                    }
+                }
+            }
+            totals
+        };
+        let mut irq_noisy = vec![false; nr_cpus];
+        if self.prev_irq_totals.len() == nr_cpus {
+            for cpu in 0..nr_cpus {
+                // ~2s window; >=2000/s sustained marks the CPU irq-noisy.
+                if irq_totals[cpu].saturating_sub(self.prev_irq_totals[cpu]) >= 4000 {
+                    irq_noisy[cpu] = true;
+                }
+            }
+        }
+        self.prev_irq_totals = irq_totals;
+
+        // Only ACTIVE RT threads poison a core — dormant per-CPU irq/rcu
+        // FIFO threads exist on every CPU and never preempt. Rate-gate on
+        // voluntary wakes across the ~2s tick window, like the loader scan.
+        let mut rt_resident = vec![false; nr_cpus];
+        let rt = rt_resident_threads();
+        let counts = rt_thread_wake_counts(&rt);
+        let mut next_prev = std::collections::HashMap::new();
+        for (i, &(tid, psr)) in rt.iter().enumerate() {
+            next_prev.insert(tid, counts[i]);
+            if let Some(&prev) = self.prev_rt_wakes.get(&tid) {
+                let per_s = counts[i].saturating_sub(prev) / 2;
+                if per_s >= 300 && (psr as usize) < nr_cpus {
+                    rt_resident[psr as usize] = true;
+                }
+            }
+        }
+        self.prev_rt_wakes = next_prev;
+
+        let clean = |cpu: usize| -> bool { !rt_resident[cpu] && !irq_noisy[cpu] };
+        let is_primary = |cpu: usize| -> bool {
+            std::fs::read_to_string(format!(
+                "/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
+            ))
+            .ok()
+            .and_then(|s| {
+                s.trim()
+                    .split([',', '-'])
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+            })
+            .map(|first| first == cpu)
+            .unwrap_or(true)
+        };
+
+        // Hysteresis: keep a still-clean reserve.
+        if self.reserve != 0 {
+            let cur = (self.reserve - 1) as usize;
+            if cur < nr_cpus && clean(cur) {
+                return;
+            }
+        }
+
+        let mut ranked: Vec<(usize, u32)> = (0..nr_cpus)
+            .filter(|&c| clean(c) && is_primary(c))
+            .map(|c| (c, read_cpu_perf_score(c)))
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let (new_reserve, new_alt) = match (ranked.first(), ranked.get(1)) {
+            (Some(&(r, _)), Some(&(a, _))) => (r as u32 + 1, a as u32 + 1),
+            (Some(&(r, _)), None) => (r as u32 + 1, 0),
+            _ => (0, 0),
+        };
+        if new_reserve == 0 {
+            log::warn!(
+                "frame-reserve: no clean primary core found (rt={:?})",
+                (0..nr_cpus).filter(|&c| rt_resident[c]).collect::<Vec<_>>()
+            );
+            return;
+        }
+        if new_reserve != self.reserve || new_alt != self.alt {
+            let Some(bss) = &mut skel.maps.bss_data else {
+                log::warn!("frame-reserve: bss_data unavailable; cannot publish");
+                return;
+            };
+            bss.cake_frame_reserve_cpu_dyn = new_reserve;
+            bss.cake_frame_reserve_alt_dyn = new_alt;
+            info!(
+                "frame-reserve: anchor core -> {} (alt {})",
+                new_reserve as i64 - 1,
+                new_alt as i64 - 1
+            );
+            self.reserve = new_reserve;
+            self.alt = new_alt;
+        }
+    }
+}
+
+/// SCX_CAKE_IRQ_AVOID: demote IRQ-storm CPUs in the routing perf scores.
+///
+/// Measured 2026-06-10 (9800X3D, Kovaaks ~1240fps): the nvidia GPU interrupt
+/// lands exclusively on one CPU (12.4k hardirqs/s) and its FIFO-50 threaded
+/// handler preempts anything sched_ext puts there — but that CPU sat in
+/// cake's top-4 frame cores by ACPI perf score, so GameThread ate ~425
+/// involuntary switches/s (14x EEVDF's wait per slice). EEVDF diffuses off
+/// the noisy core statistically via load balancing; cake routes
+/// deterministically, so it must dodge deterministically.
+///
+/// Values: unset/"0"=off, "1"/"auto"=detect (>=2000 hardirq/s over a 100ms
+/// startup sample), or an explicit comma list of CPU ids ("13" / "12,13").
+/// Detection samples at load time, after the game/GPU is already running in
+/// the A/B flow; boot-time loads with an idle GPU won't see the storm — use
+/// the explicit list there. Demotion is score/3: 196 -> 65, below every
+/// clean core on this part, so the noisy CPU becomes a last-resort target
+/// without being removed from the topology.
+fn apply_irq_avoid_penalty(
+    scores: &mut [u32; topology::MAX_CPUS],
+    nr_cpus: usize,
+    cli_knob: Option<&str>,
+) {
+    // Default "auto" since 2026-06-10 (championship config): demoting
+    // RT/IRQ-noisy cores won maxFT/jitMax with 3-4x tighter spreads and
+    // regressed nothing. Costs ~300ms of startup sampling. "0" disables.
+    let env_knob = std::env::var("SCX_CAKE_IRQ_AVOID").unwrap_or_default();
+    let mut knob = cli_knob.unwrap_or(&env_knob).trim();
+    if knob.is_empty() {
+        knob = "auto";
+    }
+    if knob == "0" {
+        return;
+    }
+    const IRQ_NOISY_RATE_PER_S: u64 = 2000;
+    /* RT threads wake-rate threshold: KWin compositor threads measured
+     * 5-6k wakes/s (FIFO-1) and PipeWire data-loops 370-750/s (FIFO-20)
+     * resident on the top frame cores; rcu_preempt idles ~260/s and is
+     * deliberately below the bar. Every RT wake can preempt an scx task
+     * mid-burst — measured 99.7% of GameThread's involuntary switches
+     * were RT-sandwich preemptions (frame_preempt_by_self diag). */
+    const RT_NOISY_WAKES_PER_S: u64 = 300;
+    let noisy: Vec<usize> = if knob == "1" || knob.eq_ignore_ascii_case("auto") {
+        let mut set: std::collections::BTreeSet<usize> = sample_irq_rates(nr_cpus, 100)
+            .iter()
+            .enumerate()
+            .filter(|(_, &r)| r >= IRQ_NOISY_RATE_PER_S)
+            .map(|(cpu, _)| cpu)
+            .collect();
+        let rt = rt_resident_threads();
+        let before = rt_thread_wake_counts(&rt);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let after = rt_thread_wake_counts(&rt);
+        for (i, &(tid, psr)) in rt.iter().enumerate() {
+            let rate = after[i].saturating_sub(before[i]) * 5;
+            if rate >= RT_NOISY_WAKES_PER_S && (psr as usize) < nr_cpus {
+                info!(
+                    "IRQ-avoid: RT thread tid={} ({} wakes/s) resident on cpu{}",
+                    tid, rate, psr
+                );
+                set.insert(psr as usize);
+            }
+        }
+        set.into_iter().collect()
+    } else {
+        knob.split(',')
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .filter(|&c| c < nr_cpus)
+            .collect()
+    };
+    if noisy.is_empty() {
+        info!("IRQ-avoid: enabled but no IRQ-noisy CPUs detected");
+        return;
+    }
+    for &cpu in &noisy {
+        scores[cpu] /= 3;
+    }
+    info!(
+        "IRQ-avoid: demoted IRQ-noisy CPUs {:?} in routing perf scores",
+        noisy
+    );
+}
+
 #[allow(dead_code)]
 fn build_core_spread_slots(
     cpu: usize,
@@ -1537,6 +1881,33 @@ struct Args {
     #[arg(long, default_value_t = 60, verbatim_doc_comment)]
     diag_period: u64,
 
+    /// Fold the enqueue idle-kick into the local-DSQ insert (SCX_ENQ_KICK_IDLE).
+    ///
+    /// Requires a kernel with the SCX_ENQ_KICK_IDLE enq_flag (for-7.2+, arighi
+    /// aee94395c1f7); on older kernels this falls back to the explicit kick with
+    /// a warning. Equivalent to SCX_CAKE_ENQ_KICK_IDLE=1 — the flag form exists
+    /// because game-capture harnesses pass per-target activation_args but cannot
+    /// inject env vars through the privileged launch path.
+    #[arg(long, action = clap::ArgAction::SetTrue, verbatim_doc_comment)]
+    enq_kick_idle: bool,
+
+    /// Demote IRQ-storm CPUs in core routing: "auto" (detect at load) or a
+    /// comma list of CPU ids (e.g. "13"). Equivalent to SCX_CAKE_IRQ_AVOID;
+    /// flag form exists for capture harnesses that pass activation_args.
+    /// See apply_irq_avoid_penalty for the measured rationale.
+    #[arg(long, value_name = "AUTO_OR_CPUS", verbatim_doc_comment)]
+    irq_avoid: Option<String>,
+
+    /// Reserve the top routing core exclusively for the frame anchor
+    /// (GameThread): anchor always selects it, other user tasks bounce to
+    /// the second-best core, and the reserve core never pulls shared-lane
+    /// work. Equivalent to SCX_CAKE_FRAME_RESERVE=1. Measured rationale in
+    /// cake.bpf.c at cake_frame_reserve_cpu: RT compositor/audio preemptions
+    /// follow the pipeline (sync wakes), so isolation — not avoidance — is
+    /// the counter. Combine with --irq-avoid so the reserved core is clean.
+    #[arg(long, action = clap::ArgAction::SetTrue, verbatim_doc_comment)]
+    frame_reserve: bool,
+
     /// Print scheduler version and exit.
     #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
@@ -1756,6 +2127,42 @@ impl<'a> Scheduler<'a> {
                 rodata.enable_stats = args.verbose;
             }
 
+            // SCX_ENQ_KICK_IDLE (kernel for-7.2+, arighi): fold the enqueue
+            // idle-kick into the insert's enq_flags — one kfunc crossing instead
+            // of dsq_insert + scx_bpf_kick_cpu. Resolve the flag bit from the
+            // BOOTED kernel's BTF; 0 if the kernel predates it, so cake falls back
+            // to the explicit kick. Gated by SCX_CAKE_ENQ_KICK_IDLE=1 so it can be
+            // A/B'd against the explicit-kick path. Unconditional (runtime rodata,
+            // present in both release and debug builds).
+            // Default-ON since 2026-06-10: the fold is strictly cheaper
+            // (cake_enqueue 164.6 -> 46.8 ns/call in-game) with zero frame
+            // regression in a 4-cycle ABBA, and the BTF probe fails safe to
+            // the explicit kick on kernels without the flag.
+            // SCX_CAKE_ENQ_KICK_IDLE=0 disables for A/B.
+            let enq_kick_idle_on = args.enq_kick_idle
+                || std::env::var("SCX_CAKE_ENQ_KICK_IDLE")
+                    .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                    .unwrap_or(true);
+            rodata.cake_enq_kick_idle_flag = if enq_kick_idle_on {
+                match scx_utils::compat::read_enum("scx_enq_flags", "SCX_ENQ_KICK_IDLE") {
+                    Ok(bit) => {
+                        info!(
+                            "SCX_ENQ_KICK_IDLE on: folding enqueue idle-kick into insert (flag=0x{:x})",
+                            bit
+                        );
+                        bit
+                    }
+                    Err(_) => {
+                        log::warn!(
+                            "SCX_CAKE_ENQ_KICK_IDLE=1 but booted kernel lacks SCX_ENQ_KICK_IDLE; using explicit kick"
+                        );
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+
             // Populate topology metadata used by local-first steering and telemetry.
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
@@ -1812,7 +2219,8 @@ impl<'a> Scheduler<'a> {
             }
 
             let nr = topo.nr_cpus.min(topology::MAX_CPUS);
-            let cpu_perf_score = cpu_perf_scores(nr);
+            let mut cpu_perf_score = cpu_perf_scores(nr);
+            apply_irq_avoid_penalty(&mut cpu_perf_score, nr, args.irq_avoid.as_deref());
             for i in 0..nr.min(rodata.cpu_meta.len()) {
                 let sibling = topo.cpu_sibling_map[i];
                 let has_smt_sibling = (sibling as usize) < nr && sibling as usize != i;
@@ -1859,6 +2267,17 @@ impl<'a> Scheduler<'a> {
                 "Core spread route table: top CPUs {:?}",
                 perf_order.iter().take(6).collect::<Vec<_>>()
             );
+
+            let frame_reserve_on = args.frame_reserve
+                || std::env::var("SCX_CAKE_FRAME_RESERVE")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+            if frame_reserve_on && perf_order.len() >= 2 {
+                rodata.cake_frame_reserve_on = 1;
+                info!(
+                    "Frame-anchor reservation on (dynamic): governor republishes the anchor core every ~2s"
+                );
+            }
 
             // Performance-ordered CPU scan arrays — HYBRID ONLY
             #[cfg(cake_has_hybrid)]
@@ -2132,8 +2551,17 @@ impl<'a> Scheduler<'a> {
                 },
             )?;
         } else {
+            // Dynamic frame-anchor governor rides the headless loop only;
+            // --verbose/TUI paths skip it (A/B captures run headless).
+            let mut frame_governor = FrameReserveGovernor::new(
+                self.args.frame_reserve
+                    || std::env::var("SCX_CAKE_FRAME_RESERVE")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false),
+            );
             while !shutdown.load(Ordering::Relaxed) {
                 trust_governor.tick(&mut self.skel, self.topology.nr_cpus);
+                frame_governor.tick(&mut self.skel, self.topology.nr_cpus);
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 if scx_utils::uei_exited!(&self.skel, uei) {
                     break;
