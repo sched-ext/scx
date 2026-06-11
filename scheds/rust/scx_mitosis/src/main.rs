@@ -145,7 +145,7 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_llc_awareness: bool,
 
-    /// Enable work stealing. This is only relevant when LLC-awareness is enabled.
+    /// Deprecated, noop. LLC-aware mode always scans sibling LLC DSQs.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_work_stealing: bool,
 
@@ -317,11 +317,7 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
-    fn validate_args(opts: &Opts) -> Result<()> {
-        if opts.enable_work_stealing && !opts.enable_llc_awareness {
-            bail!("Work stealing requires LLC-aware mode (--enable-llc-awareness)");
-        }
-
+    fn validate_args(_opts: &Opts) -> Result<()> {
         Ok(())
     }
 
@@ -384,7 +380,6 @@ impl<'a> Scheduler<'a> {
         // Set nr_llc in rodata
         rodata.nr_llc = nr_llc as u32;
         rodata.enable_llc_awareness = opts.enable_llc_awareness;
-        rodata.enable_work_stealing = opts.enable_work_stealing;
 
         rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
 

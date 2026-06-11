@@ -36,10 +36,6 @@ static inline bool llc_is_valid(u32 llc_id)
 static inline void init_task_llc(struct task_ctx *tctx)
 {
 	tctx->llc = LLC_INVALID;
-
-	if (!enable_work_stealing)
-		return;
-
 	tctx->steal_count = 0;
 	tctx->last_stolen_at = 0;
 }
@@ -258,12 +254,12 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 			continue;
 
 		/*
-    * Skip if the cell doesn't have CPUs in this LLC.
-    * Note: rechecking cell_ptr for verifier.
-    * This is racy with try_stealing_this_task, but we don't care -
-    * if the LLC actually doesn't have CPUs come steal time,
-    * we will fail the steal and continue to the next LLC.
-    */
+		 * Skip if the cell doesn't have CPUs in this LLC.
+		 * Note: rechecking cell_ptr for verifier.
+		 * This is racy with try_stealing_this_task, but we don't care -
+		 * if the LLC actually doesn't have CPUs come steal time,
+		 * we will fail the steal and continue to the next LLC.
+		 */
 		if (cell_ptr && READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
 			continue;
 
