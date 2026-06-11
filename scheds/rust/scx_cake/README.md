@@ -13,13 +13,16 @@ queue discipline) to CPU time: keep the wake path short, publish state from a
 single writer, give the latency-critical flow a deterministic fast lane, and
 arbitrate everything else fairly.
 
-The current design is the **service-gated hybrid queue** (2026-06-10). Under
-an order-rotated, focus-gated A/B protocol on a focused KovaaK's workload it
-beats Linux EEVDF — including the 7.1-era HRTICK-at-deadline and
-POC-idle-selector improvements — on every MangoHud metric measured, and beats
-`scx_cosmos` and `scx_lavd` under the same protocol. Full results and
-methodology are in [Measured results](#measured-results-2026-06-10); the
-campaign decision log is in
+The current design is the **service-gated hybrid queue** (2026-06-10). It has
+been measured side-by-side against Linux EEVDF (including the 7.1-era
+HRTICK-at-deadline and POC-idle-selector improvements), `scx_cosmos`, and
+`scx_lavd` on the development machine — a Ryzen 7 9800X3D + RTX 4090 running
+a CachyOS 7.1-rc7 kernel with one custom sched_ext patch — using an
+order-rotated, focus-gated A/B protocol on a focused KovaaK's workload. The
+explicit numbers, the test system, and the methodology are in
+[Measured results](#measured-results-2026-06-10) so you can judge for
+yourself; one machine and one title are a data point, not a universal claim.
+The campaign decision log is in
 [docs/mutation_campaign_2026-06-10.md](./docs/mutation_campaign_2026-06-10.md).
 
 > [!WARNING]
@@ -28,6 +31,17 @@ campaign decision log is in
 > the kernel's `sched_ext` watchdog evicts it and the system falls back to the
 > default scheduler automatically — a crashed experiment costs you a hiccup,
 > not a hang.
+
+> [!IMPORTANT]
+> **AI assistance disclosure.** Code mutation in this project is done with AI
+> assistance, and I am stating that openly because users deserve to know how
+> the software they run is built. The discipline that makes this workable is
+> that **no change lands on trust**: every code change — AI-assisted or not —
+> must prove itself through the benchmark gauntlet described in
+> [The mutation and testing system](#the-mutation-and-testing-system) (load
+> gates, mechanism checks, and order-rotated live game A/Bs) before it
+> becomes a default, and changes that fail are parked in-tree with their
+> falsification documented.
 
 ## Table of contents
 
@@ -355,35 +369,71 @@ In-repo A/B harnesses:
 
 ## Measured results (2026-06-10)
 
-Protocol: focused KovaaK's, 60s MangoHud socket captures, ABBA rotation,
-focus-gated, fresh game instance, stutter-aware estimators. Hardware: Ryzen 7
-9800X3D (8C/16T, single CCD), RTX 4090, 4K 240Hz. Baseline kernel: 7.1-rc7
-CachyOS — EEVDF with HRTICK-at-deadline default-on and the (cake-inspired)
-POC idle selector active.
+These are the numbers from one well-instrumented machine and one title.
+They are offered so you can see exactly what was measured and how — not as a
+claim about every system or every game. Reproduce them with the bench
+harness before trusting them on your hardware.
 
-### vs EEVDF — fresh instance, 4-cycle ABBA, n=4/arm
+### Test system
 
-| metric | cake hybrid4 | EEVDF | Δ |
+| Component | Value |
+| :-- | :-- |
+| CPU | AMD Ryzen 7 9800X3D (8C/16T, single CCD, ~5.5 GHz) |
+| GPU | NVIDIA RTX 4090 |
+| Display | 4K 240 Hz (VRR), MangoHud capture at the socket |
+| Kernel | `7.1.0-rc7-1-cachyos-rc-custom` (`uname -r`) — CachyOS rc kernel **plus one custom patch**: `SCX_ENQ_KICK_IDLE` (in [kernel-patches/](./kernel-patches/)) |
+| EEVDF baseline | The same kernel's EEVDF, with HRTICK-at-deadline default-on and the CachyOS POC idle selector active — a strong, current baseline |
+| Workload | KovaaK's (Proton), focused, ~1005 fps scene for the fresh-instance set |
+
+Protocol: 60s MangoHud socket captures, arm order alternated ABBA across
+cycles, focus-gated fail-closed, fresh game instance, extremes reported as
+medians / stutter-excluded means (one random 3–4.7 ms game-side stutter hit
+each arm exactly once during this set; they land scheduler-independently).
+
+### scx_cake (hybrid4) vs EEVDF — fresh instance, 4-cycle ABBA, n=4/arm
+
+| metric | scx_cake | EEVDF | difference |
 | :-- | --: | --: | :-- |
-| avg FPS | 1008.6 | 1004.8 | **+0.4%** slot-consistent |
-| 1% low | 777.2 | 711.9 | **+9.2% — zero overlap** (every cake run beat every EEVDF run) |
-| p99 frametime | 1.288 ms | 1.405 ms | **−8.4% — zero overlap** |
-| 0.1% low | 617.7 | 588.5 | **+6.8%** (stutter-excluded) |
-| max frametime | — | — | **−3.3%** (median) |
-| frametime stddev | — | — | **−13.6%** (median) |
-| jitter (max Δ) | — | — | **−6.1%** (median) |
+| avg FPS | 1008.6 | 1004.8 | +0.4% (slot-consistent, 3 of 4 cycles) |
+| 1% low FPS | 777.2 | 711.9 | +9.2% (zero overlap: lowest cake run 750.0 vs highest EEVDF run 736.5) |
+| p99 frametime | 1.288 ms | 1.405 ms | −8.4% (zero overlap: worst cake 1.333 vs best EEVDF 1.358) |
+| 0.1% low FPS | 617.7 | 588.5 | +5.0% pooled, +6.8% stutter-excluded |
+| max frametime (median) | 1.634 ms | 1.691 ms | −3.3% |
+| frametime stddev (median) | 0.0825 | 0.0955 | −13.6% |
+| jitter max Δ (median) | 0.694 ms | 0.739 ms | −6.1% |
 
 Across the day's longer-session sets the same build held the 1%-low and p99
-wins with zero losses anywhere; cake's tail spreads run 3–4× tighter than
-EEVDF's, and EEVDF's tail quality drifts downward over a session while cake's
-stays flat.
+advantages with no department lost; cake's tail spreads ran 3–4× tighter
+(1%-low σ 10–40 vs 43–103), and EEVDF's tail quality drifted downward over a
+multi-hour session while cake's stayed flat.
 
-### vs the sched_ext field — same protocol
+### scx_cake (hybrid4) vs scx_cosmos — 2-cycle ABBA, n=2/arm
 
-- **scx_cosmos**: cake wins avg, 1% low, p99, FT-stddev in both cycles
-  (including from the disadvantaged slot); extremes tie. No losses.
-- **scx_lavd**: cake wins every metric — avg +7%, 1% low +14.7%, jitter −86%;
-  lavd threw repeated 4–5 ms stutters in this scene.
+| metric | scx_cake | scx_cosmos | difference |
+| :-- | --: | --: | :-- |
+| avg FPS | 1330.5 | 1324.6 | +0.4% (won both cycles, incl. from the later slot) |
+| 1% low FPS | 980.8 | 957.5 | +2.4% (both cycles) |
+| p99 frametime | 1.020 ms | 1.046 ms | −2.5% (both cycles) |
+| frametime stddev | 0.078 | 0.081 | −3.7% |
+| 0.1% low / max FT / jitter | 753.2 / 1.366 / 0.645 | 767.5 / 1.378 / 0.664 | within slot noise — treat as ties at this n |
+
+(Different scene state than the EEVDF set — ~1330 fps; compare columns within
+a table, not across tables.)
+
+### scx_cake (hybrid4) vs scx_lavd — cleanest full cycle, same scene
+
+| metric | scx_cake | scx_lavd | difference |
+| :-- | --: | --: | :-- |
+| avg FPS | 1327.4 | 1240.4 | +7.0% |
+| 1% low FPS | 993.5 | 866.3 | +14.7% |
+| 0.1% low FPS | 758.4 | 463.9 | +63% |
+| max frametime | 1.327 ms | 4.923 ms | −73% |
+| jitter max Δ | 0.577 ms | 4.133 ms | −86% |
+| p99 frametime | 1.007 ms | 1.154 ms | −12.7% |
+
+lavd recorded 4–5 ms worst-frames in two of its three runs in this scene; its
+strengths may lie elsewhere — these numbers describe this workload on this
+machine, nothing broader.
 
 ### Mechanism measurements
 
