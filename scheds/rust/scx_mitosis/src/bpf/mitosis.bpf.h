@@ -40,7 +40,6 @@ enum mitosis_constants {
  * Variables populated by userspace
  */
 const volatile bool enable_llc_awareness = false;
-const volatile bool enable_work_stealing = false;
 const volatile u32 nr_llc = 1;
 
 static inline struct cell *lookup_cell(int idx)
