@@ -8218,8 +8218,15 @@ enqueue_dsq_dispatch(struct task_struct *p, u64 enq_flags, u32 enq_cpu)
 				cake_read_cpu_status(enq_cpu));
 			return;
 		}
+		/* pid==tgid: the anchor must be the process MAIN thread.
+		 * Measured 2026-06-10 (Arc Raiders, UE5): 21 task workers
+		 * share the GameThread comm and flooded this gate — avg
+		 * +1.8% but tails -4..-9% vs EEVDF. The real anchor is the
+		 * main thread in every engine measured (Kovaaks/WoW/AR);
+		 * same-named workers fall through to the arbiter. */
 		if (CAKE_HYBRID_GATE_GT_COND &&
-		    comm0 == CAKE_COMM_GAME_THREAD) {
+		    comm0 == CAKE_COMM_GAME_THREAD &&
+		    p->pid == p->tgid) {
 			u64 ts	  = cake_read_cpu_status(enq_cpu);
 			u32 owner = (u32)((ts >> CAKE_CPU_STATUS_OWNER_SHIFT) &
 					  CAKE_CPU_STATUS_OWNER_MASK);
@@ -8331,8 +8338,11 @@ enqueue_dsq_dispatch(struct task_struct *p, u64 enq_flags, u32 enq_cpu)
 				cake_read_cpu_status(enq_cpu));
 			return;
 		}
+		/* pid==tgid: main-thread anchor only — see the lean-branch
+		 * comment above. */
 		if (CAKE_HYBRID_GATE_GT_COND &&
-		    hybrid_comm0 == CAKE_COMM_GAME_THREAD) {
+		    hybrid_comm0 == CAKE_COMM_GAME_THREAD &&
+		    p->pid == p->tgid) {
 			u64 hts	   = cake_read_cpu_status(enq_cpu);
 			u32 howner = (u32)((hts >> CAKE_CPU_STATUS_OWNER_SHIFT) &
 					   CAKE_CPU_STATUS_OWNER_MASK);

@@ -100,3 +100,11 @@ native EEVDF (7.1-rc7 w/ HRTICK+POC) and vs cosmos/lavd/bpfland.
   frame-owned targets + bulk-pileup escape. NEXT: n-extension (4 more cycles)
   to convert ties to slot-consistent wins; cosmos/lavd field A/B; bake
   HYBRID_QUEUE=4 + llc-vtime as champion defaults.
+- 2026-06-10 (late) hybrid4m main-thread anchor gate (GT gate += pid==tgid) =
+  KEEP, promoted into the default gate-4 build. AR: avg +1.6% held 4/4 both
+  slots; EVERY tail metric improved vs h4 (.1%low -8.9->-4.1%, jit +30->+8%,
+  maxFT flipped to -4.6%) though AR tails remain net-native. MEASURED LAW:
+  AR's frame pipeline is a 7-thread complex (GT 41.8% + 4x Foreground Work
+  33-41% each + RenderThread 31.4% + RHIThread 32.8%); the GT<->RT pair model
+  covers 2/7 — frame-complex behavioral coverage is the next mutation.
+  PENDING: Kovaaks no-harm regression of the refined gate.
