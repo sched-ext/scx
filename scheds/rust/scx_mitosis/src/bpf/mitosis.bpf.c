@@ -1311,16 +1311,6 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 			}
 		}
 
-		/*
-		 * Recalc LLC counts BEFORE making cpumask visible.
-		 * Pass the new mask explicitly to avoid race
-		 * if recalc did a lookup_cell_cpumask()
-		 */
-		if (enable_llc_awareness) {
-			if (recalc_cell_llc_counts(cell_idx, (const struct cpumask *)bpf_cpumask))
-				return 0;
-		}
-
 		if (publish_prepared_cpumask(&cell_cpumaskw->primary, &bpf_cpumask)) {
 			scx_bpf_error("failed to publish cpumask for cell %d", cell_idx);
 			return 0;
@@ -1349,15 +1339,6 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 			cpu_ctx->cell = 0;
 		}
 	}
-
-	/*
-	 * Recalc LLC counts for root cell BEFORE making cpumask visible.
-	 * Pass the new mask explicitly to avoid race if recalc did a
-	 * lookup_cell_cpumask()
-	 */
-	if (enable_llc_awareness)
-		if (recalc_cell_llc_counts(ROOT_CELL_ID, (const struct cpumask *)root_bpf_cpumask))
-			return 0;
 
 	/*
 	 * Publish: swap new cpumask in, get old one back.
@@ -2143,14 +2124,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		}
 	}
 
-	if (enable_llc_awareness) {
-		{
-			guard(rcu)();
-			if (recalc_cell_llc_counts(ROOT_CELL_ID, NULL))
-				return -EINVAL;
-		}
-	}
-
 	{
 		struct cell *cell = lookup_cell(0);
 		if (!cell)
@@ -2332,21 +2305,6 @@ int apply_cell_config(void *ctx)
 				scx_bpf_error("failed to set borrowable cpumask for cell_id %d",
 					      cell_id);
 				return -EINVAL;
-			}
-		}
-	}
-
-	/* Phase 2.5: Recompute per-LLC CPU counts for all cells */
-	if (enable_llc_awareness) {
-		u32 c;
-		scoped_guard(rcu)
-		{
-			bpf_for(c, 0, MAX_CELLS)
-			{
-				if (c >= config->num_cells)
-					break;
-				if (recalc_cell_llc_counts(c, NULL))
-					return -EINVAL;
 			}
 		}
 	}
