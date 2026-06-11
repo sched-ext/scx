@@ -1008,6 +1008,7 @@ impl<'a> Scheduler<'a> {
 
         // Slice shrink stats bypass DistributionStats — they're raw event counts
         let sum = |idx: usize| -> u64 { cell_stats_delta.iter().map(|c| c[idx]).sum() };
+        self.metrics.drain_cnt = sum(bpf_intf::cell_stat_idx_CSTAT_DRAIN_CNT as usize);
         self.metrics.slice_shrink_max =
             sum(bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_MAX as usize);
         self.metrics.slice_shrink_proportional =
@@ -1078,7 +1079,9 @@ impl<'a> Scheduler<'a> {
             let cell_metrics = self.metrics.cells.entry(cell as u32).or_default();
             cell_metrics.update(&stats);
 
-            // Slice shrink stats bypass DistributionStats
+            // Raw event counts bypass DistributionStats.
+            cell_metrics.drain_cnt =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_DRAIN_CNT as usize];
             cell_metrics.slice_shrink_max =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_MAX as usize];
             cell_metrics.slice_shrink_proportional = cell_stats_delta[cell]
@@ -1094,6 +1097,24 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn update_drain_metrics(&mut self, cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS]) {
+        let mut total = 0;
+
+        for cell in 0..MAX_CELLS {
+            let drain_cnt =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_DRAIN_CNT as usize];
+            total += drain_cnt;
+
+            if let Some(cell_metrics) = self.metrics.cells.get_mut(&(cell as u32)) {
+                cell_metrics.drain_cnt = drain_cnt;
+            } else if drain_cnt > 0 {
+                self.metrics.cells.entry(cell as u32).or_default().drain_cnt = drain_cnt;
+            }
+        }
+
+        self.metrics.drain_cnt = total;
+    }
+
     fn log_all_queue_stats(
         &mut self,
         cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS],
@@ -1104,8 +1125,12 @@ impl<'a> Scheduler<'a> {
             .flat_map(|cell| QUEUE_STATS_IDX.iter().map(|&idx| cell[idx as usize]))
             .sum();
 
+        self.update_drain_metrics(cell_stats_delta);
+
         if global_queue_decisions == 0 {
-            warn!("No queueing decisions made globally");
+            if self.metrics.drain_cnt == 0 {
+                warn!("No queueing decisions made globally");
+            }
             return Ok(());
         }
 
