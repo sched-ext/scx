@@ -924,6 +924,15 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
 
+	/*
+	 * If the picked CPU is invalid or not in the task's allowed mask, fall
+	 * back to the task's current CPU (lavd_misplaced_local_on).
+	 */
+	if (cpu < 0 || cpu >= nr_cpu_ids || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		cpu = task_cpu;
+		is_idle = false;
+	}
+
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
@@ -974,8 +983,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 *
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
+	 *
+	 * The cpu == task_cpu gate gets the lavd_misplaced_local_on test
+	 * to pass.
 	 */
-	if (can_direct_dispatch(cpuc, is_idle)) {
+	if (can_direct_dispatch(cpuc, is_idle) && cpu == task_cpu) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 		account_queued_load_pcpu(taskc, get_primary_cpu(cpu));

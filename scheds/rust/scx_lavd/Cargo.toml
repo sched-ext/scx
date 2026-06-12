@@ -38,8 +38,15 @@ combinations = "0.1"
 rlimit = "0.11"
 nix = "0.31"
 
+# Scheduler test harness for tests/ktstr_lavd_tests.rs. Optional + gated
+# behind the `ktstr-tests` feature so this heavy dep tree is pulled in
+# only with `--features ktstr-tests`, never in a normal scheduler build.
+# 0.11: provides the CrossAffinityChurn work type the test uses.
+ktstr = { version = "0.11", optional = true }
+
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.1" }
 
 [features]
 enable_backtrace = []
+ktstr-tests = ["dep:ktstr"]
