@@ -64,6 +64,7 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
+use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::TopologyArgs;
@@ -3395,18 +3396,28 @@ impl<'a> Scheduler<'a> {
 
     // Figure out a tuple (LLCs, extra_cpus) in terms of the target CPUs
     // computed by weighted_target_nr_cpus. Returns the number of full LLCs
-    // occupied by a layer, and any extra CPUs that don't occupy a full LLC.
-    fn compute_target_llcs(target: usize, topo: &Topology) -> (usize, usize) {
-        // TODO(kkd): We assume each LLC has equal number of cores.
-        let cores_per_llc = topo.all_cores.len() / topo.all_llcs.len();
-        // TODO(kkd): We assume each core has fixed number of threads.
-        let cpus_per_core = topo.all_cores.first_key_value().unwrap().1.cpus.len();
-        let cpus_per_llc = cores_per_llc * cpus_per_core;
-
-        let full = target / cpus_per_llc;
-        let extra = target % cpus_per_llc;
-
-        (full, extra.div_ceil(cpus_per_core))
+    // occupied by a layer, and any extra cores needed beyond those LLCs.
+    fn compute_target_llcs(target: usize, node_llcs: &BTreeMap<usize, Arc<Llc>>) -> (usize, usize) {
+        let mut remaining = target;
+        let mut full = 0;
+        for llc in node_llcs.values() {
+            let cpus_in_llc = llc.span.weight();
+            if remaining >= cpus_in_llc {
+                full += 1;
+                remaining -= cpus_in_llc;
+            } else {
+                let mut extra = 0;
+                for (_, core) in llc.cores.iter() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    extra += 1;
+                    remaining = remaining.saturating_sub(core.cpus.len());
+                }
+                return (full, extra);
+            }
+        }
+        (full, 0)
     }
 
     // Recalculate the core order for layers using StickyDynamic growth
@@ -3437,8 +3448,9 @@ impl<'a> Scheduler<'a> {
 
             for n in 0..nr_nodes {
                 let assigned_on_n = layer.assigned_llcs[n].len();
+                let node = self.topo.nodes.get(&n).unwrap();
                 let target_full_n =
-                    Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).0;
+                    Self::compute_target_llcs(alloc.node_target(n) * au, &node.llcs).0;
                 let mut to_free = assigned_on_n.saturating_sub(target_full_n);
 
                 debug!(
@@ -3471,8 +3483,9 @@ impl<'a> Scheduler<'a> {
 
             for n in 0..nr_nodes {
                 let cur_on_n = layer.assigned_llcs[n].len();
+                let node = self.topo.nodes.get(&n).unwrap();
                 let target_full_n =
-                    Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).0;
+                    Self::compute_target_llcs(alloc.node_target(n) * au, &node.llcs).0;
                 let mut to_alloc = target_full_n.saturating_sub(cur_on_n);
 
                 debug!(
@@ -3503,10 +3516,6 @@ impl<'a> Scheduler<'a> {
         }
 
         // Phase 3 — Spillover per-node: consume extra cores from free LLCs.
-        let cores_per_llc = self.topo.all_cores.len() / self.topo.all_llcs.len();
-        let cpus_per_core = self.topo.all_cores.first_key_value().unwrap().1.cpus.len();
-        let cpus_per_llc = cores_per_llc * cpus_per_core;
-
         for &(idx, _) in layer_targets.iter() {
             let layer = &mut self.layers[idx];
 
@@ -3518,22 +3527,22 @@ impl<'a> Scheduler<'a> {
             let alloc = &layer_allocs[idx];
 
             for n in 0..nr_nodes {
-                let mut extra = Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).1;
+                let node = self.topo.nodes.get(&n).unwrap();
+                let mut extra = Self::compute_target_llcs(alloc.node_target(n) * au, &node.llcs).1;
 
                 if let Some(node_llcs) = self.cpu_pool.free_llcs.get_mut(&n) {
                     for entry in node_llcs.iter_mut() {
                         if extra == 0 {
                             break;
                         }
-                        let avail = cpus_per_llc - entry.1;
+                        let llc_id = entry.0;
+                        let llc = self.topo.all_llcs.get(&llc_id).unwrap();
+                        let avail = llc.cores.len() - entry.1;
                         let mut used = extra.min(avail);
                         let cores_to_add = used;
 
                         let shift = entry.1;
                         entry.1 += used;
-
-                        let llc_id = entry.0;
-                        let llc = self.topo.all_llcs.get(&llc_id).unwrap();
 
                         for core in llc.cores.iter().skip(shift) {
                             if used == 0 {
