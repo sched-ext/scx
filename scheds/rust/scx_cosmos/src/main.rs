@@ -1194,12 +1194,13 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    /// Read per-CPU times from /proc/stat (lines "cpu0", "cpu1", ...).
-    /// Returns one CpuTimes per CPU, in order.
-    fn read_per_cpu_cpu_times(nr_cpus: usize) -> Option<Vec<CpuTimes>> {
-        let file = File::open("/proc/stat").ok()?;
-        let reader = BufReader::new(file);
-        let mut result = Vec::with_capacity(nr_cpus);
+    /// Parse per-CPU times from /proc/stat (lines "cpu0", "cpu1", ...).
+    /// Returns entries indexed by CPU id. Offline CPUs may be absent.
+    fn parse_per_cpu_cpu_times<R: BufRead>(
+        reader: R,
+        nr_cpus: usize,
+    ) -> Option<Vec<Option<CpuTimes>>> {
+        let mut result = vec![None; nr_cpus];
 
         for line in reader.lines() {
             let line = line.ok()?;
@@ -1213,8 +1214,8 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
             let cpu_id: usize = rest.split_whitespace().next()?.parse().ok()?;
-            if cpu_id != result.len() {
-                break;
+            if cpu_id >= nr_cpus {
+                continue;
             }
             let fields: Vec<&str> = line.split_whitespace().collect();
             if fields.len() < 5 {
@@ -1228,17 +1229,16 @@ impl<'a> Scheduler<'a> {
                 .take(8)
                 .filter_map(|v| v.parse::<u64>().ok())
                 .sum();
-            result.push(CpuTimes { user, nice, total });
-            if result.len() >= nr_cpus {
-                break;
-            }
+            result[cpu_id] = Some(CpuTimes { user, nice, total });
         }
 
-        if result.len() == nr_cpus {
-            Some(result)
-        } else {
-            None
-        }
+        result.iter().any(Option::is_some).then_some(result)
+    }
+
+    /// Read per-CPU times from /proc/stat.
+    fn read_per_cpu_cpu_times(nr_cpus: usize) -> Option<Vec<Option<CpuTimes>>> {
+        let file = File::open("/proc/stat").ok()?;
+        Self::parse_per_cpu_cpu_times(BufReader::new(file), nr_cpus)
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
@@ -1250,8 +1250,10 @@ impl<'a> Scheduler<'a> {
         // or deadline-based shared DSQ.
         let polling_time = Duration::from_millis(self.opts.polling_ms).min(Duration::from_secs(1));
         let nr_cpus = *NR_CPU_IDS as usize;
-        let mut prev_cputime =
-            Self::read_per_cpu_cpu_times(nr_cpus).expect("Failed to read initial per-CPU stats");
+        let mut prev_cputime = Self::read_per_cpu_cpu_times(nr_cpus).unwrap_or_else(|| {
+            warn!("Failed to read initial per-CPU stats; starting with zero CPU utilization");
+            vec![None; nr_cpus]
+        });
         let mut last_update = Instant::now();
         let mut last_gpu_sync = Instant::now();
 
@@ -1261,9 +1263,12 @@ impl<'a> Scheduler<'a> {
                 if let Some(curr_cputime) = Self::read_per_cpu_cpu_times(nr_cpus) {
                     let map = &self.skel.maps.cpu_util_map;
                     for cpu in 0..nr_cpus {
-                        if let Some(util) =
-                            Self::compute_user_cpu_pct(&prev_cputime[cpu], &curr_cputime[cpu])
-                        {
+                        let util = match (&prev_cputime[cpu], &curr_cputime[cpu]) {
+                            (Some(prev), Some(curr)) => Self::compute_user_cpu_pct(prev, curr),
+                            _ => Some(0),
+                        };
+
+                        if let Some(util) = util {
                             let _ = map.update(
                                 &(cpu as u32).to_ne_bytes(),
                                 &util.to_ne_bytes(),
