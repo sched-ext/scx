@@ -150,6 +150,18 @@ static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 	return cgc;
 }
 
+/*
+ * Check whether a cgroup should be treated as the scheduling root. Matches
+ * both the root_cgid set by userspace (which is the cgroup namespace root
+ * when running inside a container) and the global root at level 0 (which
+ * is unreachable from a non-init cgroup namespace but may appear when
+ * init_task runs for host-level processes like kthreads or systemd).
+ */
+static inline bool is_root_cgroup(struct cgroup *cgrp)
+{
+	return cgrp->kn->id == root_cgid || cgrp->level == 0;
+}
+
 static inline struct cgroup *task_cgroup(struct task_struct *p)
 {
 	struct cgroup *cgrp;
@@ -431,21 +443,17 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 
 	if (!cgc) {
 		/*
-		 * Cgroup lookup failed - this can happen during scheduler load
-		 * for tasks that were forked before the scheduler was loaded,
-		 * whose cgroups went offline before scx_cgroup_init() ran.
-		 * Only fall back to root cgroup if the workaround is enabled
-		 * and the task is exiting.
+		 * Cgroup lookup failed. This can happen when:
+		 * - Tasks were forked before the scheduler loaded and their
+		 *   cgroups went offline before scx_cgroup_init() ran.
+		 * - The scheduler runs inside a cgroup namespace and the
+		 *   task belongs to a host cgroup outside the namespace
+		 *   that was never initialized.
+		 * Fall back to the root cgroup's context (cell 0).
 		 */
-		if (exiting_task_workaround_enabled && (p->flags & PF_EXITING)) {
-			struct cgroup *rootcg = READ_ONCE(root_cgrp);
-			if (!rootcg) {
-				scx_bpf_error("Unexpected uninitialized rootcg");
-				return -ENOENT;
-			}
-
-			cgc = lookup_cgrp_ctx(rootcg);
-		}
+		struct cgroup *rootcg = READ_ONCE(root_cgrp);
+		if (rootcg)
+			cgc = lookup_cgrp_ctx_fallible(rootcg);
 
 		if (!cgc) {
 			scx_bpf_error(
@@ -1198,7 +1206,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 			 * in-flight tasks scheduled to the dsq.
 			 */
 			/* No cpuset, assign to parent cell and continue */
-			if (cur_cgrp->kn->id != root_cgid) {
+			if (!is_root_cgroup(cur_cgrp)) {
 				u32 level = cur_cgrp->level;
 				if (level <= 0 || level >= MAX_CG_DEPTH) {
 					scx_bpf_error("Cgroup hierarchy is too deep: %d", level);
@@ -1482,7 +1490,7 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 		return -ENOENT;
 	}
 
-	if (cgrp->kn->id == root_cgid) {
+	if (is_root_cgroup(cgrp)) {
 		WRITE_ONCE(cgc->cell, 0);
 		return 0;
 	}
@@ -1501,16 +1509,13 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 		__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
 	}
 
-	/* Initialize to parent's cell */
+	/* Initialize to parent's cell, defaulting to cell 0 (root's cell) */
 	struct cgroup *parent_cg __free(cgroup) = lookup_cgrp_ancestor(cgrp, cgrp->level - 1);
 	if (!parent_cg)
 		return -ENOENT;
 
-	struct cgrp_ctx *parent_cgc;
-	if (!(parent_cgc = lookup_cgrp_ctx(parent_cg)))
-		return -ENOENT;
-
-	cgc->cell = parent_cgc->cell;
+	struct cgrp_ctx *parent_cgc = lookup_cgrp_ctx_fallible(parent_cg);
+	cgc->cell = parent_cgc ? parent_cgc->cell : 0;
 	return 0;
 }
 
@@ -1528,12 +1533,30 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 	if (cgrp_is_dying(cgrp))
 		return 0;
 
-	/* Initialize ancestors first (replicates SCX cgroup_init order) */
+	/*
+	 * Initialize ancestors first (replicates SCX cgroup_init order).
+	 *
+	 * When the scheduler runs inside a cgroup namespace, root_cgid is
+	 * the namespace root (not the global root). Ancestors above it are
+	 * outside the namespace — their cgrp_ctx was never initialized and
+	 * bpf_cgroup_from_id() can't resolve them. The root's own context
+	 * is initialized in mitosis_init(), so we skip it and everything
+	 * above it and only initialize ancestors below the root.
+	 */
+	bool below_root = false;
 	bpf_for(level, 1, target_level)
 	{
 		struct cgroup *ancestor __free(cgroup) = lookup_cgrp_ancestor(cgrp, level);
 		if (!ancestor)
 			return -ENOENT;
+
+		if (is_root_cgroup(ancestor)) {
+			below_root = true;
+			continue;
+		}
+
+		if (!below_root)
+			continue;
 
 		/* Skip if dying or already initialized */
 		if (!cgrp_is_dying(ancestor) && !lookup_cgrp_ctx_fallible(ancestor)) {
