@@ -49,11 +49,15 @@ pub struct PandemoniumStats {
     pub batch_sojourn_ns: u64,
     pub longrun_mode_active: u64,
     pub nr_overflow_rescue: u64,
+    // CROSS-CCX SCATTER ATTRIBUTION (PER XCCX_* PATH) -- MATCHES nr_xccx[8] IN
+    // intf.h. PLACEMENT-SIDE PATHS FEED THE MWU SCATTER LOSS PATHWAY.
+    pub nr_xccx: [u64; 8],
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 200);
-const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 88);
+// 200 (base) + 8*8 (nr_xccx) = 264.
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 264);
+const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 80);
 
 // MAX_AFFINITY_CANDIDATES IS DEFINED IN intf.h. THE RUST MIRROR IN
 // bpf_intf.rs MUST KEEP THE SAME VALUE; IF THE TWO SIDES DRIFT, THE
@@ -150,10 +154,6 @@ impl<'a> Scheduler<'a> {
             let init_pin = "/sys/fs/bpf/pandemonium/task_class_init";
             std::fs::remove_file(init_pin).ok();
             skel.maps.task_class_init.pin(init_pin).ok();
-
-            let compositor_pin = "/sys/fs/bpf/pandemonium/compositor_map";
-            std::fs::remove_file(compositor_pin).ok();
-            skel.maps.compositor_map.pin(compositor_pin).ok();
         } else {
             log_warn!("BPFFS NOT AVAILABLE: map pinning skipped (scheduler still functional)");
         }
@@ -214,6 +214,9 @@ impl<'a> Scheduler<'a> {
                     total.longrun_mode_active = stats.longrun_mode_active;
                 }
                 total.nr_overflow_rescue += stats.nr_overflow_rescue;
+                for i in 0..8 {
+                    total.nr_xccx[i] += stats.nr_xccx[i];
+                }
             }
         }
 
@@ -264,6 +267,10 @@ impl<'a> Scheduler<'a> {
             codel_target_ns: bss.codel_target_ns,
             codel_target_floor_ns: bss.codel_target_floor_ns,
             codel_target_max_ns: data.codel_target_max_ns,
+            // NEAREST-PEER PHI HOLD WARM-STAY PRICES IN (SLOT 0 = CHEAPEST
+            // PEER, THE VALUE warm_stay_anchor READS FOR THE HOME CPU). CPU 0
+            // IS REPRESENTATIVE ON A HOMOGENEOUS TOPOLOGY.
+            home_dist_extra_ns: self.read_reff_value(0, 0) as u64,
         }
     }
 
@@ -344,6 +351,28 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    // POPULATE LLC/CCX DOMAIN MAP. MONOLITHIC-L3 PARTS: llc_domain ==
+    // socket_domain (intra-CCX checks become no-ops). CHIPLET PARTS: real
+    // CCX/CCD grouping. Consumed by pandemonium_running's migration tagger.
+    pub fn write_llc_domain(&self, cpu: u32, llc_group: u32) -> Result<()> {
+        let key = cpu.to_ne_bytes();
+        let val = llc_group.to_ne_bytes();
+        self.skel
+            .maps
+            .llc_domain
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+
+    // SET nr_ccx (post-load mutable global). Walked from topology at startup.
+    // Gates how many of the MAX_CCX_DOMAINS per-CCX overflow DSQs are addressed
+    // by dispatch drain loops.
+    pub fn write_nr_ccx(&mut self, nr_ccx: u32) {
+        if let Some(data) = self.skel.maps.data_data.as_mut() {
+            data.nr_ccx = nr_ccx;
+        }
+    }
+
     // POPULATE L2 SIBLINGS MAP ENTRY
     pub fn write_l2_sibling(&self, group_id: u32, slot: u32, cpu: u32) -> Result<()> {
         let key = (group_id * 8 + slot).to_ne_bytes();
@@ -372,18 +401,41 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    // POPULATE COMPOSITOR MAP ENTRY
-    pub fn write_compositor(&self, name: &str) -> Result<()> {
-        let mut key = [0u8; 16];
-        let bytes = name.as_bytes();
-        let len = bytes.len().min(15);
-        key[..len].copy_from_slice(&bytes[..len]);
-        let val = [1u8];
+    // POPULATE R_eff COST ORACLE MAP (PAIRS 1:1 WITH affinity_rank).
+    // reff_value[cpu * MAX_AFFINITY_CANDIDATES + slot] = quantized R_eff TO THAT TARGET.
+    pub fn write_reff_value(&self, cpu: u32, slot: u32, value: u32) -> Result<()> {
+        let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
+        let key = (cpu * stride + slot).to_ne_bytes();
+        let val = value.to_ne_bytes();
         self.skel
             .maps
-            .compositor_map
+            .reff_value
             .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
+    }
+
+    // READ ONE reff_value SLOT (ns PHI HOLD TO THAT RANKED PEER). RETURNS 0 ON
+    // MISS OR THE (u32)-1 UNUSED-SLOT SENTINEL. USED BY THE ADAPTIVE LOOP TO
+    // LEARN THE NEAREST-PEER HOLD WARM-STAY PRICES IN (SLOT 0 = CHEAPEST PEER).
+    pub fn read_reff_value(&self, cpu: u32, slot: u32) -> u32 {
+        let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
+        let key = (cpu * stride + slot).to_ne_bytes();
+        match self
+            .skel
+            .maps
+            .reff_value
+            .lookup(&key, libbpf_rs::MapFlags::ANY)
+        {
+            Ok(Some(bytes)) if bytes.len() >= 4 => {
+                let v = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                if v == u32::MAX {
+                    0
+                } else {
+                    v
+                }
+            }
+            _ => 0,
+        }
     }
 
     // READ UEI EXIT INFO. RETURNS (should_restart).
@@ -440,11 +492,6 @@ impl Drop for Scheduler<'_> {
             .maps
             .task_class_init
             .unpin("/sys/fs/bpf/pandemonium/task_class_init");
-        let _ = self
-            .skel
-            .maps
-            .compositor_map
-            .unpin("/sys/fs/bpf/pandemonium/compositor_map");
         let _ = std::fs::remove_dir("/sys/fs/bpf/pandemonium");
     }
 }

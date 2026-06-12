@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "scx_pandemonium"
-version = "5.9.1"
+version = "5.12.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -13,6 +13,11 @@ typedef unsigned char u8;
 // BPF VERIFIER LOOP BOUNDS
 #define MAX_CPUS  1024
 #define MAX_NODES 32
+// PER-CCX OVERFLOW TIER CEILING. CHIPLET PARTS (AMD CCX/CCD) HAVE SMALL CCX
+// COUNTS (Ryzen 3000: 2, EPYC: up to ~16); 32 IS A COMFORTABLE CAP.
+// PRE-ALLOCATED AT INIT (DSQs ARE CHEAP); nr_ccx WALKED FROM Rust AT TOPOLOGY
+// DETECT GATES WHICH ARE LIVE.
+#define MAX_CCX_DOMAINS 32
 // AFFINITY_RANK STORAGE PER CPU. EACH CPU'S R_eff-RANKED PEERS ARE
 // STORED HERE; STEP 1 R_eff STEAL AND THE PLACEMENT-SIDE SPILL HELPER
 // WALK THIS LIST WITH A TAU-DERIVED RUNTIME BUDGET CAPPED BY nr_cpu_ids
@@ -33,7 +38,6 @@ typedef unsigned char u8;
 struct tuning_knobs {
 	u64 slice_ns;           // BASE TIME SLICE (DEFAULT 1MS)
 	u64 preempt_thresh_ns;  // TICK PREEMPTION THRESHOLD (DEFAULT 1MS)
-	u64 lag_scale;          // DEADLINE LAG MULTIPLIER (DEFAULT 4)
 	u64 batch_slice_ns;     // BATCH TASK SLICE CEILING (DEFAULT 20MS)
 	u64 lat_cri_thresh_high; // CLASSIFIER: LAT_CRITICAL THRESHOLD (DEFAULT 32)
 	u64 lat_cri_thresh_low;  // CLASSIFIER: INTERACTIVE THRESHOLD (DEFAULT 8)
@@ -49,6 +53,8 @@ struct tuning_knobs {
 	                        // <R_eff> * 2m * tau, CLAMPED [200us, 8ms].
 	                        // 0 MEANS NOT YET WRITTEN. WRITTEN AT TOPOLOGY
 	                        // DETECT AND ON HOTPLUG (CO-LOCATED WITH tau).
+	// PHI DISTANCE PENALTY IS PRE-FOLDED INTO THE reff_value MAP (IN NS) BY
+	// RUST AT TOPOLOGY DETECT -- NO KNOB FIELD: BPF READS THE MAP DIRECTLY.
 };
 
 // PER-CPU STATISTICS (BPF_MAP_TYPE_PERCPU_ARRAY VALUE)
@@ -63,8 +69,8 @@ struct pandemonium_stats {
 	u64 nr_keep_running;    // TASKS REPLENISHED VIA keep_running()
 	u64 nr_hard_kicks;      // ENQUEUE: SCX_KICK_PREEMPT (FRESH WAKEUP)
 	u64 nr_soft_kicks;      // ENQUEUE: SOFT NUDGE (RE-ENQUEUE)
-	u64 nr_enq_wakeup;      // ENQUEUE: TASK JUST WOKE UP (AWAKE_VTIME==0)
-	u64 nr_enq_requeue;     // ENQUEUE: TASK RE-ENQUEUED (AWAKE_VTIME>0)
+	u64 nr_enq_wakeup;      // ENQUEUE: TASK JUST WOKE UP (!ran_since_wake)
+	u64 nr_enq_requeue;     // ENQUEUE: TASK RE-ENQUEUED (ran_since_wake)
 	u64 wake_lat_idle_sum;  // LATENCY SUM: IDLE FAST PATH (NS)
 	u64 wake_lat_idle_cnt;  // LATENCY COUNT: IDLE FAST PATH
 	u64 wake_lat_kick_sum;  // LATENCY SUM: HARD-KICKED ENQUEUE (NS)
@@ -86,7 +92,25 @@ struct pandemonium_stats {
 	// OVERFLOW SOJOURN RESCUE: TASKS DISPATCHED BY try_service_older_overflow
 	// AT overflow_sojourn_rescue_ns (DISPATCH STEP 2)
 	u64 nr_overflow_rescue;
+	// CROSS-CCX SCATTER ATTRIBUTION: PER-PLACEMENT-PATH COUNT OF LANDINGS
+	// WHERE THE CHOSEN CPU IS IN A DIFFERENT CCX THAN THE TASK'S last_cpu.
+	// INDEXED BY XCCX_* BELOW. THE ADAPTIVE LAYER CONSUMES THE PLACEMENT-SIDE
+	// PATHS (XCCX_SEL_* + XCCX_ENQ_T1) AS THE MWU CROSS-CCX SCATTER LOSS
+	// PATHWAY, AND THE BENCH SUITE SURFACES ALL PATHS PER RUN. THE PHI-CORRECT
+	// PATHS (XCCX_STEAL, XCCX_STEP5) ARE TRACKED BUT EXCLUDED FROM THE LOSS --
+	// THEY ARE DELIBERATE WORK-CONSERVATION MOVES, NOT SCATTER TO SUPPRESS.
+	u64 nr_xccx[8];
 };
+
+// XCCX path indices for pandemonium_stats.nr_xccx[] (diagnostic).
+#define XCCX_SEL_TIGHT   0   // select_cpu WAKE_SYNC tight-partner colocation
+#define XCCX_SEL_SYNC    1   // select_cpu WAKE_SYNC phi_warm_target
+#define XCCX_SEL_NORMAL  2   // select_cpu normal_path phi_warm_target
+#define XCCX_SEL_DFL     3   // select_cpu scx_bpf_select_cpu_dfl idle pick
+#define XCCX_ENQ_T1      4   // enqueue TIER 1 idle (pick_idle_cpu_node)
+#define XCCX_ENQ_T2      5   // enqueue TIER 2 warm-anchor spill
+#define XCCX_STEAL       6   // dispatch STEP 1 R_eff steal (this_cpu vs peer)
+#define XCCX_STEP5       7   // dispatch STEP 5 cross-CCX work-conservation scan
 
 // PROCESS CLASSIFICATION: BPF OBSERVES, RUST LEARNS, BPF APPLIES
 // SHARED BETWEEN BPF MAPS (task_class_observe, task_class_init) AND RUST (procdb.rs)

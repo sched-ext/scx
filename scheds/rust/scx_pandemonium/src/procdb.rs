@@ -47,7 +47,15 @@ pub const STALE_TICKS: u64 = 60;
 
 const PROCDB_MAGIC: &[u8; 4] = b"PDDB";
 const PROCDB_VERSION: u32 = 2;
-const PROCDB_PATH: &str = ".cache/pandemonium/procdb.bin";
+// CANONICAL PERSISTENT PATH (v5.10.0+). FHS-CORRECT FOR MACHINE-LOCAL
+// STATE THAT LIVES ACROSS REBOOTS. INDEPENDENT OF $HOME RESOLUTION SO
+// SYSTEMD-LAUNCHED, sudo-LAUNCHED, AND TEST-HARNESS RUNS ALL CONVERGE
+// ON THE SAME FILE. SYSTEMD UNIT `StateDirectory=pandemonium` CREATES
+// /var/lib/pandemonium/ AT 0700 root:root.
+const PROCDB_PATH: &str = "/var/lib/pandemonium/procdb.bin";
+// LEGACY $HOME-RELATIVE PATH (pre-v5.10.0). READ ONCE FOR MIGRATION
+// IF PROCDB_PATH IS EMPTY. NEVER WRITTEN TO BY CURRENT CODE.
+const PROCDB_LEGACY_REL: &str = ".cache/pandemonium/procdb.bin";
 const ENTRY_SIZE: usize = 64;
 const V1_ENTRY_SIZE: usize = 40;
 
@@ -122,8 +130,36 @@ pub struct ProcessDb {
 
 impl ProcessDb {
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        PathBuf::from(home).join(PROCDB_PATH)
+        PathBuf::from(PROCDB_PATH)
+    }
+
+    // LEGACY PATH RESOLVED FROM CURRENT $HOME. USED ONLY FOR ONE-SHOT
+    // MIGRATION INTO PROCDB_PATH WHEN THE CANONICAL FILE IS ABSENT.
+    fn legacy_path() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(PathBuf::from(home).join(PROCDB_LEGACY_REL))
+    }
+
+    // REMOVE *.bin.tmp ORPHANS LEFT BY save() CALLS INTERRUPTED BETWEEN
+    // File::create AND fs::rename (WATCHDOG ABORT, SCHED_EXT KERNEL EXIT,
+    // SIGKILL). HARMLESS BUT ACCUMULATES; CLEAN AT INIT.
+    fn cleanup_tmp_orphans(parent: &Path) {
+        let entries = match std::fs::read_dir(parent) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("tmp")
+                && path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with("procdb."))
+                    .unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     pub fn new() -> Result<Self> {
@@ -131,6 +167,32 @@ impl ProcessDb {
         let init = libbpf_rs::MapHandle::from_pinned_path(INIT_PIN)?;
 
         let db_path = Self::default_path();
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            Self::cleanup_tmp_orphans(parent);
+        }
+
+        // ONE-SHOT MIGRATION: if the canonical file is missing but a legacy
+        // $HOME/.cache/pandemonium/procdb.bin exists, copy it forward so we
+        // don't lose accumulated profiles on first run after upgrade.
+        if !db_path.exists() {
+            if let Some(legacy) = Self::legacy_path() {
+                if legacy.exists() {
+                    match std::fs::copy(&legacy, &db_path) {
+                        Ok(bytes) => procdb_info!(
+                            "PROCDB: MIGRATED {} BYTES FROM {} TO {}",
+                            bytes,
+                            legacy.display(),
+                            db_path.display()
+                        ),
+                        Err(e) => {
+                            procdb_warn!("PROCDB MIGRATION FROM {} FAILED: {}", legacy.display(), e)
+                        }
+                    }
+                }
+            }
+        }
+
         let profiles = match Self::load_from_disk(&db_path) {
             Ok(p) => {
                 if !p.is_empty() {
