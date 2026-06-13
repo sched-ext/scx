@@ -40,7 +40,6 @@ enum mitosis_constants {
  * Variables populated by userspace
  */
 const volatile bool enable_llc_awareness = false;
-const volatile bool enable_work_stealing = false;
 const volatile u32 nr_llc = 1;
 
 static inline struct cell *lookup_cell(int idx)
@@ -63,6 +62,8 @@ struct task_ctx {
 	/* cpumask is the set of valid cpus this task can schedule on */
 	/* (task's cpumask and-ed with its cell cpumask) */
 	struct bpf_cpumask __kptr *cpumask;
+	/* Cached cpumask & LLC mask */
+	struct bpf_cpumask __kptr *llc_cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
 	/* Cell whose vtime domain should be charged for this task */
@@ -87,11 +88,10 @@ struct task_ctx {
 	u64 cgid;
 	/* Which LLC this task is assigned to */
 	s32 llc;
+	/* LLC id for llc_cpumask */
+	s32 llc_cpumask_id;
 
 	u64 avg_runtime_ns; /* EWMA of per-wake runtimes (ns), init to 0 */
-
-	u32 steal_count; /* how many times this task has been stolen */
-	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 };
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);

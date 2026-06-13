@@ -73,6 +73,7 @@ enum cell_stat_idx {
 	CSTAT_AFFN_VIOL,
 	CSTAT_BORROWED,
 	CSTAT_STEAL,
+	CSTAT_DRAIN_CNT,
 	CSTAT_CLAMP_USED,
 	CSTAT_PIN_SKIP,
 	CSTAT_SLICE_SHRINK_MAX,
@@ -101,7 +102,6 @@ struct cgrp_ctx {
  */
 struct cell_llc {
 	u64 vtime_now;
-	u32 cpu_cnt;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 // Ensure we don't have multiple of these on the same cacheline.
@@ -136,12 +136,6 @@ struct cell {
 	u64 owner_cgid;
 	// Whether or not the cell is used
 	u32 in_use;
-
-	// Number of CPUs in this cell
-	u32 cpu_cnt;
-
-	// Number of LLCs with at least one CPU in this cell
-	u32 llc_present_cnt;
 
 	// Per-LLC data (cacheline-aligned)
 	struct cell_llc llcs[MAX_LLCS];
