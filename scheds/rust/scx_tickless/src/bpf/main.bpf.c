@@ -45,6 +45,7 @@ volatile u64 nr_direct_dispatches, nr_timer_dispatches, nr_primary_dispatches;
 
 struct cpu_ctx {
 	struct bpf_timer timer;
+	bool timer_initialized;
 };
 
 struct {
@@ -446,26 +447,54 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 }
 
 /*
- * Start the BPF timer on a target CPU.
+ * Initialize the BPF timer on a target CPU.
  */
-static void init_timer(s32 cpu)
+static s32 init_timer(s32 cpu)
 {
 	struct cpu_ctx *cctx;
 	int ret;
 
 	if (!is_primary_cpu(cpu))
-		scx_bpf_error("starting timer on cpu%d, which is not a scheduling CPU", cpu);
+		return -EINVAL;
 
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
-		return;
+		return -ENOENT;
 
-	bpf_timer_init(&cctx->timer, &cpu_ctx_stor, CLOCK_MONOTONIC);
-	bpf_timer_set_callback(&cctx->timer, sched_timerfn);
+	if (cctx->timer_initialized)
+		return 0;
 
-	ret = bpf_timer_start(&cctx->timer, tick_interval_ns(), 0);
+	ret = bpf_timer_init(&cctx->timer, &cpu_ctx_stor, CLOCK_MONOTONIC);
 	if (ret)
-		scx_bpf_error("failed to fire up timer on cpu%d: %d", cpu, ret);
+		return ret;
+
+	ret = bpf_timer_set_callback(&cctx->timer, sched_timerfn);
+	if (ret)
+		return ret;
+
+	cctx->timer_initialized = true;
+
+	return 0;
+}
+
+/*
+ * Start the already-initialized BPF timer on a target CPU.
+ */
+static s32 start_timer_on_cpu(s32 cpu)
+{
+	struct cpu_ctx *cctx;
+
+	if (!is_primary_cpu(cpu))
+		return -EINVAL;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return -ENOENT;
+
+	if (!cctx->timer_initialized)
+		return -EINVAL;
+
+	return bpf_timer_start(&cctx->timer, tick_interval_ns(), 0);
 }
 
 void BPF_STRUCT_OPS(tickless_dispatch, s32 cpu, struct task_struct *prev)
@@ -687,15 +716,33 @@ int enable_primary_cpu(struct cpu_arg *input)
 	return ret;
 }
 
+SEC("syscall")
+int start_timer(struct cpu_arg *input)
+{
+	s32 cpu = input->cpu_id;
+
+	if (cpu != bpf_get_smp_processor_id())
+		return -EINVAL;
+
+	return start_timer_on_cpu(cpu);
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(tickless_init)
 {
-	int ret;
+	s32 cpu, ret;
 
 	ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
 	if (ret < 0)
 		return ret;
 
-	init_timer(bpf_get_smp_processor_id());
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		if (!is_primary_cpu(cpu))
+			continue;
+
+		ret = init_timer(cpu);
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
