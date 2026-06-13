@@ -72,7 +72,11 @@ fn unix_handle_client(
     state: &Arc<Mutex<WebState>>,
     html: &str,
 ) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let clone = match stream.try_clone() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut reader = BufReader::new(clone);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() { return; }
 
@@ -80,20 +84,23 @@ fn unix_handle_client(
     if parts.len() < 2 { return; }
     let path = parts[1];
 
-    let st = match state.lock() {
-        Ok(s) => s,
-        Err(_) => return,
+    // Snapshot state under lock, then release before serialization.
+    let (metrics, history_snap) = {
+        let st = match state.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        (st.metrics.clone(), st.history.snapshot())
     };
 
     let (body, content_type) = match path {
         "/" => (html.as_bytes().to_vec(), "text/html; charset=utf-8"),
         "/api/stats" => {
-            let j = serde_json::to_string(&st.metrics).unwrap_or_else(|_| "{}".into());
+            let j = serde_json::to_string(&metrics).unwrap_or_else(|_| "{}".into());
             (j.into_bytes(), "application/json")
         }
         "/api/history" => {
-            let snap = st.history.snapshot();
-            let j = serde_json::to_string(&snap).unwrap_or_else(|_| "[]".into());
+            let j = serde_json::to_string(&history_snap).unwrap_or_else(|_| "[]".into());
             (j.into_bytes(), "application/json")
         }
         _ => {
@@ -101,8 +108,6 @@ fn unix_handle_client(
             return;
         }
     };
-
-    drop(st);
     let len = body.len();
     let _ = write!(
         stream,

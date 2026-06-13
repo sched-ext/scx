@@ -116,27 +116,27 @@
     <!-- Tier metric cards with sparklines -->
     <div id="tier-cards" style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px">
       <div class="card"><button onclick="showHistory('priority')" style="width:100%;text-align:left">
-        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Priority tasks</p>
+        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Priority</p>
         <p class="stat-value tier-P" id="tier-P" style="font-size:1.5rem">0</p>
-        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">tasks that earned enough budget</p>
+        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">dispatches from priority tier</p>
         <div class="sparkline" id="spark-P"></div>
       </button></div>
       <div class="card"><button onclick="showHistory('normal')" style="width:100%;text-align:left">
-        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Normal queue</p>
+        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Normal</p>
         <p class="stat-value tier-N" id="tier-N" style="font-size:1.5rem">0</p>
-        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">tasks with decent budget</p>
+        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">dispatches from normal tier</p>
         <div class="sparkline" id="spark-N"></div>
       </button></div>
       <div class="card"><button onclick="showHistory('low')" style="width:100%;text-align:left">
-        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Low queue</p>
+        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Low</p>
         <p class="stat-value tier-L" id="tier-L" style="font-size:1.5rem">0</p>
-        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">tasks with modest budget left</p>
+        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">dispatches from low tier</p>
         <div class="sparkline" id="spark-L"></div>
       </button></div>
       <div class="card"><button onclick="showHistory('deficit')" style="width:100%;text-align:left">
         <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Exhausted</p>
         <p class="stat-value tier-D" id="tier-D" style="font-size:1.5rem">0</p>
-        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">bulk workers — they still get served</p>
+        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">dispatches from deficit tier</p>
         <div class="sparkline" id="spark-D"></div>
       </button></div>
     </div>
@@ -206,10 +206,16 @@
 
     function fmtRuntime(ns) {
       ns = clamp(ns);
-      if (ns >= 1_000_000_000) return (ns / 1_000_000_000).toFixed(1) + 's';
-      if (ns >= 1_000_000) return (ns / 1_000_000).toFixed(1) + 'ms';
-      if (ns >= 1_000) return (ns / 1_000).toFixed(1) + 'μs';
-      return ns + 'ns';
+      var sec = ns / 1_000_000_000;
+      if (sec < 60) return sec.toFixed(1) + ' sec';
+      var min = sec / 60;
+      if (min < 60) return min.toFixed(1) + ' min';
+      var hr = min / 60;
+      if (hr < 24) return hr.toFixed(1) + ' hr';
+      var day = hr / 24;
+      if (day < 30) return day.toFixed(1) + ' days';
+      if (day < 365) return (day / 30).toFixed(1) + ' months';
+      return (day / 365).toFixed(1) + ' years';
     }
 
     function renderSparkline(containerId, values, color, maxVal) {
@@ -281,26 +287,24 @@
         { key: 'tier_low_dispatches',      id: 'spark-L', color: TIER_COLORS.L },
         { key: 'tier_deficit_dispatches',  id: 'spark-D', color: TIER_COLORS.D },
       ];
-      // Compute deltas from history for sparklines
+      // Compute per-sample deltas (dispatch rate per interval)
+      var tierKeys = ['tier_priority_dispatches','tier_normal_dispatches','tier_low_dispatches','tier_deficit_dispatches'];
       var deltas = [];
       for (var i = 1; i < historyData.length; i++) {
         var prev = historyData[i - 1];
         var cur = historyData[i];
-        deltas.push(cur);
+        var d = {};
+        tierKeys.forEach(function(k) { d[k] = Math.max(0, (cur[k] || 0) - (prev[k] || 0)); });
+        deltas.push(d);
       }
-      // Use last 60 samples for sparklines
       var sampleCount = Math.min(deltas.length, 60);
       var recent = deltas.slice(deltas.length - sampleCount);
 
       keys.forEach(function(k) {
         var vals = recent.map(function(d) { return d[k.key] || 0; });
         if (vals.length > 1) {
-          // Compute running deltas vs first sample
-          var base = vals[0];
-          var series = vals.map(function(v) { return v - base; }).map(function(v) { return v < 0 ? 0 : v; });
-          // Apply min-max normalization for better visibility
-          var max = Math.max(Math.max.apply(null, series), 1);
-          renderSparkline(k.id, series, k.color, max);
+          var max = Math.max(Math.max.apply(null, vals), 1);
+          renderSparkline(k.id, vals, k.color, max);
         }
       });
     }

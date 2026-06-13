@@ -65,7 +65,7 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
-    /// Disable the web UI (http://127.0.0.1:50005).
+    /// Disable the web UI (http://localhost:50005).
     #[clap(long = "no-webui", action = clap::ArgAction::SetTrue)]
     no_webui: bool,
 

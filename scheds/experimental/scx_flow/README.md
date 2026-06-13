@@ -14,12 +14,12 @@ General-purpose desktop and workstation use is also supported; interactive tasks
 
 ## Web UI
 
-When scx_flow starts, it automatically serves a live metrics dashboard at [http://127.0.0.1:50005](http://127.0.0.1:50005). No extra flags needed — open it in any browser.
+When scx_flow starts, it automatically serves a live metrics dashboard at [http://localhost:50005](http://localhost:50005). No extra flags needed — open it in any browser.
 
 The dashboard shows:
-- How many tasks are in each dispatch tier (Priority / Normal / Low / Exhausted)
+- How many dispatches have gone through each tier (Priority / Normal / Low / Exhausted)
 - System information: running tasks, runtime, dispatch counts
-- All values update every 200ms via Server-Sent Events — no page refresh needed
+- All values update every second via polling — no page refresh needed
 - If the page doesn't load, the scheduler may have stopped running (the kernel falls back to the built-in EEVDF scheduler)
 
 Disable with `--no-webui` if you don't need it.
