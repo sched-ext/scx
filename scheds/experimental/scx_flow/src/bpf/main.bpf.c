@@ -54,7 +54,10 @@ volatile u64 nr_running;
 volatile u64 total_runtime;
 volatile u64 pinned_dispatches;
 volatile u64 prio_dispatches;
-volatile u64 normal_dispatches;
+volatile u64 tier_priority_dispatches;
+volatile u64 tier_normal_dispatches;
+volatile u64 tier_low_dispatches;
+volatile u64 tier_deficit_dispatches;
 volatile u64 budget_refill_events;
 volatile u64 budget_exhaustions;
 volatile u64 runnable_wakeups;
@@ -91,11 +94,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		}
 	}
 
-	ret = scx_bpf_create_dsq(FLOW_NORMAL_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create Normal DSQ: %d", ret);
-		return ret;
-	}
+	ret = scx_bpf_create_dsq(FLOW_TIER_PRIORITY_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) return ret;
+	ret = scx_bpf_create_dsq(FLOW_TIER_NORMAL_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) return ret;
+	ret = scx_bpf_create_dsq(FLOW_TIER_LOW_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) return ret;
+	ret = scx_bpf_create_dsq(FLOW_TIER_DEFICIT_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) return ret;
 
 	return 0;
 }
