@@ -115,7 +115,7 @@
   </style>
 </head>
 <body>
-  <div class="max-w-6xl mx-auto">
+  <div style="max-width:1152px;margin:auto">
 
     <!-- Header -->
     <header class="card" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -365,7 +365,7 @@
       var vals = historyData.map(function(d) { return d[key] || 0; });
       var values = [];
       for (var i = 1; i < vals.length; i++) {
-        values.push(vals[i] - vals[0]);
+        values.push(Math.max(0, vals[i] - vals[i - 1]));
       }
       var max = Math.max.apply(null, values.concat([1]));
 
@@ -384,11 +384,11 @@
       var p99 = percentile(recent, 0.99);
 
       root.innerHTML =
-        '<div class="modal-overlay" onclick="if(event.target===this)closeModal()">' +
+        '<div class="modal-overlay" role="dialog" aria-modal="true" aria-label="' + name + ' dispatch history" onclick="if(event.target===this)closeModal()">' +
         '<div class="modal-content">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
-        '<h2>' + name + ' dispatches over time</h2>' +
-        '<button onclick="closeModal()" style="font-size:1.25rem;color:var(--text-muted);padding:4px 8px">✕</button>' +
+        '<h2 id="modal-title">' + name + ' dispatches over time</h2>' +
+        '<button onclick="closeModal()" style="font-size:1.25rem;color:var(--text-muted);padding:4px 8px" aria-label="Close">&times;</button>' +
         '</div>' +
         '<div style="overflow-x:auto;white-space:nowrap;height:140px;padding-top:10px">' + bars + '</div>' +
         '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;font-size:0.75rem">' +

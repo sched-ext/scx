@@ -84,14 +84,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Tasks need 500 us * 100 = 50 ms of sleep to reach LOW,
 	 * 100 ms for NORMAL, 150 ms for PRIORITY.  Interactive tasks
 	 * that sleep longer earn higher priority. */
-	if (budget >= 1500000)
-		scx_bpf_dsq_insert(p, FLOW_TIER_PRIORITY_DSQ, slice_ns, enq_flags);
-	else if (budget >= 1000000)
-		scx_bpf_dsq_insert(p, FLOW_TIER_NORMAL_DSQ, slice_ns, enq_flags);
-	else if (budget >= 500000)
-		scx_bpf_dsq_insert(p, FLOW_TIER_LOW_DSQ, slice_ns, enq_flags);
-	else
-		scx_bpf_dsq_insert(p, FLOW_TIER_DEFICIT_DSQ, slice_ns, enq_flags);
+	if (budget >= FLOW_BUDGET_TIER_PRIORITY_NS)
+			scx_bpf_dsq_insert(p, FLOW_TIER_PRIORITY_DSQ, slice_ns, enq_flags);
+		else if (budget >= FLOW_BUDGET_TIER_NORMAL_NS)
+			scx_bpf_dsq_insert(p, FLOW_TIER_NORMAL_DSQ, slice_ns, enq_flags);
+		else if (budget >= FLOW_BUDGET_TIER_LOW_NS)
+			scx_bpf_dsq_insert(p, FLOW_TIER_LOW_DSQ, slice_ns, enq_flags);
+		else
+			scx_bpf_dsq_insert(p, FLOW_TIER_DEFICIT_DSQ, slice_ns, enq_flags);
 	}
 	clear_wake_target(tctx);
 }

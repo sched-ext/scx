@@ -46,7 +46,12 @@ enum consts {
 	 * Within each tier, tasks dispatch in FIFO order (O(1) per operation).
 	 * The tier boundaries are compile-time constants — no adaptive tuning,
 	 * no scoring signals, no classification heuristics.  Same inputs always
-	 * produce the same tier assignment. */
+	 * produce the same tier assignment.
+	 *
+	 * Budget thresholds (in nanoseconds) used by enqueue's select_tier(). */
+	FLOW_BUDGET_TIER_PRIORITY_NS = 1500000ULL,  /* 1500 us */
+	FLOW_BUDGET_TIER_NORMAL_NS   = 1000000ULL,  /* 1000 us */
+	FLOW_BUDGET_TIER_LOW_NS      =  500000ULL,  /*  500 us */
 	FLOW_TIER_PRIORITY_DSQ = 3000ULL,
 	FLOW_TIER_NORMAL_DSQ   = 3001ULL,
 	FLOW_TIER_LOW_DSQ      = 3002ULL,

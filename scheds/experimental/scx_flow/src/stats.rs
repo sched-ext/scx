@@ -74,7 +74,7 @@ impl Metrics {
         Self {
             nr_running: self.nr_running,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
-            uptime_ns: self.uptime_ns.wrapping_sub(rhs.uptime_ns),
+            uptime_ns: self.uptime_ns, // absolute, not a counter — no delta
             prio_dispatches: self.prio_dispatches.wrapping_sub(rhs.prio_dispatches),
             pinned_dispatches: self.pinned_dispatches.wrapping_sub(rhs.pinned_dispatches),
             tier_priority_dispatches: self

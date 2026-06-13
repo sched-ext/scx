@@ -85,7 +85,7 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
-    webui_tx: crossbeam::channel::Sender<Metrics>,
+    webui_tx: Option<crossbeam::channel::Sender<Metrics>>,
     started_at: std::time::Instant,
 }
 
@@ -156,13 +156,16 @@ impl<'a> Scheduler<'a> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         // Start the web UI thread (unless disabled).
-        let (webui_tx, webui_rx) = crossbeam::channel::unbounded::<Metrics>();
-        if !opts.no_webui {
+        let webui_tx: Option<crossbeam::channel::Sender<Metrics>> = if !opts.no_webui {
+            let (tx, rx) = crossbeam::channel::unbounded::<Metrics>();
             let shutdown = shutdown.clone();
             std::thread::spawn(move || {
-                webui::start(webui_rx, shutdown);
+                webui::start(rx, shutdown);
             });
-        }
+            Some(tx)
+        } else {
+            None
+        };
 
         Ok(Self {
             skel,
@@ -204,13 +207,17 @@ impl<'a> Scheduler<'a> {
             match req_ch.recv_timeout(Duration::from_millis(250)) {
                 Ok(()) => {
                     let m = self.get_metrics();
-                    let _ = self.webui_tx.try_send(m.clone());
+                    if let Some(ref tx) = self.webui_tx {
+                        let _ = tx.try_send(m.clone());
+                    }
                     res_ch.send(m)?;
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     // No stats client connected — still push metrics to web UI.
                     let m = self.get_metrics();
-                    let _ = self.webui_tx.try_send(m);
+                    if let Some(ref tx) = self.webui_tx {
+                        let _ = tx.try_send(m);
+                    }
                 }
                 Err(e) => Err(e)?,
             }

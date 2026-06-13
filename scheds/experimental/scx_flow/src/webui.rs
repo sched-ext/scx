@@ -162,13 +162,27 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
         }
     });
 
-    // Try TCP first (works when run manually from terminal).
-    // Falls back to Unix socket (when spawned by scx_loader which
-    // has systemd hardening: RestrictAddressFamilies, SocketBindDeny).
-    let tcp_addr = format!("[::1]:{}", PORT);
+    // Try TCP: IPv6 loopback first, then IPv4.  Falls back to Unix socket
+    // (scx_loader's systemd hardening: RestrictAddressFamilies, SocketBindDeny).
     let html_for_unix = html.to_owned();
+    let mut server: Option<tiny_http::Server> = None;
+    let mut tcp_addr = String::new();
 
-    if let Ok(server) = Server::http(&tcp_addr) {
+    // Attempt IPv6
+    if let Ok(s) = Server::http(&format!("[::1]:{}", PORT)) {
+        tcp_addr = format!("[::1]:{}", PORT);
+        server = Some(s);
+    }
+
+    // Attempt IPv4 if IPv6 failed
+    if server.is_none() {
+        if let Ok(s) = Server::http("127.0.0.1:50005") {
+            tcp_addr = "127.0.0.1:50005".into();
+            server = Some(s);
+        }
+    }
+
+    if let Some(server) = server {
         log::info!(
             "Web UI listening on http://{}/ — disable with --no-webui",
             tcp_addr
@@ -181,9 +195,13 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
 
         while !shutdown.load(Ordering::Relaxed) {
             if let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(200)) {
-                let st = match state.lock() {
-                    Ok(s) => s,
-                    Err(_) => continue,
+                // Snapshot under lock, then release before serialization.
+                let (metrics, history_snap) = {
+                    let st = match state.lock() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    (st.metrics.clone(), st.history.snapshot())
                 };
                 match request.url() {
                     "/" => {
@@ -193,8 +211,7 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
                         let _ = request.respond(resp);
                     }
                     "/api/stats" => {
-                        let json =
-                            serde_json::to_string(&st.metrics).unwrap_or_else(|_| "{}".into());
+                        let json = serde_json::to_string(&metrics).unwrap_or_else(|_| "{}".into());
                         let resp = Response::from_string(json)
                             .with_header(cors.clone())
                             .with_header(json_type.clone())
@@ -202,8 +219,8 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
                         let _ = request.respond(resp);
                     }
                     "/api/history" => {
-                        let snap = st.history.snapshot();
-                        let json = serde_json::to_string(&snap).unwrap_or_else(|_| "[]".into());
+                        let json =
+                            serde_json::to_string(&history_snap).unwrap_or_else(|_| "[]".into());
                         let resp = Response::from_string(json)
                             .with_header(cors.clone())
                             .with_header(json_type.clone())
