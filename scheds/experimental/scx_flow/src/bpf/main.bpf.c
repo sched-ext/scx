@@ -50,7 +50,7 @@ struct {
 	__type(value, struct flow_cpu_state);
 } cpu_state SEC(".maps");
 
-volatile u64 nr_running;
+volatile u64 on_cpu;
 volatile u64 total_runtime;
 volatile u64 pinned_dispatches;
 volatile u64 prio_dispatches;

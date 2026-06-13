@@ -177,7 +177,7 @@
     <div class="card">
       <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px">System</p>
       <div class="sys-grid">
-        <div><span style="color:var(--text-muted)">Running tasks:</span> <span class="stat-value" id="nr-running">0</span></div>
+        <div><span style="color:var(--text-muted)">On CPU:</span> <span class="stat-value" id="on-cpu">0</span></div>
         <div><span style="color:var(--text-muted)">Uptime:</span> <span class="stat-value" id="total-runtime">0</span></div>
         <div><span style="color:var(--text-muted)">Quick dispatches:</span> <span class="stat-value" id="quick-disp">0</span></div>
         <div><span style="color:var(--text-muted)">Pinned dispatches:</span> <span class="stat-value" id="pinned-disp">0</span></div>
@@ -280,7 +280,7 @@
       el('tier-D').textContent = fmt(data.tier_deficit_dispatches || 0);
 
       // System stats
-      el('nr-running').textContent = fmt(data.nr_running || 0);
+      el('on-cpu').textContent = fmt(data.on_cpu || 0);
       el('total-runtime').textContent = fmtRuntime(data.uptime_ns || 0);
       el('quick-disp').textContent = fmt(data.prio_dispatches || 0);
       el('pinned-disp').textContent = fmt(data.pinned_dispatches || 0);

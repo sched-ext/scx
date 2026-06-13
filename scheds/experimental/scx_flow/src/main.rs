@@ -180,7 +180,7 @@ impl<'a> Scheduler<'a> {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         let cpu_policy_state = self.read_cpu_policy_state();
         Metrics {
-            nr_running: bss_data.nr_running,
+            on_cpu: bss_data.on_cpu,
             total_runtime: bss_data.total_runtime,
             prio_dispatches: bss_data.prio_dispatches,
             pinned_dispatches: bss_data.pinned_dispatches,

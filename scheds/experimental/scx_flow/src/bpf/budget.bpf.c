@@ -32,7 +32,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		tctx->first_run = false;
 	}
 
-	__sync_fetch_and_add(&nr_running, 1);
+	__sync_fetch_and_add(&on_cpu, 1);
 }
 
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
@@ -60,5 +60,5 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	}
 
 	__sync_fetch_and_add(&total_runtime, runtime_ns);
-	__sync_fetch_and_sub(&nr_running, 1);
+	__sync_fetch_and_sub(&on_cpu, 1);
 }
