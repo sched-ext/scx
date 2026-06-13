@@ -385,7 +385,7 @@
       var p99 = percentile(recent, 0.99);
 
       root.innerHTML =
-        '<div class="modal-overlay" role="dialog" aria-modal="true" aria-label="' + name + ' dispatch history" onclick="if(event.target===this)closeModal()">' +
+        '<div class="modal-overlay" role="dialog" aria-modal="true" aria-label="' + name + ' dispatch history" onclick="onOverlayClick(event)">' +
         '<div class="modal-content">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
         '<h2 id="modal-title">' + name + ' dispatches over time</h2>' +
@@ -411,6 +411,10 @@
       if (e.key === 'Escape' && el('modal-root').innerHTML) closeModal();
     });
 
+    function onOverlayClick(e) {
+      if (e.target === e.currentTarget) closeModal();
+    }
+
     function closeModal() {
       var root = el('modal-root');
       if (root) root.innerHTML = '';
@@ -423,8 +427,6 @@
       var idx = Math.ceil(sorted.length * p) - 1;
       return sorted[Math.max(0, Math.min(idx, sorted.length - 1))];
     }
-
-    document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeModal(); });
 
     // Poll immediately and then every second
     pollStats();

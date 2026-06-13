@@ -205,7 +205,9 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
                 };
                 match request.url() {
                     "/" => {
-                        let resp = Response::from_string(&html).with_header(html_type.clone());
+                        let resp = Response::from_string(&html)
+                            .with_header(html_type.clone())
+                            .with_header(no_cache.clone());
                         let _ = request.respond(resp);
                     }
                     "/api/stats" => {
