@@ -74,10 +74,18 @@ impl Metrics {
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
             prio_dispatches: self.prio_dispatches.wrapping_sub(rhs.prio_dispatches),
             pinned_dispatches: self.pinned_dispatches.wrapping_sub(rhs.pinned_dispatches),
-            tier_priority_dispatches: self.tier_priority_dispatches.wrapping_sub(rhs.tier_priority_dispatches),
-            tier_normal_dispatches: self.tier_normal_dispatches.wrapping_sub(rhs.tier_normal_dispatches),
-            tier_low_dispatches: self.tier_low_dispatches.wrapping_sub(rhs.tier_low_dispatches),
-            tier_deficit_dispatches: self.tier_deficit_dispatches.wrapping_sub(rhs.tier_deficit_dispatches),
+            tier_priority_dispatches: self
+                .tier_priority_dispatches
+                .wrapping_sub(rhs.tier_priority_dispatches),
+            tier_normal_dispatches: self
+                .tier_normal_dispatches
+                .wrapping_sub(rhs.tier_normal_dispatches),
+            tier_low_dispatches: self
+                .tier_low_dispatches
+                .wrapping_sub(rhs.tier_low_dispatches),
+            tier_deficit_dispatches: self
+                .tier_deficit_dispatches
+                .wrapping_sub(rhs.tier_deficit_dispatches),
             budget_refill_events: self
                 .budget_refill_events
                 .wrapping_sub(rhs.budget_refill_events),

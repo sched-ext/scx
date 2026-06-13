@@ -74,9 +74,14 @@
     ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
     ::-webkit-scrollbar-thumb:hover { background: #555; }
 
+    .tier-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px; }
+    @media (min-width: 640px) { .tier-grid { grid-template-columns: repeat(4, 1fr); } }
+    .sys-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font-size: 0.8125rem; }
+    @media (min-width: 640px) { .sys-grid { grid-template-columns: repeat(4, 1fr); } }
     @media (max-width: 640px) {
       .card { padding: 12px; }
       .stat-value { font-size: 1rem !important; }
+      .modal-content { padding: 16px; }
     }
 
     /* Modal overlay */
@@ -114,7 +119,7 @@
     </header>
 
     <!-- Tier metric cards with sparklines -->
-    <div id="tier-cards" style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px">
+    <div id="tier-cards" class="tier-grid">
       <div class="card"><button onclick="showHistory('priority')" style="width:100%;text-align:left">
         <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Priority</p>
         <p class="stat-value tier-P" id="tier-P" style="font-size:1.5rem">0</p>
@@ -161,7 +166,7 @@
     <!-- System stats -->
     <div class="card">
       <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px">System</p>
-      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;font-size:0.8125rem">
+      <div class="sys-grid">
         <div><span style="color:var(--text-muted)">Running tasks:</span> <span class="stat-value" id="nr-running">0</span></div>
         <div><span style="color:var(--text-muted)">Runtime:</span> <span class="stat-value" id="total-runtime">0</span></div>
         <div><span style="color:var(--text-muted)">Quick dispatches:</span> <span class="stat-value" id="quick-disp">0</span></div>
