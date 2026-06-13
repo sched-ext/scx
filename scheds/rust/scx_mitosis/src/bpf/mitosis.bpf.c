@@ -50,6 +50,8 @@ const volatile bool userspace_managed_cell_mode = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
 const volatile bool dynamic_affinity_cpu_selection = false;
+/* Per-cell sibling-LLC queue-depth threshold gating work-stealing; tuned by userspace. */
+u32 per_cell_steal_min_queued[MAX_CELLS];
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -66,6 +68,7 @@ struct llc_cpumask llc_to_cpus[MAX_LLCS];
 u32 configuration_seq;
 u32 applied_configuration_seq;
 u32 cpuset_seq;
+
 u32 applied_cpuset_seq;
 
 /*
@@ -584,10 +587,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		 * enqueue), SCX_DSQ_LOCAL resolves to task_rq(p) -- not
 		 * the idle CPU we picked.
 		 */
-		tctx->vtime_charge_cell = tctx->cell;
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
-		if (kick)
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		place_task_on_cpu(p, tctx, cpu, kick);
 		return cpu;
 	}
 	if (cpu == -1)
@@ -608,10 +608,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		if (cpu >= 0) {
 			tctx->borrowed = true;
 			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
-			tctx->vtime_charge_cell = tctx->cell;
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
-			if (kick)
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			place_task_on_cpu(p, tctx, cpu, kick);
 			return cpu;
 		}
 	}
@@ -683,6 +680,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
+
+	tctx->last_cpu_source = MIG_SELECT_CPU;
 
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return prev_cpu;
@@ -772,6 +771,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
 
+	tctx->last_cpu_source = MIG_ENQUEUE;
+
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return;
 
@@ -839,6 +840,22 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 			if (!llc_is_valid(tctx->llc)) {
 				scx_bpf_error("Invalid LLC ID: %d", tctx->llc);
 				return;
+			}
+
+			/* If the cell no longer owns CPUs in this LLC, the
+			 * (cell, llc) DSQ has no consumer. Re-pick by
+			 * resetting cpumask and re-running LLC assignment.
+			 * update_task_cpumask resets tctx->cpumask to
+			 * (cell & affinity) before re-narrowing by LLC. */
+			if (READ_ONCE(cell->llcs[tctx->llc].cpu_cnt) == 0) {
+				if (update_task_cpumask(p, tctx) < 0)
+					return;
+				/* re-validate for verifier; vtime was reset */
+				if (!llc_is_valid(tctx->llc)) {
+					scx_bpf_error("Invalid LLC after re-pick: %d", tctx->llc);
+					return;
+				}
+				vtime = p->scx.dsq_vtime;
 			}
 
 			basis_vtime = READ_ONCE(cell->llcs[tctx->llc].vtime_now);
@@ -917,6 +934,10 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	/* Peek at cell-LLC DSQ head */
 	p = dsq_peek(cell_dsq.raw);
 	if (p) {
+		struct task_ctx *dtctx = lookup_task_ctx(p);
+		if (!dtctx)
+			return;
+		dtctx->last_cpu_source = MIG_DISPATCH;
 		min_vtime = p->scx.dsq_vtime;
 		min_vtime_dsq = cell_dsq;
 		found = true;
@@ -925,6 +946,10 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	/* Peek at CPU DSQ head, prefer if lower vtime */
 	p = dsq_peek(cpu_dsq.raw);
 	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
+		struct task_ctx *dtctx = lookup_task_ctx(p);
+		if (!dtctx)
+			return;
+		dtctx->last_cpu_source = MIG_DISPATCH;
 		min_vtime = p->scx.dsq_vtime;
 		min_vtime_dsq = cpu_dsq;
 		found = true;
@@ -936,15 +961,15 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
 	 */
 	if (!found) {
-		/* Try work stealing if enabled */
+		/* We can't stamp the task with MIG_DISPATCH here, but we
+		 * detect the LLC change in maybe_retag_stolen_task */
 		if (enable_llc_awareness && enable_work_stealing) {
 			/* Returns: <0 error, 0 no steal, >0 stole work */
 			s32 ret = try_stealing_work(cell, llc);
 			if (ret < 0)
 				return;
-			if (ret > 0) {
+			if (ret > 0)
 				cstat_inc(CSTAT_STEAL, cell, cctx);
-			}
 		}
 		return;
 	}
@@ -1342,11 +1367,17 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
 
+	/* Stolen tasks skip select_cpu/enqueue, so refresh here as a catch-all. */
+	if (maybe_refresh_cell(p, tctx) < 0)
+		return;
+
 	/* Handle stolen task retag (LLC-aware mode only) */
 	if (enable_llc_awareness && enable_work_stealing) {
 		if (maybe_retag_stolen_task(p, tctx, cctx) < 0)
 			return;
 	}
+
+	track_cpu_migration(p, tctx);
 
 	/* Record the running slice start time. */
 	tctx->started_running_at = scx_bpf_now();
@@ -1740,6 +1771,8 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 		return -EINVAL;
 	}
 
+	tctx->last_ran_cpu = -1;
+
 	/* Initialize LLC assignment fields */
 	if (enable_llc_awareness)
 		init_task_llc(tctx);
@@ -1826,14 +1859,28 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		scx_bpf_dump("CELL[%d] CPUS=", i);
 		dump_cell_cpumask(i);
 		scx_bpf_dump("\n");
-		/* Per-LLC stats deferred: FAKE_FLAT_CELL_LLC used for now */
-		dsq_id_t dsq_id = get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC);
-		if (dsq_is_invalid(dsq_id))
-			return;
-
-		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-			     READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
-			     scx_bpf_dsq_nr_queued(dsq_id.raw));
+		if (enable_llc_awareness) {
+			u32 llc;
+			bpf_for(llc, 0, nr_llc)
+			{
+				if (llc >= MAX_LLCS)
+					break;
+				dsq_id_t llc_dsq = get_cell_llc_dsq_id(i, llc);
+				if (dsq_is_invalid(llc_dsq))
+					continue;
+				scx_bpf_dump(
+					"CELL[%d] LLC[%d] cpu_cnt=%u vtime=%llu nr_queued=%d\n", i,
+					llc, READ_ONCE(cell->llcs[llc].cpu_cnt),
+					READ_ONCE(cell->llcs[llc].vtime_now),
+					scx_bpf_dsq_nr_queued(llc_dsq.raw));
+			}
+		} else {
+			dsq_id_t dsq_id = get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC);
+			if (!dsq_is_invalid(dsq_id))
+				scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
+					     READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
+					     scx_bpf_dsq_nr_queued(dsq_id.raw));
+		}
 	}
 
 	bpf_for(i, 0, nr_possible_cpus)
@@ -2248,6 +2295,20 @@ int apply_cell_config(void *ctx)
 			cctx->cell = cell_id;
 		}
 
+		if (enable_llc_awareness) {
+			int rc;
+			/* recalc_cell_llc_counts may iterate per-cell-LLC DSQs to
+			 * drain orphaned tasks via bpf_for_each(scx_dsq, ...) which
+			 * requires an RCU read CS. */
+			scoped_guard(rcu)
+			{
+				rc = recalc_cell_llc_counts(cell_id,
+							    (const struct cpumask *)new_cpumask);
+			}
+			if (rc)
+				return -EINVAL;
+		}
+
 		/* Swap the new cpumask into place */
 		if (publish_prepared_cpumask(&cpumaskw->primary, &new_cpumask)) {
 			scx_bpf_error("failed to publish cpumask for cell_id %d", cell_id);
@@ -2268,21 +2329,6 @@ int apply_cell_config(void *ctx)
 				scx_bpf_error("failed to set borrowable cpumask for cell_id %d",
 					      cell_id);
 				return -EINVAL;
-			}
-		}
-	}
-
-	/* Phase 2.5: Recompute per-LLC CPU counts for all cells */
-	if (enable_llc_awareness) {
-		u32 c;
-		scoped_guard(rcu)
-		{
-			bpf_for(c, 0, MAX_CELLS)
-			{
-				if (c >= config->num_cells)
-					break;
-				if (recalc_cell_llc_counts(c, NULL))
-					return -EINVAL;
 			}
 		}
 	}

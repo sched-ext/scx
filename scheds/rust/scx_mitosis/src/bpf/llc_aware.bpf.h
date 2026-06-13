@@ -24,6 +24,20 @@ typedef u32 llc_id_t;
  */
 extern u32 cpu_to_llc[MAX_CPUS];
 extern struct llc_cpumask llc_to_cpus[MAX_LLCS];
+extern u32 per_cell_steal_min_queued[MAX_CELLS];
+
+/* Global migration counters - 2x3 cross-product (read by userspace).
+ * Same-vs-cross is classified against cpu_to_llc[] above. */
+u64 nr_mig_same_select;
+u64 nr_mig_same_enqueue;
+u64 nr_mig_same_dispatch;
+u64 nr_mig_cross_select;
+u64 nr_mig_cross_enqueue;
+u64 nr_mig_cross_dispatch;
+
+/* Counter for tasks moved by the cell-shrink drain in
+ * recalc_cell_llc_counts. Read by userspace. */
+u64 nr_drained_tasks;
 
 static inline bool llc_is_valid(u32 llc_id)
 {
@@ -77,6 +91,7 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 	u32 llc, llcs_present = 0, total_cpus = 0;
 	// Just so we don't hold the lock longer than necessary
 	u32 llc_cpu_cnt_tmp[MAX_LLCS] = { 0 };
+	u32 llc_cpu_cnt_old[MAX_LLCS] = { 0 };
 
 	const struct cpumask *cell_mask;
 	if (explicit_mask) {
@@ -97,6 +112,9 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 
 		u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp_mask);
 
+		/* Snapshot old count BEFORE the publish below so the drain's
+		 * >0 -> 0 transition check still works after the reorder. */
+		llc_cpu_cnt_old[llc] = READ_ONCE(cell->llcs[llc].cpu_cnt);
 		llc_cpu_cnt_tmp[llc] = cnt;
 
 		// These are counted across the whole cell
@@ -107,7 +125,21 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 			llcs_present++;
 	}
 
-	// Write to cell
+	/*
+	 * Publish cpu_cnt FIRST, then drain. Enqueues that read cpu_cnt
+	 * after the publish see 0 and re-pick via update_task_cpumask
+	 * (mitosis_enqueue's cpu_cnt==0 guard); the drain then sweeps
+	 * anything in the DSQ at iterator time.
+	 * Order matters: dispatch never peeks cpu_cnt==0 LLCs and stealing
+	 * skips them, so any task that lands in an orphan (cell, llc) DSQ
+	 * stays stranded indefinitely.
+	 *
+	 * Residual race (not eliminated): an enqueue between its cpu_cnt
+	 * read and its scx_bpf_dsq_insert_vtime call may have read the
+	 * old cpu_cnt and complete its insert after the drain iterator.
+	 * BPF lacks the synchronize_rcu / atomic-insert-if-predicate
+	 * primitives needed to close this fully.
+	 */
 	scoped_guard(spin_lock, &cell->lock)
 	{
 		for (u32 llc_idx = 0; llc_idx < nr_llc; llc_idx++) {
@@ -117,6 +149,70 @@ static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpu
 		cell->llc_present_cnt = llcs_present;
 		cell->cpu_cnt = total_cpus;
 	}
+
+	/*
+	 * Drain orphan: if an LLC's count just dropped from >0 to 0, any
+	 * tasks queued on (cell, llc) DSQ would be stranded (no consumer).
+	 * Move them to a sibling LLC's DSQ that the cell still has CPUs in.
+	 *
+	 * Done outside the spin_lock above because bpf_for_each(scx_dsq,..)
+	 * and scx_bpf_dsq_move_vtime cannot be called under cell->lock.
+	 * The transition check uses the snapshotted llc_cpu_cnt_old[]
+	 * because cell->llcs[].cpu_cnt now holds the new value.
+	 */
+	bpf_for(llc, 0, nr_llc)
+	{
+		u32 old_cnt = llc_cpu_cnt_old[llc];
+		u32 new_cnt = llc_cpu_cnt_tmp[llc];
+		if (!(old_cnt > 0 && new_cnt == 0))
+			continue;
+
+		/* Pick destination LLC: first one the cell still has CPUs in.
+		 * TODO: spread across surviving LLCs (round-robin or
+		 * least-loaded); currently we dump all stranded tasks onto
+		 * one LLC. */
+		u32 dest_llc = LLC_INVALID;
+		u32 d;
+		bpf_for(d, 0, nr_llc)
+		{
+			if (llc_cpu_cnt_tmp[d] > 0) {
+				dest_llc = d;
+				break;
+			}
+		}
+		if (dest_llc == LLC_INVALID) {
+			scx_bpf_error(
+				"recalc_cell_llc_counts: cell %u has no CPUs in any LLC; cannot drain (cell, llc=%u)",
+				cell_idx, llc);
+			return -EINVAL;
+		}
+
+		dsq_id_t src_dsq = get_cell_llc_dsq_id(cell_idx, llc);
+		dsq_id_t dst_dsq = get_cell_llc_dsq_id(cell_idx, dest_llc);
+		if (dsq_is_invalid(src_dsq) || dsq_is_invalid(dst_dsq))
+			return -EINVAL;
+
+		struct task_struct *p;
+		u64 dst_vtime = READ_ONCE(cell->llcs[dest_llc].vtime_now);
+		/* Caller must hold RCU read lock for bpf_iter_scx_dsq_next. */
+		bpf_for_each(scx_dsq, p, src_dsq.raw, 0) {
+			struct task_ctx *tctx = lookup_task_ctx(p);
+			if (!tctx)
+				return -ENOENT; /* error already raised by lookup_task_ctx */
+			tctx->llc = dest_llc;
+			tctx->dsq = dst_dsq;
+			/* Use dest LLC's vtime_now for the move so the task lands
+			 * at the tail of the dest DSQ instead of the head. We can't
+			 * write p->scx.dsq_vtime directly here (iterator-returned
+			 * pointers are RCU read-only), so dispatch's cross-DSQ
+			 * comparison may still see the source-domain dsq_vtime
+			 * until the task next stops and dsq_vtime is recharged. */
+			scx_bpf_dsq_move_set_vtime(BPF_FOR_EACH_ITER, dst_vtime);
+			scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p, dst_dsq.raw, 0);
+			__sync_fetch_and_add(&nr_drained_tasks, 1);
+		}
+	}
+
 	return 0;
 }
 
@@ -211,9 +307,10 @@ static inline int maybe_retag_stolen_task(struct task_struct *p, struct task_ctx
 	if (tctx->llc == cctx->llc)
 		return 0;
 
-	/* Task was stolen to a different LLC - update accounting */
+	/* Task was stolen to a different LLC - update accounting. */
 	tctx->steal_count++;
 	tctx->last_stolen_at = scx_bpf_now();
+	tctx->last_cpu_source = MIG_DISPATCH;
 
 	/* Assign task to new LLC */
 	tctx->llc = cctx->llc;
@@ -223,6 +320,46 @@ static inline int maybe_retag_stolen_task(struct task_struct *p, struct task_ctx
 	 * to that of the new cell-LLC DSQ.
 	 */
 	return update_task_cpumask(p, tctx);
+}
+
+/* Bump the appropriate (same|cross)_(select|enqueue|dispatch) counter
+ * based on whether the new CPU is in the same LLC as the previous one
+ * and how this task arrived (last_cpu_source). Updates last_ran_cpu.
+ * First run on a CPU (prev < 0) is uncounted by design. */
+static inline void track_cpu_migration(struct task_struct *p, struct task_ctx *tctx)
+{
+	s32 cpu = scx_bpf_task_cpu(p);
+	s32 prev = tctx->last_ran_cpu;
+	tctx->last_ran_cpu = cpu;
+
+	if (!(prev >= 0 && prev != cpu && prev < nr_possible_cpus && cpu < nr_possible_cpus))
+		return;
+
+	if (cpu_to_llc[prev] == cpu_to_llc[cpu]) {
+		switch (tctx->last_cpu_source) {
+		case MIG_SELECT_CPU:
+			__sync_fetch_and_add(&nr_mig_same_select, 1);
+			break;
+		case MIG_ENQUEUE:
+			__sync_fetch_and_add(&nr_mig_same_enqueue, 1);
+			break;
+		case MIG_DISPATCH:
+			__sync_fetch_and_add(&nr_mig_same_dispatch, 1);
+			break;
+		}
+	} else {
+		switch (tctx->last_cpu_source) {
+		case MIG_SELECT_CPU:
+			__sync_fetch_and_add(&nr_mig_cross_select, 1);
+			break;
+		case MIG_ENQUEUE:
+			__sync_fetch_and_add(&nr_mig_cross_enqueue, 1);
+			break;
+		case MIG_DISPATCH:
+			__sync_fetch_and_add(&nr_mig_cross_dispatch, 1);
+			break;
+		}
+	}
 }
 
 /* Work stealing:
@@ -244,50 +381,55 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		return -EINVAL;
 
 	// Loop over all other LLCs, looking for a queued task to steal
+	/* Find the most backed-up sibling LLC and steal from it, but only
+	 * if its queue depth exceeds per_cell_steal_min_queued[cell] (the
+	 * per-cell threshold maintained by userspace's adaptive controller;
+	 * default 0 means "steal whenever a sibling has any queued task"). */
 	u32 i;
+	u32 max_queued = 0;
+	dsq_id_t max_dsq = DSQ_INVALID;
+
 	bpf_for(i, 1, nr_llc)
 	{
-		// Start with the next one to spread out the load
 		u32 candidate_llc = (local_llc + i) % nr_llc;
 
-		// Prevents the optimizer from removing the following conditional return
-		// so that the verifier knows the read will be safe
 		barrier_var(candidate_llc);
 
 		if (candidate_llc >= MAX_LLCS)
 			continue;
 
 		/*
-    * Skip if the cell doesn't have CPUs in this LLC.
-    * Note: rechecking cell_ptr for verifier.
-    * This is racy with try_stealing_this_task, but we don't care -
-    * if the LLC actually doesn't have CPUs come steal time,
-    * we will fail the steal and continue to the next LLC.
-    */
+		 * Skip LLCs the cell has no CPUs in. Read is racy with reconfig
+		 * but harmless: a stale-positive just means the steal will fail.
+		 * cell_ptr re-check is for the verifier.
+		 */
 		if (cell_ptr && READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
 			continue;
 
 		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell, candidate_llc);
 		if (dsq_is_invalid(candidate_dsq))
-			return -EINVAL; // already errored in get_cell_llc_dsq_id
+			return -EINVAL;
 
-		// Optimization: skip if faster than constructing an iterator
-		// Not redundant with later checking if task found (race)
-		if (!scx_bpf_dsq_nr_queued(candidate_dsq.raw))
-			continue;
+		u32 nr = scx_bpf_dsq_nr_queued(candidate_dsq.raw);
+		if (nr > max_queued) {
+			max_queued = nr;
+			max_dsq = candidate_dsq;
+		}
+	}
 
-		/*
-		 * Attempt the steal - can fail because it's a race.
-		 * We don't update task_ctx here because the peeked task_ctx
-		 * may be stale (a different task may now be at head of DSQ).
-		 * Actual retag and accounting happens in running() via
-		 * mismatch detection.
-		 */
-		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
-			continue;
-
-		// Success, we got a task
-		return true;
+	/*
+	 * Single steal attempt; can fail under race (e.g. another CPU
+	 * consumed the head first). Stolen task's LLC retag happens
+	 * lazily in mitosis_running via maybe_retag_stolen_task.
+	 *
+	 * TODO: on race the CPU goes idle even if other siblings have
+	 * queued tasks. Track second-best during the scan and try it on
+	 * failure (cheap, ~6 lines, single-pass), or fall back to a full
+	 * sibling sweep.
+	 */
+	if (max_queued > per_cell_steal_min_queued[cell] && !dsq_is_invalid(max_dsq)) {
+		if (scx_bpf_dsq_move_to_local(max_dsq.raw, 0))
+			return true;
 	}
 	return false;
 }

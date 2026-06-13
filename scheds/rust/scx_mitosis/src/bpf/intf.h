@@ -65,6 +65,8 @@ struct debug_event {
 	};
 };
 
+enum migration_source { MIG_SELECT_CPU, MIG_ENQUEUE, MIG_DISPATCH, NR_MIG_SOURCES };
+
 /* Statistics */
 enum cell_stat_idx {
 	CSTAT_LOCAL,
