@@ -24,6 +24,7 @@ pub struct Metrics {
     pub nr_running: u64,
     #[stat(desc = "Total CPU runtime in ns")]
     pub total_runtime: u64,
+    pub uptime_ns: u64,
     #[stat(desc = "Tasks enqueued via the wakeup fast path (FLOW_DSQ_LOCAL_ON)")]
     pub prio_dispatches: u64,
     #[stat(desc = "Tasks dispatched from the per-CPU pinned DSQ (non-migratable tasks)")]
@@ -50,10 +51,11 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] run={} runtime_ns={} quick_disp={} pinned_disp={} tier_P={} tier_N={} tier_L={} tier_D={} refill={} exhaust={} runnable={} migrations={}",
+            "[{}] run={} runtime_ns={} uptime_ns={} quick_disp={} pinned_disp={} tier_P={} tier_N={} tier_L={} tier_D={} refill={} exhaust={} runnable={} migrations={}",
             crate::SCHEDULER_NAME,
             self.nr_running,
             self.total_runtime,
+            self.uptime_ns,
             self.prio_dispatches,
             self.pinned_dispatches,
             self.tier_priority_dispatches,
@@ -72,6 +74,7 @@ impl Metrics {
         Self {
             nr_running: self.nr_running,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
+            uptime_ns: self.uptime_ns.wrapping_sub(rhs.uptime_ns),
             prio_dispatches: self.prio_dispatches.wrapping_sub(rhs.prio_dispatches),
             pinned_dispatches: self.pinned_dispatches.wrapping_sub(rhs.pinned_dispatches),
             tier_priority_dispatches: self

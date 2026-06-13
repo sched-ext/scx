@@ -86,6 +86,7 @@ struct Scheduler<'a> {
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
     webui_tx: crossbeam::channel::Sender<Metrics>,
+    started_at: std::time::Instant,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -168,6 +169,7 @@ impl<'a> Scheduler<'a> {
             struct_ops: Some(struct_ops),
             stats_server,
             webui_tx,
+            started_at: std::time::Instant::now(),
         })
     }
 
@@ -187,6 +189,7 @@ impl<'a> Scheduler<'a> {
             budget_exhaustions: bss_data.budget_exhaustions + cpu_policy_state.budget_exhaustions,
             runnable_wakeups: bss_data.runnable_wakeups + cpu_policy_state.runnable_wakeups,
             cpu_migrations: bss_data.cpu_migrations + cpu_policy_state.cpu_migrations,
+            uptime_ns: self.started_at.elapsed().as_nanos() as u64,
         }
     }
 
