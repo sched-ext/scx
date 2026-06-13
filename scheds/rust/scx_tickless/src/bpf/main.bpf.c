@@ -3,6 +3,7 @@
  * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
  */
 #include <scx/common.bpf.h>
+#include <lib/bpf_cpumask.h>
 #include "intf.h"
 
 #define MAX_CPUS		1024
@@ -612,47 +613,10 @@ s32 BPF_STRUCT_OPS(tickless_init_task, struct task_struct *p,
 /*
  * Allocate/re-allocate a new cpumask.
  */
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
 
 /*
  * Initialize a cpumask (if not already initialized).
  */
-static int init_cpumask(struct bpf_cpumask **cpumask)
-{
-	struct bpf_cpumask *mask;
-	int err = 0;
-
-	/*
-	 * Do nothing if the mask is already initialized.
-	 */
-	mask = *cpumask;
-	if (mask)
-		return 0;
-
-	/*
-	 * Create the CPU mask.
-	 */
-	err = calloc_cpumask(cpumask);
-	if (!err)
-		mask = *cpumask;
-	if (!mask)
-		err = -ENOMEM;
-
-	return err;
-}
 
 /*
  * Add a CPU to the pool of CPUs dedicated to process scheduling
@@ -668,7 +632,7 @@ int enable_primary_cpu(struct cpu_arg *input)
 	s32 cpu = input->cpu_id;
 	int ret;
 
-	ret = init_cpumask(&primary_cpumask);
+	ret = init_bpfmask(&primary_cpumask);
 	if (ret)
 		return ret;
 
