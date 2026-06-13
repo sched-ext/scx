@@ -66,14 +66,32 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
-	if (tctx) {
-		s64 effective_budget = tctx->budget_ns > 0 ? tctx->budget_ns : 0;
-		u64 vtime = FLOW_BUDGET_MAX_NS - (u64)effective_budget;
+	{
+		s64 budget;
 
-		scx_bpf_dsq_insert_vtime(p, FLOW_NORMAL_DSQ, slice_ns,
-					  vtime, enq_flags);
-	} else {
-		scx_bpf_dsq_insert(p, FLOW_NORMAL_DSQ, slice_ns, enq_flags);
+		if (tctx)
+			budget = tctx->budget_ns;
+		else
+			budget = 0;
+
+		/* Budget is in nanoseconds (s64).  Budget range after clamp is
+	 * [-500 us, 2000 us] = [-500,000 ns, 2,000,000 ns].  Tiers:
+	 *   PRIORITY: budget >= 1500 us (1,500,000 ns)  — long-sleep tasks
+	 *   NORMAL:   budget >= 1000 us (1,000,000 ns)  — tasks with typical budget
+	 *   LOW:      budget >=  500 us (  500,000 ns)  — tasks with modest budget
+	 *   DEFICIT:  budget <   500 us (  500,000 ns)  — exhausted / bulk workers
+	 *
+	 * Tasks need 500 us * 100 = 50 ms of sleep to reach LOW,
+	 * 100 ms for NORMAL, 150 ms for PRIORITY.  Interactive tasks
+	 * that sleep longer earn higher priority. */
+	if (budget >= FLOW_BUDGET_TIER_PRIORITY_NS)
+			scx_bpf_dsq_insert(p, FLOW_TIER_PRIORITY_DSQ, slice_ns, enq_flags);
+		else if (budget >= FLOW_BUDGET_TIER_NORMAL_NS)
+			scx_bpf_dsq_insert(p, FLOW_TIER_NORMAL_DSQ, slice_ns, enq_flags);
+		else if (budget >= FLOW_BUDGET_TIER_LOW_NS)
+			scx_bpf_dsq_insert(p, FLOW_TIER_LOW_DSQ, slice_ns, enq_flags);
+		else
+			scx_bpf_dsq_insert(p, FLOW_TIER_DEFICIT_DSQ, slice_ns, enq_flags);
 	}
 	clear_wake_target(tctx);
 }

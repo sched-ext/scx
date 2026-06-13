@@ -36,12 +36,26 @@ enum consts {
 	 * systems with cpu >= FLOW_PINNED_DSQ_BASE (reviewer comment). */
 	FLOW_PINNED_DSQ_BASE = 2048ULL,
 
-	/* Single vtime-ordered DSQ for all non-wakeup re-enqueues.
-	 * Vtime = FLOW_BUDGET_MAX_NS - max(0, budget_ns), giving tasks
-	 * that slept longer (higher budget) lower vtime and earlier
-	 * dispatch.  The budget range [-500us, 2000us] bounds vtime
-	 * to [0, 2500us] — it cannot grow indefinitely. */
-	FLOW_NORMAL_DSQ = 1025ULL,
+	/* O(1) multi-level FIFO dispatch tiers for non-wakeup re-enqueues.
+	 * Each tier is an independent FIFO DSQ, checked in priority order
+	 * during dispatch.  Tasks are classified by budget at enqueue time:
+	 *   PRIORITY (≥ 1500 us)  — tasks that slept a long time (interactive)
+	 *   NORMAL   (≥ 1000 us)  — tasks with typical budget
+	 *   LOW      (≥  500 us)  — tasks with modest budget
+	 *   DEFICIT  (<  500 us)  — tasks that exhausted their budget (bulk workers)
+	 * Within each tier, tasks dispatch in FIFO order (O(1) per operation).
+	 * The tier boundaries are compile-time constants — no adaptive tuning,
+	 * no scoring signals, no classification heuristics.  Same inputs always
+	 * produce the same tier assignment.
+	 *
+	 * Budget thresholds (in nanoseconds) used by enqueue's select_tier(). */
+	FLOW_BUDGET_TIER_PRIORITY_NS = 1500000ULL,  /* 1500 us */
+	FLOW_BUDGET_TIER_NORMAL_NS   = 1000000ULL,  /* 1000 us */
+	FLOW_BUDGET_TIER_LOW_NS      =  500000ULL,  /*  500 us */
+	FLOW_TIER_PRIORITY_DSQ = 3000ULL,
+	FLOW_TIER_NORMAL_DSQ   = 3001ULL,
+	FLOW_TIER_LOW_DSQ      = 3002ULL,
+	FLOW_TIER_DEFICIT_DSQ  = 3003ULL,
 
 	/* Enqueue flags (defined directly to bypass weak-volatile compat) */
 	FLOW_ENQ_WAKEUP  = 0x0000000000000001ULL,  /* SCX_ENQ_WAKEUP */
@@ -77,9 +91,9 @@ typedef int pid_t;
 struct flow_cpu_state {
 	u64 budget_exhaustions;
 	u64 runnable_wakeups;
-	u64 prio_dispatches;
-	u64 normal_dispatches;
 	u64 cpu_migrations;
+	/* per-tier dispatch counters are BSS volatiles (not per-CPU),
+	 * read directly by the Rust loader for the web UI. */
 };
 
 #endif /* __INTF_H */
