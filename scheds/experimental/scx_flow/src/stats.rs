@@ -30,13 +30,13 @@ pub struct Metrics {
     pub prio_dispatches: u64,
     #[stat(desc = "Tasks dispatched from the per-CPU pinned DSQ (non-migratable tasks)")]
     pub pinned_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the PRIORITY tier (budget >= 11 ms)")]
+    #[stat(desc = "Tasks dispatched from the PRIORITY tier (budget >= 1.5 ms)")]
     pub tier_priority_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the NORMAL tier (3 ms <= budget < 11 ms)")]
+    #[stat(desc = "Tasks dispatched from the NORMAL tier (1.0 ms <= budget < 1.5 ms)")]
     pub tier_normal_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the LOW tier (1 ms <= budget < 3 ms)")]
+    #[stat(desc = "Tasks dispatched from the LOW tier (0.5 ms <= budget < 1.0 ms)")]
     pub tier_low_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the DEFICIT tier (budget < 1 ms)")]
+    #[stat(desc = "Tasks dispatched from the DEFICIT tier (budget < 0.5 ms)")]
     pub tier_deficit_dispatches: u64,
     #[stat(desc = "Wakeups that refilled task budget")]
     pub budget_refill_events: u64,
