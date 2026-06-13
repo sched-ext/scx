@@ -35,7 +35,11 @@ struct RingBuf {
 
 impl RingBuf {
     fn new(cap: usize) -> Self {
-        Self { buf: Vec::with_capacity(cap), head: 0, count: 0 }
+        Self {
+            buf: Vec::with_capacity(cap),
+            head: 0,
+            count: 0,
+        }
     }
     fn push(&mut self, m: Metrics) {
         if self.count < self.buf.capacity() {
@@ -49,7 +53,9 @@ impl RingBuf {
     fn snapshot(&self) -> Vec<Metrics> {
         let cap = self.buf.capacity();
         let mut out = Vec::with_capacity(self.count);
-        if self.count == 0 { return out; }
+        if self.count == 0 {
+            return out;
+        }
         let start = if self.count < cap { 0 } else { self.head };
         for i in 0..self.count {
             out.push(self.buf[(start + i) % cap].clone());
@@ -78,10 +84,14 @@ fn unix_handle_client(
     };
     let mut reader = BufReader::new(clone);
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() { return; }
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
 
     let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 2 { return; }
+    if parts.len() < 2 {
+        return;
+    }
     let path = parts[1];
 
     // Snapshot state under lock, then release before serialization.
@@ -104,7 +114,10 @@ fn unix_handle_client(
             (j.into_bytes(), "application/json")
         }
         _ => {
-            let _ = write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            let _ = write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+            );
             return;
         }
     };
@@ -122,10 +135,7 @@ fn unix_handle_client(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn start(
-    metrics_rx: crossbeam::channel::Receiver<Metrics>,
-    shutdown: Arc<AtomicBool>,
-) {
+pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<AtomicBool>) {
     log::info!("Web UI thread started");
 
     let html = include_str!("../ui/index.html").to_string();
@@ -159,7 +169,10 @@ pub fn start(
     let html_for_unix = html.to_owned();
 
     if let Ok(server) = Server::http(&tcp_addr) {
-        log::info!("Web UI listening on http://{}/ — disable with --no-webui", tcp_addr);
+        log::info!(
+            "Web UI listening on http://{}/ — disable with --no-webui",
+            tcp_addr
+        );
 
         let cors = Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap();
         let no_cache = Header::from_bytes("Cache-Control", "no-store").unwrap();
@@ -180,25 +193,35 @@ pub fn start(
                         let _ = request.respond(resp);
                     }
                     "/api/stats" => {
-                        let json = serde_json::to_string(&st.metrics).unwrap_or_else(|_| "{}".into());
+                        let json =
+                            serde_json::to_string(&st.metrics).unwrap_or_else(|_| "{}".into());
                         let resp = Response::from_string(json)
-                            .with_header(cors.clone()).with_header(json_type.clone()).with_header(no_cache.clone());
+                            .with_header(cors.clone())
+                            .with_header(json_type.clone())
+                            .with_header(no_cache.clone());
                         let _ = request.respond(resp);
                     }
                     "/api/history" => {
                         let snap = st.history.snapshot();
                         let json = serde_json::to_string(&snap).unwrap_or_else(|_| "[]".into());
                         let resp = Response::from_string(json)
-                            .with_header(cors.clone()).with_header(json_type.clone()).with_header(no_cache.clone());
+                            .with_header(cors.clone())
+                            .with_header(json_type.clone())
+                            .with_header(no_cache.clone());
                         let _ = request.respond(resp);
                     }
-                    _ => { let _ = request.respond(Response::empty(404).with_header(cors.clone())); }
+                    _ => {
+                        let _ = request.respond(Response::empty(404).with_header(cors.clone()));
+                    }
                 }
             }
         }
     } else {
         // TCP blocked — use Unix socket (scx_loader's systemd hardening)
-        log::warn!("Web UI: TCP blocked (spawned by scx_loader?), falling back to {}", UNIX_SOCKET_PATH);
+        log::warn!(
+            "Web UI: TCP blocked (spawned by scx_loader?), falling back to {}",
+            UNIX_SOCKET_PATH
+        );
         let _ = std::fs::remove_file(UNIX_SOCKET_PATH);
 
         let listener = match UnixListener::bind(UNIX_SOCKET_PATH) {
@@ -210,7 +233,12 @@ pub fn start(
             }
         };
 
-        log::info!("Web UI listening on unix:{} — access via: sudo socat TCP-LISTEN:{} UNIX-CONNECT:{}", UNIX_SOCKET_PATH, PORT, UNIX_SOCKET_PATH);
+        log::info!(
+            "Web UI listening on unix:{} — access via: sudo socat TCP-LISTEN:{} UNIX-CONNECT:{}",
+            UNIX_SOCKET_PATH,
+            PORT,
+            UNIX_SOCKET_PATH
+        );
         log::info!("Or run: sudo /usr/bin/scx_flow for direct TCP access");
 
         listener.set_nonblocking(true).expect("set_nonblocking");
