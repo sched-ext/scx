@@ -95,13 +95,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	}
 
 	ret = scx_bpf_create_dsq(FLOW_TIER_PRIORITY_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) return ret;
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create priority DSQ: %d", ret);
+		return ret;
+	}
 	ret = scx_bpf_create_dsq(FLOW_TIER_NORMAL_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) return ret;
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create normal DSQ: %d", ret);
+		return ret;
+	}
 	ret = scx_bpf_create_dsq(FLOW_TIER_LOW_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) return ret;
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create low DSQ: %d", ret);
+		return ret;
+	}
 	ret = scx_bpf_create_dsq(FLOW_TIER_DEFICIT_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) return ret;
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create deficit DSQ: %d", ret);
+		return ret;
+	}
 
 	return 0;
 }

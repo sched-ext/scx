@@ -213,9 +213,9 @@ impl<'a> Scheduler<'a> {
                     res_ch.send(m)?;
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    // No stats client connected — still push metrics to web UI.
-                    let m = self.get_metrics();
+                    // Push metrics to web UI only if someone's listening.
                     if let Some(ref tx) = self.webui_tx {
+                        let m = self.get_metrics();
                         let _ = tx.try_send(m);
                     }
                 }

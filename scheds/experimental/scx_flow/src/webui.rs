@@ -9,6 +9,7 @@
 // Starts automatically; no CLI flags required.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -124,7 +125,7 @@ fn unix_handle_client(
     let len = body.len();
     let _ = write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         content_type, len
     );
     let _ = stream.write_all(&body);
@@ -176,8 +177,8 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
 
     // Attempt IPv4 if IPv6 failed
     if server.is_none() {
-        if let Ok(s) = Server::http("127.0.0.1:50005") {
-            tcp_addr = "127.0.0.1:50005".into();
+        if let Ok(s) = Server::http(&format!("127.0.0.1:{}", PORT)) {
+            tcp_addr = format!("127.0.0.1:{}", PORT);
             server = Some(s);
         }
     }
@@ -188,7 +189,6 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
             tcp_addr
         );
 
-        let cors = Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap();
         let no_cache = Header::from_bytes("Cache-Control", "no-store").unwrap();
         let html_type = Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap();
         let json_type = Header::from_bytes("Content-Type", "application/json").unwrap();
@@ -205,15 +205,12 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
                 };
                 match request.url() {
                     "/" => {
-                        let resp = Response::from_string(&html)
-                            .with_header(cors.clone())
-                            .with_header(html_type.clone());
+                        let resp = Response::from_string(&html).with_header(html_type.clone());
                         let _ = request.respond(resp);
                     }
                     "/api/stats" => {
                         let json = serde_json::to_string(&metrics).unwrap_or_else(|_| "{}".into());
                         let resp = Response::from_string(json)
-                            .with_header(cors.clone())
                             .with_header(json_type.clone())
                             .with_header(no_cache.clone());
                         let _ = request.respond(resp);
@@ -222,13 +219,12 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
                         let json =
                             serde_json::to_string(&history_snap).unwrap_or_else(|_| "[]".into());
                         let resp = Response::from_string(json)
-                            .with_header(cors.clone())
                             .with_header(json_type.clone())
                             .with_header(no_cache.clone());
                         let _ = request.respond(resp);
                     }
                     _ => {
-                        let _ = request.respond(Response::empty(404).with_header(cors.clone()));
+                        let _ = request.respond(Response::empty(404));
                     }
                 }
             }
@@ -239,7 +235,12 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
             "Web UI: TCP blocked (spawned by scx_loader?), falling back to {}",
             UNIX_SOCKET_PATH
         );
-        let _ = std::fs::remove_file(UNIX_SOCKET_PATH);
+        // Only remove if it's an existing socket (avoid following symlinks).
+        if let Ok(meta) = std::fs::symlink_metadata(UNIX_SOCKET_PATH) {
+            if meta.file_type().is_socket() {
+                let _ = std::fs::remove_file(UNIX_SOCKET_PATH);
+            }
+        }
 
         let listener = match UnixListener::bind(UNIX_SOCKET_PATH) {
             Ok(l) => l,

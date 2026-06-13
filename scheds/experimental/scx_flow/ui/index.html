@@ -354,8 +354,9 @@
       })
       .catch(function() {});
 
-    // Modal
+    // Modal — save focus, trap inside, restore on close.
     function showHistory(tier) {
+      lastFocused = document.activeElement;
       var root = el('modal-root');
       if (!root) return;
       var key = TIER_KEYS[tier];
@@ -399,11 +400,21 @@
         '</div>' +
         '</div>' +
         '</div>';
+      // Focus close button, restore on Esc.
+      var closeBtn = root.querySelector('button[aria-label="Close"]');
+      if (closeBtn) closeBtn.focus();
     }
+
+    var lastFocused = null;
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && el('modal-root').innerHTML) closeModal();
+    });
 
     function closeModal() {
       var root = el('modal-root');
       if (root) root.innerHTML = '';
+      if (lastFocused && lastFocused.focus) lastFocused.focus();
     }
 
     function percentile(arr, p) {

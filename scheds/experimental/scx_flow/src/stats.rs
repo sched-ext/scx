@@ -24,6 +24,7 @@ pub struct Metrics {
     pub nr_running: u64,
     #[stat(desc = "Total CPU runtime in ns")]
     pub total_runtime: u64,
+    #[stat(desc = "Scheduler uptime (wall clock since attach)")]
     pub uptime_ns: u64,
     #[stat(desc = "Tasks enqueued via the wakeup fast path (FLOW_DSQ_LOCAL_ON)")]
     pub prio_dispatches: u64,

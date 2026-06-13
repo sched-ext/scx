@@ -93,7 +93,7 @@ struct flow_cpu_state {
 	u64 runnable_wakeups;
 	u64 cpu_migrations;
 	/* per-tier dispatch counters are BSS volatiles (not per-CPU),
-	 * aggregated in the Rust loader for the web UI. */
+	 * read directly by the Rust loader for the web UI. */
 };
 
 #endif /* __INTF_H */
