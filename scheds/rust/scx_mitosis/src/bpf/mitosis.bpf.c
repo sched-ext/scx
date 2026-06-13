@@ -917,6 +917,16 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 
+	/*
+	 * Account after insertion: cell reconfiguration can orphan the selected
+	 * LLC between LLC selection and enqueue, so this is where we interlock
+	 * with refresh_cell_llc_draining() and enable draining if needed.
+	 */
+	if (enable_llc_awareness && tctx->all_cell_cpus_allowed) {
+		if (account_cell_llc_enqueue(tctx->cell, (u32)tctx->llc))
+			return;
+	}
+
 	/* Shrink the running task's slice for this pinned waiter.
 	 * We know this task is pinned (!all_cell_cpus_allowed). */
 	if (!tctx->all_cell_cpus_allowed && enable_slice_shrinking) {
@@ -952,8 +962,23 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	dsq_id_t cell_dsq = get_cell_llc_dsq_id(cell, llc);
 	dsq_id_t cpu_dsq = get_cpu_dsq_id(cpu);
 
-	if (dsq_is_invalid(cell_dsq) || dsq_is_invalid(cpu_dsq)) {
+	if (dsq_is_invalid(cell_dsq) || dsq_is_invalid(cpu_dsq))
 		return;
+
+	if (enable_llc_awareness) {
+		struct cell *cellp = lookup_cell(cell);
+
+		if (!cellp)
+			return;
+
+		if (READ_ONCE(cellp->llcs_to_drain)) {
+			s32 ret = try_draining_work(cell, llc);
+
+			if (ret >= 0) {
+				cstat_inc(CSTAT_DRAIN_CNT, cell, cctx);
+				return;
+			}
+		}
 	}
 
 	/* Peek at cell-LLC DSQ head */
@@ -974,24 +999,12 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	/*
 	 * If we failed to find an eligible task, try the sibling LLC DSQs.
-	 * This also rescues orphaned LLC DSQs: CPU reconfiguration can leave
-	 * queued tasks in a cell+LLC DSQ whose LLC no longer has CPUs in this
-	 * cell, and no CPU naturally checks it.
 	 * Otherwise, scx will keep running prev if prev->scx.flags &
 	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
 	 */
 	if (!found) {
-		if (enable_llc_awareness) {
-			/* Returns: <0 error, 0 no steal, >0 stole work */
-			s32 ret = try_stealing_work(cell, llc);
-			if (ret < 0)
-				return;
-			if (ret == STEAL_WORK_DRAINED) {
-				cstat_inc(CSTAT_DRAIN_CNT, cell, cctx);
-			} else if (ret == STEAL_WORK_STOLEN) {
-				cstat_inc(CSTAT_STEAL, cell, cctx);
-			}
-		}
+		if (enable_llc_awareness && !try_stealing_work(cell, llc))
+			cstat_inc(CSTAT_STEAL, cell, cctx);
 		return;
 	}
 
@@ -1312,6 +1325,10 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 			scx_bpf_error("failed to publish cpumask for cell %d", cell_idx);
 			return 0;
 		}
+		if (refresh_cell_llc_draining(cell_idx)) {
+			scx_bpf_error("failed to refresh LLC draining for cell %d", cell_idx);
+			return 0;
+		}
 
 		barrier();
 		WRITE_ONCE(cgrp_ctx->cell, cell_idx);
@@ -1343,6 +1360,10 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	 */
 	if (publish_prepared_cpumask(&root_cell_cpumaskw->primary, &root_bpf_cpumask)) {
 		scx_bpf_error("failed to publish root cpumask");
+		return 0;
+	}
+	if (refresh_cell_llc_draining(ROOT_CELL_ID)) {
+		scx_bpf_error("failed to refresh LLC draining for root cell");
 		return 0;
 	}
 
@@ -2295,6 +2316,10 @@ int apply_cell_config(void *ctx)
 		/* Swap the new cpumask into place */
 		if (publish_prepared_cpumask(&cpumaskw->primary, &new_cpumask)) {
 			scx_bpf_error("failed to publish cpumask for cell_id %d", cell_id);
+			return -EINVAL;
+		}
+		if (refresh_cell_llc_draining(cell_id)) {
+			scx_bpf_error("failed to refresh LLC draining for cell_id %d", cell_id);
 			return -EINVAL;
 		}
 

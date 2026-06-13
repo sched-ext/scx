@@ -136,6 +136,10 @@ struct cell {
 	u64 owner_cgid;
 	// Whether or not the cell is used
 	u32 in_use;
+	// Bitmap of LLC DSQs that have queued work but no CPUs in this cell
+	u64 llcs_to_drain;
+	// Bitmap of LLCs that contain CPUs assigned to this cell
+	u64 llcs_with_cpus;
 
 	// Per-LLC data (cacheline-aligned)
 	struct cell_llc llcs[MAX_LLCS];
