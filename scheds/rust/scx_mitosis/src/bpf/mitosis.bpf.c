@@ -1883,6 +1883,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
 	dsq_id_t dsq_id;
 	int i;
+	u32 llc;
 	struct cell *cell;
 	struct cpu_ctx *cpu_ctx;
 
@@ -1899,14 +1900,47 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		scx_bpf_dump("CELL[%d] CPUS=", i);
 		dump_cell_cpumask(i);
 		scx_bpf_dump("\n");
-		/* Per-LLC stats deferred: FAKE_FLAT_CELL_LLC used for now */
-		dsq_id_t dsq_id = get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC);
-		if (dsq_is_invalid(dsq_id))
-			return;
 
-		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-			     READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
-			     scx_bpf_dsq_nr_queued(dsq_id.raw));
+		if (enable_llc_awareness) {
+			u64 drain_mask = READ_ONCE(cell->llcs_to_drain);
+			u64 llcs_with_cpus = READ_ONCE(cell->llcs_with_cpus);
+
+			scx_bpf_dump("CELL[%d] llcs_to_drain=%llx llcs_with_cpus=%llx\n", i,
+				     drain_mask, llcs_with_cpus);
+
+			bpf_for(llc, 0, nr_llc)
+			{
+				u64 bit;
+				s32 nr_queued;
+
+				if (llc >= MAX_LLCS)
+					break;
+
+				dsq_id = get_cell_llc_dsq_id(i, llc);
+				if (dsq_is_invalid(dsq_id))
+					return;
+
+				bit = 1LLU << llc;
+				nr_queued = scx_bpf_dsq_nr_queued(dsq_id.raw);
+				if (!nr_queued && !(drain_mask & bit) &&
+				    !(llcs_with_cpus & bit))
+					continue;
+
+				scx_bpf_dump(
+					"CELL[%d] LLC[%d] vtime=%llu nr_queued=%d drain=%d has_cpus=%d\n",
+					i, llc, READ_ONCE(cell->llcs[llc].vtime_now),
+					nr_queued, !!(drain_mask & bit),
+					!!(llcs_with_cpus & bit));
+			}
+		} else {
+			dsq_id = get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC);
+			if (dsq_is_invalid(dsq_id))
+				return;
+
+			scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
+				     READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
+				     scx_bpf_dsq_nr_queued(dsq_id.raw));
+		}
 	}
 
 	bpf_for(i, 0, nr_possible_cpus)
@@ -1917,8 +1951,15 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		dsq_id = get_cpu_dsq_id(i);
 		if (dsq_is_invalid(dsq_id))
 			return;
-		scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell,
-			     READ_ONCE(cpu_ctx->vtime_now), scx_bpf_dsq_nr_queued(dsq_id.raw));
+		if (enable_llc_awareness) {
+			scx_bpf_dump("CPU[%d] cell=%d llc=%d vtime=%llu nr_queued=%d\n", i,
+				     cpu_ctx->cell, cpu_ctx->llc, READ_ONCE(cpu_ctx->vtime_now),
+				     scx_bpf_dsq_nr_queued(dsq_id.raw));
+		} else {
+			scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i, cpu_ctx->cell,
+				     READ_ONCE(cpu_ctx->vtime_now),
+				     scx_bpf_dsq_nr_queued(dsq_id.raw));
+		}
 	}
 
 	if (!debug_events_enabled)
