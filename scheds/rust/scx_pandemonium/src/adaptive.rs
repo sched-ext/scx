@@ -160,6 +160,7 @@ pub fn monitor_loop(
         let delta_shared = stats.nr_shared.wrapping_sub(prev.nr_shared);
         let delta_preempt = stats.nr_preempt.wrapping_sub(prev.nr_preempt);
         let delta_keep = stats.nr_keep_running.wrapping_sub(prev.nr_keep_running);
+        let delta_parks = stats.nr_osc_park.wrapping_sub(prev.nr_osc_park);
         let delta_wake_sum = stats.wake_lat_sum.wrapping_sub(prev.wake_lat_sum);
         let delta_wake_samples = stats.wake_lat_samples.wrapping_sub(prev.wake_lat_samples);
         let delta_hard = stats.nr_hard_kicks.wrapping_sub(prev.nr_hard_kicks);
@@ -477,6 +478,7 @@ pub fn monitor_loop(
             delta_shared,
             delta_preempt,
             delta_keep,
+            delta_parks,
             wake_avg_us,
             delta_hard,
             delta_soft,
