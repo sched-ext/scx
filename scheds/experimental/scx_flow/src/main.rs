@@ -11,6 +11,7 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
+mod webui;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -64,6 +65,10 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
+    /// Disable the web UI (http://localhost:50005).
+    #[clap(long = "no-webui", action = clap::ArgAction::SetTrue)]
+    no_webui: bool,
+
     /// Disable adaptive runtime tuning (no-op, kept for backward compatibility).
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_autotune: bool,
@@ -80,13 +85,14 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
+    webui_tx: Option<crossbeam::channel::Sender<Metrics>>,
+    started_at: std::time::Instant,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CpuPolicyStateAgg {
     budget_exhaustions: u64,
     runnable_wakeups: u64,
-    normal_dispatches: u64,
     cpu_migrations: u64,
 }
 
@@ -118,9 +124,6 @@ impl<'a> Scheduler<'a> {
                 .budget_exhaustions
                 .saturating_add(state.budget_exhaustions);
             agg.runnable_wakeups = agg.runnable_wakeups.saturating_add(state.runnable_wakeups);
-            agg.normal_dispatches = agg
-                .normal_dispatches
-                .saturating_add(state.normal_dispatches);
             agg.cpu_migrations = agg.cpu_migrations.saturating_add(state.cpu_migrations);
         }
 
@@ -130,6 +133,7 @@ impl<'a> Scheduler<'a> {
     fn init(
         opts: &'a Opts,
         open_object: &'a mut MaybeUninit<libbpf_rs::OpenObject>,
+        shutdown: Arc<AtomicBool>,
     ) -> Result<Self> {
         try_set_rlimit_infinity();
 
@@ -151,10 +155,24 @@ impl<'a> Scheduler<'a> {
         // Expose live metrics for monitor and stats clients.
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        // Start the web UI thread (unless disabled).
+        let webui_tx: Option<crossbeam::channel::Sender<Metrics>> = if !opts.no_webui {
+            let (tx, rx) = crossbeam::channel::unbounded::<Metrics>();
+            let shutdown = shutdown.clone();
+            std::thread::spawn(move || {
+                webui::start(rx, shutdown);
+            });
+            Some(tx)
+        } else {
+            None
+        };
+
         Ok(Self {
             skel,
             struct_ops: Some(struct_ops),
             stats_server,
+            webui_tx,
+            started_at: std::time::Instant::now(),
         })
     }
 
@@ -162,15 +180,19 @@ impl<'a> Scheduler<'a> {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         let cpu_policy_state = self.read_cpu_policy_state();
         Metrics {
-            nr_running: bss_data.nr_running,
+            on_cpu: bss_data.on_cpu,
             total_runtime: bss_data.total_runtime,
             prio_dispatches: bss_data.prio_dispatches,
             pinned_dispatches: bss_data.pinned_dispatches,
-            normal_dispatches: bss_data.normal_dispatches + cpu_policy_state.normal_dispatches,
+            tier_priority_dispatches: bss_data.tier_priority_dispatches,
+            tier_normal_dispatches: bss_data.tier_normal_dispatches,
+            tier_low_dispatches: bss_data.tier_low_dispatches,
+            tier_deficit_dispatches: bss_data.tier_deficit_dispatches,
             budget_refill_events: bss_data.budget_refill_events,
             budget_exhaustions: bss_data.budget_exhaustions + cpu_policy_state.budget_exhaustions,
             runnable_wakeups: bss_data.runnable_wakeups + cpu_policy_state.runnable_wakeups,
             cpu_migrations: bss_data.cpu_migrations + cpu_policy_state.cpu_migrations,
+            uptime_ns: self.started_at.elapsed().as_nanos() as u64,
         }
     }
 
@@ -183,8 +205,20 @@ impl<'a> Scheduler<'a> {
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_millis(250)) {
-                Ok(()) => res_ch.send(self.get_metrics())?,
-                Err(RecvTimeoutError::Timeout) => {}
+                Ok(()) => {
+                    let m = self.get_metrics();
+                    if let Some(ref tx) = self.webui_tx {
+                        let _ = tx.try_send(m.clone());
+                    }
+                    res_ch.send(m)?;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // Push metrics to web UI only if someone's listening.
+                    if let Some(ref tx) = self.webui_tx {
+                        let m = self.get_metrics();
+                        let _ = tx.try_send(m);
+                    }
+                }
                 Err(e) => Err(e)?,
             }
         }
@@ -250,7 +284,7 @@ fn main() -> Result<()> {
     }
 
     let mut open_object = MaybeUninit::<libbpf_rs::OpenObject>::uninit();
-    let mut sched = Scheduler::init(&opts, &mut open_object)?;
+    let mut sched = Scheduler::init(&opts, &mut open_object, shutdown.clone())?;
     sched.run(shutdown)?;
 
     info!("Scheduler exited");

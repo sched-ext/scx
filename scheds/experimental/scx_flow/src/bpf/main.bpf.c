@@ -50,11 +50,14 @@ struct {
 	__type(value, struct flow_cpu_state);
 } cpu_state SEC(".maps");
 
-volatile u64 nr_running;
+volatile u64 on_cpu;
 volatile u64 total_runtime;
 volatile u64 pinned_dispatches;
 volatile u64 prio_dispatches;
-volatile u64 normal_dispatches;
+volatile u64 tier_priority_dispatches;
+volatile u64 tier_normal_dispatches;
+volatile u64 tier_low_dispatches;
+volatile u64 tier_deficit_dispatches;
 volatile u64 budget_refill_events;
 volatile u64 budget_exhaustions;
 volatile u64 runnable_wakeups;
@@ -63,6 +66,7 @@ volatile u64 init_task_events;
 volatile u64 enable_events;
 volatile u64 exit_task_events;
 volatile u64 cpu_migrations;
+volatile u64 dispatch_gen;	/* dispatch phase selector (gen & 3 → rotating tier start) */
 volatile u64 tune_reserved_max_ns = FLOW_SLICE_RESERVED_MAX_NS;
 volatile u64 tune_interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_NS;
 
@@ -91,9 +95,24 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		}
 	}
 
-	ret = scx_bpf_create_dsq(FLOW_NORMAL_DSQ, -1);
+	ret = scx_bpf_create_dsq(FLOW_TIER_PRIORITY_DSQ, -1);
 	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create Normal DSQ: %d", ret);
+		scx_bpf_error("failed to create priority DSQ: %d", ret);
+		return ret;
+	}
+	ret = scx_bpf_create_dsq(FLOW_TIER_NORMAL_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create normal DSQ: %d", ret);
+		return ret;
+	}
+	ret = scx_bpf_create_dsq(FLOW_TIER_LOW_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create low DSQ: %d", ret);
+		return ret;
+	}
+	ret = scx_bpf_create_dsq(FLOW_TIER_DEFICIT_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create deficit DSQ: %d", ret);
 		return ret;
 	}
 
