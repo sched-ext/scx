@@ -2368,9 +2368,13 @@ int apply_cell_config(void *ctx)
 			scx_bpf_error("failed to publish cpumask for cell_id %d", cell_id);
 			return -EINVAL;
 		}
-		if (refresh_cell_llc_draining(cell_id)) {
-			scx_bpf_error("failed to refresh LLC draining for cell_id %d", cell_id);
-			return -EINVAL;
+		scoped_guard(rcu)
+		{
+			if (refresh_cell_llc_draining(cell_id)) {
+				scx_bpf_error("failed to refresh LLC draining for cell_id %d",
+					      cell_id);
+				return -EINVAL;
+			}
 		}
 
 		/* Apply borrowable cpumask for this cell */

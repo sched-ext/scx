@@ -199,25 +199,32 @@ static inline bool cell_llc_has_cpus(struct cell *cell, u32 llc)
 	return READ_ONCE(cell->llcs_with_cpus) & (1LLU << llc);
 }
 
-static inline void kick_cell_idle_cpu(u32 cell_id)
+/* Caller must hold RCU. */
+static inline void kick_cell_idle_cpu_locked(u32 cell_id)
 {
 	s32 cpu = -1;
+	const struct cpumask *cell_mask = lookup_cell_cpumask(cell_id);
 
-	scoped_guard(rcu)
-	{
-		const struct cpumask *cell_mask = lookup_cell_cpumask(cell_id);
+	if (!cell_mask)
+		return;
 
-		if (!cell_mask)
-			return;
+	cpu = scx_bpf_pick_idle_cpu(cell_mask, SCX_PICK_IDLE_CORE);
+	if (cpu < 0)
+		cpu = scx_bpf_pick_idle_cpu(cell_mask, 0);
 
-		cpu = scx_bpf_pick_idle_cpu(cell_mask, SCX_PICK_IDLE_CORE);
-		if (cpu < 0)
-			cpu = scx_bpf_pick_idle_cpu(cell_mask, 0);
-	}
 	if (cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
+static inline void kick_cell_idle_cpu(u32 cell_id)
+{
+	scoped_guard(rcu)
+	{
+		kick_cell_idle_cpu_locked(cell_id);
+	}
+}
+
+/* Caller must hold RCU for lookup_cell_cpumask() and cpumask kfuncs. */
 static inline int refresh_cell_llc_draining(u32 cell_id)
 {
 	struct cell *cell;
@@ -231,21 +238,18 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 	if (!cell)
 		return -EINVAL;
 
-	scoped_guard(rcu)
+	const struct cpumask *cell_mask = lookup_cell_cpumask(cell_id);
+
+	if (!cell_mask)
+		return -EINVAL;
+
+	bpf_for(llc, 0, nr_llc)
 	{
-		const struct cpumask *cell_mask = lookup_cell_cpumask(cell_id);
+		if (llc >= MAX_LLCS)
+			break;
 
-		if (!cell_mask)
-			return -EINVAL;
-
-		bpf_for(llc, 0, nr_llc)
-		{
-			if (llc >= MAX_LLCS)
-				break;
-
-			if (cell_mask_intersects_llc(cell_mask, llc))
-				llcs_with_cpus |= 1LLU << llc;
-		}
+		if (cell_mask_intersects_llc(cell_mask, llc))
+			llcs_with_cpus |= 1LLU << llc;
 	}
 	WRITE_ONCE(cell->llcs_with_cpus, llcs_with_cpus);
 
@@ -271,7 +275,7 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 
 		if (READ_ONCE(cell->llcs[llc].nr_queued) > 0) {
 			cell_llc_drain_enable(cell, llc);
-			kick_cell_idle_cpu(cell_id);
+			kick_cell_idle_cpu_locked(cell_id);
 		}
 	}
 
