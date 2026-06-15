@@ -79,15 +79,6 @@ const volatile u64 nr_cpu_ids = 1;
 
 #define EWMA_AGE_MATURE      8
 #define EWMA_AGE_CAP         16
-// FRESH-FORK COLD-START PRIME (Q16): A SMALL BOUNDED BACK-DATE FOR AN
-// UNOBSERVED INTERACTIVE TASK SO IT IS NOT SORTED DEAD-LAST (LIKE BATCH) AND
-// LOSING THE DISPATCH RACE DURING ITS LAUNCH WINDOW -- THE app-launch ms
-// BLOWOUT. 1/16 OF FULL: A MATURED INTERACTIVE/LAT_CRITICAL TASK (UP TO 65536)
-// ALWAYS SORTS AHEAD, SO DEADLINE WORK IS UNTOUCHED. DECAYS TO 0 BY
-// EWMA_AGE_MATURE, WHERE THE EARNED WARP TAKES OVER. lag_cap_ns BOUNDS THE
-// RESULTING BACK-DATE (STARVATION-FREE). ORDERING ONLY -- NEVER A PREEMPT.
-#define PRIME_FRESH_Q16      4096u
-#define MAX_WAKEUP_FREQ      64
 #define MAX_WAKEUP_FREQ      64
 #define MAX_CSW_RATE         512
 // WARP CEILING: TAU-DERIVED IN apply_tau_scaling() VIA K_LAG_CAP. THE UPPER
@@ -203,26 +194,6 @@ u64 codel_target_ns;          // ADAPTIVE CENTER (EXPOSED FOR MWU)
 static s64 oscillator_velocity_ns;        // DAMPED OSCILLATION VELOCITY
 static u64 prev_rescue_snapshot;       // LAST-SEEN RESCUE COUNT
 static u64 global_rescue_count;        // ATOMIC CROSS-CPU RESCUE ACCUMULATOR
-
-// OSCILLATOR ENVELOPE: THE CONTROL EFFORT OBEYS THE SAME DAMPING LAW AS THE
-// SYSTEM IT CONTROLS. A DECAYED ENERGY RESERVOIR (GIRARD'S DYNAMIC-TRIGGER
-// eta) DRIVES THE OSCILLATOR'S OWN RECOMPUTE CADENCE: FULL EVERY-TICK WHEN
-// HOT, A SHORT GRADED BAND BELOW THE RELEASE THRESHOLD, A TRUE PARK (ZERO
-// ARITHMETIC, TARGET PINNED AT ITS CLOSED-FORM FIXED POINT) BELOW THE PARK
-// THRESHOLD. CPU-0 TICK IS THE SINGLE WRITER; DISPATCH READS codel_target_ns
-// WITH NO KNOWLEDGE THE ENVELOPE EXISTS. SEE MAYBE-5.13.0.md (Idle) AND
-// ENVELOPE-RESEARCH.md FOR THE DESIGN RECORD.
-#define OSC_ENV_DECAY_SHIFT     3    // RESERVOIR DECAY: env -= env >> 3 PER UPDATE
-#define OSC_ENV_GRADED_DIV      4    // GRADED BAND: RECOMPUTE EVERY 4TH TICK
-#define OSC_ENV_HEARTBEAT_TICKS 1024 // MAX-PARK SAFETY VALVE (~1s @ 1kHz, ~4s @ 250Hz)
-static u64 osc_env_energy;           // DECAYED disp^2 + v^2 RESERVOIR
-static u32 osc_env_skip;             // GRADED-BAND CADENCE DIVIDER
-static bool osc_env_parked;          // OSCILLATOR PARKED AT EQUILIBRIUM
-                                     // (bool, NOT u32: LLVM GlobalOpt SHRINKS A
-                                     // 0/1-ONLY INTERNAL GLOBAL TO 1 BYTE WHILE
-                                     // BTF KEEPS THE 4-BYTE TYPE -- THE KERNEL
-                                     // REJECTS THE .bss DATASEC SIZE MISMATCH)
-static u64 osc_env_park_ticks;       // TICKS SPENT PARKED (HEARTBEAT CAP)
 
 // LONGRUN DETECTION
 // TRACKS SUSTAINED BATCH DSQ PRESSURE. WHEN BATCH DSQ IS NON-EMPTY
@@ -350,32 +321,6 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 } reff_value SEC(".maps");
-
-// TIERED STEAL TABLES (RUST-POPULATED AT TOPOLOGY DETECT, SENTINEL-TERMINATED).
-// PACKED u64 PER SLOT: LOW 32 BITS = PEER CPU ((u32)-1 SENTINEL), HIGH 32 =
-// THE PRE-FOLDED PHI DISTANCE PENALTY IN ns. ONE LOOKUP YIELDS BOTH, SO THE
-// TIERED WALKS DO STRICTLY FEWER MAP READS THAN THE affinity_rank+reff_value
-// PAIR THEY REPLACE IN THE STEAL/SPILL PATHS. THE CCX SPLIT IS TOPOLOGY-
-// STATIC, SO THE TIER BOUNDARY IS COMPUTED ONCE BY RUST -- NEVER PER
-// DISPATCH (FREE-COMPUTE), AND NEVER AS A VARIABLE LOOP BOUNDARY THE
-// VERIFIER MUST TRACK.
-// near_tbl: SAME-CCX PEERS ONLY, R_EFF-ASCENDING -- THE PREFIX OF
-//           affinity_rank. ON A MONOLITHIC 1-CCX BOX IT EQUALS THE FULL
-//           RANK AND far_tbl IS ALL-SENTINEL: EXACT PRIOR BEHAVIOR.
-// far_tbl:  THE FAR_CANDIDATES NEAREST CROSS-CCX PEERS, R_EFF-ASCENDING.
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, MAX_CPUS * MAX_AFFINITY_CANDIDATES);
-	__type(key, u32);
-	__type(value, u64);
-} near_tbl SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, MAX_CPUS * FAR_CANDIDATES);
-	__type(key, u32);
-	__type(value, u64);
-} far_tbl SEC(".maps");
 
 // STEP 1 SCAN RATE-LIMIT: per-CPU timestamp of the last R_eff steal scan.
 // PERCPU SO IT IS THIS-CPU-LOCAL -- NO CROSS-CPU COHERENCE TRAFFIC. THE PEER
@@ -666,39 +611,12 @@ static __always_inline s32 phi_warm_target(s32 anchor,
 // DECOUPLED FROM affinity_mode: STICKINESS IS FUNDAMENTAL MIGRATION RESISTANCE,
 // NOT AN ADAPTIVE-ONLY L2 FEATURE -- SO IT ENGAGES IN BPF-ONLY MODE TOO, WHERE
 // THE MIGRATION STORM (2375 MOVES/THREAD VS EEVDF'S 45) WAS MEASURED.
-
-// IPC HANDOFF DISCRIMINATOR -- THE NARROW GATE BRANCH. The replacement for the
-// blunt is_wakeup preempt is NOT "any short task" (that was the rank object,
-// which preempted globally and torched 58% of deadlines). It is a SELF-CHECK for
-// a true tight synchronous handoff partner: a matured, non-BATCH task woken by
-// only a handful of distinct partners (popcount of the waker bitmap <=
-// SHAPE_TIGHT_MAX). That set is ~2 threads -- the pinger pair -- so fast-pathing
-// it on REQUEUE (where is_wakeup is false and the baseline makes it wait a tick)
-// cannot move the deadline numbers, while every other task falls through to the
-// exact baseline behavior. WAKES are unchanged (is_wakeup still fires); this only
-// ADDS the requeue case for genuine handoff partners. LAT_CRITICAL always
-// qualifies (the latency floor); BATCH and unclassified tasks never do.
-static __always_inline bool is_handoff_partner(const struct task_ctx *tctx)
-{
-	if (!tctx)
-		return false;
-	if (tctx->tier == TIER_LAT_CRITICAL)
-		return true;
-	if (tctx->tier == TIER_BATCH)
-		return false;
-	if (tctx->ewma_age < EWMA_AGE_MATURE)
-		return false;            // not yet classified -- stay on baseline
-	return __builtin_popcountll(tctx->waker_bitmap) <= SHAPE_TIGHT_MAX;
-}
-
 static __always_inline s32 warm_stay_anchor(struct task_struct *p,
 					    struct task_ctx *tctx,
 					    struct tuning_knobs *knobs,
 					    bool is_wakeup, u64 now)
 {
-	// ADMIT A WAKE, OR A REQUEUED TRUE HANDOFF PARTNER (the narrow IPC branch),
-	// to the warm per-CPU seat. Everything else stays on baseline.
-	if (!tctx || (!is_wakeup && !is_handoff_partner(tctx)))
+	if (!tctx || !is_wakeup)
 		return -1;
 	if (!knobs)
 		return -1;
@@ -712,15 +630,6 @@ static __always_inline s32 warm_stay_anchor(struct task_struct *p,
 	if (lc < 0 || (u32)lc >= nr_cpu_ids)
 		return -1;
 	if (!bpf_cpumask_test_cpu(lc, p->cpus_ptr))
-		return -1;
-	// OCCUPANCY GATE (fan-out 1:N): if the home per-CPU DSQ already holds a
-	// queued waiter, release the NEXT same-home wakee to idle-seek instead of
-	// stacking it. A 1:N parent wakes K children whose home_cpu collides onto a
-	// few cores; warm-stay seats with NO spill, so without this they pile on one
-	// per-CPU DSQ and the per-round straggler waits a CoDel-aged steal/tick (the
-	// fan-out ms p50). The FIRST wakee (nq==0) still takes the warm seat, so the
-	// 1:1 IPC handoff -- where the waker is on-CPU, not queued -- is unaffected.
-	if (scx_bpf_dsq_nr_queued((u64)lc) > 0)
 		return -1;
 	u64 stamp = pcpu_enqueue_ns[(u32)lc & (MAX_CPUS - 1)].ns;
 	u64 sojourn = (stamp && now > stamp) ? (now - stamp) : 0;
@@ -770,31 +679,19 @@ static __always_inline s32 find_pcpu_with_room(s32 src_cpu,
 	if (src_cpu < 0 || (u32)src_cpu >= nr_cpu_ids)
 		return -1;
 
-	// NEAR TIER ONLY: near_tbl HOLDS THE SAME-CCX PEERS EXCLUSIVELY, SO
-	// ENQUEUE NEVER PUSHES A WAKEE ACROSS THE CCX BOUNDARY -- THE CALLER
-	// FALLS THROUGH TO THE OVER-DEPTH-OWN SEAT (BOUNDED BY THE CoDel
-	// SOJOURN STEAL), AND CROSS-CCX MOVEMENT REMAINS PULL-ONLY: THE
-	// Φ-PRICED STEP 4b STEAL AND STEP 5 WORK CONSERVATION. THIS IS THE
-	// SEMANTIC THE B-v2 COMMENT IN THE CALLER ALWAYS DESCRIBED ("NO ROOM
-	// ON A NEAR (SAME-CCX) SIBLING"); THE WALK PREVIOUSLY RAN THE FULL
-	// affinity_rank AND COULD SEAT A FRESH WAKEE CROSS-CCX ON FIRST
-	// SPILL -- THE XCCX_ENQ_T1 SCATTER.
 	u32 base = (u32)src_cpu * MAX_AFFINITY_CANDIDATES;
 	u32 checked = 0;
 	for (int i = 0; i < MAX_AFFINITY_CANDIDATES; i++) {
 		u32 key = base + (u32)i;
-		u64 *ent = bpf_map_lookup_elem(&near_tbl, &key);
-		if (!ent)
+		u32 *val = bpf_map_lookup_elem(&affinity_rank, &key);
+		if (!val || *val == (u32)-1)
 			break;
-		u32 peer = (u32)*ent;
-		if (peer == (u32)-1)
-			break;
-		if (peer >= nr_cpu_ids)
+		if (*val >= nr_cpu_ids)
 			continue;
-		if (allowed && !bpf_cpumask_test_cpu((s32)peer, allowed))
+		if (allowed && !bpf_cpumask_test_cpu((s32)*val, allowed))
 			continue;
-		if (scx_bpf_dsq_nr_queued((u64)peer) < pcpu_depth_base)
-			return (s32)peer;
+		if (scx_bpf_dsq_nr_queued((u64)*val) < pcpu_depth_base)
+			return (s32)*val;
 		if (++checked >= pcpu_spill_search_budget)
 			break;
 	}
@@ -818,7 +715,7 @@ static __always_inline s32 find_pcpu_with_room(s32 src_cpu,
 // LANDED IN; src_cpu IF WE FELL BACK TO ccx_inter_dsq).
 static __always_inline u64 pick_pcpu_dsq_with_spill(s32 src_cpu,
 						    const struct cpumask *allowed,
-						    u32 shape, bool keep_own,
+						    u32 shape,
 					    s32 *out_cpu)
 {
 	u64 now = bpf_ktime_get_ns();
@@ -852,14 +749,7 @@ static __always_inline u64 pick_pcpu_dsq_with_spill(s32 src_cpu,
 	// }
 	(void)shape;
 
-	// HANDOFF PARTNER (keep_own): A is about to block and free src_cpu within
-	// ~us, so the post-block STEP 0 on src_cpu drains B next. Skip the sibling
-	// spill -- a spill strands B on a per-CPU DSQ that src_cpu's STEP 0 never
-	// looks at, reachable only by the rate-limited / nq>1-guarded STEP 1 steal
-	// or the tick (the ~1% / 1.3ms IPC tail). Fall through to the over-depth-own
-	// seat on src_cpu below (bounded by the CoDel sojourn steal). NO kick change
-	// -- pure placement, the zero-IPI half of the fix.
-	s32 spill = keep_own ? -1 : find_pcpu_with_room(src_cpu, allowed);
+	s32 spill = find_pcpu_with_room(src_cpu, allowed);
 	if (spill >= 0) {
 		if ((u32)spill < MAX_CPUS)
 			__sync_val_compare_and_swap(
@@ -1201,29 +1091,6 @@ static __always_inline void pcpu_drain_clear(u32 cpu)
 		__sync_val_compare_and_swap(&pcpu_enqueue_ns[cpu].ns, old, 0);
 }
 
-// HEAL A STALE PER-CPU WAITER STAMP, THEN KICK ONLY IF A REAL WAITER REMAINS.
-// pcpu_enqueue_ns[cpu] IS ARMED ON PLACEMENT AND CLEARED BY pcpu_drain_clear
-// AFTER A SUCCESSFUL move_to_local. IF A QUEUED TASK IS INSTEAD REMOVED BY A
-// NON-DISPATCH PATH -- TASK EXIT, OR A SETAFFINITY DEQUEUE THAT BYPASSES
-// dispatch() -- THE DSQ EMPTIES BUT THE STAMP STAYS ARMED, AND NO move_to_local
-// WILL EVER SUCCEED ON THE NOW-EMPTY DSQ TO CLEAR IT. THE TICK SCAN WOULD THEN
-// KICK THAT IDLE CPU EVERY TICK FOREVER: A SPURIOUS-WAKEUP IDLE-POWER DRAIN, AND
-// A CORRUPTED (STALE-OLD) SOJOURN FOR THE NEXT TASK THAT LANDS THERE. CONFIRM
-// THE DSQ BEFORE KICKING: pcpu_drain_clear ZEROES THE STAMP WHEN nr_queued == 0,
-// SO A SURVIVED (STILL NON-ZERO) STAMP MEANS A GENUINE WAITER. RETURNS TRUE IFF
-// IT KICKED. THE nr_queued PROBE RUNS ONLY ON A STAMP ALREADY AGED PAST
-// THRESHOLD (THE RARE SUSPICIOUS CASE), SO THE COMMON PATH IS UNCHANGED.
-static bool pcpu_kick_if_waiter(u32 cpu)
-{
-	if (cpu >= MAX_CPUS)
-		return false;
-	pcpu_drain_clear(cpu);
-	if (pcpu_enqueue_ns[cpu].ns == 0)
-		return false;
-	scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-	return true;
-}
-
 // HISTOGRAM BUCKETING: MATCHES HIST_EDGES_NS AND SLEEP_EDGES_NS IN RUST
 
 static __always_inline u32 lat_bucket(u64 lat_ns)
@@ -1339,29 +1206,8 @@ static __always_inline u64 effective_weight(const struct task_struct *p,
 static __always_inline u32 task_potentiality_q16(const struct task_ctx *tctx,
 						 const struct tuning_knobs *knobs)
 {
-	if (tctx->ewma_age < EWMA_AGE_MATURE) {
-		// UNOBSERVED. A FRESH FORK ENTERS AS TIER_INTERACTIVE WITH A SHORT
-		// avg_runtime; WITHOUT A PRIME IT WARPS 0 -> SORTS AT now (DEAD-LAST,
-		// LIKE BATCH) -> LOSES THE 4C DISPATCH RACE TO A FULL STRESS SLICE
-		// (THE app-launch ms BLOWOUT). GIVE A GENUINELY-FRESH, SHORT-RUNTIME,
-		// INTERACTIVE TASK A SMALL BOUNDED BACK-DATE THAT DECAYS TO 0 BY
-		// MATURITY (WHERE THE EARNED WARP BELOW TAKES OVER). BOUNDED << THE
-		// MATURE CEILING SO MATURED/DEADLINE WORK ALWAYS SORTS AHEAD; SHORT-
-		// RUNTIME-GATED SO A FRESH HOG EARNS NOTHING; ORDERING ONLY (FEEDS THE
-		// DSQ KEY, NEVER A PREEMPT) AND lag_cap-BOUNDED, SO A FORK STORM STILL
-		// CANNOT LEAPFROG ESTABLISHED WORK.
-		if (tctx->tier == TIER_INTERACTIVE) {
-			u64 slice = knobs && knobs->slice_ns
-				  ? knobs->slice_ns : 1000000;
-			if (tctx->avg_runtime < slice) {
-				u32 ramp = (u32)(EWMA_AGE_MATURE -
-						 tctx->ewma_age);
-				return (PRIME_FRESH_Q16 * ramp) /
-				       EWMA_AGE_MATURE;
-			}
-		}
-		return 0;                  // BATCH / HOG / UNCLASSIFIED: NO PRIME
-	}
+	if (tctx->ewma_age < EWMA_AGE_MATURE)
+		return 0;                  // UNOBSERVED: NO POTENTIAL
 	if (tctx->tier == TIER_BATCH)
 		return 0;                  // BATCH NEVER WARPS
 	if (tctx->tier == TIER_LAT_CRITICAL)
@@ -1554,8 +1400,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 				      : bpf_ktime_get_ns();
 			s32 dst_cpu;
 			u64 dst_dsq = pick_pcpu_dsq_with_spill(waker_cpu, p->cpus_ptr,
-				tctx ? tctx->shape : SHAPE_UNCLASSIFIED,
-				is_handoff_partner(tctx), &dst_cpu);
+				tctx ? tctx->shape : SHAPE_UNCLASSIFIED, &dst_cpu);
 			scx_bpf_dsq_insert_vtime(p, dst_dsq, sl, dl, 0);
 			scx_bpf_kick_cpu(dst_cpu, SCX_KICK_IDLE);
 			if (tctx) {
@@ -1584,7 +1429,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 				u64 sl = tctx ? task_slice(tctx, knobs)
 					      : 1000000;
 				s32 dst_cpu;
-				u64 dst_dsq = pick_pcpu_dsq_with_spill(target, p->cpus_ptr, tctx ? tctx->shape : SHAPE_UNCLASSIFIED, is_handoff_partner(tctx), &dst_cpu);
+				u64 dst_dsq = pick_pcpu_dsq_with_spill(target, p->cpus_ptr, tctx ? tctx->shape : SHAPE_UNCLASSIFIED, &dst_cpu);
 				u64 dl = tctx ? task_deadline(tctx, knobs) : bpf_ktime_get_ns();
 				scx_bpf_dsq_insert_vtime(p,
 					dst_dsq, sl, dl, 0);
@@ -1644,7 +1489,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 				u64 sl = task_slice(tctx, knobs);
 				u64 dl = task_deadline(tctx, knobs);
 				s32 seat_cpu;
-				u64 seat_dsq = pick_pcpu_dsq_with_spill(target, p->cpus_ptr, tctx->shape, is_handoff_partner(tctx), &seat_cpu);
+				u64 seat_dsq = pick_pcpu_dsq_with_spill(target, p->cpus_ptr, tctx->shape, &seat_cpu);
 				scx_bpf_dsq_insert_vtime(p, seat_dsq, sl, dl, 0);
 				scx_bpf_kick_cpu(seat_cpu, SCX_KICK_IDLE);
 				tctx->dispatch_path = 0;
@@ -1672,7 +1517,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 		// PER-CPU DSQ PLACEMENT WITH L2/R_EFF SPILL. CACHE-HOT IF cpu
 		// HAS ROOM; SIBLING PER-CPU DSQ NEXT (REACHED BY DISPATCH STEP 0
 		// ON SIBLING OR STEP 1 L2 STEAL); LAST-RESORT ccx_inter_dsq.
-		u64 dst_dsq = pick_pcpu_dsq_with_spill(cpu, p->cpus_ptr, tctx ? tctx->shape : SHAPE_UNCLASSIFIED, is_handoff_partner(tctx), &dst_cpu);
+		u64 dst_dsq = pick_pcpu_dsq_with_spill(cpu, p->cpus_ptr, tctx ? tctx->shape : SHAPE_UNCLASSIFIED, &dst_cpu);
 		u64 dl = tctx ? task_deadline(tctx, knobs)
 			      : bpf_ktime_get_ns();
 		scx_bpf_dsq_insert_vtime(p, dst_dsq, sl, dl, 0);
@@ -1838,8 +1683,7 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	// DRAINS THE WARM PER-CPU DSQ WHEN last_cpu NEXT DISPATCHES; STEP 1
 	// (NEAREST-SURPLUS STEAL) COVERS A SIBLING LANDING.
 	if (tctx &&
-	    (tctx->tier == TIER_LAT_CRITICAL || is_wakeup ||
-	     is_handoff_partner(tctx))) {
+	    (tctx->tier == TIER_LAT_CRITICAL || is_wakeup)) {
 		// WARM-ANCHOR: PREFER THE WAKEE'S OWN LAST CORE. pick_pcpu_dsq_with_spill
 		// THEN SEATS IT ON THAT cpu'S PER-CPU DSQ (WARM), A NEAR R_eff SIBLING,
 		// OR ccx_inter_dsq AS LAST RESORT.
@@ -1849,13 +1693,14 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 		if (cpu >= 0 && (u64)cpu < nr_cpu_ids &&
 		    __COMPAT_scx_bpf_cpu_curr(cpu)) {
 			s32 t2_cpu;
-			u64 tier2_dsq = pick_pcpu_dsq_with_spill(cpu, p->cpus_ptr, tctx->shape, is_handoff_partner(tctx), &t2_cpu);
+			u64 tier2_dsq = pick_pcpu_dsq_with_spill(cpu, p->cpus_ptr, tctx->shape, &t2_cpu);
 
 			dl = task_deadline(tctx, knobs);
 			scx_bpf_dsq_insert_vtime(p, tier2_dsq, sl, dl,
 						  enq_flags);
 
-			u64 kick_flag = (is_wakeup || is_handoff_partner(tctx))
+			u64 kick_flag = (is_wakeup ||
+				 tctx->tier == TIER_LAT_CRITICAL)
 				? SCX_KICK_PREEMPT : SCX_KICK_IDLE;
 			scx_bpf_kick_cpu(t2_cpu, kick_flag);
 			tctx->dispatch_path = 1;
@@ -1918,8 +1763,7 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	// CCX OVERFLOW (ccx_inter_dsq OR ccx_batch_dsq). WAKEUPS KICK
 	// scx_bpf_task_cpu(p); IF BUSY, tick()'s PER-CPU PREEMPT DISLODGES
 	// THE RESIDENT. NO FLAG.
-	u64 kick_flags = (is_wakeup || is_handoff_partner(tctx))
-		       ? SCX_KICK_PREEMPT : 0;
+	u64 kick_flags = is_wakeup ? SCX_KICK_PREEMPT : 0;
 	scx_bpf_kick_cpu(scx_bpf_task_cpu(p), kick_flags);
 
 	if (tctx)
@@ -1958,9 +1802,6 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	u32 my_ccx = cpu_ccx(cpu);
 	struct pandemonium_stats *s;
 	u64 now = bpf_ktime_get_ns();
-	// SCAN-WINDOW FLAG SHARED BY STEP 1 (NEAR) AND STEP 4b (FAR): ONE
-	// RATE-LIMIT STAMP, ONE WINDOW, SET IN STEP 1.
-	bool steal_scan = false;
 
 	// STEP 0: OWN PER-CPU DSQ -- HIGHEST PRIORITY, CACHE-HOT.
 	// SOJOURN GATE AT EXIT: IF EITHER OVERFLOW SIDE HAS AGED PAST
@@ -1979,14 +1820,9 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 	}
 
-	// STEP 1: NEAR R_EFF STEAL -- SAME-CCX TIER. SINGLE LOOP OVER near_tbl
-	// (THE SAME-CCX PREFIX OF THE R_EFF RANK, PACKED PEER+PENALTY, BUILT BY
-	// RUST AT TOPOLOGY DETECT): SLOT 0 IS THE L2 SIBLING. THE FAR TIER IS
-	// STEP 4b, REACHED ONLY AFTER THE HOME CCX -- PEERS *AND* LOCAL
-	// OVERFLOW -- IS EXHAUSTED. THE CCX BOUNDARY IS STRUCTURAL ORDERING
-	// *BETWEEN* TIERS, NOT A GATE IN FRONT OF THE PRICE: Φ STILL DECIDES
-	// WITHIN EACH TIER. RESTORES THE NEAR-BEFORE-FAR EXHAUSTION THE v5.8.0
-	// SINGLE-WALK COLLAPSE DELETED.
+	// STEP 1: R_EFF STEAL. SINGLE LOOP OVER affinity_rank: SLOT 0 IS THE
+	// L2 SIBLING (LOWEST R_EFF), SLOTS 1+ ARE R_EFF-RANKED CROSS-L2 PEERS.
+	// affinity_rank IS AUTHORITATIVE FOR PLACEMENT DISTANCE.
 	// BUDGET = pcpu_spill_search_budget (nr_cpu_ids/2 CLAMPED TO
 	// [6, MAX_AFFINITY_CANDIDATES]), MATCHING THE ENQUEUE-SIDE SPILL HELPER.
 	{
@@ -1994,7 +1830,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 		u32 base = my_cpu * MAX_AFFINITY_CANDIDATES;
 		u32 checked = 0;
 		s32 best_peer = -1;
-		// SCAN RATE-LIMIT: the peer walk (near_tbl lookup + per-peer
+		// SCAN RATE-LIMIT: the peer walk (affinity_rank lookup + per-peer
 		// nr_queued) is the dominant per-dispatch cache cost under wake-heavy
 		// LOADS. A PEER CANNOT ACCUMULATE STEALABLE BACKLOG (AGED PAST
 		// codel_target + b*R_eff) FASTER THAN codel_target, SO SCANNING MORE
@@ -2003,23 +1839,21 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 		// ANY AGED PER-CPU DSQ, SO NO WORK IS STRANDED.
 		u32 zero = 0;
 		u64 *last_scan = bpf_map_lookup_elem(&last_spill_scan, &zero);
-		steal_scan = !last_scan || *last_scan == 0 ||
-			     (now - *last_scan) >= codel_target_ns;
-		if (steal_scan && last_scan)
+		bool do_scan = !last_scan || *last_scan == 0 ||
+			       (now - *last_scan) >= codel_target_ns;
+		if (do_scan && last_scan)
 			*last_scan = now;
-		// SOURCE: R_eff FLOW STEAL. near_tbl IS DISTANCE-ORDERED (SLOT 0 =
+		// SOURCE: R_eff FLOW STEAL. affinity_rank IS DISTANCE-ORDERED (SLOT 0 =
 		// L2 SIBLING), SO THE FIRST QUALIFYING PEER IS THE CLOSEST -- MIN-COST
 		// FLOW. SURPLUS > 1 GUARD: a peer needs at least 2 queued before we pull
 		// one (a lone warm task is never yanked). BOUNDED LOOP, LOCK-FREE
 		// move_to_local.
-		for (int i = 0; steal_scan && i < MAX_AFFINITY_CANDIDATES; i++) {
+		for (int i = 0; do_scan && i < MAX_AFFINITY_CANDIDATES; i++) {
 			u32 key = base + (u32)i;
-			u64 *ent = bpf_map_lookup_elem(&near_tbl, &key);
-			if (!ent)
+			u32 *val = bpf_map_lookup_elem(&affinity_rank, &key);
+			if (!val || *val == (u32)-1)
 				break;
-			u32 peer = (u32)*ent;
-			if (peer == (u32)-1)
-				break;
+			u32 peer = *val;
 			if (peer >= nr_cpu_ids)
 				continue;
 			if (peer == my_cpu) {
@@ -2041,12 +1875,15 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 				// PHI STEAL-RESIST (SHAPE-BLIND): sojourn >= codel_target +
 				// b*R_eff, built only from values we already produce. SOJOURN is
 				// `enq` above (no remote head peek, no remote task_ctx deref). THE
-				// DISTANCE PENALTY b*R_eff is pre-folded into the high 32 BITS of
-				// THE near_tbl ENTRY at topology detect (already ns), so the steal
-				// needs no second lookup and no multiply: an SMT sibling (R_eff~0)
-				// stays freely relievable. ALL-ZERO PENALTIES (monolithic /
-				// --phi-scale 0) => flat codel_target, prior behavior.
-				u64 phi_thresh = codel_target_ns + (*ent >> 32);
+				// DISTANCE PENALTY b*R_eff is pre-folded into reff_value at topology
+				// detect (already ns), so the steal does ONE indexed read and no
+				// multiply: an SMT sibling (R_eff~0) stays freely relievable while a
+				// cross-CCX pull needs ~tau of sustained backlog. reff_value all-zero
+				// (monolithic / --phi-scale 0) => flat codel_target, prior behavior.
+				u32 *dxp = bpf_map_lookup_elem(&reff_value, &key);
+				u32 dx = dxp ? *dxp : 0;
+				u64 dist_extra = (dx == (u32)-1) ? 0 : (u64)dx;
+				u64 phi_thresh = codel_target_ns + dist_extra;
 				if (now >= enq && (now - enq) >= phi_thresh) {
 					best_peer = (s32)peer;
 					break;
@@ -2097,53 +1934,6 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 		if (s)
 			s->nr_dispatches += 1;
 		return;
-	}
-
-	// STEP 4b: FAR R_EFF STEAL -- CROSS-CCX TIER, REACHED ONLY WITH THE
-	// HOME CCX FULLY EXHAUSTED: NO OWN WORK (STEP 0), NO QUALIFYING NEAR
-	// PEER (STEP 1), NO LOCAL OVERFLOW (STEPS 2-4). WALKS far_tbl -- THE
-	// FAR_CANDIDATES NEAREST CROSS-CCX PEERS, DENSE FROM SLOT 0, CONSTANT
-	// BOUND, SENTINEL-TERMINATED -- UNDER THE SAME SCAN WINDOW STEP 1
-	// STAMPED. THE Φ PRICE IS UNCHANGED: A CROSS-CCX PULL STILL REQUIRES
-	// ~tau OF SUSTAINED BACKLOG VIA THE PRE-FOLDED PENALTY IN THE ENTRY'S
-	// HIGH BITS. THIS IS v5.7.0's FAR-STEAL-LAST ORDERING EXPRESSED INSIDE
-	// THE Φ-PRICED WALK. ALL-SENTINEL ON A MONOLITHIC BOX: INSTANT BREAK.
-	if (steal_scan) {
-		u32 fbase = (u32)cpu * FAR_CANDIDATES;
-		s32 far_peer = -1;
-		for (int j = 0; j < FAR_CANDIDATES; j++) {
-			u32 key = fbase + (u32)j;
-			u64 *ent = bpf_map_lookup_elem(&far_tbl, &key);
-			if (!ent)
-				break;
-			u32 peer = (u32)*ent;
-			if (peer == (u32)-1)
-				break;
-			if (peer >= nr_cpu_ids)
-				continue;
-			u64 enq = pcpu_enqueue_ns[peer & (MAX_CPUS - 1)].ns;
-			if (enq == 0)
-				continue;
-			u32 nq = scx_bpf_dsq_nr_queued((u64)peer);
-			if (nq > 1) {
-				u64 phi_thresh = codel_target_ns + (*ent >> 32);
-				if (now >= enq && (now - enq) >= phi_thresh) {
-					far_peer = (s32)peer;
-					break;
-				}
-			}
-		}
-		if (far_peer >= 0 &&
-		    scx_bpf_dsq_move_to_local((u64)far_peer, 0)) {
-			pcpu_drain_clear((u32)far_peer);
-			s = get_stats();
-			if (s) {
-				s->nr_dispatches += 1;
-				xccx_bump(s, XCCX_STEAL, far_peer, cpu);
-			}
-			if (sojourn_gate_pass(now))
-				return;
-		}
 	}
 
 	// STEP 5: CROSS-CCX WORK CONSERVATION. SCAN OTHER CCXs ONCE; DRAIN ANY
@@ -2471,68 +2261,6 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 			u64 delta = cur - prev_rescue_snapshot;
 			prev_rescue_snapshot = cur;
 
-			// ENVELOPE THRESHOLDS: DERIVED FROM THE SPRING/DAMP
-			// DEAD-BAND QUANTA (THE ENERGY OF ONE NO-OP-RESOLUTION
-			// STEP ON EACH AXIS), PRE-SCALED BY THE RESERVOIR GAIN
-			// (<< DECAY_SHIFT: A STEADY INSTANTANEOUS ENERGY E
-			// CONVERGES THE RESERVOIR TO E << DECAY_SHIFT). RELEASE
-			// SITS 2x ABOVE PARK -- MULTIPLICATIVE HYSTERESIS, A
-			// SCHMITT TRIGGER ON ENERGY, NOT A CHANGE-POINT
-			// ACCUMULATOR. TWO SHIFTS AND AN ADD PER PASS: FREE.
-			u64 env_floor =
-				(1ULL << (2 * oscillator_damping_shift)) +
-				(1ULL << (2 * oscillator_spring_shift));
-			u64 env_park = env_floor << (OSC_ENV_DECAY_SHIFT + 1);
-			u64 env_release = env_floor << (OSC_ENV_DECAY_SHIFT + 2);
-
-			if (osc_env_parked) {
-				// ARMED DETECTOR, EVERY TICK, THREE COMPARES: A
-				// RESCUE EVENT (DISCRETE COUNT -- ONE RESCUE IS A
-				// REAL EVENT, NOT ANALOG NOISE, SO NO EPSILON),
-				// THE EQUILIBRIUM MOVED UNDER THE PARKED VALUE
-				// (MWU/tau RETUNE), OR THE MAX-PARK HEARTBEAT.
-				if (delta == 0 &&
-				    codel_target_ns == codel_target_equilibrium_ns &&
-				    ++osc_env_park_ticks < OSC_ENV_HEARTBEAT_TICKS)
-					goto osc_env_done;
-				// WAKE EDGE: FULL RECOMPUTE THIS SAME TICK, BEFORE
-				// ANY DISPATCH PRICES AGAINST THE TARGET AGAIN --
-				// NEVER "RESUME CADENCE AND WAIT ONE PERIOD".
-				// REFRACTORY DWELL: RE-PRIME THE RESERVOIR ABOVE
-				// RELEASE SO CONTRACTION RESTARTS FROM SCRATCH AND
-				// A BURSTY WAKE CANNOT IMMEDIATELY RE-PARK.
-				osc_env_parked = false;
-				osc_env_park_ticks = 0;
-				osc_env_energy = env_release << 1;
-			} else if (delta == 0 && osc_env_energy < env_release) {
-				// GRADED BAND: CONTRACTION IS GRADUAL (DIVIDED
-				// CADENCE), EXPANSION IS INSTANT (ANY RESCUE
-				// FALLS THROUGH TO THE FULL RECOMPUTE ABOVE).
-				// THE BAND IS DELIBERATELY SHORT -- RACE INTO
-				// PARK; THE COST CURVE IS FLAT FOR THE FIRST
-				// FEW CADENCE CUTS AND ALL THE RISK IS DEEPER.
-				if (++osc_env_skip < OSC_ENV_GRADED_DIV)
-					goto osc_env_done;
-				osc_env_skip = 0;
-				if (osc_env_energy < env_park) {
-					// PARK: PIN THE TARGET AT THE FIXED POINT
-					// THE DYNAMICS CONVERGE TO (ASYMPTOTICALLY
-					// EXACT, ONE STORE), FREEZE THE VELOCITY
-					// INTEGRATOR (ANTI-WINDUP: IT MUST NOT
-					// ACCUMULATE ACROSS THE BAND AND SLINGSHOT
-					// AT WAKE), STOP THE ARITHMETIC.
-					codel_target_ns = codel_target_equilibrium_ns;
-					oscillator_velocity_ns = 0;
-					osc_env_parked = true;
-					osc_env_park_ticks = 0;
-					if (s)
-						s->nr_osc_park++;
-					goto osc_env_done;
-				}
-			} else {
-				osc_env_skip = 0;
-			}
-
 			// FORCING TERM: ONLY RESCUE EVENTS. THE FORMER QUIET-TICK
 			// "RELAX" DRIFT WAS A PRIMITIVE PROXY FOR THE SPRING; WITH
 			// AN ACTUAL RESTORING TERM IT IS REDUNDANT (AND, WORSE,
@@ -2573,24 +2301,6 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 			if (nc > (s64)codel_target_max_ns)
 				nc = (s64)codel_target_max_ns;
 			codel_target_ns = (u64)nc;
-
-			// RESERVOIR UPDATE: POST-INTEGRATE STATE, VALUES ALREADY
-			// IN HAND -- THE ENVELOPE READS WHAT THE RECOMPUTE JUST
-			// MAINTAINED, IT NEVER DERIVES ANYTHING OF ITS OWN
-			// (FREE-COMPUTE). DECAYED ACCUMULATION RATHER THAN
-			// INSTANTANEOUS ENERGY: INSTANTANEOUS RIPPLES AT 2w AND
-			// A CADENCE KEYED TO IT WOULD PUMP THE TRANSIENT IT IS
-			// DAMPING (PARAMETRIC RESONANCE).
-			{
-				s64 ed = (s64)codel_target_ns -
-					 (s64)codel_target_equilibrium_ns;
-				s64 ev = oscillator_velocity_ns;
-				osc_env_energy -=
-					osc_env_energy >> OSC_ENV_DECAY_SHIFT;
-				osc_env_energy +=
-					(u64)(ed * ed) + (u64)(ev * ev);
-			}
-		osc_env_done: ;
 		}
 	}
 
@@ -2667,8 +2377,9 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 			u64 pcpu_oldest = pcpu_enqueue_ns[this_cpu].ns;
 			if (pcpu_oldest > 0 &&
 			    (now2 - pcpu_oldest) > pcpu_sojourn_thresh) {
-				if (pcpu_kick_if_waiter(this_cpu))
-					return;
+				scx_bpf_kick_cpu(this_cpu,
+						 SCX_KICK_PREEMPT);
+				return;
 			}
 		}
 
@@ -2695,7 +2406,8 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 					u64 remote_stamp = pcpu_enqueue_ns[scan_cpu].ns;
 					if (remote_stamp > 0 &&
 					    (now2 - remote_stamp) > pcpu_sojourn_thresh)
-						pcpu_kick_if_waiter(scan_cpu);
+						scx_bpf_kick_cpu(scan_cpu,
+								 SCX_KICK_PREEMPT);
 				}
 			} else {
 				u32 scan_base = (u32)(now2 >> 20);
@@ -2714,7 +2426,8 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 					u64 remote_stamp = pcpu_enqueue_ns[scan_cpu].ns;
 					if (remote_stamp > 0 &&
 					    (now2 - remote_stamp) > pcpu_sojourn_thresh)
-						pcpu_kick_if_waiter(scan_cpu);
+						scx_bpf_kick_cpu(scan_cpu,
+								 SCX_KICK_PREEMPT);
 				}
 			}
 		}
@@ -2746,12 +2459,11 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 		   : batch_thresh;
 
 	if (wait_age >= thresh) {
-		if (pcpu_kick_if_waiter(wcpu)) {
-			if (!s)
-				s = get_stats();
-			if (s)
-				s->nr_preempt += 1;
-		}
+		scx_bpf_kick_cpu(wcpu, SCX_KICK_PREEMPT);
+		if (!s)
+			s = get_stats();
+		if (s)
+			s->nr_preempt += 1;
 	}
 }
 
