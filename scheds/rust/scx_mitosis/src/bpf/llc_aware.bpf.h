@@ -141,6 +141,7 @@ static void zero_cell_vtimes(struct cell *cell)
 		bpf_for(llc_idx, 0, MAX_LLCS)
 		{
 			WRITE_ONCE(cell->llcs[llc_idx].vtime_now, 0);
+			WRITE_ONCE(cell->llcs[llc_idx].nr_queued, 0);
 		}
 	} else {
 		WRITE_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now, 0);
@@ -161,6 +162,22 @@ static inline void cell_llc_drain_disable(struct cell *cell, u32 llc)
 		return;
 
 	__sync_and_and_fetch(&cell->llcs_to_drain, ~(1LLU << llc));
+}
+
+/*
+ * Work around the kernel DSQ nr visibility bug: direct
+ * scx_bpf_dsq_insert_vtime() from enqueue can leave a task invisible to
+ * scx_bpf_dsq_nr_queued() until the enqueue callback finishes. Drain
+ * interlocking needs the queue depth visible before enabling llcs_to_drain.
+ */
+static inline void cell_llc_nr_queued_inc(struct cell *cell, u32 llc)
+{
+	__sync_fetch_and_add(&cell->llcs[llc].nr_queued, 1);
+}
+
+static inline u32 cell_llc_nr_queued_dec(struct cell *cell, u32 llc)
+{
+	return __sync_sub_and_fetch(&cell->llcs[llc].nr_queued, 1);
 }
 
 static inline bool cell_mask_intersects_llc(const struct cpumask *cell_mask, u32 llc)
@@ -233,8 +250,8 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 	WRITE_ONCE(cell->llcs_with_cpus, llcs_with_cpus);
 
 	/*
-	 * Pair the post-publication DSQ scan with enqueue's post-insert cached
-	 * no-CPU check. Either this path sees already queued work, or a racing
+	 * Pair the post-publication queue count check with enqueue's
+	 * post-increment cached no-CPU check. Either this path sees already
 	 * queued work, or a racing enqueue sees the CPU-less LLC and enables
 	 * draining itself. BPF has no standalone full-barrier instruction, so
 	 * use an atomic op on a stack slot to avoid bouncing a shared cacheline.
@@ -244,9 +261,6 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 
 	bpf_for(llc, 0, nr_llc)
 	{
-		dsq_id_t dsq;
-		s32 nr_queued;
-
 		if (llc >= MAX_LLCS)
 			break;
 
@@ -255,9 +269,7 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 			continue;
 		}
 
-		dsq = get_cell_llc_dsq_id(cell_id, llc);
-		nr_queued = scx_bpf_dsq_nr_queued(dsq.raw);
-		if (nr_queued > 0) {
+		if (READ_ONCE(cell->llcs[llc].nr_queued) > 0) {
 			cell_llc_drain_enable(cell, llc);
 			kick_cell_idle_cpu(cell_id);
 		}
@@ -283,6 +295,15 @@ static inline int account_cell_llc_enqueue(u32 cell_id, u32 llc)
 		scx_bpf_error("account_cell_llc_enqueue: invalid cell %u", cell_id);
 		return -ENOENT;
 	}
+
+	/*
+	 * Account the logical LLC DSQ insertion before checking llcs_with_cpus.
+	 * This atomic op is the interlock with refresh_cell_llc_draining():
+	 * either refresh observes the tracked queued work after publishing
+	 * llcs_with_cpus, or this enqueue observes the CPU-less LLC below and
+	 * enables draining.
+	 */
+	cell_llc_nr_queued_inc(cell, llc);
 
 	if (cell_llc_has_cpus(cell, llc))
 		return 0;
@@ -314,7 +335,7 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
 		u64 bit;
 		bool disabled = false;
 		bool consumed;
-		s32 nr_queued;
+		u32 pending;
 
 		// Prevents the optimizer from removing the following conditional return
 		// so that the verifier knows the read will be safe
@@ -343,32 +364,34 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
 			continue;
 		}
 
+		pending = READ_ONCE(cell->llcs[candidate_llc].nr_queued);
+		if (!pending) {
+			cell_llc_drain_disable(cell, candidate_llc);
+			continue;
+		}
+
 		/*
 		 * Turn off draining before consuming if this consume is likely
-		 * to empty the DSQ. If a racing enqueue adds more work, either
-		 * it observes that this LLC has no CPUs and re-enables draining,
-		 * or the recheck below sees the new depth and re-enables it.
+		 * to drain the last known pending task. If a racing enqueue adds
+		 * more work, either it observes the disabled bit and re-enables
+		 * draining, or the pending count below remains non-zero and this
+		 * path re-enables it.
 		 */
-		nr_queued = scx_bpf_dsq_nr_queued(candidate_dsq.raw);
-		if (nr_queued <= 1) {
+		if (pending <= 1) {
 			cell_llc_drain_disable(cell, candidate_llc);
 			disabled = true;
 		}
 
 		consumed = scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0);
 
-		if (disabled) {
-			nr_queued = scx_bpf_dsq_nr_queued(candidate_dsq.raw);
-			/*
-			 * If refresh repopulated this LLC while drain was
-			 * temporarily disabled, this can leave an unnecessary
-			 * drain bit set until the next refresh. That's harmless:
-			 * the LLC's CPUs can consume the DSQ normally, and future
-			 * drain attempts skip it while cell_llc_has_cpus() is true.
-			 */
-			if (nr_queued > 0)
-				cell_llc_drain_enable(cell, candidate_llc);
+		if (consumed) {
+			pending = cell_llc_nr_queued_dec(cell, candidate_llc);
+		} else {
+			pending = READ_ONCE(cell->llcs[candidate_llc].nr_queued);
 		}
+
+		if (disabled && pending > 0)
+			cell_llc_drain_enable(cell, candidate_llc);
 
 		if (consumed)
 			return candidate_llc;
@@ -409,6 +432,11 @@ static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 
 		// Optimization: skip if faster than constructing an iterator
 		// Not redundant with later checking if task found (race)
+
+		/*
+		 * We don't use tracked nr_queued here because we won't be able
+		 * to consume until the actual racy dispatch got comitted.
+		 */
 		if (scx_bpf_dsq_nr_queued(candidate_dsq.raw) <= 0)
 			continue;
 
@@ -419,6 +447,7 @@ static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
 			continue;
 
+		cell_llc_nr_queued_dec(cell, candidate_llc);
 		return 0;
 	}
 	return -ENOENT;

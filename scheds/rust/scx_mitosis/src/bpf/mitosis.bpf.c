@@ -1015,8 +1015,15 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 
 	/* Try the winner first */
-	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0))
+	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
+		if (enable_llc_awareness && min_vtime_dsq.raw == cell_dsq.raw) {
+			struct cell *cellp = lookup_cell(cell);
+
+			if (cellp)
+				cell_llc_nr_queued_dec(cellp, llc);
+		}
 		return;
+	}
 
 	/* Winner was cell DSQ but failed - try the CPU DSQ */
 	if (min_vtime_dsq.raw == cell_dsq.raw)
@@ -1912,6 +1919,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 			{
 				u64 bit;
 				s32 nr_queued;
+				u32 tracked_nr_queued;
 
 				if (llc >= MAX_LLCS)
 					break;
@@ -1922,15 +1930,16 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 
 				bit = 1LLU << llc;
 				nr_queued = scx_bpf_dsq_nr_queued(dsq_id.raw);
-				if (!nr_queued && !(drain_mask & bit) &&
+				tracked_nr_queued = READ_ONCE(cell->llcs[llc].nr_queued);
+				if (!nr_queued && !tracked_nr_queued && !(drain_mask & bit) &&
 				    !(llcs_with_cpus & bit))
 					continue;
 
 				scx_bpf_dump(
-					"CELL[%d] LLC[%d] vtime=%llu nr_queued=%d drain=%d has_cpus=%d\n",
-					i, llc, READ_ONCE(cell->llcs[llc].vtime_now),
-					nr_queued, !!(drain_mask & bit),
-					!!(llcs_with_cpus & bit));
+					"CELL[%d] LLC[%d] vtime=%llu nr_queued=%d drain=%d has_cpus=%d tracked_nr_queued=%u\n",
+					i, llc, READ_ONCE(cell->llcs[llc].vtime_now), nr_queued,
+					!!(drain_mask & bit), !!(llcs_with_cpus & bit),
+					tracked_nr_queued);
 			}
 		} else {
 			dsq_id = get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC);

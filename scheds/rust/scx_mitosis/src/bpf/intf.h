@@ -102,6 +102,7 @@ struct cgrp_ctx {
  */
 struct cell_llc {
 	u64 vtime_now;
+	u32 nr_queued;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 // Ensure we don't have multiple of these on the same cacheline.
