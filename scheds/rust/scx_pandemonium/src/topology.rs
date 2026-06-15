@@ -507,16 +507,8 @@ impl CpuTopology {
         phi_dist_scale_q16: u64,
     ) -> Result<()> {
         let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES as usize;
-        let far_stride = crate::bpf_intf::FAR_CANDIDATES as usize;
         let valid = self.nr_cpus.saturating_sub(1).min(stride);
         for cpu in 0..self.nr_cpus {
-            // TIERED STEAL TABLES: SPLIT THE R_EFF-ASCENDING RANK AT THE CCX
-            // BOUNDARY ONCE, HERE, AT TOPOLOGY DETECT -- THE BPF WALKS NEVER
-            // DERIVE THE BOUNDARY PER DISPATCH. PACKED u64 PER SLOT:
-            // (penalty_ns << 32) | peer_cpu. ON MONOLITHIC PARTS llc_domain
-            // IS UNIFORM, SO near == FULL RANK AND far IS ALL-SENTINEL.
-            let mut near_slot: usize = 0;
-            let mut far_slot: usize = 0;
             for slot in 0..valid {
                 let val = rank[cpu * self.nr_cpus + slot];
                 sched.write_affinity_rank(cpu as u32, slot as u32, val)?;
@@ -532,24 +524,10 @@ impl CpuTopology {
                 let dist_extra =
                     (r_scaled.saturating_mul(phi_dist_scale_q16) >> 16).min(u32::MAX as u64) as u32;
                 sched.write_reff_value(cpu as u32, slot as u32, dist_extra)?;
-                let packed = ((dist_extra as u64) << 32) | (val as u64);
-                if self.llc_domain[val as usize] == self.llc_domain[cpu] {
-                    sched.write_near_tbl(cpu as u32, near_slot as u32, packed)?;
-                    near_slot += 1;
-                } else if far_slot < far_stride {
-                    sched.write_far_tbl(cpu as u32, far_slot as u32, packed)?;
-                    far_slot += 1;
-                }
             }
             for slot in valid..stride {
                 sched.write_affinity_rank(cpu as u32, slot as u32, u32::MAX)?;
                 sched.write_reff_value(cpu as u32, slot as u32, u32::MAX)?;
-            }
-            for slot in near_slot..stride {
-                sched.write_near_tbl(cpu as u32, slot as u32, u64::MAX)?;
-            }
-            for slot in far_slot..far_stride {
-                sched.write_far_tbl(cpu as u32, slot as u32, u64::MAX)?;
             }
         }
         Ok(())
