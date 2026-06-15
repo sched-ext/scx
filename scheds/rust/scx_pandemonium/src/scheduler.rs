@@ -52,11 +52,13 @@ pub struct PandemoniumStats {
     // CROSS-CCX SCATTER ATTRIBUTION (PER XCCX_* PATH) -- MATCHES nr_xccx[8] IN
     // intf.h. PLACEMENT-SIDE PATHS FEED THE MWU SCATTER LOSS PATHWAY.
     pub nr_xccx: [u64; 8],
+    // OSCILLATOR ENVELOPE PARK ENTRIES (CPU-0 TICK WRITER; intf.h nr_osc_park)
+    pub nr_osc_park: u64,
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
-// 200 (base) + 8*8 (nr_xccx) = 264.
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 264);
+// 200 (base) + 8*8 (nr_xccx) + 8 (nr_osc_park) = 272.
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 272);
 const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 80);
 
 // MAX_AFFINITY_CANDIDATES IS DEFINED IN intf.h. THE RUST MIRROR IN
@@ -217,6 +219,7 @@ impl<'a> Scheduler<'a> {
                 for i in 0..8 {
                     total.nr_xccx[i] += stats.nr_xccx[i];
                 }
+                total.nr_osc_park += stats.nr_osc_park;
             }
         }
 
@@ -410,6 +413,32 @@ impl<'a> Scheduler<'a> {
         self.skel
             .maps
             .reff_value
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+
+    // POPULATE TIERED STEAL TABLES (PACKED u64: LOW 32 = PEER CPU, HIGH 32 =
+    // PRE-FOLDED PHI PENALTY ns). near_tbl = SAME-CCX PEERS (STRIDE
+    // MAX_AFFINITY_CANDIDATES), far_tbl = NEAREST CROSS-CCX PEERS (STRIDE
+    // FAR_CANDIDATES). SENTINEL SLOT = u64::MAX (LOW 32 = (u32)-1).
+    pub fn write_near_tbl(&self, cpu: u32, slot: u32, packed: u64) -> Result<()> {
+        let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
+        let key = (cpu * stride + slot).to_ne_bytes();
+        let val = packed.to_ne_bytes();
+        self.skel
+            .maps
+            .near_tbl
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+
+    pub fn write_far_tbl(&self, cpu: u32, slot: u32, packed: u64) -> Result<()> {
+        let stride = crate::bpf_intf::FAR_CANDIDATES;
+        let key = (cpu * stride + slot).to_ne_bytes();
+        let val = packed.to_ne_bytes();
+        self.skel
+            .maps
+            .far_tbl
             .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
