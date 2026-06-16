@@ -4,10 +4,8 @@
  * GNU General Public License version 2.
  *
  * This header assists adding LLC cache awareness to scx_mitosis by defining
- * maps and fns for managing CPU-to-LLC domain mappings. It provides code to
- * recalculate per-LLC CPU counts within cells and implements weighted
- * random LLC selection for tasks. It also tracks work-stealing
- * statistics for cross-LLC task migrations.
+ * maps and fns for managing CPU-to-LLC domain mappings and maintaining
+ * per-task LLC candidate masks derived from the task's base cpumask.
  */
 #pragma once
 
@@ -16,6 +14,9 @@
 
 typedef u32 llc_id_t;
 #define LLC_INVALID ((llc_id_t)~0u)
+
+/* struct cell LLC bitmaps use u64. */
+_Static_assert(MAX_LLCS <= 64, "MAX_LLCS too high");
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -36,17 +37,12 @@ static inline bool llc_is_valid(u32 llc_id)
 static inline void init_task_llc(struct task_ctx *tctx)
 {
 	tctx->llc = LLC_INVALID;
-
-	if (!enable_work_stealing)
-		return;
-
-	tctx->steal_count = 0;
-	tctx->last_stolen_at = 0;
+	tctx->llc_cpumask_id = LLC_INVALID;
 }
 
 static inline const struct cpumask *lookup_llc_cpumask(u32 llc)
 {
-	if (llc >= nr_llc) {
+	if (llc >= nr_llc || llc >= MAX_LLCS) {
 		scx_bpf_error("llc index out of bounds: %d", llc);
 		return NULL;
 	}
@@ -54,200 +50,373 @@ static inline const struct cpumask *lookup_llc_cpumask(u32 llc)
 	return (const struct cpumask *)&llc_to_cpus[llc];
 }
 
-/*
- * Recompute cell->llc_cpu_cnt[] for a cell cpumask.
- *
- * @cell_idx: The cell index to update LLC counts for
- * @explicit_mask: If non-NULL, use this cpumask instead of looking up current
- *                 cell cpumask. This allows pre-calculating counts for a new
- *                 cpumask BEFORE swapping it in, avoiding race conditions.
- */
-static __always_inline int recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
+static inline void invalidate_task_llc_cpumask(struct task_ctx *tctx)
 {
-	struct cell *cell = lookup_cell(cell_idx);
-	if (!cell)
-		return -ENOENT;
-
-	struct bpf_cpumask *tmp_mask __free(bpf_cpumask) = bpf_cpumask_create();
-	if (!tmp_mask) {
-		scx_bpf_error("recalc_cell_llc_counts: failed to create tmp mask");
-		return -ENOMEM;
-	}
-
-	u32 llc, llcs_present = 0, total_cpus = 0;
-	// Just so we don't hold the lock longer than necessary
-	u32 llc_cpu_cnt_tmp[MAX_LLCS] = { 0 };
-
-	const struct cpumask *cell_mask;
-	if (explicit_mask) {
-		cell_mask = explicit_mask;
-	} else {
-		cell_mask = lookup_cell_cpumask(cell_idx); // RCU ptr
-		if (!cell_mask)
-			return -EINVAL;
-	}
-
-	bpf_for(llc, 0, nr_llc)
-	{
-		const struct cpumask *llc_mask = lookup_llc_cpumask(llc);
-		if (!llc_mask)
-			return -ENOENT;
-
-		bpf_cpumask_and(tmp_mask, cell_mask, llc_mask);
-
-		u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp_mask);
-
-		llc_cpu_cnt_tmp[llc] = cnt;
-
-		// These are counted across the whole cell
-		total_cpus += cnt;
-
-		// Number of non-empty LLCs in this cell
-		if (cnt)
-			llcs_present++;
-	}
-
-	// Write to cell
-	scoped_guard(spin_lock, &cell->lock)
-	{
-		for (u32 llc_idx = 0; llc_idx < nr_llc; llc_idx++) {
-			cell->llcs[llc_idx].cpu_cnt = llc_cpu_cnt_tmp[llc_idx];
-		}
-
-		cell->llc_present_cnt = llcs_present;
-		cell->cpu_cnt = total_cpus;
-	}
-	return 0;
+	tctx->llc_cpumask_id = LLC_INVALID;
 }
 
-/**
- * Weighted random selection of an LLC cache domain for a task.
- *
- * Uses the CPU count in each LLC domain within the cell as weights to
- * probabilistically select an LLC. LLC domains with more CPUs in the cell
- * have higher probability of being selected.
- *
- * @cell_id: The cell ID to select an LLC from
- * @return: LLC ID on success, LLC_INVALID on error
- */
-static inline s32 pick_llc_for_task(u32 cell_id)
+static inline s32 llc_from_cpu(s32 cpu)
 {
-	struct cell *cell;
-
-	/* Look up the cell structure */
-	if (!(cell = lookup_cell(cell_id)))
-		return LLC_INVALID;
-
-	/*
-	 * Read only what we need under the lock to avoid putting the
-	 * large cell struct on the stack (would exceed BPF stack limit).
-	 */
-	u32 llc_cpu_cnt[MAX_LLCS];
-	u32 total_cpu_cnt;
-
-	scoped_guard(spin_lock, &cell->lock)
-	{
-		for (u32 i = 0; i < MAX_LLCS; i++)
-			llc_cpu_cnt[i] = cell->llcs[i].cpu_cnt;
-
-		total_cpu_cnt = cell->cpu_cnt;
-	}
-
-	if (!total_cpu_cnt) {
-		scx_bpf_error("pick_llc_for_task: cell %d has no CPUs accounted yet", cell_id);
+	if (cpu < 0 || cpu >= nr_possible_cpus || cpu >= MAX_CPUS) {
+		scx_bpf_error("cpu out of bounds for LLC lookup: %d", cpu);
 		return LLC_INVALID;
 	}
 
-	/* Find the LLC domain corresponding to the target value using
-	 * weighted selection - accumulate CPU counts until we exceed target */
-
-	/* Generate random target value in range [0, cpu_cnt) */
-	u32 target = bpf_get_prandom_u32() % total_cpu_cnt;
-	u32 llc, cur = 0;
-	s32 ret = LLC_INVALID;
-
-	/* Linear scan: find first LLC where cumulative count exceeds target */
-	bpf_for(llc, 0, nr_llc)
-	{
-		cur += llc_cpu_cnt[llc];
-		if (target < cur) {
-			ret = (s32)llc;
-			break;
-		}
-	}
-
-	if (ret == LLC_INVALID) {
-		scx_bpf_error("pick_llc_for_task: invalid LLC");
+	u32 llc = cpu_to_llc[cpu];
+	if (!llc_is_valid(llc) || llc >= nr_llc) {
+		scx_bpf_error("cpu %d maps to invalid LLC %u", cpu, llc);
 		return LLC_INVALID;
 	}
 
-	return ret;
+	return (s32)llc;
+}
+
+static inline s32 choose_task_llc(struct task_ctx *tctx, s32 preferred_cpu)
+{
+	const struct cpumask *cpumask;
+	s32 llc;
+
+	cpumask = cast_mask(tctx->cpumask);
+	if (!cpumask || bpf_cpumask_empty(cpumask))
+		return LLC_INVALID;
+
+	if (preferred_cpu >= 0 && preferred_cpu < nr_possible_cpus && preferred_cpu < MAX_CPUS &&
+	    bpf_cpumask_test_cpu(preferred_cpu, cpumask)) {
+		llc = llc_from_cpu(preferred_cpu);
+		if (llc_is_valid(llc))
+			return llc;
+	}
+
+	u32 cpu = bpf_cpumask_any_distribute(cpumask);
+	return llc_from_cpu(cpu);
+}
+
+static inline int refresh_task_llc_cpumask(struct task_ctx *tctx, u32 llc)
+{
+	const struct cpumask *base_mask;
+	const struct cpumask *cached_mask;
+	const struct cpumask *llc_mask;
+	struct bpf_cpumask *llc_cpumask;
+
+	llc_cpumask = tctx->llc_cpumask;
+	if (!llc_cpumask) {
+		scx_bpf_error("tctx->llc_cpumask is NULL");
+		return -EINVAL;
+	}
+
+	if (tctx->llc_cpumask_id == llc) {
+		cached_mask = cast_mask(llc_cpumask);
+		if (cached_mask && !bpf_cpumask_empty(cached_mask))
+			return 0;
+		tctx->llc_cpumask_id = LLC_INVALID;
+	}
+
+	base_mask = cast_mask(tctx->cpumask);
+	if (!base_mask) {
+		scx_bpf_error("tctx->cpumask is NULL");
+		return -EINVAL;
+	}
+
+	llc_mask = lookup_llc_cpumask(llc);
+	if (!llc_mask)
+		return -ENOENT;
+
+	bpf_cpumask_and(llc_cpumask, base_mask, llc_mask);
+	if (bpf_cpumask_empty(cast_mask(llc_cpumask))) {
+		tctx->llc_cpumask_id = LLC_INVALID;
+		return -ENOENT;
+	}
+
+	tctx->llc_cpumask_id = llc;
+	return 0;
 }
 
 static void zero_cell_vtimes(struct cell *cell)
 {
+	WRITE_ONCE(cell->llcs_to_drain, 0);
+	WRITE_ONCE(cell->llcs_with_cpus, 0);
+
 	if (enable_llc_awareness) {
 		u32 llc_idx;
 		bpf_for(llc_idx, 0, MAX_LLCS)
 		{
 			WRITE_ONCE(cell->llcs[llc_idx].vtime_now, 0);
+			WRITE_ONCE(cell->llcs[llc_idx].nr_queued, 0);
 		}
 	} else {
 		WRITE_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now, 0);
 	}
 }
 
-/*
- * Detect and handle cross-LLC task migration.
- * Called from running() to check if task's assigned LLC differs
- * from the CPU's LLC (indicating work stealing occurred).
- *
- * Caller must ensure enable_llc_awareness is true.
- */
-static inline int maybe_retag_stolen_task(struct task_struct *p, struct task_ctx *tctx,
-					  struct cpu_ctx *cctx)
+static inline void cell_llc_drain_enable(struct cell *cell, u32 llc)
 {
-	/* No mismatch = no steal, fast path */
-	if (tctx->llc == cctx->llc)
-		return 0;
+	if (llc >= MAX_LLCS)
+		return;
 
-	/* Task was stolen to a different LLC - update accounting */
-	tctx->steal_count++;
-	tctx->last_stolen_at = scx_bpf_now();
-
-	/* Assign task to new LLC */
-	tctx->llc = cctx->llc;
-
-	/*
-	 * New LLC, need new cpumask. This updates the task vtime
-	 * to that of the new cell-LLC DSQ.
-	 */
-	return update_task_cpumask(p, tctx);
+	__sync_or_and_fetch(&cell->llcs_to_drain, 1LLU << llc);
 }
 
-/* Work stealing:
- * Scan sibling (cell,LLC) DSQs in the same cell and steal the first queued task if it can run on this cpu
- * Returns:
- *  true == 1;  task was stolen
- *  false == 0; no tasks were stolen
- *  error <0;   error encountered
-*/
-static inline s32 try_stealing_work(u32 cell, s32 local_llc)
+static inline void cell_llc_drain_disable(struct cell *cell, u32 llc)
+{
+	if (llc >= MAX_LLCS)
+		return;
+
+	__sync_and_and_fetch(&cell->llcs_to_drain, ~(1LLU << llc));
+}
+
+/*
+ * Work around the kernel DSQ nr visibility bug: direct
+ * scx_bpf_dsq_insert_vtime() from enqueue can leave a task invisible to
+ * scx_bpf_dsq_nr_queued() until the enqueue callback finishes. Drain
+ * interlocking needs the queue depth visible before enabling llcs_to_drain.
+ */
+static inline void cell_llc_nr_queued_inc(struct cell *cell, u32 llc)
+{
+	__sync_fetch_and_add(&cell->llcs[llc].nr_queued, 1);
+}
+
+static inline u32 cell_llc_nr_queued_dec(struct cell *cell, u32 llc)
+{
+	return __sync_sub_and_fetch(&cell->llcs[llc].nr_queued, 1);
+}
+
+static inline bool cell_mask_intersects_llc(const struct cpumask *cell_mask, u32 llc)
+{
+	const struct cpumask *llc_mask;
+
+	if (!cell_mask)
+		return false;
+
+	llc_mask = lookup_llc_cpumask(llc);
+	if (!llc_mask)
+		return false;
+
+	return bpf_cpumask_intersects(cell_mask, llc_mask);
+}
+
+static inline bool cell_llc_has_cpus(struct cell *cell, u32 llc)
+{
+	return READ_ONCE(cell->llcs_with_cpus) & (1LLU << llc);
+}
+
+/* Caller must hold RCU. */
+static inline void kick_cell_idle_cpu_locked(u32 cell_id)
+{
+	s32 cpu = -1;
+	const struct cpumask *cell_mask = lookup_cell_cpumask(cell_id);
+
+	if (!cell_mask)
+		return;
+
+	cpu = scx_bpf_pick_idle_cpu(cell_mask, SCX_PICK_IDLE_CORE);
+	if (cpu < 0)
+		cpu = scx_bpf_pick_idle_cpu(cell_mask, 0);
+
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+static inline void kick_cell_idle_cpu(u32 cell_id)
+{
+	scoped_guard(rcu)
+	{
+		kick_cell_idle_cpu_locked(cell_id);
+	}
+}
+
+/* Caller must hold RCU for lookup_cell_cpumask() and cpumask kfuncs. */
+static inline int refresh_cell_llc_draining(u32 cell_id)
+{
+	struct cell *cell;
+	u64 llcs_with_cpus = 0;
+	u32 llc;
+
+	if (!enable_llc_awareness)
+		return 0;
+
+	cell = lookup_cell(cell_id);
+	if (!cell)
+		return -EINVAL;
+
+	const struct cpumask *cell_mask = lookup_cell_cpumask(cell_id);
+
+	if (!cell_mask)
+		return -EINVAL;
+
+	bpf_for(llc, 0, nr_llc)
+	{
+		if (llc >= MAX_LLCS)
+			break;
+
+		if (cell_mask_intersects_llc(cell_mask, llc))
+			llcs_with_cpus |= 1LLU << llc;
+	}
+	WRITE_ONCE(cell->llcs_with_cpus, llcs_with_cpus);
+
+	/*
+	 * Pair the post-publication queue count check with enqueue's
+	 * post-increment cached no-CPU check. Either this path sees already
+	 * queued work, or a racing enqueue sees the CPU-less LLC and enables
+	 * draining itself. BPF has no standalone full-barrier instruction, so
+	 * use an atomic op on a stack slot to avoid bouncing a shared cacheline.
+	 */
+	volatile unsigned long mb = 0;
+	__sync_fetch_and_add(&mb, 0);
+
+	bpf_for(llc, 0, nr_llc)
+	{
+		if (llc >= MAX_LLCS)
+			break;
+
+		if (llcs_with_cpus & (1LLU << llc)) {
+			cell_llc_drain_disable(cell, llc);
+			continue;
+		}
+
+		if (READ_ONCE(cell->llcs[llc].nr_queued) > 0) {
+			cell_llc_drain_enable(cell, llc);
+			kick_cell_idle_cpu_locked(cell_id);
+		}
+	}
+
+	return 0;
+}
+
+static inline int account_cell_llc_enqueue(u32 cell_id, u32 llc)
+{
+	struct cell *cell;
+
+	if (!enable_llc_awareness)
+		return 0;
+
+	if (!llc_is_valid(llc) || llc >= nr_llc) {
+		scx_bpf_error("account_cell_llc_enqueue: invalid LLC %u", llc);
+		return -EINVAL;
+	}
+
+	cell = lookup_cell(cell_id);
+	if (!cell) {
+		scx_bpf_error("account_cell_llc_enqueue: invalid cell %u", cell_id);
+		return -ENOENT;
+	}
+
+	/*
+	 * Account the logical LLC DSQ insertion before checking llcs_with_cpus.
+	 * This atomic op is the interlock with refresh_cell_llc_draining():
+	 * either refresh observes the tracked queued work after publishing
+	 * llcs_with_cpus, or this enqueue observes the CPU-less LLC below and
+	 * enables draining.
+	 */
+	cell_llc_nr_queued_inc(cell, llc);
+
+	if (cell_llc_has_cpus(cell, llc))
+		return 0;
+
+	cell_llc_drain_enable(cell, llc);
+	kick_cell_idle_cpu(cell_id);
+	return 0;
+}
+
+static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
+{
+	if (!llc_is_valid(local_llc)) {
+		scx_bpf_error("try_draining_work: invalid local_llc: %d", local_llc);
+		return -EINVAL;
+	}
+
+	struct cell *cell = lookup_cell(cell_id);
+	if (!cell)
+		return -EINVAL;
+
+	u64 drain_mask = READ_ONCE(cell->llcs_to_drain);
+	if (!drain_mask)
+		return -ENOENT;
+
+	u32 i;
+	bpf_for(i, 0, nr_llc)
+	{
+		u32 candidate_llc = (local_llc + i) % nr_llc;
+		u64 bit;
+		bool disabled = false;
+		bool consumed;
+		u32 pending;
+
+		// Prevents the optimizer from removing the following conditional return
+		// so that the verifier knows the read will be safe
+		barrier_var(candidate_llc);
+
+		if (candidate_llc >= MAX_LLCS)
+			continue;
+
+		if (candidate_llc == local_llc)
+			continue;
+
+		bit = 1LLU << candidate_llc;
+		if (!(drain_mask & bit))
+			continue;
+
+		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell_id, candidate_llc);
+
+		if (cell_llc_has_cpus(cell, candidate_llc)) {
+			/*
+			 * Normal dispatch can consume this DSQ now that the LLC
+			 * has CPUs again. Don't clear the drain bit here:
+			 * refresh/enqueue may be racing to mark it orphaned
+			 * again, and disabling must be paired with checking
+			 * whether queued work remains.
+			 */
+			continue;
+		}
+
+		pending = READ_ONCE(cell->llcs[candidate_llc].nr_queued);
+		if (!pending) {
+			cell_llc_drain_disable(cell, candidate_llc);
+			continue;
+		}
+
+		/*
+		 * Turn off draining before consuming if this consume is likely
+		 * to drain the last known pending task. If a racing enqueue adds
+		 * more work, either it observes the disabled bit and re-enables
+		 * draining, or the pending count below remains non-zero and this
+		 * path re-enables it.
+		 */
+		if (pending <= 1) {
+			cell_llc_drain_disable(cell, candidate_llc);
+			disabled = true;
+		}
+
+		consumed = scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0);
+
+		if (consumed) {
+			pending = cell_llc_nr_queued_dec(cell, candidate_llc);
+		} else {
+			pending = READ_ONCE(cell->llcs[candidate_llc].nr_queued);
+		}
+
+		if (disabled && pending > 0)
+			cell_llc_drain_enable(cell, candidate_llc);
+
+		if (consumed)
+			return candidate_llc;
+	}
+	return -ENOENT;
+}
+
+static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 {
 	if (!llc_is_valid(local_llc)) {
 		scx_bpf_error("try_stealing_work: invalid local_llc: %d", local_llc);
 		return -EINVAL;
 	}
 
-	struct cell *cell_ptr = lookup_cell(cell);
-	if (!cell_ptr)
+	struct cell *cell = lookup_cell(cell_id);
+	if (!cell)
 		return -EINVAL;
 
-	// Loop over all other LLCs, looking for a queued task to steal
 	u32 i;
-	bpf_for(i, 1, nr_llc)
+	bpf_for(i, 0, nr_llc)
 	{
-		// Start with the next one to spread out the load
 		u32 candidate_llc = (local_llc + i) % nr_llc;
 
 		// Prevents the optimizer from removing the following conditional return
@@ -257,84 +426,114 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		if (candidate_llc >= MAX_LLCS)
 			continue;
 
-		/*
-    * Skip if the cell doesn't have CPUs in this LLC.
-    * Note: rechecking cell_ptr for verifier.
-    * This is racy with try_stealing_this_task, but we don't care -
-    * if the LLC actually doesn't have CPUs come steal time,
-    * we will fail the steal and continue to the next LLC.
-    */
-		if (cell_ptr && READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
+		if (candidate_llc == local_llc)
 			continue;
 
-		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell, candidate_llc);
-		if (dsq_is_invalid(candidate_dsq))
-			return -EINVAL; // already errored in get_cell_llc_dsq_id
+		if (!cell_llc_has_cpus(cell, candidate_llc))
+			continue;
+
+		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell_id, candidate_llc);
 
 		// Optimization: skip if faster than constructing an iterator
 		// Not redundant with later checking if task found (race)
-		if (!scx_bpf_dsq_nr_queued(candidate_dsq.raw))
+
+		/*
+		 * We don't use tracked nr_queued here because we won't be able
+		 * to consume until the actual racy dispatch got comitted.
+		 */
+		if (scx_bpf_dsq_nr_queued(candidate_dsq.raw) <= 0)
 			continue;
 
 		/*
-		 * Attempt the steal - can fail because it's a race.
-		 * We don't update task_ctx here because the peeked task_ctx
-		 * may be stale (a different task may now be at head of DSQ).
-		 * Actual retag and accounting happens in running() via
-		 * mismatch detection.
+		 * Attempt the steal - can fail because it's a race. The task's
+		 * LLC is updated from the CPU it actually runs on in running().
 		 */
 		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
 			continue;
 
-		// Success, we got a task
-		return true;
+		cell_llc_nr_queued_dec(cell, candidate_llc);
+		return 0;
 	}
-	return false;
+	return -ENOENT;
 }
 
-static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx)
+static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32 new_llc,
+			       bool reset_vtime)
 {
 	if (!tctx) {
 		scx_bpf_error("Invalid task context");
 		return -ENOENT;
 	}
 
-	const struct cpumask *llc_mask = NULL;
-
-	// Let's get a new LLC for this task
-	s32 new_llc = pick_llc_for_task(tctx->cell);
-	if (new_llc < 0)
+	if (!llc_is_valid(new_llc) || new_llc >= nr_llc || new_llc >= MAX_LLCS) {
+		scx_bpf_error("invalid LLC assignment: %u", new_llc);
 		return -EINVAL;
+	}
 
-	tctx->llc = new_llc;
-	llc_mask = lookup_llc_cpumask((u32)tctx->llc);
-	if (!llc_mask)
+	struct cell *cell = lookup_cell(tctx->cell);
+	if (!cell) {
+		scx_bpf_error("failed to lookup cell %u for LLC assignment", tctx->cell);
 		return -ENOENT;
-
-	/* --- Narrow the effective cpumask by the chosen LLC --- */
-	/* tctx->cpumask already contains (task_affinity & cell_mask) */
-	struct bpf_cpumask *cpumask = tctx->cpumask;
-	if (!cpumask) {
-		scx_bpf_error("tctx->cpumask is NULL");
-		return -EINVAL;
 	}
-	bpf_cpumask_and(cpumask, (const struct cpumask *)cpumask, llc_mask);
 
-	/* If empty after intersection, nothing can run here */
-	if (bpf_cpumask_empty((const struct cpumask *)cpumask)) {
-		scx_bpf_error("Empty cpumask after intersection");
+	u32 old_llc = tctx->llc;
+	if (refresh_task_llc_cpumask(tctx, new_llc)) {
+		scx_bpf_error("failed to refresh task LLC cpumask for cell %u LLC %u", tctx->cell,
+			      new_llc);
 		return -EINVAL;
 	}
 
-	/* --- Point to the correct (cell,LLC) DSQ and set vtime baseline --- */
-	tctx->dsq = get_cell_llc_dsq_id(tctx->cell, tctx->llc);
+	/*
+	 * This writes a cell/LLC DSQ. Pinned tasks keep CPU DSQs.
+	 */
+	tctx->dsq = get_cell_llc_dsq_id(tctx->cell, new_llc);
 	if (dsq_is_invalid(tctx->dsq))
 		return -EINVAL;
 
-	struct cell *cell = lookup_cell(tctx->cell);
-	if (!cell)
-		return -ENOENT;
+	if (reset_vtime || !llc_is_valid(old_llc) || old_llc >= nr_llc || old_llc >= MAX_LLCS) {
+		p->scx.dsq_vtime = READ_ONCE(cell->llcs[new_llc].vtime_now);
+	} else if (old_llc != new_llc) {
+		s64 vtime_delta = p->scx.dsq_vtime - READ_ONCE(cell->llcs[old_llc].vtime_now);
+		p->scx.dsq_vtime = READ_ONCE(cell->llcs[new_llc].vtime_now) + vtime_delta;
+	}
 
-	p->scx.dsq_vtime = READ_ONCE(cell->llcs[new_llc].vtime_now);
+	tctx->llc = new_llc;
 	return 0;
+}
+
+static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx,
+					     s32 preferred_cpu)
+{
+	s32 new_llc = choose_task_llc(tctx, preferred_cpu);
+	if (!llc_is_valid(new_llc))
+		return -EINVAL;
+
+	return set_task_llc(p, tctx, (u32)new_llc, true);
+}
+
+static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx *tctx,
+					s32 preferred_cpu)
+{
+	int ret;
+	s32 new_llc;
+
+	if (!tctx->all_cell_cpus_allowed)
+		return 0;
+
+	/* Retag only all-cell tasks; pinned tasks keep CPU DSQs. */
+	new_llc = choose_task_llc(tctx, preferred_cpu);
+	if (!llc_is_valid(new_llc))
+		return 0;
+
+	if (tctx->llc == new_llc) {
+		ret = refresh_task_llc_cpumask(tctx, (u32)new_llc);
+		if (ret && !llc_is_valid(tctx->llc))
+			return -EINVAL;
+		return 0;
+	}
+
+	ret = set_task_llc(p, tctx, (u32)new_llc, false);
+	if (ret && llc_is_valid(tctx->llc))
+		return 0;
+	return ret;
 }

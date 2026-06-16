@@ -34,6 +34,8 @@ pub struct CellMetrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Orphaned LLC DSQ drain events")]
+    pub drain_cnt: u64,
     #[stat(desc = "Pin reject skipped %")]
     pub pin_skip_pct: f64,
     #[stat(desc = "Slice shrink events")]
@@ -96,6 +98,8 @@ pub struct Metrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Orphaned LLC DSQ drain events")]
+    pub drain_cnt: u64,
     #[stat(desc = "Pin reject skipped %")]
     pub pin_skip_pct: f64,
     #[stat(desc = "Slice shrink events")]
