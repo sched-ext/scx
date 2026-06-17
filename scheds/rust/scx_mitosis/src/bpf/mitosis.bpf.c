@@ -824,13 +824,9 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	tctx->vtime_charge_cell = tctx->cell;
 
-	/* Ensure this is done *AFTER* refreshing cell which might manipulate vtime */
-	vtime = p->scx.dsq_vtime;
-
 	if (!tctx->all_cell_cpus_allowed) {
 		if (dynamic_affinity_cpu_selection) {
 			cpu = enqueue_pinned_cpu(p, tctx);
-			vtime = p->scx.dsq_vtime; /* re-read: may have been reset */
 			/* Kick target CPU — select_cpu may have returned a different one */
 			if (cpu >= 0)
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -900,6 +896,11 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
 
+	/*
+	 * Ensure this is done *AFTER* refreshing cell and enqueue_pinned_cpu()
+	 * or maybe_update_task_llc(), which might manipulate vtime.
+	 */
+	vtime = p->scx.dsq_vtime;
 	tctx->basis_vtime = basis_vtime;
 
 	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
