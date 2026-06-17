@@ -434,6 +434,7 @@ static void update_stat_for_running(struct task_struct *p,
 	reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	taskc->last_running_clk = now;
 	taskc->last_measured_wall_clk = now;
+	taskc->last_measured_exec = p->se.sum_exec_runtime;
 
 	/*
 	 * ops.running() can fire while the BPF callback runs on a CPU other
@@ -530,7 +531,7 @@ static void account_task_runtime(struct task_struct *p,
 				 struct cpu_ctx *cpuc,
 				 u64 now)
 {
-	u64 task_time_wall, task_time_iwgt, task_time_invr;
+	u64 task_time_wall, task_time_iwgt, task_time_invr, exec_now, exec_delta;
 	u64 now_task, now_pelt;
 
 	/*
@@ -555,6 +556,20 @@ static void account_task_runtime(struct task_struct *p,
 	task_time_invr = unlikely(!taskc->last_measured_pelt_clk) ? 0 :
 		time_delta(now_pelt, taskc->last_measured_pelt_clk);
 
+	/*
+	 * Synchronizing clock_task for tasks for different CPUs is tricky
+	 * business when our current CPU isn't the CPU that the task is running
+	 * on. Let's use exec_delta where the kernel already does the correct
+	 * accounting for us to bound clock jumps when comparing clock_task
+	 * from different CPUs.
+	 */
+	exec_now = p->se.sum_exec_runtime;
+	exec_delta = unlikely(!taskc->last_measured_exec) ? 0 :
+		time_delta(exec_now, taskc->last_measured_exec);
+
+	if (task_time_wall > exec_delta)
+		task_time_wall = exec_delta;
+
 	task_time_iwgt = task_time_invr / p->scx.weight;
 
 	WRITE_ONCE(cpuc->tot_task_time_wall, cpuc->tot_task_time_wall + task_time_wall);
@@ -574,6 +589,7 @@ static void account_task_runtime(struct task_struct *p,
 	taskc->last_measured_wall_clk = now;
 	taskc->last_measured_task_clk = now_task;
 	taskc->last_measured_pelt_clk = now_pelt;
+	taskc->last_measured_exec = exec_now;
 
 	/*
 	 * Under CPU bandwidth control using cpu.max, we also need to report
