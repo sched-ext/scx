@@ -1,0 +1,154 @@
+From aee94395c1f7e5e6414db223acc8d672603fed93 Mon Sep 17 00:00:00 2001
+From: Andrea Righi <arighi@nvidia.com>
+Date: Tue, 9 Jun 2026 18:17:54 +0200
+Subject: [PATCH] sched_ext: Add SCX_ENQ_KICK_IDLE enqueue flag
+
+When inserting a task into a local DSQ, a scheduler often wants to wake
+the target CPU if it is idle. Currently, this requires a separate
+scx_bpf_kick_cpu() call after the insert.
+
+Add SCX_ENQ_KICK_IDLE, which can be set in @enq_flags when inserting
+into a local DSQ. After the task is successfully inserted, the CPU
+owning that local DSQ is kicked as if scx_bpf_kick_cpu() was called with
+SCX_KICK_IDLE, folding the two operations into one.
+
+The flag is only valid on local DSQs; using it on a non-local DSQ
+triggers an scx_error().
+
+Signed-off-by: Andrea Righi <arighi@nvidia.com>
+---
+ Documentation/scheduler/sched-ext.rst         |  4 +++
+ kernel/sched/ext.c                            | 26 ++++++++++++++-----
+ kernel/sched/ext_internal.h                   |  7 +++++
+ .../sched_ext/include/scx/enum_defs.autogen.h |  1 +
+ .../sched_ext/include/scx/enums.autogen.bpf.h |  3 +++
+ tools/sched_ext/include/scx/enums.autogen.h   |  1 +
+ 6 files changed, 35 insertions(+), 7 deletions(-)
+
+diff --git a/Documentation/scheduler/sched-ext.rst b/Documentation/scheduler/sched-ext.rst
+index c4f59c08d8a4..7d99135ca858 100644
+--- a/Documentation/scheduler/sched-ext.rst
++++ b/Documentation/scheduler/sched-ext.rst
+@@ -410,6 +410,10 @@ dispatching, and must be dispatched to with ``scx_bpf_dsq_insert()``. See
+ the function documentation and usage in ``tools/sched_ext/scx_simple.bpf.c``
+ for more information.
+ 
++When inserting into a local DSQ, ``SCX_ENQ_KICK_IDLE`` can be set in
++``enq_flags`` to automatically kick the target CPU with ``SCX_KICK_IDLE``
++after the task is inserted.
++
+ Task Lifecycle
+ --------------
+ 
+diff --git a/kernel/sched/ext.c b/kernel/sched/ext.c
+index 59c164b8780e..f1d3b4e6c917 100644
+--- a/kernel/sched/ext.c
++++ b/kernel/sched/ext.c
+@@ -1619,6 +1619,9 @@ static void local_dsq_post_enq(struct scx_sched *sch, struct scx_dispatch_q *dsq
+ 	if (rq->scx.flags & SCX_RQ_IN_BALANCE)
+ 		return;
+ 
++	if (enq_flags & SCX_ENQ_KICK_IDLE)
++		scx_kick_cpu(sch, cpu_of(rq), SCX_KICK_IDLE);
++
+ 	if ((enq_flags & SCX_ENQ_PREEMPT) && p != rq->curr &&
+ 	    rq->curr->sched_class == &ext_sched_class) {
+ 		rq->curr->scx.slice = 0;
+@@ -8607,15 +8610,20 @@ static bool scx_vet_enq_flags(struct scx_sched *sch, u64 dsq_id, u64 *enq_flags)
+ 	bool is_local = dsq_id == SCX_DSQ_LOCAL ||
+ 		(dsq_id & SCX_DSQ_LOCAL_ON) == SCX_DSQ_LOCAL_ON;
+ 
+-	if (*enq_flags & SCX_ENQ_IMMED) {
+-		if (unlikely(!is_local)) {
+-			scx_error(sch, "SCX_ENQ_IMMED on a non-local DSQ 0x%llx", dsq_id);
+-			return false;
+-		}
+-	} else if ((sch->ops.flags & SCX_OPS_ALWAYS_ENQ_IMMED) && is_local) {
+-		*enq_flags |= SCX_ENQ_IMMED;
++	if (unlikely((*enq_flags & SCX_ENQ_IMMED) && !is_local)) {
++		scx_error(sch, "SCX_ENQ_IMMED on a non-local DSQ 0x%llx", dsq_id);
++		return false;
++	}
++
++	if (unlikely((*enq_flags & SCX_ENQ_KICK_IDLE) && !is_local)) {
++		scx_error(sch, "SCX_ENQ_KICK_IDLE on a non-local DSQ 0x%llx", dsq_id);
++		return false;
+ 	}
+ 
++	if (!(*enq_flags & SCX_ENQ_IMMED) &&
++	    (sch->ops.flags & SCX_OPS_ALWAYS_ENQ_IMMED) && is_local)
++		*enq_flags |= SCX_ENQ_IMMED;
++
+ 	return true;
+ }
+ 
+@@ -8709,6 +8717,10 @@ __bpf_kfunc_start_defs();
+  * %SCX_SLICE_INF, @p never expires and the BPF scheduler must kick the CPU with
+  * scx_bpf_kick_cpu() to trigger scheduling.
+  *
++ * If @p is inserted into a local DSQ, %SCX_ENQ_KICK_IDLE can be used to
++ * automatically kick the CPU owning that local DSQ with %SCX_KICK_IDLE after
++ * insertion.
++ *
+  * Returns %true on successful insertion, %false on failure. On the root
+  * scheduler, %false return triggers scheduler abort and the caller doesn't need
+  * to check the return value.
+diff --git a/kernel/sched/ext_internal.h b/kernel/sched/ext_internal.h
+index 79ebfcb26917..b76633c52c96 100644
+--- a/kernel/sched/ext_internal.h
++++ b/kernel/sched/ext_internal.h
+@@ -1273,6 +1273,13 @@ enum scx_enq_flags {
+ 	 */
+ 	SCX_ENQ_IMMED		= 1LLU << 33,
+ 
++	/*
++	 * Only allowed on local DSQs. After successfully inserting the task
++	 * into a local DSQ, kick the CPU owning that local DSQ as if
++	 * scx_bpf_kick_cpu() was called with %SCX_KICK_IDLE.
++	 */
++	SCX_ENQ_KICK_IDLE	= 1LLU << 34,
++
+ 	/*
+ 	 * The task being enqueued was previously enqueued on a DSQ, but was
+ 	 * removed and is being re-enqueued. See SCX_TASK_REENQ_* flags to find
+diff --git a/tools/sched_ext/include/scx/enum_defs.autogen.h b/tools/sched_ext/include/scx/enum_defs.autogen.h
+index da4b459820fd..2820a22cf78b 100644
+--- a/tools/sched_ext/include/scx/enum_defs.autogen.h
++++ b/tools/sched_ext/include/scx/enum_defs.autogen.h
+@@ -53,6 +53,7 @@
+ #define HAVE_SCX_ENQ_CPU_SELECTED
+ #define HAVE_SCX_ENQ_PREEMPT
+ #define HAVE_SCX_ENQ_IMMED
++#define HAVE_SCX_ENQ_KICK_IDLE
+ #define HAVE_SCX_ENQ_REENQ
+ #define HAVE_SCX_ENQ_LAST
+ #define HAVE___SCX_ENQ_INTERNAL_MASK
+diff --git a/tools/sched_ext/include/scx/enums.autogen.bpf.h b/tools/sched_ext/include/scx/enums.autogen.bpf.h
+index dafccbb6b69d..6a65cf41bfcd 100644
+--- a/tools/sched_ext/include/scx/enums.autogen.bpf.h
++++ b/tools/sched_ext/include/scx/enums.autogen.bpf.h
+@@ -124,6 +124,9 @@ const volatile u64 __SCX_ENQ_PREEMPT __weak;
+ const volatile u64 __SCX_ENQ_IMMED __weak;
+ #define SCX_ENQ_IMMED __SCX_ENQ_IMMED
+ 
++const volatile u64 __SCX_ENQ_KICK_IDLE __weak;
++#define SCX_ENQ_KICK_IDLE __SCX_ENQ_KICK_IDLE
++
+ const volatile u64 __SCX_ENQ_REENQ __weak;
+ #define SCX_ENQ_REENQ __SCX_ENQ_REENQ
+ 
+diff --git a/tools/sched_ext/include/scx/enums.autogen.h b/tools/sched_ext/include/scx/enums.autogen.h
+index bbd4901f4fce..c869a6e5aa79 100644
+--- a/tools/sched_ext/include/scx/enums.autogen.h
++++ b/tools/sched_ext/include/scx/enums.autogen.h
+@@ -45,6 +45,7 @@
+ 	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_HEAD); \
+ 	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_PREEMPT); \
+ 	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_IMMED); \
++	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_KICK_IDLE); \
+ 	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_REENQ); \
+ 	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_LAST); \
+ 	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_CLEAR_OPSS); \
+-- 
+2.54.0
+

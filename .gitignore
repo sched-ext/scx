@@ -18,3 +18,28 @@ CLAUDE.md
 **/*.tmp
 .agent/
 .agents/
+/docs/
+
+# Local agent/review state and benchmark scratch artifacts
+.codex
+.codex/
+.superpowers/
+.sashiko-submit/
+.semcode.db/
+.scx_cake_bench/
+sashiko*.db*
+test-sashiko*.db*
+tui_dump_*
+
+# Local scx_cake benchmark/research artifacts. Keep these available on the
+# workstation but out of the public nightly branch unless explicitly promoted.
+/history/
+/tools/cakebench_bpf_audit.py
+/tools/cakebench_goal_score.py
+/tools/cakebench_mutation_report.py
+/tools/tests/test_cakebench_bpf_audit.py
+/tools/tests/test_cakebench_goal_score.py
+/tools/tests/test_cakebench_mutation_report.py
+/tools/__pycache__/
+/tools/tests/__pycache__/
+target_*/

@@ -1,647 +1,571 @@
-# scx_cake: CAKE DRR++ Adapted for CPU Scheduling
+# scx_cake 1.2.0
 
-[![License: GPL-2.0](https://img.shields.io/badge/License-GPL%202.0-blue.svg?style=flat-square)](https://opensource.org/licenses/GPL-2.0)
-[![Kernel: 6.12+](https://img.shields.io/badge/Kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
-[![Status: Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg?style=flat-square)](https://github.com/sched-ext/scx)
+[![License: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg?style=flat-square)](https://opensource.org/licenses/GPL-2.0)
+[![Kernel: 6.12+](https://img.shields.io/badge/kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
+[![sched_ext](https://img.shields.io/badge/sched_ext-BPF-orange.svg?style=flat-square)](https://github.com/sched-ext/scx)
 
-> **ABSTRACT**: `scx_cake` is an experimental BPF CPU scheduler that adapts the network [CAKE](https://www.bufferbloat.net/projects/codel/wiki/Cake/) algorithm's DRR++ (Deficit Round Robin++) for CPU scheduling. Designed for **gaming workloads** on modern AMD and Intel hardware.
->
-> - **4-Class System** — Tasks classified as GAME / NORMAL / HOG / BG by PELT utilization and game family detection
-> - **Zero Global Atomics** — Per-CPU BSS arrays with MESI-guarded writes eliminate bus locking
-> - **3-Gate select_cpu** — prev_cpu idle → performance-ordered scan → kernel fallback → tunnel
-> - **Per-LLC DSQ Sharding** — Eliminates cross-CCD lock contention on multi-chiplet CPUs
-> - **EEVDF-Inspired Weighting** — Virtual runtime with sleep lag credit, nice scaling, and tiered DSQ ordering
+`scx_cake` is a `sched_ext` CPU scheduler whose **primary focus is gaming** —
+frame consistency, tail latency, and input-to-photon responsiveness — while
+remaining a competent **general-purpose scheduler**: desktop, compile, and
+benchmark workloads run through the same machinery with service-aware shaping
+rather than a separate mode. It applies CAKE-inspired ideas (the bufferbloat
+queue discipline) to CPU time: keep the wake path short, publish state from a
+single writer, give the latency-critical flow a deterministic fast lane, and
+arbitrate everything else fairly.
 
----
+The current design is the **service-gated hybrid queue** (2026-06-10). It has
+been measured side-by-side against Linux EEVDF (including the 7.1-era
+HRTICK-at-deadline and POC-idle-selector improvements), `scx_cosmos`, and
+`scx_lavd` on the development machine — a Ryzen 7 9800X3D + RTX 4090 running
+a CachyOS 7.1-rc7 kernel with one custom sched_ext patch — using an
+order-rotated, focus-gated A/B protocol on a focused KovaaK's workload. The
+explicit numbers, the test system, and the methodology are in
+[Measured results](#measured-results-2026-06-10) so you can judge for
+yourself; one machine and one title are a data point, not a universal claim.
+The campaign decision log is in
+[docs/mutation_campaign_2026-06-10.md](./docs/mutation_campaign_2026-06-10.md).
 
 > [!WARNING]
-> **EXPERIMENTAL SOFTWARE**
-> This scheduler is experimental and intended for use with `sched_ext` on Linux Kernel 6.12+. Performance may vary depending on hardware and user configuration.
+> `scx_cake` is experimental scheduler code. It requires a Linux kernel with
+> `sched_ext` support and root privileges. If the BPF scheduler misbehaves,
+> the kernel's `sched_ext` watchdog evicts it and the system falls back to the
+> default scheduler automatically — a crashed experiment costs you a hiccup,
+> not a hang.
 
-> [!NOTE]
-> **AI TRANSPARENCY**
-> Large Language Models were used for optimization pattern matching and design exploration. All implementation details have been human-verified, benchmarked on real gaming workloads, and validated for correctness.
+> [!IMPORTANT]
+> **AI assistance disclosure.** Code mutation in this project is done with AI
+> assistance, and I am stating that openly because users deserve to know how
+> the software they run is built. The discipline that makes this workable is
+> that **no change lands on trust**: every code change — AI-assisted or not —
+> must prove itself through the benchmark gauntlet described in
+> [The mutation and testing system](#the-mutation-and-testing-system) (load
+> gates, mechanism checks, and order-rotated live game A/Bs) before it
+> becomes a default, and changes that fail are parked in-tree with their
+> falsification documented.
 
----
+## Table of contents
 
-## Navigation
+1. [Quick start](#quick-start)
+2. [Build-time flags (complete)](#build-time-flags-complete)
+3. [Runtime flags (complete)](#runtime-flags-complete)
+4. [Architecture](#architecture)
+5. [Hot paths and cold paths](#hot-paths-and-cold-paths)
+6. [Named concepts and code patterns](#named-concepts-and-code-patterns)
+7. [The mutation and testing system](#the-mutation-and-testing-system)
+8. [Measured results](#measured-results-2026-06-10)
+9. [Vocabulary](#vocabulary) and [Gamer terms](#gamer-terms)
+10. [User concerns for gaming](#user-concerns-for-gaming)
+11. [Source tour](#source-tour)
 
-- [1. Quick Start](#1-quick-start)
-- [2. Philosophy](#2-philosophy)
-- [3. 4-Class System](#3-4-class-system)
-- [4. Architecture](#4-architecture)
-- [5. Configuration](#5-configuration)
-- [6. Build Modes](#6-build-modes)
-- [7. TUI Guide](#7-tui-guide)
-- [8. Performance](#8-performance)
-- [9. Vocabulary](#9-vocabulary)
-
----
-
-## 1. Quick Start
+## Quick start
 
 ```bash
-# Prerequisites: Linux Kernel 6.12+ with sched_ext, Rust toolchain
-
-# Clone and build
 git clone https://github.com/sched-ext/scx.git
-cd scx && cargo build --release -p scx_cake
+cd scx
 
-# Run (requires root)
+# A plain release build IS the measured champion configuration.
+cargo build --release -p scx_cake
 sudo ./target/release/scx_cake
 
-# Run with live stats TUI
-sudo scx_cake -v
+# Debug build: TUI, telemetry, runtime A/B knobs
+cargo build -p scx_cake
+sudo ./target/debug/scx_cake --verbose
 ```
 
----
+Requirements: Linux `6.12+` with `sched_ext`, a Rust toolchain, the `scx`
+repository's build dependencies, and root to attach.
 
-## 2. Philosophy
+## Build-time flags (complete)
 
-Traditional schedulers (CFS, EEVDF) optimize for **fairness** — if a game and a compiler both run, each gets 50% CPU time. For gaming, this creates two problems:
+Release builds bake policy at compile time so the verifier const-folds
+branches and dead paths disappear from the JIT output. Every knob is an
+environment variable read by `build.rs`. Defaults marked ⭐ are the measured
+champion; entries marked 📦 are parked experiments kept for reproducibility
+(measured worse or neutral — see the campaign logs before re-enabling).
 
-1. **Latency inversion**: A 50µs input handler waits behind a 50ms compile job
-2. **Frame jitter**: Game render threads get preempted mid-frame by background work
+### Core tuple
 
-**scx_cake's answer**: Detect the game process family automatically (Steam, Wine/Proton, native games) and give it scheduling priority. Non-game tasks are classified by PELT CPU utilization into NORMAL, HOG, or BG classes with progressively lower priority. The system self-tunes — no manual configuration needed.
+| Env | Default | Values | Meaning |
+| :-- | :-- | :-- | :-- |
+| `SCX_CAKE_PROFILE` | ⭐ `gaming` | `gaming`, `esports`, … | Baked profile preset (quantum and policy seeds). |
+| `SCX_CAKE_QUANTUM_US` | ⭐ `1000` | µs | Base slice. Owner-class thresholds derive from it (`short=q/8`, `med=q/4`, `frame=q/2`, `bulk=q−q/8`). |
+| `SCX_CAKE_QUEUE_POLICY` | ⭐ `llc-vtime` | `local`, `llc-vtime` | Busy-fallback queue shape. `local` restores the per-CPU local-first design **and compiles in the native-fast-wake game stack** (the two shapes are different compiled programs, not a runtime switch). |
+| `SCX_CAKE_HYBRID_QUEUE` | ⭐ `4` | `0`–`4` | Frame gate for the llc-vtime build. `0` off, `1` GameThread+RenderThread local, `2` GT-only 📦, `3` RT-only 📦 (both single-thread gates destabilize 1% lows, σ 83–104 vs 10–40 — measured), `4` RT always + GT onto idle/frame-owned targets only (champion). |
+| `SCX_CAKE_STORM_GUARD` | ⭐ `shield` | `off`, `shadow`, `shield`, `full` | Busy-wake handoff envelope under wake storms. |
+| `SCX_CAKE_BUSY_WAKE_KICK` | ⭐ `policy` | `policy`, `preempt`, `idle` | Same-CPU busy-wake kick shaping. |
 
-This is the same insight behind network CAKE: short flows (DNS, gaming packets) should not be delayed by bulk flows (downloads). scx_cake applies this to CPU time.
+### Release accelerators
 
----
+| Env | Default | Meaning |
+| :-- | :-- | :-- |
+| `SCX_CAKE_RELEASE_LLC_PENDING` | ⭐ on | `llc_pending` hint lane: dispatch only pulls the shared LLC queue when the hint says work may exist. |
+| `SCX_CAKE_RELEASE_LOCAL_WAITER` | ⭐ on | Head-insert + preempt-kick lane for futex/schbench-style waiter handoffs. |
+| `SCX_CAKE_RELEASE_PLANCK_LOCAL` | ⭐ on | Minimal local-insert fast path. |
+| `SCX_CAKE_RELEASE_ROUTE_PRED` | 📦 off | Route replay/prediction subsystem (stubbed in champion; large surface, no measured win). |
+| `SCX_CAKE_RELEASE_CONFIDENCE` | 📦 off | Packed-confidence floor gears for narrowing probe width. |
+| `SCX_CAKE_RELEASE_DOMAIN_DRR` | 📦 off | Per-class domain DRR queues. |
+| `SCX_CAKE_CORE_STEAL_DHQ` | 📦 off | Lock-free dequeue (arena) variant of core-steal. |
+| `SCX_CAKE_LEARNED_LOCALITY` / `SCX_CAKE_WAKE_CHAIN_LOCALITY` | 📦 off | Learned wake-chain steering (debug/arena surface). |
 
-## 3. 4-Class System
+### Wake-path experiment family
 
-`scx_cake` classifies every task into one of four classes. Classification uses PELT (Per-Entity Load Tracking) utilization from the kernel and automatic game family detection via process tree analysis.
+These exist because the wake path is where gaming latency lives; each was an
+instrumented A/B. The `NFW_*` group only compiles in `local`-policy builds.
 
-### Class Hierarchy
+| Env | Default | Measured status |
+| :-- | :-- | :-- |
+| `SCX_CAKE_NATIVE_FAST_WAKE` | ⭐ on (local builds) | Route default-user wakes through the kernel idle pick + select-side direct insert. Core of the 6-08 `smtstrict` stack that beat cosmos 6/6. |
+| `SCX_CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL` | ⭐ on (local) | A native-idle miss is authoritative — tunnel to prev instead of re-probing. |
+| `SCX_CAKE_NFW_STRICT_SIBLING` | ⭐ on (local) | Reject warm-prev claims when ANY SMT sibling is busy (fixed a 12× SMT-contention bug vs EEVDF). |
+| `SCX_CAKE_DISPATCH_SKIP_RESCUE` | ⭐ on | Skip dispatch idle-rescue probes (−35.5% dispatch ns, no regression). |
+| `SCX_CAKE_BUSY_WAKE_GRACE` | ⭐ on | 250µs–4ms pressure-scaled preemption grace for busy wakes (game builds compile it out via profile). |
+| `SCX_CAKE_NFW_LEAN_PREV` | 📦 off | Leaner prev-claim; tied avg, won tails, but was the maxFT variance culprit (1.22↔10.96ms). |
+| `SCX_CAKE_NFW_MISS_SHARED` | 📦 off | Park wakee in the shared LLC queue on a global idle miss (cosmos-style work conservation). |
+| `SCX_CAKE_PREV_IDLE_OVERRIDE` | 📦 off | Prev-CPU idle claim override experiments. |
+| `SCX_CAKE_WAKE_PREEMPT_ELAPSED` / `_ADAPTIVE` / `_US` | 📦 off | Elapsed-gated wake preemption (EEVDF-eligibility-like, regime-gated by owner burst length). |
+| `SCX_CAKE_KTHREAD_WAKE_PREEMPT` | 📦 off | Kthreads always preempt (GPU-submit chain experiment). |
+| `SCX_CAKE_LEAN_WAKE_KICK` | 📦 off | Preempt default wakes unless the owner is frame/interactive class. |
+| `SCX_CAKE_SMT_CLEAN_SELECT` / `SCX_CAKE_FRAME_OWNER_SHIELD` | 📦 off | SMT-clean selection and blunt frame-owner preemption shields. |
+| `SCX_CAKE_ENQ_SKIP_BUSY_KICK` / `_SKIP_IDLE_KICK` / `SCX_CAKE_FAST_ENQUEUE` | 📦 off | Enqueue ablations (proved the idle kick is load-bearing and the enqueue kfunc floor is irreducible). |
+| `SCX_CAKE_LEAN_ACCOUNTING` | 📦 off | Reduced stopping-path accounting. |
+| `SCX_CAKE_VTIME_WAKE_FLOOR` | 📦 off | EEVDF-style wake-lag floor at arbiter inserts (measured: hurts 0.1% lows; extreme tails are not vtime queue-jumps). |
 
-| Class      | DSQ Weight Range | Typical Workload                                                     |
-| :--------- | :--------------- | :------------------------------------------------------------------- |
-| **GAME**   | [0, 5120]        | Game process tree + audio daemons + compositor (during GAMING state) |
-| **NORMAL** | [8192, 13312]    | Default — interactive desktop tasks                                  |
-| **HOG**    | [16384, 21504]   | High PELT utilization (≥78% CPU) non-game tasks                      |
-| **BG**     | [49152, 54272]   | Low PELT utilization non-game tasks during GAMING                    |
+### Instrumentation builds
 
-> [!TIP]
-> **Lower weight = dispatches first.** Non-overlapping weight ranges guarantee class ordering: all GAME tasks dispatch before any NORMAL task, all NORMAL before any HOG, etc.
+| Env | Default | Meaning |
+| :-- | :-- | :-- |
+| `SCX_CAKE_GAME_DIAG` | off | Compile the release game-diag recorder: per-CPU action counters (wake routing, kick shapes, queue depths) plus frame-preemptor attribution, dumped headlessly by `--verbose`. ~free when idle; only for capture runs. |
+| `SCX_CAKE_FUTEX_TRACE` | off | Futex-lane event tracing for waiter-handoff studies. |
 
-### How Classification Works
+## Runtime flags (complete)
 
-1. **Game detection**: Two-phase detection scans for Steam environment variables and Wine `.exe` processes. Detected game TGIDs and their parent PID are written to BPF BSS. The entire process family (game + wineserver + audio + compositor) is promoted to GAME class.
-2. **PELT-based classification**: Every 64th stop, the scheduler reads the kernel's `util_avg` for each task. Tasks with ≥78% CPU utilization are classified as HOG; lower-utilization non-game tasks become BG during GAMING state, or NORMAL otherwise.
-3. **Audio/Compositor protection**: PipeWire daemons and Wayland compositors are detected at startup and baked into RODATA. During GAMING state, they receive GAME-level priority for latency parity with game threads.
-4. **Waker-boost chain**: Tasks woken by GAME threads inherit GAME priority for one scheduling cycle. This automatically promotes game pipeline threads (sim→render→present) without explicit classification.
-
-### Game Detection Deep Dive
-
-Game detection runs in the **Rust TUI polling loop** (userspace, every refresh interval) and writes results to BPF BSS. The BPF side never scans `/proc` — it only reads the pre-resolved `game_tgid`, `game_ppid`, and `sched_state` from BSS.
-
-**Detection Pipeline** (priority order):
-
-1. **Phase 1 — Steam**: For each PPID group with ≥`GAME_MIN_THREADS` threads, read `/proc/<ppid>/environ` looking for `SteamGameId=` or `STEAM_GAME=`. If found, validate that the group contains a real game binary (not just `steam`, `steamwebhelper`, or `pressure-vessel`). Confidence: **100** (instant lock).
-2. **Phase 2 — Wine/Proton .exe**: For remaining PPIDs with ≥`GAME_MIN_THREADS`, read `/proc/<ppid>/cmdline` looking for any argument ending in `.exe`. Covers Heroic Launcher, Lutris, manual Wine launches. Confidence: **90** (5-second holdoff).
-
-**TGID Resolution**: Once a winning PPID is found, resolve the actual game TGID by:
-
-- Building per-TGID max `pelt_util` across all threads in the PPID group
-- Sorting TGIDs by descending PELT (the game's render loop consumes ms, infra exes consume µs)
-- Filtering through a Windows infrastructure blocklist: `services.exe`, `winedevice.exe`, `pluginhost.exe`, `svchost.exe`, `explorer.exe`, `wineboot.exe`, `crashhandler.exe`, etc.
-- Extracting the game name from `/proc/<tgid>/cmdline` (for `.exe`) or `/proc/<tgid>/comm` (for native)
-
-**Hysteresis State Machine**:
-
-- **Holdoff timer**: Lower-confidence candidates wait before locking (Steam=instant, .exe=5s). The same candidate must persist across multiple polls to lock.
-- **Sticky incumbent**: Once locked, a game stays locked until its `/proc/<tgid>` disappears (process exits). A challenger can only displace it with **strictly higher** confidence.
-- **Exit detection**: Every poll checks if `/proc/<game_tgid>` still exists. On exit → `tracked_game_tgid = 0`, `sched_state` transitions from GAMING → IDLE.
-
-**BSS Propagation**: The resolved state is written to BPF BSS every refresh:
-
+```text
+scx_cake [OPTIONS]
 ```
-bss.game_tgid       = tracked_game_tgid    // for existence checks + display
-bss.game_ppid       = tracked_game_ppid    // primary family signal for BPF classification
-bss.game_confidence  = game_confidence      // 0/90/100
-bss.sched_state      = IDLE | COMPILATION | GAMING
+
+| Flag | Default | Meaning |
+| :-- | :-- | :-- |
+| `-p, --profile <PROFILE>` | `gaming` | Profile (debug builds; release uses the baked value). |
+| `--quantum <US>` | baked | Override slice in debug builds. |
+| `--queue-policy <local\|llc-vtime>` | baked | Debug-only runtime queue policy A/B; release is compile-time. |
+| `--storm-guard <off\|shadow\|shield\|full>` | `shield` | Busy-wake storm envelope. |
+| `--busy-wake-kick <policy\|preempt\|idle>` | `policy` | Busy-wake kick shaping. |
+| `--learned-locality`, `--wake-chain-locality` | off | Debug arena-backed locality steering. |
+| `--enq-kick-idle` | **on by default** | Force the `SCX_ENQ_KICK_IDLE` fold (it defaults on; `SCX_CAKE_ENQ_KICK_IDLE=0` disables). The fold lets the local-DSQ insert itself carry the idle kick — one BPF→kernel crossing per idle wake. BTF-probed against the running kernel; falls back to the explicit kick on kernels without the flag. |
+| `--irq-avoid <auto\|0\|cpulist>` | **`auto`** | RT/IRQ noise-avoid: at load, sample `/proc/interrupts` (100ms) and FIFO/RR thread wake rates (200ms); demote CPUs hosting ≥2k IRQs/s or ≥300 RT wakes/s in the routing perf scores. `0` disables; an explicit list (`"12,13"`) skips detection. |
+| `--frame-reserve` | off 📦 | Reserve the top core exclusively for the frame anchor, with a userspace governor re-picking the core every ~2s. **Parked**: measured to backfire — see [the RT-magnet law](#named-concepts-and-code-patterns). |
+| `-v, --verbose` | off | Debug TUI when on a terminal; headless diag snapshots otherwise (release: requires the `GAME_DIAG` build). |
+| `--interval <S>` / `--diag-dir <DIR>` / `--diag-period <S>` | `1` / `.` / `60` | Telemetry cadence and headless diag output. |
+| `--compare-dump <BASELINE> <CANDIDATE>` | — | Offline TUI-dump diff; exits without loading BPF. |
+| `-V, --version` | — | Version. |
+
+Runtime environment variables: `SCX_CAKE_ENQ_KICK_IDLE` (`0` disables the
+fold), `SCX_CAKE_IRQ_AVOID` (same values as the flag),
+`SCX_CAKE_FRAME_RESERVE` (`1` enables). Flags win over env.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph US["Userspace (main.rs) — cold"]
+        T[topology.rs sysfs scan] --> R[RODATA bake:<br/>cpu_meta, probe tables,<br/>perf scores]
+        N[IRQ/RT noise scan<br/>--irq-avoid] --> R
+        R --> A[open / load / attach]
+        A --> G[1s governor loop:<br/>trust lanes, frame-reserve]
+    end
+    subgraph BPF["BPF (cake.bpf.c) — hot"]
+        S[select_cpu] --> E[enqueue]
+        E --> D[dispatch]
+        D --> RU[running] --> ST[stopping]
+        ST -->|publish| L
+        RU -->|publish| L
+    end
+    subgraph LANES["Single-writer publication lanes"]
+        L["cpu_status (64B/CPU)<br/>cpu_frontier (64B/CPU)<br/>llc_pending hint"]
+    end
+    R -.const volatile.-> BPF
+    L -.reads only.-> S
+    L -.reads only.-> E
 ```
 
-The BPF classification engine in `cake_init_task` and `cake_stopping` reads `game_ppid` to decide if a task belongs to the game family. All scheduling behavior changes (class assignment, DSQ weights, quantum caps, CPUPERF boost) flow from `sched_state`.
+Two structural ideas carry the design:
 
-### DRR++ Deficit Tracking
+1. **Cake Scoreboard Dispatch.** Every CPU owns one cache line of published
+   state (`cpu_status`: idle/accept/wake-preempt bits, owner class, pressure
+   bucket, epoch; `cpu_frontier`: the vtime frontier). Remote placement reads
+   these single-writer lines plus immutable topology RODATA — never another
+   CPU's private bookkeeping. One writer per line means no multi-writer
+   contention on the wake path; write elision
+   (`cake_status_same_visible_state`) means a no-op publish never invalidates
+   remote cached copies.
 
-Adapted from network CAKE's flow fairness:
+2. **Service-gated hybrid queue.** The busy-fallback path splits by thread
+   role. The frame pipeline's serial pair (GameThread/RenderThread) keeps the
+   deterministic LOCAL handoff; everything else is arbitrated through a
+   per-LLC virtual-time queue. Measured law: the pair must share the queue
+   shape — gating only one of the two threads destabilizes 1% lows by 3–8×,
+   because the GT↔RT handoff is the frame's serial spine.
 
-- Each task starts with a **deficit** (quantum + new-flow bonus ≈ 10ms credit)
-- Each execution bout consumes deficit proportional to runtime
-- When deficit exhausts → new-flow bonus removed → task competes normally
-- GAME tasks skip deficit drain entirely — their new-flow bonus persists forever
-
-### EEVDF-Inspired Weighting
-
-scx_cake uses a virtual runtime system inspired by EEVDF:
-
-- **Sleep lag credit**: Tasks that yield voluntarily (game threads at vsync, audio callbacks) accumulate credit that reduces their DSQ weight on the next wakeup — dispatching them ahead of continuous consumers.
-- **Nice scaling**: Per-task `nice_shift` (0-12) scales runtime cost. High `nice` priority → less vruntime cost → dispatches sooner. Computed once per 64 stops from `p->scx.weight`.
-- **Capacity scaling**: On heterogeneous CPUs (P/E cores), E-core runtime is scaled by CPU capacity so tasks running on slower cores accumulate proportionally less vruntime.
-- **CPUPERF steering**: During GAMING state, GAME tasks signal max CPU frequency boost (1024); non-GAME tasks use reduced boost (768). Check-before-write avoids redundant kfunc calls.
-
----
-
-## 4. Architecture
-
-### Overview
+### The journey of a wakeup (champion build)
 
 ```mermaid
 flowchart TD
-    subgraph HOT["BPF Hot Path"]
-        SELECT["cake_select_cpu<br/>3-gate + tunnel"] --> |GATE 1| PREV["prev_cpu idle?<br/>scx_bpf_test_and_clear_cpu_idle"]
-        SELECT --> |GATE 2| SCAN["Perf-ordered scan<br/>cpus_fast_to_slow / cpus_slow_to_fast<br/>(only when big_core_phys_mask != 0)"]
-        SELECT --> |GATE 3| KERNEL["scx_bpf_select_cpu_dfl<br/>kernel authoritative idle scan"]
-        SELECT --> |TUNNEL| ENQ["cake_enqueue<br/>all CPUs busy"]
-
-        PREV --> LOCALON["SCX_DSQ_LOCAL_ON<br/>direct to CPU"]
-        SCAN --> LOCALON
-        KERNEL --> LOCALON
-
-        ENQ --> |"weighted vtime"| LLCDSQ["Per-LLC DSQ"]
-        LLCDSQ --> DISPATCH["cake_dispatch"]
-        DISPATCH --> |"1. Local LLC<br/>scx_bpf_dsq_move_to_local"| LOCAL["Run task"]
-        DISPATCH --> |"2. Cross-LLC steal<br/>(nr_llcs > 1, victim queued > 1)"| STEAL["Steal from other LLC"]
+    W[task wakes] --> MS{sync message wake?<br/>pipe-style}
+    MS -->|yes| SIB[SMT sibling of waker]
+    MS -->|no| BE{default-user,<br/>non-sync?}
+    BE -->|yes| NAT[kernel native idle pick]
+    NAT -->|hit| OK[idle CPU chosen]
+    NAT -->|miss| FS
+    BE -->|no| FS[scoreboard fast-scan:<br/>prev → probe slots,<br/>test_and_clear claim]
+    FS -->|hit| OK
+    FS -->|miss| CS[core-spread:<br/>full-idle core for bulk]
+    CS -->|miss| NF[native fallback helper]
+    NF --> OK2[best-effort CPU]
+    OK --> ENQ
+    OK2 --> ENQ
+    subgraph ENQ[enqueue]
+        I{target idle?} -->|yes| DL["direct local insert<br/>+ SCX_ENQ_KICK_IDLE fold<br/>(1 kfunc, kick included)"]
+        I -->|no| BW{busy wake accepted?<br/>owner class / pressure /<br/>storm-guard shield}
+        BW -->|yes| DL2[local insert + shaped kick]
+        BW -->|no| HG{hybrid frame gate:<br/>RenderThread always;<br/>GameThread if target idle<br/>or frame-owned}
+        HG -->|local| DL3[local insert via<br/>cake_insert_local_kick_idle]
+        HG -->|arbiter| VT["per-LLC vtime DSQ<br/>vtime ceiling clamp<br/>(frontier + 2q)"]
     end
-
-    subgraph CLASSIFY["Classification Engine (cake_stopping)"]
-        EVERY["Every stop"] --> DEFICIT["DRR++ deficit drain"]
-        EVERY --> WFREQ["Wake frequency EWMA"]
-        EVERY --> VTIME["Vtime staging<br/>(staged_vtime_bits)"]
-        GATE64["Every 64th stop<br/>(confidence gate)"] --> RECLASS["PELT reclassify<br/>GAME / NORMAL / HOG / BG"]
-        GATE64 --> NICE["Nice shift recompute"]
-        RUNNING["cake_running<br/>(every context switch)"] --> STAMP["BSS: run_start, tick_slice,<br/>is_yielder, running_class,<br/>wake_freq, game_cpu_mask"]
+    DL --> DISP
+    DL2 --> DISP
+    DL3 --> DISP
+    VT --> DISP
+    subgraph DISP[dispatch on the target CPU]
+        LQ[local DSQ first] --> KR{nothing queued?}
+        KR -->|keep running| CUR[extend current owner]
+        KR -->|llc_pending set| PULL[pull shared LLC queue]
+        PULL --> IDLE[else publish idle]
     end
 ```
 
-### Source Files
+**Design decisions, and why:**
 
-| File           | Lines  | Purpose                                                          |
-| :------------- | :----- | :--------------------------------------------------------------- |
-| `cake.bpf.c`   | ~3,300 | All BPF ops + classification engine + BenchLab                   |
-| `intf.h`       | ~690   | Shared structs, constants, telemetry definitions                 |
-| `bpf_compat.h` | ~38    | Relaxed atomics compatibility shim                               |
-| `main.rs`      | ~750   | Rust loader, CLI, profiles, topology, audio/compositor detection |
-| `topology.rs`  | ~270   | CPU topology detection (CCDs, P/E cores, V-Cache, SMT)           |
-| `calibrate.rs` | ~305   | ETD inter-core latency measurement (CAS ping-pong)               |
-| `tui.rs`       | ~4,500 | Terminal UI: debug view, live matrix, BenchLab, topology         |
+- *Local-first, arbiter-second.* Direct local inserts are the cheapest
+  correct handoff (`SCX_DSQ_LOCAL_ON | cpu`); the shared queue exists for
+  fairness and work conservation, not as the common case. Local queue depth
+  in-game measures ~0 (8 non-zero samples in 2.8M probes).
+- *The hybrid gate is owner-conditional for GameThread.* GT→LOCAL onto a
+  frame-owned core preserves the pair handoff; GT→arbiter otherwise escapes
+  bulk pileups. This single condition is what converted average FPS to parity-
+  or-better while keeping the 1%-low/p99 wins (the 2×2 gate ablation is in the
+  campaign doc).
+- *The idle kick rides the insert.* With the `SCX_ENQ_KICK_IDLE` kernel flag
+  (patches in [kernel-patches/](./kernel-patches/), BTF-probed at load), the
+  enqueue path is one kfunc instead of two: measured 164.6 → 46.8 ns/call
+  in-game with identical kick semantics.
+- *Fairness is bounded, not strict.* `dsq_vtime += runtime +
+  (100−weight)·20480`, seeded from the published frontier, wake-clamped to
+  `frontier + 2 quanta` so sleepers rejoin near the present. The arbiter
+  orders fallback work; placement is trusted elsewhere.
+- *Routing avoids noisy cores deterministically.* EEVDF dodges IRQ/RT-loaded
+  cores statistically via capacity accounting; cake's static routing was
+  measured RT-blind (compositor/audio FIFO threads preempting the frame
+  pipeline ~400–680/s). `--irq-avoid auto` demotes those cores at load.
 
-### Ops Callbacks
+## Hot paths and cold paths
 
-| Callback                  | Role                                                       | Hot/Cold          |
-| :------------------------ | :--------------------------------------------------------- | :---------------- |
-| `cake_select_cpu`         | 3-gate idle CPU selection + kfunc tunneling                | **Hot**           |
-| `cake_enqueue`            | Weighted vtime insert into per-LLC DSQ                     | **Hot**           |
-| `cake_dispatch`           | Local LLC → cross-LLC steal                                | **Hot**           |
-| `cake_running`            | BSS staging: run_start, is_yielder, game_cpu_mask, cpuperf | **Hot** (minimal) |
-| `cake_stopping`           | Confidence-gated reclassification + DRR++ + vtime staging  | **Warm**          |
-| `cake_yield`              | Yield count telemetry (stats-gated)                        | **Cold**          |
-| `cake_runnable`           | Preempt count + wakeup source telemetry (stats-gated)      | **Cold**          |
-| `cake_set_cpumask`        | Event-driven affinity update (replaces polling)            | **Cold**          |
-| `cake_init_task`          | Arena + task_storage allocation, initial classification    | **Cold** (once)   |
-| `cake_exit_task`          | Arena deallocation                                         | **Cold** (once)   |
-| `cake_init` / `cake_exit` | DSQ creation, arena init, UEI                              | **Cold** (once)   |
+Per-callback costs from kernel `bpf_stats` under live KovaaK's (~13k wakes/s;
+champion build):
 
-### Data Structures
+| Path | Temperature | Cost (ns/call) | What happens |
+| :-- | :-- | --: | :-- |
+| `cake_select_cpu` | hot, ~wake rate | ~53–55 | Message-wake fast path → native bulk escape → scoreboard fast-scan (prev + probe slots, claim via `test_and_clear_cpu_idle`) → core-spread → native fallback. Reads: task_struct, `cpu_status`, RODATA probe packs. |
+| `cake_enqueue` | hot, ~wake rate | ~47 (folded) / ~165 (explicit kick) | Idle → direct local insert (+kick fold). Busy → accepted-wake local handoff or hybrid gate or vtime arbiter. The comm-word service classifier and the gate cost ~2 loads. |
+| `cake_dispatch` | hot, ~2× ctx-switch rate | ~22–23 | Local DSQ → keep-running slice refresh → `llc_pending`-gated shared pull → idle publication. |
+| `cake_running` | hot, ctx-switch rate | ~30–32 | Owner bookkeeping start: last-pid fast path, owner publication on task change (write-elided). |
+| `cake_stopping` | hot, ctx-switch rate | ~21 | Vtime integration, owner-runtime EWMA, frontier publication, owner-class/pressure derivation (LUT, no branches). |
+| `cake_enable` | cold, task birth | ~8–14 | Seed `dsq_vtime` from the CPU frontier. |
+| `cake_init` | cold, once | ~11µs | Create per-LLC + per-CPU DSQs, pin `cpuperf` to max (gaming). |
+| loader (`main.rs`) | cold, once | ~0.5s | Topology scan, perf scores, IRQ/RT noise scan (~300ms sampling), RODATA bake, attach. |
+| governor loop | cold, 1 Hz | ~10ms/tick worst | Trust-lane tick; frame-reserve RT rescan when enabled. |
 
-**Dual-storage architecture**:
+Cold paths deliberately absorb work so hot paths don't: the probe tables,
+LLC masks, sibling maps, demoted perf order — all baked once into
+`const volatile` RODATA, so the verifier const-folds bounds and the JIT sees
+immediates. Debug-only surfaces (TUI telemetry, arena task contexts, the
+behavioral classifier, ring-buffer events) compile to empty stubs in release
+and are dead-code-eliminated — verified by disassembling the release object,
+not assumed.
 
-- **`cake_task_hot`** (BPF task_storage, ~10ns lookup) — CL0 scheduling-critical fields used every stop: `task_class`, `deficit_u16`, `packed_info`, `warm_cpus`, `staged_vtime_bits`, `nice_shift`, `sleep_lag`, `cached_cpumask`
-- **`cake_task_ctx`** (BPF Arena, ~29ns TLB walk) — Telemetry-only fields, gated behind `CAKE_STATS_ACTIVE`. Dead in release builds.
-- **`cake_cpu_bss`** (BSS array, L1-cached) — Per-CPU hot fields: `run_start`, `tick_slice`, `is_yielder`, `cached_now`, `idle_hint`, `waker_boost`, `cached_perf`
+## Named concepts and code patterns
 
-**Per-CPU arena** (`cake_per_cpu`, conditional sizing):
+| Pattern | What it is | Why it exists |
+| :-- | :-- | :-- |
+| **Cake Scoreboard Dispatch** | Init-built candidate tables + owner-published per-CPU lanes as the only cross-CPU placement signal. | Placement from cache-line facts, not shared structures. One writer per line. |
+| **Owner publication / write elision** | Only the owning CPU writes its `cpu_status`/`cpu_frontier`; `cake_status_same_visible_state` skips no-op publishes. | A redundant store still invalidates remote cache copies; elision keeps the lanes read-mostly. |
+| **Service-gated hybrid queue** | Queue shape chosen per thread role (frame pair LOCAL, rest arbiter). | The two pure shapes trade average vs tails; the gate takes both. |
+| **Pair-coherence law** | GameThread and RenderThread must share a queue shape. | Measured: any partial gate destabilizes 1% lows 3–8× (handoff variance re-enters). |
+| **Enq-kick-idle fold** | `SCX_ENQ_KICK_IDLE` enq_flag on local inserts; the kernel kicks from inside the insert. | Two kfunc crossings → one on every idle wake (−72% enqueue ns in-game). |
+| **Noise-avoid** | Load-time demotion of IRQ-storm/RT-resident cores in routing scores. | FIFO compositor/audio threads preempt anything sched_ext puts under them; dodge deterministically. |
+| **The RT-magnet law** 📦 | An exclusively-reserved (mostly idle) core becomes the kernel's *preferred* RT wake/push target — `cpupri` ranks idle CPUs first. | Why `--frame-reserve` is parked: isolation under sched_ext attracts the interference it was built to avoid. Counter-designs are documented in the campaign log. |
+| **Comm-word classification** | Service detection via 64-bit word compares on `p->comm` (`GameThread`, `RenderThread`, bench services). | ~2 loads on the hot path. A behavioral classifier exists in debug telemetry but isn't wired into release placement yet — known design smell, honest tradeoff. |
+| **Frontier clamp** | Wakee vtime capped to `frontier + 2 quanta`. | Responsiveness-first: sleepers rejoin near the present instead of waiting out accumulated CPU-bound progress. |
+| **Keep-running** | Dispatch extends the current owner when nothing is queued. | The cheapest scheduling decision is no decision; ~107k/s in-game. |
+| **`llc_pending` hint** | Conservative may-have-work flag for the shared queue. | Idle dispatch never pays for empty shared pulls. |
+| **Kfunc-floor honesty** | Enqueue ablations (`FAST_ENQUEUE`, kick-skips) measured zero: the dsq-insert+kick kfunc cost is the floor. | Redesigns target mechanisms, not phantom overhead. |
 
-- Release: 64B/CPU (CL0 only, 1 page total)
-- Debug: 128B/CPU (CL0 + CL1 telemetry, 2 pages total)
+## The mutation and testing system
 
-### DSQ Architecture
+`scx_cake` is developed as an instrumented mutation campaign: thousands of
+benchmark runs and hundreds of live game captures, each tied to a change-id,
+with **null results logged as findings**. Nothing ships on intuition; parked
+experiments stay in-tree behind knobs with their falsification documented.
 
 ```mermaid
 flowchart LR
-    subgraph SINGLE["Single-CCD (9800X3D)"]
-        DSQ0["LLC_DSQ_BASE + 0<br/>vtime ordered<br/>nr_llcs = 1<br/>stealing skipped"]
-    end
-
-    subgraph MULTI["Multi-CCD (9950X)"]
-        DSQ1["LLC_DSQ_BASE + 0<br/>CCD 0 cores"] <-->|"cross-LLC steal<br/>when local empty"| DSQ2["LLC_DSQ_BASE + 1<br/>CCD 1 cores"]
-    end
+    IDEA[hypothesis from<br/>lever map / profiling] --> MUT[mutation behind a knob<br/>env or CLI, default off]
+    MUT --> GATE[load gate:<br/>startup log proves the<br/>arm is real]
+    GATE --> MECH[mechanism check:<br/>bpf_stats ns/call,<br/>per-thread /proc profile,<br/>diag counters]
+    MECH -->|mechanism dead| PARK[park + document law]
+    MECH -->|alive| AB[Kovaaks frame A/B:<br/>ABBA order rotation,<br/>focus-gated, 60s MangoHud<br/>socket captures]
+    AB --> STATS[order-aware analysis:<br/>per-slot + pooled,<br/>medians for extremes]
+    STATS -->|win| KEEP[keep → champion candidate<br/>→ bake as default]
+    STATS -->|null/loss| PARK
+    KEEP --> STORE[(decision store +<br/>ML warehouse +<br/>campaign doc)]
+    PARK --> STORE
+    STORE --> IDEA
 ```
 
-- **Vtime encoding**: `now_cached + dsq_weight` — class weight ranges guarantee ordering (GAME always before NORMAL)
-- **RODATA gate**: `if (nr_llcs <= 1) return;` skips all cross-LLC stealing on single-CCD systems
-
-### Zero Global State
-
-| Anti-pattern                | scx_cake                                      |
-| :-------------------------- | :-------------------------------------------- |
-| Global atomics              | **0** (except game_cpu_mask, transition-only) |
-| Volatile variables          | **0**                                         |
-| Division in hot path        | **0** (shift-based µs conversion: `>> 10`)    |
-| Global vtime writes         | **0** (per-task only)                         |
-| RCU lock/unlock in hot path | **0**                                         |
-
-### Kfunc Tunneling
-
-`select_cpu` caches `scx_bpf_now()` in per-CPU BSS (`cpu_bss[cpu].cached_now`). `enqueue` reuses this value, saving ~15ns (1 kfunc trampoline entry) on the all-busy path.
-
-### VPROT: Preemption Protection
-
-When a GAME task enters the DSQ during GAMING state and all CPUs are busy, `cake_enqueue` actively preempts a non-GAME task:
-
-1. **O(1) victim finding**: `__builtin_ctzll(~game_cpu_mask)` — single `tzcnt` instruction (1 cycle on Zen 4). Bits set in `~game_cpu_mask` correspond to CPUs running non-GAME tasks.
-2. **VPROT guard**: Before preempting, check if the victim has run long enough to justify interruption. The protection threshold is computed as:
-   - **Base**: `tick_slice >> 4`, clamped to [125µs, 500µs]
-   - **Per-class scaling**:
-     - **NORMAL**: 75% (×3>>2) — useful interactive work, strong protection
-     - **BG**: 50% (>>1) — background tasks, moderate protection
-     - **HOG**: 25% (>>2) — bulk CPU consumers, minimal protection
-3. **Preempt decision**: If `elapsed >= vprot_ns` → `scx_bpf_kick_cpu(victim, SCX_KICK_PREEMPT)`. Otherwise → suppressed (counted as `nr_vprot_suppressed` in stats).
-
-This ensures GAME tasks never wait in the DSQ for a natural context switch while still protecting tasks from micro-slicing. The per-class scaling means HOG tasks (compilers, render farms) get preempted quickly while NORMAL desktop tasks get reasonable protection.
-
-### Starvation Guard
-
-The tiered DSQ weight system intrinsically prevents starvation:
-
-- **Non-overlapping weight ranges** guarantee that within each class, tasks compete fairly on vtime (runtime cost determines ordering)
-- **New-flow bonus** gives newly-woken tasks a vtime advantage, preventing permanent queue-back
-- **Deficit drain** ensures long-running tasks lose their new-flow bonus and compete normally
-- **Sleep lag credit** rewards voluntary yielders, preventing inversion where a yielding task falls behind a continuous consumer
-
-The clock domain fix in `cake_running` (using `scx_bpf_now()` instead of `p->se.exec_start`) prevents a subtle starvation bug: after ~22 minutes, accumulated IRQ time drift in `exec_start` would exceed the u32 wrap boundary, corrupting elapsed-time checks and causing unconditional preemption (priority inversion).
-
-### Scheduler States
-
-The userspace TUI drives state machine transitions written to BPF BSS:
-
-| State           | Value | Trigger                            | Effect                                   |
-| :-------------- | :---- | :--------------------------------- | :--------------------------------------- |
-| **IDLE**        | 0     | No game or compiler detected       | Baseline — NORMAL/HOG classes only       |
-| **COMPILATION** | 1     | ≥2 compiler processes at ≥78% PELT | Cluster co-scheduling for build locality |
-| **GAMING**      | 2     | Game detected (Steam/.exe/family)  | Full priority system: GAME/HOG/BG active |
-
-### Loader Intelligence
-
-The Rust loader (`main.rs`) performs significant one-time work at startup, baking results into BPF RODATA (immutable after load):
-
-**Prefcore Ranking → Core Steering Arrays**:
-
-- Reads `/sys/devices/system/cpu/cpu*/cpufreq/amd_pstate_prefcore_ranking` for each CPU
-- Sorts by descending rank (fastest first), grouping SMT siblings together: `[best_phys, best_smt, second_phys, second_smt, ...]`
-- Populates `cpus_fast_to_slow` (GAME scan order) and `cpus_slow_to_fast` (non-GAME scan order) in RODATA
-- 0xFF sentinel terminates the array on CPUs without prefcore rankings
-
-**Audio Stack Detection** (2-phase):
-
-1. **Phase 1 — Comm scan**: Searches `/proc/*/comm` for known audio daemons: `pipewire`, `wireplumber`, `pipewire-pulse`, `pulseaudio`, `jackd`, `jackdbus`
-2. **Phase 2 — PipeWire socket scan**: Reads `/proc/net/unix` to find the PipeWire socket inode (`/run/user/<uid>/pipewire-0`), then scans `/proc/*/fd` for processes holding a file descriptor to that inode. This catches audio mixer daemons (`goxlr-daemon`, `easyeffects`, etc.) without brittle comm lists.
-
-- Up to 8 audio TGIDs baked into `audio_tgids[]` RODATA. During GAMING, BPF promotes matching tasks to GAME class.
-
-**Compositor Detection**:
-
-- Scans `/proc/*/comm` for known Wayland/X11 compositors: `kwin_wayland`, `kwin_x11`, `mutter`, `gnome-shell`, `sway`, `Hyprland`, `weston`, `labwc`, `wayfire`, `river`, `gamescope`
-- Up to 4 compositor TGIDs baked into `compositor_tgids[]` RODATA. During GAMING, compositors receive GAME-level priority — essential for frame presentation latency parity.
-
-**Topology Arrays**:
-
-- `cpu_sibling_map[]` — SMT sibling pairs (Gate 2 class-mismatch filter)
-- `cpu_llc_id[]` — Per-CPU LLC assignment (DSQ sharding)
-- `llc_cpu_mask[]`, `core_cpu_mask[]` — Bitmask sets for LLC/core grouping
-- `big_core_phys_mask`, `little_core_mask`, `vcache_llc_mask` — Intel hybrid + V-Cache topology
-
----
-
-## 5. Configuration
-
-### Profiles (`--profile, -p`)
-
-| Profile     | Quantum | Starvation | Use Case                              |
-| :---------- | :------ | :--------- | :------------------------------------ |
-| **gaming**  | 2ms     | 100ms      | **(Default)** Balanced for most games |
-| **esports** | 1ms     | 50ms       | Competitive FPS, ultra-low latency    |
-| **legacy**  | 4ms     | 200ms      | Older CPUs, reduced overhead          |
-| **battery** | 4ms     | 200ms      | Power-efficient for handhelds/laptops |
-| **default** | 2ms     | 100ms      | Alias for gaming                      |
-
-### CLI Arguments
-
-| Argument                  | Default  | Description                             |
-| :------------------------ | :------- | :-------------------------------------- |
-| `--profile, -p <PROFILE>` | `gaming` | Select preset profile                   |
-| `--quantum <µs>`          | profile  | Base time slice in microseconds         |
-| `--new-flow-bonus <µs>`   | profile  | Extra deficit for newly woken tasks     |
-| `--starvation <µs>`       | profile  | Max run time before forced preemption   |
-| `--verbose, -v`           | `false`  | Enable live TUI stats display           |
-| `--interval <secs>`       | `1`      | TUI refresh interval                    |
-| `--testing`               | `false`  | Automated benchmarking mode (see below) |
-
-### Testing Mode
-
-`--testing` runs an automated benchmark for CI and regression testing:
-
-1. **Warmup**: 1 second pause for the scheduler to stabilize
-2. **Collection**: 10 seconds of operation, sampling per-CPU BSS dispatch counters
-3. **Output**: Single-line JSON to stdout:
-
-```json
-{
-  "duration_sec": 10.0,
-  "total_dispatches": 1847263,
-  "dispatches_per_sec": 184726.3
-}
-```
-
-The scheduler exits automatically after printing. Requires a **debug build** (release builds silently ignore `--testing`). Useful for comparing scheduling throughput across code changes.
-
-### Yield-Gated Quantum
-
-Instead of per-tier multipliers, scx_cake uses a **yield-gated quantum** system:
-
-- **Yielders** (cooperative tasks that voluntarily yield): Get full quantum ceiling (up to 2ms default)
-- **Non-yielders** (bulk consumers): Get PELT-scaled slice, capped per class
-- **GAME during GAMING**: 2x quantum ceiling (tasks yield at vsync, so they'll never consume it all)
-- **HOG/BG during GAMING**: Halved caps (forces more preemption points for GAME tasks)
-
-> [!NOTE]
-> **Higher weight = dispatches later.** GAME [0-5120] dispatches before NORMAL [8192-13312] dispatches before HOG [16384-21504] dispatches before BG [49152-54272]. Within each class, PELT utilization and runtime cost provide fine-grained ordering.
-
-### Examples
-
-```bash
-# Default gaming profile
-sudo scx_cake
-
-# Competitive gaming
-sudo scx_cake -p esports
-
-# Gaming with custom quantum and live stats
-sudo scx_cake --quantum 1500 -v
-
-# Battery-friendly for laptop gaming
-sudo scx_cake -p battery
-```
-
----
-
-## 6. Build Modes
-
-`scx_cake` has two build modes that control whether telemetry instrumentation is compiled into the BPF code.
-
-### Release Mode (`cargo build --release`)
-
-- `build.rs` passes `-DCAKE_RELEASE=1` to Clang
-- **All `#ifndef CAKE_RELEASE` blocks are dead-code eliminated** — arena telemetry, per-task counters, gate hit tracking, BenchLab, and the entire `cake_task_ctx` arena struct are compiled out
-- `CAKE_STATS_ENABLED` is a compile-time constant `0` — Clang eliminates all telemetry branches at BPF compile time
-- Per-CPU arena blocks shrink from 128B (debug) to 64B (release)
-- **TUI still works** but only shows aggregate BSS stats (gate latencies, dispatch counts). Per-task arena fields (gate hit %, callback durations, quantum breakdown) are unavailable
-
-> [!TIP]
-> Use `--release` for production gaming. The telemetry overhead is small (~2-5%), but eliminating it gives the tightest possible scheduling latency.
-
-### Debug Mode (`cargo build`)
-
-- `CAKE_RELEASE` is **not defined** — all telemetry code is compiled in
-- `CAKE_STATS_ENABLED` becomes a volatile BSS read of `enable_stats`, controllable at runtime
-- `CAKE_STATS_ACTIVE` = `CAKE_STATS_ENABLED && !bench_active` — telemetry is suppressed during BenchLab runs to avoid measuring measurement overhead
-- Full per-task arena telemetry: gate hit counters, callback duration timers, quantum utilization, waker chain, LLC placement, dispatch gap tracking
-- **Required for**: full TUI live matrix, BenchLab benchmarks, per-task gate analysis
-
-```bash
-# Production (release) — minimal overhead, limited TUI
-cargo build --release -p scx_cake
-sudo ./target/release/scx_cake -v
-
-# Development (debug) — full telemetry, complete TUI
-cargo build -p scx_cake
-sudo ./target/debug/scx_cake -v
-```
-
----
-
-## 7. TUI Guide
-
-The TUI is activated with `--verbose` / `-v` and provides real-time visibility into every scheduling decision. It requires a **debug build** for full per-task telemetry.
-
-### Tabs
-
-Navigate between tabs with `Tab` / `→` (next) and `Shift-Tab` / `←` (previous).
-
-| Tab                 | Content                                                                                |
-| :------------------ | :------------------------------------------------------------------------------------- |
-| **Dashboard**       | Aggregate stats header + live task matrix with per-task scheduling data                |
-| **Topology**        | CPU topology map: CCDs, P/E cores, V-Cache, SMT siblings, core-to-core latency heatmap |
-| **BenchLab**        | In-kernel kfunc microbenchmarks: 60+ operations with ns-precision timing               |
-| **Reference Guide** | Quick reference for column meanings, keybindings, and terminology                      |
-
-### Dashboard: Aggregate Stats
-
-The top section shows system-wide scheduling statistics aggregated from per-CPU BSS counters:
-
-- **Gate hit rates**: Gate 1 (prev_cpu idle) %, Gate 2 (perf-ordered scan) %, Gate 3 (kernel fallback) %, Tunnel %
-- **Dispatch stats**: DSQ queued, consumed, local dispatches, cross-LLC steals, dispatch misses
-- **Flow stats**: New flow dispatches, old flow dispatches, DRR++ deficit activity
-- **Game state**: Detected game name, TGID, PPID, thread count, sched_state (IDLE/COMPILATION/GAMING)
-- **EEVDF stats**: Sleep lag applications, vprot suppression count, nice shift distribution
-
-### Dashboard: Live Task Matrix
-
-The scrollable table shows one row per task with these columns:
-
-| Column     | Meaning                                                                             |
-| :--------- | :---------------------------------------------------------------------------------- |
-| **CPU**    | Last CPU the task ran on                                                            |
-| **PID**    | Process ID                                                                          |
-| **ST**     | Liveness: ●LIVE (BPF-tracked + running), ○IDLE (alive, no BPF data), ✗DEAD (exited) |
-| **COMM**   | Task command name (from `/proc/PID/comm`)                                           |
-| **CLS**    | Task class: GAME 🎮, NORM, HOG 🔥, BG                                               |
-| **VCSW**   | Voluntary context switches (delta per interval)                                     |
-| **AVGRT**  | Average runtime per execution bout (µs)                                             |
-| **MAXRT**  | Maximum single-run duration (µs)                                                    |
-| **GAP**    | Average dispatch gap — time between consecutive runs (µs)                           |
-| **JITTER** | Scheduling jitter — variance in dispatch timing (µs)                                |
-| **WAIT**   | Average wait time in DSQ before dispatch (µs)                                       |
-| **RUNS/s** | Scheduling frequency — how often this task runs per second                          |
-| **CPU**    | Current/last CPU placement (core ID)                                                |
-| **SEL**    | `select_cpu` callback duration (ns)                                                 |
-| **ENQ**    | `enqueue` callback duration (ns)                                                    |
-| **STOP**   | `stopping` callback duration (ns)                                                   |
-| **RUN**    | `running` callback duration (ns)                                                    |
-| **G1**     | Gate 1 (prev_cpu idle) hit percentage for this task                                 |
-| **G3**     | Gate 3 (kernel scan) hit percentage for this task                                   |
-| **DSQ**    | DSQ tunnel (all busy) hit percentage                                                |
-| **MIGR/s** | CPU migrations per second                                                           |
-| **TGID**   | Thread Group ID (process leader PID)                                                |
-| **Q%F**    | Quantum full — % of runs where task consumed entire time slice                      |
-| **Q%Y**    | Quantum yield — % of runs where task yielded voluntarily                            |
-| **Q%P**    | Quantum preempt — % of runs where task was preempted                                |
-| **WAKER**  | PID of the last task that woke this task                                            |
-| **NICE**   | Nice shift value (0-12) — EEVDF vruntime scaling factor                             |
-
-Tasks are grouped by TGID (process) with collapsible headers. The detected game family is highlighted.
-
-### Topology Tab
-
-Displays the detected CPU topology in a visual format:
-
-- **CCD map**: Which cores belong to which LLC/CCD
-- **P/E core identification**: Big cores vs Little cores (Intel hybrid)
-- **V-Cache detection**: Asymmetric LLC sizes across CCDs
-- **SMT siblings**: Logical CPU pairs sharing a physical core
-- **Core-to-core latency matrix**: Press `b` to run an ETD (Empirical Topology Discovery) benchmark measuring CAS ping-pong latency between every core pair. Results display as a color-coded heatmap.
-
-### BenchLab Tab
-
-In-kernel microbenchmark suite measuring the real cost of scheduling primitives:
-
-- **60+ benchmarked operations**: kfunc trampolines, BSS reads, arena lookups, RODATA constants, data structure accesses, idle cascades, classification paths
-- Each operation shows: **ID**, **Name**, **Category** (Data Read, Synchronization, Idle Selection, etc.), **Type** (K=kfunc, C=cake-internal), and **measured latency in nanoseconds**
-- Press `b` to trigger a benchmark run (runs in-kernel, suppresses telemetry during measurement)
-- Results persist across runs; press `c` to copy to clipboard for external analysis
-
-### Keybindings
-
-| Key               | Action                                                              |
-| :---------------- | :------------------------------------------------------------------ |
-| `q` / `Esc`       | Quit                                                                |
-| `Tab` / `→`       | Next tab                                                            |
-| `Shift-Tab` / `←` | Previous tab                                                        |
-| `↑` / `↓`         | Scroll table / bench results                                        |
-| `t`               | Jump to top of table                                                |
-| `s`               | Cycle sort column (PID → PELT → Runs/s → CPU → Gate1% → ...)        |
-| `S`               | Toggle sort direction (ascending ↔ descending)                      |
-| `f`               | Toggle filter: BPF-tracked only ↔ all system tasks                  |
-| `Enter`           | Collapse/expand PPID group (Dashboard)                              |
-| `Space`           | Collapse/expand TGID group (Dashboard)                              |
-| `x`               | Fold/unfold all PPID groups (Dashboard)                             |
-| `c`               | Copy current tab data to clipboard                                  |
-| `d`               | Dump full snapshot to timestamped file (`tui_dump_<epoch>.txt`)     |
-| `r`               | Reset all BSS stats counters to zero                                |
-| `b`               | Run benchmark (BenchLab on most tabs, core latency on Topology tab) |
-| `+` / `=`         | Faster refresh rate (halve interval, min 250ms)                     |
-| `-`               | Slower refresh rate (double interval, max 5000ms)                   |
-
-### Data Export
-
-Two export methods are available from any tab:
-
-- **Clipboard** (`c`): Copies the current tab's data as formatted text. On Dashboard, includes aggregate stats + full task matrix. On BenchLab, includes all benchmark results with categories.
-- **File dump** (`d`): Writes a complete snapshot to `tui_dump_<epoch>.txt` in the current working directory. Includes all stats, task matrix, and metadata. Useful for before/after comparisons or sharing with developers.
-
----
-
-## 8. Performance
-
-### Target Hardware
-
-| Component | Specification                       |
-| :-------- | :---------------------------------- |
-| CPU       | AMD Ryzen 7 9800X3D (1 CCD, 8C/16T) |
-| Kernel    | Linux 6.12+ with sched_ext          |
-
-### Design Targets
-
-- **Sub-microsecond scheduling decisions** — Select CPU + enqueue under 100ns typical
-- **Zero bus lock contention** — No global atomics means no scaling regression under load
-- **Consistent 1% lows** — Tiered weight system prevents frame time spikes from background work
-- **Automatic game detection** — Two-phase Steam/Wine detection with holdoff hysteresis
-
-### Benchmarks
-
-- [schbench](https://github.com/brendangregg/schbench) — Scheduler latency microbenchmark
-- Arc Raiders — AAA game stress testing (frame rates, 1% lows)
-- Splitgate 2 — Competitive FPS latency testing
-
-> [!NOTE]
-> Throughput workloads (compilers, render farms) will perform **worse** than CFS/EEVDF. This scheduler explicitly trades throughput for latency — the same tradeoff network CAKE makes for packets.
-
-### Comparison with Other sched_ext Schedulers
-
-| Feature                 | scx_cake                            | scx_bpfland                    | scx_lavd                       | scx_cosmos                        |
-| :---------------------- | :---------------------------------- | :----------------------------- | :----------------------------- | :-------------------------------- |
-| **Primary goal**        | Gaming latency                      | General-purpose interactive    | Latency-sensitive workloads    | General-purpose + gaming          |
-| **Task classification** | 4-class (GAME/NORMAL/HOG/BG)        | Interactive vs batch (2-class) | Urgency score (continuous)     | Latency criticality (multi-level) |
-| **Game detection**      | Automatic (Steam/Wine/process tree) | None                           | Behavioral (latency patterns)  | None                              |
-| **DSQ structure**       | Per-LLC vtime-ordered               | Per-LLC + shared               | Global ordered                 | Per-LLC                           |
-| **Idle CPU selection**  | 3-gate custom + kernel fallback     | Kernel default                 | Custom idle scan               | Kernel default + LLC preference   |
-| **EEVDF features**      | Sleep lag, nice scaling, vprot      | None                           | Urgency scoring                | None                              |
-| **Core steering**       | Prefcore-aware (P/E, V-Cache)       | LLC-aware                      | LLC-aware                      | LLC-aware                         |
-| **Global atomics**      | 0 (MESI-guarded BSS)                | Minimal                        | Some                           | Minimal                           |
-| **When to choose**      | Gaming-first, multi-game families   | Desktop daily driver           | Mixed interactive + throughput | Desktop with gaming needs         |
-
-> [!NOTE]
-> scx_cake is **not** a general-purpose scheduler. It makes explicit tradeoffs that benefit gaming at the cost of throughput workloads. For daily desktop use without gaming, `scx_bpfland` or `scx_cosmos` may be better choices.
-
----
-
-## 9. Vocabulary
-
-### Core Concepts
-
-| Term            | Definition                                                                                                                               |
-| :-------------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
-| **CAKE**        | [Common Applications Kept Enhanced](https://www.bufferbloat.net/projects/codel/wiki/Cake/). Network AQM algorithm this scheduler adapts. |
-| **DRR++**       | Deficit Round Robin++. Network algorithm balancing fair queuing with strict priority.                                                    |
-| **PELT**        | Per-Entity Load Tracking. Kernel mechanism providing exponentially-decayed CPU utilization per task (`util_avg`).                        |
-| **Class**       | Classification level (GAME/NORMAL/HOG/BG). Controls DSQ weight, quantum cap, and preemption policy.                                      |
-| **Deficit**     | Per-task credit from DRR++. New tasks get bonus credit; GAME tasks skip deficit drain entirely.                                          |
-| **Quantum**     | Base time slice a task is allotted before a scheduling decision.                                                                         |
-| **Sleep Lag**   | EEVDF credit for voluntary yields. Reduces DSQ weight on next wakeup, so yielders dispatch first.                                        |
-| **Waker Boost** | Transitive priority inheritance: tasks woken by GAME threads get GAME-level priority for one cycle.                                      |
-| **Staged Bits** | Pre-computed scheduling state packed into a single u64 by `cake_stopping`, consumed by `cake_enqueue` to avoid redundant computation.    |
-| **Jitter**      | Variance in scheduling latency between consecutive events. Low jitter = consistent frame delivery.                                       |
-
-### Architecture
-
-| Term                    | Definition                                                                                     |
-| :---------------------- | :--------------------------------------------------------------------------------------------- |
-| **Task Storage**        | BPF local storage attached to each task. 10ns lookup; holds CL0 hot scheduling fields.         |
-| **Arena**               | BPF memory region for per-task telemetry data. 29ns TLB walk; dead in release builds.          |
-| **BSS**                 | Zero-initialized BPF global data. Per-CPU arrays (`cpu_bss`) provide L1-cached hot fields.     |
-| **Kfunc Tunneling**     | Caching kfunc return values in per-CPU BSS to avoid redundant trampoline calls.                |
-| **MESI Guard**          | Read-before-write pattern: skip store if value unchanged, preventing cache invalidation.       |
-| **RODATA Gate**         | Compile-time constant that eliminates entire code paths (e.g., single-CCD skips stealing).     |
-| **Confidence Gate**     | Reclassification runs every 64th stop. 63/64 stops reuse cached task_class from task_storage.  |
-| **BenchLab**            | In-kernel microbenchmark suite measuring kfunc costs, data access patterns, and gate cascades. |
-| **Bitfield Coalescing** | Packing fields written together into adjacent bits for fused clear/set ops.                    |
-
-### Hardware
-
-| Term              | Definition                                                                                              |
-| :---------------- | :------------------------------------------------------------------------------------------------------ |
-| **CCD**           | Core Complex Die. Physical chiplet containing cores (9800X3D: 1 CCD, 9950X: 2 CCDs).                    |
-| **LLC**           | Last Level Cache (L3). Cores in same LLC communicate ~3-5x faster than cross-LLC.                       |
-| **SMT**           | Simultaneous Multi-Threading. Two logical CPUs per physical core.                                       |
-| **P/E Cores**     | Intel hybrid architecture: Performance cores (fast) and Efficiency cores (power-saving).                |
-| **V-Cache**       | AMD 3D V-Cache. Asymmetric LLC sizes across CCDs (e.g., 96MB vs 32MB on 9800X3D).                       |
-| **ETD**           | Empirical Topology Discovery. Measures inter-core CAS latency at startup for display.                   |
-| **Cache Line**    | 64-byte block of memory. Smallest unit the CPU loads from RAM. Foundation of data layout.               |
-| **MESI Protocol** | Cache coherency protocol (Modified/Exclusive/Shared/Invalid). Unnecessary writes trigger invalidations. |
-
-### Performance
-
-| Term                | Definition                                                                              |
-| :------------------ | :-------------------------------------------------------------------------------------- |
-| **Hot Path**        | Code on every scheduling decision: select_cpu → enqueue → dispatch.                     |
-| **Cold Path**       | Infrequent code: task init, reclassification (every 64th stop).                         |
-| **Direct Dispatch** | `SCX_DSQ_LOCAL_ON` — task goes directly to a CPU's local queue, bypassing the DSQ path. |
-| **1% Lows**         | Average framerate of the slowest 1% of frames. Key metric for stutter.                  |
-| **Branchless**      | Code avoiding `if/else` to prevent CPU pipeline stalls from branch misprediction.       |
-
-### Anti-Patterns
-
-| Term                   | Definition                                                                                    |
-| :--------------------- | :-------------------------------------------------------------------------------------------- |
-| **False Sharing**      | Performance penalty when CPUs write to different data on the same 64-byte cache line.         |
-| **Cache Invalidation** | Forcing other cores to discard cached data via unnecessary writes. Causes bus locking.        |
-| **Micro-slicing**      | Preempting tasks too frequently. Queued interruptions degrade throughput and increase jitter. |
-| **Volatile**           | Compiler hint preventing optimization. Clogs LSU, breaks ILP/MLP parallelism. Avoid in BPF.   |
-
----
-
-**License**: GPL-2.0
-**Maintainer**: RitzDaCat
+The protocol encodes measured measurement-laws:
+
+- **ABBA order rotation.** Arms run in alternated order across cycles because
+  slot position alone moves tail metrics more than schedulers do (measured:
+  slot-1 advantage up to +5% on 1% lows). Fixed-order tail rankings are
+  invalid.
+- **Focus gating, fail-closed.** Captures refuse to start unless the game
+  window is the active focus; an unfocused scene measures a different
+  workload.
+- **Stutter-aware estimators.** Rare multi-ms game-side stutters hit both
+  arms at a session-dependent rate; at small n the extremes are reported as
+  medians or stutter-excluded means, never raw pooled means.
+- **Mechanism before frames.** A mutation that can't show its mechanism
+  (bpf_stats deltas, preemption attribution, diag counters) doesn't earn
+  bench time; a mutation whose mechanism is falsified at the profile gate is
+  parked without burning capture cycles.
+- **Same-binary arms when possible.** A/B arms differ by one runtime flag on
+  the identical binary (e.g. the enq-kick-idle fold), so the delta isolates
+  the mechanism.
+
+Tooling (the harness lives in the separate `scx_cake_bench_assets`
+repository): a MangoHud-socket capture driver with scheduler-runner staging
+(binaries hash-verified and staged by a scoped root runner), `cake-bpfstats`
+(per-callback ns via kernel `bpf_stats`), a scheduler-agnostic per-thread
+profiler (run%, wait/slice, migrations, involuntary switches), the
+`GAME_DIAG` action recorder with frame-preemptor attribution, an ML warehouse
+that ingests every run with full build/source lineage, and a decision store
+holding keep/park/reject verdicts with their evidence run-ids. Bench-suite
+runs (schbench, stress-ng families, sched-pipe/messaging) guard general
+scheduling performance alongside the game captures.
+
+In-repo A/B harnesses:
+[bench/enq_kick_idle_ab.sh](./bench/enq_kick_idle_ab.sh),
+[bench/enq_kick_idle_schbench_ab.sh](./bench/enq_kick_idle_schbench_ab.sh),
+[bench/scx_cake_thread_profile.py](./bench/scx_cake_thread_profile.py).
+
+## Measured results (2026-06-10)
+
+These are the numbers from one well-instrumented machine and one title.
+They are offered so you can see exactly what was measured and how — not as a
+claim about every system or every game. Reproduce them with the bench
+harness before trusting them on your hardware.
+
+### Test system
+
+| Component | Value |
+| :-- | :-- |
+| CPU | AMD Ryzen 7 9800X3D (8C/16T, single CCD, ~5.5 GHz) |
+| GPU | NVIDIA RTX 4090 |
+| Display | 4K 240 Hz (VRR), MangoHud capture at the socket |
+| Kernel | `7.1.0-rc7-1-cachyos-rc-custom` (`uname -r`) — CachyOS rc kernel **plus one custom patch**: `SCX_ENQ_KICK_IDLE` (in [kernel-patches/](./kernel-patches/)) |
+| EEVDF baseline | The same kernel's EEVDF, with HRTICK-at-deadline default-on and the CachyOS POC idle selector active — a strong, current baseline |
+| Workload | KovaaK's (Proton), focused, ~1005 fps scene for the fresh-instance set |
+
+Protocol: 60s MangoHud socket captures, arm order alternated ABBA across
+cycles, focus-gated fail-closed, fresh game instance, extremes reported as
+medians / stutter-excluded means (one random 3–4.7 ms game-side stutter hit
+each arm exactly once during this set; they land scheduler-independently).
+
+### scx_cake (hybrid4) vs EEVDF — fresh instance, 4-cycle ABBA, n=4/arm
+
+| metric | scx_cake | EEVDF | difference |
+| :-- | --: | --: | :-- |
+| avg FPS | 1008.6 | 1004.8 | +0.4% (slot-consistent, 3 of 4 cycles) |
+| 1% low FPS | 777.2 | 711.9 | +9.2% (zero overlap: lowest cake run 750.0 vs highest EEVDF run 736.5) |
+| p99 frametime | 1.288 ms | 1.405 ms | −8.4% (zero overlap: worst cake 1.333 vs best EEVDF 1.358) |
+| 0.1% low FPS | 617.7 | 588.5 | +5.0% pooled, +6.8% stutter-excluded |
+| max frametime (median) | 1.634 ms | 1.691 ms | −3.3% |
+| frametime stddev (median) | 0.0825 | 0.0955 | −13.6% |
+| jitter max Δ (median) | 0.694 ms | 0.739 ms | −6.1% |
+
+Across the day's longer-session sets the same build held the 1%-low and p99
+advantages with no department lost; cake's tail spreads ran 3–4× tighter
+(1%-low σ 10–40 vs 43–103), and EEVDF's tail quality drifted downward over a
+multi-hour session while cake's stayed flat.
+
+### scx_cake (hybrid4) vs scx_cosmos — 2-cycle ABBA, n=2/arm
+
+| metric | scx_cake | scx_cosmos | difference |
+| :-- | --: | --: | :-- |
+| avg FPS | 1330.5 | 1324.6 | +0.4% (won both cycles, incl. from the later slot) |
+| 1% low FPS | 980.8 | 957.5 | +2.4% (both cycles) |
+| p99 frametime | 1.020 ms | 1.046 ms | −2.5% (both cycles) |
+| frametime stddev | 0.078 | 0.081 | −3.7% |
+| 0.1% low / max FT / jitter | 753.2 / 1.366 / 0.645 | 767.5 / 1.378 / 0.664 | within slot noise — treat as ties at this n |
+
+(Different scene state than the EEVDF set — ~1330 fps; compare columns within
+a table, not across tables.)
+
+### scx_cake (hybrid4) vs scx_lavd — cleanest full cycle, same scene
+
+| metric | scx_cake | scx_lavd | difference |
+| :-- | --: | --: | :-- |
+| avg FPS | 1327.4 | 1240.4 | +7.0% |
+| 1% low FPS | 993.5 | 866.3 | +14.7% |
+| 0.1% low FPS | 758.4 | 463.9 | +63% |
+| max frametime | 1.327 ms | 4.923 ms | −73% |
+| jitter max Δ | 0.577 ms | 4.133 ms | −86% |
+| p99 frametime | 1.007 ms | 1.154 ms | −12.7% |
+
+lavd recorded 4–5 ms worst-frames in two of its three runs in this scene; its
+strengths may lie elsewhere — these numbers describe this workload on this
+machine, nothing broader.
+
+### scx_cake (hybrid4) vs EEVDF — World of Warcraft, 4-cycle ABBA, n=4/arm
+
+A second-title check on a very different workload: an MMO (vkd3d-proton,
+player-housing scene, ~475 fps) with naturally heavy tails — the scene
+streams in 4–8 ms hitch waves that arrive game-side in alternating cycles and
+hit whichever scheduler is up, so extremes are read as medians.
+
+| metric | scx_cake | EEVDF | Δmean | Δmedian | cycles won (cake) |
+| :-- | --: | --: | :-- | :-- | :-- |
+| avg FPS | 473.1 | 473.4 | −0.1% | −0.3% | 2/4 — parity |
+| 1% low | 260.2 | 248.8 | +4.6% | +4.0% | 3/4 |
+| p99 frametime | 3.85 ms | 4.03 ms | −4.5% | −3.7% | 3/4 |
+| 0.1% low | 195.5 | 183.2 | +6.7% | +7.9% | 2/4 (hitch-wave bimodal) |
+| max frametime | 5.79 ms | 6.01 ms | −3.7% | −3.1% | 3/4 |
+| frametime stddev | 0.459 | 0.499 | −8.1% | −12.0% | 3/4 |
+| jitter (max Δ) | 3.76 ms | 3.95 ms | −4.8% | −3.1% | 3/4 |
+
+Honest grade: at n=4 in a hitch-wave scene none of these pass the
+slot-consistency bar the KovaaK's claims meet — read this as "the same
+profile, favored" rather than proven: average at parity, tail and smoothness
+metrics ahead in three of four cycles each, nothing lost. The shape of the
+KovaaK's result generalized to a different engine and workload class.
+
+Reproducibility note: measuring WoW at all required patching MangoHud —
+stock 0.8.4's control socket wedges from launch under vkd3d (an early
+non-presenting Vulkan instance binds the per-pid socket and never services
+it; instance teardown then closes it; the fd also leaks into child
+processes). The fix (process-global control socket + teardown guard +
+`SOCK_CLOEXEC`) is in the bench-assets repository under `mangohud-patches/`
+and is being prepared for upstream. WoW's MangoHud capture prefix is `WoW`,
+not `wow`.
+
+### Mechanism measurements
+
+- Enq-kick-idle fold: `cake_enqueue` 164.6 → 46.8 ns/call in-game (−72%) at
+  ~13k idle wakes/s; frame metrics unchanged (the saving is real but below
+  the frame noise floor — kept because cheaper is cheaper).
+- Frame-preemptor attribution: 99.7% of GameThread's involuntary context
+  switches are RT-class sandwiches (compositor ~11k wakes/s FIFO, PipeWire
+  audio loops, GPU IRQ thread) — invisible to sched_ext, motivating
+  `--irq-avoid` and falsifying `--frame-reserve`.
+
+## Vocabulary
+
+| Term | Meaning in `scx_cake` |
+| :-- | :-- |
+| `sched_ext` | Kernel framework allowing this BPF scheduler to provide the scheduling policy, with a watchdog that evicts misbehaving schedulers. |
+| DSQ | Kernel dispatch queue. `SCX_DSQ_LOCAL_ON \| cpu` targets one CPU; cake adds one vtime-ordered DSQ per LLC. |
+| `cpu_status` | Owner-published per-CPU cache line: idle/accept/wake-preempt bits, owner class, pressure, epoch, latency class. |
+| `cpu_frontier` | Owner-published per-CPU vtime frontier; seeds/clamps task vtime without touching private state. |
+| owner class | EWMA-derived class of a CPU's current owner: short / interactive / frame / bulk (thresholds are quantum fractions). |
+| `dsq_vtime` | Per-task virtual time (ns): runtime plus a nice-weight adjustment; orders the shared queue. |
+| quantum | Base slice; release bakes it (gaming: 1 ms). |
+| hybrid gate | The per-thread-role queue-shape decision at busy fallback. |
+| probe slots | Loader-built per-CPU candidate CPUs for the fast idle scan, packed for single-load access. |
+| keep-running | Dispatch extending the current owner when no work is queued. |
+| ABBA | A/B protocol with arm order alternated between cycles. |
+
+## Gamer terms
+
+| Term | Meaning, and what cake does about it |
+| :-- | :-- |
+| frametime | Time to produce one frame (ms). Scheduling shows up here when the frame pipeline waits for CPU. |
+| avg FPS | Throughput. Serial GameThread work caps it; schedulers mostly lose it through placement and handoff overhead. |
+| 1% / 0.1% lows | Average FPS of the worst 1% / 0.1% of frames — the hitches you feel. Cake's strongest department (+9.2% zero-overlap vs EEVDF). |
+| p99 frametime | 99th-percentile frametime; pacing consistency. |
+| jitter | Frame-to-frame time variance. Tight jitter = stable aim feel. |
+| stutter | A multi-ms frame. Some stutters are game-side (shader compilation, streaming) and hit any scheduler; measured rate varies by session. |
+| frame pacing | Evenness of frame delivery; FT-stddev and jitter measure it. |
+| frame pipeline | GameThread → RenderThread → graphics driver → GPU. The GT↔RT handoff is the serial spine cake's hybrid gate protects. |
+| input latency | Click-to-photon. Wake latency of the frame pipeline is the scheduler's slice of it. |
+| VRR / fps cap | Variable refresh and frame limiting change the workload shape; cake's captures record both — compare like against like. |
+
+## User concerns for gaming
+
+Honest answers to the questions you should ask before running an experimental
+scheduler under your games:
+
+- **What if it breaks mid-game?** The `sched_ext` watchdog (5s timeout)
+  evicts a stalled BPF scheduler and the system falls back to EEVDF. You get
+  a hiccup, not a freeze. `scxctl stop` restores native at any time.
+- **Root and kernel requirements.** Attaching needs root and a `6.12+` kernel
+  with `sched_ext`. The `SCX_ENQ_KICK_IDLE` optimization additionally wants a
+  for-7.2+ kernel (or the included patch); without it cake silently uses the
+  explicit-kick fallback — correct, slightly slower.
+- **Anti-cheat.** cake never touches game memory or processes — it is kernel
+  scheduling policy. No anti-cheat interaction has been observed; the same
+  applies to any sched_ext scheduler, but no guarantee is made.
+- **Will it help my game?** Measured on a CPU-bound aim trainer at very high
+  FPS. GPU-bound titles see less scheduler influence. The honest expectation
+  from the data: similar averages, noticeably better and *more repeatable*
+  lows. Measure your own title — the bench harness exists for exactly that.
+- **Compositor/audio interference is real.** FIFO-priority compositor and
+  audio threads preempt any sched_ext scheduler's threads. `--irq-avoid`
+  mitigates routing into them; it cannot eliminate RT preemption (nothing
+  below RT can).
+- **Power and frequency.** The gaming profile pins `cpuperf` to maximum while
+  attached — frame consistency over power efficiency. Stop the scheduler to
+  return to your governor's behavior.
+- **Session drift.** Long game sessions accumulate game-side state (shader
+  caches, memory fragmentation); measured EEVDF tail quality drifts with it
+  while cake stays flat — but absolute numbers from different session ages
+  are not comparable. Restart the game between serious measurement sets.
+
+## Source tour
+
+| File | Role |
+| :-- | :-- |
+| [src/main.rs](./src/main.rs) | Loader, CLI, RODATA bake, IRQ/RT noise scan, frame-reserve governor, attach loop |
+| [src/bpf/cake.bpf.c](./src/bpf/cake.bpf.c) | The scheduler: all `sched_ext` callbacks and policy |
+| [src/bpf/intf.h](./src/bpf/intf.h) | Shared structs, scoreboard layout, diag counters |
+| [src/topology.rs](./src/topology.rs) | Topology detection and mask construction |
+| [src/tui.rs](./src/tui.rs) | Debug TUI and telemetry consumer |
+| [kernel-patches/](./kernel-patches/) | `SCX_ENQ_KICK_IDLE` upstream patch + 7.0-stable backport |
+| [bench/](./bench) | In-repo A/B harnesses and the per-thread profiler |
+| [docs/](./docs) | Research notes, design analysis, mutation-campaign decision logs |
+
+### Main callbacks
+
+| Callback | Purpose |
+| :-- | :-- |
+| `cake_select_cpu` | message-wake fast path, native bulk escape, scoreboard probes, native fallback, clean direct dispatch |
+| `cake_enqueue` | idle direct insert (+kick fold), accepted busy-wake handoff, hybrid frame gate, vtime arbiter |
+| `cake_dispatch` | local first, keep-running, `llc_pending`-gated shared pull, idle publication |
+| `cake_running` / `cake_stopping` | owner bookkeeping, vtime integration, status/frontier publication |
+| `cake_enable` | seed `dsq_vtime` from the published frontier |
+| `cake_init` / `cake_exit` | DSQ creation, `cpuperf` pin, exit info |
+
+## Related notes
+
+- [docs/mutation_campaign_2026-06-10.md](./docs/mutation_campaign_2026-06-10.md) — the hybrid-queue campaign: decision log, falsifications, measurement laws
+- [docs/hot_path_optimization_analysis.md](./docs/hot_path_optimization_analysis.md)
+- [docs/idle_path_bubble_reduction_proposal.md](./docs/idle_path_bubble_reduction_proposal.md)
+- [docs/benchmark_winner_analysis.md](./docs/benchmark_winner_analysis.md)

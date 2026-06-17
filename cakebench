@@ -1,0 +1,2539 @@
+#!/usr/bin/env bash
+# Compatibility shim: the benchmark project lives next to this scx checkout.
+set -Eeuo pipefail
+
+check_sudo_env() {
+    if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${HOME:-}" == "/root" ]]; then
+        cat >&2 <<'EOF'
+
+================================================================================
+WARNING: cakebench was run with direct 'sudo' which resets $HOME to /root.
+This can break GPU acceleration and local configuration access for GUI/GPU-bound
+benchmarks (like 'blender-render') by losing Wayland/X11 socket credentials.
+
+Please run cakebench without 'sudo' (it elevates automatically via 'sudo -E')
+or execute it as:
+  sudo -E ./cakebench
+================================================================================
+
+EOF
+    fi
+}
+check_sudo_env
+
+
+LAUNCHER_SCX_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCX_REPO_ROOT="${SCX_CAKE_SOURCE_ROOT:-${LAUNCHER_SCX_REPO_ROOT}}"
+SCX_REPO_ROOT="$(cd "${SCX_REPO_ROOT}" && pwd)"
+BENCH_REPO_ROOT="${SCX_CAKE_BENCH_REPO:-${LAUNCHER_SCX_REPO_ROOT}/../scx_cake_bench_assets}"
+BENCH_REPO_ROOT="$(cd "${BENCH_REPO_ROOT}" 2>/dev/null && pwd || printf '%s' "${BENCH_REPO_ROOT}")"
+BENCH_LAUNCHER="${BENCH_REPO_ROOT}/cakebench"
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  ./cakebench --bench cake_only [--matrix none|quick|search|all] [extra options]
+  ./cakebench --bench cake_all [--matrix quick|search|all] [extra options]
+  ./cakebench --bench all_scheds [--matrix search|all] [extra options]
+  ./cakebench score <mutation-id> [--kind policy|system|knob|...] [hypothesis words...]
+  ./cakebench debug-one [benchmark] [--capture stat] [debug/diag options]
+  ./cakebench debug-suite [--capture stat] [debug/diag options]
+  ./cakebench ai-one [benchmark] [--capture stat] [--hypothesis text]
+  ./cakebench one [benchmark] --debug [--capture stat] [debug/diag options]
+  ./cakebench one [benchmark] --scheduler scx_pandemonium [--capture stat]
+  ./cakebench sequence [benchmark ...] --scheduler scx_cake [--capture stat]
+  ./cakebench history import-old [--dry-run]
+  ./cakebench history rebuild
+  ./cakebench noise [--sample-secs 1] [--out-dir DIR]
+  ./cakebench code-patterns [scoreboard/code-pattern options]
+  ./cakebench [normal cakebench command/options]
+
+Bench presets:
+  cake_only   current release scx_cake only, core suite, stat capture
+  cake_all    scx_cake release-policy matrix, defaulting to 24-run search
+  all_scheds  scx_cake matrix plus all schedulers, defaulting to 24-run search
+
+Matrix modes:
+  none   single current release scx_cake run; default for cake_only
+  quick  4-run Cake sanity matrix, core suite, default gaming 1000us quantum
+  search 24-run Cake policy search, full suite, default gaming 1000us quantum
+  all    Cake release matrix, full suite, default gaming 1000us quantum
+
+The presets create their own timestamped output directory under:
+  ../scx_cake_bench_assets/runs/full
+
+Extra options are appended after the preset defaults, so simple overrides like
+--dry-run, --queues local, --storms shadow, or --matrix all still work.
+Preset runs stop an already-active sched_ext scheduler first. Use
+--no-stop-active to fail/skip exactly like the raw benchmark helpers.
+
+Debug diagnostics:
+  debug-one runs target/debug/scx_cake with --verbose headless diagnostics,
+  captures one benchmark, stops Cake, and copies the final dump under:
+    <out>/diag/final
+  Useful for workload investigations such as:
+    ./cakebench debug-one stress-ng-cpu-cache-mem --capture stat --queue-policy local
+    ./cakebench debug-one stress-ng-cache --capture stat --queue-policy local
+    ./cakebench debug-one stress-ng-memcpy --capture stat --queue-policy local
+    ./cakebench debug-suite --capture stat --queue-policy local --storm-guard shield --busy-wake-kick policy
+
+Sequence diagnostics:
+  sequence starts one release scheduler instance and runs direct captures
+  back-to-back under that same scheduler. Default sequence:
+    stress-ng-cache stress-ng-memcpy stress-ng-futex
+  Useful for reproducing suite-order state carry-over without the full suite.
+
+Noise capture:
+  Single-run commands capture host process noise automatically unless disabled:
+    SCX_CAKE_BENCH_NOISE=0
+  Artifacts are written under <out>/noise. Manual check:
+    ./cakebench noise --sample-secs 2
+
+Code-pattern analysis:
+  Delegates to the benchmark-suite code-pattern command, joining best-by-
+  benchmark rows with captured source snapshots:
+    ./cakebench code-patterns --since 20260521 --cake-only --include-singles --include-captures --out /tmp/cake_patterns
+USAGE
+}
+
+need_value() {
+    local opt="$1"
+    shift
+    [[ "$#" -gt 0 ]] || {
+        echo "error: ${opt} requires a value" >&2
+        exit 1
+    }
+    printf '%s' "$1"
+}
+
+require_uint() {
+    local name="$1"
+    local value="$2"
+    [[ "${value}" =~ ^[0-9]+$ ]] || {
+        echo "error: ${name} must be an integer" >&2
+        exit 1
+    }
+}
+
+safe_name() {
+    local value="${1//[^a-zA-Z0-9_.-]/_}"
+    [[ -n "${value}" ]] || value="benchmark"
+    printf '%s' "${value}"
+}
+
+history_root() {
+    printf '%s/history' "${BENCH_REPO_ROOT}"
+}
+
+give_history_to_sudo_user() {
+    local path="$1"
+
+    [[ "${EUID}" -eq 0 && -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" && "${SUDO_UID}" != "0" ]] || return 0
+    [[ -e "${path}" && ! -L "${path}" ]] || return 0
+    chown -R "${SUDO_UID}:${SUDO_GID}" -- "${path}" 2>/dev/null || true
+}
+
+noise_tool() {
+    printf '%s/tools/cakebench_noise.py' "${SCX_REPO_ROOT}"
+}
+
+noise_enabled() {
+    [[ "${SCX_CAKE_BENCH_NOISE:-1}" != "0" ]]
+}
+
+run_noise_snapshot() {
+    local out_dir="$1"
+    local phase="$2"
+    local benchmark="$3"
+    local scheduler="$4"
+    local sample_secs="${SCX_CAKE_BENCH_NOISE_SAMPLE_SECS:-1}"
+
+    noise_enabled || return 0
+    [[ -f "$(noise_tool)" ]] || return 0
+    python3 "$(noise_tool)" snapshot \
+        --out-dir "${out_dir}" \
+        --phase "${phase}" \
+        --sample-secs "${sample_secs}" \
+        --benchmark "${benchmark}" \
+        --scheduler "${scheduler}" >/dev/null 2>&1 || true
+}
+
+start_noise_monitor() {
+    local out_dir="$1"
+    local benchmark="$2"
+    local scheduler="$3"
+    local interval="${SCX_CAKE_BENCH_NOISE_INTERVAL:-1}"
+    local sample_secs="${SCX_CAKE_BENCH_NOISE_MONITOR_SAMPLE_SECS:-0.25}"
+    local pid
+
+    noise_enabled || return 0
+    [[ -f "$(noise_tool)" ]] || return 0
+    python3 "$(noise_tool)" monitor \
+        --out-dir "${out_dir}" \
+        --interval "${interval}" \
+        --sample-secs "${sample_secs}" \
+        --benchmark "${benchmark}" \
+        --scheduler "${scheduler}" >/dev/null 2>&1 &
+    pid=$!
+    printf '%s' "${pid}"
+}
+
+stop_noise_monitor() {
+    local pid="${1:-}"
+    local i
+
+    [[ -n "${pid}" ]] || return 0
+    kill -TERM "${pid}" >/dev/null 2>&1 || true
+    for ((i = 0; i < 30; i++)); do
+        kill -0 "${pid}" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    if kill -0 "${pid}" >/dev/null 2>&1; then
+        kill -KILL "${pid}" >/dev/null 2>&1 || true
+    fi
+	wait "${pid}" >/dev/null 2>&1 || true
+}
+
+run_as_sudo_user() {
+    if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local -a extra_envs=()
+        local var
+        for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+            extra_envs+=("${var}=${!var}")
+        done
+        sudo -u "${SUDO_USER}" env \
+            "HOME=$(getent passwd "${SUDO_USER}" | cut -d: -f6)" \
+            "PATH=${PATH}" \
+            "${extra_envs[@]}" \
+            GIT_OPTIONAL_LOCKS=0 \
+            "$@"
+    else
+        env GIT_OPTIONAL_LOCKS=0 "$@"
+    fi
+}
+
+sudo_reexec() {
+    local subcommand="$1"
+    shift
+
+    local -a extra_envs=()
+    local var
+    for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+        extra_envs+=("${var}=${!var}")
+    done
+
+    if [[ "${SCX_CAKE_AI_NONINTERACTIVE:-0}" == "1" ]]; then
+        if ! sudo -n -E "${extra_envs[@]}" "${SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"; then
+            cat >&2 <<'EOF'
+error: sudo credentials are not available for non-interactive AI benchmark mode.
+
+Either warm sudo from your shell:
+  sudo -v
+
+or allow this exact command with NOPASSWD:
+  /home/ritz/Documents/Repo/scx/cakebench *
+
+The AI-safe path uses sudo -n -E directly on cakebench so it matches a narrow
+sudoers rule and fails fast instead of waiting at a password prompt the agent
+cannot answer.
+EOF
+            exit 1
+        fi
+        exit 0
+    fi
+
+    exec sudo -E "${extra_envs[@]}" "${LAUNCHER_SCX_REPO_ROOT}/cakebench" "${subcommand}" "$@"
+}
+
+record_cakebench_history() {
+    local out_dir="$1"
+    local benchmark="$2"
+    local scheduler="$3"
+    local capture="$4"
+    local hypothesis="$5"
+    local mutation_id="$6"
+    local mutation_kind="$7"
+    shift 7
+
+    local history
+    history="$(history_root)"
+    run_as_sudo_user python3 "${SCX_REPO_ROOT}/tools/cakebench_history.py" record \
+        --out-dir "${out_dir}" \
+        --history-root "${history}" \
+        --scx-repo "${SCX_REPO_ROOT}" \
+        --bench-repo "${BENCH_REPO_ROOT}" \
+        --benchmark "${benchmark}" \
+        --scheduler "${scheduler}" \
+        --capture "${capture}" \
+        --hypothesis "${hypothesis}" \
+        --mutation-id "${mutation_id}" \
+        --mutation-kind "${mutation_kind}" \
+        -- "$@" || true
+    give_history_to_sudo_user "${history}"
+}
+
+preset_out_dir() {
+    local slug="$1"
+    local stamp
+
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    printf '%s/runs/full/%s_%s\n' "${BENCH_REPO_ROOT}" "${stamp}" "${slug}"
+}
+
+detect_out_override() {
+    local out=""
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --out=*)
+                out="${1#*=}"
+                ;;
+            --out)
+                shift
+                [[ "$#" -gt 0 ]] || break
+                out="$1"
+                ;;
+        esac
+        shift || break
+    done
+
+    printf '%s' "${out}"
+}
+
+has_arg() {
+    local needle="$1"
+    shift
+
+    while [[ "$#" -gt 0 ]]; do
+        [[ "$1" == "${needle}" ]] && return 0
+        shift
+    done
+    return 1
+}
+
+has_scheduler_arg() {
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --scheduler|--scheduler=*) return 0 ;;
+        esac
+        shift
+    done
+    return 1
+}
+
+active_ops() {
+	cat /sys/kernel/sched_ext/root/ops 2>/dev/null || true
+}
+
+normalize_one_benchmark() {
+	local benchmark="$1"
+
+	case "${benchmark}" in
+		xz-compression)
+			printf '%s' "xz-compress"
+			;;
+		x265-encoding)
+			printf '%s' "x265"
+			;;
+		schbench/default)
+			printf '%s' "schbench"
+			;;
+		stress-ng-cpu-cache-mem/cache)
+			printf '%s' "stress-ng-cache"
+			;;
+		stress-ng-cpu-cache-mem/memcpy)
+			printf '%s' "stress-ng-memcpy"
+			;;
+		*)
+			printf '%s' "${benchmark}"
+			;;
+	esac
+}
+
+validate_direct_one_benchmark() {
+	local benchmark="$1"
+
+	case "${benchmark}" in
+		perf-sched-fork|perf-sched-thread|perf-sched-both|perf-sched-pipe|perf-memcpy|\
+		schbench|schbench-light|schbench-saturated|\
+		stress-ng-cache|stress-ng-memcpy|stress-ng-futex|stress-ng-cpu-cache-mem|\
+		kernel-defconfig|xz-compress|x265|namd|custom|\
+		blender-render|ffmpeg-compilation|argon2-hashing|y-cruncher-pi-1b|prime-numbers)
+			return 0
+			;;
+	esac
+
+	cat >&2 <<EOF
+error: benchmark '${benchmark}' is not supported by './cakebench one'.
+
+The one-shot path uses bench/scx_cake_bench_capture.sh and must validate the
+benchmark before loading a sched_ext scheduler. Supported direct slugs:
+  stress-ng-cpu-cache-mem, stress-ng-cache, stress-ng-memcpy, stress-ng-futex
+  perf-sched-fork, perf-sched-thread, perf-sched-both, perf-sched-pipe, perf-memcpy
+  schbench, schbench-light, schbench-saturated, kernel-defconfig, xz-compress, x265, namd, custom,
+  blender-render, ffmpeg-compilation, argon2-hashing, y-cruncher-pi-1b, prime-numbers
+
+Aliases accepted by the wrapper:
+  xz-compression -> xz-compress
+  x265-encoding  -> x265
+  schbench/default -> schbench
+  stress-ng-cpu-cache-mem/cache  -> stress-ng-cache
+  stress-ng-cpu-cache-mem/memcpy -> stress-ng-memcpy
+
+Suite-only rows such as prime-numbers and ffmpeg-compilation must be run via
+the suite/matrix path, not scheduler-one, so the scheduler is not left loaded
+after a rejected capture slug.
+EOF
+	return 1
+}
+
+wait_for_sched_ext_empty() {
+    local i
+
+    for ((i = 0; i < 15; i++)); do
+        if [[ -z "$(active_ops)" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    [[ -z "$(active_ops)" ]]
+}
+
+wait_for_pid_exit() {
+    local pid="$1"
+    local timeout="$2"
+    local i
+
+    for ((i = 0; i < timeout; i++)); do
+        if ! kill -0 "${pid}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    ! kill -0 "${pid}" >/dev/null 2>&1
+}
+
+wait_for_scheduler() {
+    local pid="$1"
+    local expected="$2"
+    local timeout="$3"
+    local log_file="$4"
+    local i ops
+
+    for ((i = 0; i < timeout; i++)); do
+        if ! kill -0 "${pid}" >/dev/null 2>&1; then
+            return 2
+        fi
+        ops="$(active_ops)"
+        if [[ -n "${ops}" && ( "${ops}" == "${expected}"* || "${ops}" == *"${expected}"* ) ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    {
+        echo "expected active ops containing: ${expected}"
+        echo "last active ops: ${ops:-<none>}"
+    } >>"${log_file}"
+    return 1
+}
+
+stop_debug_scheduler() {
+    local pid="${1:-}"
+    local timeout="$2"
+
+    [[ -n "${pid}" ]] || return 0
+    echo "stopping scheduler pid ${pid}"
+    if command -v scxctl >/dev/null 2>&1; then
+        scxctl stop >/dev/null 2>&1 || true
+    fi
+    if kill -0 "${pid}" >/dev/null 2>&1; then
+        kill -TERM "${pid}" >/dev/null 2>&1 || true
+    fi
+    if ! wait_for_pid_exit "${pid}" "${timeout}"; then
+        echo "scheduler pid ${pid} did not exit after ${timeout}s; sending SIGKILL"
+        kill -KILL "${pid}" >/dev/null 2>&1 || true
+    fi
+	wait "${pid}" >/dev/null 2>&1 || true
+}
+
+stop_sched_ext_if_expected() {
+	local expected="${1:-}"
+	local ops
+
+	ops="$(active_ops)"
+	[[ -n "${ops}" ]] || return 0
+	if [[ -n "${expected}" && "${ops}" != "${expected}"* && "${ops}" != *"${expected}"* ]]; then
+		echo "warning: sched_ext still active but not expected '${expected}': ${ops}" >&2
+		return 0
+	fi
+	if command -v scxctl >/dev/null 2>&1; then
+		scxctl stop >/dev/null 2>&1 || true
+		wait_for_sched_ext_empty || true
+	fi
+}
+
+scheduler_binary_from_ops() {
+	local ops="$1"
+	local base
+
+	base="${ops%%_*}"
+	case "${base}" in
+		cake)
+			printf '%s' "scx_cake"
+			;;
+		scx_*)
+			printf '%s' "${base}"
+			;;
+		*)
+			printf '%s' "scx_${base}"
+			;;
+	esac
+}
+
+stop_scheduler_process_by_ops() {
+	local ops="$1"
+	local timeout="${2:-5}"
+	local comm pids
+
+	[[ -n "${ops}" ]] || return 1
+	comm="$(scheduler_binary_from_ops "${ops}")"
+	pids="$(ps -eo pid=,comm= | awk -v comm="${comm}" '$2 == comm { print $1 }')"
+	[[ -n "${pids}" ]] || return 1
+
+	echo "stopping active scheduler process(es) for ${ops}: ${pids}" >&2
+	if [[ "${EUID}" -eq 0 ]]; then
+		# shellcheck disable=SC2086
+		kill -TERM ${pids} >/dev/null 2>&1 || true
+	else
+		# shellcheck disable=SC2086
+		sudo -E kill -TERM ${pids} >/dev/null 2>&1 || true
+	fi
+	wait_for_sched_ext_empty && return 0
+	sleep "${timeout}" || true
+	wait_for_sched_ext_empty && return 0
+	echo "active scheduler did not stop after SIGTERM; sending SIGKILL: ${pids}" >&2
+	if [[ "${EUID}" -eq 0 ]]; then
+		# shellcheck disable=SC2086
+		kill -KILL ${pids} >/dev/null 2>&1 || true
+	else
+		# shellcheck disable=SC2086
+		sudo -E kill -KILL ${pids} >/dev/null 2>&1 || true
+	fi
+	wait_for_sched_ext_empty
+}
+
+stop_benchmark_helper_processes() {
+	local timeout="${1:-2}"
+	local pids i
+
+	pids="$(ps -eo pid=,args= | awk \
+		-v repo="${SCX_REPO_ROOT}" \
+		-v bench="${BENCH_REPO_ROOT}" '
+		$0 ~ repo "/tools/cakebench_noise.py monitor" ||
+		$0 ~ bench "/bench/scx_cake_noise_sampler.py" ||
+		$0 ~ bench "/bench/scx_cake_bench_capture.sh" {
+			print $1
+		}')"
+	[[ -n "${pids}" ]] || return 0
+
+	echo "stopping stale benchmark helper process(es): ${pids}" >&2
+	if [[ "${EUID}" -eq 0 ]]; then
+		# shellcheck disable=SC2086
+		kill -TERM ${pids} >/dev/null 2>&1 || true
+	else
+		# shellcheck disable=SC2086
+		sudo -E kill -TERM ${pids} >/dev/null 2>&1 || true
+	fi
+	for ((i = 0; i < timeout * 10; i++)); do
+		pids="$(ps -eo pid=,args= | awk \
+			-v repo="${SCX_REPO_ROOT}" \
+			-v bench="${BENCH_REPO_ROOT}" '
+			$0 ~ repo "/tools/cakebench_noise.py monitor" ||
+			$0 ~ bench "/bench/scx_cake_noise_sampler.py" ||
+			$0 ~ bench "/bench/scx_cake_bench_capture.sh" {
+				print $1
+			}')"
+		[[ -z "${pids}" ]] && return 0
+		sleep 0.1
+	done
+	echo "benchmark helper process(es) did not stop after SIGTERM; sending SIGKILL: ${pids}" >&2
+	if [[ "${EUID}" -eq 0 ]]; then
+		# shellcheck disable=SC2086
+		kill -KILL ${pids} >/dev/null 2>&1 || true
+	else
+		# shellcheck disable=SC2086
+		sudo -E kill -KILL ${pids} >/dev/null 2>&1 || true
+	fi
+}
+
+stop_active_sched_ext_for_preset() {
+    local ops stop_status
+
+    ops="$(active_ops)"
+    [[ -n "${ops}" ]] || return 0
+
+    echo "stopping active sched_ext scheduler before benchmark: ${ops}" >&2
+    if ! command -v scxctl >/dev/null 2>&1; then
+        echo "error: scxctl is required to stop the active scheduler automatically" >&2
+        echo "run: sudo scxctl stop" >&2
+        exit 1
+    fi
+
+    stop_status=0
+    if [[ "${EUID}" -eq 0 ]]; then
+        scxctl stop >/dev/null 2>&1 || stop_status=$?
+    else
+        sudo -E scxctl stop >/dev/null 2>&1 || stop_status=$?
+    fi
+
+    wait_for_sched_ext_empty && return 0
+
+    ops="$(active_ops)"
+    stop_benchmark_helper_processes 2 || true
+    stop_scheduler_process_by_ops "${ops}" 5 && return 0
+    stop_benchmark_helper_processes 2 || true
+
+    if [[ "${stop_status}" -ne 0 ]]; then
+        echo "error: scxctl stop failed with status ${stop_status}" >&2
+    fi
+    echo "error: sched_ext is still active after stop attempt: $(active_ops)" >&2
+    echo "stop the current scheduler, then rerun ./cakebench" >&2
+    exit 1
+}
+
+maybe_stop_active_sched_ext() {
+    local stop_active="$1"
+    shift
+
+    [[ "${stop_active}" == "1" ]] || return 0
+    has_arg --dry-run "$@" && return 0
+    stop_active_sched_ext_for_preset
+}
+
+build_debug_cake() {
+    local -a build_cmd=(cargo build -p scx_cake)
+
+    if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local -a extra_envs=()
+        local var
+        for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+            extra_envs+=("${var}=${!var}")
+        done
+        sudo -u "${SUDO_USER}" env \
+            "HOME=$(getent passwd "${SUDO_USER}" | cut -d: -f6)" \
+            "PATH=${PATH}" \
+            "${extra_envs[@]}" \
+            "${build_cmd[@]}"
+    else
+        "${build_cmd[@]}"
+    fi
+}
+
+build_release_scheduler() {
+    local scheduler="$1"
+    local -a build_cmd=(cargo build -p "${scheduler}" --release)
+
+    if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local -a extra_envs=()
+        local var
+        for var in ${!SCX_CAKE_*} ${!CARGO_*}; do
+            extra_envs+=("${var}=${!var}")
+        done
+        sudo -u "${SUDO_USER}" env \
+            "HOME=$(getent passwd "${SUDO_USER}" | cut -d: -f6)" \
+            "PATH=${PATH}" \
+            "${extra_envs[@]}" \
+            "${build_cmd[@]}"
+    else
+        "${build_cmd[@]}"
+    fi
+}
+
+normalize_scheduler_name() {
+    local scheduler="$1"
+
+    case "${scheduler}" in
+        native|none|kernel|cfs) scheduler="native" ;;
+        cake) scheduler="scx_cake" ;;
+        pandemonium|pandamonium) scheduler="scx_pandemonium" ;;
+        cosmos) scheduler="scx_cosmos" ;;
+        flash) scheduler="scx_flash" ;;
+    esac
+    if [[ "${scheduler}" != "native" && "${scheduler}" != scx_* ]]; then
+        scheduler="scx_${scheduler}"
+    fi
+    printf '%s' "${scheduler}"
+}
+
+run_scheduler_one() {
+	if has_arg --help "$@" || has_arg -h "$@"; then
+		usage
+		exit 0
+	fi
+
+	local -a orig_args=("$@")
+	local benchmark="stress-ng-cpu-cache-mem"
+	local benchmark_set=0
+	local scheduler=""
+    local capture="${SCX_CAKE_BENCH_CAPTURE:-stat}"
+    local capture_seen=0
+    local bench_root="${SCX_CAKE_BENCH_ROOT:-${BENCH_REPO_ROOT}/runs}"
+    local out_dir=""
+    local build=1
+    local start_wait="${SCX_CAKE_ONE_BENCH_START_WAIT:-10}"
+    local term_wait="${SCX_CAKE_ONE_BENCH_TERM_WAIT:-10}"
+    local stop_active=1
+    local safe sched_safe stamp runs_dir log_dir capture_helper sched_bin sched_pid expected_ops noise_pid
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --scheduler=*)
+                scheduler="${1#*=}"
+                ;;
+            --scheduler)
+                shift
+                scheduler="$(need_value --scheduler "$@")"
+                ;;
+            --capture=*)
+                capture="${1#*=}"
+                ;;
+            --capture)
+                shift
+                capture="$(need_value --capture "$@")"
+                ;;
+            --bench-root=*)
+                bench_root="${1#*=}"
+                ;;
+            --bench-root)
+                shift
+                bench_root="$(need_value --bench-root "$@")"
+                ;;
+            --out=*)
+                out_dir="${1#*=}"
+                ;;
+            --out)
+                shift
+                out_dir="$(need_value --out "$@")"
+                ;;
+            --no-build)
+                build=0
+                ;;
+            --build)
+                build=1
+                ;;
+            --start-wait=*)
+                start_wait="${1#*=}"
+                ;;
+            --start-wait)
+                shift
+                start_wait="$(need_value --start-wait "$@")"
+                ;;
+            --term-wait=*)
+                term_wait="${1#*=}"
+                ;;
+            --term-wait)
+                shift
+                term_wait="$(need_value --term-wait "$@")"
+                ;;
+            --stop-active)
+                stop_active=1
+                ;;
+            --no-stop-active)
+                stop_active=0
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --*)
+                echo "error: unknown scheduler-one option: $1" >&2
+                exit 1
+                ;;
+            *)
+                if [[ "${benchmark_set}" == "0" ]]; then
+                    benchmark="$1"
+                    benchmark_set=1
+                else
+                    echo "error: unexpected positional argument: $1" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    [[ -n "${scheduler}" ]] || {
+        echo "error: --scheduler requires a scheduler name" >&2
+        exit 1
+    }
+    scheduler="$(normalize_scheduler_name "${scheduler}")"
+	benchmark="$(normalize_one_benchmark "${benchmark}")"
+	validate_direct_one_benchmark "${benchmark}" || exit 1
+    case "${capture}" in
+        both|stat|sched|time|none) ;;
+        *) echo "error: --capture must be one of: both, stat, sched, time, none" >&2; exit 1 ;;
+    esac
+    require_uint SCX_CAKE_ONE_BENCH_START_WAIT "${start_wait}"
+    require_uint SCX_CAKE_ONE_BENCH_TERM_WAIT "${term_wait}"
+
+	if [[ "${EUID}" -ne 0 ]]; then
+		sudo_reexec one "${orig_args[@]}"
+	fi
+
+    safe="$(safe_name "${benchmark}")"
+    sched_safe="$(safe_name "${scheduler}")"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    out_dir="${out_dir:-${bench_root}/single/${stamp}_${safe}_release-${sched_safe}}"
+    runs_dir="${out_dir}/runs"
+    log_dir="${out_dir}/logs"
+    capture_helper="${BENCH_REPO_ROOT}/bench/scx_cake_bench_capture.sh"
+    sched_bin="${SCX_REPO_ROOT}/target/release/${scheduler}"
+    sched_pid=""
+    noise_pid=""
+    expected_ops="${scheduler#scx_}"
+    if [[ "${scheduler}" == "scx_cake" ]]; then
+        expected_ops="cake"
+    elif [[ "${scheduler}" == "native" ]]; then
+        expected_ops=""
+        sched_bin=""
+    fi
+
+    [[ -x "${capture_helper}" ]] || {
+        echo "error: missing capture helper: ${capture_helper}" >&2
+        exit 1
+    }
+
+    mkdir -p -m 0700 "${runs_dir}" "${log_dir}"
+    local SCRIPT_DIR="${BENCH_REPO_ROOT}/bench"
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/scx_cake_bench_paths.sh"
+    scx_bench_give_output_path_to_sudo_user "${out_dir}" "${bench_root}"
+    local asset_env="${SCX_CAKE_BENCH_ASSET_ENV:-${BENCH_REPO_ROOT}/scx_cake_bench.env}"
+    if [[ "${SCX_CAKE_BENCH_LOAD_ASSET_ENV:-1}" == "1" && -f "${asset_env}" ]]; then
+        # shellcheck disable=SC1090
+        source "${asset_env}"
+    fi
+
+    CAKEBENCH_CLEANUP_SCHED_PID=""
+    CAKEBENCH_CLEANUP_NOISE_PID=""
+    CAKEBENCH_CLEANUP_EXPECTED_OPS="${expected_ops}"
+    CAKEBENCH_CLEANUP_TERM_WAIT="${term_wait}"
+    CAKEBENCH_CLEANUP_OUT_DIR="${out_dir}"
+
+    cleanup_scheduler_one() {
+        local status=$?
+        stop_noise_monitor "${CAKEBENCH_CLEANUP_NOISE_PID:-}" || true
+        stop_debug_scheduler "${CAKEBENCH_CLEANUP_SCHED_PID:-}" "${CAKEBENCH_CLEANUP_TERM_WAIT:-10}" || true
+        stop_sched_ext_if_expected "${CAKEBENCH_CLEANUP_EXPECTED_OPS:-}" || true
+        if [[ -n "${CAKEBENCH_CLEANUP_OUT_DIR:-}" ]]; then
+            scx_bench_give_tree_to_sudo_user "${CAKEBENCH_CLEANUP_OUT_DIR}" || true
+        fi
+        return "${status}"
+    }
+    trap cleanup_scheduler_one EXIT
+
+    if [[ "${stop_active}" == "1" ]]; then
+        stop_active_sched_ext_for_preset
+    elif [[ -n "$(active_ops)" ]]; then
+        echo "error: sched_ext is already active: $(active_ops)" >&2
+        exit 1
+    fi
+
+    if [[ "${scheduler}" != "native" && "${build}" == "1" ]]; then
+        echo "building release ${scheduler}"
+        build_release_scheduler "${scheduler}"
+    fi
+    [[ "${scheduler}" == "native" || -x "${sched_bin}" ]] || {
+        echo "error: missing release binary: ${sched_bin}" >&2
+        exit 1
+    }
+
+    {
+        echo "# cakebench scheduler-one"
+        echo
+        echo "- Benchmark: ${benchmark}"
+        echo "- Scheduler: ${scheduler}"
+        echo "- Capture: ${capture}"
+        echo "- Output: ${out_dir}"
+        echo
+        echo "## Scheduler Command"
+        echo
+        if [[ "${scheduler}" == "native" ]]; then
+            echo "native kernel scheduler (sched_ext disabled)"
+        else
+            printf '%q ' "${sched_bin}"
+            echo
+        fi
+    } >"${out_dir}/scheduler_one.md"
+
+    if [[ "${scheduler}" == "native" ]]; then
+        echo "using native scheduler; sched_ext disabled"
+    else
+        echo "starting release ${scheduler}"
+        setsid "${sched_bin}" >"${log_dir}/${scheduler}.log" 2>&1 &
+        sched_pid=$!
+        CAKEBENCH_CLEANUP_SCHED_PID="${sched_pid}"
+
+        if ! wait_for_scheduler "${sched_pid}" "${expected_ops}" "${start_wait}" "${log_dir}/${scheduler}.log"; then
+            echo "error: ${scheduler} did not become active; see ${log_dir}/${scheduler}.log" >&2
+            exit 1
+        fi
+    fi
+
+    echo "active ops: $(active_ops)"
+    echo "running benchmark: ${benchmark}"
+    echo "output: ${out_dir}"
+
+    run_noise_snapshot "${out_dir}" pre "${benchmark}" "${scheduler}"
+    noise_pid="$(start_noise_monitor "${out_dir}" "${benchmark}" "${scheduler}")"
+    CAKEBENCH_CLEANUP_NOISE_PID="${noise_pid}"
+    SCX_CAKE_BENCH_ROOT="${out_dir}" \
+    SCX_CAKE_BENCH_OUT="${runs_dir}" \
+    SCX_CAKE_BENCH_LABEL="${SCX_CAKE_BENCH_LABEL:-${safe}_release-${sched_safe}}" \
+    SCX_CAKE_BENCH_CAPTURE="${capture}" \
+    SCX_CAKE_BENCH_REQUIRE_CAKE=0 \
+    SCX_CAKE_BENCH_REQUIRE_OPS="${SCX_CAKE_BENCH_REQUIRE_OPS:-${expected_ops}}" \
+        "${capture_helper}" "${benchmark}"
+    stop_noise_monitor "${noise_pid:-}"
+    noise_pid=""
+    CAKEBENCH_CLEANUP_NOISE_PID=""
+    run_noise_snapshot "${out_dir}" post "${benchmark}" "${scheduler}"
+
+    if [[ "${scheduler}" != "native" ]]; then
+        stop_debug_scheduler "${sched_pid}" "${term_wait}" || true
+        sched_pid=""
+        CAKEBENCH_CLEANUP_SCHED_PID=""
+        stop_sched_ext_if_expected "${expected_ops}" || true
+    fi
+    scx_bench_give_tree_to_sudo_user "${out_dir}" || true
+    trap - EXIT
+    unset CAKEBENCH_CLEANUP_SCHED_PID CAKEBENCH_CLEANUP_NOISE_PID \
+        CAKEBENCH_CLEANUP_EXPECTED_OPS CAKEBENCH_CLEANUP_TERM_WAIT \
+        CAKEBENCH_CLEANUP_OUT_DIR
+
+    echo "scheduler benchmark complete"
+    echo "output: ${out_dir}"
+    record_cakebench_history "${out_dir}" "${benchmark}" "${scheduler}" "${capture}" \
+        "${SCX_CAKE_BENCH_HYPOTHESIS:-}" "${SCX_CAKE_BENCH_MUTATION_ID:-}" \
+        "${SCX_CAKE_BENCH_MUTATION_KIND:-}" \
+        "${SCX_REPO_ROOT}/cakebench" one "${benchmark}" --scheduler "${scheduler}" --capture "${capture}"
+}
+
+run_scheduler_sequence() {
+	if has_arg --help "$@" || has_arg -h "$@"; then
+		cat <<'USAGE'
+Usage:
+  ./cakebench sequence [benchmark ...] --scheduler scx_cake [options]
+
+Runs several direct benchmark captures under one scheduler instance so scheduler
+state carries across rows. If no benchmark is provided, the default sequence is:
+  stress-ng-cache stress-ng-memcpy stress-ng-futex
+
+Options:
+  --scheduler NAME       scheduler to run; default: scx_cake
+  --capture MODE         both, stat, sched, time, or none; default: stat
+  --bench-root DIR       benchmark output root
+  --out DIR              exact sequence output directory
+  --pause-secs N         cooldown between captures; default: 10
+  --no-build             reuse existing release scheduler binary
+  --build                rebuild release scheduler binary
+  --stop-active          stop an active sched_ext scheduler first; default
+  --no-stop-active       fail if sched_ext is already active
+USAGE
+		exit 0
+	fi
+
+	local -a orig_args=("$@")
+	local -a benchmarks=()
+	local scheduler="scx_cake"
+	local capture="${SCX_CAKE_BENCH_CAPTURE:-stat}"
+	local bench_root="${SCX_CAKE_BENCH_ROOT:-${BENCH_REPO_ROOT}/runs}"
+	local out_dir=""
+	local build=1
+	local start_wait="${SCX_CAKE_ONE_BENCH_START_WAIT:-10}"
+	local term_wait="${SCX_CAKE_ONE_BENCH_TERM_WAIT:-10}"
+	local pause_secs="${SCX_CAKE_SEQUENCE_PAUSE_SECS:-10}"
+	local stop_active=1
+	local safe_sequence sched_safe stamp runs_dir log_dir capture_helper sched_bin sched_pid expected_ops
+
+	while [[ "$#" -gt 0 ]]; do
+		case "$1" in
+			--scheduler=*)
+				scheduler="${1#*=}"
+				;;
+			--scheduler)
+				shift
+				scheduler="$(need_value --scheduler "$@")"
+				;;
+			--capture=*)
+				capture="${1#*=}"
+				;;
+			--capture)
+				shift
+				capture="$(need_value --capture "$@")"
+				;;
+			--bench-root=*)
+				bench_root="${1#*=}"
+				;;
+			--bench-root)
+				shift
+				bench_root="$(need_value --bench-root "$@")"
+				;;
+			--out=*)
+				out_dir="${1#*=}"
+				;;
+			--out)
+				shift
+				out_dir="$(need_value --out "$@")"
+				;;
+			--pause-secs=*)
+				pause_secs="${1#*=}"
+				;;
+			--pause-secs|--pause)
+				shift
+				pause_secs="$(need_value --pause-secs "$@")"
+				;;
+			--start-wait=*)
+				start_wait="${1#*=}"
+				;;
+			--start-wait)
+				shift
+				start_wait="$(need_value --start-wait "$@")"
+				;;
+			--term-wait=*)
+				term_wait="${1#*=}"
+				;;
+			--term-wait)
+				shift
+				term_wait="$(need_value --term-wait "$@")"
+				;;
+			--no-build)
+				build=0
+				;;
+			--build)
+				build=1
+				;;
+			--stop-active)
+				stop_active=1
+				;;
+			--no-stop-active)
+				stop_active=0
+				;;
+			--)
+				shift
+				while [[ "$#" -gt 0 ]]; do
+					benchmarks+=("$1")
+					shift
+				done
+				break
+				;;
+			-h|--help)
+				run_scheduler_sequence --help
+				exit 0
+				;;
+			--*)
+				echo "error: unknown sequence option: $1" >&2
+				exit 1
+				;;
+			*)
+				benchmarks+=("$1")
+				;;
+		esac
+		shift
+	done
+
+	if [[ "${#benchmarks[@]}" -eq 0 ]]; then
+		benchmarks=(stress-ng-cache stress-ng-memcpy stress-ng-futex)
+	fi
+
+	scheduler="$(normalize_scheduler_name "${scheduler}")"
+	case "${capture}" in
+		both|stat|sched|time|none) ;;
+		*) echo "error: --capture must be one of: both, stat, sched, time, none" >&2; exit 1 ;;
+	esac
+	require_uint SCX_CAKE_ONE_BENCH_START_WAIT "${start_wait}"
+	require_uint SCX_CAKE_ONE_BENCH_TERM_WAIT "${term_wait}"
+	require_uint SCX_CAKE_SEQUENCE_PAUSE_SECS "${pause_secs}"
+
+	local i
+	for i in "${!benchmarks[@]}"; do
+		benchmarks[$i]="$(normalize_one_benchmark "${benchmarks[$i]}")"
+		validate_direct_one_benchmark "${benchmarks[$i]}" || exit 1
+	done
+
+	if [[ "${EUID}" -ne 0 ]]; then
+		sudo_reexec sequence "${orig_args[@]}"
+	fi
+
+	safe_sequence="$(safe_name "$(IFS=+; echo "${benchmarks[*]}")")"
+	sched_safe="$(safe_name "${scheduler}")"
+	stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+	out_dir="${out_dir:-${bench_root}/sequence/${stamp}_${safe_sequence}_release-${sched_safe}}"
+	runs_dir="${out_dir}/runs"
+	log_dir="${out_dir}/logs"
+	capture_helper="${BENCH_REPO_ROOT}/bench/scx_cake_bench_capture.sh"
+	sched_bin="${SCX_REPO_ROOT}/target/release/${scheduler}"
+	sched_pid=""
+	expected_ops="${scheduler#scx_}"
+	if [[ "${scheduler}" == "scx_cake" ]]; then
+		expected_ops="cake"
+	elif [[ "${scheduler}" == "native" ]]; then
+		expected_ops=""
+		sched_bin=""
+	fi
+
+	[[ -x "${capture_helper}" ]] || {
+		echo "error: missing capture helper: ${capture_helper}" >&2
+		exit 1
+	}
+
+	mkdir -p -m 0700 "${runs_dir}" "${log_dir}"
+	local SCRIPT_DIR="${BENCH_REPO_ROOT}/bench"
+	# shellcheck disable=SC1091
+	source "${SCRIPT_DIR}/scx_cake_bench_paths.sh"
+	scx_bench_give_output_path_to_sudo_user "${out_dir}" "${bench_root}"
+	local asset_env="${SCX_CAKE_BENCH_ASSET_ENV:-${BENCH_REPO_ROOT}/scx_cake_bench.env}"
+	if [[ "${SCX_CAKE_BENCH_LOAD_ASSET_ENV:-1}" == "1" && -f "${asset_env}" ]]; then
+		# shellcheck disable=SC1090
+		source "${asset_env}"
+	fi
+
+	CAKEBENCH_CLEANUP_SCHED_PID=""
+	CAKEBENCH_CLEANUP_EXPECTED_OPS="${expected_ops}"
+	CAKEBENCH_CLEANUP_TERM_WAIT="${term_wait}"
+	CAKEBENCH_CLEANUP_OUT_DIR="${out_dir}"
+
+	cleanup_scheduler_sequence() {
+		local status=$?
+		stop_debug_scheduler "${CAKEBENCH_CLEANUP_SCHED_PID:-}" "${CAKEBENCH_CLEANUP_TERM_WAIT:-10}" || true
+		stop_sched_ext_if_expected "${CAKEBENCH_CLEANUP_EXPECTED_OPS:-}" || true
+		if [[ -n "${CAKEBENCH_CLEANUP_OUT_DIR:-}" ]]; then
+			scx_bench_give_tree_to_sudo_user "${CAKEBENCH_CLEANUP_OUT_DIR}" || true
+		fi
+		return "${status}"
+	}
+	trap cleanup_scheduler_sequence EXIT
+
+	if [[ "${stop_active}" == "1" ]]; then
+		stop_active_sched_ext_for_preset
+	elif [[ -n "$(active_ops)" ]]; then
+		echo "error: sched_ext is already active: $(active_ops)" >&2
+		exit 1
+	fi
+
+	if [[ "${scheduler}" != "native" && "${build}" == "1" ]]; then
+		echo "building release ${scheduler}"
+		build_release_scheduler "${scheduler}"
+	fi
+	[[ "${scheduler}" == "native" || -x "${sched_bin}" ]] || {
+		echo "error: missing release binary: ${sched_bin}" >&2
+		exit 1
+	}
+
+	{
+		echo "# cakebench sequence"
+		echo
+		echo "- Scheduler: ${scheduler}"
+		echo "- Capture: ${capture}"
+		echo "- Pause between captures: ${pause_secs}s"
+		echo "- Output: ${out_dir}"
+		echo
+		echo "## Benchmarks"
+		printf -- "- %s\n" "${benchmarks[@]}"
+		echo
+		echo "## Scheduler Command"
+		echo
+		if [[ "${scheduler}" == "native" ]]; then
+			echo "native kernel scheduler (sched_ext disabled)"
+		else
+			printf '%q ' "${sched_bin}"
+			echo
+		fi
+	} >"${out_dir}/sequence.md"
+
+	if [[ "${scheduler}" == "native" ]]; then
+		echo "using native scheduler; sched_ext disabled"
+	else
+		echo "starting release ${scheduler}"
+		setsid "${sched_bin}" >"${log_dir}/${scheduler}.log" 2>&1 &
+		sched_pid=$!
+		CAKEBENCH_CLEANUP_SCHED_PID="${sched_pid}"
+
+		if ! wait_for_scheduler "${sched_pid}" "${expected_ops}" "${start_wait}" "${log_dir}/${scheduler}.log"; then
+			echo "error: ${scheduler} did not become active; see ${log_dir}/${scheduler}.log" >&2
+			exit 1
+		fi
+	fi
+
+	echo "active ops: $(active_ops)"
+	echo "sequence output: ${out_dir}"
+	for benchmark in "${benchmarks[@]}"; do
+		local label
+		label="$(safe_name "${benchmark}")_sequence-${sched_safe}"
+		echo
+		echo "== sequence benchmark: ${benchmark} =="
+		SCX_CAKE_BENCH_ROOT="${out_dir}" \
+		SCX_CAKE_BENCH_OUT="${runs_dir}" \
+		SCX_CAKE_BENCH_LABEL="${label}" \
+		SCX_CAKE_BENCH_CAPTURE="${capture}" \
+		SCX_CAKE_BENCH_REQUIRE_CAKE=0 \
+		SCX_CAKE_BENCH_REQUIRE_OPS="${SCX_CAKE_BENCH_REQUIRE_OPS:-${expected_ops}}" \
+			"${capture_helper}" "${benchmark}"
+		if [[ "${pause_secs}" -gt 0 ]]; then
+			echo "cooldown: ${pause_secs}s"
+			sleep "${pause_secs}"
+		fi
+	done
+
+	if [[ "${scheduler}" != "native" ]]; then
+		stop_debug_scheduler "${sched_pid}" "${term_wait}" || true
+		sched_pid=""
+		CAKEBENCH_CLEANUP_SCHED_PID=""
+		stop_sched_ext_if_expected "${expected_ops}" || true
+	fi
+	scx_bench_give_tree_to_sudo_user "${out_dir}" || true
+	trap - EXIT
+	unset CAKEBENCH_CLEANUP_SCHED_PID CAKEBENCH_CLEANUP_EXPECTED_OPS \
+		CAKEBENCH_CLEANUP_TERM_WAIT CAKEBENCH_CLEANUP_OUT_DIR
+
+	echo
+	echo "sequence benchmark complete"
+	echo "output: ${out_dir}"
+}
+
+copy_final_debug_diag() {
+    local diag_dir="$1"
+    local out_dir="$2"
+    local final_dir="${out_dir}/diag/final"
+
+    mkdir -p -m 0700 "${final_dir}"
+    find "${diag_dir}" -maxdepth 1 -type f -printf '%T@ %p\n' | sort -n \
+        >"${final_dir}/inventory.txt" 2>/dev/null || true
+    find "${diag_dir}" -maxdepth 1 -type f \
+        \( -name 'cake_diag_*.txt' -o -name 'cake_diag_*.json' -o -name 'cake_diag_latest.txt' -o -name 'cake_diag_latest.json' -o -name 'tui_dump_*.txt' -o -name 'tui_dump_*.json' \) \
+        -exec cp -a -- {} "${final_dir}/" \; 2>/dev/null || true
+}
+
+run_debug_one() {
+    if has_arg --help "$@" || has_arg -h "$@"; then
+        usage
+        exit 0
+    fi
+
+    if [[ "${EUID}" -ne 0 ]]; then
+        sudo_reexec debug-one "$@"
+    fi
+
+    local benchmark="stress-ng-cpu-cache-mem"
+    local benchmark_set=0
+    local capture="${SCX_CAKE_BENCH_CAPTURE:-stat}"
+    local capture_seen=0
+    local bench_root="${SCX_CAKE_BENCH_ROOT:-${BENCH_REPO_ROOT}/runs}"
+    local out_dir=""
+    local build=1
+    local start_wait="${SCX_CAKE_ONE_BENCH_START_WAIT:-10}"
+    local term_wait="${SCX_CAKE_ONE_BENCH_TERM_WAIT:-10}"
+    local diag_period="${SCX_CAKE_DEBUG_DIAG_PERIOD:-1}"
+    local diag_wait="${SCX_CAKE_BENCH_POST_SLEEP:-3}"
+    local diag_dir=""
+    local stop_active=1
+    local safe stamp run_dir runs_dir log_dir capture_helper cake_bin sched_pid noise_pid
+    local -a cake_args=()
+    local -a scheduler_cmd=()
+    local assignment tmp_bool
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --debug|--diag|--diagnostics)
+                ;;
+            --release)
+                echo "error: debug-one cannot be combined with --release" >&2
+                exit 1
+                ;;
+            --capture=*)
+                capture="${1#*=}"
+                ;;
+            --capture)
+                shift
+                capture="$(need_value --capture "$@")"
+                ;;
+            --bench-root=*)
+                bench_root="${1#*=}"
+                ;;
+            --bench-root)
+                shift
+                bench_root="$(need_value --bench-root "$@")"
+                ;;
+            --out=*)
+                out_dir="${1#*=}"
+                ;;
+            --out)
+                shift
+                out_dir="$(need_value --out "$@")"
+                ;;
+            --no-build)
+                build=0
+                ;;
+            --build)
+                build=1
+                ;;
+            --start-wait=*)
+                start_wait="${1#*=}"
+                ;;
+            --start-wait)
+                shift
+                start_wait="$(need_value --start-wait "$@")"
+                ;;
+            --term-wait=*)
+                term_wait="${1#*=}"
+                ;;
+            --term-wait)
+                shift
+                term_wait="$(need_value --term-wait "$@")"
+                ;;
+            --diag-period=*)
+                diag_period="${1#*=}"
+                ;;
+            --diag-period)
+                shift
+                diag_period="$(need_value --diag-period "$@")"
+                ;;
+            --diag-wait=*|--post-sleep=*)
+                diag_wait="${1#*=}"
+                ;;
+            --diag-wait)
+                shift
+                diag_wait="$(need_value --diag-wait "$@")"
+                ;;
+            --post-sleep)
+                shift
+                diag_wait="$(need_value --post-sleep "$@")"
+                ;;
+            --diag-dir=*)
+                diag_dir="${1#*=}"
+                ;;
+            --diag-dir)
+                shift
+                diag_dir="$(need_value --diag-dir "$@")"
+                ;;
+            --stop-active)
+                stop_active=1
+                ;;
+            --no-stop-active)
+                stop_active=0
+                ;;
+            --profile=*)
+                cake_args+=(--profile "${1#*=}")
+                ;;
+            --profile|-p)
+                shift
+                cake_args+=(--profile "$(need_value --profile "$@")")
+                ;;
+            --quantum-us=*|--quantum=*)
+                cake_args+=(--quantum "${1#*=}")
+                ;;
+            --quantum-us|--quantum)
+                shift
+                cake_args+=(--quantum "$(need_value --quantum "$@")")
+                ;;
+            --queue-policy=*|--queue=*)
+                cake_args+=(--queue-policy "${1#*=}")
+                ;;
+            --queue-policy|--queue)
+                shift
+                cake_args+=(--queue-policy "$(need_value --queue-policy "$@")")
+                ;;
+            --storm-guard=*|--storm=*)
+                cake_args+=(--storm-guard "${1#*=}")
+                ;;
+            --storm-guard|--storm)
+                shift
+                cake_args+=(--storm-guard "$(need_value --storm-guard "$@")")
+                ;;
+            --busy-wake-kick=*|--kick=*)
+                cake_args+=(--busy-wake-kick "${1#*=}")
+                ;;
+            --busy-wake-kick|--kick)
+                shift
+                cake_args+=(--busy-wake-kick "$(need_value --busy-wake-kick "$@")")
+                ;;
+            --learned-locality=*)
+                tmp_bool="${1#*=}"
+                case "${tmp_bool}" in
+                    on|true|1) cake_args+=(--learned-locality=true) ;;
+                    off|false|0) cake_args+=(--learned-locality=false) ;;
+                    *) cake_args+=("--learned-locality=${tmp_bool}") ;;
+                esac
+                ;;
+            --learned-locality)
+                if [[ "$#" -gt 1 && "${2}" != --* ]]; then
+                    shift
+                    case "$1" in
+                        on|true|1) cake_args+=(--learned-locality=true) ;;
+                        off|false|0) cake_args+=(--learned-locality=false) ;;
+                        *) cake_args+=("--learned-locality=$1") ;;
+                    esac
+                else
+                    cake_args+=(--learned-locality)
+                fi
+                ;;
+            --wake-chain-locality=*)
+                tmp_bool="${1#*=}"
+                case "${tmp_bool}" in
+                    on|true|1) cake_args+=(--wake-chain-locality=true) ;;
+                    off|false|0) cake_args+=(--wake-chain-locality=false) ;;
+                    *) cake_args+=("--wake-chain-locality=${tmp_bool}") ;;
+                esac
+                ;;
+            --wake-chain-locality)
+                if [[ "$#" -gt 1 && "${2}" != --* ]]; then
+                    shift
+                    case "$1" in
+                        on|true|1) cake_args+=(--wake-chain-locality=true) ;;
+                        off|false|0) cake_args+=(--wake-chain-locality=false) ;;
+                        *) cake_args+=("--wake-chain-locality=$1") ;;
+                    esac
+                else
+                    cake_args+=(--wake-chain-locality)
+                fi
+                ;;
+            --cake-arg)
+                shift
+                cake_args+=("$(need_value --cake-arg "$@")")
+                ;;
+            --cake-args)
+                shift
+                assignment="$(need_value --cake-args "$@")"
+                read -r -a scheduler_cmd <<<"${assignment}"
+                cake_args+=("${scheduler_cmd[@]}")
+                scheduler_cmd=()
+                ;;
+            --)
+                shift
+                cake_args+=("$@")
+                break
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --*)
+                echo "error: unknown debug-one option: $1" >&2
+                exit 1
+                ;;
+            *)
+                if [[ "${benchmark_set}" == "0" ]]; then
+                    benchmark="$1"
+                    benchmark_set=1
+                else
+                    echo "error: unexpected positional argument: $1" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    case "${capture}" in
+        both|stat|sched|time|none) ;;
+        *) echo "error: --capture must be one of: both, stat, sched, time, none" >&2; exit 1 ;;
+    esac
+    require_uint SCX_CAKE_ONE_BENCH_START_WAIT "${start_wait}"
+    require_uint SCX_CAKE_ONE_BENCH_TERM_WAIT "${term_wait}"
+    require_uint SCX_CAKE_DEBUG_DIAG_PERIOD "${diag_period}"
+    require_uint SCX_CAKE_BENCH_POST_SLEEP "${diag_wait}"
+
+    safe="$(safe_name "${benchmark}")"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    out_dir="${out_dir:-${bench_root}/single/${stamp}_${safe}_debug-cake_diag}"
+    runs_dir="${out_dir}/runs"
+    log_dir="${out_dir}/logs"
+    diag_dir="${diag_dir:-${out_dir}/diag/live}"
+    capture_helper="${BENCH_REPO_ROOT}/bench/scx_cake_bench_capture.sh"
+    cake_bin="${SCX_REPO_ROOT}/target/debug/scx_cake"
+    sched_pid=""
+    noise_pid=""
+
+    [[ -x "${capture_helper}" ]] || {
+        echo "error: missing capture helper: ${capture_helper}" >&2
+        exit 1
+    }
+
+    mkdir -p -m 0700 "${runs_dir}" "${log_dir}" "${diag_dir}"
+    local SCRIPT_DIR="${BENCH_REPO_ROOT}/bench"
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/scx_cake_bench_paths.sh"
+    scx_bench_give_output_path_to_sudo_user "${out_dir}" "${bench_root}"
+
+    CAKEBENCH_DEBUG_CLEANUP_SCHED_PID=""
+    CAKEBENCH_DEBUG_CLEANUP_NOISE_PID=""
+    CAKEBENCH_DEBUG_CLEANUP_TERM_WAIT="${term_wait}"
+    CAKEBENCH_DEBUG_CLEANUP_OUT_DIR="${out_dir}"
+    CAKEBENCH_DEBUG_CLEANUP_DIAG_DIR="${diag_dir}"
+
+    cleanup_debug_one() {
+        local status=$?
+        stop_noise_monitor "${CAKEBENCH_DEBUG_CLEANUP_NOISE_PID:-}" || true
+        stop_debug_scheduler "${CAKEBENCH_DEBUG_CLEANUP_SCHED_PID:-}" "${CAKEBENCH_DEBUG_CLEANUP_TERM_WAIT:-10}" || true
+        if [[ -n "${CAKEBENCH_DEBUG_CLEANUP_DIAG_DIR:-}" && -n "${CAKEBENCH_DEBUG_CLEANUP_OUT_DIR:-}" ]]; then
+            copy_final_debug_diag "${CAKEBENCH_DEBUG_CLEANUP_DIAG_DIR}" "${CAKEBENCH_DEBUG_CLEANUP_OUT_DIR}" || true
+        fi
+        if [[ -n "${CAKEBENCH_DEBUG_CLEANUP_OUT_DIR:-}" ]]; then
+            scx_bench_give_tree_to_sudo_user "${CAKEBENCH_DEBUG_CLEANUP_OUT_DIR}" || true
+        fi
+        return "${status}"
+    }
+    trap cleanup_debug_one EXIT
+
+    if [[ "${stop_active}" == "1" ]]; then
+        stop_active_sched_ext_for_preset
+    elif [[ -n "$(active_ops)" ]]; then
+        echo "error: sched_ext is already active: $(active_ops)" >&2
+        exit 1
+    fi
+
+    if [[ "${build}" == "1" ]]; then
+        echo "building debug scx_cake"
+        build_debug_cake
+    fi
+    [[ -x "${cake_bin}" ]] || {
+        echo "error: missing debug binary: ${cake_bin}" >&2
+        exit 1
+    }
+
+    scheduler_cmd=("${cake_bin}" --verbose --diag-dir "${diag_dir}" --diag-period "${diag_period}")
+    scheduler_cmd+=("${cake_args[@]}")
+    {
+        echo "# cakebench debug-one"
+        echo
+        echo "- Benchmark: ${benchmark}"
+        echo "- Capture: ${capture}"
+        echo "- Output: ${out_dir}"
+        echo "- Diag dir: ${diag_dir}"
+        echo "- Diag period: ${diag_period}s"
+        echo "- Post benchmark diag wait: ${diag_wait}s"
+        echo
+        echo "## Scheduler Command"
+        echo
+        printf '%q ' "${scheduler_cmd[@]}"
+        echo
+    } >"${out_dir}/debug_one.md"
+
+    echo "starting debug scx_cake with headless diagnostics"
+    setsid "${scheduler_cmd[@]}" >"${log_dir}/scx_cake.log" 2>&1 &
+    sched_pid=$!
+    CAKEBENCH_DEBUG_CLEANUP_SCHED_PID="${sched_pid}"
+
+    if ! wait_for_scheduler "${sched_pid}" "cake" "${start_wait}" "${log_dir}/scx_cake.log"; then
+        echo "error: debug scx_cake did not become active; see ${log_dir}/scx_cake.log" >&2
+        exit 1
+    fi
+
+    echo "active ops: $(active_ops)"
+    echo "running benchmark: ${benchmark}"
+    echo "output: ${out_dir}"
+    echo "diagnostics: ${diag_dir}"
+
+    run_noise_snapshot "${out_dir}" pre "${benchmark}" "scx_cake_debug"
+    noise_pid="$(start_noise_monitor "${out_dir}" "${benchmark}" "scx_cake_debug")"
+    CAKEBENCH_DEBUG_CLEANUP_NOISE_PID="${noise_pid}"
+    SCX_CAKE_BENCH_ROOT="${out_dir}" \
+    SCX_CAKE_BENCH_OUT="${runs_dir}" \
+    SCX_CAKE_BENCH_LABEL="${SCX_CAKE_BENCH_LABEL:-${safe}_debug-cake}" \
+    SCX_CAKE_BENCH_CAPTURE="${capture}" \
+    SCX_CAKE_BENCH_POST_SLEEP="${diag_wait}" \
+    SCX_CAKE_BENCH_REQUIRE_CAKE=1 \
+    SCX_CAKE_BENCH_REQUIRE_OPS="${SCX_CAKE_BENCH_REQUIRE_OPS:-cake}" \
+    SCX_CAKE_DIAG_DIR="${diag_dir}" \
+        "${capture_helper}" "${benchmark}"
+    stop_noise_monitor "${noise_pid:-}"
+    noise_pid=""
+    CAKEBENCH_DEBUG_CLEANUP_NOISE_PID=""
+    run_noise_snapshot "${out_dir}" post "${benchmark}" "scx_cake_debug"
+
+    stop_debug_scheduler "${sched_pid}" "${term_wait}" || true
+    sched_pid=""
+    CAKEBENCH_DEBUG_CLEANUP_SCHED_PID=""
+    copy_final_debug_diag "${diag_dir}" "${out_dir}"
+    scx_bench_give_tree_to_sudo_user "${out_dir}" || true
+    trap - EXIT
+    unset CAKEBENCH_DEBUG_CLEANUP_SCHED_PID CAKEBENCH_DEBUG_CLEANUP_NOISE_PID \
+        CAKEBENCH_DEBUG_CLEANUP_TERM_WAIT CAKEBENCH_DEBUG_CLEANUP_OUT_DIR \
+        CAKEBENCH_DEBUG_CLEANUP_DIAG_DIR
+
+    echo "debug benchmark complete"
+    echo "output: ${out_dir}"
+    echo "final diagnostics: ${out_dir}/diag/final"
+    record_cakebench_history "${out_dir}" "${benchmark}" "scx_cake_debug" "${capture}" \
+        "${SCX_CAKE_BENCH_HYPOTHESIS:-}" "${SCX_CAKE_BENCH_MUTATION_ID:-}" \
+        "${SCX_CAKE_BENCH_MUTATION_KIND:-}" \
+        "${SCX_REPO_ROOT}/cakebench" debug-one "${benchmark}" --capture "${capture}" "${cake_args[@]}"
+}
+
+run_debug_cache_mem_suite() {
+    if has_arg --help "$@" || has_arg -h "$@"; then
+        cat <<'USAGE'
+Usage:
+  ./cakebench debug-suite [--capture stat] [debug/diag options]
+
+Runs three debug captures with the same Cake settings:
+  stress-ng-cache
+  stress-ng-memcpy
+  stress-ng-cpu-cache-mem
+
+Example:
+  ./cakebench debug-suite --capture stat --queue-policy local --storm-guard shield --busy-wake-kick policy --diag-period 1 --diag-wait 3
+USAGE
+        exit 0
+    fi
+
+    local arg
+    for arg in "$@"; do
+        case "${arg}" in
+            --out|--out=*|--diag-dir|--diag-dir=*)
+                echo "error: debug-suite manages per-benchmark output dirs; use debug-one for ${arg}" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ "${EUID}" -ne 0 ]]; then
+        sudo_reexec debug-suite "$@"
+    fi
+
+    local -a defaults=()
+    defaults+=(--capture "${SCX_CAKE_BENCH_CAPTURE:-stat}")
+    defaults+=(--queue-policy "${SCX_CAKE_QUEUE_POLICY:-local}")
+    defaults+=(--storm-guard "${SCX_CAKE_STORM_GUARD:-shield}")
+    defaults+=(--busy-wake-kick "${SCX_CAKE_BUSY_WAKE_KICK:-policy}")
+    defaults+=(--diag-period "${SCX_CAKE_DEBUG_DIAG_PERIOD:-1}")
+    defaults+=(--diag-wait "${SCX_CAKE_BENCH_POST_SLEEP:-3}")
+
+    echo "debug suite: stress-ng-cache"
+    run_debug_one stress-ng-cache "${defaults[@]}" "$@"
+    echo "debug suite: stress-ng-memcpy"
+    run_debug_one stress-ng-memcpy --no-build "${defaults[@]}" "$@"
+    echo "debug suite: stress-ng-cpu-cache-mem"
+    run_debug_one stress-ng-cpu-cache-mem --no-build "${defaults[@]}" "$@"
+}
+
+run_plain_one() {
+    if has_arg --help "$@" || has_arg -h "$@"; then
+        exec "${BENCH_LAUNCHER}" one "$@"
+    fi
+
+    local -a orig_args=("$@")
+    local benchmark="stress-ng-cpu-cache-mem"
+    local benchmark_set=0
+    local benchmark_arg_index=-1
+    local capture="${SCX_CAKE_BENCH_CAPTURE:-stat}"
+    local capture_seen=0
+    local bench_root="${SCX_CAKE_BENCH_ROOT:-${BENCH_REPO_ROOT}/runs}"
+    local out_dir=""
+    local hypothesis="${SCX_CAKE_BENCH_HYPOTHESIS:-}"
+    local mutation_id="${SCX_CAKE_BENCH_MUTATION_ID:-}"
+    local mutation_kind="${SCX_CAKE_BENCH_MUTATION_KIND:-}"
+    local safe stamp status noise_pid
+    local -a pass_args=()
+    local -a out_args=()
+    local -a capture_args=()
+    noise_pid=""
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --capture=*)
+                capture="${1#*=}"
+                capture_seen=1
+                pass_args+=("$1")
+                ;;
+            --capture)
+                pass_args+=("$1")
+                shift
+                capture="$(need_value --capture "$@")"
+                capture_seen=1
+                pass_args+=("$1")
+                ;;
+            --bench-root=*)
+                bench_root="${1#*=}"
+                pass_args+=("$1")
+                ;;
+            --bench-root)
+                pass_args+=("$1")
+                shift
+                bench_root="$(need_value --bench-root "$@")"
+                pass_args+=("$1")
+                ;;
+            --out=*)
+                out_dir="${1#*=}"
+                pass_args+=("$1")
+                ;;
+            --out)
+                pass_args+=("$1")
+                shift
+                out_dir="$(need_value --out "$@")"
+                pass_args+=("$1")
+                ;;
+            --hypothesis=*)
+                hypothesis="${1#*=}"
+                ;;
+            --hypothesis)
+                shift
+                hypothesis="$(need_value --hypothesis "$@")"
+                ;;
+            --mutation-id=*)
+                mutation_id="${1#*=}"
+                ;;
+            --mutation-id)
+                shift
+                mutation_id="$(need_value --mutation-id "$@")"
+                ;;
+            --mutation-kind=*|--kind=*)
+                mutation_kind="${1#*=}"
+                ;;
+            --mutation-kind|--kind)
+                shift
+                mutation_kind="$(need_value --mutation-kind "$@")"
+                ;;
+            --)
+                pass_args+=("$1")
+                shift
+                pass_args+=("$@")
+                break
+                ;;
+            *)
+                if [[ "$1" != --* && "${benchmark_set}" == "0" ]]; then
+                    benchmark="$1"
+                    benchmark_set=1
+                    benchmark_arg_index="${#pass_args[@]}"
+                fi
+                pass_args+=("$1")
+                ;;
+        esac
+        shift
+    done
+
+    case "${capture}" in
+        both|stat|sched|time|none) ;;
+        *) echo "error: --capture must be one of: both, stat, sched, time, none" >&2; exit 1 ;;
+    esac
+    benchmark="$(normalize_one_benchmark "${benchmark}")"
+    validate_direct_one_benchmark "${benchmark}" || exit 1
+    if [[ "${benchmark_arg_index}" -ge 0 ]]; then
+        pass_args["${benchmark_arg_index}"]="${benchmark}"
+    fi
+
+    if [[ "${EUID}" -ne 0 ]]; then
+        sudo_reexec one "${orig_args[@]}"
+    fi
+
+    if [[ -z "${out_dir}" ]]; then
+        safe="$(safe_name "${benchmark}")"
+        stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+        out_dir="${bench_root}/single/${stamp}_${safe}_release-cake"
+        out_args=(--out "${out_dir}")
+    fi
+    if [[ "${capture_seen}" == "0" ]]; then
+        capture_args=(--capture "${capture}")
+    fi
+
+    CAKEBENCH_PLAIN_CLEANUP_NOISE_PID=""
+
+    cleanup_plain_one() {
+        local cleanup_status=$?
+        stop_noise_monitor "${CAKEBENCH_PLAIN_CLEANUP_NOISE_PID:-}" || true
+        return "${cleanup_status}"
+    }
+    trap cleanup_plain_one EXIT
+
+    run_noise_snapshot "${out_dir}" pre "${benchmark}" "scx_cake"
+    noise_pid="$(start_noise_monitor "${out_dir}" "${benchmark}" "scx_cake")"
+    CAKEBENCH_PLAIN_CLEANUP_NOISE_PID="${noise_pid}"
+    set +e
+    "${BENCH_LAUNCHER}" one "${pass_args[@]}" "${capture_args[@]}" "${out_args[@]}"
+    status=$?
+    set -e
+    stop_noise_monitor "${noise_pid:-}"
+    noise_pid=""
+    CAKEBENCH_PLAIN_CLEANUP_NOISE_PID=""
+    run_noise_snapshot "${out_dir}" post "${benchmark}" "scx_cake"
+    give_history_to_sudo_user "${out_dir}" || true
+    trap - EXIT
+    unset CAKEBENCH_PLAIN_CLEANUP_NOISE_PID
+    if [[ "${status}" -eq 0 ]]; then
+        record_cakebench_history "${out_dir}" "${benchmark}" "scx_cake" "${capture}" \
+            "${hypothesis}" "${mutation_id}" "${mutation_kind}" \
+            "${SCX_REPO_ROOT}/cakebench" one "${pass_args[@]}" "${capture_args[@]}" "${out_args[@]}"
+    fi
+    exit "${status}"
+}
+
+run_ai_one() {
+    export SCX_CAKE_AI_NONINTERACTIVE=1
+
+    if has_arg --help "$@" || has_arg -h "$@"; then
+        cat <<'USAGE'
+Usage:
+  ./cakebench ai-one [benchmark] [--capture stat] [--hypothesis text] [--mutation-id id]
+  ./cakebench ai-one [benchmark] --scheduler scx_cosmos [--capture stat]
+  ./cakebench ai-one [benchmark] --debug [--capture stat] [debug/diag options]
+
+AI mode is non-interactive. It uses sudo -n and fails fast if sudo is not
+already warmed:
+  sudo -v
+
+Runs are recorded automatically in:
+  ../scx_cake_bench_assets/history
+USAGE
+        exit 0
+    fi
+
+    if has_arg --debug "$@"; then
+        run_debug_one "$@"
+        exit $?
+    fi
+    if has_scheduler_arg "$@"; then
+        run_scheduler_one "$@"
+        exit $?
+    fi
+    run_plain_one "$@"
+}
+
+run_score_one() {
+    if has_arg --help "$@" || has_arg -h "$@"; then
+        cat <<'USAGE'
+Usage:
+  ./cakebench score <mutation-id> [--kind policy|system|knob|...] [hypothesis words...]
+
+Shortcut for the standard scx_cake cache/mem mutation benchmark:
+  SCX_CAKE_QUEUE_POLICY=local
+  SCX_CAKE_STORM_GUARD=shield
+  SCX_CAKE_BUSY_WAKE_KICK=policy
+  benchmark: stress-ng-cpu-cache-mem
+  capture: stat
+
+Example:
+  ./cakebench score frontier-route-current --kind policy current route prediction frontier tree
+USAGE
+        exit 0
+    fi
+
+    local mutation_id="${1:-}"
+    shift || true
+    [[ -n "${mutation_id}" ]] || {
+        echo "error: score requires a mutation id" >&2
+        echo "run: ./cakebench score frontier-route-current" >&2
+        exit 1
+    }
+    if [[ "${mutation_id}" == *- ]]; then
+        echo "error: score mutation id looks truncated: ${mutation_id}" >&2
+        echo "keep the mutation id on one physical line, or build args in a fish begin/end block" >&2
+        exit 1
+    fi
+
+    local mutation_kind="${SCX_CAKE_BENCH_MUTATION_KIND:-unspecified}"
+    local -a hypothesis_words=()
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --kind=*|--mutation-kind=*)
+                mutation_kind="${1#*=}"
+                ;;
+            --kind|--mutation-kind)
+                shift
+                mutation_kind="$(need_value --kind "$@")"
+                ;;
+            *)
+                hypothesis_words+=("$1")
+                ;;
+        esac
+        shift || true
+    done
+
+    local hypothesis="${hypothesis_words[*]}"
+    [[ -n "${hypothesis}" ]] || hypothesis="${mutation_id}"
+
+    export SCX_CAKE_QUEUE_POLICY="${SCX_CAKE_QUEUE_POLICY:-local}"
+    export SCX_CAKE_STORM_GUARD="${SCX_CAKE_STORM_GUARD:-shield}"
+    export SCX_CAKE_BUSY_WAKE_KICK="${SCX_CAKE_BUSY_WAKE_KICK:-policy}"
+
+    run_plain_one stress-ng-cpu-cache-mem \
+        --capture stat \
+        --mutation-id "${mutation_id}" \
+        --mutation-kind "${mutation_kind}" \
+        --hypothesis "${hypothesis}"
+}
+
+git_value() {
+    local fallback="$1"
+    shift
+
+    run_as_sudo_user git -C "${SCX_REPO_ROOT}" "$@" 2>/dev/null || printf '%s\n' "${fallback}"
+}
+
+write_preset_metadata() {
+    local out_dir="$1"
+    local preset="$2"
+    local matrix="$3"
+    local suite="$4"
+    local capture="$5"
+    local variants="$6"
+    local profiles="$7"
+    local quantums="$8"
+    local queues="$9"
+    local storms="${10}"
+    local kicks="${11}"
+    local learned="${12}"
+    local wake_chain="${13}"
+    local override_out="${14}"
+    shift 14
+
+    local created_utc created_local branch commit status_count dirty_state
+    created_utc="$(date -u --iso-8601=seconds)"
+    created_local="$(date --iso-8601=seconds)"
+    branch="$(git_value unknown rev-parse --abbrev-ref HEAD)"
+    commit="$(git_value unknown rev-parse --short HEAD)"
+    status_count="$(run_as_sudo_user git -C "${SCX_REPO_ROOT}" status --short 2>/dev/null | wc -l | tr -d ' ')"
+    dirty_state="clean"
+    [[ "${status_count}" == "0" ]] || dirty_state="dirty:${status_count}"
+
+    mkdir -p -m 0700 "${out_dir}"
+
+    {
+        echo "# cakebench Run"
+        echo
+        echo "- Created UTC: ${created_utc}"
+        echo "- Created local: ${created_local}"
+        echo "- Preset: ${preset}"
+        echo "- Matrix: ${matrix}"
+        echo "- Suite: ${suite}"
+        echo "- Capture: ${capture}"
+        echo "- Estimated variants: ${variants}"
+        echo "- Output: ${out_dir}"
+        echo "- Output override: ${override_out:-<auto>}"
+        echo
+        echo "## Axes"
+        echo
+        echo "- Profiles: ${profiles}"
+        echo "- Quantums: ${quantums}"
+        echo "- Queues: ${queues}"
+        echo "- Storm guards: ${storms}"
+        echo "- Busy wake kicks: ${kicks}"
+        echo "- Learned locality: ${learned}"
+        echo "- Wake-chain locality: ${wake_chain}"
+        echo
+        echo "## Source"
+        echo
+        echo "- scx repo: ${SCX_REPO_ROOT}"
+        echo "- Benchmark repo: ${BENCH_REPO_ROOT}"
+        echo "- Git branch: ${branch}"
+        echo "- Git commit: ${commit}"
+        echo "- Git state: ${dirty_state}"
+        echo
+        echo "## Command Argv"
+        echo
+        echo '```text'
+        printf '%s\n' "$0" "$@"
+        echo '```'
+    } >"${out_dir}/cakebench_run.md"
+
+    {
+        printf 'key\tvalue\n'
+        printf 'created_utc\t%s\n' "${created_utc}"
+        printf 'created_local\t%s\n' "${created_local}"
+        printf 'preset\t%s\n' "${preset}"
+        printf 'matrix\t%s\n' "${matrix}"
+        printf 'suite\t%s\n' "${suite}"
+        printf 'capture\t%s\n' "${capture}"
+        printf 'estimated_variants\t%s\n' "${variants}"
+        printf 'profiles\t%s\n' "${profiles}"
+        printf 'quantums\t%s\n' "${quantums}"
+        printf 'queues\t%s\n' "${queues}"
+        printf 'storms\t%s\n' "${storms}"
+        printf 'kicks\t%s\n' "${kicks}"
+        printf 'learned_locality\t%s\n' "${learned}"
+        printf 'wake_chain_locality\t%s\n' "${wake_chain}"
+        printf 'out_dir\t%s\n' "${out_dir}"
+        printf 'out_override\t%s\n' "${override_out:-}"
+        printf 'scx_repo\t%s\n' "${SCX_REPO_ROOT}"
+        printf 'bench_repo\t%s\n' "${BENCH_REPO_ROOT}"
+        printf 'git_branch\t%s\n' "${branch}"
+        printf 'git_commit\t%s\n' "${commit}"
+        printf 'git_state\t%s\n' "${dirty_state}"
+    } >"${out_dir}/cakebench_run.tsv"
+}
+
+expand_bench_preset() {
+    local preset="$1"
+    local matrix=""
+    local stop_active=1
+    local -a args=()
+    shift
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --matrix=*)
+                matrix="${1#*=}"
+                ;;
+            --matrix)
+                shift
+                [[ "$#" -gt 0 ]] || {
+                    usage >&2
+                    echo "error: --matrix requires none, quick, search, or all" >&2
+                    exit 1
+                }
+                matrix="$1"
+                ;;
+            --no-stop-active)
+                stop_active=0
+                ;;
+            --stop-active)
+                stop_active=1
+                ;;
+            *)
+                args+=("$1")
+                ;;
+        esac
+        shift
+    done
+    set -- "${args[@]}"
+
+    case "${preset}" in
+        cake_only|cake-only)
+            case "${matrix:-none}" in
+                none|off|single)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_only_single_core_stat_release)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "none" "core" "stat" "1" \
+                        "release-default" "release-default" "release-default" \
+                        "release-default" "release-default" "release-default" \
+                        "release-default" "${override}" \
+                        "${BENCH_LAUNCHER}" cake --core --capture stat --plan quick \
+                        --allow-missing-optional --release "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        cake \
+                        --core \
+                        --capture stat \
+                        --plan quick \
+                        --allow-missing-optional \
+                        --release \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                quick|core)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_only_quick_4x_core_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "quick" "core" "stat" "4" \
+                        "gaming" "<profile default>" "llc-vtime,local" "shadow" \
+                        "policy,idle" "on" "on" "${override}" \
+                        "${BENCH_LAUNCHER}" release-matrix --core --capture stat \
+                        --allow-missing-optional --profiles gaming --queues llc-vtime,local \
+                        --storms shadow --kicks policy,idle --learned-localities on \
+                        --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --core \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms shadow \
+                        --kicks policy,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                search)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_only_search_24x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "search" "all" "stat" "24" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on" "on" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --capture stat --allow-missing-optional --profiles gaming \
+                        --queues llc-vtime,local --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle --learned-localities on \
+                        --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                all|full)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_only_all_96x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "all" "all" "stat" "96" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on,off" "on,off" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --capture stat --allow-missing-optional --profiles gaming \
+                        --queues llc-vtime,local --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle --learned-localities on,off \
+                        --wake-chain-localities on,off "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on,off \
+                        --wake-chain-localities on,off \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                *)
+                    usage >&2
+                    echo "error: --matrix must be none, quick, search, or all for cake_only" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        cake_all|cake-all)
+            case "${matrix:-search}" in
+                quick|core)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_all_quick_4x_core_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "quick" "core" "stat" "4" \
+                        "gaming" "<profile default>" "llc-vtime,local" "shadow" \
+                        "policy,idle" "on" "on" "${override}" \
+                        "${BENCH_LAUNCHER}" release-matrix --core --capture stat \
+                        --allow-missing-optional --profiles gaming --queues llc-vtime,local \
+                        --storms shadow --kicks policy,idle --learned-localities on \
+                        --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --core \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms shadow \
+                        --kicks policy,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                search)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_all_search_24x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "search" "all" "stat" "24" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on" "on" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --capture stat --allow-missing-optional --profiles gaming \
+                        --queues llc-vtime,local --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle --learned-localities on \
+                        --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                all|full)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir cake_all_all_96x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "all" "all" "stat" "96" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on,off" "on,off" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --capture stat --allow-missing-optional --profiles gaming \
+                        --queues llc-vtime,local --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle --learned-localities on,off \
+                        --wake-chain-localities on,off "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on,off \
+                        --wake-chain-localities on,off \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                *)
+                    usage >&2
+                    echo "error: --matrix must be quick, search, or all for cake_all" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        all_scheds|all-scheds|all_schedulers|all-schedulers)
+            case "${matrix:-search}" in
+                search)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir all_scheds_search_24x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "search" "all" "stat" "24 + scheduler baseline" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on" "on" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --all-schedulers --capture stat --allow-missing-optional \
+                        --profiles gaming --queues llc-vtime,local \
+                        --storms off,shadow,shield,full --kicks policy,preempt,idle \
+                        --learned-localities on --wake-chain-localities on "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --all-schedulers \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on \
+                        --wake-chain-localities on \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                all|full)
+                    local override out_dir
+                    maybe_stop_active_sched_ext "${stop_active}" "$@"
+                    override="$(detect_out_override "$@")"
+                    out_dir="${override:-$(preset_out_dir all_scheds_all_96x_full_stat_gaming)}"
+                    write_preset_metadata "${out_dir}" "${preset}" "all" "all" "stat" "96 + scheduler baseline" \
+                        "gaming" "<profile default>" "llc-vtime,local" \
+                        "off,shadow,shield,full" "policy,preempt,idle" "on,off" "on,off" \
+                        "${override}" "${BENCH_LAUNCHER}" release-matrix --all \
+                        --all-schedulers --capture stat --allow-missing-optional \
+                        --profiles gaming --queues llc-vtime,local \
+                        --storms off,shadow,shield,full --kicks policy,preempt,idle \
+                        --learned-localities on,off --wake-chain-localities on,off "$@"
+                    local -a out_args=()
+                    if [[ -z "${override}" ]]; then
+                        out_args=(--out "${out_dir}")
+                    fi
+                    exec "${BENCH_LAUNCHER}" \
+                        release-matrix \
+                        --all \
+                        --all-schedulers \
+                        --capture stat \
+                        --allow-missing-optional \
+                        --profiles gaming \
+                        --queues llc-vtime,local \
+                        --storms off,shadow,shield,full \
+                        --kicks policy,preempt,idle \
+                        --learned-localities on,off \
+                        --wake-chain-localities on,off \
+                        "${out_args[@]}" \
+                        "$@"
+                    ;;
+                *)
+                    usage >&2
+                    echo "error: --matrix must be search or all for all_scheds" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            echo "error: unknown --bench preset: ${preset}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+run_history_command() {
+    local subcommand="${1:-}"
+    shift || true
+
+    case "${subcommand}" in
+        rebuild)
+            python3 "${SCX_REPO_ROOT}/tools/cakebench_history.py" rebuild \
+                --history-root "$(history_root)" "$@"
+            ;;
+        import-old|import|backfill)
+            python3 "${SCX_REPO_ROOT}/tools/cakebench_history.py" import-old \
+                --runs-root "${BENCH_REPO_ROOT}/runs" \
+                --history-root "$(history_root)" \
+                --scx-repo "${SCX_REPO_ROOT}" \
+                --bench-repo "${BENCH_REPO_ROOT}" \
+                "$@"
+            ;;
+        path)
+            printf '%s\n' "$(history_root)"
+            ;;
+        -h|--help|help|"")
+            cat <<'USAGE'
+Usage:
+  ./cakebench history rebuild
+  ./cakebench history import-old [--dry-run]
+  ./cakebench history path
+
+History is daemonless. The source ledger is:
+  ../scx_cake_bench_assets/history/runs.jsonl
+
+Generated convenience files live beside it:
+  latest.json, best.json, index.html
+USAGE
+            ;;
+        *)
+            echo "error: unknown history command: ${subcommand}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+run_noise_command() {
+    local out_dir=""
+    local sample_secs="${SCX_CAKE_BENCH_NOISE_SAMPLE_SECS:-2}"
+    local interval="${SCX_CAKE_BENCH_NOISE_INTERVAL:-1}"
+    local benchmark="manual"
+    local scheduler="${SCX_CAKE_BENCH_NOISE_SCHEDULER:-manual}"
+    local monitor=0
+    local stamp
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --out=*)
+                out_dir="${1#*=}"
+                ;;
+            --out|--out-dir)
+                shift
+                out_dir="$(need_value --out "$@")"
+                ;;
+            --sample-secs=*)
+                sample_secs="${1#*=}"
+                ;;
+            --sample-secs)
+                shift
+                sample_secs="$(need_value --sample-secs "$@")"
+                ;;
+            --interval=*)
+                interval="${1#*=}"
+                ;;
+            --interval)
+                shift
+                interval="$(need_value --interval "$@")"
+                ;;
+            --benchmark=*)
+                benchmark="${1#*=}"
+                ;;
+            --benchmark)
+                shift
+                benchmark="$(need_value --benchmark "$@")"
+                ;;
+            --scheduler=*)
+                scheduler="${1#*=}"
+                ;;
+            --scheduler)
+                shift
+                scheduler="$(need_value --scheduler "$@")"
+                ;;
+            --monitor)
+                monitor=1
+                ;;
+            -h|--help)
+                cat <<'USAGE'
+Usage:
+  ./cakebench noise [--sample-secs 2] [--out-dir DIR]
+  ./cakebench noise --monitor [--interval 1] [--sample-secs 0.25]
+
+Single benchmark runs write noise artifacts automatically under:
+  <run>/noise
+
+Useful environment:
+  SCX_CAKE_BENCH_NOISE=0
+  SCX_CAKE_BENCH_NOISE_SAMPLE_SECS=1
+  SCX_CAKE_BENCH_NOISE_INTERVAL=1
+  SCX_CAKE_BENCH_NOISE_MONITOR_SAMPLE_SECS=0.25
+USAGE
+                exit 0
+                ;;
+            *)
+                echo "error: unknown noise option: $1" >&2
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    out_dir="${out_dir:-${BENCH_REPO_ROOT}/noise/manual/${stamp}_host-noise}"
+    mkdir -p -m 0700 "${out_dir}"
+
+    if [[ "${monitor}" == "1" ]]; then
+        echo "monitoring host noise; press Ctrl-C to stop"
+        python3 "$(noise_tool)" monitor \
+            --out-dir "${out_dir}" \
+            --interval "${interval}" \
+            --sample-secs "${sample_secs}" \
+            --benchmark "${benchmark}" \
+            --scheduler "${scheduler}"
+    else
+        python3 "$(noise_tool)" snapshot \
+            --out-dir "${out_dir}" \
+            --phase manual \
+            --sample-secs "${sample_secs}" \
+            --benchmark "${benchmark}" \
+            --scheduler "${scheduler}"
+    fi
+    give_history_to_sudo_user "${out_dir}"
+    echo "noise output: ${out_dir}/noise"
+}
+
+if [[ ! -x "${BENCH_LAUNCHER}" ]]; then
+    echo "error: benchmark launcher not found: ${BENCH_LAUNCHER}" >&2
+    echo "set SCX_CAKE_BENCH_REPO=/path/to/scx_cake_bench_assets if it moved" >&2
+    exit 1
+fi
+
+export SCX_REPO_ROOT
+
+if [[ "$#" -gt 0 ]]; then
+    case "$1" in
+        debug-one|diag-one|debug_one|diag_one)
+            shift
+            run_debug_one "$@"
+            exit $?
+            ;;
+        debug-suite|diag-suite|debug_suite|diag_suite|debug-cache-mem|debug_cache_mem)
+            shift
+            run_debug_cache_mem_suite "$@"
+            exit $?
+            ;;
+        ai-one|ai_one)
+            shift
+            run_ai_one "$@"
+            exit $?
+            ;;
+        score|score-one|score_one)
+            shift
+            run_score_one "$@"
+            exit $?
+            ;;
+        one|single)
+            if has_arg --debug "$@"; then
+                shift
+                run_debug_one "$@"
+                exit $?
+            fi
+            if has_scheduler_arg "$@"; then
+                shift
+                run_scheduler_one "$@"
+                exit $?
+            fi
+            shift
+            run_plain_one "$@"
+            exit $?
+            ;;
+        sequence|seq|scheduler-sequence|scheduler_seq)
+            shift
+            run_scheduler_sequence "$@"
+            exit $?
+            ;;
+        history)
+            shift
+            run_history_command "$@"
+            exit $?
+            ;;
+        noise|noise-check|host-noise)
+            shift
+            run_noise_command "$@"
+            exit $?
+            ;;
+        --bench)
+            shift
+            [[ "$#" -gt 0 ]] || {
+                usage >&2
+                echo "error: --bench requires a preset" >&2
+                exit 1
+            }
+            expand_bench_preset "$@"
+            ;;
+        --bench=*)
+            preset="${1#*=}"
+            shift
+            expand_bench_preset "${preset}" "$@"
+            ;;
+        -h|--help|help)
+            usage
+            echo
+            exec "${BENCH_LAUNCHER}" --help
+            ;;
+    esac
+fi
+
+exec "${BENCH_LAUNCHER}" "$@"
