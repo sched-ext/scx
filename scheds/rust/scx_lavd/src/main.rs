@@ -375,6 +375,8 @@ impl Opts {
 
         if !EnergyModel::has_energy_model() || !self.cpu_pref_order.is_empty() {
             self.no_use_em = true;
+        }
+        if self.no_use_em {
             info!("Energy model won't be used for CPU preference order.");
         }
 
@@ -483,7 +485,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize CPU topology with CLI arguments
-        let order = CpuOrder::new(opts.topology.as_ref()).unwrap();
+        let order = CpuOrder::new(opts.topology.as_ref(), opts.no_use_em).unwrap();
         Self::init_cpus(&mut skel, &order);
         Self::init_cpdoms(&mut skel, &order);
 
