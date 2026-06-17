@@ -514,7 +514,7 @@ static s32 pick_cpu_on_gpu_node(const struct task_struct *p, int node,
 	if (!mask || !bpf_cpumask_and(mask, cast_mask(nctx->cpumask), p->cpus_ptr))
 		return -ENOENT;
 
-	return scx_bpf_pick_idle_cpu(cast_mask(mask), 0);
+	return __COMPAT_scx_bpf_pick_idle_cpu_node(cast_mask(mask), target_node, 0);
 }
 
 /*
