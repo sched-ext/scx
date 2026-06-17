@@ -177,6 +177,7 @@ struct task_ctx {
 	u64	last_measured_wall_clk;	/* last time when running time was measured (wall clock) */
 	u64	last_measured_pelt_clk;	/* last time when running time was measured (pelt clock) */
 	u64	last_measured_task_clk;	/* last time when running time was measured (task clock) */
+	u64	last_measured_exec;	/* p->se.sum_exec_runtime at last measurement */
 	/*
 	 * Accumulated runtime from runnable to quiescent state.
 	 * Used to calculate avg_runtime_wall/invr and latency criticality.
