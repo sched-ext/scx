@@ -2179,6 +2179,14 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 		     cgrp_name, taskc->cgrp_id,
 		     (cgroup_throttled) ? "throttled" : "not throttled",
 		     (task_throttled) ? "throttled" : "not throttled");
+
+	/*
+	 * Dump the pending direct-dispatch verdict. A non-zero ddsp_dsq_id on a
+	 * stalled task indicates a stale verdict was reused on the do_enqueue_task()
+	 * goto-direct path, bypassing ops.enqueue().
+	 */
+	scx_bpf_dump("  \\_ ddsp_dsq_id: 0x%llx   ddsp_enq_flags: 0x%llx\n",
+		     p->scx.ddsp_dsq_id, p->scx.ddsp_enq_flags);
 }
 
 static s32 init_cpdoms(u64 now)
