@@ -17,7 +17,18 @@ pub struct ParsedArgs<T> {
     pub ignored_undefok_flags: Vec<&'static UndefOkFlag>,
 }
 
-const UNDEFOK_FLAGS: &[UndefOkFlag] = &[];
+const UNDEFOK_FLAGS: &[UndefOkFlag] = &[
+    UndefOkFlag {
+        long: "reconfiguration-interval-s",
+        takes_value: true,
+        note: "accepted for CLI compatibility during rollout; cell reconfiguration is driven internally, not by a CLI interval",
+    },
+    UndefOkFlag {
+        long: "rebalance-cpus-interval-s",
+        takes_value: true,
+        note: "accepted for CLI compatibility during rollout; CPU rebalancing cadence is controlled by the remaining active knobs",
+    },
+];
 
 fn validate_undefok_flags<T: CommandFactory>() -> Result<()> {
     let mut undefok_names = HashSet::new();
@@ -129,7 +140,58 @@ mod tests {
     }
 
     #[test]
-    fn leaves_args_unchanged_when_no_undefok_flags_configured() {
+    fn filters_undefok_flag_with_inline_value() {
+        let (filtered, ignored) = filter_undefok_args(os_vec(&[
+            "scx_mitosis",
+            "--reconfiguration-interval-s=10",
+            "--monitor-interval-s",
+            "2",
+        ]));
+
+        assert_eq!(
+            strings(filtered),
+            vec!["scx_mitosis", "--monitor-interval-s", "2"]
+        );
+        assert_eq!(ignored.len(), 1);
+        assert_eq!(ignored[0].long, "reconfiguration-interval-s");
+    }
+
+    #[test]
+    fn filters_undefok_flag_with_separate_value() {
+        let (filtered, ignored) = filter_undefok_args(os_vec(&[
+            "scx_mitosis",
+            "--rebalance-cpus-interval-s",
+            "5",
+            "--monitor-interval-s",
+            "2",
+        ]));
+
+        assert_eq!(
+            strings(filtered),
+            vec!["scx_mitosis", "--monitor-interval-s", "2"]
+        );
+        assert_eq!(ignored.len(), 1);
+        assert_eq!(ignored[0].long, "rebalance-cpus-interval-s");
+    }
+
+    #[test]
+    fn missing_undefok_value_does_not_consume_next_flag() {
+        let (filtered, ignored) = filter_undefok_args(os_vec(&[
+            "scx_mitosis",
+            "--rebalance-cpus-interval-s",
+            "--monitor-interval-s",
+            "2",
+        ]));
+
+        assert_eq!(
+            strings(filtered),
+            vec!["scx_mitosis", "--monitor-interval-s", "2"]
+        );
+        assert_eq!(ignored.len(), 1);
+    }
+
+    #[test]
+    fn unknown_flags_are_left_for_clap() {
         let (filtered, ignored) = filter_undefok_args(os_vec(&[
             "scx_mitosis",
             "--unknown-flag",
@@ -154,5 +216,21 @@ mod tests {
     #[test]
     fn validation_accepts_non_overlapping_flags() {
         validate_undefok_flags::<NoOverlapOpts>().expect("non-overlapping flags should validate");
+    }
+
+    #[derive(Debug, Parser)]
+    struct OverlapOpts {
+        #[clap(long)]
+        reconfiguration_interval_s: Option<u64>,
+    }
+
+    #[test]
+    fn validation_rejects_overlapping_flags() {
+        let err = validate_undefok_flags::<OverlapOpts>().expect_err("overlap should fail");
+        assert!(
+            err.to_string()
+                .contains("undefok flag --reconfiguration-interval-s still exists"),
+            "unexpected error: {err}"
+        );
     }
 }
