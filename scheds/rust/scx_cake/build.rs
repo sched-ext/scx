@@ -218,8 +218,18 @@ fn main() {
         baked_bool("SCX_CAKE_RELEASE_ROUTE_PRED", false);
     let (baked_release_confidence, baked_release_confidence_value, _release_confidence) =
         baked_bool("SCX_CAKE_RELEASE_CONFIDENCE", false);
+    // Default OFF (2026-06-17): the llc_pending side-bitmap is a lock-free cache
+    // of the raw_spinlock-protected LLC DSQ. It desynced ~1/sec (clear/recheck
+    // race) and stranded tasks -> 5s watchdog stall; it is also a single
+    // 64B cacheline written by every CPU in the LLC. With it off, the dispatch
+    // consumer trusts the kernel's lockless list_empty (the #else direct
+    // move_to_local path) — what rusty/lavd/layered/bpfland/cosmos all do. The
+    // bitmap only "saved" a near-free kfunc on idle/fairness dispatches (the
+    // keep-running hot path never reaches the consumer), so removing it is
+    // correctness-positive with no measured gaming cost. Override with
+    // SCX_CAKE_RELEASE_LLC_PENDING=1 to restore the old cache for A/B.
     let (baked_release_llc_pending, baked_release_llc_pending_value, _release_llc_pending) =
-        baked_bool("SCX_CAKE_RELEASE_LLC_PENDING", true);
+        baked_bool("SCX_CAKE_RELEASE_LLC_PENDING", false);
     let (baked_release_local_waiter, baked_release_local_waiter_value, _release_local_waiter) =
         baked_bool("SCX_CAKE_RELEASE_LOCAL_WAITER", true);
     let (baked_release_domain_drr, baked_release_domain_drr_value, _release_domain_drr) =

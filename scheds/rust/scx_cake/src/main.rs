@@ -229,6 +229,10 @@ struct ReleaseGameDiagTotals {
     dispatch_call: u64,
     dispatch_idle_core_rescue_hit: u64,
     dispatch_idle_llc_rescue_hit: u64,
+    llc_nonwake_insert: u64,
+    llc_nonwake_kick_idle: u64,
+    llc_rescue_enter: u64,
+    llc_rescue_pending_lost_save: u64,
     dispatch_cache_hit: u64,
     dispatch_throughput_hit: u64,
     dispatch_core_steal_hit: u64,
@@ -547,6 +551,10 @@ impl ReleaseGameDiagTotals {
         self.dispatch_call += other.dispatch_call;
         self.dispatch_idle_core_rescue_hit += other.dispatch_idle_core_rescue_hit;
         self.dispatch_idle_llc_rescue_hit += other.dispatch_idle_llc_rescue_hit;
+        self.llc_nonwake_insert += other.llc_nonwake_insert;
+        self.llc_nonwake_kick_idle += other.llc_nonwake_kick_idle;
+        self.llc_rescue_enter += other.llc_rescue_enter;
+        self.llc_rescue_pending_lost_save += other.llc_rescue_pending_lost_save;
         self.dispatch_cache_hit += other.dispatch_cache_hit;
         self.dispatch_throughput_hit += other.dispatch_throughput_hit;
         self.dispatch_core_steal_hit += other.dispatch_core_steal_hit;
@@ -633,7 +641,10 @@ fn format_release_game_diag_text(uptime_secs: f64, totals: &ReleaseGameDiagTotal
             "local_waiter_attempt={} local_waiter_insert={} local_waiter_reject={} ",
             "shared_escape={} shared_vtime_insert={} ",
             "dispatch_call={} dispatch_idle_core_rescue_hit={} ",
-            "dispatch_idle_llc_rescue_hit={} dispatch_cache_hit={} ",
+            "dispatch_idle_llc_rescue_hit={} ",
+            "llc_nonwake_insert={} llc_nonwake_kick_idle={} ",
+            "llc_rescue_enter={} llc_rescue_pending_lost_save={} ",
+            "dispatch_cache_hit={} ",
             "dispatch_throughput_hit={} dispatch_core_steal_hit={} ",
             "dispatch_llc_pull_hit={} dispatch_keep_running={} dispatch_idle={} ",
             "publish_idle_call={} publish_idle_write={} publish_idle_noop={} ",
@@ -691,6 +702,10 @@ fn format_release_game_diag_text(uptime_secs: f64, totals: &ReleaseGameDiagTotal
         totals.dispatch_call,
         totals.dispatch_idle_core_rescue_hit,
         totals.dispatch_idle_llc_rescue_hit,
+        totals.llc_nonwake_insert,
+        totals.llc_nonwake_kick_idle,
+        totals.llc_rescue_enter,
+        totals.llc_rescue_pending_lost_save,
         totals.dispatch_cache_hit,
         totals.dispatch_throughput_hit,
         totals.dispatch_core_steal_hit,
@@ -793,6 +808,10 @@ fn release_game_diag_from_bpf(
             dispatch_call: row.dispatch_call,
             dispatch_idle_core_rescue_hit: row.dispatch_idle_core_rescue_hit,
             dispatch_idle_llc_rescue_hit: row.dispatch_idle_llc_rescue_hit,
+            llc_nonwake_insert: row.llc_nonwake_insert,
+            llc_nonwake_kick_idle: row.llc_nonwake_kick_idle,
+            llc_rescue_enter: row.llc_rescue_enter,
+            llc_rescue_pending_lost_save: row.llc_rescue_pending_lost_save,
             dispatch_cache_hit: row.dispatch_cache_hit,
             dispatch_throughput_hit: row.dispatch_throughput_hit,
             dispatch_core_steal_hit: row.dispatch_core_steal_hit,
@@ -834,14 +853,31 @@ fn collect_release_game_diag(
     skel: &BpfSkel,
     nr_cpus: usize,
 ) -> (ReleaseGameDiagTotals, Vec<ReleaseGameDiagCpuSnapshot>) {
-    let Some(bss) = skel.maps.bss_data.as_ref() else {
-        return (ReleaseGameDiagTotals::default(), Vec::new());
-    };
+    use libbpf_rs::MapCore as _;
     let mut totals = ReleaseGameDiagTotals::default();
     let mut per_cpu = Vec::new();
-    let limit = nr_cpus.min(bss.game_diag.len());
-    for (cpu, row) in bss.game_diag.iter().enumerate().take(limit) {
-        let snap = release_game_diag_from_bpf(cpu, row);
+    // game_diag is a BPF_MAP_TYPE_PERCPU_ARRAY (single element, key 0).
+    // lookup_percpu returns one byte buffer per CPU; reinterpret each as
+    // cake_game_diag and sum. No atomics / no remote indexing on the BPF side.
+    let per_cpu_vals = match skel
+        .maps
+        .game_diag
+        .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+    {
+        Ok(Some(vals)) => vals,
+        _ => return (totals, per_cpu),
+    };
+    let sz = std::mem::size_of::<bpf_skel::types::cake_game_diag>();
+    for (cpu, bytes) in per_cpu_vals.iter().enumerate().take(nr_cpus) {
+        if bytes.len() < sz {
+            continue;
+        }
+        // SAFETY: cake_game_diag is a POD of u64 counters and the per-CPU buffer
+        // is exactly sizeof(cake_game_diag); read_unaligned avoids any alignment
+        // assumption on the Vec<u8> backing store.
+        let row: bpf_skel::types::cake_game_diag =
+            unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const _) };
+        let snap = release_game_diag_from_bpf(cpu, &row);
         totals.add_assign(&snap.totals);
         per_cpu.push(snap);
     }

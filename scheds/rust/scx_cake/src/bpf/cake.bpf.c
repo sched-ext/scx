@@ -6883,10 +6883,18 @@ cake_dispatch_try_idle_llc_rescue(struct cake_cpu_bss *dispatch_bss,
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
 		return false;
 
+	CAKE_GAME_DIAG_INC(cpu_idx, llc_rescue_enter);
 #if CAKE_HAS_LLC_PENDING
-	if (!cake_llc_pending_maybe_cpu(cpu_idx) &&
-	    scx_bpf_dsq_nr_queued(LLC_DSQ_BASE) <= 0)
-		return false;
+	/* Same short-circuit as before (nr_queued only checked when the pending
+	 * bit is clear), split out so we can count the lost-pending save — a
+	 * task queued on LLC_DSQ_BASE while the side bit reads clear, which the
+	 * pending-only consumer would skip. A nonzero llc_rescue_pending_lost_save
+	 * is the evidence the re-armed rescue is load-bearing, not just cost. */
+	if (!cake_llc_pending_maybe_cpu(cpu_idx)) {
+		if (scx_bpf_dsq_nr_queued(LLC_DSQ_BASE) <= 0)
+			return false;
+		CAKE_GAME_DIAG_INC(cpu_idx, llc_rescue_pending_lost_save);
+	}
 	cake_llc_pending_mark_cpu(cpu_idx);
 	hit = cake_llc_pending_pull_cpu(cpu_idx, LLC_DSQ_BASE);
 #else
@@ -8177,6 +8185,24 @@ cake_insert_llc_vtime(struct task_struct *p, u64 enq_flags, u32 target_cpu,
 #ifndef CAKE_RELEASE
 	cake_record_shared_vtime_insert(enq_flags, preserve_state, target_cpu);
 #endif
+	/* Non-wakeup shared insert MUST kick — the kernel does not resched on a
+	 * non-local custom-DSQ insert (dispatch_enqueue just links the task; no
+	 * resched_curr, no IPI, no idle-CPU DSQ poller). The wakeup branch above
+	 * always kicks; this branch did not, so a task placed on LLC_DSQ_BASE
+	 * while every LLC CPU sat in deep cpuidle had no consumer and stalled
+	 * ~5s -> sched_ext runnable-stall watchdog disabled cake (reported
+	 * 2026-06-17 on the llc-vtime/hybrid4 nightly; opened by the LOCAL->
+	 * llc-vtime default flip in 6ca110b39). Marking the pending bit alone is
+	 * inert if no CPU runs ops.dispatch to read it. SCX_KICK_IDLE wakes a CPU
+	 * to drain it and is a no-op when the target is not actually idle, so the
+	 * idle-gate keeps this free of IPIs in the busy active-frame regime (the
+	 * only regime the game A/B exercised). Also wakes the lone allowed CPU of
+	 * an affinity-pinned task whose only home is this idle target. */
+	CAKE_GAME_DIAG_INC(target_cpu, llc_nonwake_insert);
+	if (target_status & CAKE_CPU_STATUS_IDLE) {
+		CAKE_GAME_DIAG_INC(target_cpu, llc_nonwake_kick_idle);
+		scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+	}
 }
 
 #if CAKE_LEAN_SCHED
@@ -9754,6 +9780,15 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 #ifndef CAKE_DISPATCH_SKIP_RESCUE
 #define CAKE_DISPATCH_SKIP_RESCUE 0
 #endif
+	/* NO-BUCKET design (2026-06-17): the idle LLC/core-steal rescues were
+	 * cold-path "buckets" catching tasks the side-bit skip-gates leaked
+	 * (llc_pending desync). With Option A the bitmap is gone and dispatch
+	 * consumes LLC_DSQ_BASE directly (kernel-truth via cake_dispatch_try_
+	 * single_llc_pull's move_to_local), and non-wakeup shared inserts kick a
+	 * consumer (cake_insert_llc_vtime). Nothing strands, so the LLC rescue is
+	 * dead weight and stays compiled out. The core-steal rescue remains for
+	 * loaded/contended builds (SCX_CAKE_DISPATCH_SKIP_RESCUE=0); the
+	 * core_steal_pending_mask leak it backstops is the next source-fix. */
 #if !CAKE_DISPATCH_SKIP_RESCUE
 	if (cake_dispatch_try_idle_core_steal_rescue(dispatch_bss, prev, cpu_idx)) {
 		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_idle_core_rescue_hit);

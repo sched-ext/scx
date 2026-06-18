@@ -9,18 +9,40 @@
 #endif
 
 #if CAKE_GAME_DIAG
-struct cake_game_diag game_diag[CAKE_MAX_CPUS] SEC(".bss")
-	__attribute__((aligned(256)));
+/* Per-CPU diagnostic counters (debug/measurement only).
+ *
+ * PERCPU_ARRAY, not a flat BSS array: bpf_map_lookup_elem returns THIS CPU's
+ * private copy, so a counter can only ever touch the caller's local cacheline.
+ * That makes the remote-index mistake STRUCTURALLY IMPOSSIBLE and lets the
+ * increment be a plain non-atomic local op — no LOCK xadd, no cross-CPU
+ * coherence traffic. The previous design (BSS array + __sync_fetch_and_add)
+ * indexed target_cpu on the wake path, so 47 of the call sites did a LOCK xadd
+ * on a *remote* CPU's 256B-aligned line and bounced it across all cores,
+ * heavily perturbing the very readings it took (measured 2026-06-17). Userspace
+ * sums the per-CPU copies at read time, so per-callback totals are unchanged. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct cake_game_diag);
+	__uint(max_entries, 1);
+} game_diag SEC(".maps");
 
-static __always_inline struct cake_game_diag *cake_game_diag_for(u32 cpu)
+static __always_inline struct cake_game_diag *cake_game_diag_this_cpu(void)
 {
-	return &game_diag[cpu & (CAKE_MAX_CPUS - 1)];
+	u32 key = 0;
+
+	return bpf_map_lookup_elem(&game_diag, &key);
 }
 
-#define CAKE_GAME_DIAG_INC(cpu, field)                                  \
-	do {                                                            \
-		struct cake_game_diag *__gd = cake_game_diag_for(cpu);  \
-		__sync_fetch_and_add(&__gd->field, 1);                  \
+/* The cpu arg is intentionally ignored: the counter is always the caller's
+ * local per-CPU slot (the remote-index footgun is gone). It is kept in the
+ * macro signature so the existing call sites do not change. */
+#define CAKE_GAME_DIAG_INC(cpu, field)                                    \
+	do {                                                              \
+		struct cake_game_diag *__gd = cake_game_diag_this_cpu();  \
+		(void)(cpu);                                              \
+		if (__gd)                                                 \
+			__gd->field += 1;                                 \
 	} while (0)
 #else
 #define CAKE_GAME_DIAG_INC(cpu, field) \

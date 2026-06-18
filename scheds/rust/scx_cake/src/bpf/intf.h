@@ -1164,6 +1164,18 @@ struct cake_game_diag {
 	u64 dispatch_call; /* dispatch(): callback entered */
 	u64 dispatch_idle_core_rescue_hit; /* dispatch(): idle core rescue found work */
 	u64 dispatch_idle_llc_rescue_hit; /* dispatch(): idle LLC rescue found work */
+	/* Watchdog-stall fix instrumentation (2026-06-17). llc_nonwake_insert =
+	 * non-wakeup tail of cake_insert_llc_vtime reached (the path that used to
+	 * place work on LLC_DSQ_BASE with no kick); llc_nonwake_kick_idle = of
+	 * those, target was idle so the new SCX_KICK_IDLE fired. llc_rescue_enter
+	 * = idle-LLC rescue ran its backstop past the queued-prev early-exit;
+	 * llc_rescue_pending_lost_save = rescue drained a task the pending bit had
+	 * lost (pending clear but DSQ non-empty) — the only metric that justifies
+	 * keeping the re-armed rescue. */
+	u64 llc_nonwake_insert;
+	u64 llc_nonwake_kick_idle;
+	u64 llc_rescue_enter;
+	u64 llc_rescue_pending_lost_save;
 	u64 dispatch_cache_hit; /* dispatch(): cache-simple/cache-sprint path hit */
 	u64 dispatch_throughput_hit; /* dispatch(): throughput lane path hit */
 	u64 dispatch_core_steal_hit; /* dispatch(): core-steal path hit */
