@@ -692,7 +692,6 @@ struct cake_domain_drr domain_drr[CAKE_MAX_LLCS];
 struct cake_llc_pending llc_pending[CAKE_MAX_LLCS];
 #endif
 struct cake_core_steal_pending core_steal_pending[CAKE_MAX_CPUS];
-u64 core_steal_pending_mask __attribute__((aligned(64)));
 #if !CAKE_HAS_DOMAIN_DRR
 u64 cache_simple_state;
 #endif
@@ -6547,12 +6546,13 @@ static __noinline bool cake_dsq_move_to_local(u64 dsq_id, u64 enq_flags)
 static __always_inline void cake_core_steal_pending_mark_primary(u32 primary)
 {
 	u32 idx = cake_core_steal_index(primary);
-	u64 bit = 1ULL << idx;
 
-	if (!READ_ONCE(core_steal_pending[idx].pending)) {
+	/* NO-BUCKET (2026-06-18): per-CPU pending is the truth. The global summary
+	 * mask was a LOCK-OR'd cacheline mirroring this flag, written by every
+	 * sibling — contended + desyncable. Consumers now read this per-CPU flag
+	 * directly, so the mask is gone. */
+	if (!READ_ONCE(core_steal_pending[idx].pending))
 		WRITE_ONCE(core_steal_pending[idx].pending, 1);
-		__sync_fetch_and_or(&core_steal_pending_mask, bit);
-	}
 }
 
 static __always_inline __maybe_unused void cake_core_steal_pending_mark_cpu(u32 cpu)
@@ -6564,7 +6564,6 @@ static __noinline __maybe_unused bool
 cake_core_steal_pull_primary(u32 primary)
 {
 	u32 idx = cake_core_steal_index(primary);
-	u64 bit = 1ULL << idx;
 	bool hit = false;
 
 	if (idx >= cake_nr_cpus)
@@ -6648,28 +6647,16 @@ cake_core_steal_pull_primary(u32 primary)
 			}
 		}
 
-		if (has_queued) {
-			// Keep pending at 1, do not touch mask.
-		} else {
-			if (READ_ONCE(core_steal_pending[idx].pending)) {
-				WRITE_ONCE(core_steal_pending[idx].pending, 0);
-				__sync_fetch_and_and(&core_steal_pending_mask, ~bit);
-			}
-		}
+		if (!has_queued)
+			WRITE_ONCE(core_steal_pending[idx].pending, 0);
 		return hit;
 	}
 #endif
 
 	u64 dsq = cake_core_steal_dsq_for_primary(idx);
 	hit = cake_dsq_move_to_local(dsq, 0);
-	if (scx_bpf_dsq_nr_queued(dsq) > 0) {
-		// Keep pending at 1, do not touch mask.
-	} else {
-		if (READ_ONCE(core_steal_pending[idx].pending)) {
-			WRITE_ONCE(core_steal_pending[idx].pending, 0);
-			__sync_fetch_and_and(&core_steal_pending_mask, ~bit);
-		}
-	}
+	if (scx_bpf_dsq_nr_queued(dsq) <= 0)
+		WRITE_ONCE(core_steal_pending[idx].pending, 0);
 	return hit;
 }
 
@@ -6677,9 +6664,8 @@ static __always_inline __maybe_unused bool
 cake_dispatch_try_core_steal_own(u32 cpu)
 {
 	u32 primary = cake_core_steal_primary_cpu(cpu);
-	u64 bit = 1ULL << primary;
 
-	if (!(READ_ONCE(core_steal_pending_mask) & bit))
+	if (!READ_ONCE(core_steal_pending[cake_core_steal_index(primary)].pending))
 		return false;
 	return cake_core_steal_pull_primary(primary);
 }
@@ -6690,10 +6676,6 @@ cake_dispatch_try_core_steal_same_llc(u32 cpu)
 	u32 own_primary = cake_core_steal_primary_cpu(cpu);
 	cake_fast_probe_pack_t packed =
 		cpu_core_spread_pack[cpu & (CAKE_MAX_CPUS - 1)];
-	u64 mask = READ_ONCE(core_steal_pending_mask);
-
-	if (!mask)
-		return false;
 
 	for (u32 slot = 0; slot < CAKE_FAST_PROBE_SLOTS; slot++) {
 		u32 victim = cake_fast_probe_slot_from_pack(packed, slot);
@@ -6704,7 +6686,7 @@ cake_dispatch_try_core_steal_same_llc(u32 cpu)
 		primary = cake_core_steal_primary_cpu(victim);
 		if (primary == own_primary)
 			continue;
-		if (!(mask & (1ULL << primary)))
+		if (!READ_ONCE(core_steal_pending[cake_core_steal_index(primary)].pending))
 			continue;
 		if (cake_llc_id_for_cpu(primary) != cake_llc_id_for_cpu(cpu))
 			continue;
@@ -6719,10 +6701,6 @@ static __noinline __maybe_unused bool
 cake_dispatch_try_core_steal_any(u32 cpu)
 {
 	u32 own_primary = cake_core_steal_primary_cpu(cpu);
-	u64 mask = READ_ONCE(core_steal_pending_mask);
-
-	if (!mask)
-		return false;
 
 	for (u32 off = 1; off < CAKE_MAX_CPUS; off++) {
 		u32 victim = cpu + off;
@@ -6736,7 +6714,7 @@ cake_dispatch_try_core_steal_any(u32 cpu)
 		primary = cake_core_steal_primary_cpu(victim);
 		if (primary == own_primary)
 			continue;
-		if (!(mask & (1ULL << primary)))
+		if (!READ_ONCE(core_steal_pending[cake_core_steal_index(primary)].pending))
 			continue;
 		if (primary != victim)
 			continue;
@@ -6803,7 +6781,6 @@ cake_dispatch_try_idle_core_steal_rescue(struct cake_cpu_bss *dispatch_bss,
 {
 #if defined(CAKE_RELEASE) && CAKE_ENABLE_CORE_STEAL_BUSY_FALLBACK
 	u32 idx = cake_core_steal_primary_cpu(cpu_idx);
-	u64 bit = 1ULL << idx;
 	bool hit;
 	bool has_queued = false;
 
@@ -6852,7 +6829,8 @@ cake_dispatch_try_idle_core_steal_rescue(struct cake_cpu_bss *dispatch_bss,
 		has_queued = true;
 #endif
 
-	if (!(READ_ONCE(core_steal_pending_mask) & bit) && !has_queued)
+	if (!READ_ONCE(core_steal_pending[cake_core_steal_index(idx)].pending) &&
+	    !has_queued)
 		return false;
 	cake_core_steal_pending_mark_primary(idx);
 	hit = cake_core_steal_pull_primary(idx);
@@ -9786,9 +9764,11 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	 * consumes LLC_DSQ_BASE directly (kernel-truth via cake_dispatch_try_
 	 * single_llc_pull's move_to_local), and non-wakeup shared inserts kick a
 	 * consumer (cake_insert_llc_vtime). Nothing strands, so the LLC rescue is
-	 * dead weight and stays compiled out. The core-steal rescue remains for
-	 * loaded/contended builds (SCX_CAKE_DISPATCH_SKIP_RESCUE=0); the
-	 * core_steal_pending_mask leak it backstops is the next source-fix. */
+	 * dead weight and stays compiled out. The core-steal global summary mask
+	 * was likewise removed (2026-06-18): consumers read per-CPU
+	 * core_steal_pending[].pending directly, so the steal path has no contended
+	 * cacheline and no desync. The core-steal rescue remains only for
+	 * loaded/contended builds (SCX_CAKE_DISPATCH_SKIP_RESCUE=0). */
 #if !CAKE_DISPATCH_SKIP_RESCUE
 	if (cake_dispatch_try_idle_core_steal_rescue(dispatch_bss, prev, cpu_idx)) {
 		CAKE_GAME_DIAG_INC(cpu_idx, dispatch_idle_core_rescue_hit);
