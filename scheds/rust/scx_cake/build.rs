@@ -536,10 +536,7 @@ fn main() {
         " -DCAKE_NATIVE_FAST_WAKE_MISS_TUNNEL={}",
         nfw_miss_tunnel_value
     ));
-    cflags.push_str(&format!(
-        " -DCAKE_NFW_LEAN_PREV={}",
-        nfw_lean_prev_value
-    ));
+    cflags.push_str(&format!(" -DCAKE_NFW_LEAN_PREV={}", nfw_lean_prev_value));
     cflags.push_str(&format!(
         " -DCAKE_NFW_STRICT_SIBLING={}",
         nfw_strict_sibling_value
@@ -585,7 +582,10 @@ fn main() {
         dsq_insert_v2_fastpath_value
     ));
     cflags.push_str(&format!(" -DCAKE_GAME_DIAG={}", game_diag_value));
-    cflags.push_str(&format!(" -DCAKE_HYBRID_QUEUE_VALUE={}", hybrid_queue_value));
+    cflags.push_str(&format!(
+        " -DCAKE_HYBRID_QUEUE_VALUE={}",
+        hybrid_queue_value
+    ));
     let (_vtime_floor_label, vtime_floor_value, _vtime_floor) =
         baked_bool("SCX_CAKE_VTIME_WAKE_FLOOR", false);
     cflags.push_str(&format!(" -DCAKE_VTIME_WAKE_FLOOR={}", vtime_floor_value));

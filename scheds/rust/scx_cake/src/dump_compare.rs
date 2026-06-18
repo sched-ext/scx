@@ -1918,7 +1918,9 @@ mod tests {
         )
         .expect("native fast wake hit body should be present");
         let wide_guard_count = nfw_body.matches("#if CAKE_NATIVE_FAST_WAKE_WIDE").count();
-        let cpumask_count = nfw_body.matches("bpf_cpumask_test_cpu((u32)prev_cpu").count();
+        let cpumask_count = nfw_body
+            .matches("bpf_cpumask_test_cpu((u32)prev_cpu")
+            .count();
 
         assert!(nfw_body.contains("!cake_task_is_affinitized(p)"));
         assert_eq!(

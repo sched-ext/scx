@@ -866,7 +866,7 @@ static __always_inline u8 cake_status_owner_class(u64 flags)
 		WRITE_ONCE(futex_trace[__idx].order_field, __order);	\
 	}								\
 } while (0)
-static __always_inline void
+static __always_inline __maybe_unused void
 cake_futex_task_trace_event(const struct task_struct *p, u32 cpu, u32 kind)
 {
 	u64 pid = (u64)(u32)p->pid;
@@ -918,7 +918,7 @@ cake_futex_task_trace_event(const struct task_struct *p, u32 cpu, u32 kind)
 #else
 #define CAKE_FUTEX_TRACE_INC(cpu, field) do { } while (0)
 #define CAKE_FUTEX_TRACE_FIRST(cpu, pid_field, order_field, pid) do { } while (0)
-static __always_inline void
+static __always_inline __maybe_unused void
 cake_futex_task_trace_event(const struct task_struct *p, u32 cpu, u32 kind)
 {
 	(void)p;
@@ -3736,8 +3736,8 @@ static __noinline void cake_clamp_wakeup_vtime(struct task_struct *p,
 static __noinline void cake_insert_llc_vtime(struct task_struct *p,
 					     u64 enq_flags, u32 target_cpu,
 					     u64 slice);
-static __always_inline void cake_nfw_dsq_insert(struct task_struct *p,
-						u64 dsq_id, u64 slice)
+static __always_inline __maybe_unused void cake_nfw_dsq_insert(struct task_struct *p,
+							       u64 dsq_id, u64 slice)
 {
 #if CAKE_DSQ_INSERT_V2_FASTPATH
 	scx_bpf_dsq_insert___v2___compat(p, dsq_id, slice, 0);

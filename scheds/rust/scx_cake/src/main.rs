@@ -1370,7 +1370,9 @@ fn sample_irq_rates(nr_cpus: usize, gap_ms: u64) -> Vec<u64> {
             for line in raw.lines().skip(1) {
                 let mut cols = line.split_whitespace();
                 let Some(label) = cols.next() else { continue };
-                if !label.ends_with(':') || !label[..label.len() - 1].chars().all(|c| c.is_ascii_digit()) {
+                if !label.ends_with(':')
+                    || !label[..label.len() - 1].chars().all(|c| c.is_ascii_digit())
+                {
                     continue;
                 }
                 for (cpu, col) in cols.take(nr_cpus).enumerate() {
@@ -1414,24 +1416,42 @@ fn rt_thread_wake_counts(tids: &[(u32, u32)]) -> Vec<u64> {
 /// signal worth demoting a core over.
 fn rt_resident_threads() -> Vec<(u32, u32)> {
     let mut out = Vec::new();
-    let Ok(proc_dir) = std::fs::read_dir("/proc") else { return out };
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        return out;
+    };
     for pid_entry in proc_dir.flatten() {
-        let Some(pid_name) = pid_entry.file_name().to_str().map(String::from) else { continue };
+        let Some(pid_name) = pid_entry.file_name().to_str().map(String::from) else {
+            continue;
+        };
         if !pid_name.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid_name}/task")) else { continue };
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid_name}/task")) else {
+            continue;
+        };
         for task in tasks.flatten() {
-            let Some(tid) = task.file_name().to_str().and_then(|t| t.parse::<u32>().ok()) else { continue };
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{tid}/stat")) else { continue };
+            let Some(tid) = task
+                .file_name()
+                .to_str()
+                .and_then(|t| t.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{tid}/stat")) else {
+                continue;
+            };
             // Fields after the parenthesized comm: split on the LAST ')'.
-            let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else { continue };
+            let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else {
+                continue;
+            };
             let cols: Vec<&str> = rest.split_whitespace().collect();
             // rest[0]=state(field 3) ... psr=field 39 -> rest[36], policy=field 41 -> rest[38]
             let (Some(psr), Some(policy)) = (
                 cols.get(36).and_then(|v| v.parse::<u32>().ok()),
                 cols.get(38).and_then(|v| v.parse::<u32>().ok()),
-            ) else { continue };
+            ) else {
+                continue;
+            };
             if policy != 1 && policy != 2 {
                 continue; // not SCHED_FIFO/SCHED_RR
             }
@@ -2049,9 +2069,7 @@ impl Args {
 fn cli_arg_present(long: &str, short: Option<&str>) -> bool {
     let long_with_value = format!("{long}=");
     std::env::args().skip(1).any(|arg| {
-        arg == long
-            || arg.starts_with(&long_with_value)
-            || short.map_or(false, |short| arg == short)
+        arg == long || arg.starts_with(&long_with_value) || short.is_some_and(|short| arg == short)
     })
 }
 
