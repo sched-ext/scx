@@ -700,7 +700,7 @@ u64 futex_lane_until_ns __attribute__((aligned(64)));
 struct scx_dhq __arena *core_dhqs[CAKE_MAX_CORES];
 struct scx_lfdeq __arena *cpu_lfdeqs[CAKE_MAX_CPUS];
 
-static __noinline struct scx_lfdeq __arena *get_cpu_lfdeq(u32 cpu)
+static __noinline __maybe_unused struct scx_lfdeq __arena *get_cpu_lfdeq(u32 cpu)
 {
 	u32 idx = cpu & (CAKE_MAX_CPUS - 1);
 	barrier_var(idx);
@@ -710,7 +710,7 @@ static __noinline struct scx_lfdeq __arena *get_cpu_lfdeq(u32 cpu)
 }
 
 
-static __noinline int scx_lfdeq_enqueue_remote(struct scx_lfdeq __arena *lfdeq, u64 pid)
+static __noinline __maybe_unused int scx_lfdeq_enqueue_remote(struct scx_lfdeq __arena *lfdeq, u64 pid)
 {
 	struct lfdeq_ring __arena *ring = &lfdeq->eq_buf;
 	
@@ -734,7 +734,7 @@ static __noinline int scx_lfdeq_enqueue_remote(struct scx_lfdeq __arena *lfdeq, 
 	return 0;
 }
 
-static __noinline void scx_lfdeq_flush(struct scx_lfdeq __arena *lfdeq)
+static __noinline __maybe_unused void scx_lfdeq_flush(struct scx_lfdeq __arena *lfdeq)
 {
 	struct lfdeq_ring __arena *ring = &lfdeq->eq_buf;
 	u64 h = READ_ONCE(ring->head);
@@ -779,7 +779,7 @@ static __noinline void scx_lfdeq_flush(struct scx_lfdeq __arena *lfdeq)
 	}
 }
 
-static __noinline u64 scx_lfdeq_pop_local(struct scx_lfdeq __arena *lfdeq)
+static __noinline __maybe_unused u64 scx_lfdeq_pop_local(struct scx_lfdeq __arena *lfdeq)
 {
 	u64 t = READ_ONCE(lfdeq->tail);
 	u64 h = READ_ONCE(lfdeq->head);
@@ -814,7 +814,7 @@ static __noinline u64 scx_lfdeq_pop_local(struct scx_lfdeq __arena *lfdeq)
 	return pid;
 }
 
-static __noinline u64 scx_lfdeq_steal(struct scx_lfdeq __arena *lfdeq)
+static __noinline __maybe_unused u64 scx_lfdeq_steal(struct scx_lfdeq __arena *lfdeq)
 {
 	u64 h, t;
 
@@ -2023,12 +2023,12 @@ cake_select_service_needs_enqueue_contract(u32 service_kind)
 	       service_kind == CAKE_TASK_SERVICE_PERF_SCHED_PIPE;
 }
 
-static __always_inline void cake_futex_lane_note_now(u64 now)
+static __always_inline __maybe_unused void cake_futex_lane_note_now(u64 now)
 {
 	WRITE_ONCE(futex_lane_until_ns, now + CAKE_FUTEX_LANE_ACTIVE_NS);
 }
 
-static __always_inline bool cake_futex_lane_active(u64 *nowp)
+static __always_inline __maybe_unused bool cake_futex_lane_active(u64 *nowp)
 {
 	u64 until = READ_ONCE(futex_lane_until_ns);
 	u64 now;
