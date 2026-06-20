@@ -1,6 +1,6 @@
 [package]
 name = "scx_flow"
-version = "3.0.4"
+version = "3.1.0"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
 description = "A budget-driven sched_ext scheduler with zero heuristic classification. https://github.com/sched-ext/scx/tree/main"

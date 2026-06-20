@@ -17,7 +17,6 @@
       --text-secondary: #888888;
       --text-muted: #6a6a6a;
       --accent: #3f83f8;
-      --accent-hover: #5a9aff;
       --success: #31c48d;
       --warning: #f5a623;
       --error: #ee0000;
@@ -34,7 +33,6 @@
       padding: 16px;
       min-height: 100vh;
       overflow-x: hidden;
-      -webkit-text-size-adjust: 100%;
     }
     @media (min-width: 640px) { body { padding: 24px; } }
 
@@ -46,72 +44,59 @@
       min-width: 0;
       overflow: hidden;
     }
-    .card:hover { border-color: var(--border-hover); }
 
     .stat-value {
       font-family: var(--font-mono);
       font-weight: 600;
       font-feature-settings: "tnum";
     }
-    .tier-P { color: var(--success); }
-    .tier-N { color: var(--accent); }
-    .tier-L { color: var(--warning); }
-    .tier-D { color: var(--error); }
 
-    .tier-bar {
-      height: 20px;
-      border-radius: 4px;
-      min-width: 2px;
+    /* Per-core card grid */
+    .core-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 8px;
+      margin-bottom: 16px;
     }
+    .core-card { padding: 12px; font-size: 0.8125rem; }
+    .core-card .core-id { font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono); }
+    .core-card .core-freq { font-size: 0.75rem; color: var(--text-secondary); margin-top: 2px; }
+    .core-card .core-smt { font-size: 0.6875rem; color: var(--warning); }
+    .core-card .core-llc { font-size: 0.6875rem; color: var(--text-muted); }
 
-    .sparkline { display: flex; align-items: flex-end; gap: 1px; height: 32px; padding-top: 6px; }
-    .sparkline-bar { width: 4px; border-radius: 1px; min-height: 1px; flex-shrink: 0; }
+    /* Carriage pool grid */
+    .carriage-grid {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .carriage-slot {
+      width: 20px; height: 20px;
+      border-radius: 3px;
+      font-size: 0.5rem;
+      display: flex; align-items: center; justify-content: center;
+      font-family: var(--font-mono);
+    }
+    .carriage-slot.filling { background: var(--accent); color: #fff; }
+    .carriage-slot.calculating { background: var(--warning); color: #000; }
+    .carriage-slot.idle { background: var(--elevated); color: var(--text-muted); }
 
-    .dist-bar-outer { height: 24px; background: var(--elevated); border-radius: 4px; overflow: hidden; display: flex; }
-    .dist-bar { height: 100%; min-width: 4px; }
-
-    button { background: none; border: none; color: inherit; font: inherit; cursor: pointer; }
-    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-    ::-webkit-scrollbar { width: 4px; height: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
-    ::-webkit-scrollbar-thumb:hover { background: #555; }
-
-    .tier-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px; }
-    @media (min-width: 640px) { .tier-grid { grid-template-columns: repeat(4, 1fr); } }
-    .sys-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font-size: 0.8125rem; }
+    /* System stats grid */
+    .sys-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      font-size: 0.8125rem;
+    }
     @media (min-width: 640px) { .sys-grid { grid-template-columns: repeat(4, 1fr); } }
     @media (max-width: 640px) {
       body { padding: 8px; }
       .card { padding: 10px; }
       .stat-value { font-size: 0.875rem !important; word-break: break-all; }
-      .tier-grid { gap: 6px; }
-      .sys-grid { gap: 4px; font-size: 0.75rem; }
-      .modal-content { padding: 12px; margin: 8px; }
-      .sparkline { height: 20px; }
-      .sparkline-bar { width: 3px; }
-      header .text-sm { font-size: 0.75rem; }
+      .core-grid { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+      .carriage-slot { width: 16px; height: 16px; }
     }
-
-    /* Modal overlay */
-    .modal-overlay {
-      position: fixed; inset: 0; z-index: 100;
-      background: rgba(0,0,0,0.8);
-      display: flex; align-items: center; justify-content: center;
-      padding: 16px;
-    }
-    .modal-content {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 24px;
-      max-width: 640px;
-      width: 100%;
-      max-height: 80vh;
-      overflow: auto;
-    }
-    .modal-content h2 { font-size: 1rem; font-weight: 600; margin-bottom: 12px; }
   </style>
 </head>
 <body>
@@ -120,57 +105,29 @@
     <!-- Header -->
     <header class="card" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
       <div style="min-width:0;overflow:hidden">
-        <h1 style="font-size:1.25rem;font-weight:700;font-family:var(--font-sans)">scx_flow stats</h1>
-        <p style="font-size:0.8125rem;color:var(--text-secondary);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">tier dispatches, budget distribution, system stats</p>
+        <h1 style="font-size:1.25rem;font-weight:700">scx_flow stats</h1>
+        <p style="font-size:0.8125rem;color:var(--text-secondary);margin-top:2px">Waiting Room — per-core dispatch, carriage pool</p>
       </div>
       <div id="status-badge" style="font-size:0.75rem;padding:3px 10px;border-radius:999px;border:1px solid var(--success);color:var(--success);font-family:var(--font-mono);white-space:nowrap">
         ● running
       </div>
     </header>
 
-    <!-- Tier metric cards with sparklines -->
-    <div id="tier-cards" class="tier-grid">
-      <div class="card"><button onclick="showHistory('priority')" style="width:100%;text-align:left">
-        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Priority</p>
-        <p class="stat-value tier-P" id="tier-P" style="font-size:1.5rem">0</p>
-        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">dispatches from priority tier</p>
-        <div class="sparkline" id="spark-P"></div>
-      </button></div>
-      <div class="card"><button onclick="showHistory('normal')" style="width:100%;text-align:left">
-        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Normal</p>
-        <p class="stat-value tier-N" id="tier-N" style="font-size:1.5rem">0</p>
-        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">dispatches from normal tier</p>
-        <div class="sparkline" id="spark-N"></div>
-      </button></div>
-      <div class="card"><button onclick="showHistory('low')" style="width:100%;text-align:left">
-        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Low</p>
-        <p class="stat-value tier-L" id="tier-L" style="font-size:1.5rem">0</p>
-        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">dispatches from low tier</p>
-        <div class="sparkline" id="spark-L"></div>
-      </button></div>
-      <div class="card"><button onclick="showHistory('deficit')" style="width:100%;text-align:left">
-        <p style="font-size:0.75rem;color:var(--text-muted);font-family:var(--font-sans)">Exhausted</p>
-        <p class="stat-value tier-D" id="tier-D" style="font-size:1.5rem">0</p>
-        <p style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">dispatches from deficit tier</p>
-        <div class="sparkline" id="spark-D"></div>
-      </button></div>
-    </div>
+    <!-- Per-core cards -->
+    <div id="core-cards" class="core-grid"></div>
 
-    <!-- Tier distribution bar -->
+    <!-- Carriage pool -->
     <div class="card" style="margin-bottom:16px">
-      <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px">Tier distribution</p>
-      <div class="dist-bar-outer" id="dist-bar">
-        <div class="dist-bar tier-P" id="dist-P" style="background:var(--success)"></div>
-        <div class="dist-bar tier-N" id="dist-N" style="background:var(--accent)"></div>
-        <div class="dist-bar tier-L" id="dist-L" style="background:var(--warning)"></div>
-        <div class="dist-bar tier-D" id="dist-D" style="background:var(--error)"></div>
+      <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px">Waiting Room — Carriage Pool</p>
+      <div style="display:flex;gap:12px;font-size:0.75rem;font-family:var(--font-mono);margin-bottom:8px">
+        <span>prod: <span id="carriage-prod">0</span></span>
+        <span>slot: <span id="carriage-slot">0</span></span>
+
+        <span>fill: <span id="carriage-fill">0</span></span>
+
+
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-size:0.6875rem">
-        <span style="color:var(--success)">■ P <span id="dist-pct-P">0</span>%</span>
-        <span style="color:var(--accent)">■ N <span id="dist-pct-N">0</span>%</span>
-        <span style="color:var(--warning)">■ L <span id="dist-pct-L">0</span>%</span>
-        <span style="color:var(--error)">■ D <span id="dist-pct-D">0</span>%</span>
-      </div>
+      <div id="carriage-grid" class="carriage-grid"></div>
     </div>
 
     <!-- System stats -->
@@ -178,13 +135,12 @@
       <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px">System</p>
       <div class="sys-grid">
         <div><span style="color:var(--text-muted)">On CPU:</span> <span class="stat-value" id="on-cpu">0</span></div>
-        <div><span style="color:var(--text-muted)">Uptime:</span> <span class="stat-value" id="total-runtime">0</span></div>
-        <div><span style="color:var(--text-muted)">Quick dispatches:</span> <span class="stat-value" id="quick-disp">0</span></div>
+        <div><span style="color:var(--text-muted)">Uptime:</span> <span class="stat-value" id="uptime">0</span></div>
+        <div><span style="color:var(--text-muted)">Wake dispatches:</span> <span class="stat-value" id="prio-disp">0</span></div>
         <div><span style="color:var(--text-muted)">Pinned dispatches:</span> <span class="stat-value" id="pinned-disp">0</span></div>
-        <div><span style="color:var(--text-muted)">Budget refills:</span> <span class="stat-value" id="budget-refill">0</span></div>
         <div><span style="color:var(--text-muted)">Budget exhaustions:</span> <span class="stat-value" id="budget-exhaust">0</span></div>
-        <div><span style="color:var(--text-muted)">CPU migrations:</span> <span class="stat-value" id="cpu-migrations">0</span></div>
-        <div><span style="color:var(--text-muted)">Wakeups:</span> <span class="stat-value" id="runnable-wakeups">0</span></div>
+        <div><span style="color:var(--text-muted)">CPU migrations:</span> <span class="stat-value" id="cpu-mig">0</span></div>
+        <div><span style="color:var(--text-muted)">Wakeups:</span> <span class="stat-value" id="wakeups">0</span></div>
       </div>
     </div>
 
@@ -194,21 +150,8 @@
     </div>
   </div>
 
-  <!-- Modal placeholder -->
-  <div id="modal-root"></div>
-
   <script>
     const el = (id) => document.getElementById(id);
-    const TIER_COLORS = { P: '#31c48d', N: '#3f83f8', L: '#f5a623', D: '#ee0000' };
-    const TIER_NAMES = { priority: 'Priority', normal: 'Normal', low: 'Low', deficit: 'Exhausted' };
-    const TIER_KEYS = {
-      priority: 'tier_priority_dispatches',
-      normal: 'tier_normal_dispatches',
-      low: 'tier_low_dispatches',
-      deficit: 'tier_deficit_dispatches'
-    };
-
-    let historyData = [];
 
     function clamp(v) { return v < 0 ? 0 : v; }
 
@@ -231,110 +174,72 @@
       var hr = min / 60;
       if (hr < 24) return hr.toFixed(1) + ' hr';
       var day = hr / 24;
-      if (day < 30) return day.toFixed(1) + ' days';
-      if (day < 365) return (day / 30).toFixed(1) + ' months';
-      return (day / 365).toFixed(1) + ' years';
+      return day.toFixed(1) + ' days';
     }
 
-    function renderSparkline(containerId, values, color, maxVal) {
-      const container = el(containerId);
-      if (!container || !values.length) { if (container) container.innerHTML = ''; return; }
-      const h = 26;
-      const m = maxVal || Math.max(...values, 1);
-      container.innerHTML = values.map(function(v) {
-        var bh = Math.max(1, (v / m) * h);
-        return '<div class="sparkline-bar" style="height:' + bh.toFixed(0) + 'px;background:' + color + '"></div>';
+    function renderCoreCards(data) {
+      var container = el('core-cards');
+      var perCpu = data.per_cpu || [];
+      if (!perCpu.length) {
+        container.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;color:var(--text-muted)">No CPU data yet</div>';
+        return;
+      }
+      container.innerHTML = perCpu.map(function(cpu) {
+        var freqMhz = Math.round(cpu.freq_khz / 1000);
+        var smtLabel = cpu.smt ? ' <span class="core-smt">SMT</span>' : '';
+        return '<div class="card core-card">' +
+          '<div class="core-id">CPU ' + cpu.id + smtLabel + '</div>' +
+          '<div class="core-freq">' + freqMhz + ' MHz</div>' +
+          '<div class="core-llc">LLC ' + cpu.llc_id + '</div>' +
+          '</div>';
       }).join('');
     }
 
-    function renderDistBar(data) {
-      var p = data.tier_priority_dispatches || 0;
-      var n = data.tier_normal_dispatches || 0;
-      var l = data.tier_low_dispatches || 0;
-      var d = data.tier_deficit_dispatches || 0;
-      var total = p + n + l + d;
-      if (total === 0) {
-        ['dist-P','dist-N','dist-L','dist-D'].forEach(function(id) { el(id).style.width = '0'; });
-        ['dist-pct-P','dist-pct-N','dist-pct-L','dist-pct-D'].forEach(function(id) { el(id).textContent = '0'; });
-        return;
+    function renderCarriagePool(data) {
+      var s = data.stats || {};
+      var prod = s.carriage_producer || 0;
+      var fillCount = data.carriage_filling_count || 0;
+      el('carriage-prod').textContent = fmt(prod);
+      el('carriage-slot').textContent = prod & 63;
+      el('carriage-fill').textContent = fmt(fillCount);
+
+      // Render slot grid from stats API (carriage_pool data not in current API)
+      // Show a simple 64-slot grid based on producer/consumer
+      var grid = el('carriage-grid');
+      var slots = '';
+      for (var i = 0; i < 64; i++) {
+        var cls = 'carriage-slot';
+        if (i === (prod & 63)) cls += ' filling';
+        else cls += ' idle';
+        slots += '<div class="' + cls + '"></div>';
       }
-      el('dist-P').style.width = (p / total * 100) + '%';
-      el('dist-N').style.width = (n / total * 100) + '%';
-      el('dist-L').style.width = (l / total * 100) + '%';
-      el('dist-D').style.width = (d / total * 100) + '%';
-      el('dist-pct-P').textContent = (p / total * 100).toFixed(0);
-      el('dist-pct-N').textContent = (n / total * 100).toFixed(0);
-      el('dist-pct-L').textContent = (l / total * 100).toFixed(0);
-      el('dist-pct-D').textContent = (d / total * 100).toFixed(0);
+      grid.innerHTML = slots;
     }
 
     function updateUI(data) {
-      // Status badge
       el('status-badge').textContent = '● running';
       el('status-badge').style.borderColor = 'var(--success)';
       el('status-badge').style.color = 'var(--success)';
 
-      // Tier counts
-      el('tier-P').textContent = fmt(data.tier_priority_dispatches || 0);
-      el('tier-N').textContent = fmt(data.tier_normal_dispatches || 0);
-      el('tier-L').textContent = fmt(data.tier_low_dispatches || 0);
-      el('tier-D').textContent = fmt(data.tier_deficit_dispatches || 0);
+      var s = data.stats || {};
+      el('on-cpu').textContent = fmt(s.on_cpu || 0);
+      el('uptime').textContent = fmtRuntime(s.uptime_ns || 0);
+      el('prio-disp').textContent = fmt(s.prio_dispatches || 0);
+      el('pinned-disp').textContent = fmt(s.pinned_dispatches || 0);
+      el('budget-exhaust').textContent = fmt(s.budget_exhaustions || 0);
+      el('cpu-mig').textContent = fmt(s.cpu_migrations || 0);
+      el('wakeups').textContent = fmt(s.runnable_wakeups || 0);
 
-      // System stats
-      el('on-cpu').textContent = fmt(data.on_cpu || 0);
-      el('total-runtime').textContent = fmtRuntime(data.uptime_ns || 0);
-      el('quick-disp').textContent = fmt(data.prio_dispatches || 0);
-      el('pinned-disp').textContent = fmt(data.pinned_dispatches || 0);
-      el('budget-refill').textContent = fmt(data.budget_refill_events || 0);
-      el('budget-exhaust').textContent = fmt(data.budget_exhaustions || 0);
-      el('cpu-migrations').textContent = fmt(data.cpu_migrations || 0);
-      el('runnable-wakeups').textContent = fmt(data.runnable_wakeups || 0);
-
-      // Distribution bar
-      renderDistBar(data);
-
-      // Connection status
-      el('conn-status').textContent = 'Live — ' + new Date().toLocaleTimeString();
-    }
-
-    function updateSparklines() {
-      if (historyData.length < 2) return;
-      var keys = [
-        { key: 'tier_priority_dispatches', id: 'spark-P', color: TIER_COLORS.P },
-        { key: 'tier_normal_dispatches',   id: 'spark-N', color: TIER_COLORS.N },
-        { key: 'tier_low_dispatches',      id: 'spark-L', color: TIER_COLORS.L },
-        { key: 'tier_deficit_dispatches',  id: 'spark-D', color: TIER_COLORS.D },
-      ];
-      // Compute per-sample deltas (dispatch rate per interval)
-      var tierKeys = ['tier_priority_dispatches','tier_normal_dispatches','tier_low_dispatches','tier_deficit_dispatches'];
-      var deltas = [];
-      for (var i = 1; i < historyData.length; i++) {
-        var prev = historyData[i - 1];
-        var cur = historyData[i];
-        var d = {};
-        tierKeys.forEach(function(k) { d[k] = Math.max(0, (cur[k] || 0) - (prev[k] || 0)); });
-        deltas.push(d);
-      }
-      var sampleCount = Math.min(deltas.length, 60);
-      var recent = deltas.slice(deltas.length - sampleCount);
-
-      keys.forEach(function(k) {
-        var vals = recent.map(function(d) { return d[k.key] || 0; });
-        if (vals.length > 1) {
-          var max = Math.max(Math.max.apply(null, vals), 1);
-          renderSparkline(k.id, vals, k.color, max);
-        }
-      });
+      renderCoreCards(data);
+      renderCarriagePool(data);
     }
 
     function pollStats() {
       fetch('/api/stats')
         .then(function(r) { return r.json(); })
         .then(function(data) {
-          historyData.push(data);
-          if (historyData.length > 300) historyData.shift();
           updateUI(data);
-          updateSparklines();
+          el('conn-status').textContent = 'Live — ' + new Date().toLocaleTimeString();
         })
         .catch(function() {
           el('status-badge').textContent = '● disconnected';
@@ -344,94 +249,6 @@
         });
     }
 
-    // Load history on page load
-    fetch('/api/history')
-      .then(function(r) { return r.json(); })
-      .then(function(h) {
-        if (Array.isArray(h) && h.length) {
-          historyData = h;
-          updateSparklines();
-          // Update UI with latest history point
-          updateUI(h[h.length - 1]);
-        }
-      })
-      .catch(function() {});
-
-    // Modal — save focus, aria-modal, restore on close.
-    function showHistory(tier) {
-      lastFocused = document.activeElement;
-      var root = el('modal-root');
-      if (!root) return;
-      var key = TIER_KEYS[tier];
-      var name = TIER_NAMES[tier] || tier;
-      var color = TIER_COLORS[tier.charAt(0).toUpperCase()] || '#fff';
-
-      var vals = historyData.map(function(d) { return d[key] || 0; });
-      var values = [];
-      for (var i = 1; i < vals.length; i++) {
-        values.push(Math.max(0, vals[i] - vals[i - 1]));
-      }
-      var max = Math.max.apply(null, values.concat([1]));
-
-      var sampleCount = Math.min(values.length, 120);
-      var recent = values.slice(Math.max(values.length - sampleCount, 0));
-      var barWidth = 640 / Math.max(recent.length, 1);
-
-      var bars = recent.map(function(v) {
-        var h = Math.max(1, (v / max) * 120);
-        return '<div style="width:' + barWidth + 'px;height:' + h.toFixed(0) + 'px;background:' + color + ';display:inline-block;vertical-align:bottom;border-radius:1px"></div>';
-      }).join('');
-
-      var last = recent.length ? recent[recent.length - 1] : 0;
-      var p50 = percentile(recent, 0.5);
-      var p95 = percentile(recent, 0.95);
-      var p99 = percentile(recent, 0.99);
-
-      root.innerHTML =
-        '<div class="modal-overlay" role="dialog" aria-modal="true" aria-label="' + name + ' dispatch history" onclick="onOverlayClick(event)">' +
-        '<div class="modal-content">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
-        '<h2 id="modal-title">' + name + ' dispatches over time</h2>' +
-        '<button onclick="closeModal()" style="font-size:1.25rem;color:var(--text-muted);padding:4px 8px" aria-label="Close">&times;</button>' +
-        '</div>' +
-        '<div style="overflow-x:auto;white-space:nowrap;height:140px;padding-top:10px">' + bars + '</div>' +
-        '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;font-size:0.75rem">' +
-        '<div><span style="color:var(--text-muted)">Current</span><br><span class="stat-value">' + fmt(last) + '</span></div>' +
-        '<div><span style="color:var(--text-muted)">Median</span><br><span class="stat-value">' + fmt(p50) + '</span></div>' +
-        '<div><span style="color:var(--text-muted)">p95</span><br><span class="stat-value">' + fmt(p95) + '</span></div>' +
-        '<div><span style="color:var(--text-muted)">p99</span><br><span class="stat-value">' + fmt(p99) + '</span></div>' +
-        '</div>' +
-        '</div>' +
-        '</div>';
-      // Focus close button, restore on Esc.
-      var closeBtn = root.querySelector('button[aria-label="Close"]');
-      if (closeBtn) closeBtn.focus();
-    }
-
-    var lastFocused = null;
-
-    document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape' && el('modal-root').innerHTML) closeModal();
-    });
-
-    function onOverlayClick(e) {
-      if (e.target === e.currentTarget) closeModal();
-    }
-
-    function closeModal() {
-      var root = el('modal-root');
-      if (root) root.innerHTML = '';
-      if (lastFocused && lastFocused.focus) lastFocused.focus();
-    }
-
-    function percentile(arr, p) {
-      if (!arr.length) return 0;
-      var sorted = arr.slice().sort(function(a,b) { return a - b; });
-      var idx = Math.ceil(sorted.length * p) - 1;
-      return sorted[Math.max(0, Math.min(idx, sorted.length - 1))];
-    }
-
-    // Poll immediately and then every second
     pollStats();
     setInterval(pollStats, 1000);
   </script>

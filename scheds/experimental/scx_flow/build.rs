@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 //
 // This software may be used and distributed according to the terms of the

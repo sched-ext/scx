@@ -1,7 +1,6 @@
-// Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+// SPDX-License-Identifier: GPL-2.0
 //
-// This software may be used and distributed according to the terms of the
-// GNU General Public License version 2.
+// Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -16,6 +15,21 @@ use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PerCpuMetrics {
+    pub id: u32,
+    pub freq_khz: u64,
+    pub llc_id: u32,
+    pub smt: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WebMetrics {
+    pub stats: Metrics,
+    pub per_cpu: Vec<PerCpuMetrics>,
+    pub carriage_filling_count: u64,
+}
+
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
@@ -26,25 +40,19 @@ pub struct Metrics {
     pub total_runtime: u64,
     #[stat(desc = "Scheduler uptime (wall clock since attach)")]
     pub uptime_ns: u64,
-    #[stat(desc = "Tasks enqueued via the wakeup fast path (FLOW_DSQ_LOCAL_ON)")]
+    #[stat(desc = "Tasks dispatched via the wakeup fast path")]
     pub prio_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the per-CPU pinned DSQ (non-migratable tasks)")]
+    #[stat(desc = "Tasks dispatched from the per-CPU pinned DSQ")]
     pub pinned_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the PRIORITY tier (budget >= 1.5 ms)")]
-    pub tier_priority_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the NORMAL tier (1.0 ms <= budget < 1.5 ms)")]
-    pub tier_normal_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the LOW tier (0.5 ms <= budget < 1.0 ms)")]
-    pub tier_low_dispatches: u64,
-    #[stat(desc = "Tasks dispatched from the DEFICIT tier (budget < 0.5 ms)")]
-    pub tier_deficit_dispatches: u64,
-    #[stat(desc = "Wakeups that refilled task budget")]
-    pub budget_refill_events: u64,
+
+    #[stat(desc = "Carriage pool slot index")]
+    pub carriage_producer: u64,
+
     #[stat(desc = "Times a task ran its budget down to zero or below")]
     pub budget_exhaustions: u64,
-    #[stat(desc = "Runnable wakeups observed before enqueue/select_cpu decisions")]
+    #[stat(desc = "Runnable wakeups observed")]
     pub runnable_wakeups: u64,
-    #[stat(desc = "Observed task migrations between successive runs")]
+    #[stat(desc = "Observed task migrations")]
     pub cpu_migrations: u64,
 }
 
@@ -52,19 +60,17 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] run={} runtime_ns={} uptime_ns={} quick_disp={} pinned_disp={} tier_P={} tier_N={} tier_L={} tier_D={} refill={} exhaust={} runnable={} migrations={}",
+            "[{}] run={} runtime_ns={} uptime_ns={} quick_disp={} pinned_disp={} \
+             pool: slot={} \
+              exhaust={} runnable={} migrations={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
             self.uptime_ns,
             self.prio_dispatches,
             self.pinned_dispatches,
-            self.tier_priority_dispatches,
-            self.tier_normal_dispatches,
-            self.tier_low_dispatches,
-            self.tier_deficit_dispatches,
-            self.budget_refill_events,
-            self.budget_exhaustions,
+             self.carriage_producer & 63,
+             self.budget_exhaustions,
             self.runnable_wakeups,
             self.cpu_migrations,
         )?;
@@ -75,24 +81,11 @@ impl Metrics {
         Self {
             on_cpu: self.on_cpu,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
-            uptime_ns: self.uptime_ns, // absolute, not a counter — no delta
+            uptime_ns: self.uptime_ns,
             prio_dispatches: self.prio_dispatches.wrapping_sub(rhs.prio_dispatches),
             pinned_dispatches: self.pinned_dispatches.wrapping_sub(rhs.pinned_dispatches),
-            tier_priority_dispatches: self
-                .tier_priority_dispatches
-                .wrapping_sub(rhs.tier_priority_dispatches),
-            tier_normal_dispatches: self
-                .tier_normal_dispatches
-                .wrapping_sub(rhs.tier_normal_dispatches),
-            tier_low_dispatches: self
-                .tier_low_dispatches
-                .wrapping_sub(rhs.tier_low_dispatches),
-            tier_deficit_dispatches: self
-                .tier_deficit_dispatches
-                .wrapping_sub(rhs.tier_deficit_dispatches),
-            budget_refill_events: self
-                .budget_refill_events
-                .wrapping_sub(rhs.budget_refill_events),
+            carriage_producer: self.carriage_producer.wrapping_sub(rhs.carriage_producer),
+
             budget_exhaustions: self.budget_exhaustions.wrapping_sub(rhs.budget_exhaustions),
             runnable_wakeups: self.runnable_wakeups.wrapping_sub(rhs.runnable_wakeups),
             cpu_migrations: self.cpu_migrations.wrapping_sub(rhs.cpu_migrations),

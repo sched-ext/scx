@@ -7,9 +7,11 @@
 
 mod bpf_skel;
 pub use bpf_skel::*;
+pub use bpf_skel::types;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+mod carriage;
 mod stats;
 mod webui;
 use std::mem::MaybeUninit;
@@ -49,31 +51,24 @@ fn full_version() -> String {
 #[derive(Debug, Parser)]
 #[command(name = SCHEDULER_NAME, version, disable_version_flag = true)]
 struct Opts {
-    /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
 
-    /// Run in stats monitoring mode with the specified interval. Scheduler is not launched.
     #[clap(long)]
     monitor: Option<f64>,
 
-    /// Debug mode
     #[clap(short, long, action = clap::ArgAction::SetTrue)]
     debug: bool,
 
-    /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
-    /// Disable the web UI (http://localhost:50005).
     #[clap(long = "no-webui", action = clap::ArgAction::SetTrue)]
     no_webui: bool,
 
-    /// Disable adaptive runtime tuning (no-op, kept for backward compatibility).
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_autotune: bool,
 
-    /// Generate shell completions for the given shell and exit.
     #[clap(long, value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
 
@@ -85,7 +80,7 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
-    webui_tx: Option<crossbeam::channel::Sender<Metrics>>,
+    webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
     started_at: std::time::Instant,
 }
 
@@ -150,14 +145,33 @@ impl<'a> Scheduler<'a> {
 
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
 
+        // Write scheduler PID to BSS so BPF can bypass the carriage.
+        {
+            let key: u32 = 0;
+            let mut bss_raw = skel.maps.bss
+                .lookup(&key.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let pid_offset = std::mem::offset_of!(types::bss, flow_scheduler_pid);
+            let pid_bytes = (std::process::id() as u64).to_ne_bytes();
+            let bss_slice = bss_raw.as_mut_slice();
+            if pid_offset + 8 <= bss_slice.len() {
+                bss_slice[pid_offset..pid_offset + 8].copy_from_slice(&pid_bytes);
+            }
+            let _ = skel.maps.bss.update(&key.to_ne_bytes(), &bss_raw,
+                                         libbpf_rs::MapFlags::ANY);
+        }
+
+        // Discover topology and write into BSS.
+        carriage::init_topology(&mut skel)?;
+
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
 
-        // Expose live metrics for monitor and stats clients.
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
-        // Start the web UI thread (unless disabled).
-        let webui_tx: Option<crossbeam::channel::Sender<Metrics>> = if !opts.no_webui {
-            let (tx, rx) = crossbeam::channel::unbounded::<Metrics>();
+        let webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>> = if !opts.no_webui {
+            let (tx, rx) = crossbeam::channel::unbounded::<stats::WebMetrics>();
             let shutdown = shutdown.clone();
             std::thread::spawn(move || {
                 webui::start(rx, shutdown);
@@ -177,22 +191,54 @@ impl<'a> Scheduler<'a> {
     }
 
     fn get_metrics(&self) -> Metrics {
-        let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
+        let bss_data = self.skel.maps.bss_data.as_ref().expect("bss_data missing — BPF object has no .bss section");
         let cpu_policy_state = self.read_cpu_policy_state();
         Metrics {
             on_cpu: bss_data.on_cpu,
             total_runtime: bss_data.total_runtime,
+            uptime_ns: self.started_at.elapsed().as_nanos() as u64,
+
             prio_dispatches: bss_data.prio_dispatches,
             pinned_dispatches: bss_data.pinned_dispatches,
-            tier_priority_dispatches: bss_data.tier_priority_dispatches,
-            tier_normal_dispatches: bss_data.tier_normal_dispatches,
-            tier_low_dispatches: bss_data.tier_low_dispatches,
-            tier_deficit_dispatches: bss_data.tier_deficit_dispatches,
-            budget_refill_events: bss_data.budget_refill_events,
+
+            carriage_producer: bss_data.carriage_producer,
+
+
             budget_exhaustions: bss_data.budget_exhaustions + cpu_policy_state.budget_exhaustions,
             runnable_wakeups: bss_data.runnable_wakeups + cpu_policy_state.runnable_wakeups,
             cpu_migrations: bss_data.cpu_migrations + cpu_policy_state.cpu_migrations,
-            uptime_ns: self.started_at.elapsed().as_nanos() as u64,
+        }
+    }
+
+    fn get_web_metrics(&self) -> stats::WebMetrics {
+        let metrics = self.get_metrics();
+        let bss_data = self.skel.maps.bss_data.as_ref().expect("bss_data missing — BPF object has no .bss section");
+
+        let nr_cpus = bss_data.nr_cpu_ids as usize;
+        let mut per_cpu = Vec::with_capacity(nr_cpus);
+        for cpu in 0..nr_cpus {
+            if cpu >= 1024 {
+                break;
+            }
+            per_cpu.push(stats::PerCpuMetrics {
+                id: cpu as u32,
+                freq_khz: bss_data.per_cpu_max_freq_khz[cpu],
+                llc_id: bss_data.per_cpu_llc_id[cpu] as u32,
+                smt: bss_data.per_cpu_is_smt[cpu] != 0,
+            });
+        }
+
+        let closed_slot = (bss_data.carriage_producer.wrapping_sub(1) & 63) as usize;
+        let carriage_filling_count = if closed_slot < 64 {
+            bss_data.carriage_pool[closed_slot].count as u64
+        } else {
+            0
+        };
+
+        stats::WebMetrics {
+            stats: metrics,
+            per_cpu,
+            carriage_filling_count,
         }
     }
 
@@ -208,15 +254,15 @@ impl<'a> Scheduler<'a> {
                 Ok(()) => {
                     let m = self.get_metrics();
                     if let Some(ref tx) = self.webui_tx {
-                        let _ = tx.try_send(m.clone());
+                        let wm = self.get_web_metrics();
+                        let _ = tx.try_send(wm);
                     }
                     res_ch.send(m)?;
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    // Push metrics to web UI only if someone's listening.
                     if let Some(ref tx) = self.webui_tx {
-                        let m = self.get_metrics();
-                        let _ = tx.try_send(m);
+                        let wm = self.get_web_metrics();
+                        let _ = tx.try_send(wm);
                     }
                 }
                 Err(e) => Err(e)?,
