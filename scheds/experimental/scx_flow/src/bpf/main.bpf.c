@@ -32,6 +32,7 @@ struct task_ctx {
 	u64 sleep_started_at;
 	s32 last_cpu;
 	s32 last_llc;		/* for migration cost calculation */
+	s32 runnable_cpu;	/* CPU where flow_runnable incremented per_cpu_runnable */
 	s32 wake_cpu;
 	bool wake_cpu_idle;
 	bool wake_cpu_valid;

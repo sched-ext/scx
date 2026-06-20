@@ -29,6 +29,10 @@ pub fn init_topology(skel: &mut crate::BpfSkel<'_>) -> Result<()> {
     let mut system_total_khz: u64 = 0;
 
     for (id, cpu) in &topo.all_cpus {
+        if *id >= 1024 {
+            log::warn!("CPU {} exceeds max supported (1024), skipping", id);
+            continue;
+        }
         let freq_khz = cpu.max_freq as u64;
         let llc_id = read_cpu_llc_id(*id);
         let core_id = read_cpu_core_id(*id);

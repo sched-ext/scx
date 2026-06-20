@@ -53,6 +53,8 @@ static __always_inline void carriage_enqueue_task(struct task_struct *p,
 
 	target_cpu = (tctx && tctx->last_cpu >= 0) ? tctx->last_cpu
 		     : scx_bpf_task_cpu(p);
+	if (target_cpu < 0 || (u32)target_cpu >= 1024)
+		target_cpu = 0;
 
 	slice_ns = compute_task_slice(tctx, target_cpu);
 	dsq_id = FLOW_VTIME_DSQ_BASE + (u32)target_cpu;

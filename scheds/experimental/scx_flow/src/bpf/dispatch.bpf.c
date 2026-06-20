@@ -30,7 +30,7 @@ static __always_inline bool flow_dsq_move_one(u64 dsq_id)
 	return scx_bpf_dsq_move_to_local(dsq_id);
 }
 
-int BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
+void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	s32 peer;
 	u64 best_load = 0, load;
@@ -40,13 +40,13 @@ int BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	if (scx_bpf_dsq_nr_queued(FLOW_PINNED_DSQ_BASE + (u32)cpu) > 0 &&
 	    flow_dsq_move_one(FLOW_PINNED_DSQ_BASE + (u32)cpu)) {
 		__sync_fetch_and_add(&pinned_dispatches, 1);
-		return 0;
+		return;
 	}
 
 	/* 2. Per-CPU vtime DSQ (this CPU's own tasks). */
 	if (scx_bpf_dsq_nr_queued(FLOW_VTIME_DSQ_BASE + (u32)cpu) > 0 &&
 	    flow_dsq_move_one(FLOW_VTIME_DSQ_BASE + (u32)cpu))
-		return 0;
+		return;
 
 	/* 3. Work stealing: if this CPU is idle, steal from the busiest peer.
 	 *    Scan peer DSQs (bounded by nr_cpu_ids ≤ 1024). */
@@ -65,17 +65,17 @@ int BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	}
 	if (steal_from >= 0 &&
 	    flow_dsq_move_one(FLOW_VTIME_DSQ_BASE + (u32)steal_from))
-		return 0;
+		return;
 
 	/* 4. Shared FLOW_BATCH_DSQ fallback. */
 	if (scx_bpf_dsq_nr_queued(FLOW_BATCH_DSQ) > 0 &&
 	    flow_dsq_move_one(FLOW_BATCH_DSQ))
-		return 0;
+		return;
 
 	/* 5. Previous task extension. */
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
-		return 0;
+		return;
 
 	prev->scx.slice = task_slice_ns(lookup_task_ctx(prev));
-	return 0;
+	return;
 }

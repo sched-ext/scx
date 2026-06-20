@@ -101,6 +101,7 @@ static __always_inline void reset_task_ctx(struct task_ctx *tctx, u64 now, bool 
 	tctx->sleep_started_at = sleeping ? now : 0;
 	tctx->last_cpu = -1;
 	tctx->last_llc = -1;
+	tctx->runnable_cpu = -1;
 	tctx->first_run = true;
 	clear_wake_target(tctx);
 }

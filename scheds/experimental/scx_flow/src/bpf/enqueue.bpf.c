@@ -2,10 +2,10 @@
  *
  * Wakeup and pinned tasks bypass the carriage and are dispatched
  * directly to local DSQs.  Non-wakeup tasks go through
- * carriage_enqueue_task() which inserts into FLOW_BATCH_DSQ
- * (shared vtime-ordered DSQ) via scx_bpf_dsq_insert_vtime. */
+ * carriage_enqueue_task() which inserts into per-CPU vtime DSQs
+ * (FLOW_VTIME_DSQ_BASE + cpu) via scx_bpf_dsq_insert_vtime. */
 
-int BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 	s32 target_cpu = -1;
@@ -27,8 +27,8 @@ int BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		else
 			scx_bpf_dsq_insert___v1(p, FLOW_DSQ_LOCAL,
 				FLOW_SLICE_MIN_NS, flags);
-		return 0;
-	}
+	return;
+}
 
 	tctx = lookup_task_ctx(p);
 	is_wakeup = enq_flags & FLOW_ENQ_WAKEUP;
@@ -60,7 +60,7 @@ int BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		u64 ps = compute_task_slice(tctx, scx_bpf_task_cpu(p));
 		scx_bpf_dsq_insert___v1(p, FLOW_DSQ_LOCAL,
 			ps, enq_flags);
-		return 0;
+		return;
 	}
 
 	/* Non-wakeup, non-migratable: per-CPU pinned DSQ. */
@@ -72,7 +72,7 @@ int BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_dsq_insert___v1(p,
 				FLOW_PINNED_DSQ_BASE + (u32)pin_cpu,
 				ps, enq_flags);
-			return 0;
+			return;
 		}
 	}
 
@@ -102,7 +102,7 @@ int BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 		__sync_fetch_and_add(&prio_dispatches, 1);
 		clear_wake_target(tctx);
-		return 0;
+		return;
 	}
 
 	/* Non-wakeup re-enqueue: Waiting Room.
@@ -110,5 +110,5 @@ int BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	carriage_enqueue_task(p, tctx);
 
 	clear_wake_target(tctx);
-	return 0;
+	return;
 }

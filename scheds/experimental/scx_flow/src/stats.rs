@@ -84,7 +84,7 @@ impl Metrics {
             uptime_ns: self.uptime_ns,
             prio_dispatches: self.prio_dispatches.wrapping_sub(rhs.prio_dispatches),
             pinned_dispatches: self.pinned_dispatches.wrapping_sub(rhs.pinned_dispatches),
-            carriage_producer: self.carriage_producer.wrapping_sub(rhs.carriage_producer),
+            carriage_producer: self.carriage_producer,
 
             budget_exhaustions: self.budget_exhaustions.wrapping_sub(rhs.budget_exhaustions),
             runnable_wakeups: self.runnable_wakeups.wrapping_sub(rhs.runnable_wakeups),

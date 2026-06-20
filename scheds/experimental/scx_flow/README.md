@@ -4,11 +4,11 @@ This is a single user-defined scheduler used within [`sched_ext`](https://github
 
 ## Overview
 
-`scx_flow` is a budget-driven `sched_ext` scheduler with zero heuristic classification. Tasks accumulate budget while sleeping and spend it while running. Non-wakeup re-enqueues enter the **Waiting Room** — per-CPU DSQs where each task receives an ideal CPU time slice computed from the bandwidth model: `(budget / BUDGET_MAX) × (thread_bw / system_total_khz) × window_ns`, adjusted for SMT bandwidth halving, migration cost penalties, and load awareness. Wakeups are dispatched immediately to the target CPU via `SCX_DSQ_LOCAL_ON`.
+`scx_flow` is a budget-driven `sched_ext` scheduler with zero heuristic classification. Tasks accumulate budget while sleeping and spend it while running. Non-wakeup re-enqueues enter the **Waiting Room** — per-CPU vtime-ordered DSQs where each task receives an equal share of its target CPU's bandwidth: `FLOW_CARRIAGE_NS / tasks_on_cpu`, clamped to [50µs, 2ms]. Slices adjust dynamically as tasks arrive on the same core. Wakeups are dispatched immediately to the target CPU via `SCX_DSQ_LOCAL_ON`.
 
 ## Typical Use Case
 
-Systems where scheduling decisions must be deterministic and explainable: embedded control, robotics, avionics, automotive, and other mission-critical workloads. The bandwidth model ensures tasks get slices proportional to their budget and target core frequency, preventing both starvation and priority inversion.
+Systems where scheduling decisions must be deterministic and explainable: embedded control, robotics, avionics, automotive, and other mission-critical workloads. The fair-share slice model ensures each task receives an equal portion of its target core's bandwidth, preventing both starvation and priority inversion.
 
 General-purpose desktop and workstation use is also supported; interactive tasks (longer sleep → higher budget → longer slice) are naturally separated from bulk workers without requiring configuration or heuristics.
 

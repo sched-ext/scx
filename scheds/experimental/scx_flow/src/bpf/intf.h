@@ -27,8 +27,8 @@ enum consts {
 	FLOW_BATCH_DSQ            = 8192ULL,
 
 	/* Carriage pool — stats-only ring buffer for the web UI.
-	 * Non-wakeup tasks are dispatched to SCX_DSQ_LOCAL directly
-	 * from the enqueue callback (matching bpfland/cosmos pattern).
+	 * Non-wakeup tasks are dispatched to per-CPU vtime DSQs
+	 * (FLOW_VTIME_DSQ_BASE + cpu) from the enqueue callback.
 	 * The carriage pool records a rolling sample of dispatched PIDs. */
 	FLOW_NR_CARRIAGES        = 64ULL,
 	FLOW_CARRIAGE_CAPACITY   = 64ULL,

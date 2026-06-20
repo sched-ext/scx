@@ -23,8 +23,11 @@ void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
 	 */
 	{
 		s32 cpu = scx_bpf_task_cpu(p);
-		if (cpu >= 0 && (u32)cpu < 1024)
-			__sync_fetch_and_add(&per_cpu_runnable[(u32)cpu], 1);
+		if (cpu >= 0 && (u32)cpu < 1024) {
+			u32 c = (u32)cpu;
+			tctx->runnable_cpu = cpu;
+			__sync_fetch_and_add(&per_cpu_runnable[c], 1);
+		}
 	}
 }
 
@@ -86,14 +89,15 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		__sync_fetch_and_add(&on_cpu, 1);
 
 	/*
-	 * Decrement per-CPU runnable count for load awareness on both
-	 * preempt (runnable=true) and sleep (runnable=false) paths.
-	 * Atomic with saturation guard: if it was already zero, restore.
+	 * Decrement per_cpu_runnable on the CPU where flow_runnable
+	 * incremented it (tctx->runnable_cpu), not tctx->last_cpu.
+	 * This ensures correct pairing even when work stealing moves
+	 * the task to a different CPU.  Atomic saturation guard.
 	 */
-	if (tctx && tctx->last_cpu >= 0 && (u32)tctx->last_cpu < 1024) {
-		u32 cpu_idx = (u32)tctx->last_cpu;
-		if (__sync_fetch_and_sub(&per_cpu_runnable[cpu_idx], 1) == 0)
-			__sync_fetch_and_add(&per_cpu_runnable[cpu_idx], 1);
+	if (tctx && tctx->runnable_cpu >= 0 && (u32)tctx->runnable_cpu < 1024) {
+		u32 c = (u32)tctx->runnable_cpu;
+		if (__sync_fetch_and_sub(&per_cpu_runnable[c], 1) == 0)
+			__sync_fetch_and_add(&per_cpu_runnable[c], 1);
 	}
 
 }
