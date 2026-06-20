@@ -5,14 +5,12 @@
 
 /* Dispatch hierarchy — included by main.bpf.c via #include
  *
- * Per-CPU DSQ: non-wakeup tasks go to FLOW_VTIME_DSQ_BASE + cpu
- * (user-created).  ops.dispatch() moves tasks from the calling CPU's
- * DSQ to the local DSQ.
+ * Shared FLOW_BATCH_DSQ: non-wakeup tasks with vtime ordering.  Any
+ * idle CPU steals from this DSQ, providing natural load balancing.
+ * Per-CPU pinned DSQ: non-migratable tasks (nr_cpus_allowed == 1).
  *
- * The compat macro scx_bpf_dsq_move_to_local checks v2/v1/old variants,
- * but on kernel 7.0.x only the base scx_bpf_dsq_move_to_local(u64 dsq_id)
- * is registered.  We wrap it with a local fallback to ensure dispatch
- * works across all kernel versions. */
+ * flow_dsq_move_one wraps scx_bpf_dsq_move_to_local with fallback
+ * chain for v2/v1/old/base variants across kernel versions. */
 
 bool scx_bpf_dsq_move_to_local___v2(u64 dsq_id, u64 enq_flags) __ksym __weak;
 bool scx_bpf_dsq_move_to_local___v1(u64 dsq_id) __ksym __weak;
@@ -40,9 +38,11 @@ int BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return 0;
 	}
 
-	/* 2. Per-CPU vtime DSQ. */
-	if (scx_bpf_dsq_nr_queued(FLOW_VTIME_DSQ_BASE + (u32)cpu) > 0 &&
-	    flow_dsq_move_one(FLOW_VTIME_DSQ_BASE + (u32)cpu)) {
+	/* 2. Shared FLOW_BATCH_DSQ: non-wakeup tasks with vtime ordering.
+	 *    Any idle CPU steals from this shared DSQ, balancing load
+	 *    without per-enqueue CPU scanning. */
+	if (scx_bpf_dsq_nr_queued(FLOW_BATCH_DSQ) > 0 &&
+	    flow_dsq_move_one(FLOW_BATCH_DSQ)) {
 		return 0;
 	}
 

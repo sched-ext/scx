@@ -21,8 +21,8 @@ enum consts {
 
 	/* Per-CPU pinned DSQ base. */
 	FLOW_PINNED_DSQ_BASE = 2048ULL,
-	/* Per-CPU vtime DSQ base (follows bpfland per-CPU-DSQ pattern). */
-	FLOW_VTIME_DSQ_BASE = 4096ULL,
+	/* Shared vtime-ordered batch DSQ for non-wakeup dispatch. */
+	FLOW_BATCH_DSQ            = 4096ULL,
 
 	/* Carriage pool — stats-only ring buffer for the web UI.
 	 * Non-wakeup tasks are dispatched to SCX_DSQ_LOCAL directly

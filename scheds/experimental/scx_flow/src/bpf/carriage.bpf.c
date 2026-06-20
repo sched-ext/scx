@@ -1,19 +1,21 @@
 /* Waiting Room — included by main.bpf.c via #include
  *
- * Non-wakeup tasks are dispatched to per-CPU DSQs
- * (FLOW_VTIME_DSQ_BASE + target_cpu) via scx_bpf_dsq_insert___v1.
- * This calls the base kfunc directly (___v1 resolves to type_id 128815
- * on 7.0.x), bypassing the compat inline which would route to
- * ___v2___compat (checks task_is_running, returns false at re-enqueue).
+ * Non-wakeup tasks are dispatched to FLOW_BATCH_DSQ, a shared vtime-
+ * ordered DSQ (matching cosmos's global vtime DSQ pattern).  Any idle
+ * CPU drains from FLOW_BATCH_DSQ during ops.dispatch(), naturally
+ * balancing load without per-enqueue CPU scanning.
  *
- * The carriage pool records a rolling window of dispatched PIDs for the
- * web UI display.  It uses a simple counter (no state machine) so it
- * never returns -2 — every task is dispatched to a proper DSQ. */
+ * The bandwidth model computes each task's slice from the task's budget,
+ * the target core's frequency, and the system's total bandwidth:
+ *   slice = (budget / BUDGET_MAX) x (thread_bw / system_total_khz) x window
+ * adjusted for migration cost (same-LLC: -10%, cross-LLC: -25%).
+ *
+ * The carriage pool records PIDs for the web UI (stats-only). */
 
-/* Declare the base dsq_insert kfunc directly (bypass compat inline). */
 void scx_bpf_dsq_insert___v1(struct task_struct *p, u64 dsq_id,
 			      u64 slice, u64 enq_flags) __ksym __weak;
 
+/* Base slice: budget x frequency x window (PRD Phase C). */
 static __always_inline u64 compute_base_slice(struct task_ctx *tctx,
 					       s32 target_cpu)
 {
@@ -34,6 +36,7 @@ static __always_inline u64 compute_base_slice(struct task_ctx *tctx,
 	return slice_ns;
 }
 
+/* Migration penalty: same-LLC -10%, cross-LLC -25%. */
 static __always_inline u64 apply_slice_adjustments(u64 slice_ns,
 						     struct task_ctx *tctx,
 						     s32 target_cpu)
@@ -48,16 +51,6 @@ static __always_inline u64 apply_slice_adjustments(u64 slice_ns,
 			slice_ns = slice_ns * 75ULL / 100ULL;
 		if (slice_ns < FLOW_SLICE_MIN_NS) slice_ns = FLOW_SLICE_MIN_NS;
 	}
-	if ((u32)target_cpu < 1024) {
-		u64 nr_run = per_cpu_runnable[target_cpu];
-		if (nr_run > 0 && nr_cpu_ids > 0) {
-			u64 factor = nr_run * 100ULL / nr_cpu_ids;
-			if (factor > 50) factor = 50;
-			slice_ns = slice_ns * (100ULL - factor) / 100ULL;
-			if (slice_ns < FLOW_SLICE_MIN_NS)
-				slice_ns = FLOW_SLICE_MIN_NS;
-		}
-	}
 	return slice_ns;
 }
 
@@ -69,13 +62,10 @@ static __always_inline u64 compute_task_slice(struct task_ctx *tctx,
 }
 
 /*
- * Dispatch a non-wakeup task and record its PID for the web UI.
- * Target CPU selection (in order of preference):
- *   1. last_cpu — cache warmth (matching bpfland/cosmos pattern)
- *   2. If last_cpu is an SMT secondary, prefer the primary sibling
- *      (avoids sharing the same physical core's execution resources)
- *   3. scx_bpf_task_cpu(p) — fallback (current CPU or wake target)
- * No CPU scanning — O(1) per dispatch, no iterator kfunc calls.
+ * Dispatch a non-wakeup task to the shared FLOW_BATCH_DSQ with vtime
+ * ordering.  The target CPU for the bandwidth model is the task's
+ * last_cpu (cache warmth).  No per-CPU scanning — idle CPUs drain
+ * FLOW_BATCH_DSQ during ops.dispatch().
  */
 static __always_inline void carriage_enqueue_task(struct task_struct *p,
 						   struct task_ctx *tctx)
@@ -86,27 +76,18 @@ static __always_inline void carriage_enqueue_task(struct task_struct *p,
 	slot = __sync_fetch_and_add(&carriage_producer, 1)
 		& (FLOW_NR_CARRIAGES - 1);
 
+	/* Use last_cpu for the bandwidth model (cache warmth).
+	 * The actual dispatch goes to the shared FLOW_BATCH_DSQ. */
 	target_cpu = (tctx && tctx->last_cpu >= 0) ? tctx->last_cpu
 		     : scx_bpf_task_cpu(p);
-	/* SMT-aware: if targeting an SMT secondary, prefer its primary
-	 * sibling to avoid sharing execution resources.  Consecutive
-	 * CPU pairs (0↔1, 2↔3, ...) are typical on x86. */
-	if (target_cpu >= 0 && (u32)target_cpu < 1024 &&
-	    per_cpu_is_smt[target_cpu])
-		target_cpu = target_cpu ^ 1;
 
 	slice_ns = compute_task_slice(tctx, target_cpu);
 
-	/* Dispatch to the target CPU's per-CPU DSQ via the base kfunc. */
-	{
-		u64 dsq_id; s32 tgt = target_cpu;
-		if (tgt < 0 || (u32)tgt >= 1024)
-			tgt = scx_bpf_task_cpu(p);
-		dsq_id = FLOW_VTIME_DSQ_BASE + (u32)tgt;
-		scx_bpf_dsq_insert___v1(p, dsq_id, slice_ns, 0);
-	}
+	/* Shareed vtime-ordered DSQ — idle CPUs drain via ops.dispatch(). */
+	if (!scx_bpf_dsq_insert_vtime(p, FLOW_BATCH_DSQ,
+				      slice_ns, slice_ns, 0))
+		scx_bpf_dsq_insert___v1(p, FLOW_BATCH_DSQ, slice_ns, 0);
 
-	/* Record PID (stats-only, simple rolling slot). */
 	carriage_pool[slot].tasks[carriage_pool[slot].count %
 				  FLOW_CARRIAGE_CAPACITY] = (u64)(s32)p->pid;
 	carriage_pool[slot].count++;

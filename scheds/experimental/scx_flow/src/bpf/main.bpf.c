@@ -111,17 +111,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -E2BIG;
 	}
 
-	/* Create per-CPU pinned DSQs and per-CPU vtime DSQs. */
+	/* Create shared vtime-ordered DSQ for non-wakeup traffic. */
+	ret = scx_bpf_create_dsq(FLOW_BATCH_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create batch DSQ: %d", ret);
+		return ret;
+	}
+
+	/* Create per-CPU pinned DSQs for non-migratable tasks. */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		ret = scx_bpf_create_dsq(FLOW_PINNED_DSQ_BASE + (u32)cpu, -1);
 		if (ret < 0 && ret != -EEXIST) {
 			scx_bpf_error("failed to create pinned DSQ for CPU %d: %d",
-				      cpu, ret);
-			return ret;
-		}
-		ret = scx_bpf_create_dsq(FLOW_VTIME_DSQ_BASE + (u32)cpu, -1);
-		if (ret < 0 && ret != -EEXIST) {
-			scx_bpf_error("failed to create vtime DSQ for CPU %d: %d",
 				      cpu, ret);
 			return ret;
 		}
