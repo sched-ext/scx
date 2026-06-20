@@ -55,7 +55,8 @@ struct {
 /* Per-core topology — populated at init by Rust userspace. */
 volatile u64 per_cpu_max_freq_khz[1024];
 volatile u64 per_cpu_llc_id[1024];
-volatile u64 per_cpu_is_smt[1024];
+volatile u64 per_cpu_is_smt[1024];	/* 1 = SMT secondary (for web UI) */
+volatile u64 per_cpu_sibling_count[1024]; /* threads per core (for bandwidth) */
 volatile u64 per_cpu_runnable[1024];	/* current runnable count per CPU */
 volatile u64 system_total_khz;		/* sum of all core_effective_khz */
 volatile u64 nr_cpu_ids;

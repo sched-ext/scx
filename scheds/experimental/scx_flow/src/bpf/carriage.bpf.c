@@ -17,14 +17,14 @@ void scx_bpf_dsq_insert___v1(struct task_struct *p, u64 dsq_id,
 static __always_inline u64 compute_base_slice(struct task_ctx *tctx,
 					       s32 target_cpu)
 {
-	u64 slice_ns, budget, core_freq, is_smt, thread_bw, bw_share, wshare;
+	u64 slice_ns, budget, core_freq, siblings, thread_bw, bw_share, wshare;
 	if (!tctx || tctx->budget_ns <= 0 || system_total_khz == 0 ||
 	    target_cpu < 0 || (u32)target_cpu >= 1024)
 		return task_slice_ns(tctx);
 	budget = (u64)tctx->budget_ns;
 	core_freq = per_cpu_max_freq_khz[target_cpu];
-	is_smt = per_cpu_is_smt[target_cpu];
-	thread_bw = is_smt ? core_freq / 2 : core_freq;
+	siblings = per_cpu_sibling_count[target_cpu];
+	thread_bw = siblings > 1 ? core_freq / siblings : core_freq;
 	bw_share = thread_bw * 10000ULL / system_total_khz;
 	wshare = budget * 10000ULL / FLOW_BUDGET_MAX_NS;
 	if (wshare > 10000ULL) wshare = 10000ULL;
@@ -70,10 +70,12 @@ static __always_inline u64 compute_task_slice(struct task_ctx *tctx,
 
 /*
  * Dispatch a non-wakeup task and record its PID for the web UI.
- * The task is always dispatched (never returned -2).
- * The carriage pool uses a simple rolling counter — no ring buffer
- * state machine, no producer/consumer indices, no FILLING/CALCULATING
- * states.  It always records, never blocks.
+ * Target CPU selection (in order of preference):
+ *   1. last_cpu — cache warmth (matching bpfland/cosmos pattern)
+ *   2. If last_cpu is an SMT secondary, prefer the primary sibling
+ *      (avoids sharing the same physical core's execution resources)
+ *   3. scx_bpf_task_cpu(p) — fallback (current CPU or wake target)
+ * No CPU scanning — O(1) per dispatch, no iterator kfunc calls.
  */
 static __always_inline void carriage_enqueue_task(struct task_struct *p,
 						   struct task_ctx *tctx)
@@ -86,6 +88,13 @@ static __always_inline void carriage_enqueue_task(struct task_struct *p,
 
 	target_cpu = (tctx && tctx->last_cpu >= 0) ? tctx->last_cpu
 		     : scx_bpf_task_cpu(p);
+	/* SMT-aware: if targeting an SMT secondary, prefer its primary
+	 * sibling to avoid sharing execution resources.  Consecutive
+	 * CPU pairs (0↔1, 2↔3, ...) are typical on x86. */
+	if (target_cpu >= 0 && (u32)target_cpu < 1024 &&
+	    per_cpu_is_smt[target_cpu])
+		target_cpu = target_cpu ^ 1;
+
 	slice_ns = compute_task_slice(tctx, target_cpu);
 
 	/* Dispatch to the target CPU's per-CPU DSQ via the base kfunc. */

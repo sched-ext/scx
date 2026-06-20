@@ -4,7 +4,6 @@
 // Topology discovery: reads per-CPU max frequencies, LLC IDs, and SMT
 // status from sysfs and writes them into BPF BSS arrays.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -44,15 +43,26 @@ pub fn init_topology(skel: &mut crate::BpfSkel<'_>) -> Result<()> {
         );
     }
 
-    let mut seen_cores = HashSet::new();
+    /* Set per_cpu_sibling_count for all CPUs and mark SMT secondaries.
+     * The first CPU per core_id is primary; subsequent ones are secondary.
+     * sibling_count is set for ALL CPUs (including non-SMT, where it's 1)
+     * so the bandwidth model works correctly for every CPU. */
     for (core_id, cpus) in core_to_cpus.iter().enumerate() {
-        if cpus.len() > 1 && !seen_cores.contains(&core_id) {
-            seen_cores.insert(core_id);
-            for &cpu_id in cpus {
-                bss.per_cpu_is_smt[cpu_id] = 1;
-                info!("  CPU {:3}: SMT sibling (core {} has {} CPUs)",
-                      cpu_id, core_id, cpus.len());
+        let count = cpus.len();
+        if count > 1 {
+            for (j, &cpu_id) in cpus.iter().enumerate() {
+                bss.per_cpu_sibling_count[cpu_id] = count as u64;
+                if j == 0 {
+                    info!("  CPU {:3}: primary (core {}: {} CPUs)",
+                          cpu_id, core_id, count);
+                } else {
+                    bss.per_cpu_is_smt[cpu_id] = 1;
+                    info!("  CPU {:3}: SMT sibling (core {})",
+                          cpu_id, core_id);
+                }
             }
+        } else if count == 1 {
+            bss.per_cpu_sibling_count[cpus[0]] = 1;
         }
     }
 
