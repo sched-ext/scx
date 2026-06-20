@@ -69,8 +69,8 @@ impl Metrics {
             self.uptime_ns,
             self.prio_dispatches,
             self.pinned_dispatches,
-             self.carriage_producer & 63,
-             self.budget_exhaustions,
+            self.carriage_producer & 63,
+            self.budget_exhaustions,
             self.runnable_wakeups,
             self.cpu_migrations,
         )?;

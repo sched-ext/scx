@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tiny_http::{Header, Response, Server};
 use serde_json::json;
+use tiny_http::{Header, Response, Server};
 
 use crate::stats::WebMetrics;
 
@@ -150,8 +150,7 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<WebMetrics>, shutdown: Arc
                     }
                     "/api/stats" => {
                         let stats = serde_json::to_value(&metrics.stats).unwrap_or_default();
-                        let per_cpu =
-                            serde_json::to_value(&metrics.per_cpu).unwrap_or_default();
+                        let per_cpu = serde_json::to_value(&metrics.per_cpu).unwrap_or_default();
                         let merged = json!({
                             "stats": stats,
                             "per_cpu": per_cpu,

@@ -14,7 +14,10 @@ use scx_utils::Topology;
 pub fn init_topology(skel: &mut crate::BpfSkel<'_>) -> Result<()> {
     let topo = Topology::new().context("Failed to read CPU topology")?;
     let nr_cpus = topo.all_cpus.len();
-    let bss = skel.maps.bss_data.as_mut()
+    let bss = skel
+        .maps
+        .bss_data
+        .as_mut()
         .context("bss_data missing — BPF object has no .bss section")?;
 
     info!(
@@ -39,7 +42,10 @@ pub fn init_topology(skel: &mut crate::BpfSkel<'_>) -> Result<()> {
 
         info!(
             "  CPU {:3}: max_freq = {:>6} MHz, LLC = {}, core_id = {}",
-            id, freq_khz / 1000, llc_id, core_id,
+            id,
+            freq_khz / 1000,
+            llc_id,
+            core_id,
         );
     }
 
@@ -53,12 +59,13 @@ pub fn init_topology(skel: &mut crate::BpfSkel<'_>) -> Result<()> {
             for (j, &cpu_id) in cpus.iter().enumerate() {
                 bss.per_cpu_sibling_count[cpu_id] = count as u64;
                 if j == 0 {
-                    info!("  CPU {:3}: primary (core {}: {} CPUs)",
-                          cpu_id, core_id, count);
+                    info!(
+                        "  CPU {:3}: primary (core {}: {} CPUs)",
+                        cpu_id, core_id, count
+                    );
                 } else {
                     bss.per_cpu_is_smt[cpu_id] = 1;
-                    info!("  CPU {:3}: SMT sibling (core {})",
-                          cpu_id, core_id);
+                    info!("  CPU {:3}: SMT sibling (core {})", cpu_id, core_id);
                 }
             }
         } else if count == 1 {
@@ -69,15 +76,24 @@ pub fn init_topology(skel: &mut crate::BpfSkel<'_>) -> Result<()> {
     for (id, cpu) in &topo.all_cpus {
         let freq_khz = cpu.max_freq as u64;
         let core_id = read_cpu_core_id(*id);
-        let siblings = if core_id < 1024 { core_to_cpus[core_id].len() } else { 1 };
-        let thread_bw = if siblings > 1 { freq_khz / siblings as u64 } else { freq_khz };
+        let siblings = if core_id < 1024 {
+            core_to_cpus[core_id].len()
+        } else {
+            1
+        };
+        let thread_bw = if siblings > 1 {
+            freq_khz / siblings as u64
+        } else {
+            freq_khz
+        };
         system_total_khz += thread_bw;
     }
     bss.system_total_khz = system_total_khz;
 
     info!(
         "  System total effective bandwidth: {} MHz ({} cores, SMT halved)",
-        system_total_khz / 1000, nr_cpus,
+        system_total_khz / 1000,
+        nr_cpus,
     );
 
     Ok(())
@@ -88,13 +104,17 @@ fn read_cpu_llc_id(cpu: usize) -> u64 {
     let path = Path::new(&p);
     if path.exists() {
         return std::fs::read_to_string(path)
-            .ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
     }
     let fb = format!("/sys/devices/system/cpu/cpu{}/topology/llc_id", cpu);
     let fb_path = Path::new(&fb);
     if fb_path.exists() {
         return std::fs::read_to_string(fb_path)
-            .ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
     }
     0
 }
@@ -107,5 +127,7 @@ fn read_cpu_core_id(cpu: usize) -> usize {
         return 0;
     }
     std::fs::read_to_string(path)
-        .ok().and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0)
 }

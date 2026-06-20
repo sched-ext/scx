@@ -6,8 +6,8 @@
 // General Public License version 2.
 
 mod bpf_skel;
-pub use bpf_skel::*;
 pub use bpf_skel::types;
+pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
@@ -148,7 +148,9 @@ impl<'a> Scheduler<'a> {
         // Write scheduler PID to BSS so BPF can bypass the carriage.
         {
             let key: u32 = 0;
-            let mut bss_raw = skel.maps.bss
+            let mut bss_raw = skel
+                .maps
+                .bss
                 .lookup(&key.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
                 .ok()
                 .flatten()
@@ -159,8 +161,10 @@ impl<'a> Scheduler<'a> {
             if pid_offset + 8 <= bss_slice.len() {
                 bss_slice[pid_offset..pid_offset + 8].copy_from_slice(&pid_bytes);
             }
-            let _ = skel.maps.bss.update(&key.to_ne_bytes(), &bss_raw,
-                                         libbpf_rs::MapFlags::ANY);
+            let _ = skel
+                .maps
+                .bss
+                .update(&key.to_ne_bytes(), &bss_raw, libbpf_rs::MapFlags::ANY);
         }
 
         // Discover topology and write into BSS.
@@ -191,7 +195,12 @@ impl<'a> Scheduler<'a> {
     }
 
     fn get_metrics(&self) -> Metrics {
-        let bss_data = self.skel.maps.bss_data.as_ref().expect("bss_data missing — BPF object has no .bss section");
+        let bss_data = self
+            .skel
+            .maps
+            .bss_data
+            .as_ref()
+            .expect("bss_data missing — BPF object has no .bss section");
         let cpu_policy_state = self.read_cpu_policy_state();
         Metrics {
             on_cpu: bss_data.on_cpu,
@@ -203,7 +212,6 @@ impl<'a> Scheduler<'a> {
 
             carriage_producer: bss_data.carriage_producer,
 
-
             budget_exhaustions: bss_data.budget_exhaustions + cpu_policy_state.budget_exhaustions,
             runnable_wakeups: bss_data.runnable_wakeups + cpu_policy_state.runnable_wakeups,
             cpu_migrations: bss_data.cpu_migrations + cpu_policy_state.cpu_migrations,
@@ -212,7 +220,12 @@ impl<'a> Scheduler<'a> {
 
     fn get_web_metrics(&self) -> stats::WebMetrics {
         let metrics = self.get_metrics();
-        let bss_data = self.skel.maps.bss_data.as_ref().expect("bss_data missing — BPF object has no .bss section");
+        let bss_data = self
+            .skel
+            .maps
+            .bss_data
+            .as_ref()
+            .expect("bss_data missing — BPF object has no .bss section");
 
         let nr_cpus = bss_data.nr_cpu_ids as usize;
         let mut per_cpu = Vec::with_capacity(nr_cpus);
