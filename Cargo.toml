@@ -28,6 +28,7 @@ members = [
     "scheds/experimental/scx_rlfifo",
     "tools/scx_characterize",
     "tools/scxtop",
+    "tools/scx_forge_agent",
     "tools/vmlinux_docify",
     "tools/xtask",
 ]
