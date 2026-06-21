@@ -89,15 +89,18 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		__sync_fetch_and_add(&on_cpu, 1);
 
 	/*
-	 * Decrement per_cpu_runnable on the CPU where flow_runnable
-	 * incremented it (tctx->runnable_cpu), not tctx->last_cpu.
-	 * This ensures correct pairing even when work stealing moves
-	 * the task to a different CPU.  Atomic saturation guard.
+	 * Decrement per_cpu_runnable only when the task is truly leaving
+	 * the runnable state (runnable == false — going to sleep/block).
+	 * When preempted (runnable == true), the task stays runnable and
+	 * will be re-enqueued — the counter should remain unchanged.
+	 * Clear runnable_cpu after decrement to prevent double-counting.
 	 */
-	if (tctx && tctx->runnable_cpu >= 0 && (u32)tctx->runnable_cpu < 1024) {
+	if (tctx && !runnable && tctx->runnable_cpu >= 0 &&
+	    (u32)tctx->runnable_cpu < 1024) {
 		u32 c = (u32)tctx->runnable_cpu;
 		if (__sync_fetch_and_sub(&per_cpu_runnable[c], 1) == 0)
 			__sync_fetch_and_add(&per_cpu_runnable[c], 1);
+		tctx->runnable_cpu = -1;
 	}
 
 }
