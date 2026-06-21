@@ -100,6 +100,28 @@ fn detect_scx_dsq_insert_v2_kfunc() -> bool {
         || file_contains_bytes("/sys/kernel/btf/vmlinux", NEEDLE)
 }
 
+fn detect_scx_select_cpu_and_compat_kfunc() -> bool {
+    const NEEDLE: &[u8] = b"scx_bpf_select_cpu_and___compat";
+
+    file_contains_bytes("/proc/kallsyms", NEEDLE)
+        || file_contains_bytes("/sys/kernel/btf/vmlinux", NEEDLE)
+}
+
+fn detect_scx_select_cpu_and_struct_abi() -> bool {
+    file_contains_bytes("/sys/kernel/btf/vmlinux", b"scx_bpf_select_cpu_and_args")
+        && file_contains_bytes("/sys/kernel/btf/vmlinux", b"__scx_bpf_select_cpu_and")
+}
+
+/// Detect whether the booted kernel exposes the SCX_ENQ_KICK_IDLE enum bit.
+/// Release BPF is already specialized to the booted sched_ext ABI; when this
+/// flag is absent, compiling out the fold avoids carrying a permanently-zero
+/// rodata branch on every idle local insert.
+fn detect_scx_enq_kick_idle_flag() -> bool {
+    const NEEDLE: &[u8] = b"SCX_ENQ_KICK_IDLE";
+
+    file_contains_bytes("/sys/kernel/btf/vmlinux", NEEDLE)
+}
+
 fn profile_quantum_us(profile: &str) -> Option<u64> {
     match profile {
         "esports" => Some(750),
@@ -132,19 +154,22 @@ fn baked_profile() -> (String, u64) {
 }
 
 fn baked_queue_policy() -> (&'static str, u32) {
-    // Default flipped local -> llc-vtime 2026-06-10: the measured champion.
-    // LOCAL lost avg -1.5% zero-overlap vs EEVDF on 7.1-rc7; llc-vtime (with
-    // the hybrid frame gate below) beat EEVDF on all seven Kovaaks MangoHud
-    // metrics on a fresh instance. SCX_CAKE_QUEUE_POLICY=local restores the
-    // old shape for A/B.
+    // Default now names the mechanism it actually ships: vtime-guided local
+    // placement.  The old shared-queue "llc-vtime" spelling remains accepted
+    // as a compatibility alias for scripts/history, but release builds map it
+    // to the same builtin-local custody path.
     let policy = std::env::var("SCX_CAKE_QUEUE_POLICY")
-        .unwrap_or_else(|_| "llc-vtime".into())
+        .unwrap_or_else(|_| "vtime-local".into())
         .to_ascii_lowercase()
         .replace('_', "-");
     match policy.as_str() {
         "local" => ("local", 0),
-        "llc" | "llc-vtime" => ("llc-vtime", 1),
-        _ => panic!("SCX_CAKE_QUEUE_POLICY must be one of local, llc-vtime (got {policy})"),
+        "vtime-local" | "local-vtime" | "llc" | "llc-vtime" => ("vtime-local", 1),
+        _ => {
+            panic!(
+                "SCX_CAKE_QUEUE_POLICY must be one of local, vtime-local (llc-vtime alias accepted; got {policy})"
+            )
+        }
     }
 }
 
@@ -246,6 +271,8 @@ fn main() {
         baked_bool("SCX_CAKE_SMT_CLEAN_SELECT", false);
     let (_frame_owner_shield_label, frame_owner_shield_value, _frame_owner_shield) =
         baked_bool("SCX_CAKE_FRAME_OWNER_SHIELD", false);
+    let (baked_frame_reserve, baked_frame_reserve_value, _frame_reserve) =
+        baked_bool("SCX_CAKE_FRAME_RESERVE", false);
     let (_prev_idle_override_label, prev_idle_override_value, _prev_idle_override) =
         baked_bool("SCX_CAKE_PREV_IDLE_OVERRIDE", false);
     let (_lean_wake_kick_label, lean_wake_kick_value, _lean_wake_kick) =
@@ -292,14 +319,16 @@ fn main() {
         baked_bool("SCX_CAKE_WAKE_PREEMPT_ADAPTIVE", false);
     let (_game_diag_label, game_diag_value, game_diag_enabled) =
         baked_bool("SCX_CAKE_GAME_DIAG", false);
-    // Service-gated hybrid queue policy (2026-06-10): frame threads keep the
-    // LOCAL busy-fallback shape, everything else takes the per-LLC vtime
-    // arbiter. Only meaningful with SCX_CAKE_QUEUE_POLICY=llc-vtime.
+    // Service-gated hybrid signal policy (2026-06-10, signal-local 2026-06-20):
+    // frame wakeups get LOCAL head/preempt ordering while normal work stays
+    // direct-local with vtime/debt accounting. Only meaningful with
+    // SCX_CAKE_QUEUE_POLICY=vtime-local (old llc-vtime alias accepted).
     // 0=off, 1=GameThread+RenderThread LOCAL, 2=GT-only, 3=RT-only,
     // 4=RT always + GT only onto idle/frame-owned targets (CHAMPION).
-    // Default flipped 0 -> 4 with the llc-vtime default: gate4 is the config
-    // that beat EEVDF on all seven Kovaaks metrics (fresh-instance, 2026-06-10);
-    // gates 2/3 destabilize 1%low (sigma 83-104 vs 10-40) — measured, avoid.
+    // Default flipped 0 -> 4 with the vtime-local game-ordering default: gate4
+    // is the config that beat EEVDF on all seven Kovaaks metrics
+    // (fresh-instance, 2026-06-10); gates 2/3 destabilize 1%low
+    // (sigma 83-104 vs 10-40) — measured, avoid.
     let hybrid_queue_value: u32 = std::env::var("SCX_CAKE_HYBRID_QUEUE")
         .ok()
         .map(|v| match v.trim() {
@@ -311,7 +340,38 @@ fn main() {
             other => panic!("SCX_CAKE_HYBRID_QUEUE must be 0..4 (got {other})"),
         })
         .unwrap_or(4);
+    // WoW-specific signal-local A/B gate:
+    // 0=off, 1=WoW.exe main-thread anchor only, 2=WoW main + vkd3d* present helpers.
+    // This is intentionally off by default so the current known-good release is
+    // reproducible unless a benchmark run opts into the experiment.
+    let wow_frame_boost_value: u32 = std::env::var("SCX_CAKE_WOW_FRAME_BOOST")
+        .ok()
+        .map(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "0" | "false" | "off" => 0,
+            "1" | "main" | "wow" | "true" | "on" => 1,
+            "2" | "vkd3d" | "vk3d" | "present" => 2,
+            other => {
+                panic!("SCX_CAKE_WOW_FRAME_BOOST must be 0/off, 1/main, or 2/vkd3d (got {other})")
+            }
+        })
+        .unwrap_or(0);
     let dsq_insert_v2_fastpath_value = if detect_scx_dsq_insert_v2_kfunc() {
+        1
+    } else {
+        0
+    };
+    let select_cpu_and_compat_fastpath_value = if detect_scx_select_cpu_and_compat_kfunc() {
+        1
+    } else {
+        0
+    };
+    let select_cpu_and_struct_fastpath_value =
+        if select_cpu_and_compat_fastpath_value == 0 && detect_scx_select_cpu_and_struct_abi() {
+            1
+        } else {
+            0
+        };
+    let enq_kick_idle_abi_value = if detect_scx_enq_kick_idle_flag() {
         1
     } else {
         0
@@ -374,6 +434,12 @@ fn main() {
              pub const BAKED_RELEASE_PLANCK_LOCAL_VALUE: u32 = {};\n\
              pub const BAKED_RELEASE_TRUST_MAPS: &str = {:?};\n\
              pub const BAKED_RELEASE_TRUST_MAPS_VALUE: u32 = {};\n\
+             pub const BAKED_FRAME_RESERVE: &str = {:?};\n\
+             pub const BAKED_FRAME_RESERVE_VALUE: u32 = {};\n\
+             pub const BAKED_DSQ_INSERT_V2_FASTPATH_VALUE: u32 = {};\n\
+             pub const BAKED_ENQ_KICK_IDLE_ABI_VALUE: u32 = {};\n\
+             pub const BAKED_SELECT_CPU_AND_COMPAT_VALUE: u32 = {};\n\
+             pub const BAKED_SELECT_CPU_AND_STRUCT_VALUE: u32 = {};\n\
              pub const BAKED_CORE_STEAL_DHQ: &str = {:?};\n\
              pub const BAKED_CORE_STEAL_DHQ_VALUE: u32 = {};\n\
              pub const BAKED_GAME_DIAG_VALUE: u32 = {};\n",
@@ -407,6 +473,12 @@ fn main() {
             baked_release_planck_local_value,
             baked_release_trust_maps,
             baked_release_trust_maps_value,
+            baked_frame_reserve,
+            baked_frame_reserve_value,
+            dsq_insert_v2_fastpath_value,
+            enq_kick_idle_abi_value,
+            select_cpu_and_compat_fastpath_value,
+            select_cpu_and_struct_fastpath_value,
             baked_core_steal_dhq,
             baked_core_steal_dhq_value,
             game_diag_value
@@ -432,6 +504,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_BUSY_WAKE_GRACE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_SMT_CLEAN_SELECT");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_FRAME_OWNER_SHIELD");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_FRAME_RESERVE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_PREV_IDLE_OVERRIDE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_LEAN_WAKE_KICK");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_KTHREAD_WAKE_PREEMPT");
@@ -451,6 +524,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ELAPSED_US");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_GAME_DIAG");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_HYBRID_QUEUE");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_WOW_FRAME_BOOST");
     println!("cargo:rerun-if-changed=/proc/kallsyms");
     println!("cargo:rerun-if-changed=/sys/kernel/btf/vmlinux");
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
@@ -511,6 +585,10 @@ fn main() {
     cflags.push_str(&format!(
         " -DCAKE_FRAME_OWNER_SHIELD_VALUE={}",
         frame_owner_shield_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_FRAME_RESERVE_VALUE={}",
+        baked_frame_reserve_value
     ));
     cflags.push_str(&format!(
         " -DCAKE_PREV_IDLE_OVERRIDE_VALUE={}",
@@ -581,10 +659,26 @@ fn main() {
         " -DCAKE_DSQ_INSERT_V2_FASTPATH={}",
         dsq_insert_v2_fastpath_value
     ));
+    cflags.push_str(&format!(
+        " -DCAKE_SELECT_CPU_AND_COMPAT_FASTPATH={}",
+        select_cpu_and_compat_fastpath_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_SELECT_CPU_AND_STRUCT_FASTPATH={}",
+        select_cpu_and_struct_fastpath_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_HAS_ENQ_KICK_IDLE={}",
+        enq_kick_idle_abi_value
+    ));
     cflags.push_str(&format!(" -DCAKE_GAME_DIAG={}", game_diag_value));
     cflags.push_str(&format!(
         " -DCAKE_HYBRID_QUEUE_VALUE={}",
         hybrid_queue_value
+    ));
+    cflags.push_str(&format!(
+        " -DCAKE_WOW_FRAME_BOOST_VALUE={}",
+        wow_frame_boost_value
     ));
     let (_vtime_floor_label, vtime_floor_value, _vtime_floor) =
         baked_bool("SCX_CAKE_VTIME_WAKE_FLOOR", false);
@@ -639,7 +733,7 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} NEEDS_ARENA={} FUTEX_TRACE={} CORE_STEAL_DHQ={} DSQ_INSERT_V2_FASTPATH={} GAME_DIAG={}",
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} BAKED_FRAME_RESERVE={} NEEDS_ARENA={} FUTEX_TRACE={} CORE_STEAL_DHQ={} DSQ_INSERT_V2_FASTPATH={} SELECT_CPU_AND_COMPAT={} SELECT_CPU_AND_STRUCT={} ENQ_KICK_IDLE_ABI={} GAME_DIAG={} WOW_FRAME_BOOST={}",
         max_cpus,
         max_llcs,
         nr_cpus,
@@ -660,11 +754,16 @@ fn main() {
         baked_release_domain_drr,
         baked_release_planck_local,
         baked_release_trust_maps,
+        baked_frame_reserve,
         needs_arena,
         futex_trace_enabled,
         baked_core_steal_dhq,
         dsq_insert_v2_fastpath_value != 0,
-        game_diag_enabled
+        select_cpu_and_compat_fastpath_value != 0,
+        select_cpu_and_struct_fastpath_value != 0,
+        enq_kick_idle_abi_value != 0,
+        game_diag_enabled,
+        wow_frame_boost_value
     );
 
     std::env::set_var("BPF_EXTRA_CFLAGS_PRE_INCL", &cflags);

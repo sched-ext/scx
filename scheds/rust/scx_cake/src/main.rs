@@ -17,9 +17,7 @@ use std::io::IsTerminal;
 use std::os::unix::ffi::OsStrExt;
 #[cfg(all(cake_bpf_release, cake_game_diag))]
 use std::os::unix::fs::PermissionsExt;
-#[cfg(all(cake_bpf_release, cake_game_diag))]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -138,10 +136,11 @@ impl StormGuardMode {
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum QueuePolicy {
-    /// Default local-first fallback policy used by the benchmark-guided release path.
+    /// Pure local-first fallback policy without vtime/debt ordering.
     Local = 0,
-    /// Per-LLC vtime fallback queues similar to the 1.1.0 queue shape.
-    LlcVtime = 1,
+    /// Vtime-guided local placement; release builds avoid shared LLC DSQ storage.
+    #[value(alias = "llc-vtime", alias = "llc", alias = "local-vtime")]
+    VtimeLocal = 1,
 }
 
 impl QueuePolicy {
@@ -149,7 +148,7 @@ impl QueuePolicy {
     fn as_str(&self) -> &'static str {
         match self {
             QueuePolicy::Local => "local",
-            QueuePolicy::LlcVtime => "llc-vtime",
+            QueuePolicy::VtimeLocal => "vtime-local",
         }
     }
 }
@@ -161,6 +160,11 @@ const CPU_FAST_PROBE_PACK_SLOT_BITS: usize = if topology::MAX_CPUS < 256 { 8 } e
 const CPU_FAST_PROBE_PACK_SLOT_MASK: u64 = (1u64 << CPU_FAST_PROBE_PACK_SLOT_BITS) - 1;
 const CPU_META_PRIMARY: u64 = 1u64 << 48;
 const CPU_META_SMT: u64 = 1u64 << 49;
+const CPU_DYN_FLAG_BOOST_ENABLED: u32 = 1 << 0;
+const CPU_DYN_FLAG_GOV_PERFORMANCE: u32 = 1 << 1;
+const CPU_DYN_FLAG_EPP_PERFORMANCE: u32 = 1 << 2;
+const CPU_DYN_FLAG_SCALING_CLAMPED: u32 = 1 << 3;
+const CPU_DYN_FLAG_CUR_FREQ_BELOW_CAP: u32 = 1 << 4;
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
 struct ReleaseGameDiagTotals {
@@ -1259,6 +1263,144 @@ fn primary_cpu_for(topo: &topology::TopologyInfo, cpu: usize, nr_cpus: usize) ->
     cpu as u16
 }
 
+#[derive(Debug, Default, Clone)]
+struct CpuCapability {
+    highest_perf: Option<u32>,
+    nominal_perf: Option<u32>,
+    lowest_perf: Option<u32>,
+    lowest_nonlinear_perf: Option<u32>,
+    reference_perf: Option<u32>,
+    amd_pstate_prefcore_ranking: Option<u32>,
+    cpuinfo_max_freq_khz: Option<u32>,
+    scaling_max_freq_khz: Option<u32>,
+    scaling_min_freq_khz: Option<u32>,
+    scaling_cur_freq_khz: Option<u32>,
+    governor: Option<String>,
+    energy_performance_preference: Option<String>,
+}
+
+impl CpuCapability {
+    fn read_from_root(root: &Path, cpu: usize) -> Self {
+        let cpu_root = root.join(format!("cpu{cpu}"));
+        Self {
+            highest_perf: read_sysfs_u32(cpu_root.join("acpi_cppc/highest_perf")),
+            nominal_perf: read_sysfs_u32(cpu_root.join("acpi_cppc/nominal_perf")),
+            lowest_perf: read_sysfs_u32(cpu_root.join("acpi_cppc/lowest_perf")),
+            lowest_nonlinear_perf: read_sysfs_u32(cpu_root.join("acpi_cppc/lowest_nonlinear_perf")),
+            reference_perf: read_sysfs_u32(cpu_root.join("acpi_cppc/reference_perf")),
+            amd_pstate_prefcore_ranking: read_sysfs_u32(
+                cpu_root.join("cpufreq/amd_pstate_prefcore_ranking"),
+            ),
+            cpuinfo_max_freq_khz: read_sysfs_u32(cpu_root.join("cpufreq/cpuinfo_max_freq")),
+            scaling_max_freq_khz: read_sysfs_u32(cpu_root.join("cpufreq/scaling_max_freq")),
+            scaling_min_freq_khz: read_sysfs_u32(cpu_root.join("cpufreq/scaling_min_freq")),
+            scaling_cur_freq_khz: read_sysfs_u32(cpu_root.join("cpufreq/scaling_cur_freq")),
+            governor: read_sysfs_string(cpu_root.join("cpufreq/scaling_governor")),
+            energy_performance_preference: read_sysfs_string(
+                cpu_root.join("cpufreq/energy_performance_preference"),
+            ),
+        }
+    }
+
+    fn read(cpu: usize) -> Self {
+        Self::read_from_root(Path::new("/sys/devices/system/cpu"), cpu)
+    }
+
+    fn base_perf_score(&self) -> u32 {
+        self.highest_perf
+            .or(self.amd_pstate_prefcore_ranking)
+            .or(self.reference_perf)
+            .or(self.nominal_perf)
+            .or_else(|| self.cpuinfo_max_freq_khz.map(|khz| khz / 1000))
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    fn dynamic_perf_score(&self) -> u32 {
+        let base = self.base_perf_score();
+        match (self.scaling_max_freq_khz, self.cpuinfo_max_freq_khz) {
+            (Some(cap), Some(max)) if max > 0 && cap < max => ((u64::from(base) * u64::from(cap))
+                / u64::from(max))
+            .try_into()
+            .unwrap_or(u32::MAX)
+            .max(1),
+            _ => base,
+        }
+    }
+
+    fn dynamic_cap_flags(&self, boost_enabled: bool) -> u32 {
+        let mut flags = 0;
+        if boost_enabled {
+            flags |= CPU_DYN_FLAG_BOOST_ENABLED;
+        }
+        if self.governor.as_deref() == Some("performance") {
+            flags |= CPU_DYN_FLAG_GOV_PERFORMANCE;
+        }
+        if self.energy_performance_preference.as_deref() == Some("performance") {
+            flags |= CPU_DYN_FLAG_EPP_PERFORMANCE;
+        }
+        if matches!(
+            (self.scaling_max_freq_khz, self.cpuinfo_max_freq_khz),
+            (Some(cap), Some(max)) if max > 0 && cap < max
+        ) {
+            flags |= CPU_DYN_FLAG_SCALING_CLAMPED;
+        }
+        if matches!(
+            (self.scaling_cur_freq_khz, self.scaling_max_freq_khz),
+            (Some(cur), Some(cap)) if cap > 0 && cur < cap
+        ) {
+            flags |= CPU_DYN_FLAG_CUR_FREQ_BELOW_CAP;
+        }
+        flags
+    }
+}
+
+fn read_sysfs_u32(path: impl AsRef<Path>) -> Option<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+}
+
+fn read_sysfs_string(path: impl AsRef<Path>) -> Option<String> {
+    let value = std::fs::read_to_string(path).ok()?.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn read_boost_enabled_from_root(root: &Path) -> Option<bool> {
+    read_sysfs_u32(root.join("cpufreq/boost")).map(|v| v != 0)
+}
+
+fn read_boost_enabled() -> Option<bool> {
+    read_boost_enabled_from_root(Path::new("/sys/devices/system/cpu"))
+}
+
+fn read_cpu_capabilities(nr_cpus: usize) -> Vec<CpuCapability> {
+    (0..nr_cpus.min(topology::MAX_CPUS))
+        .map(CpuCapability::read)
+        .collect()
+}
+
+fn cpu_base_perf_scores_from_caps(caps: &[CpuCapability]) -> [u32; topology::MAX_CPUS] {
+    let mut scores = [1u32; topology::MAX_CPUS];
+    for (cpu, cap) in caps.iter().enumerate().take(topology::MAX_CPUS) {
+        scores[cpu] = cap.base_perf_score();
+    }
+    scores
+}
+
+fn external_pressure_mask_from_cpus<I>(cpus: I, nr_cpus: usize) -> u64
+where
+    I: IntoIterator<Item = usize>,
+{
+    let mut mask = 0u64;
+    for cpu in cpus {
+        if cpu < nr_cpus.min(64) {
+            mask |= 1u64 << cpu;
+        }
+    }
+    mask
+}
+
 fn build_fast_scan_slots(
     cpu: usize,
     nr_cpus: usize,
@@ -1321,43 +1463,12 @@ fn build_fast_scan_slots(
 
 #[allow(dead_code)]
 fn read_cpu_perf_score(cpu: usize) -> u32 {
-    let highest_perf = format!("/sys/devices/system/cpu/cpu{cpu}/acpi_cppc/highest_perf");
-    if let Ok(raw) = std::fs::read_to_string(&highest_perf) {
-        if let Ok(score) = raw.trim().parse::<u32>() {
-            return score.max(1);
-        }
-    }
-
-    let pref_rank = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/amd_pstate_prefcore_ranking");
-    if let Ok(raw) = std::fs::read_to_string(&pref_rank) {
-        if let Ok(rank) = raw.trim().parse::<u32>() {
-            /*
-             * amd_pstate_prefcore_ranking polarity has changed across kernel
-             * discussions and vendor docs, while ACPI CPPC highest_perf is
-             * directly "larger is faster". If highest_perf is unavailable,
-             * keep the ranking useful but conservative by inverting the common
-             * small-is-fast form into a larger-is-better score.
-             */
-            return 1024u32.saturating_sub(rank.min(1023)).max(1);
-        }
-    }
-
-    1
+    CpuCapability::read(cpu).base_perf_score()
 }
 
 #[allow(dead_code)]
 fn cpu_perf_scores(nr_cpus: usize) -> [u32; topology::MAX_CPUS] {
-    let mut scores = [1u32; topology::MAX_CPUS];
-
-    for (cpu, score) in scores
-        .iter_mut()
-        .enumerate()
-        .take(nr_cpus.min(topology::MAX_CPUS))
-    {
-        *score = read_cpu_perf_score(cpu);
-    }
-
-    scores
+    cpu_base_perf_scores_from_caps(&read_cpu_capabilities(nr_cpus))
 }
 
 /// Per-CPU hardirq rates from two /proc/interrupts samples `gap_ms` apart.
@@ -1615,7 +1726,8 @@ impl FrameReserveGovernor {
     }
 }
 
-/// SCX_CAKE_IRQ_AVOID: demote IRQ-storm CPUs in the routing perf scores.
+/// SCX_CAKE_IRQ_AVOID: detect IRQ/RT noisy CPUs and publish them as dynamic
+/// external pressure.  Do not fold these into static topology/perf rodata.
 ///
 /// Measured 2026-06-10 (9800X3D, Kovaaks ~1240fps): the nvidia GPU interrupt
 /// lands exclusively on one CPU (12.4k hardirqs/s) and its FIFO-50 threaded
@@ -1629,14 +1741,9 @@ impl FrameReserveGovernor {
 /// startup sample), or an explicit comma list of CPU ids ("13" / "12,13").
 /// Detection samples at load time, after the game/GPU is already running in
 /// the A/B flow; boot-time loads with an idle GPU won't see the storm — use
-/// the explicit list there. Demotion is score/3: 196 -> 65, below every
-/// clean core on this part, so the noisy CPU becomes a last-resort target
-/// without being removed from the topology.
-fn apply_irq_avoid_penalty(
-    scores: &mut [u32; topology::MAX_CPUS],
-    nr_cpus: usize,
-    cli_knob: Option<&str>,
-) {
+/// the explicit list there.  The result is a runtime pressure mask consumed by
+/// idle placement, while base core ranking remains pure CPPC/topology.
+fn detect_irq_avoid_cpus(nr_cpus: usize, cli_knob: Option<&str>, log_result: bool) -> Vec<usize> {
     // Default "auto" since 2026-06-10 (championship config): demoting
     // RT/IRQ-noisy cores won maxFT/jitMax with 3-4x tighter spreads and
     // regressed nothing. Costs ~300ms of startup sampling. "0" disables.
@@ -1646,7 +1753,7 @@ fn apply_irq_avoid_penalty(
         knob = "auto";
     }
     if knob == "0" {
-        return;
+        return Vec::new();
     }
     const IRQ_NOISY_RATE_PER_S: u64 = 2000;
     /* RT threads wake-rate threshold: KWin compositor threads measured
@@ -1670,10 +1777,12 @@ fn apply_irq_avoid_penalty(
         for (i, &(tid, psr)) in rt.iter().enumerate() {
             let rate = after[i].saturating_sub(before[i]) * 5;
             if rate >= RT_NOISY_WAKES_PER_S && (psr as usize) < nr_cpus {
-                info!(
-                    "IRQ-avoid: RT thread tid={} ({} wakes/s) resident on cpu{}",
-                    tid, rate, psr
-                );
+                if log_result {
+                    info!(
+                        "IRQ-avoid: RT thread tid={} ({} wakes/s) resident on cpu{}",
+                        tid, rate, psr
+                    );
+                }
                 set.insert(psr as usize);
             }
         }
@@ -1685,16 +1794,90 @@ fn apply_irq_avoid_penalty(
             .collect()
     };
     if noisy.is_empty() {
-        info!("IRQ-avoid: enabled but no IRQ-noisy CPUs detected");
+        if log_result {
+            info!("IRQ-avoid: enabled but no IRQ-noisy CPUs detected");
+        }
+        return noisy;
+    }
+    if log_result {
+        info!("IRQ-avoid: external-pressure CPUs {:?}", noisy);
+    }
+    noisy
+}
+
+fn detect_external_pressure_mask(nr_cpus: usize, cli_knob: Option<&str>, log_result: bool) -> u64 {
+    external_pressure_mask_from_cpus(
+        detect_irq_avoid_cpus(nr_cpus, cli_knob, log_result),
+        nr_cpus,
+    )
+}
+
+fn publish_dynamic_cpu_capabilities(
+    skel: &mut BpfSkel<'_>,
+    caps: &[CpuCapability],
+    boost_enabled: bool,
+    external_pressure_mask: u64,
+) {
+    let Some(bss) = &mut skel.maps.bss_data else {
         return;
+    };
+    bss.cake_external_pressure_mask = external_pressure_mask;
+    for (cpu, cap) in caps
+        .iter()
+        .enumerate()
+        .take(bss.cpu_dynamic_perf_score.len())
+    {
+        bss.cpu_dynamic_perf_score[cpu] = cap.dynamic_perf_score();
+        bss.cpu_dynamic_cap_flags[cpu] = cap.dynamic_cap_flags(boost_enabled);
+        bss.cpu_scaling_max_freq_khz[cpu] = cap.scaling_max_freq_khz.unwrap_or_default();
+        bss.cpu_scaling_min_freq_khz[cpu] = cap.scaling_min_freq_khz.unwrap_or_default();
+        bss.cpu_scaling_cur_freq_khz[cpu] = cap.scaling_cur_freq_khz.unwrap_or_default();
     }
-    for &cpu in &noisy {
-        scores[cpu] /= 3;
-    }
+}
+
+fn log_cpu_capability_summary(caps: &[CpuCapability], boost_enabled: bool, external_mask: u64) {
+    let mut ranked: Vec<(usize, u32, u32, u32)> = caps
+        .iter()
+        .enumerate()
+        .map(|(cpu, cap)| {
+            (
+                cpu,
+                cap.base_perf_score(),
+                cap.cpuinfo_max_freq_khz.unwrap_or_default(),
+                cap.scaling_max_freq_khz.unwrap_or_default(),
+            )
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     info!(
-        "IRQ-avoid: demoted IRQ-noisy CPUs {:?} in routing perf scores",
-        noisy
+        "CPU capability ingest: boost={} external_pressure_mask={:#x} top={:?}",
+        boost_enabled,
+        external_mask,
+        ranked.iter().take(8).collect::<Vec<_>>()
     );
+}
+
+struct CapabilityGovernor {
+    tick: u64,
+    irq_avoid: Option<String>,
+}
+
+impl CapabilityGovernor {
+    fn new(irq_avoid: Option<String>) -> Self {
+        Self { tick: 0, irq_avoid }
+    }
+
+    fn tick(&mut self, skel: &mut BpfSkel<'_>, nr_cpus: usize) {
+        self.tick += 1;
+        if self.tick % 2 != 1 {
+            return;
+        }
+        let caps = read_cpu_capabilities(nr_cpus);
+        let boost_enabled = read_boost_enabled().unwrap_or(true);
+        let external_mask =
+            detect_external_pressure_mask(nr_cpus, self.irq_avoid.as_deref(), false);
+        publish_dynamic_cpu_capabilities(skel, &caps, boost_enabled, external_mask);
+    }
 }
 
 #[allow(dead_code)]
@@ -1782,8 +1965,8 @@ fn fast_scan_probe_bits(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> u64 {
 /// 🍰 scx_cake: A CAKE-inspired sched_ext CPU scheduler
 ///
 /// This scheduler adapts CAKE's low-latency scheduling ideas to CPU time.
-/// The current design centers on topology-aware CPU selection, per-LLC
-/// vtime fallback queues, and lightweight per-task accounting in BPF.
+/// The current design centers on topology-aware CPU selection, vtime-guided
+/// builtin-local dispatch, and lightweight per-task accounting in BPF.
 ///
 /// Release builds bake profile, quantum, queue policy, storm guard, busy-wake
 /// kick, learned locality, and wake-chain locality at compile time.
@@ -1800,7 +1983,7 @@ fn fast_scan_probe_bits(slots: [u16; CPU_FAST_SCAN_SLOTS]) -> u64 {
 ///   scx_cake --wake-chain-locality=true # A/B enable learned wake-chain guard
 ///   scx_cake --learned-locality=true # A/B enable learned locality steering
 ///   scx_cake --busy-wake-kick=preempt # A/B force same-CPU busy wake preemption
-///   scx_cake --queue-policy local # A/B use 1.1.1 local fallback queues
+///   scx_cake --queue-policy vtime-local # A/B vtime-guided local placement
 ///   scx_cake -v                       # Run with live TUI stats display
 ///   scx_cake -v --diag-dir /tmp/cake  # Headless recorder; directory must exist
 #[derive(Parser, Debug, Clone)]
@@ -1899,10 +2082,12 @@ struct Args {
     /// Debug builds patch this at startup. Release builds use
     /// SCX_CAKE_QUEUE_POLICY at build time.
     ///
-    /// LOCAL keeps busy fallback work in the selected CPU's local DSQ.
-    /// LLC-VTIME A/B tests the 1.1.0-style shape: fallback work is inserted
-    /// into a per-LLC vtime DSQ that dispatch() pulls from.
-    #[arg(long, value_enum, default_value_t = QueuePolicy::Local, verbatim_doc_comment)]
+    /// LOCAL keeps busy fallback work in the selected CPU's local DSQ without
+    /// vtime/debt ordering.
+    /// VTIME-LOCAL keeps vtime/debt and hybrid frame ordering as signals, then
+    /// inserts directly into the selected CPU's builtin local DSQ in release.
+    /// The old `llc-vtime` spelling is accepted as a compatibility alias.
+    #[arg(long, value_enum, default_value_t = QueuePolicy::VtimeLocal, verbatim_doc_comment)]
     queue_policy: QueuePolicy,
 
     /// Enable live TUI (Terminal User Interface) with real-time statistics.
@@ -1957,10 +2142,9 @@ struct Args {
     /// Reserve the top routing core exclusively for the frame anchor
     /// (GameThread): anchor always selects it, other user tasks bounce to
     /// the second-best core, and the reserve core never pulls shared-lane
-    /// work. Equivalent to SCX_CAKE_FRAME_RESERVE=1. Measured rationale in
-    /// cake.bpf.c at cake_frame_reserve_cpu: RT compositor/audio preemptions
-    /// follow the pipeline (sync wakes), so isolation — not avoidance — is
-    /// the counter. Combine with --irq-avoid so the reserved core is clean.
+    /// work. Parked A/B path: default release BPF compiles this branch out;
+    /// rebuild with SCX_CAKE_FRAME_RESERVE=on before using this flag.
+    /// Measured rationale and counterevidence live in cake.bpf.c and README.
     #[arg(long, action = clap::ArgAction::SetTrue, verbatim_doc_comment)]
     frame_reserve: bool,
 
@@ -2162,6 +2346,13 @@ impl<'a> Scheduler<'a> {
 
         // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
         let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
+        let nr = topo.nr_cpus.min(topology::MAX_CPUS);
+        let cpu_capabilities = read_cpu_capabilities(nr);
+        let boost_enabled = read_boost_enabled().unwrap_or(true);
+        let external_pressure_mask =
+            detect_external_pressure_mask(nr, args.irq_avoid.as_deref(), true);
+        let cpu_perf_score = cpu_base_perf_scores_from_caps(&cpu_capabilities);
+        log_cpu_capability_summary(&cpu_capabilities, boost_enabled, external_pressure_mask);
 
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
@@ -2197,7 +2388,9 @@ impl<'a> Scheduler<'a> {
                 || std::env::var("SCX_CAKE_ENQ_KICK_IDLE")
                     .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
                     .unwrap_or(true);
-            rodata.cake_enq_kick_idle_flag = if enq_kick_idle_on {
+            rodata.cake_enq_kick_idle_flag = if enq_kick_idle_on
+                && topology::BAKED_ENQ_KICK_IDLE_ABI_VALUE != 0
+            {
                 match scx_utils::compat::read_enum("scx_enq_flags", "SCX_ENQ_KICK_IDLE") {
                     Ok(bit) => {
                         info!(
@@ -2213,6 +2406,11 @@ impl<'a> Scheduler<'a> {
                         0
                     }
                 }
+            } else if enq_kick_idle_on {
+                log::warn!(
+                    "SCX_CAKE_ENQ_KICK_IDLE=1 but this BPF object was built without the SCX_ENQ_KICK_IDLE ABI; using explicit idle kicks"
+                );
+                0
             } else {
                 0
             };
@@ -2272,16 +2470,22 @@ impl<'a> Scheduler<'a> {
                 rodata.cpu_core_id[i] = topo.cpu_core_id[i];
             }
 
-            let nr = topo.nr_cpus.min(topology::MAX_CPUS);
-            let mut cpu_perf_score = cpu_perf_scores(nr);
-            apply_irq_avoid_penalty(&mut cpu_perf_score, nr, args.irq_avoid.as_deref());
             for i in 0..nr.min(rodata.cpu_meta.len()) {
                 let sibling = topo.cpu_sibling_map[i];
                 let has_smt_sibling = (sibling as usize) < nr && sibling as usize != i;
                 let primary = primary_cpu_for(&topo, i, nr);
                 let is_primary = primary as usize == i;
                 let llc_id = topo.cpu_llc_id[i] as u32;
+                let cap = cpu_capabilities.get(i).cloned().unwrap_or_default();
 
+                rodata.cpu_base_perf_score[i] = cap.base_perf_score();
+                rodata.cpu_cppc_highest_perf[i] = cap.highest_perf.unwrap_or_default();
+                rodata.cpu_cppc_nominal_perf[i] = cap.nominal_perf.unwrap_or_default();
+                rodata.cpu_cppc_lowest_perf[i] = cap.lowest_perf.unwrap_or_default();
+                rodata.cpu_cppc_lowest_nonlinear_perf[i] =
+                    cap.lowest_nonlinear_perf.unwrap_or_default();
+                rodata.cpu_cppc_reference_perf[i] = cap.reference_perf.unwrap_or_default();
+                rodata.cpuinfo_max_freq_khz[i] = cap.cpuinfo_max_freq_khz.unwrap_or_default();
                 rodata.cpu_meta[i] = pack_cpu_meta(
                     sibling,
                     primary,
@@ -2322,34 +2526,30 @@ impl<'a> Scheduler<'a> {
                 perf_order.iter().take(6).collect::<Vec<_>>()
             );
 
-            let frame_reserve_on = args.frame_reserve
+            let frame_reserve_requested = args.frame_reserve
                 || std::env::var("SCX_CAKE_FRAME_RESERVE")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
-            if frame_reserve_on && perf_order.len() >= 2 {
-                rodata.cake_frame_reserve_on = 1;
-                info!(
-                    "Frame-anchor reservation on (dynamic): governor republishes the anchor core every ~2s"
-                );
+            if frame_reserve_requested {
+                if topology::BAKED_FRAME_RESERVE_VALUE != 0 && perf_order.len() >= 2 {
+                    rodata.cake_frame_reserve_on = 1;
+                    info!(
+                        "Frame-anchor reservation on (dynamic): governor republishes the anchor core every ~2s"
+                    );
+                } else {
+                    log::warn!(
+                        "frame-reserve requested but this BPF object was built with BAKED_FRAME_RESERVE={}; rebuild with SCX_CAKE_FRAME_RESERVE=on to enable the parked A/B path",
+                        topology::BAKED_FRAME_RESERVE
+                    );
+                }
             }
 
             // Performance-ordered CPU scan arrays — HYBRID ONLY
             #[cfg(cake_has_hybrid)]
             {
                 let nr = topo.nr_cpus.min(topology::MAX_CPUS);
-                let mut rankings: Vec<(usize, u32)> = (0..nr)
-                    .map(|cpu| {
-                        let path = format!(
-                            "/sys/devices/system/cpu/cpu{}/cpufreq/amd_pstate_prefcore_ranking",
-                            cpu
-                        );
-                        let rank = std::fs::read_to_string(&path)
-                            .ok()
-                            .and_then(|s| s.trim().parse::<u32>().ok())
-                            .unwrap_or(100);
-                        (cpu, rank)
-                    })
-                    .collect();
+                let mut rankings: Vec<(usize, u32)> =
+                    (0..nr).map(|cpu| (cpu, cpu_perf_score[cpu])).collect();
 
                 rankings.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
@@ -2403,7 +2603,7 @@ impl<'a> Scheduler<'a> {
         #[cfg(cake_needs_arena)]
         let mut skel = open_skel.load().context("Failed to load BPF program")?;
         #[cfg(not(cake_needs_arena))]
-        let skel = open_skel.load().context("Failed to load BPF program")?;
+        let mut skel = open_skel.load().context("Failed to load BPF program")?;
 
         #[cfg(cake_needs_arena)]
         {
@@ -2422,6 +2622,13 @@ impl<'a> Scheduler<'a> {
                 task_ctx_size, topo.nr_cpus
             );
         }
+
+        publish_dynamic_cpu_capabilities(
+            &mut skel,
+            &cpu_capabilities,
+            boost_enabled,
+            external_pressure_mask,
+        );
 
         Ok(Self {
             skel,
@@ -2483,7 +2690,7 @@ impl<'a> Scheduler<'a> {
             || cli_arg_present("--wake-chain-locality", None)
         {
             log::warn!(
-                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}, learned-locality={}, wake-chain-locality={}, release-route-pred={}, release-confidence={}, release-llc-pending={}, release-local-waiter={}, release-domain-drr={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, SCX_CAKE_BUSY_WAKE_KICK, SCX_CAKE_LEARNED_LOCALITY, SCX_CAKE_WAKE_CHAIN_LOCALITY, SCX_CAKE_RELEASE_ROUTE_PRED, SCX_CAKE_RELEASE_CONFIDENCE, SCX_CAKE_RELEASE_LLC_PENDING, SCX_CAKE_RELEASE_LOCAL_WAITER, or SCX_CAKE_RELEASE_DOMAIN_DRR to change hot-path knobs",
+                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}, learned-locality={}, wake-chain-locality={}, release-route-pred={}, release-confidence={}, release-llc-pending={}, release-local-waiter={}, release-domain-drr={}, release-trust-maps={}, frame-reserve={}, core-steal-dhq={}, dsq-insert-v2-fastpath={}, select-cpu-and-compat={}, select-cpu-and-struct={}, enq-kick-idle-abi={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, SCX_CAKE_BUSY_WAKE_KICK, SCX_CAKE_LEARNED_LOCALITY, SCX_CAKE_WAKE_CHAIN_LOCALITY, SCX_CAKE_RELEASE_ROUTE_PRED, SCX_CAKE_RELEASE_CONFIDENCE, SCX_CAKE_RELEASE_LLC_PENDING, SCX_CAKE_RELEASE_LOCAL_WAITER, SCX_CAKE_RELEASE_DOMAIN_DRR, SCX_CAKE_RELEASE_TRUST_MAPS, SCX_CAKE_FRAME_RESERVE, or SCX_CAKE_CORE_STEAL_DHQ to change hot-path knobs",
                 topology::BAKED_PROFILE,
                 topology::BAKED_QUANTUM_US,
                 topology::BAKED_QUEUE_POLICY,
@@ -2495,7 +2702,14 @@ impl<'a> Scheduler<'a> {
                 topology::BAKED_RELEASE_CONFIDENCE,
                 topology::BAKED_RELEASE_LLC_PENDING,
                 topology::BAKED_RELEASE_LOCAL_WAITER,
-                topology::BAKED_RELEASE_DOMAIN_DRR
+                topology::BAKED_RELEASE_DOMAIN_DRR,
+                topology::BAKED_RELEASE_TRUST_MAPS,
+                topology::BAKED_FRAME_RESERVE,
+                topology::BAKED_CORE_STEAL_DHQ,
+                topology::BAKED_DSQ_INSERT_V2_FASTPATH_VALUE != 0,
+                topology::BAKED_SELECT_CPU_AND_COMPAT_VALUE != 0,
+                topology::BAKED_SELECT_CPU_AND_STRUCT_VALUE != 0,
+                topology::BAKED_ENQ_KICK_IDLE_ABI_VALUE != 0
             );
         }
 
@@ -2519,14 +2733,19 @@ impl<'a> Scheduler<'a> {
 
         #[cfg(cake_bpf_release)]
         info!(
-            "release accelerators: route-pred={}, confidence={}, llc-pending={}, local-waiter={}, domain-drr={}, trust-maps={}, core-steal-dhq={}",
+            "release accelerators: route-pred={}, confidence={}, llc-pending={}, local-waiter={}, domain-drr={}, trust-maps={}, frame-reserve={}, core-steal-dhq={}, dsq-insert-v2-fastpath={}, select-cpu-and-compat={}, select-cpu-and-struct={}, enq-kick-idle-abi={}",
             topology::BAKED_RELEASE_ROUTE_PRED,
             topology::BAKED_RELEASE_CONFIDENCE,
             topology::BAKED_RELEASE_LLC_PENDING,
             topology::BAKED_RELEASE_LOCAL_WAITER,
             topology::BAKED_RELEASE_DOMAIN_DRR,
             topology::BAKED_RELEASE_TRUST_MAPS,
-            topology::BAKED_CORE_STEAL_DHQ
+            topology::BAKED_FRAME_RESERVE,
+            topology::BAKED_CORE_STEAL_DHQ,
+            topology::BAKED_DSQ_INSERT_V2_FASTPATH_VALUE != 0,
+            topology::BAKED_SELECT_CPU_AND_COMPAT_VALUE != 0,
+            topology::BAKED_SELECT_CPU_AND_STRUCT_VALUE != 0,
+            topology::BAKED_ENQ_KICK_IDLE_ABI_VALUE != 0
         );
 
         info!(
@@ -2607,14 +2826,17 @@ impl<'a> Scheduler<'a> {
         } else {
             // Dynamic frame-anchor governor rides the headless loop only;
             // --verbose/TUI paths skip it (A/B captures run headless).
+            let frame_reserve_requested = self.args.frame_reserve
+                || std::env::var("SCX_CAKE_FRAME_RESERVE")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
             let mut frame_governor = FrameReserveGovernor::new(
-                self.args.frame_reserve
-                    || std::env::var("SCX_CAKE_FRAME_RESERVE")
-                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                        .unwrap_or(false),
+                frame_reserve_requested && topology::BAKED_FRAME_RESERVE_VALUE != 0,
             );
+            let mut capability_governor = CapabilityGovernor::new(self.args.irq_avoid.clone());
             while !shutdown.load(Ordering::Relaxed) {
                 trust_governor.tick(&mut self.skel, self.topology.nr_cpus);
+                capability_governor.tick(&mut self.skel, self.topology.nr_cpus);
                 frame_governor.tick(&mut self.skel, self.topology.nr_cpus);
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 if scx_utils::uei_exited!(&self.skel, uei) {
@@ -2703,10 +2925,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn queue_policy_defaults_to_local() {
+    fn queue_policy_defaults_to_vtime_local() {
         let args = Args::try_parse_from(["scx_cake"]).unwrap();
 
-        assert_eq!(args.queue_policy, QueuePolicy::Local);
+        assert_eq!(args.queue_policy, QueuePolicy::VtimeLocal);
     }
 
     #[test]
@@ -2714,6 +2936,18 @@ mod tests {
         let args = Args::try_parse_from(["scx_cake", "--queue-policy", "local"]).unwrap();
 
         assert_eq!(args.queue_policy, QueuePolicy::Local);
+    }
+
+    #[test]
+    fn queue_policy_parses_vtime_local_and_legacy_alias() {
+        let args = Args::try_parse_from(["scx_cake", "--queue-policy", "vtime-local"]).unwrap();
+        assert_eq!(args.queue_policy, QueuePolicy::VtimeLocal);
+
+        let args = Args::try_parse_from(["scx_cake", "--queue-policy", "llc-vtime"]).unwrap();
+        assert_eq!(args.queue_policy, QueuePolicy::VtimeLocal);
+
+        let args = Args::try_parse_from(["scx_cake", "--queue-policy", "local-vtime"]).unwrap();
+        assert_eq!(args.queue_policy, QueuePolicy::VtimeLocal);
     }
 
     #[test]
@@ -2766,6 +3000,104 @@ mod tests {
 
         let slots = build_core_spread_slots(0, 8, &siblings, &thread_bits, &llcs, &perf);
 
+        assert_eq!(slots, [3, 1, 2, u16::MAX]);
+    }
+
+    #[test]
+    fn cpu_capability_ingests_cppc_cpufreq_policy_and_base_score() {
+        let root = std::env::temp_dir().join(format!(
+            "scx_cake_cpu_capability_test_{}_{}",
+            std::process::id(),
+            "ingest"
+        ));
+        let cpu_dir = root.join("cpu0");
+        std::fs::create_dir_all(cpu_dir.join("acpi_cppc")).unwrap();
+        std::fs::create_dir_all(cpu_dir.join("cpufreq")).unwrap();
+        std::fs::write(cpu_dir.join("acpi_cppc/highest_perf"), "196\n").unwrap();
+        std::fs::write(cpu_dir.join("acpi_cppc/nominal_perf"), "148\n").unwrap();
+        std::fs::write(cpu_dir.join("acpi_cppc/lowest_perf"), "19\n").unwrap();
+        std::fs::write(cpu_dir.join("acpi_cppc/lowest_nonlinear_perf"), "27\n").unwrap();
+        std::fs::write(cpu_dir.join("acpi_cppc/reference_perf"), "148\n").unwrap();
+        std::fs::write(cpu_dir.join("cpufreq/amd_pstate_prefcore_ranking"), "196\n").unwrap();
+        std::fs::write(cpu_dir.join("cpufreq/cpuinfo_max_freq"), "5271622\n").unwrap();
+        std::fs::write(cpu_dir.join("cpufreq/scaling_max_freq"), "5000000\n").unwrap();
+        std::fs::write(cpu_dir.join("cpufreq/scaling_min_freq"), "603379\n").unwrap();
+        std::fs::write(cpu_dir.join("cpufreq/scaling_cur_freq"), "4200000\n").unwrap();
+        std::fs::write(cpu_dir.join("cpufreq/scaling_governor"), "performance\n").unwrap();
+        std::fs::write(
+            cpu_dir.join("cpufreq/energy_performance_preference"),
+            "performance\n",
+        )
+        .unwrap();
+
+        let cap = CpuCapability::read_from_root(&root, 0);
+
+        assert_eq!(cap.highest_perf, Some(196));
+        assert_eq!(cap.nominal_perf, Some(148));
+        assert_eq!(cap.lowest_perf, Some(19));
+        assert_eq!(cap.lowest_nonlinear_perf, Some(27));
+        assert_eq!(cap.reference_perf, Some(148));
+        assert_eq!(cap.amd_pstate_prefcore_ranking, Some(196));
+        assert_eq!(cap.cpuinfo_max_freq_khz, Some(5_271_622));
+        assert_eq!(cap.scaling_max_freq_khz, Some(5_000_000));
+        assert_eq!(cap.scaling_min_freq_khz, Some(603_379));
+        assert_eq!(cap.scaling_cur_freq_khz, Some(4_200_000));
+        assert_eq!(cap.governor.as_deref(), Some("performance"));
+        assert_eq!(
+            cap.energy_performance_preference.as_deref(),
+            Some("performance")
+        );
+        assert_eq!(cap.base_perf_score(), 196);
+        assert_eq!(
+            cap.dynamic_cap_flags(true),
+            CPU_DYN_FLAG_BOOST_ENABLED
+                | CPU_DYN_FLAG_GOV_PERFORMANCE
+                | CPU_DYN_FLAG_EPP_PERFORMANCE
+                | CPU_DYN_FLAG_SCALING_CLAMPED
+                | CPU_DYN_FLAG_CUR_FREQ_BELOW_CAP
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cpu_capability_uses_prefcore_ranking_when_cppc_highest_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "scx_cake_cpu_capability_test_{}_{}",
+            std::process::id(),
+            "fallback"
+        ));
+        let cpu_dir = root.join("cpu2/cpufreq");
+        std::fs::create_dir_all(&cpu_dir).unwrap();
+        std::fs::write(cpu_dir.join("amd_pstate_prefcore_ranking"), "181\n").unwrap();
+
+        let cap = CpuCapability::read_from_root(&root, 2);
+
+        assert_eq!(cap.highest_perf, None);
+        assert_eq!(cap.amd_pstate_prefcore_ranking, Some(181));
+        assert_eq!(cap.base_perf_score(), 181);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_pressure_mask_packs_valid_cpus_only() {
+        let mask = external_pressure_mask_from_cpus([3, 99, 1, 3], 8);
+
+        assert_eq!(mask, (1u64 << 1) | (1u64 << 3));
+    }
+
+    #[test]
+    fn core_spread_slots_remain_base_ranked_when_external_pressure_moves() {
+        let siblings = [4, 5, 6, 7, 0, 1, 2, 3];
+        let thread_bits = [1, 1, 1, 1, 2, 2, 2, 2];
+        let llcs = [0; 8];
+        let perf = [176, 186, 181, 191, 176, 186, 181, 191];
+        let external_pressure = external_pressure_mask_from_cpus([3], 8);
+
+        let slots = build_core_spread_slots(0, 8, &siblings, &thread_bits, &llcs, &perf);
+
+        assert_eq!(external_pressure, 1u64 << 3);
         assert_eq!(slots, [3, 1, 2, u16::MAX]);
     }
 

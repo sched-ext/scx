@@ -443,6 +443,10 @@ typedef unsigned short cake_cpu_id_t;
 #endif
 
 #define LFDEQ_CAPACITY 128
+#define LFDEQ_CAPACITY_SHIFT 7
+#if (1U << LFDEQ_CAPACITY_SHIFT) != LFDEQ_CAPACITY
+#error "LFDEQ_CAPACITY must match LFDEQ_CAPACITY_SHIFT"
+#endif
 
 struct lfdeq_slot {
 	u64 pid;
@@ -473,10 +477,13 @@ extern struct scx_dhq __arena *core_dhqs[CAKE_MAX_CORES];
 #endif
 /* Queue policy selected by loader through RODATA. */
 #define CAKE_QUEUE_POLICY_LOCAL 0U
-#define CAKE_QUEUE_POLICY_LLC_VTIME 1U
+#define CAKE_QUEUE_POLICY_VTIME_LOCAL 1U
+/* Backward-compatible name for old scripts/history.  The release build treats
+ * this value as vtime-guided local placement, not shared LLC-DSQ custody. */
+#define CAKE_QUEUE_POLICY_LLC_VTIME CAKE_QUEUE_POLICY_VTIME_LOCAL
 
-/* Shared-DSQ base used by the per-LLC vtime fallback A/B policy.
- * The default local queue policy does not pull from these fallback DSQs. */
+/* Shared-DSQ base kept for debug/experimental service paths. Release
+ * vtime-local does not store normal hot-path work here. */
 #define LLC_DSQ_BASE 200
 #define CAKE_THROUGHPUT_DSQ_BASE 1024
 #define CAKE_DOMAIN_DRR_DSQ_BASE 2048
