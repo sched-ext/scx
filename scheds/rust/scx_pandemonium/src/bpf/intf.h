@@ -13,11 +13,11 @@ typedef unsigned char u8;
 // BPF VERIFIER LOOP BOUNDS
 #define MAX_CPUS  1024
 #define MAX_NODES 32
-// PER-CCX OVERFLOW TIER CEILING. CHIPLET PARTS (AMD CCX/CCD) HAVE SMALL CCX
-// COUNTS (Ryzen 3000: 2, EPYC: up to ~16); 32 IS A COMFORTABLE CAP.
-// PRE-ALLOCATED AT INIT (DSQs ARE CHEAP); nr_ccx WALKED FROM Rust AT TOPOLOGY
-// DETECT GATES WHICH ARE LIVE.
-#define MAX_CCX_DOMAINS 32
+// EMERGENT OVERFLOW-DOMAIN CEILING. The min-conductance partition yields small
+// domain counts (Ryzen 3000: 2, EPYC: up to ~16); 32 is a comfortable cap. The
+// overflow DSQs are pre-allocated at init (DSQs are cheap); nr_overflow_domains,
+// walked from Rust at topology detect, gates which are live.
+#define MAX_OVERFLOW_DOMAINS 32
 // AFFINITY_RANK STORAGE PER CPU. EACH CPU'S R_eff-RANKED PEERS ARE
 // STORED HERE; STEP 1 R_eff STEAL AND THE PLACEMENT-SIDE SPILL HELPER
 // WALK THIS LIST WITH A TAU-DERIVED RUNTIME BUDGET CAPPED BY nr_cpu_ids
@@ -92,25 +92,35 @@ struct pandemonium_stats {
 	// OVERFLOW SOJOURN RESCUE: TASKS DISPATCHED BY try_service_older_overflow
 	// AT overflow_sojourn_rescue_ns (DISPATCH STEP 2)
 	u64 nr_overflow_rescue;
-	// CROSS-CCX SCATTER ATTRIBUTION: PER-PLACEMENT-PATH COUNT OF LANDINGS
-	// WHERE THE CHOSEN CPU IS IN A DIFFERENT CCX THAN THE TASK'S last_cpu.
-	// INDEXED BY XCCX_* BELOW. THE ADAPTIVE LAYER CONSUMES THE PLACEMENT-SIDE
-	// PATHS (XCCX_SEL_* + XCCX_ENQ_T1) AS THE MWU CROSS-CCX SCATTER LOSS
+	// CROSS-DOMAIN SCATTER ATTRIBUTION: PER-PLACEMENT-PATH COUNT OF LANDINGS
+	// WHERE THE CHOSEN CPU IS IN A DIFFERENT cache domain THAN THE TASK'S last_cpu.
+	// INDEXED BY XDOM_* BELOW. THE ADAPTIVE LAYER CONSUMES THE PLACEMENT-SIDE
+	// PATHS (XDOM_SEL_* + XDOM_ENQ_T1) AS THE MWU CROSS-DOMAIN SCATTER LOSS
 	// PATHWAY, AND THE BENCH SUITE SURFACES ALL PATHS PER RUN. THE PHI-CORRECT
-	// PATHS (XCCX_STEAL, XCCX_STEP5) ARE TRACKED BUT EXCLUDED FROM THE LOSS --
+	// PATHS (XDOM_STEAL, XDOM_STEP5) ARE TRACKED BUT EXCLUDED FROM THE LOSS --
 	// THEY ARE DELIBERATE WORK-CONSERVATION MOVES, NOT SCATTER TO SUPPRESS.
-	u64 nr_xccx[8];
+	u64 nr_cross_domain[8];
+	// OSCILLATOR ENVELOPE: PARK ENTRIES (CPU-0 TICK WRITER). ZERO AFTER AN
+	// IDLE-HEAVY RUN MEANS THE ENVELOPE NEVER PARKED -- THE MIET-COLLAPSE
+	// FAILURE MODE THE BENCH MUST BE ABLE TO DETECT.
+	u64 nr_osc_park;
+	// SPILL-KICK ATTRIBUTION: select_cpu wakeups whose seat was redirected off
+	// the verified-idle pick onto a busy spill CPU, kicked with SCX_KICK_PREEMPT
+	// instead of the no-op SCX_KICK_IDLE. The signal that confirms the tick-floor
+	// strand fix -- it should track the formerly tick-floored burst wakes while
+	// the >=900us wake2run bucket collapses.
+	u64 nr_spill_kick_preempt;
 };
 
-// XCCX path indices for pandemonium_stats.nr_xccx[] (diagnostic).
-#define XCCX_SEL_TIGHT   0   // select_cpu WAKE_SYNC tight-partner colocation
-#define XCCX_SEL_SYNC    1   // select_cpu WAKE_SYNC phi_warm_target
-#define XCCX_SEL_NORMAL  2   // select_cpu normal_path phi_warm_target
-#define XCCX_SEL_DFL     3   // select_cpu scx_bpf_select_cpu_dfl idle pick
-#define XCCX_ENQ_T1      4   // enqueue TIER 1 idle (pick_idle_cpu_node)
-#define XCCX_ENQ_T2      5   // enqueue TIER 2 warm-anchor spill
-#define XCCX_STEAL       6   // dispatch STEP 1 R_eff steal (this_cpu vs peer)
-#define XCCX_STEP5       7   // dispatch STEP 5 cross-CCX work-conservation scan
+// XDOM path indices for pandemonium_stats.nr_cross_domain[] (diagnostic).
+#define XDOM_SEL_TIGHT   0   // select_cpu WAKE_SYNC tight-partner colocation
+#define XDOM_SEL_SYNC    1   // select_cpu WAKE_SYNC phi_warm_target
+#define XDOM_SEL_NORMAL  2   // select_cpu normal_path phi_warm_target
+#define XDOM_SEL_DFL     3   // select_cpu scx_bpf_select_cpu_dfl idle pick
+#define XDOM_ENQ_T1      4   // enqueue TIER 1 idle (pick_idle_cpu_node)
+#define XDOM_ENQ_T2      5   // enqueue TIER 2 warm-anchor spill
+#define XDOM_STEAL       6   // dispatch STEP 1 R_eff steal (this_cpu vs peer)
+#define XDOM_STEP5       7   // dispatch STEP 5 cross-domain work-conservation scan
 
 // PROCESS CLASSIFICATION: BPF OBSERVES, RUST LEARNS, BPF APPLIES
 // SHARED BETWEEN BPF MAPS (task_class_observe, task_class_init) AND RUST (procdb.rs)

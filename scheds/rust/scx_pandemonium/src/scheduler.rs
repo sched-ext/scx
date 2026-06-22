@@ -49,14 +49,19 @@ pub struct PandemoniumStats {
     pub batch_sojourn_ns: u64,
     pub longrun_mode_active: u64,
     pub nr_overflow_rescue: u64,
-    // CROSS-CCX SCATTER ATTRIBUTION (PER XCCX_* PATH) -- MATCHES nr_xccx[8] IN
+    // CROSS-DOMAIN SCATTER ATTRIBUTION (PER XDOM_* PATH) -- MATCHES nr_cross_domain[8] IN
     // intf.h. PLACEMENT-SIDE PATHS FEED THE MWU SCATTER LOSS PATHWAY.
-    pub nr_xccx: [u64; 8],
+    pub nr_cross_domain: [u64; 8],
+    // OSCILLATOR ENVELOPE PARK ENTRIES (CPU-0 TICK WRITER; intf.h nr_osc_park)
+    pub nr_osc_park: u64,
+    // SPILL-KICK PREEMPTS (select_cpu seat redirected off the idle pick onto a
+    // busy spill CPU; intf.h nr_spill_kick_preempt). Confirms the tick-floor fix.
+    pub nr_spill_kick_preempt: u64,
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
-// 200 (base) + 8*8 (nr_xccx) = 264.
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 264);
+// 200 (base) + 8*8 (nr_cross_domain) + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt) = 280.
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 280);
 const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 80);
 
 // MAX_AFFINITY_CANDIDATES IS DEFINED IN intf.h. THE RUST MIRROR IN
@@ -215,8 +220,10 @@ impl<'a> Scheduler<'a> {
                 }
                 total.nr_overflow_rescue += stats.nr_overflow_rescue;
                 for i in 0..8 {
-                    total.nr_xccx[i] += stats.nr_xccx[i];
+                    total.nr_cross_domain[i] += stats.nr_cross_domain[i];
                 }
+                total.nr_osc_park += stats.nr_osc_park;
+                total.nr_spill_kick_preempt += stats.nr_spill_kick_preempt;
             }
         }
 
@@ -351,25 +358,24 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    // POPULATE LLC/CCX DOMAIN MAP. MONOLITHIC-L3 PARTS: llc_domain ==
-    // socket_domain (intra-CCX checks become no-ops). CHIPLET PARTS: real
-    // CCX/CCD grouping. Consumed by pandemonium_running's migration tagger.
-    pub fn write_llc_domain(&self, cpu: u32, llc_group: u32) -> Result<()> {
+    // POPULATE EMERGENT OVERFLOW-DOMAIN MAP (T3b.2). cpu_domain[cpu] = the
+    // emergent domain id from the T2 tree (the discrete domain map replacement).
+    pub fn write_cpu_domain(&self, cpu: u32, domain: u32) -> Result<()> {
         let key = cpu.to_ne_bytes();
-        let val = llc_group.to_ne_bytes();
+        let val = domain.to_ne_bytes();
         self.skel
             .maps
-            .llc_domain
+            .cpu_domain
             .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
 
-    // SET nr_ccx (post-load mutable global). Walked from topology at startup.
-    // Gates how many of the MAX_CCX_DOMAINS per-CCX overflow DSQs are addressed
+    // SET nr_overflow_domains (post-load mutable global). Walked from topology at startup.
+    // Gates how many of the MAX_OVERFLOW_DOMAINS per-domain overflow DSQs are addressed
     // by dispatch drain loops.
-    pub fn write_nr_ccx(&mut self, nr_ccx: u32) {
+    pub fn write_nr_overflow_domains(&mut self, nr_overflow_domains: u32) {
         if let Some(data) = self.skel.maps.data_data.as_mut() {
-            data.nr_ccx = nr_ccx;
+            data.nr_overflow_domains = nr_overflow_domains;
         }
     }
 
@@ -410,6 +416,20 @@ impl<'a> Scheduler<'a> {
         self.skel
             .maps
             .reff_value
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+
+    // POPULATE EMERGENT-DOMAIN CROSSING-PRICE MAP (PAIRS 1:1 WITH affinity_rank).
+    // domain_phi[cpu * MAX_AFFINITY_CANDIDATES + slot] = (phi * 1e6) OF THE CUT
+    // SEPARATING cpu FROM THAT RANKED PEER. (u32)-1 = SAME LEAF / UNUSED SLOT.
+    pub fn write_domain_phi(&self, cpu: u32, slot: u32, value: u32) -> Result<()> {
+        let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
+        let key = (cpu * stride + slot).to_ne_bytes();
+        let val = value.to_ne_bytes();
+        self.skel
+            .maps
+            .domain_phi
             .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }

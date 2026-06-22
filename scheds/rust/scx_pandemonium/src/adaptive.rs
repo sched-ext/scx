@@ -160,6 +160,7 @@ pub fn monitor_loop(
         let delta_shared = stats.nr_shared.wrapping_sub(prev.nr_shared);
         let delta_preempt = stats.nr_preempt.wrapping_sub(prev.nr_preempt);
         let delta_keep = stats.nr_keep_running.wrapping_sub(prev.nr_keep_running);
+        let delta_parks = stats.nr_osc_park.wrapping_sub(prev.nr_osc_park);
         let delta_wake_sum = stats.wake_lat_sum.wrapping_sub(prev.wake_lat_sum);
         let delta_wake_samples = stats.wake_lat_samples.wrapping_sub(prev.wake_lat_samples);
         let delta_hard = stats.nr_hard_kicks.wrapping_sub(prev.nr_hard_kicks);
@@ -169,13 +170,13 @@ pub fn monitor_loop(
         let delta_rescue = stats
             .nr_overflow_rescue
             .wrapping_sub(prev.nr_overflow_rescue);
-        // CROSS-CCX SCATTER (PATHWAY 6 INPUT). PLACEMENT-SIDE PATHS ONLY:
-        // XCCX_SEL_* + XCCX_ENQ_T1/T2 (INDICES 0..6). THE PHI-CORRECT WORK-
-        // CONSERVATION PATHS XCCX_STEAL (6) AND XCCX_STEP5 (7) ARE EXCLUDED --
+        // CROSS-DOMAIN SCATTER (PATHWAY 6 INPUT). PLACEMENT-SIDE PATHS ONLY:
+        // XDOM_SEL_* + XDOM_ENQ_T1/T2 (INDICES 0..6). THE PHI-CORRECT WORK-
+        // CONSERVATION PATHS XDOM_STEAL (6) AND XDOM_STEP5 (7) ARE EXCLUDED --
         // PENALIZING THEM WOULD MAKE MWU FIGHT THE BPF'S DELIBERATE REBALANCING.
         // saturating_sub ABSORBS A COUNTER RESET (BPF RELOAD) AS 0, NO GARBAGE.
-        let scatter_now: u64 = stats.nr_xccx[0..6].iter().sum();
-        let scatter_prev: u64 = prev.nr_xccx[0..6].iter().sum();
+        let scatter_now: u64 = stats.nr_cross_domain[0..6].iter().sum();
+        let scatter_prev: u64 = prev.nr_cross_domain[0..6].iter().sum();
         let delta_scatter = scatter_now.saturating_sub(scatter_prev);
         let scatter_pct = if delta_d > 0 {
             delta_scatter * 100 / delta_d
@@ -477,6 +478,7 @@ pub fn monitor_loop(
             delta_shared,
             delta_preempt,
             delta_keep,
+            delta_parks,
             wake_avg_us,
             delta_hard,
             delta_soft,
@@ -535,10 +537,10 @@ pub fn monitor_loop(
     } else {
         0
     };
-    // CROSS-CCX SCATTER ATTRIBUTION (PER XCCX_* PATH). scatter_pct IS THE
+    // CROSS-DOMAIN SCATTER ATTRIBUTION (PER XDOM_* PATH). scatter_pct IS THE
     // PLACEMENT-SIDE FRACTION (idx 0..6) PATHWAY 6 ACTS ON; THE PER-PATH COUNTS
     // ARE THE PERMANENT ATTRIBUTION SURFACED TO THE BENCH SUITE EVERY RUN.
-    let x = &final_stats.nr_xccx;
+    let x = &final_stats.nr_cross_domain;
     let x_scatter: u64 = x[0..6].iter().sum();
     let x_scatter_pct = if final_stats.nr_dispatches > 0 {
         x_scatter * 100 / final_stats.nr_dispatches
@@ -546,7 +548,7 @@ pub fn monitor_loop(
         0
     };
     println!(
-        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} mwu={:.3} ticks=L:{}/M:{}/H:{} frozen={} l2_hit=B:{}%/I:{}%/L:{}% xccx_scatter_pct={} xccx_sel_tight={} xccx_sel_sync={} xccx_sel_normal={} xccx_sel_dfl={} xccx_enq_t1={} xccx_enq_t2={} xccx_steal={} xccx_step5={}",
+        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} mwu={:.3} ticks=L:{}/M:{}/H:{} frozen={} l2_hit=B:{}%/I:{}%/L:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={}",
         regime.label(), final_knobs.slice_ns, final_knobs.batch_slice_ns,
         final_knobs.preempt_thresh_ns,
         mwu.scale(regime),
