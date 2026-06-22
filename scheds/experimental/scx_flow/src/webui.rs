@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // Copyright (c) 2026 Galih Tama <galpt@v.recipes>
-//
-// Web UI — lightweight HTTP server for realtime scx_flow metrics.
-// Uses tiny_http for TCP (when run manually) and falls back to a
-// Unix domain socket (when spawned by scx_loader which blocks TCP
-// via systemd hardening RestrictAddressFamilies/SocketBindDeny).
-// Starts automatically; no CLI flags required.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::FileTypeExt;
@@ -15,64 +9,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde_json::json;
 use tiny_http::{Header, Response, Server};
 
-use crate::stats::Metrics;
+use crate::stats::WebMetrics;
 
 const PORT: u16 = 50005;
 const UNIX_SOCKET_PATH: &str = "/tmp/scx_flow.sock";
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-const HISTORY_CAP: usize = 300;
-
-// ---------------------------------------------------------------------------
-// Ring buffer
-// ---------------------------------------------------------------------------
-
-struct RingBuf {
-    buf: Vec<Metrics>,
-    head: usize,
-    count: usize,
-}
-
-impl RingBuf {
-    fn new(cap: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(cap),
-            head: 0,
-            count: 0,
-        }
-    }
-    fn push(&mut self, m: Metrics) {
-        if self.count < self.buf.capacity() {
-            self.buf.push(m);
-            self.count += 1;
-        } else {
-            self.buf[self.head] = m;
-            self.head = (self.head + 1) % self.buf.capacity();
-        }
-    }
-    fn snapshot(&self) -> Vec<Metrics> {
-        let cap = self.buf.capacity();
-        let mut out = Vec::with_capacity(self.count);
-        if self.count == 0 {
-            return out;
-        }
-        let start = if self.count < cap { 0 } else { self.head };
-        for i in 0..self.count {
-            out.push(self.buf[(start + i) % cap].clone());
-        }
-        out
-    }
-}
 
 struct WebState {
-    metrics: Metrics,
-    history: RingBuf,
+    metrics: WebMetrics,
 }
-
-// ---------------------------------------------------------------------------
-// Raw HTTP handler for Unix socket (tiny_http doesn't support Unix sockets)
-// ---------------------------------------------------------------------------
 
 fn unix_handle_client(
     mut stream: std::os::unix::net::UnixStream,
@@ -95,23 +43,25 @@ fn unix_handle_client(
     }
     let path = parts[1];
 
-    // Snapshot state under lock, then release before serialization.
-    let (metrics, history_snap) = {
+    let metrics = {
         let st = match state.lock() {
             Ok(s) => s,
             Err(_) => return,
         };
-        (st.metrics.clone(), st.history.snapshot())
+        st.metrics.clone()
     };
 
     let (body, content_type) = match path {
         "/" => (html.as_bytes().to_vec(), "text/html; charset=utf-8"),
         "/api/stats" => {
-            let j = serde_json::to_string(&metrics).unwrap_or_else(|_| "{}".into());
-            (j.into_bytes(), "application/json")
-        }
-        "/api/history" => {
-            let j = serde_json::to_string(&history_snap).unwrap_or_else(|_| "[]".into());
+            let stats = serde_json::to_value(&metrics.stats).unwrap_or_default();
+            let per_cpu = serde_json::to_value(&metrics.per_cpu).unwrap_or_default();
+            let merged = json!({
+                "stats": stats,
+                "per_cpu": per_cpu,
+                "carriage_filling_count": metrics.carriage_filling_count,
+            });
+            let j = serde_json::to_string(&merged).unwrap_or_else(|_| "{}".into());
             (j.into_bytes(), "application/json")
         }
         _ => {
@@ -132,20 +82,14 @@ fn unix_handle_client(
     let _ = stream.flush();
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
-pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<AtomicBool>) {
+pub fn start(metrics_rx: crossbeam::channel::Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
     log::info!("Web UI thread started");
 
     let html = include_str!("../ui/index.html").to_string();
     let state = Arc::new(Mutex::new(WebState {
-        metrics: Metrics::default(),
-        history: RingBuf::new(HISTORY_CAP),
+        metrics: WebMetrics::default(),
     }));
 
-    // Poller thread
     let state_clone = state.clone();
     let shutdown_clone = shutdown.clone();
     std::thread::spawn(move || {
@@ -153,8 +97,7 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
             match metrics_rx.recv_timeout(POLL_INTERVAL) {
                 Ok(m) => {
                     if let Ok(mut st) = state_clone.lock() {
-                        st.metrics = m.clone();
-                        st.history.push(m);
+                        st.metrics = m;
                     }
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
@@ -163,19 +106,15 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
         }
     });
 
-    // Try TCP: IPv6 loopback first, then IPv4.  Falls back to Unix socket
-    // (scx_loader's systemd hardening: RestrictAddressFamilies, SocketBindDeny).
     let html_for_unix = html.to_owned();
     let mut server: Option<tiny_http::Server> = None;
     let mut tcp_addr = String::new();
 
-    // Attempt IPv6
     if let Ok(s) = Server::http(&format!("[::1]:{}", PORT)) {
         tcp_addr = format!("[::1]:{}", PORT);
         server = Some(s);
     }
 
-    // Attempt IPv4 if IPv6 failed
     if server.is_none() {
         if let Ok(s) = Server::http(&format!("127.0.0.1:{}", PORT)) {
             tcp_addr = format!("127.0.0.1:{}", PORT);
@@ -195,13 +134,12 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
 
         while !shutdown.load(Ordering::Relaxed) {
             if let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(200)) {
-                // Snapshot under lock, then release before serialization.
-                let (metrics, history_snap) = {
+                let metrics = {
                     let st = match state.lock() {
                         Ok(s) => s,
                         Err(_) => continue,
                     };
-                    (st.metrics.clone(), st.history.snapshot())
+                    st.metrics.clone()
                 };
                 match request.url() {
                     "/" => {
@@ -211,15 +149,14 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
                         let _ = request.respond(resp);
                     }
                     "/api/stats" => {
-                        let json = serde_json::to_string(&metrics).unwrap_or_else(|_| "{}".into());
-                        let resp = Response::from_string(json)
-                            .with_header(json_type.clone())
-                            .with_header(no_cache.clone());
-                        let _ = request.respond(resp);
-                    }
-                    "/api/history" => {
-                        let json =
-                            serde_json::to_string(&history_snap).unwrap_or_else(|_| "[]".into());
+                        let stats = serde_json::to_value(&metrics.stats).unwrap_or_default();
+                        let per_cpu = serde_json::to_value(&metrics.per_cpu).unwrap_or_default();
+                        let merged = json!({
+                            "stats": stats,
+                            "per_cpu": per_cpu,
+                            "carriage_filling_count": metrics.carriage_filling_count,
+                        });
+                        let json = serde_json::to_string(&merged).unwrap_or_else(|_| "{}".into());
                         let resp = Response::from_string(json)
                             .with_header(json_type.clone())
                             .with_header(no_cache.clone());
@@ -232,12 +169,10 @@ pub fn start(metrics_rx: crossbeam::channel::Receiver<Metrics>, shutdown: Arc<At
             }
         }
     } else {
-        // TCP blocked — use Unix socket (scx_loader's systemd hardening)
         log::warn!(
             "Web UI: TCP blocked (spawned by scx_loader?), falling back to {}",
             UNIX_SOCKET_PATH
         );
-        // Only remove if it's an existing socket (avoid following symlinks).
         if let Ok(meta) = std::fs::symlink_metadata(UNIX_SOCKET_PATH) {
             if meta.file_type().is_socket() {
                 let _ = std::fs::remove_file(UNIX_SOCKET_PATH);

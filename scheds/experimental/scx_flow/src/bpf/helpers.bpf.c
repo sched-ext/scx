@@ -56,7 +56,7 @@ static __always_inline s64 clamp_budget(s64 budget_ns)
 static __always_inline u64 task_slice_ns(const struct task_ctx *tctx)
 {
 	if (tctx && tctx->budget_ns > 0) {
-		u64 budget_ns = (u64)tctx->budget_ns;
+		u64 budget_ns = tctx->budget_ns;
 		u64 reserved_max_ns = tune_reserved_max_ns;
 
 		if (reserved_max_ns < FLOW_SLICE_MIN_NS)
@@ -100,6 +100,8 @@ static __always_inline void reset_task_ctx(struct task_ctx *tctx, u64 now, bool 
 	tctx->last_sleep_ns = 0;
 	tctx->sleep_started_at = sleeping ? now : 0;
 	tctx->last_cpu = -1;
+	tctx->last_llc = -1;
+	tctx->runnable_cpu = -1;
 	tctx->first_run = true;
 	clear_wake_target(tctx);
 }
@@ -158,7 +160,4 @@ static __always_inline void update_budget_on_wakeup(const struct task_struct *p,
 	tctx->last_refill_ns = refill_ns;
 	tctx->last_sleep_ns = sleep_ns;
 	tctx->sleep_started_at = 0;
-
-	if (refill_ns > 0)
-		__sync_fetch_and_add(&budget_refill_events, 1);
 }

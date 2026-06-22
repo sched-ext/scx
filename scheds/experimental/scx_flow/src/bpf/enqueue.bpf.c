@@ -1,16 +1,36 @@
-/* Enqueue routing — included by main.bpf.c via #include */
+/* Enqueue routing — included by main.bpf.c via #include
+ *
+ * Wakeup and pinned tasks bypass the carriage and are dispatched
+ * directly to local DSQs.  Non-wakeup tasks go through
+ * carriage_enqueue_task() which inserts into per-CPU vtime DSQs
+ * (FLOW_VTIME_DSQ_BASE + cpu) via scx_bpf_dsq_insert_vtime. */
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 	s32 target_cpu = -1;
 	s32 task_cpu;
-	u64 slice_ns;
 	bool is_wakeup;
 	bool has_wake_target = false;
 
+	/* Scheduler process bypass: direct dispatch with HEAD+PREEMPT.
+	 * Uses the default slice (not the bandwidth model) since the
+	 * scheduler thread receives HEAD+PREEMPT for immediate dispatch
+	 * regardless of slice duration. */
+	if (flow_scheduler_pid && (u64)(s32)p->pid == flow_scheduler_pid) {
+		s32 sch_cpu = scx_bpf_task_cpu(p);
+		u64 flags = FLOW_ENQ_HEAD | FLOW_ENQ_PREEMPT;
+		if (sch_cpu >= 0 && (u32)sch_cpu < 1024)
+			scx_bpf_dsq_insert(p,
+				FLOW_DSQ_LOCAL_ON | (u32)sch_cpu,
+				FLOW_SLICE_MIN_NS, flags);
+		else
+			scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL,
+				FLOW_SLICE_MIN_NS, flags);
+	return;
+}
+
 	tctx = lookup_task_ctx(p);
-	slice_ns = task_slice_ns(tctx);
 	is_wakeup = enq_flags & FLOW_ENQ_WAKEUP;
 
 	if (tctx && tctx->wake_cpu_valid) {
@@ -19,6 +39,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	task_cpu = scx_bpf_task_cpu(p);
+
+	/* Non-migratable: ensure target matches current CPU. */
 	if (is_non_migratable(p) && task_cpu >= 0 &&
 	    bpf_cpumask_test_cpu(task_cpu, p->cpus_ptr)) {
 		if (!has_wake_target || target_cpu != task_cpu) {
@@ -32,66 +54,61 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 	}
 
+	/* Pinned kthread: direct to local DSQ. */
 	if (is_pinned_kthread(p)) {
 		clear_wake_target(tctx);
-		scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL, FLOW_SLICE_MIN_NS, enq_flags);
+		u64 ps = compute_task_slice(tctx, scx_bpf_task_cpu(p));
+		scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL,
+			ps, enq_flags);
 		return;
 	}
 
+	/* Non-wakeup, non-migratable: per-CPU pinned DSQ. */
 	if (!is_wakeup && tctx && is_non_migratable(p)) {
 		s32 pin_cpu = task_cpu;
 		if (pin_cpu >= 0 && valid_sched_cpu(pin_cpu)) {
 			clear_wake_target(tctx);
+			u64 ps = compute_task_slice(tctx, pin_cpu);
 			scx_bpf_dsq_insert(p,
 				FLOW_PINNED_DSQ_BASE + (u32)pin_cpu,
-				task_slice_ns(tctx), enq_flags);
+				ps, enq_flags);
 			return;
 		}
 	}
 
-	if (is_wakeup && has_wake_target && valid_sched_cpu(target_cpu)) {
-		u64 wake_enq_flags;
-		slice_ns = FLOW_SLICE_MIN_NS;
-
-		wake_enq_flags = enq_flags | FLOW_ENQ_HEAD;
-		if (tctx && (tctx->first_run ||
-			     tctx->budget_ns >= (s64)FLOW_SLICE_MIN_NS))
-			wake_enq_flags |= FLOW_ENQ_PREEMPT;
-
-		scx_bpf_cpuperf_set(target_cpu, SCX_CPUPERF_ONE);
-		scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL_ON | (u32)target_cpu,
-				   slice_ns, wake_enq_flags);
+	/* Wakeup fast path — bypass carriage.
+	 * Use the bandwidth model to compute the slice (matching 3.0.4's
+	 * task_slice_ns pattern), not the fixed minimum.  Tasks that wake
+	 * up often accumulate budget from sleep refills and should receive
+	 * longer slices proportional to their accumulated budget. */
+	if (is_wakeup) {
+		if (has_wake_target && valid_sched_cpu(target_cpu)) {
+			u64 wake_slice = compute_task_slice(tctx, target_cpu);
+			u64 wake_enq_flags;
+			wake_enq_flags = enq_flags | FLOW_ENQ_HEAD;
+			if (tctx && tctx->budget_ns >= (s64)wake_slice)
+				wake_enq_flags |= FLOW_ENQ_PREEMPT;
+			scx_bpf_cpuperf_set(target_cpu, SCX_CPUPERF_ONE);
+			scx_bpf_dsq_insert(p,
+				FLOW_DSQ_LOCAL_ON | (u32)target_cpu,
+				wake_slice, wake_enq_flags);
+		} else {
+			s32 fb_cpu = scx_bpf_task_cpu(p);
+			u64 fb_slice = (fb_cpu >= 0 && (u32)fb_cpu < 1024)
+				? compute_task_slice(tctx, fb_cpu)
+				: task_slice_ns(tctx);
+			scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL,
+				fb_slice, FLOW_ENQ_HEAD);
+		}
 		__sync_fetch_and_add(&prio_dispatches, 1);
 		clear_wake_target(tctx);
 		return;
 	}
 
-	{
-		s64 budget;
+	/* Non-wakeup re-enqueue: Waiting Room.
+	 * carriage_enqueue_task always dispatches (no pool-full blocking). */
+	carriage_enqueue_task(p, tctx);
 
-		if (tctx)
-			budget = tctx->budget_ns;
-		else
-			budget = 0;
-
-		/* Budget is in nanoseconds (s64).  Budget range after clamp is
-	 * [-500 us, 2000 us] = [-500,000 ns, 2,000,000 ns].  Tiers:
-	 *   PRIORITY: budget >= 1500 us (1,500,000 ns)  — long-sleep tasks
-	 *   NORMAL:   budget >= 1000 us (1,000,000 ns)  — tasks with typical budget
-	 *   LOW:      budget >=  500 us (  500,000 ns)  — tasks with modest budget
-	 *   DEFICIT:  budget <   500 us (  500,000 ns)  — exhausted / bulk workers
-	 *
-	 * Tasks need 500 us * 100 = 50 ms of sleep to reach LOW,
-	 * 100 ms for NORMAL, 150 ms for PRIORITY.  Interactive tasks
-	 * that sleep longer earn higher priority. */
-	if (budget >= FLOW_BUDGET_TIER_PRIORITY_NS)
-			scx_bpf_dsq_insert(p, FLOW_TIER_PRIORITY_DSQ, slice_ns, enq_flags);
-		else if (budget >= FLOW_BUDGET_TIER_NORMAL_NS)
-			scx_bpf_dsq_insert(p, FLOW_TIER_NORMAL_DSQ, slice_ns, enq_flags);
-		else if (budget >= FLOW_BUDGET_TIER_LOW_NS)
-			scx_bpf_dsq_insert(p, FLOW_TIER_LOW_DSQ, slice_ns, enq_flags);
-		else
-			scx_bpf_dsq_insert(p, FLOW_TIER_DEFICIT_DSQ, slice_ns, enq_flags);
-	}
 	clear_wake_target(tctx);
+	return;
 }

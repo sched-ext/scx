@@ -1,92 +1,64 @@
 /* Dispatch hierarchy — included by main.bpf.c via #include
  *
- * Rotating tier dispatch (Model A):
- *   gen & 3 selects the dispatch phase.  Each phase rotates which tier
- *   is checked FIRST.  Over 4 dispatches every tier starts the cascade
- *   exactly once, guaranteeing that no tier waits longer than 3 dispatch
- *   calls before it is serviced.  Starvation-free by construction.
+ * 1. Per-CPU pinned DSQ (non-migratable tasks)
+ * 2. Per-CPU vtime DSQ (this CPU's own tasks)
+ * 3. Peer CPU vtime DSQs (work stealing — idle CPU steals from busiest peer)
+ * 4. Shared FLOW_BATCH_DSQ (fallback)
+ * 5. Previous task extension
  *
- *   Phase 0:  PRIORITY → NORMAL → LOW → DEFICIT
- *   Phase 1:  NORMAL   → LOW    → DEFICIT → PRIORITY
- *   Phase 2:  LOW      → DEFICIT → PRIORITY → NORMAL
- *   Phase 3:  DEFICIT  → PRIORITY → NORMAL → LOW
- *
- *   The per-CPU pinned DSQ (non-migratable tasks) is always checked first
- *   regardless of phase — it bypasses the tier system entirely. */
+ * flow_dsq_move_one wraps scx_bpf_dsq_move_to_local from compat.bpf.h. */
+
+static __always_inline bool flow_dsq_move_one(u64 dsq_id)
+{
+	return scx_bpf_dsq_move_to_local(dsq_id, 0);
+}
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
-	u64 gen = __sync_fetch_and_add(&dispatch_gen, 1);
+	s32 peer;
+	u64 best_load = 0, load;
+	s32 steal_from = -1;
 
+	/* 1. Per-CPU pinned DSQ. */
 	if (scx_bpf_dsq_nr_queued(FLOW_PINNED_DSQ_BASE + (u32)cpu) > 0 &&
-	    scx_bpf_dsq_move_to_local(FLOW_PINNED_DSQ_BASE + (u32)cpu, 0)) {
+	    flow_dsq_move_one(FLOW_PINNED_DSQ_BASE + (u32)cpu)) {
 		__sync_fetch_and_add(&pinned_dispatches, 1);
 		return;
 	}
 
-	switch (gen & 3) {
-	case 0:
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_PRIORITY_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_PRIORITY_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_priority_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_NORMAL_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_NORMAL_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_normal_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_LOW_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_LOW_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_low_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_DEFICIT_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_DEFICIT_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_deficit_dispatches, 1); return; }
-		break;
-	case 1:
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_NORMAL_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_NORMAL_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_normal_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_LOW_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_LOW_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_low_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_DEFICIT_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_DEFICIT_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_deficit_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_PRIORITY_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_PRIORITY_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_priority_dispatches, 1); return; }
-		break;
-	case 2:
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_LOW_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_LOW_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_low_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_DEFICIT_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_DEFICIT_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_deficit_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_PRIORITY_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_PRIORITY_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_priority_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_NORMAL_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_NORMAL_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_normal_dispatches, 1); return; }
-		break;
-	case 3:
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_DEFICIT_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_DEFICIT_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_deficit_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_PRIORITY_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_PRIORITY_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_priority_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_NORMAL_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_NORMAL_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_normal_dispatches, 1); return; }
-		if (scx_bpf_dsq_nr_queued(FLOW_TIER_LOW_DSQ) > 0 &&
-		    scx_bpf_dsq_move_to_local(FLOW_TIER_LOW_DSQ, 0))
-			{ __sync_fetch_and_add(&tier_low_dispatches, 1); return; }
-		break;
-	}
+	/* 2. Per-CPU vtime DSQ (this CPU's own tasks). */
+	if (scx_bpf_dsq_nr_queued(FLOW_VTIME_DSQ_BASE + (u32)cpu) > 0 &&
+	    flow_dsq_move_one(FLOW_VTIME_DSQ_BASE + (u32)cpu))
+		return;
 
-	/* No tasks in any tier DSQ — check whether prev still has a slice.
-	 * This path is identical across all phases. */
+	/* 3. Work stealing: if this CPU is idle, steal from the busiest peer.
+	 *    Scan peer DSQs (bounded by nr_cpu_ids ≤ 1024). */
+	bpf_for(peer, 0, 1024) {
+		if ((u32)peer >= nr_cpu_ids)
+			break;
+		if (peer == cpu)
+			continue;
+		if (scx_bpf_dsq_nr_queued(FLOW_VTIME_DSQ_BASE + (u32)peer) > 0) {
+			load = scx_bpf_dsq_nr_queued(FLOW_VTIME_DSQ_BASE + (u32)peer);
+			if (load > best_load) {
+				best_load = load;
+				steal_from = peer;
+			}
+		}
+	}
+	if (steal_from >= 0 &&
+	    flow_dsq_move_one(FLOW_VTIME_DSQ_BASE + (u32)steal_from))
+		return;
+
+	/* 4. Shared FLOW_BATCH_DSQ fallback. */
+	if (scx_bpf_dsq_nr_queued(FLOW_BATCH_DSQ) > 0 &&
+	    flow_dsq_move_one(FLOW_BATCH_DSQ))
+		return;
+
+	/* 5. Previous task extension. */
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
 		return;
 
 	prev->scx.slice = task_slice_ns(lookup_task_ctx(prev));
+	return;
 }

@@ -8,10 +8,11 @@
  * The scheduling logic is organized into separate modules included below:
  *   helpers.bpf.c    — utility functions and macros
  *   select_cpu.bpf.c — CPU selection
- *   enqueue.bpf.c    — enqueue routing (pinned -> vtime)
- *   dispatch.bpf.c   — DSQ hierarchy dispatch
+ *   enqueue.bpf.c    — enqueue routing (wakeup fast path / Waiting Room)
+ *   dispatch.bpf.c   — DSQ dispatch (pinned DSQ, FLOW_BATCH_DSQ)
  *   budget.bpf.c     — budget lifecycle (runnable, running, stopping)
  *   task.bpf.c       — task lifecycle (init, enable, exit, yield, cpu_release)
+ *   carriage.bpf.c   — Waiting Room stats window and slice computation
  */
 
 #include <scx/common.bpf.h>
@@ -30,6 +31,8 @@ struct task_ctx {
 	u64 last_sleep_ns;
 	u64 sleep_started_at;
 	s32 last_cpu;
+	s32 last_llc;		/* for migration cost calculation */
+	s32 runnable_cpu;	/* CPU where flow_runnable incremented per_cpu_runnable */
 	s32 wake_cpu;
 	bool wake_cpu_idle;
 	bool wake_cpu_valid;
@@ -50,15 +53,32 @@ struct {
 	__type(value, struct flow_cpu_state);
 } cpu_state SEC(".maps");
 
+/* Per-core topology — populated at init by Rust userspace. */
+volatile u64 per_cpu_max_freq_khz[1024];
+volatile u64 per_cpu_llc_id[1024];
+volatile u64 per_cpu_is_smt[1024];	/* 1 = SMT secondary (for web UI) */
+volatile u64 per_cpu_sibling_count[1024]; /* threads per core (for bandwidth) */
+volatile u64 per_cpu_runnable[1024];	/* current runnable count per CPU */
+volatile u64 system_total_khz;		/* sum of all core_effective_khz */
+volatile u64 nr_cpu_ids;
+
+/* Scheduler PID — set by userspace before attach.
+ * Tasks matching this PID bypass the carriage pool. */
+volatile u64 flow_scheduler_pid;
+
+/* Carriage pool — stats window buffer.
+ * Records recently-dispatched task PIDs for the web UI.
+ * All slots pre-allocated in BSS. */
+struct flow_carriage carriage_pool[FLOW_NR_CARRIAGES];
+volatile u64 carriage_producer;
+
+
+
+/* System-level counters */
 volatile u64 on_cpu;
 volatile u64 total_runtime;
 volatile u64 pinned_dispatches;
-volatile u64 prio_dispatches;
-volatile u64 tier_priority_dispatches;
-volatile u64 tier_normal_dispatches;
-volatile u64 tier_low_dispatches;
-volatile u64 tier_deficit_dispatches;
-volatile u64 budget_refill_events;
+volatile u64 prio_dispatches;	/* wakeup fast path dispatches */
 volatile u64 budget_exhaustions;
 volatile u64 runnable_wakeups;
 volatile u64 cpu_release_reenqueues;
@@ -66,14 +86,14 @@ volatile u64 init_task_events;
 volatile u64 enable_events;
 volatile u64 exit_task_events;
 volatile u64 cpu_migrations;
-volatile u64 dispatch_gen;	/* dispatch phase selector (gen & 3 → rotating tier start) */
+
+/* Tunable bounds (compile-time defaults, no-knobs) */
 volatile u64 tune_reserved_max_ns = FLOW_SLICE_RESERVED_MAX_NS;
 volatile u64 tune_interactive_floor_ns = FLOW_INTERACTIVE_FLOOR_NS;
 
-static u64 nr_cpu_ids;
-
 #include "helpers.bpf.c"
 #include "select_cpu.bpf.c"
+#include "carriage.bpf.c"	/* must precede enqueue/dispatch for function visibility */
 #include "enqueue.bpf.c"
 #include "dispatch.bpf.c"
 #include "budget.bpf.c"
@@ -86,7 +106,27 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
+	if (nr_cpu_ids > 1024) {
+		scx_bpf_error("nr_cpu_ids (%llu) exceeds max supported (1024)",
+			      nr_cpu_ids);
+		return -E2BIG;
+	}
+
+	/* Create shared vtime-ordered DSQ for non-wakeup traffic. */
+	ret = scx_bpf_create_dsq(FLOW_BATCH_DSQ, -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("failed to create batch DSQ: %d", ret);
+		return ret;
+	}
+
+	/* Create per-CPU vtime DSQs and per-CPU pinned DSQs. */
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		ret = scx_bpf_create_dsq(FLOW_VTIME_DSQ_BASE + (u32)cpu, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("failed to create vtime DSQ for CPU %d: %d",
+				      cpu, ret);
+			return ret;
+		}
 		ret = scx_bpf_create_dsq(FLOW_PINNED_DSQ_BASE + (u32)cpu, -1);
 		if (ret < 0 && ret != -EEXIST) {
 			scx_bpf_error("failed to create pinned DSQ for CPU %d: %d",
@@ -95,26 +135,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		}
 	}
 
-	ret = scx_bpf_create_dsq(FLOW_TIER_PRIORITY_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create priority DSQ: %d", ret);
-		return ret;
-	}
-	ret = scx_bpf_create_dsq(FLOW_TIER_NORMAL_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create normal DSQ: %d", ret);
-		return ret;
-	}
-	ret = scx_bpf_create_dsq(FLOW_TIER_LOW_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create low DSQ: %d", ret);
-		return ret;
-	}
-	ret = scx_bpf_create_dsq(FLOW_TIER_DEFICIT_DSQ, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("failed to create deficit DSQ: %d", ret);
-		return ret;
-	}
+	carriage_producer = 0;
 
 	return 0;
 }
