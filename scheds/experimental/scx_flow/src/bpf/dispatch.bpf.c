@@ -1,8 +1,3 @@
-/* Undefine the compat macro so we can declare base kfuncs directly. */
-#ifdef scx_bpf_dsq_move_to_local
-#undef scx_bpf_dsq_move_to_local
-#endif
-
 /* Dispatch hierarchy — included by main.bpf.c via #include
  *
  * 1. Per-CPU pinned DSQ (non-migratable tasks)
@@ -11,23 +6,11 @@
  * 4. Shared FLOW_BATCH_DSQ (fallback)
  * 5. Previous task extension
  *
- * flow_dsq_move_one wraps scx_bpf_dsq_move_to_local with fallback
- * chain for v2/v1/old/base variants. */
-
-bool scx_bpf_dsq_move_to_local___v2(u64 dsq_id, u64 enq_flags) __ksym __weak;
-bool scx_bpf_dsq_move_to_local___v1(u64 dsq_id) __ksym __weak;
-bool scx_bpf_consume___old(u64 dsq_id) __ksym __weak;
-bool scx_bpf_dsq_move_to_local(u64 dsq_id) __ksym __weak;
+ * flow_dsq_move_one wraps scx_bpf_dsq_move_to_local from compat.bpf.h. */
 
 static __always_inline bool flow_dsq_move_one(u64 dsq_id)
 {
-	if (bpf_ksym_exists(scx_bpf_dsq_move_to_local___v2))
-		return scx_bpf_dsq_move_to_local___v2(dsq_id, 0);
-	if (bpf_ksym_exists(scx_bpf_dsq_move_to_local___v1))
-		return scx_bpf_dsq_move_to_local___v1(dsq_id);
-	if (bpf_ksym_exists(scx_bpf_consume___old))
-		return scx_bpf_consume___old(dsq_id);
-	return scx_bpf_dsq_move_to_local(dsq_id);
+	return scx_bpf_dsq_move_to_local(dsq_id, 0);
 }
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)

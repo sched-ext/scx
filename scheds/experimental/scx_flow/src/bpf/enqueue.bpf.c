@@ -21,11 +21,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		s32 sch_cpu = scx_bpf_task_cpu(p);
 		u64 flags = FLOW_ENQ_HEAD | FLOW_ENQ_PREEMPT;
 		if (sch_cpu >= 0 && (u32)sch_cpu < 1024)
-			scx_bpf_dsq_insert___v1(p,
+			scx_bpf_dsq_insert(p,
 				FLOW_DSQ_LOCAL_ON | (u32)sch_cpu,
 				FLOW_SLICE_MIN_NS, flags);
 		else
-			scx_bpf_dsq_insert___v1(p, FLOW_DSQ_LOCAL,
+			scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL,
 				FLOW_SLICE_MIN_NS, flags);
 	return;
 }
@@ -58,7 +58,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (is_pinned_kthread(p)) {
 		clear_wake_target(tctx);
 		u64 ps = compute_task_slice(tctx, scx_bpf_task_cpu(p));
-		scx_bpf_dsq_insert___v1(p, FLOW_DSQ_LOCAL,
+		scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL,
 			ps, enq_flags);
 		return;
 	}
@@ -69,7 +69,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (pin_cpu >= 0 && valid_sched_cpu(pin_cpu)) {
 			clear_wake_target(tctx);
 			u64 ps = compute_task_slice(tctx, pin_cpu);
-			scx_bpf_dsq_insert___v1(p,
+			scx_bpf_dsq_insert(p,
 				FLOW_PINNED_DSQ_BASE + (u32)pin_cpu,
 				ps, enq_flags);
 			return;
@@ -89,7 +89,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			if (tctx && tctx->budget_ns >= (s64)wake_slice)
 				wake_enq_flags |= FLOW_ENQ_PREEMPT;
 			scx_bpf_cpuperf_set(target_cpu, SCX_CPUPERF_ONE);
-			scx_bpf_dsq_insert___v1(p,
+			scx_bpf_dsq_insert(p,
 				FLOW_DSQ_LOCAL_ON | (u32)target_cpu,
 				wake_slice, wake_enq_flags);
 		} else {
@@ -97,7 +97,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			u64 fb_slice = (fb_cpu >= 0 && (u32)fb_cpu < 1024)
 				? compute_task_slice(tctx, fb_cpu)
 				: task_slice_ns(tctx);
-			scx_bpf_dsq_insert___v1(p, FLOW_DSQ_LOCAL,
+			scx_bpf_dsq_insert(p, FLOW_DSQ_LOCAL,
 				fb_slice, FLOW_ENQ_HEAD);
 		}
 		__sync_fetch_and_add(&prio_dispatches, 1);
