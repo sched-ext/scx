@@ -6111,6 +6111,45 @@ cake_select_try_pipe_tunnel_direct(struct task_struct *p, s32 prev_cpu)
 #endif
 }
 
+#ifndef CAKE_REBAL_PREV_DEPTH
+/* Rebalance the throughput class off prev only when prev's local DSQ already has
+ * this many queued tasks (real backlog), so warm-prev locality is kept for the
+ * common case and the LLC scan is paid only on the congested path. */
+#define CAKE_REBAL_PREV_DEPTH 1
+#endif
+
+/* EEVDF wake_affine fallback for the throughput class when no idle CPU exists.
+ * cake_select_cpu otherwise returns prev_cpu, which FREEZES a bad ramp-up cluster
+ * (woken throughput tasks pinned to a congested prev) -> the bimodal throughput
+ * variance vs EEVDF.  A full find_idlest LLC scan blows the verifier insn budget
+ * (cake_select_cpu is already near the 1M limit), so we use EEVDF's PRIMARY wake
+ * placement instead: when prev is backed up, pull the wakee to the WAKER's CPU
+ * (this_cpu, where select_cpu runs) if it is in the same LLC and less loaded.
+ * For futex that is the soon-free, cache-warm handoff target (the waker is about
+ * to block).  No loop -> verifier-cheap.  Throughput-class only, gated on prev
+ * congestion.  Returns -1 to keep prev. */
+static __always_inline s32 cake_rebalance_least_loaded(struct task_struct *p,
+						       s32 prev_cpu)
+{
+	u32 pc = (u32)prev_cpu & (CAKE_MAX_CPUS - 1);
+	u32 this_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+	s32 prev_depth, this_depth;
+
+	if (this_cpu == pc)
+		return -1;
+	if (cake_task_is_affinitized_n(p, cake_nr_cpus))
+		return -1; /* pinned task: do not fight its affinity */
+	if (cpu_llc_dsq[this_cpu] != cpu_llc_dsq[pc])
+		return -1; /* same LLC only: preserve the cache domain */
+	prev_depth = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | pc);
+	if (prev_depth <= (s32)CAKE_REBAL_PREV_DEPTH)
+		return -1; /* prev not congested: keep warm-prev locality */
+	this_depth = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu);
+	if (this_depth < prev_depth)
+		return (s32)this_cpu; /* waker's CPU less loaded: wake_affine pull */
+	return -1;
+}
+
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -6801,6 +6840,12 @@ tunnel:
 	if (cake_task_is_throughput_class(p, wake_flags)) {
 		s32 spread = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
 
+		if (spread >= 0)
+			return spread;
+		/* No idle CPU: rebalance off a congested prev (EEVDF find_idlest)
+		 * instead of freezing the ramp-up cluster.  See
+		 * cake_rebalance_least_loaded. */
+		spread = cake_rebalance_least_loaded(p, prev_cpu);
 		if (spread >= 0)
 			return spread;
 	}
