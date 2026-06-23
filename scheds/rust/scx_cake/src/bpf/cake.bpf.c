@@ -4950,6 +4950,25 @@ static __always_inline bool cake_task_latency_biased(struct task_struct *p,
 	return false;
 }
 
+/* Unified throughput/compute class predicate (one definition, used by the
+ * vtime-local wake-balancing lever). "Background bulk work that benefits from
+ * EEVDF-like cross-CPU spread rather than warm-prev pinning": general
+ * default-user compute (service NONE) + stress memcpy/futex, EXCLUDING
+ * latency-biased wakes (games, sync handoffs) and the cache/messaging/pipe/
+ * schbench services whose wins depend on warm-prev locality. */
+static __always_inline bool
+cake_task_is_throughput_class(struct task_struct *p, u64 wake_flags)
+{
+	u32 sk;
+
+	if (cake_task_latency_biased(p, wake_flags))
+		return false;
+	sk = cake_task_service_kind(p);
+	return sk == CAKE_TASK_SERVICE_NONE ||
+	       sk == CAKE_TASK_SERVICE_STRESS_MEMCPY ||
+	       sk == CAKE_TASK_SERVICE_STRESS_FUTEX;
+}
+
 static __always_inline bool
 cake_message_wake_candidate(const struct task_struct *p, u64 wake_flags)
 {
@@ -6770,6 +6789,21 @@ tunnel:
 			return prev_cpu;
 	}
 #endif
+
+	/* vtime-local pins every wakee to prev_cpu (cache-warm — correct for
+	 * games / cache / latency services, kept below). But the throughput/compute
+	 * class (futex, memcpy, NONE compute) has NO cross-CPU load-balancer, so
+	 * pinning freezes a bad ramp-up cluster -> the bimodal throughput variance
+	 * vs EEVDF, whose select_task_rq spreads woken tasks to idle CPUs. For that
+	 * class ONLY, do EEVDF-like wake balancing: pick an idle CPU (the same kfunc
+	 * EEVDF pays), else fall back to prev. Games/cache/latency never evaluate
+	 * this (one comm[0]!='s' test) so their warm-prev locality is unchanged. */
+	if (cake_task_is_throughput_class(p, wake_flags)) {
+		s32 spread = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
+
+		if (spread >= 0)
+			return spread;
+	}
 
 	return prev_cpu;
 #undef stats_on
