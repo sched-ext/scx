@@ -7836,20 +7836,11 @@ static __always_inline __maybe_unused bool
 cake_requeue_shared_escape_candidate(const struct task_struct *p,
 				     u64 target_status, u32 target_cpu)
 {
-	u64 overloaded = ((u64)CAKE_CPU_OWNER_BULK
-			  << CAKE_CPU_STATUS_OWNER_SHIFT) |
-			 ((u64)CAKE_CPU_PRESSURE_HIGH
-			  << CAKE_CPU_STATUS_PRESS_SHIFT);
-
-	if ((target_status & CAKE_CPU_STATUS_IDLE) ||
-	    !(target_status & overloaded))
-		return false;
-	if (target_status & CAKE_CPU_STATUS_SAT_CACHE_MEM)
-		return false;
-	if (cake_task_is_affinitized(p) || p->prio < 120 || p->scx.weight > 120)
-		return false;
+	/* Identical predicate to the initial-escape candidate; the requeue site
+	 * just carries a target_cpu it does not use. Forward to the single source
+	 * of truth (both __always_inline, so codegen folds identically). */
 	(void)target_cpu;
-	return true;
+	return cake_initial_shared_escape_candidate(p, target_status);
 }
 
 static __always_inline __maybe_unused void
@@ -7865,9 +7856,10 @@ static __noinline __maybe_unused void
 cake_insert_default_bulk_shared_escape(struct task_struct *p, u64 enq_flags,
 				       u32 target_cpu, u64 slice)
 {
-	CAKE_GAME_DIAG_INC(target_cpu, shared_escape);
-	cake_insert_llc_pending_vtime(p, enq_flags, target_cpu, slice);
-	cake_record_shared_vtime_insert(enq_flags, false, target_cpu);
+	/* Same body as cake_insert_shared_escape(..., preserve_state=false);
+	 * kept as a __noinline out-of-line entry for the bulk call site but
+	 * deduped to one implementation. */
+	cake_insert_shared_escape(p, enq_flags, target_cpu, slice, false);
 }
 static __always_inline __maybe_unused bool
 cake_default_bulk_shared_escape_candidate(const struct task_struct *p,
