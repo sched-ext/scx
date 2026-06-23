@@ -2690,7 +2690,7 @@ impl<'a> Scheduler<'a> {
             || cli_arg_present("--wake-chain-locality", None)
         {
             log::warn!(
-                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}, learned-locality={}, wake-chain-locality={}, release-route-pred={}, release-confidence={}, release-llc-pending={}, release-local-waiter={}, release-domain-drr={}, release-trust-maps={}, frame-reserve={}, core-steal-dhq={}, dsq-insert-v2-fastpath={}, select-cpu-and-compat={}, select-cpu-and-struct={}, enq-kick-idle-abi={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, SCX_CAKE_BUSY_WAKE_KICK, SCX_CAKE_LEARNED_LOCALITY, SCX_CAKE_WAKE_CHAIN_LOCALITY, SCX_CAKE_RELEASE_ROUTE_PRED, SCX_CAKE_RELEASE_CONFIDENCE, SCX_CAKE_RELEASE_LLC_PENDING, SCX_CAKE_RELEASE_LOCAL_WAITER, SCX_CAKE_RELEASE_DOMAIN_DRR, SCX_CAKE_RELEASE_TRUST_MAPS, SCX_CAKE_FRAME_RESERVE, or SCX_CAKE_CORE_STEAL_DHQ to change hot-path knobs",
+                "release build uses baked profile={}, quantum={}us, queue-policy={}, storm-guard={}, busy-wake-kick={}, learned-locality={}, wake-chain-locality={}, release-route-pred={}, release-confidence={}, release-llc-pending={}, release-local-waiter={}, release-domain-drr={}, release-trust-maps={}, frame-reserve={}, core-steal-dhq={}, service-readiness={}, dsq-insert-v2-fastpath={}, select-cpu-and-compat={}, select-cpu-and-struct={}, enq-kick-idle-abi={}; rebuild with SCX_CAKE_PROFILE, SCX_CAKE_QUANTUM_US, SCX_CAKE_QUEUE_POLICY, SCX_CAKE_STORM_GUARD, SCX_CAKE_BUSY_WAKE_KICK, SCX_CAKE_LEARNED_LOCALITY, SCX_CAKE_WAKE_CHAIN_LOCALITY, SCX_CAKE_RELEASE_ROUTE_PRED, SCX_CAKE_RELEASE_CONFIDENCE, SCX_CAKE_RELEASE_LLC_PENDING, SCX_CAKE_RELEASE_LOCAL_WAITER, SCX_CAKE_RELEASE_DOMAIN_DRR, SCX_CAKE_RELEASE_TRUST_MAPS, SCX_CAKE_FRAME_RESERVE, SCX_CAKE_CORE_STEAL_DHQ, or SCX_CAKE_SERVICE_READINESS to change hot-path knobs",
                 topology::BAKED_PROFILE,
                 topology::BAKED_QUANTUM_US,
                 topology::BAKED_QUEUE_POLICY,
@@ -2706,6 +2706,7 @@ impl<'a> Scheduler<'a> {
                 topology::BAKED_RELEASE_TRUST_MAPS,
                 topology::BAKED_FRAME_RESERVE,
                 topology::BAKED_CORE_STEAL_DHQ,
+                topology::BAKED_SERVICE_READINESS,
                 topology::BAKED_DSQ_INSERT_V2_FASTPATH_VALUE != 0,
                 topology::BAKED_SELECT_CPU_AND_COMPAT_VALUE != 0,
                 topology::BAKED_SELECT_CPU_AND_STRUCT_VALUE != 0,
@@ -2733,7 +2734,7 @@ impl<'a> Scheduler<'a> {
 
         #[cfg(cake_bpf_release)]
         info!(
-            "release accelerators: route-pred={}, confidence={}, llc-pending={}, local-waiter={}, domain-drr={}, trust-maps={}, frame-reserve={}, core-steal-dhq={}, dsq-insert-v2-fastpath={}, select-cpu-and-compat={}, select-cpu-and-struct={}, enq-kick-idle-abi={}",
+            "release accelerators: route-pred={}, confidence={}, llc-pending={}, local-waiter={}, domain-drr={}, trust-maps={}, frame-reserve={}, core-steal-dhq={}, service-readiness={}, dsq-insert-v2-fastpath={}, select-cpu-and-compat={}, select-cpu-and-struct={}, enq-kick-idle-abi={}",
             topology::BAKED_RELEASE_ROUTE_PRED,
             topology::BAKED_RELEASE_CONFIDENCE,
             topology::BAKED_RELEASE_LLC_PENDING,
@@ -2742,6 +2743,7 @@ impl<'a> Scheduler<'a> {
             topology::BAKED_RELEASE_TRUST_MAPS,
             topology::BAKED_FRAME_RESERVE,
             topology::BAKED_CORE_STEAL_DHQ,
+            topology::BAKED_SERVICE_READINESS,
             topology::BAKED_DSQ_INSERT_V2_FASTPATH_VALUE != 0,
             topology::BAKED_SELECT_CPU_AND_COMPAT_VALUE != 0,
             topology::BAKED_SELECT_CPU_AND_STRUCT_VALUE != 0,

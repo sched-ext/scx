@@ -319,6 +319,8 @@ fn main() {
         baked_bool("SCX_CAKE_WAKE_PREEMPT_ADAPTIVE", false);
     let (_game_diag_label, game_diag_value, game_diag_enabled) =
         baked_bool("SCX_CAKE_GAME_DIAG", false);
+    let (baked_service_readiness, baked_service_readiness_value, service_readiness_enabled) =
+        baked_bool("SCX_CAKE_SERVICE_READINESS", false);
     // Service-gated hybrid signal policy (2026-06-10, signal-local 2026-06-20):
     // frame wakeups get LOCAL head/preempt ordering while normal work stays
     // direct-local with vtime/debt accounting. Only meaningful with
@@ -442,6 +444,8 @@ fn main() {
              pub const BAKED_SELECT_CPU_AND_STRUCT_VALUE: u32 = {};\n\
              pub const BAKED_CORE_STEAL_DHQ: &str = {:?};\n\
              pub const BAKED_CORE_STEAL_DHQ_VALUE: u32 = {};\n\
+             pub const BAKED_SERVICE_READINESS: &str = {:?};\n\
+             pub const BAKED_SERVICE_READINESS_VALUE: u32 = {};\n\
              pub const BAKED_GAME_DIAG_VALUE: u32 = {};\n",
             max_cpus,
             max_llcs,
@@ -481,6 +485,8 @@ fn main() {
             select_cpu_and_struct_fastpath_value,
             baked_core_steal_dhq,
             baked_core_steal_dhq_value,
+            baked_service_readiness,
+            baked_service_readiness_value,
             game_diag_value
         ),
     )
@@ -523,6 +529,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ADAPTIVE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WAKE_PREEMPT_ELAPSED_US");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_GAME_DIAG");
+    println!("cargo:rerun-if-env-changed=SCX_CAKE_SERVICE_READINESS");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_HYBRID_QUEUE");
     println!("cargo:rerun-if-env-changed=SCX_CAKE_WOW_FRAME_BOOST");
     println!("cargo:rerun-if-changed=/proc/kallsyms");
@@ -530,6 +537,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/bpf/telemetry.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/debug_events.bpf.h");
     println!("cargo:rerun-if-changed=src/bpf/iter.bpf.h");
+    println!("cargo:rerun-if-changed=src/bpf/service_readiness_table.h");
 
     // Register custom cfg names to suppress unexpected_cfgs warnings
     println!("cargo::rustc-check-cfg=cfg(cake_bpf_release)");
@@ -542,6 +550,7 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(cake_futex_trace)");
     println!("cargo::rustc-check-cfg=cfg(cake_core_steal_dhq)");
     println!("cargo::rustc-check-cfg=cfg(cake_game_diag)");
+    println!("cargo::rustc-check-cfg=cfg(cake_service_readiness)");
 
     // Emit rustc-cfg flags for true conditional compilation (Rust #[cfg] guards)
     if has_hybrid {
@@ -673,6 +682,10 @@ fn main() {
     ));
     cflags.push_str(&format!(" -DCAKE_GAME_DIAG={}", game_diag_value));
     cflags.push_str(&format!(
+        " -DCAKE_SERVICE_READINESS={}",
+        baked_service_readiness_value
+    ));
+    cflags.push_str(&format!(
         " -DCAKE_HYBRID_QUEUE_VALUE={}",
         hybrid_queue_value
     ));
@@ -718,6 +731,9 @@ fn main() {
     if game_diag_enabled {
         println!("cargo:rustc-cfg=cake_game_diag");
     }
+    if service_readiness_enabled {
+        println!("cargo:rustc-cfg=cake_service_readiness");
+    }
     cflags.push_str(&format!(
         " -DCAKE_RELEASE_TRUST_MAPS={}",
         baked_release_trust_maps_value
@@ -733,7 +749,7 @@ fn main() {
 
     // Log detected topology + gates during build
     println!(
-        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} BAKED_FRAME_RESERVE={} NEEDS_ARENA={} FUTEX_TRACE={} CORE_STEAL_DHQ={} DSQ_INSERT_V2_FASTPATH={} SELECT_CPU_AND_COMPAT={} SELECT_CPU_AND_STRUCT={} ENQ_KICK_IDLE_ABI={} GAME_DIAG={} WOW_FRAME_BOOST={}",
+        "scx_cake [info]: CAKE_MAX_CPUS={} CAKE_MAX_LLCS={} CAKE_NR_CPUS={} CAKE_NR_LLCS={} SINGLE_LLC={} HAS_HYBRID={} BAKED_PROFILE={} BAKED_QUANTUM_US={} BAKED_QUEUE_POLICY={} BAKED_STORM_GUARD={} BAKED_BUSY_WAKE_KICK={} BAKED_LEARNED_LOCALITY={} BAKED_WAKE_CHAIN_LOCALITY={} BAKED_RELEASE_ROUTE_PRED={} BAKED_RELEASE_CONFIDENCE={} BAKED_RELEASE_LLC_PENDING={} BAKED_RELEASE_LOCAL_WAITER={} BAKED_RELEASE_DOMAIN_DRR={} BAKED_RELEASE_PLANCK_LOCAL={} BAKED_RELEASE_TRUST_MAPS={} BAKED_FRAME_RESERVE={} NEEDS_ARENA={} FUTEX_TRACE={} CORE_STEAL_DHQ={} SERVICE_READINESS={} DSQ_INSERT_V2_FASTPATH={} SELECT_CPU_AND_COMPAT={} SELECT_CPU_AND_STRUCT={} ENQ_KICK_IDLE_ABI={} GAME_DIAG={} WOW_FRAME_BOOST={}",
         max_cpus,
         max_llcs,
         nr_cpus,
@@ -758,6 +774,7 @@ fn main() {
         needs_arena,
         futex_trace_enabled,
         baked_core_steal_dhq,
+        baked_service_readiness,
         dsq_insert_v2_fastpath_value != 0,
         select_cpu_and_compat_fastpath_value != 0,
         select_cpu_and_struct_fastpath_value != 0,

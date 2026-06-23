@@ -4,7 +4,7 @@ use super::report::build_telemetry_report;
 use super::*;
 use crate::telemetry_report::{
     AcceleratorSummary, CoverageItem, GraphSummary, HealthSummary, LifecycleSummary,
-    TelemetryReport,
+    ServiceReadinessSummary, TelemetryReport,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
@@ -228,6 +228,7 @@ pub(super) struct ServiceReport {
     pub health: HealthSummary,
     pub lifecycle: LifecycleSummary,
     pub accelerator: AcceleratorSummary,
+    pub service_readiness: ServiceReadinessSummary,
     pub graph: GraphSummary,
     pub coverage: Vec<CoverageItem>,
     pub live_data: LiveData,
@@ -349,6 +350,7 @@ pub(super) fn build_service_report(
         health: report.health.clone(),
         lifecycle: report.lifecycle.clone(),
         accelerator: report.accelerator.clone(),
+        service_readiness: report.service_readiness.clone(),
         graph: report.graph.clone(),
         coverage: report.coverage.clone(),
         live_data: evaluation.live_data,
@@ -869,6 +871,24 @@ pub(super) fn format_service_report_text(report: &ServiceReport) -> String {
             .iter()
             .filter(|monitor| monitor.state == MonitorState::NotReady)
             .count(),
+    ));
+    out.push_str(&format!(
+        "service_readiness: eval={} urgent={} promote={} defer={} defer[fair/owner/route/cache]={}/{}/{}/{} action[preempt/idle/local]={}/{}/{} wait_promote[lt100us/ge1ms]={}/{} wait_defer[lt100us/ge1ms]={}/{}\n",
+        report.service_readiness.eval,
+        report.service_readiness.urgent,
+        report.service_readiness.promote,
+        report.service_readiness.defer,
+        report.service_readiness.defer_fairness,
+        report.service_readiness.defer_owner,
+        report.service_readiness.defer_route,
+        report.service_readiness.defer_cache,
+        report.service_readiness.preempt,
+        report.service_readiness.idle_kick,
+        report.service_readiness.local_only,
+        report.service_readiness.promote_wait_lt100us,
+        report.service_readiness.promote_wait_ge1ms,
+        report.service_readiness.defer_wait_lt100us,
+        report.service_readiness.defer_wait_ge1ms,
     ));
     out.push_str("readiness.monitors:\n");
     for monitor in &report.monitors {
@@ -2240,6 +2260,7 @@ mod tests {
             health: HealthSummary::default(),
             lifecycle: LifecycleSummary::default(),
             accelerator: AcceleratorSummary::default(),
+            service_readiness: ServiceReadinessSummary::default(),
             graph: GraphSummary::default(),
             coverage: Vec::new(),
             live_data: LiveData::default(),

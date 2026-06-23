@@ -600,8 +600,12 @@ where
     pub fn new(data: StatsServerData<Req, Res>) -> Self {
         let (ich, och) = ChannelPair::<Req, Res>::bidi();
 
+        let base_path = std::env::var_os("SCX_STATS_BASE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/run/scx"));
+
         Self {
-            base_path: PathBuf::from("/var/run/scx"),
+            base_path,
             sched_path: PathBuf::from("root"),
             stats_path: PathBuf::from("stats"),
             path: None,

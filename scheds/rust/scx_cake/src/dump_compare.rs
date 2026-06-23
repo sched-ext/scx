@@ -1374,6 +1374,343 @@ mod tests {
     }
 
     #[test]
+    fn bpf_service_readiness_telemetry_is_debug_only_and_release_inert() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let intf = include_str!("bpf/intf.h");
+        let report = include_str!("tui/report.rs");
+        let telemetry_report = include_str!("telemetry_report.rs");
+
+        assert!(intf.contains("enum cake_ready_bit"));
+        assert!(intf.contains("enum cake_ready_action"));
+        assert!(intf.contains("CAKE_READY_URGENT_SERVICE"));
+        assert!(intf.contains("CAKE_READY_ACT_PREEMPT_KICK"));
+        assert!(intf.contains("pending_ready_bits"));
+        assert!(intf.contains("pending_ready_action"));
+        for counter in [
+            "nr_ready_eval",
+            "nr_ready_urgent",
+            "nr_ready_promote",
+            "nr_ready_defer",
+            "nr_ready_defer_fairness",
+            "nr_ready_defer_owner",
+            "nr_ready_defer_route",
+            "nr_ready_defer_cache",
+            "nr_ready_preempt",
+            "nr_ready_idle_kick",
+            "nr_ready_local_only",
+            "nr_ready_promote_wait_lt100us",
+            "nr_ready_promote_wait_ge1ms",
+            "nr_ready_defer_wait_lt100us",
+            "nr_ready_defer_wait_ge1ms",
+        ] {
+            assert!(
+                intf.contains(counter),
+                "missing readiness counter {counter}"
+            );
+        }
+
+        assert!(source_contains(
+            src,
+            "#ifndef CAKE_RELEASE
+             static __always_inline u8 cake_ready_bits_for_wake"
+        ));
+        assert!(src.contains("cake_ready_record_enqueue("));
+        assert!(src.contains("cake_ready_record_action_outcome("));
+
+        let release_local_enqueue = source_body_between(
+            src,
+            "static __noinline void enqueue_body",
+            "#else\n\tbool is_wakeup",
+        )
+        .expect("release-local enqueue body should be present");
+        assert!(!release_local_enqueue.contains("cake_ready_record_enqueue"));
+        assert!(!release_local_enqueue.contains("pending_ready_bits"));
+
+        assert!(report.contains("service_readiness"));
+        assert!(telemetry_report.contains("ServiceReadinessSummary"));
+    }
+
+    #[test]
+    fn bpf_service_readiness_joins_wake_wait_outcomes() {
+        let src = include_str!("bpf/cake.bpf.c");
+
+        assert!(src.contains("struct cake_wake_wait_scratch"));
+        assert!(src.contains("u8  ready_action;"));
+        assert!(src.contains("ww->ready_action = tctx->telemetry.pending_ready_action;"));
+        assert!(src.contains("tctx->telemetry.pending_ready_bits = 0;"));
+        assert!(src.contains("tctx->telemetry.pending_ready_action = CAKE_READY_ACT_NONE;"));
+
+        let running_body = source_body_between(
+            src,
+            "running_record_wake_wait(struct cake_task_ctx",
+            "static __noinline void\nrunning_record_dispatch_gap",
+        )
+        .expect("running wake-wait body should be present");
+        assert!(source_contains(
+            running_body,
+            "running_wake_wait_record_readiness(tctx, s_run, ww);"
+        ));
+        assert!(
+            running_body
+                .find("running_wake_wait_record_readiness")
+                .unwrap()
+                < running_body
+                    .find("running_wake_wait_record_reason_all")
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn bpf_service_readiness_aggregate_counts_do_not_require_task_ctx() {
+        let src = include_str!("bpf/cake.bpf.c");
+        let helper_body = source_body_between(
+            src,
+            "cake_ready_record_enqueue(",
+            "#endif\n\n#if !CAKE_LEAN_SCHED",
+        )
+        .expect("debug readiness helper should be present");
+        assert!(helper_body.contains("if (!stats)"));
+        assert!(!helper_body.contains("if (!stats || !tctx)"));
+        assert!(source_contains(
+            helper_body,
+            "if (tctx) {
+                tctx->telemetry.pending_ready_bits = bits;
+                tctx->telemetry.pending_ready_action = action;
+             }"
+        ));
+
+        let wake_path_body = source_body_between(
+            src,
+            "if (stats)\n\t\tstats->nr_enqueue_path_wakeup++;",
+            "if (affinitized)",
+        )
+        .expect("enqueue wake path accounting body should be present");
+        assert!(
+            wake_path_body.contains("cake_ready_record_enqueue"),
+            "aggregate readiness recording must run at the main wake path choke point"
+        );
+        assert!(!source_contains(
+            wake_path_body,
+            "if (tctx) {
+                cake_ready_record_enqueue"
+        ));
+    }
+
+    #[test]
+    fn bpf_service_readiness_userspace_stats_fold_keeps_counters() {
+        let intf = include_str!("bpf/intf.h");
+        let tui = include_str!("tui.rs");
+        let aggregate_body = source_body_between(
+            tui,
+            "fn aggregate_stats(skel: &BpfSkel) -> cake_stats",
+            "#[cfg(cake_bpf_release)]",
+        )
+        .expect("debug aggregate_stats body should be present");
+        let delta_body = source_body_between(
+            tui,
+            "fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats",
+            "\n\n#[cfg(not(cake_bpf_release))]\nfn cstr_comm",
+        )
+        .expect("stats_delta body should be present");
+
+        for counter in [
+            "nr_ready_eval",
+            "nr_ready_urgent",
+            "nr_ready_promote",
+            "nr_ready_defer",
+            "nr_ready_defer_fairness",
+            "nr_ready_defer_owner",
+            "nr_ready_defer_route",
+            "nr_ready_defer_cache",
+            "nr_ready_preempt",
+            "nr_ready_idle_kick",
+            "nr_ready_local_only",
+            "nr_ready_promote_wait_lt100us",
+            "nr_ready_promote_wait_ge1ms",
+            "nr_ready_defer_wait_lt100us",
+            "nr_ready_defer_wait_ge1ms",
+        ] {
+            assert!(
+                intf.contains(counter),
+                "ABI missing readiness counter {counter}"
+            );
+            assert!(
+                source_contains(aggregate_body, &format!("total.{counter} += s.{counter};")),
+                "aggregate_stats drops readiness counter {counter}"
+            );
+            assert!(
+                source_contains(
+                    delta_body,
+                    &format!(
+                        "delta.{counter} = current.{counter}.saturating_sub(previous.{counter});"
+                    )
+                ) || source_contains(
+                    delta_body,
+                    &format!(
+                        "delta.{counter} = current .{counter} .saturating_sub(previous.{counter});"
+                    )
+                ),
+                "stats_delta drops readiness counter {counter}"
+            );
+        }
+    }
+
+    #[test]
+    fn service_readiness_oracle_cli_contract_is_present() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let oracle = manifest_dir.join("tools/service_readiness_oracle.py");
+        let oracle_src = fs::read_to_string(&oracle)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", oracle.display()));
+
+        for required in [
+            "SERVICE_CLASSES",
+            "TARGET_STATUSES",
+            "OWNER_CLASSES",
+            "ACTIONS",
+            "cache_memcpy_regression_penalty",
+            "migration_or_preempt_penalty",
+            "CAKE_SERVICE_READINESS_TABLE_SIZE",
+        ] {
+            assert!(
+                oracle_src.contains(required),
+                "oracle source missing contract token {required}"
+            );
+        }
+
+        let help = std::process::Command::new("python3")
+            .arg(&oracle)
+            .arg("--help")
+            .output()
+            .expect("python3 should run readiness oracle --help");
+        assert!(
+            help.status.success(),
+            "oracle --help failed: {}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&help.stdout);
+        for required in ["--input", "--out", "--explain", "--emit-default-samples"] {
+            assert!(stdout.contains(required), "oracle help missing {required}");
+        }
+    }
+
+    #[test]
+    fn service_readiness_oracle_generates_bounded_action_table() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let oracle = manifest_dir.join("tools/service_readiness_oracle.py");
+        let tmp = std::env::temp_dir().join(format!(
+            "scx_cake_service_readiness_oracle_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create oracle temp dir");
+        let input = tmp.join("samples.jsonl");
+        let table = tmp.join("service_readiness_table.h");
+        let explain = tmp.join("service_readiness_oracle.md");
+
+        fs::write(
+            &input,
+            [
+                r#"{"service_class":"futex","target_status":"idle","owner_class":"default","fairness_due":false,"action":"idle_kick","outcome_bucket":"lt100us","weight":8}"#,
+                r#"{"service_class":"pipe","target_status":"remote_busy","owner_class":"default","fairness_due":false,"action":"preempt_kick","outcome_bucket":"lt100us","weight":6}"#,
+                r#"{"service_class":"cache","target_status":"busy","owner_class":"cache_hot","fairness_due":false,"action":"preempt_kick","outcome_bucket":"ge1ms","weight":10}"#,
+                r#"{"service_class":"bulk","target_status":"busy","owner_class":"bulk","fairness_due":true,"action":"preempt_kick","outcome_bucket":"ge1ms","weight":10}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write oracle samples");
+
+        let output = std::process::Command::new("python3")
+            .arg(&oracle)
+            .arg("--input")
+            .arg(&input)
+            .arg("--out")
+            .arg(&table)
+            .arg("--explain")
+            .arg(&explain)
+            .output()
+            .expect("run readiness oracle");
+        assert!(
+            output.status.success(),
+            "oracle generation failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let table_src = fs::read_to_string(&table).expect("read generated table");
+        assert!(table_src.contains("#define CAKE_SERVICE_READINESS_TABLE_SIZE 256"));
+        assert!(table_src.contains("cake_service_readiness_action_table[256]"));
+        assert!(table_src.contains("CAKE_READY_ACT_IDLE_KICK"));
+        assert!(table_src.contains("CAKE_READY_ACT_PREEMPT_KICK"));
+        assert!(table_src.contains("CAKE_READY_ACT_THROUGHPUT_LANE"));
+        assert_eq!(
+            table_src.matches("/* [").count(),
+            256,
+            "generated table must contain one commented entry per index"
+        );
+
+        let explanation = fs::read_to_string(&explain).expect("read oracle explanation");
+        assert!(explanation.contains("guardrail penalties"));
+        assert!(explanation.contains("cache_memcpy_regression_penalty"));
+        assert!(explanation.contains("action table stability"));
+
+        fs::remove_dir_all(&tmp).expect("remove oracle temp dir");
+    }
+
+    #[test]
+    fn bpf_service_readiness_release_gate_and_table_contract() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("manifest path should be scheds/rust/scx_cake");
+        let build_rs = fs::read_to_string(manifest_dir.join("build.rs")).expect("read build.rs");
+        let src = include_str!("bpf/cake.bpf.c");
+        let main = include_str!("main.rs");
+        let table = fs::read_to_string(manifest_dir.join("src/bpf/service_readiness_table.h"))
+            .expect("read generated service readiness table");
+
+        assert!(build_rs.contains("SCX_CAKE_SERVICE_READINESS"));
+        assert!(build_rs.contains("baked_bool(\"SCX_CAKE_SERVICE_READINESS\", false)"));
+        assert!(build_rs.contains("BAKED_SERVICE_READINESS_VALUE"));
+        assert!(build_rs.contains("-DCAKE_SERVICE_READINESS={}"));
+        assert!(main.contains("BAKED_SERVICE_READINESS"));
+
+        assert!(table.contains("#define CAKE_SERVICE_READINESS_TABLE_SIZE 256"));
+        assert!(table.contains("cake_service_readiness_action_table[256]"));
+        assert!(table.contains("cake_service_readiness_table_action(u8 idx)"));
+        assert_eq!(table.matches("/* [").count(), 256);
+
+        assert!(src.contains("#include \"service_readiness_table.h\""));
+        assert!(src.contains("#if CAKE_SERVICE_READINESS"));
+        assert!(src.contains("cake_service_readiness_index_for_wake("));
+        assert!(src.contains("cake_service_readiness_action_for_wake("));
+        assert!(src.contains("cake_service_readiness_apply_wake_action("));
+        assert!(source_contains(
+            src,
+            "#if CAKE_SERVICE_READINESS
+             if (cake_service_readiness_apply_wake_action"
+        ));
+
+        let readiness_body = source_body_between(
+            src,
+            "cake_service_readiness_apply_wake_action(",
+            "cake_service_avoids_busy_preempt",
+        )
+        .expect("service readiness release helper body should be present");
+        assert!(!readiness_body.contains("for ("));
+        assert!(!readiness_body.contains("bpf_map_lookup_elem"));
+        assert!(!readiness_body.contains("scx_bpf_dsq_nr_queued"));
+
+        assert!(
+            repo_root
+                .join("scheds/rust/scx_cake/docs/research/2026-06-22_service_readiness_oracle.md")
+                .exists(),
+            "oracle research note should exist for proof handoff"
+        );
+    }
+
+    #[test]
     fn bpf_wake_chain_locality_policy_is_identity_free() {
         let src = include_str!("bpf/cake.bpf.c");
         let intf = include_str!("bpf/intf.h");
@@ -1501,7 +1838,6 @@ mod tests {
         assert!(main.contains("topology::BAKED_RELEASE_LLC_PENDING"));
         assert!(main.contains("topology::BAKED_RELEASE_LOCAL_WAITER"));
         assert!(main.contains("topology::BAKED_RELEASE_DOMAIN_DRR"));
-
     }
 
     #[test]

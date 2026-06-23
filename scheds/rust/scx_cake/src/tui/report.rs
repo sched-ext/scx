@@ -3,7 +3,7 @@
 use super::*;
 use crate::telemetry_report::{
     AcceleratorSummary, CoverageItem, CoverageQuality, GraphSummary, HealthSummary,
-    LifecycleSummary, TelemetryReport,
+    LifecycleSummary, ServiceReadinessSummary, TelemetryReport,
 };
 
 pub(super) fn build_telemetry_report(stats: &cake_stats, app: &TuiApp) -> TelemetryReport {
@@ -184,7 +184,28 @@ pub(super) fn build_telemetry_report(stats: &cake_stats, app: &TuiApp) -> Teleme
         ),
         init_exit_count: stats.lifecycle_init_exit_count,
     })
+    .with_service_readiness(build_service_readiness_summary(stats))
     .with_accelerator(accelerator)
+}
+
+fn build_service_readiness_summary(stats: &cake_stats) -> ServiceReadinessSummary {
+    ServiceReadinessSummary {
+        eval: stats.nr_ready_eval,
+        urgent: stats.nr_ready_urgent,
+        promote: stats.nr_ready_promote,
+        defer: stats.nr_ready_defer,
+        defer_fairness: stats.nr_ready_defer_fairness,
+        defer_owner: stats.nr_ready_defer_owner,
+        defer_route: stats.nr_ready_defer_route,
+        defer_cache: stats.nr_ready_defer_cache,
+        preempt: stats.nr_ready_preempt,
+        idle_kick: stats.nr_ready_idle_kick,
+        local_only: stats.nr_ready_local_only,
+        promote_wait_lt100us: stats.nr_ready_promote_wait_lt100us,
+        promote_wait_ge1ms: stats.nr_ready_promote_wait_ge1ms,
+        defer_wait_lt100us: stats.nr_ready_defer_wait_lt100us,
+        defer_wait_ge1ms: stats.nr_ready_defer_wait_ge1ms,
+    }
 }
 
 fn report_conf_value(confidence: u64, shift: u32) -> u64 {

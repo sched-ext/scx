@@ -1350,6 +1350,21 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
             total.nr_enqueue_path_affine_preserve += s.nr_enqueue_path_affine_preserve;
             total.nr_enqueue_path_affine_requeue += s.nr_enqueue_path_affine_requeue;
             total.nr_enqueue_path_affine_dispatch += s.nr_enqueue_path_affine_dispatch;
+            total.nr_ready_eval += s.nr_ready_eval;
+            total.nr_ready_urgent += s.nr_ready_urgent;
+            total.nr_ready_promote += s.nr_ready_promote;
+            total.nr_ready_defer += s.nr_ready_defer;
+            total.nr_ready_defer_fairness += s.nr_ready_defer_fairness;
+            total.nr_ready_defer_owner += s.nr_ready_defer_owner;
+            total.nr_ready_defer_route += s.nr_ready_defer_route;
+            total.nr_ready_defer_cache += s.nr_ready_defer_cache;
+            total.nr_ready_preempt += s.nr_ready_preempt;
+            total.nr_ready_idle_kick += s.nr_ready_idle_kick;
+            total.nr_ready_local_only += s.nr_ready_local_only;
+            total.nr_ready_promote_wait_lt100us += s.nr_ready_promote_wait_lt100us;
+            total.nr_ready_promote_wait_ge1ms += s.nr_ready_promote_wait_ge1ms;
+            total.nr_ready_defer_wait_lt100us += s.nr_ready_defer_wait_lt100us;
+            total.nr_ready_defer_wait_ge1ms += s.nr_ready_defer_wait_ge1ms;
             total.nr_llc_vtime_wake_idle_direct += s.nr_llc_vtime_wake_idle_direct;
             total.nr_llc_vtime_wake_busy_shared += s.nr_llc_vtime_wake_busy_shared;
             total.nr_llc_vtime_nonwake_shared += s.nr_llc_vtime_nonwake_shared;
@@ -2227,6 +2242,49 @@ fn stats_delta(current: &cake_stats, previous: &cake_stats) -> cake_stats {
     delta.nr_enqueue_path_affine_dispatch = current
         .nr_enqueue_path_affine_dispatch
         .saturating_sub(previous.nr_enqueue_path_affine_dispatch);
+    delta.nr_ready_eval = current.nr_ready_eval.saturating_sub(previous.nr_ready_eval);
+    delta.nr_ready_urgent = current
+        .nr_ready_urgent
+        .saturating_sub(previous.nr_ready_urgent);
+    delta.nr_ready_promote = current
+        .nr_ready_promote
+        .saturating_sub(previous.nr_ready_promote);
+    delta.nr_ready_defer = current
+        .nr_ready_defer
+        .saturating_sub(previous.nr_ready_defer);
+    delta.nr_ready_defer_fairness = current
+        .nr_ready_defer_fairness
+        .saturating_sub(previous.nr_ready_defer_fairness);
+    delta.nr_ready_defer_owner = current
+        .nr_ready_defer_owner
+        .saturating_sub(previous.nr_ready_defer_owner);
+    delta.nr_ready_defer_route = current
+        .nr_ready_defer_route
+        .saturating_sub(previous.nr_ready_defer_route);
+    delta.nr_ready_defer_cache = current
+        .nr_ready_defer_cache
+        .saturating_sub(previous.nr_ready_defer_cache);
+    delta.nr_ready_preempt = current
+        .nr_ready_preempt
+        .saturating_sub(previous.nr_ready_preempt);
+    delta.nr_ready_idle_kick = current
+        .nr_ready_idle_kick
+        .saturating_sub(previous.nr_ready_idle_kick);
+    delta.nr_ready_local_only = current
+        .nr_ready_local_only
+        .saturating_sub(previous.nr_ready_local_only);
+    delta.nr_ready_promote_wait_lt100us = current
+        .nr_ready_promote_wait_lt100us
+        .saturating_sub(previous.nr_ready_promote_wait_lt100us);
+    delta.nr_ready_promote_wait_ge1ms = current
+        .nr_ready_promote_wait_ge1ms
+        .saturating_sub(previous.nr_ready_promote_wait_ge1ms);
+    delta.nr_ready_defer_wait_lt100us = current
+        .nr_ready_defer_wait_lt100us
+        .saturating_sub(previous.nr_ready_defer_wait_lt100us);
+    delta.nr_ready_defer_wait_ge1ms = current
+        .nr_ready_defer_wait_ge1ms
+        .saturating_sub(previous.nr_ready_defer_wait_ge1ms);
     delta.nr_llc_vtime_wake_idle_direct = current
         .nr_llc_vtime_wake_idle_direct
         .saturating_sub(previous.nr_llc_vtime_wake_idle_direct);

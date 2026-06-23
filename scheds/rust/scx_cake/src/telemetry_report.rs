@@ -162,6 +162,25 @@ pub struct AcceleratorSummary {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ServiceReadinessSummary {
+    pub eval: u64,
+    pub urgent: u64,
+    pub promote: u64,
+    pub defer: u64,
+    pub defer_fairness: u64,
+    pub defer_owner: u64,
+    pub defer_route: u64,
+    pub defer_cache: u64,
+    pub preempt: u64,
+    pub idle_kick: u64,
+    pub local_only: u64,
+    pub promote_wait_lt100us: u64,
+    pub promote_wait_ge1ms: u64,
+    pub defer_wait_lt100us: u64,
+    pub defer_wait_ge1ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct TelemetryReport {
     pub schema_version: u32,
     pub text_version: u32,
@@ -170,6 +189,7 @@ pub struct TelemetryReport {
     pub graph: GraphSummary,
     pub lifecycle: LifecycleSummary,
     pub accelerator: AcceleratorSummary,
+    pub service_readiness: ServiceReadinessSummary,
 }
 
 impl TelemetryReport {
@@ -182,6 +202,7 @@ impl TelemetryReport {
             graph,
             lifecycle: LifecycleSummary::default(),
             accelerator: AcceleratorSummary::default(),
+            service_readiness: ServiceReadinessSummary::default(),
         }
     }
 
@@ -192,6 +213,11 @@ impl TelemetryReport {
 
     pub fn with_accelerator(mut self, accelerator: AcceleratorSummary) -> Self {
         self.accelerator = accelerator;
+        self
+    }
+
+    pub fn with_service_readiness(mut self, service_readiness: ServiceReadinessSummary) -> Self {
+        self.service_readiness = service_readiness;
         self
     }
 
@@ -243,6 +269,7 @@ impl TelemetryReport {
             health: &'a HealthSummary,
             lifecycle: &'a LifecycleSummary,
             accelerator: &'a AcceleratorSummary,
+            service_readiness: &'a ServiceReadinessSummary,
             graph: &'a GraphSummary,
             coverage: &'a [CoverageItem],
         }
@@ -255,6 +282,7 @@ impl TelemetryReport {
             health: &self.health,
             lifecycle: &self.lifecycle,
             accelerator: &self.accelerator,
+            service_readiness: &self.service_readiness,
             graph: &self.graph,
             coverage: &self.coverage,
         };

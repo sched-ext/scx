@@ -540,6 +540,27 @@ enum cake_kick_kind {
 	CAKE_KICK_KIND_MAX     = 3,
 };
 
+enum cake_ready_bit {
+	CAKE_READY_URGENT_SERVICE	= 1U << 0,
+	CAKE_READY_FAIRNESS_OK		= 1U << 1,
+	CAKE_READY_OWNER_PREEMPT_OK	= 1U << 2,
+	CAKE_READY_ROUTE_KNOWN		= 1U << 3,
+	CAKE_READY_CACHE_DAMAGE_OK	= 1U << 4,
+	CAKE_READY_KICK_BUYS_SERVICE	= 1U << 5,
+};
+
+enum cake_ready_action {
+	CAKE_READY_ACT_NONE		= 0,
+	CAKE_READY_ACT_LOCAL_INSERT	= 1,
+	CAKE_READY_ACT_IDLE_KICK	= 2,
+	CAKE_READY_ACT_PREEMPT_KICK	= 3,
+	CAKE_READY_ACT_KEEP_OWNER	= 4,
+	CAKE_READY_ACT_THROUGHPUT_LANE	= 5,
+	CAKE_READY_ACT_SHARED_ESCAPE	= 6,
+	CAKE_READY_ACT_CORE_STEAL_PROBE	= 7,
+	CAKE_READY_ACT_MAX		= 8,
+};
+
 enum cake_wake_class {
 	CAKE_WAKE_CLASS_NONE	= 0,
 	CAKE_WAKE_CLASS_NORMAL	= 1,
@@ -1017,7 +1038,8 @@ struct cake_task_ctx {
 
 		/* Wake chain tracking */
 		u16 waker_cpu; /* CPU the waker was running on */
-		u16 _pad_waker; /* Align to 4B */
+		u8 pending_ready_bits; /* HELIOS-style debug readiness bitset */
+		u8 pending_ready_action; /* enum cake_ready_action at enqueue */
 		u32 waker_tgid; /* TGID of the waker (process group) */
 		u64 wake_reason_wait_ns[CAKE_WAKE_REASON_MAX -
 					1]; /* Wait by wake path */
@@ -1487,6 +1509,21 @@ struct cake_stats {
 	u64 nr_idle_hint_clear_skips; /* idle_hint already 0 */
 	u64 nr_wake_kick_idle; /* Wake-driven kicks that used SCX_KICK_IDLE */
 	u64 nr_wake_kick_preempt; /* Wake-driven kicks that used SCX_KICK_PREEMPT */
+	u64 nr_ready_eval; /* Debug readiness classifications at wake enqueue */
+	u64 nr_ready_urgent; /* Readiness samples with urgent-service bit set */
+	u64 nr_ready_promote; /* Readiness action would promote/run wakee */
+	u64 nr_ready_defer; /* Readiness action would keep owner / defer wakee */
+	u64 nr_ready_defer_fairness; /* Deferred because fairness/debt bit failed */
+	u64 nr_ready_defer_owner; /* Deferred because owner-preempt bit failed */
+	u64 nr_ready_defer_route; /* Deferred because route/custody was unknown */
+	u64 nr_ready_defer_cache; /* Deferred because cache-damage bit failed */
+	u64 nr_ready_preempt; /* Readiness action selected preempt kick */
+	u64 nr_ready_idle_kick; /* Readiness action selected idle kick */
+	u64 nr_ready_local_only; /* Readiness action selected local insert/no kick */
+	u64 nr_ready_promote_wait_lt100us; /* Promoted wake observed under 100us */
+	u64 nr_ready_promote_wait_ge1ms; /* Promoted wake observed at/above 1ms */
+	u64 nr_ready_defer_wait_lt100us; /* Deferred wake observed under 100us */
+	u64 nr_ready_defer_wait_ge1ms; /* Deferred wake observed at/above 1ms */
 	u64 wake_class_sample_count
 		[CAKE_WAKE_CLASS_MAX]; /* Shadow wake class samples */
 	u64 wake_class_reason_count
