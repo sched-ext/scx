@@ -95,6 +95,7 @@ struct task_ctx {
 };
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
+static inline struct cpu_ctx *lookup_cpu_ctx(int cpu);
 
 /*
  * Smoothed average of a task's per-wake runtime (EWMA, alpha=1/8).
