@@ -7446,6 +7446,19 @@ cake_insert_llc_vtime_signal_local(struct task_struct *p, u64 enq_flags,
 			CAKE_GAME_DIAG_INC(target_cpu, wake_kick_preempt);
 		else
 			CAKE_GAME_DIAG_INC(target_cpu, wake_kick_idle);
+
+		/* Local non-preempt wake: inserting into our own CPU's builtin
+		 * local DSQ already auto-reschedules on enqueue return (kernel
+		 * ext.c direct_dispatch -> local_dsq_post_enq).  A self
+		 * SCX_KICK_IDLE is a guaranteed no-op here (the enqueueing CPU is
+		 * never idle), yet still costs an irq_work + self-IPI: we hold
+		 * this rq's lock, so the kernel's own skip-if-busy trylock
+		 * (ext.c can_skip_idle_kick) fails and the kick is queued anyway.
+		 * Drop it.  PREEMPT still kicks to force the resched.  (A. Righi.) */
+		if (kick == SCX_KICK_IDLE &&
+		    (bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1)) ==
+			    target_cpu)
+			return;
 		scx_bpf_kick_cpu(target_cpu, kick);
 	}
 #else
