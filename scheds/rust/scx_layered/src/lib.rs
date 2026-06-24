@@ -94,11 +94,11 @@ pub fn round_targets_to_alloc_units(
         .iter()
         .map(|&(target, min)| {
             // Round target up to next alloc_unit multiple.
-            let aligned = (target + alloc_unit - 1) / alloc_unit * alloc_unit;
+            let aligned = target.div_ceil(alloc_unit) * alloc_unit;
             // Cap at total_cpus.
             let aligned = aligned.min(total_cpus);
             // Round min up similarly.
-            let min_aligned = (min + alloc_unit - 1) / alloc_unit * alloc_unit;
+            let min_aligned = min.div_ceil(alloc_unit) * alloc_unit;
             let min_aligned = min_aligned.min(total_cpus);
             (aligned, min_aligned)
         })
@@ -191,12 +191,15 @@ impl CpuPool {
 
     fn update_fallback_cpus(&mut self) {
         for node in self.topo.nodes.values() {
-            let fb = self
+            let Some(fb) = self
                 .available_cpus
                 .and(&node.span)
                 .iter()
                 .next()
-                .unwrap_or_else(|| node.span.iter().next().unwrap());
+                .or_else(|| node.span.iter().next())
+            else {
+                continue;
+            };
             self.fallback_cpus.insert(node.id, fb);
         }
     }
@@ -237,7 +240,7 @@ impl CpuPool {
         for alloc_core in core_alloc_order {
             // Constrain CPUs by NUMA node or LLC. Since allowed_cpus is NUMA/LLC aligned,
             // this operation is guaranteed to produce either the core mask or an empty mask.
-            let core_cpus = &self.topo.all_cores[alloc_core].span.and(&allowed_cpus);
+            let core_cpus = &self.topo.all_cores[alloc_core].span.and(allowed_cpus);
             if core_cpus.is_empty() {
                 continue;
             }
@@ -286,7 +289,7 @@ impl CpuPool {
             bail!("Some of CPUs {} are already free", cpus_to_free);
         }
 
-        self.available_cpus = self.available_cpus.or(&cpus_to_free);
+        self.available_cpus = self.available_cpus.or(cpus_to_free);
         self.update_fallback_cpus();
 
         self.check_partial()?;
@@ -295,7 +298,7 @@ impl CpuPool {
     }
 
     pub fn mark_allocated(&mut self, cpus_to_alloc: &Cpumask) -> Result<()> {
-        if *&cpus_to_alloc.and(&self.available_cpus.not()).weight() > 0 {
+        if cpus_to_alloc.and(&self.available_cpus.not()).weight() > 0 {
             bail!(
                 "Some of CPUs {} are not available to allocate",
                 cpus_to_alloc
@@ -381,7 +384,8 @@ impl CpuPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scx_utils::testutils::{make_test_topo, mask_from_bits};
+    use scx_utils::testutils::{make_het_test_topo, make_test_topo, mask_from_bits};
+    use scx_utils::Llc;
 
     // 1N: 1 node, 2 LLCs, 4 cores/LLC, 2 HTs/core = 16 CPUs
     //   LLC0: cores 0-3 (cpus 0-7), LLC1: cores 4-7 (cpus 8-15)
@@ -2404,13 +2408,27 @@ mod tests {
     // =========================================================================
 
     /// Mirrors the target computation from Scheduler::compute_target_llcs.
-    fn compute_target_llcs(target: usize, topo: &Topology) -> (usize, usize) {
-        let cores_per_llc = topo.all_cores.len() / topo.all_llcs.len();
-        let cpus_per_core = topo.all_cores.first_key_value().unwrap().1.cpus.len();
-        let cpus_per_llc = cores_per_llc * cpus_per_core;
-        let full = target / cpus_per_llc;
-        let extra = target % cpus_per_llc;
-        (full, extra.div_ceil(cpus_per_core))
+    fn compute_target_llcs(target: usize, node_llcs: &BTreeMap<usize, Arc<Llc>>) -> (usize, usize) {
+        let mut remaining = target;
+        let mut full = 0;
+        for llc in node_llcs.values() {
+            let cpus_in_llc = llc.span.weight();
+            if remaining >= cpus_in_llc {
+                full += 1;
+                remaining -= cpus_in_llc;
+            } else {
+                let mut extra = 0;
+                for (_, core) in llc.cores.iter() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    extra += 1;
+                    remaining = remaining.saturating_sub(core.cpus.len());
+                }
+                return (full, extra);
+            }
+        }
+        (full, 0)
     }
 
     // --- StickyDynamic per-node test infrastructure ---
@@ -2479,7 +2497,11 @@ mod tests {
 
             for n in 0..nr_nodes {
                 let assigned_on_n = layer.assigned_llcs[n].len();
-                let target_full_n = compute_target_llcs(alloc.node_target(n) * au, topo).0;
+                let target_full_n = compute_target_llcs(
+                    alloc.node_target(n) * au,
+                    &topo.nodes.get(&n).unwrap().llcs,
+                )
+                .0;
                 let mut to_free = assigned_on_n.saturating_sub(target_full_n);
 
                 while to_free > 0 {
@@ -2500,7 +2522,11 @@ mod tests {
 
             for n in 0..nr_nodes {
                 let cur_on_n = layer.assigned_llcs[n].len();
-                let target_full_n = compute_target_llcs(alloc.node_target(n) * au, topo).0;
+                let target_full_n = compute_target_llcs(
+                    alloc.node_target(n) * au,
+                    &topo.nodes.get(&n).unwrap().llcs,
+                )
+                .0;
                 let mut to_alloc = target_full_n.saturating_sub(cur_on_n);
 
                 while to_alloc > 0 {
@@ -2515,22 +2541,24 @@ mod tests {
         }
 
         // Phase 3 — Spillover per-node: consume extra cores from free LLCs.
-        let cores_per_llc = topo.all_cores.len() / topo.all_llcs.len();
-        let cpus_per_core = topo.all_cores.first_key_value().unwrap().1.cpus.len();
-        let cpus_per_llc = cores_per_llc * cpus_per_core;
-
         for &(idx, _) in ascending.iter() {
             let alloc = &layer_allocs[idx];
 
             for n in 0..nr_nodes {
-                let mut extra = compute_target_llcs(alloc.node_target(n) * au, topo).1;
+                let mut extra = compute_target_llcs(
+                    alloc.node_target(n) * au,
+                    &topo.nodes.get(&n).unwrap().llcs,
+                )
+                .1;
 
                 if let Some(node_llcs) = pool.free_llcs.get_mut(&n) {
                     for entry in node_llcs.iter_mut() {
                         if extra == 0 {
                             break;
                         }
-                        let avail = cpus_per_llc - entry.1;
+                        let llc_id = entry.0;
+                        let llc = topo.all_llcs.get(&llc_id).unwrap();
+                        let avail = llc.cores.len() - entry.1;
                         let used = extra.min(avail);
                         entry.1 += used;
                         extra -= used;
@@ -2574,38 +2602,75 @@ mod tests {
     #[test]
     fn test_compute_target_llcs_1n() {
         let (topo, _total) = topo_1n();
+        let node = topo.nodes.get(&0).unwrap();
         // 1N: 8 cores, 2 LLCs → 4 cores/LLC, 2 HTs/core → 8 cpus/LLC
-        assert_eq!(compute_target_llcs(0, &topo), (0, 0));
-        assert_eq!(compute_target_llcs(1, &topo), (0, 1)); // 1 cpu = 0 full + 1 extra core
-        assert_eq!(compute_target_llcs(2, &topo), (0, 1)); // 2 cpus = 1 core
-        assert_eq!(compute_target_llcs(3, &topo), (0, 2)); // 3 cpus = 2 cores (ceil)
-        assert_eq!(compute_target_llcs(8, &topo), (1, 0)); // exactly 1 LLC
-        assert_eq!(compute_target_llcs(9, &topo), (1, 1)); // 1 LLC + 1 extra core
-        assert_eq!(compute_target_llcs(16, &topo), (2, 0)); // exactly 2 LLCs
+        assert_eq!(compute_target_llcs(0, &node.llcs), (0, 0));
+        assert_eq!(compute_target_llcs(1, &node.llcs), (0, 1)); // 1 cpu = 0 full + 1 extra core
+        assert_eq!(compute_target_llcs(2, &node.llcs), (0, 1)); // 2 cpus = 1 core
+        assert_eq!(compute_target_llcs(3, &node.llcs), (0, 2)); // 3 cpus = 2 cores (ceil)
+        assert_eq!(compute_target_llcs(8, &node.llcs), (1, 0)); // exactly 1 LLC
+        assert_eq!(compute_target_llcs(9, &node.llcs), (1, 1)); // 1 LLC + 1 extra core
+        assert_eq!(compute_target_llcs(16, &node.llcs), (2, 0)); // exactly 2 LLCs
     }
 
     #[test]
     fn test_compute_target_llcs_2n() {
         let (topo, _total) = topo_2n();
         // 2N: 16 cores, 4 LLCs → 4 cores/LLC, 2 HTs/core → 8 cpus/LLC
-        assert_eq!(compute_target_llcs(0, &topo), (0, 0));
-        assert_eq!(compute_target_llcs(8, &topo), (1, 0));
-        assert_eq!(compute_target_llcs(16, &topo), (2, 0));
-        assert_eq!(compute_target_llcs(24, &topo), (3, 0));
-        assert_eq!(compute_target_llcs(32, &topo), (4, 0));
-        assert_eq!(compute_target_llcs(10, &topo), (1, 1)); // 8+2 = 1 LLC + 1 core
-        assert_eq!(compute_target_llcs(15, &topo), (1, 4)); // 8+7 = 1 LLC + 4 cores (ceil(7/2))
+        assert_eq!(compute_target_llcs(0, &topo.all_llcs), (0, 0));
+        assert_eq!(compute_target_llcs(8, &topo.all_llcs), (1, 0));
+        assert_eq!(compute_target_llcs(16, &topo.all_llcs), (2, 0));
+        assert_eq!(compute_target_llcs(24, &topo.all_llcs), (3, 0));
+        assert_eq!(compute_target_llcs(32, &topo.all_llcs), (4, 0));
+        assert_eq!(compute_target_llcs(10, &topo.all_llcs), (1, 1)); // 8+2 = 1 LLC + 1 core
+        assert_eq!(compute_target_llcs(15, &topo.all_llcs), (1, 4)); // 8+7 = 1 LLC + 4 cores (ceil(7/2))
     }
 
     #[test]
     fn test_compute_target_llcs_4n() {
         let (topo, _total) = topo_4n();
         // 4N: 16 cores, 8 LLCs → 2 cores/LLC, 2 HTs/core → 4 cpus/LLC
-        assert_eq!(compute_target_llcs(0, &topo), (0, 0));
-        assert_eq!(compute_target_llcs(4, &topo), (1, 0)); // exactly 1 LLC
-        assert_eq!(compute_target_llcs(5, &topo), (1, 1)); // 1 LLC + 1 extra core
-        assert_eq!(compute_target_llcs(8, &topo), (2, 0)); // exactly 2 LLCs
-        assert_eq!(compute_target_llcs(32, &topo), (8, 0)); // all 8 LLCs
+        assert_eq!(compute_target_llcs(0, &topo.all_llcs), (0, 0));
+        assert_eq!(compute_target_llcs(4, &topo.all_llcs), (1, 0)); // exactly 1 LLC
+        assert_eq!(compute_target_llcs(5, &topo.all_llcs), (1, 1)); // 1 LLC + 1 extra core
+        assert_eq!(compute_target_llcs(8, &topo.all_llcs), (2, 0)); // exactly 2 LLCs
+        assert_eq!(compute_target_llcs(32, &topo.all_llcs), (8, 0)); // all 8 LLCs
+    }
+
+    #[test]
+    fn test_compute_target_llcs_het() {
+        // LLC0: 2 cores × 2 HTs = 4 CPUs
+        // LLC1: 4 cores × 2 HTs = 8 CPUs
+        // Total: 12 CPUs across 2 unequal LLCs
+        let (topo, _total) = make_het_test_topo(&[&[2, 4]], 2);
+        let node = topo.nodes.get(&0).unwrap();
+        assert_eq!(compute_target_llcs(0, &node.llcs), (0, 0));
+        assert_eq!(compute_target_llcs(4, &node.llcs), (1, 0)); // exactly LLC0
+        assert_eq!(compute_target_llcs(5, &node.llcs), (1, 1)); // LLC0 + 1 core from LLC1
+        assert_eq!(compute_target_llcs(8, &node.llcs), (1, 2)); // LLC0 + 2 cores from LLC1
+        assert_eq!(compute_target_llcs(12, &node.llcs), (2, 0)); // both LLCs full
+    }
+
+    #[test]
+    fn test_compute_target_llcs_het_multi_node() {
+        // Node 0: LLC0=2cores, LLC1=2cores → 4 CPUs per LLC, 8 total
+        // Node 1: LLC2=4cores, LLC3=4cores → 8 CPUs per LLC, 16 total
+        // Total: 24 CPUs across 2 nodes with different LLC sizes
+        let (topo, _total) = make_het_test_topo(&[&[2, 2], &[4, 4]], 2);
+        let node0 = topo.nodes.get(&0).unwrap();
+        let node1 = topo.nodes.get(&1).unwrap();
+
+        // node 0: each LLC has 4 CPUs, 2 cores
+        assert_eq!(compute_target_llcs(0, &node0.llcs), (0, 0));
+        assert_eq!(compute_target_llcs(4, &node0.llcs), (1, 0)); // exactly LLC0
+        assert_eq!(compute_target_llcs(5, &node0.llcs), (1, 1)); // LLC0 + 1 core from LLC1
+        assert_eq!(compute_target_llcs(8, &node0.llcs), (2, 0)); // both LLCs full
+
+        // node 1: each LLC has 8 CPUs, 4 cores — different size than node 0
+        assert_eq!(compute_target_llcs(0, &node1.llcs), (0, 0));
+        assert_eq!(compute_target_llcs(8, &node1.llcs), (1, 0)); // exactly LLC2
+        assert_eq!(compute_target_llcs(10, &node1.llcs), (1, 1)); // LLC2 + 1 core
+        assert_eq!(compute_target_llcs(16, &node1.llcs), (2, 0)); // both LLCs full
     }
 
     // --- StickyDynamic per-node lifecycle: 1N ---
@@ -3068,7 +3133,7 @@ mod tests {
             let allocs = vec![make_sd_alloc(&[0, 0, 0, 0], unpinned)];
             simulate_sd_recompute(&mut pool, &mut layers, &allocs, au, &topo);
             let total_cpus: usize = unpinned.iter().sum::<usize>() * au;
-            let expected_llcs = compute_target_llcs(total_cpus, &topo).0;
+            let expected_llcs = compute_target_llcs(total_cpus, &topo.all_llcs).0;
             assert_eq!(
                 layers[0].total_llcs(),
                 expected_llcs,
@@ -3076,7 +3141,8 @@ mod tests {
                 i
             );
             for n in 0..4 {
-                let expected_n = compute_target_llcs(unpinned[n] * au, &topo).0;
+                let expected_n =
+                    compute_target_llcs(unpinned[n] * au, &topo.nodes.get(&n).unwrap().llcs).0;
                 assert_eq!(
                     layers[0].llcs_on_node(n),
                     expected_n,
@@ -3093,7 +3159,8 @@ mod tests {
             let allocs = vec![make_sd_alloc(&[0, 0, 0, 0], unpinned)];
             simulate_sd_recompute(&mut pool, &mut layers, &allocs, au, &topo);
             for n in 0..4 {
-                let expected_n = compute_target_llcs(unpinned[n] * au, &topo).0;
+                let expected_n =
+                    compute_target_llcs(unpinned[n] * au, &topo.nodes.get(&n).unwrap().llcs).0;
                 assert_eq!(
                     layers[0].llcs_on_node(n),
                     expected_n,

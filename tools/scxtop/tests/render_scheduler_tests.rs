@@ -5,9 +5,10 @@
 
 use num_format::SystemLocale;
 use ratatui::backend::TestBackend;
+use ratatui::widgets::TableState;
 use ratatui::Terminal;
-use scxtop::render::scheduler::{SchedulerStatsParams, SchedulerViewParams};
-use scxtop::{render::SchedulerRenderer, AppTheme, EventData, ViewState};
+use scxtop::render::scheduler::{DsqSummaryParams, ProcessLatencyParams, SchedulerViewParams};
+use scxtop::{render::SchedulerRenderer, AppTheme, EventData, ProcData, ViewState};
 use std::collections::BTreeMap;
 
 // Helper function to create test DSQ data
@@ -221,31 +222,72 @@ fn test_render_scheduler_view_with_localization() {
 }
 
 #[test]
-fn test_render_scheduler_stats() {
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+fn test_render_dsq_summary_table() {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let dsq_data = create_test_dsq_data();
     let theme = AppTheme::Default;
 
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let params = SchedulerStatsParams {
+            let params = DsqSummaryParams {
                 scheduler_name: "scx_rustland",
-                sched_stats_raw: "dispatch_count: 12345\nlocal: 98%\nglobal: 2%",
-                tick_rate_ms: 1000,
-                dispatch_keep_last: 100,
-                select_cpu_fallback: 50,
+                dsq_data: &dsq_data,
+                sample_rate: 1000,
+                dsq_filter_text: "",
+                filtering: false,
+                filter_input: "",
                 theme: &theme,
             };
-            let result = SchedulerRenderer::render_scheduler_stats(frame, area, &params);
+            let result = SchedulerRenderer::render_dsq_summary_table(
+                frame,
+                area,
+                &params,
+                &mut TableState::default(),
+            );
 
-            assert!(result.is_ok(), "render_scheduler_stats should succeed");
+            assert!(result.is_ok(), "render_dsq_summary_table should succeed");
         })
         .unwrap();
 }
 
 #[test]
-fn test_render_scheduler_stats_different_themes() {
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+fn test_render_dsq_summary_table_empty() {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let dsq_data = BTreeMap::new();
+    let theme = AppTheme::Default;
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let params = DsqSummaryParams {
+                scheduler_name: "scx_rustland",
+                dsq_data: &dsq_data,
+                sample_rate: 1000,
+                dsq_filter_text: "",
+                filtering: false,
+                filter_input: "",
+                theme: &theme,
+            };
+            let result = SchedulerRenderer::render_dsq_summary_table(
+                frame,
+                area,
+                &params,
+                &mut TableState::default(),
+            );
+
+            assert!(
+                result.is_ok(),
+                "render_dsq_summary_table with empty data should succeed"
+            );
+        })
+        .unwrap();
+}
+
+#[test]
+fn test_render_dsq_summary_table_different_themes() {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let dsq_data = create_test_dsq_data();
 
     for theme in [
         AppTheme::Default,
@@ -255,24 +297,61 @@ fn test_render_scheduler_stats_different_themes() {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let params = SchedulerStatsParams {
+                let params = DsqSummaryParams {
                     scheduler_name: "scx_rustland",
-                    sched_stats_raw: "test stats",
-                    tick_rate_ms: 1000,
-                    dispatch_keep_last: 100,
-                    select_cpu_fallback: 50,
+                    dsq_data: &dsq_data,
+                    sample_rate: 1000,
+                    dsq_filter_text: "",
+                    filtering: false,
+                    filter_input: "",
                     theme: &theme,
                 };
-                let result = SchedulerRenderer::render_scheduler_stats(frame, area, &params);
+                let result = SchedulerRenderer::render_dsq_summary_table(
+                    frame,
+                    area,
+                    &params,
+                    &mut TableState::default(),
+                );
 
                 assert!(
                     result.is_ok(),
-                    "render_scheduler_stats with {:?} theme should succeed",
+                    "render_dsq_summary_table with {:?} theme should succeed",
                     theme
                 );
             })
             .unwrap();
     }
+}
+
+#[test]
+fn test_render_process_latency_table() {
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    let theme = AppTheme::Default;
+
+    // Use empty proc_data since we can't easily create ProcData without /proc
+    let proc_data: BTreeMap<i32, ProcData> = BTreeMap::new();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let params = ProcessLatencyParams {
+                proc_data: &proc_data,
+                dsq_filter_text: "",
+                theme: &theme,
+            };
+            let result = SchedulerRenderer::render_process_latency_table(
+                frame,
+                area,
+                &params,
+                &mut TableState::default(),
+            );
+
+            assert!(
+                result.is_ok(),
+                "render_process_latency_table should succeed"
+            );
+        })
+        .unwrap();
 }
 
 #[test]

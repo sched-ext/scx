@@ -445,11 +445,9 @@ impl RelationshipStats {
     }
 
     pub fn avg_latency_us(&self) -> u64 {
-        if self.sample_count > 0 {
-            self.total_latency_us / self.sample_count
-        } else {
-            0
-        }
+        self.total_latency_us
+            .checked_div(self.sample_count)
+            .unwrap_or(0)
     }
 
     pub fn criticality_score(&self) -> u64 {

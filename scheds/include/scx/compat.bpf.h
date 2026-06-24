@@ -92,15 +92,20 @@ int bpf_cpumask_populate(struct cpumask *dst, void *src, size_t src__sz) __ksym 
 
 /*
  * v6.19: Introduce lockless peek API for user DSQs.
+ * v7.1:  Resolve the stale pointer issue of the lockless peek API.
  *
- * Preserve the following macro until v6.21.
+ * The kfunc exists on earlier kernels but its lockless implementation could
+ * return stale task pointers. Require kernel version >= 7.1.0 before calling
+ * it; otherwise fall through to the bpf_iter_scx_dsq fallback below.
+ *
  */
 static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
 {
 	struct task_struct *p = NULL;
 	struct bpf_iter_scx_dsq it;
 
-	if (bpf_ksym_exists(scx_bpf_dsq_peek))
+	if (bpf_ksym_exists(scx_bpf_dsq_peek) &&
+	    LINUX_KERNEL_VERSION >= KERNEL_VERSION(7, 1, 0))
 		return scx_bpf_dsq_peek(dsq_id);
 	if (!bpf_iter_scx_dsq_new(&it, dsq_id, 0))
 		p = bpf_iter_scx_dsq_next(&it);
@@ -128,7 +133,7 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 	 * We should temporarily suspend the macro expansion of
 	 * 'SCX_ENQ_CPU_SELECTED'. This avoids 'SCX_ENQ_CPU_SELECTED' being
 	 * rewritten to '__SCX_ENQ_CPU_SELECTED' when 'SCX_ENQ_CPU_SELECTED'
-	 * is defined in 'scripts/gen_enums.py'.
+	 * is defined as a relocatable enum in enums.autogen.bpf.h.
 	 */
 #pragma push_macro("SCX_ENQ_CPU_SELECTED")
 #undef SCX_ENQ_CPU_SELECTED

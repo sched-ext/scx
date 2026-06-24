@@ -1,4 +1,3 @@
-#include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
 #include <lib/sdt_task.h>
 
@@ -69,6 +68,15 @@ int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __
 		return -EINVAL;
 
 	/*
+	 * The ->atq field is not protected by the ATQ
+	 * lock, since multiple callers may be trying to
+	 * add the same task to differnt ATQs. Use atomic
+	 * cmpxchg so that races have a single winner.
+	 */
+	if (cmpxchg(&taskc->atq, 0, atq))
+		return -EALREADY;
+
+	/*
 	 * For FIFO, "Leak" the seq on error. We only want
 	 * sequence numbers to be monotonic, not
 	 * consecutive.
@@ -77,10 +85,11 @@ int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __
 	node->value = (u64)taskc;
 
 	ret = rb_insert_node(atq->tree, node);
-	if (ret)
+	if (ret) {
+		taskc->atq = NULL;
 		return ret;
+	}
 
-	taskc->atq = atq;
 	atq->size += 1;
 
 	return 0;
@@ -97,13 +106,13 @@ int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena
 {
 	int ret;
 
-	ret = arena_spin_lock(&atq->lock);
+	ret = scx_atq_lock(atq);
 	if (ret)
 		return ret;
 
 	ret = scx_atq_insert_vtime_unlocked(atq, taskc, vtime);
 
-	arena_spin_unlock(&atq->lock);
+	scx_atq_unlock(atq);
 
 	return ret;
 }
@@ -125,14 +134,24 @@ int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
 	int ret;
 
-       /* Are we in this ATQ in the first place? */
+       /*
+	* Are we in this ATQ in the first place?
+	*
+	* Note: Unlike in the insert path, the ATQ
+	* lock is valid enough protection here.
+	*/
        if (taskc->atq != atq)
 	       return -EINVAL;
 
        ret = rb_remove_node(atq->tree, &taskc->node);
+       if (ret)
+	       return ret;
+
        taskc->atq = NULL;
 
-       return ret;
+       atq->size -= 1;
+
+       return 0;
 }
 
 __hidden
@@ -140,13 +159,13 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
        int ret;
 
-       ret = arena_spin_lock(&atq->lock);
+       ret = scx_atq_lock(atq);
        if (ret)
                return ret;
 
        ret = scx_atq_remove_unlocked(atq, taskc);
 
-       arena_spin_unlock(&atq->lock);
+       scx_atq_unlock(atq);
 
        return ret;
 }
@@ -158,29 +177,30 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	u64 vtime, taskc_ptr;
 	int ret;
 
-	ret = arena_spin_lock(&atq->lock);
+	ret = scx_atq_lock(atq);
 	if (ret)
 		return (u64)NULL;
 
 	if (!scx_atq_nr_queued(atq)) {
-		arena_spin_unlock(&atq->lock);
+		scx_atq_unlock(atq);
 		return (u64)NULL;
 	}
 
 	ret = rb_pop(atq->tree, &vtime, &taskc_ptr);
-	if (!ret)
-		atq->size -= 1;
-
-	taskc = (scx_task_common *)taskc_ptr;
-	taskc->atq = NULL;
-
-	arena_spin_unlock(&atq->lock);
-
 	if (ret) {
+		scx_atq_unlock(atq);
+
 		if (ret != -ENOENT)
 			bpf_printk("%s: error %d", __func__, ret);
 		return (u64)NULL;
 	}
+
+	atq->size -= 1;
+
+	taskc = (scx_task_common *)taskc_ptr;
+	taskc->atq = NULL;
+
+	scx_atq_unlock(atq);
 
 	return taskc_ptr;
 }
@@ -191,18 +211,18 @@ u64 scx_atq_peek(scx_atq_t *atq)
 	u64 vtime, taskc_ptr;
 	int ret;
 
-	ret = arena_spin_lock(&atq->lock);
+	ret = scx_atq_lock(atq);
 	if (ret)
 		return (u64)NULL;
 
 	if (!scx_atq_nr_queued(atq)) {
-		arena_spin_unlock(&atq->lock);
+		scx_atq_unlock(atq);
 		return (u64)NULL;
 	}
 
 	ret = rb_least(atq->tree, &vtime, &taskc_ptr);
 
-	arena_spin_unlock(&atq->lock);
+	scx_atq_unlock(atq);
 
 	return taskc_ptr;
 }

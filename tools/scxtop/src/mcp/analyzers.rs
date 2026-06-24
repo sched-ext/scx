@@ -517,7 +517,7 @@ impl MigrationAnalyzer {
         }
 
         let mut process_patterns: Vec<_> = per_process.into_values().collect();
-        process_patterns.sort_by(|a, b| b.migration_count.cmp(&a.migration_count));
+        process_patterns.sort_by_key(|b| std::cmp::Reverse(b.migration_count));
         process_patterns.truncate(20);
 
         // CPU pair analysis
@@ -535,7 +535,7 @@ impl MigrationAnalyzer {
             })
             .collect();
 
-        cpu_pair_stats.sort_by(|a, b| b.count.cmp(&a.count));
+        cpu_pair_stats.sort_by_key(|b| std::cmp::Reverse(b.count));
         cpu_pair_stats.truncate(20);
 
         MigrationAnalysis {

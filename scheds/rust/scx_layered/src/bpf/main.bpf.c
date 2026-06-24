@@ -1437,6 +1437,23 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (!idle_smtmask)
 		return -1;
 
+	/*
+	 * Grouped layers may opt to act like Confined for idle selection
+	 * until the layer becomes saturated (check_no_idle is set) or
+	 * the system is fully allocated (no free CPUs to grow into), at
+	 * which point they fall back to searching unprotected CPUs.
+	 *
+	 * check_no_idle alone is too restrictive: CPUs degraded by
+	 * softirq/IRQ overhead still appear briefly idle between bursts,
+	 * keeping check_no_idle cleared even though the CPUs are
+	 * effectively saturated.  fully_allocated lets userspace override
+	 * when there's no room to grow.
+	 */
+	bool can_use_open = layer->kind != LAYER_KIND_CONFINED &&
+		(!layer->idle_confined ||
+		 READ_ONCE(layer->check_no_idle) ||
+		 READ_ONCE(layer->fully_allocated));
+
 	if (is_float)
 		goto no_locality;
 
@@ -1499,7 +1516,7 @@ no_locality:
 	 * masks which respect p->cpus_ptr.
 	 */
 	if (nr_nodes > 1 && taskc->all_cpus_allowed) {
-		bool is_open = layer->kind != LAYER_KIND_CONFINED;
+		bool is_open = can_use_open;
 		u32 src_nid = prev_cpuc->node_id;
 		struct node_ctx *src_nodec;
 		s32 i;
@@ -1588,7 +1605,7 @@ xnuma_done: ;
 					     idle_smtmask, layer)) >= 0)
 			goto out;
 
-		if (layer->kind != LAYER_KIND_CONFINED) {
+		if (can_use_open) {
 			maybe_refresh_layered_cpus_unprotected(p, taskc,
 							       layered_cpumask);
 			unprot_mask = taskc->layered_unprotected_mask;
@@ -2518,9 +2535,15 @@ static bool try_drain_layer_node_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 }
 
 static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc,
-					      struct llc_ctx *llcc)
+					      struct llc_ctx *llcc,
+					      bool rescue_stranded)
 {
-	struct llc_prox_map *llc_pmap = &llcc->prox_map;
+	/*
+	 * Select random proximity map from NUM_PROXIMITY_MAPS to avoid
+	 * bias in proximity map ordering of LLCs with same locality.
+	 */
+	u32 pmap_idx = bpf_get_prandom_u32() % NUM_PROXIMITY_MAPS;
+	struct llc_prox_map *llc_pmap = &llcc->prox_maps[pmap_idx];
 	struct layer *layer;
 	u32 nid = llc_node_id(llcc->id);
 	bool xllc_mig_skipped = false;
@@ -2531,10 +2554,13 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 		return false;
 
 	/*
-	 * If a layer is confined, and the CPU doesn't belong to it, we shouldn't
-	 * consume from it.
+	 * If a layer is confined, and the CPU doesn't belong to it, we
+	 * shouldn't consume from it — unless rescue_stranded is set,
+	 * which indicates fallback draining of stranded tasks on nodes
+	 * where the layer has no CPUs.
 	 */
-	if (layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer_id)
+	if (!rescue_stranded &&
+	    layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer_id)
 		return false;
 
 	skip_remote_node = layer->skip_remote_node;
@@ -2606,7 +2632,8 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 
 static __always_inline
 bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
-			struct cpu_ctx *cpuc, struct llc_ctx *llcc)
+			struct cpu_ctx *cpuc, struct llc_ctx *llcc,
+			bool rescue_stranded)
 {
 	u32 u;
 
@@ -2621,7 +2648,7 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 		if (layer_id == exclude_layer_id)
 			continue;
 
-		if (try_consume_layer(layer_id, cpuc, llcc))
+		if (try_consume_layer(layer_id, cpuc, llcc, rescue_stranded))
 			return true;
 	}
 
@@ -2719,7 +2746,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	    (nodec = lookup_node_ctx(cpuc->node_id)) &&
 	    try_consume_layers(nodec->empty_layer_ids,
 			       nodec->nr_empty_layer_ids,
-			       MAX_LAYERS, cpuc, llcc)) {
+			       MAX_LAYERS, cpuc, llcc, true)) {
 		trace("FALLBACK cpu=%d node=%d (node_cpus=0)",
 		      cpuc->cpu, cpuc->node_id);
 		cpuc->running_fallback = true;
@@ -2768,26 +2795,26 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		if (cpuc->protect_owned) {
 			if (try_consume_layers(cpuc->op_layer_order, nr_op_layers,
-					       MAX_LAYERS, cpuc, llcc))
+					       MAX_LAYERS, cpuc, llcc, false))
 				return;
 			if (try_consume_layers(cpuc->on_layer_order, nr_on_layers,
-					       MAX_LAYERS, cpuc, llcc))
+					       MAX_LAYERS, cpuc, llcc, false))
 				return;
 			if (try_consume_layers(cpuc->gp_layer_order, nr_gp_layers,
-					       MAX_LAYERS, cpuc, llcc))
+					       MAX_LAYERS, cpuc, llcc, false))
 				return;
 			if (try_consume_layers(cpuc->gn_layer_order, nr_gn_layers,
-					       MAX_LAYERS, cpuc, llcc))
+					       MAX_LAYERS, cpuc, llcc, false))
 				return;
 		} else {
 			if (try_consume_layers(cpuc->op_layer_order, nr_op_layers,
-					       MAX_LAYERS, cpuc, llcc))
+					       MAX_LAYERS, cpuc, llcc, false))
 				return;
 			if (try_consume_layers(cpuc->gp_layer_order, nr_gp_layers,
-					       MAX_LAYERS, cpuc, llcc))
+					       MAX_LAYERS, cpuc, llcc, false))
 				return;
 			if (try_consume_layers(cpuc->ogn_layer_order, nr_ogn_layers,
-					       MAX_LAYERS, cpuc, llcc))
+					       MAX_LAYERS, cpuc, llcc, false))
 				return;
 		}
 	} else {
@@ -2805,7 +2832,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		if (!owner_layer || (!owner_layer->is_protected && !cpuc->protect_owned && !owner_layer->preempt)) {
 			if (try_consume_layers(cpuc->ogp_layer_order, nr_ogp_layers,
-					       cpuc->layer_id, cpuc, llcc))
+					       cpuc->layer_id, cpuc, llcc, false))
 				return;
 
 			tried_preempting = true;
@@ -2817,7 +2844,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			    owner_layer->node[cpuc->node_id].llcs_to_drain &&
 			    try_drain_layer_node_llcs(owner_layer, cpuc))
 				return;
-			if (try_consume_layer(owner_layer->id, cpuc, llcc))
+			if (try_consume_layer(owner_layer->id, cpuc, llcc, false))
 				return;
 
 			/* CPU is in a protected layer, do not pull from other layers. */
@@ -2828,12 +2855,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		/* try grouped/open preempting if not tried yet */
 		if (!tried_preempting &&
 		    try_consume_layers(cpuc->ogp_layer_order, nr_ogp_layers,
-				       cpuc->layer_id, cpuc, llcc))
+				       cpuc->layer_id, cpuc, llcc, false))
 			return;
 
 		/* grouped/open non-preempt layers */
 		if (try_consume_layers(cpuc->ogn_layer_order, nr_ogn_layers,
-				       cpuc->layer_id, cpuc, llcc))
+				       cpuc->layer_id, cpuc, llcc, false))
 			return;
 	}
 
@@ -3442,7 +3469,7 @@ static s32 create_llc(u32 llc_id)
 
 	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
 
-	pmap = &llcc->prox_map;
+	pmap = &llcc->prox_maps[0];
 	dbg("CFG: LLC[%d] prox_map node/sys=%d/%d",
 	    llc_id, pmap->node_end, pmap->sys_end);
 	if (pmap->sys_end > nr_possible_cpus || pmap->sys_end > MAX_CPUS) {

@@ -19,12 +19,13 @@
 #endif
 
 #include "intf.h"
+#include "cell_cpumask.bpf.h"
 #include "dsq.bpf.h"
 #include <lib/cleanup.bpf.h>
 
 extern const volatile u32 nr_llc;
 
-extern struct cell_map	  cells;
+extern struct cell_map cells;
 
 enum mitosis_constants {
 
@@ -38,9 +39,8 @@ enum mitosis_constants {
 /*
  * Variables populated by userspace
  */
-const volatile bool	   enable_llc_awareness = false;
-const volatile bool	   enable_work_stealing = false;
-const volatile u32	   nr_llc		= 1;
+const volatile bool enable_llc_awareness = false;
+const volatile u32 nr_llc = 1;
 
 static inline struct cell *lookup_cell(int idx)
 {
@@ -62,8 +62,12 @@ struct task_ctx {
 	/* cpumask is the set of valid cpus this task can schedule on */
 	/* (task's cpumask and-ed with its cell cpumask) */
 	struct bpf_cpumask __kptr *cpumask;
+	/* Cached intersection of cpumask and the selected LLC's cpumask */
+	struct bpf_cpumask __kptr *llc_cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
+	/* Cell whose vtime domain should be charged for this task */
+	u32 vtime_charge_cell;
 	u64 basis_vtime;
 	/* For the sake of monitoring, each task is owned by a cell */
 	u32 cell;
@@ -84,13 +88,61 @@ struct task_ctx {
 	u64 cgid;
 	/* Which LLC this task is assigned to */
 	s32 llc;
+	/* LLC id used to populate llc_cpumask; mismatch means recompute */
+	s32 llc_cpumask_id;
 
-	u32 steal_count; /* how many times this task has been stolen */
-	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
+	u64 avg_runtime_ns; /* EWMA of per-wake runtimes (ns), init to 0 */
 };
 
-static inline const struct cpumask *lookup_cell_cpumask(int idx);
-static inline struct task_ctx	   *lookup_task_ctx(struct task_struct *p);
+static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
+
+/*
+ * Smoothed average of a task's per-wake runtime (EWMA, alpha=1/8).
+ * Updated in stopping() after each run. Starts at 0 and converges
+ * over ~8 runs. Used by features like slice shrinking to estimate
+ * how long a task typically runs.
+ */
+static inline void update_task_runtime_ewma(struct task_ctx *tctx, u64 used)
+{
+	if (unlikely(!tctx->avg_runtime_ns))
+		/* Init */
+		tctx->avg_runtime_ns = used;
+	else
+		tctx->avg_runtime_ns = (tctx->avg_runtime_ns * 7 + used) / 8;
+}
+
+extern const volatile bool use_lockless_peek;
+
+/*
+ * Peek at the head of a DSQ. Uses lockless kfunc when available,
+ * otherwise falls back to bpf_for_each iterator.
+ */
+static inline struct task_struct *dsq_peek(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	if (use_lockless_peek)
+		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0)
+		return p;
+	return NULL;
+}
+
+static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
+{
+	u64 *vptr;
+
+	if ((vptr = MEMBER_VPTR(*cctx, .cstats[cell][idx])))
+		(*vptr) += delta;
+	else
+		scx_bpf_error("invalid cell or stat idxs: %d, %d", idx, cell);
+}
+
+static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
+{
+	cstat_add(idx, cell, cctx, 1);
+}
 
 struct cell_map {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -99,5 +151,4 @@ struct cell_map {
 	__uint(max_entries, MAX_CELLS);
 };
 
-static inline int update_task_cpumask(struct task_struct *p,
-				      struct task_ctx	 *tctx);
+static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);

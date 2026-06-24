@@ -86,7 +86,7 @@ static int topology_timer_callback(void *map, int *key, struct bpf_timer *timer)
 	if (topo_all->mask && topo_all->nr_children > 0) {
 		topology_accessed_in_timer = true;
 
-		for (i = 0; i < topo_all->nr_children && i < TOPO_MAX_CHILDREN && can_loop; i++) {
+		for (i = 0; i < topo_all->nr_children && i < topo_max_children[topo_all->level] && can_loop; i++) {
 			topo = topo_all->children[i];
 			/* make sure we can deference arena pointers */
 			if (topo && topo->mask) {
@@ -273,7 +273,7 @@ int scx_selftest_arena_topology_timer_timer_with_helpers(void)
 
 		child_data->magic_value = magic + i + 1;
 		child_data->access_count = i;
-		child_data->cpu_id = child->id;
+		child_data->cpu_id = child->level_ids[child->level];
 		child->data = (void __arena *)child_data;
 		i++;
 	}
@@ -411,10 +411,10 @@ int scx_selftest_arena_topology_timer_arena_data(void)
 
 		child_data->magic_value = magic + i + 2;
 		child_data->access_count = 0;
-		child_data->cpu_id = child->id;
+		child_data->cpu_id = child->level_ids[child->level];
 		child->data = (void __arena *)child_data;
 
-		ret = topo_update_data(child, magic + i + 2, child->id);
+		ret = topo_update_data(child, magic + i + 2, child->level_ids[child->level]);
 		if (ret) {
 			bpf_printk("TOPO ARENA DATA: failed to update child %d data", i);
 			return ret;

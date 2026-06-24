@@ -124,6 +124,40 @@ pub enum CoreType {
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Powermode {
+    Turbo,
+    Performance,
+    Powersave,
+    Any,
+}
+
+/// Return the list of CPU IDs matching the requested power mode.
+///
+/// Selects CPUs from the system topology based on [`Powermode`]:
+/// - [`Powermode::Turbo`]: only turbo-capable big cores
+/// - [`Powermode::Performance`]: all big cores
+/// - [`Powermode::Powersave`]: only little cores
+/// - [`Powermode::Any`]: all CPUs
+pub fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
+    let topo = Topology::new().unwrap();
+
+    let cpus: Vec<usize> = topo
+        .all_cores
+        .values()
+        .flat_map(|core| &core.cpus)
+        .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
+            (Powermode::Turbo, CoreType::Big { turbo: true })
+            | (Powermode::Performance, CoreType::Big { .. })
+            | (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
+            (Powermode::Any, ..) => Some(*cpu_id),
+            _ => None,
+        })
+        .collect();
+
+    Ok(cpus)
+}
+
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Cpu {
     pub id: usize,
     pub min_freq: usize,
@@ -1268,6 +1302,58 @@ pub mod testutils {
                 llc_id += 1;
             }
             nodes.insert(node_idx, test_node(node_idx, llcs, nr_nodes));
+        }
+
+        let mut span = Cpumask::new();
+        for i in 0..total_cpus {
+            span.set_cpu(i).unwrap();
+        }
+
+        (Topology::instantiate(span, nodes).unwrap(), total_cpus)
+    }
+
+    pub fn make_het_test_topo(
+        cores_per_llc: &[&[usize]],
+        hts_per_core: usize,
+    ) -> (Topology, usize) {
+        let nr_nodes = cores_per_llc.len();
+
+        let total_cpus = cores_per_llc
+            .iter()
+            .map(|node| node.iter().sum::<usize>())
+            .sum::<usize>()
+            * hts_per_core;
+
+        set_cpumask_test_width(total_cpus);
+
+        let mut cpu_id = 0usize;
+        let mut core_id = 0usize;
+        let mut llc_id = 0usize;
+        let mut nodes = BTreeMap::new();
+
+        for (node_id, llcs_in_node) in cores_per_llc.iter().enumerate() {
+            let mut llcs = BTreeMap::new();
+
+            for &cores_in_llc in *llcs_in_node {
+                let mut cores = BTreeMap::new();
+
+                for _ in 0..cores_in_llc {
+                    let mut cpus = BTreeMap::new();
+
+                    for _ in 0..hts_per_core {
+                        cpus.insert(cpu_id, Arc::new(test_cpu(cpu_id, core_id, llc_id, node_id)));
+                        cpu_id += 1;
+                    }
+
+                    cores.insert(core_id, Arc::new(test_core(core_id, cpus, llc_id, node_id)));
+                    core_id += 1;
+                }
+
+                llcs.insert(llc_id, Arc::new(test_llc(llc_id, cores, node_id)));
+                llc_id += 1;
+            }
+
+            nodes.insert(node_id, test_node(node_id, llcs, nr_nodes));
         }
 
         let mut span = Cpumask::new();

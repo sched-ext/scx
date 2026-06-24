@@ -9,6 +9,7 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+mod bpf_streams;
 pub use bpf_intf::*;
 
 mod cpu_order;
@@ -104,7 +105,7 @@ struct Opts {
     #[clap(long = "performance", action = clap::ArgAction::SetTrue)]
     performance: bool,
 
-    /// Run the scheduler in powersave mode to minimize powr consumption.
+    /// Run the scheduler in powersave mode to minimize power consumption.
     /// This option cannot be used with other conflicting options (--autopilot,
     /// --autopower, --performance, --balanced, --no-core-compaction)
     /// affecting the use of core compaction.
@@ -125,6 +126,14 @@ struct Opts {
     /// Minimum scheduling slice duration in microseconds.
     #[clap(long = "slice-min-us", default_value = "500")]
     slice_min_us: u64,
+
+    /// Target load percentage for turbulent CPUs relative to non-turbulent
+    /// CPUs' per-capacity utilization. 100 means turbulent CPUs should carry
+    /// the same per-capacity load as non-turbulent CPUs. Values below 100
+    /// route fewer tasks to turbulent CPUs; values above 100 route more.
+    /// Range: 0-200. Default: 100.
+    #[clap(long = "lat-load-target-pct", default_value = "100", value_parser=Opts::lat_load_target_pct_range)]
+    lat_load_target_pct: u16,
 
     /// Migration delta threshold percentage (0-100). When set to a non-zero value,
     /// the migration threshold is mig-delta-pct percent of the average load.
@@ -184,6 +193,12 @@ struct Opts {
     /// Do not boost futex holders.
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
     no_futex_boost: bool,
+
+    /// Default: --no-fast-lb is deactivated (fast load balancer is on).
+    /// Disable the fast (batch-migration) load balancer and fall back to
+    /// the pre-fast-lb load-balancer behavior.
+    #[clap(long = "no-fast-lb", action = clap::ArgAction::SetTrue)]
+    no_fast_lb: bool,
 
     /// Disable preemption.
     #[clap(long = "no-preemption", action = clap::ArgAction::SetTrue)]
@@ -360,6 +375,8 @@ impl Opts {
 
         if !EnergyModel::has_energy_model() || !self.cpu_pref_order.is_empty() {
             self.no_use_em = true;
+        }
+        if self.no_use_em {
             info!("Energy model won't be used for CPU preference order.");
         }
 
@@ -385,6 +402,10 @@ impl Opts {
 
     fn preempt_shift_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 10)
+    }
+
+    fn lat_load_target_pct_range(s: &str) -> Result<u16, String> {
+        number_range(s, 0, 200)
     }
 
     fn mig_delta_pct_range(s: &str) -> Result<u8, String> {
@@ -464,7 +485,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize CPU topology with CLI arguments
-        let order = CpuOrder::new(opts.topology.as_ref()).unwrap();
+        let order = CpuOrder::new(opts.topology.as_ref(), opts.no_use_em).unwrap();
         Self::init_cpus(&mut skel, &order);
         Self::init_cpdoms(&mut skel, &order);
 
@@ -669,10 +690,12 @@ impl<'a> Scheduler<'a> {
         rodata.slice_min_ns = opts.slice_min_us * 1000;
         rodata.pinned_slice_ns = opts.pinned_slice_us.map(|v| v * 1000).unwrap_or(0);
         rodata.preempt_shift = opts.preempt_shift;
+        rodata.lat_load_target_pct = opts.lat_load_target_pct;
         rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.lb_low_util_wall = ((opts.lb_low_util_pct as u64) << 10) / 100;
         rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
         rodata.no_use_em = opts.no_use_em as u8;
+        rodata.no_fast_lb = opts.no_fast_lb as u8;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
@@ -756,6 +779,10 @@ impl<'a> Scheduler<'a> {
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
+            lat_headroom: tx.lat_headroom,
+            vuln_thresh: tx.vuln_thresh,
+            task_util_est: tx.task_util_est,
+            norm_lat_cri: tx.norm_lat_cri,
             slice_used_wall: tx.last_slice_used_wall,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,
@@ -906,7 +933,7 @@ impl<'a> Scheduler<'a> {
     fn update_power_profile(&mut self, prev_profile: PowerProfile) -> (bool, PowerProfile) {
         let profile = fetch_power_profile(false);
         if profile == prev_profile {
-            // If the profile is the same, skip updaring the profile for BPF.
+            // If the profile is the same, skip updating the profile for BPF.
             return (true, profile);
         }
 
@@ -960,6 +987,7 @@ impl<'a> Scheduler<'a> {
         }
         self.rb_mgr.consume().unwrap();
 
+        bpf_streams::dump_bpf_streams(&mut self.skel);
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
     }

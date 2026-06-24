@@ -92,16 +92,49 @@
 //! tasks absorb whatever is left, and no budget is wasted on layers that
 //! can't use it.
 //!
+//! ## Tiered placement
+//!
+//! Each non-spread layer's unpinned budget is placed across nodes
+//! according to a per-layer `node_groups: Vec<Vec<usize>>`.  The outer
+//! Vec is ranks (0 = most preferred); the inner Vec at each rank is the
+//! set of nodes the layer is equally happy to land on at that rank.
+//!
+//! `place_unpinned()` walks ranks in order.  At each rank, every layer
+//! with growth left distributes its budget across the rank's nodes via
+//! cap-weighted `water_fill` (each node's "demand" is its remaining
+//! capacity, with uniform weight).  Per-node contention between layers
+//! is then resolved by a second `water_fill` weighted by layer weight.
+//! The within-rank step iterates until no progress so capacity caps
+//! within a tier can spill to other nodes in the same tier before
+//! advancing to the next rank.
+//!
+//! Two shapes cover all current growth algorithms:
+//!
+//! - **One node per tier** (locality algos like Sticky, Topo, Linear):
+//!   degenerates to strict-preference packing — rank 0 fills first,
+//!   then spills to rank 1.  Equivalent to the prior per-rank algorithm.
+//! - **Single tier with all nodes** (RoundRobin): degenerates to
+//!   balanced placement proportional to free capacity.  Replaces the
+//!   prior `spread:true` path for RoundRobin, recovering capacity that
+//!   would have been stranded by the bottleneck-cap penalty.
+//!
 //! ## Spread layers
 //!
-//! Spread layers (RoundRobin, NodeSpread) need equal CPU counts on every
-//! node.  After the global water-fill determines their total budget,
+//! `NodeSpread*` layers (`LayerDemand::spread = true`) keep strict
+//! equal-per-node placement via the dedicated `resolve_spread()` path.
+//! After the global water-fill determines their total budget,
 //! `resolve_spread()` distributes it evenly across nodes — but caps each
 //! node at the least available capacity (after non-spread pinned
 //! allocations).  When a pinned layer consumes most of one node, spread
 //! layers can't use that node fully, so the excess is freed and
-//! redistributed to non-spread layers who CAN place it.  Multiple spread
-//! layers share the bottleneck capacity fairly via `water_fill`.
+//! redistributed to non-spread layers (including RoundRobin / locality
+//! tiered layers) who CAN place it.  Multiple spread layers share the
+//! bottleneck capacity fairly via `water_fill`.
+//!
+//! This strict equality is what `NodeSpread*` exists for (memory-
+//! bandwidth-bound or replicated work that needs predictable per-node
+//! CPU counts).  Layers that just want balanced cross-node placement
+//! without the bottleneck cap should use `RoundRobin` instead.
 //!
 //! # Terminology
 //!
@@ -316,12 +349,16 @@ impl LayerDemand {
 ///    docs for the full algorithm.
 ///
 /// 2. **Unpinned placement** (`place_unpinned`): places each layer's
-///    unpinned budget on specific nodes, preserving current placement
-///    and using preference/weight logic for the marginal delta.
+///    unpinned budget across preferred node tiers.  Within a tier, a
+///    layer's growth distributes proportionally to remaining capacity
+///    (cap-weighted water_fill); per-node contention between layers is
+///    resolved by layer-weight water_fill.  Spillover to the next tier
+///    happens only when every node in the current tier is full.
 ///
-/// `cur_node_cpus[layer][node]` is each layer's current total CPU count
-/// on each node (in alloc units).  `norders[layer]` is the node
-/// preference order.
+/// `node_groups[layer]` is a list of node-preference tiers.  One node
+/// per tier (the default) reproduces strict-preference packing — rank 0
+/// fills first, then rank 1, etc.  A single tier with all nodes (e.g.
+/// `RoundRobin`) yields balanced placement.
 ///
 /// Returns a `LayerAlloc` per layer with per-node pinned counts, an
 /// unpinned budget, and per-node unpinned distribution, all in alloc
@@ -330,12 +367,11 @@ pub fn unified_alloc(
     total_units: usize,
     node_caps: &[usize],
     demands: &[LayerDemand],
-    cur_node_cpus: &[Vec<usize>],
-    norders: &[Vec<usize>],
+    node_groups: &[Vec<Vec<usize>>],
 ) -> Vec<LayerAlloc> {
     let mut allocs = allocate_budgets(total_units, node_caps, demands);
     resolve_spread(&mut allocs, demands, node_caps);
-    place_unpinned(&mut allocs, demands, node_caps, cur_node_cpus, norders);
+    place_unpinned(&mut allocs, demands, node_caps, node_groups);
     allocs
 }
 
@@ -354,6 +390,7 @@ pub fn unified_alloc(
 /// layer with per-node `pinned` counts and `unpinned_budget` set.
 /// Per-node `unpinned` distribution is NOT resolved here — that's done
 /// by `resolve_spread` and `place_unpinned`.
+#[allow(clippy::needless_range_loop)]
 fn allocate_budgets(
     total_units: usize,
     node_caps: &[usize],
@@ -523,6 +560,7 @@ fn allocate_budgets(
 ///    layers by weight.  Each layer gets at most `total / nr_nodes` per node.
 /// 4. Freed capacity (from capping) is redistributed to non-spread layers
 ///    proportionally via `water_fill`, increasing their `unpinned_budget`.
+#[allow(clippy::needless_range_loop)]
 fn resolve_spread(allocs: &mut [LayerAlloc], demands: &[LayerDemand], node_caps: &[usize]) {
     if allocs.is_empty() {
         return;
@@ -630,106 +668,139 @@ fn resolve_spread(allocs: &mut [LayerAlloc], demands: &[LayerDemand], node_caps:
 
 /// Phase 3: Place each layer's unpinned budget on specific nodes.
 ///
-/// Uses `cur_node_cpus` as the starting point so that pinned shifts
-/// between nodes are compensated and the per-node total stays stable.
-/// Only the marginal delta uses preference/weight logic:
+/// Packs each layer's unpinned budget across preferred node tiers
+/// (`node_groups[layer]`).  At each rank (0 = most preferred tier), every
+/// layer with growth remaining distributes its budget proportionally
+/// across the rank's nodes via cap-weighted `water_fill` (each node's
+/// "demand" is its remaining capacity).  Per-node contention between
+/// layers is then resolved by a second `water_fill` weighted by layer
+/// weight.  The within-rank loop iterates until no further progress —
+/// handling the case where capacity caps on one node leave the layer
+/// with residual growth that can absorb on another node in the same
+/// tier.  Spillover to the next rank happens only when every node in
+/// the current tier is full.
 ///
-/// - **Shrink**: trims from least-preferred nodes (reverse norder).
-/// - **Grow**: distributes rank-interleaved, weight-proportional via
-///   `water_fill` across nodes in preference order.
-///
-/// No-op when `cur_node_cpus` is empty (first cycle or tests without
-/// per-node state).
+/// One node per tier (the default) degenerates to strict-preference
+/// packing identical to the prior rank-by-node algorithm: at each rank
+/// each layer has a single-element tier, the inner per-node water_fill
+/// runs once, and growth that doesn't fit spills to the next rank.
+#[allow(clippy::needless_range_loop)]
 fn place_unpinned(
     allocs: &mut [LayerAlloc],
     demands: &[LayerDemand],
     node_caps: &[usize],
-    cur_node_cpus: &[Vec<usize>],
-    norders: &[Vec<usize>],
+    node_groups: &[Vec<Vec<usize>>],
 ) {
-    if cur_node_cpus.is_empty() {
+    if node_groups.is_empty() {
         return;
     }
 
     let nr_layers = allocs.len();
     let nr_nodes = node_caps.len();
 
-    // Initialize unpinned from current minus pinned.
-    for (idx, alloc) in allocs.iter_mut().enumerate() {
-        if demands[idx].spread {
-            continue;
-        }
+    // Remaining capacity per node after pinned and spread allocations.
+    let mut node_remaining = node_caps.to_vec();
+    for (idx, alloc) in allocs.iter().enumerate() {
         for n in 0..nr_nodes {
-            alloc.unpinned[n] = cur_node_cpus[idx][n].saturating_sub(alloc.pinned[n]);
-        }
-    }
-
-    // Shrink: trim from least-preferred nodes first.
-    for (idx, alloc) in allocs.iter_mut().enumerate() {
-        if demands[idx].spread {
-            continue;
-        }
-        let cur_total: usize = alloc.unpinned.iter().sum();
-        if cur_total > alloc.unpinned_budget {
-            let mut excess = cur_total - alloc.unpinned_budget;
-            for &n in norders[idx].iter().rev() {
-                let trim = excess.min(alloc.unpinned[n]);
-                alloc.unpinned[n] -= trim;
-                excess -= trim;
-                if excess == 0 {
-                    break;
-                }
+            node_remaining[n] = node_remaining[n].saturating_sub(alloc.pinned[n]);
+            if demands[idx].spread {
+                node_remaining[n] = node_remaining[n].saturating_sub(alloc.unpinned[n]);
             }
         }
     }
 
-    // Remaining capacity per node after all pinned + current unpinned.
-    let mut node_remaining = node_caps.to_vec();
-    for alloc in allocs.iter() {
-        for n in 0..nr_nodes {
-            node_remaining[n] =
-                node_remaining[n].saturating_sub(alloc.pinned[n] + alloc.unpinned[n]);
+    // Start non-spread layers from zero — the grow phase below packs
+    // them onto preferred nodes.
+    for (idx, alloc) in allocs.iter_mut().enumerate() {
+        if !demands[idx].spread {
+            alloc.unpinned = vec![0; nr_nodes];
         }
     }
 
-    // Per-layer growth needed.
+    // Per-layer growth needed (entire unpinned budget for non-spread).
     let mut growth: Vec<usize> = allocs
         .iter()
-        .map(|a| {
-            a.unpinned_budget
-                .saturating_sub(a.unpinned.iter().sum::<usize>())
+        .enumerate()
+        .map(|(idx, a)| {
+            if demands[idx].spread {
+                0
+            } else {
+                a.unpinned_budget
+            }
         })
         .collect();
 
-    // Grow: rank-interleaved, weight-proportional across preferred nodes.
-    for rank in 0..nr_nodes {
-        let mut node_to_layers: Vec<Vec<usize>> = vec![vec![]; nr_nodes];
-        for idx in 0..nr_layers {
-            if growth[idx] == 0 || rank >= norders[idx].len() {
-                continue;
+    let max_rank = node_groups.iter().map(|g| g.len()).max().unwrap_or(0);
+
+    // Walk tiers in priority order.  Within each tier, iterate until no
+    // progress so capacity caps can spill to other nodes in the same tier
+    // before advancing to the next rank.
+    for rank in 0..max_rank {
+        loop {
+            // Step 1: Per-layer cap-weighted distribution across this
+            // tier's nodes.  tier_demand[idx][n] = how much layer idx
+            // wants to place on node n at this rank.
+            let mut tier_demand: Vec<Vec<usize>> = vec![vec![0; nr_nodes]; nr_layers];
+            for idx in 0..nr_layers {
+                if growth[idx] == 0 || rank >= node_groups[idx].len() {
+                    continue;
+                }
+                let tier = &node_groups[idx][rank];
+                if tier.is_empty() {
+                    continue;
+                }
+                // Node entries: weight=1 (uniform), demand=remaining cap.
+                // water_fill distributes growth proportionally to free
+                // capacity, naturally avoiding congested nodes.
+                let entries: Vec<WaterFillEntry> = tier
+                    .iter()
+                    .map(|&n| WaterFillEntry {
+                        weight: 1,
+                        demand: node_remaining[n],
+                    })
+                    .collect();
+                let shares = water_fill(growth[idx], &entries);
+                for (pos, &n) in tier.iter().enumerate() {
+                    tier_demand[idx][n] = shares[pos];
+                }
             }
-            node_to_layers[norders[idx][rank]].push(idx);
-        }
 
-        for n in 0..nr_nodes {
-            let contestants = &node_to_layers[n];
-            if contestants.is_empty() || node_remaining[n] == 0 {
-                continue;
+            // Step 2: Per-node cross-layer contention.  Each node gathers
+            // its contestants and runs weight-proportional water_fill.
+            let mut progress = false;
+            for n in 0..nr_nodes {
+                if node_remaining[n] == 0 {
+                    continue;
+                }
+                let mut contestants: Vec<usize> = Vec::new();
+                let mut entries: Vec<WaterFillEntry> = Vec::new();
+                for idx in 0..nr_layers {
+                    if tier_demand[idx][n] == 0 {
+                        continue;
+                    }
+                    contestants.push(idx);
+                    entries.push(WaterFillEntry {
+                        weight: demands[idx].weight,
+                        demand: tier_demand[idx][n],
+                    });
+                }
+                if contestants.is_empty() {
+                    continue;
+                }
+                let shares = water_fill(node_remaining[n], &entries);
+                for (pos, &idx) in contestants.iter().enumerate() {
+                    if shares[pos] == 0 {
+                        continue;
+                    }
+                    allocs[idx].unpinned[n] += shares[pos];
+                    growth[idx] -= shares[pos];
+                    node_remaining[n] -= shares[pos];
+                    progress = true;
+                }
             }
 
-            let entries: Vec<WaterFillEntry> = contestants
-                .iter()
-                .map(|&idx| WaterFillEntry {
-                    weight: demands[idx].weight,
-                    demand: growth[idx],
-                })
-                .collect();
-            let shares = water_fill(node_remaining[n], &entries);
-
-            for (pos, &idx) in contestants.iter().enumerate() {
-                allocs[idx].unpinned[n] += shares[pos];
-                growth[idx] -= shares[pos];
-                node_remaining[n] -= shares[pos];
+            if !progress {
+                break;
             }
         }
     }
@@ -937,6 +1008,16 @@ mod tests {
         allocs.iter().map(|a| a.total()).sum()
     }
 
+    /// Convert a flat node-order list into strict tier groups
+    /// (one node per tier).  Reproduces today's pre-tiers behavior:
+    /// rank 0 packs first, then rank 1, etc.
+    fn strict_groups(orders: Vec<Vec<usize>>) -> Vec<Vec<Vec<usize>>> {
+        orders
+            .into_iter()
+            .map(|ord| ord.into_iter().map(|n| vec![n]).collect())
+            .collect()
+    }
+
     // S1: No contention, no demand-cap
     //
     // A(1,18,0,18) B(1,0,18,18) C(1,12,0,24) D(1,0,12,24). All raw=36.
@@ -957,7 +1038,7 @@ mod tests {
             demand(1, 12, 0, 24),
             demand(1, 0, 12, 24),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         for a in &allocs {
             assert_eq!(a.total(), 24);
         }
@@ -989,7 +1070,7 @@ mod tests {
             demand(1, 4, 0, 2),
             demand(1, 0, 4, 2),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[2].total(), 6);
         assert_eq!(allocs[3].total(), 6);
         assert_eq!(allocs[0].total(), 36);
@@ -1015,7 +1096,7 @@ mod tests {
             demand(1, 6, 0, 2),
             demand(1, 0, 2, 2),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 36);
         assert_eq!(allocs[1].total(), 24);
         assert_eq!(allocs[2].total(), 8);
@@ -1044,7 +1125,7 @@ mod tests {
             demand(1, 36, 0, 12),
             demand(1, 36, 0, 12),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         for a in &allocs {
             assert_eq!(a.total(), 24);
             assert_eq!(a.pinned[0], 12);
@@ -1074,11 +1155,11 @@ mod tests {
             demand(1, 40, 0, 8),
             demand(1, 3, 0, 3),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[3].total(), 6);
-        for i in 0..3 {
-            assert_eq!(allocs[i].unpinned_budget, 8);
-            assert!(allocs[i].total() >= 22 && allocs[i].total() <= 24);
+        for a in allocs.iter().take(3) {
+            assert_eq!(a.unpinned_budget, 8);
+            assert!(a.total() >= 22 && a.total() <= 24);
         }
     }
 
@@ -1106,7 +1187,7 @@ mod tests {
             demand(1, 40, 0, 8),
             demand(1, 40, 0, 8),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 12);
         assert_eq!(allocs[1].total(), 12);
         assert_eq!(allocs[2].unpinned_budget, 8);
@@ -1145,7 +1226,7 @@ mod tests {
             demand(1, 18, 0, 18),
             demand(1, 6, 0, 6),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 36);
         assert_eq!(allocs[3].total(), 12);
         assert_eq!(allocs[1].total(), 24);
@@ -1170,7 +1251,7 @@ mod tests {
             demand(1, 0, 0, 24),
             demand(1, 0, 0, 24),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         for a in &allocs {
             assert_eq!(a.total(), 24);
         }
@@ -1197,7 +1278,7 @@ mod tests {
             demand(1, 0, 0, 6),
             demand(1, 0, 0, 6),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 24);
         assert_eq!(allocs[1].total(), 24);
         assert_eq!(allocs[2].total(), 6);
@@ -1219,7 +1300,7 @@ mod tests {
             demand(1, 36, 0, 12),
             demand(1, 36, 0, 12),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         for a in &allocs {
             assert_eq!(a.total(), 24);
             assert_eq!(a.pinned[0], 12);
@@ -1251,12 +1332,12 @@ mod tests {
             demand(1, 36, 0, 12),
             demand(1, 36, 0, 12),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 36);
         assert_eq!(allocs[0].unpinned_budget, 12);
-        for i in 1..4 {
-            assert_eq!(allocs[i].unpinned_budget, 12);
-            assert_eq!(allocs[i].total(), 20);
+        for a in allocs.iter().skip(1).take(3) {
+            assert_eq!(a.unpinned_budget, 12);
+            assert_eq!(a.total(), 20);
         }
         assert_eq!(total_alloc(&allocs), 96);
     }
@@ -1284,7 +1365,7 @@ mod tests {
             demand(1, 3, 0, 3),
             demand(1, 0, 3, 3),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 36);
         assert_eq!(allocs[1].total(), 36);
         assert_eq!(allocs[2].total(), 6);
@@ -1316,11 +1397,11 @@ mod tests {
             demand(1, 48, 0, 0),
             demand(1, 0, 0, 24),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[3].total(), 24);
-        for i in 0..3 {
-            assert_eq!(allocs[i].pinned[0], 16);
-            assert_eq!(allocs[i].total(), 16);
+        for a in allocs.iter().take(3) {
+            assert_eq!(a.pinned[0], 16);
+            assert_eq!(a.total(), 16);
         }
         assert_eq!(total_alloc(&allocs), 72);
     }
@@ -1346,10 +1427,10 @@ mod tests {
             demand(1, 40, 0, 8),
             demand(1, 2, 0, 2),
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[3].total(), 4);
-        for i in 0..3 {
-            assert_eq!(allocs[i].unpinned_budget, 8);
+        for a in allocs.iter().take(3) {
+            assert_eq!(a.unpinned_budget, 8);
         }
 
         let n0_pinned: usize = allocs.iter().map(|a| a.pinned[0]).sum();
@@ -1379,7 +1460,7 @@ mod tests {
                 spread: false,
             },
         ];
-        let allocs = unified_alloc(16, &[16], &demands, &[], &[]);
+        let allocs = unified_alloc(16, &[16], &demands, &[]);
         assert_eq!(allocs[0].total(), 8);
         assert_eq!(allocs[1].total(), 8);
         assert_eq!(allocs[0].unpinned_budget, 8);
@@ -1390,7 +1471,7 @@ mod tests {
     #[test]
     fn test_ua_single_layer() {
         let demands = vec![demand(1, 10, 5, 20)];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 35);
         assert_eq!(allocs[0].pinned[0], 10);
         assert_eq!(allocs[0].pinned[1], 5);
@@ -1402,13 +1483,13 @@ mod tests {
     #[test]
     fn test_ua_conservation_no_stranded() {
         let demands = vec![demand(1, 40, 0, 40), demand(1, 0, 40, 40)];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(total_alloc(&allocs), 96);
     }
 
     #[test]
     fn test_ua_empty() {
-        let allocs = unified_alloc(96, &caps_2n(), &[], &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &[], &[]);
         assert!(allocs.is_empty());
     }
 
@@ -1416,7 +1497,7 @@ mod tests {
     #[test]
     fn test_ua_all_zero_demand() {
         let demands = vec![demand(1, 0, 0, 0), demand(1, 0, 0, 0)];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         for a in &allocs {
             assert_eq!(a.total(), 0);
         }
@@ -1447,7 +1528,7 @@ mod tests {
                 spread: false,
             },
         ];
-        let allocs = unified_alloc(32, &[32], &demands, &[], &[]);
+        let allocs = unified_alloc(32, &[32], &demands, &[]);
         assert_eq!(allocs[0].total(), 16);
         assert_eq!(allocs[1].total(), 8);
         assert_eq!(allocs[2].total(), 8);
@@ -1473,7 +1554,7 @@ mod tests {
                 spread: false,
             },
         ];
-        let allocs = unified_alloc(32, &[32], &demands, &[], &[]);
+        let allocs = unified_alloc(32, &[32], &demands, &[]);
         assert_eq!(allocs[0].total(), 5);
         assert_eq!(allocs[1].total(), 27);
     }
@@ -1501,7 +1582,7 @@ mod tests {
                 spread: false,
             },
         ];
-        let allocs = unified_alloc(4, &[4], &demands, &[], &[]);
+        let allocs = unified_alloc(4, &[4], &demands, &[]);
         assert!(
             allocs[1].total() >= 1,
             "low-weight layer must get >= 1, got {}",
@@ -1527,7 +1608,7 @@ mod tests {
                 spread: false,
             },
         ];
-        let allocs = unified_alloc(4, &[4], &demands, &[], &[]);
+        let allocs = unified_alloc(4, &[4], &demands, &[]);
         assert_eq!(allocs[1].total(), 0);
     }
 
@@ -1555,7 +1636,7 @@ mod tests {
                 spread: false,
             },
         ];
-        let allocs = unified_alloc(6, &[6], &demands, &[], &[]);
+        let allocs = unified_alloc(6, &[6], &demands, &[]);
         assert!(allocs[1].total() >= 1);
         assert!(allocs[2].total() >= 1);
         assert_eq!(total_alloc(&allocs), 6);
@@ -1581,7 +1662,7 @@ mod tests {
     #[test]
     fn test_ua_spread_even_split() {
         let demands = vec![demand_spread(1, 10, 10, 20)];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 40);
         assert_eq!(allocs[0].pinned, vec![0, 0]);
         assert_eq!(allocs[0].unpinned[0], 20);
@@ -1592,7 +1673,7 @@ mod tests {
     #[test]
     fn test_ua_spread_odd_budget() {
         let demands = vec![demand_spread(1, 10, 10, 21)];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
         assert_eq!(allocs[0].total(), 41);
         assert_eq!(allocs[0].unpinned[0], 21);
         assert_eq!(allocs[0].unpinned[1], 20);
@@ -1606,9 +1687,8 @@ mod tests {
             demand_spread(1, 20, 20, 50), // S: spread, raw_total=90
             demand(1, 20, 0, 70),         // L: non-spread, pinned N0, raw_total=90
         ];
-        let cur = vec![vec![20, 20], vec![20, 0]];
-        let norders = vec![vec![0, 1], vec![0, 1]];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &cur, &norders);
+        let groups = strict_groups(vec![vec![0, 1], vec![0, 1]]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &groups);
 
         // S: spread, equal weight → 48 total, split 24/24.
         assert_eq!(allocs[0].total(), 48);
@@ -1627,7 +1707,7 @@ mod tests {
             demand_spread(1, 5, 5, 10), // S: raw_total=20
             demand(1, 30, 10, 40),      // L: raw_total=80
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
 
         // S: demand-capped at 20, split 10/10.
         assert_eq!(allocs[0].total(), 20);
@@ -1646,9 +1726,8 @@ mod tests {
             demand_spread(1, 20, 20, 20), // S: raw_total=60
             demand(1, 30, 0, 30),         // L: pinned N0, raw_total=60
         ];
-        let cur = vec![vec![24, 24], vec![24, 0]];
-        let norders = vec![vec![0, 1], vec![0, 1]];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &cur, &norders);
+        let groups = strict_groups(vec![vec![0, 1], vec![0, 1]]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &groups);
 
         assert_eq!(total_alloc(&allocs), 96);
         // No node exceeds 48.
@@ -1672,7 +1751,7 @@ mod tests {
             demand_spread(1, 0, 0, 40), // S: spread, weight 1
             demand(1, 0, 0, 60),        // L: unpinned, weight 1
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
 
         assert_eq!(allocs[0].total(), 40); // P: demand-capped
         assert_eq!(allocs[1].unpinned[0], 8); // S: capped at min(avail)
@@ -1696,7 +1775,7 @@ mod tests {
             demand_spread(1, 0, 0, 20), // S1: spread
             demand_spread(1, 0, 0, 20), // S2: spread
         ];
-        let allocs = unified_alloc(96, &caps_2n(), &demands, &[], &[]);
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &[]);
 
         assert_eq!(allocs[0].total(), 40); // P: demand-capped
                                            // Both spread layers get equal share of bottleneck.
@@ -1706,5 +1785,719 @@ mod tests {
         assert_eq!(allocs[2].unpinned[0], 4);
         assert_eq!(allocs[2].unpinned[1], 4);
         assert_eq!(allocs[2].total(), 8);
+    }
+
+    // =====================================================================
+    // NUMA consolidation tests
+    //
+    // Verify that place_unpinned packs layers onto preferred nodes
+    // instead of preserving fragmented historical placement.
+    // =====================================================================
+
+    fn caps_4n() -> Vec<usize> {
+        vec![8, 8, 8, 8]
+    }
+
+    fn demand_4n(w: usize, p: [usize; 4], u: usize) -> LayerDemand {
+        LayerDemand {
+            raw_pinned: p.to_vec(),
+            raw_unpinned: u,
+            weight: w,
+            spread: false,
+        }
+    }
+
+    // Four layers with distinct preferred nodes. Each layer's budget
+    // fits on a single node. Verify full NUMA consolidation.
+    //
+    // A(8, N0)  B(5, N1)  C(6, N3)  D(13, N2)
+    // With 8 cores/node, A/B/C each fit on their primary.
+    // D overflows N2 to secondary nodes.
+    #[test]
+    fn test_ua_4n_numa_consolidation() {
+        let demands = vec![
+            demand_4n(1, [0, 0, 0, 0], 8),  // A: unpinned=8
+            demand_4n(1, [0, 0, 0, 0], 5),  // B: unpinned=5
+            demand_4n(1, [0, 0, 0, 0], 6),  // C: unpinned=6
+            demand_4n(1, [0, 0, 0, 0], 13), // D: unpinned=13
+        ];
+        let groups = strict_groups(vec![
+            vec![0, 1, 3, 2], // A prefers N0
+            vec![1, 0, 3, 2], // B prefers N1
+            vec![3, 1, 0, 2], // C prefers N3
+            vec![2, 1, 0, 3], // D prefers N2
+        ]);
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+
+        // A: fully consolidated on N0.
+        assert_eq!(allocs[0].unpinned[0], 8, "A should be fully on N0");
+        assert_eq!(allocs[0].unpinned[3], 0, "A should have nothing on N3");
+
+        // B: fully consolidated on N1.
+        assert_eq!(allocs[1].unpinned[1], 5, "B should be fully on N1");
+        assert_eq!(allocs[1].unpinned[0], 0, "B should have nothing on N0");
+        assert_eq!(allocs[1].unpinned[3], 0, "B should have nothing on N3");
+
+        // C: fully consolidated on N3.
+        assert_eq!(allocs[2].unpinned[3], 6, "C should be fully on N3");
+
+        // D: fills N2 first, then spills to N1 and N3.
+        assert_eq!(allocs[3].unpinned[2], 8, "D fills N2 first");
+        let d_total: usize = allocs[3].unpinned.iter().sum();
+        assert_eq!(d_total, 13, "D gets full budget");
+
+        assert_eq!(total_alloc(&allocs), 32);
+    }
+
+    // Same scenario but starting from a clean initial state (empty
+    // cur_node_cpus). Verifies first-cycle allocation also consolidates.
+    #[test]
+    fn test_ua_4n_numa_consolidation_first_cycle() {
+        let demands = vec![
+            demand_4n(1, [0, 0, 0, 0], 8),
+            demand_4n(1, [0, 0, 0, 0], 5),
+            demand_4n(1, [0, 0, 0, 0], 6),
+            demand_4n(1, [0, 0, 0, 0], 13),
+        ];
+        let groups = strict_groups(vec![
+            vec![0, 1, 3, 2],
+            vec![1, 0, 3, 2],
+            vec![3, 1, 0, 2],
+            vec![2, 1, 0, 3],
+        ]);
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+
+        assert_eq!(allocs[0].unpinned[0], 8);
+        assert_eq!(allocs[1].unpinned[1], 5);
+        assert_eq!(allocs[2].unpinned[3], 6);
+        assert_eq!(allocs[3].unpinned[2], 8);
+        assert_eq!(total_alloc(&allocs), 32);
+    }
+
+    // Two layers competing for the same primary node. Verify fair
+    // split via water_fill, then spill to secondary nodes.
+    #[test]
+    fn test_ua_4n_shared_primary_node() {
+        let demands = vec![
+            demand_4n(1, [0, 0, 0, 0], 6), // A: prefers N0
+            demand_4n(1, [0, 0, 0, 0], 6), // B: also prefers N0
+            demand_4n(1, [0, 0, 0, 0], 8), // C: prefers N2
+        ];
+        let groups = strict_groups(vec![
+            vec![0, 1, 2, 3], // A
+            vec![0, 1, 2, 3], // B
+            vec![2, 0, 1, 3], // C
+        ]);
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+
+        // N0 has 8 capacity. A and B both want 6 on N0.
+        // water_fill(8, [{w=1,d=6},{w=1,d=6}]) -> [4, 4].
+        // Each gets 4 on N0, then 2 on N1 (rank 1).
+        assert_eq!(allocs[0].unpinned[0], 4, "A gets half of N0");
+        assert_eq!(allocs[1].unpinned[0], 4, "B gets half of N0");
+        assert_eq!(
+            allocs[0].unpinned[1] + allocs[1].unpinned[1],
+            4,
+            "A+B spill to N1"
+        );
+        assert_eq!(allocs[2].unpinned[2], 8, "C fully on N2");
+    }
+
+    // =====================================================================
+    // Tiered placement tests (T01-T30)
+    //
+    // Verify within-tier cap-weighted water_fill and tier spillover.
+    // Uses 4 NUMA nodes, 8 cap/node (32 total) unless noted.
+    // =====================================================================
+
+    // ---- Single-tier (multi-node) basic distribution ----
+
+    // T01: Even split across all nodes, abundant capacity.
+    #[test]
+    fn test_ua_t01_tier_single_even_split() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 8)];
+        let groups = vec![vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        for n in 0..4 {
+            assert_eq!(allocs[0].unpinned[n], 2, "node {} should get 2", n);
+        }
+        assert_eq!(allocs[0].total(), 8);
+    }
+
+    // T02: Uneven capacity — one node congested by another layer's pinned demand.
+    #[test]
+    fn test_ua_t02_tier_uneven_capacity() {
+        let demands = vec![
+            demand_4n(1, [6, 0, 0, 0], 0), // P: pinned 6 on N0
+            demand_4n(1, [0, 0, 0, 0], 8), // L: 8 unpinned, single tier
+        ];
+        let groups = vec![vec![vec![0]], vec![vec![0, 1]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[1].unpinned[0], 2, "N0 has 2 free");
+        assert_eq!(allocs[1].unpinned[1], 6, "rest goes to N1");
+        assert_eq!(allocs[1].total(), 8);
+    }
+
+    // T03: Total demand smaller than tier capacity → even spread of small budget.
+    #[test]
+    fn test_ua_t03_tier_small_demand() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 4)];
+        let groups = vec![vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // 4 units across 4 nodes → 1 each.
+        for n in 0..4 {
+            assert_eq!(allocs[0].unpinned[n], 1);
+        }
+        assert_eq!(allocs[0].total(), 4);
+    }
+
+    // T04: Growth less than tier size → some nodes get 0.
+    #[test]
+    fn test_ua_t04_tier_growth_less_than_tier() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 3)];
+        let groups = vec![vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        let sum: usize = allocs[0].unpinned.iter().sum();
+        assert_eq!(sum, 3, "total must equal growth");
+        // Exactly one node gets 0; the others get 1 each (largest-remainder).
+        let zeros = allocs[0].unpinned.iter().filter(|&&x| x == 0).count();
+        assert_eq!(zeros, 1);
+    }
+
+    // T05: Growth=1 in a 4-node tier → one node, rest zero.
+    #[test]
+    fn test_ua_t05_tier_growth_one() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 1)];
+        let groups = vec![vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].total(), 1);
+        let nonzero = allocs[0].unpinned.iter().filter(|&&x| x > 0).count();
+        assert_eq!(nonzero, 1, "exactly one node gets the 1 unit");
+    }
+
+    // T06: All nodes in tier are congested → no placement (supply-constrained).
+    #[test]
+    fn test_ua_t06_tier_all_congested() {
+        let demands = vec![
+            demand_4n(2, [8, 8, 0, 0], 0), // P: pins all of N0 and N1
+            demand_4n(1, [0, 0, 0, 0], 8), // L: wants tier [N0, N1] but both full
+        ];
+        let groups = vec![vec![vec![0], vec![1]], vec![vec![0, 1]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // L cannot place — N0/N1 both full, no tier spillover defined.
+        assert_eq!(allocs[1].unpinned.iter().sum::<usize>(), 0);
+    }
+
+    // T07: Single-node tier behaves identically to strict-rank.
+    #[test]
+    fn test_ua_t07_tier_single_node_behaves_strict() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 5)];
+        let groups = vec![vec![vec![0]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].unpinned[0], 5);
+        for n in 1..4 {
+            assert_eq!(allocs[0].unpinned[n], 0);
+        }
+    }
+
+    // ---- Multi-tier spillover ----
+
+    // T08: Two-tier basic — primary tier capped, spill to secondary.
+    #[test]
+    fn test_ua_t08_tier_two_tier_basic() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 12)];
+        let groups = vec![vec![vec![0], vec![1]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].unpinned[0], 8, "tier 0 capped at 8");
+        assert_eq!(allocs[0].unpinned[1], 4, "spill 4 to tier 1");
+        assert_eq!(allocs[0].total(), 12);
+    }
+
+    // T09: 3-tier chain with multi-node middle tier.
+    #[test]
+    fn test_ua_t09_tier_three_tier_chain() {
+        // Growth 30, tier 0=[N0] (8 cap), tier 1=[N1,N2] (16 cap), tier 2=[N3] (8).
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 30)];
+        let groups = vec![vec![vec![0], vec![1, 2], vec![3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].unpinned[0], 8);
+        assert_eq!(allocs[0].unpinned[1] + allocs[0].unpinned[2], 16);
+        assert_eq!(allocs[0].unpinned[3], 6); // 30 - 8 - 16
+        assert_eq!(allocs[0].total(), 30);
+    }
+
+    // T10: Multi-node tier 0 with spill to tier 1.
+    #[test]
+    fn test_ua_t10_tier_multi_node_tier_with_spill() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 20)];
+        let groups = vec![vec![vec![0, 1], vec![2]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].unpinned[0], 8);
+        assert_eq!(allocs[0].unpinned[1], 8);
+        assert_eq!(allocs[0].unpinned[2], 4);
+        assert_eq!(allocs[0].total(), 20);
+    }
+
+    // T11: Tier 0 partial congestion → cap-weighted within tier, then spill.
+    #[test]
+    fn test_ua_t11_tier_partial_congestion_then_spill() {
+        let demands = vec![
+            demand_4n(1, [4, 0, 0, 0], 0),  // P: pins 4 on N0
+            demand_4n(1, [0, 0, 0, 0], 10), // L: tier 0=[N0,N1], tier 1=[N2]
+        ];
+        let groups = vec![vec![vec![0]], vec![vec![0, 1], vec![2]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // L's tier 0 has 4 free on N0, 8 on N1. cap-weighted water_fill of
+        // growth 10: iter 1 share=5 each, N0 capped at 4 → pool=6 → N1=6.
+        // Sum at tier 0 = 10. No spill to tier 1.
+        assert_eq!(allocs[1].unpinned[0], 4);
+        assert_eq!(allocs[1].unpinned[1], 6);
+        assert_eq!(allocs[1].unpinned[2], 0);
+        assert_eq!(allocs[1].total(), 10);
+    }
+
+    // T12: Tier list at full nr_nodes length — terminates cleanly.
+    #[test]
+    fn test_ua_t12_tier_full_length() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 32)];
+        let groups = vec![vec![vec![0], vec![1], vec![2], vec![3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        for n in 0..4 {
+            assert_eq!(allocs[0].unpinned[n], 8);
+        }
+        assert_eq!(allocs[0].total(), 32);
+    }
+
+    // T13: Defensive — empty tier in middle is skipped.
+    #[test]
+    fn test_ua_t13_tier_empty_middle() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 10)];
+        let groups = vec![vec![vec![0], vec![], vec![1]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // Tier 0 takes 8, tier 1 (empty) takes 0, tier 2 takes 2.
+        assert_eq!(allocs[0].unpinned[0], 8);
+        assert_eq!(allocs[0].unpinned[1], 2);
+        assert_eq!(allocs[0].total(), 10);
+    }
+
+    // ---- Cross-layer contention within tiers ----
+
+    // T14: Two layers, same single tier, equal weights.
+    #[test]
+    fn test_ua_t14_tier_same_tier_equal_weight() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 8), demand_4n(1, [0, 0, 0, 0], 8)];
+        let groups = vec![vec![vec![0, 1, 2, 3]], vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // Each layer wants 2/node; per-node water_fill splits 2 each → 4 layers total → exactly 2 each.
+        // Actually 8 cap/node; demand at node = 2+2 = 4 ≤ 8. No contention.
+        assert_eq!(allocs[0].total(), 8);
+        assert_eq!(allocs[1].total(), 8);
+    }
+
+    // T15: Same single tier, weight disparity 1:3.
+    #[test]
+    fn test_ua_t15_tier_weight_disparity() {
+        let demands = vec![
+            demand_4n(1, [0, 0, 0, 0], 16), // A: w=1
+            demand_4n(3, [0, 0, 0, 0], 16), // B: w=3
+        ];
+        let groups = vec![vec![vec![0, 1, 2, 3]], vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // Per-node demand: A wants 4, B wants 4, cap=8 → no contention.
+        // Both demand-capped at 16.
+        assert_eq!(allocs[0].total(), 16);
+        assert_eq!(allocs[1].total(), 16);
+    }
+
+    // T16: Strict layer + single-tier layer sharing a node.
+    #[test]
+    fn test_ua_t16_tier_strict_plus_single_tier() {
+        let demands = vec![
+            demand_4n(1, [0, 0, 0, 0], 4), // A: strict tier 0=[N0]
+            demand_4n(1, [0, 0, 0, 0], 8), // B: single tier [N0, N1]
+        ];
+        let groups = vec![vec![vec![0]], vec![vec![0, 1]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // A wants 4 on N0. B wants 4 on N0, 4 on N1 (cap-weighted equal).
+        // Per-node N0: A=4, B=4, cap=8 → fits. N1: B=4 alone.
+        assert_eq!(allocs[0].unpinned[0], 4);
+        assert_eq!(allocs[1].unpinned[0], 4);
+        assert_eq!(allocs[1].unpinned[1], 4);
+    }
+
+    // T17: Multiple single-tier layers competing on one congested node.
+    #[test]
+    fn test_ua_t17_tier_multi_layer_congested_node() {
+        let demands = vec![
+            demand_4n(1, [6, 0, 0, 0], 0), // P pins 6 N0
+            demand_4n(1, [0, 0, 0, 0], 4), // A tier=[N0,N1]
+            demand_4n(1, [0, 0, 0, 0], 4), // B tier=[N0,N1]
+        ];
+        let groups = vec![vec![vec![0]], vec![vec![0, 1]], vec![vec![0, 1]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // N0 has 2 free, N1 has 8 free. A and B each want 2 on N0, 2 on N1.
+        // N0 contention: A=2, B=2, cap=2 → water_fill 1:1 = each 1.
+        // N1: each 2.
+        // After iter 1, A and B have growth left (4 - 1 - 2 = 1 each).
+        // Iter 2: tier_demand for A = water_fill(1, [N0=1, N1=6]) = ... cap-weighted.
+        // Should converge with total = 4 each.
+        assert_eq!(allocs[1].total(), 4);
+        assert_eq!(allocs[2].total(), 4);
+    }
+
+    // T18: Cascading demand-caps in a single tier.
+    #[test]
+    fn test_ua_t18_tier_cascading_demand_caps() {
+        let demands = vec![
+            demand_4n(1, [0, 0, 0, 0], 2),  // A: tiny demand
+            demand_4n(1, [0, 0, 0, 0], 3),  // B: small demand
+            demand_4n(1, [0, 0, 0, 0], 30), // C: huge demand
+        ];
+        let groups = vec![
+            vec![vec![0, 1, 2, 3]],
+            vec![vec![0, 1, 2, 3]],
+            vec![vec![0, 1, 2, 3]],
+        ];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].total(), 2);
+        assert_eq!(allocs[1].total(), 3);
+        // C absorbs the remainder.
+        assert_eq!(allocs[2].total(), 27);
+        assert_eq!(total_alloc(&allocs), 32);
+    }
+
+    // ---- Interaction with spread:bool layers ----
+
+    // T19: Spread + single-tier sibling coexist.
+    #[test]
+    fn test_ua_t19_tier_spread_plus_single_tier() {
+        let demands = vec![
+            demand_spread(1, 0, 0, 16), // S: spread, raw=16
+            LayerDemand {
+                // R: RoundRobin-style single tier
+                raw_pinned: vec![0, 0],
+                raw_unpinned: 32,
+                weight: 1,
+                spread: false,
+            },
+        ];
+        let groups = vec![vec![vec![0]], vec![vec![0, 1]]];
+        let allocs = unified_alloc(96, &caps_2n(), &demands, &groups);
+        // S: spread, gets equal per-node, demand-capped at 16/2 = 8 each.
+        assert_eq!(allocs[0].unpinned[0], 8);
+        assert_eq!(allocs[0].unpinned[1], 8);
+        assert_eq!(allocs[0].total(), 16);
+        // R: takes the rest in single-tier balanced fashion.
+        assert_eq!(allocs[1].total(), 32);
+    }
+
+    // ---- Conservation, edge cases, invariants ----
+
+    // T22: Conservation — total ≤ supply.
+    #[test]
+    fn test_ua_t22_tier_conservation() {
+        let demands = vec![
+            demand_4n(1, [0, 0, 0, 0], 100),
+            demand_4n(1, [0, 0, 0, 0], 100),
+        ];
+        let groups = vec![vec![vec![0, 1, 2, 3]], vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(total_alloc(&allocs), 32, "no stranded units");
+    }
+
+    // T25: All-zero demand — nothing placed.
+    #[test]
+    fn test_ua_t25_tier_all_zero_demand() {
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 0)];
+        let groups = vec![vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].total(), 0);
+    }
+
+    // T28: Pinned-only layer untouched by tiered placement.
+    #[test]
+    fn test_ua_t28_tier_pinned_only_untouched() {
+        let demands = vec![
+            demand_4n(1, [4, 0, 0, 0], 0), // pinned-only
+            demand_4n(1, [0, 0, 0, 0], 8), // tier layer
+        ];
+        let groups = vec![vec![vec![0]], vec![vec![1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].pinned[0], 4);
+        assert_eq!(allocs[0].unpinned.iter().sum::<usize>(), 0);
+        // L spread evenly across tier [N1, N2, N3].
+        assert_eq!(allocs[1].total(), 8);
+    }
+
+    // T29: Asymmetric topology — equal-share within tier, capped by free capacity.
+    // Verifies that smaller-cap nodes get filled to their limit and the slack
+    // flows to larger-cap nodes via water_fill's internal cap-and-restart.
+    #[test]
+    fn test_ua_t29_tier_asymmetric_topo() {
+        let caps = vec![4, 4, 16, 4]; // N2 is large, others are small.
+        let demands = vec![LayerDemand {
+            raw_pinned: vec![0; 4],
+            raw_unpinned: 20,
+            weight: 1,
+            spread: false,
+        }];
+        let groups = vec![vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(28, &caps, &demands, &groups);
+        // Equal share=5 each. N0, N1, N3 cap at 4 → pool=20-12=8.
+        // N2 absorbs remaining 8 (8 ≤ 16 cap).
+        // Result [4, 4, 8, 4] sum 20.
+        assert_eq!(allocs[0].unpinned[0], 4);
+        assert_eq!(allocs[0].unpinned[1], 4);
+        assert_eq!(allocs[0].unpinned[2], 8);
+        assert_eq!(allocs[0].unpinned[3], 4);
+        assert_eq!(allocs[0].total(), 20);
+    }
+
+    // T30: Largest-remainder rounding stability.
+    #[test]
+    fn test_ua_t30_tier_rounding_exact_sum() {
+        // 4 nodes, single tier, growth 7 (doesn't divide evenly).
+        let demands = vec![demand_4n(1, [0, 0, 0, 0], 7)];
+        let groups = vec![vec![vec![0, 1, 2, 3]]];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // Sum must equal exactly 7.
+        assert_eq!(allocs[0].unpinned.iter().sum::<usize>(), 7);
+    }
+
+    // ---- RoundRobin migration coverage (RR1-RR12) ----
+
+    fn demand_rr_4n(w: usize, u: usize) -> LayerDemand {
+        // RoundRobin-shape: not spread, used with single-tier groups.
+        LayerDemand {
+            raw_pinned: vec![0; 4],
+            raw_unpinned: u,
+            weight: w,
+            spread: false,
+        }
+    }
+
+    fn rr_groups_4n() -> Vec<Vec<usize>> {
+        vec![vec![0, 1, 2, 3]]
+    }
+
+    // RR2: RoundRobin alone, abundant capacity — even spread.
+    #[test]
+    fn test_ua_rr2_round_robin_alone_abundant() {
+        let demands = vec![demand_rr_4n(1, 16)];
+        let groups = vec![rr_groups_4n()];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        for n in 0..4 {
+            assert_eq!(allocs[0].unpinned[n], 4);
+        }
+        assert_eq!(allocs[0].total(), 16);
+    }
+
+    // RR3: RoundRobin alone, demand-capped (small budget).
+    #[test]
+    fn test_ua_rr3_round_robin_alone_demand_capped() {
+        let demands = vec![demand_rr_4n(1, 4)];
+        let groups = vec![rr_groups_4n()];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        for n in 0..4 {
+            assert_eq!(allocs[0].unpinned[n], 1);
+        }
+        assert_eq!(allocs[0].total(), 4);
+    }
+
+    // RR4: RoundRobin alone, supply-constrained (demand > supply).
+    #[test]
+    fn test_ua_rr4_round_robin_alone_supply_constrained() {
+        let demands = vec![demand_rr_4n(1, 100)];
+        let groups = vec![rr_groups_4n()];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // All caps fill: 8 each.
+        for n in 0..4 {
+            assert_eq!(allocs[0].unpinned[n], 8);
+        }
+        assert_eq!(allocs[0].total(), 32);
+    }
+
+    // RR5: Two RoundRobin layers, equal weight.
+    #[test]
+    fn test_ua_rr5_two_round_robin_equal_weight() {
+        let demands = vec![demand_rr_4n(1, 16), demand_rr_4n(1, 16)];
+        let groups = vec![rr_groups_4n(), rr_groups_4n()];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // Each demand=16, equal weight, total demand=32=supply → both fully met.
+        assert_eq!(allocs[0].total(), 16);
+        assert_eq!(allocs[1].total(), 16);
+        // Spread evenly: 4 each per node per layer.
+        for n in 0..4 {
+            assert_eq!(allocs[0].unpinned[n], 4);
+            assert_eq!(allocs[1].unpinned[n], 4);
+        }
+    }
+
+    // RR6: Two RoundRobin layers, weight disparity 1:3.
+    #[test]
+    fn test_ua_rr6_two_round_robin_weight_disparity() {
+        let demands = vec![demand_rr_4n(1, 32), demand_rr_4n(3, 32)];
+        let groups = vec![rr_groups_4n(), rr_groups_4n()];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // global_target: A=8, B=24. Both demand=32 > target.
+        // A gets 8, B gets 24.
+        assert_eq!(allocs[0].total(), 8);
+        assert_eq!(allocs[1].total(), 24);
+    }
+
+    // RR7: RoundRobin + locality layer, no contention.
+    #[test]
+    fn test_ua_rr7_round_robin_plus_locality() {
+        let demands = vec![
+            demand_4n(1, [0, 0, 0, 0], 4), // A: locality, single node tier
+            demand_rr_4n(1, 16),           // R: RoundRobin
+        ];
+        let groups = vec![
+            vec![vec![0]],  // A: strict to N0
+            rr_groups_4n(), // R: single tier
+        ];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // A fills 4 on N0. R wants 4 per node, but N0 only has 4 free.
+        // R: cap-weighted water_fill(16, [{w=1,d=4}, {w=1,d=8}, {w=1,d=8}, {w=1,d=8}])
+        //   iter 1: share=4, N0 capped at 4, pool=12, 3 remaining.
+        //   iter 2: share=4 each. Done. Result [4, 4, 4, 4] = 16.
+        assert_eq!(allocs[0].unpinned[0], 4);
+        assert_eq!(allocs[1].total(), 16);
+        // R: 4 each.
+        for n in 0..4 {
+            assert_eq!(allocs[1].unpinned[n], 4);
+        }
+    }
+
+    // RR8: RoundRobin + NodeSpread sibling — each respects its placement class.
+    #[test]
+    fn test_ua_rr8_round_robin_plus_node_spread() {
+        let demands = vec![
+            // S: NodeSpread, 4-NUMA, total=16 → 4 per node strict.
+            LayerDemand {
+                raw_pinned: vec![0; 4],
+                raw_unpinned: 16,
+                weight: 1,
+                spread: true,
+            },
+            demand_rr_4n(1, 16), // R: RoundRobin, 4-NUMA
+        ];
+        let groups = vec![
+            vec![vec![0], vec![1], vec![2], vec![3]], // S: irrelevant (spread:true)
+            rr_groups_4n(),                           // R: single tier
+        ];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // S: strict equal-per-node 4 each.
+        for n in 0..4 {
+            assert_eq!(allocs[0].unpinned[n], 4, "S: equal per node");
+        }
+        assert_eq!(allocs[0].total(), 16);
+        // R: takes remaining 16 cap-weighted across what's left.
+        // Each node has 8-4=4 free for R. R demand=16, equal share=4 each.
+        for n in 0..4 {
+            assert_eq!(allocs[1].unpinned[n], 4, "R: fills remaining");
+        }
+        assert_eq!(allocs[1].total(), 16);
+    }
+
+    // RR9: RoundRobin with restricted spec_nodes (single tier with 2 nodes).
+    #[test]
+    fn test_ua_rr9_round_robin_restricted_nodes() {
+        let demands = vec![demand_rr_4n(1, 8)];
+        let groups = vec![vec![vec![0, 2]]]; // RR restricted to N0 and N2
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        assert_eq!(allocs[0].unpinned[0], 4);
+        assert_eq!(allocs[0].unpinned[2], 4);
+        assert_eq!(allocs[0].unpinned[1], 0);
+        assert_eq!(allocs[0].unpinned[3], 0);
+        assert_eq!(allocs[0].total(), 8);
+    }
+
+    // RR10: RoundRobin with multiple pinned competitors.
+    #[test]
+    fn test_ua_rr10_round_robin_multiple_pinned() {
+        let demands = vec![
+            demand_4n(1, [6, 0, 0, 0], 0), // P1: pinned 6 N0
+            demand_4n(1, [0, 0, 6, 0], 0), // P2: pinned 6 N2
+            demand_rr_4n(1, 20),           // R: 4-tier single, 20 unpinned
+        ];
+        let groups = vec![vec![vec![0]], vec![vec![2]], rr_groups_4n()];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // After P1/P2: remaining = [2, 8, 2, 8] = 20 free.
+        // R cap-weighted water_fill(20, [{w=1,d=2}, {w=1,d=8}, {w=1,d=2}, {w=1,d=8}]):
+        //   iter 1: share=5, N0/N2 cap at 2, pool=16, 2 remaining.
+        //   iter 2: share=8 each. N1=8, N3=8.
+        //   Result [2, 8, 2, 8] = 20.
+        assert_eq!(allocs[2].unpinned[0], 2);
+        assert_eq!(allocs[2].unpinned[1], 8);
+        assert_eq!(allocs[2].unpinned[2], 2);
+        assert_eq!(allocs[2].unpinned[3], 8);
+        assert_eq!(allocs[2].total(), 20);
+    }
+
+    // RR11: Floor guarantee preserved for low-weight RoundRobin.
+    #[test]
+    fn test_ua_rr11_round_robin_floor_guarantee() {
+        let demands = vec![
+            demand_4n(100, [0, 0, 0, 0], 100), // dominant locality
+            demand_rr_4n(1, 10),               // low-weight RoundRobin
+        ];
+        let groups = vec![
+            strict_groups(vec![vec![0, 1, 2, 3]])[0].clone(),
+            rr_groups_4n(),
+        ];
+        let allocs = unified_alloc(4, &caps_4n(), &demands, &groups);
+        // Tiny pool, dominant weight — floor guarantees ≥ 1 for RR.
+        assert!(allocs[1].total() >= 1, "low-weight RR layer must get ≥ 1");
+    }
+
+    // RR12: RoundRobin on asymmetric topology.
+    #[test]
+    fn test_ua_rr12_round_robin_asymmetric_topo() {
+        let caps = vec![4, 4, 16, 4]; // N2 large, others small
+        let demands = vec![demand_rr_4n(1, 20)];
+        let groups = vec![rr_groups_4n()];
+        let allocs = unified_alloc(28, &caps, &demands, &groups);
+        // Equal share=5 each. N0/N1/N3 cap at 4. Pool=20-12=8.
+        // iter 2: only N2 left, gets min(8, 16) = 8.
+        // Result [4, 4, 8, 4] = 20.
+        assert_eq!(allocs[0].unpinned[0], 4);
+        assert_eq!(allocs[0].unpinned[1], 4);
+        assert_eq!(allocs[0].unpinned[2], 8);
+        assert_eq!(allocs[0].unpinned[3], 4);
+        assert_eq!(allocs[0].total(), 20);
+    }
+
+    // RR1: RoundRobin recovers from bottleneck-cap with single-tier groups.
+    //
+    // Before refactor: RoundRobin used spread:true and was capped at
+    // min(spread_avail) * nr_nodes. Here min=2, so total = 2*4 = 8.
+    // After: single-tier groups distribute proportionally; R gets 20.
+    #[test]
+    fn test_ua_rr1_round_robin_no_bottleneck_cap() {
+        let demands = vec![
+            demand_4n(1, [6, 0, 0, 0], 0), // P: pinned 6 on N0
+            LayerDemand {
+                // R: RoundRobin shape, NOT spread
+                raw_pinned: vec![0; 4],
+                raw_unpinned: 20,
+                weight: 1,
+                spread: false,
+            },
+        ];
+        let groups = vec![
+            vec![vec![0], vec![1], vec![2], vec![3]],
+            vec![vec![0, 1, 2, 3]],
+        ];
+        let allocs = unified_alloc(32, &caps_4n(), &demands, &groups);
+        // Free per node: [2, 8, 8, 8] = 26. R wants 20.
+        // cap-weighted water_fill(20, demands=[2,8,8,8]):
+        //   iter 1 equal share=5: N0 capped at 2, pool=18.
+        //   iter 2: 18/3=6 each. Result [2, 6, 6, 6] = 20.
+        assert_eq!(allocs[1].unpinned[0], 2);
+        assert_eq!(allocs[1].unpinned[1], 6);
+        assert_eq!(allocs[1].unpinned[2], 6);
+        assert_eq!(allocs[1].unpinned[3], 6);
+        assert_eq!(allocs[1].total(), 20);
     }
 }

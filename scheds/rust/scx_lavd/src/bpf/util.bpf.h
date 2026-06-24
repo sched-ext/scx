@@ -34,7 +34,8 @@ u32 calc_avg32(u32 old_val, u32 new_val);
 bool is_kernel_task(struct task_struct *p);
 bool is_kernel_worker(struct task_struct *p);
 bool is_ksoftirqd(struct task_struct *p);
-bool is_pinned(const struct task_struct *p);
+bool is_permanently_pinned(const struct task_struct *p);
+bool is_effectively_pinned(task_ctx __arg_arena *taskc);
 bool use_full_cpus(void);
 void set_affinity_flags(task_ctx __arg_arena *taskc,
 			const struct cpumask *cpumask);
@@ -45,4 +46,42 @@ static inline bool rt_or_dl_task(struct task_struct *p)
 {
 	return unlikely(p->prio < MAX_RT_PRIO);
 }
+
+/*
+ * task_ctx lookup with per-CPU cache.
+ *
+ * get_task_ctx_curcpu(p, cpuc) -- @cpuc MUST be the current CPU's cpu_ctx
+ * (i.e. obtained via get_cpu_ctx(), not get_cpu_ctx_id(...) or
+ * get_cpu_ctx_task(...) for an arbitrary CPU). Misuse silently corrupts
+ * the cache of a remote CPU and racing reads can return torn results.
+ *
+ * get_task_ctx(p) is a foot-gun-free wrapper that always uses
+ * get_cpu_ctx() internally.
+ */
+struct cpu_ctx;
+u64 __get_task_ctx_slowpath(struct task_struct *p, struct cpu_ctx *cpuc);
+
+static __always_inline u64
+__get_task_ctx_curcpu(struct task_struct *p, struct cpu_ctx *cpuc)
+{
+	if (cpuc) {
+#ifdef LAVD_DEBUG
+		if (cpuc->cpu_id != bpf_get_smp_processor_id())
+			scx_bpf_error("get_task_ctx_curcpu: non-local cpuc "
+				      "(cpu_id=%u, cur=%d)",
+				      cpuc->cpu_id,
+				      bpf_get_smp_processor_id());
+#endif
+		if (cpuc->cached_task == (u64)p &&
+		    cpuc->cached_pid == p->pid)
+			return cpuc->cached_taskc_raw;
+	}
+	return __get_task_ctx_slowpath(p, cpuc);
+}
+
+#define get_task_ctx_curcpu(p, cpuc) \
+	((task_ctx *)__get_task_ctx_curcpu((p), (cpuc)))
+#define get_task_ctx(p)	get_task_ctx_curcpu((p), get_cpu_ctx())
+
+
 #endif /* __UTIL_H */

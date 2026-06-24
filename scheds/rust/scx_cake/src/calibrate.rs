@@ -84,7 +84,22 @@ fn measure_pair(cpu_a: usize, cpu_b: usize, config: &EtdConfig) -> Option<Vec<f6
 
             // Set real-time priority to minimize preemption jitter
             unsafe {
+                #[cfg(target_env = "gnu")]
                 let param = libc::sched_param { sched_priority: 99 };
+                #[cfg(target_env = "musl")]
+                let param = libc::sched_param {
+                    sched_priority: 99,
+                    sched_ss_low_priority: 0,
+                    sched_ss_repl_period: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    sched_ss_init_budget: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    sched_ss_max_repl: 0,
+                };
                 libc::sched_setscheduler(0, libc::SCHED_FIFO, &param);
             }
 
@@ -116,7 +131,22 @@ fn measure_pair(cpu_a: usize, cpu_b: usize, config: &EtdConfig) -> Option<Vec<f6
 
             // Reset to normal priority before thread exit
             unsafe {
+                #[cfg(target_env = "gnu")]
                 let param = libc::sched_param { sched_priority: 0 };
+                #[cfg(target_env = "musl")]
+                let param = libc::sched_param {
+                    sched_priority: 0,
+                    sched_ss_low_priority: 0,
+                    sched_ss_repl_period: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    sched_ss_init_budget: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    sched_ss_max_repl: 0,
+                };
                 libc::sched_setscheduler(0, libc::SCHED_OTHER, &param);
             }
         });
@@ -130,7 +160,22 @@ fn measure_pair(cpu_a: usize, cpu_b: usize, config: &EtdConfig) -> Option<Vec<f6
 
             // Set real-time priority to minimize preemption jitter
             unsafe {
+                #[cfg(target_env = "gnu")]
                 let param = libc::sched_param { sched_priority: 99 };
+                #[cfg(target_env = "musl")]
+                let param = libc::sched_param {
+                    sched_priority: 99,
+                    sched_ss_low_priority: 0,
+                    sched_ss_repl_period: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    sched_ss_init_budget: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    sched_ss_max_repl: 0,
+                };
                 libc::sched_setscheduler(0, libc::SCHED_FIFO, &param);
             }
 
@@ -173,7 +218,22 @@ fn measure_pair(cpu_a: usize, cpu_b: usize, config: &EtdConfig) -> Option<Vec<f6
 
             // Reset to normal priority before thread exit
             unsafe {
+                #[cfg(target_env = "gnu")]
                 let param = libc::sched_param { sched_priority: 0 };
+                #[cfg(target_env = "musl")]
+                let param = libc::sched_param {
+                    sched_priority: 0,
+                    sched_ss_low_priority: 0,
+                    sched_ss_repl_period: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    sched_ss_init_budget: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    sched_ss_max_repl: 0,
+                };
                 libc::sched_setscheduler(0, libc::SCHED_OTHER, &param);
             }
 

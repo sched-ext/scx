@@ -330,7 +330,7 @@ impl ContextSwitchAnalyzer {
             .collect();
 
         // Sort by total runtime (descending)
-        stats.sort_by(|a, b| b.total_runtime_ns.cmp(&a.total_runtime_ns));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.total_runtime_ns));
 
         stats
     }
@@ -460,7 +460,7 @@ impl ContextSwitchAnalyzer {
             })
             .collect();
 
-        stats.sort_by(|a, b| b.total_runtime_ns.cmp(&a.total_runtime_ns));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.total_runtime_ns));
         stats
     }
 }
@@ -946,7 +946,7 @@ impl CorrelationAnalyzer {
         }
 
         // Sort by latency (descending)
-        correlations.sort_by(|a, b| b.wakeup_latency_ns.cmp(&a.wakeup_latency_ns));
+        correlations.sort_by_key(|b| std::cmp::Reverse(b.wakeup_latency_ns));
 
         correlations
     }

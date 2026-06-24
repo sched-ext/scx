@@ -63,7 +63,22 @@ int scx_atq_cancel(scx_task_common *taskc);
 static __always_inline
 int scx_atq_lock(scx_atq_t __arg_arena *atq)
 {
-	return arena_spin_lock(&atq->lock);
+	int ret = arena_spin_lock(&atq->lock);
+
+	/*
+	 * arena_spin_lock() returns -ETIMEDOUT when one of the bounded spin
+	 * loops inside arena_spin_lock_slowpath() exhausts its iterations
+	 * (see scheds/include/bpf_arena_spin_lock.h).  The timed-out waiter
+	 * just bails, leaving the MCS chain with stale ->next links and any
+	 * waiters queued behind it stuck on their own bounded spins.
+	 * Subsequent acquires race against an inconsistent queue; retrying
+	 * is unsafe.  Treat the timeout as a fatal scheduler error so the
+	 * system tears down cleanly.
+	 */
+	if (ret == -ETIMEDOUT)
+		scx_bpf_error("scx_atq: arena_spin_lock timed out");
+
+	return ret;
 }
 
 static __always_inline

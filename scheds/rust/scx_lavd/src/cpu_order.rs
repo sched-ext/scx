@@ -6,6 +6,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use anyhow::anyhow;
 use anyhow::Result;
 use combinations::Combinations;
 use itertools::iproduct;
@@ -96,9 +97,15 @@ pub struct CpuOrder {
 }
 
 impl CpuOrder {
-    /// Build a cpu preference order with optional topology configuration
-    pub fn new(topology_args: Option<&scx_utils::TopologyArgs>) -> Result<CpuOrder> {
-        let ctx = CpuOrderCtx::new(topology_args)?;
+    /// Build a cpu preference order with optional topology configuration.
+    /// When @no_use_em is set, ignore the energy model even if the kernel
+    /// provides one, so the CPU preference order is built as on a machine
+    /// without an energy model.
+    pub fn new(
+        topology_args: Option<&scx_utils::TopologyArgs>,
+        no_use_em: bool,
+    ) -> Result<CpuOrder> {
+        let ctx = CpuOrderCtx::new(topology_args, no_use_em)?;
         let cpus_pf = ctx.build_topo_order(false).unwrap();
         let cpus_ps = ctx.build_topo_order(true).unwrap();
         let cpdom_map = CpuOrderCtx::build_cpdom(&cpus_pf).unwrap();
@@ -137,13 +144,17 @@ struct CpuOrderCtx {
 }
 
 impl CpuOrderCtx {
-    fn new(topology_args: Option<&scx_utils::TopologyArgs>) -> Result<Self> {
+    fn new(topology_args: Option<&scx_utils::TopologyArgs>, no_use_em: bool) -> Result<Self> {
         let topo = match topology_args {
             Some(args) => Topology::with_args(args)?,
             None => Topology::new()?,
         };
 
-        let em = EnergyModel::new();
+        let em = if no_use_em {
+            Err(anyhow!("energy model disabled (--no-use-em)"))
+        } else {
+            EnergyModel::new()
+        };
         let smt_enabled = topo.smt_enabled;
         let has_biglittle = topo.has_little_cores();
         let has_energy_model = em.is_ok();
@@ -278,10 +289,10 @@ impl CpuOrderCtx {
 
     /// Build a list of compute domains
     fn build_cpdom(cpu_ids: &Vec<CpuId>) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
-        // Note that building compute domain is independent to CPU orer
+        // Note that building compute domain is independent to CPU order
         // so it is okay to use any cpus_*.
 
-        // Creat a compute domain map, where a compute domain is a CPUs that
+        // Create a compute domain map, where a compute domain is a CPUs that
         // are under the same node and LLC (virtual and physical) and have the same core type.
         let mut cpdom_id = 0;
         let mut cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain> = BTreeMap::new();

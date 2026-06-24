@@ -17,6 +17,8 @@
 #include <bpf/bpf_tracing.h>
 #include <lib/cgroup.h>
 
+extern const volatile u8	no_fast_lb;
+
 struct sticky_ctx {
 	/*
 	 * For test_cpu_stickable().
@@ -33,7 +35,7 @@ bool init_idle_i_mask(struct pick_ctx *ctx, const struct cpumask *idle_cpumask)
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		ctx->i_mask = idle_cpumask;
 	else {
-		struct bpf_cpumask *_i_mask = ctx->cpuc_cur->tmp_i_mask;
+		struct bpf_cpumask *_i_mask = ctx->cpuc_cur->i_mask;
 		if (!_i_mask)
 			return false;
 		bpf_cpumask_and(_i_mask, ctx->p->cpus_ptr, idle_cpumask);
@@ -67,8 +69,8 @@ bool init_ao_masks(struct pick_ctx *ctx)
 		return true;
 	}
 
-	ctx->a_mask = ctx->cpuc_cur->tmp_a_mask;
-	ctx->o_mask = ctx->cpuc_cur->tmp_o_mask;
+	ctx->a_mask = ctx->cpuc_cur->a_mask;
+	ctx->o_mask = ctx->cpuc_cur->o_mask;
 	if (!ctx->a_mask || !ctx->o_mask)
 		return false;
 
@@ -84,12 +86,75 @@ bool init_ao_masks(struct pick_ctx *ctx)
 }
 
 static __always_inline
+bool is_preemption_vulnerable(struct pick_ctx *ctx)
+{
+	struct cpdom_ctx *cpdc;
+
+	cpdc = MEMBER_VPTR(cpdom_ctxs, [ctx->cpuc_cur->cpdom_id]);
+	if (!cpdc)
+		return false;
+
+	return preemption_vulnerability(ctx->taskc->normalized_lat_cri,
+				       ctx->taskc->util_est) >= cpdc->vuln_thresh;
+}
+
+/*
+ * For preemption-vulnerable tasks, repartition active/overflow masks based
+ * on the pre-computed steady_cpumask. Steady (non-turbulent) CPUs become
+ * the active set, and turbulent CPUs become the overflow set.
+ */
+static __always_inline
+bool repartition_masks_for_latency(struct pick_ctx *ctx)
+{
+	struct bpf_cpumask *steady_set = ctx->cpuc_cur->a_mask;
+	struct bpf_cpumask *turb_set = ctx->cpuc_cur->o_mask;
+	struct bpf_cpumask *steady = steady_cpumask;
+
+	if (!steady_set || !turb_set || !steady)
+		return false;
+
+	/*
+	 * Start from the unfiltered active/overflow masks and apply
+	 * affinity if needed. We can't reuse a_mask/o_mask from
+	 * init_ao_masks() because they share the same scratch buffers
+	 * we're about to overwrite.
+	 *
+	 * steady_set = eligible_cpus ∩ steady
+	 * turb_set   = eligible_cpus - steady
+	 */
+	bpf_cpumask_or(steady_set, cast_mask(ctx->active), cast_mask(ctx->ovrflw));
+
+	if (test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
+		bpf_cpumask_and(steady_set, ctx->p->cpus_ptr, cast_mask(steady_set));
+
+	bpf_cpumask_copy(turb_set, cast_mask(steady_set));
+	bpf_cpumask_and(steady_set, cast_mask(steady_set), cast_mask(steady));
+	bpf_cpumask_xor(turb_set, cast_mask(turb_set), cast_mask(steady_set));
+
+	ctx->a_mask = steady_set;
+	ctx->o_mask = turb_set;
+	ctx->a_empty = bpf_cpumask_empty(cast_mask(steady_set));
+	ctx->o_empty = bpf_cpumask_empty(cast_mask(turb_set));
+	if (ctx->a_empty)
+		ctx->a_mask = NULL;
+	if (ctx->o_empty)
+		ctx->o_mask = NULL;
+
+	return true;
+}
+
+static __always_inline
 bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 {
-	ctx->ia_mask = ctx->cpuc_cur->tmp_t_mask;
-	ctx->io_mask = ctx->cpuc_cur->tmp_t2_mask;
-	ctx->iat_mask = ctx->cpuc_cur->tmp_t3_mask;
-	ctx->temp_mask = ctx->cpuc_cur->tmp_l_mask; /* l_mask is no longer used, recycle it. */
+	/*
+	 * temp_mask is also used by find_cpu_in() earlier in pick_idle_cpu(),
+	 * but find_cpu_in()'s caller goes straight to unlock_out, so the
+	 * scratch is free by the time we reach here.
+	 */
+	ctx->ia_mask = ctx->cpuc_cur->ia_mask;
+	ctx->io_mask = ctx->cpuc_cur->io_mask;
+	ctx->iat_mask = ctx->cpuc_cur->iat_mask;
+	ctx->temp_mask = ctx->cpuc_cur->temp_mask;
 	if (!ctx->ia_mask || !ctx->io_mask || !ctx->iat_mask || !ctx->temp_mask)
 		return false;
 
@@ -129,7 +194,7 @@ s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 	/*
 	 * online_src_mask = src_mask ∩ online_mask
 	 */
-	online_src_mask = cpuc_cur->tmp_l_mask;
+	online_src_mask = cpuc_cur->temp_mask;
 	if (!online_src_mask)
 		return -ENOENT;
 
@@ -199,7 +264,7 @@ static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 }
 
 static __always_inline
-s32 cpumask_any_dsitribute(struct pick_ctx *ctx)
+s32 cpumask_any_distribute(struct pick_ctx *ctx)
 {
 	const struct cpumask *mask;
 	s32 cpu;
@@ -221,8 +286,8 @@ s32 pick_random_cpu(struct pick_ctx *ctx)
 	/*
 	 * Pick a less loaded CPU using the random of two choices technique.
 	 */
-	s32 cpu0 = cpumask_any_dsitribute(ctx);
-	s32 cpu1 = cpumask_any_dsitribute(ctx);
+	s32 cpu0 = cpumask_any_distribute(ctx);
+	s32 cpu1 = cpumask_any_distribute(ctx);
 	struct cpu_ctx *cpuc0, *cpuc1;
 
 	if (cpu0 == cpu1 && cpu0 != -ENOENT)
@@ -547,16 +612,17 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
 			if (cpu >= 0) {
 				/*
-				 * If task donation is successful, mark the stealer
-				 * and the stealee's job done. By marking done,
-				 * those compute domains would not be involved in
-				 * load balancing until the end of this round,
-				 * so this helps gradual migration. It is racy
-				 * in task stealings and donations, but we don't
-				 * care because a slight over-migration does not matter.
+				 * Leave both stealer and stealee flags
+				 * active for the round. Donation redirects
+				 * a waking task — it was never queued in
+				 * the stealee domain, so don't touch the
+				 * budget. Flags are cleared only by budget
+				 * exhaustion in the stealing path.
 				 */
-				WRITE_ONCE(mig_cpdc->is_stealer, false);
-				WRITE_ONCE(cpdc->is_stealee, false);
+				if (no_fast_lb) {
+					WRITE_ONCE(mig_cpdc->is_stealer, false);
+					WRITE_ONCE(cpdc->is_stealee, false);
+				}
 				*sticky_cpdom = mig_cpdom;
 				break;
 			}
@@ -610,6 +676,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 *    (if it exists) will be resolved by the load balancing mechanism.
 	 */
 	bpf_rcu_read_lock();
+	ctx->a_mask = ctx->o_mask = NULL;
 
 	/*
 	 * If a task can run only on a single CPU (e.g., per-CPU kworker),
@@ -617,12 +684,30 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * Note that do not extend the overflow set for a unpinned,
 	 * non-migratable task since disabling task migration is temporary.
 	 */
-	if (!init_active_ovrflw_masks(ctx))
-		goto err_out;
-	if (is_pinned(ctx->p) || is_migration_disabled(ctx->p)) {
+	if (!init_active_ovrflw_masks(ctx)) {
+		/*
+		 * ctx->a_mask and ctx->o_mask haven't been initialized yet,
+		 * so we cannot rely on pick_random_cpu(). Hence, fall back to
+		 * the prev_cpu and go out.
+		 */
+		cpu = ctx->prev_cpu;
+		goto unlock_out;
+	}
+
+	/*
+	 * Use effective pinning here so we cover both permanent pinning
+	 * (nr_cpus_allowed == 1) and transient migrate_disable narrowing
+	 * (cpus_ptr weight == 1, cached via ops.set_cpumask).
+	 */
+	if (is_effectively_pinned(ctx->taskc) || is_migration_disabled(ctx->p)) {
 		cpu = ctx->prev_cpu;
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(ctx->active))) {
-			if (is_pinned(ctx->p))
+			/*
+			 * Extend the overflow set only for permanent pinning;
+			 * migrate_disable is transient, so we don't want to
+			 * pollute the overflow set with short-lived restrictions.
+			 */
+			if (is_permanently_pinned(ctx->p))
 				bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
 		}
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
@@ -634,8 +719,15 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * If @p cannot run on either active or overflow set, extend the
 	 * overflow set, respecting the cpu preference order.
 	 */
-	if (!init_ao_masks(ctx))
-		goto err_out;
+	if (!init_ao_masks(ctx)) {
+		/*
+		 * ctx->a_mask and ctx->o_mask haven't been initialized yet,
+		 * so we cannot rely on pick_random_cpu(). Hence, fall back to
+		 * the prev_cpu and go out.
+		 */
+		cpu = ctx->prev_cpu;
+		goto unlock_out;
+	}
 	if (ctx->a_empty && ctx->o_empty) {
 		cpu = find_cpu_in(ctx->p->cpus_ptr, ctx->cpuc_cur);
 		if (cpu >= 0) {
@@ -645,6 +737,16 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 		goto unlock_out;
 	}
 	/* NOTE: Now task @p can run on either active or overflow set. */
+
+	/*
+	 * For preemption-vulnerable tasks, repartition the active/overflow
+	 * masks so the idle CPU search prefers non-turbulent CPUs with
+	 * sufficient latency headroom.
+	 */
+	if (is_preemption_vulnerable(ctx)) {
+		if (!repartition_masks_for_latency(ctx))
+			goto err_out;
+	}
 
 	/*
 	 * Find a sticky cpu and domain considering the core & task type

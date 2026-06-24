@@ -1,6 +1,6 @@
 [package]
 name = "scxtop"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 authors = ["Daniel Hodges <hodges.daniel.scott@gmail.com>", "Yaakov Stein <ymstein14@gmail.com>"]
 license = "GPL-2.0-only"
@@ -27,7 +27,7 @@ clap_complete = "4"
 crossterm = { version = "0.29", features = ["serde", "event-stream"] }
 futures = "0.3"
 glob = "0.3"
-libbpf-rs = "=0.26.1"
+libbpf-rs = "=0.26.2"
 libc = "0.2"
 log = "0.4"
 num-format = { version = "0.4", features = ["with-serde", "with-system-locale"] }
@@ -38,8 +38,8 @@ protobuf = "3"
 rand = "0.10"
 ratatui = { version = "0.30", features = ["serde", "macros"] }
 regex = "1"
-scx_stats = { path = "../../rust/scx_stats", version = "1.1.0" }
-scx_utils = { path = "../../rust/scx_utils", version = "1.1.0" }
+scx_stats = { path = "../../rust/scx_stats", version = "1.1.1" }
+scx_utils = { path = "../../rust/scx_utils", version = "1.1.1" }
 simplelog = "0.12"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
@@ -50,7 +50,7 @@ tokio = { version = "1", features = ["full"] }
 toml = "1"
 xdg = "3"
 log-panics = { version = "2", features = ["with-backtrace"]}
-hashbrown = "0.16"
+hashbrown = "0.17"
 smartstring = { version = "1", features = ["serde"] }
 nix = { version = "0.31", features = ["time", "user"] }
 blazesym = "0.2"
@@ -65,5 +65,5 @@ name = "search_benchmark"
 harness = false
 
 [build-dependencies]
-scx_stats = { path = "../../rust/scx_stats", version = "1.1.0" }
-scx_cargo = { path = "../../rust/scx_cargo", version = "1.1.0" }
+scx_stats = { path = "../../rust/scx_stats", version = "1.1.1" }
+scx_cargo = { path = "../../rust/scx_cargo", version = "1.1.1" }

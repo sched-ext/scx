@@ -241,7 +241,7 @@ pub fn detect() -> Result<TopologyInfo> {
         info.has_hybrid_cores = true;
     } else {
         info.has_hybrid_cores = false;
-        // On Homogenous CPUs (Like 9800X3D), everything is a "Big Phys" core.
+        // On Homogeneous CPUs (Like 9800X3D), everything is a "Big Phys" core.
         // If there's no V-Cache Asymmetry, everything collapses perfectly to prevent extra BPF scans.
     }
 

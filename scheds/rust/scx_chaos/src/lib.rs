@@ -308,6 +308,9 @@ impl Builder<'_> {
         };
         let open_opts = LibbpfOpts::default().into_bpf_open_opts();
         let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos, open_opts)?;
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+        open_skel.progs.on_thermal_pressure.set_autoload(false);
+
         let hw_profile = scx_p2dq::HardwareProfile::detect();
         scx_p2dq::init_open_skel!(
             &mut open_skel,
@@ -316,6 +319,34 @@ impl Builder<'_> {
             self.verbose,
             &hw_profile
         )?;
+
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+        {
+            let thermal_enabled = std::path::Path::new(
+                "/sys/kernel/tracing/events/thermal_pressure/hw_pressure_update",
+            )
+            .exists()
+                || std::path::Path::new(
+                    "/sys/kernel/debug/tracing/events/thermal_pressure/hw_pressure_update",
+                )
+                .exists();
+
+            if thermal_enabled {
+                debug!(
+                    "Kernel supports thermal pressure tracking, enabling hw_pressure_update tracepoint"
+                );
+                open_skel.progs.on_thermal_pressure.set_autoload(true);
+                open_skel
+                    .maps
+                    .rodata_data
+                    .as_mut()
+                    .unwrap()
+                    .p2dq_config
+                    .thermal_enabled = std::mem::MaybeUninit::new(true);
+            } else {
+                debug!("Kernel does not support thermal pressure tracking (CONFIG_SCHED_HW_PRESSURE not enabled)");
+            }
+        }
 
         let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
 

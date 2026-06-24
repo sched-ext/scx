@@ -1,204 +1,293 @@
 # PANDEMONIUM
 
-Built in Rust and C23, PANDEMONIUM is a Linux kernel scheduler built for sched_ext. Utilizing BPF patterns, PANDEMONIUM classifies every task by its behavior--wakeup frequency, context switch rate, runtime, sleep patterns--and adapts scheduling decisions in real time. Single-thread adaptive control loop (zero mutexes), three-tier behavioral dispatch, overflow sojourn rescue, longrun detection with deficit tightening, dual burst detection (CUSUM + wakeup rate), L2 cache affinity placement, sleep-informed batch tuning, CoDel-inspired sojourn rescue, classification-gated DSQ routing, workload regime detection, vtime ceiling, hard starvation rescue, and a persistent process database that learns task classifications across lifetimes.
+A Linux kernel scheduler for sched_ext, built in Rust and C23. PANDEMONIUM classifies every task by behavior — wakeup frequency, context switch rate, runtime, sleep patterns — and adapts scheduling decisions in real time. A damped harmonic oscillator drives CoDel-inspired stall detection with the literal RFC 8289 sojourn metric and an R_eff-derived equilibrium reference. Resistance affinity (effective resistance from the Laplacian pseudoinverse of the CPU topology graph) provides topology-aware task placement for pipe/IPC storms. A migration potential Φ — R_eff priced against the queueing relief a move buys — gates cross-domain work stealing, so a steal crosses a cache boundary only when the backlog it relieves outweighs the cache cost. Multiplicative Weight Updates (MWU) balance six competing expert profiles across six loss pathways — one of them a cross-domain scatter signal that holds the adaptive layer's knob choices in line with the Φ placement it sits above.
 
-PANDEMONIUM is included in the [sched-ext/scx](https://github.com/sched-ext/scx) project alongside scx_rusty, scx_lavd, scx_layered, scx_cosmos, and the rest of the sched_ext family. Thank you to Piotr Gorski and the sched-ext team. PANDEMONIUM is made possible by contributions from the sched_ext, CachyOS, Gentoo, OpenSUSE and Arch communities within the Linux ecosystem.
+Three-tier behavioral dispatch, overflow sojourn rescue, longrun detection, tier-aware preempt scaling, sleep-informed batch tuning, classification-gated DSQ routing, workload regime detection, flow-signature shape routing (per-task partner-cardinality classification into TIGHT loops vs STORM meshes), a migration-potential-gated R_eff work steal, a Φ-priced warm-stay home anchor, a sojourn selector with bounded maturity-gated tier warp, a per-CPU tau-derived preempt, an RT-policy latency floor, hard starvation rescue and a persistent process database that learns task classifications across lifetimes.
+
+See the [New User Guide](NEW-USER-GUIDE.md) for an introduction — the ideas behind PANDEMONIUM in plain language.
+
+PANDEMONIUM is included in the [sched-ext/scx](https://github.com/sched-ext/scx) project alongside scx_rusty, scx_lavd, scx_cosmos and the rest of the sched_ext family. Thank you to Piotr Gorski and the sched-ext team. PANDEMONIUM is made possible by contributions from the sched_ext, CachyOS, Gentoo, OpenSUSE, Arch, Ubuntu and NixOS communities within the Linux ecosystem.
 
 ## Performance
 
-Benchmarked on 12 AMD Zen CPUs, kernel 6.18.13-arch1-1, clang 21.1.6, 3 iterations.
-
-### Burst P99 (fork/exec storm under CPU saturation)
-
-| Cores | EEVDF    | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) | scx_bpfland |
-|-------|----------|-------------------|------------------------|-------------|
-| 2     | 2,773us  | 1,228us           | **821us**              | 3,181us     |
-| 4     | 2,883us  | **1,285us**       | 1,594us                | 2,005us     |
-| 8     | 2,886us  | **1,092us**       | 1,239us                | 2,006us     |
-| 12    | 2,280us  | 1,231us           | **1,021us**            | 2,007us     |
-
-Both modes beat EEVDF and scx_bpfland at every core count. Overflow sojourn rescue and dual burst detection (CUSUM + wakeup rate) keep burst response sub-2ms.
+12 AMD Zen CPUs (Ryzen 5 3600), kernel 7.0.12.arch1, clang 21. v5.14.0, EEVDF, scx_cosmos, scx_lavd are from a fresh-boot full-field bench-scale (2026-06-17, 3 iterations). All five schedulers completed every cell; no crash or hotplug insta-exit contamination.
 
 ### P99 Wakeup Latency (interactive probe under CPU saturation)
 
-| Cores | EEVDF    | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) | scx_bpfland |
-|-------|----------|-------------------|------------------------|-------------|
-| 2     | 1,953us  | 1,922us           | **929us**              | 3,060us     |
-| 4     | 1,358us  | **1,012us**       | 1,690us                | 2,011us     |
-| 8     | 1,711us  | **1,041us**       | 830us                  | 2,005us     |
-| 12    | **718us**| 909us             | 1,284us                | 2,007us     |
+| Cores | EEVDF    | scx_cosmos | scx_lavd  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|------------|-----------|-------------------|------------------------|
+| 2     | 72,740us | 11,847us   | 11,561us  | 612us             | **463us**              |
+| 4     | 6,020us  | 2,274us    | 5,957us   | 108us             | **66us**               |
+| 8     | 1,305us  | 1,705us    | 3,291us   | **67us**          | **67us**               |
+| 12    | 694us    | 1,902us    | 1,789us   | 69us              | **68us**               |
 
-ADAPTIVE wins at 2C, BPF beats EEVDF at 4C and 8C. Both modes beat scx_bpfland at every core count.
+### Burst P99 (fork/exec storm under CPU saturation)
+
+| Cores | EEVDF    | scx_cosmos | scx_lavd  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|------------|-----------|-------------------|------------------------|
+| 2     | 5,809us  | 10,336us   | 13,934us  | **266us**         | 924us                  |
+| 4     | 5,066us  | 2,328us    | 6,849us   | **146us**         | 919us                  |
+| 8     | 2,175us  | 1,896us    | 4,845us   | 66us              | **34us**               |
+| 12    | 2,870us  | 853us      | 2,103us   | **72us**          | 164us                  |
 
 ### Longrun P99 (interactive latency with sustained CPU-bound long-runners)
 
-| Cores | EEVDF    | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) | scx_bpfland |
-|-------|----------|-------------------|------------------------|-------------|
-| 2     | 2,295us  | **440us**         | 568us                  | 2,020us     |
-| 4     | 1,395us  | **912us**         | 1,338us                | 2,001us     |
-| 8     | **557us**| 1,009us           | 1,741us                | 2,005us     |
-| 12    | **418us**| 993us             | 1,957us                | 1,999us     |
-
-Longrun detection tightens deficit ratio to 1:1 under sustained batch pressure. BPF mode sub-1ms at 2C and 4C.
+| Cores | EEVDF    | scx_cosmos | scx_lavd  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|------------|-----------|-------------------|------------------------|
+| 2     | 11,073us | 7,093us    | 13,527us  | **775us**         | 1,527us                |
+| 4     | 4,526us  | 1,985us    | 5,965us   | **532us**         | 1,818us                |
+| 8     | 689us    | 1,946us    | 4,954us   | 824us             | **225us**              |
+| 12    | 814us    | 1,745us    | 4,693us   | **67us**          | 71us                   |
 
 ### Mixed Latency P99 (interactive + batch concurrent)
 
-| Cores | EEVDF    | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) | scx_bpfland |
-|-------|----------|-------------------|------------------------|-------------|
-| 2     | 2,759us  | **520us**         | 1,026us                | 2,167us     |
-| 4     | **974us**| 1,075us           | 1,386us                | 1,999us     |
-| 8     | 2,183us  | **968us**         | 1,217us                | 2,004us     |
-| 12    | 2,100us  | **999us**         | 1,737us                | 2,000us     |
+| Cores | EEVDF    | scx_cosmos | scx_lavd  | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|----------|------------|-----------|-------------------|------------------------|
+| 2     | 16,989us | 8,652us    | 13,937us  | 1,147us           | **1,011us**            |
+| 4     | 3,020us  | 2,003us    | 6,293us   | **773us**         | 1,138us                |
+| 8     | 2,424us  | 1,478us    | 4,681us   | **67us**          | 668us                  |
+| 12    | 1,436us  | 1,772us    | 4,826us   | **70us**          | 673us                  |
 
-BPF mode sub-1ms at 2C, 8C, and 12C under mixed interactive+batch workloads.
+### Deadline Miss Ratio (16.6ms frame target)
 
-### Throughput (kernel build, vs EEVDF baseline, 3 iterations)
+| Cores | EEVDF   | scx_cosmos | scx_lavd | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|---------|------------|----------|-------------------|------------------------|
+| 2     | 20.9%   | 72.8%      | 86.9%    | 3.0%              | **2.8%**               |
+| 4     | 13.9%   | 67.4%      | 79.5%    | 0.5%              | **0.2%**               |
+| 8     | 13.0%   | 54.7%      | 53.3%    | **0.2%**          | **0.2%**               |
+| 12    | 11.8%   | 51.7%      | 49.8%    | **0.2%**          | 0.4%                   |
 
-| Cores | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) | scx_bpfland |
-|-------|-------------------|------------------------|-------------|
-| 2     | +2.6%             | +18.8%                 | +5.2%       |
-| 4     | +3.5%             | +2.7%                  | +0.4%       |
-| 8     | +3.9%             | +2.9%                  | +3.8%       |
-| 12    | +1.7%             | +0.6%                  | +1.9%       |
+### Burst Recovery P99 (latency after storm subsides)
 
-### Deadline Jitter (16.6ms frame target, miss ratio)
+| Cores | PANDEMONIUM (BPF) (bench-scale burst-recovery phase) |
+|-------|------------------------------------------------------|
+| 2     | base 517us / burst 266us / recovery 696us           |
+| 4     | base 63us / burst 146us / recovery 165us            |
+| 8     | base 66us / burst 66us / recovery 66us              |
+| 12    | base 67us / burst 72us / recovery 74us              |
 
-| Cores | EEVDF   | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) | scx_bpfland |
-|-------|---------|-------------------|------------------------|-------------|
-| 8     | 11.3%   | **8.1%**          | **4.3%**               | 56.5%       |
-| 12    | 11.9%   | **4.4%**          | **6.8%**               | 56.3%       |
+### App Launch (`fork()`+`exec()` under load, mean / p99 us)
 
-At 8+ cores, PANDEMONIUM ADAPTIVE misses 4.3% of frame deadlines at 8C. BPF mode hits 4.4% at 12C vs EEVDF's 11.9%. scx_bpfland misses 56%.
+| Cores | EEVDF         | scx_cosmos    | scx_lavd       | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-------|---------------|---------------|----------------|-------------------|------------------------|
+| 2     | 1,639 / 5,050 | 759 / 2,549   | 1,939 / 21,080 | 1,508 / 6,560     | 1,501 / 4,674          |
+| 4     | 1,947 / 4,689 | 1,033 / 2,668 | 715 / 6,172    | **828** / 2,774   | 1,145 / 4,007          |
+| 8     | 1,488 / 3,124 | 1,007 / 2,631 | 781 / 3,986    | **732** / 2,297   | 971 / 5,609            |
+| 12    | 1,575 / 3,153 | 898 / 2,043   | 720 / 2,959    | 968 / 15,187      | **670** / 1,850        |
+
+The *typical* app launch under PANDEMONIUM is faster than EEVDF — mean 0.7–1.0ms vs EEVDF's ~1.5ms at 4C and up. The p99 carries occasional cold-launch outliers from the fork/exec dispatch waterfall (the BPF 12C 15ms is one slow launch in 100, not the norm — mean there is 968us). Reported as mean / p99 so the typical-case win isn't masked by the tail. IPC is likewise nuanced — broken out by primitive below.
+
+### IPC Round-Trip by Primitive (12C, p50 / p99 us)
+
+| Primitive | EEVDF       | scx_cosmos | scx_lavd    | PANDEMONIUM (BPF) | PANDEMONIUM (ADAPTIVE) |
+|-----------|-------------|------------|-------------|-------------------|------------------------|
+| pipe      | 10 / 14     | 12 / 49    | 13 / 477    | 10 / 1,335        | 10 / 1,335             |
+| socket    | 17 / 321    | 14 / 30    | 16 / 191    | 13 / 1,337        | 13 / 1,338             |
+| eventfd   | 9 / 16      | 11 / 55    | 13 / 1,008  | 21 / **137**      | 22 / **30**            |
+| sem       | 12 / 18     | 11 / 76    | 14 / 1,000  | 17 / **25**       | 17 / **48**            |
+| fanout    | 102 / 3,578 | 93 / 198   | 130 / 2,251 | 1,007 / 2,246     | 998 / 2,008            |
+
+PANDEMONIUM dispatches the typical IPC wake in tens of microseconds on every primitive except the 1:N fan-out (pipe p50 10us, socket 13us). The sem and eventfd *tails* are resolved too — p99 25us and 137us (BPF), ~40× under scx_lavd's ~1ms. The remaining gaps are honest: pipe and socket p99 sit on the CONFIG_HZ=1000 tick floor (~1.3ms) under busy-waker co-location even though their median is microsecond-tight, and the 1:N fanout (~1ms p50) is where cosmos, purpose-built for it, leads. Closing the pipe/socket busy-waker tail is the top v5.15.0 item.
+
+### Fork/Thread IPC (`perf bench sched messaging -t -g 24 -l 6000`, 12C, v5.14.0)
+
+| Scheduler                | Time        | vs EEVDF  | Cache Misses | Cache Refs | IPC   |
+|--------------------------|-------------|-----------|--------------|------------|-------|
+| EEVDF                    | **16.837s** | baseline  | **36.94M**   | 1,150M     | 0.411 |
+| PANDEMONIUM (BPF)        | 19.020s     | +13.0%    | 51.14M       | 1,160M     | 0.411 |
+| PANDEMONIUM (ADAPTIVE)   | 18.759s     | +11.4%    | 53.41M       | 1,150M     | 0.413 |
+
+The fork/exec storm is PANDEMONIUM's hardest case: it trails fresh-boot EEVDF by ~11–13% on wall time and takes ~40% more cache-misses (3.2% vs ~4.5% miss rate) — the cross-domain migration cost of the aggressive rebalancing that buys the latency, burst and deadline wins above. IPC is at parity (0.41). Tightening the storm-cache without giving back the tail is standing v5.15.0 work.
+
+### Energy Efficiency (`bench-power`, 12C, v5.14.0)
+
+5 runs per (scheduler, workload), 30s cooldown, off a fresh reboot (2026-06-17). Package energy via `perf stat -a -e power/energy-pkg/`. Zen 2 (Ryzen 5 3600) exposes only `J_pkg` (no per-core or per-DRAM RAPL).
+
+**Idle floor** (30s `sleep`, scheduler restlessness):
+
+| Scheduler                | J_pkg   | Avg W    | vs EEVDF |
+|--------------------------|---------|----------|----------|
+| scx_cosmos               | **517.33J** | **17.22W** | **-1.3%** |
+| PANDEMONIUM (ADAPTIVE)   | 518.61J | 17.27W   | -1.1%    |
+| PANDEMONIUM (BPF)        | 519.31J | 17.29W   | -0.9%    |
+| EEVDF                    | 524.26J | 17.36W   | baseline |
+| scx_lavd                 | 528.44J | 17.59W   | +0.8%    |
+
+PANDEMONIUM now idles *below* EEVDF (−0.9 / −1.1%), second only to cosmos — the scheduler is quiet at rest.
+
+**Messaging** (`perf bench sched messaging`, fork-storm + IPC):
+
+| Scheduler                | Wall_s     | J_pkg       | J/op       | vs EEVDF |
+|--------------------------|------------|-------------|------------|----------|
+| EEVDF                    | **14.72s** | **882.77J** | **153.26uJ** | baseline |
+| PANDEMONIUM (BPF)        | 15.77s     | 957.83J     | 166.29uJ   | +8.5%    |
+| PANDEMONIUM (ADAPTIVE)   | 15.88s     | 959.98J     | 166.66uJ   | +8.7%    |
+| scx_cosmos               | 25.10s     | 1470.48J    | 255.29uJ   | +66.6%   |
+| scx_lavd                 | 27.28s     | 1650.12J    | 286.48uJ   | +86.9%   |
+
+On the fork-storm PANDEMONIUM trails EEVDF ~8% on energy (the cross-domain rebalancing cost, same source as the cache-miss delta) but undercuts the scx field by 60–87% — lavd and cosmos burn far more energy for the same messaging work.
 
 ## Key Features
 
-### Dispatch Order
+### Dispatch Waterfall
 
-0. Overflow sojourn rescue (aging overflow DSQ tasks > threshold, deficit-gated)
-1. Per-CPU DSQ (direct placement from enqueue, zero contention, counts toward deficit)
-2. Deficit counter (DRR: force batch if budget exhausted + starving; longrun tightens budget)
-3. Hard starvation rescue (core-count-scaled absolute safety net)
-4. Node interactive overflow (LAT_CRITICAL + INTERACTIVE, vtime-ordered)
-5. Batch sojourn rescue (CoDel: rescue if oldest batch > threshold)
-6. Node batch overflow (normal fallback for batch tasks)
-7. Cross-node steal (interactive + batch per remote node)
-8. KEEP_RUNNING if prev still wants CPU and nothing queued
+Layered dispatch with per-CPU DSQ dominance and one age-driven safety mechanism. CPU-tied placement (Tier 2 wakeup preemption, `select_cpu`) is bounded at the enqueue site by `pcpu_depth_base` and overflow spills to a sibling per-CPU DSQ in R_eff order (`find_pcpu_with_room` → `pick_pcpu_dsq_with_spill`), so the dispatch waterfall reaches every CPU-tied enqueue at STEP 0 (sibling owns) or STEP 1 (near R_eff steal). Idle-CPU placement (Tier 1) inserts directly into the per-domain overflow DSQ and is picked up by STEP 3 within one dispatch cycle — eager R_eff search at this site is a wire-speed regression on fork-storm workloads with no measurable placement benefit. The steal is **near-before-far tiered**: STEP 1 walks same-domain peers only, the cross-domain tier (STEP 4b) is reached only after the home domain — peers *and* local overflow — is fully exhausted, so a working set never scatters off its home L3 while same-domain or local work remains. The cache-domain boundary is structural ordering *between* tiers; Φ still prices the steal *within* each tier. The waterfall is 8 steps (0, 1, 2, 3, 4, 4b, 5, KEEP_RUNNING) + 1 safety net; redundant rescue paths (deficit-gate-with-exception, DRR deficit counter, batch sojourn rescue) are deliberately absent — they all reduce to "service the older overflow side past a threshold," which STEP 2 already does. `sojourn_gate_pass` sits at STEP 0 / STEP 1, load-bearing for workqueue-worker fairness under sustained per-CPU load (without it, `scx_watchdog_workfn` strands in the overflow DSQ long enough to trigger 30s watchdog kills).
+
+0. **Own per-CPU DSQ** — cache-hot, zero contention. Sojourn-gated return: if either overflow side has aged past `overflow_sojourn_rescue_ns`, fall through to STEP 2 so this dispatch serves overflow too.
+1. **Near R_eff steal (same-domain tier)** — single loop over `near_tbl`, the same-domain prefix of the R_eff rank packed by Rust at topology detect: slot 0 = L2 sibling, each u64 entry packs the peer CPU (low 32 bits) and the pre-folded Φ distance penalty in ns (high 32). Budget is tau-derived: `pcpu_spill_search_budget = K_SPILL_BUDGET / tau ≈ λ₂/2`, clamped to `[6, min(nr_cpu_ids - 1, MAX_AFFINITY_CANDIDATES)]`. The companion WAKE_SYNC idle-search budget `affinity_search_online = K_AFFINITY_SEARCH / tau ≈ λ₂/4` clamps the same way (smaller divisor because the predicate is more expensive). A peer is relieved only with `nr_queued > 1` and its head aged past the Φ threshold `codel_target_ns + (penalty >> 32)` — the penalty read straight from the entry's high bits, no second map lookup and no multiply, so an SMT sibling (R_eff≈0) stays freely relievable while a far peer must show ~τ of backlog. A per-CPU scan rate-limit (`last_spill_scan`, one stamp shared with STEP 4b) gates the walk to once per `codel_target_ns`. Same sojourn gate as STEP 0 on success.
+1. *Safety net.* **Hard starvation rescue** — `try_service_older_overflow(starvation_rescue_ns)`: drains whichever of `interactive_enqueue_ns` / `batch_enqueue_ns` is older past the tau-scaled hard cap. Fires before STEP 2 so it cannot be gated. Should ~never fire post-placement-fix.
+2. **Service older overflow side** — `try_service_older_overflow(overflow_sojourn_rescue_ns)`: same pick-the-older comparison at the R_eff-derived equilibrium threshold (`overflow_sojourn_rescue_ns = codel_target_equilibrium_ns`). Feeds the CoDel oscillator (`global_rescue_count++`).
+3. **Per-cache domain interactive overflow (local)** — cache-coherent drain of this cache domain's interactive overflow DSQ (`node_dsq`; LAT_CRITICAL + INTERACTIVE, sojourn-ordered).
+4. **Per-cache domain batch overflow (local)** — this cache domain's batch overflow DSQ.
+4. **STEP 4b — Far R_eff steal (cross-domain tier)** — reached only with the home domain fully exhausted (no own work, no qualifying near peer, no local overflow). Walks `far_tbl`, the `FAR_CANDIDATES = 8` nearest cross-domain peers (dense from slot 0, constant bound, sentinel-terminated), under the same scan window STEP 1 stamped and the same Φ price: a cross-domain pull still needs ~τ of sustained backlog via the pre-folded penalty. v5.7.0's far-steal-last ordering expressed inside the Φ-priced walk. All-sentinel on a monolithic box — instant break.
+5. **Cross-domain work conservation** — scan other domains once; drain any non-empty overflow (interactive first per domain, then batch). Runs only when the local domain is empty, so cross-domain migration here is pure idle-time work conservation.
+6. **KEEP_RUNNING** — if prev still wants CPU and nothing queued.
 
 ### Three-Tier Enqueue
 
-- **Idle CPU Fast Path**: `select_cpu()` places wakeups directly to per-CPU DSQ (depth-gated: 1 slot at <4 CPUs, 2 at 4+), kicks with `SCX_KICK_IDLE`
-- **Node-Local Placement with L2 Affinity**: `enqueue()` tries L2 sibling first (INTERACTIVE/BATCH with affinity_mode > 0), then falls back to any idle CPU within the NUMA node, always dispatching to the per-node shared DSQ. LAT_CRITICAL and kernel threads (PF_KTHREAD) skip affinity for fastest-available placement
-- **Wakeup Preemption**: All wakeups get node DSQ dispatch with `SCX_KICK_PREEMPT`. A task waking from sleep has external input to deliver regardless of behavioral tier. The classifier operates on historical behavior; the wakeup is the real-time latency signal. LAT_CRITICAL also gets preemption on requeue (compositor guarantee). Batch requeues skip to overflow DSQ
-- **NUMA-Scoped Overflow**: Per-node overflow DSQ with classification-gated routing. Immature INTERACTIVE tasks (`ewma_age < 2`) route to batch DSQ until EWMA classifies them. LAT_CRITICAL tasks are never redirected
-- **Event-Driven Preemption**: `tick()` checks `interactive_waiting` flag and preempts batch tasks above `preempt_thresh_ns`. During `burst_mode`, preempt threshold drops to 0 (immediate preemption). Zero polling -- no BPF timer
+- **select_cpu**: idle CPU -> per-CPU DSQ (depth-gated: 1 slot at <4C, 2 at 4C+) -> R_eff sibling spill if full -> last-resort node DSQ, with KICK_IDLE on the placement target. WAKE_SYNC path: partner-CPU fast path (claim the wakee's `last_cpu` directly if idle and allowed, skipping the R_eff scan on a stable pair) -> R_eff idle search -> waker fallback, WITH a kick — arm A (found-idle) KICK_IDLE, arm B (no-idle) KICK_PREEMPT — so the wakee runs next instead of aging until the target's tick (the dominant IPC round-trip tail)
+- **enqueue Tier 1** (idle CPU): direct `node_dsq` insert + KICK_PREEMPT for non-BATCH / KICK_IDLE for BATCH. Drained by STEP 3 (unconditional `node_dsq`) within one dispatch cycle. The wire-speed path: eager R_eff search at this site is a fork-storm regression with no placement benefit, so Tier 1 stays a direct insert
+- **enqueue Tier 2** (wakeup preemption): uses `pick_pcpu_dsq_with_spill` for symmetric placement with `select_cpu`. CPU-tied; benefits from eager per-CPU placement
+- **enqueue Tier 3** (fallback): batch overflow DSQ for BATCH only; LAT_CRITICAL, INTERACTIVE and immature INTERACTIVE (`ewma_age < 2`) all stay in `node_dsq` — immature tasks are deliberately kept out of the batch DSQ to avoid burst-spawn starvation. The sojourn deadline (`now − warp`) is computed at the insert
+- **tick**: longrun detection (batch non-empty >2s), sojourn enforcement, per-CPU preempt of the resident for an aged waiter (`pcpu_enqueue_ns[this_cpu]` age vs a tau-scaled threshold; BATCH yields at base, INTERACTIVE at 2×, LAT_CRITICAL never)
+
+### Damped Harmonic Oscillator Stall Detection
+
+CoDel-inspired per-CPU DSQ stall detection where the target follows the full damped harmonic oscillator equation:
+
+```
+ẍ + 2γẋ + ω₀²(x − c_eq) = F(t)
+```
+
+with `γ` set for Butterworth-optimal damping (ζ ≈ 0.707) — a maximally-flat response that trades a small ~4.3% step-response overshoot per adaptation for shorter settling time; the overshoot is the controller's deliberate exploration term (it probes the convex-response boundary on each impulse instead of parking inside it).
+
+**Per-task sojourn** (RFC 8289): `task_ctx.enqueue_at` is set at every `scx_bpf_dsq_insert_vtime` call site (six placement paths) and consumed in `pandemonium_running` to compute `sojourn = now − enqueue_at`. This is the literal CoDel metric — wait between enqueue and run start — feeding `pcpu_min_sojourn_ns`. A per-task timestamp stays accurate through an entire drain, where a per-CPU `now − pcpu_enqueue_ns[cpu]` proxy weakens past the first task.
+
+**Stall decision** (`pcpu_dsq_is_stalled`): compares per-CPU minimum sojourn against `codel_target_ns`. Below = flowing. Above for `sojourn_interval_ns` = stalled, force rescue. Binary CoDel decision; the target itself is what oscillates.
+
+**Spring (restoring term)**: equilibrium `c_eq = ⟨R_eff⟩ × 2m × τ` derived from spectral graph properties already computed at topology detect — `⟨R_eff⟩ = Tr(L⁺)/N` over nonzero eigenvalues, `2m = Tr(L)`, τ the Fiedler-derived mixing time. The product is the natural latency tolerance of the topology. Rust clamps `c_eq` to `[200µs, 8ms]`; BPF additionally constrains it inside the oscillator's `[floor, max]` window.
+
+**Butterworth damping** (discrete): the existing `v −= v >> damping_shift` corresponds to `2γ ≈ 2^−D`. The spring is `v −= disp >> spring_shift` with `spring_shift = 2*damping_shift + 1`, placing the pole pair at ζ ≈ 2^(−1/2) ≈ 0.707 (Butterworth-optimal). Co-derived in `apply_tau_scaling` so topology changes preserve the damping ratio automatically: `damping_shift=1 → spring_shift=3` (2C, fast restore), `damping_shift=5 → spring_shift=11` (12C, gentle restore).
+
+**Feedback loop**: `global_rescue_count` (atomic, incremented at the overflow rescue site in dispatch) drives the impulse `F(t)`. Each tick on CPU 0: apply impulse → apply spring (`v −= disp >> spring_shift`) → apply damping (`v −= v >> damping_shift`) → cap velocity → integrate `x`.
+
+**Core-scaled parameters** (derived from τ in `apply_tau_scaling`; the per-column values below are an approximate reference — the live values are derived at runtime):
+
+| Parameter | 2C | 4C | 8C | 12C |
+|-----------|----|----|-----|------|
+| Sojourn interval | 2ms | 4ms | 8ms | 12ms |
+| Damping shift D | 1 (v/2) | 1-2 | 3 | 5 (v/32) |
+| Spring shift (2D+1) | 3 (disp/8) | 3-5 | 7 (disp/128) | 11 (disp/2048) |
+| Pull scale | 1 | 1 | 3 | 4 |
+| Center floor | 200µs | 200µs | 500µs | 700µs |
+| Center ceiling | 1ms | 1ms | 1ms | 2ms |
+
+`x` rests at `c_eq` when the system is quiet, descends below on rescue events and returns Butterworth-damped — one bounded ~4.3% overshoot, then settle.
+
+**Oscillator envelope (idle quiescence)**: the control effort obeys the same damping law as the system it controls, so the oscillator goes quiet when the system does. A decayed energy reservoir (`osc_env_energy -= osc_env_energy >> 3`, then `+= disp² + v²`, built only from values the recompute already maintains) drives the recompute cadence down as the oscillator contracts. Below the RELEASE threshold the oscillator recomputes every 4th tick (graded band); below PARK it pins `codel_target_ns` at `codel_target_equilibrium_ns` (the closed-form fixed point, one store), freezes the velocity integrator (anti-windup, so it cannot accumulate across the band and slingshot at wake) and stops the arithmetic. Thresholds derive from the spring/damp dead-band quanta pre-scaled by the reservoir gain, with RELEASE 2× above PARK — multiplicative hysteresis, a Schmitt trigger on energy, not a change-point accumulator. While parked, three compares per tick arm the detector: a rescue event (a discrete count, so no epsilon floor), the equilibrium moving under the parked value (MWU/τ retune) or a 1024-tick max-park heartbeat. On any of these the oscillator does a full recompute in the same tick — before any dispatch prices against the target — and re-primes the reservoir above RELEASE so a bursty wake cannot immediately re-park. Every burst begins from an identical controller state. `nr_osc_park` (in the stats struct, surfaced as TOTAL OSC PARKS) counts parks; zero parks after an idle-heavy run is the minimum-attention-collapse failure mode the counter exists to detect.
 
 ### Overflow Sojourn Rescue
 
-Per-CPU DSQ dominance under sustained load makes all downstream anti-starvation logic unreachable -- 90%+ of dispatches serve per-CPU DSQ while overflow tasks age indefinitely. Dispatch Step 0 checks both overflow DSQs for tasks aging past `overflow_sojourn_rescue_ns` (core-count-scaled: 2ms per core, clamped 4-10ms) and serves them before per-CPU DSQ. CAS-based timestamp management prevents races across CPUs.
+Per-CPU DSQ dominance under sustained load makes downstream anti-starvation unreachable — 90%+ of dispatches serve per-CPU DSQ while overflow tasks age indefinitely. Dispatch STEP 0 / STEP 1 fall through to STEP 2 when either overflow DSQ has aged past `overflow_sojourn_rescue_ns` — which is set to `codel_target_equilibrium_ns` (the R_eff-derived CoDel equilibrium `⟨R_eff⟩ × 2m × τ`, clamped into the oscillator's `[floor, max]` window, so ≤~2ms at 12C — not a hand-tuned ~10ms). The spectral scalar opens the gate; sojourn (enqueue-age) fills it and selects the older side. `try_service_older_overflow` then drains that side past the threshold. CAS-based timestamp management prevents races across CPUs.
+
+**Drain both when both aged**: under sustained mixed load both overflow DSQs can stay continuously non-empty for tens of seconds, freezing both timestamps at their first-non-empty values. A strict "older wins" would then pick the same side every rescue call until external pressure dropped, locking out batch-demoted long-runners (at 2C, a 19-29s starvation tail; 4C+ closes the window through higher dispatch density). So when BOTH sides are aged, both drain — older-first ordering preserved (latency-budget bias for interactive on ties), at the cost of one extra `scx_bpf_dsq_move_to_local`.
 
 ### Longrun Detection
 
-Tracks sustained batch DSQ pressure. When batch DSQ is non-empty for >2 seconds, `longrun_mode` activates:
-- Deficit ratio tightens from `nr_cpu_ids * ratio` to `nr_cpu_ids * 1`, quadrupling batch dispatch share
-- `task_slice()` uses `burst_slice_ns` (1ms) instead of regime slice (up to 4ms)
-- Rust adaptive layer: sleep-informed batch adjustment skipped, affinity forced to WEAK (spread batch across CPUs)
+When batch DSQ stays non-empty past `longrun_thresh_ns` (tau-scaled, ~2s at 12C reference), `longrun_mode` activates. Two consumers: `task_slice` substitutes `burst_slice_ns` for `slice_ns` on INTERACTIVE/LATCRIT (1ms tighter cap, yields CPU faster under pressure); `tick` scales the preempt threshold via `longrun_preempt_shift` — 4× at 2C (extends BATCH's protected window) so thin topologies don't thrash, no scaling at 4C+ where capacity already absorbs LAT_CRIT contention.
 
-### Dual Burst Detection
+### Wake Sensitivity & Preemption
 
-- **CUSUM**: Statistical change-point detection (Page, 1954) monitors total enqueue rate. Samples every 64th enqueue, EWMA baseline with 25% slack. Effective for BPF mode (1ms slices) where enqueue rate spikes during fork storms
-- **Wakeup Rate Counter**: Absolute threshold -- `nr_cpu_ids * 2` wakeups per tick = fork storm. No calibration needed, works immediately on first tick. Effective for adaptive mode (4ms slices) where CUSUM is rate-bounded
-- Either firing activates `burst_mode`: preempt threshold drops to 0, task_slice uses `burst_slice_ns`
-- Split DSQ routing always active. Burst handled via slice reduction and preempt override, not DSQ reorganization
+No burst detector. The failure modes one would cover — CUSUM on enqueue-interval EWMA, `wake_burst` on absolute wakeup rate, `burst_mode` gating slice/depth/preempt behaviors — are instead handled by the oscillator-adapted CoDel target, the placement-side depth gate + L2/R_eff spill, hard starvation rescue or tier information already present at the enqueue site. Tick preemption is derived per-CPU, with no global signal:
 
-### Vtime Ceiling
+- **Per-CPU preempt**: `pandemonium_tick` reads its own `pcpu_enqueue_ns[this_cpu]` — the age of the oldest task waiting on this CPU — against a tau-scaled threshold (`preempt_thresh_ns`): a BATCH resident yields once a waiter ages past the base threshold, an INTERACTIVE resident at 2× (batch-throughput protection), a LAT_CRITICAL resident never. Per-CPU by construction — no token to race over. A single global flag instead (armed at enqueue, cleared by the first tick to preempt on *any* CPU) gets token-stolen across cores under a fork storm, so the CPU actually burying a latency waker rarely wins the race — the audio-under-load pathology (intermittent, single-thread, bursty-only). The per-CPU read reuses the bounded-array scan already running for the coarse per-CPU sojourn check, so no new global state.
+- **RT-policy floor**: `SCHED_FIFO`/`SCHED_RR` threads are pinned `TIER_LAT_CRITICAL` by declaration, after the behavioral classifier and the high-prio-kthread→BATCH override. A periodic audio RT thread scores erratically on the behavioral `lat_cri` metric and was flipping out of LAT_CRITICAL mid-burst; threaded USB IRQ kthreads were force-demoted to BATCH. The floor keeps both latency-critical under load, immune to the EWMA jitter.
+- **Core-scaled longrun protection**: during sustained `longrun_mode`, the preempt threshold scales up on thin topologies (τ < 4ms) only, extending the protected BATCH window so they don't thrash; wider topologies keep the baseline, where capacity already absorbs LAT_CRIT contention.
 
-High-vtime daemons sort to the tail of the batch DSQ while fresh burst tasks take the head. Sojourn rescue dispatches from the head, so daemons starve. The ceiling caps batch deadline at `vtime_now + 30ms`, keeping every task within 6 sojourn cycles of the head. Gated at >=8 cores -- at 2-4 cores the batch DSQ is shallow enough that sojourn rescue reaches every task naturally.
+### Sojourn Selector + Lag Cap
+
+There is no weighted virtual-time engine. `task_deadline()` returns `now − warp` — the enqueue timestamp back-dated by a bounded per-tier warp — so every DSQ is ordered oldest-first (largest sojourn served first). Sojourn IS the selector; no second fairness clock runs parallel to the sojourn + R_eff/CoDel layer.
+
+`lag_cap_ns = K_LAG_CAP × τ` clamped `[8ms, 80ms]` is the warp bound (~13ms at the 12C reference). The warp is flat per tier — `LAT_CRITICAL = lag_cap`, `INTERACTIVE = lag_cap/2`, `BATCH = 0` — and **maturity-gated**: a task earns its warp only once classified (`ewma_age ≥ EWMA_AGE_MATURE`), so a fork storm of unmatured INTERACTIVE children competes on pure arrival order and cannot leapfrog established work.
+
+Because the warp is bounded, a BATCH task older than `lag_cap` always out-sorts a freshly-warped LAT_CRITICAL waker: **starvation-free by construction**, with no ceiling and no new-task penalty needed. A new task simply enters at `now` like any other arrival. (A wakeup-frequency-weighted warp and a queue-depth backlog term each reorder by something other than wait — they cluster ping-pong wakers or rubberband interactivity — so the warp stays flat, bounded and maturity-gated; deep-queue drainage is left to the overflow sojourn rescue, which forces aged work forward by wait, not depth.)
 
 ### Hard Starvation Rescue
 
-Absolute safety net. Computed as the minimum of two linear functions: `min(25ms * nr_cpus, 500ms / max(1, nr_cpus/4))`, clamped to 20-500ms. Short at low core counts (fast starvation: 2C = 50ms) and at high core counts (dispatch contention: 128C = 20ms), peaks in the middle (8C = 200ms). Fires before the interactive DSQ and guarantees batch service regardless of interactive pressure.
+`clamp(K_STARVATION_RESCUE × τ, 20ms, 500ms)` — tau-scaled and monotonic in topology timing: 20ms at 2C, ~80ms at 4C, ~160ms at 8C, ~167ms at 12C (the Core-Count Scaling table values). Runs as the dispatch safety net before STEP 2, ungated; should ~never trip after the placement fix.
 
-### Batch DSQ Separation
+### Topology-Aware Placement
 
-Batch tasks enqueue to dedicated per-node batch overflow DSQs instead of sharing vtime-ordered DSQs with interactive tasks. Separate DSQs give dispatch explicit control: interactive overflow first, then sojourn rescue, then batch fallback.
+**Resistance affinity**: The CPU topology is modeled as a weighted electrical network (L2 siblings = 10.0, same socket = 1.0, cross-socket = 0.3). The Laplacian pseudoinverse (Jacobi eigendecomposition, O(n^3), pure Rust) gives all-pairs migration costs accounting for every path through the graph, not just direct connections. `R_eff(i,j) = L+[i,i] + L+[j,j] - 2*L+[i,j]` — a true metric satisfying the triangle inequality. Per-CPU ranked lists stored in a BPF map sized at `MAX_AFFINITY_CANDIDATES = MAX_CPUS >> 3` slots per CPU (= 128 at MAX_CPUS=1024); the runtime walk is bounded by `nr_cpu_ids - 1`, with `(u32)-1` sentinels marking unused slots so loops early-exit on small N.
 
-### CoDel Sojourn Rescue
+**Online-budget search**: `find_idle_by_affinity()` walks the ranked list with an online-candidates budget, not a total-slots budget. The rank map is built once at init from the full topology; after hotplug, some top ranks may reference offline CPUs. Offline entries are skipped without charging budget, so the search cost on a fully-online system is identical to a raw limit of 3, while remaining robust to arbitrary hotplug asymmetry (12C → 8C, 32C → 4C, etc.).
 
-`batch_enqueue_ns` records when the batch DSQ transitions from empty to non-empty. `dispatch()` rescues batch tasks waiting longer than `sojourn_thresh_ns`. The threshold is set by the Rust adaptive layer from observed dispatch rate: target = 4x dispatch interval, EWMA-smoothed (7/8 old + 1/8 new), clamped to core-count-aware floor/ceiling.
+**Tiered R_eff steal (near-before-far)**: the R_eff rank is split once, in Rust at topology detect, into two packed tables — `near_tbl` (same-domain peers, R_eff-ascending) and `far_tbl` (the `FAR_CANDIDATES = 8` nearest cross-domain peers). Each slot is a u64 packing the peer CPU (low 32) and the pre-folded Φ distance penalty in ns (high 32), so one lookup yields both distance and price — strictly fewer map reads than the prior `affinity_rank` + `reff_value` pair. Dispatch STEP 1 walks `near_tbl` under the tau-derived `pcpu_spill_search_budget` (clamped to `[6, min(nr_cpu_ids - 1, MAX_AFFINITY_CANDIDATES)]`); STEP 4b walks `far_tbl` under a constant 8-slot bound, reached only with the home domain exhausted. The split is computed once (topology-static, never a per-dispatch or variable-loop-bound cost) — two earlier inline-loop attempts hit verifier E2BIG path-state explosion, which moving the boundary to Rust-side static tables eliminates. On a monolithic single-domain box `near_tbl` is the full rank and `far_tbl` is all-sentinel — bit-identical prior behavior.
 
-### Deficit Counter (DRR)
+**wakee_flips gate**: `select_cpu()` reads waker/wakee `wakee_flips` from `task_struct`. Both below `nr_cpu_ids` = 1:1 pipe pair (affinity beneficial). Either above = 1:N server pattern (skip to normal path). Same discrimination as the kernel's `wake_wide()`.
 
-After `interactive_budget` consecutive interactive dispatches without batch service, forces one batch dispatch. Budget scales with core count: `nr_cpus * ratio` where ratio = `min(4, 2 + nr_cpus/2)` (2C: 6, 4C+: same as nr_cpus * 4). Per-CPU DSQ dispatches count toward the deficit. During longrun mode, budget tightens to `nr_cpu_ids * 1`.
+**L2 cache affinity**: `find_idle_l2_sibling()` in enqueue finds idle CPUs in the same L2 domain (max 8 iterations), gated by the `affinity_mode` knob (0=OFF / 1=WEAK / 2=STRONG). The Rust regime baseline sets it per regime (LIGHT=WEAK, MIXED=STRONG, HEAVY=WEAK); MWU can override by majority vote. Per-dispatch L2 hit/miss counters for BATCH, INTERACTIVE, LAT_CRITICAL tiers.
+
+**Commute time interpretation**: R_eff is proportional to expected round-trip time for work between CPUs [2]. Minimizing R_eff between pipe partners minimizes cache line transfer cost [1][3][4].
+
+### Migration Potential (Φ)
+
+R_eff alone is a placement *ranking* — it orders candidate CPUs by distance but doesn't price a migration against the queueing relief it buys, so a cross-domain steal would be as cheap as an SMT-sibling steal once a head aged. The migration potential prices it: **Φ = R_eff − β·sojourn**, the graph resistance of a move set against the wait it relieves. The dispatch STEP 1 work steal pays Φ, so it crosses a cache boundary only when the backlog justifies the cache cost.
+
+- **R_eff cost oracle**: the per-tier steal penalty `b·R_eff` is pre-folded by Rust into the high 32 bits of each `near_tbl` / `far_tbl` entry at topology detect (`b = phi_dist_scale_q16`), so the dispatch steal reads peer and price from one u64 — no second lookup, no multiply. A companion `reff_value` map — sized and indexed like the rank, `reff_value[cpu * MAX_AFFINITY_CANDIDATES + slot] = (R_eff(cpu, target) × b) >> 16` in ns, `(u32)-1` past the topology end — remains the price source for the warm-stay home anchor (slot 0) and the MWU oscillator gating, which need a CPU's nearest-peer penalty outside the steal walk.
+- **Distance-scaled steal resist**: STEP 1 / STEP 4b relieve a peer only once its head has waited past `codel_target_ns + (penalty >> 32)`, the penalty read straight from the tier-table entry's high bits. An SMT sibling (`R_eff ≈ 0`) stays freely relievable at the flat CoDel target; a cross-domain pull must show ~τ of sustained backlog before the steal crosses the domain boundary. The scale is topology-owned (`phi_dist_scale_q16`, folded in at detect) and is always computed now (T1): on a single-domain part it calibrates to the L2 boundary instead of vanishing, so the continuous metric prices distance on every processor with no binary topology gate. Penalties are all-zero only pre-first-tick or under `--phi-scale 0`, which collapses the threshold to the flat `codel_target_ns` as if Φ were absent.
+- **Shape-routed warm placement**: before the topology-blind `scx_bpf_select_cpu_dfl` any-idle pick — which can seat a wakee on a cross-domain idle core with a cold L3, the storm's residual cache-miss source — the wakee is anchored on its own last core and searched R_eff-near (same L2/cache domain first). A TIGHT pair grabs its exact warm core when free (tightest consolidation); both shapes then take the nearest idle; only a fully warm-busy neighborhood falls through to dfl.
+- **Warm-stay (Φ-priced home anchor)**: a wakee whose stable home — `home_cpu`, pinned to its first CPU and never chasing the `last_cpu` a migration storm rewrites every stop — is uncongested is held there rather than fanned to a cold idle sibling. It is the placement dual of the steal threshold, releasing at the SAME point. `select_cpu` only DEFERS (returns the anchor without dispatching); `enqueue` TIER 0 seats the wakee on the home's own per-CPU DSQ with `KICK_PREEMPT` — the kick a busy core honors. The idle fast path still never places on a busy core: a `KICK_IDLE` there is a no-op that strands the wakee until the resident yields (the ~90% deadline-miss scar), so the busy placement lives only in enqueue. The hold releases once the home's sojourn passes `codel_target + dist_extra` — the home's own nearest-peer Φ penalty, read from `reff_value` slot 0 — so a near (low-R_eff) home releases quickly while a far cross-domain home holds hard: one threshold, no binary STORM branch. `reff_value` all-zero (monolithic / `--phi-scale 0`) collapses it to the bare `codel_target`. LAT_CRITICAL and kthreads are exempt — they flee for immediacy.
+
+Φ prices each migration by its graph resistance [1][2] and pays only when queueing relief justifies the cache cost. Cross-domain work conservation is preserved — an idle cross-domain core is still taken freely; what Φ removes is the *cheap* cross-domain steal that thrashed L3 for marginal queueing gain.
 
 ### Behavioral Classification
 
-- **Latency-Criticality Score**: `lat_cri = (wakeup_freq * csw_rate) / effective_runtime` where `effective_runtime = avg_runtime + (runtime_dev >> 1)`
-- **Three Tiers**: LAT_CRITICAL (1.5x avg_runtime slices, preemptive kicks), INTERACTIVE (2x avg_runtime), BATCH (configurable ceiling via adaptive layer)
-- **EWMA Classification**: All tasks go through full EWMA classification in `runnable()`. Wakeup frequency, context switch rate, and runtime variance drive `lat_cri` scoring
-- **CPU-Bound Demotion**: Tasks with avg_runtime above `cpu_bound_thresh_ns` (regime-dependent) are demoted from INTERACTIVE to BATCH. Reversed when the task sleeps
-- **Kworker Floor**: Workqueue workers (PF_WQ_WORKER) floor at TIER_INTERACTIVE -- kernel I/O completion handlers are latency-critical infrastructure regardless of EWMA score
-- **Compositor Boosting**: BPF hash map populated by Rust at startup. Default compositors (kwin, gnome-shell, mutter, sway, Hyprland, picom, weston, labwc, wayfire, niri) always LAT_CRITICAL. User-extensible via `--compositor` CLI flag
+- **Latency-Criticality Score**: `lat_cri = (wakeup_freq * csw_rate) / effective_runtime_ms`, where `effective_runtime_ms = (avg_runtime + runtime_dev/2) >> 20` (ns→ms, floored to 1)
+- **Three Tiers**: LAT_CRITICAL (1.5x avg_runtime slices), INTERACTIVE (2x), BATCH (configurable ceiling)
+- **EWMA Classification**: wakeup frequency, context switch rate, runtime variance drive scoring
+- **CPU-Bound Demotion**: an INTERACTIVE task whose `avg_runtime` reaches 75% of `slice_ns` (`avg_runtime*4 >= slice_ns*3`), guarded by `ewma_age <= 4`, is demoted to BATCH — the guard spares tasks that burn a full slice but sleep often
+- **Kworker Floor**: PF_WQ_WORKER floors at INTERACTIVE
+- **High-Priority Kthread Override**: `PF_KTHREAD` at `static_prio <= 110` (`task_nice <= -10`) forced to BATCH regardless of behavioral score. ZFS workers (`z_rd_int_*`, `arc_*`), kopia helpers and similar storage kthreads no longer compete with userspace LAT_CRITICAL. The kworker floor wins for `PF_WQ_WORKER` (a `PF_KTHREAD` subset), so workqueue workers continue to be treated as latency-adjacent.
+- **Flow Signature**: each wakeup sets the waker CPU's bit in a per-task bitmap; the popcount is the task's distinct-partner cardinality — a topology-free read of the live communication graph's conductance. At maturity (`ewma_age ≥ EWMA_AGE_MATURE`) the task is classified once and frozen: `≤ SHAPE_TIGHT_MAX` (2) distinct partners is a **TIGHT** pair/loop; a partner set spanning at least half of `nr_cpu_ids` is a **STORM** mesh; everything between defaults to TIGHT (latency-safe — its steal stays freely relievable). Portable — the STORM threshold scales with the machine, no hardcoded core geometry. The shape drives *placement* (TIGHT consolidates on its warm core, STORM spreads), never the steal — a shape-gated steal once starved a STORM-classed audio thread on a busy core, so the steal stays shape-blind.
 
-### L2 Cache Affinity
+### Process Database (procdb)
 
-- **Active Placement**: `find_idle_l2_sibling()` in enqueue Tier 1 finds idle CPUs in the same L2 domain. Bounded loop (max 8 iterations), verifier-safe
-- **Affinity Mode**: Per-regime knob (LIGHT=WEAK, MIXED=STRONG, HEAVY=WEAK). Longrun overrides to WEAK
-- **Kernel Thread Bypass**: kworkers and ksoftirqd (PF_KTHREAD) skip L2 affinity entirely
-- **Per-Dispatch Tracking**: Every dispatch compares the selected CPU's L2 domain against the task's last CPU
-- **Per-Tier Hit/Miss Counters**: Separate L2 hit rates for BATCH, INTERACTIVE, and LAT_CRITICAL tiers
-
-### Process Classification Database (procdb)
-
-- **Cross-Lifecycle Learning**: BPF publishes mature task profiles (tier + avg_runtime) keyed by `comm[16]` to an observation map
-- **Confidence Scoring**: Rust ingests observations, tracks EWMA convergence stability, and promotes profiles to "confident" when avg_runtime stabilizes
-- **Warm-Start on Spawn**: `enable()` applies learned classification from prior runs
-- **EWMA Validation**: Confident tasks still run through full behavioral classification in `runnable()`. ProcDb provides the initial state; EWMA validates and corrects
-- **Persistent Memory**: Saved to `~/.cache/pandemonium/procdb.bin` on shutdown (atomic write). Zero cold-start penalty after the first run
-- **Deterministic Eviction**: When the profile cache is full, eviction sorts by (staleness, observations, comm)
-
-### Sleep-Aware Scheduling
-
-- **quiescent() Callback**: Records sleep timestamp
-- **Sleep Duration Tracking**: `running()` classifies sleep into BPF per-CPU histogram (IO-WAIT / SHORT IO / MODERATE / IDLE)
-- **Sleep-Informed Batch Tuning**: IO-heavy (>60% io_pct) extends batch slices +25%, idle-heavy (<15%) tightens -25%, dead zone unchanged. 25ms ceiling. Skipped during longrun mode
-- **Wakeup Latency Histograms**: Per-CPU BPF histograms (3 tiers x 12 buckets), approximately 20ns per wakeup
+BPF publishes mature task profiles (tier + avg_runtime) keyed by `comm[16]`. Rust tracks EWMA convergence stability, promotes to "confident", applies learned classifications on spawn. `enable()` warm-starts; `runnable()` EWMA validates and corrects. Persistent to `~/.cache/pandemonium/procdb.bin` (atomic write).
 
 ### Adaptive Control Loop
 
-- **One Thread, Zero Mutexes**: Single monitor thread, 1-second control loop. Reads BPF histogram maps, computes P99, adjusts knobs
-- **Workload Regime Detection**: LIGHT (idle >50%), MIXED (10-50%), HEAVY (<10%) with Schmitt trigger hysteresis and 2-tick hold
-- **Regime Profiles**:
-  - LIGHT: slice 2ms, preempt 1ms, batch 20ms, affinity WEAK
-  - MIXED: slice 1ms, preempt 1ms, batch 20ms (scaled: nr_cpus * 5ms cap), affinity STRONG
-  - HEAVY: slice 4ms, preempt 2ms, batch 20ms, affinity WEAK
-- **Knob Adjustment Layering**:
-  1. `regime_knobs()` sets baseline
-  2. `sleep_adjust_batch_ns()` adjusts for IO/idle pattern (skipped during longrun)
-  3. Dispatch-rate sojourn threshold (EWMA, core-count-aware floor/ceil)
-  4. Tighten check: P99 above ceiling tightens slice_ns by 25% (MIXED only)
-  5. Graduated relax: step back toward baseline by 500us/tick with 2-second hold
-  6. Longrun override: force WEAK affinity, skip sleep adjustment
-- **Core-Count-Aware Sojourn**: Floor = `clamp(nr_cpus * 1ms, 2ms, 6ms)`, ceiling = floor * 2. Dispatch rate normalized to actual elapsed time (not assumed 1s)
-- **P99 Ceilings**: LIGHT 3ms, MIXED 5ms, HEAVY 10ms
+The Rust control plane is chaos-theory-driven: both regime detection and the MWU weight-update damping run off raw-window nonlinear-dynamics statistics (`chaos.rs`), not EWMAs or Schmitt triggers.
+
+- **One Thread, Zero Mutexes**: 1-second control loop on the main thread reads BPF histogram maps, computes per-tier and aggregate P99 and drives the MWU orchestrator. BPF produces histograms; Rust reads them once per second and writes knobs BPF picks up on the next scheduling decision.
+- **Chaos primitives** (`chaos.rs`, pure Rust, recomputed each tick over a 16-sample raw window): HVG mean degree λ (Luque–Lacasa horizontal visibility graph — ~2 periodic, →4 IID-random), Bandt–Pompe D=3 permutation entropy (ordinal disorder, normalized to [0,1]) and RQA determinism (fraction of recurrence points on diagonals — →1 steady, →0 IID).
+- **Workload Regime Detection**: LIGHT / MIXED / HEAVY from the raw `idle_pct` window — no Schmitt trigger. LIGHT needs `mean_idle ≥ 50%` AND "chaos-low" (`λ < 3.4` OR `bp_h < 0.85`); HEAVY needs `mean_idle ≤ 10%` AND chaos-low; everything else is MIXED. A 2-tick hold smooths transitions.
+- **MWU Orchestrator**: 6 experts (LATENCY, BALANCED, THROUGHPUT, IO_HEAVY, FORK_STORM, SATURATED) compete via multiplicative weight updates, with one weight vector **per regime** (LIGHT/MIXED/HEAVY each learn independently). 7 continuous knobs are blended via per-expert scale factors; 1 discrete knob (`affinity_mode`) by weighted majority vote. Learning rate ETA = 0.33465 (= √(ln 6 / 16), the theory-optimal Hedge rate for the 16-tick window); weight floor 1e-6; relaxation 80% toward a no-op-skewed equilibrium after 2 healthy ticks below 70% of the regime P99 ceiling. The weight update is itself Butterworth-damped by a signal-trust coefficient (RQA determinism + λ), so the controller tracks faithfully only when the workload looks steady.
+- **6 loss pathways**, all firing immediately (no streak confirmation): (1) **P99 spike** — worst of aggregate / interactive P99 over the regime ceiling; (2) **rescue delta** — 0→nonzero, penalizes all experts so MWU holds steady while the BPF oscillator does the tightening; (3) **IO-bucket transition**; (4) **fork storm** — raw wake-rate over a tau-derived threshold AND concurrent `rescue_count > 0`, scaled by wake-rate overage, letting the FORK_STORM expert compress `burst_slice_ns` / `preempt_thresh_ns` / `sojourn_thresh_ns` / `batch_slice_ns`; (5) **chaos transition** — a `bp_h` jump > 0.10 or an upward λ crossing penalizes the currently-dominant non-BALANCED expert; (6) **cross-domain scatter** — the placement-side cross-domain migration fraction (the select/enqueue `nr_cross_domain` paths, excluding the Φ-correct steal and work-conservation moves MWU must not punish) climbing past a 20% rising-edge threshold penalizes the THROUGHPUT / SATURATED / FORK_STORM experts, re-weighting the blend toward LATENCY / BALANCED and affinity STRONG. This is the adaptive layer's only direct view of the migration storm its own knobs can induce; rising-edge gating leaves a stable high-scatter throughput regime (8C+) untouched, where wide-slice scatter is a winning trade.
+- **Φ-aware oscillator gating**: before scoring, MWU reads the BPF CoDel oscillator's position AND the nearest-peer Φ hold (`reff_value` slot 0). The rescue-delta and fork-storm pathways defer only when the oscillator has tightened (< 0.40) AND the effective release `codel_target + dist_extra` sits below the Φ equilibrium — or gone quiet (> 0.90) above it — so the two controllers never double-correct on `global_rescue_count`, and MWU never reads a hard Φ hold as a loose window and stands down on rescue pressure that is genuinely live.
+- **Quiescence freeze + adaptive-rarity retune**: when λ sits in the periodic band, RQA determinism ≥ 0.90 and the active regime's weight vector has converged, the loop latches `frozen` and skips the MWU retune + knob write (it still ticks at 1 Hz; the chaos sensors are the thaw condition). When not frozen, a sub-threshold retune stretches the retune interval ×1.5 (capped at 8 ticks); any disturbance snaps it back to 1.
 
 ### Core-Count Scaling
 
-All scheduling parameters scale dynamically with `nr_cpus` using clamped linear formulas. No special-casing, no lookup tables -- every value is a calculation.
+All timing constants scale from `tau_ns = TAU_SCALE_NS / √(λ₂ · N)` — capacity-aware (the geometric mean of connectivity `1/λ₂` and capacity `1/√N`, so a well-connected but core-starved topology loosens instead of tightening), with safety-rail clamps. 12C reference: τ≈13.3ms (λ₂=12, N=12). Cardinality decisions (per-CPU DSQ depth, wake_wide threshold, tick scan budget) use `nr_cpus` directly — counts are not tau-derived. **The per-column τ values and derived cells below are an approximate reference; the live values are derived at runtime from the capacity-aware τ law.**
 
-| Parameter | Formula | 2C | 4C | 8C | 12C |
-|-----------|---------|----|----|----|----|
-| Sojourn floor | `clamp(nr_cpus * 1ms, 2ms, 6ms)` | 2ms | 4ms | 6ms | 6ms |
-| Sojourn ceiling | `floor * 2` | 4ms | 8ms | 12ms | 12ms |
-| Overflow rescue | `clamp(nr_cpus * 2ms, 4ms, 10ms)` | 4ms | 8ms | 10ms | 10ms |
-| Starvation rescue | `clamp(min(25ms * N, 500ms / max(1,N/4)), 20ms, 500ms)` | 50ms | 100ms | 200ms | 167ms |
-| Deficit budget | `nr_cpus * min(4, 2 + nr_cpus/2)` | 6 | 16 | 32 | 48 |
-| Per-CPU DSQ depth | `nr_cpus < 4 ? 1 : 2` | 1 | 2 | 2 | 2 |
-| Mixed batch cap | `nr_cpus * 5ms` (no-op above base) | 10ms | 20ms | 20ms | 20ms |
-| Mixed slice cap | `nr_cpus * 500us` (no-op above base) | 1ms | 1ms | 1ms | 1ms |
+| Parameter | Formula | 2C | 4C | 8C | 12C | 32C |
+|-----------|---------|------------|----|----|----|----|
+| Sojourn interval | `clamp(K × τ, 2ms, 12ms)` | 2ms | 4ms | 8ms | 12ms | 5ms |
+| Overflow rescue | `= codel_target_equilibrium_ns` (R_eff-derived) | varies | varies | varies | varies | varies |
+| Starvation rescue | `clamp(K × τ, 20ms, 500ms)` | 20ms | 80ms | 160ms | 166ms | 21ms |
+| CoDel target floor | `clamp(K × τ, 200µs, 800µs)` | 200µs | 200µs | 500µs | 700µs | 200µs |
+| CoDel target max | `clamp(K × τ, 1ms, 8ms)` | 1ms | 1ms | 1ms | 2ms | 1ms |
+| CoDel equilibrium | `clamp(⟨R_eff⟩ × 2m × τ, 200µs, 8ms)` | varies | varies | varies | varies | varies |
+| Lag cap (warp bound) | `clamp(K × τ, 8ms, 80ms)` | — | — | — | — | — |
+| Spill search budget | `clamp(K / τ, 6, min(nr_cpu_ids - 1, MAX_AFFINITY_CANDIDATES))` (≈ λ₂/2) | 6 | 6 | 6 | 6 | 16 |
+| Affinity idle search | `clamp(K / τ, 3, min(nr_cpu_ids - 1, MAX_AFFINITY_CANDIDATES))` (≈ λ₂/4) | 3 | 3 | 3 | 3 | 8 |
+| Per-CPU DSQ depth | `tau ≥ 6ms ? 2 : 1` | 1 | 2 | 2 | 2 | 1 |
+| Longrun preempt shift | `tau < 4ms ? 2 : 0` | 4× | 1× | 1× | 1× | 1× |
 
-- **CPU Hotplug**: `cpu_online`/`cpu_offline` callbacks prevent sched_ext auto-exit during CPU restriction
-- **Topology Detection**: Parses sysfs for physical packages, L2/L3 cache domains, NUMA nodes
-- **BPF-Verifier Safe**: All EWMA uses bit shifts, no floats. All shared state uses GCC __sync builtins (CAS, atomic add, test-and-set)
+- **Low-core slice discipline**: τ is largest at low core count (λ₂ shrinks as cores drop), so the tau slice cap runs loosest exactly where a wide batch slice hurts most — a 4ms HEAVY-regime slice on 2–4 cores denies a latency-sensitive probe across many consecutive slices, the low-core tail. The regime slice is capped to the MIXED value (1ms) at `nr_cpus ≤ 4`, where a wide slice buys no throughput; 8C/12C keep the tau-scaled width, where it earns it.
+- **CPU Hotplug**: `cpu_online`/`cpu_offline` callbacks clear per-CPU timestamps and oscillator state (velocity, rescue count) to prevent stale oscillation after suspend/resume
+- **BPF-Verifier Safe**: All EWMA uses bit shifts, no floats. All shared state uses GCC __sync builtins
 
 ## Architecture
 
@@ -209,79 +298,43 @@ pandemonium_common.py    Shared infrastructure (logging, build, CPU management,
 export_scx.py            Automated import into sched-ext/scx monorepo
 src/
   main.rs              Entry point, CLI, scheduler loop, telemetry
-  scheduler.rs         BPF skeleton lifecycle, tuning knobs I/O, histogram reads
-  adaptive.rs          Adaptive control loop (single monitor thread, histogram P99,
-                         sleep adjustment, sojourn threshold, tighten/relax,
-                         longrun override, core-count-aware sojourn)
-  tuning.rs            Regime knobs, stability scoring, sleep adjustment
-  procdb.rs            Process classification database (observe -> learn -> predict -> persist)
-  topology.rs          CPU topology detection (sysfs -> cache_domain + l2_siblings BPF maps)
-  event.rs             Pre-allocated ring buffer for stats time series
-  log.rs               Logging macros
   lib.rs               Library root
+  scheduler.rs         BPF skeleton lifecycle, tuning knobs I/O, histogram reads
+  adaptive.rs          Adaptive control loop (monitor thread, histogram P99,
+                         chaos-driven regime detection, MWU, quiescence freeze)
+  chaos.rs             Chaos primitives: HVG mean degree/entropy, Bandt-Pompe D=3
+                         permutation entropy, RQA determinism (raw-window, no EWMA)
+  tuning.rs            MWU orchestrator (6 experts, 6 loss pathways, scale factors),
+                         regime thresholds, quiescence + adaptive-rarity retune
+  procdb.rs            Process classification database (observe -> learn -> predict -> persist)
+  topology.rs          CPU topology detection, Laplacian pseudoinverse, effective resistance,
+                         resistance affinity ranking, R_eff cost oracle + Φ distance scale (sysfs -> BPF maps)
+  event.rs             Pre-allocated ring buffer for stats time series
+  watchdog.rs          Control-loop stall detector (10s heartbeat, abort on miss)
+  bpf_intf.rs          Mirror of intf.h constants (MAX_CPUS, MAX_AFFINITY_CANDIDATES,
+                         MAX_NODES) with static_assert against the C macro
+  bpf_skel.rs          libbpf-cargo-generated BPF skeleton bindings
+  log.rs               Logging macros
   bpf/
     main.bpf.c         BPF scheduler (GNU C23)
     intf.h             Shared structs: tuning_knobs, pandemonium_stats, task_class_entry
   cli/
-    mod.rs             Shared constants, helpers
-    check.rs           Dependency + kernel config verification
-    run.rs             Build, sudo execution, dmesg, log management
-    bench.rs           A/B benchmarking
-    probe.rs           Interactive wakeup probe
-    report.rs          Statistics, formatting
-    test_gate.rs       Test gate orchestration
-    child_guard.rs     RAII child process guard
-    death_pipe.rs      Orphan detection via pipe POLLHUP
+    mod.rs             Shared CLI helpers
+    probe.rs           Interactive wakeup probe (Python test harness hook)
+    stress.rs          CPU-pinned stress worker (Python test harness hook)
 build.rs               vmlinux.h generation + C23 patching + BPF compilation
 tests/
-  pandemonium-tests.py Test orchestrator (bench-scale, bench-trace, bench-contention,
-                         bench-pcpu, bench-scx)
-  contention.rs        Contention stress tests (44 tests: sojourn, relax, tighten,
-                         longrun, sleep-informed batch, regime hold, P99 histogram)
-  adaptive.rs          Adaptive layer tests (29 tests: regime, stability, sleep, telemetry)
-  event.rs             Unit tests (ring buffer)
-  procdb.rs            Process database tests (26 tests: confidence, eviction, persistence)
-  scale.rs             Latency scaling benchmark
+  pandemonium-tests.py Test orchestrator (bench-scale, bench-contention,
+                         bench-pcpu, bench-scx, bench-sys, low-cpu-deadline)
+  bench-fork-thread.py Fork/thread IPC benchmark (full scx field) + hw counters + non-compensatory regression gate
+  bench-power.py       Energy-efficiency benchmark (RAPL J/op + idle floor)
+  bench-enduser.py     One-command shareable report (montauk digest: specs + ranked offenders + metrics, redacted)
+  gate.rs              Integration test gate (load/classify/latency/responsiveness/contention)
 include/
   scx/                 Vendored sched_ext headers
 ```
 
-### BPF Scheduler (main.bpf.c)
-
-```
-select_cpu()  ->  Idle CPU found?  ->  Per-CPU DSQ (depth-gated, KICK_IDLE)
-                      |                  (depth: 1 at <4C, 2 at 4C+)
-                      v (no)
-enqueue()     ->  L2 sibling idle?  ->  Node DSQ + kick (L2-affine placement)
-                  (skip for LAT_CRITICAL    |
-                   and kernel threads)      v (no)
-              ->  Wakeup or          ->  Node DSQ + KICK_PREEMPT
-                  LAT_CRITICAL?          (all wakeups, any tier)
-                      |
-                      v (batch requeue)
-              ->  BATCH or immature  ->  Per-node batch overflow DSQ (sojourn tracked)
-                  INTERACTIVE?           (classification gate: ewma_age < 2)
-                  (vtime ceiling at       |
-                   >=8 cores)             v (classified INTERACTIVE)
-              ->  Per-node interactive overflow DSQ
-
-dispatch()    ->  Overflow sojourn rescue (core-count-scaled threshold, deficit-gated)
-              ->  Per-CPU DSQ (direct placement, counts toward deficit)
-              ->  Deficit counter (DRR: force batch if budget + starving, longrun tightens)
-              ->  Hard starvation rescue (core-count-scaled safety net)
-              ->  Node interactive overflow (LAT_CRITICAL + INTERACTIVE)
-              ->  Batch sojourn rescue (CoDel: rescue if oldest > threshold)
-              ->  Node batch overflow (normal fallback)
-              ->  Cross-node steal (interactive + batch per remote node)
-              ->  KEEP_RUNNING if nothing queued
-
-tick()        ->  Burst detection (CUSUM + wakeup rate -> burst_mode)
-              ->  Longrun detection (batch DSQ non-empty >2s -> longrun_mode)
-              ->  Sojourn enforcement (kick batch CPUs when batch DSQ starving)
-              ->  interactive_waiting?  ->  Preempt batch (thresh=0 during burst)
-```
-
-### Adaptive Layer (adaptive.rs)
+### Data Flow
 
 ```
 BPF per-CPU histograms              Monitor Thread (1s loop)
@@ -289,55 +342,43 @@ BPF per-CPU histograms              Monitor Thread (1s loop)
                                     Compute P99 per tier
                                       |
                                       v
-                                    regime_knobs() -> baseline
-                                      -> sleep_adjust_batch_ns() (skip if longrun)
-                                        -> dispatch-rate sojourn threshold (core-count-aware)
-                                          -> tighten check -> P99 ceiling
-                                            -> graduated relax -> step toward baseline
-                                      -> longrun override -> WEAK affinity, base batch
+                                    detect_regime (chaos: HVG λ + Bandt-Pompe)
+                                      -> scaled_regime_knobs() -> baseline
+                                      -> MWU orchestrator (6 experts, 6 loss pathways)
+                                        -> blend continuous knobs (scale factors)
+                                        -> vote discrete knobs (majority)
+                                      -> oscillator gating + quiescence freeze
                                       |
                                       v
                                     BPF reads knobs on next dispatch
 
-L2 placement:      affinity_mode knob -> BPF enqueue (WEAK during longrun)
-Sojourn threshold: sojourn_thresh_ns knob -> BPF dispatch (core-count-scaled)
+Resistance affinity: R_eff ranked map -> BPF select_cpu (wakee_flips-gated)
+L2 placement:        affinity_mode knob -> BPF enqueue (per-regime baseline; MWU vote)
+Migration potential: R_eff cost oracle + phi_dist_scale_q16 -> BPF dispatch STEP 1 steal resist
+Sojourn threshold:   sojourn_thresh_ns knob -> BPF dispatch (core-count-scaled, codel_eq-floored)
+Stall detection:     codel_target_ns (BPF-internal, damped oscillation, no Rust input)
+Cross-cache domain scatter:   nr_cross_domain path counters -> Rust MWU PATHWAY 6 (re-weights experts + affinity)
 ```
 
-One thread, zero mutexes. BPF produces histograms, Rust reads them once per second. Rust writes knobs, BPF reads them on the very next scheduling decision.
-
-### Process Database (procdb.rs)
-
-```
-BPF stopping()                    Rust monitor                    BPF enable()
-  |                                |                                |
-  v                                v                                v
-task_class_observe  -------->  ingest()  -------->  task_class_init
-(comm -> tier, avg_runtime)    confidence scoring   (comm -> tier, avg_runtime)
-                               EWMA convergence     warm-start -> EWMA validates
-                               detection
-
-~/.cache/pandemonium/procdb.bin
-  ^                    |
-  |  save() on         |  load() on startup
-  |  shutdown          |  -> flush_predictions()
-  |  (atomic write)    v
-  +--- Rust monitor ---+
-```
+One thread, zero mutexes. BPF produces histograms, Rust reads them once per second. Rust writes knobs, BPF reads them on the next scheduling decision. Stall detection is fully BPF-internal — the damped oscillation runs in tick() on CPU 0 with no Rust involvement.
 
 ### Tuning Knobs (BPF map)
 
-| Knob | Default | Purpose |
-|------|---------|---------|
-| `slice_ns` | 1ms | Interactive/lat_cri slice ceiling |
-| `preempt_thresh_ns` | 1ms | Tick preemption threshold (0 during burst) |
-| `lag_scale` | 4 | Deadline lag multiplier (higher = more vtime credit) |
-| `batch_slice_ns` | 20ms | Batch task slice ceiling (sleep-adjusted) |
-| `burst_slice_ns` | 1ms | Slice ceiling during burst/longrun mode |
-| `cpu_bound_thresh_ns` | 2.5ms | CPU-bound demotion threshold (regime-dependent) |
-| `lat_cri_thresh_high` | 32 | Classifier: LAT_CRITICAL threshold |
-| `lat_cri_thresh_low` | 8 | Classifier: INTERACTIVE threshold |
-| `affinity_mode` | 1 | L2 placement (0=OFF, 1=WEAK, 2=STRONG) |
-| `sojourn_thresh_ns` | 5ms | Batch DSQ rescue threshold (set by Rust, core-count-aware) |
+| Knob | Default | Owner | Purpose |
+|------|---------|-------|---------|
+| `slice_ns` | 1ms | MWU | Interactive/lat_cri slice ceiling |
+| `preempt_thresh_ns` | 1ms | MWU | Tick preemption threshold |
+| `batch_slice_ns` | 20ms | MWU | Batch task slice ceiling (sleep-adjusted) |
+| `burst_slice_ns` | 1ms | MWU | Slice during longrun mode |
+| `lat_cri_thresh_high` | 32 | MWU | LAT_CRITICAL classifier threshold |
+| `lat_cri_thresh_low` | 8 | MWU | INTERACTIVE classifier threshold |
+| `affinity_mode` | 0 | MWU | L2 placement (0=OFF, 1=WEAK, 2=STRONG); Rust writes the per-regime value at startup |
+| `sojourn_thresh_ns` | 5ms | MWU | Batch DSQ rescue threshold (tau-scaled) |
+| `topology_tau_ns` | 0 | Topology | Fiedler-derived time constant (τ = TAU_SCALE / λ₂) |
+| `codel_eq_ns` | 0 | Topology | R_eff-derived CoDel equilibrium (`⟨R_eff⟩ × 2m × τ`) |
+| `phi_dist_scale_q16` | 0 | Topology | Φ distance→wait scale (Q16): cross-domain steal resist `R_eff × this >> 16`; 0 = flat CoDel target (monolithic / single domain) |
+
+Topology-owned fields are written by Rust at topology detect and on hotplug. The adaptive loop preserves them on every MWU write (the 1Hz cycle would otherwise clobber the equilibrium).
 
 ## Requirements
 
@@ -345,7 +386,7 @@ task_class_observe  -------->  ingest()  -------->  task_class_init
 - Rust toolchain
 - clang (BPF compilation)
 - system libbpf
-- bpftool (first build only -- generates vmlinux.h, can be uninstalled after)
+- bpftool (first build only — generates vmlinux.h, can be uninstalled after)
 - Root privileges (`CAP_SYS_ADMIN`)
 
 ```bash
@@ -363,142 +404,125 @@ pacman -S clang libbpf bpf rust
 ./pandemonium.py clean          # Wipe build artifacts
 
 # Manual
-CARGO_TARGET_DIR=/tmp/pandemonium-build cargo build --release
+CARGO_TARGET_DIR=$HOME/.cache/pandemonium-build cargo build --release
 ```
 
-vmlinux.h is generated from the running kernel's BTF via bpftool on first build and cached at `~/.cache/pandemonium/vmlinux.h`. Subsequent builds use the cache -- bpftool is not needed after the first build.
+vmlinux.h is generated from the running kernel's BTF via bpftool on first build and cached at `~/.cache/pandemonium/vmlinux.h`. The cargo target tree lives at `~/.cache/pandemonium-build` (alongside the log and vmlinux caches under `~/.cache/pandemonium`), so all per-user pandemonium state sits in one place. The `CARGO_TARGET_DIR=$HOME/.cache/pandemonium-build` override is also what lets the vendored libbpf Makefile build cleanly when the source tree path contains spaces.
 
-After install, start and enable manually:
+After install:
 
 ```bash
-sudo systemctl start pandemonium          # Start now (one-time)
-sudo systemctl enable pandemonium         # Start on boot (after confirming it works)
+sudo systemctl start pandemonium          # Start now
+sudo systemctl enable pandemonium         # Start on boot
 ```
-
-Note: the source directory path contains spaces, so `CARGO_TARGET_DIR=/tmp/pandemonium-build` is required for the vendored libbpf Makefile.
 
 ## Usage
 
 ```bash
-# Run the scheduler (default: adaptive mode)
-sudo pandemonium
-
-# BPF-only mode (no Rust adaptive control loop)
-sudo pandemonium --no-adaptive
-
-# Override CPU count for scaling formulas
-sudo pandemonium --nr-cpus 4
-
-# Add custom compositor process names (boosted to LAT_CRITICAL)
-sudo pandemonium --compositor gamescope --compositor picom-next
-
-# Subcommands
-pandemonium check        # Verify dependencies and kernel config
-pandemonium start        # Build + sudo run + dmesg capture + log management
-pandemonium bench        # A/B benchmark (EEVDF vs PANDEMONIUM)
-pandemonium test         # Full test gate (unit + integration)
-pandemonium test-scale   # A/B scaling benchmark with CPU hotplug
-pandemonium probe        # Standalone interactive wakeup probe
-pandemonium dmesg        # Filtered kernel log for sched_ext/pandemonium
+sudo scx_pandemonium                  # Default: adaptive mode
+sudo scx_pandemonium --no-adaptive    # BPF-only (no Rust control loop)
+sudo scx_pandemonium -v               # Verbose telemetry on stdout
 ```
+
+There is no compositor allowlist. Compositors land at `LAT_CRITICAL` naturally
+through the behavioral classifier (high wakeup frequency × high context-switch
+rate × short avg runtime → `lat_cri` peaks), and procdb warm-starts known
+names from prior sessions. The earlier hardcoded comm boost was scaffolding
+from when the classifier was less reliable on cold-start; the current
+classifier no longer needs the safety net.
 
 ### Monitoring
 
-Per-second telemetry (printed to stdout while running):
+Per-second telemetry:
 
 ```
-d/s: 251000  idle: 5% shared: 230000  preempt: 12  keep: 0  kick: H=8000 S=22000 enq: W=8000 R=22000 wake: 4us p99: 10us L2: B=67% I=72% LC=85% procdb: 42/5 sleep: io=87% sjrn: 3ms/5ms rescue: 0 [MIXED]
-```
-
-During fork/exec storms, burst mode activates:
-
-```
-d/s: 380000  idle: 1% shared: 360000  preempt: 45  keep: 0  kick: H=15000 S=35000 enq: W=15000 R=35000 wake: 12us p99: 85us L2: B=45% I=68% LC=82% procdb: 42/5 sleep: io=92% sjrn: 1ms/5ms rescue: 3 [HEAVY BURST]
-```
-
-During sustained batch pressure, longrun mode activates:
-
-```
-d/s: 180000  idle: 2% shared: 170000  preempt: 8  keep: 0  kick: H=6000 S=18000 enq: W=6000 R=18000 wake: 6us p99: 15us L2: B=55% I=70% LC=80% procdb: 42/5 sleep: io=30% sjrn: 8ms/10ms rescue: 1 [HEAVY LONGRUN]
+d/s: 251000 idle: 5% shared: 230000 preempt: 12 keep: 0 kick: H=8000 S=22000 enq: W=8000 R=22000 wake: 4us p99: 10us [B:8 I:9 L:7] lat_idle: 3us lat_kick: 6us procdb: 42/5 sleep: io=87% slice: 1000us batch: 20000us reenq: 4 sjrn: 3ms/5ms rescue: 0 l2: B=67% I=72% L=85% chaos: lam=2.10 H=0.40 det=0.95 x=0 frozen: 0 (n=12) retune_iv: 2 [MIXED]
 ```
 
 | Counter | Meaning |
 |---------|---------|
 | d/s | Total dispatches per second |
-| idle | Placed via select_cpu idle fast path (%) |
+| idle | select_cpu idle fast path (%) |
 | shared | Enqueue -> per-node DSQ |
-| preempt | Tick preemptions (batch task yielded) |
-| kick H/S | Hard (PREEMPT) / Soft (nudge) kicks |
+| preempt | Tick preemptions |
+| keep | KEEP_RUNNING re-slices |
+| kick H/S | Hard (PREEMPT) / Soft kicks |
 | enq W/R | Wakeup / Re-enqueue counts |
-| wake | Average wakeup-to-run latency |
-| p99 | P99 wakeup latency (from histogram) |
-| L2: B/I/LC | L2 cache hit rate per tier (Batch/Interactive/Lat_Critical) |
+| wake / p99 | Average / aggregate P99 wakeup latency |
+| [B/I/L] | Per-tier P99 (BATCH / INTERACTIVE / LAT_CRITICAL) |
+| lat_idle / lat_kick | Wakeup latency split: idle-placement vs kick path |
 | procdb | Total profiles / confident predictions |
-| sleep: io | I/O-wait sleep pattern percentage |
-| sjrn | Batch sojourn: current wait / threshold (ms) |
-| rescue | Overflow sojourn rescue dispatches this tick |
-| [REGIME] | Current workload regime (LIGHT/MIXED/HEAVY) |
-| BURST | Burst detection active (CUSUM or wakeup rate) |
-| LONGRUN | Sustained batch pressure detected (>2s) |
+| sleep: io | I/O-wait sleep pattern (%) |
+| slice / batch | Current interactive / batch slice knob (us) |
+| reenq | Re-enqueue count |
+| sjrn | Batch sojourn: current / threshold |
+| rescue | Overflow rescue dispatches this tick |
+| l2: B/I/L | L2 cache hit rate per tier |
+| chaos: lam/H/det/x | HVG mean degree λ / Bandt-Pompe entropy / RQA determinism / chaos-crossing counter |
+| frozen (n) | Quiescence freeze active (1/0) and cumulative frozen ticks |
+| retune_iv | Adaptive-rarity retune interval (ticks between retunes) |
+| [REGIME] | LIGHT/MIXED/HEAVY + LONGRUN flag |
 
 ## Benchmarking
 
 ```bash
-# Full benchmark (throughput + latency + burst + longrun + mixed + deadline + IPC + launch)
-./pandemonium.py bench-scale
-./pandemonium.py bench-scale --iterations 3
-./pandemonium.py bench-scale --iterations 3 --core-counts 4,8,12
-./pandemonium.py bench-scale --burst       # Burst-only mode
-./pandemonium.py bench-scale --longrun     # Longrun-only mode
-./pandemonium.py bench-scale --mixed       # Mixed-only mode (burst + longrun combined)
-./pandemonium.py bench-scale --deadline    # Deadline jitter only
-./pandemonium.py bench-scale --ipc         # IPC round-trip latency only
-./pandemonium.py bench-scale --launch      # Fork/exec launch latency only
-
-# Crash-detection stress test with BPF trace capture
-./pandemonium.py bench-trace
-./pandemonium.py bench-trace --iterations 3 --core-counts 4,8,12
-
-# Contention stress test (6 phases targeting adaptive features)
-./pandemonium.py bench-contention
-./pandemonium.py bench-contention --iterations 3 --core-counts 4,8,12
-./pandemonium.py bench-contention --phase regime-sweep   # Single phase
-
-# Per-CPU DSQ correctness (burst, steal balance, sojourn rescue)
-./pandemonium.py bench-pcpu
-./pandemonium.py bench-pcpu --core-counts 4,8,12
-
-# sched-ext/scx CI compatibility (functional + stress-ng)
-./pandemonium.py bench-scx
-./pandemonium.py bench-scx --core-counts 2
-./pandemonium.py bench-scx --duration 60 --stress-duration 60
+./pandemonium.py bench-scale                     # Full suite (throughput, latency, burst, longrun, mixed, deadline, IPC, launch)
+./pandemonium.py bench-scale --iterations 3      # Multi-iteration
+./pandemonium.py bench-scale --pandemonium-only  # Skip EEVDF and externals
+./pandemonium.py bench-contention                # Contention stress (6 phases)
+./pandemonium.py bench-pcpu                      # Per-CPU DSQ correctness
+./pandemonium.py bench-fork-thread               # Fork/thread IPC + hw counters + regression gate
+./pandemonium.py bench-power                     # Energy efficiency (RAPL J/op + idle floor)
+./pandemonium.py bench-sys                       # Live system telemetry capture
+./pandemonium.py bench-scx                       # sched-ext/scx CI compatibility
+./pandemonium.py bench-cachyos                   # CachyOS Mini-Benchmarker application suite
+./pandemonium.py bench-enduser                   # One-command shareable report (specs + ranked misbehaving items + metrics)
+./pandemonium.py bench-enduser --schedulers scx_rusty,scx_lavd  # Add named scx schedulers to the cachyos field (EEVDF + PANDEMONIUM always in)
+./pandemonium.py bench-enduser --all-scx         # Add the full installed scx field instead (mutually exclusive with --schedulers)
+./pandemonium.py bench-enduser --workload "ffmpeg -i in.mkv out.mp4"   # Trace YOUR isolated workload instead of the fixed profile
+./pandemonium.py bench-enduser --attach chrome --duration 30           # Trace an already-running program for 30s
 ```
 
-All benchmarks compare across core counts via CPU hotplug (2, 4, 8, ..., max). Results are archived to `~/.cache/pandemonium/` in Prometheus exposition format (.prom) for cross-build regression tracking. Human-readable reports are saved as .log files.
+All benchmarks compare across core counts via CPU hotplug (2, 4, 8, ..., max). Results archived to `~/.cache/pandemonium/`.
+
+`bench-enduser` is the one command a user runs to send a report. It runs a short
+fixed profile — the cachyos application workloads, a fork/exec storm, an IPC
+round-trip and capped (20s) burst-starvation and contention captures — under
+your scheduler and EEVDF as a neutral reference, traces each with montauk, and
+assembles one small, redacted file: your system specs, the misbehaving items
+ranked by name (hot CPUs, livelocking tasks, unsignaled waiters, idle strands),
+a thermal/power block, then the key wake-to-run metrics. Process names are
+hashed and the raw traces stay local — you share only the report. montauk is the
+only data source; the script orchestrates and assembles, nothing more.
+
+If montauk isn't installed, bench-enduser clones it from its repo and drives
+montauk's own installer: two prompts up front decide whether it installs montauk
+permanently (capped so `--trace` needs no sudo) or builds it just for the run and
+removes it after. It self-elevates for the trace, ejects any scheduler it loaded
+if you Ctrl+C, and when a build dependency is missing it prints the exact install
+command for your distro (CachyOS, Arch, Gentoo, OpenSUSE, Ubuntu, NixOS). Share
+the resulting `enduser-report-*.txt`.
+
+If you have already isolated the problem to one program, skip the fixed profile
+and capture that program directly: `--workload "<command>"` launches your
+command under the loaded scheduler and traces it until it exits (or `--duration`
+seconds), while `--attach <comm> --duration <s>` traces an already-running
+program by name. Same report, same redaction — captured on your real workload
+rather than the synthetic profile.
 
 ## Testing
 
 ```bash
-# Unit tests (no root required)
-CARGO_TARGET_DIR=/tmp/pandemonium-build cargo test --release
-
-# Full test gate (requires root + sched_ext kernel)
-pandemonium test
-
-# Scaling benchmark (EEVDF vs PANDEMONIUM, CPU hotplug, requires root)
-./pandemonium.py bench-scale
+CARGO_TARGET_DIR=$HOME/.cache/pandemonium-build cargo test --release   # Unit tests (no root)
+sudo CARGO_TARGET_DIR=$HOME/.cache/pandemonium-build \
+     cargo test --release --test gate -- --ignored \
+     --test-threads=1 full_gate                                 # Integration gate (requires root)
 ```
 
-110 tests across 6 test files:
-
-| File | Tests | Coverage |
-|------|-------|----------|
-| tests/contention.rs | 44 | Sojourn EWMA, graduated relax, tighten/spike detection, longrun override, sleep-informed batch, regime hold hysteresis, P99 histogram edge cases, stability score |
-| tests/adaptive.rs | 29 | Regime detection, tuning knobs, stability scoring, sleep adjustment, telemetry gating |
-| tests/procdb.rs | 26 | Profile confidence, eviction, persistence, determinism |
-| src/main.rs | 6 | Topology parsing |
-| tests/event.rs | 5 | Ring buffer, snapshot, summary |
-| tests/gate.rs | 5 | BPF lifecycle, latency (require root, ignored offline) |
+5 tests in 1 file: the integration gate at `tests/gate.rs` — `full_gate` plus the
+load/classify, latency, responsiveness and contention layers (all `#[ignore]`,
+root-only). The `src/*.rs` modules carry no inline unit tests; the pure-Rust logic
+(chaos, tuning, topology) is validated offline through the bench harnesses.
 
 ## sched-ext/scx Integration
 
@@ -508,13 +532,45 @@ PANDEMONIUM is included in the sched-ext/scx monorepo. `export_scx.py` automates
 ./export_scx.py /path/to/scx
 ```
 
-The script copies source files into `scheds/rust/scx_pandemonium/`, renames the crate, strips `[profile.release]` (the workspace provides its own), replaces `build.rs` with a `scx_cargo::BpfBuilder` version, swaps `libbpf-cargo` for `scx_cargo` in build dependencies, registers the workspace member, and runs `cargo fmt`.
+Copies source into `scheds/rust/scx_pandemonium/`, renames the crate, replaces `build.rs` with `scx_cargo::BpfBuilder`, swaps `libbpf-cargo` for `scx_cargo`, registers the workspace member and runs `cargo fmt`.
 
 ## Attribution
 
 - `include/scx/*` headers from the [sched_ext](https://github.com/sched-ext/scx) project (GPL-2.0)
-- vmlinux.h generated from the running kernel's BTF (cached after first build)
+- vmlinux.h generated from the running kernel's BTF
 - Included in the [sched-ext/scx](https://github.com/sched-ext/scx) project
+
+## References
+
+[1] D.J. Klein, M. Randic. "Resistance Distance." *Journal of Mathematical Chemistry* 12, 81-95, 1993. [doi:10.1007/BF01164627](https://link.springer.com/article/10.1007/BF01164627)
+
+[2] A.K. Chandra, P. Raghavan, W.L. Ruzzo, R. Smolensky, P. Tiwari. "The Electrical Resistance of a Graph Captures its Commute and Cover Times." *STOC 1989*, 574-586. Journal version: *Computational Complexity* 6, 312-340, 1996. [doi:10.1007/BF01270385](https://link.springer.com/article/10.1007/BF01270385)
+
+[3] P. Christiano, J.A. Kelner, A. Madry, D.A. Spielman, S.-H. Teng. "Electrical Flows, Laplacian Systems, and Faster Approximation of Maximum Flow in Undirected Graphs." *STOC 2011*, 273-282. [arXiv:1010.2921](https://arxiv.org/abs/1010.2921)
+
+[4] L. Chen, R. Kyng, Y.P. Liu, R. Peng, M.P. Gutenberg, S. Sachdeva. "Maximum Flow and Minimum-Cost Flow in Almost-Linear Time." *FOCS 2022*. Journal version: *Journal of the ACM* 72(3), 2025. [arXiv:2203.00671](https://arxiv.org/abs/2203.00671)
+
+[5] K. Nichols, V. Jacobson. "Controlling Queue Delay." *ACM Queue* 10(5), 2012. [doi:10.1145/2208917.2209336](https://queue.acm.org/detail.cfm?id=2209336)
+
+[6] K. Nichols, V. Jacobson. "Controlled Delay Active Queue Management." *RFC 8289*, January 2018. [rfc-editor.org/rfc/rfc8289](https://www.rfc-editor.org/rfc/rfc8289.html)
+
+[7] M. Shreedhar, G. Varghese. "Efficient Fair Queuing Using Deficit Round Robin." *ACM SIGCOMM 1995*, 231-242. [doi:10.1145/217382.217453](https://dl.acm.org/doi/10.1145/217382.217453)
+
+[8] S. Arora, E. Hazan, S. Kale. "The Multiplicative Weights Update Method: a Meta-Algorithm and Applications." *Theory of Computing* 8, 121-164, 2012. [doi:10.4086/toc.2012.v008a006](https://theoryofcomputing.org/articles/v008a006/)
+
+[9] J.D. Valois. "Lock-Free Linked Lists Using Compare-and-Swap." *PODC 1995*, 214-222. [doi:10.1145/224964.224988](https://dl.acm.org/doi/10.1145/224964.224988)
+
+[10] M. Fiedler. "Algebraic Connectivity of Graphs." *Czechoslovak Mathematical Journal* 23(2), 298-305, 1973. [doi:10.21136/CMJ.1973.101168](https://dml.cz/dmlcz/101168)
+
+[11] R.D. Blumofe, C.E. Leiserson. "Scheduling Multithreaded Computations by Work Stealing." *Journal of the ACM* 46(5), 720-748, 1999. [doi:10.1145/324133.324234](https://dl.acm.org/doi/10.1145/324133.324234)
+
+[12] C. Bandt, B. Pompe. "Permutation Entropy: A Natural Complexity Measure for Time Series." *Physical Review Letters* 88(17), 174102, 2002. [doi:10.1103/PhysRevLett.88.174102](https://doi.org/10.1103/PhysRevLett.88.174102)
+
+[13] B. Luque, L. Lacasa, F. Ballesteros, J. Luque. "Horizontal Visibility Graphs: Exact Results for Random Time Series." *Physical Review E* 80(4), 046103, 2009. [doi:10.1103/PhysRevE.80.046103](https://doi.org/10.1103/PhysRevE.80.046103)
+
+[14] N. Marwan, M.C. Romano, M. Thiel, J. Kurths. "Recurrence Plots for the Analysis of Complex Systems." *Physics Reports* 438(5-6), 237-329, 2007. [doi:10.1016/j.physrep.2006.11.001](https://doi.org/10.1016/j.physrep.2006.11.001)
+
+[15] S. Butterworth. "On the Theory of Filter Amplifiers." *Experimental Wireless and the Wireless Engineer* 7, 536-541, 1930.
 
 ## License
 

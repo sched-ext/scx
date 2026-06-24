@@ -2548,7 +2548,7 @@ impl McpTools {
 
                 // Sort per-CPU stats by avg latency descending, show top N worst
                 let mut per_cpu_sorted: Vec<_> = stats.per_cpu_stats.values().collect();
-                per_cpu_sorted.sort_by(|a, b| b.avg_latency_ns.cmp(&a.avg_latency_ns));
+                per_cpu_sorted.sort_by_key(|b| std::cmp::Reverse(b.avg_latency_ns));
                 let total_cpus = per_cpu_sorted.len();
                 let top_n = limit.min(20);
                 let worst_cpus: Vec<_> = per_cpu_sorted.iter().take(top_n).collect();
@@ -2654,8 +2654,7 @@ impl McpTools {
                     Some(stats) => {
                         // Limit per-LLC stats and top processes
                         let mut per_llc_sorted: Vec<_> = stats.per_llc_stats.values().collect();
-                        per_llc_sorted
-                            .sort_by(|a, b| b.outbound_migrations.cmp(&a.outbound_migrations));
+                        per_llc_sorted.sort_by_key(|b| std::cmp::Reverse(b.outbound_migrations));
                         let top_n = limit.min(20);
                         let limited_llc: Vec<_> = per_llc_sorted.into_iter().take(top_n).collect();
                         let limited_procs: Vec<_> =
@@ -2700,7 +2699,7 @@ impl McpTools {
 
                 // Sort CPUs by max depth descending
                 let mut cpu_sorted: Vec<_> = stats.per_cpu.values().collect();
-                cpu_sorted.sort_by(|a, b| b.max_depth.cmp(&a.max_depth));
+                cpu_sorted.sort_by_key(|b| std::cmp::Reverse(b.max_depth));
                 let top_n = limit.min(20);
                 let worst_cpus: Vec<_> = cpu_sorted.iter().take(top_n).collect();
 

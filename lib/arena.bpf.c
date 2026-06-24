@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: GPL-2.0
  * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
  */
-#include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
 #include <lib/sdt_task.h>
 
@@ -77,6 +76,24 @@ int arena_alloc_mask(struct arena_alloc_mask_args *args)
 		return -ENOMEM;
 
 	args->bitmap = (u64)&bitmap->bits;
+
+	return 0;
+}
+
+SEC("syscall")
+int arena_topology_init(struct arena_topology_init_args *args)
+{
+	/*
+	 * Variable-offset access into a SEC("syscall") context pointer is
+	 * disallowed by the BPF verifier. Access each element with a constant
+	 * index to avoid the restriction.
+	 */
+	_Static_assert(TOPO_MAX_LEVEL == 5, "unroll below must match TOPO_MAX_LEVEL");
+	topo_max_children[0] = args->max_children[0];
+	topo_max_children[1] = args->max_children[1];
+	topo_max_children[2] = args->max_children[2];
+	topo_max_children[3] = args->max_children[3];
+	topo_max_children[4] = args->max_children[4];
 
 	return 0;
 }

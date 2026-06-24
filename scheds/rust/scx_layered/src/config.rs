@@ -137,6 +137,10 @@ pub struct LayerCommon {
     pub idle_smt: Option<bool>,
     #[serde(default)]
     pub growth_algo: LayerGrowthAlgo,
+    /// Half-life in milliseconds for holding recent utilization peaks when
+    /// deciding whether a layer should shrink. 0 disables peak holding.
+    #[serde(default)]
+    pub util_peak_half_life_ms: u64,
     #[serde(default)]
     pub perf: u64,
     #[serde(default)]
@@ -197,6 +201,16 @@ pub enum LayerKind {
 
         #[serde(default)]
         protected: bool,
+
+        /// When true, idle CPU selection only considers the layer's own
+        /// CPUs until the layer becomes saturated (i.e., no idle CPU is
+        /// found and check_no_idle is set) or the system is fully
+        /// allocated (all CPUs assigned to layers). At that point, idle
+        /// search falls back to unprotected CPUs like a normal Grouped
+        /// layer. Provides Confined-style cache locality under normal
+        /// load with Grouped-style overflow under pressure.
+        #[serde(default)]
+        idle_confined: bool,
 
         #[serde(flatten)]
         common: LayerCommon,

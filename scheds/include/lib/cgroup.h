@@ -6,6 +6,7 @@
 #pragma once
 
 #include <errno.h>
+#include <lib/atq.h>
 
 /**
  * Configs for cpu.max
@@ -74,23 +75,28 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 
 /**
  * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
- * @cgrp: cgroup where a task belongs to.
+ * @cgrp_id: cgroup id where a task belongs to.
  * @p: a task to be tested.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
+ *         pass 0 when no task context is available.
  *
  * Return 0 when the cgroup is not throttled,
  * -EAGAIN when the cgroup is throttled, and
  * -errno for some other failures.
  */
-int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, struct task_struct *p __arg_trusted);
+int scx_cgroup_bw_throttled(u64 cgrp_id,
+			    struct task_struct *p __arg_trusted, u64 taskc);
 
 /**
  * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
- * @cgrp: cgroup where a task belongs to.
+ * @cgrp_id: cgroup id where a task belongs to.
  * @consumed_ns: amount of time actually used.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
+ *         pass 0 when no task context is available.
  *
  * Return 0 for success, -errno for failure.
  */
-int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns);
+int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc);
 
 /**
  * scx_cgroup_bw_put_aside - Put aside a task to execute it when the cgroup is
@@ -98,7 +104,7 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns);
  * @p: a task to be put aside since the cgroup is throttled.
  * @taskc: a task-embedded pointer to scx_task_common.
  * @vtime: vtime of a task @p.
- * @cgrp: cgroup where a task belongs to.
+ * @cgrp_id: cgroup id where a task belongs to.
  *
  * When a cgroup is throttled (i.e., scx_cgroup_bw_reserve() returns -EAGAIN),
  * a task that is in the ops.enqueue() path should be put aside to the BTQ of
@@ -108,7 +114,7 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns);
  *
  * Return 0 for success, -errno for failure.
  */
-int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime, struct cgroup *cgrp __arg_trusted);
+int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime, u64 cgrp_id);
 
 /**
  * scx_cgroup_bw_reenqueue - Reenqueue backlogged tasks.
@@ -218,4 +224,25 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
  * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent);
+
+/**
+ * Per-task context for CPU bandwidth control.
+ *
+ * Schedulers that use cpu.max control should embed this struct at the
+ * beginning of their per-task context. @common is at offset 0, so all
+ * existing scx_task_common casts still work.
+ *
+ * @common:      Must be first; all existing scx_task_common casts still work.
+ * @cgx_raw:     Cached arena pointer to scx_cgroup_ctx (0 = not cached).
+ * @llcx_raw:    Cached arena pointer to scx_cgroup_llc_ctx (0 = not cached).
+ * @last_llc_id: LLC id for which @llcx_raw was cached.
+ */
+struct scx_task_cgroup_bw {
+	struct scx_task_common	common;		/* MUST be first */
+	u64			cgx_raw;	/* 0 = not cached */
+	u64			llcx_raw;	/* 0 = not cached */
+	int			last_llc_id;
+};
+
+typedef struct scx_task_cgroup_bw __arena scx_task_cgroup_bw_t;
 

@@ -1,4 +1,3 @@
-#include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
 #include <lib/sdt_task.h>
 
@@ -18,6 +17,13 @@ u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
 
 int nr_topo_nodes[TOPO_MAX_LEVEL];
 
+/*
+ * Per-level maximum number of children. Set by arena_topology_init() before
+ * any topo_init() calls. Each topology node at level L is allocated with
+ * topo_max_children[L] child pointer slots.
+ */
+u32 topo_max_children[TOPO_MAX_LEVEL];
+
 __hidden
 int topo_contains(topo_ptr topo, u32 cpu)
 {
@@ -31,11 +37,25 @@ int topo_subset(topo_ptr topo, scx_bitmap_t mask)
 }
 
 static
-topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, u64 id)
+topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, s16 id)
 {
-	topo_ptr topo;
+	volatile topo_ptr topo; /* add volatile to satisfy the verifier. */
+	u32 level = parent ? parent->level + 1 : 0;
+	u32 max_ch;
+	int i;
 
-	topo = scx_static_alloc(sizeof(struct topology), 1);
+	if (level >= TOPO_MAX_LEVEL) {
+		bpf_printk("topology is too deep");
+		return NULL;
+	}
+
+	if (id < 0 || id >= NR_CPUS) {
+		bpf_printk("invalid node id");
+		return NULL;
+	}
+
+	max_ch = topo_max_children[level];
+	topo = scx_static_alloc(sizeof(struct topology) + max_ch * sizeof(topo_ptr), 1);
 	if (!topo) {
 		bpf_printk("static allocation failed");
 		return NULL;
@@ -43,32 +63,46 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, u64 id)
 
 	topo->parent = parent;
 	topo->nr_children = 0;
-	topo->level = parent ? topo->parent->level + 1 : 0;
-	topo->id = id;
+	topo->level = level;
 	/*
-	* The passed-in mask is deliberately consumed; topo_node takes ownership.
-	* Do not reuse the same mask elsewhere after this call.
-	*/
+	 * The passed-in mask is deliberately consumed; topo_node takes ownership.
+	 * Do not reuse the same mask elsewhere after this call.
+	 */
 	topo->mask = mask;
 
-	if (topo->level >= TOPO_MAX_LEVEL) {
-		bpf_printk("topology is too deep");
+	/*
+	 * Re-assert bounds for the verifier. barrier_var() prevents the compiler
+	 * from treating these checks as dead code (since level/id are local
+	 * variables that it knows were already checked above). Without it, clang
+	 * eliminates the re-check, and the verifier loses the narrowed bounds
+	 * after scx_static_alloc().
+	 */
+	barrier_var(level);
+	barrier_var(id);
+	if (level >= TOPO_MAX_LEVEL || id < 0 || id >= NR_CPUS)
 		return NULL;
+
+	/*
+	 * Populate level_ids: levels below this node are copied from the
+	 * parent, this node's own level gets id, levels above are -EINVAL.
+	 */
+	bpf_for(i, 0, TOPO_MAX_LEVEL) {
+		if (i < (int)level && parent)
+			topo->level_ids[i] = parent->level_ids[i];
+		else if (i == (int)level)
+			topo->level_ids[i] = id;
+		else
+			topo->level_ids[i] = -EINVAL;
 	}
 
-	if (id >= NR_CPUS) {
-		bpf_printk("invalid node id");
-		return NULL;
-	}
-
-	topo_nodes[topo->level][topo->id] = (u64)topo;
+	topo_nodes[level][id] = (u64)topo;
 
 	return topo;
 }
 
 
-static
-int topo_add(topo_ptr parent, scx_bitmap_t mask, u64 id)
+static __noinline
+int topo_add(topo_ptr parent, scx_bitmap_t mask, s16 id)
 {
 	topo_ptr child;
 
@@ -77,14 +111,19 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask, u64 id)
 		return -EINVAL;
 	}
 
-	child = topo_node(parent, mask, id);
-	if (!child)
-		return -ENOMEM;
+	if (parent->level >= TOPO_MAX_LEVEL) {
+		bpf_printk("topology tree is too deep");
+		return -EINVAL;
+	}
 
-	if (parent->nr_children >= TOPO_MAX_CHILDREN) {
+	if (parent->nr_children >= topo_max_children[parent->level]) {
 		bpf_printk("topology fanout is too large");
 		return -EINVAL;
 	}
+
+	child = topo_node(parent, mask, id);
+	if (!child)
+		return -ENOMEM;
 
 	parent->children[parent->nr_children++] = child;
 
@@ -92,11 +131,11 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask, u64 id)
 }
 
 __weak
-int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id)
+int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
 {
 	/* Initializing the child to appease the verifier. */
 	topo_ptr topo, child = NULL;
-	int i, j;
+	int i, j, ret;
 
 	topo = topo_all;
 	if (!topo_all) {
@@ -132,7 +171,9 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id)
 		 * parent topology node.
 		 */
 		if (j == topo->nr_children) {
-			topo_add(topo, mask, id);
+			ret = topo_add(topo, mask, id);
+			if (ret)
+				return ret;
 			nr_topo_nodes[i]++;
 			return 0;
 		}
@@ -369,7 +410,6 @@ __weak int
 topo_cpu_to_llc_id(u32 cpu)
 {
 	topo_ptr topo;
-	u32 id;
 
 	if (cpu >= nr_cpu_ids) {
 		bpf_printk("invalid cpu id: %u", cpu);
@@ -382,9 +422,7 @@ topo_cpu_to_llc_id(u32 cpu)
 		return -EINVAL;
 	}
 
-	/* TOPO_CPU -> TOPO_CORE -> TOPO_LLC */
-	id = topo->parent->parent->id;
-	return id;
+	return topo->level_ids[TOPO_LLC];
 }
 
 volatile u64 a;

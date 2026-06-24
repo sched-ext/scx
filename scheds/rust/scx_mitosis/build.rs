@@ -5,9 +5,9 @@
 
 fn main() {
     scx_cargo::BpfBuilder::new()
-        .unwrap()
+        .expect("BpfBuilder creation returned error")
         .enable_intf("src/bpf/intf_rust.h", "bpf_intf.rs")
         .enable_skel("src/bpf/mitosis.bpf.c", "bpf")
         .build()
-        .unwrap();
+        .expect("BpfBuilder build returned error");
 }

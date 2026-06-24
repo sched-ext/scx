@@ -186,7 +186,7 @@ out:
  */
 static __always_inline void clear_pending(arena_spinlock_t __arena *lock)
 {
-	WRITE_ONCE(lock->pending, 0);
+	(void)WRITE_ONCE(lock->pending, 0);
 }
 
 /**
@@ -199,7 +199,7 @@ static __always_inline void clear_pending(arena_spinlock_t __arena *lock)
  */
 static __always_inline void clear_pending_set_locked(arena_spinlock_t __arena *lock)
 {
-	WRITE_ONCE(lock->locked_pending, _Q_LOCKED_VAL);
+	(void)WRITE_ONCE(lock->locked_pending, _Q_LOCKED_VAL);
 }
 
 /**
@@ -210,7 +210,7 @@ static __always_inline void clear_pending_set_locked(arena_spinlock_t __arena *l
  */
 static __always_inline void set_locked(arena_spinlock_t __arena *lock)
 {
-	WRITE_ONCE(lock->locked, _Q_LOCKED_VAL);
+	(void)WRITE_ONCE(lock->locked, _Q_LOCKED_VAL);
 }
 
 static __always_inline
@@ -311,7 +311,7 @@ int arena_spin_lock_slowpath(arena_spinlock_t __arena __arg_arena *lock, u32 val
 	 * barriers.
 	 */
 	if (val & _Q_LOCKED_MASK)
-		smp_cond_load_acquire_label(&lock->locked, !VAL, release_err);
+		(void)smp_cond_load_acquire_label(&lock->locked, !VAL, release_err);
 
 	/*
 	 * take ownership and clear the pending bit.
@@ -387,9 +387,9 @@ queue:
 		prev = decode_tail(old);
 
 		/* Link @node into the waitqueue. */
-		WRITE_ONCE(prev->next, node);
+		(void)WRITE_ONCE(prev->next, node);
 
-		arch_mcs_spin_lock_contended_label(&node->locked, release_node_err);
+		(void)arch_mcs_spin_lock_contended_label(&node->locked, release_node_err);
 
 		/*
 		 * While waiting for the MCS lock, the next pointer may have

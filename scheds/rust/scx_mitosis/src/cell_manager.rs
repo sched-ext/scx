@@ -309,7 +309,12 @@ impl CellManager {
                 if self.should_exclude(&path) {
                     continue;
                 }
-                let cgid = path.metadata()?.ino();
+                let cgid = path
+                    .metadata()
+                    .with_context(|| {
+                        format!("reading inode of cgroup directory {}", path.display())
+                    })?
+                    .ino();
                 let (cgid, cell_id) =
                     self.create_cell_for_cgroup(&path, cgid).with_context(|| {
                         format!("Failed to create cell for cgroup: {}", path.display())
@@ -360,8 +365,10 @@ impl CellManager {
     fn reconcile_cells(&mut self) -> Result<(Vec<(u64, u32)>, Vec<u32>)> {
         let mut new_cells = Vec::new();
 
-        // Find current cgroups on disk
-        let mut current_paths: HashSet<PathBuf> = HashSet::new();
+        // Snapshot current child cgroups by path and inode.
+        // Reconcile by identity, not path alone, so path reuse doesn't keep
+        // the old cell and create a second one for the new inode.
+        let mut current_entries: HashMap<PathBuf, u64> = HashMap::new();
         let entries = std::fs::read_dir(&self.cell_parent_path).with_context(|| {
             format!(
                 "Failed to read cell parent directory: {}",
@@ -380,9 +387,25 @@ impl CellManager {
             })?;
             if file_type.is_dir() {
                 let path = entry.path();
-                if !self.should_exclude(&path) {
-                    current_paths.insert(path);
+                if self.should_exclude(&path) {
+                    continue;
                 }
+
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Directory disappeared after readdir(); retry on the
+                        // next reconcile instead of failing this scan.
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!("reading inode of cgroup directory {}", path.display())
+                        });
+                    }
+                };
+
+                current_entries.insert(path, metadata.ino());
             }
         }
 
@@ -397,7 +420,9 @@ impl CellManager {
                 .cgroup_path
                 .as_ref()
                 .expect("BUG: non-zero cell missing cgroup_path");
-            if current_paths.contains(cgroup_path) {
+            // Same path with a different inode means the old cgroup was
+            // replaced and this tracked cell must be dropped.
+            if current_entries.get(cgroup_path) == Some(&cgid) {
                 true
             } else {
                 info!(
@@ -417,8 +442,7 @@ impl CellManager {
         self.free_cell_ids.extend(destroyed_cells.iter().copied());
 
         // Find new cgroups that we don't have cells for
-        for path in current_paths {
-            let cgid = path.metadata()?.ino();
+        for (path, cgid) in current_entries {
             if self.cells.contains_key(&cgid) {
                 continue; // Already have a cell for this cgroup
             }
@@ -432,9 +456,10 @@ impl CellManager {
     }
 
     fn create_cell_for_cgroup(&mut self, path: &Path, cgid: u64) -> Result<(u64, u32)> {
-        let cell_id = self.allocate_cell_id()?;
+        let cell_id = self.allocate_cell_id().context("allocating cell ID")?;
 
-        let cpuset = Self::read_cpuset(path)?;
+        let cpuset = Self::read_cpuset(path)
+            .with_context(|| format!("reading cpuset for cgroup {}", path.display()))?;
         if let Some(ref mask) = cpuset {
             debug!(
                 "Cell {} has cpuset: {} (from {})",
@@ -597,10 +622,12 @@ impl CellManager {
                 };
                 Ok((info.cell_id, weight))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()
+            .context("building cell demand weights map")?;
         all_cells_with_weights.sort_by_key(|(cell_id, _)| *cell_id);
 
-        let targets = compute_targets(total_cpu_count, &all_cells_with_weights)?;
+        let targets = compute_targets(total_cpu_count, &all_cells_with_weights)
+            .context("computing per-cell CPU targets")?;
 
         // Seed assigned_count from exclusive assignments
         let mut assigned_count: HashMap<u32, usize> = HashMap::new();
@@ -661,7 +688,8 @@ impl CellManager {
                 recipients = claimants.iter().map(|&cell_id| (cell_id, 1.0)).collect();
             }
 
-            let distribution = distribute_cpus_proportional(&cpus, &recipients)?;
+            let distribution = distribute_cpus_proportional(&cpus, &recipients)
+                .context("distributing contested CPUs among claimants")?;
             for (cell_id, assigned_cpus) in distribution {
                 let count = assigned_cpus.len();
                 for cpu in assigned_cpus {
@@ -712,7 +740,8 @@ impl CellManager {
                     .collect();
             }
 
-            let distribution = distribute_cpus_proportional(&unclaimed_cpus, &recipients)?;
+            let distribution = distribute_cpus_proportional(&unclaimed_cpus, &recipients)
+                .context("distributing unclaimed CPUs among unpinned cells")?;
             for (cell_id, assigned_cpus) in distribution {
                 let count = assigned_cpus.len();
                 for cpu in assigned_cpus {
@@ -823,7 +852,8 @@ impl CellManager {
             let Some(ref cgroup_path) = info.cgroup_path else {
                 continue; // cell 0 has no cgroup
             };
-            let new_cpuset = Self::read_cpuset(cgroup_path)?;
+            let new_cpuset = Self::read_cpuset(cgroup_path)
+                .with_context(|| format!("reading cpuset for cgroup {}", cgroup_path.display()))?;
             if new_cpuset != info.cpuset {
                 info!(
                     "Cell {} cpuset changed: {:?} -> {:?} ({})",
@@ -878,6 +908,7 @@ impl CellManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -980,6 +1011,43 @@ mod tests {
         assert_eq!(new_cells.len(), 0);
         assert_eq!(destroyed_cells.len(), 1);
         assert_eq!(mgr.cell_count(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_replaces_reused_path_with_new_inode() {
+        let tmp = TempDir::new().unwrap();
+        let parked = TempDir::new().unwrap();
+
+        let original_path = tmp.path().join("container-a");
+        std::fs::create_dir(&original_path).unwrap();
+
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(mgr.cell_count(), 1);
+
+        let old_info = mgr.find_cell_by_name("container-a").unwrap();
+        let old_cell_id = old_info.cell_id;
+        let old_cgid = old_info.cgid.unwrap();
+
+        // Move the original cgroup out of the watched directory so the inode
+        // stays alive while a new cgroup is created at the same path.
+        std::fs::rename(&original_path, parked.path().join("container-a-old")).unwrap();
+        std::fs::create_dir(&original_path).unwrap();
+
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+
+        assert_eq!(new_cells.len(), 1);
+        assert_eq!(destroyed_cells, vec![old_cell_id]);
+        assert_eq!(mgr.cell_count(), 1);
+
+        let new_info = mgr.find_cell_by_name("container-a").unwrap();
+        assert_eq!(new_info.cell_id, old_cell_id);
+        assert_ne!(new_info.cgid.unwrap(), old_cgid);
     }
 
     #[test]

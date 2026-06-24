@@ -200,13 +200,21 @@ pub struct SchedSample {
     pub dsq_id: u64,
     #[stat(desc = "Consume latency of this DSQ (shows how contended the DSQ is)")]
     pub dsq_consume_lat: u64,
+    #[stat(desc = "CPU's latency headroom (1024 - ravg(irq_steal_util))")]
+    pub lat_headroom: u32,
+    #[stat(desc = "Preemption vulnerability threshold step")]
+    pub vuln_thresh: u32,
+    #[stat(desc = "Task's estimated utilization from ravg")]
+    pub task_util_est: u32,
+    #[stat(desc = "Task's normalized latency criticality [0, 1024]")]
+    pub norm_lat_cri: u16,
 }
 
 impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:11} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:10} | {:11} | {:9} | {:10} | {:6} | {:6} | {:10} |\x1b[0m",
+            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:11} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:10} | {:11} | {:9} | {:10} | {:6} | {:6} | {:10} | {:7} | {:6} | {:8} | {:7} |\x1b[0m",
             "MSEQ",
             "PID",
             "COMM",
@@ -239,6 +247,10 @@ impl SchedSample {
             "NR_ACT",
             "DSQ_ID",
             "DSQ_LAT_NS",
+            "LAT_HDR",
+            "VLN_TH",
+            "TSK_UTIL",
+            "NRM_LC",
         )?;
         Ok(())
     }
@@ -250,7 +262,7 @@ impl SchedSample {
 
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:11} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:10} | {:11} | {:9} | {:10} | {:6} | {:6} | {:10} |",
+            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:11} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:10} | {:11} | {:9} | {:10} | {:6} | {:6} | {:10} | {:7} | {:6} | {:8} | {:7} |",
             self.mseq,
             self.pid,
             self.comm,
@@ -283,6 +295,10 @@ impl SchedSample {
             self.nr_active,
             self.dsq_id,
             self.dsq_consume_lat,
+            self.lat_headroom,
+            self.vuln_thresh,
+            self.task_util_est,
+            self.norm_lat_cri,
         )?;
         Ok(())
     }

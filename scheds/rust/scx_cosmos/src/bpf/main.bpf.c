@@ -101,13 +101,6 @@ const volatile bool numa_enabled;
 const volatile bool gpu_enabled = true;
 
 /*
- * Aggressively try to avoid SMT contention.
- *
- * Default to true here, so veristat takes the more complicated path.
- */
-const volatile bool avoid_smt = true;
-
-/*
  * Enable address space affinity.
  */
 const volatile bool mm_affinity;
@@ -134,9 +127,9 @@ const volatile u64 perf_sticky;
 volatile u64 perf_sticky_threshold;
 
 /*
- * Enable tick-based preemption enforcement.
+ * Disable high-resolution preemption enforcement.
  */
-const volatile bool tick_preempt = true;
+const volatile bool time_preemption;
 
 /*
  * Ignore synchronous wakeup events.
@@ -468,23 +461,6 @@ static void update_cpufreq(s32 cpu)
 }
 
 /*
- * Timer used to defer idle CPU wakeups.
- *
- * Instead of triggering wake-up events directly from hot paths, such as
- * ops.enqueue(), idle CPUs are kicked using the wake-up timer.
- */
-struct wakeup_timer {
-	struct bpf_timer timer;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct wakeup_timer);
-} wakeup_timer SEC(".maps");
-
-/*
  * Return the global system shared DSQ.
  */
 static inline u64 shared_dsq(s32 cpu)
@@ -538,7 +514,7 @@ static s32 pick_cpu_on_gpu_node(const struct task_struct *p, int node,
 	if (!mask || !bpf_cpumask_and(mask, cast_mask(nctx->cpumask), p->cpus_ptr))
 		return -ENOENT;
 
-	return scx_bpf_pick_idle_cpu(cast_mask(mask), 0);
+	return __COMPAT_scx_bpf_pick_idle_cpu_node(cast_mask(mask), target_node, 0);
 }
 
 /*
@@ -601,6 +577,33 @@ static s32 smt_sibling(s32 cpu)
 }
 
 /*
+ * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_cpumask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_cpumask();
+
+	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
+ * Return the cpumask of idle SMT cores within the NUMA node that contains
+ * @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_smtmask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_smtmask();
+
+	return __COMPAT_scx_bpf_get_idle_smtmask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
  * Return true if the CPU is part of a fully busy SMT core, false
  * otherwise.
  *
@@ -619,7 +622,7 @@ static bool is_smt_contended(s32 cpu)
 	 * If the sibling SMT CPU is not idle and there are other full-idle
 	 * SMT cores available, consider the current CPU as contended.
 	 */
-	idle_mask = scx_bpf_get_idle_cpumask();
+	idle_mask = get_idle_cpumask(cpu);
 	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
 		       !bpf_cpumask_empty(idle_mask);
 	scx_bpf_put_cpumask(idle_mask);
@@ -758,7 +761,7 @@ static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
 	s32 cpu;
 
 	primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
-	smt = smt_enabled ? scx_bpf_get_idle_smtmask() : NULL;
+	smt = smt_enabled ? get_idle_smtmask(prev_cpu) : NULL;
 
 	/*
 	 * If the task can't migrate, there's no point looking for other
@@ -885,12 +888,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 	}
 
 	/*
-	 * If a primary domain is defined, try to pick an idle CPU from
-	 * there first.
+	 * If a primary domain is defined, try to pick an idle CPU from there
+	 * first.
 	 */
 	if (!primary_all && mask) {
-		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask,
-					     avoid_smt ? SCX_PICK_IDLE_CORE : 0);
+		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask, 0);
 		if (cpu >= 0)
 			return cpu;
 	}
@@ -1109,7 +1111,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
-	if (!tick_preempt)
+	if (!time_preemption)
 		return;
 
 	tctx = try_lookup_task_ctx(p);
@@ -1127,11 +1129,10 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	 */
 	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > task_slice(p)) {
 		s32 cpu = scx_bpf_task_cpu(p);
-		bool smt_contention = avoid_smt && is_smt_contended(cpu);
 		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
 				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
 
-		if (smt_contention || (is_cpu_busy(cpu) && cpu_busy))
+		if (is_smt_contended(cpu) || (is_cpu_busy(cpu) && cpu_busy))
 			p->scx.slice = 0;
 	}
 }
@@ -1174,7 +1175,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_sticky_event_heavy(tctx) &&
 	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p)) &&
-	    (!avoid_smt || !is_smt_contended(prev_cpu))) {
+	    !is_smt_contended(prev_cpu)) {
 		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(shared_dsq(prev_cpu));
 
 		/*
@@ -1197,7 +1198,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (task_should_migrate(p, enq_flags) ||
 	    !is_cpu_idle(prev_cpu) ||
-	    (avoid_smt && is_smt_contended(prev_cpu)) ||
+	    is_smt_contended(prev_cpu) ||
 	    (!is_pcpu_task(p) && (is_event_heavy(tctx) || !is_primary_cpu(prev_cpu)))) {
 		if (is_pcpu_task(p))
 			cpu = test_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
@@ -1260,7 +1261,7 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	 * full-idle SMT cores available in the system, give it a chance to
 	 * migrate elsewhere.
 	 */
-	if (avoid_smt && is_smt_contended(cpu))
+	if (is_smt_contended(cpu))
 		return false;
 
 	/*
@@ -1438,11 +1439,15 @@ void BPF_STRUCT_OPS(cosmos_exit_task, struct task_struct *p,
 
 /*
  * Initialize a NUMA node context.
+ *
+ * Return 0 if @node contains at least one CPU, -ENODEV if it is CPU-less, or
+ * another negative errno on failure.
  */
 static int init_node(int node)
 {
 	struct bpf_cpumask *cpumask;
 	struct node_ctx *nctx;
+	bool has_cpus = false;
 	u32 cpu;
 	int ret;
 
@@ -1460,13 +1465,18 @@ static int init_node(int node)
 		ret = -EINVAL;
 		goto out_unlock;
 	}
-	bpf_for(cpu, 0, nr_cpu_ids)
-		if (cpu_node(cpu) == node)
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		if (cpu_node(cpu) == node) {
 			bpf_cpumask_set_cpu(cpu, cpumask);
+			has_cpus = true;
+		}
+	}
 out_unlock:
 	bpf_rcu_read_unlock();
 
-	return ret;
+	if (ret)
+		return ret;
+	return has_cpus ? 0 : -ENODEV;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
@@ -1485,14 +1495,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		int node;
 
 		bpf_for(node, 0, nr_node_ids) {
+			/*
+			 * Skip per-node DSQ creation for nodes that failed to
+			 * initialize, including CPU-less NUMA nodes (e.g.,
+			 * GPU-memory or CXL-memory nodes): with no CPU to
+			 * consume from it, the DSQ would never be used.
+			 */
+			err = init_node(node);
+			if (err)
+				continue;
+
 			err = scx_bpf_create_dsq(node, node);
 			if (err) {
 				scx_bpf_error("failed to create node DSQ %d: %d", node, err);
-				return err;
-			}
-			err = init_node(node);
-			if (err) {
-				scx_bpf_error("failed to initialize NUMA node %d: %d", node, err);
 				return err;
 			}
 		}

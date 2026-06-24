@@ -141,6 +141,8 @@ pub struct LayerStats {
     pub index: usize,
     #[stat(desc = "Total CPU utilization (100% means one full CPU)")]
     pub util: f64,
+    #[stat(desc = "Compensated CPU utilization (adjusted for irq/softirq/stolen)")]
+    pub util_compensated: f64,
     #[stat(desc = "Protected CPU utilization %")]
     pub util_protected_frac: f64,
     #[stat(desc = "Preempt-protected CPU utilization %")]
@@ -280,6 +282,11 @@ impl LayerStats {
             .take(LAYER_USAGE_SUM_UPTO + 1)
             .sum::<f64>();
 
+        let util_comp_sum = stats.layer_utils_compensated[lidx]
+            .iter()
+            .take(LAYER_USAGE_SUM_UPTO + 1)
+            .sum::<f64>();
+
         let membw_frac = match &layer.kind {
             // Open layer's can't have a memory BW limit.
             LayerKind::Open { .. } => 0.0,
@@ -290,7 +297,7 @@ impl LayerStats {
                         .iter()
                         .take(LAYER_USAGE_SUM_UPTO + 1)
                         .sum::<f64>()
-                        / ((*membw_limit_gb * (1024_u64.pow(3) as f64)) as f64)
+                        / (*membw_limit_gb * (1024_u64.pow(3) as f64))
                 } else {
                     0.0
                 }
@@ -300,6 +307,7 @@ impl LayerStats {
         Self {
             index: lidx,
             util: util_sum * 100.0,
+            util_compensated: util_comp_sum * 100.0,
             util_open_frac: calc_frac(stats.layer_utils[lidx][LAYER_USAGE_OPEN], util_sum),
             util_protected_frac: calc_frac(
                 stats.layer_utils[lidx][LAYER_USAGE_PROTECTED],
@@ -319,7 +327,7 @@ impl LayerStats {
             enq_reenq: lstat_pct(LSTAT_ENQ_REENQ),
             enq_dsq: lstat_pct(LSTAT_ENQ_DSQ),
             min_exec: lstat_pct(LSTAT_MIN_EXEC),
-            min_exec_us: (lstat(LSTAT_MIN_EXEC_NS) / 1000) as u64,
+            min_exec_us: lstat(LSTAT_MIN_EXEC_NS) / 1000,
             open_idle: lstat_pct(LSTAT_OPEN_IDLE),
             preempt: lstat_pct(LSTAT_PREEMPT),
             preempt_xllc: lstat_pct(LSTAT_PREEMPT_XLLC),
@@ -335,7 +343,7 @@ impl LayerStats {
             excl_collision: lstat_pct(LSTAT_EXCL_COLLISION),
             excl_preempt: lstat_pct(LSTAT_EXCL_PREEMPT),
             yielded: lstat_pct(LSTAT_YIELD),
-            yield_ignore: lstat(LSTAT_YIELD_IGNORE) as u64,
+            yield_ignore: lstat(LSTAT_YIELD_IGNORE),
             migration: lstat_pct(LSTAT_MIGRATION),
             xnuma_migration: lstat_pct(LSTAT_XNUMA_MIGRATION),
             xlayer_wake: lstat_pct(LSTAT_XLAYER_WAKE),
@@ -394,13 +402,20 @@ impl LayerStats {
         no_llc: bool,
     ) -> Result<()> {
         // Line 1: layer summary
+        let comp_str = if self.util > 0.1 && (self.util_compensated - self.util).abs() > 0.1 {
+            let overhead_pct = (1.0 - self.util / self.util_compensated) * 100.0;
+            format!(" comp_overhead={:.1}%", overhead_pct)
+        } else {
+            String::new()
+        };
         writeln!(
             w,
-            "\n\u{25B6} {} \u{2500} util/open/frac={:6.1}/{}/{:7.1} prot/prot_preempt={}/{} tasks={:6}",
+            "\n\u{25B6} {} \u{2500} util/open/frac={:6.1}/{}/{:7.1}{} prot/prot_preempt={}/{} tasks={:6}",
             name,
             self.util,
             fmt_pct(self.util_open_frac),
             self.util_frac,
+            comp_str,
             fmt_pct(self.util_protected_frac),
             fmt_pct(self.util_protected_preempt_frac),
             self.tasks,
@@ -799,14 +814,14 @@ impl SysStats {
 #[derive(Debug)]
 pub enum StatsReq {
     Hello(ThreadId),
-    Refresh(ThreadId, Stats),
+    Refresh(ThreadId, Box<Stats>),
     Bye(ThreadId),
 }
 
 #[derive(Debug)]
 pub enum StatsRes {
-    Hello(Stats),
-    Refreshed((Stats, SysStats)),
+    Hello(Box<Stats>),
+    Refreshed(Box<(Stats, SysStats)>),
     Bye,
 }
 
@@ -815,15 +830,15 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
         let tid = current().id();
         req_ch.send(StatsReq::Hello(tid))?;
         let mut stats = Some(match res_ch.recv()? {
-            StatsRes::Hello(v) => v,
+            StatsRes::Hello(v) => *v,
             res => bail!("invalid response to Hello: {:?}", res),
         });
 
         let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
             Box::new(move |_args, (req_ch, res_ch)| {
-                req_ch.send(StatsReq::Refresh(tid, stats.take().unwrap()))?;
+                req_ch.send(StatsReq::Refresh(tid, Box::new(stats.take().unwrap())))?;
                 let (new_stats, sys_stats) = match res_ch.recv()? {
-                    StatsRes::Refreshed(v) => v,
+                    StatsRes::Refreshed(v) => *v,
                     res => bail!("invalid response to Refresh: {:?}", res),
                 };
                 stats = Some(new_stats);

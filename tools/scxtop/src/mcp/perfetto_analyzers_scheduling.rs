@@ -106,7 +106,7 @@ impl LlcLocalityAnalyzer {
 
         // Build top cross-LLC processes
         let mut cross_llc_sorted: Vec<_> = process_cross_llc.into_iter().collect();
-        cross_llc_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        cross_llc_sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         let processes = self.trace.get_processes();
         stats.top_cross_llc_processes = cross_llc_sorted
             .into_iter()
@@ -204,9 +204,9 @@ impl RunqueueDepthAnalyzer {
                 let ts = event_with_idx.event.timestamp.unwrap_or(0);
 
                 match &event_with_idx.event.event {
-                    Some(ftrace_event::Event::SchedWakeup(wakeup)) => {
+                    Some(ftrace_event::Event::SchedWakeup(wakeup))
                         // Task placed on this CPU's runqueue
-                        if wakeup.target_cpu == Some(cpu_id as i32) {
+                        if wakeup.target_cpu == Some(cpu_id as i32) => {
                             // Accumulate weighted depth before changing it
                             if ts > last_ts {
                                 total_depth_time += depth as f64 * (ts - last_ts) as f64;
@@ -218,7 +218,6 @@ impl RunqueueDepthAnalyzer {
                             }
                             depth_samples.push((ts, depth));
                         }
-                    }
                     Some(ftrace_event::Event::SchedSwitch(switch)) => {
                         // Accumulate weighted depth before changing it
                         if ts > last_ts {
@@ -573,7 +572,7 @@ impl FairnessAnalyzer {
                 }
             })
             .collect();
-        starved.sort_by(|a, b| a.runtime_ns.cmp(&b.runtime_ns));
+        starved.sort_by_key(|a| a.runtime_ns);
 
         // Identify hogging processes (> 10x fair share)
         let hogging_threshold = fair_share.saturating_mul(10);
@@ -595,7 +594,7 @@ impl FairnessAnalyzer {
                 }
             })
             .collect();
-        hogging.sort_by(|a, b| b.runtime_ns.cmp(&a.runtime_ns));
+        hogging.sort_by_key(|b| std::cmp::Reverse(b.runtime_ns));
 
         FairnessStats {
             total_processes: num_processes,

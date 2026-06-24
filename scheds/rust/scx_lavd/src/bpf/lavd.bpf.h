@@ -8,8 +8,10 @@
 
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.bpf.h>
+#include <lib/ravg.h>
 #include <lib/sdt_task.h>
 #include <lib/atq.h>
+#include <lib/cgroup.h>
 
 /*
  * common macros
@@ -27,6 +29,7 @@
 #define s2p(scale)			(((scale) * 100) >> LAVD_SHIFT)
 
 #define cpdom_to_dsq(cpdom_id)		((cpdom_id) | LAVD_DSQ_TYPE_CPDOM << LAVD_DSQ_TYPE_SHFT)
+#define cpdom_to_turb_dsq(cpdom_id)	((cpdom_id) | LAVD_DSQ_TYPE_CPDOM_TURB << LAVD_DSQ_TYPE_SHFT)
 #define dsq_to_cpdom(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_to_cpu(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_type(dsq_id)		(((dsq_id) & LAVD_DSQ_TYPE_MASK) >> LAVD_DSQ_TYPE_SHFT)
@@ -48,8 +51,9 @@ enum {
 	LAVD_DSQ_TYPE_MASK		= 0x3 << LAVD_DSQ_TYPE_SHFT,
 	LAVD_DSQ_ID_SHFT		= 0,
 	LAVD_DSQ_ID_MASK		= 0xfff << LAVD_DSQ_ID_SHFT,
-	LAVD_DSQ_NR_TYPES		= 2,
+	LAVD_DSQ_NR_TYPES		= 3,
 	LAVD_DSQ_TYPE_CPDOM		= 1,
+	LAVD_DSQ_TYPE_CPDOM_TURB		= 2,
 	LAVD_DSQ_TYPE_CPU		= 0,
 };
 
@@ -87,6 +91,13 @@ enum consts_internal {
 	LAVD_LC_WAKE_INTERVAL_MIN	= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
 	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
+	LAVD_LC_LATENCY_SENSITIVE_THRESH = LAVD_SCALE - (LAVD_SCALE >> 3), /* top 12.5% most latency-critical tasks */
+	LAVD_VULN_THRESH_STEP_SIZE	= 64, /* granularity for lat and util in threshold space */
+	LAVD_VULN_THRESH_UTIL_STEPS	= LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE, /* util sub-steps per lat level (16) */
+	LAVD_VULN_THRESH_MAX		= (LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE) * (LAVD_SCALE / LAVD_VULN_THRESH_STEP_SIZE), /* 16 lat × 16 util = 256 */
+	LAVD_VULN_THRESH_INIT		= 32, /* initial threshold */
+
+	LAVD_RAVG_HALFLIFE_NS		= (128ULL * NSEC_PER_MSEC),
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (10ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
@@ -107,7 +118,7 @@ enum consts_internal {
 							  performance mode when cpu util > 50% */
 
 	LAVD_CPDOM_MIG_SHIFT_UL		= 2, /* when under-loaded:  1/2**2 = [-25.0%, +25.0%] */
-	LAVD_CPDOM_MIG_SHIFT		= 3, /* when midely loaded: 1/2**3 = [-12.5%, +12.5%] */
+	LAVD_CPDOM_MIG_SHIFT		= 3, /* when mildly loaded: 1/2**3 = [-12.5%, +12.5%] */
 	LAVD_CPDOM_MIG_SHIFT_OL		= 4, /* when over-loaded:   1/2**4 = [-6.25%, +6.25%] */
 	LAVD_CPDOM_MIG_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS / LAVD_SLICE_MAX_NS_DFL), /* roughly twice per interval */
 
@@ -131,6 +142,7 @@ enum consts_flags {
 	LAVD_FLAG_WOKEN_BY_SOFTIRQ	= (0x1 << 13), /* woken by a softirq */
 	LAVD_FLAG_MIGRATION_AGGRESSIVE  = (0x1 << 14), /* immediate task migration is necessary. */
 	LAVD_FLAG_DOMAIN_PINNED		= (0x1 << 15), /* task's cpumask is confined to a single compute domain */
+	LAVD_FLAG_IS_EFFECTIVELY_PINNED	= (0x1 << 16), /* effective cpumask weight is 1 (permanent or migrate-disable) */
 };
 
 #define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)
@@ -153,7 +165,7 @@ struct task_ctx {
 	 * Do NOT change the position of atq. It should be at the beginning
 	 * of the task_ctx.
 	 */
-	struct scx_task_common atq __attribute__((aligned(CACHELINE_SIZE)));
+	struct scx_task_cgroup_bw atq __attribute__((aligned(CACHELINE_SIZE)));
 
 	/* --- cacheline 1 boundary (64 bytes): running/stopping hot --- */
 	/*
@@ -165,6 +177,7 @@ struct task_ctx {
 	u64	last_measured_wall_clk;	/* last time when running time was measured (wall clock) */
 	u64	last_measured_pelt_clk;	/* last time when running time was measured (pelt clock) */
 	u64	last_measured_task_clk;	/* last time when running time was measured (task clock) */
+	u64	last_measured_exec;	/* p->se.sum_exec_runtime at last measurement */
 	/*
 	 * Accumulated runtime from runnable to quiescent state.
 	 * Used to calculate avg_runtime_wall/invr and latency criticality.
@@ -184,12 +197,13 @@ struct task_ctx {
 	 * traffic on the critical scheduling path.
 	 */
 	u16	lat_cri;		/* final context-aware latency criticality */
+	u16	normalized_lat_cri;	/* lat_cri normalized to [0, 1024] scale */
 	u16	lat_cri_waker;		/* waker's latency criticality */
 	u16	lat_cri_wakee;		/* wakee's latency criticality */
 	u16	perf_cri;		/* performance criticality of a task */
-	u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
-	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
-	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
+	volatile u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
+	volatile u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
+	volatile s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	u32	__pad0;
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	run_freq;		/* scheduling frequency in a second */
@@ -214,10 +228,17 @@ struct task_ctx {
 	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
 	u32	cpu_id;			/* where a task is running now */
 	u32	prev_cpu_id;		/* where a task ran last time */
+	u8	queued_in_cpdom_id;	/* cpdom this task's load is counted in; LAVD_CPDOM_MAX_NR = not queued */
+	s16	queued_on_cpu_id;	/* primary CPU id this task's load is counted on; -1 = not queued */
+	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time for the per-cpdom counter */
+	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 
-	/* --- cacheline 4 boundary (256 bytes) --- */
+	/* --- cacheline 5 boundary (320 bytes): ravg/util read-mostly group --- */
+	u32	util_est __attribute__((aligned(CACHELINE_SIZE)));
+					/* Estimated task util using ravg duty cycle */
+	struct ravg_data avg_util_ravg;	/* Running average of task utilization using ravg */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -242,7 +263,8 @@ struct cpdom_ctx {
 	u8	is_stealee;			    /* stealer domain should steal tasks from this domain */
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
-	u32	load_invr;			    /* invariant load considering DSQ length and invariant CPU utilization */
+	u64	qload_invr;			    /* queued load: sum of task_load_metric() for all queued tasks, tracked atomically */
+	u64	load_invr;			    /* domain load for balancing: avg_util_invr_sum + qload_invr */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
 	u32	avg_util_wall_sum;		    /* the sum of average CPU utilization */
@@ -260,18 +282,57 @@ struct cpdom_ctx {
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
 
+	/* per-cpdom preemption vulnerability threshold tracking */
+	u32	vuln_thresh;			    /* unified lat/util threshold step [0, LAVD_VULN_THRESH_MAX] */
+	u32	util_sum_steady;		    /* sum of util_est for steady CPUs in this cpdom */
+	u32	util_sum_turb;		    /* sum of util_est for turbulent CPUs in this cpdom */
+	u32	cap_sum_steady;		    /* sum of capacity for steady CPUs in this cpdom */
+	u32	cap_sum_turb;		    /* sum of capacity for turbulent CPUs in this cpdom */
+	u16	nr_steady_cpus;		    /* count of steady CPUs in this cpdom */
+	u16	nr_turb_cpus;		    /* count of turbulent CPUs in this cpdom */
+
+	s64	stealee_budget_invr;		    /* egress budget: how much load can leave this domain per round */
+	s64	stealer_budget_invr;		    /* ingress budget: how much additional load this stealer can accept */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])
+
+/*
+ * Atomically subtract @amount from the stealee's egress budget. Concurrent
+ * stealers on other CPUs may call this in parallel, so use __sync_fetch_and_sub
+ * to avoid race conditions. The signed s64 field lets the counter go slightly
+ * negative on underflow; once it happens, the <= 0 check clears the stealee
+ * flag so further stealers skip this domain for the rest of the round. Budgets
+ * are recomputed from scratch each LB round. Hopefully, transient negativity is
+ * harmless.
+ */
+static __always_inline void decrement_stealee_budget(struct cpdom_ctx *cpdomc,
+						     u64 amount)
+{
+	__sync_fetch_and_sub(&cpdomc->stealee_budget_invr, amount);
+
+	if (READ_ONCE(cpdomc->stealee_budget_invr) <= 0)
+		WRITE_ONCE(cpdomc->is_stealee, false);
+}
+
+/*
+ * Atomically subtract @amount from the stealer's ingress budget.
+ * Same rationale as decrement_stealee_budget().
+ */
+static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
+						     u64 amount)
+{
+	__sync_fetch_and_sub(&cpdomc->stealer_budget_invr, amount);
+
+	if (READ_ONCE(cpdomc->stealer_budget_invr) <= 0)
+		WRITE_ONCE(cpdomc->is_stealer, false);
+}
 
 extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 extern int			nr_cpdoms;
 
 typedef struct task_ctx __arena task_ctx;
-
-u64 get_task_ctx_internal(struct task_struct *p);
-#define get_task_ctx(p) ((task_ctx *)get_task_ctx_internal((p)))
 
 struct cpu_ctx *get_cpu_ctx(void);
 struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id);
@@ -345,6 +406,29 @@ struct cpu_ctx {
 	volatile u32	nr_sched;	/* number of schedules */
 	volatile u32	nr_preempt;
 
+	/*
+	 * Per-CPU task_ctx lookup cache. Local-only writes/reads, never
+	 * accessed remotely. Used by get_task_ctx_curcpu() / get_task_ctx()
+	 * to skip bpf_task_storage_get() when consecutive ops callbacks
+	 * reference the same task on the same CPU.
+	 *
+	 * Keyed by (task_struct *, pid). Either alone is unsafe:
+	 *  - task_struct * alone: SLUB can recycle a freed task_struct
+	 *    address; a stale cache entry on an idle CPU would then alias
+	 *    the new task and return the freed taskc.
+	 *  - pid alone: a non-leader thread's pid changes when it calls
+	 *    execve() -- de_thread() / exchange_tids() swaps the calling
+	 *    thread's pid with the leader's, and the leader is then
+	 *    released; entries keyed on the old pid would become stale
+	 *    hits for the surviving thread.
+	 *
+	 * Together: ABA defeated by pid mismatch, execve swap defeated
+	 * by address mismatch. cached_pid == 0 means invalid.
+	 */
+	u64		cached_task;		/* (struct task_struct *) as u64 */
+	u64		cached_taskc_raw;	/* (task_ctx __arena *) as u64 */
+	u32		cached_pid;
+
 	/* --- cacheline 2 boundary (128 bytes): per-interval results --- */
 	/*
 	 * Updated once per sys_stat collection interval. Read by userspace
@@ -357,6 +441,7 @@ struct cpu_ctx {
 	volatile u32	cur_util_wall;	/* CPU utilization of the current interval (based on wall clock time) */
 	volatile u32	avg_util_invr;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
+	volatile u32	lat_headroom;	/* latency headroom available to this CPU (inversely related to irq/steal time) */
 	/*
 	 * Steal utilization: steal_time as a fraction of duration_wall,
 	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;
@@ -368,6 +453,7 @@ struct cpu_ctx {
 	u32		avg_steal_util_wall;
 	u32		cur_steal_util_invr;
 	u32		avg_steal_util_invr;
+
 	/*
 	 * Domain-pinned task utilization: the fraction of duration_wall
 	 * spent running LAVD_FLAG_DOMAIN_PINNED tasks, in LAVD_SHIFT
@@ -378,7 +464,6 @@ struct cpu_ctx {
 	u32		avg_dom_pinned_util_wall;
 	u32		cur_dom_pinned_util_invr;
 	u32		avg_dom_pinned_util_invr;
-	u32		__pad1;
 
 	/* --- cacheline 3 boundary (192 bytes): sys_stat raw inputs --- */
 	/*
@@ -436,14 +521,26 @@ struct cpu_ctx {
 	 */
 	u64		prev_pelt_clk;
 
-	/* --- cacheline 4 boundary (256 bytes): cpumask temps --- */
-	struct bpf_cpumask __kptr *tmp_a_mask; /* for active set */
-	struct bpf_cpumask __kptr *tmp_o_mask; /* for overflow set */
-	struct bpf_cpumask __kptr *tmp_l_mask; /* for online cpumask */
-	struct bpf_cpumask __kptr *tmp_i_mask; /* for idle cpumask */
-	struct bpf_cpumask __kptr *tmp_t_mask;
-	struct bpf_cpumask __kptr *tmp_t2_mask;
-	struct bpf_cpumask __kptr *tmp_t3_mask;
+	/* --- cacheline 4 boundary (256 bytes): cpumask scratch --- */
+	struct bpf_cpumask __kptr *a_mask;	/* scratch: task & active */
+	struct bpf_cpumask __kptr *o_mask;	/* scratch: task & overflow */
+	struct bpf_cpumask __kptr *temp_mask;	/* scratch: general-purpose */
+	struct bpf_cpumask __kptr *i_mask;	/* scratch: task & idle */
+	struct bpf_cpumask __kptr *ia_mask;	/* scratch: idle & active */
+	struct bpf_cpumask __kptr *io_mask;	/* scratch: idle & overflow */
+	struct bpf_cpumask __kptr *iat_mask;	/* scratch: idle & active & turbo */
+
+	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
+	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
+	volatile u32	util_est;	/* Estimated CPU utilization from ravg tracking */
+
+	/* --- cacheline 7 boundary (448 bytes): cross-CPU write-heavy accumulator --- */
+	/*
+	 * qload_invr is incremented from any CPU on enqueue (remote write
+	 * via bpf_map_lookup_percpu_elem + __sync_fetch_and_add) and
+	 * decremented likewise on dispatch/dequeue/exit.
+	 */
+	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
@@ -576,12 +673,53 @@ static __always_inline bool use_cpdom_dsq(void)
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
+u16 normalize_lat_cri(u16 lat_cri);
+
+/*
+ * Compute a task's preemption vulnerability — how likely it is to be
+ * routed to the turbulent DSQ. Lat is the major axis (weighted by
+ * LAVD_VULN_THRESH_UTIL_STEPS) and util is the minor axis, so the
+ * threshold naturally cascades: util sub-steps carry into lat levels
+ * when vuln_thresh is incremented/decremented.
+ */
+static __always_inline
+u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
+{
+	u32 lat_step = normalized_lat_cri / LAVD_VULN_THRESH_STEP_SIZE;
+	u32 util_step = util_est / LAVD_VULN_THRESH_STEP_SIZE;
+	return lat_step * LAVD_VULN_THRESH_UTIL_STEPS + util_step;
+}
+
+/*
+ * Return the task's load contribution for queued load tracking.
+ * Uses RAVG util_est: [0, 1024], 128ms half-life, tracks duty cycle.
+ * Updated in lavd_runnable/lavd_quiescent — active under sched_ext.
+ *
+ * Note: kernel PELT p->se.avg.util_avg is NOT updated when sched_ext
+ * is enabled (tasks bypass CFS), so it cannot be used here.
+ */
+static __always_inline u32 task_load_metric(task_ctx *taskc)
+{
+	return taskc->util_est;
+}
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
 extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+extern struct bpf_cpumask __kptr *steady_cpumask; /* CPU mask for non-turbulent (steady) CPUs */
+
+/* DSQ helpers. */
+
+struct dsq_entry {
+	u64 dsq_id;
+	u64 vtime;
+	bool eligible;
+};
+
+u64 peek_dsq_vtime(u64 dsq_id);
+void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 
 /* Load balancer helpers. */
 

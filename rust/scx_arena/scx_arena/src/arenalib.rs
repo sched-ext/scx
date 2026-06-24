@@ -100,6 +100,11 @@ impl<'a> ArenaLib<'a> {
             bitmap: 0 as c_ulong,
         };
 
+        // Exclude memory-only NUMA nodes
+        if mask.into_iter().all(|&b| b == 0) {
+            return Ok(());
+        }
+
         let input = ProgramInput {
             context_in: Some(unsafe {
                 std::slice::from_raw_parts_mut(
@@ -152,8 +157,62 @@ impl<'a> ArenaLib<'a> {
         Ok(())
     }
 
+    /// Set the per-level maximum number of children before registering topology
+    /// nodes. Each topology node at level L is allocated with
+    /// topo_max_children[L] child pointer slots, so these values must be set
+    /// before any arena_topology_node_init() calls. The sizes are derived from
+    /// the actual host topology to keep per-node allocation as small as
+    /// possible.
+    ///
+    /// NOTE: rust/scx_arena/selftests/src/main.rs::setup_topology() contains
+    /// equivalent logic and must be kept in sync with this function.
+    fn setup_topology_max_children(&self, topo: &Topology) -> Result<()> {
+        // Compute the maximum number of children at each topology level.
+        // TOPO_TOP  (0): children are NUMA nodes
+        // TOPO_NODE (1): children are LLCs
+        // TOPO_LLC  (2): children are cores
+        // TOPO_CORE (3): children are CPUs (SMT threads)
+        // TOPO_CPU  (4): leaf nodes, no children
+        let max_children: [u32; 5] = [
+            topo.nodes.len() as u32,
+            topo.nodes.values().map(|n| n.llcs.len()).max().unwrap_or(0) as u32,
+            topo.all_llcs
+                .values()
+                .map(|l| l.cores.len())
+                .max()
+                .unwrap_or(0) as u32,
+            topo.all_cores
+                .values()
+                .map(|c| c.cpus.len())
+                .max()
+                .unwrap_or(0) as u32,
+            0,
+        ];
+
+        let mut args = types::arena_topology_init_args { max_children };
+
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+
+        let ret = self.run_prog_by_name("arena_topology_init", input)?;
+        if ret != 0 {
+            bail!("arena_topology_init returned {}", ret);
+        }
+
+        Ok(())
+    }
+
     fn setup_topology(&self) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
+
+        self.setup_topology_max_children(&topo)?;
 
         // Top level - ID 0 is fine as there's only one top-level node
         self.setup_topology_node(topo.span.as_raw_slice(), 0)?;

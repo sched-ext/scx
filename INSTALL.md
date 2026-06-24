@@ -23,15 +23,13 @@ $ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config li
 ```
 $ git clone https://github.com/sched-ext/scx.git
 $ cd scx
-$ make all                    # Build C schedulers
-$ cargo build --release       # Build Rust schedulers
+$ cargo build --release
 ```
 
 #### Install the scx schedulers from source
 
 ```
-$ make install INSTALL_DIR=~/bin                                        # Install C schedulers
-$ ls -d scheds/rust/scx_* | xargs -I{} cargo install --path {}          # Install Rust schedulers
+$ ls -d scheds/rust/scx_* | xargs -I{} cargo install --path {}
 ```
 
 ## Arch Linux
@@ -50,9 +48,9 @@ $ sudo pacman -Sy cargo bpf pahole
 
 ## Gentoo Linux
 Make sure you build the kernel with the right configuration, installation
-should be easy:
+should be easy (pahole is required for BTF):
 ```
-emerge sys-kernel/scx
+emerge sys-kernel/scx dev-util/pahole
 ```
 The kernel config used for CI can be used as a reference for required configs.
 See [kernel.config](kernel.config) for reference.

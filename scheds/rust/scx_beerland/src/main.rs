@@ -13,13 +13,11 @@ pub use bpf_intf::*;
 mod stats;
 use std::collections::HashSet;
 use std::ffi::{c_int, c_ulong};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -32,6 +30,7 @@ use log::{debug, info, warn};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
+use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -39,7 +38,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
+use scx_utils::Powermode;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
@@ -67,26 +66,15 @@ struct Opts {
     ///
     /// A positive value can help to enhance the responsiveness of interactive tasks, but it can
     /// also make performance more "spikey".
-    #[clap(short = 'l', long, default_value = "40000")]
+    #[clap(short = 'l', long, default_value = "20000")]
     slice_us_lag: u64,
 
-    /// CPU busy threshold.
+    /// CPU utilization percentage required to steal from a CPU.
     ///
-    /// Specifies the CPU utilization percentage (0-100%) at which the scheduler considers the
-    /// system to be busy.
-    #[clap(short = 'c', long, default_value = "75")]
+    /// CPUs running tasks below this percentage are treated as not overloaded, so load balancer
+    /// will not pull tasks from their DSQ (0 disables the filter).
+    #[clap(short = 'c', long, default_value = "0")]
     cpu_busy_thresh: u64,
-
-    /// Polling time (ms) to refresh the CPU utilization.
-    ///
-    /// This interval determines how often the scheduler refreshes the CPU utilization that is
-    /// compared with the CPU busy threshold (option -c) to decide if the system is busy or not.
-    ///
-    /// Value is clamped to the range [10 .. 1000].
-    ///
-    /// 0 = disabled.
-    #[clap(short = 'p', long, default_value = "250")]
-    polling_ms: u64,
 
     /// Specifies a list of CPUs to prioritize.
     ///
@@ -102,12 +90,9 @@ struct Opts {
     #[clap(short = 'm', long)]
     primary_domain: Option<String>,
 
-    /// Enable preferred idle CPU scanning.
-    ///
-    /// With this option enabled, the scheduler will prioritize assigning tasks to higher-ranked
-    /// cores before considering lower-ranked ones.
-    #[clap(short = 'P', long, action = clap::ArgAction::SetTrue)]
-    preferred_idle_scan: bool,
+    /// Disable NUMA optimizations.
+    #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
+    disable_numa: bool,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -132,39 +117,6 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
-}
-
-#[derive(PartialEq)]
-enum Powermode {
-    Turbo,
-    Performance,
-    Powersave,
-    Any,
-}
-
-/*
- * TODO: this code is shared between scx_bpfland, scx_flash and scx_cosmos; consder to move it to
- * scx_utils.
- */
-fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
-    let cpus: Vec<usize> = Topology::new()
-        .unwrap()
-        .all_cores
-        .values()
-        .flat_map(|core| &core.cpus)
-        .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
-            // Turbo mode: prioritize CPUs with the highest max frequency
-            (Powermode::Turbo, CoreType::Big { turbo: true }) |
-            // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
-            (Powermode::Performance, CoreType::Big { .. }) |
-            // Powersave mode: add all the Little CPUs
-            (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
-            (Powermode::Any, ..) => Some(*cpu_id),
-            _ => None,
-        })
-        .collect();
-
-    Ok(cpus)
 }
 
 pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
@@ -238,16 +190,8 @@ pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
     Ok(cpus)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CpuTimes {
-    user: u64,
-    nice: u64,
-    total: u64,
-}
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
-    opts: &'a Opts,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
 }
@@ -261,6 +205,20 @@ impl<'a> Scheduler<'a> {
 
         // Check host topology to determine if we need to enable SMT capabilities.
         let smt_enabled = topo.smt_enabled;
+
+        // Determine the amount of non-empty NUMA nodes in the system.
+        let nr_nodes = topo
+            .nodes
+            .values()
+            .filter(|node| !node.all_cpus.is_empty())
+            .count();
+        info!("NUMA nodes: {}", nr_nodes);
+
+        // Automatically disable NUMA optimizations when running on non-NUMA systems.
+        let numa_enabled = !opts.disable_numa && nr_nodes > 1;
+        if !numa_enabled {
+            info!("Disabling NUMA optimizations");
+        }
 
         info!(
             "{} {} {}",
@@ -288,9 +246,23 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.smt_enabled = smt_enabled;
-
-        // Normalize CPU busy threshold in the range [0 .. 1024].
-        rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
+        rodata.numa_enabled = numa_enabled;
+        let cpu_busy_thresh = opts.cpu_busy_thresh.min(100);
+        let cpu_busy_filter = cpu_busy_thresh > 0;
+        let busy_threshold = if cpu_busy_filter {
+            cpu_busy_thresh * 1024 / 100
+        } else {
+            0
+        };
+        rodata.busy_threshold = busy_threshold;
+        if cpu_busy_filter {
+            info!(
+                "BPF accounted-time CPU steal filter: threshold {}%",
+                cpu_busy_thresh
+            );
+        } else {
+            info!("BPF accounted-time CPU steal filter disabled");
+        }
 
         // Define the primary scheduling domain.
         let primary_cpus = if let Some(ref domain) = opts.primary_domain {
@@ -308,26 +280,22 @@ impl<'a> Scheduler<'a> {
             rodata.primary_all = true;
         }
 
-        // Generate the list of available CPUs sorted by capacity in descending order.
-        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
-        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
-        for (i, cpu) in cpus.iter().enumerate() {
+        // Cache CPU capacity values for wakeup placement decisions.
+        for cpu in topo.all_cpus.values() {
             rodata.cpu_capacity[cpu.id] = cpu.cpu_capacity as c_ulong;
-            rodata.preferred_cpus[i] = cpu.id as u64;
         }
-        if opts.preferred_idle_scan {
-            info!(
-                "Preferred CPUs: {:?}",
-                &rodata.preferred_cpus[0..cpus.len()]
-            );
-        }
-        rodata.preferred_idle_scan = opts.preferred_idle_scan;
 
         // Set scheduler flags.
         skel.struct_ops.beerland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+            | *compat::SCX_OPS_ALWAYS_ENQ_IMMED
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+            | if numa_enabled {
+                *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
+            } else {
+                0
+            };
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.beerland_ops_mut().flags
@@ -356,7 +324,6 @@ impl<'a> Scheduler<'a> {
 
         Ok(Self {
             skel,
-            opts,
             struct_ops,
             stats_server,
         })
@@ -435,78 +402,12 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
-    fn compute_user_cpu_pct(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
-        // Evaluate total user CPU time as user + nice.
-        let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
-        let total_diff = curr.total.saturating_sub(prev.total);
-
-        if total_diff > 0 {
-            let user_ratio = user_diff as f64 / total_diff as f64;
-            Some((user_ratio * 1024.0).round() as u64)
-        } else {
-            None
-        }
-    }
-
-    fn read_cpu_times() -> Option<CpuTimes> {
-        let file = File::open("/proc/stat").ok()?;
-        let reader = BufReader::new(file);
-
-        for line in reader.lines() {
-            let line = line.ok()?;
-            if line.starts_with("cpu ") {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() < 5 {
-                    return None;
-                }
-
-                let user: u64 = fields[1].parse().ok()?;
-                let nice: u64 = fields[2].parse().ok()?;
-
-                // Sum the first 8 fields as total time, including idle, system, etc.
-                let total: u64 = fields
-                    .iter()
-                    .skip(1)
-                    .take(8)
-                    .filter_map(|v| v.parse::<u64>().ok())
-                    .sum();
-
-                return Some(CpuTimes { user, nice, total });
-            }
-        }
-
-        None
-    }
-
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
-        // Periodically evaluate user CPU utilization from user-space and update a global variable
-        // in BPF.
-        //
-        // The BPF scheduler can use this value to determine when the system is busy or idle.
-        let polling_time = Duration::from_millis(self.opts.polling_ms).min(Duration::from_secs(1));
-        let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
-        let mut last_update = Instant::now();
-
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            // Update CPU utilization.
-            if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
-                if let Some(curr_cputime) = Self::read_cpu_times() {
-                    Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
-                        .map(|util| self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util);
-                    prev_cputime = curr_cputime;
-                }
-                last_update = Instant::now();
-            }
-
             // Update statistics and check for exit condition.
-            let timeout = if polling_time.is_zero() {
-                Duration::from_secs(1)
-            } else {
-                polling_time
-            };
-            match req_ch.recv_timeout(timeout) {
+            match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,

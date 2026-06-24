@@ -709,11 +709,11 @@ impl SoftirqAnalyzer {
                     count: type_stats.count,
                     rate_per_sec: type_stats.count as f64 / window_duration_sec,
                     total_time_us: type_stats.total_duration_ns / 1000,
-                    avg_duration_us: if type_stats.count > 0 {
-                        (type_stats.total_duration_ns / type_stats.count) / 1000
-                    } else {
-                        0
-                    },
+                    avg_duration_us: type_stats
+                        .total_duration_ns
+                        .checked_div(type_stats.count)
+                        .unwrap_or(0)
+                        / 1000,
                     min_duration_us: duration_us.first().copied().unwrap_or(0),
                     max_duration_us: duration_us.last().copied().unwrap_or(0),
                     p50_duration_us: percentile_u64(&duration_us, 50.0),
@@ -723,7 +723,7 @@ impl SoftirqAnalyzer {
             })
             .collect();
 
-        stats.sort_by(|a, b| b.count.cmp(&a.count));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.count));
         stats
     }
 
@@ -755,7 +755,7 @@ impl SoftirqAnalyzer {
             })
             .collect();
 
-        stats.sort_by(|a, b| b.count.cmp(&a.count));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.count));
         stats.truncate(top_n);
         stats
     }
@@ -792,7 +792,7 @@ impl SoftirqAnalyzer {
             })
             .collect();
 
-        stats.sort_by(|a, b| b.total_time_us.cmp(&a.total_time_us));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.total_time_us));
         stats.truncate(top_n);
         stats
     }
@@ -820,11 +820,7 @@ impl SoftirqAnalyzer {
             total_events,
             event_rate_per_sec: total_events as f64 / window_duration_sec,
             total_time_us: total_time_ns / 1000,
-            avg_duration_us: if total_events > 0 {
-                (total_time_ns / total_events) / 1000
-            } else {
-                0
-            },
+            avg_duration_us: total_time_ns.checked_div(total_events).unwrap_or(0) / 1000,
             p50_duration_us: percentile_u64(&duration_us, 50.0),
             p95_duration_us: percentile_u64(&duration_us, 95.0),
             p99_duration_us: percentile_u64(&duration_us, 99.0),
