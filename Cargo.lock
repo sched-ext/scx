@@ -6077,7 +6077,7 @@ dependencies = [
  "scx_utils",
  "serde",
  "serde_json",
- "strum",
+ "strum 0.27.2",
  "sysinfo",
  "tachyonfx",
 ]
