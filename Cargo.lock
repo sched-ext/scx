@@ -6399,7 +6399,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "ordered-float 5.1.0",
+ "ordered-float 5.3.0",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
