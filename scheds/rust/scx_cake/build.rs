@@ -298,9 +298,9 @@ fn main() {
         baked_bool("SCX_CAKE_NATIVE_FAST_WAKE_MISS_TUNNEL", true);
     // stays false: frame-time-variance culprit, see smtstrict note above.
     let (_nfw_lean_prev_label, nfw_lean_prev_value, _nfw_lean_prev) =
-        baked_bool("SCX_CAKE_NFW_LEAN_PREV", false);
+        baked_bool("SCX_CAKE_NFW_LEAN_PREV", true);
     let (_nfw_strict_sibling_label, nfw_strict_sibling_value, _nfw_strict_sibling) =
-        baked_bool("SCX_CAKE_NFW_STRICT_SIBLING", true);
+        baked_bool("SCX_CAKE_NFW_STRICT_SIBLING", false);
     let (_enq_skip_busy_kick_label, enq_skip_busy_kick_value, _enq_skip_busy_kick) =
         baked_bool("SCX_CAKE_ENQ_SKIP_BUSY_KICK", false);
     let (_enq_skip_idle_kick_label, enq_skip_idle_kick_value, _enq_skip_idle_kick) =
@@ -393,11 +393,7 @@ fn main() {
         "off"
     };
     let has_trust_maps = profile != "release" || baked_release_trust_maps_value != 0;
-    let needs_arena = if profile == "release" {
-        release_learned_locality || release_wake_chain_locality || release_core_steal_dhq
-    } else {
-        enable_hot_telemetry || enable_locality_experiments || release_core_steal_dhq
-    };
+    let needs_arena = false;
 
     // Generate Rust constants file — avoids unstable option_env! str matching.
     let out_dir = std::env::var("OUT_DIR").unwrap();

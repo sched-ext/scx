@@ -12604,8 +12604,11 @@ SCX_OPS_DEFINE(
 	.runnable   = (void *)cake_runnable,
 	.set_weight = (void *)cake_set_weight, .enable = (void *)cake_enable,
 	.set_cpumask = (void *)cake_set_cpumask,
+#if CAKE_NEEDS_ARENA
 	.init_task   = (void *)cake_init_task,
-	.exit_task = (void *)cake_exit_task, .init = (void *)cake_init,
+	.exit_task = (void *)cake_exit_task,
+#endif
+	.init = (void *)cake_init,
 	.exit = (void *)cake_exit, .flags = SCX_OPS_KEEP_BUILTIN_IDLE,
 	.timeout_ms = 5000, /* Override with SCX_TIMEOUT_MS when needed */
 	.name	    = "cake");

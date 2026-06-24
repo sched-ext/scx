@@ -178,6 +178,9 @@ struct cake_cpu_bss {
 
 struct cake_cpu_status {
 	u64 flags; /* CAKE_CPU_STATUS_* plus owner/pressure buckets */
+	u64 frontier_vtime; /* Published vtime frontier for wake clamp/seeding */
+	u64 local_waiter_debt; /* Remote wake admitted a local waiter for owner quench */
+	u64 core_steal_pending; /* Conservative per-primary-CPU steal DSQ has-work hint */
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct cake_cpu_status) == 64,
 	       "cake_cpu_status must stay one cache line");
@@ -928,6 +931,7 @@ struct cake_task_ctx {
 	/* ═══ CACHE LINE 0: RELEASE + ITER FIELDS ═══ */
 	u32 packed_info; /* 4B: Bitfield flags (iter-visible) */
 	u32 ppid; /* 4B: Parent PID (iter-visible) */
+	u64 last_run_ns; /* 8B: timestamp when task stopped running */
 	u16 task_weight; /* 2B: Raw task weight for iter/TUI display (100=nice0) */
 	u16 home_cpu; /* 2B: Sticky preferred CPU (primary SMT lane) */
 	u8  home_score; /* 1B: Hysteresis for updating home_cpu */
@@ -1103,6 +1107,13 @@ _Static_assert(sizeof(struct cake_task_ctx) == CAKE_TCTX_SIZE,
 #define BIT_KCRITICAL \
 	23 /* 1 bit: latency-critical kthread (set in init_task) */
 #define BIT_BG_NOISE 22 /* 1 bit: reserved legacy flag */
+
+/* Cached task properties in packed_info (bits 8-15) to avoid task_struct cache misses */
+#define SHIFT_CACHED_SERVICE_KIND        8   /* bits 8-10 (3 bits) */
+#define MASK_CACHED_SERVICE_KIND         0x07U
+#define BIT_CACHED_DEFAULT_USER          11  /* bit 11 (1 bit) */
+#define BIT_CACHED_FULL_AFFINITY         12  /* bit 12 (1 bit) */
+#define BIT_CACHED_STATIC_LATENCY_BIASED 13  /* bit 13 (1 bit) */
 
 #define MASK_TIER 0x03 /* 2 bits: 0-3 */
 #define MASK_FLAGS 0x0F /* 4 bits */
