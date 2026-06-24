@@ -169,6 +169,7 @@ static __always_inline u32 cake_cb_bucket(u64 dur_ns)
 	return CAKE_CB_BUCKET_GE10US;
 }
 
+#ifndef CAKE_RELEASE
 static __noinline void cake_record_cb(struct cake_stats *s, u32 cb_idx,
 				      u64 dur_ns)
 {
@@ -217,6 +218,15 @@ static __noinline void cake_record_cb_split(struct cake_stats *s, u32 cb_idx,
 		 -(debug_tax_ns > s->callback_debug_tax_max_ns[cb_idx]));
 	s->callback_split_count[cb_idx]++;
 }
+#else
+static __always_inline void cake_record_cb(struct cake_stats *s __maybe_unused,
+					   u32 cb_idx __maybe_unused,
+					   u64 dur_ns __maybe_unused) {}
+static __always_inline void cake_record_cb_split(struct cake_stats *s __maybe_unused,
+						 u32 cb_idx __maybe_unused,
+						 u64 release_est_ns __maybe_unused,
+						 u64 debug_tax_ns __maybe_unused) {}
+#endif
 
 #ifndef CAKE_RELEASE
 static __always_inline void cake_record_wake_wait(u64 *sum, u64 *count,

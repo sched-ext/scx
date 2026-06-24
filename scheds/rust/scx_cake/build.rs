@@ -235,9 +235,9 @@ fn main() {
     let (baked_queue_policy, baked_queue_policy_value) = baked_queue_policy();
     let (baked_storm_guard, baked_storm_guard_value) = baked_storm_guard();
     let (baked_busy_wake_kick, baked_busy_wake_kick_value) = baked_busy_wake_kick();
-    let (baked_learned_locality, baked_learned_locality_value, release_learned_locality) =
+    let (baked_learned_locality, baked_learned_locality_value, _release_learned_locality) =
         baked_bool("SCX_CAKE_LEARNED_LOCALITY", false);
-    let (baked_wake_chain_locality, baked_wake_chain_locality_value, release_wake_chain_locality) =
+    let (baked_wake_chain_locality, baked_wake_chain_locality_value, _release_wake_chain_locality) =
         baked_bool("SCX_CAKE_WAKE_CHAIN_LOCALITY", false);
     let (baked_release_route_pred, baked_release_route_pred_value, _release_route_pred) =
         baked_bool("SCX_CAKE_RELEASE_ROUTE_PRED", false);
