@@ -2128,6 +2128,19 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 		unaccount_queued_load_pcpu(taskc);
 	}
 
+	/*
+	 * A task's BTQ node lives in the memory scx_task_free() is about to
+	 * release, so it must be unlinked from every BTQ first. lavd_dequeue()
+	 * -> scx_cgroup_bw_cancel() normally does that when the task stops
+	 * running, but a cgroup teardown (cbw_free_llc_ctx) can relocate an
+	 * already-dequeued task into root's BTQ afterward, so it can still be
+	 * queued here. Cancel it before the free; scx_atq_cancel() unlinks it
+	 * wherever teardown moved it.
+	 */
+	if (enable_cpu_bw && taskc &&
+	    scx_cgroup_bw_is_task_throttled((u64)taskc))
+		scx_cgroup_bw_cancel((u64)taskc);
+
 	scx_task_free(p);
 	return 0;
 }
