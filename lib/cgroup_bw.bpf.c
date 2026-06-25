@@ -893,10 +893,10 @@ static void schedule_atq_destroy(scx_atq_t *btq)
 static __always_inline
 int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 {
-	scx_cgroup_llc_ctx_t *llcx;
+	scx_cgroup_llc_ctx_t *llcx, *root_llcx;
 	volatile int nr_moved = 0; /* Add volatile to satisfy the verifier. */
-	int i, ret;
-	scx_atq_t *btq;
+	scx_atq_t *btq, *root_btq;
+	int i;
 	u64 taskc;
 
 	/*
@@ -941,48 +941,32 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		 */
 
 		/*
-		 * Move all the throttled exiting tasks into the root cgroup.
-		 * Then, delete the LLC context and its associated BTQ.
+		 * Relocate this dying cgroup's throttled tasks into the root
+		 * cgroup's BTQ for the same LLC, then delete the LLC context
+		 * and its BTQ. scx_atq_move_vtime() moves each task under both
+		 * BTQ locks, so its ->atq transitions straight from @btq to
+		 * root's and is never observed as NULL. vtime 0 reaps the
+		 * exiting task at the next replenishment interval.
 		 */
 		if (cgrp_id != ROOT_CGID) {
-			while (can_loop && (taskc = scx_atq_pop(btq))) {
-				scx_task_cgroup_bw_t *t = (scx_task_cgroup_bw_t *)taskc;
-				/*
-				 * Invalidate the per-task cgx/llcx caches before
-				 * moving the task to the root BTQ. The old cgroup
-				 * context will be freed by cbw_del_cgroup_ctx()
-				 * shortly; a stale cgx_raw would cause throttle
-				 * checks to read freed or reallocated memory
-				 * (ABA), potentially throttling the task under
-				 * the wrong cgroup.
-				 *
-				 * No smp_mb() is needed here: cbw_put_aside()
-				 * acquires and releases the BTQ spinlock, whose
-				 * store-release orders these stores before the
-				 * task becomes visible in the BTQ. The drain
-				 * path's lock-acquire provides the matching
-				 * load-acquire.
-				 */
-				WRITE_ONCE(t->cgx_raw, 0);
-				WRITE_ONCE(t->llcx_raw, 0);
-				/*
-				 * Set task's vtime to zero so we can reap the
-				 * the throttled exiting task as soon as possible.
-				 *
-				 * We will try to reenqueue the throttled exiting
-				 * task in the next replenishment interval. This
-				 * is fair since the task was throttled under the
-				 * cgroup, so it has to wait until the next
-				 * replenishment interval anyway.
-				 */
-				ret = cbw_put_aside(taskc, 0, ROOT_CGID);
-				if (likely(!ret)) {
+			root_llcx = cbw_get_llc_ctx_with_id(ROOT_CGID, i);
+			if (root_llcx && (root_btq = READ_ONCE(root_llcx->btq))) {
+				while (can_loop &&
+				       (taskc = scx_atq_move_vtime(btq, root_btq, 0))) {
+					scx_task_cgroup_bw_t *t = (scx_task_cgroup_bw_t *)taskc;
+					/*
+					 * Invalidate the per-task cgx/llcx caches:
+					 * the old cgroup context is about to be freed
+					 * by cbw_del_cgroup_ctx(), and a stale cgx_raw
+					 * would let a later throttle check read freed
+					 * or reallocated memory (ABA).
+					 */
+					WRITE_ONCE(t->cgx_raw, 0);
+					WRITE_ONCE(t->llcx_raw, 0);
 					nr_moved++;
-				} else {
-					cbw_err("Failed to put aside a task "
-						"while exiting cgid%llu: %d",
-						cgrp_id, ret);
 				}
+			} else {
+				cbw_err("Failed to look up root BTQ for LLC %d", i);
 			}
 		}
 
