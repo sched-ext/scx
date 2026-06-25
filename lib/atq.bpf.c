@@ -380,32 +380,54 @@ int scx_atq_cancel(scx_task_common __arg_arena *taskc)
 	int ret;
 
 	/*
-	 * Copy the ATQ pointer over to the stack and use it to avoid
-	 * a racing scx_atq_pop() from overwriting it. Check the
-	 * pointer is valid, as expected by the caller.
+	 * scx_atq_move_vtime() acquires both ATQ locks up front and only drops
+	 * them after publishing the new owner (taskc->atq = dst), so a task's
+	 * ATQ membership changes atomically: ->atq is safe to read locklessly --
+	 * never NULL, never torn. But that does not pin the value across the gap
+	 * between our lockless read and our lock acquisition, so a move can slip
+	 * in between them:
+	 *
+	 *   1. we snapshot atq = taskc->atq, holding no lock yet;
+	 *   2. a move relocates the task out of atq into another ATQ and
+	 *      completes -- it acquired atq's lock before we did;
+	 *   3. we finally acquire atq's lock and observe taskc->atq != atq.
+	 *
+	 * At step 3 we are holding the wrong ATQ's lock and must not touch the
+	 * node, so we re-snapshot ->atq and retry against the ATQ the task now
+	 * lives in. can_loop bounds the retries; in the common, race-free case
+	 * the loop body runs exactly once.
 	 */
-	atq = taskc->atq;
-	if (!atq)
-		return 0;
+	while (can_loop) {
+		/*
+		 * Copy the ATQ pointer over to the stack and use it to avoid
+		 * a racing scx_atq_pop() from overwriting it. Check the
+		 * pointer is valid, as expected by the caller.
+		 */
+		atq = taskc->atq;
+		if (!atq)
+			return 0;
 
-	if ((ret = scx_atq_lock(atq))) {
-		bpf_printk("Failed to lock ATQ for task");
+		if ((ret = scx_atq_lock(atq))) {
+			bpf_printk("Failed to lock ATQ for task");
+			return ret;
+		}
+
+		/* Relocated after our snapshot; retry against the new ATQ. */
+		if (taskc->atq != atq) {
+			scx_atq_unlock(atq);
+			continue;
+		}
+
+		/* Protected from races by the lock. */
+		if ((ret = scx_atq_remove_unlocked(taskc->atq, taskc))) {
+			/* There is an unavoidable race with scx_atq_pop. */
+			bpf_printk("Failed to remove node from task");
+		}
+
+		scx_atq_unlock(atq);
 		return ret;
 	}
 
-	/* We lost the race, assume whoever popped the task will handle it. */
-	if (taskc->atq != atq) {
-		scx_atq_unlock(atq);
-		return 0;
-	}
-
-	/* Protected from races by the lock. */
-	if ((ret = scx_atq_remove_unlocked(taskc->atq, taskc))) {
-		/* There is an unavoidable race with scx_atq_pop. */
-		bpf_printk("Failed to remove node from task");
-	}
-
-	scx_atq_unlock(atq);
-	return ret;
+	return 0;
 }
 
