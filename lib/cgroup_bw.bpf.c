@@ -2504,7 +2504,13 @@ int cbw_reenqueue_cgroup(scx_cgroup_ctx_t *cgx, u64 cgrp_id, u64 nuance)
 		idx = (nuance + i) % TOPO_NR(LLC);
 		llcx = cbw_get_llc_ctx_with_id(cgrp_id, idx);
 		if (!llcx) {
-			cbw_err("Failed to lookup an LLC context: cgid%llu", cgrp_id);
+			/*
+			 * After putting the cgroup ID to cbw_throttled_cgroup_ids[],
+			 * the cgroup is exiting, freeing its LLC context
+			 * (cbw_free_llc_ctx). This is expected under cgroup
+			 * churn, not an error; skip it.
+			 */
+			cbw_dbg("LLC context gone (cgroup exiting): cgid%llu", cgrp_id);
 			continue;
 		}
 
