@@ -57,6 +57,7 @@ int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __
 int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc);
 int scx_atq_nr_queued(scx_atq_t *atq);
 u64 scx_atq_pop(scx_atq_t *atq);
+u64 scx_atq_move_vtime(scx_atq_t *src, scx_atq_t *dst, u64 vtime);
 u64 scx_atq_peek(scx_atq_t *atq);
 int scx_atq_cancel(scx_task_common *taskc);
 

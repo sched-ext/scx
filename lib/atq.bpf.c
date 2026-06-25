@@ -205,6 +205,142 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	return taskc_ptr;
 }
 
+/*
+ * Lock two distinct ATQs, lowest address first, to avoid ABBA deadlock with
+ * a concurrent move in the opposite direction. @a and @b must differ;
+ * scx_atq_move_vtime() rejects @src == @dst before calling this. Keeping the
+ * lock count unconditional (always two) also keeps the verifier's
+ * preempt-disable/enable balance provable.
+ */
+static __always_inline
+int scx_atq_lock2(scx_atq_t *a, scx_atq_t *b)
+{
+	scx_atq_t *first, *second;
+	int ret;
+
+	if ((u64)a < (u64)b) {
+		first = a;
+		second = b;
+	} else {
+		first = b;
+		second = a;
+	}
+
+	if ((ret = scx_atq_lock(first)))
+		return ret;
+	if ((ret = scx_atq_lock(second))) {
+		scx_atq_unlock(first);
+		return ret;
+	}
+
+	return 0;
+}
+
+static __always_inline
+void scx_atq_unlock2(scx_atq_t *a, scx_atq_t *b)
+{
+	scx_atq_t *first, *second;
+
+	if ((u64)a < (u64)b) {
+		first = a;
+		second = b;
+	} else {
+		first = b;
+		second = a;
+	}
+
+	scx_atq_unlock(second);
+	scx_atq_unlock(first);
+}
+
+/*
+ * Atomically move the front (min-key) task of @src into @dst, re-keyed by
+ * @vtime. Both ATQ locks are held across the move and the task's ->atq is
+ * updated directly from @src to @dst, so a lockless reader of ->atq never
+ * observes the transient NULL that a separate scx_atq_pop()+insert() would
+ * expose. Locks are taken lowest-address-first (see scx_atq_lock2()).
+ *
+ * On insertion failure the task is left in @src; it is never lost.
+ *
+ * Return the moved task (scx_task_common *) as u64, or (u64)NULL if @src is
+ * empty or the move failed.
+ */
+__hidden
+u64 scx_atq_move_vtime(scx_atq_t *src, scx_atq_t *dst, u64 vtime)
+{
+	scx_task_common *taskc;
+	rbnode_t *node;
+	u64 src_key, taskc_ptr;
+	int ret;
+
+	/*
+	 * Relocation is between distinct ATQs; @src == @dst would self-deadlock
+	 * in scx_atq_lock2(). Reject it before locking.
+	 */
+	if (src == dst)
+		return (u64)NULL;
+
+	ret = scx_atq_lock2(src, dst);
+	if (ret)
+		return (u64)NULL;
+
+	/* Same FIFO/vtime discipline as scx_atq_insert_vtime_unlocked(). */
+	if ((vtime == SCX_ATQ_FIFO) != dst->fifo)
+		goto out_unlock;
+
+	/* Need room in @dst before removing from @src. */
+	if (dst->size == dst->capacity)
+		goto out_unlock;
+
+	if (!scx_atq_nr_queued(src))
+		goto out_unlock;
+
+	ret = rb_pop(src->tree, &src_key, &taskc_ptr);
+	if (ret) {
+		if (ret != -ENOENT)
+			bpf_printk("%s: src error %d", __func__, ret);
+		goto out_unlock;
+	}
+	src->size -= 1;
+
+	taskc = (scx_task_common *)taskc_ptr;
+	node = &taskc->node;
+
+	/* The node still carries value == taskc from @src; only re-key it. */
+	node->key = (vtime == SCX_ATQ_FIFO) ? dst->seq++ : vtime;
+
+	ret = rb_insert_node(dst->tree, node);
+	if (ret) {
+		/*
+		 * Couldn't insert into @dst after popping from @src. Restore
+		 * the task to @src so it is never lost. The capacity check
+		 * above makes this unreachable in practice.
+		 */
+		node->key = src_key;
+		if (!rb_insert_node(src->tree, node))
+			src->size += 1;
+		else
+			bpf_printk("%s: failed to restore task to src", __func__);
+		goto out_unlock;
+	}
+
+	dst->size += 1;
+
+	/*
+	 * Publish the new owner. Both ATQ locks are held, so no concurrent
+	 * pop/cancel/insert can run on @src or @dst; ->atq transitions
+	 * directly from @src to @dst and is never observed as NULL.
+	 */
+	taskc->atq = dst;
+
+	scx_atq_unlock2(src, dst);
+	return taskc_ptr;
+
+out_unlock:
+	scx_atq_unlock2(src, dst);
+	return (u64)NULL;
+}
+
 __hidden
 u64 scx_atq_peek(scx_atq_t *atq)
 {
