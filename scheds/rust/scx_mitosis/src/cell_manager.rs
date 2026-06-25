@@ -242,7 +242,7 @@ impl CellManager {
         if !path.exists() {
             bail!("Cell parent cgroup path does not exist: {}", path.display());
         }
-        Self::new_with_path(
+        Self::new_with_path_opts(
             path,
             max_cells,
             all_cpus,
@@ -252,7 +252,20 @@ impl CellManager {
         )
     }
 
+    /// Test-only 4-argument constructor with the holdout defaulted off
+    /// (`cell0_min_cpus = 0`, empty `cpu_to_llc`). Tests that exercise the
+    /// holdout call [`Self::new_with_path_opts`] directly with those arguments.
+    #[cfg(test)]
     fn new_with_path(
+        path: PathBuf,
+        max_cells: u32,
+        all_cpus: Cpumask,
+        exclude: HashSet<String>,
+    ) -> Result<Self> {
+        Self::new_with_path_opts(path, max_cells, all_cpus, exclude, 0, HashMap::new())
+    }
+
+    fn new_with_path_opts(
         path: PathBuf,
         max_cells: u32,
         all_cpus: Cpumask,
@@ -605,12 +618,12 @@ impl CellManager {
             }
         }
 
-        // Holdout: reserve up to `cell0_min_cpus` CPUs for cell 0 before the
-        // cpuset-based assignment below. Prefer CPUs no child cpuset claims;
-        // when those run out, steal from cells — largest cell first, but never a
-        // cell's last CPU — so no child is starved (cell 0 may end up with fewer
-        // than requested). Reserved CPUs are skipped by the phases below and
-        // pre-seeded onto cell 0.
+        // Holdout: try to reserve `cell0_min_cpus` CPUs for cell 0 before the
+        // cpuset-based assignment below, but reserve fewer if reserving more
+        // would mean taking a workload cell's last CPU. Prefer CPUs no child
+        // cpuset claims; when those run out, steal from cells — largest cell
+        // first, but never a cell's last CPU — so no child is starved. Reserved
+        // CPUs are skipped by the phases below and pre-seeded onto cell 0.
         let mut holdout = Cpumask::new();
         if self.cell0_min_cpus > 0 {
             let mut unclaimed: Vec<usize> = self
@@ -1074,8 +1087,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -1095,8 +1106,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -1119,8 +1128,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -1147,8 +1154,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2);
@@ -1176,8 +1181,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -1216,8 +1219,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -1247,8 +1248,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -1270,8 +1269,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1297,8 +1294,6 @@ mod tests {
             256,
             cpumask_for_range(10),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1323,8 +1318,6 @@ mod tests {
             256,
             cpumask_for_range(4),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let result = mgr.compute_cpu_assignments(false);
@@ -1356,8 +1349,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1421,8 +1412,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let result = mgr.compute_cpu_assignments(false);
@@ -1454,7 +1443,7 @@ mod tests {
         std::fs::create_dir(&cell2_path).unwrap();
         std::fs::write(cell2_path.join("cpuset.cpus"), "8-15\n").unwrap();
 
-        let mgr = CellManager::new_with_path(
+        let mgr = CellManager::new_with_path_opts(
             tmp.path().to_path_buf(),
             256,
             cpumask_for_range(16),
@@ -1518,7 +1507,7 @@ mod tests {
 
         let cpu_to_llc: HashMap<usize, usize> = (0..16usize).map(|cpu| (cpu, cpu / 8)).collect();
 
-        let mgr = CellManager::new_with_path(
+        let mgr = CellManager::new_with_path_opts(
             tmp.path().to_path_buf(),
             256,
             cpumask_for_range(16),
@@ -1580,7 +1569,7 @@ mod tests {
             std::fs::write(p.join("cpuset.cpus"), format!("{range}\n")).unwrap();
         }
 
-        let mgr = CellManager::new_with_path(
+        let mgr = CellManager::new_with_path_opts(
             tmp.path().to_path_buf(),
             256,
             cpumask_for_range(24),
@@ -1643,7 +1632,7 @@ mod tests {
         std::fs::create_dir(&cell2_path).unwrap();
         std::fs::write(cell2_path.join("cpuset.cpus"), "2-3\n").unwrap();
 
-        let mgr = CellManager::new_with_path(
+        let mgr = CellManager::new_with_path_opts(
             tmp.path().to_path_buf(),
             256,
             cpumask_for_range(4),
@@ -1702,7 +1691,7 @@ mod tests {
         std::fs::create_dir(&cell2_path).unwrap();
         std::fs::write(cell2_path.join("cpuset.cpus"), "0-1\n").unwrap();
 
-        let mgr = CellManager::new_with_path(
+        let mgr = CellManager::new_with_path_opts(
             tmp.path().to_path_buf(),
             256,
             cpumask_for_range(5),
@@ -1756,8 +1745,6 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1794,8 +1781,6 @@ mod tests {
             256,
             cpumask_for_range(32),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -1831,8 +1816,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -1890,8 +1873,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -1983,8 +1964,6 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -2047,8 +2026,6 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -2098,8 +2075,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -2153,8 +2128,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
@@ -2200,8 +2173,6 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2230,8 +2201,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2278,8 +2247,6 @@ mod tests {
             3,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2); // cell1 + cell2
@@ -2311,8 +2278,6 @@ mod tests {
             3,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 2);
@@ -2345,8 +2310,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             exclude,
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2371,8 +2334,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             exclude,
-            0,
-            HashMap::new(),
         )
         .unwrap();
         assert_eq!(mgr.cell_count(), 1);
@@ -2407,8 +2368,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -2452,8 +2411,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -2489,8 +2446,6 @@ mod tests {
             256,
             cpumask_for_range(32),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
         let assignments = mgr.compute_cpu_assignments(true).unwrap();
@@ -2550,8 +2505,6 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2588,8 +2541,6 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2650,8 +2601,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2702,8 +2651,6 @@ mod tests {
             256,
             cpumask_for_range(12),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2756,8 +2703,6 @@ mod tests {
             256,
             cpumask_for_range(8),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2800,8 +2745,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2867,8 +2810,6 @@ mod tests {
             256,
             cpumask_for_range(16),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -2937,8 +2878,6 @@ mod tests {
             256,
             cpumask_for_range(20),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
@@ -3125,8 +3064,6 @@ mod tests {
             256,
             cpumask_for_range(56),
             HashSet::new(),
-            0,
-            HashMap::new(),
         )
         .unwrap();
 
