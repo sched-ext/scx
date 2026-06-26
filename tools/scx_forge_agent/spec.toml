@@ -69,21 +69,23 @@ skip_knobs = false
 cross_scheduler_refs = false
 
 [tracing]
-# Enable optional trace-cmd tracing during workloads (only used when trace-cmd
-# is available).
+# Enable optional perf recording during workloads (only used when perf is
+# available).
 enable_tracing = true
-# Trace events passed to trace-cmd record with -e.
+# Events passed to perf record with -e. Tracepoints such as sched:sched_switch are
+# recorded per occurrence; hardware PMU events such as cache-misses are sampled
+# according to perf's configured/default sampling period.
 trace_events = [
   "sched:sched_wakeup",
   "sched:sched_wakeup_new",
   "sched:sched_switch",
   "sched:sched_migrate_task",
+  "cache-references",
+  "cache-misses",
 ]
-# Cap on the combined trace.dat size per recording. Accepts a plain byte count or
-# a human-readable size with a binary suffix (K, M, G; an optional trailing B is
-# allowed), e.g., "256M" or "1G". trace-cmd records into a circular file once
-# the cap is reached, keeping the most recent data so the file stays bounded
-# even for long or busy workloads.
+# Cap passed to perf record --max-size for perf.data. Accepts a plain byte count
+# or a human-readable size with a binary suffix (K, M, G; an optional trailing B
+# is allowed), e.g., "256M" or "1G".
 max_trace_size = "256M"
 
 [scheduler]

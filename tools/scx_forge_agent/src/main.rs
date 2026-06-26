@@ -1767,7 +1767,7 @@ async fn optimize(args: OptimizeArgs) -> Result<()> {
         println!(
             "tracing       : {}",
             if spec.tracing.enable_tracing {
-                "enabled when trace-cmd is available"
+                "enabled when perf is available"
             } else {
                 "disabled"
             }

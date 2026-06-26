@@ -4,7 +4,7 @@
 //!
 //! Mirrors `tools/scx_forge_agent/spec.toml`: `[scheduler]` (what to build and run),
 //! `[system]` (host/runtime settings), `[ai]` (model selection), `[tracing]`
-//! (optional trace-cmd profiling, event list, and size cap), `[workload]`
+//! (optional perf profiling, event list, and size cap), `[workload]`
 //! (the load to apply, the numeric metric to emit, and how many times to repeat
 //! the measurement), and `[goal]` (what the number means, which direction is
 //! better, and the accept threshold).
@@ -140,18 +140,16 @@ impl Ai {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tracing {
-    /// Enable optional trace-cmd tracing during workloads (only used when
-    /// trace-cmd is available). On by default.
+    /// Enable optional perf recording during workloads (only used when perf is
+    /// available). On by default.
     #[serde(default = "default_true")]
     pub enable_tracing: bool,
-    /// Trace events passed to `trace-cmd record` with `-e`.
+    /// Events passed to `perf record` with `-e`.
     #[serde(default = "default_trace_events")]
     pub trace_events: Vec<String>,
-    /// Cap on the combined `trace.dat` size for a recording. Accepts a plain
-    /// byte count or a human-readable size with a binary suffix (`K`, `M`, `G`,
-    /// optionally followed by `B`), e.g. `256M`, `1G`. trace-cmd records into a
-    /// circular file once the cap is hit, so the recording keeps the most recent
-    /// data and the file stays bounded even for long or busy workloads.
+    /// Cap passed to `perf record --max-size` for perf.data. Accepts a plain byte
+    /// count or a human-readable size with a binary suffix (`K`, `M`, `G`,
+    /// optionally followed by `B`), e.g. `256M`, `1G`.
     #[serde(default = "default_max_trace_size")]
     pub max_trace_size: String,
 }
