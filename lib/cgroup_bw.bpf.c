@@ -2646,7 +2646,10 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 		       struct cgroup *to __arg_trusted)
 {
 	volatile scx_task_cgroup_bw_t *tc; /* Add `volatile` to work around the verifier error */
-	int ret;
+	scx_task_common *tcm = (scx_task_common *)taskc;
+	scx_cgroup_llc_ctx_t *to_llcx;
+	scx_atq_t *src_btq, *dst_btq;
+	int llc_id, ret;
 
 	scx_arena_subprog_init();
 	/*
@@ -2665,26 +2668,47 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 	}
 
 	/*
-	 * If a task is throttled, remove it from the @from cgroup,
-	 * then add it to the BTQ of the @to cgroup.
+	 * If the task is throttled, relocate it from @from's BTQ to @to's BTQ.
 	 *
-	 * We will try to reenqueue it in the next replenishment interval.
-	 * This is fair because the task was throttled under @from cgroup,
-	 * so it has to wait until the next replenishment interval anyway.
+	 * This must be atomic. A cancel-then-put_aside pair would leave
+	 * ->atq == NULL between the two steps; a concurrent task-exit could
+	 * observe that NULL (skipping its own cancel), then free the task
+	 * context while put_aside re-links the node into @to -- leaving a freed
+	 * node in @to's rbtree and corrupting it. scx_atq_move_task() moves the
+	 * task under both BTQ locks, so ->atq is always @from or @to, never NULL.
+	 *
+	 * The task is reenqueued at the next replenishment interval. This is
+	 * fair because it was throttled under @from, so it has to wait anyway.
 	 */
 	if (!scx_cgroup_bw_is_task_throttled(taskc))
 		return 0;
 
-	if ((ret = scx_cgroup_bw_cancel(taskc))) {
-		cbw_err("Fail to cancel a throttled task (%s:%d) from a cgroup (cgid%llu): %d",
-			p->comm, p->pid, cgroup_get_id(from), ret);
-		return ret;
+	/*
+	 * Snapshot the current BTQ. A concurrent pop/cancel may have cleared
+	 * ->atq after the throttle check above; then there is nothing to move.
+	 */
+	src_btq = (scx_atq_t *)READ_ONCE(tcm->atq);
+	if (!src_btq)
+		return 0;
+
+	/* Locate @to's BTQ for the current LLC, as cbw_put_aside() would. */
+	if ((llc_id = cbw_get_current_llc_id()) < 0) {
+		cbw_err("Invalid LLC id: %d", llc_id);
+		return -EINVAL;
+	}
+	to_llcx = cbw_get_llc_ctx_with_id(cgroup_get_id(to), llc_id);
+	if (!to_llcx || !(dst_btq = (scx_atq_t *)READ_ONCE(to_llcx->btq))) {
+		cbw_err("Failed to lookup @to BTQ: cgid%llu llc%d",
+			cgroup_get_id(to), llc_id);
+		return -ESRCH;
 	}
 
-	if ((ret = scx_cgroup_bw_put_aside(p, taskc, p->scx.dsq_vtime, cgroup_get_id(to)))) {
-		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
+	ret = scx_atq_move_task(src_btq, dst_btq, tcm, p->scx.dsq_vtime);
+	if (ret == -EAGAIN)
+		return 0;	/* task left @src concurrently; nothing to move */
+	if (ret)
+		cbw_err("Fail to move a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
-	}
 
 	return ret;
 }
