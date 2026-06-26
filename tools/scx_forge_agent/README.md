@@ -200,9 +200,11 @@ before Phase 2 spends rounds on writing new code.
    context, but the model is free to choose the next self-contained experiment
    on its own technical merits rather than exploiting kept directions or cooling
    down regressed ones.
-   When `trace-cmd` is available, the harness also records a small curated sched
-   profile while the workload runs and passes only a compact trace summary in
-   the verdict JSON to the planner model.
+   When `perf` is available, the harness also records the configured perf events
+   while the workload runs and passes only a compact sample summary in the
+   verdict JSON to the planner model, including observed event counts, global
+   retained-window sample rates, and a compact CPU-rate summary. For hardware PMU
+   events, these are perf sample records rather than raw hardware event totals.
 5. The crate is edited in place on the current branch, no branch is created and
    no commits are made. Accepted edits accumulate in the working tree; the final
    report (markdown or `--json`) shows the per-round history and the winner, and

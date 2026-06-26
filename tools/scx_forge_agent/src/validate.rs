@@ -199,62 +199,44 @@ fn read_lossy(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn trace_cmd_available() -> bool {
-    // Some trace-cmd builds print help/version but still exit non-zero. For
-    // availability, only require that the executable can be spawned; record/report
-    // errors are captured later in trace.run<N>.log and sched_trace.
-    Command::new("trace-cmd")
+fn perf_available() -> bool {
+    Command::new("perf")
+        .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok()
 }
 
-/// Per-CPU `-m` value in KB for `trace-cmd record`, derived from a total byte
-/// budget split across the online CPUs (at least 1 KB). `trace-cmd record -m`
-/// takes a *per-CPU* limit in KB and records into a circular file (oldest data
-/// is overwritten once the cap is hit), so the combined `trace.dat` stays within
-/// roughly `max_total_bytes`.
-fn trace_max_kb_per_cpu(max_total_bytes: u64) -> u64 {
+/// Per-CPU mmap pages for `perf record -m`, derived from a total byte budget
+/// split across the online CPUs. This controls perf's live mmap buffer; the
+/// output file is separately capped with `perf record --max-size`.
+fn perf_mmap_pages_per_cpu(max_total_bytes: u64) -> u64 {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get() as u64)
         .unwrap_or(1)
         .max(1);
-    (max_total_bytes / 1024 / cpus).max(1)
+    const PAGE_SIZE: u64 = 4096;
+    let pages = (max_total_bytes / PAGE_SIZE / cpus).max(1);
+    let mut pow2 = 1;
+    while pow2 <= pages / 2 {
+        pow2 *= 2;
+    }
+    pow2
 }
 
 #[derive(Default, Debug)]
 struct TraceStats {
-    sched_switch: u64,
-    sched_wakeup: u64,
-    sched_wakeup_new: u64,
-    sched_migrate_task: u64,
-    switch_cpu: HashMap<String, u64>,
-    next_comm: HashMap<String, u64>,
-    prev_comm: HashMap<String, u64>,
-    prev_state: HashMap<String, u64>,
-    wakeup_comm: HashMap<String, u64>,
-    wakeup_target_cpu: HashMap<String, u64>,
-    wakeup_new_comm: HashMap<String, u64>,
-    wakeup_new_target_cpu: HashMap<String, u64>,
-    migrate_comm: HashMap<String, u64>,
-    migrate_orig_cpu: HashMap<String, u64>,
-    migrate_dest_cpu: HashMap<String, u64>,
-    migrate_path: HashMap<String, u64>,
+    start_ts: Option<f64>,
+    end_ts: Option<f64>,
+    events: HashMap<String, u64>,
+    per_cpu_events: HashMap<String, u64>,
 }
 
-fn bump(map: &mut HashMap<String, u64>, key: Option<String>) {
-    if let Some(key) = key.filter(|s| !s.is_empty()) {
-        *map.entry(key).or_insert(0) += 1;
+impl TraceStats {
+    fn total(&self) -> u64 {
+        self.events.values().sum()
     }
-}
-
-fn trace_field(line: &str, key: &str) -> Option<String> {
-    let marker = format!("{key}=");
-    let start = line.find(&marker)? + marker.len();
-    let rest = &line[start..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    Some(rest[..end].trim_end_matches(',').to_string())
 }
 
 fn trace_cpu(line: &str) -> Option<String> {
@@ -263,50 +245,123 @@ fn trace_cpu(line: &str) -> Option<String> {
     Some(line[start..end].trim().to_string())
 }
 
-fn trace_cpu_path(line: &str) -> Option<String> {
-    let orig = trace_field(line, "orig_cpu")?;
-    let dest = trace_field(line, "dest_cpu")?;
-    Some(format!("{orig}->{dest}"))
+fn trace_event(line: &str) -> Option<(f64, String, Option<String>)> {
+    let cpu = trace_cpu(line);
+    let cpu_end = line.find(']')? + 1;
+    let mut tokens = line[cpu_end..].split_whitespace();
+    while let Some(token) = tokens.next() {
+        let ts_token = token.trim_end_matches(':');
+        if let Ok(ts) = ts_token.parse::<f64>() {
+            for token in tokens {
+                let event = token.trim_end_matches(':');
+                if event.is_empty() || event.parse::<f64>().is_ok() {
+                    continue;
+                }
+                return Some((ts, event.to_string(), cpu));
+            }
+            return None;
+        }
+    }
+    None
 }
 
 fn update_trace_stats(stats: &mut TraceStats, line: &str) {
-    if line.contains("sched_switch:") {
-        stats.sched_switch += 1;
-        bump(&mut stats.switch_cpu, trace_cpu(line));
-        bump(&mut stats.next_comm, trace_field(line, "next_comm"));
-        bump(&mut stats.prev_comm, trace_field(line, "prev_comm"));
-        bump(&mut stats.prev_state, trace_field(line, "prev_state"));
-    } else if line.contains("sched_wakeup_new:") {
-        stats.sched_wakeup_new += 1;
-        bump(&mut stats.wakeup_new_comm, trace_field(line, "comm"));
-        bump(
-            &mut stats.wakeup_new_target_cpu,
-            trace_field(line, "target_cpu"),
-        );
-    } else if line.contains("sched_wakeup:") {
-        stats.sched_wakeup += 1;
-        bump(&mut stats.wakeup_comm, trace_field(line, "comm"));
-        bump(
-            &mut stats.wakeup_target_cpu,
-            trace_field(line, "target_cpu"),
-        );
-    } else if line.contains("sched_migrate_task:") {
-        stats.sched_migrate_task += 1;
-        bump(&mut stats.migrate_comm, trace_field(line, "comm"));
-        bump(&mut stats.migrate_orig_cpu, trace_field(line, "orig_cpu"));
-        bump(&mut stats.migrate_dest_cpu, trace_field(line, "dest_cpu"));
-        bump(&mut stats.migrate_path, trace_cpu_path(line));
+    if let Some((ts, event, cpu)) = trace_event(line) {
+        stats.start_ts = Some(stats.start_ts.map_or(ts, |start| start.min(ts)));
+        stats.end_ts = Some(stats.end_ts.map_or(ts, |end| end.max(ts)));
+        *stats.events.entry(event).or_insert(0) += 1;
+        if let Some(cpu) = cpu {
+            *stats.per_cpu_events.entry(cpu).or_insert(0) += 1;
+        }
     }
 }
 
-fn top_counts(map: &HashMap<String, u64>, limit: usize) -> Value {
+fn trace_window_sec(start_ts: Option<f64>, end_ts: Option<f64>) -> Option<f64> {
+    let window = end_ts? - start_ts?;
+    (window > 0.0).then_some(window)
+}
+
+fn round_trace_float(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn rounded_option(value: Option<f64>) -> Value {
+    match value {
+        Some(value) => json!(round_trace_float(value)),
+        None => Value::Null,
+    }
+}
+
+fn rate_value(count: u64, window: Option<f64>) -> Value {
+    match window {
+        Some(window) => json!(round_trace_float(count as f64 / window)),
+        None => Value::Null,
+    }
+}
+
+fn sorted_counts(map: &HashMap<String, u64>) -> Vec<(&String, &u64)> {
     let mut v = map.iter().collect::<Vec<_>>();
     v.sort_by(|(ka, va), (kb, vb)| vb.cmp(va).then_with(|| ka.cmp(kb)));
-    json!(v
+    v
+}
+
+fn event_counts_json(events: &HashMap<String, u64>) -> Value {
+    json!(sorted_counts(events)
         .into_iter()
-        .take(limit)
-        .map(|(name, count)| json!({"name": name, "count": count}))
+        .map(|(event, count)| json!({"event": event, "count": count}))
         .collect::<Vec<_>>())
+}
+
+fn event_rates_json(events: &HashMap<String, u64>, window: Option<f64>) -> Value {
+    json!(sorted_counts(events)
+        .into_iter()
+        .map(|(event, count)| json!({"event": event, "per_sec": rate_value(*count, window)}))
+        .collect::<Vec<_>>())
+}
+
+fn cpu_event_rate_summary(stats: &TraceStats, window: Option<f64>, limit: usize) -> Value {
+    let mut cpus = stats.per_cpu_events.iter().collect::<Vec<_>>();
+    cpus.sort_by(|(cpu_a, count_a), (cpu_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| cpu_a.cmp(cpu_b))
+    });
+
+    let rates = match window {
+        Some(window) => cpus
+            .iter()
+            .map(|(_, count)| **count as f64 / window)
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+    let max_rate = rates.iter().copied().reduce(f64::max);
+    let median_rate = if rates.is_empty() {
+        None
+    } else {
+        Some(median(&rates))
+    };
+    let max_to_median = match (max_rate, median_rate) {
+        (Some(max), Some(median)) if median > 0.0 => Some(max / median),
+        _ => None,
+    };
+    let top_cpus = cpus
+        .iter()
+        .take(limit)
+        .map(|(cpu, count)| {
+            json!({
+                "cpu": cpu,
+                "events": count,
+                "events_per_sec": rate_value(**count, window),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "cpus_observed": stats.per_cpu_events.len(),
+        "rates_scope": "per-CPU observed event totals divided by the global retained trace_window.duration_sec",
+        "median_events_per_sec": rounded_option(median_rate),
+        "max_events_per_sec": rounded_option(max_rate),
+        "max_to_median_ratio": rounded_option(max_to_median),
+        "top_cpus_by_total_events": top_cpus,
+    })
 }
 
 fn trace_stats_json(
@@ -315,29 +370,27 @@ fn trace_stats_json(
     report_path: &Path,
     events: &[String],
 ) -> Value {
+    let window = trace_window_sec(stats.start_ts, stats.end_ts);
     json!({
         "enabled": true,
+        "backend": "perf",
         "events": events,
         "artifacts": {
-            "trace_dat": trace_path.display().to_string(),
-            "report": report_path.display().to_string(),
+            "perf_data": trace_path.display().to_string(),
+            "perf_script": report_path.display().to_string(),
         },
-        "sched_switch": stats.sched_switch,
-        "sched_wakeup": stats.sched_wakeup,
-        "sched_wakeup_new": stats.sched_wakeup_new,
-        "sched_migrate_task": stats.sched_migrate_task,
-        "top_switch_cpu": top_counts(&stats.switch_cpu, 8),
-        "top_next_comm": top_counts(&stats.next_comm, 8),
-        "top_prev_comm": top_counts(&stats.prev_comm, 8),
-        "top_prev_state": top_counts(&stats.prev_state, 8),
-        "top_wakeup_comm": top_counts(&stats.wakeup_comm, 8),
-        "top_wakeup_target_cpu": top_counts(&stats.wakeup_target_cpu, 8),
-        "top_wakeup_new_comm": top_counts(&stats.wakeup_new_comm, 8),
-        "top_wakeup_new_target_cpu": top_counts(&stats.wakeup_new_target_cpu, 8),
-        "top_migrate_comm": top_counts(&stats.migrate_comm, 8),
-        "top_migrate_orig_cpu": top_counts(&stats.migrate_orig_cpu, 8),
-        "top_migrate_dest_cpu": top_counts(&stats.migrate_dest_cpu, 8),
-        "top_migrate_path": top_counts(&stats.migrate_path, 8),
+        "trace_window": {
+            "start_ts": rounded_option(stats.start_ts),
+            "end_ts": rounded_option(stats.end_ts),
+            "duration_sec": rounded_option(window),
+            "scope": "retained perf script sample window; max-size limits may make this shorter than the workload",
+        },
+        "event_count_semantics": "perf sample records. Tracepoints are sampled per occurrence; hardware PMU events are sampled according to perf's configured/default sampling period, not raw hardware event totals.",
+        "event_count_total": stats.total(),
+        "event_rate_total_per_sec": rate_value(stats.total(), window),
+        "event_counts": event_counts_json(&stats.events),
+        "event_rates_per_sec": event_rates_json(&stats.events, window),
+        "cpu_event_rate_summary": cpu_event_rate_summary(stats, window, 8),
     })
 }
 
@@ -353,6 +406,7 @@ impl TraceRecorder {
         trace_path: PathBuf,
         log_path: PathBuf,
         max_total_bytes: u64,
+        max_size_arg: &str,
         events: &[String],
     ) -> Result<Self> {
         let _ = std::fs::remove_file(&trace_path);
@@ -360,22 +414,29 @@ impl TraceRecorder {
             .command("rm", &["-f".to_string(), trace_path.display().to_string()])
             .status();
         let log = File::create(&log_path)
-            .with_context(|| format!("create trace-cmd log {}", log_path.display()))?;
-        let log_err = log.try_clone().context("clone trace-cmd log handle")?;
+            .with_context(|| format!("create perf record log {}", log_path.display()))?;
+        let log_err = log.try_clone().context("clone perf record log handle")?;
         let mut args = vec![
             "record".to_string(),
+            "-a".to_string(),
+            "-q".to_string(),
+            "--sample-cpu".to_string(),
+            "-T".to_string(),
             "-o".to_string(),
             trace_path.display().to_string(),
-            // Bound the per-CPU output so the combined trace.dat stays within
-            // max_total_bytes even for long/busy workloads.
+            "--max-size".to_string(),
+            max_size_arg.to_string(),
             "-m".to_string(),
-            trace_max_kb_per_cpu(max_total_bytes).to_string(),
+            perf_mmap_pages_per_cpu(max_total_bytes).to_string(),
         ];
         for event in events {
             args.push("-e".to_string());
             args.push(event.to_string());
         }
-        let mut command = sudo.command("trace-cmd", &args);
+        args.push("--".to_string());
+        args.push("sleep".to_string());
+        args.push("2147483647".to_string());
+        let mut command = sudo.command("perf", &args);
         command.stdout(log).stderr(log_err).stdin(Stdio::null());
         unsafe {
             command.pre_exec(|| {
@@ -385,11 +446,11 @@ impl TraceRecorder {
         }
         let mut child = command
             .spawn()
-            .with_context(|| format!("spawn trace-cmd record {}", trace_path.display()))?;
+            .with_context(|| format!("spawn perf record {}", trace_path.display()))?;
         sleep(Duration::from_millis(250));
-        if let Some(status) = child.try_wait().context("poll trace-cmd startup")? {
+        if let Some(status) = child.try_wait().context("poll perf startup")? {
             anyhow::bail!(
-                "trace-cmd exited during startup with {status}; log tail:\n{}",
+                "perf record exited during startup with {status}; log tail:\n{}",
                 tail(&read_lossy(&log_path), 1000)
             );
         }
@@ -436,18 +497,20 @@ fn summarize_trace(sudo: &Sudo, trace_path: &Path, log_path: &Path, events: &[St
     if !trace_path.exists() {
         return json!({
             "enabled": false,
-            "error": format!("trace-cmd did not create {}", trace_path.display()),
+            "backend": "perf",
+            "error": format!("perf record did not create {}", trace_path.display()),
             "log_tail": tail(&read_lossy(log_path), 1000),
         });
     }
-    let report_path = trace_path.with_extension("report");
+    let report_path = trace_path.with_extension("script");
     let report = match File::create(&report_path) {
         Ok(f) => f,
         Err(e) => {
             return json!({
                 "enabled": false,
-                "trace_dat": trace_path.display().to_string(),
-                "error": format!("create trace report {}: {e}", report_path.display()),
+                "backend": "perf",
+                "perf_data": trace_path.display().to_string(),
+                "error": format!("create perf script report {}: {e}", report_path.display()),
                 "log_tail": tail(&read_lossy(log_path), 1000),
             })
         }
@@ -457,28 +520,33 @@ fn summarize_trace(sudo: &Sudo, trace_path: &Path, log_path: &Path, events: &[St
         Err(e) => {
             return json!({
                 "enabled": false,
-                "trace_dat": trace_path.display().to_string(),
-                "error": format!("clone trace report handle: {e}"),
+                "backend": "perf",
+                "perf_data": trace_path.display().to_string(),
+                "error": format!("clone perf script report handle: {e}"),
                 "log_tail": tail(&read_lossy(log_path), 1000),
             })
         }
     };
     let args = vec![
-        "report".to_string(),
+        "script".to_string(),
+        "--ns".to_string(),
+        "-F".to_string(),
+        "comm,pid,cpu,time,event".to_string(),
         "-i".to_string(),
         trace_path.display().to_string(),
     ];
     let status = sudo
-        .command("trace-cmd", &args)
+        .command("perf", &args)
         .stdout(report)
         .stderr(report_err)
         .status();
     if !matches!(status, Ok(s) if s.success()) {
         return json!({
             "enabled": false,
-            "trace_dat": trace_path.display().to_string(),
-            "report": report_path.display().to_string(),
-            "error": format!("trace-cmd report failed: {:?}", status),
+            "backend": "perf",
+            "perf_data": trace_path.display().to_string(),
+            "perf_script": report_path.display().to_string(),
+            "error": format!("perf script failed: {:?}", status),
             "report_tail": tail(&read_lossy(&report_path), 1000),
             "log_tail": tail(&read_lossy(log_path), 1000),
         });
@@ -489,9 +557,10 @@ fn summarize_trace(sudo: &Sudo, trace_path: &Path, log_path: &Path, events: &[St
         Err(e) => {
             return json!({
                 "enabled": false,
-                "trace_dat": trace_path.display().to_string(),
-                "report": report_path.display().to_string(),
-                "error": format!("open trace report: {e}"),
+                "backend": "perf",
+                "perf_data": trace_path.display().to_string(),
+                "perf_script": report_path.display().to_string(),
+                "error": format!("open perf script report: {e}"),
                 "log_tail": tail(&read_lossy(log_path), 1000),
             })
         }
@@ -806,14 +875,15 @@ fn measure_once(
                 "running workload...".to_string()
             };
             let trace_recorder = if trace_enabled {
-                let trace_path = workdir.join(format!("trace.run{run_idx}.dat"));
-                let trace_log_path = workdir.join(format!("trace.run{run_idx}.log"));
+                let trace_path = workdir.join(format!("perf.run{run_idx}.data"));
+                let trace_log_path = workdir.join(format!("perf.run{run_idx}.log"));
                 let max_trace_bytes = spec.tracing.max_trace_bytes()?;
                 match TraceRecorder::start(
                     sudo,
                     trace_path,
                     trace_log_path,
                     max_trace_bytes,
+                    &spec.tracing.max_trace_size,
                     &spec.tracing.trace_events,
                 ) {
                     Ok(recorder) => Some(recorder),
@@ -1069,9 +1139,9 @@ pub fn run_validation(
 
     let mut errors: Vec<String> = Vec::new();
     let mut runtime_failed = false;
-    let trace_enabled = tracing_enabled && trace_cmd_available();
+    let trace_enabled = tracing_enabled && perf_available();
     if verbose && tracing_enabled && !trace_enabled {
-        eprintln!("  validate: trace-cmd not available; sched tracing disabled");
+        eprintln!("  validate: perf not available; tracing disabled");
     }
 
     // Measured runs (target scheduler attached). There is no no-scheduler
@@ -1206,8 +1276,20 @@ mod tests {
     }
 
     #[test]
-    fn trace_stats_parse_sched_events() {
+    fn trace_stats_parse_events_generically() {
         let mut stats = TraceStats::default();
+        assert_eq!(
+            trace_event("bash-10 [003] d..2. 1.000: sched_switch: prev_comm=bash prev_pid=10"),
+            Some((1.0, "sched_switch".to_string(), Some("003".to_string())))
+        );
+        assert_eq!(
+            trace_event("workload 1234 [007] 2.000000001: 100000 cache-misses:"),
+            Some((
+                2.000000001,
+                "cache-misses".to_string(),
+                Some("007".to_string())
+            ))
+        );
         update_trace_stats(
             &mut stats,
             "bash-10 [003] d..2. 1.000: sched_switch: prev_comm=bash prev_pid=10 prev_prio=120 prev_state=R ==> next_comm=schbench next_pid=11 next_prio=120",
@@ -1224,23 +1306,74 @@ mod tests {
             &mut stats,
             "bash-10 [003] d..2. 1.003: sched_migrate_task: comm=schbench pid=11 prio=120 orig_cpu=003 dest_cpu=005",
         );
+        update_trace_stats(
+            &mut stats,
+            "irq/99-42 [005] d..2. 1.004: irq_handler_entry: irq=99 name=test_irq",
+        );
 
-        assert_eq!(stats.sched_switch, 1);
-        assert_eq!(stats.sched_wakeup, 1);
-        assert_eq!(stats.sched_wakeup_new, 1);
-        assert_eq!(stats.sched_migrate_task, 1);
-        assert_eq!(stats.switch_cpu.get("003"), Some(&1));
-        assert_eq!(stats.next_comm.get("schbench"), Some(&1));
-        assert_eq!(stats.prev_comm.get("bash"), Some(&1));
-        assert_eq!(stats.prev_state.get("R"), Some(&1));
-        assert_eq!(stats.wakeup_comm.get("schbench"), Some(&1));
-        assert_eq!(stats.wakeup_target_cpu.get("003"), Some(&1));
-        assert_eq!(stats.wakeup_new_comm.get("worker"), Some(&1));
-        assert_eq!(stats.wakeup_new_target_cpu.get("004"), Some(&1));
-        assert_eq!(stats.migrate_comm.get("schbench"), Some(&1));
-        assert_eq!(stats.migrate_orig_cpu.get("003"), Some(&1));
-        assert_eq!(stats.migrate_dest_cpu.get("005"), Some(&1));
-        assert_eq!(stats.migrate_path.get("003->005"), Some(&1));
+        assert_eq!(stats.total(), 5);
+        assert_eq!(stats.events.get("sched_switch"), Some(&1));
+        assert_eq!(stats.events.get("sched_wakeup"), Some(&1));
+        assert_eq!(stats.events.get("sched_wakeup_new"), Some(&1));
+        assert_eq!(stats.events.get("sched_migrate_task"), Some(&1));
+        assert_eq!(stats.events.get("irq_handler_entry"), Some(&1));
+        assert_eq!(stats.per_cpu_events.get("003"), Some(&2));
+        assert_eq!(stats.start_ts, Some(1.0));
+        assert_eq!(stats.end_ts, Some(1.004));
+
+        let summary = trace_stats_json(
+            &stats,
+            Path::new("/tmp/perf.data"),
+            Path::new("/tmp/perf.script"),
+            &[
+                "sched:sched_switch".to_string(),
+                "irq:irq_handler_entry".to_string(),
+            ],
+        );
+        assert_eq!(summary["trace_window"]["start_ts"], json!(1.0));
+        assert_eq!(summary["trace_window"]["end_ts"], json!(1.004));
+        assert_eq!(summary["trace_window"]["duration_sec"], json!(0.004));
+        assert_eq!(summary["event_count_total"], json!(5));
+        assert_eq!(summary["event_rate_total_per_sec"], json!(1250.0));
+        assert_eq!(
+            summary["event_counts"][0],
+            json!({"event": "irq_handler_entry", "count": 1})
+        );
+        assert_eq!(
+            summary["event_rates_per_sec"][0],
+            json!({"event": "irq_handler_entry", "per_sec": 250.0})
+        );
+        assert!(!summary.as_object().unwrap().contains_key("sched_switch"));
+        assert!(!summary.as_object().unwrap().contains_key("top_switch_cpu"));
+        assert!(!summary
+            .as_object()
+            .unwrap()
+            .contains_key("top_cpu_event_rates"));
+        assert_eq!(summary["cpu_event_rate_summary"]["cpus_observed"], json!(4));
+        assert_eq!(
+            summary["cpu_event_rate_summary"]["median_events_per_sec"],
+            json!(250.0)
+        );
+        assert_eq!(
+            summary["cpu_event_rate_summary"]["max_events_per_sec"],
+            json!(500.0)
+        );
+        assert_eq!(
+            summary["cpu_event_rate_summary"]["max_to_median_ratio"],
+            json!(2.0)
+        );
+        assert_eq!(
+            summary["cpu_event_rate_summary"]["top_cpus_by_total_events"][0]["cpu"],
+            json!("003")
+        );
+        assert_eq!(
+            summary["cpu_event_rate_summary"]["top_cpus_by_total_events"][0]["events"],
+            json!(2)
+        );
+        assert_eq!(
+            summary["cpu_event_rate_summary"]["top_cpus_by_total_events"][0]["events_per_sec"],
+            json!(500.0)
+        );
     }
 
     #[test]

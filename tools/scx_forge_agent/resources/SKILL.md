@@ -443,10 +443,9 @@ process; there is no separate script):
   scheduler is already attached, launches it on the host as root, drives a
   workload, verifies `/sys/kernel/sched_ext/state` is still `enabled`, extracts
   one metric, always tears the scheduler down (verifying the state returns to
-  `disabled`), optionally records a small `trace-cmd` sched profile
-  (`sched:sched_wakeup`, `sched:sched_wakeup_new`, `sched:sched_switch`,
-  `sched:sched_migrate_task`) while the workload runs, and produces a single
-  JSON verdict. It needs root: run as root, with passwordless sudo, or set
+  `disabled`), optionally records the configured `perf` events while the
+  workload runs, and produces a single JSON verdict. It needs root: run as root,
+  with passwordless sudo, or set
   `SCX_SUDO_PASSWORD_FILE` to a file containing the sudo password.
 - `tools/scx_forge_agent/spec.toml` documents the spec: `[scheduler]` (package -
   which `scheds/rust/<name>` crate to optimize - plus profile), `[system]`
@@ -456,8 +455,8 @@ process; there is no separate script):
   claude/codex/opencode/cursor-agent,
   and the planner/coder can use different backends. API keys come from
   `$SCX_FORGE_API_KEY` / `$SCX_FORGE_CODING_API_KEY`),
-  `[tracing]` (`enable_tracing`, `trace_events` passed to trace-cmd record, plus
-  `max_trace_size` capping the recorded trace.dat, e.g. `256M`),
+  `[tracing]` (`enable_tracing`, `trace_events` passed to perf record with `-e`,
+  plus `max_trace_size` passed to `perf record --max-size`, e.g. `256M`),
   `[workload]` (`command`, `duration` in seconds, repeated measurement
   count `runs`), and `[goal]` (a plain-language `prompt`, `direction`, and
   `accept_threshold_stddev`; the reported metric name is always `score`).
@@ -484,10 +483,13 @@ Agent loop (driven by the controller, not by you):
    (`stage = "metric"`), because that often means the candidate disrupted the
    workload. Read `metric.value` (vs the previous best value), normalized
    `improvement`, the `scheduler_log_tail` (the scheduler stats deltas), and
-   `sched_trace` if present (summary counts plus top switch/wakeup/migration
-   tasks and CPUs from trace-cmd, not raw trace data) to understand *why* the
-   number moved. Improvement is always measured against the starting (round 0)
-   scheduler, never the default kernel scheduler.
+   `sched_trace` if present (observed perf event/sample counts, global
+   retained-window sample rates, and a compact CPU-rate summary from the
+   configured perf events, not raw perf script data) to understand *why* the
+   number moved. Tracepoint events are sampled per occurrence; hardware PMU events
+   are sampled according to perf's configured/default sampling period, so they are
+   not raw hardware event totals. Improvement is always measured against the
+   starting (round 0) scheduler, never the default kernel scheduler.
 6. Keep a short running log of (change -> metric value) so the search is
    auditable. The controller can append a completed run to a state file with
    `--save <path>` and load that memory into future prompts with
