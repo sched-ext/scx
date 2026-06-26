@@ -193,27 +193,58 @@ void __arena *scx_alloc_from_pool(struct sdt_pool *pool,
 	return ptr;
 }
 
-/* Allocate element from the pool. Must be called with a then pool lock held. */
+/*
+ * Allocate an element from the pool. Takes alloc_lock internally; must be
+ * called WITHOUT it held. Carve under the lock; drop it only for the sleepable
+ * page refill, then re-check before installing, mirroring scx_alloc_stack().
+ */
 static
 void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 {
-	__u64 elem_size, max_elems;
-	void __arena *slab;
+	__u64 elem_size = pool->elem_size;
+	__u64 max_elems = pool->max_elems;
+	__u64 nr_pages;
+	void __arena *slab = NULL;
 	void __arena *ptr;
 
-	elem_size = pool->elem_size;
-	max_elems = pool->max_elems;
+	bpf_spin_lock(&alloc_lock);
 
-	/* If the chunk is spent, get a new one. */
-	if (pool->idx >= max_elems) {
-		slab = bpf_arena_alloc_pages(&arena, NULL,
-			div_round_up(max_elems * elem_size, PAGE_SIZE), NUMA_NO_NODE, 0);
-		pool->slab = slab;
-		pool->idx = 0;
+	/* Fast path: carve the next element from the current slab. */
+	if (pool->idx < max_elems) {
+		ptr = (void __arena *)((__u64)pool->slab + elem_size * pool->idx);
+		pool->idx += 1;
+		bpf_spin_unlock(&alloc_lock);
+		return ptr;
 	}
 
-	ptr = (void __arena *)((__u64) pool->slab + elem_size * pool->idx);
+	/* Slab spent: drop the lock for the sleepable page allocation. */
+	bpf_spin_unlock(&alloc_lock);
+
+	nr_pages = div_round_up(max_elems * elem_size, PAGE_SIZE);
+	slab = bpf_arena_alloc_pages(&arena, NULL, nr_pages, NUMA_NO_NODE, 0);
+	if (!slab)
+		return NULL;
+
+	bpf_spin_lock(&alloc_lock);
+
+	/*
+	 * Re-check: another thread may have installed a fresh slab while we
+	 * slept. If still spent, install ours; otherwise keep the winner's and
+	 * free ours after unlocking.
+	 */
+	if (pool->idx >= max_elems) {
+		pool->slab = slab;
+		pool->idx = 0;
+		slab = NULL;
+	}
+
+	ptr = (void __arena *)((__u64)pool->slab + elem_size * pool->idx);
 	pool->idx += 1;
+
+	bpf_spin_unlock(&alloc_lock);
+
+	if (slab)	/* lost the refill race; release the unused slab */
+		bpf_arena_free_pages(&arena, slab, nr_pages);
 
 	return ptr;
 }
