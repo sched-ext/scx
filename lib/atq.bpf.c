@@ -341,6 +341,98 @@ out_unlock:
 	return (u64)NULL;
 }
 
+/*
+ * Atomically move a specific @taskc from @src to @dst, re-keyed by @vtime.
+ * Like scx_atq_move_vtime(), both ATQ locks are held across the move and
+ * ->atq transitions directly from @src to @dst, so a lockless reader never
+ * observes the transient NULL that a separate scx_atq_cancel()+insert() would
+ * expose. Unlike scx_atq_move_vtime(), which moves the front (min-key) task,
+ * this moves the given task via rb_remove_node().
+ *
+ * On insertion failure the task is restored to @src so it is never lost.
+ *
+ * Return 0 on success, -EAGAIN if @taskc is no longer queued in @src (a
+ * concurrent pop/cancel won the race), or -errno on other failures.
+ */
+__hidden
+int scx_atq_move_task(scx_atq_t *src, scx_atq_t *dst,
+		      scx_task_common __arg_arena *taskc, u64 vtime)
+{
+	rbnode_t *node = &taskc->node;
+	u64 old_key;
+	int ret;
+
+	/*
+	 * Relocation is between distinct ATQs; @src == @dst would self-deadlock
+	 * in scx_atq_lock2(). Reject it before locking.
+	 */
+	if (src == dst)
+		return -EINVAL;
+
+	ret = scx_atq_lock2(src, dst);
+	if (ret)
+		return ret;
+
+	/* Same FIFO/vtime discipline as scx_atq_insert_vtime_unlocked(). */
+	if ((vtime == SCX_ATQ_FIFO) != dst->fifo) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	/* Need room in @dst before removing from @src. */
+	if (dst->size == dst->capacity) {
+		ret = -ENOSPC;
+		goto out_unlock;
+	}
+
+	/*
+	 * The task must still be queued in @src. A concurrent scx_atq_pop() or
+	 * scx_atq_cancel() may have removed it after the caller read ->atq but
+	 * before we took the lock; in that case there is nothing to move.
+	 */
+	if (taskc->atq != src) {
+		ret = -EAGAIN;
+		goto out_unlock;
+	}
+
+	old_key = node->key;
+	ret = rb_remove_node(src->tree, node);
+	if (ret)
+		goto out_unlock;
+	src->size -= 1;
+
+	node->key = (vtime == SCX_ATQ_FIFO) ? dst->seq++ : vtime;
+
+	ret = rb_insert_node(dst->tree, node);
+	if (ret) {
+		/*
+		 * Couldn't insert into @dst after removing from @src. Restore
+		 * the task to @src so it is never lost. The capacity check
+		 * above makes this unreachable in practice.
+		 */
+		node->key = old_key;
+		if (!rb_insert_node(src->tree, node))
+			src->size += 1;
+		else
+			bpf_printk("%s: failed to restore task to src", __func__);
+		goto out_unlock;
+	}
+
+	dst->size += 1;
+
+	/*
+	 * Publish the new owner. Both ATQ locks are held, so no concurrent
+	 * pop/cancel/insert can run on @src or @dst; ->atq transitions
+	 * directly from @src to @dst and is never observed as NULL.
+	 */
+	taskc->atq = dst;
+	ret = 0;
+
+out_unlock:
+	scx_atq_unlock2(src, dst);
+	return ret;
+}
+
 __hidden
 u64 scx_atq_peek(scx_atq_t *atq)
 {
