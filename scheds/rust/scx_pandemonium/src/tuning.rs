@@ -59,7 +59,7 @@ pub struct TuningKnobs {
     pub lat_cri_thresh_high: u64,
     pub lat_cri_thresh_low: u64,
     pub affinity_mode: u64,
-    pub sojourn_thresh_ns: u64,
+    pub codel_thresh_ns: u64,
     pub burst_slice_ns: u64,
     // FIEDLER-DERIVED TOPOLOGY TIME CONSTANT (TAU_SCALE_NS / lambda_2).
     // ZERO MEANS RUST HAS NOT YET WRITTEN tau; BPF USES THE PRE-FIRST-TICK
@@ -80,7 +80,7 @@ impl Default for TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_OFF,
-            sojourn_thresh_ns: 5_000_000,
+            codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
@@ -127,7 +127,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
-            sojourn_thresh_ns: 5_000_000,
+            codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
@@ -139,7 +139,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_STRONG,
-            sojourn_thresh_ns: 5_000_000,
+            codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
@@ -151,7 +151,7 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
-            sojourn_thresh_ns: 5_000_000,
+            codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
@@ -185,7 +185,7 @@ fn scale_tau_u64(tau_ns: u64, k_q16: u64) -> u64 {
     (tau_ns as u128 * k_q16 as u128 >> 16) as u64
 }
 
-pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64, tau_ns: u64) -> TuningKnobs {
+pub fn scaled_regime_knobs(r: Regime, _nr_cpus: u64, tau_ns: u64) -> TuningKnobs {
     let mut knobs = regime_knobs(r);
 
     let slice_cap_tau = scale_tau_u64(tau_ns, K_SLICE_CAP_Q16).clamp(500_000, 8_000_000);
@@ -194,27 +194,11 @@ pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64, tau_ns: u64) -> TuningKnobs 
 
     knobs.slice_ns = knobs.slice_ns.min(slice_cap_tau);
     knobs.preempt_thresh_ns = knobs.preempt_thresh_ns.min(preempt_cap_tau);
-
-    // LOW-CORE SLICE CAP. tau IS LARGEST AT LOW CORE COUNT (lambda_2 SHRINKS
-    // AS CORES DROP), SO THE tau SLICE CAP ABOVE IS LOOSEST EXACTLY WHERE A
-    // WIDE BATCH SLICE DOES THE MOST DAMAGE: ON 2-4 CORES THE HEAVY PROFILE'S
-    // 4ms SLICE DENIES A LATENCY-SENSITIVE PROBE ACROSS MANY CONSECUTIVE
-    // SLICES, PRODUCING THE 50-200ms LONG-RUN/MIXED P99 TAIL AT LOW CORE.
-    // idle_pct READS LOW AT LOW CORE COUNT -- BECAUSE THE
-    // BPF WARM-STAY/PER-CPU LANDING DELIBERATELY BYPASSES THE IDLE FAST PATH
-    // -- SO THE REGIME FALSELY LATCHES HEAVY AND INHERITS ITS 4ms SLICE. THE
-    // BPF BASELINE RUNS 1ms HERE WITH NO SUCH TAIL, AND THE LONG-RUN WORK
-    // NUMBERS SHOW THE WIDE SLICE BUYS NO THROUGHPUT ON SO FEW CORES. CAP THE
-    // SLICE TO THE MIXED VALUE AT <=4 CORES; 8C/12C (WHERE ADAPTIVE WINS AND
-    // THE WIDER SLICE EARNS THROUGHPUT) ARE UNTOUCHED.
-    if nr_cpus <= 4 {
-        knobs.slice_ns = knobs.slice_ns.min(MIXED_SLICE_NS);
-    }
     if matches!(r, Regime::Mixed) {
         let batch_cap_tau = scale_tau_u64(tau_ns, K_BATCH_CAP_Q16).clamp(10_000_000, 80_000_000);
         knobs.batch_slice_ns = knobs.batch_slice_ns.min(batch_cap_tau);
     }
-    knobs.sojourn_thresh_ns = sojourn_tau;
+    knobs.codel_thresh_ns = sojourn_tau;
 
     knobs
 }
@@ -355,12 +339,6 @@ const EQUILIBRIUM: [f64; N_EXPERTS] = [0.04, 0.80, 0.04, 0.04, 0.04, 0.04];
 
 const WEIGHT_FLOOR: f64 = 1e-6;
 
-// CROSS-DOMAIN SCATTER THRESHOLD (PATHWAY 6). PLACEMENT-SIDE CROSS-DOMAIN MIGRATION
-// FRACTION ABOVE THIS (PERCENT OF DISPATCHES) IS TREATED AS STORM PRESSURE.
-// EEVDF'S MEASURED BASELINE IS ~14%; 20 LEAVES HEADROOM SO NORMAL CROSS-DOMAIN
-// WORK-CONSERVATION DOES NOT TRIP THE PATHWAY, ONLY A GENUINE SCATTER CLIMB.
-const SCATTER_THRESH_PCT: u64 = 20;
-
 // WARM-UP GATE: FOR THE FIRST WARMUP_TICKS CALLS PER REGIME, SCORE THE
 // LOSS PATHWAYS (KEEP prev_* EDGE STATE CURRENT) BUT SKIP THE WEIGHT
 // UPDATE AND RETURN BASELINE KNOBS. PREVENTS THE FIRST NOISY TICKS
@@ -446,18 +424,12 @@ const SC_SOJOURN: [f64; 6] = [0.80, 1.00, 1.60, 0.93, 0.53, 1.07];
 const SC_BURST: [f64; 6] = [0.74, 1.00, 1.47, 0.98, 0.49, 1.23];
 
 // DISCRETE KNOB VALUES (ABSOLUTE, NOT SCALE FACTORS)
-// FORK_STORM (INDEX 4) IS WEAK, NOT OFF: THE BPF READS affinity_mode ONLY AS
-// A BINARY GATE (main.bpf.c:1619, > 0) ON find_idle_l2_sibling. OFF DISABLES
-// THE L2 SIBLING PRE-FILTER, SO DURING A STORM WAKEES SEAT TOPOLOGY-BLIND AND
-// SCATTER CROSS-DOMAIN -- FIGHTING THE PHI/WARM-STAY PLACEMENT INSTEAD OF HELPING.
-// WEAK KEEPS THE L2 PRE-FILTER ON. (STRONG VS WEAK IS A NO-OP TO THE BPF; ONLY
-// OFF DIFFERS.)
 const DV_AFFINITY: [u64; 6] = [
     AFFINITY_STRONG,
     AFFINITY_STRONG,
     AFFINITY_WEAK,
     AFFINITY_WEAK,
-    AFFINITY_WEAK,
+    AFFINITY_OFF,
     AFFINITY_WEAK,
 ];
 fn blend_continuous(base: u64, scales: &[f64; 6], w: &[f64; N_EXPERTS]) -> u64 {
@@ -505,12 +477,6 @@ pub struct MwuSignals {
     pub io_pct: u64,
     pub rescue_count: u64,
     pub wakeup_rate: u64,
-    // CROSS-DOMAIN SCATTER FRACTION THIS TICK: PLACEMENT-SIDE CROSS-DOMAIN LANDINGS
-    // (XDOM_SEL_* + XDOM_ENQ_T1, EXCLUDING THE PHI-CORRECT STEAL/STEP5 WORK-
-    // CONSERVATION PATHS) AS A PERCENTAGE OF DISPATCHES. EEVDF BASELINE ~14%;
-    // PANDEMONIUM'S STORM REGRESSION RAN ~48%. PATHWAY 6 KEYS ON THIS SO MWU
-    // CAN SEE THE MIGRATION STORM IT MIGHT BE INDUCING AND STEER AWAY FROM IT.
-    pub scatter_pct: u64,
     // CHAOS PRIMITIVES (RAW-WINDOW DERIVED, NO EWMA, NO SCHMITT).
     // hvg_lambda     := HVG MEAN DEGREE OF THE idle_pct WINDOW
     // bp_h_delta     := bp_h(THIS TICK) - bp_h(PREVIOUS TICK), WHERE
@@ -540,13 +506,6 @@ pub struct OscillatorState {
     pub codel_target_ns: u64,
     pub codel_target_floor_ns: u64,
     pub codel_target_max_ns: u64,
-    // HOME NEAREST-PEER PHI HOLD (reff_value SLOT 0, ns). THE BPF WARM-STAY
-    // AND STEP-1 R_eff STEAL RELEASE AT codel_target_ns + THIS, NOT AT THE
-    // BARE CODEL WINDOW. position() MEASURES THE BARE WINDOW; THE ABSOLUTE
-    // CHECKS BELOW ADD THIS TERM SO THE DEFER DECISION IS TAKEN AGAINST THE
-    // EFFECTIVE PHI RELEASE POINT THE BPF ACTUALLY USES. 0 = READBACK
-    // UNAVAILABLE -> TREATED AS NO EXTRA HOLD (NEUTRAL).
-    pub home_dist_extra_ns: u64,
 }
 
 impl OscillatorState {
@@ -561,14 +520,6 @@ impl OscillatorState {
             .codel_target_ns
             .saturating_sub(self.codel_target_floor_ns) as f64;
         (pos / range).clamp(0.0, 1.0)
-    }
-
-    // EFFECTIVE PHI RELEASE POINT: WHERE WARM-STAY / STEP-1 STEAL ACTUALLY LET
-    // A TASK LEAVE HOME (codel_target + NEAREST-PEER HOLD). THE DEFER GATE
-    // COMPARES THIS AGAINST codel_eq TO DECIDE WHETHER THE BPF HAS GENUINELY
-    // RESPONDED, RATHER THAN TRUSTING THE BARE-WINDOW position() ALONE.
-    pub fn effective_release_ns(&self) -> u64 {
-        self.codel_target_ns.saturating_add(self.home_dist_extra_ns)
     }
 }
 
@@ -594,10 +545,6 @@ pub struct MwuController {
     prev_io_bucket: IoBucket,
     prev_rescuing: bool,
     prev_lambda_chaotic: bool,
-    // LAST TICK'S CROSS-DOMAIN SCATTER %. PATHWAY 6 IS RISING-EDGE GATED ON THIS
-    // SO A STABLE HIGH-SCATTER REGIME (E.G. 8C+ THROUGHPUT WHERE IT WINS) IS
-    // NOT PENALIZED -- ONLY A CLIMBING STORM IS.
-    prev_scatter_pct: u64,
     losses_applied: bool,
     // TRUE WHEN THE ACTIVE WEIGHT VECTOR MOVED THIS TICK.
     weights_changed: bool,
@@ -618,7 +565,6 @@ impl MwuController {
             prev_io_bucket: IoBucket::Mid,
             prev_rescuing: false,
             prev_lambda_chaotic: false,
-            prev_scatter_pct: 0,
             losses_applied: false,
             weights_changed: false,
         }
@@ -640,7 +586,6 @@ impl MwuController {
         self.prev_io_bucket = IoBucket::Mid;
         self.prev_rescuing = false;
         self.prev_lambda_chaotic = false;
-        self.prev_scatter_pct = 0;
         self.losses_applied = false;
         self.weights_changed = false;
         self.last_knobs = self.baseline;
@@ -707,23 +652,9 @@ impl MwuController {
         // POSITION 0.0 = TIGHTENED (FLOOR), 1.0 = RELAXED (MAX).
         // < 0.40 -> BPF HAS RESPONDED HEAVILY; SKIP RESCUE-DRIVEN LOSSES.
         // > 0.90 -> BPF SAYS QUIET; RESCUE BURSTS ARE STALE NOISE; SKIP.
-        //
-        // position() MEASURES THE BARE codel WINDOW, BUT THE BPF ACTUALLY
-        // RELEASES WARM-STAY / STEP-1 STEAL AT codel_target + home_dist_extra
-        // (THE NEAREST-PEER PHI HOLD). WITH A LARGE HOLD THE BARE POSITION CAN
-        // READ "LOOSE" WHILE THE EFFECTIVE RELEASE IS STILL HARD, AND MWU WOULD
-        // WRONGLY STAY OUT OF GENUINE RESCUE PRESSURE. CONFIRM EACH SIDE WITH
-        // THE EFFECTIVE RELEASE VS THE PHI EQUILIBRIUM (codel_eq, FROM THE
-        // BASELINE): ONLY TREAT THE OSCILLATOR AS TIGHT WHEN THE EFFECTIVE
-        // RELEASE IS BELOW EQUILIBRIUM, AND AS LOOSE WHEN IT IS ABOVE. WITH
-        // home_dist_extra_ns = 0 (READBACK UNAVAILABLE) THIS REDUCES TO THE
-        // BARE-POSITION BEHAVIOR. codel_eq = 0 (UNSEEDED) DISABLES THE ABSOLUTE
-        // QUALIFIER (THE BARE POSITION GOVERNS), NEVER GATING SPURIOUSLY.
         let osc_pos = osc.position();
-        let eff_release = osc.effective_release_ns();
-        let codel_eq = self.baseline.codel_eq_ns;
-        let osc_already_tight = osc_pos < 0.40 && (codel_eq == 0 || eff_release < codel_eq);
-        let osc_already_loose = osc_pos > 0.90 && (codel_eq == 0 || eff_release > codel_eq);
+        let osc_already_tight = osc_pos < 0.40;
+        let osc_already_loose = osc_pos > 0.90;
         let defer_to_oscillator = osc_already_tight || osc_already_loose;
 
         let mut losses = [0.0f64; N_EXPERTS];
@@ -792,7 +723,7 @@ impl MwuController {
         //
         // FORK_STORM EXPERT (SC_SLICE=0.49, SC_PREEMPT=0.49, SC_BATCH=0.52,
         // SC_SOJOURN=0.53, SC_BURST=0.49) DOMINATES THE BLEND DURING A REAL
-        // STORM, DRIVING burst_slice_ns / preempt_thresh_ns / sojourn_thresh_ns
+        // STORM, DRIVING burst_slice_ns / preempt_thresh_ns / codel_thresh_ns
         // / batch_slice_ns DOWN END-TO-END.
         let fork_thresh = scale_tau_u64(tau_ns, K_FORK_STORM_RATE_Q16).max(FORK_STORM_RATE_FLOOR);
         let fork_storm = sig.wakeup_rate > fork_thresh && sig.rescue_count > 0;
@@ -851,35 +782,6 @@ impl MwuController {
             }
         }
         self.prev_lambda_chaotic = sig.hvg_lambda >= crate::chaos::HVG_LAMBDA_CHAOTIC_MIN;
-
-        // PATHWAY 6: CROSS-DOMAIN SCATTER (PHI-AWARE, RISING-EDGE GATED).
-        // sig.scatter_pct IS THE PLACEMENT-SIDE CROSS-DOMAIN MIGRATION FRACTION
-        // (XDOM_SEL_* + XDOM_ENQ_T1, EXCLUDING THE PHI-CORRECT STEAL/STEP5
-        // WORK-CONSERVATION PATHS -- COMPUTED IN THE ADAPTIVE LOOP). WHEN IT
-        // CLIMBS PAST THE EEVDF-BASELINE HEADROOM THE BLEND HAS DRIFTED TOWARD
-        // EXPERTS THAT SCATTER WAKEES THE BPF WARM-STAY/PER-CPU LANDING TRIED
-        // TO KEEP HOME. PENALIZE THE EXPERTS THAT FAVOR WIDE SLICES + WEAK/OFF
-        // AFFINITY (THROUGHPUT, SATURATED, FORK_STORM) SO THE BLEND RE-WEIGHTS
-        // TOWARD LATENCY/BALANCED AND AFFINITY STRONG, ALIGNING THE ADAPTIVE
-        // LAYER WITH PHI PLACEMENT INSTEAD OF FIGHTING IT.
-        //
-        // RISING-EDGE: ONLY FIRES WHILE SCATTER IS HIGH AND INCREASING. A
-        // STABLE HIGH-SCATTER REGIME (8C+ THROUGHPUT, WHERE WIDE-SLICE SCATTER
-        // IS A WINNING TRADE) PLATEAUS AND IS NOT PENALIZED -- ONLY A CLIMBING
-        // STORM IS. EX_BALANCED/EX_LATENCY ARE NEVER PENALIZED (THEY ARE THE
-        // DIRECTION WE WANT THE BLEND TO MOVE TOWARD).
-        let scatter_high = sig.scatter_pct > SCATTER_THRESH_PCT;
-        let scatter_rising = scatter_high && sig.scatter_pct > self.prev_scatter_pct;
-        if scatter_rising {
-            let v = ((sig.scatter_pct as f64 - SCATTER_THRESH_PCT as f64)
-                / SCATTER_THRESH_PCT as f64)
-                .clamp(0.0, 3.0);
-            losses[EX_THROUGHPUT] += v * 1.00;
-            losses[EX_SATURATED] += v * 0.80;
-            losses[EX_FORK_STORM] += v * 0.60;
-            has_loss = true;
-        }
-        self.prev_scatter_pct = sig.scatter_pct;
 
         // WARM-UP GATE. THE PATHWAYS ABOVE HAVE SCORED `losses` AND
         // UPDATED THE prev_* EDGE STATE. FOR THE FIRST WARMUP_TICKS
@@ -981,27 +883,17 @@ impl MwuController {
         let b = &self.baseline;
         let blended_slice = blend_continuous(b.slice_ns, &SC_SLICE, &w);
         let blended_burst = blend_continuous(b.burst_slice_ns, &SC_BURST, &w);
-        let mut blended_sojourn = blend_continuous(b.sojourn_thresh_ns, &SC_SOJOURN, &w);
+        let mut blended_sojourn = blend_continuous(b.codel_thresh_ns, &SC_SOJOURN, &w);
 
-        // SOJOURN FLOOR: tick() KICKS PER-CPU DSQs WHOSE OLDEST TASK HAS AGED
-        // PAST sojourn_thresh_ns (BPF, main.bpf.c:2374). THAT EVICTION DEADLINE
-        // MUST NOT SIT ABOVE THE THRESHOLD WARM-STAY / STEP-1 R_eff STEAL
-        // ACTUALLY RELEASE AT, OR THE ADAPTIVE LAYER HOLDS TASKS LONG PAST THE
-        // POINT THE PHI GATES ASSUMED RELIEF HAD ARRIVED (THE 2C/4C LONG-RUN /
-        // LAT P99 TAIL). THE BPF OVERFLOW RESCUE IS NO LONGER "[4ms,10ms]" --
-        // IT WAS REWIRED TO THE PHI EQUILIBRIUM (overflow_sojourn_rescue_ns =
-        // codel_target_equilibrium_ns, main.bpf.c:995), SUB-MS AT LOW CORE.
-        // ANCHOR THE FLOOR TO THAT SAME PHI-DERIVED EQUILIBRIUM SO USERSPACE
-        // EVICTION AND THE BPF PHI RELEASE AGREE. THE +blended_slice TERM IS
-        // THE GENUINE DISPATCH-SERVICE-WINDOW GUARD (KEPT). codel_eq_ns CAN BE
-        // SEEDED 0 BY MwuController::new BEFORE THE TOPOLOGY OVERLAY LANDS --
-        // GUARD AGAINST COLLAPSING THE FLOOR AND REINTRODUCING THE KICK STORM.
-        let floor_base = if b.codel_eq_ns >= 200_000 {
-            b.codel_eq_ns
-        } else {
-            4_000_000
-        };
-        let sojourn_floor = floor_base.saturating_add(blended_slice);
+        // SOJOURN FLOOR: dispatch waterfall services aged overflow at
+        // the live codel_target_ns (BPF-side, the oscillator-modulated target).
+        // tick() also kicks per-CPU DSQs whose oldest task has aged past
+        // codel_thresh_ns. If MWU drives codel_thresh_ns below the
+        // dispatch service window + one slice, every tick generates kicks
+        // on per-CPU DSQs that the dispatcher will service on the next
+        // dispatch anyway -- a kick storm. Floor against the worst-case
+        // dispatch service window to prevent it.
+        let sojourn_floor = 4_000_000u64.saturating_add(blended_slice);
         if blended_sojourn < sojourn_floor {
             blended_sojourn = sojourn_floor;
         }
@@ -1017,7 +909,7 @@ impl MwuController {
             lat_cri_thresh_high: blend_continuous(b.lat_cri_thresh_high, &SC_LCRI_HI, &w),
             lat_cri_thresh_low: blend_continuous(b.lat_cri_thresh_low, &SC_LCRI_LO, &w),
             affinity_mode: majority_discrete(&DV_AFFINITY, &w),
-            sojourn_thresh_ns: blended_sojourn,
+            codel_thresh_ns: blended_sojourn,
             burst_slice_ns: blended_burst,
             // topology_tau_ns AND codel_eq_ns ARE OWNED BY THE TOPOLOGY LAYER;
             // MWU DOESN'T TOUCH THEM. THE MONITOR LOOP OVERLAYS THE LIVE BPF
@@ -1134,6 +1026,6 @@ pub fn knobs_differ(a: &TuningKnobs, b: &TuningKnobs) -> bool {
         || a.lat_cri_thresh_high != b.lat_cri_thresh_high
         || a.lat_cri_thresh_low != b.lat_cri_thresh_low
         || a.affinity_mode != b.affinity_mode
-        || a.sojourn_thresh_ns != b.sojourn_thresh_ns
+        || a.codel_thresh_ns != b.codel_thresh_ns
         || a.burst_slice_ns != b.burst_slice_ns
 }

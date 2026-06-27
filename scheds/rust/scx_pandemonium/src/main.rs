@@ -64,13 +64,6 @@ struct Cli {
     /// Run BPF scheduler only, disable Rust adaptive control loop
     #[arg(long)]
     no_adaptive: bool,
-
-    /// Override the topology-derived Phi distance scale (phi_dist_scale_q16).
-    /// 0 disables the Phi steal-resist (flat CoDel target); omit for the
-    /// topology value. Test/bench use -- the override holds across both the
-    /// adaptive and --no-adaptive paths.
-    #[arg(long)]
-    phi_scale: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -98,7 +91,6 @@ fn main() -> Result<()> {
     let dump_log = cli.dump_log;
     let nr_cpus = cli.nr_cpus;
     let no_adaptive = cli.no_adaptive;
-    let phi_scale = cli.phi_scale;
 
     if cli.version {
         println!(
@@ -109,7 +101,7 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive, phi_scale),
+        None => run_scheduler(verbose, dump_log, nr_cpus, no_adaptive),
         Some(SubCmd::Probe) => {
             cli::probe::run_probe();
             Ok(())
@@ -126,7 +118,6 @@ fn run_scheduler(
     dump_log: bool,
     nr_cpus: Option<u64>,
     no_adaptive: bool,
-    phi_scale: Option<u64>,
 ) -> Result<()> {
     ctrlc::set_handler(move || {
         SHUTDOWN.store(true, Ordering::Relaxed);
@@ -180,7 +171,7 @@ fn run_scheduler(
         match topology::CpuTopology::detect(nr_cpus_display as usize) {
             Ok(topo) => {
                 topo.log_summary();
-                if let Err(e) = topo.populate_bpf_map(&mut sched) {
+                if let Err(e) = topo.populate_bpf_map(&sched) {
                     log_warn!("CACHE TOPOLOGY MAP WRITE FAILED: {}", e);
                 }
                 if let Err(e) = topo.populate_l2_siblings_map(&sched) {
@@ -189,46 +180,14 @@ fn run_scheduler(
                 // RESISTANCE AFFINITY: COMPUTE R_EFF VIA LAPLACIAN PSEUDOINVERSE
                 // AND POPULATE BPF AFFINITY RANK MAP. SPECTRUM CARRIES lambda_2
                 // AND tau_ns FOR UNIVERSAL TOPOLOGY-DERIVED SCALING.
-                let (reff, rank, mut spectrum) = topo.compute_resistance_affinity();
-                if let Some(pv) = phi_scale {
-                    log_info!(
-                        "PHI OVERRIDE: phi_dist_scale_q16 {} -> {} (--phi-scale)",
-                        spectrum.phi_dist_scale_q16,
-                        pv
-                    );
-                    spectrum.phi_dist_scale_q16 = pv;
-                }
+                let (reff, rank, spectrum) = topo.compute_resistance_affinity();
+                let phi_dist_scale_q16 = spectrum.phi_dist_scale_q16;
                 topo.log_resistance_affinity(&reff, &rank, spectrum);
-                // T2: derive the emergent de-facto-NUMA domain tree from the cache
-                // graph (min-conductance cuts) and log it. T3's bounded steal reads it.
-                let domains = topo.compute_domain_tree();
-                topo.log_domains(&domains);
-                // T3b.1: flatten the tree to the per-CPU-pair crossing-price matrix
-                // and write it 1:1 with the affinity rank (domain_phi map).
-                let domain_phi = topo.domain_cross_phi_matrix(&domains);
-                if let Err(e) = topo.populate_affinity_rank_map(
-                    &sched,
-                    &reff,
-                    &rank,
-                    spectrum.phi_dist_scale_q16,
-                    &domain_phi,
-                ) {
+                if let Err(e) =
+                    topo.populate_affinity_rank_map(&sched, &reff, &rank, phi_dist_scale_q16)
+                {
                     log_warn!("AFFINITY RANK MAP WRITE FAILED: {}", e);
                 }
-                // T3b.2: partition the tree into emergent overflow domains (L3
-                // granularity) and write cpu_domain -- the the discrete domain map replacement.
-                let ov_domains = topo.overflow_domain_count();
-                let cpu_dom = topo.domain_partition(&domains, ov_domains);
-                for (cpu, &d) in cpu_dom.iter().enumerate() {
-                    if let Err(e) = sched.write_cpu_domain(cpu as u32, d) {
-                        log_warn!("CPU DOMAIN MAP WRITE FAILED (cpu {}): {}", cpu, e);
-                        break;
-                    }
-                }
-                log_info!(
-                    "OVERFLOW DOMAINS: {} (emergent, cpu_domain populated)",
-                    ov_domains
-                );
                 // WRITE tau_ns + codel_eq_ns INTO tuning_knobs. BPF'S tick() ON
                 // CPU 0 PICKS THESE UP AND DERIVES THE TAU-SCALED TIMING STATICS
                 // AND THE R_eff-DERIVED CODEL EQUILIBRIUM TARGET.
@@ -272,7 +231,6 @@ fn run_scheduler(
                 let delta_shared = stats.nr_shared.wrapping_sub(prev.nr_shared);
                 let delta_preempt = stats.nr_preempt.wrapping_sub(prev.nr_preempt);
                 let delta_keep = stats.nr_keep_running.wrapping_sub(prev.nr_keep_running);
-                let delta_parks = stats.nr_osc_park.wrapping_sub(prev.nr_osc_park);
                 let delta_wake_sum = stats.wake_lat_sum.wrapping_sub(prev.wake_lat_sum);
                 let delta_wake_samples = stats.wake_lat_samples.wrapping_sub(prev.wake_lat_samples);
                 let delta_hard = stats.nr_hard_kicks.wrapping_sub(prev.nr_hard_kicks);
@@ -362,7 +320,6 @@ fn run_scheduler(
                     delta_shared,
                     delta_preempt,
                     delta_keep,
-                    delta_parks,
                     wake_avg_us,
                     delta_hard,
                     delta_soft,
@@ -394,23 +351,14 @@ fn run_scheduler(
             } else {
                 0
             };
-            // CROSS-DOMAIN SCATTER ATTRIBUTION (PER XDOM_* PATH), ON THE [KNOBS]
-            // LINE SO THE BENCH SUITE CAPTURES IT UNIFORMLY ACROSS BPF/ADAPTIVE
-            // (LETS THE SUITE COMPARE SCATTER BETWEEN MODES). scatter_pct IS THE
-            // PLACEMENT-SIDE FRACTION (idx 0..6).
-            let x = &final_stats.nr_cross_domain;
-            let x_scatter: u64 = x[0..6].iter().sum();
-            let x_scatter_pct = if final_stats.nr_dispatches > 0 {
-                x_scatter * 100 / final_stats.nr_dispatches
-            } else {
-                0
-            };
             println!(
-                "[KNOBS] regime=BPF slice_ns={} batch_ns={} preempt_ns={} l2_hit=B:{}%/I:{}%/L:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={}",
-                knobs.slice_ns, knobs.batch_slice_ns,
+                "[KNOBS] regime=BPF slice_ns={} batch_ns={} preempt_ns={} l2_hit=B:{}%/I:{}%/L:{}%",
+                knobs.slice_ns,
+                knobs.batch_slice_ns,
                 knobs.preempt_thresh_ns,
-                l2_cum_b, l2_cum_i, l2_cum_l,
-                x_scatter_pct, x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7],
+                l2_cum_b,
+                l2_cum_i,
+                l2_cum_l,
             );
 
             sched.read_exit_info()
