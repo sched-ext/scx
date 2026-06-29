@@ -122,6 +122,10 @@ pub struct Metrics {
     pub lent_pct: f64,
     #[stat(desc = "Number of rebalancing events")]
     pub rebalance_count: u64,
+    #[stat(
+        desc = "1 if the cell-0 holdout has taken a CPU already claimed by a workload cell, else 0"
+    )]
+    pub enforced_holdout: u64,
     #[stat(desc = "Per-cell metrics")] // TODO: cell names
     pub cells: BTreeMap<u32, CellMetrics>,
 }
