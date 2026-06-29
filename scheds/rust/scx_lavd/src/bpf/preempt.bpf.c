@@ -409,7 +409,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 	cpumask = cpuc_cur->temp_mask;
 	cpdom_id = dsq_to_cpdom(dsq_id);
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+	cd_cpumask = lookup_cpdom_cpumask(cpdom_id);
 	if (!cpdomc || !cd_cpumask || !cpumask)
 		return;
 
