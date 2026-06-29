@@ -193,6 +193,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <lib/cgroup.h>
+#include <lib/bpf_cpumask.h>
 
 char _license[] SEC("license") = "GPL";
 
@@ -2243,20 +2244,6 @@ static s32 init_cpdoms(u64 now)
 	return 0;
 }
 
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
-
 static int init_cpumasks(void)
 {
 	const struct cpumask *online_cpumask;
@@ -2267,7 +2254,7 @@ static int init_cpumasks(void)
 	/*
 	 * Allocate active cpumask and initialize it with all online CPUs.
 	 */
-	err = calloc_cpumask(&active_cpumask);
+	err = create_save_bpfmask(&active_cpumask);
 	active = active_cpumask;
 	if (err || !active)
 		goto out;
@@ -2280,19 +2267,19 @@ static int init_cpumasks(void)
 	/*
 	 * Allocate the other cpumasks.
 	 */
-	err = calloc_cpumask(&ovrflw_cpumask);
+	err = create_save_bpfmask(&ovrflw_cpumask);
 	if (err)
 		goto out;
 
-	err = calloc_cpumask(&turbo_cpumask);
+	err = create_save_bpfmask(&turbo_cpumask);
 	if (err)
 		goto out;
 
-	err = calloc_cpumask(&big_cpumask);
+	err = create_save_bpfmask(&big_cpumask);
 	if (err)
 		goto out;
 
-	err = calloc_cpumask(&steady_cpumask);
+	err = create_save_bpfmask(&steady_cpumask);
 	if (err)
 		goto out;
 out:
@@ -2341,31 +2328,31 @@ static s32 init_per_cpu_ctx(u64 now)
 			goto unlock_out;
 		}
 
-		err = calloc_cpumask(&cpuc->a_mask);
+		err = create_save_bpfmask(&cpuc->a_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->o_mask);
+		err = create_save_bpfmask(&cpuc->o_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->temp_mask);
+		err = create_save_bpfmask(&cpuc->temp_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->i_mask);
+		err = create_save_bpfmask(&cpuc->i_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->ia_mask);
+		err = create_save_bpfmask(&cpuc->ia_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->io_mask);
+		err = create_save_bpfmask(&cpuc->io_mask);
 		if (err)
 			goto unlock_out;
 
-		err = calloc_cpumask(&cpuc->iat_mask);
+		err = create_save_bpfmask(&cpuc->iat_mask);
 		if (err)
 			goto unlock_out;
 
