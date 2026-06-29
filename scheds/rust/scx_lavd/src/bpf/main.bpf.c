@@ -2436,7 +2436,10 @@ static s32 init_per_cpu_ctx(u64 now)
 			continue;
 
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-			u64 cpumask = cpdomc->__cpumask[i];
+			u64 cpumask;
+			if ((u32)i * 64 >= nr_cpu_ids)
+				break;
+			cpumask = cpdomc->__cpumask[i];
 			bpf_for(k, 0, 64) {
 				j = cpumask_next_set_bit(&cpumask);
 				if (j < 0)
