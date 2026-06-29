@@ -1153,6 +1153,10 @@ impl<'a> Scheduler<'a> {
         self.log_all_queue_stats(&cell_stats_delta)
             .context("logging queue stats")?;
 
+        // Mirror the sticky holdout flag on every collection, independent of the
+        // zero-decisions early return inside log_all_queue_stats above.
+        self.metrics.enforced_holdout = self.cell_manager.enforced_holdout() as u64;
+
         self.collect_demand_metrics(&cpu_ctxs)
             .context("collecting demand metrics")?;
 

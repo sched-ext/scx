@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
 use inotify::{Inotify, WatchMask};
@@ -227,6 +228,11 @@ pub struct CellManager {
     /// most cells once unclaimed CPUs run out; empty falls back to lowest CPU
     /// number.
     cpu_to_llc: HashMap<usize, usize>,
+    /// Set true (and never reset) the first time the holdout has to take a CPU
+    /// already claimed by a workload cell rather than only unclaimed CPUs.
+    /// Surfaced via stats so a host with unexpected performance can be checked
+    /// for whether the holdout took CPUs away from a workload.
+    enforced_holdout: AtomicBool,
 }
 
 impl CellManager {
@@ -291,6 +297,7 @@ impl CellManager {
             exclude_names: exclude,
             cell0_min_cpus,
             cpu_to_llc,
+            enforced_holdout: AtomicBool::new(false),
         };
 
         // Insert cell 0 as a permanent entry. cgid 0 is a safe sentinel —
@@ -310,6 +317,12 @@ impl CellManager {
         mgr.scan_existing_children()
             .context("Failed to scan existing child cgroups at startup")?;
         Ok(mgr)
+    }
+
+    /// True once the holdout has had to take a CPU already claimed by a workload
+    /// cell (sticky from scheduler start). Surfaced via stats.
+    pub fn enforced_holdout(&self) -> bool {
+        self.enforced_holdout.load(Ordering::Relaxed)
     }
 
     fn should_exclude(&self, path: &Path) -> bool {
@@ -729,6 +742,9 @@ impl CellManager {
                     })
                     .expect("donor has a reservable CPU");
                 holdout.set_cpu(cpu).ok();
+                // Taking a CPU a workload cell already claims -- record that the
+                // holdout put its hand on the scales (queryable via stats).
+                self.enforced_holdout.store(true, Ordering::Relaxed);
                 *taken_from.entry(donor).or_insert(0) += 1;
                 taken += 1;
             }
@@ -1530,6 +1546,10 @@ mod tests {
             "holdout should take CPU 0 (lowest CPU of the largest cell), got {:?}",
             cell0.primary
         );
+        assert!(
+            mgr.enforced_holdout(),
+            "stealing a claimed CPU must set enforced_holdout"
+        );
 
         let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
         assert_eq!(total, 16);
@@ -1703,6 +1723,14 @@ mod tests {
         let assignments = mgr
             .compute_cpu_assignments(false)
             .expect("holdout must not starve a cell that shares a contested CPU");
+        // The steal loop runs (3 unclaimed < 4 requested) but no claimed CPU is
+        // safely reservable, so it breaks without taking one -- enforced_holdout
+        // tracks an actual steal, not loop entry.
+        assert!(
+            !mgr.enforced_holdout(),
+            "entering the steal loop without taking a claimed CPU must not set \
+             enforced_holdout"
+        );
 
         let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
         assert_eq!(total, 5);
