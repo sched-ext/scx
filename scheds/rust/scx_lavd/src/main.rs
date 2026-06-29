@@ -200,6 +200,21 @@ struct Opts {
     #[clap(long = "no-fast-lb", action = clap::ArgAction::SetTrue)]
     no_fast_lb: bool,
 
+    /// Use the lockless scx_bpf_dsq_peek() kfunc even on kernels that report
+    /// LINUX_KERNEL_VERSION < 7.1.0. By default the BPF compat falls back to
+    /// the bpf_iter_scx_dsq_* path on such kernels because the kfunc could
+    /// return stale task pointers before the upstream fixes landed:
+    ///
+    ///   71d7847cad44 ("sched_ext: Fix scx_bpf_dsq_peek() with FIFO
+    ///                   DSQs")
+    ///   2f2ea7709266 ("sched_ext: Use dsq->first_task instead of
+    ///                   list_empty() in dispatch_enqueue() FIFO-tail")
+    ///
+    /// Only enable this flag if you have verified your kernel has
+    /// both fixes backported.
+    #[clap(long = "allow-lockless-peek-unsafe", action = clap::ArgAction::SetTrue)]
+    allow_lockless_peek_unsafe: bool,
+
     /// Disable preemption.
     #[clap(long = "no-preemption", action = clap::ArgAction::SetTrue)]
     no_preemption: bool,
@@ -696,6 +711,7 @@ impl<'a> Scheduler<'a> {
         rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_fast_lb = opts.no_fast_lb as u8;
+        rodata.__COMPAT_scx_allow_lockless_peek_unsafe = opts.allow_lockless_peek_unsafe;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;

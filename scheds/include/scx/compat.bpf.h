@@ -90,6 +90,8 @@ int bpf_cpumask_populate(struct cpumask *dst, void *src, size_t src__sz) __ksym 
 	(bpf_ksym_exists(bpf_cpumask_populate) ?			\
 	 (bpf_cpumask_populate(cpumask, src, size__sz)) : -EOPNOTSUPP)
 
+__weak const volatile bool __COMPAT_scx_allow_lockless_peek_unsafe = false;
+
 /*
  * v6.19: Introduce lockless peek API for user DSQs.
  * v7.1:  Resolve the stale pointer issue of the lockless peek API.
@@ -98,6 +100,9 @@ int bpf_cpumask_populate(struct cpumask *dst, void *src, size_t src__sz) __ksym 
  * return stale task pointers. Require kernel version >= 7.1.0 before calling
  * it; otherwise fall through to the bpf_iter_scx_dsq fallback below.
  *
+ * The version gate can be bypassed at runtime by setting
+ * __COMPAT_scx_allow_lockless_peek_unsafe if the bug fixes have been backported
+ * to the LTS kernel.
  */
 static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
 {
@@ -105,7 +110,8 @@ static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
 	struct bpf_iter_scx_dsq it;
 
 	if (bpf_ksym_exists(scx_bpf_dsq_peek) &&
-	    LINUX_KERNEL_VERSION >= KERNEL_VERSION(7, 1, 0))
+	    (LINUX_KERNEL_VERSION >= KERNEL_VERSION(7, 1, 0) ||
+	     __COMPAT_scx_allow_lockless_peek_unsafe))
 		return scx_bpf_dsq_peek(dsq_id);
 	if (!bpf_iter_scx_dsq_new(&it, dsq_id, 0))
 		p = bpf_iter_scx_dsq_next(&it);
