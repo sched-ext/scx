@@ -13,11 +13,6 @@ typedef unsigned char u8;
 // BPF VERIFIER LOOP BOUNDS
 #define MAX_CPUS  1024
 #define MAX_NODES 32
-// EMERGENT OVERFLOW-DOMAIN CEILING. The min-conductance partition yields small
-// domain counts (Ryzen 3000: 2, EPYC: up to ~16); 32 is a comfortable cap. The
-// overflow DSQs are pre-allocated at init (DSQs are cheap); nr_overflow_domains,
-// walked from Rust at topology detect, gates which are live.
-#define MAX_OVERFLOW_DOMAINS 32
 // AFFINITY_RANK STORAGE PER CPU. EACH CPU'S R_eff-RANKED PEERS ARE
 // STORED HERE; STEP 1 R_eff STEAL AND THE PLACEMENT-SIDE SPILL HELPER
 // WALK THIS LIST WITH A TAU-DERIVED RUNTIME BUDGET CAPPED BY nr_cpu_ids
@@ -39,10 +34,8 @@ struct tuning_knobs {
 	u64 slice_ns;           // BASE TIME SLICE (DEFAULT 1MS)
 	u64 preempt_thresh_ns;  // TICK PREEMPTION THRESHOLD (DEFAULT 1MS)
 	u64 batch_slice_ns;     // BATCH TASK SLICE CEILING (DEFAULT 20MS)
-	u64 lat_cri_thresh_high; // CLASSIFIER: LAT_CRITICAL THRESHOLD (DEFAULT 32)
-	u64 lat_cri_thresh_low;  // CLASSIFIER: INTERACTIVE THRESHOLD (DEFAULT 8)
 	u64 affinity_mode;      // L2 PLACEMENT: 0=OFF, 1=WEAK, 2=STRONG
-	u64 sojourn_thresh_ns;  // BATCH DSQ RESCUE THRESHOLD (SET BY RUST)
+	u64 codel_thresh_ns;    // BATCH DSQ RESCUE THRESHOLD (SET BY RUST)
 	u64 burst_slice_ns;     // SLICE CEILING DURING BURST/LONGRUN (SET BY RUST, DEFAULT 1MS)
 	u64 topology_tau_ns;    // FIEDLER-DERIVED TIME CONSTANT (1/lambda_2).
 	                        // 0 MEANS RUST HAS NOT YET WRITTEN tau; BPF
@@ -53,8 +46,7 @@ struct tuning_knobs {
 	                        // <R_eff> * 2m * tau, CLAMPED [200us, 8ms].
 	                        // 0 MEANS NOT YET WRITTEN. WRITTEN AT TOPOLOGY
 	                        // DETECT AND ON HOTPLUG (CO-LOCATED WITH tau).
-	// PHI DISTANCE PENALTY IS PRE-FOLDED INTO THE reff_value MAP (IN NS) BY
-	// RUST AT TOPOLOGY DETECT -- NO KNOB FIELD: BPF READS THE MAP DIRECTLY.
+	u64 spill_temp_q16;     // SPILL-Phi #69: T_base*(1+kappa*H) Q16, from perm-entropy
 };
 
 // PER-CPU STATISTICS (BPF_MAP_TYPE_PERCPU_ARRAY VALUE)
@@ -90,37 +82,11 @@ struct pandemonium_stats {
 	// LONGRUN: 1 IF SUSTAINED BATCH PRESSURE DETECTED, 0 OTHERWISE, WRITTEN BY tick()
 	u64 longrun_mode_active;
 	// OVERFLOW SOJOURN RESCUE: TASKS DISPATCHED BY try_service_older_overflow
-	// AT overflow_sojourn_rescue_ns (DISPATCH STEP 2)
+	// AT codel_target_ns (DISPATCH STEP 2)
 	u64 nr_overflow_rescue;
-	// CROSS-DOMAIN SCATTER ATTRIBUTION: PER-PLACEMENT-PATH COUNT OF LANDINGS
-	// WHERE THE CHOSEN CPU IS IN A DIFFERENT cache domain THAN THE TASK'S last_cpu.
-	// INDEXED BY XDOM_* BELOW. THE ADAPTIVE LAYER CONSUMES THE PLACEMENT-SIDE
-	// PATHS (XDOM_SEL_* + XDOM_ENQ_T1) AS THE MWU CROSS-DOMAIN SCATTER LOSS
-	// PATHWAY, AND THE BENCH SUITE SURFACES ALL PATHS PER RUN. THE PHI-CORRECT
-	// PATHS (XDOM_STEAL, XDOM_STEP5) ARE TRACKED BUT EXCLUDED FROM THE LOSS --
-	// THEY ARE DELIBERATE WORK-CONSERVATION MOVES, NOT SCATTER TO SUPPRESS.
-	u64 nr_cross_domain[8];
-	// OSCILLATOR ENVELOPE: PARK ENTRIES (CPU-0 TICK WRITER). ZERO AFTER AN
-	// IDLE-HEAVY RUN MEANS THE ENVELOPE NEVER PARKED -- THE MIET-COLLAPSE
-	// FAILURE MODE THE BENCH MUST BE ABLE TO DETECT.
+	// IDLE QUIESCENCE ENVELOPE: TIMES THE OSCILLATOR PARKED AT EQUILIBRIUM
 	u64 nr_osc_park;
-	// SPILL-KICK ATTRIBUTION: select_cpu wakeups whose seat was redirected off
-	// the verified-idle pick onto a busy spill CPU, kicked with SCX_KICK_PREEMPT
-	// instead of the no-op SCX_KICK_IDLE. The signal that confirms the tick-floor
-	// strand fix -- it should track the formerly tick-floored burst wakes while
-	// the >=900us wake2run bucket collapses.
-	u64 nr_spill_kick_preempt;
 };
-
-// XDOM path indices for pandemonium_stats.nr_cross_domain[] (diagnostic).
-#define XDOM_SEL_TIGHT   0   // select_cpu WAKE_SYNC tight-partner colocation
-#define XDOM_SEL_SYNC    1   // select_cpu WAKE_SYNC phi_warm_target
-#define XDOM_SEL_NORMAL  2   // select_cpu normal_path phi_warm_target
-#define XDOM_SEL_DFL     3   // select_cpu scx_bpf_select_cpu_dfl idle pick
-#define XDOM_ENQ_T1      4   // enqueue TIER 1 idle (pick_idle_cpu_node)
-#define XDOM_ENQ_T2      5   // enqueue TIER 2 warm-anchor spill
-#define XDOM_STEAL       6   // dispatch STEP 1 R_eff steal (this_cpu vs peer)
-#define XDOM_STEP5       7   // dispatch STEP 5 cross-domain work-conservation scan
 
 // PROCESS CLASSIFICATION: BPF OBSERVES, RUST LEARNS, BPF APPLIES
 // SHARED BETWEEN BPF MAPS (task_class_observe, task_class_init) AND RUST (procdb.rs)
