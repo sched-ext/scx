@@ -44,6 +44,14 @@ const TAU_CEIL_NS: u64 = 40_000_000; // 40MS
 const C_EQ_FLOOR_NS: u64 = 200_000; // 200us
 const C_EQ_CEIL_NS: u64 = 8_000_000; // 8ms
 
+// SPILL-Phi PLACEMENT DEPTH THRESHOLDS. Rust folds R_eff into a per-peer DSQ-depth
+// cap the BPF spill helper applies: near peers (R_eff~0) accept spills up to
+// SPILL_NEAR_DEPTH, the most distant only when near-empty (SPILL_FAR_DEPTH).
+// Monolithic (no distance structure to price) -> flat SPILL_MONO_DEPTH.
+const SPILL_NEAR_DEPTH: u32 = 4;
+const SPILL_FAR_DEPTH: u32 = 1;
+const SPILL_MONO_DEPTH: u32 = 2;
+
 #[derive(Clone, Copy, Debug)]
 pub struct TopologySpectrum {
     pub fiedler: f64,            // lambda_2
@@ -411,6 +419,109 @@ impl CpuTopology {
         r
     }
 
+    // INTEGER-EXACT R_eff (v5.16.0 SPILL-Phi #67). The f64 conductance rung
+    // (10/3/1/0.3) scaled x10 clears the 0.3 cross-socket cut, so the Laplacian is
+    // integer and R_eff is an EXACT rational -- the spanning-2-forest over
+    // spanning-tree determinant ratio (Barrett et al., Spanning 2-Forests and
+    // Resistance Distance) -- with no float rounding. Bareiss fraction-free
+    // elimination keeps every step integer; i128 holds it through
+    // REFF_EXACT_MAX_CPUS, above which the float pseudoinverse path takes over.
+    // Hand-verified: the 2-CPU (0.1) and 3-CPU path (0.2) cases reproduce the f64
+    // R_eff exactly.
+    const ICOND_L2: i128 = 100;
+    const ICOND_LLC: i128 = 30;
+    const ICOND_SOCKET: i128 = 10;
+    const ICOND_CROSS: i128 = 3;
+    const ICOND_RECOVER: f64 = 10.0; // undo the x10 conductance scale
+    const REFF_EXACT_MAX_CPUS: usize = 24;
+
+    fn build_laplacian_int(&self) -> Vec<i128> {
+        let n = self.nr_cpus;
+        let mut l = vec![0i128; n * n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let w = if self.l2_domain[i] == self.l2_domain[j] {
+                    Self::ICOND_L2
+                } else if self.ccx_active && self.llc_domain[i] == self.llc_domain[j] {
+                    Self::ICOND_LLC
+                } else if self.socket_domain[i] == self.socket_domain[j] {
+                    Self::ICOND_SOCKET
+                } else {
+                    Self::ICOND_CROSS
+                };
+                l[i * n + j] = -w;
+                l[j * n + i] = -w;
+                l[i * n + i] += w;
+                l[j * n + j] += w;
+            }
+        }
+        l
+    }
+
+    // BAREISS FRACTION-FREE DETERMINANT of an integer matrix (row-major, m x m).
+    // Every division is exact by the Bareiss invariant. None on i128 overflow or a
+    // zero pivot -- a connected reduced Laplacian is positive-definite, so a zero
+    // pivot only ever means fall-back-to-float here, never a real singular case.
+    pub fn bareiss_det(mut a: Vec<i128>, m: usize) -> Option<i128> {
+        let mut prev: i128 = 1;
+        for k in 0..m.saturating_sub(1) {
+            let pivot = a[k * m + k];
+            if pivot == 0 {
+                return None;
+            }
+            for i in (k + 1)..m {
+                for j in (k + 1)..m {
+                    let t1 = a[i * m + j].checked_mul(pivot)?;
+                    let t2 = a[i * m + k].checked_mul(a[k * m + j])?;
+                    a[i * m + j] = t1.checked_sub(t2)? / prev;
+                }
+            }
+            prev = pivot;
+        }
+        if m == 0 {
+            Some(1)
+        } else {
+            Some(a[(m - 1) * m + (m - 1)])
+        }
+    }
+
+    // det of the integer Laplacian with the given index set's rows AND columns gone.
+    fn minor_det(l_int: &[i128], n: usize, remove: &[usize]) -> Option<i128> {
+        let keep: Vec<usize> = (0..n).filter(|x| !remove.contains(x)).collect();
+        let m = keep.len();
+        let mut sub = vec![0i128; m * m];
+        for (a, &ri) in keep.iter().enumerate() {
+            for (b, &cj) in keep.iter().enumerate() {
+                sub[a * m + b] = l_int[ri * n + cj];
+            }
+        }
+        Self::bareiss_det(sub, m)
+    }
+
+    // EXACT R_eff(i,j) = det(L minus rows/cols i,j) / det(L minus row/col 0), the
+    // spanning-2-forest / spanning-tree ratio, in the integer Laplacian's units.
+    // None on overflow so the caller falls back to the float path.
+    pub fn reff_from_int_laplacian(l_int: &[i128], n: usize) -> Option<Vec<f64>> {
+        if n < 2 {
+            return Some(vec![0.0; n * n]);
+        }
+        let tau = Self::minor_det(l_int, n, &[0])?;
+        if tau == 0 {
+            return None;
+        }
+        let tau_f = tau as f64;
+        let mut r = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let f = Self::minor_det(l_int, n, &[i, j])?;
+                let v = ((f as f64) / tau_f).max(0.0);
+                r[i * n + j] = v;
+                r[j * n + i] = v;
+            }
+        }
+        Some(r)
+    }
+
     // BUILD PER-CPU AFFINITY RANK: FOR EACH CPU, ALL OTHERS SORTED BY R_EFF
     // Returns flat array: affinity_rank[cpu * nr_cpus + slot] = target_cpu
     fn build_affinity_rank(reff: &[f64], n: usize) -> Vec<u32> {
@@ -446,8 +557,19 @@ impl CpuTopology {
         let (eigenvalues, eigenvectors) = Self::symmetric_eigen(&laplacian, n);
         let fiedler = extract_fiedler(&eigenvalues);
         let tau_ns = compute_tau_ns(fiedler, n);
-        let l_pinv = Self::compute_pseudoinverse(&eigenvalues, &eigenvectors, n);
-        let reff = Self::extract_reff(&l_pinv, n);
+        // EXACT INTEGER R_eff (Bareiss spanning-2-forest / spanning-tree determinant
+        // ratio) where i128 holds it; else the float pseudoinverse. Both agree to
+        // fixed-point precision (hand-verified 2-/3-CPU), so downstream is unchanged.
+        let reff: Vec<f64> = match (n <= Self::REFF_EXACT_MAX_CPUS)
+            .then(|| Self::reff_from_int_laplacian(&self.build_laplacian_int(), n))
+            .flatten()
+        {
+            Some(r) => r.into_iter().map(|x| x * Self::ICOND_RECOVER).collect(),
+            None => {
+                let l_pinv = Self::compute_pseudoinverse(&eigenvalues, &eigenvectors, n);
+                Self::extract_reff(&l_pinv, n)
+            }
+        };
         let rank = Self::build_affinity_rank(&reff, n);
         let codel_eq_ns = compute_codel_eq_ns(&eigenvalues, n, tau_ns);
         // PHI DISTANCE SCALE: calibrated so the most distant pair (max R_eff) maps to
@@ -491,6 +613,11 @@ impl CpuTopology {
     ) -> Result<()> {
         let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES as usize;
         let valid = self.nr_cpus.saturating_sub(1).min(stride);
+        // SPILL-Phi: fold the SAME R_eff into a per-peer DSQ-depth cap the BPF
+        // spill helper applies (near peers accept at higher depth, far peers
+        // near-empty only). max_reff normalizes distance to [0,1]; monolithic
+        // (phi_dist_scale 0) -> flat SPILL_MONO_DEPTH, no distance to price.
+        let max_reff = reff.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
         for cpu in 0..self.nr_cpus {
             for slot in 0..valid {
                 let val = rank[cpu * self.nr_cpus + slot];
@@ -506,10 +633,22 @@ impl CpuTopology {
                 let dist_extra =
                     (r_scaled.saturating_mul(phi_dist_scale_q16) >> 16).min(u32::MAX as u64) as u32;
                 sched.write_reff_value(cpu as u32, slot as u32, dist_extra)?;
+                // PLACEMENT THRESHOLD: same R_eff, applied as a depth cap not a delay.
+                let spill_d = if phi_dist_scale_q16 == 0 {
+                    SPILL_MONO_DEPTH
+                } else {
+                    let frac = (reff[cpu * self.nr_cpus + val as usize] / max_reff).clamp(0.0, 1.0);
+                    (SPILL_NEAR_DEPTH as f64 - (SPILL_NEAR_DEPTH - SPILL_FAR_DEPTH) as f64 * frac)
+                        .round()
+                        .clamp(SPILL_FAR_DEPTH as f64, SPILL_NEAR_DEPTH as f64)
+                        as u32
+                };
+                sched.write_spill_depth(cpu as u32, slot as u32, spill_d)?;
             }
             for slot in valid..stride {
                 sched.write_affinity_rank(cpu as u32, slot as u32, u32::MAX)?;
                 sched.write_reff_value(cpu as u32, slot as u32, u32::MAX)?;
+                sched.write_spill_depth(cpu as u32, slot as u32, SPILL_MONO_DEPTH)?;
             }
         }
         Ok(())

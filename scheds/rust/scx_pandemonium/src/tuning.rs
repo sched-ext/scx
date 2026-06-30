@@ -35,12 +35,17 @@ const LIGHT_P99_CEIL_NS: u64 = 3_000_000; // 3MS
 const MIXED_P99_CEIL_NS: u64 = 5_000_000; // 5MS: BELOW 16MS FRAME BUDGET
 const HEAVY_P99_CEIL_NS: u64 = 10_000_000; // 10MS: HEAVY LOAD, REALISTIC
 
-// CLASSIFIER THRESHOLDS
-// LAT_CRI SCORE BOUNDARIES FOR TIER CLASSIFICATION
-// EXPOSED AS TUNING KNOBS FOR RUNTIME ADJUSTMENT
+// SPILL TEMPERATURE (v5.16.0 SPILL-Phi #69). T = T_base*(1 + kappa*H), H the
+// Bandt-Pompe permutation entropy in [0,1]; Q16 fixed-point (65536 = T_base = 1.0).
+// Computed each tick from the chaos layer, shipped as a non-MWU knob overlaid like
+// topology_tau_ns. Inert until the SPILL price (#70) consumes it.
+pub const SPILL_TEMP_BASE_Q16: u64 = 65536;
+pub const SPILL_TEMP_KAPPA: f64 = 1.0;
 
-pub const DEFAULT_LAT_CRI_THRESH_HIGH: u64 = 32; // >= THIS: LAT_CRITICAL
-pub const DEFAULT_LAT_CRI_THRESH_LOW: u64 = 8; // >= THIS: INTERACTIVE, BELOW: BATCH
+pub fn spill_temp_q16(h: f64) -> u64 {
+    let h = h.clamp(0.0, 1.0);
+    ((SPILL_TEMP_BASE_Q16 as f64) * (1.0 + SPILL_TEMP_KAPPA * h)) as u64
+}
 
 // TUNING KNOBS
 // MATCHES struct tuning_knobs IN BPF (intf.h)
@@ -56,8 +61,6 @@ pub struct TuningKnobs {
     pub slice_ns: u64,
     pub preempt_thresh_ns: u64,
     pub batch_slice_ns: u64,
-    pub lat_cri_thresh_high: u64,
-    pub lat_cri_thresh_low: u64,
     pub affinity_mode: u64,
     pub codel_thresh_ns: u64,
     pub burst_slice_ns: u64,
@@ -69,6 +72,7 @@ pub struct TuningKnobs {
     // R_eff-DERIVED CODEL EQUILIBRIUM TARGET (<R_eff> * 2m * tau).
     // CO-LOCATED WITH topology_tau_ns; SAME ZERO/WRITE/CLAMP SEMANTICS.
     pub codel_eq_ns: u64,
+    pub spill_temp_q16: u64,
 }
 
 impl Default for TuningKnobs {
@@ -77,13 +81,12 @@ impl Default for TuningKnobs {
             slice_ns: 1_000_000,
             preempt_thresh_ns: 1_000_000,
             batch_slice_ns: 20_000_000,
-            lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
-            lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_OFF,
             codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         }
     }
 }
@@ -124,37 +127,34 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             slice_ns: LIGHT_SLICE_NS,
             preempt_thresh_ns: LIGHT_PREEMPT_NS,
             batch_slice_ns: LIGHT_BATCH_NS,
-            lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
-            lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
             codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         },
         Regime::Mixed => TuningKnobs {
             slice_ns: MIXED_SLICE_NS,
             preempt_thresh_ns: MIXED_PREEMPT_NS,
             batch_slice_ns: MIXED_BATCH_NS,
-            lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
-            lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_STRONG,
             codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         },
         Regime::Heavy => TuningKnobs {
             slice_ns: HEAVY_SLICE_NS,
             preempt_thresh_ns: HEAVY_PREEMPT_NS,
             batch_slice_ns: HEAVY_BATCH_NS,
-            lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
-            lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
             codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         },
     }
 }
@@ -418,8 +418,6 @@ const EX_SATURATED: usize = 5;
 const SC_SLICE: [f64; 6] = [0.74, 1.00, 1.23, 0.98, 0.49, 1.47];
 const SC_PREEMPT: [f64; 6] = [0.74, 1.00, 1.23, 0.98, 0.49, 1.47];
 const SC_BATCH: [f64; 6] = [0.78, 1.00, 1.30, 1.30, 0.52, 1.04];
-const SC_LCRI_HI: [f64; 6] = [0.74, 1.00, 1.23, 0.98, 0.98, 0.98];
-const SC_LCRI_LO: [f64; 6] = [0.70, 1.00, 1.40, 0.93, 0.93, 0.93];
 const SC_SOJOURN: [f64; 6] = [0.80, 1.00, 1.60, 0.93, 0.53, 1.07];
 const SC_BURST: [f64; 6] = [0.74, 1.00, 1.47, 0.98, 0.49, 1.23];
 
@@ -906,8 +904,6 @@ impl MwuController {
             preempt_thresh_ns: blend_continuous(b.preempt_thresh_ns, &SC_PREEMPT, &w)
                 .max(b.preempt_thresh_ns),
             batch_slice_ns: blend_continuous(b.batch_slice_ns, &SC_BATCH, &w),
-            lat_cri_thresh_high: blend_continuous(b.lat_cri_thresh_high, &SC_LCRI_HI, &w),
-            lat_cri_thresh_low: blend_continuous(b.lat_cri_thresh_low, &SC_LCRI_LO, &w),
             affinity_mode: majority_discrete(&DV_AFFINITY, &w),
             codel_thresh_ns: blended_sojourn,
             burst_slice_ns: blended_burst,
@@ -916,6 +912,7 @@ impl MwuController {
             // VALUES BACK ONTO MWU'S OUTPUT BEFORE WRITING -- PASSTHROUGH.
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         };
         self.last_knobs = k;
         k
@@ -1023,8 +1020,6 @@ pub fn knobs_differ(a: &TuningKnobs, b: &TuningKnobs) -> bool {
     a.slice_ns != b.slice_ns
         || a.preempt_thresh_ns != b.preempt_thresh_ns
         || a.batch_slice_ns != b.batch_slice_ns
-        || a.lat_cri_thresh_high != b.lat_cri_thresh_high
-        || a.lat_cri_thresh_low != b.lat_cri_thresh_low
         || a.affinity_mode != b.affinity_mode
         || a.codel_thresh_ns != b.codel_thresh_ns
         || a.burst_slice_ns != b.burst_slice_ns

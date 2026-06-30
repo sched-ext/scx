@@ -34,8 +34,6 @@ struct tuning_knobs {
 	u64 slice_ns;           // BASE TIME SLICE (DEFAULT 1MS)
 	u64 preempt_thresh_ns;  // TICK PREEMPTION THRESHOLD (DEFAULT 1MS)
 	u64 batch_slice_ns;     // BATCH TASK SLICE CEILING (DEFAULT 20MS)
-	u64 lat_cri_thresh_high; // CLASSIFIER: LAT_CRITICAL THRESHOLD (DEFAULT 32)
-	u64 lat_cri_thresh_low;  // CLASSIFIER: INTERACTIVE THRESHOLD (DEFAULT 8)
 	u64 affinity_mode;      // L2 PLACEMENT: 0=OFF, 1=WEAK, 2=STRONG
 	u64 codel_thresh_ns;    // BATCH DSQ RESCUE THRESHOLD (SET BY RUST)
 	u64 burst_slice_ns;     // SLICE CEILING DURING BURST/LONGRUN (SET BY RUST, DEFAULT 1MS)
@@ -48,6 +46,7 @@ struct tuning_knobs {
 	                        // <R_eff> * 2m * tau, CLAMPED [200us, 8ms].
 	                        // 0 MEANS NOT YET WRITTEN. WRITTEN AT TOPOLOGY
 	                        // DETECT AND ON HOTPLUG (CO-LOCATED WITH tau).
+	u64 spill_temp_q16;     // SPILL-Phi #69: T_base*(1+kappa*H) Q16, from perm-entropy
 };
 
 // PER-CPU STATISTICS (BPF_MAP_TYPE_PERCPU_ARRAY VALUE)

@@ -269,6 +269,7 @@ pub fn monitor_loop(
         // None UNTIL THE WINDOW HAS RQA_MIN_SAMPLES FILLED.
         let (idle_lambda, _idle_hvg_s) = chaos::hvg_stats(&idle_win);
         let wake_bp_h = chaos::bandt_pompe_d3(&wake_win);
+        let spill_temp_q16 = tuning::spill_temp_q16(wake_bp_h);
         let bp_delta = wake_bp_h - prev_bp_h;
         let mean_idle = chaos::mean(&idle_win);
         let rqa = chaos::rqa_det(&idle_win);
@@ -305,6 +306,7 @@ pub fn monitor_loop(
                 let mut rk = scaled_regime_knobs(regime, nr_cpus, tau_ns);
                 rk.topology_tau_ns = tau_ns;
                 rk.codel_eq_ns = live.codel_eq_ns;
+                rk.spill_temp_q16 = spill_temp_q16;
                 sched.write_tuning_knobs(&rk)?;
                 last_written_knobs = rk;
                 regime_changed_this_tick = true;
@@ -381,6 +383,7 @@ pub fn monitor_loop(
                 let live = sched.read_tuning_knobs();
                 knobs.topology_tau_ns = live.topology_tau_ns;
                 knobs.codel_eq_ns = live.codel_eq_ns;
+                knobs.spill_temp_q16 = spill_temp_q16;
                 // COMMIT-ON-CHANGE: only push to the BPF map when an
                 // MWU-owned field actually moved. The BPF side reads the
                 // map unsynchronized -- skipping redundant writes strictly

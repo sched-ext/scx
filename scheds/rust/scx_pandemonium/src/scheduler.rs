@@ -54,7 +54,7 @@ pub struct PandemoniumStats {
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
 const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 208);
-const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 80);
+const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 72);
 
 // MAX_AFFINITY_CANDIDATES IS DEFINED IN intf.h. THE RUST MIRROR IN
 // bpf_intf.rs MUST KEEP THE SAME VALUE; IF THE TWO SIDES DRIFT, THE
@@ -379,6 +379,20 @@ impl<'a> Scheduler<'a> {
         self.skel
             .maps
             .reff_value
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+
+    // WRITE ONE spill_depth SLOT: THE PRE-FOLDED PHI PLACEMENT THRESHOLD (DSQ
+    // DEPTH) FOR THE PEER AT affinity_rank[cpu][slot]. THE SPILL HELPER READS IT
+    // AS THE PER-PEER DEPTH CAP -- THE PLACEMENT MIRROR OF reff_value's STEAL DELAY.
+    pub fn write_spill_depth(&self, cpu: u32, slot: u32, value: u32) -> Result<()> {
+        let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
+        let key = (cpu * stride + slot).to_ne_bytes();
+        let val = value.to_ne_bytes();
+        self.skel
+            .maps
+            .spill_depth
             .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
