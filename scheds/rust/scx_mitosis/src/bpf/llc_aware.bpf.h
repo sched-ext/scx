@@ -429,6 +429,7 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
 				consumed = scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p, cpu_dsq.raw,
 								  0);
 				if (consumed) {
+					tctx->check_affinity = true;
 					cstat_inc(CSTAT_DRAIN_AFFN_CNT, cell_id, target_cctx);
 					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 				}
