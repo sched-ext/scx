@@ -20,6 +20,14 @@ use inotify::{Inotify, WatchMask};
 use scx_utils::Cpumask;
 use tracing::{debug, info};
 
+/// Strip the cgroup mount prefix from a stored cell path, yielding the
+/// root-relative cgroup path (e.g. `/sys/fs/cgroup/a/b` -> `/a/b`).
+fn cgroup_root_relative(path: &Path) -> String {
+    path.strip_prefix("/sys/fs/cgroup")
+        .map(|rel| format!("/{}", rel.to_string_lossy()))
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
+
 /// Information about a cell created for a cgroup
 #[derive(Debug)]
 pub struct CellInfo {
@@ -1015,6 +1023,19 @@ impl CellManager {
         parts.join(" ")
     }
 
+    /// Return the cgroup path for a cell, relative to the cgroup root as it
+    /// appears in `/proc/<pid>/cgroup` (e.g. `/test.slice/foobar`), so
+    /// consumers can map a cell id to its cgroup. Empty for cell 0 (the root
+    /// cell, which has no dedicated cgroup) and for any unknown cell id.
+    pub fn cgroup_path_for_cell(&self, cell_id: u32) -> String {
+        self.cell_id_to_cgid
+            .get(&cell_id)
+            .and_then(|cgid| self.cells.get(cgid))
+            .and_then(|info| info.cgroup_path.as_deref())
+            .map(cgroup_root_relative)
+            .unwrap_or_default()
+    }
+
     /// Re-read cpuset.cpus for all cells and update stored cpusets.
     /// Returns true if any cell's cpuset changed.
     pub fn refresh_cpusets(&mut self) -> Result<bool> {
@@ -1091,6 +1112,41 @@ mod tests {
             mask.set_cpu(cpu).unwrap();
         }
         mask
+    }
+
+    // ==================== cgroup path mapping tests ====================
+
+    #[test]
+    fn test_cgroup_path_for_cell() {
+        let tmp = TempDir::new().unwrap();
+        let child = tmp.path().join("container-a");
+        std::fs::create_dir(&child).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+
+        // Cell 0 (root cell) and unknown ids have no dedicated cgroup -> empty.
+        assert_eq!(mgr.cgroup_path_for_cell(0), "");
+        assert_eq!(mgr.cgroup_path_for_cell(999), "");
+
+        // A created cell maps to its cgroup. The TempDir is not under the cgroup
+        // mount, so the path is returned as-is (the strip falls back to the
+        // absolute path); the mount-strip itself is covered below.
+        let cell_id = mgr.find_cell_by_name("container-a").unwrap().cell_id;
+        assert_eq!(
+            mgr.cgroup_path_for_cell(cell_id),
+            child.to_string_lossy().into_owned()
+        );
+
+        // A real (mount-absolute) cgroup path is reported relative to the root.
+        assert_eq!(
+            cgroup_root_relative(Path::new("/sys/fs/cgroup/test.slice/foobar")),
+            "/test.slice/foobar"
+        );
     }
 
     // ==================== Cell scanning and creation tests ====================
