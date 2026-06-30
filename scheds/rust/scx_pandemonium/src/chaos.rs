@@ -189,14 +189,45 @@ pub fn mean<const N: usize>(w: &RawWindow<N>) -> f64 {
     s / w.filled as f64
 }
 
+#[allow(dead_code)]
+pub fn min<const N: usize>(w: &RawWindow<N>) -> f64 {
+    let mut it = w.iter();
+    let mut m = match it.next() {
+        Some(x) => x,
+        None => return 0.0,
+    };
+    for x in it {
+        if x < m {
+            m = x;
+        }
+    }
+    m
+}
+
+#[allow(dead_code)]
+pub fn max<const N: usize>(w: &RawWindow<N>) -> f64 {
+    let mut it = w.iter();
+    let mut m = match it.next() {
+        Some(x) => x,
+        None => return 0.0,
+    };
+    for x in it {
+        if x > m {
+            m = x;
+        }
+    }
+    m
+}
+
 // HORIZONTAL VISIBILITY GRAPH
 //
 // FOR A SEQUENCE x_1..x_N, NODES i AND j (i < j) ARE HVG-CONNECTED IFF
 // x_k < min(x_i, x_j) FOR ALL i < k < j. ADJACENT NODES (j = i+1) ARE
 // ALWAYS CONNECTED.
 //
-// hvg_degrees BUILDS THE DEGREE VECTOR ONCE; hvg_stats DERIVES BOTH
-// LAMBDA AND ENTROPY FROM IT IN A SINGLE O(N^2) PASS.
+// hvg_degrees BUILDS THE DEGREE VECTOR ONCE; hvg_mean_degree AND
+// hvg_entropy ARE THIN WRAPPERS OVER IT. WHEN BOTH ARE NEEDED IN THE
+// SAME TICK, USE hvg_stats TO AMORTIZE THE O(N^2) CONSTRUCTION.
 //
 // BRUTE-FORCE O(N^2). AT N <= 128 (>1-MINUTE WINDOW AT 1HZ) THIS IS
 // UNDER 16K COMPARISONS, DONE ONCE PER SECOND.
@@ -229,6 +260,50 @@ fn hvg_degrees<const N: usize>(w: &RawWindow<N>) -> Option<([u32; N], usize)> {
         }
     }
     Some((deg, n))
+}
+
+// HVG MEAN DEGREE (LAMBDA). PRIMARY DISCRIMINATOR FOR REGIME DETECTION.
+//   - PERIODIC: ~2
+//   - CHAOTIC / IID RANDOM: -> 4
+#[allow(dead_code)]
+pub fn hvg_mean_degree<const N: usize>(w: &RawWindow<N>) -> f64 {
+    let (deg, n) = match hvg_degrees(w) {
+        Some(v) => v,
+        None => return 0.0,
+    };
+    let mut sum: u64 = 0;
+    for d in deg.iter().take(n) {
+        sum += *d as u64;
+    }
+    sum as f64 / n as f64
+}
+
+// HVG SHANNON ENTROPY (S). CORROBORATING DISCRIMINATOR.
+// 0 = SHARP DEGREE DISTRIBUTION (PERIODIC). HVG_S_IID ~= 1.91 = IID
+// ASYMPTOTE. INTERMEDIATE VALUES = MIXED OR CHAOTIC DYNAMICS.
+#[allow(dead_code)]
+pub fn hvg_entropy<const N: usize>(w: &RawWindow<N>) -> f64 {
+    let (deg, n) = match hvg_degrees(w) {
+        Some(v) => v,
+        None => return 0.0,
+    };
+
+    let mut hist: [u32; N] = [0; N];
+    for d in deg.iter().take(n) {
+        let bucket = (*d as usize).min(n - 1);
+        hist[bucket] += 1;
+    }
+
+    let total = n as f64;
+    let mut s_hvg = 0.0;
+    for c in hist.iter().take(n) {
+        if *c == 0 {
+            continue;
+        }
+        let p = *c as f64 / total;
+        s_hvg -= p * p.ln();
+    }
+    s_hvg
 }
 
 // AMORTIZED LAMBDA + ENTROPY. ONE O(N^2) PASS BUILDS THE DEGREE VECTOR;

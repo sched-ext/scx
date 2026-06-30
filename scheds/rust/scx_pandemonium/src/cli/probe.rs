@@ -10,6 +10,13 @@ const MAX_SAMPLES: usize = 16384;
 /// For EEVDF baseline, we measure in userspace.
 /// Either way: ZERO I/O during measurement, bulk output at end.
 pub fn run_probe() {
+    // DISTINCT COMM so montauk can target JUST the latency probe -- the stress
+    // workers all share the "pandemonium" comm, making the probe untraceable in
+    // isolation. Mirrors the IPC workload's IPC_COMM = "pand-ipc".
+    unsafe {
+        libc::prctl(libc::PR_SET_NAME, b"pand-probe\0".as_ptr() as libc::c_ulong);
+    }
+
     ctrlc::set_handler(move || {
         RUNNING.store(false, Ordering::Relaxed);
     })
