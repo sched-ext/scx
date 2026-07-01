@@ -23,7 +23,7 @@ pub struct CellMetrics {
     #[stat(desc = "Number of cpus")]
     pub num_cpus: u32,
     #[stat(
-        desc = "Cgroup path of this cell, relative to the cgroup root (empty for the root cell)",
+        desc = "Cgroup path of this cell, relative to the cgroup root (\"/\" for the root cell)",
         _om_skip
     )]
     pub cgroup_path: String,

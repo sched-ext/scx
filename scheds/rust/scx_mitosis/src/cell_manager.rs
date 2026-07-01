@@ -1024,16 +1024,15 @@ impl CellManager {
     }
 
     /// Return the cgroup path for a cell, relative to the cgroup root as it
-    /// appears in `/proc/<pid>/cgroup` (e.g. `/test.slice/foobar`), so
-    /// consumers can map a cell id to its cgroup. Empty for cell 0 (the root
-    /// cell, which has no dedicated cgroup) and for any unknown cell id.
+    /// appears in `/proc/<pid>/cgroup` (e.g. `/test.slice/foobar`), so consumers
+    /// can map a cell id to its cgroup. Cell 0 (the root cell) is `/`.
     pub fn cgroup_path_for_cell(&self, cell_id: u32) -> String {
         self.cell_id_to_cgid
             .get(&cell_id)
             .and_then(|cgid| self.cells.get(cgid))
             .and_then(|info| info.cgroup_path.as_deref())
             .map(cgroup_root_relative)
-            .unwrap_or_default()
+            .unwrap_or_else(|| "/".to_string())
     }
 
     /// Re-read cpuset.cpus for all cells and update stored cpusets.
@@ -1129,9 +1128,8 @@ mod tests {
         )
         .unwrap();
 
-        // Cell 0 (root cell) and unknown ids have no dedicated cgroup -> empty.
-        assert_eq!(mgr.cgroup_path_for_cell(0), "");
-        assert_eq!(mgr.cgroup_path_for_cell(999), "");
+        // Cell 0 is the root cell -> "/".
+        assert_eq!(mgr.cgroup_path_for_cell(0), "/");
 
         // A created cell maps to its cgroup. The TempDir is not under the cgroup
         // mount, so the path is returned as-is (the strip falls back to the
