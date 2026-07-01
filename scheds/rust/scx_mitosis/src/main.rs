@@ -1169,15 +1169,12 @@ impl<'a> Scheduler<'a> {
             self.metrics
                 .cells
                 .entry(*cell_id)
-                .and_modify(|cell_metrics| cell_metrics.num_cpus = cell.cpus.weight() as u32);
+                .and_modify(|cell_metrics| {
+                    cell_metrics.num_cpus = cell.cpus.weight() as u32;
+                    cell_metrics.cgroup_path = self.cell_manager.cgroup_path_for_cell(*cell_id);
+                });
         }
         self.metrics.num_cells = self.cells.len() as u32;
-
-        // Stamp every cell's cgroup path here in one pass: metrics.cells entries
-        // are created at several sites, and this re-derives on cell-id reuse.
-        for (cell_id, cell_metrics) in self.metrics.cells.iter_mut() {
-            cell_metrics.cgroup_path = self.cell_manager.cgroup_path_for_cell(*cell_id);
-        }
 
         Ok(())
     }
