@@ -605,8 +605,8 @@ test_borrowing() {
     sudo mkdir -p "$busy_path"
     sudo mkdir -p "$idle_path"
 
-    # Start scheduler with borrowing
-    start_scheduler --enable-borrowing
+    # Start scheduler
+    start_scheduler
 
     # Use more workers than the busy cell has CPUs to force borrowing
     local workers=$(nproc)
@@ -739,11 +739,10 @@ test_cpu_rebalancing_demand() {
     sudo mkdir -p "$busy_path"
     sudo mkdir -p "$idle_path"
 
-    # Start scheduler with borrowing and short rebalance intervals
-    log_info "Starting scx_mitosis with --enable-borrowing and short rebalance intervals..."
+    # Start scheduler with short rebalance intervals
+    log_info "Starting scx_mitosis with short rebalance intervals..."
     sudo "$SCHEDULER_BIN" \
         --cell-parent-cgroup /test.slice \
-        --enable-borrowing \
         --rebalance-cooldown-s 3 \
         --rebalance-threshold 10 \
         > "$LOG_FILE" 2>&1 &
@@ -1108,11 +1107,10 @@ test_new_cell_gets_fair_share() {
     sudo mkdir -p "$busy_path"
     sudo mkdir -p "$idle_path"
 
-    # Start scheduler with borrowing and short rebalance intervals
-    log_info "Starting scx_mitosis with --enable-borrowing and short rebalance intervals..."
+    # Start scheduler with short rebalance intervals
+    log_info "Starting scx_mitosis with short rebalance intervals..."
     sudo "$SCHEDULER_BIN" \
         --cell-parent-cgroup /test.slice \
-        --enable-borrowing \
         --rebalance-cooldown-s 3 \
         --rebalance-threshold 10 \
         > "$LOG_FILE" 2>&1 &

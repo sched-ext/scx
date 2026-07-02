@@ -164,11 +164,6 @@ struct Opts {
     #[clap(long, default_value_t = 0)]
     cell0_min_cpus: usize,
 
-    /// Enable CPU borrowing: cells can use idle CPUs from other cells.
-    /// Only meaningful with --cell-parent-cgroup and multiple cells.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_borrowing: bool,
-
     /// Use lockless scx_bpf_dsq_peek() instead of the default iterator-based peek.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     use_lockless_peek: bool,
@@ -235,8 +230,6 @@ struct Scheduler<'a> {
     last_cpuset_seq: u32,
     /// Cell manager for the cgroup passed via --cell-parent-cgroup.
     cell_manager: CellManager,
-    /// Whether CPU borrowing is enabled
-    enable_borrowing: bool,
     /// Utilization spread threshold for triggering rebalancing
     rebalance_threshold: f64,
     /// Minimum duration between rebalancing events
@@ -370,7 +363,6 @@ impl<'a> Scheduler<'a> {
         rodata.nr_llc = nr_llc as u32;
         rodata.enable_llc_awareness = opts.enable_llc_awareness;
 
-        rodata.enable_borrowing = opts.enable_borrowing;
         rodata.use_lockless_peek = opts.use_lockless_peek;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
@@ -453,7 +445,6 @@ impl<'a> Scheduler<'a> {
             last_configuration_seq: None,
             last_cpuset_seq: 0,
             cell_manager,
-            enable_borrowing: opts.enable_borrowing,
             rebalance_threshold: opts.rebalance_threshold,
             rebalance_cooldown: Duration::from_secs(opts.rebalance_cooldown_s),
             demand_smoothing: opts.demand_smoothing,
@@ -654,12 +645,12 @@ impl<'a> Scheduler<'a> {
                     .collect();
 
                 self.cell_manager
-                    .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
+                    .compute_demand_cpu_assignments(&cell_demands)
                     .context("computing demand-weighted CPU assignments")?
             } else {
                 // No utilization data yet (e.g., initial startup) — equal weight
                 self.cell_manager
-                    .compute_cpu_assignments(self.enable_borrowing)
+                    .compute_cpu_assignments()
                     .context("computing equal-weight CPU assignments (no utilization data)")?
             };
 
@@ -712,7 +703,7 @@ impl<'a> Scheduler<'a> {
         let (cell_assignments, cpu_assignments) = {
             let cpu_assignments = self
                 .cell_manager
-                .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
+                .compute_demand_cpu_assignments(&cell_demands)
                 .context("computing demand-weighted CPU assignments for rebalance")?;
 
             let changed = cpu_assignments.iter().any(|a| {
@@ -806,12 +797,10 @@ impl<'a> Scheduler<'a> {
 
             write_cpumask_to_config(&a.primary, &mut config.cpumasks[a.cell_id as usize].mask);
 
-            if let Some(ref borrowable) = a.borrowable {
-                write_cpumask_to_config(
-                    borrowable,
-                    &mut config.borrowable_cpumasks[a.cell_id as usize].mask,
-                );
-            }
+            write_cpumask_to_config(
+                &a.borrowable,
+                &mut config.borrowable_cpumasks[a.cell_id as usize].mask,
+            );
         }
         config.num_cells = max_cell_id;
 

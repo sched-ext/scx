@@ -46,7 +46,6 @@ const volatile bool debug_events_enabled = false;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool cpu_controller_disabled = false;
 const volatile bool reject_multicpu_pinning = false;
-const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
 
 /*
@@ -292,7 +291,7 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	 */
 	all_cell_cpus_allowed = bpf_cpumask_subset(cell_cpumask, p->cpus_ptr);
 
-	if (all_cell_cpus_allowed && enable_borrowing) {
+	if (all_cell_cpus_allowed) {
 		const struct cpumask *borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
 		if (!borrowable)
 			return -ENOENT;
@@ -539,7 +538,7 @@ static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, st
 
 /*
  * Try to find an idle CPU for a task. First searches within the cell's
- * own CPUs, then tries borrowing from other cells if enabled.
+ * own CPUs, then tries borrowing from other cells.
  *
  * On success, bumps CSTAT_LOCAL or CSTAT_BORROWED as appropriate and
  * dispatches the task to SCX_DSQ_LOCAL. If @kick is true, the idle CPU
@@ -573,26 +572,23 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		return -1; /* error from pick_idle_cpu, propagate */
 
 	/* cpu == -EBUSY: no idle CPU in cell, try borrowing */
-	if (enable_borrowing) {
-		const struct cpumask *borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
-		if (!borrowable)
-			return -1;
-		const struct cpumask *idle_smtmask __free(idle_cpumask) =
-			scx_bpf_get_idle_smtmask();
-		if (!idle_smtmask) {
-			scx_bpf_error("Failed to get idle smtmask");
-			return -1;
-		}
-		cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
-		if (cpu >= 0) {
-			tctx->borrowed = true;
-			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
-			tctx->vtime_charge_cell = tctx->cell;
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
-			if (kick)
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			return cpu;
-		}
+	const struct cpumask *borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
+	if (!borrowable)
+		return -1;
+	const struct cpumask *idle_smtmask __free(idle_cpumask) = scx_bpf_get_idle_smtmask();
+	if (!idle_smtmask) {
+		scx_bpf_error("Failed to get idle smtmask");
+		return -1;
+	}
+	cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
+	if (cpu >= 0) {
+		tctx->borrowed = true;
+		cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
+		tctx->vtime_charge_cell = tctx->cell;
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
+		if (kick)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		return cpu;
 	}
 
 	return -EBUSY;
@@ -1704,15 +1700,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			return ret;
 		}
 
-		if (enable_borrowing) {
-			/* Start with empty borrowable masks */
-			ret = init_cpumask_slot(&cpumaskw->borrowable, false);
-			if (ret) {
-				scx_bpf_error(
-					"failed to init borrowable cpumask slot for cell %d: %d", i,
-					ret);
-				return ret;
-			}
+		/* Start with empty borrowable masks */
+		ret = init_cpumask_slot(&cpumaskw->borrowable, false);
+		if (ret) {
+			scx_bpf_error("failed to init borrowable cpumask slot for cell %d: %d", i,
+				      ret);
+			return ret;
 		}
 	}
 
@@ -1874,20 +1867,17 @@ int apply_cell_config(void *ctx)
 		}
 
 		/* Apply borrowable cpumask for this cell */
-		if (enable_borrowing) {
-			struct cell_cpumask_data *borrowable_data;
+		struct cell_cpumask_data *borrowable_data;
 
-			borrowable_data = MEMBER_VPTR(config->borrowable_cpumasks, [cell_id]);
-			if (!borrowable_data) {
-				scx_bpf_error("cell_id %d out of bounds for borrowable", cell_id);
-				return -EINVAL;
-			}
+		borrowable_data = MEMBER_VPTR(config->borrowable_cpumasks, [cell_id]);
+		if (!borrowable_data) {
+			scx_bpf_error("cell_id %d out of bounds for borrowable", cell_id);
+			return -EINVAL;
+		}
 
-			if (set_cpumask_from_data(&cpumaskw->borrowable, borrowable_data)) {
-				scx_bpf_error("failed to set borrowable cpumask for cell_id %d",
-					      cell_id);
-				return -EINVAL;
-			}
+		if (set_cpumask_from_data(&cpumaskw->borrowable, borrowable_data)) {
+			scx_bpf_error("failed to set borrowable cpumask for cell_id %d", cell_id);
+			return -EINVAL;
 		}
 	}
 

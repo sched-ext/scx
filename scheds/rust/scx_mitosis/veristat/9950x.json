@@ -23,8 +23,6 @@
                 },{
                     "userspace_managed_cell_mode": false
                 },{
-                    "enable_borrowing": false
-                },{
                     "__SCX_OPS_NAME_LEN": 128
                 },{
                     "__SCX_SLICE_DFL": 20000000
