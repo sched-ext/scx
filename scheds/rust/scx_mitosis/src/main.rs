@@ -189,12 +189,6 @@ struct Opts {
     #[clap(long, default_value = "0.3", value_parser = parse_ewma_factor)]
     demand_smoothing: f64,
 
-    /// Dynamically reassign multi-CPU affinitized tasks on each wake: prefer an
-    /// idle CPU within the mask, fall back to random. Redistribute at enqueue if
-    /// the target CPU already has queued work.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    dynamic_affinity_cpu_selection: bool,
-
     /// Upper bound for shrink limit (us). Used when the proportional
     /// value (avg_runtime * K) exceeds it.
     #[clap(long, default_value = "4000")]
@@ -357,7 +351,6 @@ impl<'a> Scheduler<'a> {
         rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
-        rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
 
         // Slice shrinking configuration
         if opts.slice_shrink_min_us >= opts.slice_shrink_max_us {

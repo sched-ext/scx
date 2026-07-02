@@ -48,7 +48,6 @@ const volatile bool cpu_controller_disabled = false;
 const volatile bool reject_multicpu_pinning = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
-const volatile bool dynamic_affinity_cpu_selection = false;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -674,12 +673,9 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 		if (bpf_cpumask_weight(p->cpus_ptr) == 1) {
 			/* If we're pinned to a single CPU, just use that */
 			cpu = get_cpu_from_dsq(tctx->dsq);
-		} else if (dynamic_affinity_cpu_selection) {
+		} else {
 			/* Multicpu pinning, try to find an idle CPU */
 			cpu = select_pinned_cpu(p, prev_cpu, tctx, &idle_cpu_cleared);
-		} else {
-			/* Legacy pinned CPU, stay on DSQ you were initialized to */
-			cpu = get_cpu_from_dsq(tctx->dsq);
 		}
 
 		if (cpu < 0)
@@ -769,14 +765,10 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx->vtime_charge_cell = tctx->cell;
 
 	if (!tctx->all_cell_cpus_allowed) {
-		if (dynamic_affinity_cpu_selection) {
-			cpu = enqueue_pinned_cpu(p, tctx);
-			/* Kick target CPU — select_cpu may have returned a different one */
-			if (cpu >= 0)
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		} else {
-			cpu = get_cpu_from_dsq(tctx->dsq);
-		}
+		cpu = enqueue_pinned_cpu(p, tctx);
+		/* Kick target CPU — select_cpu may have returned a different one */
+		if (cpu >= 0)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 		if (cpu < 0)
 			return;

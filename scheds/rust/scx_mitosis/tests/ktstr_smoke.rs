@@ -20,7 +20,6 @@ const MITOSIS: Scheduler = Scheduler::named("mitosis")
         "--cell-parent-cgroup",
         "/test.slice",
         "--cpu-controller-disabled",
-        "--dynamic-affinity-cpu-selection",
         "--enable-borrowing",
         "--enable-rebalancing",
         "--enable-llc-awareness",
