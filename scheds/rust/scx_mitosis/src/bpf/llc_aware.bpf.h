@@ -55,6 +55,12 @@ static inline void invalidate_task_llc_cpumask(struct task_ctx *tctx)
 	tctx->llc_cpumask_id = LLC_INVALID;
 }
 
+static inline void invalidate_task_llc(struct task_ctx *tctx)
+{
+	tctx->llc = LLC_INVALID;
+	invalidate_task_llc_cpumask(tctx);
+}
+
 static inline s32 llc_from_cpu(s32 cpu)
 {
 	if (cpu < 0 || cpu >= nr_possible_cpus || cpu >= MAX_CPUS) {
@@ -370,6 +376,66 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
 		}
 
 		consumed = scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0);
+
+		/*
+		 * There is a possibility that the task at the head of the
+		 * candidate DSQ is not eligible to move to the local DSQ of
+		 * this CPU due to affinity restrictions. This can happen when
+		 * a cell loses CPUs on an LLC where it previously ended up
+		 * queuing tasks into the LLC DSQs since all cell CPUs were
+		 * allowed for it.
+		 */
+		if (unlikely(!consumed && READ_ONCE(cell->llcs[candidate_llc].nr_queued))) {
+			struct task_struct *p;
+
+			bpf_for_each(scx_dsq, p, candidate_dsq.raw, 0) {
+				struct task_ctx *tctx;
+				struct cpu_ctx *target_cctx;
+				dsq_id_t cpu_dsq;
+				u64 basis_vtime;
+				u32 cpu;
+
+				tctx = lookup_task_ctx(p);
+				if (!tctx) {
+					scx_bpf_error(
+						"lookup_task_ctx() failed in try_draining_work()");
+					break;
+				}
+
+				cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+				if (cpu >= nr_possible_cpus || cpu >= MAX_CPUS)
+					break;
+
+				target_cctx = lookup_cpu_ctx(cpu);
+				if (!target_cctx)
+					break;
+
+				cpu_dsq = get_cpu_dsq_id(cpu);
+				if (dsq_is_invalid(cpu_dsq))
+					break;
+
+				basis_vtime = READ_ONCE(target_cctx->vtime_now);
+				tctx->basis_vtime = basis_vtime;
+				tctx->dsq = cpu_dsq;
+				/*
+				 * Obviate any LLC updates during running(),
+				 * next cell refresh on enqueue() will recompute
+				 * these based on the current cell state.
+				 */
+				tctx->all_cell_cpus_allowed = false;
+				invalidate_task_llc(tctx);
+
+				scx_bpf_dsq_move_set_vtime(BPF_FOR_EACH_ITER, basis_vtime);
+				consumed = scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p, cpu_dsq.raw,
+								  0);
+				if (consumed) {
+					tctx->check_affinity = true;
+					cstat_inc(CSTAT_DRAIN_AFFN_CNT, cell_id, target_cctx);
+					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+				}
+				break;
+			}
+		}
 
 		if (consumed) {
 			pending = cell_llc_nr_queued_dec(cell, candidate_llc);
