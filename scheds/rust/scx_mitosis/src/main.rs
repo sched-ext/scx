@@ -173,10 +173,6 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     use_lockless_peek: bool,
 
-    /// Enable demand-based CPU rebalancing between cells.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_rebalancing: bool,
-
     /// Utilization spread (max - min) that triggers rebalancing (default: 20%)
     #[clap(long, default_value = "20.0")]
     rebalance_threshold: f64,
@@ -241,8 +237,6 @@ struct Scheduler<'a> {
     cell_manager: CellManager,
     /// Whether CPU borrowing is enabled
     enable_borrowing: bool,
-    /// Whether demand-based rebalancing is enabled
-    enable_rebalancing: bool,
     /// Utilization spread threshold for triggering rebalancing
     rebalance_threshold: f64,
     /// Minimum duration between rebalancing events
@@ -460,7 +454,6 @@ impl<'a> Scheduler<'a> {
             last_cpuset_seq: 0,
             cell_manager,
             enable_borrowing: opts.enable_borrowing,
-            enable_rebalancing: opts.enable_rebalancing,
             rebalance_threshold: opts.rebalance_threshold,
             rebalance_cooldown: Duration::from_secs(opts.rebalance_cooldown_s),
             demand_smoothing: opts.demand_smoothing,
@@ -542,10 +535,7 @@ impl<'a> Scheduler<'a> {
             self.check_cpuset_changes()
                 .context("checking cpuset changes")?;
             self.collect_metrics().context("collecting metrics")?;
-
-            if self.enable_rebalancing {
-                self.maybe_rebalance().context("running rebalance check")?;
-            }
+            self.maybe_rebalance().context("running rebalance check")?;
         }
 
         drop(struct_ops);
@@ -613,10 +603,10 @@ impl<'a> Scheduler<'a> {
 
     /// Compute cell configuration from CellManager and apply it to BPF.
     ///
-    /// When rebalancing is enabled and there is existing utilization data,
-    /// uses demand-weighted CPU assignment instead of equal-weight. New cells
-    /// (listed in `new_cell_ids`) are seeded to the average smoothed_util of
-    /// existing cells so they start with a fair share rather than zero.
+    /// When existing utilization data is available, uses demand-weighted CPU
+    /// assignment instead of equal-weight. New cells (listed in `new_cell_ids`)
+    /// are seeded to the average smoothed_util of existing cells so they start
+    /// with a fair share rather than zero.
     ///
     /// Returns the CPU assignments for use with `format_cell_config`.
     fn compute_and_apply_cell_config(
@@ -635,48 +625,42 @@ impl<'a> Scheduler<'a> {
                 .chain(active_cell_ids.iter().copied())
                 .collect();
 
-            let cpu_assignments = if self.enable_rebalancing {
-                // Check if any existing (non-new) cell has utilization data
-                let new_set: HashSet<u32> = new_cell_ids.iter().copied().collect();
-                let existing_utils: Vec<f64> = all_cell_ids
+            // Check if any existing (non-new) cell has utilization data
+            let new_set: HashSet<u32> = new_cell_ids.iter().copied().collect();
+            let existing_utils: Vec<f64> = all_cell_ids
+                .iter()
+                .filter(|id| !new_set.contains(id))
+                .map(|&id| self.smoothed_util[id as usize])
+                .collect();
+
+            let has_data = existing_utils.iter().any(|&u| u > 0.0);
+
+            let cpu_assignments = if has_data {
+                // Seed new cells to the average utilization of existing cells
+                let avg_util: f64 =
+                    existing_utils.iter().sum::<f64>() / existing_utils.len().max(1) as f64;
+                for &id in new_cell_ids {
+                    self.smoothed_util[id as usize] = avg_util;
+                    info!(
+                        "Seeded new cell {} smoothed_util to average {:.1}%",
+                        id, avg_util
+                    );
+                }
+
+                // Build demand map from smoothed_util for all active cells
+                let cell_demands: HashMap<u32, f64> = all_cell_ids
                     .iter()
-                    .filter(|id| !new_set.contains(id))
-                    .map(|&id| self.smoothed_util[id as usize])
+                    .map(|&id| (id, self.smoothed_util[id as usize]))
                     .collect();
 
-                let has_data = existing_utils.iter().any(|&u| u > 0.0);
-
-                if has_data {
-                    // Seed new cells to the average utilization of existing cells
-                    let avg_util: f64 =
-                        existing_utils.iter().sum::<f64>() / existing_utils.len().max(1) as f64;
-                    for &id in new_cell_ids {
-                        self.smoothed_util[id as usize] = avg_util;
-                        info!(
-                            "Seeded new cell {} smoothed_util to average {:.1}%",
-                            id, avg_util
-                        );
-                    }
-
-                    // Build demand map from smoothed_util for all active cells
-                    let cell_demands: HashMap<u32, f64> = all_cell_ids
-                        .iter()
-                        .map(|&id| (id, self.smoothed_util[id as usize]))
-                        .collect();
-
-                    self.cell_manager
-                        .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
-                        .context("computing demand-weighted CPU assignments")?
-                } else {
-                    // No utilization data yet (e.g., initial startup) — equal weight
-                    self.cell_manager
-                        .compute_cpu_assignments(self.enable_borrowing)
-                        .context("computing equal-weight CPU assignments (no utilization data)")?
-                }
+                self.cell_manager
+                    .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
+                    .context("computing demand-weighted CPU assignments")?
             } else {
+                // No utilization data yet (e.g., initial startup) — equal weight
                 self.cell_manager
                     .compute_cpu_assignments(self.enable_borrowing)
-                    .context("computing equal-weight CPU assignments (rebalancing disabled)")?
+                    .context("computing equal-weight CPU assignments (no utilization data)")?
             };
 
             (self.cell_manager.get_cell_assignments(), cpu_assignments)
@@ -1245,10 +1229,8 @@ impl<'a> Scheduler<'a> {
             let lent_pct = 100.0 * (delta_lent as f64) / (capacity as f64);
 
             // Update EWMA-smoothed utilization
-            if self.enable_rebalancing {
-                self.smoothed_util[cell] = self.demand_smoothing * util_pct
-                    + (1.0 - self.demand_smoothing) * self.smoothed_util[cell];
-            }
+            self.smoothed_util[cell] = self.demand_smoothing * util_pct
+                + (1.0 - self.demand_smoothing) * self.smoothed_util[cell];
 
             self.metrics
                 .cells
@@ -1257,13 +1239,11 @@ impl<'a> Scheduler<'a> {
                 .update_demand(util_pct, demand_borrow_pct, lent_pct);
 
             // Update smoothed_util_pct in metrics
-            if self.enable_rebalancing {
-                self.metrics
-                    .cells
-                    .entry(cell as u32)
-                    .or_default()
-                    .smoothed_util_pct = self.smoothed_util[cell];
-            }
+            self.metrics
+                .cells
+                .entry(cell as u32)
+                .or_default()
+                .smoothed_util_pct = self.smoothed_util[cell];
 
             global_running_delta = global_running_delta.saturating_add(delta_running);
             global_borrowed_delta = global_borrowed_delta.saturating_add(delta_borrowed);

@@ -21,7 +21,6 @@ const MITOSIS: Scheduler = Scheduler::named("mitosis")
         "/test.slice",
         "--cpu-controller-disabled",
         "--enable-borrowing",
-        "--enable-rebalancing",
         "--enable-llc-awareness",
         "--exit-dump-len",
         "1048576",
