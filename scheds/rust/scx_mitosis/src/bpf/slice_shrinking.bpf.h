@@ -68,7 +68,6 @@
 /* ── Config (populated by userspace rodata) ────────────────────────── */
 
 /* Defaults are in main.rs; userspace always overwrites via rodata */
-const volatile bool enable_slice_shrinking;
 const volatile u64 slice_shrink_min_ns;
 const volatile u64 slice_shrink_max_ns;
 const volatile u32 slice_shrink_multiplier;
@@ -125,7 +124,7 @@ static inline void slice_shrink_apply(struct task_struct *p, u64 limit,
 /*
  * Called from enqueue() when a pinned waiter arrives.
  * Shrinks the currently running task's slice based on the waiter's
- * EWMA runtime. Caller must check enable_slice_shrinking and curr.
+ * EWMA runtime. Caller must check curr.
  */
 static inline void slice_shrink_on_enqueue(struct task_struct *curr,
 					   struct task_ctx *pinned_waiter_tctx, u32 cell,
@@ -139,7 +138,6 @@ static inline void slice_shrink_on_enqueue(struct task_struct *curr,
 /*
  * Called from running() to shrink our slice when waiters are queued
  * on our CPU DSQ. Peeks the head waiter for EWMA data.
- * Caller must check enable_slice_shrinking.
  */
 static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struct cpu_ctx *cctx)
 {

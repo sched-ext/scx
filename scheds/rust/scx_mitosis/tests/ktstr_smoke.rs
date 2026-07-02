@@ -23,7 +23,6 @@ const MITOSIS: Scheduler = Scheduler::named("mitosis")
         "--dynamic-affinity-cpu-selection",
         "--enable-borrowing",
         "--enable-rebalancing",
-        "--enable-slice-shrinking",
         "--enable-llc-awareness",
         "--exit-dump-len",
         "1048576",

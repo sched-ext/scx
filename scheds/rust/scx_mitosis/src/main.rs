@@ -195,11 +195,6 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     dynamic_affinity_cpu_selection: bool,
 
-    /// Enable slice shrinking for CPU-pinned tasks. Uses per-task EWMA
-    /// runtime to shrink the running task's slice when pinned waiters are queued.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_slice_shrinking: bool,
-
     /// Upper bound for shrink limit (us). Used when the proportional
     /// value (avg_runtime * K) exceeds it.
     #[clap(long, default_value = "4000")]
@@ -372,7 +367,6 @@ impl<'a> Scheduler<'a> {
                 opts.slice_shrink_max_us
             );
         }
-        rodata.enable_slice_shrinking = opts.enable_slice_shrinking;
         rodata.slice_shrink_max_ns = opts.slice_shrink_max_us * 1_000;
         // K=2: in the proportional region, a pinned task waits at most 2x its historical runtime
         rodata.slice_shrink_multiplier = 2;

@@ -874,7 +874,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/* Shrink the running task's slice for this pinned waiter.
 	 * We know this task is pinned (!all_cell_cpus_allowed). */
-	if (!tctx->all_cell_cpus_allowed && enable_slice_shrinking) {
+	if (!tctx->all_cell_cpus_allowed) {
 		struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
 		/* Likely overly defensive bc no other should read */
 		if (curr && !(curr->flags & PF_IDLE))
@@ -1014,11 +1014,9 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	tctx->started_running_at = scx_bpf_now();
 
 	/* Shrink our slice if a pinned task is queued on this CPU's DSQ. */
-	if (enable_slice_shrinking) {
-		int ret = slice_shrink_on_running(p, tctx->cell, cctx);
-		if (ret < 0)
-			return;
-	}
+	int ret = slice_shrink_on_running(p, tctx->cell, cctx);
+	if (ret < 0)
+		return;
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
