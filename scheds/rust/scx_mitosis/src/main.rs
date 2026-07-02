@@ -1160,8 +1160,20 @@ impl<'a> Scheduler<'a> {
         self.collect_demand_metrics(&cpu_ctxs)
             .context("collecting demand metrics")?;
 
-        for (cell_id, cell) in &self.cells {
-            trace!("CELL[{}]: {}", cell_id, cell.cpus);
+        let mut sorted_cells: Vec<_> = self.cells.iter().collect();
+        sorted_cells.sort_by_key(|(cell_id, _)| *cell_id);
+        for (cell_id, cell) in sorted_cells {
+            let cell_metrics = self.metrics.cells.get(cell_id);
+            let util_pct = cell_metrics.map_or(0.0, |metrics| metrics.util_pct);
+            let smoothed_util_pct = cell_metrics.map_or(0.0, |metrics| metrics.smoothed_util_pct);
+            trace!(
+                "CELL[{}]: {} ({} CPUs, util={:.1}%, smoothed={:.1}%)",
+                cell_id,
+                cell.cpus,
+                cell.cpus.weight(),
+                util_pct,
+                smoothed_util_pct
+            );
         }
 
         for (cell_id, cell) in self.cells.iter() {
