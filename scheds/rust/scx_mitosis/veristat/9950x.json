@@ -13,8 +13,6 @@
                 },{
                     "exiting_task_workaround_enabled": true
                 },{
-                    "reject_multicpu_pinning": false
-                },{
                     "userspace_managed_cell_mode": false
                 },{
                     "__SCX_OPS_NAME_LEN": 128

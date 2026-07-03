@@ -36,7 +36,6 @@ const volatile u64 slice_ns;
 const volatile u64 root_cgid = 1;
 const volatile bool debug_events_enabled = false;
 const volatile bool exiting_task_workaround_enabled = true;
-const volatile bool reject_multicpu_pinning = false;
 const volatile bool use_lockless_peek = false;
 
 /*
@@ -49,7 +48,6 @@ struct llc_cpumask llc_to_cpus[MAX_LLCS];
 /* applied_configuration_seq is bumped when a userspace-pushed config finishes applying. */
 u32 applied_configuration_seq;
 u32 cpuset_seq;
-u32 applied_cpuset_seq;
 
 /*
  * Debug events circular buffer
@@ -277,30 +275,6 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 			return -ENOENT;
 		if (!bpf_cpumask_subset(borrowable, p->cpus_ptr))
 			all_cell_cpus_allowed = false;
-	}
-
-	/*
-	 * Single-CPU pinning is fine (even if outside this cell).
-	 * However, multi-CPU pinning that doesn't cover the entire
-	 * cell is not supported - the scheduler can't efficiently
-	 * handle partial affinity restrictions.
-	 *
-	 * When a new cell is created, or any cpuset change occurs,
-	 * there's a window where many tasks don't have the same
-	 * cpumask as their cell (since cell cpumasks are updated
-	 * later via apply_cell_config). We don't abort on these
-	 * tasks by checking cpuset_seq vs applied_cpuset_seq.
-	 */
-	if (tctx->cell != 0 && reject_multicpu_pinning && !all_cell_cpus_allowed &&
-	    bpf_cpumask_weight(p->cpus_ptr) > 1) {
-		if (READ_ONCE(cpuset_seq) != READ_ONCE(applied_cpuset_seq)) {
-			struct cpu_ctx *cctx = lookup_cpu_ctx(-1);
-			if (cctx)
-				cstat_inc(CSTAT_PIN_SKIP, tctx->cell, cctx);
-		} else {
-			scx_bpf_error("multi-CPU pinning within cell %d not supported", tctx->cell);
-			return -EINVAL;
-		}
 	}
 
 	/*
