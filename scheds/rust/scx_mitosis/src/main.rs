@@ -82,10 +82,6 @@ fn parse_ewma_factor(s: &str) -> Result<f64, String> {
 /// split and which CPUs they should be assigned to.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Deprecated, noop, use RUST_LOG or --log-level instead.
-    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
-
     /// Specify the logging level. Accepts rust's envfilter syntax for modular
     /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
     #[clap(long, default_value = "info")]
@@ -1396,10 +1392,6 @@ fn main(opts: Opts) -> Result<()> {
     {
         Ok(()) => {}
         Err(e) => eprintln!("failed to init logger: {}", e),
-    }
-
-    if opts.verbose > 0 {
-        warn!("Setting verbose via -v is deprecated and will be an error in future releases.");
     }
 
     debug!("opts={:?}", &opts);
