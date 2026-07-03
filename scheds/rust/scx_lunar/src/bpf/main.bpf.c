@@ -100,7 +100,7 @@ static __always_inline void update_task_dsq_type(
   }
 }
 
-static __always_inline void update_task_prio(struct task_struct* task, struct task_ctx* task_ctx, struct dispatch_ctx* dispatch_ctx, s u64 used_ns, bool runnable)
+static __always_inline void update_task_prio(struct task_struct* task, struct task_ctx* task_ctx, struct dispatch_ctx* dispatch_ctx, u64 used_ns, bool runnable)
 {
   if (!task_ctx)
   {

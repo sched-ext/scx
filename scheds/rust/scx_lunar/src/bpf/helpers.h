@@ -125,13 +125,13 @@ static __always_inline u32 cpu_llc_id(u32 cpu)
   return cpu_to_llc[cpu];
 }
 
-static __always_inline void dec_skipFallbackCounter(struct dispatch_ctx* ctx)
-{
-  if (ctx->skipFallbackCounter > 0)
-  {
-    ctx->skipFallbackCounter -= 1;
-  }
-}
+// static __always_inline void dec_skipFallbackCounter(struct dispatch_ctx* ctx)
+// {
+//   if (ctx->skipFallbackCounter > 0)
+//   {
+//     ctx->skipFallbackCounter -= 1;
+//   }
+// }
 
 static __always_inline bool isSpammer(struct task_ctx* task)
 {
