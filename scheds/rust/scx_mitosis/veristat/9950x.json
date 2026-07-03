@@ -17,8 +17,6 @@
                 },{
                     "exiting_task_workaround_enabled": true
                 },{
-                    "cpu_controller_disabled": false
-                },{
                     "reject_multicpu_pinning": false
                 },{
                     "userspace_managed_cell_mode": false

@@ -44,7 +44,6 @@ const volatile u64 slice_ns;
 const volatile u64 root_cgid = 1;
 const volatile bool debug_events_enabled = false;
 const volatile bool exiting_task_workaround_enabled = true;
-const volatile bool cpu_controller_disabled = false;
 const volatile bool reject_multicpu_pinning = false;
 const volatile bool use_lockless_peek = false;
 
@@ -133,22 +132,12 @@ static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 
 static inline struct cgroup *task_cgroup(struct task_struct *p)
 {
-	struct cgroup *cgrp;
+	struct cgroup *cgrp = NULL;
 
-	if (!cpu_controller_disabled) {
-		cgrp = scx_bpf_task_cgroup(p);
-	} else {
-		/*
-		 * When CPU controller is disabled, scx_bpf_task_cgroup() returns
-		 * root. Use p->cgroups->dfl_cgrp to get the task's actual cgroup
-		 * in the default (unified) hierarchy.
-		 *
-		 * p->cgroups is RCU-protected, so we need RCU lock.
-		 */
-		scoped_guard(rcu)
-		{
-			cgrp = bpf_cgroup_acquire(p->cgroups->dfl_cgrp);
-		}
+	/* Use the default hierarchy cgroup as the task's actual cgroup. */
+	scoped_guard(rcu)
+	{
+		cgrp = bpf_cgroup_acquire(p->cgroups->dfl_cgrp);
 	}
 
 	if (!cgrp)
@@ -393,7 +382,7 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 		/*
 		 * Cgroup lookup failed - this can happen during scheduler load
 		 * for tasks that were forked before the scheduler was loaded,
-		 * whose cgroups went offline before scx_cgroup_init() ran.
+		 * whose cgroups went offline before manual cgroup initialization ran.
 		 * Only fall back to root cgroup if the workaround is enabled
 		 * and the task is exiting.
 		 */
@@ -474,21 +463,18 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p, struct task
 		return refresh_task_cell(p, tctx);
 
 	/*
-	 * When not using CPU controller, check if task's cgroup changed.
-	 * The cgroup is already initialized by tp_cgroup_mkdir which
-	 * fires before the task can be scheduled in the new cgroup.
+	 * Check whether the task moved to a different cgroup. The cgroup is
+	 * initialized by tp_cgroup_mkdir before the task can be scheduled there.
 	 */
-	if (cpu_controller_disabled) {
-		u64 current_cgid;
+	u64 current_cgid;
 
-		scoped_guard(rcu)
-		{
-			current_cgid = p->cgroups->dfl_cgrp->kn->id;
-		}
-
-		if (current_cgid != tctx->cgid)
-			return refresh_task_cell(p, tctx);
+	scoped_guard(rcu)
+	{
+		current_cgid = p->cgroups->dfl_cgrp->kn->id;
 	}
+
+	if (current_cgid != tctx->cgid)
+		return refresh_task_cell(p, tctx);
 
 	return 0;
 }
@@ -1152,7 +1138,6 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 
 /*
  * Initialize cgroup and all its ancestors. Handles dying cgroups gracefully.
- * Used when CPU controller is disabled since SCX cgroup callbacks won't fire.
  */
 static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 {
@@ -1164,7 +1149,7 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 	if (cgrp_is_dying(cgrp))
 		return 0;
 
-	/* Initialize ancestors first (replicates SCX cgroup_init order) */
+	/* Initialize ancestors first so parent cell inheritance is available. */
 	bpf_for(level, 1, target_level)
 	{
 		struct cgroup *ancestor __free(cgroup) = lookup_cgrp_ancestor(cgrp, level);
@@ -1186,66 +1171,22 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 	return init_cgrp_ctx(cgrp);
 }
 
-/*
- * SCX cgroup callbacks - called by the SCX framework when the CPU controller
- * is enabled.
- */
-s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp, struct scx_cgroup_init_args *args)
-{
-	if (cpu_controller_disabled)
-		return 0;
-	return init_cgrp_ctx(cgrp);
-}
-
-s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
-{
-	if (cpu_controller_disabled)
-		return 0;
-
-	record_cgroup_exit(cgrp->kn->id);
-	return 0;
-}
-
-void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p, struct cgroup *from,
-		    struct cgroup *to)
-{
-	struct task_ctx *tctx;
-
-	if (cpu_controller_disabled)
-		return;
-
-	if (!(tctx = lookup_task_ctx(p)))
-		return;
-
-	update_task_cell(p, tctx, to);
-}
-
-/*
- * Tracepoint fallbacks - only active when CPU controller is disabled.
- * These provide cgroup tracking when SCX cgroup callbacks don't fire.
- */
+/* Tracepoints provide cgroup lifecycle tracking. */
 SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 {
 	int ret;
-	if (!cpu_controller_disabled)
-		return 0;
 
 	ret = init_cgrp_ctx_with_ancestors(cgrp);
-	if (ret) {
-		scx_bpf_error(
-			"tp_cgroup_mkdir: init_cgrp_ctx_with_ancestors failed for cgid %llu: %d",
-			cgrp->kn->id, ret);
-	}
+	if (ret)
+		/* Error already reported; tracepoints still return 0. */
+		return 0;
 	return 0;
 }
 
 SEC("tp_btf/cgroup_rmdir")
 int BPF_PROG(tp_cgroup_rmdir, struct cgroup *cgrp, const char *cgrp_path)
 {
-	if (!cpu_controller_disabled)
-		return 0;
-
 	record_cgroup_exit(cgrp->kn->id);
 	return 0;
 }
@@ -1341,26 +1282,16 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 
 s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
-	/*
-	 * When CPU controller is disabled, args->cgroup is root, so we need
-	 * to get the task's actual cgroup for both logging and cell assignment.
-	 * We also need to ensure the cgroup hierarchy is initialized since
-	 * SCX cgroup callbacks won't fire.
-	 */
-	if (cpu_controller_disabled) {
-		struct cgroup *cgrp __free(cgroup) = task_cgroup(p);
-		if (!cgrp)
-			return -ENOENT;
+	struct cgroup *cgrp __free(cgroup) = task_cgroup(p);
+	if (!cgrp)
+		return -ENOENT;
 
-		/* Ensure cgroup hierarchy is initialized (handles ancestors + this cgroup) */
-		int ret = init_cgrp_ctx_with_ancestors(cgrp);
-		if (ret)
-			return ret;
+	/* Ensure cgroup hierarchy is initialized before assigning the task. */
+	int ret = init_cgrp_ctx_with_ancestors(cgrp);
+	if (ret)
+		return ret;
 
-		return init_task_impl(p, cgrp);
-	}
-
-	return init_task_impl(p, args->cgroup);
+	return init_task_impl(p, cgrp);
 }
 
 __hidden void dump_cpumask_word(s32 word, const struct cpumask *cpumask)
@@ -1620,42 +1551,41 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		bpf_cpumask_release(cpumask);
 
 	/*
-	 * When CPU controller is disabled, initialize cgrp_ctx for all existing
-	 * cgroups. This replicates SCX cgroup_init callback behavior - all
-	 * cgroups get initialized in hierarchical order during scheduler attach.
+	 * Initialize cgrp_ctx for all existing cgroups in hierarchical order.
 	 * The tracepoint handles new cgroups created after attach.
 	 */
-	if (cpu_controller_disabled) {
-		struct cgroup *iter_root __free(cgroup) = NULL;
+	struct cgroup *iter_root __free(cgroup) = NULL;
 
-		scoped_guard(rcu)
-		{
-			if (root_cgrp)
-				iter_root = bpf_cgroup_acquire(root_cgrp);
-		}
+	scoped_guard(rcu)
+	{
+		if (root_cgrp)
+			iter_root = bpf_cgroup_acquire(root_cgrp);
+	}
 
-		if (!iter_root) {
-			scx_bpf_error("Failed to acquire root cgroup for initialization");
-			return -ENOENT;
-		}
+	if (!iter_root) {
+		scx_bpf_error("Failed to acquire root cgroup for initialization");
+		return -ENOENT;
+	}
 
-		struct cgroup_subsys_state *root_css = &iter_root->self;
-		struct cgroup_subsys_state *pos;
+	struct cgroup_subsys_state *root_css = &iter_root->self;
+	struct cgroup_subsys_state *pos;
 
-		scoped_guard(rcu)
-		{
-			bpf_for_each(css, pos, root_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
-				/*
-				 * pos->cgroup dereference loses RCU tracking in verifier,
-				 * so we can't use it directly with bpf_cgroup_acquire or
-				 * pass it to functions that call bpf_cgroup_ancestor.
-				 * Instead, read the cgroup ID and use bpf_cgroup_from_id
-				 * to get a trusted, acquired reference.
-				 */
-				u64 cgid = pos->cgroup->kn->id;
-				struct cgroup *cgrp __free(cgroup) = bpf_cgroup_from_id(cgid);
-				if (cgrp)
-					init_cgrp_ctx(cgrp);
+	scoped_guard(rcu)
+	{
+		bpf_for_each(css, pos, root_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+			/*
+			 * pos->cgroup dereference loses RCU tracking in verifier,
+			 * so we can't use it directly with bpf_cgroup_acquire or
+			 * pass it to functions that call bpf_cgroup_ancestor.
+			 * Instead, read the cgroup ID and use bpf_cgroup_from_id
+			 * to get a trusted, acquired reference.
+			 */
+			u64 cgid = pos->cgroup->kn->id;
+			struct cgroup *cgrp __free(cgroup) = bpf_cgroup_from_id(cgid);
+			if (cgrp) {
+				ret = init_cgrp_ctx_with_ancestors(cgrp);
+				if (ret)
+					return ret;
 			}
 		}
 	}
@@ -2018,9 +1948,6 @@ SCX_OPS_DEFINE(mitosis,
 	       .stopping		= (void *)mitosis_stopping,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
 	       .init_task		= (void *)mitosis_init_task,
-	       .cgroup_init		= (void *)mitosis_cgroup_init,
-	       .cgroup_exit		= (void *)mitosis_cgroup_exit,
-	       .cgroup_move		= (void *)mitosis_cgroup_move,
 	       .dump 			= (void *)mitosis_dump,
 	       .dump_task		= (void *)mitosis_dump_task,
 	       .init			= (void *)mitosis_init,

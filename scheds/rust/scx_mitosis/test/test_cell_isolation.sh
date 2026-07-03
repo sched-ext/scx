@@ -205,12 +205,6 @@ create_cgroups() {
         sudo mkdir -p "$CGROUP_BASE"
     fi
 
-    # Enable CPU controller for children (required for sched_ext cgroup callbacks)
-    if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
-        log_info "Enabling CPU controller for $CGROUP_BASE children"
-        echo "+cpu" | sudo tee "$CGROUP_BASE/cgroup.subtree_control" > /dev/null
-    fi
-
     for i in $(seq 1 $NUM_CELLS); do
         cell_name="test_cell_${i}"
         cell_path="$CGROUP_BASE/$cell_name"

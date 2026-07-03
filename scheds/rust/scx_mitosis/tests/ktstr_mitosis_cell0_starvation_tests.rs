@@ -8,7 +8,6 @@ declare_scheduler!(MITOSIS, {
     topology = (1, 2, 4, 2),
     sched_args = [
         "--exit-dump-len", "1048576",
-        "--cpu-controller-disabled",
         "--cell-parent-cgroup", "/ktstr",
         "--cell0-min-cpus", "1",
     ],

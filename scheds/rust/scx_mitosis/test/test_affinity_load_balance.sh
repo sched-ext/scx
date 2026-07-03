@@ -100,9 +100,6 @@ trap cleanup EXIT INT TERM
 
 start_scheduler() {
     mkdir -p "$CGROUP_BASE"
-    if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
-        echo "+cpu" > "$CGROUP_BASE/cgroup.subtree_control"
-    fi
 
     local scheduler_args=("--cell-parent-cgroup" "/test.slice")
     if [[ -n "${SCX_MITOSIS_ARGS:-}" ]]; then

@@ -68,9 +68,6 @@ echo -e "${YELLOW}MANAGED CELL EXHAUSTION / REUSE TEST${NC}"
 echo -e "${YELLOW}========================================${NC}\n"
 
 mkdir -p "$CGROUP_BASE"
-if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
-    echo "+cpu" > "$CGROUP_BASE/cgroup.subtree_control"
-fi
 
 echo -e "${YELLOW}Starting scx_mitosis with managed parent /test.slice${NC}"
 "$SCHEDULER_BIN" --cell-parent-cgroup /test.slice > "$LOG_FILE" 2>&1 &

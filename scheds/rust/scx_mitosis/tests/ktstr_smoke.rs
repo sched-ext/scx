@@ -19,7 +19,6 @@ const MITOSIS: Scheduler = Scheduler::named("mitosis")
     .sched_args(&[
         "--cell-parent-cgroup",
         "/test.slice",
-        "--cpu-controller-disabled",
         "--enable-llc-awareness",
         "--exit-dump-len",
         "1048576",

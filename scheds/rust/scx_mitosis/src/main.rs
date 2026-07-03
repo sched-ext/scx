@@ -123,11 +123,6 @@ struct Opts {
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     exiting_task_workaround: bool,
 
-    /// Disable SCX cgroup callbacks (for when CPU cgroup controller is disabled).
-    /// Uses tracepoints and cgroup iteration instead.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    cpu_controller_disabled: bool,
-
     /// Reject tasks with multi-CPU pinning that doesn't cover the entire cell.
     /// By default, these tasks are allowed but may have degraded performance.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -337,7 +332,6 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
         rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
-        rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
 
         // Slice shrinking configuration
         if opts.slice_shrink_min_us >= opts.slice_shrink_max_us {

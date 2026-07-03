@@ -84,7 +84,7 @@ struct task_ctx {
 	 * lending cell's per-CPU DSQ vtime with this task's execution.
 	 */
 	bool borrowed;
-	/* Last known cgroup ID for detecting cgroup moves (used when cpu_controller_disabled) */
+	/* Last known cgroup ID for detecting cgroup moves */
 	u64 cgid;
 	/* Which LLC this task is assigned to */
 	s32 llc;
