@@ -1,6 +1,6 @@
 [package]
 name = "scx_forge_agent"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
 license = "GPL-2.0-only"
