@@ -128,15 +128,6 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     reject_multicpu_pinning: bool,
 
-    /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
-    /// to use LLC-aware scheduling.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_llc_awareness: bool,
-
-    /// Deprecated, noop. LLC-aware mode always scans sibling LLC DSQs.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_work_stealing: bool,
-
     /// Parent cgroup path whose direct children become cells.
     /// Scheduler startup requires this unless running in --monitor or --version mode.
     /// Example: --cell-parent-cgroup /workloads
@@ -353,9 +344,7 @@ impl<'a> Scheduler<'a> {
 
         rodata.reject_multicpu_pinning = opts.reject_multicpu_pinning;
 
-        // Set nr_llc in rodata
         rodata.nr_llc = nr_llc as u32;
-        rodata.enable_llc_awareness = opts.enable_llc_awareness;
 
         rodata.use_lockless_peek = opts.use_lockless_peek;
 

@@ -214,9 +214,6 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 	u64 llcs_with_cpus = 0;
 	u32 llc;
 
-	if (!enable_llc_awareness)
-		return 0;
-
 	cell = lookup_cell(cell_id);
 	if (!cell)
 		return -EINVAL;
@@ -269,19 +266,14 @@ static inline int account_cell_llc_enqueue(u32 cell_id, u32 llc)
 {
 	struct cell *cell;
 
-	if (!enable_llc_awareness)
-		return 0;
-
 	if (!llc_is_valid(llc) || llc >= nr_llc) {
 		scx_bpf_error("account_cell_llc_enqueue: invalid LLC %u", llc);
 		return -EINVAL;
 	}
 
 	cell = lookup_cell(cell_id);
-	if (!cell) {
-		scx_bpf_error("account_cell_llc_enqueue: invalid cell %u", cell_id);
+	if (!cell)
 		return -ENOENT;
-	}
 
 	/*
 	 * Account the logical LLC DSQ insertion before checking llcs_with_cpus.
@@ -454,17 +446,13 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 	}
 
 	struct cell *cell = lookup_cell(tctx->cell);
-	if (!cell) {
-		scx_bpf_error("failed to lookup cell %u for LLC assignment", tctx->cell);
-		return -ENOENT;
-	}
+	if (!cell)
+		return -EINVAL;
 
 	u32 old_llc = tctx->llc;
-	if (refresh_task_llc_cpumask(tctx, new_llc)) {
-		scx_bpf_error("failed to refresh task LLC cpumask for cell %u LLC %u", tctx->cell,
-			      new_llc);
-		return -EINVAL;
-	}
+	int ret = refresh_task_llc_cpumask(tctx, new_llc);
+	if (ret)
+		return ret;
 
 	/*
 	 * This writes a cell/LLC DSQ. Pinned tasks keep CPU DSQs.
@@ -488,10 +476,15 @@ static inline int update_task_llc_assignment(struct task_struct *p, struct task_
 					     s32 preferred_cpu)
 {
 	s32 new_llc = choose_task_llc(tctx, preferred_cpu);
+	int ret;
+
 	if (!llc_is_valid(new_llc))
 		return -EINVAL;
 
-	return set_task_llc(p, tctx, (u32)new_llc, true);
+	ret = set_task_llc(p, tctx, (u32)new_llc, true);
+	if (ret == -ENOENT)
+		scx_bpf_error("failed to assign task LLC for cell %u LLC %u", tctx->cell, new_llc);
+	return ret;
 }
 
 static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx *tctx,
@@ -510,13 +503,13 @@ static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx *
 
 	if (tctx->llc == new_llc) {
 		ret = refresh_task_llc_cpumask(tctx, (u32)new_llc);
-		if (ret && !llc_is_valid(tctx->llc))
-			return -EINVAL;
-		return 0;
+		if (ret == -ENOENT && llc_is_valid(tctx->llc))
+			return 0;
+		return ret;
 	}
 
 	ret = set_task_llc(p, tctx, (u32)new_llc, false);
-	if (ret && llc_is_valid(tctx->llc))
+	if (ret == -ENOENT && llc_is_valid(tctx->llc))
 		return 0;
 	return ret;
 }
