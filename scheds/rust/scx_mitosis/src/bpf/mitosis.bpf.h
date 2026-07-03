@@ -32,6 +32,9 @@ enum mitosis_constants {
 	/* Root cell index */
 	ROOT_CELL_ID = 0,
 
+	/* cgroup-v2 root cgroup id (kernfs root inode is always 1) */
+	ROOT_CGID = 1,
+
 	/* No NUMA constraint for DSQ creation */
 	ANY_NUMA = -1,
 };

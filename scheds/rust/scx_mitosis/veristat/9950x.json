@@ -5,15 +5,9 @@
                 },{
                     "nr_possible_cpus": 32
                 },{
-                    "smt_enabled": true
-                },{
-                    "root_cgid": 1
-                },{
                     "debug_events_enabled": false
                 },{
                     "exiting_task_workaround_enabled": true
-                },{
-                    "userspace_managed_cell_mode": false
                 },{
                     "__SCX_OPS_NAME_LEN": 128
                 },{

@@ -29,11 +29,9 @@ char _license[] SEC("license") = "GPL";
  * Variables populated by userspace
  */
 const volatile u32 nr_possible_cpus = 1;
-const volatile bool smt_enabled = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;
-const volatile u64 root_cgid = 1;
 const volatile bool debug_events_enabled = false;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool use_lockless_peek = false;
@@ -384,18 +382,16 @@ static s32 pick_idle_cpu_from(struct task_struct *p, const struct cpumask *cand_
 	s32 cpu;
 
 	/*
-	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
-	 * partially idle @prev_cpu.
+	 * Any wholly idle CPU is likely a better pick than a partially idle
+	 * @prev_cpu.
 	 */
-	if (smt_enabled) {
-		if (prev_in_cand && bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-			return prev_cpu;
+	if (prev_in_cand && bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		return prev_cpu;
 
-		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
-		if (cpu >= 0)
-			return cpu;
-	}
+	cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
+	if (cpu >= 0)
+		return cpu;
 
 	if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 		return prev_cpu;
@@ -1067,8 +1063,8 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 		return -ENOENT;
 	}
 
-	if (cgrp->kn->id == root_cgid) {
-		WRITE_ONCE(cgc->cell, 0);
+	if (cgrp->kn->id == ROOT_CGID) {
+		WRITE_ONCE(cgc->cell, ROOT_CELL_ID);
 		return 0;
 	}
 
@@ -1415,7 +1411,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if ((ret = validate_userspace_data()))
 		return ret;
 
-	struct cgroup *rootcg __free(cgroup) = bpf_cgroup_from_id(root_cgid);
+	struct cgroup *rootcg __free(cgroup) = bpf_cgroup_from_id(ROOT_CGID);
 	if (!rootcg)
 		return -ENOENT;
 
