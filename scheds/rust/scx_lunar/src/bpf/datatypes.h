@@ -19,6 +19,7 @@ struct task_ctx
   s64 vlag;
   u64 last_spawn_timestamp;
   u64 task_spawn_interval_avg;
+  u64 last_run_granted_slice;
 };
 
 struct dispatch_ctx

@@ -1,5 +1,5 @@
 #include <scx/common.bpf.h>
-//#include <bpf_experimental.h>
+// #include <bpf_experimental.h>
 #include "defines.h"
 #include "helpers.h"
 #include "datatypes.h"
@@ -296,7 +296,9 @@ s32 BPF_STRUCT_OPS(
   if (isIdle && (context->current_dsq_type != DSQ_TYPE_GREEDY || !context->first_runtime_avg_sample_taken) && !isSpammer(context))
   {
     creditVlag(context);
-    scx_bpf_dsq_insert(p, DEFAULT_DSQ_LOCAL_ON | cpu, get_dsq_task_slice(context->current_dsq_type), 0);
+    u64 slice = get_dsq_task_slice(context->current_dsq_type);
+    context->last_run_granted_slice = slice;
+    scx_bpf_dsq_insert(p, DEFAULT_DSQ_LOCAL_ON | cpu, slice, 0);
   }
   return cpu;
 }
@@ -373,8 +375,9 @@ void BPF_STRUCT_OPS(lunar_enqueue, struct task_struct* p, u64 enq_flags)
   {
     dsq = get_cpu_dsq_from_type(dsqType, cpu);
   }
-
-  scx_bpf_dsq_insert(p, dsq, get_dsq_task_slice(dsqType), enq_flags);
+  u64 slice = get_dsq_task_slice(dsqType);
+  context->last_run_granted_slice = slice;
+  scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
 }
 
 void BPF_STRUCT_OPS(
@@ -408,7 +411,7 @@ void BPF_STRUCT_OPS(
   if (!dispatch_ctx)
     return;
 
-  u64 task_slice = get_dsq_task_slice(tctx->current_dsq_type);
+  u64 task_slice = tctx->last_run_granted_slice;
   u64 remaining = task->scx.slice;
 
   u64 used_ns = (remaining >= task_slice) ? 0 : (task_slice - remaining);
@@ -420,6 +423,16 @@ void BPF_STRUCT_OPS(
   if (!runnable)
   {
     tctx->last_yield_timestamp = bpf_ktime_get_ns();
+  }
+
+  u64 current_dsq = tctx->current_dsq_type;
+  u64 dsqIndex;
+  bpf_for(dsqIndex, DSQ_TYPE_LC, DSQ_TYPE_GREEDY) /* LC..BATCH */
+  {
+    if (dsqIndex >= current_dsq)
+      dispatch_ctx->runtime_per_queue[dsqIndex] += used_ns;
+    else
+      dispatch_ctx->runtime_per_queue[dsqIndex] = 0;
   }
 
   update_task_prio(task, tctx, dispatch_ctx, used_ns, runnable);
