@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
+//
+// Author: Timon Stipkovits <timon2201@gmail.com>
+//
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
 #ifndef DATATYPES_H
 #define DATATYPES_H
 #include "defines.h"
@@ -8,7 +15,6 @@ const volatile u32 schedulerMode = 0;
 
 struct task_ctx
 {
-  // s64 vlag;
   u64 current_dsq_type;
   u64 dsq_type_before_boost;
   u64 runtime_avg;
@@ -26,7 +32,6 @@ struct dispatch_ctx
 {
   u64 runtime_avg;
   u64 runtime_per_queue[DSQ_PRIO_QUEUE_AMOUNT];
-  u64 skipFallbackRemainingTime;
 };
 
 struct

@@ -1,6 +1,6 @@
 [package]
 name = "scx_lunar"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Multi-queue latency-focused scheduler with per-CPU/per-LLC dispatch modes"
 license = "GPL-2.0-only"
