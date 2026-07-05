@@ -917,11 +917,22 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Find a proper DSQ for the task, which is either the task's
-	 * associated compute domain or its alternative domain, or
-	 * the closest available domain from the previous domain.
+	 * associated compute domain or its alternative domain, or the
+	 * closest available domain from the previous domain.
 	 *
-	 * If the CPU is already picked at ops.select_cpu(),
-	 * let's use the chosen CPU.
+	 * task_cpu is the placement hint used below; whether it lies within
+	 * p->cpus_ptr depends on how we reached ops.enqueue():
+	 *
+	 * 1. Within this ops.enqueue(), task_cpu and p->cpus_ptr are stable:
+	 *    enqueue and set_cpumask() are both serialized by the rq lock, so
+	 *    neither changes between here and the dispatch below.
+	 * 2. If ops.select_cpu() already chose the CPU (is_enq_cpu_selected),
+	 *    the kernel validated it and pi_lock spans select_cpu()->enqueue(),
+	 *    so task_cpu is guaranteed to be within p->cpus_ptr.
+	 * 3. Otherwise (pure enqueue), task_cpu may lag a cpumask change --
+	 *    e.g. set_cpus_allowed()'s DEQUEUE_SAVE/ENQUEUE_RESTORE updates the
+	 *    mask and re-enqueues before affine_move_task() migrates -- so it
+	 *    can be outside p->cpus_ptr and must be clamped before use.
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
 	if (likely(!__COMPAT_is_enq_cpu_selected(enq_flags))) {
@@ -932,6 +943,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			.cpuc_cur = cpuc_cur,
 			.wake_flags = 0,
 		};
+
+		/* Case 3: task_cpu may be stale; clamp the pick input to cpus_ptr. */
+		if (!bpf_cpumask_test_cpu(ictx.prev_cpu, p->cpus_ptr))
+			ictx.prev_cpu = bpf_cpumask_first(p->cpus_ptr);
 
 		cpu = pick_idle_cpu(&ictx, &is_idle);
 	} else {
@@ -1067,9 +1082,8 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	 * the new mask while taskc->suggested_cpu_id (only refreshed at
 	 * step 4) is still the stale pre-change pick.
 	 *
-	 * Fall back to scx_bpf_task_cpu(p) when the cached pick is no
-	 * longer in p->cpus_ptr -- the kernel keeps task_cpu consistent
-	 * with affinity. A full pick_idle_cpu() refresh would be more
+	 * Fall back to the first CPU of p->cpus_ptr when the cached pick
+	 * is no longer valid. A full pick_idle_cpu() refresh would be more
 	 * accurate but extends the call chain (lavd_dispatch ->
 	 * scx_cgroup_bw_reenqueue -> cbw_reenqueue_cgroup ->
 	 * cbw_drain_btq_batch -> enqueue_cb -> pick_idle_cpu) past the
@@ -1078,7 +1092,7 @@ int enqueue_cb(struct task_struct __arg_trusted *p, task_ctx *taskc)
 	cpu = taskc->suggested_cpu_id;
 	if (cpu < 0 || cpu >= nr_cpu_ids ||
 	    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-		cpu = scx_bpf_task_cpu(p);
+		cpu = bpf_cpumask_first(p->cpus_ptr);
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
@@ -2093,6 +2107,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);
+	/* task_cpu may fall outside cpus_ptr; seed an allowed CPU. */
+	if (!bpf_cpumask_test_cpu(taskc->suggested_cpu_id, p->cpus_ptr))
+		taskc->suggested_cpu_id = bpf_cpumask_first(p->cpus_ptr);
 	bpf_rcu_read_unlock();
 
 	if (is_ksoftirqd(p))
