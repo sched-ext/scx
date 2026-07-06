@@ -1,3156 +1,868 @@
-// SPDX-License-Identifier: GPL-2.0
-/* scx_cake - CAKE DRR++ adapted for CPU scheduling: yield-gated priority, direct dispatch, per-LLC DSQ */
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * scx_cake — a clean-slate sched_ext scheduler.
+ *
+ * One master algorithm, eight callbacks, built entirely on kernel primitives.
+ * No feature flags, no build variants, no runtime telemetry, no volatile, no
+ * attributes, no division. See DESIGN.md for the full rationale.
+ *
+ * Model of operation
+ * ------------------
+ *   - Placement is a single kfunc: scx_bpf_select_cpu_dfl(). It already
+ *     computes the saturation tiers we want (idle full core, then idle SMT
+ *     sibling, then "saturated") while preserving prev-CPU cache warmth,
+ *     WAKE_SYNC, and LLC locality. When it hands back an idle CPU we
+ *     direct-dispatch; otherwise the task falls through to ops.enqueue().
+ *   - Under saturation a task queues on the vtime DSQ of the CPU the kernel
+ *     validated for it (dsq_id == task_cpu): the insert happens under that
+ *     CPU's already-held rq lock, so the queue lock is contended only by its
+ *     owner and occasional stealers — never the degree-nr_cpus global rbtree
+ *     that serialized 3M wakes/s. Slice-expiry requeues resolve on their own
+ *     CPU (L1/L2 stays warm); an idle CPU pulls work via a staggered ring
+ *     steal in dispatch, so nothing strands. Work-conservation is enforced by
+ *     kicking one claimed-idle CPU per insert (custom DSQs have no auto-kick;
+ *     an idle *owner* is already resched'd by core's activate→wakeup_preempt
+ *     under the same rq-lock hold, so no insert kick is needed for it).
+ *   - Under low load a CPU whose queue is empty keeps its current task running
+ *     (slice refill), cutting per-quantum reprocessing. Contention preempts it
+ *     instantly via SCX_KICK_PREEMPT.
+ *   - Fairness is a single dsq_vtime advanced by a reciprocal-weight table
+ *     (no division on the hot path); per-CPU run-start stamps give correct
+ *     wall-time charge across keep-running rounds.
+ *
+ * This software may be used and distributed according to the terms of the GNU
+ * General Public License version 2.
+ */
 #include <scx/common.bpf.h>
-#include <scx/compat.bpf.h>
-#include <lib/arena_map.h> /* BPF_MAP_TYPE_ARENA definition */
-#include <lib/sdt_task.h> /* scx_task_data, scx_task_alloc, scx_task_free */
 #include "intf.h"
-#include "bpf_compat.h"
 
 char _license[] SEC("license") = "GPL";
 
-/* Scheduler RODATA config - JIT constant-folds these for ~200 cycle savings per decision */
-const u64  quantum_ns	     = CAKE_DEFAULT_QUANTUM_NS;
-const u64  new_flow_bonus_ns = CAKE_DEFAULT_NEW_FLOW_BONUS_NS;
-
-/* Hog Squeeze RODATA — self-regulating triple-gate deprioritization.
- * Vtime penalties only matter under contention (zero contention = zero impact).
- * Set by loader, derivable from hardware config. */
-
-/* RODATA BAKING: hot-path constants promoted from #define for JIT folding
- * + per-profile tunability. JIT treats these identically to immediates.
- * Rust loader can override for esports/battery profiles. */
-const u64  aq_yielder_ceiling_ns = AQ_YIELDER_CEILING_NS; /* 50ms ceiling for yielders */
-const u64  aq_min_ns             = AQ_MIN_NS;             /* 50µs quantum floor */
-const u32  preempt_vip_ns        = CAKE_PREEMPT_VIP_THRESHOLD_NS;     /* 50µs VIP preempt */
-const u32  preempt_yielder_ns    = CAKE_PREEMPT_YIELDER_THRESHOLD_NS; /* 100µs normal preempt */
-
-/* JITTER REDUCTION: RODATA lookup tables indexed by task_class (0-3).
- * Eliminates branching chains — single indexed load is constant-time
- * regardless of class, zero pipeline misprediction variance. */
-/* ── TIERED DSQ ORDERING ──
- * Non-overlapping offsets guarantee class ordering in vtime DSQ.
- * GAME [0,4096] < NORMAL [8192,12288] < BG [32768,36864] < HOG [49152,53248].
- * HOG = worst offender (75%+ quantum), gets heaviest penalty (6× NORMAL).
- * BG = passive background, moderate penalty (4× NORMAL).
- * Index: [NORMAL=0, GAME=1, HOG=2, BG=3] (matches CAKE_CLASS_* enum) */
-const u32  tier_base[4]           = { 8192, 0, 49152, 32768 };  /* NORMAL=8192, GAME=0, HOG=49152(6×), BG=32768(4×) */
-/* VRUNTIME COST: max rt_cost per class (clamped to inter-bucket gap).
- * Prevents runtime cost from pushing a task across bucket boundaries.
- * All gaps ≥3072 — uniform cap of 4096 is safe for every class. */
-const u32  rt_cost_cap[4]        = { 4096, 4096, 4096, 4096 };  /* uniform cap */
-const u32  preempt_thresh_ns[4]  = { 100000, 50000, 100000, 100000 }; /* NORMAL=100µs, GAME=50µs(VIP), HOG/BG=100µs */
-/* OPT-4: EEVDF nice scaling — pre-computed reciprocal multiplier.
- * vtime_mult = 102400 / weight, where 1024 = nice0 baseline (weight 100).
- * Replaces the 30-insn binary tree nice_shift system with a 5-insn
- * division (1/64 stops) + 4-insn multiply (every stop).
- * nice_scale_table REMOVED — was Shadow State (Rule 74). */
-
-/* CAKE_STATS_ENABLED: compile-time elimination for release builds.
- *
- * RELEASE (CAKE_RELEASE=1, set by build.rs in --release):
- *   CAKE_STATS_ENABLED is a compile-time constant 0. Clang eliminates ALL
- *   stats/telemetry branches entirely — zero instructions, zero overhead.
- *   The --verbose flag is unavailable in release builds.
- *
- * DEBUG (CAKE_RELEASE not defined):
- *   volatile RODATA toggle — loader patches enable_stats to true when
- *   --verbose is passed. Volatile prevents Clang DCE while the initial
- *   value is still 'false'. JIT replaces the volatile load with an
- *   immediate compare after loader patching — negligible cost. */
-#ifdef CAKE_RELEASE
-#define CAKE_STATS_ENABLED 0
-#else
-const bool enable_stats __attribute__((used)) = false;
-#define CAKE_STATS_ENABLED (*(volatile const bool *)&enable_stats)
-#endif
-/* CAKE_STATS_ACTIVE: runtime-suppressible telemetry.
- * False during BenchLab runs (bench_active=1) so kfunc measurements
- * aren't polluted by ~15 extra scx_bpf_now() + arena writes per event. */
-#define CAKE_STATS_ACTIVE (CAKE_STATS_ENABLED && !bench_active)
-const bool enable_dvfs =
-	false; /* RODATA — loader-compat only (tick removed, DVFS dead) */
-
-/* Topology config - JIT eliminates unused SMT steering when nr_cpus <= nr_phys_cpus.
- * has_hybrid removed: Rust loader pre-fills cpu_sibling_map for ALL topologies
- * via scx_utils::Topology::sibling_cpus(). No runtime branching needed. */
-
-/* Per-LLC DSQ partitioning — populated by loader from topology detection.
- * Eliminates cross-CCD lock contention: each LLC has its own DSQ.
- * Single-CCD (9800X3D): nr_llcs=1, identical to single-DSQ behavior.
- * Multi-CCD (9950X): nr_llcs=2, halves contention, eliminates cross-CCD atomics. */
-const u32 nr_llcs = 1;
-const u32 nr_cpus = 8; /* Set by loader — bounds kick scan loop (Rule 39) */
-const u32 nr_phys_cpus =
-	8; /* Set by loader — physical core count for PHYS_FIRST */
-const u32 nr_nodes = 1; /* Set by loader — NUMA node count for bench competitor */
-const u32 cpu_llc_id[CAKE_MAX_CPUS] = {};
-const u32 cpuperf_cap_table[CAKE_MAX_CPUS] = {}; /* Set by loader — per-CPU max perf */
-
-/* Performance-ordered CPU scan arrays (populated by Rust loader).
- * cpus_fast_to_slow: GAME tasks scan highest-perf cores first → maximum boost.
- * cpus_slow_to_fast: non-GAME tasks scan lowest-perf cores first → power parking.
- * Source: amd_pstate_prefcore_ranking (Zen 4) or cpufreq_cap (fallback).
- * Terminated by 0xFF sentinel when nr_cpus < CAKE_MAX_CPUS. */
-const u8 cpus_fast_to_slow[CAKE_MAX_CPUS] = {};
-const u8 cpus_slow_to_fast[CAKE_MAX_CPUS] = {};
-
-/* Topological O(1) Arrays — populated by loader */
-const u64 llc_cpu_mask[CAKE_MAX_LLCS]	 = {};
-const u64 core_cpu_mask[32]		 = {};
-const u8  cpu_sibling_map[CAKE_MAX_CPUS] = {};
-
-/* BSS bench state: xorshift32 PRNG seed */
-u32 bench_xorshift_state = 0xDEADBEEF;
-
-/* F2 FIX: 256-bit CPU mask support for Threadripper/EPYC */
-#define CAKE_CPU_MASK_WORDS (CAKE_MAX_CPUS / 64)
-
-/* Heterogeneous Routing Masks — u64[4] for 256 CPUs */
-const u64  big_core_phys_mask[CAKE_CPU_MASK_WORDS] = {};
-const u64  big_core_smt_mask[CAKE_CPU_MASK_WORDS]  = {};
-const u64  little_core_mask[CAKE_CPU_MASK_WORDS]   = {};
-const u64  vcache_llc_mask[CAKE_CPU_MASK_WORDS]    = {};
-const bool has_vcache	      = false;
-const bool has_hybrid_cores   = false; /* Set by loader — gate for Gate 2 scan */
-/* has_cpuperf_control REMOVED: cpuperf 768/1024 scaling was removed.
- * All CPUs run at full speed during GAMING. */
-
-/* Audio stack TGIDs — detected once at startup, baked into RODATA.
- * PipeWire/PulseAudio/JACK daemons + PipeWire socket clients (mixers like
- * goxlr-daemon, easyeffects). Session-persistent (started at login, same
- * PID until logout). JIT constant-folds these to immediates.
- * Zero-terminated: unused slots = 0 (no valid TGID matches pid 0). */
-const u32 nr_audio_tgids = 0;
-const u32 audio_tgids[CAKE_MAX_AUDIO_TGIDS] = {};
-
-/* Compositor TGIDs — detected once at startup, baked into RODATA.
- * Wayland compositors (kwin_wayland, mutter, sway, Hyprland, etc.) present
- * every frame to the display. Must dispatch promptly during GAMING.
- * Session-persistent like audio daemons. */
-const u32 nr_compositor_tgids = 0;
-const u32 compositor_tgids[CAKE_MAX_COMPOSITOR_TGIDS] = {};
-
-
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * PER-CPU ARENA BLOCK: Unified mailbox (C1 spatial consolidation).
- *
- * Single per-CPU allocation sized by CAKE_MBOX_SIZE:
- *   - release: 64B/CPU (1 CL) — struct is dead stub (all reads DCE'd)
- *   - debug:  128B/CPU (2 CL) — CL0 telemetry + CL1 BenchLab handoff
- *   - 1 BSS global pointer, 1 TLB entry, 1 null-check
- * ═══════════════════════════════════════════════════════════════════════════ */
-struct cake_per_cpu {
-	struct mega_mailbox_entry
-		mbox; /* release: 64B (1 CL), debug: 128B (2 CL) */
-} __attribute__((aligned(CAKE_MBOX_ALIGN)));
-_Static_assert(sizeof(struct cake_per_cpu) == CAKE_MBOX_SIZE,
-	       "cake_per_cpu must match CAKE_MBOX_SIZE for per-CPU isolation");
-struct cake_per_cpu __arena *per_cpu;
-
-/* Global stats BSS array - 0ns lookup vs 25ns helper, 256-byte aligned per CPU */
-struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss")
-	__attribute__((aligned(256)));
-
-/* DSQ Work Hint: DELETED.
- * dsq_gen was a unidirectional generation counter that caused CPUs to
- * permanently skip checking the shared DSQ after pulling one task.
- * With 18.8M hint_skips, OS threads (ksoftirqd, rcu) starved for 6.5s.
- * Replaced by O(1) scx_bpf_dsq_nr_queued() in cake_dispatch. */
-
-
-/* BSS tail guard - absorbs BTF truncation bugs instead of corrupting real data */
-u8 __bss_tail_guard[64] SEC(".bss") __attribute__((aligned(64)));
-
-/* pid_to_tctx (BPF_MAP_TYPE_HASH) removed — replaced by SEC("iter/task") cake_task_iter.
- * cake_init_task and cake_exit_task are now fully lockless: no map_update_elem or
- * map_delete_elem calls. Userspace reads fixed-size cake_iter_record records from the
- * iter fd instead of walking a 65536-entry global hash table. */
-
-
-
-/* ARENA_ASSOC: Force arena map association for struct_ops programs.
- * BSS loads don't create arena map relocations — only direct &arena references do.
- * Inline asm constraint forces &arena into a register (ld_imm64 relocation)
- * without emitting a stack store. 2 insns vs 3 with volatile. */
-#define ARENA_ASSOC() asm volatile("" : : "r"(&arena))
-
-static __always_inline struct cake_stats *get_local_stats(void)
-{
-#ifndef CAKE_RELEASE
-	asm volatile("" : : "r"(enable_stats) : "memory");
-#endif
-	u32 cpu = bpf_get_smp_processor_id();
-	return &global_stats[cpu & (CAKE_MAX_CPUS - 1)];
-}
-
-/* Rule 30: Avoid redundant bpf_get_smp_processor_id() kfunc trampoline (~15ns)
- * when caller already has CPU ID in a register. */
-static __always_inline struct cake_stats *get_local_stats_for(u32 cpu)
-{
-	return &global_stats[cpu & (CAKE_MAX_CPUS - 1)];
-}
-
-/* User exit info for graceful scheduler exit */
 UEI_DEFINE(uei);
 
-/* Per-LLC DSQs with vtime-encoded priority.
- * Single vtime-ordered DSQ per LLC. Weighted vtime ordering:
- * yielders sort first (lower vtime), non-yielders sort later.
- * Dispatch: 1 kfunc always.
- * DSQ IDs: LLC_DSQ_BASE + 0, LLC_DSQ_BASE + 1, ... (one per LLC). */
+/*
+ * Compile-time enum immediates. enums.autogen.bpf.h #defines each SCX_* name
+ * onto a loader-filled `const volatile u64 __SCX_*` — a rodata memory load on
+ * every hot-path use. #undef the five names cake uses and rebind them to
+ * bpf_core_enum_value(), which CO-RE resolves to a load-time immediate
+ * (precedent: compat.bpf.h uses this mechanism on scx_enq_flags).
+ *
+ * The #undef is PERMANENT — deliberately no push/pop: macro bodies expand at
+ * the use site, so a pop would silently rebind the enumerator names back to
+ * the volatile shadows inside every CAKE_* expansion. Must sit after all scx
+ * header includes; cake never uses the SCX_* macro forms below this point.
+ */
+#undef SCX_DSQ_LOCAL
+#undef SCX_DSQ_LOCAL_ON
+#undef SCX_ENQ_WAKEUP
+#undef SCX_KICK_IDLE
+#undef SCX_KICK_PREEMPT
+#undef SCX_TASK_QUEUED
+#undef SCX_WAKE_SYNC
+#define CAKE_DSQ_LOCAL    bpf_core_enum_value(enum scx_dsq_id_flags, SCX_DSQ_LOCAL)
+#define CAKE_DSQ_LOCAL_ON bpf_core_enum_value(enum scx_dsq_id_flags, SCX_DSQ_LOCAL_ON)
+#define CAKE_ENQ_WAKEUP   bpf_core_enum_value(enum scx_enq_flags,    SCX_ENQ_WAKEUP)
+#define CAKE_KICK_IDLE    bpf_core_enum_value(enum scx_kick_flags,   SCX_KICK_IDLE)
+#define CAKE_KICK_PREEMPT bpf_core_enum_value(enum scx_kick_flags,   SCX_KICK_PREEMPT)
+#define CAKE_TASK_QUEUED  bpf_core_enum_value(enum scx_ent_flags,    SCX_TASK_QUEUED)
+#define CAKE_WAKE_SYNC    bpf_core_enum_value(enum scx_wake_flags,   SCX_WAKE_SYNC)
 
-/* ── Kfunc BenchLab: BSS globals ──
- * bench_request: TUI writes 1 → BPF runs bench on next stopping → clears to 0.
- * bench_results: populated by run_kfunc_bench(), read by TUI. */
-u32 bench_request = 0;
-u32 bench_active = 0;  /* 1 while benchmark is running — suppresses telemetry */
-struct kfunc_bench_results bench_results = {};
-
-/* ── Game Family Boost: PPID-based process-level yielder promotion ──
- * Written by Rust TUI every poll (~500ms) with detected game tgid + ppid.
- * Read in cake_stopping and select_cpu to identify game family members.
- * game_tgid == 0 means no game detected (system behaves as before).
- * Own cache line: written rarely (~2/s), read on every dispatch (~6K/s).
- * After settling, lives in shared-S state across all cores (~1ns read). */
-u32 game_tgid __attribute__((aligned(64))) = 0;
-/* Parent PID of game process — all Proton/Wine siblings share the same
- * pv-adverb container PPID.  Written by Rust TUI alongside game_tgid.
- * Same cache-line lifecycle: written rarely (~2/s), read in cake_stopping. */
-u32 game_ppid = 0;
-/* Scheduler operating state: IDLE=0, COMPILATION=1, GAMING=2.
- * Written by Rust TUI every poll (~500ms). Read by BPF hot path to select
- * the appropriate policy profile (squeeze, vprot kick, quantum ceiling).
- * Lives on the same cache line as game_tgid/game_ppid — written rarely,
- * read-shared across cores in MESI-S state at ~1ns cost. */
-u32 sched_state = CAKE_STATE_IDLE;
-/* Precomputed quantum ceiling — set by userspace when sched_state changes.
- * Eliminates sched_state == COMPILATION branch from stopping hot path.
- * COMPILATION → 8ms, else → 2ms. Zero-init for BSS placement; Rust sets
- * initial value (AQ_BULK_CEILING_NS) at startup. Written at ~2Hz by TUI. */
-u64 quantum_ceiling_ns = 0;
-/* Confidence score for game detection: 100=Steam-confirmed, 90=Wine .exe,
- * 50=native/unknown, 0=none. Written by Rust TUI alongside sched_state.
- * Same cache line — available for future BPF hot-path policy scaling. */
-u8 game_confidence = 0;
-
-/* G1+G4: EEVDF intra-tier virtual clock.
- * Tracks the latest dispatched task's vtime. Used to initialize
- * new/waking tasks and cap sleep credit. Updated in cake_running. */
-/* vtime_now REMOVED: was a global BSS u64 written by every CPU on every
- * context switch, causing 15-core MESI invalidation. Replaced by per-CPU
- * bss->vtime_local — each CPU advances its own monotonic max. */
-
-/* PID→task_class cache: tunnels task_class from stopping → select_cpu Gate 2.
- * Eliminates bpf_task_storage_get (28ns avg, 1982ns worst-case jitter)
- * from the select_cpu wakeup path. BSS read = 14ns avg, 96ns jitter.
- * 4096 entries (4KB) indexed by p->pid & 4095. Hash collision risk with
- * ~100 gaming tasks is <0.1%. Written in stopping, read in select_cpu. */
-#define PID_CLASS_CACHE_SIZE 4096
-static u8 pid_class_cache[PID_CLASS_CACHE_SIZE];
-
-/* O(1) GAME preemption bitmask: bit N set = CPU N running a GAME task.
- * Written atomically (or/and) in cake_running. Read in cake_enqueue.
- * F2 FIX: widened to u64[4] for 256 CPUs.
- * find-victim scans words with tzcnt (1 cycle per word). */
-static u64 game_cpu_mask[CAKE_CPU_MASK_WORDS];
-
-/* Phase 5: Per-CPU BSS — arena-free running.
- * Each entry is 64B aligned (one cache line per CPU).
- * running writes, stopping reads (same CPU) + vprot kick reads (remote CPU). */
-struct cake_cpu_bss cpu_bss[CAKE_MAX_CPUS];
-
-/* DSQ MAILBOX: per-LLC flag tracks whether a kick has been sent to drain
- * the LLC DSQ. Set on enqueue (0→1 transition only, check-before-write).
- * Cleared in cake_dispatch after successful move_to_local.
- * Prevents tasks from rotting in DSQ when all CPUs use Gate 1 direct
- * dispatch (which bypasses cake_dispatch entirely).
- * MESI: read-first — stays Shared if already set, no cache bounce. */
-u8 dsq_kick_needed[CAKE_MAX_LLCS];
-
-/* BenchLab ringbuf: tiny ringbuf for measuring reserve+submit overhead.
- * Size 4096 = minimum page-aligned allocation. Never consumed by userspace;
- * benchmarks use reserve+discard to measure the API cost. */
-struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 4096);
-} bench_ringbuf SEC(".maps");
-
-/* BenchLab task storage: measures bpf_task_storage_get() cost.
- * This is the standard per-task storage approach that cake replaced with arena.
- * Only used in benchmarks to measure what we're saving. */
-struct bench_task_val {
-	u64 dummy;
+/*
+ * All mutable hot state in ONE BSS struct built from 128-byte-stride slots;
+ * only .word of each slot is ever accessed. This replaces the former
+ * __attribute__((aligned(64))) uses with pure layout: any two accessed words
+ * are >= 128 bytes apart in offset, so regardless of the struct's base
+ * alignment their 64B line indexes differ by >= 2 — never the same cache
+ * line, and never the same adjacent-line-prefetcher 128B pair.
+ */
+struct cake_slot {
+	u64 word;
+	u64 pad[15];		/* sizeof == 128 */
 };
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct bench_task_val);
-} bench_task_storage SEC(".maps");
 
-/* Phase 6: Per-task hot fields in kernel task_storage (~10ns lookup).
- * Replaces Arena CL0 reads in running+stopping (saves 2× 19ns = 38ns).
- * Arena CL0 still exists for telemetry but is dead in release builds. */
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct cake_task_hot);
-} task_hot_stor SEC(".maps");
-
-/* BenchLab spin lock: measures bpf_spin_lock + unlock cycle cost. */
-struct bench_lock_data {
-	struct bpf_spin_lock lock;
-	u64 counter;
+struct cake_state {
+	/*
+	 * .word = global vtime frontier. Written by all CPUs in running()
+	 * (conditional store), read in enqueue/enable. The sleeper clamp
+	 * against it is load-bearing for futex handoff.
+	 */
+	struct cake_slot frontier;
+	/*
+	 * .word = nr_cpu_ids, written ONCE in ops.init and read-only after —
+	 * its own slot so frontier RFOs never dirty the line the steal loop
+	 * reads.
+	 */
+	struct cake_slot ncpu;
+	/*
+	 * .word = per-CPU run-start ns. Written and read ONLY by CPU i: a
+	 * stamp is charged on the same CPU that wrote it, so the 128B stride
+	 * means zero cross-CPU traffic on the context-switch path.
+	 */
+	struct cake_slot stamp[MAX_CPUS];
+	/*
+	 * .word = per-CPU sum_exec_runtime snapshot taken in running().
+	 * ops.stopping charges used = p->se.sum_exec_runtime - this, with
+	 * ZERO clock reads: the kernel calls update_curr_scx() immediately
+	 * before invoking ops.stopping (both call sites, verified in the
+	 * tree), so sum_exec is boundary-exact there — unlike mid-slice
+	 * remote reads, which stay on the ktime stamp above for
+	 * eligibility. Owner-only, same 128B-stride isolation as stamp.
+	 */
+	struct cake_slot sum[MAX_CPUS];
+	/*
+	 * .word = "DSQ[i] may hold work" hint gating the steal ring.
+	 * bpfstats: a going-idle dispatch spent 199ns/call — 30% of the
+	 * whole pipe benchmark — walking 15+ EMPTY queues through hashed
+	 * kfuncs. Stealers now read these (cached, shared) lines and hash
+	 * only marked queues. Set by enqueue BEFORE its insert; the owner
+	 * clears it before peeking its own head and re-marks if the peek
+	 * hits, so an insert can never be hidden by a concurrent clear.
+	 * Races are benign by construction: a stale mark costs one wasted
+	 * move attempt, a missed mark delays only THEFT — the owner serves
+	 * its own queue on every dispatch regardless, and the existing
+	 * activate/kick guarantees that owners dispatch are untouched.
+	 */
+	struct cake_slot qmark[MAX_CPUS];
+	/*
+	 * .word = "curr was preempt-kicked" — set beside every
+	 * CAKE_KICK_PREEMPT, read-and-cleared by the victim CPU's next
+	 * continuation enqueue. A preempt-requeue (handoff spinner) must
+	 * never overflow: its partner is here. Owner-cleared, one-shot
+	 * benign races like qmark.
+	 */
+	struct cake_slot pmark[MAX_CPUS];
 };
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct bench_lock_data);
-} bench_lock_map SEC(".maps");
 
-/* Benchmark a single kfunc iteration: call twice, delta = cost.
- * Macro to avoid function pointer overhead (BPF doesn't support them). */
-#define BENCH_ONE(entry, call_expr, idx) do {                     \
-	u64 _s = bpf_ktime_get_ns();                                 \
-	u64 _v = (u64)(call_expr);                                    \
-	u64 _e = bpf_ktime_get_ns();                                 \
-	u64 _d = _e - _s;                                            \
-	if (_d < (entry)->min_ns) (entry)->min_ns = _d;               \
-	if (_d > (entry)->max_ns) (entry)->max_ns = _d;               \
-	(entry)->total_ns += _d;                                      \
-	(entry)->last_value = _v;                                     \
-	(entry)->samples[idx] = _d;                                   \
-} while (0)
+static struct cake_state cake;
 
-static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
-					     struct task_struct *p);
-
-/* Forward declare get_task_ctx — defined later, needed by bench */
-static __always_inline struct cake_task_ctx __arena *
-get_task_ctx(struct task_struct *p);
-
-static __always_inline void run_kfunc_bench(struct kfunc_bench_results *r,
-					     struct task_struct *p)
-{
-	/* Suppress CAKE_STATS_ACTIVE on all cores during benchmark */
-	*(volatile u32 *)&bench_active = 1;
-	r->cpu = bpf_get_smp_processor_id();
-	r->iterations = BENCH_ITERATIONS;
-
-	/* Zero all entries */
-	#pragma unroll
-	for (int i = 0; i < BENCH_MAX_ENTRIES; i++) {
-		r->entries[i].min_ns = ~0ULL;
-		r->entries[i].max_ns = 0;
-		r->entries[i].total_ns = 0;
-		r->entries[i].last_value = 0;
-	}
-
-	/* Bench: bpf_ktime_get_ns() — legacy CLOCK_MONOTONIC */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_KTIME_GET_NS], bpf_ktime_get_ns(), i);
-
-	/* Bench: scx_bpf_now() — SCX cached clock */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_SCX_BPF_NOW], scx_bpf_now(), i);
-
-	/* Bench: bpf_get_smp_processor_id() — CPU identification */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_GET_SMP_PROC_ID], bpf_get_smp_processor_id(), i);
-
-	/* Bench: bpf_task_from_pid() — PID lookup (kfunc) */
-	{
-		s32 pid = p->pid;
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			struct task_struct *t = bpf_task_from_pid(pid);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			if (t) bpf_task_release(t);
-			struct kfunc_bench_entry *e = &r->entries[BENCH_TASK_FROM_PID];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)(t != NULL);
-		}
-	}
-
-	/* Bench: scx_bpf_test_and_clear_cpu_idle() — idle probe (gate 1 hot path) */
-	{
-		u32 cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			bool idle = scx_bpf_test_and_clear_cpu_idle(cpu);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_TEST_CLEAR_IDLE];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)idle;
-		}
-	}
-
-	/* Bench: scx_bpf_nr_cpu_ids() — topology constant read */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_NR_CPU_IDS], scx_bpf_nr_cpu_ids(), i);
-
-	/* Bench: get_task_ctx() — scx_task_data arena direct pointer deref */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			struct cake_task_ctx __arena *t = get_task_ctx(p);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_GET_TASK_CTX];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)(t != NULL);
-		}
-	}
-
-	/* Bench: scx_bpf_dsq_nr_queued() — DSQ depth query (read-only kfunc) */
-	{
-		u64 dsq_id = LLC_DSQ_BASE + cpu_llc_id[r->cpu & (CAKE_MAX_CPUS - 1)];
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			s32 nr = scx_bpf_dsq_nr_queued(dsq_id);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_DSQ_NR_QUEUED];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)nr;
-		}
-	}
-
-	/* Bench: BSS array access — raw global_stats[cpu] field read */
-	{
-		u32 bcpu = r->cpu & (CAKE_MAX_CPUS - 1);
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 v = global_stats[bcpu].total_stopping_ns;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_BSS_ARRAY_ACCESS];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = v;
-		}
-	}
-
-	/* Bench: Arena per_cpu deref — read field from per_cpu[cpu].mbox */
-#ifndef CAKE_RELEASE
-	{
-		ARENA_ASSOC();
-		u32 bcpu = r->cpu & (CAKE_MAX_CPUS - 1);
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 v = per_cpu[bcpu].mbox.tick_slice;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_ARENA_DEREF];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = v;
-		}
-	}
-#endif
-
-	/* Bench: Back-to-back scx_bpf_now() pair — calibration baseline.
-	 * Measures the overhead of the timing harness itself (2× bpf_ktime_get_ns). */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++) {
-		u64 _s = bpf_ktime_get_ns();
-		u64 _e = bpf_ktime_get_ns();
-		u64 _d = _e - _s;
-		struct kfunc_bench_entry *e = &r->entries[BENCH_NOW_PAIR];
-		if (_d < e->min_ns) e->min_ns = _d;
-		if (_d > e->max_ns) e->max_ns = _d;
-		e->total_ns += _d;
-		e->samples[i] = _d;
-		e->last_value = _d; /* Shows raw overhead of timing harness */
-	}
-
-	/* Bench: Read cached CPU from mailbox CL0 (Disruptor handoff pattern).
-	 * Simulates cake_stopping reading CPU from mailbox instead of calling
-	 * bpf_get_smp_processor_id(). Mailbox is L1-hot from prior tick_slice read. */
-#ifndef CAKE_RELEASE
-	{
-		u32 bcpu = r->cpu & (CAKE_MAX_CPUS - 1);
-		struct mega_mailbox_entry __arena *mbox = &per_cpu[bcpu].mbox;
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u32 v = mbox->tick_last_run_at; /* Same CL0 as CPU would be */
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_MBOX_CPU_READ];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = v;
-		}
-	}
-#endif
-
-	/* Bench: Read cached tctx pointer from mailbox + field deref.
-	 * Simulates reading a pre-cached arena pointer from mailbox CL0,
-	 * then dereferencing a field. Compares against get_task_ctx() kfunc. */
-#ifndef CAKE_RELEASE
-	{
-		u32 bcpu = r->cpu & (CAKE_MAX_CPUS - 1);
-		struct mega_mailbox_entry __arena *mbox = &per_cpu[bcpu].mbox;
-		/* Simulate: read a u64 from mailbox (where ptr would be cached),
-		 * then read a field from the tctx we already have. */
-		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-		if (tctx) {
-			#pragma unroll
-			for (int i = 0; i < BENCH_ITERATIONS; i++) {
-				u64 _s = bpf_ktime_get_ns();
-				volatile u64 ptr_val = mbox->tick_slice; /* Simulate ptr read from CL0 */
-				volatile u16 field = tctx->deficit_u16; /* Deref cached ptr */
-				u64 _e = bpf_ktime_get_ns();
-				u64 _d = _e - _s;
-				struct kfunc_bench_entry *e = &r->entries[BENCH_TCTX_FROM_MBOX];
-				if (_d < e->min_ns) e->min_ns = _d;
-				if (_d > e->max_ns) e->max_ns = _d;
-				e->total_ns += _d;
-				e->samples[i] = _d;
-				e->last_value = field + (u32)ptr_val;
-			}
-		}
-	}
-#endif
-
-	/* Bench: bpf_ringbuf_reserve + discard cycle.
-	 * Measures the cost of the BPF ringbuf API (Disruptor pattern #3).
-	 * Uses reserve+discard (not submit) to avoid requiring a consumer. */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			void *slot = bpf_ringbuf_reserve(&bench_ringbuf, 8, 0);
-			if (slot)
-				bpf_ringbuf_discard(slot, 0);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_RINGBUF_CYCLE];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)(slot != NULL);
-		}
-	}
-
-	/* Bench: task_struct field reads — p->scx.slice + p->nvcsw */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 sl = p->scx.slice;
-			volatile u64 nv = p->nvcsw;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_TASK_STRUCT_READ];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = sl + nv;
-		}
-	}
-
-	/* Bench: RODATA array lookup — cpu_llc_id[cpu] + quantum_ns */
-	{
-		u32 bcpu = r->cpu & (CAKE_MAX_CPUS - 1);
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u32 llc = cpu_llc_id[bcpu];
-			volatile u64 ts = quantum_ns; /* RODATA const read */
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_RODATA_LOOKUP];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = ts + llc;
-		}
-	}
-
-	/* Bench: Bitflag operations — shift+mask+branchless yielder pattern.
-	 * Simulates the full yielder detection + branchless flag set from stopping. */
-	{
-		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-		if (tctx) {
-			u32 packed = tctx->packed_info;
-			#pragma unroll
-			for (int i = 0; i < BENCH_ITERATIONS; i++) {
-				u64 _s = bpf_ktime_get_ns();
-				/* Extract yielder flag */
-				u32 yl_mask = (u32)CAKE_FLOW_YIELDER << SHIFT_FLAGS;
-				volatile u32 result = (packed & ~yl_mask) | (yl_mask & -(u32)1);
-				/* Extract nf + yl bits */
-				volatile u8 nf = (result >> SHIFT_FLAGS) & 1;
-				volatile u8 yl = (result >> SHIFT_FLAGS) & (u32)CAKE_FLOW_YIELDER;
-				u64 _e = bpf_ktime_get_ns();
-				u64 _d = _e - _s;
-				struct kfunc_bench_entry *e = &r->entries[BENCH_BITFLAG_OPS];
-				if (_d < e->min_ns) e->min_ns = _d;
-				if (_d > e->max_ns) e->max_ns = _d;
-				e->total_ns += _d;
-				e->samples[i] = _d;
-				e->last_value = nf + yl + result;
-			}
-		}
-	}
-
-	/* Bench: EWMA computation (legacy, slot preserved for comparison).
-	 * Reads tick_slice from cpu_bss. compute_ewma() removed in PELT transition. */
-	{
-		s32 ewma_cpu = bpf_get_smp_processor_id();
-		u64 tick_sl_bss = cpu_bss[ewma_cpu & (CAKE_MAX_CPUS - 1)].tick_slice;
-		u32 fused_val = 0x00C80064; /* Simulated: avg=200, deficit=100 */
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			/* 1.0.4 path: tick_slice from BSS, remaining from p->scx */
-			u64 tick_sl = tick_sl_bss;   /* cpu_bss — already L1 hot */
-			u64 rem_sl = p->scx.slice;   /* task_struct — already read */
-			u16 old_avg = (u16)(fused_val >> 16);
-			u16 deficit = (u16)(fused_val & 0xFFFF);
-			u64 used = (tick_sl > rem_sl) ? (tick_sl - rem_sl) : 0;
-			u16 rt_us = (u16)(used >> 10);
-			volatile u16 new_avg = (old_avg * 7 + rt_us) >> 3;
-			volatile u16 new_def = (deficit > rt_us) ? deficit - rt_us : 0;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_RESERVED_17];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = new_avg + new_def;
-		}
-	}
-
-	/* Bench: Mailbox CL0 multi-field read simulation.
-	 * Reads cached_tctx_ptr + cached_deficit + cached_packed from CL0.
-	 * Simulates the full cake_stopping mailbox-only path (zero arena). */
-#ifndef CAKE_RELEASE
-	{
-		ARENA_ASSOC();
-		u32 bcpu = r->cpu & (CAKE_MAX_CPUS - 1);
-		struct mega_mailbox_entry __arena *mbox = &per_cpu[bcpu].mbox;
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 ptr = mbox->cached_tctx_ptr;
-			volatile u32 fused = mbox->cached_deficit;
-			volatile u32 packed = mbox->cached_packed;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_PSYCHIC_HIT_SIM];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = ptr + fused + packed;
-		}
-	}
-#endif
-
-	/* Bench: scx_bpf_test_and_clear_cpu_idle(sibling) — cross-CPU contention.
-	 * Simulates cross-CPU idle probing where we probe a DIFFERENT CPU's idle state.
-	 * This reveals MESI contention cost: the idle bitmap cache line must
-	 * be snooped from the remote CPU owner (30-100ns on Zen 5).
-	 * Compare against BENCH_TEST_CLEAR_IDLE (local CPU, ~15ns). */
-	{
-		u32 local_cpu = bpf_get_smp_processor_id();
-		/* Pick SMT sibling (XOR 1 gives the hyper-thread pair on Zen) */
-		s32 remote_cpu = (s32)((local_cpu ^ 1) & (CAKE_MAX_CPUS - 1));
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			bool idle = scx_bpf_test_and_clear_cpu_idle(remote_cpu);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_IDLE_REMOTE];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)idle;
-		}
-	}
-
-	/* Bench: Read-only idle smtmask check — zero-contention alternative.
-	 * scx_bpf_get_idle_smtmask() returns a reference to the SMT idle mask
-	 * (per-core fully-idle tracking). cpumask_test_cpu is a pure read —
-	 * no atomic test-and-clear, no cache line invalidation.
-	 * This is the fastest way to CHECK if a CPU is idle without CLAIMING it.
-	 * Use case: pre-screen before committing with test_and_clear. */
-	{
-		u32 local_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			const struct cpumask *smtmask = scx_bpf_get_idle_smtmask();
-			volatile bool fully_idle = bpf_cpumask_test_cpu(local_cpu, smtmask);
-			scx_bpf_put_idle_cpumask(smtmask);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_IDLE_SMTMASK];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)fully_idle;
-		}
-	}
-
-	/* Bench: Full Disruptor handoff read — simulates cake_stopping.
-	 * Reads all 5 CL0 fields from the local CPU mailbox in sequence.
-	 * Measures MLP benefit of concentrating all handoff data on one CL. */
-#ifndef CAKE_RELEASE
-	{
-		u32 local_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-		struct mega_mailbox_entry __arena *mbox = &per_cpu[local_cpu].mbox;
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 _ptr = mbox->cached_tctx_ptr;
-			volatile u32 _fused = mbox->cached_deficit;
-			volatile u32 _packed = mbox->cached_packed;
-			volatile u64 _nvcsw = mbox->cached_nvcsw;
-			volatile u64 _slice = mbox->tick_slice;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_DISRUPTOR_READ];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = _ptr + _fused + _packed + _nvcsw + _slice;
-		}
-	}
-#endif
-
-	/* Bench: get_task_ctx + arena CL0 read — simulates cake_running.
-	 * Measures the kfunc + dependent arena load chain.
-	 * Uses bpf_get_current_task_btf() as the task source. */
-	{
-		struct task_struct *cur = bpf_get_current_task_btf();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			struct cake_task_ctx __arena *tctx = get_task_ctx(cur);
-			volatile u32 _packed = tctx ? tctx->packed_info : 0;
-			volatile u16 _fused = tctx ? tctx->deficit_u16 : 0;
-			volatile u64 _nvcsw = tctx ? tctx->nvcsw_snapshot : 0;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_TCTX_COLD_SIM];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = _packed + _fused + _nvcsw;
-		}
-	}
-
-	/* Bench: Arena stride — walk 16 per_cpu mailbox entries.
-	 * Forces TLB walks across arena pages. With 4KB pages, each per_cpu
-	 * block (64B release / 128B debug) may share pages. With hugepages
-	 * (2MB), all 16 fit in one TLB entry. Delta vs BENCH_ARENA_DEREF
-	 * (single hot access) reveals the TLB miss tax. */
-#ifndef CAKE_RELEASE
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 sum = 0;
-			#pragma unroll
-			for (int c = 0; c < 16; c++) {
-				sum += per_cpu[c & (CAKE_MAX_CPUS - 1)].mbox.tick_last_run_at;
-			}
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_ARENA_STRIDE];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = sum;
-		}
-	}
-#endif
-
-	/* ═══ NEW ENTRIES (24–42): eBPF helpers + SCX kfuncs ═══ */
-
-	/* Bench: bpf_ktime_get_boot_ns() — suspend-aware monotonic clock */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_KTIME_BOOT_NS], bpf_ktime_get_boot_ns(), i);
-
-	/* NOTE: bpf_ktime_get_coarse_ns (slot 25), bpf_jiffies64 (slot 26),
-	 * and bpf_ktime_get_tai_ns (slot 27) are NOT available for struct_ops
-	 * programs — the kernel rejects them at load time. Slots left empty. */
-
-	/* Bench: bpf_get_current_pid_tgid() — PID+TGID in single call */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_CURRENT_PID_TGID], bpf_get_current_pid_tgid(), i);
-
-	/* Bench: bpf_get_current_task_btf() — get task_struct directly */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_CURRENT_TASK_BTF], (u64)bpf_get_current_task_btf(), i);
-
-	/* Bench: bpf_get_current_comm() — read task comm name (16 bytes) */
-	{
-		char comm[16];
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			long ret = bpf_get_current_comm(comm, sizeof(comm));
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_CURRENT_COMM];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)ret;
-		}
-	}
-
-	/* Bench: bpf_get_numa_node_id() — current NUMA node */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_NUMA_NODE_ID], bpf_get_numa_node_id(), i);
-
-	/* Bench: scx_bpf_task_running(p) — check if task is currently on-CPU */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_SCX_TASK_RUNNING], scx_bpf_task_running(p), i);
-
-	/* Bench: scx_bpf_task_cpu(p) — get task's current CPU */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_SCX_TASK_CPU], scx_bpf_task_cpu(p), i);
-
-	/* Bench: scx_bpf_nr_node_ids() — NUMA node count (topology constant) */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_SCX_NR_NODE_IDS], scx_bpf_nr_node_ids(), i);
-
-	/* Bench: scx_bpf_cpuperf_cur(cpu) — current CPU performance level */
-	{
-		s32 bench_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++)
-			BENCH_ONE(&r->entries[BENCH_SCX_CPUPERF_CUR], scx_bpf_cpuperf_cur(bench_cpu), i);
-	}
-
-	/* Bench: bpf_task_storage_get() — standard per-task map lookup.
-	 * This is the approach cake replaced with arena. Measuring the cost
-	 * validates our arena design decision. */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			struct bench_task_val *v = bpf_task_storage_get(
-				&bench_task_storage, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_TASK_STORAGE_GET];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = v ? v->dummy : 0;
-		}
-	}
-
-	/* Bench: scx_bpf_pick_idle_cpu() — kernel's idle CPU scanner */
-	{
-		const struct cpumask *online = scx_bpf_get_online_cpumask();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++)
-			BENCH_ONE(&r->entries[BENCH_SCX_PICK_IDLE_CPU],
-				  scx_bpf_pick_idle_cpu(online, 0), i);
-		scx_bpf_put_cpumask(online);
-	}
-
-	/* Bench: scx_bpf_get_idle_cpumask() + put — full idle mask cycle */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			const struct cpumask *idle = scx_bpf_get_idle_cpumask();
-			scx_bpf_put_idle_cpumask(idle);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_SCX_IDLE_CPUMASK];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = 0;
-		}
-	}
-
-	/* Bench: scx_bpf_kick_cpu() — IPI preemption cost.
-	 * Kicks current CPU with no flags (cheapest IPI). */
-	{
-		s32 self_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++)
-			BENCH_ONE(&r->entries[BENCH_SCX_KICK_CPU],
-				  (scx_bpf_kick_cpu(self_cpu, 0), 0), i);
-	}
-
-	/* Bench: bpf_get_prandom_u32() — pseudo-RNG cost */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_PRANDOM_U32], bpf_get_prandom_u32(), i);
-
-	/* Bench: bpf_spin_lock + unlock cycle — lock contention baseline */
-	{
-		u32 key = 0;
-		struct bench_lock_data *ld = bpf_map_lookup_elem(&bench_lock_map, &key);
-		if (ld) {
-			#pragma unroll
-			for (int i = 0; i < BENCH_ITERATIONS; i++) {
-				u64 _s = bpf_ktime_get_ns();
-				bpf_spin_lock(&ld->lock);
-				ld->counter++;
-				bpf_spin_unlock(&ld->lock);
-				u64 _e = bpf_ktime_get_ns();
-				u64 _d = _e - _s;
-				struct kfunc_bench_entry *e = &r->entries[BENCH_SPIN_LOCK];
-				if (_d < e->min_ns) e->min_ns = _d;
-				if (_d > e->max_ns) e->max_ns = _d;
-				e->total_ns += _d;
-				e->samples[i] = _d;
-				e->last_value = ld->counter;
-			}
-		}
-	}
-
-	/* Bench: scx_bpf_cpuperf_cap(cpu) — max performance capacity */
-	{
-		s32 cap_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++)
-			BENCH_ONE(&r->entries[BENCH_SCX_CPUPERF_CAP], scx_bpf_cpuperf_cap(cap_cpu), i);
-	}
-
-	/* ═══ CAKE COMPETITOR ENTRIES (43–49) ═══ */
-
-	/* Bench: RODATA nr_cpus read — JIT-constant, should be ~0ns overhead */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_RODATA_NR_CPUS], (u64)nr_cpus, i);
-
-	/* Bench: RODATA nr_nodes read — JIT-constant vs scx_bpf_nr_node_ids() */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_RODATA_NR_NODES], (u64)nr_nodes, i);
-
-	/* Bench: RODATA cpuperf_cap_table[cpu] — per-CPU array vs kfunc */
-	{
-		s32 perf_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++)
-			BENCH_ONE(&r->entries[BENCH_RODATA_CPUPERF_CAP],
-				  (u64)cpuperf_cap_table[perf_cpu & (CAKE_MAX_CPUS - 1)], i);
-	}
-
-	/* Bench: p->pid + p->tgid direct read — same cost as arena-cached fields
-	 * (both are fixed-offset reads from an already-hot struct base pointer) */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 cached_pid = ((u64)p->tgid << 32) | p->pid;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_ARENA_PID_TGID];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = cached_pid;
-		}
-	}
-
-	/* Bench: Mbox CL0 cached_cpu read — already-hot CL0 vs scx_bpf_task_cpu kfunc */
-#ifndef CAKE_RELEASE
-	{
-		s32 mbox_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++)
-			BENCH_ONE(&r->entries[BENCH_MBOX_TASK_CPU],
-				  (u64)per_cpu[mbox_cpu & (CAKE_MAX_CPUS - 1)].mbox.cached_cpu, i);
-	}
-#endif
-
-	/* Bench: CL0 lock-free atomic read — Disruptor pattern vs spin_lock cycle.
-	 * Reads 3 adjacent CL0 fields with zero locking overhead. */
-#ifndef CAKE_RELEASE
-	{
-		s32 lf_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 lf_val =
-				per_cpu[lf_cpu & (CAKE_MAX_CPUS - 1)].mbox.cached_cpu +
-				per_cpu[lf_cpu & (CAKE_MAX_CPUS - 1)].mbox.tick_tier +
-				cpu_bss[lf_cpu & (CAKE_MAX_CPUS - 1)].is_yielder;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_CL0_LOCKFREE];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = lf_val;
-		}
-	}
-#endif
-
-	/* Bench: BSS xorshift32 PRNG — zero-kfunc RNG vs bpf_get_prandom_u32 */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			u32 x = bench_xorshift_state;
-			x ^= x << 13;
-			x ^= x >> 17;
-			x ^= x << 5;
-			bench_xorshift_state = x;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_BSS_XORSHIFT];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)x;
-		}
-	}
-
-	/* ═══ KERNEL FREE DATA PROBES (50–54) ═══
-	 * These read kernel-maintained task_struct fields at ~3ns to validate
-	 * whether they can replace BPF-side computation (EWMA, classification).
-	 * Critical question: Does PELT still update under sched_ext? */
-
-	/* Bench: PELT util_avg — kernel's PELT utilization metric (0-1024).
-	 * Non-zero and changing confirms PELT is maintained under sched_ext.
-	 * Zero BPF compute cost — kernel does all the work. */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 util = p->se.avg.util_avg;
-			volatile u64 runnable = p->se.avg.runnable_avg;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_PELT_UTIL_AVG];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (util << 16) | runnable; /* Pack both for TUI */
-		}
-	}
-
-	/* Bench: PELT runnable_avg alone — single field read baseline.
-	 * Should be ~3ns (fixed offset from p, already in register). */
-	#pragma unroll
-	for (int i = 0; i < BENCH_ITERATIONS; i++)
-		BENCH_ONE(&r->entries[BENCH_PELT_RUNNABLE_AVG], p->se.avg.runnable_avg, i);
-
-	/* Bench: schedstats nr_wakeups — cumulative wakeup count.
-	 * Requires CONFIG_SCHEDSTATS=y. Guarded for release builds where
-	 * the target kernel may have CONFIG_SCHEDSTATS=n (common on aarch64). */
-#ifndef CAKE_RELEASE
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u64 wakeups = p->stats.nr_wakeups;
-			volatile u64 wakeups_sync = p->stats.nr_wakeups_sync;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_SCHEDSTATS_WAKEUPS];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (wakeups << 32) | wakeups_sync;
-		}
-	}
-#endif
-
-	/* Bench: p->policy + p->in_iowait — free classification signals.
-	 * policy: SCHED_NORMAL=0, SCHED_BATCH=3, SCHED_IDLE=5.
-	 * in_iowait: 1 if task is waiting for I/O. */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u32 policy = p->policy;
-			volatile u32 prio = p->prio;
-			volatile u32 flags = p->flags;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_TASK_POLICY_FLAGS];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = ((u64)policy << 32) | ((u64)prio << 16) | (flags & 0xFFFF);
-		}
-	}
-
-	/* Bench: PELT read + tier classify.
-	 * The critical comparison: 3ns PELT read replaces 12ns compute_ewma().
-	 * Reads util_avg and does tier boundary compare. */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			u64 util = p->se.avg.util_avg;
-			/* Tier classification using PELT util_avg */
-			volatile u8 tier = (util > 512) ? 2 : ((util > 128) ? 1 : 0);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_PELT_VS_EWMA];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = ((u64)tier << 32) | util;
-		}
-	}
-
-	/* ═══ END-TO-END WORKFLOW COMPARISONS (55–62) ═══
-	 * These simulate FULL scheduler operations as they'd be used in practice,
-	 * not isolated micro-ops. Compare storage backends, idle selection
-	 * strategies, classification algorithms, and SMT probing approaches. */
-
-	/* Bench 55: BSS cpu_bss write+read roundtrip — cake 1.0.4 storage.
-	 * Write idle_hint+is_yielder+run_start (like running), read back
-	 * (like select_cpu gate checks). This is the REAL cost of BSS storage. */
-	{
-		s32 bss_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			/* Write (like cake_running writes to cpu_bss) */
-			cpu_bss[bss_cpu & (CAKE_MAX_CPUS - 1)].idle_hint = 1;
-			cpu_bss[bss_cpu & (CAKE_MAX_CPUS - 1)].is_yielder = 0;
-			cpu_bss[bss_cpu & (CAKE_MAX_CPUS - 1)].run_start = 12345678ULL;
-			asm volatile("" ::: "memory");
-			/* Read back (like cake_select_cpu reads cpu_bss) */
-			volatile u8 hint = cpu_bss[bss_cpu & (CAKE_MAX_CPUS - 1)].idle_hint;
-			volatile u8 yielder = cpu_bss[bss_cpu & (CAKE_MAX_CPUS - 1)].is_yielder;
-			volatile u64 start = cpu_bss[bss_cpu & (CAKE_MAX_CPUS - 1)].run_start;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_STORAGE_ROUNDTRIP];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = hint + yielder + start;
-		}
-	}
-
-	/* Bench 56: Arena write+read roundtrip — same operation via arena.
-	 * Compare against slot 55 to see the TLB walk penalty. */
-#ifndef CAKE_RELEASE
-	{
-		s32 ar_cpu = bpf_get_smp_processor_id();
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			/* Write to arena mbox (like old cake_running) */
-			per_cpu[ar_cpu & (CAKE_MAX_CPUS - 1)].mbox.tick_last_run_at = 0xCAFEBABE;
-			asm volatile("" ::: "memory");
-			/* Read back from arena (like old cake_select_cpu gate check) */
-			volatile u64 readback = per_cpu[ar_cpu & (CAKE_MAX_CPUS - 1)].mbox.tick_last_run_at;
-			volatile u32 tier = per_cpu[ar_cpu & (CAKE_MAX_CPUS - 1)].mbox.tick_tier;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_ARENA_ROUNDTRIP];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = readback + tier;
-		}
-	}
-#endif
-
-	/* Bench 57: 3-probe cascade simulation — cake's select_cpu flow.
-	 * Tests: prev idle check → BSS[sib] idle_hint → BSS[home] idle_hint.
-	 * This is the FULL cascade data access pattern. */
-	{
-		s32 self = bpf_get_smp_processor_id();
-		s32 sib = cpu_sibling_map[self & (CAKE_MAX_CPUS - 1)];
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			/* Probe 1: prev idle? (test_and_clear is the real op) */
-			volatile bool prev_idle = scx_bpf_test_and_clear_cpu_idle(self);
-			/* Probe 2: sibling idle_hint from BSS? */
-			volatile u8 sib_idle = cpu_bss[sib & (CAKE_MAX_CPUS - 1)].idle_hint;
-			/* Probe 3: home CPU idle_hint from BSS? (simulated as prev) */
-			volatile u8 home_idle = cpu_bss[self & (CAKE_MAX_CPUS - 1)].idle_hint;
-			/* Gate decision */
-			volatile s32 result = prev_idle ? self :
-						(sib_idle ? sib : (home_idle ? self : -1));
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_CASCADE_VS_PICK];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)result;
-		}
-	}
-
-	/* Bench 58: pick_idle_cpu full path — bpfland/cosmos approach.
-	 * kfunc + cpumask allowed check + SMT filter. Compare vs slot 57. */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			/* Full pick_idle path: kfunc scan + affinity verify */
-			s32 found_cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-			/* Verify found CPU is valid (bpfland does this) */
-			volatile bool valid = (found_cpu >= 0) &&
-				bpf_cpumask_test_cpu(found_cpu, p->cpus_ptr);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_PICK_IDLE_FULL];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = (u64)found_cpu + (u64)valid;
-		}
-	}
-
-	/* Bench 59: Weight-based classification (bpfland approach).
-	 * Reads p->scx.weight and computes vtime offset — the FULL
-	 * classification path of bpfland. Compare vs slot 17 (legacy EWMA, now reserved). */
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			volatile u32 weight = p->scx.weight;
-			/* bpfland: vtime += slice_lag * 100 / weight */
-			volatile u64 vtime_offset = (40ULL * 1000000ULL * 100ULL) /
-				(weight ? weight : 1);
-			/* bpfland: task_slice(p) = slice_ns * 100 / weight */
-			volatile u64 slice = (5000000ULL * 100ULL) /
-				(weight ? weight : 1);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_CLASSIFY_WEIGHT];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = vtime_offset + slice;
-		}
-	}
-
-	/* Bench 60: Latency-critical classification (lavd approach).
-	 * Reads task wakeup stats + computes latency criticality score.
-	 * Simulates lavd's update_stat_for_running key path. Compare vs 17.
-	 * Requires CONFIG_SCHEDSTATS=y for p->stats.nr_wakeups access. */
-#ifndef CAKE_RELEASE
-	{
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			/* lavd reads these per-task stats to compute lat_cri */
-			volatile u64 wakeups = p->stats.nr_wakeups;
-			volatile u64 sync_wakeups = p->stats.nr_wakeups_sync;
-			volatile u64 nvcsw = p->nvcsw;
-			volatile u64 nivcsw = p->nivcsw;
-			/* lavd's lat_cri = f(sync_ratio, run_freq) */
-			u64 total = wakeups ? wakeups : 1;
-			volatile u64 sync_ratio = (sync_wakeups * 1000) / total;
-			volatile u64 cs_ratio = (nvcsw * 1000) / (nvcsw + nivcsw + 1);
-			volatile u64 lat_score = sync_ratio + cs_ratio;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_CLASSIFY_LATCRI];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = lat_score;
-		}
-	}
-#endif
-
-	/* Bench 61: cake SMT probe — test_and_clear(sibling) + BSS check.
-	 * This is cake's idle sibling probe: atomic idle clear + BSS idle_hint read.
-	 * The FULL SMT probe path as used in select_cpu. */
-
-	{
-		s32 self_cpu = bpf_get_smp_processor_id();
-		s32 sib_cpu = cpu_sibling_map[self_cpu & (CAKE_MAX_CPUS - 1)];
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			/* Cake: atomic test_and_clear on sibling */
-			volatile bool sib_idle = scx_bpf_test_and_clear_cpu_idle(
-				sib_cpu & (CAKE_MAX_CPUS - 1));
-			/* Plus BSS hint read (what running wrote) */
-			volatile u8 hint = cpu_bss[sib_cpu & (CAKE_MAX_CPUS - 1)].idle_hint;
-			volatile bool should_use = sib_idle || hint;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_SMT_CAKE_PROBE];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = should_use;
-		}
-	}
-
-	/* Bench 62: bpfland/cosmos SMT probe — cpumask-based contention check.
-	 * is_smt_contended(): get idle smtmask → cpumask_test_cpu(sibling).
-	 * Requires kfunc for smtmask + cpumask ops. Compare vs slot 61. */
-	{
-		s32 smt_cpu = bpf_get_smp_processor_id();
-		s32 smt_sib = cpu_sibling_map[smt_cpu & (CAKE_MAX_CPUS - 1)];
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			/* bpfland: get idle SMT mask + test if sibling is in it */
-			const struct cpumask *idle_smt = scx_bpf_get_idle_smtmask();
-			volatile bool sib_fully_idle =
-				bpf_cpumask_test_cpu(smt_sib & (CAKE_MAX_CPUS - 1), idle_smt);
-			scx_bpf_put_idle_cpumask(idle_smt);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_SMT_CPUMASK_PROBE];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = sib_fully_idle;
-		}
-	}
-
-	/* ═══ FAIRNESS FIXES: COLD-CACHE + REMOTE ═══
-	 * These probes simulate production conditions where data may not be L1-hot.
-	 * Cold simulation: read 32 unrelated arena cache lines (2KB) between
-	 * iterations to evict the target data from L1D (32KB, 8-way).
-	 * This models the real cost when a different task ran between accesses. */
-
-#ifndef CAKE_RELEASE
-	/* Bench: bpf_task_storage_get — COLD task (first access per-task).
-	 * Evict the storage cache between iterations to measure the slow path:
-	 * hlist walk + spinlock cache insertion, not the cached fast path. */
-	{
-		ARENA_ASSOC();
-		u32 ccpu = r->cpu & (CAKE_MAX_CPUS - 1);
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			/* Pollute L1: stride through arena to evict storage cache lines */
-			volatile u64 sink = 0;
-			#pragma unroll
-			for (int j = 0; j < 16; j++) {
-				u32 idx = (ccpu + j + 1) & (CAKE_MAX_CPUS - 1);
-				sink += per_cpu[idx].mbox.cached_cpu;
-			}
-			u64 _s = bpf_ktime_get_ns();
-			struct cake_task_hot *hot_cold = bpf_task_storage_get(
-				&task_hot_stor, p, 0, 0);
-			volatile u16 cold_val = hot_cold ? hot_cold->deficit_u16 : 0;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_STORAGE_GET_COLD];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = cold_val + sink;
-		}
-	}
-#endif
-
-#ifndef CAKE_RELEASE
-	/* Bench: PELT util_avg — COLD p->se.avg (evicted from L1).
-	 * In production, each stopping() call processes a DIFFERENT task.
-	 * p->se.avg may be in a cold cache line if the task hasn't run recently. */
-	{
-		ARENA_ASSOC();
-		u32 ccpu2 = r->cpu & (CAKE_MAX_CPUS - 1);
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			/* Pollute L1: stride through arena to evict p->se.avg cache line */
-			volatile u64 sink2 = 0;
-			#pragma unroll
-			for (int j = 0; j < 16; j++) {
-				u32 idx = (ccpu2 + j + 1) & (CAKE_MAX_CPUS - 1);
-				sink2 += per_cpu[idx].mbox.tick_slice;
-			}
-			u64 _s = bpf_ktime_get_ns();
-			u64 util_cold = p->se.avg.util_avg;
-			volatile u8 tier = (util_cold > 600) ? 2 : (util_cold > 200) ? 1 : 0;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_PELT_COLD];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = tier + sink2;
-		}
-	}
-#endif
-
-#ifndef CAKE_RELEASE
-	/* Bench: Legacy EWMA compute — COLD cpu_bss (evicted from L1).
-	 * In production, cpu_bss[cpu] may be evicted if another BPF program
-	 * or kernel path displaced the cache line between scheduling events. */
-	{
-		u32 ewma_c = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-		ARENA_ASSOC();
-		u32 fused_c = 0x00C80064;
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			/* Pollute L1: stride through arena */
-			volatile u64 sink3 = 0;
-			#pragma unroll
-			for (int j = 0; j < 16; j++) {
-				u32 idx = (ewma_c + j + 1) & (CAKE_MAX_CPUS - 1);
-				sink3 += per_cpu[idx].mbox.cached_deficit;
-			}
-			u64 _s = bpf_ktime_get_ns();
-			u64 tick_c = cpu_bss[ewma_c].tick_slice;
-			u64 rem_c = p->scx.slice;
-			u16 oavg = (u16)(fused_c >> 16);
-			u16 odef = (u16)(fused_c & 0xFFFF);
-			u64 used_c = (tick_c > rem_c) ? (tick_c - rem_c) : 0;
-			u16 rt_c = (u16)(used_c >> 10);
-			volatile u16 navg = (oavg * 7 + rt_c) >> 3;
-			volatile u16 ndef = (odef > rt_c) ? odef - rt_c : 0;
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_EWMA_COLD];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = navg + ndef + sink3;
-		}
-	}
-#endif
-
-	/* Bench: kick_cpu — REMOTE sibling (real IPI, not self-noop).
-	 * scx_bpf_kick_cpu(self) is a bit-set noop. Production kicks remote
-	 * CPUs which triggers deferred IPI via irq_work. */
-	{
-		s32 kick_cpu = bpf_get_smp_processor_id();
-		s32 kick_sib = cpu_sibling_map[kick_cpu & (CAKE_MAX_CPUS - 1)];
-		#pragma unroll
-		for (int i = 0; i < BENCH_ITERATIONS; i++) {
-			u64 _s = bpf_ktime_get_ns();
-			scx_bpf_kick_cpu(kick_sib & (CAKE_MAX_CPUS - 1), 0);
-			u64 _e = bpf_ktime_get_ns();
-			u64 _d = _e - _s;
-			struct kfunc_bench_entry *e = &r->entries[BENCH_KICK_REMOTE];
-			if (_d < e->min_ns) e->min_ns = _d;
-			if (_d > e->max_ns) e->max_ns = _d;
-			e->total_ns += _d;
-			e->samples[i] = _d;
-			e->last_value = kick_sib;
-		}
-	}
-
-	r->bench_timestamp = bpf_ktime_get_ns();
-	*(volatile u32 *)&bench_active = 0;  /* Re-enable CAKE_STATS_ACTIVE */
-}
-
-
-
-
-
-/* Per-task context: arena-backed direct pointer dereference.
- * Replaces BPF_MAP_TYPE_TASK_STORAGE (hash lookup, ~25-40ns cold)
- * Fast, direct lookups utilizing Arena pointers rather than BPF task storage.
- * Storage allocated in cake_init_task (sleepable), freed in cake_exit_task. */
-
-/* Get task context — arena direct pointer dereference.
- * Arena storage allocated upfront in cake_init_task (sleepable).
- * No null check needed in hot paths: init_task guarantees allocation
- * before any scheduling callbacks fire for this task.
- * __arena qualifier: verifier knows this pointer is arena-backed. */
-static __always_inline struct cake_task_ctx __arena *
-get_task_ctx(struct task_struct *p)
-{
-	return (struct cake_task_ctx __arena *)scx_task_data(p);
-}
-
-/* Phase 6: Fast per-task hot field lookup (~10ns vs 29ns arena).
- * Used by running + stopping + select_cpu + enqueue for CL0 fields.
- * Returns NULL if task_storage not yet allocated (init_task not called). */
-static __always_inline struct cake_task_hot *
-get_task_hot(struct task_struct *p)
-{
-	return bpf_task_storage_get(&task_hot_stor, p, 0, 0);
-}
-
-/* ═══ DEDUP HELPERS (F1/F2/F3) ═══
- * Extracted from repeated inline blocks to reduce BPF insn footprint,
- * i-cache pressure, and source maintenance burden.
- * All __always_inline: zero call overhead, compiler CSE applies. */
-
-
-/* build_cached_cpumask REMOVED: after scx_bpf_select_cpu_and refactor,
- * the kernel handles affinity via p->cpus_ptr natively.
- * cached_cpumask had 0 read sites across the entire codebase (Rule 74). */
-
-/* smt_sibling removed — 3-gate select_cpu delegates SMT handling
- * to scx_bpf_select_cpu_dfl (Gate 3) which handles it natively. */
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * S2 SELECT_CPU: 3-GATE IDLE CPU SELECTION
- * Gate hierarchy: prev_cpu idle → perf-ordered scan → kernel default → DSQ tunnel.
- * ZERO bpf_task_storage_get: identity is in p->scx (task_struct, L1-hot).
+/*
+ * Reciprocal-weight table for division-free vtime charging.
  *
- * PRINCIPLE: "Where to run" is orthogonal to "how long to run".
- *   1. Gate 1: prev_cpu idle (91% hit, L1/L2 warm, zero arena)
- *   2. Gate 2: perf-ordered scan (P/E topology, GAMING active)
- *   3. Gate 3: kernel scx_bpf_select_cpu_dfl (any idle CPU)
- *   4. Tunnel: all busy → enqueue to per-LLC DSQ, wait for dispatch
+ *   recip_weight[i] = (1024 << 20) / sched_prio_to_weight[i]
  *
- * Results (100K event sim, 40 recurring gaming tasks):
- *   S0 → S2: migration 93.1% → 8.9%, cache warm 84.1% → 98.7%
- *   Per-frame savings: 53.4µs/frame, +1.1 avg FPS, +1.1 1% low FPS
- *   Decision cost: ~17ns vs ~100ns (6x faster)
+ * so that `used * recip_weight[i] >> 20 == used * 1024 / weight`, i.e. the
+ * EEVDF charge that advances a nice-0 task's vtime by exactly `used` and a
+ * heavier (negative-nice) task's vtime proportionally slower.
  *
- * SYNC STRIP: In gaming, wakes are signal-only (vsync, GPU completion,
- * futex unlock). SYNC dispatch migrates wakee to waker's CPU, destroying
- * L1/L2 cache warmth (1.6-3.5µs refill) for zero data-locality benefit.
- * Confirmed: Elden Ring main thread bounced across 5+ cores/frame due to
- * SYNC wakes from vkd3d_queue, GXWorkers on random cores.
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * Indexed by `nice + 20 == static_prio - 100 ∈ [0, 39]`. The table is sized to
+ * 64 (a power of 2) so the index masks cleanly; entries [40, 63] are
+ * unreachable for scx-managed SCHED_NORMAL/BATCH/IDLE tasks (static_prio is
+ * always in [100, 139]) and are padded with the lightest-weight value.
+ */
+static const u64 recip_weight[64] = {
+	   12097,    14964,    19009,    23204,    29587, /* nice -20..-16 */
+	   36830,    46174,    57404,    71827,    90109, /* nice -15..-11 */
+	  112457,   140911,   176023,   218952,   274895, /* nice -10..-6  */
+	  344037,   429324,   539297,   677012,   840831, /* nice  -5..-1  */
+	 1048576,  1309441,  1639300,  2041334,  2538396, /* nice  +0..+4  */
+	 3205199,  3947580,  4994148,  6242685,  7837531, /* nice  +5..+9  */
+	 9761289, 12341860, 15339168, 19173961, 23860929, /* nice +10..+14 */
+	29826161, 37025580, 46684427, 59652323, 71582788, /* nice +15..+19 */
+	/* padding [40..63]: unreachable, replicate the lightest weight */
+	71582788, 71582788, 71582788, 71582788, 71582788, 71582788,
+	71582788, 71582788, 71582788, 71582788, 71582788, 71582788,
+	71582788, 71582788, 71582788, 71582788, 71582788, 71582788,
+	71582788, 71582788, 71582788, 71582788, 71582788, 71582788,
+};
 
-
-/* ═══ Kfunc out-param wrappers (Rule 73: zero r10 refs in caller) ═══
+/*
+ * Live wake preemption (EEVDF update_curr + preempt_sync analogue). With
+ * per-CPU queues a woken task can only run on its home CPU, so a stale
+ * comparison strands it behind the whole 1ms slice of whatever runs there:
+ * curr's dsq_vtime is charged only at stopping, so mid-slice it looks
+ * eternally deserving and a full-slice margin never fired — futex collapsed
+ * 20-50x on the per-CPU topology (2026-07-01). Charge curr's in-flight
+ * runtime from its own run-start stamp (the exact stopping() math) so the
+ * comparison is against its TRUE vtime. This helper serves only GLOBAL
+ * wakes (the home path preempts inline, floor-less — that half is the
+ * futex handoff). Here curr's first SLICE_NS/8 stays protected:
+ * the wakee sits in the global queue, not on this CPU, so a floor-less
+ * kick is pure churn — dropping the floor cost futex 4.78M -> 3.51M
+ * while moving schbench p99 not at all (bisected both directions,
+ * 2026-07-04). A zero curr_vtime means a higher class (RT/DL) or the
+ * idle task, which we can't or needn't preempt this way.
  *
- * scx_bpf_select_cpu_dfl requires &is_idle out-param (3 r10 refs).
- * scx_bpf_select_cpu_and requires struct arg on stack (2 r10 refs).
- * Wrapping in __noinline isolates stack usage to these frames.
- * cake_select_cpu gets 0 r10 refs.
- * Cost: 1 extra call per select_cpu — negligible vs kfunc overhead. */
-
-/* Returns cpu if idle found, -1 otherwise. */
-static __noinline s32 select_cpu_dfl_idle(
-	struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+ * The remote read of the owner's stamp slot is the one cross-CPU touch of
+ * that line, confined to saturated wakeups; the owner rewrites it once per
+ * context switch.
+ */
+static __always_inline bool cake_wake_preempt(struct task_struct *p, s32 tcpu)
 {
-	bool is_idle = false;
-	s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	return is_idle ? cpu : -1;
+	struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(tcpu);
+	u64 curr_vtime, ran, live;
+	u32 cidx;
+
+	if (!curr)
+		return false;
+	curr_vtime = curr->scx.dsq_vtime;
+	if (!curr_vtime)
+		return false;
+
+	ran = bpf_ktime_get_ns() - cake.stamp[(u32)tcpu & (MAX_CPUS - 1)].word;
+	if (ran < (SLICE_NS >> 3))
+		return false;
+
+	cidx = (u32)(curr->static_prio - 100) & 63;
+	live = curr_vtime + ((ran * recip_weight[cidx]) >> 20);
+	if (!time_before(p->scx.dsq_vtime, live))
+		return false;
+
+	scx_bpf_kick_cpu(tcpu, CAKE_KICK_PREEMPT);
+	return true;
 }
 
-/* Returns cpu >= 0 if idle found, < 0 otherwise. */
-static __noinline s32 select_cpu_and_idle(
-	struct task_struct *p, s32 prev_cpu, u64 wake_flags,
-	u64 enq_flags)
-{
-	return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags,
-				      p->cpus_ptr, enq_flags);
-}
-
+/*
+ * ops.select_cpu — THE placement decision, one kfunc.
+ *
+ * If select_cpu_dfl found an idle CPU (full idle core, else idle SMT sibling)
+ * we direct-dispatch to the local DSQ for lowest latency and let the kernel
+ * auto-reschedule. Otherwise the system is saturated on this task's affinity:
+ * return the (non-idle) CPU and let ops.enqueue() queue on its vtime DSQ.
+ */
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	/* RELEASE: zero arena dereferences in this callback — all behind
-	 * stats_on / #ifndef CAKE_RELEASE. Skip ARENA_ASSOC to free a
-	 * callee-saved register + 2 insns (Rule 36). */
-#ifndef CAKE_RELEASE
-	ARENA_ASSOC();
-#endif
+	bool is_idle = false;
+	s32 cpu;
 
-#ifndef CAKE_RELEASE
-	bool stats_on = CAKE_STATS_ACTIVE;
-	u64 start_time = 0;
-	if (stats_on)
-		start_time = scx_bpf_now();
-#else
-	#define stats_on 0
-	u64 start_time = 0;
-#endif
-
-	/* SYNC STRIP: In gaming, wakes are signal-only (vsync, futex, GPU done)
-	 * — no data locality from SYNC. A/B tested: SYNC enabled = same or
-	 * slightly worse FPS in Arc Raiders during GAMING. */
-	/* Per-CPU sched_state_local: use prev_cpu (always valid, Rust syncs
-	 * all per-CPU copies identically). Avoids bpf_get_smp_processor_id()
-	 * kfunc which forces r1 spill across call (Rule 73). */
-	if (cpu_bss[prev_cpu & (CAKE_MAX_CPUS - 1)].sched_state_local == CAKE_STATE_GAMING)
-		wake_flags &= ~SCX_WAKE_SYNC;
-
-	/* ── KERNEL IDLE SELECTION ──
-	 * scx_bpf_select_cpu_and (6.17+) or scx_bpf_select_cpu_dfl (6.12+).
-	 * CO-RE dead-code eliminates the unused path at load time — zero
-	 * instruction overhead on the live kernel. Both provide:
-	 *   1. prev_cpu idle test   2. SYNC wake-affine   3. SMT full-idle
-	 *   4. LLC-scoped scan      5. NUMA-scoped scan   6. Global scan
-	 *   7. Proper affinity for restricted tasks (Wine/Proton)
-	 * Rule 62: Grounded in kernel source. Rule 4: Topology-correct.
-	 * Rule 54: Works on all consumer gaming topologies + all kernels. */
-	if (!__COMPAT_HAS_scx_bpf_select_cpu_and) {
-		/* Kernel ≤ 6.16: scx_bpf_select_cpu_dfl via noinline wrapper.
-		 * CO-RE prunes this entire block on 6.17+. */
-		s32 cpu = select_cpu_dfl_idle(p, prev_cpu, wake_flags);
-		if (cpu >= 0) {
-			u64 slice = p->scx.slice ?: quantum_ns;
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					    slice, wake_flags);
-			return cpu;
-		}
-		/* !idle: fall through to Gate 2 (hybrid P/E scan). */
-		goto gate2;
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle) {
+		scx_bpf_dsq_insert(p, CAKE_DSQ_LOCAL, SLICE_NS, 0);
+		return cpu;
 	}
 
+	/*
+	 * EEVDF sync-handoff emulation for the saturated case
+	 * select_cpu_dfl refuses to cover: its WAKE_SYNC convergence
+	 * requires idle CPUs to exist, so under full saturation every
+	 * futex handoff fell to the global wake queue and was consumed by
+	 * whichever CPU blocked first — 0.7 migrations per context switch
+	 * (22M/34M) versus EEVDF's 1 per ~3000, sloshing both working sets
+	 * between L2s every round trip (futex 1.0M vs native 3.1M).
+	 * EEVDF's wake_affine converges a sync wake onto the waker's CPU
+	 * whenever the waker is the only thing on its rq: the waker is
+	 * about to block, so its CPU is where the wakee runs soonest AND
+	 * warmest — the pair collapses into a same-CPU L1 ping-pong. Same
+	 * gate here (waker's local and own vtime queues both provably
+	 * empty), so the FIFO local insert can't starve queued vtime work
+	 * — the kernel's own "unfair when oversaturated" caveat on this
+	 * shape is exactly what the emptiness check rules out.
+	 */
 	{
-		s32 cpu = select_cpu_and_idle(p, prev_cpu, wake_flags, 0);
-		if (cpu >= 0) {
-			u64 slice = p->scx.slice ?: quantum_ns;
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					    slice, wake_flags);
-			if (stats_on) {
-				struct cake_stats *s = get_local_stats();
-				s->total_gate1_latency_ns += scx_bpf_now() - start_time;
-#ifndef CAKE_RELEASE
-				struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-				if (tctx) {
-					tctx->telemetry.gate_1_hits++;
-					tctx->telemetry.direct_dispatch_count++;
-					if (cpu != prev_cpu)
-						tctx->telemetry.migration_count++;
-				}
-#endif
+		s32 waker = (s32)bpf_get_smp_processor_id();
+
+		if (bpf_cpumask_test_cpu(waker, p->cpus_ptr) &&
+		    !scx_bpf_dsq_nr_queued(CAKE_DSQ_LOCAL_ON | (u32)waker) &&
+		    !scx_bpf_dsq_nr_queued((u64)(u32)waker)) {
+			if (wake_flags & CAKE_WAKE_SYNC) {
+				scx_bpf_dsq_insert(p,
+						   CAKE_DSQ_LOCAL_ON | (u32)waker,
+						   SLICE_NS, 0);
+				return waker;
 			}
-			return cpu;
+
+			/*
+			 * Plain-wake convergence (EEVDF's saturated shape:
+			 * select_idle_cpu finds nothing -> wakee runs on the
+			 * affine target, i.e. the waker's CPU). dfl already
+			 * proved nothing is idle, so this only redirects the
+			 * wakee from its old prev to the waker — and that
+			 * difference is the whole futex gap: a split pair is
+			 * SELF-SUSTAINING under prev/home stickiness, and
+			 * every wake of a split pair pays cross-CPU delivery
+			 * plus a preempt of some unrelated CPU's curr —
+			 * wake-to-run p50 1.42us / p99 19.9us with only 68%
+			 * of wakes preempting, vs native 0.27us / 2.99us at
+			 * 95% (traced 2026-07-03). Returning the waker makes
+			 * the activate local; enqueue then sees an empty home
+			 * (just checked), inserts on the waker's own vtime
+			 * queue, and the floor-less home preempt collapses
+			 * the pair onto one CPU — native's 66/33 ping-pong,
+			 * IPI-free, and it STAYS converged because prev ==
+			 * waker from then on. Unlike the sync path above the
+			 * wakee takes the ordinary vtime insert, so a
+			 * non-eligible wakee waits fairly and storm shapes
+			 * keep their idle-kick fallback.
+			 *
+			 * Gated on either side being a genuine sleeper — raw
+			 * dsq_vtime more than one slice behind the frontier,
+			 * exactly the tasks the enqueue sleeper clamp would
+			 * boost. Ungated convergence dragged warm runners off
+			 * their prev (-12.3% cpu-cache-mem, 2026-07-03); with
+			 * NEITHER side a sleeper both are frontier-running
+			 * compute peers (ccm, x265 pools) and the wakee keeps
+			 * dfl's prev placement. A sleeper WAKEE is the futex
+			 * handoff — it accrues nothing between wakes. A
+			 * sleeper WAKER is a dispatcher (schbench messenger:
+			 * ~10% duty) whose CPU is a relief valve: without
+			 * this half, two workers sharing one CPU mutually
+			 * preempt forever — cake has no periodic balancer,
+			 * so the trap pair never rotates and both requests
+			 * stretch 2x (p99 9072us == 2 x p50 4648us vs native
+			 * 5832us, histograms 2026-07-04). The escaped wakee
+			 * queues behind the ineligible sleeper-waker and runs
+			 * when it blocks moments later — no preempt, no kick.
+			 * Once a pair co-locates, prev == waker and the gate
+			 * is moot. `current` IS the waker here: on a shared-
+			 * cache box every cross-CPU wake takes the direct
+			 * ttwu path, and select_task_rq always runs in the
+			 * waker's context.
+			 */
+			if (time_before(p->scx.dsq_vtime + (SLICE_NS >> 1),
+					cake.frontier.word) ||
+			    time_before(bpf_get_current_task_btf()->scx.dsq_vtime +
+						(SLICE_NS >> 1),
+					cake.frontier.word))
+				return waker;
 		}
 	}
 
-gate2:
-	/* ── GATE 2: Performance-ordered idle scan ──
-	 * Scan CPUs in performance order for idle cores:
-	 *   GAME:     fast→slow (P-cores first for max boost)
-	 *   non-GAME: slow→fast (E-cores first for power parking)
-	 * Uses RODATA cpus_fast_to_slow / cpus_slow_to_fast (populated by
-	 * Rust loader from amd_pstate_prefcore_ranking).
-	 * EEVDF TOPOLOGY: Always active when P/E cores exist, not just GAMING.
-	 * Ensures GAME tasks always land on P-cores, BG on E-cores.
-	 * Cost: 0ns on SMP (has_hybrid_cores=false → JIT eliminates). */
-	if (has_hybrid_cores) {
-		/* READ TASK CLASS from BSS pid_class_cache (tunneled from stopping).
-		 * Zero bpf_task_storage_get → eliminates 1982ns tail jitter.
-		 * BSS read = 14ns avg, 96ns jitter (vs 28ns/1982ns task_storage).
-		 * p->pid is L1-hot (same CL as p->scx.slice). */
-		u8 g2_tc = pid_class_cache[p->pid & (PID_CLASS_CACHE_SIZE - 1)];
-		bool is_game = (g2_tc == CAKE_CLASS_GAME);
-		const u8 *scan_order = is_game
-			? cpus_fast_to_slow
-			: cpus_slow_to_fast;
-
-		for (u32 i = 0; i < CAKE_MAX_CPUS && i < nr_cpus; i++) {
-			u8 candidate = scan_order[i];
-			if (candidate >= nr_cpus)
-				break;  /* 0xFF sentinel or out of range */
-
-			/* SMT-aware: XOR detects class mismatch in 1 insn.
-			 * Branchless: is_game ^ sib_game = true when mismatched. */
-			u8 sib = cpu_sibling_map[candidate & (CAKE_MAX_CPUS - 1)];
-			if (sib < nr_cpus && sib != candidate) {
-				bool sib_game = (game_cpu_mask[sib >> 6] >> (sib & 63)) & 1;
-				if (is_game ^ sib_game)
-					continue;  /* class mismatch — skip */
-			}
-
-			if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
-				u64 slice = p->scx.slice ?: quantum_ns;
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | candidate,
-						   slice, wake_flags);
-				return candidate;
-			}
-		}
-	}
-
-	/* ── TUNNEL: All CPUs busy — return prev_cpu ──
-	 * FunSearch: cached_now staging REMOVED (−12 insns).
-	 * bss->cached_now was written but had ZERO READERS in the codebase.
-	 * Enqueue paths call scx_bpf_now() directly — the staging was dead
-	 * code from pre-optimization. Rule 5: no work < some work.
-	 * Tiered weights guarantee GAME [0,5120] sorts before NORMAL [8192,13312].
-	 * DSQ ordering handles all priority — no preemption or kicks needed. */
-#ifdef CAKE_RELEASE
-	#undef stats_on
-#endif
-	return prev_cpu;
-}
-/* Cut 3: enqueue_depth_scale_slice DELETED — zero callers after removal.
- * Gaming DSQs have 0-1 tasks, making depth-scaled slicing dead weight. */
-
-/* OPT-17: enqueue_dsq_dispatch — DSQ insert + mailbox kick.
- * Follows kernel enqueue_entity pattern: all state lives in the entity.
- *   - p is PARENT for: vtime (p->scx.dsq_vtime), slice (p->scx.slice)
- *   - packed is PARENT for: enq_cpu, enq_llc (derived just-in-time)
- * 3 args: p, enq_flags, packed_cpu_llc.
- * kfuncs: scx_bpf_dsq_insert_vtime, scx_bpf_kick_cpu.
- * Only packed (parent of enq_cpu+enq_llc) survives insert → 1 callee-save.
- * 3 args + 1 survivor = 0 spills. */
-static __noinline void enqueue_dsq_dispatch(
-	struct task_struct *p,
-	u64 enq_flags,
-	u64 packed_cpu_llc)
-{
-	/* Derive enq_llc from parent (packed) — used for DSQ ID */
-	u32 enq_llc = (u32)(packed_cpu_llc & 0xFFFF);
-
-	/* Derive vtime+slice from parent (p) — consumed by insert, die immediately */
-	scx_bpf_dsq_insert_vtime(p, LLC_DSQ_BASE + enq_llc,
-				 p->scx.slice ?: quantum_ns,
-				 p->scx.dsq_vtime, enq_flags);
-
-	/* After insert: only packed_cpu_llc needed (parent of enq_cpu+enq_llc) */
-	if (!dsq_kick_needed[enq_llc]) {
-		dsq_kick_needed[enq_llc] = 1;
-		/* Derive enq_cpu from parent (packed) — just-in-time for kick */
-		u32 enq_cpu = (u32)(packed_cpu_llc >> 32) & 0xFFFF;
-		u64 kick_flags = (u64)cpu_bss[enq_cpu].idle_hint * SCX_KICK_IDLE;
-		scx_bpf_kick_cpu(enq_cpu, kick_flags);
-	}
+	return cpu;
 }
 
-
-/* OPT-18: enqueue_nostaged — cold path, no staged context.
- * kthread or first dispatch. 2 args: p, enq_flags.
- * Always uses scx_bpf_now() (cold path — ~10ns irrelevant).
- * Fetches CPU/LLC internally → isolated register frame. */
-static __noinline void enqueue_nostaged(struct task_struct *p, u64 enq_flags)
-{
-	u32 enq_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-	u32 enq_llc = 0;
-	if (nr_llcs > 1) {
-		u32 task_cpu = scx_bpf_task_cpu(p);
-		enq_llc = cpu_llc_id[task_cpu < nr_cpus ? task_cpu : enq_cpu];
-	}
-	/* Cold path: scx_bpf_now() always — cache miss irrelevant here. */
-	scx_bpf_task_set_dsq_vtime(p, scx_bpf_now());
-	scx_bpf_task_set_slice(p, quantum_ns);
-	enqueue_dsq_dispatch(p, enq_flags,
-			    ((u64)enq_cpu << 32) | enq_llc);
-}
-
-/* OPT-19: enqueue_requeue_path — requeue (yield/slice exhaust).
- * 3 args: p, enq_flags, hot. Fetches CPU/LLC/now internally. */
-static __noinline void enqueue_requeue_path(
-	struct task_struct *p, u64 enq_flags,
-	struct cake_task_hot *hot, u32 enq_cpu)
-{
-	/* FunSearch: enq_cpu hoisted from caller (enqueue_body).
-	 * Eliminates bpf_get_smp_processor_id() kfunc from this path.
-	 * Rule 62: EEVDF pattern — kernel derives CPU from rq struct. */
-	u64 now_cached = scx_bpf_now();  /* always fresh for non-wakeup */
-	u32 enq_llc = 0;
-	if (nr_llcs > 1) {
-		u32 task_cpu = scx_bpf_task_cpu(p);
-		enq_llc = cpu_llc_id[task_cpu < nr_cpus ? task_cpu : enq_cpu];
-	}
-	/* FunSearch: hot null check removed — provably dead.
-	 * Proof: enqueue_body gates requeue_path behind staged & VALID.
-	 * If hot were NULL → staged=0 → VALID not set → nostaged path.
-	 * hot is guaranteed non-NULL here. Rule 5: no work < some work. */
-	u64 staged = hot->staged_vtime_bits;
-	u64 requeue_slice = p->scx.slice ?: quantum_ns;
-	u32 dsq_weight = (u32)(staged & 0xFFFFFFFF);
-	scx_bpf_task_set_dsq_vtime(p, now_cached + dsq_weight);
-	/* Cut 5: flat 50% requeue slice for all classes.
-	 * GAME 75%/non-GAME 50% differentiation removed — vtime ordering
-	 * already provides GAME priority. Saves yl_flag + variable multiply. */
-	requeue_slice >>= 1;
-	requeue_slice += (200000 - requeue_slice) & -(requeue_slice < 200000);
-	scx_bpf_task_set_slice(p, requeue_slice);
-	enqueue_dsq_dispatch(p, enq_flags,
-			    ((u64)enq_cpu << 32) | enq_llc);
-}
-
-/* OPT-20: enqueue_wakeup_path — main wakeup dispatch (~90%).
- * PARENT-DERIVATION + FUSION pattern (Rules 24/37/41):
- *   hot is PARENT for 6 derivatives: staged, dsq_weight, new_flow,
- *   dsq_vtime, is_game, task_class. All fused into vtime computation
- *   and entity pre-write BEFORE any kfunc. hot dies immediately.
+/*
+ * ops.enqueue — reached only when select_cpu claimed no idle CPU.
  *
- * Liveness across bpf_get_smp_processor_id:
- *   p(r6), enq_flags(r7), is_game(r8) = 3 values < 4 callee-saves.
- * After kfunc: + enq_cpu(r9) = 4 values = 4 callee-saves.
- * → 0 spills. */
-static __noinline void enqueue_wakeup_path(
-	struct task_struct *p, u64 enq_flags,
-	struct cake_task_hot *hot, u32 enq_cpu)
-{
-	/* ── Phase 1: FUSE all hot derivatives into entity pre-write ──
-	 * hot is parent for: staged_vtime_bits → dsq_weight, new_flow
-	 *                     dsq_vtime → vtime base
-	 *                     task_class → is_game (single bool)
-	 * After this block, hot is DEAD — all data consumed.
-	 * FunSearch: hot null checks removed — provably dead.
-	 * Proof: enqueue_body gates wakeup_path behind staged & VALID.
-	 * If hot were NULL → staged=0 → VALID not set → nostaged path. */
-	u64 staged = hot->staged_vtime_bits;
-	u32 dsq_weight = (u32)(staged & 0xFFFFFFFF);
-	u8 new_flow = (staged >> STAGED_BIT_NEW_FLOW) & 1;
-	u64 vtime = dsq_weight + hot->dsq_vtime;
-	vtime -= new_flow_bonus_ns & -(u64)new_flow;
-	u8 is_game = (hot->task_class == CAKE_CLASS_GAME);
-	/* Write vtime to entity — kernel enqueue_entity pattern.
-	 * vtime, staged, dsq_weight, new_flow all DIE here. */
-	scx_bpf_task_set_dsq_vtime(p, vtime);
-	/* GAME DOUBLE-SLICE: frame-time headroom during GAMING.
-	 * Only GAME+GAMING gets an explicit 2× quantum for frame pacing. */
-	/* Per-CPU sched_state_local: use enq_cpu (already have it from caller).
-	 * Avoids bpf_get_smp_processor_id() kfunc which causes 3 spills (Rule 73). */
-	if (is_game && cpu_bss[enq_cpu].sched_state_local == CAKE_STATE_GAMING)
-		scx_bpf_task_set_slice(p, quantum_ns << 1);
-	/* hot is now DEAD — all 6 derivatives consumed or stored.
-	 * FunSearch: bpf_get_smp_processor_id() kfunc removed.
-	 * enq_cpu hoisted to enqueue_body (caller) — eliminates
-	 * the root cause of 2 stack spills. EEVDF pattern: kernel
-	 * gets CPU from rq struct; we get it from caller's frame.
-	 * Without any kfunc here, p and enq_flags stay in arg regs
-	 * or callee-saves — no spill/reload cycle. */
-
-	/* ── Phase 3: LLC (dead-coded on single-CCD via RODATA nr_llcs=1) ── */
-	u32 enq_llc = 0;
-	if (nr_llcs > 1) {
-		u32 task_cpu = scx_bpf_task_cpu(p);
-		enq_llc = cpu_llc_id[task_cpu < nr_cpus ? task_cpu : enq_cpu];
-	}
-
-	/* ── Phase 5: Dispatch (3 args, 0 spills) ── */
-	u64 packed = ((u64)enq_cpu << 32) | enq_llc;
-	enqueue_dsq_dispatch(p, enq_flags, packed);
-
-
-}
-
-/* OPT-14: enqueue_body — thin router. get_task_hot + branch to path.
- * FunSearch: bpf_get_smp_processor_id hoisted here from wakeup/requeue paths.
- * Live after kfuncs: p(r6), enq_flags(r7), enq_cpu(r8), hot(r9) = 4 callee-saves.
- * Eliminates 2 spills from enqueue_wakeup_path. EEVDF-inspired:
- * kernel derives CPU from rq struct, passed to enqueue_entity. */
-static __noinline void enqueue_body(struct task_struct *p, u64 enq_flags)
-{
-	u32 enq_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-	struct cake_task_hot *hot = get_task_hot(p);
-	u64 staged = hot ? hot->staged_vtime_bits : 0;
-
-	if (unlikely(!(staged & (1ULL << STAGED_BIT_VALID)))) {
-		enqueue_nostaged(p, enq_flags);
-		return;
-	}
-	if (!(enq_flags & (SCX_ENQ_WAKEUP | SCX_ENQ_PREEMPT))) {
-		enqueue_requeue_path(p, enq_flags, hot, enq_cpu);
-		return;
-	}
-	enqueue_wakeup_path(p, enq_flags, hot, enq_cpu);
-}
-
-/* Enqueue — trivial struct_ops stub → __noinline enqueue_body.
- * Stub isolates BPF struct_ops arg extraction from core logic.
- * enqueue_body gets its own register frame (Rule 23: 0 spills). */
+ * Insert into the OWNER's vtime queue: dsq_id == task_cpu. task_cpu is
+ * post-core-validation and always in p->cpus_ptr (pinned tasks that skipped
+ * select_cpu included), and ops.enqueue runs holding that CPU's rq lock, so
+ * either the owner scans its own DSQ after this insert, or core's
+ * activate→wakeup_preempt rescheds it out of idle for us — no insert kick is
+ * needed for the owner. On a same-CPU futex handoff the insert and consume
+ * both happen under this CPU's own rq lock: EEVDF's in-place shape.
+ *
+ * Then keep the rest of the machine work-conserving: if any eligible CPU is
+ * idle, kick it (pick CLAIMS the idle bit, so concurrent wakers fan out to
+ * distinct CPUs; under saturation this is a read-only scan of an all-zero
+ * mask — zero atomics); else, on a wakeup, preempt the target CPU if the
+ * task running there is a full slice less deserving (later vtime).
+ *
+ * Callee-saved across kfuncs: p, enq_flags, tcpu — no spills. Recompute over
+ * hold: the kernel writes the clamped vtime back into p->scx.dsq_vtime inside
+ * the insert, so the preempt margin reloads it from p rather than holding vt
+ * live across three kfunc calls.
+ */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
-#ifndef CAKE_RELEASE
-	ARENA_ASSOC();
-#endif
-	enqueue_body(p, enq_flags);
-}
+	/*
+	 * task_cpu(p), read directly: the kfunc body is one CO-RE-able load
+	 * (READ_ONCE(task_thread_info(p)->cpu); THREAD_INFO_IN_TASK is
+	 * unconditional on x86-64), so calling it paid a full kfunc
+	 * call-clobber — r1-r5 dead, tcpu spilled to stack and reloaded
+	 * around every later kfunc — on the hottest enqueue path for one
+	 * 4-byte load. p is already verified PTR_TO_BTF_ID here.
+	 */
+	s32 tcpu = (s32)p->thread_info.cpu;
+	u64 lo, d, vt;
+	s32 idle;
 
-/* Dispatch: single DSQ per LLC + cross-LLC steal.
- * Direct-dispatched tasks (SCX_DSQ_LOCAL_ON) bypass this callback entirely —
- * kernel handles them natively. Only tasks that went through
- * cake_enqueue → per-LLC DSQ arrive here.
- *
- * FIX: dsq_gen blindfold REMOVED. The generation counter caused CPUs to
- * permanently skip checking the shared DSQ after pulling one task, because
- * all CPUs synced to the same global gen after consuming a single task.
- * Result: 18.8M hint_skips, OS threads (ksoftirqd, rcu) starved for 6.5s.
- * Replaced with O(1) scx_bpf_dsq_nr_queued() — true queue depth, no drift. */
-void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
-{
-#ifndef CAKE_RELEASE
-	ARENA_ASSOC();
-#endif
-	u32 cpu_idx = raw_cpu & (CAKE_MAX_CPUS - 1);
-	bool stats_on = CAKE_STATS_ACTIVE;
-	u64 dispatch_start = stats_on ? scx_bpf_now() : 0;
+	/*
+	 * Sleeper clamp max(own, frontier - one slice): branchless and
+	 * wrap-safe under time_before() semantics —
+	 *   d = own - lo; own >= lo => (s64)d >= 0 => mask = ~0 => lo + d = own
+	 *                 own <  lo => (s64)d <  0 => mask =  0 => lo + 0 = lo
+	 */
+	lo = cake.frontier.word - SLICE_NS;
+	d  = p->scx.dsq_vtime - lo;
+	vt = lo + (d & ~((u64)((s64)d >> 63)));
 
-	u32 my_llc = cpu_bss[cpu_idx].llc_id;  /* per-CPU cache (Rule 41) */
-	u64 my_dsq_id = LLC_DSQ_BASE + my_llc;
+	/*
+	 * Wakeups are global, continuations are local. A woken task must be
+	 * findable by the FIRST CPU that blocks anywhere — pinning it to one
+	 * home CPU's queue strands handoff chains behind a stranger's slice
+	 * (futex 20-50x, 2026-07-01); a slice-expired task wants exactly its
+	 * home CPU for L1/L2 warmth (the schbench p99 requeue band). The
+	 * routing key is the enqueue's own wakeup bit: one algorithm, no
+	 * state, no detector.
+	 *
+	 * EXCEPT single-CPU tasks: the global queue exists so that ANY
+	 * blocking CPU can pick the wakee up, and for nr_cpus_allowed == 1
+	 * that premise is false — only tcpu may run it, tcpu drains its own
+	 * DSQ first, and under saturation it never looks further: a pinned
+	 * kworker stranded in WAKE_DSQ ate the 5s runnable-stall watchdog
+	 * (stress-ng-futex, 2026-07-02). In its owner's queue the vtime
+	 * order guarantees progress, and every other CPU's WAKE consume
+	 * stops paying to skip over a task it can never take.
+	 */
+	/*
+	 * Empty-home carve-out (EEVDF's futex shape), sleeper-gated on BOTH
+	 * ends. Futex wakes carry no WF_SYNC, so EEVDF's futex locality is
+	 * prev-CPU stickiness PLUS floor-less eligibility preemption —
+	 * measured 2026-07-02, each half alone loses: wake-global = flow
+	 * without locality, home routing alone = locality without flow. A
+	 * wake whose own CPU's queue is empty queues at home when either
+	 *
+	 *   - the wake is LOCAL (this CPU waking onto itself: curr is the
+	 *     waker — the converged-pair signature; the raw-vtime test
+	 *     flaps for it because the clamp rewrites the wakee to exactly
+	 *     frontier - SLICE every insert), or
+	 *   - the WAKEE is a sleeper (raw vtime more than half a slice
+	 *     behind the frontier — the handoff shape: it accrues nothing
+	 *     between wakes), or
+	 *   - the CURR there is a valve (live vtime a full slice behind —
+	 *     a low-duty dispatcher about to block; the wakee just waits it
+	 *     out, no preempt or kick needed).
+	 *
+	 * When NEITHER holds, wakee and curr are frontier-running compute
+	 * peers, and homing the wakee builds a trap: cake has no periodic
+	 * balancer, so two workers sharing one CPU mutually preempt forever
+	 * while other CPUs run one worker each — every affected schbench
+	 * request stretched exactly 2x (p99 9072us == 2 x p50 4648us vs
+	 * native 5832us, 2026-07-04). Peer wakes go to the global queue
+	 * where the FIRST CPU to block anywhere picks them up — stateless
+	 * rotation, the very musical-chairs EEVDF gets from blocked-load
+	 * wake_affine. A congested home always falls back to the global
+	 * queue (the pure per-CPU 20-50x collapse), and an RT/idle-owned
+	 * home (curr_vtime 0) does too rather than queue behind a class we
+	 * cannot preempt. Pinned tasks never reach this path.
+	 */
+	if ((enq_flags & CAKE_ENQ_WAKEUP) && p->nr_cpus_allowed > 1) {
+		struct task_struct *curr;
+		u64 live = 0, ran = 0;
+		bool home = false;
 
-	/* 1. Fast Path: Check if our local LLC DSQ actually has tasks */
-	{
-		s32 depth = scx_bpf_dsq_nr_queued(my_dsq_id);
-		/* P2B: dsq_depth_cached pruned — Rule 5/74.
-		 * Zero BPF + zero Rust consumers (sleep_lag removed). */
+		bool local = (u32)tcpu == bpf_get_smp_processor_id();
 
-		if (depth > 0) {
-		if (scx_bpf_dsq_move_to_local(my_dsq_id, 0)) {
-			/* MAILBOX CLEAR: DSQ drained. Check-before-write (Rule 11).
-			 * Stays Shared if already 0 (MESI no-op on fast path). */
-			if (dsq_kick_needed[my_llc]) dsq_kick_needed[my_llc] = 0;
-			if (stats_on) {
-				struct cake_stats *s = get_local_stats_for(cpu_idx);
-				s->nr_local_dispatches++;
-				s->nr_dsq_consumed++;
-				u64 d_oh = scx_bpf_now() - dispatch_start;
-				s->total_dispatch_ns += d_oh;
-				s->max_dispatch_ns = s->max_dispatch_ns + ((d_oh - s->max_dispatch_ns) & -(d_oh > s->max_dispatch_ns));
-			}
+		/*
+		 * Self-race first: waking the task this CPU is still
+		 * switching out (sub-slice block/wake cadence rides the
+		 * ttwu wakelist and lands here with curr == p — the
+		 * pipe/futex on-cpu shape). It is the hottest single wake
+		 * path, so it runs BEFORE the nr_queued rhashtable lookup:
+		 * cpu_curr is a plain per-cpu rq deref. Home is right even
+		 * with a non-empty queue — p was current here microseconds
+		 * ago (continuation-local by definition) and the vtime
+		 * order keeps whatever is queued ahead of it fair.
+		 * Eligibility, the ktime read, and a preempt kick would
+		 * all be spent against ourselves; insert and let the
+		 * in-flight schedule() repick — core's activate already
+		 * rescheds an idling owner.
+		 */
+		curr = __COMPAT_scx_bpf_cpu_curr(tcpu);
+		if (curr == p) {
+			cake.qmark[(u32)tcpu & (MAX_CPUS - 1)].word = 1;
+			scx_bpf_dsq_insert_vtime(p, (u64)(u32)tcpu, SLICE_NS,
+						 vt, enq_flags);
 			return;
 		}
+
+		if (!scx_bpf_dsq_nr_queued((u64)(u32)tcpu)) {
+			u64 cv = curr ? curr->scx.dsq_vtime : 0;
+
+			if (!cv) {
+				/*
+				 * Idle-owned (or RT-owned) empty home: the
+				 * CPU is free or imminently free — the best
+				 * claim there is. Sending this case global
+				 * was the pipe leak: a wake racing its
+				 * partner's idle transition took a WAKE_DSQ
+				 * insert + pick_idle + kick detour on every
+				 * message. No preempt exists to fire (live
+				 * stays 0).
+				 */
+				home = true;
+			} else {
+				ran = bpf_ktime_get_ns() -
+				      cake.stamp[(u32)tcpu & (MAX_CPUS - 1)].word;
+				u32 cidx = (u32)(curr->static_prio - 100) & 63;
+
+				live = cv + ((ran * recip_weight[cidx]) >> 20);
+				/*
+				 * A LOCAL wake (this CPU waking onto itself —
+				 * curr is the waker, about to block or be
+				 * preempted) always claims home: it is the
+				 * converged handoff pair, and its raw-vtime
+				 * sleeper test flaps because the clamp itself
+				 * writes the wakee back to within one slice
+				 * of the frontier every insert (routing that
+				 * flap globally collapsed futex 4.8M -> 0.98M,
+				 * 2026-07-04). Remote wakes need a sleeper on
+				 * one end.
+				 */
+				home = local ||
+				       (s64)d < (s64)(SLICE_NS >> 1) ||
+				       time_before(live, lo);
+			}
 		}
-	}
 
-	/* 2. Steal Path: Look at other LLCs (Active on multi-CCD setups) */
-	if (nr_llcs > 1) {
-		for (u32 i = 1; i < CAKE_MAX_LLCS; i++) {
-			if (i >= nr_llcs) break;
-			u32 victim = my_llc + i;
-			if (victim >= nr_llcs) victim -= nr_llcs;
-
-			u64 victim_dsq = LLC_DSQ_BASE + victim;
-			/* EEVDF TOPOLOGY: only cross-CCD steal when victim has 2+ tasks.
-			 * Prevents cache-cold migration of single tasks that are better
-			 * served waiting for their CCD's core to free up. Mirrors EEVDF's
-			 * imbalance_pct threshold for cross-domain migration. */
-			if (scx_bpf_dsq_nr_queued(victim_dsq) > 1 && scx_bpf_dsq_move_to_local(victim_dsq, 0)) {
-				/* MAILBOX CLEAR: stolen DSQ drained. */
-				if (dsq_kick_needed[victim]) dsq_kick_needed[victim] = 0;
-				if (stats_on) {
-					struct cake_stats *s = get_local_stats_for(cpu_idx);
-					s->nr_stolen_dispatches++;
-					s->nr_dsq_consumed++;
-				}
+		if (home) {
+			cake.qmark[(u32)tcpu & (MAX_CPUS - 1)].word = 1;
+			scx_bpf_dsq_insert_vtime(p, (u64)(u32)tcpu, SLICE_NS,
+						 vt, enq_flags);
+			/*
+			 * Home preempt BEFORE any idle kick: a kicked-idle
+			 * third party's dispatch pulled the just-inserted
+			 * home wakee through the steal ring, undoing the
+			 * locality. When the wakee is eligible NOW the pair
+			 * collapses onto tcpu (EEVDF's wake_preempt shape) —
+			 * this wake created no other runnable work, and any
+			 * CPU that idles later re-scans every queue through
+			 * the steal ring, so the preempted curr can't strand.
+			 * A local wake onto an idle-owned home returns too:
+			 * schedule() here is imminent, and a pick_idle kick
+			 * could only invite a third party to steal the wakee
+			 * out of the very queue it just claimed.
+			 */
+			/*
+			 * INVERTED floor: preempt only a YOUNG curr. The
+			 * stateless spinner/worker discriminator is curr's
+			 * own on-cpu age — a handoff ping-pong participant
+			 * is always young (a few us between switches, futex),
+			 * while a mid-request compute worker has run long
+			 * unswitched (refills don't re-stamp). Flushing the
+			 * old one for a us-service wakee was the schbench
+			 * RPS tax (workers preempted 2.5x native, -2%
+			 * capacity -> p99 amplified at critical load); the
+			 * wakee is vtime-queued and takes over at curr's
+			 * block or slice expiry anyway. EEVDF makes the same
+			 * trade — its messengers WAIT (800ms runnable/12s)
+			 * while workers run uninterrupted.
+			 */
+			/*
+			 * Deadline margin (pick_eevdf semantics, and the
+			 * legitimate form of native's victim selection): a
+			 * bare-eligibility preempt fired for wakees only
+			 * microseconds ahead of curr — the flap-zone churn
+			 * class whose co-execution paid the −1% IPC tax.
+			 * Demand a real win (an eighth-slice) before
+			 * flushing curr: deep sleepers (futex children,
+			 * dispatchers — clamp-boosted a full slice back)
+			 * preempt exactly as before; marginal wakees wait
+			 * the turn out, and their host's sibling runs solo
+			 * meanwhile. NOTE: the 2026-07-01 "full-slice
+			 * margin" falsification measured a margin against a
+			 * STALE curr vtime; this one sits atop the correct
+			 * live charge.
+			 */
+			if (live && ran < (SLICE_NS >> 5) &&
+			    time_before(vt + (SLICE_NS >> 1), live)) {
+				cake.pmark[(u32)tcpu & (MAX_CPUS - 1)].word = 1;
+				scx_bpf_kick_cpu(tcpu, CAKE_KICK_PREEMPT);
 				return;
 			}
+			if (local && !live)
+				return;
+		} else if (!scx_bpf_dsq_nr_queued((u64)(u32)tcpu)) {
+			/*
+			 * Peer wake, empty home: queue at prev anyway —
+			 * WARM, no preempt (it fails eligibility against a
+			 * frontier curr and waits at most one turn). The
+			 * global detour sent every such request to a random
+			 * blocker: always cross-core, always a cold L2,
+			 * while native's wake migrations stay near prev
+			 * (often the SMT sibling — same core, same L2).
+			 * Equal migration COUNTS, opposite warmth — the
+			 * measured on-CPU slowdown on tail requests. The
+			 * M12 trap that justified the detour was measured
+			 * under 1ms turns with mutual-preempt churn; 3ms
+			 * turns amortize the alternation and the young-curr
+			 * floor removed the churn. A busy home still goes
+			 * global below.
+			 */
+			cake.qmark[(u32)tcpu & (MAX_CPUS - 1)].word = 1;
+			scx_bpf_dsq_insert_vtime(p, (u64)(u32)tcpu, SLICE_NS,
+						 vt, enq_flags);
+		} else if (scx_bpf_dsq_nr_queued((u64)WAKE_DSQ)) {
+			/*
+			 * Global backlog = the oversubscription signature:
+			 * a wake is already waiting there, so scattering
+			 * another one buys nothing — it lands on a random
+			 * cold CPU and splits its pair (the t32/t64 herd
+			 * collapse: 995K/201K per sec vs native 2.8M/2.5M).
+			 * Stay home instead — native's oversubscribed shape
+			 * is pairs stable at prev, vtime-fair locally. At
+			 * 1x the global queue drains ahead of wakes and
+			 * this branch never fires.
+			 */
+			cake.qmark[(u32)tcpu & (MAX_CPUS - 1)].word = 1;
+			scx_bpf_dsq_insert_vtime(p, (u64)(u32)tcpu, SLICE_NS,
+						 vt, enq_flags);
+		} else {
+			scx_bpf_dsq_insert_vtime(p, (u64)WAKE_DSQ, SLICE_NS,
+						 vt, enq_flags);
+
+			/*
+			 * Targeted idle kick: prev's SMT sibling shares its
+			 * L2, so if it is idle, wake IT to collect from the
+			 * global queue — the pickup lands warm without any
+			 * routing change (the wake stays in WAKE_DSQ for
+			 * anyone; flow preserved). x265-class busy-home
+			 * wakes hit this constantly; converged futex never
+			 * reaches here. Falls through to the untargeted
+			 * pick when the sibling is busy too.
+			 */
+			{
+				u32 nrc = (u32)cake.ncpu.word;
+				u32 half = nrc >> 1;
+				s32 sib = (u32)tcpu < half ? tcpu + (s32)half :
+							     tcpu - (s32)half;
+
+				if (half &&
+				    bpf_cpumask_test_cpu(sib, p->cpus_ptr) &&
+				    scx_bpf_test_and_clear_cpu_idle(sib)) {
+					scx_bpf_kick_cpu(sib, CAKE_KICK_IDLE);
+					return;
+				}
+			}
+		}
+
+		idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (idle >= 0)
+			scx_bpf_kick_cpu(idle, CAKE_KICK_IDLE);
+		else if (!home)
+			cake_wake_preempt(p, tcpu);
+		return;
+	}
+
+	/*
+	 * A continuation that lands behind a waiter is one half of an
+	 * alternating pair — the only place turn length is paid for in L2
+	 * refills (the 1ms->2ms base-slice change bought schbench p99
+	 * 7368->6984, sat +30%, cache +18% by halving exactly this). Give
+	 * the alternation a longer 3ms turn: wake storms never take this
+	 * path (fork/thread margins stay), an empty queue keeps the base
+	 * slice, and wake service rides preempts and kicks, not expiry
+	 * cadence. This is a binary distinction, not the falsified
+	 * queue-depth ladder.
+	 */
+	{
+		u64 nq = scx_bpf_dsq_nr_queued((u64)(u32)tcpu);
+
+		/*
+		 * Depth-2 overflow to OVF_DSQ — the saturation balance the
+		 * design lacked (nothing idles at 2x compute, the steal
+		 * ring never runs, imbalance persists: cache-t32 -16%).
+		 * Own channel: routing through WAKE_DSQ corrupted the
+		 * backlog-homing signal (futex t32 2.13M -> 0.64M). Only
+		 * while the global wake queue is empty — backlog there
+		 * means uniform depth (sat), where overflow helps nobody.
+		 */
+		u64 was_preempted = cake.pmark[(u32)tcpu & (MAX_CPUS - 1)].word;
+
+		cake.pmark[(u32)tcpu & (MAX_CPUS - 1)].word = 0;
+		if (nq >= 2 && p->nr_cpus_allowed > 1 && !was_preempted &&
+		    !scx_bpf_dsq_nr_queued((u64)WAKE_DSQ)) {
+			scx_bpf_dsq_insert_vtime(p, (u64)OVF_DSQ, SLICE_NS,
+						 vt, enq_flags);
+		} else {
+			cake.qmark[(u32)tcpu & (MAX_CPUS - 1)].word = 1;
+			scx_bpf_dsq_insert_vtime(p, (u64)(u32)tcpu,
+						 nq ? SLICE_NS + (SLICE_NS >> 1) :
+						      SLICE_NS,
+						 vt, enq_flags);
 		}
 	}
 
-	if (stats_on) get_local_stats_for(cpu_idx)->nr_dispatch_misses++;
-
-	/* G3 FIX: keep_running — if no tasks in any DSQ and prev task is
-	 * still queued (wants to run), replenish its slice instead of forcing
-	 * a pointless context switch. Saves ~2-4µs per cycle under light load.
-	 * Cosmos/bpfland both implement this. Especially important for gaming
-	 * where single-task-per-core is the common steady state. */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
-		scx_bpf_task_set_slice(prev, quantum_ns);
-
-	/* Check-before-write: if CPU is already marked idle from a previous
-	 * dispatch miss, skip the store (Rule 11: MESI optimization). */
-	if (!cpu_bss[cpu_idx].idle_hint) cpu_bss[cpu_idx].idle_hint = 1;
+	idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	if (idle >= 0)
+		scx_bpf_kick_cpu(idle, CAKE_KICK_IDLE);
 }
 
-/* DVFS RODATA: unused by BPF (tick removed) but written by Rust loader.
- * Kept to prevent loader panic on missing RODATA symbol. JIT dead-code eliminates. */
-const u32 tier_perf_target[8] = {
-	1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
-};
-
-/* OPT-13: __noinline running_task_change — isolates task-change kfuncs
- * from cake_running's register frame. Contains get_task_hot, game_cpu_mask
- * atomics, scx_bpf_cpuperf_set. 4 args: p, bss, cpu, slice. */
-static __noinline void running_task_change(
-	struct task_struct *p,
-	struct cake_cpu_bss *bss,
-	u32 cpu)
+/*
+ * ops.dispatch — earliest eligible vtime of {own queue, wake queue}, then
+ * staggered ring steal, then keep-running.
+ *
+ * 1) Own DSQ vs the global wake queue: two lockless peeks (one RCU load of
+ *    first_task each — no DSQ lock, so the 3M-wakes/s serialization stays
+ *    dead) pick whichever head has the earlier vtime; the other is the
+ *    immediate fallback. Own-first-always starved WAKE_DSQ whenever own
+ *    queues never emptied — pure-spinner saturation requeues a continuation
+ *    every slice, dispatch always found local work, and a woken task waited
+ *    out the 5s watchdog (stress-ng-futex, 2026-07-02). Vtime comparison
+ *    seals that at the source: a stranded wake head's vtime is frozen while
+ *    every running task's advances past it, so each CPU soon prefers the
+ *    wake head — starvation-free with no rescue path, and it is the
+ *    latency rule too: a blocker that sleeps often carries low vtime and
+ *    beats the warm backlog the moment it wakes. Insert and the own-queue
+ *    consume are both under this CPU's rq lock, so that DSQ spinlock is
+ *    uncontended except for occasional stealers. Slice-expiry requeues (the
+ *    schbench +1.7ms tail) resolve right here, and select_cpu placement
+ *    (L1/L2 warmth, the x265 fix) is honored because nobody else drains
+ *    this queue while we're busy.
+ * 2) Steal ring: two constant-start half-loops in ascending order from
+ *    cpu+1, wraparound expressed as the second loop — no modulo, no wrap
+ *    arithmetic, structurally unroll-resistant, verifier-friendly. The
+ *    own-offset start is a zero-cost anti-herd stagger. A blind
+ *    move_to_local takes the victim's min-vtime task, skips tasks whose
+ *    cpumask excludes us, and self-corrects any cross-queue vtime inversion;
+ *    an empty victim costs one lockless list-empty read. Migration happens
+ *    at the work-conserving minimum: only when this CPU would otherwise
+ *    idle or refill (pull model).
+ * 3) Everything visibly empty → keep the previous task running with a fresh
+ *    slice (the +46% stress-ng-cpu-cache-mem lever). It cannot starve
+ *    queued work: our own move_to_local returning false proved DSQ[cpu]
+ *    empty under its lock, and the kernel would otherwise keep prev anyway
+ *    with its 20ms default slice — the refill preserves cake's 1ms cadence.
+ *
+ * Only scalars stay live across the move kfuncs (a successful remote
+ * consume drops this rq's lock mid-call; we return immediately on success).
+ */
+void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 {
-	/* FunSearch: slice load moved here from cake_running.
-	 * On 75% same-task re-runs, cake_running skips this function entirely,
-	 * avoiding a wasted p->scx.slice load. Rule 5: no work < some work. */
-	u64 slice = p->scx.slice;
-	bss->last_pid = p->pid;
-	bss->tick_slice = slice ?: quantum_ns;
-	struct cake_task_hot *hot = get_task_hot(p);
+	u32 ucpu = (u32)cpu;
+	u64 first = (u64)ucpu, second = (u64)WAKE_DSQ;
+	struct task_struct *own, *wake;
+	u32 nr, i, idx;
 
-	/* FunSearch V10: Early exit on !hot — flatten control flow.
-	 * Without hot: tc defaults to NORMAL, vtime_now untouched,
-	 * game_cpu_mask would clear our bit (NORMAL != GAME),
-	 * cpuperf would set 768. These are safe to skip:
-	 * - game_cpu_mask: next task switch will correct it
-	 * - game_cpu_mask + cpuperf eliminated → mask-only block
-	 * Trade-off: 1-cycle stale mask for NULL hot (rare edge case). */
-	if (!hot)
+	/*
+	 * Point-in-time snapshots; a stale read only mis-orders the two
+	 * consume attempts, both of which still happen. NULL from an empty
+	 * queue keeps own-first (second try still drains the wake queue: a
+	 * blocking CPU picking up the earliest-vtime waker IS the handoff
+	 * fast path).
+	 *
+	 * The one-slice margin is hysteresis, not fairness slack: sleeper-
+	 * clamped wake heads sit *slightly* earlier than own heads almost
+	 * always, and a plain earliest-vtime rule sent every CPU to the
+	 * global queue first — move_to_local takes the DSQ lock, and the
+	 * wake-storm serialization came right back (futex −49%, 2026-07-02).
+	 * Own-first within the margin keeps the uncontended fast path; a
+	 * genuinely stranded wake head freezes while own heads advance past
+	 * it by more than a slice within a few quanta, and then every CPU
+	 * prefers it until it drains — the starvation seal stays structural.
+	 */
+	cake.qmark[ucpu & (MAX_CPUS - 1)].word = 0;
+	own  = __COMPAT_scx_bpf_dsq_peek((u64)ucpu);
+	if (own)
+		cake.qmark[ucpu & (MAX_CPUS - 1)].word = 1;
+	wake = __COMPAT_scx_bpf_dsq_peek((u64)WAKE_DSQ);
+	if (wake && (!own ||
+		     time_before(wake->scx.dsq_vtime +
+					 (time_before(wake->scx.dsq_vtime,
+						      cake.frontier.word -
+							      (SLICE_NS >> 1)) ?
+						  SLICE_NS :
+						  2 * SLICE_NS),
+				 own->scx.dsq_vtime))) {
+		first  = (u64)WAKE_DSQ;
+		second = (u64)ucpu;
+	}
+
+	if (scx_bpf_dsq_move_to_local(first, 0))
+		return;
+	if (scx_bpf_dsq_move_to_local(second, 0))
+		return;
+	if (scx_bpf_dsq_move_to_local((u64)OVF_DSQ, 0))
 		return;
 
-	u8 tc = hot->task_class;
+	nr = (u32)cake.ncpu.word;
 
-	/* vtime_local monotonic max — EEVDF global clock advancement.
-	 * Per-CPU: eliminates cross-core cache line bouncing (Rule 8).
-	 * Kernel analog: update_min_vruntime() in update_curr().
-	 * Rule 62: verified against /home/ritz/Documents/Repo/linux/kernel/sched/fair.c */
-	u64 tv = hot->dsq_vtime;
-	if (tv > bss->vtime_local)
-		bss->vtime_local = tv;
-
-	/* Per-CPU sched_state_local: eliminates remote global BSS fetch (Rule 78). */
-	if (bss->sched_state_local == CAKE_STATE_GAMING) {
-		/* game_cpu_mask — only needed during GAMING (Gate 2 scan).
-		 * Rule 5: no work < some work. Non-GAMING: skip entirely. */
-		u8 game_flag = (tc == CAKE_CLASS_GAME);
-		u32 word = cpu >> 6;
-		u64 bit = 1ULL << (cpu & 63);
-		u64 cur = READ_ONCE(game_cpu_mask[word]);
-		u64 want = (cur & ~bit) | (bit & -(u64)game_flag);
-		if (want != cur)
-			WRITE_ONCE(game_cpu_mask[word], want);
-
-		/* cpuperf scaling REMOVED: the 768/1024 split throttled
-		 * non-GAME tasks to 75% frequency during GAMING. This hurt
-		 * game loading threads (not yet reclassified to GAME),
-		 * audio, compositor, and wineserver. All CPUs should run at
-		 * full speed during GAMING. Saves ~6 insns. */
+	for (i = 0; i < MAX_CPUS; i++) {	/* upper half: cpu+1 .. nr-1 */
+		idx = ucpu + 1 + i;
+		if (idx >= nr)
+			break;
+		if (cake.qmark[idx & (MAX_CPUS - 1)].word &&
+		    scx_bpf_dsq_move_to_local((u64)idx, 0))
+			return;
 	}
+	for (i = 0; i < MAX_CPUS; i++) {	/* lower half: 0 .. cpu-1 */
+		if (i >= ucpu)
+			break;
+		if (cake.qmark[i & (MAX_CPUS - 1)].word &&
+		    scx_bpf_dsq_move_to_local((u64)i, 0))
+			return;
+	}
+
+	if (prev && (prev->scx.flags & CAKE_TASK_QUEUED))
+		prev->scx.slice = SLICE_NS;
 }
 
-/* OPT-12: __noinline running_telemetry — cold-path extraction for cake_running.
- * Rule 23: Isolates register pressure so p doesn't survive the task-change block.
- * Rule 13: Telemetry is cold path (~1/64 of calls write heavy CL1-CL3).
- * 4 args: p, cpu, now_full, overhead_start (== mbox_start).
- * 'hot' is NOT passed — removing it frees r6 for p in the caller,
- * eliminating the last spill. Fetched internally (cold path). */
-#ifndef CAKE_RELEASE
-static __noinline void running_telemetry(
-	struct task_struct *p,
-	u32 cpu,
-	u64 now_full,
-	u64 overhead_start)
-{
-	/* Phase 8: mailbox staging stopwatch end (before arena work) */
-	u64 mbox_end = scx_bpf_now();
-
-	/* Phase 6: Deferred arena fetch — only in telemetry path */
-	struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-	if (!tctx)
-		return;
-
-	u64 start = now_full;
-
-	/* F4: Save OLD run_start BEFORE overwriting for dispatch_gap calc. */
-	u64 prev_run_start = tctx->telemetry.run_start_ns;
-	tctx->telemetry.run_start_ns = start;
-
-	/* Fetch hot internally (cold path, ~10ns). */
-	struct cake_task_hot *hot_tel = get_task_hot(p);
-	u32 rc = hot_tel ? hot_tel->reclass_counter : 0;
-	if ((rc & 63) != 0)
-		return;
-
-	/* 1. DISPATCH GAP */
-	if (prev_run_start > 0 && start > prev_run_start) {
-		u64 gap = start - prev_run_start;
-		tctx->telemetry.dispatch_gap_ns = gap;
-		u64 old_max_g = tctx->telemetry.max_dispatch_gap_ns;
-		tctx->telemetry.max_dispatch_gap_ns = old_max_g + ((gap - old_max_g) & -(gap > old_max_g));
-	}
-
-	tctx->telemetry.llc_id = (u16)cpu_bss[cpu & (CAKE_MAX_CPUS - 1)].llc_id;
-
-	/* 2. WAIT HISTOGRAM */
-	if (tctx->telemetry.enqueue_start_ns > 0 && start > tctx->telemetry.enqueue_start_ns) {
-		u64 wait = start - tctx->telemetry.enqueue_start_ns;
-		tctx->telemetry.wait_duration_ns = wait;
-		tctx->telemetry.enqueue_start_ns = 0;
-
-		u64 wait_us = wait >> 10;
-		if (wait_us < 10)
-			tctx->telemetry.wait_hist_lt10us++;
-		else if (wait_us < 100)
-			tctx->telemetry.wait_hist_lt100us++;
-		else if (wait_us < 1000)
-			tctx->telemetry.wait_hist_lt1ms++;
-		else
-			tctx->telemetry.wait_hist_ge1ms++;
-	}
-
-	struct cake_stats *s_run = get_local_stats_for(cpu);
-	u64 oh_run = scx_bpf_now() - overhead_start;
-	tctx->telemetry.running_duration_ns = (u32)oh_run;
-	s_run->total_running_ns += oh_run;
-	s_run->max_running_ns = s_run->max_running_ns + ((oh_run - s_run->max_running_ns) & -(oh_run > s_run->max_running_ns));
-
-	/* Phase 8: mailbox staging duration (overhead_start == mbox_start) */
-	tctx->telemetry.mbox_staging_ns = (u32)(mbox_end - overhead_start);
-}
-#endif
-
-/* cake_running — stamp per-CPU mailbox with run start + slice.
- * cake_stopping reads from the same cache line. Per-task telemetry
- * tracked via arena for zero cross-CPU cache invalidation. */
+/*
+ * ops.running — stamp the per-CPU run start and advance the global vtime
+ * frontier to this task's deadline.
+ *
+ * The dsq_vtime read is hoisted above the helper call so only the scalar
+ * stays live across it (holding p forced a stack spill/reload per context
+ * switch). The frontier store is deliberately conditional, NOT a branchless
+ * max: the frontier is the hottest shared line in the scheduler and a select
+ * would dirty it on every quantum on every CPU even when it doesn't move. A
+ * predictable branch is cheaper than a guaranteed RFO. (Racy read-check-write
+ * is fine — the frontier is advisory and monotonic enough under time_before
+ * semantics.)
+ */
 void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 {
-#ifndef CAKE_RELEASE
-	ARENA_ASSOC();
-	bool stats_on = CAKE_STATS_ACTIVE;
-	u64 running_overhead_start = 0;
-	if (stats_on)
-		running_overhead_start = scx_bpf_now();
-#endif
+	u64 task_vtime = p->scx.dsq_vtime;
+	u32 cpu = bpf_get_smp_processor_id();
 
-	/* Batch kfuncs first: only p=r6 survives both calls (1 callee-save).
-	 * p->scx.slice read DEFERRED until after both kfuncs to avoid
-	 * forcing p through 2 separate spill/reload cycles. */
-	u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+	cake.stamp[cpu & (MAX_CPUS - 1)].word = bpf_ktime_get_ns();
+	cake.sum[cpu & (MAX_CPUS - 1)].word = p->se.sum_exec_runtime;
 
-	/* CLOCK DOMAIN FIX: tick_last_run_at MUST come from scx_bpf_now(),
-	 * NOT p->se.exec_start. exec_start is rq_clock_task() which subtracts
-	 * IRQ + steal time. Consumers (anti-starvation clamp in cake_enqueue,
-	 * Gate 2/3 idle checks in cake_select_cpu) compare against scx_bpf_now().
-	 * After ~22 min of gaming, accumulated IRQ time drift exceeds the u32
-	 * wrap boundary (4.295s), corrupting elapsed-time checks → unconditional
-	 * anti-starvation firing (priority inversion) + constant preemption. */
-	u64 now_full = scx_bpf_now();
-	u32 now = (u32)now_full;
-
-	/* ── WRITE: BSS per-CPU (always needed) ── */
-	struct cake_cpu_bss *bss = &cpu_bss[cpu];
-	bss->run_start   = now;
-	/* Check-before-write: ~75% of calls (same-task re-run), idle_hint
-	 * is already 0. Skip the store to avoid unnecessary L1 dirty-mark
-	 * and store buffer pressure (Rule 11: MESI optimization). */
-	if (bss->idle_hint) bss->idle_hint = 0;
-
-	/* FAST PATH: Same task re-running on same CPU (~75% in gaming).
-	 * FunSearch: slice load deferred into running_task_change.
-	 * On 75% same-task re-runs, avoids wasted p->scx.slice load.
-	 * Rule 5: no work < some work. */
-	if (bss->last_pid != p->pid)
-		running_task_change(p, bss, cpu);
-
-	/* ARENA TELEMETRY: Record run start time for task-level tracking.
-     * Extracted to __noinline: isolates register pressure so p doesn't
-     * need to survive the task-change block's internal kfunc calls.
-     * Phase 6: Arena access ONLY in stats_on (dead in release). */
-#ifndef CAKE_RELEASE
-	if (stats_on)
-		running_telemetry(p, cpu, now_full, running_overhead_start);
-#endif
+	if (time_before(cake.frontier.word, task_vtime))
+		cake.frontier.word = task_vtime;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * YIELD-GATED CLASSIFICATION + DRR++: Dynamic reclassification on every stop.
- * CPU analog of network CAKE's flow classification:
- * - Cooperative flows (game, audio, input) → voluntary yields → yielder boost
- * - Bulk flows (compilation, background) → run until preempted → tight ceiling
- *
- * This is the engine that makes yield-gated weighted vtime differentiate
- * traffic. Without it, all tasks compete at the same priority.
- * ═══════════════════════════════════════════════════════════════════════════ */
-/* stopping_reclassify — confidence-gated cold path (1/64 stops).
- * __noinline: verifier tracks typed args across function boundary.
- * Must remain separate to prevent register spills in drr_ewma.
- *
- * OPTIMIZATION: !GAMING early exit (Rule 5).
- * When sched_state != GAMING: game_tgid=0, game_ppid=0 (Rust contract),
- * all cls_* clauses false, classification always yields NORMAL.
- * Skips ~25 insns → pays only ~5 (load + cmp + jnz + vtime_mult).
- *
- * GAMING path: null-check elimination (Rule 16).
- * Rust guarantees game_tgid != 0 and game_ppid != 0 when sched_state == GAMING.
- * Removes 2 redundant test instructions from cls_game computation.
- * Kthread clause simplified: is_kthread (GAMING already confirmed). */
-static __noinline void stopping_reclassify(
-	struct cake_task_hot *hot,
-	struct task_struct *p,
-	u32 rt_raw,
-	u32 packed,
-	u64 tick_slice)
-{
-	/* EEVDF NICE: always runs regardless of state.
-	 * Hoisted before the GAMING gate so non-GAMING tasks still get
-	 * correct vtime_mult updates (nice changes apply everywhere).
-	 * BPF division: ~20-40 cycles, but runs only 1/64 stops (Rule 40). */
-	{
-		u32 w = p->scx.weight ?: 100;
-		u16 mult = (u16)(102400 / w);
-		if (hot->vtime_mult != mult)
-			hot->vtime_mult = mult;
-	}
-
-	/* !GAMING early exit: when sched_state != GAMING, game_tgid/ppid == 0
-	 * (Rust writes both atomically), so cls_game = false. All penalty
-	 * clauses require GAMING. Result is always CAKE_CLASS_NORMAL.
-	 * Rule 5: no work < some work. Saves ~25 insns on the non-gaming path. */
-	/* sched_state: global BSS read on 1/64 cold path.
-	 * Per-CPU bss->sched_state_local not used here — adding
-	 * bpf_get_smp_processor_id() kfunc causes 10 spills due to
-	 * call-frame overhead in this register-heavy function.
-	 * sched_state is rarely written (MESI-S). Acceptable. */
-	u32 snap_sched_state = sched_state;
-	if (snap_sched_state != CAKE_STATE_GAMING) {
-		if (hot->task_class != CAKE_CLASS_NORMAL)
-			hot->task_class = CAKE_CLASS_NORMAL;
-		return;
-	}
-
-	/* ── GAMING path: full classification ── */
-	u8 is_kthread = (packed >> BIT_KTHREAD) & 1;
-
-	/* cls_game: Rust contract guarantees game_tgid != 0 and game_ppid != 0
-	 * when sched_state == GAMING. Null-checks eliminated (Rule 16).
-	 * Kthread clause: GAMING confirmed above → just test is_kthread. */
-	bool cls_game = (p->tgid == game_tgid)
-		     || (hot->ppid == game_ppid)
-		     || is_kthread;
-
-	/* AUDIO PROTECTION: promote audio daemons during GAMING.
-	 * JIT-constant: nr_audio_tgids==0 → dead-code eliminated. */
-	bool cls_audio = false;
-	u32 task_tgid = p->tgid;
-	if (!cls_game && nr_audio_tgids) {
-		#pragma unroll
-		for (u32 i = 0; i < CAKE_MAX_AUDIO_TGIDS; i++) {
-			if (i >= nr_audio_tgids)
-				break;
-			if (task_tgid == audio_tgids[i]) {
-				cls_audio = true;
-				break;
-			}
-		}
-	}
-
-	/* COMPOSITOR PROTECTION: promote compositors during GAMING.
-	 * JIT-constant: nr_compositor_tgids==0 → dead-code eliminated. */
-	bool cls_compositor = false;
-	if (!cls_game && !cls_audio && nr_compositor_tgids) {
-		#pragma unroll
-		for (u32 i = 0; i < CAKE_MAX_COMPOSITOR_TGIDS; i++) {
-			if (i >= nr_compositor_tgids)
-				break;
-			if (task_tgid == compositor_tgids[i]) {
-				cls_compositor = true;
-				break;
-			}
-		}
-	}
-
-	/* Rule 37: Fuse cls_squeeze + !is_kthread into cls_penalty.
-	 * GAMING already confirmed — snap_sched_state check removed. */
-	bool cls_penalty = !cls_game
-		&& !(((packed >> SHIFT_FLAGS) & CAKE_FLOW_WAKER_BOOST))
-		&& !is_kthread;
-	/* HOG detection: rt_raw >= 75% of quantum. Zero cold CL reads.
-	 * Rule 14: bit testing / comparison-based classification. */
-	u32 hog_thresh = ((u32)tick_slice >> 2) * 3;
-	bool cls_hog = cls_penalty && (rt_raw >= hog_thresh);
-	bool cls_bg  = cls_penalty && !cls_hog;
-
-	u8 new_tc = cls_game       ? CAKE_CLASS_GAME
-		  : cls_audio      ? CAKE_CLASS_GAME
-		  : cls_compositor ? CAKE_CLASS_GAME
-		  : cls_hog        ? CAKE_CLASS_HOG
-		  : cls_bg         ? CAKE_CLASS_BG
-		  : CAKE_CLASS_NORMAL;
-	/* Rule 11: MESI check-before-write (~95% stable). */
-	if (hot->task_class != new_tc)
-		hot->task_class = new_tc;
-}
-/* ═══ Phase 7A-1: Compute rt_raw (pure compute, 0 internal calls → 0 spills) ═══
- *
- * Pure computation: no kfunc calls, no sub-function calls.
- * Takes cpu_run (with cpu in bits 0-7), reads bss/p->scx.slice,
- * applies capacity scaling. Returns rt_raw (u32). */
-/* stopping_get_rt_raw: REMOVED — merged into stopping_drr_ewma.
- * BSS indexing was duplicated between the two functions.
- * Rule 24: operation fusion. Rule 64: A→D path compression. */
-
-
-/* FunSearch: stopping_get_rt_raw MERGED into stopping_drr_ewma.
- * Both functions computed identical BSS indexing (cpu & 0xFF, &cpu_bss[cpu]).
- * Merge eliminates: (1) 4-insn call overhead in cake_stopping,
- * (2) 4-insn BSS indexing duplication, (3) rt_raw arg passing.
- * Returns rt_raw for eevdf_weight consumer.
- * Rule 24: operation fusion. Rule 64: A→D path compression. */
-static __noinline u32 stopping_drr_ewma(
-	struct cake_task_hot *hot,
-	struct task_struct *p,
-	u32 cpu_run)
-{
-	u32 cpu = cpu_run & 0xFF;
-	struct cake_cpu_bss *bss = &cpu_bss[cpu];
-
-	/* ════ EWMA BLOCK (no p dependency) ════
-	 * Compute EWMA BEFORE rt_raw so p does not need to survive
-	 * across the EWMA block. This shrinks p liveness from ~38
-	 * instructions to ~5, eliminating 2 spills (Rule 73). */
-	u32 rc = hot->reclass_counter++;
-
-	/* FunSearch DRR V8: EWMA FIRST, reclassify AFTER.
-	 * EWMA has no dependency on reclassify output.
-	 * Reclassify call at function END means hot doesn't need to
-	 * survive past it — saves r6 callee-save reservation.
-	 * Rule 13: reclassify is cold (1/64), EWMA is hot (100%). */
-	{
-		u32 rs = bss->run_start;
-		u32 interval = rs - hot->last_run_at;
-		hot->last_run_at = rs;
-		u16 wc = hot->wake_counter;
-		wc = (interval < 1024) ? (wc + ((1023 - wc) >> 2)) : (wc >> 1);
-		hot->wake_counter = wc;
-	}
-
-	/* ════ RT_RAW + RECLASSIFY (p alive here) ════
-	 * p->scx.slice read and reclassify call are adjacent,
-	 * so p survives < 10 instructions. Zero spills (Rule 73). */
-	u32 rt_raw = (u32)(bss->tick_slice - p->scx.slice);
-	rt_raw -= (rt_raw - (65535U << 10)) & -(rt_raw > (65535U << 10));
-	/* EEVDF TOPOLOGY: capacity-scale dead-coded (9800X3D symmetric). */
-	{
-		u32 cap = cpuperf_cap_table[cpu];
-		if (cap > 0 && cap < 1024)
-			rt_raw = (u32)((u64)rt_raw * cap >> 10);
-	}
-
-	/* Confidence-gated reclassification (1/64 stops).
-	 * Now at function END — call doesn't require hot survival past it.
-	 * Separate __noinline to prevent register spills (Rule 23). */
-	if (unlikely((rc & 63) == 0)) {
-		u32 packed = hot->packed_info;
-		packed &= ~(((u32)CAKE_FLOW_WAKER_BOOST) << SHIFT_FLAGS);
-		if (hot->packed_info != packed)
-			hot->packed_info = packed;
-		stopping_reclassify(hot, p, rt_raw, packed,
-					 bss->tick_slice);
-	}
-
-	return rt_raw;
-}
-
-/* ═══ Phase 7B: EEVDF vtime + DSQ weight ═══
- *
- * Rule 74 (Intrinsic State Exploitation):
- * - sleep_lag REMOVED: vtime gap from not advancing IS the sleeper credit.
- *   Kernel EEVDF derives lag from vruntime delta — no separate variable.
- * - nice_scale_table REMOVED: vtime rate via nice_shift IS the nice scaling.
- *   Double-scaling vtime AND dsq_weight by nice was a Shadow State.
- * - Tiered weight simplified: vtime rate handles proportional ordering;
- *   dsq_weight is a fixed tier offset + optional GAME wake bonus.
- *
- * Returns: dsq_weight (u32) for Phase C quantum/staged pack.
- * Reads: hot->task_class, nice_shift, wake_counter, dsq_vtime.
- * Writes: hot->dsq_vtime. */
-static __noinline u32 stopping_eevdf_weight(
-	struct cake_task_hot *hot,
-	u32 rt_raw,
-	u32 cpu_run,
-	u64 vtime_local)
-{
-	u8 tc = hot->task_class;
-
-	/* Non-runnable: no vtime advancement, return 0.
-	 * Rule 74: The vtime gap from NOT advancing IS the sleeper credit.
-	 * No side effects needed — intrinsic state. */
-	if (!(cpu_run >> 8))
-		return 0;
-
-	/* EEVDF vtime advancement — the core operation.
-	 * vtime_mult is pre-computed reciprocal (102400/weight).
-	 * Rule 74: vtime rate IS the nice/priority scaling — no separate table.
-	 *
-	 * Kernel equivalent: curr->vruntime += calc_delta_fair(delta_exec, curr)
-	 * which does: delta * NICE_0_LOAD / weight. We do: rt_raw * vtime_mult >> 10.
-	 * Same math, BPF-optimized. */
-	{
-		u64 vt_delta = (u64)rt_raw * (u32)hot->vtime_mult >> 10;
-		hot->dsq_vtime += vt_delta;
-
-		/* Vtime floor: prevent infinite credit from long sleep.
-		 * Analogous to kernel's update_min_vruntime().
-		 * Per-CPU vtime_local: eliminates cross-core BSS read (Rule 8). */
-		u64 vt_min = vtime_local - 200000000ULL;
-		if (hot->dsq_vtime < vt_min)
-			hot->dsq_vtime = vt_min;
-	}
-
-	/* DSQ weight: fixed tier offset for class separation.
-	 * Vtime rate handles proportional ordering within tiers;
-	 * tier_base provides absolute priority gaps between classes.
-	 *
-	 * FunSearch V6: wake_bonus block REMOVED — provably dead code.
-	 * tier_base[CAKE_CLASS_GAME] == 0, so the branchless subtraction
-	 * dsq_weight -= wb & -(dsq_weight > wb) always yields:
-	 * 0 - (wb & -(0 > wb)) = 0 - (wb & 0) = 0.
-	 * Zero instructions wasted on a nop. */
-	return tier_base[tc & 3];
-}
-
-/* ═══ Phase 7C: Quantum + Staged Pack (≤4 live values → 0 spills) ═══
- *
- * Does: PID class cache tunnel, quantum/slice computation,
- *       staged_vtime_bits packing (dsq_weight + new_flow flag).
- * P2C: cpu_run arg removed — only consumer was dead home_cpu staging.
- * P2C: packed_info load for wb_val removed — wb_dup had zero read sites.
- * Reads: hot->task_class, hot->packed_info (new_flow bit only).
- * Writes: p->scx.slice, hot->staged_vtime_bits, pid_class_cache[]. */
-static __noinline void stopping_quantum_pack(
-	struct cake_task_hot *hot,
-	struct task_struct *p,
-	u32 dsq_weight)
-{
-	u8 tc = hot->task_class;
-
-	/* PID class cache tunnel for Gate 2. MESI check-before-write. */
-	{
-		u32 pid_idx = p->pid & (PID_CLASS_CACHE_SIZE - 1);
-		if (pid_class_cache[pid_idx] != (u8)tc)
-			pid_class_cache[pid_idx] = (u8)tc;
-	}
-
-	/* ANTI-STARVATION: p->scx.slice NOT set here.
-	 * Writing slice in stopping caused the kernel's balance_one()
-	 * to set SCX_RQ_BAL_KEEP (ext.c:2197), which skips local_dsq
-	 * and ops.dispatch() entirely — starving all other tasks on
-	 * this CPU. Verified: no other sched-ext scheduler (bpfland,
-	 * cosmos, lavd) writes p->scx.slice in stopping.
-	 * Slice lifecycle: natural tick decay → 0 → balance_one enters
-	 * full dispatch → local DSQ + LLC DSQ checked → fair scheduling.
-	 * GAME double-slice moved to enqueue_wakeup_path. */
-
-	/* P2C: home_cpu (STAGED_SHIFT_HOME) and wb_dup (STAGED_BIT_WB_DUP) pruned —
-	 * Rule 5/74: both have zero BPF read sites. Only dsq_weight, new_flow,
-	 * and VALID are consumed by enqueue paths. packed_info load eliminated. */
-	{
-		u64 nf_val = (tc == CAKE_CLASS_GAME) ? 1 : (u64)((hot->packed_info >> SHIFT_FLAGS) & 1);
-		hot->staged_vtime_bits = (1ULL << STAGED_BIT_VALID) |
-					(nf_val << STAGED_BIT_NEW_FLOW) |
-					(u64)dsq_weight;
-	}
-}
-
-/* cake_stopping — direct arena access + confidence-gated PELT
- *
- * Inputs read directly from task_storage via get_task_hot:
- *   deficit_u16 = DRR deficit (standalone)
- *   packed_info = yield/flow flags
- *   nvcsw_snapshot = yield detection baseline
- *
- * Per-CPU BSS (cpu_bss) provides run_start and tick_slice
- * (staged by cake_running from task_struct fields).
- *
- * Cost: get_task_ctx (~29ns) + arena CL0 reads (~4ns) + work (~15ns). */
+/*
+ * ops.stopping — charge the wall time used to the task's vtime, weighted by
+ * the reciprocal table (no division on the hot path).
+ */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
-#ifndef CAKE_RELEASE
-	ARENA_ASSOC();
-#endif
+	u32 cpu = bpf_get_smp_processor_id();
+	u64 used = p->se.sum_exec_runtime -
+		   cake.sum[cpu & (MAX_CPUS - 1)].word;
+	u32 idx = (u32)(p->static_prio - 100) & 63;
 
-	/* Call ordering: bpf_get_smp_processor_id FIRST (only p=r6,
-	 * runnable=r7 survive = 2 callee-saves). Then compute cpu_run.
-	 * Then get_task_hot (p=r6, cpu_run=r7 survive = 2 callee-saves).
-	 * Neither call exceeds 4 callee-saves → 0 spills. */
-	u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-	/* FunSearch: explicit (runnable & 1) forces branchless packing.
-	 * BPF struct_ops extracts runnable as u64 — compiler doesn't trust
-	 * it to be 0/1 and generates a branch. The & 1 constrains the value,
-	 * enabling shift-OR instead of branch. Rule 14: bitwise ops. */
-	u32 cpu_run = cpu | (((u32)runnable & 1) << 8);
-
-	struct cake_task_hot *hot = get_task_hot(p);
-	if (unlikely(!hot))
-		return;
-
-	/* ═══ Phase 7A: DRR + Classify + EWMA + rt_raw (fused) ═══
-	 * stopping_get_rt_raw merged into stopping_drr_ewma.
-	 * BSS indexing shared, rt_raw returned. Rule 24: operation fusion. */
-	u32 rt_raw = stopping_drr_ewma(hot, p, cpu_run);
-	u8 tc = hot->task_class;
-
-	bool stats_on = CAKE_STATS_ACTIVE;
-	u64 stopping_overhead_start = 0;
-	if (stats_on) {
-		stopping_overhead_start = scx_bpf_now();
-		per_cpu[cpu].mbox.last_stopped_pid = p->pid;
-	}
-
-	/* P3-2: nvcsw tracking — stats-gated (telemetry only). */
-	u64 cur_nv = 0;
-	u32 __maybe_unused nvcsw_accum = 0;
-	if (stats_on && tc != CAKE_CLASS_GAME) {
-		cur_nv = p->nvcsw;
-		u64 prev_nv = hot->nvcsw_snapshot;
-		if (prev_nv > 0)
-			nvcsw_accum = (u32)(cur_nv - prev_nv);
-		hot->nvcsw_snapshot = cur_nv;
-	}
-
-	/* P2 OPT-7: deferred_ts_start/classify_end/tctx_stop REMOVED.
-	 * All were always-zero in release (stats_on=0) and in debug
-	 * (deferred_ts_start=0 → classify_end=0 → tctx_stop=NULL).
-	 * Eliminates 3 dead variable inits + 2 dead branches (−4 insns). */
-
-	/* ═══ Phase 7B: EEVDF vtime + DSQ weight ═══
-	 * Extracted to __noinline — handles sleep_lag, warm_cpus, vtime,
-	 * DSQ weight, rt_cost, nice scaling, lag credit.
-	 * Returns 0 if non-runnable (skip quantum/pack), dsq_weight otherwise. */
-	u32 dsq_weight = stopping_eevdf_weight(hot, rt_raw, cpu_run,
-		cpu_bss[cpu_run & 0xFF].vtime_local);
-
-	/* Gate Phase C on dsq_weight instead of runnable.
-	 * stopping_eevdf_weight returns 0 for non-runnable tasks,
-	 * so dsq_weight > 0 ≡ runnable && has_weight. This eliminates
-	 * the compiler's need to keep the original ctx 'runnable' bool
-	 * alive across all function calls (was causing 4 spills). */
-	if (dsq_weight) {
-#ifndef CAKE_RELEASE
-		/* P3-3: classify/warm telemetry — tctx_stop removed (P2 OPT-7).
-		 * deferred_ts_start/classify_end were always-zero → dead code. */
-#endif
-
-		/* ═══ Phase 7C: Quantum + Staged Pack ═══
-		 * Extracted to __noinline — handles PID class cache,
-		 * quantum/slice computation, staged_vtime_bits packing. */
-		stopping_quantum_pack(hot, p, dsq_weight);
-	}
-
-	/* Phase 8: vtime staging stopwatch — tctx_stop removed (P2 OPT-7). */
-#ifndef CAKE_RELEASE
-#endif
-
-	/* ── Telemetry + aggregate profiling (verbose only) ──
-	 * Split into ALWAYS (lightweight CL0/BSS) + DEFERRED (heavy CL1-CL3).
-	 * Deferred block runs every 64th stop via reclass_counter gate. */
-	/* last_run_at: moved up to co-locate with deficit/packed writes (Change B). */
-
-	if (stats_on) {
-#ifndef CAKE_RELEASE
-		/* ALWAYS: nvcsw_delta accumulator (must not skip deltas) */
-		/* Note: nvcsw_delta write is on telemetry CL, but accumulator
-		 * correctness requires every-stop update. The CL fetch is
-		 * amortized since stopping already read nvcsw_snapshot from CL0. */
-
-		/* DEFERRED TELEMETRY: Heavy per-task writes every 64th stop.
-		 * Saves ~13 arena writes + 1 scx_bpf_now() + 1 div64 on 63/64 stops.
-		 * SIMPLIFY #3: Single get_task_ctx + shared timestamp for entire block.
-		 * FIX: Use pre-increment rc (matches classify block at line 2582).
-		 * Was using hot->reclass_counter (post-increment = rc+1) — fired on
-		 * different stop than classify, wasting a 29ns get_task_ctx call.
-		 * Now reuses tctx_stop (already fetched under same gate). */
-		if (((hot->reclass_counter - 1) & 63) == 0) {
-			struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-			if (tctx) {
-				/* P3-2: Use pre-computed nvcsw_accum from above
-				 * (eliminates redundant p->nvcsw + hot->nvcsw_snapshot reads) */
-				if (nvcsw_accum)
-					tctx->telemetry.nvcsw_delta += nvcsw_accum;
-
-				if (tctx->telemetry.run_start_ns > 0) {
-				/* SIMPLIFY #4: Single scx_bpf_now() for dur + stopping overhead */
-				u64 now_deferred = scx_bpf_now();
-				u64 dur = now_deferred - tctx->telemetry.run_start_ns;
-				tctx->telemetry.run_duration_ns = dur;
-
-				/* Branchless same-CPU streak */
-				bool same = ((u16)cpu == tctx->telemetry.core_placement);
-				tctx->telemetry.same_cpu_streak = (tctx->telemetry.same_cpu_streak + 1) & -(u16)same;
-				tctx->telemetry.core_placement = (u16)cpu;
-
-				/* Jitter: |actual_run - PELT_expected| */
-				u64 expected_ns = (u64)(rt_raw >> 10) * 1000ULL;
-				u64 d = dur - expected_ns;
-				u64 mask = -(u64)(dur < expected_ns);
-				u64 jitter = (d ^ mask) - mask;
-				tctx->telemetry.jitter_accum_ns += jitter;
-				tctx->telemetry.total_runs++;
-
-				/* Branchless max */
-				u16 old_max_rt = tctx->telemetry.max_runtime_us;
-				u16 ps = (u16)(rt_raw >> 10);
-				tctx->telemetry.max_runtime_us = old_max_rt + ((ps - old_max_rt) & -(u16)(ps > old_max_rt));
-
-				/* Slice utilization — shift-approximate, no div64 (Rule 5)
-				 * (dur << 7) / tslice ≈ dur * 128 / tslice.
-				 * Rescaled by 100/128 = 0.78, close enough for TUI display. */
-				u64 tslice = cpu_bss[cpu].tick_slice ?: quantum_ns;
-				tctx->telemetry.slice_util_pct =
-					(u16)((dur << 7) / tslice);
-
-				/* Involuntary context switch delta */
-				u64 cur_nivcsw = p->nivcsw;
-				u64 prev_nivcsw = tctx->telemetry.nivcsw_snapshot;
-				if (prev_nivcsw > 0)
-					tctx->telemetry.nivcsw_delta += (u32)(cur_nivcsw - prev_nivcsw);
-				tctx->telemetry.nivcsw_snapshot = cur_nivcsw;
-
-				/* Per-task stopping overhead — reuse now_deferred */
-				tctx->telemetry.stopping_duration_ns =
-					(u32)(now_deferred - stopping_overhead_start);
-				}
-
-				/* Phase 8: quantum completion tracking */
-				u64 rem = p->scx.slice;
-				if (rem == 0)
-					tctx->telemetry.quantum_full_count++;
-				else if (!(cpu_run >> 8))
-					tctx->telemetry.quantum_yield_count++;
-				else
-					tctx->telemetry.quantum_preempt_count++;
-
-				/* Phase 8: CPU core distribution histogram */
-				tctx->telemetry.cpu_run_count[cpu & (CAKE_TELEM_MAX_CPUS - 1)]++;
-
-				/* CL0 → arena sync: iter reads these from tctx, not hot.
-				 * Values computed in reclassify path above (every 64th stop).
-				 * Check-before-write avoids cache invalidation on unchanged fields. */
-				if (tctx->vtime_mult != hot->vtime_mult)
-					tctx->vtime_mult = hot->vtime_mult;
-				if (tctx->task_class != hot->task_class)
-					tctx->task_class = hot->task_class;
-			}
-		}
-#endif /* !CAKE_RELEASE */
-
-		/* ALWAYS: Aggregate overhead timing (per-CPU BSS, cheap)
-		 * Rule 30: reuse cpu from top of function, skip kfunc trampoline.
-		 * Rule 7: single scx_bpf_now() for both deferred + always paths. */
-		struct cake_stats *s = get_local_stats_for(cpu);
-		u64 oh_agg = scx_bpf_now() - stopping_overhead_start;
-		s->total_stopping_ns += oh_agg;
-		s->max_stopping_ns = s->max_stopping_ns + ((oh_agg - s->max_stopping_ns) & -(oh_agg > s->max_stopping_ns));
-		/* Phase 7A: rc moved inside stopping_drr_classify.
-		 * Read post-increment counter and subtract 1 to match. */
-		if (((hot->reclass_counter - 1) & 63) == 0)
-			s->nr_stop_classify++;
-		else
-			s->nr_stop_confidence_skip++;
-
-		/* BenchLab trigger (cold — only fires on TUI demand) */
-		if (unlikely(bench_request)) {
-			bench_request = 0;
-			run_kfunc_bench(&bench_results, p);
-		}
-	}
+	p->scx.dsq_vtime += (used * recip_weight[idx]) >> 20;
 }
 
-/* Initialize per-task arena storage.
- * Sleepable: bpf_arena_alloc_pages is sleepable-only, so all arena
- * allocation must happen here, not in hot paths.
- * Called before any scheduling ops fire for this task. */
-s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
-			     struct scx_init_task_args *args)
-{
-	struct cake_task_ctx __arena *tctx;
-
-	tctx = (struct cake_task_ctx __arena *)scx_task_alloc(p);
-	if (!tctx) {
-		if (CAKE_STATS_ACTIVE) {
-			struct cake_stats *s = get_local_stats();
-			s->nr_dropped_allocations++;
-		}
-		return -ENOMEM;
-	}
-
-	/* NOTE: pid_to_tctx registration removed — iter/task program provides
-	 * full task visibility without any map update. Fully lockless. */
-
-	/* MULTI-SIGNAL INITIAL CLASSIFICATION (moved from alloc_task_ctx_cold)
-     *
-     * Signal 1: Nice value (u32 field read, ~2 cycles)
-     *   - nice < 0 (prio < 120): OS/user explicitly prioritized → T0
-     *   - nice > 10 (prio > 130): explicitly deprioritized → T3
-     *   - nice 0-10: default → T1, avg_runtime adjusts naturally
-     *
-     * R1 sum-of-cmp: branchless non-monotonic mapping.
-     * (prio >= 120) = 0 for negative nice (→ CRITICAL=0), 1 for default (→ INTERACT=1)
-     * (prio > 130) * 2 = 0 for normal, 2 for high nice (1+2 = BULK=3) */
-	/* init_deficit: shared by arena init (stats-gated) and task_hot init. */
-	u16 init_deficit = (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
-
-	/* SIMPLIFY #1: Arena CL0 fields are only read by cake_task_iter (telemetry).
-	 * Hot-path readers (running, stopping, select_cpu, enqueue) use task_hot.
-	 * Gate arena CL0 init behind CAKE_STATS_ENABLED to save ~10 arena writes. */
-	if (CAKE_STATS_ENABLED) {
-		tctx->deficit_u16      = init_deficit;
-		tctx->last_run_at      = 0;
-		tctx->reclass_counter  = 0;
-		tctx->warm_cpus[0]     = 0xFFFF;
-		tctx->warm_cpus[1]     = 0xFFFF;
-		tctx->warm_cpus[2]     = 0xFFFF;
-		tctx->waker_cpu        = 0xFFFF;
-		tctx->task_class       = CAKE_CLASS_NORMAL;
-	}
-
-	/* PPID: deferred — derived after bpf_task_storage_get to avoid
-	 * carrying init_ppid across build_cached_cpumask (Rule 23: 0 spills).
-	 * Set in tctx and hot together below. */
-
-	/* TUI telemetry: identity fields only needed with --verbose.
-	 * Gated to avoid unnecessary arena writes on task creation. */
-#ifndef CAKE_RELEASE
-	if (CAKE_STATS_ACTIVE) {
-		tctx->telemetry.pid = p->pid;
-		tctx->telemetry.tgid = p->tgid;
-		u64 *comm_src = (u64 *)p->comm;
-		u64 __arena *comm_dst = (u64 __arena *)tctx->telemetry.comm;
-		comm_dst[0] = comm_src[0];
-		comm_dst[1] = comm_src[1];
-		/* nivcsw_snapshot: TUI delta only (nvcsw gated separately below) */
-		tctx->telemetry.nivcsw_snapshot = p->nivcsw;
-	}
-#endif
-
-	/* nvcsw_snapshot: hot-path reads hot->nvcsw_snapshot (task_storage).
-	 * Arena copy only needed for iter/task (TUI). Gate to save arena write. */
-	if (CAKE_STATS_ENABLED)
-		tctx->nvcsw_snapshot = p->nvcsw;
-
-
-	u32 packed		= 0;
-	/* Fused FLAGS: bits [27:24] = [flags:4], FLOW_NEW set on creation */
-	packed |= ((u32)CAKE_FLOW_NEW & MASK_FLAGS) << SHIFT_FLAGS;
-	/* Cache PF_KTHREAD branchless (Rule 14+41: relocate cold read to init).
-	 * Kernel threads are immune to bg_noise squeeze.
-	 * Branchless: extract bit 21 (PF_KTHREAD) from p->flags, shift to BIT_KTHREAD. */
-	packed |= (((u32)(p->flags >> 21) & 1u) << BIT_KTHREAD);
-	/* Arena copy: only read by iter/task (TUI). Hot-path uses hot->packed_info. */
-	if (CAKE_STATS_ENABLED)
-		tctx->packed_info = packed;
-
-	/* CACHED AFFINITY REMOVED: after scx_bpf_select_cpu_and refactor,
-	 * kernel handles affinity via p->cpus_ptr natively.
-	 * build_cached_cpumask + bpf_rcu_read_lock/unlock eliminated (Rule 64). */
-
-	/* Phase 6: Allocate task_storage and mirror CL0 hot fields.
-	 * BPF_LOCAL_STORAGE_GET_F_CREATE allocates on first call. */
-	struct cake_task_hot *hot = bpf_task_storage_get(
-		&task_hot_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (hot) {
-		hot->deficit_u16 = init_deficit;
-		hot->wake_counter      = 0;
-		hot->packed_info       = packed;
-		u32 init_ppid = p->real_parent ? p->real_parent->tgid : 0;
-		if (CAKE_STATS_ENABLED)
-			tctx->ppid = init_ppid;
-		hot->ppid              = init_ppid;
-		hot->last_run_at       = 0;
-		hot->reclass_counter   = 0;
-		/* Rule 24 (Operation Fusion): warm_cpus[0..2] + waker_cpu are
-		 * contiguous u16s at struct offsets 28-35 (8 bytes total).
-		 * Single u64 store writes all 4 sentinel values (0xFFFF). */
-		*(u64 *)&hot->warm_cpus[0] = 0xFFFFFFFFFFFFFFFFULL;
-		hot->nvcsw_snapshot    = p->nvcsw;
-		hot->task_class        = CAKE_CLASS_NORMAL;
-		hot->vtime_mult        = 1024;  /* nice0 baseline (102400/100) */
-
-		hot->dsq_vtime         = cpu_bss[bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1)].vtime_local;
-	}
-
-	return 0;
-}
-
-/* G1 FIX: .enable callback — initialize task vtime when it becomes schedulable.
- * Like cosmos/bpfland: p->scx.dsq_vtime = vtime_now.
- * For cake, we store in arena (avoids kernel dsq_insert_vtime overwrite). */
+/*
+ * ops.enable — a freshly enabled task starts at the current vtime frontier so
+ * it is neither starved nor granted a windfall of credit.
+ */
 void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
 {
-	struct cake_task_hot *hot = get_task_hot(p);
-	if (hot)
-		hot->dsq_vtime = cpu_bss[bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1)].vtime_local;
+	p->scx.dsq_vtime = cake.frontier.word;
 }
 
-/* EVENT-DRIVEN AFFINITY UPDATE — telemetry counter only.
- * cached_cpumask field removed: scx_bpf_select_cpu_and handles affinity
- * natively via p->cpus_ptr (Rule 64: A→D path compression).
- * Only the telemetry counter survives for TUI cpumask change tracking. */
-void BPF_STRUCT_OPS(cake_set_cpumask, struct task_struct *p __arg_trusted,
-		    const struct cpumask *cpumask __arg_trusted)
-{
-#ifndef CAKE_RELEASE
-	if (CAKE_STATS_ENABLED) {
-		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-		if (tctx)
-			tctx->telemetry.cpumask_change_count++;
-	}
-#endif
-}
-
-/* Handle manual yields (e.g. sched_yield syscall).
- * yield_count is TUI-only telemetry (stats-gated). Game family detection
- * uses PPID matching in cake_stopping, not per-task yield counts.
- * Cost in debug: 1 get_task_ctx (~16ns) per yield. Zero cost in release. */
-bool BPF_STRUCT_OPS(cake_yield, struct task_struct *p)
-{
-#ifndef CAKE_RELEASE
-	/* F3: Gate behind CAKE_STATS_ENABLED — yield_count is TUI-only.
-	 * Saves ~16ns get_task_ctx per sched_yield() in release builds. */
-	if (CAKE_STATS_ACTIVE) {
-		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-		if (tctx) tctx->telemetry.yield_count++;
-	}
-#endif
-	return false;
-}
-
-/* Handle preemption when a task is pushed off the CPU. */
-void BPF_STRUCT_OPS(cake_runnable, struct task_struct *p, u64 enq_flags)
-{
-#ifndef CAKE_RELEASE
-	if (CAKE_STATS_ACTIVE) {
-		struct cake_task_ctx __arena *tctx = get_task_ctx(p);
-		if (tctx) {
-			if (enq_flags & SCX_ENQ_PREEMPT)
-				tctx->telemetry.preempt_count++;
-			/* Wakeup source: the currently running task is the waker */
-			struct task_struct *waker = bpf_get_current_task_btf();
-			if (waker) {
-				tctx->telemetry.wakeup_source_pid = waker->pid;
-				/* Phase 8: wake chain enhancement */
-				tctx->telemetry.waker_cpu = (u16)bpf_get_smp_processor_id();
-				tctx->telemetry.waker_tgid = waker->tgid;
-			}
-		}
-	}
-#endif
-}
-
-/* Free per-task arena storage on task exit. */
-void BPF_STRUCT_OPS(cake_exit_task, struct task_struct *p,
-		    struct scx_exit_task_args *args)
-{
-	/* Remove from PID→tctx map: removed — iter/task program handles visibility
-	 * without explicit cleanup. Task storage freed below. */
-	scx_task_free(p);
-}
-
-/* Initialize the scheduler */
+/*
+ * ops.init (sleepable, one-shot): cache nr_cpu_ids once — it's a kfunc,
+ * never to be called on a hot path — then create one custom vtime DSQ per
+ * possible CPU, dsq_id == cpu (raw small ids are safe: the kernel reserves
+ * only bit-63 builtin ids). init completes before any other callback runs,
+ * so there is no ordering hazard on cake.ncpu.
+ */
 s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 {
-	/* Per-CPU DSQs eliminated — SCX_DSQ_LOCAL_ON dispatches directly to
-     * the kernel's built-in local DSQ, skipping dispatch callback entirely.
-     * Per-LLC DSQs used for enqueue → dispatch path. */
-	/* Single vtime-ordered DSQ per LLC.
-     * Priority encoded in vtime: (vtime_tier << 56) | timestamp.
-     * T0 always dispatches first (lowest vtime). Eliminates 3 empty probes.
-     * Single-CCD (9800x3d): 1 DSQ. Multi-CCD: N DSQs (one per LLC).
-     * DSQ ID = LLC_DSQ_BASE + llc_index. */
-	for (u32 i = 0; i < CAKE_MAX_LLCS; i++) {
-		if (i >= nr_llcs)
-			break;
-		s32 ret = scx_bpf_create_dsq(LLC_DSQ_BASE + i, -1);
-		if (ret < 0)
+	u32 nr = scx_bpf_nr_cpu_ids();
+	s32 i, ret;
+
+	if (nr > MAX_CPUS)
+		nr = MAX_CPUS;
+	cake.ncpu.word = nr;
+
+	bpf_for(i, 0, nr) {
+		ret = scx_bpf_create_dsq((u64)(u32)i, -1);
+		if (ret)
 			return ret;
 	}
-
-	/* Unified per-CPU arena block — conditional sizing.
-	 * RELEASE: 64B/CPU × 64 = 4KB = 1 page (CL0 only, all DCE'd)
-	 * DEBUG:  128B/CPU × 64 = 8KB = 2 pages (CL0 telemetry + CL1 BenchLab)
-	 * Pages rounded up: (CAKE_MBOX_SIZE * CAKE_MAX_CPUS + 4095) / 4096 */
-#ifdef CAKE_RELEASE
-	per_cpu = (struct cake_per_cpu __arena *)bpf_arena_alloc_pages(
-		&arena, NULL, 1, NUMA_NO_NODE, 0);
-#else
-	per_cpu = (struct cake_per_cpu __arena *)bpf_arena_alloc_pages(
-		&arena, NULL, 2, NUMA_NO_NODE, 0);
-#endif
-	if (!per_cpu)
-		return -ENOMEM;
-
-
-	/* Populate per-CPU LLC ID cache from RODATA (Rule 41).
-	 * Set once at init — llc_id never changes for a given CPU. */
-	for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
-		if (i >= nr_cpus)
-			break;
-		cpu_bss[i].llc_id = (u8)cpu_llc_id[i];
-	}
-
-	return 0;
+	ret = scx_bpf_create_dsq(WAKE_DSQ, -1);
+	if (ret)
+		return ret;
+	return scx_bpf_create_dsq(OVF_DSQ, -1);
 }
 
-/* Scheduler exit - record exit info */
 void BPF_STRUCT_OPS(cake_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
 }
 
-/* ── cake_task_iter: SEC("iter/task") — replaces pid_to_tctx hash map ──
- * Iterates all kernel tasks. For each task managed by cake (tctx != NULL,
- * telemetry.pid != 0), emits a cake_iter_record via bpf_seq_write.
- * Userspace opens the link fd and reads fixed-size records synchronously.
- * Zero overhead in scheduling hot path: never called during scheduling.
- * No init/exit map ops: cake_init_task and cake_exit_task are now lockless.
- *
- * OPT-25: telemetry copy split into noinline batches (Rule 30: group to
- * reduce trampolining). Each batch: 2 args (tctx+rec) = 2 callee-saves,
- * r8-r9 free for temporaries → 0 spills per batch. */
-
-#ifndef CAKE_RELEASE
-/* Batch 1: timing fields (u64-heavy, 4 u64s + 3 u32s = ~44 bytes) */
-static __noinline void iter_copy_timing(
-	struct cake_task_ctx __arena *tctx,
-	struct cake_iter_record *rec)
-{
-	rec->telemetry.run_start_ns          = tctx->telemetry.run_start_ns;
-	rec->telemetry.run_duration_ns       = tctx->telemetry.run_duration_ns;
-	rec->telemetry.enqueue_start_ns      = tctx->telemetry.enqueue_start_ns;
-	rec->telemetry.wait_duration_ns      = tctx->telemetry.wait_duration_ns;
-	rec->telemetry.select_cpu_duration_ns= tctx->telemetry.select_cpu_duration_ns;
-	rec->telemetry.enqueue_duration_ns   = tctx->telemetry.enqueue_duration_ns;
-	rec->telemetry.dsq_insert_ns         = tctx->telemetry.dsq_insert_ns;
-	rec->telemetry.jitter_accum_ns       = tctx->telemetry.jitter_accum_ns;
-	rec->telemetry.stopping_duration_ns  = tctx->telemetry.stopping_duration_ns;
-	rec->telemetry.running_duration_ns   = tctx->telemetry.running_duration_ns;
-	rec->telemetry.max_runtime_us        = tctx->telemetry.max_runtime_us;
-	rec->telemetry._pad4                 = 0;
-	rec->telemetry.dispatch_gap_ns       = tctx->telemetry.dispatch_gap_ns;
-	rec->telemetry.max_dispatch_gap_ns   = tctx->telemetry.max_dispatch_gap_ns;
-}
-
-/* Batch 2: gate hits + counters (all u32/u16 — compact) */
-static __noinline void iter_copy_gates(
-	struct cake_task_ctx __arena *tctx,
-	struct cake_iter_record *rec)
-{
-	rec->telemetry.gate_1_hits           = tctx->telemetry.gate_1_hits;
-	rec->telemetry.gate_2_hits           = tctx->telemetry.gate_2_hits;
-	rec->telemetry.gate_1w_hits          = tctx->telemetry.gate_1w_hits;
-	rec->telemetry.gate_3_hits           = tctx->telemetry.gate_3_hits;
-	rec->telemetry.gate_1p_hits          = tctx->telemetry.gate_1p_hits;
-	rec->telemetry.gate_1c_hits          = tctx->telemetry.gate_1c_hits;
-	rec->telemetry.gate_1cp_hits         = tctx->telemetry.gate_1cp_hits;
-	rec->telemetry.gate_1d_hits          = tctx->telemetry.gate_1d_hits;
-	rec->telemetry.gate_1wc_hits         = tctx->telemetry.gate_1wc_hits;
-	rec->telemetry.gate_tun_hits         = tctx->telemetry.gate_tun_hits;
-	rec->telemetry._pad2                 = 0;
-	rec->telemetry.total_runs            = tctx->telemetry.total_runs;
-	rec->telemetry.core_placement        = tctx->telemetry.core_placement;
-	rec->telemetry.migration_count       = tctx->telemetry.migration_count;
-	rec->telemetry.preempt_count         = tctx->telemetry.preempt_count;
-	rec->telemetry.yield_count           = tctx->telemetry.yield_count;
-	rec->telemetry.direct_dispatch_count = tctx->telemetry.direct_dispatch_count;
-	rec->telemetry.enqueue_count         = tctx->telemetry.enqueue_count;
-	rec->telemetry.cpumask_change_count  = tctx->telemetry.cpumask_change_count;
-	rec->telemetry._pad3                 = 0;
-}
-
-/* Batch 3: histogram + identity fields */
-static __noinline void iter_copy_hist(
-	struct cake_task_ctx __arena *tctx,
-	struct cake_iter_record *rec)
-{
-	rec->telemetry.wait_hist_lt10us      = tctx->telemetry.wait_hist_lt10us;
-	rec->telemetry.wait_hist_lt100us     = tctx->telemetry.wait_hist_lt100us;
-	rec->telemetry.wait_hist_lt1ms       = tctx->telemetry.wait_hist_lt1ms;
-	rec->telemetry.wait_hist_ge1ms       = tctx->telemetry.wait_hist_ge1ms;
-	rec->telemetry.slice_util_pct        = tctx->telemetry.slice_util_pct;
-	rec->telemetry.llc_id                = tctx->telemetry.llc_id;
-	rec->telemetry.same_cpu_streak       = tctx->telemetry.same_cpu_streak;
-	rec->telemetry._pad_recomp           = 0;
-	rec->telemetry.wakeup_source_pid     = tctx->telemetry.wakeup_source_pid;
-	rec->telemetry.nivcsw_snapshot       = tctx->telemetry.nivcsw_snapshot;
-	rec->telemetry.nvcsw_delta           = tctx->telemetry.nvcsw_delta;
-	rec->telemetry.nivcsw_delta          = tctx->telemetry.nivcsw_delta;
-	rec->telemetry.pid_inner             = tctx->telemetry.pid;
-	rec->telemetry.tgid                  = tctx->telemetry.tgid;
-	/* comm: 16 bytes as two u64 reads via arena cast */
-	*((__u64 *)&rec->telemetry.comm[0]) = *((__u64 __arena *)&tctx->telemetry.comm[0]);
-	*((__u64 *)&rec->telemetry.comm[8]) = *((__u64 __arena *)&tctx->telemetry.comm[8]);
-}
-
-/* Batch 4: enqueue substage timing + quantum + waker + per-CPU run counts */
-static __noinline void iter_copy_substage(
-	struct cake_task_ctx __arena *tctx,
-	struct cake_iter_record *rec)
-{
-	rec->telemetry.gate_cascade_ns       = tctx->telemetry.gate_cascade_ns;
-	rec->telemetry.idle_probe_ns         = tctx->telemetry.idle_probe_ns;
-	rec->telemetry.vtime_compute_ns      = tctx->telemetry.vtime_compute_ns;
-	rec->telemetry.mbox_staging_ns       = tctx->telemetry.mbox_staging_ns;
-	rec->telemetry._pad_ewma             = 0;
-	rec->telemetry.classify_ns           = tctx->telemetry.classify_ns;
-	rec->telemetry.vtime_staging_ns      = tctx->telemetry.vtime_staging_ns;
-	rec->telemetry.warm_history_ns       = tctx->telemetry.warm_history_ns;
-	rec->telemetry.quantum_full_count    = tctx->telemetry.quantum_full_count;
-	rec->telemetry.quantum_yield_count   = tctx->telemetry.quantum_yield_count;
-	rec->telemetry.quantum_preempt_count = tctx->telemetry.quantum_preempt_count;
-	rec->telemetry._pad_quantum          = 0;
-	rec->telemetry.waker_cpu             = tctx->telemetry.waker_cpu;
-	rec->telemetry._pad_waker            = 0;
-	rec->telemetry.waker_tgid            = tctx->telemetry.waker_tgid;
-	/* cpu_run_count: per-element arena reads */
-	for (int _ci = 0; _ci < CAKE_TELEM_MAX_CPUS; _ci++)
-		rec->telemetry.cpu_run_count[_ci] = tctx->telemetry.cpu_run_count[_ci];
-}
-#endif /* !CAKE_RELEASE */
-
-SEC("iter/task")
-int cake_task_iter(struct bpf_iter__task *ctx)
-{
-	struct seq_file *seq = ctx->meta->seq;
-	struct task_struct *task = ctx->task;
-	if (!task)
-		return 0;
-
-	/* Only emit tasks managed by this scheduler instance. */
-	struct cake_task_ctx __arena *tctx = get_task_ctx(task);
-#ifndef CAKE_RELEASE
-	if (!tctx || !tctx->telemetry.pid)
-		return 0;
-#else
-	if (!tctx)
-		return 0;
-#endif
-
-	/* Build iter record from arena tctx data.
-	 * Zero-init: in release builds, telemetry block is skipped —
-	 * without this, bpf_seq_write emits stack garbage. */
-	struct cake_iter_record rec = {};
-	rec.pid         = task->pid;
-	rec.ppid        = tctx->ppid;
-	rec.packed_info = tctx->packed_info;
-	rec.pelt_util = (u16)task->se.avg.util_avg;
-	rec.deficit_us     = tctx->deficit_u16;
-	rec.vtime_mult     = tctx->vtime_mult;
-
-#ifndef CAKE_RELEASE
-	/* Telemetry: batched noinline copies → 0 spills per batch.
-	 * Each batch: 2 args (tctx+rec) = 2 callee-saves. */
-	iter_copy_timing(tctx, &rec);
-	iter_copy_gates(tctx, &rec);
-	iter_copy_hist(tctx, &rec);
-	iter_copy_substage(tctx, &rec);
-#endif
-
-	bpf_seq_write(seq, &rec, sizeof(rec));
-	return 0;
-}
-/* F3 FIX: Tick callback for cross-LLC load balance hinting.
- * Runs once per tick (~1ms) per CPU. Throttled to every 8th tick (~8ms)
- * to minimize overhead. On single-CCD (nr_llcs==1), JIT eliminates
- * the entire function body (RODATA constant fold).
- *
- * Kernel source truth (ext.c:2798-2817): task_tick_scx() calls this
- * AFTER update_curr_scx() has already decremented p->scx.slice.
- * Slice enforcement is FREE — we only use this for load balance hinting.
- *
- * Algorithm: if my LLC's DSQ has 2+ tasks queued AND another LLC's DSQ
- * is empty, kick one of that LLC's CPUs to trigger cross-LLC steal.
- * This turns passive "discover work on idle" into proactive "notify idle". */
-void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
-{
-	/* Single-LLC: nothing to balance. JIT dead-code eliminates. */
-	if (nr_llcs <= 1)
-		return;
-
-	/* Throttle: only check every 8th tick (~8ms) to minimize overhead.
-	 * 1ms per-tick × 8 = 8ms period. Cost on fast path: 1 byte load + AND.
-	 * tick_count wraps at 255 — no concern, only low 3 bits matter. */
-	u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-	cpu_bss[cpu].tick_count++;
-	if (cpu_bss[cpu].tick_count & 7)
-		return;
-
-	/* Check my LLC's DSQ depth — only rebalance when overloaded */
-	u32 my_llc = cpu_bss[cpu].llc_id;  /* per-CPU cache (Rule 41) */
-	s32 my_depth = scx_bpf_dsq_nr_queued(LLC_DSQ_BASE + my_llc);
-	if (my_depth < 2)
-		return;
-
-	/* Find an empty LLC and kick one of its CPUs to trigger steal.
-	 * Round-robin from my_llc+1 to avoid always kicking the same LLC.
-	 * llc_cpu_mask[] is RODATA — zero cache bounce on read. */
-	for (u32 i = 1; i < CAKE_MAX_LLCS && i < nr_llcs; i++) {
-		u32 other = (my_llc + i);
-		if (other >= nr_llcs) other -= nr_llcs;
-		s32 other_depth = scx_bpf_dsq_nr_queued(LLC_DSQ_BASE + other);
-		if (other_depth == 0) {
-			u64 mask = llc_cpu_mask[other];
-			if (mask) {
-				u32 target = __builtin_ctzll(mask);
-				if (target < nr_cpus)
-					scx_bpf_kick_cpu(target, SCX_KICK_IDLE);
-			}
-			break;
-		}
-	}
-}
-
-/* F6 FIX: Cgroup weight callback — enables framework weight propagation.
- * The kernel calls this when p->scx.weight changes via cgroup or nice.
- * No-op: actual weight application happens in cake_stopping via F4's
- * multiplicative scaling (102400 / p->scx.weight). Registering this
- * callback signals to the framework that cake is weight-aware. */
-void BPF_STRUCT_OPS(cake_set_weight, struct task_struct *p, u32 weight)
-{
-	/* Weight already stored in p->scx.weight by kernel.
-	 * F4 reads it in cake_stopping. Nothing to do here. */
-}
-
-SCX_OPS_DEFINE(cake_ops, .select_cpu = (void *)cake_select_cpu,
-	       .enqueue	 = (void *)cake_enqueue,
-	       .dispatch = (void *)cake_dispatch,
-	       .tick         = (void *)cake_tick,
-	       .running	    = (void *)cake_running,
-	       .stopping    = (void *)cake_stopping,
-	       .yield = (void *)cake_yield,
-	       .runnable = (void *)cake_runnable,
-	       .set_weight   = (void *)cake_set_weight,
-	       .enable       = (void *)cake_enable,
-	       .set_cpumask = (void *)cake_set_cpumask,
-	       .init_task   = (void *)cake_init_task,
-	       .exit_task = (void *)cake_exit_task, .init = (void *)cake_init,
-	       .exit = (void *)cake_exit, .flags = SCX_OPS_KEEP_BUILTIN_IDLE,
-	       .timeout_ms = 5000, /* G2 FIX: starvation watchdog — matches cosmos/bpfland */
-	       .name = "cake");
+/*
+ * ALLOW_QUEUED_WAKEUP: remote wakeups ride the batched TTWU queue (one IPI
+ * drains a list on the target) instead of the waker grabbing the remote rq
+ * lock per wake — the futex/pipe handoff-storm shape. Safe here because no
+ * cake callback reads `current` expecting the waker: with queued wakeups,
+ * select_cpu/enqueue run on the target CPU in batch context (lavd precedent).
+ */
+SCX_OPS_DEFINE(cake_ops,
+	       .select_cpu	= (void *)cake_select_cpu,
+	       .enqueue		= (void *)cake_enqueue,
+	       .dispatch	= (void *)cake_dispatch,
+	       .running		= (void *)cake_running,
+	       .stopping	= (void *)cake_stopping,
+	       .enable		= (void *)cake_enable,
+	       .init		= (void *)cake_init,
+	       .exit		= (void *)cake_exit,
+	       .flags		= SCX_OPS_ALLOW_QUEUED_WAKEUP,
+	       .timeout_ms	= 5000,
+	       .name		= "cake");

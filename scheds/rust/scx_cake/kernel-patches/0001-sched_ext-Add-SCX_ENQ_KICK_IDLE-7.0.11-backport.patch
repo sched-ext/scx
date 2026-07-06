@@ -1,0 +1,77 @@
+From: Andrea Righi <arighi@nvidia.com>
+Subject: [PATCH] sched_ext: Add SCX_ENQ_KICK_IDLE enqueue flag (7.0.11 backport)
+
+Backport of arighi for-7.2 commit aee94395c1f7e5e6414db223acc8d672603fed93
+("sched_ext: Add SCX_ENQ_KICK_IDLE enqueue flag") to the CachyOS 7.0.11
+tree. The upstream patch does not apply there because its context depends
+on SCX_ENQ_IMMED and scx_vet_enq_flags(), which only exist in for-7.2.
+
+Backport deltas vs upstream (behavior identical):
+ - 7.0.11's local_dsq_post_enq() has no scx_sched *sch param; use the
+   file-scope scx_root directly (same pattern as yield_to_task_scx()).
+ - No scx_vet_enq_flags() on 7.0.11; the non-local-DSQ validation goes at
+   the top of scx_dsq_insert_commit(), which every dsq-insert kfunc
+   (FIFO + vtime, v1 + v2) routes through.
+ - Same bit value as upstream: 1LLU << 34 (free on 7.0.11; bit 33/IMMED
+   does not exist here). Userspace resolves the bit from kernel BTF at
+   runtime, so the value only needs to match this kernel's own enum.
+ - tools/sched_ext autogen header hunks dropped: scx_cake resolves the
+   enum via scx_utils::compat::read_enum() from booted-kernel BTF.
+
+When inserting a task into a local DSQ, a scheduler often wants to wake
+the target CPU if it is idle. Currently, this requires a separate
+scx_bpf_kick_cpu() call after the insert.
+
+Add SCX_ENQ_KICK_IDLE, which can be set in @enq_flags when inserting
+into a local DSQ. After the task is successfully inserted, the CPU
+owning that local DSQ is kicked as if scx_bpf_kick_cpu() was called with
+SCX_KICK_IDLE, folding the two operations into one.
+
+The flag is only valid on local DSQs; using it on a non-local DSQ
+triggers an scx_error().
+
+Signed-off-by: Andrea Righi <arighi@nvidia.com>
+[backported to cachyos-7.0.11 by Paul Reitz]
+---
+--- a/kernel/sched/ext.c	2026-06-10 09:21:30.394434947 -0500
++++ b/kernel/sched/ext.c	2026-06-10 09:22:54.000797724 -0500
+@@ -1004,6 +1004,9 @@ static void local_dsq_post_enq(struct sc
+ 	if (rq->scx.flags & SCX_RQ_IN_BALANCE)
+ 		return;
+ 
++	if (enq_flags & SCX_ENQ_KICK_IDLE)
++		scx_kick_cpu(scx_root, cpu_of(rq), SCX_KICK_IDLE);
++
+ 	if ((enq_flags & SCX_ENQ_PREEMPT) && p != rq->curr &&
+ 	    rq->curr->sched_class == &ext_sched_class) {
+ 		rq->curr->scx.slice = 0;
+@@ -5923,6 +5926,13 @@ static void scx_dsq_insert_commit(struct
+ {
+ 	struct scx_dsp_ctx *dspc = this_cpu_ptr(scx_dsp_ctx);
+ 	struct task_struct *ddsp_task;
++	bool is_local = dsq_id == SCX_DSQ_LOCAL ||
++		(dsq_id & SCX_DSQ_LOCAL_ON) == SCX_DSQ_LOCAL_ON;
++
++	if (unlikely((enq_flags & SCX_ENQ_KICK_IDLE) && !is_local)) {
++		scx_error(sch, "SCX_ENQ_KICK_IDLE on a non-local DSQ 0x%llx", dsq_id);
++		return;
++	}
+ 
+ 	ddsp_task = __this_cpu_read(direct_dispatch_task);
+ 	if (ddsp_task) {
+--- a/kernel/sched/ext_internal.h	2026-06-10 09:21:30.394754738 -0500
++++ b/kernel/sched/ext_internal.h	2026-06-10 09:21:54.282042735 -0500
+@@ -942,6 +942,13 @@ enum scx_enq_flags {
+ 	SCX_ENQ_PREEMPT		= 1LLU << 32,
+ 
+ 	/*
++	 * Only allowed on local DSQs. After successfully inserting the task
++	 * into a local DSQ, kick the CPU owning that local DSQ as if
++	 * scx_bpf_kick_cpu() was called with %SCX_KICK_IDLE.
++	 */
++	SCX_ENQ_KICK_IDLE	= 1LLU << 34,
++
++	/*
+ 	 * The task being enqueued was previously enqueued on the current CPU's
+ 	 * %SCX_DSQ_LOCAL, but was removed from it in a call to the
+ 	 * scx_bpf_reenqueue_local() kfunc. If scx_bpf_reenqueue_local() was
