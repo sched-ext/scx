@@ -204,7 +204,9 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 	atq->size -= 1;
 
 	taskc = (scx_task_common *)taskc_ptr;
-	(void)hold;
+	if (hold)
+		scx_atq_task_hold(taskc);
+
 	taskc->atq = NULL;
 
 	scx_atq_unlock(atq);
