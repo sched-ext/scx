@@ -1021,12 +1021,12 @@ static void update_vtime(struct task_struct *p, struct cpu_ctx *cpuc,
 				  llcx->vtime - scaled_min : 0;
 
 		if (p->scx.dsq_vtime < vtime_floor)
-			p->scx.dsq_vtime = vtime_floor;
+			scx_bpf_task_set_dsq_vtime(p, vtime_floor);
 
 		return;
 	}
 
-	p->scx.dsq_vtime = llcx->vtime;
+	scx_bpf_task_set_dsq_vtime(p, llcx->vtime);
 
 	return;
 }
@@ -1057,7 +1057,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx,
 
 	u64 slice_ns = task_slice_ns(p, cpuc->slice_ns);
 	cpuc->ran_for += slice_ns;
-	p->scx.slice = slice_ns;
+	scx_bpf_task_set_slice(p, slice_ns);
 	stat_inc(P2DQ_STAT_KEEP);
 	return true;
 }
@@ -2430,7 +2430,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	used = now - taskc->last_run_at;
 	scaled_used = scale_by_task_weight_inverse(p, used);
 
-	p->scx.dsq_vtime += scaled_used;
+	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + scaled_used);
 	__sync_fetch_and_add(&llcx->vtime, used);
 
 	/* Update PELT metrics if enabled */
@@ -3193,7 +3193,7 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 	else
 		task_ctx_clear_flag(taskc, TASK_CTX_F_INTERACTIVE);
 
-	p->scx.dsq_vtime = llcx->vtime;
+	scx_bpf_task_set_dsq_vtime(p, llcx->vtime);
 	task_refresh_llc_runs(taskc);
 
 	// When a task is initialized set the DSQ id to invalid. This causes
