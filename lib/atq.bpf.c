@@ -129,8 +129,8 @@ int scx_atq_insert(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 	return scx_atq_insert_vtime(atq, taskc, SCX_ATQ_FIFO);
 }
 
-__hidden
-int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+static __always_inline
+int scx_atq_remove_internal(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
 	int ret;
 
@@ -155,6 +155,12 @@ int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 }
 
 __hidden
+int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+{
+	return scx_atq_remove_internal(atq, taskc);
+}
+
+__hidden
 int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
        int ret;
@@ -163,7 +169,7 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
        if (ret)
                return ret;
 
-       ret = scx_atq_remove_unlocked(atq, taskc);
+       ret = scx_atq_remove_internal(atq, taskc);
 
        scx_atq_unlock(atq);
 
