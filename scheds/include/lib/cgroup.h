@@ -130,23 +130,31 @@ int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 
 int scx_cgroup_bw_reenqueue(void);
 
 /**
- * scx_cgroup_bw_cancel - Cancel throttling for a task.
+ * enum scx_cgroup_bw_cancel_flags - Flags for scx_cgroup_bw_cancel().
+ * @SCX_CGROUP_BW_CANCEL_DROP: also drop the task's throttling-ownership
+ *   reference and quiesce in-flight ATQ operations so the task context can be
+ *   freed (from ops.exit_task). Without it, cancel only unlinks the task from
+ *   its BTQ and keeps ownership active.
+ */
+enum scx_cgroup_bw_cancel_flags {
+	SCX_CGROUP_BW_CANCEL_DROP = ((u64)0x01),
+};
+
+/**
+ * scx_cgroup_bw_cancel - Cancel a task's BTQ membership.
  *
  * @taskc: Pointer to the scx_task_common task context. Passed as a u64
  * to avoid exposing the scx_task_common type to the scheduler.
+ * @flags: bitmask of enum scx_cgroup_bw_cancel_flags.
  *
- * Tasks may be dequeued from the BPF side by the scx core during system
- * calls like sched_setaffinity(2). In that case, we must cancel any
- * throttling-related ATQ insert operations for the task:
- * - We must avoid double inserts caused by the dequeued task being
- *   reenqueed and throttled again while still in an ATQ.
- * - We want to remove tasks not in scx anymore from throttling. While
- *   inserting non-scx tasks into a DSQ is a no-op, we would like our
- *   accounting to be as accurate as possible.
+ * This removes the task from any current bandwidth-throttle queue but leaves it
+ * eligible to be re-queued. Pass SCX_CGROUP_BW_CANCEL_DROP at task exit to
+ * instead mark it dying (SCX_ATQ_DEAD) and quiesce in-flight ATQ ops so the
+ * task context can be freed.
  *
  * Return 0 for success, -errno for failure.
  */
-int scx_cgroup_bw_cancel(u64 taskc);
+int scx_cgroup_bw_cancel(u64 taskc, u64 flags);
 
 /**
  * REGISTER_SCX_CGROUP_BW_ENQUEUE_CB - Register an enqueue callback.
@@ -168,11 +176,12 @@ int scx_cgroup_bw_cancel(u64 taskc);
 		if (p) {							\
 			eqcb(p, (u64)taskc);					\
 			bpf_task_release(p);					\
-		} else {							\
-			scx_bpf_error("BUG: bpf_task_from_pid() failed for "	\
-				      "pid %d -- exiting task was "		\
-				      "unexpectedly throttled", taskc->pid);	\
 		}								\
+		/*								\
+		 * If bpf_task_from_pid() fails the task already exited; a	\
+		 * dying task is not lost by skipping reenqueue. This races	\
+		 * a drain against ops.exit_task, which is expected.		\
+		 */								\
 		return 0;							\
 	}
 
@@ -245,4 +254,3 @@ struct scx_task_cgroup_bw {
 };
 
 typedef struct scx_task_cgroup_bw __arena scx_task_cgroup_bw_t;
-

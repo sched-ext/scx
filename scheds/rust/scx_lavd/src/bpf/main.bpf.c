@@ -1153,7 +1153,7 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 	if (!enable_cpu_bw)
 		return;
 
-	if ((ret = scx_cgroup_bw_cancel((u64)taskc)))
+	if ((ret = scx_cgroup_bw_cancel((u64)taskc, 0)))
 		debugln("Failed to cancel task %d with %d", p->pid, ret);
 }
 

@@ -1796,6 +1796,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	scx_task_common *taskc = (scx_task_common *)ctx;
 	scx_cgroup_llc_ctx_t *llcx;
 	scx_atq_t *btq;
+	scx_atq_t *task_atq;
 	int llc_id, ret;
 
 	/* Get the current LLC ID. */
@@ -1852,7 +1853,12 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	 * detected either here on the fast path or as EALREADY returned by the
 	 * insert below.
 	 */
-	if (READ_ONCE(taskc->atq) != NULL) {
+	task_atq = (scx_atq_t *)READ_ONCE(taskc->atq);
+	if (task_atq == (scx_atq_t *)SCX_ATQ_DEAD) {
+		scx_atq_unlock(btq);
+		return 0;
+	}
+	if (task_atq) {
 		cbw_dbg("Possible double enqueue detected.");
 		scx_atq_unlock(btq);
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
@@ -1862,7 +1868,9 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	ret = scx_atq_insert_vtime_unlocked(btq, taskc, vtime);
 	scx_atq_unlock(btq);
 
-	if (unlikely(ret == -EALREADY)) {
+	if (unlikely(ret == -ECANCELED)) {
+		return 0;
+	} else if (unlikely(ret == -EALREADY)) {
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
 		return 0;
 	} else if (unlikely(ret)) {
@@ -2038,26 +2046,25 @@ out_no_replenish:
 }
 
 /*
- * scx_cgroup_bw_cancel - Cancel throttling for a task.
+ * scx_cgroup_bw_cancel - Cancel a task's BTQ membership.
  *
  * @taskc: Pointer to the scx_task_common task context. Passed as a u64
  * to avoid exposing the scx_task_common type to the scheduler.
- *
- * Tasks may be dequeued from the BPF side by the scx core during system
- * calls like sched_setaffinity(2). In that case, we must cancel any
- * throttling-related ATQ insert operations for the task:
- * - We must avoid double inserts caused by the dequeued task being
- *   reenqueed and throttled again while still in an ATQ.
- * - We want to remove tasks not in scx anymore from throttling. While
- *   inserting non-scx tasks into a DSQ is a no-op, we would like our
- *   accounting to be as accurate as possible.
+ * @flags: bitmask of enum scx_cgroup_bw_cancel_flags.
  *
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_cancel(u64 ctx)
+int scx_cgroup_bw_cancel(u64 ctx, u64 flags)
 {
-	return scx_atq_cancel((scx_task_common *)ctx);
+	scx_task_common *taskc = (scx_task_common *)ctx;
+	int ret;
+
+	if (flags & SCX_CGROUP_BW_CANCEL_DROP)
+		return scx_atq_task_detach(taskc);
+
+	ret = scx_atq_task_fini(taskc);
+	return ret < 0 ? ret : 0;
 }
 
 static struct cgroup *cbw_get_root_cgrp(void)
@@ -2642,7 +2649,13 @@ __hidden
 int scx_cgroup_bw_is_task_throttled(u64 taskc)
 {
 	scx_task_common *ctx = (scx_task_common *)taskc;
-	return ctx && (READ_ONCE(ctx->atq) != NULL);
+	scx_atq_t *atq;
+
+	if (!ctx)
+		return false;
+
+	atq = READ_ONCE(ctx->atq);
+	return atq != NULL && atq != (scx_atq_t *)SCX_ATQ_DEAD;
 }
 
 /**
@@ -2691,7 +2704,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 	if (!scx_cgroup_bw_is_task_throttled(taskc))
 		return 0;
 
-	if ((ret = scx_cgroup_bw_cancel(taskc))) {
+	if ((ret = scx_cgroup_bw_cancel(taskc, 0))) {
 		cbw_err("Fail to cancel a throttled task (%s:%d) from a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(from), ret);
 		return ret;
