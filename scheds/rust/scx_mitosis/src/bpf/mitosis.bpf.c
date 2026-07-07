@@ -353,7 +353,7 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 		if (dsq_is_invalid(tctx->dsq))
 			return -EINVAL;
 
-		p->scx.dsq_vtime = READ_ONCE(cpu_ctx->vtime_now);
+		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctx->vtime_now));
 		tctx->all_cell_cpus_allowed = false;
 		return 0;
 	}
@@ -375,7 +375,7 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	if (!(cell = lookup_cell(tctx->cell)))
 		return -ENOENT;
 
-	p->scx.dsq_vtime = READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now);
+	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now));
 	tctx->all_cell_cpus_allowed = true;
 
 	return 0;
@@ -618,7 +618,7 @@ static __always_inline s32 update_pinned_dsq(struct task_struct *p, struct task_
 		return -1;
 
 	tctx->dsq = get_cpu_dsq_id(new_cpu);
-	p->scx.dsq_vtime = READ_ONCE(new_cctx->vtime_now);
+	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(new_cctx->vtime_now));
 	return new_cpu;
 }
 
@@ -1059,7 +1059,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 		scx_bpf_error("Task %d has zero weight", p->pid);
 		return;
 	}
-	p->scx.dsq_vtime += used * 100 / p->scx.weight;
+	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (used * 100 / p->scx.weight));
 
 	/*
 	 * Only advance this CPU's local vtime when the slice ends on a CPU

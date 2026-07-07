@@ -474,10 +474,11 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 		return -EINVAL;
 
 	if (reset_vtime || !llc_is_valid(old_llc) || old_llc >= nr_llc || old_llc >= MAX_LLCS) {
-		p->scx.dsq_vtime = READ_ONCE(cell->llcs[new_llc].vtime_now);
+		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cell->llcs[new_llc].vtime_now));
 	} else if (old_llc != new_llc) {
 		s64 vtime_delta = p->scx.dsq_vtime - READ_ONCE(cell->llcs[old_llc].vtime_now);
-		p->scx.dsq_vtime = READ_ONCE(cell->llcs[new_llc].vtime_now) + vtime_delta;
+		scx_bpf_task_set_dsq_vtime(p,
+					   READ_ONCE(cell->llcs[new_llc].vtime_now) + vtime_delta);
 	}
 
 	tctx->llc = new_llc;
