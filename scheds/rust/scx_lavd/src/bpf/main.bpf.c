@@ -2128,6 +2128,14 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 		unaccount_queued_load_pcpu(taskc);
 	}
 
+	/*
+	 * Mark the task dead in the bandwidth-throttle queues before freeing
+	 * taskc. Concurrent drains or cgroup moves that already hold the task
+	 * must finish before scx_task_free() releases the arena storage.
+	 */
+	if (enable_cpu_bw && taskc)
+		scx_cgroup_bw_cancel((u64)taskc, SCX_CGROUP_BW_CANCEL_DROP);
+
 	scx_task_free(p);
 	return 0;
 }
