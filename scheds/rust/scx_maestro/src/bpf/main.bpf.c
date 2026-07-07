@@ -755,7 +755,7 @@ void BPF_STRUCT_OPS(maestro_tick, struct task_struct *p)
 		s32 cpu = scx_bpf_task_cpu(p);
 
 		if (is_smt_contended(cpu))
-			p->scx.slice = 0;
+			scx_bpf_task_set_slice(p, 0);
 	}
 }
 
