@@ -913,7 +913,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (prev && is_queued(prev) &&
 	    (!is_usersched_task(prev) || usersched_has_pending_tasks()))
-		prev->scx.slice = slice_ns;
+		scx_bpf_task_set_slice(prev, slice_ns);
 }
 
 void BPF_STRUCT_OPS(rustland_runnable, struct task_struct *p, u64 enq_flags)
@@ -989,8 +989,8 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
  */
 void BPF_STRUCT_OPS(rustland_enable, struct task_struct *p)
 {
-	p->scx.dsq_vtime = 0;
-	p->scx.slice = slice_ns;
+	scx_bpf_task_set_dsq_vtime(p, 0);
+	scx_bpf_task_set_slice(p, slice_ns);
 }
 
 /*
