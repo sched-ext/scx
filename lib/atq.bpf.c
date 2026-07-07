@@ -59,6 +59,7 @@ __hidden __inline
 int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
 	rbnode_t *node = &taskc->node;
+	scx_atq_t *old_atq;
 	int ret;
 
 	if (unlikely(atq->size == atq->capacity))
@@ -68,13 +69,15 @@ int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __
 		return -EINVAL;
 
 	/*
-	 * The ->atq field is not protected by the ATQ
-	 * lock, since multiple callers may be trying to
-	 * add the same task to differnt ATQs. Use atomic
-	 * cmpxchg so that races have a single winner.
+	 * Claim the task with a single atomic election on ->atq. The field is
+	 * not protected by the ATQ lock because a task may be inserted into
+	 * different ATQs concurrently; cmpxchg picks one winner. The claim only
+	 * succeeds from NULL, so a task already queued (a real BTQ pointer) or
+	 * dying (SCX_ATQ_DEAD) is rejected.
 	 */
-	if (cmpxchg(&taskc->atq, 0, atq))
-		return -EALREADY;
+	old_atq = cmpxchg(&taskc->atq, 0, atq);
+	if (old_atq)
+		return old_atq == (scx_atq_t *)SCX_ATQ_DEAD ? -ECANCELED : -EALREADY;
 
 	/*
 	 * For FIFO, "Leak" the seq on error. We only want
@@ -148,8 +151,7 @@ int scx_atq_remove_internal(scx_atq_t *atq, scx_task_common __arg_arena *taskc,
 	if (ret)
 		return ret;
 
-	(void)dead;
-	taskc->atq = NULL;
+	taskc->atq = dead ? (scx_atq_t *)SCX_ATQ_DEAD : NULL;
 
 	atq->size -= 1;
 
@@ -245,41 +247,83 @@ int scx_atq_nr_queued(scx_atq_t *atq)
 }
 
 /*
- * Cancel ATQ membership for the task. Find any ATQs it is
- * in and pop it out.
+ * Detach a dying task from the ATQ subsystem so its context can be freed.
+ *
+ * Unlink it from whatever BTQ it currently sits in and latch SCX_ATQ_DEAD so
+ * it can never be queued again. Then wait for any in-flight operation still
+ * pinning the task to drop its hold, so the caller can safely free the task.
  */
 __weak
-int scx_atq_cancel(scx_task_common __arg_arena *taskc)
+int scx_atq_task_detach(scx_task_common __arg_arena *taskc)
+{
+	volatile int holdcnt;
+	scx_atq_t *atq;
+	int ret;
+
+	while (can_loop) {
+		atq = taskc->atq;
+		if (atq == (scx_atq_t *)SCX_ATQ_DEAD)
+			break;
+
+		if (!atq) {
+			if (!cmpxchg(&taskc->atq, 0, (scx_atq_t *)SCX_ATQ_DEAD))
+				break;
+			continue;
+		}
+
+		if ((ret = scx_atq_lock(atq))) {
+			bpf_printk("Failed to lock ATQ for task");
+			return ret;
+		}
+
+		if (taskc->atq != atq) {
+			scx_atq_unlock(atq);
+			continue;
+		}
+
+		ret = scx_atq_remove_internal(atq, taskc, true);
+		scx_atq_unlock(atq);
+		if (ret)
+			return ret;
+		break;
+	}
+
+	while ((holdcnt = taskc->holdcnt) > 0 && can_loop)
+		;
+
+	return 0;
+}
+
+/*
+ * Cancel ATQ membership from the task itself, keeping it reusable. Returns 1
+ * if this caller removed the task, 0 if it was not queued (or dying), or
+ * -errno on failure.
+ */
+__weak
+int scx_atq_task_fini(scx_task_common __arg_arena *taskc)
 {
 	scx_atq_t *atq;
 	int ret;
 
-	/*
-	 * Copy the ATQ pointer over to the stack and use it to avoid
-	 * a racing scx_atq_pop() from overwriting it. Check the
-	 * pointer is valid, as expected by the caller.
-	 */
-	atq = taskc->atq;
-	if (!atq)
-		return 0;
+	while (can_loop) {
+		atq = taskc->atq;
+		if (!atq || atq == (scx_atq_t *)SCX_ATQ_DEAD)
+			return 0;
 
-	if ((ret = scx_atq_lock(atq))) {
-		bpf_printk("Failed to lock ATQ for task");
-		return ret;
-	}
+		if ((ret = scx_atq_lock(atq))) {
+			bpf_printk("Failed to lock ATQ for task");
+			return ret;
+		}
 
-	/* We lost the race, assume whoever popped the task will handle it. */
-	if (taskc->atq != atq) {
+		if (taskc->atq != atq) {
+			scx_atq_unlock(atq);
+			continue;
+		}
+
+		ret = scx_atq_remove_unlocked(taskc->atq, taskc);
 		scx_atq_unlock(atq);
-		return 0;
+		return ret ? ret : 1;
 	}
 
-	/* Protected from races by the lock. */
-	if ((ret = scx_atq_remove_unlocked(taskc->atq, taskc))) {
-		/* There is an unavoidable race with scx_atq_pop. */
-		bpf_printk("Failed to remove node from task");
-	}
-
-	scx_atq_unlock(atq);
-	return ret;
+	return 0;
 }

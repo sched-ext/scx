@@ -13,7 +13,8 @@
 
 enum scx_atq_consts {
 	SCX_ATQ_INF_CAPACITY  = ((u64)-1),
-	SCX_ATQ_FIFO = ((u64)-1)
+	SCX_ATQ_FIFO = ((u64)-1),
+	SCX_ATQ_DEAD = ((u64)0x1),
 };
 
 enum scx_task_throttle {
@@ -59,7 +60,8 @@ int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc);
 int scx_atq_nr_queued(scx_atq_t *atq);
 u64 scx_atq_pop(scx_atq_t *atq, bool hold);
 u64 scx_atq_peek(scx_atq_t *atq);
-int scx_atq_cancel(scx_task_common *taskc);
+int scx_atq_task_detach(scx_task_common *taskc);
+int scx_atq_task_fini(scx_task_common *taskc);
 
 static __always_inline
 void scx_atq_task_hold(scx_task_common __arg_arena *taskc)
