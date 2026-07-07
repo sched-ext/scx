@@ -2068,6 +2068,68 @@ int scx_cgroup_bw_cancel(u64 ctx, u64 flags)
 	return ret < 0 ? ret : 0;
 }
 
+/*
+ * Remove @taskc from its current BTQ and hold it across the temporary
+ * ->atq == NULL window. The hold prevents ops.exit_task from freeing the task
+ * context while the caller relocates or reenqueues it.
+ *
+ * Return 0 for success or -errno on failure. On success, @cancelled is true
+ * iff this caller removed the task and now owns a hold.
+ */
+static __always_inline
+int cbw_cancel_with_hold(scx_task_common __arg_arena *taskc, bool *cancelled)
+{
+	scx_atq_t *atq;
+	int ret;
+
+	*cancelled = false;
+
+	while (can_loop) {
+		atq = (scx_atq_t *)READ_ONCE(taskc->atq);
+		if (!atq || atq == (scx_atq_t *)SCX_ATQ_DEAD)
+			return 0;
+
+		if ((ret = scx_atq_lock(atq))) {
+			cbw_err("Failed to lock BTQ while moving task: %d", ret);
+			return ret;
+		}
+
+		if (READ_ONCE(taskc->atq) != atq) {
+			scx_atq_unlock(atq);
+			continue;
+		}
+
+		scx_atq_task_hold(taskc);
+		ret = scx_atq_remove_unlocked(atq, taskc);
+		scx_atq_unlock(atq);
+
+		if (ret) {
+			scx_atq_task_drop(taskc);
+			return ret;
+		}
+
+		*cancelled = true;
+		return 0;
+	}
+
+	return 0;
+}
+
+static int cbw_unthrottle_held_task(u64 taskc)
+{
+	int ret;
+
+	/*
+	 * The task is being unthrottled and reenqueued, so it stays alive:
+	 * use fini (unlink only), not detach (which would latch SCX_ATQ_DEAD).
+	 */
+	ret = scx_atq_task_fini((scx_task_common *)taskc);
+	if (ret < 0)
+		return ret;
+
+	return scx_cgroup_bw_enqueue_cb(taskc);
+}
+
 static struct cgroup *cbw_get_root_cgrp(void)
 {
 	struct task_struct *task;
@@ -2664,7 +2726,7 @@ int scx_cgroup_bw_is_task_throttled(u64 taskc)
  * scx_cgroup_bw_move - Move a task from a cgroup to another (@from -> @to).
  *
  * @p: task being moved
- * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * @task_ptr: Pointer to the scx_task_common task context. Passed as a u64
  * to avoid exposing the scx_task_common type to the scheduler.
  * @from: cgroup @p is being moved from
  * @to: cgroup @p is being moved to
@@ -2672,11 +2734,13 @@ int scx_cgroup_bw_is_task_throttled(u64 taskc)
  * Return 0 for success, -errno for failure.
  */
 __hidden __noinline
-int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
+int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 		       struct cgroup *from __arg_trusted,
 		       struct cgroup *to __arg_trusted)
 {
 	volatile scx_task_cgroup_bw_t *tc; /* Add `volatile` to work around the verifier error */
+	scx_task_common *taskc = (scx_task_common *)task_ptr;
+	bool cancelled;
 	int ret;
 
 	scx_arena_subprog_init();
@@ -2696,27 +2760,41 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 	}
 
 	/*
-	 * If a task is throttled, remove it from the @from cgroup,
-	 * then add it to the BTQ of the @to cgroup.
+	 * If a task is throttled, remove it from its current BTQ, hold it
+	 * across the transient ->atq == NULL state, then add it to @to's BTQ.
+	 * A concurrent ops.exit_task may latch SCX_ATQ_DEAD during the window,
+	 * but it must wait for our hold before freeing the task context; the
+	 * subsequent put_aside sees DEAD and skips reinsertion safely.
 	 *
 	 * We will try to reenqueue it in the next replenishment interval.
 	 * This is fair because the task was throttled under @from cgroup,
 	 * so it has to wait until the next replenishment interval anyway.
 	 */
-	if (!scx_cgroup_bw_is_task_throttled(taskc))
+	if (!scx_cgroup_bw_is_task_throttled(task_ptr))
 		return 0;
 
-	if ((ret = scx_cgroup_bw_cancel(taskc, 0))) {
+	ret = cbw_cancel_with_hold(taskc, &cancelled);
+	if (ret) {
 		cbw_err("Fail to cancel a throttled task (%s:%d) from a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(from), ret);
 		return ret;
 	}
+	if (!cancelled)
+		return 0;
 
-	if ((ret = scx_cgroup_bw_put_aside(p, taskc, p->scx.dsq_vtime, cgroup_get_id(to)))) {
+	if ((ret = cbw_put_aside(task_ptr, p->scx.dsq_vtime, cgroup_get_id(to)))) {
+		if (ret == -ESRCH) {
+			cbw_warn("Destination cgroup unavailable while moving throttled task (%s:%d) to cgid%llu",
+				 p->comm, p->pid, cgroup_get_id(to));
+			ret = cbw_unthrottle_held_task(task_ptr);
+			goto out_drop;
+		}
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
 	}
 
+out_drop:
+	scx_atq_task_drop(taskc);
 	return ret;
 }
 
