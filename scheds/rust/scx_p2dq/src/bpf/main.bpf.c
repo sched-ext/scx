@@ -304,10 +304,10 @@ static s32 pref_idle_cpu(struct llc_ctx *llcx)
 	struct scx_minheap_elem helem;
 	int ret;
 
-	if ((ret = arena_spin_lock((void __arena *)&llcx->idle_lock)))
+	if ((ret = arena_spin_lock(&((struct llc_ctx __arena *)llcx)->idle_lock)))
 		return ret;
 	ret = scx_minheap_pop(llcx->idle_cpu_heap, &helem);
-	arena_spin_unlock((void __arena *)&llcx->idle_lock);
+	arena_spin_unlock(&((struct llc_ctx __arena *)llcx)->idle_lock);
 	if (ret)
 		return -EINVAL;
 
@@ -3114,11 +3114,11 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 	// Since we use a minheap convert the highest prio to lowest score.
 	idle_score = scx_bpf_now() - ((1<<7) * (u64)priority);
 
-	if ((ret = arena_spin_lock((void __arena *)&llcx->idle_lock)))
+	if ((ret = arena_spin_lock(&((struct llc_ctx __arena *)llcx)->idle_lock)))
 		return;
 
 	scx_minheap_insert(llcx->idle_cpu_heap, (u64)cpu, idle_score);
-	arena_spin_unlock((void __arena *)&llcx->idle_lock);
+	arena_spin_unlock(&((struct llc_ctx __arena *)llcx)->idle_lock);
 
 	return;
 }
