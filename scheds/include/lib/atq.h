@@ -56,7 +56,7 @@ int scx_atq_insert_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc);
 int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime);
 int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc);
 int scx_atq_nr_queued(scx_atq_t *atq);
-u64 scx_atq_pop(scx_atq_t *atq);
+u64 scx_atq_pop(scx_atq_t *atq, bool hold);
 u64 scx_atq_peek(scx_atq_t *atq);
 int scx_atq_cancel(scx_task_common *taskc);
 

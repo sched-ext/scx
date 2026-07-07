@@ -945,7 +945,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		 * Then, delete the LLC context and its associated BTQ.
 		 */
 		if (cgrp_id != ROOT_CGID) {
-			while (can_loop && (taskc = scx_atq_pop(btq))) {
+			while (can_loop && (taskc = scx_atq_pop(btq, false))) {
 				scx_task_cgroup_bw_t *t = (scx_task_cgroup_bw_t *)taskc;
 				/*
 				 * Invalidate the per-task cgx/llcx caches before
@@ -2414,7 +2414,7 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 	 */
 	for (i = 0; can_loop && i < CBW_REENQ_MAX_BATCH &&
 		    (btq = READ_ONCE(llcx->btq)) &&
-		    (taskc = (scx_task_common *)scx_atq_pop(btq)); i++) {
+		    (taskc = (scx_task_common *)scx_atq_pop(btq, false)); i++) {
 		/*
 		 * Note that we do not worry about racing with .dequeue() here,
 		 * because even if we do, the callback's insert_vtime call will

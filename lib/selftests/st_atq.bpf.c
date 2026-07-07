@@ -93,7 +93,7 @@ int scx_selftest_atq_common(bool isfifo)
 
 	vtime = 0;
 	for (i = 0; i < NTASKS_IN_QUEUE && can_loop; i++ ) {
-		taskc = (task_ctx *)scx_atq_pop(atq);
+		taskc = (task_ctx *)scx_atq_pop(atq, false);
 		if (!taskc) {
 			bpf_printk("NULL pointer on iteration %d", i);
 			return -EINVAL;
@@ -196,7 +196,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 			 * XXX We're leaking rbnodes by design here, ATQs nodes are normally embedded
 			 * into task contexts and get cleaned up with the task.
 			 */
-			scx_atq_pop(atq);
+			scx_atq_pop(atq, false);
 
 			expected = (PUSHES_PER_TEST - POPS_PER_TEST) * i  + (PUSHES_PER_TEST - 1 - j);
 			found = scx_atq_nr_queued(atq);
@@ -210,7 +210,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 
 	found = scx_atq_nr_queued(atq);
 	for (i = 0; i < found && can_loop; i++) {
-		ctx = scx_atq_pop(atq);
+		ctx = scx_atq_pop(atq, false);
 		if (!ctx) {
 			bpf_printk("scx_atq_pop retrieved (%d)", taskc);
 			return -EINVAL;
@@ -265,7 +265,7 @@ int scx_selftest_atq_peek_nodestruct(u64 unused)
 		return -EINVAL;
 	}
 
-	scx_atq_pop(fifo);
+	scx_atq_pop(fifo, false);
 
 	found = scx_atq_nr_queued(fifo);
 	if (found) {

@@ -46,7 +46,7 @@ int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 {
 	scx_arena_subprog_init();
 
-	while (scx_atq_pop(atq) && can_loop) {
+	while (scx_atq_pop(atq, false) && can_loop) {
 		/* Do nothing. Just drain all the queued tasks. */
 	}
 	rb_destroy(atq->tree);
@@ -177,7 +177,7 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 }
 
 __hidden
-u64 scx_atq_pop(scx_atq_t *atq)
+u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 {
 	scx_task_common *taskc;
 	u64 vtime, taskc_ptr;
@@ -204,6 +204,7 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	atq->size -= 1;
 
 	taskc = (scx_task_common *)taskc_ptr;
+	(void)hold;
 	taskc->atq = NULL;
 
 	scx_atq_unlock(atq);
