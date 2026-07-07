@@ -134,24 +134,24 @@ int scx_atq_remove_internal(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
 	int ret;
 
-       /*
-	* Are we in this ATQ in the first place?
-	*
-	* Note: Unlike in the insert path, the ATQ
-	* lock is valid enough protection here.
-	*/
-       if (taskc->atq != atq)
-	       return -EINVAL;
+	/*
+	 * Are we in this ATQ in the first place?
+	 *
+	 * Note: Unlike in the insert path, the ATQ
+	 * lock is valid enough protection here.
+	 */
+	if (taskc->atq != atq)
+		return -EINVAL;
 
-       ret = rb_remove_node(atq->tree, &taskc->node);
-       if (ret)
-	       return ret;
+	ret = rb_remove_node(atq->tree, &taskc->node);
+	if (ret)
+		return ret;
 
-       taskc->atq = NULL;
+	taskc->atq = NULL;
 
-       atq->size -= 1;
+	atq->size -= 1;
 
-       return 0;
+	return 0;
 }
 
 __hidden
@@ -163,17 +163,17 @@ int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 __hidden
 int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
-       int ret;
+	int ret;
 
-       ret = scx_atq_lock(atq);
-       if (ret)
-               return ret;
+	ret = scx_atq_lock(atq);
+	if (ret)
+		return ret;
 
-       ret = scx_atq_remove_internal(atq, taskc);
+	ret = scx_atq_remove_internal(atq, taskc);
 
-       scx_atq_unlock(atq);
+	scx_atq_unlock(atq);
 
-       return ret;
+	return ret;
 }
 
 __hidden
@@ -278,4 +278,3 @@ int scx_atq_cancel(scx_task_common __arg_arena *taskc)
 	scx_atq_unlock(atq);
 	return ret;
 }
-
