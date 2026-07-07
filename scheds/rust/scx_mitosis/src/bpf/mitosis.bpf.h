@@ -32,6 +32,9 @@ enum mitosis_constants {
 	/* Root cell index */
 	ROOT_CELL_ID = 0,
 
+	/* cgroup-v2 root cgroup id (kernfs root inode is always 1) */
+	ROOT_CGID = 1,
+
 	/* No NUMA constraint for DSQ creation */
 	ANY_NUMA = -1,
 };
@@ -39,7 +42,6 @@ enum mitosis_constants {
 /*
  * Variables populated by userspace
  */
-const volatile bool enable_llc_awareness = false;
 const volatile u32 nr_llc = 1;
 
 static inline struct cell *lookup_cell(int idx)
@@ -84,7 +86,7 @@ struct task_ctx {
 	 * lending cell's per-CPU DSQ vtime with this task's execution.
 	 */
 	bool borrowed;
-	/* Last known cgroup ID for detecting cgroup moves (used when cpu_controller_disabled) */
+	/* Last known cgroup ID for detecting cgroup moves */
 	u64 cgid;
 	/* Which LLC this task is assigned to */
 	s32 llc;

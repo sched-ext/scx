@@ -1,14 +1,12 @@
 #!/bin/bash
-# Test that demonstrates load imbalance with affinitized tasks
-# and how --dynamic-affinity-cpu-selection resolves it.
+# Test that demonstrates load balancing for affinitized tasks.
 #
 # Strategy:
 # 1. Start scx_mitosis in CellManager mode with an empty managed parent
 # 2. Create multiple CPU-bound tasks in the root cgroup (cell 0 has all CPUs)
-# 2. Use taskset to restrict each task's affinity to a subset of CPUs
-# 3. This triggers the affinity violation path in select_cpu/enqueue
-# 4. With legacy behavior: tasks may pile onto one CPU (imbalanced)
-# 5. With dynamic_affinity_cpu_selection: tasks spread across allowed CPUs
+# 3. Use taskset to restrict each task's affinity to a subset of CPUs
+# 4. This triggers the affinity violation path in select_cpu/enqueue
+# 5. Dynamic affinity selection should spread tasks across allowed CPUs
 #
 # Tests both:
 # - CPU-bound tasks (no wakeups) - tests enqueue() redistribution
@@ -79,12 +77,6 @@ if [[ ! -f "/sys/kernel/sched_ext/state" ]]; then
     exit 1
 fi
 
-if [[ "$SCX_MITOSIS_ARGS" == *"--dynamic-affinity-cpu-selection"* ]]; then
-    MODE="dynamic"
-else
-    MODE="legacy"
-fi
-
 WORKER_PIDS=()
 
 cleanup() {
@@ -108,9 +100,6 @@ trap cleanup EXIT INT TERM
 
 start_scheduler() {
     mkdir -p "$CGROUP_BASE"
-    if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
-        echo "+cpu" > "$CGROUP_BASE/cgroup.subtree_control"
-    fi
 
     local scheduler_args=("--cell-parent-cgroup" "/test.slice")
     if [[ -n "${SCX_MITOSIS_ARGS:-}" ]]; then
@@ -190,11 +179,7 @@ run_test() {
     echo -e "Duration: ${WORK_DURATION}s"
     echo ""
 
-    if [ "$MODE" = "dynamic" ]; then
-        echo -e "${GREEN}Mode: dynamic-affinity-cpu-selection ENABLED${NC}"
-    else
-        echo -e "${BLUE}Mode: legacy (static CPU assignment)${NC}"
-    fi
+    echo -e "${GREEN}Mode: dynamic affinity CPU selection enabled${NC}"
     echo ""
 
     echo -e "${YELLOW}Spawning $NUM_WORKERS workers ($test_type)...${NC}"
@@ -377,6 +362,3 @@ esac
 echo -e "${YELLOW}========================================${NC}"
 echo -e "${YELLOW}TEST COMPLETE${NC}"
 echo -e "${YELLOW}========================================${NC}"
-if [ "$MODE" = "legacy" ]; then
-    echo -e "Run with --dynamic-affinity-cpu-selection to see improvement."
-fi

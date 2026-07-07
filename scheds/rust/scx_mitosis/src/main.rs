@@ -82,10 +82,6 @@ fn parse_ewma_factor(s: &str) -> Result<f64, String> {
 /// split and which CPUs they should be assigned to.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Deprecated, noop, use RUST_LOG or --log-level instead.
-    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
-
     /// Specify the logging level. Accepts rust's envfilter syntax for modular
     /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
     #[clap(long, default_value = "info")]
@@ -123,25 +119,6 @@ struct Opts {
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     exiting_task_workaround: bool,
 
-    /// Disable SCX cgroup callbacks (for when CPU cgroup controller is disabled).
-    /// Uses tracepoints and cgroup iteration instead.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    cpu_controller_disabled: bool,
-
-    /// Reject tasks with multi-CPU pinning that doesn't cover the entire cell.
-    /// By default, these tasks are allowed but may have degraded performance.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    reject_multicpu_pinning: bool,
-
-    /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
-    /// to use LLC-aware scheduling.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_llc_awareness: bool,
-
-    /// Deprecated, noop. LLC-aware mode always scans sibling LLC DSQs.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_work_stealing: bool,
-
     /// Parent cgroup path whose direct children become cells.
     /// Scheduler startup requires this unless running in --monitor or --version mode.
     /// Example: --cell-parent-cgroup /workloads
@@ -164,18 +141,9 @@ struct Opts {
     #[clap(long, default_value_t = 0)]
     cell0_min_cpus: usize,
 
-    /// Enable CPU borrowing: cells can use idle CPUs from other cells.
-    /// Only meaningful with --cell-parent-cgroup and multiple cells.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_borrowing: bool,
-
     /// Use lockless scx_bpf_dsq_peek() instead of the default iterator-based peek.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     use_lockless_peek: bool,
-
-    /// Enable demand-based CPU rebalancing between cells.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_rebalancing: bool,
 
     /// Utilization spread (max - min) that triggers rebalancing (default: 20%)
     #[clap(long, default_value = "20.0")]
@@ -188,17 +156,6 @@ struct Opts {
     /// EWMA smoothing factor for demand tracking. Higher = more responsive (default: 0.3)
     #[clap(long, default_value = "0.3", value_parser = parse_ewma_factor)]
     demand_smoothing: f64,
-
-    /// Dynamically reassign multi-CPU affinitized tasks on each wake: prefer an
-    /// idle CPU within the mask, fall back to random. Redistribute at enqueue if
-    /// the target CPU already has queued work.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    dynamic_affinity_cpu_selection: bool,
-
-    /// Enable slice shrinking for CPU-pinned tasks. Uses per-task EWMA
-    /// runtime to shrink the running task's slice when pinned waiters are queued.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_slice_shrinking: bool,
 
     /// Upper bound for shrink limit (us). Used when the proportional
     /// value (avg_runtime * K) exceeds it.
@@ -250,10 +207,6 @@ struct Scheduler<'a> {
     last_cpuset_seq: u32,
     /// Cell manager for the cgroup passed via --cell-parent-cgroup.
     cell_manager: CellManager,
-    /// Whether CPU borrowing is enabled
-    enable_borrowing: bool,
-    /// Whether demand-based rebalancing is enabled
-    enable_rebalancing: bool,
     /// Utilization spread threshold for triggering rebalancing
     rebalance_threshold: f64,
     /// Minimum duration between rebalancing events
@@ -281,7 +234,6 @@ struct DistributionStats {
     borrowed_pct: f64,
     affn_viol_pct: f64,
     steal_pct: f64,
-    pin_skip_pct: f64,
 
     // for formatting
     global_queue_decisions: u64,
@@ -303,7 +255,7 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
@@ -312,7 +264,6 @@ impl Display for DistributionStats {
             self.borrowed_pct,
             self.affn_viol_pct,
             self.steal_pct,
-            self.pin_skip_pct,
             width = descisions_width,
         )
     }
@@ -361,8 +312,6 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
         rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
-        rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
-        rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
 
         // Slice shrinking configuration
         if opts.slice_shrink_min_us >= opts.slice_shrink_max_us {
@@ -372,7 +321,6 @@ impl<'a> Scheduler<'a> {
                 opts.slice_shrink_max_us
             );
         }
-        rodata.enable_slice_shrinking = opts.enable_slice_shrinking;
         rodata.slice_shrink_max_ns = opts.slice_shrink_max_us * 1_000;
         // K=2: in the proportional region, a pinned task waits at most 2x its historical runtime
         rodata.slice_shrink_multiplier = 2;
@@ -383,13 +331,8 @@ impl<'a> Scheduler<'a> {
             rodata.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        rodata.reject_multicpu_pinning = opts.reject_multicpu_pinning;
-
-        // Set nr_llc in rodata
         rodata.nr_llc = nr_llc as u32;
-        rodata.enable_llc_awareness = opts.enable_llc_awareness;
 
-        rodata.enable_borrowing = opts.enable_borrowing;
         rodata.use_lockless_peek = opts.use_lockless_peek;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
@@ -472,8 +415,6 @@ impl<'a> Scheduler<'a> {
             last_configuration_seq: None,
             last_cpuset_seq: 0,
             cell_manager,
-            enable_borrowing: opts.enable_borrowing,
-            enable_rebalancing: opts.enable_rebalancing,
             rebalance_threshold: opts.rebalance_threshold,
             rebalance_cooldown: Duration::from_secs(opts.rebalance_cooldown_s),
             demand_smoothing: opts.demand_smoothing,
@@ -555,10 +496,7 @@ impl<'a> Scheduler<'a> {
             self.check_cpuset_changes()
                 .context("checking cpuset changes")?;
             self.collect_metrics().context("collecting metrics")?;
-
-            if self.enable_rebalancing {
-                self.maybe_rebalance().context("running rebalance check")?;
-            }
+            self.maybe_rebalance().context("running rebalance check")?;
         }
 
         drop(struct_ops);
@@ -626,10 +564,10 @@ impl<'a> Scheduler<'a> {
 
     /// Compute cell configuration from CellManager and apply it to BPF.
     ///
-    /// When rebalancing is enabled and there is existing utilization data,
-    /// uses demand-weighted CPU assignment instead of equal-weight. New cells
-    /// (listed in `new_cell_ids`) are seeded to the average smoothed_util of
-    /// existing cells so they start with a fair share rather than zero.
+    /// When existing utilization data is available, uses demand-weighted CPU
+    /// assignment instead of equal-weight. New cells (listed in `new_cell_ids`)
+    /// are seeded to the average smoothed_util of existing cells so they start
+    /// with a fair share rather than zero.
     ///
     /// Returns the CPU assignments for use with `format_cell_config`.
     fn compute_and_apply_cell_config(
@@ -648,48 +586,42 @@ impl<'a> Scheduler<'a> {
                 .chain(active_cell_ids.iter().copied())
                 .collect();
 
-            let cpu_assignments = if self.enable_rebalancing {
-                // Check if any existing (non-new) cell has utilization data
-                let new_set: HashSet<u32> = new_cell_ids.iter().copied().collect();
-                let existing_utils: Vec<f64> = all_cell_ids
+            // Check if any existing (non-new) cell has utilization data
+            let new_set: HashSet<u32> = new_cell_ids.iter().copied().collect();
+            let existing_utils: Vec<f64> = all_cell_ids
+                .iter()
+                .filter(|id| !new_set.contains(id))
+                .map(|&id| self.smoothed_util[id as usize])
+                .collect();
+
+            let has_data = existing_utils.iter().any(|&u| u > 0.0);
+
+            let cpu_assignments = if has_data {
+                // Seed new cells to the average utilization of existing cells
+                let avg_util: f64 =
+                    existing_utils.iter().sum::<f64>() / existing_utils.len().max(1) as f64;
+                for &id in new_cell_ids {
+                    self.smoothed_util[id as usize] = avg_util;
+                    info!(
+                        "Seeded new cell {} smoothed_util to average {:.1}%",
+                        id, avg_util
+                    );
+                }
+
+                // Build demand map from smoothed_util for all active cells
+                let cell_demands: HashMap<u32, f64> = all_cell_ids
                     .iter()
-                    .filter(|id| !new_set.contains(id))
-                    .map(|&id| self.smoothed_util[id as usize])
+                    .map(|&id| (id, self.smoothed_util[id as usize]))
                     .collect();
 
-                let has_data = existing_utils.iter().any(|&u| u > 0.0);
-
-                if has_data {
-                    // Seed new cells to the average utilization of existing cells
-                    let avg_util: f64 =
-                        existing_utils.iter().sum::<f64>() / existing_utils.len().max(1) as f64;
-                    for &id in new_cell_ids {
-                        self.smoothed_util[id as usize] = avg_util;
-                        info!(
-                            "Seeded new cell {} smoothed_util to average {:.1}%",
-                            id, avg_util
-                        );
-                    }
-
-                    // Build demand map from smoothed_util for all active cells
-                    let cell_demands: HashMap<u32, f64> = all_cell_ids
-                        .iter()
-                        .map(|&id| (id, self.smoothed_util[id as usize]))
-                        .collect();
-
-                    self.cell_manager
-                        .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
-                        .context("computing demand-weighted CPU assignments")?
-                } else {
-                    // No utilization data yet (e.g., initial startup) — equal weight
-                    self.cell_manager
-                        .compute_cpu_assignments(self.enable_borrowing)
-                        .context("computing equal-weight CPU assignments (no utilization data)")?
-                }
-            } else {
                 self.cell_manager
-                    .compute_cpu_assignments(self.enable_borrowing)
-                    .context("computing equal-weight CPU assignments (rebalancing disabled)")?
+                    .compute_demand_cpu_assignments(&cell_demands)
+                    .context("computing demand-weighted CPU assignments")?
+            } else {
+                // No utilization data yet (e.g., initial startup) — equal weight
+                self.cell_manager
+                    .compute_cpu_assignments()
+                    .context("computing equal-weight CPU assignments (no utilization data)")?
             };
 
             (self.cell_manager.get_cell_assignments(), cpu_assignments)
@@ -741,7 +673,7 @@ impl<'a> Scheduler<'a> {
         let (cell_assignments, cpu_assignments) = {
             let cpu_assignments = self
                 .cell_manager
-                .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
+                .compute_demand_cpu_assignments(&cell_demands)
                 .context("computing demand-weighted CPU assignments for rebalance")?;
 
             let changed = cpu_assignments.iter().any(|a| {
@@ -835,12 +767,10 @@ impl<'a> Scheduler<'a> {
 
             write_cpumask_to_config(&a.primary, &mut config.cpumasks[a.cell_id as usize].mask);
 
-            if let Some(ref borrowable) = a.borrowable {
-                write_cpumask_to_config(
-                    borrowable,
-                    &mut config.borrowable_cpumasks[a.cell_id as usize].mask,
-                );
-            }
+            write_cpumask_to_config(
+                &a.borrowable,
+                &mut config.borrowable_cpumasks[a.cell_id as usize].mask,
+            );
         }
         config.num_cells = max_cell_id;
 
@@ -872,7 +802,6 @@ impl<'a> Scheduler<'a> {
         scope_queue_decisions: u64,
         scope_affn_viols: u64,
         scope_steals: u64,
-        scope_pin_skips: u64,
     ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
@@ -903,12 +832,6 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_steals as f64) / (scope_queue_decisions as f64)
         };
 
-        let pin_skip_pct = if scope_queue_decisions == 0 {
-            0.0
-        } else {
-            100.0 * (scope_pin_skips as f64) / (scope_queue_decisions as f64)
-        };
-
         const EXPECTED_QUEUES: usize = 4;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
@@ -927,7 +850,6 @@ impl<'a> Scheduler<'a> {
             borrowed_pct: queue_pct[3],
             affn_viol_pct: affinity_violations_percent,
             steal_pct,
-            pin_skip_pct,
             global_queue_decisions,
         });
     }
@@ -960,12 +882,6 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_STEAL as usize])
             .sum::<u64>();
 
-        // Sum pin skips over all cells
-        let scope_pin_skips: u64 = cell_stats_delta
-            .iter()
-            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize])
-            .sum::<u64>();
-
         // Special case where the number of scope decisions == number global decisions
         let stats = self
             .calculate_distribution_stats(
@@ -974,7 +890,6 @@ impl<'a> Scheduler<'a> {
                 global_queue_decisions,
                 scope_affn_viols,
                 scope_steals,
-                scope_pin_skips,
             )
             .context("calculating global queue distribution stats")?;
 
@@ -1033,10 +948,6 @@ impl<'a> Scheduler<'a> {
             let scope_steals: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_STEAL as usize];
 
-            // Pin skips for this cell
-            let scope_pin_skips: u64 =
-                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize];
-
             let stats = self
                 .calculate_distribution_stats(
                     &queue_counts,
@@ -1044,7 +955,6 @@ impl<'a> Scheduler<'a> {
                     cell_queue_decisions,
                     scope_affn_viols,
                     scope_steals,
-                    scope_pin_skips,
                 )
                 .with_context(|| {
                     format!("calculating queue distribution stats for cell {}", cell)
@@ -1258,10 +1168,8 @@ impl<'a> Scheduler<'a> {
             let lent_pct = 100.0 * (delta_lent as f64) / (capacity as f64);
 
             // Update EWMA-smoothed utilization
-            if self.enable_rebalancing {
-                self.smoothed_util[cell] = self.demand_smoothing * util_pct
-                    + (1.0 - self.demand_smoothing) * self.smoothed_util[cell];
-            }
+            self.smoothed_util[cell] = self.demand_smoothing * util_pct
+                + (1.0 - self.demand_smoothing) * self.smoothed_util[cell];
 
             self.metrics
                 .cells
@@ -1270,13 +1178,11 @@ impl<'a> Scheduler<'a> {
                 .update_demand(util_pct, demand_borrow_pct, lent_pct);
 
             // Update smoothed_util_pct in metrics
-            if self.enable_rebalancing {
-                self.metrics
-                    .cells
-                    .entry(cell as u32)
-                    .or_default()
-                    .smoothed_util_pct = self.smoothed_util[cell];
-            }
+            self.metrics
+                .cells
+                .entry(cell as u32)
+                .or_default()
+                .smoothed_util_pct = self.smoothed_util[cell];
 
             global_running_delta = global_running_delta.saturating_add(delta_running);
             global_borrowed_delta = global_borrowed_delta.saturating_add(delta_borrowed);
@@ -1306,20 +1212,6 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    /// Write applied_cpuset_seq to BSS, closing the rejection-skip window.
-    fn update_applied_cpuset_seq(&mut self) {
-        unsafe {
-            let ptr = &mut self
-                .skel
-                .maps
-                .bss_data
-                .as_mut()
-                .expect("BUG: bss_data missing after scheduler load")
-                .applied_cpuset_seq as *mut u32;
-            std::ptr::write_volatile(ptr, self.last_cpuset_seq);
-        }
-    }
-
     /// Check if any cell's cpuset was modified and recompute if so.
     fn check_cpuset_changes(&mut self) -> Result<()> {
         let current_seq = unsafe {
@@ -1347,14 +1239,12 @@ impl<'a> Scheduler<'a> {
             .context("refreshing cell cpusets")?
         {
             // seq changed but no cpusets on our cells changed
-            self.update_applied_cpuset_seq();
             return Ok(());
         }
 
         let cpu_assignments = self
             .compute_and_apply_cell_config(&[])
             .context("recomputing cell configuration after cpuset change")?;
-        self.update_applied_cpuset_seq();
         info!(
             "Cpuset change detected, recomputed config: {}",
             self.cell_manager.format_cell_config(&cpu_assignments)
@@ -1502,10 +1392,6 @@ fn main(opts: Opts) -> Result<()> {
     {
         Ok(()) => {}
         Err(e) => eprintln!("failed to init logger: {}", e),
-    }
-
-    if opts.verbose > 0 {
-        warn!("Setting verbose via -v is deprecated and will be an error in future releases.");
     }
 
     debug!("opts={:?}", &opts);

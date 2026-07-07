@@ -205,12 +205,6 @@ create_cgroups() {
         sudo mkdir -p "$CGROUP_BASE"
     fi
 
-    # Enable CPU controller for children (required for sched_ext cgroup callbacks)
-    if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
-        log_info "Enabling CPU controller for $CGROUP_BASE children"
-        echo "+cpu" | sudo tee "$CGROUP_BASE/cgroup.subtree_control" > /dev/null
-    fi
-
     for i in $(seq 1 $NUM_CELLS); do
         cell_name="test_cell_${i}"
         cell_path="$CGROUP_BASE/$cell_name"
@@ -605,8 +599,8 @@ test_borrowing() {
     sudo mkdir -p "$busy_path"
     sudo mkdir -p "$idle_path"
 
-    # Start scheduler with borrowing
-    start_scheduler --enable-borrowing
+    # Start scheduler
+    start_scheduler
 
     # Use more workers than the busy cell has CPUs to force borrowing
     local workers=$(nproc)
@@ -739,12 +733,10 @@ test_cpu_rebalancing_demand() {
     sudo mkdir -p "$busy_path"
     sudo mkdir -p "$idle_path"
 
-    # Start scheduler with borrowing and rebalancing enabled
-    log_info "Starting scx_mitosis with --enable-borrowing --enable-rebalancing..."
+    # Start scheduler with short rebalance intervals
+    log_info "Starting scx_mitosis with short rebalance intervals..."
     sudo "$SCHEDULER_BIN" \
         --cell-parent-cgroup /test.slice \
-        --enable-borrowing \
-        --enable-rebalancing \
         --rebalance-cooldown-s 3 \
         --rebalance-threshold 10 \
         > "$LOG_FILE" 2>&1 &
@@ -1109,12 +1101,10 @@ test_new_cell_gets_fair_share() {
     sudo mkdir -p "$busy_path"
     sudo mkdir -p "$idle_path"
 
-    # Start scheduler with borrowing and rebalancing enabled
-    log_info "Starting scx_mitosis with --enable-borrowing --enable-rebalancing..."
+    # Start scheduler with short rebalance intervals
+    log_info "Starting scx_mitosis with short rebalance intervals..."
     sudo "$SCHEDULER_BIN" \
         --cell-parent-cgroup /test.slice \
-        --enable-borrowing \
-        --enable-rebalancing \
         --rebalance-cooldown-s 3 \
         --rebalance-threshold 10 \
         > "$LOG_FILE" 2>&1 &

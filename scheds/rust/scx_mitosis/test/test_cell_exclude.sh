@@ -66,9 +66,6 @@ fi
 
 log_info "Preparing cgroup hierarchy under $CGROUP_BASE"
 sudo mkdir -p "$CGROUP_BASE"
-if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
-    echo "+cpu" | sudo tee "$CGROUP_BASE/cgroup.subtree_control" > /dev/null
-fi
 sudo mkdir -p "$CGROUP_BASE/$INCLUDED_NAME" "$CGROUP_BASE/$EXCLUDED_NAME"
 
 log_info "Starting scx_mitosis with --cell-exclude $EXCLUDED_NAME"
