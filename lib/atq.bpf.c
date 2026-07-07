@@ -130,7 +130,8 @@ int scx_atq_insert(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 }
 
 static __always_inline
-int scx_atq_remove_internal(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+int scx_atq_remove_internal(scx_atq_t *atq, scx_task_common __arg_arena *taskc,
+			    bool dead)
 {
 	int ret;
 
@@ -147,6 +148,7 @@ int scx_atq_remove_internal(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 	if (ret)
 		return ret;
 
+	(void)dead;
 	taskc->atq = NULL;
 
 	atq->size -= 1;
@@ -157,7 +159,7 @@ int scx_atq_remove_internal(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 __hidden
 int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
-	return scx_atq_remove_internal(atq, taskc);
+	return scx_atq_remove_internal(atq, taskc, false);
 }
 
 __hidden
@@ -169,7 +171,7 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 	if (ret)
 		return ret;
 
-	ret = scx_atq_remove_internal(atq, taskc);
+	ret = scx_atq_remove_internal(atq, taskc, false);
 
 	scx_atq_unlock(atq);
 
