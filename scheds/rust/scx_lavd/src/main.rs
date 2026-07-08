@@ -486,6 +486,16 @@ impl<'a> Scheduler<'a> {
 
         // Initialize CPU topology with CLI arguments
         let order = CpuOrder::new(opts.topology.as_ref(), opts.no_use_em).unwrap();
+        if opts.enable_cpu_bw {
+            let nr_llcs = u32::try_from(order.nr_llcs).context("Too many LLC domains")?;
+            let max_entries = skel
+                .maps
+                .cbw_cgrp_map
+                .max_entries()
+                .checked_mul(nr_llcs)
+                .context("LLC context map is too large")?;
+            skel.maps.cbw_cgrp_llc_map.set_max_entries(max_entries)?;
+        }
         Self::init_cpus(&mut skel, &order);
         Self::init_cpdoms(&mut skel, &order);
 
