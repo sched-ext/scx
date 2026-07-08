@@ -868,8 +868,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			if (enable_cpu_bw &&
 			    (cgroup_throttled(p, ictx.taskc, false) == -EAGAIN))
 				goto out;
-			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
-			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
+			scx_bpf_task_set_dsq_vtime(p, calc_when_to_run(p, ictx.taskc));
+			scx_bpf_task_set_slice(p, LAVD_SLICE_MAX_NS_DFL);
 			account_queued_load(ictx.taskc, cpuc->cpdom_id);
 			account_queued_load_pcpu(ictx.taskc,
 						 get_primary_cpu(cpuc->cpu_id));
@@ -911,9 +911,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		else
 			reset_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
 
-		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+		scx_bpf_task_set_dsq_vtime(p, calc_when_to_run(p, taskc));
 	}
-	p->scx.slice = LAVD_SLICE_MIN_NS_DFL;
+	scx_bpf_task_set_slice(p, LAVD_SLICE_MIN_NS_DFL);
 
 	/*
 	 * Find a proper DSQ for the task, which is either the task's
@@ -1184,7 +1184,7 @@ void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx
 	/*
 	 * Refill the time slice.
 	 */
-	prev->scx.slice = calc_time_slice(taskc_prev, cpuc);
+	scx_bpf_task_set_slice(prev, calc_time_slice(taskc_prev, cpuc));
 
 	/*
 	 * Reset prev task's lock and futex boost count
@@ -1582,13 +1582,13 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * is not turned on.
 	 */
 	if (p->scx.slice == SCX_SLICE_DFL)
-		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
+		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cur_logical_clk));
 
 	/*
 	 * Calculate the task's time slice here,
 	 * as it depends on the system load.
 	 */
-	p->scx.slice = calc_time_slice(taskc, cpuc);
+	scx_bpf_task_set_slice(p, calc_time_slice(taskc, cpuc));
 
 	/*
 	 * Update the current logical clock.

@@ -322,7 +322,7 @@ void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now)
 		new_slice_wall = time_delta(ub_wall, duration_wall);
 	}
 
-	p->scx.slice = new_slice_wall;
+	scx_bpf_task_set_slice(p, new_slice_wall);
 	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
 	cpuc->nr_preempt++;
 }
@@ -331,7 +331,7 @@ __hidden
 void preempt_at_tick(struct task_struct *p, struct cpu_ctx *cpuc)
 {
 	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
-	p->scx.slice = 0;
+	scx_bpf_task_set_slice(p, 0);
 
 	cpuc->nr_preempt++;
 }

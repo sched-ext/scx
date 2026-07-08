@@ -59,6 +59,6 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
 		return;
 
-	prev->scx.slice = task_slice_ns(lookup_task_ctx(prev));
+	scx_bpf_task_set_slice(prev, task_slice_ns(lookup_task_ctx(prev)));
 	return;
 }

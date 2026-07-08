@@ -779,7 +779,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	 * an entire day until it's caught up to the other tasks' vtimes.
 	 */
 	if (time_before(p->scx.dsq_vtime, min_vruntime)) {
-		p->scx.dsq_vtime = min_vruntime;
+		scx_bpf_task_set_dsq_vtime(p, min_vruntime);
 		taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, enq_flags);
 		stat_add(RUSTY_STAT_DL_CLAMP, 1);
 	} else {
@@ -844,7 +844,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		taskc->domc = new_domc;
 
 		cast_kern(new_domc);
-		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
+		scx_bpf_task_set_dsq_vtime(p, dom_min_vruntime(new_domc));
 		taskc->deadline = p->scx.dsq_vtime +
 				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
 		bpf_cpumask_and(t_cpumask, cast_mask(d_cpumask), p->cpus_ptr);
@@ -1519,7 +1519,7 @@ static void stopping_update_vtime(struct task_struct *p,
 	taskc->sum_runtime += delta;
 	taskc->avg_runtime = calc_avg(taskc->avg_runtime, taskc->sum_runtime);
 
-	p->scx.dsq_vtime += scale_inverse_fair(delta, p->scx.weight);
+	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (scale_inverse_fair(delta, p->scx.weight)));
 	taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, 0);
 }
 

@@ -945,7 +945,7 @@ static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 	u64 vtime_min = vtime_now - vsleep_max;
 
 	if (time_before(p->scx.dsq_vtime, vtime_min))
-		p->scx.dsq_vtime = vtime_min;
+		scx_bpf_task_set_dsq_vtime(p, vtime_min);
 
 	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
 }
@@ -1133,7 +1133,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
 
 		if (is_smt_contended(cpu) || (is_cpu_busy(cpu) && cpu_busy))
-			p->scx.slice = 0;
+			scx_bpf_task_set_slice(p, 0);
 	}
 }
 
@@ -1290,7 +1290,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * is on the primary domain.
 	 */
 	if (prev && keep_running(prev, cpu))
-		prev->scx.slice = task_slice(prev);
+		scx_bpf_task_set_slice(prev, task_slice(prev));
 }
 
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
@@ -1396,7 +1396,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 * Cap the maximum accumulated time since last sleep to @slice_lag,
 	 * to prevent starving CPU-intensive tasks.
 	 */
-	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
+	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (scale_by_task_weight_inverse(p, slice)));
 	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
 
 	/*
@@ -1407,7 +1407,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(cosmos_enable, struct task_struct *p)
 {
-	p->scx.dsq_vtime = vtime_now;
+	scx_bpf_task_set_dsq_vtime(p, vtime_now);
 }
 
 s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,

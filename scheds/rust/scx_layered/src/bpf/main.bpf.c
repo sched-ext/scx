@@ -1660,7 +1660,7 @@ bool maybe_update_task_llc(struct task_struct *p, struct task_ctx *taskc, s32 ne
 		return false;
 
 	vtime_delta = p->scx.dsq_vtime - prev_llcc->vtime_now[layer_id];
-	p->scx.dsq_vtime = new_llcc->vtime_now[layer_id] + vtime_delta;
+	scx_bpf_task_set_dsq_vtime(p, new_llcc->vtime_now[layer_id] + vtime_delta);
 
 	taskc->llc_id = new_llc_id;
 	return true;
@@ -2319,7 +2319,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		 */
 		u64 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-			p->scx.slice = layer->slice_ns;
+			scx_bpf_task_set_slice(p, layer->slice_ns);
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
 			return true;
 		}
@@ -2343,7 +2343,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		}
 
 		if (has_idle) {
-			p->scx.slice = layer->slice_ns;
+			scx_bpf_task_set_slice(p, layer->slice_ns);
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
 			return true;
 		}
@@ -2724,7 +2724,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		if (is_task_layer_hint_stale(prev, prev_taskc))
 			return;
-		prev->scx.slice = prev_layer->slice_ns;
+		scx_bpf_task_set_slice(prev, prev_layer->slice_ns);
 		return;
 	}
 
@@ -2873,7 +2873,7 @@ replenish:
          * for layer membership change and subsequent CPU selection.
          */
         if (prev_taskc && prev_layer && !is_task_layer_hint_stale(prev, prev_taskc))
-		prev->scx.slice = prev_layer->slice_ns;
+		scx_bpf_task_set_slice(prev, prev_layer->slice_ns);
 }
 
 /*
@@ -3292,7 +3292,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	 * Revisit if high frequency dynamic layer switching
 	 * needs to be supported.
 	 */
-	p->scx.dsq_vtime = llcc->vtime_now[layer_id];
+	scx_bpf_task_set_dsq_vtime(p, llcc->vtime_now[layer_id]);
 }
 
 static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc, u64 now)
@@ -3706,7 +3706,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	if (cpuc->yielding && runtime < task_layer->slice_ns)
 		runtime = task_layer->slice_ns;
 
-	p->scx.dsq_vtime += runtime * 100 / p->scx.weight;
+	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (runtime * 100 / p->scx.weight));
 }
 
 bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct *to)
@@ -3729,10 +3729,10 @@ bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct 
 	}
 
 	if (from->scx.slice > layer->yield_step_ns) {
-		from->scx.slice -= layer->yield_step_ns;
+		scx_bpf_task_set_slice(from, from->scx.slice - (layer->yield_step_ns));
 		lstat_inc(LSTAT_YIELD_IGNORE, layer, cpuc);
 	} else {
-		from->scx.slice = 0;
+		scx_bpf_task_set_slice(from, 0);
 		cpuc->yielding = true;
 	}
 
