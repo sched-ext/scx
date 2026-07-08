@@ -68,6 +68,18 @@ UEI_DEFINE(uei);
 #define CAKE_WAKE_SYNC    bpf_core_enum_value(enum scx_wake_flags,   SCX_WAKE_SYNC)
 
 /*
+ * task_struct::policy's SCHED_* values are plain uapi macros, not a BTF enum
+ * (bpf_core_enum_value has nothing to hook here) -- guarded local defines,
+ * same convention scx_pandemonium already uses for this exact check.
+ */
+#ifndef SCHED_FIFO
+#define SCHED_FIFO 1
+#endif
+#ifndef SCHED_RR
+#define SCHED_RR   2
+#endif
+
+/*
  * All mutable hot state in ONE BSS struct built from 128-byte-stride slots;
  * only .word of each slot is ever accessed. This replaces the former
  * __attribute__((aligned(64))) uses with pure layout: any two accessed words
@@ -254,12 +266,44 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		if (bpf_cpumask_test_cpu(waker, p->cpus_ptr) &&
 		    !scx_bpf_dsq_nr_queued(CAKE_DSQ_LOCAL_ON | (u32)waker) &&
 		    !scx_bpf_dsq_nr_queued((u64)(u32)waker)) {
-			if (wake_flags & CAKE_WAKE_SYNC) {
+			/*
+			 * M5 (2026-07-08, Kovaaks latency journal): this
+			 * block is gated on the WAKER's QUEUES being empty,
+			 * never on WHO is currently running there. A LOCAL_ON
+			 * insert to a non-idle CPU forces an unconditional
+			 * preempt via sched_ext's local-dispatch semantics --
+			 * no floor, no margin. M1-M4 each tried a DURATION-
+			 * based discriminator (young vs old curr) at this or
+			 * the enqueue gates and all failed: GameThread/
+			 * RenderThread's natural per-wake burst (tens to ~100us)
+			 * is inherently shorter than any reasonable slice-
+			 * scaled floor, so a duration-only gate can never tell
+			 * "short because throughput handoff spinner" (the
+			 * futex/schbench shape this fast path exists for) apart
+			 * from "short because latency-critical desktop/game
+			 * thread". Switch to an IDENTITY discriminator instead:
+			 * a genuine futex/schbench handoff is SAME-PROCESS (two
+			 * threads of one program trading a lock); a desktop
+			 * compositor thread (kwin's DP-2) preempting a game's
+			 * own RenderThread -- plausibly woken BY RenderThread
+			 * itself signalling "frame ready" -- is CROSS-process.
+			 * Reserve this fast, ungated path for same-process
+			 * wakes; a cross-process wakee falls through to its own
+			 * natural dfl placement (`return cpu`) instead of being
+			 * forced onto the waker's (possibly game-owned) CPU.
+			 * See kovaaks_input_latency_journal_2026-07-07.md.
+			 */
+			bool same_proc = p->tgid ==
+				bpf_get_current_task_btf()->tgid;
+
+			if (same_proc && (wake_flags & CAKE_WAKE_SYNC)) {
 				scx_bpf_dsq_insert(p,
 						   CAKE_DSQ_LOCAL_ON | (u32)waker,
 						   SLICE_NS, 0);
 				return waker;
 			}
+			if (!same_proc)
+				return cpu;
 
 			/*
 			 * Plain-wake convergence (EEVDF's saturated shape:
@@ -446,19 +490,32 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 		}
 
-		if (!scx_bpf_dsq_nr_queued((u64)(u32)tcpu)) {
+		/*
+		 * M8: an RT-owned CPU is NOT "free or imminently free" the
+		 * way idle is -- it may burst again (compositor/audio RT
+		 * threads), and the kernel preempts SCX unconditionally for
+		 * it regardless of anything cake does. CFS/EEVDF discounts a
+		 * CPU's usable capacity by its RT/DL load average
+		 * (scale_rt_capacity(), fair.c) before placing a task there;
+		 * sched_ext's idle tracking has no equivalent, so approximate
+		 * it here: don't home-route onto an RT-owned CPU, route to
+		 * the global queue instead.
+		 */
+		bool rt_owned = curr && (curr->policy == SCHED_FIFO ||
+					 curr->policy == SCHED_RR);
+
+		if (!rt_owned && !scx_bpf_dsq_nr_queued((u64)(u32)tcpu)) {
 			u64 cv = curr ? curr->scx.dsq_vtime : 0;
 
 			if (!cv) {
 				/*
-				 * Idle-owned (or RT-owned) empty home: the
-				 * CPU is free or imminently free — the best
-				 * claim there is. Sending this case global
-				 * was the pipe leak: a wake racing its
-				 * partner's idle transition took a WAKE_DSQ
-				 * insert + pick_idle + kick detour on every
-				 * message. No preempt exists to fire (live
-				 * stays 0).
+				 * Idle-owned empty home: the CPU is free or
+				 * imminently free — the best claim there is.
+				 * Sending this case global was the pipe leak:
+				 * a wake racing its partner's idle transition
+				 * took a WAKE_DSQ insert + pick_idle + kick
+				 * detour on every message. No preempt exists
+				 * to fire (live stays 0).
 				 */
 				home = true;
 			} else {
@@ -534,15 +591,19 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 			 * STALE curr vtime; this one sits atop the correct
 			 * live charge.
 			 */
+			/* M6: same-process gate (see M5) applied to the home
+			 * preempt kick too -- a cross-process wakee no longer
+			 * flushes curr via the young/margin duration gate. */
 			if (live && ran < (SLICE_NS >> 5) &&
-			    time_before(vt + (SLICE_NS >> 1), live)) {
+			    time_before(vt + (SLICE_NS >> 1), live) &&
+			    p->tgid == curr->tgid) {
 				cake.pmark[(u32)tcpu & (MAX_CPUS - 1)].word = 1;
 				scx_bpf_kick_cpu(tcpu, CAKE_KICK_PREEMPT);
 				return;
 			}
 			if (local && !live)
 				return;
-		} else if (!scx_bpf_dsq_nr_queued((u64)(u32)tcpu)) {
+		} else if (!rt_owned && !scx_bpf_dsq_nr_queued((u64)(u32)tcpu)) {
 			/*
 			 * Peer wake, empty home: queue at prev anyway —
 			 * WARM, no preempt (it fails eligibility against a
@@ -764,7 +825,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	if (prev && (prev->scx.flags & CAKE_TASK_QUEUED))
-		prev->scx.slice = SLICE_NS;
+		scx_bpf_task_set_slice(prev, SLICE_NS);
 }
 
 /*
@@ -803,6 +864,18 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 		   cake.sum[cpu & (MAX_CPUS - 1)].word;
 	u32 idx = (u32)(p->static_prio - 100) & 63;
 
+	/*
+	 * Direct write, not scx_bpf_task_set_dsq_vtime(): this fires on every
+	 * context switch out, and the compat kfunc's sub-scheduler authority
+	 * check (scx_prog_sched()/scx_task_on_sched(), see internal.h) costs a
+	 * measured +28-36% here on kernels with CONFIG_EXT_SUB_SCHED=y (three
+	 * independent A/Bs, forensically verified against BPF prog id/loaded_at
+	 * to rule out stale-measurement contamination, 2026-07-08). cake is a
+	 * flat root scheduler that will never have sub-schedulers to authorize
+	 * against, so the check is pure overhead here. Still deprecated (emits
+	 * a kernel log warning, not a functional break) -- acceptable trade for
+	 * the hottest per-switch callback in the scheduler.
+	 */
 	p->scx.dsq_vtime += (used * recip_weight[idx]) >> 20;
 }
 
@@ -812,7 +885,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
  */
 void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
 {
-	p->scx.dsq_vtime = cake.frontier.word;
+	scx_bpf_task_set_dsq_vtime(p, cake.frontier.word);
 }
 
 /*
