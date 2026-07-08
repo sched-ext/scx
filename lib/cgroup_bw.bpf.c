@@ -289,7 +289,7 @@ struct {
 struct cgroup_llc_id {
 	u64		cgrp_id;
 	int		llc_id;
-};
+} __attribute__((packed));
 
 struct cbw_llc_entry {
 	u64	llcx;
