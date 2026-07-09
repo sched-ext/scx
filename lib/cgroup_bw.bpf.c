@@ -1101,9 +1101,6 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	struct cgroup *parent;
 	u64 cgrp_id;
 
-	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
-		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
-
 	cgrp_id = cgroup_get_id(cgrp);
 
 	/*
@@ -1222,8 +1219,6 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	int ret = 0;
 	u64 cgrp_id;
 
-	cbw_dbg_cgrp();
-
 	/*
 	 * A cgroup can exit when there are exiting tasks (TASK_DEAD) under it,
 	 * because the kernel does not count them as living tasks. So, care
@@ -1267,8 +1262,6 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	u64 cgx_raw, cur_cgx_raw;
 	struct cgroup_subsys_state *start_css, *pos;
 	int ret = 0;
-
-	cbw_dbg_cgrp();
 
 	/* Update the cgroup's bandwidth. */
 	cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
@@ -1466,9 +1459,6 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		
 		/* Update the previous level. */
 		prev_level = cur_level;
-
-		cbw_dbg("cgid%llu -- rt_llcx: %lld -- runtime_total_sloppy: %lld",
-			cur_cgx->id, rt_llcx, cur_cgx->runtime_total_sloppy);
 	}
 	bpf_rcu_read_unlock();
 
@@ -1633,10 +1623,7 @@ int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 	} else {
 		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
 		if (!cgx_raw) {
-			/*
-			 * The CPU controller is not enabled for this cgroup.
-			 */
-			cbw_dbg("Failed to lookup a cgroup ctx: %llu", cgrp_id);
+			/* The CPU controller is not enabled for this cgroup. */
 			return -ESRCH;
 		}
 		if (taskc)
@@ -1784,9 +1771,6 @@ accounting_out:
 	 * bandwidth correct.
 	 */
 	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
-
-	cbw_dbg("  cgrp_id: %llu -- llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
-		cgrp_id, llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
 	return 0;
 }
 
@@ -1899,7 +1883,6 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 __hidden
 int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, u64 cgrp_id)
 {
-	cbw_dbg(" [%s/%d]", p->comm, p->pid);
 	return cbw_put_aside(ctx, vtime, cgrp_id);
 }
 
@@ -2176,7 +2159,7 @@ static
 int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
 	struct cgroup *root_cgrp;
-	u64 now, next_interval = CBW_ACCOUNTING_PERIOD_MAX;
+	u64 next_interval = CBW_ACCOUNTING_PERIOD_MAX;
 	int ret;
 
 	/*
@@ -2192,9 +2175,6 @@ int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 
 	if (unlikely(cbw_top_half_running()))
 		goto release_out;
-
-	now = scx_bpf_now();
-	cbw_dbg("at %llu", now);
 
 	cbw_update_runtime_total_sloppy(root_cgrp);
 	next_interval = cbw_throttle_cgroups(root_cgrp);
@@ -2234,7 +2214,6 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	now = scx_bpf_now();
 	cbw_top_half_begin();
-	cbw_dbg("at %llu", now);
 
 	/*
 	 * Update the runtime total before replenishing budgets.
@@ -2328,7 +2307,6 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * the burst time. However, relaxing some accuracy in burst time
 	 * calculation has more benefits than drawbacks.
 	 */
-	cbw_dbg("Start replenish %llu cgroups.", cbw_nr_cgroups);
 	nr_throttled = 0;
 	bpf_for(i, 0, cbw_nr_cgroups) {
 		ids = MEMBER_VPTR(cbw_cgroup_ids, [i]);
@@ -2477,7 +2455,6 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
 		scx_atq_task_drop(taskc);
-		cbw_dbg("cgid%llu", cgx->id);
 	}
 
 	return i;
@@ -2498,7 +2475,6 @@ int cbw_reenqueue_cgroup(scx_cgroup_ctx_t *cgx, u64 cgrp_id, u64 nuance)
 	 */
 	if (!cgx->has_llcx)
 		return false;
-	cbw_dbg("cgid%llu", cgrp_id);
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		idx = (nuance + i) % TOPO_NR(LLC);
@@ -2586,7 +2562,6 @@ int scx_cgroup_bw_reenqueue(void)
 	 * Note that we intentionally ignore the error to reenqueue all the
 	 * tasks, ensuring it always returns 0.
 	 */
-	cbw_dbg();
 	nuance = bpf_get_prandom_u32();
 	nr_tcgs = backlog_stat.nr_throttled_cgroups;
 	bpf_for(i, 0, nr_tcgs) {
