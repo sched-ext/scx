@@ -208,6 +208,10 @@ struct Opts {
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     no_deferred_wakeup: bool,
 
+    /// Enqueue blocked tasks as proxy donors.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    proxy_exec: bool,
+
     /// Enable high-resolution timer preemption.
     ///
     /// By default, the scheduler preempts tasks that exceed their time slice, measuring the time
@@ -670,6 +674,11 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+            | if opts.proxy_exec {
+                *compat::SCX_OPS_ENQ_BLOCKED
+            } else {
+                0
+            }
             | if numa_enabled {
                 *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
             } else {
@@ -991,6 +1000,7 @@ impl<'a> Scheduler<'a> {
             nr_event_dispatches: bss_data.nr_event_dispatches,
             nr_ev_sticky_dispatches: bss_data.nr_ev_sticky_dispatches,
             nr_gpu_dispatches: bss_data.nr_gpu_dispatches,
+            nr_proxy_dispatches: bss_data.nr_proxy_dispatches,
         }
     }
 

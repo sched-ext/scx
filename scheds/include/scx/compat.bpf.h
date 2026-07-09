@@ -97,7 +97,6 @@ int bpf_cpumask_populate(struct cpumask *dst, void *src, size_t src__sz) __ksym 
  * The kfunc exists on earlier kernels but its lockless implementation could
  * return stale task pointers. Require kernel version >= 7.1.0 before calling
  * it; otherwise fall through to the bpf_iter_scx_dsq fallback below.
- *
  */
 static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
 {
@@ -111,6 +110,49 @@ static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
 		p = bpf_iter_scx_dsq_next(&it);
 	bpf_iter_scx_dsq_destroy(&it);
 	return p;
+}
+
+/*
+ * v7.1: scx_bpf_sub_dispatch() for sub-sched dispatch. Preserve until
+ * we drop the compat layer for older kernels that lack the kfunc.
+ */
+bool scx_bpf_sub_dispatch___compat(u64 cgroup_id) __ksym __weak;
+
+static inline bool __COMPAT_scx_bpf_sub_dispatch(u64 cgroup_id)
+{
+	if (bpf_ksym_exists(scx_bpf_sub_dispatch___compat))
+		return scx_bpf_sub_dispatch___compat(cgroup_id);
+	return false;
+}
+
+/*
+ * v7.2: scx_bpf_cid_override() for explicit cpu->cid mapping. Ignore if
+ * missing.
+ */
+void scx_bpf_cid_override___compat(const s32 *cpu_to_cid, u32 cpu_to_cid__sz) __ksym __weak;
+
+static inline void scx_bpf_cid_override(const s32 *cpu_to_cid, u32 cpu_to_cid__sz)
+{
+	if (bpf_ksym_exists(scx_bpf_cid_override___compat))
+		return scx_bpf_cid_override___compat(cpu_to_cid, cpu_to_cid__sz);
+}
+
+/*
+ * v7.3: scx_bpf_task_proxy_cpu() and scx_bpf_task_proxy_cid() for querying
+ * the next proxy execution destination. Return -EOPNOTSUPP if unavailable.
+ */
+static inline s32 __COMPAT_scx_bpf_task_proxy_cpu(struct task_struct *p)
+{
+	if (bpf_ksym_exists(scx_bpf_task_proxy_cpu))
+		return scx_bpf_task_proxy_cpu(p);
+	return -EOPNOTSUPP;
+}
+
+static inline s32 __COMPAT_scx_bpf_task_proxy_cid(struct task_struct *p)
+{
+	if (bpf_ksym_exists(scx_bpf_task_proxy_cid))
+		return scx_bpf_task_proxy_cid(p);
+	return -EOPNOTSUPP;
 }
 
 /**
@@ -133,7 +175,7 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 	 * We should temporarily suspend the macro expansion of
 	 * 'SCX_ENQ_CPU_SELECTED'. This avoids 'SCX_ENQ_CPU_SELECTED' being
 	 * rewritten to '__SCX_ENQ_CPU_SELECTED' when 'SCX_ENQ_CPU_SELECTED'
-	 * is defined as a relocatable enum in enums.autogen.bpf.h.
+	 * is defined in 'scripts/gen_enums.py'.
 	 */
 #pragma push_macro("SCX_ENQ_CPU_SELECTED")
 #undef SCX_ENQ_CPU_SELECTED
@@ -415,12 +457,26 @@ static inline void scx_bpf_dsq_reenq(u64 dsq_id, u64 reenq_flags)
 }
 
 /*
- * Define sched_ext_ops. This may be expanded to define multiple variants for
- * backward compatibility. See compat.h::SCX_OPS_LOAD/ATTACH().
+ * Define sched_ext_ops. See compat.h::SCX_OPS_OPEN() for how backward
+ * compatibility is handled (this macro can be expanded to emit multiple
+ * variants for incompatible op changes; SCX_OPS_OPEN() handles purely
+ * additive changes at load time).
  */
 #define SCX_OPS_DEFINE(__name, ...)						\
 	SEC(".struct_ops.link")							\
 	struct sched_ext_ops __name = {						\
+		__VA_ARGS__,							\
+	};
+
+/*
+ * Define a cid-form sched_ext_ops. Programs targeting this struct_ops type
+ * use cid-form callback signatures (select_cid, set_cmask, cid_online/offline,
+ * dispatch with cid arg, etc.) and may only call the cid-form scx_bpf_*
+ * kfuncs (kick_cid, task_cid, this_cid, ...).
+ */
+#define SCX_OPS_CID_DEFINE(__name, ...)						\
+	SEC(".struct_ops.link")							\
+	struct sched_ext_ops_cid __name = {					\
 		__VA_ARGS__,							\
 	};
 
