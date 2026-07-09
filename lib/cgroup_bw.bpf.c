@@ -743,11 +743,20 @@ scx_cgroup_ctx_t *cbw_get_cgroup_ctx(struct cgroup *cgrp)
 
 long cbw_del_cgroup_ctx(u64 cgrp_id)
 {
+	/*
+	 * Resolve the context before removing the map entry; the lookup
+	 * can no longer find it afterwards.
+	 */
 	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
 
+	/*
+	 * Remove the map entry first to cut the future lookup;
+	 * then, free the cgroup context.
+	 */
+	long ret = bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
 	if (cgx)
 		cbw_free_cgx(cgx);
-	return bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
+	return ret;
 }
 
 static
