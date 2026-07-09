@@ -1627,19 +1627,23 @@ int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 	if (unlikely(cgrp_id == 0))
 		return 0;
 
-	if (taskc && taskc->cgx_raw) {
-		cgx_raw = taskc->cgx_raw;
-	} else {
+	/*
+	 * Validate that the cached context still belongs to this cgroup; a
+	 * recycled cgx_raw could otherwise resolve another cgroup's throttle
+	 * state (ABA). Re-resolve on a cache miss or an id mismatch.
+	 */
+	cgx = taskc ? (scx_cgroup_ctx_t *)taskc->cgx_raw : NULL;
+	if (!cgx || cgx->id != cgrp_id) {
 		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
 		if (!cgx_raw) {
 			/* The CPU controller is not enabled for this cgroup. */
 			return -ESRCH;
 		}
+		cgx = (scx_cgroup_ctx_t *)cgx_raw;
 		if (taskc)
 			taskc->cgx_raw = cgx_raw;
 	}
 
-	cgx = (scx_cgroup_ctx_t *)cgx_raw;
 	if (READ_ONCE(cgx->is_throttled)) {
 		dbg_cgx(cgx, "throttled: ");
 		return -EAGAIN;
@@ -1720,17 +1724,18 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 	}
 
 	/*
-	 * Ensure cgx_raw is cached; populate it on the first call.
+	 * Ensure cgx_raw is cached and still belongs to this cgroup; a
+	 * recycled cgx_raw could otherwise attribute accounting to the wrong
+	 * cgroup (ABA). Re-resolve on a cache miss or an id mismatch.
 	 */
-	if (taskc->cgx_raw) {
-		cgx_raw = taskc->cgx_raw;
-	} else {
+	cgx = (scx_cgroup_ctx_t *)taskc->cgx_raw;
+	if (!cgx || cgx->id != cgrp_id) {
 		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
 		if (!cgx_raw)
 			return 0;
+		cgx = (scx_cgroup_ctx_t *)cgx_raw;
 		taskc->cgx_raw = cgx_raw;
 	}
-	cgx = (scx_cgroup_ctx_t *)cgx_raw;
 
 	/*
 	 * Infinite-quota fast path: skip accounting entirely for unconstrained
@@ -1746,13 +1751,13 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 	}
 
 	/*
-	 * Use the cached llcx if the LLC id matches; otherwise look up by
-	 * cgx->id (avoids cgroup_get_id() pointer dereferences) and update
-	 * the cache.
+	 * Use the cached llcx if both the LLC id and the cgroup id match;
+	 * otherwise look up by cgx->id (avoids cgroup_get_id() pointer
+	 * dereferences) and update the cache. Validating llcx->id guards
+	 * against a recycled llcx_raw from a different cgroup on the same LLC.
 	 */
-	if (taskc->llcx_raw && taskc->last_llc_id == llc_id) {
-		llcx = (scx_cgroup_llc_ctx_t *)taskc->llcx_raw;
-	} else {
+	llcx = (scx_cgroup_llc_ctx_t *)taskc->llcx_raw;
+	if (!llcx || taskc->last_llc_id != llc_id || llcx->id != cgrp_id) {
 		llcx_raw = cbw_get_llc_ctx_raw_with_id(cgx->id, llc_id);
 		if (!llcx_raw)
 			return 0;
