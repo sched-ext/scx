@@ -45,8 +45,6 @@ enum scx_cgroup_consts {
 	CBW_CONSUMPTION_RATE_DECAY	= 3,
 	/* maximum number of cgroups */
 	CBW_NR_CGRP_MAX			= 2048,
-	/* maximum number of scx_cgroup_llc_ctx: 2048 cgroups * 32 LLCs */
-	CBW_NR_CGRP_LLC_MAX		= (CBW_NR_CGRP_MAX * 32),
 	/* The maximum height of a cgroup tree.
 	 * cgroupv2 default maximum depth is 32 (kernel CGROUPS_DEPTH_MAX). */
 	CBW_CGRP_TREE_HEIGHT_MAX	= 32,
@@ -300,7 +298,8 @@ struct {
 	__type(key, struct cgroup_llc_id);
 	__type(value, struct cbw_llc_entry);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, CBW_NR_CGRP_LLC_MAX);
+	/* single-LLC default; userspace grows it to CBW_NR_CGRP_MAX * nr_llcs */
+	__uint(max_entries, CBW_NR_CGRP_MAX);
 } cbw_cgrp_llc_map SEC(".maps");
 
 /*
