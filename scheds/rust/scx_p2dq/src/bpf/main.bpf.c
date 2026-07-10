@@ -2566,7 +2566,7 @@ static bool consume_llc(struct llc_ctx *llcx)
 		goto try_dsq;
 	} else if (p2dq_config.atq_enabled &&
 	    scx_atq_nr_queued(llcx->mig_atq) > 0) {
-		taskc = (task_ctx *)scx_atq_pop(llcx->mig_atq);
+		taskc = (task_ctx *)scx_atq_pop(llcx->mig_atq, false);
 		p = bpf_task_from_pid((s32)taskc->pid);
 		if (!p) {
 			trace("ATQ failed to get pid %llu", taskc->pid);
@@ -2904,7 +2904,7 @@ check_llc_dsq:
 		}
 	} else if (unlikely(min_atq)) {
 		trace("ATQ dispatching %llu with min vtime %llu", min_atq, min_vtime);
-		pid = scx_atq_pop(min_atq);
+		pid = scx_atq_pop(min_atq, false);
 		if (likely((p = bpf_task_from_pid((s32)pid)))) {
 			if (unlikely(!(taskc = lookup_task_ctx(p)))) {
 				bpf_task_release(p);
@@ -2976,7 +2976,7 @@ check_llc_dsq:
 			scx_bpf_dsq_move_to_local(cpuc->llc_dsq, 0);
 		}
 	} else if (unlikely(p2dq_config.atq_enabled)) {
-		pid = scx_atq_pop(cpuc->mig_atq);
+		pid = scx_atq_pop(cpuc->mig_atq, false);
 		if (likely((p = bpf_task_from_pid((s32)pid)))) {
 			if (unlikely(!(taskc = lookup_task_ctx(p)))) {
 				bpf_task_release(p);
@@ -3799,9 +3799,9 @@ void BPF_STRUCT_OPS(p2dq_dequeue, struct task_struct *p __arg_trusted, u64 deq_f
 		return;
 
 	taskc = lookup_task_ctx(p);
-	ret = scx_atq_cancel(&taskc->common);
+	ret = scx_atq_task_fini(&taskc->common);
 	if (ret)
-		scx_bpf_error("scx_atq_cancel returned %d", ret);
+		scx_bpf_error("scx_atq_task_fini returned %d", ret);
 
 	return;
 }
