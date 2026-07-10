@@ -1100,6 +1100,7 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	scx_cgroup_ctx_t *cgx, *parentx;
 	struct cgroup *parent;
 	u64 cgrp_id;
+	int ret;
 
 	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
 		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
@@ -1119,14 +1120,8 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 		cbw_err("Failed to allocate cgroup ctx: %llu", cgrp_id);
 		return -ENOMEM;
 	}
-	entry.cgx = (u64)cgx;
-	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
-		cbw_free_cgx(cgx);
-		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
-		return -ENOMEM;
-	}
 
-	cgx->id = cgroup_get_id(cgrp);
+	cgx->id = cgrp_id;
 	cgx->level = cgrp->level;
 	if (cgrp->level > 0 &&
 	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
@@ -1167,7 +1162,31 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * is at the leaf (a cgroup is a leaf until its child is created),
 	 * so we will create per-LLC-cgroup contexts anyway.
 	 */
-	return cbw_init_llc_ctx(cgrp, cgx);
+	if ((ret = cbw_init_llc_ctx(cgrp, cgx))) {
+		cbw_err("Failed to init LLC contexts: %llu (%d)", cgrp_id, ret);
+		goto err_free;
+	}
+
+	/*
+	 * Publish the fully-initialized context into cbw_cgrp_map as the very
+	 * last step. Making @cgrp reachable only after its LLC contexts and BTQs
+	 * exist (has_llcx == true) upholds the invariant that any cgroup found
+	 * through the map can hold tasks.
+	 */
+	entry.cgx = (u64)cgx;
+	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
+		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
+		ret = -ENOMEM;
+		goto err_free;
+	}
+
+	return 0;
+
+err_free:
+	cgx->has_llcx = true;
+	cbw_free_llc_ctx(cgx, cgrp_id);
+	cbw_free_cgx(cgx);
+	return ret;
 }
 
 __noinline
