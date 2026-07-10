@@ -777,10 +777,17 @@ scx_cgroup_ctx_t *cbw_get_cgroup_ctx(struct cgroup *cgrp)
 long cbw_del_cgroup_ctx(u64 cgrp_id)
 {
 	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
+	long ret = bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
 
+	/*
+	 * Unpublish the context before recycling it: with the map entry gone a
+	 * concurrent lookup resolves to the cgroup's effective parent instead of
+	 * reading the zeroed cgx -- or, once the object is reused, another
+	 * cgroup's cgx.
+	 */
 	if (cgx)
 		cbw_free_cgx(cgx);
-	return bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
+	return ret;
 }
 
 static
