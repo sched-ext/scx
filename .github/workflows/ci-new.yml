@@ -37,6 +37,10 @@ jobs:
           # so only the scx-x64 leg carries gke.
           - { runner: scx-x64,   scheduler: layered, package: scx_layered, kernels: fedora gke }
           - { runner: scx-arm64, scheduler: layered, package: scx_layered, kernels: fedora }
+          # SteamOS ships x86_64 only, so steamos rides the scx-x64 leg and
+          # the arm64 leg verifies for-next alone.
+          - { runner: scx-x64,   scheduler: lavd,    package: scx_lavd,    kernels: steamos }
+          - { runner: scx-arm64, scheduler: lavd,    package: scx_lavd,    kernels: '' }
     runs-on: ${{ matrix.leg.runner }}
     timeout-minutes: 120
     steps:
