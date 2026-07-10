@@ -37,6 +37,7 @@ use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
+use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
@@ -497,6 +498,10 @@ impl<'a> Scheduler<'a> {
 
         // Initialize skel according to @opts.
         Self::init_globals(&mut skel, &opts, &order, debug_level);
+
+        // Size the cpu.max per-(cgroup, LLC) map to this system's LLC count
+        // before loading (a map's max_entries is fixed at load time).
+        scx_utils::resize_cgroup_bw_llc_map(skel.open_object_mut(), order.nr_llcs)?;
 
         // Initialize arena
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
