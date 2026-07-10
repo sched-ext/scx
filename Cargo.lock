@@ -6472,6 +6472,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
+ "ktstr 0.48.0",
  "libbpf-rs",
  "log",
  "nvml-wrapper",
