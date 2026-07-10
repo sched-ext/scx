@@ -2115,21 +2115,6 @@ int cbw_cancel_with_hold(scx_task_common __arg_arena *taskc, bool *cancelled)
 	return 0;
 }
 
-static int cbw_unthrottle_held_task(u64 taskc)
-{
-	int ret;
-
-	/*
-	 * The task is being unthrottled and reenqueued, so it stays alive:
-	 * use fini (unlink only), not detach (which would latch SCX_ATQ_DEAD).
-	 */
-	ret = scx_atq_task_fini((scx_task_common *)taskc);
-	if (ret < 0)
-		return ret;
-
-	return scx_cgroup_bw_enqueue_cb(taskc);
-}
-
 static struct cgroup *cbw_get_root_cgrp(void)
 {
 	struct task_struct *task;
@@ -2782,13 +2767,23 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	if (!cancelled)
 		return 0;
 
+	/*
+	 * Put the task aside into @to's cgroup. If that fails -- e.g., the
+	 * target cgroup is exiting, or a transient internal error occurred --
+	 * fall back to the root cgroup rather than lose the task.
+	 *
+	 * Note that we cannot call scx_cgroup_bw_enqueue_cb() here: the BPF
+	 * verifier rejects calling scx_bpf_dsq_insert_vtime() from the
+	 * ops.cgroup_move() callback.
+	 */
 	if ((ret = cbw_put_aside(task_ptr, p->scx.dsq_vtime, cgroup_get_id(to)))) {
 		if (ret == -ESRCH) {
 			cbw_warn("Destination cgroup unavailable while moving throttled task (%s:%d) to cgid%llu",
 				 p->comm, p->pid, cgroup_get_id(to));
-			ret = cbw_unthrottle_held_task(task_ptr);
-			goto out_drop;
 		}
+		
+		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID)))
+			goto out_drop;
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
 	}
