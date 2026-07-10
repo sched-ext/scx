@@ -1,0 +1,77 @@
+name: ci-new
+
+on:
+  workflow_dispatch:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+  KTSTR_VERSION: "0.48.0"
+  # tj's sched_ext for-next on kernel.org: the reference kernel each scheduler
+  # is verified against alongside its distro kernel.
+  KERNEL_SCHED_EXT_FOR_NEXT: "git+https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git#branch=for-next"
+
+jobs:
+  # One verifier leg per (scheduler, distro kernel, arch). `cargo ktstr verifier`
+  # boots the scheduler across topologies and checks it verifies, attaches, and
+  # dispatches on each --kernel: tj's sched_ext for-next (reference) and the
+  # distro kernel. Non-blocking (continue-on-error): a distro kernel can fail to
+  # load current scx BPF, and that reports without gating CI.
+  verifier:
+    name: 'verifier ${{ matrix.leg.package }} ${{ matrix.leg.runner }}'
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        leg:
+          # kernels: space-separated distro kernels verified in one run,
+          # alongside for-next. ktstr's GKE (COS) kernels are x86_64-only,
+          # so only the scx-x64 leg carries gke.
+          - { runner: scx-x64,   scheduler: layered, package: scx_layered, kernels: fedora gke }
+          - { runner: scx-arm64, scheduler: layered, package: scx_layered, kernels: fedora }
+    runs-on: ${{ matrix.leg.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      # The ktstr binaries are cached repo-wide keyed on version + arch, so
+      # one build serves every leg and run. Save happens right after install
+      # (not via the cache action's post step) so legs that fail the verifier
+      # still upload it.
+      - name: Restore cargo-ktstr
+        id: cache-ktstr
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cargo/bin/*ktstr*
+          key: cargo-ktstr-${{ env.KTSTR_VERSION }}-${{ runner.arch }}
+      - name: Install cargo-ktstr
+        if: steps.cache-ktstr.outputs.cache-hit != 'true'
+        run: cargo install --locked "ktstr@${KTSTR_VERSION}"
+      - name: Save cargo-ktstr cache
+        if: steps.cache-ktstr.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cargo/bin/*ktstr*
+          key: cargo-ktstr-${{ env.KTSTR_VERSION }}-${{ runner.arch }}
+      - name: Build ${{ matrix.leg.package }}
+        run: cargo build --release --locked -p ${{ matrix.leg.package }}
+      - name: 'Verify ${{ matrix.leg.scheduler }}: for-next + ${{ matrix.leg.kernels }}'
+        run: |
+          kernels=()
+          for k in ${{ matrix.leg.kernels }}; do kernels+=(--kernel "$k"); done
+          cargo ktstr verifier \
+            --scheduler ${{ matrix.leg.scheduler }} \
+            --kernel "$KERNEL_SCHED_EXT_FOR_NEXT" \
+            "${kernels[@]}" \
+            -p ${{ matrix.leg.package }} --features ktstr-tests
