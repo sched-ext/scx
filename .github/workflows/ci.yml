@@ -68,11 +68,10 @@ jobs:
           - name: scx__stable__6_13
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.13.y
-            veristat-disable: scx_lavd scx_arena_selftests
+            veristat-disable: scx_arena_selftests
           - name: scx__stable__6_16
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.16.y
-            veristat-disable: scx_lavd
           - name: scx__stable__6_18
             url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
             tag: linux-6.18.y

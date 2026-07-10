@@ -36,6 +36,8 @@ jobs:
           # COS kernel artifacts only.
           - { runner: scx-x64,   scheduler: layered, package: scx_layered, kernels: "fedora gke amazonlinux" }
           - { runner: scx-arm64, scheduler: layered, package: scx_layered, kernels: "fedora amazonlinux" }
+          # SteamOS ships x86_64 only, so lavd/steamos runs on scx-x64 only.
+          - { runner: scx-x64,   scheduler: lavd,    package: scx_lavd,    kernels: steamos }
     runs-on: ${{ matrix.leg.runner }}
     timeout-minutes: 120
     steps:

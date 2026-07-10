@@ -6438,6 +6438,7 @@ dependencies = [
  "gpoint",
  "hex",
  "itertools 0.14.0",
+ "ktstr 0.42.0",
  "libbpf-rs",
  "libc",
  "nix 0.31.3",
