@@ -1157,7 +1157,7 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 	if (!scx_cgroup_bw_is_task_throttled((u64)taskc))
 		return;
 
-	if ((ret = scx_cgroup_bw_cancel((u64)taskc, 0)))
+	if ((ret = scx_cgroup_bw_cancel((u64)taskc, SCX_CGROUP_BW_CANCEL_UNLINK)))
 		debugln("Failed to cancel task %d with %d", p->pid, ret);
 }
 

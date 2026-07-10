@@ -131,12 +131,15 @@ int scx_cgroup_bw_reenqueue(void);
 
 /**
  * enum scx_cgroup_bw_cancel_flags - Flags for scx_cgroup_bw_cancel().
+ * @SCX_CGROUP_BW_CANCEL_UNLINK: unlinks the task from its BTQ and keeps
+ *   ownership active.
  * @SCX_CGROUP_BW_CANCEL_DROP: also drop the task's throttling-ownership
  *   reference and quiesce in-flight ATQ operations so the task context can be
  *   freed (from ops.exit_task). Without it, cancel only unlinks the task from
  *   its BTQ and keeps ownership active.
  */
 enum scx_cgroup_bw_cancel_flags {
+	SCX_CGROUP_BW_CANCEL_UNLINK = ((u64)0x00),
 	SCX_CGROUP_BW_CANCEL_DROP = ((u64)0x01),
 };
 
