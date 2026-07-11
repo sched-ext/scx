@@ -2293,6 +2293,14 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 	if (scx_bpf_dsq_nr_queued(cpuc->hi_fb_dsq_id))
 		goto no;
 
+	/*
+	 * Anything already dispatched to this CPU's local DSQ should run.
+	 * Consider for example pcpu kthreads that are dispatched to the local
+	 * DSQ and which won't be detected by antistall.
+	 */
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu))
+		goto no;
+
 	/* @p has fully consumed its slice and still wants to run */
 	cpuc->ran_current_for += layer->slice_ns;
 
