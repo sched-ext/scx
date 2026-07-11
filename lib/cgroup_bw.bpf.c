@@ -944,7 +944,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		 * Then, delete the LLC context and its associated BTQ.
 		 */
 		if (cgrp_id != ROOT_CGID) {
-			while (can_loop && (taskc = scx_atq_pop(btq))) {
+			while (can_loop && (taskc = scx_atq_pop(btq, true))) {
 				scx_task_cgroup_bw_t *t = (scx_task_cgroup_bw_t *)taskc;
 				/*
 				 * Invalidate the per-task cgx/llcx caches before
@@ -982,6 +982,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 						"while exiting cgid%llu: %d",
 						cgrp_id, ret);
 				}
+				scx_atq_task_drop((scx_task_common *)taskc);
 			}
 		}
 
@@ -1795,6 +1796,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	scx_task_common *taskc = (scx_task_common *)ctx;
 	scx_cgroup_llc_ctx_t *llcx;
 	scx_atq_t *btq;
+	scx_atq_t *task_atq;
 	int llc_id, ret;
 
 	/* Get the current LLC ID. */
@@ -1851,7 +1853,12 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	 * detected either here on the fast path or as EALREADY returned by the
 	 * insert below.
 	 */
-	if (READ_ONCE(taskc->atq) != NULL) {
+	task_atq = (scx_atq_t *)READ_ONCE(taskc->atq);
+	if (task_atq == (scx_atq_t *)SCX_ATQ_DEAD) {
+		scx_atq_unlock(btq);
+		return 0;
+	}
+	if (task_atq) {
 		cbw_dbg("Possible double enqueue detected.");
 		scx_atq_unlock(btq);
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
@@ -1861,7 +1868,9 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	ret = scx_atq_insert_vtime_unlocked(btq, taskc, vtime);
 	scx_atq_unlock(btq);
 
-	if (unlikely(ret == -EALREADY)) {
+	if (unlikely(ret == -ECANCELED)) {
+		return 0;
+	} else if (unlikely(ret == -EALREADY)) {
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
 		return 0;
 	} else if (unlikely(ret)) {
@@ -2037,26 +2046,72 @@ out_no_replenish:
 }
 
 /*
- * scx_cgroup_bw_cancel - Cancel throttling for a task.
+ * scx_cgroup_bw_cancel - Cancel a task's BTQ membership.
  *
  * @taskc: Pointer to the scx_task_common task context. Passed as a u64
  * to avoid exposing the scx_task_common type to the scheduler.
- *
- * Tasks may be dequeued from the BPF side by the scx core during system
- * calls like sched_setaffinity(2). In that case, we must cancel any
- * throttling-related ATQ insert operations for the task:
- * - We must avoid double inserts caused by the dequeued task being
- *   reenqueed and throttled again while still in an ATQ.
- * - We want to remove tasks not in scx anymore from throttling. While
- *   inserting non-scx tasks into a DSQ is a no-op, we would like our
- *   accounting to be as accurate as possible.
+ * @flags: bitmask of enum scx_cgroup_bw_cancel_flags.
  *
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_cancel(u64 ctx)
+int scx_cgroup_bw_cancel(u64 ctx, u64 flags)
 {
-	return scx_atq_cancel((scx_task_common *)ctx);
+	scx_task_common *taskc = (scx_task_common *)ctx;
+	int ret;
+
+	if (flags & SCX_CGROUP_BW_CANCEL_DROP)
+		return scx_atq_task_detach(taskc);
+
+	ret = scx_atq_task_fini(taskc);
+	return ret < 0 ? ret : 0;
+}
+
+/*
+ * Remove @taskc from its current BTQ and hold it across the temporary
+ * ->atq == NULL window. The hold prevents ops.exit_task from freeing the task
+ * context while the caller relocates or reenqueues it.
+ *
+ * Return 0 for success or -errno on failure. On success, @cancelled is true
+ * iff this caller removed the task and now owns a hold.
+ */
+static __always_inline
+int cbw_cancel_with_hold(scx_task_common __arg_arena *taskc, bool *cancelled)
+{
+	scx_atq_t *atq;
+	int ret;
+
+	*cancelled = false;
+
+	while (can_loop) {
+		atq = (scx_atq_t *)READ_ONCE(taskc->atq);
+		if (!atq || atq == (scx_atq_t *)SCX_ATQ_DEAD)
+			return 0;
+
+		if ((ret = scx_atq_lock(atq))) {
+			cbw_err("Failed to lock BTQ while moving task: %d", ret);
+			return ret;
+		}
+
+		if (READ_ONCE(taskc->atq) != atq) {
+			scx_atq_unlock(atq);
+			continue;
+		}
+
+		scx_atq_task_hold(taskc);
+		ret = scx_atq_remove_unlocked(atq, taskc);
+		scx_atq_unlock(atq);
+
+		if (ret) {
+			scx_atq_task_drop(taskc);
+			return ret;
+		}
+
+		*cancelled = true;
+		return 0;
+	}
+
+	return 0;
 }
 
 static struct cgroup *cbw_get_root_cgrp(void)
@@ -2413,7 +2468,7 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 	 */
 	for (i = 0; can_loop && i < CBW_REENQ_MAX_BATCH &&
 		    (btq = READ_ONCE(llcx->btq)) &&
-		    (taskc = (scx_task_common *)scx_atq_pop(btq)); i++) {
+		    (taskc = (scx_task_common *)scx_atq_pop(btq, true)); i++) {
 		/*
 		 * Note that we do not worry about racing with .dequeue() here,
 		 * because even if we do, the callback's insert_vtime call will
@@ -2421,6 +2476,7 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 		 */
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
+		scx_atq_task_drop(taskc);
 		cbw_dbg("cgid%llu", cgx->id);
 	}
 
@@ -2641,14 +2697,20 @@ __hidden
 int scx_cgroup_bw_is_task_throttled(u64 taskc)
 {
 	scx_task_common *ctx = (scx_task_common *)taskc;
-	return ctx && (READ_ONCE(ctx->atq) != NULL);
+	scx_atq_t *atq;
+
+	if (!ctx)
+		return false;
+
+	atq = READ_ONCE(ctx->atq);
+	return atq != NULL && atq != (scx_atq_t *)SCX_ATQ_DEAD;
 }
 
 /**
  * scx_cgroup_bw_move - Move a task from a cgroup to another (@from -> @to).
  *
  * @p: task being moved
- * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * @task_ptr: Pointer to the scx_task_common task context. Passed as a u64
  * to avoid exposing the scx_task_common type to the scheduler.
  * @from: cgroup @p is being moved from
  * @to: cgroup @p is being moved to
@@ -2656,11 +2718,13 @@ int scx_cgroup_bw_is_task_throttled(u64 taskc)
  * Return 0 for success, -errno for failure.
  */
 __hidden __noinline
-int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
+int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 		       struct cgroup *from __arg_trusted,
 		       struct cgroup *to __arg_trusted)
 {
 	volatile scx_task_cgroup_bw_t *tc; /* Add `volatile` to work around the verifier error */
+	scx_task_common *taskc = (scx_task_common *)task_ptr;
+	bool cancelled;
 	int ret;
 
 	scx_arena_subprog_init();
@@ -2680,27 +2744,51 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 	}
 
 	/*
-	 * If a task is throttled, remove it from the @from cgroup,
-	 * then add it to the BTQ of the @to cgroup.
+	 * If a task is throttled, remove it from its current BTQ, hold it
+	 * across the transient ->atq == NULL state, then add it to @to's BTQ.
+	 * A concurrent ops.exit_task may latch SCX_ATQ_DEAD during the window,
+	 * but it must wait for our hold before freeing the task context; the
+	 * subsequent put_aside sees DEAD and skips reinsertion safely.
 	 *
 	 * We will try to reenqueue it in the next replenishment interval.
 	 * This is fair because the task was throttled under @from cgroup,
 	 * so it has to wait until the next replenishment interval anyway.
 	 */
-	if (!scx_cgroup_bw_is_task_throttled(taskc))
+	if (!scx_cgroup_bw_is_task_throttled(task_ptr))
 		return 0;
 
-	if ((ret = scx_cgroup_bw_cancel(taskc))) {
+	ret = cbw_cancel_with_hold(taskc, &cancelled);
+	if (ret) {
 		cbw_err("Fail to cancel a throttled task (%s:%d) from a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(from), ret);
 		return ret;
 	}
+	if (!cancelled)
+		return 0;
 
-	if ((ret = scx_cgroup_bw_put_aside(p, taskc, p->scx.dsq_vtime, cgroup_get_id(to)))) {
+	/*
+	 * Put the task aside into @to's cgroup. If that fails -- e.g., the
+	 * target cgroup is exiting, or a transient internal error occurred --
+	 * fall back to the root cgroup rather than lose the task.
+	 *
+	 * Note that we cannot call scx_cgroup_bw_enqueue_cb() here: the BPF
+	 * verifier rejects calling scx_bpf_dsq_insert_vtime() from the
+	 * ops.cgroup_move() callback.
+	 */
+	if ((ret = cbw_put_aside(task_ptr, p->scx.dsq_vtime, cgroup_get_id(to)))) {
+		if (ret == -ESRCH) {
+			cbw_warn("Destination cgroup unavailable while moving throttled task (%s:%d) to cgid%llu",
+				 p->comm, p->pid, cgroup_get_id(to));
+		}
+		
+		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID)))
+			goto out_drop;
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
 	}
 
+out_drop:
+	scx_atq_task_drop(taskc);
 	return ret;
 }
 

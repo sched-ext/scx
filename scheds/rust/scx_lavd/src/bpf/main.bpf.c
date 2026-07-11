@@ -777,7 +777,8 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	 * be called only from ops.enqueue() and ops.dispatch().
 	 */
 	ret = scx_cgroup_bw_throttled(taskc->cgrp_id, p, (u64)taskc);
-	if ((ret == -EAGAIN) && put_aside) {
+	if ((ret == -EAGAIN) && put_aside &&
+	    !scx_cgroup_bw_is_task_throttled((u64)taskc)) {
 		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime,
 					       taskc->cgrp_id);
 		if (ret2)
@@ -1167,7 +1168,10 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 	if (!enable_cpu_bw)
 		return;
 
-	if ((ret = scx_cgroup_bw_cancel((u64)taskc)))
+	if (!scx_cgroup_bw_is_task_throttled((u64)taskc))
+		return;
+
+	if ((ret = scx_cgroup_bw_cancel((u64)taskc, SCX_CGROUP_BW_CANCEL_UNLINK)))
 		debugln("Failed to cancel task %d with %d", p->pid, ret);
 }
 
@@ -2144,6 +2148,14 @@ s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
 		unaccount_queued_load(taskc);
 		unaccount_queued_load_pcpu(taskc);
 	}
+
+	/*
+	 * Mark the task dead in the bandwidth-throttle queues before freeing
+	 * taskc. Concurrent drains or cgroup moves that already hold the task
+	 * must finish before scx_task_free() releases the arena storage.
+	 */
+	if (enable_cpu_bw && taskc)
+		scx_cgroup_bw_cancel((u64)taskc, SCX_CGROUP_BW_CANCEL_DROP);
 
 	scx_task_free(p);
 	return 0;
