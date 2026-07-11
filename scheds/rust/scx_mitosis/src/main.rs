@@ -51,6 +51,7 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
+use scx_utils::TopologyArgs;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
 use tracing::{debug, info, trace, warn};
@@ -62,6 +63,7 @@ use stats::Metrics;
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const MAX_SUBCELLS_PER_CELL: usize = bpf_intf::consts_MAX_SUBCELLS_PER_CELL as usize;
+const MAX_LLCS: usize = bpf_intf::consts_MAX_LLCS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 const SHARE_SIBLING_SUBCELL_CPUS: bool = true;
 /// Epoll token for inotify events (cgroup creation/destruction)
@@ -85,6 +87,16 @@ fn parse_ewma_factor(s: &str) -> Result<f64, String> {
 /// Userspace makes the dynamic decisions of which Cells should be merged or
 /// split and which CPUs they should be assigned to.
 #[derive(Debug, Parser)]
+#[command(after_long_help = r#"VIRTUAL LLC CONFIGURATION:
+    --virt-llc requires --enable-llc-awareness to affect DSQ creation.
+    MIN-MAX specifies the target range of physical cores per virtual LLC.
+    For each physical LLC and core type, the smallest exact divisor in the
+    range is preferred; otherwise, the size with the smallest remainder is
+    used, favoring smaller sizes. Remaining cores join the last partition.
+    The total number of LLC domains across the system must not exceed 64.
+
+    Example: On a 32-core physical LLC, --virt-llc=8-8 creates four virtual
+    LLCs, and therefore four LLC DSQs per cell."#)]
 struct Opts {
     /// Deprecated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -143,7 +155,7 @@ struct Opts {
     reject_multicpu_pinning: bool,
 
     /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
-    /// to use LLC-aware scheduling.
+    /// to use LLC-aware scheduling. Required for --virt-llc to affect DSQ creation.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_llc_awareness: bool,
 
@@ -232,6 +244,9 @@ struct Opts {
     /// tick period.
     #[clap(long, default_value = "500")]
     slice_shrink_min_us: u64,
+
+    #[clap(flatten, next_help_heading = "Topology Options")]
+    topology: TopologyArgs,
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
@@ -399,15 +414,24 @@ impl<'a> Scheduler<'a> {
         if !opts.cell_exclude.is_empty() && opts.cell_parent_cgroup.is_none() {
             bail!("--cell-exclude requires --cell-parent-cgroup");
         }
+        if opts.topology.virt_llc.is_some() && !opts.enable_llc_awareness {
+            bail!("--virt-llc requires --enable-llc-awareness");
+        }
         Ok(())
     }
 
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         Self::validate_args(opts).context("validating scheduler options")?;
 
-        let topology = Topology::new().context("detecting system topology")?;
+        let topology = Topology::with_args(&opts.topology).context("detecting system topology")?;
 
         let nr_llc = topology.all_llcs.len().max(1);
+        if nr_llc > MAX_LLCS {
+            bail!(
+                "topology has {nr_llc} LLC domains, but scx_mitosis supports at most \
+                 {MAX_LLCS}; use a larger --virt-llc core range"
+            );
+        }
 
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
@@ -474,12 +498,14 @@ impl<'a> Scheduler<'a> {
         mitosis_topology_utils::populate_topology_maps(
             &mut skel,
             mitosis_topology_utils::MapKind::CpuToLLC,
+            &topology,
             None,
         )
         .context("populating CPU-to-LLC topology map")?;
         mitosis_topology_utils::populate_topology_maps(
             &mut skel,
             mitosis_topology_utils::MapKind::LLCToCpus,
+            &topology,
             None,
         )
         .context("populating LLC-to-CPUs topology map")?;
