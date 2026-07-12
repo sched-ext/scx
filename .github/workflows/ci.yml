@@ -17,7 +17,7 @@ defaults:
 env:
   PS4: '+ $(date "+%H:%M:%S") '
   BPF_CLANG: clang-19
-  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng mold"
+  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libbpf-dev libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng mold"
   SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
   SCHED_EXT_KERNEL_TAG: for-next
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
@@ -55,6 +55,16 @@ jobs:
           tmpdir=$(mktemp -d)
           tar -xf rust/scx_utils/vmlinux.tar.zst -C "$tmpdir"
           diff --no-dereference -qr scheds/vmlinux/ "$tmpdir/vmlinux/"
+      - name: Check enum defs sync
+        run: |
+          tmpdir=$(mktemp -d)
+          ./scripts/gen_enum_defs.py scheds/vmlinux/vmlinux.h \
+            "$tmpdir/enum_defs.autogen.h" \
+            "$tmpdir/enums_abi.autogen.h" \
+            "$tmpdir/enums_abi.autogen.rs"
+          diff -u scheds/include/scx/enum_defs.autogen.h "$tmpdir/enum_defs.autogen.h"
+          diff -u scheds/include/scx/enums_abi.autogen.h "$tmpdir/enums_abi.autogen.h"
+          diff -u rust/scx_utils/src/enums_abi.autogen.rs "$tmpdir/enums_abi.autogen.rs"
 
   veristat:
     if: github.repository == 'sched-ext/scx' || github.event_name != 'schedule'
@@ -204,6 +214,8 @@ jobs:
           tool: cargo-nextest
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
+      - name: Compat header tests
+        run: make -C lib/selftests/compat test
 
   test:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')

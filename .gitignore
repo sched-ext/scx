@@ -11,6 +11,7 @@ tags
 *.skel.h
 selftest
 selftest_noasan
+lib/selftests/compat/test_enum64_recovery
 CLAUDE.md
 **/.claude
 **/*.ll

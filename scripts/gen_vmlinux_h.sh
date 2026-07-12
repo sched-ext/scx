@@ -146,6 +146,16 @@ echo "All architectures processed."
 
 popd
 
+# Regenerate the enum definition headers and ABI value tables from the new
+# vmlinux.h. CI verifies these stay in sync with vmlinux.h, so this must run
+# on every vmlinux.h update.
+echo "Regenerating enum defs and ABI tables..."
+"${BASEDIR}/gen_enum_defs.py" \
+    "${BASEDIR}/../scheds/vmlinux/vmlinux.h" \
+    "${BASEDIR}/../scheds/include/scx/enum_defs.autogen.h" \
+    "${BASEDIR}/../scheds/include/scx/enums_abi.autogen.h" \
+    "${BASEDIR}/../rust/scx_utils/src/enums_abi.autogen.rs"
+
 tar \
     --use-compress-program 'zstd -19' \
     --owner=0 --group=0 --numeric-owner \
