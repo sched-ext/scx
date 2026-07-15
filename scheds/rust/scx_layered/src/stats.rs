@@ -531,7 +531,7 @@ impl LayerStats {
             writeln!(
                 w,
                 "  cpus={:3} [{:3},{:3}] {}",
-                self.cur_nr_cpus, self.min_nr_cpus, self.max_nr_cpus, &cpumask,
+                self.cur_nr_cpus, self.min_nr_cpus, self.max_nr_cpus, cpumask,
             )?;
         }
 
