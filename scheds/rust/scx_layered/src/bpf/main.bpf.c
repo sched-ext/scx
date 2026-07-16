@@ -1704,6 +1704,15 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	return prev_cpu;
 }
 
+/*
+ * Is @taskc a "guest" on a CPU (@cpuc) owned by a protected layer?
+ */
+static __always_inline bool is_protected_layer_guest(struct cpu_ctx *cpuc,
+						     struct task_ctx *taskc)
+{
+	return cpuc->is_protected && taskc->layer_id != READ_ONCE(cpuc->layer_id);
+}
+
 enum preempt_flags {
 	PREEMPT_FIRST		= 1LLU << 0,
 	PREEMPT_IGNORE_EXCL	= 1LLU << 1,
@@ -1727,6 +1736,10 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)))
+		return false;
+
+	/* You can't preempt a protected layer CPU if you're not in the layer */
+	if (is_protected_layer_guest(cand_cpuc, taskc))
 		return false;
 
 	if (cand_cpuc->preempting_task || cand_cpuc->current_preempt)
@@ -2309,6 +2322,17 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 	}
 
 	/*
+	 * A protected layer's CPUs never serve other layers' tasks through
+	 * dispatch, but a foreign task can still be running here if it's e.g.
+	 * a lo/hi_fb fallback execution. Refuse the refresh so that it just
+	 * goes back through the enqueue path.
+	 */
+	if (is_protected_layer_guest(cpuc, taskc)) {
+		lstat_inc(LSTAT_KEEP_FAIL_BUSY, layer, cpuc);
+		goto no;
+	}
+
+	/*
 	 * @p is eligible for continuing. We need to implement a better way to
 	 * determine whether a layer is allowed to keep running. For now,
 	 * implement something simple.
@@ -2869,13 +2893,23 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 replenish:
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id, 0))
 		return;
-        /*
-         * !NULL prev_taskc indicates runnable prev.
-         * Do not refresh the slice in case we need the task to be reenqueued
-         * for layer membership change and subsequent CPU selection.
-         */
-        if (prev_taskc && prev_layer && !is_task_layer_hint_stale(prev, prev_taskc))
+	/*
+	 * !NULL prev_taskc indicates runnable prev.
+	 * Do not refresh the slice in case we need the task to be reenqueued
+	 * for layer membership change and subsequent CPU selection.
+	 */
+	if (prev_taskc && prev_layer && !is_task_layer_hint_stale(prev, prev_taskc)) {
+		/*
+		 * Don't refresh the slice of a foreign task on a protected
+		 * layer's CPU. This is safe because SCX_OPS_ENQ_LAST will
+		 * cause this task to do a round trip through the enqueue path,
+		 * so it will land back in its own layer's DSQ.
+		 */
+		if (is_protected_layer_guest(cpuc, prev_taskc))
+			return;
+
 		scx_bpf_task_set_slice(prev, prev_layer->slice_ns);
+	}
 }
 
 /*
