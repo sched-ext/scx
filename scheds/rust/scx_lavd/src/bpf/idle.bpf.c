@@ -224,7 +224,7 @@ static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 	struct cpdom_ctx *cpdc;
 	s32 cpu;
 
-	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
+	cpd_mask = lookup_cpdom_cpumask(cpdom);
 	cpdc = MEMBER_VPTR(cpdom_ctxs, [cpdom]);
 	if (!ctx || !cpdc || !cpd_mask || !cpdc->is_valid)
 		return -ENOENT;
@@ -313,7 +313,7 @@ s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cp
 	if (sticky_cpdom < 0)
 		return -ENOENT;
 
-	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [sticky_cpdom]);
+	cpd_mask = lookup_cpdom_cpumask(sticky_cpdom);
 	if (cpd_mask) {
 		if (ctx->a_mask) {
 			cpu = bpf_cpumask_any_and_distribute(
@@ -368,7 +368,7 @@ bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		return true;
 
-	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
+	cpd_mask = lookup_cpdom_cpumask(cpdom);
 	cpdc = MEMBER_VPTR(cpdom_ctxs, [cpdom]);
 	if (!cpd_mask || !cpdc)
 		return false;
