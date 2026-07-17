@@ -78,6 +78,9 @@ const LSTAT_LLC_DRAIN_TRY: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN_TRY a
 const LSTAT_LLC_DRAIN: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN as usize;
 const LSTAT_SKIP_REMOTE_NODE: usize = bpf_intf::layer_stat_id_LSTAT_SKIP_REMOTE_NODE as usize;
 
+const LSTAT_RUNQ_LAT_BASE: usize = bpf_intf::layer_stat_id_LSTAT_RUNQ_LAT_BASE as usize;
+const NR_RUNQ_LAT_BUCKETS: usize = bpf_intf::consts_NR_RUNQ_LAT_BUCKETS as usize;
+
 const LLC_LSTAT_LAT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize;
 const LLC_LSTAT_CNT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
 
@@ -251,6 +254,8 @@ pub struct LayerStats {
     pub node_loads: Vec<f64>,
     #[stat(desc = "Whether xnuma gating is active for this layer (0/1)")]
     pub xnuma_active: u32,
+    #[stat(desc = "runqueue latency histogram, log2 us buckets 1us..32s, per stats interval")]
+    pub l_runq_lat_hist: Vec<u64>,
 }
 
 impl LayerStats {
@@ -390,6 +395,9 @@ impl LayerStats {
                 .map(|l| l * 100.0)
                 .collect(),
             xnuma_active: if xnuma_active { 1 } else { 0 },
+            l_runq_lat_hist: (0..NR_RUNQ_LAT_BUCKETS)
+                .map(|b| lstat(LSTAT_RUNQ_LAT_BASE + b))
+                .collect(),
         }
     }
 
