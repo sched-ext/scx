@@ -1787,8 +1787,8 @@ static __noinline void enqueue_nostaged(struct task_struct *p, u64 enq_flags)
 		enq_llc = cpu_llc_id[task_cpu < nr_cpus ? task_cpu : enq_cpu];
 	}
 	/* Cold path: scx_bpf_now() always — cache miss irrelevant here. */
-	p->scx.dsq_vtime = scx_bpf_now();
-	p->scx.slice = quantum_ns;
+	scx_bpf_task_set_dsq_vtime(p, scx_bpf_now());
+	scx_bpf_task_set_slice(p, quantum_ns);
 	enqueue_dsq_dispatch(p, enq_flags,
 			    ((u64)enq_cpu << 32) | enq_llc);
 }
@@ -1815,13 +1815,13 @@ static __noinline void enqueue_requeue_path(
 	u64 staged = hot->staged_vtime_bits;
 	u64 requeue_slice = p->scx.slice ?: quantum_ns;
 	u32 dsq_weight = (u32)(staged & 0xFFFFFFFF);
-	p->scx.dsq_vtime = now_cached + dsq_weight;
+	scx_bpf_task_set_dsq_vtime(p, now_cached + dsq_weight);
 	/* Cut 5: flat 50% requeue slice for all classes.
 	 * GAME 75%/non-GAME 50% differentiation removed — vtime ordering
 	 * already provides GAME priority. Saves yl_flag + variable multiply. */
 	requeue_slice >>= 1;
 	requeue_slice += (200000 - requeue_slice) & -(requeue_slice < 200000);
-	p->scx.slice = requeue_slice;
+	scx_bpf_task_set_slice(p, requeue_slice);
 	enqueue_dsq_dispatch(p, enq_flags,
 			    ((u64)enq_cpu << 32) | enq_llc);
 }
@@ -1856,13 +1856,13 @@ static __noinline void enqueue_wakeup_path(
 	u8 is_game = (hot->task_class == CAKE_CLASS_GAME);
 	/* Write vtime to entity — kernel enqueue_entity pattern.
 	 * vtime, staged, dsq_weight, new_flow all DIE here. */
-	p->scx.dsq_vtime = vtime;
+	scx_bpf_task_set_dsq_vtime(p, vtime);
 	/* GAME DOUBLE-SLICE: frame-time headroom during GAMING.
 	 * Only GAME+GAMING gets an explicit 2× quantum for frame pacing. */
 	/* Per-CPU sched_state_local: use enq_cpu (already have it from caller).
 	 * Avoids bpf_get_smp_processor_id() kfunc which causes 3 spills (Rule 73). */
 	if (is_game && cpu_bss[enq_cpu].sched_state_local == CAKE_STATE_GAMING)
-		p->scx.slice = quantum_ns << 1;
+		scx_bpf_task_set_slice(p, quantum_ns << 1);
 	/* hot is now DEAD — all 6 derivatives consumed or stored.
 	 * FunSearch: bpf_get_smp_processor_id() kfunc removed.
 	 * enq_cpu hoisted to enqueue_body (caller) — eliminates
@@ -1997,7 +1997,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 	 * Cosmos/bpfland both implement this. Especially important for gaming
 	 * where single-task-per-core is the common steady state. */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
-		prev->scx.slice = quantum_ns;
+		scx_bpf_task_set_slice(prev, quantum_ns);
 
 	/* Check-before-write: if CPU is already marked idle from a previous
 	 * dispatch miss, skip the store (Rule 11: MESI optimization). */

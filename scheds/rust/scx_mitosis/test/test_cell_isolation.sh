@@ -2,19 +2,15 @@
 #
 # Test script for scx_mitosis CPU cell isolation
 #
-# This script tests that processes in different cgroups are scheduled on their
-# assigned CPUs. It supports both cpuset mode (cgroups have cpuset.cpus configured)
-# and proportional mode (scheduler divides CPUs evenly among cells).
+# This script tests that processes in different managed child cgroups are
+# scheduled on distinct CPU sets.
 #
 # Usage:
-#   ./test_cell_isolation.sh [--cpuset] [--proportional] [--num-cells N] [--workers N]
-#                            [--test-dynamic] [--test-borrowing]
+#   ./test_cell_isolation.sh [--num-cells N] [--workers N] [--test-dynamic] [--test-borrowing]
 #                            [--test-enqueue-borrowing]
 #                            [--test-rebalancing] [--test-cpuset-change] [--test-all]
 #
 # Options:
-#   --cpuset        Test cpuset-based cell isolation (requires cpuset configuration)
-#   --proportional  Test proportional CPU division (no cpuset required, default)
 #   --num-cells N   Number of test cells to create (default: 2)
 #   --workers N     Number of stress-ng workers per cell (default: 5)
 #   --test-dynamic  Run dynamic cell creation/destruction tests
@@ -33,7 +29,6 @@ CGROUP_BASE="/sys/fs/cgroup/test.slice"
 LOG_FILE="/tmp/scx_mitosis_test.log"
 
 # Defaults
-MODE="proportional"
 NUM_CELLS=2
 WORKERS_PER_CELL=5
 SAMPLE_COUNT=5
@@ -75,14 +70,6 @@ log_error() {
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --cpuset)
-            MODE="cpuset"
-            shift
-            ;;
-        --proportional)
-            MODE="proportional"
-            shift
-            ;;
         --num-cells)
             NUM_CELLS="$2"
             shift 2
@@ -240,7 +227,7 @@ create_cgroups() {
 
 # Start the scheduler
 start_scheduler() {
-    log_info "Starting scx_mitosis scheduler (mode: $MODE, extra flags: $@)..."
+    log_info "Starting scx_mitosis scheduler (extra flags: $@)..."
 
     sudo "$SCHEDULER_BIN" \
         --cell-parent-cgroup /test.slice \
@@ -1358,7 +1345,6 @@ main() {
     echo "======================================"
     echo "scx_mitosis Cell Isolation Test"
     echo "======================================"
-    echo "Mode: $MODE"
     echo "Number of cells: $NUM_CELLS"
     echo "Workers per cell: $WORKERS_PER_CELL"
     echo "Test dynamic: $TEST_DYNAMIC"

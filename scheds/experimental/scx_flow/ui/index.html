@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>scx_flow stats</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #000000;
+      --surface: #0a0a0a;
+      --elevated: #111111;
+      --border: #1a1a1a;
+      --border-hover: #333333;
+      --text-primary: #ededed;
+      --text-secondary: #888888;
+      --text-muted: #6a6a6a;
+      --accent: #3f83f8;
+      --success: #31c48d;
+      --warning: #f5a623;
+      --error: #ee0000;
+      --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+      --font-mono: "JetBrains Mono", monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+    body {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      -webkit-font-smoothing: antialiased;
+      padding: 16px;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    @media (min-width: 640px) { body { padding: 24px; } }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .stat-value {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      font-feature-settings: "tnum";
+    }
+
+    /* Per-core card grid */
+    .core-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .core-card { padding: 12px; font-size: 0.8125rem; }
+    .core-card .core-id { font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono); }
+    .core-card .core-freq { font-size: 0.75rem; color: var(--text-secondary); margin-top: 2px; }
+    .core-card .core-smt { font-size: 0.6875rem; color: var(--warning); }
+    .core-card .core-llc { font-size: 0.6875rem; color: var(--text-muted); }
+
+    /* Carriage pool grid */
+    .carriage-grid {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .carriage-slot {
+      width: 20px; height: 20px;
+      border-radius: 3px;
+      font-size: 0.5rem;
+      display: flex; align-items: center; justify-content: center;
+      font-family: var(--font-mono);
+    }
+    .carriage-slot.filling { background: var(--accent); color: #fff; }
+    .carriage-slot.calculating { background: var(--warning); color: #000; }
+    .carriage-slot.idle { background: var(--elevated); color: var(--text-muted); }
+
+    /* System stats grid */
+    .sys-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      font-size: 0.8125rem;
+    }
+    @media (min-width: 640px) { .sys-grid { grid-template-columns: repeat(4, 1fr); } }
+    @media (max-width: 640px) {
+      body { padding: 8px; }
+      .card { padding: 10px; }
+      .stat-value { font-size: 0.875rem !important; word-break: break-all; }
+      .core-grid { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+      .carriage-slot { width: 16px; height: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div style="max-width:1152px;margin:auto">
+
+    <!-- Header -->
+    <header class="card" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <div style="min-width:0;overflow:hidden">
+        <h1 style="font-size:1.25rem;font-weight:700">scx_flow stats</h1>
+        <p style="font-size:0.8125rem;color:var(--text-secondary);margin-top:2px">Waiting Room — per-core dispatch, carriage pool</p>
+      </div>
+      <div id="status-badge" style="font-size:0.75rem;padding:3px 10px;border-radius:999px;border:1px solid var(--success);color:var(--success);font-family:var(--font-mono);white-space:nowrap">
+        ● running
+      </div>
+    </header>
+
+    <!-- Per-core cards -->
+    <div id="core-cards" class="core-grid"></div>
+
+    <!-- Carriage pool -->
+    <div class="card" style="margin-bottom:16px">
+      <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px">Waiting Room — Carriage Pool</p>
+      <div style="display:flex;gap:12px;font-size:0.75rem;font-family:var(--font-mono);margin-bottom:8px">
+        <span>prod: <span id="carriage-prod">0</span></span>
+        <span>slot: <span id="carriage-slot">0</span></span>
+
+        <span>fill: <span id="carriage-fill">0</span></span>
+
+
+      </div>
+      <div id="carriage-grid" class="carriage-grid"></div>
+    </div>
+
+    <!-- System stats -->
+    <div class="card">
+      <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px">System</p>
+      <div class="sys-grid">
+        <div><span style="color:var(--text-muted)">On CPU:</span> <span class="stat-value" id="on-cpu">0</span></div>
+        <div><span style="color:var(--text-muted)">Uptime:</span> <span class="stat-value" id="uptime">0</span></div>
+        <div><span style="color:var(--text-muted)">Wake dispatches:</span> <span class="stat-value" id="prio-disp">0</span></div>
+        <div><span style="color:var(--text-muted)">Pinned dispatches:</span> <span class="stat-value" id="pinned-disp">0</span></div>
+        <div><span style="color:var(--text-muted)">Budget exhaustions:</span> <span class="stat-value" id="budget-exhaust">0</span></div>
+        <div><span style="color:var(--text-muted)">CPU migrations:</span> <span class="stat-value" id="cpu-mig">0</span></div>
+        <div><span style="color:var(--text-muted)">Wakeups:</span> <span class="stat-value" id="wakeups">0</span></div>
+      </div>
+    </div>
+
+    <!-- Connection status -->
+    <div style="text-align:center;margin-top:16px">
+      <p style="font-size:0.75rem;color:var(--text-muted)" id="conn-status">Loading...</p>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+
+    function clamp(v) { return v < 0 ? 0 : v; }
+
+    function fmt(n) {
+      n = clamp(n);
+      if (n >= 1e15) return (n / 1e15).toFixed(2) + 'Q';
+      if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+      if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+      return n.toLocaleString();
+    }
+
+    function fmtRuntime(ns) {
+      ns = clamp(ns);
+      var sec = ns / 1_000_000_000;
+      if (sec < 60) return sec.toFixed(1) + ' sec';
+      var min = sec / 60;
+      if (min < 60) return min.toFixed(1) + ' min';
+      var hr = min / 60;
+      if (hr < 24) return hr.toFixed(1) + ' hr';
+      var day = hr / 24;
+      return day.toFixed(1) + ' days';
+    }
+
+    function renderCoreCards(data) {
+      var container = el('core-cards');
+      var perCpu = data.per_cpu || [];
+      if (!perCpu.length) {
+        container.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;color:var(--text-muted)">No CPU data yet</div>';
+        return;
+      }
+      container.innerHTML = perCpu.map(function(cpu) {
+        var freqMhz = Math.round(cpu.freq_khz / 1000);
+        var smtLabel = cpu.smt ? ' <span class="core-smt">SMT</span>' : '';
+        return '<div class="card core-card">' +
+          '<div class="core-id">CPU ' + cpu.id + smtLabel + '</div>' +
+          '<div class="core-freq">' + freqMhz + ' MHz</div>' +
+          '<div class="core-llc">LLC ' + cpu.llc_id + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    function renderCarriagePool(data) {
+      var s = data.stats || {};
+      var prod = s.carriage_producer || 0;
+      var fillCount = data.carriage_filling_count || 0;
+      el('carriage-prod').textContent = fmt(prod);
+      el('carriage-slot').textContent = prod & 63;
+      el('carriage-fill').textContent = fmt(fillCount);
+
+      // Render slot grid from stats API (carriage_pool data not in current API)
+      // Show a simple 64-slot grid based on producer/consumer
+      var grid = el('carriage-grid');
+      var slots = '';
+      for (var i = 0; i < 64; i++) {
+        var cls = 'carriage-slot';
+        if (i === (prod & 63)) cls += ' filling';
+        else cls += ' idle';
+        slots += '<div class="' + cls + '"></div>';
+      }
+      grid.innerHTML = slots;
+    }
+
+    function updateUI(data) {
+      el('status-badge').textContent = '● running';
+      el('status-badge').style.borderColor = 'var(--success)';
+      el('status-badge').style.color = 'var(--success)';
+
+      var s = data.stats || {};
+      el('on-cpu').textContent = fmt(s.on_cpu || 0);
+      el('uptime').textContent = fmtRuntime(s.uptime_ns || 0);
+      el('prio-disp').textContent = fmt(s.prio_dispatches || 0);
+      el('pinned-disp').textContent = fmt(s.pinned_dispatches || 0);
+      el('budget-exhaust').textContent = fmt(s.budget_exhaustions || 0);
+      el('cpu-mig').textContent = fmt(s.cpu_migrations || 0);
+      el('wakeups').textContent = fmt(s.runnable_wakeups || 0);
+
+      renderCoreCards(data);
+      renderCarriagePool(data);
+    }
+
+    function pollStats() {
+      fetch('/api/stats')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          updateUI(data);
+          el('conn-status').textContent = 'Live — ' + new Date().toLocaleTimeString();
+        })
+        .catch(function() {
+          el('status-badge').textContent = '● disconnected';
+          el('status-badge').style.borderColor = 'var(--error)';
+          el('status-badge').style.color = 'var(--error)';
+          el('conn-status').textContent = 'Disconnected — retrying...';
+        });
+    }
+
+    pollStats();
+    setInterval(pollStats, 1000);
+  </script>
+</body>
+</html>

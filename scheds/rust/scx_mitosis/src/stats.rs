@@ -34,6 +34,8 @@ pub struct CellMetrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Orphaned LLC DSQ drain events")]
+    pub drain_cnt: u64,
     #[stat(desc = "Pin reject skipped %")]
     pub pin_skip_pct: f64,
     #[stat(desc = "Slice shrink events")]
@@ -96,6 +98,8 @@ pub struct Metrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Orphaned LLC DSQ drain events")]
+    pub drain_cnt: u64,
     #[stat(desc = "Pin reject skipped %")]
     pub pin_skip_pct: f64,
     #[stat(desc = "Slice shrink events")]
@@ -118,6 +122,10 @@ pub struct Metrics {
     pub lent_pct: f64,
     #[stat(desc = "Number of rebalancing events")]
     pub rebalance_count: u64,
+    #[stat(
+        desc = "1 if the cell-0 holdout has taken a CPU already claimed by a workload cell, else 0"
+    )]
+    pub enforced_holdout: u64,
     #[stat(desc = "Per-cell metrics")] // TODO: cell names
     pub cells: BTreeMap<u32, CellMetrics>,
 }

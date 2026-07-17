@@ -1,0 +1,7 @@
+alpha-worker 1000/2001 [001] 0.000000050: sched:sched_stat_runtime: comm=alpha-worker pid=2001 runtime=1 [ns]
+alpha-worker 1000/2001 [001] 0.000000100: sched:sched_stat_runtime: comm=alpha-worker pid=2001 runtime=1 [ns]
+idle 0/0 [001] 0.000000120: sched:sched_switch: swapper/1:0 [120] R ==> alpha-worker:2001 [120]
+alpha-worker 1000/2001 [001] 0.000000300: sched:sched_stat_runtime: comm=alpha-worker pid=2001 runtime=1 [ns]
+beta 1000/3002 [001] 0.000000140: sched:sched_stat_runtime: comm=beta pid=3002 runtime=1 [ns]
+beta 1000/3002 [001] 0.000000150: sched:sched_stat_runtime: comm=beta pid=3002 runtime=1 [ns]
+gamma 5000/5000 [001] 0.000000220: sched:sched_stat_runtime: comm=gamma pid=5000 runtime=1 [ns]

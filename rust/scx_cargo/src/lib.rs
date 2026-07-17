@@ -6,7 +6,5 @@
 mod clang_info;
 pub use clang_info::ClangInfo;
 
-mod pahole_info;
-
 mod bpf_builder;
 pub use bpf_builder::BpfBuilder;

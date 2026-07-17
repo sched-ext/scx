@@ -64,6 +64,7 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
+use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::TopologyArgs;
@@ -1487,6 +1488,21 @@ fn resolve_cpus_pct_range(
     }
 }
 
+fn update_peak_util(prev_peak: f64, cur_util: f64, half_life: Duration, elapsed: Duration) -> f64 {
+    let decay = 0.5f64.powf(elapsed.as_secs_f64() / half_life.as_secs_f64());
+    (prev_peak * decay).max(cur_util)
+}
+
+fn calc_peak_aware_target_range(
+    util: f64,
+    peak_util: f64,
+    util_range: (f64, f64),
+) -> (usize, usize) {
+    let low = (util / util_range.1).ceil() as usize;
+    let high = ((util.max(peak_util) / util_range.0).floor() as usize).max(low);
+    (low, high)
+}
+
 impl Layer {
     fn new(spec: &LayerSpec, topo: &Topology, core_order: &Vec<Vec<usize>>) -> Result<Self> {
         let name = &spec.name;
@@ -1564,6 +1580,8 @@ impl Layer {
             if util_range.0 < 0.0 || util_range.1 < 0.0 || util_range.0 >= util_range.1 {
                 bail!("invalid util_range {:?}", util_range);
             }
+        } else if kind.common().util_peak_half_life_ms != 0 {
+            bail!("util_peak_half_life_ms requires util_range");
         }
 
         let layer_growth_algo = kind.common().growth_algo.clone();
@@ -1815,6 +1833,7 @@ struct Scheduler<'a> {
 
     proc_reader: fb_procfs::ProcReader,
     sched_stats: Stats,
+    layer_peak_utils: Vec<f64>,
 
     cgroup_regexes: Option<HashMap<u32, Regex>>,
 
@@ -3068,6 +3087,7 @@ impl<'a> Scheduler<'a> {
                 &gpu_task_handler,
                 opts.util_compensation,
             )?,
+            layer_peak_utils: vec![0.0; nr_layers],
 
             cgroup_regexes: Some(cgroup_regexes),
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
@@ -3258,16 +3278,11 @@ impl<'a> Scheduler<'a> {
     /// applying the inverse of util_range and capping by cpus_range.
     /// If the current allocation is within the acceptable range, no
     /// change is made. Returns (target, min) pair for each layer.
-    fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
+    fn calc_target_nr_cpus(&mut self) -> Vec<(usize, usize)> {
         let nr_cpus = self.cpu_pool.topo.all_cpus.len();
-        let utils = if self.sched_stats.util_compensation {
-            &self.sched_stats.layer_utils_compensated
-        } else {
-            &self.sched_stats.layer_utils
-        };
         let membws = &self.sched_stats.layer_membws;
 
-        let mut records: Vec<(u64, u64, u64, usize, usize, usize)> = vec![];
+        let mut records: Vec<(u64, u64, u64, u64, usize, usize, usize)> = vec![];
         let mut targets: Vec<(usize, usize)> = vec![];
 
         for (idx, layer) in self.layers.iter().enumerate() {
@@ -3293,8 +3308,14 @@ impl<'a> Scheduler<'a> {
                     // for sizing. Also, as an empty layer can only get CPU
                     // time through fallback (counted as owned) or open
                     // execution, add open cputime for empty layers.
-                    let owned = utils[idx][LAYER_USAGE_OWNED];
-                    let open = utils[idx][LAYER_USAGE_OPEN];
+                    let (owned, open) = {
+                        let utils = if self.sched_stats.util_compensation {
+                            &self.sched_stats.layer_utils_compensated[idx]
+                        } else {
+                            &self.sched_stats.layer_utils[idx]
+                        };
+                        (utils[LAYER_USAGE_OWNED], utils[LAYER_USAGE_OPEN])
+                    };
 
                     let membw_owned = membws[idx][LAYER_USAGE_OWNED];
                     let membw_open = membws[idx][LAYER_USAGE_OPEN];
@@ -3308,8 +3329,18 @@ impl<'a> Scheduler<'a> {
 
                     let util = if util < 0.01 { 0.0 } else { util };
 
-                    let low = (util / util_range.1).ceil() as usize;
-                    let high = ((util / util_range.0).floor() as usize).max(low);
+                    let peak_util = if layer.kind.common().util_peak_half_life_ms == 0 {
+                        util
+                    } else {
+                        update_peak_util(
+                            self.layer_peak_utils[idx],
+                            util,
+                            Duration::from_millis(layer.kind.common().util_peak_half_life_ms),
+                            self.sched_stats.elapsed,
+                        )
+                    };
+                    self.layer_peak_utils[idx] = peak_util;
+                    let (low, high) = calc_peak_aware_target_range(util, peak_util, *util_range);
 
                     let membw_limit = match membw_gb {
                         Some(membw_limit) => *membw_limit,
@@ -3327,6 +3358,7 @@ impl<'a> Scheduler<'a> {
                         (owned * 100.0) as u64,
                         (open * 100.0) as u64,
                         (util * 100.0) as u64,
+                        (peak_util * 100.0) as u64,
                         low,
                         high,
                         target,
@@ -3355,24 +3387,37 @@ impl<'a> Scheduler<'a> {
             });
         }
 
-        trace!("(owned, open, util, low, high, target): {:?}", &records);
+        trace!(
+            "(owned, open, util, peak, low, high, target): {:?}",
+            &records
+        );
         targets
     }
 
     // Figure out a tuple (LLCs, extra_cpus) in terms of the target CPUs
     // computed by weighted_target_nr_cpus. Returns the number of full LLCs
-    // occupied by a layer, and any extra CPUs that don't occupy a full LLC.
-    fn compute_target_llcs(target: usize, topo: &Topology) -> (usize, usize) {
-        // TODO(kkd): We assume each LLC has equal number of cores.
-        let cores_per_llc = topo.all_cores.len() / topo.all_llcs.len();
-        // TODO(kkd): We assume each core has fixed number of threads.
-        let cpus_per_core = topo.all_cores.first_key_value().unwrap().1.cpus.len();
-        let cpus_per_llc = cores_per_llc * cpus_per_core;
-
-        let full = target / cpus_per_llc;
-        let extra = target % cpus_per_llc;
-
-        (full, extra.div_ceil(cpus_per_core))
+    // occupied by a layer, and any extra cores needed beyond those LLCs.
+    fn compute_target_llcs(target: usize, node_llcs: &BTreeMap<usize, Arc<Llc>>) -> (usize, usize) {
+        let mut remaining = target;
+        let mut full = 0;
+        for llc in node_llcs.values() {
+            let cpus_in_llc = llc.span.weight();
+            if remaining >= cpus_in_llc {
+                full += 1;
+                remaining -= cpus_in_llc;
+            } else {
+                let mut extra = 0;
+                for (_, core) in llc.cores.iter() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    extra += 1;
+                    remaining = remaining.saturating_sub(core.cpus.len());
+                }
+                return (full, extra);
+            }
+        }
+        (full, 0)
     }
 
     // Recalculate the core order for layers using StickyDynamic growth
@@ -3403,8 +3448,9 @@ impl<'a> Scheduler<'a> {
 
             for n in 0..nr_nodes {
                 let assigned_on_n = layer.assigned_llcs[n].len();
+                let node = self.topo.nodes.get(&n).unwrap();
                 let target_full_n =
-                    Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).0;
+                    Self::compute_target_llcs(alloc.node_target(n) * au, &node.llcs).0;
                 let mut to_free = assigned_on_n.saturating_sub(target_full_n);
 
                 debug!(
@@ -3437,8 +3483,9 @@ impl<'a> Scheduler<'a> {
 
             for n in 0..nr_nodes {
                 let cur_on_n = layer.assigned_llcs[n].len();
+                let node = self.topo.nodes.get(&n).unwrap();
                 let target_full_n =
-                    Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).0;
+                    Self::compute_target_llcs(alloc.node_target(n) * au, &node.llcs).0;
                 let mut to_alloc = target_full_n.saturating_sub(cur_on_n);
 
                 debug!(
@@ -3469,10 +3516,6 @@ impl<'a> Scheduler<'a> {
         }
 
         // Phase 3 — Spillover per-node: consume extra cores from free LLCs.
-        let cores_per_llc = self.topo.all_cores.len() / self.topo.all_llcs.len();
-        let cpus_per_core = self.topo.all_cores.first_key_value().unwrap().1.cpus.len();
-        let cpus_per_llc = cores_per_llc * cpus_per_core;
-
         for &(idx, _) in layer_targets.iter() {
             let layer = &mut self.layers[idx];
 
@@ -3484,22 +3527,22 @@ impl<'a> Scheduler<'a> {
             let alloc = &layer_allocs[idx];
 
             for n in 0..nr_nodes {
-                let mut extra = Self::compute_target_llcs(alloc.node_target(n) * au, &self.topo).1;
+                let node = self.topo.nodes.get(&n).unwrap();
+                let mut extra = Self::compute_target_llcs(alloc.node_target(n) * au, &node.llcs).1;
 
                 if let Some(node_llcs) = self.cpu_pool.free_llcs.get_mut(&n) {
                     for entry in node_llcs.iter_mut() {
                         if extra == 0 {
                             break;
                         }
-                        let avail = cpus_per_llc - entry.1;
+                        let llc_id = entry.0;
+                        let llc = self.topo.all_llcs.get(&llc_id).unwrap();
+                        let avail = llc.cores.len() - entry.1;
                         let mut used = extra.min(avail);
                         let cores_to_add = used;
 
                         let shift = entry.1;
                         entry.1 += used;
-
-                        let llc_id = entry.0;
-                        let llc = self.topo.all_llcs.get(&llc_id).unwrap();
 
                         for core in llc.cores.iter().skip(shift) {
                             if used == 0 {
@@ -5193,6 +5236,83 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod peak_util_tests {
+    use super::*;
+
+    #[test]
+    fn test_peak_pins_recent_burst() {
+        let elapsed = Duration::from_millis(100);
+        let half_life = Duration::from_secs(1);
+        let mut peak = 0.0;
+
+        for _ in 0..5 {
+            peak = update_peak_util(peak, 0.1, half_life, elapsed);
+        }
+
+        peak = update_peak_util(peak, 2.0, half_life, elapsed);
+
+        for _ in 0..5 {
+            peak = update_peak_util(peak, 0.1, half_life, elapsed);
+        }
+
+        assert!(
+            peak > 1.3,
+            "peak should still hold the recent burst, got {peak}"
+        );
+    }
+
+    #[test]
+    fn test_peak_decays_after_quiet_period() {
+        let elapsed = Duration::from_millis(100);
+        let half_life = Duration::from_secs(1);
+        let mut peak = 2.0;
+
+        for _ in 0..50 {
+            peak = update_peak_util(peak, 0.0, half_life, elapsed);
+        }
+
+        assert!(
+            peak < 0.1,
+            "peak should decay after a long quiet period, got {peak}"
+        );
+    }
+
+    #[test]
+    fn test_peak_matches_steady_input() {
+        let elapsed = Duration::from_millis(100);
+        let half_life = Duration::from_secs(1);
+        let mut peak = 0.0;
+
+        for _ in 0..30 {
+            peak = update_peak_util(peak, 1.0, half_life, elapsed);
+        }
+
+        assert!(
+            (peak - 1.0).abs() < 1e-9,
+            "peak should match steady-state input, got {peak}"
+        );
+    }
+
+    #[test]
+    fn test_peak_only_changes_shrink_target() {
+        let util_range = (0.7, 0.9);
+        let (low_no_peak, high_no_peak) = calc_peak_aware_target_range(1.8, 1.8, util_range);
+        let (low_with_peak, high_with_peak) = calc_peak_aware_target_range(1.8, 3.1, util_range);
+
+        assert_eq!(low_no_peak, 2);
+        assert_eq!(
+            low_with_peak, low_no_peak,
+            "peak should not affect growth target"
+        );
+        assert_eq!(high_no_peak, 2);
+        assert_eq!(
+            high_with_peak, 4,
+            "peak should only widen the shrink boundary"
+        );
+    }
 }
 
 #[cfg(test)]

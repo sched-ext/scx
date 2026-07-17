@@ -2,14 +2,15 @@
 // PURE-RUST MODULE: ZERO BPF DEPENDENCIES
 // SHARED BETWEEN BINARY CRATE (scheduler.rs, adaptive.rs) AND LIB CRATE (tests)
 
-// REGIME THRESHOLDS (SCHMITT TRIGGER)
-// DIRECTIONAL HYSTERESIS PREVENTS OSCILLATION AT REGIME BOUNDARIES.
-// WIDE DEAD ZONES: MUST CLEARLY ENTER A REGIME AND CLEARLY LEAVE IT.
+// REGIME THRESHOLDS (CHAOS-DRIVEN BANDS)
+// THE SCHMITT-TRIGGER ENTER/EXIT PAIR IS GONE. THESE TWO THRESHOLDS
+// DEFINE THE HIGH/LOW BANDS OF mean_idle_pct USED BY THE CHAOS-DRIVEN
+// REGIME DETECTOR: BOTH ENTRY AND EXIT GO THROUGH THE SAME WINDOWED
+// MEAN, AND THE HVG/BP PRIMITIVES DECIDE WHEN ORDER IS SUFFICIENT TO
+// LATCH LIGHT OR HEAVY (OTHERWISE MIXED).
 
-pub const HEAVY_ENTER_PCT: u64 = 10; // ENTER HEAVY: IDLE < 10%
-pub const HEAVY_EXIT_PCT: u64 = 25; // LEAVE HEAVY: IDLE > 25%
-pub const LIGHT_ENTER_PCT: u64 = 50; // ENTER LIGHT: IDLE > 50%
-pub const LIGHT_EXIT_PCT: u64 = 30; // LEAVE LIGHT: IDLE < 30%
+pub const HEAVY_ENTER_PCT: u64 = 10; // mean_idle <= THIS BAND -> CANDIDATE HEAVY
+pub const LIGHT_ENTER_PCT: u64 = 50; // mean_idle >= THIS BAND -> CANDIDATE LIGHT
 
 // REGIME PROFILES
 // PREEMPT_THRESH CONTROLS WHEN TICK PREEMPTS BATCH TASKS (IF INTERACTIVE WAITING).
@@ -18,17 +19,14 @@ pub const LIGHT_EXIT_PCT: u64 = 30; // LEAVE LIGHT: IDLE < 30%
 
 const LIGHT_SLICE_NS: u64 = 2_000_000; // 2MS
 const LIGHT_PREEMPT_NS: u64 = 1_000_000; // 1MS: AGGRESSIVE
-const LIGHT_LAG_SCALE: u64 = 6;
 const LIGHT_BATCH_NS: u64 = 20_000_000; // 20MS: NO CONTENTION, LET BATCH RIP
 
 const MIXED_SLICE_NS: u64 = 1_000_000; // 1MS: TIGHT INTERACTIVE CONTROL
 const MIXED_PREEMPT_NS: u64 = 1_000_000; // 1MS: MATCH FOR CLEAN ENFORCEMENT
-const MIXED_LAG_SCALE: u64 = 4;
 const MIXED_BATCH_NS: u64 = 20_000_000; // 20MS: MATCHES LIGHT/HEAVY/BPF DEFAULT
 
 const HEAVY_SLICE_NS: u64 = 4_000_000; // 4MS: WIDER FOR THROUGHPUT
 const HEAVY_PREEMPT_NS: u64 = 2_000_000; // 2MS: SLIGHTLY RELAXED
-const HEAVY_LAG_SCALE: u64 = 2;
 const HEAVY_BATCH_NS: u64 = 20_000_000; // 20MS: LET BATCH RIP
 
 // P99 CEILINGS
@@ -57,7 +55,6 @@ pub const AFFINITY_STRONG: u64 = 2;
 pub struct TuningKnobs {
     pub slice_ns: u64,
     pub preempt_thresh_ns: u64,
-    pub lag_scale: u64,
     pub batch_slice_ns: u64,
     pub lat_cri_thresh_high: u64,
     pub lat_cri_thresh_low: u64,
@@ -79,7 +76,6 @@ impl Default for TuningKnobs {
         Self {
             slice_ns: 1_000_000,
             preempt_thresh_ns: 1_000_000,
-            lag_scale: 4,
             batch_slice_ns: 20_000_000,
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
@@ -127,7 +123,6 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
         Regime::Light => TuningKnobs {
             slice_ns: LIGHT_SLICE_NS,
             preempt_thresh_ns: LIGHT_PREEMPT_NS,
-            lag_scale: LIGHT_LAG_SCALE,
             batch_slice_ns: LIGHT_BATCH_NS,
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
@@ -140,7 +135,6 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
         Regime::Mixed => TuningKnobs {
             slice_ns: MIXED_SLICE_NS,
             preempt_thresh_ns: MIXED_PREEMPT_NS,
-            lag_scale: MIXED_LAG_SCALE,
             batch_slice_ns: MIXED_BATCH_NS,
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
@@ -153,7 +147,6 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
         Regime::Heavy => TuningKnobs {
             slice_ns: HEAVY_SLICE_NS,
             preempt_thresh_ns: HEAVY_PREEMPT_NS,
-            lag_scale: HEAVY_LAG_SCALE,
             batch_slice_ns: HEAVY_BATCH_NS,
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
@@ -192,7 +185,7 @@ fn scale_tau_u64(tau_ns: u64, k_q16: u64) -> u64 {
     (tau_ns as u128 * k_q16 as u128 >> 16) as u64
 }
 
-pub fn scaled_regime_knobs(r: Regime, _nr_cpus: u64, tau_ns: u64) -> TuningKnobs {
+pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64, tau_ns: u64) -> TuningKnobs {
     let mut knobs = regime_knobs(r);
 
     let slice_cap_tau = scale_tau_u64(tau_ns, K_SLICE_CAP_Q16).clamp(500_000, 8_000_000);
@@ -201,6 +194,22 @@ pub fn scaled_regime_knobs(r: Regime, _nr_cpus: u64, tau_ns: u64) -> TuningKnobs
 
     knobs.slice_ns = knobs.slice_ns.min(slice_cap_tau);
     knobs.preempt_thresh_ns = knobs.preempt_thresh_ns.min(preempt_cap_tau);
+
+    // LOW-CORE SLICE CAP. tau IS LARGEST AT LOW CORE COUNT (lambda_2 SHRINKS
+    // AS CORES DROP), SO THE tau SLICE CAP ABOVE IS LOOSEST EXACTLY WHERE A
+    // WIDE BATCH SLICE DOES THE MOST DAMAGE: ON 2-4 CORES THE HEAVY PROFILE'S
+    // 4ms SLICE DENIES A LATENCY-SENSITIVE PROBE ACROSS MANY CONSECUTIVE
+    // SLICES, PRODUCING THE 50-200ms LONG-RUN/MIXED P99 TAIL AT LOW CORE.
+    // idle_pct READS LOW AT LOW CORE COUNT -- BECAUSE THE
+    // BPF WARM-STAY/PER-CPU LANDING DELIBERATELY BYPASSES THE IDLE FAST PATH
+    // -- SO THE REGIME FALSELY LATCHES HEAVY AND INHERITS ITS 4ms SLICE. THE
+    // BPF BASELINE RUNS 1ms HERE WITH NO SUCH TAIL, AND THE LONG-RUN WORK
+    // NUMBERS SHOW THE WIDE SLICE BUYS NO THROUGHPUT ON SO FEW CORES. CAP THE
+    // SLICE TO THE MIXED VALUE AT <=4 CORES; 8C/12C (WHERE ADAPTIVE WINS AND
+    // THE WIDER SLICE EARNS THROUGHPUT) ARE UNTOUCHED.
+    if nr_cpus <= 4 {
+        knobs.slice_ns = knobs.slice_ns.min(MIXED_SLICE_NS);
+    }
     if matches!(r, Regime::Mixed) {
         let batch_cap_tau = scale_tau_u64(tau_ns, K_BATCH_CAP_Q16).clamp(10_000_000, 80_000_000);
         knobs.batch_slice_ns = knobs.batch_slice_ns.min(batch_cap_tau);
@@ -210,35 +219,34 @@ pub fn scaled_regime_knobs(r: Regime, _nr_cpus: u64, tau_ns: u64) -> TuningKnobs
     knobs
 }
 
-// REGIME DETECTION (SCHMITT TRIGGER)
-// DIRECTION-AWARE: CURRENT REGIME DETERMINES WHICH THRESHOLDS APPLY.
-// DEAD ZONES PREVENT OSCILLATION THAT SINGLE-BOUNDARY DETECTION CAUSED.
+// REGIME DETECTION (CHAOS-DRIVEN)
+// THE SCHMITT TRIGGER IS GONE. REGIME IS A FUNCTION OF:
+//   - mean_idle_pct: WINDOWED MEAN OVER THE LAST N TICKS
+//   - hvg_lambda:    HVG MEAN DEGREE OF THE idle_pct WINDOW
+//   - bp_h:          BANDT-POMPE D=3 PERMUTATION ENTROPY OF THE WINDOW
+// HYSTERESIS IS BUILT INTO THE WINDOW: SAMPLES MUST FLOW IN BEFORE THE
+// MEAN MOVES. THE 2-TICK HOLD IN THE MONITOR LOOP STAYS AS ADDITIONAL
+// SMOOTHING.
+//
+// LIGHT  := mean_idle HIGH  AND CHAOS-LOW (PERIODIC / IDLE-DOMINATED)
+// HEAVY  := mean_idle LOW   AND CHAOS-LOW (PERIODIC / SATURATED)
+// MIXED  := ANYTHING ELSE (REGIME IS UNSTABLE OR IN MID-BAND)
+//
+// THE chaos_low PREDICATE IS lambda < CHAOTIC_MIN OR bp_h < BP_H_HIGH.
+// EITHER PRIMITIVE INDICATING ORDER IS ENOUGH; THEY MEASURE DIFFERENT
+// THINGS (AMPLITUDE-AWARE VS AMPLITUDE-INVARIANT) AND THE FIRST TO
+// FIRE LATCHES THE REGIME TO LIGHT/HEAVY INSTEAD OF MIXED.
 
-pub fn detect_regime(current: Regime, idle_pct: u64) -> Regime {
-    match current {
-        Regime::Light => {
-            if idle_pct < LIGHT_EXIT_PCT {
-                Regime::Mixed
-            } else {
-                Regime::Light
-            }
-        }
-        Regime::Mixed => {
-            if idle_pct > LIGHT_ENTER_PCT {
-                Regime::Light
-            } else if idle_pct < HEAVY_ENTER_PCT {
-                Regime::Heavy
-            } else {
-                Regime::Mixed
-            }
-        }
-        Regime::Heavy => {
-            if idle_pct > HEAVY_EXIT_PCT {
-                Regime::Mixed
-            } else {
-                Regime::Heavy
-            }
-        }
+pub fn detect_regime(mean_idle_pct: f64, hvg_lambda: f64, bp_h: f64) -> Regime {
+    let chaos_low =
+        hvg_lambda < crate::chaos::HVG_LAMBDA_CHAOTIC_MIN || bp_h < crate::chaos::BP_H_HIGH;
+
+    if chaos_low && mean_idle_pct >= LIGHT_ENTER_PCT as f64 {
+        Regime::Light
+    } else if chaos_low && mean_idle_pct <= HEAVY_ENTER_PCT as f64 {
+        Regime::Heavy
+    } else {
+        Regime::Mixed
     }
 }
 
@@ -306,21 +314,118 @@ pub fn compute_p99_from_histogram(counts: &[u64; HIST_BUCKETS]) -> u64 {
 }
 
 // MWU ORCHESTRATOR
-// SCHMITT-GATED MULTIPLICATIVE WEIGHT UPDATES ACROSS ALL 11 TUNING KNOBS.
+// MULTIPLICATIVE WEIGHT UPDATES ACROSS ALL 11 TUNING KNOBS.
 // 6 EXPERT PROFILES, EACH A SCALE FACTOR ON THE REGIME BASELINE.
-// CORRECTED SCALE FACTORS: sum(EQ[i] * SCALE[i]) = 1.0 FOR EACH CONTINUOUS KNOB.
 // DISCRETE KNOBS (LAG, AFFINITY, DEPTH) USE MAJORITY VOTE, NOT WEIGHTED AVERAGE.
-// 4 LOSS PATHWAYS: P99 SPIKE, RESCUE DELTA, IO DELTA, FORK STORM.
+// 5 LOSS PATHWAYS: P99 SPIKE, RESCUE DELTA, IO DELTA, FORK STORM, CHAOS TRANSITION.
 // 1e-6 WEIGHT FLOOR PREVENTS UNDERFLOW (DEAD WEIGHTS CAN'T RECOVER).
+// PATHWAYS FIRE IMMEDIATELY -- NO SCHMITT-STYLE STREAK CONFIRMATION.
+//
+// v5.11.0: WEIGHTS ARE PER-REGIME (ONE VECTOR PER Light/Mixed/Heavy).
+// ON A STEADY WORKLOAD THE REGIME IS CONSTANT, SO THE ACTIVE VECTOR
+// SEES A STATIONARY LOSS STREAM AND CONVERGES HARD INSTEAD OF BEING
+// RE-LITIGATED EVERY TICK. BUTTERWORTH-DAMPED WEIGHT UPDATE, ANCHORED
+// LEARNING RATE, NO-OP-SKEWED INIT + WARM-UP GATE, ADAPTIVE STEP SIZE,
+// COARSE DIRTY-TRACKING, AND A WEIGHT-VARIANCE CONVERGENCE DETECTOR
+// THAT FEEDS THE QUIESCENCE GATE.
 
 const N_EXPERTS: usize = 6;
-const ETA: f64 = 8.0;
+
+// ANCHORED LEARNING RATE. ETA = ETA_CONST * sqrt(ln(N_EXPERTS) / T),
+// ETA_CONST = 1.0, T = 16 (CHAOS_WIN horizon). sqrt(ln 6 / 16) =
+// sqrt(1.79176 / 16) = 0.33465. THE OLD FIXED 8.0 OVERSHOT; THIS IS
+// THE THEORY-OPTIMAL HEDGE/EXP3 RATE FOR THE WINDOW HORIZON. IF
+// LATENCY RESPONSE REGRESSES, ETA_CONST IS THE PRIMARY TUNING SURFACE
+// (RAISE TOWARD 2-3 BEFORE TOUCHING THE QUIESCENCE GATE).
+const ETA: f64 = 0.33465;
+
 const RELAX_RATE: f64 = 0.80;
-const SPIKE_CONFIRM: u32 = 2;
 const RELAX_HOLD: u32 = 2;
 const RELAX_CEIL_PCT: f64 = 0.70;
-const EQUILIBRIUM: [f64; N_EXPERTS] = [0.08, 0.44, 0.12, 0.12, 0.12, 0.12];
+
+// NO-OP-SKEWED INIT: DOMINANT MASS ON THE ANCHOR (EX_BALANCED, THE
+// "LEAVE KNOBS AT REGIME BASELINE" EXPERT WITH THE ALL-1.00 SCALE
+// COLUMN). THIS IS BOTH THE INITIAL VECTOR AND THE RELAX TARGET -- A
+// HEALTHY WORKLOAD RELAXES BACK TO "DO NOTHING", NOT TO A CONTESTED
+// MIDDLE. NOTE: THE FULLY-RELAXED BLEND SITS AT ~0.996x BASELINE (THE
+// THIN AGGRESSOR SPREAD), NOT EXACTLY BASELINE -- SUB-1%, WITHIN
+// RUN-TO-RUN NOISE, AND THE COARSE DIRTY-TRACKING MEANS A STEADY
+// WORKLOAD RETURNS THE EXACT CACHED KNOBS ANYWAY.
+const EQUILIBRIUM: [f64; N_EXPERTS] = [0.04, 0.80, 0.04, 0.04, 0.04, 0.04];
+
 const WEIGHT_FLOOR: f64 = 1e-6;
+
+// CROSS-DOMAIN SCATTER THRESHOLD (PATHWAY 6). PLACEMENT-SIDE CROSS-DOMAIN MIGRATION
+// FRACTION ABOVE THIS (PERCENT OF DISPATCHES) IS TREATED AS STORM PRESSURE.
+// EEVDF'S MEASURED BASELINE IS ~14%; 20 LEAVES HEADROOM SO NORMAL CROSS-DOMAIN
+// WORK-CONSERVATION DOES NOT TRIP THE PATHWAY, ONLY A GENUINE SCATTER CLIMB.
+const SCATTER_THRESH_PCT: u64 = 20;
+
+// WARM-UP GATE: FOR THE FIRST WARMUP_TICKS CALLS PER REGIME, SCORE THE
+// LOSS PATHWAYS (KEEP prev_* EDGE STATE CURRENT) BUT SKIP THE WEIGHT
+// UPDATE AND RETURN BASELINE KNOBS. PREVENTS THE FIRST NOISY TICKS
+// AFTER START / REGIME CHANGE FROM YANKING KNOBS.
+const WARMUP_TICKS: u32 = 3;
+
+// DYNAMIC BUTTERWORTH DAMPING ON THE WEIGHT UPDATE. THE POST-LOSS /
+// POST-RELAX VECTOR IS LOW-PASS BLENDED TOWARD ITS ONE-TICK-AGO SELF
+// SO IT APPROACHES THE TARGET WITHOUT RINGING. THE BLEND COEFFICIENT
+// IS DRIVEN BY SIGNAL TRUST -- RQA-DET + HVG-LAMBDA -- NOT CPU COUNT.
+//
+// PRINCIPLE: BUTTERWORTH = MAXIMALLY-FLAT (FAITHFUL) TRACKING.
+// FAITHFUL TRACKING IS CORRECT ONLY WHEN THE SIGNAL IS TRUSTWORTHY;
+// WHEN THE SIGNAL IS ITSELF CHAOTIC, FAITHFUL TRACKING IS THE THING
+// THAT CAUSES THE CONTROLLER TO RING. SO DAMPING IS A FUNCTION OF
+// HOW STEADY THE WORKLOAD APPEARS:
+//   HIGH RQA-DET + lambda <= PERIODIC_MAX -> TRUST -> LIGHT DAMP (~0.85)
+//   LOW RQA-DET OR lambda >= CHAOTIC_MIN  -> NO TRUST -> HEAVY DAMP (0.50)
+//
+// REPLACED THE v5.10.0 CPU-COUNT CLIFF (0.707 BELOW 11 CPUS, 0.5 AT
+// OR ABOVE) WHICH DAMPED HARDER AT EXACTLY THE CORE COUNTS WHERE THE
+// CONTROLLER NEEDS THE MOST RESPONSIVENESS, PRODUCING THE 12C
+// REGRESSION CLUSTER (IPC BPF 12.9x, MIXED BPF 3.4x, LONGRUN
+// ADAPTIVE 2.2x). NR_CPUS NO LONGER PARTICIPATES IN DAMPING.
+const DAMP_LO: f64 = 0.50;
+const DAMP_HI: f64 = 0.85;
+// PENALTY APPLIED TO TRUST WHEN hvg_lambda CROSSES INTO THE
+// TRANSITION BAND (PERIODIC_MAX, CHAOTIC_MIN). LINEAR-RAMPED ACROSS
+// THE BAND; SATURATES AT 1.0 ONCE lambda >= CHAOTIC_MIN.
+const DAMP_LAMBDA_PENALTY: f64 = 0.20;
+// NEUTRAL TRUST WHEN RQA-DET IS NONE (WINDOW NOT FULL: NO RECURRENCE
+// EVIDENCE YET, NEITHER STEADY NOR CHAOTIC -- MIDDLE OF THE RANGE).
+const DAMP_TRUST_NEUTRAL: f64 = 0.5;
+
+// SIGNAL-TRUST -> DAMP COEFFICIENT. PURE FUNCTION OF THE TWO RAW
+// CHAOS SIGNALS ALREADY COMPUTED EVERY TICK FOR THE QUIESCENCE GATE.
+pub fn compute_damp(rqa_det: Option<f64>, hvg_lambda: f64) -> f64 {
+    let rqa_trust = rqa_det.unwrap_or(DAMP_TRUST_NEUTRAL);
+    let band = crate::chaos::HVG_LAMBDA_CHAOTIC_MIN - crate::chaos::HVG_LAMBDA_PERIODIC_MAX;
+    let lambda_penalty = if hvg_lambda > crate::chaos::HVG_LAMBDA_PERIODIC_MAX {
+        ((hvg_lambda - crate::chaos::HVG_LAMBDA_PERIODIC_MAX) / band).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let trust = (rqa_trust - DAMP_LAMBDA_PENALTY * lambda_penalty).clamp(0.0, 1.0);
+    DAMP_LO + (DAMP_HI - DAMP_LO) * trust
+}
+
+// ADAPTIVE STEP SIZE: step = STEP_BASE / (1 + residual), residual =
+// aggregate loss this tick. BIG DISTURBANCE -> SMALLER CORRECTIVE
+// STEP; STEADY -> step ~= STEP_BASE. FOLDED INTO THE DAMPING COEFF.
+const STEP_BASE: f64 = 1.0;
+
+// WEIGHT-VARIANCE CONVERGENCE DETECTOR. PER-REGIME RING OF THE LAST
+// VAR_HIST L1 WEIGHT-MOVEMENT SAMPLES. CONVERGED WHEN BOTH HALVES'
+// MEAN MOVEMENT ARE BELOW CONVERGE_MOVE_EPS AND THEIR RATIO IS WITHIN
+// [1 - DELTA, 1 + DELTA]. FEEDS THE QUIESCENCE GATE.
+const VAR_HIST: usize = 8;
+const CONVERGE_MOVE_EPS: f64 = 1e-3;
+const CONVERGE_RATIO_DELTA: f64 = 0.25;
+
+// COARSE DIRTY-TRACKING THRESHOLD: WHEN THE ACTIVE WEIGHT VECTOR MOVED
+// LESS THAN THIS (L1) THIS TICK, update() RETURNS THE CACHED BLEND
+// OUTPUT (last_knobs) AND SKIPS THE BLEND ENTIRELY.
+const WEIGHTS_MOVED_EPS: f64 = 1e-9;
 
 const EX_LATENCY: usize = 0;
 const EX_BALANCED: usize = 1;
@@ -341,13 +446,18 @@ const SC_SOJOURN: [f64; 6] = [0.80, 1.00, 1.60, 0.93, 0.53, 1.07];
 const SC_BURST: [f64; 6] = [0.74, 1.00, 1.47, 0.98, 0.49, 1.23];
 
 // DISCRETE KNOB VALUES (ABSOLUTE, NOT SCALE FACTORS)
-const DV_LAG: [u64; 6] = [6, 4, 3, 4, 4, 3];
+// FORK_STORM (INDEX 4) IS WEAK, NOT OFF: THE BPF READS affinity_mode ONLY AS
+// A BINARY GATE (main.bpf.c:1619, > 0) ON find_idle_l2_sibling. OFF DISABLES
+// THE L2 SIBLING PRE-FILTER, SO DURING A STORM WAKEES SEAT TOPOLOGY-BLIND AND
+// SCATTER CROSS-DOMAIN -- FIGHTING THE PHI/WARM-STAY PLACEMENT INSTEAD OF HELPING.
+// WEAK KEEPS THE L2 PRE-FILTER ON. (STRONG VS WEAK IS A NO-OP TO THE BPF; ONLY
+// OFF DIFFERS.)
 const DV_AFFINITY: [u64; 6] = [
     AFFINITY_STRONG,
     AFFINITY_STRONG,
     AFFINITY_WEAK,
     AFFINITY_WEAK,
-    AFFINITY_OFF,
+    AFFINITY_WEAK,
     AFFINITY_WEAK,
 ];
 fn blend_continuous(base: u64, scales: &[f64; 6], w: &[f64; N_EXPERTS]) -> u64 {
@@ -395,6 +505,26 @@ pub struct MwuSignals {
     pub io_pct: u64,
     pub rescue_count: u64,
     pub wakeup_rate: u64,
+    // CROSS-DOMAIN SCATTER FRACTION THIS TICK: PLACEMENT-SIDE CROSS-DOMAIN LANDINGS
+    // (XDOM_SEL_* + XDOM_ENQ_T1, EXCLUDING THE PHI-CORRECT STEAL/STEP5 WORK-
+    // CONSERVATION PATHS) AS A PERCENTAGE OF DISPATCHES. EEVDF BASELINE ~14%;
+    // PANDEMONIUM'S STORM REGRESSION RAN ~48%. PATHWAY 6 KEYS ON THIS SO MWU
+    // CAN SEE THE MIGRATION STORM IT MIGHT BE INDUCING AND STEER AWAY FROM IT.
+    pub scatter_pct: u64,
+    // CHAOS PRIMITIVES (RAW-WINDOW DERIVED, NO EWMA, NO SCHMITT).
+    // hvg_lambda     := HVG MEAN DEGREE OF THE idle_pct WINDOW
+    // bp_h_delta     := bp_h(THIS TICK) - bp_h(PREVIOUS TICK), WHERE
+    //                   bp_h IS BANDT-POMPE D=3 PERMUTATION ENTROPY ON
+    //                   THE wakeup_rate WINDOW, NORMALIZED TO [0, 1].
+    //                   POSITIVE = WORKLOAD ENTERED A MORE-DISORDERED
+    //                   ORDINAL REGIME WITHIN THE LAST SECOND.
+    pub hvg_lambda: f64,
+    pub bp_h_delta: f64,
+    // RQA DETERMINISM OVER THE SAME idle_pct WINDOW HVG SEES.
+    // 1.0 = PERFECTLY RECURRENT, 0.0 = NO RECURRENCE, None = WINDOW
+    // NOT YET FULL. CONSUMED BY compute_damp() AS THE PRIMARY TRUST
+    // SIGNAL FOR THE DYNAMIC BUTTERWORTH BLEND.
+    pub rqa_det: Option<f64>,
 }
 
 // SNAPSHOT OF THE BPF DAMPED-HARMONIC OSCILLATOR'S ADAPTIVE STATE.
@@ -410,6 +540,13 @@ pub struct OscillatorState {
     pub codel_target_ns: u64,
     pub codel_target_floor_ns: u64,
     pub codel_target_max_ns: u64,
+    // HOME NEAREST-PEER PHI HOLD (reff_value SLOT 0, ns). THE BPF WARM-STAY
+    // AND STEP-1 R_eff STEAL RELEASE AT codel_target_ns + THIS, NOT AT THE
+    // BARE CODEL WINDOW. position() MEASURES THE BARE WINDOW; THE ABSOLUTE
+    // CHECKS BELOW ADD THIS TERM SO THE DEFER DECISION IS TAKEN AGAINST THE
+    // EFFECTIVE PHI RELEASE POINT THE BPF ACTUALLY USES. 0 = READBACK
+    // UNAVAILABLE -> TREATED AS NO EXTRA HOLD (NEUTRAL).
+    pub home_dist_extra_ns: u64,
 }
 
 impl OscillatorState {
@@ -425,45 +562,125 @@ impl OscillatorState {
             .saturating_sub(self.codel_target_floor_ns) as f64;
         (pos / range).clamp(0.0, 1.0)
     }
+
+    // EFFECTIVE PHI RELEASE POINT: WHERE WARM-STAY / STEP-1 STEAL ACTUALLY LET
+    // A TASK LEAVE HOME (codel_target + NEAREST-PEER HOLD). THE DEFER GATE
+    // COMPARES THIS AGAINST codel_eq TO DECIDE WHETHER THE BPF HAS GENUINELY
+    // RESPONDED, RATHER THAN TRUSTING THE BARE-WINDOW position() ALONE.
+    pub fn effective_release_ns(&self) -> u64 {
+        self.codel_target_ns.saturating_add(self.home_dist_extra_ns)
+    }
 }
 
 pub struct MwuController {
-    weights: [f64; N_EXPERTS],
+    // PER-REGIME WEIGHT VECTORS, INDEXED BY `regime as usize`
+    // (Light=0, Mixed=1, Heavy=2). EACH REGIME KEEPS ITS OWN LEARNED
+    // VECTOR INSTEAD OF BEING RESET ON EVERY TRANSITION.
+    weights: [[f64; N_EXPERTS]; 3],
+    // ONE-TICK-AGO SNAPSHOT PER REGIME -- THE BUTTERWORTH DAMPING
+    // TARGET AND THE L1-MOVEMENT REFERENCE.
+    prev_weights: [[f64; N_EXPERTS]; 3],
+    // PER-REGIME RING OF L1 WEIGHT-MOVEMENT SAMPLES (CONVERGENCE).
+    weight_move_hist: [[f64; VAR_HIST]; 3],
+    move_hist_head: [usize; 3],
+    move_hist_filled: [usize; 3],
     baseline: TuningKnobs,
-    spike_streak: u32,
+    // CACHED BLEND OUTPUT -- RETURNED DIRECTLY WHEN THE ACTIVE VECTOR
+    // DID NOT MOVE THIS TICK (COARSE DIRTY-TRACKING).
+    last_knobs: TuningKnobs,
     healthy_streak: u32,
-    fork_streak: u32,
+    // WARM-UP GATE COUNTER, RESET PER REGIME CHANGE.
+    warmup_ticks: u32,
     prev_io_bucket: IoBucket,
     prev_rescuing: bool,
+    prev_lambda_chaotic: bool,
+    // LAST TICK'S CROSS-DOMAIN SCATTER %. PATHWAY 6 IS RISING-EDGE GATED ON THIS
+    // SO A STABLE HIGH-SCATTER REGIME (E.G. 8C+ THROUGHPUT WHERE IT WINS) IS
+    // NOT PENALIZED -- ONLY A CLIMBING STORM IS.
+    prev_scatter_pct: u64,
     losses_applied: bool,
+    // TRUE WHEN THE ACTIVE WEIGHT VECTOR MOVED THIS TICK.
+    weights_changed: bool,
 }
 
 impl MwuController {
     pub fn new(baseline: TuningKnobs) -> Self {
         Self {
-            weights: EQUILIBRIUM,
+            weights: [EQUILIBRIUM; 3],
+            prev_weights: [EQUILIBRIUM; 3],
+            weight_move_hist: [[0.0; VAR_HIST]; 3],
+            move_hist_head: [0; 3],
+            move_hist_filled: [0; 3],
             baseline,
-            spike_streak: 0,
+            last_knobs: baseline,
             healthy_streak: 0,
-            fork_streak: 0,
+            warmup_ticks: 0,
             prev_io_bucket: IoBucket::Mid,
             prev_rescuing: false,
+            prev_lambda_chaotic: false,
+            prev_scatter_pct: 0,
             losses_applied: false,
+            weights_changed: false,
         }
     }
 
-    pub fn reset(&mut self) {
-        self.weights = EQUILIBRIUM;
-        self.spike_streak = 0;
+    // RESET ONE REGIME'S WEIGHT VECTOR + THE CROSS-PATHWAY EDGE STATE.
+    // CALLED BY THE MONITOR LOOP ON A REGIME TRANSITION: a regime change
+    // IS A DISTURBANCE; STALE EDGE STATE SHOULD NOT CARRY OVER, AND THE
+    // WARM-UP GATE RE-ARMS.
+    pub fn reset_regime(&mut self, r: Regime) {
+        let ri = r as usize;
+        self.weights[ri] = EQUILIBRIUM;
+        self.prev_weights[ri] = EQUILIBRIUM;
+        self.weight_move_hist[ri] = [0.0; VAR_HIST];
+        self.move_hist_head[ri] = 0;
+        self.move_hist_filled[ri] = 0;
         self.healthy_streak = 0;
-        self.fork_streak = 0;
+        self.warmup_ticks = 0;
         self.prev_io_bucket = IoBucket::Mid;
         self.prev_rescuing = false;
+        self.prev_lambda_chaotic = false;
+        self.prev_scatter_pct = 0;
         self.losses_applied = false;
+        self.weights_changed = false;
+        self.last_knobs = self.baseline;
     }
 
     pub fn set_baseline(&mut self, baseline: TuningKnobs) {
         self.baseline = baseline;
+    }
+
+    // WEIGHT-VARIANCE CONVERGENCE DETECTOR. TRUE WHEN THE ACTIVE
+    // REGIME'S WEIGHT VECTOR HAS STOPPED MOVING -- BOTH HALVES OF THE
+    // MOVEMENT RING BELOW CONVERGE_MOVE_EPS AND THEIR RATIO NEAR 1.
+    // RETURNS FALSE UNTIL THE RING HAS FILLED (NO FREEZING ON A FRESH
+    // OR JUST-RESET CONTROLLER).
+    pub fn converged(&self, r: Regime) -> bool {
+        let ri = r as usize;
+        if self.move_hist_filled[ri] < VAR_HIST {
+            return false;
+        }
+        let hist = &self.weight_move_hist[ri];
+        let head = self.move_hist_head[ri];
+        let half = VAR_HIST / 2;
+        let mut recent = 0.0;
+        let mut older = 0.0;
+        for k in 0..half {
+            recent += hist[(head + VAR_HIST - 1 - k) % VAR_HIST];
+            older += hist[(head + k) % VAR_HIST];
+        }
+        let recent_mean = recent / half as f64;
+        let older_mean = older / half as f64;
+        if recent_mean >= CONVERGE_MOVE_EPS || older_mean >= CONVERGE_MOVE_EPS {
+            return false;
+        }
+        // BOTH HALVES BELOW EPS. IF THE OLDER HALF IS ESSENTIALLY ZERO
+        // BOTH ARE ZERO -> CONVERGED. OTHERWISE REQUIRE THE RATIO NEAR 1
+        // (NOT STILL DECAYING).
+        if older_mean < 1e-12 {
+            return true;
+        }
+        ((recent_mean / older_mean) - 1.0).abs() <= CONVERGE_RATIO_DELTA
     }
 
     pub fn update(
@@ -473,7 +690,9 @@ impl MwuController {
         _nr_cpus: u64,
         tau_ns: u64,
         osc: &OscillatorState,
+        regime: Regime,
     ) -> TuningKnobs {
+        let ri = regime as usize;
         let worst = sig.p99_ns.max(sig.interactive_p99_ns);
         let above = worst > ceiling;
         let below_relax = (worst as f64) < (ceiling as f64 * RELAX_CEIL_PCT);
@@ -488,29 +707,38 @@ impl MwuController {
         // POSITION 0.0 = TIGHTENED (FLOOR), 1.0 = RELAXED (MAX).
         // < 0.40 -> BPF HAS RESPONDED HEAVILY; SKIP RESCUE-DRIVEN LOSSES.
         // > 0.90 -> BPF SAYS QUIET; RESCUE BURSTS ARE STALE NOISE; SKIP.
+        //
+        // position() MEASURES THE BARE codel WINDOW, BUT THE BPF ACTUALLY
+        // RELEASES WARM-STAY / STEP-1 STEAL AT codel_target + home_dist_extra
+        // (THE NEAREST-PEER PHI HOLD). WITH A LARGE HOLD THE BARE POSITION CAN
+        // READ "LOOSE" WHILE THE EFFECTIVE RELEASE IS STILL HARD, AND MWU WOULD
+        // WRONGLY STAY OUT OF GENUINE RESCUE PRESSURE. CONFIRM EACH SIDE WITH
+        // THE EFFECTIVE RELEASE VS THE PHI EQUILIBRIUM (codel_eq, FROM THE
+        // BASELINE): ONLY TREAT THE OSCILLATOR AS TIGHT WHEN THE EFFECTIVE
+        // RELEASE IS BELOW EQUILIBRIUM, AND AS LOOSE WHEN IT IS ABOVE. WITH
+        // home_dist_extra_ns = 0 (READBACK UNAVAILABLE) THIS REDUCES TO THE
+        // BARE-POSITION BEHAVIOR. codel_eq = 0 (UNSEEDED) DISABLES THE ABSOLUTE
+        // QUALIFIER (THE BARE POSITION GOVERNS), NEVER GATING SPURIOUSLY.
         let osc_pos = osc.position();
-        let osc_already_tight = osc_pos < 0.40;
-        let osc_already_loose = osc_pos > 0.90;
+        let eff_release = osc.effective_release_ns();
+        let codel_eq = self.baseline.codel_eq_ns;
+        let osc_already_tight = osc_pos < 0.40 && (codel_eq == 0 || eff_release < codel_eq);
+        let osc_already_loose = osc_pos > 0.90 && (codel_eq == 0 || eff_release > codel_eq);
         let defer_to_oscillator = osc_already_tight || osc_already_loose;
 
         let mut losses = [0.0f64; N_EXPERTS];
         let mut has_loss = false;
 
-        // PATHWAY 1: P99 SPIKE (SCHMITT-GATED)
+        // PATHWAY 1: P99 SPIKE (FIRES IMMEDIATELY)
         if above {
             self.healthy_streak = 0;
-            self.spike_streak += 1;
-            if self.spike_streak >= SPIKE_CONFIRM {
-                let v = ((worst - ceiling) as f64 / ceiling as f64).min(3.0);
-                losses[EX_BALANCED] += v * 0.5;
-                losses[EX_THROUGHPUT] += v * 1.0;
-                losses[EX_IO_HEAVY] += v * 0.6;
-                losses[EX_FORK_STORM] += v * 0.3;
-                losses[EX_SATURATED] += v * 0.9;
-                has_loss = true;
-            }
-        } else {
-            self.spike_streak = 0;
+            let v = ((worst - ceiling) as f64 / ceiling as f64).min(3.0);
+            losses[EX_BALANCED] += v * 0.5;
+            losses[EX_THROUGHPUT] += v * 1.0;
+            losses[EX_IO_HEAVY] += v * 0.6;
+            losses[EX_FORK_STORM] += v * 0.3;
+            losses[EX_SATURATED] += v * 0.9;
+            has_loss = true;
         }
 
         // PATHWAY 2: RESCUE DELTA (0 -> NONZERO TRANSITION)
@@ -553,13 +781,14 @@ impl MwuController {
         }
         self.prev_io_bucket = cur_io;
 
-        // PATHWAY 4: FORK STORM (SCHMITT-GATED, PRESSURE-CONFIRMED).
+        // PATHWAY 4: FORK STORM (PRESSURE-CONFIRMED, FIRES IMMEDIATELY).
         // GATE THRESHOLD IS TAU-DERIVED. sig.wakeup_rate IS THE RAW TOTAL
         // WAKES/SEC; scale_tau_u64(tau, K_FORK_STORM_RATE_Q16) PRODUCES
         // THE COMPARISON THRESHOLD. AT THE 12C REFERENCE (tau=40MS) THE
         // THRESHOLD IS ~8000/SEC; AT 4C IT TIGHTENS TO ~1200/SEC. A FORK
         // STORM ALSO REQUIRES ACTIVE RESCUES (rescue_count > 0) AS GROUND-
-        // TRUTH PRESSURE.
+        // TRUTH PRESSURE -- THE PRESSURE PREDICATE IS THE CONFIRMATION;
+        // NO ADDITIONAL STREAK COUNTER.
         //
         // FORK_STORM EXPERT (SC_SLICE=0.49, SC_PREEMPT=0.49, SC_BATCH=0.52,
         // SC_SOJOURN=0.53, SC_BURST=0.49) DOMINATES THE BLEND DURING A REAL
@@ -567,83 +796,227 @@ impl MwuController {
         // / batch_slice_ns DOWN END-TO-END.
         let fork_thresh = scale_tau_u64(tau_ns, K_FORK_STORM_RATE_Q16).max(FORK_STORM_RATE_FLOOR);
         let fork_storm = sig.wakeup_rate > fork_thresh && sig.rescue_count > 0;
-        if fork_storm {
-            self.fork_streak += 1;
-            if self.fork_streak >= SPIKE_CONFIRM && !defer_to_oscillator {
-                let denom = fork_thresh.max(1) as f64;
-                let v = ((sig.wakeup_rate as f64 / denom) - 1.0).clamp(0.0, 3.0);
-                losses[EX_BALANCED] += v * 0.30;
-                losses[EX_THROUGHPUT] += v * 1.00;
-                losses[EX_IO_HEAVY] += v * 0.50;
-                losses[EX_SATURATED] += v * 0.80;
-                has_loss = true;
-            }
-        } else {
-            self.fork_streak = 0;
+        if fork_storm && !defer_to_oscillator {
+            let denom = fork_thresh.max(1) as f64;
+            let v = ((sig.wakeup_rate as f64 / denom) - 1.0).clamp(0.0, 3.0);
+            losses[EX_BALANCED] += v * 0.30;
+            losses[EX_THROUGHPUT] += v * 1.00;
+            losses[EX_IO_HEAVY] += v * 0.50;
+            losses[EX_SATURATED] += v * 0.80;
+            has_loss = true;
         }
 
-        // APPLY LOSSES WITH WEIGHT FLOOR
+        // PATHWAY 5: CHAOS TRANSITION (RAW-WINDOW, NO EWMA, NO SCHMITT)
+        // FIRES WHEN THE WORKLOAD'S ORDINAL OR AMPLITUDE-DEGREE STRUCTURE
+        // SHIFTS WITHIN THE LAST WINDOW. THE FAILED-PREDICTION INTERPRETATION
+        // IS: WHICHEVER EXPERT IS CURRENTLY DOMINANT WAS PRICED FOR THE
+        // PREVIOUS WINDOW; PENALIZE IT PROPORTIONAL TO THE TRANSITION SIZE
+        // SO THE BLEND RAPIDLY RE-WEIGHTS TOWARD BALANCED / SATURATED.
+        // EX_BALANCED IS EXEMPT (IT IS THE REGIME-AGNOSTIC BASELINE).
+        //
+        // GATE CONDITIONS (EITHER FIRES):
+        //   - bp_h_delta > 0.10   (>10% NORMALIZED PERMUTATION-ENTROPY JUMP)
+        //   - hvg_lambda CROSSED CHAOTIC_MIN UPWARD
+        let bp_jump = sig.bp_h_delta > 0.10;
+        let lambda_cross =
+            sig.hvg_lambda >= crate::chaos::HVG_LAMBDA_CHAOTIC_MIN && !self.prev_lambda_chaotic;
+        let chaos_transition = bp_jump || lambda_cross;
+        if chaos_transition {
+            // SIZE OF THE LOSS: SCALES WITH WHICHEVER GATE TRIGGERED HARDER.
+            let v_bp = (sig.bp_h_delta / 0.10).clamp(0.0, 3.0);
+            let v_l = if lambda_cross {
+                ((sig.hvg_lambda - crate::chaos::HVG_LAMBDA_CHAOTIC_MIN)
+                    / (4.0 - crate::chaos::HVG_LAMBDA_CHAOTIC_MIN))
+                    .clamp(0.0, 1.5)
+            } else {
+                0.0
+            };
+            let v = v_bp.max(v_l);
+            // FIND THE DOMINANT EXPERT (HIGHEST WEIGHT) AND PENALIZE IT.
+            // EX_BALANCED IS EXEMPT (THE ANCHOR IS NEVER PENALIZED).
+            let mut dom_idx = EX_BALANCED;
+            let mut dom_w = 0.0f64;
+            for i in 0..N_EXPERTS {
+                if i == EX_BALANCED {
+                    continue;
+                }
+                if self.weights[ri][i] > dom_w {
+                    dom_w = self.weights[ri][i];
+                    dom_idx = i;
+                }
+            }
+            if dom_idx != EX_BALANCED && dom_w > 0.0 {
+                losses[dom_idx] += v * 0.8;
+                has_loss = true;
+            }
+        }
+        self.prev_lambda_chaotic = sig.hvg_lambda >= crate::chaos::HVG_LAMBDA_CHAOTIC_MIN;
+
+        // PATHWAY 6: CROSS-DOMAIN SCATTER (PHI-AWARE, RISING-EDGE GATED).
+        // sig.scatter_pct IS THE PLACEMENT-SIDE CROSS-DOMAIN MIGRATION FRACTION
+        // (XDOM_SEL_* + XDOM_ENQ_T1, EXCLUDING THE PHI-CORRECT STEAL/STEP5
+        // WORK-CONSERVATION PATHS -- COMPUTED IN THE ADAPTIVE LOOP). WHEN IT
+        // CLIMBS PAST THE EEVDF-BASELINE HEADROOM THE BLEND HAS DRIFTED TOWARD
+        // EXPERTS THAT SCATTER WAKEES THE BPF WARM-STAY/PER-CPU LANDING TRIED
+        // TO KEEP HOME. PENALIZE THE EXPERTS THAT FAVOR WIDE SLICES + WEAK/OFF
+        // AFFINITY (THROUGHPUT, SATURATED, FORK_STORM) SO THE BLEND RE-WEIGHTS
+        // TOWARD LATENCY/BALANCED AND AFFINITY STRONG, ALIGNING THE ADAPTIVE
+        // LAYER WITH PHI PLACEMENT INSTEAD OF FIGHTING IT.
+        //
+        // RISING-EDGE: ONLY FIRES WHILE SCATTER IS HIGH AND INCREASING. A
+        // STABLE HIGH-SCATTER REGIME (8C+ THROUGHPUT, WHERE WIDE-SLICE SCATTER
+        // IS A WINNING TRADE) PLATEAUS AND IS NOT PENALIZED -- ONLY A CLIMBING
+        // STORM IS. EX_BALANCED/EX_LATENCY ARE NEVER PENALIZED (THEY ARE THE
+        // DIRECTION WE WANT THE BLEND TO MOVE TOWARD).
+        let scatter_high = sig.scatter_pct > SCATTER_THRESH_PCT;
+        let scatter_rising = scatter_high && sig.scatter_pct > self.prev_scatter_pct;
+        if scatter_rising {
+            let v = ((sig.scatter_pct as f64 - SCATTER_THRESH_PCT as f64)
+                / SCATTER_THRESH_PCT as f64)
+                .clamp(0.0, 3.0);
+            losses[EX_THROUGHPUT] += v * 1.00;
+            losses[EX_SATURATED] += v * 0.80;
+            losses[EX_FORK_STORM] += v * 0.60;
+            has_loss = true;
+        }
+        self.prev_scatter_pct = sig.scatter_pct;
+
+        // WARM-UP GATE. THE PATHWAYS ABOVE HAVE SCORED `losses` AND
+        // UPDATED THE prev_* EDGE STATE. FOR THE FIRST WARMUP_TICKS
+        // CALLS PER REGIME, SKIP THE WEIGHT UPDATE ENTIRELY AND RETURN
+        // BASELINE -- THE FIRST NOISY TICKS AFTER START / REGIME CHANGE
+        // MUST NOT YANK KNOBS.
+        if self.warmup_ticks < WARMUP_TICKS {
+            self.warmup_ticks += 1;
+            self.losses_applied = has_loss;
+            self.weights_changed = false;
+            let mut k = self.baseline;
+            k.topology_tau_ns = 0;
+            k.codel_eq_ns = 0;
+            self.last_knobs = k;
+            return k;
+        }
+
+        // ACTIVE WEIGHT VECTOR -- LOCAL COPY, MUTATED THROUGH THE
+        // LOSS / RELAX / DAMP STAGES THEN COMMITTED BACK.
+        let mut w = self.weights[ri];
+
+        // APPLY LOSSES WITH WEIGHT FLOOR.
         if has_loss {
             for i in 0..N_EXPERTS {
                 if losses[i] > 0.0 {
-                    self.weights[i] *= (-ETA * losses[i]).exp();
+                    w[i] *= (-ETA * losses[i]).exp();
                 }
-                if self.weights[i] < WEIGHT_FLOOR {
-                    self.weights[i] = WEIGHT_FLOOR;
+                if w[i] < WEIGHT_FLOOR {
+                    w[i] = WEIGHT_FLOOR;
                 }
             }
-            let sum: f64 = self.weights.iter().sum();
-            for w in self.weights.iter_mut() {
-                *w /= sum;
+            let sum: f64 = w.iter().sum();
+            for x in w.iter_mut() {
+                *x /= sum;
             }
         }
 
-        // RELAXATION
+        // RELAXATION -- TOWARD THE NO-OP-SKEWED EQUILIBRIUM.
         if !has_loss && below_relax {
             self.healthy_streak += 1;
             if self.healthy_streak >= RELAX_HOLD {
                 for i in 0..N_EXPERTS {
-                    self.weights[i] =
-                        (1.0 - RELAX_RATE) * self.weights[i] + RELAX_RATE * EQUILIBRIUM[i];
+                    w[i] = (1.0 - RELAX_RATE) * w[i] + RELAX_RATE * EQUILIBRIUM[i];
                 }
             }
         } else if !has_loss {
             self.healthy_streak = 0;
         }
 
+        // DYNAMIC BUTTERWORTH DAMPING + ADAPTIVE STEP. `w` IS NOW THE
+        // RAW POST-LOSS / POST-RELAX TARGET; LOW-PASS BLEND IT TOWARD
+        // THE ONE-TICK-AGO VECTOR. DAMP IS DRIVEN BY SIGNAL TRUST
+        // (RQA-DET + HVG-LAMBDA), NOT CPU COUNT -- SEE compute_damp.
+        // residual = aggregate loss this tick: a big disturbance takes
+        // a smaller corrective step (anti-overshoot governor).
+        let residual: f64 = losses.iter().sum();
+        let step = STEP_BASE / (1.0 + residual);
+        let damp = compute_damp(sig.rqa_det, sig.hvg_lambda);
+        let eff = (damp * step).clamp(0.0, 1.0);
+        let prev = self.prev_weights[ri];
+        for i in 0..N_EXPERTS {
+            w[i] = eff * w[i] + (1.0 - eff) * prev[i];
+            if w[i] < WEIGHT_FLOOR {
+                w[i] = WEIGHT_FLOOR;
+            }
+        }
+        let sum: f64 = w.iter().sum();
+        for x in w.iter_mut() {
+            *x /= sum;
+        }
+
+        // L1 MOVEMENT FROM LAST TICK -- FEEDS THE CONVERGENCE DETECTOR.
+        let mut move_l1 = 0.0;
+        for i in 0..N_EXPERTS {
+            move_l1 += (w[i] - prev[i]).abs();
+        }
+        let h = self.move_hist_head[ri];
+        self.weight_move_hist[ri][h] = move_l1;
+        self.move_hist_head[ri] = (h + 1) % VAR_HIST;
+        if self.move_hist_filled[ri] < VAR_HIST {
+            self.move_hist_filled[ri] += 1;
+        }
+
+        // COMMIT: w_new IS BOTH THE ACTIVE VECTOR AND NEXT TICK'S
+        // prev SNAPSHOT.
+        self.weights[ri] = w;
+        self.prev_weights[ri] = w;
+        self.weights_changed = move_l1 > WEIGHTS_MOVED_EPS;
         self.losses_applied = has_loss;
 
-        // BLEND: CONTINUOUS KNOBS VIA CORRECTED SCALE FACTORS, DISCRETE VIA MAJORITY
-        let b = &self.baseline;
-        let blended_slice = blend_continuous(b.slice_ns, &SC_SLICE, &self.weights);
-        let blended_burst = blend_continuous(b.burst_slice_ns, &SC_BURST, &self.weights);
-        let mut blended_sojourn = blend_continuous(b.sojourn_thresh_ns, &SC_SOJOURN, &self.weights);
+        // COARSE DIRTY-TRACKING: IF THE VECTOR DID NOT MOVE, THE BLEND
+        // OUTPUT IS IDENTICAL TO LAST TICK -- RETURN THE CACHE AND SKIP
+        // THE BLEND ENTIRELY.
+        if !self.weights_changed {
+            return self.last_knobs;
+        }
 
-        // SOJOURN FLOOR: dispatch waterfall services aged overflow at
-        // overflow_sojourn_rescue_ns (BPF-side, tau-clamped to [4ms, 10ms]).
-        // tick() also kicks per-CPU DSQs whose oldest task has aged past
-        // sojourn_thresh_ns. If MWU drives sojourn_thresh_ns below the
-        // dispatch service window + one slice, every tick generates kicks
-        // on per-CPU DSQs that the dispatcher will service on the next
-        // dispatch anyway -- a kick storm. Floor against the worst-case
-        // dispatch service window to prevent it.
-        let sojourn_floor = 4_000_000u64.saturating_add(blended_slice);
+        // BLEND: CONTINUOUS KNOBS VIA SCALE FACTORS, DISCRETE VIA MAJORITY.
+        let b = &self.baseline;
+        let blended_slice = blend_continuous(b.slice_ns, &SC_SLICE, &w);
+        let blended_burst = blend_continuous(b.burst_slice_ns, &SC_BURST, &w);
+        let mut blended_sojourn = blend_continuous(b.sojourn_thresh_ns, &SC_SOJOURN, &w);
+
+        // SOJOURN FLOOR: tick() KICKS PER-CPU DSQs WHOSE OLDEST TASK HAS AGED
+        // PAST sojourn_thresh_ns (BPF, main.bpf.c:2374). THAT EVICTION DEADLINE
+        // MUST NOT SIT ABOVE THE THRESHOLD WARM-STAY / STEP-1 R_eff STEAL
+        // ACTUALLY RELEASE AT, OR THE ADAPTIVE LAYER HOLDS TASKS LONG PAST THE
+        // POINT THE PHI GATES ASSUMED RELIEF HAD ARRIVED (THE 2C/4C LONG-RUN /
+        // LAT P99 TAIL). THE BPF OVERFLOW RESCUE IS NO LONGER "[4ms,10ms]" --
+        // IT WAS REWIRED TO THE PHI EQUILIBRIUM (overflow_sojourn_rescue_ns =
+        // codel_target_equilibrium_ns, main.bpf.c:995), SUB-MS AT LOW CORE.
+        // ANCHOR THE FLOOR TO THAT SAME PHI-DERIVED EQUILIBRIUM SO USERSPACE
+        // EVICTION AND THE BPF PHI RELEASE AGREE. THE +blended_slice TERM IS
+        // THE GENUINE DISPATCH-SERVICE-WINDOW GUARD (KEPT). codel_eq_ns CAN BE
+        // SEEDED 0 BY MwuController::new BEFORE THE TOPOLOGY OVERLAY LANDS --
+        // GUARD AGAINST COLLAPSING THE FLOOR AND REINTRODUCING THE KICK STORM.
+        let floor_base = if b.codel_eq_ns >= 200_000 {
+            b.codel_eq_ns
+        } else {
+            4_000_000
+        };
+        let sojourn_floor = floor_base.saturating_add(blended_slice);
         if blended_sojourn < sojourn_floor {
             blended_sojourn = sojourn_floor;
         }
 
-        TuningKnobs {
+        let k = TuningKnobs {
             slice_ns: blended_slice,
-            preempt_thresh_ns: blend_continuous(b.preempt_thresh_ns, &SC_PREEMPT, &self.weights),
-            lag_scale: majority_discrete(&DV_LAG, &self.weights),
-            batch_slice_ns: blend_continuous(b.batch_slice_ns, &SC_BATCH, &self.weights),
-            lat_cri_thresh_high: blend_continuous(
-                b.lat_cri_thresh_high,
-                &SC_LCRI_HI,
-                &self.weights,
-            ),
-            lat_cri_thresh_low: blend_continuous(b.lat_cri_thresh_low, &SC_LCRI_LO, &self.weights),
-            affinity_mode: majority_discrete(&DV_AFFINITY, &self.weights),
+            // FLOOR AT REGIME BASELINE: MWU may loosen preempt (raise it) but
+            // never tighten below baseline -- sub-ms preempt at 2C thrashed the
+            // longrun (the ADAPTIVE 2C tail). No-op where MWU stays above it.
+            preempt_thresh_ns: blend_continuous(b.preempt_thresh_ns, &SC_PREEMPT, &w)
+                .max(b.preempt_thresh_ns),
+            batch_slice_ns: blend_continuous(b.batch_slice_ns, &SC_BATCH, &w),
+            lat_cri_thresh_high: blend_continuous(b.lat_cri_thresh_high, &SC_LCRI_HI, &w),
+            lat_cri_thresh_low: blend_continuous(b.lat_cri_thresh_low, &SC_LCRI_LO, &w),
+            affinity_mode: majority_discrete(&DV_AFFINITY, &w),
             sojourn_thresh_ns: blended_sojourn,
             burst_slice_ns: blended_burst,
             // topology_tau_ns AND codel_eq_ns ARE OWNED BY THE TOPOLOGY LAYER;
@@ -651,15 +1024,116 @@ impl MwuController {
             // VALUES BACK ONTO MWU'S OUTPUT BEFORE WRITING -- PASSTHROUGH.
             topology_tau_ns: 0,
             codel_eq_ns: 0,
-        }
+        };
+        self.last_knobs = k;
+        k
     }
 
     pub fn had_losses(&self) -> bool {
         self.losses_applied
     }
 
-    pub fn scale(&self) -> f64 {
-        let s: f64 = (0..N_EXPERTS).map(|i| self.weights[i] * SC_SLICE[i]).sum();
-        s
+    pub fn scale(&self, r: Regime) -> f64 {
+        let w = &self.weights[r as usize];
+        (0..N_EXPERTS).map(|i| w[i] * SC_SLICE[i]).sum()
     }
+}
+
+// QUIESCENCE GATE
+// DETECTS STEADY STATE CHEAPLY AND LATCHES A "FROZEN" FLAG THAT TELLS
+// THE MONITOR LOOP TO SKIP THE EXPENSIVE MWU RETUNE + KNOB WRITE. THE
+// LOOP STILL TICKS AT 1 HZ -- THE CHAOS SENSORS ARE THE EXIT CONDITION
+// FOR FROZEN MODE -- BUT THE ORCHESTRATOR MACHINERY STOPS.
+//
+// STEADY STATE IS THE CONJUNCTION OF THREE SIGNALS, HELD FOR
+// QUIESCE_ENTER_TICKS CONSECUTIVE TICKS:
+//   - HVG MEAN DEGREE IN THE PERIODIC BAND (lambda <= PERIODIC_MAX);
+//     NOTE THE Engine A/B SHORTHAND "lambda ~= ln(3/2)" REFERS TO THE
+//     IID *CHARACTERISTIC EXPONENT*, NOT A lambda VALUE -- THE GATE
+//     USES THE PERIODIC-BAND THRESHOLD.
+//   - RQA DETERMINISM AT OR ABOVE RQA_DET_STEADY_MIN.
+//   - THE ACTIVE-REGIME MWU WEIGHT VECTOR HAS CONVERGED.
+// EXIT IS IMMEDIATE WHEN THE SIGNAL LEAVES THE BAND -- THE STREAK
+// COUNTER PROVIDES ENTRY HYSTERESIS, NO EXIT HYSTERESIS NEEDED.
+
+// CONSECUTIVE IN-BAND TICKS BEFORE THE GATE LATCHES (~1/4 OF THE
+// 16-TICK CHAOS WINDOW).
+pub const QUIESCE_ENTER_TICKS: u32 = 4;
+
+pub struct QuiescenceState {
+    in_band_streak: u32,
+    frozen: bool,
+}
+
+impl Default for QuiescenceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QuiescenceState {
+    pub const fn new() -> Self {
+        Self {
+            in_band_streak: 0,
+            frozen: false,
+        }
+    }
+
+    // ADVANCE THE GATE ONE TICK. RETURNS THE LATCHED `frozen` FLAG.
+    // rqa_det IS None WHEN THE WINDOW IS NOT YET FULL -- THAT NEVER
+    // COUNTS AS IN-BAND (NEVER FREEZE ON INSUFFICIENT DATA).
+    pub fn update(&mut self, hvg_lambda: f64, rqa_det: Option<f64>, mwu_converged: bool) -> bool {
+        let in_band = hvg_lambda <= crate::chaos::HVG_LAMBDA_PERIODIC_MAX
+            && rqa_det.map_or(false, |d| d >= crate::chaos::RQA_DET_STEADY_MIN)
+            && mwu_converged;
+
+        if in_band {
+            self.in_band_streak = self.in_band_streak.saturating_add(1);
+            if self.in_band_streak >= QUIESCE_ENTER_TICKS {
+                self.frozen = true;
+            }
+        } else {
+            self.in_band_streak = 0;
+            self.frozen = false;
+        }
+        self.frozen
+    }
+}
+
+// ADAPTIVE-RARITY RETUNE INTERVAL
+// WHEN THE ORCHESTRATOR IS NOT FROZEN BUT A RETUNE PRODUCES ONLY A
+// SUB-THRESHOLD KNOB DELTA, STRETCH THE INTERVAL BETWEEN RETUNES x1.5
+// (UP TO A FORCED CEILING) SO THE LOOP CONVERGES TOWARD QUIESCENCE.
+// ANY DISTURBANCE SNAPS IT BACK TO THE BASE INTERVAL.
+
+pub const RETUNE_INTERVAL_BASE: u32 = 1;
+pub const RETUNE_INTERVAL_MAX: u32 = 8;
+
+pub fn next_retune_interval(cur: u32, sub_threshold: bool, disturbed: bool) -> u32 {
+    if disturbed {
+        RETUNE_INTERVAL_BASE
+    } else if sub_threshold {
+        // x1.5 STRETCH, BUT ALWAYS GROW BY AT LEAST 1 -- INTEGER x1.5
+        // OF THE BASE INTERVAL (1) WOULD OTHERWISE STALL AT 1.
+        let stretched = (cur.saturating_mul(3) / 2).max(cur + 1);
+        stretched.clamp(RETUNE_INTERVAL_BASE, RETUNE_INTERVAL_MAX)
+    } else {
+        cur
+    }
+}
+
+// COMMIT-ON-CHANGE: TRUE IFF THE TWO KNOB SETS DIFFER ON ANY
+// MWU-OWNED FIELD. topology_tau_ns / codel_eq_ns ARE EXCLUDED -- THEY
+// ARE OWNED BY THE TOPOLOGY LAYER AND WRITTEN INDEPENDENTLY VIA
+// write_topology_fields(); INCLUDING THEM WOULD SPURIOUSLY TRIP THE
+// DIFF EVERY TICK THE LOOP OVERLAYS THEM.
+pub fn knobs_differ(a: &TuningKnobs, b: &TuningKnobs) -> bool {
+    a.slice_ns != b.slice_ns
+        || a.preempt_thresh_ns != b.preempt_thresh_ns
+        || a.batch_slice_ns != b.batch_slice_ns
+        || a.lat_cri_thresh_high != b.lat_cri_thresh_high
+        || a.lat_cri_thresh_low != b.lat_cri_thresh_low
+        || a.affinity_mode != b.affinity_mode
+        || a.sojourn_thresh_ns != b.sojourn_thresh_ns
+        || a.burst_slice_ns != b.burst_slice_ns
 }

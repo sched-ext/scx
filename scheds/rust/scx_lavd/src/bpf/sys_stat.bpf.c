@@ -7,6 +7,7 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
+#include "util.bpf.h"
 #include "power.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
@@ -145,7 +146,7 @@ static void collect_sys_stat(void)
 					break;
 
 				cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
-				if (use_per_cpu_dsq())
+				if (use_per_cpu_dsq() && cpu == get_primary_cpu(cpu))
 					cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
 			}
 		}
