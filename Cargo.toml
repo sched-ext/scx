@@ -14,6 +14,7 @@ members = [
     "scheds/rust/scx_cake",
     "scheds/rust/scx_chaos",
     "scheds/rust/scx_cosmos",
+    "scheds/rust/scx_forge",
     "scheds/rust/scx_flash",
     "scheds/rust/scx_lavd",
     "scheds/rust/scx_layered",
@@ -25,8 +26,9 @@ members = [
     "scheds/rust/scx_tickless",
     "scheds/experimental/scx_flow",
     "scheds/experimental/scx_rlfifo",
-    "tools/scxcash",
+    "tools/scx_characterize",
     "tools/scxtop",
+    "tools/scx_forge_agent",
     "tools/vmlinux_docify",
     "tools/xtask",
 ]

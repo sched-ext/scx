@@ -1,0 +1,8 @@
+alpha worker 1000/2001 0.000000050: 1 /cg 2 foo (bar.so) 3 4K
+alpha worker 1000/2001 0.000000100: 1 /cg 2 foo (bar.so) 3 4K
+alpha worker 1000/2001 0.000000250: 1 /cg 2 foo (bar.so) 3 4K
+alpha worker 1000/2001 0.000000300: 1 /cg 2 foo (bar.so) 3 4K
+beta 1000/3002 0.000000140: 1 /cg 2 foo (bar.so) 3 4K
+beta 1000/3002 0.000000150: 1 /cg 2 foo (bar.so) 3 4K
+beta 1000/3002 0.000000220: 1 /cg 2 foo (bar.so) 3 4K
+gamma 5000/5000 0.000000220: 1 /cg 2 foo (bar.so) 3 4K

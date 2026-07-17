@@ -1,0 +1,25 @@
+[package]
+name = "scx_characterize"
+version = "1.1.2"
+edition = "2021"
+authors = ["Kumar Kartikeya Dwivedi <memxor@gmail.com>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/sched-ext/scx"
+description = "Workload characterization tool for sched_ext schedulers"
+build = "build.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
+ctrlc = "3"
+libc = "0.2"
+libbpf-rs = "=0.26.2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+scx_cargo = { path = "../../rust/scx_cargo", version = "1.1.2" }
+
+[dev-dependencies]
+tempfile = "3"

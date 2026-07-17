@@ -37,6 +37,7 @@ use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
+use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
@@ -375,6 +376,8 @@ impl Opts {
 
         if !EnergyModel::has_energy_model() || !self.cpu_pref_order.is_empty() {
             self.no_use_em = true;
+        }
+        if self.no_use_em {
             info!("Energy model won't be used for CPU preference order.");
         }
 
@@ -483,7 +486,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize CPU topology with CLI arguments
-        let order = CpuOrder::new(opts.topology.as_ref()).unwrap();
+        let order = CpuOrder::new(opts.topology.as_ref(), opts.no_use_em).unwrap();
         Self::init_cpus(&mut skel, &order);
         Self::init_cpdoms(&mut skel, &order);
 
@@ -495,6 +498,10 @@ impl<'a> Scheduler<'a> {
 
         // Initialize skel according to @opts.
         Self::init_globals(&mut skel, &opts, &order, debug_level);
+
+        // Size the cpu.max per-(cgroup, LLC) map to this system's LLC count
+        // before loading (a map's max_entries is fixed at load time).
+        scx_utils::resize_cgroup_bw_llc_map(skel.open_object_mut(), order.nr_llcs)?;
 
         // Initialize arena
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;

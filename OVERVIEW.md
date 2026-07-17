@@ -150,23 +150,26 @@ BPF also provides programs with a rich set of APIs, such as maps, kfuncs, and
 BPF helpers. In addition to providing useful building blocks to programs that
 run entirely in kernel space (such as many of our example schedulers), these
 APIs also allow programs to leverage user space in making scheduling decisions.
-Specifically, the Atropos sample scheduler has a relatively simple weighted
+Specifically, the `scx_rusty` sample scheduler has a relatively simple weighted
 vtime or FIFO scheduling layer in BPF, paired with a load balancing component
 in userspace written in Rust. As described in more detail below, we also built
 a more general user-space scheduling framework called "rhone" by leveraging
 various BPF features.
 
 On the other hand, BPF does have shortcomings, as can be plainly seen from the
-complexity in some of the example schedulers. `scx_pair.bpf.c` illustrates this
-point well. To start, it requires a good amount of code to emulate
-cgroup-local-storage. In the kernel proper, this would simply be a matter of
-adding another pointer to the struct cgroup, but in BPF, it requires a complex
-juggling of data amongst multiple different maps, a good amount of boilerplate
-code, and some unwieldy `bpf_loop()`'s and atomics. The code is also littered
+complexity in some of the example C schedulers, which are found in the kernel
+tree under
+[`tools/sched_ext`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/sched_ext).
+`scx_pair.bpf.c` illustrates this point well. To start, it requires a good
+amount of code to emulate cgroup-local-storage. In the kernel proper, this
+would simply be a matter of adding another pointer to the struct cgroup, but
+in BPF, it requires a complex juggling of data amongst multiple different
+maps, a good amount of boilerplate code, and some unwieldy `bpf_loop()`'s and
+atomics. The code is also littered
 with explicit and often unnecessary sanity checks to appease the verifier.
 
 That being said, BPF is being rapidly improved. For example, Yonghong Song
-recently upstreamed a
+upstreamed a
 [patch set](https://lore.kernel.org/bpf/20221026042835.672317-1-yhs@fb.com/) to
 add a cgroup local storage map type, allowing `scx_pair.bpf.c` to be simplified.
 There are plans to address other issues as well, such as providing
@@ -224,8 +227,8 @@ fully dedicated to running workloads, and can have significant performance
 improvements for certain use cases. For example, central scheduling with VCPUs
 can avoid expensive vmexits and cache flushes, by instead delegating the
 responsibility of preemption checks from the tick to a single CPU. See
-`scx_central.bpf.c` for a simple example of a central scheduling policy built in
-`sched_ext`.
+`scx_central.bpf.c` in `tools/sched_ext` for a simple example of a central
+scheduling policy built in `sched_ext`.
 
 Some workloads also have non-generalizable constraints which enable
 optimizations in a scheduling policy which would otherwise not be feasible.
@@ -233,8 +236,9 @@ For example,VM workloads at Google typically have a low overcommit ratio
 compared to the number of physical CPUs. This allows the scheduler to support
 bounded tail latencies, as well as longer blocks of uninterrupted time.
 
-Yet another interesting use case is the `scx_flatcg` scheduler, which provides a
-flattened hierarchical vtree for cgroups. This scheduler does not account for
+Yet another interesting use case is the `scx_flatcg` scheduler (also in
+`tools/sched_ext`), which provides a flattened hierarchical vtree for cgroups.
+This scheduler does not account for
 thundering herd problems among cgroups, and therefore may not be suitable for
 inclusion in CFS. However, in a simple benchmark using
 [wrk](https://github.com/wg/wrk) on apache serving a CGI script calculating
@@ -272,13 +276,12 @@ guarantees as the kernel typically does with e.g. UAPI headers. For users who
 decide to keep their schedulers out-of-tree,the licensing and maintenance
 overheads will be fundamentally the same as for carrying out-of-tree patches.
 
-With regards to the schedulers included in this patch set, and any other
-schedulers we implement in the future, both Meta and Google will open-source
-all of the schedulers we implement which have any relevance to the broader
-upstream community. We expect that some of these, such as the simple example
-schedulers and `scx_rusty` scheduler, will be upstreamed as part of the kernel
-tree. Distros will be able to package and release these schedulers with the
-kernel, allowing users to utilize these schedulers out-of-the-box without
+Both Meta and Google open-source the schedulers they implement which have any
+relevance to the broader upstream community. Some of these, such as the simple
+example schedulers, have been upstreamed as part of the kernel tree
+(`tools/sched_ext`), while others such as the `scx_rusty` scheduler are
+maintained in this repository. Distros are able to package and release these
+schedulers, allowing users to utilize these schedulers out-of-the-box without
 requiring any additional work or dependencies such as clang or building the
 scheduler programs themselves. Other schedulers and scheduling frameworks such
 as rhone may be open-sourced through separate per-project repos.

@@ -177,6 +177,7 @@ struct task_ctx {
 	u64	last_measured_wall_clk;	/* last time when running time was measured (wall clock) */
 	u64	last_measured_pelt_clk;	/* last time when running time was measured (pelt clock) */
 	u64	last_measured_task_clk;	/* last time when running time was measured (task clock) */
+	u64	last_measured_exec;	/* p->se.sum_exec_runtime at last measurement */
 	/*
 	 * Accumulated runtime from runnable to quiescent state.
 	 * Used to calculate avg_runtime_wall/invr and latency criticality.
@@ -228,12 +229,15 @@ struct task_ctx {
 	u32	cpu_id;			/* where a task is running now */
 	u32	prev_cpu_id;		/* where a task ran last time */
 	u8	queued_in_cpdom_id;	/* cpdom this task's load is counted in; LAVD_CPDOM_MAX_NR = not queued */
-	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time */
+	s16	queued_on_cpu_id;	/* primary CPU id this task's load is counted on; -1 = not queued */
+	u32	queued_load_snapshot;	/* task_load_metric() value snapshotted at enqueue time for the per-cpdom counter */
+	u32	queued_load_snapshot_cpu; /* task_load_metric() value snapshotted at enqueue time for the per-CPU counter */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 
-	/* --- cacheline 4 boundary (256 bytes) --- */
-	u32	util_est;		/* Estimated task util using ravg duty cycle */
+	/* --- cacheline 5 boundary (320 bytes): ravg/util read-mostly group --- */
+	u32	util_est __attribute__((aligned(CACHELINE_SIZE)));
+					/* Estimated task util using ravg duty cycle */
 	struct ravg_data avg_util_ravg;	/* Running average of task utilization using ravg */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 } __attribute__((aligned(CACHELINE_SIZE)));
@@ -562,6 +566,14 @@ struct cpu_ctx {
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
 	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
 	volatile u32	util_est;	/* Estimated CPU utilization from ravg tracking */
+
+	/* --- cacheline 7 boundary (448 bytes): cross-CPU write-heavy accumulator --- */
+	/*
+	 * qload_invr is incremented from any CPU on enqueue (remote write
+	 * via bpf_map_lookup_percpu_elem + __sync_fetch_and_add) and
+	 * decremented likewise on dispatch/dequeue/exit.
+	 */
+	u64	qload_invr __attribute__((aligned(CACHELINE_SIZE)));
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */

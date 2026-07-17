@@ -36,33 +36,23 @@ common crate for calculating weights between scheduling domains. See the
 
 ## Development kernels
 
-This repository has a kernel lock file at `./kernel-versions.json` where we track
-several kernels important to development.
+The kernels used by the CI are defined in the job matrices in
+`.github/workflows/ci.yml`, which list the git URL and tag for each tested
+kernel (the `for-next` branch of the `sched_ext` tree, recent stable releases
+and `bpf-next`). The kernels are built with the kernel config at
+`./kernel.config`.
 
-If your change requires a new commit from a branch, you can update this file with:
-    `nix run ./.nix#update-kernels`
-or with:
-    `python3 ./.github/include/update-kernels.py`
-
-Otherwise new changes will be picked up automatically. If the changes that are
-picked up automatically fail CI, you can fix this in a PR separately - the automatic
-updater will kick back in once things are green. Create a branch and PR as normal
-both updating the kernel lock and making necessary fixes to the codebase.
-
-We use `virtme-ng` for testing in the CI environment, and it should be possible
-to reproduce behaviour locally with the same pinned kernels. To get an identical
-kernel to the CI with Nix installed, run:
-    `nix build ./.nix#kernel_sched_ext/for-next`
-And the kernel image will be available at `result/bzImage`. Alternatively you
-can clone the repo/commit from `kernel-versions.json`, but this isn't guaranteed
-to be reproducible.
+We use `virtme-ng` for testing in the CI environment, and it should be
+possible to reproduce behaviour locally with the same kernels: clone the
+repository and tag listed in the matrix, build the kernel with
+`./kernel.config`, and run it with `virtme-ng`.
 
 ## Rust
 
 We use `cargo fmt` to ensure consistency in our `Rust` code. This runs on PRs in
-the CI and will fail with a patch if your code doesn't match. We currently need
-a nightly version of `Rust` to format so have pinned this for consistency. If you
-have `rustup` installed this will use the version in `rust-toolchain.toml`.
+the CI and will fail with a patch if your code doesn't match. The toolchain is
+pinned in `rust-toolchain.toml` (currently stable); if you have `rustup`
+installed, it will pick up the pinned version automatically.
 
     $ cargo fmt
 

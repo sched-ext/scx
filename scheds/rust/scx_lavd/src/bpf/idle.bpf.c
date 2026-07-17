@@ -676,6 +676,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 *    (if it exists) will be resolved by the load balancing mechanism.
 	 */
 	bpf_rcu_read_lock();
+	ctx->a_mask = ctx->o_mask = NULL;
 
 	/*
 	 * If a task can run only on a single CPU (e.g., per-CPU kworker),
@@ -683,8 +684,16 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * Note that do not extend the overflow set for a unpinned,
 	 * non-migratable task since disabling task migration is temporary.
 	 */
-	if (!init_active_ovrflw_masks(ctx))
-		goto err_out;
+	if (!init_active_ovrflw_masks(ctx)) {
+		/*
+		 * ctx->a_mask and ctx->o_mask haven't been initialized yet,
+		 * so we cannot rely on pick_random_cpu(). Hence, fall back to
+		 * the prev_cpu and go out.
+		 */
+		cpu = ctx->prev_cpu;
+		goto unlock_out;
+	}
+
 	/*
 	 * Use effective pinning here so we cover both permanent pinning
 	 * (nr_cpus_allowed == 1) and transient migrate_disable narrowing
@@ -710,8 +719,15 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * If @p cannot run on either active or overflow set, extend the
 	 * overflow set, respecting the cpu preference order.
 	 */
-	if (!init_ao_masks(ctx))
-		goto err_out;
+	if (!init_ao_masks(ctx)) {
+		/*
+		 * ctx->a_mask and ctx->o_mask haven't been initialized yet,
+		 * so we cannot rely on pick_random_cpu(). Hence, fall back to
+		 * the prev_cpu and go out.
+		 */
+		cpu = ctx->prev_cpu;
+		goto unlock_out;
+	}
 	if (ctx->a_empty && ctx->o_empty) {
 		cpu = find_cpu_in(ctx->p->cpus_ptr, ctx->cpuc_cur);
 		if (cpu >= 0) {

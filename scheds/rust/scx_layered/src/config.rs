@@ -137,6 +137,10 @@ pub struct LayerCommon {
     pub idle_smt: Option<bool>,
     #[serde(default)]
     pub growth_algo: LayerGrowthAlgo,
+    /// Half-life in milliseconds for holding recent utilization peaks when
+    /// deciding whether a layer should shrink. 0 disables peak holding.
+    #[serde(default)]
+    pub util_peak_half_life_ms: u64,
     #[serde(default)]
     pub perf: u64,
     #[serde(default)]

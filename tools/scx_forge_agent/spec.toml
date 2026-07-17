@@ -1,0 +1,131 @@
+# scx scheduler validation spec.
+#
+# This is the default spec scx-forge-agent reads. It is ready to use as-is
+# (scx_forge, schbench p99 wakeup latency); set [scheduler].package to any
+# scheds/rust/<name> crate (e.g., scx_cosmos) to optimize a different scheduler,
+# and edit the [workload] section to whatever defines "good" for your goal. The
+# [system] section configures host/runtime integration, and the [ai] section
+# selects the OpenAI-compatible endpoint and models. The agent
+# drives one run per round: build the scheduler named below, attach it on the
+# host, run the workload, extract a single metric, and decide keep-or-revert.
+
+[system]
+# Optional file containing the sudo password for the validation harness. Empty
+# means unset. Omit or leave empty when running as root, using SUDO_ASKPASS, or
+# relying on passwordless / cached sudo credentials. Keep the file readable only
+# by you (e.g., chmod 600). The password is fed to sudo via a generated askpass
+# shim and never appears in argv or the process table.
+sudo_passwd_file = "~/.scx_sudo_pass"
+
+[ai]
+# Built-in OpenAI backend configuration. The planner and coding roles resolve
+# independently, and each role's backend is selected by its `backend` value: an
+# OpenAI-compatible URL uses the built-in HTTP backend, while the keywords
+# "claude", "codex", "opencode", or "cursor-agent" invoke the corresponding
+# agent CLI instead (which uses its own authentication). The planner and coder
+# can therefore use different backends.
+#
+# Example OpenAI-compatible local server (e.g., vLLM / Ollama / llama.cpp):
+# backend = "http://localhost:8000/v1"
+# model = "qwen3-coder"
+#
+# model / coding_model are honored by every backend: for an OpenAI-compatible
+# backend they select the served model, and for an agent CLI they are passed as
+# its model ID (e.g., "haiku" with the claude backend). Leave them unset to use
+# the CLI's default. OpenAI API keys come from the environment and are never
+# stored here: $SCX_FORGE_API_KEY for the planner and (optionally)
+# $SCX_FORGE_CODING_API_KEY for the coding role (falling back to
+# $SCX_FORGE_API_KEY).
+#
+# Planner/reasoner backend and model. backend is either an OpenAI-compatible
+# URL or one of "claude", "codex", "opencode", or "cursor-agent" to use an
+# agent CLI backend.
+backend = "claude"
+model = "haiku"
+# Coding backend and model. Both are optional: [ai].coding_backend falls back
+# to [ai].backend if not specified, and [ai].coding_model falls back to
+# [ai].model. Set coding_backend to either an OpenAI-compatible URL or one of
+# claude/codex/opencode/cursor-agent to use an agent CLI backend.
+coding_backend = "claude"
+coding_model = "sonnet"
+# Maximum optimization rounds, shared across both phases. The AI-driven
+# knob-tuning phase ends when the model decides it is done; the remaining rounds
+# (up to this cap) go to code changes.
+rounds = 32
+# Max tool-calling iterations per LLM turn for the built-in openai backend.
+max_tool_iterations = 20
+# Wall-clock cap, in seconds, for each planner or coding model turn.
+max_turn_seconds = 300
+# LLM edit attempts to fix a broken build before reverting the round.
+build_fix_attempts = 10
+# LLM edit attempts to fix a runtime scheduler failure before reverting.
+runtime_fix_attempts = 5
+# Skip the AI-driven knob-tuning phase and go straight to code changes.
+skip_knobs = false
+# Allow read-only cross-scheduler reference tools that inspect other scheduler
+# crates under scheds/rust. Disabled by default to keep the prompt and tool
+# surface (and token usage) smaller; enable to let the planner port mechanisms
+# from other schedulers.
+cross_scheduler_refs = false
+
+[tracing]
+# Enable optional perf recording during workloads (only used when perf is
+# available).
+enable_tracing = true
+# Events passed to perf record with -e. Tracepoints such as sched:sched_switch are
+# recorded per occurrence; hardware PMU events such as cache-misses are sampled
+# according to perf's configured/default sampling period.
+trace_events = [
+  "sched:sched_wakeup",
+  "sched:sched_wakeup_new",
+  "sched:sched_switch",
+  "sched:sched_migrate_task",
+  "cache-references",
+  "cache-misses",
+]
+# Cap passed to perf record --max-size for perf.data. Accepts a plain byte count
+# or a human-readable size with a binary suffix (K, M, G; an optional trailing B
+# is allowed), e.g., "256M" or "1G".
+max_trace_size = "256M"
+
+[scheduler]
+# Cargo package name of the scheduler crate to build and run. This is the single
+# source of truth for which scheduler the agent optimizes; the crate directory is
+# derived as scheds/rust/<package> (override with --crate-dir for odd layouts).
+# Any rust scheduler works, e.g., scx_forge, scx_cosmos, scx_bpfland, ...
+package = "scx_forge"
+# cargo profile: "release" -> target/release, "dev" -> target/debug, or a named
+# profile -> target/<profile>.
+profile = "release"
+# Time in seconds to let the scheduler settle after it reports "enabled" before
+# the workload starts.
+warmup_time = 2
+# Interval (seconds) for the scheduler's own --stats output (when supported);
+# used by the scheduler log tail included in validation results.
+stats_interval = 1
+
+[workload]
+# Command run while the scheduler is attached. It must both generate load and
+# print exactly one numeric metric value; any extraction or aggregation belongs
+# here. Example: measure p99 wakeup-latency with schbench.
+command = "schbench -L -m 4 -t 64 -n 0 -r 5 2>&1 | grep -m1 '99[.]0th:' | sed -E 's/.*99[.]0th:[[:space:]]*([0-9.]+).*/\\1/'"
+# Hard cap in seconds. The workload is killed after this duration
+# (fixed-duration benchmarks are expected to hit this).
+duration = 60
+# Repeat each measured run N times; the result reports the median + stddev, and
+# improvement is measured against the starting value of the scheduler being
+# optimized (round 0). The workload is never run under the default kernel
+# scheduler.
+runs = 1
+
+[goal]
+# Plain-language goal shown to the model to frame what "good" means (e.g.,
+# "minimize tail wakeup latency", "improve system throughput",
+# "maximize cache locality").
+prompt = "minimize tail wakeup latency for interactive responsiveness"
+# "minimize" or "maximize". Direction of improvement for the metric.
+direction = "minimize"
+# Accept a round only if it improves the metric by more than this many stddevs
+# (margin = accept_threshold_stddev * stddev). Higher values are more
+# conservative, rejecting marginal gains within measurement noise.
+accept_threshold_stddev = 1.0

@@ -40,6 +40,9 @@ use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
+use scx_utils::perf::parse_perf_event;
+use scx_utils::perf::setup_perf_events;
+use scx_utils::perf::PerfEventSpec;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -54,197 +57,6 @@ use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cosmos";
-
-/// Perf event specification: either hex (0xN) or symbolic name (e.g. cache-misses).
-/// event_id is written to BPF rodata; type_ and config are used for perf_event_open.
-#[derive(Clone, Debug)]
-struct PerfEventSpec {
-    /// Opaque id for BPF (must match between install and read).
-    event_id: u64,
-    /// perf_event_attr.type (PERF_TYPE_RAW, PERF_TYPE_HARDWARE, etc.).
-    type_: u32,
-    /// perf_event_attr.config.
-    config: u64,
-    /// Original string for error messages.
-    display_name: String,
-}
-
-fn parse_hardware_event(s: &str) -> Option<u64> {
-    match s {
-        "cpu-cycles" | "cycles" => Some(0),
-        "instructions" => Some(1),
-        "cache-references" => Some(2),
-        "cache-misses" => Some(3),
-        "branch-instructions" | "branches" => Some(4),
-        "branch-misses" => Some(5),
-        "bus-cycles" => Some(6),
-        "stalled-cycles-frontend" | "idle-cycles-frontend" => Some(7),
-        "stalled-cycles-backend" | "idle-cycles-backend" => Some(8),
-        "ref-cycles" => Some(9),
-        _ => None,
-    }
-}
-
-fn parse_software_event(s: &str) -> Option<u64> {
-    match s {
-        "cpu-clock" => Some(0),
-        "task-clock" => Some(1),
-        "page-faults" | "faults" => Some(2),
-        "context-switches" | "cs" => Some(3),
-        "cpu-migrations" | "migrations" => Some(4),
-        "minor-faults" => Some(5),
-        "major-faults" => Some(6),
-        "alignment-faults" => Some(7),
-        "emulation-faults" => Some(8),
-        "dummy" => Some(9),
-        "bpf-output" => Some(10),
-        _ => None,
-    }
-}
-
-fn parse_hw_cache_event(s: &str) -> Option<u64> {
-    let (cache_id, prefix_len) = if s.starts_with("L1-dcache-") {
-        (0, 10)
-    } else if s.starts_with("L1-icache-") {
-        (1, 10)
-    } else if s.starts_with("LLC-") {
-        (2, 4)
-    } else if s.starts_with("dTLB-") {
-        (3, 5)
-    } else if s.starts_with("iTLB-") {
-        (4, 5)
-    } else if s.starts_with("branch-") {
-        (5, 7)
-    } else if s.starts_with("node-") {
-        (6, 5)
-    } else {
-        return None;
-    };
-
-    let suffix = &s[prefix_len..];
-    let (op_id, result_id) = match suffix {
-        "loads" => (0, 0),
-        "load-misses" => (0, 1),
-        "stores" => (1, 0),
-        "store-misses" => (1, 1),
-        "prefetches" => (2, 0),
-        "prefetch-misses" => (2, 1),
-        _ => return None,
-    };
-
-    Some((result_id << 16) | (op_id << 8) | cache_id)
-}
-
-/// Parse -e / -y value: hex (0xN) or symbolic name (e.g. cache-misses, LLC-load-misses).
-fn parse_perf_event(s: &str) -> Result<PerfEventSpec, String> {
-    use perf_event_open_sys as sys;
-
-    let s = s.trim();
-    if s.is_empty() || s == "0" || s.eq_ignore_ascii_case("0x0") {
-        return Ok(PerfEventSpec {
-            event_id: 0,
-            type_: sys::bindings::PERF_TYPE_RAW,
-            config: 0,
-            display_name: s.to_string(),
-        });
-    }
-
-    if let Some(hex_str) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        if let Ok(config) = u64::from_str_radix(hex_str, 16) {
-            return Ok(PerfEventSpec {
-                event_id: config,
-                type_: sys::bindings::PERF_TYPE_RAW,
-                config,
-                display_name: s.to_string(),
-            });
-        }
-    }
-
-    if let Some(config) = parse_hardware_event(s) {
-        let event_id = (sys::bindings::PERF_TYPE_HARDWARE as u64) << 32 | config;
-        return Ok(PerfEventSpec {
-            event_id,
-            type_: sys::bindings::PERF_TYPE_HARDWARE,
-            config,
-            display_name: s.to_string(),
-        });
-    }
-
-    if let Some(config) = parse_software_event(s) {
-        let event_id = (sys::bindings::PERF_TYPE_SOFTWARE as u64) << 32 | config;
-        return Ok(PerfEventSpec {
-            event_id,
-            type_: sys::bindings::PERF_TYPE_SOFTWARE,
-            config,
-            display_name: s.to_string(),
-        });
-    }
-
-    if let Some(config) = parse_hw_cache_event(s) {
-        let event_id = (sys::bindings::PERF_TYPE_HW_CACHE as u64) << 32 | config;
-        return Ok(PerfEventSpec {
-            event_id,
-            type_: sys::bindings::PERF_TYPE_HW_CACHE,
-            config,
-            display_name: s.to_string(),
-        });
-    }
-
-    Err(format!(
-        "Invalid perf event '{}': use hex (0xN) or symbolic name (e.g. cache-misses, LLC-load-misses, page-faults)",
-        s
-    ))
-}
-
-/// Must match lib/pmu.bpf.c SCX_PMU_STRIDE for perf_events map key layout.
-const PERF_MAP_STRIDE: u32 = 4096;
-
-/// Setup performance counter events for a specific CPU and counter index.
-/// counter_idx 0 = migration event (-e), 1 = sticky event (-y).
-fn setup_perf_events(
-    skel: &mut BpfSkel,
-    cpu: i32,
-    spec: &PerfEventSpec,
-    counter_idx: u32,
-) -> Result<()> {
-    use perf_event_open_sys as sys;
-
-    if spec.event_id == 0 {
-        return Ok(());
-    }
-
-    let map = &skel.maps.scx_pmu_map;
-
-    let mut attrs = sys::bindings::perf_event_attr::default();
-    attrs.type_ = spec.type_;
-    attrs.config = spec.config;
-    attrs.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
-    attrs.set_disabled(0);
-    attrs.set_inherit(0);
-
-    let fd = unsafe { sys::perf_event_open(&mut attrs, -1, cpu, -1, 0) };
-
-    if fd < 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!(
-            "Failed to open perf event '{}' on CPU {}: {}",
-            spec.display_name,
-            cpu,
-            err
-        ));
-    }
-
-    let key = cpu as u32 + counter_idx * PERF_MAP_STRIDE;
-
-    map.update(
-        &key.to_ne_bytes(),
-        &fd.to_ne_bytes(),
-        libbpf_rs::MapFlags::ANY,
-    )
-    .with_context(|| "Failed to update perf_events map")?;
-
-    Ok(())
-}
 
 #[derive(Debug, clap::Parser)]
 #[command(
@@ -262,18 +74,7 @@ struct Opts {
     #[clap(short = 's', long, default_value = "1000")]
     slice_us: u64,
 
-    /// Maximum scheduling budget that a task can accumulate while sleeping, in microseconds.
-    ///
-    /// Tasks that sleep frequently (e.g., interactive or I/O-bound tasks) build up a scheduling
-    /// advantage that lets them run sooner after waking up. This value caps how large that
-    /// advantage can grow, preventing long-sleeping tasks from monopolizing the CPU when they
-    /// eventually wake.
-    ///
-    /// Increasing this value gives sleeping tasks a bigger head start on wakeup, improving
-    /// responsiveness for latency-sensitive workloads at the cost of reduced fairness toward
-    /// CPU-intensive tasks. Decreasing it makes scheduling more uniform and fair, which can
-    /// improve throughput for CPU-bound workloads, but may reduce responsiveness for interactive
-    /// tasks.
+    /// Maximum runtime (since last sleep) that can be charged to a task in microseconds.
     #[clap(short = 'l', long, default_value = "20000")]
     slice_lag_us: u64,
 
@@ -924,7 +725,9 @@ impl<'a> Scheduler<'a> {
         let sticky_counter_idx = if opts.perf_config.event_id > 0 { 1 } else { 0 };
         for cpu in 0..nr_cpus {
             if opts.perf_config.event_id > 0 {
-                if let Err(e) = setup_perf_events(&mut skel, cpu as i32, &opts.perf_config, 0) {
+                if let Err(e) =
+                    setup_perf_events(&skel.maps.scx_pmu_map, cpu as i32, &opts.perf_config, 0)
+                {
                     if cpu == 0 {
                         let err_str = e.to_string();
                         if err_str.contains("errno 2") || err_str.contains("os error 2") {
@@ -939,9 +742,12 @@ impl<'a> Scheduler<'a> {
                 }
             }
             if opts.perf_sticky.event_id > 0 {
-                if let Err(e) =
-                    setup_perf_events(&mut skel, cpu as i32, &opts.perf_sticky, sticky_counter_idx)
-                {
+                if let Err(e) = setup_perf_events(
+                    &skel.maps.scx_pmu_map,
+                    cpu as i32,
+                    &opts.perf_sticky,
+                    sticky_counter_idx,
+                ) {
                     if cpu == 0 {
                         let err_str = e.to_string();
                         if err_str.contains("errno 2") || err_str.contains("os error 2") {
@@ -1205,12 +1011,13 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    /// Read per-CPU times from /proc/stat (lines "cpu0", "cpu1", ...).
-    /// Returns one CpuTimes per CPU, in order.
-    fn read_per_cpu_cpu_times(nr_cpus: usize) -> Option<Vec<CpuTimes>> {
-        let file = File::open("/proc/stat").ok()?;
-        let reader = BufReader::new(file);
-        let mut result = Vec::with_capacity(nr_cpus);
+    /// Parse per-CPU times from /proc/stat (lines "cpu0", "cpu1", ...).
+    /// Returns entries indexed by CPU id. Offline CPUs may be absent.
+    fn parse_per_cpu_cpu_times<R: BufRead>(
+        reader: R,
+        nr_cpus: usize,
+    ) -> Option<Vec<Option<CpuTimes>>> {
+        let mut result = vec![None; nr_cpus];
 
         for line in reader.lines() {
             let line = line.ok()?;
@@ -1224,8 +1031,8 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
             let cpu_id: usize = rest.split_whitespace().next()?.parse().ok()?;
-            if cpu_id != result.len() {
-                break;
+            if cpu_id >= nr_cpus {
+                continue;
             }
             let fields: Vec<&str> = line.split_whitespace().collect();
             if fields.len() < 5 {
@@ -1239,17 +1046,16 @@ impl<'a> Scheduler<'a> {
                 .take(8)
                 .filter_map(|v| v.parse::<u64>().ok())
                 .sum();
-            result.push(CpuTimes { user, nice, total });
-            if result.len() >= nr_cpus {
-                break;
-            }
+            result[cpu_id] = Some(CpuTimes { user, nice, total });
         }
 
-        if result.len() == nr_cpus {
-            Some(result)
-        } else {
-            None
-        }
+        result.iter().any(Option::is_some).then_some(result)
+    }
+
+    /// Read per-CPU times from /proc/stat.
+    fn read_per_cpu_cpu_times(nr_cpus: usize) -> Option<Vec<Option<CpuTimes>>> {
+        let file = File::open("/proc/stat").ok()?;
+        Self::parse_per_cpu_cpu_times(BufReader::new(file), nr_cpus)
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
@@ -1261,20 +1067,25 @@ impl<'a> Scheduler<'a> {
         // or deadline-based shared DSQ.
         let polling_time = Duration::from_millis(self.opts.polling_ms).min(Duration::from_secs(1));
         let nr_cpus = *NR_CPU_IDS as usize;
-        let mut prev_cputime =
-            Self::read_per_cpu_cpu_times(nr_cpus).expect("Failed to read initial per-CPU stats");
+        let mut prev_cputime = Self::read_per_cpu_cpu_times(nr_cpus).unwrap_or_else(|| {
+            warn!("Failed to read initial per-CPU stats; starting with zero CPU utilization");
+            vec![None; nr_cpus]
+        });
         let mut last_update = Instant::now();
         let mut last_gpu_sync = Instant::now();
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            // Update per-CPU utilization and GPU PID -> node map (NVML).
+            // Update per-CPU utilization.
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
                 if let Some(curr_cputime) = Self::read_per_cpu_cpu_times(nr_cpus) {
                     let map = &self.skel.maps.cpu_util_map;
                     for cpu in 0..nr_cpus {
-                        if let Some(util) =
-                            Self::compute_user_cpu_pct(&prev_cputime[cpu], &curr_cputime[cpu])
-                        {
+                        let util = match (&prev_cputime[cpu], &curr_cputime[cpu]) {
+                            (Some(prev), Some(curr)) => Self::compute_user_cpu_pct(prev, curr),
+                            _ => Some(0),
+                        };
+
+                        if let Some(util) = util {
                             let _ = map.update(
                                 &(cpu as u32).to_ne_bytes(),
                                 &util.to_ne_bytes(),
@@ -1328,16 +1139,15 @@ impl<'a> Scheduler<'a> {
                     }
                 }
 
-                // GPU PID sync is throttled to GPU_SYNC_INTERVAL (NVML is expensive).
-                if self.gpu_index_to_node.is_some() && last_gpu_sync.elapsed() >= GPU_SYNC_INTERVAL
-                {
-                    if let Err(e) = self.sync_gpu_pids() {
-                        debug!("GPU PID sync: {}", e);
-                    }
-                    last_gpu_sync = Instant::now();
-                }
-
                 last_update = Instant::now();
+            }
+
+            // GPU PID sync is throttled to GPU_SYNC_INTERVAL.
+            if self.gpu_index_to_node.is_some() && last_gpu_sync.elapsed() >= GPU_SYNC_INTERVAL {
+                if let Err(e) = self.sync_gpu_pids() {
+                    debug!("GPU PID sync: {}", e);
+                }
+                last_gpu_sync = Instant::now();
             }
 
             // Update statistics and check for exit condition.

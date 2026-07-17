@@ -240,14 +240,21 @@ jobs:
           flags[chaos]="--random-delay-frequency 0.5 --random-delay-min-us 1000 --random-delay-max-us 2000"
           flags[lavd]="--log-level info"
           flags[layered]="--log-level info --stats 15 --run-example"
+          flags[mitosis]="--cell-parent-cgroup /ci.slice -v"
           for sched in ${{ matrix.scheds }}; do
             echo "=== Testing ${sched} ==="
             stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
               --affinity 1 --affinity-delay 1 --affinity-pin &
             stress_pid=$!
+            if [ "$sched" = "mitosis" ]; then
+              sudo mkdir -p /sys/fs/cgroup/ci.slice
+            fi
             sudo timeout --foreground --preserve-status 45 \
               target/ci/scx_${sched} ${flags[$sched]:-"-v"}
             rc=$?
+            if [ "$sched" = "mitosis" ]; then
+              sudo rmdir /sys/fs/cgroup/ci.slice 2>/dev/null || true
+            fi
             kill $stress_pid 2>/dev/null || true
             wait $stress_pid 2>/dev/null || true
             if [ $rc -ne 0 ]; then

@@ -1,6 +1,6 @@
 [package]
 name = "scx_mitosis"
-version = "1.1.1"
+version = "1.1.2"
 authors = ["Dan Schatzberg <dschatzberg@meta.com>", "Meta"]
 edition = "2021"
 description = "A dynamic affinity scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
@@ -23,23 +23,32 @@ inotify = "0.11"
 nix = { version = "0.31", features = ["event"] }
 crossbeam = "0.8"
 maplit = "1"
-scx_stats = { path = "../../../rust/scx_stats", version = "1.1.1" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.1" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.1.1" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.1.2" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.2" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parking_lot", "tracing-log"] }
 
+# Test-only scheduler harness, pulled in only by the `ktstr-tests` feature for
+# the gated smoke test under tests/. Not built for normal scheduler builds.
+# Optional (not a dev-dependency) so the feature can gate it.
+ktstr = { version = "=0.18.0", optional = true }
+
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.1" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.2" }
 
 [dev-dependencies]
 tempfile = "3"
-scx_utils = { path = "../../../rust/scx_utils", version = "1.1.1", features = ["testutils"] }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.2", features = ["testutils"] }
 
 [features]
 enable_backtrace = []
+# Gates the ktstr-based scheduler smoke test under tests/ and pulls in the
+# optional ktstr harness. Off by default; enable with `--features ktstr-tests`
+# under `cargo ktstr test`.
+ktstr-tests = ["dep:ktstr"]
 
 [lints.clippy]
 unwrap_used = "deny"

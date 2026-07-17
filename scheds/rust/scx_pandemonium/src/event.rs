@@ -13,6 +13,7 @@ pub struct Snapshot {
     pub shared: u64,
     pub preempt: u64,
     pub keep_run: u64,
+    pub osc_parks: u64,
     pub wake_avg_us: u64,
     pub hard_kicks: u64,
     pub soft_kicks: u64,
@@ -37,6 +38,7 @@ impl EventLog {
                     shared: 0,
                     preempt: 0,
                     keep_run: 0,
+                    osc_parks: 0,
                     wake_avg_us: 0,
                     hard_kicks: 0,
                     soft_kicks: 0,
@@ -59,6 +61,7 @@ impl EventLog {
         shared: u64,
         preempt: u64,
         keep_run: u64,
+        osc_parks: u64,
         wake_avg_us: u64,
         hard_kicks: u64,
         soft_kicks: u64,
@@ -72,6 +75,7 @@ impl EventLog {
             shared,
             preempt,
             keep_run,
+            osc_parks,
             wake_avg_us,
             hard_kicks,
             soft_kicks,
@@ -185,6 +189,7 @@ impl EventLog {
         let total_shared: u64 = snapshots.iter().map(|s| s.shared).sum();
         let total_preempt: u64 = snapshots.iter().map(|s| s.preempt).sum();
         let total_keep: u64 = snapshots.iter().map(|s| s.keep_run).sum();
+        let total_parks: u64 = snapshots.iter().map(|s| s.osc_parks).sum();
 
         let peak_d = snapshots.iter().map(|s| s.dispatches).max().unwrap_or(0);
 
@@ -197,6 +202,7 @@ impl EventLog {
         println!("  TOTAL SHARED:      {}", total_shared);
         println!("  TOTAL PREEMPT:     {}", total_preempt);
         println!("  TOTAL KEEP_RUN:    {}", total_keep);
+        println!("  TOTAL OSC PARKS:   {}", total_parks);
         println!("  PEAK DISPATCH/S:   {}", peak_d);
         if elapsed_s > 0.0 {
             println!("  AVG DISPATCH/S:    {:.0}", total_d as f64 / elapsed_s);

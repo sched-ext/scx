@@ -1312,6 +1312,58 @@ pub mod testutils {
         (Topology::instantiate(span, nodes).unwrap(), total_cpus)
     }
 
+    pub fn make_het_test_topo(
+        cores_per_llc: &[&[usize]],
+        hts_per_core: usize,
+    ) -> (Topology, usize) {
+        let nr_nodes = cores_per_llc.len();
+
+        let total_cpus = cores_per_llc
+            .iter()
+            .map(|node| node.iter().sum::<usize>())
+            .sum::<usize>()
+            * hts_per_core;
+
+        set_cpumask_test_width(total_cpus);
+
+        let mut cpu_id = 0usize;
+        let mut core_id = 0usize;
+        let mut llc_id = 0usize;
+        let mut nodes = BTreeMap::new();
+
+        for (node_id, llcs_in_node) in cores_per_llc.iter().enumerate() {
+            let mut llcs = BTreeMap::new();
+
+            for &cores_in_llc in *llcs_in_node {
+                let mut cores = BTreeMap::new();
+
+                for _ in 0..cores_in_llc {
+                    let mut cpus = BTreeMap::new();
+
+                    for _ in 0..hts_per_core {
+                        cpus.insert(cpu_id, Arc::new(test_cpu(cpu_id, core_id, llc_id, node_id)));
+                        cpu_id += 1;
+                    }
+
+                    cores.insert(core_id, Arc::new(test_core(core_id, cpus, llc_id, node_id)));
+                    core_id += 1;
+                }
+
+                llcs.insert(llc_id, Arc::new(test_llc(llc_id, cores, node_id)));
+                llc_id += 1;
+            }
+
+            nodes.insert(node_id, test_node(node_id, llcs, nr_nodes));
+        }
+
+        let mut span = Cpumask::new();
+        for i in 0..total_cpus {
+            span.set_cpu(i).unwrap();
+        }
+
+        (Topology::instantiate(span, nodes).unwrap(), total_cpus)
+    }
+
     /// Create a [`Cpumask`] from a list of set CPU IDs.
     pub fn mask_from_bits(_total: usize, bits: &[usize]) -> Cpumask {
         let mut mask = Cpumask::new();
