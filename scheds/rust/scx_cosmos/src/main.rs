@@ -1075,7 +1075,7 @@ impl<'a> Scheduler<'a> {
         let mut last_gpu_sync = Instant::now();
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            // Update per-CPU utilization and GPU PID -> node map (NVML).
+            // Update per-CPU utilization.
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
                 if let Some(curr_cputime) = Self::read_per_cpu_cpu_times(nr_cpus) {
                     let map = &self.skel.maps.cpu_util_map;
@@ -1139,16 +1139,15 @@ impl<'a> Scheduler<'a> {
                     }
                 }
 
-                // GPU PID sync is throttled to GPU_SYNC_INTERVAL (NVML is expensive).
-                if self.gpu_index_to_node.is_some() && last_gpu_sync.elapsed() >= GPU_SYNC_INTERVAL
-                {
-                    if let Err(e) = self.sync_gpu_pids() {
-                        debug!("GPU PID sync: {}", e);
-                    }
-                    last_gpu_sync = Instant::now();
-                }
-
                 last_update = Instant::now();
+            }
+
+            // GPU PID sync is throttled to GPU_SYNC_INTERVAL.
+            if self.gpu_index_to_node.is_some() && last_gpu_sync.elapsed() >= GPU_SYNC_INTERVAL {
+                if let Err(e) = self.sync_gpu_pids() {
+                    debug!("GPU PID sync: {}", e);
+                }
+                last_gpu_sync = Instant::now();
             }
 
             // Update statistics and check for exit condition.

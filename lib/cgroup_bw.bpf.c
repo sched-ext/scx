@@ -147,6 +147,11 @@ struct scx_cgroup_ctx {
 		 */
 		u32		nr_throttled_periods;
 
+		/* Run of consecutive throttled periods: current and max seen. */
+		bool		was_throttled;	/* is_throttled at the previous period */
+		u32		nr_consec_throttled_periods;
+		u32		max_consec_throttled_periods;
+
 		/*
 		 * @period_start_clk represents when a new period starts.
 		 * @burst_remaining is the maximum burst that can be accumulated
@@ -2224,6 +2229,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	s64 interval, jitter, period;
 	int i, ret;
 	s32 idle_cpu;
+	bool is_throttled;
 
 	/* Attach the timer function to the BPF area context. */
 	scx_arena_subprog_init();
@@ -2353,9 +2359,19 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 		}
 
-		if (READ_ONCE(cur_cgx->is_throttled)) {
+		is_throttled = READ_ONCE(cur_cgx->is_throttled);
+		if (is_throttled) {
 			cur_cgx->nr_throttled_periods++;
+			/* Consecutive only if throttled in the previous period too. */
+			if (cur_cgx->was_throttled &&
+			    ++cur_cgx->nr_consec_throttled_periods >
+			    cur_cgx->max_consec_throttled_periods)
+				cur_cgx->max_consec_throttled_periods =
+					cur_cgx->nr_consec_throttled_periods;
+		} else {
+			cur_cgx->nr_consec_throttled_periods = 0;
 		}
+		cur_cgx->was_throttled = is_throttled;
 
 		/*
 		 * Replenish the cgroup. If it was throttled, add it to the
@@ -2869,9 +2885,10 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 			cgx->quota, cgx->period, cgx->burst);
 	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
 			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
-	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
+	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d (%u/%u), nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
+			cgx->nr_consec_throttled_periods, cgx->max_consec_throttled_periods,
 			nr_throttled_tasks);
 	bpf_printk("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
 			cgx->period_budget, cgx->burst_remaining);
