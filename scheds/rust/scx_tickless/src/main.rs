@@ -180,13 +180,15 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, tickless_ops, uei)?;
 
-        // Set task affinity to the first primary CPU: this is required to start the scheduler's
-        // timer on a primary CPU.
+        // Set task affinity to the first primary CPU. The scheduler enable path
+        // runs in a kernel helper thread, so start the BPF timer explicitly
+        // after attach while this thread is still pinned here.
         let timer_cpu = domain.iter().next();
         if timer_cpu.is_none() {
             bail!("primary cpumask is empty");
         }
-        if let Err(e) = set_thread_affinity(&[timer_cpu.unwrap() as usize]) {
+        let timer_cpu = timer_cpu.unwrap();
+        if let Err(e) = set_thread_affinity(&[timer_cpu as usize]) {
             bail!("cannot set central CPU affinity: {}", e);
         }
 
@@ -197,6 +199,13 @@ impl<'a> Scheduler<'a> {
 
         // Attach the scheduler.
         let struct_ops = Some(scx_ops_attach!(skel, tickless_ops)?);
+        if let Err(err) = Self::start_timer(&mut skel, timer_cpu as i32) {
+            bail!(
+                "failed to start scheduling timer on CPU {}: error {}",
+                timer_cpu,
+                err as i32
+            );
+        }
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         // Reset task affinity.
@@ -213,6 +222,28 @@ impl<'a> Scheduler<'a> {
 
     fn enable_primary_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
         let prog = &mut skel.progs.enable_primary_cpu;
+        let mut args = cpu_arg {
+            cpu_id: cpu as c_int,
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let out = prog.test_run(input).unwrap();
+        if out.return_value != 0 {
+            return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn start_timer(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
+        let prog = &mut skel.progs.start_timer;
         let mut args = cpu_arg {
             cpu_id: cpu as c_int,
         };

@@ -78,19 +78,22 @@ cargo build --profile=release-tiny -p scx_flash
 
 | Scheduler name | Example build command |
 |----------------|------------------------|
+| `scx_beerland` | `cargo build --release -p scx_beerland` |
 | `scx_bpfland`  | `cargo build --release -p scx_bpfland` |
+| `scx_cake`     | `cargo build --release -p scx_cake` |
 | `scx_chaos`    | `cargo build --release -p scx_chaos` |
 | `scx_cosmos`   | `cargo build --release -p scx_cosmos` |
 | `scx_flash`    | `cargo build --release -p scx_flash` |
+| `scx_flow`     | `cargo build --release -p scx_flow` |
 | `scx_lavd`     | `cargo build --release -p scx_lavd` |
 | `scx_layered`  | `cargo build --release -p scx_layered` |
 | `scx_mitosis`  | `cargo build --release -p scx_mitosis` |
 | `scx_p2dq`     | `cargo build --release -p scx_p2dq` |
+| `scx_pandemonium` | `cargo build --release -p scx_pandemonium` |
 | `scx_rlfifo`   | `cargo build --release -p scx_rlfifo` |
 | `scx_rustland` | `cargo build --release -p scx_rustland` |
 | `scx_rusty`    | `cargo build --release -p scx_rusty` |
 | `scx_tickless` | `cargo build --release -p scx_tickless` |
-| `scx_wd40`     | `cargo build --release -p scx_wd40` |
 
 ---
 
@@ -104,10 +107,10 @@ Besides schedulers, the workspace includes several tools:
   cargo build --release -p scxtop
   ```
 
-- **scxcash** – Caching utility:
+- **scx_characterize** – Workload characterization tool:
 
   ```bash
-  cargo build --release -p scxcash
+  cargo build --release -p scx_characterize
   ```
 
 - **vmlinux_docify** – Kernel documentation generator:

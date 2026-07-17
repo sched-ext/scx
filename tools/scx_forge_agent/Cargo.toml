@@ -1,0 +1,28 @@
+[package]
+name = "scx_forge_agent"
+version = "1.1.1"
+edition = "2021"
+authors = ["Andrea Righi <arighi@nvidia.com>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/sched-ext/scx"
+description = "LLM-driven optimizer that iterates a sched_ext scheduler against a benchmark metric"
+
+# No BPF in this crate; skip veristat.
+[package.metadata.veristat]
+disable = true
+
+[[bin]]
+name = "scx-forge-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+glob = "0.3"
+libc = "0.2"
+regex = "1"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }

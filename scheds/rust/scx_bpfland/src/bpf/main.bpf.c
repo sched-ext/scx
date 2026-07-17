@@ -718,7 +718,7 @@ static u64 task_dl(struct task_struct *p, s32 cpu, struct task_ctx *tctx)
 	 */
 	vtime_min = vtime_now - scale_by_task_weight(p, slice_lag * lag_scale);
 	if (time_before(p->scx.dsq_vtime, vtime_min))
-		p->scx.dsq_vtime = vtime_min;
+		scx_bpf_task_set_dsq_vtime(p, vtime_min);
 
 	/*
 	 * Cap the partial accumulated vruntime since last sleep to
@@ -1026,7 +1026,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * round on the same CPU.
 	 */
 	if (prev && keep_running(prev, cpu))
-		prev->scx.slice = task_slice(prev, cpu);
+		scx_bpf_task_set_slice(prev, task_slice(prev, cpu));
 }
 
 /*
@@ -1154,7 +1154,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * sleep.
 	 */
 	delta_vtime = scale_by_task_weight_inverse(p, slice);
-	p->scx.dsq_vtime += delta_vtime;
+	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (delta_vtime));
 	tctx->awake_vtime += delta_vtime;
 
 	/*
@@ -1193,7 +1193,7 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	/*
 	 * Initialize the task vruntime to the current global vruntime.
 	 */
-	p->scx.dsq_vtime = vtime_now;
+	scx_bpf_task_set_dsq_vtime(p, vtime_now);
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,

@@ -716,7 +716,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 					 scale_by_weight_inverse(prev, slice);
 
 			if (prev_vtime < q_vtime) {
-				prev->scx.slice = task_slice(prev);
+				scx_bpf_task_set_slice(prev, task_slice(prev));
 				return;
 			}
 		}
@@ -731,7 +731,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * round on the same CPU.
 	 */
 	if (need_running)
-		prev->scx.slice = task_slice(prev);
+		scx_bpf_task_set_slice(prev, task_slice(prev));
 }
 
 /*
@@ -878,7 +878,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 		/*
 		 * Update task's vruntime and accumulated runtime.
 		 */
-		p->scx.dsq_vtime += scale_by_weight_inverse(p, slice);
+		scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (scale_by_weight_inverse(p, slice)));
 	}
 
 	/*
@@ -921,7 +921,7 @@ void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
 	if (rr_sched)
 		return;
 
-	p->scx.dsq_vtime = vtime_now;
+	scx_bpf_task_set_dsq_vtime(p, vtime_now);
 }
 
 s32 BPF_STRUCT_OPS(flash_cgroup_init, struct cgroup *cgrp,
@@ -1129,7 +1129,7 @@ static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
 			u64 slice = bpf_ktime_get_ns() - tctx->last_run_at;
 
 			if (slice > slice_max)
-				p->scx.slice = 0;
+				scx_bpf_task_set_slice(p, 0);
 		}
 		bpf_task_release(p);
 	}

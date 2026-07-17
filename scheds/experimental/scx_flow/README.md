@@ -1,65 +1,21 @@
 # scx_flow
 
-This is a single user-defined scheduler used within
-[`sched_ext`](https://github.com/sched-ext/scx/tree/main), which is a Linux
-kernel feature which enables implementing kernel thread schedulers in BPF and
-dynamically loading them. [Read more about
-`sched_ext`](https://github.com/sched-ext/scx/tree/main).
+This is a single user-defined scheduler used within [`sched_ext`](https://github.com/sched-ext/scx/tree/main), which is a Linux kernel feature that enables implementing kernel thread schedulers in BPF and dynamically loading them. [Read more about `sched_ext`](https://github.com/sched-ext/scx/tree/main).
 
 ## Overview
 
-`scx_flow` is a budget-based `sched_ext` scheduler built around a small number
-of bounded service lanes. It aims to keep interactive wakeups responsive
-without abandoning general-purpose throughput or turning the policy into a
-large collection of special cases.
-
-Tasks accumulate wakeup budget while sleeping and spend that budget while
-running. Positive-budget work is favored ahead of the shared fallback path,
-while bounded adaptive tuning lets the scheduler move between balanced,
-latency-oriented, and throughput-oriented behavior without requiring constant
-manual retuning. The implementation combines reserved, latency, shared, and
-contained paths with bounded urgency, fairness, locality, and confidence
-signals so the scheduler stays explainable and measurable instead of depending
-on large, open-ended heuristics.
+`scx_flow` is a budget-driven `sched_ext` scheduler with zero heuristic classification. Tasks accumulate budget while sleeping and spend it while running. Non-wakeup re-enqueues enter the **Waiting Room** — per-CPU vtime-ordered DSQs where each task receives an equal share of its target CPU's bandwidth: `FLOW_CARRIAGE_NS / tasks_on_cpu`, clamped to [50µs, 2ms]. Slices adjust dynamically as tasks arrive on the same core. Wakeups are dispatched immediately to the target CPU via `SCX_DSQ_LOCAL_ON`.
 
 ## Typical Use Case
 
-General-purpose desktop and workstation use where foreground responsiveness and
-background CPU work both matter.
+Systems where scheduling decisions must be deterministic and explainable: embedded control, robotics, avionics, automotive, and other mission-critical workloads. The fair-share slice model ensures each task receives an equal portion of its target core's bandwidth, preventing both starvation and priority inversion.
 
-In plain terms, `scx_flow` is aimed at machines that do several things at once:
+General-purpose desktop and workstation use is also supported; interactive tasks (longer sleep → higher budget → longer slice) are naturally separated from bulk workers without requiring configuration or heuristics.
 
-- gaming while browsers, chat apps, or launchers stay open
-- coding or office work while builds, downloads, or background jobs keep running
-- everyday multitasking where short interactive work should feel quick instead
-  of getting buried behind heavier CPU activity
+## Web UI
 
-What users should usually notice is not "maximum benchmark throughput at all
-costs", but a machine that feels more consistently responsive, with fewer
-obvious hiccups when interactive tasks and background load need to coexist.
+When scx_flow starts, it serves a live dashboard at `http://[::1]:50005/` or via Unix socket at `/tmp/scx_flow.sock`. The dashboard shows per-core cards (CPU ID, max frequency, LLC, SMT status), the Waiting Room carriage pool (producer slot index, filling count, 64-slot grid), and system statistics (on-CPU count, wake/pinned dispatches, budget exhaustions, CPU migrations). Values update every second. Disable with `--no-webui`.
 
 ## Production Ready?
 
-Yes, for everyday general-purpose use.
-
-`scx_flow` has been exercised across broad workload, lifecycle, and adversarial
-stress validation, and its core paths are intended to be robust rather than
-experimental scaffolding. It should still be described conservatively for hard
-latency guarantees under extreme interference, but it is suitable for daily use
-as a general-purpose `sched_ext` scheduler.
-
-## Validation
-
-Benchmark scripts, validation helpers, and archived result bundles used during
-development are available at:
-https://github.com/galpt/testing-scx_flow
-
-Direct `v2.2.4` benchmark snapshot:
-https://github.com/galpt/testing-scx_flow/tree/benchmark-archives/20260409_scx_flow_v2.2.0_release
-
-In practice, the stronger results there usually translate to better foreground
-responsiveness, steadier behavior under background load, and fewer obvious
-hiccups when interactive and CPU-heavy work happen at the same time.
-
-These artifacts are provided as supplementary validation material and are not
-required to use `scx_flow` itself.
+Yes, for the use cases described above.
