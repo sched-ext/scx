@@ -711,6 +711,8 @@ struct task_ctx {
 	u64			layer_refresh_seq;
 
 	u64			recheck_layer_membership;
+
+	bool			runq_lat_pending;
 };
 
 struct {
@@ -3522,6 +3524,7 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	taskc->runnable_at = now;
+	taskc->runq_lat_pending = true;
 	maybe_refresh_layer(p, taskc, now);
 
 	if (enq_flags & SCX_ENQ_WAKEUP)
@@ -3599,6 +3602,34 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	} else {
 		cpuc->running_owned = taskc->layer_id == cpuc->layer_id;
 		cpuc->running_open = false;
+	}
+
+	if (taskc->runq_lat_pending) {
+		u64 lat_us = (now - taskc->runnable_at) / 1000;
+		u32 rql_bucket = 0;
+
+		taskc->runq_lat_pending = false;
+		if (lat_us >> 16) {
+			rql_bucket += 16;
+			lat_us >>= 16;
+		}
+		if (lat_us >> 8) {
+			rql_bucket += 8;
+			lat_us >>= 8;
+		}
+		if (lat_us >> 4) {
+			rql_bucket += 4;
+			lat_us >>= 4;
+		}
+		if (lat_us >> 2) {
+			rql_bucket += 2;
+			lat_us >>= 2;
+		}
+		if (lat_us >> 1)
+			rql_bucket += 1;
+		if (rql_bucket >= NR_RUNQ_LAT_BUCKETS)
+			rql_bucket = NR_RUNQ_LAT_BUCKETS - 1;
+		lstat_inc(LSTAT_RUNQ_LAT_BASE + rql_bucket, layer, cpuc);
 	}
 
 	/*

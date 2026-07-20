@@ -157,9 +157,9 @@ fn get_cpusets(topo: &Topology) -> Result<BTreeSet<CpuSet>> {
     let cpuset_cpus = collect_cpuset_effective()?;
     for x in cpuset_cpus {
         let mut cores = BTreeSet::new();
-        for (_, core) in topo.all_cores.iter() {
+        for core in topo.all_cores.values() {
             let mut has_all = true;
-            for (_, cpu) in core.cpus.iter() {
+            for cpu in core.cpus.values() {
                 has_all &= x.contains(&cpu.id);
             }
             if has_all {
