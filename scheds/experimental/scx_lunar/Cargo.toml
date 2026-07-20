@@ -1,0 +1,22 @@
+[package]
+name = "scx_lunar"
+version = "1.0.0"
+authors = ["Timon Stipkovits <timon2201@gmail.com>"]
+edition = "2021"
+description = "Multi-queue all purpose scheduler with per-CPU/per-LLC dispatch queues"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1"
+ctrlc = { version = "3", features = ["termination"] }
+clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.2" }
+libbpf-rs = "=0.26.2"
+log = "0.4"
+simplelog = "0.12"
+
+[build-dependencies]
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.2" }
+
+[features]
+enable_backtrace = []
