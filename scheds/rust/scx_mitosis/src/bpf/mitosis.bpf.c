@@ -472,6 +472,16 @@ static s32 pick_idle_cpu_from(struct task_struct *p, const struct cpumask *cand_
 /* Check if we need to update the cell/cpumask mapping */
 static __always_inline int maybe_refresh_cell(struct task_struct *p, struct task_ctx *tctx)
 {
+	if (tctx->check_affinity) {
+		tctx->check_affinity = false;
+		if (tctx->configuration_seq == READ_ONCE(applied_configuration_seq)) {
+			scx_bpf_error(
+				"check_affinity task reached maybe_refresh_cell without config refresh: pid=%d cell=%u dsq=%llx",
+				p->pid, tctx->cell, tctx->dsq.raw);
+			return -EINVAL;
+		}
+	}
+
 	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq))
 		return refresh_task_cell(p, tctx);
 

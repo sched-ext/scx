@@ -79,6 +79,8 @@ struct task_ctx {
 	u32 configuration_seq;
 	/* Is this task allowed on all cores of its cell? */
 	bool all_cell_cpus_allowed;
+	/* Debug: assert rescued affinity placement is followed by a config refresh. */
+	bool check_affinity;
 	/* Set when task is dispatched to a borrowed CPU from another cell.
 	 * Consumed and cleared in mitosis_stopping to avoid advancing the
 	 * lending cell's per-CPU DSQ vtime with this task's execution.
@@ -95,6 +97,7 @@ struct task_ctx {
 };
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
+static inline struct cpu_ctx *lookup_cpu_ctx(int cpu);
 
 /*
  * Smoothed average of a task's per-wake runtime (EWMA, alpha=1/8).
