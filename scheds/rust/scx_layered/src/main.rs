@@ -1697,7 +1697,7 @@ impl GpuTaskAffinitizer {
             for proc in device
                 .running_compute_processes()?
                 .into_iter()
-                .chain(device.running_graphics_processes()?.into_iter())
+                .chain(device.running_graphics_processes()?)
             {
                 self.gpu_pids_to_devs.insert(Pid::from_u32(proc.pid), i);
             }
@@ -3185,7 +3185,7 @@ impl<'a> Scheduler<'a> {
         let ncpu: u64 = layer.cpus.weight() as u64;
         let membw = (membw * 1024_f64.powf(3.0)).round() as u64;
         let membw_limit = (membw_limit * 1024_f64.powf(3.0)).round() as u64;
-        let last_membw_percpu = if ncpu > 0 { membw / ncpu } else { 0 };
+        let last_membw_percpu = membw.checked_div(ncpu).unwrap_or(0);
 
         // Either there is no memory bandwidth limit set, or the counters
         // are not fully initialized yet. Just return the current target.
@@ -3407,7 +3407,7 @@ impl<'a> Scheduler<'a> {
                 remaining -= cpus_in_llc;
             } else {
                 let mut extra = 0;
-                for (_, core) in llc.cores.iter() {
+                for core in llc.cores.values() {
                     if remaining == 0 {
                         break;
                     }
@@ -3807,7 +3807,7 @@ impl<'a> Scheduler<'a> {
         let prev_nr_cpus: Vec<usize> = self.layers.iter().map(|l| l.nr_cpus).collect();
 
         let mut ascending: Vec<(usize, usize)> = cpu_targets.iter().copied().enumerate().collect();
-        ascending.sort_by(|a, b| a.1.cmp(&b.1));
+        ascending.sort_by_key(|a| a.1);
 
         // Snapshot per-layer per-node CPU counts before allocation changes.
         let prev_node_cpus: Vec<Vec<usize>> =
@@ -4545,7 +4545,7 @@ impl<'a> Scheduler<'a> {
                     Ok(StatsReq::Refresh(tid, mut stats)) => {
                         // Propagate self's layer cpu ranges into each stat's.
                         for i in 0..self.nr_layer_cpus_ranges.len() {
-                            for (_, ranges) in cpus_ranges.iter_mut() {
+                            for ranges in cpus_ranges.values_mut() {
                                 ranges[i] = (
                                     ranges[i].0.min(self.nr_layer_cpus_ranges[i].0),
                                     ranges[i].1.max(self.nr_layer_cpus_ranges[i].1),
