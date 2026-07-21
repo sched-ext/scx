@@ -346,18 +346,33 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	return deadline >> LAVD_SHIFT;
 }
 
+static u64 calc_compete_window(void)
+{
+	u64 nr_q = sys_stat.nr_queued_task;
+	u64 nr_a = max(sys_stat.nr_active, 1);
+
+	/*
+	 * The compete window is meant to boost bursty tasks that wake and
+	 * block frequently, as they'll benefit from the enqueue-time boost
+	 * more frequently than longer-running tasks. However, if the window is
+	 * too large, then the global clock will be incremented very
+	 * infrequently, which can cause fairness issues.
+	 *
+	 * We therefore shrink the window proportionally to the
+	 * oversubscription ratio so that the window scales inversely with the
+	 * number of enqueued tasks.
+	 */
+	if (nr_q > nr_a)
+		return (LAVD_DL_COMPETE_WINDOW * nr_a) / nr_q;
+	return LAVD_DL_COMPETE_WINDOW;
+}
+
 __hidden
 u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc)
 {
 	u64 dl_delta, clc;
 
-	/*
-	 * Before enqueueing a task to a run queue, we should decide when a
-	 * task should be scheduled. We start from -LAVD_DL_COMPETE_WINDOW
-	 * so that the current task can compete against the already enqueued
-	 * tasks within [-LAVD_DL_COMPETE_WINDOW, 0].
-	 */
 	dl_delta = calc_virtual_deadline_delta(p, taskc);
-	clc = READ_ONCE(cur_logical_clk) - LAVD_DL_COMPETE_WINDOW;
+	clc = READ_ONCE(cur_logical_clk) - calc_compete_window();
 	return clc + dl_delta;
 }
