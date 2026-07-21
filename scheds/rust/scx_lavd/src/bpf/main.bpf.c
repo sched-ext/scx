@@ -222,6 +222,14 @@ const volatile u8	mig_delta_pct = 0;
 const volatile u8	no_fast_lb = 0;
 
 /*
+ * Warm-CPU wait budget. When > 0, a waking latency-tolerant task waits up to
+ * this many ns for its previous CPU to free up before migrating to an idle one,
+ * queueing on that CPU's per-CPU DSQ meanwhile. Warm cache and TLB state on the
+ * CPU extend the wait up to 2x. 0 disables. Set via --warm-cpu-us.
+ */
+const volatile u64	warm_cpu_ns = 0;
+
+/*
  * Skip periodic load balancing when average system utilization is below this
  * threshold. The value is pre-scaled by userspace. 0 = disabled.
  * Default: p2s(25) = 256.
@@ -628,6 +636,9 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	taskc->last_slice_used_wall = time_delta(now, taskc->last_running_clk);
 
+	/* Add this slice to the per-CPU warmth that drives warm-CPU placement. */
+	task_update_cpu_warmth(taskc, cpuc, taskc->last_slice_used_wall, now);
+
 	/*
 	 * Update the current service time if necessary.
 	 */
@@ -888,7 +899,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
-	bool is_idle = false;
+	bool is_idle = false, warm_wait;
 	task_ctx *taskc;
 	u64 dsq_id;
 
@@ -956,6 +967,14 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
 
+	/*
+	 * pick_idle_cpu() sets LAVD_FLAG_WARM_CPU when it chose to wait on
+	 * the previous CPU. Consume it here so the dispatch below honors that
+	 * one decision instead of recomputing it against a clock that has moved.
+	 */
+	warm_wait = test_task_flag(taskc, LAVD_FLAG_WARM_CPU);
+	reset_task_flag(taskc, LAVD_FLAG_WARM_CPU);
+
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
@@ -1010,6 +1029,16 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	if (can_direct_dispatch(cpuc, is_idle)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
+		account_queued_load_pcpu(taskc, get_primary_cpu(cpu));
+	} else if (warm_wait) {
+		/*
+		 * Wait on the previous CPU (== cpu here). Queue on its per-CPU
+		 * DSQ, not a shared domain DSQ, so no other CPU can steal the task
+		 * and pull it off its warm CPU. use_per_cpu_dsq() is on whenever
+		 * warm_cpu_ns is set, so consume_task() drains this DSQ.
+		 */
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
+					 p->scx.dsq_vtime, enq_flags);
 		account_queued_load_pcpu(taskc, get_primary_cpu(cpu));
 	} else {
 		dsq_id = get_target_dsq_id(p, cpuc, taskc);
@@ -2108,6 +2137,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	WRITE_ONCE(taskc->queued_on_cpu_id, -1);
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
+
+	/* Per-CPU warmth is task+CPU private -- never inherit it. */
+	taskc->cpu_heat = 0;
+	taskc->warm_cpu_id = LAVD_CPU_ID_NONE;
+	taskc->cpu_heat_updated_clk = scx_bpf_now();
 
 	bpf_rcu_read_lock();
 	set_affinity_flags(taskc, p->cpus_ptr);
