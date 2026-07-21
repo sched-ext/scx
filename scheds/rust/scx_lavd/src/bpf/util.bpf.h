@@ -18,6 +18,7 @@ extern volatile bool		no_freq_scaling;
 extern const volatile bool	no_wake_sync;
 extern const volatile bool	no_slice_boost;
 extern const volatile bool	per_cpu_dsq;
+extern const volatile u64	warm_cpu_ns;	/* enables per-CPU DSQ consume */
 extern const volatile bool	enable_cpu_bw;
 extern const volatile bool	is_autopilot_on;
 extern const volatile u8	verbose;
