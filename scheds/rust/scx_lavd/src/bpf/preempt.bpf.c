@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+#include <vmlinux.h>
+
 #include <scx/common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
@@ -453,4 +455,3 @@ void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
 	}
 }
-
