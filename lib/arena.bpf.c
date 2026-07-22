@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-2.0
  * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
  */
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
 #include <lib/sdt_task.h>
 
@@ -89,7 +90,7 @@ int arena_topology_node_init(struct arena_topology_node_init_args *args)
 SEC("syscall")
 int arena_topology_print(void)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	topo_print();
 

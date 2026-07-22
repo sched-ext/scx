@@ -1,3 +1,4 @@
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
 #include <lib/sdt_task.h>
 
@@ -26,7 +27,7 @@ scx_bitmap_pick_any_cpu_once(scx_bitmap_t __arg_arena mask, u64 __arg_arena *sta
 		if (!old)
 			continue;
 
-		cpu = scx_ffs(old);
+		cpu = arena_ffs(old);
 		if (!bmp_test_and_clear_bit(ind * BITS_PER_LONG_LONG + cpu, mask))
 			return -EAGAIN;
 

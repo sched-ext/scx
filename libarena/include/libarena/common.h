@@ -2,6 +2,14 @@
 /* Copyright (c) 2026 Meta Platforms, Inc. and affiliates. */
 #pragma once
 
+#ifndef div_round_up
+#define div_round_up(a, b) (((a) + (b) - 1) / (b))
+#endif
+
+#ifndef round_up
+#define round_up(a, b) ((((a) + (b) - 1) / (b)) * b)
+#endif
+
 #ifdef __BPF__
 
 #include <vmlinux.h>
@@ -46,6 +54,7 @@ struct {
 volatile u32 zero __weak;
 extern volatile u64 asan_violated;
 
+int arena_ffs(__u64 word);
 int arena_fls(__u64 word);
 
 void __arena *arena_malloc(size_t size);
