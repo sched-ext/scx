@@ -27,13 +27,13 @@ u32 topo_max_children[TOPO_MAX_LEVEL];
 __hidden
 int topo_contains(topo_ptr topo, u32 cpu)
 {
-	return scx_bitmap_test_cpu(cpu, topo->mask);
+	return bmp_test_bit(cpu, topo->mask);
 }
 
 static
 int topo_subset(topo_ptr topo, scx_bitmap_t mask)
 {
-	return scx_bitmap_subset(topo->mask, mask);
+	return bmp_subset(SCX_BITMAP_NR_BITS, topo->mask, mask);
 }
 
 static
@@ -160,7 +160,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
 			if (topo_subset(child, mask))
 				break;
 
-			if (scx_bitmap_intersects(child->mask, mask)) {
+			if (bmp_intersects(SCX_BITMAP_NR_BITS, child->mask, mask)) {
 				bpf_printk("partially intersecting topology nodes");
 				return -EINVAL;
 			}
@@ -462,7 +462,7 @@ int topo_print(void)
 			iter.indices[TOPO_CORE],
 			iter.indices[TOPO_CPU]);
 
-		scx_bitmap_print(iter.topo->mask);
+		bmp_print(SCX_BITMAP_NR_BITS, iter.topo->mask);
 	} while (topo_iter_next(&iter) && can_loop);
 
 	return 0;
@@ -476,27 +476,27 @@ int topo_print_by_level(void)
 	topo_ptr topo;
 
 	bpf_printk("TOP-LEVEL MASK");
-	scx_bitmap_print(topo_all->mask);
+	bmp_print(SCX_BITMAP_NR_BITS, topo_all->mask);
 	bpf_printk("\n");
 
 	bpf_printk("NODE MASKS");
 	TOPO_FOR_EACH_NODE(&iter, topo)
-		scx_bitmap_print(topo->mask);
+		bmp_print(SCX_BITMAP_NR_BITS, topo->mask);
 	bpf_printk("\n");
 
 	bpf_printk("LLC MASKS");
 	TOPO_FOR_EACH_LLC(&iter, topo)
-		scx_bitmap_print(topo->mask);
+		bmp_print(SCX_BITMAP_NR_BITS, topo->mask);
 	bpf_printk("\n");
 
 	bpf_printk("CORE MASKS");
 	TOPO_FOR_EACH_CORE(&iter, topo)
-		scx_bitmap_print(topo->mask);
+		bmp_print(SCX_BITMAP_NR_BITS, topo->mask);
 	bpf_printk("\n");
 
 	bpf_printk("CPU MASKS");
 	TOPO_FOR_EACH_CPU(&iter, topo)
-		scx_bitmap_print(topo->mask);
+		bmp_print(SCX_BITMAP_NR_BITS, topo->mask);
 	bpf_printk("\n");
 
 	return 0;
