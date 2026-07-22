@@ -4,6 +4,7 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.h>
 #include <lib/topology.h>
@@ -265,7 +266,7 @@ static struct scx_cgroup_bw_config cbw_config;
  * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer.
  *
  * scx_cgroup_ctx objects are allocated in the BPF arena via
- * scx_static_alloc(); the map holds only an arena pointer to each object.
+ * arena_malloc(); the map holds only an arena pointer to each object.
  */
 struct cbw_cgrp_entry {
 	u64	cgx;
@@ -284,7 +285,7 @@ struct {
  * cgroup id and LLC id (struct cgroup_llc_id).
  *
  * scx_cgroup_llc_ctx objects are allocated in the BPF arena via
- * scx_static_alloc(); the map holds only an arena pointer to each object.
+ * arena_malloc(); the map holds only an arena pointer to each object.
  */
 struct cgroup_llc_id {
 	u64		cgrp_id;
@@ -350,10 +351,11 @@ static u64 cbw_llcx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
 static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx(void)
 {
 	scx_cgroup_llc_ctx_t *llcx;
+	size_t size = round_up(sizeof(*llcx), SCX_CACHELINE_SIZE);
 
 	llcx = cbw_freelist_pop(&cbw_llcx_free_head);
 	if (!llcx)
-		llcx = scx_static_alloc(sizeof(*llcx), SCX_CACHELINE_SIZE);
+		llcx = arena_malloc(size);
 	return llcx;
 }
 
@@ -375,10 +377,11 @@ static u64 cbw_cgx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
 static inline scx_cgroup_ctx_t *cbw_alloc_cgx(void)
 {
 	scx_cgroup_ctx_t *cgx;
+	size_t size = round_up(sizeof(*cgx), SCX_CACHELINE_SIZE);
 
 	cgx = cbw_freelist_pop(&cbw_cgx_free_head);
 	if (!cgx)
-		cgx = scx_static_alloc(sizeof(*cgx), SCX_CACHELINE_SIZE);
+		cgx = arena_malloc(size);
 	return cgx;
 }
 
@@ -1050,7 +1053,7 @@ int cbw_update_nquota_ub(u64 cgx_raw)
 {
 	/*
 	 * Accept cgx as u64 rather than scx_cgroup_ctx_t * to avoid a BPF
-	 * verifier type mismatch.  When cgx comes from scx_static_alloc() the
+	 * verifier type mismatch.  When cgx comes from arena_malloc() the
 	 * compiler tracks it as a scalar; __noinline call sites with arena
 	 * pointer parameters require an arena-qualified register, which the
 	 * compiler does not emit from a scalar.  Passing u64 and casting here

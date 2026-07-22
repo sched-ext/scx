@@ -5,34 +5,25 @@
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
 
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
-#include <lib/alloc/bpf_helpers_local.h>
+#include <lib/arena.h>
 #include <lib/sdt_task.h>
 
-/*
- * Task BPF map entry recording the task's assigned ID and pointing to the data
- * area allocated in arena.
- */
-struct scx_task_map_val {
-	union sdt_id		tid;
-	__u64			tptr;
-	struct sdt_data __arena	*data;
-};
+static size_t task_ctx_size;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
-	__type(value, struct scx_task_map_val);
+	__type(value, u64);
 } scx_task_map SEC(".maps");
-
-struct scx_allocator scx_task_allocator;
 
 __hidden
 void __arena *scx_task_alloc(struct task_struct *p)
 {
-	struct sdt_data __arena *data = NULL;
-	struct scx_task_map_val *mval;
+	void __arena *data;
+	u64 *mval;
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -41,30 +32,28 @@ void __arena *scx_task_alloc(struct task_struct *p)
 		return NULL;
 	}
 
-	data = scx_alloc(&scx_task_allocator);
+	data = arena_malloc(task_ctx_size);
 	if (unlikely(!data)) {
 		scx_err_loc("scx_alloc failed");
 		return NULL;
 	}
 
-	mval->tid = data->tid;
-	mval->tptr = (__u64) p;
-	mval->data = data;
+	*mval = (u64)data;
 
-	return (void __arena *)data->payload;
+	return data;
 }
 
 __hidden
 int scx_task_init(__u64 data_size)
 {
-	return scx_alloc_init(&scx_task_allocator, data_size);
+	task_ctx_size = data_size;
+	return 0;
 }
 
 __hidden
 void __arena *scx_task_data(struct task_struct *p)
 {
-	struct sdt_data __arena *data;
-	struct scx_task_map_val *mval;
+	u64 *mval;
 
 	scx_arena_subprog_init();
 
@@ -74,15 +63,13 @@ void __arena *scx_task_data(struct task_struct *p)
 		return NULL;
 	}
 
-	data = mval->data;
-
-	return (void __arena *)data->payload;
+	return (void __arena *)*mval;
 }
 
 __hidden
 void scx_task_free(struct task_struct *p)
 {
-	struct scx_task_map_val *mval;
+	u64 *mval;
 
 	scx_arena_subprog_init();
 
@@ -92,6 +79,6 @@ void scx_task_free(struct task_struct *p)
 		return;
 	}
 
-	scx_alloc_free_idx(&scx_task_allocator, mval->tid.idx);
+	arena_free((void __arena *)*mval);
 	bpf_task_storage_delete(&scx_task_map, p);
 }

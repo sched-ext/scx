@@ -1,11 +1,10 @@
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
 #include <lib/arena.h>
 #include <lib/cpumask.h>
-#include <lib/sdt_task.h>
 
 const volatile u32 nr_cpu_ids = NR_CPU_IDS_UNINIT;
 
-static struct scx_allocator scx_bitmap_allocator;
 size_t mask_size;
 
 __weak
@@ -13,22 +12,19 @@ int scx_bitmap_init(__u64 total_mask_size)
 {
 	mask_size = div_round_up(total_mask_size, 8);
 
-	return scx_alloc_init(&scx_bitmap_allocator, mask_size * 8 + sizeof(union sdt_id));
+	return 0;
 }
 
 __weak
 u64 scx_bitmap_alloc_internal(void)
 {
-	struct sdt_data __arena *data = NULL;
 	scx_bitmap_t mask;
 	int i;
 
-	data = scx_alloc(&scx_bitmap_allocator);
-	if (unlikely(!data))
+	mask = arena_malloc(mask_size);
+	if (unlikely(!mask))
 		return (u64)(NULL);
 
-	mask = (scx_bitmap_t)data->payload;
-	mask->tid = data->tid;
 	bpf_for(i, 0, mask_size) {
 		mask->bits[i] = 0ULL;
 	}
@@ -46,7 +42,7 @@ int scx_bitmap_free(scx_bitmap_t __arg_arena mask)
 {
 	scx_arena_subprog_init();
 
-	scx_alloc_free_idx(&scx_bitmap_allocator, mask->tid.idx);
+	arena_free(mask);
 	return 0;
 }
 

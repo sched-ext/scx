@@ -1,5 +1,5 @@
+#include <libarena/common.h>
 #include <scx/common.bpf.h>
-#include <lib/sdt_task.h>
 
 #include <lib/cpumask.h>
 #include <lib/topology.h>
@@ -55,7 +55,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, s16 id)
 	}
 
 	max_ch = topo_max_children[level];
-	topo = scx_static_alloc(sizeof(struct topology) + max_ch * sizeof(topo_ptr), 1);
+	topo = arena_malloc(sizeof(struct topology) + max_ch * sizeof(topo_ptr));
 	if (!topo) {
 		bpf_printk("static allocation failed");
 		return NULL;
@@ -75,7 +75,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, s16 id)
 	 * from treating these checks as dead code (since level/id are local
 	 * variables that it knows were already checked above). Without it, clang
 	 * eliminates the re-check, and the verifier loses the narrowed bounds
-	 * after scx_static_alloc().
+	 * after arena_malloc().
 	 */
 	barrier_var(level);
 	barrier_var(id);
@@ -188,7 +188,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
 
 	topo->data = NULL;
 	if (data_size) {
-		topo->data = scx_static_alloc(data_size, 1);
+		topo->data = arena_malloc(data_size);
 		if (!topo->data)
 			return -ENOMEM;
 	}
