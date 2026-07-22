@@ -31,7 +31,7 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 __weak
 int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	while (scx_atq_pop(atq) && can_loop) {
 		/* Do nothing. Just drain all the queued tasks. */

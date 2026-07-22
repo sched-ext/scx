@@ -7,6 +7,14 @@
 struct buddy __arena buddy;
 volatile u32 zero = 0;
 
+int arena_ffs(__u64 word)
+{
+	if (!word)
+		return 0;
+
+	return 64 - __builtin_ffs(word);
+}
+
 int arena_fls(__u64 word)
 {
 	if (!word)

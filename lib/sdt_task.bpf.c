@@ -55,7 +55,7 @@ void __arena *scx_task_data(struct task_struct *p)
 {
 	u64 *mval;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
 	if (!mval) {
@@ -71,7 +71,7 @@ void scx_task_free(struct task_struct *p)
 {
 	u64 *mval;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
 	if (!mval) {
