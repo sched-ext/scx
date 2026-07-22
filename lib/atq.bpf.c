@@ -178,7 +178,7 @@ u64 scx_atq_pop(scx_atq_t *atq)
 		scx_atq_unlock(atq);
 
 		if (ret != -ENOENT)
-			bpf_printk("%s: error %d", __func__, ret);
+			arena_stderr("%s: error %d", __func__, ret);
 		return (u64)NULL;
 	}
 
@@ -240,7 +240,7 @@ int scx_atq_cancel(scx_task_common __arg_arena *taskc)
 		return 0;
 
 	if ((ret = scx_atq_lock(atq))) {
-		bpf_printk("Failed to lock ATQ for task");
+		arena_stderr("Failed to lock ATQ for task");
 		return ret;
 	}
 
@@ -253,7 +253,7 @@ int scx_atq_cancel(scx_task_common __arg_arena *taskc)
 	/* Protected from races by the lock. */
 	if ((ret = scx_atq_remove_unlocked(taskc->atq, taskc))) {
 		/* There is an unavoidable race with scx_atq_pop. */
-		bpf_printk("Failed to remove node from task");
+		arena_stderr("Failed to remove node from task");
 	}
 
 	scx_atq_unlock(atq);

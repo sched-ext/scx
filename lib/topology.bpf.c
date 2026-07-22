@@ -45,19 +45,19 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, s16 id)
 	int i;
 
 	if (level >= TOPO_MAX_LEVEL) {
-		bpf_printk("topology is too deep");
+		arena_stderr("topology is too deep");
 		return NULL;
 	}
 
 	if (id < 0 || id >= NR_CPUS) {
-		bpf_printk("invalid node id");
+		arena_stderr("invalid node id");
 		return NULL;
 	}
 
 	max_ch = topo_max_children[level];
 	topo = arena_malloc(sizeof(struct topology) + max_ch * sizeof(topo_ptr));
 	if (!topo) {
-		bpf_printk("static allocation failed");
+		arena_stderr("static allocation failed");
 		return NULL;
 	}
 
@@ -107,17 +107,17 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask, s16 id)
 	topo_ptr child;
 
 	if (unlikely(!mask)) {
-		bpf_printk("NULL mask pointer");
+		arena_stderr("NULL mask pointer");
 		return -EINVAL;
 	}
 
 	if (parent->level >= TOPO_MAX_LEVEL) {
-		bpf_printk("topology tree is too deep");
+		arena_stderr("topology tree is too deep");
 		return -EINVAL;
 	}
 
 	if (parent->nr_children >= topo_max_children[parent->level]) {
-		bpf_printk("topology fanout is too large");
+		arena_stderr("topology fanout is too large");
 		return -EINVAL;
 	}
 
@@ -141,7 +141,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
 	if (!topo_all) {
 		topo_all = topo_node(NULL, mask, id);
 		if (!topo_all) {
-			bpf_printk("couldn't initialize topology");
+			arena_stderr("couldn't initialize topology");
 			return -EINVAL;
 		}
 
@@ -150,7 +150,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
 
 	for (i = 0; i < TOPO_MAX_LEVEL && can_loop; i++) {
 		if (!topo_subset(topo, mask)) {
-			bpf_printk("mask not a subset of a topology node");
+			arena_stderr("mask not a subset of a topology node");
 			topo_print();
 			return -EINVAL;
 		}
@@ -161,7 +161,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
 				break;
 
 			if (bmp_intersects(SCX_BITMAP_NR_BITS, child->mask, mask)) {
-				bpf_printk("partially intersecting topology nodes");
+				arena_stderr("partially intersecting topology nodes");
 				return -EINVAL;
 			}
 		}
@@ -179,7 +179,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
 		}
 
 		if (!child) {
-			bpf_printk("child is not valid");
+			arena_stderr("child is not valid");
 			return 0;
 		}
 
@@ -193,7 +193,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, s16 id)
 			return -ENOMEM;
 	}
 
-	bpf_printk("topology is too deep");
+	arena_stderr("topology is too deep");
 	return -EINVAL;
 }
 
@@ -204,7 +204,7 @@ topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
 	int lvl, i;
 
 	if (!topo_contains(topo, cpu)) {
-		bpf_printk("missing cpu from topology");
+		arena_stderr("missing cpu from topology");
 		return NULL;
 	}
 
@@ -219,7 +219,7 @@ topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
 		}
 
 		if (i == topo->nr_children) {
-			bpf_printk("missing cpu from inner topology nodes");
+			arena_stderr("missing cpu from inner topology nodes");
 			return NULL;
 		}
 
@@ -236,7 +236,7 @@ topo_ptr topo_find_ancestor(topo_ptr topo, u32 cpu)
 		topo = topo->parent;
 
 	if (!topo_contains(topo, cpu))
-		bpf_printk("could not find cpu");
+		arena_stderr("could not find cpu");
 
 	return topo;
 
@@ -250,7 +250,7 @@ topo_ptr topo_find_sibling(topo_ptr topo, u32 cpu)
 	int i;
 
 	if (!parent) {
-		bpf_printk("node is at the top level");
+		arena_stderr("node is at the top level");
 		return NULL;
 	}
 
@@ -268,12 +268,12 @@ __weak
 u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level)
 {
 	if (unlikely(level < 0 || level >= TOPO_MAX_LEVEL)) {
-		bpf_printk("invalid topology level %d", level);
+		arena_stderr("invalid topology level %d", level);
 		return (u64)NULL;
 	}
 
 	if (unlikely(topo->level < level)) {
-		bpf_printk("requesting cpumask from lower level %d, starting from %d", level, topo->level);
+		arena_stderr("requesting cpumask from lower level %d, starting from %d", level, topo->level);
 		return (u64)NULL;
 	}
 
@@ -305,13 +305,13 @@ topo_iter_start_from(struct topo_iter *iter, topo_ptr topo)
 		}
 
 		if (ind == parent->nr_children) {
-			bpf_printk("could not find topology node in parent");
+			arena_stderr("could not find topology node in parent");
 			return -EINVAL;
 		}
 
 
 		if (unlikely(lvl >= TOPO_MAX_LEVEL)) {
-			bpf_printk("invalid level %d", lvl);
+			arena_stderr("invalid level %d", lvl);
 			return -EINVAL;
 		}
 
@@ -336,7 +336,7 @@ topo_iter_next(struct topo_iter *iter)
 	enum topo_level lvl;
 
 	if (unlikely(!iter)) {
-		bpf_printk("passing NULL iterator");
+		arena_stderr("passing NULL iterator");
 		return false;
 	}
 
@@ -351,8 +351,8 @@ topo_iter_next(struct topo_iter *iter)
 			 * out of an abundance of caution: In some cases bpf_printk
 			 * does not fire at all, making debugging more difficult.
 			 */
-			bpf_printk("invalid child level %d", lvl);
-			bpf_printk("invalid child level %d", lvl);
+			arena_stderr("invalid child level %d", lvl);
+			arena_stderr("invalid child level %d", lvl);
 			return false;
 		}
 
@@ -369,7 +369,7 @@ topo_iter_next(struct topo_iter *iter)
 	while (iter->topo->level > 0 && can_loop) {
 		lvl = iter->topo->level;
 		if (unlikely(lvl < 0 || lvl >= TOPO_MAX_LEVEL)) {
-			bpf_printk("invalid level %d", lvl);
+			arena_stderr("invalid level %d", lvl);
 			return false;
 		}
 
@@ -412,13 +412,13 @@ topo_cpu_to_llc_id(u32 cpu)
 	topo_ptr topo;
 
 	if (cpu >= nr_cpu_ids) {
-		bpf_printk("invalid cpu id: %u", cpu);
+		arena_stderr("invalid cpu id: %u", cpu);
 		return -EINVAL;
 	}
 
 	topo = (topo_ptr)topo_nodes[TOPO_CPU][cpu];
 	if (!topo) {
-		bpf_printk("cpu %u has no topology node set", cpu);
+		arena_stderr("cpu %u has no topology node set", cpu);
 		return -EINVAL;
 	}
 
@@ -436,7 +436,7 @@ int topo_print(void)
 	int i;
 
 	if (!topo_all) {
-		bpf_printk("[NO TOPOLOGY]");
+		arena_stderr("[NO TOPOLOGY]");
 		return 0;
 	}
 
@@ -453,7 +453,7 @@ int topo_print(void)
 
 			indent[i] = '\t';
 		}
-		bpf_printk("%s (LEVEL %d) [%d, %d, %d ,%d, %d]",
+		arena_stderr("%s (LEVEL %d) [%d, %d, %d ,%d, %d]",
 			indent,
 			iter.topo->level,
 			iter.indices[TOPO_TOP],
@@ -475,29 +475,29 @@ int topo_print_by_level(void)
 	struct topo_iter iter;
 	topo_ptr topo;
 
-	bpf_printk("TOP-LEVEL MASK");
+	arena_stderr("TOP-LEVEL MASK");
 	bmp_print(SCX_BITMAP_NR_BITS, topo_all->mask);
-	bpf_printk("\n");
+	arena_stderr("\n");
 
-	bpf_printk("NODE MASKS");
+	arena_stderr("NODE MASKS");
 	TOPO_FOR_EACH_NODE(&iter, topo)
 		bmp_print(SCX_BITMAP_NR_BITS, topo->mask);
-	bpf_printk("\n");
+	arena_stderr("\n");
 
-	bpf_printk("LLC MASKS");
+	arena_stderr("LLC MASKS");
 	TOPO_FOR_EACH_LLC(&iter, topo)
 		bmp_print(SCX_BITMAP_NR_BITS, topo->mask);
-	bpf_printk("\n");
+	arena_stderr("\n");
 
-	bpf_printk("CORE MASKS");
+	arena_stderr("CORE MASKS");
 	TOPO_FOR_EACH_CORE(&iter, topo)
 		bmp_print(SCX_BITMAP_NR_BITS, topo->mask);
-	bpf_printk("\n");
+	arena_stderr("\n");
 
-	bpf_printk("CPU MASKS");
+	arena_stderr("CPU MASKS");
 	TOPO_FOR_EACH_CPU(&iter, topo)
 		bmp_print(SCX_BITMAP_NR_BITS, topo->mask);
-	bpf_printk("\n");
+	arena_stderr("\n");
 
 	return 0;
 }

@@ -562,25 +562,25 @@ void cbw_top_half_end(u16 nr_throttled_cgroups, u16 has_throttled_tasks)
  * Debug macros.
  */
 #define cbw_err(fmt, ...) do { 							\
-	bpf_printk("[%s:%d] ERROR: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+	arena_stderr("[%s:%d] ERROR: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
 #define cbw_warn(fmt, ...) do { 						\
-	bpf_printk("[%s:%d] WARNING: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+	arena_stderr("[%s:%d] WARNING: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
 #define cbw_info(fmt, ...) do { 						\
-	bpf_printk("[%s:%d] INFO: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+	arena_stderr("[%s:%d] INFO: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
 #define cbw_dbg(fmt, ...) do { 							\
 	if (cbw_config.verbose > 0)						\
-		bpf_printk("[%s:%d] " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+		arena_stderr("[%s:%d] " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
 #define cbw_dbg_cgrp(fmt, ...) do { 						\
 	if (cbw_config.verbose > 0)						\
-		bpf_printk("[%s:%d/cgid%llu] " fmt, __func__, __LINE__,		\
+		arena_stderr("[%s:%d/cgid%llu] " fmt, __func__, __LINE__,		\
 			   cgrp->kn->id, ##__VA_ARGS__);			\
 } while(0)
 
@@ -2766,7 +2766,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	indent_str = indent_strs[ clamp((u32)cgrp->level, 0, indent_max - 1) ];
 
 	bpf_probe_read_kernel_str(name, sizeof(name), BPF_CORE_READ(cgrp->kn, name));
-	bpf_printk("%s +-- %s (id: %llu, level: %d)", indent_str,
+	arena_stderr("%s +-- %s (id: %llu, level: %d)", indent_str,
 			name, cgroup_get_id(cgrp), (u32)cgrp->level);
 
 	if (cgx->nquota_ub == CBW_RUNTUME_INF)
@@ -2781,17 +2781,17 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 		}
 	}
 
-	bpf_printk("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
+	arena_stderr("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
 			cgx->quota, cgx->period, cgx->burst);
-	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
+	arena_stderr("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
 			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
-	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
+	arena_stderr("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
 			nr_throttled_tasks);
-	bpf_printk("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
+	arena_stderr("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
 			cgx->period_budget, cgx->burst_remaining);
-	bpf_printk("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
+	arena_stderr("%s   \\_ runtime_total_sloppy: %lld, runtime_total_last: %lld", indent_str,
 			cgx->runtime_total_sloppy, cgx->runtime_total_last);
 					
 	return 0;

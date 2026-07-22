@@ -185,6 +185,7 @@
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.h>
 #include <bpf_experimental.h>
+#include <libarena/common.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"

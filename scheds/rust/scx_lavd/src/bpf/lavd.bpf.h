@@ -560,14 +560,14 @@ extern const volatile u8	verbose;
 #define debugln(fmt, ...)						\
 ({									\
 	if (verbose > 0)						\
-		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
+		arena_stderr("[%s:%d] " fmt, __func__, __LINE__,		\
 					##__VA_ARGS__);			\
 })
 
 #define traceln(fmt, ...)						\
 ({									\
 	if (verbose > 1)						\
-		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
+		arena_stderr("[%s:%d] " fmt, __func__, __LINE__,		\
 					##__VA_ARGS__);			\
 })
 

@@ -70,12 +70,12 @@ scx_bitmap_vacate_cpu(scx_bitmap_t __arg_arena mask, s32 cpu)
 	int off = (u32)cpu / 64;
 
 	if (cpu < 0 || cpu >= nr_cpu_ids) {
-		bpf_printk("freeing invalid cpu");
+		arena_stderr("freeing invalid cpu");
 		return -EINVAL;
 	}
 
 	if (off < 0 || off >= SCX_BITMAP_NR_LONGS || off >= SCXMASK_NLONG) {
-		bpf_printk("impossible out-of-bounds on free");
+		arena_stderr("impossible out-of-bounds on free");
 		return -EINVAL;
 	}
 
@@ -115,7 +115,7 @@ scx_bitmap_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
 
 	ret = __COMPAT_bpf_cpumask_populate((struct cpumask *)bpfmask, tmp->bits, sizeof(tmp->bits));
 	if (unlikely(ret)) {
-		bpf_printk("error %d when calling bpf_cpumask_populate", ret);
+		arena_stderr("error %d when calling bpf_cpumask_populate", ret);
 		return ret;
 	}
 

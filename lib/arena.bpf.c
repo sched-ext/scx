@@ -23,19 +23,19 @@ int arena_init(struct arena_init_args *args)
 	int ret;
 
 	if (nr_cpu_ids == NR_CPU_IDS_UNINIT) {
-		bpf_printk("uninitialized nr_cpu_ids variable");
+		arena_stderr("uninitialized nr_cpu_ids variable");
 		return -ENODEV;
 	}
 
 	ret = scx_percpu_storage_init();
 	if (ret) {
-		bpf_printk("scx_percpu_storage_init failed with %d", ret);
+		arena_stderr("scx_percpu_storage_init failed with %d", ret);
 		return ret;
 	}
 
 	ret = scx_task_init(args->task_ctx_size);
 	if (ret) {
-		bpf_printk("scx_task_init failed with %d", ret);
+		arena_stderr("scx_task_init failed with %d", ret);
 		return ret;
 	}
 
