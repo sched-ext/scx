@@ -779,22 +779,6 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 		__scalar_type_to_expr_cases(long long), \
 		default: (typeof(x))0))
 
-#define READ_ONCE(x)								\
-({										\
-	union { __unqual_typeof(x) __val; char __c[1]; } __u =			\
-		{ .__c = { 0 } };						\
-	__read_once_size((__unqual_typeof(x) *)&(x), __u.__c, sizeof(x));	\
-	__u.__val;								\
-})
-
-#define WRITE_ONCE(x, val)							\
-({										\
-	union { __unqual_typeof(x) __val; char __c[1]; } __u =			\
-		{ .__val = (val) }; 						\
-	__write_once_size((__unqual_typeof(x) *)&(x), __u.__c, sizeof(x));	\
-	__u.__val;								\
-})
-
 /*
  * __calc_avg - Calculate exponential weighted moving average (EWMA) with
  * @old and @new values. @decay represents how large the @old value remains.
