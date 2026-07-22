@@ -6,9 +6,10 @@
  */
 #pragma once
 
-#include "sdt_alloc.h"
-
 #ifdef __BPF__
+
+#include <bpf_arena_common.bpf.h>
+#include <bpf_arena_spin_lock.h>
 
 void __arena *__scx_task_data(struct task_struct *p);
 void __arena *scx_task_data(struct task_struct *p);
@@ -16,5 +17,6 @@ int scx_task_init(__u64 data_size, __u64 align);
 void __arena *scx_task_alloc(struct task_struct *p);
 void scx_task_free(struct task_struct *p);
 void scx_task_free_rcu(struct task_struct *p);
+void scx_arena_subprog_init(void);
 
 #endif /* __BPF__ */

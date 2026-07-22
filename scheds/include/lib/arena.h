@@ -9,6 +9,9 @@
 #define __arena
 #endif
 
+#define scx_out_loc(fmt, ...) bpf_stream_printk(1, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
+#define scx_err_loc(fmt, ...) bpf_stream_printk(2, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
+
 struct arena_init_args {
 	u64 static_pages;
 	u64 task_ctx_size;

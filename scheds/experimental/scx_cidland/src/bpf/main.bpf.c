@@ -24,7 +24,7 @@
  * deadline computed by task_dl().
  */
 #include <scx/common.bpf.h>
-#include <lib/arena_map.h>
+#include <libarena/common.h>
 #include <lib/const-defs.h>
 #include <lib/sdt_task.h>
 #include "intf.h"
@@ -53,17 +53,6 @@
 char _license[] SEC("license") = "GPL";
 
 /*
- * Storage for the arena spinlock queue nodes that the allocator behind
- * scx_task_alloc() takes.
- *
- * This normally comes from lib/common.bpf.c, but a translation unit that has
- * __arena globals of its own emits the extern declaration into its own
- * .addr_space.1 as a zero sized definition, which then collides with the real
- * one at link time. Defining it here keeps it to a single definition.
- */
-struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
-
-/*
  * Define struct user_exit_info which is shared between BPF and userspace to
  * communicate the exit status.
  */
@@ -75,13 +64,6 @@ UEI_DEFINE(uei);
  * cid that runs out of work.
  */
 #define SHARED_DSQ	0
-
-/*
- * Slack pages added to the arena's static pool on top of what the cid keyed
- * arrays need, for the task context allocator's own bookkeeping. Same
- * granularity ArenaLib uses.
- */
-#define STATIC_ALLOC_PAGES	8
 
 /*
  * The verifier only associates a program with an arena if the program emits an
@@ -1072,33 +1054,21 @@ void BPF_STRUCT_OPS(cidland_exit, struct scx_exit_info *ei)
 SEC("syscall")
 int cidland_arena_init(struct cidland_arena_args *args)
 {
-	u64 nr_cpus = args->nr_cpus, bytes;
-	s32 err;
+	u64 nr_cpus = args->nr_cpus;
 
 	if (!nr_cpus)
 		return -EINVAL;
+	arena_subprog_init();
 
 	nr_cids_max = nr_cpus;
-	nr_cid_words = div_round_up(nr_cpus, 64);
+	nr_cid_words = (nr_cpus + 63) / 64;
 	nr_cmask_words = CMASK_NR_WORDS(nr_cpus);
 
-	/*
-	 * The static allocator hands out of a pool it takes up front, so ask
-	 * for what the arrays below need plus a margin for the task context
-	 * allocator's own bookkeeping.
-	 */
-	bytes = nr_cpus * sizeof(struct cid_ctx) +
-		3 * cmask_size(nr_cmask_words) +
-		(u64)nr_cid_words * sizeof(u64);
-	err = scx_static_init(div_round_up(bytes, PAGE_SIZE) + STATIC_ALLOC_PAGES);
-	if (err)
-		return err;
-
-	cid_ctxs = scx_static_alloc(nr_cpus * sizeof(struct cid_ctx), sizeof(u64));
-	all_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
-	primary_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
-	idle_cids = scx_static_alloc(cmask_size(nr_cmask_words), sizeof(u64));
-	primary_cpus = scx_static_alloc(nr_cid_words * sizeof(u64), sizeof(u64));
+	cid_ctxs = arena_calloc(nr_cpus, sizeof(struct cid_ctx));
+	all_cids = arena_calloc(1, cmask_size(nr_cmask_words));
+	primary_cids = arena_calloc(1, cmask_size(nr_cmask_words));
+	idle_cids = arena_calloc(1, cmask_size(nr_cmask_words));
+	primary_cpus = arena_calloc(nr_cid_words, sizeof(u64));
 
 	if (!cid_ctxs || !all_cids || !primary_cids || !idle_cids || !primary_cpus)
 		return -ENOMEM;

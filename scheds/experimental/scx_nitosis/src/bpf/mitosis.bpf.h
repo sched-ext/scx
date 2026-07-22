@@ -21,7 +21,6 @@
 #include "intf.h"
 #include "cell_cpumask.bpf.h"
 #include "dsq.bpf.h"
-#include <lib/arena_map.h>
 #include <lib/cleanup.bpf.h>
 #include <lib/sdt_task.h>
 #include <lib/topology.h>

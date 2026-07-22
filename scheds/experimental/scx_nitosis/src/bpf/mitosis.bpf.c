@@ -26,7 +26,9 @@
  */
 #define FAKE_FLAT_CELL_LLC 0
 
+#include <libarena/common.h>
 #include <lib/sdt_cgroup.h>
+#include <lib/urcu.h>
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
 #include "slice_shrinking.bpf.h"
@@ -960,7 +962,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	struct cpu_ctx __arena *cctx;
 	u32 cell;
@@ -1332,7 +1334,7 @@ void BPF_STRUCT_OPS(mitosis_cpuctl_move, struct task_struct *p, struct cgroup *f
 SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	int ret;
 	if (!cpu_controller_disabled)
@@ -1550,7 +1552,7 @@ static void dump_cell_cmask(int id)
 
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	dsq_id_t dsq_id;
 	int i;
@@ -2020,7 +2022,7 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 SEC("syscall")
 int apply_cell_config(void *ctx)
 {
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	struct cgrp_ctx __arena *cgc;
 	struct cell __arena *cell;
