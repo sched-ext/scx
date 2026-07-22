@@ -72,8 +72,6 @@ struct rbtree {
 
 typedef struct rbtree __arena rbtree_t;
 
-int scx_rb_init(void);
-
 #ifdef __BPF__
 u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert);
 #define rb_create(alloc, insert) ((rbtree_t *)rb_create_internal((alloc), (insert)))
