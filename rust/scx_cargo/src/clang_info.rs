@@ -161,7 +161,7 @@ impl ClangInfo {
         };
 
         // Assemble cflags.
-        let mut cflags: Vec<String> = ["-g", "-O2", "-Wall", "-Wno-compare-distinct-pointer-types"]
+        let mut cflags: Vec<String> = ["-g", "-O2", "-Wall", "-Wno-compare-distinct-pointer-types", "-Wno-missing-declarations"]
             .into_iter()
             .map(|x| x.into())
             .collect();
