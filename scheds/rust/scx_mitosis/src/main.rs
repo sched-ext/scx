@@ -10,6 +10,7 @@ pub mod bpf_intf;
 mod cell_manager;
 mod mitosis_topology_utils;
 mod stats;
+mod undefok_flags;
 
 use cell_manager::{CellManager, CpuAssignment};
 
@@ -1472,8 +1473,7 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     Ok(cpu_ctxs)
 }
 
-#[clap_main::clap_main]
-fn main(opts: Opts) -> Result<()> {
+fn run(opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_mitosis {}",
@@ -1559,6 +1559,17 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let parsed = undefok_flags::parse_args::<Opts>()?;
+    for undefok in &parsed.ignored_undefok_flags {
+        eprintln!(
+            "warning: ignoring undefok flag --{} ({})",
+            undefok.long, undefok.note
+        );
+    }
+    run(parsed.opts)
 }
 
 #[cfg(test)]
