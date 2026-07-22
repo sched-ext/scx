@@ -336,6 +336,22 @@ impl BpfBuilder {
         self
     }
 
+    /// Add an include search path that takes precedence over the built-in
+    /// header directories (vmlinux, `scheds/include`, and `bpf-compat`). The
+    /// path is prepended to the compiler flags, so it is searched first and
+    /// headers found here shadow the bundled ones. Later calls take precedence
+    /// over earlier ones.
+    pub fn add_include_path(&mut self, path: &str) -> &mut Self {
+        self.cflags.insert(0, format!("-I{path}"));
+        self
+    }
+
+    /// Add a raw flag (e.g. a `-D<name>` define) to the BPF compiler flags.
+    pub fn add_cflag(&mut self, flag: &str) -> &mut Self {
+        self.cflags.push(flag.into());
+        self
+    }
+
     pub fn compile_link_gen(&mut self) -> Result<()> {
         let input = match &self.skel_input_name {
             Some((name, _)) => name,
