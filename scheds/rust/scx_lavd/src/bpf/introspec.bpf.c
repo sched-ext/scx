@@ -150,5 +150,3 @@ void try_proc_introspec_cmd(struct task_struct *p, task_ctx __arg_arena *taskc)
 		break;
 	}
 }
-
-
