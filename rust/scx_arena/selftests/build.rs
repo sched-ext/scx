@@ -10,7 +10,6 @@ fn main() {
         .add_source("src/bpf/lib/arena.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
         .add_source("src/bpf/lib/dhq.bpf.c")
-        .add_source("src/bpf/lib/bitmap.bpf.c")
         .add_source("src/bpf/lib/btree.bpf.c")
         .add_source("src/bpf/lib/lvqueue.bpf.c")
         .add_source("src/bpf/lib/minheap.bpf.c")
