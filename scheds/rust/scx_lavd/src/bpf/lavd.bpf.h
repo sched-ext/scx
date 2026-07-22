@@ -7,7 +7,7 @@
 #define __LAVD_H
 
 #include <scx/common.bpf.h>
-#include <bpf_arena_common.bpf.h>
+#include <bpf_arena_common.h>
 #include <lib/ravg.h>
 #include <lib/sdt_task.h>
 #include <lib/atq.h>

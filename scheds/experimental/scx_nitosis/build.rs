@@ -12,7 +12,6 @@ fn main() {
         // ride along even though nothing here uses them directly yet.
         .add_source("src/bpf/lib/arena.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
-        .add_source("src/bpf/lib/common.bpf.c")
         .add_source("src/bpf/lib/bitmap.bpf.c")
         .add_source("src/bpf/lib/cpumask.bpf.c")
         .add_source("src/bpf/lib/rbtree.bpf.c")

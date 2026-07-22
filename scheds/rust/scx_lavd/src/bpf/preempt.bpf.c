@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+#include <vmlinux.h>
+
 #include <scx/common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"

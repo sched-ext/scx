@@ -180,8 +180,10 @@
  * Copyright (c) 2023, 2024 Valve Corporation.
  * Author: Changwoo Min <changwoo@igalia.com>
  */
+#include <vmlinux.h>
+
 #include <scx/common.bpf.h>
-#include <bpf_arena_common.bpf.h>
+#include <bpf_arena_common.h>
 #include <bpf_experimental.h>
 #include "intf.h"
 #include "lavd.bpf.h"

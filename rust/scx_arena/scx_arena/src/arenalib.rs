@@ -100,6 +100,16 @@ impl ArenaLib {
             bail!("Could not initialize arenas, setup_arenas returned {}", ret);
         }
 
+        let input = ProgramInput {
+            context_in: None,
+            ..Default::default()
+        };
+
+        let ret = Self::run_prog_by_name(obj, "arena_buddy_reset", input)?;
+        if ret != 0 {
+            bail!("Could not initialize arenas, setup_arenas returned {}", ret);
+        }
+
         Ok(())
     }
 
