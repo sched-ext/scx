@@ -6,25 +6,24 @@
 __weak
 u64 scx_atq_create_internal(bool fifo, size_t capacity)
 {
-	struct sdt_data __arena *data = NULL;
 	scx_atq_t *atq;
-	int i;
 
 	atq = arena_malloc(sizeof(scx_atq_t));
-	if (unlikely(!data))
+	if (unlikely(!atq))
 		return (u64)NULL;
 
-	for (i = zero; i < sizeof(scx_atq_t); i++)
-		*(u8 * __arena)data = 0;
+	atq->tree = NULL;
+	atq->lock.val.counter = 0;
+	atq->capacity = capacity;
+	atq->size = 0;
+	atq->seq = 0;
+	atq->fifo = fifo;
 
 	atq->tree = rb_create(RB_NOALLOC, RB_DUPLICATE);
 	if (!atq->tree) {
-		arena_free(data);
+		arena_free(atq);
 		return (u64)NULL;
 	}
-
-	atq->fifo = fifo;
-	atq->capacity = capacity;
 
 	return (u64)atq;
 }
@@ -46,7 +45,7 @@ int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 __hidden __inline
 int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
-	rbnode_t *node = &taskc->node;
+	struct rbnode __arena *node = &taskc->node;
 	int ret;
 
 	if (unlikely(atq->size == atq->capacity))
@@ -260,4 +259,3 @@ int scx_atq_cancel(scx_task_common __arg_arena *taskc)
 	scx_atq_unlock(atq);
 	return ret;
 }
-

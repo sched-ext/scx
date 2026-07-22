@@ -9,7 +9,7 @@
 #endif /* __BPF__ */
 
 #include <bpf_arena_spin_lock.h>
-#include <lib/rbtree.h>
+#include <libarena/rbtree.h>
 
 enum scx_atq_consts {
 	SCX_ATQ_INF_CAPACITY  = ((u64)-1),
@@ -22,8 +22,7 @@ enum scx_task_throttle {
 };
 
 struct scx_atq {
-	union sdt_id tid;
-	rbtree_t *tree;
+	struct rbtree __arena *tree;
 	arena_spinlock_t lock;
 	u64 capacity;
 	u64 size;
