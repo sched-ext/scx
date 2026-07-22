@@ -5,8 +5,14 @@
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include <libarena/common.h>
 #include <scx/common.bpf.h>
+/*
+ * libarena's arena_stderr() expands to bpf_stream_printk() and ships no
+ * declaration for the bpf_stream_vprintk() kfunc behind it; it expects a
+ * current libbpf. scx bundles an older one, so declare it locally.
+ */
+#include <lib/alloc/bpf_helpers_local.h>
+#include <libarena/common.h>
 #include <lib/arena.h>
 #include <lib/sdt_task.h>
 #include <lib/urcu.h>
@@ -77,7 +83,7 @@ void __arena *scx_task_data(struct task_struct *p)
 	void __arena *data = __scx_task_data(p);
 
 	if (unlikely(!data))
-		scx_err_loc("no task data");
+		arena_stderr("%s:%d no task data", __func__, __LINE__);
 
 	return data;
 }

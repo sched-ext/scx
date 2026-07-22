@@ -188,7 +188,7 @@ u64 scx_atq_pop(scx_atq_t *atq, bool hold)
 		scx_atq_unlock(atq);
 
 		if (ret != -ENOENT)
-			bpf_printk("%s: error %d", __func__, ret);
+			arena_stderr("%s: error %d", __func__, ret);
 		return (u64)NULL;
 	}
 
@@ -298,7 +298,7 @@ int scx_atq_task_fini(scx_task_common __arg_arena *taskc)
 			return 0;
 
 		if ((ret = scx_atq_lock(atq))) {
-			bpf_printk("Failed to lock ATQ for task");
+			arena_stderr("Failed to lock ATQ for task");
 			return ret;
 		}
 
