@@ -1,0 +1,67 @@
+name: ci-new
+
+on:
+  workflow_dispatch:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+  KTSTR_VERSION: "0.42.0"
+  # tj's sched_ext for-next on kernel.org: the reference kernel each scheduler
+  # is verified against alongside its distro kernel.
+  KERNEL_SCHED_EXT_FOR_NEXT: "git+https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git#branch=for-next"
+
+jobs:
+  # One verifier leg per (scheduler, arch). `cargo ktstr verifier` boots the
+  # scheduler across topologies and checks it verifies, attaches, and dispatches
+  # on each --kernel: tj's sched_ext for-next (reference) and the applicable
+  # distro kernels. Non-blocking (continue-on-error): a distro kernel can fail
+  # to load current scx BPF, and that reports without gating CI.
+  verifier:
+    name: 'verifier ${{ matrix.leg.package }} ${{ matrix.leg.runner }}'
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        leg:
+          # Amazon Linux publishes both architectures; GKE publishes x86_64
+          # COS kernel artifacts only.
+          - { runner: scx-x64,   scheduler: layered, package: scx_layered, kernels: "fedora gke amazonlinux" }
+          - { runner: scx-arm64, scheduler: layered, package: scx_layered, kernels: "fedora amazonlinux" }
+          # SteamOS ships x86_64 only, so lavd/steamos runs on scx-x64 only.
+          - { runner: scx-x64,   scheduler: lavd,    package: scx_lavd,    kernels: steamos }
+          - { runner: scx-x64,   scheduler: cosmos,  package: scx_cosmos,  kernels: ubuntu }
+          - { runner: scx-arm64, scheduler: cosmos,  package: scx_cosmos,  kernels: ubuntu }
+    runs-on: ${{ matrix.leg.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Install cargo-ktstr
+        run: cargo install --locked "ktstr@${KTSTR_VERSION}"
+      - name: Build ${{ matrix.leg.package }}
+        run: cargo build --release --locked -p ${{ matrix.leg.package }}
+      - name: 'Verify ${{ matrix.leg.scheduler }}: for-next + ${{ matrix.leg.kernels }}'
+        env:
+          DISTRO_KERNELS: ${{ matrix.leg.kernels }}
+        run: |
+          kernel_args=()
+          for kernel in $DISTRO_KERNELS; do
+            kernel_args+=(--kernel "$kernel")
+          done
+          cargo ktstr verifier \
+            --scheduler ${{ matrix.leg.scheduler }} \
+            --kernel "$KERNEL_SCHED_EXT_FOR_NEXT" \
+            "${kernel_args[@]}" \
+            -p ${{ matrix.leg.package }} --features ktstr-tests
