@@ -9,8 +9,6 @@
 #include <lib/percpu.h>
 #include <lib/cpumask.h>
 #include <lib/topology.h>
-#include <lib/rbtree.h>
-#include <lib/atq.h>
 
 /*
  * "System-call" based API for arenas.
@@ -26,13 +24,6 @@ int arena_init(struct arena_init_args *args)
 	if (nr_cpu_ids == NR_CPU_IDS_UNINIT) {
 		bpf_printk("uninitialized nr_cpu_ids variable");
 		return -ENODEV;
-	}
-
-	/* How many types to store all CPU IDs? */
-	ret = scx_bitmap_init(div_round_up(nr_cpu_ids, 8));
-	if (ret) {
-		bpf_printk("scx_bitmap_init failed with %d", ret);
-		return ret;
 	}
 
 	ret = scx_percpu_storage_init();
@@ -53,13 +44,13 @@ int arena_init(struct arena_init_args *args)
 SEC("syscall")
 int arena_alloc_mask(struct arena_alloc_mask_args *args)
 {
-	scx_bitmap_t bitmap;
+	struct arena_bitmap __arena *bitmap;
 
-	bitmap = scx_bitmap_alloc();
+	bitmap = bmp_alloc(SCX_BITMAP_NR_BITS);
 	if (!bitmap)
 		return -ENOMEM;
 
-	args->bitmap = (u64)&bitmap->bits;
+	args->bitmap = (u64)bitmap;
 
 	return 0;
 }
@@ -85,7 +76,7 @@ int arena_topology_init(struct arena_topology_init_args *args)
 SEC("syscall")
 int arena_topology_node_init(struct arena_topology_node_init_args *args)
 {
-	scx_bitmap_t bitmap = (scx_bitmap_t)container_of(args->bitmap, struct scx_bitmap, bits);
+	struct arena_bitmap __arena *bitmap = (struct arena_bitmap __arena *)args->bitmap;
 	int ret;
 
 	ret = topo_init(bitmap, args->data_size, args->id);
