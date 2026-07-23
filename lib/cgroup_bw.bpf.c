@@ -748,11 +748,20 @@ scx_cgroup_ctx_t *cbw_get_cgroup_ctx(struct cgroup *cgrp)
 
 long cbw_del_cgroup_ctx(u64 cgrp_id)
 {
+	/*
+	 * Resolve the context before removing the map entry; the lookup
+	 * can no longer find it afterwards.
+	 */
 	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
 
+	/*
+	 * Remove the map entry first to cut the future lookup;
+	 * then, free the cgroup context.
+	 */
+	long ret = bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
 	if (cgx)
 		cbw_free_cgx(cgx);
-	return bpf_map_delete_elem(&cbw_cgrp_map, &cgrp_id);
+	return ret;
 }
 
 static
@@ -1106,9 +1115,6 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	struct cgroup *parent;
 	u64 cgrp_id;
 
-	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
-		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
-
 	cgrp_id = cgroup_get_id(cgrp);
 
 	/*
@@ -1227,8 +1233,6 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	int ret = 0;
 	u64 cgrp_id;
 
-	cbw_dbg_cgrp();
-
 	/*
 	 * A cgroup can exit when there are exiting tasks (TASK_DEAD) under it,
 	 * because the kernel does not count them as living tasks. So, care
@@ -1272,8 +1276,6 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	u64 cgx_raw, cur_cgx_raw;
 	struct cgroup_subsys_state *start_css, *pos;
 	int ret = 0;
-
-	cbw_dbg_cgrp();
 
 	/* Update the cgroup's bandwidth. */
 	cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
@@ -1471,9 +1473,6 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		
 		/* Update the previous level. */
 		prev_level = cur_level;
-
-		cbw_dbg("cgid%llu -- rt_llcx: %lld -- runtime_total_sloppy: %lld",
-			cur_cgx->id, rt_llcx, cur_cgx->runtime_total_sloppy);
 	}
 	bpf_rcu_read_unlock();
 
@@ -1633,22 +1632,23 @@ int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 	if (unlikely(cgrp_id == 0))
 		return 0;
 
-	if (taskc && taskc->cgx_raw) {
-		cgx_raw = taskc->cgx_raw;
-	} else {
+	/*
+	 * Validate that the cached context still belongs to this cgroup; a
+	 * recycled cgx_raw could otherwise resolve another cgroup's throttle
+	 * state (ABA). Re-resolve on a cache miss or an id mismatch.
+	 */
+	cgx = taskc ? (scx_cgroup_ctx_t *)taskc->cgx_raw : NULL;
+	if (!cgx || cgx->id != cgrp_id) {
 		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
 		if (!cgx_raw) {
-			/*
-			 * The CPU controller is not enabled for this cgroup.
-			 */
-			cbw_dbg("Failed to lookup a cgroup ctx: %llu", cgrp_id);
+			/* The CPU controller is not enabled for this cgroup. */
 			return -ESRCH;
 		}
+		cgx = (scx_cgroup_ctx_t *)cgx_raw;
 		if (taskc)
 			taskc->cgx_raw = cgx_raw;
 	}
 
-	cgx = (scx_cgroup_ctx_t *)cgx_raw;
 	if (READ_ONCE(cgx->is_throttled)) {
 		dbg_cgx(cgx, "throttled: ");
 		return -EAGAIN;
@@ -1729,17 +1729,18 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 	}
 
 	/*
-	 * Ensure cgx_raw is cached; populate it on the first call.
+	 * Ensure cgx_raw is cached and still belongs to this cgroup; a
+	 * recycled cgx_raw could otherwise attribute accounting to the wrong
+	 * cgroup (ABA). Re-resolve on a cache miss or an id mismatch.
 	 */
-	if (taskc->cgx_raw) {
-		cgx_raw = taskc->cgx_raw;
-	} else {
+	cgx = (scx_cgroup_ctx_t *)taskc->cgx_raw;
+	if (!cgx || cgx->id != cgrp_id) {
 		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
 		if (!cgx_raw)
 			return 0;
+		cgx = (scx_cgroup_ctx_t *)cgx_raw;
 		taskc->cgx_raw = cgx_raw;
 	}
-	cgx = (scx_cgroup_ctx_t *)cgx_raw;
 
 	/*
 	 * Infinite-quota fast path: skip accounting entirely for unconstrained
@@ -1755,13 +1756,13 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 	}
 
 	/*
-	 * Use the cached llcx if the LLC id matches; otherwise look up by
-	 * cgx->id (avoids cgroup_get_id() pointer dereferences) and update
-	 * the cache.
+	 * Use the cached llcx if both the LLC id and the cgroup id match;
+	 * otherwise look up by cgx->id (avoids cgroup_get_id() pointer
+	 * dereferences) and update the cache. Validating llcx->id guards
+	 * against a recycled llcx_raw from a different cgroup on the same LLC.
 	 */
-	if (taskc->llcx_raw && taskc->last_llc_id == llc_id) {
-		llcx = (scx_cgroup_llc_ctx_t *)taskc->llcx_raw;
-	} else {
+	llcx = (scx_cgroup_llc_ctx_t *)taskc->llcx_raw;
+	if (!llcx || taskc->last_llc_id != llc_id || llcx->id != cgrp_id) {
 		llcx_raw = cbw_get_llc_ctx_raw_with_id(cgx->id, llc_id);
 		if (!llcx_raw)
 			return 0;
@@ -1789,9 +1790,6 @@ accounting_out:
 	 * bandwidth correct.
 	 */
 	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
-
-	cbw_dbg("  cgrp_id: %llu -- llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
-		cgrp_id, llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
 	return 0;
 }
 
@@ -1904,7 +1902,6 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 __hidden
 int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, u64 cgrp_id)
 {
-	cbw_dbg(" [%s/%d]", p->comm, p->pid);
 	return cbw_put_aside(ctx, vtime, cgrp_id);
 }
 
@@ -1912,6 +1909,7 @@ static
 bool cbw_has_backlogged_tasks(scx_cgroup_ctx_t *cgx)
 {
 	scx_cgroup_llc_ctx_t *llcx;
+	scx_atq_t *btq;
 	int i;
 
 	if (!cgx || !cgx->has_llcx)
@@ -1922,7 +1920,7 @@ bool cbw_has_backlogged_tasks(scx_cgroup_ctx_t *cgx)
 		if (!llcx)
 			continue;
 
-		if (scx_atq_nr_queued(llcx->btq))
+		if ((btq = READ_ONCE(llcx->btq)) && scx_atq_nr_queued(btq))
 			return true;
 	}
 
@@ -2181,7 +2179,7 @@ static
 int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
 	struct cgroup *root_cgrp;
-	u64 now, next_interval = CBW_ACCOUNTING_PERIOD_MAX;
+	u64 next_interval = CBW_ACCOUNTING_PERIOD_MAX;
 	int ret;
 
 	/*
@@ -2197,9 +2195,6 @@ int accounting_timerfn(void *map, int *key, struct bpf_timer *timer)
 
 	if (unlikely(cbw_top_half_running()))
 		goto release_out;
-
-	now = scx_bpf_now();
-	cbw_dbg("at %llu", now);
 
 	cbw_update_runtime_total_sloppy(root_cgrp);
 	next_interval = cbw_throttle_cgroups(root_cgrp);
@@ -2240,7 +2235,6 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	now = scx_bpf_now();
 	cbw_top_half_begin();
-	cbw_dbg("at %llu", now);
 
 	/*
 	 * Update the runtime total before replenishing budgets.
@@ -2334,7 +2328,6 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * the burst time. However, relaxing some accuracy in burst time
 	 * calculation has more benefits than drawbacks.
 	 */
-	cbw_dbg("Start replenish %llu cgroups.", cbw_nr_cgroups);
 	nr_throttled = 0;
 	bpf_for(i, 0, cbw_nr_cgroups) {
 		ids = MEMBER_VPTR(cbw_cgroup_ids, [i]);
@@ -2493,7 +2486,6 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
 		scx_atq_task_drop(taskc);
-		cbw_dbg("cgid%llu", cgx->id);
 	}
 
 	return i;
@@ -2514,13 +2506,18 @@ int cbw_reenqueue_cgroup(scx_cgroup_ctx_t *cgx, u64 cgrp_id, u64 nuance)
 	 */
 	if (!cgx->has_llcx)
 		return false;
-	cbw_dbg("cgid%llu", cgrp_id);
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		idx = (nuance + i) % TOPO_NR(LLC);
 		llcx = cbw_get_llc_ctx_with_id(cgrp_id, idx);
 		if (!llcx) {
-			cbw_err("Failed to lookup an LLC context: cgid%llu", cgrp_id);
+			/*
+			 * After putting the cgroup ID to cbw_throttled_cgroup_ids[],
+			 * the cgroup is exiting, freeing its LLC context
+			 * (cbw_free_llc_ctx). This is expected under cgroup
+			 * churn, not an error; skip it.
+			 */
+			cbw_dbg("LLC context gone (cgroup exiting): cgid%llu", cgrp_id);
 			continue;
 		}
 
@@ -2596,7 +2593,6 @@ int scx_cgroup_bw_reenqueue(void)
 	 * Note that we intentionally ignore the error to reenqueue all the
 	 * tasks, ensuring it always returns 0.
 	 */
-	cbw_dbg();
 	nuance = bpf_get_prandom_u32();
 	nr_tcgs = backlog_stat.nr_throttled_cgroups;
 	bpf_for(i, 0, nr_tcgs) {
