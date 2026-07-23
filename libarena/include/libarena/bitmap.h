@@ -12,7 +12,8 @@ struct arena_bitmap {
 	u64 bits[0];
 };
 
-struct arena_bitmap __arena *bmp_alloc(size_t bits);
+u64 bmp_alloc_internal(size_t bits);
+#define bmp_alloc(bits) ((struct arena_bitmap __arena *)bmp_alloc_internal((bits)))
 void bmp_free(struct arena_bitmap __arena *bmp);
 
 void __bmp_set_bit(u32 bit, struct arena_bitmap __arena *bmp);

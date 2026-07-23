@@ -15,14 +15,14 @@ static int rbnode_replace(struct rbtree __arena *rbtree,
 			  struct rbnode __arena *existing,
 			  struct rbnode __arena *replacement);
 
-struct rbtree __arena *rb_create(enum rbtree_alloc alloc,
-				 enum rbtree_insert_mode insert)
+u64 rb_create_internal(enum rbtree_alloc alloc,
+		       enum rbtree_insert_mode insert)
 {
 	struct rbtree __arena *rbtree;
 
 	rbtree = arena_malloc(sizeof(*rbtree));
 	if (unlikely(!rbtree))
-		return NULL;
+		return 0;
 
 	/*
 	 * RB_UPDATE overwrites existing values in the nodes, but RB_NOALLOC
@@ -33,14 +33,14 @@ struct rbtree __arena *rb_create(enum rbtree_alloc alloc,
 	if (alloc == RB_NOALLOC && insert == RB_UPDATE) {
 		arena_stderr("WARNING: Cannot combine RB_NOALLOC and RB_UPDATE");
 		arena_free(rbtree);
-		return NULL;
+		return 0;
 	}
 
 	rbtree->alloc = alloc;
 	rbtree->insert = insert;
 	rbtree->root = NULL;
 
-	return rbtree;
+	return (u64)rbtree;
 }
 
 __weak
@@ -203,13 +203,13 @@ int rb_find(struct rbtree __arena *rbtree, u64 key, u64 *value)
 }
 
 __weak
-struct rbnode __arena *rb_node_alloc(u64 key, u64 value)
+u64 rb_node_alloc_internal(u64 key, u64 value)
 {
 	struct rbnode __arena *rbnode = NULL;
 
 	rbnode = (struct rbnode __arena *)arena_malloc(sizeof(*rbnode));
 	if (!rbnode)
-		return NULL;
+		return 0;
 
 	/*
 	 * WARNING: The order of assignments is weird on purpose.
@@ -225,7 +225,7 @@ struct rbnode __arena *rb_node_alloc(u64 key, u64 value)
 	rbnode->is_red = true;
 	rbnode->right = NULL;
 
-	return rbnode;
+	return (u64)rbnode;
 }
 
 __weak

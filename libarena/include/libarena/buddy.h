@@ -76,6 +76,8 @@ struct buddy {
 int buddy_init(struct buddy __arena *buddy);
 int buddy_destroy(struct buddy __arena *buddy);
 int buddy_free(struct buddy __arena *buddy, void __arena *free);
-void __arena *buddy_alloc(struct buddy __arena *buddy, size_t size);
+u64 buddy_alloc_internal(struct buddy __arena *buddy, size_t size);
+#define buddy_alloc(buddy, size) \
+	((void __arena *)buddy_alloc_internal((buddy), (size)))
 
 #endif /* __BPF__  */

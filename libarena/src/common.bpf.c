@@ -51,9 +51,9 @@ __weak int arena_buddy_destroy(void)
 	return buddy_destroy(&buddy);
 }
 
-__weak void __arena *arena_malloc(size_t size)
+__weak u64 arena_malloc_internal(size_t size)
 {
-	return buddy_alloc(&buddy, size);
+	return (u64)buddy_alloc(&buddy, size);
 }
 
 __weak void arena_free(void __arena *ptr)

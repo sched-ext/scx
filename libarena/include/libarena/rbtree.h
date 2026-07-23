@@ -62,7 +62,9 @@ struct rbtree {
 };
 
 #ifdef __BPF__
-struct rbtree __arena *rb_create(enum rbtree_alloc alloc, enum rbtree_insert_mode insert);
+u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert);
+#define rb_create(alloc, insert) \
+	((struct rbtree __arena *)rb_create_internal((alloc), (insert)))
 
 int rb_destroy(struct rbtree __arena *rbtree);
 int rb_insert(struct rbtree __arena *rbtree, u64 key, u64 value);
@@ -75,7 +77,9 @@ int rb_pop(struct rbtree __arena *rbtree, u64 *key, u64 *value);
 int rb_insert_node(struct rbtree __arena *rbtree, struct rbnode __arena *node);
 int rb_remove_node(struct rbtree __arena *rbtree, struct rbnode __arena *node);
 
-struct rbnode __arena *rb_node_alloc(u64 key, u64 value);
+u64 rb_node_alloc_internal(u64 key, u64 value);
+#define rb_node_alloc(key, value) \
+	((struct rbnode __arena *)rb_node_alloc_internal((key), (value)))
 void rb_node_free(struct rbnode __arena *rbnode);
 
 int rb_integrity_check(struct rbtree __arena *rbtree);

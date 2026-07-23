@@ -748,7 +748,7 @@ static u64 buddy_alloc_from_new_chunk(struct buddy __arena *buddy, struct buddy_
 	return (u64)address;
 }
 __weak
-void __arena *buddy_alloc(struct buddy __arena *buddy, size_t size)
+u64 buddy_alloc_internal(struct buddy __arena *buddy, size_t size)
 {
 	unsigned long flags;
 	void __arena *address = NULL;
@@ -756,16 +756,16 @@ void __arena *buddy_alloc(struct buddy __arena *buddy, size_t size)
 	int order;
 
 	if (!buddy)
-		return NULL;
+		return 0;
 
 	order = size_to_order(size);
 	if (order >= BUDDY_CHUNK_NUM_ORDERS || order < 0) {
 		arena_stderr("invalid order %d (sz %lu)\n", order, size);
-		return NULL;
+		return 0;
 	}
 
 	if (buddy_lock(buddy, flags))
-		return NULL;
+		return 0;
 
 	address = (u8 __arena *)buddy_alloc_from_existing_chunks(buddy, order);
 	buddy_unlock(buddy, flags);
@@ -780,7 +780,7 @@ void __arena *buddy_alloc(struct buddy __arena *buddy, size_t size)
 done:
 	/* If we failed to allocate memory, return NULL. */
 	if (!address)
-		return NULL;
+		return 0;
 
 	/*
 	 * Unpoison exactly the amount of bytes requested. If the
@@ -793,7 +793,7 @@ done:
 
 	asan_unpoison(address, size);
 
-	return address;
+	return (u64)address;
 }
 
 static __always_inline int buddy_free_unlocked(struct buddy __arena *buddy, u64 addr)
