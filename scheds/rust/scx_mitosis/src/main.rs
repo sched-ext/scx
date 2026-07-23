@@ -1497,10 +1497,7 @@ fn main(opts: Opts) -> Result<()> {
 
     match tracing_subscriber::fmt()
         .with_env_filter(env_filter)
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true)
+        .with_target(false)
         .try_init()
     {
         Ok(()) => {}
