@@ -18,6 +18,7 @@
 #include <lib/cgroup.h>
 
 extern const volatile u8	no_fast_lb;
+extern const volatile u64	warm_cpu_ns;
 
 struct sticky_ctx {
 	/*
@@ -714,6 +715,32 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 		goto unlock_out;
 	}
 	/* NOTE: Now task @p is not a per-CPU task. */
+
+	/*
+	 * Warm-CPU preference: Prefer the previous CPU while its cache and TLB
+	 * are still warm. Take it if idle or, if it is busy but predicted to
+	 * free up within the warmth-extended budget.
+	 */
+	if (warm_cpu_ns && ctx->prev_cpu >= 0 &&
+	    bpf_cpumask_test_cpu(ctx->prev_cpu, cast_mask(ctx->active)) &&
+	    bpf_cpumask_test_cpu(ctx->prev_cpu, ctx->p->cpus_ptr)) {
+		if (scx_bpf_test_and_clear_cpu_idle(ctx->prev_cpu)) {
+			cpu = ctx->prev_cpu;
+			*is_idle = true;
+			goto unlock_out;
+		}
+
+		if (ctx->taskc->lat_cri < sys_stat.thr_lat_cri &&
+		    warm_cpu_wait_ok(ctx->taskc, ctx->prev_cpu, scx_bpf_now())) {
+			cpu = ctx->prev_cpu;
+			/*
+			 * Previous CPU is busy, so wait on the previous CPU's
+			 * Per-core DSQ.
+			 */
+			set_task_flag(ctx->taskc, LAVD_FLAG_WARM_CPU);
+			goto unlock_out;
+		}
+	}
 
 	/*
 	 * If @p cannot run on either active or overflow set, extend the
