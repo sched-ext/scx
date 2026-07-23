@@ -82,6 +82,7 @@ fn read_cpu_llc_map(path: &str) -> Result<Vec<(usize, usize)>> {
 pub fn populate_topology_maps(
     skel: &mut OpenBpfSkel,
     map: MapKind,
+    topo: &Topology,
     file: Option<String>,
 ) -> Result<()> {
     match map {
@@ -89,7 +90,6 @@ pub fn populate_topology_maps(
             let map_entries = if let Some(path) = file {
                 read_cpu_llc_map(&path)?
             } else {
-                let topo = Topology::new()?;
                 (0..*scx_utils::NR_CPUS_POSSIBLE)
                     // Use 0 if a CPU is missing from the topology
                     .map(|cpu| (cpu, topo.all_cpus.get(&cpu).map(|c| c.llc_id).unwrap_or(0)))
@@ -111,8 +111,6 @@ pub fn populate_topology_maps(
             if file.is_some() {
                 anyhow::bail!("Loading llc_to_cpus from file is not supported yet");
             }
-
-            let topo = Topology::new()?;
 
             // Group CPUs by LLC cache ID
             let mut llc_to_cpus: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -151,8 +149,7 @@ pub fn populate_topology_maps(
 
 /// Display CPU to LLC cache relationships discovered from the host topology.
 #[allow(dead_code)]
-pub fn print_topology() -> Result<()> {
-    let topo = Topology::new()?;
+pub fn print_topology(topo: &Topology) -> Result<()> {
     println!("Number LLC caches: {}", topo.all_llcs.len());
     println!("CPU -> LLC id:");
     for cpu in topo.all_cpus.values() {
