@@ -30,9 +30,6 @@ ARCHS=(
     [s390]="s390x-linux-gnu-"
     [x86]="x86_64-linux-gnu-"
 )
-if grep ^ID=fedora /etc/os-release &> /dev/null; then
-    ARCHS[arm]="arm-linux-gnu-"
-fi
 
 # Detect and install cross-compile toolchains based on the package manager
 install_toolchains() {
@@ -72,6 +69,21 @@ install_toolchains() {
         echo "Unsupported package manager. Please install cross-compilers manually."
         exit 1
     fi
+}
+
+resolve_toolchains() {
+    # Fedora package the ARM compiler without the EABI suffix.
+    if ! command -v "${ARCHS[arm]}gcc" &> /dev/null && \
+       command -v arm-linux-gnu-gcc &> /dev/null; then
+        ARCHS[arm]="arm-linux-gnu-"
+    fi
+
+    for ARCH in "${!ARCHS[@]}"; do
+        if ! command -v "${ARCHS[$ARCH]}gcc" &> /dev/null; then
+            echo "Cross-compiler for ${ARCH} not found: ${ARCHS[$ARCH]}gcc"
+            exit 1
+        fi
+    done
 }
 
 # Function to compile the kernel and generate vmlinux.h for a given architecture
@@ -135,6 +147,7 @@ then
 fi
 
 install_toolchains
+resolve_toolchains
 
 echo "Start generating vmlinux.h for each arch: "
 for ARCH in "${!ARCHS[@]}"; do
