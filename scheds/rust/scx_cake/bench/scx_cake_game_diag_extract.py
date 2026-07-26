@@ -1013,6 +1013,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
+    if os.geteuid() == 0:
+        print("error: scx_cake_game_diag_extract.py refuses root execution; run as repository owner", file=sys.stderr)
+        return 77
     args = parse_args(argv)
     if args.self_test:
         run_self_test()

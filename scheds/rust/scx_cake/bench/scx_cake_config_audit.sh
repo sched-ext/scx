@@ -3,6 +3,11 @@
 set -Eeuo pipefail
 umask 077
 
+if [[ "${EUID}" -eq 0 ]]; then
+    echo "error: config audit is owning-user only; the project does not repair privileges" >&2
+    exit 2
+fi
+
 usage() {
     cat <<'USAGE'
 Usage:
@@ -119,18 +124,9 @@ safe_write_file() {
     safe_replace_from_tmp "${tmp}" "${dest}"
 }
 
-give_output_to_sudo_user() {
-    local path="$1"
-    if [[ "${EUID}" -eq 0 && -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" && "${SUDO_UID}" != "0" ]]; then
-        [[ -e "${path}" && ! -L "${path}" ]] || return 0
-        chown -R "${SUDO_UID}:${SUDO_GID}" -- "${path}" 2>/dev/null || true
-    fi
-}
-
 cleanup() {
     local status=$?
     rm -f "${TMP_FILES[@]}" 2>/dev/null || true
-    give_output_to_sudo_user "${OUT_DIR}"
     return "${status}"
 }
 trap cleanup EXIT
@@ -230,7 +226,7 @@ if [[ -x "${SCX_BIN}" ]]; then
 else
     safe_write_file "${HELP_FILE}" <<EOF
 scx_cake binary not executable: ${SCX_BIN}
-Build first with: cargo build -p scx_cake
+No maintained receipt-producing builder exists; this audit will not create an unreceipted binary.
 EOF
 fi
 
@@ -263,7 +259,7 @@ Start with the quick or wide plan. The full-factorial plan is useful for invento
 
 \`\`\`bash
 scheds/rust/scx_cake/bench/scx_cake_config_audit.sh --plan=wide
-sudo scheds/rust/scx_cake/bench/scx_cake_scheduler_matrix.sh --cake-config-plan ${CONFIG_PLAN} --all
+/home/ritz/Documents/Repo/scx/cakebench release-matrix --all --all-schedulers
 \`\`\`
 EOF
 

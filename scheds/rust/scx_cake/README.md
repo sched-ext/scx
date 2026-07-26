@@ -19,23 +19,24 @@ evicts it and your system falls back to the default scheduler within
 seconds** — a crashed experiment costs a hiccup, not a hang or a reboot.
 
 > [!IMPORTANT]
-> **Honest status for gamers:** this 1.2.0 rewrite currently proves itself
-> on system benchmarks (results below), where it beats or matches both the
-> previous scx_cake and the kernel default on nearly everything. Its live
-> game A/B validation (frame-time capture during real gameplay) is **still
-> pending** — the gaming results you may have seen belong to the previous
-> 1.1.x line. If you want the game-validated version today, run your
-> distro's packaged scx_cake; if you want the faster benchmark-validated
-> engine and don't mind experimental, build this one.
+> **Honest current status (2026-07-24).** This 1.2.0 development source builds
+> and benchmarks: the current working head carries a build receipt, passes the
+> readiness probe, and has been screened against native EEVDF across every
+> registered workload through the exact-pair broker. What it does **not** have
+> is a live-game gate. Game frame-time tails are this scheduler's stated hard
+> constraint, and no game A/B has been run on the current mutation stack — so
+> the benchmark numbers below are real, and the gaming claim in the paragraph
+> above is *unproven for this checkout*. Treat it as a research candidate, not
+> a drop-in daily driver.
 
 > [!IMPORTANT]
 > **AI assistance disclosure.** Code mutation in this project is done with
 > AI assistance, stated openly because users deserve to know how the
-> software they run is built. The discipline that makes this workable: **no
-> change lands on trust** — every change is committed singly and must prove
-> itself through an interleaved, noise-gated benchmark A/B (and, for
-> defaults, live game A/Bs) before it stays. Changes that fail are reverted
-> with their falsification documented in the decision log.
+> software they run is built. The required discipline is **no change lands on
+> trust**: a candidate intended for retention must eventually clear
+> interleaved, noise-gated benchmark A/B and, for defaults, live-game A/B.
+> Historical A/Bs are research evidence rather than current promotion proof;
+> this checkout has not yet cleared that protocol.
 
 ## Requirements
 
@@ -43,38 +44,46 @@ seconds** — a crashed experiment costs a hiccup, not a hang or a reboot.
   check with `zgrep SCHED_EXT /proc/config.gz`). Gaming-oriented distro
   kernels (CachyOS et al.) qualify; cake also uses the lockless
   `scx_bpf_dsq_peek` kfunc from this kernel generation.
-- To build: a Rust toolchain + clang ≥ 17 (the standard
-  [scx](https://github.com/sched-ext/scx) build environment).
+- Future receipt-producing builds require a Rust toolchain + clang ≥ 17 (the
+  standard [scx](https://github.com/sched-ext/scx) build environment).
 - Distro packages (`scx-scheds`) currently ship the 1.1.x line; this
-  rewrite is build-from-source for now.
+  rewrite remains development source rather than a promotion-ready package.
 
-## Running it
+## Development and execution
 
-```sh
-# build (from the scx repo root)
-cargo build --release -p scx_cake
+No maintained receipt-producing builder currently exists. Do not invoke Cargo
+directly for score-bearing research: an unreceipted binary/BPF pair cannot be
+attributed to this source or admitted by the strict runner. The owning-user
+`./cakebench diagnostics doctor --json` command remains a read-only environment
+check; it is not build, activation, or performance proof.
 
-# run in a terminal (Ctrl+C stops it and restores the default scheduler)
-sudo ./target/release/scx_cake
+Do not activate a development binary directly or through a privilege wrapper.
+This checkout's `cakebench` shim delegates to the maintained owning-user
+benchmark project, which requires exact binary/BPF receipts, current-boot
+runtime checks, and pre-provisioned capabilities. Missing access is a hard
+failure; the project does not grant or repair privileges during a run.
 
-# or manage it like any scx scheduler:
-scxctl start -s scx_cake        # and: scxctl stop / scxctl get
-# on boot: set default_sched = "scx_cake" in /etc/scx_loader.toml,
-# then: systemctl enable --now scx_loader
-```
+Distribution service management is outside this development/benchmark
+contract and must not be used as evidence that a dirty candidate was built,
+validated, or benchmarked correctly.
 
 **Verify it's active:** `cat /sys/kernel/sched_ext/root/ops` → prints
 `cake_…` while cake is scheduling. If the watchdog ever evicts it, that
 file disappears, the default scheduler resumes silently, and the exit
 reason lands in `dmesg` (grep for `sched_ext`).
 
-**Stop / undo:** Ctrl+C the terminal process, or `scxctl stop`, or stop the
-`scx_loader` service. There is nothing else to clean up — the default
-scheduler takes over instantly.
+**Stop / undo:** the maintained runner must prove that sched_ext returned to
+`disabled` after every arm. A run without that restoration receipt is invalid.
 
-There are no build-time or runtime tuning flags. That is the point:
+There are no runtime tuning flags, and nothing for a user to configure — the
+binary takes `-v` and `-V` and nothing else. That is the point:
 
-**no flags · one algorithm · no division · no cold paths · no rescue buckets**
+**no knobs · one algorithm · no division · no cold paths · no rescue buckets**
+
+(`intf.h` does carry compile-time *research* switches for mutation campaigns.
+They are all off or at their default value in the shipped build, and the
+project's own rule is that experiments are A/B'd as two git commits rather
+than by flipping a cflag — see invariant 1 in [`DESIGN.md`](./DESIGN.md).)
 
 ## How it works — in plain terms
 
@@ -146,7 +155,7 @@ currently running on its target CPU only if that task is *young* (started
 < 100 µs ago — interrupting a just-started handoff partner is free;
 flushing a mid-request worker destroys throughput) *and* the wakee is ahead
 on fairness by a real margin. Expired tasks requeue on their own CPU —
-unless that queue already holds two, in which case they spill to the
+unless that queue already holds six, in which case they spill to the
 overflow queue that any draining CPU picks up (the load-balancing that
 otherwise never happens when no core ever idles). Each CPU's `dispatch`
 drains: own queue vs wake queue by earliest vtime (with hysteresis so the
@@ -170,34 +179,35 @@ the companion `scx_cake_bench_assets` repo; the complete
 falsification-by-falsification log is
 [`EEVDF_GATE_2026-07-04.md`](./EEVDF_GATE_2026-07-04.md).
 
-**vs the packaged scx_cake 1.1.1: zero losses** — every benchmark wins or
-ties (futex 2.8×, schbench-saturated +52%, fork/thread/ffmpeg/argon2 wins,
-ties elsewhere).
+**vs EEVDF — sealed exact-pair medians** (2026-07-17/18, 8 interleaved blocks
+per workload, noise sealed per arm as a covariate):
 
-**vs EEVDF (the kernel's default scheduler), 21-benchmark suite** —
-schbench (request-latency), stress-ng families (locking, cache, memory),
-perf-sched micro-benchmarks, and real workloads (x265 encode, ffmpeg
-compile, blender, NAMD, xz/7zip, y-cruncher, kernel build):
+| | detail |
+|---|---|
+| wins | futex +57.2% · schbench-saturated p99 +49.1% · ccm-cache +45.9% · stress-ng-cache +26.5% · perf-sched-pipe +22.7% (CI +21.1…+24.9) · blender-render +11.9% · mutex-handoff +10.3% · thread +7.5% · fork +5.5% · stress-ng-memcpy +4.5% |
+| losses | ccm-memcpy −14.9% (attributed: zero-sum CPU-share reallocation, equal per-CPU-second efficiency both schedulers) · schbench-light p99 −1.42% quiet / −9.6% under heavy desktop load (attributed: the priced side of the futex/pipe/saturated wins — same behavior, seven falsifications) · futex-lock-pi −71.8%, recovered from −86.6% |
 
-| | count | detail |
-|---|---|---|
-| wins | 7 | schbench-saturated +31% · futex +25% · cpu-cache-mem +28% · cache +13–25% · fork +9–12% · perf-memcpy · xz |
-| statistical ties | 12–13 | incl. schbench-mid, certified by a literal dead heat in interleaved pairs |
-| losses | 2 | x265 −1.2 to −1.7% (excess cold pickups; every stateless fix measured and falsified) · perf-sched-pipe −11% (equals cake's own BPF callback execution time — the sched_ext framework's cost on a 1:1 microbench, decomposed to the nanosecond) |
+A 2-block screen of the later K+L+M+S1d stack (2026-07-20) reproduced the shape
+and moved two entries materially: `futex-lock-pi` −1.2% (from −86.6%, once the
+regime was controlled for) and `schbench-light` −2.24% (8-block trusted — about
+0.8 pt of the stack's cost). Every registered workload has now been screened
+against that stack; the only losses anywhere are `ccm-memcpy` and
+`schbench-light`.
 
-**vs EEVDF under oversubscription** (2–4× more runnable threads than
-CPUs — the regime where schedulers usually fall apart): futex 32-thread
-**+28%** and 64-thread **+46%** (recovered from −64%/−92% the same day by
-the backlog and overflow gates), cache-32t +3–7%, argon2 p32 +8.8% / p64
-+1.6%. The schbench-saturated margin traded down from +50% to +31% to buy
-those wins; re-tightening that gate is the open tuning task, alongside a
-clean-window revalidation of cache/cpu-cache-mem at 1×.
+> **Read futex numbers as mode-tagged, not code-tagged.** On 2026-07-20 the
+> same binary, boot, and noise regime measured 4.7M / 1.4M / 0.35M futex ops/s
+> across sessions while native EEVDF stayed flat at 3.0M. The host variable
+> behind that mode shift is still unidentified. Every historical futex delta in
+> this project — including the +57.2% above — is conditional on which mode the
+> host was in.
 
 Caveats, stated plainly: single machine, single topology (the global wake
-queue is validated on one 16-CPU LLC — multi-CCD/multi-socket scaling is
-untested); numbers are author-reported pending independent reproduction;
-and the live game A/B for this rewrite is pending (see the status note at
-the top).
+queue is validated on one 16-CPU single-CCD LLC — multi-CCD/multi-socket
+scaling is untested); numbers are author-reported pending independent
+reproduction; several older workloads (namd, kernel-defconfig, xz, prime,
+x265, argon2, 7zip, y-cruncher, perf-memcpy) have **no current native
+baseline** and are deliberately omitted above rather than quoted stale; and
+the live game A/B is pending (see the status note at the top).
 
 ## How it compares to other scx schedulers
 
@@ -228,11 +238,14 @@ workload is exactly what the benchmark discipline above exists to answer.
 
 | file | contents |
 |---|---|
-| `src/bpf/cake.bpf.c` | the scheduler — 8 callbacks, ~870 lines, half comments explaining the why |
-| `src/bpf/intf.h` | `SLICE_NS`, `MAX_CPUS`, `WAKE_DSQ`, `OVF_DSQ` — the only constants |
+| `src/bpf/cake.bpf.c` | the scheduler — 8 callbacks in the release build, ~1.75k lines, roughly half comments explaining the why |
+| `src/bpf/intf.h` | the constant surface: `SLICE_NS`, `MAX_CPUS`, `WAKE_DSQ`, `OVF_DSQ`, the policy divisors every threshold derives from, and the default-off compile-time research switches |
 | `src/main.rs` | thin Rust loader (attach, exit reporting) |
 | [`DESIGN.md`](./DESIGN.md) | the full design: every rule, every dose-responsed constant, invariants |
 | [`EEVDF_GATE_2026-07-04.md`](./EEVDF_GATE_2026-07-04.md) | the complete benchmark campaign log — every keep and every falsification |
+| [`docs/GAME_RENDER_PIPELINE_SCHED_EXT_INVESTIGATION_2026-07-23.md`](./docs/GAME_RENDER_PIPELINE_SCHED_EXT_INVESTIGATION_2026-07-23.md) | input-to-photon Wayland/KWin/DRM pipeline and the RT-preemption escape investigation (its IMMED candidate is superseded — see below) |
+| [`docs/RT_PLACEMENT_LOGIC_2026-07-24.md`](./docs/RT_PLACEMENT_LOGIC_2026-07-24.md) | how Linux RT chooses cores, kernel-source verified — and the falsified hypothesis that cake's occupancy can steer it |
+| [`docs/LEDGER_REPAIR_AND_REGIME_GATE_2026-07-24.md`](./docs/LEDGER_REPAIR_AND_REGIME_GATE_2026-07-24.md) | the experiment ledger was emitting zeros; gear Gate 1 result on the repaired corpus |
 | `docs/` | historical decision logs from the pre-rewrite mutation campaigns |
 
 ## Contributing & reporting problems

@@ -3,6 +3,9 @@ docs/*
 !docs/flight_recorder_telemetry.md
 !docs/queue_policy_latency_findings.md
 !docs/benchmark_capture_workflow.md
+!docs/GAME_RENDER_PIPELINE_SCHED_EXT_INVESTIGATION_2026-07-23.md
+!docs/LEDGER_REPAIR_AND_REGIME_GATE_2026-07-24.md
+!docs/RT_PLACEMENT_LOGIC_2026-07-24.md
 
 # Benchmark binaries and local captures
 bench/*

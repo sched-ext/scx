@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Summarize scx_cake policy benchmark artifacts into reviewable evidence.
 set -Eeuo pipefail
+
+if [[ "${EUID}" -eq 0 ]]; then
+    echo "error: scx_cake_bench_report.sh refuses root execution" >&2
+    exit 77
+fi
 umask 077
 
 SCRIPT_NAME="$(basename "$0")"
@@ -580,11 +585,8 @@ write_diag_table
 	echo
 	echo
 	echo '```bash'
-	if [[ "${IS_MATRIX}" == "1" ]]; then
-		echo 'sudo scheds/rust/scx_cake/bench/scx_cake_scheduler_matrix.sh --schedulers cake,pandemonium,lavd,p2dq,flash --all'
-	else
-		echo 'sudo scheds/rust/scx_cake/bench/scx_cake_policy_bench.sh --storm-abba --all'
-	fi
+	echo '# Legacy in-tree execution is retired.'
+	echo '# Use /home/ritz/Documents/Repo/scx/cakebench and its owning-user receipt/runtime preflight.'
 	echo '```'
 	echo
 	echo 'For the original chart workloads, configure the optional environment variables printed by the suite (`YCRUNCHER_CMD`, `NAMD_CONFIG`, `FFMPEG_BUILD_CMD`, `XZ_INPUT`, `BLENDER_CMD` or `BLENDER_SCENE`, and `X265_INPUT`) before running the same command.'

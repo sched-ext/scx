@@ -99,8 +99,8 @@ checking whether a future change needs the shared fallback arbiter again.
 
 Useful future comparisons:
 
-- repeat same-session A/B pairs with `sudo ./target/release/scx_cake` and
-  `sudo ./target/release/scx_cake --queue-policy local`
+- repeat same-session A/B pairs only through the maintained owning-user
+  receipt-gated broker; the historical direct-activation commands are retired
 - keep comparing against EEVDF when changing queueing or wakeup policy
 - in debug dumps, watch `nr_shared_vtime_inserts`, `nr_local_dispatches`,
   `nr_stolen_dispatches`, wake wait tails, and busy wake counts
