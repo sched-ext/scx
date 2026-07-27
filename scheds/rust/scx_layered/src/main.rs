@@ -2418,14 +2418,21 @@ impl<'a> Scheduler<'a> {
             .map(|(idx, _)| idx as u32)
             .collect();
 
-        // FIXME - this incorrectly assumes all possible CPUs are consecutive.
+        // The percpu map has one slot per possible CPU, but topo only tracks
+        // CPUs that are actually present. In VMs where CONFIG_NR_CPUS exceeds
+        // the number of vCPUs the guest boots with (e.g. NR_CPUS=512 with 384
+        // online), the possible range is sparse. Skip the topo-dependent init
+        // for absent slots; their ctx stays zero-initialized from the map
+        // lookup, which is fine because BPF never runs on those CPUs.
         for cpu in 0..*NR_CPUS_POSSIBLE {
             cpu_ctxs.push(
                 *plain::from_bytes(cpu_ctxs_vec[cpu].as_slice())
                     .expect("cpu_ctx: short or misaligned buffer"),
             );
 
-            let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
+            let Some(topo_cpu) = topo.all_cpus.get(&cpu) else {
+                continue;
+            };
             let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
             cpu_ctxs[cpu].cpu = cpu as i32;
             cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
