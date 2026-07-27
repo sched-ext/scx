@@ -34,15 +34,17 @@ const MAX_CPU_SUPPORTED: usize = 640;
 #[derive(Debug)]
 pub struct ArenaLib<'a> {
     task_size: usize,
+    nr_cpu_ids: usize,
     obj: &'a mut Object,
 }
 
 impl<'a> ArenaLib<'a> {
-    /// Maximum CPU mask size, derived from MAX_CPU_SUPPORTED.
-    const MAX_CPU_ARRSZ: usize = (MAX_CPU_SUPPORTED + 63) / 64;
-
     /// Amount of pages allocated at once form the BPF map. by the static stack allocator.
     const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 8;
+
+    fn nr_cpumask_words(&self) -> usize {
+        (self.nr_cpu_ids + 63) / 64
+    }
 
     fn run_prog_by_name(&self, name: &str, input: ProgramInput) -> Result<i32> {
         let c_name = CString::new(name)?;
@@ -92,10 +94,30 @@ impl<'a> ArenaLib<'a> {
             bail!("Could not initialize arenas, setup_arenas returned {}", ret);
         }
 
+        let input = ProgramInput {
+            context_in: None,
+            ..Default::default()
+        };
+
+        let ret = self.run_prog_by_name("arena_buddy_reset", input)?;
+        if ret != 0 {
+            bail!("Could not initialize arenas, setup_arenas returned {}", ret);
+        }
+
         Ok(())
     }
 
     fn setup_topology_node(&self, mask: &[u64], id: usize) -> Result<()> {
+        let nr_words = self.nr_cpumask_words();
+        if mask.len() < nr_words {
+            bail!(
+                "CPU mask has {} words, expected at least {}",
+                mask.len(),
+                nr_words
+            );
+        }
+        let mask = &mask[..nr_words];
+
         let mut args = types::arena_alloc_mask_args {
             bitmap: 0 as c_ulong,
         };
@@ -124,14 +146,13 @@ impl<'a> ArenaLib<'a> {
             );
         }
 
-        let ptr = unsafe {
-            &mut *std::ptr::with_exposed_provenance_mut::<[u64; 640]>(
-                args.bitmap.try_into().unwrap(),
+        let valid_mask = unsafe {
+            std::slice::from_raw_parts_mut(
+                std::ptr::with_exposed_provenance_mut::<u64>(args.bitmap.try_into().unwrap()),
+                nr_words,
             )
         };
-
-        let (valid_mask, _) = ptr.split_at_mut(mask.len());
-        valid_mask.clone_from_slice(mask);
+        valid_mask.copy_from_slice(mask);
 
         let mut args = types::arena_topology_node_init_args {
             bitmap: args.bitmap as c_ulong,
@@ -242,7 +263,7 @@ impl<'a> ArenaLib<'a> {
             )?;
         }
         for (_, cpu) in topo.all_cpus {
-            let mut mask = [0; Self::MAX_CPU_ARRSZ - 1];
+            let mut mask = vec![0; self.nr_cpumask_words()];
             mask[cpu.id / 64] |= 1 << (cpu.id % 64);
             self.setup_topology_node(&mask, cpu.id)?;
         }
@@ -251,12 +272,16 @@ impl<'a> ArenaLib<'a> {
     }
 
     /// Create an Arenalib object This call only initializes the Rust side of Arenalib.
-    pub fn init(obj: &'a mut Object, task_size: usize, nr_cpus: usize) -> Result<Self> {
-        if nr_cpus >= MAX_CPU_SUPPORTED {
+    pub fn init(obj: &'a mut Object, task_size: usize, nr_cpu_ids: usize) -> Result<Self> {
+        if nr_cpu_ids >= MAX_CPU_SUPPORTED {
             bail!("Scheduler specifies too many CPUs");
         }
 
-        Ok(Self { task_size, obj })
+        Ok(Self {
+            task_size,
+            nr_cpu_ids,
+            obj,
+        })
     }
 
     /// Set up the BPF arena library state.
