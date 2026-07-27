@@ -44,7 +44,7 @@ u64 rb_create_internal(enum rbtree_alloc alloc,
 }
 
 __weak
-int rb_destroy(struct rbtree __arena *rbtree)
+int rb_destroy(struct rbtree __arena *rbtree __arg_arena)
 {
 	int ret = 0;
 
@@ -81,7 +81,7 @@ out:
 	return ret;
 }
 
-static inline int rbnode_dir(struct rbnode __arena *node)
+static inline int rbnode_dir(struct rbnode __arena *node __arg_arena)
 {
 	/* Arbitrarily choose a direction for the root. */
 	if (unlikely(!node->parent))
@@ -96,8 +96,8 @@ static inline int rbnode_dir(struct rbnode __arena *node)
  * stack usage above what is permitted.
  */
 __noinline
-int rbnode_rotate(struct rbtree __arena *rbtree,
-		  struct rbnode __arena *node, int dir)
+int rbnode_rotate(struct rbtree __arena *rbtree __arg_arena,
+		  struct rbnode __arena *node __arg_arena, int dir)
 {
 	struct rbnode __arena *tmp, *parent;
 	int parentdir;
@@ -138,7 +138,7 @@ int rbnode_rotate(struct rbtree __arena *rbtree,
 }
 
 static
-struct rbnode __arena *rbnode_find(struct rbnode __arena *subtree, u64 key)
+struct rbnode __arena *rbnode_find(struct rbnode __arena *subtree __arg_arena, u64 key)
 {
 	struct rbnode __arena *node = subtree;
 	int dir;
@@ -162,7 +162,7 @@ struct rbnode __arena *rbnode_find(struct rbnode __arena *subtree, u64 key)
 }
 
 static
-struct rbnode __arena *rbnode_least_upper_bound(struct rbnode __arena *subtree, uint64_t key)
+struct rbnode __arena *rbnode_least_upper_bound(struct rbnode __arena *subtree __arg_arena, uint64_t key)
 {
 	struct rbnode __arena *node = subtree;
 	int dir;
@@ -183,7 +183,7 @@ struct rbnode __arena *rbnode_least_upper_bound(struct rbnode __arena *subtree, 
 }
 
 __weak
-int rb_find(struct rbtree __arena *rbtree, u64 key, u64 *value)
+int rb_find(struct rbtree __arena *rbtree __arg_arena, u64 key, u64 *value)
 {
 	struct rbnode __arena *node;
 
@@ -229,14 +229,14 @@ u64 rb_node_alloc_internal(u64 key, u64 value)
 }
 
 __weak
-void rb_node_free(struct rbnode __arena *rbnode)
+void rb_node_free(struct rbnode __arena *rbnode __arg_arena)
 {
 	arena_free(rbnode);
 }
 
 static
-int rb_node_insert(struct rbtree __arena *rbtree,
-		   struct rbnode __arena *node)
+int rb_node_insert(struct rbtree __arena *rbtree __arg_arena,
+		   struct rbnode __arena *node __arg_arena)
 {
 	struct rbnode __arena *grandparent, *parent = rbtree->root;
 	u64 key = node->key;
@@ -327,8 +327,8 @@ int rb_node_insert(struct rbtree __arena *rbtree,
 	return 0;
 }
 
-int rb_insert_node(struct rbtree __arena *rbtree,
-		   struct rbnode __arena *node)
+int rb_insert_node(struct rbtree __arena *rbtree __arg_arena,
+		   struct rbnode __arena *node __arg_arena)
 {
 	if (unlikely(!rbtree))
 		return -EINVAL;
@@ -362,7 +362,7 @@ int rb_insert_node(struct rbtree __arena *rbtree,
 }
 
 __weak
-int rb_insert(struct rbtree __arena *rbtree, u64 key, u64 value)
+int rb_insert(struct rbtree __arena *rbtree __arg_arena, u64 key, u64 value)
 {
 	struct rbnode __arena *node;
 	int ret;
@@ -386,7 +386,7 @@ int rb_insert(struct rbtree __arena *rbtree, u64 key, u64 value)
 	return 0;
 }
 
-static inline struct rbnode __arena *rbnode_least(struct rbnode __arena *subtree)
+static inline struct rbnode __arena *rbnode_least(struct rbnode __arena *subtree __arg_arena)
 {
 	while (subtree->left && can_loop)
 		subtree = subtree->left;
@@ -394,7 +394,7 @@ static inline struct rbnode __arena *rbnode_least(struct rbnode __arena *subtree
 	return subtree;
 }
 
-__weak int rb_least(struct rbtree __arena *rbtree, u64 *key, u64 *value)
+__weak int rb_least(struct rbtree __arena *rbtree __arg_arena, u64 *key, u64 *value)
 {
 	struct rbnode __arena *least;
 
@@ -418,8 +418,8 @@ __weak int rb_least(struct rbtree __arena *rbtree, u64 *key, u64 *value)
  * If we are referencing ourselves, a and b have a parent-child relation,
  * and we should be pointing at the other node instead.
  */
-static inline void rbnode_fixup_pointers(struct rbnode __arena *a,
-					 struct rbnode __arena *b)
+static inline void rbnode_fixup_pointers(struct rbnode __arena *a __arg_arena,
+					 struct rbnode __arena *b __arg_arena)
 {
 #define fixup(n1, n2, member) do { if (n1->member == n1) n1->member = n2; } while (0)
 	fixup(a, b, left);
@@ -428,8 +428,8 @@ static inline void rbnode_fixup_pointers(struct rbnode __arena *a,
 #undef fixup
 }
 
-static inline void rbnode_swap_values(struct rbnode __arena *a,
-				      struct rbnode __arena *b)
+static inline void rbnode_swap_values(struct rbnode __arena *a __arg_arena,
+				      struct rbnode __arena *b __arg_arena)
 {
 #define swap(n1, n2, tmp) do { (tmp) = (n1); (n1) = (n2); (n2) = (tmp); } while (0)
 	struct rbnode __arena *tmpnode;
@@ -448,8 +448,8 @@ static inline void rbnode_swap_values(struct rbnode __arena *a,
 	rbnode_fixup_pointers(a, b);
 }
 
-static inline void rbnode_adjust_neighbors(struct rbtree __arena *rbtree,
-					   struct rbnode __arena *node, int dir)
+static inline void rbnode_adjust_neighbors(struct rbtree __arena *rbtree __arg_arena,
+					   struct rbnode __arena *node __arg_arena, int dir)
 {
 	if (node->left)
 		node->left->parent = node;
@@ -468,9 +468,9 @@ static inline void rbnode_adjust_neighbors(struct rbtree __arena *rbtree,
  * Directly replace an existing node with a replacement. The replacement node
  * should not already be in the tree.
  */
-static int rbnode_replace(struct rbtree __arena *rbtree,
-			  struct rbnode __arena *existing,
-			  struct rbnode __arena *replacement)
+static int rbnode_replace(struct rbtree __arena *rbtree __arg_arena,
+			  struct rbnode __arena *existing __arg_arena,
+			  struct rbnode __arena *replacement __arg_arena)
 {
 	int dir = 0;
 
@@ -496,9 +496,9 @@ static int rbnode_replace(struct rbtree __arena *rbtree,
  * This is more involved than switching the values of the two nodes because we
  * must update all tree pointers.
  */
-static void rbnode_switch(struct rbtree __arena *rbtree,
-			  struct rbnode __arena *a,
-			  struct rbnode __arena *b)
+static void rbnode_switch(struct rbtree __arena *rbtree __arg_arena,
+			  struct rbnode __arena *a __arg_arena,
+			  struct rbnode __arena *b __arg_arena)
 {
 	int adir = 0, bdir = 0;
 
@@ -522,8 +522,8 @@ static void rbnode_switch(struct rbtree __arena *rbtree,
 	rbnode_adjust_neighbors(rbtree, b, adir);
 }
 
-static inline int rbnode_remove_node_single_child(struct rbtree __arena *rbtree,
-						  struct rbnode __arena *node,
+static inline int rbnode_remove_node_single_child(struct rbtree __arena *rbtree __arg_arena,
+						  struct rbnode __arena *node __arg_arena,
 						  bool free)
 {
 	struct rbnode __arena *child;
@@ -563,7 +563,7 @@ static inline int rbnode_remove_node_single_child(struct rbtree __arena *rbtree,
 	return 0;
 }
 
-static inline bool rbnode_has_red_children(struct rbnode __arena *node)
+static inline bool rbnode_has_red_children(struct rbnode __arena *node __arg_arena)
 {
 	if (node->left && node->left->is_red)
 		return true;
@@ -572,8 +572,8 @@ static inline bool rbnode_has_red_children(struct rbnode __arena *node)
 }
 
 static
-int rb_node_remove(struct rbtree __arena *rbtree,
-		   struct rbnode __arena *node)
+int rb_node_remove(struct rbtree __arena *rbtree __arg_arena,
+		   struct rbnode __arena *node __arg_arena)
 {
 	struct rbnode __arena *parent, *sibling, *close_nephew, *distant_nephew;
 	bool free = (rbtree->alloc == RB_ALLOC);
@@ -760,8 +760,8 @@ int rb_node_remove(struct rbtree __arena *rbtree,
 }
 
 __weak
-int rb_remove_node(struct rbtree __arena *rbtree,
-		   struct rbnode __arena *node)
+int rb_remove_node(struct rbtree __arena *rbtree __arg_arena,
+		   struct rbnode __arena *node __arg_arena)
 {
 	if (unlikely(!rbtree))
 		return -EINVAL;
@@ -773,7 +773,7 @@ int rb_remove_node(struct rbtree __arena *rbtree,
 }
 
 __weak
-int rb_remove(struct rbtree __arena *rbtree, u64 key)
+int rb_remove(struct rbtree __arena *rbtree __arg_arena, u64 key)
 {
 	struct rbnode __arena *node;
 
@@ -794,7 +794,7 @@ int rb_remove(struct rbtree __arena *rbtree, u64 key)
 }
 
 __weak
-int rb_pop(struct rbtree __arena *rbtree, u64 *key, u64 *value)
+int rb_pop(struct rbtree __arena *rbtree __arg_arena, u64 *key, u64 *value)
 {
 	struct rbnode __arena *node;
 
@@ -819,7 +819,7 @@ int rb_pop(struct rbtree __arena *rbtree, u64 *key, u64 *value)
 	return rb_node_remove(rbtree, node);
 }
 
-inline void rbnode_print(size_t depth, struct rbnode __arena *rbn)
+inline void rbnode_print(size_t depth, struct rbnode __arena *rbn __arg_arena)
 {
 	arena_stderr("[DEPTH %d] %p (%s)\n PARENT %p", depth, rbn, rbn->is_red ? "red" : "black", rbn->parent);
 	arena_stderr("\tKV (%ld, %ld)\n LEFT %p RIGHT %p]\n", rbn->key, rbn->value, rbn->left, rbn->right);
@@ -832,7 +832,7 @@ enum rb_print_state {
 };
 
 __weak
-enum rb_print_state rb_print_next_state(struct rbnode __arena *rbnode,
+enum rb_print_state rb_print_next_state(struct rbnode __arena *rbnode __arg_arena,
 					enum rb_print_state state, u64 *next)
 {
 	if (unlikely(!next))
@@ -866,7 +866,7 @@ enum rb_print_state rb_print_next_state(struct rbnode __arena *rbnode,
 }
 
 __weak
-int rb_print_pop_up(struct rbnode __arena **rbnodep, u8 *depthp, enum rb_print_state (*stack)[RB_MAXLVL_PRINT], enum rb_print_state *state)
+int rb_print_pop_up(struct rbnode __arena **rbnodep __arg_arena, u8 *depthp, enum rb_print_state (*stack)[RB_MAXLVL_PRINT], enum rb_print_state *state)
 {
 	struct rbnode __arena *rbnode;
 	volatile u8 depth;
@@ -897,7 +897,7 @@ int rb_print_pop_up(struct rbnode __arena **rbnodep, u8 *depthp, enum rb_print_s
 }
 
 __weak
-int rb_print(struct rbtree __arena *rbtree)
+int rb_print(struct rbtree __arena *rbtree __arg_arena)
 {
 	enum rb_print_state stack[RB_MAXLVL_PRINT];
 	struct rbnode __arena *rbnode = rbtree->root;
@@ -959,7 +959,7 @@ out:
 }
 
 __weak
-int rb_integrity_check(struct rbtree __arena *rbtree)
+int rb_integrity_check(struct rbtree __arena *rbtree __arg_arena)
 {
 	enum rb_print_state stack[RB_MAXLVL_PRINT];
 	struct rbnode __arena *rbnode = rbtree->root;

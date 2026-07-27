@@ -110,7 +110,7 @@ volatile bool asan_report_once = false;
  * to exit due to a missing implementation. Provide a simple implementation
  * just for memset to use it for poisoning/unpoisoning the map.
  */
-__weak int asan_memset(s8 __arena *dst, s8 val, size_t size)
+__weak int asan_memset(s8 __arena *dst __arg_arena, s8 val, size_t size)
 {
 	size_t i;
 
@@ -121,7 +121,7 @@ __weak int asan_memset(s8 __arena *dst, s8 val, size_t size)
 }
 
 /* Validate a 1-byte access, always within a single byte. */
-static __always_inline bool memory_is_poisoned_1(s8 __arena *addr)
+static __always_inline bool memory_is_poisoned_1(s8 __arena *addr __arg_arena)
 {
 	s8 shadow_value = *(s8 __arena *)mem_to_shadow(addr);
 
@@ -139,7 +139,7 @@ static __always_inline bool memory_is_poisoned_1(s8 __arena *addr)
 }
 
 /* Validate a 2- 4-, 8-byte access, shadow spans up to 2 bytes. */
-static __always_inline bool memory_is_poisoned_2_4_8(s8 __arena *addr, u64 size)
+static __always_inline bool memory_is_poisoned_2_4_8(s8 __arena *addr __arg_arena, u64 size)
 {
 	u64 end = (u64)addr + size - 1;
 
@@ -158,7 +158,7 @@ static __always_inline bool memory_is_poisoned_2_4_8(s8 __arena *addr, u64 size)
 	return *(s8 __arena *)mem_to_shadow(addr) || memory_is_poisoned_1((s8 __arena *)end);
 }
 
-__weak bool asan_shadow_set(void __arena *addr)
+__weak bool asan_shadow_set(void __arena *addr __arg_arena)
 {
 	return memory_is_poisoned_1(addr);
 }
@@ -175,7 +175,7 @@ static __always_inline u64 first_nonzero_byte(u64 addr, size_t size)
 	return SHADOW_ALL_ZEROES;
 }
 
-static __always_inline bool memory_is_poisoned_n(s8 __arena *addr, u64 size)
+static __always_inline bool memory_is_poisoned_n(s8 __arena *addr __arg_arena, u64 size)
 {
 	u64 ret;
 	u64 start;
@@ -192,7 +192,7 @@ static __always_inline bool memory_is_poisoned_n(s8 __arena *addr, u64 size)
 	return unlikely(ret != end || ASAN_GRANULE(addr + size - 1) >= *(s8 __arena *)end);
 }
 
-__weak int asan_report(s8 __arena *addr, size_t sz, u32 flags)
+__weak int asan_report(s8 __arena *addr __arg_arena, size_t sz, u32 flags)
 {
 	u32 reported = __sync_val_compare_and_swap(&asan_reported, false, true);
 
@@ -211,7 +211,7 @@ __weak int asan_report(s8 __arena *addr, size_t sz, u32 flags)
 	return 0;
 }
 
-static __always_inline bool check_asan_args(s8 __arena *addr, size_t size,
+static __always_inline bool check_asan_args(s8 __arena *addr __arg_arena, size_t size,
 					    bool *result)
 {
 	bool valid = true;
@@ -383,7 +383,7 @@ void *__asan_memset(void *p, int c, size_t n)
  * 	a) pulling memory from the arena segment using bpf_arena_alloc_pages()
  * 	b) freeing memory from application code
  */
-__hidden __noasan int asan_poison(void __arena *addr, s8 val, size_t size)
+__hidden __noasan int asan_poison(void __arena *addr __arg_arena, s8 val, size_t size)
 {
 	s8 __arena *shadow;
 	size_t len;
@@ -440,7 +440,7 @@ __hidden __noasan int asan_poison(void __arena *addr, s8 val, size_t size)
  * memory is still done in granule-aligned sizes and repoisons the already
  * poisoned padding.
  */
-__hidden __noasan int asan_unpoison(void __arena *addr, size_t size)
+__hidden __noasan int asan_unpoison(void __arena *addr __arg_arena, size_t size)
 {
 	size_t partial = size & ASAN_GRANULE_MASK;
 	s8 __arena *shadow;

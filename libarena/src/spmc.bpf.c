@@ -12,13 +12,13 @@
 #include <libarena/spmc.h>
 
 static inline
-u64 spmc_arr_size(volatile struct spmc_arr __arena *spmc_arr)
+u64 spmc_arr_size(volatile struct spmc_arr __arena *spmc_arr __arg_arena)
 {
 	return SPMC_ARR_BASESZ << spmc_arr->order;
 }
 
 static inline
-u64 spmc_arr_get(volatile struct spmc_arr __arena *spmc_arr, u64 ind)
+u64 spmc_arr_get(volatile struct spmc_arr __arena *spmc_arr __arg_arena, u64 ind)
 {
 	u64 ret = READ_ONCE(spmc_arr->data[ind % spmc_arr_size(spmc_arr)]);
 
@@ -26,14 +26,14 @@ u64 spmc_arr_get(volatile struct spmc_arr __arena *spmc_arr, u64 ind)
 }
 
 static inline
-void spmc_arr_put(volatile struct spmc_arr __arena *spmc_arr, u64 ind, u64 value)
+void spmc_arr_put(volatile struct spmc_arr __arena *spmc_arr __arg_arena, u64 ind, u64 value)
 {
 	WRITE_ONCE(spmc_arr->data[ind % spmc_arr_size(spmc_arr)], value);
 }
 
 static inline
-void spmc_arr_copy(volatile struct spmc_arr __arena *dst,
-		   volatile struct spmc_arr __arena *src, u64 b, u64 t)
+void spmc_arr_copy(volatile struct spmc_arr __arena *dst __arg_arena,
+		   volatile struct spmc_arr __arena *src __arg_arena, u64 b, u64 t)
 {
 	u64 i;
 
@@ -42,7 +42,7 @@ void spmc_arr_copy(volatile struct spmc_arr __arena *dst,
 }
 
 static inline
-int spmc_order_init(struct spmc __arena *spmc, int order)
+int spmc_order_init(struct spmc __arena *spmc __arg_arena, int order)
 {
 	volatile struct spmc_arr __arena *arr = &spmc->arr[order];
 
@@ -64,7 +64,7 @@ int spmc_order_init(struct spmc __arena *spmc, int order)
 }
 
 __weak
-int spmc_owned_add(struct spmc __arena *spmc, u64 val)
+int spmc_owned_add(struct spmc __arena *spmc __arg_arena, u64 val)
 {
 	volatile struct spmc_arr __arena *newarr;
 	volatile struct spmc_arr __arena *arr;
@@ -104,7 +104,7 @@ int spmc_owned_add(struct spmc __arena *spmc, u64 val)
 
 
 __weak
-int spmc_owned_remove(struct spmc __arena *spmc, u64 *val)
+int spmc_owned_remove(struct spmc __arena *spmc __arg_arena, u64 *val)
 {
 	volatile struct spmc_arr __arena *arr;
 	int ret = 0;
@@ -148,7 +148,7 @@ int spmc_owned_remove(struct spmc __arena *spmc, u64 *val)
 }
 
 __weak
-int spmc_steal(struct spmc __arena *spmc, u64 *val)
+int spmc_steal(struct spmc __arena *spmc __arg_arena, u64 *val)
 {
 	volatile struct spmc_arr __arena *arr;
 	ssize_t sz;
@@ -218,7 +218,7 @@ struct spmc __arena *spmc_create(void)
 }
 
 __weak
-int spmc_destroy(struct spmc __arena *spmc)
+int spmc_destroy(struct spmc __arena *spmc __arg_arena)
 {
 	int i;
 

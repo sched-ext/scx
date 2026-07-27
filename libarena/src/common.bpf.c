@@ -56,7 +56,7 @@ __weak u64 arena_malloc_internal(size_t size)
 	return (u64)buddy_alloc(&buddy, size);
 }
 
-__weak void arena_free(void __arena *ptr)
+__weak void arena_free(void __arena *ptr __arg_arena)
 {
 	buddy_free(&buddy, ptr);
 }
