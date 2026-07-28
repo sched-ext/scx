@@ -8,7 +8,6 @@
 
 use anyhow::anyhow;
 use anyhow::Result;
-use combinations::Combinations;
 use itertools::iproduct;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
@@ -24,6 +23,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use tracing::debug;
 
 #[derive(Debug, Clone)]
@@ -951,23 +951,219 @@ impl<'a> EnergyModelOptimizer<'a> {
         }
     }
 
-    fn gen_pds_combinations(&'a self, util: f32) -> Vec<PDSetInfo<'a>> {
-        let mut pdsi_vec = Vec::new();
+    /// Upper bound on how many `(group, count)` combinations we're willing to
+    /// enumerate in [`gen_pds_combinations`]. Grouping domains by identical
+    /// `perf_table` reduces the search space from `2^n_domains` down to
+    /// roughly `prod(weight_i + 1)` for the common case of hybrid CPUs,
+    /// whose domains collapse into a handful of groups (e.g. P-cores /
+    /// E-cores / LP-E-cores). But if a topology *doesn't* collapse well
+    /// (e.g. many domains with genuinely distinct performance tables), that
+    /// product can still explode -- which is exactly the failure mode that
+    /// caused <https://github.com/sched-ext/scx/issues/3340> (unbounded
+    /// `Vec`/`BTreeSet` allocation per combination: ~34GB RSS and a pegged
+    /// core on a 28-thread hybrid CPU). If the search space would exceed
+    /// this cap, we fall back to the one combination the original
+    /// (pre-fix) code always included unconditionally regardless of how it
+    /// enumerated everything else: every CPU at its own highest performance
+    /// state. This trades away fine-grained power/performance combinations
+    /// on such pathological topologies for a hard guarantee against
+    /// runaway memory/CPU use.
+    const MAX_PDS_COMBINATIONS: u128 = 100_000;
 
-        let pds_set = self.gen_pds_set(util);
-        let n = pds_set.len();
-        for k in 1..n {
-            let pdss = pds_set.clone();
-            let pds_cmbs: Vec<_> = Combinations::new(pdss, k)
-                .map(|cmb| PDSetInfo::new(cmb.clone()))
-                .collect();
-            pdsi_vec.extend(pds_cmbs);
+    /// `recurse_pds_groups` (see its doc comment) can additionally emit one
+    /// "backward-fill" variant per leaf combination, alongside the default
+    /// "forward-fill" one -- i.e. at most 2x the combinations computed
+    /// below, never more. `gen_pds_combinations` only allows this when
+    /// `total_combinations * 2` would still fit under `MAX_PDS_COMBINATIONS`.
+
+    fn gen_pds_combinations(&'a self, util: f32) -> Vec<PDSetInfo<'a>> {
+        // Group performance domains that share an identical `perf_table`.
+        // On hybrid Intel CPUs the kernel registers one performance domain
+        // per CPU thread, even though e.g. all P-cores (or all E-cores)
+        // have identical performance/power characteristics. Treating them
+        // as interchangeable members of one group turns "which specific
+        // domains are active" into "how many CPUs from this group are
+        // active", collapsing what used to be a per-domain combinatorial
+        // search (`2^n_domains`) into a per-group one (`prod(weight_i+1)`).
+        let mut groups: Vec<(BTreeMap<usize, Arc<PerfState>>, Vec<&'a PerfDomain>)> = Vec::new();
+        for (_, pd) in self.em.perf_doms.iter() {
+            let mut found = false;
+            for group in groups.iter_mut() {
+                if group.0 == pd.perf_table {
+                    group.1.push(pd.as_ref());
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                groups.push((pd.perf_table.clone(), vec![pd.as_ref()]));
+            }
         }
 
-        let pdsi = PDSetInfo::new(pds_set.clone());
-        pdsi_vec.push(pdsi);
+        let mut group_max_weights = Vec::new();
+        for group in groups.iter() {
+            let total_weight: usize = group.1.iter().map(|pd| pd.span.weight()).sum();
+            group_max_weights.push(total_weight);
+        }
 
+        // See `MAX_PDS_COMBINATIONS`: bail out to a single, safe combination
+        // if grouping didn't collapse the search space enough.
+        let total_combinations: u128 = group_max_weights
+            .iter()
+            .map(|&w| u128::from(w as u64) + 1)
+            .product();
+
+        if total_combinations > Self::MAX_PDS_COMBINATIONS {
+            tracing::warn!(
+                "gen_pds_combinations: {} groups produce {total_combinations} combinations, \
+                 exceeding the safety cap of {}; falling back to the single \
+                 full-performance combination instead of exploring the full search space \
+                 (see sched-ext/scx#3340)",
+                groups.len(),
+                Self::MAX_PDS_COMBINATIONS,
+            );
+            let full_pds_set: Vec<PDS<'a>> = groups
+                .iter()
+                .flat_map(|(_, pds)| pds.iter())
+                .flat_map(|pd| {
+                    let ps = pd.select_perf_state(util).unwrap();
+                    std::iter::repeat_n(PDS::new(pd, ps), pd.span.weight())
+                })
+                .collect();
+            return vec![PDSetInfo::new(full_pds_set)];
+        }
+
+        // Whether it's safe to also explore a "backward-fill" ordering of
+        // domains within each partially-selected group, alongside the
+        // default "forward-fill". See `recurse_pds_groups` for why. At most
+        // doubles the combination count, so this is safe whenever we're not
+        // already right at the cap.
+        let explore_variants = total_combinations.saturating_mul(2) <= Self::MAX_PDS_COMBINATIONS;
+
+        let mut pdsi_vec = Vec::new();
+        let mut current_choice = vec![0; groups.len()];
+
+        Self::recurse_pds_groups(
+            0,
+            &groups,
+            &group_max_weights,
+            util,
+            explore_variants,
+            &mut current_choice,
+            &mut pdsi_vec,
+        );
         pdsi_vec
+    }
+
+    /// For a given per-group `count` (how many CPUs from that group are
+    /// active), fills `pds_set` with `count` entries drawn from
+    /// `group_pds`, respecting each domain's own weight. Iterating
+    /// `group_pds` in reverse (`backward`) instead of its natural order
+    /// (`forward`) picks a different subset of domains when `0 < count <
+    /// total group weight` and the group has more than one domain --
+    /// otherwise (boundary counts, or a single domain) direction can't
+    /// change which domains are picked, so it's a no-op.
+    fn fill_group_pds(
+        group_pds: &[&'a PerfDomain],
+        count: usize,
+        util: f32,
+        backward: bool,
+        pds_set: &mut Vec<PDS<'a>>,
+    ) {
+        let mut remaining = count;
+        let mut fill = |pd: &&'a PerfDomain| {
+            if remaining == 0 {
+                return;
+            }
+            let ps = pd.select_perf_state(util).unwrap();
+            let take = remaining.min(pd.span.weight());
+            for _ in 0..take {
+                pds_set.push(PDS::new(pd, ps));
+            }
+            remaining -= take;
+        };
+        if backward {
+            group_pds.iter().rev().for_each(|pd| fill(pd));
+        } else {
+            group_pds.iter().for_each(|pd| fill(pd));
+        }
+    }
+
+    /// Recursively enumerates every combination of per-group CPU counts
+    /// (`0..=group_max_weights[i]` for each group `i`), producing one
+    /// [`PDSetInfo`] per combination -- this is the core of the fix for
+    /// sched-ext/scx#3340 (see `MAX_PDS_COMBINATIONS`).
+    ///
+    /// One caveat: `insert_pds_combinations` keeps every [`PDSetInfo`] tied
+    /// for the lowest power at a given performance level, so that `dist()`
+    /// can later pick whichever tied candidate best overlaps the
+    /// previously-active domain set (for cache locality / a smooth
+    /// transition). Because domains within a group are interchangeable by
+    /// construction, a given `count` only needs *one* representative
+    /// combination to get the performance/power total right -- but that
+    /// means, unlike the exhaustive brute-force search this function
+    /// replaces, we no longer naturally produce *multiple* same-total
+    /// candidates that differ in exactly *which* domains within a group are
+    /// used. `explore_variants` (when it's safe to, see
+    /// `MAX_GROUPS_FOR_VARIANTS`) partially compensates by also trying a
+    /// "backward-fill" ordering per group alongside the default
+    /// "forward-fill", giving `dist()` at least two candidates to choose
+    /// between instead of exactly one. This is a bounded, partial mitigation,
+    /// not a full restoration of the original search diversity.
+    fn recurse_pds_groups(
+        depth: usize,
+        groups: &[(BTreeMap<usize, Arc<PerfState>>, Vec<&'a PerfDomain>)],
+        group_max_weights: &[usize],
+        util: f32,
+        explore_variants: bool,
+        current_choice: &mut [usize],
+        pdsi_vec: &mut Vec<PDSetInfo<'a>>,
+    ) {
+        if depth == groups.len() {
+            if current_choice.iter().all(|&c| c == 0) {
+                return;
+            }
+
+            let mut forward_set = Vec::new();
+            let mut backward_set = explore_variants.then(Vec::new);
+            let mut any_partial = false;
+
+            for (g_idx, &count) in current_choice.iter().enumerate() {
+                if count == 0 {
+                    continue;
+                }
+                let group_pds = &groups[g_idx].1;
+                Self::fill_group_pds(group_pds, count, util, false, &mut forward_set);
+
+                if let Some(backward_set) = backward_set.as_mut() {
+                    let is_partial = count < group_max_weights[g_idx] && group_pds.len() > 1;
+                    any_partial |= is_partial;
+                    Self::fill_group_pds(group_pds, count, util, is_partial, backward_set);
+                }
+            }
+
+            pdsi_vec.push(PDSetInfo::new(forward_set));
+            if any_partial {
+                if let Some(backward_set) = backward_set {
+                    pdsi_vec.push(PDSetInfo::new(backward_set));
+                }
+            }
+            return;
+        }
+
+        let max_weight = group_max_weights[depth];
+        for count in 0..=max_weight {
+            current_choice[depth] = count;
+            Self::recurse_pds_groups(
+                depth + 1,
+                groups,
+                group_max_weights,
+                util,
+                explore_variants,
+                current_choice,
+                pdsi_vec,
+            );
+        }
     }
 
     fn insert_pds_combinations(&self, new_pdsi_vec: &Vec<PDSetInfo<'a>>) -> bool {
@@ -1008,38 +1204,6 @@ impl<'a> EnergyModelOptimizer<'a> {
             }
         }
         found_new
-    }
-
-    /// Get a vector of (performance domain, performance state) to achieve
-    /// the given CPU utilization, @util.
-    fn gen_pds_set(&self, util: f32) -> Vec<PDS<'_>> {
-        let mut pds_set = vec![];
-        for (_, pd) in self.em.perf_doms.iter() {
-            let ps = pd.select_perf_state(util).unwrap();
-            let pds = PDS::new(pd, ps);
-            pds_set.push(pds);
-        }
-        self.expand_pds_set(&mut pds_set);
-        pds_set
-    }
-
-    /// Expand a PDS vector such that a performance domain with X CPUs
-    /// has N elements in the vector. This is purely for generating
-    /// combinations easy.
-    fn expand_pds_set(&self, pds_set: &mut Vec<PDS<'_>>) {
-        let mut xset = vec![];
-        // For a performance domain having nr_cpus, add nr_cpus-1 more
-        // PDS to make the PDS nr_cpus in the vector.
-        for pds in pds_set.iter() {
-            let nr_cpus = pds.pd.span.weight();
-            for _ in 1..nr_cpus {
-                xset.push(pds.clone());
-            }
-        }
-        pds_set.append(&mut xset);
-
-        // Sort the pds_set for easy comparison.
-        pds_set.sort();
     }
 }
 
@@ -1184,5 +1348,150 @@ impl fmt::Display for PerfCpuOrder {
         write!(f, "  primary CPUs:  {:?}\n", self.cpus_perf.borrow())?;
         write!(f, "  overflow CPUs: {:?}", self.cpus_ovflw.borrow())?;
         Ok(())
+    }
+}
+
+/// Regression tests for `gen_pds_combinations`/`recurse_pds_groups`
+/// (sched-ext/scx#3340): a combinatorial explosion in the pre-fix
+/// brute-force domain-combination search caused unbounded memory growth
+/// (~34GB observed) and a pegged CPU core on real hybrid Intel hardware
+/// (Core Ultra, Alder Lake/Arrow Lake). These construct synthetic energy
+/// models directly (bypassing the real `/sys/kernel/debug/energy_model`
+/// data source) to exercise both the intended common case and the
+/// pathological one the safety cap exists for, without needing matching
+/// hardware to run on.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn perf_state(performance: usize, power: usize) -> Arc<PerfState> {
+        Arc::new(PerfState {
+            cost: performance,
+            frequency: performance,
+            inefficient: 0,
+            performance,
+            power,
+        })
+    }
+
+    fn make_domain(
+        id: usize,
+        cpu_bit: usize,
+        perf_table: BTreeMap<usize, Arc<PerfState>>,
+    ) -> Arc<PerfDomain> {
+        Arc::new(PerfDomain {
+            id,
+            span: Cpumask::from_vec(vec![1u64 << cpu_bit]),
+            perf_table,
+        })
+    }
+
+    /// Mirrors the real-world hybrid CPU from sched-ext/scx#3340: 28
+    /// per-thread performance domains (8 P-cores, 16 E-cores, 4 LP-E-cores)
+    /// that collapse into exactly 3 groups once grouped by identical
+    /// `perf_table`. Before the fix, this would have tried `2^28 - 2`
+    /// (~268 million) combinations. Grouped, the base search produces
+    /// exactly `(8+1)*(16+1)*(4+1) - 1 = 764` combinations (matching the
+    /// number reported in the upstream issue); with the backward-fill
+    /// diversity variant enabled (764*2 = 1528 fits comfortably under the
+    /// cap), every combination with at least one non-boundary group count
+    /// gets a second variant, for an exact total of 1521.
+    #[test]
+    fn test_hybrid_topology_matches_expected_combination_count() {
+        let p_core_table: BTreeMap<usize, Arc<PerfState>> =
+            [(100, perf_state(100, 50))].into_iter().collect();
+        let e_core_table: BTreeMap<usize, Arc<PerfState>> =
+            [(60, perf_state(60, 20))].into_iter().collect();
+        let lpe_core_table: BTreeMap<usize, Arc<PerfState>> =
+            [(30, perf_state(30, 5))].into_iter().collect();
+
+        let mut perf_doms = BTreeMap::new();
+        let mut next_id = 0;
+        for _ in 0..8 {
+            perf_doms.insert(
+                next_id,
+                make_domain(next_id, next_id % 64, p_core_table.clone()),
+            );
+            next_id += 1;
+        }
+        for _ in 0..16 {
+            perf_doms.insert(
+                next_id,
+                make_domain(next_id, next_id % 64, e_core_table.clone()),
+            );
+            next_id += 1;
+        }
+        for _ in 0..4 {
+            perf_doms.insert(
+                next_id,
+                make_domain(next_id, next_id % 64, lpe_core_table.clone()),
+            );
+            next_id += 1;
+        }
+
+        let em = EnergyModel { perf_doms };
+        let cpus_pf: Vec<CpuId> = Vec::new();
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        let combos = emo.gen_pds_combinations(100.0);
+
+        assert_eq!(
+            combos.len(),
+            1521,
+            "expected 764 base combinations + 757 backward-fill variants, got {}",
+            combos.len()
+        );
+    }
+
+    /// A topology that does NOT collapse into a small number of groups --
+    /// every domain has a distinct `perf_table`, so grouping provides no
+    /// reduction at all (group count == domain count == 24). This is
+    /// exactly the scenario `MAX_PDS_COMBINATIONS` guards against: without
+    /// the cap, this would try to enumerate `2^24 - 2` (~16.7 million)
+    /// combinations, reproducing the same class of bug on a different
+    /// (non-hybrid, or unluckily-binned) topology.
+    #[test]
+    fn test_pathological_topology_falls_back_to_safety_cap() {
+        let mut perf_doms = BTreeMap::new();
+        for id in 0..24 {
+            let table: BTreeMap<usize, Arc<PerfState>> =
+                [(id + 1, perf_state(id + 1, id + 1))].into_iter().collect();
+            perf_doms.insert(id, make_domain(id, id % 64, table));
+        }
+
+        let em = EnergyModel { perf_doms };
+        let cpus_pf: Vec<CpuId> = Vec::new();
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        let combos = emo.gen_pds_combinations(100.0);
+
+        assert_eq!(
+            combos.len(),
+            1,
+            "expected the safety-cap fallback (single full-performance combination), got {}",
+            combos.len()
+        );
+    }
+
+    /// A single, uniform group (all domains share one `perf_table`): the
+    /// simplest non-trivial case, with no cross-group interaction at all.
+    #[test]
+    fn test_uniform_group_stays_small_and_exact() {
+        let table: BTreeMap<usize, Arc<PerfState>> =
+            [(100, perf_state(100, 50))].into_iter().collect();
+        let mut perf_doms = BTreeMap::new();
+        for id in 0..8 {
+            perf_doms.insert(id, make_domain(id, id, table.clone()));
+        }
+
+        let em = EnergyModel { perf_doms };
+        let cpus_pf: Vec<CpuId> = Vec::new();
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        let combos = emo.gen_pds_combinations(100.0);
+
+        // Counts 1..=7 are partial (2 entries each), count 8 is the full
+        // boundary (1 entry): 7*2 + 1 = 15.
+        assert_eq!(combos.len(), 15, "got {}", combos.len());
     }
 }
