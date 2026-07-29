@@ -19,6 +19,7 @@ use anyhow::Result;
 use crate::chaos::{self, RawWindow};
 use crate::procdb::ProcessDb;
 use crate::scheduler::{PandemoniumStats, Scheduler};
+use crate::topology::CpuTopology;
 use crate::tuning::{
     self, detect_regime, scaled_regime_knobs, MwuController, MwuSignals, Regime, HIST_BUCKETS,
 };
@@ -47,7 +48,14 @@ pub fn monitor_loop(
     shutdown: &'static AtomicBool,
     verbose: bool,
     nr_cpus: u64,
+    phi_scale: Option<u64>,
 ) -> Result<bool> {
+    // HOTPLUG POLL STATE: the online count as last observed. The poll below
+    // re-derives topology on change AND refreshes the Rust-local tau_ns --
+    // without that refresh, a hotplug that changes tau without flipping the
+    // regime left MWU computing every knob off pre-hotplug tau until a regime
+    // change happened to land (the stale-MWU-tau gap).
+    let mut last_online = CpuTopology::online_cpu_count();
     let mut prev = PandemoniumStats::default();
     let mut prev_hist = [[0u64; HIST_BUCKETS]; 3];
     let mut prev_sleep = [0u64; SLEEP_BUCKETS];
@@ -71,8 +79,8 @@ pub fn monitor_loop(
     let mut light_ticks: u64 = 0;
     let mut mixed_ticks: u64 = 0;
     let mut heavy_ticks: u64 = 0;
-    // STABILITY SCORE IS A WEAK PRE-CHAOS STEADY-STATE PROXY. v5.11.0
-    // KEEPS IT FOR TELEMETRY GATING ONLY -- THE REAL STEADY-STATE GATE
+    // STABILITY SCORE IS A WEAK PRE-CHAOS STEADY-STATE PROXY, KEPT FOR
+    // TELEMETRY GATING ONLY -- THE REAL STEADY-STATE GATE
     // IS `quiesce.frozen` BELOW. DO NOT WIRE stability_score INTO THE
     // FREEZE DECISION (TWO COMPETING "AM I STEADY" SIGNALS = A BUG).
     let mut stability_score: u32 = 0;
@@ -118,6 +126,10 @@ pub fn monitor_loop(
     while !shutdown.load(Ordering::Relaxed) && !sched.exited() {
         crate::watchdog::LOOP_HEARTBEAT.fetch_add(1, Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(1));
+
+        if CpuTopology::poll_hotplug(sched, nr_cpus as usize, phi_scale, &mut last_online) {
+            tau_ns = sched.read_tuning_knobs().topology_tau_ns;
+        }
 
         let stats = sched.read_stats();
         let cur_hist = sched.read_wake_lat_hist();
@@ -289,6 +301,10 @@ pub fn monitor_loop(
         // None UNTIL THE WINDOW HAS RQA_MIN_SAMPLES FILLED.
         let (idle_lambda, _idle_hvg_s) = chaos::hvg_stats(&idle_win);
         let wake_bp_h = chaos::bandt_pompe_d3(&wake_win);
+        // SPILL-Phi CHAOS->TEMPERATURE BRIDGE: OVERLAID ONTO EVERY KNOB
+        // WRITE BELOW LIKE topology_tau_ns; INERT IN BPF UNTIL THE SPILL
+        // PRICE CONSUMES IT.
+        let spill_temp_q16 = tuning::spill_temp_q16(wake_bp_h);
         let bp_delta = wake_bp_h - prev_bp_h;
         let mean_idle = chaos::mean(&idle_win);
         let rqa = chaos::rqa_det(&idle_win);
@@ -325,6 +341,7 @@ pub fn monitor_loop(
                 let mut rk = scaled_regime_knobs(regime, nr_cpus, tau_ns);
                 rk.topology_tau_ns = tau_ns;
                 rk.codel_eq_ns = live.codel_eq_ns;
+                rk.spill_temp_q16 = spill_temp_q16;
                 sched.write_tuning_knobs(&rk)?;
                 last_written_knobs = rk;
                 regime_changed_this_tick = true;
@@ -402,6 +419,7 @@ pub fn monitor_loop(
                 let live = sched.read_tuning_knobs();
                 knobs.topology_tau_ns = live.topology_tau_ns;
                 knobs.codel_eq_ns = live.codel_eq_ns;
+                knobs.spill_temp_q16 = spill_temp_q16;
                 // COMMIT-ON-CHANGE: only push to the BPF map when an
                 // MWU-owned field actually moved. The BPF side reads the
                 // map unsynchronized -- skipping redundant writes strictly
@@ -445,7 +463,7 @@ pub fn monitor_loop(
         let knobs = sched.read_tuning_knobs();
 
         let sojourn_ms = stats.batch_sojourn_ns / 1_000_000;
-        let sojourn_thresh_ms = knobs.sojourn_thresh_ns / 1_000_000;
+        let sojourn_thresh_ms = knobs.codel_thresh_ns / 1_000_000;
         let longrun_label = if stats.longrun_mode_active > 0 {
             " LONGRUN"
         } else {

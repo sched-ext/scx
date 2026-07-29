@@ -50,6 +50,18 @@ pub const AFFINITY_OFF: u64 = 0;
 pub const AFFINITY_WEAK: u64 = 1;
 pub const AFFINITY_STRONG: u64 = 2;
 
+// SPILL TEMPERATURE (SPILL-Phi). T = T_base*(1 + kappa*H), H THE Bandt-Pompe
+// PERMUTATION ENTROPY IN [0,1]; Q16 FIXED-POINT (65536 = T_base = 1.0).
+// COMPUTED EACH ADAPTIVE TICK FROM THE CHAOS LAYER, SHIPPED AS A NON-MWU KNOB
+// OVERLAID LIKE topology_tau_ns. INERT UNTIL THE SPILL PRICE CONSUMES IT.
+pub const SPILL_TEMP_BASE_Q16: u64 = 65536;
+pub const SPILL_TEMP_KAPPA: f64 = 1.0;
+
+pub fn spill_temp_q16(h: f64) -> u64 {
+    let h = h.clamp(0.0, 1.0);
+    ((SPILL_TEMP_BASE_Q16 as f64) * (1.0 + SPILL_TEMP_KAPPA * h)) as u64
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TuningKnobs {
@@ -59,7 +71,7 @@ pub struct TuningKnobs {
     pub lat_cri_thresh_high: u64,
     pub lat_cri_thresh_low: u64,
     pub affinity_mode: u64,
-    pub sojourn_thresh_ns: u64,
+    pub codel_thresh_ns: u64,
     pub burst_slice_ns: u64,
     // FIEDLER-DERIVED TOPOLOGY TIME CONSTANT (TAU_SCALE_NS / lambda_2).
     // ZERO MEANS RUST HAS NOT YET WRITTEN tau; BPF USES THE PRE-FIRST-TICK
@@ -69,6 +81,7 @@ pub struct TuningKnobs {
     // R_eff-DERIVED CODEL EQUILIBRIUM TARGET (<R_eff> * 2m * tau).
     // CO-LOCATED WITH topology_tau_ns; SAME ZERO/WRITE/CLAMP SEMANTICS.
     pub codel_eq_ns: u64,
+    pub spill_temp_q16: u64,
 }
 
 impl Default for TuningKnobs {
@@ -80,10 +93,11 @@ impl Default for TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_OFF,
-            sojourn_thresh_ns: 5_000_000,
+            codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         }
     }
 }
@@ -127,10 +141,11 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
-            sojourn_thresh_ns: 5_000_000,
+            codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         },
         Regime::Mixed => TuningKnobs {
             slice_ns: MIXED_SLICE_NS,
@@ -139,10 +154,11 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_STRONG,
-            sojourn_thresh_ns: 5_000_000,
+            codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         },
         Regime::Heavy => TuningKnobs {
             slice_ns: HEAVY_SLICE_NS,
@@ -151,10 +167,11 @@ pub fn regime_knobs(r: Regime) -> TuningKnobs {
             lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
             lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_WEAK,
-            sojourn_thresh_ns: 5_000_000,
+            codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         },
     }
 }
@@ -214,7 +231,7 @@ pub fn scaled_regime_knobs(r: Regime, nr_cpus: u64, tau_ns: u64) -> TuningKnobs 
         let batch_cap_tau = scale_tau_u64(tau_ns, K_BATCH_CAP_Q16).clamp(10_000_000, 80_000_000);
         knobs.batch_slice_ns = knobs.batch_slice_ns.min(batch_cap_tau);
     }
-    knobs.sojourn_thresh_ns = sojourn_tau;
+    knobs.codel_thresh_ns = sojourn_tau;
 
     knobs
 }
@@ -321,7 +338,7 @@ pub fn compute_p99_from_histogram(counts: &[u64; HIST_BUCKETS]) -> u64 {
 // 1e-6 WEIGHT FLOOR PREVENTS UNDERFLOW (DEAD WEIGHTS CAN'T RECOVER).
 // PATHWAYS FIRE IMMEDIATELY -- NO SCHMITT-STYLE STREAK CONFIRMATION.
 //
-// v5.11.0: WEIGHTS ARE PER-REGIME (ONE VECTOR PER Light/Mixed/Heavy).
+// WEIGHTS ARE PER-REGIME (ONE VECTOR PER Light/Mixed/Heavy).
 // ON A STEADY WORKLOAD THE REGIME IS CONSTANT, SO THE ACTIVE VECTOR
 // SEES A STATIONARY LOSS STREAM AND CONVERGES HARD INSTEAD OF BEING
 // RE-LITIGATED EVERY TICK. BUTTERWORTH-DAMPED WEIGHT UPDATE, ANCHORED
@@ -333,7 +350,7 @@ const N_EXPERTS: usize = 6;
 
 // ANCHORED LEARNING RATE. ETA = ETA_CONST * sqrt(ln(N_EXPERTS) / T),
 // ETA_CONST = 1.0, T = 16 (CHAOS_WIN horizon). sqrt(ln 6 / 16) =
-// sqrt(1.79176 / 16) = 0.33465. THE OLD FIXED 8.0 OVERSHOT; THIS IS
+// sqrt(1.79176 / 16) = 0.33465. A FIXED RATE OVERSHOOTS; THIS IS
 // THE THEORY-OPTIMAL HEDGE/EXP3 RATE FOR THE WINDOW HORIZON. IF
 // LATENCY RESPONSE REGRESSES, ETA_CONST IS THE PRIMARY TUNING SURFACE
 // (RAISE TOWARD 2-3 BEFORE TOUCHING THE QUIESCENCE GATE).
@@ -380,11 +397,10 @@ const WARMUP_TICKS: u32 = 3;
 //   HIGH RQA-DET + lambda <= PERIODIC_MAX -> TRUST -> LIGHT DAMP (~0.85)
 //   LOW RQA-DET OR lambda >= CHAOTIC_MIN  -> NO TRUST -> HEAVY DAMP (0.50)
 //
-// REPLACED THE v5.10.0 CPU-COUNT CLIFF (0.707 BELOW 11 CPUS, 0.5 AT
-// OR ABOVE) WHICH DAMPED HARDER AT EXACTLY THE CORE COUNTS WHERE THE
-// CONTROLLER NEEDS THE MOST RESPONSIVENESS, PRODUCING THE 12C
-// REGRESSION CLUSTER (IPC BPF 12.9x, MIXED BPF 3.4x, LONGRUN
-// ADAPTIVE 2.2x). NR_CPUS NO LONGER PARTICIPATES IN DAMPING.
+// NO CPU-COUNT CLIFF: DAMPING KEYED ON NR_CPUS BITES HARDEST AT
+// EXACTLY THE CORE COUNTS WHERE THE CONTROLLER NEEDS THE MOST
+// RESPONSIVENESS (THE 12C REGRESSION CLUSTER). NR_CPUS DOES NOT
+// PARTICIPATE IN DAMPING.
 const DAMP_LO: f64 = 0.50;
 const DAMP_HI: f64 = 0.85;
 // PENALTY APPLIED TO TRUST WHEN hvg_lambda CROSSES INTO THE
@@ -447,7 +463,7 @@ const SC_BURST: [f64; 6] = [0.74, 1.00, 1.47, 0.98, 0.49, 1.23];
 
 // DISCRETE KNOB VALUES (ABSOLUTE, NOT SCALE FACTORS)
 // FORK_STORM (INDEX 4) IS WEAK, NOT OFF: THE BPF READS affinity_mode ONLY AS
-// A BINARY GATE (main.bpf.c:1619, > 0) ON find_idle_l2_sibling. OFF DISABLES
+// A BINARY GATE (> 0) ON find_idle_l2_sibling IN THE BPF. OFF DISABLES
 // THE L2 SIBLING PRE-FILTER, SO DURING A STORM WAKEES SEAT TOPOLOGY-BLIND AND
 // SCATTER CROSS-DOMAIN -- FIGHTING THE PHI/WARM-STAY PLACEMENT INSTEAD OF HELPING.
 // WEAK KEEPS THE L2 PRE-FILTER ON. (STRONG VS WEAK IS A NO-OP TO THE BPF; ONLY
@@ -792,7 +808,7 @@ impl MwuController {
         //
         // FORK_STORM EXPERT (SC_SLICE=0.49, SC_PREEMPT=0.49, SC_BATCH=0.52,
         // SC_SOJOURN=0.53, SC_BURST=0.49) DOMINATES THE BLEND DURING A REAL
-        // STORM, DRIVING burst_slice_ns / preempt_thresh_ns / sojourn_thresh_ns
+        // STORM, DRIVING burst_slice_ns / preempt_thresh_ns / codel_thresh_ns
         // / batch_slice_ns DOWN END-TO-END.
         let fork_thresh = scale_tau_u64(tau_ns, K_FORK_STORM_RATE_Q16).max(FORK_STORM_RATE_FLOOR);
         let fork_storm = sig.wakeup_rate > fork_thresh && sig.rescue_count > 0;
@@ -981,16 +997,16 @@ impl MwuController {
         let b = &self.baseline;
         let blended_slice = blend_continuous(b.slice_ns, &SC_SLICE, &w);
         let blended_burst = blend_continuous(b.burst_slice_ns, &SC_BURST, &w);
-        let mut blended_sojourn = blend_continuous(b.sojourn_thresh_ns, &SC_SOJOURN, &w);
+        let mut blended_sojourn = blend_continuous(b.codel_thresh_ns, &SC_SOJOURN, &w);
 
         // SOJOURN FLOOR: tick() KICKS PER-CPU DSQs WHOSE OLDEST TASK HAS AGED
-        // PAST sojourn_thresh_ns (BPF, main.bpf.c:2374). THAT EVICTION DEADLINE
+        // PAST codel_thresh_ns (the BPF tick's per-CPU scan). THAT EVICTION DEADLINE
         // MUST NOT SIT ABOVE THE THRESHOLD WARM-STAY / STEP-1 R_eff STEAL
         // ACTUALLY RELEASE AT, OR THE ADAPTIVE LAYER HOLDS TASKS LONG PAST THE
         // POINT THE PHI GATES ASSUMED RELIEF HAD ARRIVED (THE 2C/4C LONG-RUN /
-        // LAT P99 TAIL). THE BPF OVERFLOW RESCUE IS NO LONGER "[4ms,10ms]" --
-        // IT WAS REWIRED TO THE PHI EQUILIBRIUM (overflow_sojourn_rescue_ns =
-        // codel_target_equilibrium_ns, main.bpf.c:995), SUB-MS AT LOW CORE.
+        // LAT P99 TAIL). THE BPF OVERFLOW RESCUE READS THE LIVE OSCILLATOR
+        // TARGET DIRECTLY (codel_target_ns, WHICH THE ENVELOPE PARKS AT
+        // codel_seed_ns), SUB-MS AT LOW CORE.
         // ANCHOR THE FLOOR TO THAT SAME PHI-DERIVED EQUILIBRIUM SO USERSPACE
         // EVICTION AND THE BPF PHI RELEASE AGREE. THE +blended_slice TERM IS
         // THE GENUINE DISPATCH-SERVICE-WINDOW GUARD (KEPT). codel_eq_ns CAN BE
@@ -1017,13 +1033,14 @@ impl MwuController {
             lat_cri_thresh_high: blend_continuous(b.lat_cri_thresh_high, &SC_LCRI_HI, &w),
             lat_cri_thresh_low: blend_continuous(b.lat_cri_thresh_low, &SC_LCRI_LO, &w),
             affinity_mode: majority_discrete(&DV_AFFINITY, &w),
-            sojourn_thresh_ns: blended_sojourn,
+            codel_thresh_ns: blended_sojourn,
             burst_slice_ns: blended_burst,
             // topology_tau_ns AND codel_eq_ns ARE OWNED BY THE TOPOLOGY LAYER;
             // MWU DOESN'T TOUCH THEM. THE MONITOR LOOP OVERLAYS THE LIVE BPF
             // VALUES BACK ONTO MWU'S OUTPUT BEFORE WRITING -- PASSTHROUGH.
             topology_tau_ns: 0,
             codel_eq_ns: 0,
+            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         };
         self.last_knobs = k;
         k
@@ -1134,6 +1151,6 @@ pub fn knobs_differ(a: &TuningKnobs, b: &TuningKnobs) -> bool {
         || a.lat_cri_thresh_high != b.lat_cri_thresh_high
         || a.lat_cri_thresh_low != b.lat_cri_thresh_low
         || a.affinity_mode != b.affinity_mode
-        || a.sojourn_thresh_ns != b.sojourn_thresh_ns
+        || a.codel_thresh_ns != b.codel_thresh_ns
         || a.burst_slice_ns != b.burst_slice_ns
 }

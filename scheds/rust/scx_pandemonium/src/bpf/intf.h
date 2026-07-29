@@ -42,7 +42,7 @@ struct tuning_knobs {
 	u64 lat_cri_thresh_high; // CLASSIFIER: LAT_CRITICAL THRESHOLD (DEFAULT 32)
 	u64 lat_cri_thresh_low;  // CLASSIFIER: INTERACTIVE THRESHOLD (DEFAULT 8)
 	u64 affinity_mode;      // L2 PLACEMENT: 0=OFF, 1=WEAK, 2=STRONG
-	u64 sojourn_thresh_ns;  // BATCH DSQ RESCUE THRESHOLD (SET BY RUST)
+	u64 codel_thresh_ns;    // BATCH DSQ RESCUE THRESHOLD (SET BY RUST)
 	u64 burst_slice_ns;     // SLICE CEILING DURING BURST/LONGRUN (SET BY RUST, DEFAULT 1MS)
 	u64 topology_tau_ns;    // FIEDLER-DERIVED TIME CONSTANT (1/lambda_2).
 	                        // 0 MEANS RUST HAS NOT YET WRITTEN tau; BPF
@@ -53,6 +53,10 @@ struct tuning_knobs {
 	                        // <R_eff> * 2m * tau, CLAMPED [200us, 8ms].
 	                        // 0 MEANS NOT YET WRITTEN. WRITTEN AT TOPOLOGY
 	                        // DETECT AND ON HOTPLUG (CO-LOCATED WITH tau).
+	u64 spill_temp_q16;     // SPILL-Phi: T_base*(1+kappa*H) Q16, FROM THE
+	                        // BANDT-POMPE PERMUTATION ENTROPY. COMPUTED AND
+	                        // SHIPPED EACH ADAPTIVE TICK; INERT UNTIL THE
+	                        // SPILL PRICE CONSUMES IT.
 	// PHI DISTANCE PENALTY IS PRE-FOLDED INTO THE reff_value MAP (IN NS) BY
 	// RUST AT TOPOLOGY DETECT -- NO KNOB FIELD: BPF READS THE MAP DIRECTLY.
 };
@@ -90,7 +94,7 @@ struct pandemonium_stats {
 	// LONGRUN: 1 IF SUSTAINED BATCH PRESSURE DETECTED, 0 OTHERWISE, WRITTEN BY tick()
 	u64 longrun_mode_active;
 	// OVERFLOW SOJOURN RESCUE: TASKS DISPATCHED BY try_service_older_overflow
-	// AT overflow_sojourn_rescue_ns (DISPATCH STEP 2)
+	// AT codel_target_ns (DISPATCH STEP 2)
 	u64 nr_overflow_rescue;
 	// CROSS-DOMAIN SCATTER ATTRIBUTION: PER-PLACEMENT-PATH COUNT OF LANDINGS
 	// WHERE THE CHOSEN CPU IS IN A DIFFERENT cache domain THAN THE TASK'S last_cpu.
