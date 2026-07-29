@@ -10,6 +10,7 @@ pub mod bpf_intf;
 mod cell_manager;
 mod mitosis_topology_utils;
 mod stats;
+mod undefok_flags;
 
 use cell_manager::{CellManager, CpuAssignment};
 
@@ -111,6 +112,12 @@ struct Opts {
     /// Optional run ID for tracking scheduler instances.
     #[clap(long)]
     run_id: Option<u64>,
+
+    /// Ignore the listed long flags if present. Accepts a comma-separated list
+    /// of names without the leading `--`, for example
+    /// `--undefok=reconfiguration-interval-s,rebalance-cpus-interval-s`.
+    #[clap(long, value_delimiter = ',')]
+    undefok: Vec<String>,
 
     /// Enable debug event tracking for cgroup_init, init_task, and cgroup_exit.
     /// Events are recorded in a ring buffer and output in dump().
@@ -1472,8 +1479,7 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     Ok(cpu_ctxs)
 }
 
-#[clap_main::clap_main]
-fn main(opts: Opts) -> Result<()> {
+fn run(opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_mitosis {}",
@@ -1559,6 +1565,15 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let parsed = undefok_flags::parse_args::<Opts>()?;
+    // Emit undefok notices before logger setup so ignored rollout flags are always visible.
+    for undefok in &parsed.ignored_undefok_flags {
+        eprintln!("warning: ignoring undefok flag --{}", undefok.long);
+    }
+    run(parsed.opts)
 }
 
 #[cfg(test)]
