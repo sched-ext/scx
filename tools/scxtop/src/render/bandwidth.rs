@@ -28,22 +28,16 @@ pub struct BandwidthRenderer;
 #[derive(Copy, Clone)]
 enum Metric {
     MbmLocal,
+    MbmRemote,
     MbmTotal,
     Occupancy,
 }
 
 impl Metric {
-    fn event(self) -> &'static str {
-        match self {
-            Metric::MbmLocal => EVENT_MBM_LOCAL_BPS,
-            Metric::MbmTotal => EVENT_MBM_TOTAL_BPS,
-            Metric::Occupancy => EVENT_LLC_OCCUPANCY,
-        }
-    }
-
     fn title(self) -> &'static str {
         match self {
             Metric::MbmLocal => "Local Memory Bandwidth",
+            Metric::MbmRemote => "Remote Memory Bandwidth",
             Metric::MbmTotal => "Total Memory Bandwidth",
             Metric::Occupancy => "L3 Cache Occupancy",
         }
@@ -51,7 +45,7 @@ impl Metric {
 
     fn format(self, v: u64) -> String {
         match self {
-            Metric::MbmLocal | Metric::MbmTotal => format_bytes_per_sec(v),
+            Metric::MbmLocal | Metric::MbmRemote | Metric::MbmTotal => format_bytes_per_sec(v),
             Metric::Occupancy => format_bytes(v),
         }
     }
@@ -78,6 +72,7 @@ impl BandwidthRenderer {
         let (has_local, has_total, has_occupancy) = stats.feature_flags();
         let metrics: Vec<Metric> = [
             (Metric::MbmLocal, has_local),
+            (Metric::MbmRemote, has_local && has_total),
             (Metric::MbmTotal, has_total),
             (Metric::Occupancy, has_occupancy),
         ]
@@ -155,11 +150,34 @@ fn render_unavailable(frame: &mut Frame, area: Rect, stats: &BandwidthStats, the
     frame.render_widget(para, area);
 }
 
+fn series_for_metric<F>(metric: Metric, read: F) -> Vec<u64>
+where
+    F: Fn(&str) -> Vec<u64>,
+{
+    match metric {
+        Metric::MbmLocal => read(EVENT_MBM_LOCAL_BPS),
+        Metric::MbmTotal => read(EVENT_MBM_TOTAL_BPS),
+        Metric::Occupancy => read(EVENT_LLC_OCCUPANCY),
+        Metric::MbmRemote => {
+            // Derived: total − local per sample, saturating at zero to
+            // absorb the case where local reads race ahead of total on
+            // the first prime tick.
+            let total = read(EVENT_MBM_TOTAL_BPS);
+            let local = read(EVENT_MBM_LOCAL_BPS);
+            total
+                .iter()
+                .zip(local.iter().chain(std::iter::repeat(&0)))
+                .map(|(t, l)| t.saturating_sub(*l))
+                .collect()
+        }
+    }
+}
+
 fn llc_values(metric: Metric, llc_data: &BTreeMap<usize, LlcData>) -> Vec<(usize, Vec<u64>, u64)> {
     llc_data
         .iter()
         .map(|(id, d)| {
-            let series = d.event_data_immut(metric.event());
+            let series = series_for_metric(metric, |e| d.event_data_immut(e));
             let current = series.last().copied().unwrap_or(0);
             (*id, series, current)
         })
@@ -173,26 +191,48 @@ fn node_values(
     node_data
         .iter()
         .map(|(id, d)| {
-            let series = d.event_data_immut(metric.event());
+            let series = series_for_metric(metric, |e| d.event_data_immut(e));
             let current = series.last().copied().unwrap_or(0);
             (*id, series, current)
         })
         .collect()
 }
 
+/// Nearest-rank percentile over a pre-sorted slice.
+fn percentile_sorted(sorted: &[u64], p: u32) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let n = sorted.len();
+    // ceil(p/100 * n) - 1, saturating to 0.
+    let idx = (n as u64 * p as u64).div_ceil(100).saturating_sub(1) as usize;
+    sorted[idx.min(n - 1)]
+}
+
 fn stats_line(
     theme: &AppTheme,
     title: &str,
     metric: Metric,
-    values: &[u64],
+    entries: &[(usize, Vec<u64>, u64)],
     system_total: u64,
 ) -> Line<'static> {
-    let max = *values.iter().max().unwrap_or(&0);
-    let avg: u64 = if values.is_empty() {
+    // Flatten every history sample from every entry — that's the pool the
+    // window-wide max/avg/p95 are computed over. Percentiles across only
+    // the current per-entry values are meaningless at 2-8 entries.
+    let mut flat: Vec<u64> = entries
+        .iter()
+        .flat_map(|(_, s, _)| s.iter().copied())
+        .collect();
+    flat.sort_unstable();
+
+    let max = flat.last().copied().unwrap_or(0);
+    let avg: u64 = if flat.is_empty() {
         0
     } else {
-        (values.iter().map(|v| *v as u128).sum::<u128>() / values.len() as u128) as u64
+        (flat.iter().map(|v| *v as u128).sum::<u128>() / flat.len() as u128) as u64
     };
+    let p95 = percentile_sorted(&flat, 95);
+
     Line::from(vec![
         Span::styled(format!("{title} — "), theme.title_style()),
         Span::styled(metric.title(), theme.title_style()),
@@ -200,6 +240,8 @@ fn stats_line(
         Span::styled(metric.format(system_total), theme.text_important_color()),
         Span::styled("  max=", theme.text_color()),
         Span::styled(metric.format(max), theme.text_important_color()),
+        Span::styled("  p95=", theme.text_color()),
+        Span::styled(metric.format(p95), theme.text_important_color()),
         Span::styled("  avg=", theme.text_color()),
         Span::styled(metric.format(avg), theme.text_important_color()),
     ])
@@ -222,9 +264,8 @@ fn render_llc_panel(
     theme: &AppTheme,
 ) {
     let entries = llc_values(metric, llc_data);
-    let currents: Vec<u64> = entries.iter().map(|(_, _, c)| *c).collect();
-    let system_total: u64 = currents.iter().sum();
-    let title = stats_line(theme, "LLCs", metric, &currents, system_total);
+    let system_total: u64 = entries.iter().map(|(_, _, c)| *c).sum();
+    let title = stats_line(theme, "LLCs", metric, &entries, system_total);
     render_topology_panel(
         frame, area, view_state, theme, title, "LLC", metric, &entries,
     );
@@ -239,9 +280,8 @@ fn render_node_panel(
     theme: &AppTheme,
 ) {
     let entries = node_values(metric, node_data);
-    let currents: Vec<u64> = entries.iter().map(|(_, _, c)| *c).collect();
-    let system_total: u64 = currents.iter().sum();
-    let title = stats_line(theme, "Nodes", metric, &currents, system_total);
+    let system_total: u64 = entries.iter().map(|(_, _, c)| *c).sum();
+    let title = stats_line(theme, "Nodes", metric, &entries, system_total);
     render_topology_panel(
         frame, area, view_state, theme, title, "Node", metric, &entries,
     );
