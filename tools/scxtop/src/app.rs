@@ -20,7 +20,8 @@ use crate::get_default_events;
 use crate::render::bpf_programs::{ProgramDetailParams, ProgramsListParams};
 use crate::render::scheduler::{DsqSummaryParams, ProcessLatencyParams, SchedulerViewParams};
 use crate::render::{
-    BpfProgramRenderer, MemoryRenderer, NetworkRenderer, ProcessRenderer, SchedulerRenderer,
+    BandwidthRenderer, BpfProgramRenderer, MemoryRenderer, NetworkRenderer, ProcessRenderer,
+    SchedulerRenderer,
 };
 use crate::search;
 use crate::symbol_data::SymbolData;
@@ -113,6 +114,7 @@ pub struct App<'a> {
     mem_info: MemStatSnapshot,
     memory_view_state: ComponentViewState,
     network_view_state: ComponentViewState,
+    bandwidth_stats: crate::bandwidth_stats::BandwidthStats,
 
     scheduler: String,
     max_cpu_events: usize,
@@ -280,11 +282,13 @@ impl<'a> App<'a> {
         for llc in topo.all_llcs.values() {
             let mut data = LlcData::new(llc.id, llc.node_id, llc.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
+            data.initialize_events(crate::bandwidth_stats::ALL_EVENTS);
             llc_data.insert(llc.id, data);
         }
         for node in topo.nodes.values() {
             let mut data = NodeData::new(node.id, node.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
+            data.initialize_events(crate::bandwidth_stats::ALL_EVENTS);
             node_data.insert(node.id, data);
         }
 
@@ -379,6 +383,7 @@ impl<'a> App<'a> {
             mem_info,
             memory_view_state: ComponentViewState::Default,
             network_view_state: ComponentViewState::Default,
+            bandwidth_stats: crate::bandwidth_stats::BandwidthStats::new(),
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -541,11 +546,13 @@ impl<'a> App<'a> {
         for llc in topo.all_llcs.values() {
             let mut data = LlcData::new(llc.id, llc.node_id, llc.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
+            data.initialize_events(crate::bandwidth_stats::ALL_EVENTS);
             llc_data.insert(llc.id, data);
         }
         for node in topo.nodes.values() {
             let mut data = NodeData::new(node.id, node.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
+            data.initialize_events(crate::bandwidth_stats::ALL_EVENTS);
             node_data.insert(node.id, data);
         }
 
@@ -643,6 +650,7 @@ impl<'a> App<'a> {
             mem_info,
             memory_view_state: ComponentViewState::Default,
             network_view_state: ComponentViewState::Default,
+            bandwidth_stats: crate::bandwidth_stats::BandwidthStats::new(),
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -1115,6 +1123,7 @@ impl<'a> App<'a> {
     /// Uses view-specific data collection to optimize performance.
     fn on_tick(&mut self) -> Result<()> {
         match self.state {
+            AppState::Bandwidth => self.on_tick_bandwidth(),
             AppState::BpfProgramDetail => self.on_tick_bpf_program_detail(),
             AppState::BpfPrograms => self.on_tick_bpf_programs(),
             AppState::Default => self.on_tick_default(),
@@ -2544,6 +2553,7 @@ impl<'a> App<'a> {
         // Update terminal width for overhead history sizing
         self.terminal_width = area.width;
         match self.state {
+            AppState::Bandwidth => self.render_bandwidth(frame),
             AppState::BpfPrograms => self.render_bpf_programs(frame),
             AppState::BpfProgramDetail => self.render_bpf_program_detail(frame),
             AppState::Help => self.render_help(frame),
@@ -2891,6 +2901,15 @@ impl<'a> App<'a> {
                         .active_keymap
                         .action_keys_string(Action::SetState(AppState::Memory)),
                     self.memory_view_state
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: display memory bandwidth view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Bandwidth)),
                 ),
                 Style::default(),
             )),
@@ -3787,6 +3806,27 @@ impl<'a> App<'a> {
 
         frame.render_widget(paragraph, area);
         Ok(())
+    }
+
+    /// Renders the bandwidth application state.
+    fn render_bandwidth(&mut self, frame: &mut Frame) -> Result<()> {
+        // Each metric row is split left/right into LLC and Node panels of
+        // equal width, so a sparkline in either panel wants that many
+        // samples to fill horizontally.
+        let panel_width = (frame.area().width / 2) as usize;
+        if self.max_cpu_events != panel_width && panel_width > 0 {
+            self.resize_events(panel_width);
+        }
+        let theme = self.theme();
+        BandwidthRenderer::render_bandwidth_view(
+            frame,
+            &self.bandwidth_stats,
+            &self.llc_data,
+            &self.node_data,
+            &self.view_state,
+            self.config.tick_rate_ms(),
+            theme,
+        )
     }
 
     /// Renders the memory application state.
@@ -7284,6 +7324,65 @@ impl<'a> App<'a> {
     /// Memory view: focus on memory stats
     fn on_tick_memory(&mut self) -> Result<()> {
         self.mem_info.update()?;
+        Ok(())
+    }
+
+    /// Bandwidth view: sample resctrl MBM/CMT counters, roll up per-LLC
+    /// readings into node-level and system-level aggregates, and append them
+    /// to the per-topology EventData ring buffers used by the renderer.
+    fn on_tick_bandwidth(&mut self) -> Result<()> {
+        // Push a zero for every LLC/Node first — the renderer needs a fresh
+        // sample slot even when nothing is collected this tick.
+        for event in crate::bandwidth_stats::ALL_EVENTS {
+            for llc_data in self.llc_data.values_mut() {
+                llc_data.add_event_data(event, 0);
+            }
+            for node_data in self.node_data.values_mut() {
+                node_data.add_event_data(event, 0);
+            }
+        }
+
+        let snapshot = match self.bandwidth_stats.sample()? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Map resctrl domain id (== Llc::kernel_id) to the monotonic id used
+        // as the key for LlcData / NodeData.
+        for llc in self.topo.all_llcs.values() {
+            let Some(reading) = snapshot.per_domain.get(&llc.kernel_id) else {
+                continue;
+            };
+            if let Some(llc_data) = self.llc_data.get_mut(&llc.id) {
+                llc_data.add_cpu_event_data(
+                    crate::bandwidth_stats::EVENT_MBM_LOCAL_BPS,
+                    reading.mbm_local_bps,
+                );
+                llc_data.add_cpu_event_data(
+                    crate::bandwidth_stats::EVENT_MBM_TOTAL_BPS,
+                    reading.mbm_total_bps,
+                );
+                llc_data.add_cpu_event_data(
+                    crate::bandwidth_stats::EVENT_LLC_OCCUPANCY,
+                    reading.llc_occupancy_bytes,
+                );
+            }
+            if let Some(node_data) = self.node_data.get_mut(&llc.node_id) {
+                node_data.add_cpu_event_data(
+                    crate::bandwidth_stats::EVENT_MBM_LOCAL_BPS,
+                    reading.mbm_local_bps,
+                );
+                node_data.add_cpu_event_data(
+                    crate::bandwidth_stats::EVENT_MBM_TOTAL_BPS,
+                    reading.mbm_total_bps,
+                );
+                node_data.add_cpu_event_data(
+                    crate::bandwidth_stats::EVENT_LLC_OCCUPANCY,
+                    reading.llc_occupancy_bytes,
+                );
+            }
+        }
+
         Ok(())
     }
 
