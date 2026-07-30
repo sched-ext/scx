@@ -54,6 +54,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('M'), Action::SetState(AppState::Memory));
         bindings.insert(Key::Char('?'), Action::SetState(AppState::Help));
         bindings.insert(Key::Char('l'), Action::SetState(AppState::Llc));
+        bindings.insert(Key::Char('B'), Action::SetState(AppState::Bandwidth));
         bindings.insert(Key::Char('n'), Action::SetState(AppState::Node));
         bindings.insert(Key::Char('N'), Action::SetState(AppState::Network));
         bindings.insert(Key::Char('w'), Action::SetState(AppState::Power));
@@ -379,6 +380,7 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "ToggleLocalization" => Ok(Action::ToggleLocalization),
         "ToggleHwPressure" => Ok(Action::ToggleHwPressure),
         "AppStateHelp" | "SetState(Help)" => Ok(Action::SetState(AppState::Help)),
+        "AppStateBandwidth" | "SetState(Bandwidth)" => Ok(Action::SetState(AppState::Bandwidth)),
         "AppStateLlc" | "SetState(Llc)" => Ok(Action::SetState(AppState::Llc)),
         "AppStateMangoApp" | "SetState(MangoApp)" => Ok(Action::SetState(AppState::MangoApp)),
         "AppStateMemory" | "SetState(Memory)" => Ok(Action::SetState(AppState::Memory)),

@@ -7,6 +7,8 @@
 pub mod process;
 // Memory rendering
 pub mod memory;
+// Memory-bandwidth rendering
+pub mod bandwidth;
 
 // Network rendering
 pub mod network;
@@ -15,6 +17,7 @@ pub mod scheduler;
 // BPF program rendering
 pub mod bpf_programs;
 
+pub use bandwidth::BandwidthRenderer;
 pub use bpf_programs::BpfProgramRenderer;
 pub use memory::MemoryRenderer;
 pub use network::NetworkRenderer;
