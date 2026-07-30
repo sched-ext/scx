@@ -119,6 +119,8 @@ struct task_ctx_x {
 	u32	vuln_thresh;	/* preemption vulnerability threshold step */
 	u32	task_util_est;	/* task's estimated utilization from ravg */
 	u16	norm_lat_cri;	/* task's normalized latency criticality [0, 1024] */
+	u16	cpu_heat;	/* per-CPU warmth (cache/TLB) [0, 1024] */
+	u16	warm_cpu_id;	/* CPU the per-CPU warmth belongs to */
 };
 
 

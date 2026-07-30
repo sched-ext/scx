@@ -145,6 +145,14 @@ struct Opts {
     #[clap(long = "mig-delta-pct", default_value = "0", value_parser=Opts::mig_delta_pct_range)]
     mig_delta_pct: u8,
 
+    /// Warm-CPU wait. Maximum time, in microseconds, a waking latency-tolerant
+    /// task waits for its previous CPU to free up before migrating to an idle
+    /// one, queueing on that CPU's per-CPU DSQ meanwhile. The wait is predicted
+    /// from the previous CPU's estimated free time, and warm cache/TLB state on
+    /// that CPU extends the budget up to 2x. 0 disables (default).
+    #[clap(long = "warm-cpu-us", default_value = "0")]
+    warm_cpu_us: u64,
+
     /// Low utilization threshold percentage (0-100) for periodic load balancing.
     /// When set to a non-zero value, periodic load balancing is skipped when
     /// the maximum per-domain utilization is below this percentage.
@@ -697,6 +705,7 @@ impl<'a> Scheduler<'a> {
         rodata.preempt_shift = opts.preempt_shift;
         rodata.lat_load_target_pct = opts.lat_load_target_pct;
         rodata.mig_delta_pct = opts.mig_delta_pct;
+        rodata.warm_cpu_ns = opts.warm_cpu_us * 1000;
         rodata.lb_low_util_wall = ((opts.lb_low_util_pct as u64) << 10) / 100;
         rodata.lb_local_dsq_util_wall = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
         rodata.no_use_em = opts.no_use_em as u8;
@@ -788,6 +797,8 @@ impl<'a> Scheduler<'a> {
             vuln_thresh: tx.vuln_thresh,
             task_util_est: tx.task_util_est,
             norm_lat_cri: tx.norm_lat_cri,
+            cpu_heat: tx.cpu_heat,
+            warm_cpu_id: tx.warm_cpu_id,
             slice_used_wall: tx.last_slice_used_wall,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,

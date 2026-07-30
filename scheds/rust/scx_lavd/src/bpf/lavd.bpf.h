@@ -125,6 +125,18 @@ enum consts_internal {
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
 
+/*
+ * Per-CPU warmth: a proxy for the microarchitectural state a task builds up on
+ * a CPU (L1/L2 cache, TLB entries). Heat accrues with on-CPU residence and
+ * decays once the task leaves; a warmer previous CPU earns a longer wait
+ * before the task migrates. Full heat is LAVD_SCALE.
+ */
+enum consts_cpu_warmth {
+	LAVD_CPU_ID_NONE		= 0xffff, /* no warm CPU, for introspection */
+	LAVD_CPU_WARM_SAT_NS		= (500ULL * NSEC_PER_USEC), /* residence to full heat */
+	LAVD_CPU_WARM_LIFETIME_NS	= (5ULL * NSEC_PER_MSEC), /* linear decay to 0 once away */
+};
+
 enum consts_flags {
 	LAVD_FLAG_FUTEX_BOOST		= (0x1 << 0), /* futex acquired or not */
 	LAVD_FLAG_NEED_LOCK_BOOST	= (0x1 << 1), /* need to boost lock for deadline calculation */
@@ -143,6 +155,7 @@ enum consts_flags {
 	LAVD_FLAG_MIGRATION_AGGRESSIVE  = (0x1 << 14), /* immediate task migration is necessary. */
 	LAVD_FLAG_DOMAIN_PINNED		= (0x1 << 15), /* task's cpumask is confined to a single compute domain */
 	LAVD_FLAG_IS_EFFECTIVELY_PINNED	= (0x1 << 16), /* effective cpumask weight is 1 (permanent or migrate-disable) */
+	LAVD_FLAG_WARM_CPU		= (0x1 << 17), /* wait on the previous CPU: enqueue on its per-CPU DSQ */
 };
 
 #define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)
@@ -240,6 +253,10 @@ struct task_ctx {
 					/* Estimated task util using ravg duty cycle */
 	struct ravg_data avg_util_ravg;	/* Running average of task utilization using ravg */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
+
+	/* --- per-CPU warmth (cache/TLB state) --- */
+	u64	last_stopping_clk;	/* when cpu_heat was last integrated (task stopped) */
+	u16	cpu_heat;		/* residence-integrated heat for cpu_id [0, LAVD_SCALE] */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 /*
@@ -650,9 +667,16 @@ void reset_task_flag(task_ctx *taskc, u64 flag);
 bool test_task_flag(task_ctx *taskc, u64 flag);
 bool test_task_flag_mask(task_ctx __arg_arena *taskc, u64 flag);
 
+extern const volatile u64	warm_cpu_ns;	/* warm-CPU wait budget (ns) */
+
+/* Per-CPU warmth clock (util.bpf.c). */
+u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cpu_id, u64 now);
+void task_update_cpu_warmth(task_ctx __arg_arena *taskc, struct cpu_ctx *cpuc,
+			    u64 slice_used, u64 now);
+
 static __always_inline bool use_per_cpu_dsq(void)
 {
-	return per_cpu_dsq || pinned_slice_ns;
+	return per_cpu_dsq || pinned_slice_ns || warm_cpu_ns;
 }
 
 static __always_inline  bool is_per_cpu_dsq_migratable(void)
@@ -689,6 +713,38 @@ u32 preemption_vulnerability(u16 normalized_lat_cri, u32 util_est)
 	u32 lat_step = normalized_lat_cri / LAVD_VULN_THRESH_STEP_SIZE;
 	u32 util_step = util_est / LAVD_VULN_THRESH_STEP_SIZE;
 	return lat_step * LAVD_VULN_THRESH_UTIL_STEPS + util_step;
+}
+
+/*
+ * Does the predicted wait for @cpu to free up fit the task's warmth-extended
+ * budget? The base budget is warm_cpu_ns; warm cache and TLB state on @cpu
+ * stretch it up to 2x, so a task still warm there waits rather than migrate to
+ * a cold CPU and refill. The wait is the time until the running task stops plus
+ * the service time of tasks already queued ahead on that CPU's DSQ.
+ */
+static __always_inline
+bool warm_cpu_wait_ok(task_ctx *taskc, s32 cpu, u64 now)
+{
+	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	u64 heat, budget, est, wait;
+
+	if (!cpuc)
+		return false;
+
+	heat = task_cpu_warmth(taskc, cpu, now);
+	budget = (warm_cpu_ns * (LAVD_SCALE + heat)) >> LAVD_SHIFT;
+	est = READ_ONCE(cpuc->est_stopping_clk);
+	wait = time_delta(est, now);
+
+	/*
+	 * Add the wait for tasks already queued ahead on @cpu. This is rough: it
+	 * assumes @p is served last and that every queued task runs the
+	 * system-average slice. A per-core qload_invr would sharpen the latter;
+	 * revisit once per-core queued load is tracked.
+	 */
+	wait += (u64)scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) * sys_stat.slice_wall;
+
+	return wait <= budget;
 }
 
 /*
