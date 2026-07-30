@@ -77,6 +77,7 @@ pub use topology::NR_CPU_IDS;
 
 mod energy_model;
 pub use energy_model::EnergyModel;
+pub use energy_model::EqPerfDomain;
 pub use energy_model::PerfDomain;
 pub use energy_model::PerfState;
 
