@@ -123,6 +123,21 @@ static s32 create_save_cpumask(struct bpf_cpumask **kptr)
 	return 0;
 }
 
+/*
+ * Hash map value recycling may retain referenced kptrs instead of eagerly
+ * releasing them. Explicitly detach and release any retained cpumask before
+ * initializing a recycled map value. On older kernels the exchange normally
+ * returns NULL, making this a no-op.
+ */
+static void release_retained_cpumask(struct bpf_cpumask **kptr)
+{
+	struct bpf_cpumask *cpumask;
+
+	cpumask = bpf_kptr_xchg(kptr, NULL);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+}
+
 static int scx_rusty_percpu_storage_init(void)
 {
 	void *map = &scx_percpu_bpfmask_map;
@@ -1688,6 +1703,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 		return -EINVAL;
 	}
 
+	release_retained_cpumask(&mask_map_value->instance);
 	ret = create_save_cpumask(&mask_map_value->instance);
 	if (ret) {
 		bpf_map_delete_elem(&task_masks, &p_map);
@@ -1705,7 +1721,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
+	struct bpfmask_wrapper *mask_map_value;
+	struct task_struct *p_map;
 	long ret;
+
+	p_map = p;
+	mask_map_value = bpf_map_lookup_elem(&task_masks, &p_map);
+	if (mask_map_value)
+		release_retained_cpumask(&mask_map_value->instance);
 
 	sdt_task_free(p);
 
