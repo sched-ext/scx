@@ -459,14 +459,17 @@ impl CpuOrderCtx {
 
 #[derive(Debug)]
 struct EnergyModelOptimizer<'a> {
-    // Energy model of performance domains
-    em: &'a EnergyModel,
+    // The member performance domains of each equivalence performance domain of
+    // the energy model. Both the equivalence performance domains and their
+    // members are in CPU preference order, so taking N CPUs from an equivalence
+    // performance domain takes the N most preferred ones.
+    eq_pds: Vec<Vec<&'a PerfDomain>>,
 
-    // How many CPUs to take from each equivalence performance domain of @em,
-    // for every combination worth considering. The i-th count belongs to the
-    // i-th equivalence performance domain of @em. It depends only on the CPU
-    // count of each equivalence performance domain, not on the CPU
-    // utilization, so it is enumerated once here.
+    // How many CPUs to take from each equivalence performance domain, for
+    // every combination worth considering. The i-th count belongs to
+    // @eq_pds[i]. It depends only on the CPU count of each equivalence
+    // performance domain, not on the CPU utilization, so it is enumerated once
+    // here.
     //
     // For example, when @em has two equivalence performance domains, one of
     // 2 P-cores and one of 3 E-cores, the (2 + 1) * (3 + 1) - 1 = 11
@@ -537,7 +540,13 @@ const MAX_EQPD_COMBINATIONS: u128 = 100_000;
 impl<'a> EnergyModelOptimizer<'a> {
     fn new(em: &'a EnergyModel, cpus_pf: &'a Vec<CpuId>) -> EnergyModelOptimizer<'a> {
         let tot_perf = em.perf_total();
-        let nr_cpus_combinations = Self::gen_nr_cpus_combinations(em);
+
+        let eq_pds = Self::sort_eq_pds(em, cpus_pf);
+        let max_nr_cpus: Vec<usize> = eq_pds
+            .iter()
+            .map(|perf_doms| perf_doms.iter().map(|pd| pd.span.weight()).sum())
+            .collect();
+        let nr_cpus_combinations = Self::gen_nr_cpus_combinations(&max_nr_cpus);
 
         let pdss_infos: BTreeMap<usize, RefCell<HashSet<PDSetInfo<'a>>>> = BTreeMap::new();
         let pdss_infos = pdss_infos.into();
@@ -568,7 +577,7 @@ impl<'a> EnergyModelOptimizer<'a> {
         debug!("{:#?}", pd_cpu_order);
 
         EnergyModelOptimizer {
-            em,
+            eq_pds,
             nr_cpus_combinations,
             cpus_topological_order,
             pd_cpu_order,
@@ -981,17 +990,49 @@ impl<'a> EnergyModelOptimizer<'a> {
         }
     }
 
-    /// Enumerate how many CPUs to take from each equivalence performance
-    /// domain of @em. See @EnergyModelOptimizer::nr_cpus_combinations.
-    fn gen_nr_cpus_combinations(em: &EnergyModel) -> Vec<Vec<usize>> {
-        // The largest number of CPUs to take from each equivalence performance
-        // domain, which is all the CPUs it has.
-        let max_nr_cpus: Vec<usize> = em
+    /// Rank the performance domains by CPU preference: a performance domain is
+    /// as preferred as its most preferred CPU, which is the first one appearing
+    /// in @cpus_pf. A performance domain with no CPU in @cpus_pf is unranked and
+    /// comes last.
+    fn rank_perf_doms(cpus_pf: &[CpuId]) -> BTreeMap<usize, usize> {
+        let mut ranks = BTreeMap::new();
+
+        for (rank, cpuid) in cpus_pf.iter().enumerate() {
+            ranks.entry(cpuid.pd_adx).or_insert(rank);
+        }
+
+        ranks
+    }
+
+    /// Collect the member performance domains of each equivalence performance
+    /// domain of @em, ordering both the members and the equivalence performance
+    /// domains by CPU preference. See @EnergyModelOptimizer::eq_pds.
+    fn sort_eq_pds(em: &'a EnergyModel, cpus_pf: &'a [CpuId]) -> Vec<Vec<&'a PerfDomain>> {
+        let ranks = Self::rank_perf_doms(cpus_pf);
+        let rank_of = |pd: &PerfDomain| ranks.get(&pd.id).copied().unwrap_or(usize::MAX);
+
+        let mut eq_pds: Vec<Vec<&'a PerfDomain>> = em
             .eq_perf_doms
             .values()
-            .map(|eq_pd| eq_pd.span.weight())
+            .map(|eq_pd| {
+                let mut perf_doms: Vec<&'a PerfDomain> =
+                    eq_pd.perf_doms.iter().map(|pd| pd.as_ref()).collect();
+                perf_doms.sort_by_key(|pd| rank_of(pd));
+                perf_doms
+            })
             .collect();
 
+        // An equivalence performance domain is as preferred as its most
+        // preferred member performance domain.
+        eq_pds.sort_by_key(|perf_doms| perf_doms.iter().map(|pd| rank_of(pd)).min());
+
+        eq_pds
+    }
+
+    /// Enumerate how many CPUs to take from each equivalence performance
+    /// domain, taking at most @max_nr_cpus[i] CPUs from the i-th one. See
+    /// @EnergyModelOptimizer::nr_cpus_combinations.
+    fn gen_nr_cpus_combinations(max_nr_cpus: &[usize]) -> Vec<Vec<usize>> {
         // The number of all the possible combinations. An equivalence
         // performance domain can contribute none, some, or all of its CPUs, so
         // it has max_nr_cpus + 1 choices, and the choices of all the
@@ -1004,10 +1045,10 @@ impl<'a> EnergyModelOptimizer<'a> {
             .fold(1u128, |nr, &max| nr.saturating_mul(max as u128 + 1))
             - 1;
         if nr_combinations <= MAX_EQPD_COMBINATIONS {
-            return Self::gen_all_nr_cpus(&max_nr_cpus);
+            return Self::gen_all_nr_cpus(max_nr_cpus);
         }
 
-        let combinations = Self::gen_run_nr_cpus(&max_nr_cpus);
+        let combinations = Self::gen_run_nr_cpus(max_nr_cpus);
         warn!(
             "{} equivalence performance domains yield {nr_combinations} combinations, \
              exceeding the limit of {MAX_EQPD_COMBINATIONS}, so consider only {} of them",
@@ -1115,13 +1156,13 @@ impl<'a> EnergyModelOptimizer<'a> {
     fn gen_pdsi(&'a self, nr_cpus: &[usize], util: f32) -> PDSetInfo<'a> {
         let mut pds_set = vec![];
 
-        for (eq_pd, &nr) in self.em.eq_perf_doms.values().zip(nr_cpus.iter()) {
+        for (perf_doms, &nr) in self.eq_pds.iter().zip(nr_cpus.iter()) {
             // All the member performance domains share one performance table,
             // so they are all at the same performance state.
-            let ps = eq_pd.select_perf_state(util).unwrap();
+            let ps = perf_doms[0].select_perf_state(util).unwrap();
             let mut remaining = nr;
 
-            for pd in eq_pd.perf_doms.iter() {
+            for pd in perf_doms.iter() {
                 if remaining == 0 {
                     break;
                 }
@@ -1383,6 +1424,76 @@ mod tests {
             perf_doms,
             eq_perf_doms,
         }
+    }
+
+    /// Build a CPU preference order taking one CPU from each performance domain
+    /// of @pd_adxs, so the performance domain listed first is the most
+    /// preferred one.
+    fn cpu_pref_order(pd_adxs: &[usize]) -> Vec<CpuId> {
+        pd_adxs
+            .iter()
+            .enumerate()
+            .map(|(core_rdx, &pd_adx)| CpuId {
+                numa_adx: 0,
+                pd_adx,
+                llc_adx: 0,
+                llc_rdx: 0,
+                llc_kernel_id: 0,
+                core_rdx,
+                cpu_rdx: 0,
+                cpu_adx: pd_adx,
+                smt_level: 1,
+                cache_size: 0,
+                cpu_cap: 1024,
+                big_core: true,
+                turbo_core: false,
+                cpu_sibling: pd_adx,
+            })
+            .collect()
+    }
+
+    /// The CPUs of an equivalence performance domain are taken from its most
+    /// preferred member performance domain first, not from the one with the
+    /// lowest id.
+    #[test]
+    fn test_members_in_cpu_preference_order() {
+        // One equivalence performance domain of 4 CPUs, each in a performance
+        // domain of its own, preferred in the reverse order of their ids.
+        let em = energy_model(&[4]);
+        let cpus_pf = cpu_pref_order(&[3, 2, 1, 0]);
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        let pd_ids: Vec<usize> = emo.eq_pds[0].iter().map(|pd| pd.id).collect();
+        assert_eq!(pd_ids, vec![3, 2, 1, 0]);
+
+        // Taking 2 CPUs takes them from the 2 most preferred performance
+        // domains.
+        let expected: BTreeSet<usize> = [2, 3].into_iter().collect();
+        assert_eq!(emo.gen_pdsi(&[2], 100.0).pd_id_set, expected);
+    }
+
+    /// The equivalence performance domains themselves are ordered by CPU
+    /// preference, so a count belongs to the equivalence performance domain of
+    /// the same preference.
+    #[test]
+    fn test_eq_pds_in_cpu_preference_order() {
+        // Two equivalence performance domains of 2 CPUs each, preferring the
+        // CPUs of the second one.
+        let em = energy_model(&[2, 2]);
+        let cpus_pf = cpu_pref_order(&[2, 3, 0, 1]);
+        let emo = EnergyModelOptimizer::new(&em, &cpus_pf);
+
+        let pd_ids: Vec<Vec<usize>> = emo
+            .eq_pds
+            .iter()
+            .map(|perf_doms| perf_doms.iter().map(|pd| pd.id).collect())
+            .collect();
+        assert_eq!(pd_ids, vec![vec![2, 3], vec![0, 1]]);
+
+        // The first count belongs to the first equivalence performance domain,
+        // which is the preferred one.
+        let expected: BTreeSet<usize> = [2].into_iter().collect();
+        assert_eq!(emo.gen_pdsi(&[1, 0], 100.0).pd_id_set, expected);
     }
 
     /// A 28-thread hybrid processor (8 P-cores, 16 E-cores, and 4 LP-E-cores)
