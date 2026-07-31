@@ -27,6 +27,7 @@
 #define FAKE_FLAT_CELL_LLC 0
 
 #include "mitosis.bpf.h"
+#include "debug_events.bpf.h"
 #include "dsq.bpf.h"
 #include "slice_shrinking.bpf.h"
 #include "llc_aware.bpf.h"
@@ -42,7 +43,6 @@ const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;
 const volatile u64 root_cgid = 1;
-const volatile bool debug_events_enabled = false;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool cpu_controller_disabled = false;
 const volatile bool reject_multicpu_pinning = false;
@@ -61,18 +61,6 @@ struct llc_cpumask llc_to_cpus[MAX_LLCS];
 u32 applied_configuration_seq;
 u32 cpuset_seq;
 u32 applied_cpuset_seq;
-
-/*
- * Debug events circular buffer
- */
-u32 debug_event_pos;
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, DEBUG_EVENTS_BUF_SIZE);
-	__type(key, u32);
-	__type(value, struct debug_event);
-} debug_events SEC(".maps");
 
 /* Configuration struct for apply_cell_config, populated by userspace */
 struct cell_config cell_config;
@@ -201,70 +189,6 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	}
 
 	return cctx;
-}
-
-/*
- * Record debug events to the circular buffer
- */
-static inline void record_cgroup_init(u64 cgid)
-{
-	struct debug_event *event;
-	u32 pos, idx;
-
-	if (likely(!debug_events_enabled))
-		return;
-
-	pos = __sync_fetch_and_add(&debug_event_pos, 1);
-	idx = pos % DEBUG_EVENTS_BUF_SIZE;
-
-	event = bpf_map_lookup_elem(&debug_events, &idx);
-	if (unlikely(!event))
-		return;
-
-	event->timestamp = scx_bpf_now();
-	event->event_type = DEBUG_EVENT_CGROUP_INIT;
-	event->cgroup_init.cgid = cgid;
-}
-
-static inline void record_init_task(u64 cgid, u32 pid)
-{
-	struct debug_event *event;
-	u32 pos, idx;
-
-	if (likely(!debug_events_enabled))
-		return;
-
-	pos = __sync_fetch_and_add(&debug_event_pos, 1);
-	idx = pos % DEBUG_EVENTS_BUF_SIZE;
-
-	event = bpf_map_lookup_elem(&debug_events, &idx);
-	if (unlikely(!event))
-		return;
-
-	event->timestamp = scx_bpf_now();
-	event->event_type = DEBUG_EVENT_INIT_TASK;
-	event->init_task.cgid = cgid;
-	event->init_task.pid = pid;
-}
-
-static inline void record_cgroup_exit(u64 cgid)
-{
-	struct debug_event *event;
-	u32 pos, idx;
-
-	if (likely(!debug_events_enabled))
-		return;
-
-	pos = __sync_fetch_and_add(&debug_event_pos, 1);
-	idx = pos % DEBUG_EVENTS_BUF_SIZE;
-
-	event = bpf_map_lookup_elem(&debug_events, &idx);
-	if (unlikely(!event))
-		return;
-
-	event->timestamp = scx_bpf_now();
-	event->event_type = DEBUG_EVENT_CGROUP_EXIT;
-	event->cgroup_exit.cgid = cgid;
 }
 
 struct cell_cpumask_map cell_cpumasks SEC(".maps");
@@ -1497,47 +1421,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		}
 	}
 
-	if (!debug_events_enabled)
-		return;
-
-	/* Dump debug events */
-	scx_bpf_dump("\n");
-	scx_bpf_dump("DEBUG EVENTS (last %d):\n", DEBUG_EVENTS_BUF_SIZE);
-
-	u32 total_events = READ_ONCE(debug_event_pos);
-	u32 start_idx =
-		total_events > DEBUG_EVENTS_BUF_SIZE ? total_events - DEBUG_EVENTS_BUF_SIZE : 0;
-
-	bpf_for(i, 0, DEBUG_EVENTS_BUF_SIZE)
-	{
-		u32 event_num = start_idx + i;
-		if (event_num >= total_events)
-			break;
-
-		u32 idx = event_num % DEBUG_EVENTS_BUF_SIZE;
-		struct debug_event *event = bpf_map_lookup_elem(&debug_events, &idx);
-		if (!event)
-			continue;
-
-		switch (event->event_type) {
-		case DEBUG_EVENT_CGROUP_INIT:
-			scx_bpf_dump("[%3d] CGROUP_INIT cgid=%llu ts=%llu\n", event_num,
-				     event->cgroup_init.cgid, event->timestamp);
-			break;
-		case DEBUG_EVENT_INIT_TASK:
-			scx_bpf_dump("[%3d] INIT_TASK   cgid=%llu pid=%u ts=%llu\n", event_num,
-				     event->init_task.cgid, event->init_task.pid, event->timestamp);
-			break;
-		case DEBUG_EVENT_CGROUP_EXIT:
-			scx_bpf_dump("[%3d] CGROUP_EXIT cgid=%llu ts=%llu\n", event_num,
-				     event->cgroup_exit.cgid, event->timestamp);
-			break;
-		default:
-			scx_bpf_dump("[%3d] UNKNOWN     type=%u ts=%llu\n", event_num,
-				     event->event_type, event->timestamp);
-			break;
-		}
-	}
+	dump_debug_events();
 }
 
 void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx, struct task_struct *p)
