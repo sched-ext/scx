@@ -5,11 +5,11 @@
 #ifndef __INTF_H
 #define __INTF_H
 
-#ifdef __BINDGEN_RUNNING__
-#include <stddef.h>
+#include <stdbool.h>
+
+#ifndef __VMLINUX_H__
 typedef unsigned long long u64;
 typedef unsigned int u32;
-typedef _Bool bool;
 #endif
 
 enum consts {
@@ -80,30 +80,7 @@ struct cell_llc {
 _Static_assert(sizeof(struct cell_llc) >= CACHELINE_SIZE,
 	       "cell_llc must be at least one cache line");
 
-// CELL_LOCK_T is a lock for kernel and padding for user.
-#if !defined(__BINDGEN_RUNNING__)
-#define CELL_LOCK_T struct bpf_spin_lock
-#else
-// When userspaces accesses a cell, this pad is zero.
-#define CELL_LOCK_T        \
-	struct {           \
-		u32 __pad; \
-	}
-#endif
-
-/*
-* Cell struct shared between kernel and userspace.
-* Kernel uses spinlock for atomic updates.
-* Userspace must read with BPF_F_LOCK to avoid torn reads.
-* Lock field is padding (kernel zeros it to avoid leaking pointers).
-*
-* map.lookup(&key, MapFlags::ANY)  -> userspace may see torn state
-* map.lookup(&key, MapFlags::LOCK) -> safe read
-*/
 struct cell {
-	// This is a lock in the kernel and padding in userspace
-	CELL_LOCK_T lock;
-
 	// cgroup ID of the cell owner (0 for cell 0 or if no owner)
 	u64 owner_cgid;
 	// Whether or not the cell is used
@@ -116,17 +93,6 @@ struct cell {
 	// Per-LLC data (cacheline-aligned)
 	struct cell_llc llcs[MAX_LLCS];
 };
-
-// Putting the lock first in the struct is our convention.
-// We pad this space when in Rust code that will never see the lock value.
-// It is a BPF constraint that it is 4 byte aligned.
-
-// All assertions work for both BPF and userspace builds
-_Static_assert(offsetof(struct cell, lock) == 0, "lock/padding must be first field");
-
-_Static_assert(sizeof(((struct cell *)0)->lock) == 4, "lock/padding must be 4 bytes");
-
-_Static_assert(_Alignof(CELL_LOCK_T) == 4, "lock/padding must be 4-byte aligned");
 
 // Verify these are the same size in both BPF and Rust.
 _Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
