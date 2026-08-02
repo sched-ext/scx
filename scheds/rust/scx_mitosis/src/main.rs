@@ -119,11 +119,6 @@ struct Opts {
     #[clap(long, value_delimiter = ',')]
     undefok: Vec<String>,
 
-    /// Enable debug event tracking for cgroup_init, init_task, and cgroup_exit.
-    /// Events are recorded in a ring buffer and output in dump().
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    debug_events: bool,
-
     /// Enable workaround for exiting tasks with offline cgroups during scheduler load.
     /// This works around a kernel bug where tasks can be initialized with cgroups that
     /// were never initialized. Disable this once the kernel bug is fixed.
@@ -366,7 +361,6 @@ impl<'a> Scheduler<'a> {
             .expect("BUG: rodata_data missing after skel open");
 
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
-        rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
