@@ -23,8 +23,6 @@ enum consts {
 	MAX_CG_DEPTH = 256,
 	MAX_LLCS = 16,
 
-	DEBUG_EVENTS_BUF_SIZE = 4096,
-
 	/* Size of cpumask in unsigned longs (supports up to 8192 CPUs) */
 	CPUMASK_LONG_ENTRIES = 128,
 };
@@ -36,31 +34,6 @@ enum consts {
  */
 struct llc_cpumask {
 	unsigned long bits[CPUMASK_LONG_ENTRIES];
-};
-
-/* Debug event types */
-enum debug_event_type {
-	DEBUG_EVENT_CGROUP_INIT,
-	DEBUG_EVENT_INIT_TASK,
-	DEBUG_EVENT_CGROUP_EXIT,
-};
-
-/* Debug event record - discriminated union */
-struct debug_event {
-	u64 timestamp;
-	u32 event_type;
-	union {
-		struct {
-			u64 cgid;
-		} cgroup_init;
-		struct {
-			u64 cgid;
-			u32 pid;
-		} init_task;
-		struct {
-			u64 cgid;
-		} cgroup_exit;
-	};
 };
 
 /* Statistics */
