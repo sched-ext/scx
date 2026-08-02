@@ -33,7 +33,6 @@ use clap_num::number_range;
 use cpu_order::CpuOrder;
 use cpu_order::PerfCpuOrder;
 use crossbeam::channel;
-use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
@@ -448,9 +447,7 @@ impl introspec {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    rb_mgr: libbpf_rs::RingBuffer<'static>,
     intrspc: introspec,
-    intrspc_rx: Receiver<SchedSample>,
     monitor_tid: Option<ThreadId>,
     stats_server: StatsServer<StatsReq, StatsRes>,
     mseq_id: u64,
@@ -521,23 +518,10 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
         let stats_server = StatsServer::new(stats::server_data(*NR_CPU_IDS as u64)).launch()?;
 
-        // Build a ring buffer for instrumentation
-        let (intrspc_tx, intrspc_rx) = channel::bounded(65536);
-        let rb_map = &mut skel.maps.introspec_msg;
-        let mut builder = libbpf_rs::RingBufferBuilder::new();
-        builder
-            .add(rb_map, move |data| {
-                Scheduler::relay_introspec(data, &intrspc_tx)
-            })
-            .unwrap();
-        let rb_mgr = builder.build().unwrap();
-
         Ok(Self {
             skel,
             struct_ops,
-            rb_mgr,
             intrspc: introspec::new(),
-            intrspc_rx,
             monitor_tid: None,
             stats_server,
             mseq_id: 0,
@@ -831,10 +815,36 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    /// Collect the scheduling samples the BPF side has queued, waiting up to
+    /// @timeout for them, or draining without waiting when it is None.
+    ///
+    /// Built per request rather than kept: crossbeam initializes every slot up
+    /// front, so a standing bounded(65536) channel cost 17.5MB resident. Unbounded
+    /// because the count depends on load, not on the request; intrspc.arg caps it.
+    fn drain_sched_samples(&mut self, timeout: Option<Duration>) -> Result<Vec<SchedSample>> {
+        let (intrspc_tx, intrspc_rx) = channel::unbounded();
+
+        {
+            let mut builder = libbpf_rs::RingBufferBuilder::new();
+            builder.add(&mut self.skel.maps.introspec_msg, move |data| {
+                Scheduler::relay_introspec(data, &intrspc_tx)
+            })?;
+            let rb_mgr = builder.build()?;
+
+            match timeout {
+                Some(timeout) => rb_mgr.poll(timeout)?,
+                None => rb_mgr.consume()?,
+            }
+        }
+
+        Ok(intrspc_rx.try_iter().collect())
+    }
+
     fn stats_req_to_res(&mut self, req: &StatsReq) -> Result<StatsRes> {
         Ok(match req {
             StatsReq::NewSampler(tid) => {
-                self.rb_mgr.consume().unwrap();
+                /* Discard whatever the BPF side queued before this client. */
+                self.drain_sched_samples(None)?;
                 self.monitor_tid = Some(*tid);
                 StatsRes::Ack
             }
@@ -900,12 +910,8 @@ impl<'a> Scheduler<'a> {
                 self.intrspc.arg = *nr_samples;
                 self.prep_introspec();
                 std::thread::sleep(Duration::from_millis(*interval_ms));
-                self.rb_mgr.poll(Duration::from_millis(100)).unwrap();
 
-                let mut samples = vec![];
-                while let Ok(ts) = self.intrspc_rx.try_recv() {
-                    samples.push(ts);
-                }
+                let samples = self.drain_sched_samples(Some(Duration::from_millis(100)))?;
 
                 self.cleanup_introspec();
 
@@ -1001,7 +1007,6 @@ impl<'a> Scheduler<'a> {
             }
             self.cleanup_introspec();
         }
-        self.rb_mgr.consume().unwrap();
 
         bpf_streams::dump_bpf_streams(&mut self.skel);
         let _ = self.struct_ops.take();
