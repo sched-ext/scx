@@ -1024,6 +1024,21 @@ impl Drop for Scheduler<'_> {
     }
 }
 
+/// Return heap freed during initialization to the OS.
+///
+/// libbpf drops its copy of the BPF object's sections and its BTF once loading
+/// finishes, and the CPU topology and energy model are dropped once the BPF side
+/// has been initialized from them. glibc holds those pages until asked.
+///
+/// glibc only: musl has no malloc_trim(), and needs none, since it returns freed
+/// memory to the kernel rather than parking it in per-arena free lists.
+fn trim_heap_after_init() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 fn init_log(opts: &Opts) {
     let env_filter = EnvFilter::try_from_default_env()
         .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
@@ -1122,6 +1137,7 @@ fn main(mut opts: Opts) -> Result<()> {
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         info!("scx_lavd scheduler starts running.");
+        trim_heap_after_init();
         if !sched.run(&opts, shutdown.clone())?.should_restart() {
             break;
         }
