@@ -9,7 +9,8 @@
 //! for direct child cgroups of a specified parent. Uses inotify to watch for
 //! cgroup creation/destruction and manages cell ID allocation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::DirEntry;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
@@ -781,6 +782,20 @@ fn validate_cpu_assignments(
     Ok(())
 }
 
+fn read_dir_sorted(path: &Path) -> Result<Vec<DirEntry>> {
+    let readdir = std::fs::read_dir(path)
+        .with_context(|| format!("Failed to read directory: {}", path.display()))?;
+
+    let mut entries: Vec<_> = readdir
+        .map(|entry| {
+            entry.with_context(|| format!("Failed to read directory entry in: {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
+    Ok(entries)
+}
+
 /// Manages cells for direct child cgroups of a specified parent
 pub struct CellManager {
     cell_parent_path: PathBuf,
@@ -790,7 +805,7 @@ pub struct CellManager {
     /// Maps cell ID to cgroup ID (for reverse lookup)
     cell_id_to_cgid: HashMap<u32, u64>,
     /// Freed cell IDs available for reuse
-    free_cell_ids: Vec<u32>,
+    free_cell_ids: BTreeSet<u32>,
     next_cell_id: u32,
     max_cells: u32,
     /// Cpumask of all CPUs in the system (from topology)
@@ -866,7 +881,7 @@ impl CellManager {
             inotify,
             cells: HashMap::new(),
             cell_id_to_cgid: HashMap::new(),
-            free_cell_ids: Vec::new(),
+            free_cell_ids: BTreeSet::new(),
             next_cell_id: 1, // Cell 0 is reserved for root
             max_cells,
             all_cpus,
@@ -910,19 +925,11 @@ impl CellManager {
 
     fn scan_existing_children(&mut self) -> Result<Vec<(u64, u32)>> {
         let mut assignments = Vec::new();
-        let entries = std::fs::read_dir(&self.cell_parent_path).with_context(|| {
-            format!(
-                "Failed to read cell parent directory: {}",
-                self.cell_parent_path.display()
-            )
-        })?;
+
+        let entries = read_dir_sorted(&self.cell_parent_path)
+            .context("Failed to read cell parent directory")?;
+
         for entry in entries {
-            let entry = entry.with_context(|| {
-                format!(
-                    "Failed to read directory entry in: {}",
-                    self.cell_parent_path.display()
-                )
-            })?;
             let file_type = entry.file_type().with_context(|| {
                 format!("Failed to get file type for: {}", entry.path().display())
             })?;
@@ -990,20 +997,9 @@ impl CellManager {
         // Snapshot current child cgroups by path and inode.
         // Reconcile by identity, not path alone, so path reuse doesn't keep
         // the old cell and create a second one for the new inode.
-        let mut current_entries: HashMap<PathBuf, u64> = HashMap::new();
-        let entries = std::fs::read_dir(&self.cell_parent_path).with_context(|| {
-            format!(
-                "Failed to read cell parent directory: {}",
-                self.cell_parent_path.display()
-            )
-        })?;
+        let mut current_entries: BTreeMap<PathBuf, u64> = BTreeMap::new();
+        let entries = read_dir_sorted(&self.cell_parent_path)?;
         for entry in entries {
-            let entry = entry.with_context(|| {
-                format!(
-                    "Failed to read directory entry in: {}",
-                    self.cell_parent_path.display()
-                )
-            })?;
             let file_type = entry.file_type().with_context(|| {
                 format!("Failed to get file type for: {}", entry.path().display())
             })?;
@@ -1032,7 +1028,7 @@ impl CellManager {
         }
 
         // Remove cells for cgroups that no longer exist
-        let mut destroyed_cells: HashSet<u32> = HashSet::new();
+        let mut destroyed_cells: BTreeSet<u32> = BTreeSet::new();
         self.cells.retain(|&cgid, info| {
             if info.cell_id == 0 {
                 return true; // Cell 0 is permanent
@@ -1138,7 +1134,7 @@ impl CellManager {
 
     fn allocate_cell_id(&mut self) -> Result<u32> {
         // Prefer reusing freed IDs to keep cell ID space compact
-        if let Some(id) = self.free_cell_ids.pop() {
+        if let Some(id) = self.free_cell_ids.pop_first() {
             return Ok(id);
         }
 
@@ -1272,7 +1268,8 @@ impl CellManager {
     /// Returns all cell assignments as (cgid, cell_id) pairs.
     /// Used to configure BPF with cgroup-to-cell mappings.
     pub fn get_cell_assignments(&self) -> Vec<(u64, u32)> {
-        self.cells
+        let mut assignments: Vec<_> = self
+            .cells
             .values()
             .filter(|info| info.cell_id != 0)
             .map(|info| {
@@ -1281,7 +1278,9 @@ impl CellManager {
                     info.cell_id,
                 )
             })
-            .collect()
+            .collect();
+        assignments.sort_by_key(|(_cgid, cell_id)| *cell_id);
+        assignments
     }
 
     /// Format the cell configuration as a compact string for logging.
