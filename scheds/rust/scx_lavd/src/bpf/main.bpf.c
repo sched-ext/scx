@@ -2071,16 +2071,8 @@ int BPF_PROG(lavd_sched_switch, bool preempt,
 	 */
 	if (unlikely(next->prio < MAX_RT_PRIO &&
 		     prev->prio >= MAX_RT_PRIO)) {
-		/*
-		 * Reenqueue any SCX tasks stranded on the local DSQ.
-		 * Use the v2 (call-from-anywhere) kfunc directly rather
-		 * than the generic compat wrapper: the wrapper inlines a
-		 * v1 fallback that is not callable from a tracepoint
-		 * context, and veristat (which doesn't honor autoload)
-		 * would reject it on kernels without v2.
-		 */
-		if (bpf_ksym_exists(scx_bpf_reenqueue_local___v2___compat))
-			scx_bpf_reenqueue_local___v2___compat();
+		/* Reenqueue any SCX tasks stranded on the local DSQ. */
+		scx_bpf_reenqueue_local_from_anywhere();
 	}
 	return 0;
 }

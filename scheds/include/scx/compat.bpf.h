@@ -6,6 +6,7 @@
  */
 #ifndef __SCX_COMPAT_BPF_H
 #define __SCX_COMPAT_BPF_H
+#include <errno.h>
 
 #define __COMPAT_ENUM_OR_ZERO(__type, __ent)					\
 ({										\
@@ -391,6 +392,15 @@ static inline void scx_bpf_reenqueue_local(void)
 		scx_bpf_reenqueue_local___v2___compat();
 	else
 		scx_bpf_reenqueue_local___v1();
+}
+
+static inline int scx_bpf_reenqueue_local_from_anywhere(void)
+{
+	if (__COMPAT_scx_bpf_reenqueue_local_from_anywhere()) {
+		scx_bpf_reenqueue_local___v2___compat();
+		return 0;
+	}
+	return -ENOTSUP;
 }
 
 /*
