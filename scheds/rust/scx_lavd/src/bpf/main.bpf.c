@@ -677,7 +677,8 @@ static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 {
 	return (is_cpu_idle && !queued_on_cpu(cpuc)) ||
 	       (lb_local_dsq_util_wall > 0 &&
-		cpuc->avg_util_wall < lb_local_dsq_util_wall);
+		cpuc->avg_util_wall < lb_local_dsq_util_wall &&
+		!is_rt_or_dl_task_running(cpuc->cpu_id));
 }
 
 /*
