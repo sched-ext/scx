@@ -419,6 +419,15 @@ static u64		cbw_nr_cgroups;
 static u64		cbw_cgroup_ids[CBW_NR_CGRP_MAX];
 
 /*
+ * Number of allocated cgroup contexts, i.e. the live occupancy of
+ * cbw_cgrp_map. Bumped atomically on a successful init and dropped on exit,
+ * and used to cap the number of managed cgroups at CBW_NR_CGRP_MAX. This is
+ * distinct from cbw_nr_cgroups above, which is only the fill count of
+ * cbw_cgroup_ids[] rebuilt on every replenish.
+ */
+static u64		cbw_nr_cgx;
+
+/*
  * An array of throttled cgroups that need to be reenqueued.
  */
 static u64		cbw_throttled_cgroup_ids[CBW_NR_CGRP_MAX];
@@ -1105,11 +1114,39 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	scx_cgroup_ctx_t *cgx, *parentx;
 	struct cgroup *parent;
 	u64 cgrp_id;
+	int ret;
 
 	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
 		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
 
 	cgrp_id = cgroup_get_id(cgrp);
+
+	/*
+	 * Give up bandwidth control for cgroups that exceed the static limits
+	 * rather than failing their creation. We return 0 to leave the cgroup
+	 * unmanaged: with no cbw_cgrp_map entry it reads as unthrottled
+	 * (scx_cgroup_bw_throttled() returns -ESRCH) and its tasks run without
+	 * bandwidth control.
+	 */
+	if (cgrp->level >= CBW_CGRP_TREE_HEIGHT_MAX) {
+		cbw_err("cgroup %llu level %d exceeds max tree height %d; "
+			"skipping bandwidth control",
+			cgrp_id, cgrp->level, CBW_CGRP_TREE_HEIGHT_MAX);
+		return 0;
+	}
+
+	if (READ_ONCE(cbw_nr_cgx) >= CBW_NR_CGRP_MAX) {
+		cbw_err("cgroup %llu exceeds max cgroups %d; skipping "
+			"bandwidth control", cgrp_id, CBW_NR_CGRP_MAX);
+		return 0;
+	}
+	if (__sync_fetch_and_add(&cbw_nr_cgx, 1) >= CBW_NR_CGRP_MAX) {
+		/* Raced past the limit after the fast-path check; give the slot back. */
+		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+		cbw_err("cgroup %llu exceeds max cgroups %d; skipping "
+			"bandwidth control", cgrp_id, CBW_NR_CGRP_MAX);
+		return 0;
+	}
 
 	/*
 	 * Allocate and initialize scx_cgroup_ctx for @cgrp.
@@ -1122,16 +1159,11 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	cgx = cbw_alloc_cgx();
 	if (!cgx) {
 		cbw_err("Failed to allocate cgroup ctx: %llu", cgrp_id);
-		return -ENOMEM;
-	}
-	entry.cgx = (u64)cgx;
-	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
-		cbw_free_cgx(cgx);
-		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_unreserve;
 	}
 
-	cgx->id = cgroup_get_id(cgrp);
+	cgx->id = cgrp_id;
 	cgx->level = cgrp->level;
 	if (cgrp->level > 0 &&
 	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
@@ -1172,7 +1204,33 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * is at the leaf (a cgroup is a leaf until its child is created),
 	 * so we will create per-LLC-cgroup contexts anyway.
 	 */
-	return cbw_init_llc_ctx(cgrp, cgx);
+	if ((ret = cbw_init_llc_ctx(cgrp, cgx))) {
+		cbw_err("Failed to init LLC contexts: %llu (%d)", cgrp_id, ret);
+		goto err_free;
+	}
+
+	/*
+	 * Publish the fully-initialized context into cbw_cgrp_map as the very
+	 * last step. Making @cgrp reachable only after its LLC contexts and BTQs
+	 * exist (has_llcx == true) upholds the invariant that any cgroup found
+	 * through the map can hold tasks.
+	 */
+	entry.cgx = (u64)cgx;
+	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
+		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
+		ret = -ENOMEM;
+		goto err_free;
+	}
+
+	return 0;
+
+err_free:
+	cgx->has_llcx = true;
+	cbw_free_llc_ctx(cgx, cgrp_id);
+	cbw_free_cgx(cgx);
+err_unreserve:
+	__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+	return ret;
 }
 
 __noinline
@@ -1224,7 +1282,6 @@ int cbw_unthrottle_cgroup_for_exit(u64 cgrp_id)
 __hidden
 int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 {
-	int ret = 0;
 	u64 cgrp_id;
 
 	cbw_dbg_cgrp();
@@ -1239,10 +1296,19 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	 */
 	cgrp_id = cgroup_get_id(cgrp);
 
+	/*
+	 * A cgroup we never managed -- skipped at init for exceeding the static
+	 * limits, or CPU controller not enabled -- has no context; nothing to
+	 * tear down.
+	 */
+	if (!cbw_get_cgroup_ctx_with_id(cgrp_id))
+		return 0;
+
 	cbw_unthrottle_cgroup_for_exit(cgrp_id);
-	cbw_del_cgroup_ctx(cgrp_id);
+	if (!cbw_del_cgroup_ctx(cgrp_id))
+		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 	cbw_free_llc_ctx(NULL, cgrp_id);
-	return ret;
+	return 0;
 }
 
 /**
@@ -1278,9 +1344,11 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	/* Update the cgroup's bandwidth. */
 	cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
 	if (!cgx_raw) {
-		cbw_err("Failed to lookup a cgroup ctx: %llu",
-			cgroup_get_id(cgrp));
-		return -ESRCH;
+		/*
+		 * Unmanaged cgroup -- skipped at init for exceeding the static
+		 * limits. Nothing to configure.
+		 */
+		return 0;
 	}
 
 	cbw_set_bandwidth(cgx_raw, period_us, quota_us, burst_us);
@@ -2784,8 +2852,8 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 
 	/*
 	 * Put the task aside into @to's cgroup. If that fails -- e.g., the
-	 * target cgroup is exiting, or a transient internal error occurred --
-	 * fall back to the root cgroup rather than lose the task.
+	 * target cgroup is exiting or unmanaged, or a transient internal error
+	 * occurred -- fall back to the root cgroup rather than lose the task.
 	 *
 	 * Note that we cannot call scx_cgroup_bw_enqueue_cb() here: the BPF
 	 * verifier rejects calling scx_bpf_dsq_insert_vtime() from the
@@ -2796,7 +2864,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 			cbw_warn("Destination cgroup unavailable while moving throttled task (%s:%d) to cgid%llu",
 				 p->comm, p->pid, cgroup_get_id(to));
 		}
-		
+
 		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID)))
 			goto out_drop;
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
