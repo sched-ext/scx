@@ -840,9 +840,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 
 		if (READ_ONCE(cellp->llcs_to_drain)) {
-			s32 ret = try_draining_work(cell, llc);
+			s32 ret = try_draining_work(cell, llc, cctx);
 
-			if (ret >= 0) {
+			if (!ret) {
 				cstat_inc(CSTAT_DRAIN_CNT, cell, cctx);
 				return;
 			}
