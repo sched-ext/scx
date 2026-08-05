@@ -48,6 +48,12 @@ static inline bool rt_or_dl_task(struct task_struct *p)
 	return unlikely(p->prio < MAX_RT_PRIO);
 }
 
+static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
+{
+	struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+	return curr && rt_or_dl_task(curr);
+}
+
 /*
  * task_ctx lookup with per-CPU cache.
  *

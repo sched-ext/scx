@@ -2,6 +2,7 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
+#include "util.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -50,6 +51,12 @@ static bool can_x_kick_cpu2(struct preemption_info *prm_x,
 			    struct preemption_info *prm_cpu2,
 			    struct cpu_ctx *cpuc2)
 {
+	/*
+	 * A CPU taken by an RT/DL task cannot be a victim.
+	 */
+	if (is_rt_or_dl_task_running(cpuc2->cpu_id))
+		return false;
+
 	/*
 	 * Never preeempt a CPU running a lock holder.
 	 */
@@ -433,24 +440,12 @@ kick_out:
 }
 
 __hidden
-void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
+void reset_cpu_preemption_info(struct cpu_ctx *cpuc)
 {
-	if (released) {
-		/*
-		 * When the CPU is taken by high priority scheduler,
-		 * set things impossible to preempt.
-		 */
-		cpuc->flags = 0;
-		cpuc->lat_cri = SCX_SLICE_INF;
-		cpuc->est_stopping_clk = 0;
-	} else {
-		/*
-		 * When the CPU is idle,
-		 * set things easy to preempt.
-		 */
-		cpuc->flags = 0;
-		cpuc->lat_cri = 0;
-		cpuc->est_stopping_clk = SCX_SLICE_INF;
-	}
+	/*
+	 * When the CPU is idle, set things easy to preempt.
+	 */
+	cpuc->flags = 0;
+	cpuc->lat_cri = 0;
+	cpuc->est_stopping_clk = SCX_SLICE_INF;
 }
-

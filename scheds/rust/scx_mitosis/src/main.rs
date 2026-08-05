@@ -50,6 +50,7 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
+use scx_utils::TopologyArgs;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
 use tracing::{debug, info, trace, warn};
@@ -82,6 +83,15 @@ fn parse_ewma_factor(s: &str) -> Result<f64, String> {
 /// Userspace makes the dynamic decisions of which Cells should be merged or
 /// split and which CPUs they should be assigned to.
 #[derive(Debug, Parser)]
+#[command(after_long_help = r#"VIRTUAL LLC CONFIGURATION:
+    --virt-llc requires --enable-llc-awareness to affect DSQ creation.
+    MIN-MAX specifies the target range of physical cores per virtual LLC.
+    For each physical LLC and core type, the smallest exact divisor in the
+    range is preferred; otherwise, the size with the smallest remainder is
+    used, favoring smaller sizes. Remaining cores join the last partition.
+
+    Example: On a 32-core physical LLC, --virt-llc=8-8 creates four virtual
+    LLCs, and therefore four LLC DSQs per cell."#)]
 struct Opts {
     /// Deprecated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -119,11 +129,6 @@ struct Opts {
     #[clap(long, value_delimiter = ',')]
     undefok: Vec<String>,
 
-    /// Enable debug event tracking for cgroup_init, init_task, and cgroup_exit.
-    /// Events are recorded in a ring buffer and output in dump().
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    debug_events: bool,
-
     /// Enable workaround for exiting tasks with offline cgroups during scheduler load.
     /// This works around a kernel bug where tasks can be initialized with cgroups that
     /// were never initialized. Disable this once the kernel bug is fixed.
@@ -141,7 +146,7 @@ struct Opts {
     reject_multicpu_pinning: bool,
 
     /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
-    /// to use LLC-aware scheduling.
+    /// to use LLC-aware scheduling. Required for --virt-llc to affect DSQ creation.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_llc_awareness: bool,
 
@@ -217,6 +222,9 @@ struct Opts {
     /// tick period.
     #[clap(long, default_value = "500")]
     slice_shrink_min_us: u64,
+
+    #[clap(flatten, next_help_heading = "Topology Options")]
+    topology: TopologyArgs,
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
@@ -339,7 +347,7 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         Self::validate_args(opts).context("validating scheduler options")?;
 
-        let topology = Topology::new().context("detecting system topology")?;
+        let topology = Topology::with_args(&opts.topology).context("detecting system topology")?;
 
         let nr_llc = topology.all_llcs.len().max(1);
 
@@ -366,7 +374,6 @@ impl<'a> Scheduler<'a> {
             .expect("BUG: rodata_data missing after skel open");
 
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
-        rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
@@ -408,12 +415,14 @@ impl<'a> Scheduler<'a> {
         mitosis_topology_utils::populate_topology_maps(
             &mut skel,
             mitosis_topology_utils::MapKind::CpuToLLC,
+            &topology,
             None,
         )
         .context("populating CPU-to-LLC topology map")?;
         mitosis_topology_utils::populate_topology_maps(
             &mut skel,
             mitosis_topology_utils::MapKind::LLCToCpus,
+            &topology,
             None,
         )
         .context("populating LLC-to-CPUs topology map")?;
@@ -990,6 +999,7 @@ impl<'a> Scheduler<'a> {
         // Slice shrink stats bypass DistributionStats — they're raw event counts
         let sum = |idx: usize| -> u64 { cell_stats_delta.iter().map(|c| c[idx]).sum() };
         self.metrics.drain_cnt = sum(bpf_intf::cell_stat_idx_CSTAT_DRAIN_CNT as usize);
+        self.metrics.drain_affn_cnt = sum(bpf_intf::cell_stat_idx_CSTAT_DRAIN_AFFN_CNT as usize);
         self.metrics.slice_shrink_max =
             sum(bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_MAX as usize);
         self.metrics.slice_shrink_proportional =
@@ -1063,6 +1073,8 @@ impl<'a> Scheduler<'a> {
             // Raw event counts bypass DistributionStats.
             cell_metrics.drain_cnt =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_DRAIN_CNT as usize];
+            cell_metrics.drain_affn_cnt =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_DRAIN_AFFN_CNT as usize];
             cell_metrics.slice_shrink_max =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_SLICE_SHRINK_MAX as usize];
             cell_metrics.slice_shrink_proportional = cell_stats_delta[cell]
@@ -1080,20 +1092,28 @@ impl<'a> Scheduler<'a> {
 
     fn update_drain_metrics(&mut self, cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS]) {
         let mut total = 0;
+        let mut affn_total = 0;
 
         for cell in 0..MAX_CELLS {
             let drain_cnt =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_DRAIN_CNT as usize];
+            let drain_affn_cnt =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_DRAIN_AFFN_CNT as usize];
             total += drain_cnt;
+            affn_total += drain_affn_cnt;
 
             if let Some(cell_metrics) = self.metrics.cells.get_mut(&(cell as u32)) {
                 cell_metrics.drain_cnt = drain_cnt;
-            } else if drain_cnt > 0 {
-                self.metrics.cells.entry(cell as u32).or_default().drain_cnt = drain_cnt;
+                cell_metrics.drain_affn_cnt = drain_affn_cnt;
+            } else if drain_cnt > 0 || drain_affn_cnt > 0 {
+                let cell_metrics = self.metrics.cells.entry(cell as u32).or_default();
+                cell_metrics.drain_cnt = drain_cnt;
+                cell_metrics.drain_affn_cnt = drain_affn_cnt;
             }
         }
 
         self.metrics.drain_cnt = total;
+        self.metrics.drain_affn_cnt = affn_total;
     }
 
     fn log_all_queue_stats(

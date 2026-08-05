@@ -55,6 +55,12 @@ static inline void invalidate_task_llc_cpumask(struct task_ctx *tctx)
 	tctx->llc_cpumask_id = LLC_INVALID;
 }
 
+static inline void invalidate_task_llc(struct task_ctx *tctx)
+{
+	tctx->llc = LLC_INVALID;
+	invalidate_task_llc_cpumask(tctx);
+}
+
 static inline s32 llc_from_cpu(s32 cpu)
 {
 	if (cpu < 0 || cpu >= nr_possible_cpus || cpu >= MAX_CPUS) {
@@ -300,7 +306,16 @@ static inline int account_cell_llc_enqueue(u32 cell_id, u32 llc)
 	return 0;
 }
 
-static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
+enum {
+	CONTINUE_DISPATCH = 1,
+};
+
+/*
+ * Returns 0 when work was dispatched to the local DSQ,
+ * CONTINUE_DISPATCH when work was moved to a remote CPU DSQ, and a negative
+ * error when no work was dispatched.
+ */
+static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx *local_cctx)
 {
 	if (!llc_is_valid(local_llc)) {
 		scx_bpf_error("try_draining_work: invalid local_llc: %d", local_llc);
@@ -322,6 +337,7 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
 		u64 bit;
 		bool disabled = false;
 		bool consumed;
+		bool continue_dispatch = false;
 		u32 pending;
 
 		// Prevents the optimizer from removing the following conditional return
@@ -371,6 +387,76 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
 
 		consumed = scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0);
 
+		/*
+		 * The new cell cpumask is published before applied_configuration_seq
+		 * is bumped at the end of apply_cell_config(). A task left in, or
+		 * racing into, an LLC DSQ that became drain-only therefore still has
+		 * a configuration sequence predating the published configuration.
+		 * A task refreshed against the new sequence cannot select an LLC that
+		 * no longer intersects the cell, so a rescued task will refresh its
+		 * placement on its next select_cpu() or enqueue(). While stale, the
+		 * head task may be affinity-ineligible for this CPU.
+		 *
+		 * The failed local move and the iterator remain racy: another CPU can
+		 * consume the head task between them. Do not update task scheduling
+		 * state until the remote move succeeds.
+		 */
+		if (unlikely(!consumed && READ_ONCE(cell->llcs[candidate_llc].nr_queued))) {
+			struct task_struct *p;
+
+			bpf_for_each(scx_dsq, p, candidate_dsq.raw, 0) {
+				struct task_ctx *tctx;
+				struct cpu_ctx *target_cctx;
+				dsq_id_t cpu_dsq;
+				u64 basis_vtime;
+				u32 cpu;
+
+				tctx = lookup_task_ctx(p);
+				if (!tctx) {
+					scx_bpf_error(
+						"lookup_task_ctx() failed in try_draining_work()");
+					break;
+				}
+
+				cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+				if (cpu >= nr_possible_cpus || cpu >= MAX_CPUS)
+					break;
+
+				target_cctx = lookup_cpu_ctx(cpu);
+				if (!target_cctx)
+					break;
+
+				cpu_dsq = get_cpu_dsq_id(cpu);
+				if (dsq_is_invalid(cpu_dsq))
+					break;
+
+				basis_vtime = READ_ONCE(target_cctx->vtime_now);
+				scx_bpf_dsq_move_set_vtime(BPF_FOR_EACH_ITER, basis_vtime);
+				consumed = scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p, cpu_dsq.raw,
+								  0);
+				if (consumed) {
+					tctx->basis_vtime = basis_vtime;
+					tctx->dsq = cpu_dsq;
+					/*
+					 * Obviate any LLC updates during running(),
+					 * next cell refresh on enqueue() will recompute
+					 * these based on the current cell state.
+					 */
+					tctx->all_cell_cpus_allowed = false;
+					invalidate_task_llc(tctx);
+
+					continue_dispatch = true;
+					/*
+					 * cstats are per-CPU and non-atomic. Account on the
+					 * dispatching CPU rather than the remote target CPU.
+					 */
+					cstat_inc(CSTAT_DRAIN_AFFN_CNT, cell_id, local_cctx);
+					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+				}
+				break;
+			}
+		}
+
 		if (consumed) {
 			pending = cell_llc_nr_queued_dec(cell, candidate_llc);
 		} else {
@@ -381,7 +467,7 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc)
 			cell_llc_drain_enable(cell, candidate_llc);
 
 		if (consumed)
-			return candidate_llc;
+			return continue_dispatch ? CONTINUE_DISPATCH : 0;
 	}
 	return -ENOENT;
 }
