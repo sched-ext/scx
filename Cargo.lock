@@ -953,12 +953,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "combinations"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "728b7ab3119b5167cc60a4aad16b6086b762278f5571cc650e7eed2e89a23a15"
-
-[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6241,7 +6235,6 @@ dependencies = [
  "clap",
  "clap-num",
  "clap_main",
- "combinations",
  "crossbeam",
  "ctrlc",
  "gpoint",
