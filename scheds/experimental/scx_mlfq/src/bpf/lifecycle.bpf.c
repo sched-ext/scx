@@ -1,0 +1,217 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ *
+ * Task lifecycle, included by main.bpf.c via #include.
+ *
+ * init_task/enable initialize the task context; running() drops the task
+ * from its queue aggregate and records the local-curr fold inputs;
+ * stopping() advances vruntime and the EMA gauge; dequeue() drops the
+ * aggregate contribution of a task that blocked while queued; exit_task()
+ * removes any residual aggregate contribution and deletes the task
+ * storage; cpu_release() re-enqueues local-DSQ leftovers when a CPU
+ * leaves the scheduler.
+ */
+
+static __always_inline void mlfq_reset_task_ctx(struct task_ctx *tctx,
+						const struct task_struct *p,
+						u64 now)
+{
+	tctx->vruntime = 0;
+	tctx->vlag = 0;
+	tctx->deadline = 0;
+	tctx->last_run_at = 0;
+	tctx->last_sleep_at = scx_bpf_task_running(p) ? 0 : now;
+	tctx->queued_at = 0;
+	tctx->weight = p->scx.weight;
+	if (!tctx->weight)
+		tctx->weight = 1;
+	tctx->flags = MLFQ_TF_FIRST_RUN;
+	tctx->wake_cpu_state = 0;
+	mlfq_reset_classification(tctx);
+}
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(mlfq_init_task, struct task_struct *p,
+			     struct scx_init_task_args *args)
+{
+	struct task_ctx *tctx;
+
+	tctx = mlfq_alloc_task_ctx(p);
+	if (!tctx)
+		return -ENOMEM;
+
+	mlfq_reset_task_ctx(tctx, p, scx_bpf_now());
+	return 0;
+}
+
+void BPF_STRUCT_OPS(mlfq_enable, struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	/* init_task() is called for every task first; be defensive here. */
+	tctx = mlfq_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	mlfq_reset_task_ctx(tctx, p, scx_bpf_now());
+}
+
+void BPF_STRUCT_OPS(mlfq_running, struct task_struct *p)
+{
+	struct task_ctx *tctx;
+	struct mlfq_cpu_state *cpu;
+	struct queue_ctx *q;
+	s32 cpu_id = bpf_get_smp_processor_id();
+
+	tctx = mlfq_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * The task left its queue to run: drop it from the aggregate so
+	 * V_q reflects the queued set, and record the running task's
+	 * EEVDF state -- the local-curr fold inputs and the deadline the
+	 * wakeup preemption decision compares against. Fast-path and
+	 * migration-disabled tasks were never accounted and are skipped
+	 * by the ACCOUNTED flag.
+	 */
+	q = mlfq_lookup_queue(tctx->queue);
+	if (q)
+		mlfq_queue_del_task(tctx->queue, q, tctx);
+
+	cpu = mlfq_lookup_cpu_state(cpu_id);
+	if (cpu) {
+		cpu->running_queue = tctx->queue;
+		cpu->running_pid = p->pid;
+		cpu->running_vruntime = tctx->vruntime;
+		cpu->running_weight = tctx->weight;
+	}
+
+	tctx->last_run_at = scx_bpf_now();
+	tctx->flags &= ~MLFQ_TF_FIRST_RUN;
+
+	__sync_fetch_and_add(&mlfq_stats.on_cpu, 1);
+
+	/*
+	 * cpufreq interaction: the interactive queue requests the maximum
+	 * performance level through the sched_ext cpuperf API. The kernel
+	 * stores the target per CPU and it persists until overwritten, so
+	 * setting it on every ops.running() makes the last value always
+	 * reflect the interactive task now on the CPU, and schedutil then
+	 * picks the frequency. The other queues leave the target untouched
+	 * so the kernel's governor drives the frequency without
+	 * throttling. The counter reports Q1 placements as the interactive
+	 * boost signal.
+	 */
+	if (tctx->queue == 1) {
+		scx_bpf_cpuperf_set(scx_bpf_task_cpu(p), MLFQ_CPUPERF_Q1);
+		__sync_fetch_and_add(&mlfq_stats.cpuperf_boosts, 1);
+	}
+}
+
+void BPF_STRUCT_OPS(mlfq_stopping, struct task_struct *p, bool runnable)
+{
+	struct task_ctx *tctx;
+	struct mlfq_cpu_state *cpu;
+	u64 now, delta = 0;
+
+	tctx = mlfq_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	now = scx_bpf_now();
+	if (tctx->last_run_at && mlfq_time_before(tctx->last_run_at, now))
+		delta = now - tctx->last_run_at;
+	tctx->last_run_at = 0;
+
+	if (delta) {
+		/* vruntime advance + EMA climb for this run segment. */
+		mlfq_update_vruntime(tctx, delta);
+		mlfq_ema_climb_task(tctx, delta);
+		__sync_fetch_and_add(&mlfq_stats.total_runtime, delta);
+	}
+
+	if (!runnable)
+		tctx->last_sleep_at = now;
+
+	/*
+	 * Keep the fold inputs current while the task remains runnable
+	 * (preempted); clear them when it goes to sleep so V_q never folds
+	 * a sleeping task.
+	 */
+	cpu = mlfq_lookup_cpu_state(bpf_get_smp_processor_id());
+	if (cpu) {
+		if (runnable) {
+			cpu->running_vruntime = tctx->vruntime;
+		} else {
+			cpu->running_queue = 0;
+			cpu->running_pid = 0;
+			cpu->running_vruntime = 0;
+			cpu->running_weight = 0;
+		}
+	}
+
+	/* Diagnostic runnable count; guard against wrap-around. */
+	if (__sync_fetch_and_sub(&mlfq_stats.on_cpu, 1) == 0)
+		__sync_fetch_and_add(&mlfq_stats.on_cpu, 1);
+}
+
+void BPF_STRUCT_OPS(mlfq_dequeue, struct task_struct *p, u64 deq_flags)
+{
+	struct task_ctx *tctx;
+	struct queue_ctx *q;
+
+	tctx = mlfq_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * A task that blocks while queued is removed from its DSQ by the
+	 * kernel before ops.dequeue runs, so dropping the aggregate
+	 * contribution here keeps the aggregate mirroring DSQ membership;
+	 * the flag-guarded del is idempotent for tasks that were never
+	 * accounted (local-DSQ/fast-path tasks).
+	 */
+	q = mlfq_lookup_queue(tctx->queue);
+	if (q)
+		mlfq_queue_del_task(tctx->queue, q, tctx);
+}
+
+void BPF_STRUCT_OPS(mlfq_exit_task, struct task_struct *p,
+		    struct scx_exit_task_args *args)
+{
+	struct task_ctx *tctx;
+	struct queue_ctx *q;
+	u8 qid;
+
+	tctx = mlfq_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * If the task exits while queued, drop its residual aggregate
+	 * contribution so nr_queued == 0 <=> sum_weight == 0 holds.
+	 */
+	qid = tctx->queue;
+	q = mlfq_lookup_queue(qid);
+	if (q)
+		mlfq_queue_del_task(qid, q, tctx);
+
+	bpf_task_storage_delete(&task_ctx_stor, p);
+}
+
+/*
+ * CPU release (hotplug offline, exit drain, higher-priority class take-over):
+ * push any leftover local-DSQ tasks back through ops.enqueue() so they
+ * re-enter the queue DSQs instead of being stranded on the released CPU.
+ * Normally a no-op: by discipline the local DSQ depth is at most one task,
+ * and a queued leftover is exactly the runnable task the CPU is leaving
+ * behind. The re-enqueued leftovers land in the releasing CPU's queue
+ * DSQs and are served by other CPUs' steal scans; the kernel's reenqueue
+ * guard and the stall watchdog cap the pathological loop.
+ * scx_bpf_reenqueue_local() is restricted to this callback (ext.c).
+ */
+void BPF_STRUCT_OPS(mlfq_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
+{
+	scx_bpf_reenqueue_local();
+}
