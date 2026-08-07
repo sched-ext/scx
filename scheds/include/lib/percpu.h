@@ -1,6 +1,7 @@
 #pragma once
 
 #include <scx/common.bpf.h>
+#include <lib/bpf_cpumask.h>
 #include <lib/cpumask.h>
 
 struct scx_percpu_storage {
@@ -36,24 +37,7 @@ static s32 create_save_scx_bitmap(scx_bitmap_t *maskp)
 	return 0;
 }
 
-static s32 create_save_bpfmask(struct bpf_cpumask __kptr **kptr)
-{
-	struct bpf_cpumask *bpfmask;
-
-	bpfmask = bpf_cpumask_create();
-	if (!bpfmask) {
-		bpf_printk("Failed to create bpfmask");
-		return -ENOMEM;
-	}
-
-	bpfmask = bpf_kptr_xchg(kptr, bpfmask);
-	if (bpfmask) {
-		bpf_printk("kptr already had cpumask");
-		bpf_cpumask_release(bpfmask);
-	}
-
-	return 0;
-}
+/* create_save_bpfmask() now lives in lib/bpf_cpumask.h (included above). */
 
 __weak int scx_storage_init_single(u32 cpu)
 {
