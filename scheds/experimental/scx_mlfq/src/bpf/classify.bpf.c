@@ -127,22 +127,18 @@ static __always_inline void mlfq_wakeup_classify(const struct task_struct *p,
 	/*
 	 * IPC boost: a wakeup from I/O or a short sleep is treated as
 	 * interactive and placed in Q1, rate-limited per task (the
-	 * stand-in for the kernel's futex/IPC wakeup fast paths).
-	 * mlfq_ss_boost_allowed() grants the boost only once the previous
-	 * rate-limit window has elapsed, so a burst of short sleeps or
-	 * I/O completions cannot chain boosts. wake_cnt stays short-sleep
-	 * based: an I/O wakeup does not count toward the promotion
-	 * hysteresis.
+	 * stand-in for the kernel's futex/IPC wakeup fast paths). The
+	 * rate limit is part of mlfq_ss_boost_pending(), which the CPU
+	 * selection also consults so the two paths agree on whether the
+	 * wakeup will be treated as interactive.
 	 *
 	 * SCHED_IDLE tasks are forced to Q3 by mlfq_apply_sched_idle, so
 	 * a boost would burn the rate-limit budget and push the counter
 	 * up to no effect; it is gated on the task policy.
 	 */
 	if (p->policy != MLFQ_SCHED_IDLE &&
-	    mlfq_boost_eligible(sleep_ns, mlfq_short_sleep_ns,
-				mlfq_task_io_wait(p)) &&
-	    mlfq_ss_boost_allowed(tctx->last_ss_boost_at, now,
-				  mlfq_short_sleep_rate_limit_ns)) {
+	    mlfq_ss_boost_pending(tctx, sleep_ns, mlfq_task_io_wait(p), now,
+				  mlfq_short_sleep_ns, mlfq_short_sleep_rate_limit_ns)) {
 		tctx->queue = 1;
 		tctx->last_ss_boost_at = now;
 		__sync_fetch_and_add(&mlfq_stats.short_sleep_boosts, 1);

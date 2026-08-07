@@ -109,13 +109,46 @@ mlfq_pick_idle_primary(const struct task_struct *p,
 					primary_bm);
 }
 
+/*
+ * mlfq_interactive_on_wakeup - Whether a wakeup will be treated as interactive.
+ * @p: The task being woken.
+ * @tctx: The task context.
+ * @now: Current time (scx_bpf_now()).
+ *
+ * The queue recorded in the task context reflects the previous run,
+ * while the short-sleep boost runs in ops.enqueue(), after the CPU
+ * selection. The CPU selection must treat a wakeup that is about to be
+ * promoted as interactive already, so the primary-core preference
+ * applies to it from the start. SCHED_IDLE tasks are excluded, the
+ * classification pins them to Q3.
+ *
+ * Return: true if the wakeup is or will become interactive.
+ */
+static __always_inline bool
+mlfq_interactive_on_wakeup(const struct task_struct *p,
+			   const struct task_ctx *tctx, u64 now)
+{
+	u64 sleep_ns = 0;
+
+	if (tctx->last_sleep_at && mlfq_time_before(tctx->last_sleep_at, now))
+		sleep_ns = now - tctx->last_sleep_at;
+
+	return tctx->queue == 1 ||
+	       (p->policy != MLFQ_SCHED_IDLE &&
+		mlfq_ss_boost_pending(tctx, sleep_ns, mlfq_task_io_wait(p),
+				      now, mlfq_short_sleep_ns,
+				      mlfq_short_sleep_rate_limit_ns));
+}
+
 s32 BPF_STRUCT_OPS(mlfq_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	struct task_ctx *tctx;
 	const struct mlfq_bitmap *primary_bm;
 	u32 first_cpu, waker_cpu, waker_llc;
+	u64 now;
 	s32 cpu_id = -1;
+	bool interactive;
 
 	tctx = mlfq_lookup_task_ctx(p);
 	if (!tctx)
@@ -124,7 +157,10 @@ s32 BPF_STRUCT_OPS(mlfq_select_cpu, struct task_struct *p, s32 prev_cpu,
 	/* Clear any fast-path state from a previous select_cpu(). */
 	tctx->wake_cpu_state = 0;
 
-	/* The task may not be allowed on prev_cpu (cpuset); fix that up. */
+	/*
+	 * The task allowed on prev_cpu (cpuset) may have changed since
+	 * the last run; fix that up.
+	 */
 	if (!bpf_cpumask_test_cpu((u32)prev_cpu, p->cpus_ptr)) {
 		first_cpu = bpf_cpumask_first(p->cpus_ptr);
 		if (first_cpu >= nr_cpu_ids)
@@ -146,15 +182,26 @@ s32 BPF_STRUCT_OPS(mlfq_select_cpu, struct task_struct *p, s32 prev_cpu,
 	primary_bm = mlfq_get_primary_bitmap();
 
 	/*
+	 * Whether this wakeup will be treated as interactive. The queue
+	 * recorded in the task context reflects the previous run, while
+	 * the short-sleep boost runs in ops.enqueue(), after the CPU
+	 * selection. A task about to be promoted must already be treated
+	 * as interactive here, otherwise it could claim an idle
+	 * efficiency core and then be promoted onto it.
+	 */
+	now = scx_bpf_now();
+	interactive = mlfq_interactive_on_wakeup(p, tctx, now);
+
+	/*
 	 * Step 1: prev CPU fast path. The prev CPU is preferred when idle
 	 * for cache locality. An interactive task on a hybrid system only
 	 * sticks to prev when it is a primary core: settling an interactive
 	 * wakeup on an efficiency core would trade cache warmth for
 	 * sustained capacity. The idle mark is cleared only after the
 	 * primary check passes, so an idle efficiency core is never lost
-	 * from the idle pool for a Q1 wakeup.
+	 * from the idle pool for an interactive wakeup.
 	 */
-	if ((tctx->queue != 1 || mlfq_is_primary(primary_bm, prev_cpu)) &&
+	if ((!interactive || mlfq_is_primary(primary_bm, prev_cpu)) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu_id = prev_cpu;
 		goto direct;
@@ -178,17 +225,17 @@ s32 BPF_STRUCT_OPS(mlfq_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (mlfq_nr_llcs > 0 && waker_cpu < MLFQ_MAX_CPUS) {
 		waker_llc = mlfq_cpu_llc[waker_cpu];
 		if (waker_llc < MLFQ_MAX_LLCS && waker_llc < mlfq_nr_llcs &&
-		    (tctx->queue != 1 || mlfq_llc_has_primary[waker_llc])) {
+		    (!interactive || mlfq_llc_has_primary[waker_llc])) {
 			if (mlfq_nr_llcs == 1) {
 				cpu_id = scx_bpf_pick_idle_cpu(p->cpus_ptr,
-							       tctx->queue == 1 ?
+							       interactive ?
 							       SCX_PICK_IDLE_CORE : 0);
 				if (cpu_id < 0)
 					cpu_id = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 			} else {
 				cpu_id = mlfq_pick_idle_in_bitmap(&mlfq_llc_bitmaps,
 								  waker_llc, p,
-								  tctx->queue == 1,
+								  interactive,
 								  primary_bm);
 			}
 			if (cpu_id >= 0)
@@ -197,11 +244,11 @@ s32 BPF_STRUCT_OPS(mlfq_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 
 	/*
-	 * Step 3: global fallbacks. Q1 prefers an idle primary core, with
-	 * the SMT-aware whole-core preference on uniform-capacity systems;
-	 * Q2/Q3 take any idle CPU.
+	 * Step 3: global fallbacks. Interactive wakeups prefer an idle
+	 * primary core, with the SMT-aware whole-core preference on
+	 * uniform-capacity systems; the other queues take any idle CPU.
 	 */
-	if (tctx->queue == 1) {
+	if (interactive) {
 		if (mlfq_primary_all) {
 			/*
 			 * pick_idle_cpu() returns an error when no idle CPU

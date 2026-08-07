@@ -124,9 +124,12 @@ enum mlfq_consts {
 	 * maximum level. The kernel stores the target per-CPU and it
 	 * persists until overwritten, so ops.running() states the level of
 	 * the task now on the CPU on every context switch and schedutil
-	 * follows. The interactive queue requests the maximum level; the
-	 * other queues leave the target untouched so the governor drives
-	 * the frequency without throttling.
+	 * follows. The interactive queue requests the maximum level and
+	 * the other queues request the level matching the CPU's recent
+	 * activity (mlfq_cpuperf_from_ema()), so a CPU that once ran an
+	 * interactive task does not stay at the maximum level for the
+	 * background work that follows. With the scheduler in switch-all
+	 * mode the target is the only utilization signal schedutil sees.
 	 */
 	MLFQ_CPUPERF_Q1			= 1024ULL,
 
@@ -223,6 +226,8 @@ struct mlfq_cpu_state {
 	s32 running_queue;		/* queue of the running task, 0 none */
 	u32 running_pid;
 	u32 steal_scan_off;		/* rotating remote-scan start for Q2/Q3 */
+	u64 cpu_ema;			/* busy-ns EMA of this CPU's activity */
+	u64 cpu_ema_at;			/* scx_bpf_now() of the last update */
 };
 
 /* System-level BPF counters, reported to userspace through the stats module. */
@@ -363,6 +368,51 @@ static __always_inline bool mlfq_boost_eligible(u64 sleep_ns, u64 window_ns,
 	if (io_wait)
 		return true;
 	return sleep_ns && sleep_ns <= window_ns;
+}
+
+/**
+ * mlfq_ss_boost_pending - Short-sleep boost decision for a wakeup.
+ * @tctx: The task context.
+ * @sleep_ns: Sleep duration at wakeup.
+ * @io_wait: True when the wakeup is an I/O completion.
+ * @now: Current time (scx_bpf_now()).
+ * @short_sleep: Short-sleep window (MLFQ_SHORT_SLEEP_NS).
+ * @rate_limit: Minimum spacing between boosts (MLFQ_SHORT_SLEEP_RATE_LIMIT_NS).
+ *
+ * Combines the wakeup test (mlfq_boost_eligible()) with the per-task
+ * boost rate limit (mlfq_ss_boost_allowed()). The wakeup classification
+ * uses it to apply the boost, and the CPU selection uses it to know
+ * whether a wakeup will be treated as interactive before the
+ * classification runs, so both paths agree on the same condition.
+ *
+ * Return: true if the wakeup qualifies for the Q1 boost.
+ */
+static __always_inline bool mlfq_ss_boost_pending(const struct task_ctx *tctx,
+						  u64 sleep_ns, bool io_wait,
+						  u64 now, u64 short_sleep,
+						  u64 rate_limit)
+{
+	return mlfq_boost_eligible(sleep_ns, short_sleep, io_wait) &&
+	       mlfq_ss_boost_allowed(tctx->last_ss_boost_at, now, rate_limit);
+}
+
+/**
+ * mlfq_cpuperf_from_ema - CPU performance level for a busy-ns gauge.
+ * @ema: The per-CPU EMA of the recent run time.
+ *
+ * Maps the busy-ns gauge to the sched_ext cpuperf scale: a CPU that ran
+ * tasks for the whole gauge window requests the maximum level and a
+ * lightly loaded CPU requests a proportionally lower one. The gauge
+ * ceiling is the per-task budget, so a CPU saturated over the gauge
+ * window maps to the maximum.
+ *
+ * Return: The cpuperf level in [0, SCX_CPUPERF_ONE].
+ */
+static __always_inline u32 mlfq_cpuperf_from_ema(u64 ema)
+{
+	u64 perf = ema * MLFQ_CPUPERF_Q1 / MLFQ_BUDGET_MAX_NS;
+
+	return perf > MLFQ_CPUPERF_Q1 ? MLFQ_CPUPERF_Q1 : (u32)perf;
 }
 
 /**

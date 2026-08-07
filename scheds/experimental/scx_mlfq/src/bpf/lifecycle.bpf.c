@@ -84,18 +84,23 @@ void BPF_STRUCT_OPS(mlfq_running, struct task_struct *p)
 
 	/*
 	 * cpufreq interaction: the interactive queue requests the maximum
-	 * performance level through the sched_ext cpuperf API. The kernel
-	 * stores the target per CPU and it persists until overwritten, so
-	 * setting it on every ops.running() makes the last value always
-	 * reflect the interactive task now on the CPU, and schedutil then
-	 * picks the frequency. The other queues leave the target untouched
-	 * so the kernel's governor drives the frequency without
-	 * throttling. The counter reports Q1 placements as the interactive
-	 * boost signal.
+	 * performance level through the sched_ext cpuperf API, and the
+	 * other queues request the level matching the CPU's recent
+	 * activity (mlfq_cpuperf_from_ema()). The kernel stores the
+	 * target per CPU and schedutil follows it on every update, so
+	 * setting it on every ops.running() makes the frequency track the
+	 * task now on the CPU. With the scheduler in switch-all mode the
+	 * target is the only utilization signal schedutil sees, so a
+	 * stale maximum would keep the CPU at top frequency for the
+	 * background work that follows an interactive task. The counter
+	 * reports the interactive boosts.
 	 */
 	if (tctx->queue == 1) {
 		scx_bpf_cpuperf_set(scx_bpf_task_cpu(p), MLFQ_CPUPERF_Q1);
 		__sync_fetch_and_add(&mlfq_stats.cpuperf_boosts, 1);
+	} else if (cpu) {
+		scx_bpf_cpuperf_set(scx_bpf_task_cpu(p),
+				    mlfq_cpuperf_from_ema(cpu->cpu_ema));
 	}
 }
 
@@ -119,6 +124,28 @@ void BPF_STRUCT_OPS(mlfq_stopping, struct task_struct *p, bool runnable)
 		/* vruntime advance + EMA climb for this run segment. */
 		mlfq_update_vruntime(tctx, delta);
 		mlfq_ema_climb_task(tctx, delta);
+		/*
+		 * The per-CPU busy gauge: the run segment climbs the
+		 * gauge and the wall time since the previous segment
+		 * decays it, so the gauge reflects the CPU's recent
+		 * activity. The cpuperf target for the non-interactive
+		 * queues is derived from it, so the frequency follows the
+		 * load instead of staying pinned at the last level.
+		 */
+		cpu = mlfq_lookup_cpu_state(bpf_get_smp_processor_id());
+		if (cpu) {
+			u64 elapsed = 0;
+
+			if (cpu->cpu_ema_at &&
+			    mlfq_time_before(cpu->cpu_ema_at, now))
+				elapsed = now - cpu->cpu_ema_at;
+			cpu->cpu_ema = mlfq_ema_decay(cpu->cpu_ema, elapsed,
+						      mlfq_ema_half_life_ns);
+			cpu->cpu_ema = mlfq_ema_climb(cpu->cpu_ema, delta,
+						      mlfq_budget_max_ns,
+						      mlfq_alpha);
+			cpu->cpu_ema_at = now;
+		}
 		/*
 		 * Advance the owning queue's virtual clock with the
 		 * virtual time just charged: the clock follows the

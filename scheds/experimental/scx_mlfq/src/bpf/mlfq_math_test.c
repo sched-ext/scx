@@ -393,6 +393,47 @@ static void test_ss_boost_allowed(void)
 		"wrap-around clock: a future boost timestamp blocks");
 }
 
+/*
+ * The combined boost decision must agree with its two parts, and it is
+ * what the CPU selection consults to treat a wakeup as interactive
+ * before the classification runs.
+ */
+static void test_ss_boost_pending(void)
+{
+	struct task_ctx t = { .ema = 0, .last_ss_boost_at = 0 };
+	u64 now = 1000000000;
+
+	TEST_OK(mlfq_ss_boost_pending(&t, 10000, false, now, 32000000, 2000000),
+		"short sleep within the window qualifies");
+	TEST_OK(!mlfq_ss_boost_pending(&t, 0, false, now, 32000000, 2000000),
+		"zero sleep without I/O does not qualify");
+	TEST_OK(mlfq_ss_boost_pending(&t, 0, true, now, 32000000, 2000000),
+		"I/O wakeup qualifies regardless of the sleep length");
+	TEST_OK(!mlfq_ss_boost_pending(&t, 100000000, false, now, 32000000, 2000000),
+		"long sleep without I/O does not qualify");
+
+	t.last_ss_boost_at = now;
+	TEST_OK(!mlfq_ss_boost_pending(&t, 10000, false, now + 1000000, 32000000, 2000000),
+		"rate limit blocks a second boost inside the window");
+	TEST_OK(mlfq_ss_boost_pending(&t, 10000, false, now + 3000000, 32000000, 2000000),
+		"rate limit expires and the boost qualifies again");
+}
+
+static void test_cpuperf_mapping(void)
+{
+	u32 one = MLFQ_CPUPERF_Q1;
+	u64 budget = MLFQ_BUDGET_MAX_NS;
+
+	TEST_OK(mlfq_cpuperf_from_ema(0) == 0,
+		"an idle gauge requests the minimum level");
+	TEST_OK(mlfq_cpuperf_from_ema(budget) == one,
+		"a saturated gauge requests the maximum level");
+	TEST_OK(mlfq_cpuperf_from_ema(budget / 2) == one / 2,
+		"half the gauge requests half the level");
+	TEST_OK(mlfq_cpuperf_from_ema(budget * 2) == one,
+		"an over-saturated gauge clamps to the maximum");
+}
+
 static void test_boost_eligible(void)
 {
 	u64 win = 1000000;	/* MLFQ_SHORT_SLEEP_NS */
@@ -426,6 +467,8 @@ int main(void)
 	test_promote_hysteresis();
 	test_demote_hysteresis();
 	test_ss_boost_allowed();
+	test_ss_boost_pending();
+	test_cpuperf_mapping();
 	test_boost_eligible();
 	test_mlfq_check_predicates();
 	test_bitmap();
