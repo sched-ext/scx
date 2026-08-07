@@ -124,7 +124,12 @@ pub fn plan_llcs(cpu_to_llc: &[(u32, u32)], primary_cpus: &[u32], max_llcs: usiz
         return plan;
     }
 
-    let nr = cpu_to_llc.iter().map(|&(_, llc)| llc).max().unwrap() + 1;
+    let nr = cpu_to_llc
+        .iter()
+        .map(|&(_, llc)| llc)
+        .max()
+        .unwrap()
+        .saturating_add(1);
     if nr as usize > max_llcs {
         warn!(
             "{} LLC domains exceed the supported maximum ({}), disabling LLC-aware placement",
@@ -156,8 +161,6 @@ pub fn plan_llcs(cpu_to_llc: &[(u32, u32)], primary_cpus: &[u32], max_llcs: usiz
 pub struct TopologyPlan {
     pub capacity: CapacityPlan,
     pub llcs: LlcPlan,
-    /// Number of non-empty NUMA nodes (0 when discovery failed).
-    pub nr_numa_nodes: usize,
 }
 
 /// Phase 1 (pre-load): discover the topology and write the rodata globals.
@@ -180,17 +183,11 @@ pub fn init_topology(skel: &mut crate::bpf_skel::OpenBpfSkel<'_>) -> Result<Topo
                     llc_cpus: Vec::new(),
                     cpu_llc: [0; MAX_CPUS],
                 },
-                nr_numa_nodes: 0,
             });
         }
     };
 
     let nr_online = topo.all_cpus.len();
-    let nr_numa_nodes = topo
-        .nodes
-        .values()
-        .filter(|node| !node.all_cpus.is_empty())
-        .count();
     let primaries: Vec<u32> = match get_primary_cpus(Powermode::Performance) {
         Ok(cpus) => cpus.into_iter().map(|cpu| cpu as u32).collect(),
         Err(e) => {
@@ -239,11 +236,7 @@ pub fn init_topology(skel: &mut crate::bpf_skel::OpenBpfSkel<'_>) -> Result<Topo
         info!("Topology: {} LLC cache domains", llcs.nr_llcs);
     }
 
-    Ok(TopologyPlan {
-        capacity,
-        llcs,
-        nr_numa_nodes,
-    })
+    Ok(TopologyPlan { capacity, llcs })
 }
 
 /// Phase 2 (post-load): write the primary (big-core) membership bitmap.
@@ -394,6 +387,15 @@ mod tests {
         // 33 domains exceed the 32-domain bound: disable LLC awareness.
         let map: Vec<(u32, u32)> = (0..33).map(|i| (i, i)).collect();
         let plan = plan_llcs(&map, &[], MAX_LLCS);
+        assert_eq!(plan.nr_llcs, 0);
+        assert!(plan.llc_cpus.is_empty());
+    }
+
+    #[test]
+    fn llc_plan_saturates_on_u32_max_llc_id() {
+        // A llc_id of u32::MAX must not wrap the domain count to zero,
+        // which would pass the cap check and later index out of bounds.
+        let plan = plan_llcs(&[(0, 0), (1, u32::MAX)], &[], MAX_LLCS);
         assert_eq!(plan.nr_llcs, 0);
         assert!(plan.llc_cpus.is_empty());
     }

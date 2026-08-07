@@ -40,68 +40,14 @@ static void test_calc_delta_fair(void)
 		"delta 1ms weight 10000 -> 10us virtual");
 }
 
-static void test_floor_div(void)
-{
-	TEST_OK(mlfq_div64_s64_floored(7, 2) == 3,
-		"floor(7/2) == 3");
-	TEST_OK(mlfq_div64_s64_floored(-7, 2) == -4,
-		"floor(-7/2) == -4 (truncation would give -3)");
-	TEST_OK(mlfq_div64_s64_floored(7, -2) == -4,
-		"floor(7/-2) == -4");
-	TEST_OK(mlfq_div64_s64_floored(-7, -2) == 3,
-		"floor(-7/-2) == 3");
-	TEST_OK(mlfq_div64_s64_floored(8, 2) == 4,
-		"floor(8/2) == 4");
-	TEST_OK(mlfq_div64_s64_floored(-8, 2) == -4,
-		"floor(-8/2) == -4");
-}
-
-static struct queue_ctx make_q(u64 max_slice_ns, s64 sum, u64 w, u64 zero)
+static struct queue_ctx make_q(u64 clock, u64 max_slice_ns)
 {
 	struct queue_ctx q = {
+		.clock = clock,
 		.max_slice_ns = max_slice_ns,
-		.sum_w_vruntime = sum,
-		.sum_weight = w,
-		.zero_vruntime = zero,
-		.nr_queued = w ? 1 : 0,
 	};
 
 	return q;
-}
-
-static void test_avg_vruntime(void)
-{
-	struct queue_ctx q;
-
-	q = make_q(2000000, 0, 0, 1000);
-	TEST_OK(mlfq_avg_vruntime(&q) == 1000,
-		"empty queue average is zero_vruntime");
-
-	q = make_q(2000000, 0, 100, 1000);
-	TEST_OK(mlfq_avg_vruntime(&q) == 1000,
-		"all keys zero -> average is zero_vruntime");
-
-	q = make_q(2000000, -100, 100, 1000);
-	TEST_OK(mlfq_avg_vruntime(&q) == 999,
-		"single key -1 weight 100 -> V = zero - 1");
-
-	q = make_q(2000000, -101, 100, 1000);
-	TEST_OK(mlfq_avg_vruntime(&q) == 998,
-		"floor division: V = zero + floor(-1.01) = 998");
-}
-
-static void test_entity_lag_clamp(void)
-{
-	struct queue_ctx q = make_q(2000000, 0, 0, 0); /* limit = 3ms @ w=100 */
-
-	TEST_OK(mlfq_entity_lag_clamp(&q, 0, 100) == 0,
-		"lag at V is zero");
-	TEST_OK(mlfq_entity_lag_clamp(&q, 1ULL << 40, 100) == -3000000,
-		"far ahead clamps to -limit (3ms @ weight 100)");
-	TEST_OK(mlfq_entity_lag_clamp(&q, -(1ULL << 40), 100) == 3000000,
-		"far behind clamps to +limit");
-	TEST_OK(mlfq_entity_lag_clamp(&q, 2000000, 100) == -2000000,
-		"within-limit lag is preserved");
 }
 
 static void test_place_entity(void)
@@ -109,64 +55,161 @@ static void test_place_entity(void)
 	struct queue_ctx q;
 	struct task_ctx t;
 
-	/* Empty queue, weight 100, Q2 slice: deadline == vslice == 2ms. */
-	q = make_q(2000000, 0, 0, 0);
+	/* Empty clock at 0, weight 100, Q2 slice: deadline == vslice == 2ms. */
+	q = make_q(0, 2000000);
 	memset(&t, 0, sizeof(t));
 	t.weight = 100;
-	TEST_OK(mlfq_place_entity(&q, &t, false) == 2000000 &&
-		t.vruntime == 0 && t.vlag == 0,
+	TEST_OK(mlfq_place_entity(&q, &t) == 2000000 &&
+		t.vruntime == 0 && t.vlag == 0 && t.deadline == 2000000,
 		"first placement: vruntime 0, vlag 0, deadline 2ms");
 
 	/*
-	 * Eligibility clamp (DELAY_ZERO): a task far ahead of V is placed at
-	 * V with zeroed negative lag.
+	 * A task far behind the clock is clamped to clock - limit, the
+	 * fair.c bounded-lag property: lag saturates at limit and the
+	 * placed vruntime never falls more than one lag bound behind the
+	 * service point. limit = 3ms virtual at weight 100.
 	 */
-	q = make_q(2000000, 0, 0, 0);
+	q = make_q(1ULL << 40, 2000000);
+	memset(&t, 0, sizeof(t));
+	t.weight = 100;
+	t.vruntime = 0;
+	TEST_OK(mlfq_place_entity(&q, &t) == (1ULL << 40) - 1000000 &&
+		t.vruntime == (1ULL << 40) - 3000000 && t.vlag == 3000000,
+		"behind task clamped to clock - limit, lag at the bound");
+
+	/*
+	 * An ahead task is placed at the clock (fair.c DELAY_ZERO):
+	 * leading credit is not carried, so the negative lag case is
+	 * collapsed to zero.
+	 */
+	q = make_q(1000, 2000000);
 	memset(&t, 0, sizeof(t));
 	t.weight = 100;
 	t.vruntime = 1ULL << 40;
-	TEST_OK(mlfq_place_entity(&q, &t, false) == 2000000 &&
-		t.vruntime == 0 && t.vlag == 0,
-		"ahead task placed at V with vlag 0");
+	TEST_OK(mlfq_place_entity(&q, &t) == 2001000 &&
+		t.vruntime == 1000 && t.vlag == 0,
+		"ahead task placed at the clock, vlag 0");
 
 	/*
-	 * Positive lag is preserved up to the clamp, then inflated when
-	 * inflate is set and W > 0 (fair.c place_entity()). An inflation
-	 * that would push the placed position past the lag bound -- and, in
-	 * the u64 encoding, past the wrap point -- is clamped back to V
-	 * with vlag zeroed, keeping the queued set within [V-limit, V].
+	 * An in-band task (within one lag limit behind the clock) keeps
+	 * its vruntime; its lag and deadline follow the placement formulas.
 	 */
-	q = make_q(2000000, 0, 100, 0);
+	q = make_q(1000000, 2000000);
 	memset(&t, 0, sizeof(t));
 	t.weight = 100;
-	t.vruntime = -(u64)3000000;
-	mlfq_place_entity(&q, &t, true);
-	TEST_OK(t.vlag == 0 && t.vruntime == 0,
-		"over-inflated lag (6ms > 3ms limit) is clamped to V, vlag 0");
-	mlfq_place_entity(&q, &t, false);
-	TEST_OK(t.vlag == 0,
-		"task at V stays at V with vlag 0");
+	t.vruntime = 800000;
+	TEST_OK(mlfq_place_entity(&q, &t) == 2800000 &&
+		t.vruntime == 800000 && t.vlag == 200000 &&
+		t.deadline == 2800000,
+		"in-band task keeps its vruntime, deadline = vruntime + vslice");
 
-	/*
-	 * A legitimate wrapped placement one vslice below the u64 boundary
-	 * produces a deadline that wraps to zero; zero is the sentinel for
-	 * placement failure, so it is bumped to 1 (positionally identical in
-	 * wrapping space).
-	 */
-	q = make_q(1000000, 0, 0, 0);
-	memset(&t, 0, sizeof(t));
-	t.weight = 100;
-	t.vruntime = -(u64)1000000;
-	TEST_OK(mlfq_place_entity(&q, &t, false) == 1 && t.deadline == 1,
-		"wrapped deadline that would be zero is bumped to 1");
-
-	/* FIRST_RUN halves the vslice (PLACE_DEADLINE_INITIAL). */
-	q = make_q(2000000, 0, 0, 0);
+	/* deadline = vruntime_new + vslice, with FIRST_RUN halving once. */
+	q = make_q(0, 2000000);
 	memset(&t, 0, sizeof(t));
 	t.weight = 100;
 	t.flags = MLFQ_TF_FIRST_RUN;
-	TEST_OK(mlfq_place_entity(&q, &t, false) == 1000000,
+	TEST_OK(mlfq_place_entity(&q, &t) == 1000000,
 		"FIRST_RUN deadline is half vslice (1ms)");
+	t.flags &= ~MLFQ_TF_FIRST_RUN;
+	TEST_OK(mlfq_place_entity(&q, &t) == 2000000,
+		"after FIRST_RUN clears the full vslice applies");
+
+	/*
+	 * A wrapped deadline that would compute to zero is bumped to one
+	 * (the sentinel for a failed placement); the position is identical
+	 * in the wrapping order the DSQ rbtree uses.
+	 */
+	q = make_q(0ULL - 1000000ULL, 1000000);	/* clock one slice before wrap */
+	memset(&t, 0, sizeof(t));
+	t.weight = 100;
+	t.vruntime = q.clock;	/* task exactly at the clock, lag 0 */
+	TEST_OK(mlfq_place_entity(&q, &t) == 1 && t.deadline == 1,
+		"wrapped deadline that would be zero is bumped to 1");
+}
+
+/*
+ * The lag bound scales with the weight: a weight-1 task may lag up to
+ * 100x the request size behind the clock, a weight-10000 task only
+ * 1% of it. The clamp holds at both extremes.
+ */
+static void test_place_entity_weight_edges(void)
+{
+	struct queue_ctx q;
+	struct task_ctx t;
+
+	q = make_q(1ULL << 40, 2000000);
+	memset(&t, 0, sizeof(t));
+	t.weight = 1;
+	t.vruntime = 0;
+	TEST_OK(mlfq_place_entity(&q, &t) == (1ULL << 40) - 100000000ULL &&
+		t.vruntime == (1ULL << 40) - 300000000ULL &&
+		t.vlag == 300000000ULL,
+		"weight 1: lag clamped to 100x the request size");
+
+	q = make_q(1ULL << 40, 2000000);
+	memset(&t, 0, sizeof(t));
+	t.weight = 10000;
+	t.vruntime = 0;
+	TEST_OK(mlfq_place_entity(&q, &t) == (1ULL << 40) - 30000ULL + 20000ULL &&
+		t.vruntime == (1ULL << 40) - 30000ULL && t.vlag == 30000ULL,
+		"weight 10000: lag clamped to 1/100 of the request size");
+}
+
+/*
+ * Placement, charge and re-placement form the per-queue service loop:
+ * the clock advances to the vruntime just charged, and the next
+ * placement of the same task measures its lag from the fresh clock.
+ */
+static void test_place_charge_replacement(void)
+{
+	struct queue_ctx q;
+	struct task_ctx t;
+
+	q = make_q(1ULL << 40, 2000000);
+	memset(&t, 0, sizeof(t));
+	t.weight = 100;
+	t.vruntime = q.clock - 1000000;	/* one ms behind the clock */
+	mlfq_place_entity(&q, &t);
+	TEST_OK(t.vruntime == q.clock - 1000000 && t.vlag == 1000000,
+		"in-band task placed with its lag preserved");
+
+	mlfq_queue_advance_clock(&q, t.vruntime);
+	TEST_OK(q.clock == (1ULL << 40),
+		"a task behind the clock does not advance it");
+
+	/*
+	 * The task runs a full slice: the charge is its vruntime plus
+	 * the slice's virtual time, which lands ahead of the clock.
+	 */
+	t.vruntime += 2000000;
+	mlfq_queue_advance_clock(&q, t.vruntime);
+	TEST_OK(q.clock == t.vruntime,
+		"clock advances to the vruntime charged for a full slice");
+
+	t.vruntime = q.clock - 500000;	/* now only 0.5 ms behind */
+	mlfq_place_entity(&q, &t);
+	TEST_OK(t.vruntime == q.clock - 500000 && t.vlag == 500000,
+		"re-placement measures the lag from the advanced clock");
+}
+
+static void test_clock_advance(void)
+{
+	struct queue_ctx q = make_q(1000, 2000000);
+
+	mlfq_queue_advance_clock(&q, 5000);
+	TEST_OK(q.clock == 5000,
+		"advance to a larger vruntime advances the clock");
+	mlfq_queue_advance_clock(&q, 100);
+	TEST_OK(q.clock == 5000,
+		"advance to a smaller vruntime is ignored (monotone)");
+	mlfq_queue_advance_clock(&q, 5000);
+	TEST_OK(q.clock == 5000,
+		"equal vruntime leaves the clock unchanged");
+
+	q = make_q(0ULL - 100ULL, 2000000);
+	mlfq_queue_advance_clock(&q, 10);
+	TEST_OK(q.clock == 10,
+		"wrapped advance across the u64 boundary is followed");
 }
 
 static void test_ema_climb(void)
@@ -282,8 +325,6 @@ static void test_demote_hysteresis(void)
 
 static void test_mlfq_check_predicates(void)
 {
-	struct queue_ctx q = { .nr_queued = 0, .sum_weight = 0 };
-
 	TEST_OK(mlfq_check_ema_bounds(6000000, 6000000),
 		"ema == budget max is in bounds");
 	TEST_OK(!mlfq_check_ema_bounds(6000001, 6000000),
@@ -296,23 +337,6 @@ static void test_mlfq_check_predicates(void)
 		"weight >= 1 invariant");
 	TEST_OK(mlfq_check_queued_vlag(0) && !mlfq_check_queued_vlag(-1),
 		"queued lag >= 0 invariant");
-	TEST_OK(mlfq_check_queue_ctx(&q),
-		"empty queue with zero weight is consistent");
-	q.nr_queued = 0;
-	q.sum_weight = 100;
-	TEST_OK(!mlfq_check_queue_ctx(&q),
-		"nr_queued == 0 with nonzero weight is inconsistent");
-	q.nr_queued = 1;
-	q.sum_weight = 0;
-	TEST_OK(!mlfq_check_queue_ctx(&q),
-		"nr_queued > 0 with zero weight is inconsistent");
-
-	q = make_q(4000000, 50000000000LL, 100, 0);
-	TEST_OK(mlfq_check_aggregate_bounds(&q),
-		"aggregate at the theoretical bound is accepted");
-	q.sum_w_vruntime = 50000000001LL;
-	TEST_OK(!mlfq_check_aggregate_bounds(&q),
-		"aggregate past the theoretical bound is rejected");
 }
 
 static void test_bitmap(void)
@@ -392,10 +416,10 @@ static void test_boost_eligible(void)
 int main(void)
 {
 	test_calc_delta_fair();
-	test_floor_div();
-	test_avg_vruntime();
-	test_entity_lag_clamp();
 	test_place_entity();
+	test_place_entity_weight_edges();
+	test_place_charge_replacement();
+	test_clock_advance();
 	test_ema_climb();
 	test_ema_decay();
 	test_queue_mapping();

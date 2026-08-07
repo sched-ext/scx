@@ -114,7 +114,6 @@ s32 BPF_STRUCT_OPS(mlfq_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	struct task_ctx *tctx;
 	const struct mlfq_bitmap *primary_bm;
-	const struct cpumask *idle_cpumask;
 	u32 first_cpu, waker_cpu, waker_llc;
 	s32 cpu_id = -1;
 
@@ -166,16 +165,32 @@ s32 BPF_STRUCT_OPS(mlfq_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * cache domain. The waker is the current CPU. For Q1 an
 	 * all-efficiency LLC is skipped entirely so the wakeup can land on
 	 * an idle primary of a faster LLC via the global fallbacks below.
+	 *
+	 * On a machine with a single LLC the cache domain is the whole
+	 * machine, so the kernel's idle scan serves the placement directly
+	 * instead of walking the LLC bitmap with a test-and-clear per
+	 * candidate: the kernel's scan is affinity- and SMT-aware and
+	 * claims the CPU in one call, while the bitmap walk issues one
+	 * kfunc call per candidate until it finds an idle one. The
+	 * whole-core preference for Q1 matches the step-3 fallback.
 	 */
 	waker_cpu = (u32)bpf_get_smp_processor_id();
 	if (mlfq_nr_llcs > 0 && waker_cpu < MLFQ_MAX_CPUS) {
 		waker_llc = mlfq_cpu_llc[waker_cpu];
 		if (waker_llc < MLFQ_MAX_LLCS && waker_llc < mlfq_nr_llcs &&
 		    (tctx->queue != 1 || mlfq_llc_has_primary[waker_llc])) {
-			cpu_id = mlfq_pick_idle_in_bitmap(&mlfq_llc_bitmaps,
-							  waker_llc, p,
-							  tctx->queue == 1,
-							  primary_bm);
+			if (mlfq_nr_llcs == 1) {
+				cpu_id = scx_bpf_pick_idle_cpu(p->cpus_ptr,
+							       tctx->queue == 1 ?
+							       SCX_PICK_IDLE_CORE : 0);
+				if (cpu_id < 0)
+					cpu_id = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+			} else {
+				cpu_id = mlfq_pick_idle_in_bitmap(&mlfq_llc_bitmaps,
+								  waker_llc, p,
+								  tctx->queue == 1,
+								  primary_bm);
+			}
 			if (cpu_id >= 0)
 				goto direct;
 		}
@@ -188,14 +203,16 @@ s32 BPF_STRUCT_OPS(mlfq_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	if (tctx->queue == 1) {
 		if (mlfq_primary_all) {
-			idle_cpumask = scx_bpf_get_idle_cpumask();
-			if (!bpf_cpumask_empty(idle_cpumask)) {
-				cpu_id = scx_bpf_pick_idle_cpu(p->cpus_ptr,
-							       SCX_PICK_IDLE_CORE);
-				if (cpu_id < 0)
-					cpu_id = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-			}
-			scx_bpf_put_idle_cpumask(idle_cpumask);
+			/*
+			 * pick_idle_cpu() returns an error when no idle CPU
+			 * exists, so the idle-cpumask acquire and the empty
+			 * pre-check would only add an acquire/release pair
+			 * without changing the result.
+			 */
+			cpu_id = scx_bpf_pick_idle_cpu(p->cpus_ptr,
+						       SCX_PICK_IDLE_CORE);
+			if (cpu_id < 0)
+				cpu_id = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		} else {
 			cpu_id = mlfq_pick_idle_primary(p, primary_bm);
 			if (cpu_id < 0)

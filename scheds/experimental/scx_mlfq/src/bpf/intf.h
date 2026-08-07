@@ -110,9 +110,12 @@ enum mlfq_consts {
 	 * permanently excluded. The runtime bound (mlfq_steal_scan) is
 	 * this value clamped to the CPU count in init(), so the window
 	 * never exceeds the machine size and a small machine does not
-	 * re-peek the same remote DSQs.
+	 * re-peek the same remote DSQs. The static bound also bounds the
+	 * verifier's exploration of the nested steal loops; it must stay
+	 * low enough that mlfq_dispatch() verifies within the kernel's
+	 * jump-sequence limit.
 	 */
-	MLFQ_STEAL_SCAN_MAX		= 256ULL,
+	MLFQ_STEAL_SCAN_MAX		= 64ULL,
 
 	/*
 	 * sched_ext cpuperf level (scx_bpf_cpuperf_set(), the schedutil
@@ -163,14 +166,13 @@ enum mlfq_consts {
 /* task_ctx flags */
 enum mlfq_task_flags {
 	MLFQ_TF_FIRST_RUN		= 1U << 0,	/* first placement */
-	MLFQ_TF_AGING_BOOSTED		= 1U << 1,	/* last stay aged to Q1 */
-	MLFQ_TF_ACCOUNTED		= 1U << 2,	/* in the queue aggregate */
 };
 
 /*
  * Per-task state in BPF task storage. All timestamps are scx_bpf_now()
- * nsecs. vruntime is on the per-queue clock and only meaningful relative
- * to the owning queue's zero_vruntime. The struct is 80 bytes.
+ * nsecs. vruntime is on the owning queue's virtual-time clock and is
+ * re-anchored to the queue's clock at every placement. The struct is
+ * 80 bytes.
  */
 struct task_ctx {
 	u64 vruntime;			/* last placed virtual runtime */
@@ -195,24 +197,31 @@ struct task_ctx {
 #define MLFQ_WAKE_CPU_VALID	0x02U
 
 /*
- * Per-queue aggregate state. The spinlock guarding these scalars lives in
- * a separate per-queue array map in main.bpf.c so this header stays
- * bindgen/native-safe.
+ * Per-queue virtual clock. clock is the service point the queue
+ * has reached: it advances monotonically as the queue's tasks run, and
+ * placement anchors a task's lag to it. No weighted-average aggregate is
+ * maintained because computing it needs consistent reads of two shared
+ * sums, which in BPF would require mutual exclusion; the bounded-lag
+ * theorem is instead enforced by clamping the task lag to the clock at
+ * placement, which is exact enough for the safety properties and keeps
+ * the placement lock-free.
  */
 struct queue_ctx {
-	s64 sum_w_vruntime;		/* \Sum (v_i - v0) * w_i over queued tasks */
-	u64 sum_weight;			/* \Sum w_i */
-	u64 zero_vruntime;		/* v0 base of the per-queue clock */
-	u64 nr_queued;
+	/*
+	 * Virtual clock of the queue. Read without a lock by
+	 * every placement; the aligned 64-bit load is atomic on the
+	 * supported targets, and a stale read only lowers the clock,
+	 * which the placement clamp absorbs.
+	 */
+	u64 clock;
 	u64 max_slice_ns;		/* per-queue request size */
+	u64 pad[6];			/* one queue_ctx per cacheline */
 };
 
 /* Per-CPU state, BPF_MAP_TYPE_ARRAY keyed by cpu. */
 struct mlfq_cpu_state {
 	s32 running_queue;		/* queue of the running task, 0 none */
 	u32 running_pid;
-	u64 running_vruntime;		/* local-curr fold input */
-	u32 running_weight;
 	u32 steal_scan_off;		/* rotating remote-scan start for Q2/Q3 */
 };
 
@@ -357,34 +366,6 @@ static __always_inline bool mlfq_boost_eligible(u64 sleep_ns, u64 window_ns,
 }
 
 /**
- * mlfq_div64_s64_floored - Floor division for s64.
- * @num: Dividend.
- * @den: Divisor, must be nonzero.
- *
- * C's s64 division truncates toward zero. The weighted-average virtual
- * time (fair.c avg_vruntime()) needs floor division so a negative
- * remainder pulls the average down (fair.c:819-823 sign handling). The
- * BPF backend has no signed division, so the magnitude is divided
- * unsigned and the sign restored.
- *
- * Return: floor(@num / @den).
- */
-static __always_inline s64 mlfq_div64_s64_floored(s64 num, s64 den)
-{
-	u64 unum = num < 0 ? -(u64)num : (u64)num;
-	u64 uden = den < 0 ? -(u64)den : (u64)den;
-	u64 uq = unum / uden;
-
-	if ((num < 0) != (den < 0)) {
-		/* negative truncation: round the magnitude up toward -inf */
-		if (uq * uden != unum)
-			uq++;
-		return -(s64)uq;
-	}
-	return (s64)uq;
-}
-
-/**
  * calc_delta_fair_bpf - Scale a runtime delta to virtual time.
  * @delta: Physical time in nsecs.
  * @weight: Task weight in scx scale (nice-0 = 100, min 1).
@@ -400,34 +381,13 @@ static __always_inline u64 calc_delta_fair_bpf(u64 delta, u32 weight)
 }
 
 /**
- * mlfq_avg_vruntime - Weighted-average virtual time of a queue.
- * @q: The queue.
- *
- * V_q = \Sum(v_i * w_i) / \Sum w_i, computed in the relative form against
- * q->zero_vruntime so every key * weight product stays within s64: the
- * base is advanced on every place/dequeue event, keeping
- * |v_i - v0| within a few lag bounds. Empty queue evaluates to the base.
- *
- * Return: The weighted-average virtual time.
- */
-static __always_inline u64 mlfq_avg_vruntime(const struct queue_ctx *q)
-{
-	s64 avg;
-
-	if (q->sum_weight == 0)
-		return q->zero_vruntime;
-
-	avg = mlfq_div64_s64_floored(q->sum_w_vruntime, (s64)q->sum_weight);
-	return q->zero_vruntime + avg;
-}
-
-/**
- * mlfq_lag_limit - Bound for |lag| (fair.c entity_lag()).
+ * mlfq_lag_limit - Placement lag bound (fair.c entity_lag()).
  * @q: The queue.
  * @weight: Task weight.
  *
- * limit = calc_delta_fair(max_slice + TICK, weight): a task can be at most
- * one request ahead of, or one request + tick behind, the fair point.
+ * limit = calc_delta_fair(max_slice + TICK, weight): a task is placed at
+ * most one request plus one tick behind the queue's virtual clock, the
+ * bounded-lag horizon of entity_lag() in kernel/sched/fair.c.
  *
  * Return: The lag bound in virtual-time nsecs.
  */
@@ -437,88 +397,77 @@ static __always_inline u64 mlfq_lag_limit(const struct queue_ctx *q, u32 weight)
 }
 
 /**
- * mlfq_entity_lag_clamp - Clamp a task's virtual lag.
+ * mlfq_queue_advance_clock - Advance a queue's virtual clock.
  * @q: The queue.
- * @vruntime: The task's virtual runtime.
- * @weight: The task's weight.
+ * @vruntime: The virtual runtime just charged for the queue.
  *
- * lag = V_q - vruntime, clamped to [-limit, limit] (fair.c:852-861).
- *
- * Return: The clamped lag.
+ * The clock follows the service given to the queue: it is advanced to
+ * @vruntime whenever @vruntime is ahead of it, as a monotone max update.
+ * The clock never moves backward: the compare-and-swap stores only when
+ * the clock still holds the value the advance read, and the winner of a
+ * contended update is the store that lands first, not necessarily the
+ * largest one. A losing update can therefore leave the clock behind the
+ * true service point by at most the virtual-time spread of the
+ * concurrent updates; the placement clamp bounds the error this creates
+ * and the next advance heals it. The single-shot compare-and-swap never
+ * retries, so the update cost is constant and contention degrades to a
+ * stale clock, never to a convoy.
  */
-static __always_inline s64 mlfq_entity_lag_clamp(const struct queue_ctx *q,
-						 u64 vruntime, u32 weight)
+static __always_inline void mlfq_queue_advance_clock(struct queue_ctx *q,
+						     u64 vruntime)
 {
-	u64 vq = mlfq_avg_vruntime(q);
-	s64 lag = (s64)(vq - vruntime);
-	s64 limit = (s64)mlfq_lag_limit(q, weight);
+	u64 cur = q->clock;
 
-	if (lag > limit)
-		return limit;
-	if (lag < -limit)
-		return -limit;
-	return lag;
+	if (mlfq_time_before(cur, vruntime))
+		__sync_val_compare_and_swap(&q->clock, cur, vruntime);
 }
 
 /**
  * mlfq_place_entity - Place a task on the virtual-time timeline.
  * @q: The queue being placed into.
  * @tctx: The task being placed.
- * @inflate: True for wakeup/reenqueue placements, which preserve lag by
- *	inflating it (fair.c place_entity()); false for first placement.
  *
- * EEVDF placement:
+ * EEVDF placement against the queue's virtual clock:
  *
- *   V_q       = avg_vruntime(q)
- *   lag       = clamp(V_q - vruntime, -limit, limit)
- *   if (inflate) and W_q > 0:
- *       lag = lag * (W_q + w) / W_q          # lag-conserving inflation
- *   vruntime_new = V_q - lag
- *   if (vruntime_new > V_q) vruntime_new = V_q   # eligibility clamp
- *   vslice = calc_delta_fair(slice_q, weight)
+ *   limit        = calc_delta_fair(max_slice + TICK, weight)
+ *   lag          = clamp(clock - vruntime, 0, limit)
+ *   vruntime_new = clock - lag       (== clamp(vruntime, clock - limit, clock))
+ *   vslice       = calc_delta_fair(slice_q, weight)
  *   if (FIRST_RUN) vslice /= 2
- *   deadline = vruntime_new + vslice
+ *   deadline     = vruntime_new + vslice
  *
- * The eligibility clamp is DELAY_ZERO semantics: a task ahead of the fair
- * point is placed at V_q (negative lag credit zeroed), so every queued
- * task is eligible by construction and min-deadline selection is EEVDF
- * selection over the queued set.
+ * A task that has fallen behind the service point is re-anchored within
+ * one lag limit of the clock, the bounded-lag property of fair.c
+ * entity_lag(); a task that is ahead of the clock is placed at the
+ * clock itself, the fair.c DELAY_ZERO semantics that do not carry
+ * leading credit. The stored lag is therefore bounded in [0, limit], and
+ * every queued task is eligible by construction, so min-deadline
+ * selection over the queue DSQs is EEVDF selection over the queued set.
  *
  * Updates tctx->vruntime, tctx->vlag (>= 0) and tctx->deadline.
  *
  * Return: The placement deadline, also stored in tctx->deadline.
  */
 static __always_inline u64 mlfq_place_entity(const struct queue_ctx *q,
-					     struct task_ctx *tctx, bool inflate)
+					     struct task_ctx *tctx)
 {
-	u64 vq = mlfq_avg_vruntime(q);
 	u64 w = tctx->weight;
-	s64 limit = (s64)mlfq_lag_limit(q, (u32)w);
-	s64 lag = mlfq_entity_lag_clamp(q, tctx->vruntime, (u32)w);
-	u64 vslice, vruntime_new, deadline;
-
-	if (inflate && q->sum_weight > 0) {
-		u64 wsum = q->sum_weight + w;
-
-		lag = mlfq_div64_s64_floored(lag * (s64)wsum,
-					     (s64)q->sum_weight);
-	}
-
-	vruntime_new = vq - (u64)lag;
+	u64 limit = mlfq_lag_limit(q, (u32)w);
+	u64 clock = q->clock;
+	u64 lag, vslice, vruntime_new, deadline;
 
 	/*
-	 * Eligibility clamp (DELAY_ZERO semantics): a task is never placed
-	 * ahead of the fair point or more than one lag bound behind it. The
-	 * signed distance is evaluated in wrapping space, so an inflated lag
-	 * that would push the position past the u64 wrap point is clamped
-	 * back to V_q instead of landing near the boundary (which would
-	 * corrupt the aggregate keys).
+	 * The lag is measured in the wrapping order of the virtual-time
+	 * clock: a task ahead of the clock sits at it (fair.c
+	 * DELAY_ZERO), a task behind is clamped to the clock minus
+	 * the bound. The wrapping-aware comparison keeps the u64 epoch
+	 * boundary indistinguishable from any other point.
 	 */
-	if ((s64)(vq - vruntime_new) < 0 ||
-	    (s64)(vq - vruntime_new) > (s64)limit) {
-		vruntime_new = vq;
-		lag = 0;
-	}
+	lag = mlfq_time_before(clock, tctx->vruntime) ? 0 : clock - tctx->vruntime;
+	if (lag > limit)
+		lag = limit;
+
+	vruntime_new = clock - lag;
 
 	vslice = calc_delta_fair_bpf(q->max_slice_ns, (u32)w);
 	/* fair.c PLACE_DEADLINE_INITIAL: new tasks start with half a slice. */
@@ -528,13 +477,14 @@ static __always_inline u64 mlfq_place_entity(const struct queue_ctx *q,
 	deadline = vruntime_new + vslice;
 	/*
 	 * A deadline that lands exactly on the wrap point computes to zero;
-	 * zero is a valid wrapped position (the fair point), so move it off
-	 * the sentinel value used for placement failures.
+	 * zero is the sentinel for a failed placement, so move the wrapped
+	 * deadline to one, which is positionally identical in the wrapping
+	 * order the DSQ rbtree uses.
 	 */
 	if (!deadline)
 		deadline = 1;
 	tctx->vruntime = vruntime_new;
-	tctx->vlag = lag;
+	tctx->vlag = (s64)lag;
 	tctx->deadline = deadline;
 
 	return deadline;
@@ -746,26 +696,6 @@ static __always_inline bool mlfq_check_weight(u32 weight)
 static __always_inline bool mlfq_check_queued_vlag(s64 vlag)
 {
 	return vlag >= 0;
-}
-
-static __always_inline bool mlfq_check_queue_ctx(const struct queue_ctx *q)
-{
-	if (q->nr_queued == 0)
-		return q->sum_weight == 0;
-	return q->sum_weight > 0;
-}
-
-/*
- * The aggregate magnitude is bounded by the worst-case key (one lag limit
- * at weight 1) times the total weight; anything beyond that is an s64
- * risks exceeding the s64 range.
- */
-static __always_inline bool mlfq_check_aggregate_bounds(const struct queue_ctx *q)
-{
-	u64 limit_max = calc_delta_fair_bpf(q->max_slice_ns + MLFQ_TICK_NS, 1);
-	s64 bound = (s64)(limit_max * q->sum_weight);
-
-	return q->sum_w_vruntime >= -bound && q->sum_w_vruntime <= bound;
 }
 #endif /* MLFQ_CHECK */
 

@@ -22,3 +22,6 @@ simplelog = "0.12"
 
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.2" }
+
+[features]
+enable_backtrace = []

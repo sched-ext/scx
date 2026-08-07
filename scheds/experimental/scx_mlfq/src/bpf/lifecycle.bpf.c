@@ -4,13 +4,12 @@
  *
  * Task lifecycle, included by main.bpf.c via #include.
  *
- * init_task/enable initialize the task context; running() drops the task
- * from its queue aggregate and records the local-curr fold inputs;
- * stopping() advances vruntime and the EMA gauge; dequeue() drops the
- * aggregate contribution of a task that blocked while queued; exit_task()
- * removes any residual aggregate contribution and deletes the task
- * storage; cpu_release() re-enqueues local-DSQ leftovers when a CPU
- * leaves the scheduler.
+ * init_task/enable initialize the task context; running() records the
+ * running task's queue and pid, the wakeup-preemption inputs;
+ * stopping() charges vruntime and the EMA gauge for the run segment and
+ * advances the owning queue's virtual clock with the virtual time just
+ * charged; exit_task() deletes the task storage; cpu_release() re-enqueues
+ * local-DSQ leftovers when a CPU leaves the scheduler.
  */
 
 static __always_inline void mlfq_reset_task_ctx(struct task_ctx *tctx,
@@ -60,7 +59,6 @@ void BPF_STRUCT_OPS(mlfq_running, struct task_struct *p)
 {
 	struct task_ctx *tctx;
 	struct mlfq_cpu_state *cpu;
-	struct queue_ctx *q;
 	s32 cpu_id = bpf_get_smp_processor_id();
 
 	tctx = mlfq_lookup_task_ctx(p);
@@ -68,23 +66,15 @@ void BPF_STRUCT_OPS(mlfq_running, struct task_struct *p)
 		return;
 
 	/*
-	 * The task left its queue to run: drop it from the aggregate so
-	 * V_q reflects the queued set, and record the running task's
-	 * EEVDF state -- the local-curr fold inputs and the deadline the
-	 * wakeup preemption decision compares against. Fast-path and
-	 * migration-disabled tasks were never accounted and are skipped
-	 * by the ACCOUNTED flag.
+	 * Record the running task's queue and pid. The wakeup-preemption
+	 * decision in enqueue() compares a wakeup's queue against the
+	 * queue of the task running on the CPU it was last running on, so
+	 * the record is refreshed on every context switch.
 	 */
-	q = mlfq_lookup_queue(tctx->queue);
-	if (q)
-		mlfq_queue_del_task(tctx->queue, q, tctx);
-
 	cpu = mlfq_lookup_cpu_state(cpu_id);
 	if (cpu) {
 		cpu->running_queue = tctx->queue;
 		cpu->running_pid = p->pid;
-		cpu->running_vruntime = tctx->vruntime;
-		cpu->running_weight = tctx->weight;
 	}
 
 	tctx->last_run_at = scx_bpf_now();
@@ -113,6 +103,7 @@ void BPF_STRUCT_OPS(mlfq_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *tctx;
 	struct mlfq_cpu_state *cpu;
+	struct queue_ctx *q;
 	u64 now, delta = 0;
 
 	tctx = mlfq_lookup_task_ctx(p);
@@ -128,6 +119,18 @@ void BPF_STRUCT_OPS(mlfq_stopping, struct task_struct *p, bool runnable)
 		/* vruntime advance + EMA climb for this run segment. */
 		mlfq_update_vruntime(tctx, delta);
 		mlfq_ema_climb_task(tctx, delta);
+		/*
+		 * Advance the owning queue's virtual clock with the
+		 * virtual time just charged: the clock follows the
+		 * service given to the queue, and placement anchors new
+		 * arrivals to it. The queue lookup can fail when the task's
+		 * queue state was not carried over, which is tolerated: the
+		 * clock only needs to be near the service point and the
+		 * placement clamp bounds the staleness.
+		 */
+		q = mlfq_lookup_queue(tctx->queue);
+		if (q)
+			mlfq_queue_advance_clock(q, tctx->vruntime);
 		__sync_fetch_and_add(&mlfq_stats.total_runtime, delta);
 	}
 
@@ -135,20 +138,15 @@ void BPF_STRUCT_OPS(mlfq_stopping, struct task_struct *p, bool runnable)
 		tctx->last_sleep_at = now;
 
 	/*
-	 * Keep the fold inputs current while the task remains runnable
-	 * (preempted); clear them when it goes to sleep so V_q never folds
-	 * a sleeping task.
+	 * Keep the running-task record while the task remains runnable
+	 * (preempted); clear it when the task goes to sleep so the
+	 * wakeup-preemption decision never compares against a stale
+	 * record.
 	 */
 	cpu = mlfq_lookup_cpu_state(bpf_get_smp_processor_id());
-	if (cpu) {
-		if (runnable) {
-			cpu->running_vruntime = tctx->vruntime;
-		} else {
-			cpu->running_queue = 0;
-			cpu->running_pid = 0;
-			cpu->running_vruntime = 0;
-			cpu->running_weight = 0;
-		}
+	if (cpu && !runnable) {
+		cpu->running_queue = 0;
+		cpu->running_pid = 0;
 	}
 
 	/* Diagnostic runnable count; guard against wrap-around. */
@@ -156,46 +154,14 @@ void BPF_STRUCT_OPS(mlfq_stopping, struct task_struct *p, bool runnable)
 		__sync_fetch_and_add(&mlfq_stats.on_cpu, 1);
 }
 
-void BPF_STRUCT_OPS(mlfq_dequeue, struct task_struct *p, u64 deq_flags)
-{
-	struct task_ctx *tctx;
-	struct queue_ctx *q;
-
-	tctx = mlfq_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	/*
-	 * A task that blocks while queued is removed from its DSQ by the
-	 * kernel before ops.dequeue runs, so dropping the aggregate
-	 * contribution here keeps the aggregate mirroring DSQ membership;
-	 * the flag-guarded del is idempotent for tasks that were never
-	 * accounted (local-DSQ/fast-path tasks).
-	 */
-	q = mlfq_lookup_queue(tctx->queue);
-	if (q)
-		mlfq_queue_del_task(tctx->queue, q, tctx);
-}
-
 void BPF_STRUCT_OPS(mlfq_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
 	struct task_ctx *tctx;
-	struct queue_ctx *q;
-	u8 qid;
 
 	tctx = mlfq_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-
-	/*
-	 * If the task exits while queued, drop its residual aggregate
-	 * contribution so nr_queued == 0 <=> sum_weight == 0 holds.
-	 */
-	qid = tctx->queue;
-	q = mlfq_lookup_queue(qid);
-	if (q)
-		mlfq_queue_del_task(qid, q, tctx);
 
 	bpf_task_storage_delete(&task_ctx_stor, p);
 }

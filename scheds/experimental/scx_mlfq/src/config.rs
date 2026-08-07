@@ -13,9 +13,9 @@
 //! `src/bpf/main.bpf.c` (see `src/bpf/intf.h` for the compile-time
 //! defaults, which are the source of truth for every value here).
 //!
-//! `ConfigBuilder` assembles a `Config` from optional setters. Every
-//! setter is optional and `build()` validates the assembled values, so an
-//! invalid intermediate state can never be constructed.
+//! The scheduler is knob-free: the production path uses `Config::default()`
+//! validated by `Config::validate()`. `ConfigBuilder` exists only to drive
+//! the validation contract from the unit tests.
 
 use anyhow::bail;
 use anyhow::Context;
@@ -143,9 +143,10 @@ impl Config {
     /// relies on (`src/bpf/intf.h`).
     ///
     /// An invalid configuration is a programming error, not a runtime
-    /// condition: `ConfigBuilder::build()` enforces it before any value is
-    /// written into rodata.
-    fn validate(&self) -> Result<()> {
+    /// condition: the production path validates `Config::default()` before
+    /// any value is written into rodata, and the unit tests drive the same
+    /// contract through `ConfigBuilder::build()`.
+    pub fn validate(&self) -> Result<()> {
         if self.q1_slice_ns == 0 || self.q2_slice_ns == 0 || self.q3_slice_ns == 0 {
             bail!(
                 "queue slices must be non-zero (got Q1={} Q2={} Q3={})",
@@ -298,6 +299,12 @@ impl Config {
 /// Every setter is optional; unset fields fall back to the `intf.h`
 /// defaults. `build()` validates the result and returns an error for any
 /// configuration that would break a BPF invariant.
+///
+/// Production code never uses this type: the scheduler is deliberately
+/// knob-free, so `main.rs` applies `Config::default()` directly. The
+/// builder lives under `#[cfg(test)]` and exercises every field through
+/// the validation contract.
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct ConfigBuilder {
     q1_slice_ns: Option<u64>,
@@ -320,12 +327,10 @@ pub struct ConfigBuilder {
 
 /*
  * The setters assemble a Config from the intf.h defaults and run it
- * through build()'s validation. The scheduler is intentionally knob-free,
- * so the production path always uses the defaults. The setters are
- * exercised by the unit tests, which drive every field through the
- * validation contract.
+ * through build()'s validation. Test-only: the production path always
+ * uses Config::default().
  */
-#[allow(dead_code)]
+#[cfg(test)]
 impl ConfigBuilder {
     /// Set the Q1 (interactive) request size in nsecs.
     pub fn q1_slice_ns(mut self, v: u64) -> Self {

@@ -111,8 +111,6 @@ static __always_inline void mlfq_wakeup_classify(const struct task_struct *p,
 {
 	u64 sleep_ns = 0, base_q;
 
-	tctx->flags &= ~MLFQ_TF_AGING_BOOSTED;
-
 	if (tctx->last_sleep_at && mlfq_time_before(tctx->last_sleep_at, now)) {
 		sleep_ns = now - tctx->last_sleep_at;
 		tctx->ema = mlfq_ema_decay(tctx->ema, sleep_ns,
@@ -137,8 +135,8 @@ static __always_inline void mlfq_wakeup_classify(const struct task_struct *p,
 	 * hysteresis.
 	 *
 	 * SCHED_IDLE tasks are forced to Q3 by mlfq_apply_sched_idle, so
-	 * a boost would burn the rate-limit budget and inflate the counter
-	 * to no effect; it is gated on the task policy.
+	 * a boost would burn the rate-limit budget and push the counter
+	 * up to no effect; it is gated on the task policy.
 	 */
 	if (p->policy != MLFQ_SCHED_IDLE &&
 	    mlfq_boost_eligible(sleep_ns, mlfq_short_sleep_ns,
@@ -183,7 +181,6 @@ static __always_inline void mlfq_wakeup_classify(const struct task_struct *p,
 static __always_inline void mlfq_runout_classify(const struct task_struct *p,
 						 struct task_ctx *tctx)
 {
-	tctx->flags &= ~MLFQ_TF_AGING_BOOSTED;
 	tctx->wake_cnt = 0;
 
 	if (mlfq_demotion_blocked(p))
