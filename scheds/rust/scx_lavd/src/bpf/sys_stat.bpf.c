@@ -91,6 +91,14 @@ static void init_sys_stat_ctx(void)
 	WRITE_ONCE(sys_stat.last_update_clk, c->now);
 }
 
+/* Caller must hold the BPF RCU read lock. */
+static bool is_cpu_idle_now(s32 cpu)
+{
+	struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+
+	return curr && curr->pid == 0;
+}
+
 static void collect_sys_stat(void)
 {
 	struct sys_stat_ctx *c = &ctx;
@@ -533,6 +541,8 @@ static void collect_sys_stat(void)
 		struct bpf_cpumask *steady;
 		struct cpdom_ctx *cpu_cpdomc;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		bool cpu_idle;
+
 		if (!cpuc) {
 			c->compute_total_wall = 0;
 			break;
@@ -565,6 +575,17 @@ static void collect_sys_stat(void)
 			else
 				bpf_cpumask_clear_cpu(cpu, steady);
 		}
+
+		/*
+		 * Repair idle hints after missed transitions or unused claims.
+		 * Snapshots race transitions, so enqueue kicks independently.
+		 */
+		cpu_idle = cpuc->is_online && is_cpu_idle_now(cpu);
+		WRITE_ONCE(cpuc->in_idle, cpu_idle);
+		if (cpu_idle)
+			set_cpu_idle_state(cpuc, cpu);
+		else
+			clear_cpu_idle_state(cpuc, cpu);
 		bpf_rcu_read_unlock();
 
 		/*

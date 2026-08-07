@@ -283,6 +283,7 @@ struct cpdom_ctx {
 	u8	is_stealee;			    /* stealer domain should steal tasks from this domain */
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
+	volatile u32	nr_idle_cpus;		    /* approximate idle count */
 	u64	qload_invr;			    /* queued load: sum of task_load_metric() for all queued tasks, tracked atomically */
 	u64	load_invr;			    /* domain load for balancing: avg_util_invr_sum + qload_invr */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
@@ -350,6 +351,8 @@ static __always_inline void decrement_stealer_budget(struct cpdom_ctx *cpdomc,
 
 extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
+extern struct bpf_cpumask	cpdom_idle_cpumask[LAVD_CPDOM_MAX_NR];
+extern struct bpf_cpumask	cpdom_idle_smtmask[LAVD_CPDOM_MAX_NR];
 extern int			nr_cpdoms;
 
 typedef struct task_ctx __arena task_ctx;
@@ -386,7 +389,8 @@ struct cpu_ctx {
 	u8		llc_id;		/* llc domain id */
 	u8		cpdom_alt_id;	/* compute domain id of alternative type */
 	u8		is_online;	/* is this CPU online? */
-	u8		__pad0[2];
+	volatile u8	in_idle;	/* approximate idle hint; never gates wakeups */
+	u8		__pad0;
 	volatile s32	futex_op;	/* futex op in futex V1 */
 
 	/* --- cacheline 1 boundary (64 bytes): write accumulators --- */
@@ -547,10 +551,6 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *a_mask;	/* scratch: task & active */
 	struct bpf_cpumask __kptr *o_mask;	/* scratch: task & overflow */
 	struct bpf_cpumask __kptr *temp_mask;	/* scratch: general-purpose */
-	struct bpf_cpumask __kptr *i_mask;	/* scratch: task & idle */
-	struct bpf_cpumask __kptr *ia_mask;	/* scratch: idle & active */
-	struct bpf_cpumask __kptr *io_mask;	/* scratch: idle & overflow */
-	struct bpf_cpumask __kptr *iat_mask;	/* scratch: idle & active & turbo */
 
 	struct ravg_data avg_irq_steal_ravg;	/* Running average of IRQ steal utilization using ravg */
 	struct ravg_data avg_util_ravg;	/* Running average of CPU utilization using ravg */
@@ -837,17 +837,7 @@ struct pick_ctx {
 	struct cpu_ctx *cpuc_cur;
 	struct bpf_cpumask *a_mask; /* task's active mask */
 	struct bpf_cpumask *o_mask; /* task's overflow mask */
-	/*
-	 * Additional input arguments for init_idle_i_mask().
-	 */
-	const struct cpumask *i_mask;
-	/*
-	 * Additional input arguments for init_idle_ato_masks().
-	 * Additional input arguments for pick_idle_cpu_at_cpdom().
-	 */
-	struct bpf_cpumask *ia_mask;
-	struct bpf_cpumask *iat_mask;
-	struct bpf_cpumask *io_mask;
+	/* Scratch mask for pick_idle_cpu_at_cpdom(). */
 	struct bpf_cpumask *temp_mask;
 	/*
 	 * Flags.
@@ -855,15 +845,14 @@ struct pick_ctx {
 	bool a_empty:1;
 	bool o_empty:1;
 	bool is_task_big:1;
-	bool i_empty:1;
-	bool ia_empty:1;
-	bool iat_empty:1;
-	bool io_empty:1;
 };
 
 
 s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle);
+void set_cpu_idle_state(struct cpu_ctx *cpuc, s32 cpu);
+bool clear_cpu_idle_state(struct cpu_ctx *cpuc, s32 cpu);
+bool claim_idle_cpu(s32 cpu);
 
 bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id);
 

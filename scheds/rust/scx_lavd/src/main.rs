@@ -740,8 +740,8 @@ impl<'a> Scheduler<'a> {
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
-        // Replenishment wakes dispatch through the built-in idle tracking.
-        rodata.bw_kick_builtin_idle = true;
+        // Use LAVD's idle masks for replenishment kicks.
+        rodata.bw_kick_builtin_idle = false;
 
         // Fail hard if cpu.max was explicitly requested but the kernel lacks
         // ops.cgroup_set_bandwidth support; setup_cgroup_bw() otherwise disables
@@ -775,10 +775,10 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // Use ops.update_idle() instead of builtin idle tracking.
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
-            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
+            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED;
 
         if opts.partial {
             skel.struct_ops.lavd_ops_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
