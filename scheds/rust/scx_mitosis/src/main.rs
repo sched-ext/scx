@@ -8,8 +8,8 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 mod cell_manager;
-mod mitosis_topology_utils;
 mod stats;
+mod topology;
 mod undefok_flags;
 
 use cell_manager::{CellManager, CpuAssignment};
@@ -58,6 +58,7 @@ use tracing_subscriber::filter::EnvFilter;
 
 use stats::CellMetrics;
 use stats::Metrics;
+use topology::MitosisTopology;
 
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
@@ -411,21 +412,10 @@ impl<'a> Scheduler<'a> {
             v => skel.struct_ops.mitosis_mut().flags |= v,
         }
 
-        // Populate LLC topology arrays before load (data section is only writable before load)
-        mitosis_topology_utils::populate_topology_maps(
-            &mut skel,
-            mitosis_topology_utils::MapKind::CpuToLLC,
-            &topology,
-            None,
-        )
-        .context("populating CPU-to-LLC topology map")?;
-        mitosis_topology_utils::populate_topology_maps(
-            &mut skel,
-            mitosis_topology_utils::MapKind::LLCToCpus,
-            &topology,
-            None,
-        )
-        .context("populating LLC-to-CPUs topology map")?;
+        let mitosis_topology = MitosisTopology::new(&topology);
+        mitosis_topology
+            .apply(&mut skel)
+            .context("mitosis_topology.apply")?;
 
         let skel = scx_ops_load!(skel, mitosis, uei).context("loading BPF skeleton")?;
 
@@ -435,18 +425,13 @@ impl<'a> Scheduler<'a> {
 
         let parent_cgroup = Self::managed_cell_parent(opts)?;
         let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
-        let cpu_to_llc: HashMap<usize, usize> = topology
-            .all_cpus
-            .iter()
-            .map(|(&cpu, c)| (cpu, c.llc_id))
-            .collect();
         let cell_manager = CellManager::new(
             parent_cgroup,
             MAX_CELLS as u32,
             topology.span.clone(),
             exclude,
             opts.cell0_min_cpus,
-            cpu_to_llc,
+            mitosis_topology.cpu_to_llc.into_iter().collect(),
         )
         .with_context(|| format!("initializing cell manager for cgroup {}", parent_cgroup))?;
 
