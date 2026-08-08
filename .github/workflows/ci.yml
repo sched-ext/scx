@@ -228,7 +228,7 @@ jobs:
         scheds:
           - flash beerland bpfland cosmos
           - layered p2dq lavd mitosis
-          - rlfifo rustland tickless
+          - rlfifo rustland tickless mlfq
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
