@@ -263,6 +263,19 @@ typedef struct scx_cgroup_llc_ctx __arena scx_cgroup_llc_ctx_t;
 static struct scx_cgroup_bw_config cbw_config;
 
 /*
+ * Load-time cap on the number of managed cgroups. Defaults to CBW_NR_CGRP_MAX;
+ * userspace may set this before load and resize the backing maps to match
+ * (cbw_cgrp_map, cbw_cgrp_llc_map, cbw_cgroup_ids, cbw_throttled_cgroup_ids).
+ */
+const volatile u32 nr_cgrp_max = CBW_NR_CGRP_MAX;
+
+/*
+ * Load-time cap on cgroup nesting depth. Defaults to CBW_CGRP_TREE_HEIGHT_MAX;
+ * userspace may set this before load and resize tree_levels_map to match.
+ */
+const volatile u32 tree_height_max = CBW_CGRP_TREE_HEIGHT_MAX;
+
+/*
  * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer.
  *
  * scx_cgroup_ctx objects are allocated in the BPF arena via
@@ -394,19 +407,17 @@ static inline void cbw_free_cgx(scx_cgroup_ctx_t *cgx)
 }
 
 /*
- * A per-CPU map to store levels in traversing a cgroup hierarchy while
- * updating runtime_total_sloppy. The per-CPU map is used to reduce the
- * stack size of cbw_update_runtime_total_sloppy().
+ * A per-CPU map of per-level accumulators used while traversing a cgroup
+ * hierarchy in cbw_update_runtime_total_sloppy(). Keyed by cgroup level, it
+ * keeps the aggregation off the (limited) BPF stack. Sized to
+ * CBW_CGRP_TREE_HEIGHT_MAX by default; userspace may resize it to
+ * tree_height_max before load.
  */
-struct tree_levels {
-	s64		levels[CBW_CGRP_TREE_HEIGHT_MAX];
-};
-
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
-	__type(value, struct tree_levels);
-	__uint(max_entries, 1);
+	__type(value, s64);
+	__uint(max_entries, CBW_CGRP_TREE_HEIGHT_MAX);
 } tree_levels_map SEC(".maps");
 
 /*
@@ -414,7 +425,12 @@ struct {
  * cgroups without holding an RCU lock.
  */
 static u64		cbw_nr_cgroups;
-static u64		cbw_cgroup_ids[CBW_NR_CGRP_MAX];
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, CBW_NR_CGRP_MAX);
+} cbw_cgroup_ids SEC(".maps");
 
 /*
  * Number of allocated cgroup contexts, i.e. the live occupancy of
@@ -428,7 +444,12 @@ static u64		cbw_nr_cgx;
 /*
  * An array of throttled cgroups that need to be reenqueued.
  */
-static u64		cbw_throttled_cgroup_ids[CBW_NR_CGRP_MAX];
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, CBW_NR_CGRP_MAX);
+} cbw_throttled_cgroup_ids SEC(".maps");
 
 /*
  * Timer to replenish time budget for all cgroups periodically.
@@ -1122,22 +1143,22 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	/*
 	 * Abort past the static limits rather than run a cgroup unmanaged.
 	 */
-	if (cgrp->level >= CBW_CGRP_TREE_HEIGHT_MAX) {
+	if (cgrp->level >= tree_height_max) {
 		cbw_err("cgroup %llu level %d exceeds max tree height %d; aborting",
-			cgrp_id, cgrp->level, CBW_CGRP_TREE_HEIGHT_MAX);
+			cgrp_id, cgrp->level, tree_height_max);
 		return -E2BIG;
 	}
 
-	if (READ_ONCE(cbw_nr_cgx) >= CBW_NR_CGRP_MAX) {
+	if (READ_ONCE(cbw_nr_cgx) >= nr_cgrp_max) {
 		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
-			cgrp_id, CBW_NR_CGRP_MAX);
+			cgrp_id, nr_cgrp_max);
 		return -ENOSPC;
 	}
-	if (__sync_fetch_and_add(&cbw_nr_cgx, 1) >= CBW_NR_CGRP_MAX) {
+	if (__sync_fetch_and_add(&cbw_nr_cgx, 1) >= nr_cgrp_max) {
 		/* Raced past the limit after the fast-path check; give the slot back. */
 		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
-			cgrp_id, CBW_NR_CGRP_MAX);
+			cgrp_id, nr_cgrp_max);
 		return -ENOSPC;
 	}
 
@@ -1390,33 +1411,41 @@ s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 }
 
 static
-struct tree_levels *get_clean_tree_levels(void)
+s64 *tree_level(u32 level)
 {
-	const u32 idx = 0;
-	struct tree_levels *tree;
+	return bpf_map_lookup_elem(&tree_levels_map, &level);
+}
 
-	tree = bpf_map_lookup_elem(&tree_levels_map, &idx);
-	if (tree)
-		__builtin_memset(tree, 0, sizeof(*tree));
+static
+int clean_tree_levels(void)
+{
+	s64 *lv;
+	u32 l;
 
-	return tree;
+	bpf_for(l, 0, tree_height_max) {
+		lv = bpf_map_lookup_elem(&tree_levels_map, &l);
+		if (!lv)
+			return -ENOMEM;
+		*lv = 0;
+	}
+
+	return 0;
 }
 
 static
 int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 {
-	u32 cur_level, prev_level = CBW_CGRP_TREE_HEIGHT_MAX;
+	u32 cur_level, prev_level = tree_height_max;
 	struct cgroup_subsys_state *start_css, *pos;
 	scx_cgroup_ctx_t *cur_cgx = NULL;
-	struct tree_levels *tree;
 	struct cgroup *cur_cgrp;
-	s64 rt_llcx;
+	s64 rt_llcx, *lv;
 	int ret = 0;
 
 
-	tree = get_clean_tree_levels();
-	if (!tree)
-		return -ENOMEM;
+	ret = clean_tree_levels();
+	if (ret)
+		return ret;
 
 	/*
 	 * Suppose the following cgroup hierarchy with cgroup name and level.
@@ -1456,11 +1485,11 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		cur_level = cur_cgrp->level;
 		if (can_loop && cur_level == 0) /* cgroup_root */
 			break;
-		if (cur_level >= CBW_CGRP_TREE_HEIGHT_MAX) {
+		if (cur_level >= tree_height_max) {
 			ret = -E2BIG;
 			break;
 		}
-		if (prev_level == CBW_CGRP_TREE_HEIGHT_MAX)
+		if (prev_level == tree_height_max)
 			prev_level = cur_level;
 
 		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
@@ -1513,9 +1542,11 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		 * levels[prev_level] = 0).
 		 */
 		else if (prev_level > cur_level) {
+			lv = tree_level(prev_level);
 			WRITE_ONCE(cur_cgx->runtime_total_sloppy,
-				   tree->levels[prev_level] + rt_llcx);
-			tree->levels[prev_level] = 0;
+				   (lv ? *lv : 0) + rt_llcx);
+			if (lv)
+				*lv = 0;
 		}
 
 		/*
@@ -1528,8 +1559,10 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 			WRITE_ONCE(cur_cgx->is_throttled, true);
 
 		/* Aggregate this cgroup's runtime_total_sloppy to the level. */
-		tree->levels[cur_level] += READ_ONCE(cur_cgx->runtime_total_sloppy);
-		
+		lv = tree_level(cur_level);
+		if (lv)
+			*lv += READ_ONCE(cur_cgx->runtime_total_sloppy);
+
 		/* Update the previous level. */
 		prev_level = cur_level;
 
@@ -1618,7 +1651,7 @@ u64 cbw_throttle_cgroups(struct cgroup *cgrp)
 		 * be throttled; so this cgroup should be throttled too.
 		 */
 		anc_css = pos->parent;
-		bpf_for(i, 0, CBW_CGRP_TREE_HEIGHT_MAX) {
+		bpf_for(i, 0, tree_height_max) {
 			if (!anc_css)
 				break;
 			cur_anc_cgrp = anc_css->cgroup;
@@ -2290,6 +2323,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	s64 interval, jitter, period;
 	int i, ret;
 	s32 idle_cpu;
+	u32 slot;
 	bool is_throttled;
 
 	/* Attach the timer function to the BPF area context. */
@@ -2370,8 +2404,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 		}
 
-		ids = MEMBER_VPTR(cbw_cgroup_ids,
-				  [cbw_nr_cgroups]);
+		slot = cbw_nr_cgroups;
+		ids = bpf_map_lookup_elem(&cbw_cgroup_ids, &slot);
 		if (!ids) {
 			cbw_err("Failed to fetch a cgroup table.");
 			continue;
@@ -2398,7 +2432,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	cbw_dbg("Start replenish %llu cgroups.", cbw_nr_cgroups);
 	nr_throttled = 0;
 	bpf_for(i, 0, cbw_nr_cgroups) {
-		ids = MEMBER_VPTR(cbw_cgroup_ids, [i]);
+		slot = i;
+		ids = bpf_map_lookup_elem(&cbw_cgroup_ids, &slot);
 		if (!ids) {
 			cbw_err("Failed to fetch a cgroup table.");
 			continue;
@@ -2444,8 +2479,8 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 		 * observes a consistent cbw_throttled_cgroup_ids[].
 		 */
 		if (cbw_replenish_cgroup(cur_cgx, now)) {
-			ids = MEMBER_VPTR(cbw_throttled_cgroup_ids,
-					  [nr_throttled]);
+			slot = nr_throttled;
+			ids = bpf_map_lookup_elem(&cbw_throttled_cgroup_ids, &slot);
 			if (!ids) {
 				cbw_err("Failed to fetch a throttled cgroup table.");
 				continue;
@@ -2640,6 +2675,7 @@ int scx_cgroup_bw_reenqueue(void)
 	int i, idx, n, nr_enq = 0;
 	u64 nuance, nuance2, nr_tcgs;
 	u64 *ids, cur_cgrp_id;
+	u32 slot;
 
 	/*
 	 * If there are throttled tasks in BTQ, let’s reenqueue them.
@@ -2663,7 +2699,8 @@ int scx_cgroup_bw_reenqueue(void)
 	bpf_for(i, 0, nr_tcgs) {
 		nuance2 = nuance + i;
 		idx = nuance2 % nr_tcgs;
-		ids = MEMBER_VPTR(cbw_throttled_cgroup_ids, [idx]);
+		slot = idx;
+		ids = bpf_map_lookup_elem(&cbw_throttled_cgroup_ids, &slot);
 		if (!ids) {
 			cbw_err("Failed to fetch a throttled cgroup table.");
 			continue;
