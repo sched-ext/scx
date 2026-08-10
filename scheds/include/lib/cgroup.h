@@ -243,13 +243,17 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
  * beginning of their per-task context. @common is at offset 0, so all
  * existing scx_task_common casts still work.
  *
- * @common:      Must be first; all existing scx_task_common casts still work.
- * @cgx_raw:     Cached arena pointer to scx_cgroup_ctx (0 = not cached).
- * @llcx_raw:    Cached arena pointer to scx_cgroup_llc_ctx (0 = not cached).
- * @last_llc_id: LLC id for which @llcx_raw was cached.
+ * @common:       Must be first; all existing scx_task_common casts still work.
+ * @bill_cgrp_id: Cached billing cgroup id -- the task's nearest managed
+ *                (limited, or root) ancestor-or-self, resolved on first use
+ *                (0 = unresolved). All accounting/throttling is charged here.
+ * @cgx_raw:      Cached arena pointer to scx_cgroup_ctx (0 = not cached).
+ * @llcx_raw:     Cached arena pointer to scx_cgroup_llc_ctx (0 = not cached).
+ * @last_llc_id:  LLC id for which @llcx_raw was cached.
  */
 struct scx_task_cgroup_bw {
 	struct scx_task_common	common;		/* MUST be first */
+	u64			bill_cgrp_id;	/* 0 = unresolved */
 	u64			cgx_raw;	/* 0 = not cached */
 	u64			llcx_raw;	/* 0 = not cached */
 	int			last_llc_id;
