@@ -756,12 +756,6 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 }
 
 static
-bool cgroup_is_threaded(struct cgroup *cgrp)
-{
-	return cgrp->dom_cgrp != cgrp;
-}
-
-static
 u64 cgroup_get_id(struct cgroup *cgrp)
 {
 	return cgrp->kn->id;
@@ -966,6 +960,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 				 * path's lock-acquire provides the matching
 				 * load-acquire.
 				 */
+				WRITE_ONCE(t->bill_cgrp_id, 0);
 				WRITE_ONCE(t->cgx_raw, 0);
 				WRITE_ONCE(t->llcx_raw, 0);
 				/*
@@ -1088,6 +1083,50 @@ u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
 	return id;
 }
 
+/*
+ * Billing cgroup for a task whose cgroup is @cgrp_id: the cgroup itself if it
+ * has a context (is limited), otherwise its effective parent (nearest managed
+ * ancestor). The root always terminates the walk, so a task under only-infinite
+ * ancestors bills to the root.
+ */
+static
+u64 cbw_resolve_bill_cgid(u64 cgrp_id)
+{
+	struct cgroup *cgrp;
+	u64 bill;
+
+	if (cgrp_id == ROOT_CGID || cgrp_id == 0)
+		return ROOT_CGID;
+
+	cgrp = bpf_cgroup_from_id(cgrp_id);
+	if (!cgrp)
+		return ROOT_CGID;
+
+	if (cbw_get_cgroup_ctx(cgrp))
+		bill = cgrp_id;
+	else
+		bill = cbw_eff_parent_cgid(cgrp);
+	bpf_cgroup_release(cgrp);
+
+	return bill ? bill : ROOT_CGID;
+}
+
+/*
+ * Resolve and cache the task's billing cgroup id. Resolved once (0 =
+ * unresolved) and reused; invalidated when the task changes cgroup
+ * (scx_cgroup_bw_move) or its cgroup context is torn down (cbw_free_llc_ctx).
+ * A null task context (shutdown path) falls back to the raw cgroup id.
+ */
+static
+u64 cbw_bill_cgid(scx_task_cgroup_bw_t *taskc, u64 cgrp_id)
+{
+	if (!taskc)
+		return cgrp_id;
+	if (!taskc->bill_cgrp_id)
+		taskc->bill_cgrp_id = cbw_resolve_bill_cgid(cgrp_id);
+	return taskc->bill_cgrp_id;
+}
+
 /**
  * scx_cgroup_bw_init - Initialize a cgroup for CPU bandwidth control.
  * @cgrp: cgroup being initialized.
@@ -1102,8 +1141,7 @@ u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
 int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init_args *args __arg_trusted)
 {
 	struct cbw_cgrp_entry entry;
-	scx_cgroup_ctx_t *cgx, *parentx;
-	struct cgroup *parent;
+	scx_cgroup_ctx_t *cgx;
 	u64 cgrp_id;
 	int ret;
 
@@ -1175,29 +1213,10 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	cgx->is_throttled = false;
 
 	/*
-	 * The parent of @cgrp becomes non-leaf. If the parent is not
-	 * threaded, it cannot have tasks. So, we should free its
-	 * per-LLC-cgroup contexts.
-	 *
-	 * Note that the root cgroup always has LLC contexts and its
-	 * associated BTQs since its level is 0.
-	 */
-	if ((cgrp->level > 0) &&
-	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
-		if (cgroup_get_id(parent) != ROOT_CGID) {
-			parentx = cbw_get_cgroup_ctx(parent);
-			if (parentx && !cgroup_is_threaded(parent)) {
-				cbw_free_llc_ctx(parentx, parentx->id);
-			}
-		}
-		bpf_cgroup_release(parent);
-	}
-
-	/*
-	 * Create per-LLC-cgroup contexts if @cgrp can have tasks (i.e.,
-	 * a cgroup is either at the leaf level or threaded). Here, @cgrp
-	 * is at the leaf (a cgroup is a leaf until its child is created),
-	 * so we will create per-LLC-cgroup contexts anyway.
+	 * A managed cgroup keeps its per-LLC contexts and BTQs even after it
+	 * becomes non-leaf: tasks in unlimited descendants bill to their nearest
+	 * managed ancestor, which must own LLC contexts to account for and park
+	 * them. The managed set is small, so retaining them is cheap.
 	 */
 	if ((ret = cbw_init_llc_ctx(cgrp, cgx))) {
 		cbw_err("Failed to init LLC contexts: %llu (%d)", cgrp_id, ret);
@@ -1708,12 +1727,13 @@ int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 	if (taskc && taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
-		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
+		u64 bill_id = cbw_bill_cgid(taskc, cgrp_id);
+		cgx_raw = cbw_get_cgroup_ctx_raw(bill_id);
 		if (!cgx_raw) {
 			/*
-			 * The CPU controller is not enabled for this cgroup.
+			 * The billing cgroup has no context (e.g. it exited).
 			 */
-			cbw_dbg("Failed to lookup a cgroup ctx: %llu", cgrp_id);
+			cbw_dbg("Failed to lookup a cgroup ctx: %llu", bill_id);
 			return -ESRCH;
 		}
 		if (taskc)
@@ -1801,12 +1821,14 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 	}
 
 	/*
-	 * Ensure cgx_raw is cached; populate it on the first call.
+	 * Ensure cgx_raw is cached; populate it on the first call from the
+	 * task's billing cgroup (its nearest managed ancestor-or-self).
 	 */
 	if (taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
-		cgx_raw = cbw_get_cgroup_ctx_raw(cgrp_id);
+		u64 bill_id = cbw_bill_cgid(taskc, cgrp_id);
+		cgx_raw = cbw_get_cgroup_ctx_raw(bill_id);
 		if (!cgx_raw)
 			return 0;
 		taskc->cgx_raw = cgx_raw;
@@ -1874,7 +1896,12 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	scx_cgroup_llc_ctx_t *llcx;
 	scx_atq_t *btq;
 	scx_atq_t *task_atq;
+	u64 bill_id;
 	int llc_id, ret;
+
+	/* Park under the task's billing cgroup (its nearest managed ancestor),
+	 * whose BTQ the drain reenqueues from. */
+	bill_id = cbw_bill_cgid((scx_task_cgroup_bw_t *)ctx, cgrp_id);
 
 	/* Get the current LLC ID. */
 	if ((llc_id = cbw_get_current_llc_id()) < 0) {
@@ -1885,10 +1912,10 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	/*
 	 * Put aside the task to the BTQ of the LLC context.
 	 */
-	llcx = cbw_get_llc_ctx_with_id(cgrp_id, llc_id);
+	llcx = cbw_get_llc_ctx_with_id(bill_id, llc_id);
 	if (!llcx) {
 		cbw_err("Failed to lookup an LLC ctx: [%llu/%d]",
-			cgrp_id, llc_id);
+			bill_id, llc_id);
 		return -ESRCH;
 	}
 
@@ -1902,16 +1929,16 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	}
 
 	/*
-	 * Re-verify under the BTQ lock that cgrp_id still maps to this llcx.
+	 * Re-verify under the BTQ lock that bill_id still maps to this llcx.
 	 * cbw_free_llc_ctx() deletes the map entry before draining the BTQ, so
 	 * if the cgroup is exiting the re-lookup returns a different pointer (or
 	 * none) and we bail rather than park a task in a doomed BTQ. If it still
 	 * matches, a concurrent free can only drain after we unlock, and it reaps
 	 * the task we insert.
 	 */
-	if (cbw_get_llc_ctx_with_id(cgrp_id, llc_id) != llcx) {
+	if (cbw_get_llc_ctx_with_id(bill_id, llc_id) != llcx) {
 		scx_atq_unlock(btq);
-		cbw_warn("put_aside skipped: cgroup exited: cgid=%llu", cgrp_id);
+		cbw_warn("put_aside skipped: cgroup exited: cgid=%llu", bill_id);
 		return -ESRCH;
 	}
 
@@ -2762,8 +2789,15 @@ int scx_cgroup_bw_is_cgroup_throttled(u64 cgrp_id)
 	scx_cgroup_ctx_t *cgx;
 
 	cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
-	if (!cgx)
-		return 0;
+	if (!cgx) {
+		/*
+		 * Unmanaged (e.g. infinite cpu.max): its tasks are throttled
+		 * against the nearest managed ancestor, so report that.
+		 */
+		cgx = cbw_get_cgroup_ctx_with_id(cbw_resolve_bill_cgid(cgrp_id));
+		if (!cgx)
+			return 0;
+	}
 
 	return READ_ONCE(cgx->is_throttled);
 }
@@ -2813,8 +2847,10 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 
 	scx_arena_subprog_init();
 	/*
-	 * Invalidate the per-task cache: cgx_raw and llcx_raw belong to the
-	 * old cgroup and will be repopulated on the next throttle/consume call.
+	 * Invalidate the per-task cache: bill_cgrp_id, cgx_raw and llcx_raw
+	 * belong to the old cgroup. They are re-resolved for @to on the next
+	 * throttle/consume call, and the re-park below (via cbw_put_aside)
+	 * repopulates bill_cgrp_id for the destination.
 	 *
 	 * Use atomic exchanges instead of plain stores: LLVM folds constant
 	 * stores into base+offset addressing and omits addr_space_cast for the
@@ -2823,6 +2859,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	 */
 	tc = (scx_task_cgroup_bw_t *)taskc;
 	if (tc) {
+		__sync_lock_test_and_set(&tc->bill_cgrp_id, 0);
 		__sync_lock_test_and_set(&tc->cgx_raw, 0);
 		__sync_lock_test_and_set(&tc->llcx_raw, 0);
 	}
@@ -2865,8 +2902,11 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 				 p->comm, p->pid, cgroup_get_id(to));
 		}
 
-		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID)))
+		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID))) {
+			/* Parked at root as a fallback; re-resolve billing. */
+			WRITE_ONCE(((scx_task_cgroup_bw_t *)task_ptr)->bill_cgrp_id, 0);
 			goto out_drop;
+		}
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
 	}
