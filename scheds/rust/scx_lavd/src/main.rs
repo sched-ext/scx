@@ -274,6 +274,13 @@ struct Opts {
     #[clap(long, default_value = "info")]
     log_level: String,
 
+    /// Exit debug dump buffer length in bytes. 0 selects the kernel default
+    /// of 32 KiB, which lavd overruns: ops.dump_task() adds three lines per
+    /// runnable task on top of the five lines and stack trace the kernel
+    /// already emits, so the dump grows with runqueue depth, not CPU count.
+    #[clap(long, default_value = "262144")]
+    exit_dump_len: u32,
+
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
@@ -733,6 +740,8 @@ impl<'a> Scheduler<'a> {
         if opts.partial {
             skel.struct_ops.lavd_ops_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
+
+        skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
     }
 
     fn get_msg_seq_id() -> u64 {
