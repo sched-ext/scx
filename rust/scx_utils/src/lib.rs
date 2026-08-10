@@ -109,7 +109,7 @@ pub use netdev::NetDev;
 pub mod pm;
 
 pub mod cgroup;
-pub use cgroup::resize_cgroup_bw_llc_map;
+pub use cgroup::resize_cgroup_bw;
 
 pub mod enums;
 pub use enums::scx_enums;
