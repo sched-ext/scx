@@ -94,8 +94,13 @@ struct scx_cgroup_ctx {
 		/* cgroup id */
 		u64		id;
 
-		/* parent cgroup id (0 for root); set once at init */
-		u64		parent_id;
+		/*
+		 * Id of the nearest ancestor with a context -- the effective
+		 * parent in the tree of tracked cgroups: the nearest limited
+		 * (finite cpu.max) ancestor, or the root. Infinite ancestors are
+		 * skipped. 0 for the root itself. Set once at init.
+		 */
+		u64		eff_parent_id;
 
 		/* cgroup tree depth (root = 0); set once at init */
 		u32		level;
@@ -1037,30 +1042,50 @@ int cbw_update_nquota_ub(u64 cgx_raw)
 	 * causes the compiler to emit addr_space_cast inside the subprogram.
 	 */
 	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
-	scx_cgroup_ctx_t *parentx;
+	scx_cgroup_ctx_t *eff_parentx;
 
 	if (!cgx)
 		return -EINVAL;
 
 	/*
-	 * We assume that all its ancestors' nquota_ub are already updated
-	 * (e.g., pre-order traversal of the cgroup tree). Hence, we don't
-	 * need to walk up all its ancestors to get the minimum, so we compare
-	 * against its parent's nquota_ub. The parent is identified by
-	 * cgx->parent_id, which is cached at init.
+	 * Cap against the effective parent -- the nearest ancestor with a
+	 * context (cgx->eff_parent_id, cached at init). Infinite ancestors were
+	 * skipped when resolving it, so the constraint from a finite ancestor
+	 * above them still applies. Callers update in pre-order (self before
+	 * descendants), so the effective parent's nquota_ub is already current;
+	 * a missing entry (root, or an unmanaged effective parent) adds no cap.
 	 */
 	cgx->nquota_ub = cgx->nquota;
-	if (cgx->level > 1) {
-		parentx = cbw_get_cgroup_ctx_with_id(cgx->parent_id);
-		if (!parentx) {
-			cbw_err("Fail to lookup parent ctx: %llu",
-				cgx->parent_id);
-			return -ESRCH;
-		}
-
-		cgx->nquota_ub = min(cgx->nquota_ub, parentx->nquota_ub);
-	}
+	eff_parentx = cbw_get_cgroup_ctx_with_id(cgx->eff_parent_id);
+	if (eff_parentx)
+		cgx->nquota_ub = min(cgx->nquota_ub, eff_parentx->nquota_ub);
 	return 0;
+}
+
+/*
+ * Id of @cgrp's effective parent -- the nearest ancestor that has a context:
+ * the nearest limited (finite cpu.max) ancestor, or the root; infinite
+ * ancestors are skipped. 0 if @cgrp is the root (it has no ancestor).
+ * Ref-counted walk, so no RCU read lock is required.
+ */
+static __always_inline
+u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
+{
+	struct cgroup *anc;
+	u64 id = 0;
+	int i, level = cgrp->level;
+
+	bpf_for(i, 1, level + 1) {
+		anc = bpf_cgroup_ancestor(cgrp, level - i);
+		if (!anc)
+			break;
+		if (cbw_get_cgroup_ctx(anc))
+			id = cgroup_get_id(anc);
+		bpf_cgroup_release(anc);
+		if (id)
+			break;
+	}
+	return id;
 }
 
 /**
@@ -1096,6 +1121,15 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 		return -E2BIG;
 	}
 
+	/*
+	 * Manage only cgroups that define a limit -- a finite cpu.max -- plus
+	 * the root. A non-root cgroup with an infinite cpu.max gets no context:
+	 * its tasks are billed to the nearest limited ancestor, and the roll-up
+	 * and throttle propagation treat it as a pass-through gap.
+	 */
+	if (cgrp->level > 0 && args->bw_quota_us == CBW_RUNTUME_INF_RAW)
+		return 0;
+
 	if (READ_ONCE(cbw_nr_cgx) >= nr_cgrp_max) {
 		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
 			cgrp_id, nr_cgrp_max);
@@ -1126,13 +1160,13 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 
 	cgx->id = cgrp_id;
 	cgx->level = cgrp->level;
-	if (cgrp->level > 0 &&
-	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
-		cgx->parent_id = cgroup_get_id(parent);
-		bpf_cgroup_release(parent);
-	} else {
-		cgx->parent_id = 0;
-	}
+
+	/*
+	 * Cache the effective parent (nearest ancestor with a context).
+	 * Ancestors are initialized before their descendants, so it already
+	 * exists.
+	 */
+	cgx->eff_parent_id = cbw_eff_parent_cgid(cgrp);
 	cbw_set_bandwidth((u64)cgx, args->bw_period_us, args->bw_quota_us,
 			  args->bw_burst_us);
 	cbw_update_nquota_ub((u64)cgx);
