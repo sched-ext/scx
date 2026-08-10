@@ -1350,8 +1350,12 @@ s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 	sum = 0;
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		llcx = cbw_get_llc_ctx(cgrp, i);
+		/*
+		 * A set can be missing an entry while it is being built or
+		 * torn down; the remaining LLCs still count.
+		 */
 		if (!llcx)
-			break;
+			continue;
 		sum += READ_ONCE(llcx->runtime_total);
 	}
 	return sum;
@@ -1379,14 +1383,36 @@ int clean_tree_levels(void)
 	return 0;
 }
 
+/*
+ * Sum and clear every per-level accumulator below @level. In a post-order
+ * pass these hold the subtree totals of the current cgroup's descendants,
+ * which infinite cgroups may separate from it by deeper levels.
+ */
+static
+s64 tree_absorb_deeper(u32 level)
+{
+	s64 sum = 0, *lv;
+	u32 l;
+
+	bpf_for(l, level + 1, tree_height_max) {
+		lv = tree_level(l);
+		if (!lv)
+			continue;
+		sum += *lv;
+		*lv = 0;
+	}
+
+	return sum;
+}
+
 static
 int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 {
-	u32 cur_level, prev_level = tree_height_max;
 	struct cgroup_subsys_state *start_css, *pos;
 	scx_cgroup_ctx_t *cur_cgx = NULL;
 	struct cgroup *cur_cgrp;
-	s64 rt_llcx, *lv;
+	s64 rt_llcx, rts, *lv;
+	u32 cur_level;
 	int ret = 0;
 
 
@@ -1395,24 +1421,41 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		return ret;
 
 	/*
-	 * Suppose the following cgroup hierarchy with cgroup name and level.
-	 * (cgroup_root:0
-	 *	(A:1
-	 *		(D:2
-	 *		 E:2))
-	 *	(B:1)
-	 *	(C:1
-	 *		(F:2
-	 *		 G:2)))
+	 * Refresh each cgroup's runtime_total_sloppy to the CPU time consumed by
+	 * its whole subtree, in a single post-order (left-right-self) pass.
 	 *
-	 * The post-order traversal of the tree is as follows:
-	 *   D:2 -> E:2 -> A:1 -> B:1 -> F:2 -> G:2 -> C:1 -> cgroup_root:0
+	 * Post-order visits an entire subtree before its root, so by the time we
+	 * reach a cgroup every deeper cgroup has already deposited its own subtree
+	 * total into the per-level scratch (tree_levels_map, indexed by cgroup
+	 * level). A cgroup absorbs and clears all deeper levels, adds its own LLC
+	 * runtime, and deposits the result at its own level for an ancestor to
+	 * absorb in turn.
 	 *
-	 * We traverse the tree in a post-order (left-right-self). We first
-	 * update the runtime_total_sloppy (rts) to the fresh value. Then,
-	 * we aggregate the runtime_total_sloppy values at the same level
-	 * (e.g., D:2 and E:2). When we visit an upper level (e.g., A:1),
-	 * we put the aggregate value in the upper level (A:1).
+	 * Only limited cgroups (finite cpu.max) and the root have a context; they
+	 * are marked '+' below. With every cgroup limited:
+	 *   (P:0+
+	 *	(Q:1+
+	 *		(S:2+
+	 *		 T:2+))
+	 *	(R:1+))
+	 * post-order is S:2 -> T:2 -> Q:1 -> R:1 -> P:0: S and T deposit at level
+	 * 2, then Q absorbs level 2 (S+T) into its own total; leaf R has nothing
+	 * deeper. The root P:0 is never throttled, so the sweep stops there.
+	 *
+	 * A cgroup with an infinite cpu.max has no context: it records nothing of
+	 * its own, but still forwards its descendants' totals up to its own level,
+	 * so a context-bearing ancestor absorbs them. Here V has a limited child W
+	 * and an infinite child X, and X has a limited child Y:
+	 *   (U:0+
+	 *	(V:1+
+	 *		(W:2+)
+	 *		(X:2
+	 *			(Y:3+))))
+	 * post-order is W:2 -> Y:3 -> X:2 -> V:1 -> U:0: W deposits at level 2 and
+	 * Y at level 3; X, though it has no context, forwards Y up to level 2
+	 * (clearing level 3); V then absorbs level 2 and gets both W and Y. W keeps
+	 * only its own runtime, since it absorbs only levels deeper than 2 and so
+	 * never picks up Y.
 	 *
 	 * Note that refreshing runtime_total_sloppy is racy because we do
 	 * not coordinate multiple, concurrent CPUs to consume budget and
@@ -1424,77 +1467,39 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 	bpf_rcu_read_lock();
 	start_css = &cgrp->self;
 	bpf_for_each(css, pos, start_css, BPF_CGROUP_ITER_DESCENDANTS_POST) {
-		/*
-		 * We first obtain the up-to-date value of runtime_total
-		 * of its LLC contexts if they exist.
-		 */
 		cur_cgrp = pos->cgroup;
 		cur_level = cur_cgrp->level;
 		if (can_loop && cur_level == 0) /* cgroup_root */
 			break;
-		if (cur_level >= tree_height_max) {
-			ret = -E2BIG;
-			break;
-		}
-		if (prev_level == tree_height_max)
-			prev_level = cur_level;
-
-		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
-		if (!cur_cgx) {
-			/*
-			 * The CPU controller of this cgroup is not enabled
-			 * so that we can skip it safely.
-			 */
+		/*
+		 * A cgroup deeper than the height cap has no accumulator slot
+		 * and was already left unmanaged at init, so skip it and keep
+		 * rolling up the rest of the tree. Its subtree contributes no
+		 * runtime; every cgroup visited after it still gets an accurate
+		 * total for this period.
+		 */
+		if (cur_level >= tree_height_max)
 			continue;
-		}
-
-		rt_llcx = cbw_sum_rumtime_total_llcx(cur_cgrp, cur_cgx);
 
 		/*
-		 * When traversing the siblings (e.g., D:2 -> E2, A:1 -> B:1,
-		 * B:1 -> C:1), the previous and current levels are the same.
-		 *
-		 * This means the current cgroup does not have children.
-		 * Hence, its runtime_total_sloppy is the sum of runtime_total
-		 * of its LLC contexts (i.e., rt_llcx).
+		 * Roll the subtree up whether or not this cgroup has a context:
+		 * absorb and clear all deeper levels and deposit the result at
+		 * this level. A contextless cgroup contributes no runtime of its
+		 * own but still forwards its descendants' totals up to its own
+		 * level, so a context-bearing ancestor -- never a sibling --
+		 * absorbs them.
 		 */
-		if (prev_level == cur_level) {
-			WRITE_ONCE(cur_cgx->runtime_total_sloppy, rt_llcx);
-		}
-		/*
-		 * When starting to travel the subtree of a sibling (e.g.,
-		 * B:1 -> F:2), the current level is larger than the previous
-		 * level.
-		 *
-		 * This means the current cgroup does not have children.
-		 * Hence, its runtime_total_sloppy is the sum of runtime_total
-		 * of its LLC contexts (i.e., rt_llcx).
-		 */
-		else if (prev_level < cur_level) {
-			WRITE_ONCE(cur_cgx->runtime_total_sloppy, rt_llcx);
-		}
-		/*
-		 * Once finishing the traversal of all its siblings (e.g.,
-		 * D:2 E:2 -> A1, F:2 G:2 -> C:1), the current level is smaller
-		 * than the previous level.
-		 *
-		 * This means that the current cgroup is a parent of cgroups
-		 * in the previous level. Hence, we should aggregate all
-		 * children's runtime_total_sloppy (i.e., levels[prev_level])
-		 * and the sum of runtime_total of its LLC contexts (i.e.,
-		 * rt_llcx).
-		 *
-		 * Since we finished a subtree, we should reset the accumulated
-		 * runtime_total_sloppy value of the previous level (i.e.,
-		 * levels[prev_level] = 0).
-		 */
-		else if (prev_level > cur_level) {
-			lv = tree_level(prev_level);
-			WRITE_ONCE(cur_cgx->runtime_total_sloppy,
-				   (lv ? *lv : 0) + rt_llcx);
-			if (lv)
-				*lv = 0;
-		}
+		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
+		rt_llcx = cur_cgx ? cbw_sum_rumtime_total_llcx(cur_cgrp, cur_cgx) : 0;
+		rts = rt_llcx + tree_absorb_deeper(cur_level);
+		lv = tree_level(cur_level);
+		if (lv)
+			*lv += rts;
+
+		if (!cur_cgx)
+			continue;
+
+		WRITE_ONCE(cur_cgx->runtime_total_sloppy, rts);
 
 		/*
 		 * If the cgroup has consumed its effective period budget, mark
@@ -1502,19 +1507,11 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		 * reflects any debt carried from the previous period, so the
 		 * comparison enforces long-run average convergence.
 		 */
-		if (READ_ONCE(cur_cgx->runtime_total_sloppy) >= cur_cgx->period_budget)
+		if (rts >= cur_cgx->period_budget)
 			WRITE_ONCE(cur_cgx->is_throttled, true);
 
-		/* Aggregate this cgroup's runtime_total_sloppy to the level. */
-		lv = tree_level(cur_level);
-		if (lv)
-			*lv += READ_ONCE(cur_cgx->runtime_total_sloppy);
-
-		/* Update the previous level. */
-		prev_level = cur_level;
-
 		cbw_dbg("cgid%llu -- rt_llcx: %lld -- runtime_total_sloppy: %lld",
-			cur_cgx->id, rt_llcx, cur_cgx->runtime_total_sloppy);
+			cur_cgx->id, rt_llcx, rts);
 	}
 	bpf_rcu_read_unlock();
 
