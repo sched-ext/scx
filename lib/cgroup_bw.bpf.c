@@ -52,8 +52,6 @@ enum scx_cgroup_consts {
 	CBW_RUNTUME_INF			= ((s64)~((u64)1 << 63)),
 	/* maximum number of re-enqueue tasks in one dispatch */
 	CBW_REENQ_MAX_BATCH		= 2,
-	/* size of the deferred BTQ destroy queue */
-	CBW_DEFERRED_BTQ_SIZE		= 256,
 };
 
 /*
@@ -374,10 +372,21 @@ static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx(void)
 
 static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
 {
+	const int btq_off = __builtin_offsetof(struct scx_cgroup_llc_ctx, btq);
 	int i;
 
-	for (i = 0; can_loop && i < sizeof(*llcx); i++)
+	/*
+	 * Zero every field except btq. BTQs are never destroyed, so a recycled
+	 * llcx keeps its (drained, empty) BTQ for reuse by cbw_alloc_llc_ctx().
+	 * btq is left untouched -- not zeroed and restored -- so that a
+	 * concurrent stale drain re-reading llcx->btq never observes a torn
+	 * pointer during recycling.
+	 */
+	for (i = 0; can_loop && i < sizeof(*llcx); i++) {
+		if (i >= btq_off && i < btq_off + sizeof(llcx->btq))
+			continue;
 		((char __arena *)llcx)[i] = 0;
+	}
 	cbw_freelist_push(&cbw_llcx_free_head, llcx);
 }
 
@@ -802,27 +811,30 @@ scx_cgroup_llc_ctx_t *cbw_alloc_llc_ctx(struct cgroup *cgrp,
 		.llc_id = llc_id,
 	};
 
-	/* Allocate an LLC context from the free list or the arena bump allocator. */
+	/*
+	 * Allocate an LLC context from the free list or the arena bump
+	 * allocator. A recycled llcx carries its BTQ (never destroyed); reuse it
+	 * and only create one for a fresh, BTQ-less object.
+	 */
 	llcx = cbw_alloc_llcx();
 	if (!llcx)
 		return NULL;
 
 	llcx->id = cgroup_get_id(cgrp);
 
-	/* Create an associated BTQ. */
-	llcx->btq = (scx_atq_t *)scx_atq_create(false);
 	if (!llcx->btq) {
-		cbw_err("Fail to allocate a BTQ");
-		cbw_free_llcx(llcx);
-		return NULL;
+		llcx->btq = (scx_atq_t *)scx_atq_create(false);
+		if (!llcx->btq) {
+			cbw_err("Fail to allocate a BTQ");
+			cbw_free_llcx(llcx);
+			return NULL;
+		}
 	}
 
 	/* Store the arena pointer in the map. */
 	entry.llcx = (u64)llcx;
 	if (bpf_map_update_elem(&cbw_cgrp_llc_map, &key, &entry, BPF_NOEXIST)) {
-		scx_atq_destroy(llcx->btq);
-		llcx->btq = NULL;
-		cbw_free_llcx(llcx);
+		cbw_free_llcx(llcx);	/* recycle llcx with its BTQ intact */
 		return NULL;
 	}
 
@@ -888,47 +900,6 @@ int cbw_init_llc_ctx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 __hidden
 int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id);
 
-static void schedule_atq_destroy(scx_atq_t *btq)
-{
-	static u64 slots[CBW_DEFERRED_BTQ_SIZE] __attribute__((aligned(SCX_CACHELINE_SIZE)));
-	static u64 tail __attribute__((aligned(SCX_CACHELINE_SIZE)));
-	u64 slot, old, prev;
-
-	do {
-		/*
-		 * Atomically claim the slot. If the slot is empty, we are done.
-		 */
-		slot = __sync_fetch_and_add(&tail, 1) % CBW_DEFERRED_BTQ_SIZE;
-		old = __sync_val_compare_and_swap(&slots[slot], 0, (u64)btq);
-		if (!old)
-			return;
-
-		/*
-		 * If it is occupied, the tail has wrapped around: replace old
-		 * with the new BTQ via CAS to make the eviction atomic and
-		 * prevent a double-free.
-		 */
-		prev = __sync_val_compare_and_swap(&slots[slot], old, (u64)btq);
-		if (likely(old == prev)) {
-			scx_atq_destroy((scx_atq_t *)old);
-			return;
-		}
-
-		/*
-		 * The CAS can fail if CBW_DEFERRED_BTQ_SIZE concurrent
-		 * destroyer claimed the same slot. If the CAS fails,
-		 * retry to work on a new slot.
-		 */
-	} while (can_loop);
-
-	/*
-	 * Atomically updating tail and slots could be a potential memory hot
-	 * spot, causing a lot of cache coherence traffic. However, it is
-	 * unlikely that real-world workloads will continuously and concurrently
-	 * destroy cgroups. So, let’s keep the design simple for now.
-	 */
-}
-
 static __always_inline
 int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 {
@@ -957,31 +928,19 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 			continue;
 
 		/*
-		 * Atomically null llcx->btq to signal
-		 * cbw_drain_btq_until_throttled() that this ATQ is being
-		 * destroyed. The CAS acts as a full memory barrier, ordering
-		 * this store before scx_atq_destroy(). Only the CAS winner
-		 * proceeds to drain and destroy; the loser skips via the
-		 * branch below.
+		 * Winner-takes-all via the map delete: bpf_map_delete_elem is
+		 * atomic, so exactly one CPU removes the entry and then owns the
+		 * now-unmapped llcx exclusively; the losers skip and move on to
+		 * the next LLC context (cbw_free_llc_ctx() is multi-CPU-reentrant).
+		 * Deleting first also stops new put-asides into this cgroup's BTQ
+		 * during the drain (lookups return NULL), and cbw_put_aside()
+		 * re-checks the map under the BTQ lock to catch one in flight.
 		 */
-		if (!__sync_bool_compare_and_swap(&llcx->btq, btq, NULL)) {
-			/*
-			 * Another CPU concurrently zeroed llcx->btq via the
-			 * same CAS. That CPU is the winner and is responsible
-			 * for draining this LLC context, freeing it, and
-			 * scheduling BTQ destruction. The loser (this CPU)
-			 * will just move on to the next LLC context. Hence,
-			 * cbw_free_llc_ctx() is multi-CPU-reentrant.
-			 */
+		if (cbw_del_llc_ctx_with_id(cgrp_id, i))
 			continue;
-		}
-		/*
-		 * This CPU won the CAS - proceed to drain, delete, and destroy.
-		 */
 
 		/*
 		 * Move all the throttled exiting tasks into the root cgroup.
-		 * Then, delete the LLC context and its associated BTQ.
 		 */
 		if (cgrp_id != ROOT_CGID) {
 			while (can_loop && (taskc = scx_atq_pop(btq, true))) {
@@ -1026,35 +985,16 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 			}
 		}
 
-		if (cbw_del_llc_ctx_with_id(cgrp_id, i)) {
-			cbw_err("Failed to delete an LLC context: [%llu/%d]",
-				cgrp_id, i);
-			/*
-			 * Even if the map delete fails, it is still safe to
-			 * call schedule_atq_destroy() below. We won the CAS
-			 * above, so we hold exclusive ownership of btq -- no
-			 * other CPU will access it. The stale LLC map entry
-			 * will be harmless: future lookups will find
-			 * llcx->btq == NULL and skip it.
-			 *
-			 * Do NOT recycle llcx: the stale map entry still
-			 * holds a reference to it.
-			 */
-		} else {
-			/*
-			 * Map entry removed; no future lookup can reach llcx.
-			 * Return it to the free list for reuse.
-			 */
-			cbw_free_llcx(llcx);
-		}
-
 		/*
-		 * Defer scx_atq_destroy() to avoid a use-after-free in
-		 * cbw_drain_btq_batch(): that function snapshots llcx->btq
-		 * under READ_ONCE(), and cbw_free_llc_ctx() may destroy the
-		 * BTQ in the window between the snapshot and scx_atq_pop().
+		 * Recycle the llcx with its (drained) BTQ intact -- BTQs are
+		 * never destroyed. A drain that snapshotted this BTQ before the
+		 * delete above may still pop from it after it is recycled and
+		 * reused, but that is only a transient inaccuracy (a task briefly
+		 * reenqueued from the wrong cgroup, then re-evaluated), never a
+		 * use-after-free, since the memory stays valid and BTQ operations
+		 * are lock-serialized.
 		 */
-		schedule_atq_destroy(btq);
+		cbw_free_llcx(llcx);
 	}
 
 	return nr_moved;
@@ -1921,13 +1861,8 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 		return -ESRCH;
 	}
 
-	/*
-	 * Snapshot llcx->btq. cbw_free_llc_ctx() nulls this field before
-	 * destroying the ATQ, so observing NULL means the ATQ is gone.
-	 */
+	/* A mapped llcx always owns a live BTQ (BTQs are never destroyed). */
 	btq = READ_ONCE(llcx->btq);
-	if (!btq)
-		return -ESRCH;
 
 	ret = scx_atq_lock(btq);
 	if (ret) {
@@ -1935,20 +1870,17 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 		return -EBUSY;
 	}
 
-	scx_atq_t *btq_now = READ_ONCE(llcx->btq);
-	if (btq_now != btq) {
-		/*
-		 * If this happens, that means there is a race between
-		 * cbw_put_aside() and cbw_free_llc_ctx() since only
-		 * cbw_free_llc_ctx() can concurrently change llcx->btq.
-		 * If we continue here, we park a task in a detached BTQ,
-		 * causing a task stall. Hence, stop here after printing
-		 * the log.
-		 */
+	/*
+	 * Re-verify under the BTQ lock that cgrp_id still maps to this llcx.
+	 * cbw_free_llc_ctx() deletes the map entry before draining the BTQ, so
+	 * if the cgroup is exiting the re-lookup returns a different pointer (or
+	 * none) and we bail rather than park a task in a doomed BTQ. If it still
+	 * matches, a concurrent free can only drain after we unlock, and it reaps
+	 * the task we insert.
+	 */
+	if (cbw_get_llc_ctx_with_id(cgrp_id, llc_id) != llcx) {
 		scx_atq_unlock(btq);
-		cbw_warn("put_aside skipped: BTQ has changed in the middle: "
-			 "cgid=%llu, btq1=%llx, btq2=%llx",
-			 cgrp_id, (u64)btq, (u64)btq_now);
+		cbw_warn("put_aside skipped: cgroup exited: cgid=%llu", cgrp_id);
 		return -ESRCH;
 	}
 
@@ -2581,9 +2513,9 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 	 * the main problem is that because a .dequeue() callback can happen
 	 * at any point.
 	 *
-	 * Re-read llcx->btq on every iteration. cbw_free_llc_ctx() nulls
-	 * this field before destroying the ATQ; catching NULL between
-	 * iterations prevents operating on a freed ATQ.
+	 * The BTQ comes from the mapped llcx and is never destroyed, so popping
+	 * is always safe even if the cgroup is concurrently exiting: at worst a
+	 * task is drained from a recycled BTQ and re-evaluated on reenqueue.
 	 */
 	for (i = 0; can_loop && i < CBW_REENQ_MAX_BATCH &&
 		    (btq = READ_ONCE(llcx->btq)) &&
