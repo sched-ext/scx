@@ -229,7 +229,7 @@ struct scx_cgroup_llc_ctx {
 	 * and cbw_freelist_push() can operate on any arena struct generically.
 	 * When this object is on the free list, holds the raw u64 arena address
 	 * of the next free node (0 = end of list).  Only valid between
-	 * cbw_free_llcx() pushing and cbw_alloc_llcx() popping.
+	 * cbw_free_llcx() pushing and cbw_alloc_llcx_sleepable() popping.
 	 */
 	u64		free_next;
 
@@ -360,19 +360,117 @@ static inline void cbw_freelist_push(u64 *head, void __arena *ptr)
 }
 
 /*
+ * CPU-bandwidth reserve accounting.
+ *
+ * A cgroup that gains a finite cpu.max at runtime is materialized from the
+ * non-sleepable ops.cgroup_set_bandwidth(), which cannot allocate. To guarantee
+ * it always finds a ready context set, every unmanaged (infinite) cgroup
+ * reserves one spare set -- 1 cgx plus one llcx-with-BTQ per LLC -- during its
+ * sleepable ops.cgroup_init(). cbw_nr_pending_reservations counts those
+ * reservations; cbw_nr_free_{cgx,llcx} (declared with their free lists below)
+ * count the objects currently parked on the lists. The invariant held at every
+ * instant is
+ *
+ *     cbw_nr_free_cgx  >= cbw_nr_pending_reservations, and
+ *     cbw_nr_free_llcx >= cbw_nr_pending_reservations * TOPO_NR(LLC),
+ *
+ * so a burst of concurrent materializations can never exhaust the reserve.
+ *
+ * Free-list discipline that makes the counters safe to act on: push the object
+ * onto the list *before* incrementing the counter, and (atomically) decrement
+ * the counter *before* popping. The counter then never exceeds the list length,
+ * so a successful decrement always has a real object to pop.
+ */
+static s64 cbw_nr_pending_reservations;
+
+/*
+ * Atomically claim one object from *counter while keeping it above the reserve
+ * floor cbw_nr_pending_reservations * @floor_mult. Returns true after the
+ * decrement (the caller then pops), or false if nothing is available above the
+ * floor. @floor_mult is 1 for cgx and TOPO_NR(LLC) for llcx in the sleepable
+ * managed allocator, and 0 in the non-sleepable materialize allocator (which is
+ * entitled to the reserve). The counter (supply) is read before the floor
+ * (demand): since a reservation publishes the demand before pushing the spare,
+ * a counter that already reflects the spare pairs with a freshly read floor
+ * that reflects the reservation -- so a managed init cannot claim a fresh
+ * reserve through a stale-low floor.
+ */
+static inline bool cbw_claim_free(u64 *counter, u64 floor_mult)
+{
+	u64 f, floor;
+	s64 pending;
+
+	while (can_loop) {
+		f = READ_ONCE(*counter);
+		/*
+		 * Complete the pairing with the reservation side, which orders
+		 * its two updates with full barriers: keep the supply and floor
+		 * loads below from being satisfied out of order on a weakly
+		 * ordered CPU, which would pair a new supply with a stale floor.
+		 */
+		smp_rmb();
+		pending = READ_ONCE(cbw_nr_pending_reservations);
+		floor = (pending > 0 ? (u64)pending : 0) * floor_mult;
+		if (f <= floor)
+			return false;
+		if (__sync_bool_compare_and_swap(counter, f, f - 1))
+			return true;
+	}
+	return false;
+}
+
+/*
  * Per-type free-list heads and alloc/free wrappers for scx_cgroup_llc_ctx.
  * Cacheline-aligned to avoid false sharing with adjacent globals.
  */
 static u64 cbw_llcx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
+static u64 cbw_nr_free_llcx;	/* objects on cbw_llcx_free_head */
 
-static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx(void)
+static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx_sleepable(void)
+{
+	/*
+	 * Managed (sleepable) allocation: reuse a recycled llcx only from the
+	 * surplus beyond the reserve; otherwise allocate fresh, leaving the
+	 * reserve intact. A recycled llcx carries its BTQ; a fresh one is
+	 * BTQ-less and cbw_alloc_llc_ctx() creates one.
+	 */
+	if (cbw_claim_free(&cbw_nr_free_llcx, TOPO_NR(LLC))) {
+		scx_cgroup_llc_ctx_t *llcx = cbw_freelist_pop(&cbw_llcx_free_head);
+
+		if (llcx)
+			return llcx;
+		/* Claimed a slot but the pop lost a CAS race; undo and fall back. */
+		__sync_fetch_and_add(&cbw_nr_free_llcx, 1);
+	}
+	return scx_static_alloc(sizeof(scx_cgroup_llc_ctx_t), SCX_CACHELINE_SIZE);
+}
+
+/*
+ * Materialize (non-sleepable) allocation: claim a reserved llcx-with-BTQ, or
+ * NULL when the reserve is empty. Never allocates. A rare BTQ-less spare (left
+ * by a failed BTQ create) is discarded and the next tried.
+ */
+static inline scx_cgroup_llc_ctx_t *cbw_alloc_llcx_atomic(void)
 {
 	scx_cgroup_llc_ctx_t *llcx;
 
-	llcx = cbw_freelist_pop(&cbw_llcx_free_head);
-	if (!llcx)
-		llcx = scx_static_alloc(sizeof(*llcx), SCX_CACHELINE_SIZE);
-	return llcx;
+	while (can_loop) {
+		if (!cbw_claim_free(&cbw_nr_free_llcx, 0))
+			return NULL;
+		llcx = cbw_freelist_pop(&cbw_llcx_free_head);
+		if (!llcx) {
+			/* Claimed a slot but the pop lost a CAS race; undo and bail. */
+			__sync_fetch_and_add(&cbw_nr_free_llcx, 1);
+			return NULL;
+		}
+		if (llcx->btq)
+			return llcx;
+		/*
+		 * BTQ-less spare: its claim already removed it from the list, so
+		 * drop it (arena never frees) and try the next.
+		 */
+	}
+	return NULL;
 }
 
 static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
@@ -393,6 +491,7 @@ static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
 		((char __arena *)llcx)[i] = 0;
 	}
 	cbw_freelist_push(&cbw_llcx_free_head, llcx);
+	__sync_fetch_and_add(&cbw_nr_free_llcx, 1);	/* push before count */
 }
 
 /*
@@ -400,15 +499,34 @@ static inline void cbw_free_llcx(scx_cgroup_llc_ctx_t *llcx)
  * Cacheline-aligned to avoid false sharing with adjacent globals.
  */
 static u64 cbw_cgx_free_head __attribute__((aligned(SCX_CACHELINE_SIZE)));
+static u64 cbw_nr_free_cgx;	/* objects on cbw_cgx_free_head */
 
-static inline scx_cgroup_ctx_t *cbw_alloc_cgx(void)
+static inline scx_cgroup_ctx_t *cbw_alloc_cgx_sleepable(void)
 {
-	scx_cgroup_ctx_t *cgx;
+	/* Managed (sleepable): reuse surplus beyond the reserve, else fresh. */
+	if (cbw_claim_free(&cbw_nr_free_cgx, 1)) {
+		scx_cgroup_ctx_t *cgx = cbw_freelist_pop(&cbw_cgx_free_head);
 
-	cgx = cbw_freelist_pop(&cbw_cgx_free_head);
-	if (!cgx)
-		cgx = scx_static_alloc(sizeof(*cgx), SCX_CACHELINE_SIZE);
-	return cgx;
+		if (cgx)
+			return cgx;
+		/* Claimed a slot but the pop lost a CAS race; undo and fall back. */
+		__sync_fetch_and_add(&cbw_nr_free_cgx, 1);
+	}
+	return scx_static_alloc(sizeof(scx_cgroup_ctx_t), SCX_CACHELINE_SIZE);
+}
+
+/* Materialize (non-sleepable): claim a reserved cgx, or NULL. Never allocates. */
+static inline scx_cgroup_ctx_t *cbw_alloc_cgx_atomic(void)
+{
+	if (cbw_claim_free(&cbw_nr_free_cgx, 0)) {
+		scx_cgroup_ctx_t *cgx = cbw_freelist_pop(&cbw_cgx_free_head);
+
+		if (cgx)
+			return cgx;
+		/* Claimed a slot but the pop lost a CAS race; undo and bail. */
+		__sync_fetch_and_add(&cbw_nr_free_cgx, 1);
+	}
+	return NULL;
 }
 
 static inline void cbw_free_cgx(scx_cgroup_ctx_t *cgx)
@@ -418,6 +536,50 @@ static inline void cbw_free_cgx(scx_cgroup_ctx_t *cgx)
 	for (i = 0; can_loop && i < sizeof(*cgx); i++)
 		((char __arena *)cgx)[i] = 0;
 	cbw_freelist_push(&cbw_cgx_free_head, cgx);
+	__sync_fetch_and_add(&cbw_nr_free_cgx, 1);	/* push before count */
+}
+
+/*
+ * Build the spare context set (1 cgx + one llcx-with-BTQ per LLC) that a
+ * context-less cgroup's reservation covers, so a later non-sleepable
+ * ops.cgroup_set_bandwidth() can materialize from it. The caller has already
+ * published the demand (cbw_nr_pending_reservations++), so throughout the build
+ * a concurrent managed init already sees the raised floor and cannot claim the
+ * spare being pushed as if it were surplus. The transient
+ * cbw_nr_free_* < cbw_nr_pending gap this opens is exactly this cgroup's
+ * not-yet-built set, and this cgroup cannot materialize until its init returns,
+ * so no materialize consumes it early. Any allocation failure is fatal: the
+ * reservation is already published, so a partial spare would break the
+ * cbw_nr_free_* >= cbw_nr_pending invariant and later strand a correctly-
+ * reserved cgroup; call scx_bpf_error() to eject. MUST run in a sleepable
+ * context.
+ */
+static void cbw_build_spare(void)
+{
+	scx_cgroup_ctx_t *cgx;
+	scx_cgroup_llc_ctx_t *llcx;
+	int i;
+
+	cgx = scx_static_alloc(sizeof(*cgx), SCX_CACHELINE_SIZE);
+	if (!cgx) {
+		scx_bpf_error("cgroup_bw: failed to build spare cgx");
+		return;
+	}
+	cbw_free_cgx(cgx);
+
+	bpf_for(i, 0, TOPO_NR(LLC)) {
+		llcx = scx_static_alloc(sizeof(*llcx), SCX_CACHELINE_SIZE);
+		if (!llcx) {
+			scx_bpf_error("cgroup_bw: failed to build spare llcx");
+			return;
+		}
+		llcx->btq = (scx_atq_t *)scx_atq_create(false);
+		if (!llcx->btq) {
+			scx_bpf_error("cgroup_bw: failed to build spare BTQ");
+			return;	/* llcx orphaned; arena never frees */
+		}
+		cbw_free_llcx(llcx);
+	}
 }
 
 /*
@@ -815,7 +977,7 @@ scx_cgroup_llc_ctx_t *cbw_alloc_llc_ctx(struct cgroup *cgrp,
 	 * allocator. A recycled llcx carries its BTQ (never destroyed); reuse it
 	 * and only create one for a fresh, BTQ-less object.
 	 */
-	llcx = cbw_alloc_llcx();
+	llcx = cbw_alloc_llcx_sleepable();
 	if (!llcx)
 		return NULL;
 
@@ -1160,13 +1322,33 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	}
 
 	/*
+	 * Take a reservation for every non-root cgroup under the height cap and
+	 * hold it until the cgroup either publishes a context below or exits.
+	 * cbw_nr_pending_reservations then always equals the number of live
+	 * non-root cgroups that have no context, whatever their cpu.max happens
+	 * to be -- so a cgroup whose limit changes while it stays context-less
+	 * stays balanced, and scx_cgroup_bw_exit() releases on context-absence
+	 * alone.
+	 */
+	if (cgrp->level > 0)
+		__sync_fetch_and_add(&cbw_nr_pending_reservations, 1);
+
+	/*
 	 * Manage only cgroups that define a limit -- a finite cpu.max -- plus
 	 * the root. A non-root cgroup with an infinite cpu.max gets no context:
 	 * its tasks are billed to the nearest limited ancestor, and the roll-up
 	 * and throttle propagation treat it as a pass-through gap.
 	 */
-	if (cgrp->level > 0 && args->bw_quota_us == CBW_RUNTUME_INF_RAW)
+	if (cgrp->level > 0 && args->bw_quota_us == CBW_RUNTUME_INF_RAW) {
+		/*
+		 * Unmanaged, but it may gain a finite cpu.max at runtime and need
+		 * materializing from the non-sleepable ops.cgroup_set_bandwidth().
+		 * Build the spare its reservation covers here, in this sleepable
+		 * path.
+		 */
+		cbw_build_spare();
 		return 0;
+	}
 
 	if (READ_ONCE(cbw_nr_cgx) >= nr_cgrp_max) {
 		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
@@ -1189,7 +1371,7 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * so the cgroup can distribute the budget to its descendants
 	 * when requested.
 	 */
-	cgx = cbw_alloc_cgx();
+	cgx = cbw_alloc_cgx_sleepable();
 	if (!cgx) {
 		cbw_err("Failed to allocate cgroup ctx: %llu", cgrp_id);
 		ret = -ENOMEM;
@@ -1235,6 +1417,13 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 		ret = -ENOMEM;
 		goto err_free;
 	}
+
+	/*
+	 * @cgrp is managed now, so it consumes the reservation it took above: a
+	 * cgroup with a context needs no spare to materialize from.
+	 */
+	if (cgrp->level > 0)
+		__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 
 	return 0;
 
@@ -1315,8 +1504,18 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	 * limits, or CPU controller not enabled -- has no context; nothing to
 	 * tear down.
 	 */
-	if (!cbw_get_cgroup_ctx_with_id(cgrp_id))
+	if (!cbw_get_cgroup_ctx_with_id(cgrp_id)) {
+		/*
+		 * Release the reservation @cgrp took in scx_cgroup_bw_init().
+		 * Every non-root cgroup under the height cap holds one for as
+		 * long as it has no context, so context-absence alone decides
+		 * this -- @cgrp's current cpu.max does not matter, and a limit
+		 * that changed while it stayed context-less cannot unbalance it.
+		 */
+		if (cgrp->level > 0 && cgrp->level < tree_height_max)
+			__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 		return 0;
+	}
 
 	cbw_unthrottle_cgroup_for_exit(cgrp_id);
 	if (!cbw_del_cgroup_ctx(cgrp_id))
