@@ -1,0 +1,4 @@
+[submodule "libarena-import"]
+	path = libarena-import
+	url = https://github.com/libbpf/libarena.git
+	branch = compat
