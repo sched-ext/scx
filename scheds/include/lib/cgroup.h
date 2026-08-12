@@ -249,6 +249,9 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
  *                (0 = unresolved). All accounting/throttling is charged here.
  * @cgx_raw:      Cached arena pointer to scx_cgroup_ctx (0 = not cached).
  * @llcx_raw:     Cached arena pointer to scx_cgroup_llc_ctx (0 = not cached).
+ * @bill_gen:     Generation id (cbw_bill_gen) the cached billing state above
+ *                was resolved against; when it lags, the cache is dropped and
+ *                re-resolved.
  * @last_llc_id:  LLC id for which @llcx_raw was cached.
  */
 struct scx_task_cgroup_bw {
@@ -256,6 +259,7 @@ struct scx_task_cgroup_bw {
 	u64			bill_cgrp_id;	/* 0 = unresolved */
 	u64			cgx_raw;	/* 0 = not cached */
 	u64			llcx_raw;	/* 0 = not cached */
+	u64			bill_gen;	/* cbw_bill_gen the cache was resolved against */
 	int			last_llc_id;
 };
 

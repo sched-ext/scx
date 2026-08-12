@@ -1289,6 +1289,40 @@ u64 cbw_bill_cgid(scx_task_cgroup_bw_t *taskc, u64 cgrp_id)
 	return taskc->bill_cgrp_id;
 }
 
+/*
+ * Generation id of the managed-cgroup set. Bumped when a cgroup's managed
+ * status flips -- it gains a finite cpu.max and becomes its subtree's nearest
+ * managed billing target, or loses it and hands its billers up to its effective
+ * parent -- because either moves live tasks' billing target. A task stamps its
+ * cached billing state (bill_cgrp_id/cgx_raw/llcx_raw) with the generation id it
+ * resolved against (bill_gen); cbw_sync_bill_gen() drops the cache when this
+ * generation id no longer matches.
+ */
+static u64 cbw_bill_gen;
+
+/*
+ * Drop a task's cached billing state (bill_cgrp_id/cgx_raw/llcx_raw) and
+ * restamp bill_gen when it lags cbw_bill_gen. Runs before any cached field is
+ * read on the hot paths, including the cgx_raw fast path that does not go
+ * through cbw_bill_cgid().
+ */
+static inline void cbw_sync_bill_gen(scx_task_cgroup_bw_t *taskc)
+{
+	u64 gen = READ_ONCE(cbw_bill_gen);
+
+	if (unlikely(taskc->bill_gen != gen)) {
+		/*
+		 * Atomic exchanges, not plain stores: LLVM folds constant stores
+		 * into base+offset addressing and drops the arena addr_space_cast,
+		 * which the verifier rejects (same reason as scx_cgroup_bw_move()).
+		 */
+		__sync_lock_test_and_set(&taskc->bill_cgrp_id, 0);
+		__sync_lock_test_and_set(&taskc->cgx_raw, 0);
+		__sync_lock_test_and_set(&taskc->llcx_raw, 0);
+		__sync_lock_test_and_set(&taskc->bill_gen, gen);
+	}
+}
+
 /**
  * scx_cgroup_bw_init - Initialize a cgroup for CPU bandwidth control.
  * @cgrp: cgroup being initialized.
@@ -1923,6 +1957,9 @@ int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 	if (unlikely(cgrp_id == 0))
 		return 0;
 
+	if (taskc)
+		cbw_sync_bill_gen(taskc);
+
 	if (taskc && taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
@@ -2019,6 +2056,8 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 		goto accounting_out;
 	}
 
+	cbw_sync_bill_gen(taskc);	/* taskc is non-NULL here */
+
 	/*
 	 * Ensure cgx_raw is cached; populate it on the first call from the
 	 * task's billing cgroup (its nearest managed ancestor-or-self).
@@ -2097,6 +2136,9 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	scx_atq_t *task_atq;
 	u64 bill_id;
 	int llc_id, ret;
+
+	if (ctx)
+		cbw_sync_bill_gen((scx_task_cgroup_bw_t *)ctx);
 
 	/* Park under the task's billing cgroup (its nearest managed ancestor),
 	 * whose BTQ the drain reenqueues from. */
