@@ -1034,7 +1034,7 @@ int cbw_set_bandwidth(u64 cgx_raw, u64 period_us, u64 quota_us, u64 burst_us)
 	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	cgx->period = period_us * 1000;
 	cgx->period_start_clk = scx_bpf_now();
@@ -2235,7 +2235,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	bool is_throttled;
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	/*
 	 * Let's start running the top half.
@@ -2746,7 +2746,7 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	bool cancelled;
 	int ret;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 	/*
 	 * Invalidate the per-task cache: cgx_raw and llcx_raw belong to the
 	 * old cgroup and will be repopulated on the next throttle/consume call.
@@ -2858,7 +2858,7 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	char name[64];
 
 	/* Attach the timer function to the BPF area context. */
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	cgx = cbw_get_cgroup_ctx(cgrp);
 	if (!cgx) {

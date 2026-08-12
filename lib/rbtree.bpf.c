@@ -44,7 +44,7 @@ int rb_destroy(rbtree_t __arg_arena *rbtree)
 	rbnode_t *node, *next;
 	int ret;
 
-	scx_arena_subprog_init();
+	arena_subprog_init();
 
 	while (rbtree->root && can_loop) {
 		ret = rb_remove(rbtree, rbtree->root->key);
