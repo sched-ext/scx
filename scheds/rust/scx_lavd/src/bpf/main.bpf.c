@@ -2141,7 +2141,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	 */
 	parent = bpf_task_from_pid(p->real_parent->pid);
 	if (parent && (taskc_parent = get_task_ctx(parent))) {
-		for (i = 0; i < sizeof(*taskc) && can_loop; i++)
+		/* Do not inherit cgroup status. */
+		for (i = 0; i < sizeof(taskc->atq) && can_loop; i++)
+			((char __arena *)taskc)[i] = 0;
+
+		for (i = sizeof(taskc->atq); i < sizeof(*taskc) && can_loop; i++)
 			((char __arena *)taskc)[i] = ((char __arena *)taskc_parent)[i];
 	} else {
 		for (i = 0; i < sizeof(*taskc) && can_loop; i++)
