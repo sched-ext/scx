@@ -1082,7 +1082,7 @@ int __cbw_init_llcx_atomic(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 }
 
 __hidden
-int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id);
+int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id);
 
 static __always_inline
 int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
@@ -1272,47 +1272,66 @@ u64 cbw_eff_parent_cgid(struct cgroup *cgrp)
 }
 
 /*
- * Billing cgroup for a task whose cgroup is @cgrp_id: the cgroup itself if it
- * has a context (is limited), otherwise its effective parent (nearest managed
- * ancestor). The root always terminates the walk, so a task under only-infinite
- * ancestors bills to the root.
+ * Billing cgroup for @cgrp: the cgroup itself if it has a context (is limited),
+ * otherwise its effective parent (nearest managed ancestor). The root always
+ * terminates the walk, so a cgroup under only-infinite ancestors bills to the
+ * root. @cgrp is borrowed, not released.
+ *
+ * @cgrp must come from a source that is not filtered by the caller's cgroup
+ * namespace -- scx_bpf_task_cgroup() (from the task) or a trusted cgroup
+ * argument -- never bpf_cgroup_from_id(), which returns NULL for an id outside
+ * current's namespace on kernels before v6.18.
  */
-static
-u64 cbw_resolve_bill_cgid(u64 cgrp_id)
+static __always_inline
+u64 cbw_resolve_bill_cgid(struct cgroup *cgrp)
 {
-	struct cgroup *cgrp;
 	u64 bill;
 
-	if (cgrp_id == ROOT_CGID || cgrp_id == 0)
-		return ROOT_CGID;
-
-	cgrp = bpf_cgroup_from_id(cgrp_id);
-	if (!cgrp)
-		return ROOT_CGID;
-
 	if (cbw_get_cgroup_ctx(cgrp))
-		bill = cgrp_id;
+		bill = cgroup_get_id(cgrp);
 	else
 		bill = cbw_eff_parent_cgid(cgrp);
-	bpf_cgroup_release(cgrp);
 
 	return bill ? bill : ROOT_CGID;
 }
 
 /*
- * Resolve and cache the task's billing cgroup id. Resolved once (0 =
- * unresolved) and reused; invalidated when the task changes cgroup
+ * Resolve and cache a task's billing cgroup id from its own cgroup. Resolved
+ * once (0 = unresolved) and reused; invalidated when the task changes cgroup
  * (scx_cgroup_bw_move) or its cgroup context is torn down (cbw_free_llc_ctx).
- * A null task context (shutdown path) falls back to the raw cgroup id.
+ * Resolution uses scx_bpf_task_cgroup(), so @p must be the task the current op
+ * is operating on. A NULL @p is a cache-only caller (a non-subject op): return
+ * the cached id, or 0 (unknown) when the cache is cold, without resolving.
  */
-static
-u64 cbw_bill_cgid(scx_task_cgroup_bw_t *taskc, u64 cgrp_id)
+static __always_inline
+u64 cbw_bill_task(scx_task_cgroup_bw_t *taskc, struct task_struct *p)
 {
-	if (!taskc)
-		return cgrp_id;
-	if (!taskc->bill_cgrp_id)
-		taskc->bill_cgrp_id = cbw_resolve_bill_cgid(cgrp_id);
-	return taskc->bill_cgrp_id;
+	struct cgroup *cgrp;
+	u64 bill;
+
+	if (taskc && taskc->bill_cgrp_id)
+		return taskc->bill_cgrp_id;
+
+	/*
+	 * A NULL @p marks a cache-only caller: a non-subject op (e.g.
+	 * ops.dispatch() accounting the previous task) where scx_bpf_task_cgroup()
+	 * is illegal. With the cache cold, report the billing cgroup as unknown
+	 * (0); the caller then skips, and it is resolved on @p's next subject op.
+	 */
+	if (!p)
+		return 0;
+
+	cgrp = scx_bpf_task_cgroup(p);
+	if (!cgrp) {
+		scx_bpf_error("cgroup_bw: failed to get cgroup for task %d", p->pid);
+		return 0;
+	}
+	bill = cbw_resolve_bill_cgid(cgrp);
+	bpf_cgroup_release(cgrp);
+
+	if (taskc)
+		taskc->bill_cgrp_id = bill;
+	return bill;
 }
 
 /*
@@ -1330,7 +1349,7 @@ static u64 cbw_bill_gen;
  * Drop a task's cached billing state (bill_cgrp_id/cgx_raw/llcx_raw) and
  * restamp bill_gen when it lags cbw_bill_gen. Runs before any cached field is
  * read on the hot paths, including the cgx_raw fast path that does not go
- * through cbw_bill_cgid().
+ * through cbw_bill_task().
  */
 static inline void cbw_sync_bill_gen(scx_task_cgroup_bw_t *taskc)
 {
@@ -2143,50 +2162,39 @@ int cbw_get_current_llc_id(void)
 	return topo_cpu_to_llc_id(cpu);
 }
 
+/*
+ * Whether the billing cgroup @bill_id (already resolved to the task's nearest
+ * managed ancestor) is throttled.
+ *
+ * The throttle decision is based solely on cgx->is_throttled, which is
+ * maintained asynchronously by the accounting timer via a two-step process:
+ *
+ *   Step 1 (cbw_update_runtime_total_sloppy): aggregates runtime_total from LLC
+ *   contexts bottom-up and sets is_throttled when runtime_total_sloppy reaches
+ *   nquota_ub.
+ *
+ *   Step 2 (cbw_throttle_cgroups): propagates is_throttled top-down to all
+ *   descendants of a throttled ancestor.
+ *
+ * The flag is cleared at the replenish period boundary. A stale read is
+ * harmless: at worst it allows one extra accounting interval of overspend,
+ * which is recovered via debt carry-over at the next period.
+ */
 static
-int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
+int cbw_billed_throttled(u64 bill_id, scx_task_cgroup_bw_t *taskc)
 {
-	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
 	scx_cgroup_ctx_t *cgx;
 	u64 cgx_raw;
 
-	/*
-	 * The throttle decision is based solely on cgx->is_throttled, which is
-	 * maintained asynchronously by the accounting timer via a two-step
-	 * process:
-	 *
-	 *   Step 1 (cbw_update_runtime_total_sloppy): aggregates runtime_total
-	 *   from LLC contexts bottom-up and sets is_throttled when
-	 *   runtime_total_sloppy reaches nquota_ub.
-	 *
-	 *   Step 2 (cbw_throttle_cgroups): propagates is_throttled top-down to
-	 *   all descendants of a throttled ancestor.
-	 *
-	 * The flag is cleared at the replenish period boundary. A stale read
-	 * is harmless: at worst it allows one extra accounting interval of
-	 * overspend, which is recovered via debt carry-over at the next period.
-	 */
-
-	/* Always go ahead with the root cgroup. */
-	if (cgrp_id == ROOT_CGID)
+	if (bill_id == ROOT_CGID || unlikely(bill_id == 0))
 		return 0;
-
-	/* Skip the uninitialized cgroup id. */
-	if (unlikely(cgrp_id == 0))
-		return 0;
-
-	if (taskc)
-		cbw_sync_bill_gen(taskc);
 
 	if (taskc && taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
-		u64 bill_id = cbw_bill_cgid(taskc, cgrp_id);
 		cgx_raw = cbw_get_cgroup_ctx_raw(bill_id);
 		if (!cgx_raw) {
-			/*
-			 * The billing cgroup has no context (e.g. it exited).
-			 */
+			/* The billing cgroup has no context (e.g. it exited). */
 			cbw_dbg("Failed to lookup a cgroup ctx: %llu", bill_id);
 			return -ESRCH;
 		}
@@ -2205,19 +2213,18 @@ int cbw_cgroup_bw_throttled(u64 cgrp_id, u64 taskc_raw)
 
 /**
  * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
- * @cgrp_id: cgroup id where a task belongs to.
- * @p: a task to be tested.
- * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
- *         pass 0 when no task context is available.
+ * @p: a task to be tested; must be the current op's subject task.
+ * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
  *
  * Return 0 when the cgroup is not throttled,
  * -EAGAIN when the cgroup is throttled, and
  * -errno for some other failures.
  */
 __hidden
-int scx_cgroup_bw_throttled(u64 cgrp_id,
-			     struct task_struct *p __arg_trusted, u64 taskc)
+int scx_cgroup_bw_throttled(struct task_struct *p __arg_trusted __arg_nullable, u64 taskc_raw)
 {
+	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
+
 	/*
 	 * Never throttle an exiting task. In do_exit(), a task is removed from
 	 * the PID map by __unhash_process() (called from exit_notify()) in the
@@ -2227,63 +2234,96 @@ int scx_cgroup_bw_throttled(u64 cgrp_id,
 	 * looks up the task pointer via bpf_task_from_pid(), which returns NULL
 	 * for an unhashed task. With no way to reenqueue it, the task is
 	 * permanently lost from all runqueues, causing a watchdog timeout.
+	 *
+	 * A NULL @p is a cache-only caller (see cbw_bill_task); skip this check.
 	 */
-	if (p->flags & PF_EXITING)
+	if (p && (p->flags & PF_EXITING))
 		return 0;
 
-	return cbw_cgroup_bw_throttled(cgrp_id, taskc);
+	if (!taskc)
+		return 0;
+
+	cbw_sync_bill_gen(taskc);
+
+	/*
+	 * Fast path for the common case: a task in the root or a fully-unlimited
+	 * subtree bills to the root, which is never throttled. bill_cgrp_id is
+	 * cached after the first resolution below.
+	 */
+	if (taskc->bill_cgrp_id == ROOT_CGID)
+		return 0;
+
+	return cbw_billed_throttled(cbw_bill_task(taskc, p), taskc);
 }
 
 /**
  * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
- * @cgrp_id: cgroup id where a task belongs to.
+ * @p: the task being accounted; the current op's subject task, or NULL for a
+ *     cache-only call (a non-subject op such as ops.dispatch()).
+ * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
  * @consumed_ns: amount of time actually used.
- * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
- *             pass 0 when no task context is available.
  *
- * Return 0 for success, -errno for failure.
+ * Return 0 on success -- billed now, nothing to bill (root/unlimited), or
+ * deferred: a cache-only caller (@p == NULL) whose billing cgroup is not yet
+ * resolved has this interval carried in the task and billed on the next
+ * resolved call, so the caller never has to defer its own accounting. Returns
+ * -errno only on a hard failure.
  */
 __hidden
-int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
+int scx_cgroup_bw_consume(struct task_struct *p __arg_trusted __arg_nullable, u64 taskc_raw,
+			  u64 consumed_ns)
 {
 	scx_task_cgroup_bw_t *taskc = (scx_task_cgroup_bw_t *)taskc_raw;
 	scx_cgroup_llc_ctx_t *llcx;
 	scx_cgroup_ctx_t *cgx;
-	u64 cgx_raw, llcx_raw;
+	u64 cgx_raw, llcx_raw, carry = 0;
 	int llc_id;
 
-	/* Always go ahead with the root cgroup. */
-	if (cgrp_id == ROOT_CGID)
+	if (!taskc)
 		return 0;
 
-	if (unlikely(!taskc)) {
-		/*
-		 * No task context: fall back to map lookups.
-		 *
-		 * When exiting a scx scheduler, the sched_ext kernel shuts
-		 * down cgroup support before tasks. Hence, failing to look
-		 * up an LLC context is quite normal in this case.
-		 */
-		if ((llc_id = cbw_get_current_llc_id()) < 0) {
-			cbw_err("Invalid LLC id: %d", llc_id);
-			return -EINVAL;
-		}
-		llcx = cbw_get_llc_ctx_with_id(cgrp_id, llc_id);
-		if (!llcx)
-			return 0;
-		goto accounting_out;
-	}
-
-	cbw_sync_bill_gen(taskc);	/* taskc is non-NULL here */
+	cbw_sync_bill_gen(taskc);
 
 	/*
-	 * Ensure cgx_raw is cached; populate it on the first call from the
-	 * task's billing cgroup (its nearest managed ancestor-or-self).
+	 * Absorb any interval an earlier cache-only call could not attribute to a
+	 * billing cgroup (see the deferral below) and bill it together with this
+	 * one. The carry shares this interval's fate: billed at the accounting
+	 * site, re-deferred if this call also cannot resolve, or dropped if the
+	 * billing cgroup is root/unlimited or gone -- exactly what would have
+	 * happened had the carried time been measured now.
+	 */
+	if (taskc->pending_ns)
+		carry = __sync_lock_test_and_set(&taskc->pending_ns, 0);
+
+	/*
+	 * Fast path for the common case: a task in the root or a fully-unlimited
+	 * subtree bills to the root and needs no accounting. bill_cgrp_id is
+	 * cached after the first resolution below.
+	 */
+	if (taskc->bill_cgrp_id == ROOT_CGID)
+		return 0;
+
+	/*
+	 * Resolve the billing cgroup's context, cached in the task on the first
+	 * call from its billing cgroup (nearest managed ancestor-or-self).
 	 */
 	if (taskc->cgx_raw) {
 		cgx_raw = taskc->cgx_raw;
 	} else {
-		u64 bill_id = cbw_bill_cgid(taskc, cgrp_id);
+		u64 bill_id = cbw_bill_task(taskc, p);
+
+		/*
+		 * Cache-only caller (@p == NULL) with a cold cache: the billing
+		 * cgroup is unknown here. Defer -- carry this interval (plus any
+		 * already carried) and bill it on the next call that resolves,
+		 * which lands on @p's current billing cgroup.
+		 */
+		if (bill_id == 0) {
+			__sync_fetch_and_add(&taskc->pending_ns, carry + consumed_ns);
+			return 0;
+		}
+		if (bill_id == ROOT_CGID)
+			return 0;
 		cgx_raw = cbw_get_cgroup_ctx_raw(bill_id);
 		if (!cgx_raw)
 			return 0;
@@ -2320,7 +2360,6 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc_raw)
 		llcx = (scx_cgroup_llc_ctx_t *)llcx_raw;
 	}
 
-accounting_out:
 	/*
 	 * Update the budget usage.
 	 *
@@ -2338,29 +2377,26 @@ accounting_out:
 	 * is subtracted from the next period's budget, keeping long-term CPU
 	 * bandwidth correct.
 	 */
-	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
+	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns + carry);
 
-	cbw_dbg("  cgrp_id: %llu -- llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
-		cgrp_id, llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
+	cbw_dbg("  bill cgid%llu -- llc_id: %d -- consumed_ns: %llu -- llcx:runtime_total: %lld",
+		cgx->id, llc_id, consumed_ns, READ_ONCE(llcx->runtime_total));
 	return 0;
 }
 
 __hidden
-int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
+int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id)
 {
 	scx_task_common *taskc = (scx_task_common *)ctx;
 	scx_cgroup_llc_ctx_t *llcx;
 	scx_atq_t *btq;
 	scx_atq_t *task_atq;
-	u64 bill_id;
 	int llc_id, ret;
 
-	if (ctx)
-		cbw_sync_bill_gen((scx_task_cgroup_bw_t *)ctx);
-
-	/* Park under the task's billing cgroup (its nearest managed ancestor),
-	 * whose BTQ the drain reenqueues from. */
-	bill_id = cbw_bill_cgid((scx_task_cgroup_bw_t *)ctx, cgrp_id);
+	/*
+	 * @bill_id is the billing cgroup (the task's nearest managed ancestor),
+	 * already resolved by the caller, whose BTQ the drain reenqueues from.
+	 */
 
 	/* Get the current LLC ID. */
 	if ((llc_id = cbw_get_current_llc_id()) < 0) {
@@ -2416,7 +2452,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	if (task_atq) {
 		cbw_dbg("Possible double enqueue detected.");
 		scx_atq_unlock(btq);
-		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
+		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", bill_id);
 		return 0;
 	}
 
@@ -2426,7 +2462,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	if (unlikely(ret == -ECANCELED)) {
 		return 0;
 	} else if (unlikely(ret == -EALREADY)) {
-		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
+		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", bill_id);
 		return 0;
 	} else if (unlikely(ret)) {
 		cbw_err("Failed to insert a task to BTQ: %d", ret);
@@ -2452,10 +2488,15 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, u64 cgrp_id)
+int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime)
 {
 	cbw_dbg(" [%s/%d]", p->comm, p->pid);
-	return cbw_put_aside(ctx, vtime, cgrp_id);
+
+	if (ctx)
+		cbw_sync_bill_gen((scx_task_cgroup_bw_t *)ctx);
+	/* Park @p under its own billing cgroup (resolved from @p, cache-hot). */
+	return cbw_put_aside(ctx, vtime,
+			     cbw_bill_task((scx_task_cgroup_bw_t *)ctx, p));
 }
 
 static
@@ -3080,7 +3121,7 @@ int cbw_reenqueue_cgroup(scx_cgroup_ctx_t *cgx, u64 cgrp_id, u64 nuance)
 		 * If the cgroup is throttled, all its LLC contexts are
 		 * throttled too. Stop draining immediately.
 		 */
-		if (cbw_cgroup_bw_throttled(cgrp_id, 0) == -EAGAIN)
+		if (cbw_billed_throttled(cgrp_id, NULL) == -EAGAIN)
 			break;
 
 		nr_enq += cbw_drain_btq_batch(cgx, llcx);
@@ -3238,27 +3279,23 @@ int scx_cgroup_bw_reenqueue(void)
 /**
  * scx_cgroup_bw_is_cgroup_throttled - Test if a cgroup is throttled or not.
  *
- * @cgrp_id: cgroup id
+ * @cgrp: the cgroup to test
  *
  * Return true if the cgroup is throttled. Otherwise, return false.
  */
 __hidden
-int scx_cgroup_bw_is_cgroup_throttled(u64 cgrp_id)
+int scx_cgroup_bw_is_cgroup_throttled(struct cgroup *cgrp __arg_trusted)
 {
-	scx_cgroup_ctx_t *cgx;
+	scx_cgroup_ctx_t *cgx = cbw_get_cgroup_ctx_with_id(cgroup_get_id(cgrp));
 
-	cgx = cbw_get_cgroup_ctx_with_id(cgrp_id);
-	if (!cgx) {
-		/*
-		 * Unmanaged (e.g. infinite cpu.max): its tasks are throttled
-		 * against the nearest managed ancestor, so report that.
-		 */
-		cgx = cbw_get_cgroup_ctx_with_id(cbw_resolve_bill_cgid(cgrp_id));
-		if (!cgx)
-			return 0;
-	}
+	/*
+	 * Unmanaged (e.g. infinite cpu.max): its tasks are throttled against the
+	 * nearest managed ancestor, so report that.
+	 */
+	if (!cgx)
+		cgx = cbw_get_cgroup_ctx_with_id(cbw_resolve_bill_cgid(cgrp));
 
-	return READ_ONCE(cgx->is_throttled);
+	return cgx ? READ_ONCE(cgx->is_throttled) : 0;
 }
 
 
@@ -3306,10 +3343,14 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 
 	scx_arena_subprog_init();
 	/*
-	 * Invalidate the per-task cache: bill_cgrp_id, cgx_raw and llcx_raw
-	 * belong to the old cgroup. They are re-resolved for @to on the next
-	 * throttle/consume call, and the re-park below (via cbw_put_aside)
-	 * repopulates bill_cgrp_id for the destination.
+	 * Drain any time an earlier cache-only call deferred (pending_ns) and
+	 * charge it to @from below, before repointing @p -- otherwise it would be
+	 * billed to @to. The atomic drain is race-safe against a concurrent
+	 * consume: only one side sees the value.
+	 *
+	 * Then invalidate the per-task cache: bill_cgrp_id, cgx_raw and llcx_raw
+	 * belong to the old cgroup. They are re-resolved from @p's new cgroup on
+	 * the next throttle/consume call.
 	 *
 	 * Use atomic exchanges instead of plain stores: LLVM folds constant
 	 * stores into base+offset addressing and omits addr_space_cast for the
@@ -3318,6 +3359,37 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	 */
 	tc = (scx_task_cgroup_bw_t *)taskc;
 	if (tc) {
+		u64 carry = __sync_lock_test_and_set(&tc->pending_ns, 0);
+
+		/*
+		 * Charge the deferred time to @from's billing cgroup, where it was
+		 * consumed. Prefer @p's cached contexts -- read before the
+		 * invalidation below, they still point at the old cgroup: the
+		 * cached LLC ctx charges with no lookup; a cached cgroup ctx (e.g.
+		 * warmed by a throttle check, which caches no LLC ctx) needs only
+		 * an LLC lookup. Fall back to resolving @from when the cache is
+		 * fully cold. Any LLC works; runtime_total rolls up to the cgroup.
+		 */
+		if (carry) {
+			u64 llcx_raw = tc->llcx_raw;
+			u64 cgx_raw = tc->cgx_raw;
+
+			if (!llcx_raw) {
+				int llc_id = cbw_get_current_llc_id();
+
+				if (!cgx_raw)
+					cgx_raw = cbw_get_cgroup_ctx_raw(
+							cbw_resolve_bill_cgid(from));
+				if (cgx_raw && llc_id >= 0)
+					llcx_raw = cbw_get_llc_ctx_raw_with_id(
+						((scx_cgroup_ctx_t *)cgx_raw)->id,
+						llc_id);
+			}
+			if (llcx_raw)
+				__sync_fetch_and_add(&((scx_cgroup_llc_ctx_t *)
+						     llcx_raw)->runtime_total, carry);
+		}
+
 		__sync_lock_test_and_set(&tc->bill_cgrp_id, 0);
 		__sync_lock_test_and_set(&tc->cgx_raw, 0);
 		__sync_lock_test_and_set(&tc->llcx_raw, 0);
@@ -3355,17 +3427,15 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 	 * verifier rejects calling scx_bpf_dsq_insert_vtime() from the
 	 * ops.cgroup_move() callback.
 	 */
-	if ((ret = cbw_put_aside(task_ptr, p->scx.dsq_vtime, cgroup_get_id(to)))) {
+	if ((ret = cbw_put_aside(task_ptr, p->scx.dsq_vtime,
+				 cbw_resolve_bill_cgid(to)))) {
 		if (ret == -ESRCH) {
 			cbw_warn("Destination cgroup unavailable while moving throttled task (%s:%d) to cgid%llu",
 				 p->comm, p->pid, cgroup_get_id(to));
 		}
 
-		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID))) {
-			/* Parked at root as a fallback; re-resolve billing. */
-			WRITE_ONCE(((scx_task_cgroup_bw_t *)task_ptr)->bill_cgrp_id, 0);
+		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID)))
 			goto out_drop;
-		}
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
 	}
