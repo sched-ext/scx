@@ -537,7 +537,8 @@ static void update_stat_for_running(struct task_struct *p,
 static void account_task_runtime(struct task_struct *p,
 				 task_ctx *taskc,
 				 struct cpu_ctx *cpuc,
-				 u64 now)
+				 u64 now,
+				 bool may_resolve)
 {
 	u64 task_time_wall, task_time_iwgt, task_time_invr, exec_now, exec_delta;
 	u64 now_task, now_pelt;
@@ -580,6 +581,17 @@ static void account_task_runtime(struct task_struct *p,
 
 	task_time_iwgt = task_time_invr / p->scx.weight;
 
+	/*
+	 * Under cpu.max, report the consumed time. On a non-subject op
+	 * (@may_resolve == false, e.g. ops.dispatch()) bill cache-only (NULL @p)
+	 * so scx_bpf_task_cgroup() never runs on a task that is not the op's
+	 * subject; the library carries any interval it cannot yet attribute and
+	 * bills it once @p's billing cgroup resolves.
+	 */
+	if (enable_cpu_bw && (p->pid != lavd_pid))
+		scx_cgroup_bw_consume(may_resolve ? p : NULL, (u64)taskc,
+				      task_time_wall);
+
 	WRITE_ONCE(cpuc->tot_task_time_wall, cpuc->tot_task_time_wall + task_time_wall);
 	WRITE_ONCE(cpuc->tot_task_time_iwgt, cpuc->tot_task_time_iwgt + task_time_iwgt);
 	WRITE_ONCE(cpuc->tot_task_time_invr, cpuc->tot_task_time_invr + task_time_invr);
@@ -598,13 +610,6 @@ static void account_task_runtime(struct task_struct *p,
 	taskc->last_measured_task_clk = now_task;
 	taskc->last_measured_pelt_clk = now_pelt;
 	taskc->last_measured_exec = exec_now;
-
-	/*
-	 * Under CPU bandwidth control using cpu.max, we also need to report
-	 * how much time was actually consumed compared to the reserved time.
-	 */
-	if (enable_cpu_bw && (p->pid != lavd_pid))
-		scx_cgroup_bw_consume(taskc->cgrp_id, task_time_wall, (u64)taskc);
 }
 
 static void update_stat_for_stopping(struct task_struct *p,
@@ -616,7 +621,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 	/*
 	 * Account task runtime statistics first.
 	 */
-	account_task_runtime(p, taskc, cpuc, now);
+	account_task_runtime(p, taskc, cpuc, now, true);
 
 	taskc->avg_runtime_wall = calc_avg(taskc->avg_runtime_wall,
 					   taskc->acc_runtime_wall);
@@ -659,9 +664,13 @@ static void update_stat_for_refill(struct task_struct *p,
 	u64 now = scx_bpf_now();
 
 	/*
-	 * Account task runtime statistics first.
+	 * ops.dispatch() operates on the CPU, not on @p, so account cache-only
+	 * (may_resolve = false): scx_bpf_task_cgroup() must not run on a
+	 * non-subject task. When @p's billing cgroup is unresolved (cache cold,
+	 * just after the managed set changed), the library carries the interval
+	 * and bills it on @p's next subject op.
 	 */
-	account_task_runtime(p, taskc, cpuc, now);
+	account_task_runtime(p, taskc, cpuc, now, false);
 
 	/*
 	 * We update avg_runtime_wall/invr here
@@ -783,15 +792,11 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 	 * Under CPU bandwidth control using cpu.max, we should first check
 	 * if the cgroup is throttled or not. If not, we will go ahead.
 	 * Otherwise, we should put the task aside for later execution.
-	 *
-	 * Note that we cannot use scx_bpf_task_cgroup() here because this can
-	 * be called only from ops.enqueue() and ops.dispatch().
 	 */
-	ret = scx_cgroup_bw_throttled(taskc->cgrp_id, p, (u64)taskc);
+	ret = scx_cgroup_bw_throttled(p, (u64)taskc);
 	if ((ret == -EAGAIN) && put_aside &&
 	    !scx_cgroup_bw_is_task_throttled((u64)taskc)) {
-		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime,
-					       taskc->cgrp_id);
+		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime);
 		if (ret2)
 			return ret2;
 	}
@@ -1273,16 +1278,15 @@ void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx
 		return;
 
 	/*
-	 * Let's update stats first before calculating time slice.
+	 * Update stats, then recheck the cpu.max throttle before recalculating
+	 * the time slice. Both run cache-only: ops.dispatch() operates on the
+	 * CPU, not on @prev, so scx_bpf_task_cgroup() must not run here. A cold
+	 * billing cache resolves to "not throttled" here; @prev's billing is
+	 * resolved on its next subject op.
 	 */
 	update_stat_for_refill(prev, taskc_prev, cpuc);
-
-	/*
-	 * Under the CPU bandwidth control with cpu.max,
-	 * check if the cgroup is throttled before executing
-	 * the task.
-	 */
-	if (enable_cpu_bw && (cgroup_throttled(prev, taskc_prev, false) == -EAGAIN))
+	if (enable_cpu_bw &&
+	    scx_cgroup_bw_throttled(NULL, (u64)taskc_prev) == -EAGAIN)
 		return;
 
 	/*
@@ -1742,7 +1746,7 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	}
 
 	now = scx_bpf_now();
-	account_task_runtime(p, taskc, cpuc, now);
+	account_task_runtime(p, taskc, cpuc, now, true);
 
 	/*
 	 * Under the CPU bandwidth control with cpu.max, check if the cgroup
@@ -2267,14 +2271,13 @@ void BPF_STRUCT_OPS(lavd_dump_task, struct scx_dump_ctx *dctx,
 	if (!taskc)
 		return;
 
-	if (enable_cpu_bw) {
-		cgroup_throttled = scx_cgroup_bw_is_cgroup_throttled(taskc->cgrp_id);
+	if (enable_cpu_bw)
 		task_throttled = scx_cgroup_bw_is_task_throttled((u64)taskc);
-	}
-
 
 	cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
 	if (cgrp) {
+		if (enable_cpu_bw)
+			cgroup_throttled = scx_cgroup_bw_is_cgroup_throttled(cgrp);
 		kn = BPF_CORE_READ(cgrp, kn);
 		bpf_probe_read_kernel_str(cgrp_name, sizeof(cgrp_name), BPF_CORE_READ(kn, name));
 		bpf_cgroup_release(cgrp);

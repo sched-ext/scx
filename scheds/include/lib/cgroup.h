@@ -74,28 +74,33 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 
 /**
  * scx_cgroup_bw_throttled - Check if the cgroup is throttled or not.
- * @cgrp_id: cgroup id where a task belongs to.
- * @p: a task to be tested.
- * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
- *         pass 0 when no task context is available.
+ * @p: the task to test; must be the current op's subject task, or NULL to test
+ *     using only the cached billing (never resolving) -- for non-subject ops
+ *     such as ops.dispatch() where scx_bpf_task_cgroup() is illegal. With NULL
+ *     and a cold cache the task is reported not throttled.
+ * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
  *
  * Return 0 when the cgroup is not throttled,
  * -EAGAIN when the cgroup is throttled, and
  * -errno for some other failures.
  */
-int scx_cgroup_bw_throttled(u64 cgrp_id,
-			    struct task_struct *p __arg_trusted, u64 taskc);
+int scx_cgroup_bw_throttled(struct task_struct *p __arg_trusted __arg_nullable, u64 taskc);
 
 /**
  * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
- * @cgrp_id: cgroup id where a task belongs to.
+ * @p: the task being accounted; the current op's subject task, or NULL for a
+ *     cache-only call (a non-subject op such as ops.dispatch()).
+ * @taskc_raw: per-task context (scx_task_cgroup_bw *) cast to u64 for caching.
  * @consumed_ns: amount of time actually used.
- * @taskc: per-task context (scx_task_cgroup_bw *) cast to u64 for caching;
- *         pass 0 when no task context is available.
  *
- * Return 0 for success, -errno for failure.
+ * Return 0 on success -- billed now, nothing to bill (root/unlimited), or
+ * deferred: a cache-only caller (@p == NULL) whose billing cgroup is not yet
+ * resolved has this interval carried in the task and billed on the next
+ * resolved call, so the caller never has to defer its own accounting. Returns
+ * -errno only on a hard failure.
  */
-int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc);
+int scx_cgroup_bw_consume(struct task_struct *p __arg_trusted __arg_nullable, u64 taskc,
+			  u64 consumed_ns);
 
 /**
  * scx_cgroup_bw_put_aside - Put aside a task to execute it when the cgroup is
@@ -103,7 +108,6 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc);
  * @p: a task to be put aside since the cgroup is throttled.
  * @taskc: a task-embedded pointer to scx_task_common.
  * @vtime: vtime of a task @p.
- * @cgrp_id: cgroup id where a task belongs to.
  *
  * When a cgroup is throttled (i.e., scx_cgroup_bw_reserve() returns -EAGAIN),
  * a task that is in the ops.enqueue() path should be put aside to the BTQ of
@@ -113,7 +117,7 @@ int scx_cgroup_bw_consume(u64 cgrp_id, u64 consumed_ns, u64 taskc);
  *
  * Return 0 for success, -errno for failure.
  */
-int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime, u64 cgrp_id);
+int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime);
 
 /**
  * scx_cgroup_bw_reenqueue - Reenqueue backlogged tasks.
@@ -190,11 +194,11 @@ int scx_cgroup_bw_cancel(u64 taskc, u64 flags);
 /**
  * scx_cgroup_bw_is_cgroup_throttled - Test if a cgroup is throttled or not.
  *
- * @cgrp_id: cgroup id
+ * @cgrp: the cgroup to test
  *
  * Return true if the cgroup is throttled. Otherwise, return false.
  */
-int scx_cgroup_bw_is_cgroup_throttled(u64 cgrp_id);
+int scx_cgroup_bw_is_cgroup_throttled(struct cgroup *cgrp);
 
 /**
  * scx_cgroup_bw_is_task_throttled - Test if a task is throttled or not.
@@ -252,6 +256,9 @@ int scx_cgroup_bw_dump(u64 cgrp_id, bool descendent, bool accurate, bool indent)
  * @bill_gen:     Generation id (cbw_bill_gen) the cached billing state above
  *                was resolved against; when it lags, the cache is dropped and
  *                re-resolved.
+ * @pending_ns:   Consumed time a cache-only call could not yet attribute to a
+ *                billing cgroup; carried here and billed on the next resolved
+ *                call so no accounting is lost.
  * @last_llc_id:  LLC id for which @llcx_raw was cached.
  */
 struct scx_task_cgroup_bw {
@@ -260,6 +267,7 @@ struct scx_task_cgroup_bw {
 	u64			cgx_raw;	/* 0 = not cached */
 	u64			llcx_raw;	/* 0 = not cached */
 	u64			bill_gen;	/* cbw_bill_gen the cache was resolved against */
+	u64			pending_ns;	/* deferred consumed time, billed once resolved */
 	int			last_llc_id;
 };
 
