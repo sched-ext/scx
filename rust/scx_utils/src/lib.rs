@@ -110,6 +110,8 @@ pub mod pm;
 
 pub mod cgroup;
 pub use cgroup::resize_cgroup_bw;
+pub use cgroup::setup_cgroup_bw;
+pub use cgroup::CgroupBwSupport;
 
 pub mod enums;
 pub use enums::scx_enums;

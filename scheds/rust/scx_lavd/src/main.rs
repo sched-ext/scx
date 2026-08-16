@@ -531,7 +531,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize skel according to @opts.
-        Self::init_globals(&mut skel, &opts, &order, debug_level);
+        Self::init_globals(&mut skel, &opts, &order, debug_level)?;
 
         // Mirror the cpu.max caps into rodata so the BPF admission gates match
         // the map sizes set just below.
@@ -712,7 +712,12 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder, debug_level: u8) {
+    fn init_globals(
+        skel: &mut OpenBpfSkel,
+        opts: &Opts,
+        order: &CpuOrder,
+        debug_level: u8,
+    ) -> Result<()> {
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.no_preemption = opts.no_preemption;
         bss_data.no_core_compaction = opts.no_core_compaction;
@@ -740,9 +745,16 @@ impl<'a> Scheduler<'a> {
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
 
-        if !ksym_exists("scx_group_set_bandwidth").unwrap() {
-            skel.struct_ops.lavd_ops_mut().cgroup_set_bandwidth = std::ptr::null_mut();
-            warn!("Kernel does not support ops.cgroup_set_bandwidth(), so disable it.");
+        // Fail hard if cpu.max was explicitly requested but the kernel lacks
+        // ops.cgroup_set_bandwidth support; setup_cgroup_bw() otherwise disables
+        // the struct_ops callback for the unsupported tier.
+        let cgroup_bw =
+            scx_utils::setup_cgroup_bw(skel.open_object_mut(), "lavd_cgroup_set_bandwidth")?;
+        if opts.enable_cpu_bw && cgroup_bw == scx_utils::CgroupBwSupport::Unsupported {
+            anyhow::bail!(
+                "--enable-cpu-bw requires kernel cpu.max support (ops.cgroup_set_bandwidth), \
+                 which this kernel lacks"
+            );
         }
 
         /*
@@ -775,6 +787,8 @@ impl<'a> Scheduler<'a> {
         }
 
         skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
+
+        Ok(())
     }
 
     fn get_msg_seq_id() -> u64 {
