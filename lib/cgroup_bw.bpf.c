@@ -272,6 +272,21 @@ const volatile u32 nr_cgrp_max = CBW_NR_CGRP_MAX;
 const volatile u32 tree_height_max = CBW_CGRP_TREE_HEIGHT_MAX;
 
 /*
+ * Whether ops.cgroup_set_bandwidth() runs in a sleepable context, which the
+ * kernel allows only with the "sched_ext: allow ops.cgroup_set_bandwidth() to
+ * be sleepable" change. Userspace probes for it and sets this together with the
+ * program's BPF_F_SLEEPABLE flag before load.
+ *
+ * When true, a cgroup that gains a finite cpu.max at runtime materializes its
+ * context by allocating on demand, so no memory is pre-reserved. When false,
+ * the non-sleepable path pre-reserves a spare set per unmanaged cgroup during
+ * the sleepable ops.cgroup_init() and claims it at materialize. This is a
+ * const so the verifier prunes the unused (and, for the non-sleepable load,
+ * verifier-illegal sleepable-allocation) branch.
+ */
+const volatile bool bw_set_sleepable;
+
+/*
  * A map to store scx_cgroup_ctx. It is accessed through a cgroup pointer.
  *
  * scx_cgroup_ctx objects are allocated in the BPF arena via
@@ -990,9 +1005,10 @@ long cbw_del_llc_ctx_with_id(u64 cgrp_id, int llc_id)
 }
 
 /*
- * Allocate each of @cgx's per-LLC contexts on demand and publish it in
- * cbw_cgrp_llc_map under BPF_NOEXIST. A recycled llcx carries its BTQ (never
- * destroyed); reuse it and only create one for a fresh, BTQ-less object.
+ * Sleepable implementation of cbw_init_llcx(): allocate each per-LLC context on
+ * demand and publish it in cbw_cgrp_llc_map under BPF_NOEXIST. A recycled llcx
+ * carries its BTQ (never destroyed); reuse it and only create one for a fresh,
+ * BTQ-less object.
  *
  * Returns -EEXIST if a concurrent materialize of @cgrp published first.
  */
@@ -1070,6 +1086,22 @@ int __cbw_init_llcx_atomic(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 		}
 	}
 	return 0;
+}
+
+/*
+ * Populate @cgx's per-LLC contexts and publish them. The sleepable path
+ * (patched kernel) allocates on demand; the non-sleepable path claims the
+ * reserve built during ops.cgroup_init(). The bw_set_sleepable const prunes the
+ * branch not in use, so a non-sleepable load never verifies the sleepable
+ * allocation. Both publish under BPF_NOEXIST and return -EEXIST if a concurrent
+ * materialize of @cgrp published first, so the caller leaves it to that winner.
+ */
+static
+int cbw_init_llcx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
+{
+	if (bw_set_sleepable)
+		return __cbw_init_llcx_sleepable(cgrp, cgx);
+	return __cbw_init_llcx_atomic(cgrp, cgx);
 }
 
 __hidden
@@ -1423,15 +1455,17 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	}
 
 	/*
-	 * Take a reservation for every non-root cgroup under the height cap and
-	 * hold it until the cgroup either publishes a context below or exits.
-	 * cbw_nr_pending_reservations then always equals the number of live
-	 * non-root cgroups that have no context, whatever their cpu.max happens
-	 * to be -- so a cgroup whose limit changes while it stays context-less
-	 * stays balanced, and scx_cgroup_bw_exit() releases on context-absence
-	 * alone.
+	 * When ops.cgroup_set_bandwidth() is non-sleepable it cannot allocate, so
+	 * a cgroup that may gain a finite cpu.max at runtime needs its context set
+	 * pre-reserved here, in this sleepable ops.cgroup_init(). Take a
+	 * reservation for every non-root cgroup under the height cap and hold it
+	 * until the cgroup either publishes a context below or exits, so
+	 * cbw_nr_pending_reservations always equals the number of live non-root
+	 * cgroups that have no context, and scx_cgroup_bw_exit() releases on
+	 * context-absence alone. When set_bandwidth is sleepable, materialize
+	 * allocates on demand and nothing is reserved.
 	 */
-	if (cgrp->level > 0)
+	if (!bw_set_sleepable && cgrp->level > 0)
 		__sync_fetch_and_add(&cbw_nr_pending_reservations, 1);
 
 	/*
@@ -1441,13 +1475,9 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * and throttle propagation treat it as a pass-through gap.
 	 */
 	if (cgrp->level > 0 && args->bw_quota_us == CBW_RUNTUME_INF_RAW) {
-		/*
-		 * Unmanaged, but it may gain a finite cpu.max at runtime and need
-		 * materializing from the non-sleepable ops.cgroup_set_bandwidth().
-		 * Build the spare its reservation covers here, in this sleepable
-		 * path.
-		 */
-		cbw_build_spare();
+		/* Build the spare its reservation covers (non-sleepable path). */
+		if (!bw_set_sleepable)
+			cbw_build_spare();
 		return 0;
 	}
 
@@ -1490,6 +1520,9 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * becomes non-leaf: tasks in unlimited descendants bill to their nearest
 	 * managed ancestor, which must own LLC contexts to account for and park
 	 * them. The managed set is small, so retaining them is cheap.
+	 *
+	 * ops.cgroup_init() is always sleepable and allocates fresh, so it uses
+	 * the sleepable path directly rather than the bw_set_sleepable dispatch.
 	 */
 	if ((ret = __cbw_init_llcx_sleepable(cgrp, cgx))) {
 		/*
@@ -1530,9 +1563,10 @@ out_unreserve:
 	 * Release the reservation taken above on every outcome except the
 	 * infinite-quota early return: a managed cgroup consumes it once its
 	 * context is published, and a failed init leaves no cgroup for
-	 * scx_cgroup_bw_exit() to release later.
+	 * scx_cgroup_bw_exit() to release later. Only the non-sleepable path
+	 * reserves (see the init gate).
 	 */
-	if (cgrp->level > 0)
+	if (!bw_set_sleepable && cgrp->level > 0)
 		__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 
 	return ret;
@@ -1613,8 +1647,10 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 		 * long as it has no context, so context-absence alone decides
 		 * this -- @cgrp's current cpu.max does not matter, and a limit
 		 * that changed while it stayed context-less cannot unbalance it.
+		 * Only the non-sleepable path reserves (see the init gate).
 		 */
-		if (cgrp->level > 0 && cgrp->level < tree_height_max)
+		if (!bw_set_sleepable &&
+		    cgrp->level > 0 && cgrp->level < tree_height_max)
 			__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 		return 0;
 	}
@@ -1681,8 +1717,9 @@ int cbw_repoint_subtree(struct cgroup *cgrp, u64 from_id, u64 to_id)
 
 /*
  * Bring @cgrp, which gained a finite cpu.max while unmanaged, under bandwidth
- * management. Runs in the non-sleepable ops.cgroup_set_bandwidth(), so it builds
- * the context from a reserved spare (cbw_alloc_*_atomic) rather than allocating.
+ * management. It builds the context by allocating on demand when
+ * ops.cgroup_set_bandwidth() may sleep, or from a spare reserved during
+ * ops.cgroup_init() otherwise.
  * On success @cgrp joins the managed set: its reservation is released,
  * cbw_bill_gen is bumped so cached billers re-resolve, and its subtree is
  * re-pointed. Over the static caps, or with no spare available, it aborts
@@ -1716,17 +1753,23 @@ int cbw_manage_cgroup(struct cgroup *cgrp, u64 period_us, u64 quota_us, u64 burs
 		return -ENOSPC;
 	}
 
-	/* The reserved spare should be present; abort if the build came up short. */
-	cgx = cbw_alloc_cgx_atomic();
+	/*
+	 * Sleepable: allocate on demand. Non-sleepable: claim the spare reserved
+	 * during ops.cgroup_init() -- abort if that build came up short.
+	 */
+	if (bw_set_sleepable)
+		cgx = cbw_alloc_cgx_sleepable();
+	else
+		cgx = cbw_alloc_cgx_atomic();
 	if (!cgx) {
-		cbw_err("cgroup %llu: no reserved cgx spare; aborting", cgrp_id);
+		cbw_err("cgroup %llu: failed to obtain a context; aborting", cgrp_id);
 		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 		return -ENOMEM;
 	}
 
 	cbw_init_cgx(cgrp, (u64)cgx, period_us, quota_us, burst_us);
 
-	ret = __cbw_init_llcx_atomic(cgrp, cgx);
+	ret = cbw_init_llcx(cgrp, cgx);
 	if (ret == -EEXIST) {
 		/*
 		 * Lost a concurrent materialize of @cgrp: the winner owns the
@@ -1739,7 +1782,7 @@ int cbw_manage_cgroup(struct cgroup *cgrp, u64 period_us, u64 quota_us, u64 burs
 		return 0;
 	}
 	if (ret) {
-		cbw_err("cgroup %llu: no reserved llcx spare; aborting", cgrp_id);
+		cbw_err("cgroup %llu: failed to obtain LLC contexts; aborting", cgrp_id);
 		cbw_deinit_cgx((u64)cgx, cgrp_id);
 		return ret;
 	}
@@ -1752,11 +1795,13 @@ int cbw_manage_cgroup(struct cgroup *cgrp, u64 period_us, u64 quota_us, u64 burs
 	}
 
 	/*
-	 * @cgrp is managed now: consume the reservation it held while unmanaged,
-	 * bump the generation so cached billers re-resolve to it, and re-point
-	 * the subtree so descendants cap against it.
+	 * @cgrp is managed now: consume the reservation it held while unmanaged
+	 * (non-sleepable path only -- the sleepable path reserves nothing), bump
+	 * the generation so cached billers re-resolve to it, and re-point the
+	 * subtree so descendants cap against it.
 	 */
-	__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
+	if (!bw_set_sleepable)
+		__sync_fetch_and_sub(&cbw_nr_pending_reservations, 1);
 	__sync_fetch_and_add(&cbw_bill_gen, 1);
 
 	/* Re-point descendants to cap against @cgrp. */
