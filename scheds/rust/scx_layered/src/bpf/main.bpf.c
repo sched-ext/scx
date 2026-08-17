@@ -3890,10 +3890,15 @@ static int init_cached_cpus(struct cached_cpus *ccpus)
 static int maybe_init_task_unprotected_mask(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct bpf_cpumask *cpumask;
+	bool full;
 	int ret;
 
+	bpf_rcu_read_lock();
+	full = bpf_cpumask_full(p->cpus_ptr);
+	bpf_rcu_read_unlock();
+
 	/* We don't need our own mask, we have no placement restrictions. */
-	if (bpf_cpumask_full(p->cpus_ptr))
+	if (full)
 		return 0;
 
 	/* Already initialized. */
@@ -3972,8 +3977,8 @@ void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
 	scx_bpf_reenqueue_local();
 }
 
-s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
+s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init_task, struct task_struct *p,
+			     struct scx_init_task_args *args)
 {
 	struct task_ctx *taskc;
 	struct bpf_cpumask *cpumask;
