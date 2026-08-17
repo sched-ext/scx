@@ -565,7 +565,7 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 	/* On success, call returns with the lock taken. */
 	ret = scx_alloc_attempt(stack);
 	if (ret != 0) {
-		scx_err_loc("scx_alloc_attempt failed with %d\n", ret);
+		scx_bpf_error("scx_alloc_attempt failed with %d\n", ret);
 		return (u64)NULL;
 	}
 
@@ -575,7 +575,7 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 	bpf_spin_unlock(&alloc_lock);
 
 	if (unlikely(desc == NULL)) {
-		scx_err_loc("failed to find empty tree key");
+		scx_bpf_error("failed to find empty tree key");
 		return (u64)NULL;
 	}
 
@@ -588,7 +588,7 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 		data = scx_alloc_from_pool_sleepable(&alloc->pool);
 		if (!data) {
 			scx_alloc_free_idx(alloc, idx);
-			scx_err_loc("failed to allocate data from pool");
+			scx_bpf_error("failed to allocate data from pool");
 			return (u64)NULL;
 		}
 	}
