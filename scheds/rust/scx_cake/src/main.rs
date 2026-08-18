@@ -209,7 +209,7 @@ impl<'a> Scheduler<'a> {
         // Matches scx_ops_open!(skel_builder, open_object, cake_ops, None)
         // Cake can't use the macro directly (custom arena architecture),
         // so we inline the critical functionality.
-        scx_utils::compat::check_min_requirements()?;
+        scx_utils::compat::check_min_requirements("sched_ext_ops")?;
 
         let skel_builder = BpfSkelBuilder::default();
         let mut open_skel = skel_builder
