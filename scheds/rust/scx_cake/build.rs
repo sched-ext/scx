@@ -18,6 +18,7 @@ fn main() {
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/cake.bpf.c", "bpf")
         .add_source("src/bpf/lib/arena.bpf.c")
+        .add_source("src/bpf/lib/common.bpf.c")
         .add_source("src/bpf/lib/rbtree.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
         .add_source("src/bpf/lib/sdt_alloc.bpf.c")

@@ -550,25 +550,22 @@ macro_rules! unwrap_or_break {
     }};
 }
 
-pub fn check_min_requirements() -> Result<()> {
+pub fn check_min_requirements(ops_struct: &str) -> Result<()> {
     // ec7e3b0463e1 ("implement-ops") in https://github.com/sched-ext/sched_ext
     // is the current minimum required kernel version.
-    if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "dump") {
-        bail!("sched_ext_ops.dump() missing, kernel too old?");
+    if let Ok(false) | Err(_) = struct_has_field(ops_struct, "dump") {
+        bail!("{}.dump() missing, kernel too old?", ops_struct);
     }
     Ok(())
 }
 
-/// struct sched_ext_ops can change over time. If compat.bpf.h::SCX_OPS_DEFINE()
-/// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
-/// scx_ops_attach!() are used to open, load and attach it, backward
-/// compatibility is automatically maintained where reasonable.
+#[doc(hidden)]
 #[rustfmt::skip]
 #[macro_export]
-macro_rules! scx_ops_open {
-    ($builder: expr, $obj_ref: expr, $ops: ident, $open_opts: expr) => { 'block: {
+macro_rules! __scx_ops_open {
+    ($builder: expr, $obj_ref: expr, $ops: ident, $ops_struct: literal, $open_opts: expr) => { 'block: {
         scx_utils::paste! {
-        scx_utils::unwrap_or_break!(scx_utils::compat::check_min_requirements(), 'block);
+        scx_utils::unwrap_or_break!(scx_utils::compat::check_min_requirements($ops_struct), 'block);
             use ::anyhow::Context;
             use ::libbpf_rs::skel::SkelBuilder;
 
@@ -658,20 +655,93 @@ macro_rules! scx_ops_open {
 /// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
 /// scx_ops_attach!() are used to open, load and attach it, backward
 /// compatibility is automatically maintained where reasonable.
+#[macro_export]
+macro_rules! scx_ops_open {
+    ($builder: expr, $obj_ref: expr, $ops: ident, $open_opts: expr) => {
+        $crate::__scx_ops_open!($builder, $obj_ref, $ops, "sched_ext_ops", $open_opts)
+    };
+}
+
+/// Open a cid-form (struct sched_ext_ops_cid) skeleton. Pair with
+/// scx_ops_cid_load!(), which skips the fix-ups for the cpu-form-only cgroup
+/// callbacks that don't exist in the cid form.
+#[macro_export]
+macro_rules! scx_ops_cid_open {
+    ($builder: expr, $obj_ref: expr, $ops: ident, $open_opts: expr) => {
+        $crate::__scx_ops_open!($builder, $obj_ref, $ops, "sched_ext_ops_cid", $open_opts)
+    };
+}
+
+/// struct sched_ext_ops can change over time. If compat.bpf.h::SCX_OPS_DEFINE()
+/// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
+/// scx_ops_attach!() are used to open, load and attach it, backward
+/// compatibility is automatically maintained where reasonable.
+/*
+ * Load-time fix-ups that only exist in the cpu ops form. The cid form renamed
+ * the cgroup callbacks to cpuctl_*, so referencing these members would not
+ * compile against a cid-form skeleton.
+ */
+#[doc(hidden)]
 #[rustfmt::skip]
 #[macro_export]
-macro_rules! scx_ops_load {
-    ($skel: expr, $ops: ident, $uei: ident) => { 'block: {
+macro_rules! __scx_ops_form_fixups {
+    (cpu, $ops_ref: expr) => {
+        if !$ops_ref.cgroup_set_bandwidth.is_null() {
+            if let Ok(false) | Err(_) = scx_utils::compat::struct_has_field("sched_ext_ops", "cgroup_set_bandwidth") {
+                ::scx_utils::warn!("kernel doesn't support ops.cgroup_set_bandwidth()");
+                $ops_ref.cgroup_set_bandwidth = std::ptr::null_mut();
+            }
+        }
+        if !$ops_ref.cgroup_set_idle.is_null() {
+            if let Ok(false) | Err(_) = scx_utils::compat::struct_has_field("sched_ext_ops", "cgroup_set_idle") {
+                ::scx_utils::warn!("kernel doesn't support ops.cgroup_set_idle()");
+                $ops_ref.cgroup_set_idle = std::ptr::null_mut();
+            }
+        }
+    };
+    (cid, $ops_ref: expr) => {};
+}
+
+#[doc(hidden)]
+#[rustfmt::skip]
+#[macro_export]
+macro_rules! __scx_ops_load {
+    ($skel: expr, $ops: ident, $uei: ident, $form: ident) => { 'block: {
         scx_utils::paste! {
             use ::anyhow::Context;
             use ::libbpf_rs::skel::OpenSkel;
 
             {
                 let ops = $skel.struct_ops.[<$ops _mut>]();
+                $crate::__scx_ops_form_fixups!($form, ops);
+                if !ops.sub_attach.is_null() {
+                    if let Ok(false) | Err(_) = scx_utils::compat::struct_has_field("sched_ext_ops", "sub_attach") {
+                        ::scx_utils::warn!("kernel doesn't support ops.sub_attach()");
+                        ops.sub_attach = std::ptr::null_mut();
+                    }
+                }
+                if !ops.sub_detach.is_null() {
+                    if let Ok(false) | Err(_) = scx_utils::compat::struct_has_field("sched_ext_ops", "sub_detach") {
+                        ::scx_utils::warn!("kernel doesn't support ops.sub_detach()");
+                        ops.sub_detach = std::ptr::null_mut();
+                    }
+                }
                 if ops.sub_cgroup_id > 0 {
                     if let Ok(false) | Err(_) = scx_utils::compat::struct_has_field("sched_ext_ops", "sub_cgroup_id") {
                         ::scx_utils::warn!("kernel doesn't support ops.sub_cgroup_id");
                         ops.sub_cgroup_id = 0;
+                    }
+                }
+                if ops.rescue_bandwidth_ppt > 0 {
+                    if let Ok(false) | Err(_) = scx_utils::compat::struct_has_field("sched_ext_ops", "rescue_bandwidth_ppt") {
+                        ::scx_utils::warn!("kernel doesn't support ops.rescue_bandwidth_ppt");
+                        ops.rescue_bandwidth_ppt = 0;
+                    }
+                }
+                if ops.rescue_quantum_us > 0 {
+                    if let Ok(false) | Err(_) = scx_utils::compat::struct_has_field("sched_ext_ops", "rescue_quantum_us") {
+                        ::scx_utils::warn!("kernel doesn't support ops.rescue_quantum_us");
+                        ops.rescue_quantum_us = 0;
                     }
                 }
             }
@@ -697,9 +767,61 @@ macro_rules! scx_ops_load {
                         bad.join(", ")
                     ))
                 }
+            }).inspect(|skel| {
+                use ::libbpf_rs::skel::Skel;
+                use ::libbpf_rs::AsRawLibbpf;
+
+                /*
+                 * Associate non-struct_ops BPF programs with the scheduler's
+                 * struct_ops map so that the kernel can determine which
+                 * scheduler a BPF program belongs to. Association is required
+                 * once a root scheduler declares ops.sub_attach(). Skip
+                 * silently when the running kernel predates
+                 * BPF_PROG_ASSOC_STRUCT_OPS; on supporting kernels, stop at
+                 * the first failure to avoid warning for every program.
+                 */
+                if scx_utils::compat::read_enum("bpf_cmd", "BPF_PROG_ASSOC_STRUCT_OPS").is_ok() {
+                    let map_ptr = skel.maps.$ops.as_libbpf_object().as_ptr();
+                    for prog in skel.object().progs() {
+                        if prog.prog_type() == ::libbpf_rs::ProgramType::StructOps || !prog.autoload() {
+                            continue;
+                        }
+                        let ret = unsafe {
+                            ::libbpf_rs::libbpf_sys::bpf_program__assoc_struct_ops(
+                                prog.as_libbpf_object().as_ptr(), map_ptr, std::ptr::null_mut())
+                        };
+                        if ret < 0 {
+                            ::scx_utils::warn!("Failed to associate {} with {}: {}",
+                                               prog.name().to_string_lossy(), stringify!($ops), ret);
+                            break;
+                        }
+                    }
+                }
             })
         }
     }};
+}
+
+/// struct sched_ext_ops can change over time. If compat.bpf.h::SCX_OPS_DEFINE()
+/// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
+/// scx_ops_attach!() are used to open, load and attach it, backward
+/// compatibility is automatically maintained where reasonable.
+#[macro_export]
+macro_rules! scx_ops_load {
+    ($skel: expr, $ops: ident, $uei: ident) => {
+        $crate::__scx_ops_load!($skel, $ops, $uei, cpu)
+    };
+}
+
+/// Load a cid-form (struct sched_ext_ops_cid) skeleton opened with
+/// scx_ops_cid_open!(). Skips the cpu-form-only cgroup callback fix-ups (the
+/// cid form renamed them to cpuctl_*); the fix-ups for fields shared by both
+/// forms still apply.
+#[macro_export]
+macro_rules! scx_ops_cid_load {
+    ($skel: expr, $ops: ident, $uei: ident) => {
+        $crate::__scx_ops_load!($skel, $ops, $uei, cid)
+    };
 }
 
 /// Must be used together with scx_ops_load!(). See there.
