@@ -114,7 +114,7 @@ struct arena_qnode {
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
 
-static struct arena_qnode __arena qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
+extern struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
 
 #ifdef __BPF__
 
