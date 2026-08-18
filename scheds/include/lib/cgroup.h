@@ -5,7 +5,6 @@
  */
 #pragma once
 
-#include <errno.h>
 #include <lib/atq.h>
 
 /**

@@ -670,7 +670,7 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 	/* If the kernel does not support cpu.max, let's stop here. */
 	if (!is_kernel_compatible()) {
 		cbw_err("The kernel does not support the cpu.max for scx.");
-		return -ENOTSUP;
+		return -EOPNOTSUPP;
 	}
 
 	/* Initialize the library-wide configuration. */
