@@ -6,7 +6,6 @@
  */
 #ifndef __SCX_COMPAT_BPF_H
 #define __SCX_COMPAT_BPF_H
-#include <errno.h>
 
 #define __COMPAT_ENUM_OR_ZERO(__type, __ent)					\
 ({										\
@@ -93,12 +92,12 @@ int bpf_cpumask_populate(struct bpf_cpumask *dst, void *src, size_t src__sz) __k
 
 /*
  * v6.19: Introduce lockless peek API for user DSQs.
- * v7.1:  Resolve the stale pointer issue of the lockless peek API.
+ * v7.1:  Fix scx_bpf_dsq_peek() spuriously returning NULL on non-empty
+ *        FIFO DSQs (2f2ea7709266).
  *
- * The kfunc exists on earlier kernels but its lockless implementation could
- * return stale task pointers. Require kernel version >= 7.1.0 before calling
- * it; otherwise fall through to the bpf_iter_scx_dsq fallback below.
- *
+ * The kfunc exists from v6.19 but can return NULL for a non-empty FIFO DSQ
+ * before the v7.1 fix. Require kernel version >= 7.1.0 before calling it;
+ * otherwise fall through to the bpf_iter_scx_dsq fallback below.
  */
 static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
 {
@@ -405,6 +404,17 @@ static inline void scx_bpf_task_set_dsq_vtime(struct task_struct *p, u64 vtime)
 }
 
 /*
+ * v7.1: New scx_bpf_dsq_reenq() that allows re-enqueues on more DSQs. This
+ * will eventually deprecate scx_bpf_reenqueue_local().
+ */
+void scx_bpf_dsq_reenq___compat(u64 dsq_id, u64 reenq_flags) __ksym __weak;
+
+static inline bool __COMPAT_has_generic_reenq(void)
+{
+	return bpf_ksym_exists(scx_bpf_dsq_reenq___compat);
+}
+
+/*
  * v6.19: The new void variant can be called from anywhere while the older v1
  * variant can only be called from ops.cpu_release(). The double ___ prefixes on
  * the v2 variant need to be removed once libbpf is updated to ignore ___ prefix
@@ -421,7 +431,9 @@ static inline bool __COMPAT_scx_bpf_reenqueue_local_from_anywhere(void)
 
 static inline void scx_bpf_reenqueue_local(void)
 {
-	if (__COMPAT_scx_bpf_reenqueue_local_from_anywhere())
+	if (__COMPAT_has_generic_reenq())
+		scx_bpf_dsq_reenq___compat(SCX_DSQ_LOCAL, 0);
+	else if (__COMPAT_scx_bpf_reenqueue_local_from_anywhere())
 		scx_bpf_reenqueue_local___v2___compat();
 	else
 		scx_bpf_reenqueue_local___v1();
@@ -429,22 +441,21 @@ static inline void scx_bpf_reenqueue_local(void)
 
 static inline int scx_bpf_reenqueue_local_from_anywhere(void)
 {
+	/*
+	 * The generic reenq kfunc and the v2 reenqueue-local variant can both be
+	 * called from anywhere; v1 cannot. Test each ksym in its own branch with a
+	 * distinct call: combining them with || would fold into a bitwise OR of the
+	 * two ksym addresses, which the verifier rejects.
+	 */
+	if (__COMPAT_has_generic_reenq()) {
+		scx_bpf_dsq_reenq___compat(SCX_DSQ_LOCAL, 0);
+		return 0;
+	}
 	if (__COMPAT_scx_bpf_reenqueue_local_from_anywhere()) {
 		scx_bpf_reenqueue_local___v2___compat();
 		return 0;
 	}
-	return -ENOTSUP;
-}
-
-/*
- * v7.1: New scx_bpf_dsq_reenq() that allows re-enqueues on more DSQs. This
- * will eventually deprecate scx_bpf_reenqueue_local().
- */
-void scx_bpf_dsq_reenq___compat(u64 dsq_id, u64 reenq_flags) __ksym __weak;
-
-static inline bool __COMPAT_has_generic_reenq(void)
-{
-	return bpf_ksym_exists(scx_bpf_dsq_reenq___compat);
+	return -EOPNOTSUPP;
 }
 
 static inline void scx_bpf_dsq_reenq(u64 dsq_id, u64 reenq_flags)
