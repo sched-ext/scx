@@ -32,7 +32,7 @@ struct cgroup *scx_bpf_task_cgroup___new(struct task_struct *p) __ksym __weak;
  *
  * v7.1: scx_bpf_dsq_move_to_local___v2() to add @enq_flags.
  */
-bool scx_bpf_dsq_move_to_local___v2(u64 dsq_id, u64 enq_flags) __ksym __weak;
+bool scx_bpf_dsq_move_to_local___v2___compat(u64 dsq_id, u64 enq_flags) __ksym __weak;
 bool scx_bpf_dsq_move_to_local___v1(u64 dsq_id) __ksym __weak;
 void scx_bpf_dsq_move_set_slice___new(struct bpf_iter_scx_dsq *it__iter, u64 slice) __ksym __weak;
 void scx_bpf_dsq_move_set_vtime___new(struct bpf_iter_scx_dsq *it__iter, u64 vtime) __ksym __weak;
@@ -46,8 +46,8 @@ bool scx_bpf_dispatch_from_dsq___old(struct bpf_iter_scx_dsq *it__iter, struct t
 bool scx_bpf_dispatch_vtime_from_dsq___old(struct bpf_iter_scx_dsq *it__iter, struct task_struct *p, u64 dsq_id, u64 enq_flags) __ksym __weak;
 
 #define scx_bpf_dsq_move_to_local(dsq_id, enq_flags)				\
-	(bpf_ksym_exists(scx_bpf_dsq_move_to_local___v2) ?			\
-	 scx_bpf_dsq_move_to_local___v2((dsq_id), (enq_flags)) :		\
+	(bpf_ksym_exists(scx_bpf_dsq_move_to_local___v2___compat) ?		\
+	 scx_bpf_dsq_move_to_local___v2___compat((dsq_id), (enq_flags)) :	\
 	 (bpf_ksym_exists(scx_bpf_dsq_move_to_local___v1) ?			\
 	  scx_bpf_dsq_move_to_local___v1((dsq_id)) :				\
 	  scx_bpf_consume___old((dsq_id))))
@@ -85,7 +85,7 @@ bool scx_bpf_dispatch_vtime_from_dsq___old(struct bpf_iter_scx_dsq *it__iter, st
  *
  * Compat macro will be dropped on v6.19 release.
  */
-int bpf_cpumask_populate(struct cpumask *dst, void *src, size_t src__sz) __ksym __weak;
+int bpf_cpumask_populate(struct bpf_cpumask *dst, void *src, size_t src__sz) __ksym __weak;
 
 #define __COMPAT_bpf_cpumask_populate(cpumask, src, size__sz)		\
 	(bpf_ksym_exists(bpf_cpumask_populate) ?			\
@@ -114,6 +114,36 @@ static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
 	return p;
 }
 
+/*
+ * v7.1: scx_bpf_sub_dispatch() for sub-sched dispatch. Preserve until
+ * we drop the compat layer for older kernels that lack the kfunc.
+ */
+bool scx_bpf_sub_dispatch___compat(u64 cgroup_id) __ksym __weak;
+
+static inline bool scx_bpf_sub_dispatch(u64 cgroup_id)
+{
+	if (bpf_ksym_exists(scx_bpf_sub_dispatch___compat))
+		return scx_bpf_sub_dispatch___compat(cgroup_id);
+	return false;
+}
+
+/*
+ * v7.3: scx_bpf_cid_override() for explicit cid and shard mapping. Ignore if
+ * missing.
+ */
+void scx_bpf_cid_override___compat(const s32 __arena *cpu_to_cid__arena,
+				   u32 cpu_to_cid_cnt,
+				   const s32 __arena *shard_start__arena,
+				   u32 shard_start_cnt) __ksym __weak;
+
+static inline void scx_bpf_cid_override(const s32 __arena *cpu_to_cid, u32 cpu_to_cid_cnt,
+					const s32 __arena *shard_start, u32 shard_start_cnt)
+{
+	if (bpf_ksym_exists(scx_bpf_cid_override___compat))
+		scx_bpf_cid_override___compat(cpu_to_cid, cpu_to_cid_cnt,
+					      shard_start, shard_start_cnt);
+}
+
 /**
  * __COMPAT_is_enq_cpu_selected - Test if SCX_ENQ_CPU_SELECTED is on
  * in a compatible way. We will preserve this __COMPAT helper until v6.16.
@@ -134,7 +164,7 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 	 * We should temporarily suspend the macro expansion of
 	 * 'SCX_ENQ_CPU_SELECTED'. This avoids 'SCX_ENQ_CPU_SELECTED' being
 	 * rewritten to '__SCX_ENQ_CPU_SELECTED' when 'SCX_ENQ_CPU_SELECTED'
-	 * is defined as a relocatable enum in enums.autogen.bpf.h.
+	 * is defined in 'scripts/gen_enums.py'.
 	 */
 #pragma push_macro("SCX_ENQ_CPU_SELECTED")
 #undef SCX_ENQ_CPU_SELECTED
@@ -217,7 +247,10 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 /*
  * v6.18: Add a helper to retrieve the current task running on a CPU.
  *
- * Keep this helper available until v6.20 for compatibility.
+ * The kernel tree dropped this helper and scx_bpf_cpu_rq(), but schedulers in
+ * this tree still support pre-v6.18 kernels where scx_bpf_cpu_curr() doesn't
+ * resolve and the scx_bpf_cpu_rq() fallback still exists. Keep it until
+ * pre-v6.18 kernels fall out of the support window.
  */
 static inline struct task_struct *__COMPAT_scx_bpf_cpu_curr(int cpu)
 {
@@ -404,10 +437,10 @@ static inline int scx_bpf_reenqueue_local_from_anywhere(void)
 }
 
 /*
- * v6.20: New scx_bpf_dsq_reenq() that allows re-enqueues on more DSQs. This
+ * v7.1: New scx_bpf_dsq_reenq() that allows re-enqueues on more DSQs. This
  * will eventually deprecate scx_bpf_reenqueue_local().
  */
-void scx_bpf_dsq_reenq___compat(u64 dsq_id, u64 reenq_flags, const struct bpf_prog_aux *aux__prog) __ksym __weak;
+void scx_bpf_dsq_reenq___compat(u64 dsq_id, u64 reenq_flags) __ksym __weak;
 
 static inline bool __COMPAT_has_generic_reenq(void)
 {
@@ -417,7 +450,7 @@ static inline bool __COMPAT_has_generic_reenq(void)
 static inline void scx_bpf_dsq_reenq(u64 dsq_id, u64 reenq_flags)
 {
 	if (bpf_ksym_exists(scx_bpf_dsq_reenq___compat))
-		scx_bpf_dsq_reenq___compat(dsq_id, reenq_flags, NULL);
+		scx_bpf_dsq_reenq___compat(dsq_id, reenq_flags);
 	else if (dsq_id == SCX_DSQ_LOCAL && reenq_flags == 0)
 		scx_bpf_reenqueue_local();
 	else
@@ -425,12 +458,26 @@ static inline void scx_bpf_dsq_reenq(u64 dsq_id, u64 reenq_flags)
 }
 
 /*
- * Define sched_ext_ops. This may be expanded to define multiple variants for
- * backward compatibility. See compat.h::SCX_OPS_LOAD/ATTACH().
+ * Define sched_ext_ops. See compat.h::SCX_OPS_OPEN() for how backward
+ * compatibility is handled (this macro can be expanded to emit multiple
+ * variants for incompatible op changes; SCX_OPS_OPEN() handles purely
+ * additive changes at load time).
  */
 #define SCX_OPS_DEFINE(__name, ...)						\
 	SEC(".struct_ops.link")							\
 	struct sched_ext_ops __name = {						\
+		__VA_ARGS__,							\
+	};
+
+/*
+ * Define a cid-form sched_ext_ops. Programs targeting this struct_ops type
+ * use cid-form callback signatures (select_cid, set_cmask, cid_online/offline,
+ * dispatch with cid arg, etc.) and may only call the cid-form scx_bpf_*
+ * kfuncs (kick_cid, task_cid, this_cid, ...).
+ */
+#define SCX_OPS_CID_DEFINE(__name, ...)						\
+	SEC(".struct_ops.link")							\
+	struct sched_ext_ops_cid __name = {					\
 		__VA_ARGS__,							\
 	};
 

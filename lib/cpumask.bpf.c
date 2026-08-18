@@ -103,7 +103,7 @@ scx_bitmap_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
 	tmp = scx_percpu_scx_bitmap_stack();
 	scx_bitmap_copy_to_stack(tmp, scx_bitmap);
 
-	ret = __COMPAT_bpf_cpumask_populate((struct cpumask *)bpfmask, tmp->bits, sizeof(tmp->bits));
+	ret = __COMPAT_bpf_cpumask_populate(bpfmask, tmp->bits, sizeof(tmp->bits));
 	if (unlikely(ret)) {
 		bpf_printk("error %d when calling bpf_cpumask_populate", ret);
 		return ret;
