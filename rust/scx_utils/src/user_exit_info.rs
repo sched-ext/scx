@@ -57,10 +57,15 @@ macro_rules! uei_read {
                 Ok(true) => &bpf_uei.exit_code as *const _,
                 _ => std::ptr::null(),
             };
+            let exit_cpu_ptr = match scx_utils::compat::struct_has_field("scx_exit_info", "exit_cpu") {
+                Ok(true) => &bpf_uei.exit_cpu as *const _,
+                _ => std::ptr::null(),
+            };
 
             scx_utils::UserExitInfo::new(
                 &bpf_uei.kind as *const _,
                 exit_code_ptr,
+                exit_cpu_ptr,
                 bpf_uei.reason.as_ptr() as *const _,
                 bpf_uei.msg.as_ptr() as *const _,
                 bpf_dump,
@@ -117,15 +122,30 @@ macro_rules! uei_report {
 }
 
 /// Rust counterpart of C struct user_exit_info.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct UserExitInfo {
     /// The C enum scx_exit_kind value. Test against ScxExitKind. None-zero
     /// value indicates that the BPF scheduler has exited.
     kind: i32,
     exit_code: i64,
+    /// CPU that triggered the exit, or -1 if unknown.
+    exit_cpu: i32,
     reason: Option<String>,
     msg: Option<String>,
     dump: Option<String>,
+}
+
+impl Default for UserExitInfo {
+    fn default() -> Self {
+        Self {
+            kind: 0,
+            exit_code: 0,
+            exit_cpu: -1,
+            reason: None,
+            msg: None,
+            dump: None,
+        }
+    }
 }
 
 impl UserExitInfo {
@@ -137,6 +157,7 @@ impl UserExitInfo {
     pub fn new(
         kind_ptr: *const i32,
         exit_code_ptr: *const i64,
+        exit_cpu_ptr: *const i32,
         reason_ptr: *const c_char,
         msg_ptr: *const c_char,
         dump_ptr: *const c_char,
@@ -146,6 +167,15 @@ impl UserExitInfo {
             0
         } else {
             unsafe { std::ptr::read_volatile(exit_code_ptr) }
+        };
+        /*
+         * Start from -1 and only read the field when the kernel reports it
+         * so that missing information stays distinguishable from CPU 0.
+         */
+        let exit_cpu = if exit_cpu_ptr.is_null() {
+            -1
+        } else {
+            unsafe { std::ptr::read_volatile(exit_cpu_ptr) }
         };
 
         let (reason, msg) = (
@@ -180,6 +210,7 @@ impl UserExitInfo {
         Self {
             kind,
             exit_code,
+            exit_cpu,
             reason,
             msg,
             dump,
@@ -205,10 +236,14 @@ impl UserExitInfo {
             );
         }
 
+        let cpu = match self.exit_cpu {
+            v if v >= 0 => format!(" on CPU {v}"),
+            _ => "".into(),
+        };
         let why = match (&self.reason, &self.msg) {
-            (Some(reason), None) => format!("EXIT: {reason}"),
-            (Some(reason), Some(msg)) => format!("EXIT: {reason} ({msg})"),
-            _ => "<UNKNOWN>".into(),
+            (Some(reason), None) => format!("EXIT: {reason}{cpu}"),
+            (Some(reason), Some(msg)) => format!("EXIT: {reason} ({msg}){cpu}"),
+            _ => format!("<UNKNOWN>{cpu}"),
         };
 
         if self.kind <= ScxExitKind::UnregKern as i32 {
@@ -225,6 +260,12 @@ impl UserExitInfo {
     pub fn exit_code(&self) -> Option<i64> {
         (self.kind == ScxExitKind::UnregBPF as i32 || self.kind == ScxExitKind::UnregKern as i32)
             .then_some(self.exit_code)
+    }
+
+    /// CPU on which the exit condition was triggered. None if the kernel
+    /// did not report it.
+    pub fn exit_cpu(&self) -> Option<i32> {
+        (self.exit_cpu >= 0).then_some(self.exit_cpu)
     }
 
     /// Test whether the BPF scheduler requested restart.

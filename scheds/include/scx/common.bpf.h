@@ -14,9 +14,6 @@
  */
 #define BPF_NO_KFUNC_PROTOTYPES
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wmissing-declarations"
-
 #ifdef LSP
 #define __bpf__
 #include "../vmlinux.h"
@@ -24,13 +21,12 @@
 #include "vmlinux.h"
 #endif
 
-#pragma clang diagnostic pop
-
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <asm-generic/errno.h>
 #include "user_exit_info.bpf.h"
 #include "enum_defs.autogen.h"
+#include "bpf_arena_common.bpf.h"
 
 #define PF_IDLE				0x00000002	/* I am an IDLE thread */
 #define PF_IO_WORKER			0x00000010	/* Task is an IO worker */
@@ -105,9 +101,27 @@ s32 scx_bpf_task_cpu(const struct task_struct *p) __ksym;
 struct rq *scx_bpf_cpu_rq(s32 cpu) __ksym __weak;
 struct rq *scx_bpf_locked_rq(void) __ksym;
 struct task_struct *scx_bpf_cpu_curr(s32 cpu) __ksym __weak;
+struct task_struct *scx_bpf_tid_to_task(u64 tid) __ksym __weak;
 u64 scx_bpf_now(void) __ksym __weak;
 void scx_bpf_events(struct scx_event_stats *events, size_t events__sz) __ksym __weak;
-bool scx_bpf_sub_dispatch(u64 cgroup_id) __ksym __weak;
+s32 scx_bpf_cpu_to_cid(s32 cpu) __ksym __weak;
+s32 scx_bpf_cid_to_cpu(s32 cid) __ksym __weak;
+void scx_bpf_cid_topo(s32 cid, struct scx_cid_topo *out) __ksym __weak;
+void scx_bpf_kick_cid(s32 cid, u64 flags) __ksym __weak;
+s32 scx_bpf_task_cid(const struct task_struct *p) __ksym __weak;
+s32 scx_bpf_this_cid(void) __ksym __weak;
+struct task_struct *scx_bpf_cid_curr(s32 cid) __ksym __weak;
+u32 scx_bpf_nr_cids(void) __ksym __weak;
+u32 scx_bpf_nr_online_cids(void) __ksym __weak;
+u32 scx_bpf_cidperf_cap(s32 cid) __ksym __weak;
+u32 scx_bpf_cidperf_cur(s32 cid) __ksym __weak;
+s32 scx_bpf_cidperf_set(s32 cid, u32 perf) __ksym __weak;
+
+/* sub-scheduler cap control, scx_bpf_sub_caps() cgroup_id 0 == self */
+s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps, const struct scx_cmask __arena *cmask__arena, struct scx_cmask __arena *denied_out__arena__nullable) __ksym __weak;
+void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps, const struct scx_cmask __arena *cmask__arena) __ksym __weak;
+s32 scx_bpf_sub_caps(u64 cgroup_id, u64 caps, struct scx_cmask __arena *out__arena) __ksym __weak;
+s32 scx_bpf_sub_kill_bstr(u64 cgroup_id, char *fmt, unsigned long long *data, u32 data__sz) __ksym __weak;
 
 /*
  * Use the following as @it__iter when calling scx_bpf_dsq_move[_vtime]() from
@@ -152,6 +166,22 @@ void ___scx_bpf_bstr_format_checker(const char *fmt, ...) {}
 	scx_bpf_bstr_preamble(fmt, args)					\
 	scx_bpf_exit_bstr(code, ___fmt, ___param, sizeof(___param));		\
 	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+})
+
+/*
+ * scx_bpf_sub_kill() wraps the scx_bpf_sub_kill_bstr() kfunc with variadic
+ * arguments instead of an array of u64. It kills the direct child sub-scheduler
+ * @cgid, passing the formatted reason to its user space, and evaluates to the
+ * kfunc's return value. On a kernel without sub-scheduler support the kfunc is
+ * absent and it returns -EOPNOTSUPP.
+ */
+#define scx_bpf_sub_kill(cgid, fmt, args...)					\
+({										\
+	scx_bpf_bstr_preamble(fmt, args)					\
+	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+	bpf_ksym_exists(scx_bpf_sub_kill_bstr) ?				\
+		scx_bpf_sub_kill_bstr((cgid), ___fmt, ___param,			\
+				      sizeof(___param)) : -EOPNOTSUPP;		\
 })
 
 /*
@@ -604,6 +634,10 @@ static inline bool is_migration_disabled(const struct task_struct *p)
 void bpf_rcu_read_lock(void) __ksym;
 void bpf_rcu_read_unlock(void) __ksym;
 
+/* resilient qspinlock */
+int bpf_res_spin_lock(struct bpf_res_spin_lock *lock) __ksym __weak;
+void bpf_res_spin_unlock(struct bpf_res_spin_lock *lock) __ksym __weak;
+
 /*
  * Time helpers, most of which are from jiffies.h.
  */
@@ -1044,8 +1078,8 @@ extern struct irqtime___local cpu_irqtime __ksym __weak;
 static inline struct rq___local *get_current_rq(u32 cpu)
 {
 	/*
-	 * This is a workaround to get an rq pointer since we decided to
-	 * deprecate scx_bpf_cpu_rq().
+	 * This is a workaround to get an rq pointer now that
+	 * scx_bpf_cpu_rq() has been removed.
 	 *
 	 * WARNING: The caller must hold the rq lock for @cpu. This is
 	 * guaranteed when called from scheduling callbacks (ops.running,
@@ -1140,7 +1174,18 @@ static inline u64 scx_clock_irq(u32 cpu)
 	return irqt ? BPF_CORE_READ(irqt, total) : 0;
 }
 
+/* Abbreviated forms of <linux/overflow.h>'s struct_size() family. */
+#define flex_array_size(p, member, count)	\
+	((count) * sizeof(*(p)->member))
+
+#define struct_size(p, member, count)		\
+	(offsetof(typeof(*(p)), member) + flex_array_size(p, member, count))
+
+#define struct_size_t(type, member, count)	\
+	struct_size((type *)NULL, member, count)
+
 #include "compat.bpf.h"
 #include "enums.bpf.h"
+#include "cid.bpf.h"
 
 #endif	/* __SCX_COMMON_BPF_H */
