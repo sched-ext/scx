@@ -13,11 +13,9 @@ pub use bpf_intf::*;
 mod stats;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, c_ulong};
-use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
-use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -825,9 +823,9 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    /// Sync PID -> GPU (node) map from NVML. When gpu_util_threshold > 0, only PIDs with
-    /// GPU utilization (SM or memory) >= threshold are added. Map is keyed by task pid.
-    /// Only processes using a single GPU are added; multi-GPU processes are excluded.
+    /// Sync process TGID -> GPU (node) map from NVML. When gpu_util_threshold > 0, only
+    /// processes with GPU utilization (SM or memory) >= threshold are added. Only processes
+    /// whose GPUs resolve to a single NUMA node are included.
     fn sync_gpu_pids(&mut self) -> Result<()> {
         let gpu_index_to_node = match &self.gpu_index_to_node {
             Some(m) => m,
@@ -871,15 +869,12 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Only add PIDs that use exactly one GPU to the map.
+        // Only add process TGIDs whose GPUs resolve to exactly one NUMA node.
         let mut current: HashMap<u32, u32> = HashMap::new();
         for (tgid, nodes) in pid_to_nodes {
             if nodes.len() == 1 {
                 let node = nodes.into_iter().next().unwrap();
                 current.insert(tgid, node);
-                for tid in Self::task_tids(tgid) {
-                    current.insert(tid, node);
-                }
             }
         }
 
@@ -897,7 +892,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    /// Record running compute/graphics process PIDs and the GPU node in pid_to_nodes.
+    /// Record running compute/graphics process TGIDs and the GPU node in pid_to_nodes.
     fn add_running_gpu_processes_to_set(
         device: &nvml_wrapper::Device<'_>,
         node: u32,
@@ -911,18 +906,6 @@ impl<'a> Scheduler<'a> {
         {
             pid_to_nodes.entry(proc.pid).or_default().insert(node);
         }
-    }
-
-    /// Return all thread IDs (tids) of the process with the given pid (tgid).
-    fn task_tids(pid: u32) -> Vec<u32> {
-        let task_dir = format!("/proc/{}/task", pid);
-        let Ok(entries) = fs::read_dir(Path::new(&task_dir)) else {
-            return Vec::new();
-        };
-        entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()))
-            .collect()
     }
 
     fn enable_primary_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
