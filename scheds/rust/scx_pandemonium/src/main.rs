@@ -17,7 +17,6 @@ mod log;
 mod adaptive;
 mod chaos;
 mod cli;
-mod procdb;
 mod scheduler;
 mod topology;
 mod tuning;
@@ -176,94 +175,38 @@ fn run_scheduler(
         let mut open_object = MaybeUninit::uninit();
         let mut sched = Scheduler::init(&mut open_object, nr_cpus)?;
 
-        // POPULATE CACHE TOPOLOGY MAP AT STARTUP
-        match topology::CpuTopology::detect(nr_cpus_display as usize) {
-            Ok(topo) => {
-                topo.log_summary();
-                if let Err(e) = topo.populate_bpf_map(&mut sched) {
-                    log_warn!("CACHE TOPOLOGY MAP WRITE FAILED: {}", e);
-                }
-                if let Err(e) = topo.populate_l2_siblings_map(&sched) {
-                    log_warn!("L2 SIBLINGS MAP WRITE FAILED: {}", e);
-                }
-                // RESISTANCE AFFINITY: COMPUTE R_EFF VIA LAPLACIAN PSEUDOINVERSE
-                // AND POPULATE BPF AFFINITY RANK MAP. SPECTRUM CARRIES lambda_2
-                // AND tau_ns FOR UNIVERSAL TOPOLOGY-DERIVED SCALING.
-                let (reff, rank, mut spectrum) = topo.compute_resistance_affinity();
-                if let Some(pv) = phi_scale {
-                    log_info!(
-                        "PHI OVERRIDE: phi_dist_scale_q16 {} -> {} (--phi-scale)",
-                        spectrum.phi_dist_scale_q16,
-                        pv
-                    );
-                    spectrum.phi_dist_scale_q16 = pv;
-                }
-                topo.log_resistance_affinity(&reff, &rank, spectrum);
-                // T2: derive the emergent de-facto-NUMA domain tree from the cache
-                // graph (min-conductance cuts) and log it. T3's bounded steal reads it.
-                let domains = topo.compute_domain_tree();
-                topo.log_domains(&domains);
-                // T3b.1: flatten the tree to the per-CPU-pair crossing-price matrix
-                // and write it 1:1 with the affinity rank (domain_phi map).
-                let domain_phi = topo.domain_cross_phi_matrix(&domains);
-                if let Err(e) = topo.populate_affinity_rank_map(
-                    &sched,
-                    &reff,
-                    &rank,
-                    spectrum.phi_dist_scale_q16,
-                    &domain_phi,
-                ) {
-                    log_warn!("AFFINITY RANK MAP WRITE FAILED: {}", e);
-                }
-                // T3b.2: partition the tree into emergent overflow domains (L3
-                // granularity) and write cpu_domain -- the the discrete domain map replacement.
-                let ov_domains = topo.overflow_domain_count();
-                let cpu_dom = topo.domain_partition(&domains, ov_domains);
-                for (cpu, &d) in cpu_dom.iter().enumerate() {
-                    if let Err(e) = sched.write_cpu_domain(cpu as u32, d) {
-                        log_warn!("CPU DOMAIN MAP WRITE FAILED (cpu {}): {}", cpu, e);
-                        break;
-                    }
-                }
-                log_info!(
-                    "OVERFLOW DOMAINS: {} (emergent, cpu_domain populated)",
-                    ov_domains
-                );
-                // WRITE tau_ns + codel_eq_ns INTO tuning_knobs. BPF'S tick() ON
-                // CPU 0 PICKS THESE UP AND DERIVES THE TAU-SCALED TIMING STATICS
-                // AND THE R_eff-DERIVED CODEL EQUILIBRIUM TARGET.
-                if let Err(e) = sched.write_topology_fields(spectrum.tau_ns, spectrum.codel_eq_ns) {
-                    log_warn!("TOPOLOGY KNOB WRITE FAILED: {}", e);
-                }
-            }
-            Err(e) => log_warn!("CACHE TOPOLOGY DETECT FAILED: {}", e),
+        // POPULATE CACHE TOPOLOGY AT STARTUP -- the one detect-and-populate
+        // sequence (topology.rs owns it: all computes before any map write,
+        // tuning knobs written last as the "go" signal). The SAME sequence
+        // re-runs on hotplug via CpuTopology::poll_hotplug from both control
+        // loops, so a CPU broken at boot self-corrects and the R_eff/phi/
+        // domain tables track the live width.
+        let mut last_online = topology::CpuTopology::online_cpu_count();
+        if let Err(e) = topology::CpuTopology::detect_and_populate(
+            &mut sched,
+            nr_cpus_display as usize,
+            phi_scale,
+        ) {
+            log_warn!("CACHE TOPOLOGY DETECT FAILED: {}", e);
         }
 
         let should_restart = if no_adaptive {
             // BPF-ONLY MODE: SCHEDULER RUNS WITH DEFAULT KNOBS, NO RUST TUNING
             // STILL PRINTS STATS SO BENCHMARKS GET TELEMETRY FOR BOTH PHASES
             log_info!("PANDEMONIUM IS ACTIVE (BPF ONLY, CTRL+C TO EXIT)");
-            // ONE-SHOT PROCDB WARM-START. BPF-only mode has no adaptive loop,
-            // so without this every app launch re-learns task classes from cold
-            // (12C BPF app-launch 16ms vs ADAPTIVE ~2ms). ProcessDb::new() loads
-            // the persisted profiles and flush_predictions() populates
-            // task_class_init, which enable() reads on every spawn. Construct,
-            // log, drop -- no loop, no 1Hz tax. Stale-but-warm beats cold.
-            match crate::procdb::ProcessDb::new() {
-                Ok(db) => {
-                    let (total, confident) = db.summary();
-                    log_info!(
-                        "PROCDB: BPF-mode warm-start {}/{} confident profiles",
-                        confident,
-                        total
-                    );
-                }
-                Err(e) => log_warn!("PROCDB WARM-START FAILED: {}", e),
-            }
             let mut prev = scheduler::PandemoniumStats::default();
             while !SHUTDOWN.load(Ordering::Relaxed) && !sched.exited() {
                 watchdog::LOOP_HEARTBEAT.fetch_add(1, Ordering::Relaxed);
                 std::thread::sleep(Duration::from_secs(1));
+
+                // HOTPLUG: re-derive topology when the online set changes
+                // (BPF-only mode has no adaptive loop to carry the poll).
+                topology::CpuTopology::poll_hotplug(
+                    &mut sched,
+                    nr_cpus_display as usize,
+                    phi_scale,
+                    &mut last_online,
+                );
 
                 let stats = sched.read_stats();
 
@@ -417,7 +360,7 @@ fn run_scheduler(
         } else {
             // ADAPTIVE MODE: BPF + SINGLE-THREAD MONITOR LOOP
             log_info!("PANDEMONIUM IS ACTIVE (CTRL+C TO EXIT)");
-            adaptive::monitor_loop(&mut sched, &SHUTDOWN, verbose, nr_cpus_display)?
+            adaptive::monitor_loop(&mut sched, &SHUTDOWN, verbose, nr_cpus_display, phi_scale)?
         };
 
         log_info!("PANDEMONIUM IS SHUTTING DOWN");
