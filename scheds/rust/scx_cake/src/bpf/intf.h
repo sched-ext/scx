@@ -42,13 +42,16 @@ enum consts {
 	/* The slice every task gets. Dose-responsed U-curve minimum (§S.1). */
 	SLICE_NS	= 3000 * NSEC_PER_USEC,
 
-	/* Patience windows are shifts of cake_frame_slice_ns (§S.2, §G27). */
+	/* Vtime credit for time an occupant already ran (§S.2). */
 	HOME_PREEMPT_RAN_CREDIT_SHIFT	= 1,
 
-	/* Occupant protection as a fraction of a FRAME (§G11.4). */
-	FRAME_PREEMPT_PROTECT_SHIFT	= 4,
-	FRAME_PROBE_PROTECT_SHIFT	= 2,
-	FRAME_SLICE_CAP_SHIFT		= 1,
+	/* Occupant protection: FIXED slice fractions, so only long-running
+	 * compute is ever preempted and no shared clock moves them (§R.28). */
+	PREEMPT_PROTECT_SHIFT		= 4,
+	PROBE_PROTECT_SHIFT		= 2,
+
+	/* Slice cap: half the task's OWN mean cycle (§G12, §R.28). */
+	PERIOD_SLICE_CAP_SHIFT		= 1,
 
 	/* Pre-scale for the wait:run cross-multiply; it cancels (§G12). */
 	CAKE_RATIO_SHIFT		= 16,

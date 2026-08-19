@@ -487,8 +487,8 @@ impl<'a> Scheduler<'a> {
         if let Some(bss) = self.skel.maps.bss_data.as_mut() {
             bss.cake_frame_ns = period;
             bss.cake_frame_floor_ns = self.frame_floor;
-            // Geometry unit: 3/4 of the pessimistic floor, and never looser
-            // than the fixed slice — display regimes only TIGHTEN it (§G27).
+            // Diagnostic only: feeds the --verbose clock line; no policy
+            // consumes these — geometry is per task (§R.28).
             bss.cake_frame_slice_ns = ((self.frame_floor >> 1) + (self.frame_floor >> 2))
                 .min(bpf_intf::consts_SLICE_NS as u64);
         }

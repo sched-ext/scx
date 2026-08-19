@@ -155,17 +155,17 @@ const volatile u64 cake_handoff_max_ns		= 1464;
 u64 cake_frame_ns __attribute__((aligned(STATE_SLOT_BYTES)));
 
 /*
- * The same estimate filtered PESSIMISTICALLY: a cap must never widen because
- * the estimator wobbled (§G18).
+ * The same estimate filtered PESSIMISTICALLY (§G18). Diagnostic only: no
+ * policy consumes it (§R.28).
  */
 u64 cake_frame_floor_ns __attribute__((aligned(STATE_SLOT_BYTES)));
 
 /*
- * The GEOMETRY UNIT: every patience window (sleeper lag, wake hysteresis,
- * preempt margins) is a shift of this, not of the fixed grant. Loader publishes
- * min(3/4 x frame floor, SLICE_NS): a display-coupled regime tightens the
- * geometry with its engine cadence; a vote-free regime keeps the slice exactly,
- * so benches are unchanged by construction (§G27).
+ * DIAGNOSTIC ONLY: the loader still publishes min(3/4 x frame floor,
+ * SLICE_NS) for the --verbose clock line, but no policy consumes it.
+ * As the shared geometry unit it let one fast desktop crowd tighten every
+ * task's patience windows — measured as a 2x handoff-tail mode flip.
+ * Geometry is per task now (§R.28).
  */
 u64 cake_frame_slice_ns __attribute__((aligned(STATE_SLOT_BYTES)));
 
@@ -193,6 +193,18 @@ struct {
 static __always_inline u64 cake_burst_ns(const struct task_struct *p)
 {
 	return p->se.sum_exec_runtime / (p->nvcsw | 1);
+}
+
+/*
+ * This task's mean CYCLE: lifetime per voluntary switch, cake_burst_ns's
+ * wall-axis twin (§G12). Clamped to the fixed slice so a task that rarely
+ * yields is bounded as compute, not trusted forever (§R.28).
+ */
+static __always_inline u64 cake_period_ns(const struct task_struct *p)
+{
+	u64 per = (bpf_ktime_get_ns() - p->start_time) / (p->nvcsw | 1);
+
+	return per > SLICE_NS ? SLICE_NS : per;
 }
 
 /*
@@ -576,13 +588,14 @@ static __noinline u64 cake_occupant_live(s32 tcpu, u64 *ran_out)
  * RT/DL or idle, which we neither can nor need preempt. §R.1.
  */
 static __noinline bool cake_wake_preempt(struct task_struct *p, s32 tcpu,
-					 u64 min_ran)
+					 u32 protect_shift)
 {
 	u64 ran = 0;
 	u64 live = cake_occupant_live(tcpu, &ran);
 	struct task_struct *curr;
 
-	if (!live || ran < min_ran || !time_before(p->scx.dsq_vtime, live))
+	if (!live || ran < (u64)SLICE_NS >> protect_shift ||
+	    !time_before(p->scx.dsq_vtime, live))
 		return false;
 
 	/*
@@ -662,20 +675,20 @@ static __noinline bool cake_handoff_yields(s32 tcpu)
 
 
 /*
- * The slice this task needs: twice its own burst, floored at the chain
- * boundary, capped at half a frame -- taken from the PESSIMISTIC frame
- * estimate, since a bound must not widen when the estimator wobbles. The grant
- * is a PREEMPTION TIMER, not a vtime question (§G10.4, §G11.5, §G18).
+ * The slice this task needs: twice its own burst, capped at half its OWN
+ * cycle -- a task must not hold a CPU past its next wake -- floored at the
+ * handoff cost. The grant is a PREEMPTION TIMER, not a vtime question
+ * (§G10.4, §G18, §R.28).
  */
-static __always_inline u64 cake_task_slice(const struct task_struct *p)
+static __noinline u64 cake_task_slice(struct task_struct *p __arg_trusted)
 {
 	u64 want = cake_burst_ns(p) << 1;
-	u64 cap = cake_frame_floor_ns >> FRAME_SLICE_CAP_SHIFT;
+	u64 cap = cake_period_ns(p) >> PERIOD_SLICE_CAP_SHIFT;
 
-	if (want < cake_handoff_max_ns)
-		want = cake_handoff_max_ns;
 	if (want > cap)
 		want = cap;
+	if (want < cake_handoff_max_ns)
+		want = cake_handoff_max_ns;
 	return want;
 }
 
@@ -697,7 +710,7 @@ static __always_inline u64 cake_sleeper_dose(u64 unused)
 static __always_inline u64 cake_cadence_depth(const struct task_struct *p)
 {
 	u64 burst = cake_burst_ns(p);
-	u64 vs = cake_frame_slice_ns;
+	u64 vs = SLICE_NS;
 
 	if (!cake_starved(p) || burst >= vs)
 		return 0;
@@ -712,7 +725,7 @@ static __always_inline u64 cake_cadence_depth(const struct task_struct *p)
  */
 static __noinline u64 cake_wake_vtime(const struct task_struct *p)
 {
-	u64 lo = cake.frontier.word - cake_frame_slice_ns - cake_cadence_depth(p);
+	u64 lo = cake.frontier.word - SLICE_NS - cake_cadence_depth(p);
 	u64 d  = p->scx.dsq_vtime - lo;
 
 	return lo + (d & ~((u64)((s64)d >> 63)));
@@ -729,14 +742,12 @@ static __noinline bool cake_home_notify(struct task_struct *p, s32 tcpu)
 {
 	u64 ran = 0;
 	u64 live = cake_occupant_live(tcpu, &ran);
-	u64 vs;
 
 	if (!live)
 		return (u32)tcpu == bpf_get_smp_processor_id();
 
-	vs = cake_frame_slice_ns;
-	if (ran >= (vs >> 5) ||
-	    !time_before(p->scx.dsq_vtime + (vs >> 1) -
+	if (ran >= ((u64)SLICE_NS >> 5) ||
+	    !time_before(p->scx.dsq_vtime + (SLICE_NS >> 1) -
 			 (ran >> HOME_PREEMPT_RAN_CREDIT_SHIFT), live))
 		return false;
 
@@ -916,7 +927,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * direct-dispatching keeps live-vtime eligibility (§R.20).
 	 */
 	if ((wake_flags & CAKE_WAKE_SYNC) ||
-	    time_before(p->scx.dsq_vtime + (cake_frame_slice_ns >> 1),
+	    time_before(p->scx.dsq_vtime + (SLICE_NS >> 1),
 			cake.frontier.word)) {
 		s32 waker_cpu = (s32)bpf_get_smp_processor_id();
 
@@ -989,8 +1000,7 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 	 * occupant genuinely deserves it. Cake registers no .tick, so an arm
 	 * that decides neither leaves the wakee on the 5 s watchdog (§R.14).
 	 */
-	if (cake_wake_preempt(p, tcpu,
-			       cake_frame_ns >> FRAME_PREEMPT_PROTECT_SHIFT))
+	if (cake_wake_preempt(p, tcpu, PREEMPT_PROTECT_SHIFT))
 		return 0;
 
 	/*
@@ -1009,8 +1019,7 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 			if (!bpf_cpumask_test_cpu((s32)cand, p->cpus_ptr))
 				continue;
 			if (cake_wake_preempt(p, (s32)cand,
-					       cake_frame_ns >>
-					       FRAME_PROBE_PROTECT_SHIFT))
+					       PROBE_PROTECT_SHIFT))
 				break;
 		}
 	}
@@ -1030,7 +1039,7 @@ __noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 static __noinline bool cake_home_claim(struct task_struct *p __arg_trusted,
 				       s32 tcpu)
 {
-	u64 vs = cake_frame_slice_ns;
+	u64 vs = SLICE_NS;
 	u64 lo = cake.frontier.word - vs;
 	u64 ran = 0, live;
 
@@ -1135,7 +1144,7 @@ static __noinline void cake_pinned_wake_preempt(struct task_struct *p __arg_trus
 	if (!clive)
 		return;
 
-	vs = cake_frame_slice_ns;
+	vs = SLICE_NS;
 	lo = cake.frontier.word - vs;
 	dd = d + vs;
 	pvt = lo - vs + (dd & ~((u64)((s64)dd >> 63)));
@@ -1191,7 +1200,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Only the continuation arm consumes it; the wake arm derives its own
 	 * cadence-deep floor (§R.13).
 	 */
-	lo = cake.frontier.word - cake_frame_slice_ns;
+	lo = cake.frontier.word - SLICE_NS;
 	d  = p->scx.dsq_vtime - lo;
 
 	/*
@@ -1364,7 +1373,7 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 		 * served that queue in a wall-clock window (§R.16, §G11.2).
 		 */
 		if (!own ||
-		    time_before(wv + cake_frame_slice_ns,
+		    time_before(wv + SLICE_NS,
 				own->scx.dsq_vtime) ||
 		    cake_wake_starved()) {
 			first  = (u64)WAKE_DSQ;
