@@ -4,7 +4,8 @@
 
 One `SCX_OPS_DEFINE`, eight callbacks, plus four irq/softirq tracepoints
 feeding the live in-handler bit (§G35; a failed hook degrades to chronic-sink
-steering), no knobs, no per-task storage; needs Linux 7.1 kfuncs.
+steering), no knobs, no per-task storage; runs on Linux 6.12+, and kernels
+with the 7.1 kfuncs take the fastest paths (§R.27).
 
 Overview: [`README.md`](./README.md) ·
 rationale per `§`: the registry in [`STATE.md`](./STATE.md) ·

@@ -293,6 +293,7 @@ real session), live replica (loader logic run standalone on the live host), audi
 | **G35** | live in-handler bit from 4 IRQ tracepoints (§G35) | WAKE (desktop smoke) | **Phases A-D BUILT; WoW endpoint unmeasured** | movable hot-landings **0.80 → 0.66 → 0.23 → 0.17%**, hot max **135 → 15.8 → 8.8 µs**, cpu0 timer hits **820 → 4**; desktop smokes are attribution, not verdicts |
 | G36 | tick look-ahead: skip a CPU whose timer fires within the hop horizon (§G36) | STATIC | **BUILT; unmeasured** | `cake_cpu_tick_soon` **28 insns, 0 spills**; enqueue spills 2/4, TOTAL 17/11/28; desktop smoke expects timer-race hits → ~0 |
 | R.24 | cross-multiplied divide elimination in `cake_frame_observe` + handoff-yields (§R.24) | bench exact-pair | ✅ **kept** | both exact-pairs pass |
+| R.27 | shaped compat ladders for ≤ 6.18 kernels (§R.27) | STATIC + CI | **BUILT; CI veristat endpoint pending** | spills 28 → 26, hot frames flat (`select_cpu` 5, `enqueue` 6); +141 insns of dead arms, pruned at load |
 | — | spread placement, co-location returns off (§R.1 fps A/B) | FRAME | **reverted byte-identical (7826cfe3a; hashes now in backup/nightly-12-commits-20260818)** | fps INCONCLUSIVE: scene drift **~7%/h** (nvidia **5044 → 4695/s**) dominated every arm; placement stayed concentrated on ~7 CPUs with all three co-location returns off |
 
 ### The frame result (2026-08-01, the campaign's first)
@@ -1057,8 +1058,10 @@ A PRIQ insert reads no positional bits; IMMED trips `WARN_ON_ONCE`.
 #### §R.7 — `ops.dispatch` stages
 Own/wake vtime, lockless peeks, steal ring, keep-prev (**+46%**).
 
-#### §R.8 — kfunc bindings, kernel 7.1+
-It cost a fifth of `cake_enqueue`'s instructions.
+#### §R.8 — kfunc bindings (superseded by §R.27)
+The 1.1.x flat compat include cost a fifth of `cake_enqueue`'s instructions; 1.2.0
+first answered with direct v2 bindings (kernel 7.1+ only), now answered by §R.27's
+shaped ladders — same hot-frame codegen, old kernels load again.
 
 #### §R.9 — `SCX_*` as immediates
 `bpf_core_enum_value()`, not rodata loads. Permanent `#undef`.
@@ -1129,6 +1132,21 @@ that distribution itself (largest gap, rank, comparison of two measured costs) s
 number claims to know the world in advance. Dimensionless agreement counts (3-poll
 release, 8-poll slowdown) survive — they pace confidence, they measure nothing.
 Companion to §R.25: that ruling makes checks live, this one makes the VALUES live.
+
+#### §R.27 — compat ladders, shaped (2026-08-18)
+Old-kernel support without §R.8's hot-frame tax, by placing each ladder by its shape:
+arms that are alternative calls with one argument shape stay inline (the verifier
+deletes the untaken arms; register allocation is a single call's); a fallback that
+needs its own stack or argument shape (`insert_vtime` args struct, `dsq_peek`
+iterator, `cpu_curr` rq deref) lives in a `static __noinline` subprogram so the cost
+stays inside that frame. Global subprograms return s32, never void — a pre-6.19
+verifier rejects void global functions. Spills 28 → 26, hot frames flat
+(`select_cpu` 5, `enqueue` 6); insns 1908 → 2049 are the dead arms, pruned at load.
+Experiment: hypothesis — compat via shaped ladders keeps new-kernel codegen and
+makes ≤ 6.18 verify; steps — port 5 `cpu_curr` + 3 `peek` + insert family +
+`move_to_local` + 3 s32 returns; endpoint — CI veristat green on 6.13/6.16/6.18 with
+hot spills flat; abort — any hot-frame spill regression, or a fallback that changes
+scheduling behavior on the dev kernel.
 
 ---
 

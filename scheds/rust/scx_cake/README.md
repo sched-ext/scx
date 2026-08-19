@@ -8,7 +8,7 @@ Steady frame times, low input lag, small worst-case stutters —
 while staying a competent general-purpose scheduler.
 
 [![License: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg?style=flat-square)](https://opensource.org/licenses/GPL-2.0)
-[![Kernel: 7.1+](https://img.shields.io/badge/kernel-7.1%2B-green.svg?style=flat-square)](https://kernel.org)
+[![Kernel: 6.12+](https://img.shields.io/badge/kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
 [![sched_ext](https://img.shields.io/badge/sched_ext-BPF-orange.svg?style=flat-square)](https://github.com/sched-ext/scx)
 
 **The mission: a scheduler I would want to use for gaming.**
@@ -41,7 +41,7 @@ results stand: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
 
 | | |
 |---|---|
-| **Kernel** | 7.1+ with `CONFIG_SCHED_EXT=y` — check `zgrep SCHED_EXT /proc/config.gz`. Gaming distro kernels (CachyOS et al.) qualify |
+| **Kernel** | 6.12+ with `CONFIG_SCHED_EXT=y` — check `zgrep SCHED_EXT /proc/config.gz`. Kernels with the 7.1 kfuncs take the fastest paths; older ones take compat fallbacks. Gaming distro kernels (CachyOS et al.) qualify |
 | **Build** | `cargo build --release -p scx_cake` from the scx repo root (Rust toolchain + clang ≥ 17) |
 | **Run** | `sudo ./target/release/scx_cake` |
 | **Is it active?** | `cat /sys/kernel/sched_ext/root/ops` prints `cake_…` |

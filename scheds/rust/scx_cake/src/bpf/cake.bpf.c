@@ -51,38 +51,41 @@ UEI_DEFINE(uei);
 #define CAKE_WAKE_SYNC    bpf_core_enum_value(enum scx_wake_flags,   SCX_WAKE_SYNC)
 
 /*
- * Cake-local kfunc bindings. MINIMUM KERNEL 7.1: bind straight to the modern
- * kfuncs rather than through compat.bpf.h's ladder, whose untaken arms cost
- * register allocation the verifier's dead-code elimination cannot undo (§R.8).
+ * Cake-local kfunc bindings through compat.bpf.h's ladders, shaped so the
+ * modern kernel pays nothing (§R.8): a ladder whose arms are alternative
+ * calls with one argument shape stays inline — the verifier deletes the
+ * untaken arms and the register allocation is that of a single call. A
+ * ladder whose fallback needs its own stack or argument shape (the
+ * insert_vtime args struct, the dsq_peek iterator, the cpu_curr rq deref)
+ * is confined to a static __noinline subprogram, so its cost stays inside
+ * that frame instead of the hot caller. Global subprograms return s32, not
+ * void: a pre-6.19 verifier rejects a void return from a global function.
  */
-static __always_inline bool cake_dsq_insert_vtime(struct task_struct *p, u64 dsq_id,
-						  u64 slice, u64 vtime, u64 enq_flags)
+static __noinline bool cake_dsq_insert_vtime(struct task_struct *p, u64 dsq_id,
+					     u64 slice, u64 vtime, u64 enq_flags)
 {
-	struct scx_bpf_dsq_insert_vtime_args args = {
-		.dsq_id		= dsq_id,
-		.slice		= slice,
-		.vtime		= vtime,
-		.enq_flags	= enq_flags,
-	};
-
-	return __scx_bpf_dsq_insert_vtime(p, &args);
+	return scx_bpf_dsq_insert_vtime(p, dsq_id, slice, vtime, enq_flags);
 }
 
 static __always_inline bool cake_dsq_insert(struct task_struct *p, u64 dsq_id,
 					    u64 slice, u64 enq_flags)
 {
-	return scx_bpf_dsq_insert___v2___compat(p, dsq_id, slice, enq_flags);
+	return scx_bpf_dsq_insert(p, dsq_id, slice, enq_flags);
 }
 
-/*
- * NOTE THE NAME: libbpf strips the trailing ___suffix before resolving, so the
- * ___cake tail is what makes this ask the kernel for the v2 kfunc rather than
- * the base name. Cake needs its own extern, not compat's (§R.8).
- */
-bool scx_bpf_dsq_move_to_local___v2___cake(u64 dsq_id, u64 enq_flags) __ksym __weak;
 static __always_inline bool cake_move_to_local(u64 dsq_id)
 {
-	return scx_bpf_dsq_move_to_local___v2___cake(dsq_id, 0);
+	return scx_bpf_dsq_move_to_local(dsq_id, 0);
+}
+
+static __noinline struct task_struct *cake_cpu_curr(s32 cpu)
+{
+	return __COMPAT_scx_bpf_cpu_curr(cpu);
+}
+
+static __noinline struct task_struct *cake_dsq_peek(u64 dsq_id)
+{
+	return __COMPAT_scx_bpf_dsq_peek(dsq_id);
 }
 
 /*
@@ -218,7 +221,7 @@ static __always_inline bool cake_starved(const struct task_struct *p)
  * ops.running caller — never divides; nvcsw >= 2^32 takes the exact divide
  * path instead (§R.24).
  */
-__noinline void cake_frame_observe(struct task_struct *p __arg_trusted, u64 now)
+__noinline s32 cake_frame_observe(struct task_struct *p __arg_trusted, u64 now)
 {
 	u64 n = p->nvcsw | 1;
 	u64 delta = now - p->start_time;
@@ -234,25 +237,26 @@ __noinline void cake_frame_observe(struct task_struct *p __arg_trusted, u64 now)
 	 * argmax mid-game, 2026-08-17).
 	 */
 	if ((p->se.sum_exec_runtime << 1) >= delta)
-		return;
+		return 0;
 
 	if (!(n >> 32) &&
 	    (delta < FRAME_PERIOD_MIN_NS * n ||
 	     delta >= (FRAME_PERIOD_MAX_NS + 1) * n))
-		return;
+		return 0;
 
 	per = delta / n;
 	if (per < FRAME_PERIOD_MIN_NS || per > FRAME_PERIOD_MAX_NS)
-		return;
+		return 0;
 
 	idx = (u32)(per >> FRAME_BUCKET_SHIFT) & (FRAME_BUCKETS - 1);
 	b = bpf_map_lookup_elem(&cake_frame_hist, &idx);
 	if (!b)
-		return;
+		return 0;
 
 	/* This CPU's own copy: no atomic, no shared line (§R.22). */
 	b->count++;
 	b->sum += per;
+	return 0;
 }
 
 _Static_assert(sizeof(struct cake_slot) == STATE_SLOT_BYTES,
@@ -540,7 +544,7 @@ static __always_inline u32 cake_recip_index(const struct task_struct *p)
  */
 static __noinline u64 cake_occupant_live(s32 tcpu, u64 *ran_out)
 {
-	struct task_struct *curr = scx_bpf_cpu_curr(tcpu);
+	struct task_struct *curr = cake_cpu_curr(tcpu);
 	u64 cv, ran, stamp;
 	u32 cidx;
 
@@ -585,7 +589,7 @@ static __noinline bool cake_wake_preempt(struct task_struct *p, s32 tcpu,
 	 * Never preempt a pipeline stage; tested last so rejections stay
 	 * cheap (§G10.5).
 	 */
-	curr = scx_bpf_cpu_curr(tcpu);
+	curr = cake_cpu_curr(tcpu);
 	if (curr && cake_starved(curr))
 		return false;
 
@@ -638,7 +642,7 @@ static __noinline bool cake_system_serial(void)
  */
 static __noinline bool cake_handoff_yields(s32 tcpu)
 {
-	struct task_struct *curr = scx_bpf_cpu_curr(tcpu);
+	struct task_struct *curr = cake_cpu_curr(tcpu);
 	u64 ran, burst, lim, n;
 
 	if (!curr || !curr->scx.dsq_vtime)
@@ -891,7 +895,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		    cake_qmark_test((u32)cpu)) {
 			struct task_struct *head;
 
-			head = scx_bpf_dsq_peek((u64)(u32)cpu);
+			head = cake_dsq_peek((u64)(u32)cpu);
 			if (head) {
 				u64 head_vtime = head->scx.dsq_vtime;
 
@@ -952,13 +956,13 @@ enum cake_route { ROUTE_GLOBAL = 0, ROUTE_HOME_QUEUE, ROUTE_HOME_CLAIM };
  * already published, so only p, tcpu and the route cross this boundary — which
  * is what makes the cut cheap (§R.11).
  */
-__noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
+__noinline s32 cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 				 u32 route)
 {
 	s32 idle;
 
 	if (route == ROUTE_HOME_CLAIM && cake_home_notify(p, tcpu))
-		return;
+		return 0;
 
 	/* Prefer an idle SMT sibling for globally queued cold pickup. */
 	if (route == ROUTE_GLOBAL) {
@@ -969,14 +973,14 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 		    bpf_cpumask_test_cpu(sib, p->cpus_ptr) &&
 		    scx_bpf_test_and_clear_cpu_idle(sib)) {
 			scx_bpf_kick_cpu(sib, CAKE_KICK_IDLE);
-			return;
+			return 0;
 		}
 	}
 
 	idle = cake_pick_idle_clean(p);
 	if (idle >= 0) {
 		scx_bpf_kick_cpu(idle, CAKE_KICK_IDLE);
-		return;
+		return 0;
 	}
 
 	/*
@@ -987,7 +991,7 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 	 */
 	if (cake_wake_preempt(p, tcpu,
 			       cake_frame_ns >> FRAME_PREEMPT_PROTECT_SHIFT))
-		return;
+		return 0;
 
 	/*
 	 * Globally queued only: hunt a mid-slice compute occupant among the
@@ -1010,6 +1014,7 @@ __noinline void cake_wake_notify(struct task_struct *p __arg_trusted, s32 tcpu,
 				break;
 		}
 	}
+	return 0;
 }
 
 /*
@@ -1052,10 +1057,10 @@ static __noinline bool cake_home_claim(struct task_struct *p __arg_trusted,
  * frame; @p is __arg_trusted because the verifier checks it independently
  * (§R.11).
  */
-__noinline void cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
+__noinline s32 cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 {
 
-	struct task_struct *curr = scx_bpf_cpu_curr(tcpu);
+	struct task_struct *curr = cake_cpu_curr(tcpu);
 	bool empty_home;
 	u32 route;
 
@@ -1072,7 +1077,7 @@ __noinline void cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 		cake_qmark_set((u32)tcpu);
 		cake_dsq_insert_vtime(p, (u64)(u32)tcpu, cake_task_slice(p),
 				      cake_wake_vtime(p), CAKE_ENQ_WAKEUP);
-		return;
+		return 0;
 	}
 
 	/*
@@ -1111,7 +1116,7 @@ __noinline void cake_enqueue_wake(struct task_struct *p __arg_trusted, s32 tcpu)
 			      CAKE_ENQ_WAKEUP);
 
 	cake_wake_notify(p, tcpu, route);
-
+	return 0;
 }
 
 /*
@@ -1209,7 +1214,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	{
 		u64 vt = lo + (d & ~((u64)((s64)d >> 63)));
-		struct task_struct *hc = scx_bpf_cpu_curr(tcpu);
+		struct task_struct *hc = cake_cpu_curr(tcpu);
 
 		/*
 		 * Anti-collision: home held by an equally well-served PEER. The
@@ -1348,9 +1353,9 @@ static __noinline bool cake_dispatch_search(s32 cpu)
 	 * takes the global lock first and the wake-storm serialisation returns.
 	 * The head peek republishes the mark with one conditional store (§R.3).
 	 */
-	own = scx_bpf_dsq_peek((u64)ucpu);
+	own = cake_dsq_peek((u64)ucpu);
 	cake_qmark_publish(ucpu, own);
-	wake = scx_bpf_dsq_peek((u64)WAKE_DSQ);
+	wake = cake_dsq_peek((u64)WAKE_DSQ);
 	if (wake) {
 		u64 wv = wake->scx.dsq_vtime;
 
