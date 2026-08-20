@@ -22,15 +22,10 @@ typedef signed long s64;
 #endif /* __VMLINUX_H__ */
 
 /*
- * Build-host topology, detected by build.rs. The ONLY definitions a cflag may
- * set: policy is source-only so an A/B is two commits, not two flags (§S.6).
+ * No cflag sets topology — the loader measures the host into rodata at
+ * attach, so one binary fits any machine. Policy is source-only so an A/B
+ * is two commits, not two flags (§S.6).
  */
-#ifndef CAKE_NR_CCDS
-#define CAKE_NR_CCDS 1
-#endif
-#ifndef CAKE_NR_CPUS
-#define CAKE_NR_CPUS 1024
-#endif
 
 /* Multi-CCD steal order: 0 off, 1 same-CCD first, 2 also group cache tiers. */
 #define CAKE_CCD_STEAL_POLICY 2
@@ -77,8 +72,9 @@ enum consts {
 	FRAME_BUCKET_SHIFT		= 17,
 	FRAME_BUCKETS			= 512,
 
-	NR_CCDS				= CAKE_NR_CCDS,
-	BUILD_NR_CPUS			= CAKE_NR_CPUS,
+	/* Widest host the CCD steal matrix covers (u16² = 32 KB rodata);
+	 * wider machines take the generic ring walk at runtime. */
+	STEAL_SPAN			= 128,
 	CCD_STEAL_POLICY		= CAKE_CCD_STEAL_POLICY,
 
 	/* Fixed-point weight scaling: representation, not policy (§S.7). */

@@ -10,7 +10,6 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
-#[cfg(cake_multi_ccd)]
 use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -232,7 +231,9 @@ impl<'a> Scheduler<'a> {
             bss.cake_frame_slice_ns = bpf_intf::consts_SLICE_NS as u64;
         }
 
-        #[cfg(cake_multi_ccd)]
+        // Multi-CCD steal order is a runtime decision, never a build-host
+        // property: one binary must attach on any topology. Hosts wider than
+        // the fixed matrix span keep the generic ring walk.
         {
             let rodata = skel
                 .maps
@@ -240,51 +241,57 @@ impl<'a> Scheduler<'a> {
                 .as_mut()
                 .context("BPF rodata unavailable for cache topology")?;
             let order = &mut rodata.cpu_steal_order;
-            let nr_span = bpf_intf::consts_BUILD_NR_CPUS as usize;
-            anyhow::ensure!(
-                topo.all_cpus
-                    .keys()
-                    .next_back()
-                    .is_none_or(|cpu| *cpu < nr_span),
-                "runtime CPU topology exceeds Cake's build-host CPU span"
-            );
+            let span = bpf_intf::consts_STEAL_SPAN as usize;
+            let fits = topo
+                .all_cpus
+                .keys()
+                .next_back()
+                .is_none_or(|cpu| *cpu < span);
+            let multi_ccd = topo.all_llcs.len() > 1;
+            rodata.steal_order_live = u8::from(multi_ccd && fits);
             order.fill(0);
 
-            let llc_cache: BTreeMap<usize, usize> = topo
-                .all_llcs
-                .iter()
-                .map(|(id, llc)| {
-                    (
-                        *id,
-                        llc.all_cpus
-                            .values()
-                            .map(|cpu| cpu.cache_size)
-                            .max()
-                            .unwrap_or(0),
-                    )
-                })
-                .collect();
-            let policy = bpf_intf::consts_CCD_STEAL_POLICY;
-
-            for src in topo.all_cpus.values() {
-                let mut candidates: Vec<_> = topo
-                    .all_cpus
-                    .values()
-                    .filter(|dst| dst.id != src.id)
+            if multi_ccd && !fits {
+                warn!("   ccd     host wider than steal matrix ({span} CPUs); ring steal only");
+            }
+            if multi_ccd && fits {
+                let llc_cache: BTreeMap<usize, usize> = topo
+                    .all_llcs
+                    .iter()
+                    .map(|(id, llc)| {
+                        (
+                            *id,
+                            llc.all_cpus
+                                .values()
+                                .map(|cpu| cpu.cache_size)
+                                .max()
+                                .unwrap_or(0),
+                        )
+                    })
                     .collect();
-                candidates.sort_by_key(|dst| {
-                    let class = if dst.llc_id == src.llc_id {
-                        0
-                    } else if policy > 1 && llc_cache[&dst.llc_id] == llc_cache[&src.llc_id] {
-                        1
-                    } else {
-                        2
-                    };
-                    (class, (dst.id + nr_span - src.id) % nr_span)
-                });
-                let base = src.id * nr_span;
-                for (slot, dst) in candidates.into_iter().enumerate() {
-                    order[base + slot] = dst.id as u16;
+                let policy = bpf_intf::consts_CCD_STEAL_POLICY;
+                let nr_ids = *NR_CPU_IDS;
+
+                for src in topo.all_cpus.values() {
+                    let mut candidates: Vec<_> = topo
+                        .all_cpus
+                        .values()
+                        .filter(|dst| dst.id != src.id)
+                        .collect();
+                    candidates.sort_by_key(|dst| {
+                        let class = if dst.llc_id == src.llc_id {
+                            0
+                        } else if policy > 1 && llc_cache[&dst.llc_id] == llc_cache[&src.llc_id] {
+                            1
+                        } else {
+                            2
+                        };
+                        (class, (dst.id + nr_ids - src.id) % nr_ids)
+                    });
+                    let base = src.id * span;
+                    for (slot, dst) in candidates.into_iter().enumerate() {
+                        order[base + slot] = dst.id as u16;
+                    }
                 }
             }
         }

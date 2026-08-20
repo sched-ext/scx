@@ -49,9 +49,10 @@ results stand: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
 | **If evicted** | the exit reason lands in `dmesg` (grep `sched_ext`) |
 
 The binary takes `-v` and `-V` and nothing else — that is the point.
-(`intf.h` carries no policy switches; the only cflag inputs are the build
-host's CCD/CPU counts. Experiments are A/B'd as two git commits, never a
-build flag — see [`DESIGN.md`](./DESIGN.md).)
+(`intf.h` carries no policy switches and no cflag inputs; the loader
+measures the host's topology at attach, so one binary fits any machine.
+Experiments are A/B'd as two git commits, never a build flag — see
+[`DESIGN.md`](./DESIGN.md).)
 
 ## How it works
 
@@ -176,7 +177,7 @@ only learned state is one per-CPU three-bit handoff-confidence hint.
 | file | contents |
 |---|---|
 | `src/bpf/cake.bpf.c` | the scheduler — 8 callbacks, ~1.5k lines, about a third comments explaining the why |
-| `src/bpf/intf.h` | the constant surface: build-host CPU/CCD counts, the `SLICE_NS` boot seed, frame-clock bands, and the IDs shared with the loader |
+| `src/bpf/intf.h` | the constant surface: the `SLICE_NS` boot seed, frame-clock bands, and the IDs shared with the loader |
 | `src/main.rs` | the loader: attach, exit reporting, hardware probes, frame-clock publish, sink monitor |
 | [`STATE.md`](./STATE.md) | **start here** — current state, the experiment ledger, and the `§` rationale registry every source comment resolves to |
 | [`DESIGN.md`](./DESIGN.md) | the full design: every rule, constant, invariant |

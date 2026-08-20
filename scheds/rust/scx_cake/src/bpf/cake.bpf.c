@@ -23,8 +23,8 @@ _Static_assert((MAX_CPUS & (MAX_CPUS - 1)) == 0,
 	       "MAX_CPUS must remain a power of two");
 _Static_assert((RECIP_TABLE_SIZE & (RECIP_TABLE_SIZE - 1)) == 0,
 	       "reciprocal table must remain mask-indexable");
-_Static_assert(CAKE_NR_CPUS <= MAX_CPUS,
-	       "build-host CPU span must fit Cake MAX_CPUS");
+_Static_assert(STEAL_SPAN <= MAX_CPUS,
+	       "steal matrix span must fit Cake MAX_CPUS");
 
 char _license[] SEC("license") = "GPL";
 
@@ -477,10 +477,12 @@ static __noinline int cake_nonsink_rebuild(u32 gen)
 	return 0;
 }
 
-#if CAKE_NR_CCDS > 1
-/* Loader-sorted: same CCD, same cache-capacity tier, then unrestricted. */
-const volatile u16 cpu_steal_order[CAKE_NR_CPUS * CAKE_NR_CPUS];
-#endif
+/* Loader-sorted: same CCD, same cache-capacity tier, then unrestricted.
+ * Fixed span so one binary fits any host; live only when the loader saw
+ * multiple CCDs AND the host fits the matrix — rodata, so the verifier
+ * folds the dead branch away on every other machine. */
+const volatile u16 cpu_steal_order[STEAL_SPAN * STEAL_SPAN];
+const volatile u8 steal_order_live;
 
 /*
  * Reciprocal-weight table for division-free vtime charging:
@@ -1271,25 +1273,25 @@ kick_idle:
 static __noinline bool cake_ring_steal(u32 ucpu)
 {
 	u32 nr = nr_cpu_span;
-	u32 i;
-
-#if CAKE_NR_CCDS > 1 && CAKE_CCD_STEAL_POLICY > 0
-	/* One precomputed locality order avoids verifier-multiplying scan loops. */
-	if (ucpu >= CAKE_NR_CPUS)
-		return true;
-	for (i = 0; i < MAX_CPUS; i++) {
-		u32 idx;
-
-		if (i >= CAKE_NR_CPUS || i + 1 >= nr)
-			break;
-		idx = cpu_steal_order[ucpu * CAKE_NR_CPUS + i];
-		if (cake_qmark_test(idx) &&
-		    cake_move_to_local((u64)idx))
-			return true;
-	}
-#else
 	u32 cw = (u32)-1;	/* which qmask word `m` holds; none yet */
 	u64 m = 0;
+	u32 i;
+
+	if (CCD_STEAL_POLICY > 0 && steal_order_live && ucpu < STEAL_SPAN) {
+		/* One precomputed locality order avoids verifier-multiplying
+		 * scan loops. */
+		for (i = 0; i < STEAL_SPAN; i++) {
+			u32 idx;
+
+			if (i + 1 >= nr)
+				break;
+			idx = cpu_steal_order[ucpu * STEAL_SPAN + i];
+			if (cake_qmark_test(idx) &&
+			    cake_move_to_local((u64)idx))
+				return true;
+		}
+		return false;
+	}
 
 	for (i = 1; i < MAX_CPUS; i++) {
 		u32 idx = ucpu + i, wi;
@@ -1308,7 +1310,6 @@ static __noinline bool cake_ring_steal(u32 ucpu)
 		if (cake_move_to_local((u64)idx))
 			return true;
 	}
-#endif
 
 	return false;
 }
