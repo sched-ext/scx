@@ -1287,6 +1287,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
 	struct cgroup *cgrp __free(cgroup) = NULL;
+	int ret;
+
 	/*
 	 * When CPU controller is disabled, args->cgroup is root, so we need
 	 * to get the task's actual cgroup for both logging and cell assignment.
@@ -1295,15 +1297,24 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
 	 */
 	if (cpu_controller_disabled) {
 		cgrp = task_cgroup(p);
-		if (!cgrp)
+		if (!cgrp) {
+			scx_bpf_error("task_cgroup() failed");
 			return -ENOENT;
+		}
 
 		/* Ensure cgroup hierarchy is initialized (handles ancestors + this cgroup) */
-		int ret = init_cgrp_ctx_with_ancestors(cgrp);
-		if (ret)
+		ret = init_cgrp_ctx_with_ancestors(cgrp);
+		if (ret) {
+			scx_bpf_error("init_cgrp_ctx_with_ancestors() failed");
 			return ret;
+		}
 
-		return init_task_impl(p, cgrp);
+		ret = init_task_impl(p, cgrp);
+		if (ret) {
+			scx_bpf_error("init_task_impl failed");
+			return ret;
+		}
+		return 0;
 	}
 	/*
 	 * Extra refcount bump below can be dropped and args->cgroup can be used
@@ -1311,9 +1322,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
 	 * https://lore.kernel.org/bpf/95d7ccc17681aa3a4a2eeb1b073f00f7@kernel.org.
 	 */
 	cgrp = bpf_cgroup_from_id(args->cgroup->kn->id);
-	if (!cgrp)
+	if (!cgrp) {
+		scx_bpf_error("bpf_cgroup_from_id() failed");
 		return -ENOENT;
-	return init_task_impl(p, cgrp);
+	}
+	ret = init_task_impl(p, cgrp);
+	if (ret) {
+		scx_bpf_error("init_task_impl() failed");
+		return ret;
+	}
+	return 0;
 }
 
 __hidden void dump_cpumask_word(s32 word, const struct cpumask *cpumask)
