@@ -14,12 +14,14 @@ This file was compacted 2026-08-12 from 30,510 words; everything cut is in that 
 <summary><b>Branch and squash history</b></summary>
 <br>
 
-Branch: **`RitzDaCat/scx_cake-nightly`** (pushed to fork). History squashed three
+Branch: **`RitzDaCat/scx_cake-nightly`** (pushed to fork). History squashed four
 times: at `15960cb97` (53 commits → `backup/nightly-53-commits-20260810`), at
-`38397bb59` (10 commits → `backup/nightly-10-commits-20260817`), and at this commit
+`38397bb59` (10 commits → `backup/nightly-10-commits-20260817`), at `c99eb00c7`
 (12 commits → `backup/nightly-12-commits-20260818`, after the 2026-08-18 rebase onto
-upstream `ff86d6588`; pre-rebase state in `backup/nightly-pre-rebase-20260818`); all
-hashes cited below resolve via those local backup branches.
+upstream `ff86d6588`; pre-rebase state in `backup/nightly-pre-rebase-20260818`), and
+at this commit (17 commits → `backup/nightly-17-commits-20260819`: the R.28 arc —
+1.1.3 wallclock campaign, mode-flip root cause, per-task geometry, veto bisect,
+live WoW confirm); all hashes cited below resolve via those local backup branches.
 
 </details>
 
@@ -40,6 +42,31 @@ hashes cited below resolve via those local backup branches.
 | 9 | dead-branch deletions | pinned-wake preempt (5th zero dataset) + sibling kick (2nd) — delete-with-no-trade | **ON HOLD** until the receipts audit confirms the zero datasets (`REVIEW_INDEPENDENT_2026-08-17.md` Addendum, in git history); then delete both and run a game screen |
 | 10 | **G25** steal-ring bitmask | **LANDED**, verifier accepted, attach smoke passed 2026-08-08 | wake latency on HD2 render roles + P4 bench screen. Prediction on record: ~0.04% of a core quiet, 4.7% invalidated — **expected frame effect near zero; a null confirms the pricing** |
 | 11 | **G23** per-line IRQ-sink detection + mask avoidance | built, smoke PASSED, **endpoint unmeasured** | HD2 ABBA during ACTIVE play (P2 needs live mouse input) on `Window & Input` / `main` / `renderer` mean wake + severe-frame screen, then P4 `--blocks 2` bench screen. Receipts + steps: `docs/REVIEW_G21_G23_2026-08-02.md` §resume |
+
+**PORTABILITY FIX (2026-08-20): one binary now runs on any machine.** A 1.2.1
+package refused a 16-CPU host: `build.rs` baked the build machine's CPU and CCD
+counts into the BPF. A binary built on a smaller machine refused to attach; a
+binary built on a single-CCD machine lost CCD steal with no warning.
+
+The fix, commit `9e5d31f56`:
+- `build.rs` no longer reads the build machine. No topology cflags remain.
+- `cpu_steal_order` has a fixed size: `STEAL_SPAN`² = 128² u16 = 32 KB rodata.
+- The `#if CAKE_NR_CCDS` forks are gone. One rodata flag, `steal_order_live`,
+  replaces them. The loader sets it when the host has >1 LLC and fits the span.
+  The verifier then deletes the dead branch on each host at attach.
+- Hosts wider than `STEAL_SPAN` use the ring walk. Only `MAX_CPUS` (1024) can
+  refuse attach.
+- New CLAUDE.md invariant: cake runs on all hardware; per-hardware fast paths
+  are rodata-gated, never build-host-shaped.
+
+**EXP S.1-1ms (2026-08-19): ❌ FALSIFIED.** Hypothesis was: nightly's extreme-tail loss
+vs shipped 1.1.3 (mutex-handoff p999 −37% 6/6; `runs/adhoc_wallclock_113_vs_nightly_20260819`)
+is SLICE_NS geometry. Probe SLICE_NS 3000→1000 µs (`092ada871`), 6-slot ABCCBA
+(1.1.3 / 3 ms / 1 ms): p999 2.53→2.70 µs (both ~2× 1.1.3's stable 1.36), p99 1.20→**1.85**
+(1 ms actively worse), schbench-saturated −18% worse; throughput flat ±4%. Reverted
+byte-identical `3df90d103` (39d784f3). Secondary find: 1.1.3's handoff tail is IDENTICAL
+across suites (0.85/1.36 µs) while nightly's drifted (p99 0.85→1.20 same code) — the
+nightly tail is regime-sensitive, the 1.1.3 tail is not. The gap is structural, not quantum.
 
 **Also open, no owner:** the serial-handoff trade (fires 0.01–0.03% in game regimes —
 games-only maintainer call). G25 leftovers: contended regime needs re-pricing with a
@@ -85,30 +112,32 @@ y-cruncher, namd, kernel-defconfig, xz, prime.
 | HD2 live, ABBA, 2026-08-02 (G21) | `main` mean wake | 0.79 / 0.79 | **0.47 / 0.48** | **cake 2/2, −39.9%** |
 | same | `renderer` mean wake | 0.91 / 0.83 | **0.66 / 0.64** | cake 2/2, −25.3% |
 
-**WoW wake read (2026-08-17, single-arm cake @ G27.1c build `db0b3636…`, 22 s live play —
-attribution only, no native arm):** 29 roles; every high-n role p99 ≤ 2.6 µs except
-**vkd3d_fence p99 31.45 / max 255 µs**, 99% of slow wakes targeting idle-shown CPU 13 =
-the nvidia IRQ CPU (ISR shadow; cpuidle driver `none` on this host). Off-target fence
-wakes: p50 2 / max 11 µs. Sink set empty at attach → §G30. **After G30 Phase B + sink
-veto (`wow-cake-g30c`): fence p99 1.25 µs, 6 slow wakes, CPU 13 share 2/50.8k — tail
-eliminated at the wake tier; frames unmeasured.** Artifacts:
+**WoW wake read (2026-08-17, single-arm cake @ G27.1c build `db0b3636…`, 22 s live
+play — attribution only, no native arm).** 29 roles. Every high-n role p99 ≤ 2.6 µs
+except vkd3d_fence: **p99 31.45 / max 255 µs**. 99% of the slow wakes target
+idle-shown CPU 13 — the nvidia IRQ CPU (ISR shadow; cpuidle driver `none` on this
+host). Off-target fence wakes: p50 2 / max 11 µs. The sink set was empty at attach
+→ §G30. **After G30 Phase B + sink veto (`wow-cake-g30c`): fence p99 1.25 µs,
+6 slow wakes, CPU 13 share 2/50.8k.** Tail eliminated at the wake tier; frames
+unmeasured. Artifacts:
 `~/Documents/Repo/scx_cake_bench/history/wake_latency/wow-cake-{g27tip,g30a,g30b,g30c,g35d,g36}*`.
 
-**Five-domain wake sweep (G17 rotation, delays > 200 µs per 10k transitions):** input
-294.6/93.2 → **39.0/47.8** (4.5×), FAudio 288.3/80.8 → **31.7/40.6** (~5×), renderer
-124.0/87.0 → **46.7/47.0** (2.2×), vkd3d_queue 42.0/18.7 → **13.2/15.5** (1.5×) — cake 2/2
-on all four. Network (n~555) and IO (250× transition mismatch) unusable; `data-loop.0` is
-SCHED_FIFO, so cake never schedules it. **Law: cake's advantage scales inversely with the
-thread's burst** — G10–G20 optimised the renderer, the longest-burst thread, where the win
-is smallest.
+**Five-domain wake sweep (G17 rotation; delays > 200 µs per 10k transitions,
+native → cake):** input 294.6/93.2 → **39.0/47.8** (4.5×), FAudio 288.3/80.8 →
+**31.7/40.6** (~5×), renderer 124.0/87.0 → **46.7/47.0** (2.2×), vkd3d_queue
+42.0/18.7 → **13.2/15.5** (1.5×) — cake 2/2 on all four. Network (n~555) and IO
+(250× transition mismatch) unusable. `data-loop.0` is SCHED_FIFO, so cake never
+schedules it. **Law: cake's advantage scales inversely with the thread's burst.**
+G10–G20 optimised the renderer — the longest-burst thread, where the win is
+smallest.
 
 ---
 
 ## Open gaps
 
 1. **Cake loses the EASY scene** — 0.1% low −5.6%, 2/2 no overlap, on a scene where
-   native's own tail is already tight. Mechanism unknown; **highest-value target on the
-   board.** The G17 frame win and this loss both stand; neither generalises.
+   native's own tail is already tight. Mechanism unknown; **highest-value open
+   target.** The G17 frame win and this loss both stand; neither generalises.
 2. **ccm-memcpy −14.9%** — pure CPU-share reallocation from cake's sleeper catch-up
    (per-usr-second efficiency equal). Zero-sum, no point fix; four falsified attempts.
    The lever is unlike-type SMT pairing (+73% memcpy pinned) with a **per-TASK** duty
@@ -119,17 +148,37 @@ is smallest.
 4. **futex-lock-pi −71.8%** — lock-pi pins its workers, so a pinned wake queues behind a
    busy occupant and no CPU may steal it. A sched_ext **semantic gap**; kernel lane
    (a wakeup-equivalent flag for PI re-activations). Accepted known loss.
-5. **The renderer wake tail resists everything** — locality (G13), preempt (G14/G15),
+5. **The renderer wake tail: all levers null so far** — locality (G13), preempt (G14/G15),
    notification (G16) all null; G15 confirmed falsified on input too. 28–32% of slow
    same-CPU wakes have `swapper` as occupant in **both** schedulers — an idle-exit floor
    neither one beats.
 6. **`ops.enqueue` reaches 0.142% of a game's dispatches** (vs 23.6% saturated). Every
    enqueue-side routing decision is nearly inert on games; leverage is on the direct
    path in `cake_select_cpu`, which serves 99.86%.
-7. **Third arm blocked** — shipped 1.1.3 builds but does not attach on kernel 7.1.5
-   (`map 'cake_ops': BPF map skeleton link is uninitialized`, libbpf/struct_ops skew).
-   (Recorded on 7.1.5; host now on 7.1.8 post-rebase — re-test attach of the shipped
-   1.1.3 binary before citing this gap.)
+7. **Third arm UNBLOCKED 2026-08-19.** Shipped 1.1.3 (`/usr/bin/scx_cake`, sha256
+   `56f9e886…`) attaches and runs clean on 7.1.8. The libbpf skeleton warning still
+   prints but is non-fatal.
+   - Quick wallclock ABBA vs nightly HEAD (diagnostic tier,
+     `scx_cake_bench_assets/runs/adhoc_wallclock_113_vs_nightly_20260819/`): nightly
+     pipe **−16.0%**, memcpy −3.9%, sched-messaging **+70.5%** (4/4, no overlap).
+     The many-to-many handoff shape regressed vs 1.1.3; unscored at the sealed tier.
+   - n=10 confirm (suite 4, 5×ABBA): schbench-light req p99 **+72% 10/10** (S sd
+     7 µs, N sd 459), mutex-handoff p999 **2.0× 10/10** (S sd 0.024 µs), p99
+     **BIMODAL** (4/10 runs match 1.1.3 exactly, 6/10 at 1.2–1.9 µs), pipe −9.7%
+     win 10/10. Slice dose falsified (EXP S.1-1ms).
+   - **MODE SWITCH ROOT-CAUSED 2026-08-19** (`mode_probe/` in the run dir): it is
+     `cake_frame_slice_ns`. Placement exonerated (24 runs, pair co-resident on
+     CPU 11 in both modes, sinks 0%). Dose-response with an injected 1 kHz
+     sleep-majority crowd (`--verbose` clock log as ground truth): crowd on binds
+     in one poll (950.8 Hz published) → p99 1.8–2.1; crowd off → 3-poll re-publish
+     + ~16 s floor climb → p99 decays to 0.90.
+   - A 374.9 Hz desktop voter holds the slice at 2 ms on this host even quiet, so
+     nightly never runs at the 3 ms cap on a live desktop. 1.1.3 has no frame clock
+     (constant geometry) — hence its sd ≈ 0.
+   - Mechanism: a fast desktop crowd tightens the patience windows (shifts of
+     `cake_frame_slice_ns`, §S.2) for every task; the same-CPU handoff tail pays.
+     Registered fix: §G12 KEYSTONE re-bases the `FRAME_*_SHIFT` windows onto the
+     occupant's own period, which decouples bystander tasks from the global clock.
 8. **Receipts audit** — 5 load-bearing claims (deletion-queue zeros, 1464 ns, SLICE_NS
    dose, §R.17 +28-36%, G17/G21 wins); list + rationale:
    `REVIEW_INDEPENDENT_2026-08-17.md` Addendum (git history).
@@ -157,10 +206,11 @@ is smallest.
 | `edafb27e5` + `d56ad5131` | **G25** — steal-ring queue hint becomes a u64 bitmask (41 insns, 10 branches, 0 spills; rotate+`ctz` design measured and REJECTED, do not restore) |
 | `3fb89cf05` (`6471262e1`, `b607264ad`) | **R.24** cross-multiplied divide elimination in `cake_frame_observe` + handoff-yields; both exact-pairs pass, kept |
 
-Static budget at tip: **11 divides** (re-counted 2026-08-17). Spills at tip per
-`bench/fnspills.py` (re-measured 2026-08-18): `select_cpu` 4/1, `enqueue` 2/4,
-`stopping` 1/1, `ring_steal` 1/1, `dispatch`/`running` 0/0; TOTAL 17/11/28. (The
-script was BLIND on llvm-objdump 22 until `18581c73c` fixed the regex — any
+Static budget at tip: **5 divides** (re-counted 2026-08-19 post-§R.28; was 11 —
+`cake_task_slice` became one subprogram, and fixed windows replaced bss loads).
+Spills at tip per `bench/fnspills.py` (2026-08-19): `select_cpu` 4/1, `enqueue`
+2/4, `stopping` 1/1, `ring_steal` 1/1, `dispatch`/`running` 0/0; TOTAL 16/10/26.
+(The script was BLIND on llvm-objdump 22 until `18581c73c` fixed the regex — any
 zero-spill claim made before it is vacuous.)
 
 ---
@@ -294,6 +344,7 @@ real session), live replica (loader logic run standalone on the live host), audi
 | G36 | tick look-ahead: skip a CPU whose timer fires within the hop horizon (§G36) | STATIC | **BUILT; unmeasured** | `cake_cpu_tick_soon` **28 insns, 0 spills**; enqueue spills 2/4, TOTAL 17/11/28; desktop smoke expects timer-race hits → ~0 |
 | R.24 | cross-multiplied divide elimination in `cake_frame_observe` + handoff-yields (§R.24) | bench exact-pair | ✅ **kept** | both exact-pairs pass |
 | R.27 | shaped compat ladders for ≤ 6.18 kernels (§R.27) | STATIC + CI | ✅ **CI veristat green ×6** (6.13/6.16/6.18/rolling/for-next/bpf-next, run 32206840388, 2026-08-18) | spills 28 → 26, hot frames flat (`select_cpu` 5, `enqueue` 6); +141 insns of dead arms, pruned at load; dev-kernel bench screen still owed |
+| **R.28** | per-task slice cap, fixed patience windows, frame clock demoted to diagnostic (§R.28) | bench dose + n=3 ABBA | ✅ **clock mode mechanism REMOVED; tail gap partially remains; game screen owed** | quiet handoff p99 rests 0.86–0.92 (was 0.85–1.9 drifting); divides 11→5, spills 17/11→16/10; p999 2× + schbench-light +72% vs 1.1.3 persist → IRQ-reactive stack (§G33/§G35/§G36) is the standing suspect |
 | — | spread placement, co-location returns off (§R.1 fps A/B) | FRAME | **reverted byte-identical (7826cfe3a; hashes now in backup/nightly-12-commits-20260818)** | fps INCONCLUSIVE: scene drift **~7%/h** (nvidia **5044 → 4695/s**) dominated every arm; placement stayed concentrated on ~7 CPUs with all three co-location returns off |
 
 ### The frame result (2026-08-01, the campaign's first)
@@ -398,7 +449,7 @@ to a heading here.**
 - **B2 OPEN** — a home-routed wake onto a busy CPU with no idle gets **no kick**; ~0 kills it.
 - **B3 OPEN** — vtime seals, but the frontier advances only in `cake_running`; wall-rate tracking kills it.
 - **B4 OPEN** — no `.tick`, a multiplier on B2/B3.
-- **B5 OPEN** — 1.1.3 is neither fix nor control, and no longer attaches.
+- **B5 OPEN** — 1.1.3 is neither fix nor control; attaches again on 7.1.8 (2026-08-19), so it is usable as a third arm.
 - **B6 OPEN** — lost zero-spill discipline cannot explain 10-40 ms stalls.
 
 ### §G6. The spill law as a proxy
@@ -1147,6 +1198,47 @@ makes ≤ 6.18 verify; steps — port 5 `cpu_curr` + 3 `peek` + insert family +
 `move_to_local` + 3 s32 returns; endpoint — CI veristat green on 6.13/6.16/6.18 with
 hot spills flat; abort — any hot-frame spill regression, or a fallback that changes
 scheduling behavior on the dev kernel.
+
+#### §R.28 — geometry decoupled from the shared clock (2026-08-19)
+The frame clock was the GEOMETRY UNIT: every patience window a shift of
+`cake_frame_slice_ns`, so one fast desktop crowd (a 374.9 Hz voter, the mouse at
+1 kHz) tightened every task's windows — measured as the 2× handoff-tail mode flip
+(`mode_probe/` in the 2026-08-19 run dir). Now: slice cap = half the task's OWN
+cycle (`cake_period_ns`, the §G12 KEYSTONE twin divide); occupant-protection and
+young-occupant windows = FIXED slice fractions — a per-occupant-period version
+inverted semantics for fast occupants (window ~44 ns ⇒ the handoff kick never
+fired, p99 2.1) and was reverted same-session; all vtime windows = fixed SLICE_NS.
+The clock publishes for --verbose only; §G27's easy-scene endpoint is superseded by
+per-task geometry. Object: spills 17/11 → 16/10, divides 11 → **5** (`cake_task_slice`
+consolidated to one subprogram). Verdict: quiet handoff p99 rests at 0.86–0.92
+(was 0.85–1.9 drifting) and the clock dose is gone, but **p999 2× and
+schbench-light +72% persist** — with the crowd control (1.1.3 +0.05 µs vs nightly
++0.9 under 8×1 kHz hrtimer load) the standing suspect is the IRQ-reactive stack
+(§G33/§G35/§G36; schbench is pure timer pressure and 1.1.3 ignores IRQs). GAME
+SCREEN OWED before keep (GAME-FIRST).
+
+**Bisect 2026-08-19 (4 probe commits, all reverted byte-identical to `0d345ed2…`):**
+all-vetoes-off closes EVERYTHING — quiet handoff p99 **0.80** (beats 1.1.3's 0.855),
+crowd-immune (0.79 under 8×1 kHz), schbench-light **2548** ≈ 1.1.3's 2540, pipe
+2.015 s (best of day). Single-feature-on runs, each independently harmful:
+**§G36** tick veto → handoff drift 0.84→1.35 + crowd sensitivity (schbench 2964);
+**§G35** live bit → quiet p999 2.7, crowd p999 **4.7**, schbench 3796;
+**§G33** chronic sinks → schbench **4472, the full +72% alone**, handoff clean.
+Their wake-tier game wins (G21 −39.9% main wake, G30 fence tail, G35 staircase)
+stand — this is a GAMES-VS-BENCH TRADE, maintainer's call, no deletion on bench
+data. Design cut for the next arc: each veto fires on SIGNAL PRESENCE with no
+cost comparison against the alternative placement (claiming a briefly-loud CPU
+usually beats queueing) — the §R.26 lens, binary thresholds discarding data.
+
+**Live WoW ABBA closes the trade 2026-08-19 (`wow-vetoAB-s{1..4}` in
+`history/wake_latency/`, `--irq`, 22 s slots, active play): the vetoes EARN
+THEIR KEEP IN-GAME, 2/2 no overlap on every role.** With vetoes vs all-off:
+fence p99 **23–27 → 48 µs**, vkd3d_queue p95 **7.4 → 28–33** (4×), WoW.exe main
+p95 14 → 30–32, ThreadPool High p50 **0.86 → 5.0 µs** (6×), same-CPU wakes
+86% → 31%. VERDICT under GAME-FIRST: vetoes STAY; the bench/desktop tail cost
+(schbench-light +72%, handoff p999 2× vs 1.1.3) is the accepted price, and the
+weighed-veto refinement is the registered path to buying both. MangoHud was not
+injected — frame screen still owed; wake tier only.
 
 ---
 

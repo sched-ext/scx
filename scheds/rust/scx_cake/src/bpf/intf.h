@@ -22,15 +22,10 @@ typedef signed long s64;
 #endif /* __VMLINUX_H__ */
 
 /*
- * Build-host topology, detected by build.rs. The ONLY definitions a cflag may
- * set: policy is source-only so an A/B is two commits, not two flags (§S.6).
+ * No cflag sets topology — the loader measures the host into rodata at
+ * attach, so one binary fits any machine. Policy is source-only so an A/B
+ * is two commits, not two flags (§S.6).
  */
-#ifndef CAKE_NR_CCDS
-#define CAKE_NR_CCDS 1
-#endif
-#ifndef CAKE_NR_CPUS
-#define CAKE_NR_CPUS 1024
-#endif
 
 /* Multi-CCD steal order: 0 off, 1 same-CCD first, 2 also group cache tiers. */
 #define CAKE_CCD_STEAL_POLICY 2
@@ -42,13 +37,16 @@ enum consts {
 	/* The slice every task gets. Dose-responsed U-curve minimum (§S.1). */
 	SLICE_NS	= 3000 * NSEC_PER_USEC,
 
-	/* Patience windows are shifts of cake_frame_slice_ns (§S.2, §G27). */
+	/* Vtime credit for time an occupant already ran (§S.2). */
 	HOME_PREEMPT_RAN_CREDIT_SHIFT	= 1,
 
-	/* Occupant protection as a fraction of a FRAME (§G11.4). */
-	FRAME_PREEMPT_PROTECT_SHIFT	= 4,
-	FRAME_PROBE_PROTECT_SHIFT	= 2,
-	FRAME_SLICE_CAP_SHIFT		= 1,
+	/* Occupant protection: FIXED slice fractions, so only long-running
+	 * compute is ever preempted and no shared clock moves them (§R.28). */
+	PREEMPT_PROTECT_SHIFT		= 4,
+	PROBE_PROTECT_SHIFT		= 2,
+
+	/* Slice cap: half the task's OWN mean cycle (§G12, §R.28). */
+	PERIOD_SLICE_CAP_SHIFT		= 1,
 
 	/* Pre-scale for the wait:run cross-multiply; it cancels (§G12). */
 	CAKE_RATIO_SHIFT		= 16,
@@ -74,8 +72,9 @@ enum consts {
 	FRAME_BUCKET_SHIFT		= 17,
 	FRAME_BUCKETS			= 512,
 
-	NR_CCDS				= CAKE_NR_CCDS,
-	BUILD_NR_CPUS			= CAKE_NR_CPUS,
+	/* Widest host the CCD steal matrix covers (u16² = 32 KB rodata);
+	 * wider machines take the generic ring walk at runtime. */
+	STEAL_SPAN			= 128,
 	CCD_STEAL_POLICY		= CAKE_CCD_STEAL_POLICY,
 
 	/* Fixed-point weight scaling: representation, not policy (§S.7). */

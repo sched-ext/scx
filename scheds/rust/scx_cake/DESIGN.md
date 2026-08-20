@@ -163,7 +163,8 @@ Peek own head (republishing the qmask bit) and `WAKE_DSQ`. Own first unless
 the wake head wins by one geometry unit or `WAKE_DSQ` went unserved for
 `WAKE_STARVE_WALL_NS` (24 ms); then the other; then the staggered
 `qmask`-gated ring steal from `cpu+1` (multi-CCD: same-CCD → cache-tier →
-all). Else refill prev's slice.
+all — active when the host has >1 LLC and fits `STEAL_SPAN`, else the
+plain ring). Else refill prev's slice.
 
 ---
 
