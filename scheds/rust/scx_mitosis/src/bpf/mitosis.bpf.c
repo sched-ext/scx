@@ -323,13 +323,21 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 		 * and the task is exiting.
 		 */
 		if (exiting_task_workaround_enabled && (p->flags & PF_EXITING)) {
-			struct cgroup *rootcg = READ_ONCE(root_cgrp);
-			if (!rootcg) {
-				scx_bpf_error("Unexpected uninitialized rootcg");
-				return -ENOENT;
+			/*
+			 * We may be invoked from sleepable context (init_task),
+			 * thus require RCU protection to ensure that kptr
+			 * loaded for the root cgroup remains valid while
+			 * performing cgroup context lookup.
+			 */
+			scoped_guard(rcu)
+			{
+				struct cgroup *rootcg = READ_ONCE(root_cgrp);
+				if (!rootcg) {
+					scx_bpf_error("Unexpected uninitialized rootcg");
+					return -ENOENT;
+				}
+				cgc = lookup_cgrp_ctx(rootcg);
 			}
-
-			cgc = lookup_cgrp_ctx(rootcg);
 		}
 
 		if (!cgc) {
@@ -351,6 +359,11 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	tctx->cell = cgc->cell;
 	tctx->cgid = cg->kn->id;
 
+	/*
+	 * We may be called from sleepable context (init_task), provide RCU
+	 * protection for cpumask update to ensure kptrs are well formed.
+	 */
+	guard(rcu)();
 	return update_task_cpumask(p, tctx);
 }
 
@@ -1270,8 +1283,10 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 	return update_task_cell(p, tctx, cgrp);
 }
 
-s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p, struct scx_init_task_args *args)
+s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
+			     struct scx_init_task_args *args)
 {
+	struct cgroup *cgrp __free(cgroup) = NULL;
 	/*
 	 * When CPU controller is disabled, args->cgroup is root, so we need
 	 * to get the task's actual cgroup for both logging and cell assignment.
@@ -1279,7 +1294,7 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p, struct scx_init_tas
 	 * SCX cgroup callbacks won't fire.
 	 */
 	if (cpu_controller_disabled) {
-		struct cgroup *cgrp __free(cgroup) = task_cgroup(p);
+		cgrp = task_cgroup(p);
 		if (!cgrp)
 			return -ENOENT;
 
@@ -1290,8 +1305,15 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p, struct scx_init_tas
 
 		return init_task_impl(p, cgrp);
 	}
-
-	return init_task_impl(p, args->cgroup);
+	/*
+	 * Extra refcount bump below can be dropped and args->cgroup can be used
+	 * directly when minimum kernel version advances to >= v7.4, per the patch
+	 * https://lore.kernel.org/bpf/95d7ccc17681aa3a4a2eeb1b073f00f7@kernel.org.
+	 */
+	cgrp = bpf_cgroup_from_id(args->cgroup->kn->id);
+	if (!cgrp)
+		return -ENOENT;
+	return init_task_impl(p, cgrp);
 }
 
 __hidden void dump_cpumask_word(s32 word, const struct cpumask *cpumask)
