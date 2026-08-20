@@ -124,13 +124,6 @@ struct scx_cgroup_ctx {
 		 * normalized quota of all its ancestors and itself.
 		 */
 		u64		nquota_ub;
-	
-		/*
-		 * A boolean flag indicating whether the cgroup has LLC
-		 * contexts. Written only during slow-path init/destroy;
-		 * treated as read-only in the hot path.
-		 */
-		bool		has_llcx;
 	} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 	/* read-write cache line */
@@ -1040,7 +1033,6 @@ int __cbw_init_llcx_sleepable(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 			return ret;
 		}
 	}
-	cgx->has_llcx = true;
 	return 0;
 }
 
@@ -1077,7 +1069,6 @@ int __cbw_init_llcx_atomic(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 			return ret;
 		}
 	}
-	cgx->has_llcx = true;
 	return 0;
 }
 
@@ -1085,7 +1076,7 @@ __hidden
 int cbw_put_aside(u64 ctx, u64 vtime, u64 bill_id);
 
 static __always_inline
-int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
+int cbw_free_llc_ctx(u64 cgrp_id)
 {
 	scx_cgroup_llc_ctx_t *llcx;
 	volatile int nr_moved = 0; /* Add volatile to satisfy the verifier. */
@@ -1099,12 +1090,6 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 	 */
 	if (unlikely(cgrp_id == ROOT_CGID))
 		return 0;
-
-	if (cgx) {
-		if (!cgx->has_llcx)
-			return 0;
-		cgx->has_llcx = false;
-	}
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		llcx = cbw_get_llc_ctx_with_id(cgrp_id, i);
@@ -1400,8 +1385,7 @@ void cbw_deinit_cgx(u64 cgx_raw, u64 cgrp_id)
 {
 	scx_cgroup_ctx_t *cgx = (scx_cgroup_ctx_t *)cgx_raw;
 
-	cgx->has_llcx = true;
-	cbw_free_llc_ctx(cgx, cgrp_id);
+	cbw_free_llc_ctx(cgrp_id);
 	cbw_free_cgx(cgx);
 	__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 }
@@ -1529,8 +1513,8 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	/*
 	 * Publish the fully-initialized context into cbw_cgrp_map as the very
 	 * last step. Making @cgrp reachable only after its LLC contexts and BTQs
-	 * exist (has_llcx == true) upholds the invariant that any cgroup found
-	 * through the map can hold tasks.
+	 * exist upholds the invariant that any cgroup found through the map can
+	 * hold tasks.
 	 */
 	entry.cgx = (u64)cgx;
 	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
@@ -1638,7 +1622,7 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	cbw_unthrottle_cgroup_for_exit(cgrp_id);
 	if (!cbw_del_cgroup_ctx(cgrp_id))
 		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
-	cbw_free_llc_ctx(NULL, cgrp_id);
+	cbw_free_llc_ctx(cgrp_id);
 	return 0;
 }
 
@@ -1866,9 +1850,6 @@ s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, scx_cgroup_ctx_t *cgx)
 	scx_cgroup_llc_ctx_t *llcx;
 	s64 sum;
 	int i;
-
-	if (!cgx->has_llcx)
-		return 0;
 
 	sum = 0;
 	bpf_for(i, 0, TOPO_NR(LLC)) {
@@ -2505,7 +2486,7 @@ bool cbw_has_backlogged_tasks(scx_cgroup_ctx_t *cgx)
 	scx_cgroup_llc_ctx_t *llcx;
 	int i;
 
-	if (!cgx || !cgx->has_llcx)
+	if (!cgx)
 		return false;
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
@@ -2866,12 +2847,10 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 		}
 
-		if (cur_cgx->has_llcx) {
-			bpf_for(i, 0, TOPO_NR(LLC)) {
-				cur_llcx = cbw_get_llc_ctx(cur_cgrp, i);
-				if (cur_llcx)
-					WRITE_ONCE(cur_llcx->runtime_total, 0);
-			}
+		bpf_for(i, 0, TOPO_NR(LLC)) {
+			cur_llcx = cbw_get_llc_ctx(cur_cgrp, i);
+			if (cur_llcx)
+				WRITE_ONCE(cur_llcx->runtime_total, 0);
 		}
 		WRITE_ONCE(cur_cgx->runtime_total_last,
 			   READ_ONCE(cur_cgx->runtime_total_sloppy));
@@ -3105,15 +3084,19 @@ int cbw_reenqueue_cgroup(scx_cgroup_ctx_t *cgx, u64 cgrp_id, u64 nuance)
 	 * Note that we start with a random LLC to give each LLC a fair
 	 * chance to be reenqueued.
 	 */
-	if (!cgx->has_llcx)
-		return false;
 	cbw_dbg("cgid%llu", cgrp_id);
 
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		idx = (nuance + i) % TOPO_NR(LLC);
 		llcx = cbw_get_llc_ctx_with_id(cgrp_id, idx);
 		if (!llcx) {
-			cbw_err("Failed to lookup an LLC context: cgid%llu", cgrp_id);
+			/*
+			 * A concurrent teardown can free this cgroup's LLC
+			 * contexts while the drain runs, so a missing entry is an
+			 * expected transient here, not an error: skip it and move
+			 * on to the next LLC.
+			 */
+			cbw_dbg("Failed to lookup an LLC context: cgid%llu", cgrp_id);
 			continue;
 		}
 
@@ -3509,19 +3492,17 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 	if (cgx->nquota_ub == CBW_RUNTUME_INF)
 		return 0;
 
-	if (cgx->has_llcx) {
-		bpf_for(i, 0, TOPO_NR(LLC)) {
-			llcx = cbw_get_llc_ctx(cgrp, i);
-			if (!llcx || !(btq = READ_ONCE(llcx->btq)))
-				continue;
-			nr_throttled_tasks += scx_atq_nr_queued(btq);
-		}
+	bpf_for(i, 0, TOPO_NR(LLC)) {
+		llcx = cbw_get_llc_ctx(cgrp, i);
+		if (!llcx || !(btq = READ_ONCE(llcx->btq)))
+			continue;
+		nr_throttled_tasks += scx_atq_nr_queued(btq);
 	}
 
 	bpf_printk("%s   \\_ quota: %llu/%llu/%llu, period: %llu, burst: %llu", indent_str,
 			cgx->quota, cgx->period, cgx->burst);
-	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
-			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
+	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu", indent_str,
+			cgx->nquota, cgx->nquota_ub);
 	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d (%u/%u), nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
