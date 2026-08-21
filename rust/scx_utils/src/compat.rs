@@ -433,6 +433,14 @@ pub fn tracepoint_exists(tracepoint: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// Whether the kernel supports function tracing (CONFIG_FUNCTION_TRACER),
+/// needed for fentry/fexit BPF programs to load or attach.
+/// `/proc/sys/kernel/ftrace_enabled` only exists when it's compiled in,
+/// so its presence is a cheap proxy.
+pub fn function_tracer_available() -> bool {
+    std::path::Path::new("/proc/sys/kernel/ftrace_enabled").exists()
+}
+
 pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<bool> {
     if in_kallsyms(sym)? {
         unsafe {
@@ -744,6 +752,10 @@ macro_rules! __scx_ops_load {
                         ops.rescue_quantum_us = 0;
                     }
                 }
+            }
+
+            if !scx_utils::compat::function_tracer_available() {
+                break 'block Err(anyhow::anyhow!("kernel is missing CONFIG_FUNCTION_TRACER"));
             }
 
             scx_utils::uei_set_size!($skel, $ops, $uei);
