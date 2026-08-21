@@ -80,8 +80,6 @@ pub struct Metrics {
     pub nr_dispatch_cpu_dsq_consumes: u64,
     #[stat(desc = "Number of dispatch node DSQ consumes")]
     pub nr_dispatch_node_dsq_consumes: u64,
-    #[stat(desc = "Number of CPU release reenqueues")]
-    pub nr_cpu_release_reenqueue: u64,
 }
 
 impl Metrics {
@@ -155,7 +153,6 @@ impl Metrics {
                 - rhs.nr_dispatch_cpu_dsq_consumes,
             nr_dispatch_node_dsq_consumes: self.nr_dispatch_node_dsq_consumes
                 - rhs.nr_dispatch_node_dsq_consumes,
-            nr_cpu_release_reenqueue: self.nr_cpu_release_reenqueue - rhs.nr_cpu_release_reenqueue,
             ..self.clone()
         }
     }
