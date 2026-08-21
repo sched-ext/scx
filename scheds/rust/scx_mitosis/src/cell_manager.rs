@@ -39,113 +39,132 @@ pub struct CellInfo {
     pub cpuset: Option<Cpumask>,
 }
 
-/// Compute the global target CPU count for each cell.
+/// Minimum primary-CPU constraints for a partitioning recipient.
 ///
-/// Each cell gets a floor of 1 CPU, with the remainder distributed proportionally
-/// by weight. Returns only counts, not actual CPU assignments.
-fn compute_targets(total_cpus: usize, cells: &[(u32, f64)]) -> Result<HashMap<u32, usize>> {
-    if cells.is_empty() {
-        bail!("compute_targets called with no cells");
-    }
-    if total_cpus < cells.len() {
-        bail!(
-            "Not enough CPUs ({}) for {} cells (need at least 1 each)",
-            total_cpus,
-            cells.len()
-        );
-    }
-
-    let total_weight: f64 = cells.iter().map(|(_, w)| w).sum();
-    let num_cells = cells.len();
-
-    if total_weight <= 0.0 {
-        // Equal division fallback
-        let per = total_cpus / num_cells;
-        let remainder = total_cpus % num_cells;
-        return Ok(cells
-            .iter()
-            .enumerate()
-            .map(|(i, (cell_id, _))| {
-                let extra = if i < remainder { 1 } else { 0 };
-                (*cell_id, per + extra)
-            })
-            .collect());
-    }
-
-    let distributable = total_cpus - num_cells;
-    let mut assigned = num_cells;
-    let mut raw: Vec<(u32, f64, usize)> = cells
-        .iter()
-        .map(|(cell_id, w)| {
-            let frac = w / total_weight * distributable as f64;
-            let floored = frac.floor() as usize;
-            assigned += floored;
-            (*cell_id, frac - frac.floor(), 1 + floored)
-        })
-        .collect();
-
-    let mut remainder = total_cpus - assigned;
-    raw.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    for entry in raw.iter_mut() {
-        if remainder == 0 {
-            break;
-        }
-        entry.2 += 1;
-        remainder -= 1;
-    }
-
-    Ok(raw
-        .iter()
-        .map(|(cell_id, _, count)| (*cell_id, *count))
-        .collect())
+/// `protected` is a hard donor floor: satisfying another recipient's requested
+/// minimum must not reduce this recipient below it. `requested` is a
+/// best-effort floor reserved before weighted allocation; it may be capped when
+/// satisfying it would violate another recipient's protected floor.
+#[derive(Debug, Clone, Copy, Default)]
+struct CpuMinimum {
+    protected: usize,
+    requested: usize,
 }
 
-/// Distribute CPUs among recipients proportionally by weight.
+/// Generic allocation input for a CPU partitioning recipient.
 ///
-/// Recipients with weight 0 receive 0 CPUs. If all weights are 0, falls back to
-/// equal division. As a post-processing step, if any positive-weight recipient got
-/// 0 CPUs, 1 CPU is stolen from the recipient with the highest allocation (that has
-/// > 1) to prevent starvation.
-fn distribute_cpus_proportional(
-    cpus: &[usize],
-    recipients: &[(u32, f64)],
-) -> Result<HashMap<u32, Vec<usize>>> {
-    if cpus.is_empty() {
-        bail!("distribute_cpus_proportional called with no CPUs");
+/// `allowed` is the hard eligibility mask. `claimed=None` means the recipient
+/// is unpinned: it has no preferential ownership and normally participates in
+/// the unclaimed pool. Keeping eligibility separate from claims allows an
+/// unpinned recipient to request a minimum from anywhere in its allowed mask.
+#[derive(Debug, Clone)]
+pub(crate) struct CpuRecipient {
+    id: u32,
+    weight: f64,
+    allowed: Cpumask,
+    claimed: Option<Cpumask>,
+    minimum: CpuMinimum,
+}
+
+impl CpuRecipient {
+    /// Create an unpinned recipient over the complete allocation domain.
+    ///
+    /// It may run anywhere in `domain`, claims no CPU preferentially, and
+    /// protects one primary CPU from later redistribution.
+    pub(crate) fn unpinned(id: u32, weight: f64, domain: &Cpumask) -> Self {
+        Self {
+            id,
+            weight,
+            allowed: domain.clone(),
+            claimed: None,
+            minimum: CpuMinimum {
+                protected: 1,
+                requested: 0,
+            },
+        }
     }
-    if recipients.is_empty() {
-        bail!("distribute_cpus_proportional called with no recipients");
+}
+
+/// Result of CPU assignment computation, containing both primary and optional borrowable masks.
+#[derive(Debug)]
+pub struct CpuAssignment {
+    pub id: u32,
+    pub primary: Cpumask,
+    pub borrowable: Option<Cpumask>,
+}
+
+/// Generic CPU allocator over a fixed domain of CPUs.
+struct CpuManager<'a> {
+    domain: &'a Cpumask,
+    /// Optional CPU -> topology partition mapping used only to rank CPUs when
+    /// a requested minimum must displace preferential claims.
+    cpu_to_partition: Option<&'a HashMap<usize, usize>>,
+}
+
+impl<'a> CpuManager<'a> {
+    fn new(domain: &'a Cpumask) -> Self {
+        Self {
+            domain,
+            cpu_to_partition: None,
+        }
     }
 
-    let total_weight: f64 = recipients.iter().map(|(_, w)| w).sum();
-    let n = cpus.len();
+    fn with_partitions(domain: &'a Cpumask, cpu_to_partition: &'a HashMap<usize, usize>) -> Self {
+        Self {
+            domain,
+            cpu_to_partition: Some(cpu_to_partition),
+        }
+    }
 
-    let mut allocs: Vec<(u32, usize)> = if total_weight <= 0.0 {
-        // Equal division fallback
-        let per = n / recipients.len();
-        let remainder = n % recipients.len();
-        recipients
+    /// Compute the global target CPU count for each recipient.
+    ///
+    /// Each recipient gets a floor of 1 CPU, with the remainder distributed
+    /// proportionally by weight. Returns only counts, not actual CPU assignments.
+    fn compute_targets(
+        total_cpus: usize,
+        recipients: &[(u32, f64)],
+    ) -> Result<HashMap<u32, usize>> {
+        if recipients.is_empty() {
+            bail!("compute_targets called with no cells");
+        }
+        if total_cpus < recipients.len() {
+            bail!(
+                "Not enough CPUs ({}) for {} cells (need at least 1 each)",
+                total_cpus,
+                recipients.len()
+            );
+        }
+
+        let total_weight: f64 = recipients.iter().map(|(_, w)| w).sum();
+        let num_recipients = recipients.len();
+
+        if total_weight <= 0.0 {
+            // Equal division fallback
+            let per = total_cpus / num_recipients;
+            let remainder = total_cpus % num_recipients;
+            return Ok(recipients
+                .iter()
+                .enumerate()
+                .map(|(i, (id, _))| {
+                    let extra = if i < remainder { 1 } else { 0 };
+                    (*id, per + extra)
+                })
+                .collect());
+        }
+
+        let distributable = total_cpus - num_recipients;
+        let mut assigned = num_recipients;
+        let mut raw: Vec<(u32, f64, usize)> = recipients
             .iter()
-            .enumerate()
-            .map(|(i, (cell_id, _))| {
-                let extra = if i < remainder { 1 } else { 0 };
-                (*cell_id, per + extra)
-            })
-            .collect()
-    } else {
-        // Standard proportional distribution
-        let mut assigned = 0usize;
-        let mut raw: Vec<(u32, f64, usize, bool)> = recipients
-            .iter()
-            .map(|(cell_id, w)| {
-                let frac = w / total_weight * n as f64;
+            .map(|(id, weight)| {
+                let frac = weight / total_weight * distributable as f64;
                 let floored = frac.floor() as usize;
                 assigned += floored;
-                (*cell_id, frac - frac.floor(), floored, *w > 0.0)
+                (*id, frac - frac.floor(), 1 + floored)
             })
             .collect();
 
-        let mut remainder = n - assigned;
+        let mut remainder = total_cpus - assigned;
         raw.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         for entry in raw.iter_mut() {
             if remainder == 0 {
@@ -155,631 +174,579 @@ fn distribute_cpus_proportional(
             remainder -= 1;
         }
 
-        // Post-processing floor guarantee: if any positive-weight recipient got 0
-        // CPUs, steal 1 from the recipient with the highest allocation (> 1).
-        // This prevents death spirals where cells with low but non-zero demand
-        // get starved of CPUs entirely.
-        loop {
-            let Some(starved_idx) = raw
-                .iter()
-                .position(|(_, _, count, pos_weight)| *pos_weight && *count == 0)
-            else {
-                break;
-            };
-            let Some(donor_idx) = raw
+        Ok(raw.iter().map(|(id, _, count)| (*id, *count)).collect())
+    }
+
+    /// Distribute CPUs among recipients proportionally by weight.
+    ///
+    /// Recipients with weight 0 receive 0 CPUs. If all weights are 0, falls back to
+    /// equal division. As a post-processing step, if any positive-weight recipient got
+    /// 0 CPUs, 1 CPU is stolen from the recipient with the highest allocation (that has
+    /// > 1) to prevent starvation.
+    fn distribute_cpus_proportional(
+        cpus: &[usize],
+        recipients: &[(u32, f64)],
+    ) -> Result<HashMap<u32, Vec<usize>>> {
+        if cpus.is_empty() {
+            bail!("distribute_cpus_proportional called with no CPUs");
+        }
+        if recipients.is_empty() {
+            bail!("distribute_cpus_proportional called with no recipients");
+        }
+
+        let total_weight: f64 = recipients.iter().map(|(_, w)| w).sum();
+        let n = cpus.len();
+
+        let mut allocs: Vec<(u32, usize)> = if total_weight <= 0.0 {
+            // Equal division fallback
+            let per = n / recipients.len();
+            let remainder = n % recipients.len();
+            recipients
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, _, count, _))| *count > 1)
-                .max_by_key(|(_, (_, _, count, _))| *count)
-                .map(|(i, _)| i)
-            else {
-                break; // No donor with > 1 CPU available
-            };
-            raw[donor_idx].2 -= 1;
-            raw[starved_idx].2 += 1;
-        }
+                .map(|(i, (id, _))| {
+                    let extra = if i < remainder { 1 } else { 0 };
+                    (*id, per + extra)
+                })
+                .collect()
+        } else {
+            // Standard proportional distribution
+            let mut assigned = 0usize;
+            let mut raw: Vec<(u32, f64, usize, bool)> = recipients
+                .iter()
+                .map(|(id, weight)| {
+                    let frac = weight / total_weight * n as f64;
+                    let floored = frac.floor() as usize;
+                    assigned += floored;
+                    (*id, frac - frac.floor(), floored, *weight > 0.0)
+                })
+                .collect();
 
-        raw.iter()
-            .map(|(cell_id, _, count, _)| (*cell_id, *count))
-            .collect()
-    };
-
-    // Assign actual CPU numbers
-    let mut cpu_iter = cpus.iter().copied();
-    allocs.sort_by_key(|(cell_id, _)| *cell_id);
-    let mut result: HashMap<u32, Vec<usize>> = HashMap::new();
-    for (cell_id, count) in allocs {
-        let cpus_for_cell: Vec<usize> = cpu_iter.by_ref().take(count).collect();
-        if cpus_for_cell.len() != count {
-            bail!(
-                "BUG: distribute_cpus_proportional: cell {} expected {} CPUs but got {}",
-                cell_id,
-                count,
-                cpus_for_cell.len()
-            );
-        }
-        if !cpus_for_cell.is_empty() {
-            result.insert(cell_id, cpus_for_cell);
-        }
-    }
-
-    Ok(result)
-}
-
-/// Result of CPU assignment computation, containing both primary and optional borrowable masks.
-#[derive(Debug)]
-pub struct CpuAssignment {
-    pub cell_id: u32,
-    pub primary: Cpumask,
-    pub borrowable: Option<Cpumask>,
-}
-
-#[derive(Debug, Clone)]
-struct CellSpec {
-    cell_id: u32,
-    cpuset: Option<Cpumask>,
-}
-
-#[derive(Debug)]
-struct HoldoutResult {
-    mask: Cpumask,
-    enforced: bool,
-}
-
-#[derive(Debug)]
-struct CpuBuckets {
-    cell_cpus: HashMap<u32, Cpumask>,
-    contested_groups: HashMap<Vec<u32>, Vec<usize>>,
-    unclaimed_cpus: Vec<usize>,
-}
-
-fn build_cell_specs(cells: &HashMap<u64, CellInfo>) -> Vec<CellSpec> {
-    let mut specs: Vec<CellSpec> = cells
-        .values()
-        .map(|info| CellSpec {
-            cell_id: info.cell_id,
-            cpuset: info.cpuset.clone(),
-        })
-        .collect();
-    specs.sort_by_key(|spec| spec.cell_id);
-    specs
-}
-
-fn build_cell_cpuset_map(cells: &[CellSpec]) -> HashMap<u32, Option<Cpumask>> {
-    cells
-        .iter()
-        .map(|spec| (spec.cell_id, spec.cpuset.clone()))
-        .collect()
-}
-
-fn build_cell_weights(
-    cells: &[CellSpec],
-    cell_demands: Option<&HashMap<u32, f64>>,
-) -> Result<Vec<(u32, f64)>> {
-    if let Some(demands) = cell_demands {
-        for (&cell_id, &weight) in demands {
-            if weight < 0.0 {
-                bail!("Cell {} has negative demand weight {}", cell_id, weight);
+            let mut remainder = n - assigned;
+            raw.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for entry in raw.iter_mut() {
+                if remainder == 0 {
+                    break;
+                }
+                entry.2 += 1;
+                remainder -= 1;
             }
-        }
-    }
 
-    let mut weights = cells
-        .iter()
-        .map(|spec| {
-            let weight = match cell_demands {
-                Some(demands) => *demands.get(&spec.cell_id).ok_or_else(|| {
-                    anyhow::anyhow!("Cell {} is missing from demands map", spec.cell_id)
-                })?,
-                None => 1.0,
-            };
-            Ok((spec.cell_id, weight))
-        })
-        .collect::<Result<Vec<_>>>()
-        .context("building cell demand weights map")?;
-    weights.sort_by_key(|(cell_id, _)| *cell_id);
-    Ok(weights)
-}
-
-fn build_contention(cells: &[CellSpec]) -> HashMap<usize, Vec<u32>> {
-    let mut contention: HashMap<usize, Vec<u32>> = HashMap::new();
-    for spec in cells {
-        if let Some(ref cpuset) = spec.cpuset {
-            for cpu in cpuset.iter() {
-                contention.entry(cpu).or_default().push(spec.cell_id);
+            // Post-processing floor guarantee: if any positive-weight recipient got 0
+            // CPUs, steal 1 from the recipient with the highest allocation (> 1).
+            // This prevents death spirals where cells with low but non-zero demand
+            // get starved of CPUs entirely.
+            loop {
+                let Some(starved_idx) = raw
+                    .iter()
+                    .position(|(_, _, count, pos_weight)| *pos_weight && *count == 0)
+                else {
+                    break;
+                };
+                let Some(donor_idx) = raw
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, _, count, _))| *count > 1)
+                    .max_by_key(|(_, (_, _, count, _))| *count)
+                    .map(|(i, _)| i)
+                else {
+                    break; // No donor with > 1 CPU available
+                };
+                raw[donor_idx].2 -= 1;
+                raw[starved_idx].2 += 1;
             }
-        }
-    }
-    for claimants in contention.values_mut() {
-        claimants.sort_unstable();
-    }
-    contention
-}
 
-fn compute_cell0_holdout(
-    all_cpus: &Cpumask,
-    contention: &HashMap<usize, Vec<u32>>,
-    cell0_min_cpus: usize,
-    cpu_to_llc: &HashMap<usize, usize>,
-) -> HoldoutResult {
-    let mut holdout = Cpumask::new();
-    let mut enforced = false;
-
-    if cell0_min_cpus == 0 {
-        return HoldoutResult {
-            mask: holdout,
-            enforced,
+            raw.iter().map(|(id, _, count, _)| (*id, *count)).collect()
         };
-    }
 
-    let mut unclaimed: Vec<usize> = all_cpus
-        .iter()
-        .filter(|cpu| !contention.contains_key(cpu))
-        .collect();
-    unclaimed.sort_unstable();
-
-    // Distinct cells claiming a CPU in each LLC.
-    let mut llc_cells: HashMap<usize, HashSet<u32>> = HashMap::new();
-    for (cpu, claimants) in contention {
-        if let Some(&llc) = cpu_to_llc.get(cpu) {
-            llc_cells.entry(llc).or_default().extend(claimants);
+        // Assign actual CPU numbers
+        let mut cpu_iter = cpus.iter().copied();
+        allocs.sort_by_key(|(id, _)| *id);
+        let mut result: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (id, count) in allocs {
+            let cpus_for_recipient: Vec<usize> = cpu_iter.by_ref().take(count).collect();
+            if cpus_for_recipient.len() != count {
+                bail!(
+                    "BUG: distribute_cpus_proportional: cell {} expected {} CPUs but got {}",
+                    id,
+                    count,
+                    cpus_for_recipient.len()
+                );
+            }
+            if !cpus_for_recipient.is_empty() {
+                result.insert(id, cpus_for_recipient);
+            }
         }
-    }
-    let partition = |cpu: &usize| -> usize {
-        cpu_to_llc
-            .get(cpu)
-            .and_then(|llc| llc_cells.get(llc))
-            .map_or(0, |cells| cells.len())
-    };
 
-    // Take unclaimed CPUs first; they cost no cell anything.
-    let mut taken = 0usize;
-    for cpu in unclaimed.into_iter().take(cell0_min_cpus) {
-        holdout.set_cpu(cpu).ok();
-        taken += 1;
+        Ok(result)
     }
 
-    // Steal the remainder from cells round-robin: each cell yields one CPU
-    // in turn, largest cell first, so the reservation is spread across
-    // cells rather than draining one. A CPU is reservable only if every
-    // cell claiming it keeps at least one CPU afterward -- otherwise the
-    // reservation would zero that cell and re-trigger the final "no CPUs
-    // assigned" validation this holdout exists to prevent (mirrors
-    // distribute_cpus_proportional's anti-starvation floor). Within the
-    // donor, prefer an exclusive CPU, then the LLC split across the most
-    // cells, then the lowest CPU. When no CPU is reservable, stop -- cell 0
-    // receives fewer than cell0_min_cpus rather than starving a child.
-    let mut cell_claimed: HashMap<u32, Vec<usize>> = HashMap::new();
-    for (&cpu, claimants) in contention {
-        for &cell_id in claimants {
-            cell_claimed.entry(cell_id).or_default().push(cpu);
-        }
-    }
-    // CPUs yielded to the holdout per cell, for round-robin selection.
-    let mut taken_from: HashMap<u32, usize> = cell_claimed.keys().map(|&id| (id, 0usize)).collect();
-
-    while taken < cell0_min_cpus {
-        // Unreserved EXCLUSIVE CPUs per cell, recomputed as the holdout
-        // grows. Only exclusive CPUs count toward survival: a contested CPU
-        // may be awarded to a co-claimant during contested distribution, so it
-        // cannot be what keeps a cell alive -- counting it would let the steal
-        // take a cell's last exclusive CPU and zero the cell.
-        let remaining: HashMap<u32, usize> = cell_claimed
+    /// Reserve best-effort requested minima before weighted allocation.
+    ///
+    /// Prefer CPUs without a claim. If those are insufficient, displace claims
+    /// only where every claimant remains above its protected minimum. The
+    /// optional topology partition map is a tie-breaker after exclusive CPUs:
+    /// prefer taking from the partition split across the most claimants.
+    fn reserve_requested_minimums(
+        &self,
+        recipients: &[CpuRecipient],
+        contention: &HashMap<usize, Vec<u32>>,
+    ) -> Result<HashMap<u32, Cpumask>> {
+        let by_id: HashMap<u32, &CpuRecipient> = recipients
             .iter()
-            .map(|(&cell_id, cpus)| {
-                (
-                    cell_id,
-                    cpus.iter()
-                        .filter(|&&c| !holdout.test_cpu(c) && contention[&c].len() == 1)
-                        .count(),
-                )
+            .map(|recipient| (recipient.id, recipient))
+            .collect();
+        let mut assignments = HashMap::new();
+        let mut reserved = Cpumask::new();
+
+        let mut requesters: Vec<&CpuRecipient> = recipients
+            .iter()
+            .filter(|recipient| recipient.minimum.requested > 0)
+            .collect();
+        requesters.sort_by_key(|recipient| recipient.id);
+
+        let mut partition_claimants: HashMap<usize, HashSet<u32>> = HashMap::new();
+        if let Some(cpu_to_partition) = self.cpu_to_partition {
+            for (cpu, claimants) in contention {
+                if let Some(&partition) = cpu_to_partition.get(cpu) {
+                    partition_claimants
+                        .entry(partition)
+                        .or_default()
+                        .extend(claimants);
+                }
+            }
+        }
+        let partition_pressure = |cpu: usize| {
+            self.cpu_to_partition
+                .and_then(|cpu_to_partition| cpu_to_partition.get(&cpu))
+                .and_then(|partition| partition_claimants.get(partition))
+                .map_or(0, HashSet::len)
+        };
+
+        let mut claimed_cpus: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (&cpu, claimants) in contention {
+            for &id in claimants {
+                claimed_cpus.entry(id).or_default().push(cpu);
+            }
+        }
+
+        for recipient in requesters {
+            let mut recipient_reserved = Cpumask::new();
+            let mut unclaimed: Vec<usize> = self
+                .domain
+                .iter()
+                .filter(|&cpu| {
+                    recipient.allowed.test_cpu(cpu)
+                        && !reserved.test_cpu(cpu)
+                        && !contention.contains_key(&cpu)
+                })
+                .collect();
+            unclaimed.sort_unstable();
+
+            let mut taken = 0usize;
+            for cpu in unclaimed.into_iter().take(recipient.minimum.requested) {
+                recipient_reserved.set_cpu(cpu).ok();
+                reserved.set_cpu(cpu).ok();
+                taken += 1;
+            }
+
+            let mut taken_from: HashMap<u32, usize> =
+                claimed_cpus.keys().map(|&id| (id, 0)).collect();
+            while taken < recipient.minimum.requested {
+                // A contested CPU cannot prove that a claimant will survive
+                // later contention, so only exclusive claims count toward its
+                // protected floor.
+                let remaining: HashMap<u32, usize> = claimed_cpus
+                    .iter()
+                    .map(|(&id, cpus)| {
+                        (
+                            id,
+                            cpus.iter()
+                                .filter(|&&cpu| {
+                                    !reserved.test_cpu(cpu) && contention[&cpu].len() == 1
+                                })
+                                .count(),
+                        )
+                    })
+                    .collect();
+
+                let reservable = |cpu: usize| {
+                    recipient.allowed.test_cpu(cpu)
+                        && !reserved.test_cpu(cpu)
+                        && contention.get(&cpu).is_some_and(|claimants| {
+                            claimants.iter().all(|id| {
+                                let protected = by_id
+                                    .get(id)
+                                    .map_or(0, |recipient| recipient.minimum.protected);
+                                remaining.get(id).copied().unwrap_or(0) > protected
+                            })
+                        })
+                };
+
+                let donor = claimed_cpus
+                    .iter()
+                    .filter(|(_, cpus)| cpus.iter().any(|&cpu| reservable(cpu)))
+                    .map(|(&id, _)| id)
+                    .min_by(|&a, &b| {
+                        taken_from[&a]
+                            .cmp(&taken_from[&b])
+                            .then(remaining[&b].cmp(&remaining[&a]))
+                            .then(a.cmp(&b))
+                    });
+                let Some(donor) = donor else {
+                    break;
+                };
+
+                let cpu = claimed_cpus[&donor]
+                    .iter()
+                    .copied()
+                    .filter(|&cpu| reservable(cpu))
+                    .min_by(|&a, &b| {
+                        let contested = |cpu: usize| contention.get(&cpu).map_or(0, Vec::len) > 1;
+                        contested(a)
+                            .cmp(&contested(b))
+                            .then_with(|| partition_pressure(b).cmp(&partition_pressure(a)))
+                            .then(a.cmp(&b))
+                    })
+                    .expect("donor has a reservable CPU");
+                recipient_reserved.set_cpu(cpu).ok();
+                reserved.set_cpu(cpu).ok();
+                *taken_from.entry(donor).or_insert(0) += 1;
+                taken += 1;
+            }
+
+            if recipient_reserved.weight() > 0 {
+                assignments.insert(recipient.id, recipient_reserved);
+            }
+        }
+
+        Ok(assignments)
+    }
+
+    /// Compute CPU assignments over `domain` for a generic set of recipients.
+    ///
+    /// `allowed` is hard eligibility while `claimed` expresses preferential
+    /// ownership. Recipients without claims normally receive from the unclaimed
+    /// pool, but may reserve a requested minimum from anywhere they are allowed
+    /// without violating another recipient's protected minimum.
+    ///
+    /// When claimed masks overlap, contested CPUs are divided proportionally among
+    /// claimants. Unclaimed CPUs go to unpinned recipients.
+    ///
+    /// If `compute_borrowable` is true, each assignment includes a borrowable
+    /// cpumask consisting of `domain - primary`, intersected with `allowed` if
+    /// present.
+    fn compute_assignments(
+        &self,
+        recipients: &[CpuRecipient],
+        compute_borrowable: bool,
+    ) -> Result<Vec<CpuAssignment>> {
+        let domain = self.domain;
+
+        if recipients.is_empty() {
+            bail!("compute_cpu_assignments called with no recipients");
+        }
+
+        let mut seen_ids = HashSet::new();
+        for recipient in recipients {
+            if recipient.weight < 0.0 {
+                bail!(
+                    "Recipient {} has negative weight {}",
+                    recipient.id,
+                    recipient.weight
+                );
+            }
+            if !seen_ids.insert(recipient.id) {
+                bail!("Duplicate recipient id {}", recipient.id);
+            }
+            if let Some(claimed) = &recipient.claimed {
+                let claimed_outside_allowed = claimed.and(&recipient.allowed.not()).and(domain);
+                if claimed_outside_allowed.weight() > 0 {
+                    bail!(
+                        "Recipient {} claims CPUs outside its allowed mask: {}",
+                        recipient.id,
+                        claimed_outside_allowed.to_cpulist()
+                    );
+                }
+            }
+        }
+
+        // Phase 1: Build contention map - for each CPU, track which recipients claim it
+        let mut contention: HashMap<usize, Vec<u32>> = HashMap::new();
+        for recipient in recipients {
+            if let Some(ref claimed) = recipient.claimed {
+                for cpu in claimed.iter() {
+                    if domain.test_cpu(cpu) {
+                        contention.entry(cpu).or_default().push(recipient.id);
+                    }
+                }
+            }
+        }
+
+        let mut recipient_cpus = self.reserve_requested_minimums(recipients, &contention)?;
+        let mut reserved = Cpumask::new();
+        for cpus in recipient_cpus.values() {
+            reserved = reserved.or(cpus);
+        }
+
+        // Phase 2: Categorize CPUs and build initial assignments
+        // - Exclusive: claimed by exactly 1 recipient -> assigned directly
+        // - Contested: claimed by 2+ recipients -> distributed by weight
+        // - Unclaimed: no preferred claim -> shared among unpinned recipients
+        let mut contested_cpus: Vec<usize> = Vec::new();
+        let mut unclaimed_cpus: Vec<usize> = Vec::new();
+
+        for cpu in domain.iter() {
+            if reserved.test_cpu(cpu) {
+                continue;
+            }
+            match contention.get(&cpu) {
+                None => unclaimed_cpus.push(cpu),
+                Some(claimants) if claimants.len() == 1 => {
+                    let id = claimants[0];
+                    recipient_cpus
+                        .entry(id)
+                        .or_insert_with(Cpumask::new)
+                        .set_cpu(cpu)
+                        .ok();
+                }
+                Some(_) => contested_cpus.push(cpu),
+            }
+        }
+
+        // Seed the running assignment count from requested minima and exclusive
+        // claims, then satisfy protected minima from contested CPUs before
+        // target-weighted distribution. Otherwise, a claimant which already has
+        // an exclusive CPU can win the only contested CPU from a claimant at
+        // zero merely due to recipient-ID ordering.
+        let mut assigned_count: HashMap<u32, usize> = recipient_cpus
+            .iter()
+            .map(|(&id, mask)| (id, mask.weight()))
+            .collect();
+        contested_cpus.sort_unstable();
+        let contested_choices: HashMap<u32, usize> = recipients
+            .iter()
+            .map(|recipient| {
+                let choices = contested_cpus
+                    .iter()
+                    .filter(|cpu| {
+                        contention
+                            .get(cpu)
+                            .is_some_and(|claimants| claimants.contains(&recipient.id))
+                    })
+                    .count();
+                (recipient.id, choices)
             })
             .collect();
-        let reservable = |cpu: usize| {
-            contention
+        let mut weighted_contested_cpus = Vec::new();
+        for cpu in contested_cpus {
+            let claimants = contention
                 .get(&cpu)
-                .is_some_and(|claimants| claimants.iter().all(|c| remaining[c] >= 2))
-        };
-        // Reservable iff every cell claiming the CPU keeps >=1 exclusive CPU.
-        // Donor = cell that has yielded the fewest CPUs so far
-        // (round-robin); ties break toward the larger cell, then the
-        // lowest cell id. Only cells with a reservable CPU are eligible.
-        let donor = cell_claimed
-            .iter()
-            .filter(|(_, cpus)| {
-                cpus.iter()
-                    .any(|&cpu| !holdout.test_cpu(cpu) && reservable(cpu))
-            })
-            .map(|(&cell_id, _)| cell_id)
-            .min_by(|&a, &b| {
-                taken_from[&a]
-                    .cmp(&taken_from[&b])
-                    .then(remaining[&b].cmp(&remaining[&a]))
-                    .then(a.cmp(&b))
-            });
-        let Some(donor) = donor else {
-            break; // no CPU can be reserved without starving a child cell
-        };
-        let cpu = cell_claimed[&donor]
-            .iter()
-            .copied()
-            .filter(|&cpu| !holdout.test_cpu(cpu) && reservable(cpu))
-            .min_by(|&a, &b| {
-                let contested = |cpu: usize| contention.get(&cpu).map_or(0, |v| v.len()) > 1;
-                contested(a)
-                    .cmp(&contested(b))
-                    .then_with(|| partition(&b).cmp(&partition(&a)))
-                    .then(a.cmp(&b))
-            })
-            .expect("donor has a reservable CPU");
-        holdout.set_cpu(cpu).ok();
-        // Taking a CPU a workload cell already claims -- record that the
-        // holdout put its hand on the scales (queryable via stats).
-        enforced = true;
-        *taken_from.entry(donor).or_insert(0) += 1;
-        taken += 1;
-    }
+                .expect("contested CPU missing contention entry");
+            let protected_recipient = claimants
+                .iter()
+                .filter_map(|id| {
+                    let recipient = recipients
+                        .iter()
+                        .find(|recipient| recipient.id == *id)
+                        .expect("claimant missing recipient");
+                    let assigned = assigned_count.get(id).copied().unwrap_or(0);
+                    (assigned < recipient.minimum.protected)
+                        .then(|| (*id, recipient.minimum.protected - assigned))
+                })
+                // Prefer the recipient with fewer alternative contested CPUs,
+                // then the larger protected deficit, then the lower ID.
+                .min_by(|(a_id, a_deficit), (b_id, b_deficit)| {
+                    contested_choices[a_id]
+                        .cmp(&contested_choices[b_id])
+                        .then(b_deficit.cmp(a_deficit))
+                        .then(a_id.cmp(b_id))
+                })
+                .map(|(id, _)| id);
 
-    HoldoutResult {
-        mask: holdout,
-        enforced,
-    }
-}
-
-fn classify_cpus(
-    all_cpus: &Cpumask,
-    contention: &HashMap<usize, Vec<u32>>,
-    holdout: &Cpumask,
-) -> CpuBuckets {
-    let mut cell_cpus: HashMap<u32, Cpumask> = HashMap::new();
-    if holdout.weight() > 0 {
-        cell_cpus.insert(0, holdout.clone());
-    }
-
-    let mut contested_groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
-    let mut unclaimed_cpus: Vec<usize> = Vec::new();
-
-    for cpu in all_cpus.iter() {
-        if holdout.test_cpu(cpu) {
-            // Reserved for cell 0 by the holdout above.
-            continue;
-        }
-        match contention.get(&cpu) {
-            None => unclaimed_cpus.push(cpu),
-            Some(claimants) if claimants.len() == 1 => {
-                cell_cpus
-                    .entry(claimants[0])
+            if let Some(id) = protected_recipient {
+                recipient_cpus
+                    .entry(id)
                     .or_insert_with(Cpumask::new)
                     .set_cpu(cpu)
                     .ok();
+                *assigned_count.entry(id).or_insert(0) += 1;
+            } else {
+                weighted_contested_cpus.push(cpu);
             }
-            Some(claimants) => {
+        }
+        let contested_cpus = weighted_contested_cpus;
+
+        // Compute global targets for the remaining weighted allocation.
+        let total_cpu_count = domain.weight();
+        let mut all_recipients_with_weights: Vec<(u32, f64)> =
+            recipients.iter().map(|r| (r.id, r.weight)).collect();
+        all_recipients_with_weights.sort_by_key(|(id, _)| *id);
+
+        let targets = Self::compute_targets(total_cpu_count, &all_recipients_with_weights)?;
+
+        // Phase 3: Distribute contested CPUs among claimants using deficit weights
+        let mut contested_groups: HashMap<Vec<u32>, Vec<usize>> = HashMap::new();
+        for cpu in contested_cpus {
+            if let Some(claimants) = contention.get(&cpu) {
                 let mut sorted_claimants = claimants.clone();
-                sorted_claimants.sort_unstable();
+                sorted_claimants.sort();
                 contested_groups
                     .entry(sorted_claimants)
                     .or_default()
                     .push(cpu);
             }
         }
-    }
 
-    CpuBuckets {
-        cell_cpus,
-        contested_groups,
-        unclaimed_cpus,
-    }
-}
-
-fn assigned_counts(cell_cpus: &HashMap<u32, Cpumask>) -> HashMap<u32, usize> {
-    cell_cpus
-        .iter()
-        .map(|(&cell_id, mask)| (cell_id, mask.weight()))
-        .collect()
-}
-
-fn compute_initial_deficit(
-    targets: &HashMap<u32, usize>,
-    assigned_count: &HashMap<u32, usize>,
-) -> HashMap<u32, f64> {
-    targets
-        .iter()
-        .map(|(&cell_id, &target)| {
-            // Cells with no exclusive CPUs have no entry yet; 0 is correct.
-            let already = assigned_count.get(&cell_id).copied().unwrap_or(0);
-            let deficit = if target > already {
-                (target - already) as f64
-            } else {
-                0.0
-            };
-            (cell_id, deficit)
-        })
-        .collect()
-}
-
-fn distribute_contested_groups(
-    contested_groups: &HashMap<Vec<u32>, Vec<usize>>,
-    initial_deficit: &HashMap<u32, f64>,
-    cell_cpus: &mut HashMap<u32, Cpumask>,
-    assigned_count: &mut HashMap<u32, usize>,
-) -> Result<()> {
-    let mut groups: Vec<_> = contested_groups.iter().collect();
-    groups.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-    for (claimants, cpus) in groups {
-        let mut recipients: Vec<(u32, f64)> = Vec::new();
-        let mut all_zero = true;
-        for &cell_id in claimants {
-            let deficit = *initial_deficit.get(&cell_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "BUG: cell {} in contention map but missing from targets",
-                    cell_id
-                )
-            })?;
-            if deficit > 0.0 {
-                all_zero = false;
-            }
-            recipients.push((cell_id, deficit));
-        }
-
-        // If all claimants already meet/exceed their target, fall back to equal weights.
-        if all_zero {
-            recipients = claimants.iter().map(|&cell_id| (cell_id, 1.0)).collect();
-        }
-
-        let distribution = distribute_cpus_proportional(cpus, &recipients)
-            .context("distributing contested CPUs among claimants")?;
-        for (cell_id, assigned_cpus) in distribution {
-            let count = assigned_cpus.len();
-            for cpu in assigned_cpus {
-                cell_cpus
-                    .entry(cell_id)
-                    .or_insert_with(Cpumask::new)
-                    .set_cpu(cpu)
-                    .ok();
-            }
-            *assigned_count.entry(cell_id).or_insert(0) += count;
-        }
-    }
-
-    Ok(())
-}
-
-fn distribute_unclaimed_cpus(
-    unclaimed_cpus: &[usize],
-    cells: &[CellSpec],
-    targets: &HashMap<u32, usize>,
-    cell_cpus: &mut HashMap<u32, Cpumask>,
-    assigned_count: &mut HashMap<u32, usize>,
-) -> Result<()> {
-    if unclaimed_cpus.is_empty() {
-        return Ok(());
-    }
-
-    let mut recipients: Vec<(u32, f64)> = Vec::new();
-    let mut all_zero = true;
-
-    for spec in cells {
-        if spec.cpuset.is_some() {
-            // Pinned cells don't receive unclaimed CPUs.
-            continue;
-        }
-        let target = *targets.get(&spec.cell_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "BUG: cell {} is unpinned but missing from targets",
-                spec.cell_id
-            )
-        })?;
-        // Cells with no assigned CPUs have no entry yet; 0 is correct.
-        let already = assigned_count.get(&spec.cell_id).copied().unwrap_or(0);
-        let deficit = if target > already {
-            (target - already) as f64
-        } else {
-            0.0
-        };
-        if deficit > 0.0 {
-            all_zero = false;
-        }
-        recipients.push((spec.cell_id, deficit));
-    }
-    recipients.sort_by_key(|(cell_id, _)| *cell_id);
-
-    // If all recipients already meet/exceed their target, fall back to equal weights.
-    if all_zero {
-        recipients = recipients
+        // Freeze deficit weights before processing any group. Each group is an
+        // independent allocation decision, so a recipient's weight should not depend
+        // on HashMap iteration order (i.e., which other groups were processed
+        // first). Using the initial deficit (target - exclusive_count) as weight
+        // for all groups makes the result deterministic.
+        let initial_deficit: HashMap<u32, f64> = targets
             .iter()
-            .map(|(cell_id, _)| (*cell_id, 1.0))
+            .map(|(&id, &target)| {
+                // Recipients with no exclusive CPUs have no entry yet; 0 is correct.
+                let already = assigned_count.get(&id).copied().unwrap_or(0);
+                let deficit = if target > already {
+                    (target - already) as f64
+                } else {
+                    0.0
+                };
+                (id, deficit)
+            })
             .collect();
-    }
 
-    let distribution = distribute_cpus_proportional(unclaimed_cpus, &recipients)
-        .context("distributing unclaimed CPUs among unpinned cells")?;
-    for (cell_id, assigned_cpus) in distribution {
-        let count = assigned_cpus.len();
-        for cpu in assigned_cpus {
-            cell_cpus
-                .entry(cell_id)
-                .or_insert_with(Cpumask::new)
-                .set_cpu(cpu)
-                .ok();
-        }
-        *assigned_count.entry(cell_id).or_insert(0) += count;
-    }
-
-    Ok(())
-}
-
-fn build_cpu_assignments(
-    cells: &[CellSpec],
-    all_cpus: &Cpumask,
-    cell_cpus: HashMap<u32, Cpumask>,
-    compute_borrowable: bool,
-) -> Vec<CpuAssignment> {
-    let cpusets = build_cell_cpuset_map(cells);
-    let mut cell_cpus: Vec<(u32, Cpumask)> = cell_cpus.into_iter().collect();
-    cell_cpus.sort_by_key(|(cell_id, _)| *cell_id);
-
-    cell_cpus
-        .into_iter()
-        .map(|(cell_id, primary)| {
-            let borrowable = if compute_borrowable {
-                let mut borrow_mask = all_cpus.and(&primary.not());
-                // If this cell has a cpuset, restrict borrowable to it.
-                if let Some(Some(cpuset)) = cpusets.get(&cell_id) {
-                    borrow_mask = borrow_mask.and(cpuset);
+        for (claimants, cpus) in contested_groups {
+            let mut recipients_with_deficit: Vec<(u32, f64)> = Vec::new();
+            let mut all_zero = true;
+            for &id in &claimants {
+                let deficit = *initial_deficit.get(&id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "BUG: recipient {} in contention map but missing from targets",
+                        id
+                    )
+                })?;
+                if deficit > 0.0 {
+                    all_zero = false;
                 }
-                Some(borrow_mask)
-            } else {
-                None
-            };
-            CpuAssignment {
-                cell_id,
-                primary,
-                borrowable,
+                recipients_with_deficit.push((id, deficit));
             }
-        })
-        .collect()
-}
 
-fn validate_cpu_assignments(
-    cells: &[CellSpec],
-    all_cpus: &Cpumask,
-    contention: &HashMap<usize, Vec<u32>>,
-    assignments: &[CpuAssignment],
-    compute_borrowable: bool,
-) -> Result<()> {
-    let known_cells: HashSet<u32> = cells.iter().map(|spec| spec.cell_id).collect();
-    let cpusets = build_cell_cpuset_map(cells);
-    let mut seen_cells: HashSet<u32> = HashSet::new();
-    let mut owner_by_cpu: HashMap<usize, u32> = HashMap::new();
+            // If all claimants already meet/exceed their target, fall back to equal weights
+            if all_zero {
+                recipients_with_deficit = claimants.iter().map(|&id| (id, 1.0)).collect();
+            }
 
-    for assignment in assignments {
-        if !known_cells.contains(&assignment.cell_id) {
-            bail!(
-                "CPU assignment references unknown cell {}",
-                assignment.cell_id
-            );
-        }
-        if !seen_cells.insert(assignment.cell_id) {
-            bail!("Cell {} has duplicate CPU assignments", assignment.cell_id);
-        }
-        if assignment.primary.weight() == 0 {
-            bail!(
-                "Cell {} has no CPUs assigned (nr_cpus={}, num_cells={})",
-                assignment.cell_id,
-                all_cpus.weight(),
-                cells.len()
-            );
-        }
-
-        if let Some(Some(cpuset)) = cpusets.get(&assignment.cell_id) {
-            for cpu in assignment.primary.iter() {
-                if !cpuset.test_cpu(cpu) {
-                    bail!(
-                        "Cell {} primary CPU {} is outside its cpuset",
-                        assignment.cell_id,
-                        cpu
-                    );
+            let distribution = Self::distribute_cpus_proportional(&cpus, &recipients_with_deficit)?;
+            for (id, assigned_cpus) in distribution {
+                let count = assigned_cpus.len();
+                for cpu in assigned_cpus {
+                    recipient_cpus
+                        .entry(id)
+                        .or_insert_with(Cpumask::new)
+                        .set_cpu(cpu)
+                        .ok();
                 }
+                *assigned_count.entry(id).or_insert(0) += count;
             }
         }
 
-        match (compute_borrowable, &assignment.borrowable) {
-            (false, None) => {}
-            (false, Some(_)) => {
-                bail!(
-                    "Cell {} has borrowable CPUs when borrowing is disabled",
-                    assignment.cell_id
-                );
-            }
-            (true, None) => {
-                bail!(
-                    "Cell {} is missing borrowable CPUs when borrowing is enabled",
-                    assignment.cell_id
-                );
-            }
-            (true, Some(borrowable)) => {
-                for cpu in borrowable.iter() {
-                    if !all_cpus.test_cpu(cpu) {
-                        bail!(
-                            "Cell {} borrowable CPU {} is outside all_cpus",
-                            assignment.cell_id,
-                            cpu
-                        );
-                    }
-                    if assignment.primary.test_cpu(cpu) {
-                        bail!(
-                            "Cell {} borrowable CPU {} overlaps primary",
-                            assignment.cell_id,
-                            cpu
-                        );
-                    }
-                    if let Some(Some(cpuset)) = cpusets.get(&assignment.cell_id) {
-                        if !cpuset.test_cpu(cpu) {
-                            bail!(
-                                "Cell {} borrowable CPU {} is outside its cpuset",
-                                assignment.cell_id,
-                                cpu
-                            );
-                        }
-                    }
+        // Phase 4: Distribute unclaimed CPUs among unpinned recipients using deficit weights
+        if !unclaimed_cpus.is_empty() {
+            let mut unpinned_recipients: Vec<(u32, f64)> = Vec::new();
+            let mut all_zero = true;
+
+            for recipient in recipients {
+                if recipient.claimed.is_some() {
+                    continue; // pinned recipients don't receive unclaimed CPUs
                 }
+                let target = *targets.get(&recipient.id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "BUG: recipient {} is unpinned but missing from targets",
+                        recipient.id
+                    )
+                })?;
+                // Recipients with no exclusive CPUs have no entry yet; 0 is correct.
+                let already = assigned_count.get(&recipient.id).copied().unwrap_or(0);
+                let deficit = if target > already {
+                    (target - already) as f64
+                } else {
+                    0.0
+                };
+                if deficit > 0.0 {
+                    all_zero = false;
+                }
+                unpinned_recipients.push((recipient.id, deficit));
+            }
+            unpinned_recipients.sort_by_key(|(id, _)| *id);
+
+            // If all recipients already meet/exceed their target, fall back to equal weights
+            if all_zero {
+                unpinned_recipients = unpinned_recipients
+                    .iter()
+                    .map(|(id, _)| (*id, 1.0))
+                    .collect();
+            }
+
+            let distribution =
+                Self::distribute_cpus_proportional(&unclaimed_cpus, &unpinned_recipients)?;
+            for (id, assigned_cpus) in distribution {
+                let count = assigned_cpus.len();
+                for cpu in assigned_cpus {
+                    recipient_cpus
+                        .entry(id)
+                        .or_insert_with(Cpumask::new)
+                        .set_cpu(cpu)
+                        .ok();
+                }
+                *assigned_count.entry(id).or_insert(0) += count;
             }
         }
 
-        for cpu in assignment.primary.iter() {
-            if !all_cpus.test_cpu(cpu) {
+        // Phase 5: Verify the legacy non-empty invariant and every explicit
+        // protected minimum.
+        for recipient in recipients {
+            let assigned = recipient_cpus.get(&recipient.id).map_or(0, Cpumask::weight);
+            let required = recipient.minimum.protected.max(1);
+            if assigned < required {
                 bail!(
-                    "Cell {} primary CPU {} is outside all_cpus",
-                    assignment.cell_id,
-                    cpu
+                    "Recipient {} has {} CPUs assigned, below required minimum {} \
+                     (nr_cpus={}, num_recipients={})",
+                    recipient.id,
+                    assigned,
+                    required,
+                    domain.weight(),
+                    recipients.len()
                 );
             }
-            if let Some(previous_owner) = owner_by_cpu.insert(cpu, assignment.cell_id) {
-                bail!(
-                    "CPU {} assigned to both cell {} and cell {}",
-                    cpu,
-                    previous_owner,
-                    assignment.cell_id
-                );
-            }
         }
-    }
 
-    for spec in cells {
-        if !seen_cells.contains(&spec.cell_id) {
-            bail!(
-                "Cell {} has no CPUs assigned (nr_cpus={}, num_cells={})",
-                spec.cell_id,
-                all_cpus.weight(),
-                cells.len()
-            );
-        }
-    }
+        let allowed_by_id: HashMap<u32, Cpumask> = recipients
+            .iter()
+            .map(|recipient| (recipient.id, recipient.allowed.clone()))
+            .collect();
 
-    for cpu in all_cpus.iter() {
-        if !owner_by_cpu.contains_key(&cpu) {
-            bail!("CPU {} is not assigned to any cell", cpu);
-        }
+        // Phase 6: Build CpuAssignment results, optionally computing borrowable masks
+        Ok(recipient_cpus
+            .into_iter()
+            .map(|(id, primary)| {
+                let borrowable = if compute_borrowable {
+                    let allowed = allowed_by_id
+                        .get(&id)
+                        .expect("recipient assignment missing allowed mask");
+                    Some(domain.and(&primary.not()).and(allowed))
+                } else {
+                    None
+                };
+                CpuAssignment {
+                    id,
+                    primary,
+                    borrowable,
+                }
+            })
+            .collect())
     }
-
-    for (&cpu, claimants) in contention {
-        if !all_cpus.test_cpu(cpu) {
-            continue;
-        }
-        let Some(owner) = owner_by_cpu.get(&cpu) else {
-            bail!("Claimed CPU {} is not assigned to any cell", cpu);
-        };
-        if *owner != 0 && !claimants.contains(owner) {
-            bail!(
-                "Claimed CPU {} assigned to non-claimant cell {}",
-                cpu,
-                owner
-            );
-        }
-    }
-
-    Ok(())
 }
 
 fn read_dir_sorted(path: &Path) -> Result<Vec<DirEntry>> {
@@ -1178,89 +1145,87 @@ impl CellManager {
         self.compute_cpu_assignments_inner(Some(cell_demands), compute_borrowable)
     }
 
+    /// Compute CPU assignments for subcells inside a cell's primary CPU domain.
+    ///
+    /// Subcells are treated as recipients over `domain`, which is expected to be
+    /// the parent cell's exclusive CPU allocation.
+    pub(crate) fn compute_subcell_cpu_assignments(
+        domain: &Cpumask,
+        subcells: &[CpuRecipient],
+        compute_borrowable: bool,
+    ) -> Result<Vec<CpuAssignment>> {
+        CpuManager::new(domain).compute_assignments(subcells, compute_borrowable)
+    }
+
     /// Internal implementation shared by equal-weight and demand-weighted assignment.
     fn compute_cpu_assignments_inner(
         &self,
         cell_demands: Option<&HashMap<u32, f64>>,
         compute_borrowable: bool,
     ) -> Result<Vec<CpuAssignment>> {
-        // Cells: stable, sorted worklist.
-        let cells = build_cell_specs(&self.cells);
-        // Weights: CPU-util based demand, or equal shares.
-        let weights = build_cell_weights(&cells, cell_demands)?;
-        // Map: CPU -> [cells that claim it].
-        let contention = build_contention(&cells);
+        let recipients: Vec<CpuRecipient> = self
+            .cells
+            .values()
+            .map(|info| {
+                let weight = match cell_demands {
+                    Some(demands) => {
+                        let weight = *demands
+                            .get(&info.cell_id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Cell {} is missing from demands map", info.cell_id)
+                            })
+                            .context("building cell demand weights map")?;
+                        if weight < 0.0 {
+                            bail!(
+                                "Cell {} has negative demand weight {}",
+                                info.cell_id,
+                                weight
+                            );
+                        }
+                        weight
+                    }
+                    None => 1.0,
+                };
+                Ok(CpuRecipient {
+                    id: info.cell_id,
+                    weight,
+                    allowed: info.cpuset.clone().unwrap_or_else(|| self.all_cpus.clone()),
+                    claimed: info.cpuset.clone(),
+                    minimum: if info.cell_id == 0 {
+                        CpuMinimum {
+                            protected: 0,
+                            requested: self.cell0_min_cpus,
+                        }
+                    } else {
+                        CpuMinimum {
+                            protected: 1,
+                            requested: 0,
+                        }
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        // Holdout: try to reserve `cell0_min_cpus` CPUs for cell 0 before the
-        // cpuset-based assignment below, but reserve fewer if reserving more
-        // would mean taking a workload cell's last CPU. Prefer CPUs no child
-        // cpuset claims; when those run out, steal from cells — largest cell
-        // first, but never a cell's last CPU — so no child is starved. Reserved
-        // CPUs are skipped by the phases below and pre-seeded onto cell 0.
-        let holdout = compute_cell0_holdout(
-            &self.all_cpus,
-            &contention,
-            self.cell0_min_cpus,
-            &self.cpu_to_llc,
-        );
-        if holdout.enforced {
-            self.enforced_holdout.store(true, Ordering::Relaxed);
+        let assignments = CpuManager::with_partitions(&self.all_cpus, &self.cpu_to_llc)
+            .compute_assignments(&recipients, compute_borrowable)?;
+
+        // The sticky statistic records when satisfying cell 0's requested
+        // minimum displaced any CPU preferentially claimed by a workload cell.
+        if self.cell0_min_cpus > 0 {
+            let mut workload_claims = Cpumask::new();
+            for recipient in recipients.iter().filter(|recipient| recipient.id != 0) {
+                if let Some(claimed) = &recipient.claimed {
+                    workload_claims = workload_claims.or(claimed);
+                }
+            }
+            if assignments
+                .iter()
+                .find(|assignment| assignment.id == 0)
+                .is_some_and(|assignment| assignment.primary.and(&workload_claims).weight() > 0)
+            {
+                self.enforced_holdout.store(true, Ordering::Relaxed);
+            }
         }
-
-        // Categorize CPUs and build initial assignments:
-        // - Exclusive: claimed by exactly 1 cell -> assigned directly
-        // - Contested: claimed by 2+ cells -> distributed by weight
-        // - Unclaimed: no cpuset claims it -> shared among cell 0 + unpinned cells
-        let CpuBuckets {
-            mut cell_cpus,
-            contested_groups,
-            unclaimed_cpus,
-        } = classify_cpus(&self.all_cpus, &contention, &holdout.mask);
-
-        // Compute each cell's total CPU target, then snapshot deficits after exclusive CPUs are assigned.
-        let targets = compute_targets(self.all_cpus.weight(), &weights)
-            .context("computing per-cell CPU targets")?;
-
-        // Seed assigned_count from holdout and exclusive assignments.
-        // Map: cell_id -> num cpus assigned.
-        let mut assigned_count = assigned_counts(&cell_cpus);
-
-        // Freeze deficit weights before processing any group. Each group is an
-        // independent allocation decision, so a cell's weight should not depend
-        // on HashMap iteration order (i.e., which other groups were processed
-        // first). Using the initial deficit (target - exclusive_count) as weight
-        // for all groups makes the result deterministic.
-        let initial_deficit = compute_initial_deficit(&targets, &assigned_count);
-
-        // Allocate contested CPUs using the frozen deficit snapshot.
-        distribute_contested_groups(
-            &contested_groups,
-            &initial_deficit,
-            &mut cell_cpus,
-            &mut assigned_count,
-        )?;
-
-        // Distribute unclaimed CPUs among unpinned cells, including cell 0.
-        distribute_unclaimed_cpus(
-            &unclaimed_cpus,
-            &cells,
-            &targets,
-            &mut cell_cpus,
-            &mut assigned_count,
-        )?;
-
-        // Build final assignments.
-        let assignments =
-            build_cpu_assignments(&cells, &self.all_cpus, cell_cpus, compute_borrowable);
-
-        // Validate that every cell has a non-empty primary mask before returning.
-        validate_cpu_assignments(
-            &cells,
-            &self.all_cpus,
-            &contention,
-            &assignments,
-            compute_borrowable,
-        )?;
 
         Ok(assignments)
     }
@@ -1287,26 +1252,26 @@ impl CellManager {
     /// Example output: "[0: 0-7] [1(container-a): 8-15] [2(container-b): 16-23]"
     pub fn format_cell_config(&self, cpu_assignments: &[CpuAssignment]) -> String {
         let mut sorted: Vec<_> = cpu_assignments.iter().collect();
-        sorted.sort_by_key(|a| a.cell_id);
+        sorted.sort_by_key(|a| a.id);
 
         let mut parts = Vec::new();
         for assignment in sorted {
             let cpulist = assignment.primary.to_cpulist();
-            if assignment.cell_id == 0 {
+            if assignment.id == 0 {
                 parts.push(format!("[0: {}]", cpulist));
             } else {
                 // Find cgroup name for this cell
                 let name = self
                     .cells
                     .values()
-                    .find(|info| info.cell_id == assignment.cell_id)
+                    .find(|info| info.cell_id == assignment.id)
                     .and_then(|info| {
                         info.cgroup_path
                             .as_ref()
                             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                     })
                     .unwrap_or_else(|| "?".to_string());
-                parts.push(format!("[{}({}): {}]", assignment.cell_id, name, cpulist));
+                parts.push(format!("[{}({}): {}]", assignment.id, name, cpulist));
             }
         }
         parts.join(" ")
@@ -1436,422 +1401,13 @@ mod tests {
         );
     }
 
-    fn cpumask_for_cpus(nr_cpus: usize, cpus: &[usize]) -> Cpumask {
+    fn cpumask_from_cpulist(nr_cpus: usize, cpulist: &str) -> Cpumask {
         scx_utils::set_cpumask_test_width(nr_cpus);
-        let mut mask = Cpumask::new();
-        for &cpu in cpus {
-            mask.set_cpu(cpu).unwrap();
-        }
-        mask
+        Cpumask::from_cpulist(cpulist).unwrap()
     }
 
-    fn assignment_signature(assignments: &[CpuAssignment]) -> Vec<(u32, String, Option<String>)> {
-        let mut signature: Vec<_> = assignments
-            .iter()
-            .map(|assignment| {
-                (
-                    assignment.cell_id,
-                    assignment.primary.to_cpulist(),
-                    assignment.borrowable.as_ref().map(|mask| mask.to_cpulist()),
-                )
-            })
-            .collect();
-        signature.sort();
-        signature
-    }
-
-    fn compute_assignments_from_specs(
-        cells: &[CellSpec],
-        all_cpus: &Cpumask,
-        compute_borrowable: bool,
-    ) -> Vec<CpuAssignment> {
-        let weights = build_cell_weights(cells, None).unwrap();
-        let contention = build_contention(cells);
-        let holdout = compute_cell0_holdout(all_cpus, &contention, 0, &HashMap::new());
-        let CpuBuckets {
-            mut cell_cpus,
-            contested_groups,
-            unclaimed_cpus,
-        } = classify_cpus(all_cpus, &contention, &holdout.mask);
-        let targets = compute_targets(all_cpus.weight(), &weights).unwrap();
-        let mut assigned_count = assigned_counts(&cell_cpus);
-        let initial_deficit = compute_initial_deficit(&targets, &assigned_count);
-
-        distribute_contested_groups(
-            &contested_groups,
-            &initial_deficit,
-            &mut cell_cpus,
-            &mut assigned_count,
-        )
-        .unwrap();
-        distribute_unclaimed_cpus(
-            &unclaimed_cpus,
-            cells,
-            &targets,
-            &mut cell_cpus,
-            &mut assigned_count,
-        )
-        .unwrap();
-
-        let assignments = build_cpu_assignments(cells, all_cpus, cell_cpus, compute_borrowable);
-        validate_cpu_assignments(
-            cells,
-            all_cpus,
-            &contention,
-            &assignments,
-            compute_borrowable,
-        )
-        .unwrap();
-        assignments
-    }
-
-    // ==================== CPU assignment helper tests ====================
-
-    #[test]
-    fn test_build_contention_and_classify_cpus() {
-        let all_cpus = cpumask_for_range(6);
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(6, &[0, 1, 2])),
-            },
-            CellSpec {
-                cell_id: 2,
-                cpuset: Some(cpumask_for_cpus(6, &[2, 3])),
-            },
-        ];
-
-        let contention = build_contention(&cells);
-        assert_eq!(contention.get(&0).unwrap(), &vec![1]);
-        assert_eq!(contention.get(&2).unwrap(), &vec![1, 2]);
-        assert_eq!(contention.get(&3).unwrap(), &vec![2]);
-        assert!(!contention.contains_key(&4));
-
-        let buckets = classify_cpus(&all_cpus, &contention, &Cpumask::new());
-        assert!(buckets.cell_cpus.get(&1).unwrap().test_cpu(0));
-        assert!(buckets.cell_cpus.get(&1).unwrap().test_cpu(1));
-        assert!(buckets.cell_cpus.get(&2).unwrap().test_cpu(3));
-        assert_eq!(buckets.contested_groups.get(&vec![1, 2]).unwrap(), &vec![2]);
-        assert_eq!(buckets.unclaimed_cpus, vec![4, 5]);
-    }
-
-    #[test]
-    fn test_compute_cell0_holdout_prefers_unclaimed_cpus() {
-        let all_cpus = cpumask_for_range(6);
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(6, &[0, 1])),
-            },
-            CellSpec {
-                cell_id: 2,
-                cpuset: Some(cpumask_for_cpus(6, &[2, 3])),
-            },
-        ];
-        let contention = build_contention(&cells);
-
-        let holdout = compute_cell0_holdout(&all_cpus, &contention, 2, &HashMap::new());
-
-        assert_eq!(holdout.mask.weight(), 2);
-        assert!(holdout.mask.test_cpu(4));
-        assert!(holdout.mask.test_cpu(5));
-        assert!(!holdout.enforced);
-    }
-
-    #[test]
-    fn test_compute_cell0_holdout_steals_without_starving_children() {
-        let all_cpus = cpumask_for_range(6);
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(6, &[0, 1, 2])),
-            },
-            CellSpec {
-                cell_id: 2,
-                cpuset: Some(cpumask_for_cpus(6, &[3, 4, 5])),
-            },
-        ];
-        let contention = build_contention(&cells);
-
-        let holdout = compute_cell0_holdout(&all_cpus, &contention, 2, &HashMap::new());
-
-        assert_eq!(holdout.mask.weight(), 2);
-        assert!(holdout.enforced);
-        let mut remaining_exclusive: HashMap<u32, usize> = HashMap::new();
-        for (&cpu, claimants) in &contention {
-            if holdout.mask.test_cpu(cpu) || claimants.len() != 1 {
-                continue;
-            }
-            *remaining_exclusive.entry(claimants[0]).or_insert(0) += 1;
-        }
-        for cell_id in [1, 2] {
-            assert!(
-                remaining_exclusive.get(&cell_id).copied().unwrap_or(0) >= 1,
-                "cell {} was starved by holdout {:?}",
-                cell_id,
-                holdout.mask
-            );
-        }
-    }
-
-    #[test]
-    fn test_distribute_contested_groups_uses_frozen_deficit() {
-        let mut cell_cpus: HashMap<u32, Cpumask> = HashMap::new();
-        let mut assigned_count: HashMap<u32, usize> = HashMap::new();
-        let contested_groups: HashMap<Vec<u32>, Vec<usize>> =
-            [(vec![1, 2], vec![0, 1]), (vec![1, 3], vec![2, 3])].into();
-        let initial_deficit: HashMap<u32, f64> = [(1, 1.0), (2, 10.0), (3, 10.0)].into();
-
-        distribute_contested_groups(
-            &contested_groups,
-            &initial_deficit,
-            &mut cell_cpus,
-            &mut assigned_count,
-        )
-        .unwrap();
-
-        assert_eq!(cell_cpus.get(&1).unwrap().weight(), 2);
-        assert_eq!(cell_cpus.get(&2).unwrap().weight(), 1);
-        assert_eq!(cell_cpus.get(&3).unwrap().weight(), 1);
-    }
-
-    #[test]
-    fn test_distribute_unclaimed_cpus_only_to_unpinned_cells() {
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(6, &[0, 1])),
-            },
-            CellSpec {
-                cell_id: 2,
-                cpuset: None,
-            },
-        ];
-        let mut cell_cpus: HashMap<u32, Cpumask> = [(1, cpumask_for_cpus(6, &[0, 1]))].into();
-        let mut assigned_count = assigned_counts(&cell_cpus);
-        let targets: HashMap<u32, usize> = [(0, 2), (1, 2), (2, 2)].into();
-
-        distribute_unclaimed_cpus(
-            &[2, 3, 4, 5],
-            &cells,
-            &targets,
-            &mut cell_cpus,
-            &mut assigned_count,
-        )
-        .unwrap();
-
-        assert_eq!(cell_cpus.get(&1).unwrap().to_cpulist(), "0-1");
-        assert_eq!(cell_cpus.get(&0).unwrap().weight(), 2);
-        assert_eq!(cell_cpus.get(&2).unwrap().weight(), 2);
-    }
-
-    #[test]
-    fn test_assignment_helpers_are_cell_order_independent() {
-        let all_cpus = cpumask_for_range(12);
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(12, &[0, 1, 2, 3, 4, 5])),
-            },
-            CellSpec {
-                cell_id: 2,
-                cpuset: Some(cpumask_for_cpus(12, &[3, 4, 5, 6, 7, 8])),
-            },
-        ];
-        let shuffled = vec![cells[2].clone(), cells[0].clone(), cells[1].clone()];
-
-        let expected =
-            assignment_signature(&compute_assignments_from_specs(&cells, &all_cpus, false));
-        let actual =
-            assignment_signature(&compute_assignments_from_specs(&shuffled, &all_cpus, false));
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_validate_cpu_assignments_rejects_duplicate_cpu_owner() {
-        let all_cpus = cpumask_for_range(4);
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(4, &[1, 2, 3])),
-            },
-        ];
-        let contention = build_contention(&cells);
-        let assignments = vec![
-            CpuAssignment {
-                cell_id: 0,
-                primary: cpumask_for_cpus(4, &[0, 1]),
-                borrowable: None,
-            },
-            CpuAssignment {
-                cell_id: 1,
-                primary: cpumask_for_cpus(4, &[1, 2, 3]),
-                borrowable: None,
-            },
-        ];
-
-        let err = validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments, false)
-            .unwrap_err();
-        assert!(err.to_string().contains("assigned to both cell"));
-    }
-
-    #[test]
-    fn test_validate_cpu_assignments_rejects_missing_cell_assignment() {
-        let all_cpus = cpumask_for_range(4);
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(4, &[0, 1])),
-            },
-        ];
-        let contention = build_contention(&cells);
-        let assignments = vec![CpuAssignment {
-            cell_id: 0,
-            primary: cpumask_for_cpus(4, &[0, 1, 2, 3]),
-            borrowable: None,
-        }];
-
-        let err = validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments, false)
-            .unwrap_err();
-        assert!(err.to_string().contains("Cell 1 has no CPUs assigned"));
-    }
-
-    #[test]
-    fn test_validate_cpu_assignments_rejects_empty_primary_mask() {
-        let all_cpus = cpumask_for_range(2);
-        let cells = vec![CellSpec {
-            cell_id: 0,
-            cpuset: None,
-        }];
-        let assignments = vec![CpuAssignment {
-            cell_id: 0,
-            primary: Cpumask::new(),
-            borrowable: None,
-        }];
-
-        let err = validate_cpu_assignments(&cells, &all_cpus, &HashMap::new(), &assignments, false)
-            .unwrap_err();
-        assert!(err.to_string().contains("Cell 0 has no CPUs assigned"));
-    }
-
-    #[test]
-    fn test_validate_cpu_assignments_rejects_pinned_cell_outside_cpuset() {
-        let all_cpus = cpumask_for_range(4);
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(4, &[0, 1])),
-            },
-        ];
-        let contention = build_contention(&cells);
-        let assignments = vec![
-            CpuAssignment {
-                cell_id: 0,
-                primary: cpumask_for_cpus(4, &[0, 1, 3]),
-                borrowable: None,
-            },
-            CpuAssignment {
-                cell_id: 1,
-                primary: cpumask_for_cpus(4, &[2]),
-                borrowable: None,
-            },
-        ];
-
-        let err = validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments, false)
-            .unwrap_err();
-        assert!(err.to_string().contains("outside its cpuset"));
-    }
-
-    #[test]
-    fn test_validate_cpu_assignments_rejects_claimed_cpu_assigned_to_non_claimant() {
-        let all_cpus = cpumask_for_range(4);
-        let cells = vec![
-            CellSpec {
-                cell_id: 0,
-                cpuset: None,
-            },
-            CellSpec {
-                cell_id: 1,
-                cpuset: Some(cpumask_for_cpus(4, &[0, 1])),
-            },
-            CellSpec {
-                cell_id: 2,
-                cpuset: None,
-            },
-        ];
-        let contention = build_contention(&cells);
-        let assignments = vec![
-            CpuAssignment {
-                cell_id: 0,
-                primary: cpumask_for_cpus(4, &[3]),
-                borrowable: None,
-            },
-            CpuAssignment {
-                cell_id: 1,
-                primary: cpumask_for_cpus(4, &[1]),
-                borrowable: None,
-            },
-            CpuAssignment {
-                cell_id: 2,
-                primary: cpumask_for_cpus(4, &[0, 2]),
-                borrowable: None,
-            },
-        ];
-
-        let err = validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments, false)
-            .unwrap_err();
-        assert!(err.to_string().contains("assigned to non-claimant cell"));
-    }
-
-    #[test]
-    fn test_validate_cpu_assignments_rejects_bad_borrowable_overlap() {
-        let all_cpus = cpumask_for_range(2);
-        let cells = vec![CellSpec {
-            cell_id: 0,
-            cpuset: None,
-        }];
-        let assignments = vec![CpuAssignment {
-            cell_id: 0,
-            primary: cpumask_for_cpus(2, &[0, 1]),
-            borrowable: Some(cpumask_for_cpus(2, &[1])),
-        }];
-
-        let err = validate_cpu_assignments(&cells, &all_cpus, &HashMap::new(), &assignments, true)
-            .unwrap_err();
-        assert!(err.to_string().contains("overlaps primary"));
+    fn find_assignment(assignments: &[CpuAssignment], id: u32) -> &CpuAssignment {
+        assignments.iter().find(|a| a.id == id).unwrap()
     }
 
     // ==================== Cell scanning and creation tests ====================
@@ -2032,7 +1588,7 @@ mod tests {
 
         // Only cell 0 with all CPUs
         assert_eq!(assignments.len(), 1);
-        assert_eq!(assignments[0].cell_id, 0);
+        assert_eq!(assignments[0].id, 0);
         assert_eq!(assignments[0].primary.weight(), 16);
     }
 
@@ -2053,8 +1609,8 @@ mod tests {
         // 16 CPUs / 2 cells = 8 each
         assert_eq!(assignments.len(), 2);
 
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
-        let cell1 = assignments.iter().find(|a| a.cell_id == 1).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
+        let cell1 = assignments.iter().find(|a| a.id == 1).unwrap();
 
         assert_eq!(cell0.primary.weight(), 8);
         assert_eq!(cell1.primary.weight(), 8);
@@ -2076,7 +1632,7 @@ mod tests {
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         // 10 CPUs / 3 cells = 3 each + 1 remainder to cell 0
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
         assert_eq!(cell0.primary.weight(), 4); // 3 + 1 remainder
     }
 
@@ -2137,14 +1693,14 @@ mod tests {
         let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
         let cell2_info = mgr.find_cell_by_name("cell2").unwrap();
 
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
         let cell1 = assignments
             .iter()
-            .find(|a| a.cell_id == cell1_info.cell_id)
+            .find(|a| a.id == cell1_info.cell_id)
             .unwrap();
         let cell2 = assignments
             .iter()
-            .find(|a| a.cell_id == cell2_info.cell_id)
+            .find(|a| a.id == cell2_info.cell_id)
             .unwrap();
 
         // cell1 gets CPUs 0-3
@@ -2198,8 +1754,8 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = format!("{:#}", err);
         assert!(
-            err_msg.contains("Cell 0 has no CPUs assigned"),
-            "Expected 'Cell 0 has no CPUs assigned' error, got: {}",
+            err_msg.contains("Recipient 0 has 0 CPUs assigned, below required minimum 1"),
+            "Expected recipient minimum error, got: {}",
             err_msg
         );
     }
@@ -2235,7 +1791,7 @@ mod tests {
 
         let cell0 = assignments
             .iter()
-            .find(|a| a.cell_id == 0)
+            .find(|a| a.id == 0)
             .expect("cell 0 present");
         assert_eq!(cell0.primary.weight(), 1);
 
@@ -2248,13 +1804,13 @@ mod tests {
             assert!(
                 assignment.primary.weight() >= 1,
                 "cell {} starved after holdout: {:?}",
-                assignment.cell_id,
+                assignment.id,
                 assignment.primary
             );
         }
         let donor_weights: Vec<usize> = assignments
             .iter()
-            .filter(|a| a.cell_id != 0)
+            .filter(|a| a.id != 0)
             .map(|a| a.primary.weight())
             .collect();
         assert!(donor_weights.contains(&7));
@@ -2299,7 +1855,7 @@ mod tests {
 
         let cell0 = assignments
             .iter()
-            .find(|a| a.cell_id == 0)
+            .find(|a| a.id == 0)
             .expect("cell 0 present");
         assert_eq!(cell0.primary.weight(), 1);
         assert!(
@@ -2319,18 +1875,18 @@ mod tests {
         // two smaller cells are untouched.
         let mut child_weights: Vec<usize> = assignments
             .iter()
-            .filter(|a| a.cell_id != 0)
+            .filter(|a| a.id != 0)
             .map(|a| a.primary.weight())
             .collect();
         child_weights.sort_unstable();
         assert_eq!(child_weights, vec![4, 4, 7]);
 
         // No child cell still holds the held-out CPU.
-        for a in assignments.iter().filter(|a| a.cell_id != 0) {
+        for a in assignments.iter().filter(|a| a.id != 0) {
             assert!(
                 !a.primary.test_cpu(0),
                 "cell {} still holds held-out CPU 0",
-                a.cell_id
+                a.id
             );
         }
     }
@@ -2365,7 +1921,7 @@ mod tests {
 
         let cell0 = assignments
             .iter()
-            .find(|a| a.cell_id == 0)
+            .find(|a| a.id == 0)
             .expect("cell 0 present");
         assert_eq!(
             cell0.primary.weight(),
@@ -2377,7 +1933,7 @@ mod tests {
         // exactly two, ending at six.
         let mut donor_weights: Vec<usize> = assignments
             .iter()
-            .filter(|a| a.cell_id != 0)
+            .filter(|a| a.id != 0)
             .map(|a| a.primary.weight())
             .collect();
         donor_weights.sort_unstable();
@@ -2402,9 +1958,9 @@ mod tests {
         // 4 CPUs fully claimed by two 2-CPU children, cell0_min_cpus=3 -- more
         // than the 2 CPUs that can be reserved while each child keeps one. Without
         // a per-donor floor the steal drains a child to zero and re-triggers the
-        // final "no CPUs assigned" validation this holdout exists to prevent.
-        // The floor caps the reservation so every child keeps >=1 CPU and cell
-        // 0 receives as many as it safely can (2, not the requested 3).
+        // Phase 5 "no CPUs assigned" bail this holdout exists to prevent. The floor
+        // caps the reservation so every child keeps >=1 CPU and cell 0 receives as
+        // many as it safely can (2, not the requested 3).
         let cell1_path = tmp.path().join("cell1");
         std::fs::create_dir(&cell1_path).unwrap();
         std::fs::write(cell1_path.join("cpuset.cpus"), "0-1\n").unwrap();
@@ -2429,12 +1985,12 @@ mod tests {
         let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
         assert_eq!(total, 4);
 
-        // Every child keeps at least one CPU.
-        for a in assignments.iter().filter(|a| a.cell_id != 0) {
+        // Every child keeps at least one CPU -- no Phase 5 bail.
+        for a in assignments.iter().filter(|a| a.id != 0) {
             assert!(
                 a.primary.weight() >= 1,
                 "cell {} starved by the holdout: {:?}",
-                a.cell_id,
+                a.id,
                 a.primary
             );
         }
@@ -2442,7 +1998,7 @@ mod tests {
         // Cell 0 received the floor-capped count (2), not the requested 3.
         let cell0 = assignments
             .iter()
-            .find(|a| a.cell_id == 0)
+            .find(|a| a.id == 0)
             .expect("cell 0 present");
         assert_eq!(
             cell0.primary.weight(),
@@ -2460,8 +2016,8 @@ mod tests {
         // CPU 0 is contested. 5 CPUs total (2,3,4 unclaimed). With cell0_min_cpus=4
         // the holdout must dip past the unclaimed CPUs into a claimed one. It must
         // NOT take cell2's exclusive CPU 1: that would leave cell2 holding only the
-        // contested CPU 0, which contested distribution awards to cell1, zeroing
-        // cell2. The exclusive-only floor refuses to steal a cell's last
+        // contested CPU 0, which Phase 3 awards to cell1, zeroing cell2 -> the
+        // Phase-5 bail. The exclusive-only floor refuses to steal a cell's last
         // exclusive CPU, so cell 0 gets only the 3 unclaimed CPUs (capped below 4)
         // and every cell keeps >=1.
         let cell1_path = tmp.path().join("cell1");
@@ -2496,12 +2052,12 @@ mod tests {
         let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
         assert_eq!(total, 5);
 
-        // Every child keeps at least one CPU.
-        for a in assignments.iter().filter(|a| a.cell_id != 0) {
+        // Every child keeps at least one CPU -- no Phase 5 bail.
+        for a in assignments.iter().filter(|a| a.id != 0) {
             assert!(
                 a.primary.weight() >= 1,
                 "cell {} starved by the holdout: {:?}",
-                a.cell_id,
+                a.id,
                 a.primary
             );
         }
@@ -2510,7 +2066,7 @@ mod tests {
         // the 3 unclaimed CPUs -- capped below the requested 4.
         let cell0 = assignments
             .iter()
-            .find(|a| a.cell_id == 0)
+            .find(|a| a.id == 0)
             .expect("cell 0 present");
         assert_eq!(
             cell0.primary.weight(),
@@ -2540,8 +2096,8 @@ mod tests {
 
         assert_eq!(assignments.len(), 2);
 
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
-        let cell1 = assignments.iter().find(|a| a.cell_id != 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
+        let cell1 = assignments.iter().find(|a| a.id != 0).unwrap();
 
         // cell1 gets even CPUs
         assert_eq!(cell1.primary.weight(), 4);
@@ -2626,18 +2182,18 @@ mod tests {
         // cell1 gets its cpuset (0-3)
         let cell1_assignment = assignments
             .iter()
-            .find(|a| a.cell_id == cell1_info.cell_id)
+            .find(|a| a.id == cell1_info.cell_id)
             .unwrap();
         assert_eq!(cell1_assignment.primary.weight(), 4);
 
         // cell0 gets 7 CPUs (deficit-proportional share of unclaimed)
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
         assert_eq!(cell0.primary.weight(), 7);
 
         // cell2 (unpinned) gets 5 CPUs
         let cell2_assignment = assignments
             .iter()
-            .find(|a| a.cell_id == cell2_info.cell_id)
+            .find(|a| a.id == cell2_info.cell_id)
             .unwrap();
         assert_eq!(cell2_assignment.primary.weight(), 5);
     }
@@ -2671,13 +2227,13 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|a| a.cell_id == cell_a_info.cell_id)
+            .find(|a| a.id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|a| a.cell_id == cell_b_info.cell_id)
+            .find(|a| a.id == cell_b_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
 
         // Cell A gets exclusive 0-3 (4 CPUs) + half of contested 4-7 (2 CPUs) = 6 CPUs
         // Cell B gets half of contested 4-7 (2 CPUs) + exclusive 8-11 (4 CPUs) = 6 CPUs
@@ -2763,17 +2319,17 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|a| a.cell_id == cell_a_info.cell_id)
+            .find(|a| a.id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|a| a.cell_id == cell_b_info.cell_id)
+            .find(|a| a.id == cell_b_info.cell_id)
             .unwrap();
         let cell_c = assignments
             .iter()
-            .find(|a| a.cell_id == cell_c_info.cell_id)
+            .find(|a| a.id == cell_c_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
 
         // 6 contested CPUs / 3 cells = 2 each
         assert_eq!(cell_a.primary.weight(), 2);
@@ -2824,11 +2380,11 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|a| a.cell_id == cell_a_info.cell_id)
+            .find(|a| a.id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|a| a.cell_id == cell_b_info.cell_id)
+            .find(|a| a.id == cell_b_info.cell_id)
             .unwrap();
 
         // 3 CPUs / 2 cells = 1 each + 1 remainder
@@ -2873,13 +2429,13 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|a| a.cell_id == cell_a_info.cell_id)
+            .find(|a| a.id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|a| a.cell_id == cell_b_info.cell_id)
+            .find(|a| a.id == cell_b_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
 
         // 8 contested CPUs / 2 cells = 4 each
         assert_eq!(cell_a.primary.weight(), 4);
@@ -2926,13 +2482,13 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|a| a.cell_id == cell_a_info.cell_id)
+            .find(|a| a.id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|a| a.cell_id == cell_b_info.cell_id)
+            .find(|a| a.id == cell_b_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
 
         // No overlap - each cell gets its exact cpuset
         assert_eq!(cell_a.primary.weight(), 4);
@@ -2971,7 +2527,7 @@ mod tests {
         }
 
         let assignments = vec![CpuAssignment {
-            cell_id: 0,
+            id: 0,
             primary: mask,
             borrowable: None,
         }];
@@ -3005,12 +2561,12 @@ mod tests {
 
         let assignments = vec![
             CpuAssignment {
-                cell_id: 0,
+                id: 0,
                 primary: mask0,
                 borrowable: None,
             },
             CpuAssignment {
-                cell_id: 1,
+                id: 1,
                 primary: mask1,
                 borrowable: None,
             },
@@ -3170,7 +2726,7 @@ mod tests {
                 overlap.weight(),
                 0,
                 "Cell {} borrowable overlaps with primary",
-                assignment.cell_id
+                assignment.id
             );
             // borrowable + primary should cover all CPUs
             let union = borrow_mask.or(&assignment.primary);
@@ -3178,7 +2734,7 @@ mod tests {
                 union.weight(),
                 16,
                 "Cell {} union doesn't cover all CPUs",
-                assignment.cell_id
+                assignment.id
             );
         }
     }
@@ -3212,7 +2768,7 @@ mod tests {
                 overlap.weight(),
                 0,
                 "Cell {} borrowable overlaps with primary",
-                assignment.cell_id
+                assignment.id
             );
         }
     }
@@ -3247,7 +2803,7 @@ mod tests {
         // the borrowable within 0-7 is whatever it doesn't own.
         let cell1_assignment = assignments
             .iter()
-            .find(|a| a.cell_id == cell1_info.cell_id)
+            .find(|a| a.id == cell1_info.cell_id)
             .unwrap();
         let cell1_borrow = cell1_assignment.borrowable.as_ref().unwrap();
         // Cell 1's borrowable should NOT include CPUs outside its cpuset (0-7)
@@ -3262,7 +2818,7 @@ mod tests {
         // Cell 2's borrowable should be restricted to its cpuset (8-15)
         let cell2_assignment = assignments
             .iter()
-            .find(|a| a.cell_id == cell2_info.cell_id)
+            .find(|a| a.id == cell2_info.cell_id)
             .unwrap();
         let cell2_borrow = cell2_assignment.borrowable.as_ref().unwrap();
         for cpu in 0..8 {
@@ -3302,16 +2858,16 @@ mod tests {
         let assignments = mgr.compute_demand_cpu_assignments(&demands, false).unwrap();
 
         // 12 / 3 = 4 each
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
         let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
         let cell2_info = mgr.find_cell_by_name("cell2").unwrap();
         let c1 = assignments
             .iter()
-            .find(|a| a.cell_id == cell1_info.cell_id)
+            .find(|a| a.id == cell1_info.cell_id)
             .unwrap();
         let c2 = assignments
             .iter()
-            .find(|a| a.cell_id == cell2_info.cell_id)
+            .find(|a| a.id == cell2_info.cell_id)
             .unwrap();
 
         assert_eq!(cell0.primary.weight(), 4);
@@ -3345,14 +2901,14 @@ mod tests {
         .into();
         let assignments = mgr.compute_demand_cpu_assignments(&demands, false).unwrap();
 
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
         let c1 = assignments
             .iter()
-            .find(|a| a.cell_id == cell1_info.cell_id)
+            .find(|a| a.id == cell1_info.cell_id)
             .unwrap();
         let c2 = assignments
             .iter()
-            .find(|a| a.cell_id == cell2_info.cell_id)
+            .find(|a| a.id == cell2_info.cell_id)
             .unwrap();
 
         // Busy cell should get more CPUs than idle cell
@@ -3407,11 +2963,11 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|a| a.cell_id == cell_a_info.cell_id)
+            .find(|a| a.id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|a| a.cell_id == cell_b_info.cell_id)
+            .find(|a| a.id == cell_b_info.cell_id)
             .unwrap();
 
         // Cell A should get more of the contested CPUs 4-7
@@ -3455,14 +3011,14 @@ mod tests {
         .into();
         let assignments = mgr.compute_demand_cpu_assignments(&demands, false).unwrap();
 
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
         let c1 = assignments
             .iter()
-            .find(|a| a.cell_id == cell1_info.cell_id)
+            .find(|a| a.id == cell1_info.cell_id)
             .unwrap();
         let c2 = assignments
             .iter()
-            .find(|a| a.cell_id == cell2_info.cell_id)
+            .find(|a| a.id == cell2_info.cell_id)
             .unwrap();
 
         // Idle cell gets its minimum target (1 CPU) via deficit-based distribution:
@@ -3551,13 +3107,13 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|a| a.cell_id == cell_a_info.cell_id)
+            .find(|a| a.id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|a| a.cell_id == cell_b_info.cell_id)
+            .find(|a| a.id == cell_b_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
 
         // Verify total = 16
         assert_eq!(
@@ -3607,14 +3163,14 @@ mod tests {
 
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
         let cell1 = assignments
             .iter()
-            .find(|a| a.cell_id == cell1_info.cell_id)
+            .find(|a| a.id == cell1_info.cell_id)
             .unwrap();
         let cell2 = assignments
             .iter()
-            .find(|a| a.cell_id == cell2_info.cell_id)
+            .find(|a| a.id == cell2_info.cell_id)
             .unwrap();
 
         // Targets (equal weight, 3 cells, 16 CPUs): cell0=6, cell1=5, cell2=5
@@ -3677,13 +3233,13 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|a| a.cell_id == cell_a_info.cell_id)
+            .find(|a| a.id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|a| a.cell_id == cell_b_info.cell_id)
+            .find(|a| a.id == cell_b_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.id == 0).unwrap();
 
         // cell_a exceeded its target from exclusive alone, so it gets 0 contested CPUs.
         // cell_b has deficit, so it gets all 2 contested CPUs.
@@ -3722,7 +3278,7 @@ mod tests {
     fn test_distribute_proportional_basic() {
         let cpus: Vec<usize> = (0..8).collect();
         let recipients = vec![(0, 3.0), (1, 1.0)];
-        let result = distribute_cpus_proportional(&cpus, &recipients).unwrap();
+        let result = CpuManager::distribute_cpus_proportional(&cpus, &recipients).unwrap();
 
         // 3/4 * 8 = 6 for cell 0, 1/4 * 8 = 2 for cell 1
         assert_eq!(result.get(&0).unwrap().len(), 6);
@@ -3733,7 +3289,7 @@ mod tests {
     fn test_distribute_proportional_zero_weight_gets_nothing() {
         let cpus: Vec<usize> = (0..6).collect();
         let recipients = vec![(0, 1.0), (1, 0.0)];
-        let result = distribute_cpus_proportional(&cpus, &recipients).unwrap();
+        let result = CpuManager::distribute_cpus_proportional(&cpus, &recipients).unwrap();
 
         // Cell 0 gets all, cell 1 gets nothing
         assert_eq!(result.get(&0).unwrap().len(), 6);
@@ -3744,7 +3300,7 @@ mod tests {
     fn test_distribute_proportional_all_zero_fallback() {
         let cpus: Vec<usize> = (0..6).collect();
         let recipients = vec![(0, 0.0), (1, 0.0)];
-        let result = distribute_cpus_proportional(&cpus, &recipients).unwrap();
+        let result = CpuManager::distribute_cpus_proportional(&cpus, &recipients).unwrap();
 
         // Falls back to equal division
         assert_eq!(result.get(&0).unwrap().len(), 3);
@@ -3757,7 +3313,7 @@ mod tests {
         // Without floor guarantee, cell 0 would get floor(1/101 * 38) = 0.
         let cpus: Vec<usize> = (0..38).collect();
         let recipients = vec![(2, 1.0), (3, 100.0)];
-        let result = distribute_cpus_proportional(&cpus, &recipients).unwrap();
+        let result = CpuManager::distribute_cpus_proportional(&cpus, &recipients).unwrap();
 
         // Both cells must get at least 1 CPU
         let cell2_count = result.get(&2).map_or(0, |v| v.len());
@@ -3782,7 +3338,7 @@ mod tests {
         // Without floor guarantee, cell A gets 0 → death spiral.
         let cpus: Vec<usize> = (24..62).collect(); // 38 CPUs (24-61)
         let recipients = vec![(2, 1.0), (3, 87.0)];
-        let result = distribute_cpus_proportional(&cpus, &recipients).unwrap();
+        let result = CpuManager::distribute_cpus_proportional(&cpus, &recipients).unwrap();
 
         let cell2_count = result.get(&2).map_or(0, |v| v.len());
         let cell3_count = result.get(&3).map_or(0, |v| v.len());
@@ -3803,7 +3359,7 @@ mod tests {
 
     #[test]
     fn test_compute_targets_equal_weight() {
-        let targets = compute_targets(12, &[(0, 1.0), (1, 1.0), (2, 1.0)]).unwrap();
+        let targets = CpuManager::compute_targets(12, &[(0, 1.0), (1, 1.0), (2, 1.0)]).unwrap();
         assert_eq!(*targets.get(&0).unwrap(), 4);
         assert_eq!(*targets.get(&1).unwrap(), 4);
         assert_eq!(*targets.get(&2).unwrap(), 4);
@@ -3811,13 +3367,232 @@ mod tests {
 
     #[test]
     fn test_compute_targets_with_remainder() {
-        let targets = compute_targets(10, &[(0, 1.0), (1, 1.0), (2, 1.0)]).unwrap();
+        let targets = CpuManager::compute_targets(10, &[(0, 1.0), (1, 1.0), (2, 1.0)]).unwrap();
         // 10 / 3 = 3 each + 1 remainder
         let total: usize = targets.values().sum();
         assert_eq!(total, 10);
         for (_, &count) in &targets {
             assert!(count >= 3 && count <= 4);
         }
+    }
+
+    // ==================== CpuManager domain tests ====================
+
+    #[test]
+    fn test_cpu_manager_non_root_domain_unpinned_invariants() {
+        let domain = cpumask_from_cpulist(32, "8-15");
+        let recipients = vec![
+            CpuRecipient {
+                id: 10,
+                weight: 1.0,
+                allowed: domain.clone(),
+                claimed: None,
+                minimum: CpuMinimum::default(),
+            },
+            CpuRecipient {
+                id: 11,
+                weight: 1.0,
+                allowed: domain.clone(),
+                claimed: None,
+                minimum: CpuMinimum::default(),
+            },
+            CpuRecipient {
+                id: 12,
+                weight: 2.0,
+                allowed: domain.clone(),
+                claimed: None,
+                minimum: CpuMinimum::default(),
+            },
+        ];
+
+        let assignments = CpuManager::new(&domain)
+            .compute_assignments(&recipients, false)
+            .unwrap();
+
+        assert_eq!(assignments.len(), 3);
+        assert_eq!(find_assignment(&assignments, 10).primary.weight(), 2);
+        assert_eq!(find_assignment(&assignments, 11).primary.weight(), 2);
+        assert_eq!(find_assignment(&assignments, 12).primary.weight(), 4);
+
+        let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
+        assert_eq!(total, domain.weight());
+
+        for assignment in &assignments {
+            assert!(
+                assignment.borrowable.is_none(),
+                "borrowable should stay disabled in this case"
+            );
+            for cpu in assignment.primary.iter() {
+                assert!(domain.test_cpu(cpu), "CPU {} escaped the domain", cpu);
+            }
+        }
+
+        for i in 0..assignments.len() {
+            for j in (i + 1)..assignments.len() {
+                let overlap = assignments[i].primary.and(&assignments[j].primary);
+                assert_eq!(
+                    overlap.weight(),
+                    0,
+                    "Recipients {} and {} overlap",
+                    assignments[i].id,
+                    assignments[j].id
+                );
+            }
+        }
+
+        let mut union = Cpumask::new();
+        for assignment in &assignments {
+            union = union.or(&assignment.primary);
+        }
+        assert_eq!(union, domain, "Primary masks should cover the whole domain");
+    }
+
+    #[test]
+    fn test_cpu_manager_non_contiguous_domain_borrowable_invariants() {
+        let domain = cpumask_from_cpulist(32, "8-9,12,14-15,20-21,26");
+        let allowed_1 = cpumask_from_cpulist(32, "0-1,8-9,12");
+        let allowed_2 = cpumask_from_cpulist(32, "9,14-15,20-22");
+        let recipients = vec![
+            CpuRecipient {
+                id: 1,
+                weight: 1.0,
+                allowed: allowed_1.clone(),
+                claimed: Some(allowed_1.clone()),
+                minimum: CpuMinimum::default(),
+            },
+            CpuRecipient {
+                id: 2,
+                weight: 2.0,
+                allowed: allowed_2.clone(),
+                claimed: Some(allowed_2.clone()),
+                minimum: CpuMinimum::default(),
+            },
+            CpuRecipient {
+                id: 3,
+                weight: 1.0,
+                allowed: domain.clone(),
+                claimed: None,
+                minimum: CpuMinimum::default(),
+            },
+        ];
+
+        let assignments = CpuManager::new(&domain)
+            .compute_assignments(&recipients, true)
+            .unwrap();
+
+        assert_eq!(assignments.len(), 3);
+
+        for assignment in &assignments {
+            for cpu in assignment.primary.iter() {
+                assert!(
+                    domain.test_cpu(cpu),
+                    "Primary CPU {} escaped the domain",
+                    cpu
+                );
+            }
+            let borrowable = assignment.borrowable.as_ref().unwrap();
+            for cpu in borrowable.iter() {
+                assert!(
+                    domain.test_cpu(cpu),
+                    "Borrowable CPU {} escaped the domain",
+                    cpu
+                );
+            }
+            assert_eq!(
+                assignment.primary.and(borrowable).weight(),
+                0,
+                "Primary and borrowable overlap for recipient {}",
+                assignment.id
+            );
+        }
+
+        let recipient_1 = find_assignment(&assignments, 1);
+        let recipient_2 = find_assignment(&assignments, 2);
+        let recipient_3 = find_assignment(&assignments, 3);
+
+        for cpu in recipient_1.primary.iter() {
+            assert!(
+                allowed_1.test_cpu(cpu),
+                "Recipient 1 got CPU {} outside allowed",
+                cpu
+            );
+        }
+        for cpu in recipient_2.primary.iter() {
+            assert!(
+                allowed_2.test_cpu(cpu),
+                "Recipient 2 got CPU {} outside allowed",
+                cpu
+            );
+        }
+
+        let allowed_1_in_domain = domain.and(&allowed_1);
+        let allowed_2_in_domain = domain.and(&allowed_2);
+        let recipient_1_union = recipient_1
+            .primary
+            .or(recipient_1.borrowable.as_ref().unwrap());
+        let recipient_2_union = recipient_2
+            .primary
+            .or(recipient_2.borrowable.as_ref().unwrap());
+        assert_eq!(recipient_1_union, allowed_1_in_domain);
+        assert_eq!(recipient_2_union, allowed_2_in_domain);
+
+        let recipient_3_union = recipient_3
+            .primary
+            .or(recipient_3.borrowable.as_ref().unwrap());
+        assert_eq!(recipient_3_union, domain);
+        assert_eq!(recipient_3.primary.weight(), 1);
+        assert!(!recipient_3.primary.test_cpu(8));
+        assert!(!recipient_3.primary.test_cpu(9));
+        assert!(recipient_3.primary.test_cpu(26));
+
+        let mut union = Cpumask::new();
+        for assignment in &assignments {
+            union = union.or(&assignment.primary);
+        }
+        assert_eq!(union, domain, "Primary masks should cover the whole domain");
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_matches_domain() {
+        let domain = cpumask_from_cpulist(32, "8-9,12,14-15");
+        let recipients = vec![CpuRecipient::unpinned(0, 1.0, &domain)];
+
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, false).unwrap();
+
+        assert_eq!(assignments.len(), 1);
+        let subcell0 = find_assignment(&assignments, 0);
+        assert_eq!(subcell0.primary, domain);
+        assert!(subcell0.borrowable.is_none());
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_borrowable_is_empty_when_enabled() {
+        let domain = cpumask_from_cpulist(32, "3-4,8,10-11");
+        let recipients = vec![CpuRecipient::unpinned(0, 1.0, &domain)];
+
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, true).unwrap();
+        let subcell0 = find_assignment(&assignments, 0);
+
+        assert_eq!(subcell0.primary, domain);
+        assert_eq!(subcell0.borrowable.as_ref().unwrap().weight(), 0);
+    }
+
+    #[test]
+    fn test_compute_subcell_cpu_assignments_preserves_existing_custom_subcells() {
+        let domain = cpumask_from_cpulist(32, "8-15");
+        let recipients = vec![
+            CpuRecipient::unpinned(0, 1.0, &domain),
+            CpuRecipient::unpinned(2, 1.0, &domain),
+        ];
+
+        let assignments =
+            CellManager::compute_subcell_cpu_assignments(&domain, &recipients, false).unwrap();
+
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(find_assignment(&assignments, 0).primary.weight(), 4);
+        assert_eq!(find_assignment(&assignments, 2).primary.weight(), 4);
     }
 
     /// Symmetric pairwise overlaps must produce equal cell sizes regardless
@@ -3858,13 +3633,13 @@ mod tests {
 
         let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
-        let workload: Vec<_> = assignments.iter().filter(|a| a.cell_id != 0).collect();
+        let workload: Vec<_> = assignments.iter().filter(|a| a.id != 0).collect();
         assert_eq!(workload.len(), 5, "Expected 5 workload cells");
 
         // All workload cells must have equal CPU counts.
         let counts: Vec<(u32, usize)> = workload
             .iter()
-            .map(|a| (a.cell_id, a.primary.weight()))
+            .map(|a| (a.id, a.primary.weight()))
             .collect();
         for &(cell_id, count) in &counts {
             assert_eq!(
@@ -3884,8 +3659,8 @@ mod tests {
                             && assignments[j].primary.test_cpu(cpu)),
                         "CPU {} assigned to both cell {} and cell {}",
                         cpu,
-                        assignments[i].cell_id,
-                        assignments[j].cell_id,
+                        assignments[i].id,
+                        assignments[j].id,
                     );
                 }
             }
