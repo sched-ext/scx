@@ -279,6 +279,60 @@ static __always_inline void cmask_zero(struct scx_cmask __arena *m)
 	}
 }
 
+/**
+ * cmask_fill - Set every cid in @m's active range
+ * @m: cmask to fill
+ *
+ * Counterpart to cmask_zero(). Storage past the active range is left as is,
+ * matching the kernel-side scx_cmask_fill().
+ */
+static __always_inline void cmask_fill(struct scx_cmask __arena *m)
+{
+	u32 nr_words, head_bits, tail_bits, i;
+
+	if (!m->nr_cids)
+		return;
+	nr_words = (m->base + m->nr_cids - 1) / 64 - m->base / 64 + 1;
+
+	bpf_for(i, 0, CMASK_MAX_WORDS) {
+		if (i >= nr_words)
+			break;
+		m->bits[i] = ~0LLU;
+	}
+
+	/* clear word-0 bits below base */
+	head_bits = m->base & 63;
+	if (head_bits)
+		m->bits[0] &= ~((1LLU << head_bits) - 1);
+
+	/* clear last-word bits at or past base + nr_cids */
+	tail_bits = (m->base + m->nr_cids) & 63;
+	if (tail_bits)
+		m->bits[nr_words - 1] &= (1LLU << tail_bits) - 1;
+}
+
+/**
+ * cmask_empty - Test whether no cid is set in @m's active range
+ * @m: cmask to test
+ *
+ * Scans the words the active range spans, whose bits outside the range every
+ * mutator keeps zero.
+ */
+static __always_inline bool cmask_empty(const struct scx_cmask __arena *m)
+{
+	u32 wbase = m->base / 64, i;
+	u32 nr_words = m->nr_cids ?
+		(m->base + m->nr_cids - 1) / 64 - wbase + 1 : 0;
+
+	bpf_for(i, 0, CMASK_MAX_WORDS) {
+		if (i >= nr_words)
+			break;
+		if (m->bits[i])
+			return false;
+	}
+	return true;
+}
+
 /*
  * BPF_-prefixed to avoid colliding with the kernel's anonymous CMASK_OP_*
  * enum in ext/cid.c, which is exported via BTF and reachable through
@@ -644,6 +698,17 @@ static __always_inline u32 cmask_next_set_wrap(const struct scx_cmask __arena *m
 
 	found = cmask_next_set(m, m->base);
 	return found < start ? found : end;
+}
+
+/**
+ * cmask_end - One past the last cid of @m's active range
+ * @m: cmask of interest
+ *
+ * The scan helpers return this value when no set cid is found.
+ */
+static __always_inline u32 cmask_end(const struct scx_cmask __arena *m)
+{
+	return m->base + m->nr_cids;
 }
 
 /*
