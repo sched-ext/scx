@@ -8,7 +8,7 @@
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
 #include <lib/alloc/bpf_helpers_local.h>
-#include <lib/sdt_task.h>
+#include <lib/sdt_alloc.h>
 #include <scx/arena_userspace_interrop.bpf.h>
 
 struct scx_alloc_stack __arena *prealloc_stack;
