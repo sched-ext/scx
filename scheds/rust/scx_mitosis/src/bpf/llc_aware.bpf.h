@@ -389,6 +389,17 @@ static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc,
 		pending = READ_ONCE(candidate_llc_state->nr_queued);
 		if (!pending) {
 			subcell_llc_drain_disable(subcell, candidate_llc);
+			/*
+			 * Either a racing enqueue's drain enable lands after
+			 * the disable above and draining stays enabled, or this
+			 * recheck sees the work queued before the enable. The
+			 * racing kick can be consumed while draining was
+			 * disabled, so kick again.
+			 */
+			if (READ_ONCE(candidate_llc_state->nr_queued)) {
+				subcell_llc_drain_enable(subcell, candidate_llc);
+				kick_subcell_idle_cpu(cell_id, subcell_id);
+			}
 			continue;
 		}
 
@@ -482,8 +493,11 @@ static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc,
 			pending = READ_ONCE(candidate_llc_state->nr_queued);
 		}
 
-		if (disabled && pending > 0)
+		if (disabled && pending > 0) {
 			subcell_llc_drain_enable(subcell, candidate_llc);
+			/* Same consumed-kick window as the recheck above. */
+			kick_subcell_idle_cpu(cell_id, subcell_id);
+		}
 
 		if (consumed)
 			return continue_dispatch ? CONTINUE_DISPATCH : 0;
