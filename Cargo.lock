@@ -5724,6 +5724,7 @@ dependencies = [
  "anyhow",
  "libbpf-rs",
  "libbpf-sys",
+ "libc",
  "scx_cargo",
  "scx_utils",
  "simplelog",

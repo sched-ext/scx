@@ -7,6 +7,7 @@ license = "GPL-2.0-only"
 
 [dependencies]
 anyhow = "1"
+libc = "0.2"
 libbpf-rs = "=0.26.2"
 libbpf-sys = "=1.7.0"
 simplelog = "0.12"

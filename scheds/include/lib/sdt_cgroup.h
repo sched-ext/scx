@@ -12,5 +12,6 @@ void __arena *scx_cgrp_data(struct cgroup *cgrp);
 int scx_cgrp_init(__u64 data_size);
 void __arena *scx_cgrp_alloc(struct cgroup *cgrp);
 void scx_cgrp_free(struct cgroup *cgrp);
+void scx_cgrp_free_rcu(struct cgroup *cgrp);
 
 #endif	/* __BPF__ */

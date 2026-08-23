@@ -15,5 +15,6 @@ void __arena *scx_task_data(struct task_struct *p);
 int scx_task_init(__u64 data_size);
 void __arena *scx_task_alloc(struct task_struct *p);
 void scx_task_free(struct task_struct *p);
+void scx_task_free_rcu(struct task_struct *p);
 
 #endif /* __BPF__ */

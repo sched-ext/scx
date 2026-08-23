@@ -259,11 +259,12 @@ impl<'a> ArenaLib<'a> {
         Ok(Self { task_size, obj })
     }
 
-    /// Set up the BPF arena library state.
+    /// Set up the BPF arena library state and, when the object carries the
+    /// scx_urcu doorbell, spawn the detached reclaim daemon.
     pub fn setup(&self) -> Result<()> {
         self.setup_arena()?;
         self.setup_topology()?;
 
-        Ok(())
+        crate::urcu_spawn(self.obj)
     }
 }

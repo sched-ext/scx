@@ -49,10 +49,12 @@ struct sdt_desc {
 };
 
 /*
- * Leaf node containing per-task data.
+ * Leaf node containing per-task data. urcu_link chains deferred frees so that
+ * the payload stays intact for readers until reclaim.
  */
 struct sdt_data {
 	union sdt_id			tid;
+	__u64				urcu_link;
 	__u64				payload[];
 };
 

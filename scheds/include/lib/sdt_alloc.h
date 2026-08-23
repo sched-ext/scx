@@ -44,6 +44,18 @@ struct scx_stk {
 	scx_stk_seg_t *reserve;
 };
 
+/*
+ * Poor man's userspace-driven RCU for sdt allocations. Freed nodes accumulate
+ * on the active side while the draining side sits out a grace period which
+ * userspace provides, membarrier(MEMBARRIER_CMD_GLOBAL) being
+ * synchronize_rcu(), before its nodes return to the allocator. Stands in until
+ * BPF grows bpf_call_rcu().
+ */
+struct scx_urcu {
+	__u64		head[2];	/* struct sdt_data ptrs linked via urcu_link */
+	__u32		active;
+};
+
 #ifdef __BPF__
 
 void scx_arena_subprog_init(void);
@@ -53,6 +65,10 @@ u64 scx_alloc_internal(struct scx_allocator *alloc);
 int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 
 #define scx_alloc(alloc) ((struct sdt_data __arena *)scx_alloc_internal((alloc)))
+
+int scx_urcu_pending(struct scx_urcu *urcu);
+void scx_urcu_free(struct scx_urcu *urcu, struct sdt_data __arena *data);
+int scx_urcu_reclaim(struct scx_urcu *urcu, struct scx_allocator *alloc);
 
 u64 scx_static_alloc_internal(size_t bytes, size_t alignment);
 #define scx_static_alloc(bytes, alignment) ((void __arena *)scx_static_alloc_internal((bytes), (alignment)))

@@ -101,3 +101,43 @@ void scx_task_free(struct task_struct *p)
 	scx_alloc_free_idx(&scx_task_allocator, mval->tid.idx);
 	bpf_task_storage_delete(&scx_task_map, p);
 }
+
+static struct scx_urcu scx_task_urcu;
+
+/*
+ * The deferred counterpart of scx_task_free(): queue @p's allocation, if any,
+ * for freeing after a grace period, currently provided by the scx_urcu
+ * machinery in lib/sdt_alloc.bpf.c. For free path hooks: absence is not an
+ * error and repeated calls are no-ops, the first caller claims the allocation.
+ */
+__hidden
+void scx_task_free_rcu(struct task_struct *p)
+{
+	struct scx_task_map_val *mval;
+	struct sdt_data __arena *data;
+
+	scx_arena_subprog_init();
+
+	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
+	if (unlikely(!mval))
+		return;
+
+	data = (struct sdt_data __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
+	if (unlikely(!data))
+		return;
+
+	scx_urcu_free(&scx_task_urcu, data);
+}
+
+/* scx_urcu driver programs, discovered by name and run by the userspace side */
+SEC("syscall")
+int scx_urcu_task_pending(void *ctx)
+{
+	return scx_urcu_pending(&scx_task_urcu);
+}
+
+SEC("syscall")
+int scx_urcu_task_reclaim(void *ctx)
+{
+	return scx_urcu_reclaim(&scx_task_urcu, &scx_task_allocator);
+}
