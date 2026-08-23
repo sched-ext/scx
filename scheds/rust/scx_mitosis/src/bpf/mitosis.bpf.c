@@ -43,6 +43,7 @@ const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u64 slice_ns;
 const volatile u64 root_cgid = 1;
 const volatile bool exiting_task_workaround_enabled = true;
+// When true, we didn't detect the cpu controller on scheduler startup.
 const volatile bool cpu_controller_disabled = false;
 const volatile bool reject_multicpu_pinning = false;
 const volatile bool enable_borrowing = false;

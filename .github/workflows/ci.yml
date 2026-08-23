@@ -259,7 +259,9 @@ jobs:
               --affinity 1 --affinity-delay 1 --affinity-pin &
             stress_pid=$!
             if [ "$sched" = "mitosis" ]; then
+              echo +cpu | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null || true
               sudo mkdir -p /sys/fs/cgroup/ci.slice
+              echo +cpu | sudo tee /sys/fs/cgroup/ci.slice/cgroup.subtree_control >/dev/null
             fi
             sudo timeout --foreground --preserve-status 45 \
               target/ci/scx_${sched} ${flags[$sched]:-"-v"}

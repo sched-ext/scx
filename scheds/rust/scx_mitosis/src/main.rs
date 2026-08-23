@@ -12,7 +12,7 @@ mod stats;
 mod topology;
 mod undefok_flags;
 
-use cell_manager::{CellManager, CpuAssignment, CpuRecipient};
+use cell_manager::{CellManager, CpuAssignment, CpuRecipient, CGROUP_ROOT};
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -20,6 +20,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
@@ -31,6 +32,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use cgroupfs::CgroupReader;
 use clap::Parser;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
@@ -137,8 +139,8 @@ struct Opts {
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     exiting_task_workaround: bool,
 
-    /// Disable SCX cgroup callbacks (for when CPU cgroup controller is disabled).
-    /// Uses tracepoints and cgroup iteration instead.
+    /// Enable fallback cgroup tracking when CPU controller is disabled.
+    /// Uses tracepoints and cgroup iteration if cpu controller is not enabled.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     cpu_controller_disabled: bool,
 
@@ -362,6 +364,15 @@ impl Display for DistributionStats {
     }
 }
 
+fn cgroup_cpu_controller_enabled(parent_cgroup: &str) -> Result<bool> {
+    let cgroup = CgroupReader::new_with_relative_path(
+        PathBuf::from(CGROUP_ROOT),
+        PathBuf::from(parent_cgroup),
+    )?;
+    let enabled_controllers = cgroup.read_cgroup_subtree_control()?;
+    Ok(enabled_controllers.contains("cpu"))
+}
+
 impl<'a> Scheduler<'a> {
     fn managed_cell_parent<'b>(opts: &'b Opts) -> Result<&'b str> {
         opts.cell_parent_cgroup
@@ -379,6 +390,7 @@ impl<'a> Scheduler<'a> {
         let topology = Topology::with_args(&opts.topology).context("detecting system topology")?;
 
         let nr_llc = topology.all_llcs.len().max(1);
+        let parent_cgroup = Self::managed_cell_parent(opts)?;
 
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
@@ -404,8 +416,22 @@ impl<'a> Scheduler<'a> {
 
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
-        rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
+
+        let cgroup_cpu_controller_enabled = cgroup_cpu_controller_enabled(parent_cgroup)
+            .context("cgroup_cpu_controller_enabled")?;
+        if !cgroup_cpu_controller_enabled && !opts.cpu_controller_disabled {
+            bail!(
+                "cpu controller is not enabled for {}. use --cpu-controller-disabled to enable fallback.",
+                parent_cgroup,
+            );
+        }
+        let cpu_controller_disabled =
+            opts.cpu_controller_disabled && !cgroup_cpu_controller_enabled;
+        if cpu_controller_disabled {
+            info!("cpu_controller_disabled=true");
+        }
+        rodata.cpu_controller_disabled = cpu_controller_disabled;
 
         // Slice shrinking configuration
         if opts.slice_shrink_min_us >= opts.slice_shrink_max_us {
@@ -451,7 +477,6 @@ impl<'a> Scheduler<'a> {
             .launch()
             .context("launching stats server")?;
 
-        let parent_cgroup = Self::managed_cell_parent(opts)?;
         let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
         let cell_manager = CellManager::new(
             parent_cgroup,

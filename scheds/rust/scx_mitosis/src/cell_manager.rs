@@ -21,10 +21,12 @@ use inotify::{Inotify, WatchMask};
 use scx_utils::Cpumask;
 use tracing::{debug, info};
 
+pub(crate) const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
 /// Strip the cgroup mount prefix from a stored cell path, yielding the
 /// root-relative cgroup path (e.g. `/sys/fs/cgroup/a/b` -> `/a/b`).
 fn cgroup_root_relative(path: &Path) -> String {
-    path.strip_prefix("/sys/fs/cgroup")
+    path.strip_prefix(CGROUP_ROOT)
         .map(|rel| format!("/{}", rel.to_string_lossy()))
         .unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
@@ -802,7 +804,7 @@ impl CellManager {
         cell0_min_cpus: usize,
         cpu_to_llc: HashMap<usize, usize>,
     ) -> Result<Self> {
-        let path = PathBuf::from(format!("/sys/fs/cgroup{}", cell_parent_path));
+        let path = PathBuf::from(format!("{}{}", CGROUP_ROOT, cell_parent_path));
         if !path.exists() {
             bail!("Cell parent cgroup path does not exist: {}", path.display());
         }
