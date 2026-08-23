@@ -10,6 +10,7 @@
 
 #ifdef __BPF__
 
+void __arena *__scx_task_data(struct task_struct *p);
 void __arena *scx_task_data(struct task_struct *p);
 int scx_task_init(__u64 data_size);
 void __arena *scx_task_alloc(struct task_struct *p);

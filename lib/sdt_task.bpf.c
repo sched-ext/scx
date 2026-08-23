@@ -61,22 +61,28 @@ int scx_task_init(__u64 data_size)
 }
 
 __hidden
-void __arena *scx_task_data(struct task_struct *p)
+void __arena *__scx_task_data(struct task_struct *p)
 {
-	struct sdt_data __arena *data;
 	struct scx_task_map_val *mval;
 
 	scx_arena_subprog_init();
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
-	if (!mval) {
-		scx_err_loc("bpf_task_storage_get failed");
+	if (unlikely(!mval || !mval->data))
 		return NULL;
-	}
 
-	data = mval->data;
+	return (void __arena *)mval->data->payload;
+}
 
-	return (void __arena *)data->payload;
+__hidden
+void __arena *scx_task_data(struct task_struct *p)
+{
+	void __arena *data = __scx_task_data(p);
+
+	if (unlikely(!data))
+		scx_err_loc("no task data");
+
+	return data;
 }
 
 __hidden
