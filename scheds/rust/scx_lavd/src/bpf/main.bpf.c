@@ -939,6 +939,27 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 * cpdom DSQ, never the local DSQ it was just drained from.
 		 */
 		cpu = taskc->suggested_cpu_id;
+		/*
+		 * suggested_cpu_id may be stale. It was set by a previous
+		 * ops.select_cpu()/ops.enqueue(), but a REENQ arrives at
+		 * ops.enqueue() directly without going through select_task_rq(),
+		 * so the cache is only refreshed by a later non-REENQ enqueue.
+		 * Meanwhile, cpus_ptr can change underneath:
+		 *   - migrate_disable() narrows cpus_ptr to the CPU the
+		 *     task is currently running on, which may differ from
+		 *     the cached one
+		 *   - sched_setaffinity() or cgroup migration changes the
+		 *     task's affinity mask; if task_cpu is still allowed,
+		 *     the task is not re-enqueued, leaving the cache stale
+		 *   - CPU hotplug removes an offline CPU from cpus_ptr
+		 * Clamp to cpus_ptr to prevent routing the task to the
+		 * per-CPU DSQ of a CPU that cannot run it.
+		 */
+		if (cpu < 0 || cpu >= nr_cpu_ids ||
+		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+			cpu = bpf_cpumask_first(p->cpus_ptr);
+			taskc->suggested_cpu_id = cpu;
+		}
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
