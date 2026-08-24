@@ -133,7 +133,7 @@ volatile u64 nr_kthread_dispatches, nr_direct_dispatches, nr_shared_dispatches,
 	nr_idle_global_misses, nr_waker_cpu_biases, nr_keep_running_reuses,
 	nr_keep_running_queue_empty, nr_keep_running_smt_blocked,
 	nr_keep_running_queued_work, nr_dispatch_cpu_dsq_consumes,
-	nr_dispatch_node_dsq_consumes, nr_cpu_release_reenqueue;
+	nr_dispatch_node_dsq_consumes;
 
 /*
  * Amount of currently running tasks.
@@ -892,7 +892,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * locking pressure on the per-CPU and per-node DSQs.
 	 */
 	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu),
+				   enq_flags | (timely_enabled ? SCX_ENQ_IMMED : 0));
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -903,7 +904,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * per-node DSQs.
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu),
+				   enq_flags | (timely_enabled ? SCX_ENQ_IMMED : 0));
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -923,7 +925,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_pcpu_task(p)) {
 		if (local_pcpu)
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu),
+					   enq_flags | (timely_enabled ? SCX_ENQ_IMMED : 0));
 		else
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
 						 task_slice(p, prev_cpu), task_dl(p, prev_cpu, tctx), enq_flags);
@@ -1455,19 +1458,10 @@ void BPF_STRUCT_OPS(bpfland_exit, struct scx_exit_info *ei)
 	UEI_RECORD(uei, ei);
 }
 
-void BPF_STRUCT_OPS(bpfland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
-{
-	if (timely_enabled) {
-		scx_bpf_reenqueue_local();
-		__sync_fetch_and_add(&nr_cpu_release_reenqueue, 1);
-	}
-}
-
 SCX_OPS_DEFINE(bpfland_ops,
 	       .select_cpu		= (void *)bpfland_select_cpu,
 	       .enqueue			= (void *)bpfland_enqueue,
 	       .dispatch		= (void *)bpfland_dispatch,
-	       .cpu_release		= (void *)bpfland_cpu_release,
 	       .running			= (void *)bpfland_running,
 	       .stopping		= (void *)bpfland_stopping,
 	       .runnable		= (void *)bpfland_runnable,
