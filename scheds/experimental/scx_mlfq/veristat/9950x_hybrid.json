@@ -1,0 +1,53 @@
+[{
+        "value": {
+            ".rodata": [{
+                    "mlfq_q1_slice_ns": 1000000
+                },{
+                    "mlfq_q2_slice_ns": 2000000
+                },{
+                    "mlfq_q3_slice_ns": 4000000
+                },{
+                    "mlfq_budget_max_ns": 6000000
+                },{
+                    "mlfq_alpha": 3072
+                },{
+                    "mlfq_t_l_ns": 250000
+                },{
+                    "mlfq_t_h_ns": 2000000
+                },{
+                    "mlfq_ema_half_life_ns": 24000000
+                },{
+                    "mlfq_aging_period_ns": 1000000000
+                },{
+                    "mlfq_short_sleep_ns": 32000000
+                },{
+                    "mlfq_short_sleep_rate_limit_ns": 2000000
+                },{
+                    "mlfq_hysteresis_sleep_ns": 4000000
+                },{
+                    "mlfq_long_sleep_ns": 120000000
+                },{
+                    "mlfq_q1_quota": 4
+                },{
+                    "mlfq_q2_quota": 8
+                },{
+                    "mlfq_dispatch_max_batch": 32
+                },{
+                    "mlfq_primary_all": false
+                },{
+                    "mlfq_nr_llcs": 8
+                },{
+                    "__SCX_ENQ_WAKEUP": 1
+                },{
+                    "__SCX_KICK_PREEMPT": 2
+                },{
+                    "__SCX_DSQ_LOCAL": 9223372036854775810
+                },{
+                    "__SCX_DSQ_LOCAL_ON": 13835058055282163712
+                },{
+                    "uei_dump_len": 32768
+                }
+            ]
+        }
+    }
+]

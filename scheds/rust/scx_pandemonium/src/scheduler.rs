@@ -57,12 +57,21 @@ pub struct PandemoniumStats {
     // SPILL-KICK PREEMPTS (select_cpu seat redirected off the idle pick onto a
     // busy spill CPU; intf.h nr_spill_kick_preempt). Confirms the tick-floor fix.
     pub nr_spill_kick_preempt: u64,
+    // PER-CPU RUNNABLE DEPTH (intf.h rq_depth_sum / rq_depth_samples).
+    // Monotonic accumulators sampled at tick rate; difference BOTH across an
+    // interval and divide for the mean depth on that CPU, exactly as
+    // wake_lat_sum/wake_lat_samples are already consumed. Read per-CPU via
+    // read_stats_percpu() -- folding these to a total discards the spatial
+    // dimension that is the entire reason they exist.
+    pub rq_depth_sum: u64,
+    pub rq_depth_samples: u64,
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
-// 200 (base) + 8*8 (nr_cross_domain) + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt) = 280.
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 280);
-const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 80);
+// 200 (base) + 8*8 (nr_cross_domain) + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt)
+// + 8 (rq_depth_sum) + 8 (rq_depth_samples) = 296.
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 296);
+const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 88);
 
 // MAX_AFFINITY_CANDIDATES IS DEFINED IN intf.h. THE RUST MIRROR IN
 // bpf_intf.rs MUST KEEP THE SAME VALUE; IF THE TWO SIDES DRIFT, THE
@@ -151,14 +160,6 @@ impl<'a> Scheduler<'a> {
             let cache_pin = "/sys/fs/bpf/pandemonium/cache_domain";
             std::fs::remove_file(cache_pin).ok();
             skel.maps.cache_domain.pin(cache_pin).ok();
-
-            let observe_pin = "/sys/fs/bpf/pandemonium/task_class_observe";
-            std::fs::remove_file(observe_pin).ok();
-            skel.maps.task_class_observe.pin(observe_pin).ok();
-
-            let init_pin = "/sys/fs/bpf/pandemonium/task_class_init";
-            std::fs::remove_file(init_pin).ok();
-            skel.maps.task_class_init.pin(init_pin).ok();
         } else {
             log_warn!("BPFFS NOT AVAILABLE: map pinning skipped (scheduler still functional)");
         }
@@ -170,11 +171,20 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    // SUM PER-CPU STATS INTO A SINGLE TOTAL
-    pub fn read_stats(&self) -> PandemoniumStats {
+    // PER-CPU STATS, UNCOLLAPSED. The BPF side keeps one PandemoniumStats
+    // per CPU and lookup_percpu hands the whole array across the boundary --
+    // the syscall, the copy and the cache traffic are paid whether or not the
+    // structure survives. It did not: every field was summed into one scalar
+    // set inside the loop that first touched it, which destroyed the spatial
+    // dimension at the boundary and left the adaptive layer steering a machine
+    // it could only see one number of. Keeping the array costs zero additional
+    // bytes; it is the absence of a discard, not a new transfer.
+    //
+    // read_stats() below folds this into the same total it always returned, so
+    // the aggregate is DERIVED from the array rather than computed beside it
+    // and the two cannot drift.
+    pub fn read_stats_percpu(&self) -> Vec<PandemoniumStats> {
         let key = 0u32.to_ne_bytes();
-        let mut total = PandemoniumStats::default();
-
         let percpu_vals = match self
             .skel
             .maps
@@ -182,14 +192,30 @@ impl<'a> Scheduler<'a> {
             .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
         {
             Ok(Some(v)) => v,
-            _ => return total,
+            _ => return Vec::new(),
         };
-
+        let mut out = Vec::with_capacity(percpu_vals.len());
         for cpu_val in &percpu_vals {
             if cpu_val.len() >= std::mem::size_of::<PandemoniumStats>() {
-                let stats: PandemoniumStats = unsafe {
+                out.push(unsafe {
                     std::ptr::read_unaligned(cpu_val.as_ptr() as *const PandemoniumStats)
-                };
+                });
+            }
+        }
+        out
+    }
+
+    // THE REDUCE. Separated from the read so the fold is testable without a
+    // live BPF map, and so every not-a-sum field is stated in one place:
+    // batch_sojourn_ns and longrun_mode_active take a MAX across CPUs (a
+    // system's worst sojourn is not the sum of its CPUs' sojourns), and
+    // nr_cross_domain is an 8-element per-path array summed elementwise.
+    // Returning the raw vec without honoring these would silently change
+    // behavior for every existing consumer.
+    pub fn fold_stats(percpu: &[PandemoniumStats]) -> PandemoniumStats {
+        let mut total = PandemoniumStats::default();
+        for stats in percpu {
+            {
                 total.nr_dispatches += stats.nr_dispatches;
                 total.nr_idle_hits += stats.nr_idle_hits;
                 total.nr_shared += stats.nr_shared;
@@ -224,25 +250,82 @@ impl<'a> Scheduler<'a> {
                 }
                 total.nr_osc_park += stats.nr_osc_park;
                 total.nr_spill_kick_preempt += stats.nr_spill_kick_preempt;
+                // Folded so the aggregate stays complete, but the SUMMED value
+                // is close to meaningless -- it is the total depth seen across
+                // every CPU. The per-CPU pair is the point; read it from
+                // read_stats_percpu() and never from here.
+                total.rq_depth_sum += stats.rq_depth_sum;
+                total.rq_depth_samples += stats.rq_depth_samples;
             }
         }
 
         total
     }
 
-    // WRITE TUNING KNOBS TO BPF MAP -- CALLED BY MONITOR THREAD
-    pub fn write_tuning_knobs(&self, knobs: &TuningKnobs) -> Result<()> {
-        let key = 0u32.to_ne_bytes();
-        let value = unsafe {
-            std::slice::from_raw_parts(
-                knobs as *const TuningKnobs as *const u8,
-                std::mem::size_of::<TuningKnobs>(),
-            )
+    // THE AGGREGATE VIEW, UNCHANGED FOR EVERY EXISTING CALLER. One syscall,
+    // one fold, byte-for-byte the same total this returned before the array
+    // was preserved.
+    pub fn read_stats(&self) -> PandemoniumStats {
+        Self::fold_stats(&self.read_stats_percpu())
+    }
+
+    // FIELDS THAT MUST BE IDENTICAL ON EVERY CPU.
+    //
+    // tuning_knobs_map is per-CPU, which makes divergence expressible -- and
+    // for these six it would be a defect rather than a feature. tau and
+    // codel_eq are topology-owned and drive tau-scaling, which every CPU
+    // re-derives from the same constant; the two lat_cri thresholds and
+    // affinity_mode decide how a TASK is classified and placed, so a task would
+    // change class depending on which CPU last looked at it; spill_temp is
+    // computed from system-wide permutation entropy and has no per-CPU meaning.
+    //
+    // Broadcast rather than trusted: the writer overwrites these in every slot
+    // from slot 0, so a caller cannot diverge them by omission.
+    fn broadcast_global_fields(per_cpu: &mut [TuningKnobs]) {
+        let (first, rest) = match per_cpu.split_first_mut() {
+            Some(v) => v,
+            None => return,
         };
+        for k in rest.iter_mut() {
+            k.topology_tau_ns = first.topology_tau_ns;
+            k.codel_eq_ns = first.codel_eq_ns;
+            k.spill_temp_q16 = first.spill_temp_q16;
+            k.affinity_mode = first.affinity_mode;
+            k.lat_cri_thresh_high = first.lat_cri_thresh_high;
+            k.lat_cri_thresh_low = first.lat_cri_thresh_low;
+        }
+    }
+
+    // WRITE ONE KNOB SET TO EVERY CPU -- CALLED BY MONITOR THREAD.
+    // Behaviorally identical to the pre-per-CPU map: every slot holds the same
+    // struct, so no CPU can observe a value another CPU does not.
+    pub fn write_tuning_knobs(&self, knobs: &TuningKnobs) -> Result<()> {
+        let n = libbpf_rs::num_possible_cpus()?;
+        self.write_tuning_knobs_percpu(&vec![*knobs; n])
+    }
+
+    // WRITE PER-CPU KNOBS. The per-CPU fields (slice, preempt window, batch and
+    // burst ceilings, the CoDel rescue threshold) may differ per slot; the six
+    // global fields are broadcast from slot 0 regardless of what the caller put
+    // in the others.
+    pub fn write_tuning_knobs_percpu(&self, per_cpu: &[TuningKnobs]) -> Result<()> {
+        let n = libbpf_rs::num_possible_cpus()?;
+        let mut vals: Vec<TuningKnobs> = (0..n)
+            .map(|i| per_cpu.get(i).copied().unwrap_or_else(|| per_cpu[0]))
+            .collect();
+        Self::broadcast_global_fields(&mut vals);
+        let key = 0u32.to_ne_bytes();
+        let sz = std::mem::size_of::<TuningKnobs>();
+        let bytes: Vec<Vec<u8>> = vals
+            .iter()
+            .map(|k| unsafe {
+                std::slice::from_raw_parts(k as *const TuningKnobs as *const u8, sz).to_vec()
+            })
+            .collect();
         self.skel
             .maps
             .tuning_knobs_map
-            .update(&key, value, libbpf_rs::MapFlags::ANY)?;
+            .update_percpu(&key, &bytes, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
 
@@ -259,6 +342,14 @@ impl<'a> Scheduler<'a> {
     }
 
     // READ BPF OSCILLATOR STATE FROM BSS/DATA SECTIONS.
+    //
+    // Unused since MWU was removed, and kept deliberately. MWU read this to
+    // avoid double-correcting: two controllers both adapting on
+    // global_rescue_count would fight. That hazard is GONE -- the BPF
+    // oscillator is now the only thing adapting on rescue count, and the graph
+    // derives from depth, shape and persistence instead. The accessor stays
+    // because the live-R_eff work reads the same maps.
+    #[allow(dead_code)]
     // MWU GATES ITS RESCUE-DRIVEN PATHWAYS ON THIS SO IT DOESN'T
     // DOUBLE-CORRECT WHEN THE BPF DAMPED OSCILLATOR HAS ALREADY MOVED.
     pub fn read_oscillator_state(&self) -> OscillatorState {
@@ -281,20 +372,38 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    // READ CURRENT TUNING KNOBS FROM BPF MAP
-    pub fn read_tuning_knobs(&self) -> TuningKnobs {
+    // READ PER-CPU TUNING KNOBS. One entry per CPU; the six global fields are
+    // identical across slots by construction (broadcast_global_fields).
+    pub fn read_tuning_knobs_percpu(&self) -> Vec<TuningKnobs> {
         let key = 0u32.to_ne_bytes();
-        match self
+        let vals = match self
             .skel
             .maps
             .tuning_knobs_map
-            .lookup(&key, libbpf_rs::MapFlags::ANY)
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
         {
-            Ok(Some(v)) if v.len() >= std::mem::size_of::<TuningKnobs>() => unsafe {
-                std::ptr::read_unaligned(v.as_ptr() as *const TuningKnobs)
-            },
-            _ => TuningKnobs::default(),
-        }
+            Ok(Some(v)) => v,
+            _ => return Vec::new(),
+        };
+        let sz = std::mem::size_of::<TuningKnobs>();
+        vals.iter()
+            .filter(|v| v.len() >= sz)
+            .map(|v| unsafe { std::ptr::read_unaligned(v.as_ptr() as *const TuningKnobs) })
+            .collect()
+    }
+
+    // READ CURRENT TUNING KNOBS -- CPU 0'S SLOT.
+    //
+    // Every existing caller wants either a global field (tau, codel_eq) or the
+    // value it just wrote uniformly, and both are identical on every CPU, so
+    // slot 0 is the same answer this returned before the map was per-CPU. A
+    // caller that needs a PER-CPU knob must use read_tuning_knobs_percpu() --
+    // this one cannot represent divergence and must not be used to look for it.
+    pub fn read_tuning_knobs(&self) -> TuningKnobs {
+        self.read_tuning_knobs_percpu()
+            .first()
+            .copied()
+            .unwrap_or_default()
     }
 
     // READ WAKEUP LATENCY HISTOGRAM: 3 TIERS x 12 BUCKETS
@@ -420,6 +529,21 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    // WRITE ONE spill_depth SLOT: THE PRE-FOLDED PHI PLACEMENT THRESHOLD (DSQ
+    // DEPTH) FOR THE PEER AT affinity_rank[cpu][slot]. THE SPILL HELPER READS IT
+    // AS THE PER-PEER DEPTH CAP -- THE PLACEMENT MIRROR OF reff_value's STEAL
+    // DELAY.
+    pub fn write_spill_depth(&self, cpu: u32, slot: u32, value: u32) -> Result<()> {
+        let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
+        let key = (cpu * stride + slot).to_ne_bytes();
+        let val = value.to_ne_bytes();
+        self.skel
+            .maps
+            .spill_depth
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+
     // POPULATE EMERGENT-DOMAIN CROSSING-PRICE MAP (PAIRS 1:1 WITH affinity_rank).
     // domain_phi[cpu * MAX_AFFINITY_CANDIDATES + slot] = (phi * 1e6) OF THE CUT
     // SEPARATING cpu FROM THAT RANKED PEER. (u32)-1 = SAME LEAF / UNUSED SLOT.
@@ -437,6 +561,7 @@ impl<'a> Scheduler<'a> {
     // READ ONE reff_value SLOT (ns PHI HOLD TO THAT RANKED PEER). RETURNS 0 ON
     // MISS OR THE (u32)-1 UNUSED-SLOT SENTINEL. USED BY THE ADAPTIVE LOOP TO
     // LEARN THE NEAREST-PEER HOLD WARM-STAY PRICES IN (SLOT 0 = CHEAPEST PEER).
+    #[allow(dead_code)]
     pub fn read_reff_value(&self, cpu: u32, slot: u32) -> u32 {
         let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
         let key = (cpu * stride + slot).to_ne_bytes();
@@ -502,16 +627,158 @@ impl Drop for Scheduler<'_> {
             .maps
             .cache_domain
             .unpin("/sys/fs/bpf/pandemonium/cache_domain");
-        let _ = self
-            .skel
-            .maps
-            .task_class_observe
-            .unpin("/sys/fs/bpf/pandemonium/task_class_observe");
-        let _ = self
-            .skel
-            .maps
-            .task_class_init
-            .unpin("/sys/fs/bpf/pandemonium/task_class_init");
         let _ = std::fs::remove_dir("/sys/fs/bpf/pandemonium");
+    }
+}
+
+// THE FOLD'S NOT-A-SUM FIELDS
+//
+// read_stats() returns a total derived from the per-CPU array. Three fields
+// do not fold by addition, and getting any of them wrong changes numbers that
+// every consumer already trusts, silently and in the safe-looking direction:
+// a summed sojourn reads HIGHER than reality, a summed longrun flag reads as
+// a count rather than a boolean, and an elementwise array folded as a scalar
+// loses per-path attribution entirely. This pins all three against the shape
+// the code had before the array was preserved.
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    fn cpu(dispatches: u64, sojourn: u64, longrun: u64, xdom: [u64; 8]) -> PandemoniumStats {
+        let mut s = PandemoniumStats::default();
+        s.nr_dispatches = dispatches;
+        s.batch_sojourn_ns = sojourn;
+        s.longrun_mode_active = longrun;
+        s.nr_cross_domain = xdom;
+        s
+    }
+
+    #[test]
+    fn counters_sum_across_cpus() {
+        let cpus = [
+            cpu(10, 0, 0, [0; 8]),
+            cpu(7, 0, 0, [0; 8]),
+            cpu(3, 0, 0, [0; 8]),
+        ];
+        assert_eq!(Scheduler::fold_stats(&cpus).nr_dispatches, 20);
+    }
+
+    #[test]
+    fn sojourn_takes_the_max_not_the_sum() {
+        // A system's worst batch sojourn is the worst any CPU saw, never the
+        // sum of what all of them saw. Summing here would report 900ms where
+        // the machine's actual worst wait was 500.
+        let cpus = [
+            cpu(0, 100, 0, [0; 8]),
+            cpu(0, 500, 0, [0; 8]),
+            cpu(0, 300, 0, [0; 8]),
+        ];
+        assert_eq!(Scheduler::fold_stats(&cpus).batch_sojourn_ns, 500);
+    }
+
+    #[test]
+    fn longrun_flag_takes_the_max_not_the_sum() {
+        // It is a mode flag. Summed across 20 CPUs it becomes a count and any
+        // consumer testing `> 0` still passes, which is exactly why this would
+        // survive review unnoticed.
+        let cpus = [
+            cpu(0, 0, 1, [0; 8]),
+            cpu(0, 0, 1, [0; 8]),
+            cpu(0, 0, 0, [0; 8]),
+        ];
+        assert_eq!(Scheduler::fold_stats(&cpus).longrun_mode_active, 1);
+    }
+
+    #[test]
+    fn cross_domain_folds_elementwise_per_path() {
+        let mut a = [0u64; 8];
+        let mut b = [0u64; 8];
+        a[0] = 5;
+        a[3] = 2;
+        b[0] = 1;
+        b[7] = 9;
+        let got = Scheduler::fold_stats(&[cpu(0, 0, 0, a), cpu(0, 0, 0, b)]).nr_cross_domain;
+        assert_eq!(got[0], 6, "path 0 must sum across CPUs");
+        assert_eq!(got[3], 2);
+        assert_eq!(got[7], 9);
+        assert_eq!(got[1], 0, "an untouched path stays zero");
+    }
+
+    #[test]
+    fn empty_array_folds_to_default() {
+        // A failed lookup returns an empty vec; the fold of nothing must be
+        // the same zeroed struct the old early-return produced.
+        let got = Scheduler::fold_stats(&[]);
+        assert_eq!(got.nr_dispatches, 0);
+        assert_eq!(got.batch_sojourn_ns, 0);
+    }
+}
+
+// GLOBAL-FIELD COHERENCE ACROSS THE PER-CPU KNOB MAP
+//
+// Making the knob map per-CPU makes divergence EXPRESSIBLE, and for six of the
+// eleven fields divergence is a defect rather than a feature: tau and codel_eq
+// are topology-owned and every CPU re-derives its tau-scaled statics from them,
+// while affinity_mode and the two lat_cri thresholds decide how a TASK is
+// classified, so a task would change class depending on which CPU last looked
+// at it. These pin the broadcast so a caller cannot diverge them by omission.
+#[cfg(test)]
+mod knob_broadcast_tests {
+    use super::*;
+
+    fn knobs(slice: u64, tau: u64, lat_hi: u64) -> TuningKnobs {
+        let mut k = TuningKnobs::default();
+        k.slice_ns = slice;
+        k.topology_tau_ns = tau;
+        k.lat_cri_thresh_high = lat_hi;
+        k
+    }
+
+    #[test]
+    fn global_fields_are_broadcast_from_slot_zero() {
+        let mut v = vec![
+            knobs(100, 7_000, 32),
+            knobs(200, 9_999, 64),
+            knobs(300, 1, 8),
+        ];
+        Scheduler::broadcast_global_fields(&mut v);
+        for (i, k) in v.iter().enumerate() {
+            assert_eq!(k.topology_tau_ns, 7_000, "slot {i} diverged on tau");
+            assert_eq!(k.lat_cri_thresh_high, 32, "slot {i} diverged on classifier");
+        }
+    }
+
+    #[test]
+    fn per_cpu_fields_survive_the_broadcast() {
+        // The whole point: slices may differ per CPU. A broadcast that
+        // flattened them would silently restore the global-only behavior this
+        // change exists to remove.
+        let mut v = vec![knobs(100, 7_000, 32), knobs(200, 0, 0), knobs(300, 0, 0)];
+        Scheduler::broadcast_global_fields(&mut v);
+        assert_eq!(v[0].slice_ns, 100);
+        assert_eq!(v[1].slice_ns, 200);
+        assert_eq!(v[2].slice_ns, 300);
+    }
+
+    #[test]
+    fn uniform_input_stays_uniform() {
+        // The acceptance criterion for the whole change: identical values in
+        // every slot must be indistinguishable from the pre-per-CPU map.
+        let mut v = vec![knobs(100, 7_000, 32); 8];
+        let before = v.clone();
+        Scheduler::broadcast_global_fields(&mut v);
+        for (a, b) in before.iter().zip(v.iter()) {
+            assert_eq!(a.slice_ns, b.slice_ns);
+            assert_eq!(a.topology_tau_ns, b.topology_tau_ns);
+        }
+    }
+
+    #[test]
+    fn empty_and_single_slot_are_no_ops() {
+        let mut none: Vec<TuningKnobs> = Vec::new();
+        Scheduler::broadcast_global_fields(&mut none);
+        let mut one = vec![knobs(100, 7_000, 32)];
+        Scheduler::broadcast_global_fields(&mut one);
+        assert_eq!(one[0].slice_ns, 100);
     }
 }
