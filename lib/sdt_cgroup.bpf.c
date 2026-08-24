@@ -130,3 +130,42 @@ void scx_cgrp_free(struct cgroup *cgrp)
 
 	scx_alloc_free_idx(&scx_cgrp_allocator, data->tid.idx);
 }
+
+static struct scx_urcu scx_cgrp_urcu;
+
+/*
+ * The deferred counterpart of scx_cgrp_free(): queue @cgrp's allocation, if
+ * any, for freeing after a grace period, currently provided by the scx_urcu
+ * machinery in lib/sdt_alloc.bpf.c. Same repetition rules as scx_cgrp_free().
+ */
+__hidden
+void scx_cgrp_free_rcu(struct cgroup *cgrp)
+{
+	struct sdt_data __arena *data;
+	struct scx_cgrp_map_val *mval;
+
+	scx_arena_subprog_init();
+
+	mval = bpf_cgrp_storage_get(&scx_cgrp_map, cgrp, 0, 0);
+	if (unlikely(!mval))
+		return;
+
+	data = (struct sdt_data __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
+	if (unlikely(!data))
+		return;
+
+	scx_urcu_free(&scx_cgrp_urcu, data);
+}
+
+/* scx_urcu driver programs, discovered by name and run by the userspace side */
+SEC("syscall")
+int scx_urcu_cgrp_pending(void *ctx)
+{
+	return scx_urcu_pending(&scx_cgrp_urcu);
+}
+
+SEC("syscall")
+int scx_urcu_cgrp_reclaim(void *ctx)
+{
+	return scx_urcu_reclaim(&scx_cgrp_urcu, &scx_cgrp_allocator);
+}
