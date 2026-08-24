@@ -8,7 +8,7 @@
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
 #include <lib/alloc/bpf_helpers_local.h>
-#include <lib/sdt_task.h>
+#include <lib/sdt_alloc.h>
 #include <scx/arena_userspace_interrop.bpf.h>
 
 struct scx_alloc_stack __arena *prealloc_stack;
@@ -299,13 +299,27 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 	_Static_assert(sizeof(struct sdt_chunk) <= PAGE_SIZE,
 		"chunk size must fit into a page");
 
-	ret = pool_set_size(&chunk_pool, sizeof(struct sdt_chunk), 1);
-	if (ret != 0)
-		return ret;
+	/*
+	 * chunk_pool, desc_pool and prealloc_stack are shared across allocator
+	 * instances. Set them up on the first init only: rerunning would orphan
+	 * the previous instance's remaining preallocations.
+	 */
+	if (!prealloc_stack) {
+		ret = pool_set_size(&chunk_pool, sizeof(struct sdt_chunk), 1);
+		if (ret != 0)
+			return ret;
 
-	ret = pool_set_size(&desc_pool, sizeof(struct sdt_desc), 1);
-	if (ret != 0)
-		return ret;
+		ret = pool_set_size(&desc_pool, sizeof(struct sdt_desc), 1);
+		if (ret != 0)
+			return ret;
+
+		prealloc_stack = bpf_arena_alloc_pages(&arena, NULL,
+						       div_round_up(sizeof(*prealloc_stack),
+								    PAGE_SIZE),
+						       NUMA_NO_NODE, 0);
+		if (prealloc_stack == NULL)
+			return -ENOMEM;
+	}
 
 	/* Wrap data into a descriptor and word align. */
 	data_size += sizeof(struct sdt_data);
@@ -319,10 +333,6 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 	ret = pool_set_size(&alloc->pool, data_size, min_chunk_size);
 	if (ret != 0)
 		return ret;
-
-	prealloc_stack = bpf_arena_alloc_pages(&arena, NULL, div_round_up(sizeof(*prealloc_stack), PAGE_SIZE), NUMA_NO_NODE, 0);
-	if (prealloc_stack == NULL)
-		return -ENOMEM;
 
 	/* On success, returns with the lock taken. */
 	ret = scx_alloc_attempt(prealloc_stack);
@@ -559,6 +569,15 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 
 	if (!alloc) {
 		scx_err_loc("No allocator found\n");
+		return (u64)NULL;
+	}
+
+	/*
+	 * A NULL root aliases arena page zero and silently corrupts whatever
+	 * lives there, fail loudly instead.
+	 */
+	if (unlikely(!alloc->root)) {
+		scx_bpf_error("allocator not initialized");
 		return (u64)NULL;
 	}
 
