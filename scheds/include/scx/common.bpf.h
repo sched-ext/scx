@@ -535,11 +535,11 @@ static __always_inline const struct cpumask *cast_mask(struct bpf_cpumask *mask)
  * scx_lib_init_probe, an fentry program on bpf_scx_reg() that fires during
  * the natural scheduler-attach call chain (auto-attached by scx_ops_attach!).
  *
- * Defaults to true (conservative). Over-reporting in is_migration_disabled()
+ * Defaults to false (conservative). Over-reporting in is_migration_disabled()
  * causes local-only dispatch, which is safe. Under-reporting can crash the
  * scheduler, so we err high if the probe somehow fails to run.
  */
-bool __scx_prolog_disables_migration __weak = true;
+bool __scx_prolog_disables_migration __weak = false;
 
 /*
  * scx_lib_init_probe - non-sleepable prolog probe.
