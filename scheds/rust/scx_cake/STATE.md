@@ -29,6 +29,22 @@ live WoW confirm); all hashes cited below resolve via those local backup branche
 
 ## RESUME HERE
 
+**PICKUP 2026-08-21 EOD — machine left on EEVDF, nothing attached, all
+background jobs stopped.** Code tip `60b238311` (§G38.1-repaired + §G40; §G39-B
+aborted), tip receipt `20260821T155506Z_head-5e0e8244b21a` built + attach-tested.
+Three staged actions, in graph-cut order:
+1. **R1 rotation** (needs KovaaKs being played, ~3.5 min):
+   `bash runs/rotation_r1_staged/r1_rotation.sh` — 3-arm native/G38/tip; draws
+   the tip's chain lane, scores §G38.1+§G40 (GameThread p99 128 → toward 6?).
+2. **E4a pinned chain3 split** (no game needed, ~3 min): rerun
+   `runs/causeb_chain3_20260821/ab.sh` (bug fixed) with stages pinned —
+   separates BPF-text pollution from migration-cooling; decides E4's shape.
+   Cause B front-end signature already CONFIRMED preliminary (ledger below).
+3. **E1 in-game per-thread counters** (`runs/frontend_ipc_20260821/`) — the
+   game-side confirm; optional `sudo setcap cap_sys_ptrace+ep /usr/bin/perf`
+   first for kwin tids.
+Board (live, movable): claude.ai/code/artifact/98701cdf-e541-48c5-8dfc-07109a311dbe
+
 | # | item | state | next action |
 |---|---|---|---|
 | 1 | **G35** in-handler bit from IRQ tracepoints + **G36** tick predictor | Phases A–D LIVE 2026-08-17 (D closes §G34 H3), §G36 BUILT, all gates clean; desktop movable hot-landings staircase **0.80 → 0.66 → 0.23 → 0.17%**, cpu0 timer hits **820 → 4** | captures on disk unscored: `wow-cake-g35d`, `wow-cake-g36`, `g36-desktop` in `~/Documents/Repo/scx_cake_bench/history/wake_latency/`; next action: score vs `wow-cake-g30c`. §G35/§G36 |
@@ -42,6 +58,116 @@ live WoW confirm); all hashes cited below resolve via those local backup branche
 | 9 | dead-branch deletions | pinned-wake preempt (5th zero dataset) + sibling kick (2nd) — delete-with-no-trade | **ON HOLD** until the receipts audit confirms the zero datasets (`REVIEW_INDEPENDENT_2026-08-17.md` Addendum, in git history); then delete both and run a game screen |
 | 10 | **G25** steal-ring bitmask | **LANDED**, verifier accepted, attach smoke passed 2026-08-08 | wake latency on HD2 render roles + P4 bench screen. Prediction on record: ~0.04% of a core quiet, 4.7% invalidated — **expected frame effect near zero; a null confirms the pricing** |
 | 11 | **G23** per-line IRQ-sink detection + mask avoidance | built, smoke PASSED, **endpoint unmeasured** | HD2 ABBA during ACTIVE play (P2 needs live mouse input) on `Window & Input` / `main` / `renderer` mean wake + severe-frame screen, then P4 `--blocks 2` bench screen. Receipts + steps: `docs/REVIEW_G21_G23_2026-08-02.md` §resume |
+| 12 | **G37** adaptive switch-cost floor (`cake_handoff_max_ns`) | registered 2026-08-20, §G37 | build Phase A: observe-only gap EMA, publish nothing, confirm ~1464 convergence on this host |
+| 13 | **G38** fully idle core outranks a cache-warm thread | **SCORED 2026-08-21** (live KovaaKs ABCCBA native/base/G38, 25 s slots): chain p50 19.25 → 18.42 µs (native 14.85), doubled cores 0.255 → 0.20 (native 0.04), game IPC 1.108 → 1.150 (native 1.263) — all three endpoints move the right way; ~¼ of the chain gap closed. PARTIAL WIN, KEPT | remaining doubling is `kwin_wayland` (sib-busy ~32%, untouched by G38's sites); next lever picked from the input-pipeline board. Data `runs/g38_idlecore_20260821/`. §G38 |
+| 14 | **G38.1** core preference at the raw-pick sites + serial arm | BUILT `ab57ba40a`; **guardrail FIRED**: mutex-handoff **−69.3% [−91.3, −47.3]** — the serial-arm core veto exiled handoff pairs; **veto withdrawn `bd54a03df`**. Attribution pairs 2026-08-21: today's mutex reads −9..−26% on EVERY build incl. pre-G38 `51ee88b21` (−12.5 [−18.4, −6.7]) — mode variance, not a build residual; only the veto's −69.3 stood clear | 3-arm game rotation draws the tip's chain lane. §G38.1 |
+| 15 | **G39** chain-successor handoff (construct) | Phase A census PASSED (~100× floor); **Phase B ABORTED `60b238311`** — pipe −36.8% [−42.1, −31.5], ctx +45.9% (§R.6 weld; pipe is SYNC ping-pong); mutex/schbench unaffected isolates the SYNC condition | Phase B' needs a wine-RPC vs data-stream discriminator before retry. §G39 |
+| 16 | **G40** kick the idle home (E7 find) | registered + BUILT 2026-08-21, §G40 | `cake_home_notify` `!live` remote branch now kicks tcpu; gates, attach-test, rides the same rotation |
+| 17 | **G41** wake-queue occupancy mark | BUILT `1b957daca`, screen PASSED 2026-08-21 (+48.2 vs baseline +41.3, diagnostic), §G41 | game screen: rides the next rotation (R1 already staged covers the tip once rebuilt) |
+| 18 | **G42** vtime mis-charge + missing per-CPU wall net | mechanism grounded in source, FIX BUILT (task-CPU slot indexing), repro 3× null, 2026-08-21, §G42 | SOAK: fixed cake attached through normal use with an exit watcher; wall-clock net for per-CPU queues stays open as the second half |
+| 19 | **G43** going-idle hint claim (predict-verify audit C1) | registered 2026-08-22, §G43; audit `docs/AUDIT_PREDICT_VERIFY_2026-08-22.md` | build, then on/off `--blocks 2` screen: mutex-handoff + perf-sched-pipe (weld guard) |
+| 20 | **G44** qmask answers wake-routing emptiness (audit C3) | wallclock NULL 2026-08-22; **CODE REMOVED 2026-08-23** (toggle audit) — the emptiness question belongs to the M4 consolidation program when it runs | closed |
+| 21 | **G45** event-complete idle census for the serial gate (audit C5) | BUILT `0ef821db8`; wallclock lean-positive 2026-08-22 (pipe −3.8, messaging −1.7, memcpy −0.2, all overlap); in the stack winner | sealed `--blocks 2` on the stack config; all-off vs old-tip A/A owed (callback registration cost). §G45 |
+| 22 | **G46** departing-slice cache, pid-tagged, per-CPU (audit C4 reshaped) | BUILT `61589428c`; **the campaign's one separated result**: memcpy −7.8% SEPARATED in singles, −5.4% SEPARATED in stack; pipe/messaging lean-positive | sealed `--blocks 2` (ccm-memcpy + mutex-handoff), then game screen — a stale slice is geometry, not just cost. §G46 |
+| 23 | **G47** ISR-successor kthread keeps the IRQ CPU | falsified at the KovaaKs frame gate 2026-08-23 (severe frames doubled, zero wake benefit warm); mechanism real only at deep idle; **CODE REMOVED** (toggle audit) | closed — revisit only with §G51 depth model live |
+| 24 | **G48** hint-first main placement (component audit) | **CODE REMOVED 2026-08-23** (toggle audit; counter too). History: **LOADED SCREEN FAILED 2026-08-23** (counter `29c18b379`, clean pair): hint word nonzero on 51% of wakes, claims 1.33M/3.54M attempts (37.6%/attempt, 19%/wake), net select_cpu 195→212 ns — claim-FAIL overhead (62% of attempts pay gates + failed test_and_clear + full scan) exceeds hit savings. Toggle stays off. Decision gate → census-claim (§G50 shape) with cheap-fail ordering: census bit read FIRST, gates only behind a set bit | **CLOSED 2026-08-23, all regimes measured**: idle-regime 74.1% claim rate but sel 140 vs 132 ns — the scan a hit skips is already cheap at idle; loaded +17 ns (claim-fail overhead). Mechanism verified, no cost regime exists; §R.29's push principle stands but the mailbox buys nothing. Toggle stays off |
+| 26 | **G50** census: claim ABORTED, zero-skip survives (maintainer autopsy) | **claim half ABORTED 2026-08-23, structural** — sel 179→264 ns/call; 84% attempt rate, 17.8% claims; autopsy: no winning regime (light load: scan already cheap; heavy: census empty, gate suffices; middle: contested stale bits → pay both). Gates (~75 ns) approach the scan they skip (109 ns). Walk code REMOVED; zero-skip (census==0 → skip both scans) stays under `--toggle g50`, untested — census never empty under this load | **zero-skip WINS its regime (first pass 2026-08-23)**: schbench-saturated sel 213→73 ns/call (−66%), request p99 −19% first pass DID NOT REPLICATE — BAAB mirrored: sel 200→63 ns SEALED (53/73 vs 195/205, separated), req p99 183.3 vs 172.5 ms inside slot spread 156–192 (variance-dominated, TIE). Callback win real; workload win unproven, needs overnight slot count |
+| 29 | **G51** idle-depth model (maintainer-directed) | **BUILT** behind `--toggle g51`: tp_btf/cpu_idle writes cstate into cake_irq_live; loader reads cpuidle exit latencies into rodata; consumer PENDING (census-claim ordering removed with the §G50 abort; next consumer = escape/exile pricing). **INERT ON THIS HOST — cpuidle current_driver is `none`**, degrade verified (logged, attach unaffected) | needs a cpuidle-enabled host or kernel config change (maintainer call) to measure |
+| 30 | **G52** preferred-core rank (maintainer-directed) | **BUILT** behind `--toggle g52`: loader reads acpi_cppc/highest_perf per CPU into rodata; consumer PENDING (census-claim tiebreak removed with the §G50 abort). CPPC live on this host. cpuperf_set half DEFERRED: governor `performance` pins 5.53 GHz, unmeasurable here | screens with g50 arm |
+| 31 | **M7** runqueues percpu-ksym direct reads (maintainer audit, 13th pass) | **BUILT `28a1b1839`** behind `--toggle m7`; ksym resolves + verifies (probe question answered). First pair INCONCLUSIVE: on-arm ran first and caught noise (p99 0.90 vs 0.63), deltas +8..+15 ns inside the asymmetry — expected effect below single-window sensitivity, same lesson as §M6 | composed m6+m7 mirrored ABBA (clean, 4 slots): sel −4, enq −3, disp −1 ns — coherent direction on every callback, ~1 ms/s total, below hardwire threshold. Both parked toggled off; revisit when the queryless path completes (K1 + F14) |
+| 32 | **K1** chronic-sink accounting L3→L2 (maintainer audit, 14th pass) | registered 2026-08-23 | handler-duration accumulation on the existing IRQ edge progs (stamp+subtract, owned line); event-driven window decay (no tick — roll on large stamp gap); BPF bumps cake_sink_gen on flag flip; deletes the loader poll + 1 Hz staleness. ~+20 ns/edge, screen once. K2 (fused kfuncs) + K3 (occupant facts as ops args) are PATCH-GATED options on the maintainer kernel; N1 (core DSQ-emptiness push replacing qmark) recorded, not built |
+| 27 | **M2** frame-clock trio is dead plumbing (maintainer audit) | VERIFIED 2026-08-23: cake_frame_ns/floor/slice have zero BPF readers (decl-only; §G11 comment admits it); votes still paid on display threads | decision: demote voting to loader-side telemetry or land a consumer; separate commit + wallclock screen |
+| 28 | **M6** occupant mirror — subscribe, don't query (maintainer audit) | **BUILT `9f344d8da`** behind `--toggle m6`; first mirrored ABBA: NULL on the one clean pair (select_cpu 187=187 ns, no coherence tax; slot 3 noise-contaminated) — the deref chains were warm-line cheap in the appsim regime | park pending a quiet-machine screen; handoff_yields stays on deref (needs live sum_exec) |
+| 25 | **G49** core-contended via idle-smtmask (component audit) | registered 2026-08-23; same audit | build behind toggle: smtmask bit replaces the sibling cpu_curr deref; A/A + wallclock |
+
+**TOGGLE CAMPAIGN (2026-08-22, maintainer-directed):** §G43–§G46 each sit behind a
+`const volatile` rodata toggle (`--toggle gNN=0|1`) so ONE binary serves both arms of
+every on/off wallclock pair — the verifier deletes the off arm at attach, and arm
+identity is the logged toggle line, not the binary hash. This is a sanctioned exception
+to "A/B by commits" (§S.6): rodata arms cannot suffer the stale-object-cache failure
+that rule guards against, and the toggles are scaffolding — winners get hardwired and
+losers deleted when the campaign closes. Screen: quick wallclock ABBA per toggle
+(pipe + messaging + calibrated memcpy, diagnostic tier), then stack the survivors and
+re-screen; keeps still owe the sealed/game tiers before scoring.
+
+**Campaign RUN 2026-08-22** (`scx_cake_bench/runs/toggle_wallclock_20260822/`, binary
+`61589428c` receipt `0a0223d8d397`, desktop noise, load1 1.5–30 — the herds' own):
+G43 lean-NEGATIVE (messaging +10.6% nearly separated against; its registered
+mutex+pipe `--blocks 2` endpoint still decides), G44 null, G45 lean-positive 3/3,
+**G46 memcpy −7.8% SEPARATED** (only separated single). Stack (g43=0 g45=1 g46=1 vs
+tip defaults): pipe −1.3, messaging −3.2 (overlap), **memcpy −5.4 SEPARATED** —
+direction held 3/3, the G46 separation reproduced in an independent pair. Zero
+stalls across ~25 min attached (doubles as §G42 soak evidence). Diagnostic tier
+only: sealed pairs + game screen owed before any toggle is hardwired.
+
+**GAME SCREEN 2026-08-22 (live HD2 gameplay, wake tier — MangoHud unavailable,
+maintainer-directed fallback): STACK NON-REGRESSING, leans better.** ABCCBA ×2
+(native / tip / stack, 25 s slots, arms = receipt binaries, stack = probe commit
+`42f2a1612`, banner-verified per attach). Slow wakes >1 ms/10k, arm medians:
+main 18.99 → **13.40**, renderer 19.12 → **11.19**, vkd3d_queue 1.17 → **0.73**
+(tip → stack; all-slot-rank consistent, no separation); Window&Input/fence tie;
+FAudio "regression" = 1 event in each of 2 slots. Game IPC: native 1.396,
+tip 1.552, stack 1.524 — BOTH cake arms beat native in this heavy regime
+(reverse of KovaaKs light). Native keeps renderer (7.70). Data:
+`runs/toggle_game_wake_20260822/` + `history/wake_latency/hd2tog-*`.
+
+**IRQ-origin service + scheduling volume (same traces, 2026-08-22):** mouse
+pipeline (libinput, woken from the USB-hub IRQ CPU 9): p99 **12.0 → 5.0/5.0 µs**
+native→tip/stack, max 159 → ~30, IRQ-CPU stranding 6.2% → 0.0% — the KovaaKs
+input win reproduces on HD2, toggles indistinguishable. GPU (CPU 13 origin):
+vkd3d_fence p99 564 → 351 → **326**, `main` 658 → 420 → **390** (native → tip →
+stack; stack best on every game-facing row). Volume per 25 s slot: cake
+−28% context switches (8.1M → 5.8M), −16% wakings, softirqs HALVED (733k →
+395k), migrations +25% (2.0M → 2.5M); tip ≈ stack on all counts. NEW
+OBSERVATION, unowned: cake's sink avoidance displaces nvidia's own kthreads
+off CPU 13 — nvidia-modeset p99 78 → ~820 µs, nvidia-drm/timeline 104 → ~890
+(stay% 2.5/20 → ~0) — game threads win but the displaced display-service
+tail is a possible frame-pacing input; needs a FRAME read to matter.
+
+**SECOND GAME SCREEN 2026-08-22 — LOTR (AppId 2956680, UE + vkd3d, LIGHT
+regime ~280% CPU), ABCCBA ×4 (n=8/arm after the maintainer extended play):**
+n=8 UPDATE — migrations native 1.37M / tip 1.61M / **stack 1.38M** (stack ≈
+native, tip +17%, 7/8 tip slots above all-but-one stack slot — g43-off removes
+the premium, near-separated); nvidia cadence sd 408.7/406.0/**391.6**, p99
+2149/2121/**2059**, max 3499/3903/**3397** (stack tightest all three, worst
+slot 423 < native 437 < tip 536); IPC 1.045/1.085/1.078 — cake > native ~3–4%
+solid, tip-vs-stack DEMOTED to tie (scene outliers 1.59/1.29 in rounds 3–4).
+First-round detail below.** wake tails near-zero on ALL arms
+(0.0–0.5/10k — regime too light to differentiate); game IPC native 1.034 <
+tip 1.069 < **stack 1.078** (stack tightest spread); **stack migrations 1.37M
+< native 1.42M < tip 1.71M per slot** — first toggle-level VOLUME effect:
+g43-off removes cake's migration premium (HD2 heavy: both cake arms +25% vs
+native). Mouse service ties native (p99 7.0 vs 7.5 µs; heavy-regime 2.4× win
+absent when quiet). GPU-origin lane flips to native when light (fence p99 59
+vs 106/120) — the displaced nvidia-kthread pattern reproduces (modeset 21.5 →
+~250 µs), now seen in BOTH regimes; frame-pacing question stands. Data:
+`runs/toggle_game_wake_20260822/lort-*`, `history/wake_latency/lort-*`.
+
+**IRQ jitter/duration (same traces, corrected aggregation):** handler
+durations IDENTICAL all arms both games (nvidia p50 24/p99 ~48 µs, USB 2–4/
+4–7 µs) — scheduler-independent, validity anchor. Nvidia IRQ inter-arrival
+(pacing proxy), LOTR at near-equal rates: sd 401/399/**387**, p99 2154/2121/
+**2048**, max 3408/5054/**3345** native/tip/stack — stack tightest on all
+three, tip owns the worst spike. HD2 confounded (rates differ 10–15% by
+scene). USB cadence bit-identical (p99 1005 µs all arms). Analyzer:
+`runs/toggle_game_wake_20260822/irqjitter.py`.
+
+**FIRST FRAME READ of the toggle campaign — KovaaKs menu ~700 fps, ABCCBA,
+n=2/arm, MangoHud per-frame (2026-08-22 23:46–23:50):** native 728 fps /
+0.1% low 388.9 / median FT 1.349 ms; tip 705 / 383.4 / 1.394; stack 689 /
+377.4 / 1.429. Severe frames: cake arms 0.029% vs native 0.032; worst frame
+stack 3.06 < tip 3.11 < native 3.99 ms. **The g43 trade is now MAPPED:**
+tip (g43 on) beats stack by ~35 µs/frame in this extreme-fps idle-machine
+regime — the hint's design case (scan-free claims at huge wake rates) —
+while g43-off wins loaded gameplay (HD2 tails, LOTR migrations) and
+wallclock. g45+g46 implicated in no loss anywhere. Menu caveat travels
+(G17 class); report `runs/game/kovaaks/2026-08-22/reports/`.
+
+**Isolation pair (stack2): the stack is MORE than G46.** Full stack vs
+g43=0+g46=1 (only §G45 differs): pipe −1.5, messaging −5.5 (overlap), memcpy
+**−4.4 SEPARATED** — §G45 contributes inside the stack despite its null single.
+WARNING for future reads: same-config memcpy wanders 9.4–10.3 s (~5%) ACROSS
+pairs — within-pair only; attribution goes to the sealed tier.
 
 **PORTABILITY FIX (2026-08-20): one binary now runs on any machine.** A 1.2.1
 package refused a 16-CPU host: `build.rs` baked the build machine's CPU and CCD
@@ -79,7 +205,60 @@ stall train 20–33×.
 
 ---
 
+## CAMPAIGN: select_cpu for gaming (opened 2026-08-23, maintainer-directed)
+
+Tonight's evidence: one placement redesign (§G53+§G54) moved game frames more
+than any change this month — severe frames 0.062→0.037%, 0.1% low 171→286
+fps, switches −5%, dispatch −41%, avg fps unchanged. Placement is the lever.
+
+**TOGGLE AUDIT 2026-08-23** (maintainer order): g43 hint hardwired ON
+(campaign scaffolding retired); g44/g47/g48 bodies DELETED (null/falsified/
+closed); surviving toggles, each with a reason: g46 (separated win awaiting
+its pre-registered seal + game screen), g51/g52 (pillar-4 physics inputs,
+consumers scheduled), m6/m7 (parked pending K1/F14 composition). A/A after
+audit: sel 83 ns unchanged, spills flat, select_cpu 486 insns.
+
+**REMAINING-TOGGLE BENCHMARK 2026-08-23** (post-hardwire base): g46 net
+NEGATIVE on the new base (+2.6k us/s: sel −9 ns but stopping publish +26 ns;
+its memcpy workload win needs the registered ccm-memcpy+mutex seal, appsim
+cannot see it) — stays off pending that seal. m6+m7 NULL on the new base
+(78 vs 77 ns): the mailbox design removed their query sites from the hot
+path — cleanup candidates next audit. g51 unmeasurable (no cpuidle driver,
+BIOS decision); g52 unmeasurable (consumer deleted, A/A by construction).
+
+**HARDWIRED 2026-08-23** (maintainer order): §G45 census, §G50-R zero-skip,
+§G53 census fallback, §G54 self-park mailboxes are DEFAULT cake; toggles
+g45/g50/g53/g54/g55 removed. Default-arm confirmation: sel 83 ns @ 151k =
+12.5k us/s (was 183 ns / 27.4k), dispatch 219→116 ns, total scheduler cost
+−40%, appsim p99 0.678 clean. Pending: EEVDF head-to-head HD2 frames (game
+wedged pre-Vulkan after restart churn — needs a human-present launch, FIRST
+item next session); longer sealing rotation; K2 for the 8k line.
+
+**Pillars, in priority order:**
+1. **Frames are the endpoint.** Every select change screens on the game
+   rotation (severe ratio, 0.1% low, and BOTH jitter faces: avg|Δ|/Δp95
+   small-wobble vs Δmax big-hitch — §G54 trades the first for the second;
+   whether that feels better is a maintainer in-game call).
+2. **Seal §G53+§G54**: longer HD2 + KovaaKs rotation, one input-live
+   mission, mutex/pipe guards (serial-handoff interplay unmeasured).
+3. **Cost floor**: 80 ns now, BPF floor ~65-70; K2 fused place kfunc
+   (maintainer kernel patch) + mailbox hit-rate are the path to 8k us/s.
+4. **Physics inputs feed parking policy at zero wake cost**: §G51 depth
+   (needs BIOS Global C-State Control enabled), §G52 rank, K1 sink
+   self-accounting — the idle CPU decides its own quality when parking.
+5. **Falsified, do not revisit**: verified claims on the wake path (§G48,
+   §G50-claim, §R.29); census-as-identity; unthrottled pre-scan gates.
+
 ## Scoreboard
+
+**BLENDER-RED — DOWNGRADED to practical tie 2026-08-23:** on the hardwired select redesign the deficit is −0.21% [−0.29,−0.14] (2 blocks), below the 1% meaningful threshold; the redesign recovered the loss. Bisect deprioritized. Same window: **mutex-handoff +39.67% [+38.4,+41.0]** vs the +10.3% seal — the mailbox design amplifies the handoff shape (migrations −162k); needs an 8-block seal to enter the scoreboard. Original flag: blender-render vs native at HEAD d41b7dd41:
+−2.31% then −1.56% [−2.9,−0.3] (2×2-block, second run quiet), cake +78-88k
+cpu migrations. The +11.9% seal is 2026-07-19, unscreened for a month; today's
+commits cannot change decisions (O1 order-only, M3 identical, toggles off).
+Suspect: the month of sink-veto strengthening (quiet-machine exile, §G47's
+origin finding). Needs commit bisect over the July→Aug window, 2-block per
+step, migrations as the mechanism signature.
+
 
 ### Benchmarks vs native EEVDF — SEALED exact-pair medians, 8 blocks
 
@@ -102,6 +281,9 @@ y-cruncher, namd, kernel-defconfig, xz, prime.
 
 ### Games — latest valid reads
 
+| hd2-menu 2026-08-23 (game ab ABBA, 2 runs/arm, HEAD 1f1682044) | avg fps / 1% low / 0.1% low / p99 | native 599 / 455 / 366 / 2.23 ms | cake 616 / 527 / 388 / 1.90 ms | ✅ cake sweeps averages; best-run 0.1% ties 398.4; native's weak run was slot 1 (first-slot noise). HEAD healthy in-game — outranks BLENDER-RED per GAME-FIRST |
+
+
 | run | metric | native | cake | verdict |
 |---|---|---|---|---|
 | HD2 menu, ABBA 2/arm, 240 Hz VRR, 2026-08-01 (G17) | 240 Hz deadline miss % | 3.019 | **1.419** | **cake 2/2, −53%** |
@@ -111,6 +293,8 @@ y-cruncher, namd, kernel-defconfig, xz, prime.
 | same | 240 Hz deadline miss % | 1.004 | 1.278 / 1.155 | native |
 | HD2 live, ABBA, 2026-08-02 (G21) | `main` mean wake | 0.79 / 0.79 | **0.47 / 0.48** | **cake 2/2, −39.9%** |
 | same | `renderer` mean wake | 0.91 / 0.83 | **0.66 / 0.64** | cake 2/2, −25.3% |
+| KovaaKs live, ABBA 22 s, 2026-08-20 (wake tier) | mouse-IRQ→libinput wake p99 / starts on IRQ CPU | 11 µs / 36.1% | **3 µs / 0.0%** | **cake**; native n=1 slot — eevdf-2 had zero mouse input |
+| same | task-graph role wake p99 (TaskGraph/Game/Render) | **2.57 / 1.58 / 0.96** | 5.59–13.07 / 2.73–115 / 2.49–4.44 | **native 2/2 most roles**; cake mig% ×2–3 |
 
 **WoW wake read (2026-08-17, single-arm cake @ G27.1c build `db0b3636…`, 22 s live
 play — attribution only, no native arm).** 29 roles. Every high-n role p99 ≤ 2.6 µs
@@ -159,7 +343,7 @@ smallest.
    `56f9e886…`) attaches and runs clean on 7.1.8. The libbpf skeleton warning still
    prints but is non-fatal.
    - Quick wallclock ABBA vs nightly HEAD (diagnostic tier,
-     `scx_cake_bench_assets/runs/adhoc_wallclock_113_vs_nightly_20260819/`): nightly
+     `scx_cake_bench/runs/adhoc_wallclock_113_vs_nightly_20260819/`): nightly
      pipe **−16.0%**, memcpy −3.9%, sched-messaging **+70.5%** (4/4, no overlap).
      The many-to-many handoff shape regressed vs 1.1.3; unscored at the sealed tier.
    - n=10 confirm (suite 4, 5×ABBA): schbench-light req p99 **+72% 10/10** (S sd
@@ -179,14 +363,17 @@ smallest.
      `cake_frame_slice_ns`, §S.2) for every task; the same-CPU handoff tail pays.
      Registered fix: §G12 KEYSTONE re-bases the `FRAME_*_SHIFT` windows onto the
      occupant's own period, which decouples bystander tasks from the global clock.
+   - The KovaaKs live wake A/B (2026-08-20) shows the same shape vs native EEVDF:
+     task-graph wake p99 2–5× worse than native while the IRQ-sink half wins
+     (ledger row; `runs/kovaaks_irq_wake_20260820/`).
 8. **Receipts audit** — 5 load-bearing claims (deletion-queue zeros, 1464 ns, SLICE_NS
    dose, §R.17 +28-36%, G17/G21 wins); list + rationale:
    `REVIEW_INDEPENDENT_2026-08-17.md` Addendum (git history).
 9. **G17's mechanism is unexplained** — peer share 58.1%→56.9% while the tail fell 17%.
 10. **`SLICE_NS`'s vtime-unit role** — the last architectural constant.
 11. **Probe-driven `cake_handoff_max_ns`** — forbidden per the −35.66% mutex-handoff
-    result; a host-adaptive value needs runtime observation of `used` in ops.stopping,
-    not a boot probe (main.rs:159 comment).
+    result. The runtime-observation path is now registered as **§G37** (adaptive
+    switch-cost floor); boot probes stay dead (main.rs:159 comment).
 12. **`STATE_SLOT_BYTES` sysfs probe** — probe the cache line size at boot instead of
     the hard-coded 128 (intf.h:92).
 13. **`CAKE_NEIGHBOUR_PROBE_DEPTH` topology ordering** — order the probe by
@@ -278,7 +465,7 @@ zero-spill claim made before it is vacuous.)
 
 **Purpose: spot trends at a glance.** One row per experiment, so the arc, the verdicts,
 and the cost read in one pass. Current state is above; the `§` registry below holds the
-design rationale. `scx_cake_bench_assets` holds the raw runs.
+design rationale. `scx_cake_bench` holds the raw runs.
 
 **Rule for this file: every number is measured, and its EVIDENCE CLASS is named.** A blank
 verdict means never measured — not "fine".
@@ -346,6 +533,18 @@ real session), live replica (loader logic run standalone on the live host), audi
 | R.27 | shaped compat ladders for ≤ 6.18 kernels (§R.27) | STATIC + CI | ✅ **CI veristat green ×6** (6.13/6.16/6.18/rolling/for-next/bpf-next, run 32206840388, 2026-08-18) | spills 28 → 26, hot frames flat (`select_cpu` 5, `enqueue` 6); +141 insns of dead arms, pruned at load; dev-kernel bench screen still owed |
 | **R.28** | per-task slice cap, fixed patience windows, frame clock demoted to diagnostic (§R.28) | bench dose + n=3 ABBA | ✅ **clock mode mechanism REMOVED; tail gap partially remains; game screen owed** | quiet handoff p99 rests 0.86–0.92 (was 0.85–1.9 drifting); divides 11→5, spills 17/11→16/10; p999 2× + schbench-light +72% vs 1.1.3 persist → IRQ-reactive stack (§G33/§G35/§G36) is the standing suspect |
 | — | spread placement, co-location returns off (§R.1 fps A/B) | FRAME | **reverted byte-identical (7826cfe3a; hashes now in backup/nightly-12-commits-20260818)** | fps INCONCLUSIVE: scene drift **~7%/h** (nvidia **5044 → 4695/s**) dominated every arm; placement stayed concentrated on ~7 CPUs with all three co-location returns off |
+| — | **KovaaKs wake+IRQ A/B** — eevdf/cake/cake/eevdf, 22 s slots, HEAD `f26d3c6b2` (ops `cake_1.2.1`, kernel-log identity) | **WAKE, interleaved** | ⚖️ **split** | sink machinery works: game-role residency on IRQ CPUs {5, 13} 10–61% native → ~0 cake; mouse-IRQ→libinput p99 **11 → 3 µs**, IRQ-CPU stranding **36.1 → 0.0%**. Bulk UE4 task-graph wakes: native p95/p99 **2–5× tighter**, cake mig% ×2–3 — the gap-#7 many-to-many shape, now shown vs native too. Input intensity uncontrolled per slot (eevdf-2: zero mouse). `runs/kovaaks_irq_wake_20260820/` |
+| — | **domain wallclock audit** — sound/network/render/taskgraph/game from the retained g38 traces | **WAKE, interleaved (offline reprocess)** | 🏆 **render + sound wake tails flip to cake at G38** | render: modeset p99 **14.1 → 3.1**, drm/timeline **28.9 → 3.2**, dxvk 3.9–5.3 → 2.9–4.3 (5 of 7 comms win); AudioThread p99 **7.6 → 5.1**. Losses: TaskGraph p99 5.7 → 7.0, **GameThread p99 6.3 → 72.5 at tied p50** (new target), exec +15–42% everywhere, mig ×3–5 all domains. Network n/a this title (NET_RX 3–5 ms/25 s). `runs/domain_audit_20260821/` |
+| **G39-A** | chain-successor handoff census (§G39 Phase A, offline, zero code) | **CENSUS** | ✅ **opportunity confirmed ~100× the abort floor** | game↔wineserver **~580k wakes each way/25 s, 80.9–91.9% handoff-shaped** (waker blocks ≤1464 ns, gap p50 0.6–1.1 µs); dxvk-submit→queue 63%, TaskGraph→GameThread 71%. Native same shape (92–97%). `runs/domain_audit_20260821/*.census.json` |
+| **G38.1** | core preference at the raw-pick sites + serial arm (§G38.1) | STATIC + attach-test + **bench exact-pair (blocks 2, diagnostic)** | 🚨 **guardrail FIRED → serial veto withdrawn same session** | `cake_pick_idle_escape` 34 insns 0 spills; spills 16/12/28, select_cpu 428→435; attach PASSED 15:26. Guardrail on receipt `ab57ba40a`: **mutex-handoff −69.3% [−91.3, −47.3]** (task_clock −13.6% — pairs waiting), schbench-saturated +11.2% [5.5, 16.9] primary GOOD but context_switches +23.2% vs 5% margin. Repair `bd54a03df`: serial arm sheds the core veto (§R.26 — veto fired on signal presence, no cost comparison); home-claim veto + all pick sites stand; select_cpu →424. Tip re-run owed |
+| **G39-B** | WAKE_SYNC joins the serial-handoff arm (§G39 Phase B) | STATIC + attach-test + **bench exact-pair (blocks 2)** | ❌ **ABORTED `60b238311`** (pre-registered abort: pipe regression beyond CI) | built `ec8d24dc6` (SYNC skips `cake_system_serial()`, object byte-identical; two called-subprogram shapes rejected first for select_cpu spills); tip guardrail: **perf-sched-pipe −36.8% [−42.1, −31.5], ctx-sw +45.9%** (sealed +22.7) = the §R.6 weld re-measured — pipe wakes ARE SYNC ping-pong; mutex −9.2 (non-SYNC) and schbench **+42.4 [22.9, 62.0]** unaffected, isolating the SYNC condition. Census + registry stand; Phase B' needs an RPC-vs-stream discriminator |
+| — | **cause-B discriminator** — `chain3` microbench (3 unpinned socket stages, FIXED work = identical instruction streams), EEVDF vs tip, per-thread counters | controlled microbench, **n=1/arm PRELIMINARY** (ABBA hung on a tool bug after the cake slot; fixed) | ✅ **front-end pollution CONFIRMED** | stage IPC **−5.5/−9.7/−12.6%** with L1i/kinsn **+19–24%**, br-miss +10–19%, **L1d flat**; smallest stage worst (matches the game's 1.4×→1.19× gradient); e2e p50 near-tie, p99 +21%, one 2.7 ms max. Mechanism split still owed: BPF text vs migration-cooling → **E4a pinned rerun** decides E4's shape. `runs/causeb_chain3_20260821/` |
+| **G41** | wake-queue occupancy mark (§G41, predict-verify) | 2-block screen, diagnostic, noise 59% | **BUILT `1b957daca` 2026-08-21; screen PASSED** | schbench-saturated vs native +48.2 [43.2, 53.2] against same-hour baseline +41.3 [36.5, 46.1]; first screen aborted on the §G42 latent stall (attributed away, 1/1 + 1/1); game rotation owed |
+| **G42** | vtime mis-charge + no per-CPU wall net (bug) | source + stall dump; repro 3× NULL | **FIX BUILT 2026-08-21, soaking** | remote property change fires running/stopping on the CALLER's CPU; smp-id slot indexing let the caller be charged the target's difference (+3.226 s observed); fix = index by task CPU; §G42 |
+| **G40** | kick the idle home (§G40, E7 find) | STATIC + attach-test | **BUILT `c0b6d65d7` 2026-08-21; unscored** | E7: 651/651 slow GameThread wakes (>20 µs; p99 128 vs native 6.1) had idle capacity, ~75% an idle home that `cake_home_notify` never kicked (gap B2 measured); fix = one KICK_IDLE in the `!live` remote branch; tip attach PASSED 15:39, sink set [13] live |
+| **G38** | fully idle core outranks a cache-warm thread (§G38) | **WAKE chain + perf-stat IPC, interleaved ABCCBA** (native/base/G38, 25 s live KovaaKs, 2026-08-21) | ⚖️ **partial win, KEPT** | chain p50 base 18.72/19.77 → G38 18.55/18.29 µs vs native 15.51/14.19; doubled cores 0.27/0.24 → **0.20/0.20** (native 0.05/0.03); game IPC 1.104/1.112 → **1.156/1.143** (native 1.238/1.287). All three endpoints move the right way; ~¼ of the gap closed. `kwin_wayland` sib-busy ~32% untouched. Arms: base receipt `head-51ee88b21`, G38 receipt `g38_5be54ef0` (source diffed identical to `dac0be8d8`). `runs/g38_idlecore_20260821/` |
+
+| — | **toggle campaign** — §G43 off / §G44 / §G45 / §G46 on-off ABBA + stack, one binary, arms = rodata toggles | **wallclock, interleaved, diagnostic** | ⚖️ **G46 the one separated result; G45 lean+; G44 null; G43 lean−** | per-arm medians (on vs off): G43 pipe +2.6 msg +10.6 mem +4.8 (all overlap, against); G44 +2.2/+5.6/−1.5 (overlap); G45 −3.8/−1.7/−0.2 (overlap, 3/3 for); G46 −0.7/−2.9/**−7.8 SEPARATED**; stack (g43=0 g45=1 g46=1) −1.3/−3.2/**−5.4 SEPARATED**. `runs/toggle_wallclock_20260822/` |
 
 ### The frame result (2026-08-01, the campaign's first)
 
@@ -409,7 +608,7 @@ to a heading here.**
 | [§G1–§G6](#g1-wake-service-under-load-trunk) | trunk graphs — wake service (N), cache trade (M), ordering (S), game-tail bound (B), spill proxy (P), harness meta (H) |
 | [Graph cut](#graph-cut-open-by-prune-value) | the OPEN queue, ranked by prune value |
 | [§G7–§G25](#g7--mutex-handoff-p99) | measured campaigns, one entry each — verdicts with numbers; the §G12 KEYSTONE lives here |
-| [§G26–§G36](#g26--frame-laxity-input-registered) | registered constructs and live builds — bold status line per entry |
+|  [§G26–§G38](#g26--frame-laxity-input-registered) | registered constructs and live builds — bold status line per entry |
 | [§R.1–§R.26](#r--design-rationale-from-source-comments) | design rationale from source comments, incl. the two maintainer rulings (§R.25, §R.26) |
 | [§S.1–§S.7](#s--constant-ledger-from-intfh) | constant ledger from `intf.h` |
 | [Open review findings](#open-review-findings--review_independent_2026-08-17md) | verified against source, not yet fixed |
@@ -1084,9 +1283,456 @@ expected → ~0).**
   select_cpu 4/1 unchanged, TOTAL 17/11/28. Ratio 0.67, all gates clean.
   Pending: relaunch + desktop smoke (timer-race hits expected → ~0).
 
+### §G37 — adaptive switch-cost floor (registered 2026-08-20)
+
+`cake_handoff_max_ns = 1464` is this machine's number shipped to every machine
+(hardware-audit finding #2). It is cake's definition of "a hand-off-sized run" in
+three places: the turn floor, the occupant-nearly-done horizon, and the partner
+classifier. A boot probe cannot replace it — measured 2026-07-30, −35.66%
+mutex-handoff: an idle probe sees only the ~600 ns hardware floor, not the load
+tail (Open gaps #11).
+
+- **Hypothesis:** the real switch gap, measured on the switch path itself, converges
+  near 1464 on this host and gives other hosts their own correct number.
+- **Signal:** gap = new-start − old-start − old-run-length; all three values already
+  on the switch path, zero new clock reads. EMA per CPU, folded to ONE global value
+  (the classifier needs one yardstick).
+- **Dynamics:** fast up, slow down — too low caused the switch storm, too high is
+  mild. Continuous measurement; the published floor moves only on the sink-monitor
+  cadence (1 s → 16 s with confidence), in steps, inside hard clamps.
+- **Phases:** A observe-only (log, publish nothing). B actuate; sealed mutex-handoff
+  pair; expect null on this host — the win is portability. C game screen ABBA with
+  floor telemetry; motion during scene changes is the thing to watch.
+- **Endpoint:** A: converges 1464 ± 25% here. B: mutex-handoff null-or-better.
+  C: severe-frame ratio null-or-better, floor stable within a game session.
+- **Aborts:** published floor flaps > 1 step/min under game load; mutex-handoff
+  regresses; spill or verifier budget blows on the hot path.
+
+---
+
+### §G38 — a fully idle core outranks a cache-warm thread (registered 2026-08-21)
+
+Measured on live KovaaKs (`runs/kovaaks_irqchain_20260821/ANALYSIS_HOPS.md`): cake
+runs both threads of a core **0.15-0.18** cores of the time against native's **0.02**,
+on a machine with only **2 of 8** physical cores busy. The input reader lands beside a
+running sibling on **30%** of its runs (native 10%) and pays **+59%** execution time
+there; the task-graph workers land beside one on **22%** (native 0.7%). Two sites rank
+cache warmth above core exclusivity: the home claim declines `select_cpu_dfl`'s
+fully-idle-core preference by design (§G13), and `ROUTE_GLOBAL` *seeks* the target's
+sibling for cold pickup.
+
+- **Hypothesis:** on an idle machine a whole idle core beats a warm thread on a busy
+  core; ranking the core first cuts chain-stage execution time with no placement cost.
+- **Steps:** `cake_pick_idle_clean` asks `SCX_PICK_IDLE_CORE` first and falls back to
+  any idle CPU; the home claim declines a contended core (`cake_core_contended`, one
+  `cpu_sibling` read plus the existing `cake_cpu_curr`); `ROUTE_GLOBAL`'s sibling
+  preference is ranked BELOW the clean pick instead of above it. No decision deleted.
+- **Endpoint:** mouse-IRQ -> game-thread chain p50 (native 14.2 µs, cake 16.7-17.7 µs)
+  closes; cores-with-both-threads-busy falls toward native's 0.02; game-process IPC
+  null-or-better. Then a KovaaKs frame ABBA.
+- **Aborts:** spills rise on `select_cpu`/`enqueue`; stage execution unchanged (the
+  co-residency was a symptom, not the cause); saturated-machine regression from losing
+  the home claim, watched on schbench-saturated and mutex-handoff.
+
+**Build 2026-08-21:** zero warnings both profiles, clippy clean, spills **16/12/28
+unchanged**, `cake_select_cpu` 432 -> **428** insns, total 1988 -> 2001.
+
+**SCORED 2026-08-21 (ABCCBA native/base/G38, 25 s live KovaaKs slots; data
+`runs/g38_idlecore_20260821/`): partial win, KEPT.** Chain p50 (mouse IRQ -> game
+thread) base 18.72/19.77 → G38 18.55/18.29 µs, native 15.51/14.19 — closes ~¼ of the
+gap. Doubled-core mean 0.27/0.24 → 0.20/0.20 (native 0.05/0.03). Whole-game-process
+IPC 1.104/1.112 → 1.156/1.143 (native 1.238/1.287) — the IPC endpoint is BETTER, not
+just null. Per-stage sibling-idle exec p50: game worker 3.23 → 2.81 µs (native 2.31),
+libinput 4.07 → 3.87 (native 3.40), **kwin_wayland flat 10.95 → 10.92 (native 8.26)
+with sib-busy ~32% in both cake arms** — G38's three sites never see kwin's placement,
+so the residual doubling and the largest per-stage exec loss are the same open front.
+Arm identity: base = receipt `head-51ee88b21`; G38 = receipt `g38_5be54ef0`, whose
+`source_snapshot` diffs identical to HEAD `dac0be8d8` (the tested commit was amended
+into it; binary hashes differ only by build environment).
+
+#### §G38.1 — core preference at the raw-pick sites + serial arm (registered 2026-08-21)
+
+The flow map (`runs/g38_idlecore_20260821/flowmap.md`) found G38's residue: the
+kernel's ranked pick is already core-first at flags 0, so the uncovered doubling
+sources are the RAW `scx_bpf_pick_idle_cpu(…, 0)` sites and the serial
+co-location arm. Kernel fact checked 2026-08-21: `flags & SCX_PICK_IDLE_CORE`
+on `select_cpu_and`/dfl is a STRICT core search returning −EBUSY (idle.c:613),
+and a raw pick at flags 0 has no core preference at all. The idle sink core
+{5,13} poisons a strict CORE pick, so every CORE retry must re-pick
+thread-grain when the winner is bad — the pick's test-and-clear consumes the
+sink's idle bit, which makes the second CORE try skip it.
+
+- Hypothesis: core-first at the raw-pick retries (`:936`, `:1001`, compat
+  `:921`) plus `!cake_core_contended(wc)` on the serial arm cuts the remaining
+  doubling (kwin sib-busy 32%) without touching the ranked pick.
+- Steps: CORE-first pick with validated thread-grain fallback at the three raw
+  sites; one contended-core term on the serial arm; no decision deleted.
+- Endpoint: repeat the G38 rotation — kwin sib-busy toward ≤12%, doubled cores
+  toward native's 0.04, chain p50; bench guardrail mutex-handoff +
+  schbench-saturated null (the serial arm term is the risk).
+- Aborts: spills rise; mutex-handoff regresses beyond CI; kwin sib-busy
+  unmoved (falsifies the site attribution — the residue is then WAKE_DSQ
+  pulls, site D).
+
+#### §G39 — chain-successor handoff (construct; registered 2026-08-21)
+
+The input chain (libinput → kwin → game) repeats 50k×/25 s at fixed depth 3;
+every hop is a SYNC wake whose waker blocks immediately. Cake re-places each
+hop from scratch; the switch-cost floor for the whole chain is 3 ×
+`cake_handoff_max_ns` ≈ 4.4 µs against native's measured 14.2 µs — the only
+lever whose ceiling BEATS native rather than matching it (gap #7's shape,
+attacked at the chain, not the storm).
+
+- Hypothesis: when a serial-shaped waker SYNC-wakes its successor and blocks
+  within `cake_handoff_max_ns`, handing the waker's CPU directly to the
+  successor beats any re-placement.
+- Phases: A offline census from the retained g38 traces — opportunity rate
+  (SYNC wake → waker blocks < 1464 ns) per chain edge, zero code. B the
+  handoff arm: §R.18 conf + `cake_handoff_yields` gate the SYNC distrust arm
+  (`:912`) into a handoff instead of a re-rank; sibling/sink vetoes retained.
+  C chain A/B + frame screen.
+- Endpoint: chain p50 below native's 14.2 µs, 2/2 slots; task-graph roles
+  null-or-better (the §R.6 weld is the known failure mode — G9.4's per-CPU
+  bit game-failed; this one is per-EDGE and conf-gated).
+- Aborts: census &lt; 10k opportunities/25 s; any task-graph p99 regression
+  &gt; 2×; any hot-path spill; pipe/futex bench regression beyond CI.
+- **Phase A PASSED + Phase B BUILT 2026-08-21 (`ec8d24dc6`).** Census (offline,
+  `runs/domain_audit_20260821/*.census.json`): game↔wineserver ~580k wakes each
+  way/25 s at 80.9–91.9% handoff-shaped, gap p50 0.6–1.1 µs — ~100× the abort
+  floor; native shows 92–97% on the same edges. Build: one condition — SYNC
+  skips `cake_system_serial()` in the serial arm (the kernel asserts the pair;
+  a non-SYNC wake still proves it machine-wide); every other gate stands. Two
+  subprogram shapes were tried first and REJECTED: a called `cake_sync_handoff`
+  cost select_cpu +1/+2 then +1/+8 spills/fills from the extra clobber point —
+  the merged condition is free (16/12/28, 2039 insns, byte-identical counts to
+  §G38.1). Guardrails owed: mutex-handoff, schbench-saturated, perf-sched-pipe.
+- **Phase B ABORTED 2026-08-21 (`60b238311`), pre-registered condition.** Tip
+  guardrail: perf-sched-pipe **−36.8% [−42.1, −31.5]**, ctx-switches +45.9%
+  (sealed +22.7) — pipe wakes are `wake_up_interruptible_sync_poll` ping-pong,
+  and admitting SYNC to the serial arm welded the pairs (§R.6, re-measured).
+  mutex-handoff (futex, non-SYNC, −9.2) and schbench-saturated (+42.4)
+  unaffected — the SYNC condition is isolated as the cause. Do NOT retry
+  Phase B without a discriminator that admits the wine-RPC edge (successor
+  chain, both sides block round-trip) while excluding data-streaming SYNC
+  pairs (pipe: consumer drains a buffer the producer keeps filling). Candidate
+  discriminators for B': wakee's own conf bit (both sides serial-shaped);
+  chain depth ≥ 3 (RPC continues to a third task, pipe bounces between two).
+- **Revert confirmed 2026-08-21:** pipe on the reverted tip −12.0 [−13.1,
+  −10.8] with ctx-switches +1.6% (was +46) — the weld effect (~25 pts) is
+  removed and CI-separated from the aborted build. Today's −12 baseline vs
+  the sealed +22.7 is regime-shaped (mutex read −9..−26 across ALL builds
+  including pre-G38 the same hour); settle only at the sealed tier if it
+  matters (H5: the formula is conditioned on regime + workload).
+
+#### §G40 — kick the idle home (registered + built 2026-08-21) `<- B2, E7`
+
+E7 decomposition (`runs/domain_audit_20260821/*.e7.json`): every one of cake's
+651 slow GameThread wakes (>20 µs; p99 128 µs vs native 6.1) happened WITH idle
+CPUs free, and ~75% targeted an ALREADY-IDLE home — `cake_home_notify`'s
+`!live` branch returned false for a remote idle home, so nothing kicked tcpu
+and the queued task waited for the steal ring. This is open-gap B2's measured
+cousin, found on the game's main thread.
+
+- Hypothesis: kicking the idle home itself (one `KICK_IDLE` on tcpu) collapses
+  the GameThread tail toward native's 6 µs; the B2 discriminator and fix in one.
+- Steps: `!live` remote branch kicks tcpu and reports handled; local case
+  unchanged; no other route touched.
+- Endpoint: GameThread wake p99 ≤ 2× native on the rotation; E7 rerun shows
+  idle-home slow wakes → ~0.
+- Aborts: any spill; kick-storm visible in schbench-saturated (a kick per
+  queued wake is the design cost — census says 1% of GameThread wakes).
+
+#### §G41 — wake-queue occupancy mark (registered 2026-08-21) `<- G25, predict-verify audit`
+
+Every dispatch on every CPU peeks the global WAKE_DSQ (rhashtable lookup plus
+a shared head line) even in home-routing regimes where that queue is nearly
+always empty. §G25 proved the mark shape for per-CPU queues, where the owner's
+unconditional rescan makes a stale-clear bit benign. WAKE_DSQ has no owner —
+every consumer gates on the mark — so a stale-clear needs a closing protocol:
+the setter marks AFTER the insert, the consumer retires the mark only by
+clear (exchange) then re-peek, so a nonempty queue can never end unmarked.
+
+- Hypothesis: one "may hold work" mark in its own §R.10 slot replaces the
+  global peek with a word read on the common dispatch, no wake-service change.
+- Steps: mark slot + set/retire helpers; dispatch peeks only on mark-or-starved
+  (§R.16 cadence = lost-mark backstop, bounded one 24 ms window, no watchdog);
+  set at both WAKE_DSQ insert sites (wake arm, anti-collision arm).
+- Endpoint: schbench-saturated `--blocks 2` non-regressing (the global-queue
+  regime is where a service bug would show); game rides the next rotation.
+- Aborts: "runnable task stall" in scx_cake.log; watchdog kill
+  (`scheduler == native`); schbench-saturated p99 regression outside noise.
+
+**Outcome 2026-08-21: BUILT `1b957daca`, screened.** First screen ABORTED on
+the pre-registered stall (`systemd` 7.05 s, watchdog): dump shows a SINGLE
+victim at **+3.226 s vtime debt** (whole pack within +7 ms) parked on sink
+CPU 5's per-CPU queue while WAKE_DSQ flowed at 1–7 ms — the §G41 mechanism
+uninvolved. Attribution split: baseline clean 1/1, G41 rerun clean 1/1 →
+latent pre-existing pathology, filed as §G42. Screen (2 blocks, diagnostic,
+noise EXTREME 59% external): usecs_per_op vs native **+48.2 [43.2, 53.2]**
+against same-hour baseline **+41.3 [36.5, 46.1]** — non-regressing, CIs
+nearly separate in G41's favor. Guardrails noninferior (ctx +38.9 b-good,
+task-clock −2.3). Dispatch subprogram 76 insns (was 81), 0 spills. GAME-FIRST:
+rides the next rotation before scoring.
+
+#### §G42 — single-event vtime mis-charge + no wall-clock net on per-CPU queues (bug report, 2026-08-21) `<- §G41 abort`
+
+Evidence `runs/exact_pair/exact_pair_20260821T203147Z_1c535c2744be` (b02.p1
+dump): one task (`systemd[1003]`, weight 100) at +3.226 s vtime over a pack
+spread of 7 ms. Its lifetime sum_exec was ~4.9 s, so the charge shape is
+`sum_exec - run[cpu].sum` with a slot residue (~1.7 s) that looks like a
+DIFFERENT task's runtime — a stopping without a matching running stamp
+(attach/bypass or attribute-change edge, unproven). Second half: WAKE_DSQ
+has a 24 ms wall net (§R.16); per-CPU queues have none, so a debted task
+waits its full debt in wall time — 7 s beat the 5 s watchdog.
+
+- Hypothesis: `cake_stopping` can fire against a run slot stamped by another
+  task; one event is enough to strand its victim past the watchdog.
+- Steps: instrument stopping (charge > 1 s traces stamp owner) OR reason the
+  ext.c edge to ground; separately price a per-CPU wall-clock net.
+- Endpoint: mechanism named, then a bounded charge or a net — maintainer call.
+- Aborts: none (observation first; no scheduler change in this phase).
+
+**Mechanism grounded 2026-08-21 (source, Linux 7.2 tree):** a property change
+on a RUNNING task (`sched_setscheduler`, `set_user_nice`, cgroup
+`sched_move_task`) runs `sched_change_begin/end` on the CALLER's CPU under the
+victim's rq lock: `dequeue_task_scx` fires `stopping(false)` and `set_next`
+fires `running()` there. Cake indexed both by `bpf_get_smp_processor_id()` —
+the CALLER's CPU — so the remote `running()` stamps the caller-CPU slot with
+the TARGET's sum, and the CALLER's own next switch-out charges
+`caller.sum − target.sum`. systemd (a task that property-changes others
+constantly) at 4.9 s lifetime minus a ~1.7 s stamp = the observed +3.2 s.
+The direct charge on the target self-masks (the following `running()` drags
+the frontier along); the caller-side debt does not — no frontier advance
+follows a switch-out.
+
+**Repro: 3 attempts NULL** (~235k forced remote BATCH↔OTHER toggles under
+saturated H1 arms; rigs in scratchpad `g42rig*.c`): v1 slot arithmetic went
+negative (self-heals via clamps), v2 caller-victim shape also never gapped.
+The bad ordering needs conditions not yet identified; the mis-indexing itself
+is a defect by inspection regardless.
+
+**FIX BUILT 2026-08-21:** both ops index `cake.run[]` by `p->thread_info.cpu`
+(the task's rq CPU — identical on the normal switch path, correct on the
+remote path; the remote ping-pong becomes exactly accounted). Gates clean;
+`cake_stopping` spills 1 → 0 (dropped the smp-id call). No policy change, so
+no game screen owed on its own; rides the §G41 rotation. Confirmation is a
+SOAK: fixed cake attached through normal desktop use, watcher on the exit
+path — the bug's signature is the watchdog stall, which previously appeared
+within ~4 min of one saturated bench.
+
+#### §G43 — going-idle hint: publish at dispatch, claim before the idle scan (registered 2026-08-22) `<- predict-verify audit C1, §G38, §G41`
+
+`cake_wake_notify` and `cake_enqueue`'s kick tail run `cake_pick_idle_clean`
+— up to three kernel idle-mask scans plus escapes — on every global wake. The
+going-idle moment is already an event cake observes: `cake_dispatch` finds
+nothing and prev is not queued. One published word turns the common idle
+search into a single test-and-clear (the claim IS the verify, same contract
+as the prev-CPU arm). Full audit and the candidate ranking:
+`docs/AUDIT_PREDICT_VERIFY_2026-08-22.md`.
+
+- Hypothesis: a going-idle CPU publishing its id lets the wake path claim an
+  idle CPU with one test-and-clear instead of a scan; wake cost drops, no
+  routing or ranking change (§G38 core preference preserved by the gates).
+- Steps: `idle_hint` §R.10 slot; dispatch publishes on going idle
+  (test-before-write); `cake_idle_hint_claim` (affinity + irq/tick/core gates,
+  test-and-clear, CAS retire so a newer publish survives) ahead of the scan in
+  `cake_pick_idle_clean`; no other site touched.
+- Endpoint: on/off `--blocks 2` same-hour pairs — mutex-handoff on-arm ≥
+  off-arm within CI; perf-sched-pipe non-regressing (the §R.6/§G39 weld guard).
+- Aborts: pipe regression outside CI; any new spill in `cake_pick_idle_clean`
+  or its callers; "runnable task stall" in scx_cake.log; watchdog kill.
+- **Wallclock screen 2026-08-22 (diagnostic): lean NEGATIVE** — on-arm slower 3/3
+  (messaging +10.6% nearly separated). The registered mutex-handoff + pipe
+  `--blocks 2` endpoint decides; toggle default stays ON until it runs.
+
+#### §G44 — qmask answers wake-routing emptiness (registered 2026-08-22) `<- predict-verify audit C3, §G25`
+
+- Hypothesis: a CLEAR qmask bit already proves the per-CPU DSQ empty, so the
+  wake-routing sites (serial block, empty-home test, frontier-convergence
+  return) can skip the `dsq_nr_queued` rhashtable lookup; a SET bit still
+  verifies with the real count (insert marks before the task lands, §G25).
+- Steps: `cake_cpu_dsq_idle()` helper behind `--toggle g44`; three call sites;
+  local-DSQ (`LOCAL_ON`) lookups untouched.
+- Endpoint: wallclock on/off ABBA — pipe + messaging non-regressing, any win
+  kept for the stack arm. Stale-clear misroute is benign: the owner's
+  unconditional own-queue peek finds the task next dispatch.
+- Aborts: "runnable task stall" in scx_cake.log; watchdog kill; pipe
+  regression outside the arm spread. Routing change → game screen before keep.
+- **Outcome 2026-08-22: BUILT `f5185af07`, wallclock NULL** (pipe +2.2,
+  messaging +5.6, memcpy −1.5, all overlap). Parked off.
+
+#### §G45 — event-complete idle census for the serial gate (registered 2026-08-22) `<- predict-verify audit C5, §R.25`
+
+- Hypothesis: `ops.update_idle` (KEEP_BUILTIN_IDLE) maintaining an idle bitmask
+  + count makes `cake_system_serial` one word read instead of
+  `get_idle_cpumask` + full cpumask weight per serial-candidate wake.
+- Steps: idle words + counter (flip-gated atomics, idempotent, seeded in
+  ops.init from the kernel mask); `cake_system_serial` reads the counter when
+  `--toggle g45`; callback body prunes to nop when off.
+- Endpoint: wallclock on/off ABBA; the off arm still pays the registered
+  callback, priced separately by the all-off vs tip A/A.
+- Aborts: stall/watchdog; messaging regression outside spread (transition-rate
+  atomics are the predicted cost); audit's own gate — if on/off is null, C5 is
+  rejected and the callback deleted.
+- **Outcome 2026-08-22: BUILT `0ef821db8`, wallclock lean-positive 3/3**
+  (pipe −3.8, messaging −1.7, memcpy −0.2, all overlap); rides the stack.
+  All-off vs old-tip A/A owed for the bare callback-registration cost.
+
+#### §G46 — departing-slice cache, pid-tagged, per-CPU (registered 2026-08-22) `<- predict-verify audit C4, §R.18`
+
+- Hypothesis: `cake_task_slice` (two divides + a clock read) recomputes at
+  every insert what `cake_stopping` could have published; a two-entry
+  pid-tagged cache in the run slot (handoff pairs alternate, so one entry
+  always misses) serves the insert sites with one load + compare. Per-CPU
+  slot state, NOT per-task storage — the audit's tenet blocker dissolves.
+- Steps: `slice_cache[2]` words in `cake_run_slot` (owner-written at stopping,
+  line already dirty); `cake_task_slice_cached()` at the seven insert sites
+  behind `--toggle g46`; kthread flat grant and dispatch keep-prev untouched.
+- Endpoint: wallclock on/off ABBA — pipe (the curr==p self-race is the
+  hottest consumer); staleness bound is one quantum of estimator drift.
+- Aborts: stall/watchdog; any new spill in `cake_enqueue_wake` or
+  `cake_select_cpu`; pid-reuse mis-grant is bounded by the cached value being
+  a valid slice for some task (≤ SLICE_NS), so no correctness abort.
+- **Outcome 2026-08-22: BUILT `61589428c`, the campaign's one separated
+  result** — memcpy −7.8% SEPARATED single, −5.4% SEPARATED in the stack;
+  pipe/messaging lean-positive. A one-quantum-stale slice is GEOMETRY, not
+  just saved arithmetic, so attribution is open; sealed ccm-memcpy +
+  mutex-handoff pair, then game screen, before hardwiring.
+
+#### §G47 — ISR-successor kthread keeps the IRQ CPU (registered 2026-08-23, maintainer-directed) `<- §G30, §G35, toggle campaign IRQ finding`
+
+- Hypothesis: the sink veto exiles the ISR's OWN continuation kthreads
+  (nvidia-modeset p99 78→~820 µs HD2, 21.5→~250 LOTR, stay% →0) — the GPU-feed
+  path — explaining cake's GPU-util gap (87.8 vs 84.6/82.3% KovaaKs menu). A
+  kthread woken FROM interrupt context on its own prev CPU keeps that CPU: it
+  cannot run before the handler ends (p99 48 µs) and cold remote placement
+  costs 250–900 µs.
+- Steps: in the kthread wake arm, `cake_irq_live[this].depth && tcpu == this
+  && prev == this` → insert LOCAL_ON tcpu, skip the idle pick; behind
+  `--toggle g47`.
+- Endpoint: KovaaKs menu frame A/B — GPU util gap closes toward native, avg
+  fps recovers; nvidia-kthread wake p99 toward native's 21–104 µs; the fence
+  tail (wow-cake-g30c class) and game-role sink avoidance MUST hold.
+- Aborts: fence-tail regression (the §G30 win is senior); stall/watchdog; any
+  new spill in `cake_enqueue`.
+
+#### §G48 — hint-first main placement (registered 2026-08-23, component audit) `<- §G43, AUDIT_COMPONENT_COST`
+
+- Hypothesis: the ranked scan dominates `cake_select_cpu`'s measured 185
+  ns/call (28.2 ms/s at 152k wakes/s vs EEVDF select_task_rq_fair 10.2 ms/s,
+  bpf_stats + perf, runs/bpfstats_20260823); a §G43 hint claim ahead of
+  `select_cpu_and` makes the hit O(1) at unchanged ranking (claim gates =
+  scan gates). Campaign target: placement ≤8,000 us/s at held switch rate.
+- Probe §G48-P (first): commit that returns prev/dfl with the ranked scan
+  deleted, same appsim+bpf_stats window, read ns/call = fixed-path cost;
+  revert byte-identical. Placement quality knowingly sacrificed; ns/call is
+  the only read.
+- Steps: `cake_idle_hint_claim` between home claim and nonsink scan, direct
+  insert on hit; behind `--toggle g48`.
+- Endpoint: select_cpu ns/call + placement us/s (bpf_stats, appsim window),
+  hit rate; context switches and appsim p99/p999 MUST hold.
+- Aborts: stall/watchdog; switch-rate regression >5%; new spill in
+  `cake_select_cpu`.
+- **Progress 2026-08-23:** §G48-P probe `40878f738`→revert (byte-identical
+  b6078ab5): fixed path 76 ns, scan 109 ns of 185; probe also showed deleted
+  placement costs +67 ms/s in dispatch/enqueue — the scan's decision is
+  load-bearing, only its price is the target. Sub-8k therefore ALSO needs
+  fixed-path cuts (§G49, O1, F14): 76 ns fixed > 52 ns budget on its own.
+  BUILT `5d2c4012c` (+`8e761ef53` word-gate + O1 order fix): loaded on-arm
+  202→188 ns/call; off-arm O1 window noise-invalidated (enqueue 117k/s,
+  off-profile), mirrored re-run owed. M3 dedup `0030b2a2b`, spills flat.
+  Maintainer audit registrations: §G50 (census-zero skip), M2 (dead
+  frame-clock plumbing), M1 (serial/convergence double-eval — screen first),
+  M4 (G44+F14+F15 as one consolidation program). F14 note: the serial gate's
+  two emptiness checks cover two DIFFERENT queues (vtime DSQ + LOCAL_ON);
+  merging needs a maintained bit, not a dedup.
+
+#### §M6 — occupant mirror: subscribe, don't query (registered 2026-08-23, maintainer-directed) `<- component audit 8th pass, §R.17, §G45 shape`
+
+- Hypothesis: five rq->curr deref-chain sites (core_contended, handoff_yields,
+  occupant_live -> preempt/notify/anti-collision) can read one flat
+  cake.run[cpu] line instead: running/stopping already own that line at every
+  transition; publishing start-vtime + recip-index + pid costs ~2 stores on an
+  already-dirty line. Win = chain and kfunc deletion, NOT locality — remote
+  questions stay one remote line.
+- Steps: extend cake_run_slot, publish in running/stopping, convert the five
+  readers; behind a campaign toggle; fnspills gate on select_cpu.
+- Endpoint: select_cpu + dispatch ns/call (bpf_stats appsim window, mirrored
+  rotation); per-wake kfunc pulls ~4-5 -> ~1; composes with §G48/§G50.
+- Aborts: cake_running/cake_stopping ns/call regression (coherence tax — the
+  irq_leave 11->276 ns lesson); any new spill in select_cpu; stall/watchdog.
+  §G49 screens after; absorbed if M6 lands.
+- Pre-build decisions (maintainer-accepted 2026-08-23): (1) the occupant word
+  packs pid-tag + recip-index + class in ONE u64, value 0 = off-mirror — keeps
+  the RT-owned-home check in enqueue_wake and zero-vtime conventions correct
+  without a second load (§G46 pid<<32 packing is the precedent); (2) geometry
+  re-verified against the constant: STATE_SLOT_BYTES=128 so slots are 16
+  words; run_slot had 11 pad words, mirror uses 2 — the earlier "3 free"
+  figure checked the expression, not the constant. Publication stays
+  single-store, benign-stale model preserved. Tax refinement: the slot line is already
+  remote-read (stamp in handoff_yields/occupant_live), so M6's net
+  lines-touched delta is plausibly negative; hard abort kept regardless.
+
+#### §G53 — EEVDF-shape optimistic placement (registered 2026-08-23, maintainer-directed)
+
+- Hypothesis: EEVDF's 66 ns comes from NOT verifying its pick — no gates, no
+  claim, collisions absorbed by the queue. Cake's failed fast paths all died
+  on verify-and-claim cost (§G48 claim-fail, §G50 claim-race). Census
+  first-fit + affinity + direct insert, nothing else, should land 80-110 ns.
+- Steps: behind `--toggle g53` (forces g45); census bit -> direct LOCAL
+  insert, no test_and_clear, no clean/contended gates; empty census -> scan.
+- Endpoint: sel ns/call (mirrored appsim ABBA) + switch rate + tails hold.
+- Aborts: stall/watchdog; appsim p99 regression; new spill in select_cpu.
+
+#### §G54 — self-park mailboxes (registered 2026-08-23, maintainer-directed redesign) `<- §R.29, §G53 probe, §G50-R, M7`
+
+- Hypothesis: the wake path can READ a decision instead of making one. Idle
+  CPUs evaluate their own gates at idle-entry (free time, local facts) and
+  park into per-waker mailboxes (owner-read, no consume atomics — kills the
+  §G50 claim race by construction); retract at idle-exit. Wake path: prev
+  census-bit optimistic -> own mailbox -> zero-skip -> old ladder. Affinity
+  by direct cpus_ptr bitmap read (no kfunc). §G53 measured optimism at 77
+  ns incl. insert with dispatch halved and −7% switches; producer gating +
+  prev-warmth + retraction attack its tail residue.
+- Steps: behind `--toggle g54` (forces g45); producer in update_idle,
+  rotor-distributed slots, park idx in cake_irq_live; consumer subprogram.
+- Endpoint: select_cpu <8,000 us/s loaded (<=52 ns/call) with switch rate
+  and appsim p99/p999 held; schbench-saturated pair must not regress.
+- Aborts: stall/watchdog; p99 regression beyond slot-position band; new
+  spill in cake_select_cpu; update_idle ns/call regression >2x.
+- **First mirrored ABBA 2026-08-23:** sel 92/92 ns on-arm (vs off 163 avg) =
+  13.6k us/s — half of baseline, above the 8k target. Tails FIXED vs §G53:
+  end-slot p99 0.676/0.682 against the 0.93 position band — producer gating
+  + prev-warmth cured the collision cost. Switches −6%, dispatch 219→123.
+  Gap = miss path (~25% of wakes fall to the full ladder). Levers: chain
+  §G53 walk as mailbox-miss fallback (pair in flight); multi-park (2-3
+  entries per idle CPU — consumed entries orphan an idle CPU until its next
+  transition); warmth-first reorder if the combined arm shows G53 tails.
+  update_idle 9→34 ns producer cost (+5.5 ms/s) — net total still −38%.
+- **G54.1 (warmth-first + core entries + per-core slots):** sel 80/81 ns =
+  11,748 us/s, tails arm-comparable (quality restored), switches −5%,
+  dispatch −41%. §G55 insert probe: the insert is ~10 ns of the 80 and
+  skipping it explodes enqueue+dispatch (+60 ms/s) — cheap AND load-bearing.
+  Architecture floor ≈ 65-70 ns avg (trampoline ~15-20 + serial block +
+  reads + insert): the 8,000 us/s goal is ~2-3k short of reachable in this
+  accounting without K2 (fused place kfunc, patch-gated) plus hit-rate work.
+  Achieved: 27,400 → 11,748 us/s (2.3x), quality held.
+- **HD2 menu frame screen (mirrored ABBA, n=2/arm, ~12k frames/slot): PASS**
+  — severe (>2x med) 0.037 vs 0.062%, 0.1% low 286 vs 171 fps, p99.9-median
+  tie (1.142 vs 1.132 ms); cost: p99 mid-band thicker (2.22 vs 1.92 ms).
+  First fast path to win benchmarks AND frames. Longer rotation before
+  default-on; K2 fused kfunc is the remaining path to the 8k line.
+
 ---
 
 ### §R — Design rationale (from source comments)
+
+#### §R.29 — push vs pull (census-claim autopsy, 2026-08-23)
+Identity claims only work from PUSHED events (the §G43 hint: published at
+going-idle, single candidate, one test-and-clear); pulled aggregates are
+fresh enough for counts ("someone is idle" — gates, zero-skips) but never
+for identity ("take this one") under concurrent wakers. Census-as-gate ✓,
+census-as-identity ✗ — sel 179→264 ns bought this law.
 
 #### §R.1 — co-location gate
 mutex p99 **1.442 → 0.625 µs**; gates G9.2→G9.6, before dfl.
