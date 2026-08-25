@@ -91,6 +91,9 @@ enum consts {
 	STATE_SLOT_BYTES	= 128,
 	STATE_SLOT_WORDS	= STATE_SLOT_BYTES / sizeof(u64),
 
+	/* §G51: cpuidle exit-latency table entries (sysfs state count cap). */
+	CAKE_CSTATE_TABLE	= 16,
+
 	/* Runnable-stall safety watchdog, not a scheduling threshold. */
 	WATCHDOG_TIMEOUT_MS	= 5 * 1000,
 

@@ -23,7 +23,7 @@ import subprocess
 import sys
 
 REPO = "/home/ritz/Documents/Repo/scx"
-ASSETS = "/home/ritz/Documents/Repo/scx_cake_bench_assets"
+ASSETS = "/home/ritz/Documents/Repo/scx_cake_bench"
 
 # The live path. game_capture_start is QUARANTINED behind the strict
 # v2-manifest/v5-receipt runner and will refuse; game_ab is what works.

@@ -56,6 +56,13 @@ struct Opts {
     /// Print the version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Campaign toggle `NAME=0|1` (g43, g44, g45, g46), repeatable. One
+    /// binary serves both arms of an on/off pair: the verifier deletes the
+    /// off arm at attach. Scaffolding for the 2026-08-22 toggle campaign
+    /// (STATE.md); defaults are tip behavior. Unknown names refuse to start.
+    #[clap(long = "toggle", value_name = "NAME=0|1")]
+    toggle: Vec<String>,
 }
 
 struct Scheduler<'a> {
@@ -145,6 +152,64 @@ impl<'a> Scheduler<'a> {
             bpf_intf::consts_MAX_CPUS
         );
         rodata.nr_cpu_span = *NR_CPU_IDS as u32;
+        rodata.cake_span_mask = (*NR_CPU_IDS as u32).next_power_of_two() - 1;
+
+        // Campaign toggles land in rodata before load so the verifier prunes
+        // the off arms; the logged line is each arm's identity in an on/off
+        // pair (STATE.md, toggle campaign 2026-08-22).
+        for spec in &opts.toggle {
+            let (name, val) = spec
+                .split_once('=')
+                .with_context(|| format!("--toggle {spec}: expected NAME=0|1"))?;
+            let on = match val {
+                "0" => 0u8,
+                "1" => 1u8,
+                _ => anyhow::bail!("--toggle {spec}: value must be 0 or 1"),
+            };
+            match name {
+                "g46" => rodata.cake_tog_g46 = on,
+                "m6" => rodata.cake_tog_m6 = on,
+                "g51" => rodata.cake_tog_g51 = on,
+                "g52" => rodata.cake_tog_g52 = on,
+                "m7" => rodata.cake_tog_m7 = on,
+                _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
+            }
+        }
+        info!(
+            "   toggle  g46={} g51={} g52={} m6={} m7={}",
+            rodata.cake_tog_g46,
+            rodata.cake_tog_g51,
+            rodata.cake_tog_g52,
+            rodata.cake_tog_m6,
+            rodata.cake_tog_m7
+        );
+
+        // §G51: cpuidle exit-latency table from sysfs; absent driver leaves
+        // zeros and the depth model inert. §G52: CPPC highest_perf per CPU.
+        let mut deepest_us = 0u32;
+        for i in 0..bpf_intf::consts_CAKE_CSTATE_TABLE as usize {
+            let path = format!("/sys/devices/system/cpu/cpu0/cpuidle/state{i}/latency");
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                let us: u32 = s.trim().parse().unwrap_or(0);
+                rodata.cake_cstate_exit_us[i] = us;
+                deepest_us = deepest_us.max(us);
+            }
+        }
+        if rodata.cake_tog_g51 == 1 && deepest_us == 0 {
+            info!("   g51     no cpuidle driver: depth model inert");
+        }
+        let mut perf_seen = false;
+        for c in 0..*NR_CPU_IDS {
+            let path = format!("/sys/devices/system/cpu/cpu{c}/acpi_cppc/highest_perf");
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                let v: u64 = s.trim().parse().unwrap_or(0);
+                rodata.cpu_perf_rank[c] = v.min(255) as u8;
+                perf_seen = perf_seen || v != 0;
+            }
+        }
+        if rodata.cake_tog_g52 == 1 && !perf_seen {
+            info!("   g52     no CPPC highest_perf: rank tiebreak inert");
+        }
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
         // Clamped so a probe perturbed by host load cannot mis-tune the
@@ -365,6 +430,16 @@ impl<'a> Scheduler<'a> {
                     1e9 / observed as f64
                 );
             }
+        }
+
+        if let Some(bss) = self.skel.maps.bss_data.as_mut() {
+            let ev = &bss.cake_events;
+            info!(
+                "   events  select_fallback {} keep_last {} enq_skip_exiting {}",
+                ev.SCX_EV_SELECT_CPU_FALLBACK,
+                ev.SCX_EV_DISPATCH_KEEP_LAST,
+                ev.SCX_EV_ENQ_SKIP_EXITING
+            );
         }
 
         self.struct_ops.take();
