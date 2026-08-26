@@ -1,10 +1,5 @@
 #pragma once
 
-#include <lib/cpumask.h>
-
-struct topology;
-typedef struct topology __arena * topo_ptr;
-
 enum topo_level {
 	TOPO_TOP	= 0,
 	TOPO_NODE	= 1,
@@ -13,6 +8,14 @@ enum topo_level {
 	TOPO_CPU	= 4,
 	TOPO_MAX_LEVEL	= 5,
 };
+
+/* Everything below is BPF-only; userspace only consumes the levels above. */
+#ifdef __BPF__
+
+#include <lib/cpumask.h>
+
+struct topology;
+typedef struct topology __arena * topo_ptr;
 
 struct topology {
 	topo_ptr parent;
@@ -99,3 +102,5 @@ extern u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
 extern int nr_topo_nodes[TOPO_MAX_LEVEL];
 
 #define TOPO_NR(type) nr_topo_nodes[TOPO_##type - 1]
+
+#endif /* __BPF__ */

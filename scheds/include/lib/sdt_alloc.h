@@ -10,9 +10,21 @@
 
 #include <bpf_arena_common.bpf.h>
 #include <bpf_arena_spin_lock.h>
-#include "sdt_task_defs.h"
+
+#else /* __BPF__ */
+
+/* For userspace programs, __arena is a no-op. */
+#ifndef __arena
+#define __arena
 #endif
 
+/* Userspace only carries pointers to arena spinlocks. */
+struct __qspinlock;
+#define arena_spinlock_t struct __qspinlock
+
+#endif /* __BPF__ */
+
+#include "sdt_task_defs.h"
 #include "const-defs.h"
 
 struct scx_stk_seg;
