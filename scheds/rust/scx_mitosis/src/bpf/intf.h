@@ -6,6 +6,7 @@
 #define __INTF_H
 
 #include <stdbool.h>
+#include <lib/const-defs.h>
 
 #ifndef __VMLINUX_H__
 typedef unsigned long long u64;
@@ -13,7 +14,6 @@ typedef unsigned int u32;
 #endif
 
 enum consts {
-	CACHELINE_SIZE = 64,
 	MAX_CPUS_SHIFT = 9,
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
@@ -77,10 +77,10 @@ struct cgrp_ctx {
 struct subcell_llc {
 	u64 vtime_now;
 	u32 nr_queued;
-} __attribute__((aligned(CACHELINE_SIZE)));
+} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 // Ensure we don't have multiple of these on the same cacheline.
-_Static_assert(sizeof(struct subcell_llc) >= CACHELINE_SIZE,
+_Static_assert(sizeof(struct subcell_llc) >= SCX_CACHELINE_SIZE,
 	       "subcell_llc must be at least one cache line");
 
 /* Cell cpumask data for a single cell or subcell */
@@ -121,7 +121,7 @@ struct cell {
 
 // Verify these are the same size in both BPF and Rust.
 _Static_assert(sizeof(struct cell) ==
-		       (CACHELINE_SIZE + (sizeof(struct subcell) * MAX_SUBCELLS_PER_CELL)),
+	       (SCX_CACHELINE_SIZE + (sizeof(struct subcell) * MAX_SUBCELLS_PER_CELL)),
 	       "struct cell size must be stable for Rust bindings");
 
 /* Cell assignment entry: maps a cgroup to a cell */

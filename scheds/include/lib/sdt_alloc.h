@@ -13,6 +13,8 @@
 #include "sdt_task_defs.h"
 #endif
 
+#include "const-defs.h"
+
 struct scx_stk_seg;
 typedef struct scx_stk_seg __arena scx_stk_seg_t;
 
