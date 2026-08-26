@@ -49,13 +49,13 @@ struct sdt_desc {
 };
 
 /*
- * Leaf node containing per-task data. urcu_link chains deferred frees so that
- * the payload stays intact for readers until reclaim.
+ * Allocation metadata, trailing the caller's payload so that the payload starts
+ * at the element's alignment boundary, see sdt_tailer(). urcu_link chains
+ * deferred frees so that the payload stays intact for readers until reclaim.
  */
 struct sdt_data {
 	union sdt_id			tid;
 	__u64				urcu_link;
-	__u64				payload[];
 };
 
 /*
@@ -64,7 +64,7 @@ struct sdt_data {
 struct sdt_chunk {
 	union {
 		sdt_desc_t * descs[SDT_TASK_ENTS_PER_CHUNK];
-		struct sdt_data __arena *data[SDT_TASK_ENTS_PER_CHUNK];
+		void __arena *data[SDT_TASK_ENTS_PER_CHUNK];
 	};
 };
 

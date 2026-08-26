@@ -19,16 +19,14 @@ int scx_bitmap_init(__u64 total_mask_size)
 __weak
 u64 scx_bitmap_alloc_internal(void)
 {
-	struct sdt_data __arena *data = NULL;
 	scx_bitmap_t mask;
 	int i;
 
-	data = scx_alloc(&scx_bitmap_allocator);
-	if (unlikely(!data))
+	mask = scx_alloc(&scx_bitmap_allocator);
+	if (unlikely(!mask))
 		return (u64)(NULL);
 
-	mask = (scx_bitmap_t)data->payload;
-	mask->tid = data->tid;
+	mask->tid = sdt_tailer(&scx_bitmap_allocator, mask)->tid;
 	bpf_for(i, 0, mask_size) {
 		mask->bits[i] = 0ULL;
 	}

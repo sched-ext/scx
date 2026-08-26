@@ -18,16 +18,14 @@ int scx_atq_init(void)
 __weak
 u64 scx_atq_create_internal(bool fifo, size_t capacity)
 {
-	struct sdt_data __arena *data = NULL;
 	scx_atq_t *atq;
 
 	/* Note that scx_alloc() returns a zero-initialized memory. */
-	data = scx_alloc(&scx_atq_allocator);
-	if (unlikely(!data))
+	atq = scx_alloc(&scx_atq_allocator);
+	if (unlikely(!atq))
 		return (u64)NULL;
 
-	atq = (scx_atq_t *)data->payload;
-	atq->tid = data->tid;
+	atq->tid = sdt_tailer(&scx_atq_allocator, atq)->tid;
 
 	atq->tree = rb_create(RB_NOALLOC, RB_DUPLICATE);
 	if (!atq->tree) {

@@ -41,16 +41,14 @@ int scx_rb_init(void)
 
 u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 {
-	struct sdt_data __arena *data;
 	rbtree_t *rbtree;
 
 	/* Note that scx_alloc() returns a zero-initialized memory. */
-	data = scx_alloc(&scx_rbtree_allocator);
-	if (unlikely(!data))
+	rbtree = scx_alloc(&scx_rbtree_allocator);
+	if (unlikely(!rbtree))
 		return (u64)(NULL);
 
-	rbtree = (rbtree_t *)data->payload;
-	rbtree->tid = data->tid;
+	rbtree->tid = sdt_tailer(&scx_rbtree_allocator, rbtree)->tid;
 
 	rbtree->alloc = alloc;
 	rbtree->insert = insert;
@@ -198,7 +196,6 @@ int rb_find(rbtree_t __arg_arena *rbtree, u64 key, u64 *value)
 
 static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 {
-	struct sdt_data __arena *data;
 	rbnode_t *rbnode;
 	volatile rbnode_t *node;
 
@@ -212,12 +209,11 @@ static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 k
 	} while (cmpxchg(&rbtree->freelist, rbnode, rbnode->parent) != rbnode && can_loop);
 
 	if (!rbnode) {
-		data = scx_alloc(&scx_rbnode_allocator);
-		if (unlikely(!data))
+		rbnode = scx_alloc(&scx_rbnode_allocator);
+		if (unlikely(!rbnode))
 			return NULL;
 
-		rbnode = (rbnode_t *)data->payload;
-		rbnode->tid = data->tid;
+		rbnode->tid = sdt_tailer(&scx_rbnode_allocator, rbnode)->tid;
 	}
 	
 	if (!rbnode)

@@ -78,10 +78,22 @@ int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size);
 u64 scx_alloc_internal(struct scx_allocator *alloc);
 int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 
-#define scx_alloc(alloc) ((struct sdt_data __arena *)scx_alloc_internal((alloc)))
+#define scx_alloc(alloc) ((void __arena *)scx_alloc_internal((alloc)))
+
+/*
+ * The metadata of the allocation holding @payload. It trails the payload inside
+ * the element so that the payload starts at the element's alignment boundary.
+ */
+static inline struct sdt_data __arena *sdt_tailer(struct scx_allocator *alloc,
+						  void __arena *payload)
+{
+	return (struct sdt_data __arena *)
+		((__u64)payload + alloc->pool.elem_size - sizeof(struct sdt_data));
+}
 
 int scx_urcu_pending(struct scx_urcu *urcu);
-void scx_urcu_free(struct scx_urcu *urcu, struct sdt_data __arena *data);
+void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc,
+		   void __arena *payload);
 int scx_urcu_reclaim(struct scx_urcu *urcu, struct scx_allocator *alloc);
 
 u64 scx_static_alloc_internal(size_t bytes, size_t alignment);
