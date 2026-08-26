@@ -733,6 +733,74 @@ static __always_inline u32 cmask_next_and_set_wrap(const struct scx_cmask __aren
 	return found < start ? found : a_end;
 }
 
+/* per-cpu rotor for cmask_any_distribute() */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u32);
+} cmask_distribute_rotor __weak SEC(".maps");
+
+/**
+ * cmask_any_distribute - Pick a set cid, spreading successive picks
+ * @m: cmask to pick from
+ *
+ * Counterpart of bpf_cpumask_any_distribute(): a per-cpu rotor makes successive
+ * picks rotate through the set cids instead of repeating the first one. Returns
+ * cmask_end(@m) if @m is empty.
+ */
+static __always_inline u32 cmask_any_distribute(const struct scx_cmask __arena *m)
+{
+	u32 zero = 0, pick;
+	u32 *rotor;
+
+	if (unlikely(!(rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero))))
+		return cmask_first_set(m);
+
+	pick = cmask_next_set_wrap(m, *rotor + 1);
+	if (pick < cmask_end(m))
+		*rotor = pick;
+	return pick;
+}
+
+/**
+ * cmask_any_and_distribute - Pick a cid set in both masks, spreading picks
+ * @a: first cmask, the scan is bounded by its range
+ * @b: second cmask
+ *
+ * Counterpart of bpf_cpumask_any_and_distribute(). Shares the rotor with
+ * cmask_any_distribute() the same way the kernel counterparts share theirs.
+ * Returns cmask_end(@a) if the intersection is empty.
+ */
+static __always_inline u32 cmask_any_and_distribute(const struct scx_cmask __arena *a,
+						    const struct scx_cmask __arena *b)
+{
+	u32 zero = 0, pick;
+	u32 *rotor;
+
+	if (unlikely(!(rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero))))
+		return cmask_next_and_set(a, b, a->base);
+
+	pick = cmask_next_and_set_wrap(a, b, *rotor + 1);
+	if (pick < cmask_end(a))
+		*rotor = pick;
+	return pick;
+}
+
+/**
+ * cmask_distribute_rotor_pos - Last cid picked by the distribute helpers
+ *
+ * For callers that anchor scans of their own on the shared rotor. Returns 0
+ * when nothing has been picked on this cpu yet.
+ */
+static __always_inline u32 cmask_distribute_rotor_pos(void)
+{
+	u32 zero = 0;
+	u32 *rotor = bpf_map_lookup_elem(&cmask_distribute_rotor, &zero);
+
+	return likely(rotor) ? *rotor : 0;
+}
+
 /*
  * Like cmask_next_and_set() but over the intersection of THREE masks. Return
  * a->base + a->nr_cids if no cid is set in all three at or after @start.
