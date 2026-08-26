@@ -43,9 +43,9 @@ struct {
 struct scx_allocator scx_cgrp_allocator;
 
 __hidden
-int scx_cgrp_init(__u64 data_size)
+int scx_cgrp_init(__u64 data_size, __u64 align)
 {
-	return scx_alloc_init(&scx_cgrp_allocator, data_size);
+	return scx_alloc_init(&scx_cgrp_allocator, data_size, align);
 }
 
 __hidden

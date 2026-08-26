@@ -74,7 +74,7 @@ struct scx_urcu {
 
 void scx_arena_subprog_init(void);
 
-int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size);
+int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size, __u64 align);
 u64 scx_alloc_internal(struct scx_allocator *alloc);
 int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 

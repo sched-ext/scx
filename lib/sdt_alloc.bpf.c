@@ -291,7 +291,7 @@ static int pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
 
 /* initialize the whole thing, maybe misnomer */
 __hidden int
-scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
+scx_alloc_init(struct scx_allocator *alloc, __u64 data_size, __u64 align)
 {
 	size_t min_chunk_size;
 	int ret;
@@ -321,9 +321,15 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 			return -ENOMEM;
 	}
 
-	/* Wrap data into a descriptor and word align. */
+	if (!align)
+		align = 8;
+	if (unlikely(align < 8 || (align & (align - 1)))) {
+		scx_err_loc("invalid alignment %llu", align);
+		return -EINVAL;
+	}
+
 	data_size += sizeof(struct sdt_data);
-	data_size = round_up(data_size, 8);
+	data_size = round_up(data_size, align);
 
 	/*
 	 * Ensure we allocate large enough chunks from the arena to avoid excessive

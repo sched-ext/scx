@@ -13,7 +13,7 @@ int scx_bitmap_init(__u64 total_mask_size)
 {
 	mask_size = div_round_up(total_mask_size, 8);
 
-	return scx_alloc_init(&scx_bitmap_allocator, mask_size * 8);
+	return scx_alloc_init(&scx_bitmap_allocator, mask_size * 8, 8);
 }
 
 __weak

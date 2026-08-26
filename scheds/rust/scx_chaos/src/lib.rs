@@ -448,7 +448,7 @@ impl Builder<'_> {
         scx_p2dq::init_skel!(&mut skel, topo);
 
         let task_size = std::mem::size_of::<types::task_p2dq>();
-        let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
+        let arenalib = ArenaLib::init(skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
         arenalib.setup()?;
 
         let out = unsafe {

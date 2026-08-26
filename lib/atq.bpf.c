@@ -12,7 +12,8 @@ static struct scx_allocator scx_atq_allocator;
 __weak
 int scx_atq_init(void)
 {
-	return scx_alloc_init(&scx_atq_allocator, sizeof(scx_atq_t));
+	return scx_alloc_init(&scx_atq_allocator, sizeof(scx_atq_t),
+			      SCX_CACHELINE_SIZE);
 }
 
 __weak

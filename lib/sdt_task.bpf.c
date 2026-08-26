@@ -55,9 +55,9 @@ void __arena *scx_task_alloc(struct task_struct *p)
 }
 
 __hidden
-int scx_task_init(__u64 data_size)
+int scx_task_init(__u64 data_size, __u64 align)
 {
-	return scx_alloc_init(&scx_task_allocator, data_size);
+	return scx_alloc_init(&scx_task_allocator, data_size, align);
 }
 
 __hidden

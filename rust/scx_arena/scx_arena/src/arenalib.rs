@@ -34,6 +34,7 @@ const MAX_CPU_SUPPORTED: usize = 640;
 #[derive(Debug)]
 pub struct ArenaLib<'a> {
     task_size: usize,
+    task_align: usize,
     obj: &'a mut Object,
 }
 
@@ -75,6 +76,7 @@ impl<'a> ArenaLib<'a> {
         let mut args = types::arena_init_args {
             static_pages: Self::STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
             task_ctx_size: self.task_size as c_ulong,
+            task_ctx_align: self.task_align as c_ulong,
         };
 
         let input = ProgramInput {
@@ -251,12 +253,22 @@ impl<'a> ArenaLib<'a> {
     }
 
     /// Create an Arenalib object This call only initializes the Rust side of Arenalib.
-    pub fn init(obj: &'a mut Object, task_size: usize, nr_cpus: usize) -> Result<Self> {
+    /// @task_align: task ctx element alignment, 0 for word alignment.
+    pub fn init(
+        obj: &'a mut Object,
+        task_size: usize,
+        task_align: usize,
+        nr_cpus: usize,
+    ) -> Result<Self> {
         if nr_cpus >= MAX_CPU_SUPPORTED {
             bail!("Scheduler specifies too many CPUs");
         }
 
-        Ok(Self { task_size, obj })
+        Ok(Self {
+            task_size,
+            task_align,
+            obj,
+        })
     }
 
     /// Set up the BPF arena library state and, when the object carries the
