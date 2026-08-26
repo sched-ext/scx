@@ -5,11 +5,11 @@
 #ifndef __INTF_H
 #define __INTF_H
 
-#ifdef __BINDGEN_RUNNING__
-#include <stddef.h>
+#include <stdbool.h>
+
+#ifndef __VMLINUX_H__
 typedef unsigned long long u64;
 typedef unsigned int u32;
-typedef _Bool bool;
 #endif
 
 enum consts {
@@ -18,12 +18,11 @@ enum consts {
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 256,
+	MAX_SUBCELLS_PER_CELL = 8,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 
 	MAX_CG_DEPTH = 256,
 	MAX_LLCS = 16,
-
-	DEBUG_EVENTS_BUF_SIZE = 4096,
 
 	/* Size of cpumask in unsigned longs (supports up to 8192 CPUs) */
 	CPUMASK_LONG_ENTRIES = 128,
@@ -38,31 +37,6 @@ struct llc_cpumask {
 	unsigned long bits[CPUMASK_LONG_ENTRIES];
 };
 
-/* Debug event types */
-enum debug_event_type {
-	DEBUG_EVENT_CGROUP_INIT,
-	DEBUG_EVENT_INIT_TASK,
-	DEBUG_EVENT_CGROUP_EXIT,
-};
-
-/* Debug event record - discriminated union */
-struct debug_event {
-	u64 timestamp;
-	u32 event_type;
-	union {
-		struct {
-			u64 cgid;
-		} cgroup_init;
-		struct {
-			u64 cgid;
-			u32 pid;
-		} init_task;
-		struct {
-			u64 cgid;
-		} cgroup_exit;
-	};
-};
-
 /* Statistics */
 enum cell_stat_idx {
 	CSTAT_LOCAL,
@@ -72,6 +46,7 @@ enum cell_stat_idx {
 	CSTAT_BORROWED,
 	CSTAT_STEAL,
 	CSTAT_DRAIN_CNT,
+	CSTAT_DRAIN_AFFN_CNT,
 	CSTAT_CLAMP_USED,
 	CSTAT_PIN_SKIP,
 	CSTAT_SLICE_SHRINK_MAX,
@@ -86,6 +61,7 @@ struct cpu_ctx {
 	u64 running_ns[MAX_CELLS];
 	u64 vtime_now;
 	u32 cell;
+	u32 subcell;
 	u32 llc;
 };
 
@@ -98,76 +74,60 @@ struct cgrp_ctx {
  * Per-LLC data is cacheline-aligned to prevent false sharing when
  * CPUs on different LLCs update their vtime concurrently.
  */
-struct cell_llc {
+struct subcell_llc {
 	u64 vtime_now;
 	u32 nr_queued;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 // Ensure we don't have multiple of these on the same cacheline.
-_Static_assert(sizeof(struct cell_llc) >= CACHELINE_SIZE,
-	       "cell_llc must be at least one cache line");
+_Static_assert(sizeof(struct subcell_llc) >= CACHELINE_SIZE,
+	       "subcell_llc must be at least one cache line");
 
-// CELL_LOCK_T is a lock for kernel and padding for user.
-#if !defined(__BINDGEN_RUNNING__)
-#define CELL_LOCK_T struct bpf_spin_lock
-#else
-// When userspaces accesses a cell, this pad is zero.
-#define CELL_LOCK_T        \
-	struct {           \
-		u32 __pad; \
-	}
-#endif
+/* Cell cpumask data for a single cell or subcell */
+struct cell_cpumask_data {
+	unsigned char mask[MAX_CPUS_U8];
+};
 
-/*
-* Cell struct shared between kernel and userspace.
-* Kernel uses spinlock for atomic updates.
-* Userspace must read with BPF_F_LOCK to avoid torn reads.
-* Lock field is padding (kernel zeros it to avoid leaking pointers).
-*
-* map.lookup(&key, MapFlags::ANY)  -> userspace may see torn state
-* map.lookup(&key, MapFlags::LOCK) -> safe read
-*/
+/* Serialized subcell config shared between userspace and BPF. */
+struct subcell_config {
+	u32 id;
+	u32 in_use;
+	struct cell_cpumask_data primary;
+	struct cell_cpumask_data borrowable;
+};
+
+/* Subcell state shared between kernel and userspace. */
+struct subcell {
+	u32 id;
+	u32 in_use;
+	// Bitmap of LLC DSQs that have queued work but no CPUs in this subcell
+	u64 llcs_to_drain;
+	// Bitmap of LLCs that contain CPUs assigned to this subcell
+	u64 llcs_with_cpus;
+	struct cell_cpumask_data primary;
+	struct cell_cpumask_data borrowable;
+	struct subcell_llc llcs[MAX_LLCS];
+};
+
 struct cell {
-	// This is a lock in the kernel and padding in userspace
-	CELL_LOCK_T lock;
-
 	// cgroup ID of the cell owner (0 for cell 0 or if no owner)
 	u64 owner_cgid;
 	// Whether or not the cell is used
 	u32 in_use;
-	// Bitmap of LLC DSQs that have queued work but no CPUs in this cell
-	u64 llcs_to_drain;
-	// Bitmap of LLCs that contain CPUs assigned to this cell
-	u64 llcs_with_cpus;
 
-	// Per-LLC data (cacheline-aligned)
-	struct cell_llc llcs[MAX_LLCS];
+	// Fixed-size subcell state owned by this cell.
+	struct subcell subcells[MAX_SUBCELLS_PER_CELL];
 };
 
-// Putting the lock first in the struct is our convention.
-// We pad this space when in Rust code that will never see the lock value.
-// It is a BPF constraint that it is 4 byte aligned.
-
-// All assertions work for both BPF and userspace builds
-_Static_assert(offsetof(struct cell, lock) == 0, "lock/padding must be first field");
-
-_Static_assert(sizeof(((struct cell *)0)->lock) == 4, "lock/padding must be 4 bytes");
-
-_Static_assert(_Alignof(CELL_LOCK_T) == 4, "lock/padding must be 4-byte aligned");
-
 // Verify these are the same size in both BPF and Rust.
-_Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
+_Static_assert(sizeof(struct cell) ==
+		       (CACHELINE_SIZE + (sizeof(struct subcell) * MAX_SUBCELLS_PER_CELL)),
 	       "struct cell size must be stable for Rust bindings");
 
 /* Cell assignment entry: maps a cgroup to a cell */
 struct cell_assignment {
 	u64 cgid; /* cgroup ID (from cgroup file inode) */
 	u32 cell_id; /* cell ID to assign */
-};
-
-/* Cell cpumask data for a single cell */
-struct cell_cpumask_data {
-	unsigned char mask[MAX_CPUS_U8];
 };
 
 /*
@@ -177,6 +137,7 @@ struct cell_cpumask_data {
  * BPF program invocation:
  * - Cell-to-cgroup assignments (which cgroups own which cells)
  * - Cell cpumasks (which CPUs belong to each cell)
+ * - Per-cell subcell cpumasks
  */
 struct cell_config {
 	u32 num_cell_assignments;
@@ -184,6 +145,7 @@ struct cell_config {
 	struct cell_assignment assignments[MAX_CELLS];
 	struct cell_cpumask_data cpumasks[MAX_CELLS];
 	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
+	struct subcell_config subcells[MAX_CELLS][MAX_SUBCELLS_PER_CELL];
 };
 
 #endif /* __INTF_H */

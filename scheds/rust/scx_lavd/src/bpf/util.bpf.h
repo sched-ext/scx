@@ -18,6 +18,7 @@ extern volatile bool		no_freq_scaling;
 extern const volatile bool	no_wake_sync;
 extern const volatile bool	no_slice_boost;
 extern const volatile bool	per_cpu_dsq;
+extern const volatile u64	warm_cpu_ns;	/* enables per-CPU DSQ consume */
 extern const volatile bool	enable_cpu_bw;
 extern const volatile bool	is_autopilot_on;
 extern const volatile u8	verbose;
@@ -45,6 +46,12 @@ u32 get_primary_cpu(u32 cpu);
 static inline bool rt_or_dl_task(struct task_struct *p)
 {
 	return unlikely(p->prio < MAX_RT_PRIO);
+}
+
+static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
+{
+	struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+	return curr && rt_or_dl_task(curr);
 }
 
 /*

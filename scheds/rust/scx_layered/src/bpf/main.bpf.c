@@ -711,6 +711,8 @@ struct task_ctx {
 	u64			layer_refresh_seq;
 
 	u64			recheck_layer_membership;
+
+	bool			runq_lat_pending;
 };
 
 struct {
@@ -1660,7 +1662,7 @@ bool maybe_update_task_llc(struct task_struct *p, struct task_ctx *taskc, s32 ne
 		return false;
 
 	vtime_delta = p->scx.dsq_vtime - prev_llcc->vtime_now[layer_id];
-	p->scx.dsq_vtime = new_llcc->vtime_now[layer_id] + vtime_delta;
+	scx_bpf_task_set_dsq_vtime(p, new_llcc->vtime_now[layer_id] + vtime_delta);
 
 	taskc->llc_id = new_llc_id;
 	return true;
@@ -1702,6 +1704,15 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	return prev_cpu;
 }
 
+/*
+ * Is @taskc a "guest" on a CPU (@cpuc) owned by a protected layer?
+ */
+static __always_inline bool is_protected_layer_guest(struct cpu_ctx *cpuc,
+						     struct task_ctx *taskc)
+{
+	return cpuc->is_protected && taskc->layer_id != READ_ONCE(cpuc->layer_id);
+}
+
 enum preempt_flags {
 	PREEMPT_FIRST		= 1LLU << 0,
 	PREEMPT_IGNORE_EXCL	= 1LLU << 1,
@@ -1725,6 +1736,10 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)))
+		return false;
+
+	/* You can't preempt a protected layer CPU if you're not in the layer */
+	if (is_protected_layer_guest(cand_cpuc, taskc))
 		return false;
 
 	if (cand_cpuc->preempting_task || cand_cpuc->current_preempt)
@@ -2307,6 +2322,17 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 	}
 
 	/*
+	 * A protected layer's CPUs never serve other layers' tasks through
+	 * dispatch, but a foreign task can still be running here if it's e.g.
+	 * a lo/hi_fb fallback execution. Refuse the refresh so that it just
+	 * goes back through the enqueue path.
+	 */
+	if (is_protected_layer_guest(cpuc, taskc)) {
+		lstat_inc(LSTAT_KEEP_FAIL_BUSY, layer, cpuc);
+		goto no;
+	}
+
+	/*
 	 * @p is eligible for continuing. We need to implement a better way to
 	 * determine whether a layer is allowed to keep running. For now,
 	 * implement something simple.
@@ -2319,7 +2345,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		 */
 		u64 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-			p->scx.slice = layer->slice_ns;
+			scx_bpf_task_set_slice(p, layer->slice_ns);
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
 			return true;
 		}
@@ -2343,7 +2369,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		}
 
 		if (has_idle) {
-			p->scx.slice = layer->slice_ns;
+			scx_bpf_task_set_slice(p, layer->slice_ns);
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
 			return true;
 		}
@@ -2724,7 +2750,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		if (is_task_layer_hint_stale(prev, prev_taskc))
 			return;
-		prev->scx.slice = prev_layer->slice_ns;
+		scx_bpf_task_set_slice(prev, prev_layer->slice_ns);
 		return;
 	}
 
@@ -2867,13 +2893,23 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 replenish:
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id, 0))
 		return;
-        /*
-         * !NULL prev_taskc indicates runnable prev.
-         * Do not refresh the slice in case we need the task to be reenqueued
-         * for layer membership change and subsequent CPU selection.
-         */
-        if (prev_taskc && prev_layer && !is_task_layer_hint_stale(prev, prev_taskc))
-		prev->scx.slice = prev_layer->slice_ns;
+	/*
+	 * !NULL prev_taskc indicates runnable prev.
+	 * Do not refresh the slice in case we need the task to be reenqueued
+	 * for layer membership change and subsequent CPU selection.
+	 */
+	if (prev_taskc && prev_layer && !is_task_layer_hint_stale(prev, prev_taskc)) {
+		/*
+		 * Don't refresh the slice of a foreign task on a protected
+		 * layer's CPU. This is safe because SCX_OPS_ENQ_LAST will
+		 * cause this task to do a round trip through the enqueue path,
+		 * so it will land back in its own layer's DSQ.
+		 */
+		if (is_protected_layer_guest(cpuc, prev_taskc))
+			return;
+
+		scx_bpf_task_set_slice(prev, prev_layer->slice_ns);
+	}
 }
 
 /*
@@ -3292,7 +3328,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	 * Revisit if high frequency dynamic layer switching
 	 * needs to be supported.
 	 */
-	p->scx.dsq_vtime = llcc->vtime_now[layer_id];
+	scx_bpf_task_set_dsq_vtime(p, llcc->vtime_now[layer_id]);
 }
 
 static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc, u64 now)
@@ -3522,6 +3558,7 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	taskc->runnable_at = now;
+	taskc->runq_lat_pending = true;
 	maybe_refresh_layer(p, taskc, now);
 
 	if (enq_flags & SCX_ENQ_WAKEUP)
@@ -3599,6 +3636,34 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	} else {
 		cpuc->running_owned = taskc->layer_id == cpuc->layer_id;
 		cpuc->running_open = false;
+	}
+
+	if (taskc->runq_lat_pending) {
+		u64 lat_us = (now - taskc->runnable_at) / 1000;
+		u32 rql_bucket = 0;
+
+		taskc->runq_lat_pending = false;
+		if (lat_us >> 16) {
+			rql_bucket += 16;
+			lat_us >>= 16;
+		}
+		if (lat_us >> 8) {
+			rql_bucket += 8;
+			lat_us >>= 8;
+		}
+		if (lat_us >> 4) {
+			rql_bucket += 4;
+			lat_us >>= 4;
+		}
+		if (lat_us >> 2) {
+			rql_bucket += 2;
+			lat_us >>= 2;
+		}
+		if (lat_us >> 1)
+			rql_bucket += 1;
+		if (rql_bucket >= NR_RUNQ_LAT_BUCKETS)
+			rql_bucket = NR_RUNQ_LAT_BUCKETS - 1;
+		lstat_inc(LSTAT_RUNQ_LAT_BASE + rql_bucket, layer, cpuc);
 	}
 
 	/*
@@ -3706,7 +3771,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	if (cpuc->yielding && runtime < task_layer->slice_ns)
 		runtime = task_layer->slice_ns;
 
-	p->scx.dsq_vtime += runtime * 100 / p->scx.weight;
+	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (runtime * 100 / p->scx.weight));
 }
 
 bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct *to)
@@ -3729,10 +3794,10 @@ bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct 
 	}
 
 	if (from->scx.slice > layer->yield_step_ns) {
-		from->scx.slice -= layer->yield_step_ns;
+		scx_bpf_task_set_slice(from, from->scx.slice - (layer->yield_step_ns));
 		lstat_inc(LSTAT_YIELD_IGNORE, layer, cpuc);
 	} else {
-		from->scx.slice = 0;
+		scx_bpf_task_set_slice(from, 0);
 		cpuc->yielding = true;
 	}
 
@@ -3825,10 +3890,15 @@ static int init_cached_cpus(struct cached_cpus *ccpus)
 static int maybe_init_task_unprotected_mask(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct bpf_cpumask *cpumask;
+	bool full;
 	int ret;
 
+	bpf_rcu_read_lock();
+	full = bpf_cpumask_full(p->cpus_ptr);
+	bpf_rcu_read_unlock();
+
 	/* We don't need our own mask, we have no placement restrictions. */
-	if (bpf_cpumask_full(p->cpus_ptr))
+	if (full)
 		return 0;
 
 	/* Already initialized. */
@@ -3907,8 +3977,8 @@ void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
 	scx_bpf_reenqueue_local();
 }
 
-s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
+s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init_task, struct task_struct *p,
+			     struct scx_init_task_args *args)
 {
 	struct task_ctx *taskc;
 	struct bpf_cpumask *cpumask;

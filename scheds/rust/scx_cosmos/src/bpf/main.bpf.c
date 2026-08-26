@@ -268,31 +268,31 @@ struct {
 } gpu_node_map SEC(".maps");
 
 /*
- * PID -> NUMA node mapping for GPU tasks (updated from userspace via NVML).
- * Key is the task's pid (thread id). Entries are removed when the task
- * is no longer using a GPU.
+ * Process TGID -> NUMA node mapping for GPU tasks (updated from userspace via
+ * NVML). Entries are removed when the process is no longer using a GPU.
  */
 #define MAX_GPU_PIDS	8192
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, MAX_GPU_PIDS);
-	__type(key, u32);	/* pid (task/thread id) */
+	__type(key, u32);	/* process tgid */
 	__type(value, u32);	/* node_id */
 } gpu_pid_map SEC(".maps");
 
 /*
- * Look up preferred NUMA node for a PID from userspace-provided GPU process
- * list (NVML). Returns node id or negative error.
+ * Look up the preferred NUMA node for a process TGID from the
+ * userspace-provided NVML GPU process list. Returns a node id or a negative
+ * error.
  */
-static int gpu_node_by_pid(u32 pid)
+static int gpu_node_by_tgid(u32 tgid)
 {
 	u32 *node;
 
 	if (!gpu_enabled || !numa_enabled)
 		return -ENOENT;
 
-	node = bpf_map_lookup_elem(&gpu_pid_map, &pid);
+	node = bpf_map_lookup_elem(&gpu_pid_map, &tgid);
 	if (!node)
 		return -ENOENT;
 
@@ -490,10 +490,10 @@ static bool can_use_node(const struct task_struct *p, int node)
 }
 
 /*
- * If the task is in gpu_pid_map and should run on a different node, pick a CPU
- * on the preferred GPU node. Returns the CPU id (>= 0) on success, or a
- * negative value if the task is not GPU-bound, is already on the right node,
- * or no suitable CPU was found.
+ * If the task's thread group is in gpu_pid_map and should run on a different
+ * node, pick a CPU on the preferred GPU node. Returns the CPU id (>= 0) on
+ * success, or a negative value if the task is not GPU-bound, is already on
+ * the right node, or no suitable CPU was found.
  */
 static s32 pick_cpu_on_gpu_node(const struct task_struct *p, int node,
 				struct task_ctx *tctx)
@@ -502,7 +502,7 @@ static s32 pick_cpu_on_gpu_node(const struct task_struct *p, int node,
 	struct bpf_cpumask *mask;
 	int target_node;
 
-	target_node = gpu_node_by_pid(p->pid);
+	target_node = gpu_node_by_tgid(p->tgid);
 	if (target_node < 0 || target_node == node || !can_use_node(p, target_node))
 		return -ENOENT;
 
@@ -945,7 +945,7 @@ static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 	u64 vtime_min = vtime_now - vsleep_max;
 
 	if (time_before(p->scx.dsq_vtime, vtime_min))
-		p->scx.dsq_vtime = vtime_min;
+		scx_bpf_task_set_dsq_vtime(p, vtime_min);
 
 	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
 }
@@ -1079,7 +1079,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	}
 
 	/*
-	 * If GPU affinity is enabled and the task's pid is in gpu_pid_map
+	 * If GPU affinity is enabled and the task's TGID is in gpu_pid_map
 	 * but not on the GPU's node, try to pick a CPU on the GPU node.
 	 */
 	if (gpu_enabled && numa_enabled) {
@@ -1133,7 +1133,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
 
 		if (is_smt_contended(cpu) || (is_cpu_busy(cpu) && cpu_busy))
-			p->scx.slice = 0;
+			scx_bpf_task_set_slice(p, 0);
 	}
 }
 
@@ -1152,7 +1152,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * If the task's pid is in gpu_pid_map (NVML GPU task), prefer the
+	 * If the task's TGID is in gpu_pid_map (NVML GPU process), prefer the
 	 * GPU NUMA node. If we're on a different node, migrate to the GPU
 	 * node.
 	 */
@@ -1290,7 +1290,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * is on the primary domain.
 	 */
 	if (prev && keep_running(prev, cpu))
-		prev->scx.slice = task_slice(prev);
+		scx_bpf_task_set_slice(prev, task_slice(prev));
 }
 
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
@@ -1396,7 +1396,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 * Cap the maximum accumulated time since last sleep to @slice_lag,
 	 * to prevent starving CPU-intensive tasks.
 	 */
-	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
+	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (scale_by_task_weight_inverse(p, slice)));
 	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
 
 	/*
@@ -1407,7 +1407,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(cosmos_enable, struct task_struct *p)
 {
-	p->scx.dsq_vtime = vtime_now;
+	scx_bpf_task_set_dsq_vtime(p, vtime_now);
 }
 
 s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,

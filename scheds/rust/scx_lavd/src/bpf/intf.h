@@ -31,7 +31,7 @@ enum {
  * common constants
  */
 enum {
-	LAVD_CPU_ID_MAX			= 512,
+	LAVD_CPU_ID_MAX			= 8192,
 
 	LAVD_CPDOM_MAX_NR		= 128, /* maximum number of compute domain */
 	LAVD_CPDOM_MAX_DIST		= 3,  /* maximum distance from one compute domain to another */
@@ -119,6 +119,8 @@ struct task_ctx_x {
 	u32	vuln_thresh;	/* preemption vulnerability threshold step */
 	u32	task_util_est;	/* task's estimated utilization from ravg */
 	u16	norm_lat_cri;	/* task's normalized latency criticality [0, 1024] */
+	u16	cpu_heat;	/* per-CPU warmth (cache/TLB) [0, 1024] */
+	u16	warm_cpu_id;	/* CPU the per-CPU warmth belongs to */
 };
 
 

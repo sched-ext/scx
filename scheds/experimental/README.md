@@ -23,4 +23,3 @@ comments in their `main.rs` or `*.bpf.c` files.
 
 - [scx_flow](scx_flow/README.md)
 - [scx_rlfifo](scx_rlfifo/README.md)
-- [scx_wd40](scx_wd40/README.md)

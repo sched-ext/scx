@@ -435,7 +435,7 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 		 * can be preempted.
 		 */
 		if (p->scx.slice == SCX_SLICE_INF) {
-			p->scx.slice = slice_ns;
+			scx_bpf_task_set_slice(p, slice_ns);
 			__sync_fetch_and_add(&nr_preemptions, 1);
 		}
 	}
@@ -524,7 +524,7 @@ void BPF_STRUCT_OPS(tickless_dispatch, s32 cpu, struct task_struct *prev)
 	 * Keep running the previous task if it still wants to run.
 	 */
 	if (prev && prev->scx.flags & SCX_TASK_QUEUED)
-		prev->scx.slice = SCX_SLICE_INF;
+		scx_bpf_task_set_slice(prev, SCX_SLICE_INF);
 }
 
 /*

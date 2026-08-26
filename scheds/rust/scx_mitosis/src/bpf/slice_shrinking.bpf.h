@@ -112,7 +112,7 @@ static inline void slice_shrink_apply(struct task_struct *p, u64 limit,
 				      struct cpu_ctx *cctx)
 {
 	if (p->scx.slice > limit) {
-		p->scx.slice = limit;
+		scx_bpf_task_set_slice(p, limit);
 		if (result == SHRINK_MAX)
 			cstat_inc(CSTAT_SLICE_SHRINK_MAX, cell, cctx);
 		else if (result == SHRINK_PROPORTIONAL)

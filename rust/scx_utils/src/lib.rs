@@ -77,6 +77,7 @@ pub use topology::NR_CPU_IDS;
 
 mod energy_model;
 pub use energy_model::EnergyModel;
+pub use energy_model::EqPerfDomain;
 pub use energy_model::PerfDomain;
 pub use energy_model::PerfState;
 
@@ -106,6 +107,9 @@ pub use netdev::read_netdevs;
 pub use netdev::NetDev;
 
 pub mod pm;
+
+pub mod cgroup;
+pub use cgroup::resize_cgroup_bw_llc_map;
 
 pub mod enums;
 pub use enums::scx_enums;

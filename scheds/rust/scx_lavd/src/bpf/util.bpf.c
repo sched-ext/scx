@@ -454,6 +454,50 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 	return cpdom_to_turb_dsq(cpuc->cpdom_id);
 }
 
+/*
+ * Current warmth of @cpu_id for @taskc: 0 unless @cpu_id is the CPU the task
+ * last ran on (taskc->cpu_id). Heat decays linearly to 0 across
+ * LAVD_CPU_WARM_LIFETIME_NS of away-time.
+ */
+__hidden
+u64 task_cpu_warmth(task_ctx __arg_arena *taskc, u32 cpu_id, u64 now)
+{
+	u64 away_ns, heat = taskc->cpu_heat;
+
+	if (!heat || taskc->cpu_id != cpu_id)
+		return 0;
+
+	away_ns = time_delta(now, taskc->last_stopping_clk);
+	if (away_ns >= LAVD_CPU_WARM_LIFETIME_NS)
+		return 0;
+
+	return heat - (heat * away_ns) / LAVD_CPU_WARM_LIFETIME_NS;
+}
+
+/*
+ * Add the slice a task just spent on @cpuc to its warmth, saturating at full
+ * heat after LAVD_CPU_WARM_SAT_NS of residence. Heat follows the CPU the task
+ * last ran on (taskc->cpu_id); a migration onto @cpuc (prev_cpu_id != cpu_id)
+ * restarts the clock from this slice.
+ */
+__hidden
+void task_update_cpu_warmth(task_ctx __arg_arena *taskc, struct cpu_ctx *cpuc,
+			    u64 slice_used, u64 now)
+{
+	u64 gain, w;
+
+	gain = (min(slice_used, (u64)LAVD_CPU_WARM_SAT_NS) * LAVD_SCALE) /
+	       LAVD_CPU_WARM_SAT_NS;
+
+	if (taskc->prev_cpu_id == cpuc->cpu_id) {
+		w = task_cpu_warmth(taskc, cpuc->cpu_id, now) + gain;
+		taskc->cpu_heat = min(w, (u64)LAVD_SCALE);
+	} else {
+		taskc->cpu_heat = min(gain, (u64)LAVD_SCALE);
+	}
+	taskc->last_stopping_clk = now;
+}
+
 /**
  * normalize_lat_cri - Normalize latency criticality to 1024 scale
  * @lat_cri: The latency criticality value from task_ctx

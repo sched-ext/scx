@@ -22,6 +22,11 @@ use crate::DistributionStats;
 pub struct CellMetrics {
     #[stat(desc = "Number of cpus")]
     pub num_cpus: u32,
+    #[stat(
+        desc = "Cgroup path of this cell, relative to the cgroup root (\"/\" for the root cell)",
+        _om_skip
+    )]
+    pub cgroup_path: String,
     #[stat(desc = "Local queue %")]
     pub local_q_pct: f64,
     #[stat(desc = "CPU queue %")]
@@ -36,6 +41,8 @@ pub struct CellMetrics {
     pub steal_pct: f64,
     #[stat(desc = "Orphaned LLC DSQ drain events")]
     pub drain_cnt: u64,
+    #[stat(desc = "Orphaned LLC DSQ affinity rescue events")]
+    pub drain_affn_cnt: u64,
     #[stat(desc = "Pin reject skipped %")]
     pub pin_skip_pct: f64,
     #[stat(desc = "Slice shrink events")]
@@ -100,6 +107,8 @@ pub struct Metrics {
     pub steal_pct: f64,
     #[stat(desc = "Orphaned LLC DSQ drain events")]
     pub drain_cnt: u64,
+    #[stat(desc = "Orphaned LLC DSQ affinity rescue events")]
+    pub drain_affn_cnt: u64,
     #[stat(desc = "Pin reject skipped %")]
     pub pin_skip_pct: f64,
     #[stat(desc = "Slice shrink events")]
@@ -126,7 +135,7 @@ pub struct Metrics {
         desc = "1 if the cell-0 holdout has taken a CPU already claimed by a workload cell, else 0"
     )]
     pub enforced_holdout: u64,
-    #[stat(desc = "Per-cell metrics")] // TODO: cell names
+    #[stat(desc = "Per-cell metrics")]
     pub cells: BTreeMap<u32, CellMetrics>,
 }
 

@@ -33,7 +33,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 
 bool BPF_STRUCT_OPS(flow_yield, struct task_struct *from, struct task_struct *to)
 {
-	from->scx.slice = FLOW_SLICE_MIN_NS;
+	scx_bpf_task_set_slice(from, FLOW_SLICE_MIN_NS);
 	return false;
 }
 

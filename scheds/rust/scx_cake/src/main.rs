@@ -1,796 +1,926 @@
 // SPDX-License-Identifier: GPL-2.0
-// scx_cake - sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling
+//
+// scx_cake — a clean-slate sched_ext scheduler.
+//
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
 
-mod topology;
-mod tui;
+mod bpf_skel;
+pub use bpf_skel::*;
+pub mod bpf_intf;
+pub use bpf_intf::*;
 
-use core::sync::atomic::Ordering;
-use std::io::IsTerminal;
-
+use std::collections::BTreeMap;
+use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
-use log::{info, warn};
-
-use scx_arena::ArenaLib;
+use anyhow::Context;
+use anyhow::Result;
+use clap::Parser;
+use libbpf_rs::MapCore;
+use libbpf_rs::MapFlags;
+use libbpf_rs::OpenObject;
+use log::info;
+use log::warn;
 use scx_utils::build_id;
+use scx_utils::compat;
+use scx_utils::scx_ops_attach;
+use scx_utils::scx_ops_load;
+use scx_utils::scx_ops_open;
+use scx_utils::try_set_rlimit_infinity;
+use scx_utils::uei_exited;
+use scx_utils::uei_report;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
-// Include the generated interface bindings
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
-mod bpf_intf {
-    include!(concat!(env!("OUT_DIR"), "/bpf_intf.rs"));
-}
-
-// Include the generated BPF skeleton
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
-mod bpf_skel {
-    include!(concat!(env!("OUT_DIR"), "/bpf_skel.rs"));
-}
-use bpf_skel::*;
 
 const SCHEDULER_NAME: &str = "scx_cake";
 
-/// Scheduler profile presets
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Profile {
-    /// Ultra-low-latency for competitive esports (1ms quantum)
-    Esports,
-    /// Optimized for older/lower-power hardware (4ms quantum)
-    Legacy,
-    /// Low-latency profile optimized for gaming and interactive workloads
-    Gaming,
-    /// Balanced profile for general desktop use (same as gaming for now)
-    Default,
-    /// Power-efficient profile for handhelds/laptops on battery (DVFS enabled)
-    Battery,
-}
-
-impl Profile {
-    /// Returns (quantum_us, new_flow_bonus_us, starvation_us)
-    fn values(&self) -> (u64, u64, u64) {
-        match self {
-            // Esports: Ultra-aggressive, 1ms quantum for maximum responsiveness
-            Profile::Esports => (1000, 4000, 50000),
-            // Legacy: High efficiency, 4ms quantum to reduce overhead on older CPUs
-            Profile::Legacy => (4000, 12000, 200000),
-            // Gaming: Aggressive latency, 2ms quantum
-            Profile::Gaming => (2000, 8000, 100000),
-            // Default: Same as gaming for now
-            Profile::Default => (2000, 8000, 100000),
-            // Battery: 4ms quantum — fewer context switches = less power
-            Profile::Battery => (4000, 12000, 200000),
-        }
-    }
-
-    // DVFS — disabled (tick architecture removed, no runtime effect).
-    // RODATA symbols retained in BPF for loader compat; JIT eliminates.
-}
-
-/// 🍰 scx_cake: A sched_ext scheduler applying CAKE bufferbloat concepts
-///
-/// This scheduler adapts CAKE's DRR++ (Deficit Round Robin++) algorithm
-/// for CPU scheduling, providing low-latency scheduling for gaming and
-/// interactive workloads while maintaining fairness.
-///
-/// PROFILES set all tuning parameters at once. Individual options override profile defaults.
-///
-/// 4-CLASS SYSTEM (classified by PELT utilization + game family detection):
-///   GAME:    game process tree + audio + compositor (during GAMING)
-///   NORMAL:  default class — interactive desktop tasks
-///   HOG:     high PELT utilization (≥78% CPU) non-game tasks
-///   BG:      low PELT utilization non-game tasks during GAMING
-///
-/// EXAMPLES:
-///   scx_cake                          # Run with gaming profile (default)
-///   scx_cake -p esports               # Ultra-low-latency for competitive play
-///   scx_cake --quantum 1500           # Gaming profile with custom quantum
-///   scx_cake -v                       # Run with live TUI stats display
-#[derive(Parser, Debug, Clone)]
-#[command(
-    author,
-    version,
-    disable_version_flag = true,
-    about = "🍰 A sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling",
-    verbatim_doc_comment
-)]
-struct Args {
-    /// Scheduler profile preset.
-    ///
-    /// Profiles configure all tier thresholds, quantum multipliers, and wait budgets.
-    /// Individual CLI options (--quantum, etc.) override profile values.
-    ///
-    /// ESPORTS: Ultra-low-latency for competitive gaming.
-    ///   - Quantum: 1000µs, Starvation: 50ms
-    ///
-    /// LEGACY: Optimized for older/lower-power hardware.
-    ///   - Quantum: 4000µs, Starvation: 200ms
-    ///
-    /// GAMING: Optimized for low-latency gaming and interactive workloads.
-    ///   - Quantum: 2000µs, Starvation: 100ms
-    ///
-    /// DEFAULT: Balanced profile for general desktop use.
-    ///   - Currently same as gaming; will diverge in future versions
-    ///
-    /// BATTERY: Power-efficient for handhelds/laptops on battery.
-    ///   - Quantum: 4000µs, reduced context switch overhead
-    #[arg(long, short, value_enum, default_value_t = Profile::Gaming, verbatim_doc_comment)]
-    profile: Profile,
-
-    /// Base scheduling time slice in MICROSECONDS [default: 2000].
-    ///
-    /// How long a task runs before potentially yielding.
-    ///
-    /// Smaller quantum = more responsive but higher overhead.
-    /// Esports: 1000µs | Gaming: 2000µs | Legacy: 4000µs
-    /// Recommended range: 1000-8000µs
-    #[arg(long, verbatim_doc_comment)]
-    quantum: Option<u64>,
-
-    /// Bonus time for newly woken tasks in MICROSECONDS [default: 8000].
-    ///
-    /// Tasks waking from sleep get this extra time added to their deficit,
-    /// allowing them to run longer on first dispatch. Helps bursty workloads.
-    ///
-    /// Esports: 4000µs | Gaming: 8000µs
-    /// Recommended range: 4000-16000µs
-    #[arg(long, verbatim_doc_comment)]
-    new_flow_bonus: Option<u64>,
-
-    /// Max run time before forced preemption in MICROSECONDS [default: 100000].
-    ///
-    /// Safety limit: tasks running longer than this are forcibly preempted.
-    /// Prevents any single task from monopolizing the CPU.
-    ///
-    /// Esports: 50000µs (50ms) | Gaming: 100000µs (100ms) | Legacy: 200000µs (200ms)
-    /// Recommended range: 50000-200000µs
-    #[arg(long, verbatim_doc_comment)]
-    starvation: Option<u64>,
-
-    /// Enable live TUI (Terminal User Interface) with real-time statistics.
-    ///
-    /// Shows dispatch counts per tier, tier transitions,
-    /// wait time stats, and system topology information.
-    /// Press 'q' to exit TUI mode.
-    #[arg(long, short, verbatim_doc_comment)]
+/// scx_cake: a gaming-first sched_ext scheduler — one master algorithm on
+/// kernel primitives, no feature flags, no knobs, no runtime telemetry.
+/// Placement is the kernel's idle-CPU pick with direct dispatch on a hit.
+/// Under saturation, wakeups queue on one global vtime queue while
+/// slice-expired tasks requeue on their own CPU's queue ("wakeups global,
+/// continuations local"), and each CPU dispatches the earliest eligible of
+/// the two. The time slice is a compile-time constant.
+#[derive(Debug, Parser)]
+struct Opts {
+    /// Enable verbose libbpf output and runtime diagnostics. A release run
+    /// without this prints only identity, attach and exit.
+    #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
 
-    /// Statistics refresh interval in SECONDS (only with --verbose).
-    ///
-    /// How often the TUI updates. Lower values = more responsive but
-    /// higher overhead. Has no effect without --verbose.
-    ///
-    /// Default: 1 second
-    #[arg(long, default_value_t = 1, verbatim_doc_comment)]
-    interval: u64,
-
-    /// Live in-kernel testing mode for automated benchmarking.
-    ///
-    /// Runs the scheduler for 10 seconds, collects BPF data points,
-    /// and prints a structured JSON output to stdout.
-    #[arg(long, verbatim_doc_comment)]
-    testing: bool,
-
-    /// Print scheduler version and exit.
-    #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    /// Print the version and exit.
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
-}
 
-impl Args {
-    /// Get effective values (profile defaults with CLI overrides applied)
-    fn effective_values(&self) -> (u64, u64, u64) {
-        let (q, nfb, starv) = self.profile.values();
-        (
-            self.quantum.unwrap_or(q),
-            self.new_flow_bonus.unwrap_or(nfb),
-            self.starvation.unwrap_or(starv),
-        )
-    }
+    /// Campaign toggle `NAME=0|1` (g43, g44, g45, g46), repeatable. One
+    /// binary serves both arms of an on/off pair: the verifier deletes the
+    /// off arm at attach. Scaffolding for the 2026-08-22 toggle campaign
+    /// (STATE.md); defaults are tip behavior. Unknown names refuse to start.
+    #[clap(long = "toggle", value_name = "NAME=0|1")]
+    toggle: Vec<String>,
 }
 
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
-    args: Args,
-    topology: topology::TopologyInfo,
-    latency_matrix: Vec<Vec<f64>>,
     struct_ops: Option<libbpf_rs::Link>,
+    /// Handler-edge tracepoint links (§G35); dropped on exit with the rest.
+    _irq_links: Vec<libbpf_rs::Link>,
+    /// Frame-clock incumbent bucket, held against near-ties (§R.22).
+    frame_bucket: Option<u32>,
+    /// Last published period; the reference for slow-direction hysteresis.
+    frame_period: u64,
+    /// Consecutive polls a slower candidate has won; slow switches need
+    /// agreement, fast ones are instant (§G27.1).
+    slow_polls: u32,
+    /// Pessimistic frame estimate: fast down, slow up. Feeds the slice cap,
+    /// which must not widen when the mode wobbles (§G18).
+    frame_floor: u64,
+    /// Print runtime diagnostics. Off by default: a release run is not a
+    /// measurement session, and a scheduler logging into a game is noise.
+    verbose: bool,
+    /// Live IRQ-sink tracking state (§G30, §G33).
+    sinks: SinkMonitor,
+    /// The first live sink set completes the startup banner at INFO; later
+    /// changes are diagnostics and follow --verbose.
+    sinks_logged: bool,
 }
 
 impl<'a> Scheduler<'a> {
-    fn new(
-        args: Args,
-        open_object: &'a mut std::mem::MaybeUninit<libbpf_rs::OpenObject>,
-    ) -> Result<Self> {
-        use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        try_set_rlimit_infinity();
 
-        // ═══ scx_ops_open! equivalent ═══
-        // Matches scx_ops_open!(skel_builder, open_object, cake_ops, None)
-        // Cake can't use the macro directly (custom arena architecture),
-        // so we inline the critical functionality.
-        scx_utils::compat::check_min_requirements()?;
+        // The startup banner is the only "telemetry" cake emits, and it is
+        // one-shot: version, machine shape, the compiled constants, and
+        // which kernel fast paths the RUNNING kernel provides (probed from
+        // BTF, not what the source requested) — so every log is
+        // self-describing about what actually loaded.
+        let topo = Topology::new().context("failed to read topology")?;
+        let physical = topo.all_cores.len();
+        let total = topo.all_cpus.len();
+        let smt = total.saturating_sub(physical);
 
-        let skel_builder = BpfSkelBuilder::default();
-        let mut open_skel = skel_builder
-            .open(open_object)
-            .context("Failed to open BPF skeleton")?;
+        let slice_us = bpf_intf::consts_SLICE_NS as u64 / bpf_intf::consts_NSEC_PER_USEC as u64;
+        let queued_wakeup = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP != 0;
+        let dsq_peek = compat::ksym_exists("scx_bpf_dsq_peek").unwrap_or(false);
 
-        // Inject version suffix into ops name: "cake" → "cake_1.1.0_g<hash>_<target>"
-        // This is what scx_loader reads from /sys/kernel/sched_ext/root/ops
-        {
-            let ops = open_skel.struct_ops.cake_ops_mut();
-            let name_field = &mut ops.name;
-
-            let version_suffix = scx_utils::build_id::ops_version_suffix(env!("CARGO_PKG_VERSION"));
-            let bytes = version_suffix.as_bytes();
-            let mut i = 0;
-            let mut bytes_idx = 0;
-            let mut found_null = false;
-
-            while i < name_field.len() - 1 {
-                found_null |= name_field[i] == 0;
-                if !found_null {
-                    i += 1;
-                    continue;
-                }
-
-                if bytes_idx < bytes.len() {
-                    name_field[i] = bytes[bytes_idx] as i8;
-                    bytes_idx += 1;
-                } else {
-                    break;
-                }
-                i += 1;
-            }
-            name_field[i] = 0;
-        }
-
-        // Read hotplug sequence number — enables kernel-requested restarts on CPU hotplug
-        {
-            let path = std::path::Path::new("/sys/kernel/sched_ext/hotplug_seq");
-            let val = std::fs::read_to_string(path)
-                .context("Failed to read /sys/kernel/sched_ext/hotplug_seq")?;
-            open_skel.struct_ops.cake_ops_mut().hotplug_seq = val
-                .trim()
-                .parse::<u64>()
-                .context("Failed to parse hotplug_seq")?;
-        }
-
-        // Honor SCX_TIMEOUT_MS environment variable (matches scx_ops_open! behavior)
-        if let Ok(s) = std::env::var("SCX_TIMEOUT_MS") {
-            let ms: u32 = s.parse().context("SCX_TIMEOUT_MS has invalid value")?;
-            info!("Setting timeout_ms to {} based on environment", ms);
-            open_skel.struct_ops.cake_ops_mut().timeout_ms = ms;
-        }
-
-        // Populate SCX enum RODATA from kernel BTF (SCX_DSQ_LOCAL_ON, SCX_KICK_PREEMPT, etc.)
-        scx_utils::import_enums!(open_skel);
-
-        // Detect system topology (CCDs, P/E cores)
-        let topo = topology::detect()?;
-
-        // Get effective values (profile + CLI overrides)
-        let (quantum, new_flow_bonus, _starvation) = args.effective_values();
-
-        // Latency matrix: zeroed, populated by TUI Topology tab if --verbose
-        let latency_matrix = vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus];
-
-        // Configure the scheduler via rodata (read-only data)
-        if let Some(rodata) = &mut open_skel.maps.rodata_data {
-            rodata.quantum_ns = quantum * 1000;
-            rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
-            // Stats/telemetry: only available in debug builds (CAKE_RELEASE omits the field).
-            // In release, --verbose is silently ignored — zero overhead for production gaming.
-            #[cfg(debug_assertions)]
-            {
-                rodata.enable_stats = args.verbose || args.testing;
-            }
-
-            // has_hybrid removed: smt_sibling now uses pre-filled cpu_sibling_map only
-            // Per-LLC DSQ partitioning: populate CPU→LLC mapping
-            let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
-            rodata.nr_llcs = llc_count.max(1);
-            rodata.nr_cpus = topo.nr_cpus.min(256) as u32; // F2: widened from 64→256 for Threadripper
-            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(256) as u32; // V3: PHYS_FIRST scan mask
-
-            // Ferry explicit 64-bit topology arrays down into BPF (O(1) execution replacements)
-
-            // Heterogeneous Gaming Topology — u64[4] arrays (F2: 256-bit masks)
-            rodata.big_core_phys_mask[0] = topo.big_core_phys_mask;
-            rodata.big_core_smt_mask[0] = topo.big_core_smt_mask;
-            rodata.little_core_mask[0] = topo.little_core_mask;
-            rodata.vcache_llc_mask[0] = topo.vcache_llc_mask;
-            rodata.has_vcache = topo.has_vcache;
-            rodata.has_hybrid_cores = topo.big_core_phys_mask != 0;
-
-            for i in 0..topo.cpu_sibling_map.len() {
-                rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i];
-            }
-            for i in 0..topo.llc_cpu_mask.len().min(8) {
-                rodata.llc_cpu_mask[i] = topo.llc_cpu_mask[i];
-            }
-            for i in 0..topo.core_cpu_mask.len().min(32) {
-                rodata.core_cpu_mask[i] = topo.core_cpu_mask[i];
-            }
-
-            for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
-                rodata.cpu_llc_id[i] = llc_id as u32;
-            }
-
-            // Performance-ordered CPU arrays: read prefcore ranking from sysfs,
-            // sort by performance, group SMT pairs together.
-            // GAME tasks scan fast→slow, non-GAME scans slow→fast.
-            {
-                let nr = topo.nr_cpus.min(256);
-                // Read prefcore ranking per CPU (higher = faster)
-                let mut rankings: Vec<(usize, u32)> = (0..nr)
-                    .map(|cpu| {
-                        let path = format!(
-                            "/sys/devices/system/cpu/cpu{}/cpufreq/amd_pstate_prefcore_ranking",
-                            cpu
-                        );
-                        let rank = std::fs::read_to_string(&path)
-                            .ok()
-                            .and_then(|s| s.trim().parse::<u32>().ok())
-                            .unwrap_or(100); // fallback: equal ranking
-                        (cpu, rank)
-                    })
-                    .collect();
-
-                // Sort by descending rank (fastest first), stable for SMT grouping
-                rankings.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
-                // Build fast→slow array with SMT pairs grouped together:
-                // [best_phys, best_smt, second_phys, second_smt, ...]
-                let mut fast_to_slow: Vec<u8> = Vec::with_capacity(nr);
-                let mut used = vec![false; nr];
-                for &(cpu, _) in &rankings {
-                    if used[cpu] {
-                        continue;
-                    }
-                    fast_to_slow.push(cpu as u8);
-                    used[cpu] = true;
-                    // Add SMT sibling immediately after
-                    let sib = topo.cpu_sibling_map.get(cpu).copied().unwrap_or(0xFF);
-                    if (sib as usize) < nr && !used[sib as usize] {
-                        fast_to_slow.push(sib);
-                        used[sib as usize] = true;
-                    }
-                }
-
-                // Populate RODATA arrays
-                for i in 0..64usize {
-                    if i < fast_to_slow.len() {
-                        rodata.cpus_fast_to_slow[i] = fast_to_slow[i];
-                        // Reverse for slow→fast
-                        rodata.cpus_slow_to_fast[i] = fast_to_slow[fast_to_slow.len() - 1 - i];
-                    } else {
-                        rodata.cpus_fast_to_slow[i] = 0xFF; // sentinel
-                        rodata.cpus_slow_to_fast[i] = 0xFF;
-                    }
-                }
-
-                let top_cpus: Vec<_> = fast_to_slow.iter().take(4).collect();
-                info!(
-                    "Core steering: fast→slow order {:?} ({} CPUs)",
-                    top_cpus, nr
-                );
-            }
-
-            // ═══ Per-CPU capacity table (F1 correctness fix) ═══
-            // Read arch_scale_cpu_capacity from sysfs for P/E core vruntime scaling.
-            // Scale: 0-1024, where 1024 = fastest core. On SMP all = 1024 → JIT folds.
-            // Intel hybrid: P-cores ~1024, E-cores ~600-700.
-            // AMD SMP: all 1024 → cap > 0 && cap < 1024 is always false → zero overhead.
-            {
-                let nr = topo.nr_cpus.min(256);
-                let mut all_equal = true;
-                let mut first_cap: u32 = 0;
-
-                for cpu in 0..nr {
-                    let path = format!("/sys/devices/system/cpu/cpu{}/cpu_capacity", cpu);
-                    let cap = std::fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|s| s.trim().parse::<u32>().ok())
-                        .unwrap_or(1024);
-
-                    rodata.cpuperf_cap_table[cpu] = cap;
-
-                    if cpu == 0 {
-                        first_cap = cap;
-                    } else if cap != first_cap {
-                        all_equal = false;
-                    }
-                }
-
-                if !all_equal {
-                    info!(
-                        "Capacity scaling: heterogeneous (P/E cores, range {}-{})",
-                        rodata.cpuperf_cap_table[..nr].iter().min().unwrap_or(&0),
-                        rodata.cpuperf_cap_table[..nr].iter().max().unwrap_or(&1024)
-                    );
-                }
-            }
-
-            // Arena library: nr_cpu_ids must be set before load() — arena_init
-            // checks this and returns -ENODEV (errno 19) if uninitialized.
-            rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
-
-            // ═══ Audio stack detection ═══
-            // Phase 1: Core audio daemons by comm name.
-            // Phase 2: PipeWire socket clients (mixers like goxlr-daemon).
-            // Both are session-persistent → bake into RODATA.
-            {
-                use std::collections::HashSet;
-
-                const AUDIO_COMMS: &[&str] = &[
-                    "pipewire",
-                    "wireplumber",
-                    "pipewire-pulse",
-                    "pulseaudio",
-                    "jackd",
-                    "jackdbus",
-                ];
-                let mut audio_tgids: Vec<u32> = Vec::new();
-                let mut audio_tgid_set: HashSet<u32> = HashSet::new();
-
-                // Phase 1: comm-based detection
-                if let Ok(entries) = std::fs::read_dir("/proc") {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                            continue;
-                        }
-                        let pid: u32 = match name_str.parse() {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-                            let comm = comm.trim();
-                            if AUDIO_COMMS.contains(&comm) && audio_tgid_set.insert(pid) {
-                                audio_tgids.push(pid);
-                            }
-                        }
-                    }
-                }
-
-                // Phase 2: PipeWire socket client detection.
-                // Scan /proc/net/unix for pipewire-0 socket inodes, then find
-                // processes with fds pointing to those inodes. This catches any
-                // audio mixer daemon (goxlr-daemon, easyeffects, etc.) without
-                // brittle comm lists.
-                let core_count = audio_tgids.len();
-                'pw_detect: {
-                    let uid = unsafe { libc::getuid() };
-                    let pw_socket_path = format!("/run/user/{}/pipewire-0", uid);
-
-                    // Collect inodes for the PipeWire socket
-                    let unix_content = match std::fs::read_to_string("/proc/net/unix") {
-                        Ok(c) => c,
-                        Err(_) => break 'pw_detect,
-                    };
-                    let mut pw_inodes: HashSet<u64> = HashSet::new();
-                    for line in unix_content.lines().skip(1) {
-                        if line.ends_with(&pw_socket_path)
-                            || line.contains(&format!("{} ", pw_socket_path))
-                        {
-                            // Format: Num RefCount Protocol Flags Type St Inode Path
-                            let fields: Vec<&str> = line.split_whitespace().collect();
-                            if fields.len() >= 7 {
-                                if let Ok(inode) = fields[6].parse::<u64>() {
-                                    if inode > 0 {
-                                        pw_inodes.insert(inode);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if pw_inodes.is_empty() {
-                        break 'pw_detect;
-                    }
-
-                    // Scan /proc/*/fd for socket links matching PipeWire inodes.
-                    // Only check thread-group leaders (dirs in /proc with numeric names).
-                    if let Ok(proc_entries) = std::fs::read_dir("/proc") {
-                        for entry in proc_entries.flatten() {
-                            if audio_tgids.len() >= 8 {
-                                break;
-                            }
-                            let name = entry.file_name();
-                            let name_str = name.to_string_lossy();
-                            if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                                continue;
-                            }
-                            let pid: u32 = match name_str.parse() {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
-                            // Skip PIDs already detected as core audio
-                            if audio_tgid_set.contains(&pid) {
-                                continue;
-                            }
-                            let fd_dir = format!("/proc/{}/fd", pid);
-                            let fd_entries = match std::fs::read_dir(&fd_dir) {
-                                Ok(e) => e,
-                                Err(_) => continue,
-                            };
-                            for fd_entry in fd_entries.flatten() {
-                                if let Ok(link) = std::fs::read_link(fd_entry.path()) {
-                                    let link_str = link.to_string_lossy();
-                                    // Socket links look like "socket:[12345]"
-                                    if let Some(inode_str) = link_str
-                                        .strip_prefix("socket:[")
-                                        .and_then(|s| s.strip_suffix(']'))
-                                    {
-                                        if let Ok(inode) = inode_str.parse::<u64>() {
-                                            if pw_inodes.contains(&inode) {
-                                                if audio_tgid_set.insert(pid) {
-                                                    audio_tgids.push(pid);
-                                                }
-                                                break; // Found one match, move to next PID
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                rodata.nr_audio_tgids = audio_tgids.len() as u32;
-                for (i, &tgid) in audio_tgids.iter().enumerate() {
-                    rodata.audio_tgids[i] = tgid;
-                }
-                let client_count = audio_tgids.len() - core_count;
-                if !audio_tgids.is_empty() {
-                    info!(
-                        "Audio stack detected: {} daemons{} (TGIDs: {:?})",
-                        audio_tgids.len(),
-                        if client_count > 0 {
-                            format!(
-                                ", {} PipeWire client{}",
-                                client_count,
-                                if client_count == 1 { "" } else { "s" }
-                            )
-                        } else {
-                            String::new()
-                        },
-                        audio_tgids
-                    );
-                }
-            }
-
-            // ═══ Compositor detection ═══
-            // Wayland compositors present every frame to the display.
-            // Session-persistent → bake into RODATA.
-            {
-                const COMPOSITOR_COMMS: &[&str] = &[
-                    "kwin_wayland",
-                    "kwin_x11",
-                    "mutter",
-                    "gnome-shell",
-                    "sway",
-                    "Hyprland",
-                    "weston",
-                    "labwc",
-                    "wayfire",
-                    "river",
-                    "gamescope",
-                ];
-                let mut compositor_tgids: Vec<u32> = Vec::new();
-                if let Ok(entries) = std::fs::read_dir("/proc") {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if !name_str.chars().all(|c| c.is_ascii_digit()) {
-                            continue;
-                        }
-                        let pid: u32 = match name_str.parse() {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-                            let comm = comm.trim();
-                            if COMPOSITOR_COMMS.contains(&comm) {
-                                compositor_tgids.push(pid);
-                                if compositor_tgids.len() >= 4 {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                rodata.nr_compositor_tgids = compositor_tgids.len() as u32;
-                for (i, &tgid) in compositor_tgids.iter().enumerate() {
-                    rodata.compositor_tgids[i] = tgid;
-                }
-                if !compositor_tgids.is_empty() {
-                    info!(
-                        "Compositor detected: {} (TGIDs: {:?})",
-                        compositor_tgids.len(),
-                        compositor_tgids
-                    );
-                }
-            }
-        }
-
-        // ═══ scx_ops_load! equivalent ═══
-        // Set UEI dump buffer size before load (matches scx_ops_load! behavior)
-        scx_utils::uei_set_size!(open_skel, cake_ops, uei);
-
-        let mut skel = open_skel.load().context("Failed to load BPF program")?;
-
-        // Initialize the BPF arena library.
-        // Must happen after load() (BPF maps are now live) but before attach_struct_ops()
-        // (scheduler not yet running, so init_task hasn't fired yet).
-        // ArenaLib::setup() runs SEC("syscall") probes:
-        //   1. arena_init: allocates static pages, inits task stack allocator
-        //   2. arena_topology_node_init: registers topology nodes for arena traversal
-        let task_ctx_size = std::mem::size_of::<bpf_intf::cake_task_ctx>();
-        let arena = ArenaLib::init(skel.object_mut(), task_ctx_size, topo.nr_cpus)
-            .context("Failed to create ArenaLib")?;
-        arena.setup().context("Failed to initialize BPF arena")?;
         info!(
-            "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
-            task_ctx_size, topo.nr_cpus
+            "🍰 {} {}",
+            SCHEDULER_NAME,
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        info!("   cores   {physical} physical + {smt} SMT = {total} CPUs");
+        info!("   slice   {slice_us}µs · queues {total} per-CPU vtime + 1 global wake");
+        info!(
+            "   kernel  queued_wakeup {} · dsq_peek {}",
+            if queued_wakeup { "on" } else { "UNSUPPORTED" },
+            // cake calls scx_bpf_dsq_peek() unconditionally -- the
+            // __COMPAT_ iterator arm was deleted with the other compat
+            // ladders. On a kernel without the ksym the load fails
+            // outright, so "MISSING" is the honest word, not "fallback".
+            if dsq_peek { "native" } else { "MISSING" },
         );
 
-        // Set initial BSS values before attach (zero-init'd in BPF for BSS placement).
-        // quantum_ceiling_ns: default IDLE/GAMING → 2ms. TUI updates at ~2Hz.
-        if let Some(bss) = &mut skel.maps.bss_data {
-            bss.quantum_ceiling_ns = 2_000_000; // AQ_BULK_CEILING_NS
+        // Open the BPF program.
+        let mut skel_builder = BpfSkelBuilder::default();
+        skel_builder.obj_builder.debug(opts.verbose);
+        let mut skel = scx_ops_open!(skel_builder, open_object, cake_ops, None)?;
+
+        // Linux CPU numbering does not guarantee that an SMT sibling is
+        // cpu +/- nr_cpus/2. Populate the immutable BPF lookup from sysfs
+        // topology and cycle within wider-than-SMT2 cores. The fallback path
+        // treats -1 as "no online sibling" and uses the kernel idle picker.
+        let rodata = skel
+            .maps
+            .rodata_data
+            .as_mut()
+            .context("BPF rodata unavailable for CPU topology")?;
+
+        // The CPU id span the steal ring and neighbour probe scan. It is a
+        // load-time constant, so it goes in rodata (frozen before load, hence
+        // folded by the verifier) instead of being written into mutable BPF
+        // state from ops.init. `ops.init` refuses to attach if this is
+        // narrower than the kernel's own nr_cpu_ids.
+        anyhow::ensure!(
+            *NR_CPU_IDS <= bpf_intf::consts_MAX_CPUS as usize,
+            "host nr_cpu_ids {} exceeds Cake's compiled MAX_CPUS {}",
+            *NR_CPU_IDS,
+            bpf_intf::consts_MAX_CPUS
+        );
+        rodata.nr_cpu_span = *NR_CPU_IDS as u32;
+        rodata.cake_span_mask = (*NR_CPU_IDS as u32).next_power_of_two() - 1;
+
+        // Campaign toggles land in rodata before load so the verifier prunes
+        // the off arms; the logged line is each arm's identity in an on/off
+        // pair (STATE.md, toggle campaign 2026-08-22).
+        for spec in &opts.toggle {
+            let (name, val) = spec
+                .split_once('=')
+                .with_context(|| format!("--toggle {spec}: expected NAME=0|1"))?;
+            let on = match val {
+                "0" => 0u8,
+                "1" => 1u8,
+                _ => anyhow::bail!("--toggle {spec}: value must be 0 or 1"),
+            };
+            match name {
+                "g46" => rodata.cake_tog_g46 = on,
+                "m6" => rodata.cake_tog_m6 = on,
+                "g51" => rodata.cake_tog_g51 = on,
+                "g52" => rodata.cake_tog_g52 = on,
+                "m7" => rodata.cake_tog_m7 = on,
+                _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
+            }
         }
+        info!(
+            "   toggle  g46={} g51={} g52={} m6={} m7={}",
+            rodata.cake_tog_g46,
+            rodata.cake_tog_g51,
+            rodata.cake_tog_g52,
+            rodata.cake_tog_m6,
+            rodata.cake_tog_m7
+        );
+
+        // §G51: cpuidle exit-latency table from sysfs; absent driver leaves
+        // zeros and the depth model inert. §G52: CPPC highest_perf per CPU.
+        let mut deepest_us = 0u32;
+        for i in 0..bpf_intf::consts_CAKE_CSTATE_TABLE as usize {
+            let path = format!("/sys/devices/system/cpu/cpu0/cpuidle/state{i}/latency");
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                let us: u32 = s.trim().parse().unwrap_or(0);
+                rodata.cake_cstate_exit_us[i] = us;
+                deepest_us = deepest_us.max(us);
+            }
+        }
+        if rodata.cake_tog_g51 == 1 && deepest_us == 0 {
+            info!("   g51     no cpuidle driver: depth model inert");
+        }
+        let mut perf_seen = false;
+        for c in 0..*NR_CPU_IDS {
+            let path = format!("/sys/devices/system/cpu/cpu{c}/acpi_cppc/highest_perf");
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                let v: u64 = s.trim().parse().unwrap_or(0);
+                rodata.cpu_perf_rank[c] = v.min(255) as u8;
+                perf_seen = perf_seen || v != 0;
+            }
+        }
+        if rodata.cake_tog_g52 == 1 && !perf_seen {
+            info!("   g52     no CPPC highest_perf: rank tiebreak inert");
+        }
+
+        // Hardware-anchored thresholds: measured, never derived from the slice.
+        // Clamped so a probe perturbed by host load cannot mis-tune the
+        // scheduler, and logged so the value used is always on the record.
+        match probe_handoff_hop_ns() {
+            Some(probe) => {
+                // The admission threshold IS the tail of a genuine handoff --
+                // used directly, never a mean times an invented multiplier.
+                // DIAGNOSTIC ONLY -- deliberately does not drive policy yet.
+                //
+                // Measured 2026-07-30: driving cake_handoff_max_ns from this
+                // probe cost mutex-handoff -35.66% (CI[-40.01,-31.31]) with
+                // migrations 2.4-2.7x up, at both `2 * mean` (1240ns) and, by
+                // inspection, `p99` (798ns). The known-good threshold is
+                // 1464ns = 2.34x this probe's median.
+                //
+                // The probe is not wrong about the hardware -- its 625ns
+                // median cross-validates the independent 606ns rdtscp floor
+                // to 3%. It is measuring the wrong DISTRIBUTION: a clean
+                // condvar ping-pong on an idle host, where p99 sits just
+                // 1.28x the median, while real handoffs under contention
+                // carry lock acquisition and cache misses and run far wider.
+                // That is a workload property, and no startup probe can see
+                // it. Making this threshold host-adaptive needs runtime
+                // observation of `used` in ops.stopping, not a boot-time
+                // measurement -- same machinery as G9.7.
+                let (med, p99) = (probe.median, probe.p99);
+                let hm = rodata.cake_handoff_max_ns;
+                // The probe's p99 IS the pick-to-landing horizon the tick
+                // predictor needs (§G36): how long this host takes to land a
+                // wake. Zero (probe failed) leaves the predictor off.
+                rodata.cake_wake_hop_ns = p99;
+                if opts.verbose {
+                    info!("   class   starvation = mean wait > mean burst (no threshold)");
+                    info!(
+                        "   probe   hop median {med}ns p99 {p99}ns (diagnostic) · handoff_max {hm}ns"
+                    );
+                }
+            }
+            None => {
+                if opts.verbose {
+                    log::warn!("   probe   handoff probe failed (diagnostic only)");
+                }
+            }
+        }
+
+        // Interrupt sinks are measured, never guessed — and measured LIVE:
+        // per-CPU handler-time share off the run loop, cut at the
+        // distribution's own widest gap (§G30, §G33, §R.26). Nothing is
+        // sampled at attach — an attach-time window measures whatever the
+        // machine happened to be doing during launch (§G30's observer
+        // effect) — so the scheduler starts sink-free and announces the
+        // first honest set seconds later.
+        info!("   irq     interrupt sinks tracked live by handler-time share");
+
+        let siblings = &mut rodata.cpu_sibling;
+        siblings.fill(-1);
+        for core in topo.all_cores.values() {
+            let cpu_ids: Vec<usize> = core.cpus.keys().copied().collect();
+
+            if cpu_ids.len() < 2 {
+                continue;
+            }
+            for (idx, cpu) in cpu_ids.iter().copied().enumerate() {
+                let sibling = cpu_ids[(idx + 1) % cpu_ids.len()];
+
+                anyhow::ensure!(
+                    cpu < siblings.len() && sibling <= i32::MAX as usize,
+                    "CPU topology id exceeds Cake's compiled sibling map"
+                );
+                siblings[cpu] = sibling as i32;
+            }
+        }
+
+        // Bootstrap each frame word in its SAFE direction. The clock starts
+        // slow so occupant protection is never divided into a zero; the FLOOR
+        // starts at the display-class fast end (2 ms, NOT the engine-band min:
+        // a vote-free host would keep a 250 µs slice cap forever) so the cap
+        // begins tight and relaxes only as evidence arrives (§G18, §G19).
+        // Geometry starts at the fixed slice; only votes move it (§G27).
+        if let Some(bss) = skel.maps.bss_data.as_mut() {
+            bss.cake_frame_ns = bpf_intf::consts_FRAME_PERIOD_MAX_NS as u64;
+            bss.cake_frame_floor_ns = bpf_intf::consts_FRAME_FLOOR_BOOT_NS as u64;
+            bss.cake_frame_slice_ns = bpf_intf::consts_SLICE_NS as u64;
+        }
+
+        // Multi-CCD steal order is a runtime decision, never a build-host
+        // property: one binary must attach on any topology. Hosts wider than
+        // the fixed matrix span keep the generic ring walk.
+        {
+            let rodata = skel
+                .maps
+                .rodata_data
+                .as_mut()
+                .context("BPF rodata unavailable for cache topology")?;
+            let order = &mut rodata.cpu_steal_order;
+            let span = bpf_intf::consts_STEAL_SPAN as usize;
+            let fits = topo
+                .all_cpus
+                .keys()
+                .next_back()
+                .is_none_or(|cpu| *cpu < span);
+            let multi_ccd = topo.all_llcs.len() > 1;
+            rodata.steal_order_live = u8::from(multi_ccd && fits);
+            order.fill(0);
+
+            if multi_ccd && !fits {
+                warn!("   ccd     host wider than steal matrix ({span} CPUs); ring steal only");
+            }
+            if multi_ccd && fits {
+                let llc_cache: BTreeMap<usize, usize> = topo
+                    .all_llcs
+                    .iter()
+                    .map(|(id, llc)| {
+                        (
+                            *id,
+                            llc.all_cpus
+                                .values()
+                                .map(|cpu| cpu.cache_size)
+                                .max()
+                                .unwrap_or(0),
+                        )
+                    })
+                    .collect();
+                let policy = bpf_intf::consts_CCD_STEAL_POLICY;
+                let nr_ids = *NR_CPU_IDS;
+
+                for src in topo.all_cpus.values() {
+                    let mut candidates: Vec<_> = topo
+                        .all_cpus
+                        .values()
+                        .filter(|dst| dst.id != src.id)
+                        .collect();
+                    candidates.sort_by_key(|dst| {
+                        let class = if dst.llc_id == src.llc_id {
+                            0
+                        } else if policy > 1 && llc_cache[&dst.llc_id] == llc_cache[&src.llc_id] {
+                            1
+                        } else {
+                            2
+                        };
+                        (class, (dst.id + nr_ids - src.id) % nr_ids)
+                    });
+                    let base = src.id * span;
+                    for (slot, dst) in candidates.into_iter().enumerate() {
+                        order[base + slot] = dst.id as u16;
+                    }
+                }
+            }
+        }
+
+        // Load and attach.
+        let mut skel = scx_ops_load!(skel, cake_ops, uei)?;
+        let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
+
+        // Handler-edge tracepoints feed the in-handler word (§G35). A failed
+        // attach degrades to chronic-only steering, never blocks the
+        // scheduler; the word simply stays zero.
+        let mut irq_links = Vec::with_capacity(4);
+        for (name, res) in [
+            ("irq_enter", skel.progs.cake_irq_enter.attach()),
+            ("irq_leave", skel.progs.cake_irq_leave.attach()),
+            ("softirq_enter", skel.progs.cake_softirq_enter.attach()),
+            ("softirq_leave", skel.progs.cake_softirq_leave.attach()),
+        ] {
+            match res {
+                Ok(link) => irq_links.push(link),
+                Err(e) => warn!("   irq     {name} hook failed ({e}); chronic steering only"),
+            }
+        }
+
+        info!("🍰 attached — wakeups queue globally, continuations locally");
+
+        // The file capabilities (cap_bpf,cap_perfmon,cap_sys_nice) are only
+        // needed to load and attach; detach and map access use already-open
+        // fds. Drop them all: while any elevated capability stays in the
+        // permitted set, the kernel's ptrace access check denies
+        // /proc/<pid>/exe to unprivileged observers even with dumpable
+        // restored, which breaks the sudoless bench runner's hash-of-exe
+        // identity verification (and holding dead privileges is bad hygiene).
+        drop_all_capabilities();
 
         Ok(Self {
             skel,
-            args,
-            topology: topo,
-            latency_matrix,
-            struct_ops: None,
+            struct_ops,
+            _irq_links: irq_links,
+            frame_bucket: None,
+            frame_period: 0,
+            slow_polls: 0,
+            frame_floor: 0,
+            verbose: opts.verbose,
+            sinks: SinkMonitor::new(*NR_CPU_IDS),
+            sinks_logged: false,
         })
     }
 
+    fn exited(&mut self) -> bool {
+        uei_exited!(&self.skel, uei)
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        use libbpf_rs::skel::Skel;
+        // Frame clock, reported under --verbose on a material change only, so
+        // a moving line there means the observed cadence really moved (§G11).
+        let mut shown: u64 = 0;
+        while !shutdown.load(Ordering::Relaxed) && !self.exited() {
+            std::thread::sleep(Duration::from_secs(1));
 
-        // ═══ scx_ops_attach! equivalent ═══
-        // Guard: prevent loading if another sched_ext scheduler is already active
-        if scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
-            anyhow::bail!("another sched_ext scheduler is already running");
-        }
-
-        // Attach non-struct_ops BPF programs first, then struct_ops
-        self.skel
-            .attach()
-            .context("Failed to attach non-struct_ops BPF programs")?;
-        self.struct_ops = Some(
-            self.skel
-                .maps
-                .cake_ops
-                .attach_struct_ops()
-                .context("Failed to attach struct_ops BPF programs")?,
-        );
-
-        // Release builds: --verbose and --testing are unavailable (stats compiled out).
-        // Warn early so user knows these flags require a debug build.
-        #[cfg(not(debug_assertions))]
-        if self.args.verbose || self.args.testing {
-            warn!("--verbose and --testing require a debug build (telemetry is compiled out in release).");
-            warn!("Rebuild without --release: cargo build -p scx_cake");
-            self.args.verbose = false;
-            self.args.testing = false;
-        }
-
-        // Standard startup banner: follows scx_cosmos/scx_bpfland convention
-        info!(
-            "{} {} {}",
-            SCHEDULER_NAME,
-            build_id::full_version(env!("CARGO_PKG_VERSION")),
-            if self.topology.smt_enabled {
-                "SMT on"
-            } else {
-                "SMT off"
+            if let Some(set) = self.sinks.tick(*NR_CPU_IDS) {
+                self.publish_sinks(&set);
             }
-        );
 
-        // Print command line.
-        info!(
-            "scheduler options: {}",
-            std::env::args().collect::<Vec<_>>().join(" ")
-        );
+            let observed = self.publish_frame_clock();
+            if self.verbose && observed != 0 && observed.abs_diff(shown) > shown / 16 {
+                shown = observed;
+                info!(
+                    "   frame   observed period {}us ({:.1} Hz)",
+                    observed / 1000,
+                    1e9 / observed as f64
+                );
+            }
+        }
 
-        info!(
-            "{} CPUs, {} LLCs, profile: {:?}",
-            self.topology.nr_cpus,
-            self.topology
-                .llc_cpu_mask
+        if let Some(bss) = self.skel.maps.bss_data.as_mut() {
+            let ev = &bss.cake_events;
+            info!(
+                "   events  select_fallback {} keep_last {} enq_skip_exiting {}",
+                ev.SCX_EV_SELECT_CPU_FALLBACK,
+                ev.SCX_EV_DISPATCH_KEEP_LAST,
+                ev.SCX_EV_ENQ_SKIP_EXITING
+            );
+        }
+
+        self.struct_ops.take();
+        info!("🍰 {SCHEDULER_NAME} detached — default scheduler restored");
+        uei_report!(&self.skel, uei)
+    }
+
+    /// Push a changed sink set live: rewrite the per-CPU flags, then bump
+    /// the generation so the next ranked pick rebuilds the nonsink mask
+    /// (§G30). Flags settle before the bump; a torn read costs at most one
+    /// extra rebuild.
+    fn publish_sinks(&mut self, set: &[bool]) {
+        let Some(bss) = self.skel.maps.bss_data.as_mut() else {
+            return;
+        };
+        for (cpu, hot) in set.iter().enumerate() {
+            if cpu < bss.cpu_irq_hot.len() {
+                bss.cpu_irq_hot[cpu] = u8::from(*hot);
+            }
+        }
+        bss.cake_sink_gen = bss.cake_sink_gen.wrapping_add(1);
+
+        if self.verbose || !self.sinks_logged {
+            self.sinks_logged = true;
+            let named: Vec<usize> = set
                 .iter()
-                .filter(|&&m| m != 0)
-                .count()
-                .max(1),
-            self.args.profile
-        );
-        if self.args.testing {
-            info!("Running in benchmarking mode for 10 seconds...");
-            std::thread::sleep(std::time::Duration::from_secs(1)); // Warmup
+                .enumerate()
+                .filter_map(|(cpu, hot)| hot.then_some(cpu))
+                .collect();
+            info!("   irq     interrupt-sink CPUs {named:?} — steered around");
+        }
+    }
 
-            let mut start_dispatches = 0u64;
-            for cpu in 0..self.topology.nr_cpus {
-                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
-                start_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
+    /// Publish the binding cadence from the vote histogram.
+    ///
+    /// Every crowd near the biggest is a REAL cadence (a game plus the
+    /// desktop coexist legitimately), so no argmax: the FASTEST real crowd
+    /// is published, because every consumer of the clock is a bound and the
+    /// fastest cadence is the one that binds. The clock moves faster the
+    /// moment a faster crowd qualifies; it moves slower only when the fast
+    /// crowd actually fades — one noisy poll cannot drag it slower (§G27.1).
+    /// Buckets are cleared as read; sum/count keeps the value exact.
+    /// Returns the published period, 0 when there are no votes.
+    fn publish_frame_clock(&mut self) -> u64 {
+        const WIDTH: usize = std::mem::size_of::<u64>() * 2;
+        /// A crowd within 2x of the biggest is real, not noise.
+        const QUALIFY: u64 = 2;
+        /// The incumbent stays alive down to a quarter of the biggest crowd.
+        const FADE: u64 = 4;
+
+        let hist = &self.skel.maps.cake_frame_hist;
+        let mut crowds: Vec<(u32, u64, u64)> = Vec::new();
+
+        for idx in 0..bpf_intf::consts_FRAME_BUCKETS {
+            let key = idx.to_ne_bytes();
+            let Ok(Some(percpu)) = hist.lookup_percpu(&key, MapFlags::ANY) else {
+                continue;
+            };
+            let (mut count, mut sum) = (0u64, 0u64);
+            for cpu in &percpu {
+                if cpu.len() < WIDTH {
+                    continue;
+                }
+                count += u64::from_ne_bytes(cpu[..8].try_into().unwrap());
+                sum += u64::from_ne_bytes(cpu[8..16].try_into().unwrap());
             }
-
-            let start_time = std::time::Instant::now();
-            let mut elapsed = 0;
-            while elapsed < 10 && !shutdown.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                elapsed += 1;
+            if count == 0 {
+                continue;
             }
-            let duration = start_time.elapsed().as_secs_f64();
+            crowds.push((idx, count, sum));
+            let zeroed = vec![vec![0u8; WIDTH]; percpu.len()];
+            let _ = hist.update_percpu(&key, &zeroed, MapFlags::ANY);
+        }
 
-            let mut end_dispatches = 0u64;
-            for cpu in 0..self.topology.nr_cpus {
-                let stats = &self.skel.maps.bss_data.as_ref().unwrap().global_stats[cpu];
-                end_dispatches += stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches;
-            }
+        let Some(max_count) = crowds.iter().map(|c| c.1).max() else {
+            return 0;
+        };
+        // Fastest qualified crowd; bucket index is monotone in period.
+        let Some((qi, qc, qs)) = crowds
+            .iter()
+            .copied()
+            .filter(|c| c.1 * QUALIFY >= max_count)
+            .min_by_key(|c| c.0)
+        else {
+            return 0;
+        };
 
-            let delta = end_dispatches.saturating_sub(start_dispatches);
-            let throughput = delta as f64 / duration;
-            println!("{{\"duration_sec\": {:.2}, \"total_dispatches\": {}, \"dispatches_per_sec\": {:.2}}}",
-                     duration, delta, throughput);
+        let held = self
+            .frame_bucket
+            .and_then(|hb| crowds.iter().copied().find(|c| c.0 == hb));
+        let (bucket, count, sum) = match held {
+            // The incumbent holds only while at least as fast as the
+            // challenger AND still alive; a faster challenger wins at once.
+            Some((hi, hc, hs)) if hi <= qi && hc * FADE >= max_count => (hi, hc, hs),
+            _ => (qi, qc, qs),
+        };
+        let cand = sum / count;
 
-            shutdown.store(true, Ordering::Relaxed);
-        } else if self.args.verbose && std::io::stdout().is_terminal() {
-            // Run TUI mode
-            tui::run_tui(
-                &mut self.skel,
-                shutdown.clone(),
-                self.args.interval,
-                self.topology.clone(),
-                self.latency_matrix.clone(),
-            )?;
+        // Fast up, slow down: a faster cadence binds immediately, a slower
+        // one must win SLOW_POLLS in a row — an app's own threads form
+        // several fast crowds whose per-second counts wobble, and a one-poll
+        // silence must not publish a slow blip (§G27.1; live 2026-08-17).
+        const SLOW_POLLS: u32 = 3;
+        let (period, bucket) = if self.frame_period == 0 || cand <= self.frame_period {
+            self.slow_polls = 0;
+            (cand, Some(bucket))
         } else {
-            if self.args.verbose && !std::io::stdout().is_terminal() {
-                warn!("TUI disabled: no terminal detected (headless mode)");
+            self.slow_polls += 1;
+            if self.slow_polls >= SLOW_POLLS {
+                self.slow_polls = 0;
+                (cand, Some(bucket))
+            } else {
+                (self.frame_period, self.frame_bucket)
             }
-            // Simple headless mode: matches cosmos/bpfland pattern exactly.
-            // ctrlc handler sets shutdown on SIGINT/SIGTERM.
-            // 1-second sleep + UEI check = responsive shutdown.
-            while !shutdown.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                if scx_utils::uei_exited!(&self.skel, uei) {
-                    break;
+        };
+        self.frame_period = period;
+
+        // A bound takes the pessimistic side of a noisy estimate: drop to a new
+        // low at once, climb back over ~16 polls. One 17372us excursion off a
+        // true 3621us previously doubled the slice cap (§G18).
+        self.frame_floor = match self.frame_floor {
+            0 => period,
+            f if period < f => period,
+            f => f + (period - f) / 16,
+        };
+        self.frame_bucket = bucket;
+        if let Some(bss) = self.skel.maps.bss_data.as_mut() {
+            bss.cake_frame_ns = period;
+            bss.cake_frame_floor_ns = self.frame_floor;
+            // Diagnostic only: feeds the --verbose clock line; no policy
+            // consumes these — geometry is per task (§R.28).
+            bss.cake_frame_slice_ns = ((self.frame_floor >> 1) + (self.frame_floor >> 2))
+                .min(bpf_intf::consts_SLICE_NS as u64);
+        }
+        period
+    }
+}
+
+/// Re-execute this image to service a kernel-requested restart.
+///
+/// `drop_all_capabilities()` runs after every successful attach, and a
+/// permitted set cleared through `capset` cannot be regained in-process —
+/// file capabilities are applied only at `execve`. Re-entering
+/// `Scheduler::init` would therefore fail `BPF_PROG_LOAD` with `EPERM` and
+/// kill the scheduler instead of restarting it. Exec'ing ourselves restores
+/// the file capabilities from the bounding set (which `capset` never
+/// touched), keeps the PID and `/proc/<pid>/exe` identity the bench runner
+/// verifies, and re-runs `PR_SET_DUMPABLE` on the way in. The struct_ops link
+/// is already dropped by `run()`, so the scheduler is detached before we
+/// replace the image.
+/// One host's wake+block+switch hop, as a distribution rather than a mean.
+struct HandoffProbe {
+    /// Typical hop — the switch-cost anchor for the preempt-protect window.
+    median: u64,
+    /// Tail of a GENUINE handoff. This is the admission threshold itself, not
+    /// a base to multiply: measured 2026-07-30, using `2 * mean` instead cost
+    /// mutex-handoff -35.66% (CI[-40.01,-31.31]) with migrations 2.4-2.7x up,
+    /// because enough real handoffs land in the tail above the mean that a
+    /// mean-derived cut loses them. The in-tree dose-response wanted a 99.67%
+    /// firing rate on this workload, so the statistic that matches the
+    /// requirement is a high percentile, not an invented multiplier.
+    p99: u64,
+}
+
+/// Per-CPU time spent in interrupt handlers, in kernel ticks, from
+/// `/proc/stat` (irq + softirq columns, CONFIG_IRQ_TIME_ACCOUNTING).
+///
+/// Handler TIME is the harm itself, not a proxy: a wake suffers exactly
+/// when it lands on a CPU whose handler is running, and the time share IS
+/// that probability. Counting interrupt lines mis-priced both directions --
+/// a 1000 Hz mouse with a ~1 µs handler steals no more time than an
+/// unflagged CPU, while a slow line with a heavy handler could never reach
+/// a count bar (§G33). Softirq time is included because NAPI network
+/// processing shadows wakes the same way and never appeared as line counts.
+fn read_irq_ticks(nr_cpus: usize) -> Option<Vec<u64>> {
+    let text = std::fs::read_to_string("/proc/stat").ok()?;
+    let mut ticks = vec![0u64; nr_cpus];
+    let mut seen = false;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(cpu) = fields
+            .next()
+            .and_then(|l| l.strip_prefix("cpu"))
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if cpu >= nr_cpus {
+            continue;
+        }
+        // cpuN user nice system idle iowait irq softirq ...
+        let vals: Vec<u64> = fields.filter_map(|v| v.parse().ok()).collect();
+        if vals.len() < 7 {
+            continue;
+        }
+        ticks[cpu] = vals[5] + vals[6];
+        seen = true;
+    }
+    seen.then_some(ticks)
+}
+
+/// Split the host's own handler-time distribution at its widest gap: sinks
+/// are the CPUs above the cut (§G33, §R.26).
+///
+/// No unit-carrying threshold -- the cut is wherever the sorted per-CPU
+/// tick deltas separate the most, so it adapts to any host, any device,
+/// and any load without claiming to know in advance what "loud" means.
+/// Deltas feed ratios directly, so no clock or tick-rate conversion exists.
+/// A zero delta means "under one tick this window" and enters the ranking
+/// at half a tick -- the midpoint of what the measurement could not
+/// resolve -- keeping every ratio finite so a lone loud CPU still
+/// separates from an otherwise-quiet machine. A flat distribution has no
+/// gap and therefore no sinks; a cut that would condemn half the machine
+/// has measured host-wide load, not pinned interrupt affinity (None).
+fn sinks_by_widest_gap(deltas: &[u64]) -> Option<Vec<bool>> {
+    let mut ranked: Vec<(f64, usize)> = deltas
+        .iter()
+        .enumerate()
+        .map(|(cpu, &d)| ((d as f64).max(0.5), cpu))
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let mut cut = 0;
+    let mut widest = 1.0f64;
+    for i in 1..ranked.len() {
+        let ratio = ranked[i - 1].0 / ranked[i].0;
+        if ratio > widest {
+            widest = ratio;
+            cut = i;
+        }
+    }
+    if cut == 0 {
+        return Some(vec![false; deltas.len()]);
+    }
+    if cut * 2 >= deltas.len() {
+        return None;
+    }
+
+    let mut hot = vec![false; deltas.len()];
+    for &(_, cpu) in &ranked[..cut] {
+        hot[cpu] = true;
+    }
+    Some(hot)
+}
+
+/// Live IRQ-sink tracking riding the 1 s run loop (§G30, §G33, §R.25/§R.26).
+///
+/// Each window the handler-time deltas are split at their widest gap. A CPU
+/// above the cut for FLAG_POLLS consecutive windows is published as a sink
+/// -- a real sink ranks above the cut every window, ranking noise does not
+/// -- and a published sink is released after UNFLAG_POLLS windows below it,
+/// because removal merely returns placement freedom and a loading screen
+/// must not flap the mask. A set that keeps repeating earns a doubled
+/// sampling interval up to INTERVAL_MAX (longer windows accumulate more
+/// ticks, so confidence also buys resolution); any change resets to every
+/// tick. All four constants are agreement counts: every value that steers
+/// comes from the measured distribution alone (§R.26).
+struct SinkMonitor {
+    /// Last accepted read; deltas span the full gap between accepted reads,
+    /// so a slower cadence measures a longer, smoother window.
+    prev: Option<Vec<u64>>,
+    /// The set currently pushed to the scheduler.
+    published: Vec<bool>,
+    /// Consecutive windows each CPU has ranked above the cut.
+    hot_streak: Vec<u32>,
+    /// Consecutive windows each published sink has ranked below the cut.
+    quiet: Vec<u32>,
+    /// Windows since the published set last changed.
+    stable: u32,
+    /// Current sampling interval in run-loop ticks.
+    interval: u32,
+    ticks: u32,
+}
+
+impl SinkMonitor {
+    /// Unchanged windows that earn an interval doubling.
+    const STABLE_POLLS: u32 = 8;
+    /// Sampling never slows past this many ticks.
+    const INTERVAL_MAX: u32 = 16;
+    /// Above-cut windows before a CPU is published.
+    const FLAG_POLLS: u32 = 2;
+    /// Below-cut windows before a published sink is removed.
+    const UNFLAG_POLLS: u32 = 3;
+
+    fn new(nr_cpus: usize) -> Self {
+        Self {
+            prev: None,
+            published: vec![false; nr_cpus],
+            hot_streak: vec![0; nr_cpus],
+            quiet: vec![0; nr_cpus],
+            stable: 0,
+            interval: 1,
+            ticks: 0,
+        }
+    }
+
+    /// One run-loop tick; Some(set) when the published set changed.
+    fn tick(&mut self, nr_cpus: usize) -> Option<Vec<bool>> {
+        self.ticks = self.ticks.wrapping_add(1);
+        if !self.ticks.is_multiple_of(self.interval) {
+            return None;
+        }
+        // A failed read leaves prev in place, so the next sample just spans
+        // a longer window; an untrusted split still advances the baseline.
+        let sample = read_irq_ticks(nr_cpus)?;
+        let before = self.prev.replace(sample)?;
+        let current = self.prev.as_ref()?;
+        let deltas: Vec<u64> = current
+            .iter()
+            .zip(before.iter())
+            .map(|(c, b)| c.saturating_sub(*b))
+            .collect();
+        let hot = sinks_by_widest_gap(&deltas)?;
+
+        let mut changed = false;
+        for (cpu, &is_hot) in hot.iter().enumerate().take(self.published.len()) {
+            if is_hot {
+                self.quiet[cpu] = 0;
+                self.hot_streak[cpu] += 1;
+                // The cut wanders under load, so flagged CPUs accrete across
+                // polls — the per-sample half-machine guard cannot see the
+                // UNION. Bound it here: the published set stays a strict
+                // minority, so placement always keeps most of the machine.
+                if !self.published[cpu]
+                    && self.hot_streak[cpu] >= Self::FLAG_POLLS
+                    && (self.published.iter().filter(|h| **h).count() + 1) * 2
+                        < self.published.len()
+                {
+                    self.published[cpu] = true;
+                    changed = true;
+                }
+            } else {
+                self.hot_streak[cpu] = 0;
+                if self.published[cpu] {
+                    self.quiet[cpu] += 1;
+                    if self.quiet[cpu] >= Self::UNFLAG_POLLS {
+                        self.published[cpu] = false;
+                        self.quiet[cpu] = 0;
+                        changed = true;
+                    }
                 }
             }
         }
 
-        info!("{SCHEDULER_NAME} scheduler shutting down");
-
-        // Drop struct_ops link BEFORE uei_report — this triggers the kernel to
-        // set UEI kind=SCX_EXIT_UNREG. Matches scx_bpfland/scx_cosmos/scx_lavd
-        // pattern: `let _ = self.struct_ops.take(); uei_report!(...)`
-        let _ = self.struct_ops.take();
-
-        // Standard UEI exit report — returns UserExitInfo for should_restart().
-        scx_utils::uei_report!(&self.skel, uei)
+        if changed {
+            self.stable = 0;
+            self.interval = 1;
+            return Some(self.published.clone());
+        }
+        self.stable += 1;
+        if self.stable >= Self::STABLE_POLLS {
+            self.stable = 0;
+            self.interval = (self.interval * 2).min(Self::INTERVAL_MAX);
+        }
+        None
     }
 }
 
-impl Drop for Scheduler<'_> {
-    fn drop(&mut self) {
-        info!("Unregister {SCHEDULER_NAME} scheduler");
+/// Measure one wake + block + switch hop on THIS host.
+///
+/// Two threads ping-pong through a condvar, which exercises exactly the path
+/// `cake_handoff_max_ns` is a proxy for: a blocking handoff between two
+/// tasks. It used to be a slice divisor (/2048), since removed: that made it
+/// made it wrong at any other slice value and wrong on any other CPU -- at a
+/// 1 ms slice it evaluated to 488 ns, below this host's ~606 ns sleep floor, so
+/// nothing could qualify and the co-location gate silently disabled itself.
+///
+/// Runs before the scheduler attaches, so it measures the stock kernel path.
+/// ~2200 round trips, a few milliseconds of startup. Returns nanoseconds per
+/// one-way hop, or None if the probe could not complete -- callers keep the
+/// compiled-in defaults rather than trusting a failed measurement.
+fn probe_handoff_hop_ns() -> Option<HandoffProbe> {
+    const WARMUP: u32 = 200;
+    const ITERS: u32 = 2_000;
+    let total = WARMUP + ITERS;
+
+    let pair = Arc::new((std::sync::Mutex::new(0u32), std::sync::Condvar::new()));
+    let peer = Arc::clone(&pair);
+
+    let responder = std::thread::Builder::new()
+        .name("cake-probe".into())
+        .spawn(move || {
+            let (lock, cv) = &*peer;
+            let mut turn = lock.lock().ok()?;
+            for _ in 0..total {
+                while *turn % 2 == 0 {
+                    turn = cv.wait(turn).ok()?;
+                }
+                *turn = turn.wrapping_add(1);
+                cv.notify_one();
+            }
+            Some(())
+        })
+        .ok()?;
+
+    let mut hops: Vec<u64> = Vec::with_capacity(ITERS as usize);
+    {
+        let (lock, cv) = &*pair;
+        let mut turn = lock.lock().ok()?;
+        for i in 0..total {
+            let t0 = std::time::Instant::now();
+            *turn = turn.wrapping_add(1);
+            cv.notify_one();
+            while *turn % 2 == 1 {
+                turn = cv.wait(turn).ok()?;
+            }
+            if i >= WARMUP {
+                // Two hops per round trip: our wake of the peer, its wake of us.
+                hops.push(t0.elapsed().as_nanos() as u64 / 2);
+            }
+        }
+    }
+    responder.join().ok()?;
+
+    if hops.len() < ITERS as usize / 2 {
+        return None;
+    }
+    hops.sort_unstable();
+    let median = hops[hops.len() / 2];
+    let p99 = hops[hops.len() * 99 / 100];
+    if median == 0 || p99 == 0 {
+        return None;
+    }
+    Some(HandoffProbe { median, p99 })
+}
+
+fn reexec_self() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = std::fs::read_link("/proc/self/exe")
+        .context("failed to resolve /proc/self/exe for restart")?;
+    /* exec() only returns on failure. */
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .exec();
+
+    Err(anyhow::Error::new(err).context("re-exec after kernel restart request failed"))
+}
+
+/// Clear the effective, permitted, and inheritable capability sets.
+fn drop_all_capabilities() {
+    #[repr(C)]
+    struct CapHeader {
+        version: u32,
+        pid: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+    let hdr = CapHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let data = [CapData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    let rc = unsafe { libc::syscall(libc::SYS_capset, &hdr, data.as_ptr()) };
+    if rc != 0 {
+        log::warn!("capset drop failed ({})", std::io::Error::last_os_error());
     }
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // File capabilities (cap_bpf,cap_perfmon,cap_sys_nice) clear the dumpable
+    // flag, which makes /proc/self/exe root-only and defeats the sudoless
+    // bench runner's process-identity verification (hash of /proc/<pid>/exe).
+    // The binary holds no secrets, so restore normal /proc introspection.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+    }
 
-    let args = Args::parse();
+    let opts = Opts::parse();
 
-    // Handle --version before anything else (matches cosmos/bpfland)
-    if args.version {
+    if opts.version {
         println!(
             "{} {}",
             SCHEDULER_NAME,
@@ -799,28 +929,74 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Set up signal handler: ctrlc handles both SIGINT and SIGTERM on Linux.
-    // This is the same pattern cosmos/bpfland use — no SigSet blocking or
-    // SignalFd complexity needed.
+    let mut lcfg = simplelog::ConfigBuilder::new();
+    lcfg.set_time_level(simplelog::LevelFilter::Error)
+        .set_location_level(simplelog::LevelFilter::Off)
+        .set_target_level(simplelog::LevelFilter::Off)
+        .set_thread_level(simplelog::LevelFilter::Off);
+    simplelog::TermLogger::init(
+        simplelog::LevelFilter::Info,
+        lcfg.build(),
+        simplelog::TerminalMode::Stderr,
+        simplelog::ColorChoice::Auto,
+    )?;
+
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
-
     ctrlc::set_handler(move || {
-        info!("Received shutdown signal");
         shutdown_clone.store(true, Ordering::Relaxed);
-    })?;
+    })
+    .context("Error setting Ctrl-C handler")?;
 
-    // Create open object for BPF - needs to outlive scheduler
-    let mut open_object = std::mem::MaybeUninit::uninit();
+    let mut open_object = MaybeUninit::uninit();
+    let mut sched = Scheduler::init(&opts, &mut open_object)?;
 
-    // Restart loop: matches cosmos/bpfland pattern.
-    // Kernel can request restart via UEI (e.g., CPU hotplug).
-    loop {
-        let mut scheduler = Scheduler::new(args.clone(), &mut open_object)?;
-        if !scheduler.run(shutdown.clone())?.should_restart() {
-            break;
-        }
+    if sched.run(shutdown.clone())?.should_restart() {
+        info!("🍰 restart requested by the kernel — re-executing");
+        reexec_self()?;
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sinks_by_widest_gap;
+
+    fn flagged(hot: &[bool]) -> Vec<usize> {
+        hot.iter()
+            .enumerate()
+            .filter_map(|(cpu, h)| h.then_some(cpu))
+            .collect()
+    }
+
+    #[test]
+    fn bimodal_host_cuts_above_the_gap() {
+        // The development host under load: nvidia on 13, network on 5,
+        // everything else at or under one tick.
+        let deltas = [0, 1, 0, 0, 0, 20, 0, 1, 0, 0, 0, 0, 0, 32, 0, 0];
+        let hot = sinks_by_widest_gap(&deltas).unwrap();
+        assert_eq!(flagged(&hot), vec![5, 13]);
+    }
+
+    #[test]
+    fn flat_distribution_has_no_sinks() {
+        assert_eq!(sinks_by_widest_gap(&[3; 16]).unwrap(), vec![false; 16]);
+        assert_eq!(sinks_by_widest_gap(&[0; 16]).unwrap(), vec![false; 16]);
+    }
+
+    #[test]
+    fn half_machine_cut_is_untrusted() {
+        // Eight equally-loud CPUs is host-wide load, not pinned affinity.
+        let deltas = [50, 50, 50, 50, 50, 50, 50, 50, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(sinks_by_widest_gap(&deltas).is_none());
+    }
+
+    #[test]
+    fn lone_loud_cpu_separates_from_quiet_machine() {
+        let mut deltas = [0u64; 16];
+        deltas[13] = 4;
+        let hot = sinks_by_widest_gap(&deltas).unwrap();
+        assert_eq!(flagged(&hot), vec![13]);
+    }
 }

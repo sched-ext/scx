@@ -45,8 +45,6 @@ enum scx_cgroup_consts {
 	CBW_CONSUMPTION_RATE_DECAY	= 3,
 	/* maximum number of cgroups */
 	CBW_NR_CGRP_MAX			= 2048,
-	/* maximum number of scx_cgroup_llc_ctx: 2048 cgroups * 32 LLCs */
-	CBW_NR_CGRP_LLC_MAX		= (CBW_NR_CGRP_MAX * 32),
 	/* The maximum height of a cgroup tree.
 	 * cgroupv2 default maximum depth is 32 (kernel CGROUPS_DEPTH_MAX). */
 	CBW_CGRP_TREE_HEIGHT_MAX	= 32,
@@ -148,6 +146,11 @@ struct scx_cgroup_ctx {
 		 * How many times this cgroup is throttled so far.
 		 */
 		u32		nr_throttled_periods;
+
+		/* Run of consecutive throttled periods: current and max seen. */
+		bool		was_throttled;	/* is_throttled at the previous period */
+		u32		nr_consec_throttled_periods;
+		u32		max_consec_throttled_periods;
 
 		/*
 		 * @period_start_clk represents when a new period starts.
@@ -289,7 +292,7 @@ struct {
 struct cgroup_llc_id {
 	u64		cgrp_id;
 	int		llc_id;
-};
+} __attribute__((packed));
 
 struct cbw_llc_entry {
 	u64	llcx;
@@ -300,7 +303,8 @@ struct {
 	__type(key, struct cgroup_llc_id);
 	__type(value, struct cbw_llc_entry);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, CBW_NR_CGRP_LLC_MAX);
+	/* single-LLC default; userspace grows it to CBW_NR_CGRP_MAX * nr_llcs */
+	__uint(max_entries, CBW_NR_CGRP_MAX);
 } cbw_cgrp_llc_map SEC(".maps");
 
 /*
@@ -413,6 +417,15 @@ struct {
  */
 static u64		cbw_nr_cgroups;
 static u64		cbw_cgroup_ids[CBW_NR_CGRP_MAX];
+
+/*
+ * Number of allocated cgroup contexts, i.e. the live occupancy of
+ * cbw_cgrp_map. Bumped atomically on a successful init and dropped on exit,
+ * and used to cap the number of managed cgroups at CBW_NR_CGRP_MAX. This is
+ * distinct from cbw_nr_cgroups above, which is only the fill count of
+ * cbw_cgroup_ids[] rebuilt on every replenish.
+ */
+static u64		cbw_nr_cgx;
 
 /*
  * An array of throttled cgroups that need to be reenqueued.
@@ -666,7 +679,7 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config)
 	/* If the kernel does not support cpu.max, let's stop here. */
 	if (!is_kernel_compatible()) {
 		cbw_err("The kernel does not support the cpu.max for scx.");
-		return -ENOTSUP;
+		return -EOPNOTSUPP;
 	}
 
 	/* Initialize the library-wide configuration. */
@@ -945,7 +958,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 		 * Then, delete the LLC context and its associated BTQ.
 		 */
 		if (cgrp_id != ROOT_CGID) {
-			while (can_loop && (taskc = scx_atq_pop(btq))) {
+			while (can_loop && (taskc = scx_atq_pop(btq, true))) {
 				scx_task_cgroup_bw_t *t = (scx_task_cgroup_bw_t *)taskc;
 				/*
 				 * Invalidate the per-task cgx/llcx caches before
@@ -983,6 +996,7 @@ int cbw_free_llc_ctx(scx_cgroup_ctx_t *cgx, u64 cgrp_id)
 						"while exiting cgid%llu: %d",
 						cgrp_id, ret);
 				}
+				scx_atq_task_drop((scx_task_common *)taskc);
 			}
 		}
 
@@ -1100,11 +1114,34 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	scx_cgroup_ctx_t *cgx, *parentx;
 	struct cgroup *parent;
 	u64 cgrp_id;
+	int ret;
 
 	cbw_dbg_cgrp(" level: %d -- period_us: %llu -- quota_us: %llu -- burst_us: %llu ",
 		     cgrp->level, args->bw_period_us, args->bw_quota_us, args->bw_burst_us);
 
 	cgrp_id = cgroup_get_id(cgrp);
+
+	/*
+	 * Abort past the static limits rather than run a cgroup unmanaged.
+	 */
+	if (cgrp->level >= CBW_CGRP_TREE_HEIGHT_MAX) {
+		cbw_err("cgroup %llu level %d exceeds max tree height %d; aborting",
+			cgrp_id, cgrp->level, CBW_CGRP_TREE_HEIGHT_MAX);
+		return -E2BIG;
+	}
+
+	if (READ_ONCE(cbw_nr_cgx) >= CBW_NR_CGRP_MAX) {
+		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
+			cgrp_id, CBW_NR_CGRP_MAX);
+		return -ENOSPC;
+	}
+	if (__sync_fetch_and_add(&cbw_nr_cgx, 1) >= CBW_NR_CGRP_MAX) {
+		/* Raced past the limit after the fast-path check; give the slot back. */
+		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+		cbw_err("cgroup %llu exceeds max cgroups %d; aborting",
+			cgrp_id, CBW_NR_CGRP_MAX);
+		return -ENOSPC;
+	}
 
 	/*
 	 * Allocate and initialize scx_cgroup_ctx for @cgrp.
@@ -1117,16 +1154,11 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	cgx = cbw_alloc_cgx();
 	if (!cgx) {
 		cbw_err("Failed to allocate cgroup ctx: %llu", cgrp_id);
-		return -ENOMEM;
-	}
-	entry.cgx = (u64)cgx;
-	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
-		cbw_free_cgx(cgx);
-		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_unreserve;
 	}
 
-	cgx->id = cgroup_get_id(cgrp);
+	cgx->id = cgrp_id;
 	cgx->level = cgrp->level;
 	if (cgrp->level > 0 &&
 	    (parent = bpf_cgroup_ancestor(cgrp, cgrp->level - 1))) {
@@ -1167,7 +1199,33 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 	 * is at the leaf (a cgroup is a leaf until its child is created),
 	 * so we will create per-LLC-cgroup contexts anyway.
 	 */
-	return cbw_init_llc_ctx(cgrp, cgx);
+	if ((ret = cbw_init_llc_ctx(cgrp, cgx))) {
+		cbw_err("Failed to init LLC contexts: %llu (%d)", cgrp_id, ret);
+		goto err_free;
+	}
+
+	/*
+	 * Publish the fully-initialized context into cbw_cgrp_map as the very
+	 * last step. Making @cgrp reachable only after its LLC contexts and BTQs
+	 * exist (has_llcx == true) upholds the invariant that any cgroup found
+	 * through the map can hold tasks.
+	 */
+	entry.cgx = (u64)cgx;
+	if (bpf_map_update_elem(&cbw_cgrp_map, &cgrp_id, &entry, BPF_ANY)) {
+		cbw_err("Failed to insert cgroup entry: %llu", cgrp_id);
+		ret = -ENOMEM;
+		goto err_free;
+	}
+
+	return 0;
+
+err_free:
+	cgx->has_llcx = true;
+	cbw_free_llc_ctx(cgx, cgrp_id);
+	cbw_free_cgx(cgx);
+err_unreserve:
+	__sync_fetch_and_sub(&cbw_nr_cgx, 1);
+	return ret;
 }
 
 __noinline
@@ -1219,7 +1277,6 @@ int cbw_unthrottle_cgroup_for_exit(u64 cgrp_id)
 __hidden
 int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 {
-	int ret = 0;
 	u64 cgrp_id;
 
 	cbw_dbg_cgrp();
@@ -1234,10 +1291,19 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 	 */
 	cgrp_id = cgroup_get_id(cgrp);
 
+	/*
+	 * A cgroup we never managed -- skipped at init for exceeding the static
+	 * limits, or CPU controller not enabled -- has no context; nothing to
+	 * tear down.
+	 */
+	if (!cbw_get_cgroup_ctx_with_id(cgrp_id))
+		return 0;
+
 	cbw_unthrottle_cgroup_for_exit(cgrp_id);
-	cbw_del_cgroup_ctx(cgrp_id);
+	if (!cbw_del_cgroup_ctx(cgrp_id))
+		__sync_fetch_and_sub(&cbw_nr_cgx, 1);
 	cbw_free_llc_ctx(NULL, cgrp_id);
-	return ret;
+	return 0;
 }
 
 /**
@@ -1273,9 +1339,11 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	/* Update the cgroup's bandwidth. */
 	cgx_raw = cbw_get_cgroup_ctx_raw(cgroup_get_id(cgrp));
 	if (!cgx_raw) {
-		cbw_err("Failed to lookup a cgroup ctx: %llu",
-			cgroup_get_id(cgrp));
-		return -ESRCH;
+		/*
+		 * Unmanaged cgroup -- skipped at init for exceeding the static
+		 * limits. Nothing to configure.
+		 */
+		return 0;
 	}
 
 	cbw_set_bandwidth(cgx_raw, period_us, quota_us, burst_us);
@@ -1796,6 +1864,7 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	scx_task_common *taskc = (scx_task_common *)ctx;
 	scx_cgroup_llc_ctx_t *llcx;
 	scx_atq_t *btq;
+	scx_atq_t *task_atq;
 	int llc_id, ret;
 
 	/* Get the current LLC ID. */
@@ -1852,7 +1921,12 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	 * detected either here on the fast path or as EALREADY returned by the
 	 * insert below.
 	 */
-	if (READ_ONCE(taskc->atq) != NULL) {
+	task_atq = (scx_atq_t *)READ_ONCE(taskc->atq);
+	if (task_atq == (scx_atq_t *)SCX_ATQ_DEAD) {
+		scx_atq_unlock(btq);
+		return 0;
+	}
+	if (task_atq) {
 		cbw_dbg("Possible double enqueue detected.");
 		scx_atq_unlock(btq);
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
@@ -1862,7 +1936,9 @@ int cbw_put_aside(u64 ctx, u64 vtime, u64 cgrp_id)
 	ret = scx_atq_insert_vtime_unlocked(btq, taskc, vtime);
 	scx_atq_unlock(btq);
 
-	if (unlikely(ret == -EALREADY)) {
+	if (unlikely(ret == -ECANCELED)) {
+		return 0;
+	} else if (unlikely(ret == -EALREADY)) {
 		cbw_warn("put_aside skipped: already in BTQ; cgid=%llu", cgrp_id);
 		return 0;
 	} else if (unlikely(ret)) {
@@ -2038,26 +2114,72 @@ out_no_replenish:
 }
 
 /*
- * scx_cgroup_bw_cancel - Cancel throttling for a task.
+ * scx_cgroup_bw_cancel - Cancel a task's BTQ membership.
  *
  * @taskc: Pointer to the scx_task_common task context. Passed as a u64
  * to avoid exposing the scx_task_common type to the scheduler.
- *
- * Tasks may be dequeued from the BPF side by the scx core during system
- * calls like sched_setaffinity(2). In that case, we must cancel any
- * throttling-related ATQ insert operations for the task:
- * - We must avoid double inserts caused by the dequeued task being
- *   reenqueed and throttled again while still in an ATQ.
- * - We want to remove tasks not in scx anymore from throttling. While
- *   inserting non-scx tasks into a DSQ is a no-op, we would like our
- *   accounting to be as accurate as possible.
+ * @flags: bitmask of enum scx_cgroup_bw_cancel_flags.
  *
  * Return 0 for success, -errno for failure.
  */
 __hidden
-int scx_cgroup_bw_cancel(u64 ctx)
+int scx_cgroup_bw_cancel(u64 ctx, u64 flags)
 {
-	return scx_atq_cancel((scx_task_common *)ctx);
+	scx_task_common *taskc = (scx_task_common *)ctx;
+	int ret;
+
+	if (flags & SCX_CGROUP_BW_CANCEL_DROP)
+		return scx_atq_task_detach(taskc);
+
+	ret = scx_atq_task_fini(taskc);
+	return ret < 0 ? ret : 0;
+}
+
+/*
+ * Remove @taskc from its current BTQ and hold it across the temporary
+ * ->atq == NULL window. The hold prevents ops.exit_task from freeing the task
+ * context while the caller relocates or reenqueues it.
+ *
+ * Return 0 for success or -errno on failure. On success, @cancelled is true
+ * iff this caller removed the task and now owns a hold.
+ */
+static __always_inline
+int cbw_cancel_with_hold(scx_task_common __arg_arena *taskc, bool *cancelled)
+{
+	scx_atq_t *atq;
+	int ret;
+
+	*cancelled = false;
+
+	while (can_loop) {
+		atq = (scx_atq_t *)READ_ONCE(taskc->atq);
+		if (!atq || atq == (scx_atq_t *)SCX_ATQ_DEAD)
+			return 0;
+
+		if ((ret = scx_atq_lock(atq))) {
+			cbw_err("Failed to lock BTQ while moving task: %d", ret);
+			return ret;
+		}
+
+		if (READ_ONCE(taskc->atq) != atq) {
+			scx_atq_unlock(atq);
+			continue;
+		}
+
+		scx_atq_task_hold(taskc);
+		ret = scx_atq_remove_unlocked(atq, taskc);
+		scx_atq_unlock(atq);
+
+		if (ret) {
+			scx_atq_task_drop(taskc);
+			return ret;
+		}
+
+		*cancelled = true;
+		return 0;
+	}
+
+	return 0;
 }
 
 static struct cgroup *cbw_get_root_cgrp(void)
@@ -2170,6 +2292,7 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 	s64 interval, jitter, period;
 	int i, ret;
 	s32 idle_cpu;
+	bool is_throttled;
 
 	/* Attach the timer function to the BPF area context. */
 	scx_arena_subprog_init();
@@ -2299,9 +2422,19 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 		}
 
-		if (READ_ONCE(cur_cgx->is_throttled)) {
+		is_throttled = READ_ONCE(cur_cgx->is_throttled);
+		if (is_throttled) {
 			cur_cgx->nr_throttled_periods++;
+			/* Consecutive only if throttled in the previous period too. */
+			if (cur_cgx->was_throttled &&
+			    ++cur_cgx->nr_consec_throttled_periods >
+			    cur_cgx->max_consec_throttled_periods)
+				cur_cgx->max_consec_throttled_periods =
+					cur_cgx->nr_consec_throttled_periods;
+		} else {
+			cur_cgx->nr_consec_throttled_periods = 0;
 		}
+		cur_cgx->was_throttled = is_throttled;
 
 		/*
 		 * Replenish the cgroup. If it was throttled, add it to the
@@ -2414,7 +2547,7 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 	 */
 	for (i = 0; can_loop && i < CBW_REENQ_MAX_BATCH &&
 		    (btq = READ_ONCE(llcx->btq)) &&
-		    (taskc = (scx_task_common *)scx_atq_pop(btq)); i++) {
+		    (taskc = (scx_task_common *)scx_atq_pop(btq, true)); i++) {
 		/*
 		 * Note that we do not worry about racing with .dequeue() here,
 		 * because even if we do, the callback's insert_vtime call will
@@ -2422,6 +2555,7 @@ int cbw_drain_btq_batch(scx_cgroup_ctx_t *cgx,
 		 */
 
 		scx_cgroup_bw_enqueue_cb((u64)taskc);
+		scx_atq_task_drop(taskc);
 		cbw_dbg("cgid%llu", cgx->id);
 	}
 
@@ -2642,14 +2776,20 @@ __hidden
 int scx_cgroup_bw_is_task_throttled(u64 taskc)
 {
 	scx_task_common *ctx = (scx_task_common *)taskc;
-	return ctx && (READ_ONCE(ctx->atq) != NULL);
+	scx_atq_t *atq;
+
+	if (!ctx)
+		return false;
+
+	atq = READ_ONCE(ctx->atq);
+	return atq != NULL && atq != (scx_atq_t *)SCX_ATQ_DEAD;
 }
 
 /**
  * scx_cgroup_bw_move - Move a task from a cgroup to another (@from -> @to).
  *
  * @p: task being moved
- * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * @task_ptr: Pointer to the scx_task_common task context. Passed as a u64
  * to avoid exposing the scx_task_common type to the scheduler.
  * @from: cgroup @p is being moved from
  * @to: cgroup @p is being moved to
@@ -2657,11 +2797,13 @@ int scx_cgroup_bw_is_task_throttled(u64 taskc)
  * Return 0 for success, -errno for failure.
  */
 __hidden __noinline
-int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
+int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 task_ptr,
 		       struct cgroup *from __arg_trusted,
 		       struct cgroup *to __arg_trusted)
 {
 	volatile scx_task_cgroup_bw_t *tc; /* Add `volatile` to work around the verifier error */
+	scx_task_common *taskc = (scx_task_common *)task_ptr;
+	bool cancelled;
 	int ret;
 
 	scx_arena_subprog_init();
@@ -2681,27 +2823,51 @@ int scx_cgroup_bw_move(struct task_struct *p __arg_trusted, u64 taskc,
 	}
 
 	/*
-	 * If a task is throttled, remove it from the @from cgroup,
-	 * then add it to the BTQ of the @to cgroup.
+	 * If a task is throttled, remove it from its current BTQ, hold it
+	 * across the transient ->atq == NULL state, then add it to @to's BTQ.
+	 * A concurrent ops.exit_task may latch SCX_ATQ_DEAD during the window,
+	 * but it must wait for our hold before freeing the task context; the
+	 * subsequent put_aside sees DEAD and skips reinsertion safely.
 	 *
 	 * We will try to reenqueue it in the next replenishment interval.
 	 * This is fair because the task was throttled under @from cgroup,
 	 * so it has to wait until the next replenishment interval anyway.
 	 */
-	if (!scx_cgroup_bw_is_task_throttled(taskc))
+	if (!scx_cgroup_bw_is_task_throttled(task_ptr))
 		return 0;
 
-	if ((ret = scx_cgroup_bw_cancel(taskc))) {
+	ret = cbw_cancel_with_hold(taskc, &cancelled);
+	if (ret) {
 		cbw_err("Fail to cancel a throttled task (%s:%d) from a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(from), ret);
 		return ret;
 	}
+	if (!cancelled)
+		return 0;
 
-	if ((ret = scx_cgroup_bw_put_aside(p, taskc, p->scx.dsq_vtime, cgroup_get_id(to)))) {
+	/*
+	 * Put the task aside into @to's cgroup. If that fails -- e.g., the
+	 * target cgroup is exiting or unmanaged, or a transient internal error
+	 * occurred -- fall back to the root cgroup rather than lose the task.
+	 *
+	 * Note that we cannot call scx_cgroup_bw_enqueue_cb() here: the BPF
+	 * verifier rejects calling scx_bpf_dsq_insert_vtime() from the
+	 * ops.cgroup_move() callback.
+	 */
+	if ((ret = cbw_put_aside(task_ptr, p->scx.dsq_vtime, cgroup_get_id(to)))) {
+		if (ret == -ESRCH) {
+			cbw_warn("Destination cgroup unavailable while moving throttled task (%s:%d) to cgid%llu",
+				 p->comm, p->pid, cgroup_get_id(to));
+		}
+
+		if (!(ret = cbw_put_aside(task_ptr, 0, ROOT_CGID)))
+			goto out_drop;
 		cbw_err("Fail to put aside a throttled task (%s:%d) to a cgroup (cgid%llu): %d",
 			p->comm, p->pid, cgroup_get_id(to), ret);
 	}
 
+out_drop:
+	scx_atq_task_drop(taskc);
 	return ret;
 }
 
@@ -2782,9 +2948,10 @@ int cbw_dump_cgroup(struct cgroup *cgrp __arg_trusted, bool indent)
 			cgx->quota, cgx->period, cgx->burst);
 	bpf_printk("%s   \\_ nquota: %llu, nquota_ub: %llu, has_llcx: %d", indent_str,
 			cgx->nquota, cgx->nquota_ub, cgx->has_llcx);
-	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d, nr_throttled_tasks: %d", indent_str,
+	bpf_printk("%s   \\_ is_throttled: %d, nr_throttled_periods: %d/%d (%u/%u), nr_throttled_tasks: %d", indent_str,
 			cgx->is_throttled,
 			cgx->nr_throttled_periods, READ_ONCE(cbw_backlog_stat.rp_seq) / 2,
+			cgx->nr_consec_throttled_periods, cgx->max_consec_throttled_periods,
 			nr_throttled_tasks);
 	bpf_printk("%s   \\_ period_budget: %lld, burst_remaining: %lld", indent_str,
 			cgx->period_budget, cgx->burst_remaining);

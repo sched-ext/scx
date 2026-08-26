@@ -79,28 +79,29 @@ const volatile u64 nr_cpu_ids = 1;
 
 #define EWMA_AGE_MATURE      8
 #define EWMA_AGE_CAP         16
-// FRESH-FORK COLD-START PRIME (Q16): A SMALL BOUNDED BACK-DATE FOR AN
-// UNOBSERVED INTERACTIVE TASK SO IT IS NOT SORTED DEAD-LAST (LIKE BATCH) AND
-// LOSING THE DISPATCH RACE DURING ITS LAUNCH WINDOW -- THE app-launch ms
-// BLOWOUT. 1/16 OF FULL: A MATURED INTERACTIVE/LAT_CRITICAL TASK (UP TO 65536)
-// ALWAYS SORTS AHEAD, SO DEADLINE WORK IS UNTOUCHED. DECAYS TO 0 BY
-// EWMA_AGE_MATURE, WHERE THE EARNED WARP TAKES OVER. lag_cap_ns BOUNDS THE
-// RESULTING BACK-DATE (STARVATION-FREE). ORDERING ONLY -- NEVER A PREEMPT.
-#define PRIME_FRESH_Q16      4096u
-#define MAX_WAKEUP_FREQ      64
 #define MAX_WAKEUP_FREQ      64
 #define MAX_CSW_RATE         512
-// WARP CEILING: TAU-DERIVED IN apply_tau_scaling() VIA K_LAG_CAP. THE UPPER
-// BOUND ON THE SOJOURN warp IN task_deadline() (warp = lag_cap_ns *
-// task_potentiality_q16 >> 16), SO THE WARP IS STARVATION-FREE. AT THE 12C REFERENCE
-// (tau=40MS) THIS IS 40MS, MATCHING THE PRE-v5.8.0 CONSTANT. CLAMPED
-// [8MS, 80MS]. INIT FALLBACK MATCHES THE 12C REFERENCE.
+// STARVATION BOUND: TAU-DERIVED IN apply_tau_scaling() VIA K_LAG_CAP. THE AGE AT
+// WHICH sweep_bound_preempt FORCES A HEAD OFF ITS CPU, AND THE OUTER GUARD ON THE
+// warp IN task_deadline() (WHICH IS BOUNDED BY codel_target_ns FIRST, SO THE GUARD
+// IS NEVER THE BINDING CONSTRAINT). NO LONGER THE ORDERING BOUND -- THE TWO WERE
+// ONE NUMBER, WHICH LET A WARP CONSUME THE WHOLE STARVATION BUDGET. AT THE 12C
+// REFERENCE (tau=40MS) THIS IS 40MS. CLAMPED [8MS, 80MS]. INIT FALLBACK MATCHES.
 static u64 lag_cap_ns = 40000000ULL;
 
 #define SLICE_MIN_NS 100000     // 100US FLOOR
-// starvation_rescue_ns AND overflow_sojourn_rescue_ns ARE DERIVED FROM
-// knobs->topology_tau_ns VIA scale_tau() AT THE FIRST CPU-0 TICK. SEE
-// apply_tau_scaling() AND pandemonium_init().
+// HOW MANY LIVE CoDel TARGETS A STANDING TASK MAY HOLD A CPU FOR. The gate
+// already prices the warp, the overflow rescue and the safety net in targets;
+// the quantum was the one bound still set by a raw knob, and it is the bound a
+// waiter actually pays when it lands on a busy CPU. Four keeps a batch task's
+// run long enough to be worth the switch and short enough that the worst landing
+// costs a few targets rather than a fixed 15.6ms.
+#define SLICE_STANDING_TARGETS  4ULL
+// codel_starve_ns IS DERIVED FROM knobs->topology_tau_ns VIA scale_tau()
+// AT THE FIRST CPU-0 TICK. SEE apply_tau_scaling() AND pandemonium_init().
+// THE NORMAL OVERFLOW-SERVICE THRESHOLD IS codel_target_ns ITSELF, THE
+// LIVE OSCILLATOR TARGET -- ONE THRESHOLD, ONE WRITER (THE CPU-0 TICK),
+// NO SHADOW COPY TO RE-SEED AND FLAP ON HOTPLUG.
 
 // FIEDLER-SCALED TIMING CONSTANTS (Q16 FIXED-POINT DIMENSIONLESS RATIOS).
 // EACH k_i ENCODES (target_ns / tau_ns) AT THE 12C REFERENCE TOPOLOGY WHERE
@@ -139,21 +140,26 @@ static u32 nr_nodes;
 volatile u32 nr_overflow_domains = 1;
 
 // NO GLOBAL PREEMPT FLAG: tick() DERIVES THE DECISION PER-CPU FROM
-// pcpu_enqueue_ns[this_cpu] (OLDEST WAITER AGE) AGAINST A k*tau THRESHOLD,
+// sojourn_stamp_pcpu[this_cpu] (OLDEST WAITER AGE) AGAINST A k*tau THRESHOLD,
 // TIER-GATED ON THE RESIDENT. PER-CPU SO NO TOKEN FOR CPUs TO RACE OVER.
 
 // SOJOURN TRACKERS: RECORD WHEN OVERFLOW DSQs TRANSITION FROM EMPTY.
 // DISPATCH STEP 0 CHECKS THESE TO RESCUE OVERFLOW TASKS AGING PAST
-// overflow_sojourn_rescue_ns. WITHOUT THIS, PER-CPU DSQ DOMINANCE
-// UNDER SUSTAINED LOAD MAKES ALL DOWNSTREAM ANTI-STARVATION LOGIC
-// (DEFICIT, SOJOURN, STARVATION_RESCUE) UNREACHABLE.
-// per-domain (v5.14.0 F3): the overflow DSQs are per-domain (domain_inter_dsq /
-// domain_batch_dsq), so their sojourn stamps must be too. A single global scalar
-// let one cache domain's stamp mask another cache domain's aging -- a task buried on the
-// unmonitored cache domain was invisible to STEP 2 / the safety net and aged to the 30s
-// watchdog -> ejection on multi-cache domain parts. Indexed by dom at every arm/clear/read.
-static u64 batch_enqueue_ns[MAX_OVERFLOW_DOMAINS];
-static u64 interactive_enqueue_ns[MAX_OVERFLOW_DOMAINS];
+// codel_target_ns (THE LIVE OSCILLATOR TARGET). WITHOUT THIS, PER-CPU DSQ
+// DOMINANCE UNDER SUSTAINED LOAD MAKES ALL DOWNSTREAM ANTI-STARVATION LOGIC
+// (DEFICIT, SOJOURN, codel_starve_ns) UNREACHABLE.
+// PER-DOMAIN: THE OVERFLOW DSQs ARE PER-DOMAIN (domain_inter_dsq /
+// domain_batch_dsq), SO THEIR SOJOURN STAMPS MUST BE TOO. A SINGLE GLOBAL
+// SCALAR LETS ONE cache domain's STAMP MASK ANOTHER'S AGING -- A TASK BURIED
+// ON THE UNMONITORED cache domain IS INVISIBLE TO STEP 2 / THE SAFETY NET AND
+// AGES TO THE 30s WATCHDOG -> EJECTION ON MULTI-cache domain PARTS. INDEXED
+// BY dom AT EVERY ARM/CLEAR/READ.
+// BOTH TIERS OF ONE DOMAIN FOLD ONTO ONE 64-BYTE LINE (inter + batch OF THE
+// SAME DOMAIN ARE ARMED/CLEARED TOGETHER ON THAT DOMAIN'S ENQUEUE/DRAIN
+// PATH); THE PER-DOMAIN ALIGNMENT KEEPS DIFFERENT DOMAINS OFF EACH OTHER'S
+// LINE, SO NO TWO DOMAINS EVER FALSE-SHARE THEIR CAS TRAFFIC.
+struct sojourn_stamp_pair { u64 inter; u64 batch; } __attribute__((aligned(64)));
+static struct sojourn_stamp_pair sojourn_stamp_overflow[MAX_OVERFLOW_DOMAINS];
 
 // PER-CPU DSQ SOJOURN: TRACKS WHEN EACH PER-CPU DSQ TRANSITIONS
 // FROM EMPTY. DISPATCH AND TICK CHECK THESE TO DETECT STALE TASKS.
@@ -161,11 +167,23 @@ static u64 interactive_enqueue_ns[MAX_OVERFLOW_DOMAINS];
 // CACHELINE-PADDED: one stamp per 64-byte line so the per-placement CAS
 // (arm/clear) and the per-tick cross-CPU scan don't false-share neighbors.
 struct pcpu_stamp { u64 ns; } __attribute__((aligned(64)));
-static struct pcpu_stamp pcpu_enqueue_ns[MAX_CPUS];
+static struct pcpu_stamp sojourn_stamp_pcpu[MAX_CPUS];
 
-static u64 starvation_rescue_ns;
-static u64 overflow_sojourn_rescue_ns;
+static u64 codel_starve_ns;
 static u32 pcpu_depth_base;
+
+// PAIR-WARM SEAT MARKER -- THE STEAL-SIDE HALF OF TIGHT-PAIR COLOCATION.
+// warm_stay_anchor HOLDS A HANDOFF PARTNER HOME (THE STAY SIDE); A PAIR-BLIND
+// STEP-1 STEAL SPLITS THE PAIR ANYWAY -- TRACED: WHAT UNSEATS A WARM PAIR AT
+// WIDTH IS THE STEAL. THE SEAT SITES STAMP THE PARTNER'S PER-CPU SEAT HERE;
+// THE STEAL READS IT (ONE INDEXED LOOKUP, NO REMOTE task_ctx DEREF) AND
+// PRICES THE SPLIT BY THE domain_phi SEAM. A PRICE, NOT A GATE -- A GENUINELY
+// STARVING TASK IS STILL STOLEN AT A LONGER SOJOURN.
+static u64 pair_warm_ns[MAX_CPUS];
+
+// LAST TIER 1 REQUEUE PREEMPT PER CPU. THE RATE BOUND ON THE ONE KICK SITE
+// THAT CAN FEED ITSELF -- SEE THE COMMENT AT ITS USE IN enqueue().
+static u64 requeue_kick_last[MAX_CPUS];
 
 // TAU-DERIVED LONGRUN PREEMPT BOOST. SET IN apply_tau_scaling() AS A
 // STEP FUNCTION ON tau (SHIFT 2 WHEN tau < 4MS, ELSE 0). USED BY tick()
@@ -229,7 +247,7 @@ static bool osc_env_parked;          // OSCILLATOR PARKED AT EQUILIBRIUM
                                      // REJECTS THE .bss DATASEC SIZE MISMATCH)
 static u64 osc_env_park_ticks;       // TICKS SPENT PARKED (HEARTBEAT CAP)
 
-// F1a: the SINGLE un-park owner. Called from the CPU-0 tick (rescue edge) and
+// THE SINGLE UN-PARK OWNER. Called from the CPU-0 tick (rescue edge) and
 // from pandemonium_runnable (wake edge). Re-primes the reservoir above RELEASE
 // (refractory dwell, so a bursty wake cannot immediately re-park) and resets the
 // graded-band divider + heartbeat. Does NOT touch oscillator_velocity_ns or
@@ -271,7 +289,7 @@ static u64 last_tau_snapshot;
 // THE OSCILLATOR'S SPRING (RESTORING TERM) -- WITHOUT IT THE OSCILLATOR
 // HAS NO EQUILIBRIUM AND CAN ACCUMULATE OPEN-LOOP DRIFT.
 // FALLBACK 2MS UNTIL RUST WRITES; SAME ORDER AS codel_target_max_ns.
-static u64 codel_target_equilibrium_ns = 2000000ULL;
+static u64 codel_seed_ns = 2000000ULL;
 
 // PHI MIGRATION POTENTIAL: distance penalty b*R_eff is pre-folded into the
 // reff_value map (in ns) by Rust at topology detect, so dispatch STEP 1 reads it
@@ -284,7 +302,22 @@ UEI_DEFINE(uei);
 // MAPS
 
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
+	// PER-CPU KNOBS. max_entries STAYS 1: EACH CPU GETS ITS OWN COPY OF THAT
+	// ONE ENTRY, SO get_knobs() BELOW IS UNCHANGED -- bpf_map_lookup_elem WITH
+	// key 0 ALREADY RETURNS THIS CPU'S SLOT ONCE THE MAP IS PER-CPU. NO CROSS-
+	// CPU ACCESS IS INTRODUCED AND ALL 13 READ SITES ARE UNTOUCHED.
+	//
+	// WHY: A CONTROL LOOP THAT CAN SEE CPU 3 STARVING WHILE CPU 7 IDLES, WHOSE
+	// ONLY LEVER IS A SYSTEM-WIDE slice_ns, OBSERVES LOCALLY AND ACTUATES
+	// GLOBALLY -- EVERY LOCAL FINDING IS AVERAGED AWAY AT THE MOMENT OF ACTION.
+	// stats_map IS ALREADY PER-CPU; THIS MAKES THE BOUNDARY SYMMETRIC.
+	//
+	// NOT EVERY FIELD IS PER-CPU. topology_tau_ns, codel_eq_ns, spill_temp_q16,
+	// affinity_mode AND THE TWO lat_cri THRESHOLDS MUST HOLD THE SAME VALUE ON
+	// EVERY CPU OR TAU-SCALING AND TASK CLASSIFICATION DIVERGE BY WHICHEVER CPU
+	// HAPPENED TO OBSERVE. THE RUST WRITER ENFORCES THAT BY CONSTRUCTION --
+	// SEE Scheduler::write_tuning_knobs_percpu.
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, u32);
 	__type(value, struct tuning_knobs);
@@ -318,23 +351,6 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 } cpu_domain SEC(".maps");
-
-// PROCESS CLASSIFICATION DATABASE: BPF OBSERVES, RUST LEARNS, BPF APPLIES
-// OBSERVE: BPF WRITES MATURE TASK CLASSIFICATION, RUST DRAINS EVERY SECOND
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 512);
-	__type(key, char[16]);
-	__type(value, struct task_class_entry);
-} task_class_observe SEC(".maps");
-
-// INIT: RUST WRITES PREDICTIONS, BPF READS IN enable() FOR NEW TASKS
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 512);
-	__type(key, char[16]);
-	__type(value, struct task_class_entry);
-} task_class_init SEC(".maps");
 
 // L2 SIBLINGS MAP: FLAT ARRAY FOR L2-AWARE CPU PLACEMENT
 // l2_siblings[group_id * MAX_L2_SIBLINGS + slot] = cpu_id
@@ -380,6 +396,21 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 } reff_value SEC(".maps");
+
+// PHI SPILL DEPTH ORACLE (SPILL-Phi): PER-CPU PRE-FOLDED PLACEMENT
+// THRESHOLD TO EACH TARGET. spill_depth[cpu * MAX_AFFINITY_CANDIDATES + slot] =
+// THE MAX PEER DSQ DEPTH AT WHICH A SPILL TO affinity_rank[cpu][slot] IS STILL
+// WORTH ITS R_eff DISTANCE, FOLDED BY RUST AT TOPOLOGY DETECT. THE PLACEMENT
+// SPILL READS IT DIRECTLY -- ONE INDEXED LOOKUP, NO RUNTIME MULTIPLY: THE
+// ENQUEUE-SIDE MIRROR OF reff_value's STEAL DELAY. 0 (PRE-POPULATE / UNFILLED
+// SLOT) FALLS BACK TO THE FLAT pcpu_depth_base. FLAT ON MONOLITHIC (NO DISTANCE
+// STRUCTURE TO PRICE) -- NEAR-PRIOR BEHAVIOR THERE BY CONSTRUCTION.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CPUS * MAX_AFFINITY_CANDIDATES);
+	__type(key, u32);
+	__type(value, u32);
+} spill_depth SEC(".maps");
 
 // EMERGENT-DOMAIN CROSSING PRICE: PER-CPU phi OF THE DOMAIN CUT TO EACH TARGET.
 // domain_phi[cpu * MAX_AFFINITY_CANDIDATES + slot] = (phi * 1e6) OF THE LOWEST
@@ -441,7 +472,20 @@ struct task_ctx {
 	u64 csw_rate;
 	u64 lat_cri;
 	u64 sleep_start_ns;  // SET IN quiescent(), USED IN running()
+	u64 wait_since;      // WHEN THIS QUEUE WAIT BEGAN; 0 = NOT WAITING. STAMPED ON
+	                     // THE FIRST INSERT AFTER A RUN, PRESERVED ACROSS REQUEUES,
+	                     // CLEARED IN running() AND quiescent(). THE SOJOURN BASE.
+	u64 last_run_ns;     // DURATION OF THE LAST RUN, RAW. SET IN stopping().
+	                     // THE WARP'S ONLY INPUT: warp = codel_target - last_run_ns.
+	                     // 0 (NEVER RAN) EARNS A FULL TARGET.
 	u64 waker_bitmap;    // BIT i = CPU i woke this task; popcount = partner cardinality
+	u32 wake_obs;        // SATURATING COUNT OF WAKEUPS OBSERVED. THE DENOMINATOR
+	                     // FOR shape: FEW PARTNERS MEANS TIGHT ONLY AFTER ENOUGH
+	                     // LOOKS. A LEDGER, NOT AN AVERAGE.
+	u32 standing_runs;   // CONSECUTIVE RUNS THAT CONSUMED A FULL codel_target_ns.
+	                     // A SERVICE LEDGER, NOT AN ESTIMATOR: IT RECORDS WHAT WAS
+	                     // RENDERED, NEVER GUESSES WHAT THE TASK IS. MAINTAINED IN
+	                     // stopping() BESIDE last_run_ns; RESET BY ANY SHORT RUN.
 	u32 tier;
 	u32 ewma_age;
 	s32 last_cpu;        // LAST CPU THIS TASK RAN ON (FOR CACHE AFFINITY)
@@ -490,12 +534,12 @@ static __always_inline u64 domain_batch_dsq(u32 dom)
 _Static_assert(MAX_OVERFLOW_DOMAINS <= 2 * MAX_NODES,
 	       "per-domain overflow DSQ ranges must fit the reserved id gap");
 
-// Overflow domain of a CPU (T3b.2): now the EMERGENT domain from the T2
+// Overflow domain of a CPU (T3b.2): the EMERGENT domain from the T2
 // min-conductance tree (cpu_domain map), not the discrete llc_domain. The
-// partition targets the L3 granularity, so on a real part cpu_domain == the old
-// llc_domain value and this is behavior-preserving -- the boundary is just drawn
-// by the conductance landscape instead of a hardcoded multi-domain table. The name
-// stays cpu_domain_of until T7's vocabulary sweep; every overflow site re-keys here.
+// partition targets the L3 granularity, so on a real part cpu_domain matches
+// the llc_domain value and the re-key is behavior-preserving -- the boundary
+// is just drawn by the conductance landscape instead of a hardcoded
+// multi-domain table. Every overflow site re-keys here.
 static __always_inline u32 cpu_domain_of(s32 cpu)
 {
 	if (cpu < 0 || (u32)cpu >= nr_cpu_ids)
@@ -574,36 +618,6 @@ static __always_inline void count_l2_affinity(struct pandemonium_stats *s,
 	}
 }
 
-// L2 CACHE PLACEMENT: FIND IDLE SIBLING IN SAME L2 DOMAIN
-// BOUNDED LOOP (MAX 8 ITERATIONS), VERIFIER-SAFE.
-// RETURNS IDLE CPU IN SAME L2 GROUP, OR -1 IF NONE FOUND.
-
-static __always_inline s32 find_idle_l2_sibling(const struct task_ctx *tctx,
-					       const struct cpumask *allowed)
-{
-	if (tctx->last_cpu < 0)
-		return -1;
-
-	u32 lcpu = (u32)tctx->last_cpu;
-	u32 *group = bpf_map_lookup_elem(&cache_domain, &lcpu);
-	if (!group)
-		return -1;
-
-	u32 base = *group * MAX_L2_SIBLINGS;
-	for (int i = 0; i < MAX_L2_SIBLINGS; i++) {
-		u32 key = base + i;
-		u32 *val = bpf_map_lookup_elem(&l2_siblings, &key);
-		if (!val || *val == (u32)-1)
-			break;
-		s32 cpu = (s32)*val;
-		if (allowed && !bpf_cpumask_test_cpu(cpu, allowed))
-			continue;
-		if (scx_bpf_test_and_clear_cpu_idle(cpu))
-			return cpu;
-	}
-	return -1;
-}
-
 // RESISTANCE AFFINITY: IDLE CPU SEARCH BY EFFECTIVE RESISTANCE
 // WALKS THE R_EFF-RANKED AFFINITY LIST (LAPLACIAN PSEUDOINVERSE) FOR A
 // GIVEN SOURCE CPU. RETURNS FIRST IDLE CPU FOUND, OR -1.
@@ -670,10 +684,8 @@ static __always_inline s32 find_idle_by_affinity(s32 src_cpu,
 // A PLACE-ON-BUSY WARM-STAY, IF EVER PURSUED, BELONGS IN THE enqueue PATH THAT KICKS
 // PREEMPT -- NEVER THE IDLE FAST PATH.
 static __always_inline s32 phi_warm_target(s32 anchor,
-					   const struct cpumask *allowed,
-					   u32 tier)
+					   const struct cpumask *allowed)
 {
-	(void)tier;
 	return find_idle_by_affinity(anchor, allowed);
 }
 
@@ -754,9 +766,19 @@ static __always_inline s32 warm_stay_anchor(struct task_struct *p,
 	// per-CPU DSQ and the per-round straggler waits a CoDel-aged steal/tick (the
 	// fan-out ms p50). The FIRST wakee (nq==0) still takes the warm seat, so the
 	// 1:1 IPC handoff -- where the waker is on-CPU, not queued -- is unaffected.
+	//
+	// IT IS ALSO THE RATE LIMIT ON THE HOME-PULL, WHICH IS THE LOAD-BEARING HALF
+	// AND IS NOT WHAT THE PARAGRAPH ABOVE SAYS. warm_stay_anchor RETURNS home_cpu,
+	// AND SEATING A TASK ON home_cpu WHEN IT LAST RAN SOMEWHERE ELSE IS ITSELF A
+	// MIGRATION. PRICING THIS AS DEPTH INSTEAD OF GATING ON IT ADMITS FAR MORE
+	// WAKEES TO THE WARM SEAT AND SO FIRES FAR MORE HOME-PULLS: MEASURED AT 12C
+	// UNDER --dev ipc AS intra_wake 2161 -> 57485, TOTAL MIGRATIONS 3037 -> 59150
+	// AGAINST A FLAT WAKEUP COUNT (233147 -> 246540), 1.3% -> 24.0% PER WAKEUP.
+	// DO NOT REPLACE THIS WITH A PRICE UNTIL THE home_cpu / last_cpu DIVERGENCE
+	// BELOW IT IS SETTLED -- THE GATE IS SUPPRESSING A DEFECT, NOT EXPRESSING ONE.
 	if (scx_bpf_dsq_nr_queued((u64)lc) > 0)
 		return -1;
-	u64 stamp = pcpu_enqueue_ns[(u32)lc & (MAX_CPUS - 1)].ns;
+	u64 stamp = sojourn_stamp_pcpu[(u32)lc & (MAX_CPUS - 1)].ns;
 	u64 sojourn = (stamp && now > stamp) ? (now - stamp) : 0;
 	// PHI-PRICED STAY. THE STAY AND THE STEP-1 STEAL MUST RELEASE AT THE SAME
 	// THRESHOLD, OR THEY FIGHT: THE STEAL FIRES AT codel_target + dist_extra
@@ -830,7 +852,7 @@ static __always_inline s32 find_pcpu_with_room(s32 src_cpu,
 	u32 base = (u32)src_cpu * MAX_AFFINITY_CANDIDATES;
 	u32 checked = 0;
 	s32 best_cross_domain = -1;
-	u32 best_cross_domain_q = pcpu_depth_base;
+	u32 best_cross_domain_q = (u32)-1;
 	for (int i = 0; i < PCPU_SPILL_SCAN_MAX; i++) {
 		u32 key = base + (u32)i;
 		u32 *val = bpf_map_lookup_elem(&affinity_rank, &key);
@@ -841,8 +863,15 @@ static __always_inline s32 find_pcpu_with_room(s32 src_cpu,
 			continue;
 		if (allowed && !bpf_cpumask_test_cpu((s32)peer, allowed))
 			continue;
+		// SPILL-Phi: THE DEPTH CAP IS PER-PEER, PRICED BY R_eff -- RUST
+		// FOLDS THE DISTANCE INTO spill_depth AT TOPOLOGY DETECT, THE
+		// READ HERE IS ONE INDEXED LOOKUP. NEAR PEERS ACCEPT AT HIGHER
+		// DEPTH, FAR PEERS NEAR-EMPTY ONLY; 0 (UNFILLED) FALLS BACK TO
+		// THE FLAT pcpu_depth_base. MIRRORS THE STEAL reff_value READ.
+		u32 *sdp = bpf_map_lookup_elem(&spill_depth, &key);
+		u32 sd = (sdp && *sdp) ? *sdp : pcpu_depth_base;
 		u32 q = scx_bpf_dsq_nr_queued((u64)peer);
-		if (q < pcpu_depth_base) {
+		if (q < sd) {
 			if (cpu_domain_of((s32)peer) == src_dom)
 				return (s32)peer;
 			if (q < best_cross_domain_q) {
@@ -881,31 +910,35 @@ static __always_inline u64 pick_pcpu_dsq_with_spill(s32 src_cpu,
 	bool src_ok = (u64)src_cpu < nr_cpu_ids &&
 		      (!allowed || bpf_cpumask_test_cpu(src_cpu, allowed));
 
+	// PAIR-WARM MARKER: a handoff partner (keep_own) always seats on its own
+	// warm core (src_cpu) -- the sibling spill is forced off below, and the
+	// only non-src_cpu outcome is the affinity-stranded escape (!src_ok).
+	// Stamp the seat so the STEP-1 steal can price splitting this warm pair
+	// without a remote task_ctx deref.
+	if (keep_own && src_ok && (u32)src_cpu < MAX_CPUS)
+		pair_warm_ns[(u32)src_cpu & (MAX_CPUS - 1)] = now;
+
 	if (src_ok &&
 	    scx_bpf_dsq_nr_queued((u64)src_cpu) < pcpu_depth_base) {
 		if ((u32)src_cpu < MAX_CPUS)
 			__sync_val_compare_and_swap(
-				&pcpu_enqueue_ns[(u32)src_cpu].ns,
+				&sojourn_stamp_pcpu[(u32)src_cpu].ns,
 				0, now);
 		*out_cpu = src_cpu;
 		return (u64)src_cpu;
 	}
 
-	// FALSIFYING TEST (20-AGENT CONSENSUS): DISABLE THE SHAPE_STORM BRANCH.
-	// HYPOTHESIS: STORM WAKEES ROUTED TO domain_inter_dsq (A cache domain-WIDE SHARED DSQ)
-	// WHILE KICKING ONLY `src_cpu` DECOUPLES PLACEMENT FROM DRAIN -- THE KICKED
-	// CPU IS NOT NECESSARILY THE same-domain PEER THAT WINS STEP 3a's DRAIN RACE.
-	// P(KICKED CPU DRAINS) ≈ 1/6 ON A 6-CPU cache domain, SO ~5/6 OF STORM WAKEUPS
-	// PRODUCE A MIGRATION ON EVERY SINGLE WAKE -- ACCOUNTING FOR THE MEASURED
-	// 22× MIGRATION MULTIPLIER AND 2.1× WAKEUP AMPLIFIER. LETTING STORM FALL
-	// THROUGH TO find_pcpu_with_room + B-v2 OVER-DEPTH OWN PLACES THE WAKEE ON
-	// A SPECIFIC NAMED CPU'S PER-CPU DSQ, RESTORING KICK == DRAIN IDENTITY.
-	// (void)now IN THIS BRANCH SINCE WE NO LONGER ARM interactive_enqueue_ns.
-	// if (shape == SHAPE_STORM) {
-	// 	__sync_val_compare_and_swap(&interactive_enqueue_ns, 0, now);
-	// 	*out_cpu = src_cpu;
-	// 	return domain_inter_dsq(cpu_domain_of(src_cpu));
-	// }
+	// NO SHAPE_STORM FAST PATH: STORM WAKEES FALL THROUGH TO
+	// find_pcpu_with_room + THE OVER-DEPTH OWN SEAT. ROUTING THEM TO
+	// domain_inter_dsq (A cache domain-WIDE SHARED DSQ) WHILE KICKING ONLY
+	// `src_cpu` DECOUPLES PLACEMENT FROM DRAIN -- THE KICKED CPU IS NOT
+	// NECESSARILY THE same-domain PEER THAT WINS STEP 3a's DRAIN RACE.
+	// P(KICKED CPU DRAINS) ≈ 1/6 ON A 6-CPU cache domain, SO ~5/6 OF STORM
+	// WAKEUPS PRODUCE A MIGRATION ON EVERY SINGLE WAKE (THE MEASURED 22×
+	// MIGRATION MULTIPLIER, 2.1× WAKEUP AMPLIFIER). THE FALL-THROUGH PLACES
+	// THE WAKEE ON A SPECIFIC NAMED CPU'S PER-CPU DSQ, PRESERVING
+	// KICK == DRAIN IDENTITY. THIS BRANCH ARMS NO sojourn_stamp_overflow.inter
+	// STAMP.
 	(void)shape;
 
 	// HANDOFF PARTNER (keep_own): A is about to block and free src_cpu within
@@ -919,7 +952,7 @@ static __always_inline u64 pick_pcpu_dsq_with_spill(s32 src_cpu,
 	if (spill >= 0) {
 		if ((u32)spill < MAX_CPUS)
 			__sync_val_compare_and_swap(
-				&pcpu_enqueue_ns[(u32)spill].ns,
+				&sojourn_stamp_pcpu[(u32)spill].ns,
 				0, now);
 		*out_cpu = spill;
 		return (u64)spill;
@@ -934,7 +967,7 @@ static __always_inline u64 pick_pcpu_dsq_with_spill(s32 src_cpu,
 	if (src_ok) {
 		if ((u32)src_cpu < MAX_CPUS)
 			__sync_val_compare_and_swap(
-				&pcpu_enqueue_ns[(u32)src_cpu].ns,
+				&sojourn_stamp_pcpu[(u32)src_cpu].ns,
 				0, now);
 		*out_cpu = src_cpu;
 		return (u64)src_cpu;
@@ -944,36 +977,53 @@ static __always_inline u64 pick_pcpu_dsq_with_spill(s32 src_cpu,
 	// cache domain-local overflow DSQ; if allowed excludes the whole cache domain, the cross-domain
 	// drain at STEP 3b picks it up as work-conservation.
 	__sync_val_compare_and_swap(
-		&interactive_enqueue_ns[cpu_domain_of(src_cpu) & (MAX_OVERFLOW_DOMAINS - 1)],
+		&sojourn_stamp_overflow[cpu_domain_of(src_cpu) & (MAX_OVERFLOW_DOMAINS - 1)].inter,
 		0, now);
 	*out_cpu = src_cpu;
 	return domain_inter_dsq(cpu_domain_of(src_cpu));
 }
 
-// NO ARM FUNCTION: THE PER-CPU WAITING SIGNAL IS pcpu_enqueue_ns[cpu], STAMPED
+// NO ARM FUNCTION: THE PER-CPU WAITING SIGNAL IS sojourn_stamp_pcpu[cpu], STAMPED
 // AT PLACEMENT; tick() READS IT DIRECTLY (SEE THE PER-CPU PREEMPT IN tick()).
 
 // SOJOURN GATE: RETURNS TRUE IF BOTH OVERFLOW DSQs ARE WITHIN THE RESCUE
 // WINDOW (i.e. IT IS SAFE TO RETURN FROM dispatch() AFTER A SUCCESSFUL
 // STEP 0 / STEP 1 HIT WITHOUT STARVING A SHARED OVERFLOW DSQ). CALLERS
 // SHORT-CIRCUIT AS `if (sojourn_gate_pass(now)) return;` -- IF AN OVERFLOW
-// SIDE HAS AGED PAST overflow_sojourn_rescue_ns, FALL THROUGH SO STEP 2
+// SIDE HAS AGED PAST codel_target_ns, FALL THROUGH SO STEP 2
 // SERVES OVERFLOW ON THIS DISPATCH CYCLE TOO.
 //
 // THIS GATE IS LOAD-BEARING. WITHOUT IT, EVERY CPU WHOSE OWN PER-CPU DSQ
 // HAS WORK SUCCEEDS AT STEP 0 AND RETURNS, NEVER VISITING STEP 2.  UNDER
 // SUSTAINED LOAD WHERE ALL CPUs ARE BUSY, OVERFLOW DSQs AGE TO THE
-// starvation_rescue_ns SAFETY NET (~167MS) BEFORE ANYONE SERVICES THEM --
+// codel_starve_ns SAFETY NET (~167MS) BEFORE ANYONE SERVICES THEM --
 // LONG ENOUGH TO STARVE WORKQUEUE WORKERS (INCLUDING scx_watchdog_workfn)
 // AND CAUSE 30S WATCHDOG KILLS, AUDIO DROPOUTS, AND BURST-TAIL LATENCY.
 // COST: TWO STATIC READS, TWO COMPARES PER SUCCESSFUL DRAIN.
 static __always_inline bool sojourn_gate_pass(u64 now, u32 dom)
 {
 	u32 cx = dom & (MAX_OVERFLOW_DOMAINS - 1);
-	u64 ie = interactive_enqueue_ns[cx];
-	u64 be = batch_enqueue_ns[cx];
-	return (ie == 0 || (now - ie) <= overflow_sojourn_rescue_ns) &&
-	       (be == 0 || (now - be) <= overflow_sojourn_rescue_ns);
+	u64 ie = sojourn_stamp_overflow[cx].inter;
+	u64 be = sojourn_stamp_overflow[cx].batch;
+	return (ie == 0 || (now - ie) <= codel_target_ns) &&
+	       (be == 0 || (now - be) <= codel_target_ns);
+}
+
+// DRAIN-CLEAR TOCTOU TAIL: BETWEEN A DRAINER'S nr_queued==0 CHECK AND ITS
+// CLEAR-CAS, A CONCURRENT ENQUEUE'S ARM-CAS (0 -> now) LOSES TO THE
+// STILL-ARMED OLD STAMP AND SILENTLY NO-OPS -- THEN THE CLEAR ZEROES THE
+// STAMP OVER THE QUEUED TASK, HIDING THAT DSQ'S BACKLOG FROM EVERY
+// STAMP-READING RESCUE (THE STEP 1 STEAL, THE SWEEP, OLDER-OVERFLOW SERVICE,
+// THE TICK SCAN) UNTIL IT DRAINS ON ITS OWN. THE ONE SHARED TAIL: CLEAR, THEN
+// RE-CHECK THE QUEUE AND RE-ARM A FRESH STAMP IF A TASK SNUCK INTO THE
+// WINDOW. BOTH DRAIN-CLEAR SITES ROUTE THROUGH IT.
+static __always_inline void stamp_clear_or_rearm(u64 dsq, u64 *stamp)
+{
+	u64 old = *stamp;
+	if (old > 0)
+		__sync_val_compare_and_swap(stamp, old, 0);
+	if (scx_bpf_dsq_nr_queued(dsq) != 0)
+		__sync_val_compare_and_swap(stamp, 0, bpf_ktime_get_ns());
 }
 
 // DRAIN ONE TASK FROM AN OVERFLOW DSQ; CLEAR ITS EMPTY->NONEMPTY STAMP WHEN
@@ -984,11 +1034,8 @@ static __always_inline bool overflow_drain_clear(u64 dsq, u64 *stamp)
 {
 	if (!scx_bpf_dsq_move_to_local(dsq, 0))
 		return false;
-	if (scx_bpf_dsq_nr_queued(dsq) == 0) {
-		u64 old = *stamp;
-		if (old > 0)
-			__sync_val_compare_and_swap(stamp, old, 0);
-	}
+	if (scx_bpf_dsq_nr_queued(dsq) == 0)
+		stamp_clear_or_rearm(dsq, stamp);
 	return true;
 }
 
@@ -1009,8 +1056,8 @@ static __always_inline bool domain_overflow_drain_local(u32 my_dom,
 
 // SERVICE WHICHEVER OVERFLOW SIDE (INTERACTIVE OR BATCH) HAS THE OLDER
 // PENDING ENQUEUE AGED PAST `thresh`. RETURNS TRUE IF DISPATCHED.
-// USED AT TWO THRESHOLDS IN dispatch(): starvation_rescue_ns (THE SAFETY
-// NET, FIRES BEFORE STEP 2 AND IS NEVER GATED) AND overflow_sojourn_rescue_ns
+// USED AT TWO THRESHOLDS IN dispatch(): codel_starve_ns (THE SAFETY
+// NET, FIRES BEFORE STEP 2 AND IS NEVER GATED) AND codel_target_ns
 // (STEP 2, THE NORMAL OVERFLOW SERVICE PATH). ONE FUNCTION REPLACES SIX
 // REDUNDANT RESCUE BLOCKS THAT WERE ALL DOING THE SAME scx_bpf_dsq_move_to_local
 // AT DIFFERENT THRESHOLDS WITH DIFFERENT GATING.
@@ -1025,8 +1072,8 @@ static __always_inline bool try_service_older_overflow(u64 now,
 						        bool feed_oscillator)
 {
 	u32 cx = my_dom & (MAX_OVERFLOW_DOMAINS - 1);
-	u64 ie = interactive_enqueue_ns[cx];
-	u64 be = batch_enqueue_ns[cx];
+	u64 ie = sojourn_stamp_overflow[cx].inter;
+	u64 be = sojourn_stamp_overflow[cx].batch;
 	u64 i_age = (ie > 0 && now > ie) ? (now - ie) : 0;
 	u64 b_age = (be > 0 && now > be) ? (now - be) : 0;
 
@@ -1049,17 +1096,17 @@ static __always_inline bool try_service_older_overflow(u64 now,
 
 	if (serve_interactive) {
 		if (domain_overflow_drain_local(my_dom, false,
-					     &interactive_enqueue_ns[cx]))
+					     &sojourn_stamp_overflow[cx].inter))
 			dispatched_any = true;
 		if (b_aged && domain_overflow_drain_local(my_dom, true,
-						       &batch_enqueue_ns[cx]))
+						       &sojourn_stamp_overflow[cx].batch))
 			dispatched_any = true;
 	} else {
 		if (domain_overflow_drain_local(my_dom, true,
-					     &batch_enqueue_ns[cx]))
+					     &sojourn_stamp_overflow[cx].batch))
 			dispatched_any = true;
 		if (i_aged && domain_overflow_drain_local(my_dom, false,
-						       &interactive_enqueue_ns[cx]))
+						       &sojourn_stamp_overflow[cx].inter))
 			dispatched_any = true;
 	}
 
@@ -1123,7 +1170,7 @@ static __always_inline void apply_tau_scaling(u64 tau_ns, u64 codel_eq_ns)
 	v = scale_tau(tau_ns, K_STARVATION_RESCUE);
 	if (v < 20000000ULL) v = 20000000ULL;
 	if (v > 500000000ULL) v = 500000000ULL;
-	starvation_rescue_ns = v;
+	codel_starve_ns = v;
 
 	v = scale_tau(tau_ns, K_CODEL_FLOOR);
 	if (v < 200000ULL) v = 200000ULL;
@@ -1136,7 +1183,7 @@ static __always_inline void apply_tau_scaling(u64 tau_ns, u64 codel_eq_ns)
 	longrun_thresh_ns = v;
 
 	v = scale_tau(tau_ns, K_CODEL_MAX);
-	// NO FIXED FLOOR: THE OLD 1ms FLOOR PINNED codel_target_max AT 12C
+	// NO FIXED FLOOR: A FIXED 1ms FLOOR PINS codel_target_max AT 12C
 	// (0.05*13.3ms = 665us -> 1ms) AND 8C, OVERRIDING THE tau-DERIVED VALUE --
 	// THE ONE FLOOR THAT ACTUALLY BINDS ON THIS BOX. FLOOR INSTEAD AT THE
 	// OSCILLATOR'S OWN FLOOR SO THE WORKING WINDOW CAN NEVER INVERT (max >=
@@ -1154,16 +1201,17 @@ static __always_inline void apply_tau_scaling(u64 tau_ns, u64 codel_eq_ns)
 		u64 eq = codel_eq_ns;
 		if (eq < codel_target_floor_ns) eq = codel_target_floor_ns;
 		if (eq > codel_target_max_ns)   eq = codel_target_max_ns;
-		codel_target_equilibrium_ns = eq;
+		codel_seed_ns = eq;
 	}
 
-	// OVERFLOW-GATE DELTA, PRODUCED BY R_eff FOR FREE. THE GATE THAT OPENS
-	// OVERFLOW SERVICE (sojourn_gate_pass + STEP 2) NOW KEYS ON THE
-	// R_eff-DERIVED CODEL EQUILIBRIUM -- THE ALREADY-COMPUTED SPECTRAL SCALAR
-	// -- INSTEAD OF A HAND-TUNED k*tau TIME. SOJOURN (enqueue-age) IS
-	// UNCHANGED: STILL THE MEASURED PRESSURE AND THE OLDER-SIDE SELECTOR.
-	// R_eff SETS ONLY WHEN THE GATE OPENS; SOJOURN FILLS IT.
-	overflow_sojourn_rescue_ns = codel_target_equilibrium_ns;
+	// NO OVERFLOW-GATE RE-SEED HERE. THE GATE THAT OPENS OVERFLOW SERVICE
+	// (sojourn_gate_pass + STEP 2) READS codel_target_ns DIRECTLY -- THE
+	// LIVE TARGET THE OSCILLATOR MAINTAINS AROUND codel_seed_ns. ONE
+	// THRESHOLD, ONE WRITER (THE CPU-0 TICK). A SEPARATE RESCUE MIRROR
+	// WOULD MAKE THIS FUNCTION A SECOND WRITER, RE-SEEDING THE GATE TO
+	// EQUILIBRIUM ON EVERY tau CHANGE (BOOT, HOTPLUG) AND SNAPPING IT OFF
+	// THE LIVE TARGET FOR UP TO A FULL TICK WHENEVER THE OSCILLATOR HAS
+	// DRIVEN THE TARGET AWAY -- DO NOT ADD ONE.
 
 	// OSCILLATOR DYNAMICS: DERIVED FROM tau SO THE CONTROLLER RUNS ON THE
 	// SAME TIME CONSTANT AS ITS TARGET RANGE. DIRECT-DIVIDE (NOT Q16)
@@ -1236,8 +1284,8 @@ static __always_inline void apply_tau_scaling(u64 tau_ns, u64 codel_eq_ns)
 		affinity_search_online = b;
 	}
 
-	// SLEEP-BOOST LAG CAP (NOT A VTIME CAP -- THE VTIME ENGINE WAS RETIRED
-	// IN v5.11.0; THIS BOUNDS THE SOJOURN-WARP CREDIT). SCALES WITH TOPOLOGY TIMING.
+	// SLEEP-BOOST LAG CAP (NOT A VTIME CAP -- THIS BOUNDS THE SOJOURN-WARP
+	// CREDIT). SCALES WITH TOPOLOGY TIMING.
 	// lag_cap_ns = K_LAG_CAP * tau (1.0 * tau AT 12C REFERENCE = 40MS).
 	// CLAMPED [8MS, 80MS].
 	v = scale_tau(tau_ns, K_LAG_CAP);
@@ -1256,13 +1304,11 @@ static __always_inline void pcpu_drain_clear(u32 cpu)
 		return;
 	if (scx_bpf_dsq_nr_queued((u64)cpu) != 0)
 		return;
-	u64 old = pcpu_enqueue_ns[cpu].ns;
-	if (old > 0)
-		__sync_val_compare_and_swap(&pcpu_enqueue_ns[cpu].ns, old, 0);
+	stamp_clear_or_rearm((u64)cpu, &sojourn_stamp_pcpu[cpu].ns);
 }
 
 // HEAL A STALE PER-CPU WAITER STAMP, THEN KICK ONLY IF A REAL WAITER REMAINS.
-// pcpu_enqueue_ns[cpu] IS ARMED ON PLACEMENT AND CLEARED BY pcpu_drain_clear
+// sojourn_stamp_pcpu[cpu] IS ARMED ON PLACEMENT AND CLEARED BY pcpu_drain_clear
 // AFTER A SUCCESSFUL move_to_local. IF A QUEUED TASK IS INSTEAD REMOVED BY A
 // NON-DISPATCH PATH -- TASK EXIT, OR A SETAFFINITY DEQUEUE THAT BYPASSES
 // dispatch() -- THE DSQ EMPTIES BUT THE STAMP STAYS ARMED, AND NO move_to_local
@@ -1278,7 +1324,7 @@ static bool pcpu_kick_if_waiter(u32 cpu)
 	if (cpu >= MAX_CPUS)
 		return false;
 	pcpu_drain_clear(cpu);
-	if (pcpu_enqueue_ns[cpu].ns == 0)
+	if (sojourn_stamp_pcpu[cpu].ns == 0)
 		return false;
 	scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 	return true;
@@ -1387,68 +1433,11 @@ static __always_inline u64 effective_weight(const struct task_struct *p,
 
 // SCHEDULING HELPERS
 
-// SOJOURN SELECTOR (NO VIRTUAL TIME): THE DSQ SORT KEY IS THE ENQUEUE
-// TIMESTAMP, SO THE QUEUE ORDERS OLDEST-FIRST -- AT ANY FIXED DISPATCH
-// INSTANT THE SMALLEST KEY IS THE EARLIEST INSERT, I.E. THE LARGEST
-// SOJOURN (now - enqueue time). THE TIER WARP BACK-DATES HIGHER TIERS SO
-// THEY SORT AHEAD; IT IS BOUNDED (<= lag_cap_ns), SO A STREAM OF
-// LAT_CRITICAL WAKEUPS CAN NEVER STARVE A BATCH TASK OLDER THAN THE WARP.
-// PER-TASK SOJOURN POTENTIAL (Q16, 0..65536). TIER SETS THE CEILING SHARE;
-// PER-TASK BEHAVIOR SETS THE MAGNITUDE. BOUNDED SUM OF MONOTONIC RAMPS --
-// CONTINUOUS, NO TIER CLIFF, NO UNBOUNDED ADVANTAGE.
-static __always_inline u32 task_potentiality_q16(const struct task_ctx *tctx,
-						 const struct tuning_knobs *knobs)
-{
-	if (tctx->ewma_age < EWMA_AGE_MATURE) {
-		// UNOBSERVED. A FRESH FORK ENTERS AS TIER_INTERACTIVE WITH A SHORT
-		// avg_runtime; WITHOUT A PRIME IT WARPS 0 -> SORTS AT now (DEAD-LAST,
-		// LIKE BATCH) -> LOSES THE 4C DISPATCH RACE TO A FULL STRESS SLICE
-		// (THE app-launch ms BLOWOUT). GIVE A GENUINELY-FRESH, SHORT-RUNTIME,
-		// INTERACTIVE TASK A SMALL BOUNDED BACK-DATE THAT DECAYS TO 0 BY
-		// MATURITY (WHERE THE EARNED WARP BELOW TAKES OVER). BOUNDED << THE
-		// MATURE CEILING SO MATURED/DEADLINE WORK ALWAYS SORTS AHEAD; SHORT-
-		// RUNTIME-GATED SO A FRESH HOG EARNS NOTHING; ORDERING ONLY (FEEDS THE
-		// DSQ KEY, NEVER A PREEMPT) AND lag_cap-BOUNDED, SO A FORK STORM STILL
-		// CANNOT LEAPFROG ESTABLISHED WORK.
-		if (tctx->tier == TIER_INTERACTIVE) {
-			u64 slice = knobs && knobs->slice_ns
-				  ? knobs->slice_ns : 1000000;
-			if (tctx->avg_runtime < slice) {
-				u32 ramp = (u32)(EWMA_AGE_MATURE -
-						 tctx->ewma_age);
-				return (PRIME_FRESH_Q16 * ramp) /
-				       EWMA_AGE_MATURE;
-			}
-		}
-		return 0;                  // BATCH / HOG / UNCLASSIFIED: NO PRIME
-	}
-	if (tctx->tier == TIER_BATCH)
-		return 0;                  // BATCH NEVER WARPS
-	if (tctx->tier == TIER_LAT_CRITICAL)
-		return 1u << 16;           // RT FLOOR: ABSOLUTE, FULL CEILING
-
-	// INTERACTIVE: EARNED CONTINUOUSLY FROM PER-TASK BEHAVIOR.
-	u64 slice = knobs ? knobs->slice_ns : 1000000;
-	u64 avg = tctx->avg_runtime;
-	u32 acc = 0;                       // Q16 EXCESS, CAP 65536
-
-	// AXIS 1 -- SERVICE DEFICIT: SHORT RUNTIME PER ACTIVATION (YIELDS
-	// BEFORE ITS QUANTUM) EARNS WARP; A FULL-SLICE HOG EARNS NONE.
-	if (slice > 0 && avg < slice) {
-		u32 c = (u32)(((slice - avg) << 16) / slice);
-		acc += c > 32768u ? 32768u : c;
-	}
-
-	// AXIS 2 -- SHAPE: LOW RUNTIME VARIANCE RELATIVE TO MEAN (PERIODIC,
-	// FRAME-PACED) EARNS WARP; CHAOTIC BURSTINESS EARNS NONE. INVERSE CV.
-	if (avg > 0 && tctx->runtime_dev < avg) {
-		u32 c = (u32)(((avg - tctx->runtime_dev) << 16) / avg);
-		c = c > 32768u ? 32768u : c;
-		acc = (acc > 65536u - c) ? 65536u : acc + c;
-	}
-
-	return acc;                        // 0..65536
-}
+// SOJOURN SELECTOR (NO VIRTUAL TIME): THE DSQ SORT KEY IS THE WAIT BASE, SO THE
+// QUEUE ORDERS OLDEST-FIRST -- AT ANY FIXED DISPATCH INSTANT THE SMALLEST KEY IS
+// THE LONGEST-WAITING TASK. THE WARP BACK-DATES A TASK BY WHAT IT LEFT OF ONE
+// CoDel TARGET ON ITS LAST RUN; IT IS BOUNDED BY THAT TARGET, SO NO STREAM OF
+// WAKEUPS CAN STARVE A TASK THAT HAS WAITED PAST ONE TARGET. SEE task_deadline.
 
 // FLOW SIGNATURE CLASSIFIER (CLASSIFY ONCE, FREEZE AT MATURITY). EACH WAKEUP
 // SETS THE WAKER CPU'S BIT; THE POPCOUNT IS THE TASK'S DISTINCT-PARTNER
@@ -1456,47 +1445,112 @@ static __always_inline u32 task_potentiality_q16(const struct task_ctx *tctx,
 // PARTNER SET SPANNING AT LEAST HALF THE MACHINE IS A STORM MESH; EVERYTHING
 // BETWEEN DEFAULTS TO TIGHT (LATENCY-SAFE -- ITS STEAL STAYS FREELY RELIEVABLE).
 // THEN FREEZE -- DETERMINISTIC PER TASK, SO ROUTING CAN'T COIN-FLIP.
+// THE FREEZE WAS PREMATURE AND THE GATE ON IT WAS EWMA STATE. shape WAS DECIDED AT
+// ewma_age == EWMA_AGE_MATURE -- THE FIRST ~8 WAKEUPS -- AND KEPT FOR THE TASK'S
+// LIFE, SO A THREAD THAT WILL EVENTUALLY TALK TO THE WHOLE MACHINE WAS STAMPED
+// TIGHT FROM ITS FIRST FEW PARTNERS. THAT STAMP ADMITS select_cpu's WAKER-ANCHORED
+// CO-LOCATION, WHICH IS THE LARGEST SCATTER SOURCE IN THE SCHEDULER: 498,471
+// CROSS-DOMAIN PLACEMENTS AGAINST TIER 1's 1,445 AND THE STEAL'S 2,872, AND WITH
+// IT A MIGRATION DENSITY THAT GROWS WITH DISTANCE INSTEAD OF DECAYING (L3/L2 DECAY
+// 2.157 AGAINST EEVDF'S 0.874) AND 3,739 MIGRATION AVALANCHES AGAINST EEVDF'S 159.
+//
+// TIGHTNESS NEEDS A DENOMINATOR AND THE MATURITY GATE WAS SUPPLYING IT BADLY. FEW
+// PARTNERS MEANS TIGHT ONLY IF ENOUGH WAKEUPS HAVE BEEN SEEN TO KNOW; ON A YOUNG
+// TASK IT JUST MEANS YOUNG, AND ABSENCE OF EVIDENCE IS NOT EVIDENCE OF A PAIR.
+// wake_obs IS THAT DENOMINATOR AS A SATURATING COUNT OF OBSERVATIONS -- A LEDGER
+// LIKE standing_runs, NOT AN AVERAGE, AND IT CARRIES NO CLASSIFIER.
+//
+// NO FREEZE. THE BITMAP IS MONOTONE, SO CARDINALITY ONLY GROWS AND THE VERDICT CAN
+// ONLY EVER MOVE TIGHT -> STORM, NEVER BACK. ROUTING STILL CANNOT COIN-FLIP, WHICH
+// IS WHAT THE FREEZE WAS PROTECTING; IT JUST NO LONGER LOCKS IN A GUESS MADE BEFORE
+// THE EVIDENCE ARRIVED. UNTIL THE EVIDENCE ARRIVES THE TASK STAYS UNCLASSIFIED AND
+// TAKES THE BASELINE PATH.
+#define SHAPE_OBS_MIN 8u
+#define SHAPE_OBS_CAP 16u
+
 static __always_inline void update_shape(struct task_ctx *tctx, u32 waker)
 {
-	if (tctx->shape != SHAPE_UNCLASSIFIED)
-		return;                                 // FROZEN
 	if (waker < 64)
 		tctx->waker_bitmap |= (1ULL << waker);
-
-	if (tctx->ewma_age < EWMA_AGE_MATURE)
-		return;                                 // STILL OBSERVING
+	if (tctx->wake_obs < SHAPE_OBS_CAP)
+		tctx->wake_obs += 1;
 
 	u32 card = (u32)__builtin_popcountll(tctx->waker_bitmap);
 	if (card > SHAPE_TIGHT_MAX && card * 2 >= nr_cpu_ids)
-		tctx->shape = SHAPE_STORM;
-	else
-		tctx->shape = SHAPE_TIGHT;
+		tctx->shape = SHAPE_STORM;              // MONOTONE, NEVER RETURNS
+	else if (tctx->shape != SHAPE_STORM &&
+		 tctx->wake_obs >= SHAPE_OBS_MIN)
+		tctx->shape = SHAPE_TIGHT;              // FEW PARTNERS, ENOUGH LOOKS
 }
 
 static __always_inline u64 task_deadline(struct task_ctx *tctx,
 					 const struct tuning_knobs *knobs)
 {
-	u64 now = bpf_ktime_get_ns();
+	(void)knobs;   // THE WARP READS codel_target_ns, NOT A KNOB
 
-	// SOJOURN POTENTIAL (v5.12 ANTI-LEAPFROG, CONTINUOUS FORM): warp IS A
-	// BOUNDED PER-TASK POTENTIAL, NOT A FLAT TIER CONSTANT. lag_cap_ns IS THE
-	// CEILING (STARVATION BOUND); task_potentiality_q16 POSITIONS THE BACK-DATE
-	// CONTINUOUSLY FROM THE TASK'S OWN SERVICE DEFICIT + SHAPE. SLEEPY/PERIODIC
-	// -> NEAR-FULL WARP; CPU-HOG OR CHAOTIC -> ~0. UNMATURED TASKS GET 0, SO A
-	// FORK STORM STILL CANNOT LEAPFROG ESTABLISHED WORK.
-	u64 warp = (lag_cap_ns * task_potentiality_q16(tctx, knobs)) >> 16;
+	// SOJOURN BASE: WHEN THIS WAIT BEGAN, NOT WHEN THIS INSERT HAPPENED. STAMPED
+	// ONCE AND PRESERVED ACROSS REQUEUES, SO A TASK PASSED OVER N TIMES KEEPS ITS
+	// ORIGINAL CLAIM INSTEAD OF BEING RE-STAMPED TO THE BACK N TIMES. A vtime DSQ
+	// SORTS BY THE KEY AT INSERT AND NEVER RE-SORTS, SO A STATIONARY BASE UNDER A
+	// MOVING CLOCK IS SOJOURN ORDERING AT NO RECOMPUTE COST -- THE TASK'S
+	// EFFECTIVE AGE IS now - wait_since AND IT GROWS ON ITS OWN. CLEARED IN
+	// running(), SO A TASK THAT GOT THE CPU STARTS A FRESH WAIT ON REQUEUE.
+	if (!tctx->wait_since)
+		tctx->wait_since = bpf_ktime_get_ns();
+	u64 base = tctx->wait_since;
 
-	// SOJOURN BACK-PRESSURE: ORDERING IS now - warp, OLDEST-FIRST -- A STARVING
+	// CoDel-DEFINED WARP. THE BACK-DATE A TASK MAY CLAIM IS THE SHARE OF ONE LIVE
+	// CoDel TARGET IT LEFT UNCONSUMED ON ITS LAST RUN:
+	//
+	//     warp = codel_target_ns - last_run_ns   (FLOORED AT 0)
+	//
+	// A TASK THAT BLOCKED IMMEDIATELY EARNS A FULL TARGET; ONE THAT HELD THE CPU
+	// FOR A TARGET OR LONGER EARNS NOTHING; EVERYTHING BETWEEN IS CONTINUOUS. THE
+	// SIGNAL IS THE TASK'S OWN MEASURED RUN, PRICED IN THE ONLY UNIT THE GATE
+	// USES -- NO CLASSIFIER, NO EWMA, NO TIER, NO MATURITY GATE, NO Q16 SCALING.
+	// BOUNDED BY codel_target_ns BY CONSTRUCTION, SO THE ORDERING BOUND IS NOW
+	// THE CoDel TARGET AND NO LONGER THE STARVATION BOUND: A TASK THAT HAS WAITED
+	// PAST ONE TARGET OUTRANKS ANY FRESH CLAIM, WHICH IS THE SOJOURN GUARANTEE
+	// STATED IN THE UNIT THE OSCILLATOR MAINTAINS. lag_cap_ns REMAINS THE OUTER
+	// GUARD ONLY (STARVATION), ENFORCED BY sweep_bound_preempt, NOT BY THIS KEY.
+	// A TASK THAT HAS NEVER RUN HAS LEFT NO SHARE OF A TARGET UNCONSUMED -- IT HAS
+	// NO SERVICE HISTORY TO PRICE. last_run_ns IS WRITTEN ONLY IN stopping(), SO A
+	// FRESH FORK CARRIES 0 AND target - 0 HANDS IT THE FULL TARGET: THE MAXIMUM
+	// BACK-DATE, GRANTED TO THE ONE TASK THAT HAS EARNED NOTHING. UNDER A FORK
+	// STORM THAT IS A CONTINUOUS STREAM OF MAXIMUM CLAIMS LEAPFROGGING EVERYTHING
+	// ALREADY QUEUED. NO RUN YET, NO CLAIM -- THE WARP STAYS EXACTLY WHAT IT SAYS
+	// IT IS, THE UNCONSUMED SHARE OF ONE CoDel TARGET.
+	u64 target = codel_target_ns;
+	u64 ran = tctx->last_run_ns;
+	u64 warp = ran ? (target > ran ? target - ran : 0) : 0;
+	if (warp > lag_cap_ns)
+		warp = lag_cap_ns;
+
+	// SOJOURN BACK-PRESSURE: ORDERING IS base - warp, OLDEST-FIRST -- A STARVING
 	// TASK RISES AS IT AGES, AND BOUNDED WARP MAKES IT STARVATION-FREE. DEEP-QUEUE
 	// DRAINAGE IS THE OVERFLOW RESCUE'S JOB (try_service_older_overflow AT
-	// overflow_sojourn_rescue_ns), FORCED BY WAIT NOT DEPTH.
-	return now > warp ? now - warp : 0;
+	// codel_target_ns), FORCED BY WAIT NOT DEPTH.
+	return base > warp ? base - warp : 0;
 }
 
 // PER-TIER DYNAMIC SLICING
 // LAT_CRITICAL: 1.5X AVG_RUNTIME (TIGHT -- FAST PREEMPTION)
 // INTERACTIVE:  2X AVG_RUNTIME (RESPONSIVE)
 // BATCH:        KNOB BASE SLICE (CONTROLLED BY ADAPTIVE LAYER)
+// STANDING: HAS THIS TASK CONSUMED A FULL CoDel TARGET ON EACH OF ITS LAST
+// STANDING_CONFIRM RUNS? ONE MEASURED QUANTITY AGAINST THE LIVE TARGET, NO INVENTED
+// THRESHOLD -- THE BOUNDARY IS ONE TARGET BY CONSTRUCTION. THE CONFIRM DEPTH IS THE
+// MEMORY last_run_ns ALONE LACKS: A HOG THAT BLOCKS ONCE READS AS DRAINED ON A SINGLE
+// SAMPLE, AND AN EWMA IS THE ANSWER THIS PROJECT HAS RULED OUT. A FRESH FORK CARRIES
+// 0 AND IS NOT STANDING, WHICH IS WHAT THE ewma_age < 2 BURST-SPAWN HACK EXISTED FOR.
+#define STANDING_CONFIRM 2u
+#define STANDING_CAP     8u
+
+static __always_inline bool is_standing(const struct task_ctx *tctx)
+{
+	return tctx && tctx->standing_runs >= STANDING_CONFIRM;
+}
+
 static __always_inline u64 task_slice(const struct task_ctx *tctx,
 				      const struct tuning_knobs *knobs)
 {
@@ -1506,25 +1560,21 @@ static __always_inline u64 task_slice(const struct task_ctx *tctx,
 		? knobs->burst_slice_ns : knobs->slice_ns) : 1000000;
 	u64 base;
 
-	if (tctx->tier == TIER_LAT_CRITICAL) {
-		base = tctx->avg_runtime + (tctx->avg_runtime >> 1);
-		if (base > base_slice)
-			base = base_slice;
+	// A TASK THAT HAS NOT STOOD ON A CPU FOR A FULL TARGET GETS THE ADAPTIVE
+	// SLICE AND NOTHING FURTHER. THIS WAS TWO EWMA BRANCHES SELECTED BY `tier`
+	// (LAT_CRITICAL avg_runtime*1.5, INTERACTIVE avg_runtime*2) BEHIND A SCORE
+	// THAT READS BATCH FOR EVERY TASK AFTER ITS FIRST WAKE, SO THE SELECTOR WAS
+	// A CONSTANT AND THE TWO BRANCHES WERE REACHED ONLY BY THE RT AND
+	// PF_WQ_WORKER OVERRIDES. THE PREDICATE THAT REPLACES IT IS THE DRAIN FACT
+	// ALREADY MEASURED IN stopping() AND ALREADY PRICED IN THE GATE'S OWN UNIT.
+	if (!is_standing(tctx)) {
+		base = base_slice;
 		if (base < SLICE_MIN_NS)
 			base = SLICE_MIN_NS;
 		return base;
 	}
 
-	if (tctx->tier == TIER_INTERACTIVE) {
-		base = tctx->avg_runtime << 1;
-		if (base > base_slice)
-			base = base_slice;
-		if (base < SLICE_MIN_NS)
-			base = SLICE_MIN_NS;
-		return base;
-	}
-
-	// BATCH: DEDICATED CEILING FROM RUST ADAPTIVE LAYER.
+	// STANDING: DEDICATED CEILING FROM RUST ADAPTIVE LAYER.
 	// WEIGHT-SCALED: HIGHER BEHAVIORAL WEIGHT = LONGER SLICE.
 	u64 batch_ceil = knobs ? knobs->batch_slice_ns : 20000000;
 	if (batch_ceil < SLICE_MIN_NS)
@@ -1533,6 +1583,24 @@ static __always_inline u64 task_slice(const struct task_ctx *tctx,
 	base = batch_ceil * tctx->cached_weight >> 7;
 	if (base > batch_ceil)
 		base = batch_ceil;
+
+	// PRICED IN CoDel TARGETS, LIKE EVERY OTHER BOUND IN THE GATE. The knob
+	// alone put a hard 15.6ms quantum on this path (20ms ceiling * nice-0 weight
+	// 100 >> 7), and a launch that lands on a CPU whose resident was just granted
+	// one waits the whole thing: measured at n=1000, the worst launches cluster
+	// at 16489/16440/16511/16994us -- four samples within 1% of each other and of
+	// that quantum, scattered at random through the loop. A stall that quantized
+	// is not a tail, it is the slice.
+	//
+	// The tick preempt is the intended rescue and does not reach it, so the
+	// quantum itself has to be bounded by the unit the rest of the gate uses. A
+	// resident may hold the CPU for SLICE_STANDING_TARGETS of the live target and
+	// no longer; the knob keeps its job as the other bound, so the adaptive
+	// layer's derivation still lowers this, never raises it.
+	u64 target_bound = codel_target_ns * SLICE_STANDING_TARGETS;
+	if (target_bound && base > target_bound)
+		base = target_bound;
+
 	if (base < SLICE_MIN_NS)
 		base = SLICE_MIN_NS;
 
@@ -1581,12 +1649,19 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_ctx *tctx = lookup_task_ctx(p);
 		s32 waker_cpu = bpf_get_smp_processor_id();
-		// TRACK THE WAKER EVEN ON THE SYNC-PLACED PATH (enqueue's update_shape
-		// DOESN'T RUN WHEN select_cpu DISPATCHES), SO PARTNER CARDINALITY STAYS
-		// LIVE AND A 1:N SERVER SELF-CORRECTS OUT OF THE TIGHT CLASS BELOW.
-		if (tctx && waker_cpu >= 0 && waker_cpu < 64 &&
-		    tctx->shape == SHAPE_UNCLASSIFIED)
-			tctx->waker_bitmap |= (1ULL << (u32)waker_cpu);
+		// ONE MAINTAINER FOR THE SHAPE STATE. enqueue's update_shape does not run
+		// when select_cpu dispatches, so this path has to advance the same state
+		// -- but it used to hand-roll HALF of it: the waker bit and not wake_obs,
+		// and only while the shape was still UNCLASSIFIED. That was consistent
+		// while the shape froze at maturity (nothing to advance afterwards) and
+		// became incoherent the moment the freeze came out: a task placed here on
+		// every wake never advanced wake_obs, so it could never earn SHAPE_TIGHT,
+		// and one that did earn it stopped accumulating partners and so could
+		// never be promoted to SHAPE_STORM -- the exact self-correction the old
+		// comment here claimed to provide. Two sites, two rules, and only one of
+		// them could move the counter the other read. Call the one function.
+		if (tctx && waker_cpu >= 0)
+			update_shape(tctx, (u32)waker_cpu);
 		// PIPE-PARTNER CO-LOCATION (EEVDF WAKE-AFFINE): ON A SYNC WAKE THE WAKER
 		// IS ABOUT TO BLOCK, SO ITS CORE FREES IN MICROSECONDS AND THE DATA IT
 		// JUST PRODUCED (THE PIPE BUFFER) IS CACHE-HOT. FOR A 1:1-ISH PARTNER
@@ -1598,8 +1673,13 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 		// CLIENTS DON'T PILE ONTO THE SERVER'S CPU.
 		u32 partners = tctx
 			? (u32)__builtin_popcountll(tctx->waker_bitmap) : 0;
-		bool tight = (tctx && tctx->shape == SHAPE_TIGHT) ||
-			     partners <= SHAPE_TIGHT_MAX;
+		// POSITIVE EVIDENCE ONLY. THE `partners <= SHAPE_TIGHT_MAX` CLAUSE
+		// ADMITTED EVERY YOUNG TASK -- A TASK THAT HAS SEEN TWO WAKER CPUs
+		// BECAUSE IT HAS ONLY WOKEN TWICE IS NOT A PAIR -- AND SO KEPT THE
+		// CO-LOCATION FIRING ON THE WHOLE POPULATION EVEN ONCE shape ITSELF
+		// STOPPED BEING GUESSED EARLY. UNCLASSIFIED TAKES THE BASELINE PATH.
+		(void)partners;
+		bool tight = tctx && tctx->shape == SHAPE_TIGHT;
 		// MULTI-cache domain ONLY: SEATING THE WAKEE ON THE WAKER'S CORE IS A REAL
 		// MIGRATION. IT PAYS OFF ONLY WHEN THE PARTNERS WOULD OTHERWISE SIT IN
 		// DIFFERENT L3s (CROSS-DOMAIN COLD) -- ON A MONOLITHIC L3 (nr_overflow_domains <= 1)
@@ -1617,7 +1697,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 				tctx ? tctx->shape : SHAPE_UNCLASSIFIED,
 				is_handoff_partner(tctx), &dst_cpu);
 			scx_bpf_dsq_insert_vtime(p, dst_dsq, sl, dl, 0);
-			// F0: the seat is a BUSY core. SCX_KICK_IDLE no-ops on a busy CPU and
+			// The seat is a BUSY core. SCX_KICK_IDLE no-ops on a busy CPU and
 			// strands the wakee until the next tick. But bare KICK_PREEMPT on
 			// EVERY sync co-location STORMS preemption on a fork/messaging mesh --
 			// the waker co-locates the wakee onto its OWN cpu and then gets
@@ -1648,8 +1728,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 		if (stay_hold < 0 && (u64)anchor < nr_cpu_ids) {
 			// PHI PLACEMENT: STAY ON THE WARM CORE (IDLE OR SHALLOW-BUSY)
 			// RATHER THAN FLEE TO A COLD IDLE SIBLING.
-			s32 target = phi_warm_target(anchor, p->cpus_ptr,
-						     tctx ? tctx->tier : TIER_INTERACTIVE);
+			s32 target = phi_warm_target(anchor, p->cpus_ptr);
 			if (target >= 0) {
 				struct tuning_knobs *knobs = get_knobs();
 				u64 sl = tctx ? task_slice(tctx, knobs)
@@ -1659,7 +1738,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 				u64 dl = tctx ? task_deadline(tctx, knobs) : bpf_ktime_get_ns();
 				scx_bpf_dsq_insert_vtime(p,
 					dst_dsq, sl, dl, 0);
-				// IPC FIX -- LOAD-BEARING, DO NOT REMOVE (commit 5224a8d5e).
+				// IPC FIX -- LOAD-BEARING, DO NOT REMOVE.
 				// THE PER-CPU DSQ INSERT NEEDS AN EXPLICIT KICK OR THE
 				// WAKEE WAITS FOR THE NEXT TICK. pick_pcpu_dsq_with_spill
 				// CAN REDIRECT THE SEAT (dst_cpu) OFF THE VERIFIED-IDLE
@@ -1723,7 +1802,7 @@ s32 BPF_STRUCT_OPS(pandemonium_select_cpu, struct task_struct *p,
 			// WHEN SHALLOW-BUSY (STAY L2-WARM) INSTEAD OF FLEEING COLD; ONLY A
 			// FULL WARM CORE FALLS THROUGH TO THE NEAREST IDLE. LAT_CRITICAL IS
 			// EXEMPT FROM THE QUEUE-ON-BUSY (KEEPS FLEEING FOR IMMEDIACY).
-			s32 target = phi_warm_target(anchor, p->cpus_ptr, tctx->tier);
+			s32 target = phi_warm_target(anchor, p->cpus_ptr);
 			if (target >= 0) {
 				struct tuning_knobs *knobs = get_knobs();
 				u64 sl = task_slice(tctx, knobs);
@@ -1836,21 +1915,34 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 		if (hold >= 0) {
 			u64 hdl = task_deadline(tctx, knobs);
 			u64 hnow = bpf_ktime_get_ns();
+			// PAIR-WARM MARKER: this base's second seat site -- the
+			// TIER 0 warm-stay anchor IS a pair member taking its
+			// seat; stamp it for the STEP-1 pair-split hold exactly
+			// like the keep_own site in pick_pcpu_dsq_with_spill.
+			pair_warm_ns[(u32)hold & (MAX_CPUS - 1)] = hnow;
 			__sync_val_compare_and_swap(
-				&pcpu_enqueue_ns[(u32)hold & (MAX_CPUS - 1)].ns,
+				&sojourn_stamp_pcpu[(u32)hold & (MAX_CPUS - 1)].ns,
 				0, hnow);
 			scx_bpf_dsq_insert_vtime(p, (u64)hold, sl, hdl, enq_flags);
-			scx_bpf_kick_cpu(hold, SCX_KICK_PREEMPT);
+			// ASK THE SEAT, NOT THE TASK. AN IDLE ANCHOR IS WOKEN BY
+			// SCX_KICK_IDLE; ONLY A BUSY ONE NEEDS THE PREEMPT. THE
+			// UNCONDITIONAL PREEMPT HERE SPENT A HARD IPI ON EVERY WARM-STAY
+			// WHETHER OR NOT THE SEAT HAD A RESIDENT TO DISLODGE, AND THE
+			// COMMENT BELOW ALREADY DESCRIBED THE GATE THE CODE DID NOT HAVE.
+			u64 hold_kick = __COMPAT_scx_bpf_cpu_curr(hold)
+				      ? SCX_KICK_PREEMPT : SCX_KICK_IDLE;
+			scx_bpf_kick_cpu(hold, hold_kick);
 			tctx->dispatch_path = 1;
 			struct pandemonium_stats *s = get_stats();
 			if (s) {
 				s->nr_shared += 1;
 				s->nr_dispatches += 1;
-				// COUNT THE KICK BY WHAT WAS ISSUED. A re-enqueue here
-				// took KICK_IDLE (A's gate), so it is a soft kick -- a
-				// truthful kick H is what makes a storm log distinguish a
-				// real IPI storm from IDLE re-enqueue churn.
-				if (is_wakeup)
+				// COUNT THE KICK BY WHAT WAS ISSUED -- a truthful kick H is
+				// what makes a storm log distinguish a real IPI storm from
+				// IDLE re-enqueue churn. This counted by is_wakeup while
+				// issuing an unconditional PREEMPT, so a warm-stay requeue
+				// booked a hard IPI as a soft kick.
+				if (hold_kick == SCX_KICK_PREEMPT)
 					s->nr_hard_kicks += 1;
 				else
 					s->nr_soft_kicks += 1;
@@ -1865,17 +1957,30 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 	}
 
 	// TIER 1: IDLE CPU -> THAT CPU'S PER-CPU DSQ + KICK
-	// L2 PLACEMENT: TRY IDLE SIBLING IN SAME L2 DOMAIN FIRST, SO cpu IS
-	// BIASED TO THE WAKEE'S last_cpu L2 GROUP (CACHE-WARM). SEAT THE WAKEE
-	// ON cpu'S OWN PER-CPU DSQ ((u64)cpu). cpu WAS JUST FOUND IDLE, SO ITS
-	// PER-CPU DSQ IS SHALLOW; NO SPILL SEARCH NEEDED.
-	// LAT_CRITICAL AND KERNEL THREADS SKIP AFFINITY -- FASTEST CPU WINS.
+	// PLACEMENT IS THE R_eff WALK, WITH NO CLASS GATE IN FRONT OF IT.
+	//
+	// THIS WAS AN L2-ONLY SEARCH BEHIND A THREE-TERM GATE, WITH A NODE-WIDE
+	// pick_idle_cpu BEHIND THAT. THE SEARCH HAD NO GRADIENT: EITHER AN IDLE CPU
+	// SHARED THE WAKEE'S L2 GROUP OR PLACEMENT FELL OFF A CLIFF INTO AN
+	// UNORDERED NODE-WIDE PICK. ON THIS TOPOLOGY AN L2 GROUP IS TWO CPUs, SO
+	// UNDER ANY MESSAGING LOAD THE SIBLING IS BUSY, THE SEARCH MISSES, AND
+	// EVERY WAKEUP TAKES THE CLIFF. THAT IS THE MEASURED SIGNATURE: SAME-L2
+	// 20-23% AGAINST EEVDF's 37-40% WHILE SAME-L3 INFLATES BY ALMOST EXACTLY
+	// THE LOSS, AND cpu-migrations AT 3.0-3.5M AGAINST EEVDF's 242K. THE
+	// AFFINITY CODE WAS PRODUCING THE SCATTER IT WAS WRITTEN TO PREVENT.
+	//
+	// find_idle_by_affinity WALKS affinity_rank IN R_eff ORDER -- SLOT 0 SELF,
+	// SLOT 1 THE L2 SIBLING, SLOTS 2+ ASCENDING BY EFFECTIVE RESISTANCE -- SO IT
+	// CONTAINS THE OLD L2 SEARCH AS ITS PREFIX AND THEN DEGRADES CONTINUOUSLY
+	// INSTEAD OF DISCONTINUOUSLY. THE BIAS IS EXPRESSED BY *WHICH* IDLE CPU WINS,
+	// WHICH IS THE RULE ALREADY STATED ABOVE phi_warm_target. THE GATE GOES WITH
+	// IT: THE tier TEST WAS A DEAD CLASSIFIER READ, PF_KTHREAD AND affinity_mode
+	// ONLY EVER CARVED EXCEPTIONS OUT OF A WALL THAT NO LONGER EXISTS, AND A
+	// CONTINUOUS DISTANCE PRICE NEEDS NO EXCEPTIONS. affinity_search_online IS
+	// TAU-DERIVED (3 AT 12C, 8 AT 32C), SO THE BUDGET SCALES WITHOUT A KNOB.
 	s32 cpu = -1;
-	if (knobs && knobs->affinity_mode > 0 && tctx &&
-	    tctx->tier != TIER_LAT_CRITICAL &&
-	    !(p->flags & PF_KTHREAD)) {
-		cpu = find_idle_l2_sibling(tctx, p->cpus_ptr);
-	}
+	if (tctx)
+		cpu = find_idle_by_affinity(tctx->last_cpu, p->cpus_ptr);
 	if (cpu < 0)
 		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node, 0);
 	if (cpu >= 0 && (u64)cpu < nr_cpu_ids) {
@@ -1889,22 +1994,77 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 		// WAKEE WHERE IT WAS KICKED; THE EXISTING STEP-1 R_eff STEAL STILL
 		// RELIEVES IT cache domain-LOCALLY IF IT AGES PAST THE PHI THRESHOLD.
 		u64 tier1_dsq = (u64)cpu;
-		bool tier1_to_overflow = false;
 		dl = tctx ? task_deadline(tctx, knobs)
 			  : bpf_ktime_get_ns();
-		scx_bpf_dsq_insert_vtime(p, tier1_dsq, sl, dl, enq_flags);
-		// ARM THE cache domain-OVERFLOW SOJOURN STAMP ONLY WHEN THIS PLACEMENT
-		// ACTUALLY LANDS IN domain_inter_dsq. PER-CPU PLACEMENTS (THE COMMON
-		// NON-STORM TIER 1 CASE) DON'T TOUCH domain_inter_dsq -- ARMING THE
-		// STAMP HERE WOULD LEAVE IT SET WITH NOTHING TO CLEAR IT, CAUSING
-		// STEP 2 RESCUE TO READ A STALE "HEAD AGE" THAT TRACKS NOTHING.
-		if (tier1_to_overflow)
+		// ARM THE PER-CPU SOJOURN STAMP BEFORE THE INSERT. TIER 1 used
+		// to insert UNSTAMPED on the "cpu was just found idle, the kick
+		// drains it immediately" assumption -- but a kick that no-ops (the
+		// BATCH path's KICK_IDLE on a CPU that just went busy, or the
+		// documented can_skip_idle_kick race) left the task invisible to
+		// EVERY stamp-reading rescue (the tick scan, the sweep, the
+		// lone-task steal) for up to the resident's full slice. Arm-before-
+		// insert is the safe order: the armed-but-not-yet-queued window is
+		// instruction-scale, far below any age threshold a reader fires on,
+		// and a stamp that outlives its task is healed (pcpu_drain_clear
+		// zeroes on empty; pcpu_kick_if_waiter confirms before kicking).
+		// Insert-before-arm is the ghost window the audit named. The dead
+		// tier1_to_overflow branch (misordered, never taken) is gone.
+		if ((u32)cpu < MAX_CPUS)
 			__sync_val_compare_and_swap(
-				&interactive_enqueue_ns[cpu_domain_of((s32)cpu) & (MAX_OVERFLOW_DOMAINS - 1)],
+				&sojourn_stamp_pcpu[(u32)cpu & (MAX_CPUS - 1)].ns,
 				0, bpf_ktime_get_ns());
+		scx_bpf_dsq_insert_vtime(p, tier1_dsq, sl, dl, enq_flags);
 
-		u64 kick_flag = (tctx && tctx->tier != TIER_BATCH)
-			      ? SCX_KICK_PREEMPT : SCX_KICK_IDLE;
+		// KICK BY THE TARGET'S STATE, NOT BY THE TASK'S CLASS. `cpu` CAME FROM
+		// AN IDLE PICK; IF IT IS STILL IDLE, SCX_KICK_IDLE WAKES IT, AND IF IT
+		// WENT BUSY IN BETWEEN THE SEAT DIVERGED AND ONLY A PREEMPT REACHES IT.
+		// THE TIER TEST COULD NOT KNOW WHICH: SCX_KICK_IDLE IS A DOCUMENTED
+		// NO-OP ON A BUSY CPU, SO A BATCH TASK LANDING ON A TICKLESS-IDLE CORE
+		// WAS STRANDED WITH NO TICK BEHIND IT TO RESCUE THE MISS -- MEASURED AS
+		// A PINNED PROCESS FAILING TO COMPLETE A 40s eBPF ATTACH ON AN OTHERWISE
+		// IDLE MACHINE, WHILE THE SAME PROCESS UNPINNED ATTACHED IN UNDER A
+		// SECOND. FORCING THE OTHER WAY IS NOT THE ANSWER EITHER: AN
+		// UNCONDITIONAL PREEMPT IS THE REQUEUE STORM. THE QUESTION WAS NEVER
+		// ABOUT THE TASK.
+		//
+		// AND A REQUEUE'S PREEMPT IS RATE-LIMITED, NOT REMOVED. A TASK REACHING
+		// enqueue WITH ran_since_wake SET DID NOT WAKE -- IT WAS EVICTED -- SO
+		// LETTING IT EVICT SOMEONE ELSE AT WILL CLOSES THE LOOP: EVERY PREEMPT
+		// LANDS A REQUEUE, EVERY REQUEUE ISSUES A PREEMPT. MEASURED IN THE
+		// FIELD ON 5.18.0 (AMD, 16C) AS 1,174,848 HARD KICKS AGAINST 1,174,815
+		// REQUEUES IN ONE 1s SAMPLE -- ONE KICK PER REQUEUE, 46 REAL WAKEUPS IN
+		// THE WHOLE SECOND -- HELD FLAT AT ~1.16M/s FOR 32.3 SECONDS, WHICH IS
+		// A LOOP AT ITS IPI THROUGHPUT LIMIT, NOT A LOAD SPIKE.
+		//
+		// DELETING THE REQUEUE PREEMPT OUTRIGHT WAS TRIED AND STALLS THE BOX.
+		// IN --no-adaptive THE KNOB PAGE IS ALL ZEROS AND TOTAL PREEMPT READS 0
+		// ON EVERY RUN OF EVERY VERSION -- THE TICK PREEMPT HAS NEVER FIRED IN
+		// THAT MODE -- SO THIS KICK IS THE ONLY MECHANISM DISLODGING A RESIDENT
+		// THERE. WITHOUT IT: "runnable task stall", WATCHDOG AT 10.001s, 11.0M
+		// dispatch/s AT 0.0% IDLE. THE LOOP IS NOT THE PREEMPT, IT IS THE
+		// UNBOUNDED RATE, SO BOUND THE RATE AND KEEP THE PROGRESS.
+		//
+		// ONE REQUEUE PREEMPT PER CPU PER LIVE CoDel TARGET. PRICED IN THE UNIT
+		// THE REST OF THE GATE USES, SO IT TRACKS THE OSCILLATOR INSTEAD OF
+		// PINNING A CONSTANT: AT THE 12C REFERENCE THAT CAPS THIS PATH NEAR
+		// 1e3/s ACROSS THE MACHINE AGAINST THE 1.16e6/s MEASURED. WAKEUPS AND
+		// TRUE HANDOFF PARTNERS ARE NEVER RATE-LIMITED -- THEY ARE THE LATENCY
+		// PATH, AND THE FIELD CAPTURE PUTS THEM AT 46/s.
+		u64 kick_flag;
+		if (!__COMPAT_scx_bpf_cpu_curr(cpu)) {
+			kick_flag = SCX_KICK_IDLE;
+		} else if (is_wakeup || is_handoff_partner(tctx)) {
+			kick_flag = SCX_KICK_PREEMPT;
+		} else {
+			u32 kidx = (u32)cpu & (MAX_CPUS - 1);
+			u64 know = bpf_ktime_get_ns();
+			if (know - requeue_kick_last[kidx] >= codel_target_ns) {
+				requeue_kick_last[kidx] = know;
+				kick_flag = SCX_KICK_PREEMPT;
+			} else {
+				kick_flag = SCX_KICK_IDLE;
+			}
+		}
 		scx_bpf_kick_cpu(cpu, kick_flag);
 
 		if (tctx) {
@@ -1993,26 +2153,31 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 
 	// TIER 3: NODE OVERFLOW DSQ + SELECTIVE KICK
 	// ONLY BATCH-CLASSIFIED TASKS GO TO BATCH DSQ.
-	// IMMATURE TASKS (ewma_age < 2) STAY IN INTERACTIVE DSQ TO PREVENT
-	// STARVATION DURING BURST SPAWNS -- NEW THREADS STARTING WITH
-	// ewma_age=0 WOULD FLOOD THE BATCH DSQ AND STARVE FOR 30-40S
-	// WAITING FOR SOJOURN RESCUE THAT NEVER REACHES THE TAIL.
-	// LAT_CRITICAL TASKS ARE NEVER REDIRECTED.
+	// ROUTED BY SERVICE RENDERED. A TASK THAT HAS STOOD ON A CPU FOR A FULL CoDel
+	// TARGET ON EACH OF ITS LAST STANDING_CONFIRM RUNS TAKES THE BATCH OVERFLOW;
+	// EVERYTHING ELSE TAKES THE INTERACTIVE ONE. THE BURST-SPAWN CARVE-OUT THAT
+	// USED TO LIVE HERE (ewma_age < 2 STAYS INTERACTIVE, SO A FORK STORM DOES NOT
+	// FLOOD THE BATCH DSQ AND STARVE 30-40s BEHIND A SOJOURN RESCUE THAT NEVER
+	// REACHES THE TAIL) IS NOW STRUCTURAL RATHER THAN A SPECIAL CASE: A FRESH FORK
+	// HAS RENDERED NO SERVICE, SO standing_runs IS 0 AND IT IS INTERACTIVE BY
+	// CONSTRUCTION. THE DSQ SPLIT ITSELF STAYS -- DISPATCH STEP 2 ALREADY PRICES
+	// THE CROSSOVER BETWEEN THE TWO IN codel_target_ns WITH codel_starve_ns AS THE
+	// NET ABOVE IT, SO THE FAIRNESS HALF WAS NEVER THE CLASSIFIER'S.
 	// TIER 3 ROUTES TO THE per-domain OVERFLOW DSQ FOR THE TASK'S HOME CPU'S cache domain.
 	// Dispatch STEP 3 drains it cache domain-locally (cache-coherent inside the L3);
 	// STEP 5 is the cross-domain work-conservation scan when local cache domain is empty.
 	s32 src_cpu_t3 = scx_bpf_task_cpu(p);
 	u32 src_dom_t3 = cpu_domain_of(src_cpu_t3);
-	bool is_batch_t3 = tctx && tctx->tier == TIER_BATCH;
+	bool is_batch_t3 = is_standing(tctx);
 	u64 target_dsq = is_batch_t3 ? domain_batch_dsq(src_dom_t3)
 				     : domain_inter_dsq(src_dom_t3);
 
 	// SOJOURN TRACKING: RECORD WHEN OVERFLOW DSQs TRANSITION FROM EMPTY.
 	// DISPATCH STEP 0 CHECKS THESE TO RESCUE TASKS AGING PAST THRESHOLD.
 	if (is_batch_t3)
-		__sync_val_compare_and_swap(&batch_enqueue_ns[src_dom_t3 & (MAX_OVERFLOW_DOMAINS - 1)], 0, bpf_ktime_get_ns());
+		__sync_val_compare_and_swap(&sojourn_stamp_overflow[src_dom_t3 & (MAX_OVERFLOW_DOMAINS - 1)].batch, 0, bpf_ktime_get_ns());
 	else
-		__sync_val_compare_and_swap(&interactive_enqueue_ns[src_dom_t3 & (MAX_OVERFLOW_DOMAINS - 1)], 0, bpf_ktime_get_ns());
+		__sync_val_compare_and_swap(&sojourn_stamp_overflow[src_dom_t3 & (MAX_OVERFLOW_DOMAINS - 1)].inter, 0, bpf_ktime_get_ns());
 
 	// WARP IS BOUNDED BY lag_cap_ns INSIDE task_deadline() (NO CEILING CLAMP).
 	dl = tctx ? task_deadline(tctx, knobs) : bpf_ktime_get_ns();
@@ -2048,16 +2213,164 @@ void BPF_STRUCT_OPS(pandemonium_enqueue, struct task_struct *p,
 
 }
 
+#define BOUND_SWEEP_BUDGET 8
+// UNIFIED SOJOURN BOUND SWEEP -- THE BACKSTOP UNDER THE TICK TOWER, NEVER
+// ITS REPLACEMENT. ANY CPU WHOSE PER-CPU DSQ HEAD HAS WAITED >= lag_cap_ns --
+// THE BOUND THE SORT KEY ALREADY PROMISES, SINCE warp <= lag_cap_ns -- GETS A
+// PREEMPT KICK, ANY TIER, NO EXEMPTION. IT RUNS FROM DISPATCH ON EVERY CPU,
+// SO A CPU WALLED OFF BY A NON-YIELDING RESIDENT IS RESCUED BY ANY OTHER
+// CPU's DISPATCH -- OFF THE HELD CPU's OWN TICK, SO NO_HZ_FULL CANNOT
+// SUPPRESS IT. THIS IS THE FREEZE FIX: THE TICK TOWER'S 5ms BAND IS THE FAST
+// PATH, THIS IS THE TICK-INDEPENDENT GUARANTEE BENEATH IT. ROTATING BUDGET
+// WINDOWS: O(1) PER DISPATCH, FLAT AS N GROWS. UNCONDITIONAL AT DISPATCH
+// ENTRY -- MEASURED: GATED ON A STEP-0 MISS, EVERY CPU's STEP 0 KEEPS
+// HITTING UNDER SATURATION AND THE ENFORCER GOES DORMANT SYSTEM-WIDE. DO NOT
+// REORDER.
+static __always_inline void sweep_bound_preempt(u64 now, u32 self)
+{
+	u32 nr = nr_cpu_ids;
+	if (nr == 0)
+		return;
+	u32 base = (u32)(now >> 20);
+	#pragma unroll
+	for (u32 i = 0; i < BOUND_SWEEP_BUDGET; i++) {
+		u32 c = (base + i) % nr;
+		if (c == self)
+			continue;
+		u64 stamp = sojourn_stamp_pcpu[c & (MAX_CPUS - 1)].ns;
+		if (stamp == 0)
+			continue;
+		if (now > stamp && (now - stamp) >= lag_cap_ns)
+			scx_bpf_kick_cpu((s32)c, SCX_KICK_PREEMPT);
+	}
+	// OVERFLOW BOUND: a per-domain inter/batch overflow head aged past lag_cap
+	// is drained by dispatch STEP 2/3/4 domain-locally and STEP 5 from any
+	// other domain; if every CPU is held, nobody dispatches, so force one CPU
+	// off its resident to re-enter dispatch and drain the aged head. Rotating
+	// 8-domain window (32 domains would be 64 loads on the hottest program in
+	// the scx tree); an aged head is seen within 4 dispatch rotations. The
+	// kicked CPU need not share the domain -- STEP 5's cross-domain scan
+	// reaches every aged head. Rare by construction: overflow normally drains
+	// within the codel band, far below lag_cap.
+	#pragma unroll
+	for (u32 i = 0; i < BOUND_SWEEP_BUDGET; i++) {
+		u32 d = (base + i) & (MAX_OVERFLOW_DOMAINS - 1);
+		u64 ie = sojourn_stamp_overflow[d].inter;
+		u64 be = sojourn_stamp_overflow[d].batch;
+		if ((ie != 0 && now > ie && (now - ie) >= lag_cap_ns) ||
+		    (be != 0 && now > be && (now - be) >= lag_cap_ns)) {
+			u32 k = base % nr;
+			if (k != self)
+				scx_bpf_kick_cpu((s32)k, SCX_KICK_PREEMPT);
+			break;
+		}
+	}
+}
+
+// STEP 1 STEAL-WALK STATE, CARRIED ACROSS bpf_loop() ITERATIONS.
+//
+// THE WALK IS bpf_loop() AND NOT A BOUNDED for SO THE VERIFIER CHECKS THE BODY
+// ONCE INSTEAD OF ONCE PER CANDIDATE. MAX_AFFINITY_CANDIDATES IS 128 AT COMPILE
+// TIME WHILE pcpu_spill_search_budget CLAMPS THE WALK TO ~6 AT 12C, AND A
+// VERIFIER THAT CANNOT FOLD nr_cpu_ids MUST ASSUME ALL 128. THAT GAP -- NOT THE
+// RUNTIME COST -- PUSHED pandemonium_dispatch PAST THE 1M INSTRUCTION CEILING
+// ON THE 6.13/6.16/6.18 VERIFIERS. WITH bpf_loop THE COMPILE-TIME BOUND NO
+// LONGER CONTRIBUTES DEPTH AT ALL, SO THE BODY CAN GROW AND THE CEILING CAN
+// RISE WITHOUT REOPENING THIS.
+struct steal_scan_ctx {
+	u64 now;
+	u32 base;
+	u32 my_cpu;
+	u32 checked;
+	s32 best_peer;
+};
+
+// ONE CANDIDATE OF THE R_EFF STEAL WALK. RETURN 1 STOPS THE WALK (THE for's
+// `break`), RETURN 0 ADVANCES IT (`continue`) -- THE ONLY CHANGE FROM THE
+// BOUNDED-LOOP FORM; SELECTION, ORDER AND THE checked BUDGET ARE IDENTICAL.
+static int steal_scan_step(u32 i, void *ctx_)
+{
+	struct steal_scan_ctx *c = ctx_;
+
+		u32 key = c->base + i;
+		u32 *val = bpf_map_lookup_elem(&affinity_rank, &key);
+		if (!val || *val == (u32)-1)
+			return 1;
+		u32 peer = *val;
+		if (peer >= nr_cpu_ids)
+			return 0;
+		if (peer == c->my_cpu) {
+			if (++c->checked >= pcpu_spill_search_budget)
+				return 1;
+			return 0;
+		}
+		// SOJOURN = peer DSQ backlog age. 0 means the peer's per-CPU DSQ is
+		// empty (stamp cleared on drain), so skip the remote DSQ-object touch
+		// (scx_bpf_dsq_nr_queued) for idle peers -- the common wake-heavy case.
+		u64 enq = sojourn_stamp_pcpu[peer & (MAX_CPUS - 1)].ns;
+		if (enq == 0) {
+			if (++c->checked >= pcpu_spill_search_budget)
+				return 1;
+			return 0;
+		}
+		u32 nq = scx_bpf_dsq_nr_queued((u64)peer);
+		if (nq >= 1) {
+			// PHI STEAL-RESIST (SHAPE-BLIND): sojourn >= codel_target +
+			// b*R_eff, built only from values we already produce. SOJOURN is
+			// `enq` above (no remote head peek, no remote task_ctx deref). THE
+			// DISTANCE PENALTY b*R_eff is pre-folded into reff_value at topology
+			// detect (already ns), so the steal does ONE indexed read and no
+			// multiply: an SMT sibling (R_eff~0) stays freely relievable while a
+			// cross-domain pull needs ~tau of sustained backlog. reff_value all-zero
+			// (monolithic / --phi-scale 0) => flat codel_target, prior behavior.
+			u32 *dxp = bpf_map_lookup_elem(&reff_value, &key);
+			u32 dx = dxp ? *dxp : 0;
+			u64 dist_extra = (dx == (u32)-1) ? 0 : (u64)dx;
+			u64 phi_thresh = codel_target_ns + dist_extra;
+			// PAIR-SPLIT HOLD: `peer` RECENTLY SEATED A CONFIRMED
+			// TIGHT PAIR (pair_warm_ns, STAMPED AT ITS PER-CPU SEAT).
+			// STEALING peer's HEAD SPLITS THE PAIR -- A LOCALITY LOSS
+			// R_eff CANNOT SEE, SINCE A NEAR (TIGHT-SEAM) SPLIT LOOKS
+			// CHEAP. PRICE IT BY THE SEAM: domain_phi IS HIGH FOR A
+			// TIGHT SEAM (NEAR), SO A NEAR SPLIT WAITS UP TO ~ONE EXTRA
+			// codel_target WHILE A FAR (LOOSE-SEAM) SPLIT ADDS ~0
+			// (ALREADY PRICED BY dist_extra). ONE INDEXED READ, NO
+			// REMOTE task_ctx DEREF. domain_phi SENTINEL (SAME-LEAF /
+			// MONOLITHIC / --phi-scale 0) => NO HOLD, THE FLAT
+			// phi_thresh. A PRICE, NOT A GATE -- STARVATION TRIPS THE
+			// LONGER SOJOURN.
+			u64 pw = pair_warm_ns[peer & (MAX_CPUS - 1)];
+			if (pw && c->now >= pw && (c->now - pw) < codel_target_ns) {
+				u32 *dpp = bpf_map_lookup_elem(&domain_phi, &key);
+				u32 dphi = dpp ? *dpp : (u32)-1;
+				if (dphi != (u32)-1) {
+					u64 hold = ((u64)dphi * codel_target_ns) / 1000000ULL;
+					if (hold > codel_target_ns)
+						hold = codel_target_ns;
+					phi_thresh += hold;
+				}
+			}
+			if (c->now >= enq && (c->now - enq) >= (nq > 1 ? phi_thresh : phi_thresh + codel_target_ns) /* LONE-TASK STARVATION RESCUE (nq==1): the surplus>1 rule pins a lone WARM task for cache locality, but montauk's dispatch-stall shows a lone burst wakee stranded on a BUSY peer's per-CPU DSQ is served 0% by that peer's STEP 0 (MIRROR, PREEMPT-STARVED) and 100% by steal (SUB), tailing to 100ms-947ms (worst 26.7s at 2C) since the only other rescue -- tick()'s rotating sojourn scan -- is sparse and never fires on an idle/all-idle-at-low-width topology. A lone task aged past the overflow window is no longer warm-worth-pinning: steal it here, far below the ~167ms net. Phi still prices distance; fresh lone tasks (< the window) stay pinned. */) {
+				c->best_peer = (s32)peer;
+				return 1;
+			}
+		}
+		if (++c->checked >= pcpu_spill_search_budget)
+			return 1;
+	return 0;
+}
+
 // DISPATCH: CPU IS IDLE AND NEEDS WORK
 // HYBRID PER-CPU + per-domain OVERFLOW DESIGN:
 //   SELECT_CPU -> PER-CPU DSQ (DEPTH-GATED, VISIBLE, STEALABLE)
 //   ENQUEUE TIER 1/2 -> PER-CPU DSQ (WARM); SHAPE_STORM -> domain_inter_dsq
 //   ENQUEUE TIER 3 -> domain_inter_dsq / domain_batch_dsq (L3-LOCAL, SOJOURN-ORDERED)
 //
+// UNIFIED BOUND, FIRST (sweep_bound_preempt -- off-tick, NO_HZ_FULL-immune)
 // 0. OWN PER-CPU DSQ (CACHE-HOT, ZERO CONTENTION)
 // 1. R_EFF STEAL (AFFINITY_RANK -- L2 SIBLING AT SLOT 0, R_EFF PEERS AT SLOTS 1+)
-// SAFETY NET. SERVICE OLDER OVERFLOW SIDE PAST starvation_rescue_ns
-// 2. SERVICE OLDER OVERFLOW SIDE PAST overflow_sojourn_rescue_ns
+// SAFETY NET. SERVICE OLDER OVERFLOW SIDE PAST codel_starve_ns
+// 2. SERVICE OLDER OVERFLOW SIDE PAST codel_target_ns
 // 3. cache domain-LOCAL INTERACTIVE OVERFLOW (domain_inter_dsq[my_dom])
 // 4. cache domain-LOCAL BATCH OVERFLOW (domain_batch_dsq[my_dom])
 // 5. CROSS-DOMAIN SCAN (WORK CONSERVATION ACROSS L3 INTERCONNECT)
@@ -2071,9 +2384,16 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	// SET AND CONSUMED IN STEP 1.
 	bool steal_scan = false;
 
+	// UNIFIED BOUND, FIRST: rescue any CPU whose per-CPU DSQ head has waited
+	// past lag_cap_ns before this CPU runs its own placement waterfall. Hard
+	// invariant ahead of placement, off the held CPU's tick (this is another
+	// CPU's dispatch). UNCONDITIONAL -- see the function's own comment for the
+	// measured reorder regression.
+	sweep_bound_preempt(now, (u32)cpu);
+
 	// STEP 0: OWN PER-CPU DSQ -- HIGHEST PRIORITY, CACHE-HOT.
 	// SOJOURN GATE AT EXIT: IF EITHER OVERFLOW SIDE HAS AGED PAST
-	// overflow_sojourn_rescue_ns, FALL THROUGH SO STEP 2 SERVES OVERFLOW
+	// codel_target_ns, FALL THROUGH SO STEP 2 SERVES OVERFLOW
 	// ON THIS DISPATCH TOO. WITHOUT THIS GATE, EVERY CPU WITH HOT PER-CPU
 	// WORK NEVER VISITS OVERFLOW; SCX_WATCHDOG_WORKFN AND OTHER WORKQUEUE
 	// WORKERS GET STARVED IN domain_inter_dsq UNTIL THE 167MS SAFETY NET FIRES.
@@ -2099,8 +2419,6 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	{
 		u32 my_cpu = (u32)cpu;
 		u32 base = my_cpu * MAX_AFFINITY_CANDIDATES;
-		u32 checked = 0;
-		s32 best_peer = -1;
 		// SCAN RATE-LIMIT: the peer walk (affinity_rank lookup + per-peer
 		// nr_queued) is the dominant per-dispatch cache cost under wake-heavy
 		// LOADS. A PEER CANNOT ACCUMULATE STEALABLE BACKLOG (AGED PAST
@@ -2119,50 +2437,14 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 		// FLOW. SURPLUS > 1 GUARD: a peer needs at least 2 queued before we pull
 		// one (a lone warm task is never yanked). BOUNDED LOOP, LOCK-FREE
 		// move_to_local.
-		for (int i = 0; steal_scan && i < MAX_AFFINITY_CANDIDATES; i++) {
-			u32 key = base + (u32)i;
-			u32 *val = bpf_map_lookup_elem(&affinity_rank, &key);
-			if (!val || *val == (u32)-1)
-				break;
-			u32 peer = *val;
-			if (peer >= nr_cpu_ids)
-				continue;
-			if (peer == my_cpu) {
-				if (++checked >= pcpu_spill_search_budget)
-					break;
-				continue;
-			}
-			// SOJOURN = peer DSQ backlog age. 0 means the peer's per-CPU DSQ is
-			// empty (stamp cleared on drain), so skip the remote DSQ-object touch
-			// (scx_bpf_dsq_nr_queued) for idle peers -- the common wake-heavy case.
-			u64 enq = pcpu_enqueue_ns[peer & (MAX_CPUS - 1)].ns;
-			if (enq == 0) {
-				if (++checked >= pcpu_spill_search_budget)
-					break;
-				continue;
-			}
-			u32 nq = scx_bpf_dsq_nr_queued((u64)peer);
-			if (nq >= 1) {
-				// PHI STEAL-RESIST (SHAPE-BLIND): sojourn >= codel_target +
-				// b*R_eff, built only from values we already produce. SOJOURN is
-				// `enq` above (no remote head peek, no remote task_ctx deref). THE
-				// DISTANCE PENALTY b*R_eff is pre-folded into reff_value at topology
-				// detect (already ns), so the steal does ONE indexed read and no
-				// multiply: an SMT sibling (R_eff~0) stays freely relievable while a
-				// cross-domain pull needs ~tau of sustained backlog. reff_value all-zero
-				// (monolithic / --phi-scale 0) => flat codel_target, prior behavior.
-				u32 *dxp = bpf_map_lookup_elem(&reff_value, &key);
-				u32 dx = dxp ? *dxp : 0;
-				u64 dist_extra = (dx == (u32)-1) ? 0 : (u64)dx;
-				u64 phi_thresh = codel_target_ns + dist_extra;
-				if (now >= enq && (now - enq) >= (nq > 1 ? phi_thresh : phi_thresh + overflow_sojourn_rescue_ns) /* LONE-TASK STARVATION RESCUE (nq==1): the surplus>1 rule pins a lone WARM task for cache locality, but montauk's dispatch-stall shows a lone burst wakee stranded on a BUSY peer's per-CPU DSQ is served 0% by that peer's STEP 0 (MIRROR, PREEMPT-STARVED) and 100% by steal (SUB), tailing to 100ms-947ms (worst 26.7s at 2C) since the only other rescue -- tick()'s rotating sojourn scan -- is sparse and never fires on an idle/all-idle-at-low-width topology. A lone task aged past the overflow window is no longer warm-worth-pinning: steal it here, far below the ~167ms net. Phi still prices distance; fresh lone tasks (< the window) stay pinned. */) {
-					best_peer = (s32)peer;
-					break;
-				}
-			}
-			if (++checked >= pcpu_spill_search_budget)
-				break;
-		}
+		struct steal_scan_ctx sctx = {
+			.now = now, .base = base, .my_cpu = my_cpu,
+			.checked = 0, .best_peer = -1,
+		};
+		if (steal_scan)
+			bpf_loop(MAX_AFFINITY_CANDIDATES, steal_scan_step,
+				 &sctx, 0);
+		s32 best_peer = sctx.best_peer;
 		if (best_peer >= 0 &&
 		    scx_bpf_dsq_move_to_local((u64)best_peer, 0)) {
 			pcpu_drain_clear((u32)best_peer);
@@ -2178,21 +2460,23 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	// SAFETY NET: HARD STARVATION RESCUE. SERVICE WHICHEVER OVERFLOW SIDE
-	// IS OLDER PAST starvation_rescue_ns (TAU-SCALED, ~167MS AT 12C).
+	// IS OLDER PAST codel_starve_ns (TAU-SCALED, ~167MS AT 12C).
 	// cache domain-LOCAL DRAIN FIRST, CROSS-DOMAIN FALLBACK FOR WORK-CONSERVATION.
 	if (try_service_older_overflow(now, my_dom,
-				       starvation_rescue_ns, false))
+				       codel_starve_ns, false))
 		return;
 
-	// STEP 2: SERVICE OLDER OVERFLOW SIDE PAST overflow_sojourn_rescue_ns
-	// (TAU-SCALED, ~10MS AT 12C). FEEDS THE OSCILLATOR.
+	// STEP 2: SERVICE OLDER OVERFLOW SIDE PAST codel_target_ns (THE LIVE
+	// OSCILLATOR TARGET). ONE COMPARISON, ONE DRAIN. FEEDS THE OSCILLATOR
+	// (true) -- THIS IS THE REPRESENTATIVE PRESSURE SIGNAL THAT TIGHTENS
+	// codel_target_ns ON SUSTAINED LOAD.
 	if (try_service_older_overflow(now, my_dom,
-				       overflow_sojourn_rescue_ns, true))
+				       codel_target_ns, true))
 		return;
 
 	// STEP 3: per-domain INTERACTIVE OVERFLOW (LOCAL). Cache-coherent drain
 	// of my cache domain's overflow DSQ.
-	if (domain_overflow_drain_local(my_dom, false, &interactive_enqueue_ns[my_dom & (MAX_OVERFLOW_DOMAINS - 1)])) {
+	if (domain_overflow_drain_local(my_dom, false, &sojourn_stamp_overflow[my_dom & (MAX_OVERFLOW_DOMAINS - 1)].inter)) {
 		s = get_stats();
 		if (s)
 			s->nr_dispatches += 1;
@@ -2200,7 +2484,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	// STEP 4: per-domain BATCH OVERFLOW (LOCAL).
-	if (domain_overflow_drain_local(my_dom, true, &batch_enqueue_ns[my_dom & (MAX_OVERFLOW_DOMAINS - 1)])) {
+	if (domain_overflow_drain_local(my_dom, true, &sojourn_stamp_overflow[my_dom & (MAX_OVERFLOW_DOMAINS - 1)].batch)) {
 		s = get_stats();
 		if (s)
 			s->nr_dispatches += 1;
@@ -2218,7 +2502,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 		if (c == my_dom)
 			continue;
 		if (overflow_drain_clear(domain_inter_dsq(c),
-					 &interactive_enqueue_ns[c & (MAX_OVERFLOW_DOMAINS - 1)])) {
+					 &sojourn_stamp_overflow[c & (MAX_OVERFLOW_DOMAINS - 1)].inter)) {
 			s = get_stats();
 			if (s) {
 				s->nr_dispatches += 1;
@@ -2230,7 +2514,7 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 		}
 		if (overflow_drain_clear(domain_batch_dsq(c),
-					 &batch_enqueue_ns[c & (MAX_OVERFLOW_DOMAINS - 1)])) {
+					 &sojourn_stamp_overflow[c & (MAX_OVERFLOW_DOMAINS - 1)].batch)) {
 			s = get_stats();
 			if (s) {
 				s->nr_dispatches += 1;
@@ -2261,10 +2545,9 @@ void BPF_STRUCT_OPS(pandemonium_dispatch, s32 cpu, struct task_struct *prev)
 void BPF_STRUCT_OPS(pandemonium_runnable, struct task_struct *p,
 		    u64 enq_flags)
 {
-	// F1a: WAKE-EDGE DETECTOR (the §3 "open-loop blindness" amendment, honored
-	// in substance). A wakee arriving into a PARKED controller is the disturbance
-	// the detector must catch on the wake path -- not on a post-damage rescue
-	// (the old un-park trigger). Un-park here, before any dispatch prices against
+	// WAKE-EDGE DETECTOR: a wakee arriving into a PARKED controller is the
+	// disturbance the detector must catch on the wake path, not on a
+	// post-damage rescue. Un-park here, before any dispatch prices against
 	// codel_target_ns, and kick CPU 0 so the full recompute runs this beat rather
 	// than waiting for CPU 0's next tick (which may never fire under tickless
 	// idle). Gated on osc_env_parked: a predicted-not-taken branch under load
@@ -2370,6 +2653,7 @@ void BPF_STRUCT_OPS(pandemonium_running, struct task_struct *p)
 	u64 now = bpf_ktime_get_ns();
 	tctx->last_run_at = now;
 	tctx->ran_since_wake = true;   // is_wakeup = !ran_since_wake
+	tctx->wait_since = 0;          // WAIT ENDED -- RELEASE THE SOJOURN CLAIM
 
 	// WAKEUP-TO-RUN LATENCY
 	// ONLY RECORD ONCE PER WAKEUP: CLEAR last_woke_at AFTER RECORDING.
@@ -2441,6 +2725,15 @@ void BPF_STRUCT_OPS(pandemonium_stopping, struct task_struct *p,
 
 	u64 now = bpf_ktime_get_ns();
 	u64 slice = now > tctx->last_run_at ? now - tctx->last_run_at : 0;
+	tctx->last_run_ns = slice;     // THE WARP'S INPUT: WHAT THIS RUN CONSUMED
+	// SERVICE LEDGER: A RUN THAT CONSUMED A FULL TARGET ADVANCES THE COUNT, ANY
+	// SHORTER RUN CLEARS IT. SATURATES SO A LONG HOG CANNOT BANK UNBOUNDED CREDIT.
+	if (slice >= codel_target_ns) {
+		if (tctx->standing_runs < STANDING_CAP)
+			tctx->standing_runs += 1;
+	} else {
+		tctx->standing_runs = 0;
+	}
 	{
 		u64 avg = tctx->avg_runtime;
 		u64 diff = slice > avg ? slice - avg : avg - slice;
@@ -2470,22 +2763,6 @@ void BPF_STRUCT_OPS(pandemonium_stopping, struct task_struct *p,
 			tctx->tier = TIER_BATCH;
 			tctx->cached_weight = effective_weight(p, tctx);
 		}
-	}
-
-	// PROCDB: PUBLISH TASK CLASSIFICATION FOR USERSPACE
-	// INITIAL AT EWMA MATURITY, THEN EVERY 64 SCHEDULING EVENTS
-	// RE-PUBLISHING KEEPS PROCDB FRESH FOR LONG-LIVED TASKS
-	if (tctx->ewma_age == EWMA_AGE_MATURE ||
-	    (tctx->ewma_age > EWMA_AGE_MATURE && tctx->ewma_age % 64 == 0)) {
-		struct task_class_entry obs = {};
-		obs.tier = (u8)tctx->tier;
-		obs.avg_runtime = tctx->avg_runtime;
-		obs.runtime_dev = tctx->runtime_dev;
-		obs.wakeup_freq = tctx->wakeup_freq;
-		obs.csw_rate = tctx->csw_rate;
-		char key[16];
-		__builtin_memcpy(key, p->comm, 16);
-		bpf_map_update_elem(&task_class_observe, key, &obs, BPF_ANY);
 	}
 
 }
@@ -2519,6 +2796,26 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 
 	// THE OSCILLATOR IS THE ONE DETECTOR. RESCUE DELTAS ARE THE ONLY SIGNAL
 	// IT CONSUMES; IT ADAPTS codel_target_ns WHICH DRIVES THE PER-CPU CoDel
+	// PER-CPU RUNNABLE DEPTH SAMPLE. NOT GATED TO CPU 0: THE POINT IS THE
+	// SPATIAL DIMENSION, AND A SINGLE CPU'S QUEUE IS THE ONE THING THIS
+	// CANNOT TELL US. stats_map IS PER-CPU SO `s` IS ALREADY THIS CPU'S
+	// ENTRY -- NO CROSS-CPU ACCESS, NO ATOMIC, WHICH IS WHY REDUCING BELONGS
+	// ON THIS SIDE OF THE BOUNDARY AND RELATING DOES NOT.
+	// COST: ONE DSQ COUNTER READ AND TWO ADDS PER TICK PER CPU.
+	// A/B SWITCH FOR THE TICK-SAMPLE COST. Build with
+	// -DPAND_NO_RQ_DEPTH to compile the sample out entirely, then compare the
+	// --no-adaptive arm against a build with it: that arm never runs the Rust
+	// loop, so anything that moves there is this sample and nothing else. The
+	// claim being tested is that one DSQ counter read and two adds per tick per
+	// CPU is marginal, which was asserted when it landed and never measured.
+#ifndef PAND_NO_RQ_DEPTH
+	if (s) {
+		s->rq_depth_sum +=
+			scx_bpf_dsq_nr_queued((u64)bpf_get_smp_processor_id());
+		s->rq_depth_samples++;
+	}
+#endif
+
 	// STALL DECISION AND HARD STARVATION RESCUE. NO BURST DETECTOR. NO FLAGS.
 	// OSCILLATOR UPDATE STAYS GATED TO CPU 0 -- SINGLE-WRITER TO VELOCITY
 	// AND POSITION FIELDS, NO NEED FOR CAS IN THE INTEGRATION LOOP.
@@ -2561,7 +2858,7 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 				// THE EQUILIBRIUM MOVED UNDER THE PARKED VALUE
 				// (MWU/tau RETUNE), OR THE MAX-PARK HEARTBEAT.
 				if (delta == 0 &&
-				    codel_target_ns == codel_target_equilibrium_ns &&
+				    codel_target_ns == codel_seed_ns &&
 				    ++osc_env_park_ticks < OSC_ENV_HEARTBEAT_TICKS)
 					goto osc_env_done;
 				// WAKE EDGE: FULL RECOMPUTE THIS SAME TICK, BEFORE
@@ -2570,7 +2867,7 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 				// REFRACTORY DWELL: RE-PRIME THE RESERVOIR ABOVE
 				// RELEASE SO CONTRACTION RESTARTS FROM SCRATCH AND
 				// A BURSTY WAKE CANNOT IMMEDIATELY RE-PARK.
-				osc_env_unpark();   // F1a: single un-park owner
+				osc_env_unpark();   // single un-park owner
 			} else if (delta == 0 && osc_env_energy < env_release) {
 				// GRADED BAND: CONTRACTION IS GRADUAL (DIVIDED
 				// CADENCE), EXPANSION IS INSTANT (ANY RESCUE
@@ -2588,7 +2885,7 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 					// INTEGRATOR (ANTI-WINDUP: IT MUST NOT
 					// ACCUMULATE ACROSS THE BAND AND SLINGSHOT
 					// AT WAKE), STOP THE ARITHMETIC.
-					codel_target_ns = codel_target_equilibrium_ns;
+					codel_target_ns = codel_seed_ns;
 					oscillator_velocity_ns = 0;
 					osc_env_parked = true;
 					osc_env_park_ticks = 0;
@@ -2618,7 +2915,7 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 			// IF x < c_eq -> POSITIVE v IMPULSE (PULL UP). ARITHMETIC
 			// RIGHT-SHIFT ON SIGNED s64 PRESERVES THE SIGN.
 			s64 disp = (s64)codel_target_ns -
-				   (s64)codel_target_equilibrium_ns;
+				   (s64)codel_seed_ns;
 			oscillator_velocity_ns -= disp >> oscillator_spring_shift;
 
 			// DAMPING (-2γẋ): VELOCITY DECAY VIA bit-SHIFT.
@@ -2641,14 +2938,10 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 				nc = (s64)codel_target_max_ns;
 			codel_target_ns = (u64)nc;
 
-			// CLOSE THE LOOP: the rescue threshold the oscillator's signal
-			// (global_rescue_count) is meant to govern now tracks the live
-			// target the oscillator moves -- not the frozen equilibrium. So
-			// global_rescue_count -> codel_target_ns -> overflow_sojourn_rescue_ns
-			// -> rescue rate -> global_rescue_count actually closes. Single
-			// writer (CPU0 tick), no new state. apply_tau_scaling()'s seed at
-			// codel_target_equilibrium_ns still holds before the first tick.
-			overflow_sojourn_rescue_ns = codel_target_ns;
+			// THE LOOP IS CLOSED BY CONSTRUCTION: the overflow gate and
+			// STEP 2 read codel_target_ns itself, so
+			// global_rescue_count -> codel_target_ns -> rescue rate ->
+			// global_rescue_count closes with no shadow copy to track.
 
 			// RESERVOIR UPDATE: POST-INTEGRATE STATE, VALUES ALREADY
 			// IN HAND -- THE ENVELOPE READS WHAT THE RECOMPUTE JUST
@@ -2659,7 +2952,7 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 			// DAMPING (PARAMETRIC RESONANCE).
 			{
 				s64 ed = (s64)codel_target_ns -
-					 (s64)codel_target_equilibrium_ns;
+					 (s64)codel_seed_ns;
 				s64 ev = oscillator_velocity_ns;
 				osc_env_energy -=
 					osc_env_energy >> OSC_ENV_DECAY_SHIFT;
@@ -2674,10 +2967,10 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 		s->longrun_mode_active = longrun_mode ? 1 : 0;
 	}
 
-	// F3: this CPU's cache domain batch-overflow age. The per-CPU sojourn enforcement
-	// below is cache domain-local-correct; longrun_mode (CPU-0 only) thus tracks CPU-0's
-	// cache domain -- acceptable; a machine-wide OR-reduce across cache domain is a v5.15.0 refinement.
-	u64 bens = batch_enqueue_ns[cpu_domain_of(scx_bpf_task_cpu(p)) & (MAX_OVERFLOW_DOMAINS - 1)];
+	// This CPU's cache domain batch-overflow age. The per-CPU sojourn
+	// enforcement below is cache domain-local-correct; longrun_mode (CPU-0
+	// only) thus tracks CPU-0's cache domain -- acceptable.
+	u64 bens = sojourn_stamp_overflow[cpu_domain_of(scx_bpf_task_cpu(p)) & (MAX_OVERFLOW_DOMAINS - 1)].batch;
 	if (bens > 0) {
 		u64 now = bpf_ktime_get_ns();
 		u64 sojourn = now - bens;
@@ -2696,14 +2989,14 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 		// CPU 0 IS THE SOLE WRITER: ALIGNS WITH THE OSCILLATOR / TAU-
 		// SCALING STATICS THAT ARE ALSO CPU-0-WRITTEN.
 		// PREVENTS MULTI-CPU TICK RACES THAT FLICKERED THE BOOL UNDER
-		// BURST WHILE batch_enqueue_ns WAS BEING SET/CLEARED VIA CAS.
+		// BURST WHILE sojourn_stamp_overflow.batch WAS BEING SET/CLEARED VIA CAS.
 		if (bpf_get_smp_processor_id() == 0)
 			longrun_mode = sojourn > longrun_thresh_ns;
 
 		// SOJOURN ENFORCEMENT: THRESHOLD SET BY RUST ADAPTIVE LAYER FROM
 		// OBSERVED DISPATCH RATE. IF OVERFLOW HAS STARVED PAST THE THRESHOLD,
 		// KICK THIS CPU TO FORCE A DISPATCH OF THE BURIED TASK.
-		// PREEMPT BATCH *OR* INTERACTIVE RUNNERS: THE OLD "INTERACTIVE SLICES
+		// PREEMPT BATCH *OR* INTERACTIVE RUNNERS: THE "INTERACTIVE SLICES
 		// ARE SHORT, THEY YIELD ON THEIR OWN" ASSUMPTION HOLDS IN ISOLATION BUT
 		// BREAKS UNDER A FORK-STORM -- THE CORES RUN A CONVEYOR BELT OF
 		// INTERACTIVE WORKERS, EACH YIELDING FAST ONLY FOR THE NEXT STORM
@@ -2711,18 +3004,24 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 		// RUNNER UNDER SUSTAINED STARVATION IS THE JUST-ENOUGH BACK-PRESSURE
 		// THAT LETS IT THROUGH; LATCRIT IS LEFT ALONE (GENUINELY TOP PRIORITY).
 		// PER-CPU (NOT CPU-0-ONLY): EACH CPU SELF-PREEMPTS WHEN IT'S HOGGING.
-		// KEY THE KICK ON THE R_eff OVERFLOW-GATE DELTA, NOT THE TIGHTER ADAPTIVE
-		// sojourn_thresh: STEP 0/1 ONLY FALL THROUGH TO SERVE OVERFLOW ONCE THE
-		// SOJOURN PASSES overflow_sojourn_rescue_ns, SO A KICK FIRED EARLIER JUST
-		// LETS THE FREED CORE RE-GRAB ANOTHER STORM WORKER. ALIGNING THE TWO MEANS
-		// THE PREEMPTED CORE ACTUALLY LANDS ON THE BURIED TASK ON RE-DISPATCH.
-		if (sojourn > overflow_sojourn_rescue_ns) {
-			struct task_ctx *tctx = lookup_task_ctx(p);
-			if (tctx && (tctx->tier == TIER_BATCH ||
-				     tctx->tier == TIER_INTERACTIVE)) {
-				scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
-				return;
-			}
+		// KEY THE KICK ON THE LIVE OVERFLOW GATE (codel_target_ns), NOT THE
+		// TIGHTER ADAPTIVE codel_thresh: STEP 0/1 ONLY FALL THROUGH TO SERVE
+		// OVERFLOW ONCE THE SOJOURN PASSES codel_target_ns, SO A KICK FIRED
+		// EARLIER JUST LETS THE FREED CORE RE-GRAB ANOTHER STORM WORKER.
+		// ALIGNING THE TWO MEANS THE PREEMPTED CORE ACTUALLY LANDS ON THE
+		// BURIED TASK ON RE-DISPATCH.
+		// NO CLASS EXEMPTION, TWO BOUNDS. THE TIER TEST HERE ONLY EVER EXCLUDED
+		// LAT_CRITICAL, WHICH IS A CLASSIFIER READ AND IS GONE. WHAT REPLACES IT
+		// IS NOT A CLASS BUT A DECLARED POLICY: SCHED_FIFO/RR IS A CONTRACT
+		// USERSPACE STATED, NOT A CHARACTER THIS SCHEDULER GUESSED, SO HONOURING
+		// IT IS NOT A RETURN TO THE ESTIMATOR. IT IS STILL BOUNDED -- RT JUST
+		// ANSWERS TO THE STARVATION BOUND INSTEAD OF THE SERVICE BOUND. SEE THE
+		// PER-CPU BAND BELOW FOR WHY THE TWO NUMBERS DIFFER.
+		u64 net_bound = (p->policy == SCHED_FIFO || p->policy == SCHED_RR)
+			      ? lag_cap_ns : codel_target_ns;
+		if (sojourn > net_bound) {
+			scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
+			return;
 		}
 	} else {
 		if (bpf_get_smp_processor_id() == 0)
@@ -2738,14 +3037,14 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 	{
 		u32 this_cpu = bpf_get_smp_processor_id();
 		u64 now2 = bpf_ktime_get_ns();
-		u64 pcpu_sojourn_thresh = knobs
-			? knobs->sojourn_thresh_ns : 5000000;
+		u64 codel_thresh_ns = knobs
+			? knobs->codel_thresh_ns : 5000000;
 
 		// LOCAL: OWN PER-CPU DSQ
 		if (this_cpu < MAX_CPUS) {
-			u64 pcpu_oldest = pcpu_enqueue_ns[this_cpu].ns;
+			u64 pcpu_oldest = sojourn_stamp_pcpu[this_cpu].ns;
 			if (pcpu_oldest > 0 &&
-			    (now2 - pcpu_oldest) > pcpu_sojourn_thresh) {
+			    (now2 - pcpu_oldest) > codel_thresh_ns) {
 				if (pcpu_kick_if_waiter(this_cpu))
 					return;
 			}
@@ -2771,9 +3070,9 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 					u32 scan_cpu = i & (MAX_CPUS - 1);
 					if (scan_cpu == this_cpu)
 						continue;
-					u64 remote_stamp = pcpu_enqueue_ns[scan_cpu].ns;
+					u64 remote_stamp = sojourn_stamp_pcpu[scan_cpu].ns;
 					if (remote_stamp > 0 &&
-					    (now2 - remote_stamp) > pcpu_sojourn_thresh)
+					    (now2 - remote_stamp) > codel_thresh_ns)
 						pcpu_kick_if_waiter(scan_cpu);
 				}
 			} else {
@@ -2781,7 +3080,7 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 				for (int i = 0; i < 4; i++) {
 					// MASK THE INDEX, DO NOT COMPARISON-SKIP IT. OLDER-KERNEL
 					// VERIFIERS CANNOT PROVE (scan_base + i) % nr IS BOUNDED, SO
-					// pcpu_enqueue_ns[scan_cpu] TRIPS "math between map_value
+					// sojourn_stamp_pcpu[scan_cpu] TRIPS "math between map_value
 					// pointer and register with unbounded min value" (Issue #8:
 					// Ubuntu 25.10 / 5950X; newer kernels accept the bare % nr).
 					// & (MAX_CPUS-1) IS A VERIFIER-PORTABLE BOUND, NOT A FOOTGUN
@@ -2790,39 +3089,61 @@ void BPF_STRUCT_OPS(pandemonium_tick, struct task_struct *p)
 						((scan_base + (u32)i) % nr) & (MAX_CPUS - 1);
 					if (scan_cpu == this_cpu)
 						continue;
-					u64 remote_stamp = pcpu_enqueue_ns[scan_cpu].ns;
+					u64 remote_stamp = sojourn_stamp_pcpu[scan_cpu].ns;
 					if (remote_stamp > 0 &&
-					    (now2 - remote_stamp) > pcpu_sojourn_thresh)
+					    (now2 - remote_stamp) > codel_thresh_ns)
 						pcpu_kick_if_waiter(scan_cpu);
 				}
 			}
 		}
 	}
 
-	// PER-CPU PREEMPT: SIGNAL IS pcpu_enqueue_ns[this_cpu] (OLDEST WAITER AGE),
+	// PER-CPU PREEMPT: SIGNAL IS sojourn_stamp_pcpu[this_cpu] (OLDEST WAITER AGE),
 	// SO EACH CPU DECIDES FROM ITS OWN STATE -- NO GLOBAL TOKEN. THE COARSE
-	// sojourn_thresh NET ABOVE HANDLED THE LONG-WAIT CASE; THIS IS THE TIGHT
-	// BAND AT k*tau (preempt_thresh_ns): BATCH RESIDENT YIELDS AT THE BASE,
-	// INTERACTIVE AT 2x, LAT_CRITICAL NEVER.
+	// codel_thresh NET ABOVE HANDLED THE LONG-WAIT CASE; THIS IS THE TIGHT BAND.
+	//
+	// ONE BAND, NO EXEMPTION. THE TIER SPLIT HERE WAS THE WORST HALF OF THE
+	// CLASSIFIER: THE ENQUEUE SIDE READ tier != TIER_BATCH AND KICKED HARDEST FOR
+	// INTERACTIVE, WHILE THIS SIDE READ THE SAME FIELD AND BRAKED SOFTEST FOR IT
+	// (2x THE THRESHOLD), WITH LAT_CRITICAL EXEMPT ALTOGETHER. TWO CONTROLLERS ON
+	// ONE VARIABLE, PULLING OPPOSITE WAYS. NOTHING IS EXEMPT FROM THE SOJOURN
+	// BOUND NOW -- AN RT TASK THAT HAS HELD A CPU PAST THE LIVE TARGET WHILE
+	// ANOTHER WAITS IS THE CASE THE BOUND EXISTS FOR.
+	//
+	// AND THE THRESHOLD IS codel_target_ns, NOT knobs->preempt_thresh_ns. THE KNOB
+	// PAGE IS ALL ZEROS UNDER --no-adaptive, SO base_thresh WAS 0 THERE AND THIS
+	// BLOCK NEVER RESOLVED TO A USEFUL BAND: TOTAL PREEMPT READ 0 ON EVERY BPF-ONLY
+	// RUN OF EVERY VERSION IN THE ARCHIVE. THE TICK PREEMPT HAS NEVER FIRED IN THAT
+	// MODE, WHICH IS WHY REMOVING THE TIER 1 REQUEUE KICK STALLED THE BOX OUTRIGHT
+	// (WATCHDOG AT 10.001s) -- THAT KICK WAS SILENTLY DOING THIS BLOCK'S JOB.
+	// codel_target_ns IS BPF-DERIVED AND ALWAYS LIVE, SO THE BAND EXISTS IN BOTH
+	// MODES. longrun_mode STILL WIDENS IT: SUSTAINED BATCH PRESSURE EARNS THE
+	// RESIDENT MORE ROPE, WHICH IS THE ONE MODULATION THAT WAS NEVER CLASS-BASED.
 	u32 wcpu = bpf_get_smp_processor_id();
 	if (wcpu >= MAX_CPUS)
 		return;
-	u64 waiter = pcpu_enqueue_ns[wcpu].ns;
+	u64 waiter = sojourn_stamp_pcpu[wcpu].ns;
 	if (waiter == 0)
-		return;
-
-	struct task_ctx *tctx = lookup_task_ctx(p);
-	if (!tctx || tctx->tier == TIER_LAT_CRITICAL)
 		return;
 
 	u64 wnow = bpf_ktime_get_ns();
 	u64 wait_age = wnow > waiter ? wnow - waiter : 0;
 
-	u64 base_thresh = knobs ? knobs->preempt_thresh_ns : 1000000;
-	u64 batch_thresh = longrun_mode ? (base_thresh << longrun_preempt_shift)
-			 : base_thresh;
-	u64 thresh = tctx->tier == TIER_INTERACTIVE ? (batch_thresh << 1)
-		   : batch_thresh;
+	// TWO BOUNDS, BOTH MEASURED, NEITHER A CLASS. A DECLARED RT POLICY ANSWERS TO
+	// THE STARVATION BOUND (lag_cap_ns, 40ms AT THE 12C REFERENCE); EVERYTHING
+	// ELSE ANSWERS TO THE SERVICE BOUND (codel_target_ns, 700us-8ms LIVE). THE
+	// SPLIT IS THE AUDIO QUANTUM: codel_target FALLS INSIDE ONE PipeWire PERIOD,
+	// SO A UNIFORM BAND PREEMPTS AN RT THREAD MID-BUFFER EVERY TIME A WAITER
+	// EXISTS -- AND UNDER THE fork-thread MIGRATION LOAD A WAITER ALWAYS EXISTS.
+	// lag_cap FALLS OUTSIDE ONE, SO RT IS STILL FORCED OFF A CPU IT HAS CAMPED
+	// ON, JUST NEVER PART-WAY THROUGH A PERIOD. THE OLD BLANKET EXEMPTION FIXED
+	// NEITHER HALF: IT KEPT AN RT THREAD FROM BEING KICKED OFF BUT DID NOTHING TO
+	// GET IT ON, WHICH IS THE HALF THAT ACTUALLY POPS, AND IT LET A CAMPER HOLD A
+	// CPU WITHOUT LIMIT. p->policy IS READ HERE INSTEAD OF A task_ctx FIELD, SO
+	// THE TICK ALSO SHEDS ITS PER-CALL MAP LOOKUP.
+	u64 band = (p->policy == SCHED_FIFO || p->policy == SCHED_RR)
+		 ? lag_cap_ns : codel_target_ns;
+	u64 thresh = longrun_mode ? (band << longrun_preempt_shift) : band;
 
 	if (wait_age >= thresh) {
 		if (pcpu_kick_if_waiter(wcpu)) {
@@ -2852,26 +3173,14 @@ void BPF_STRUCT_OPS(pandemonium_enable, struct task_struct *p)
 		tctx->lat_cri = 0;
 		tctx->tier = TIER_INTERACTIVE;
 		tctx->ewma_age = 0;
+		tctx->standing_runs = 0;   // NO SERVICE RENDERED YET
+		tctx->wake_obs = 0;        // NOTHING OBSERVED YET
 		tctx->dispatch_path = 0;
 		// -1 = NEVER RAN. select_cpu's warm path anchors a last_cpu<0 task on
 		// prev_cpu (the parent's CPU at fork) so it warm-routes per-domain instead
 		// of aliasing CPU 0 or scattering via the node-wide dfl pick.
 		tctx->last_cpu = -1;
 		tctx->home_cpu = -1;   // pinned on first run (stopping)
-
-		// PROCDB: APPLY LEARNED CLASSIFICATION FROM PRIOR RUNS
-		char key[16];
-		__builtin_memcpy(key, p->comm, 16);
-		struct task_class_entry *init_entry =
-		    bpf_map_lookup_elem(&task_class_init, key);
-		if (init_entry) {
-			tctx->tier = (u32)init_entry->tier;
-			tctx->avg_runtime = init_entry->avg_runtime;
-			tctx->runtime_dev = init_entry->runtime_dev;
-			tctx->wakeup_freq = init_entry->wakeup_freq;
-			tctx->csw_rate = init_entry->csw_rate;
-			tctx->cached_weight = effective_weight(p, tctx);
-		}
 	}
 }
 
@@ -2913,8 +3222,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(pandemonium_init)
 	// FIRST CPU-0 TICK. MIDPOINT CONSTANTS HERE PROVIDE SANE BEHAVIOR DURING
 	// THE ~1MS WINDOW BETWEEN struct_ops ATTACH AND THAT FIRST TICK. THEY
 	// ARE OVERWRITTEN IMMEDIATELY -- DON'T READ SIGNIFICANCE INTO THEM.
-	starvation_rescue_ns       = 100000000ULL;  // 100ms midpoint of [20, 500]
-	overflow_sojourn_rescue_ns =   6000000ULL;  //   6ms midpoint of [4, 10]
+	codel_starve_ns            = 100000000ULL;  // 100ms midpoint of [20, 500]
 	codel_target_floor_ns      =    500000ULL;  // 500us midpoint of [200, 800]
 	pcpu_depth_base            = 2;             // 8C-12C MIDPOINT; apply_tau_scaling
 	                                            //   recomputes continuously as
@@ -2946,10 +3254,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(pandemonium_init)
 		knobs->lat_cri_thresh_high = LAT_CRI_THRESH_HIGH; // 32
 		knobs->lat_cri_thresh_low  = LAT_CRI_THRESH_LOW;  // 8
 		knobs->affinity_mode = 0;                // OFF BY DEFAULT (RUST SETS PER REGIME)
-		knobs->sojourn_thresh_ns = 5000000;      // 5MS DEFAULT (RUST OVERRIDES)
+		knobs->codel_thresh_ns = 5000000;        // 5MS DEFAULT (RUST OVERRIDES)
 		knobs->burst_slice_ns = 1000000;         // 1MS DEFAULT (BURST/LONGRUN CEILING)
 		knobs->topology_tau_ns = 0;              // RUST WRITES AT TOPOLOGY DETECT
 		knobs->codel_eq_ns = 0;                  // RUST WRITES AT TOPOLOGY DETECT
+		knobs->spill_temp_q16 = 65536;           // T_base (Q16 1.0); ADAPTIVE OVERLAYS
 	}
 
 	// BELT-AND-SUSPENDERS: DERIVE tau-SCALED STATICS IMMEDIATELY IF RUST
@@ -2993,8 +3302,13 @@ void BPF_STRUCT_OPS(pandemonium_quiescent, struct task_struct *p,
 		    u64 deq_flags)
 {
 	struct task_ctx *tctx = lookup_task_ctx(p);
-	if (tctx)
+	if (tctx) {
 		tctx->sleep_start_ns = bpf_ktime_get_ns();
+		// A SLEEPING TASK IS NOT QUEUE-WAITING. WITHOUT THIS, A TASK QUEUED,
+		// DEQUEUED UNRUN (SETAFFINITY / CANCELLED WAKE) AND THEN SLEPT COMES
+		// BACK HOLDING A SECONDS-OLD CLAIM AND SORTS AHEAD OF THE MACHINE.
+		tctx->wait_since = 0;
+	}
 }
 
 // CPU RELEASE: RESCUE STRANDED TASKS WHEN RT/DL PREEMPTS OUR CPU.
@@ -3022,10 +3336,17 @@ void BPF_STRUCT_OPS(pandemonium_cpu_release, s32 cpu,
 // LATENCY-CRITICAL TASKS UNTIL THE WATCHDOG KILLS THE SCHEDULER.
 // FIX: CLEAR PER-CPU AND GLOBAL STATE ON HOTPLUG TRANSITIONS.
 
+// HOTPLUG STAMP CLEARS GO THROUGH stamp_clear_or_rearm: A RAW UNCONDITIONAL
+// OVERWRITE (__sync_lock_test_and_set(..., 0)) WIPES A CONCURRENT ENQUEUE'S
+// ARM (0 -> now) LANDING IMMEDIATELY BEFORE IT WHILE THE ENQUEUE'S TASK STAYS
+// QUEUED -- THE IDENTICAL STRANDING CLASS THE DRAIN-CLEAR TAIL CLOSES.
+// last_tau_snapshot, THE OSCILLATOR FEEDBACK AND THE RESCUE COUNTERS STAY
+// RAW: PLAIN RESETS, NO DSQ-EMPTINESS CONTRACT FOR THE REARM TO HONOR.
+
 void BPF_STRUCT_OPS(pandemonium_cpu_online, s32 cpu)
 {
 	if ((u32)cpu < MAX_CPUS)
-		__sync_lock_test_and_set(&pcpu_enqueue_ns[cpu].ns, 0);
+		stamp_clear_or_rearm((u64)cpu, &sojourn_stamp_pcpu[cpu].ns);
 	// FORCE THE NEXT CPU-0 TICK TO RE-DERIVE tau-SCALED STATICS. RUST WILL
 	// HAVE RECOMPUTED lambda_2 AGAINST THE NEW TOPOLOGY AND WRITTEN A FRESH
 	// topology_tau_ns; CLEARING THE SNAPSHOT MAKES apply_tau_scaling() PICK
@@ -3038,12 +3359,14 @@ void BPF_STRUCT_OPS(pandemonium_cpu_online, s32 cpu)
 void BPF_STRUCT_OPS(pandemonium_cpu_offline, s32 cpu)
 {
 	if ((u32)cpu < MAX_CPUS)
-		__sync_lock_test_and_set(&pcpu_enqueue_ns[cpu].ns, 0);
+		stamp_clear_or_rearm((u64)cpu, &sojourn_stamp_pcpu[cpu].ns);
 	__sync_lock_test_and_set(&last_tau_snapshot, 0);
 
 	for (u32 c = 0; c < MAX_OVERFLOW_DOMAINS; c++) {
-		__sync_lock_test_and_set(&interactive_enqueue_ns[c], 0);
-		__sync_lock_test_and_set(&batch_enqueue_ns[c], 0);
+		stamp_clear_or_rearm(domain_inter_dsq(c),
+				     &sojourn_stamp_overflow[c].inter);
+		stamp_clear_or_rearm(domain_batch_dsq(c),
+				     &sojourn_stamp_overflow[c].batch);
 	}
 
 	// RESET OSCILLATOR FEEDBACK TO AVOID STALE DELTA POST-SUSPEND

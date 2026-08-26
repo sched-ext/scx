@@ -309,7 +309,10 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 		int pick_cpu = -ENOENT, cpu, i, j, k;
 
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-			u64 cpumask = cpdomc->__cpumask[i];
+			u64 cpumask;
+			if ((u32)i * 64 >= nr_cpu_ids)
+				break;
+			cpumask = cpdomc->__cpumask[i];
 			bpf_for(k, 0, 64) {
 				u64 load;
 

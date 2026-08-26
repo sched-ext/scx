@@ -524,7 +524,7 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 		}
 
 		// restore vtime to p2dq's timeline
-		p->scx.dsq_vtime = taskc->p2dq_vtime;
+		scx_bpf_task_set_dsq_vtime(p, taskc->p2dq_vtime);
 
 		async_p2dq_enqueue_weak(&promise, p, taskc->enq_flags);
 		complete_p2dq_enqueue_move(&promise, BPF_FOR_EACH_ITER, p);
@@ -656,7 +656,7 @@ void BPF_STRUCT_OPS(chaos_tick, struct task_struct *p)
 		return;
 
 	if (taskc->pending_trait == CHAOS_TRAIT_KPROBE_RANDOM_DELAYS)
-		p->scx.slice = 0;
+		scx_bpf_task_set_slice(p, 0);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init_task, struct task_struct *p,

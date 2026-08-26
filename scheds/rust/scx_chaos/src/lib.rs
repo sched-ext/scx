@@ -796,7 +796,7 @@ pub fn run(args: Args) -> Result<()> {
 
         move || -> Result<()> {
             for builder in BuilderIterator::from(&*args) {
-                info!("{:?}", &builder);
+                info!("{:?}", builder);
 
                 let sched: Scheduler = builder.try_into()?;
 

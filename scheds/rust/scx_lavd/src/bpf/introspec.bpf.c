@@ -91,6 +91,9 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	m->taskc_x.vuln_thresh = cpdomc->vuln_thresh;
 	m->taskc_x.task_util_est = taskc->util_est;
 	m->taskc_x.norm_lat_cri = taskc->normalized_lat_cri;
+	m->taskc_x.cpu_heat = taskc->cpu_heat;
+	m->taskc_x.warm_cpu_id = taskc->cpu_heat ? (u16)taskc->cpu_id :
+						   (u16)LAVD_CPU_ID_NONE;
 
 	bpf_ringbuf_submit(m, 0);
 

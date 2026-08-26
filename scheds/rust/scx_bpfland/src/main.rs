@@ -654,7 +654,6 @@ impl<'a> Scheduler<'a> {
             nr_keep_running_queued_work: bss_data.nr_keep_running_queued_work,
             nr_dispatch_cpu_dsq_consumes: bss_data.nr_dispatch_cpu_dsq_consumes,
             nr_dispatch_node_dsq_consumes: bss_data.nr_dispatch_node_dsq_consumes,
-            nr_cpu_release_reenqueue: bss_data.nr_cpu_release_reenqueue,
         }
     }
 
