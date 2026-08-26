@@ -74,8 +74,7 @@ void __arena *scx_cgrp_alloc(struct cgroup *cgrp)
 	/* racing allocs publish with cmpxchg, the loser uses the winner's */
 	old = __sync_val_compare_and_swap((__u64 *)&mval->data, 0, (__u64)data);
 	if (unlikely(old)) {
-		scx_alloc_free_idx(&scx_cgrp_allocator,
-				   sdt_tailer(&scx_cgrp_allocator, data)->tid.idx);
+		scx_free(&scx_cgrp_allocator, data);
 		data = (void __arena *)old;
 	} else {
 		mval->cptr = (__u64)cgrp;
@@ -124,8 +123,7 @@ void scx_cgrp_free(struct cgroup *cgrp)
 	if (unlikely(!data))
 		return;
 
-	scx_alloc_free_idx(&scx_cgrp_allocator,
-			   sdt_tailer(&scx_cgrp_allocator, data)->tid.idx);
+	scx_free(&scx_cgrp_allocator, data);
 }
 
 static struct scx_urcu scx_cgrp_urcu;

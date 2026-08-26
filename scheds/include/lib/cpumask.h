@@ -6,7 +6,6 @@
 #define SCXMASK_NLONG (512 / 8)
 
 struct scx_bitmap {
-	union sdt_id tid;
 	u64 bits[SCXMASK_NLONG];
 };
 

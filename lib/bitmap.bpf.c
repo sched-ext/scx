@@ -13,7 +13,7 @@ int scx_bitmap_init(__u64 total_mask_size)
 {
 	mask_size = div_round_up(total_mask_size, 8);
 
-	return scx_alloc_init(&scx_bitmap_allocator, mask_size * 8 + sizeof(union sdt_id));
+	return scx_alloc_init(&scx_bitmap_allocator, mask_size * 8);
 }
 
 __weak
@@ -26,7 +26,6 @@ u64 scx_bitmap_alloc_internal(void)
 	if (unlikely(!mask))
 		return (u64)(NULL);
 
-	mask->tid = sdt_tailer(&scx_bitmap_allocator, mask)->tid;
 	bpf_for(i, 0, mask_size) {
 		mask->bits[i] = 0ULL;
 	}
@@ -44,7 +43,7 @@ int scx_bitmap_free(scx_bitmap_t __arg_arena mask)
 {
 	scx_arena_subprog_init();
 
-	scx_alloc_free_idx(&scx_bitmap_allocator, mask->tid.idx);
+	scx_free(&scx_bitmap_allocator, mask);
 	return 0;
 }
 

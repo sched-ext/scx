@@ -25,11 +25,9 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 	if (unlikely(!atq))
 		return (u64)NULL;
 
-	atq->tid = sdt_tailer(&scx_atq_allocator, atq)->tid;
-
 	atq->tree = rb_create(RB_NOALLOC, RB_DUPLICATE);
 	if (!atq->tree) {
-		scx_alloc_free_idx(&scx_atq_allocator, atq->tid.idx);
+		scx_free(&scx_atq_allocator, atq);
 		return (u64)NULL;
 	}
 
@@ -49,7 +47,7 @@ int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 	}
 	rb_destroy(atq->tree);
 
-	scx_alloc_free_idx(&scx_atq_allocator, atq->tid.idx);
+	scx_free(&scx_atq_allocator, atq);
 	return 0;
 }
 

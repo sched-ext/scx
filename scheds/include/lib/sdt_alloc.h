@@ -91,6 +91,12 @@ static inline struct sdt_data __arena *sdt_tailer(struct scx_allocator *alloc,
 		((__u64)payload + alloc->pool.elem_size - sizeof(struct sdt_data));
 }
 
+/* free by payload pointer, the tailer carries the index */
+static inline int scx_free(struct scx_allocator *alloc, void __arena *payload)
+{
+	return scx_alloc_free_idx(alloc, sdt_tailer(alloc, payload)->tid.idx);
+}
+
 int scx_urcu_pending(struct scx_urcu *urcu);
 void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc,
 		   void __arena *payload);

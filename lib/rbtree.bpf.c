@@ -48,8 +48,6 @@ u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 	if (unlikely(!rbtree))
 		return (u64)(NULL);
 
-	rbtree->tid = sdt_tailer(&scx_rbtree_allocator, rbtree)->tid;
-
 	rbtree->alloc = alloc;
 	rbtree->insert = insert;
 
@@ -73,11 +71,11 @@ int rb_destroy(rbtree_t __arg_arena *rbtree)
 	node = rbtree->freelist;
 	while (node && can_loop) {
 		next = node->parent;
-		scx_alloc_free_idx(&scx_rbnode_allocator, node->tid.idx);
+		scx_free(&scx_rbnode_allocator, node);
 		node = next;
 	}
 
-	scx_alloc_free_idx(&scx_rbtree_allocator, rbtree->tid.idx);
+	scx_free(&scx_rbtree_allocator, rbtree);
 	return 0;
 }
 
@@ -212,8 +210,6 @@ static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 k
 		rbnode = scx_alloc(&scx_rbnode_allocator);
 		if (unlikely(!rbnode))
 			return NULL;
-
-		rbnode->tid = sdt_tailer(&scx_rbnode_allocator, rbnode)->tid;
 	}
 	
 	if (!rbnode)
