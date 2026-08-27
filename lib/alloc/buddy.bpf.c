@@ -90,7 +90,7 @@ __weak
 int idx_set_allocated(buddy_chunk_t __arg_arena *chunk, u64 idx, bool allocated)
 {
 	if (unlikely(idx >= BUDDY_CHUNK_ITEMS)) {
-		arena_stderr("setting order of invalid idx (%d, max %d)\n", idx,
+		arena_stderr("setting order of invalid idx (%d, max %d)", idx,
 			     BUDDY_CHUNK_ITEMS);
 		return -EINVAL;
 	}
@@ -106,7 +106,7 @@ int idx_set_allocated(buddy_chunk_t __arg_arena *chunk, u64 idx, bool allocated)
 static int idx_is_allocated(buddy_chunk_t *chunk, u64 idx, bool *allocated)
 {
 	if (unlikely(idx >= BUDDY_CHUNK_ITEMS)) {
-		arena_stderr("setting order of invalid idx (%d, max %d)\n", idx,
+		arena_stderr("setting order of invalid idx (%d, max %d)", idx,
 			     BUDDY_CHUNK_ITEMS);
 		return -EINVAL;
 	}
@@ -121,12 +121,12 @@ int idx_set_order(buddy_chunk_t __arg_arena *chunk, u64 idx, u8 order)
 	u8 prev_order;
 
 	if (unlikely(order >= BUDDY_CHUNK_NUM_ORDERS)) {
-		arena_stderr("setting invalid order %u\n", order);
+		arena_stderr("setting invalid order %u", order);
 		return -EINVAL;
 	}
 
 	if (unlikely(idx >= BUDDY_CHUNK_ITEMS)) {
-		arena_stderr("setting order of invalid idx (%d, max %d)\n", idx,
+		arena_stderr("setting order of invalid idx (%d, max %d)", idx,
 			     BUDDY_CHUNK_ITEMS);
 		return -EINVAL;
 	}
@@ -157,7 +157,7 @@ static u8 idx_get_order(buddy_chunk_t *chunk, u64 idx)
 		       "order must fit in 4 bits");
 
 	if (unlikely(idx >= BUDDY_CHUNK_ITEMS)) {
-		arena_stderr("setting order of invalid idx\n");
+		arena_stderr("setting order of invalid idx");
 		return BUDDY_CHUNK_NUM_ORDERS;
 	}
 
@@ -171,7 +171,7 @@ static void __arena *idx_to_addr(buddy_chunk_t *chunk, size_t idx)
 	u64 address;
 
 	if (unlikely(idx >= BUDDY_CHUNK_ITEMS)) {
-		arena_stderr("setting order of invalid idx\n");
+		arena_stderr("setting order of invalid idx");
 		return NULL;
 	}
 
@@ -198,12 +198,12 @@ static buddy_header_t *idx_to_header(buddy_chunk_t *chunk, size_t idx)
 	u64 address;
 
 	if (unlikely(idx_is_allocated(chunk, idx, &allocated))) {
-		arena_stderr("accessing invalid idx 0x%lx\n", idx);
+		arena_stderr("accessing invalid idx 0x%lx", idx);
 		return NULL;
 	}
 
 	if (unlikely(allocated)) {
-		arena_stderr("accessing allocated idx 0x%lx as header\n", idx);
+		arena_stderr("accessing allocated idx 0x%lx as header", idx);
 		return NULL;
 	}
 
@@ -276,7 +276,7 @@ static u64 size_to_order(size_t size)
 	u64 order;
 
 	if (unlikely(!size)) {
-		arena_stderr("size 0 has no order\n");
+		arena_stderr("size 0 has no order");
 		return 64;
 	}
 
@@ -438,10 +438,10 @@ static buddy_chunk_t *buddy_chunk_get(struct buddy *buddy)
 		power2 = arena_fls(left);
 		if (unlikely(power2 >= BUDDY_CHUNK_NUM_ORDERS)) {
 			arena_stderr(
-				"buddy chunk metadata require allocation of order %d\n",
+				"buddy chunk metadata require allocation of order %d",
 				power2);
 			arena_stderr(
-				"chunk has size of 0x%lx bytes (left %lx bytes)\n",
+				"chunk has size of 0x%lx bytes (left %lx bytes)",
 				sizeof(*chunk), left);
 
 			buddy_unlock(buddy);
@@ -636,7 +636,7 @@ __weak u64 buddy_alloc_internal(struct buddy *buddy, size_t size)
 
 	order = size_to_order(size);
 	if (order >= BUDDY_CHUNK_NUM_ORDERS || order < 0) {
-		arena_stderr("invalid order %d (sz %lu)\n", order, size);
+		arena_stderr("invalid order %d (sz %lu)", order, size);
 		return (u64)NULL;
 	}
 
@@ -697,7 +697,7 @@ static __always_inline int buddy_free_unlocked(struct buddy *buddy, u64 addr)
 		return -EINVAL;
 
 	if (addr & (BUDDY_MIN_ALLOC_BYTES - 1)) {
-		arena_stderr("Freeing unaligned address %llx\n", addr);
+		arena_stderr("Freeing unaligned address %llx", addr);
 		return 0;
 	}
 

@@ -15,10 +15,11 @@
 #error "Arena allocators only require bpf_addr_space_cast feature"
 #endif
 
-#define arena_stdout(fmt, ...) bpf_stream_printk(1, (fmt), ##__VA_ARGS__)
-#define arena_stderr(fmt, ...) bpf_stream_printk(2, (fmt), ##__VA_ARGS__)
+/* newline-terminated, see the comment in bpf_helpers_local.h */
+#define arena_stdout(fmt, ...) bpf_stream_printk(1, fmt "\n", ##__VA_ARGS__)
+#define arena_stderr(fmt, ...) bpf_stream_printk(2, fmt "\n", ##__VA_ARGS__)
 
-#define DIAG() (arena_stderr("%s:%d\n", __func__, __LINE__))
+#define DIAG() (arena_stderr("%s:%d", __func__, __LINE__))
 
 static inline void
 arena_bug_trigger(const char *func, const int line)

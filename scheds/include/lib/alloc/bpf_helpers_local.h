@@ -33,8 +33,16 @@ extern int bpf_stream_vprintk(int stream_id, const char *fmt__str, const void *a
 	___ret;										\
 })
 
-#define scx_out(fmt, ...) bpf_stream_printk(1, (fmt), ##__VA_ARGS__)
-#define scx_err(fmt, ...) bpf_stream_printk(2, (fmt), ##__VA_ARGS__)
+/*
+ * Stream elements are concatenated without separators and the stream watcher
+ * consumes them line-wise, so an unterminated print glues onto whatever
+ * follows, a kernel error report included. The wrappers below terminate every
+ * print. Use them instead of raw bpf_stream_printk().
+ */
+#define scx_out(fmt, ...) bpf_stream_printk(1, fmt "\n", ##__VA_ARGS__)
+#define scx_err(fmt, ...) bpf_stream_printk(2, fmt "\n", ##__VA_ARGS__)
 
-#define scx_out_loc(fmt, ...) bpf_stream_printk(1, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
-#define scx_err_loc(fmt, ...) bpf_stream_printk(2, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
+#define scx_out_loc(fmt, ...) \
+	bpf_stream_printk(1, "%s:%d " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
+#define scx_err_loc(fmt, ...) \
+	bpf_stream_printk(2, "%s:%d " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)

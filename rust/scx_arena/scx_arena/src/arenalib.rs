@@ -36,6 +36,7 @@ const MAX_CPU_SUPPORTED: usize = 640;
 #[must_use]
 #[derive(Debug)]
 pub struct ArenaLib {
+    _watcher: crate::Daemon,
     _urcu: Option<crate::Daemon>,
 }
 
@@ -273,6 +274,7 @@ impl ArenaLib {
         Self::setup_topology(obj)?;
 
         Ok(ArenaLib {
+            _watcher: crate::stream_watcher_spawn(obj)?,
             _urcu: crate::urcu_spawn(obj)?,
         })
     }

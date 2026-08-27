@@ -260,3 +260,216 @@ pub(crate) fn urcu_spawn(obj: &libbpf_rs::Object) -> Result<Option<Daemon>> {
         thread: Some(thread),
     }))
 }
+
+const BPF_STDOUT: u32 = 1;
+const BPF_STDERR: u32 = 2;
+const BPF_STREAMS: [(u32, &str); 2] = [(BPF_STDOUT, "stdout"), (BPF_STDERR, "stderr")];
+const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+fn stream_read(fd: &OwnedFd, stream_id: u32, buf: &mut [u8]) -> i32 {
+    unsafe {
+        libbpf_sys::bpf_prog_stream_read(
+            fd.as_raw_fd(),
+            stream_id,
+            buf.as_mut_ptr() as *mut _,
+            buf.len() as u32,
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+/// The kernel prefixes the errors it reports on a program's BPF stderr
+/// stream with "ERROR: ".
+fn stream_is_fatal(lines: &[String]) -> bool {
+    lines.iter().any(|l| l.starts_with("ERROR: "))
+}
+
+/// Split the complete lines out of @carry, keeping a trailing partial for the
+/// next read. Stream elements are concatenated without separators and reads
+/// split lines arbitrarily, so prefixes may only be matched on complete lines.
+/// @new_data says whether this poll read anything: a partial with no
+/// continuation after a full poll interval is flushed as a line of its own.
+fn stream_extract_lines(carry: &mut String, new_data: bool) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+
+    if let Some(pos) = carry.rfind('\n') {
+        lines = carry[..pos].split('\n').map(str::to_string).collect();
+        carry.drain(..=pos);
+    }
+    if !new_data && !carry.is_empty() {
+        lines.push(std::mem::take(carry));
+    }
+
+    lines
+}
+
+/// Forward the BPF stdout/stderr streams of every program in the object to
+/// the scheduler's stdout and stderr respectively, and abort when the
+/// kernel reports an error on a stderr stream. Nothing reads these streams
+/// otherwise, so messages would be silently dropped. Lines prefixed "IGN: "
+/// are dropped instead of forwarded, for prints with side effects that
+/// nobody needs to see, the arena association print in
+/// scx_arena_subprog_init() for example. Called from ArenaLib::setup(), the
+/// watcher is owned by the returned ArenaLib.
+pub(crate) fn stream_watcher_spawn(obj: &libbpf_rs::Object) -> Result<Daemon> {
+    let mut progs = Vec::new();
+
+    for prog in obj.progs() {
+        let Some(name) = prog.name().to_str() else {
+            continue;
+        };
+        /* feature-gated programs may not be loaded and then have no fd */
+        let Some(fd) = prog_fd_clone(&prog)? else {
+            continue;
+        };
+        progs.push((name.to_string(), fd));
+    }
+
+    let stop = stop_eventfd()?;
+    let daemon_stop = stop
+        .try_clone()
+        .context("cloning stream watcher stop eventfd")?;
+    let thread = std::thread::Builder::new()
+        .name("scx-bpf-stream".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; 65536];
+            let mut carries: Vec<[String; 2]> = (0..progs.len())
+                .map(|_| [String::new(), String::new()])
+                .collect();
+
+            loop {
+                let mut fds = [libc::pollfd {
+                    fd: daemon_stop.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }];
+                let ret = unsafe {
+                    libc::poll(fds.as_mut_ptr(), 1, STREAM_POLL_INTERVAL.as_millis() as i32)
+                };
+                /* run one final scan below before honoring a stop request */
+                let stopping = if ret < 0 {
+                    std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                } else {
+                    ret > 0
+                };
+
+                for (pidx, (name, fd)) in progs.iter().enumerate() {
+                    for (sidx, (stream_id, label)) in BPF_STREAMS.iter().enumerate() {
+                        let carry = &mut carries[pidx][sidx];
+                        let mut new_data = false;
+
+                        /* drain fully, a backlog can exceed the buffer */
+                        loop {
+                            let n = stream_read(fd, *stream_id, &mut buf);
+                            if n <= 0 {
+                                break;
+                            }
+                            carry.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+                            new_data = true;
+                            if (n as usize) < buf.len() {
+                                break;
+                            }
+                        }
+
+                        let lines = stream_extract_lines(carry, new_data);
+                        if lines.is_empty() {
+                            continue;
+                        }
+
+                        let kept: Vec<&str> = lines
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|l| !l.starts_with("IGN: "))
+                            .collect();
+                        if !kept.is_empty() {
+                            let msg = kept.join("\n");
+                            let out = format!("BPF {} of prog {}:\n{}\n", label, name, msg);
+                            if *stream_id == BPF_STDOUT {
+                                print!("{}", out);
+                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                            } else {
+                                eprint!("{}", out);
+                            }
+                        }
+                        if *stream_id == BPF_STDERR && stream_is_fatal(&lines) {
+                            eprintln!("FATAL: aborting on BPF error report");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+
+                if stopping {
+                    break;
+                }
+            }
+        })
+        .context("spawning BPF stream watcher")?;
+
+    Ok(Daemon {
+        stop,
+        thread: Some(thread),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_extract_lines;
+    use super::stream_is_fatal;
+
+    #[test]
+    fn test_stream_extract_lines() {
+        let mut carry = String::new();
+
+        /* empty carry, quiet tick */
+        assert!(stream_extract_lines(&mut carry, false).is_empty());
+
+        /* one complete line plus a partial */
+        carry.push_str("ERROR: whole line\npartial");
+        assert_eq!(
+            stream_extract_lines(&mut carry, true),
+            ["ERROR: whole line"]
+        );
+        assert_eq!(carry, "partial");
+
+        /* the partial is not flushed while data keeps arriving */
+        assert!(stream_extract_lines(&mut carry, true).is_empty());
+        assert_eq!(carry, "partial");
+
+        /* a line split across reads is reassembled */
+        carry.push_str(" continued\nnext");
+        assert_eq!(
+            stream_extract_lines(&mut carry, true),
+            ["partial continued"]
+        );
+        assert_eq!(carry, "next");
+
+        /* a stale partial flushes on a quiet tick, exactly once */
+        assert_eq!(stream_extract_lines(&mut carry, false), ["next"]);
+        assert!(carry.is_empty());
+        assert!(stream_extract_lines(&mut carry, false).is_empty());
+
+        /* multiple lines per chunk, blank lines forwarded */
+        carry.push_str("a\n\nb\ntail");
+        assert_eq!(stream_extract_lines(&mut carry, true), ["a", "", "b"]);
+        assert_eq!(carry, "tail");
+        carry.clear();
+
+        /* multi-byte UTF-8 split across reads stays on char boundaries */
+        carry.push_str("caf");
+        assert!(stream_extract_lines(&mut carry, true).is_empty());
+        carry.push_str("\u{e9}\n");
+        assert_eq!(stream_extract_lines(&mut carry, true), ["caf\u{e9}"]);
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn test_stream_is_fatal() {
+        let fatal = ["noise".to_string(), "ERROR: Arena READ access".to_string()];
+        assert!(stream_is_fatal(&fatal));
+
+        /* the prefix only counts at the start of a line */
+        let glued = ["no task dataERROR: Arena READ access".to_string()];
+        assert!(!stream_is_fatal(&glued));
+        assert!(!stream_is_fatal(&[]));
+    }
+}

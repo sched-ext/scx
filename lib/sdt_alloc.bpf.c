@@ -41,7 +41,7 @@ __hidden void scx_arena_subprog_init(void)
 	if (scx_arena_verify_once)
 		return;
 
-	scx_err_loc("arena pointer %p", &arena);
+	scx_err("IGN: arena pointer %p", &arena);
 	scx_arena_verify_once = true;
 }
 
@@ -579,7 +579,7 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 	int ret;
 
 	if (!alloc) {
-		scx_err_loc("No allocator found\n");
+		scx_err_loc("No allocator found");
 		return (u64)NULL;
 	}
 
@@ -660,7 +660,7 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 
 	if (alloc_bytes > scx_static.max_alloc_bytes) {
 		bpf_spin_unlock(&alloc_lock);
-		scx_err_loc("invalid request %ld, max is %ld\n", alloc_bytes,
+		scx_err_loc("invalid request %ld, max is %ld", alloc_bytes,
 			      scx_static.max_alloc_bytes);
 		return (u64)NULL;
 	}
