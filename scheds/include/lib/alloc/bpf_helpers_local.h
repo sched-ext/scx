@@ -6,8 +6,8 @@
  * It assumes the standard <bpf/bpf_helpers.h> has already been included.
  */
 
-extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const void *args,
-				   __u32 len__sz, void *aux__prog) __weak __ksym;
+extern int bpf_stream_vprintk(int stream_id, const char *fmt__str, const void *args,
+			      __u32 len__sz) __weak __ksym;
 
 #ifdef bpf_stream_printk
 #undef bpf_stream_printk
@@ -17,7 +17,7 @@ extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const vo
 ({											\
 	int ___ret = 0;									\
 											\
-	if (bpf_ksym_exists(bpf_stream_vprintk_impl)) {				\
+	if (bpf_ksym_exists(bpf_stream_vprintk)) {				\
 		static const char ___fmt[] = fmt;					\
 		unsigned long long ___param[___bpf_narg(args)];				\
 											\
@@ -26,8 +26,8 @@ extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const vo
 		___bpf_fill(___param, args);						\
 		_Pragma("GCC diagnostic pop")						\
 											\
-		___ret = bpf_stream_vprintk_impl(stream_id, ___fmt, ___param,		\
-						 sizeof(___param), NULL);		\
+		___ret = bpf_stream_vprintk(stream_id, ___fmt, ___param,		\
+					    sizeof(___param));				\
 	}										\
 											\
 	___ret;										\
