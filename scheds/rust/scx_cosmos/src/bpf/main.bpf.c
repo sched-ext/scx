@@ -268,8 +268,9 @@ struct {
 } gpu_node_map SEC(".maps");
 
 /*
- * Process TGID -> NUMA node mapping for GPU tasks (updated from userspace via
- * NVML). Entries are removed when the process is no longer using a GPU.
+ * Process TGID -> NUMA node mapping for GPU workload tasks. NVML identifies
+ * GPU processes, and userspace may include peer processes from the same
+ * workload cgroup.
  */
 #define MAX_GPU_PIDS	8192
 
@@ -281,8 +282,8 @@ struct {
 } gpu_pid_map SEC(".maps");
 
 /*
- * Look up the preferred NUMA node for a process TGID from the
- * userspace-provided NVML GPU process list. Returns a node id or a negative
+ * Look up the preferred NUMA node for a process TGID from the userspace-
+ * provided GPU workload list. Returns a node id or a negative
  * error.
  */
 static int gpu_node_by_tgid(u32 tgid)
@@ -1152,7 +1153,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * If the task's TGID is in gpu_pid_map (NVML GPU process), prefer the
+	 * If the task's TGID is in gpu_pid_map (GPU workload process), prefer the
 	 * GPU NUMA node. If we're on a different node, migrate to the GPU
 	 * node.
 	 */
