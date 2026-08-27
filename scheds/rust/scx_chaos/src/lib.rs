@@ -167,6 +167,7 @@ pub struct Scheduler {
     _arena: HeapAllocator<ArenaAllocator>,
     _struct_ops: libbpf_rs::Link,
     _links: Vec<Link>,
+    _arenalib: ArenaLib,
     stats_server: StatsServer<(), Metrics>,
 
     // Fields are dropped in declaration order, this must be last as arena holds a reference to the
@@ -276,7 +277,7 @@ impl Builder<'_> {
         Ok(links)
     }
 
-    fn load_skel(&self) -> Result<Pin<Rc<SkelWithObject>>> {
+    fn load_skel(&self) -> Result<(Pin<Rc<SkelWithObject>>, ArenaLib)> {
         let mut out: Rc<MaybeUninit<SkelWithObject>> = Rc::new_uninit();
         let uninit_skel = Rc::get_mut(&mut out).expect("brand new rc should be unique");
 
@@ -448,8 +449,7 @@ impl Builder<'_> {
         scx_p2dq::init_skel!(&mut skel, topo);
 
         let task_size = std::mem::size_of::<types::task_p2dq>();
-        let arenalib = ArenaLib::init(skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
-        arenalib.setup()?;
+        let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
 
         let out = unsafe {
             // SAFETY: initialising field by field. open_object is already "initialised" (it's
@@ -462,7 +462,7 @@ impl Builder<'_> {
             Pin::new_unchecked(out.assume_init())
         };
 
-        Ok(out)
+        Ok((out, arenalib))
     }
 }
 
@@ -470,7 +470,7 @@ impl<'a> TryFrom<Builder<'a>> for Scheduler {
     type Error = anyhow::Error;
 
     fn try_from(b: Builder<'a>) -> Result<Scheduler> {
-        let skel = b.load_skel()?;
+        let (skel, arenalib) = b.load_skel()?;
 
         let arena = HeapAllocator::new(ArenaAllocator(skel.clone()));
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
@@ -486,6 +486,7 @@ impl<'a> TryFrom<Builder<'a>> for Scheduler {
             _arena: arena,
             _struct_ops: struct_ops,
             _links: links,
+            _arenalib: arenalib,
             stats_server,
             skel,
         })

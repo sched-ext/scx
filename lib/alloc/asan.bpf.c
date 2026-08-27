@@ -463,7 +463,7 @@ __hidden __noasan int asan_init(struct asan_init_args *args)
 		&arena, (void __arena *)__asan_shadow_memory_dynamic_address,
 		shadow_pages, NUMA_NO_NODE, 0);
 	if (!shadowmap) {
-		arena_stderr("Could not allocate shadow map\n");
+		arena_stderr("Could not allocate shadow map");
 		return -ENOMEM;
 	}
 
