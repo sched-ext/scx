@@ -16,7 +16,7 @@
 struct scx_task_map_val {
 	union sdt_id		tid;
 	__u64			tptr;
-	struct sdt_data __arena	*data;
+	void __arena		*data;
 };
 
 struct {
@@ -31,8 +31,8 @@ struct scx_allocator scx_task_allocator;
 __hidden
 void __arena *scx_task_alloc(struct task_struct *p)
 {
-	struct sdt_data __arena *data = NULL;
 	struct scx_task_map_val *mval;
+	void __arena *data;
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -47,17 +47,17 @@ void __arena *scx_task_alloc(struct task_struct *p)
 		return NULL;
 	}
 
-	mval->tid = data->tid;
+	mval->tid = sdt_tailer(&scx_task_allocator, data)->tid;
 	mval->tptr = (__u64) p;
 	mval->data = data;
 
-	return (void __arena *)data->payload;
+	return data;
 }
 
 __hidden
-int scx_task_init(__u64 data_size)
+int scx_task_init(__u64 data_size, __u64 align)
 {
-	return scx_alloc_init(&scx_task_allocator, data_size);
+	return scx_alloc_init(&scx_task_allocator, data_size, align);
 }
 
 __hidden
@@ -71,7 +71,7 @@ void __arena *__scx_task_data(struct task_struct *p)
 	if (unlikely(!mval || !mval->data))
 		return NULL;
 
-	return (void __arena *)mval->data->payload;
+	return mval->data;
 }
 
 __hidden
@@ -114,7 +114,7 @@ __hidden
 void scx_task_free_rcu(struct task_struct *p)
 {
 	struct scx_task_map_val *mval;
-	struct sdt_data __arena *data;
+	void __arena *data;
 
 	scx_arena_subprog_init();
 
@@ -122,11 +122,11 @@ void scx_task_free_rcu(struct task_struct *p)
 	if (unlikely(!mval))
 		return;
 
-	data = (struct sdt_data __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
+	data = (void __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
 	if (unlikely(!data))
 		return;
 
-	scx_urcu_free(&scx_task_urcu, data);
+	scx_urcu_free(&scx_task_urcu, &scx_task_allocator, data);
 }
 
 /* scx_urcu driver programs, discovered by name and run by the userspace side */

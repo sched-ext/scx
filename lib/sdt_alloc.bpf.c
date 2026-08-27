@@ -291,7 +291,7 @@ static int pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
 
 /* initialize the whole thing, maybe misnomer */
 __hidden int
-scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
+scx_alloc_init(struct scx_allocator *alloc, __u64 data_size, __u64 align)
 {
 	size_t min_chunk_size;
 	int ret;
@@ -321,9 +321,15 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 			return -ENOMEM;
 	}
 
-	/* Wrap data into a descriptor and word align. */
+	if (!align)
+		align = 8;
+	if (unlikely(align < 8 || (align & (align - 1)))) {
+		scx_err_loc("invalid alignment %llu", align);
+		return -EINVAL;
+	}
+
 	data_size += sizeof(struct sdt_data);
-	data_size = round_up(data_size, 8);
+	data_size = round_up(data_size, align);
 
 	/*
 	 * Ensure we allocate large enough chunks from the arena to avoid excessive
@@ -399,7 +405,7 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 	sdt_desc_t * __arena *desc_children;
 	struct sdt_chunk __arena *chunk;
 	sdt_desc_t *desc;
-	struct sdt_data __arena *data;
+	void __arena *data;
 	__u64 level, shift, pos;
 	__u64 lv_pos[SDT_TASK_LEVELS];
 	int ret;
@@ -453,13 +459,16 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 	pos = idx & mask;
 	data = chunk->data[pos];
 	if (likely(data)) {
-		*data = (struct sdt_data) {
-			.tid.genn = data->tid.genn + 1,
+		struct sdt_data __arena *tailer = sdt_tailer(alloc, data);
+		__u64 __arena *words = data;
+
+		*tailer = (struct sdt_data) {
+			.tid.genn = tailer->tid.genn + 1,
 		};
 
 		/* Zero out one word at a time. */
 		for (i = zero; i < (alloc->pool.elem_size - sizeof(struct sdt_data)) / 8 && can_loop; i++) {
-			data->payload[i] = 0;
+			words[i] = 0;
 		}
 	}
 
@@ -543,7 +552,8 @@ static sdt_desc_t * desc_find_empty(sdt_desc_t *desc,
 	return desc;
 }
 
-static void scx_alloc_finish(struct sdt_data __arena *data, __u64 idx)
+static void scx_alloc_finish(struct scx_allocator *alloc, void __arena *data,
+			     __u64 idx)
 {
 	bpf_spin_lock(&alloc_lock);
 
@@ -554,7 +564,7 @@ static void scx_alloc_finish(struct sdt_data __arena *data, __u64 idx)
 
 	bpf_spin_unlock(&alloc_lock);
 
-	data->tid.idx = idx;
+	sdt_tailer(alloc, data)->tid.idx = idx;
 }
 
 /* global so loop callers don't explode the verifier insn budget */
@@ -562,7 +572,7 @@ __noinline
 u64 scx_alloc_internal(struct scx_allocator *alloc)
 {
 	struct scx_alloc_stack __arena *stack = prealloc_stack;
-	struct sdt_data __arena *data = NULL;
+	void __arena *data = NULL;
 	struct sdt_chunk __arena *chunk;
 	sdt_desc_t *desc;
 	__u64 idx, pos;
@@ -615,7 +625,7 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 
 	chunk->data[pos] = data;
 
-	scx_alloc_finish(data, idx);
+	scx_alloc_finish(alloc, data, idx);
 
 	return (u64)data;
 }
@@ -1487,8 +1497,9 @@ int scx_urcu_pending(struct scx_urcu *urcu)
 }
 
 __hidden
-void scx_urcu_free(struct scx_urcu *urcu, struct sdt_data __arena *data)
+void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc, void __arena *payload)
 {
+	struct sdt_data __arena *data = sdt_tailer(alloc, payload);
 	u32 side, i;
 
 	scx_arena_subprog_init();

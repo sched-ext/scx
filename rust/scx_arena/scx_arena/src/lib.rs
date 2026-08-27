@@ -24,6 +24,15 @@ use anyhow::Result;
 use libbpf_rs::libbpf_sys;
 use libbpf_rs::MapCore as _;
 
+/// Cacheline size assumed by the arena allocator's alignment parameter.
+/// Mirrors scheds/include/lib/const-defs.h, keep in sync.
+#[cfg(target_arch = "s390x")]
+pub const CACHELINE_SIZE: usize = 256;
+#[cfg(target_arch = "powerpc64")]
+pub const CACHELINE_SIZE: usize = 128;
+#[cfg(not(any(target_arch = "s390x", target_arch = "powerpc64")))]
+pub const CACHELINE_SIZE: usize = 64;
+
 const MEMBARRIER_CMD_GLOBAL: libc::c_long = 1;
 const URCU_DOORBELL: &str = "scx_urcu_doorbell";
 const URCU_MIN_INTERVAL: Duration = Duration::from_millis(1);

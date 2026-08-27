@@ -108,6 +108,7 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     let mut args = types::arena_init_args {
         static_pages: STATIC_ALLOC_PAGES_GRANULARITY,
         task_ctx_size: TASK_SIZE,
+        task_ctx_align: 0,
     };
 
     let input = ProgramInput {

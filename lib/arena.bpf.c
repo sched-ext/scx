@@ -45,7 +45,7 @@ int arena_init(struct arena_init_args *args)
 		return ret;
 	}
 
-	ret = scx_task_init(args->task_ctx_size);
+	ret = scx_task_init(args->task_ctx_size, args->task_ctx_align);
 	if (ret) {
 		bpf_printk("scx_task_init failed with %d", ret);
 		return ret;

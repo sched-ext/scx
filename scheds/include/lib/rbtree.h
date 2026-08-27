@@ -15,7 +15,6 @@ struct rbnode;
 typedef struct rbnode __arena rbnode_t;
 
 struct rbnode {
-	union sdt_id tid;
 	rbnode_t *parent;
 	union {
 		struct {
@@ -65,7 +64,6 @@ enum rbtree_insert_mode {
 };
 
 struct rbtree {
-	union sdt_id tid;
 	rbnode_t *root;
 	rbnode_t *freelist;
 	enum rbtree_alloc alloc;

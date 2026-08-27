@@ -25,12 +25,12 @@
 
 /*
  * Cgroup BPF map entry pointing to the data area allocated in arena. The
- * allocation's identity lives in data->tid: the pointer is the single word that
- * alloc and free race on.
+ * allocation's identity lives in its tailer: the pointer is the single word
+ * that alloc and free race on.
  */
 struct scx_cgrp_map_val {
 	__u64			cptr;
-	struct sdt_data __arena	*data;
+	void __arena		*data;
 };
 
 struct {
@@ -43,16 +43,16 @@ struct {
 struct scx_allocator scx_cgrp_allocator;
 
 __hidden
-int scx_cgrp_init(__u64 data_size)
+int scx_cgrp_init(__u64 data_size, __u64 align)
 {
-	return scx_alloc_init(&scx_cgrp_allocator, data_size);
+	return scx_alloc_init(&scx_cgrp_allocator, data_size, align);
 }
 
 __hidden
 void __arena *scx_cgrp_alloc(struct cgroup *cgrp)
 {
-	struct sdt_data __arena *data;
 	struct scx_cgrp_map_val *mval;
+	void __arena *data;
 	__u64 old;
 
 	mval = bpf_cgrp_storage_get(&scx_cgrp_map, cgrp, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -61,9 +61,9 @@ void __arena *scx_cgrp_alloc(struct cgroup *cgrp)
 		return NULL;
 	}
 
-	data = (struct sdt_data __arena *)READ_ONCE(*(__u64 *)&mval->data);
+	data = (void __arena *)READ_ONCE(*(__u64 *)&mval->data);
 	if (unlikely(data))
-		return (void __arena *)data->payload;
+		return data;
 
 	data = scx_alloc(&scx_cgrp_allocator);
 	if (unlikely(!data)) {
@@ -74,13 +74,13 @@ void __arena *scx_cgrp_alloc(struct cgroup *cgrp)
 	/* racing allocs publish with cmpxchg, the loser uses the winner's */
 	old = __sync_val_compare_and_swap((__u64 *)&mval->data, 0, (__u64)data);
 	if (unlikely(old)) {
-		scx_alloc_free_idx(&scx_cgrp_allocator, data->tid.idx);
-		data = (struct sdt_data __arena *)old;
+		scx_free(&scx_cgrp_allocator, data);
+		data = (void __arena *)old;
 	} else {
 		mval->cptr = (__u64)cgrp;
 	}
 
-	return (void __arena *)data->payload;
+	return data;
 }
 
 /*
@@ -91,7 +91,6 @@ void __arena *scx_cgrp_alloc(struct cgroup *cgrp)
 __hidden
 void __arena *scx_cgrp_data(struct cgroup *cgrp)
 {
-	struct sdt_data __arena *data;
 	struct scx_cgrp_map_val *mval;
 
 	scx_arena_subprog_init();
@@ -100,11 +99,7 @@ void __arena *scx_cgrp_data(struct cgroup *cgrp)
 	if (unlikely(!mval))
 		return NULL;
 
-	data = (struct sdt_data __arena *)READ_ONCE(*(__u64 *)&mval->data);
-	if (unlikely(!data))
-		return NULL;
-
-	return (void __arena *)data->payload;
+	return (void __arena *)READ_ONCE(*(__u64 *)&mval->data);
 }
 
 /*
@@ -115,8 +110,8 @@ void __arena *scx_cgrp_data(struct cgroup *cgrp)
 __hidden
 void scx_cgrp_free(struct cgroup *cgrp)
 {
-	struct sdt_data __arena *data;
 	struct scx_cgrp_map_val *mval;
+	void __arena *data;
 
 	scx_arena_subprog_init();
 
@@ -124,11 +119,11 @@ void scx_cgrp_free(struct cgroup *cgrp)
 	if (unlikely(!mval))
 		return;
 
-	data = (struct sdt_data __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
+	data = (void __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
 	if (unlikely(!data))
 		return;
 
-	scx_alloc_free_idx(&scx_cgrp_allocator, data->tid.idx);
+	scx_free(&scx_cgrp_allocator, data);
 }
 
 static struct scx_urcu scx_cgrp_urcu;
@@ -141,8 +136,8 @@ static struct scx_urcu scx_cgrp_urcu;
 __hidden
 void scx_cgrp_free_rcu(struct cgroup *cgrp)
 {
-	struct sdt_data __arena *data;
 	struct scx_cgrp_map_val *mval;
+	void __arena *data;
 
 	scx_arena_subprog_init();
 
@@ -150,11 +145,11 @@ void scx_cgrp_free_rcu(struct cgroup *cgrp)
 	if (unlikely(!mval))
 		return;
 
-	data = (struct sdt_data __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
+	data = (void __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
 	if (unlikely(!data))
 		return;
 
-	scx_urcu_free(&scx_cgrp_urcu, data);
+	scx_urcu_free(&scx_cgrp_urcu, &scx_cgrp_allocator, data);
 }
 
 /* scx_urcu driver programs, discovered by name and run by the userspace side */

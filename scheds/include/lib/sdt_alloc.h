@@ -10,8 +10,22 @@
 
 #include <bpf_arena_common.bpf.h>
 #include <bpf_arena_spin_lock.h>
-#include "sdt_task_defs.h"
+
+#else /* __BPF__ */
+
+/* For userspace programs, __arena is a no-op. */
+#ifndef __arena
+#define __arena
 #endif
+
+/* Userspace only carries pointers to arena spinlocks. */
+struct __qspinlock;
+#define arena_spinlock_t struct __qspinlock
+
+#endif /* __BPF__ */
+
+#include "sdt_task_defs.h"
+#include "const-defs.h"
 
 struct scx_stk_seg;
 typedef struct scx_stk_seg __arena scx_stk_seg_t;
@@ -60,14 +74,32 @@ struct scx_urcu {
 
 void scx_arena_subprog_init(void);
 
-int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size);
+int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size, __u64 align);
 u64 scx_alloc_internal(struct scx_allocator *alloc);
 int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 
-#define scx_alloc(alloc) ((struct sdt_data __arena *)scx_alloc_internal((alloc)))
+#define scx_alloc(alloc) ((void __arena *)scx_alloc_internal((alloc)))
+
+/*
+ * The metadata of the allocation holding @payload. It trails the payload inside
+ * the element so that the payload starts at the element's alignment boundary.
+ */
+static inline struct sdt_data __arena *sdt_tailer(struct scx_allocator *alloc,
+						  void __arena *payload)
+{
+	return (struct sdt_data __arena *)
+		((__u64)payload + alloc->pool.elem_size - sizeof(struct sdt_data));
+}
+
+/* free by payload pointer, the tailer carries the index */
+static inline int scx_free(struct scx_allocator *alloc, void __arena *payload)
+{
+	return scx_alloc_free_idx(alloc, sdt_tailer(alloc, payload)->tid.idx);
+}
 
 int scx_urcu_pending(struct scx_urcu *urcu);
-void scx_urcu_free(struct scx_urcu *urcu, struct sdt_data __arena *data);
+void scx_urcu_free(struct scx_urcu *urcu, struct scx_allocator *alloc,
+		   void __arena *payload);
 int scx_urcu_reclaim(struct scx_urcu *urcu, struct scx_allocator *alloc);
 
 u64 scx_static_alloc_internal(size_t bytes, size_t alignment);

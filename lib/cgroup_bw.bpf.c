@@ -17,8 +17,6 @@
 extern int scx_cgroup_bw_enqueue_cb(u64 taskc);
 
 enum scx_cgroup_consts {
-	/* cache line size of an architecture */
-	SCX_CACHELINE_SIZE		= 64,
 	/* clock boottime constant */
 	CBW_CLOCK_BOOTTIME		= 7,
 	/* replenish period in nsec: 100 msec */
