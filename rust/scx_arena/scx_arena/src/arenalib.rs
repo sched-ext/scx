@@ -30,26 +30,27 @@ use libbpf_rs::ProgramMut;
 /// Maximum length of CPU mask supported by the library in bits.
 const MAX_CPU_SUPPORTED: usize = 640;
 
-/// Holds state related to BPF arenas in the program.
+/// Live BPF arena library state. Returned by setup() and must be kept alive
+/// for as long as the scheduler instance uses the arena: dropping it stops
+/// and joins the library's background threads.
+#[must_use]
 #[derive(Debug)]
-pub struct ArenaLib<'a> {
-    task_size: usize,
-    task_align: usize,
-    obj: &'a mut Object,
+pub struct ArenaLib {
+    _urcu: Option<crate::Daemon>,
 }
 
-impl<'a> ArenaLib<'a> {
+impl ArenaLib {
     /// Maximum CPU mask size, derived from MAX_CPU_SUPPORTED.
     const MAX_CPU_ARRSZ: usize = (MAX_CPU_SUPPORTED + 63) / 64;
 
     /// Amount of pages allocated at once form the BPF map. by the static stack allocator.
     const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 8;
 
-    fn run_prog_by_name(&self, name: &str, input: ProgramInput) -> Result<i32> {
+    fn run_prog_by_name(obj: &Object, name: &str, input: ProgramInput) -> Result<i32> {
         let c_name = CString::new(name)?;
         let ptr = unsafe {
             libbpf_sys::bpf_object__find_program_by_name(
-                self.obj.as_libbpf_object().as_ptr(),
+                obj.as_libbpf_object().as_ptr(),
                 c_name.as_ptr(),
             )
         };
@@ -69,14 +70,14 @@ impl<'a> ArenaLib<'a> {
     }
 
     /// Set up basic library state.
-    fn setup_arena(&self) -> Result<()> {
+    fn setup_arena(obj: &Object, task_size: usize, task_align: usize) -> Result<()> {
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
         let mut args = types::arena_init_args {
             static_pages: Self::STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
-            task_ctx_size: self.task_size as c_ulong,
-            task_ctx_align: self.task_align as c_ulong,
+            task_ctx_size: task_size as c_ulong,
+            task_ctx_align: task_align as c_ulong,
         };
 
         let input = ProgramInput {
@@ -89,7 +90,7 @@ impl<'a> ArenaLib<'a> {
             ..Default::default()
         };
 
-        let ret = self.run_prog_by_name("arena_init", input)?;
+        let ret = Self::run_prog_by_name(obj, "arena_init", input)?;
         if ret != 0 {
             bail!("Could not initialize arenas, setup_arenas returned {}", ret);
         }
@@ -97,7 +98,7 @@ impl<'a> ArenaLib<'a> {
         Ok(())
     }
 
-    fn setup_topology_node(&self, mask: &[u64], id: usize) -> Result<()> {
+    fn setup_topology_node(obj: &Object, mask: &[u64], id: usize) -> Result<()> {
         let mut args = types::arena_alloc_mask_args {
             bitmap: 0 as c_ulong,
         };
@@ -117,7 +118,7 @@ impl<'a> ArenaLib<'a> {
             ..Default::default()
         };
 
-        let ret = self.run_prog_by_name("arena_alloc_mask", input)?;
+        let ret = Self::run_prog_by_name(obj, "arena_alloc_mask", input)?;
 
         if ret != 0 {
             bail!(
@@ -151,7 +152,7 @@ impl<'a> ArenaLib<'a> {
             ..Default::default()
         };
 
-        let ret = self.run_prog_by_name("arena_topology_node_init", input)?;
+        let ret = Self::run_prog_by_name(obj, "arena_topology_node_init", input)?;
         if ret != 0 {
             bail!("arena_topology_node_init returned {}", ret);
         }
@@ -168,7 +169,7 @@ impl<'a> ArenaLib<'a> {
     ///
     /// NOTE: rust/scx_arena/selftests/src/main.rs::setup_topology() contains
     /// equivalent logic and must be kept in sync with this function.
-    fn setup_topology_max_children(&self, topo: &Topology) -> Result<()> {
+    fn setup_topology_max_children(obj: &Object, topo: &Topology) -> Result<()> {
         // Compute the maximum number of children at each topology level.
         // TOPO_TOP  (0): children are NUMA nodes
         // TOPO_NODE (1): children are LLCs
@@ -203,7 +204,7 @@ impl<'a> ArenaLib<'a> {
             ..Default::default()
         };
 
-        let ret = self.run_prog_by_name("arena_topology_init", input)?;
+        let ret = Self::run_prog_by_name(obj, "arena_topology_init", input)?;
         if ret != 0 {
             bail!("arena_topology_init returned {}", ret);
         }
@@ -211,21 +212,22 @@ impl<'a> ArenaLib<'a> {
         Ok(())
     }
 
-    fn setup_topology(&self) -> Result<()> {
+    fn setup_topology(obj: &Object) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
 
-        self.setup_topology_max_children(&topo)?;
+        Self::setup_topology_max_children(obj, &topo)?;
 
         // Top level - ID 0 is fine as there's only one top-level node
-        self.setup_topology_node(topo.span.as_raw_slice(), 0)?;
+        Self::setup_topology_node(obj, topo.span.as_raw_slice(), 0)?;
 
         for (node_id, node) in topo.nodes {
-            self.setup_topology_node(node.span.as_raw_slice(), node_id)?;
+            Self::setup_topology_node(obj, node.span.as_raw_slice(), node_id)?;
         }
 
         // LLCs need to use their actual LLC ID for proper indexing in topo_nodes
         for (llc_id, llc) in topo.all_llcs {
-            self.setup_topology_node(
+            Self::setup_topology_node(
+                obj,
                 Arc::<Llc>::into_inner(llc)
                     .expect("missing llc")
                     .span
@@ -235,7 +237,8 @@ impl<'a> ArenaLib<'a> {
         }
 
         for (core_id, core) in topo.all_cores {
-            self.setup_topology_node(
+            Self::setup_topology_node(
+                obj,
                 Arc::<Core>::into_inner(core)
                     .expect("missing core")
                     .span
@@ -246,37 +249,31 @@ impl<'a> ArenaLib<'a> {
         for (_, cpu) in topo.all_cpus {
             let mut mask = [0; Self::MAX_CPU_ARRSZ - 1];
             mask[cpu.id / 64] |= 1 << (cpu.id % 64);
-            self.setup_topology_node(&mask, cpu.id)?;
+            Self::setup_topology_node(obj, &mask, cpu.id)?;
         }
 
         Ok(())
     }
 
-    /// Create an Arenalib object This call only initializes the Rust side of Arenalib.
+    /// Set up the BPF arena library state and, when the object carries the
+    /// scx_urcu doorbell, spawn the reclaim daemon. The returned ArenaLib
+    /// owns the library's background threads.
     /// @task_align: task ctx element alignment, 0 for word alignment.
-    pub fn init(
-        obj: &'a mut Object,
+    pub fn setup(
+        obj: &Object,
         task_size: usize,
         task_align: usize,
         nr_cpus: usize,
-    ) -> Result<Self> {
+    ) -> Result<ArenaLib> {
         if nr_cpus >= MAX_CPU_SUPPORTED {
             bail!("Scheduler specifies too many CPUs");
         }
 
-        Ok(Self {
-            task_size,
-            task_align,
-            obj,
+        Self::setup_arena(obj, task_size, task_align)?;
+        Self::setup_topology(obj)?;
+
+        Ok(ArenaLib {
+            _urcu: crate::urcu_spawn(obj)?,
         })
-    }
-
-    /// Set up the BPF arena library state and, when the object carries the
-    /// scx_urcu doorbell, spawn the detached reclaim daemon.
-    pub fn setup(&self) -> Result<()> {
-        self.setup_arena()?;
-        self.setup_topology()?;
-
-        crate::urcu_spawn(self.obj)
     }
 }

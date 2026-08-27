@@ -533,11 +533,12 @@ fn main(opts: CliOpts) -> Result<()> {
 
     let mut open_object = MaybeUninit::uninit();
     loop {
+        /* declared before sched to drop, and join, after sched detaches */
+        let _arenalib;
         let mut sched =
             Scheduler::init(&opts.sched, &opts.libbpf, &mut open_object, &opts.log_level)?;
         let task_size = std::mem::size_of::<types::task_p2dq>();
-        let arenalib = ArenaLib::init(sched.skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
-        arenalib.setup()?;
+        _arenalib = ArenaLib::setup(sched.skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
 
         sched.start()?;
 
