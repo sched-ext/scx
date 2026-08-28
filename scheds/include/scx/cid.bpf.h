@@ -268,6 +268,171 @@ static __always_inline bool __cmask_test_and_clear(u32 cid, struct scx_cmask __a
 	return prev;
 }
 
+/* atomically or @mask into *@w, cmpxchg per the JIT constraint above */
+static __always_inline void __cmask_word_or(u64 __arena *w, u64 mask)
+{
+	u64 old, new;
+	u32 i;
+
+	bpf_for(i, 0, CMASK_CAS_TRIES) {
+		old = *w;
+		if ((old & mask) == mask)
+			return;
+		new = old | mask;
+		if (__sync_val_compare_and_swap(w, old, new) == old)
+			return;
+	}
+	scx_bpf_error("__cmask_word_or CAS exhausted");
+}
+
+/* atomically clear @mask bits in *@w, cmpxchg per the JIT constraint above */
+static __always_inline void __cmask_word_andnot(u64 __arena *w, u64 mask)
+{
+	u64 old, new;
+	u32 i;
+
+	bpf_for(i, 0, CMASK_CAS_TRIES) {
+		old = *w;
+		if (!(old & mask))
+			return;
+		new = old & ~mask;
+		if (__sync_val_compare_and_swap(w, old, new) == old)
+			return;
+	}
+	scx_bpf_error("__cmask_word_andnot CAS exhausted");
+}
+
+/**
+ * cmask_full_range - Test whether every cid in [@start, @start + @nr) is set
+ * @m: cmask to test
+ * @start: first cid of the range
+ * @nr: number of cids in the range
+ *
+ * The range is clamped to @m's active range first. True when no clamped bit is
+ * clear, including when the clamped range is empty.
+ */
+static __always_inline bool cmask_full_range(const struct scx_cmask __arena *m, u32 start,
+					     u32 nr)
+{
+	u64 end = (u64)start + nr;
+	u32 wbase = m->base / 64;
+	u32 first_wi, last_wi, first_bit, last_bit, last, i;
+
+	if (start < m->base)
+		start = m->base;
+	if (end > m->base + m->nr_cids)
+		end = m->base + m->nr_cids;
+	if (start >= end)
+		return true;
+	last = end - 1;
+
+	first_wi = start / 64 - wbase;
+	last_wi = last / 64 - wbase;
+	first_bit = start & 63;
+	last_bit = last & 63;
+
+	bpf_for(i, 0, CMASK_MAX_WORDS) {
+		u32 wi = first_wi + i;
+		u64 mask = ~0ULL;
+
+		if (wi > last_wi)
+			break;
+		if (wi == first_wi)
+			mask &= GENMASK_U64(63, first_bit);
+		if (wi == last_wi)
+			mask &= GENMASK_U64(last_bit, 0);
+		if ((m->bits[wi] & mask) != mask)
+			return false;
+	}
+	return true;
+}
+
+/**
+ * cmask_set_range - Set every cid in [@start, @start + @nr)
+ * @m: cmask to modify
+ * @start: first cid of the range
+ * @nr: number of cids in the range
+ *
+ * The range is clamped to @m's active range first. Words are updated with
+ * cmpxchg so concurrent updates of other bits sharing a word are never lost.
+ * The range as a whole does not transition atomically.
+ */
+static __always_inline void cmask_set_range(struct scx_cmask __arena *m, u32 start, u32 nr)
+{
+	u64 end = (u64)start + nr;
+	u32 wbase = m->base / 64;
+	u32 first_wi, last_wi, first_bit, last_bit, last, i;
+
+	if (start < m->base)
+		start = m->base;
+	if (end > m->base + m->nr_cids)
+		end = m->base + m->nr_cids;
+	if (start >= end)
+		return;
+	last = end - 1;
+
+	first_wi = start / 64 - wbase;
+	last_wi = last / 64 - wbase;
+	first_bit = start & 63;
+	last_bit = last & 63;
+
+	bpf_for(i, 0, CMASK_MAX_WORDS) {
+		u32 wi = first_wi + i;
+		u64 mask = ~0ULL;
+
+		if (wi > last_wi)
+			break;
+		if (wi == first_wi)
+			mask &= GENMASK_U64(63, first_bit);
+		if (wi == last_wi)
+			mask &= GENMASK_U64(last_bit, 0);
+		__cmask_word_or(&m->bits[wi], mask);
+	}
+}
+
+/**
+ * cmask_clear_range - Clear every cid in [@start, @start + @nr)
+ * @m: cmask to modify
+ * @start: first cid of the range
+ * @nr: number of cids in the range
+ *
+ * The range is clamped to @m's active range first. Words are updated with
+ * cmpxchg so concurrent updates of other bits sharing a word are never lost.
+ * The range as a whole does not transition atomically.
+ */
+static __always_inline void cmask_clear_range(struct scx_cmask __arena *m, u32 start, u32 nr)
+{
+	u64 end = (u64)start + nr;
+	u32 wbase = m->base / 64;
+	u32 first_wi, last_wi, first_bit, last_bit, last, i;
+
+	if (start < m->base)
+		start = m->base;
+	if (end > m->base + m->nr_cids)
+		end = m->base + m->nr_cids;
+	if (start >= end)
+		return;
+	last = end - 1;
+
+	first_wi = start / 64 - wbase;
+	last_wi = last / 64 - wbase;
+	first_bit = start & 63;
+	last_bit = last & 63;
+
+	bpf_for(i, 0, CMASK_MAX_WORDS) {
+		u32 wi = first_wi + i;
+		u64 mask = ~0ULL;
+
+		if (wi > last_wi)
+			break;
+		if (wi == first_wi)
+			mask &= GENMASK_U64(63, first_bit);
+		if (wi == last_wi)
+			mask &= GENMASK_U64(last_bit, 0);
+		__cmask_word_andnot(&m->bits[wi], mask);
+	}
+}
+
 static __always_inline void cmask_zero(struct scx_cmask __arena *m)
 {
 	u32 nr_words = CMASK_NR_WORDS(m->nr_cids), i;
