@@ -234,6 +234,22 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 	cmask_and(effective, cell_mask);
 
 	/*
+	 * An empty allowed mask means all of the task's cpus are offline. The
+	 * task cannot become runnable before a wakeup rewrites its affinity,
+	 * and the ops.set_cmask() the rewrite fires lands back here, so park
+	 * the task unassigned. Only ops.select_cid() runs before the rewrite on
+	 * that wakeup and can see the parked state, and it punts. An enqueue
+	 * that sees it is a bug and fails loudly on the invalid DSQ.
+	 */
+	if (cmask_empty(allowed)) {
+		if (enable_llc_awareness)
+			tctx->llc = LLC_INVALID;
+		tctx->dsq = DSQ_INVALID;
+		tctx->all_cell_cpus_allowed = false;
+		return 0;
+	}
+
+	/*
 	 * Set only after tctx->dsq matches it:
 	 * false => cid DSQ, true => cell DSQ.
 	 */
@@ -636,6 +652,15 @@ s32 BPF_STRUCT_OPS(mitosis_select_cid, struct task_struct *p, s32 prev_cid, u64 
 		return prev_cid;
 
 	if (!tctx->all_cell_cpus_allowed) {
+		/*
+		 * Empty means all of the task's cpus are offline and this very
+		 * wakeup is about to fix that: the affinity rewrite runs after
+		 * this callback and fires ops.set_cmask(). Any pick from here
+		 * would be discarded, return prev_cid untouched.
+		 */
+		if (cmask_empty(&tctx->allowed))
+			return prev_cid;
+
 		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
 		bool idle_cid_cleared = false;
 
@@ -1256,6 +1281,7 @@ void BPF_STRUCT_OPS(mitosis_set_cmask, struct task_struct *p, struct scx_cmask _
 		return;
 
 	cmask_copy(&tctx->allowed, cmask);
+	cmask_and(&tctx->allowed, topo_cids);
 	update_task_cmask(p, tctx);
 }
 
@@ -1318,6 +1344,7 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 		 * ops.set_cmask() keeps it in sync from here on.
 		 */
 		cmask_from_cpumask(&tctx->allowed, p->cpus_ptr);
+		cmask_and(&tctx->allowed, topo_cids);
 
 		/* Initialize LLC assignment fields */
 		if (enable_llc_awareness)
