@@ -5,7 +5,7 @@
  *
  * This header defines the 64-bit dispatch queue (DSQ) ID encoding
  * scheme for scx_nitosis, using type fields to distinguish between
- * per-CPU and cell+LLC domain queues. It includes helper functions to
+ * per-cid and cell+LLC domain queues. It includes helper functions to
  * construct, validate, and parse these DSQ IDs for queue management.
  */
 #pragma once
@@ -45,9 +45,9 @@
  *
  *   QTYPE encodes the queue type:
  *
- *     QTYPE = 0x1 -> Per-CPU Q
+ *     QTYPE = 0x1 -> Per-cid Q
  *       [31..28] [27 ..          ..        0]
- *       [ 0001 ] [          CPU#            ]
+ *       [ 0001 ] [          cid             ]
  *       [Q-TYPE:1]
  *
  *     QTYPE = 0x2 -> Cell+LLC Q
@@ -69,7 +69,7 @@
 #endif
 
 /* ---- Bitfield widths (bits) ---- */
-#define CPU_B 28
+#define CID_B 28
 #define LLC_B 16
 #define CELL_B 12
 #define TYPE_B 4
@@ -77,19 +77,19 @@
 #define RSVD_B 32
 
 /* Sum checks (in bits) */
-_Static_assert(CPU_B + TYPE_B == 32, "CPU layout low half must be 32 bits");
+_Static_assert(CID_B + TYPE_B == 32, "cid layout low half must be 32 bits");
 _Static_assert(LLC_B + CELL_B + TYPE_B == 32, "CELL+LLC layout low half must be 32 bits");
 _Static_assert(DATA_B + TYPE_B == 32, "Common layout low half must be 32 bits");
 
 typedef union {
 	u64 raw;
 
-	/* Per-CPU user DSQ */
+	/* Per-cid user DSQ */
 	struct {
-		u64 cpu : CPU_B;
+		u64 cid : CID_B;
 		u64 type : TYPE_B;
 		u64 rsvd : RSVD_B;
-	} cpu_dsq;
+	} cid_dsq;
 
 	/* Cell+LLC user DSQ */
 	struct {
@@ -123,7 +123,7 @@ typedef union {
 */
 #define DSQ_INVALID ((dsq_id_t){ 0 })
 
-_Static_assert(sizeof(((dsq_id_t){ 0 }).cpu_dsq) == sizeof(u64), "cpu view must be 8 bytes");
+_Static_assert(sizeof(((dsq_id_t){ 0 }).cid_dsq) == sizeof(u64), "cid view must be 8 bytes");
 _Static_assert(sizeof(((dsq_id_t){ 0 }).cell_llc_dsq) == sizeof(u64),
 	       "cell+LLC view must be 8 bytes");
 _Static_assert(sizeof(((dsq_id_t){ 0 }).user_dsq) == sizeof(u64),
@@ -138,12 +138,12 @@ _Static_assert(_Alignof(dsq_id_t) == sizeof(u64), "dsq_id_t must be 8-byte align
 /* DSQ type enumeration */
 enum dsq_type {
 	DSQ_TYPE_NONE,
-	DSQ_TYPE_CPU,
+	DSQ_TYPE_CID,
 	DSQ_TYPE_CELL_LLC,
 };
 
 /* Range guards */
-_Static_assert(MAX_CPUS <= (1u << CPU_B), "MAX_CPUS must fit in field");
+_Static_assert(MAX_CPUS <= (1u << CID_B), "MAX_CPUS must fit in field");
 _Static_assert(MAX_LLCS <= (1u << LLC_B), "MAX_LLCS must fit in field");
 _Static_assert(MAX_CELLS <= (1u << CELL_B), "MAX_CELLS must fit in field");
 _Static_assert(DSQ_TYPE_CELL_LLC < (1u << TYPE_B), "DSQ_TYPE_CELL_LLC must fit in field");
@@ -158,36 +158,36 @@ static inline bool is_user_dsq(dsq_id_t dsq_id)
 	return !dsq_id.builtin_dsq.builtin && dsq_id.user_dsq.type != DSQ_TYPE_NONE;
 }
 
-// Is this a per CPU DSQ?
-static inline bool is_cpu_dsq(dsq_id_t dsq_id)
+// Is this a per cid DSQ?
+static inline bool is_cid_dsq(dsq_id_t dsq_id)
 {
-	return is_user_dsq(dsq_id) && dsq_id.user_dsq.type == DSQ_TYPE_CPU;
+	return is_user_dsq(dsq_id) && dsq_id.user_dsq.type == DSQ_TYPE_CID;
 }
 
-// If this is a per cpu dsq, return the cpu
-static inline s32 get_cpu_from_dsq(dsq_id_t dsq_id)
+// If this is a per cid dsq, return the cid
+static inline s32 get_cid_from_dsq(dsq_id_t dsq_id)
 {
-	if (!is_cpu_dsq(dsq_id)) {
-		scx_bpf_error("trying to get cpu from non-cpu dsq: %llx", dsq_id.raw);
+	if (!is_cid_dsq(dsq_id)) {
+		scx_bpf_error("trying to get cid from non-cid dsq: %llx", dsq_id.raw);
 		return -EINVAL;
 	}
 
-	return dsq_id.cpu_dsq.cpu;
+	return dsq_id.cid_dsq.cid;
 }
 
 /* Helper functions to construct DSQ IDs */
-static inline dsq_id_t get_cpu_dsq_id(u32 cpu)
+static __always_inline dsq_id_t get_cid_dsq_id(u32 cid)
 {
-	// Check for valid CPU range, 0 indexed so >=.
-	if (cpu >= MAX_CPUS) {
-		scx_bpf_error("invalid cpu %u", cpu);
+	// Check for valid cid range, 0 indexed so >=.
+	if (cid >= MAX_CPUS) {
+		scx_bpf_error("invalid cid %u", cid);
 		return DSQ_INVALID;
 	}
 
-	return (dsq_id_t){ .cpu_dsq = { .cpu = cpu, .type = DSQ_TYPE_CPU } };
+	return (dsq_id_t){ .cid_dsq = { .cid = cid, .type = DSQ_TYPE_CID } };
 }
 
-static inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
+static __always_inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
 {
 	if (cell >= MAX_CELLS || llc >= MAX_LLCS) {
 		scx_bpf_error("cell %u or llc %u too large", cell, llc);

@@ -143,11 +143,11 @@ static inline void slice_shrink_on_enqueue(struct task_struct *curr,
  */
 static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struct cpu_ctx *cctx)
 {
-	dsq_id_t cpu_dsq = get_cpu_dsq_id(scx_bpf_task_cpu(p));
-	if (dsq_is_invalid(cpu_dsq))
+	dsq_id_t cid_dsq = get_cid_dsq_id(scx_bpf_task_cid(p));
+	if (dsq_is_invalid(cid_dsq))
 		return -1;
 
-	s32 nr_queued = scx_bpf_dsq_nr_queued(cpu_dsq.raw);
+	s32 nr_queued = scx_bpf_dsq_nr_queued(cid_dsq.raw);
 	if (nr_queued < 0) {
 		scx_bpf_error("scx_bpf_dsq_nr_queued failed: %d", nr_queued);
 		return -1;
@@ -159,7 +159,7 @@ static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struc
 	/*
 	 * Possible limitation: deeper queued task has lower avg runtime than head.
 	 */
-	struct task_struct *waiter = dsq_peek(cpu_dsq.raw);
+	struct task_struct *waiter = dsq_peek(cid_dsq.raw);
 	/* Raced with num queued above. Do nothing. */
 	if (!waiter)
 		return 0;

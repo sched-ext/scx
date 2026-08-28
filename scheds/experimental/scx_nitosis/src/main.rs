@@ -46,8 +46,8 @@ use scx_utils::init_libbpf_logging;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
-use scx_utils::scx_ops_load;
-use scx_utils::scx_ops_open;
+use scx_utils::scx_ops_cid_load;
+use scx_utils::scx_ops_cid_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
@@ -341,8 +341,6 @@ impl<'a> Scheduler<'a> {
 
         let topology = Topology::new().context("detecting system topology")?;
 
-        let nr_llc = topology.all_llcs.len().max(1);
-
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
             .obj_builder
@@ -354,7 +352,7 @@ impl<'a> Scheduler<'a> {
         );
 
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
-        let mut skel = scx_ops_open!(skel_builder, open_object, mitosis, open_opts)
+        let mut skel = scx_ops_cid_open!(skel_builder, open_object, mitosis, open_opts)
             .context("opening BPF skeleton")?;
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
@@ -386,14 +384,9 @@ impl<'a> Scheduler<'a> {
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
-        for cpu in topology.all_cpus.keys() {
-            rodata.all_cpus[cpu / 8] |= 1 << (cpu % 8);
-        }
 
         rodata.reject_multicpu_pinning = opts.reject_multicpu_pinning;
 
-        // Set nr_llc in rodata
-        rodata.nr_llc = nr_llc as u32;
         rodata.enable_llc_awareness = opts.enable_llc_awareness;
 
         rodata.enable_borrowing = opts.enable_borrowing;
@@ -405,11 +398,8 @@ impl<'a> Scheduler<'a> {
         }
 
         let mitosis_topology = MitosisTopology::new(&topology);
-        mitosis_topology
-            .apply(&mut skel)
-            .context("mitosis_topology.apply")?;
 
-        let mut skel = scx_ops_load!(skel, mitosis, uei).context("loading BPF skeleton")?;
+        let mut skel = scx_ops_cid_load!(skel, mitosis, uei).context("loading BPF skeleton")?;
 
         // Set up the arena allocators and topology.
         let task_size = std::mem::size_of::<types::task_ctx>();
