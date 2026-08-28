@@ -62,6 +62,7 @@ UEI_DEFINE(uei);
 struct cell __arena *cells;
 struct mitosis_topo __arena *topo;
 union shard_cmask __arena *idle_masks;
+union shard_cmask __arena *idle_smt_masks;
 struct scx_cmask __arena *topo_cids;
 /* Cell cmask generations, published in cell_masks and freed via scx_urcu */
 static struct scx_allocator cell_cmask_allocator;
@@ -457,57 +458,174 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
 }
 
 /*
+ * Claim @cid's idle bit in @im. Mirrors scx_idle_test_and_clear_cpu(): the
+ * core's range is cleared from the idle_smt mask whether or not the claim wins.
+ * The core is not wholly idle either way and a stale set range could trap the
+ * core-idle scans.
+ */
+static __always_inline bool claim_idle_cid_masks(struct mitosis_topo __arena *t, s32 cid,
+						  struct scx_cmask __arena *im)
+{
+	if (t->smt_active) {
+		s32 core = t->cid[cid].core_idx;
+		struct scx_cmask __arena *ism = &idle_smt_masks[t->cid[cid].shard_idx].cmask;
+
+		if (core >= 0)
+			cmask_clear_range(ism, t->core_cids[core].base,
+					  t->core_cids[core].nr);
+	}
+	return cmask_test_and_clear(cid, im);
+}
+
+/* the cid-form analog of scx_bpf_test_and_clear_cpu_idle() */
+static inline bool claim_idle_cid(s32 cid)
+{
+	return claim_idle_cid_masks(topo, cid, &idle_masks[topo->cid[cid].shard_idx].cmask);
+}
+
+/*
+ * Locate @prev_cid's shard when it falls inside the scan window, MAX_CPUS
+ * otherwise.
+ */
+static __always_inline u32 pick_prev_shard(struct mitosis_topo __arena *t,
+					   struct scx_cmask __arena *cand, u32 shard_base,
+					   u32 nr_shards, s32 prev_cid)
+{
+	if (prev_cid >= 0 && cmask_test(prev_cid, cand)) {
+		u32 ps = t->cid[prev_cid].shard_idx;
+
+		if (ps >= shard_base && ps < shard_base + nr_shards)
+			return ps;
+	}
+	return MAX_CPUS;
+}
+
+/*
+ * Scan rotation anchor: @prev_cid's shard when usable, otherwise a pseudo
+ * random shard so that no-prev scans, drain kicks for example, spread
+ * regardless of how narrow the window is.
+ */
+static __always_inline u32 pick_start_shard(u32 shard_base, u32 nr_shards, u32 pshard)
+{
+	if (pshard < MAX_CPUS)
+		return pshard;
+	return shard_base + bpf_get_prandom_u32() % nr_shards;
+}
+
+/*
+ * One scan pass over the shard index range [@shard_base, @shard_base +
+ * @nr_shards) rotated to start at @start_shard, intersecting each shard's idle
+ * mask (or idle_smt mask when @idle_core) with @cand and claiming with bounded
+ * retries. Returns the claimed cid, -EBUSY if nothing was claimed.
+ */
+static __always_inline s32 pick_idle_scan(struct mitosis_topo __arena *t,
+					  struct scx_cmask __arena *cand, u32 shard_base,
+					  u32 nr_shards, u32 start_shard, bool idle_core)
+{
+	u32 i;
+
+	bpf_for(i, 0, nr_shards) {
+		u32 si = shard_base + (start_shard - shard_base + i) % nr_shards;
+		struct scx_cmask __arena *im = &idle_masks[si].cmask;
+		struct scx_cmask __arena *scan;
+		u32 end, r;
+
+		if (idle_core)
+			scan = &idle_smt_masks[si].cmask;
+		else
+			scan = im;
+
+		end = scan->base + scan->nr_cids;
+		bpf_for(r, 0, IDLE_PICK_RETRIES) {
+			s32 cid = cmask_any_and_distribute(scan, cand);
+
+			if (cid < 0 || cid >= end)
+				break;
+			if (claim_idle_cid_masks(t, cid, im))
+				return cid;
+		}
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * Core-idle phase over one shard window: @prev_cid if its whole core is idle,
+ * then a scan of the idle_smt masks. No-op without SMT. A real subprog, the
+ * scan inlines a lot of state, see pick_idle_cid_partial().
+ */
+static __noinline s32 pick_idle_cid_cores(struct scx_cmask __arena *cand, u32 shard_base,
+					  u32 nr_shards, s32 prev_cid)
+{
+	struct mitosis_topo __arena *t = topo;
+	u32 pshard;
+
+	if (!nr_shards || !t->smt_active)
+		return -EBUSY;
+
+	pshard = pick_prev_shard(t, cand, shard_base, nr_shards, prev_cid);
+	if (pshard < MAX_CPUS) {
+		struct scx_cmask __arena *ism = &idle_smt_masks[pshard].cmask;
+		struct scx_cmask __arena *im = &idle_masks[pshard].cmask;
+
+		/* prev in a wholly idle core is the cheapest pick */
+		if (cmask_test(prev_cid, ism) && claim_idle_cid_masks(t, prev_cid, im))
+			return prev_cid;
+	}
+
+	return pick_idle_scan(t, cand, shard_base, nr_shards,
+			      pick_start_shard(shard_base, nr_shards, pshard), true);
+}
+
+/*
+ * Partial phase over one shard window: @prev_cid if idle, then a scan of the
+ * idle masks. A real subprog: inlining the scans into every caller blows the
+ * 512 byte stack limit once LLC awareness stacks a second pick level into
+ * select_cid.
+ */
+static __noinline s32 pick_idle_cid_partial(struct scx_cmask __arena *cand, u32 shard_base,
+					    u32 nr_shards, s32 prev_cid)
+{
+	struct mitosis_topo __arena *t = topo;
+	u32 pshard;
+
+	if (!nr_shards)
+		return -EBUSY;
+
+	pshard = pick_prev_shard(t, cand, shard_base, nr_shards, prev_cid);
+	if (pshard < MAX_CPUS) {
+		struct scx_cmask __arena *im = &idle_masks[pshard].cmask;
+
+		/* partially idle prev is the cheapest partial pick */
+		if (claim_idle_cid_masks(t, prev_cid, im))
+			return prev_cid;
+	}
+
+	return pick_idle_scan(t, cand, shard_base, nr_shards,
+			      pick_start_shard(shard_base, nr_shards, pshard), false);
+}
+
+/*
  * Claim an idle cid out of @cand within the shard index range [@shard_base,
  * @shard_base + @nr_shards). Idle state lives in per-shard windowed cmasks
- * maintained by ops.update_idle(), so the scan walks shards and intersects each
+ * maintained by ops.update_idle(), so the scans walk shards and intersect each
  * with @cand. Claims race with other pickers and with idle transitions.
- * cmask_test_and_clear() arbitrates and the scan is bounded. The rotation
- * starts at @prev_cid's shard when usable and at a pseudo random shard
- * otherwise, so picks spread regardless of how narrow the range is.
+ * cmask_test_and_clear() arbitrates and the scans are bounded.
+ *
+ * The phase order matches the cpu form: with SMT, a wholly idle core beats a
+ * partially idle @prev_cid, which beats any partially idle cid, all within one
+ * window at a time, see pick_idle_cid().
  *
  * Returns the claimed cid, -EBUSY if nothing idle was found.
  */
 static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand,
 						u32 shard_base, u32 nr_shards, s32 prev_cid)
 {
-	struct scx_cmask __arena *im;
-	u32 start_shard;
-	u32 i;
+	s32 cid = pick_idle_cid_cores(cand, shard_base, nr_shards, prev_cid);
 
-	if (!nr_shards)
-		return -EBUSY;
-
-	start_shard = shard_base + bpf_get_prandom_u32() % nr_shards;
-
-	/* Idle prev is the cheapest pick */
-	if (prev_cid >= 0 && cmask_test(prev_cid, cand)) {
-		u32 pshard = topo->cid[prev_cid].shard_idx;
-
-		if (pshard >= shard_base && pshard < shard_base + nr_shards) {
-			im = &idle_masks[pshard].cmask;
-			if (cmask_test_and_clear(prev_cid, im))
-				return prev_cid;
-			start_shard = pshard;
-		}
-	}
-
-	bpf_for(i, 0, nr_shards) {
-		u32 si = shard_base + (start_shard - shard_base + i) % nr_shards;
-		u32 end, r;
-
-		im = &idle_masks[si].cmask;
-		end = im->base + im->nr_cids;
-		bpf_for(r, 0, IDLE_PICK_RETRIES) {
-			s32 cid = cmask_any_and_distribute(im, cand);
-
-			if (cid < 0 || cid >= end)
-				break;
-			if (cmask_test_and_clear(cid, im))
-				return cid;
-		}
-	}
-
-	return -EBUSY;
+	if (cid >= 0)
+		return cid;
+	return pick_idle_cid_partial(cand, shard_base, nr_shards, prev_cid);
 }
 
 static __always_inline s32 pick_idle_cid(struct task_struct *p, s32 prev_cid,
@@ -524,10 +642,22 @@ static __always_inline s32 pick_idle_cid(struct task_struct *p, s32 prev_cid,
 
 	if (enable_llc_awareness && tctx->all_cell_cpus_allowed) {
 		s32 llc = choose_task_llc(tctx, prev_cid);
+		bool in_llc = llc < t->nr_llcs;
+		u32 lbase = 0, lnr = 0;
 
-		if (llc < t->nr_llcs) {
-			cid = pick_idle_cid_shards(&tctx->effective, t->llc_shards[llc].base,
-						   t->llc_shards[llc].nr, prev_cid);
+		if (in_llc) {
+			lbase = t->llc_shards[llc].base;
+			lnr = t->llc_shards[llc].nr;
+		}
+
+		/*
+		 * Exhaust the LLC window, core-idle then partial, before the
+		 * full range: a partially idle cpu in the task's LLC beats a
+		 * wholly idle core outside it. The builtin ladder orders the
+		 * other way, core-idle everywhere first.
+		 */
+		if (in_llc) {
+			cid = pick_idle_cid_shards(&tctx->effective, lbase, lnr, prev_cid);
 			if (cid >= 0)
 				return cid;
 		}
@@ -1544,7 +1674,7 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx, struct task_st
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 {
-	u32 nr_cids, nr_llcs = 0, nr_shards = 0;
+	u32 nr_cids, nr_llcs = 0, nr_shards = 0, nr_cores = 0, nr_topo = 0;
 	struct cell_cmasks __arena *gen;
 	struct mitosis_topo __arena *t;
 	u32 i;
@@ -1616,9 +1746,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		t->shard_cids[ct.shard_idx].nr++;
 		if ((u32)ct.shard_idx + 1 > nr_shards)
 			nr_shards = ct.shard_idx + 1;
+		if (ct.core_idx >= 0) {
+			if (!t->core_cids[ct.core_idx].nr)
+				t->core_cids[ct.core_idx].base = ct.core_cid;
+			t->core_cids[ct.core_idx].nr++;
+			if ((u32)ct.core_idx + 1 > nr_cores)
+				nr_cores = ct.core_idx + 1;
+			nr_topo++;
+		}
 	}
 	t->nr_llcs = nr_llcs;
 	t->nr_shards = nr_shards;
+	t->nr_cores = nr_cores;
+	/* multiple cids in a core means SMT, no-topo tails excluded */
+	t->smt_active = nr_topo != nr_cores;
 
 	if (enable_llc_awareness && !nr_llcs) {
 		scx_bpf_error("LLC-aware mode requires LLC topology");
@@ -1646,13 +1787,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	/* Per-shard idle masks, windowed to each shard's cid range. */
-	idle_masks = bpf_arena_alloc_pages(&arena, NULL,
-					   div_round_up(nr_shards * sizeof(union shard_cmask),
-							PAGE_SIZE), NUMA_NO_NODE, 0);
+	u32 mask_pgs = div_round_up(nr_shards * sizeof(union shard_cmask), PAGE_SIZE);
+
+	idle_masks = bpf_arena_alloc_pages(&arena, NULL, mask_pgs, NUMA_NO_NODE, 0);
 	if (!idle_masks)
 		return -ENOMEM;
-	bpf_for(i, 0, nr_shards)
+	idle_smt_masks = bpf_arena_alloc_pages(&arena, NULL, mask_pgs, NUMA_NO_NODE, 0);
+	if (!idle_smt_masks)
+		return -ENOMEM;
+	bpf_for(i, 0, nr_shards) {
 		cmask_init(&idle_masks[i].cmask, t->shard_cids[i].base, t->shard_cids[i].nr);
+		cmask_init(&idle_smt_masks[i].cmask, t->shard_cids[i].base,
+			   t->shard_cids[i].nr);
+	}
 
 	/*
 	 * Cell cmasks. Primaries start with every topology-backed cid until
@@ -2084,13 +2231,14 @@ int apply_cell_config(void *ctx)
 
 // clang-format off
 /*
- * The only source of idle state in the cid form. Keep the per-shard idle masks
- * in sync. Pickers claim bits with cmask_test_and_clear().
+ * The only source of idle state in the cid form. Keep the per-shard idle and
+ * idle_smt masks in sync. Pickers claim bits with claim_idle_cid_masks().
  */
 void BPF_STRUCT_OPS(mitosis_update_idle, s32 cid, bool idle)
 {
 	struct mitosis_topo __arena *t;
-	struct scx_cmask __arena *im;
+	struct scx_cmask __arena *im, *ism;
+	s32 core;
 
 	MITOSIS_TOUCH_ARENA();
 
@@ -2100,6 +2248,28 @@ void BPF_STRUCT_OPS(mitosis_update_idle, s32 cid, bool idle)
 		cmask_set(cid, im);
 	else
 		cmask_clear(cid, im);
+
+	if (!t->smt_active)
+		return;
+
+	core = t->cid[cid].core_idx;
+	if (core < 0)
+		return;
+
+	ism = &idle_smt_masks[t->cid[cid].shard_idx].cmask;
+
+	/*
+	 * Mirror the builtin idle core tracking, racy but self-correcting: the
+	 * core range is set only when every sibling is idle and cleared on any
+	 * busy transition.
+	 */
+	if (idle) {
+		if (!cmask_full_range(im, t->core_cids[core].base, t->core_cids[core].nr))
+			return;
+		cmask_set_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
+	} else {
+		cmask_clear_range(ism, t->core_cids[core].base, t->core_cids[core].nr);
+	}
 }
 
 SCX_OPS_CID_DEFINE(mitosis,

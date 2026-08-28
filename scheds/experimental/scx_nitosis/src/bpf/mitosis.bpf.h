@@ -82,6 +82,9 @@ struct mitosis_topo {
 	u32 nr_cids;
 	u32 nr_llcs;
 	u32 nr_shards;
+	u32 nr_cores;
+	/* set when any core holds multiple cids, see mitosis_update_idle() */
+	u32 smt_active;
 	struct scx_cid_topo cid[MAX_CPUS];
 	/* cid range of each LLC */
 	struct topo_range llc_cids[MAX_LLCS];
@@ -89,6 +92,8 @@ struct mitosis_topo {
 	struct topo_range llc_shards[MAX_LLCS];
 	/* cid range of each shard */
 	struct topo_range shard_cids[MAX_CPUS];
+	/* cid range of each core */
+	struct topo_range core_cids[MAX_CPUS];
 };
 
 extern struct mitosis_topo __arena *topo;
@@ -107,14 +112,15 @@ union shard_cmask {
 
 extern union shard_cmask __arena *idle_masks;
 
+/*
+ * idle_smt mirrors the builtin idle core tracking: a core's whole cid range is
+ * set iff every sibling was idle at the last transition. Same per-shard
+ * windowed layout as the idle masks.
+ */
+extern union shard_cmask __arena *idle_smt_masks;
+
 /* cids with load-time topology, offline-possible tail cids excluded */
 extern struct scx_cmask __arena *topo_cids;
-
-/* the cid-form analog of scx_bpf_test_and_clear_cpu_idle() */
-static inline bool claim_idle_cid(s32 cid)
-{
-	return cmask_test_and_clear(cid, &idle_masks[topo->cid[cid].shard_idx].cmask);
-}
 
 /*
  * Per-cell cid masks. scx_cmask ends in a flex array, the overlay gives every
