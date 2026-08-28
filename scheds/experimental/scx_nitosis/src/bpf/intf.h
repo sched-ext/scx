@@ -21,7 +21,7 @@ enum consts {
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 
 	MAX_CG_DEPTH = 256,
-	MAX_LLCS = 16,
+	MAX_LLCS = 64,
 
 	/* Size of cpumask in unsigned longs (supports up to 8192 CPUs) */
 	CPUMASK_LONG_ENTRIES = 128,
