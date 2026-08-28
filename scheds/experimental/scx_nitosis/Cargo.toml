@@ -52,3 +52,6 @@ ktstr-tests = ["dep:ktstr"]
 
 [lints.clippy]
 unwrap_used = "deny"
+
+[package.metadata.veristat]
+disable = true
