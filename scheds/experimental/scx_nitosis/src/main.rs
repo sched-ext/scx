@@ -12,7 +12,7 @@ mod stats;
 mod topology;
 mod undefok_flags;
 
-use cell_manager::{CellManager, CpuAssignment, CpuRecipient};
+use cell_manager::{CellManager, CpuAssignment};
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -62,7 +62,6 @@ use topology::MitosisTopology;
 
 const SCHEDULER_NAME: &str = "scx_nitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
-const MAX_SUBCELLS_PER_CELL: usize = bpf_intf::consts_MAX_SUBCELLS_PER_CELL as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 /// Epoll token for inotify events (cgroup creation/destruction)
 const INOTIFY_TOKEN: u64 = 1;
@@ -80,7 +79,7 @@ fn parse_ewma_factor(s: &str) -> Result<f64, String> {
 /// scx_nitosis: A dynamic affinity scheduler
 ///
 /// Cgroups are assigned to a dynamic number of Cells which are assigned to a
-/// dynamic set of CPUs. The BPF part does simple vtime scheduling for each subcell.
+/// dynamic set of CPUs. The BPF part does simple vtime scheduling for each cell.
 ///
 /// Userspace makes the dynamic decisions of which Cells should be merged or
 /// split and which CPUs they should be assigned to.
@@ -247,33 +246,6 @@ const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 4] = [
 #[derive(Debug)]
 struct Cell {
     cpus: Cpumask,
-    subcells: Vec<Subcell>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Subcell {
-    id: u32,
-    primary: Cpumask,
-    borrowable: Option<Cpumask>,
-}
-
-impl Cell {
-    fn new() -> Self {
-        Self {
-            cpus: Cpumask::new(),
-            subcells: vec![Subcell::new(0)],
-        }
-    }
-}
-
-impl Subcell {
-    fn new(id: u32) -> Self {
-        Self {
-            id,
-            primary: Cpumask::new(),
-            borrowable: None,
-        }
-    }
 }
 
 struct Scheduler<'a> {
@@ -665,7 +637,7 @@ impl<'a> Scheduler<'a> {
         &mut self,
         new_cell_ids: &[u32],
     ) -> Result<Vec<CpuAssignment>> {
-        let (cell_assignments, cpu_assignments, subcell_assignments) = {
+        let (cell_assignments, cpu_assignments) = {
             let active_cell_ids: Vec<u32> = self
                 .cell_manager
                 .get_cell_assignments()
@@ -721,18 +693,10 @@ impl<'a> Scheduler<'a> {
                     .context("computing equal-weight CPU assignments (rebalancing disabled)")?
             };
 
-            // TODO(kkd): Plug in demand weighted subcell assignments once
-            // supported.
-            let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
-
-            (
-                self.cell_manager.get_cell_assignments(),
-                cpu_assignments,
-                subcell_assignments,
-            )
+            (self.cell_manager.get_cell_assignments(), cpu_assignments)
         };
 
-        self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)
+        self.apply_cell_config(&cell_assignments, &cpu_assignments)
             .context("applying cell configuration to BPF")?;
 
         Ok(cpu_assignments)
@@ -775,7 +739,7 @@ impl<'a> Scheduler<'a> {
             .collect();
 
         // Compute new assignments and check if they differ from current
-        let (cell_assignments, cpu_assignments, subcell_assignments) = {
+        let (cell_assignments, cpu_assignments) = {
             let cpu_assignments = self
                 .cell_manager
                 .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
@@ -787,23 +751,14 @@ impl<'a> Scheduler<'a> {
                     .map_or(true, |cell| cell.cpus != a.primary)
             });
 
-            // TODO(kkd): Need logic to check changed demand assignments for
-            // subcells as well once demand weighted allocations work.
-
             if !changed {
                 return Ok(());
             }
 
-            let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
-
-            (
-                self.cell_manager.get_cell_assignments(),
-                cpu_assignments,
-                subcell_assignments,
-            )
+            (self.cell_manager.get_cell_assignments(), cpu_assignments)
         };
 
-        self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)
+        self.apply_cell_config(&cell_assignments, &cpu_assignments)
             .context("applying rebalanced cell configuration to BPF")?;
 
         self.last_rebalance = Instant::now();
@@ -820,70 +775,6 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn compute_subcell_assignments(
-        &self,
-        cell_cpu_assignments: &[CpuAssignment],
-    ) -> Result<Vec<Vec<CpuAssignment>>> {
-        cell_cpu_assignments
-            .iter()
-            .map(|cell_assignment| {
-                let recipients: Vec<CpuRecipient> = self
-                    .cells
-                    .get(&cell_assignment.id)
-                    .map(|cell| {
-                        cell.subcells
-                            .iter()
-                            .map(|subcell| {
-                                CpuRecipient::unpinned(subcell.id, 1.0, &cell_assignment.primary)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_else(|| {
-                        vec![CpuRecipient::unpinned(0, 1.0, &cell_assignment.primary)]
-                    });
-
-                CellManager::compute_subcell_cpu_assignments(
-                    &cell_assignment.primary,
-                    &recipients,
-                    self.enable_borrowing,
-                )
-            })
-            .collect()
-    }
-
-    fn refresh_bpf_subcells(&mut self, active_cells: &HashSet<u32>) -> Result<()> {
-        for cell_id in active_cells {
-            let bpf_cell = read_bpf_cell(&self.skel, *cell_id)?;
-            let subcells: Vec<Subcell> = bpf_cell
-                .subcells
-                .iter()
-                .filter(|subcell| subcell.in_use != 0)
-                .map(|subcell| {
-                    Ok(Subcell {
-                        id: subcell.id,
-                        primary: read_cpumask_from_bytes(&subcell.primary.mask)?,
-                        borrowable: if self.enable_borrowing {
-                            Some(read_cpumask_from_bytes(&subcell.borrowable.mask)?)
-                        } else {
-                            None
-                        },
-                    })
-                })
-                .collect::<Result<_>>()?;
-
-            if subcells.is_empty() {
-                bail!("Cell {} has no active subcells in BPF state", cell_id);
-            }
-
-            let cell = self.cells.get_mut(cell_id).ok_or_else(|| {
-                anyhow::anyhow!("Cell {} missing during subcell refresh", cell_id)
-            })?;
-            cell.subcells = subcells;
-        }
-
-        Ok(())
-    }
-
     /// Apply cell configuration to BPF.
     ///
     /// Writes the cell and CPU assignments to the BPF config struct and triggers
@@ -892,7 +783,6 @@ impl<'a> Scheduler<'a> {
         &mut self,
         cell_assignments: &[(u64, u32)],
         cpu_assignments: &[CpuAssignment],
-        subcell_assignments: &[Vec<CpuAssignment>],
     ) -> Result<()> {
         let bss_data = self
             .skel
@@ -918,14 +808,6 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        if subcell_assignments.len() != cpu_assignments.len() {
-            bail!(
-                "Mismatched subcell assignments: {} cell assignments vs {} subcell groups",
-                cpu_assignments.len(),
-                subcell_assignments.len()
-            );
-        }
-
         if cell_assignments.len() > bpf_intf::consts_MAX_CELLS as usize {
             bail!(
                 "Too many cell assignments: {} > MAX_CELLS ({})",
@@ -935,12 +817,6 @@ impl<'a> Scheduler<'a> {
         }
         config.num_cell_assignments = cell_assignments.len() as u32;
 
-        for cell_id in 0..MAX_CELLS {
-            for subcell_id in 0..MAX_SUBCELLS_PER_CELL {
-                config.subcells[cell_id][subcell_id].id = subcell_id as u32;
-            }
-        }
-
         for (i, (cgid, cell_id)) in cell_assignments.iter().enumerate() {
             config.assignments[i].cgid = *cgid;
             config.assignments[i].cell_id = *cell_id;
@@ -948,9 +824,7 @@ impl<'a> Scheduler<'a> {
 
         // Set cell cpumasks and borrowable cpumasks
         let mut max_cell_id: u32 = 0;
-        for (a, cell_subcells) in cpu_assignments.iter().zip(subcell_assignments.iter()) {
-            validate_subcell_assignments(a, cell_subcells, self.enable_borrowing)?;
-
+        for a in cpu_assignments {
             if a.id >= bpf_intf::consts_MAX_CELLS {
                 bail!(
                     "Cell ID {} exceeds MAX_CELLS ({})",
@@ -967,22 +841,6 @@ impl<'a> Scheduler<'a> {
                     borrowable,
                     &mut config.borrowable_cpumasks[a.id as usize].mask,
                 );
-            }
-
-            for subcell in cell_subcells {
-                let slot = subcell.id as usize;
-                config.subcells[a.id as usize][slot].id = subcell.id;
-                config.subcells[a.id as usize][slot].in_use = 1;
-                write_cpumask_to_config(
-                    &subcell.primary,
-                    &mut config.subcells[a.id as usize][slot].primary.mask,
-                );
-                if let Some(ref borrowable) = subcell.borrowable {
-                    write_cpumask_to_config(
-                        borrowable,
-                        &mut config.subcells[a.id as usize][slot].borrowable.mask,
-                    );
-                }
             }
         }
         config.num_cells = max_cell_id;
@@ -1570,7 +1428,12 @@ impl<'a> Scheduler<'a> {
                 .get(cell_idx)
                 .cloned()
                 .unwrap_or_else(|| Cpumask::new());
-            self.cells.entry(*cell_idx).or_insert_with(Cell::new).cpus = cpus;
+            self.cells
+                .entry(*cell_idx)
+                .or_insert_with(|| Cell {
+                    cpus: Cpumask::new(),
+                })
+                .cpus = cpus;
             self.metrics.cells.insert(*cell_idx, CellMetrics::default());
         }
 
@@ -1578,104 +1441,10 @@ impl<'a> Scheduler<'a> {
         self.cells.retain(|&k, _| active_cells.contains(&k));
         self.metrics.cells.retain(|&k, _| active_cells.contains(&k));
 
-        self.refresh_bpf_subcells(&active_cells)?;
-
         self.last_configuration_seq = Some(applied_configuration);
 
         Ok(())
     }
-}
-
-fn validate_subcell_assignments(
-    cell: &CpuAssignment,
-    subcells: &[CpuAssignment],
-    enable_borrowing: bool,
-) -> Result<()> {
-    if subcells.is_empty() {
-        bail!("Cell {} has no subcell assignments", cell.id);
-    }
-    if subcells.len() > MAX_SUBCELLS_PER_CELL {
-        bail!(
-            "Cell {} has too many subcells: {} > MAX_SUBCELLS_PER_CELL ({})",
-            cell.id,
-            subcells.len(),
-            MAX_SUBCELLS_PER_CELL
-        );
-    }
-
-    let mut seen = [false; MAX_SUBCELLS_PER_CELL];
-    let mut primary_union = Cpumask::new();
-
-    for subcell in subcells {
-        if subcell.id >= bpf_intf::consts_MAX_SUBCELLS_PER_CELL {
-            bail!(
-                "Subcell ID {} for cell {} exceeds MAX_SUBCELLS_PER_CELL ({})",
-                subcell.id,
-                cell.id,
-                bpf_intf::consts_MAX_SUBCELLS_PER_CELL
-            );
-        }
-
-        let slot = subcell.id as usize;
-        if seen[slot] {
-            bail!("Duplicate subcell ID {} for cell {}", subcell.id, cell.id);
-        }
-        seen[slot] = true;
-
-        if subcell.primary.weight() == 0 {
-            bail!(
-                "Subcell {} in cell {} has no primary CPUs",
-                subcell.id,
-                cell.id
-            );
-        }
-        if subcell.primary.and(&cell.primary.not()).weight() != 0 {
-            bail!(
-                "Subcell {} primary CPUs are outside cell {}",
-                subcell.id,
-                cell.id
-            );
-        }
-        if primary_union.and(&subcell.primary).weight() != 0 {
-            bail!(
-                "Subcell {} overlaps another subcell in cell {}",
-                subcell.id,
-                cell.id
-            );
-        }
-
-        if enable_borrowing {
-            let expected = cell.primary.and(&subcell.primary.not());
-            let borrowable = subcell.borrowable.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Subcell {} in cell {} is missing its borrowable mask",
-                    subcell.id,
-                    cell.id
-                )
-            })?;
-            if borrowable != &expected {
-                bail!(
-                    "Subcell {} in cell {} has an invalid borrowable mask",
-                    subcell.id,
-                    cell.id
-                );
-            }
-        } else if subcell.borrowable.is_some() {
-            bail!(
-                "Subcell {} in cell {} has borrowing disabled but a borrowable mask",
-                subcell.id,
-                cell.id
-            );
-        }
-
-        primary_union = primary_union.or(&subcell.primary);
-    }
-
-    if primary_union != cell.primary {
-        bail!("Subcell primary CPUs do not cover cell {}", cell.id);
-    }
-
-    Ok(())
 }
 
 fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
@@ -1690,41 +1459,6 @@ fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
             }
         }
     }
-}
-
-fn read_cpumask_from_bytes(src: &[u8]) -> Result<Cpumask> {
-    let mut cpumask = Cpumask::new();
-
-    for (byte_idx, byte) in src.iter().copied().enumerate() {
-        let mut bits = byte;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= !(1u8 << bit);
-            cpumask.set_cpu((byte_idx * 8) + bit)?;
-        }
-    }
-
-    Ok(cpumask)
-}
-
-fn read_bpf_cell(skel: &BpfSkel, cell_id: u32) -> Result<bpf_intf::cell> {
-    let raw = skel
-        .maps
-        .cells
-        .lookup(&cell_id.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
-        .with_context(|| format!("Failed to lookup cell {}", cell_id))?
-        .ok_or_else(|| anyhow::anyhow!("Cell {} missing from BPF map", cell_id))?;
-
-    if raw.len() != std::mem::size_of::<bpf_intf::cell>() {
-        bail!(
-            "Unexpected cell {} value size: {} != {}",
-            cell_id,
-            raw.len(),
-            std::mem::size_of::<bpf_intf::cell>()
-        );
-    }
-
-    Ok(unsafe { std::ptr::read_unaligned(raw.as_ptr() as *const bpf_intf::cell) })
 }
 
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
@@ -1849,24 +1583,8 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_subcell_assignments, CpuAssignment, Cpumask, Opts};
+    use super::Opts;
     use clap::Parser;
-
-    fn cpumask(cpus: &[usize]) -> Cpumask {
-        let mut mask = Cpumask::new();
-        for &cpu in cpus {
-            mask.set_cpu(cpu).unwrap();
-        }
-        mask
-    }
-
-    fn assignment(id: u32, primary: &[usize], borrowable: Option<&[usize]>) -> CpuAssignment {
-        CpuAssignment {
-            id,
-            primary: cpumask(primary),
-            borrowable: borrowable.map(cpumask),
-        }
-    }
 
     #[test]
     fn requires_cell_parent_cgroup_for_scheduler_mode() {
@@ -1881,35 +1599,5 @@ mod tests {
     #[test]
     fn allows_version_without_cell_parent_cgroup() {
         assert!(Opts::try_parse_from(["scx_nitosis", "--version"]).is_ok());
-    }
-
-    #[test]
-    fn accepts_complete_unpinned_subcell_partition() {
-        let cell = assignment(3, &[0, 1, 2, 3], None);
-        let subcells = [
-            assignment(0, &[0, 1], Some(&[2, 3])),
-            assignment(1, &[2, 3], Some(&[0, 1])),
-        ];
-
-        validate_subcell_assignments(&cell, &subcells, true).unwrap();
-    }
-
-    #[test]
-    fn rejects_overlapping_subcell_primaries() {
-        let cell = assignment(3, &[0, 1, 2, 3], None);
-        let subcells = [
-            assignment(0, &[0, 1, 2], None),
-            assignment(1, &[2, 3], None),
-        ];
-
-        assert!(validate_subcell_assignments(&cell, &subcells, false).is_err());
-    }
-
-    #[test]
-    fn rejects_incomplete_subcell_partition() {
-        let cell = assignment(3, &[0, 1, 2, 3], None);
-        let subcells = [assignment(0, &[0, 1, 2], None)];
-
-        assert!(validate_subcell_assignments(&cell, &subcells, false).is_err());
     }
 }

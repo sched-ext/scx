@@ -18,7 +18,6 @@ enum consts {
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 256,
-	MAX_SUBCELLS_PER_CELL = 8,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 
 	MAX_CG_DEPTH = 256,
@@ -61,7 +60,6 @@ struct cpu_ctx {
 	u64 running_ns[MAX_CELLS];
 	u64 vtime_now;
 	u32 cell;
-	u32 subcell;
 	u32 llc;
 };
 
@@ -74,60 +72,43 @@ struct cgrp_ctx {
  * Per-LLC data is cacheline-aligned to prevent false sharing when
  * CPUs on different LLCs update their vtime concurrently.
  */
-struct subcell_llc {
+struct cell_llc {
 	u64 vtime_now;
 	u32 nr_queued;
 } __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 // Ensure we don't have multiple of these on the same cacheline.
-_Static_assert(sizeof(struct subcell_llc) >= SCX_CACHELINE_SIZE,
-	       "subcell_llc must be at least one cache line");
-
-/* Cell cpumask data for a single cell or subcell */
-struct cell_cpumask_data {
-	unsigned char mask[MAX_CPUS_U8];
-};
-
-/* Serialized subcell config shared between userspace and BPF. */
-struct subcell_config {
-	u32 id;
-	u32 in_use;
-	struct cell_cpumask_data primary;
-	struct cell_cpumask_data borrowable;
-};
-
-/* Subcell state shared between kernel and userspace. */
-struct subcell {
-	u32 id;
-	u32 in_use;
-	// Bitmap of LLC DSQs that have queued work but no CPUs in this subcell
-	u64 llcs_to_drain;
-	// Bitmap of LLCs that contain CPUs assigned to this subcell
-	u64 llcs_with_cpus;
-	struct cell_cpumask_data primary;
-	struct cell_cpumask_data borrowable;
-	struct subcell_llc llcs[MAX_LLCS];
-};
+_Static_assert(sizeof(struct cell_llc) >= SCX_CACHELINE_SIZE,
+	       "cell_llc must be at least one cache line");
 
 struct cell {
 	// cgroup ID of the cell owner (0 for cell 0 or if no owner)
 	u64 owner_cgid;
 	// Whether or not the cell is used
 	u32 in_use;
+	// Bitmap of LLC DSQs that have queued work but no CPUs in this cell
+	u64 llcs_to_drain;
+	// Bitmap of LLCs that contain CPUs assigned to this cell
+	u64 llcs_with_cpus;
 
-	// Fixed-size subcell state owned by this cell.
-	struct subcell subcells[MAX_SUBCELLS_PER_CELL];
+	// Per-LLC data (cacheline-aligned)
+	struct cell_llc llcs[MAX_LLCS];
 };
 
 // Verify these are the same size in both BPF and Rust.
 _Static_assert(sizeof(struct cell) ==
-	       (SCX_CACHELINE_SIZE + (sizeof(struct subcell) * MAX_SUBCELLS_PER_CELL)),
+	       (SCX_CACHELINE_SIZE + (SCX_CACHELINE_SIZE * MAX_LLCS)),
 	       "struct cell size must be stable for Rust bindings");
 
 /* Cell assignment entry: maps a cgroup to a cell */
 struct cell_assignment {
 	u64 cgid; /* cgroup ID (from cgroup file inode) */
 	u32 cell_id; /* cell ID to assign */
+};
+
+/* Cell cpumask data for a single cell */
+struct cell_cpumask_data {
+	unsigned char mask[MAX_CPUS_U8];
 };
 
 /*
@@ -137,7 +118,6 @@ struct cell_assignment {
  * BPF program invocation:
  * - Cell-to-cgroup assignments (which cgroups own which cells)
  * - Cell cpumasks (which CPUs belong to each cell)
- * - Per-cell subcell cpumasks
  */
 struct cell_config {
 	u32 num_cell_assignments;
@@ -145,7 +125,6 @@ struct cell_config {
 	struct cell_assignment assignments[MAX_CELLS];
 	struct cell_cpumask_data cpumasks[MAX_CELLS];
 	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
-	struct subcell_config subcells[MAX_CELLS][MAX_SUBCELLS_PER_CELL];
 };
 
 #endif /* __INTF_H */
