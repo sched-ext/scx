@@ -17,6 +17,7 @@ fn main() {
         .add_source("src/bpf/lib/cpumask.bpf.c")
         .add_source("src/bpf/lib/rbtree.bpf.c")
         .add_source("src/bpf/lib/sdt_alloc.bpf.c")
+        .add_source("src/bpf/lib/sdt_cgroup.bpf.c")
         .add_source("src/bpf/lib/sdt_task.bpf.c")
         .add_source("src/bpf/lib/topology.bpf.c")
         .compile_link_gen()

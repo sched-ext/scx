@@ -26,6 +26,7 @@
  */
 #define FAKE_FLAT_CELL_LLC 0
 
+#include <lib/sdt_cgroup.h>
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
 #include "slice_shrinking.bpf.h"
@@ -119,27 +120,14 @@ static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp, u32 ances
 	return cg;
 }
 
-struct {
-	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct cgrp_ctx);
-} cgrp_ctxs SEC(".maps");
-
-static inline struct cgrp_ctx *lookup_cgrp_ctx_fallible(struct cgroup *cgrp)
+static inline struct cgrp_ctx __arena *lookup_cgrp_ctx_fallible(struct cgroup *cgrp)
 {
-	struct cgrp_ctx *cgc;
-
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0, 0))) {
-		return NULL;
-	}
-
-	return cgc;
+	return scx_cgrp_data(cgrp);
 }
 
-static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
+static inline struct cgrp_ctx __arena *lookup_cgrp_ctx(struct cgroup *cgrp)
 {
-	struct cgrp_ctx *cgc = lookup_cgrp_ctx_fallible(cgrp);
+	struct cgrp_ctx __arena *cgc = lookup_cgrp_ctx_fallible(cgrp);
 
 	if (!cgc)
 		scx_bpf_error("cgrp_ctx lookup failed for cgid %llu", cgrp->kn->id);
@@ -189,6 +177,8 @@ static inline struct task_ctx __arena *lookup_task_ctx(struct task_struct *p)
  */
 struct cpu_ctx __arena *cpu_ctxs;
 u32 nr_cid_ctxs;
+/* set once the cgroup ctx allocator is usable, see tp_cgroup_mkdir() */
+bool cgrp_alloc_ready;
 
 /* ctx of the cid this invocation is running on */
 static inline struct cpu_ctx __arena *cur_cpu_ctx(void)
@@ -327,7 +317,7 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 static inline int update_task_cell(struct task_struct *p, struct task_ctx __arena *tctx,
 				   struct cgroup *cg)
 {
-	struct cgrp_ctx *cgc;
+	struct cgrp_ctx __arena *cgc;
 
 	cgc = lookup_cgrp_ctx_fallible(cg);
 
@@ -1236,12 +1226,15 @@ static bool cgrp_is_dying(struct cgroup *cgrp)
  * Cgroup initialization - creates cgrp_ctx. Root cgroup is assigned cell 0.
  * Other cgroups inherit their parent's cell until userspace assigns them
  * explicitly via apply_cell_config().
+ *
+ * A global function: the arena accesses verify expensively and inlining them
+ * into tp_cgroup_mkdir()'s ancestor loop blows the verifier insn limit.
  */
-static int init_cgrp_ctx(struct cgroup *cgrp)
+__weak int init_cgrp_ctx(struct cgroup *cgrp __arg_trusted)
 {
-	struct cgrp_ctx *cgc;
+	struct cgrp_ctx __arena *cgc;
 
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0, BPF_LOCAL_STORAGE_GET_F_CREATE))) {
+	if (!(cgc = scx_cgrp_alloc(cgrp))) {
 		scx_bpf_error("cgrp_ctx creation failed for cgid %llu", cgrp->kn->id);
 		return -ENOENT;
 	}
@@ -1256,7 +1249,7 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 	if (!parent_cg)
 		return -ENOENT;
 
-	struct cgrp_ctx *parent_cgc;
+	struct cgrp_ctx __arena *parent_cgc;
 	if (!(parent_cgc = lookup_cgrp_ctx(parent_cg)))
 		return -ENOENT;
 
@@ -1339,8 +1332,19 @@ void BPF_STRUCT_OPS(mitosis_cpuctl_move, struct task_struct *p, struct cgroup *f
 SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 {
+	scx_arena_subprog_init();
+
 	int ret;
 	if (!cpu_controller_disabled)
+		return 0;
+
+	/*
+	 * Tracepoints attach before the struct_ops, so mkdirs can fire before
+	 * ops.init() has initialized the cgroup allocator. Skip them:
+	 * ops.init()'s cgroup walk or the first task initialized in the cgroup
+	 * creates the ctx, which inherits the parent's cell.
+	 */
+	if (!READ_ONCE(cgrp_alloc_ready))
 		return 0;
 
 	ret = init_cgrp_ctx_with_ancestors(cgrp);
@@ -1513,6 +1517,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
 	return 0;
 }
 
+/*
+ * The cgrp ctx lives as long as the cgroup and is freed when the kernel tears
+ * down the cgroup's BPF storage, after nothing can be referencing the cgroup
+ * anymore.
+ */
+SEC("fentry/bpf_cgrp_storage_free")
+int BPF_PROG(mitosis_free_cgroup, struct cgroup *cgrp)
+{
+	scx_cgrp_free(cgrp);
+	return 0;
+}
+
 static void dump_cmask(struct scx_cmask __arena *m)
 {
 	u32 nr_words = (topo->nr_cids + 63) / 64;
@@ -1646,15 +1662,22 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if ((ret = validate_userspace_data()))
 		return ret;
 
+	ret = scx_cgrp_init(sizeof(struct cgrp_ctx), 8);
+	if (ret)
+		return ret;
+
 	struct cgroup *rootcg __free(cgroup) = bpf_cgroup_from_id(root_cgid);
 	if (!rootcg)
 		return -ENOENT;
 
-	/* Initialize root cgroup storage so tasks can always fall back to cell 0. */
-	if (!bpf_cgrp_storage_get(&cgrp_ctxs, rootcg, 0, BPF_LOCAL_STORAGE_GET_F_CREATE)) {
-		scx_bpf_error("cgrp_ctx creation failed for rootcg");
-		return -ENOENT;
-	}
+	/*
+	 * A mkdir can race in the moment cgrp_alloc_ready flips and its
+	 * ancestor walk needs the root ctx, so create it before flipping.
+	 */
+	ret = init_cgrp_ctx(rootcg);
+	if (ret)
+		return ret;
+	WRITE_ONCE(cgrp_alloc_ready, true);
 
 	struct cgroup *old __free(cgroup) = bpf_kptr_xchg(&root_cgrp, no_free_ptr(rootcg));
 
@@ -1999,7 +2022,7 @@ int apply_cell_config(void *ctx)
 {
 	scx_arena_subprog_init();
 
-	struct cgrp_ctx *cgc;
+	struct cgrp_ctx __arena *cgc;
 	struct cell __arena *cell;
 	struct cell_cmasks __arena *gen;
 	struct cgroup_subsys_state *root_css, *pos;
@@ -2139,7 +2162,7 @@ int apply_cell_config(void *ctx)
 			 * or those without storage, this may fail - that's OK
 			 * since they can't have tasks anyway.
 			 */
-			struct cgrp_ctx *cgrp_ctx;
+			struct cgrp_ctx __arena *cgrp_ctx;
 			cgrp_ctx = lookup_cgrp_ctx_fallible(cur_cgrp);
 			if (!cgrp_ctx)
 				continue;
