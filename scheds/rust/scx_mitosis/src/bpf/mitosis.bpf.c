@@ -64,7 +64,6 @@ u32 applied_cpuset_seq;
 /* Configuration struct for apply_cell_config, populated by userspace */
 struct cell_config cell_config;
 
-private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(root_cgrp) struct cgroup __kptr *root_cgrp;
 
 UEI_DEFINE(uei);
@@ -1261,11 +1260,6 @@ void BPF_STRUCT_OPS(mitosis_set_cpumask, struct task_struct *p, const struct cpu
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
-	if (!all_cpumask) {
-		scx_bpf_error("NULL all_cpumask");
-		return;
-	}
-
 	update_task_cpumask(p, tctx);
 }
 
@@ -1312,11 +1306,6 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 		/* Should never happen as we just inserted it above. */
 		bpf_cpumask_release(cpumask);
 		scx_bpf_error("tctx cpumask is unexpectedly populated on init");
-		return -EINVAL;
-	}
-
-	if (!all_cpumask) {
-		scx_bpf_error("missing all_cpumask");
 		return -EINVAL;
 	}
 
@@ -1540,7 +1529,6 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx, struct task_st
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 {
-	struct bpf_cpumask *cpumask;
 	u32 i;
 	s32 ret;
 
@@ -1564,28 +1552,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 	struct cgroup *old __free(cgroup) = bpf_kptr_xchg(&root_cgrp, no_free_ptr(rootcg));
 
-	/* setup all_cpumask - must be done before cgroup iteration */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
 	bpf_for(i, 0, nr_possible_cpus)
 	{
 		const volatile u8 *u8_ptr;
 
 		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
 			if (*u8_ptr & (1 << (i % 8))) {
-				bpf_cpumask_set_cpu(i, cpumask);
 				dsq_id_t dsq_id = get_cpu_dsq_id(i);
 				if (dsq_is_invalid(dsq_id)) {
-					bpf_cpumask_release(cpumask);
 					scx_bpf_error("Invalid dsq_id for cpu %d, dsq_id: %llx", i,
 						      dsq_id.raw);
 					return -EINVAL;
 				}
 				ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
 				if (ret < 0) {
-					bpf_cpumask_release(cpumask);
 					scx_bpf_error(
 						"Failed to create dsq for cpu %d, dsq_id: %llx, ret: %d",
 						i, dsq_id.raw, ret);
@@ -1598,10 +1578,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 		/* Store the LLC that each cpu belongs to. Used in Dispatch. */
 		struct cpu_ctx *cpu_ctx = lookup_cpu_ctx(i);
-		if (!cpu_ctx) {
-			bpf_cpumask_release(cpumask);
+		if (!cpu_ctx)
 			return -EINVAL;
-		}
 
 		if (enable_llc_awareness) {
 			if (i < MAX_CPUS) // explicit bounds check for verifier
@@ -1611,10 +1589,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		}
 		cpu_ctx->subcell = 0;
 	}
-
-	cpumask = bpf_kptr_xchg(&all_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
 
 	/*
 	 * When CPU controller is disabled, initialize cgrp_ctx for all existing
