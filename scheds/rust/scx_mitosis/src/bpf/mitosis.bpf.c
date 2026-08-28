@@ -1202,12 +1202,10 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp, struct scx_cgroup_i
 	return init_cgrp_ctx(cgrp);
 }
 
-s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
+void BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 {
 	if (cpu_controller_disabled)
-		return 0;
-
-	return 0;
+		return;
 }
 
 void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p, struct cgroup *from,
