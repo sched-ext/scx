@@ -141,21 +141,6 @@ struct task_ctx {
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu);
 
-/*
- * Smoothed average of a task's per-wake runtime (EWMA, alpha=1/8).
- * Updated in stopping() after each run. Starts at 0 and converges
- * over ~8 runs. Used by features like slice shrinking to estimate
- * how long a task typically runs.
- */
-static inline void update_task_runtime_ewma(struct task_ctx *tctx, u64 used)
-{
-	if (unlikely(!tctx->avg_runtime_ns))
-		/* Init */
-		tctx->avg_runtime_ns = used;
-	else
-		tctx->avg_runtime_ns = (tctx->avg_runtime_ns * 7 + used) / 8;
-}
-
 extern const volatile bool use_lockless_peek;
 
 /*
