@@ -57,13 +57,7 @@ enum mitosis_constants {
  */
 const volatile bool enable_llc_awareness = false;
 
-/*
- * Cell vtimes live in the arena while the competing vtime sources are BPF map
- * values. Keep the arena access in a noinline helper so that clang cannot merge
- * loads from the two pointer classes into one instruction, which the verifier
- * rejects.
- */
-static __noinline u64 cell_llc_vtime_read(struct cell __arena *cell, u32 llc)
+static inline u64 cell_llc_vtime_read(struct cell __arena *cell, u32 llc)
 {
 	return READ_ONCE(cell->llcs[llc].vtime_now);
 }
@@ -145,7 +139,7 @@ struct cell_cmasks {
 
 extern struct cell_cmasks __arena *cell_masks;
 
-static inline struct cpu_ctx *lookup_cid_ctx(s32 cid);
+extern struct cpu_ctx __arena *cpu_ctxs;
 
 /* in mitosis.bpf.c, shared with llc_aware.bpf.h */
 static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand,
@@ -200,7 +194,6 @@ struct task_ctx {
 };
 
 static inline struct task_ctx __arena *lookup_task_ctx(struct task_struct *p);
-static inline struct cpu_ctx *lookup_cpu_ctx(int cpu);
 
 extern const volatile bool use_lockless_peek;
 
@@ -220,17 +213,13 @@ static inline struct task_struct *dsq_peek(u64 dsq_id)
 	return NULL;
 }
 
-static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
+static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx __arena *cctx,
+			     s64 delta)
 {
-	u64 *vptr;
-
-	if ((vptr = MEMBER_VPTR(*cctx, .cstats[cell][idx])))
-		(*vptr) += delta;
-	else
-		scx_bpf_error("invalid cell or stat idxs: %d, %d", idx, cell);
+	cctx->cstats[cell][idx] += delta;
 }
 
-static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
+static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx __arena *cctx)
 {
 	cstat_add(idx, cell, cctx, 1);
 }

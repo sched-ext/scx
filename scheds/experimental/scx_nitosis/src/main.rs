@@ -33,7 +33,6 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::skel::Skel as _;
-use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
@@ -1394,11 +1393,12 @@ impl<'a> Scheduler<'a> {
         let mut cell_to_cpus: HashMap<u32, Cpumask> = HashMap::new();
         let cpu_ctxs =
             read_cpu_ctxs(&self.skel).context("reading per-CPU contexts for BPF cell refresh")?;
-        for (i, cpu_ctx) in cpu_ctxs.iter().enumerate() {
+        for cpu_ctx in cpu_ctxs.iter() {
+            /* the array is cid-indexed; translate to the cpu domain */
             cell_to_cpus
                 .entry(cpu_ctx.cell)
                 .or_insert_with(|| Cpumask::new())
-                .set_cpu(i)
+                .set_cpu(cpu_ctx.cpu as usize)
                 .expect("set cpu in existing mask");
         }
 
@@ -1455,24 +1455,24 @@ fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
 }
 
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
-    let mut cpu_ctxs = vec![];
-    let cpu_ctxs_vec = skel
+    let bss = skel
         .maps
-        .cpu_ctxs
-        .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
-        .context("Failed to lookup cpu_ctx")?
-        .expect("BUG: cpu_ctxs lookup_percpu returned None for key 0");
-    if cpu_ctxs_vec.len() < *NR_CPUS_POSSIBLE {
-        bail!(
-            "Percpu map returned {} entries but expected {}",
-            cpu_ctxs_vec.len(),
-            *NR_CPUS_POSSIBLE
-        );
+        .bss_data
+        .as_ref()
+        .context("bss_data not available")?;
+    let nr = bss.nr_cid_ctxs as usize;
+    let ptr = bss.cpu_ctxs as *const bpf_intf::cpu_ctx;
+    if ptr.is_null() || nr == 0 {
+        bail!("cpu_ctxs arena array not initialized");
     }
-    for cpu in 0..*NR_CPUS_POSSIBLE {
-        cpu_ctxs.push(*unsafe {
-            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
-        });
+    /*
+     * The array lives in the arena, which is mapped into this process with the
+     * BSS pointer as its user address. Reads race scheduler-side updates, the
+     * same as the percpu map reads they replace.
+     */
+    let mut cpu_ctxs = Vec::with_capacity(nr);
+    for cid in 0..nr {
+        cpu_ctxs.push(unsafe { std::ptr::read_volatile(ptr.add(cid)) });
     }
     Ok(cpu_ctxs)
 }

@@ -109,7 +109,7 @@ static inline u64 slice_shrink_limit(u64 avg_runtime_ns, enum slice_shrink_resul
 /* Shrink p's slice to limit and bump the appropriate stat counter. */
 static inline void slice_shrink_apply(struct task_struct *p, u64 limit,
 				      enum slice_shrink_result result, u32 cell,
-				      struct cpu_ctx *cctx)
+				      struct cpu_ctx __arena *cctx)
 {
 	if (p->scx.slice > limit) {
 		scx_bpf_task_set_slice(p, limit);
@@ -129,7 +129,7 @@ static inline void slice_shrink_apply(struct task_struct *p, u64 limit,
  */
 static inline void slice_shrink_on_enqueue(struct task_struct *curr,
 					   struct task_ctx __arena *pinned_waiter_tctx,
-					   u32 cell, struct cpu_ctx *cctx)
+					   u32 cell, struct cpu_ctx __arena *cctx)
 {
 	enum slice_shrink_result result;
 	u64 limit = slice_shrink_limit(pinned_waiter_tctx->avg_runtime_ns, &result);
@@ -141,7 +141,8 @@ static inline void slice_shrink_on_enqueue(struct task_struct *curr,
  * on our CPU DSQ. Peeks the head waiter for EWMA data.
  * Caller must check enable_slice_shrinking.
  */
-static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struct cpu_ctx *cctx)
+static inline int slice_shrink_on_running(struct task_struct *p, u32 cell,
+					  struct cpu_ctx __arena *cctx)
 {
 	dsq_id_t cid_dsq = get_cid_dsq_id(scx_bpf_task_cid(p));
 	if (dsq_is_invalid(cid_dsq))

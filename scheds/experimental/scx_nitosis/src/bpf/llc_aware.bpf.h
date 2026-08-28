@@ -225,7 +225,8 @@ enum {
  * CONTINUE_DISPATCH when work was moved to a remote CPU DSQ, and a negative
  * error when no work was dispatched.
  */
-static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx *local_cctx)
+static inline s32 try_draining_work(u32 cell_id, s32 local_llc,
+				    struct cpu_ctx __arena *local_cctx)
 {
 	struct cell __arena *cell = &cells[cell_id];
 
@@ -314,7 +315,6 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx *
 
 			bpf_for_each(scx_dsq, p, candidate_dsq.raw, 0) {
 				struct task_ctx __arena *tctx;
-				struct cpu_ctx *target_cctx;
 				dsq_id_t target_dsq;
 				u64 basis_vtime;
 				s32 cid;
@@ -331,15 +331,11 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx *
 				if (cid >= cmask_end(&tctx->allowed))
 					break;
 
-				target_cctx = lookup_cid_ctx(cid);
-				if (!target_cctx)
-					break;
-
 				target_dsq = get_cid_dsq_id(cid);
 				if (dsq_is_invalid(target_dsq))
 					break;
 
-				basis_vtime = READ_ONCE(target_cctx->vtime_now);
+				basis_vtime = READ_ONCE(cpu_ctxs[cid].vtime_now);
 				scx_bpf_dsq_move_set_vtime(BPF_FOR_EACH_ITER, basis_vtime);
 				consumed = scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p,
 								  target_dsq.raw, 0);

@@ -54,6 +54,10 @@ enum cell_stat_idx {
 	NR_CSTATS,
 };
 
+/*
+ * Cacheline-aligned: the ctxs live in one arena array and each is hot on its
+ * own cpu, so none may share a cacheline with its neighbor.
+ */
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
@@ -61,7 +65,9 @@ struct cpu_ctx {
 	u64 vtime_now;
 	u32 cell;
 	u32 llc;
-};
+	/* cpu this cid maps to, used by userspace to translate array indices */
+	u32 cpu;
+} __attribute__((aligned(SCX_CACHELINE_SIZE)));
 
 struct cgrp_ctx {
 	u32 cell;

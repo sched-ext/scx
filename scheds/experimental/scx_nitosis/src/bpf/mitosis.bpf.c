@@ -182,42 +182,18 @@ static inline struct task_ctx __arena *lookup_task_ctx(struct task_struct *p)
 	return tctx;
 }
 
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpu_ctx);
-	__uint(max_entries, 1);
-} cpu_ctxs SEC(".maps");
-
-static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
-{
-	struct cpu_ctx *cctx;
-	u32 zero = 0;
-
-	if (cpu < 0)
-		cctx = bpf_map_lookup_elem(&cpu_ctxs, &zero);
-	else
-		cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &zero, cpu);
-
-	if (!cctx) {
-		scx_bpf_error("no cpu_ctx for cpu %d", cpu);
-		return NULL;
-	}
-
-	return cctx;
-}
-
 /*
- * Interim: cpu_ctx stays a percpu map indexed by cpu number until it moves into
- * the arena, so cid-shaped callers translate at the lookup.
+ * Per-cid contexts, one per cid in a flat arena array. Userspace reads the
+ * pointer from BSS and accesses the array directly for stats, see
+ * read_cpu_ctxs() in main.rs.
  */
-static inline struct cpu_ctx *lookup_cid_ctx(s32 cid)
-{
-	s32 cpu = scx_bpf_cid_to_cpu(cid);
+struct cpu_ctx __arena *cpu_ctxs;
+u32 nr_cid_ctxs;
 
-	if (cpu < 0)
-		return NULL;
-	return lookup_cpu_ctx(cpu);
+/* ctx of the cid this invocation is running on */
+static inline struct cpu_ctx __arena *cur_cpu_ctx(void)
+{
+	return &cpu_ctxs[scx_bpf_this_cid()];
 }
 
 static inline int update_task_cmask(struct task_struct *p, struct task_ctx __arena *tctx)
@@ -226,7 +202,6 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 	struct scx_cmask __arena *cell_mask = &cm->mask[tctx->cell].cmask;
 	struct scx_cmask __arena *allowed = &tctx->allowed;
 	struct scx_cmask __arena *effective = &tctx->effective;
-	struct cpu_ctx *cpu_ctx;
 	bool all_cell_cpus_allowed;
 	s32 cid;
 	int ret;
@@ -278,9 +253,7 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 	if (tctx->cell != 0 && reject_multicpu_pinning && !all_cell_cpus_allowed &&
 	    cmask_weight(allowed) > 1) {
 		if (READ_ONCE(cpuset_seq) != READ_ONCE(applied_cpuset_seq)) {
-			struct cpu_ctx *cctx = lookup_cpu_ctx(-1);
-			if (cctx)
-				cstat_inc(CSTAT_PIN_SKIP, tctx->cell, cctx);
+			cstat_inc(CSTAT_PIN_SKIP, tctx->cell, cur_cpu_ctx());
 		} else {
 			scx_bpf_error("multi-CPU pinning within cell %d not supported", tctx->cell);
 			return -EINVAL;
@@ -318,14 +291,11 @@ static inline int update_task_cmask(struct task_struct *p, struct task_ctx __are
 		if (cid >= cmask_end(allowed))
 			return -EINVAL;
 
-		if (!(cpu_ctx = lookup_cid_ctx(cid)))
-			return -ENOENT;
-
 		tctx->dsq = get_cid_dsq_id(cid);
 		if (dsq_is_invalid(tctx->dsq))
 			return -EINVAL;
 
-		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctx->vtime_now));
+		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctxs[cid].vtime_now));
 		tctx->all_cell_cpus_allowed = false;
 		return 0;
 	}
@@ -629,7 +599,8 @@ static __always_inline s32 pick_idle_cid_shards(struct scx_cmask __arena *cand,
 }
 
 static __always_inline s32 pick_idle_cid(struct task_struct *p, s32 prev_cid,
-					  struct cpu_ctx *cctx, struct task_ctx __arena *tctx)
+					  struct cpu_ctx __arena *cctx,
+					  struct task_ctx __arena *tctx)
 {
 	struct mitosis_topo __arena *t = topo;
 	s32 cid;
@@ -676,7 +647,7 @@ static __always_inline s32 pick_idle_cid(struct task_struct *p, s32 prev_cid,
  * Returns: cid >= 0 on success, -EBUSY if no idle cid found.
  */
 static __always_inline s32 try_pick_idle_cid(struct task_struct *p, s32 prev_cid,
-					     struct cpu_ctx *cctx,
+					     struct cpu_ctx __arena *cctx,
 					     struct task_ctx __arena *tctx, bool kick)
 {
 	s32 cid;
@@ -732,12 +703,8 @@ static __always_inline s32 update_pinned_dsq(struct task_struct *p,
 	if (current_cid == new_cid)
 		return new_cid; /* already on this DSQ */
 
-	struct cpu_ctx *new_cctx = lookup_cid_ctx(new_cid);
-	if (!new_cctx)
-		return -1;
-
 	tctx->dsq = get_cid_dsq_id(new_cid);
-	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(new_cctx->vtime_now));
+	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cpu_ctxs[new_cid].vtime_now));
 	return new_cid;
 }
 
@@ -772,10 +739,11 @@ static __always_inline s32 select_pinned_cid(struct task_struct *p, s32 prev_cid
 s32 BPF_STRUCT_OPS(mitosis_select_cid, struct task_struct *p, s32 prev_cid, u64 wake_flags)
 {
 	s32 cid;
-	struct cpu_ctx *cctx;
+	struct cpu_ctx __arena *cctx;
 	struct task_ctx __arena *tctx;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+	cctx = cur_cpu_ctx();
+	if (!(tctx = lookup_task_ctx(p)))
 		return prev_cid;
 
 	if (maybe_refresh_cell(p, tctx) < 0)
@@ -863,15 +831,16 @@ static __always_inline s32 enqueue_pinned_cid(struct task_struct *p,
 
 void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct cpu_ctx *cctx;
+	struct cpu_ctx __arena *cctx;
 	struct task_ctx __arena *tctx;
 	s32 task_cid = scx_bpf_task_cid(p);
 	u64 vtime;
 	s32 cid = -1;
 	u64 basis_vtime;
 
-	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
+	if (!(tctx = lookup_task_ctx(p)))
 		return;
+	cctx = cur_cpu_ctx();
 
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return;
@@ -910,8 +879,6 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		 * explicitly as they must end in a kick to guarantee a
 		 * follow-up scheduling event.
 		 */
-		if (!(cctx = lookup_cpu_ctx(-1)))
-			return;
 		cid = try_pick_idle_cid(p, task_cid, cctx, tctx, true);
 		if (cid >= 0)
 			return;
@@ -950,8 +917,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		 * cctx is the local cid (where enqueue is running), not the one
 		 * the task belongs to. Fetch the right cctx
 		 */
-		if (!(cctx = lookup_cid_ctx(cid)))
-			return;
+		cctx = &cpu_ctxs[cid];
 		/* Task is pinned to specific cids, use per-cid DSQ */
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
@@ -1006,12 +972,10 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
 {
 	scx_arena_subprog_init();
 
-	struct cpu_ctx *cctx;
+	struct cpu_ctx __arena *cctx;
 	u32 cell;
 
-	if (!(cctx = lookup_cpu_ctx(-1)))
-		return;
-
+	cctx = cur_cpu_ctx();
 	cell = READ_ONCE(cctx->cell);
 
 	bool found = false;
@@ -1108,8 +1072,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cid, struct task_struct *prev)
  * cgroup hierarchy.
  */
 u32 level_cells[MAX_CG_DEPTH];
-/* See cell_llc_vtime_read() for why this is noinline. */
-static __noinline void advance_cell_llc_vtime(struct cell __arena *cell, u32 llc_idx,
+static inline void advance_cell_llc_vtime(struct cell __arena *cell, u32 llc_idx,
 					      u64 task_vtime)
 {
 	if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now), task_vtime))
@@ -1118,10 +1081,11 @@ static __noinline void advance_cell_llc_vtime(struct cell __arena *cell, u32 llc
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
-	struct cpu_ctx *cctx;
+	struct cpu_ctx __arena *cctx;
 	struct task_ctx __arena *tctx;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+	cctx = cur_cpu_ctx();
+	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
 	if (enable_llc_awareness && tctx->all_cell_cpus_allowed) {
@@ -1168,13 +1132,14 @@ static inline void update_task_runtime_ewma(struct task_ctx __arena *tctx, u64 u
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 {
-	struct cpu_ctx *cctx;
+	struct cpu_ctx __arena *cctx;
 	struct task_ctx __arena *tctx;
 	struct cell __arena *cell;
 	u64 now, used;
 	u32 cidx;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+	cctx = cur_cpu_ctx();
+	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
 	/*
@@ -1239,14 +1204,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	/* Clear the borrowed flag — it is one-shot, consumed above */
 	tctx->borrowed = false;
 
-	{
-		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
-		if (!running) {
-			scx_bpf_error("Task cell index too large: %d", tctx->cell);
-			return;
-		}
-		*running += used;
-	}
+	cctx->running_ns[tctx->cell] += used;
 }
 
 SEC("fentry/cpuset_write_resmask")
@@ -1582,7 +1540,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 	int i;
 	u32 llc;
 	struct cell __arena *cell;
-	struct cpu_ctx *cpu_ctx;
+	struct cpu_ctx __arena *cpu_ctx;
 
 	scx_bpf_dump_header();
 
@@ -1638,9 +1596,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 	}
 
 	bpf_for(i, 0, topo->nr_cids) {
-		if (!(cpu_ctx = lookup_cid_ctx(i)))
-			return;
-
+		cpu_ctx = &cpu_ctxs[i];
 		dsq_id = get_cid_dsq_id(i);
 		if (dsq_is_invalid(dsq_id))
 			return;
@@ -1816,11 +1772,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		cmask_copy(&gen->mask[i].cmask, topo_cids);
 	cell_cmasks_publish(gen);
 
+	/* Per-cid contexts, read directly by userspace for stats. */
+	u32 ctx_pgs = div_round_up(nr_cids * sizeof(struct cpu_ctx), PAGE_SIZE);
+
+	cpu_ctxs = bpf_arena_alloc_pages(&arena, NULL, ctx_pgs, NUMA_NO_NODE, 0);
+	if (!cpu_ctxs)
+		return -ENOMEM;
+	nr_cid_ctxs = nr_cids;
+
 	/* Per-cid DSQs and the per-cid LLC cache in cpu_ctx. */
 	bpf_for(i, 0, nr_cids) {
 		dsq_id_t dsq_id = get_cid_dsq_id(i);
-		struct cpu_ctx *cpu_ctx;
-		s32 cpu;
+		struct cpu_ctx __arena *cpu_ctx;
 
 		if (dsq_is_invalid(dsq_id))
 			return -EINVAL;
@@ -1830,11 +1793,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			return ret;
 		}
 
-		cpu = scx_bpf_cid_to_cpu(i);
-		if (cpu < 0)
-			continue;
-		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
-			return -EINVAL;
+		cpu_ctx = &cpu_ctxs[i];
+		cpu_ctx->cpu = scx_bpf_cid_to_cpu(i);
 		if (enable_llc_awareness)
 			cpu_ctx->llc = t->cid[i].llc_idx >= 0 ?
 				t->cid[i].llc_idx : LLC_INVALID;
@@ -1931,7 +1891,7 @@ void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 {
 	struct cell_config *config = &cell_config;
-	struct cpu_ctx *cctx;
+	struct cpu_ctx __arena *cctx;
 	u32 cell_id, cpu;
 
 	bpf_for(cell_id, 0, num_cells) {
@@ -1966,9 +1926,7 @@ static int apply_cell_cmasks(struct cell_cmasks __arena *gen, u32 num_cells)
 
 			__cmask_set(cid, cell_mask);
 
-			cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
-			if (!cctx)
-				return -ENOENT;
+			cctx = &cpu_ctxs[cid];
 			/*
 			 * If the cid is changing cells, advance the new cell's
 			 * vtime to at least match this cid's vtime. Otherwise
