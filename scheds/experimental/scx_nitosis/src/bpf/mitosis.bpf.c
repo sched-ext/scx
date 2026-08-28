@@ -68,7 +68,7 @@ private(root_cgrp) struct cgroup __kptr *root_cgrp;
 
 UEI_DEFINE(uei);
 
-struct cell cells[MAX_CELLS];
+struct cell __arena *cells;
 
 /* Forward declaration for init_cgrp_ctx_with_ancestors (defined later) */
 static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp);
@@ -305,11 +305,9 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx __a
 	if (dsq_is_invalid(tctx->dsq))
 		return -EINVAL;
 
-	struct cell *cell;
-	if (!(cell = lookup_cell(tctx->cell)))
-		return -ENOENT;
+	struct cell __arena *cell = lookup_cell(tctx->cell);
 
-	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now));
+	scx_bpf_task_set_dsq_vtime(p, cell_llc_vtime_read(cell, FAKE_FLAT_CELL_LLC));
 	tctx->all_cell_cpus_allowed = true;
 
 	return 0;
@@ -713,7 +711,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx __arena *tctx;
-	struct cell *cell;
+	struct cell __arena *cell;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime;
 	s32 cpu = -1;
@@ -780,8 +778,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (tctx->all_cell_cpus_allowed) {
 		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
 		/* Task can use any CPU in its cell, so use the cell DSQ */
-		if (!(cell = lookup_cell(tctx->cell)))
-			return;
+		cell = lookup_cell(tctx->cell);
 
 		if (enable_llc_awareness) {
 			s32 llc;
@@ -795,9 +792,9 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 				return;
 			}
 
-			basis_vtime = READ_ONCE(cell->llcs[(u32)llc].vtime_now);
+			basis_vtime = cell_llc_vtime_read(cell, (u32)llc);
 		} else {
-			basis_vtime = READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now);
+			basis_vtime = cell_llc_vtime_read(cell, FAKE_FLAT_CELL_LLC);
 		}
 	} else {
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
@@ -860,6 +857,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
+	scx_arena_subprog_init();
+
 	struct cpu_ctx *cctx;
 	u32 cell;
 
@@ -883,10 +882,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	if (enable_llc_awareness) {
-		struct cell *cellp = lookup_cell(cell);
-
-		if (!cellp)
-			return;
+		struct cell __arena *cellp = lookup_cell(cell);
 
 		if (READ_ONCE(cellp->llcs_to_drain)) {
 			s32 ret = try_draining_work(cell, llc, cctx);
@@ -957,10 +953,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	/* Try the winner first */
 	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw, 0)) {
 		if (enable_llc_awareness && min_vtime_dsq.raw == cell_dsq.raw) {
-			struct cell *cellp = lookup_cell(cell);
-
-			if (cellp)
-				cell_llc_nr_queued_dec(cellp, llc);
+			cell_llc_nr_queued_dec(lookup_cell(cell), llc);
 		}
 		return;
 	}
@@ -975,7 +968,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
  * cgroup hierarchy.
  */
 u32 level_cells[MAX_CG_DEPTH];
-static inline void advance_cell_llc_vtime(struct cell *cell, u32 llc_idx, u64 task_vtime)
+/* See cell_llc_vtime_read() for why this is noinline. */
+static __noinline void advance_cell_llc_vtime(struct cell __arena *cell, u32 llc_idx,
+					      u64 task_vtime)
 {
 	if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now), task_vtime))
 		WRITE_ONCE(cell->llcs[llc_idx].vtime_now, task_vtime);
@@ -985,7 +980,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx __arena *tctx;
-	struct cell *cell;
+	struct cell __arena *cell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1001,8 +996,10 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 			return;
 
 		s32 llc = tctx->llc;
-		if (llc >= 0 && llc < MAX_LLCS && (cell = lookup_cell(tctx->cell)))
+		if (llc >= 0 && llc < MAX_LLCS) {
+			cell = lookup_cell(tctx->cell);
 			advance_cell_llc_vtime(cell, (u32)llc, p->scx.dsq_vtime);
+		}
 	}
 
 	/* Record the running slice start time. */
@@ -1034,7 +1031,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx __arena *tctx;
-	struct cell *cell;
+	struct cell __arena *cell;
 	u64 now, used;
 	u32 cidx;
 
@@ -1047,8 +1044,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	 * E.g. a cell 0 kworker pinned to a cell 1 CPU.
 	 */
 	cidx = cctx->cell;
-	if (!(cell = lookup_cell(cidx)))
-		return;
+	cell = lookup_cell(cidx);
 
 	now = scx_bpf_now();
 	/*
@@ -1479,18 +1475,19 @@ static void dump_cell_cpumask(int id)
 
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
+	scx_arena_subprog_init();
+
 	dsq_id_t dsq_id;
 	int i;
 	u32 llc;
-	struct cell *cell;
+	struct cell __arena *cell;
 	struct cpu_ctx *cpu_ctx;
 
 	scx_bpf_dump_header();
 
 	bpf_for(i, 0, MAX_CELLS)
 	{
-		if (!(cell = lookup_cell(i)))
-			return;
+		cell = lookup_cell(i);
 
 		if (!cell->in_use)
 			continue;
@@ -1528,7 +1525,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 
 				scx_bpf_dump(
 					"CELL[%d] LLC[%d] vtime=%llu nr_queued=%d drain=%d has_cpus=%d tracked_nr_queued=%u\n",
-					i, llc, READ_ONCE(cell->llcs[llc].vtime_now), nr_queued,
+					i, llc, cell_llc_vtime_read(cell, llc), nr_queued,
 					!!(drain_mask & bit), !!(llcs_with_cpus & bit),
 					tracked_nr_queued);
 			}
@@ -1538,7 +1535,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 				return;
 
 			scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-				     READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
+				     cell_llc_vtime_read(cell, FAKE_FLAT_CELL_LLC),
 				     scx_bpf_dsq_nr_queued(dsq_id.raw));
 		}
 	}
@@ -1587,6 +1584,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	/* Sanity check the flags we get from userspace. */
 	if ((ret = validate_flags()))
 		return ret;
+
+	cells = bpf_arena_alloc_pages(&arena, NULL,
+				      div_round_up(MAX_CELLS * sizeof(struct cell),
+						   PAGE_SIZE), NUMA_NO_NODE, 0);
+	if (!cells)
+		return -ENOMEM;
 
 	/* Check data from userspace. */
 	if ((ret = validate_userspace_data()))
@@ -1735,9 +1738,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	{
-		struct cell *cell = lookup_cell(0);
-		if (!cell)
-			return -ENOENT;
+		struct cell __arena *cell = lookup_cell(0);
 
 		cell->in_use = true;
 	}
@@ -1771,8 +1772,10 @@ void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 SEC("syscall")
 int apply_cell_config(void *ctx)
 {
+	scx_arena_subprog_init();
+
 	struct cgrp_ctx *cgc;
-	struct cell *cell;
+	struct cell __arena *cell;
 	struct cpu_ctx *cctx;
 	struct cell_cpumask_wrapper *cpumaskw;
 	struct cgroup_subsys_state *root_css, *pos;
@@ -1790,8 +1793,6 @@ int apply_cell_config(void *ctx)
 	bpf_for(i, 1, MAX_CELLS)
 	{
 		cell = lookup_cell(i);
-		if (!cell)
-			return -EINVAL;
 
 		WRITE_ONCE(cell->in_use, 0);
 		cell->owner_cgid = 0;
@@ -1865,14 +1866,10 @@ int apply_cell_config(void *ctx)
 			 */
 			if (cctx->cell != cell_id) {
 				cell = lookup_cell(cell_id);
-				if (!cell)
-					return -ENOENT;
 				u32 llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ?
 						      cctx->llc :
 						      FAKE_FLAT_CELL_LLC;
-				if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now),
-						cctx->vtime_now))
-					WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
+				advance_cell_llc_vtime(cell, llc_idx, cctx->vtime_now);
 			}
 			cctx->cell = cell_id;
 		}
@@ -1943,8 +1940,6 @@ int apply_cell_config(void *ctx)
 			return -ENOENT;
 
 		cell = lookup_cell(cell_id);
-		if (!cell)
-			return -EINVAL;
 
 		cell->in_use = 1;
 		cell->owner_cgid = cgid;
@@ -2008,8 +2003,6 @@ int apply_cell_config(void *ctx)
 				 * inherit from parent.
 				 */
 				cell = lookup_cell(cgrp_ctx->cell);
-				if (!cell)
-					return -EINVAL;
 				if (cell->in_use && cell->owner_cgid == cur_cgrp->kn->id) {
 					/* Cell owner with active cell - record in level_cells */
 					level_cells[level] = cgrp_ctx->cell;

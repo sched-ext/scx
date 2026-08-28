@@ -139,20 +139,52 @@ static inline int refresh_task_llc_cpumask(struct task_ctx __arena *tctx,
 	return 0;
 }
 
-static inline void cell_llc_drain_enable(struct cell *cell, u32 llc)
+/*
+ * The JIT rejects or/and atomics on arena memory (clang emits the fetching
+ * forms which bpf_jit_supports_insn() disallows), so set and clear the drain
+ * bits with cmpxchg loops instead. DRAIN_CAS_TRIES is sized so exhausting it
+ * means seconds of real spinning on one word, past any plausible contention.
+ */
+#define DRAIN_CAS_TRIES		(1U << 23)
+
+static inline void cell_llc_drain_enable(struct cell __arena *cell, u32 llc)
 {
+	u64 bit, old, new;
+	u32 i;
+
 	if (llc >= MAX_LLCS)
 		return;
 
-	__sync_or_and_fetch(&cell->llcs_to_drain, 1LLU << llc);
+	bit = 1LLU << llc;
+	bpf_for(i, 0, DRAIN_CAS_TRIES) {
+		old = cell->llcs_to_drain;
+		if (old & bit)
+			return;
+		new = old | bit;
+		if (__sync_val_compare_and_swap(&cell->llcs_to_drain, old, new) == old)
+			return;
+	}
+	scx_bpf_error("drain_enable CAS exhausted at llc %u", llc);
 }
 
-static inline void cell_llc_drain_disable(struct cell *cell, u32 llc)
+static inline void cell_llc_drain_disable(struct cell __arena *cell, u32 llc)
 {
+	u64 bit, old, new;
+	u32 i;
+
 	if (llc >= MAX_LLCS)
 		return;
 
-	__sync_and_and_fetch(&cell->llcs_to_drain, ~(1LLU << llc));
+	bit = 1LLU << llc;
+	bpf_for(i, 0, DRAIN_CAS_TRIES) {
+		old = cell->llcs_to_drain;
+		if (!(old & bit))
+			return;
+		new = old & ~bit;
+		if (__sync_val_compare_and_swap(&cell->llcs_to_drain, old, new) == old)
+			return;
+	}
+	scx_bpf_error("drain_disable CAS exhausted at llc %u", llc);
 }
 
 /*
@@ -161,12 +193,12 @@ static inline void cell_llc_drain_disable(struct cell *cell, u32 llc)
  * scx_bpf_dsq_nr_queued() until the enqueue callback finishes. Drain
  * interlocking needs the queue depth visible before enabling llcs_to_drain.
  */
-static inline void cell_llc_nr_queued_inc(struct cell *cell, u32 llc)
+static inline void cell_llc_nr_queued_inc(struct cell __arena *cell, u32 llc)
 {
 	__sync_fetch_and_add(&cell->llcs[llc].nr_queued, 1);
 }
 
-static inline u32 cell_llc_nr_queued_dec(struct cell *cell, u32 llc)
+static inline u32 cell_llc_nr_queued_dec(struct cell __arena *cell, u32 llc)
 {
 	return __sync_sub_and_fetch(&cell->llcs[llc].nr_queued, 1);
 }
@@ -185,7 +217,7 @@ static inline bool cell_mask_intersects_llc(const struct cpumask *cell_mask, u32
 	return bpf_cpumask_intersects(cell_mask, llc_mask);
 }
 
-static inline bool cell_llc_has_cpus(struct cell *cell, u32 llc)
+static inline bool cell_llc_has_cpus(struct cell __arena *cell, u32 llc)
 {
 	return READ_ONCE(cell->llcs_with_cpus) & (1LLU << llc);
 }
@@ -218,7 +250,7 @@ static inline void kick_cell_idle_cpu(u32 cell_id)
 /* Caller must hold RCU for lookup_cell_cpumask() and cpumask kfuncs. */
 static inline int refresh_cell_llc_draining(u32 cell_id)
 {
-	struct cell *cell;
+	struct cell __arena *cell;
 	u64 llcs_with_cpus = 0;
 	u32 llc;
 
@@ -226,8 +258,6 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 		return 0;
 
 	cell = lookup_cell(cell_id);
-	if (!cell)
-		return -EINVAL;
 
 	const struct cpumask *cell_mask = lookup_cell_cpumask(cell_id);
 
@@ -275,7 +305,7 @@ static inline int refresh_cell_llc_draining(u32 cell_id)
 
 static inline int account_cell_llc_enqueue(u32 cell_id, u32 llc)
 {
-	struct cell *cell;
+	struct cell __arena *cell;
 
 	if (!enable_llc_awareness)
 		return 0;
@@ -286,10 +316,6 @@ static inline int account_cell_llc_enqueue(u32 cell_id, u32 llc)
 	}
 
 	cell = lookup_cell(cell_id);
-	if (!cell) {
-		scx_bpf_error("account_cell_llc_enqueue: invalid cell %u", cell_id);
-		return -ENOENT;
-	}
 
 	/*
 	 * Account the logical LLC DSQ insertion before checking llcs_with_cpus.
@@ -324,9 +350,7 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx *
 		return -EINVAL;
 	}
 
-	struct cell *cell = lookup_cell(cell_id);
-	if (!cell)
-		return -EINVAL;
+	struct cell __arena *cell = lookup_cell(cell_id);
 
 	u64 drain_mask = READ_ONCE(cell->llcs_to_drain);
 	if (!drain_mask)
@@ -496,9 +520,7 @@ static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 		return -EINVAL;
 	}
 
-	struct cell *cell = lookup_cell(cell_id);
-	if (!cell)
-		return -EINVAL;
+	struct cell __arena *cell = lookup_cell(cell_id);
 
 	u32 i;
 	bpf_for(i, 0, nr_llc)
@@ -557,11 +579,7 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx __arena *t
 		return -EINVAL;
 	}
 
-	struct cell *cell = lookup_cell(tctx->cell);
-	if (!cell) {
-		scx_bpf_error("failed to lookup cell %u for LLC assignment", tctx->cell);
-		return -ENOENT;
-	}
+	struct cell __arena *cell = lookup_cell(tctx->cell);
 
 	u32 old_llc = tctx->llc;
 	if (refresh_task_llc_cpumask(tctx, tmasks, new_llc)) {
@@ -578,11 +596,11 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx __arena *t
 		return -EINVAL;
 
 	if (reset_vtime || !llc_is_valid(old_llc) || old_llc >= nr_llc || old_llc >= MAX_LLCS) {
-		scx_bpf_task_set_dsq_vtime(p, READ_ONCE(cell->llcs[new_llc].vtime_now));
+		scx_bpf_task_set_dsq_vtime(p, cell_llc_vtime_read(cell, new_llc));
 	} else if (old_llc != new_llc) {
-		s64 vtime_delta = p->scx.dsq_vtime - READ_ONCE(cell->llcs[old_llc].vtime_now);
+		s64 vtime_delta = p->scx.dsq_vtime - cell_llc_vtime_read(cell, old_llc);
 		scx_bpf_task_set_dsq_vtime(p,
-					   READ_ONCE(cell->llcs[new_llc].vtime_now) + vtime_delta);
+					   cell_llc_vtime_read(cell, new_llc) + vtime_delta);
 	}
 
 	tctx->llc = new_llc;

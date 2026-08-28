@@ -21,6 +21,7 @@
 #include "intf.h"
 #include "cell_cpumask.bpf.h"
 #include "dsq.bpf.h"
+#include <lib/arena_map.h>
 #include <lib/cleanup.bpf.h>
 #include <lib/cpumask.h>
 #include <lib/sdt_task.h>
@@ -28,7 +29,7 @@
 
 extern const volatile u32 nr_llc;
 
-extern struct cell cells[MAX_CELLS];
+extern struct cell __arena *cells;
 
 enum mitosis_constants {
 
@@ -45,16 +46,20 @@ enum mitosis_constants {
 const volatile bool enable_llc_awareness = false;
 const volatile u32 nr_llc = 1;
 
-static inline struct cell *lookup_cell(int idx)
+static inline struct cell __arena *lookup_cell(int idx)
 {
-	struct cell *cell;
+	return &cells[idx];
+}
 
-	cell = MEMBER_VPTR(cells, [idx]);
-	if (!cell) {
-		scx_bpf_error("Invalid cell %d", idx);
-		return NULL;
-	}
-	return cell;
+/*
+ * Cell vtimes live in the arena while the competing vtime sources are BPF map
+ * values. Keep the arena access in a noinline helper so that clang cannot merge
+ * loads from the two pointer classes into one instruction, which the verifier
+ * rejects.
+ */
+static __noinline u64 cell_llc_vtime_read(struct cell __arena *cell, u32 llc)
+{
+	return READ_ONCE(cell->llcs[llc].vtime_now);
 }
 
 /*
