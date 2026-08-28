@@ -453,6 +453,7 @@ impl introspec {
 }
 
 struct Scheduler<'a> {
+    _arenalib: ArenaLib,
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     intrspc: introspec,
@@ -519,14 +520,14 @@ impl<'a> Scheduler<'a> {
         // Initialize arena
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
         let task_size = std::mem::size_of::<types::task_ctx>();
-        let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
-        arenalib.setup()?;
+        let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)?;
 
         // Attach.
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
         let stats_server = StatsServer::new(stats::server_data(*NR_CPU_IDS as u64)).launch()?;
 
         Ok(Self {
+            _arenalib: arenalib,
             skel,
             struct_ops,
             intrspc: introspec::new(),

@@ -23,7 +23,6 @@ enum scx_task_throttle {
 };
 
 struct scx_atq {
-	union sdt_id tid;
 	rbtree_t *tree;
 	arena_spinlock_t lock;
 	u64 capacity;

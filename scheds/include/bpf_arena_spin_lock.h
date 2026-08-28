@@ -114,9 +114,9 @@ struct arena_qnode {
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
 
-extern struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
-
 #ifdef __BPF__
+
+extern struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
 
 static inline u32 encode_tail(int cpu, int idx)
 {

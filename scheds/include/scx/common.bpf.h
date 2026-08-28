@@ -27,6 +27,7 @@
 #include "user_exit_info.bpf.h"
 #include "enum_defs.autogen.h"
 #include "bpf_arena_common.bpf.h"
+#include <lib/const-defs.h>
 
 #define PF_IDLE				0x00000002	/* I am an IDLE thread */
 #define PF_IO_WORKER			0x00000010	/* Task is an IO worker */

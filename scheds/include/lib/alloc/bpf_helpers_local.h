@@ -6,8 +6,8 @@
  * It assumes the standard <bpf/bpf_helpers.h> has already been included.
  */
 
-extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const void *args,
-				   __u32 len__sz, void *aux__prog) __weak __ksym;
+extern int bpf_stream_vprintk(int stream_id, const char *fmt__str, const void *args,
+			      __u32 len__sz) __weak __ksym;
 
 #ifdef bpf_stream_printk
 #undef bpf_stream_printk
@@ -17,7 +17,7 @@ extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const vo
 ({											\
 	int ___ret = 0;									\
 											\
-	if (bpf_ksym_exists(bpf_stream_vprintk_impl)) {				\
+	if (bpf_ksym_exists(bpf_stream_vprintk)) {				\
 		static const char ___fmt[] = fmt;					\
 		unsigned long long ___param[___bpf_narg(args)];				\
 											\
@@ -26,15 +26,23 @@ extern int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const vo
 		___bpf_fill(___param, args);						\
 		_Pragma("GCC diagnostic pop")						\
 											\
-		___ret = bpf_stream_vprintk_impl(stream_id, ___fmt, ___param,		\
-						 sizeof(___param), NULL);		\
+		___ret = bpf_stream_vprintk(stream_id, ___fmt, ___param,		\
+					    sizeof(___param));				\
 	}										\
 											\
 	___ret;										\
 })
 
-#define scx_out(fmt, ...) bpf_stream_printk(1, (fmt), ##__VA_ARGS__)
-#define scx_err(fmt, ...) bpf_stream_printk(2, (fmt), ##__VA_ARGS__)
+/*
+ * Stream elements are concatenated without separators and the stream watcher
+ * consumes them line-wise, so an unterminated print glues onto whatever
+ * follows, a kernel error report included. The wrappers below terminate every
+ * print. Use them instead of raw bpf_stream_printk().
+ */
+#define scx_out(fmt, ...) bpf_stream_printk(1, fmt "\n", ##__VA_ARGS__)
+#define scx_err(fmt, ...) bpf_stream_printk(2, fmt "\n", ##__VA_ARGS__)
 
-#define scx_out_loc(fmt, ...) bpf_stream_printk(1, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
-#define scx_err_loc(fmt, ...) bpf_stream_printk(2, "%s:%d " fmt, __func__, __LINE__, ##__VA_ARGS__)
+#define scx_out_loc(fmt, ...) \
+	bpf_stream_printk(1, "%s:%d " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
+#define scx_err_loc(fmt, ...) \
+	bpf_stream_printk(2, "%s:%d " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)

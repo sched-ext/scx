@@ -28,12 +28,15 @@
 
 #include "selftest.skel.h"
 
+/* libbpf >= 1.7 declares these itself */
+#if LIBBPF_MAJOR_VERSION == 1 && LIBBPF_MINOR_VERSION < 7
 struct bpf_prog_stream_read_opts {
 	size_t sz;
 	size_t :0;
 };
 
 extern int bpf_prog_stream_read(int prog_fd, __u32 stream_id, void *buf, __u32 buf_len, struct bpf_prog_stream_read_opts *opts) __attribute__((weak));
+#endif
 
 char *topo_command = "lscpu --all --parse \
 		      | cut -f 1,2,4,9 -d ',' \
@@ -267,10 +270,13 @@ selftest(struct selftest *skel)
 	if (opts.retval)
 		fprintf(stderr, "error %d in %s\n", opts.retval, __func__);
 
+#if LIBBPF_MAJOR_VERSION == 1 && LIBBPF_MINOR_VERSION < 7
+	/* the fallback decl is weak, the symbol may be missing at runtime */
 	if (!bpf_prog_stream_read) {
 		fprintf(stderr, "[BPF Streams Unavailable]\n");
 		return 0;
 	}
+#endif
 	printf("BPF stdout:\n");
 	while ((ret = bpf_prog_stream_read(prog_fd, 1, buf, 1024, NULL)) > 0)
 		printf("%.*s", ret, buf);

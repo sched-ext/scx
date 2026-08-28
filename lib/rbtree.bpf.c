@@ -31,26 +31,22 @@ int scx_rb_init(void)
 	int ret;
 
 	/* Initialize slab allocators for rbtree_t and rbnode_t. */
-	ret = scx_alloc_init(&scx_rbtree_allocator, sizeof(rbtree_t));
+	ret = scx_alloc_init(&scx_rbtree_allocator, sizeof(rbtree_t), 8);
 	if (ret)
 		return ret;
 
 	/* Note that there is no destructor for the slab allocator. */
-	return scx_alloc_init(&scx_rbnode_allocator, sizeof(rbnode_t));
+	return scx_alloc_init(&scx_rbnode_allocator, sizeof(rbnode_t), 8);
 }
 
 u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 {
-	struct sdt_data __arena *data;
 	rbtree_t *rbtree;
 
 	/* Note that scx_alloc() returns a zero-initialized memory. */
-	data = scx_alloc(&scx_rbtree_allocator);
-	if (unlikely(!data))
+	rbtree = scx_alloc(&scx_rbtree_allocator);
+	if (unlikely(!rbtree))
 		return (u64)(NULL);
-
-	rbtree = (rbtree_t *)data->payload;
-	rbtree->tid = data->tid;
 
 	rbtree->alloc = alloc;
 	rbtree->insert = insert;
@@ -75,11 +71,11 @@ int rb_destroy(rbtree_t __arg_arena *rbtree)
 	node = rbtree->freelist;
 	while (node && can_loop) {
 		next = node->parent;
-		scx_alloc_free_idx(&scx_rbnode_allocator, node->tid.idx);
+		scx_free(&scx_rbnode_allocator, node);
 		node = next;
 	}
 
-	scx_alloc_free_idx(&scx_rbtree_allocator, rbtree->tid.idx);
+	scx_free(&scx_rbtree_allocator, rbtree);
 	return 0;
 }
 
@@ -198,7 +194,6 @@ int rb_find(rbtree_t __arg_arena *rbtree, u64 key, u64 *value)
 
 static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 {
-	struct sdt_data __arena *data;
 	rbnode_t *rbnode;
 	volatile rbnode_t *node;
 
@@ -212,12 +207,9 @@ static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 k
 	} while (cmpxchg(&rbtree->freelist, rbnode, rbnode->parent) != rbnode && can_loop);
 
 	if (!rbnode) {
-		data = scx_alloc(&scx_rbnode_allocator);
-		if (unlikely(!data))
+		rbnode = scx_alloc(&scx_rbnode_allocator);
+		if (unlikely(!rbnode))
 			return NULL;
-
-		rbnode = (rbnode_t *)data->payload;
-		rbnode->tid = data->tid;
 	}
 	
 	if (!rbnode)
