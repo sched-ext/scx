@@ -1,0 +1,184 @@
+/* Copyright (c) Meta Platforms, Inc. and affiliates. */
+/*
+ * This software may be used and distributed according to the terms of the
+ * GNU General Public License version 2.
+ *
+ * This defines the core data structures, types, and constants
+ * for the scx_nitosis scheduler, primarily containing `struct cell`
+ * and `struct task_ctx`.
+ */
+
+#pragma once
+
+#ifdef LSP
+#define __bpf__
+#include "../../../../include/scx/common.bpf.h"
+#include "../../../../include/scx/ravg_impl.bpf.h"
+#else
+#include <scx/common.bpf.h>
+#endif
+
+#include "intf.h"
+#include "cell_cpumask.bpf.h"
+#include "dsq.bpf.h"
+#include <lib/cleanup.bpf.h>
+
+extern const volatile u32 nr_llc;
+
+extern struct cell_map cells;
+
+enum mitosis_constants {
+
+	/* Root cell index */
+	ROOT_CELL_ID = 0,
+
+	/* No NUMA constraint for DSQ creation */
+	ANY_NUMA = -1,
+};
+
+/*
+ * Variables populated by userspace
+ */
+const volatile bool enable_llc_awareness = false;
+const volatile u32 nr_llc = 1;
+
+static inline struct cell *lookup_cell(int idx)
+{
+	struct cell *cell;
+
+	cell = bpf_map_lookup_elem(&cells, &idx);
+
+	if (!cell) {
+		scx_bpf_error("Invalid cell %d", idx);
+		return NULL;
+	}
+	return cell;
+}
+
+static inline struct subcell *lookup_subcell(u32 cell_idx, u32 subcell_idx)
+{
+	struct cell *cell;
+	struct subcell *subcell;
+
+	if (subcell_idx >= MAX_SUBCELLS_PER_CELL) {
+		scx_bpf_error("invalid subcell %u for cell %u", subcell_idx, cell_idx);
+		return NULL;
+	}
+
+	cell = lookup_cell(cell_idx);
+	if (!cell)
+		return NULL;
+
+	subcell = MEMBER_VPTR(cell->subcells, [subcell_idx]);
+	if (!subcell) {
+		scx_bpf_error("subcell %u out of bounds for cell %u", subcell_idx, cell_idx);
+		return NULL;
+	}
+
+	return subcell;
+}
+
+static inline struct subcell_llc *lookup_subcell_llc(struct subcell *subcell, u32 llc)
+{
+	struct subcell_llc *subcell_llc;
+
+	if (!subcell || llc >= MAX_LLCS) {
+		scx_bpf_error("invalid subcell LLC %u", llc);
+		return NULL;
+	}
+
+	subcell_llc = MEMBER_VPTR(subcell->llcs, [llc]);
+	if (!subcell_llc) {
+		scx_bpf_error("subcell LLC %u out of bounds", llc);
+		return NULL;
+	}
+
+	return subcell_llc;
+}
+
+/*
+ * task_ctx is the per-task information kept by scx_nitosis
+ */
+struct task_ctx {
+	/* cpumask is the set of valid cpus this task can schedule on */
+	/* (task's cpumask and-ed with its subcell cpumask) */
+	struct bpf_cpumask __kptr *cpumask;
+	/* Cached intersection of cpumask and the selected LLC's cpumask */
+	struct bpf_cpumask __kptr *llc_cpumask;
+	/* started_running_at for recording runtime */
+	u64 started_running_at;
+	/* Packed subcell whose vtime should be charged for this task. */
+	u32 vtime_charge_subcell;
+	u64 basis_vtime;
+	/* For the sake of monitoring, each task is owned by a cell */
+	u32 cell;
+	/* Subcell within the task's cell. Defaults to subcell 0 for now. */
+	u32 subcell;
+	/* For the sake of scheduling, a task is exclusively owned by either a
+	 * subcell or a cpu.
+	 */
+	dsq_id_t dsq;
+	/* latest configuration that was applied for this task */
+	/* (to know if it has to be re-applied) */
+	u32 configuration_seq;
+	/* Is this task allowed on all cores of its cell? */
+	bool all_cell_cpus_allowed;
+	/* Set when a task is dispatched outside its assigned subcell.
+	 * Consumed and cleared in mitosis_stopping to avoid advancing the CPU
+	 * or subcell vtime with this task's borrowed execution.
+	 */
+	bool borrowed;
+	/* Last known cgroup ID for detecting cgroup moves (used when cpu_controller_disabled) */
+	u64 cgid;
+	/* Which LLC this task is assigned to */
+	s32 llc;
+	/* LLC id used to populate llc_cpumask; mismatch means recompute */
+	s32 llc_cpumask_id;
+
+	u64 avg_runtime_ns; /* EWMA of per-wake runtimes (ns), init to 0 */
+};
+
+static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
+static inline struct cpu_ctx *lookup_cpu_ctx(int cpu);
+
+extern const volatile bool use_lockless_peek;
+
+/*
+ * Peek at the head of a DSQ. Uses lockless kfunc when available,
+ * otherwise falls back to bpf_for_each iterator.
+ */
+static inline struct task_struct *dsq_peek(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	if (use_lockless_peek)
+		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0)
+		return p;
+	return NULL;
+}
+
+static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
+{
+	u64 *vptr;
+
+	if ((vptr = MEMBER_VPTR(*cctx, .cstats[cell][idx])))
+		(*vptr) += delta;
+	else
+		scx_bpf_error("invalid cell or stat idxs: %d, %d", idx, cell);
+}
+
+static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
+{
+	cstat_add(idx, cell, cctx, 1);
+}
+
+struct cell_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cell);
+	__uint(max_entries, MAX_CELLS);
+};
+
+static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);
