@@ -28,7 +28,7 @@
 
 extern const volatile u32 nr_llc;
 
-extern struct cell_map cells;
+extern struct cell cells[MAX_CELLS];
 
 enum mitosis_constants {
 
@@ -49,8 +49,7 @@ static inline struct cell *lookup_cell(int idx)
 {
 	struct cell *cell;
 
-	cell = bpf_map_lookup_elem(&cells, &idx);
-
+	cell = MEMBER_VPTR(cells, [idx]);
 	if (!cell) {
 		scx_bpf_error("Invalid cell %d", idx);
 		return NULL;
@@ -132,12 +131,5 @@ static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *c
 {
 	cstat_add(idx, cell, cctx, 1);
 }
-
-struct cell_map {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct cell);
-	__uint(max_entries, MAX_CELLS);
-};
 
 static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);
