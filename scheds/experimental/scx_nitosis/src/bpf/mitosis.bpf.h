@@ -22,6 +22,9 @@
 #include "cell_cpumask.bpf.h"
 #include "dsq.bpf.h"
 #include <lib/cleanup.bpf.h>
+#include <lib/cpumask.h>
+#include <lib/sdt_task.h>
+#include <lib/topology.h>
 
 extern const volatile u32 nr_llc;
 

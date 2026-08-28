@@ -6093,6 +6093,7 @@ dependencies = [
  "libc",
  "maplit",
  "nix 0.31.3",
+ "scx_arena",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",

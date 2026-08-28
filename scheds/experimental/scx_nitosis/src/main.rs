@@ -32,11 +32,13 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use libbpf_rs::skel::Skel as _;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 use nix::sys::eventfd::EventFd;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -52,6 +54,7 @@ use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::NR_CPU_IDS;
 use tracing::{debug, info, trace, warn};
 use tracing_subscriber::filter::EnvFilter;
 
@@ -236,6 +239,7 @@ struct Cell {
 }
 
 struct Scheduler<'a> {
+    _arenalib: ArenaLib,
     skel: BpfSkel<'a>,
     monitor_interval: Duration,
     cells: HashMap<u32, Cell>,
@@ -381,6 +385,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_shrink_min_ns = opts.slice_shrink_min_us * 1_000;
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
         for cpu in topology.all_cpus.keys() {
             rodata.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
@@ -404,7 +409,17 @@ impl<'a> Scheduler<'a> {
             .apply(&mut skel)
             .context("mitosis_topology.apply")?;
 
-        let skel = scx_ops_load!(skel, mitosis, uei).context("loading BPF skeleton")?;
+        let mut skel = scx_ops_load!(skel, mitosis, uei).context("loading BPF skeleton")?;
+
+        // Set up the arena allocators and topology.
+        let task_size = std::mem::size_of::<types::task_ctx>();
+        let arenalib = ArenaLib::setup(
+            skel.object_mut(),
+            task_size,
+            scx_arena::CACHELINE_SIZE,
+            *NR_CPU_IDS,
+        )
+        .context("setting up arenas")?;
 
         let stats_server = StatsServer::new(stats::server_data())
             .launch()
@@ -448,6 +463,7 @@ impl<'a> Scheduler<'a> {
             .context("registering cell manager inotify with epoll")?;
 
         Ok(Self {
+            _arenalib: arenalib,
             skel,
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
