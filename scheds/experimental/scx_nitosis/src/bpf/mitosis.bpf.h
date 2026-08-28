@@ -61,11 +61,6 @@ static inline struct cell *lookup_cell(int idx)
  * task_ctx is the per-task information kept by scx_nitosis
  */
 struct task_ctx {
-	/* cpumask is the set of valid cpus this task can schedule on */
-	/* (task's cpumask and-ed with its cell cpumask) */
-	struct bpf_cpumask __kptr *cpumask;
-	/* Cached intersection of cpumask and the selected LLC's cpumask */
-	struct bpf_cpumask __kptr *llc_cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
 	/* Cell whose vtime domain should be charged for this task */
@@ -96,7 +91,21 @@ struct task_ctx {
 	u64 avg_runtime_ns; /* EWMA of per-wake runtimes (ns), init to 0 */
 };
 
-static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
+/*
+ * bpf_cpumask kptrs cannot live in arena memory, so while task_ctx lives in the
+ * arena, the task's cpumasks stay behind in task storage until the cid
+ * conversion replaces them with arena cmasks.
+ */
+struct task_masks {
+	/* cpumask is the set of valid cpus this task can schedule on */
+	/* (task's cpumask and-ed with its cell cpumask) */
+	struct bpf_cpumask __kptr *cpumask;
+	/* Cached intersection of cpumask and the selected LLC's cpumask */
+	struct bpf_cpumask __kptr *llc_cpumask;
+};
+
+static inline struct task_ctx __arena *lookup_task_ctx(struct task_struct *p);
+static inline struct task_masks *lookup_task_masks(struct task_struct *p);
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu);
 
 extern const volatile bool use_lockless_peek;
@@ -132,4 +141,4 @@ static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *c
 	cstat_add(idx, cell, cctx, 1);
 }
 
-static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);
+static inline int update_task_cpumask(struct task_struct *p, struct task_ctx __arena *tctx);

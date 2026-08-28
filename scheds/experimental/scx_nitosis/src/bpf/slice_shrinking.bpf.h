@@ -128,8 +128,8 @@ static inline void slice_shrink_apply(struct task_struct *p, u64 limit,
  * EWMA runtime. Caller must check enable_slice_shrinking and curr.
  */
 static inline void slice_shrink_on_enqueue(struct task_struct *curr,
-					   struct task_ctx *pinned_waiter_tctx, u32 cell,
-					   struct cpu_ctx *cctx)
+					   struct task_ctx __arena *pinned_waiter_tctx,
+					   u32 cell, struct cpu_ctx *cctx)
 {
 	enum slice_shrink_result result;
 	u64 limit = slice_shrink_limit(pinned_waiter_tctx->avg_runtime_ns, &result);
@@ -164,9 +164,13 @@ static inline int slice_shrink_on_running(struct task_struct *p, u32 cell, struc
 	if (!waiter)
 		return 0;
 
-	struct task_ctx *wtctx = lookup_task_ctx(waiter);
+	/*
+	 * The waiter was peeked without pinning. The RCU-protected ctx lookup
+	 * fails if the waiter is already gone, see mitosis_exit_task().
+	 */
+	struct task_ctx __arena *wtctx = __scx_task_data(waiter);
 	if (!wtctx)
-		return -ENOENT;
+		return 0;
 
 	enum slice_shrink_result result;
 	u64 limit = slice_shrink_limit(wtctx->avg_runtime_ns, &result);

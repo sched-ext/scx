@@ -149,18 +149,26 @@ struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
-	__type(value, struct task_ctx);
-} task_ctxs SEC(".maps");
+	__type(value, struct task_masks);
+} task_masks SEC(".maps");
 
-static inline struct task_ctx *lookup_task_ctx(struct task_struct *p)
+static inline struct task_ctx __arena *lookup_task_ctx(struct task_struct *p)
 {
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx = scx_task_data(p);
 
-	if ((tctx = bpf_task_storage_get(&task_ctxs, p, 0, 0))) {
-		return tctx;
-	}
+	if (!tctx)
+		scx_bpf_error("task_ctx lookup failed");
+	return tctx;
+}
 
-	scx_bpf_error("task_ctx lookup failed");
+static inline struct task_masks *lookup_task_masks(struct task_struct *p)
+{
+	struct task_masks *tmasks;
+
+	if ((tmasks = bpf_task_storage_get(&task_masks, p, 0, 0)))
+		return tmasks;
+
+	scx_bpf_error("task_masks lookup failed");
 	return NULL;
 }
 
@@ -191,9 +199,10 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 
 struct cell_cpumask_map cell_cpumasks SEC(".maps");
 
-static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx)
+static inline int update_task_cpumask(struct task_struct *p, struct task_ctx __arena *tctx)
 {
 	const struct cpumask *cell_cpumask;
+	struct task_masks *tmasks;
 	struct cpu_ctx *cpu_ctx;
 	bool all_cell_cpus_allowed;
 	u32 cpu;
@@ -202,10 +211,13 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	if (!(cell_cpumask = lookup_cell_cpumask(tctx->cell)))
 		return -ENOENT;
 
-	if (!tctx->cpumask)
+	if (!(tmasks = lookup_task_masks(p)))
+		return -ENOENT;
+
+	if (!tmasks->cpumask)
 		return -EINVAL;
 
-	bpf_cpumask_and(tctx->cpumask, cell_cpumask, p->cpus_ptr);
+	bpf_cpumask_and(tmasks->cpumask, cell_cpumask, p->cpus_ptr);
 	if (enable_llc_awareness)
 		invalidate_task_llc_cpumask(tctx);
 
@@ -281,7 +293,7 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
 	}
 
 	if (enable_llc_awareness) {
-		ret = update_task_llc_assignment(p, tctx, scx_bpf_task_cpu(p));
+		ret = update_task_llc_assignment(p, tctx, tmasks, scx_bpf_task_cpu(p));
 		if (ret)
 			return ret;
 		tctx->all_cell_cpus_allowed = true;
@@ -307,7 +319,8 @@ static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tc
  * Figure out the task's cell, dsq and store the corresponding cpumask in the
  * task_ctx.
  */
-static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx, struct cgroup *cg)
+static inline int update_task_cell(struct task_struct *p, struct task_ctx __arena *tctx,
+				   struct cgroup *cg)
 {
 	struct cgrp_ctx *cgc;
 
@@ -369,7 +382,8 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 /*
  * Get task's cgroup, update its cell, and release the cgroup.
  */
-static __always_inline int refresh_task_cell(struct task_struct *p, struct task_ctx *tctx)
+static __always_inline int refresh_task_cell(struct task_struct *p,
+					     struct task_ctx __arena *tctx)
 {
 	struct cgroup *cgrp __free(cgroup) = task_cgroup(p);
 	if (!cgrp)
@@ -405,7 +419,8 @@ static s32 pick_idle_cpu_from(struct task_struct *p, const struct cpumask *cand_
 }
 
 /* True when the task's cell/cpumask mapping is stale, read-only */
-static __always_inline bool task_needs_refresh(struct task_struct *p, struct task_ctx *tctx)
+static __always_inline bool task_needs_refresh(struct task_struct *p,
+					       struct task_ctx __arena *tctx)
 {
 	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq))
 		return true;
@@ -431,7 +446,8 @@ static __always_inline bool task_needs_refresh(struct task_struct *p, struct tas
 }
 
 /* Check if we need to update the cell/cpumask mapping */
-static __always_inline int maybe_refresh_cell(struct task_struct *p, struct task_ctx *tctx)
+static __always_inline int maybe_refresh_cell(struct task_struct *p,
+					      struct task_ctx __arena *tctx)
 {
 	if (task_needs_refresh(p, tctx))
 		return refresh_task_cell(p, tctx);
@@ -439,12 +455,16 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p, struct task
 }
 
 static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, struct cpu_ctx *cctx,
-					 struct task_ctx *tctx)
+					 struct task_ctx __arena *tctx)
 {
+	struct task_masks *tmasks;
 	struct cpumask *task_cpumask;
 	s32 cpu;
 
-	if (!(task_cpumask = (struct cpumask *)tctx->cpumask)) {
+	if (!(tmasks = lookup_task_masks(p)))
+		return -1;
+
+	if (!(task_cpumask = (struct cpumask *)tmasks->cpumask)) {
 		scx_bpf_error("Failed to get task cpumask");
 		return -1;
 	}
@@ -464,10 +484,10 @@ static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, st
 	if (enable_llc_awareness && tctx->all_cell_cpus_allowed) {
 		struct bpf_cpumask *llc_cpumask;
 		const struct cpumask *llc_mask;
-		s32 llc = choose_task_llc(tctx, prev_cpu);
+		s32 llc = choose_task_llc(tctx, tmasks, prev_cpu);
 
-		if (llc_is_valid(llc) && !refresh_task_llc_cpumask(tctx, (u32)llc)) {
-			llc_cpumask = tctx->llc_cpumask;
+		if (llc_is_valid(llc) && !refresh_task_llc_cpumask(tctx, tmasks, (u32)llc)) {
+			llc_cpumask = tmasks->llc_cpumask;
 			llc_mask = cast_mask(llc_cpumask);
 			if (!llc_mask)
 				return -1;
@@ -492,7 +512,8 @@ static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, st
  * Returns: CPU number >= 0 on success, -1 on error, -EBUSY if no idle CPU found.
  */
 static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
-					     struct cpu_ctx *cctx, struct task_ctx *tctx, bool kick)
+					     struct cpu_ctx *cctx,
+					     struct task_ctx __arena *tctx, bool kick)
 {
 	s32 cpu;
 
@@ -546,8 +567,8 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
  * Switch task to a new CPU's per-CPU DSQ with vtime reset.
  * Returns new_cpu on success, -1 on failure (tctx unchanged).
  */
-static __always_inline s32 update_pinned_dsq(struct task_struct *p, struct task_ctx *tctx,
-					     s32 new_cpu)
+static __always_inline s32 update_pinned_dsq(struct task_struct *p,
+					     struct task_ctx __arena *tctx, s32 new_cpu)
 {
 	s32 current_cpu = get_cpu_from_dsq(tctx->dsq);
 	if (current_cpu < 0)
@@ -566,7 +587,8 @@ static __always_inline s32 update_pinned_dsq(struct task_struct *p, struct task_
 }
 
 static __always_inline s32 select_pinned_cpu(struct task_struct *p, s32 prev_cpu,
-					     struct task_ctx *tctx, bool *idle_cpu_cleared)
+					     struct task_ctx __arena *tctx,
+					     bool *idle_cpu_cleared)
 {
 	s32 cpu;
 
@@ -602,7 +624,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 {
 	s32 cpu;
 	struct cpu_ctx *cctx;
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
@@ -638,23 +660,28 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if ((cpu = try_pick_idle_cpu(p, prev_cpu, cctx, tctx, false)) >= 0)
 		return cpu;
 
-	if (!tctx->cpumask) {
-		scx_bpf_error("tctx->cpumask should never be NULL");
+	struct task_masks *tmasks;
+	if (!(tmasks = lookup_task_masks(p)))
+		return prev_cpu;
+
+	if (!tmasks->cpumask) {
+		scx_bpf_error("tmasks->cpumask should never be NULL");
 		return prev_cpu;
 	}
 	/*
 	 * All else failed, send it to the prev cpu (if that's valid), otherwise any
 	 * valid cpu.
 	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, cast_mask(tctx->cpumask)) && tctx->cpumask)
-		cpu = bpf_cpumask_any_distribute(cast_mask(tctx->cpumask));
+	if (!bpf_cpumask_test_cpu(prev_cpu, cast_mask(tmasks->cpumask)) && tmasks->cpumask)
+		cpu = bpf_cpumask_any_distribute(cast_mask(tmasks->cpumask));
 	else
 		cpu = prev_cpu;
 
 	return cpu;
 }
 
-static __always_inline s32 enqueue_pinned_cpu(struct task_struct *p, struct task_ctx *tctx)
+static __always_inline s32 enqueue_pinned_cpu(struct task_struct *p,
+					      struct task_ctx __arena *tctx)
 {
 	/*
 	 * Dynamic affinity balancing: if current assigned CPU
@@ -685,7 +712,7 @@ static __always_inline s32 enqueue_pinned_cpu(struct task_struct *p, struct task
 void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cctx;
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 	struct cell *cell;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime;
@@ -740,14 +767,13 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		if (cpu == -1)
 			return;
 		if (cpu == -EBUSY) {
-			/*
-			 * Verifier gets unhappy claiming two different pointer types for
-			 * the same instruction here. This fixes it
-			 */
-			barrier_var(tctx);
-			if (tctx->cpumask)
+			struct task_masks *tmasks;
+
+			if (!(tmasks = lookup_task_masks(p)))
+				return;
+			if (tmasks->cpumask)
 				cpu = bpf_cpumask_any_distribute(
-					(const struct cpumask *)tctx->cpumask);
+					(const struct cpumask *)tmasks->cpumask);
 		}
 	}
 
@@ -903,7 +929,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		 * goes idle.
 		 */
 		if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
-			struct task_ctx *tctx;
+			struct task_ctx __arena *tctx;
 			bool stay = false;
 
 			if (!(tctx = lookup_task_ctx(prev)))
@@ -958,7 +984,7 @@ static inline void advance_cell_llc_vtime(struct cell *cell, u32 llc_idx, u64 ta
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
 	struct cpu_ctx *cctx;
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 	struct cell *cell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
@@ -995,7 +1021,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
  * stopping() after each run. Starts at 0 and converges over ~8 runs. Used by
  * features like slice shrinking to estimate how long a task typically runs.
  */
-static inline void update_task_runtime_ewma(struct task_ctx *tctx, u64 used)
+static inline void update_task_runtime_ewma(struct task_ctx __arena *tctx, u64 used)
 {
 	if (unlikely(!tctx->avg_runtime_ns))
 		/* Init */
@@ -1007,7 +1033,7 @@ static inline void update_task_runtime_ewma(struct task_ctx *tctx, u64 used)
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cctx;
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 	struct cell *cell;
 	u64 now, used;
 	u32 cidx;
@@ -1201,7 +1227,7 @@ void BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p, struct cgroup *from,
 		    struct cgroup *to)
 {
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 
 	if (cpu_controller_disabled)
 		return;
@@ -1243,7 +1269,7 @@ int BPF_PROG(tp_cgroup_rmdir, struct cgroup *cgrp, const char *cgrp_path)
 
 void BPF_STRUCT_OPS(mitosis_set_cpumask, struct task_struct *p, const struct cpumask *cpumask)
 {
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
@@ -1273,28 +1299,50 @@ s32 validate_userspace_data()
 	return 0;
 }
 
+/*
+ * Task ctxs are RCU protected and freed when the task leaves the scheduler: a
+ * lookup fails once the task is gone and a looked-up ctx stays valid until the
+ * end of the RCU section.
+ */
+void BPF_STRUCT_OPS(mitosis_exit_task, struct task_struct *p, struct scx_exit_task_args *args)
+{
+	scx_task_free_rcu(p);
+}
+
 static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 {
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
+	struct task_masks *tmasks;
 	struct bpf_cpumask *cpumask;
 	struct bpf_cpumask *llc_cpumask;
+	int ret;
 
-	tctx = bpf_task_storage_get(&task_ctxs, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	tctx = scx_task_alloc(p);
 	if (!tctx) {
 		scx_bpf_error("task_ctx allocation failure");
 		return -ENOMEM;
 	}
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
+	tmasks = bpf_task_storage_get(&task_masks, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tmasks) {
+		scx_bpf_error("task_masks allocation failure");
+		ret = -ENOMEM;
+		goto err;
+	}
 
-	cpumask = bpf_kptr_xchg(&tctx->cpumask, cpumask);
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	cpumask = bpf_kptr_xchg(&tmasks->cpumask, cpumask);
 	if (cpumask) {
 		/* Should never happen as we just inserted it above. */
 		bpf_cpumask_release(cpumask);
-		scx_bpf_error("tctx cpumask is unexpectedly populated on init");
-		return -EINVAL;
+		scx_bpf_error("tmasks cpumask is unexpectedly populated on init");
+		ret = -EINVAL;
+		goto err;
 	}
 
 	/* Initialize LLC assignment fields */
@@ -1304,18 +1352,29 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 		llc_cpumask = bpf_cpumask_create();
 		if (!llc_cpumask) {
 			scx_bpf_error("failed to allocate task LLC cpumask");
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto err;
 		}
 
-		llc_cpumask = bpf_kptr_xchg(&tctx->llc_cpumask, llc_cpumask);
+		llc_cpumask = bpf_kptr_xchg(&tmasks->llc_cpumask, llc_cpumask);
 		if (llc_cpumask) {
 			bpf_cpumask_release(llc_cpumask);
-			scx_bpf_error("tctx llc_cpumask is unexpectedly populated on init");
-			return -EINVAL;
+			scx_bpf_error("tmasks llc_cpumask is unexpectedly populated on init");
+			ret = -EINVAL;
+			goto err;
 		}
 	}
 
-	return update_task_cell(p, tctx, cgrp);
+	ret = update_task_cell(p, tctx, cgrp);
+	if (ret)
+		goto err;
+
+	return 0;
+
+err:
+	/* a failed init gets no ops.exit_task() and no one saw the ctx */
+	scx_task_free(p);
+	return ret;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
@@ -1358,8 +1417,22 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p,
 	 */
 	cgrp = bpf_cgroup_from_id(args->cgroup->kn->id);
 	if (!cgrp) {
-		scx_bpf_error("bpf_cgroup_from_id() failed");
-		return -ENOENT;
+		/*
+		 * The ID lookup fails for a cgroup that has already been
+		 * removed, which can happen for an exiting task getting
+		 * initialized during scheduler load. Fall back to the root
+		 * cgroup. This lands the task in the root cell even when the
+		 * dying cgroup's ctx, which update_task_cell() would have
+		 * preferred, is still around.
+		 */
+		if (!(exiting_task_workaround_enabled && (p->flags & PF_EXITING))) {
+			scx_bpf_error("bpf_cgroup_from_id() failed");
+			return -ENOENT;
+		}
+
+		cgrp = bpf_cgroup_from_id(root_cgid);
+		if (!cgrp)
+			return -ENOENT;
 	}
 	ret = init_task_impl(p, cgrp);
 	if (ret) {
@@ -1492,7 +1565,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 
 void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx, struct task_struct *p)
 {
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
@@ -1981,6 +2054,7 @@ SCX_OPS_DEFINE(mitosis,
 	       .stopping		= (void *)mitosis_stopping,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
 	       .init_task		= (void *)mitosis_init_task,
+	       .exit_task		= (void *)mitosis_exit_task,
 	       .cgroup_init		= (void *)mitosis_cgroup_init,
 	       .cgroup_exit		= (void *)mitosis_cgroup_exit,
 	       .cgroup_move		= (void *)mitosis_cgroup_move,

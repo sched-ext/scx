@@ -34,7 +34,7 @@ static inline bool llc_is_valid(u32 llc_id)
 	return llc_id < MAX_LLCS;
 }
 
-static inline void init_task_llc(struct task_ctx *tctx)
+static inline void init_task_llc(struct task_ctx __arena *tctx)
 {
 	tctx->llc = LLC_INVALID;
 	tctx->llc_cpumask_id = LLC_INVALID;
@@ -50,12 +50,12 @@ static inline const struct cpumask *lookup_llc_cpumask(u32 llc)
 	return (const struct cpumask *)&llc_to_cpus[llc];
 }
 
-static inline void invalidate_task_llc_cpumask(struct task_ctx *tctx)
+static inline void invalidate_task_llc_cpumask(struct task_ctx __arena *tctx)
 {
 	tctx->llc_cpumask_id = LLC_INVALID;
 }
 
-static inline void invalidate_task_llc(struct task_ctx *tctx)
+static inline void invalidate_task_llc(struct task_ctx __arena *tctx)
 {
 	tctx->llc = LLC_INVALID;
 	invalidate_task_llc_cpumask(tctx);
@@ -77,12 +77,13 @@ static inline s32 llc_from_cpu(s32 cpu)
 	return (s32)llc;
 }
 
-static inline s32 choose_task_llc(struct task_ctx *tctx, s32 preferred_cpu)
+static inline s32 choose_task_llc(struct task_ctx __arena *tctx, struct task_masks *tmasks,
+				  s32 preferred_cpu)
 {
 	const struct cpumask *cpumask;
 	s32 llc;
 
-	cpumask = cast_mask(tctx->cpumask);
+	cpumask = cast_mask(tmasks->cpumask);
 	if (!cpumask || bpf_cpumask_empty(cpumask))
 		return LLC_INVALID;
 
@@ -97,16 +98,17 @@ static inline s32 choose_task_llc(struct task_ctx *tctx, s32 preferred_cpu)
 	return llc_from_cpu(cpu);
 }
 
-static inline int refresh_task_llc_cpumask(struct task_ctx *tctx, u32 llc)
+static inline int refresh_task_llc_cpumask(struct task_ctx __arena *tctx,
+					   struct task_masks *tmasks, u32 llc)
 {
 	const struct cpumask *base_mask;
 	const struct cpumask *cached_mask;
 	const struct cpumask *llc_mask;
 	struct bpf_cpumask *llc_cpumask;
 
-	llc_cpumask = tctx->llc_cpumask;
+	llc_cpumask = tmasks->llc_cpumask;
 	if (!llc_cpumask) {
-		scx_bpf_error("tctx->llc_cpumask is NULL");
+		scx_bpf_error("tmasks->llc_cpumask is NULL");
 		return -EINVAL;
 	}
 
@@ -117,9 +119,9 @@ static inline int refresh_task_llc_cpumask(struct task_ctx *tctx, u32 llc)
 		tctx->llc_cpumask_id = LLC_INVALID;
 	}
 
-	base_mask = cast_mask(tctx->cpumask);
+	base_mask = cast_mask(tmasks->cpumask);
 	if (!base_mask) {
-		scx_bpf_error("tctx->cpumask is NULL");
+		scx_bpf_error("tmasks->cpumask is NULL");
 		return -EINVAL;
 	}
 
@@ -416,18 +418,19 @@ static inline s32 try_draining_work(u32 cell_id, s32 local_llc, struct cpu_ctx *
 			struct task_struct *p;
 
 			bpf_for_each(scx_dsq, p, candidate_dsq.raw, 0) {
-				struct task_ctx *tctx;
+				struct task_ctx __arena *tctx;
 				struct cpu_ctx *target_cctx;
 				dsq_id_t cpu_dsq;
 				u64 basis_vtime;
 				u32 cpu;
 
-				tctx = lookup_task_ctx(p);
-				if (!tctx) {
-					scx_bpf_error(
-						"lookup_task_ctx() failed in try_draining_work()");
+				/*
+				 * task_ctx is RCU protected and @p can exit and
+				 * unlink it at any point.
+				 */
+				tctx = __scx_task_data(p);
+				if (!tctx)
 					break;
-				}
 
 				cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 				if (cpu >= nr_possible_cpus || cpu >= MAX_CPUS)
@@ -540,7 +543,8 @@ static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 	return -ENOENT;
 }
 
-static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32 new_llc,
+static inline int set_task_llc(struct task_struct *p, struct task_ctx __arena *tctx,
+			       struct task_masks *tmasks, u32 new_llc,
 			       bool reset_vtime)
 {
 	if (!tctx) {
@@ -560,7 +564,7 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 	}
 
 	u32 old_llc = tctx->llc;
-	if (refresh_task_llc_cpumask(tctx, new_llc)) {
+	if (refresh_task_llc_cpumask(tctx, tmasks, new_llc)) {
 		scx_bpf_error("failed to refresh task LLC cpumask for cell %u LLC %u", tctx->cell,
 			      new_llc);
 		return -EINVAL;
@@ -585,38 +589,46 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 	return 0;
 }
 
-static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx,
+static inline int update_task_llc_assignment(struct task_struct *p,
+					     struct task_ctx __arena *tctx,
+					     struct task_masks *tmasks,
 					     s32 preferred_cpu)
 {
-	s32 new_llc = choose_task_llc(tctx, preferred_cpu);
+	s32 new_llc;
+
+	new_llc = choose_task_llc(tctx, tmasks, preferred_cpu);
 	if (!llc_is_valid(new_llc))
 		return -EINVAL;
 
-	return set_task_llc(p, tctx, (u32)new_llc, true);
+	return set_task_llc(p, tctx, tmasks, (u32)new_llc, true);
 }
 
-static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx *tctx,
+static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx __arena *tctx,
 					s32 preferred_cpu)
 {
+	struct task_masks *tmasks;
 	int ret;
 	s32 new_llc;
 
 	if (!tctx->all_cell_cpus_allowed)
 		return 0;
 
+	if (!(tmasks = lookup_task_masks(p)))
+		return -ENOENT;
+
 	/* Retag only all-cell tasks; pinned tasks keep CPU DSQs. */
-	new_llc = choose_task_llc(tctx, preferred_cpu);
+	new_llc = choose_task_llc(tctx, tmasks, preferred_cpu);
 	if (!llc_is_valid(new_llc))
 		return 0;
 
 	if (tctx->llc == new_llc) {
-		ret = refresh_task_llc_cpumask(tctx, (u32)new_llc);
+		ret = refresh_task_llc_cpumask(tctx, tmasks, (u32)new_llc);
 		if (ret && !llc_is_valid(tctx->llc))
 			return -EINVAL;
 		return 0;
 	}
 
-	ret = set_task_llc(p, tctx, (u32)new_llc, false);
+	ret = set_task_llc(p, tctx, tmasks, (u32)new_llc, false);
 	if (ret && llc_is_valid(tctx->llc))
 		return 0;
 	return ret;
