@@ -817,6 +817,7 @@ __hidden
 int calc_cpuperf_target(struct cpu_ctx *cpuc)
 {
 	u32 max_util_wall, max_util_invr, cpuperf_target, cap;
+	u32 step, cur;
 
 	/*
 	 * The CPU utilization decides the frequency. The bigger one between
@@ -854,6 +855,24 @@ int calc_cpuperf_target(struct cpu_ctx *cpuc)
 							  cpuc->cur_steal_util_invr));
 			cpuperf_target = min(max_util_invr, cap);
 		}
+	}
+
+	/*
+	 * Committing a target is not free, so utilization jitter around a
+	 * steady load should not reach cpufreq. Round the target up to a step
+	 * boundary, and apply a deadband on the way down: a lower target is
+	 * accepted only once it has fallen by cap/32.
+	 */
+	step = cap >> LAVD_CPUPERF_UP_SHIFT;
+	if (step < 1) {
+		step = 1;
+	}
+	cpuperf_target = min(round_up(cpuperf_target, step), cap);
+
+	cur = cpuc->cpuperf_target;
+	if (cpuperf_target < cur &&
+	    (cur - cpuperf_target) < (cap >> LAVD_CPUPERF_DOWN_SHIFT)) {
+		return 0;
 	}
 
 	cpuc->cpuperf_target = cpuperf_target;

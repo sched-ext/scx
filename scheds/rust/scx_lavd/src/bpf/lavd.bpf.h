@@ -104,6 +104,8 @@ enum consts_internal {
 
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= p2s(85), /* 85.0% */
 	LAVD_CPU_UTIL_THR_FOR_MAX_FREQ	= p2s(80), /* cpu utilization threshold to update max freq */
+	LAVD_CPUPERF_UP_SHIFT		= 6, /* raise in steps of capacity / 64 */
+	LAVD_CPUPERF_DOWN_SHIFT		= 5, /* lower only past a capacity / 32 deadband */
 
 	LAVD_CC_REQ_CAPACITY_HEADROOM	= p2s(25), /* 25%: inflate required capacity by 25% to handle sudden spikes */
 	LAVD_CC_PER_CPU_UTIL		= p2s(50), /* 50%: maximum per-CPU utilization */
