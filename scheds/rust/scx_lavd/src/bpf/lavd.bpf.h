@@ -385,7 +385,6 @@ struct cpu_ctx {
 	u8		cpdom_alt_id;	/* compute domain id of alternative type */
 	u8		is_online;	/* is this CPU online? */
 	u8		__pad0[2];
-	u32		cpuperf_cur;	/* CPU's current performance target */
 	volatile s32	futex_op;	/* futex op in futex V1 */
 
 	/* --- cacheline 1 boundary (64 bytes): write accumulators --- */
@@ -460,6 +459,9 @@ struct cpu_ctx {
 	volatile u32	avg_util_invr;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
 	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
 	volatile u32	lat_headroom;	/* latency headroom available to this CPU (inversely related to irq/steal time) */
+	volatile u32	cpuperf_target;	/* performance target computed at the last sys_stat
+					   interval, committed at ops.running() */
+	u32		cpuperf_cur;	/* CPU's current performance target */
 	/*
 	 * Steal utilization: steal_time as a fraction of duration_wall,
 	 * in LAVD_SHIFT fixed-point. cur_* is the current interval value;

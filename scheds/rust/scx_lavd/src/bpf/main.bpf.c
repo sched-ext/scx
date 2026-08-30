@@ -2517,6 +2517,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->prev_task_clk = scx_clock_task(cpu);
 		cpuc->prev_pelt_clk = scx_clock_pelt(cpu);
 		cpuc->avg_perf_factor = LAVD_SCALE;
+		cpuc->cpuperf_cur = SCX_CPUPERF_ONE;
 
 		sum_capacity += cpuc->max_capacity;
 

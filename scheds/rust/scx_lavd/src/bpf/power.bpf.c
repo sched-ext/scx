@@ -814,7 +814,7 @@ static __always_inline u32 scx_only_util(u32 total, u32 steal)
 }
 
 __hidden
-int update_cpuperf_target(struct cpu_ctx *cpuc)
+int calc_cpuperf_target(struct cpu_ctx *cpuc)
 {
 	u32 max_util_wall, max_util_invr, cpuperf_target, cap;
 
@@ -856,8 +856,21 @@ int update_cpuperf_target(struct cpu_ctx *cpuc)
 		}
 	}
 
+	cpuc->cpuperf_target = cpuperf_target;
+
+	return 0;
+}
+
+__hidden
+int update_cpuperf_target(struct cpu_ctx *cpuc)
+{
+	u32 cpuperf_target = cpuc->cpuperf_target;
+
 	/*
-	 * Update the performance target once it changes.
+	 * Commit the target computed at the last sys_stat interval. This must
+	 * run on the target CPU itself, since schedutil ignores an update made
+	 * from a CPU outside the policy unless the cpufreq driver allows DVFS
+	 * from any CPU.
 	 */
 	if (cpuc->cpuperf_cur != cpuperf_target) {
 		scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);
