@@ -806,21 +806,36 @@ unlock_out:
 __hidden
 int update_cpuperf_target(struct cpu_ctx *cpuc)
 {
-	u32 util_wall, max_util_wall, cpuperf_target;
+	u32 max_util_wall, max_util_invr, cpuperf_target, cap;
 
 	/*
 	 * The CPU utilization decides the frequency. The bigger one between
 	 * the running average and the recent utilization is used to respond
 	 * quickly upon load spikes. When the utilization is greater than
 	 * LAVD_CPU_UTIL_MAX_FOR_CPUPERF (85%), ceil to 100%.
+	 *
+	 * The performance target is on the system-wide capacity scale, where
+	 * SCX_CPUPERF_ONE is the most capable CPU, not a ratio of this CPU's
+	 * own busy time. Scale it by the CPU's capacity. The proportional part
+	 * uses the capacity- and frequency-invariant utilization, which does
+	 * not depend on the frequency we end up picking.
+	 *
+	 * Note that we should use scx_bpf_cpuperf_cap() because that is
+	 * what actually schedutil takes care of.
 	 */
-	if (!no_freq_scaling) {
+	cap = scx_bpf_cpuperf_cap(cpuc->cpu_id);
+	if (no_freq_scaling) {
+		cpuperf_target = cap;
+	} else {
 		max_util_wall = max(cpuc->avg_util_wall, cpuc->cur_util_wall);
-		util_wall = (max_util_wall < LAVD_CPU_UTIL_MAX_FOR_CPUPERF) ?
-				max_util_wall : LAVD_SCALE;
-		cpuperf_target = (util_wall * SCX_CPUPERF_ONE) >> LAVD_SHIFT;
-	} else
-		cpuperf_target = SCX_CPUPERF_ONE;
+		if (max_util_wall >= LAVD_CPU_UTIL_MAX_FOR_CPUPERF) {
+			cpuperf_target = cap;
+		} else {
+			max_util_invr = max(cpuc->avg_util_invr,
+					    cpuc->cur_util_invr);
+			cpuperf_target = min(max_util_invr, cap);
+		}
+	}
 
 	/*
 	 * Update the performance target once it changes.

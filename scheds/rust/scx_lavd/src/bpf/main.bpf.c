@@ -1718,10 +1718,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	update_stat_for_running(p, taskc, cpuc, now);
 
 	/*
-	 * Calculate the task's CPU performance target and update if the new
-	 * target is higher than the current one. The CPU's performance target
-	 * urgently increases according to task's target but it decreases
-	 * gradually according to EWMA of past performance targets.
+	 * Update this CPU's performance target from its utilization.
 	 */
 	update_cpuperf_target(cpuc);
 
