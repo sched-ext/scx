@@ -803,6 +803,16 @@ unlock_out:
 	return err;
 }
 
+/*
+ * The utilization counts all non-idle time, including what RT/DL and IRQ
+ * stole from SCX. schedutil adds those on its own, so the target must carry
+ * the SCX part only.
+ */
+static __always_inline u32 scx_only_util(u32 total, u32 steal)
+{
+	return (total > steal) ? (total - steal) : 0;
+}
+
 __hidden
 int update_cpuperf_target(struct cpu_ctx *cpuc)
 {
@@ -822,17 +832,26 @@ int update_cpuperf_target(struct cpu_ctx *cpuc)
 	 *
 	 * Note that we should use scx_bpf_cpuperf_cap() because that is
 	 * what actually schedutil takes care of.
+	 *
+	 * Both utilizations are taken net of the stolen time, since schedutil
+	 * accounts for RT/DL and IRQ separately; passing the total would count
+	 * them twice.
 	 */
 	cap = scx_bpf_cpuperf_cap(cpuc->cpu_id);
 	if (no_freq_scaling) {
 		cpuperf_target = cap;
 	} else {
-		max_util_wall = max(cpuc->avg_util_wall, cpuc->cur_util_wall);
+		max_util_wall = max(scx_only_util(cpuc->avg_util_wall,
+						  cpuc->avg_steal_util_wall),
+				    scx_only_util(cpuc->cur_util_wall,
+						  cpuc->cur_steal_util_wall));
 		if (max_util_wall >= LAVD_CPU_UTIL_MAX_FOR_CPUPERF) {
 			cpuperf_target = cap;
 		} else {
-			max_util_invr = max(cpuc->avg_util_invr,
-					    cpuc->cur_util_invr);
+			max_util_invr = max(scx_only_util(cpuc->avg_util_invr,
+							  cpuc->avg_steal_util_invr),
+					    scx_only_util(cpuc->cur_util_invr,
+							  cpuc->cur_steal_util_invr));
 			cpuperf_target = min(max_util_invr, cap);
 		}
 	}
