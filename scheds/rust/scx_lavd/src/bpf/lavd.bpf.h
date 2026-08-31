@@ -300,6 +300,14 @@ struct cpdom_ctx {
 	u32	avg_dom_pinned_util_invr_sum;	    /* the sum of average invariant domain-pinned task utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
+	u32	nr_overflow_cpus;		    /* count of overflow CPUs in this cpdom,
+						     * maintained via atomic inc/dec at every
+						     * overflow cpumask mutation. clang does
+						     * not support atomic ops on 16-bit fields,
+						     * so this is u32 (not u16 like
+						     * nr_active_cpus). */
+	u32	cap_sum_overflow_cpus;		    /* sum of effective_capacity of overflow
+						     * CPUs in this cpdom, atomic. */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
 
 	/* per-cpdom preemption vulnerability threshold tracking */
@@ -823,25 +831,54 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 /* Overflow-set bookkeeping helpers. */
 
 /*
- * Atomically add @cpu to the global overflow cpumask. Mirrors the return
- * semantics of bpf_cpumask_test_and_set_cpu(): true if the bit was
- * already set, false if it was newly set.
+ * Atomically add @cpu to the global overflow cpumask and, on a 0->1
+ * transition, bump the per-cpdom (nr_overflow_cpus,
+ * cap_sum_overflow_cpus) counters used by completion-time-based
+ * migration to estimate cpdom throughput over active+overflow CPUs.
+ *
+ * Returns true if the bit was already set (no counter update); false if
+ * it was newly set (counters bumped). Mirrors the return semantics of
+ * bpf_cpumask_test_and_set_cpu().
  */
 static __always_inline bool
 ovrflw_test_and_set(struct bpf_cpumask *ovrflw, s32 cpu)
 {
-	return bpf_cpumask_test_and_set_cpu(cpu, ovrflw);
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (bpf_cpumask_test_and_set_cpu(cpu, ovrflw))
+		return true;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc || !(cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])))
+		return false;
+	__sync_fetch_and_add(&cpdc->nr_overflow_cpus, 1);
+	__sync_fetch_and_add(&cpdc->cap_sum_overflow_cpus,
+			     cpuc->effective_capacity);
+	return false;
 }
 
 /*
- * Atomically remove @cpu from the global overflow cpumask. Mirrors the
- * return semantics of bpf_cpumask_test_and_clear_cpu(): true if the bit
- * was set before this call, false if it was already clear.
+ * Atomically remove @cpu from the global overflow cpumask and, on a
+ * 1->0 transition, decrement the per-cpdom counters. Returns true if
+ * the bit was set before this call (counters decremented); false if it
+ * was already clear. Mirrors the return semantics of
+ * bpf_cpumask_test_and_clear_cpu().
  */
 static __always_inline bool
 ovrflw_test_and_clear(struct bpf_cpumask *ovrflw, s32 cpu)
 {
-	return bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (!bpf_cpumask_test_and_clear_cpu(cpu, ovrflw))
+		return false;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc || !(cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])))
+		return true;
+	__sync_fetch_and_sub(&cpdc->nr_overflow_cpus, 1);
+	__sync_fetch_and_sub(&cpdc->cap_sum_overflow_cpus,
+			     cpuc->effective_capacity);
+	return true;
 }
 
 /* Load balancer helpers. */
