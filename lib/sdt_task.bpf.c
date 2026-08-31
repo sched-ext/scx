@@ -85,21 +85,29 @@ void __arena *scx_task_data(struct task_struct *p)
 	return data;
 }
 
+/*
+ * Repeated and concurrent frees are no-ops: whoever claims the pointer frees
+ * the allocation. The task_storage entry is left for the kernel to reclaim
+ * when the task itself is freed, which takes the immediate free path and keeps
+ * task exit off RCU-tasks-trace deferral.
+ */
 __hidden
 void scx_task_free(struct task_struct *p)
 {
 	struct scx_task_map_val *mval;
+	void __arena *data;
 
 	scx_arena_subprog_init();
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0, 0);
-	if (!mval) {
-		scx_err_loc("bpf_task_storage_get failed");
+	if (unlikely(!mval))
 		return;
-	}
 
-	scx_alloc_free_idx(&scx_task_allocator, mval->tid.idx);
-	bpf_task_storage_delete(&scx_task_map, p);
+	data = (void __arena *)__sync_lock_test_and_set((__u64 *)&mval->data, 0);
+	if (unlikely(!data))
+		return;
+
+	scx_free(&scx_task_allocator, data);
 }
 
 static struct scx_urcu scx_task_urcu;
