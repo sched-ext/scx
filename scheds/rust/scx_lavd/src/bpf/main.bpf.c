@@ -675,9 +675,27 @@ static void update_stat_for_refill(struct task_struct *p,
 
 static bool can_direct_dispatch(struct cpu_ctx *cpuc, bool is_cpu_idle)
 {
-	return (is_cpu_idle && !queued_on_cpu(cpuc)) ||
-	       (lb_local_dsq_util_wall > 0 &&
-		cpuc->avg_util_wall < lb_local_dsq_util_wall);
+	/*
+	 * An idle CPU with nothing queued cannot be congested --
+	 * queued_on_cpu() covers every DSQ that is_cpu_congested()
+	 * counts -- so no congestion check is needed on this path.
+	 */
+	if (is_cpu_idle && !queued_on_cpu(cpuc))
+		return true;
+
+	/*
+	 * Bypass deadline ordering under low utilization, but never
+	 * direct-dispatch into a congested CPU (tasks are already waiting
+	 * across its DSQs, and inserting into the local DSQ would let the
+	 * new task jump ahead of them) nor into a CPU an RT/DL task has
+	 * taken (the task would be stranded in a non-stealable local DSQ
+	 * until the higher class yields). Both walk/peek remote state, so
+	 * evaluate them last, only after the cheap utilization checks pass.
+	 */
+	return lb_local_dsq_util_wall > 0 &&
+	       cpuc->avg_util_wall < lb_local_dsq_util_wall &&
+	       !is_cpu_congested(cpuc) &&
+	       !is_rt_or_dl_task_running(cpuc->cpu_id);
 }
 
 /*
@@ -1114,16 +1132,11 @@ kick_cpu_out:
 	}
 
 	/*
-	 * If there is no idle CPU for an eligible task, try to preempt a task.
-	 * Try to find and kick a victim CPU, which runs a less urgent task,
-	 * from dsq_id. The kick will be done asynchronously.
-	 *
-	 * In the case of the forced enqueue mode, we don't try preemption
-	 * since it is a batch of bulk enqueues.
+	 * If there is no idle CPU, try to preempt a task. Find and kick a
+	 * victim CPU, which runs a less urgent task.
 	 */
 	if (!no_preemption) {
-		try_find_and_kick_victim_cpu(p, taskc, cpu,
-					     cpdom_to_dsq(cpuc->cpdom_id));
+		try_find_and_kick_victim_cpu(p, taskc, cpu, cpuc->cpdom_id);
 	}
 }
 

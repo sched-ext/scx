@@ -412,6 +412,34 @@ bool queued_on_cpu(struct cpu_ctx *cpuc)
 }
 
 __hidden
+bool is_cpu_congested(struct cpu_ctx *cpuc)
+{
+	int nr;
+
+	nr = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
+	if (nr >= LAVD_CPU_CONGESTED_THRES)
+		return true;
+
+	if (use_cpdom_dsq()) {
+		nr += scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id));
+		if (nr >= LAVD_CPU_CONGESTED_THRES)
+			return true;
+
+		nr += scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpuc->cpdom_id));
+		if (nr >= LAVD_CPU_CONGESTED_THRES)
+			return true;
+	}
+
+	if (use_per_cpu_dsq()) {
+		nr += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id));
+		if (nr >= LAVD_CPU_CONGESTED_THRES)
+			return true;
+	}
+
+	return false;
+}
+
+__hidden
 u64 peek_dsq_vtime(u64 dsq_id)
 {
 	struct task_struct *p;
