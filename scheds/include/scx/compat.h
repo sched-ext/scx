@@ -332,9 +332,17 @@ static inline long scx_hotplug_seq(void)
 /*
  * Open a cid-form (struct sched_ext_ops_cid) skeleton. The cid form postdates
  * every op the load-time fix-ups above handle, so none of them apply.
+ *
+ * The cid form only exists from v7.2, and so does bpf_scx_reg_cid(), so the
+ * prolog probe attached to it can be enabled unconditionally here.
  */
-#define SCX_OPS_CID_OPEN(__ops_name, __scx_name)				\
-	__SCX_OPS_OPEN(__ops_name, __scx_name, "sched_ext_ops_cid")
+#define SCX_OPS_CID_OPEN(__ops_name, __scx_name) ({				\
+	struct __scx_name *__cskel;						\
+										\
+	__cskel = __SCX_OPS_OPEN(__ops_name, __scx_name, "sched_ext_ops_cid");	\
+	bpf_program__set_autoload(__cskel->progs.scx_lib_init_probe_cid, true);	\
+	__cskel;								\
+})
 
 /*
  * Associate non-struct_ops BPF programs with the scheduler's struct_ops map so
