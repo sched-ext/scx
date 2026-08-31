@@ -709,7 +709,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 			 * pollute the overflow set with short-lived restrictions.
 			 */
 			if (is_permanently_pinned(ctx->p))
-				bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
+				ovrflw_test_and_set(ctx->ovrflw, cpu);
 		}
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 		goto unlock_out;
@@ -762,7 +762,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (ctx->a_empty && ctx->o_empty) {
 		cpu = find_cpu_in(ctx->p->cpus_ptr, ctx->cpuc_cur);
 		if (cpu >= 0) {
-			bpf_cpumask_set_cpu(cpu, ctx->ovrflw);
+			ovrflw_test_and_set(ctx->ovrflw, cpu);
 			*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 		}
 		goto unlock_out;

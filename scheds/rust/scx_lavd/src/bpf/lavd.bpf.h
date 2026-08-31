@@ -779,6 +779,30 @@ struct dsq_entry {
 u64 peek_dsq_vtime(u64 dsq_id);
 void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 
+/* Overflow-set bookkeeping helpers. */
+
+/*
+ * Atomically add @cpu to the global overflow cpumask. Mirrors the return
+ * semantics of bpf_cpumask_test_and_set_cpu(): true if the bit was
+ * already set, false if it was newly set.
+ */
+static __always_inline bool
+ovrflw_test_and_set(struct bpf_cpumask *ovrflw, s32 cpu)
+{
+	return bpf_cpumask_test_and_set_cpu(cpu, ovrflw);
+}
+
+/*
+ * Atomically remove @cpu from the global overflow cpumask. Mirrors the
+ * return semantics of bpf_cpumask_test_and_clear_cpu(): true if the bit
+ * was set before this call, false if it was already clear.
+ */
+static __always_inline bool
+ovrflw_test_and_clear(struct bpf_cpumask *ovrflw, s32 cpu)
+{
+	return bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+}
+
 /* Load balancer helpers. */
 
 int plan_x_cpdom_migration(void);
