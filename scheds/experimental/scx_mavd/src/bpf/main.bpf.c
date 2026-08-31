@@ -2128,7 +2128,7 @@ static void cid_offline(struct cpu_ctx *cpuc, s32 cid)
 	cpu_ctx_init_offline(cpuc, cid);
 	/* keep the picker off the cid until the sets are rebuilt */
 	cmask_clear(cid, active_cmask);
-	cmask_clear(cid, ovrflw_cmask);
+	ovrflw_test_and_clear(ovrflw_cmask, cid);
 	__sync_fetch_and_sub(&nr_cpus_onln, 1);
 	__sync_fetch_and_sub(&total_max_capacity, cpuc->max_capacity);
 	update_autopilot_high_cap();

@@ -305,6 +305,11 @@ struct cpdom_ctx {
 	u32	avg_dom_pinned_util_invr_sum;	    /* the sum of average invariant domain-pinned task utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
+	u32	nr_overflow_cpus;		    /* the number of of overflow CPUs in this cpdom,
+						     * maintained via atomic inc/dec at every
+						     * overflow cpumask mutation. */
+	u32	cap_sum_overflow_cpus;		    /* sum of effective_capacity of overflow
+						     * CPUs in this cpdom. */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
 
 	/* per-cpdom preemption vulnerability threshold tracking */
@@ -414,6 +419,7 @@ struct cpu_ctx {
 	u8		cpdom_alt_id;	/* compute domain id of alternative type */
 	u8		is_online;	/* is this CPU online? */
 	u16		kernel_cpu;	/* Linux CPU ID for per-CPU kernel data */
+	volatile u32	ovrflw_cap;	/* effective_capacity counted in the overflow set */
 	volatile s32	futex_op;	/* futex op in futex V1 */
 
 	/* --- cacheline 1 boundary (64 bytes): write accumulators --- */
@@ -888,12 +894,41 @@ void sort_dsqs(struct dsq_entry *a, struct dsq_entry *b, struct dsq_entry *c);
 /* Overflow-set bookkeeping helpers. */
 
 /*
- * Atomically add @cpu to the global overflow cpumask. Mirrors the return
- * semantics of cmask_test_and_set(): true if the bit was already set, false if
- * it was newly set. A sub-scheduler tests the online view and sets the bit
- * under sub_set_lock. A cid the sub does not hold is reported as already set so
- * that no caller kicks it. A caller already holding sub_set_lock on an online
- * cid uses cmask_test_and_set() directly.
+ * ovrflw_test_and_set() for a caller that already holds sub_set_lock on an
+ * online cid. It sets the bit, updates the per-cpdom counters on a 0->1
+ * transition and returns true if the bit was already set.
+ */
+static __always_inline bool
+__ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
+{
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (cmask_test_and_set(cpu, ovrflw))
+		return true;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
+		return false;
+	cpdc = get_cpdom_ctx(cpuc->cpdom_id);
+	__sync_fetch_and_add(&cpdc->nr_overflow_cpus, 1);
+	cpuc->ovrflw_cap = cpuc->effective_capacity;
+	__sync_fetch_and_add(&cpdc->cap_sum_overflow_cpus, cpuc->ovrflw_cap);
+	return false;
+}
+
+/*
+ * Atomically add @cpu to the global overflow cpumask and, on a 0->1
+ * transition, bump the per-cpdom (nr_overflow_cpus,
+ * cap_sum_overflow_cpus) counters used by completion-time-based
+ * migration to estimate cpdom throughput over active+overflow CPUs.
+ *
+ * Returns true if the bit was already set (no counter update); false if
+ * it was newly set (counters bumped).
+ *
+ * A sub-scheduler tests the online view and sets the bit under sub_set_lock. A
+ * cid the sub does not hold is reported as already set so that no caller kicks
+ * it. A caller already holding sub_set_lock on an online cid uses
+ * __ovrflw_test_and_set() directly.
  *
  * The picker calls this on every wakeup of a task pinned to a cid outside the
  * active set. Test the bit first so that only the call that sets it takes the
@@ -908,18 +943,30 @@ ovrflw_test_and_set(struct scx_cmask *ovrflw, s32 cpu)
 	guard(sub_set)();
 	if (sub_mode && !cmask_test(cpu, online_cmask))
 		return true;
-	return cmask_test_and_set(cpu, ovrflw);
+	return __ovrflw_test_and_set(ovrflw, cpu);
 }
 
 /*
- * Atomically remove @cpu from the global overflow cpumask. Mirrors the return
- * semantics of cmask_test_and_clear(): true if the bit was set before this
- * call, false if it was already clear.
+ * Atomically remove @cpu from the global overflow cpumask and, on a
+ * 1->0 transition, decrement the per-cpdom counters. Returns true if
+ * the bit was set before this call (counters decremented); false if it
+ * was already clear.
  */
 static __always_inline bool
 ovrflw_test_and_clear(struct scx_cmask *ovrflw, s32 cpu)
 {
-	return cmask_test_and_clear(cpu, ovrflw);
+	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdc;
+
+	if (!cmask_test_and_clear(cpu, ovrflw))
+		return false;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
+		return true;
+	cpdc = get_cpdom_ctx(cpuc->cpdom_id);
+	__sync_fetch_and_sub(&cpdc->nr_overflow_cpus, 1);
+	__sync_fetch_and_sub(&cpdc->cap_sum_overflow_cpus, cpuc->ovrflw_cap);
+	return true;
 }
 
 /* Load balancer helpers. */

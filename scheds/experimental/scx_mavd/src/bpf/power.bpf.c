@@ -371,7 +371,7 @@ int do_core_compaction(void)
 				 * If there is something to run on this CPU,
 				 * add this CPU to the overflow set.
 				 */
-				cmask_test_and_set(cpu, ovrflw);
+				__ovrflw_test_and_set(ovrflw, cpu);
 			} else {
 				if (!cmask_test(cpu, ovrflw))
 					continue;
@@ -696,7 +696,7 @@ int reinit_active_cpumask_for_performance(void)
 				cmask_set(cpu, active);
 				ovrflw_test_and_clear(ovrflw, cpu);
 			} else {
-				cmask_test_and_set(cpu, ovrflw);
+				__ovrflw_test_and_set(ovrflw, cpu);
 				cmask_clear(cpu, active);
 			}
 			scx_bpf_kick_cid(cpu, SCX_KICK_IDLE);
@@ -708,13 +708,19 @@ int reinit_active_cpumask_for_performance(void)
 	} else {
 		online = online_cmask;
 		nr_cpus_onln = cmask_weight(online);
-		scoped_guard(sub_set) {
+		scoped_guard(sub_set)
 			cmask_copy(active, online);
-			cmask_zero(ovrflw);
-		}
 
 		bpf_arena_for(cpu, 0, nr_cids) {
 			struct cpdom_ctx *cpdomc;
+
+			guard(sub_set)();
+			/*
+			 * Clear overflow bits one by one (rather than the
+			 * bulk bpf_cpumask_clear) so per-cpdom counters are
+			 * decremented atomically alongside each bit.
+			 */
+			ovrflw_test_and_clear(ovrflw, cpu);
 
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
