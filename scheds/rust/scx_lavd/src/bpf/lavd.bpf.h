@@ -698,6 +698,42 @@ static __always_inline bool use_cpdom_dsq(void)
 	return !per_cpu_dsq;
 }
 
+static __always_inline bool is_turbulent_cpu(struct cpu_ctx *cpuc)
+{
+	/*
+	 * A CPU is turbulent when its latency headroom (inversely related
+	 * to IRQ/steal time) falls below the latency-sensitive threshold.
+	 * Turbulent CPUs primarily serve the turbulent DSQ (non-latency-
+	 * critical tasks); steady CPUs serve latency-critical work.
+	 */
+	return cpuc->lat_headroom < LAVD_LC_LATENCY_SENSITIVE_THRESH;
+}
+
+static __always_inline bool is_steady_cpu(struct cpu_ctx *cpuc)
+{
+	return !is_turbulent_cpu(cpuc);
+}
+
+static __always_inline bool
+can_consume_steady_dsq(struct cpdom_ctx *cpdomc)
+{
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+	bool turbulent = cpuc && is_turbulent_cpu(cpuc);
+
+	/*
+	 * Whether the current CPU should consume or steal from a cpdom's
+	 * steady (non-turbulent) DSQ. A steady CPU always can. A turbulent
+	 * CPU -- a poor home for the latency-critical tasks that live on
+	 * the steady DSQ -- can do so only to prevent starvation: when the
+	 * steady DSQ is more backed up than the turbulent DSQ, or no steady
+	 * CPU is available to drain it.
+	 */
+	return !turbulent ||
+	       scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdomc->id)) >
+		       scx_bpf_dsq_nr_queued(cpdom_to_turb_dsq(cpdomc->id)) ||
+	       cpdomc->nr_steady_cpus == 0;
+}
+
 bool queued_on_cpu(struct cpu_ctx *cpuc);
 bool is_cpu_congested(struct cpu_ctx *cpuc);
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
