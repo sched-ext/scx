@@ -10,6 +10,7 @@
 #include "lavd.bpf.h"
 #include "util.bpf.h"
 #include "power.bpf.h"
+#include <lib/topology.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -214,6 +215,71 @@ s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 		if (bpf_cpumask_test_cpu(cpu, cast_mask(online_src_mask)))
 			return cpu;
 	};
+	return -ENOENT;
+}
+
+
+/*
+ * Pick a fresh CPU to add to the overflow set during ops.select_cpu()
+ * when active+overflow has no idle CPU usable by the waking task.
+ *
+ * Anchored to the same LLC as ctx->prev_cpu so the migration cost is
+ * negligible. Returns -ENOENT when extension is disabled, the system
+ * is already saturated, or no eligible candidate exists.
+ */
+static s32 find_cpu_for_ovrflw_extend(struct pick_ctx *ctx)
+{
+	const volatile u16 *cpu_order;
+	const struct cpumask *online_mask;
+	struct bpf_cpumask *online_src_mask, *ovrflw;
+	s32 cpu, prev_llc;
+	unsigned int i;
+
+	/* User disabled the feature. */
+	if (no_ovrflw_extend)
+		return -ENOENT;
+
+	/*
+	 * Saturation guard: O(1). When sys_stat.nr_active is bumped to
+	 * cover all online CPUs, there is no room to extend.
+	 */
+	if (sys_stat.nr_active >= nr_cpus_onln)
+		return -ENOENT;
+
+	/* Anchor LLC for proximity to prev_cpu. */
+	prev_llc = topo_cpu_to_llc_id(ctx->prev_cpu);
+	if (prev_llc < 0)
+		return -ENOENT;
+
+	online_src_mask = ctx->cpuc_cur->temp_mask;
+	ovrflw = ovrflw_cpumask;
+	if (!online_src_mask || !ovrflw)
+		return -ENOENT;
+
+	/*
+	 * Candidate pool = p->cpus_ptr ∩ online. Active is implicit
+	 * (iteration starts at sys_stat.nr_active); overflow exclusion
+	 * happens per-iteration.
+	 */
+	online_mask = scx_bpf_get_online_cpumask();
+	bpf_cpumask_and(online_src_mask, ctx->p->cpus_ptr, online_mask);
+	scx_bpf_put_cpumask(online_mask);
+
+	cpu_order = get_cpu_order();
+	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
+		if (i >= LAVD_CPU_ID_MAX)
+			break;
+		cpu = cpu_order[i];
+		/* Cheaper cpumask bit test first; LLC lookup is multi-load. */
+		if (!bpf_cpumask_test_cpu(cpu, cast_mask(online_src_mask)))
+			continue;
+		/* Skip CPUs already in overflow. */
+		if (bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw)))
+			continue;
+		if (topo_cpu_to_llc_id(cpu) != prev_llc)
+			continue;
+		return cpu;
+	}
 	return -ENOENT;
 }
 
@@ -634,7 +700,7 @@ s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
 }
 
 __hidden __noinline
-s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
+s32 pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle)
 {
 	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
 	s32 cpu = -ENOENT, sticky_cpu;
@@ -875,6 +941,28 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (!init_idle_ato_masks(ctx, ctx->i_mask))
 		goto err_out;
 	if (ctx->ia_empty && ctx->io_empty) {
+		/*
+		 * Bursty wake-up adaptation: when called from
+		 * ops.select_cpu() and the existing active+overflow set has
+		 * no idle CPU we can use, try to grow the overflow set with
+		 * a fresh LLC-anchored CPU. Claim it as idle first; only
+		 * commit the overflow extension when the claim succeeded so
+		 * we don't pollute the set with CPUs we couldn't use. The
+		 * caller wakes the CPU via the normal select_cpu return path.
+		 */
+		if (extend_ovrflw) {
+			s32 new_cpu = find_cpu_for_ovrflw_extend(ctx);
+			if (new_cpu >= 0 &&
+			    scx_bpf_test_and_clear_cpu_idle(new_cpu)) {
+				ovrflw_test_and_set(ctx->ovrflw, new_cpu);
+				debugln("migrate: ovrflw_extend %s[pid%d] prev_cpu=%d new_cpu=%d",
+					ctx->p->comm, ctx->p->pid,
+					ctx->prev_cpu, new_cpu);
+				cpu = new_cpu;
+				*is_idle = true;
+				goto unlock_out;
+			}
+		}
 		cpu = sticky_cpu;
 		if (cpu == -ENOENT) {
 			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
