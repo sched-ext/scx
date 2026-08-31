@@ -1164,8 +1164,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
 					   task_slice(p), enq_flags);
-			if (cpu != prev_cpu || !scx_bpf_task_running(p))
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
@@ -1186,9 +1184,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!q || q->nr_cpus_allowed > 1) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
 			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
-
-			if (!scx_bpf_task_running(p))
-				scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
@@ -1209,9 +1204,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
 			if (is_event_heavy(tctx) && cpu != prev_cpu)
 				__sync_fetch_and_add(&nr_event_dispatches, 1);
-
-			if (cpu != prev_cpu || !scx_bpf_task_running(p))
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
@@ -1222,8 +1214,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!is_cpu_busy(prev_cpu) &&
 	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
-		if (task_should_migrate(p, enq_flags))
-			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 		return;
 	}
 
@@ -1232,9 +1222,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
 				 task_slice(p), task_dl(p, tctx), enq_flags);
-
-	if (task_should_migrate(p, enq_flags))
-		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
 /*
