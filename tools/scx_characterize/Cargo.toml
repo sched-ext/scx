@@ -13,7 +13,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
 ctrlc = "3"
 libc = "0.2"
-libbpf-rs = "=0.26.2"
+libbpf-rs = "=0.27.0"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
