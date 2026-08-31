@@ -367,6 +367,9 @@ build_helper
 rm -f "$LOG_FILE" "$MONITOR_LOG_FILE"
 
 mkdir -p "$CGROUP_BASE/$VICTIM_NAME"
+if ! grep -qw cpu "$CGROUP_BASE/cgroup.controllers" 2>/dev/null; then
+    echo "+cpu" > /sys/fs/cgroup/cgroup.subtree_control
+fi
 if ! grep -qw cpu "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
     echo "+cpu" > "$CGROUP_BASE/cgroup.subtree_control"
 fi
@@ -386,7 +389,13 @@ info "Starting scx_mitosis"
     > "$LOG_FILE" 2>&1 &
 SCHED_PID="$!"
 
-sleep 2
+# Wait for scheduler to attach: scheduler startup can take a while
+# on large machines.
+for _ in $(seq 1 120); do
+    [[ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" == "enabled" ]] && break
+    ps -p "$SCHED_PID" >/dev/null 2>&1 || break
+    sleep 0.5
+done
 if ! ps -p "$SCHED_PID" >/dev/null 2>&1; then
     error "scx_mitosis failed to start"
     cat "$LOG_FILE"

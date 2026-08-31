@@ -421,10 +421,11 @@ static s32 pick_idle_cpu_from(struct task_struct *p, const struct cpumask *cand_
 }
 
 /* Check if we need to update the cell/cpumask mapping */
-static __always_inline int maybe_refresh_cell(struct task_struct *p, struct task_ctx *tctx)
+/* True when the task's cell/cpumask mapping is stale, read-only */
+static __always_inline bool task_needs_refresh(struct task_struct *p, struct task_ctx *tctx)
 {
 	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq))
-		return refresh_task_cell(p, tctx);
+		return true;
 
 	/*
 	 * When not using CPU controller, check if task's cgroup changed.
@@ -440,9 +441,17 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p, struct task
 		}
 
 		if (current_cgid != tctx->cgid)
-			return refresh_task_cell(p, tctx);
+			return true;
 	}
 
+	return false;
+}
+
+/* Check if we need to update the cell/cpumask mapping */
+static __always_inline int maybe_refresh_cell(struct task_struct *p, struct task_ctx *tctx)
+{
+	if (task_needs_refresh(p, tctx))
+		return refresh_task_cell(p, tctx);
 	return 0;
 }
 
@@ -746,10 +755,13 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		if (cpu < 0)
 			return;
 
-	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags) || (enq_flags & SCX_ENQ_LAST)) {
 		/*
 		 * If we haven't selected a cpu, then we haven't looked for and kicked an
-		 * idle CPU. Let's do the lookup now.
+		 * idle CPU. Let's do the lookup now. SCX_ENQ_LAST enqueues skip
+		 * select_cpu() and this cpu is going idle, tested explicitly as
+		 * they must end in a kick to guarantee a follow-up scheduling
+		 * event.
 		 */
 		if (!(cctx = lookup_cpu_ctx(-1)))
 			return;
@@ -852,7 +864,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/* Kick the CPU if needed */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
+	if ((!__COMPAT_is_enq_cpu_selected(enq_flags) || (enq_flags & SCX_ENQ_LAST)) && cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
@@ -914,14 +926,37 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		found = true;
 	}
 
-	/*
-	 * If we failed to find an eligible task, try the sibling LLC DSQs.
-	 * Otherwise, scx will keep running prev if prev->scx.flags &
-	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
-	 */
+	/* If we failed to find an eligible task, try the sibling LLC DSQs. */
 	if (!found) {
-		if (enable_llc_awareness && !try_stealing_work(cell, subcell_id, llc))
+		if (enable_llc_awareness && !try_stealing_work(cell, subcell_id, llc)) {
 			cstat_inc(CSTAT_STEAL, cell, cctx);
+			return;
+		}
+
+		/*
+		 * Nothing to run. Extend the slice of a still-runnable prev
+		 * whose placement is current and still names this cpu.
+		 * Otherwise let the SCX_ENQ_LAST enqueue re-place the task, its
+		 * kicks provide the follow-up scheduling event while this cpu
+		 * goes idle.
+		 */
+		if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+			struct task_ctx *tctx;
+			bool stay = false;
+
+			if (!(tctx = lookup_task_ctx(prev)))
+				return;
+
+			if (!task_needs_refresh(prev, tctx)) {
+				if (tctx->all_cell_cpus_allowed)
+					stay = tctx->cell == cell && tctx->subcell == subcell_id;
+				else
+					stay = tctx->dsq.raw == cpu_dsq.raw;
+			}
+
+			if (stay)
+				scx_bpf_task_set_slice(prev, slice_ns);
+		}
 		return;
 	}
 
@@ -2128,6 +2163,14 @@ int apply_cell_config(void *ctx)
 
 // clang-format off
 SCX_OPS_DEFINE(mitosis,
+	       /*
+		* Placement refresh is enqueue-driven: without ENQ_LAST the core
+		* keeps a solo task running with no enqueue, so it never notices
+		* a configuration change. dispatch() extends the slice of a solo
+		* task whose placement remains valid, so the enqueue only fires
+		* when the task must leave the cpu.
+		*/
+	       .flags			= SCX_OPS_ENQ_LAST,
 	       .select_cpu		= (void *)mitosis_select_cpu,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,

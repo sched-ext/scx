@@ -108,6 +108,9 @@ trap cleanup EXIT INT TERM
 
 start_scheduler() {
     mkdir -p "$CGROUP_BASE"
+    if ! grep -qw "cpu" "$CGROUP_BASE/cgroup.controllers" 2>/dev/null; then
+        echo "+cpu" > /sys/fs/cgroup/cgroup.subtree_control
+    fi
     if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
         echo "+cpu" > "$CGROUP_BASE/cgroup.subtree_control"
     fi
@@ -121,7 +124,13 @@ start_scheduler() {
 
     "$SCHEDULER_BIN" "${scheduler_args[@]}" > /tmp/scx_mitosis_affinity.log 2>&1 &
     SCHED_PID=$!
-    sleep 3
+    # Wait for scheduler to attach: scheduler startup can take a while
+    # on large machines.
+    for _ in $(seq 1 120); do
+        [[ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" == "enabled" ]] && break
+        ps -p "$SCHED_PID" > /dev/null 2>&1 || break
+        sleep 0.5
+    done
 
     if ! ps -p "$SCHED_PID" > /dev/null 2>&1; then
         echo -e "${RED}Failed to start scx_mitosis${NC}"

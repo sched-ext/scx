@@ -66,6 +66,9 @@ fi
 
 log_info "Preparing cgroup hierarchy under $CGROUP_BASE"
 sudo mkdir -p "$CGROUP_BASE"
+if ! grep -qw "cpu" "$CGROUP_BASE/cgroup.controllers" 2>/dev/null; then
+    echo "+cpu" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
+fi
 if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
     echo "+cpu" | sudo tee "$CGROUP_BASE/cgroup.subtree_control" > /dev/null
 fi
@@ -77,7 +80,13 @@ sudo "$SCHEDULER_BIN" \
     --cell-exclude "$EXCLUDED_NAME" \
     > "$LOG_FILE" 2>&1 &
 SCHED_PID=$!
-sleep 3
+# Wait for scheduler to attach: scheduler startup can take a while
+# on large machines.
+for _ in $(seq 1 120); do
+    [[ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" == "enabled" ]] && break
+    ps -p "$SCHED_PID" > /dev/null 2>&1 || break
+    sleep 0.5
+done
 
 if ! ps -p "$SCHED_PID" > /dev/null 2>&1; then
     log_error "Scheduler failed to start"

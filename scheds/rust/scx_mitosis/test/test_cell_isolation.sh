@@ -205,7 +205,11 @@ create_cgroups() {
         sudo mkdir -p "$CGROUP_BASE"
     fi
 
-    # Enable CPU controller for children (required for sched_ext cgroup callbacks)
+    # Enable CPU controller for children (required for sched_ext cgroup callbacks).
+    # The root may not delegate cpu on minimal systems, enable it there first.
+    if ! grep -qw "cpu" "$CGROUP_BASE/cgroup.controllers" 2>/dev/null; then
+        echo "+cpu" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
+    fi
     if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
         log_info "Enabling CPU controller for $CGROUP_BASE children"
         echo "+cpu" | sudo tee "$CGROUP_BASE/cgroup.subtree_control" > /dev/null
@@ -237,8 +241,13 @@ start_scheduler() {
 
     log_info "Scheduler PID: $SCHED_PID"
 
-    # Wait for scheduler to attach
-    sleep 3
+    # Wait for scheduler to attach: scheduler startup can take a while
+    # on large machines.
+    for _ in $(seq 1 120); do
+        [[ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" == "enabled" ]] && break
+        ps -p "$SCHED_PID" > /dev/null 2>&1 || break
+        sleep 0.5
+    done
 
     # Verify scheduler is running
     if ! ps -p "$SCHED_PID" > /dev/null 2>&1; then
@@ -456,12 +465,20 @@ test_dynamic_cell_lifecycle() {
 
     log_info "Found $procs processes in dynamic cell"
 
-    # Stop the workload
+    # Stop the workload and remove the cell. Retry the rmdir: the cgroup
+    # stays busy until the killed workers are fully reaped, which can take
+    # a while, and exiting tasks pin it even after cgroup.procs reads
+    # empty.
     sudo pkill -f "stress-ng.*cpu" 2>/dev/null || true
-    sleep 2
-
-    # Remove the cell
-    sudo rmdir "$cell_path"
+    for _ in $(seq 1 60); do
+        sudo rmdir "$cell_path" 2>/dev/null && break
+        sleep 0.5
+    done
+    if [[ -d "$cell_path" ]]; then
+        log_error "Failed to remove dynamic cell cgroup"
+        record_result "dynamic_cell_lifecycle" "FAILED"
+        return 1
+    fi
     sleep 3
 
     # Verify destruction logged
@@ -750,7 +767,13 @@ test_cpu_rebalancing_demand() {
         > "$LOG_FILE" 2>&1 &
     SCHED_PID=$!
 
-    sleep 3
+    # Wait for scheduler to attach: scheduler startup can take a while
+    # on large machines.
+    for _ in $(seq 1 120); do
+        [[ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" == "enabled" ]] && break
+        ps -p "$SCHED_PID" > /dev/null 2>&1 || break
+        sleep 0.5
+    done
 
     # Verify scheduler is running
     if ! ps -p "$SCHED_PID" > /dev/null 2>&1; then
@@ -948,10 +971,23 @@ test_cpuset_change() {
         fi
     done
 
+    # a previous test's cleanup may have removed the base cgroup
+    sudo mkdir -p "$CGROUP_BASE"
+    if ! grep -qw "cpu" "$CGROUP_BASE/cgroup.controllers" 2>/dev/null; then
+        echo "+cpu" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
+    fi
+    if ! grep -q "cpu" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
+        echo "+cpu" | sudo tee "$CGROUP_BASE/cgroup.subtree_control" > /dev/null
+    fi
     sudo mkdir -p "$cell_a"
     sudo mkdir -p "$cell_b"
 
-    # Enable cpuset controller for children of test.slice
+    # Enable cpuset controller for children of test.slice. The root may not
+    # delegate cpuset (systemd enables only cpu/memory/pids by default), so
+    # enable it there first.
+    if ! grep -q "cpuset" "$CGROUP_BASE/cgroup.controllers" 2>/dev/null; then
+        echo "+cpuset" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
+    fi
     if ! grep -q "cpuset" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
         echo "+cpuset" | sudo tee "$CGROUP_BASE/cgroup.subtree_control" > /dev/null
     fi
@@ -1120,7 +1156,13 @@ test_new_cell_gets_fair_share() {
         > "$LOG_FILE" 2>&1 &
     SCHED_PID=$!
 
-    sleep 3
+    # Wait for scheduler to attach: scheduler startup can take a while
+    # on large machines.
+    for _ in $(seq 1 120); do
+        [[ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" == "enabled" ]] && break
+        ps -p "$SCHED_PID" > /dev/null 2>&1 || break
+        sleep 0.5
+    done
 
     # Verify scheduler is running
     if ! ps -p "$SCHED_PID" > /dev/null 2>&1; then
