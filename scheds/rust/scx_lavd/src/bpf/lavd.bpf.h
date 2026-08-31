@@ -644,6 +644,7 @@ extern volatile u64		powersave_mode_ns;
 /* Helpers from util.bpf.c for querying CPU/task state. */
 extern const volatile bool	per_cpu_dsq;
 extern const volatile u64	pinned_slice_ns;
+extern const volatile u8	no_ovrflw_extend;
 
 extern volatile bool		reinit_cpumask_for_performance;
 extern volatile bool		no_preemption;
@@ -883,7 +884,7 @@ struct pick_ctx {
 
 
 s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
-s32  pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle);
+s32  pick_idle_cpu(struct pick_ctx *ctx, bool extend_ovrflw, bool *is_idle);
 
 bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id);
 
