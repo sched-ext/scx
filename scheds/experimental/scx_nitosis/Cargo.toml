@@ -1,0 +1,58 @@
+[package]
+name = "scx_nitosis"
+version = "1.1.3"
+authors = ["Dan Schatzberg <dschatzberg@meta.com>", "Meta"]
+edition = "2021"
+description = "Experimental fork of scx_mitosis targeting a cid-form, arena-based root scheduler with sub-scheduling support. https://github.com/sched-ext/scx/tree/main"
+license = "GPL-2.0-only"
+
+publish = false
+
+[dependencies]
+anyhow = "1"
+bitvec = "1"
+cgroupfs = "0.9"
+clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
+clap_main = "0.2"
+ctrlc = { version = "3", features = ["termination"] }
+itertools = "0.14"
+lazy_static = "1"
+libbpf-rs = "=0.26.2"
+libc = "0.2"
+inotify = "0.11"
+nix = { version = "0.31", features = ["event"] }
+crossbeam = "0.8"
+maplit = "1"
+scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "1.1.3" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.1.3" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.1.3" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.3" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parking_lot", "tracing-log"] }
+
+# Test-only scheduler harness, pulled in only by the `ktstr-tests` feature for
+# the gated smoke test under tests/. Not built for normal scheduler builds.
+# Optional (not a dev-dependency) so the feature can gate it.
+ktstr = { version = "=0.18.0", optional = true }
+
+[build-dependencies]
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.3" }
+
+[dev-dependencies]
+tempfile = "3"
+scx_utils = { path = "../../../rust/scx_utils", version = "1.1.3", features = ["testutils"] }
+
+[features]
+enable_backtrace = []
+# Gates the ktstr-based scheduler smoke test under tests/ and pulls in the
+# optional ktstr harness. Off by default; enable with `--features ktstr-tests`
+# under `cargo ktstr test`.
+ktstr-tests = ["dep:ktstr"]
+
+[lints.clippy]
+unwrap_used = "deny"
+
+[package.metadata.veristat]
+disable = true
