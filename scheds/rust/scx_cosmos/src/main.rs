@@ -10,7 +10,11 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+mod cgroup;
+mod gpu;
 mod stats;
+use cgroup::CgroupReader;
+
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, c_ulong};
 use std::fs::File;
@@ -527,10 +531,12 @@ struct Scheduler<'a> {
     stats_server: StatsServer<(), Metrics>,
     /// GPU device index -> NUMA node (for NVML PID sync). Only set when --gpu and NUMA enabled.
     gpu_index_to_node: Option<HashMap<u32, u32>>,
-    /// Previous (pid, node) set so we can remove PIDs that stopped using the GPU.
+    /// Previous (TGID, node) set so we can remove processes that stopped using the GPU.
     previous_gpu_pids: Option<HashMap<u32, u32>>,
     /// Reused NVML handle to avoid re-initializing on every sync (expensive).
     nvml: Option<Nvml>,
+    /// Host cgroup v2 reader used to discover peer processes of NVML GPU processes.
+    gpu_cgroup_reader: Option<CgroupReader>,
     /// Dynamic threshold state for perf event migrations (when --perf-threshold is 0/dynamic).
     perf_threshold_state: Option<DynamicThresholdState>,
     /// Dynamic threshold state for sticky perf events (when --perf-sticky-threshold is 0/dynamic).
@@ -661,6 +667,28 @@ impl<'a> Scheduler<'a> {
         } else {
             rodata.gpu_enabled = false;
             (None, None, None)
+        };
+
+        let gpu_cgroup_reader = if nvml.is_some() && opts.gpu_util_threshold == 0 {
+            match CgroupReader::discover() {
+                Ok(reader) => {
+                    info!("NVIDIA GPU workload discovery enabled (cgroup v2)");
+                    Some(reader)
+                }
+                Err(error) => {
+                    warn!(
+                        "GPU workload discovery unavailable, using NVML process scope: {error:#}"
+                    );
+                    None
+                }
+            }
+        } else if nvml.is_some() {
+            info!(
+                "NVIDIA GPU workload discovery requires --gpu-util-threshold=0; using NVML process scope"
+            );
+            None
+        } else {
+            None
         };
 
         // Set scheduler flags.
@@ -818,14 +846,16 @@ impl<'a> Scheduler<'a> {
             gpu_index_to_node,
             previous_gpu_pids,
             nvml,
+            gpu_cgroup_reader,
             perf_threshold_state,
             perf_sticky_threshold_state,
         })
     }
 
-    /// Sync process TGID -> GPU (node) map from NVML. When gpu_util_threshold > 0, only
-    /// processes with GPU utilization (SM or memory) >= threshold are added. Only processes
-    /// whose GPUs resolve to a single NUMA node are included.
+    /// Sync process TGID -> GPU (node) hints from NVML. Peer processes in the same exact,
+    /// non-root cgroup inherit the hint when all observed GPUs resolve to one NUMA node.
+    /// gpu_util_threshold > 0 retains process-only behavior because its NVML snapshot is
+    /// intentionally filtered.
     fn sync_gpu_pids(&mut self) -> Result<()> {
         let gpu_index_to_node = match &self.gpu_index_to_node {
             Some(m) => m,
@@ -836,17 +866,28 @@ impl<'a> Scheduler<'a> {
             None => return Ok(()),
         };
         let threshold = self.opts.gpu_util_threshold;
-        let previous = self.previous_gpu_pids.as_ref().unwrap();
-        // First collect pid -> set of nodes (GPUs) per process.
+        // First collect TGID -> set of nodes (GPUs) per process.
         let mut pid_to_nodes: HashMap<u32, HashSet<u32>> = HashMap::new();
+        let mut snapshot_complete = true;
 
+        // A failed NVML query is not an empty snapshot. Keep the last applied
+        // hints instead of deleting processes we simply failed to observe.
         let count = nvml.device_count().context("NVML device count")?;
         for i in 0..count {
             let node = match gpu_index_to_node.get(&i) {
                 Some(&n) => n,
-                None => continue,
+                None => {
+                    snapshot_complete = false;
+                    continue;
+                }
             };
-            let device = nvml.device_by_index(i).context("NVML device_by_index")?;
+            let device = match nvml.device_by_index(i) {
+                Ok(device) => device,
+                Err(error) => {
+                    debug!("NVML device {i} lookup failed: {error:#}");
+                    return Err(error).context(format!("NVML device {i} lookup failed"));
+                }
+            };
 
             if threshold > 0 {
                 // Use process utilization; only add PIDs above threshold.
@@ -861,34 +902,99 @@ impl<'a> Scheduler<'a> {
                     }
                     Err(_) => {
                         // NotSupported or other: fall back to all running processes.
-                        Self::add_running_gpu_processes_to_set(&device, node, &mut pid_to_nodes);
+                        Self::add_running_gpu_processes_to_set(&device, node, &mut pid_to_nodes)
+                            .with_context(|| {
+                                format!("NVML device {i} process snapshot is incomplete")
+                            })?;
                     }
                 }
             } else {
-                Self::add_running_gpu_processes_to_set(&device, node, &mut pid_to_nodes);
+                Self::add_running_gpu_processes_to_set(&device, node, &mut pid_to_nodes)
+                    .with_context(|| format!("NVML device {i} process snapshot is incomplete"))?;
             }
         }
 
-        // Only add process TGIDs whose GPUs resolve to exactly one NUMA node.
-        let mut current: HashMap<u32, u32> = HashMap::new();
-        for (tgid, nodes) in pid_to_nodes {
-            if nodes.len() == 1 {
-                let node = nodes.into_iter().next().unwrap();
-                current.insert(tgid, node);
-            }
-        }
+        let mut direct = gpu::direct_gpu_processes(&pid_to_nodes);
+        direct.remove(&std::process::id());
+        let mut current = if snapshot_complete {
+            self.gpu_cgroup_reader
+                .as_ref()
+                .map(|reader| gpu::expand_gpu_processes(&pid_to_nodes, reader))
+                .unwrap_or_else(|| direct.clone())
+        } else {
+            direct.clone()
+        };
+        current.remove(&std::process::id());
+        let max_entries = self.skel.maps.gpu_pid_map.max_entries() as usize;
 
+        // Workload discovery can include many peer processes. Fall back to
+        // direct NVML processes rather than partially populating the map.
+        if current.len() > max_entries {
+            warn!(
+                "GPU workload has {} processes, exceeding gpu_pid_map capacity {}; using {} direct NVML processes",
+                current.len(),
+                max_entries,
+                direct.len()
+            );
+        }
+        if direct.len() > max_entries {
+            warn!(
+                "{} direct NVML processes exceed gpu_pid_map capacity {}; clearing GPU process hints",
+                direct.len(),
+                max_entries
+            );
+        }
+        current = gpu::fit_gpu_processes(current, &direct, max_entries);
+
+        self.reconcile_gpu_pid_hints(&current)
+    }
+
+    /// Reconcile the desired GPU workload hints with the BPF map.
+    fn reconcile_gpu_pid_hints(&mut self, desired: &HashMap<u32, u32>) -> Result<()> {
+        let previous = self.previous_gpu_pids.as_ref().unwrap().clone();
         let map = &self.skel.maps.gpu_pid_map;
-        for (pid, node) in &current {
-            map.update(&pid.to_ne_bytes(), &node.to_ne_bytes(), MapFlags::ANY)
-                .context("gpu_pid_map update")?;
-        }
+
+        // Track the state actually applied to BPF so a partial map operation
+        // is retried and cleaned up on the next synchronization.
+        let mut applied = previous.clone();
+        let mut first_error = None;
+
+        // Delete stale entries first so replacements cannot temporarily run
+        // out of map capacity.
         for pid in previous.keys() {
-            if !current.contains_key(pid) {
-                let _ = map.delete(&pid.to_ne_bytes());
+            if desired.contains_key(pid) {
+                continue;
+            }
+            match map.delete(&pid.to_ne_bytes()).context("gpu_pid_map delete") {
+                Ok(()) => {
+                    applied.remove(pid);
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
-        *self.previous_gpu_pids.as_mut().unwrap() = current;
+        for (pid, node) in desired {
+            match map
+                .update(&pid.to_ne_bytes(), &node.to_ne_bytes(), MapFlags::ANY)
+                .context("gpu_pid_map update")
+            {
+                Ok(()) => {
+                    applied.insert(*pid, *node);
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        *self.previous_gpu_pids.as_mut().unwrap() = applied;
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -897,14 +1003,30 @@ impl<'a> Scheduler<'a> {
         device: &nvml_wrapper::Device<'_>,
         node: u32,
         pid_to_nodes: &mut HashMap<u32, HashSet<u32>>,
-    ) {
-        for proc in device
-            .running_compute_processes()
-            .unwrap_or_default()
-            .into_iter()
-            .chain(device.running_graphics_processes().unwrap_or_default())
-        {
-            pid_to_nodes.entry(proc.pid).or_default().insert(node);
+    ) -> Result<()> {
+        let mut errors = Vec::new();
+
+        match device.running_compute_processes() {
+            Ok(processes) => {
+                for process in processes {
+                    pid_to_nodes.entry(process.pid).or_default().insert(node);
+                }
+            }
+            Err(error) => errors.push(format!("compute process query failed: {error}")),
+        }
+        match device.running_graphics_processes() {
+            Ok(processes) => {
+                for process in processes {
+                    pid_to_nodes.entry(process.pid).or_default().insert(node);
+                }
+            }
+            Err(error) => errors.push(format!("graphics process query failed: {error}")),
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!(errors.join("; "))
         }
     }
 
