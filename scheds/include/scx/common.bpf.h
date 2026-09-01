@@ -533,8 +533,8 @@ static __always_inline const struct cpumask *cast_mask(struct bpf_cpumask *mask)
 /*
  * True if the non-sleepable BPF trampoline prolog (__bpf_prog_enter) calls
  * migrate_disable() for the current task. Recorded once by
- * scx_lib_init_probe, an fentry program on bpf_scx_reg() that fires during
- * the natural scheduler-attach call chain (auto-attached by scx_ops_attach!).
+ * scx_lib_init_probe, an fentry program that fires during the natural
+ * scheduler-attach call chain (auto-attached by scx_ops_attach!).
  *
  * Defaults to false (conservative). Over-reporting in is_migration_disabled()
  * causes local-only dispatch, which is safe. Under-reporting can crash the
@@ -551,13 +551,20 @@ bool __scx_prolog_disables_migration __weak = false;
  * ops.init() fires. Its address is taken in the vtable, so the symbol
  * is non-inlinable and has been stable since introduction.
  *
+ * A cid-form scheduler registers through bpf_scx_reg_cid(), the .reg
+ * callback of bpf_sched_ext_ops_cid, and so never enters bpf_scx_reg().
+ * The cid-form open paths (SCX_OPS_CID_OPEN(), scx_ops_cid_open!())
+ * therefore repoint this program at bpf_scx_reg_cid(). Repointing rather
+ * than adding a second program keeps the object loadable on kernels
+ * predating the cid form, where bpf_scx_reg_cid() has no BTF entry.
+ *
  * Entering via fentry runs us through __bpf_prog_enter -- the
  * non-sleepable prolog that consumers of is_migration_disabled() live
  * under.
  *
  * Loud warning: the prolog adds at most 1 to migration_disabled.
  * Reading > 1 means something upstream in the
- * bpf_struct_ops_link_create -> bpf_scx_reg path disabled migration
+ * bpf_struct_ops_link_create -> .reg path disabled migration
  * before the prolog ran, invalidating the probe; audit and adjust.
  */
 SEC("fentry/bpf_scx_reg") __weak

@@ -675,10 +675,22 @@ macro_rules! scx_ops_open {
 /// Open a cid-form (struct sched_ext_ops_cid) skeleton. Pair with
 /// scx_ops_cid_load!(), which skips the fix-ups for the cpu-form-only cgroup
 /// callbacks that don't exist in the cid form.
+///
+/// A cid-form scheduler registers through bpf_scx_reg_cid() rather than
+/// bpf_scx_reg(), so common.bpf.h's prolog probe gets repointed at it. Both
+/// the cid form and bpf_scx_reg_cid() appeared in v7.2, so a kernel that
+/// accepts this skeleton always has the symbol.
 #[macro_export]
 macro_rules! scx_ops_cid_open {
     ($builder: expr, $obj_ref: expr, $ops: ident, $open_opts: expr) => {
-        $crate::__scx_ops_open!($builder, $obj_ref, $ops, "sched_ext_ops_cid", $open_opts)
+        $crate::__scx_ops_open!($builder, $obj_ref, $ops, "sched_ext_ops_cid", $open_opts).and_then(
+            |mut skel| {
+                skel.progs
+                    .scx_lib_init_probe
+                    .set_attach_target(0, Some("bpf_scx_reg_cid".to_string()))?;
+                ::anyhow::Result::Ok(skel)
+            },
+        )
     };
 }
 
