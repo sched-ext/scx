@@ -1034,6 +1034,20 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * Return true if a shared DSQ insertion needs an explicit CPU kick.
+ *
+ * ops.select_cpu() normally provides the wakeup side effect for unbound
+ * tasks. Affinity-constrained and migration-disabled tasks can otherwise end
+ * up waiting in a shared DSQ with no eligible CPU checking it, so always kick
+ * their previous CPU.
+ */
+static bool task_needs_shared_dsq_kick(struct task_struct *p, u64 enq_flags)
+{
+	return p->nr_cpus_allowed != nr_cpu_ids || is_migration_disabled(p) ||
+	       task_should_migrate(p, enq_flags);
+}
+
+/*
  * Return true if a task is waking up another task that share the same
  * address space, false otherwise.
  */
@@ -1222,7 +1236,9 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
 				 task_slice(p), task_dl(p, tctx), enq_flags);
-	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+
+	if (task_needs_shared_dsq_kick(p, enq_flags))
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
 /*
