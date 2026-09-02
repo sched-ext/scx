@@ -50,6 +50,30 @@ use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cidland";
 
+/// Run a SEC("syscall") program with @args as its context.
+///
+/// Despite the name this is not a test run, it's the supported way of invoking
+/// a syscall program from userspace.
+fn run_syscall_prog<T>(prog: &libbpf_rs::ProgramMut<'_>, args: &mut T) -> Result<()> {
+    let input = ProgramInput {
+        context_in: Some(unsafe {
+            std::slice::from_raw_parts_mut(args as *mut T as *mut u8, std::mem::size_of::<T>())
+        }),
+        ..Default::default()
+    };
+
+    let output = prog.test_run(input)?;
+    if output.return_value != 0 {
+        bail!(
+            "{} returned {}",
+            prog.name().to_string_lossy(),
+            output.return_value as i32
+        );
+    }
+
+    Ok(())
+}
+
 /// scx_cidland: a cid-based, topology-aware scheduler.
 ///
 /// Rather than raw CPU numbers, this scheduler addresses CPUs by their cid
@@ -207,15 +231,6 @@ impl<'a> Scheduler<'a> {
             bail!("--slice-us must be greater than 0");
         }
 
-        // The cid space is always num_possible_cpus() entries wide.
-        if *NR_CPUS_POSSIBLE > MAX_CIDS as usize {
-            bail!(
-                "too many CPUs: {} (max {}), rebuild with a larger MAX_CIDS",
-                *NR_CPUS_POSSIBLE,
-                MAX_CIDS
-            );
-        }
-
         let topo = Topology::new().context("detecting system topology")?;
         info!(
             "{} {} ({} CPUs, {} LLCs)",
@@ -243,7 +258,9 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_lag_us * 1000;
 
         // Define the primary scheduling domain, in cpu space: the BPF side
-        // translates it to cids once the kernel has built the cid layout.
+        // translates it to cids once the kernel has built the cid layout. The
+        // mask itself is handed over after load, see below.
+        let mut primary_cpus: Vec<usize> = Vec::new();
         if let Some(ref domain) = opts.primary_domain {
             let cpus = parse_primary_domain(domain).context("parsing primary domain")?;
 
@@ -256,9 +273,7 @@ impl<'a> Scheduler<'a> {
             }
             if cpus.len() < *NR_CPU_IDS {
                 info!("primary domain: {:?}", cpus);
-                for cpu in cpus {
-                    rodata.primary_cpus[cpu / 64] |= 1u64 << (cpu % 64);
-                }
+                primary_cpus = cpus;
                 rodata.primary_all = false;
             }
         }
@@ -280,17 +295,35 @@ impl<'a> Scheduler<'a> {
         // Load and attach the scheduler.
         let mut skel = scx_ops_cid_load!(skel, cidland_ops, uei).context("loading BPF skeleton")?;
 
-        // Bring up the arena allocator backing the per-task contexts. This has
-        // to happen before the scheduler is visible to the kernel, so it sits
-        // between load and attach. Despite the name this is not a test run,
-        // it's how SEC("syscall") programs are invoked.
-        let output = skel
-            .progs
-            .cidland_arena_init
-            .test_run(ProgramInput::default())
+        // Bring up the arena: this sizes everything that is indexed by cid
+        // and the per-task contexts. It has to happen before the scheduler is
+        // visible to the kernel, so it sits between load and attach.
+        //
+        // The cid space is num_possible_cpus() wide, so the CPU count is all
+        // the BPF side needs to size itself.
+        let nr_cpus = (*NR_CPU_IDS).max(*NR_CPUS_POSSIBLE);
+        let mut args = types::cidland_arena_args {
+            nr_cpus: nr_cpus as u64,
+        };
+        run_syscall_prog(&skel.progs.cidland_arena_init, &mut args)
             .context("running cidland_arena_init")?;
-        if output.return_value != 0 {
-            bail!("cidland_arena_init failed: {}", output.return_value as i32);
+
+        // Hand over the primary domain a word at a time, so that nothing on
+        // either side has to cap the number of CPUs.
+        let mut words = vec![0u64; nr_cpus.div_ceil(64)];
+        for cpu in &primary_cpus {
+            words[cpu / 64] |= 1u64 << (cpu % 64);
+        }
+        for (idx, word) in words.iter().enumerate() {
+            if *word == 0 {
+                continue;
+            }
+            let mut args = types::cidland_primary_args {
+                idx: idx as u64,
+                word: *word,
+            };
+            run_syscall_prog(&skel.progs.cidland_set_primary_word, &mut args)
+                .context("running cidland_set_primary_word")?;
         }
 
         // The BPF side has a scheduler-specific initialization path, but the

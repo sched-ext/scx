@@ -17,14 +17,22 @@ enum {
 };
 
 /*
- * Maximum size of the cid space handled by this scheduler.
- *
- * The cid space is always num_possible_cpus() entries wide, so this is simply
- * the maximum number of CPUs supported.
+ * Arguments to cidland_arena_init(), which sizes everything that is indexed by
+ * cid. The cid space is always num_possible_cpus() entries wide, so userspace
+ * knows how wide it is before the scheduler is attached.
  */
-#define MAX_CIDS	1024
+struct cidland_arena_args {
+	unsigned long long	nr_cpus;
+};
 
-/* Number of u64 words needed to hold one bit per cid. */
-#define MAX_CID_WORDS	(MAX_CIDS / 64)
+/*
+ * Arguments to cidland_set_primary_word(): one word of the primary domain, in
+ * cpu space. Userspace feeds the mask a word at a time, so nothing here caps
+ * the number of CPUs.
+ */
+struct cidland_primary_args {
+	unsigned long long	idx;
+	unsigned long long	word;
+};
 
 #endif /* __INTF_H */
