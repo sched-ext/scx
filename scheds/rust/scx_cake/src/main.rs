@@ -70,6 +70,8 @@ struct Scheduler<'a> {
     struct_ops: Option<libbpf_rs::Link>,
     /// Handler-edge tracepoint links (§G35); dropped on exit with the rest.
     _irq_links: Vec<libbpf_rs::Link>,
+    /// Diagnostics on (--toggle probe=1): census, hold attribution, black box.
+    probe_on: bool,
     /// Frame-clock incumbent bucket, held against near-ties (§R.22).
     frame_bucket: Option<u32>,
     /// Last published period; the reference for slow-direction hysteresis.
@@ -167,19 +169,92 @@ impl<'a> Scheduler<'a> {
                 _ => anyhow::bail!("--toggle {spec}: value must be 0 or 1"),
             };
             match name {
+                "g39b" => rodata.cake_tog_g39b = on,
                 "g46" => rodata.cake_tog_g46 = on,
                 "m6" => rodata.cake_tog_m6 = on,
                 "g51" => rodata.cake_tog_g51 = on,
                 "g52" => rodata.cake_tog_g52 = on,
+                "g56" => rodata.cake_tog_g56 = on,
+                "g57" => rodata.cake_tog_g57 = on,
+                "g58" => rodata.cake_tog_g58 = on,
+                "g59" => rodata.cake_tog_g59 = on,
+                "g60" => rodata.cake_tog_g60 = on,
+                "g61" => rodata.cake_tog_g61 = on,
+                "g62" => rodata.cake_tog_g62 = on,
+                "g63" => rodata.cake_tog_g63 = on,
+                "g64" => rodata.cake_tog_g64 = on,
+                "g65" => rodata.cake_tog_g65 = on,
+                "g66" => rodata.cake_tog_g66 = on,
+                "g67" => rodata.cake_tog_g67 = on,
+                "g68" => rodata.cake_tog_g68 = on,
+                "g69" => rodata.cake_tog_g69 = on,
+                "g70" => rodata.cake_tog_g70 = on,
+                "g72" => rodata.cake_tog_g72 = on,
+                "g71" => rodata.cake_tog_g71 = on,
+                "g73" => rodata.cake_tog_g73 = on,
+                "g74" => rodata.cake_tog_g74 = on,
+                "g75" => rodata.cake_tog_g75 = on,
+                "g77" => rodata.cake_tog_g77 = on,
+                "g78" => rodata.cake_tog_g78 = on,
+                "g79" => rodata.cake_tog_g79 = on,
+                "g81" => rodata.cake_tog_g81 = on,
                 "m7" => rodata.cake_tog_m7 = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }
+        // §G59 reads the §G51 mirror, so it forces the producer on.
+        if rodata.cake_tog_g68 == 1 || rodata.cake_tog_g70 == 1 {
+            // EXPERIMENT §G68: the VIP process is found by comm prefix at attach.
+            let mut vip = 0u32;
+            if let Ok(rd) = std::fs::read_dir("/proc") {
+                for e in rd.flatten() {
+                    if let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) {
+                        if comm.starts_with("FPSAimTrainer") {
+                            if let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() {
+                                vip = pid;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            rodata.cake_vip_tgid = vip;
+            info!("   g68     VIP process tgid {vip} (0 = not found, VIP inert)");
+        }
+        if rodata.cake_tog_g59 == 1 {
+            rodata.cake_tog_g51 = 1;
+        }
+        let probe_on = rodata.cake_tog_probe == 1;
         info!(
-            "   toggle  g46={} g51={} g52={} m6={} m7={}",
+            "   toggle  g39b={} g46={} g51={} g52={} g56={} g57={} g58={} g59={} g60={} g61={} g62={} g63={} g64={} g65={} g66={} g67={} g68={} g69={} g70={} g72={} g71={} g73={} g74={} g75={} g77={} g78={} g79={} g81={} m6={} m7={}",
+            rodata.cake_tog_g39b,
             rodata.cake_tog_g46,
             rodata.cake_tog_g51,
             rodata.cake_tog_g52,
+            rodata.cake_tog_g56,
+            rodata.cake_tog_g57,
+            rodata.cake_tog_g58,
+            rodata.cake_tog_g59,
+            rodata.cake_tog_g60,
+            rodata.cake_tog_g61,
+            rodata.cake_tog_g62,
+            rodata.cake_tog_g63,
+            rodata.cake_tog_g64,
+            rodata.cake_tog_g65,
+            rodata.cake_tog_g66,
+            rodata.cake_tog_g67,
+            rodata.cake_tog_g68,
+            rodata.cake_tog_g69,
+            rodata.cake_tog_g70,
+            rodata.cake_tog_g72,
+            rodata.cake_tog_g71,
+            rodata.cake_tog_g73,
+            rodata.cake_tog_g74,
+            rodata.cake_tog_g75,
+            rodata.cake_tog_g77,
+            rodata.cake_tog_g78,
+            rodata.cake_tog_g79,
+            rodata.cake_tog_g81,
             rodata.cake_tog_m6,
             rodata.cake_tog_m7
         );
@@ -198,6 +273,27 @@ impl<'a> Scheduler<'a> {
         if rodata.cake_tog_g51 == 1 && deepest_us == 0 {
             info!("   g51     no cpuidle driver: depth model inert");
         }
+        // §G58: the lead covers the deepest exit twice over; a host without
+        // a cpuidle table gets the fixed default. Never a refusal.
+        rodata.cake_prewake_lead_ns = if deepest_us > 0 {
+            u64::from(deepest_us) * 2 * 1000
+        } else {
+            bpf_intf::consts_PREWAKE_LEAD_DEFAULT_NS as u64
+        };
+        if rodata.cake_tog_g58 == 1 {
+            info!(
+                "   g58     pre-wake lead {} us ({})",
+                rodata.cake_prewake_lead_ns / 1000,
+                if deepest_us > 0 {
+                    "2x deepest exit"
+                } else {
+                    "default, no cpuidle"
+                }
+            );
+        }
+        if rodata.cake_tog_g59 == 1 && deepest_us == 0 {
+            info!("   g59     no cpuidle table: depth pick is first fit");
+        }
         let mut perf_seen = false;
         for c in 0..*NR_CPU_IDS {
             let path = format!("/sys/devices/system/cpu/cpu{c}/acpi_cppc/highest_perf");
@@ -209,6 +305,51 @@ impl<'a> Scheduler<'a> {
         }
         if rodata.cake_tog_g52 == 1 && !perf_seen {
             info!("   g52     no CPPC highest_perf: rank tiebreak inert");
+        }
+
+        // §G56 FOLD tables, from RUNTIME topology — never the build host.
+        // cpu -> compact LLC index, per-LLC qmask word (narrow hosts), and
+        // the per-home band order: own LLC first, then foreign LLCs by
+        // descending CPPC rank when g52 is live, id order otherwise. More
+        // LLCs than the table degrades the fold off (bands stay id-order,
+        // the toggle gate's span check keeps the walk), never a refusal.
+        let nr_llcs = topo.all_llcs.len().min(bpf_intf::consts_MAX_LLCS as usize);
+        let mut llc_rank = [0u8; bpf_intf::consts_MAX_LLCS as usize];
+        for (idx, llc) in topo.all_llcs.values().take(nr_llcs).enumerate() {
+            let mut word = 0u64;
+            for cpu in llc.all_cpus.keys().copied() {
+                if cpu < rodata.cake_cpu_llc.len() {
+                    rodata.cake_cpu_llc[cpu] = idx as u8;
+                }
+                if cpu < 64 {
+                    word |= 1u64 << cpu;
+                }
+                if cpu < *NR_CPU_IDS {
+                    llc_rank[idx] = llc_rank[idx].max(rodata.cpu_perf_rank[cpu]);
+                }
+            }
+            rodata.cake_llc_qword[idx] = word;
+        }
+        rodata.cake_nr_llcs = nr_llcs.max(1) as u32;
+        for home in 0..nr_llcs {
+            let mut foreign: Vec<usize> = (0..nr_llcs).filter(|&l| l != home).collect();
+            if rodata.cake_tog_g52 == 1 {
+                foreign.sort_by_key(|&l| std::cmp::Reverse(llc_rank[l]));
+            }
+            rodata.cake_llc_order[home][0] = home as u8;
+            for (b, l) in foreign.iter().enumerate() {
+                rodata.cake_llc_order[home][b + 1] = *l as u8;
+            }
+        }
+        if rodata.cake_tog_g56 == 1 {
+            info!(
+                "   g56     banded steal: {nr_llcs} LLC band(s), order {}",
+                if rodata.cake_tog_g52 == 1 {
+                    "rank"
+                } else {
+                    "id"
+                }
+            );
         }
 
         // Hardware-anchored thresholds: measured, never derived from the slice.
@@ -362,6 +503,15 @@ impl<'a> Scheduler<'a> {
         }
 
         // Load and attach.
+        // §G76: the cpuidle mirror tracepoint fires on every idle transition
+        // (2.7M/12 s on a polling-idle host); it is loaded only for its consumers.
+        let want_cpu_idle = skel
+            .maps
+            .rodata_data
+            .as_ref()
+            .map(|r| r.cake_tog_g51 == 1)
+            .unwrap_or(false);
+        skel.progs.cake_cpu_idle.set_autoload(want_cpu_idle);
         let mut skel = scx_ops_load!(skel, cake_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, cake_ops)?);
 
@@ -380,6 +530,12 @@ impl<'a> Scheduler<'a> {
                 Err(e) => warn!("   irq     {name} hook failed ({e}); chronic steering only"),
             }
         }
+        if want_cpu_idle {
+            match skel.progs.cake_cpu_idle.attach() {
+                Ok(link) => irq_links.push(link),
+                Err(e) => warn!("   g51     cpu_idle hook failed ({e}); depth mirror off"),
+            }
+        }
 
         info!("🍰 attached — wakeups queue globally, continuations locally");
 
@@ -396,6 +552,7 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             _irq_links: irq_links,
+            probe_on,
             frame_bucket: None,
             frame_period: 0,
             slow_polls: 0,
@@ -428,6 +585,98 @@ impl<'a> Scheduler<'a> {
                     "   frame   observed period {}us ({:.1} Hz)",
                     observed / 1000,
                     1e9 / observed as f64
+                );
+            }
+        }
+
+        // Diagnostics (--toggle probe=1): black box of placements that waited > 10 ms, then the census.
+        if let (true, Some(bss)) = (self.probe_on, self.skel.maps.bss_data.as_ref()) {
+            let n = bss.cake_blackbox_n;
+            for i in 0..n.min(4) {
+                let b = &bss.cake_blackbox[i as usize];
+                let comm = String::from_utf8_lossy(
+                    &b.comm
+                        .iter()
+                        .map(|c| *c as u8)
+                        .take_while(|c| *c != 0)
+                        .collect::<Vec<u8>>(),
+                )
+                .to_string();
+                info!(
+                    "   BLACKBOX wait {:.2} ms  {} pid {} kind {} target cpu{} caller cpu{} waker {} ran_on cpu{}  seats {:#018x} core_free {:#018x} thread_free {:#018x} idle {:#018x}",
+                    b.wait_ns as f64 / 1e6, comm, b.pid, b.kind, b.target, b.caller, b.waker_pid, b.ran_on, b.seats, b.core_free, b.thread_free, b.idle_word
+                );
+            }
+        }
+        if self.probe_on {
+            const NAMES: [&str; 47] = [
+                "select_calls",
+                "serial",
+                "home_warm",
+                "park_reached",
+                "park_prev",
+                "park_mbox",
+                "opt_reached",
+                "opt_hit",
+                "ranked",
+                "wp_attempt",
+                "wp_tiny",
+                "wp_small",
+                "wp_protect",
+                "wp_vtime",
+                "wp_starved",
+                "wp_fired",
+                "free_pick",
+                "prewake_fire",
+                "reserved_take",
+                "pl_local",
+                "pl_local_on",
+                "pl_cpuq_wake",
+                "pl_cpuq_cont",
+                "pl_global",
+                "h300_local",
+                "h300_local_on",
+                "h300_cpuq_wake",
+                "h300_cpuq_cont",
+                "h300_global",
+                "h1ms_local",
+                "h1ms_local_on",
+                "h1ms_cpuq_wake",
+                "h1ms_cpuq_cont",
+                "h1ms_global",
+                "pl_self",
+                "h300_self",
+                "h1ms_self",
+                "hd_skip",
+                "hd_sync",
+                "hd_starved",
+                "hd_irq",
+                "hd_aff",
+                "hd_contended",
+                "hd_notidle",
+                "home_busy",
+                "home_localq",
+                "h300_home_busy",
+            ];
+            let mut tot = [0u64; NAMES.len()];
+            for (i, t) in tot.iter_mut().enumerate() {
+                let key = (i as u32).to_ne_bytes();
+                if let Ok(Some(percpu)) =
+                    self.skel.maps.cake_stats.lookup_percpu(&key, MapFlags::ANY)
+                {
+                    for cpu in &percpu {
+                        if cpu.len() >= 8 {
+                            *t += u64::from_ne_bytes(cpu[..8].try_into().unwrap());
+                        }
+                    }
+                }
+            }
+            let sel = tot[0].max(1) as f64;
+            for (i, name) in NAMES.iter().enumerate() {
+                info!(
+                    "   arms    {name:<13} {:>12}  {:>6.2}% of select",
+                    tot[i],
+                    tot[i] as f64 * 100.0 / sel
                 );
             }
         }
