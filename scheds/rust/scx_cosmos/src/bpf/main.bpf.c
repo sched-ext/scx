@@ -1034,17 +1034,45 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
 }
 
 /*
- * Return true if a shared DSQ insertion needs an explicit CPU kick.
+ * Return true if a task that only @cpu can run is waiting in @cpu's shared
+ * DSQ.
  *
- * ops.select_cpu() normally provides the wakeup side effect for unbound
- * tasks. Affinity-constrained and migration-disabled tasks can otherwise end
- * up waiting in a shared DSQ with no eligible CPU checking it, so always kick
- * their previous CPU.
+ * The kernel skips ops.dispatch() entirely while a CPU's local DSQ is not
+ * empty (see dispatch_one()), so tasks stacked on a local DSQ silently
+ * outrank the whole deadline-ordered shared DSQ. A task pinned to @cpu can
+ * therefore wait in the shared DSQ forever: remote CPUs walk past it in
+ * scx_bpf_dsq_move_to_local() and @cpu never gets to ops.dispatch().
+ *
+ * The shared DSQ is ordered by deadline and the deadline of a task that is
+ * not running is fixed at insertion time, so a starving task climbs to the
+ * head as the queue drains: peeking at the head is enough to notice it.
  */
-static bool task_needs_shared_dsq_kick(struct task_struct *p, u64 enq_flags)
+static bool shared_dsq_has_pinned_waiter(s32 cpu)
 {
-	return p->nr_cpus_allowed != nr_cpu_ids || is_migration_disabled(p) ||
-	       task_should_migrate(p, enq_flags);
+	const struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(shared_dsq(cpu));
+
+	return p && is_pcpu_task(p) && scx_bpf_task_cpu(p) == cpu;
+}
+
+/*
+ * Direct dispatch @p to the local DSQ of @cpu from ops.select_cpu().
+ *
+ * Insert with SCX_ENQ_IMMED so that the kernel bounces @p back through
+ * ops.enqueue() (and from there into the shared DSQ, where the deadline
+ * ordering applies) whenever @p can't run on @cpu right away. This keeps
+ * the local DSQ a pure "run now" fast path instead of an unbounded queue
+ * that outranks the shared DSQ.
+ *
+ * On kernels without SCX_ENQ_IMMED the flag reads as 0, so fall back to
+ * skipping the direct dispatch when a task only @cpu can run is already
+ * waiting: @p then falls through to ops.enqueue() on its own.
+ */
+static void direct_dispatch_local(struct task_struct *p, s32 cpu)
+{
+	if (!SCX_ENQ_IMMED && shared_dsq_has_pinned_waiter(cpu))
+		return;
+
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), SCX_ENQ_IMMED);
 }
 
 /*
@@ -1088,7 +1116,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 */
 	if (is_wake_affine(current, p) && !is_busy) {
 		if (this_cpu == prev_cpu) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+			direct_dispatch_local(p, this_cpu);
 			return this_cpu;
 		}
 	}
@@ -1101,7 +1129,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 		cpu = pick_cpu_on_gpu_node(p, cpu_node(prev_cpu), tctx);
 		if (cpu >= 0) {
 			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+			direct_dispatch_local(p, cpu);
 			return cpu;
 		}
 	}
@@ -1117,7 +1145,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
 			    wake_flags, false);
 	if (cpu >= 0 || !is_busy)
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+		direct_dispatch_local(p, cpu >= 0 ? cpu : prev_cpu);
 
 	return cpu >= 0 ? cpu : prev_cpu;
 }
@@ -1183,62 +1211,38 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Attempt to immediately dispatch sticky event-heavy tasks to the
-	 * same CPU.
-	 */
-	if (is_sticky_event_heavy(tctx) &&
-	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p)) &&
-	    !is_smt_contended(prev_cpu)) {
-		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(shared_dsq(prev_cpu));
-
-		/*
-		 * If a per-CPU task is waiting to acquire the CPU, skip
-		 * direct dispatch to prevent starvation.
-		 */
-		if (!q || q->nr_cpus_allowed > 1) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
-			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
-			return;
-		}
-	}
-
-	/*
-	 * Attempt to dispatch directly to an idle CPU if the task can
-	 * migrate.
-	 */
-	if (task_should_migrate(p, enq_flags) ||
-	    !is_cpu_idle(prev_cpu) ||
-	    is_smt_contended(prev_cpu) ||
-	    (!is_pcpu_task(p) && (is_event_heavy(tctx) || !is_primary_cpu(prev_cpu)))) {
-		if (is_pcpu_task(p))
-			cpu = test_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
-		else
-			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
-		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
-			if (is_event_heavy(tctx) && cpu != prev_cpu)
-				__sync_fetch_and_add(&nr_event_dispatches, 1);
-			return;
-		}
-	}
-
-	/*
-	 * Keep using the same CPU if that CPU is not busy.
-	 */
-	if (!is_cpu_busy(prev_cpu) &&
-	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
-		return;
-	}
-
-	/*
 	 * Dispatch the task to the shared DSQ.
 	 */
 	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
 				 task_slice(p), task_dl(p, tctx), enq_flags);
 
-	if (task_needs_shared_dsq_kick(p, enq_flags))
+	if (is_pcpu_task(p) ||
+	    (is_sticky_event_heavy(tctx) && is_primary_cpu(prev_cpu))) {
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		return;
+	}
+
+	if (!task_should_migrate(p, enq_flags) && !is_event_heavy(tctx))
+		return;
+
+	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+
+	cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
+	if (cpu >= 0 && cpu != prev_cpu)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+/*
+ * Return true if @p is running in its primary domain, false otherwise.
+ */
+static bool is_task_in_primary(const struct task_struct *p, s32 cpu)
+{
+	const struct cpumask *mask = cast_mask(primary_cpumask);
+
+	if (!mask)
+		return true;
+
+	return is_primary_cpu(cpu) || !bpf_cpumask_intersects(p->cpus_ptr, mask);
 }
 
 /*
@@ -1247,8 +1251,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
  */
 static bool keep_running(const struct task_struct *p, s32 cpu)
 {
-	const struct cpumask *mask = cast_mask(primary_cpumask);
-
 	/*
 	 * Do not keep running if the task doesn't need to run.
 	 */
@@ -1256,28 +1258,10 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 		return false;
 
 	/*
-	* If the task can only run on this CPU, keep it running.
-	*/
-	if (is_pcpu_task(p))
-		return true;
-
-	/*
-	 * If the task is not running in a full-idle SMT core and there are
-	 * full-idle SMT cores available in the system, give it a chance to
-	 * migrate elsewhere.
-	 */
-	if (is_smt_contended(cpu))
-		return false;
-
-	/*
 	 * If the task is not in the primary domain, give it a chance to
 	 * migrate.
 	 */
-	if (!is_primary_cpu(cpu) &&
-	    mask && bpf_cpumask_intersects(p->cpus_ptr, mask))
-		return false;
-
-	return true;
+	return is_pcpu_task(p) || is_task_in_primary(p, cpu);
 }
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
