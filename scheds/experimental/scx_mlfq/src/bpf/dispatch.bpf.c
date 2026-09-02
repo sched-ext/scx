@@ -180,6 +180,8 @@ mlfq_dispatch_queue(s32 cpu, u8 qid, u32 quota,
 	 * dispatch degrades to the plain rotating window.
 	 */
 	base_list = bpf_map_lookup_elem(&mlfq_llc_cpus, &key0);
+	if (!base_list)
+		return 0;
 	llc_cpus = base_list->cpus;
 
 	if (own_llc_list && own_llc_list->nr > 0 && own_llc < mlfq_nr_llcs) {
