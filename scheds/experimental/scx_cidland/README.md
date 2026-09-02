@@ -71,9 +71,12 @@ $ bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep sched_ext_ops_ci
 
 Note that cid-form schedulers are also required to provide a BPF arena (the
 kernel allocates the per-task cmasks from it), hence the `lib/arena_map.h`
-include. The per-cid topology table lives in that arena as well: arena pointers
-are not range tracked by the verifier, so a cid that is known to be in range can
-index the table directly.
+include. This scheduler keeps its own state there as well: the per-cid topology
+table, the cid bitmaps, and the per-task contexts, which are allocated with
+`sdt_task`. Arena pointers are not range tracked by the verifier, which keeps
+the idle search free of bounds tests, at the cost of the idle bitmap updates
+having to go through compare-and-swap loops, since arena memory doesn't take
+the fetching atomics.
 
 ## Typical Use Case
 

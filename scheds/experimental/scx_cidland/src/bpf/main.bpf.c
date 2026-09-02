@@ -31,13 +31,25 @@
 #include "intf.h"
 
 /*
- * The per-cid topology lives in the arena (see @cid_ctxs), which needs the
+ * cid-form schedulers must provide a BPF arena, which the kernel uses for the
+ * per-task cmasks.
+ *
+ * The cid bitmaps and the task contexts living in the arena need the
  * compiler to cast between arena and kernel pointers on its own. Same
  * requirement the arena allocators in lib/ already carry.
  */
 #ifndef __BPF_FEATURE_ADDR_SPACE_CAST
 #error "scx_cidland requires a compiler with bpf_addr_space_cast support"
 #endif
+
+/*
+ * The verifier only associates a program with an arena if the program emits an
+ * LD_IMM64 loading the map. The cmask helpers can't do it themselves, since
+ * scx/cid.bpf.h is included by schedulers that have no arena at all, so every
+ * program that reaches an arena resident cmask has to say so explicitly or its
+ * first addr_space_cast is rejected.
+ */
+#define TOUCH_ARENA()	do { asm volatile("" :: "r"(&arena)); } while (0)
 
 char _license[] SEC("license") = "GPL";
 
@@ -76,15 +88,6 @@ UEI_DEFINE(uei);
  * wakeup-intensive tasks.
  */
 #define MAX_WAKEUP_FREQ	1024
-
-/*
- * cid-form schedulers must provide a BPF arena, which the kernel uses for the
- * per-task cmasks. The verifier associates a program with an arena only if the
- * program emits an LD_IMM64 loading the map, so a program that has no other
- * reason to touch it has to reference it explicitly. ops.init() gets this for
- * free from @cid_ctxs, which libbpf relocates against the arena map.
- */
-#define TOUCH_ARENA()	do { asm volatile("" :: "r"(&arena)); } while (0)
 
 /* Time slice assigned to each task. */
 const volatile u64 slice_ns;
@@ -139,19 +142,23 @@ struct task_ctx {
 	u64 last_woke_at;		/* when the task last woke up */
 	u64 burst_runtime;		/* runtime accumulated since the last sleep */
 	u64 wakeup_freq;		/* average wakeup frequency */
-	u64 allowed[MAX_CID_WORDS];	/* cids the task is allowed to run on */
+	struct scx_cmask allowed;	/* cids the task is allowed to run on */
+	u64 allowed_bits[CMASK_NR_WORDS(MAX_CIDS)];	/* storage for @allowed */
 };
 
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct task_ctx);
-} task_ctx_stor SEC(".maps");
-
-static struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
+/*
+ * Task contexts are allocated from the arena so that @allowed is an arena
+ * pointer like @all_cids and @primary_cids, and the pick loop can take either
+ * without caring which one it got.
+ *
+ * Every ops path that looks a context up runs between ops.init_task() and
+ * ops.exit_task(), so this never returns NULL and the callers don't test it.
+ * A stray NULL dereference would be caught by the arena, which aborts the
+ * scheduler with a backtrace rather than reading whatever is at offset 0.
+ */
+static struct task_ctx __arena *lookup_task_ctx(const struct task_struct *p)
 {
-	return bpf_task_storage_get(&task_ctx_stor, (struct task_struct *)p, 0, 0);
+	return scx_task_data((struct task_struct *)p);
 }
 
 /*
@@ -175,16 +182,31 @@ struct cid_ctx {
 __arena_global struct cid_ctx cid_ctxs[MAX_CIDS];
 
 /*
+ * A cmask plus the storage its bits[] runs into.
+ *
+ * struct scx_cmask ends in a flexible array, so a statically sized mask has to
+ * carry its own storage right behind the header. CMASK_NR_WORDS() covers the
+ * extra word cmask keeps for a head-misaligned range, which MAX_CID_WORDS
+ * alone would not.
+ */
+struct cid_cmask {
+	struct scx_cmask cmask;
+	u64 bits[CMASK_NR_WORDS(MAX_CIDS)];
+};
+
+/*
  * Mask with every cid set, handed to the pick loop for the tasks that can run
  * anywhere: it keeps the loop testing a real mask instead of special casing a
  * NULL one, which the verifier can't follow through the inlined tests.
  */
-static u64 all_cids[MAX_CID_WORDS] = { [0 ... MAX_CID_WORDS - 1] = ~0ULL };
+__arena_global struct cid_cmask all_cids_store;
+static struct scx_cmask __arena *all_cids;
 
 /*
  * Primary domain in cid space, built in ops.init() from @primary_cpus.
  */
-static u64 primary_cids[MAX_CID_WORDS];
+__arena_global struct cid_cmask primary_cids_store;
+static struct scx_cmask __arena *primary_cids;
 
 /*
  * Bitmap of the cids that are currently idle, maintained by ops.update_idle().
@@ -192,61 +214,48 @@ static u64 primary_cids[MAX_CID_WORDS];
  * Since cids are topologically ordered, each word covers 64 CPUs that are
  * close to each other in the system topology.
  */
-static u64 idle_cids[MAX_CID_WORDS];
+__arena_global struct cid_cmask idle_cids_store;
+static struct scx_cmask __arena *idle_cids;
 
 /*
- * Return the word of @mask (MAX_CID_WORDS wide) holding the bit of @cid, or
- * NULL if @cid is out of range.
+ * Return true if @cid is a cid this scheduler can address.
+ *
+ * The mask helpers below index the arena without a bounds check, so every cid
+ * coming in from the outside has to go through here first.
  */
-static u64 *cid_word(u64 *mask, s32 cid)
+static bool cid_valid(s32 cid)
 {
-	u32 idx = (u32)cid / 64;
-
-	if (cid < 0)
-		return NULL;
-
-	/* Keep the compiler from hoisting the address computation. */
-	barrier_var(idx);
-	if (idx >= MAX_CID_WORDS)
-		return NULL;
-
-	return &mask[idx];
+	return cid >= 0 && (u32)cid < nr_cids;
 }
 
 /*
- * Return true if @cid is set in @mask, or false if @cid is out of range.
+ * Return the topology of @cid.
+ *
+ * @cid must be valid, see cid_valid().
  */
-static bool cid_isset(u64 *mask, s32 cid)
+static struct cid_ctx __arena *cid_ctx(s32 cid)
 {
-	const u64 *word = cid_word(mask, cid);
+	TOUCH_ARENA();
 
-	return word && (*word & (1ULL << (cid & 63)));
-}
-
-static u64 *idle_word(s32 cid)
-{
-	return cid_word(idle_cids, cid);
+	return &cid_ctxs[cid];
 }
 
 static bool cid_test_idle(s32 cid)
 {
-	const u64 *word = idle_word(cid);
+	TOUCH_ARENA();
 
-	return word && (READ_ONCE(*word) & (1ULL << (cid & 63)));
+	return __cmask_test(cid, idle_cids);
 }
 
+/* Set or clear the idle bit of @cid. */
 static void cid_set_idle(s32 cid, bool idle)
 {
-	u64 mask = 1ULL << (cid & 63);
-	u64 *word = idle_word(cid);
-
-	if (!word)
-		return;
+	TOUCH_ARENA();
 
 	if (idle)
-		__sync_fetch_and_or(word, mask);
+		cmask_set(cid, idle_cids);
 	else
-		__sync_fetch_and_and(word, ~mask);
+		cmask_clear(cid, idle_cids);
 }
 
 /*
@@ -259,13 +268,9 @@ static void cid_set_idle(s32 cid, bool idle)
  */
 static bool cid_claim_idle(s32 cid)
 {
-	u64 mask = 1ULL << (cid & 63);
-	u64 *word = idle_word(cid);
+	TOUCH_ARENA();
 
-	if (!word)
-		return false;
-
-	return __sync_fetch_and_and(word, ~mask) & mask;
+	return cmask_test_and_clear(cid, idle_cids);
 }
 
 /*
@@ -276,17 +281,12 @@ static bool cid_claim_idle(s32 cid)
  */
 static bool cid_range_is_idle(u32 base, u32 nr)
 {
-	u32 cid;
+	TOUCH_ARENA();
 
 	if (!nr)
 		return false;
 
-	bpf_for(cid, base, base + nr) {
-		if (!cid_test_idle(cid))
-			return false;
-	}
-
-	return true;
+	return cmask_full_range(idle_cids, base, nr);
 }
 
 /*
@@ -297,23 +297,25 @@ static bool cid_range_is_idle(u32 base, u32 nr)
  * affinity changes and scheduling class switches, so the mask has to be primed
  * when the task first shows up.
  */
-static void seed_task_cmask(struct task_struct *p, struct task_ctx *tctx)
+static void seed_task_cmask(struct task_struct *p, struct task_ctx __arena *tctx)
 {
+	TOUCH_ARENA();
+
 	u32 cpu;
 
-	__builtin_memset(tctx->allowed, 0, sizeof(tctx->allowed));
+	cmask_zero(&tctx->allowed);
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		u64 *word;
 		s32 cid;
 
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
 		cid = scx_bpf_cpu_to_cid(cpu);
-		word = cid_word(tctx->allowed, cid);
-		if (word)
-			*word |= 1ULL << (cid & 63);
+		if (!cid_valid(cid))
+			continue;
+
+		__cmask_set(cid, &tctx->allowed);
 	}
 }
 
@@ -336,9 +338,12 @@ static bool task_can_migrate(const struct task_struct *p)
  *
  * Return the claimed cid or a negative value if none was found.
  */
-static s32 claim_idle_cid_range(u64 *allowed, u64 *domain, u32 base, u32 nr,
-				bool whole_core)
+static s32 claim_idle_cid_range(const struct scx_cmask __arena *allowed,
+				const struct scx_cmask __arena *domain,
+				u32 base, u32 nr, bool whole_core)
 {
+	TOUCH_ARENA();
+
 	u32 cid;
 
 	bpf_for(cid, base, base + nr) {
@@ -352,7 +357,7 @@ static s32 claim_idle_cid_range(u64 *allowed, u64 *domain, u32 base, u32 nr,
 			if (!cid_range_is_idle(cctx->core_base, cctx->core_nr))
 				continue;
 		}
-		if (!cid_isset(allowed, cid) || !cid_isset(domain, cid))
+		if (!__cmask_test(cid, allowed) || !__cmask_test(cid, domain))
 			continue;
 		if (cid_claim_idle(cid))
 			return cid;
@@ -368,20 +373,18 @@ static s32 claim_idle_cid_range(u64 *allowed, u64 *domain, u32 base, u32 nr,
  * Return the claimed cid or a negative value if @domain has nothing idle that
  * @allowed permits.
  */
-static s32 pick_idle_cid_domain(u64 *allowed, u64 *domain,
+static s32 pick_idle_cid_domain(const struct scx_cmask __arena *allowed,
+				const struct scx_cmask __arena *domain,
 				const struct cid_ctx __arena *cctx, s32 prev_cid,
 				bool core_only)
 {
 	s32 cid;
 
-	if (!cctx)
-		return claim_idle_cid_range(allowed, domain, 0, nr_cids, false);
-
 	/*
 	 * Stay on @prev_cid if its whole core is idle: caches are warm and no
 	 * SMT sibling is competing for the core.
 	 */
-	if (cid_isset(allowed, prev_cid) && cid_isset(domain, prev_cid) &&
+	if (__cmask_test(prev_cid, allowed) && __cmask_test(prev_cid, domain) &&
 	    cid_range_is_idle(cctx->core_base, cctx->core_nr) &&
 	    cid_claim_idle(prev_cid))
 		return prev_cid;
@@ -401,7 +404,7 @@ static s32 pick_idle_cid_domain(u64 *allowed, u64 *domain,
 		return claim_idle_cid_range(allowed, domain, 0, nr_cids, true);
 
 	/* Then @prev_cid, even if its SMT sibling is busy. */
-	if (cid_isset(allowed, prev_cid) && cid_isset(domain, prev_cid) &&
+	if (__cmask_test(prev_cid, allowed) && __cmask_test(prev_cid, domain) &&
 	    cid_claim_idle(prev_cid))
 		return prev_cid;
 
@@ -422,10 +425,17 @@ static s32 pick_idle_cid_domain(u64 *allowed, u64 *domain,
 static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 			 bool from_enqueue, bool core_only)
 {
-	const struct cid_ctx __arena *cctx = NULL;
-	u64 *allowed = all_cids;
-	struct task_ctx *tctx;
+	const struct cid_ctx __arena *cctx;
+	const struct scx_cmask __arena *allowed = all_cids;
 	s32 cid;
+
+	/*
+	 * The core scheduler supplies a valid cid here. Keep the check so an
+	 * unexpected value never indexes the cid keyed arena arrays.
+	 */
+	if (!cid_valid(prev_cid))
+		return -EBUSY;
+	cctx = cid_ctx(prev_cid);
 
 	/*
 	 * Tasks that can't migrate never reach ops.select_cid(): the core
@@ -439,8 +449,8 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 	if (from_enqueue && !task_can_migrate(p)) {
 		if (!cid_claim_idle(prev_cid))
 			return -EBUSY;
-		cid = prev_cid;
-		goto out;
+		__sync_fetch_and_add(&nr_local_llc, 1);
+		return prev_cid;
 	}
 
 	/*
@@ -449,36 +459,29 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 	 * the others. Checking it once here also beats re-checking the task's
 	 * affinity for every candidate cid.
 	 */
-	if (p->nr_cpus_allowed < nr_cpu_ids) {
-		tctx = try_lookup_task_ctx(p);
-		if (!tctx)
-			return -EBUSY;
-		allowed = tctx->allowed;
-	}
-
-	if (prev_cid >= 0 && prev_cid < nr_cids)
-		cctx = &cid_ctxs[prev_cid];
+	if (p->nr_cpus_allowed < nr_cpu_ids)
+		allowed = &lookup_task_ctx(p)->allowed;
 
 	/*
 	 * Search the primary domain first and fall back to the rest of the
 	 * system only when it has nothing idle to offer.
 	 */
-	if (!primary_all) {
+	if (!primary_all)
 		cid = pick_idle_cid_domain(allowed, primary_cids, cctx, prev_cid,
 					   core_only);
-		if (cid >= 0)
-			goto out;
-	}
+	else
+		cid = -EBUSY;
 
-	cid = pick_idle_cid_domain(allowed, all_cids, cctx, prev_cid,
+	if (cid < 0)
+		cid = pick_idle_cid_domain(allowed, all_cids, cctx, prev_cid,
 					   core_only);
-out:
-	if (cid >= 0 && cctx) {
-		if (cid >= cctx->llc_base && cid < cctx->llc_base + cctx->llc_nr)
-			__sync_fetch_and_add(&nr_local_llc, 1);
-		else
-			__sync_fetch_and_add(&nr_remote_llc, 1);
-	}
+	if (cid < 0)
+		return cid;
+
+	if (cid >= cctx->llc_base && cid < cctx->llc_base + cctx->llc_nr)
+		__sync_fetch_and_add(&nr_local_llc, 1);
+	else
+		__sync_fetch_and_add(&nr_remote_llc, 1);
 
 	return cid;
 }
@@ -524,7 +527,7 @@ static u64 update_freq(u64 freq, u64 interval)
  * the task's weight and by its wakeup frequency: tasks that sleep often get a
  * bigger lag than tasks with infrequent, long sleeps.
  */
-static u64 task_dl(struct task_struct *p, const struct task_ctx *tctx)
+static u64 task_dl(struct task_struct *p, const struct task_ctx __arena *tctx)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
 	u64 vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale);
@@ -597,7 +600,7 @@ static bool task_needs_shared_dsq_kick(struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 	s32 cid, prev_cid = scx_bpf_task_cid(p);
 
 	/*
@@ -643,11 +646,7 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 	}
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx) {
-		scx_bpf_error("missing task context in ops.enqueue()");
-		return;
-	}
+	tctx = lookup_task_ctx(p);
 
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice_ns, task_dl(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_enqueues, 1);
@@ -664,6 +663,8 @@ void BPF_STRUCT_OPS(cidland_enqueue, struct task_struct *p, u64 enq_flags)
  */
 static bool keep_running(const struct task_struct *p, s32 cid)
 {
+	TOUCH_ARENA();
+
 	/* The task doesn't want to run anymore. */
 	if (!(p->scx.flags & SCX_TASK_QUEUED))
 		return false;
@@ -673,7 +674,7 @@ static bool keep_running(const struct task_struct *p, s32 cid)
 	 * move: letting it go through the shared queue gives it a chance to
 	 * land in the primary domain instead.
 	 */
-	if (!primary_all && !cid_isset(primary_cids, cid) && task_can_migrate(p))
+	if (!primary_all && !__cmask_test(cid, primary_cids) && task_can_migrate(p))
 		return false;
 
 	return true;
@@ -716,11 +717,9 @@ void BPF_STRUCT_OPS(cidland_dispatch, s32 cid, struct task_struct *prev)
 void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 {
 	u64 now = bpf_ktime_get_ns(), delta_t;
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	tctx = lookup_task_ctx(p);
 
 	/* The task just woke up: restart accounting its burst runtime. */
 	tctx->burst_runtime = 0;
@@ -735,11 +734,9 @@ void BPF_STRUCT_OPS(cidland_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 {
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	tctx = lookup_task_ctx(p);
 
 	tctx->last_run_at = bpf_ktime_get_ns();
 
@@ -750,12 +747,10 @@ void BPF_STRUCT_OPS(cidland_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 {
-	struct task_ctx *tctx;
+	struct task_ctx __arena *tctx;
 	u64 slice;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	tctx = lookup_task_ctx(p);
 
 	slice = bpf_ktime_get_ns() - tctx->last_run_at;
 
@@ -779,30 +774,18 @@ void BPF_STRUCT_OPS(cidland_stopping, struct task_struct *p, bool runnable)
 void BPF_STRUCT_OPS(cidland_set_cmask, struct task_struct *p,
 		    struct scx_cmask __arena *cmask)
 {
-	u32 i, wbase, nr_words;
-	struct task_ctx *tctx;
-
-	/* @cmask lives in the arena, so this program needs to reference it. */
 	TOUCH_ARENA();
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	struct task_ctx __arena *tctx;
 
-	__builtin_memset(tctx->allowed, 0, sizeof(tctx->allowed));
+	tctx = lookup_task_ctx(p);
 
-	wbase = cmask->base / 64;
-	nr_words = CMASK_NR_WORDS(cmask->nr_cids);
-
-	bpf_for(i, 0, nr_words) {
-		u32 idx = wbase + i;
-
-		barrier_var(idx);
-		if (idx >= MAX_CID_WORDS)
-			break;
-
-		tctx->allowed[idx] = cmask->bits[i];
-	}
+	/*
+	 * cmask_copy() only writes the window the two masks share, so the
+	 * cids outside @cmask's range have to be cleared first.
+	 */
+	cmask_zero(&tctx->allowed);
+	cmask_copy(&tctx->allowed, cmask);
 }
 
 void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
@@ -813,12 +796,19 @@ void BPF_STRUCT_OPS(cidland_update_idle, s32 cid, bool idle)
 s32 BPF_STRUCT_OPS(cidland_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	struct task_ctx *tctx;
+	TOUCH_ARENA();
 
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	struct task_ctx __arena *tctx;
+
+	tctx = scx_task_alloc(p);
 	if (!tctx)
 		return -ENOMEM;
+
+	/*
+	 * The mask has to be framed before anything touches it, including the
+	 * ops.set_cmask() of a task that becomes restricted later on.
+	 */
+	cmask_init(&tctx->allowed, 0, nr_cids);
 
 	/*
 	 * Tasks that can run anywhere never consult their mask, so only build
@@ -829,6 +819,17 @@ s32 BPF_STRUCT_OPS(cidland_init_task, struct task_struct *p,
 		seed_task_cmask(p, tctx);
 
 	return 0;
+}
+
+/*
+ * Task contexts are RCU protected: a lookup fails once the task is gone, and a
+ * context that was already looked up stays valid until the end of the RCU
+ * section it was looked up in.
+ */
+void BPF_STRUCT_OPS(cidland_exit_task, struct task_struct *p,
+		    struct scx_exit_task_args *args)
+{
+	scx_task_free_rcu(p);
 }
 
 /*
@@ -907,6 +908,8 @@ static s32 init_cid_ctxs(void)
  */
 static void init_primary_cids(void)
 {
+	TOUCH_ARENA();
+
 	u32 cpu;
 
 	if (primary_all)
@@ -914,9 +917,9 @@ static void init_primary_cids(void)
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		u32 idx = cpu / 64;
-		u64 *word;
 		s32 cid;
 
+		/* @primary_cpus is a read-only global, still verifier tracked. */
 		barrier_var(idx);
 		if (idx >= MAX_CID_WORDS)
 			break;
@@ -924,9 +927,10 @@ static void init_primary_cids(void)
 			continue;
 
 		cid = scx_bpf_cpu_to_cid(cpu);
-		word = cid_word(primary_cids, cid);
-		if (word)
-			*word |= 1ULL << (cid & 63);
+		if (!cid_valid(cid))
+			continue;
+
+		__cmask_set(cid, primary_cids);
 	}
 }
 
@@ -945,6 +949,21 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 		scx_bpf_error("cid space too large: %u (max %u)", nr_cids, MAX_CIDS);
 		return -E2BIG;
 	}
+
+	/*
+	 * Point the masks at their storage and frame them over the cid space
+	 * before anything sets a bit.
+	 */
+	all_cids = &all_cids_store.cmask;
+	primary_cids = &primary_cids_store.cmask;
+	idle_cids = &idle_cids_store.cmask;
+
+	cmask_init(all_cids, 0, nr_cids);
+	cmask_init(primary_cids, 0, nr_cids);
+	cmask_init(idle_cids, 0, nr_cids);
+
+	/* Handed to the pick loop for the tasks that can run anywhere. */
+	cmask_fill(all_cids);
 
 	err = init_cid_ctxs();
 	if (err)
@@ -988,6 +1007,7 @@ SCX_OPS_CID_DEFINE(cidland_ops,
 		   .set_cmask		= (void *)cidland_set_cmask,
 		   .update_idle		= (void *)cidland_update_idle,
 		   .init_task		= (void *)cidland_init_task,
+		   .exit_task		= (void *)cidland_exit_task,
 		   .enable		= (void *)cidland_enable,
 		   .init		= (void *)cidland_init,
 		   .exit		= (void *)cidland_exit,
