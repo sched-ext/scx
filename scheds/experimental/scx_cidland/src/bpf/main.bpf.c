@@ -28,6 +28,15 @@
 #include <lib/arena_map.h>
 #include "intf.h"
 
+/*
+ * The per-cid topology lives in the arena (see @cid_ctxs), which needs the
+ * compiler to cast between arena and kernel pointers on its own. Same
+ * requirement the arena allocators in lib/ already carry.
+ */
+#ifndef __BPF_FEATURE_ADDR_SPACE_CAST
+#error "scx_cidland requires a compiler with bpf_addr_space_cast support"
+#endif
+
 char _license[] SEC("license") = "GPL";
 
 /*
@@ -51,9 +60,10 @@ UEI_DEFINE(uei);
 
 /*
  * cid-form schedulers must provide a BPF arena, which the kernel uses for the
- * per-task cmasks. This scheduler doesn't allocate from it, but the verifier
- * associates a program with an arena only if the program emits an LD_IMM64
- * loading the map, so at least one of them has to reference it explicitly.
+ * per-task cmasks. The verifier associates a program with an arena only if the
+ * program emits an LD_IMM64 loading the map, so a program that has no other
+ * reason to touch it has to reference it explicitly. ops.init() gets this for
+ * free from @cid_ctxs, which libbpf relocates against the arena map.
  */
 #define TOUCH_ARENA()	do { asm volatile("" :: "r"(&arena)); } while (0)
 
@@ -136,7 +146,14 @@ struct cid_ctx {
 	u32 llc_nr;		/* number of cids in the LLC */
 };
 
-static struct cid_ctx cid_ctxs[MAX_CIDS];
+/*
+ * The topology table lives in the arena the cid form already gives us. Arena
+ * pointers aren't range tracked by the verifier, so a cid that's known to be
+ * in range can index it directly, instead of going through a bounds checked
+ * helper that returns NULL and makes every caller handle a case that can't
+ * happen.
+ */
+__arena_global struct cid_ctx cid_ctxs[MAX_CIDS];
 
 /*
  * Mask with every cid set, handed to the pick loop for the tasks that can run
@@ -157,21 +174,6 @@ static u64 primary_cids[MAX_CID_WORDS];
  * close to each other in the system topology.
  */
 static u64 idle_cids[MAX_CID_WORDS];
-
-static struct cid_ctx *lookup_cid_ctx(s32 cid)
-{
-	u32 idx = (u32)cid;
-
-	if (cid < 0)
-		return NULL;
-
-	/* Keep the compiler from hoisting the address computation. */
-	barrier_var(idx);
-	if (idx >= MAX_CIDS)
-		return NULL;
-
-	return &cid_ctxs[idx];
-}
 
 /*
  * Return the word of @mask (MAX_CID_WORDS wide) holding the bit of @cid, or
@@ -321,15 +323,14 @@ static s32 claim_idle_cid_range(u64 *allowed, u64 *domain, u32 base, u32 nr,
 	u32 cid;
 
 	bpf_for(cid, base, base + nr) {
-		const struct cid_ctx *cctx;
-
 		if (cid >= nr_cids)
 			break;
 		if (!cid_test_idle(cid))
 			continue;
 		if (whole_core) {
-			cctx = lookup_cid_ctx(cid);
-			if (!cctx || !cid_range_is_idle(cctx->core_base, cctx->core_nr))
+			const struct cid_ctx __arena *cctx = &cid_ctxs[cid];
+
+			if (!cid_range_is_idle(cctx->core_base, cctx->core_nr))
 				continue;
 		}
 		if (!cid_isset(allowed, cid) || !cid_isset(domain, cid))
@@ -349,7 +350,7 @@ static s32 claim_idle_cid_range(u64 *allowed, u64 *domain, u32 base, u32 nr,
  * @allowed permits.
  */
 static s32 pick_idle_cid_domain(u64 *allowed, u64 *domain,
-				const struct cid_ctx *cctx, s32 prev_cid,
+				const struct cid_ctx __arena *cctx, s32 prev_cid,
 				bool core_only)
 {
 	s32 cid;
@@ -402,7 +403,7 @@ static s32 pick_idle_cid_domain(u64 *allowed, u64 *domain,
 static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 			 bool from_enqueue, bool core_only)
 {
-	const struct cid_ctx *cctx = NULL;
+	const struct cid_ctx __arena *cctx = NULL;
 	u64 *allowed = all_cids;
 	struct task_ctx *tctx;
 	s32 cid;
@@ -436,7 +437,8 @@ static s32 pick_idle_cid(const struct task_struct *p, s32 prev_cid,
 		allowed = tctx->allowed;
 	}
 
-	cctx = lookup_cid_ctx(prev_cid);
+	if (prev_cid >= 0 && prev_cid < nr_cids)
+		cctx = &cid_ctxs[prev_cid];
 
 	/*
 	 * Search the primary domain first and fall back to the rest of the
@@ -844,12 +846,8 @@ static s32 init_cid_ctxs(void)
 
 	bpf_for(i, 0, nr_cids) {
 		struct scx_cid_topo *topo = &init_topo;
-		struct cid_ctx *cctx;
 		s32 cid = nr_cids - 1 - i;
-
-		cctx = lookup_cid_ctx(cid);
-		if (!cctx)
-			return -EINVAL;
+		struct cid_ctx __arena *cctx = &cid_ctxs[cid];
 
 		scx_bpf_cid_topo(cid, topo);
 
@@ -916,8 +914,6 @@ static void init_primary_cids(void)
 s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 {
 	s32 err;
-
-	TOUCH_ARENA();
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	if (nr_cpu_ids > MAX_CIDS) {

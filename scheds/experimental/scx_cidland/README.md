@@ -71,8 +71,9 @@ $ bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep sched_ext_ops_ci
 
 Note that cid-form schedulers are also required to provide a BPF arena (the
 kernel allocates the per-task cmasks from it), hence the `lib/arena_map.h`
-include and the `TOUCH_ARENA()` in `ops.init()`, even though this scheduler
-never allocates from the arena itself.
+include. The per-cid topology table lives in that arena as well: arena pointers
+are not range tracked by the verifier, so a cid that is known to be in range can
+index the table directly.
 
 ## Typical Use Case
 
