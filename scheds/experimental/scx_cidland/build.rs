@@ -8,6 +8,10 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .build()
+        // Arena backed per-task storage: sdt_task.bpf.c sits on the allocator
+        // in sdt_alloc.bpf.c.
+        .add_source("src/bpf/lib/sdt_alloc.bpf.c")
+        .add_source("src/bpf/lib/sdt_task.bpf.c")
+        .compile_link_gen()
         .unwrap();
 }

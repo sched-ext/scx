@@ -5894,6 +5894,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs 0.27.0",
  "log",
+ "scx_arena",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",

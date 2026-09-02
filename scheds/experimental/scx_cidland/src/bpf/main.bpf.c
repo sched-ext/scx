@@ -26,6 +26,8 @@
  */
 #include <scx/common.bpf.h>
 #include <lib/arena_map.h>
+#include <lib/const-defs.h>
+#include <lib/sdt_task.h>
 #include "intf.h"
 
 /*
@@ -40,6 +42,17 @@
 char _license[] SEC("license") = "GPL";
 
 /*
+ * Storage for the arena spinlock queue nodes that the allocator behind
+ * scx_task_alloc() takes.
+ *
+ * This normally comes from lib/common.bpf.c, but a translation unit that has
+ * __arena globals of its own emits the extern declaration into its own
+ * .addr_space.1 as a zero sized definition, which then collides with the real
+ * one at link time. Defining it here keeps it to a single definition.
+ */
+struct arena_qnode __arena __hidden qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
+
+/*
  * Define struct user_exit_info which is shared between BPF and userspace to
  * communicate the exit status.
  */
@@ -51,6 +64,12 @@ UEI_DEFINE(uei);
  * cid that runs out of work.
  */
 #define SHARED_DSQ	0
+
+/*
+ * Pages handed to the arena's static allocator, which the task context
+ * allocator carves its bookkeeping out of. Same granularity ArenaLib uses.
+ */
+#define STATIC_ALLOC_PAGES	8
 
 /*
  * Maximum measured task wakeup rate. Used to avoid spikes when prioritizing
@@ -939,6 +958,24 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cidland_init)
 void BPF_STRUCT_OPS(cidland_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
+}
+
+/*
+ * Bring up the arena allocator that backs the per-task contexts.
+ *
+ * Run from userspace between load and attach, which is all the ordering the
+ * allocator needs: it has to be ready before the first ops.init_task().
+ */
+SEC("syscall")
+int cidland_arena_init(void *ctx)
+{
+	s32 err;
+
+	err = scx_static_init(STATIC_ALLOC_PAGES);
+	if (err)
+		return err;
+
+	return scx_task_init(sizeof(struct task_ctx), SCX_CACHELINE_SIZE);
 }
 
 SCX_OPS_CID_DEFINE(cidland_ops,

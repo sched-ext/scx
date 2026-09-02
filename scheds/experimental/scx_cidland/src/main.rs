@@ -23,10 +23,13 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::skel::Skel;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use log::warn;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -190,6 +193,7 @@ fn parse_cpu_list(arg: &str) -> Result<Vec<usize>> {
 }
 
 struct Scheduler<'a> {
+    _arenalib: ArenaLib,
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
@@ -275,10 +279,32 @@ impl<'a> Scheduler<'a> {
 
         // Load and attach the scheduler.
         let mut skel = scx_ops_cid_load!(skel, cidland_ops, uei).context("loading BPF skeleton")?;
+
+        // Bring up the arena allocator backing the per-task contexts. This has
+        // to happen before the scheduler is visible to the kernel, so it sits
+        // between load and attach. Despite the name this is not a test run,
+        // it's how SEC("syscall") programs are invoked.
+        let output = skel
+            .progs
+            .cidland_arena_init
+            .test_run(ProgramInput::default())
+            .context("running cidland_arena_init")?;
+        if output.return_value != 0 {
+            bail!("cidland_arena_init failed: {}", output.return_value as i32);
+        }
+
+        // The BPF side has a scheduler-specific initialization path, but the
+        // allocator still needs ArenaLib's userspace services. In particular,
+        // scx_task_free_rcu() relies on its reclaim daemon to return exited
+        // task contexts to the allocator.
+        let arenalib =
+            ArenaLib::start(skel.object_mut()).context("starting arena userspace services")?;
+
         let struct_ops = Some(scx_ops_attach!(skel, cidland_ops).context("attaching scheduler")?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self {
+            _arenalib: arenalib,
             skel,
             struct_ops,
             stats_server,
