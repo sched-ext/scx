@@ -39,8 +39,6 @@ struct tuning_knobs {
 	u64 slice_ns;           // BASE TIME SLICE (DEFAULT 1MS)
 	u64 preempt_thresh_ns;  // TICK PREEMPTION THRESHOLD (DEFAULT 1MS)
 	u64 batch_slice_ns;     // BATCH TASK SLICE CEILING (DEFAULT 20MS)
-	u64 lat_cri_thresh_high; // CLASSIFIER: LAT_CRITICAL THRESHOLD (DEFAULT 32)
-	u64 lat_cri_thresh_low;  // CLASSIFIER: INTERACTIVE THRESHOLD (DEFAULT 8)
 	u64 affinity_mode;      // L2 PLACEMENT: 0=OFF, 1=WEAK, 2=STRONG
 	u64 codel_thresh_ns;    // BATCH DSQ RESCUE THRESHOLD (SET BY RUST)
 	u64 burst_slice_ns;     // SLICE CEILING DURING BURST/LONGRUN (SET BY RUST, DEFAULT 1MS)
@@ -53,10 +51,6 @@ struct tuning_knobs {
 	                        // <R_eff> * 2m * tau, CLAMPED [200us, 8ms].
 	                        // 0 MEANS NOT YET WRITTEN. WRITTEN AT TOPOLOGY
 	                        // DETECT AND ON HOTPLUG (CO-LOCATED WITH tau).
-	u64 spill_temp_q16;     // SPILL-Phi: T_base*(1+kappa*H) Q16, FROM THE
-	                        // BANDT-POMPE PERMUTATION ENTROPY. COMPUTED AND
-	                        // SHIPPED EACH ADAPTIVE TICK; INERT UNTIL THE
-	                        // SPILL PRICE CONSUMES IT.
 	// PHI DISTANCE PENALTY IS PRE-FOLDED INTO THE reff_value MAP (IN NS) BY
 	// RUST AT TOPOLOGY DETECT -- NO KNOB FIELD: BPF READS THE MAP DIRECTLY.
 };
@@ -85,8 +79,6 @@ struct pandemonium_stats {
 	u64 nr_l2_miss_batch;
 	u64 nr_l2_hit_interactive;
 	u64 nr_l2_miss_interactive;
-	u64 nr_l2_hit_lat_crit;
-	u64 nr_l2_miss_lat_crit;
 	// CPU RELEASE: TASKS RESCUED FROM LOCAL DSQ BY scx_bpf_reenqueue_local()
 	u64 nr_reenqueue;
 	// CODEL SOJOURN: CURRENT BATCH WAIT AGE (NS), WRITTEN BY tick()
@@ -114,6 +106,14 @@ struct pandemonium_stats {
 	// strand fix -- it should track the formerly tick-floored burst wakes while
 	// the >=900us wake2run bucket collapses.
 	u64 nr_spill_kick_preempt;
+	// TOTAL STEAL COUNT: every successful STEP 1 peer move_to_local, regardless
+	// of domain. nr_cross_domain[XDOM_STEAL] counts only CROSS-domain steals, and
+	// on a two-domain box most steals are same-domain and were counted nowhere --
+	// so "what fraction of the migration count is the dispatch-side steal" had no
+	// answer from anything in the tree. Every successful steal IS a migration by
+	// definition: the task comes off a peer's queue and runs here. One bump, no
+	// per-cause breakdown, operator-useful on any workload.
+	u64 nr_steal;
 	// PER-CPU RUNNABLE DEPTH, ACCUMULATED. THE ADAPTIVE LAYER HAD NO QUEUE
 	// SERIES AT ALL: IT INFERRED LOAD FROM idle_pct, ONE SYSTEM-WIDE INTEGER
 	// PERCENTAGE, WHICH IS WHY THE WHOLE CHAOS LAYER RAN OVER 16 SAMPLES OF

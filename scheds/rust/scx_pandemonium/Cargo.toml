@@ -1,8 +1,8 @@
 [package]
 name = "scx_pandemonium"
-version = "5.19.0"
+version = "5.20.0"
 edition = "2021"
-description = "A behavioral, adaptive sched_ext scheduler with three-tier classification, L2 affinity, and process learning"
+description = "An adaptive sched_ext scheduler: CoDel sojourn ordering, effective-resistance distance pricing and knobs derived each second from measured per-CPU queue behaviour"
 license = "GPL-2.0-only"
 
 [dependencies]

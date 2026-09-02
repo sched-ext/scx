@@ -43,8 +43,6 @@ pub struct PandemoniumStats {
     pub nr_l2_miss_batch: u64,
     pub nr_l2_hit_interactive: u64,
     pub nr_l2_miss_interactive: u64,
-    pub nr_l2_hit_lat_crit: u64,
-    pub nr_l2_miss_lat_crit: u64,
     pub nr_reenqueue: u64,
     pub batch_sojourn_ns: u64,
     pub longrun_mode_active: u64,
@@ -57,6 +55,11 @@ pub struct PandemoniumStats {
     // SPILL-KICK PREEMPTS (select_cpu seat redirected off the idle pick onto a
     // busy spill CPU; intf.h nr_spill_kick_preempt). Confirms the tick-floor fix.
     pub nr_spill_kick_preempt: u64,
+    // TOTAL STEALS (intf.h nr_steal). Every successful STEP 1 peer move_to_local,
+    // same-domain included -- nr_cross_domain[XDOM_STEAL] counts only the cross-
+    // domain half, which on a two-domain box is the minority. Every steal is a
+    // migration by definition, so this is the dispatch side's share of the count.
+    pub nr_steal: u64,
     // PER-CPU RUNNABLE DEPTH (intf.h rq_depth_sum / rq_depth_samples).
     // Monotonic accumulators sampled at tick rate; difference BOTH across an
     // interval and divide for the mean depth on that CPU, exactly as
@@ -68,10 +71,13 @@ pub struct PandemoniumStats {
 }
 
 // COMPILE-TIME ABI SAFETY: MUST MATCH STRUCT LAYOUTS IN intf.h
-// 200 (base) + 8*8 (nr_cross_domain) + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt)
-// + 8 (rq_depth_sum) + 8 (rq_depth_samples) = 296.
-const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 296);
-const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 88);
+// 184 (base, after the structurally empty latcrit l2 pair) + 8*8 (nr_cross_domain)
+// + 8 (nr_osc_park) + 8 (nr_spill_kick_preempt) + 8 (nr_steal) + 8 (rq_depth_sum)
+// + 8 (rq_depth_samples) = 288.
+const _: () = assert!(std::mem::size_of::<PandemoniumStats>() == 288);
+// 88 - 16 (lat_cri_thresh_high/_low, removed with the classifier that read them)
+// - 8 (spill_temp_q16, computed every tick and consumed by nothing).
+const _: () = assert!(std::mem::size_of::<TuningKnobs>() == 64);
 
 // MAX_AFFINITY_CANDIDATES IS DEFINED IN intf.h. THE RUST MIRROR IN
 // bpf_intf.rs MUST KEEP THE SAME VALUE; IF THE TWO SIDES DRIFT, THE
@@ -235,8 +241,6 @@ impl<'a> Scheduler<'a> {
                 total.nr_l2_miss_batch += stats.nr_l2_miss_batch;
                 total.nr_l2_hit_interactive += stats.nr_l2_hit_interactive;
                 total.nr_l2_miss_interactive += stats.nr_l2_miss_interactive;
-                total.nr_l2_hit_lat_crit += stats.nr_l2_hit_lat_crit;
-                total.nr_l2_miss_lat_crit += stats.nr_l2_miss_lat_crit;
                 total.nr_reenqueue += stats.nr_reenqueue;
                 if stats.batch_sojourn_ns > total.batch_sojourn_ns {
                     total.batch_sojourn_ns = stats.batch_sojourn_ns;
@@ -250,6 +254,7 @@ impl<'a> Scheduler<'a> {
                 }
                 total.nr_osc_park += stats.nr_osc_park;
                 total.nr_spill_kick_preempt += stats.nr_spill_kick_preempt;
+                total.nr_steal += stats.nr_steal;
                 // Folded so the aggregate stays complete, but the SUMMED value
                 // is close to meaningless -- it is the total depth seen across
                 // every CPU. The per-CPU pair is the point; read it from
@@ -272,12 +277,11 @@ impl<'a> Scheduler<'a> {
     // FIELDS THAT MUST BE IDENTICAL ON EVERY CPU.
     //
     // tuning_knobs_map is per-CPU, which makes divergence expressible -- and
-    // for these six it would be a defect rather than a feature. tau and
+    // for these three it would be a defect rather than a feature. tau and
     // codel_eq are topology-owned and drive tau-scaling, which every CPU
-    // re-derives from the same constant; the two lat_cri thresholds and
-    // affinity_mode decide how a TASK is classified and placed, so a task would
-    // change class depending on which CPU last looked at it; spill_temp is
-    // computed from system-wide permutation entropy and has no per-CPU meaning.
+    // re-derives from the same constant; affinity_mode decides how a TASK is
+    // placed, so a task would change placement depending on which CPU last
+    // looked at it.
     //
     // Broadcast rather than trusted: the writer overwrites these in every slot
     // from slot 0, so a caller cannot diverge them by omission.
@@ -289,10 +293,7 @@ impl<'a> Scheduler<'a> {
         for k in rest.iter_mut() {
             k.topology_tau_ns = first.topology_tau_ns;
             k.codel_eq_ns = first.codel_eq_ns;
-            k.spill_temp_q16 = first.spill_temp_q16;
             k.affinity_mode = first.affinity_mode;
-            k.lat_cri_thresh_high = first.lat_cri_thresh_high;
-            k.lat_cri_thresh_low = first.lat_cri_thresh_low;
         }
     }
 
@@ -349,7 +350,6 @@ impl<'a> Scheduler<'a> {
     // oscillator is now the only thing adapting on rescue count, and the graph
     // derives from depth, shape and persistence instead. The accessor stays
     // because the live-R_eff work reads the same maps.
-    #[allow(dead_code)]
     // MWU GATES ITS RESCUE-DRIVEN PATHWAYS ON THIS SO IT DOESN'T
     // DOUBLE-CORRECT WHEN THE BPF DAMPED OSCILLATOR HAS ALREADY MOVED.
     pub fn read_oscillator_state(&self) -> OscillatorState {
@@ -561,7 +561,6 @@ impl<'a> Scheduler<'a> {
     // READ ONE reff_value SLOT (ns PHI HOLD TO THAT RANKED PEER). RETURNS 0 ON
     // MISS OR THE (u32)-1 UNUSED-SLOT SENTINEL. USED BY THE ADAPTIVE LOOP TO
     // LEARN THE NEAREST-PEER HOLD WARM-STAY PRICES IN (SLOT 0 = CHEAPEST PEER).
-    #[allow(dead_code)]
     pub fn read_reff_value(&self, cpu: u32, slot: u32) -> u32 {
         let stride = crate::bpf_intf::MAX_AFFINITY_CANDIDATES;
         let key = (cpu * stride + slot).to_ne_bytes();
@@ -726,25 +725,19 @@ mod fold_tests {
 mod knob_broadcast_tests {
     use super::*;
 
-    fn knobs(slice: u64, tau: u64, lat_hi: u64) -> TuningKnobs {
+    fn knobs(slice: u64, tau: u64) -> TuningKnobs {
         let mut k = TuningKnobs::default();
         k.slice_ns = slice;
         k.topology_tau_ns = tau;
-        k.lat_cri_thresh_high = lat_hi;
         k
     }
 
     #[test]
     fn global_fields_are_broadcast_from_slot_zero() {
-        let mut v = vec![
-            knobs(100, 7_000, 32),
-            knobs(200, 9_999, 64),
-            knobs(300, 1, 8),
-        ];
+        let mut v = vec![knobs(100, 7_000), knobs(200, 9_999), knobs(300, 1)];
         Scheduler::broadcast_global_fields(&mut v);
         for (i, k) in v.iter().enumerate() {
             assert_eq!(k.topology_tau_ns, 7_000, "slot {i} diverged on tau");
-            assert_eq!(k.lat_cri_thresh_high, 32, "slot {i} diverged on classifier");
         }
     }
 
@@ -753,7 +746,7 @@ mod knob_broadcast_tests {
         // The whole point: slices may differ per CPU. A broadcast that
         // flattened them would silently restore the global-only behavior this
         // change exists to remove.
-        let mut v = vec![knobs(100, 7_000, 32), knobs(200, 0, 0), knobs(300, 0, 0)];
+        let mut v = vec![knobs(100, 7_000), knobs(200, 0), knobs(300, 0)];
         Scheduler::broadcast_global_fields(&mut v);
         assert_eq!(v[0].slice_ns, 100);
         assert_eq!(v[1].slice_ns, 200);
@@ -764,7 +757,7 @@ mod knob_broadcast_tests {
     fn uniform_input_stays_uniform() {
         // The acceptance criterion for the whole change: identical values in
         // every slot must be indistinguishable from the pre-per-CPU map.
-        let mut v = vec![knobs(100, 7_000, 32); 8];
+        let mut v = vec![knobs(100, 7_000); 8];
         let before = v.clone();
         Scheduler::broadcast_global_fields(&mut v);
         for (a, b) in before.iter().zip(v.iter()) {
@@ -777,7 +770,7 @@ mod knob_broadcast_tests {
     fn empty_and_single_slot_are_no_ops() {
         let mut none: Vec<TuningKnobs> = Vec::new();
         Scheduler::broadcast_global_fields(&mut none);
-        let mut one = vec![knobs(100, 7_000, 32)];
+        let mut one = vec![knobs(100, 7_000)];
         Scheduler::broadcast_global_fields(&mut one);
         assert_eq!(one[0].slice_ns, 100);
     }

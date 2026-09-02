@@ -30,9 +30,6 @@ const HEAVY_P99_CEIL_NS: u64 = 10_000_000; // 10MS: HEAVY LOAD, REALISTIC
 // LAT_CRI SCORE BOUNDARIES FOR TIER CLASSIFICATION
 // EXPOSED AS TUNING KNOBS FOR RUNTIME ADJUSTMENT
 
-pub const DEFAULT_LAT_CRI_THRESH_HIGH: u64 = 32; // >= THIS: LAT_CRITICAL
-pub const DEFAULT_LAT_CRI_THRESH_LOW: u64 = 8; // >= THIS: INTERACTIVE, BELOW: BATCH
-
 // TUNING KNOBS
 // MATCHES struct tuning_knobs IN BPF (intf.h)
 
@@ -42,20 +39,11 @@ pub const AFFINITY_WEAK: u64 = 1;
 // Unused since the coupling->affinity derivation was withdrawn 2026-08-05.
 // Kept: it is half of a two-value ABI the BPF side still reads, and a knob that
 // can only ever hold one of its values is a defect waiting to be re-found.
-#[allow(dead_code)]
-pub const AFFINITY_STRONG: u64 = 2;
 
 // SPILL TEMPERATURE (SPILL-Phi). T = T_base*(1 + kappa*H), H THE Bandt-Pompe
 // PERMUTATION ENTROPY IN [0,1]; Q16 FIXED-POINT (65536 = T_base = 1.0).
 // COMPUTED EACH ADAPTIVE TICK FROM THE CHAOS LAYER, SHIPPED AS A NON-MWU KNOB
 // OVERLAID LIKE topology_tau_ns. INERT UNTIL THE SPILL PRICE CONSUMES IT.
-pub const SPILL_TEMP_BASE_Q16: u64 = 65536;
-pub const SPILL_TEMP_KAPPA: f64 = 1.0;
-
-pub fn spill_temp_q16(h: f64) -> u64 {
-    let h = h.clamp(0.0, 1.0);
-    ((SPILL_TEMP_BASE_Q16 as f64) * (1.0 + SPILL_TEMP_KAPPA * h)) as u64
-}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -63,8 +51,6 @@ pub struct TuningKnobs {
     pub slice_ns: u64,
     pub preempt_thresh_ns: u64,
     pub batch_slice_ns: u64,
-    pub lat_cri_thresh_high: u64,
-    pub lat_cri_thresh_low: u64,
     pub affinity_mode: u64,
     pub codel_thresh_ns: u64,
     pub burst_slice_ns: u64,
@@ -76,7 +62,6 @@ pub struct TuningKnobs {
     // R_eff-DERIVED CODEL EQUILIBRIUM TARGET (<R_eff> * 2m * tau).
     // CO-LOCATED WITH topology_tau_ns; SAME ZERO/WRITE/CLAMP SEMANTICS.
     pub codel_eq_ns: u64,
-    pub spill_temp_q16: u64,
 }
 
 impl Default for TuningKnobs {
@@ -85,14 +70,11 @@ impl Default for TuningKnobs {
             slice_ns: 1_000_000,
             preempt_thresh_ns: 1_000_000,
             batch_slice_ns: 20_000_000,
-            lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
-            lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
             affinity_mode: AFFINITY_OFF,
             codel_thresh_ns: 5_000_000,
             burst_slice_ns: 1_000_000,
             topology_tau_ns: 0,
             codel_eq_ns: 0,
-            spill_temp_q16: SPILL_TEMP_BASE_Q16,
         }
     }
 }
@@ -132,14 +114,11 @@ pub fn base_knobs() -> TuningKnobs {
         slice_ns: MIXED_SLICE_NS,
         preempt_thresh_ns: MIXED_PREEMPT_NS,
         batch_slice_ns: MIXED_BATCH_NS,
-        lat_cri_thresh_high: DEFAULT_LAT_CRI_THRESH_HIGH,
-        lat_cri_thresh_low: DEFAULT_LAT_CRI_THRESH_LOW,
         affinity_mode: AFFINITY_WEAK,
         codel_thresh_ns: 5_000_000,
         burst_slice_ns: 1_000_000,
         topology_tau_ns: 0,
         codel_eq_ns: 0,
-        spill_temp_q16: SPILL_TEMP_BASE_Q16,
     }
 }
 
@@ -293,7 +272,6 @@ pub fn compute_p99_from_histogram(counts: &[u64; HIST_BUCKETS]) -> u64 {
 // The BPF damped-harmonic oscillator owns codel_target_ns. The adaptive layer
 // reads its position so nothing upstream re-derives a target the oscillator is
 // already moving.
-#[allow(dead_code)]
 #[derive(Default, Clone, Copy, Debug)]
 pub struct OscillatorState {
     pub codel_target_ns: u64,
@@ -311,7 +289,6 @@ pub struct OscillatorState {
 impl OscillatorState {
     // 0.0 = AT FLOOR (TIGHTENED), 1.0 = AT MAX (RELAXED).
     // SENTINEL OR DEGENERATE RANGE -> 0.5 (CENTER, NEUTRAL).
-    #[allow(dead_code)]
     pub fn position(&self) -> f64 {
         if self.codel_target_max_ns == 0 || self.codel_target_floor_ns >= self.codel_target_max_ns {
             return 0.5;
@@ -327,7 +304,6 @@ impl OscillatorState {
     // A TASK LEAVE HOME (codel_target + NEAREST-PEER HOLD). THE DEFER GATE
     // COMPARES THIS AGAINST codel_eq TO DECIDE WHETHER THE BPF HAS GENUINELY
     // RESPONDED, RATHER THAN TRUSTING THE BARE-WINDOW position() ALONE.
-    #[allow(dead_code)]
     pub fn effective_release_ns(&self) -> u64 {
         self.codel_target_ns.saturating_add(self.home_dist_extra_ns)
     }
@@ -416,8 +392,6 @@ pub fn knobs_differ(a: &TuningKnobs, b: &TuningKnobs) -> bool {
     a.slice_ns != b.slice_ns
         || a.preempt_thresh_ns != b.preempt_thresh_ns
         || a.batch_slice_ns != b.batch_slice_ns
-        || a.lat_cri_thresh_high != b.lat_cri_thresh_high
-        || a.lat_cri_thresh_low != b.lat_cri_thresh_low
         || a.affinity_mode != b.affinity_mode
         || a.codel_thresh_ns != b.codel_thresh_ns
         || a.burst_slice_ns != b.burst_slice_ns

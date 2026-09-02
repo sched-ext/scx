@@ -72,7 +72,6 @@ pub enum DomainNode {
     },
 }
 
-#[allow(dead_code)]
 impl DomainNode {
     // Flatten to the leaf CPU sets -- each an emergent atomic domain.
     pub fn leaves(&self) -> Vec<Vec<usize>> {
@@ -160,7 +159,6 @@ fn compute_codel_eq_ns(eigenvalues: &[f64], n: usize, tau_ns: u64) -> u64 {
     (raw_ns as u64).clamp(C_EQ_FLOOR_NS, C_EQ_CEIL_NS)
 }
 
-#[allow(dead_code)]
 pub struct CpuTopology {
     pub nr_cpus: usize,
     pub l2_domain: Vec<u32>,      // l2_domain[cpu] = group_id
@@ -543,7 +541,6 @@ impl CpuTopology {
     // Conductance phi of a bipartition of `members` (in_side[c] = c is on side A).
     // O(|members|^2); boot-time only. The random-walk variant (next) avoids the
     // full scan for large N -- this exact form is the ground-truth + the price.
-    #[allow(dead_code)]
     fn cut_conductance(&self, members: &[usize], in_side: &[bool]) -> f64 {
         let mut cut = 0.0f64;
         let (mut vol_a, mut vol_b) = (0.0f64, 0.0f64);
@@ -575,7 +572,6 @@ impl CpuTopology {
     // Fiedler vector (eigenvector of lambda_2) of the full graph -- the ground
     // truth the scalable random-walk cut is cross-checked against. eigenvectors
     // are column-major: component i of eigenvector k is eigenvectors[i*n + k].
-    #[allow(dead_code)]
     fn fiedler_vector(eigenvalues: &[f64], eigenvectors: &[f64], n: usize) -> Vec<f64> {
         let mut idx: Vec<usize> = (0..n).collect();
         idx.sort_by(|&a, &b| {
@@ -587,45 +583,8 @@ impl CpuTopology {
         (0..n).map(|i| eigenvectors[i * n + k]).collect()
     }
 
-    // Single-level min-conductance cut of `members` via the Fiedler sweep: order
-    // the members by their Fiedler component, sweep every prefix as side A, keep
-    // the split with the lowest phi. Balance-free. Returns (side_a, side_b, phi),
-    // or None for a singleton. fvec is indexed by global CPU id.
-    #[allow(dead_code)]
-    fn fiedler_sweep_cut(
-        &self,
-        members: &[usize],
-        fvec: &[f64],
-    ) -> Option<(Vec<usize>, Vec<usize>, f64)> {
-        if members.len() < 2 {
-            return None;
-        }
-        let mut ordered = members.to_vec();
-        ordered.sort_by(|&a, &b| {
-            fvec[a]
-                .partial_cmp(&fvec[b])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut in_side = vec![false; self.nr_cpus];
-        let (mut best_phi, mut best_k) = (f64::INFINITY, 1usize);
-        for k in 1..ordered.len() {
-            in_side[ordered[k - 1]] = true; // grow the prefix one vertex
-            let phi = self.cut_conductance(members, &in_side);
-            if phi < best_phi {
-                best_phi = phi;
-                best_k = k;
-            }
-        }
-        Some((
-            ordered[..best_k].to_vec(),
-            ordered[best_k..].to_vec(),
-            best_phi,
-        ))
-    }
-
     // True when every member shares one L2 group -- the atomic leaf. L2 siblings
     // are maximally coupled; there is no meaningful seam to find below them.
-    #[allow(dead_code)]
     fn all_same_l2(&self, members: &[usize]) -> bool {
         members
             .windows(2)
@@ -638,7 +597,6 @@ impl CpuTopology {
     // replaces these internals with a local random walk -- no eigensolve, so it
     // scales; the tree-builder is agnostic to which produces the cut.) Returns
     // global CPU ids.
-    #[allow(dead_code)]
     fn domain_cut(&self, members: &[usize]) -> Option<(Vec<usize>, Vec<usize>, f64)> {
         let k = members.len();
         if k < 2 {
@@ -695,7 +653,6 @@ impl CpuTopology {
     // walk eigenvector). Deterministic hash start (not a ramp -- ramps can align
     // with a non-Fiedler mode) so a topology yields the same domains every boot.
     // Cross-checked against domain_cut as ground truth (the T2 gate).
-    #[allow(dead_code)]
     fn walk_cut(&self, members: &[usize]) -> Option<(Vec<usize>, Vec<usize>, f64)> {
         let k = members.len();
         if k < 2 {
@@ -789,7 +746,6 @@ impl CpuTopology {
 
     // Dispatch: exact eigen cut below the threshold, scalable random-walk cut
     // above. Both produce the same boundary on real cache graphs (gate-tested).
-    #[allow(dead_code)]
     fn best_cut(&self, members: &[usize]) -> Option<(Vec<usize>, Vec<usize>, f64)> {
         if members.len() <= Self::WALK_CUT_THRESHOLD {
             self.domain_cut(members)
@@ -802,7 +758,6 @@ impl CpuTopology {
     // single L2 group (or one CPU) -- maximally coupled, no seam. Each Cut carries
     // its phi (the crossing price). This IS de-facto NUMA: the boundary is drawn
     // by the conductance landscape, not a hardcoded topology table.
-    #[allow(dead_code)]
     pub fn build_domain_tree(&self, members: &[usize]) -> DomainNode {
         if members.len() <= 1 || self.all_same_l2(members) {
             return DomainNode::Leaf(members.to_vec());
@@ -1390,11 +1345,8 @@ mod t2_cut_tests {
     #[test]
     fn min_conductance_cut_splits_on_llc() {
         let t = synth_2domain();
-        let lap = t.build_laplacian();
-        let (ev, evec) = CpuTopology::symmetric_eigen(&lap, 8);
-        let fvec = CpuTopology::fiedler_vector(&ev, &evec, 8);
         let members: Vec<usize> = (0..8).collect();
-        let (a, b, phi) = t.fiedler_sweep_cut(&members, &fvec).expect("cut");
+        let (a, b, phi) = t.best_cut(&members).expect("cut");
         let (mut sa, mut sb) = (a.clone(), b.clone());
         sa.sort();
         sb.sort();
@@ -1412,7 +1364,7 @@ mod t2_cut_tests {
     fn cut_conductance_zero_weight_guard() {
         // A singleton member set has no valid bipartition -> None, not a panic.
         let t = synth_2domain();
-        assert!(t.fiedler_sweep_cut(&[3usize], &vec![0.0; 8]).is_none());
+        assert!(t.best_cut(&[3usize]).is_none());
     }
 
     // 8 CPUs WITH SMT: 4 L2 pairs {0,1}{2,3}{4,5}{6,7}, two L3 groups {0..3},
