@@ -197,9 +197,9 @@ ops.cpuctl_exit() and ops.cpuctl_move().
 Tracepoints attach before the struct_ops, so a cgroup mkdir can fire before
 ops.init() has initialized the cgroup allocator. tp_cgroup_mkdir() skips
 until cgrp_alloc_ready is set, and the ctx is then created by ops.init()'s
-cgroup walk, ops.cpuctl_init() or the first task initialized in the cgroup,
-inheriting the parent's cell. ops.init() creates the root ctx before it sets
-the flag, because a racing mkdir's ancestor walk needs it.
+cgroup walk or by the first task initialized in the cgroup, inheriting the
+parent's cell. ops.init() creates the root ctx before it sets the flag,
+because a racing mkdir's ancestor walk needs it.
 
 ## Masks and ownership
 
@@ -271,10 +271,6 @@ state. Measure the resulting distribution.
 Cell masks and the cpu-to-cell reporting skip offline cpus, where mitosis
 kept their bits. A configuration that names offline cpus contributes nothing
 for them.
-
-An exiting task whose cgroup is already removed during scheduler load falls
-back to the root cell in ops.init_task(), where mitosis failed the task init
-and with it the scheduler load.
 
 Per-cid contexts use NUMA_NO_NODE arena pages. Their placement can differ
 from the percpu map's, so measure locality effects on multi-node hardware.
@@ -497,9 +493,9 @@ The wider coverage inventory includes cell isolation, dynamic cell creation
 and destruction, cell exclusion, borrowing, demand rebalancing, cpuset
 changes, LLC awareness with draining and stealing, pinned tasks and dynamic
 affinity selection, slice shrinking, SMT on and off, possible but offline
-cpus, hotplug restarts, the tracepoint cgroup path, and attach and detach.
-It is not a mandatory matrix for every port. Record source, binary and
-kernel identities once per batch.
+cpus, hotplug restarts, cgroup tracking with the CPU controller enabled and
+disabled, and attach and detach. It is not a mandatory matrix for every
+port. Record source, binary and kernel identities once per batch.
 
 The functional drivers are mitosis's, renamed. The scripts under test/ run a
 built scheduler binary, SCHEDULER_BIN, against test cgroups and need root
