@@ -137,8 +137,8 @@ struct Opts {
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     exiting_task_workaround: bool,
 
-    /// Disable SCX cgroup callbacks (for when CPU cgroup controller is disabled).
-    /// Uses tracepoints and cgroup iteration instead.
+    /// Deprecated compatibility flag. Mitosis always uses tracepoint cgroup tracking.
+    #[allow(dead_code)]
     #[clap(long, action = clap::ArgAction::SetTrue)]
     cpu_controller_disabled: bool,
 
@@ -404,7 +404,6 @@ impl<'a> Scheduler<'a> {
 
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
-        rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
 
         // Slice shrinking configuration
