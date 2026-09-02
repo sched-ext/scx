@@ -1034,6 +1034,48 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * Return true if a task that only @cpu can run is waiting in @cpu's shared
+ * DSQ.
+ *
+ * The kernel skips ops.dispatch() entirely while a CPU's local DSQ is not
+ * empty (see dispatch_one()), so tasks stacked on a local DSQ silently
+ * outrank the whole deadline-ordered shared DSQ. A task pinned to @cpu can
+ * therefore wait in the shared DSQ forever: remote CPUs walk past it in
+ * scx_bpf_dsq_move_to_local() and @cpu never gets to ops.dispatch().
+ *
+ * The shared DSQ is ordered by deadline and the deadline of a task that is
+ * not running is fixed at insertion time, so a starving task climbs to the
+ * head as the queue drains: peeking at the head is enough to notice it.
+ */
+static bool shared_dsq_has_pinned_waiter(s32 cpu)
+{
+	const struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(shared_dsq(cpu));
+
+	return p && is_pcpu_task(p) && scx_bpf_task_cpu(p) == cpu;
+}
+
+/*
+ * Direct dispatch @p to the local DSQ of @cpu from ops.select_cpu().
+ *
+ * Insert with SCX_ENQ_IMMED so that the kernel bounces @p back through
+ * ops.enqueue() (and from there into the shared DSQ, where the deadline
+ * ordering applies) whenever @p can't run on @cpu right away. This keeps
+ * the local DSQ a pure "run now" fast path instead of an unbounded queue
+ * that outranks the shared DSQ.
+ *
+ * On kernels without SCX_ENQ_IMMED the flag reads as 0, so fall back to
+ * skipping the direct dispatch when a task only @cpu can run is already
+ * waiting: @p then falls through to ops.enqueue() on its own.
+ */
+static void direct_dispatch_local(struct task_struct *p, s32 cpu)
+{
+	if (!SCX_ENQ_IMMED && shared_dsq_has_pinned_waiter(cpu))
+		return;
+
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), SCX_ENQ_IMMED);
+}
+
+/*
  * Return true if a task is waking up another task that share the same
  * address space, false otherwise.
  */
@@ -1074,7 +1116,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 */
 	if (is_wake_affine(current, p) && !is_busy) {
 		if (this_cpu == prev_cpu) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+			direct_dispatch_local(p, this_cpu);
 			return this_cpu;
 		}
 	}
@@ -1087,7 +1129,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 		cpu = pick_cpu_on_gpu_node(p, cpu_node(prev_cpu), tctx);
 		if (cpu >= 0) {
 			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+			direct_dispatch_local(p, cpu);
 			return cpu;
 		}
 	}
@@ -1103,7 +1145,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
 			    wake_flags, false);
 	if (cpu >= 0 || !is_busy)
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+		direct_dispatch_local(p, cpu >= 0 ? cpu : prev_cpu);
 
 	return cpu >= 0 ? cpu : prev_cpu;
 }
