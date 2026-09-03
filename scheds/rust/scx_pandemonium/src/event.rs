@@ -19,6 +19,10 @@ pub struct Snapshot {
     pub soft_kicks: u64,
     pub lat_idle_us: u64,
     pub lat_kick_us: u64,
+    // Every successful STEP 1 peer move_to_local. Each one IS a migration, so
+    // this against dispatches is the dispatch side's share of the migration
+    // count -- the half no counter in the tree could report before.
+    pub steal: u64,
 }
 
 pub struct EventLog {
@@ -43,7 +47,8 @@ impl EventLog {
                     hard_kicks: 0,
                     soft_kicks: 0,
                     lat_idle_us: 0,
-                    lat_kick_us: 0
+                    lat_kick_us: 0,
+                    steal: 0
                 };
                 MAX_SNAPSHOTS
             ],
@@ -67,6 +72,7 @@ impl EventLog {
         soft_kicks: u64,
         lat_idle_us: u64,
         lat_kick_us: u64,
+        steal: u64,
     ) {
         self.snapshots[self.head] = Snapshot {
             ts_ns: now_ns(),
@@ -81,6 +87,7 @@ impl EventLog {
             soft_kicks,
             lat_idle_us,
             lat_kick_us,
+            steal,
         };
         self.head = (self.head + 1) % MAX_SNAPSHOTS;
         if self.len < MAX_SNAPSHOTS {
@@ -190,6 +197,7 @@ impl EventLog {
         let total_preempt: u64 = snapshots.iter().map(|s| s.preempt).sum();
         let total_keep: u64 = snapshots.iter().map(|s| s.keep_run).sum();
         let total_parks: u64 = snapshots.iter().map(|s| s.osc_parks).sum();
+        let total_steal: u64 = snapshots.iter().map(|s| s.steal).sum();
 
         let peak_d = snapshots.iter().map(|s| s.dispatches).max().unwrap_or(0);
 
@@ -203,6 +211,7 @@ impl EventLog {
         println!("  TOTAL PREEMPT:     {}", total_preempt);
         println!("  TOTAL KEEP_RUN:    {}", total_keep);
         println!("  TOTAL OSC PARKS:   {}", total_parks);
+        println!("  TOTAL STEALS:      {}", total_steal);
         println!("  PEAK DISPATCH/S:   {}", peak_d);
         if elapsed_s > 0.0 {
             println!("  AVG DISPATCH/S:    {:.0}", total_d as f64 / elapsed_s);

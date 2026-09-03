@@ -7,7 +7,6 @@
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
-#[allow(dead_code)]
 mod bpf_skel;
 
 mod bpf_intf;
@@ -220,6 +219,7 @@ fn run_scheduler(
                 let delta_wake_samples = stats.wake_lat_samples.wrapping_sub(prev.wake_lat_samples);
                 let delta_hard = stats.nr_hard_kicks.wrapping_sub(prev.nr_hard_kicks);
                 let delta_soft = stats.nr_soft_kicks.wrapping_sub(prev.nr_soft_kicks);
+                let delta_steal = stats.nr_steal.wrapping_sub(prev.nr_steal);
                 let delta_enq_wake = stats.nr_enq_wakeup.wrapping_sub(prev.nr_enq_wakeup);
                 let delta_enq_requeue = stats.nr_enq_requeue.wrapping_sub(prev.nr_enq_requeue);
                 let wake_avg_us = if delta_wake_samples > 0 {
@@ -253,12 +253,6 @@ fn run_scheduler(
                 let dl2_mi = stats
                     .nr_l2_miss_interactive
                     .wrapping_sub(prev.nr_l2_miss_interactive);
-                let dl2_hl = stats
-                    .nr_l2_hit_lat_crit
-                    .wrapping_sub(prev.nr_l2_hit_lat_crit);
-                let dl2_ml = stats
-                    .nr_l2_miss_lat_crit
-                    .wrapping_sub(prev.nr_l2_miss_lat_crit);
                 let l2_pct_b = if dl2_hb + dl2_mb > 0 {
                     dl2_hb * 100 / (dl2_hb + dl2_mb)
                 } else {
@@ -266,11 +260,6 @@ fn run_scheduler(
                 };
                 let l2_pct_i = if dl2_hi + dl2_mi > 0 {
                     dl2_hi * 100 / (dl2_hi + dl2_mi)
-                } else {
-                    0
-                };
-                let l2_pct_l = if dl2_hl + dl2_ml > 0 {
-                    dl2_hl * 100 / (dl2_hl + dl2_ml)
                 } else {
                     0
                 };
@@ -290,11 +279,11 @@ fn run_scheduler(
 
                 if verbose {
                     println!(
-                        "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us lat_idle: {}us lat_kick: {}us reenq: {} sjrn: {}ms l2: B={}% I={}% L={}% [BPF{}]",
+                        "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us lat_idle: {}us lat_kick: {}us reenq: {} sjrn: {}ms l2: B={}% I={}% [BPF{}]",
                         delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
                         delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
                         wake_avg_us, lat_idle_us, lat_kick_us,
-                        delta_reenq, sojourn_ms, l2_pct_b, l2_pct_i, l2_pct_l,
+                        delta_reenq, sojourn_ms, l2_pct_b, l2_pct_i,
                         longrun_label,
                     );
                 }
@@ -311,6 +300,7 @@ fn run_scheduler(
                     delta_soft,
                     lat_idle_us,
                     lat_kick_us,
+                    delta_steal,
                 );
 
                 prev = stats;
@@ -321,7 +311,6 @@ fn run_scheduler(
             let final_stats = sched.read_stats();
             let l2_total_b = final_stats.nr_l2_hit_batch + final_stats.nr_l2_miss_batch;
             let l2_total_i = final_stats.nr_l2_hit_interactive + final_stats.nr_l2_miss_interactive;
-            let l2_total_l = final_stats.nr_l2_hit_lat_crit + final_stats.nr_l2_miss_lat_crit;
             let l2_cum_b = if l2_total_b > 0 {
                 final_stats.nr_l2_hit_batch * 100 / l2_total_b
             } else {
@@ -329,11 +318,6 @@ fn run_scheduler(
             };
             let l2_cum_i = if l2_total_i > 0 {
                 final_stats.nr_l2_hit_interactive * 100 / l2_total_i
-            } else {
-                0
-            };
-            let l2_cum_l = if l2_total_l > 0 {
-                final_stats.nr_l2_hit_lat_crit * 100 / l2_total_l
             } else {
                 0
             };
@@ -349,10 +333,10 @@ fn run_scheduler(
                 0
             };
             println!(
-                "[KNOBS] regime=BPF slice_ns={} batch_ns={} preempt_ns={} l2_hit=B:{}%/I:{}%/L:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={}",
+                "[KNOBS] regime=BPF slice_ns={} batch_ns={} preempt_ns={} l2_hit=B:{}%/I:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={}",
                 knobs.slice_ns, knobs.batch_slice_ns,
                 knobs.preempt_thresh_ns,
-                l2_cum_b, l2_cum_i, l2_cum_l,
+                l2_cum_b, l2_cum_i,
                 x_scatter_pct, x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7],
             );
 

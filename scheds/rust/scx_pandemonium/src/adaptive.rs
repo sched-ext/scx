@@ -260,22 +260,6 @@ impl LoadGraph {
             .collect()
     }
 
-    // TELEMETRY ONLY since the affinity derivation was withdrawn. This is the
-    // number that says whether the coupling graph carries structure at all, and
-    // it is still wanted -- the reading was never the problem.
-    #[allow(dead_code)]
-    // Mean coupling over the edges that computed. None when the machine is too
-    // quiet or too new to have any -- affinity then keeps whatever the caller
-    // set rather than defaulting to a guess.
-    pub fn mean_coupling(&self) -> Option<f64> {
-        let (n, mean, _, _) = self.edge_summary();
-        if n == 0 {
-            None
-        } else {
-            Some(mean)
-        }
-    }
-
     // Is there structure worth pricing against? Returns (available_edges,
     // mean, min, max) over the edges that computed. A spread near zero means
     // the coupling matrix is flat and the live graph adds nothing over the
@@ -456,6 +440,7 @@ pub fn monitor_loop(
         let delta_wake_samples = stats.wake_lat_samples.wrapping_sub(prev.wake_lat_samples);
         let delta_hard = stats.nr_hard_kicks.wrapping_sub(prev.nr_hard_kicks);
         let delta_soft = stats.nr_soft_kicks.wrapping_sub(prev.nr_soft_kicks);
+        let delta_steal = stats.nr_steal.wrapping_sub(prev.nr_steal);
         let delta_enq_wake = stats.nr_enq_wakeup.wrapping_sub(prev.nr_enq_wakeup);
         let delta_enq_requeue = stats.nr_enq_requeue.wrapping_sub(prev.nr_enq_requeue);
         let delta_rescue = stats
@@ -466,16 +451,6 @@ pub fn monitor_loop(
         // CONSERVATION PATHS XDOM_STEAL (6) AND XDOM_STEP5 (7) ARE EXCLUDED --
         // PENALIZING THEM WOULD MAKE MWU FIGHT THE BPF'S DELIBERATE REBALANCING.
         // saturating_sub ABSORBS A COUNTER RESET (BPF RELOAD) AS 0, NO GARBAGE.
-        let scatter_now: u64 = stats.nr_cross_domain[0..6].iter().sum();
-        let scatter_prev: u64 = prev.nr_cross_domain[0..6].iter().sum();
-        let delta_scatter = scatter_now.saturating_sub(scatter_prev);
-        // Cross-domain scatter: measured and reported. Its consumer was MWU's
-        // scatter loss pathway; placement now prices against the graph instead.
-        let _scatter_pct = if delta_d > 0 {
-            delta_scatter * 100 / delta_d
-        } else {
-            0
-        };
         let wake_avg_us = if delta_wake_samples > 0 {
             delta_wake_sum / delta_wake_samples / 1000
         } else {
@@ -508,12 +483,6 @@ pub fn monitor_loop(
         let dl2_mi = stats
             .nr_l2_miss_interactive
             .wrapping_sub(prev.nr_l2_miss_interactive);
-        let dl2_hl = stats
-            .nr_l2_hit_lat_crit
-            .wrapping_sub(prev.nr_l2_hit_lat_crit);
-        let dl2_ml = stats
-            .nr_l2_miss_lat_crit
-            .wrapping_sub(prev.nr_l2_miss_lat_crit);
         let l2_pct_b = if dl2_hb + dl2_mb > 0 {
             dl2_hb * 100 / (dl2_hb + dl2_mb)
         } else {
@@ -521,11 +490,6 @@ pub fn monitor_loop(
         };
         let l2_pct_i = if dl2_hi + dl2_mi > 0 {
             dl2_hi * 100 / (dl2_hi + dl2_mi)
-        } else {
-            0
-        };
-        let l2_pct_l = if dl2_hl + dl2_ml > 0 {
-            dl2_hl * 100 / (dl2_hl + dl2_ml)
         } else {
             0
         };
@@ -613,6 +577,19 @@ pub fn monitor_loop(
         // tick is the falsification, not the feature.
         let graph = LoadGraph::build(&depth_win);
         let (g_edges, g_mean, g_min, g_max) = graph.edge_summary();
+        // OSCILLATOR POSITION, READ NOT RE-DERIVED. The BPF damped oscillator owns
+        // codel_target_ns; this reads where it currently sits (0.0 floor/tightened,
+        // 1.0 max/relaxed) so the layer can SEE the target it must not fight. The
+        // reader existed with no consumer, which meant the one piece of state that
+        // says whether the BPF has already responded was unobservable from up here.
+        // Reporting only -- the defer gate that would ACT on it is still open.
+        let osc = sched.read_oscillator_state();
+        let osc_pos = osc.position();
+        // The Phi release point the warm-stay and STEP-1 steal actually let a task
+        // leave home at: codel_target plus the nearest-peer hold. Reported beside
+        // the raw position because position() alone cannot say whether the BPF has
+        // genuinely responded -- that comparison is the defer gate, still open.
+        let osc_rel_us = osc.effective_release_ns() / 1000;
         g_tick += 1;
         if g_edges > 0 {
             g_edge_ticks += 1;
@@ -627,7 +604,6 @@ pub fn monitor_loop(
         // SPILL-Phi CHAOS->TEMPERATURE BRIDGE: OVERLAID ONTO EVERY KNOB
         // WRITE BELOW LIKE topology_tau_ns; INERT IN BPF UNTIL THE SPILL
         // PRICE CONSUMES IT.
-        let spill_temp_q16 = tuning::spill_temp_q16(wake_bp_h);
         let bp_delta = wake_bp_h - prev_bp_h;
         let mean_idle = chaos::mean(&idle_win);
         let rqa = chaos::rqa_det(&idle_win);
@@ -664,7 +640,6 @@ pub fn monitor_loop(
                 let mut rk = scaled_regime_knobs(regime, nr_cpus, tau_ns);
                 rk.topology_tau_ns = tau_ns;
                 rk.codel_eq_ns = live.codel_eq_ns;
-                rk.spill_temp_q16 = spill_temp_q16;
                 // Regime baseline, spread per CPU by the graph on the same
                 // terms as the retune path below.
                 sched.write_tuning_knobs_percpu(&graph.derive_percpu_knobs(&rk))?;
@@ -713,7 +688,6 @@ pub fn monitor_loop(
                 let mut knobs = scaled_regime_knobs(regime, nr_cpus, tau_ns);
                 knobs.topology_tau_ns = live.topology_tau_ns;
                 knobs.codel_eq_ns = live.codel_eq_ns;
-                knobs.spill_temp_q16 = spill_temp_q16;
                 // COMMIT-ON-CHANGE: only push when a field actually moved. The
                 // BPF side reads the map unsynchronized, so skipping redundant
                 // writes strictly reduces torn-read exposure.
@@ -756,7 +730,7 @@ pub fn monitor_loop(
             let rqa_disp = rqa.unwrap_or(-1.0);
             let frozen_disp = if frozen { 1 } else { 0 };
             println!(
-                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms rescue: {} l2: B={}% I={}% L={}% chaos: lam={:.2} H={:.2} det={:.2} x={} frozen: {} (n={}) retune_iv: {} [{}{}] graph: n={} e={} cpl={:.2}/{:.2}/{:.2}",
+                "d/s: {:<8} idle: {}% shared: {:<6} preempt: {:<4} keep: {:<4} kick: H={:<4} S={:<4} enq: W={:<4} R={:<4} wake: {}us p99: {}us [B:{} I:{} L:{}] lat_idle: {}us lat_kick: {}us sleep: io={}% slice: {}us batch: {}us reenq: {} sjrn: {}ms/{}ms rescue: {} l2: B={}% I={}% chaos: lam={:.2} H={:.2} det={:.2} x={} frozen: {} (n={}) retune_iv: {} [{}{}] graph: n={} e={} cpl={:.2}/{:.2}/{:.2} osc: {:.2}/{}us",
                 delta_d, idle_pct, delta_shared, delta_preempt, delta_keep,
                 delta_hard, delta_soft, delta_enq_wake, delta_enq_requeue,
                 wake_avg_us, p99_us, tp99_b, tp99_i, tp99_l,
@@ -764,10 +738,11 @@ pub fn monitor_loop(
                 io_pct, knobs.slice_ns / 1000, knobs.batch_slice_ns / 1000,
                 delta_reenq, sojourn_ms, sojourn_thresh_ms,
                 delta_rescue,
-                l2_pct_b, l2_pct_i, l2_pct_l,
+                l2_pct_b, l2_pct_i,
                 idle_lambda, wake_bp_h, rqa_disp, chaos_count.load(),
                 frozen_disp, frozen_ticks, retune_interval,
                 graph.n, g_edges, g_mean, g_min, g_max,
+                osc_pos, osc_rel_us,
                 regime.label(), longrun_label,
             );
         }
@@ -784,6 +759,7 @@ pub fn monitor_loop(
             delta_soft,
             lat_idle_us,
             lat_kick_us,
+            delta_steal,
         );
 
         match regime {
@@ -804,7 +780,6 @@ pub fn monitor_loop(
     let final_stats = sched.read_stats();
     let l2_total_b = final_stats.nr_l2_hit_batch + final_stats.nr_l2_miss_batch;
     let l2_total_i = final_stats.nr_l2_hit_interactive + final_stats.nr_l2_miss_interactive;
-    let l2_total_l = final_stats.nr_l2_hit_lat_crit + final_stats.nr_l2_miss_lat_crit;
     let l2_cum_b = if l2_total_b > 0 {
         final_stats.nr_l2_hit_batch * 100 / l2_total_b
     } else {
@@ -812,11 +787,6 @@ pub fn monitor_loop(
     };
     let l2_cum_i = if l2_total_i > 0 {
         final_stats.nr_l2_hit_interactive * 100 / l2_total_i
-    } else {
-        0
-    };
-    let l2_cum_l = if l2_total_l > 0 {
-        final_stats.nr_l2_hit_lat_crit * 100 / l2_total_l
     } else {
         0
     };
@@ -868,12 +838,12 @@ pub fn monitor_loop(
     }
 
     println!(
-        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} mwu={:.3} ticks=L:{}/M:{}/H:{} frozen={} l2_hit=B:{}%/I:{}%/L:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={} osc_park={}",
+        "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} mwu={:.3} ticks=L:{}/M:{}/H:{} frozen={} l2_hit=B:{}%/I:{}% cross_domain_scatter_pct={} cross_domain_sel_tight={} cross_domain_sel_sync={} cross_domain_sel_normal={} cross_domain_sel_dfl={} cross_domain_enq_t1={} cross_domain_enq_t2={} cross_domain_steal={} cross_domain_step5={} osc_park={}",
         regime.label(), final_knobs.slice_ns, final_knobs.batch_slice_ns,
         final_knobs.preempt_thresh_ns,
         0.0f64,
         light_ticks, mixed_ticks, heavy_ticks, frozen_ticks,
-        l2_cum_b, l2_cum_i, l2_cum_l,
+        l2_cum_b, l2_cum_i,
         x_scatter_pct, x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7],
         final_stats.nr_osc_park,
     );
@@ -1306,7 +1276,7 @@ mod derivation_tests {
 #[cfg(test)]
 mod affinity_tests {
     use super::*;
-    use crate::tuning::{TuningKnobs, AFFINITY_STRONG};
+    use crate::tuning::{TuningKnobs, AFFINITY_WEAK};
 
     fn win(vals: &[f64]) -> RawWindow<CHAOS_WIN> {
         let mut w = RawWindow::new();
@@ -1331,14 +1301,14 @@ mod affinity_tests {
         let b: Vec<f64> = a.iter().map(|v| 2.0 * v + 1.0).collect();
         let g = LoadGraph::build(&[win(&a), win(&b)]);
         assert!(
-            g.mean_coupling().unwrap() > 0.9,
+            g.edge_summary().1 > 0.9,
             "the pair must still READ as coupled"
         );
         let mut base = TuningKnobs::default();
-        base.affinity_mode = AFFINITY_STRONG;
+        base.affinity_mode = AFFINITY_WEAK;
         for k in g.derive_percpu_knobs(&base) {
             assert_eq!(
-                k.affinity_mode, AFFINITY_STRONG,
+                k.affinity_mode, AFFINITY_WEAK,
                 "affinity must carry the base through, not be derived"
             );
         }
