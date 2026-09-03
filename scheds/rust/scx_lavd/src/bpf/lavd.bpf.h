@@ -132,6 +132,7 @@ enum consts_internal {
 	LAVD_CPU_CONGESTED_THRES	= 1, /* the CPU is congested when one or more tasks are waiting across its DSQs */
 
 	LAVD_LB_NEAR_DIST		= 1,	/* force stealing scans only the nearest distance */
+	LAVD_FORCE_STEAL_BACKOFF_NS	= 1000000ULL,	/* 1 ms */
 
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
@@ -295,6 +296,7 @@ struct cpdom_ctx {
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
 	u64	qload_invr;			    /* queued load: sum of task_load_metric() for all queued tasks, tracked atomically */
 	u64	qload_svc_invr;			    /* queued service time: sum of avg_runtime_invr for all queued tasks, tracked atomically */
+	u64	next_steal_probe_clk;		    /* earliest time force stealing may sweep again */
 	u64	load_invr;			    /* domain load for balancing: avg_util_invr_sum + qload_invr */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
