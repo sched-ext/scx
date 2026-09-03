@@ -17,8 +17,6 @@ use cgroup::CgroupReader;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, c_ulong};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -82,12 +80,15 @@ struct Opts {
 
     /// CPU busy threshold.
     ///
-    /// Specifies the CPU utilization percentage (0-100%) at which the scheduler considers the
-    /// system to be busy.
+    /// Specifies the user CPU utilization percentage (0-100%) at which the scheduler considers a
+    /// CPU to be busy. Only user time counts: sleep-intensive workloads burn most of their CPU
+    /// time in the kernel and their CPUs are deliberately not considered busy, so that tasks stay
+    /// on their CPU / local dispatch queue, reducing the scheduling overhead and the balancing
+    /// pressure in dispatch.
     ///
-    /// When the average CPU utilization reaches this threshold, the scheduler switches from using
-    /// multiple per-CPU round-robin dispatch queues (which favor locality and reduced locking
-    /// contention) to a global deadline-based dispatch queue (which improves load balancing).
+    /// When a CPU crosses this threshold, the scheduler switches it from using its per-CPU
+    /// round-robin dispatch queue (which favors locality and reduced locking contention) to the
+    /// global deadline-based dispatch queue (which improves load balancing).
     ///
     /// The global dispatch queue can increase task migrations and improve responsiveness for
     /// interactive tasks under heavy load. Lower values make the scheduler switch to deadline
@@ -97,15 +98,14 @@ struct Opts {
     ///
     /// A higher value is recommended for server-type workloads, while a lower value is recommended
     /// for interactive-type workloads.
+    ///
+    /// 0 = utilization tracking disabled: every CPU is always considered busy (pure deadline
+    /// mode) with no tracking overhead.
     #[clap(short = 'c', long, default_value = "0")]
     cpu_busy_thresh: u64,
 
-    /// Polling time (ms) to refresh the CPU utilization.
-    ///
-    /// This interval determines how often the scheduler refreshes the CPU utilization that is
-    /// compared with the CPU busy threshold (option -c) to decide if the system is busy or not
-    /// and trigger the switch between using multiple per-CPU dispatch queues or a single global
-    /// deadline-based dispatch queue.
+    /// Polling time (ms) to refresh the dynamic perf event thresholds (options -E / -Y in
+    /// dynamic mode).
     ///
     /// Value is clamped to the range [10 .. 1000].
     ///
@@ -528,13 +528,6 @@ impl DynamicThresholdState {
             DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_LOW * t
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CpuTimes {
-    user: u64,
-    nice: u64,
-    total: u64,
 }
 
 struct Scheduler<'a> {
@@ -1120,104 +1113,16 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
-    fn compute_user_cpu_pct(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
-        // Evaluate total user CPU time as user + nice.
-        let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
-        let total_diff = curr.total.saturating_sub(prev.total);
-
-        if total_diff > 0 {
-            let user_ratio = user_diff as f64 / total_diff as f64;
-            Some((user_ratio * 1024.0).round() as u64)
-        } else {
-            None
-        }
-    }
-
-    /// Parse per-CPU times from /proc/stat (lines "cpu0", "cpu1", ...).
-    /// Returns entries indexed by CPU id. Offline CPUs may be absent.
-    fn parse_per_cpu_cpu_times<R: BufRead>(
-        reader: R,
-        nr_cpus: usize,
-    ) -> Option<Vec<Option<CpuTimes>>> {
-        let mut result = vec![None; nr_cpus];
-
-        for line in reader.lines() {
-            let line = line.ok()?;
-            let line = line.trim();
-            if !line.starts_with("cpu") {
-                continue;
-            }
-            let rest = line.strip_prefix("cpu")?;
-            if rest.starts_with(' ') {
-                // Aggregate line "cpu " - skip.
-                continue;
-            }
-            let cpu_id: usize = rest.split_whitespace().next()?.parse().ok()?;
-            if cpu_id >= nr_cpus {
-                continue;
-            }
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 5 {
-                return None;
-            }
-            let user: u64 = fields[1].parse().ok()?;
-            let nice: u64 = fields[2].parse().ok()?;
-            let total: u64 = fields
-                .iter()
-                .skip(1)
-                .take(8)
-                .filter_map(|v| v.parse::<u64>().ok())
-                .sum();
-            result[cpu_id] = Some(CpuTimes { user, nice, total });
-        }
-
-        result.iter().any(Option::is_some).then_some(result)
-    }
-
-    /// Read per-CPU times from /proc/stat.
-    fn read_per_cpu_cpu_times(nr_cpus: usize) -> Option<Vec<Option<CpuTimes>>> {
-        let file = File::open("/proc/stat").ok()?;
-        Self::parse_per_cpu_cpu_times(BufReader::new(file), nr_cpus)
-    }
-
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
-        // Periodically evaluate per-CPU user utilization from userspace and update the
-        // cpu_util_map in BPF. The scheduler uses is_cpu_busy(cpu) with prev_cpu or
-        // scx_bpf_task_cpu(p) to decide per-CPU whether to use local DSQs (round-robin)
-        // or deadline-based shared DSQ.
+        // Periodic (option -p) updates of the dynamic perf thresholds.
         let polling_time = Duration::from_millis(self.opts.polling_ms).min(Duration::from_secs(1));
-        let nr_cpus = *NR_CPU_IDS as usize;
-        let mut prev_cputime = Self::read_per_cpu_cpu_times(nr_cpus).unwrap_or_else(|| {
-            warn!("Failed to read initial per-CPU stats; starting with zero CPU utilization");
-            vec![None; nr_cpus]
-        });
         let mut last_update = Instant::now();
         let mut last_gpu_sync = Instant::now();
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            // Update per-CPU utilization.
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
-                if let Some(curr_cputime) = Self::read_per_cpu_cpu_times(nr_cpus) {
-                    let map = &self.skel.maps.cpu_util_map;
-                    for cpu in 0..nr_cpus {
-                        let util = match (&prev_cputime[cpu], &curr_cputime[cpu]) {
-                            (Some(prev), Some(curr)) => Self::compute_user_cpu_pct(prev, curr),
-                            _ => Some(0),
-                        };
-
-                        if let Some(util) = util {
-                            let _ = map.update(
-                                &(cpu as u32).to_ne_bytes(),
-                                &util.to_ne_bytes(),
-                                MapFlags::ANY,
-                            );
-                        }
-                    }
-                    prev_cputime = curr_cputime;
-                }
-
                 // Update dynamic perf thresholds using EMA + hysteresis.
                 let elapsed_secs = last_update.elapsed().as_secs_f64();
 
