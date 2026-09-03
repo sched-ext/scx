@@ -29,6 +29,9 @@ bench/*
 !bench/scx_cake_game_diag_extract.py
 !bench/fnspills.py
 !bench/comment_lint.py
+!bench/review_regressions.py
+!bench/topology_regressions.py
+!bench/pool_mark_ordering.py
 
 # MangoHud performance logs
 mangohud/

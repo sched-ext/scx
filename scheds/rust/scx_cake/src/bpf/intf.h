@@ -51,26 +51,9 @@ enum consts {
 	/* Pre-scale for the wait:run cross-multiply; it cancels (§G12). */
 	CAKE_RATIO_SHIFT		= 16,
 
-	/*
-	 * WALL-CLOCK starvation bound for the global wake queue, ~3 frames at
-	 * 120 Hz: a vtime bound cannot bound a wall-clock stall (§S.4).
-	 */
+	/* Dispatch-time starvation escalation (§S.4); this does not arm a timer. */
 	WAKE_STARVE_WALL_NS		= 24 * NSEC_PER_MSEC,
 	WAKE_STARVE_REFRESH_NS		= WAKE_STARVE_WALL_NS / 2,
-
-	/*
-	 * FRAME CLOCK band over ENGINE cadence, not display refresh — an
-	 * uncapped engine outruns any panel. A clamp, not a knob (§G11, §G27).
-	 */
-	FRAME_HZ_MAX			= 2000,
-	FRAME_HZ_MIN			= 25,
-	FRAME_PERIOD_MIN_NS		= 1000 * NSEC_PER_MSEC / FRAME_HZ_MAX,
-	FRAME_PERIOD_MAX_NS		= 1000 * NSEC_PER_MSEC / FRAME_HZ_MIN,
-	/* Floor boot stays display-class; the band min is no safe start (§G27). */
-	FRAME_FLOOR_BOOT_NS		= 2 * NSEC_PER_MSEC,
-	/* Vote buckets spanning that band; width need only separate cadences. */
-	FRAME_BUCKET_SHIFT		= 17,
-	FRAME_BUCKETS			= 512,
 
 	/* Widest host the CCD steal matrix covers (u16² = 32 KB rodata);
 	 * wider machines take the generic ring walk at runtime. */
@@ -91,9 +74,6 @@ enum consts {
 	STATE_SLOT_BYTES	= 128,
 	STATE_SLOT_WORDS	= STATE_SLOT_BYTES / sizeof(u64),
 
-	/* §G51: cpuidle exit-latency table entries (sysfs state count cap). */
-	CAKE_CSTATE_TABLE	= 16,
-
 	/* Runnable-stall safety watchdog, not a scheduling threshold. */
 	WATCHDOG_TIMEOUT_MS	= 5 * 1000,
 
@@ -105,35 +85,13 @@ enum consts {
 	 */
 	MAX_CPUS	= 1024,
 	WAKE_DSQ	= MAX_CPUS,
+	MAX_LLCS	= 16,			/* §G89: wake pools and served stamps per LLC */
+	LLC_WAKE_DSQ_BASE	= MAX_CPUS + 2,	/* §G89: pool of LLC i is LLC_WAKE_DSQ_BASE + i */
 
 	/* The steal-ring queue hint, one bit per CPU (§G25). */
 	QMASK_WORDS	= MAX_CPUS / 64,
-
-	/* §G56 FOLD: LLC band count bound for the banded steal tables. */
-	MAX_LLCS	= 64,
-
-	/*
-	 * §G57: a saturated wake moves to an earlier-freeing CPU only when the
-	 * gain clears this fraction of the slice. A partner inside it keeps the
-	 * wake home: the herd-collapse guard expressed as time, not depth.
-	 */
-	FREE_MOVE_MARGIN_SHIFT		= 5,
-
-	/* §G58: the reservation outlives the fire by this fraction of the
-	 * task's cycle (prediction error scales with the cycle), floored at
-	 * twice the lead. */
-	PREWAKE_WINDOW_SHIFT		= 4,
-	PREWAKE_WINDOW_MULT		= 2,
-	/* §G58: pre-wake lead on a host with no cpuidle table. */
-	PREWAKE_LEAD_DEFAULT_NS		= 50 * NSEC_PER_USEC,
-
-	/* §G59: affine idle candidates the depth pick compares. */
-	DEPTH_SCAN_MAX			= 4,
-	L2_HANDOFF_BURST_NS		= 16 * NSEC_PER_USEC,	/* §G72: wakee burst bound for a sibling handoff */
-	STACK_TOLERANCE_NS		= 40 * NSEC_PER_USEC,	/* §G74: queue behind prev only if it frees within this */
-	GROOVE_HOME_MISS		= 8,		/* §G75: home misses before the task stops asking */
-	GROOVE_PROBE_MASK		= 63,		/* §G75: re-probe the home every 64 wakes */
 	SEAT_BURST_MIN_NS		= 64 * NSEC_PER_USEC,	/* §G79: stage-class burst that earns a seat */
+	CLAIM_TRIES			= 4,			/* §G86: idle-word bits tried per claim */
 };
 
 #endif /* __CAKE_INTF_H */
