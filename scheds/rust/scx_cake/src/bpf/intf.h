@@ -108,6 +108,32 @@ enum consts {
 
 	/* The steal-ring queue hint, one bit per CPU (§G25). */
 	QMASK_WORDS	= MAX_CPUS / 64,
+
+	/* §G56 FOLD: LLC band count bound for the banded steal tables. */
+	MAX_LLCS	= 64,
+
+	/*
+	 * §G57: a saturated wake moves to an earlier-freeing CPU only when the
+	 * gain clears this fraction of the slice. A partner inside it keeps the
+	 * wake home: the herd-collapse guard expressed as time, not depth.
+	 */
+	FREE_MOVE_MARGIN_SHIFT		= 5,
+
+	/* §G58: the reservation outlives the fire by this fraction of the
+	 * task's cycle (prediction error scales with the cycle), floored at
+	 * twice the lead. */
+	PREWAKE_WINDOW_SHIFT		= 4,
+	PREWAKE_WINDOW_MULT		= 2,
+	/* §G58: pre-wake lead on a host with no cpuidle table. */
+	PREWAKE_LEAD_DEFAULT_NS		= 50 * NSEC_PER_USEC,
+
+	/* §G59: affine idle candidates the depth pick compares. */
+	DEPTH_SCAN_MAX			= 4,
+	L2_HANDOFF_BURST_NS		= 16 * NSEC_PER_USEC,	/* §G72: wakee burst bound for a sibling handoff */
+	STACK_TOLERANCE_NS		= 40 * NSEC_PER_USEC,	/* §G74: queue behind prev only if it frees within this */
+	GROOVE_HOME_MISS		= 8,		/* §G75: home misses before the task stops asking */
+	GROOVE_PROBE_MASK		= 63,		/* §G75: re-probe the home every 64 wakes */
+	SEAT_BURST_MIN_NS		= 64 * NSEC_PER_USEC,	/* §G79: stage-class burst that earns a seat */
 };
 
 #endif /* __CAKE_INTF_H */
