@@ -127,6 +127,19 @@ struct Opts {
     #[clap(short = 'm', long)]
     primary_domain: Option<String>,
 
+    /// Maximum time (us) that tasks can wait in a shared DSQ before the primary domain is
+    /// considered overloaded, allowing tasks to spill to the non-primary CPUs.
+    ///
+    /// Tasks are normally contained in the primary domain (option -m). When the domain's shared
+    /// DSQ has been continuously backlogged for longer than this threshold, tasks are allowed to
+    /// run on the non-primary CPUs until the backlog drains.
+    ///
+    /// 0 = tasks are always contained in the primary domain, even when it is overloaded.
+    ///
+    /// This option is ignored when no primary domain is defined.
+    #[clap(long, default_value = "1000")]
+    primary_overload_us: u64,
+
     /// Hardware perf event to monitor (0x0 = disabled). Accepts hex (0xN) or symbolic names
     /// (e.g. cache-misses, LLC-load-misses, page-faults, branch-misses).
     #[clap(short = 'e', long, default_value = "0x0", value_parser = parse_perf_event)]
@@ -608,6 +621,9 @@ impl<'a> Scheduler<'a> {
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
+
+        // Maximum shared DSQ backlog before spilling outside the primary domain.
+        rodata.overload_thresh_ns = opts.primary_overload_us * 1000;
 
         // Generate the list of available CPUs sorted by capacity in descending order.
         let mut cpus: Vec<_> = topo.all_cpus.values().collect();
@@ -1096,6 +1112,7 @@ impl<'a> Scheduler<'a> {
             nr_event_dispatches: bss_data.nr_event_dispatches,
             nr_ev_sticky_dispatches: bss_data.nr_ev_sticky_dispatches,
             nr_gpu_dispatches: bss_data.nr_gpu_dispatches,
+            nr_overload_events: bss_data.nr_overload_events,
         }
     }
 

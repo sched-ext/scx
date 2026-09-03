@@ -50,6 +50,13 @@ char _license[] SEC("license") = "GPL";
 private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
 
 /*
+ * Complement of @primary_cpumask (only initialized when a primary domain
+ * is defined): CPUs that can be used only when the primary domain is
+ * overloaded.
+ */
+private(COSMOS) struct bpf_cpumask __kptr *nonprimary_cpumask;
+
+/*
  * Set to true when @primary_cpumask is empty (primary domain includes all
  * the CPU).
  */
@@ -157,6 +164,14 @@ const volatile u64 slice_lag = 20000000ULL;
 const volatile u64 busy_threshold;
 
 /*
+ * Maximum time (ns) that tasks are allowed to wait in a shared DSQ before
+ * the primary domain is considered overloaded, allowing tasks to spill to
+ * the non-primary CPUs (0 = tasks are always contained in the primary
+ * domain).
+ */
+const volatile u64 overload_thresh_ns;
+
+/*
  * Per-CPU user utilization in the range [0 .. 1024], updated periodically
  * from userspace. Indexed by CPU id.
  */
@@ -173,6 +188,7 @@ struct {
 volatile u64 nr_event_dispatches;
 volatile u64 nr_ev_sticky_dispatches;
 volatile u64 nr_gpu_dispatches;
+volatile u64 nr_overload_events;
 
 /*
  * Scheduler's exit status.
@@ -467,6 +483,108 @@ static void update_cpufreq(s32 cpu)
 static inline u64 shared_dsq(s32 cpu)
 {
 	return numa_enabled ? cpu_node(cpu) : SHARED_DSQ;
+}
+
+/*
+ * Primary domain overload detection.
+ *
+ * When a primary domain is defined, tasks are contained in it and are not
+ * allowed to spill to the non-primary CPUs, unless the primary domain is
+ * overloaded.
+ *
+ * Instantaneous saturation (no idle primary CPU at a given moment) is not
+ * a reliable overload signal: bursty workloads can saturate the domain for
+ * microseconds at a time (e.g., barrier wakeups) and spilling in response
+ * to such transients just moves work to worse CPUs (typically the SMT
+ * siblings of the primary CPUs).
+ *
+ * Overload is instead defined in terms of sustained queueing delay, per
+ * NUMA node: @node_empty_ts tracks the last time the node's shared DSQ was
+ * observed empty from ops.dispatch(), so a shared DSQ that has been
+ * continuously backlogged for longer than @overload_thresh_ns means the
+ * primary domain can't keep up and waiting is costing more than running on
+ * a non-primary CPU.
+ *
+ * When that happens the node is marked overloaded for a short decay window
+ * (@overload_until): spilling is allowed while the window keeps being
+ * renewed by backlogged enqueues and stops automatically once the backlog
+ * drains, without the ping-pong that an instantaneous threshold would
+ * cause.
+ */
+#define OVERLOAD_WINDOW_NS	(25ULL * NSEC_PER_MSEC)
+
+static u64 node_empty_ts[MAX_NODES];
+static u64 overload_until[MAX_NODES];
+
+/*
+ * Return true if the primary domain is overloaded on @node, false
+ * otherwise.
+ */
+static bool is_primary_overloaded(int node)
+{
+	if (primary_all || !overload_thresh_ns)
+		return false;
+
+	if (node < 0 || node >= MAX_NODES)
+		return false;
+
+	return time_before(bpf_ktime_get_ns(), overload_until[node]);
+}
+
+/*
+ * Wake up an idle non-primary CPU (close to @from_cpu) to start draining
+ * the shared DSQ.
+ */
+static void kick_idle_nonprimary(s32 from_cpu)
+{
+	const struct cpumask *nonpri = cast_mask(nonprimary_cpumask);
+	s32 cpu;
+
+	if (!nonpri)
+		return;
+
+	if (numa_enabled)
+		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(nonpri,
+					__COMPAT_scx_bpf_cpu_node(from_cpu), 0);
+	else
+		cpu = scx_bpf_pick_idle_cpu(nonpri, 0);
+
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+/*
+ * Update the overload state of @node after inserting a task into its
+ * shared DSQ from @cpu.
+ */
+static void update_primary_overload(s32 cpu, int node)
+{
+	u64 now;
+
+	if (primary_all || !overload_thresh_ns)
+		return;
+
+	if (node < 0 || node >= MAX_NODES)
+		return;
+
+	/*
+	 * The shared DSQ has been empty recently: the primary domain is
+	 * keeping up with the load.
+	 */
+	now = bpf_ktime_get_ns();
+	if (time_delta(now, node_empty_ts[node]) < overload_thresh_ns)
+		return;
+
+	if (!is_primary_overloaded(node))
+		__sync_fetch_and_add(&nr_overload_events, 1);
+	overload_until[node] = now + OVERLOAD_WINDOW_NS;
+
+	/*
+	 * Idle non-primary CPUs are never picked and never kicked during
+	 * normal operation, so nothing would drain the backlog without an
+	 * explicit wakeup.
+	 */
+	kick_idle_nonprimary(cpu);
 }
 
 /*
@@ -792,6 +910,16 @@ static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
 		cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, primary, NULL);
 		if (cpu >= 0)
 			goto out;
+
+		/*
+		 * Contain the task in the primary domain, unless the
+		 * domain is overloaded.
+		 */
+		if (primary && bpf_cpumask_intersects(p->cpus_ptr, primary) &&
+		    !is_primary_overloaded(cpu_node(prev_cpu))) {
+			cpu = -EBUSY;
+			goto out;
+		}
 	}
 
 	if (smt_enabled) {
@@ -892,10 +1020,17 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 	 * If a primary domain is defined, try to pick an idle CPU from there
 	 * first.
 	 */
-	if (!primary_all && mask) {
+	if (!primary_all && mask && bpf_cpumask_intersects(p->cpus_ptr, mask)) {
 		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask, 0);
 		if (cpu >= 0)
 			return cpu;
+
+		/*
+		 * Contain the task in the primary domain, unless the
+		 * domain is overloaded.
+		 */
+		if (!is_primary_overloaded(cpu_node(prev_cpu)))
+			return -EBUSY;
 	}
 
 	/*
@@ -1282,6 +1417,12 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (task_needs_shared_dsq_kick(p, enq_flags))
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+
+	/*
+	 * Detect a sustained backlog in the shared DSQ and, in that case,
+	 * allow tasks to spill to the non-primary CPUs.
+	 */
+	update_primary_overload(prev_cpu, node);
 }
 
 /*
@@ -1331,6 +1472,18 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (scx_bpf_dsq_move_to_local(shared_dsq(cpu), 0))
 		return;
+
+	/*
+	 * The shared DSQ is empty (or contains no task that can run
+	 * here): refresh the timestamp used to detect a sustained backlog
+	 * on this node.
+	 */
+	if (!primary_all && overload_thresh_ns) {
+		int node = cpu_node(cpu);
+
+		if (node >= 0 && node < MAX_NODES)
+			node_empty_ts[node] = bpf_ktime_get_ns();
+	}
 
 	/*
 	 * If the previous task expired its time slice, but no other task
@@ -1527,13 +1680,59 @@ out_unlock:
 	return has_cpus ? 0 : -ENODEV;
 }
 
+/*
+ * Initialize @nonprimary_cpumask as the complement of the primary domain.
+ */
+static int init_nonprimary_cpumask(void)
+{
+	const struct cpumask *primary;
+	struct bpf_cpumask *mask;
+	int err = 0, cpu;
+
+	err = init_cpumask(&nonprimary_cpumask);
+	if (err)
+		return err;
+
+	bpf_rcu_read_lock();
+	mask = nonprimary_cpumask;
+	primary = cast_mask(primary_cpumask);
+	if (!mask || !primary) {
+		err = -EINVAL;
+		goto out_unlock;
+	}
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		if (!bpf_cpumask_test_cpu(cpu, primary))
+			bpf_cpumask_set_cpu(cpu, mask);
+	}
+out_unlock:
+	bpf_rcu_read_unlock();
+
+	return err;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 {
+	u64 now = bpf_ktime_get_ns();
 	int err;
 	int cpu;
 	struct cpu_ctx *cctx;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
+	if (!primary_all) {
+		err = init_nonprimary_cpumask();
+		if (err) {
+			scx_bpf_error("failed to init non-primary cpumask: %d", err);
+			return err;
+		}
+	}
+
+	/*
+	 * Consider all the shared DSQs as just drained, so that the
+	 * overload detection starts from a clean state.
+	 */
+	bpf_for(cpu, 0, MAX_NODES)
+		node_empty_ts[cpu] = now;
 
 	/*
 	 * Create separate per-node DSQs if NUMA optimization is enabled,
