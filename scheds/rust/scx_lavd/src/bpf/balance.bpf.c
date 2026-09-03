@@ -598,6 +598,18 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
+	u64 now, next;
+
+	/* Sweep at most once per LAVD_FORCE_STEAL_BACKOFF_NS per domain. */
+	now = scx_bpf_now();
+	next = READ_ONCE(cpdomc->next_steal_probe_clk);
+
+	if (time_before(now, next))
+		return false;
+
+	if (!__sync_bool_compare_and_swap(&cpdomc->next_steal_probe_clk, next,
+					  now + LAVD_FORCE_STEAL_BACKOFF_NS))
+		return false;
 
 	/*
 	 * Traverse neighbor compute domains in distance order.
@@ -665,6 +677,8 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 				debugln("migrate: force_steal stealer=cpdom%llu stealee=cpdom%llu load=%llu cpu=%d",
 					cpdomc->id, cpdomc_pick->id, task_load,
 					bpf_get_smp_processor_id());
+				/* Stealing works, so lift the rate limit. */
+				WRITE_ONCE(cpdomc->next_steal_probe_clk, 0);
 				return true;
 			}
 		}
