@@ -110,6 +110,7 @@ whole of every slot (attach logs end in the clean detach line, nr_rejected 0;
 | g77 | steal ring skipped on an empty qmask (census-bit contended test tried: stale in the wake-list window, dropped) | equal | keep |
 | g78 | rotor on the first whole-core claim + last_win as cpu+1 | 1% low 492: spreading is wrong here | drop; the cpu+1 encoding stays |
 | g79 | **seat hold**: a blocking stage-class thread keeps its core; other wakes skip held cores while any other is free | the win above; GameThread migrations were 12,629/28 s vs 1.1.3's 650 | keep, hitch OPEN |
+| §G82 | **one idle census word** (unconditional, no toggle): `thread_free` folded into `idle_words[0]`, `idle_nr` kept for hosts >64 CPUs only (popcount inside one word), §G54 park producer/retract behind `!g69`; update_idle entry 5 atomics -> 1-2, exit 4 -> 1-2 | 2026-09-02 KovaaKs menu, 4 mirrored rounds ABBA/BAAB, 20 s slots, 8/arm: avg 705.0 vs 702.9, p99 1.747 vs 1.779, p99.9 flat, ahead on avg+p99 in 4/4 rounds, ranges overlap (maintainer: keep on the consistent lean); 0 stalls in 47 attaches; loader now accepts `--toggle probe=1` (match arm was missing); the g79 first-frame hitch hit 1/8 plain slots, 0/23 probe-armed cycles, black box empty -- OPEN | **shipped** |
 
 Why the average was behind (thread_cores.py, 1.1.3 vs stack): 1.1.3 GameThread
 650 migrations, stack 12,629 — a dxvk/render wake took GameThread's core in its

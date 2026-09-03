@@ -199,6 +199,7 @@ impl<'a> Scheduler<'a> {
                 "g79" => rodata.cake_tog_g79 = on,
                 "g81" => rodata.cake_tog_g81 = on,
                 "m7" => rodata.cake_tog_m7 = on,
+                "probe" => rodata.cake_tog_probe = on,
                 _ => anyhow::bail!("--toggle {spec}: unknown name {name}"),
             }
         }

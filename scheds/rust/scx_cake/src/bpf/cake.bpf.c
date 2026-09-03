@@ -944,7 +944,6 @@ static __always_inline void cake_stat_inc(u32 idx)
 }
 
 static u64 cake_core_free __attribute__((aligned(STATE_SLOT_BYTES)));
-static u64 cake_thread_free __attribute__((aligned(STATE_SLOT_BYTES)));
 static u64 cake_seat_word __attribute__((aligned(STATE_SLOT_BYTES)));
 static u64 cake_idle_words[QMASK_WORDS] __attribute__((aligned(STATE_SLOT_BYTES)));
 
@@ -1009,7 +1008,7 @@ static __noinline void cake_probe_place(struct task_struct *p, u64 dsq_id,
 		t->waker_pid = w ? (u32)w->pid : 0;
 	}
 	t->seats = cake_seat_word; t->core_free = cake_core_free;
-	t->thread_free = cake_thread_free; t->idle_word = cake_idle_words[0];
+	t->thread_free = cake_idle_words[0]; t->idle_word = cake_idle_words[0];
 	if (cake_probe_busy_flag[me]) {
 		kind = 6;
 		cake_probe_busy_flag[me] = 0;
@@ -1121,14 +1120,23 @@ static __noinline bool cake_wake_preempt(struct task_struct *p, s32 tcpu,
  * game regression dates from exactly there. Helldivers 2 runs ~62% idle
  * against this 75% threshold, so it declines precisely where G9.4 admits.
  */
-/* §G45: idle census kept by ops.update_idle. Bit and count flip together
- * (test-gated, idempotent), so the count cannot drift; ops.init seeds it. */
+/* §G45: idle census kept by ops.update_idle. On a host inside one word the
+ * count is the word's popcount (§G82); a wider host keeps this counter,
+ * which flips with the bit (test-gated, idempotent) and ops.init seeds. */
 static u64 cake_idle_nr __attribute__((aligned(STATE_SLOT_BYTES)));
 
+static __always_inline u32 cake_idle_count(void)
+{
+	if (nr_cpu_span <= 64)
+		return (u32)__builtin_popcountll(cake_idle_words[0]);
+	return (u32)cake_idle_nr;
+}
+
 /* §G71: the idle side publishes, the waker claims with ONE atomic. A CPU
- * entering idle sets its bit in thread_free, and in core_free when its
- * sibling is idle too; leaving idle clears both (and the sibling's core
- * bit). The words choose; the kernel idle bit claims. Narrow hosts (span <= 64). */
+ * entering idle sets its bit in the §G45 census word (the thread word,
+ * §G82), and in core_free when its sibling is idle too; leaving idle clears
+ * both (and the sibling's core bit). The words choose; the kernel idle bit
+ * claims. Narrow hosts (span <= 64). */
 
 /* §G79 SEAT HOLD. A stage-class thread (burst >= SEAT_BURST_MIN_NS) that
  * blocks will wake again within the frame; in the stack its core was taken
@@ -1220,9 +1228,9 @@ static __noinline s32 cake_claim_warm(struct task_struct *p __arg_trusted,
 			if (scx_bpf_test_and_clear_cpu_idle(c))
 				return c;
 		}
-		w = cake_thread_free & aff & ~seats;
+		w = cake_idle_words[0] & aff & ~seats;
 		if (!w)
-			w = cake_thread_free & aff;
+			w = cake_idle_words[0] & aff;
 		if (w) {
 			u64 hi = w & (~0ULL << r);
 
@@ -1339,7 +1347,7 @@ static __noinline bool cake_system_serial(void)
 	u32 nr;
 
 	/* One word read replaces the kernel mask walk per wake (§G45). */
-	nr = (u32)cake_idle_nr;
+	nr = cake_idle_count();
 
 	return nr * 4 >= nr_cpu_span * 3;
 }
@@ -2058,7 +2066,7 @@ skip_home:
 	 * the unclaimed census paths (park, first-fit) stack a second wake
 	 * onto a CPU whose first wake is still in flight. Everything else is
 	 * pooled, visible, kicked. */
-	if (cake_idle_nr && !cake_tog_g67) {
+	if (cake_idle_count() && !cake_tog_g67) {
 		s32 ocpu;
 
 		cake_stat_inc(CAKE_STAT_PARK_REACHED);
@@ -2108,7 +2116,7 @@ skip_home:
 		 * scans can only fail; a stale zero costs one queued wake,
 		 * healed by the enqueue-side kick.
 		 */
-		if (!cake_idle_nr)
+		if (!cake_idle_count())
 			ns = NULL;
 		if (ns && __COMPAT_HAS_scx_bpf_select_cpu_and)
 			cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags,
@@ -2116,7 +2124,7 @@ skip_home:
 	}
 	if (cpu >= 0)
 		is_idle = true;
-	else if (!cake_idle_nr &&
+	else if (!cake_idle_count() &&
 		 bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
 		cpu = prev_cpu;
 	else
@@ -3055,19 +3063,26 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 	u64 bit = 1ULL << (c & 63);
 
 	if (idle) {
+		/* §G82: one census word (the counter is wide hosts only), one
+		 * core word set only when the sibling's bit is already up. Two
+		 * siblings idling in the same instant can each miss the other
+		 * and leave the core half-marked until either transitions again;
+		 * the kernel accepts the same race on its own smt mask, and the
+		 * idle claim still gates every placement. */
 		if (!(cake_idle_words[c >> 6] & bit)) {
 			__atomic_fetch_or(&cake_idle_words[c >> 6], bit,
 					  __ATOMIC_RELAXED);
-			__atomic_fetch_add(&cake_idle_nr, 1, __ATOMIC_RELAXED);
+			if (nr_cpu_span > 64)
+				__atomic_fetch_add(&cake_idle_nr, 1,
+						   __ATOMIC_RELAXED);
 		}
 		if (cake_tog_g71 && c < 64) {
 			s32 sib = cpu_sibling[c];
 
-			__atomic_fetch_or(&cake_thread_free, bit, __ATOMIC_RELEASE);
 			if (sib < 0) {
 				__atomic_fetch_or(&cake_core_free, bit, __ATOMIC_RELEASE);
 			} else if ((u32)sib < 64 &&
-				   (cake_thread_free >> ((u32)sib & 63)) & 1) {
+				   (cake_idle_words[0] >> ((u32)sib & 63)) & 1) {
 				/* the sibling is idle AND still unclaimed: both
 				 * halves become whole cores */
 				__atomic_fetch_or(&cake_core_free,
@@ -3080,9 +3095,10 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 		 * itself, with local reads — the waker inherits a pre-gated
 		 * answer. Rotor spreads parkers across waker mailboxes; an
 		 * occupied slot skips one forward, then gives up (the census
-		 * still names this CPU for the fallback ladder).
+		 * still names this CPU for the fallback ladder). Its consumer,
+		 * cake_park_take, is reachable only off §G69 (§G82).
 		 */
-		if (!cake_cpu_irq_bad(cpu) &&
+		if (!cake_tog_g69 && !cake_cpu_irq_bad(cpu) &&
 		    !cake_cpu_tick_soon(cpu)) {
 			u32 r = (u32)__atomic_fetch_add(&cake_park_rotor, 1,
 							__ATOMIC_RELAXED);
@@ -3113,23 +3129,30 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 			}
 		}
 	} else {
+		/* §G82: the thread bit goes first, so a sibling idling behind
+		 * this exit reads a busy core; the core word pays an atomic only
+		 * when it holds a bit. */
+		if (cake_idle_words[c >> 6] & bit) {
+			__atomic_fetch_and(&cake_idle_words[c >> 6], ~bit,
+					   __ATOMIC_RELAXED);
+			if (nr_cpu_span > 64)
+				__atomic_fetch_sub(&cake_idle_nr, 1,
+						   __ATOMIC_RELAXED);
+		}
 		if (cake_tog_g71 && c < 64) {
 			s32 sib = cpu_sibling[c];
 			u64 clear = bit;
 
 			if (sib >= 0 && (u32)sib < 64)
 				clear |= 1ULL << ((u32)sib & 63);
-			__atomic_fetch_and(&cake_thread_free, ~bit, __ATOMIC_RELEASE);
-			__atomic_fetch_and(&cake_core_free, ~clear, __ATOMIC_RELEASE);
-		}
-		if (cake_idle_words[c >> 6] & bit) {
-			__atomic_fetch_and(&cake_idle_words[c >> 6], ~bit,
-					   __ATOMIC_RELAXED);
-			__atomic_fetch_sub(&cake_idle_nr, 1, __ATOMIC_RELAXED);
+			if (cake_core_free & clear)
+				__atomic_fetch_and(&cake_core_free, ~clear,
+						   __ATOMIC_RELEASE);
 		}
 		/* Retract (§G54): only our own entry; a raced consumer has
-		 * already taken it, and losing that race is benign. */
-		{
+		 * already taken it, and losing that race is benign. Off §G69
+		 * only, with its producer (§G82). */
+		if (!cake_tog_g69) {
 			u32 park = cake_irq_live[c].park;
 
 			if (park) {
@@ -3217,7 +3240,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 			}
 		}
 		scx_bpf_put_idle_cpumask(im);
-		cake_idle_nr = n;
+		if (nr_cpu_span > 64)
+			cake_idle_nr = n;
 	}
 
 	return cake_nonsink_rebuild(cake_sink_gen);
