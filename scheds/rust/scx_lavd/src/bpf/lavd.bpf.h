@@ -131,6 +131,8 @@ enum consts_internal {
 	LAVD_CPDOM_MIG_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS / LAVD_SLICE_MAX_NS_DFL), /* roughly twice per interval */
 	LAVD_CPU_CONGESTED_THRES	= 1, /* the CPU is congested when one or more tasks are waiting across its DSQs */
 
+	LAVD_LB_NEAR_DIST		= 1,	/* force stealing scans only the nearest distance */
+
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
 
