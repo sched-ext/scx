@@ -234,6 +234,18 @@ struct Opts {
     #[clap(long = "enable-cpu-bw", action = clap::ArgAction::SetTrue)]
     enable_cpu_bw: bool,
 
+    /// Maximum number of cgroups CPU bandwidth control (cpu.max) can manage.
+    /// Cgroups beyond the cap run unmanaged. Only meaningful with
+    /// --enable-cpu-bw.
+    #[clap(long = "cpu-bw-max-cgroups", default_value = "2048", value_parser = Opts::cpu_bw_max_cgroups_range)]
+    cpu_bw_max_cgroups: u32,
+
+    /// Maximum cgroup nesting depth CPU bandwidth control (cpu.max) can manage.
+    /// Cgroups nested deeper run unmanaged. Only meaningful with
+    /// --enable-cpu-bw.
+    #[clap(long = "cpu-bw-max-tree-height", default_value = "32", value_parser = Opts::cpu_bw_max_tree_height_range)]
+    cpu_bw_max_tree_height: u32,
+
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
@@ -420,6 +432,14 @@ impl Opts {
         number_range(s, 0, 10)
     }
 
+    fn cpu_bw_max_cgroups_range(s: &str) -> Result<u32, String> {
+        number_range(s, 1, u32::MAX)
+    }
+
+    fn cpu_bw_max_tree_height_range(s: &str) -> Result<u32, String> {
+        number_range(s, 1, u32::MAX)
+    }
+
     fn lat_load_target_pct_range(s: &str) -> Result<u16, String> {
         number_range(s, 0, 200)
     }
@@ -511,11 +531,23 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize skel according to @opts.
-        Self::init_globals(&mut skel, &opts, &order, debug_level);
+        Self::init_globals(&mut skel, &opts, &order, debug_level)?;
 
-        // Size the cpu.max per-(cgroup, LLC) map to this system's LLC count
-        // before loading (a map's max_entries is fixed at load time).
-        scx_utils::resize_cgroup_bw_llc_map(skel.open_object_mut(), order.nr_llcs)?;
+        // Mirror the cpu.max caps into rodata so the BPF admission gates match
+        // the map sizes set just below.
+        if let Some(rodata) = skel.maps.rodata_data.as_mut() {
+            rodata.nr_cgrp_max = opts.cpu_bw_max_cgroups;
+            rodata.tree_height_max = opts.cpu_bw_max_tree_height;
+        }
+
+        // Size the cpu.max maps to this system before loading (a map's
+        // max_entries is fixed at load time).
+        scx_utils::resize_cgroup_bw(
+            skel.open_object_mut(),
+            opts.cpu_bw_max_cgroups,
+            opts.cpu_bw_max_tree_height,
+            order.nr_llcs,
+        )?;
 
         // Initialize arena
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
@@ -680,7 +712,12 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder, debug_level: u8) {
+    fn init_globals(
+        skel: &mut OpenBpfSkel,
+        opts: &Opts,
+        order: &CpuOrder,
+        debug_level: u8,
+    ) -> Result<()> {
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.no_preemption = opts.no_preemption;
         bss_data.no_core_compaction = opts.no_core_compaction;
@@ -708,9 +745,16 @@ impl<'a> Scheduler<'a> {
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
         rodata.enable_cpu_bw = opts.enable_cpu_bw;
 
-        if !ksym_exists("scx_group_set_bandwidth").unwrap() {
-            skel.struct_ops.lavd_ops_mut().cgroup_set_bandwidth = std::ptr::null_mut();
-            warn!("Kernel does not support ops.cgroup_set_bandwidth(), so disable it.");
+        // Fail hard if cpu.max was explicitly requested but the kernel lacks
+        // ops.cgroup_set_bandwidth support; setup_cgroup_bw() otherwise disables
+        // the struct_ops callback for the unsupported tier.
+        let cgroup_bw =
+            scx_utils::setup_cgroup_bw(skel.open_object_mut(), "lavd_cgroup_set_bandwidth")?;
+        if opts.enable_cpu_bw && cgroup_bw == scx_utils::CgroupBwSupport::Unsupported {
+            anyhow::bail!(
+                "--enable-cpu-bw requires kernel cpu.max support (ops.cgroup_set_bandwidth), \
+                 which this kernel lacks"
+            );
         }
 
         /*
@@ -743,6 +787,8 @@ impl<'a> Scheduler<'a> {
         }
 
         skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
+
+        Ok(())
     }
 
     fn get_msg_seq_id() -> u64 {
