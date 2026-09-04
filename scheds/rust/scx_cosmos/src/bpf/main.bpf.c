@@ -159,7 +159,14 @@ const volatile u64 slice_ns = 1000000ULL;
 const volatile u64 slice_lag = 20000000ULL;
 
 /*
- * User CPU utilization threshold to determine when the system is busy.
+ * Per-CPU contention threshold, in the range [0 .. 1024], to determine
+ * when a CPU is busy: a CPU is considered busy when it has had tasks
+ * waiting to run for more than this fraction of time.
+ *
+ * 0 = contention tracking disabled: every CPU is always considered busy
+ * (pure deadline mode) and no contention state is ever updated (the
+ * branches are resolved at load time, since this is read-only data frozen
+ * at that point).
  */
 const volatile u64 busy_threshold;
 
@@ -170,17 +177,6 @@ const volatile u64 busy_threshold;
  * domain).
  */
 const volatile u64 overload_thresh_ns;
-
-/*
- * Per-CPU user utilization in the range [0 .. 1024], updated periodically
- * from userspace. Indexed by CPU id.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, MAX_CPUS);
-	__type(key, u32);
-	__type(value, u64);
-} cpu_util_map SEC(".maps");
 
 /*
  * Scheduler statistics.
@@ -219,6 +215,7 @@ struct task_ctx {
 	u64 exec_runtime;
 	u64 wakeup_freq;
 	u64 last_woke_at;
+	u64 last_utime;
 	u64 perf_events;
 	u64 perf_sticky_events;
 };
@@ -332,6 +329,10 @@ struct cpu_ctx {
 	u64 last_update;
 	u64 perf_lvl;
 	u64 perf_events;
+	u64 busy_avg;
+	u64 busy_eval_at;
+	u64 acc_utime;
+	bool busy;
 	struct bpf_cpumask __kptr *smt;
 };
 
@@ -653,27 +654,98 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 }
 
 /*
- * Return true if the given CPU is busy, false otherwise.
+ * Per-CPU user utilization tracking.
+ *
+ * This determines, per CPU, when the scheduler needs to switch to
+ * deadline-mode (using a shared DSQ) vs round-robin mode (using per-CPU
+ * local DSQs).
+ *
+ * The signal is the fraction of wall time the CPU spends executing user
+ * code, deliberately excluding system time: sleep-intensive workloads
+ * (frequent short sleeps and wakeups) burn most of their CPU time in the
+ * kernel, and for them tasks should stay on their CPU / local DSQ to
+ * reduce the scheduling overhead and the balancing pressure in
+ * ops.dispatch(). Only CPUs running sustained user work are worth the
+ * extra migrations that deadline mode brings.
+ *
+ * The user time of the running task (p->utime deltas, charged in
+ * ops.tick() and ops.stopping()) is accumulated per CPU and periodically
+ * folded into an EWMA (@busy_avg) of the user utilization, normalized in
+ * the range [0 .. 1024] of wall time. The busy state is derived from the
+ * EWMA with hysteresis (enter at @busy_threshold, exit at 3/4 of it) to
+ * avoid flapping between the two modes around the threshold. Idle CPUs
+ * don't tick, so a CPU with no recent evaluations is considered not
+ * busy.
+ */
+#define BUSY_EVAL_NS	(10ULL * NSEC_PER_MSEC)
+#define BUSY_STALE_NS	(50ULL * NSEC_PER_MSEC)
+
+/*
+ * Charge the user time accumulated by @p (running on @cpu) since the
+ * last update and periodically refresh the CPU's busy state.
+ */
+static void update_cpu_busy(struct task_struct *p, s32 cpu)
+{
+	struct cpu_ctx *cctx;
+	struct task_ctx *tctx;
+	u64 now, delta_t, util;
+
+	if (!busy_threshold)
+		return;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	tctx = try_lookup_task_ctx(p);
+	if (!cctx || !tctx)
+		return;
+
+	cctx->acc_utime += p->utime - tctx->last_utime;
+	tctx->last_utime = p->utime;
+
+	now = bpf_ktime_get_ns();
+	delta_t = time_delta(now, cctx->busy_eval_at);
+	if (delta_t < BUSY_EVAL_NS)
+		return;
+
+	util = MIN(cctx->acc_utime * 1024 / delta_t, 1024);
+	cctx->busy_avg = calc_avg(cctx->busy_avg, util);
+	cctx->acc_utime = 0;
+	cctx->busy_eval_at = now;
+
+	if (!cctx->busy && cctx->busy_avg >= busy_threshold)
+		cctx->busy = true;
+	else if (cctx->busy && cctx->busy_avg < busy_threshold - busy_threshold / 4)
+		cctx->busy = false;
+}
+
+/*
+ * Return true if the given CPU is busy (running sustained user work),
+ * false otherwise.
  *
  * @cpu should be the CPU of interest: prev_cpu in select_cpu/enqueue, or
  * scx_bpf_task_cpu(p) in tick.
- *
- * This determines when the scheduler needs to switch to deadline-mode
- * (using a shared DSQ) vs round-robin mode (using per-CPU local DSQs).
  */
 static inline bool is_cpu_busy(s32 cpu)
 {
-	u64 *util;
-	u64 max_cpu = MIN(nr_cpu_ids, MAX_CPUS);
+	struct cpu_ctx *cctx;
 
-	if (cpu < 0 || cpu >= max_cpu)
+	/*
+	 * Utilization tracking disabled: always use deadline mode.
+	 */
+	if (!busy_threshold)
+		return true;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return true;
+
+	/*
+	 * No recent evaluations: the CPU has been (mostly) idle, hence
+	 * not busy.
+	 */
+	if (time_delta(bpf_ktime_get_ns(), cctx->busy_eval_at) > BUSY_STALE_NS)
 		return false;
 
-	util = bpf_map_lookup_elem(&cpu_util_map, &cpu);
-	if (!util)
-		return false;
-
-	return *util >= busy_threshold;
+	return cctx->busy;
 }
 
 /*
@@ -1303,6 +1375,13 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
+	/*
+	 * Refresh the CPU user utilization state (resolved to a no-op at
+	 * load time when utilization tracking is disabled).
+	 */
+	if (busy_threshold)
+		update_cpu_busy(p, scx_bpf_task_cpu(p));
+
 	if (!time_preemption)
 		return;
 
@@ -1535,6 +1614,13 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	tctx->last_run_at = bpf_ktime_get_ns();
 
 	/*
+	 * Snapshot the task's user time, so that only the user time
+	 * accumulated on this CPU is charged to it.
+	 */
+	if (busy_threshold)
+		tctx->last_utime = p->utime;
+
+	/*
 	 * Update current system's vruntime.
 	 */
 	if (time_before(vtime_now, p->scx.dsq_vtime))
@@ -1577,6 +1663,19 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	if (perf_config || perf_sticky) {
 		scx_pmu_event_stop(p);
 		update_counters(p, tctx, cpu);
+	}
+
+	/*
+	 * Charge the user time accumulated on this CPU before the task
+	 * releases it.
+	 */
+	if (busy_threshold) {
+		struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
+
+		if (cctx) {
+			cctx->acc_utime += p->utime - tctx->last_utime;
+			tctx->last_utime = p->utime;
+		}
 	}
 
 	/*
