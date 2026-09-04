@@ -207,14 +207,21 @@ const volatile u32 nr_node_ids;
 static u64 vtime_now;
 
 /*
+ * Total weight of the runnable tasks, EEVDF's \Sum w_i (cfs_rq->sum_weight).
+ *
+ * Maintained across the ops.runnable() / ops.quiescent() pair, which the core
+ * scheduler guarantees to be symmetric, so it converges even when a task is
+ * dequeued without ever being consumed by the BPF side.
+ */
+static u64 sum_weight;
+
+/*
  * Per-task context.
  */
 struct task_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u64 last_run_at;
 	u64 exec_runtime;
-	u64 wakeup_freq;
-	u64 last_woke_at;
 	u64 last_utime;
 	u64 perf_events;
 	u64 perf_sticky_events;
@@ -332,6 +339,7 @@ struct cpu_ctx {
 	u64 busy_avg;
 	u64 busy_eval_at;
 	u64 acc_utime;
+	u64 vtime_rem;
 	bool busy;
 	struct bpf_cpumask __kptr *smt;
 };
@@ -400,21 +408,6 @@ static inline bool is_sticky_event_heavy(const struct task_ctx *tctx)
 static u64 calc_avg(u64 old_val, u64 new_val)
 {
 	return (old_val - (old_val >> 2)) + (new_val >> 2);
-}
-
-/*
- * Update the average frequency of an event.
- *
- * The frequency is computed from the given interval since the last event
- * and combined with the previous frequency using an exponential weighted
- * moving average.
- */
-static u64 update_freq(u64 freq, u64 interval)
-{
-        u64 new_freq;
-
-        new_freq = (100 * NSEC_PER_MSEC) / interval;
-        return calc_avg(freq, new_freq);
 }
 
 /*
@@ -1148,12 +1141,29 @@ static u64 task_slice(const struct task_struct *p)
  */
 static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale);
-	u64 vtime_min = vtime_now - vsleep_max;
+	u64 limit = scale_by_task_weight_inverse(p, slice_lag);
+	u64 vtime_min = vtime_now - limit;
+	u64 vtime_max = vtime_now + limit;
 
+	/*
+	 * Bound the lag on both sides, like EEVDF's entity_lag():
+	 *
+	 *	return clamp(vlag, -limit, limit);
+	 *
+	 * The lower bound caps the credit a sleeper builds up. The upper bound
+	 * is what keeps a task that has been running from drifting arbitrarily
+	 * far behind: without it the gap only ever grows, and a task that is
+	 * never picked never advances the clock either, so nothing brings it
+	 * back.
+	 *
+	 * The limit is scaled by the inverse of the task's weight, matching
+	 * calc_delta_fair(): the same amount of real time is a smaller step in
+	 * virtual time for a heavier task.
+	 */
 	if (time_before(p->scx.dsq_vtime, vtime_min))
 		scx_bpf_task_set_dsq_vtime(p, vtime_min);
+	else if (time_after(p->scx.dsq_vtime, vtime_max))
+		scx_bpf_task_set_dsq_vtime(p, vtime_max);
 
 	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
 }
@@ -1573,10 +1583,16 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 		scx_bpf_task_set_slice(prev, task_slice(prev));
 }
 
+void BPF_STRUCT_OPS(cosmos_quiescent, struct task_struct *p, u64 deq_flags)
+{
+	__sync_fetch_and_sub(&sum_weight, p->scx.weight);
+}
+
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = bpf_ktime_get_ns(), delta_t;
 	struct task_ctx *tctx;
+
+	__sync_fetch_and_add(&sum_weight, p->scx.weight);
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1587,16 +1603,6 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 	 * sleep).
 	 */
 	tctx->exec_runtime = 0;
-
-	/*
-	 * Update the task's wakeup frequency based on the time since
-	 * the last wakeup, then cap the result at 1024 to avoid large
-	 * spikes.
-	 */
-	delta_t = now - tctx->last_woke_at;
-	tctx->wakeup_freq = update_freq(tctx->wakeup_freq, delta_t);
-	tctx->wakeup_freq = MIN(tctx->wakeup_freq, 1024);
-	tctx->last_woke_at = now;
 }
 
 void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
@@ -1619,12 +1625,6 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	 */
 	if (busy_threshold)
 		tctx->last_utime = p->utime;
-
-	/*
-	 * Update current system's vruntime.
-	 */
-	if (time_before(vtime_now, p->scx.dsq_vtime))
-		vtime_now = p->scx.dsq_vtime;
 
 	/*
 	 * Refresh cpufreq performance level.
@@ -1653,7 +1653,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
-	u64 slice;
+	u64 slice, weight;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1698,6 +1698,43 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 */
 	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (scale_by_task_weight_inverse(p, slice)));
 	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
+
+	/*
+	 * Advance the system virtual time by the service just delivered.
+	 *
+	 * EEVDF's reference is the weighted average of the runnable set,
+	 *
+	 *	V = \Sum (w_i * v_i) / \Sum w_i
+	 *
+	 * so serving @p for @slice moves it by
+	 *
+	 *	dV = w_p * dv_p / \Sum w_i = slice * NICE_0 / \Sum w_i
+	 *
+	 * since dv_p is the slice scaled by the inverse of @p's weight. That
+	 * is an identity, not an approximation: what matters is that V rises
+	 * with the service handed out no matter who receives it. Deriving it
+	 * from the running task's own vruntime instead (the previous
+	 * max-of-running rule) stalls the clock exactly when it is needed,
+	 * because the tasks that are behind never run and the tasks that do
+	 * run barely advance their own vruntime.
+	 *
+	 * The division truncates, and once the total weight exceeds a
+	 * hundred times the length of a burst every burst contributes
+	 * nothing: with a few thousand runnable tasks V would stop entirely
+	 * and everything queued behind it would starve. Carry the remainder
+	 * per CPU so that the service is accounted in full.
+	 */
+	weight = sum_weight;
+	if (weight) {
+		struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
+		u64 acc = slice * 100 + (cctx ? cctx->vtime_rem : 0);
+		u64 delta = acc / weight;
+
+		if (cctx)
+			cctx->vtime_rem = acc - delta * weight;
+		if (delta)
+			__sync_fetch_and_add(&vtime_now, delta);
+	}
 
 	/*
 	 * Update per-CPU statistics.
@@ -1904,6 +1941,7 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .dispatch		= (void *)cosmos_dispatch,
 	       .tick                    = (void *)cosmos_tick,
 	       .runnable		= (void *)cosmos_runnable,
+	       .quiescent		= (void *)cosmos_quiescent,
 	       .running			= (void *)cosmos_running,
 	       .stopping		= (void *)cosmos_stopping,
 	       .enable			= (void *)cosmos_enable,
