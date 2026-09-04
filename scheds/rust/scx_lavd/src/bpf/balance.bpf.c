@@ -601,8 +601,12 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 
 	/*
 	 * Traverse neighbor compute domains in distance order.
+	 *
+	 * Unlike try_to_steal_task(), force stealing has no probabilistic
+	 * break, so scan only the nearest distance. Farther domains are left
+	 * to the load balancer.
 	 */
-	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
+	for (int i = 0; i < LAVD_LB_NEAR_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
@@ -626,6 +630,10 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			}
 
 			if (!cpdomc_pick->is_valid)
+				continue;
+
+			/* Never steal across NUMA nodes. */
+			if (cpdomc_pick->numa_id != cpdomc->numa_id)
 				continue;
 
 			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
