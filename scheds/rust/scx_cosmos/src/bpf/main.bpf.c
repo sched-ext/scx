@@ -223,6 +223,8 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 exec_runtime;
 	u64 last_utime;
+	u64 vruntime;
+	s64 vlag;
 	u64 perf_events;
 	u64 perf_sticky_events;
 };
@@ -1138,34 +1140,15 @@ static u64 task_slice(const struct task_struct *p)
  * frequency: tasks that sleep often have a bigger slice lag, allowing them
  * to accumulate more time-slice credit than tasks with infrequent, long
  * sleeps.
+ *
+ * The deadline is the DSQ key and nothing else. The kernel stores what is
+ * passed to scx_bpf_dsq_insert_vtime() in p->scx.dsq_vtime, so the
+ * vruntime has to live somewhere the key cannot overwrite it, see
+ * task_ctx.vruntime.
  */
-static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
+static u64 task_dl(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	u64 limit = scale_by_task_weight_inverse(p, slice_lag);
-	u64 vtime_min = vtime_now - limit;
-	u64 vtime_max = vtime_now + limit;
-
-	/*
-	 * Bound the lag on both sides, like EEVDF's entity_lag():
-	 *
-	 *	return clamp(vlag, -limit, limit);
-	 *
-	 * The lower bound caps the credit a sleeper builds up. The upper bound
-	 * is what keeps a task that has been running from drifting arbitrarily
-	 * far behind: without it the gap only ever grows, and a task that is
-	 * never picked never advances the clock either, so nothing brings it
-	 * back.
-	 *
-	 * The limit is scaled by the inverse of the task's weight, matching
-	 * calc_delta_fair(): the same amount of real time is a smaller step in
-	 * virtual time for a heavier task.
-	 */
-	if (time_before(p->scx.dsq_vtime, vtime_min))
-		scx_bpf_task_set_dsq_vtime(p, vtime_min);
-	else if (time_after(p->scx.dsq_vtime, vtime_max))
-		scx_bpf_task_set_dsq_vtime(p, vtime_max);
-
-	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
+	return tctx->vruntime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
 }
 
 /*
@@ -1585,7 +1568,34 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(cosmos_quiescent, struct task_struct *p, u64 deq_flags)
 {
+	struct task_ctx *tctx;
+	s64 limit, lag;
+
 	__sync_fetch_and_sub(&sum_weight, p->scx.weight);
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Remember how far the task is from the reference as it stops being
+	 * runnable, clamped both ways, like update_entity_lag():
+	 *
+	 *	vlag = avg_vruntime(cfs_rq) - se->vruntime;
+	 *	se->vlag = clamp(vlag, -limit, limit);
+	 *
+	 * What is preserved across a sleep is the position relative to the
+	 * reference, not the absolute vruntime. Restoring the vruntime
+	 * against the reference alone would hand every task that sleeps long
+	 * enough the full credit, no matter whether it had earned it.
+	 */
+	limit = scale_by_task_weight_inverse(p, slice_lag);
+	lag = (s64)(vtime_now - tctx->vruntime);
+	if (lag > limit)
+		lag = limit;
+	else if (lag < -limit)
+		lag = -limit;
+	tctx->vlag = lag;
 }
 
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
@@ -1603,6 +1613,17 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 	 * sleep).
 	 */
 	tctx->exec_runtime = 0;
+
+	/*
+	 * Place the task back at the lag it had when it went to sleep, the
+	 * way place_entity() does:
+	 *
+	 *	se->vruntime = vruntime - lag;
+	 *
+	 * A task that had consumed its share before sleeping comes back with
+	 * no credit, while one that was still owed service keeps it.
+	 */
+	tctx->vruntime = vtime_now - tctx->vlag;
 }
 
 void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
@@ -1696,7 +1717,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 * Cap the maximum accumulated time since last sleep to @slice_lag,
 	 * to prevent starving CPU-intensive tasks.
 	 */
-	scx_bpf_task_set_dsq_vtime(p, p->scx.dsq_vtime + (scale_by_task_weight_inverse(p, slice)));
+	tctx->vruntime += scale_by_task_weight_inverse(p, slice);
 	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
 
 	/*
@@ -1744,7 +1765,10 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(cosmos_enable, struct task_struct *p)
 {
-	scx_bpf_task_set_dsq_vtime(p, vtime_now);
+	struct task_ctx *tctx = try_lookup_task_ctx(p);
+
+	if (tctx)
+		tctx->vruntime = vtime_now;
 }
 
 s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
