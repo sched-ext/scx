@@ -154,7 +154,7 @@ const volatile bool no_early_clear;
 const volatile u64 slice_ns = 1000000ULL;
 
 /*
- * Maximum runtime that can be charged to a task.
+ * Maximum lag, in virtual time, that a task can carry across a sleep.
  */
 const volatile u64 slice_lag = 20000000ULL;
 
@@ -221,7 +221,6 @@ static u64 sum_weight;
 struct task_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u64 last_run_at;
-	u64 exec_runtime;
 	u64 last_utime;
 	u64 vruntime;
 	s64 vlag;
@@ -1107,48 +1106,43 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 }
 
 /*
- * Return a time slice scaled by the task's weight.
- */
-static u64 task_slice(const struct task_struct *p)
-{
-	return scale_by_task_weight(p, slice_ns);
-}
-
-/*
  * Calculate and return the virtual deadline for the given task.
  *
- *  The deadline is defined as:
+ * This is EEVDF's virtual deadline, see update_deadline():
  *
- *    deadline = vruntime + exec_vruntime
+ *	vd_i = ve_i + r_i / w_i
  *
- * Here, `vruntime` represents the task's total accumulated runtime,
- * inversely scaled by its weight, while `exec_vruntime` accounts the
- * runtime accumulated since the last sleep event, also inversely scaled by
- * the task's weight.
- *
- * Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize
- * tasks that sleep frequently and use the CPU in short bursts (resulting
- * in a small `exec_vruntime` value), which are typically latency critical.
- *
- * Additionally, to prevent over-prioritizing tasks that sleep for long
- * periods of time, the vruntime credit they can accumulate while sleeping
- * is limited by @slice_lag, which is also scaled based on the task's
- * weight.
- *
- * To prioritize tasks that sleep frequently over those with long sleep
- * intervals, @slice_lag is also adjusted in function of the task's wakeup
- * frequency: tasks that sleep often have a bigger slice lag, allowing them
- * to accumulate more time-slice credit than tasks with infrequent, long
- * sleeps.
+ * The request size r_i is the same @slice_ns for everybody, exactly like
+ * sysctl_sched_base_slice: the weight does not buy a task a longer time
+ * slice, it buys it an earlier deadline, so it runs more often instead of
+ * running longer.
  *
  * The deadline is the DSQ key and nothing else. The kernel stores what is
  * passed to scx_bpf_dsq_insert_vtime() in p->scx.dsq_vtime, so the
  * vruntime has to live somewhere the key cannot overwrite it, see
  * task_ctx.vruntime.
+ *
+ * pick_eevdf() considers only the eligible tasks, v_i <= V, and picks the
+ * earliest deadline among them. A DSQ cannot skip a task and its key is
+ * fixed at insertion, so the filter is not applied here. It is mostly not
+ * needed: a task that is over-served carries the excess in its key and
+ * sorts after the under-served tasks of the same weight, and stays there
+ * until V has moved past it, which is the wait pick_eevdf() would impose
+ * anyway. What is lost is the case of a heavier over-served task, whose
+ * r_i / w_i is smaller, sorting ahead of a lighter under-served one: it
+ * wins by at most the difference between the two requests, a bounded
+ * latency skew, not a fairness leak, since the vruntime is charged all
+ * the same.
+ *
+ * Pushing the ineligible tasks further back with an offset, to apply the
+ * filter exactly, would starve them instead. V advances by the service
+ * delivered divided by the total weight, so under load it barely moves,
+ * and a task waiting for V to cover a fixed offset waits for seconds
+ * while every newly woken task keeps being queued ahead of it.
  */
 static u64 task_dl(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	return tctx->vruntime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
+	return tctx->vruntime + scale_by_task_weight_inverse(p, slice_ns);
 }
 
 /*
@@ -1272,7 +1266,7 @@ static void direct_dispatch_local(struct task_struct *p, s32 cpu)
 	if (!SCX_ENQ_IMMED && shared_dsq_has_pinned_waiter(cpu))
 		return;
 
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), SCX_ENQ_IMMED);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, SCX_ENQ_IMMED);
 }
 
 /*
@@ -1391,7 +1385,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	 * - the system is busy and there are tasks waiting in the
 	 *   local or shared DSQ.
 	 */
-	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > task_slice(p)) {
+	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > slice_ns) {
 		s32 cpu = scx_bpf_task_cpu(p);
 		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
 				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
@@ -1426,7 +1420,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		if (cpu >= 0) {
 			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					   task_slice(p), enq_flags);
+					   slice_ns, enq_flags);
 			return;
 		}
 	}
@@ -1445,7 +1439,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		 * direct dispatch to prevent starvation.
 		 */
 		if (!q || q->nr_cpus_allowed > 1) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
 			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
 			return;
 		}
@@ -1465,7 +1459,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					   task_slice(p), enq_flags | SCX_ENQ_IMMED);
+					   slice_ns, enq_flags | SCX_ENQ_IMMED);
 			if (is_event_heavy(tctx) && cpu != prev_cpu)
 				__sync_fetch_and_add(&nr_event_dispatches, 1);
 			return;
@@ -1477,7 +1471,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!is_cpu_busy(prev_cpu) &&
 	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_ns, enq_flags);
 		return;
 	}
 
@@ -1485,7 +1479,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Dispatch the task to the shared DSQ.
 	 */
 	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
-				 task_slice(p), task_dl(p, tctx), enq_flags);
+				 slice_ns, task_dl(p, tctx), enq_flags);
 
 	if (task_needs_shared_dsq_kick(p, enq_flags))
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
@@ -1563,7 +1557,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * is on the primary domain.
 	 */
 	if (prev && keep_running(prev, cpu))
-		scx_bpf_task_set_slice(prev, task_slice(prev));
+		scx_bpf_task_set_slice(prev, slice_ns);
 }
 
 void BPF_STRUCT_OPS(cosmos_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1607,12 +1601,6 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-
-	/*
-	 * Reset exec runtime (accumulated execution time since last
-	 * sleep).
-	 */
-	tctx->exec_runtime = 0;
 
 	/*
 	 * Place the task back at the lag it had when it went to sleep, the
@@ -1711,14 +1699,12 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	slice = scale_by_cpu_capacity(slice, cpu);
 
 	/*
-	 * Update the vruntime and the total accumulated runtime since last
-	 * sleep.
+	 * Charge the service just consumed to the task's vruntime, the way
+	 * update_curr() does:
 	 *
-	 * Cap the maximum accumulated time since last sleep to @slice_lag,
-	 * to prevent starving CPU-intensive tasks.
+	 *	se->vruntime += calc_delta_fair(delta_exec, se);
 	 */
 	tctx->vruntime += scale_by_task_weight_inverse(p, slice);
-	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
 
 	/*
 	 * Advance the system virtual time by the service just delivered.

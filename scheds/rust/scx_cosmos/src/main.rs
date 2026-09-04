@@ -74,7 +74,7 @@ struct Opts {
     #[clap(short = 's', long, default_value = "1000")]
     slice_us: u64,
 
-    /// Maximum runtime (since last sleep) that can be charged to a task in microseconds.
+    /// Maximum lag, in microseconds of virtual time, that a task can carry across a sleep.
     #[clap(short = 'l', long, default_value = "20000")]
     slice_lag_us: u64,
 
