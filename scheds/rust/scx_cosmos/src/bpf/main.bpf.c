@@ -1460,9 +1460,24 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Attempt to dispatch directly to an idle CPU if the task can
 	 * migrate.
+	 *
+	 * A busy @prev_cpu is a reason to leave only when it is busy with
+	 * someone else. A task that is re-enqueued from its own CPU at the
+	 * end of its slice is what @prev_cpu is busy with, and it is giving
+	 * the CPU up to whoever was waiting for it, typically a per-CPU
+	 * kworker that is done a few microseconds later. Pushing it away at
+	 * that point turns every such handover into a migration. Leave it
+	 * queued instead, the way a task stays on its runqueue: its own CPU
+	 * takes it back as soon as it is free again.
+	 *
+	 * A task re-enqueued from its own CPU with slice left, on the other
+	 * hand, was preempted by a higher scheduling class (the kernel
+	 * bounces an IMMED task back through ops.enqueue() in that case)
+	 * and @prev_cpu is taken for an unknown amount of time, so an idle
+	 * CPU is the better option.
 	 */
 	if (task_should_migrate(p, enq_flags) ||
-	    !is_cpu_idle(prev_cpu) ||
+	    (!is_cpu_idle(prev_cpu) && (!scx_bpf_task_running(p) || p->scx.slice)) ||
 	    (!is_pcpu_task(p) && is_smt_contended(prev_cpu)) ||
 	    (!is_pcpu_task(p) && (is_event_heavy(tctx) || !is_primary_cpu(prev_cpu)))) {
 		if (is_pcpu_task(p))
