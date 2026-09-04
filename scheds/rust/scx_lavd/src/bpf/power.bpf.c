@@ -43,10 +43,6 @@ int			nr_cpdoms;
 /* contexts for compute domains */
 struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 
-/* online CPU mask for each compute domain */
-private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR];
-
-
 /*
  * Performance vs. CPU order (PCO) table
  */
