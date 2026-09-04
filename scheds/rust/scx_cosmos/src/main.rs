@@ -75,8 +75,20 @@ struct Opts {
     slice_us: u64,
 
     /// Maximum lag, in microseconds of virtual time, that a task can carry across a sleep.
-    #[clap(short = 'l', long, default_value = "20000")]
+    ///
+    /// This bounds both the credit a task can bring back from a sleep and the debt it can
+    /// carry after consuming more than its share: an over-served task waits for the system
+    /// vruntime to cover the debt before it runs again, and under heavy load that reference
+    /// moves slowly. EEVDF bounds the lag to twice the base slice (max(2 * slice, tick)).
+    #[clap(short = 'l', long, default_value = "2000")]
     slice_lag_us: u64,
+
+    /// Number of other CPUs' dispatch queues sampled at each dispatch while the CPU has work
+    /// of its own, looking for an earlier deadline to steal.
+    ///
+    /// 0 = a busy CPU never steals, only an idle CPU pulls from the others.
+    #[clap(long, default_value = "0")]
+    steal_sample: u64,
 
     /// CPU busy threshold.
     ///
@@ -598,6 +610,7 @@ impl<'a> Scheduler<'a> {
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
+        rodata.steal_sample = opts.steal_sample;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.flat_idle_scan = opts.flat_idle_scan;
         rodata.smt_enabled = smt_enabled;

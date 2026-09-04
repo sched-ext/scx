@@ -32,7 +32,6 @@ char _license[] SEC("license") = "GPL";
  * When system is not saturated tasks will be dispatched to the local DSQ
  * in round-robin mode.
  */
-#define SHARED_DSQ		0
 
 /*
  * Thresholds for applying hysteresis to CPU performance scaling:
@@ -184,6 +183,7 @@ const volatile u64 overload_thresh_ns;
 volatile u64 nr_event_dispatches;
 volatile u64 nr_ev_sticky_dispatches;
 volatile u64 nr_gpu_dispatches;
+volatile u64 nr_steals;
 volatile u64 nr_overload_events;
 
 /*
@@ -221,6 +221,7 @@ static u64 sum_weight;
 struct task_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u64 last_run_at;
+	u64 last_stop_at;
 	u64 last_utime;
 	u64 vruntime;
 	s64 vlag;
@@ -341,6 +342,7 @@ struct cpu_ctx {
 	u64 busy_eval_at;
 	u64 acc_utime;
 	u64 vtime_rem;
+	u32 steal_cursor;
 	bool busy;
 	struct bpf_cpumask __kptr *smt;
 };
@@ -473,11 +475,18 @@ static void update_cpufreq(s32 cpu)
 }
 
 /*
- * Return the global system shared DSQ.
+ * Return the DSQ of @cpu.
+ *
+ * Every CPU owns a deadline ordered DSQ where the tasks that last ran on
+ * it are queued, and every dispatch scans the heads of the DSQs of the
+ * node for the earliest deadline (see try_steal_task()). All the keys are
+ * built on the same system-wide vruntime reference, so the queues behave
+ * as a single node-wide deadline queue, without the single lock that a
+ * single queue puts in the path of every wakeup.
  */
-static inline u64 shared_dsq(s32 cpu)
+static inline u64 cpu_dsq(s32 cpu)
 {
-	return numa_enabled ? cpu_node(cpu) : SHARED_DSQ;
+	return cpu;
 }
 
 /*
@@ -1118,6 +1127,29 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 }
 
 /*
+ * Floor on the weight used to stretch the request and the lag bound.
+ *
+ * The scx weight of a nice 19 task is 1, so its request would be a hundred
+ * times the base slice and the lag it can carry two hundred times: under
+ * a deep backlog V takes many seconds to cover that, well past the
+ * watchdog. The vruntime is still charged with the real weight, so the
+ * share is what nice asks for; only how far ahead the deadline and the lag
+ * can stretch is capped, which update_deadline() itself notes is "probably
+ * good enough".
+ */
+#define MIN_DL_WEIGHT	25
+
+static u64 scale_by_dl_weight(const struct task_struct *p, u64 value)
+{
+	u64 weight = p->scx.weight;
+
+	if (weight < MIN_DL_WEIGHT)
+		weight = MIN_DL_WEIGHT;
+
+	return value * 100 / weight;
+}
+
+/*
  * Calculate and return the virtual deadline for the given task.
  *
  * This is EEVDF's virtual deadline, see update_deadline():
@@ -1154,7 +1186,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
  */
 static u64 task_dl(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	return tctx->vruntime + scale_by_task_weight_inverse(p, slice_ns);
+	return tctx->vruntime + scale_by_dl_weight(p, slice_ns);
 }
 
 /*
@@ -1240,22 +1272,21 @@ static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
 }
 
 /*
- * Return true if a task that only @cpu can run is waiting in @cpu's shared
- * DSQ.
+ * Return true if a task that only @cpu can run is waiting in @cpu's DSQ.
  *
  * The kernel skips ops.dispatch() entirely while a CPU's local DSQ is not
  * empty (see dispatch_one()), so tasks stacked on a local DSQ silently
- * outrank the whole deadline-ordered shared DSQ. A task pinned to @cpu can
- * therefore wait in the shared DSQ forever: remote CPUs walk past it in
- * scx_bpf_dsq_move_to_local() and @cpu never gets to ops.dispatch().
+ * outrank the deadline-ordered DSQs. A task pinned to @cpu can therefore
+ * wait in @cpu's DSQ forever: remote CPUs skip it in try_steal_task() and
+ * @cpu never gets to ops.dispatch().
  *
- * The shared DSQ is ordered by deadline and the deadline of a task that is
+ * The DSQ is ordered by deadline and the deadline of a task that is
  * not running is fixed at insertion time, so a starving task climbs to the
  * head as the queue drains: peeking at the head is enough to notice it.
  */
-static bool shared_dsq_has_pinned_waiter(s32 cpu)
+static bool dsq_has_pinned_waiter(s32 cpu)
 {
-	const struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(shared_dsq(cpu));
+	const struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(cpu));
 
 	return p && is_pcpu_task(p) && scx_bpf_task_cpu(p) == cpu;
 }
@@ -1264,10 +1295,10 @@ static bool shared_dsq_has_pinned_waiter(s32 cpu)
  * Direct dispatch @p to the local DSQ of @cpu from ops.select_cpu().
  *
  * Insert with SCX_ENQ_IMMED so that the kernel bounces @p back through
- * ops.enqueue() (and from there into the shared DSQ, where the deadline
+ * ops.enqueue() (and from there into a per-CPU DSQ, where the deadline
  * ordering applies) whenever @p can't run on @cpu right away. This keeps
  * the local DSQ a pure "run now" fast path instead of an unbounded queue
- * that outranks the shared DSQ.
+ * that outranks the deadline-ordered DSQs.
  *
  * On kernels without SCX_ENQ_IMMED the flag reads as 0, so fall back to
  * skipping the direct dispatch when a task only @cpu can run is already
@@ -1275,24 +1306,10 @@ static bool shared_dsq_has_pinned_waiter(s32 cpu)
  */
 static void direct_dispatch_local(struct task_struct *p, s32 cpu)
 {
-	if (!SCX_ENQ_IMMED && shared_dsq_has_pinned_waiter(cpu))
+	if (!SCX_ENQ_IMMED && dsq_has_pinned_waiter(cpu))
 		return;
 
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, SCX_ENQ_IMMED);
-}
-
-/*
- * Return true if a shared DSQ insertion needs an explicit CPU kick.
- *
- * ops.select_cpu() normally provides the wakeup side effect for unbound
- * tasks. Affinity-constrained and migration-disabled tasks can otherwise end
- * up waiting in a shared DSQ with no eligible CPU checking it, so always kick
- * their previous CPU.
- */
-static bool task_needs_shared_dsq_kick(struct task_struct *p, u64 enq_flags)
-{
-	return p->nr_cpus_allowed != nr_cpu_ids || is_migration_disabled(p) ||
-	       task_should_migrate(p, enq_flags);
 }
 
 /*
@@ -1400,7 +1417,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > slice_ns) {
 		s32 cpu = scx_bpf_task_cpu(p);
 		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
-				scx_bpf_dsq_nr_queued(shared_dsq(cpu));
+				scx_bpf_dsq_nr_queued(cpu_dsq(cpu));
 
 		if (is_smt_contended(cpu) || (is_cpu_busy(cpu) && cpu_busy))
 			scx_bpf_task_set_slice(p, 0);
@@ -1444,7 +1461,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	if (is_sticky_event_heavy(tctx) &&
 	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p)) &&
 	    !is_smt_contended(prev_cpu)) {
-		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(shared_dsq(prev_cpu));
+		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(prev_cpu));
 
 		/*
 		 * If a per-CPU task is waiting to acquire the CPU, skip
@@ -1503,17 +1520,20 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Dispatch the task to the shared DSQ.
+	 * Queue the task on @prev_cpu's DSQ, ordered by deadline.
+	 *
+	 * Any CPU of the node can take it from there, but only while
+	 * dispatching: if @prev_cpu went idle in the meantime and the rest
+	 * of the node is idle too, nothing would ever look at it. Kick
+	 * @prev_cpu, which is a no-op unless it is idle.
 	 */
-	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
+	scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
 				 slice_ns, task_dl(p, tctx), enq_flags);
-
-	if (task_needs_shared_dsq_kick(p, enq_flags))
-		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 
 	/*
-	 * Detect a sustained backlog in the shared DSQ and, in that case,
-	 * allow tasks to spill to the non-primary CPUs.
+	 * Detect a sustained backlog on the node and, in that case, allow
+	 * tasks to spill to the non-primary CPUs.
 	 */
 	update_primary_overload(prev_cpu, node);
 }
@@ -1557,19 +1577,132 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	return true;
 }
 
+/*
+ * Number of other CPUs' DSQs sampled at each dispatch while this CPU has
+ * work of its own. 0 = a busy CPU never steals, only an idle one pulls.
+ */
+const volatile u64 steal_sample;
+
+/*
+ * A task that ran within this long on its CPU is still cache hot there and
+ * is not stolen, like task_hot() with sysctl_sched_migration_cost.
+ */
+#define MIGRATION_COST_NS	500000ULL
+
+static bool task_hot(struct task_struct *p, u64 now)
+{
+	const struct task_ctx *tctx = try_lookup_task_ctx(p);
+
+	return tctx && time_before(now, tctx->last_stop_at + MIGRATION_COST_NS);
+}
+
+/*
+ * Dispatch on @dst_cpu the task with the earliest deadline among the head
+ * of its own DSQ and the heads of the DSQs of other CPUs on the node.
+ *
+ * With the per-CPU keys all built on the same system-wide vruntime
+ * reference, the earliest head across the queues is the task a single
+ * node-wide queue would hand out. Peeking every queue at every dispatch
+ * costs as much as the single queue's lock did, though, so the scan is
+ * bounded: a CPU with work of its own samples @steal_sample other queues,
+ * rotating through them across dispatches, and takes a remote head only
+ * when it is at least a full request ahead of its own; a task with real
+ * lag to spend is found within a few dispatches, while under a balanced
+ * load nothing clears the bar and every CPU drains its own queue, as its
+ * own runqueue would be drained by EEVDF. A CPU with nothing of its own
+ * takes the first task it finds instead of the earliest, the way the idle
+ * balancer pulls whatever is available.
+ *
+ * A task that ran on its CPU a moment ago is left there in both cases:
+ * its home CPU takes it back within a slice, while moving it costs its
+ * cache, see task_hot(). This is what keeps a wakeup-heavy load from
+ * migrating on every idle transition.
+ *
+ * Only the heads are considered, a queue whose head cannot run on @dst_cpu
+ * (or is still hot there) is skipped as a whole.
+ *
+ * Return true if a task has been dispatched, false otherwise.
+ */
+static bool try_steal_task(s32 dst_cpu)
+{
+	struct cpu_ctx *cctx = try_lookup_cpu_ctx(dst_cpu);
+	struct task_struct *own = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(dst_cpu));
+	int node = cpu_node(dst_cpu);
+	u64 min_dl = 0, now = bpf_ktime_get_ns();
+	u32 limit, start, cpu, i;
+	s32 min_cpu = -1;
+
+	/*
+	 * One extra slot covers @dst_cpu itself falling in the sample.
+	 */
+	limit = own ? (steal_sample ? steal_sample + 1 : 0) : nr_cpu_ids;
+	start = cctx ? cctx->steal_cursor : dst_cpu;
+	if (start >= nr_cpu_ids)
+		start = 0;
+
+	bpf_for(i, 0, limit) {
+		struct task_struct *p;
+
+		cpu = start + 1 + i;
+		if (cpu >= nr_cpu_ids)
+			cpu -= nr_cpu_ids;
+		if (cpu >= nr_cpu_ids || cpu == dst_cpu)
+			continue;
+		if (numa_enabled && cpu_node(cpu) != node)
+			continue;
+
+		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(cpu));
+		if (!p || !bpf_cpumask_test_cpu(dst_cpu, p->cpus_ptr) ||
+		    task_hot(p, now))
+			continue;
+
+		if (min_cpu < 0 || time_before(p->scx.dsq_vtime, min_dl)) {
+			min_dl = p->scx.dsq_vtime;
+			min_cpu = cpu;
+		}
+
+		/*
+		 * Nothing to compare against: take the first task found.
+		 */
+		if (!own)
+			break;
+	}
+	if (cctx && limit) {
+		start += limit;
+		if (start >= nr_cpu_ids)
+			start -= nr_cpu_ids;
+		cctx->steal_cursor = start;
+	}
+
+	if (own && (min_cpu < 0 ||
+		    !time_before(min_dl + slice_ns, own->scx.dsq_vtime)))
+		min_cpu = dst_cpu;
+
+	if (min_cpu < 0)
+		return false;
+
+	if (!scx_bpf_dsq_move_to_local(cpu_dsq(min_cpu), 0))
+		return false;
+
+	if (min_cpu != dst_cpu)
+		__sync_fetch_and_add(&nr_steals, 1);
+
+	return true;
+}
+
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * Check if the there's any task waiting in the shared DSQ and
-	 * dispatch.
+	 * Take the earliest deadline waiting on this node, then fall back
+	 * to this CPU's own DSQ in case the pick raced with another CPU.
 	 */
-	if (scx_bpf_dsq_move_to_local(shared_dsq(cpu), 0))
+	if (try_steal_task(cpu) || scx_bpf_dsq_move_to_local(cpu_dsq(cpu), 0))
 		return;
 
 	/*
-	 * The shared DSQ is empty (or contains no task that can run
-	 * here): refresh the timestamp used to detect a sustained backlog
-	 * on this node.
+	 * Nothing is waiting on this node (or nothing that can run here):
+	 * refresh the timestamp used to detect a sustained backlog on this
+	 * node.
 	 */
 	if (!primary_all && overload_thresh_ns) {
 		int node = cpu_node(cpu);
@@ -1610,7 +1743,7 @@ void BPF_STRUCT_OPS(cosmos_quiescent, struct task_struct *p, u64 deq_flags)
 	 * against the reference alone would hand every task that sleeps long
 	 * enough the full credit, no matter whether it had earned it.
 	 */
-	limit = scale_by_task_weight_inverse(p, slice_lag);
+	limit = scale_by_dl_weight(p, slice_lag);
 	lag = (s64)(vtime_now - tctx->vruntime);
 	if (lag > limit)
 		lag = limit;
@@ -1717,7 +1850,8 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the used time slice.
 	 */
-	slice = bpf_ktime_get_ns() - tctx->last_run_at;
+	tctx->last_stop_at = bpf_ktime_get_ns();
+	slice = tctx->last_stop_at - tctx->last_run_at;
 
 	/*
 	 * Scale used time slice by CPU capacity: time spent on slower CPU
@@ -1907,34 +2041,27 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 	bpf_for(cpu, 0, MAX_NODES)
 		node_empty_ts[cpu] = now;
 
-	/*
-	 * Create separate per-node DSQs if NUMA optimization is enabled,
-	 * otherwise use a single shared DSQ.
-	 */
 	if (numa_enabled) {
 		int node;
 
-		bpf_for(node, 0, nr_node_ids) {
-			/*
-			 * Skip per-node DSQ creation for nodes that failed to
-			 * initialize, including CPU-less NUMA nodes (e.g.,
-			 * GPU-memory or CXL-memory nodes): with no CPU to
-			 * consume from it, the DSQ would never be used.
-			 */
-			err = init_node(node);
-			if (err)
-				continue;
+		/*
+		 * Nodes that fail to initialize, including CPU-less NUMA
+		 * nodes (e.g., GPU-memory or CXL-memory nodes), are simply
+		 * skipped.
+		 */
+		bpf_for(node, 0, nr_node_ids)
+			init_node(node);
+	}
 
-			err = scx_bpf_create_dsq(node, node);
-			if (err) {
-				scx_bpf_error("failed to create node DSQ %d: %d", node, err);
-				return err;
-			}
-		}
-	} else {
-		err = scx_bpf_create_dsq(SHARED_DSQ, -1);
+	/*
+	 * Create the per-CPU DSQs.
+	 */
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		int node = numa_enabled ? cpu_node(cpu) : -1;
+
+		err = scx_bpf_create_dsq(cpu_dsq(cpu), node < 0 ? -1 : node);
 		if (err) {
-			scx_bpf_error("failed to create shared DSQ: %d", err);
+			scx_bpf_error("failed to create DSQ for CPU %d: %d", cpu, err);
 			return err;
 		}
 	}
