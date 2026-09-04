@@ -799,8 +799,20 @@ static bool is_smt_contended(s32 cpu)
 {
 	const struct cpumask *idle_mask;
 	bool is_contended;
+	s32 sibling;
 
 	if (!smt_enabled)
+		return false;
+
+	/*
+	 * A CPU without an SMT sibling (e.g. an E-core on a hybrid part)
+	 * has nothing to be contended by. Its sibling mask is empty, so
+	 * smt_sibling() returns an out-of-range CPU that never tests idle,
+	 * which would otherwise report the CPU as contended whenever any
+	 * other CPU in the system is idle.
+	 */
+	sibling = smt_sibling(cpu);
+	if (sibling == cpu || sibling < 0 || sibling >= nr_cpu_ids)
 		return false;
 
 	/*
@@ -808,7 +820,7 @@ static bool is_smt_contended(s32 cpu)
 	 * SMT cores available, consider the current CPU as contended.
 	 */
 	idle_mask = get_idle_cpumask(cpu);
-	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
+	is_contended = !bpf_cpumask_test_cpu(sibling, idle_mask) &&
 		       !bpf_cpumask_empty(idle_mask);
 	scx_bpf_put_cpumask(idle_mask);
 
