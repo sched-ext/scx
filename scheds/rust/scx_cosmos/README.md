@@ -11,10 +11,16 @@ on the same CPU using local DSQs. This not only maintains locality but also
 reduces locking contention compared to shared DSQs, enabling good
 scalability across many CPUs.
 
-Under saturation, the scheduler switches to a deadline-based policy and
-uses a shared DSQ (or per-node DSQs if NUMA optimizations are enabled).
-This increases task migration across CPUs and boosts the chances for
-interactive tasks to run promptly over the CPU-intensive ones.
+Under saturation, tasks are queued on a per-CPU DSQ ordered by an EEVDF
+virtual deadline computed against a single system-wide vruntime reference,
+so that the queues of different CPUs remain comparable. A CPU that runs out
+of work pulls from the other queues of its node, which keeps the CPUs busy
+without putting a shared lock in the path of every wakeup.
+
+On systems with CPUs of different capacity (e.g. P-cores and E-cores),
+idle CPUs are handed out in capacity order and idle faster CPUs pull work
+from the slower ones, so that tasks gravitate toward the fastest cores and
+the slower ones are used only while the faster ones are busy.
 
 To further improve responsiveness, the scheduler batches and defers CPU
 wakeups using a timer. This reduces the task enqueue overhead and allows

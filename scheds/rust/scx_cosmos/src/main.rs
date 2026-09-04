@@ -38,7 +38,6 @@ use nvml_wrapper::Nvml;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
-use scx_utils::get_primary_cpus;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::perf::parse_perf_event;
 use scx_utils::perf::setup_perf_events;
@@ -50,7 +49,6 @@ use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::GpuIndex;
-use scx_utils::Powermode;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
@@ -98,11 +96,12 @@ struct Opts {
     /// on their CPU / local dispatch queue, reducing the scheduling overhead and the balancing
     /// pressure in dispatch.
     ///
-    /// When a CPU crosses this threshold, the scheduler switches it from using its per-CPU
-    /// round-robin dispatch queue (which favors locality and reduced locking contention) to the
-    /// global deadline-based dispatch queue (which improves load balancing).
+    /// When a CPU crosses this threshold, the scheduler switches it from using its local
+    /// round-robin dispatch queue (which favors locality and reduced locking contention) to its
+    /// deadline-ordered dispatch queue, from which the other CPUs can pull (which improves load
+    /// balancing).
     ///
-    /// The global dispatch queue can increase task migrations and improve responsiveness for
+    /// The deadline-ordered queues can increase task migrations and improve responsiveness for
     /// interactive tasks under heavy load. Lower values make the scheduler switch to deadline
     /// mode sooner, improving overall responsiveness at the cost of reducing single-task
     /// performance due to the additional migrations. Higher values makes task more "sticky" to
@@ -124,33 +123,6 @@ struct Opts {
     /// 0 = disabled.
     #[clap(short = 'p', long, default_value = "0")]
     polling_ms: u64,
-
-    /// Specifies a list of CPUs to prioritize.
-    ///
-    /// Accepts a comma-separated list of CPUs or ranges (i.e., 0-3,12-15) or the following special
-    /// keywords:
-    ///
-    /// "turbo" = automatically detect and prioritize the CPUs with the highest max frequency,
-    /// "performance" = automatically detect and prioritize the fastest CPUs,
-    /// "powersave" = automatically detect and prioritize the slowest CPUs,
-    /// "all" = all CPUs assigned to the primary domain.
-    ///
-    /// By default "all" CPUs are used.
-    #[clap(short = 'm', long)]
-    primary_domain: Option<String>,
-
-    /// Maximum time (us) that tasks can wait in a shared DSQ before the primary domain is
-    /// considered overloaded, allowing tasks to spill to the non-primary CPUs.
-    ///
-    /// Tasks are normally contained in the primary domain (option -m). When the domain's shared
-    /// DSQ has been continuously backlogged for longer than this threshold, tasks are allowed to
-    /// run on the non-primary CPUs until the backlog drains.
-    ///
-    /// 0 = tasks are always contained in the primary domain, even when it is overloaded.
-    ///
-    /// This option is ignored when no primary domain is defined.
-    #[clap(long, default_value = "1000")]
-    primary_overload_us: u64,
 
     /// Hardware perf event to monitor (0x0 = disabled). Accepts hex (0xN) or symbolic names
     /// (e.g. cache-misses, LLC-load-misses, page-faults, branch-misses).
@@ -196,17 +168,7 @@ struct Opts {
     #[arg(short = 'i', long, action = clap::ArgAction::SetTrue)]
     flat_idle_scan: bool,
 
-    /// Enable preferred idle CPU scanning.
-    ///
-    /// With this option enabled, the scheduler will prioritize assigning tasks to higher-ranked
-    /// cores before considering lower-ranked ones.
-    #[clap(short = 'P', long, action = clap::ArgAction::SetTrue)]
-    preferred_idle_scan: bool,
-
     /// Disable SMT.
-    ///
-    /// This option can only be used together with --flat-idle-scan or --preferred-idle-scan,
-    /// otherwise it is ignored.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
@@ -275,77 +237,6 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
-}
-
-pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
-    let mut cpus = Vec::new();
-    let mut seen = HashSet::new();
-
-    // Handle special keywords
-    if let Some(mode) = match optarg {
-        "powersave" => Some(Powermode::Powersave),
-        "performance" => Some(Powermode::Performance),
-        "turbo" => Some(Powermode::Turbo),
-        "all" => Some(Powermode::Any),
-        _ => None,
-    } {
-        return get_primary_cpus(mode).map_err(|e| e.to_string());
-    }
-
-    // Validate input characters
-    if optarg
-        .chars()
-        .any(|c| !c.is_ascii_digit() && c != '-' && c != ',' && !c.is_whitespace())
-    {
-        return Err("Invalid character in CPU list".to_string());
-    }
-
-    // Replace all whitespace with tab (or just trim later)
-    let cleaned = optarg.replace(' ', "\t");
-
-    for token in cleaned.split(',') {
-        let token = token.trim_matches(|c: char| c.is_whitespace());
-
-        if token.is_empty() {
-            continue;
-        }
-
-        if let Some((start_str, end_str)) = token.split_once('-') {
-            let start = start_str
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| "Invalid range start")?;
-            let end = end_str
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| "Invalid range end")?;
-
-            if start > end {
-                return Err(format!("Invalid CPU range: {}-{}", start, end));
-            }
-
-            for i in start..=end {
-                if cpus.len() >= *NR_CPU_IDS {
-                    return Err(format!("Too many CPUs specified (max {})", *NR_CPU_IDS));
-                }
-                if seen.insert(i) {
-                    cpus.push(i);
-                }
-            }
-        } else {
-            let cpu = token
-                .parse::<usize>()
-                .map_err(|_| format!("Invalid CPU: {}", token))?;
-            if cpus.len() >= *NR_CPU_IDS {
-                return Err(format!("Too many CPUs specified (max {})", *NR_CPU_IDS));
-            }
-            if seen.insert(cpu) {
-                cpus.push(cpu);
-            }
-        }
-    }
-
-    Ok(cpus)
 }
 
 /// Initial value for the dynamic threshold (in BPF units).
@@ -628,9 +519,6 @@ impl<'a> Scheduler<'a> {
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
 
-        // Maximum shared DSQ backlog before spilling outside the primary domain.
-        rodata.overload_thresh_ns = opts.primary_overload_us * 1000;
-
         // Generate the list of available CPUs sorted by capacity in descending order.
         let mut cpus: Vec<_> = topo.all_cpus.values().collect();
         cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
@@ -642,28 +530,11 @@ impl<'a> Scheduler<'a> {
             rodata.preferred_cpus[i] = cpu.id as u64;
         }
         rodata.all_cpus_same_capacity = cpus.iter().all(|cpu| cpu.cpu_capacity == max_cap);
-        if opts.preferred_idle_scan {
+        if !rodata.all_cpus_same_capacity {
             info!(
-                "Preferred CPUs: {:?}",
+                "CPUs by capacity: {:?}",
                 &rodata.preferred_cpus[0..cpus.len()]
             );
-        }
-        rodata.preferred_idle_scan = opts.preferred_idle_scan;
-
-        // Define the primary scheduling domain.
-        let primary_cpus = if let Some(ref domain) = opts.primary_domain {
-            match parse_cpu_list(domain) {
-                Ok(cpus) => cpus,
-                Err(e) => bail!("Error parsing primary domain: {}", e),
-            }
-        } else {
-            (0..*NR_CPU_IDS).collect()
-        };
-        if primary_cpus.len() < *NR_CPU_IDS {
-            info!("Primary CPUs: {:?}", primary_cpus);
-            rodata.primary_all = false;
-        } else {
-            rodata.primary_all = true;
         }
 
         // Enable GPU support and build GPU index -> node for NVML PID sync. Init NVML once here
@@ -826,15 +697,6 @@ impl<'a> Scheduler<'a> {
                     &(gpu.node_id as u32).to_ne_bytes(),
                     MapFlags::ANY,
                 )?;
-            }
-        }
-
-        // Enable primary scheduling domain, if defined.
-        if primary_cpus.len() < *NR_CPU_IDS {
-            for cpu in primary_cpus {
-                if let Err(err) = Self::enable_primary_cpu(&mut skel, cpu as i32) {
-                    bail!("failed to add CPU {} to primary domain: error {}", cpu, err);
-                }
             }
         }
 
@@ -1052,28 +914,6 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn enable_primary_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_primary_cpu;
-        let mut args = cpu_arg {
-            cpu_id: cpu as c_int,
-        };
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let out = prog.test_run(input).unwrap();
-        if out.return_value != 0 {
-            return Err(out.return_value);
-        }
-
-        Ok(())
-    }
-
     fn enable_sibling_cpu(
         skel: &mut BpfSkel<'_>,
         cpu: usize,
@@ -1118,7 +958,6 @@ impl<'a> Scheduler<'a> {
             nr_event_dispatches: bss_data.nr_event_dispatches,
             nr_ev_sticky_dispatches: bss_data.nr_ev_sticky_dispatches,
             nr_gpu_dispatches: bss_data.nr_gpu_dispatches,
-            nr_overload_events: bss_data.nr_overload_events,
         }
     }
 

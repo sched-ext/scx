@@ -44,24 +44,6 @@ char _license[] SEC("license") = "GPL";
 #define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
 
 /*
- * Subset of CPUs to prioritize.
- */
-private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
-
-/*
- * Complement of @primary_cpumask (only initialized when a primary domain
- * is defined): CPUs that can be used only when the primary domain is
- * overloaded.
- */
-private(COSMOS) struct bpf_cpumask __kptr *nonprimary_cpumask;
-
-/*
- * Set to true when @primary_cpumask is empty (primary domain includes all
- * the CPU).
- */
-const volatile bool primary_all = true;
-
-/*
  * Enable flat iteration to find idle CPUs (fast but inaccurate).
  */
 const volatile bool flat_idle_scan = false;
@@ -72,12 +54,15 @@ const volatile bool flat_idle_scan = false;
 const volatile bool smt_enabled = true;
 
 /*
- * Enable preferred cores prioritization.
- */
-const volatile bool preferred_idle_scan = false;
-
-/*
- * CPUs sorted by their capacity in descendent order.
+ * CPUs sorted by their capacity in descending order.
+ *
+ * On a system with CPUs of different capacity (e.g. P-cores and E-cores)
+ * this is the order idle CPUs are handed out in, see
+ * pick_idle_cpu_ranked(): a task lands on the fastest idle CPU, and the
+ * slower ones are used only while all the faster ones are busy. There is
+ * no domain and no threshold; the ordering is the whole policy, the way
+ * fair.c steers tasks by picking the first idle CPU it finds and leaving
+ * them where they are.
  */
 const volatile u64 preferred_cpus[MAX_CPUS];
 
@@ -170,21 +155,12 @@ const volatile u64 slice_lag = 20000000ULL;
 const volatile u64 busy_threshold;
 
 /*
- * Maximum time (ns) that tasks are allowed to wait in a shared DSQ before
- * the primary domain is considered overloaded, allowing tasks to spill to
- * the non-primary CPUs (0 = tasks are always contained in the primary
- * domain).
- */
-const volatile u64 overload_thresh_ns;
-
-/*
  * Scheduler statistics.
  */
 volatile u64 nr_event_dispatches;
 volatile u64 nr_ev_sticky_dispatches;
 volatile u64 nr_gpu_dispatches;
 volatile u64 nr_steals;
-volatile u64 nr_overload_events;
 
 /*
  * Scheduler's exit status.
@@ -490,108 +466,6 @@ static inline u64 cpu_dsq(s32 cpu)
 }
 
 /*
- * Primary domain overload detection.
- *
- * When a primary domain is defined, tasks are contained in it and are not
- * allowed to spill to the non-primary CPUs, unless the primary domain is
- * overloaded.
- *
- * Instantaneous saturation (no idle primary CPU at a given moment) is not
- * a reliable overload signal: bursty workloads can saturate the domain for
- * microseconds at a time (e.g., barrier wakeups) and spilling in response
- * to such transients just moves work to worse CPUs (typically the SMT
- * siblings of the primary CPUs).
- *
- * Overload is instead defined in terms of sustained queueing delay, per
- * NUMA node: @node_empty_ts tracks the last time the node's shared DSQ was
- * observed empty from ops.dispatch(), so a shared DSQ that has been
- * continuously backlogged for longer than @overload_thresh_ns means the
- * primary domain can't keep up and waiting is costing more than running on
- * a non-primary CPU.
- *
- * When that happens the node is marked overloaded for a short decay window
- * (@overload_until): spilling is allowed while the window keeps being
- * renewed by backlogged enqueues and stops automatically once the backlog
- * drains, without the ping-pong that an instantaneous threshold would
- * cause.
- */
-#define OVERLOAD_WINDOW_NS	(25ULL * NSEC_PER_MSEC)
-
-static u64 node_empty_ts[MAX_NODES];
-static u64 overload_until[MAX_NODES];
-
-/*
- * Return true if the primary domain is overloaded on @node, false
- * otherwise.
- */
-static bool is_primary_overloaded(int node)
-{
-	if (primary_all || !overload_thresh_ns)
-		return false;
-
-	if (node < 0 || node >= MAX_NODES)
-		return false;
-
-	return time_before(bpf_ktime_get_ns(), overload_until[node]);
-}
-
-/*
- * Wake up an idle non-primary CPU (close to @from_cpu) to start draining
- * the shared DSQ.
- */
-static void kick_idle_nonprimary(s32 from_cpu)
-{
-	const struct cpumask *nonpri = cast_mask(nonprimary_cpumask);
-	s32 cpu;
-
-	if (!nonpri)
-		return;
-
-	if (numa_enabled)
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(nonpri,
-					__COMPAT_scx_bpf_cpu_node(from_cpu), 0);
-	else
-		cpu = scx_bpf_pick_idle_cpu(nonpri, 0);
-
-	if (cpu >= 0)
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-}
-
-/*
- * Update the overload state of @node after inserting a task into its
- * shared DSQ from @cpu.
- */
-static void update_primary_overload(s32 cpu, int node)
-{
-	u64 now;
-
-	if (primary_all || !overload_thresh_ns)
-		return;
-
-	if (node < 0 || node >= MAX_NODES)
-		return;
-
-	/*
-	 * The shared DSQ has been empty recently: the primary domain is
-	 * keeping up with the load.
-	 */
-	now = bpf_ktime_get_ns();
-	if (time_delta(now, node_empty_ts[node]) < overload_thresh_ns)
-		return;
-
-	if (!is_primary_overloaded(node))
-		__sync_fetch_and_add(&nr_overload_events, 1);
-	overload_until[node] = now + OVERLOAD_WINDOW_NS;
-
-	/*
-	 * Idle non-primary CPUs are never picked and never kicked during
-	 * normal operation, so nothing would drain the backlog without an
-	 * explicit wakeup.
-	 */
-	kick_idle_nonprimary(cpu);
-}
-
-/*
  * Return true if task @p can run on NUMA node @node, false otherwise.
  */
 static bool can_use_node(const struct task_struct *p, int node)
@@ -798,45 +672,6 @@ static inline const struct cpumask *get_idle_smtmask(s32 cpu)
 }
 
 /*
- * Return true if the CPU is part of a fully busy SMT core, false
- * otherwise.
- *
- * If SMT is disabled or SMT contention avoidance is disabled, always
- * return false (since there's no SMT contention or it's ignored).
- */
-static bool is_smt_contended(s32 cpu)
-{
-	const struct cpumask *idle_mask;
-	bool is_contended;
-	s32 sibling;
-
-	if (!smt_enabled)
-		return false;
-
-	/*
-	 * A CPU without an SMT sibling (e.g. an E-core on a hybrid part)
-	 * has nothing to be contended by. Its sibling mask is empty, so
-	 * smt_sibling() returns an out-of-range CPU that never tests idle,
-	 * which would otherwise report the CPU as contended whenever any
-	 * other CPU in the system is idle.
-	 */
-	sibling = smt_sibling(cpu);
-	if (sibling == cpu || sibling < 0 || sibling >= nr_cpu_ids)
-		return false;
-
-	/*
-	 * If the sibling SMT CPU is not idle and there are other full-idle
-	 * SMT cores available, consider the current CPU as contended.
-	 */
-	idle_mask = get_idle_cpumask(cpu);
-	is_contended = !bpf_cpumask_test_cpu(sibling, idle_mask) &&
-		       !bpf_cpumask_empty(idle_mask);
-	scx_bpf_put_cpumask(idle_mask);
-
-	return is_contended;
-}
-
-/*
  * Return true if @cpu is valid, otherwise trigger an error and return
  * false.
  */
@@ -852,44 +687,85 @@ static inline bool is_cpu_valid(s32 cpu)
 }
 
 /*
- * Return true if @this_cpu and @that_cpu are in the same LLC, false
+ * Return the capacity of @cpu, 0 if @cpu is not a valid CPU. The bounds
+ * check is kept in the caller's sight for the verifier.
+ */
+static __always_inline u64 cpu_cap(s32 cpu)
+{
+	u32 idx = cpu;
+
+	if (idx >= MAX_CPUS)
+		return 0;
+
+	return cpu_capacity[idx];
+}
+
+/*
+ * Return true if the CPU is part of a fully busy SMT core, false
  * otherwise.
+ *
+ * If SMT is disabled or SMT contention avoidance is disabled, always
+ * return false (since there's no SMT contention or it's ignored).
  */
-static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
+static bool is_smt_contended(s32 cpu)
 {
-	if (this_cpu == that_cpu)
-		return true;
+	const struct cpumask *idle_smt, *idle_mask;
+	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), cap;
+	bool is_contended = false;
+	s32 sibling;
+	int i;
 
-	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
+	if (!smt_enabled)
 		return false;
 
-	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
-}
-/*
- * Return true if @this_cpu is faster than @that_cpu, false otherwise.
- */
-static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
-{
-	if (all_cpus_same_capacity || this_cpu == that_cpu)
+	/*
+	 * A CPU without an SMT sibling (e.g. an E-core on a hybrid part)
+	 * has nothing to be contended by. Its sibling mask is empty, so
+	 * smt_sibling() returns an out-of-range CPU that never tests idle,
+	 * which would otherwise report the CPU as contended whenever any
+	 * other CPU in the system is idle.
+	 */
+	sibling = smt_sibling(cpu);
+	if (sibling == cpu || sibling < 0 || sibling >= nr_cpu_ids)
 		return false;
 
-	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
+	idle_mask = get_idle_cpumask(cpu);
+	if (bpf_cpumask_test_cpu(sibling, idle_mask)) {
+		scx_bpf_put_cpumask(idle_mask);
 		return false;
+	}
+	scx_bpf_put_cpumask(idle_mask);
 
-	return cpu_capacity[this_cpu] > cpu_capacity[that_cpu];
-}
+	/*
+	 * The sibling is busy: the CPU is contended if there is a fully idle
+	 * core the task could move to without losing capacity. A slower core
+	 * does not count: a P-core thread sharing its core still beats an
+	 * E-core, and moving down for a busy sibling is how a hog would end
+	 * up parked on an E-core for good.
+	 */
+	idle_smt = get_idle_smtmask(cpu);
+	if (all_cpus_same_capacity) {
+		is_contended = !bpf_cpumask_empty(idle_smt);
+		goto out;
+	}
 
-/*
- * Return true if @cpu is in the primary domain, false otherwise.
- */
-static inline bool is_primary_cpu(s32 cpu)
-{
-	const struct cpumask *mask = cast_mask(primary_cpumask);
+	cap = cpu_cap(cpu);
+	bpf_for(i, 0, max_cpus) {
+		s32 other = preferred_cpus[i];
 
-	if (primary_all)
-		return true;
+		if (cpu_cap(other) < cap)
+			break;
+		if (other == cpu || other == sibling)
+			continue;
+		if (bpf_cpumask_test_cpu(other, idle_smt)) {
+			is_contended = true;
+			break;
+		}
+	}
+out:
+	scx_bpf_put_cpumask(idle_smt);
 
-	return mask && bpf_cpumask_test_cpu(cpu, mask);
+	return is_contended;
 }
 
 static inline bool is_cpu_idle(s32 cpu)
@@ -914,41 +790,36 @@ static inline bool test_cpu_idle(s32 cpu)
 }
 
 /*
- * Try to pick the best idle CPU based on the @preferred_cpus ranking.
- * Return a full-idle SMT core if @do_idle_smt is true, or any idle CPU if
- * @do_idle_smt is false.
+ * Pick an idle CPU for @p scanning the CPUs in rotation, so that the load
+ * spreads evenly on a system where all CPUs are equal. Consider only
+ * fully idle cores if @smt is set, any idle CPU otherwise.
  */
-static s32 pick_idle_cpu_pref_smt(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
-				  const struct cpumask *primary, const struct cpumask *smt)
+static __always_inline s32
+pick_idle_cpu_rotating(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
+				  const struct cpumask *idle, const struct cpumask *smt)
 {
 	static u32 last_cpu;
 	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS);
 	int i, start;
 
 	if (is_prev_allowed &&
-	    (!primary || bpf_cpumask_test_cpu(prev_cpu, primary)) &&
-	    (!smt || bpf_cpumask_test_cpu(prev_cpu, smt)) &&
-	    test_cpu_idle(prev_cpu))
+	    bpf_cpumask_test_cpu(prev_cpu, smt ?: idle) && test_cpu_idle(prev_cpu))
 		return prev_cpu;
 
 	start = last_cpu;
 	bpf_for(i, 0, max_cpus) {
-		/*
-		 * If @preferred_idle_scan is true, always scan the CPUs in
-		 * the preferred order, otherwise rotate the CPUs to
-		 * distribute the load more evenly.
-		 */
-		s32 cpu = preferred_idle_scan ?
-				preferred_cpus[i] : (start + i) % max_cpus;
+		s32 cpu = (start + i) % max_cpus;
 
 		if ((cpu == prev_cpu) || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
-		if ((!primary || bpf_cpumask_test_cpu(cpu, primary)) &&
-		    (!smt || bpf_cpumask_test_cpu(cpu, smt)) &&
-		    test_cpu_idle(cpu)) {
-			if (!preferred_idle_scan)
-				last_cpu = cpu + 1;
+		/*
+		 * Read the idle state first and claim it only for the CPU
+		 * that is going to be used: test_cpu_idle() is an atomic
+		 * write to a shared mask.
+		 */
+		if (bpf_cpumask_test_cpu(cpu, smt ?: idle) && test_cpu_idle(cpu)) {
+			last_cpu = cpu + 1;
 			return cpu;
 		}
 	}
@@ -957,134 +828,129 @@ static s32 pick_idle_cpu_pref_smt(struct task_struct *p, s32 prev_cpu, bool is_p
 }
 
 /*
- * Return the optimal idle CPU for task @p or -EBUSY if no idle CPU is
- * found.
+ * Pick an idle CPU for @p in @preferred_cpus order (capacity descending),
+ * ignoring the CPUs slower than @min_cap. Consider only fully idle cores if
+ * @smt is set, any idle CPU otherwise.
+ *
+ * Among CPUs of the same capacity @prev_cpu comes first, to keep the task
+ * where its cache is; a faster idle CPU wins over it.
  */
-static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
+static __always_inline s32
+pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
+				const struct cpumask *idle, const struct cpumask *smt,
+				u64 min_cap)
 {
-	const struct cpumask *smt, *primary;
-	bool is_prev_allowed = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
-	s32 cpu;
+	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), prev_cap = 0;
+	bool prev_tried = false;
+	int i;
 
-	primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
-	smt = smt_enabled ? get_idle_smtmask(prev_cpu) : NULL;
+	if (is_prev_allowed)
+		prev_cap = cpu_cap(prev_cpu);
+	else
+		prev_tried = true;
+
+	bpf_for(i, 0, max_cpus) {
+		s32 cpu = preferred_cpus[i];
+		u64 cap;
+
+		cap = cpu_cap(cpu);
+		if (cap < min_cap)
+			break;
+
+		if (!prev_tried && cap <= prev_cap) {
+			prev_tried = true;
+			if (bpf_cpumask_test_cpu(prev_cpu, smt ?: idle) &&
+			    test_cpu_idle(prev_cpu))
+				return prev_cpu;
+		}
+
+		if (cpu == prev_cpu || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+
+		/*
+		 * Read the idle state first and claim it only for the CPU
+		 * that is going to be used: test_cpu_idle() is an atomic
+		 * write to a shared mask.
+		 */
+		if (bpf_cpumask_test_cpu(cpu, smt ?: idle) && test_cpu_idle(cpu))
+			return cpu;
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * Scan for an idle CPU: fully idle cores first, then any idle CPU, in
+ * @preferred_cpus order when the CPUs differ in capacity, in rotation
+ * otherwise. CPUs slower than @min_cap are never considered.
+ *
+ * Return the CPU id or -EBUSY if no idle CPU is found.
+ */
+static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu, u64 min_cap)
+{
+	const struct cpumask *idle, *smt;
+	bool is_prev_allowed = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
+	bool ranked = !all_cpus_same_capacity;
+	s32 cpu = -EBUSY;
 
 	/*
 	 * If the task can't migrate, there's no point looking for other
 	 * CPUs.
 	 */
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
-		if (test_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			goto out;
-		}
-	}
+	if (is_pcpu_task(p))
+		return test_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
 
-	if (!primary_all) {
-		if (smt_enabled) {
-			/*
-			 * Try to pick a full-idle core in the primary
-			 * domain.
-			 */
-			cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, primary, smt);
-			if (cpu >= 0)
-				goto out;
-		}
+	idle = get_idle_cpumask(prev_cpu);
+	if (bpf_cpumask_empty(idle))
+		goto out_idle;
 
-		/*
-		 * Try to pick any idle CPU in the primary domain.
-		 */
-		cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, primary, NULL);
+	smt = smt_enabled ? get_idle_smtmask(prev_cpu) : NULL;
+	if (smt) {
+		cpu = ranked ? pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, idle, smt, min_cap) :
+			       pick_idle_cpu_rotating(p, prev_cpu, is_prev_allowed, idle, smt);
 		if (cpu >= 0)
-			goto out;
-
-		/*
-		 * Contain the task in the primary domain, unless the
-		 * domain is overloaded.
-		 */
-		if (primary && bpf_cpumask_intersects(p->cpus_ptr, primary) &&
-		    !is_primary_overloaded(cpu_node(prev_cpu))) {
-			cpu = -EBUSY;
-			goto out;
-		}
+			goto out_smt;
 	}
-
-	if (smt_enabled) {
-		/*
-		 * Try to pick any full-idle core in the system.
-		 */
-		cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, NULL, smt);
-		if (cpu >= 0)
-			goto out;
-	}
-
-	/*
-	 * Try to pick any idle CPU in the system.
-	 */
-	cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, NULL, NULL);
-
-out:
+	cpu = ranked ? pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, idle, NULL, min_cap) :
+		       pick_idle_cpu_rotating(p, prev_cpu, is_prev_allowed, idle, NULL);
+out_smt:
 	if (smt)
 		scx_bpf_put_cpumask(smt);
+out_idle:
+	scx_bpf_put_cpumask(idle);
 
 	return cpu;
 }
 
 /*
- * Return true in case of a task wakeup, false otherwise.
- */
-static inline bool is_wakeup(u64 wake_flags)
-{
-	return wake_flags & SCX_WAKE_TTWU;
-}
-
-/*
- * Pick an optimal idle CPU for task @p (as close as possible to
- * @prev_cpu).
+ * Pick an idle CPU for task @p, as close as possible to @prev_cpu, never
+ * slower than @min_cap.
  *
  * Return the CPU id or a negative value if an idle CPU can't be found.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
-			 u64 wake_flags, bool from_enqueue)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
+			 bool from_enqueue, u64 min_cap)
 {
-	const struct cpumask *mask = cast_mask(primary_cpumask);
-	s32 cpu;
+	/*
+	 * CPUs of different capacity are handed out in capacity order, which
+	 * the kernel's idle CPU selection knows nothing about.
+	 */
+	if (!all_cpus_same_capacity)
+		return pick_idle_cpu_scan(p, prev_cpu, min_cap);
 
 	/*
-	 * Use lightweight idle CPU scanning when flat or preferred idle
-	 * scan is enabled, unless the system is busy, in which case the
-	 * cpumask-based scanning is more efficient.
+	 * Use lightweight idle CPU scanning when flat idle scan is enabled,
+	 * unless the system is busy, in which case the cpumask-based
+	 * scanning is more efficient.
 	 */
-	if ((flat_idle_scan || preferred_idle_scan) && !is_cpu_busy(prev_cpu))
-		return pick_idle_cpu_flat(p, prev_cpu);
+	if (flat_idle_scan && !is_cpu_busy(prev_cpu))
+		return pick_idle_cpu_scan(p, prev_cpu, 0);
 
 	/*
 	 * Clear the wake sync bit if synchronous wakeups are disabled.
 	 */
 	if (no_wake_sync)
 		wake_flags &= ~SCX_WAKE_SYNC;
-
-	/*
-	 * On wakeup if the waker's CPU is faster than the wakee's CPU, try
-	 * to move the wakee closer to the waker.
-	 *
-	 * In presence of hybrid cores this helps to naturally migrate
-	 * tasks over to the faster cores.
-	 */
-	if (primary_all && is_wakeup(wake_flags) && this_cpu >= 0 &&
-	    is_cpu_faster(this_cpu, prev_cpu)) {
-		/*
-		 * If both the waker's CPU and the wakee's CPU are in the
-		 * same LLC and the wakee's CPU is a fully idle SMT core,
-		 * don't migrate.
-		 */
-		if (cpus_share_cache(this_cpu, prev_cpu) &&
-		    !is_smt_contended(prev_cpu) &&
-		    test_cpu_idle(prev_cpu))
-			return prev_cpu;
-
-		prev_cpu = this_cpu;
-	}
 
 	/*
 	 * Fallback to the old API if the kernel doesn't support
@@ -1094,6 +960,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 	 */
 	if (!__COMPAT_HAS_scx_bpf_select_cpu_and) {
 		bool is_idle = false;
+		s32 cpu;
 
 		if (from_enqueue)
 			return -EBUSY;
@@ -1103,27 +970,45 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 		return is_idle ? cpu : -EBUSY;
 	}
 
-	/*
-	 * If a primary domain is defined, try to pick an idle CPU from there
-	 * first.
-	 */
-	if (!primary_all && mask && bpf_cpumask_intersects(p->cpus_ptr, mask)) {
-		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask, 0);
-		if (cpu >= 0)
-			return cpu;
-
-		/*
-		 * Contain the task in the primary domain, unless the
-		 * domain is overloaded.
-		 */
-		if (!is_primary_overloaded(cpu_node(prev_cpu)))
-			return -EBUSY;
-	}
-
-	/*
-	 * Pick any idle CPU usable by the task.
-	 */
 	return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
+}
+
+/*
+ * Return an idle CPU faster than @cpu whose whole core is idle, or
+ * -ENOENT. The idle state is not claimed: the caller is expected to kick
+ * it.
+ */
+static s32 idle_faster_cpu(s32 cpu)
+{
+	const struct cpumask *idle_mask;
+	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), cap;
+	s32 found = -ENOENT;
+	int i;
+
+	if (all_cpus_same_capacity)
+		return -ENOENT;
+
+	/*
+	 * Only a fully idle faster core counts: pulling a task from a whole
+	 * slow core onto a fast thread whose sibling is busy trades the
+	 * capacity for a shared core, which is what asym_smt_can_pull_tasks()
+	 * refuses to do.
+	 */
+	cap = cpu_cap(cpu);
+	idle_mask = smt_enabled ? get_idle_smtmask(cpu) : get_idle_cpumask(cpu);
+	bpf_for(i, 0, max_cpus) {
+		s32 other = preferred_cpus[i];
+
+		if (cpu_cap(other) <= cap)
+			break;
+		if (bpf_cpumask_test_cpu(other, idle_mask)) {
+			found = other;
+			break;
+		}
+	}
+	scx_bpf_put_cpumask(idle_mask);
+
+	return found;
 }
 
 /*
@@ -1232,28 +1117,6 @@ int enable_sibling_cpu(struct domain_arg *input)
 	mask = *pmask;
 	if (mask)
 		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
-	bpf_rcu_read_unlock();
-
-	return err;
-}
-
-/*
- * Called from user-space to add CPUs to the the primary domain.
- */
-SEC("syscall")
-int enable_primary_cpu(struct cpu_arg *input)
-{
-	struct bpf_cpumask *mask;
-	int err = 0;
-
-	err = init_cpumask(&primary_cpumask);
-	if (err)
-		return err;
-
-	bpf_rcu_read_lock();
-	mask = primary_cpumask;
-	if (mask)
-		bpf_cpumask_set_cpu(input->cpu_id, mask);
 	bpf_rcu_read_unlock();
 
 	return err;
@@ -1379,8 +1242,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 * task to ops.enqueue(). Dispatching directly from here, even if
 	 * we can't find an idle CPU, allows to save some locking overhead.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
-			    wake_flags, false);
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, false, 0);
 	if (cpu >= 0 || !is_busy)
 		direct_dispatch_local(p, cpu >= 0 ? cpu : prev_cpu);
 
@@ -1458,9 +1320,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to immediately dispatch sticky event-heavy tasks to the
 	 * same CPU.
 	 */
-	if (is_sticky_event_heavy(tctx) &&
-	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p)) &&
-	    !is_smt_contended(prev_cpu)) {
+	if (is_sticky_event_heavy(tctx) && !is_smt_contended(prev_cpu)) {
 		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(prev_cpu));
 
 		/*
@@ -1492,15 +1352,19 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * bounces an IMMED task back through ops.enqueue() in that case)
 	 * and @prev_cpu is taken for an unknown amount of time, so an idle
 	 * CPU is the better option.
+	 *
+	 * A task that leaves for a contended sibling or for its perf events
+	 * may only go to a CPU at least as fast as the one it is on: a busy
+	 * sibling is not worth a slower core.
 	 */
 	if (task_should_migrate(p, enq_flags) ||
-	    (!is_cpu_idle(prev_cpu) && (!scx_bpf_task_running(p) || p->scx.slice)) ||
-	    (!is_pcpu_task(p) && is_smt_contended(prev_cpu)) ||
-	    (!is_pcpu_task(p) && (is_event_heavy(tctx) || !is_primary_cpu(prev_cpu)))) {
-		if (is_pcpu_task(p))
-			cpu = test_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
-		else
-			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
+	    (!is_cpu_idle(prev_cpu) && (!scx_bpf_task_running(p) || p->scx.slice)))
+		cpu = pick_idle_cpu(p, prev_cpu, 0, true, 0);
+	else if (!is_pcpu_task(p) && (is_smt_contended(prev_cpu) || is_event_heavy(tctx)))
+		cpu = pick_idle_cpu(p, prev_cpu, 0, true, cpu_cap(prev_cpu));
+	else
+		cpu = -EBUSY;
+	{
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
 					   slice_ns, enq_flags | SCX_ENQ_IMMED);
@@ -1513,8 +1377,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Keep using the same CPU if that CPU is not busy.
 	 */
-	if (!is_cpu_busy(prev_cpu) &&
-	    (is_primary_cpu(prev_cpu) || is_pcpu_task(p))) {
+	if (!is_cpu_busy(prev_cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_ns, enq_flags);
 		return;
 	}
@@ -1532,10 +1395,14 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 
 	/*
-	 * Detect a sustained backlog on the node and, in that case, allow
-	 * tasks to spill to the non-primary CPUs.
+	 * A faster CPU sitting idle would never look at this queue on its
+	 * own: wake it up so that it pulls the task, see try_steal_task().
 	 */
-	update_primary_overload(prev_cpu, node);
+	if (!is_pcpu_task(p)) {
+		cpu = idle_faster_cpu(prev_cpu);
+		if (cpu >= 0)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
 }
 
 /*
@@ -1544,8 +1411,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
  */
 static bool keep_running(const struct task_struct *p, s32 cpu)
 {
-	const struct cpumask *mask = cast_mask(primary_cpumask);
-
 	/*
 	 * Do not keep running if the task doesn't need to run.
 	 */
@@ -1564,14 +1429,6 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	 * migrate elsewhere.
 	 */
 	if (is_smt_contended(cpu))
-		return false;
-
-	/*
-	 * If the task is not in the primary domain, give it a chance to
-	 * migrate.
-	 */
-	if (!is_primary_cpu(cpu) &&
-	    mask && bpf_cpumask_intersects(p->cpus_ptr, mask))
 		return false;
 
 	return true;
@@ -1640,6 +1497,39 @@ static bool try_steal_task(s32 dst_cpu)
 	if (start >= nr_cpu_ids)
 		start = 0;
 
+	/*
+	 * A CPU with nothing to do looks at the slower CPUs first, and takes
+	 * their tasks hot or not: a task is better off on a faster core than
+	 * with a warm cache on a slow one. This is what pulls the load up the
+	 * capacity ladder, the way asym packing does.
+	 */
+	if (!own && !all_cpus_same_capacity) {
+		u64 dst_cap = cpu_cap(dst_cpu);
+
+		bpf_for(i, 0, nr_cpu_ids) {
+			struct task_struct *p;
+			u32 j = nr_cpu_ids - 1 - i;
+
+			if (j >= MAX_CPUS)
+				continue;
+			cpu = preferred_cpus[j];
+			if (cpu_cap(cpu) >= dst_cap)
+				break;
+			if (numa_enabled && cpu_node(cpu) != node)
+				continue;
+
+			p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(cpu));
+			if (!p || !bpf_cpumask_test_cpu(dst_cpu, p->cpus_ptr))
+				continue;
+
+			min_dl = p->scx.dsq_vtime;
+			min_cpu = cpu;
+			break;
+		}
+		if (min_cpu >= 0)
+			goto pick;
+	}
+
 	bpf_for(i, 0, limit) {
 		struct task_struct *p;
 
@@ -1678,6 +1568,7 @@ static bool try_steal_task(s32 dst_cpu)
 		    !time_before(min_dl + slice_ns, own->scx.dsq_vtime)))
 		min_cpu = dst_cpu;
 
+pick:
 	if (min_cpu < 0)
 		return false;
 
@@ -1700,21 +1591,8 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Nothing is waiting on this node (or nothing that can run here):
-	 * refresh the timestamp used to detect a sustained backlog on this
-	 * node.
-	 */
-	if (!primary_all && overload_thresh_ns) {
-		int node = cpu_node(cpu);
-
-		if (node >= 0 && node < MAX_NODES)
-			node_empty_ts[node] = bpf_ktime_get_ns();
-	}
-
-	/*
 	 * If the previous task expired its time slice, but no other task
-	 * wants to run on this CPU, give it another time slot if the CPU
-	 * is on the primary domain.
+	 * wants to run on this CPU, give it another time slot.
 	 */
 	if (prev && keep_running(prev, cpu))
 		scx_bpf_task_set_slice(prev, slice_ns);
@@ -1987,59 +1865,13 @@ out_unlock:
 	return has_cpus ? 0 : -ENODEV;
 }
 
-/*
- * Initialize @nonprimary_cpumask as the complement of the primary domain.
- */
-static int init_nonprimary_cpumask(void)
-{
-	const struct cpumask *primary;
-	struct bpf_cpumask *mask;
-	int err = 0, cpu;
-
-	err = init_cpumask(&nonprimary_cpumask);
-	if (err)
-		return err;
-
-	bpf_rcu_read_lock();
-	mask = nonprimary_cpumask;
-	primary = cast_mask(primary_cpumask);
-	if (!mask || !primary) {
-		err = -EINVAL;
-		goto out_unlock;
-	}
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (!bpf_cpumask_test_cpu(cpu, primary))
-			bpf_cpumask_set_cpu(cpu, mask);
-	}
-out_unlock:
-	bpf_rcu_read_unlock();
-
-	return err;
-}
-
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 {
-	u64 now = bpf_ktime_get_ns();
 	int err;
 	int cpu;
 	struct cpu_ctx *cctx;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
-
-	if (!primary_all) {
-		err = init_nonprimary_cpumask();
-		if (err) {
-			scx_bpf_error("failed to init non-primary cpumask: %d", err);
-			return err;
-		}
-	}
-
-	/*
-	 * Consider all the shared DSQs as just drained, so that the
-	 * overload detection starts from a clean state.
-	 */
-	bpf_for(cpu, 0, MAX_NODES)
-		node_empty_ts[cpu] = now;
 
 	if (numa_enabled) {
 		int node;
