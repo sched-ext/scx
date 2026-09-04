@@ -273,6 +273,16 @@ impl ArenaLib {
         Self::setup_arena(obj, task_size, task_align)?;
         Self::setup_topology(obj)?;
 
+        Self::start(obj)
+    }
+
+    /// Start the userspace services for BPF arena state initialized by the
+    /// caller. The returned ArenaLib must be kept alive for as long as the BPF
+    /// object uses the arena.
+    ///
+    /// Use this instead of setup() when a scheduler has its own BPF-side arena
+    /// initialization and does not use the generic arena topology.
+    pub fn start(obj: &Object) -> Result<ArenaLib> {
         Ok(ArenaLib {
             _watcher: crate::stream_watcher_spawn(obj)?,
             _urcu: crate::urcu_spawn(obj)?,

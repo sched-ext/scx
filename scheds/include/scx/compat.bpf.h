@@ -143,6 +143,48 @@ static inline void scx_bpf_cid_override(const s32 __arena *cpu_to_cid, u32 cpu_t
 					      shard_start, shard_start_cnt);
 }
 
+/*
+ * v7.3: b38332be61a8 ("sched_ext: Make scx_bpf_kick_cid() return void") flipped
+ * the return type from s32 to void without renaming the kfunc, so the v7.2 and
+ * v7.3 kfuncs share a name but have incompatible prototypes. libbpf leaves a
+ * weak kfunc unresolved when the prototype doesn't match, so declare both
+ * flavors: the ___vN suffix is stripped on the BPF side, both resolve against
+ * the same kernel symbol and only the matching one gets bound. Drop the
+ * wrapper and move the decl back to common.bpf.h after v7.6.
+ */
+void scx_bpf_kick_cid___v2(s32 cid, u64 flags) __ksym __weak;
+s32 scx_bpf_kick_cid___v1(s32 cid, u64 flags) __ksym __weak;
+
+static inline void scx_bpf_kick_cid(s32 cid, u64 flags)
+{
+	if (bpf_ksym_exists(scx_bpf_kick_cid___v2))
+		scx_bpf_kick_cid___v2(cid, flags);
+	else if (bpf_ksym_exists(scx_bpf_kick_cid___v1))
+		scx_bpf_kick_cid___v1(cid, flags);
+}
+
+/*
+ * v7.3: 3a21e34eb258 ("sched_ext: Gate scx_bpf_cidperf_set() behind a new
+ * SCX_CAP_PERF") flipped the return type the other way, from void to s32, again
+ * without renaming the kfunc. Same two-flavor trick as scx_bpf_kick_cid()
+ * above; the v7.2 kfunc can't fail, so report success for it. Drop the wrapper
+ * and move the decl back to common.bpf.h after v7.6.
+ */
+s32 scx_bpf_cidperf_set___v2(s32 cid, u32 perf) __ksym __weak;
+void scx_bpf_cidperf_set___v1(s32 cid, u32 perf) __ksym __weak;
+
+static inline s32 scx_bpf_cidperf_set(s32 cid, u32 perf)
+{
+	if (bpf_ksym_exists(scx_bpf_cidperf_set___v2)) {
+		return scx_bpf_cidperf_set___v2(cid, perf);
+	} else if (bpf_ksym_exists(scx_bpf_cidperf_set___v1)) {
+		scx_bpf_cidperf_set___v1(cid, perf);
+		return 0;
+	} else {
+		return -EOPNOTSUPP;
+	}
+}
+
 /**
  * __COMPAT_is_enq_cpu_selected - Test if SCX_ENQ_CPU_SELECTED is on
  * in a compatible way. We will preserve this __COMPAT helper until v6.16.

@@ -108,7 +108,7 @@ void scx_bpf_events(struct scx_event_stats *events, size_t events__sz) __ksym __
 s32 scx_bpf_cpu_to_cid(s32 cpu) __ksym __weak;
 s32 scx_bpf_cid_to_cpu(s32 cid) __ksym __weak;
 void scx_bpf_cid_topo(s32 cid, struct scx_cid_topo *out) __ksym __weak;
-void scx_bpf_kick_cid(s32 cid, u64 flags) __ksym __weak;
+/* scx_bpf_kick_cid() is declared in compat.bpf.h */
 s32 scx_bpf_task_cid(const struct task_struct *p) __ksym __weak;
 s32 scx_bpf_this_cid(void) __ksym __weak;
 struct task_struct *scx_bpf_cid_curr(s32 cid) __ksym __weak;
@@ -116,7 +116,7 @@ u32 scx_bpf_nr_cids(void) __ksym __weak;
 u32 scx_bpf_nr_online_cids(void) __ksym __weak;
 u32 scx_bpf_cidperf_cap(s32 cid) __ksym __weak;
 u32 scx_bpf_cidperf_cur(s32 cid) __ksym __weak;
-s32 scx_bpf_cidperf_set(s32 cid, u32 perf) __ksym __weak;
+/* scx_bpf_cidperf_set() is declared in compat.bpf.h */
 
 /* sub-scheduler cap control, scx_bpf_sub_caps() cgroup_id 0 == self */
 s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps, const struct scx_cmask __arena *cmask__arena, struct scx_cmask __arena *denied_out__arena__nullable) __ksym __weak;

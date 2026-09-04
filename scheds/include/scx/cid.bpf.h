@@ -122,11 +122,27 @@ static __always_inline void cmask_reframe(struct scx_cmask __arena *m, u32 base,
 	m->nr_cids = nr_cids;
 }
 
+/**
+ * __cmask_test - Test a cid without checking it against the active range
+ * @cid: cid to test
+ * @m: cmask to test
+ *
+ * The caller must already know that @cid lies within
+ * [@m->base, @m->base + @m->nr_cids), or the read runs off @m->bits.
+ *
+ * For hot scans that have already bounded @cid, where the per-call range check
+ * is repeated work on every candidate.
+ */
+static __always_inline bool __cmask_test(u32 cid, const struct scx_cmask __arena *m)
+{
+	return *__cmask_word(cid, m) & BIT_U64(cid & 63);
+}
+
 static __always_inline bool cmask_test(u32 cid, const struct scx_cmask __arena *m)
 {
 	if (!__cmask_contains(cid, m))
 		return false;
-	return *__cmask_word(cid, m) & BIT_U64(cid & 63);
+	return __cmask_test(cid, m);
 }
 
 /*
