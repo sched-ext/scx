@@ -112,9 +112,14 @@ struct Opts {
     #[clap(long, default_value = "1")]
     monitor_interval_s: u64,
 
+    /// Launch the scheduler and monitor its stats in-process with the
+    /// specified interval.
+    #[clap(long, conflicts_with = "monitor")]
+    monitor_sync: Option<f64>,
+
     /// Run in stats monitoring mode with the specified interval. Scheduler
     /// is not launched.
-    #[clap(long)]
+    #[clap(long, conflicts_with = "monitor_sync")]
     monitor: Option<f64>,
 
     /// Print scheduler version and exit.
@@ -1802,7 +1807,7 @@ fn run(opts: Opts) -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    if let Some(intv) = opts.monitor {
+    if let Some(intv) = opts.monitor.or(opts.monitor_sync) {
         let shutdown_clone = shutdown.clone();
         let jh = std::thread::spawn(move || {
             match stats::monitor(Duration::from_secs_f64(intv), shutdown_clone) {
