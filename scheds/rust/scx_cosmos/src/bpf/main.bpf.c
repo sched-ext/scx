@@ -44,11 +44,6 @@ char _license[] SEC("license") = "GPL";
 #define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
 
 /*
- * Enable flat iteration to find idle CPUs (fast but inaccurate).
- */
-const volatile bool flat_idle_scan = false;
-
-/*
  * CPUs in the system have SMT is enabled.
  */
 const volatile bool smt_enabled = true;
@@ -126,11 +121,6 @@ const volatile bool time_preemption;
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
-
-/*
- * Disable early clearing of idle CPU state.
- */
-const volatile bool no_early_clear;
 
 /*
  * Default time slice.
@@ -694,53 +684,11 @@ static inline bool is_cpu_idle(s32 cpu)
 }
 
 /*
- * Test if a CPU is idle.
- *
- * If no_early_clear is true, leave the idle state intact so that concurrent
- * wakeups can stack tasks on the same cache. Otherwise, atomically test and
- * clear the idle state.
+ * Test if a CPU is idle, atomically claiming its idle state.
  */
 static inline bool test_cpu_idle(s32 cpu)
 {
-	return no_early_clear ? is_cpu_idle(cpu) : scx_bpf_test_and_clear_cpu_idle(cpu);
-}
-
-/*
- * Pick an idle CPU for @p scanning the CPUs in rotation, so that the load
- * spreads evenly on a system where all CPUs are equal. Consider only
- * fully idle cores if @smt is set, any idle CPU otherwise.
- */
-static __always_inline s32
-pick_idle_cpu_rotating(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
-				  const struct cpumask *idle, const struct cpumask *smt)
-{
-	static u32 last_cpu;
-	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS);
-	int i, start;
-
-	if (is_prev_allowed &&
-	    bpf_cpumask_test_cpu(prev_cpu, smt ?: idle) && test_cpu_idle(prev_cpu))
-		return prev_cpu;
-
-	start = last_cpu;
-	bpf_for(i, 0, max_cpus) {
-		s32 cpu = (start + i) % max_cpus;
-
-		if ((cpu == prev_cpu) || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-			continue;
-
-		/*
-		 * Read the idle state first and claim it only for the CPU
-		 * that is going to be used: test_cpu_idle() is an atomic
-		 * write to a shared mask.
-		 */
-		if (bpf_cpumask_test_cpu(cpu, smt ?: idle) && test_cpu_idle(cpu)) {
-			last_cpu = cpu + 1;
-			return cpu;
-		}
-	}
-
-	return -EBUSY;
+	return scx_bpf_test_and_clear_cpu_idle(cpu);
 }
 
 /*
@@ -816,8 +764,7 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 
 /*
  * Scan for an idle CPU: fully idle cores first, then any idle CPU, in
- * @preferred_cpus order when the CPUs differ in capacity, in rotation
- * otherwise. CPUs slower than @min_cap are never considered.
+ * @preferred_cpus order. CPUs slower than @min_cap are never considered.
  *
  * Return the CPU id or -EBUSY if no idle CPU is found.
  */
@@ -825,7 +772,6 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu, u64 min_cap)
 {
 	const struct cpumask *idle, *smt;
 	bool is_prev_allowed = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
-	bool ranked = !all_cpus_same_capacity;
 	s32 cpu = -EBUSY;
 
 	/*
@@ -841,13 +787,11 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu, u64 min_cap)
 
 	smt = smt_enabled ? get_idle_smtmask(prev_cpu) : NULL;
 	if (smt) {
-		cpu = ranked ? pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, idle, smt, min_cap) :
-			       pick_idle_cpu_rotating(p, prev_cpu, is_prev_allowed, idle, smt);
+		cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, idle, smt, min_cap);
 		if (cpu >= 0)
 			goto out_smt;
 	}
-	cpu = ranked ? pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, idle, NULL, min_cap) :
-		       pick_idle_cpu_rotating(p, prev_cpu, is_prev_allowed, idle, NULL);
+	cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, idle, NULL, min_cap);
 out_smt:
 	if (smt)
 		scx_bpf_put_cpumask(smt);
@@ -881,14 +825,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 
 		return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
 	}
-
-	/*
-	 * Use lightweight idle CPU scanning when flat idle scan is enabled,
-	 * unless the system is busy, in which case the cpumask-based
-	 * scanning is more efficient.
-	 */
-	if (flat_idle_scan && !is_cpu_busy(prev_cpu))
-		return pick_idle_cpu_scan(p, prev_cpu, 0);
 
 	/*
 	 * Clear the wake sync bit if synchronous wakeups are disabled.

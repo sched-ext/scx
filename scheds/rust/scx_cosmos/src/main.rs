@@ -153,28 +153,9 @@ struct Opts {
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
     disable_cpufreq: bool,
 
-    /// Enable flat idle CPU scanning.
-    ///
-    /// This option can help reducing some overhead when trying to allocate idle CPUs and it can be
-    /// quite effective with simple CPU topologies.
-    #[arg(short = 'i', long, action = clap::ArgAction::SetTrue)]
-    flat_idle_scan: bool,
-
     /// Disable SMT.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
-
-    /// ***DEPRECATED*** SMT contention avoidance.
-    #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
-    avoid_smt: bool,
-
-    /// Disable early clearing of idle CPU state.
-    ///
-    /// When enabled, multiple concurrent wakeups can select the same idle CPU
-    /// before it fully wakes up. This can improve performance in highly communicative
-    /// workloads by aggressively stacking tasks on the same cache.
-    #[clap(short = 'N', long, action = clap::ArgAction::SetTrue)]
-    no_early_clear: bool,
 
     /// Disable direct dispatch during synchronous wakeups.
     ///
@@ -485,12 +466,10 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
-        rodata.flat_idle_scan = opts.flat_idle_scan;
         rodata.smt_enabled = smt_enabled;
         rodata.numa_enabled = numa_enabled;
         rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
-        rodata.no_early_clear = opts.no_early_clear;
         rodata.time_preemption = opts.time_preemption;
 
         // Enable perf event scheduling settings.
