@@ -72,6 +72,11 @@ const volatile u64 preferred_cpus[MAX_CPUS];
 const volatile u64 cpu_capacity[MAX_CPUS];
 
 /*
+ * LLC id of each CPU.
+ */
+const volatile u64 cpu_llc[MAX_CPUS];
+
+/*
  * True when all CPUs have the same capacity (no capacity asymmetry).
  */
 const volatile bool all_cpus_same_capacity = false;
@@ -701,6 +706,29 @@ static __always_inline u64 cpu_cap(s32 cpu)
 }
 
 /*
+ * Return the LLC id of @cpu, -1 if @cpu is not a valid CPU.
+ */
+static __always_inline u64 cpu_llc_of(s32 cpu)
+{
+	u32 idx = cpu;
+
+	if (idx >= MAX_CPUS)
+		return (u64)-1;
+	barrier_var(idx);
+
+	return cpu_llc[idx];
+}
+
+static inline bool is_cpu_idle(s32 cpu)
+{
+	struct task_struct *p;
+
+	p = __COMPAT_scx_bpf_cpu_curr(cpu);
+
+	return p ? p->flags & PF_IDLE : false;
+}
+
+/*
  * Return true if the CPU is part of a fully busy SMT core, false
  * otherwise.
  *
@@ -768,15 +796,6 @@ out:
 	return is_contended;
 }
 
-static inline bool is_cpu_idle(s32 cpu)
-{
-	struct task_struct *p;
-
-	p = __COMPAT_scx_bpf_cpu_curr(cpu);
-
-	return p ? p->flags & PF_IDLE : false;
-}
-
 /*
  * Test if a CPU is idle.
  *
@@ -829,54 +848,73 @@ pick_idle_cpu_rotating(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed
 
 /*
  * Pick an idle CPU for @p in @preferred_cpus order (capacity descending),
- * ignoring the CPUs slower than @min_cap. Consider only fully idle cores if
- * @smt is set, any idle CPU otherwise.
+ * ignoring the CPUs slower than @min_cap. Only fully idle cores are
+ * considered if @smt is set, any idle CPU otherwise: the caller runs the
+ * full core pass first, across every tier, since sharing a core costs
+ * more than the step down to the next tier, the way select_idle_core()
+ * looks for a whole core before select_idle_cpu() settles for a thread.
  *
- * Among CPUs of the same capacity @prev_cpu comes first, to keep the task
- * where its cache is; a faster idle CPU wins over it.
+ * Within a pass a faster idle CPU always wins. Among idle CPUs of the same
+ * capacity a CPU in the same LLC as @prev_cpu beats one in another LLC,
+ * and @prev_cpu itself beats an equivalent CPU, to keep the task where
+ * its cache is: the same order select_idle_sibling() applies within one
+ * domain.
  */
 static __always_inline s32
 pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
-				const struct cpumask *idle, const struct cpumask *smt,
-				u64 min_cap)
+		     const struct cpumask *idle, const struct cpumask *smt, u64 min_cap)
 {
-	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), prev_cap = 0;
-	bool prev_tried = false;
-	int i;
-
-	if (is_prev_allowed)
-		prev_cap = cpu_cap(prev_cpu);
-	else
-		prev_tried = true;
+	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), best_cap = 0;
+	u64 prev_llc = cpu_llc_of(prev_cpu);
+	s32 best = -EBUSY;
+	int best_score = -1, i;
 
 	bpf_for(i, 0, max_cpus) {
 		s32 cpu = preferred_cpus[i];
-		u64 cap;
+		u64 cap = cpu_cap(cpu);
+		int score;
 
-		cap = cpu_cap(cpu);
 		if (cap < min_cap)
 			break;
+		/*
+		 * A candidate was found in a faster tier: done.
+		 */
+		if (best >= 0 && cap < best_cap)
+			break;
 
-		if (!prev_tried && cap <= prev_cap) {
-			prev_tried = true;
-			if (bpf_cpumask_test_cpu(prev_cpu, smt ?: idle) &&
-			    test_cpu_idle(prev_cpu))
-				return prev_cpu;
-		}
-
-		if (cpu == prev_cpu || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+		if (!bpf_cpumask_test_cpu(cpu, smt ?: idle))
 			continue;
 
-		/*
-		 * Read the idle state first and claim it only for the CPU
-		 * that is going to be used: test_cpu_idle() is an atomic
-		 * write to a shared mask.
-		 */
-		if (bpf_cpumask_test_cpu(cpu, smt ?: idle) && test_cpu_idle(cpu))
-			return cpu;
+		score = 0;
+		if (cpu_llc_of(cpu) == prev_llc)
+			score += 2;
+		if (cpu == prev_cpu && is_prev_allowed)
+			score += 1;
+
+		if (score > best_score) {
+			best_score = score;
+			best_cap = cap;
+			best = cpu;
+			/*
+			 * Nothing in this tier can do better.
+			 */
+			if (score == 3)
+				break;
+		}
 	}
 
-	return -EBUSY;
+	/*
+	 * Claim the idle state only for the CPU that is going to be used:
+	 * test_cpu_idle() is an atomic write to a shared mask, and doing it
+	 * for every candidate would bounce that mask across all the CPUs
+	 * on every wakeup.
+	 */
+	if (best >= 0 && !test_cpu_idle(best))
+		best = -EBUSY;
+
+	return best;
 }
 
 /*
@@ -933,10 +971,19 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 {
 	/*
 	 * CPUs of different capacity are handed out in capacity order, which
-	 * the kernel's idle CPU selection knows nothing about.
+	 * the kernel's idle CPU selection knows nothing about. The scan is
+	 * confined to the node of @prev_cpu; the kernel's selection covers
+	 * the other nodes if nothing is found there.
 	 */
-	if (!all_cpus_same_capacity)
-		return pick_idle_cpu_scan(p, prev_cpu, min_cap);
+	if (!all_cpus_same_capacity) {
+		s32 cpu = pick_idle_cpu_scan(p, prev_cpu, min_cap);
+
+		if (cpu >= 0 || !numa_enabled || min_cap ||
+		    !__COMPAT_HAS_scx_bpf_select_cpu_and)
+			return cpu;
+
+		return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
+	}
 
 	/*
 	 * Use lightweight idle CPU scanning when flat idle scan is enabled,
@@ -1485,7 +1532,7 @@ static bool try_steal_task(s32 dst_cpu)
 	struct cpu_ctx *cctx = try_lookup_cpu_ctx(dst_cpu);
 	struct task_struct *own = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(dst_cpu));
 	int node = cpu_node(dst_cpu);
-	u64 min_dl = 0, now = bpf_ktime_get_ns();
+	u64 min_dl = 0, now = bpf_ktime_get_ns(), dst_llc = cpu_llc_of(dst_cpu);
 	u32 limit, start, cpu, i;
 	s32 min_cpu = -1;
 
@@ -1530,15 +1577,24 @@ static bool try_steal_task(s32 dst_cpu)
 			goto pick;
 	}
 
-	bpf_for(i, 0, limit) {
+	/*
+	 * An idle CPU looks in its own LLC before the rest of the node, the
+	 * way the idle balancer walks the domains bottom up. A busy CPU
+	 * sampling for an earlier deadline scans a couple of queues wherever
+	 * they are, so it does a single pass.
+	 */
+	bpf_for(i, 0, own ? limit : 2 * limit) {
 		struct task_struct *p;
+		bool local_pass = !own && i < limit;
 
-		cpu = start + 1 + i;
+		cpu = start + 1 + (i < limit ? i : i - limit);
 		if (cpu >= nr_cpu_ids)
 			cpu -= nr_cpu_ids;
 		if (cpu >= nr_cpu_ids || cpu == dst_cpu)
 			continue;
 		if (numa_enabled && cpu_node(cpu) != node)
+			continue;
+		if (!own && (cpu_llc_of(cpu) == dst_llc) != local_pass)
 			continue;
 
 		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(cpu));

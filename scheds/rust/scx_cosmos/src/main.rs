@@ -527,6 +527,7 @@ impl<'a> Scheduler<'a> {
         for (i, cpu) in cpus.iter().enumerate() {
             let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
             rodata.cpu_capacity[cpu.id] = normalized as c_ulong;
+            rodata.cpu_llc[cpu.id] = cpu.llc_id as u64;
             rodata.preferred_cpus[i] = cpu.id as u64;
         }
         rodata.all_cpus_same_capacity = cpus.iter().all(|cpu| cpu.cpu_capacity == max_cap);
