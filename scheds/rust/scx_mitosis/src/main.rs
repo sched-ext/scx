@@ -14,6 +14,7 @@ mod topology;
 mod undefok_flags;
 
 use cell_manager::{CellManager, CpuAssignment, CpuRecipient};
+use config::SubcellMatch;
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -262,6 +263,7 @@ struct Subcell {
     id: u32,
     primary: Cpumask,
     borrowable: Option<Cpumask>,
+    matches: Vec<Vec<SubcellMatch>>,
 }
 
 impl Cell {
@@ -279,6 +281,7 @@ impl Subcell {
             id,
             primary: Cpumask::new(),
             borrowable: None,
+            matches: Vec::new(),
         }
     }
 }
@@ -895,6 +898,16 @@ impl<'a> Scheduler<'a> {
     fn refresh_bpf_subcells(&mut self, active_cells: &HashSet<u32>) -> Result<()> {
         for cell_id in active_cells {
             let bpf_cell = read_bpf_cell(&self.skel, *cell_id)?;
+            let existing_matches: HashMap<u32, Vec<Vec<SubcellMatch>>> = self
+                .cells
+                .get(cell_id)
+                .map(|cell| {
+                    cell.subcells
+                        .iter()
+                        .map(|subcell| (subcell.id, subcell.matches.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
             let subcells: Vec<Subcell> = bpf_cell
                 .subcells
                 .iter()
@@ -904,6 +917,10 @@ impl<'a> Scheduler<'a> {
                         id: subcell.id,
                         primary: read_cpumask_from_bytes(&subcell.primary.mask)?,
                         borrowable: Some(read_cpumask_from_bytes(&subcell.borrowable.mask)?),
+                        matches: existing_matches
+                            .get(&subcell.id)
+                            .cloned()
+                            .unwrap_or_default(),
                     })
                 })
                 .collect::<Result<_>>()?;
@@ -931,6 +948,16 @@ impl<'a> Scheduler<'a> {
         cpu_assignments: &[CpuAssignment],
         subcell_assignments: &[Vec<CpuAssignment>],
     ) -> Result<()> {
+        let subcell_matches: HashMap<(u32, u32), Vec<Vec<SubcellMatch>>> = self
+            .cells
+            .iter()
+            .flat_map(|(&cell_id, cell)| {
+                cell.subcells
+                    .iter()
+                    .map(move |subcell| ((cell_id, subcell.id), subcell.matches.clone()))
+            })
+            .collect();
+
         let bss_data = self
             .skel
             .maps
@@ -1010,6 +1037,16 @@ impl<'a> Scheduler<'a> {
                 let slot = subcell.id as usize;
                 config.subcells[a.id as usize][slot].id = subcell.id;
                 config.subcells[a.id as usize][slot].in_use = 1;
+                let matches = subcell_matches
+                    .get(&(a.id, subcell.id))
+                    .map_or(&[][..], |matches| matches.as_slice());
+                write_subcell_matches(matches, &mut config.subcells[a.id as usize][slot])
+                    .with_context(|| {
+                        format!(
+                            "writing subcell matches for cell {} subcell {}",
+                            a.id, subcell.id
+                        )
+                    })?;
                 write_cpumask_to_config(
                     &subcell.primary,
                     &mut config.subcells[a.id as usize][slot].primary.mask,
@@ -1746,6 +1783,63 @@ fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
             }
         }
     }
+}
+
+fn write_subcell_matches(
+    matches: &[Vec<SubcellMatch>],
+    dest: &mut types::subcell_config,
+) -> Result<()> {
+    if matches.len() > bpf_intf::consts_MAX_SUBCELL_MATCH_ORS as usize {
+        bail!(
+            "Too many subcell match OR groups: {} > {}",
+            matches.len(),
+            bpf_intf::consts_MAX_SUBCELL_MATCH_ORS
+        );
+    }
+
+    dest.nr_match_ors = matches.len() as u32;
+    for (or_idx, ands) in matches.iter().enumerate() {
+        if ands.len() > bpf_intf::consts_MAX_SUBCELL_MATCH_ANDS as usize {
+            bail!(
+                "Too many subcell match AND terms: {} > {}",
+                ands.len(),
+                bpf_intf::consts_MAX_SUBCELL_MATCH_ANDS
+            );
+        }
+
+        dest.matches[or_idx].nr_matches = ands.len() as u32;
+        for (and_idx, subcell_match) in ands.iter().enumerate() {
+            match subcell_match {
+                SubcellMatch::CommPrefix(prefix) => {
+                    dest.matches[or_idx].matches[and_idx].kind =
+                        bpf_intf::subcell_match_kind_SUBCELL_MATCH_COMM_PREFIX;
+                    copy_cstr(&mut dest.matches[or_idx].matches[and_idx].value, prefix)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_cstr(dest: &mut [i8], src: &str) -> Result<()> {
+    if dest.is_empty() {
+        return Ok(());
+    }
+    if src.as_bytes().contains(&0) {
+        bail!("subcell match string contains NUL byte");
+    }
+
+    for value in dest.iter_mut() {
+        *value = 0;
+    }
+
+    let len = src.len().min(dest.len() - 1);
+    for (dst, src) in dest.iter_mut().zip(src.as_bytes().iter()).take(len) {
+        *dst = *src as i8;
+    }
+
+    Ok(())
 }
 
 fn read_cpumask_from_bytes(src: &[u8]) -> Result<Cpumask> {
