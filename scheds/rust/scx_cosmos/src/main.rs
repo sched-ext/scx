@@ -12,6 +12,7 @@ pub use bpf_intf::*;
 
 mod stats;
 
+use std::collections::BTreeMap;
 use std::ffi::c_ulong;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -226,12 +227,19 @@ impl<'a> Scheduler<'a> {
             rodata.cpu_nodes[cpu.id] = cpu.node_id as u32;
             rodata.preferred_cpus[i] = cpu.id as u64;
         }
-        // Core of each CPU and size of each core, for the SMT preference of the
-        // idle CPU scan. With SMT disabled every CPU is a core of its own.
+        // SMT siblings of each CPU as a ring around the core, for the SMT
+        // preference of the idle CPU scan. With SMT disabled every CPU is a
+        // core of its own.
+        let mut core_cpus: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for cpu in cpus.iter() {
             let core = if smt_enabled { cpu.core_id } else { cpu.id };
-            rodata.cpu_core[cpu.id] = core as u32;
-            rodata.core_nr_cpus[core] += 1;
+            core_cpus.entry(core).or_default().push(cpu.id);
+        }
+        for ids in core_cpus.values_mut() {
+            ids.sort_unstable();
+            for (i, &id) in ids.iter().enumerate() {
+                rodata.cpu_sibling_next[id] = ids[(i + 1) % ids.len()] as u32;
+            }
         }
         rodata.all_cpus_same_capacity = cpus.iter().all(|cpu| cpu.cpu_capacity == max_cap);
         if !rodata.all_cpus_same_capacity {

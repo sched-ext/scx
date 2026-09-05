@@ -14,6 +14,11 @@ char _license[] SEC("license") = "GPL";
 #define MAX_CPUS	1024
 
 /*
+ * Maximum number of SMT siblings in a core.
+ */
+#define MAX_SMT		8
+
+/*
  * How many times the idle CPU scan tries again after losing a claim.
  */
 #define CLAIM_RETRIES	4
@@ -57,11 +62,10 @@ const volatile u64 cpu_llc[MAX_CPUS];
 const volatile u32 cpu_nodes[MAX_CPUS];
 
 /*
- * Core of each CPU and number of CPUs (SMT siblings) in each core. With
- * SMT disabled every CPU is a core of its own.
+ * Next SMT sibling of each CPU, as a ring around the core: a CPU without
+ * siblings, or every CPU with SMT disabled, points to itself.
  */
-const volatile u32 cpu_core[MAX_CPUS];
-const volatile u32 core_nr_cpus[MAX_CPUS];
+const volatile u32 cpu_sibling_next[MAX_CPUS];
 
 /*
  * True when all CPUs have the same capacity (no capacity asymmetry).
@@ -456,9 +460,13 @@ static inline bool is_cpu_idle(s32 cpu)
  * off, and with it the kernel's own idle CPU selection, whose walk of the
  * topology masks was the single most expensive step of a wakeup and knew
  * nothing of the capacity ordering anyway. What the scan needs is one bit
- * per CPU and, for the SMT preference, whether a whole core is idle, kept
- * as a per-core count of idle CPUs against the size of the core. Both are
- * cheap to keep and cheap to read.
+ * per CPU, updated with a single atomic word operation per transition,
+ * the way the kernel's own is, and, for the SMT preference, whether a
+ * whole core is idle, which is read from the bits of its siblings. A
+ * count of idle CPUs per core kept next to the bits is not the same
+ * thing: the bit and the count are two operations, and between the two
+ * another CPU reads a count that is off by one, a core that looks idle
+ * with a busy sibling, or a busy core that looks shared.
  *
  * ops.update_idle() only fires on real idle transitions. A CPU that was
  * claimed for a task and kicked, and then found nothing to run, goes back
@@ -469,19 +477,10 @@ static inline bool is_cpu_idle(s32 cpu)
  * ops.running() clears the bit again in that case.
  */
 static u64 idle_cpus[MAX_CPUS / 64];
-static u32 core_idle_cnt[MAX_CPUS];
 
-/*
- * Number of idle CPUs and of fully idle cores, so that a wakeup on a
- * saturated system finds out without walking the CPUs, and the whole
- * core pass is skipped when it cannot succeed.
- */
-static s64 nr_idle_cpus;
-static s64 nr_idle_cores;
-
-static __always_inline u32 cpu_core_of(s32 cpu)
+static __always_inline u32 cpu_sibling(s32 cpu)
 {
-	return cpu_core[(u32)cpu & (MAX_CPUS - 1)] & (MAX_CPUS - 1);
+	return cpu_sibling_next[(u32)cpu & (MAX_CPUS - 1)] & (MAX_CPUS - 1);
 }
 
 static __always_inline u64 *idle_word(s32 cpu)
@@ -511,13 +510,37 @@ static bool cpu_idle_test(s32 cpu)
  */
 static bool core_is_idle(s32 cpu)
 {
-	u32 core;
+	u32 c = cpu, i;
 
 	if (cpu < 0 || cpu >= MAX_CPUS)
 		return false;
-	core = cpu_core_of(cpu);
 
-	return READ_ONCE(core_idle_cnt[core]) >= core_nr_cpus[core];
+	for (i = 0; i < MAX_SMT; i++) {
+		if (!cpu_idle_test(c))
+			return false;
+		c = cpu_sibling(c);
+		if (c == cpu)
+			break;
+	}
+
+	return true;
+}
+
+/*
+ * Return true if no CPU is idle.
+ */
+static bool no_idle_cpus(void)
+{
+	u32 nr_words = (nr_cpu_ids + 63) / 64, k;
+
+	for (k = 0; k < MAX_CPUS / 64; k++) {
+		if (k >= nr_words)
+			break;
+		if (READ_ONCE(idle_cpus[k]))
+			return false;
+	}
+
+	return true;
 }
 
 /*
@@ -528,21 +551,13 @@ static bool core_is_idle(s32 cpu)
 static bool cpu_idle_claim(s32 cpu)
 {
 	u64 old;
-	u32 core;
 
 	if (cpu < 0 || cpu >= MAX_CPUS)
 		return false;
 
 	old = __sync_fetch_and_and(idle_word(cpu), ~idle_bit(cpu));
-	if (!(old & idle_bit(cpu)))
-		return false;
-	__sync_fetch_and_sub(&nr_idle_cpus, 1);
 
-	core = cpu_core_of(cpu);
-	if (__sync_fetch_and_sub(&core_idle_cnt[core], 1) >= core_nr_cpus[core])
-		__sync_fetch_and_sub(&nr_idle_cores, 1);
-
-	return true;
+	return old & idle_bit(cpu);
 }
 
 /*
@@ -550,20 +565,10 @@ static bool cpu_idle_claim(s32 cpu)
  */
 static void cpu_idle_set(s32 cpu)
 {
-	u64 old;
-	u32 core;
-
 	if (cpu < 0 || cpu >= MAX_CPUS)
 		return;
 
-	old = __sync_fetch_and_or(idle_word(cpu), idle_bit(cpu));
-	if (old & idle_bit(cpu))
-		return;
-	__sync_fetch_and_add(&nr_idle_cpus, 1);
-
-	core = cpu_core_of(cpu);
-	if (__sync_fetch_and_add(&core_idle_cnt[core], 1) + 1 >= core_nr_cpus[core])
-		__sync_fetch_and_add(&nr_idle_cores, 1);
+	__sync_fetch_and_or(idle_word(cpu), idle_bit(cpu));
 }
 
 /*
@@ -665,10 +670,9 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 
 	/*
 	 * Nothing idle at all is the common case under load: say so without
-	 * walking the CPUs. The counters are only hints, the scan and the
-	 * claim decide.
+	 * walking the CPUs.
 	 */
-	if (READ_ONCE(nr_idle_cpus) <= 0)
+	if (no_idle_cpus())
 		return -EBUSY;
 
 	/*
@@ -682,11 +686,9 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 	 * with both siblings of a P-core busy and E-cores idle.
 	 */
 	for (i = 0; i < CLAIM_RETRIES; i++) {
-		if (READ_ONCE(nr_idle_cores) > 0) {
-			cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, true);
-			if (cpu >= 0)
-				return cpu;
-		}
+		cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, true);
+		if (cpu >= 0)
+			return cpu;
 		if (cpu != -EAGAIN)
 			cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, false);
 		if (cpu != -EAGAIN)
