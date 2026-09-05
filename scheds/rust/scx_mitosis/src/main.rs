@@ -1397,7 +1397,9 @@ impl<'a> Scheduler<'a> {
 
             let nr_cpus = cell_info.cpus.weight() as u64;
             if nr_cpus == 0 {
-                bail!("Cell {} has 0 CPUs assigned", cell);
+                // Transitional: the applied masks have not been read back yet.
+                // Skip the sample but keep the smoothed history.
+                continue;
             }
 
             // capacity = total available CPU-time this interval
