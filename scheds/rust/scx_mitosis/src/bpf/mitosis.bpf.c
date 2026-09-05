@@ -593,7 +593,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 		return -1; /* error from pick_idle_cpu, propagate */
 
 	/* No idle CPU in the subcell: try sibling subcells, then other cells. */
-	if (enable_borrowing) {
+	{
 		const struct cpumask *idle_smtmask __free(idle_cpumask) = NULL;
 		const struct cpumask *subcell_borrowable;
 
@@ -606,7 +606,7 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 			return -1;
 		}
 		cpu = pick_idle_cpu_from(p, subcell_borrowable, prev_cpu, idle_smtmask);
-		if (cpu < 0) {
+		if (cpu < 0 && enable_borrowing) {
 			const struct cpumask *cell_borrowable;
 
 			cell_borrowable = lookup_cell_borrowable_cpumask(tctx->cell);
@@ -1800,14 +1800,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 				return ret;
 			}
 
-			if (enable_borrowing) {
-				ret = init_cpumask_slot(&subcell_cpumaskw->borrowable, false);
-				if (ret) {
-					scx_bpf_error(
-						"failed to init borrowable cpumask slot for cell=%u subcell=%u: %d", i,
-						subcell_id, ret);
-					return ret;
-				}
+			ret = init_cpumask_slot(&subcell_cpumaskw->borrowable, false);
+			if (ret) {
+				scx_bpf_error("failed to init borrowable cpumask slot for cell=%u subcell=%u: %d", i,
+					      subcell_id, ret);
+				return ret;
 			}
 		}
 	}
@@ -1991,12 +1988,10 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 			}
 		}
 
-		if (enable_borrowing) {
-			if (set_cpumask_from_data(&subcell_cpumaskw->borrowable, &subcell_config->borrowable)) {
-				scx_bpf_error("failed to set borrowable subcell cpumask for cell=%u subcell=%u",
-					      cell_id, subcell_id);
-				return -EINVAL;
-			}
+		if (set_cpumask_from_data(&subcell_cpumaskw->borrowable, &subcell_config->borrowable)) {
+			scx_bpf_error("failed to set borrowable subcell cpumask for cell=%u subcell=%u", cell_id,
+				      subcell_id);
+			return -EINVAL;
 		}
 
 		subcell = MEMBER_VPTR(cell->subcells, [subcell_id]);
