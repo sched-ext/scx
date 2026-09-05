@@ -8,6 +8,7 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 mod cell_manager;
+mod config;
 mod stats;
 mod topology;
 mod undefok_flags;
