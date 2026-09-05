@@ -14,6 +14,11 @@ char _license[] SEC("license") = "GPL";
 #define MAX_CPUS	1024
 
 /*
+ * How many times the idle CPU scan tries again after losing a claim.
+ */
+#define CLAIM_RETRIES	4
+
+/*
  * Thresholds for applying hysteresis to CPU performance scaling:
  *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
  *  - CPUFREQ_HIGH_THRESH: above this level, raise performance to maximum
@@ -576,7 +581,8 @@ static void cpu_idle_set(s32 cpu)
  * the order select_idle_sibling() applies within one domain, with the node
  * on top since this scan covers them all.
  *
- * The idle state is claimed only for the CPU that is returned.
+ * The idle state is claimed only for the CPU that is returned. -EAGAIN
+ * means a candidate was found but claimed by someone else first.
  */
 static __always_inline s32
 pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
@@ -633,7 +639,7 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 	}
 
 	if (best >= 0 && !cpu_idle_claim(best))
-		best = -EBUSY;
+		best = -EAGAIN;
 
 	return best;
 }
@@ -647,7 +653,8 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 {
 	bool is_prev_allowed = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
-	s32 cpu;
+	s32 cpu = -EBUSY;
+	int i;
 
 	/*
 	 * If the task can't migrate, there's no point looking for other
@@ -664,13 +671,29 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 	if (READ_ONCE(nr_idle_cpus) <= 0)
 		return -EBUSY;
 
-	if (READ_ONCE(nr_idle_cores) > 0) {
-		cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, true);
-		if (cpu >= 0)
-			return cpu;
+	/*
+	 * A claim that fails lost a race with another wakeup for the same
+	 * CPU. Scan again rather than give up: the bit is clear now, so the
+	 * next candidate is a different CPU, the way scx_bpf_pick_idle_cpu()
+	 * keeps picking until a claim sticks. Giving up queued the loser on
+	 * a busy CPU, and whichever idle CPU dispatched next, the sibling of
+	 * a busy CPU as often as not, took it from there while whole idle
+	 * cores sat unused: that is how a burst of forks or wakeups ended up
+	 * with both siblings of a P-core busy and E-cores idle.
+	 */
+	for (i = 0; i < CLAIM_RETRIES; i++) {
+		if (READ_ONCE(nr_idle_cores) > 0) {
+			cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, true);
+			if (cpu >= 0)
+				return cpu;
+		}
+		if (cpu != -EAGAIN)
+			cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, false);
+		if (cpu != -EAGAIN)
+			break;
 	}
 
-	return pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, false);
+	return cpu >= 0 ? cpu : -EBUSY;
 }
 
 /*
