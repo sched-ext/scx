@@ -97,11 +97,6 @@ const volatile bool numa_enabled;
 const volatile bool gpu_enabled = true;
 
 /*
- * Enable address space affinity.
- */
-const volatile bool mm_affinity;
-
-/*
  * ID of perf-event being tracked. 0 for "no event".
  */
 const volatile u64 perf_config;
@@ -1269,20 +1264,8 @@ static void direct_dispatch_local(struct task_struct *p, struct task_ctx *tctx, 
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, SCX_ENQ_IMMED);
 }
 
-/*
- * Return true if a task is waking up another task that share the same
- * address space, false otherwise.
- */
-static inline bool
-is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
-{
-	return mm_affinity &&
-		!(waker->flags & PF_EXITING) && wakee->mm && (wakee->mm == waker->mm);
-}
-
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
 	bool is_busy = is_cpu_busy(prev_cpu);
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
@@ -1299,21 +1282,6 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 */
 	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
 		prev_cpu = is_this_cpu_allowed ? this_cpu : bpf_cpumask_first(p->cpus_ptr);
-
-	/*
-	 * When the waker and wakee share the same address space and were previously
-	 * running on the same CPU, there's a high chance of finding hot cache data
-	 * on that CPU. In such cases, prefer keeping the wakee on the same CPU.
-	 *
-	 * This optimization is applied only when the system is not saturated,
-	 * to avoid introducing too much unfairness.
-	 */
-	if (is_wake_affine(current, p) && !is_busy) {
-		if (this_cpu == prev_cpu) {
-			direct_dispatch_local(p, tctx, this_cpu);
-			return this_cpu;
-		}
-	}
 
 	/*
 	 * If GPU affinity is enabled and the task's TGID is in gpu_pid_map

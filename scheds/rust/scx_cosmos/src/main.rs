@@ -197,15 +197,6 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     time_preemption: bool,
 
-    /// Enable address space affinity.
-    ///
-    /// This option allows to keep tasks that share the same address space (e.g., threads of the
-    /// same process) on the same CPU across wakeups.
-    ///
-    /// This can improve locality and performance in certain cache-sensitive workloads.
-    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
-    mm_affinity: bool,
-
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -501,7 +492,6 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_early_clear = opts.no_early_clear;
         rodata.time_preemption = opts.time_preemption;
-        rodata.mm_affinity = opts.mm_affinity;
 
         // Enable perf event scheduling settings.
         rodata.perf_config = opts.perf_config.event_id;
