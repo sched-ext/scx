@@ -403,8 +403,12 @@ static void update_stat_for_running(struct task_struct *p,
 	u64 task_clk = 0, pelt_clk = 0;
 	struct cpu_ctx *prev_cpuc;
 
-	/* mark the task as running in the duty-cycle ravg */
-	ravg_accumulate_arena(&taskc->avg_util_ravg, LAVD_SCALE, now, LAVD_RAVG_HALFLIFE_NS);
+	/*
+	 * Mark the task as running in the duty-cycle ravg; this re-anchors it
+	 * if @p arrived from another CPU.
+	 */
+	ravg_invr_accumulate_arena(&taskc->avg_util_ravg, LAVD_SCALE,
+				   cpuc->cpu_id, now);
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
@@ -478,11 +482,7 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Mark this CPU as busy in the duty-cycle ravg.
 	 */
-	ravg_accumulate(&cpuc->avg_util_ravg, LAVD_SCALE,
-			now, LAVD_RAVG_HALFLIFE_NS);
-	cpuc->util_est = (u32)(ravg_read(&cpuc->avg_util_ravg,
-				now, LAVD_RAVG_HALFLIFE_NS) >>
-				RAVG_FRAC_BITS);
+	cpu_util_ravg_update(cpuc, LAVD_SCALE, now);
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -612,9 +612,10 @@ static void account_task_runtime(struct task_struct *p,
 
 static void update_stat_for_stopping(struct task_struct *p,
 				     task_ctx *taskc,
-				     struct cpu_ctx *cpuc)
+				     struct cpu_ctx *cpuc, bool runnable)
 {
 	u64 now = scx_bpf_now();
+	u64 avg_util_fp;
 
 	/*
 	 * Account task runtime statistics first.
@@ -627,12 +628,18 @@ static void update_stat_for_stopping(struct task_struct *p,
 					   taskc->acc_runtime_invr);
 
 	/*
+	 * The ravg tracks runnable time: a preempted task stays on,
+	 * a sleeping one goes off.
+	 */
+	if (ravg_invr_accumulate_read_arena(&taskc->avg_util_ravg,
+					    runnable ? LAVD_SCALE : 0,
+					    cpuc->cpu_id, now, &avg_util_fp))
+		taskc->util_est = (u32)(avg_util_fp >> RAVG_FRAC_BITS);
+
+	/*
 	 * Mark this CPU as idle in the duty-cycle ravg.
 	 */
-	ravg_accumulate(&cpuc->avg_util_ravg, 0, now,
-			LAVD_RAVG_HALFLIFE_NS);
-	cpuc->util_est = (u32)(ravg_read(&cpuc->avg_util_ravg, now,
-				  LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
+	cpu_util_ravg_update(cpuc, 0, now);
 
 	/*
 	 * Account for how much of the slice was used for this instance.
@@ -1725,8 +1732,9 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 }
 
 /*
- * @taskc's demand: its runnable duty cycle (util_est), the share of a CPU's
- * time it needs.
+ * @taskc's demand on the system-wide capacity scale: its runnable duty
+ * cycle on the invariant clock (util_est), the share of the most capable CPU
+ * at its highest frequency it needs.
  */
 static __always_inline u32 task_cpuperf_demand(task_ctx *taskc)
 {
@@ -1882,7 +1890,7 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 		return;
 	}
 
-	update_stat_for_stopping(p, taskc, cpuc);
+	update_stat_for_stopping(p, taskc, cpuc, runnable);
 
 	/* @p's demand no longer holds up its CPU's target. */
 	if (READ_ONCE(cpuc->cpuperf_floor)) {
@@ -1936,12 +1944,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 */
 	if (!(deq_flags & SCX_DEQ_SLEEP))
 		return;
-
-	/* mark the task as sleeping in the duty-cycle ravg */
-	now = scx_bpf_now();
-	ravg_accumulate_arena(&taskc->avg_util_ravg, 0, now, LAVD_RAVG_HALFLIFE_NS);
-	taskc->util_est = (u32)(ravg_read_arena(&taskc->avg_util_ravg, now,
-						LAVD_RAVG_HALFLIFE_NS) >> RAVG_FRAC_BITS);
 
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
@@ -2022,6 +2024,14 @@ unlock_out:
 	cpuc->lat_cri = 0;
 	cpuc->running_clk = 0;
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
+
+	/*
+	 * Drop the duty-cycle ravg and the util_est derived from it
+	 * when the CPU becomes offline.
+	 */
+	__builtin_memset(&cpuc->avg_util_ravg, 0, sizeof(cpuc->avg_util_ravg));
+	cpuc->avg_util_ravg.anchor_cpu = LAVD_CPU_ID_NONE;
+	cpuc->util_est = 0;
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
@@ -2312,15 +2322,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	bpf_rcu_read_lock();
 	if (parent && (taskc_parent = find_task_ctx(parent))) {
 		/* Do not inherit cgroup status. */
-		for (i = 0; i < sizeof(taskc->atq) && can_loop; i++)
-			((char __arena *)taskc)[i] = 0;
+		__arena_memset(&taskc->atq, 0, sizeof(taskc->atq));
 
 		for (i = sizeof(taskc->atq); i < sizeof(*taskc) && can_loop; i++)
 			((char __arena *)taskc)[i] = ((char __arena *)taskc_parent)[i];
+
+		/* Do not inherit task's ravg. */
+		__arena_memset(&taskc->avg_util_ravg, 0,
+				 sizeof(taskc->avg_util_ravg));
 	} else {
-		for (i = 0; i < sizeof(*taskc) && can_loop; i++)
-			((char __arena *)taskc)[i] = 0;
-	
+		__arena_memset(taskc, 0, sizeof(*taskc));
+
 		now = scx_bpf_now();
 		taskc->last_runnable_clk = now;
 		taskc->last_running_clk = now;
@@ -2332,6 +2344,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	bpf_rcu_read_unlock();
 
+	taskc->avg_util_ravg.anchor_cpu = LAVD_CPU_ID_NONE;
+	taskc->util_est = 0;
 	taskc->suggested_cpu_id = scx_bpf_task_cpu(p);
 	taskc->pinned_cpu_id = -ENOENT;
 	WRITE_ONCE(taskc->queued_in_cpdom_id, LAVD_CPDOM_MAX_NR);
