@@ -187,6 +187,43 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cctx;
 }
 
+/* DSQs must be created from struct_ops init, which has scheduler context. */
+static __always_inline int create_subcell_dsqs(u32 cell_id, u32 subcell_id)
+{
+	int ret;
+
+	if (enable_llc_awareness) {
+		u32 llc;
+
+		bpf_for(llc, 0, MAX_LLCS)
+		{
+			dsq_id_t dsq_id;
+
+			if (llc >= nr_llc)
+				break;
+
+			dsq_id = get_subcell_llc_dsq_id(cell_id, subcell_id, llc);
+			if (dsq_is_invalid(dsq_id))
+				return -EINVAL;
+
+			ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
+			if (ret < 0)
+				return ret;
+		}
+	} else {
+		dsq_id_t dsq_id = get_subcell_llc_dsq_id(cell_id, subcell_id, FAKE_FLAT_SUBCELL_LLC);
+
+		if (dsq_is_invalid(dsq_id))
+			return -EINVAL;
+
+		ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}
+
 struct cell_cpumask_map cell_cpumasks SEC(".maps");
 struct subcell_cpumask_map subcell_cpumasks SEC(".maps");
 
@@ -1705,26 +1742,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		u32 subcell_id;
 		struct cell *cell;
 
-		if (enable_llc_awareness) {
-			u32 llc;
-			bpf_for(llc, 0, nr_llc)
-			{
-				dsq_id_t dsq_id = get_subcell_llc_dsq_id(i, 0, llc);
-				if (dsq_is_invalid(dsq_id))
-					return -EINVAL; // scx_bpf_error called in get_subcell_llc_dsq_id
-
-				ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
-				if (ret < 0)
-					return ret;
-			}
-		} else {
-			dsq_id_t dsq_id = get_subcell_llc_dsq_id(i, 0, FAKE_FLAT_SUBCELL_LLC);
-			if (dsq_is_invalid(dsq_id))
-				return -EINVAL; // scx_bpf_error called in get_subcell_llc_dsq_id
-
-			ret = scx_bpf_create_dsq(dsq_id.raw, ANY_NUMA);
-			if (ret < 0)
+		bpf_for(subcell_id, 0, MAX_SUBCELLS_PER_CELL)
+		{
+			ret = create_subcell_dsqs(i, subcell_id);
+			if (ret) {
+				scx_bpf_error("failed to create DSQs for cell=%u subcell=%u: %d", i, subcell_id, ret);
 				return ret;
+			}
 		}
 
 		if (!(cpumaskw = lookup_cell_cpumask_wrapper(i)))
