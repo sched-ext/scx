@@ -658,21 +658,6 @@ static inline const struct cpumask *get_idle_smtmask(s32 cpu)
 }
 
 /*
- * Return true if @cpu is valid, otherwise trigger an error and return
- * false.
- */
-static inline bool is_cpu_valid(s32 cpu)
-{
-	u64 max_cpu = MIN(nr_cpu_ids, MAX_CPUS);
-
-	if (cpu < 0 || cpu >= max_cpu) {
-		scx_bpf_error("invalid CPU id: %d", cpu);
-		return false;
-	}
-	return true;
-}
-
-/*
  * Return the capacity of @cpu, 0 if @cpu is not a valid CPU. The bounds
  * check is kept in the caller's sight for the verifier.
  */
@@ -1685,17 +1670,6 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 		scx_pmu_event_start(p, false);
 }
 
-/*
- * Return the time slice normalized by @cpu's capacity.
- */
-static u64 scale_by_cpu_capacity(u64 slice, s32 cpu)
-{
-	if (all_cpus_same_capacity || !is_cpu_valid(cpu))
-		return slice;
-
-	return slice * cpu_capacity[cpu] / SCX_CPUPERF_ONE;
-}
-
 void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
@@ -1732,11 +1706,16 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	slice = tctx->last_stop_at - tctx->last_run_at;
 
 	/*
-	 * Scale used time slice by CPU capacity: time spent on slower CPU
-	 * is charged less time than running on faster CPU.
+	 * The runtime is charged as wall-clock time whatever the CPU it was
+	 * spent on. Charging a slow CPU at a discount reads fair, but with
+	 * one system-wide reference it isn't: the tasks on the slow CPUs
+	 * drift below V without bound while the reference follows the
+	 * average, their keys keep getting earlier, and a task waking up on
+	 * a slow CPU, placed at V minus a bounded lag, sorts behind all of
+	 * them and waits until their vruntime has climbed past it, hundreds
+	 * of milliseconds after a second of load. EEVDF charges wall-clock
+	 * time and uses the capacity only to balance the load.
 	 */
-	slice = scale_by_cpu_capacity(slice, cpu);
-
 	/*
 	 * Charge the service just consumed to the task's vruntime, the way
 	 * update_curr() does:
