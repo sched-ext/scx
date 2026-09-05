@@ -378,6 +378,96 @@ static __always_inline int set_vtime_charge_subcell(struct task_ctx *tctx)
 	return 0;
 }
 
+static __always_inline bool match_comm_prefix(const char *prefix, const char *comm)
+{
+	u32 i;
+
+	bpf_for(i, 0, MAX_COMM)
+	{
+		if (prefix[i] == '\0')
+			return true;
+		if (comm[i] != prefix[i])
+			return false;
+	}
+
+	return true;
+}
+
+static __always_inline bool match_subcell_match(struct subcell_match *match, const char *comm)
+{
+	switch (match->kind) {
+	case SUBCELL_MATCH_COMM_PREFIX:
+		return match_comm_prefix(match->value, comm);
+	default:
+		return false;
+	}
+}
+
+static __always_inline bool task_matches_subcell(struct subcell *subcell, const char *comm)
+{
+	u32 or_idx;
+
+	bpf_for(or_idx, 0, MAX_SUBCELL_MATCH_ORS)
+	{
+		struct subcell_match_and_group *and_group;
+		bool matches = true;
+		u32 and_idx;
+
+		if (or_idx >= subcell->nr_match_ors)
+			break;
+
+		and_group = MEMBER_VPTR(subcell->matches, [or_idx]);
+		/* bpf_for() keeps or_idx within this array, so NULL is unreachable. */
+		if (!and_group)
+			return false;
+
+		if (and_group->nr_matches == 0)
+			return true;
+
+		bpf_for(and_idx, 0, MAX_SUBCELL_MATCH_ANDS)
+		{
+			struct subcell_match *match;
+
+			if (and_idx >= and_group->nr_matches)
+				break;
+
+			match = MEMBER_VPTR(and_group->matches, [and_idx]);
+			/* Likewise, and_idx is bounded by the size of this array. */
+			if (!match || !match_subcell_match(match, comm)) {
+				matches = false;
+				break;
+			}
+		}
+
+		if (matches)
+			return true;
+	}
+
+	return false;
+}
+
+static __always_inline s32 pick_task_subcell(struct task_struct *p, u32 cell_id)
+{
+	char comm[MAX_COMM];
+	u32 subcell_id;
+
+	__builtin_memcpy(comm, p->comm, MAX_COMM);
+
+	bpf_for(subcell_id, 1, MAX_SUBCELLS_PER_CELL)
+	{
+		struct subcell *subcell = lookup_subcell(cell_id, subcell_id);
+
+		if (!subcell)
+			return -ENOENT;
+		if (!subcell->in_use)
+			continue;
+		if (task_matches_subcell(subcell, comm))
+			return subcell_id;
+	}
+
+	return 0;
+}
+
 /*
  * Figure out the task's cell, dsq and store the corresponding cpumask in the
  * task_ctx.
@@ -385,6 +475,7 @@ static __always_inline int set_vtime_charge_subcell(struct task_ctx *tctx)
 static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx, struct cgroup *cg)
 {
 	struct cgrp_ctx *cgc;
+	s32 subcell;
 
 	cgc = lookup_cgrp_ctx_fallible(cg);
 
@@ -430,7 +521,10 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	tctx->configuration_seq = READ_ONCE(applied_configuration_seq);
 	barrier();
 	tctx->cell = cgc->cell;
-	tctx->subcell = 0;
+	subcell = pick_task_subcell(p, tctx->cell);
+	if (subcell < 0)
+		return subcell;
+	tctx->subcell = subcell;
 	tctx->cgid = cg->kn->id;
 
 	/*
