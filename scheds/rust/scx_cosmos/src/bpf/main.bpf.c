@@ -323,6 +323,7 @@ struct cpu_ctx {
 	u64 busy_eval_at;
 	u64 acc_utime;
 	u64 vtime_rem;
+	u64 last_run_at;
 	u32 steal_cursor;
 	bool busy;
 	struct bpf_cpumask __kptr *smt;
@@ -738,6 +739,7 @@ static inline bool is_cpu_idle(s32 cpu)
 static bool is_smt_contended(s32 cpu)
 {
 	const struct cpumask *idle_smt, *idle_mask;
+	struct cpu_ctx *cctx;
 	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), cap;
 	bool is_contended = false;
 	s32 sibling;
@@ -763,6 +765,18 @@ static bool is_smt_contended(s32 cpu)
 		return false;
 	}
 	scx_bpf_put_cpumask(idle_mask);
+
+	/*
+	 * The sibling counts as busy only once its task has held it for a
+	 * full slice. A task that flickers on the sibling for a few
+	 * microseconds, a kworker or a wakeup, is gone before a migration
+	 * pays off, and reacting to it moves a CPU-bound task back and forth
+	 * between cores that are fully idle one moment and not the next.
+	 * The load balancer acts on sustained load for the same reason.
+	 */
+	cctx = try_lookup_cpu_ctx(sibling);
+	if (!cctx || time_before(bpf_ktime_get_ns(), cctx->last_run_at + slice_ns))
+		return false;
 
 	/*
 	 * The sibling is busy: the CPU is contended if there is a fully idle
@@ -1711,6 +1725,7 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 {
 	struct task_ctx *tctx;
+	struct cpu_ctx *cctx;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1718,9 +1733,13 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 
 	/*
 	 * Save a timestamp when the task begins to run (used to evaluate
-	 * the used time slice).
+	 * the used time slice), in the task and in the CPU, where
+	 * is_smt_contended() reads it for the sibling.
 	 */
 	tctx->last_run_at = bpf_ktime_get_ns();
+	cctx = try_lookup_cpu_ctx(scx_bpf_task_cpu(p));
+	if (cctx)
+		cctx->last_run_at = tctx->last_run_at;
 
 	/*
 	 * Snapshot the task's user time, so that only the user time
