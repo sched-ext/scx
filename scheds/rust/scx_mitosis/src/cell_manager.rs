@@ -67,6 +67,34 @@ pub(crate) struct CpuRecipient {
 }
 
 impl CpuRecipient {
+    /// Create a recipient restricted to and preferentially claiming `cpus`.
+    pub(crate) fn pinned(id: u32, weight: f64, cpus: &Cpumask) -> Self {
+        Self {
+            id,
+            weight,
+            allowed: cpus.clone(),
+            claimed: Some(cpus.clone()),
+            minimum: CpuMinimum {
+                protected: 1,
+                requested: 0,
+            },
+        }
+    }
+
+    /// Create the unpinned root recipient with a best-effort CPU minimum.
+    pub(crate) fn root(id: u32, weight: f64, domain: &Cpumask, requested: usize) -> Self {
+        Self {
+            id,
+            weight,
+            allowed: domain.clone(),
+            claimed: None,
+            minimum: CpuMinimum {
+                protected: 0,
+                requested,
+            },
+        }
+    }
+
     /// Create an unpinned recipient over the complete allocation domain.
     ///
     /// It may run anywhere in `domain`, claims no CPU preferentially, and
@@ -1168,6 +1196,19 @@ impl CellManager {
         CpuManager::new(domain).compute_assignments(recipients, compute_borrowable)
     }
 
+    /// Compute cell assignments with topology-aware requested-minimum steering.
+    pub(crate) fn compute_configured_cell_cpu_assignments(
+        domain: &Cpumask,
+        recipients: &[CpuRecipient],
+        compute_borrowable: bool,
+        cpu_to_partition: &HashMap<usize, usize>,
+    ) -> Result<(Vec<CpuAssignment>, bool)> {
+        let assignments = CpuManager::with_partitions(domain, cpu_to_partition)
+            .compute_assignments(recipients, compute_borrowable)?;
+        let displaced_claim = Self::requested_minimum_displaced_claim(recipients, &assignments);
+        Ok((assignments, displaced_claim))
+    }
+
     fn requested_minimum_displaced_claim(
         recipients: &[CpuRecipient],
         assignments: &[CpuAssignment],
@@ -1835,6 +1876,28 @@ mod tests {
             .collect();
         assert!(donor_weights.contains(&7));
         assert!(donor_weights.contains(&8));
+    }
+
+    #[test]
+    fn test_configured_cell_assignments_apply_root_holdout() {
+        let domain = cpumask_for_range(8);
+        let recipients = vec![
+            CpuRecipient::root(0, 1.0, &domain, 2),
+            CpuRecipient::pinned(1, 1.0, &domain),
+        ];
+        let cpu_to_llc = (0..8).map(|cpu| (cpu, cpu / 4)).collect();
+
+        let (assignments, displaced_claim) = CellManager::compute_configured_cell_cpu_assignments(
+            &domain,
+            &recipients,
+            false,
+            &cpu_to_llc,
+        )
+        .expect("configured holdout should reserve CPUs for root");
+
+        assert_eq!(find_assignment(&assignments, 0).primary.weight(), 2);
+        assert_eq!(find_assignment(&assignments, 1).primary.weight(), 6);
+        assert!(displaced_claim);
     }
 
     #[test]
