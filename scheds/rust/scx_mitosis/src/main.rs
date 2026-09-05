@@ -669,7 +669,7 @@ impl<'a> Scheduler<'a> {
         &mut self,
         new_cell_ids: &[u32],
     ) -> Result<Vec<CpuAssignment>> {
-        let (cell_assignments, cpu_assignments, subcell_assignments) = {
+        let (cell_assignments, cpu_assignments) = {
             let active_cell_ids: Vec<u32> = self
                 .cell_manager
                 .get_cell_assignments()
@@ -725,16 +725,12 @@ impl<'a> Scheduler<'a> {
                     .context("computing equal-weight CPU assignments (rebalancing disabled)")?
             };
 
-            // TODO(kkd): Plug in demand weighted subcell assignments once
-            // supported.
-            let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
-
-            (
-                self.cell_manager.get_cell_assignments(),
-                cpu_assignments,
-                subcell_assignments,
-            )
+            (self.cell_manager.get_cell_assignments(), cpu_assignments)
         };
+
+        // TODO(kkd): Plug in demand weighted subcell assignments once
+        // supported.
+        let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)
             .context("applying cell configuration to BPF")?;
@@ -779,7 +775,7 @@ impl<'a> Scheduler<'a> {
             .collect();
 
         // Compute new assignments and check if they differ from current
-        let (cell_assignments, cpu_assignments, subcell_assignments) = {
+        let (cell_assignments, cpu_assignments) = {
             let cpu_assignments = self
                 .cell_manager
                 .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
@@ -798,14 +794,10 @@ impl<'a> Scheduler<'a> {
                 return Ok(());
             }
 
-            let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
-
-            (
-                self.cell_manager.get_cell_assignments(),
-                cpu_assignments,
-                subcell_assignments,
-            )
+            (self.cell_manager.get_cell_assignments(), cpu_assignments)
         };
+
+        let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments, &subcell_assignments)
             .context("applying rebalanced cell configuration to BPF")?;
