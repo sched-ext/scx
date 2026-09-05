@@ -458,7 +458,10 @@ static inline bool is_cpu_idle(s32 cpu)
  * ops.update_idle() only fires on real idle transitions. A CPU that was
  * claimed for a task and kicked, and then found nothing to run, goes back
  * to idle without a transition and would keep its bit cleared for good:
- * ops.dispatch() re-arms the bit whenever a CPU is about to idle.
+ * ops.dispatch() re-arms the bit whenever a CPU is about to idle. The
+ * re-arm can be wrong the other way, when a task lands on the CPU right
+ * after it, since a CPU that never went idle sees no transition either:
+ * ops.running() clears the bit again in that case.
  */
 static u64 idle_cpus[MAX_CPUS / 64];
 static u32 core_idle_cnt[MAX_CPUS];
@@ -1458,6 +1461,17 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	tctx->last_run_at = bpf_ktime_get_ns();
 
 	/*
+	 * A CPU that ops.dispatch() re-armed as idle and that found a task
+	 * before it got there never went idle, so no transition clears the
+	 * bit: clear it here, where the CPU is running for sure. Left set,
+	 * the bit has wakeups aim at a busy CPU and, worse, has the idle
+	 * scan take the sibling of a busy CPU for a whole idle core.
+	 */
+	cpu = scx_bpf_task_cpu(p);
+	if (cpu_idle_test(cpu))
+		cpu_idle_claim(cpu);
+
+	/*
 	 * A task that was moved here from another CPU's queue, by the
 	 * balancer or an idle pull, carries a vruntime that means nothing
 	 * against this CPU's pack: taken from a pack that was far ahead it
@@ -1466,7 +1480,6 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	 * place_entity(): how far the task was from the pack it left is how
 	 * far it is placed from the pack it joins.
 	 */
-	cpu = scx_bpf_task_cpu(p);
 	if (tctx->vcpu >= 0 && tctx->vcpu != cpu) {
 		s64 limit = scale_by_dl_weight(p, slice_lag);
 		s64 lag = (s64)(cpu_vref(tctx->vcpu) - tctx->vruntime);
