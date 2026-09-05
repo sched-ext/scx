@@ -19,6 +19,21 @@ char _license[] SEC("license") = "GPL";
 #define MAX_SMT		8
 
 /*
+ * Words of a CPU bitmap, and limits on the capacity tiers, LLCs and NUMA
+ * nodes the idle CPU scan keeps a bitmap for.
+ */
+#define IDLE_WORDS	(MAX_CPUS / 64)
+#define MAX_TIERS	8
+#define MAX_LLCS	256
+#define MAX_NODES	64
+
+/*
+ * How many bits of a word the whole core pass looks at before it moves
+ * on, and how many a task that cannot run everywhere looks at.
+ */
+#define MAX_SCAN	16
+
+/*
  * How many times the idle CPU scan tries again after losing a claim.
  */
 #define CLAIM_RETRIES	4
@@ -66,6 +81,17 @@ const volatile u32 cpu_nodes[MAX_CPUS];
  * siblings, or every CPU with SMT disabled, points to itself.
  */
 const volatile u32 cpu_sibling_next[MAX_CPUS];
+
+/*
+ * The CPUs of each capacity tier (0 = fastest), LLC and node as bitmaps,
+ * the tier of each CPU, and the number of words the CPUs span.
+ */
+const volatile u64 tier_cpus[MAX_TIERS][IDLE_WORDS];
+const volatile u64 llc_cpus[MAX_LLCS][IDLE_WORDS];
+const volatile u64 node_cpus[MAX_NODES][IDLE_WORDS];
+const volatile u32 cpu_tier[MAX_CPUS];
+const volatile u32 nr_tiers = 1;
+const volatile u32 nr_idle_words = 1;
 
 /*
  * True when all CPUs have the same capacity (no capacity asymmetry).
@@ -462,7 +488,11 @@ static inline bool is_cpu_idle(s32 cpu)
  * nothing of the capacity ordering anyway. What the scan needs is one bit
  * per CPU, updated with a single atomic word operation per transition,
  * the way the kernel's own is, and, for the SMT preference, whether a
- * whole core is idle, which is read from the bits of its siblings. A
+ * whole core is idle, which is read from the bits of its siblings. The
+ * scan intersects the bitmap with the static bitmaps of each capacity
+ * tier, LLC and node, a word at a time, with no loop the verifier cannot
+ * bound on its own: the open-coded iterators cost a call per step and
+ * made the walk of a single word cost more than a microsecond. A
  * count of idle CPUs per core kept next to the bits is not the same
  * thing: the bit and the count are two operations, and between the two
  * another CPU reads a count that is off by one, a core that looks idle
@@ -531,10 +561,10 @@ static bool core_is_idle(s32 cpu)
  */
 static bool no_idle_cpus(void)
 {
-	u32 nr_words = (nr_cpu_ids + 63) / 64, k;
+	u32 k;
 
-	for (k = 0; k < MAX_CPUS / 64; k++) {
-		if (k >= nr_words)
+	for (k = 0; k < IDLE_WORDS; k++) {
+		if (k >= nr_idle_words)
 			break;
 		if (READ_ONCE(idle_cpus[k]))
 			return false;
@@ -572,19 +602,46 @@ static void cpu_idle_set(s32 cpu)
 }
 
 /*
- * Pick an idle CPU for @p in @preferred_cpus order (capacity descending).
- * Only fully idle cores are
- * considered if @whole_core is set, any idle CPU otherwise: the caller runs
- * the whole core pass first, across every tier, since sharing a core costs
- * more than the step down to the next tier, the way select_idle_core()
- * looks for a whole core before select_idle_cpu() settles for a thread.
+ * Return the first CPU of word @k of @w that @p can run on and, if
+ * @whole_core is set, whose whole core is idle, or -EBUSY. The plain
+ * case is the first bit; the walk of the bits is bounded, as the walk of
+ * the cores in select_idle_core() is, and a whole core hidden behind too
+ * many half idle ones is left to the next pass.
+ */
+static __always_inline s32 first_cpu(struct task_struct *p, u64 w, u32 k,
+				     bool restricted, bool whole_core)
+{
+	s32 cpu;
+	u32 j;
+
+	if (!restricted && !whole_core)
+		return k * 64 + __builtin_ctzll(w);
+
+	for (j = 0; j < MAX_SCAN; j++) {
+		if (!w)
+			break;
+		cpu = k * 64 + __builtin_ctzll(w);
+		if ((!whole_core || core_is_idle(cpu)) &&
+		    (!restricted || bpf_cpumask_test_cpu(cpu, p->cpus_ptr)))
+			return cpu;
+		w &= w - 1;
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * Pick an idle CPU for @p one capacity tier at a time from the fastest.
+ * Only fully idle cores are considered if @whole_core is set, any idle
+ * CPU otherwise: the caller runs the whole core pass first, across every
+ * tier, since sharing a core costs more than the step down to the next
+ * tier, the way select_idle_core() looks for a whole core before
+ * select_idle_cpu() settles for a thread.
  *
- * Within a pass a faster idle CPU always wins. Among idle CPUs of the same
- * capacity a CPU on the node of @prev_cpu beats one on another node, a
- * CPU in the same LLC as @prev_cpu beats one in another LLC, and @prev_cpu
- * itself beats an equivalent CPU, to keep the task where its cache is:
- * the order select_idle_sibling() applies within one domain, with the node
- * on top since this scan covers them all.
+ * Within a tier @prev_cpu wins, then a CPU in the same LLC, then a CPU on
+ * the same node, then any CPU, to keep the task where its cache is: the
+ * order select_idle_sibling() applies within one domain, with the node on
+ * top since this scan covers them all.
  *
  * The idle state is claimed only for the CPU that is returned. -EAGAIN
  * means a candidate was found but claimed by someone else first.
@@ -593,54 +650,50 @@ static __always_inline s32
 pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 		     bool whole_core)
 {
-	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), best_cap = 0;
-	u64 prev_llc = cpu_llc_of(prev_cpu);
 	bool restricted = p->nr_cpus_allowed < nr_cpu_ids;
-	int prev_node = cpu_node(prev_cpu);
+	u32 prev_tier = cpu_tier[(u32)prev_cpu & (MAX_CPUS - 1)];
+	u32 prev_llc = cpu_llc_of(prev_cpu) & (MAX_LLCS - 1);
+	u32 prev_node = cpu_node(prev_cpu) & (MAX_NODES - 1);
 	s32 best = -EBUSY;
-	int best_score = -1, i;
+	u32 t, k;
 
-	bpf_for(i, 0, max_cpus) {
-		s32 cpu = preferred_cpus[i];
-		u64 cap = cpu_cap(cpu);
-		int score;
+	for (t = 0; t < MAX_TIERS && best < 0; t++) {
+		s32 node_cpu = -EBUSY, any_cpu = -EBUSY;
 
-		/*
-		 * A candidate was found in a faster tier: done.
-		 */
-		if (best >= 0 && cap < best_cap)
+		if (t >= nr_tiers)
 			break;
-
-		/*
-		 * The idle bit first, it is a load and it rules out most of
-		 * the CPUs on a busy system; the cpumask test is a call, and
-		 * only needed for a task that cannot run everywhere.
-		 */
-		if (!cpu_idle_test(cpu))
-			continue;
-		if (whole_core && !core_is_idle(cpu))
-			continue;
-		if (restricted && !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-			continue;
-
-		score = 0;
-		if (!numa_enabled || cpu_node(cpu) == prev_node)
-			score += 4;
-		if (cpu_llc_of(cpu) == prev_llc)
-			score += 2;
-		if (cpu == prev_cpu && is_prev_allowed)
-			score += 1;
-
-		if (score > best_score) {
-			best_score = score;
-			best_cap = cap;
-			best = cpu;
-			/*
-			 * Nothing in this tier can do better.
-			 */
-			if (score == 7)
-				break;
+		if (is_prev_allowed && t == prev_tier && cpu_idle_test(prev_cpu) &&
+		    (!whole_core || core_is_idle(prev_cpu))) {
+			best = prev_cpu;
+			break;
 		}
+
+		for (k = 0; k < IDLE_WORDS; k++) {
+			u64 w, m;
+
+			if (k >= nr_idle_words)
+				break;
+			w = READ_ONCE(idle_cpus[k]) & tier_cpus[t][k];
+			if (!w)
+				continue;
+
+			m = w & llc_cpus[prev_llc][k];
+			if (m) {
+				best = first_cpu(p, m, k, restricted, whole_core);
+				if (best >= 0)
+					break;
+			}
+			if (numa_enabled && node_cpu < 0) {
+				m = w & node_cpus[prev_node][k];
+				if (m)
+					node_cpu = first_cpu(p, m, k, restricted,
+							     whole_core);
+			}
+			if (any_cpu < 0)
+				any_cpu = first_cpu(p, w, k, restricted, whole_core);
+		}
+		if (best < 0)
+			best = node_cpu >= 0 ? node_cpu : any_cpu;
 	}
 
 	if (best >= 0 && !cpu_idle_claim(best))
@@ -650,8 +703,8 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 }
 
 /*
- * Scan for an idle CPU: fully idle cores first, then any idle CPU, in
- * @preferred_cpus order.
+ * Scan for an idle CPU: fully idle cores first, then any idle CPU, from
+ * the fastest tier.
  *
  * Return the CPU id or -EBUSY if no idle CPU is found.
  */

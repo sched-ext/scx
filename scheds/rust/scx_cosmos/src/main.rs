@@ -20,6 +20,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
@@ -38,6 +39,7 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cosmos";
@@ -220,8 +222,28 @@ impl<'a> Scheduler<'a> {
         cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
         // Normalize CPU capacities to 1..1024 so the highest capacity is always 1024.
         let max_cap = cpus.first().map(|c| c.cpu_capacity).unwrap_or(1).max(1);
+        let mut tier = 0usize;
         for (i, cpu) in cpus.iter().enumerate() {
             let normalized = (cpu.cpu_capacity * 1024 / max_cap).clamp(1, 1024);
+            if i > 0 && cpus[i - 1].cpu_capacity != cpu.cpu_capacity {
+                tier += 1;
+            }
+            let (word, bit) = (cpu.id / 64, 1u64 << (cpu.id % 64));
+            if tier >= rodata.tier_cpus.len()
+                || cpu.llc_id >= rodata.llc_cpus.len()
+                || cpu.node_id >= rodata.node_cpus.len()
+            {
+                bail!(
+                    "cpu {}: tier {tier}, LLC {} or node {} out of range",
+                    cpu.id,
+                    cpu.llc_id,
+                    cpu.node_id
+                );
+            }
+            rodata.tier_cpus[tier][word] |= bit;
+            rodata.llc_cpus[cpu.llc_id][word] |= bit;
+            rodata.node_cpus[cpu.node_id][word] |= bit;
+            rodata.cpu_tier[cpu.id] = tier as u32;
             rodata.cpu_capacity[cpu.id] = normalized as c_ulong;
             rodata.cpu_llc[cpu.id] = cpu.llc_id as u64;
             rodata.cpu_nodes[cpu.id] = cpu.node_id as u32;
@@ -241,6 +263,8 @@ impl<'a> Scheduler<'a> {
                 rodata.cpu_sibling_next[id] = ids[(i + 1) % ids.len()] as u32;
             }
         }
+        rodata.nr_tiers = tier as u32 + 1;
+        rodata.nr_idle_words = (*NR_CPU_IDS as u32).div_ceil(64);
         rodata.all_cpus_same_capacity = cpus.iter().all(|cpu| cpu.cpu_capacity == max_cap);
         if !rodata.all_cpus_same_capacity {
             info!(
