@@ -1945,6 +1945,7 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 	struct subcell_config(*subcell_configs)[MAX_SUBCELLS_PER_CELL];
 	struct cell *cell;
 	u32 subcell_id;
+	u32 cpu;
 
 	if (!config || cell_id >= MAX_CELLS)
 		return -EINVAL;
@@ -2006,6 +2007,44 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 		__builtin_memcpy(subcell->matches, subcell_config->matches, sizeof(subcell->matches));
 		subcell->primary = subcell_config->primary;
 		subcell->borrowable = subcell_config->borrowable;
+
+		if (!subcell_config->in_use)
+			continue;
+
+		bpf_for(cpu, 0, nr_possible_cpus)
+		{
+			struct cpu_ctx *cctx;
+			bool cpu_in_subcell;
+
+			if (cell_cpumask_data_test_cpu(&subcell_config->primary, cpu, &cpu_in_subcell)) {
+				scx_bpf_error("failed to decode subcell cpumask for cell=%u subcell=%u", cell_id,
+					      subcell_id);
+				return -EINVAL;
+			}
+
+			if (!cpu_in_subcell)
+				continue;
+
+			cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
+			if (!cctx)
+				return -ENOENT;
+
+			if (cctx->cell != cell_id || cctx->subcell != subcell_id) {
+				struct subcell_llc *llc_state;
+				u32 llc_idx;
+
+				llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ? cctx->llc :
+											    FAKE_FLAT_SUBCELL_LLC;
+				llc_state = lookup_subcell_llc(subcell, llc_idx);
+				if (!llc_state)
+					return -EINVAL;
+				if (time_before(READ_ONCE(llc_state->vtime_now), cctx->vtime_now))
+					WRITE_ONCE(llc_state->vtime_now, cctx->vtime_now);
+			}
+
+			cctx->cell = cell_id;
+			cctx->subcell = subcell_id;
+		}
 	}
 
 	return 0;
