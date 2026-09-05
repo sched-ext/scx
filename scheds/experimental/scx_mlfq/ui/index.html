@@ -1,0 +1,457 @@
+<!--
+  SPDX-License-Identifier: GPL-2.0
+  Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+
+  scx_mlfq web UI: a live view of the scheduler's per-CPU state and
+  system-wide counters, served by src/webui.rs over loopback port 50005
+  (or the /tmp/scx_mlfq.sock unix-socket fallback). Offline-first: no
+  external fonts or libraries.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>scx_mlfq stats</title>
+  <style>
+    :root {
+      --bg: #000000;
+      --surface: #0a0a0a;
+      --elevated: #111111;
+      --border: #1a1a1a;
+      --border-hover: #333333;
+      --text-primary: #ededed;
+      --text-secondary: #888888;
+      --text-muted: #6a6a6a;
+      --accent: #3f83f8;
+      --success: #31c48d;
+      --warning: #f5a623;
+      --error: #ee0000;
+      --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+      --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+    body {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      -webkit-font-smoothing: antialiased;
+      padding: 16px;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    @media (min-width: 640px) { body { padding: 24px; } }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .stat-value {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      font-feature-settings: "tnum";
+    }
+
+    /* Per-CPU card grid. Dense chips in a wrapping grid with a bounded
+     * height and an internal scroll, so a many-core machine (for example
+     * a 128-core EPYC) never stretches the page. */
+    .core-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+      gap: 6px;
+      margin-bottom: 16px;
+      max-height: 52vh;
+      overflow-y: auto;
+      padding-right: 4px;
+      scrollbar-width: thin;
+    }
+    .core-card { padding: 8px; font-size: 0.75rem; }
+    .core-card .core-id { font-size: 0.6875rem; color: var(--text-muted); font-family: var(--font-mono); }
+    .core-card .core-freq { font-size: 0.6875rem; color: var(--text-secondary); margin-top: 1px; }
+    .core-card .core-smt { font-size: 0.625rem; color: var(--warning); }
+    .core-card .core-rt { font-size: 0.625rem; color: var(--error); }
+    .core-card .core-llc { font-size: 0.625rem; color: var(--text-muted); }
+    .core-card .core-queue { font-size: 0.75rem; color: var(--accent); margin-top: 2px; font-family: var(--font-mono); }
+    .core-card .core-queue.idle { color: var(--text-muted); }
+
+    /* Per-LLC runnable occupancy chips */
+    .llc-chip {
+      background: var(--elevated);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+    .llc-chip .llc-chip-count { color: var(--accent); }
+
+    /* Summary card */
+    .summary-tldr { font-size: 0.875rem; font-weight: 600; color: var(--success); line-height: 1.45; margin-bottom: 8px; }
+    .summary-explanation { font-size: 0.8125rem; color: var(--text-secondary); line-height: 1.55; }
+    .section-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px; }
+    .subsection-label { font-size: 0.6875rem; color: var(--text-muted); margin-bottom: 2px; }
+
+    /* System stats grid */
+    .sys-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      font-size: 0.8125rem;
+    }
+    @media (min-width: 640px) { .sys-grid { grid-template-columns: repeat(4, 1fr); } }
+    @media (max-width: 640px) {
+      body { padding: 8px; }
+      .card { padding: 10px; }
+      .stat-value { font-size: 0.875rem !important; word-break: break-all; }
+      .core-grid { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div style="max-width:1152px;margin:auto">
+
+    <!-- Header -->
+    <header class="card" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <div style="min-width:0;overflow:hidden">
+        <h1 style="font-size:1.25rem;font-weight:700">scx_mlfq stats</h1>
+        <p style="font-size:0.8125rem;color:var(--text-secondary);margin-top:2px">multilevel feedback queues, virtual time, placement, stealing and realtime pressure</p>
+      </div>
+      <div id="status-badge" style="font-size:0.75rem;padding:3px 10px;border-radius:999px;border:1px solid var(--success);color:var(--success);font-family:var(--font-mono);white-space:nowrap">
+        ● running
+      </div>
+    </header>
+
+    <!-- Per-CPU cards -->
+    <div id="core-cards" class="core-grid"></div>
+
+    <!-- GPU -->
+    <div class="card" style="margin-bottom:16px" id="gpu-card">
+      <p class="section-label">GPU</p>
+      <div class="sys-grid">
+        <div><span style="color:var(--text-muted)">amdgpu:</span> <span class="stat-value" id="gpu-amdgpu">-</span></div>
+        <div><span style="color:var(--text-muted)">gpu_sched:</span> <span class="stat-value" id="gpu-sched">-</span></div>
+        <div><span style="color:var(--text-muted)">gpu_submit total:</span> <span class="stat-value" id="gpu-total">0</span></div>
+        <div><span style="color:var(--text-muted)">running gpu_submit:</span> <span class="stat-value" id="gpu-running">-</span></div>
+      </div>
+      <p style="font-size:0.75rem;color:var(--text-muted);margin-top:8px" id="gpu-note"></p>
+    </div>
+
+    <!-- Summary -->
+    <div class="card" style="margin-bottom:16px">
+      <p class="section-label">Summary</p>
+      <p class="subsection-label">TL;DR</p>
+      <p class="summary-tldr" id="summary-tldr">Loading...</p>
+      <p class="subsection-label">Explanation</p>
+      <p class="summary-explanation" id="summary-explanation"></p>
+    </div>
+
+    <!-- System stats -->
+    <div class="card">
+      <p class="section-label">System</p>
+      <div class="sys-grid">
+        <div><span style="color:var(--text-muted)">On CPU:</span> <span class="stat-value" id="on-cpu">0</span></div>
+        <div><span style="color:var(--text-muted)">Uptime:</span> <span class="stat-value" id="uptime">0</span></div>
+        <div><span style="color:var(--text-muted)">Q1 placements:</span> <span class="stat-value" id="q1-place">0</span></div>
+        <div><span style="color:var(--text-muted)">Q2 placements:</span> <span class="stat-value" id="q2-place">0</span></div>
+        <div><span style="color:var(--text-muted)">Q3 placements:</span> <span class="stat-value" id="q3-place">0</span></div>
+        <div><span style="color:var(--text-muted)">Q1 runnable:</span> <span class="stat-value" id="q1-runnable">0</span></div>
+        <div><span style="color:var(--text-muted)">Q2 runnable:</span> <span class="stat-value" id="q2-runnable">0</span></div>
+        <div><span style="color:var(--text-muted)">Q3 runnable:</span> <span class="stat-value" id="q3-runnable">0</span></div>
+        <div><span style="color:var(--text-muted)">Promotions:</span> <span class="stat-value" id="promotions">0</span></div>
+        <div><span style="color:var(--text-muted)">Demotions:</span> <span class="stat-value" id="demotions">0</span></div>
+        <div><span style="color:var(--text-muted)">Aging boosts:</span> <span class="stat-value" id="aging-boosts">0</span></div>
+        <div><span style="color:var(--text-muted)">Short-sleep boosts:</span> <span class="stat-value" id="short-sleep-boosts">0</span></div>
+        <div><span style="color:var(--text-muted)">Preemption kicks:</span> <span class="stat-value" id="preemption-kicks">0</span></div>
+        <div><span style="color:var(--text-muted)">CPUperf boosts:</span> <span class="stat-value" id="cpuperf-boosts">0</span></div>
+        <div><span style="color:var(--text-muted)">Steals:</span> <span class="stat-value" id="steals">0</span></div>
+        <div><span style="color:var(--text-muted)">Steals same-LLC:</span> <span class="stat-value" id="steals-same-llc">0</span></div>
+        <div><span style="color:var(--text-muted)">Steals cross-LLC:</span> <span class="stat-value" id="steals-cross-llc">0</span></div>
+        <div><span style="color:var(--text-muted)">Keep running:</span> <span class="stat-value" id="keep-running">0</span></div>
+        <div><span style="color:var(--text-muted)">RT takeovers:</span> <span class="stat-value" id="rt-takeovers">0</span></div>
+        <div><span style="color:var(--text-muted)">RT evacuations:</span> <span class="stat-value" id="rt-evacuations">0</span></div>
+        <div><span style="color:var(--text-muted)">RT redirects:</span> <span class="stat-value" id="rt-redirects">0</span></div>
+        <div><span style="color:var(--text-muted)">RT reenqs:</span> <span class="stat-value" id="rt-reenqs">0</span></div>
+        <div><span style="color:var(--text-muted)">Tree gen:</span> <span class="stat-value" id="tree-gen">0</span></div>
+        <div><span style="color:var(--text-muted)">Tree nodes:</span> <span class="stat-value" id="tree-nodes">0</span></div>
+        <div><span style="color:var(--text-muted)">Tree MAE:</span> <span class="stat-value" id="tree-mae">0</span></div>
+        <div><span style="color:var(--text-muted)">Tree corr:</span> <span class="stat-value" id="tree-corr">0</span></div>
+        <div><span style="color:var(--text-muted)">Wakeup lat:</span> <span class="stat-value" id="wakeup-lat">0</span><span style="color:var(--text-muted)"> us</span></div>
+        <div><span style="color:var(--text-muted)">Wakeup rate:</span> <span class="stat-value" id="wakeup-rate">0</span><span style="color:var(--text-muted)"> /s</span></div>
+        <div><span style="color:var(--text-muted)">T_L / T_H eff:</span> <span class="stat-value" id="t-l-eff">0</span><span style="color:var(--text-muted)"> / </span><span class="stat-value" id="t-h-eff">0</span><span style="color:var(--text-muted)"> us</span></div>
+        <div><span style="color:var(--text-muted)">T_INT / T_BND eff:</span> <span class="stat-value" id="t-int-eff">0</span><span style="color:var(--text-muted)"> / </span><span class="stat-value" id="t-bnd-eff">0</span><span style="color:var(--text-muted)"> us</span></div>
+        <div><span style="color:var(--text-muted)">Guard eff:</span> <span class="stat-value" id="guard-eff">0</span><span style="color:var(--text-muted)"> us</span></div>
+        <div><span style="color:var(--text-muted)">Adapt shift:</span> <span class="stat-value" id="adapt-shift">0</span><span style="color:var(--text-muted)"> %</span></div>
+        <div style="grid-column:1/-1">
+          <span style="color:var(--text-muted)">LLC loads:</span>
+          <span id="llc-runnable" style="display:inline-flex;flex-wrap:wrap;gap:4px;margin-left:4px"></span>
+        </div>
+        <div style="grid-column:1/-1">
+          <span style="color:var(--text-muted)">Op lat (us):</span>
+          <span class="stat-value" id="op-lat" style="font-size:0.75rem;font-weight:400;word-break:break-all">n/a</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection status -->
+    <div style="text-align:center;margin-top:16px">
+      <p style="font-size:0.75rem;color:var(--text-muted)" id="conn-status">Loading...</p>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+
+    // Fixed-point layout of the BPF gauges (FP_SHIFT in intf.h).
+    const FP_SHIFT = 8;
+    const FP_ONE = 1 << FP_SHIFT;
+    // A published-model correlation above this threshold counts as the
+    // model tracking the workload. The scheduler publishes only models
+    // that beat the EMA baseline on the held-out slice, so the
+    // threshold separates a meaningful fit from a weak one.
+    const SUMMARY_GOOD_CORR = 0.3;
+    // Latency bucket edges in microseconds, mirroring the MLFQ_OP_LAT_*
+    // constants in src/bpf/intf.h. Eight buckets from these seven edges.
+    const OP_LAT_EDGES_US = [2, 5, 10, 20, 50, 100, 250];
+    // GPU trace mask bits mirrored from src/bpf/intf.h:1057 (MLFQ_GPU_TRACE_*).
+    // Keep in sync with the Rust use at src/main.rs:411; the UI decodes
+    // gpuMask with these names so a future bit reassignment stays consistent.
+    const GPU_TRACE_AMDGPU_CS = 1 << 0;
+    const GPU_TRACE_AMDGPU_CS_IOCTL = 1 << 1;
+    const GPU_TRACE_GPU_SCHED = 1 << 2;
+
+    function clamp(v) { return v < 0 ? 0 : v; }
+
+    function fmt(n) {
+      n = clamp(n);
+      if (n >= 1e15) return (n / 1e15).toFixed(2) + 'Q';
+      if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+      if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+      return n.toLocaleString();
+    }
+
+    function fmtRuntime(ns) {
+      ns = clamp(ns);
+      var sec = ns / 1e9;
+      if (sec < 60) return sec.toFixed(1) + ' sec';
+      var min = sec / 60;
+      if (min < 60) return min.toFixed(1) + ' min';
+      var hr = min / 60;
+      if (hr < 24) return hr.toFixed(1) + ' hr';
+      var day = hr / 24;
+      return day.toFixed(1) + ' days';
+    }
+
+    // One op's eight latency buckets as "low-high=count" pairs, mirroring
+    // the stats module's compact form. Bucket edges are the MLFQ_OP_LAT_*
+    // constants in src/bpf/intf.h, in microseconds.
+    function fmtOpLat(op) {
+      var edges = OP_LAT_EDGES_US;
+      if (!op || op.length < 8) return 'n/a';
+      var parts = [];
+      parts.push('0-' + edges[0] + '=' + op[0]);
+      for (var i = 1; i < edges.length; i++) {
+        parts.push(edges[i - 1] + '-' + edges[i] + '=' + op[i]);
+      }
+      parts.push(edges[6] + '+=' + op[7]);
+      return parts.join(' ');
+    }
+
+    function renderCoreCards(data) {
+      var container = el('core-cards');
+      var perCpu = data.per_cpu || [];
+      if (!perCpu.length) {
+        container.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;color:var(--text-muted)">No CPU data yet</div>';
+        return;
+      }
+      container.innerHTML = perCpu.map(function(cpu) {
+        var curMhz = Math.round((cpu.cur_freq_khz || 0) / 1000);
+        var maxMhz = Math.round((cpu.freq_khz || 0) / 1000);
+        var freqLabel = curMhz > 0
+          ? curMhz + ' of ' + maxMhz + ' MHz'
+          : maxMhz + ' MHz';
+        var smtLabel = cpu.smt ? ' <span class="core-smt">SMT</span>' : '';
+        var rtLabel = cpu.rt_occupied ? ' <span class="core-rt">RT</span>' : '';
+        var qid = cpu.running_queue || 0;
+        var qLabel = qid > 0 ? 'Q' + qid : 'idle';
+        var qClass = qid > 0 ? 'core-queue' : 'core-queue idle';
+        return '<div class="card core-card">' +
+          '<div class="core-id">CPU ' + cpu.id + smtLabel + rtLabel + '</div>' +
+          '<div class="core-freq">' + freqLabel + '</div>' +
+          '<div class="core-llc">LLC ' + (cpu.llc_id || 0) + '</div>' +
+          '<div class="' + qClass + '">' + qLabel + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    // Summary prose, built from the live stats with the scheduler's
+    // published rules: the committed model is the one that beat the EMA
+    // baseline on its held-out slice, and its Pearson correlation with
+    // the measured bursts is the fit number. The wakeup-rate gauge
+    // reads zero only in the first second after attach, before the
+    // first adaptation fold, so the sentence follows the data. A model
+    // that has not been published yet gets the still-learning wording
+    // instead.
+    function buildSummary(s) {
+      var lat = Math.round(s.sys_lat_ema_us || 0);
+      var rate = (s.sys_rate_ema || 0) >> FP_SHIFT;
+      var maeTree = Math.round(s.tree_mae_tree_us || 0);
+      var maeEma = Math.round(s.tree_mae_ema_us || 0);
+      var corr = (s.tree_corr_milli || 0) / 1000;
+      var trained = (s.tree_model_generation || 0) > 0;
+      var tldr, explanation;
+      if (!trained) {
+        tldr = 'MLFQ is working as expected and is still learning your workload.';
+        explanation = 'The classification model has not been published yet, so it is still collecting samples from your task behavior. ' +
+          'As you can see from the wakeup-latency gauge, it shows ' + lat + ' us. ' +
+          'Based on the internal rules of this scheduler, a model is published only when it beats the EMA baseline on its held-out slice, and this shows that MLFQ is adapting correctly to your workload.';
+      } else {
+        tldr = corr > SUMMARY_GOOD_CORR
+          ? 'MLFQ is working as expected and is adapting correctly to your workload.'
+          : 'MLFQ is working as expected and is still adapting to your workload.';
+        explanation = 'As you can see from the wakeup-latency gauge, it shows ' + lat + ' us. ' +
+          (rate > 0
+            ? 'The wakeup-rate gauge shows ' + fmt(rate) + ' per second, '
+            : 'The wakeup-rate gauge is still warming up, ') +
+          'and the classification model reports a mean absolute error of ' + maeTree + ' us, against ' + maeEma + ' us for the EMA gauge. ' +
+          'Based on the internal rules of this scheduler, the final result is a model correlation of ' + corr.toFixed(2) + ', and this shows that MLFQ is correctly adapting to your workload.';
+      }
+      return { tldr: tldr, explanation: explanation };
+    }
+
+    function updateUI(data) {
+      el('status-badge').textContent = '● running';
+      el('status-badge').style.borderColor = 'var(--success)';
+      el('status-badge').style.color = 'var(--success)';
+
+      var s = data.stats || {};
+      var qr = data.queue_runnable || [];
+      el('on-cpu').textContent = fmt(s.on_cpu || 0);
+      el('uptime').textContent = fmtRuntime(s.uptime_ns || 0);
+      el('q1-place').textContent = fmt(s.q1_placements || 0);
+      el('q2-place').textContent = fmt(s.q2_placements || 0);
+      el('q3-place').textContent = fmt(s.q3_placements || 0);
+      el('q1-runnable').textContent = fmt(qr[1] || 0);
+      el('q2-runnable').textContent = fmt(qr[2] || 0);
+      el('q3-runnable').textContent = fmt(qr[3] || 0);
+      el('promotions').textContent = fmt(s.promotions || 0);
+      el('demotions').textContent = fmt(s.demotions || 0);
+      el('aging-boosts').textContent = fmt(s.aging_boosts || 0);
+      el('short-sleep-boosts').textContent = fmt(s.short_sleep_boosts || 0);
+      el('preemption-kicks').textContent = fmt(s.preemption_kicks || 0);
+      el('cpuperf-boosts').textContent = fmt(s.cpuperf_boosts || 0);
+      el('steals').textContent = fmt(s.steals || 0);
+      el('steals-same-llc').textContent = fmt(s.steals_same_llc || 0);
+      el('steals-cross-llc').textContent = fmt(s.steals_cross_llc || 0);
+      el('keep-running').textContent = fmt(s.keep_running || 0);
+      el('rt-takeovers').textContent = fmt(s.rt_takeovers || 0);
+      el('rt-evacuations').textContent = fmt(s.rt_evacuations || 0);
+      el('rt-redirects').textContent = fmt(s.rt_redirects || 0);
+      el('rt-reenqs').textContent = fmt(s.rt_reenqs || 0);
+      el('tree-gen').textContent = fmt(s.tree_model_generation || 0);
+      el('tree-nodes').textContent = fmt(s.tree_model_nodes || 0);
+      el('tree-mae').textContent = fmt(s.tree_mae_tree_us || 0) + ' us';
+      el('tree-corr').textContent = ((s.tree_corr_milli || 0) / 1000).toFixed(2);
+
+      var summary = buildSummary(s);
+      el('summary-tldr').textContent = summary.tldr;
+      el('summary-explanation').textContent = summary.explanation;
+
+      // Adaptation gauges. The wakeup-rate gauge is fixed point
+      // (FP_SHIFT 8), the shift is fixed point too and shown as a percent
+      // of the base band width.
+      el('wakeup-lat').textContent = fmt(s.sys_lat_ema_us || 0);
+      el('wakeup-rate').textContent = fmt((s.sys_rate_ema || 0) >> FP_SHIFT);
+      el('t-l-eff').textContent = fmt(s.t_l_eff_us || 0);
+      el('t-h-eff').textContent = fmt(s.t_h_eff_us || 0);
+      el('t-int-eff').textContent = fmt(s.t_int_eff_us || 0);
+      el('t-bnd-eff').textContent = fmt(s.t_bnd_eff_us || 0);
+      el('guard-eff').textContent = fmt(s.guard_eff_us || 0);
+      var shiftPct = ((s.adapt_shift || 0) * 100 / FP_ONE);
+      el('adapt-shift').textContent = shiftPct.toFixed(1);
+
+      // GPU card: amdgpu yes/no, gpu_sched yes/no, and current
+      // running_gpu_submit 0..4 for the task now on each CPU. The per-CPU
+      // value is the quantised counter of the running task (0..4), the
+      // total is the lifetime count of deduped bumps. When both trace
+      // bits are no, show not supported, not 0.
+      var gpuMask = data.gpu_trace_mask || 0;
+      var amdgpuYes = (gpuMask & GPU_TRACE_AMDGPU_CS) || (gpuMask & GPU_TRACE_AMDGPU_CS_IOCTL);
+      var gpuSchedYes = (gpuMask & GPU_TRACE_GPU_SCHED) !== 0;
+      el('gpu-amdgpu').textContent = amdgpuYes ? 'yes' : 'no';
+      el('gpu-sched').textContent = gpuSchedYes ? 'yes' : 'no';
+      el('gpu-total').textContent = fmt(data.gpu_submit_total || 0);
+      if (!amdgpuYes && !gpuSchedYes) {
+        el('gpu-running').textContent = 'not supported';
+        el('gpu-note').textContent = 'GPU tracepoints not available on this kernel, gpu_submit stays at 0.';
+      } else {
+        var perCpu = data.per_cpu || [];
+        var running = [];
+        for (var i = 0; i < perCpu.length; i++) {
+          if (perCpu[i].running_queue > 0) {
+            var v = perCpu[i].running_gpu_submit;
+            if (v === undefined || v === null) v = perCpu[i].gpu_submit;
+            if (v !== undefined && v !== null) running.push(v);
+          }
+        }
+        if (running.length === 0) {
+          el('gpu-running').textContent = 'idle';
+        } else {
+          // Show distribution of 0..4 values for the running queue, e.g., "2, 2, 1".
+          el('gpu-running').textContent = running.join(', ');
+        }
+        el('gpu-note').textContent = '';
+      }
+
+      // Per-LLC runnable occupancy. One chip per domain with tracked
+      // runnable tasks, in domain order. All-zero shows a single muted
+      // entry.
+      var lr = data.llc_runnable || [];
+      var llcChips = [];
+      for (var i = 0; i < lr.length; i++) {
+        if (lr[i]) {
+          llcChips.push('<span class="llc-chip">LLC ' + i + ': <span class="llc-chip-count">' + fmt(lr[i]) + '</span></span>');
+        }
+      }
+      el('llc-runnable').innerHTML = llcChips.length
+        ? llcChips.join('')
+        : '<span class="llc-chip">0</span>';
+
+      var opLat = s.op_lat || [];
+      var opNames = ['stopping', 'dispatch', 'enqueue', 'cpu_release'];
+      var opStr = opNames.map(function(name, i) {
+        return name + ': ' + fmtOpLat(opLat.slice(i * 8, i * 8 + 8));
+      }).join('  |  ');
+      el('op-lat').textContent = opStr;
+
+      renderCoreCards(data);
+    }
+
+    function pollStats() {
+      fetch('/api/stats')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          updateUI(data);
+          el('conn-status').textContent = 'Live at ' + new Date().toLocaleTimeString();
+        })
+        .catch(function() {
+          el('status-badge').textContent = '● disconnected';
+          el('status-badge').style.borderColor = 'var(--error)';
+          el('status-badge').style.color = 'var(--error)';
+          el('conn-status').textContent = 'Disconnected, retrying...';
+        });
+    }
+
+    pollStats();
+    setInterval(pollStats, 1000);
+  </script>
+</body>
+</html>
