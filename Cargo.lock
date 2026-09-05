@@ -5913,8 +5913,6 @@ dependencies = [
  "ctrlc",
  "libbpf-rs 0.27.0",
  "log",
- "nvml-wrapper",
- "nvml-wrapper-sys",
  "scx_cargo",
  "scx_stats",
  "scx_stats_derive",

@@ -4,34 +4,14 @@
  */
 #include <scx/common.bpf.h>
 #include <scx/percpu.bpf.h>
-#include <lib/pmu.h>
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
 
 /*
- * Maximum amount of CPUs supported by the scheduler when flat or preferred
- * idle CPU scan is enabled.
+ * Maximum amount of CPUs supported by the scheduler.
  */
 #define MAX_CPUS	1024
-
-/*
- * Maximum amount of NUMA nodes supported by the scheduler.
- */
-#define MAX_NODES	1024
-
-/*
- * Maximum amount of GPUs supported by the scheduler.
- */
-#define MAX_GPUS	32
-
-/*
- * Shared DSQ used to schedule tasks in deadline mode when the system is
- * saturated.
- *
- * When system is not saturated tasks will be dispatched to the local DSQ
- * in round-robin mode.
- */
 
 /*
  * Thresholds for applying hysteresis to CPU performance scaling:
@@ -94,32 +74,6 @@ const volatile bool cpufreq_enabled = true;
 const volatile bool numa_enabled;
 
 /*
- * Enable automatic GPU affinity.
- */
-const volatile bool gpu_enabled = true;
-
-/*
- * ID of perf-event being tracked. 0 for "no event".
- */
-const volatile u64 perf_config;
-
-/*
- * Performance counter threshold to classify a task as event heavy.
- */
-volatile u64 perf_threshold;
-
-/*
- * Sticky perf event (0x0 = disabled). When task's count for this event
- * exceeds perf_sticky_threshold, keep it on the same CPU.
- */
-const volatile u64 perf_sticky;
-
-/*
- * Threshold for sticky event; task is kept on same CPU when exceeded.
- */
-volatile u64 perf_sticky_threshold;
-
-/*
  * Disable high-resolution preemption enforcement.
  */
 const volatile bool time_preemption;
@@ -154,9 +108,6 @@ const volatile u64 busy_threshold;
 /*
  * Scheduler statistics.
  */
-volatile u64 nr_event_dispatches;
-volatile u64 nr_ev_sticky_dispatches;
-volatile u64 nr_gpu_dispatches;
 volatile u64 nr_steals;
 
 /*
@@ -168,11 +119,6 @@ UEI_DEFINE(uei);
  * Maximum amount of CPUs supported by the system.
  */
 static u64 nr_cpu_ids;
-
-/*
- * Maximum possible NUMA node number.
- */
-const volatile u32 nr_node_ids;
 
 /*
  * Current system vruntime.
@@ -201,8 +147,6 @@ struct task_ctx {
 	s32 vcpu;
 	u64 vjoin_w;
 	u64 vjoin_v;
-	u64 perf_events;
-	u64 perf_sticky_events;
 };
 
 struct {
@@ -211,78 +155,6 @@ struct {
 	__type(key, int);
 	__type(value, struct task_ctx);
 } task_ctx_stor SEC(".maps");
-
-/*
- * NUMA node context.
- */
-struct node_ctx {
-        struct bpf_cpumask __kptr *cpumask;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct node_ctx);
-	__uint(max_entries, MAX_NODES);
-} node_ctx_stor SEC(".maps");
-
-struct node_ctx *try_lookup_node_ctx(int node)
-{
-	return bpf_map_lookup_elem(&node_ctx_stor, &node);
-}
-
-static int cpu_node(s32 cpu)
-{
-	if (!numa_enabled)
-		return 0;
-	if (cpu < 0 || cpu >= MAX_CPUS)
-		return -ENOENT;
-
-	return cpu_nodes[(u32)cpu & (MAX_CPUS - 1)];
-}
-
-/*
- * GPU -> node mapping.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_GPUS);
-	__type(key, u32);	/* nvml_id */
-	__type(value, u32);	/* node_id */
-} gpu_node_map SEC(".maps");
-
-/*
- * Process TGID -> NUMA node mapping for GPU workload tasks. NVML identifies
- * GPU processes, and userspace may include peer processes from the same
- * workload cgroup.
- */
-#define MAX_GPU_PIDS	8192
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_GPU_PIDS);
-	__type(key, u32);	/* process tgid */
-	__type(value, u32);	/* node_id */
-} gpu_pid_map SEC(".maps");
-
-/*
- * Look up the preferred NUMA node for a process TGID from the userspace-
- * provided GPU workload list. Returns a node id or a negative
- * error.
- */
-static int gpu_node_by_tgid(u32 tgid)
-{
-	u32 *node;
-
-	if (!gpu_enabled || !numa_enabled)
-		return -ENOENT;
-
-	node = bpf_map_lookup_elem(&gpu_pid_map, &tgid);
-	if (!node)
-		return -ENOENT;
-
-	return *node;
-}
 
 /*
  * Return a local task context from a generic task.
@@ -299,7 +171,6 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 struct cpu_ctx {
 	u64 last_update;
 	u64 perf_lvl;
-	u64 perf_events;
 	u64 busy_avg;
 	u64 busy_eval_at;
 	u64 acc_utime;
@@ -325,44 +196,6 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 {
 	const u32 idx = 0;
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
-}
-
-static void update_counters(struct task_struct *p, struct task_ctx *tctx, s32 cpu)
-{
-	struct cpu_ctx *cctx;
-	u64 delta = 0;
-	u64 sticky_delta = 0;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (cctx)
-		cctx->perf_events += delta;
-
-	if (perf_config) {
-		scx_pmu_read(p, perf_config, &delta, true);
-		tctx->perf_events = delta;
-	}
-
-	if (perf_sticky) {
-		scx_pmu_read(p, perf_sticky, &sticky_delta, true);
-		tctx->perf_sticky_events = sticky_delta;
-	}
-}
-
-/*
- * Return true if the task is triggering too many PMU events (migration event).
- */
-static inline bool is_event_heavy(const struct task_ctx *tctx)
-{
-	return perf_config && tctx->perf_events > perf_threshold;
-}
-
-/*
- * Return true if the task exceeds the sticky event threshold and should
- * stay on the same CPU.
- */
-static inline bool is_sticky_event_heavy(const struct task_ctx *tctx)
-{
-	return perf_sticky && tctx->perf_sticky_events > perf_sticky_threshold;
 }
 
 /*
@@ -451,55 +284,6 @@ static void update_cpufreq(s32 cpu)
 static inline u64 cpu_dsq(s32 cpu)
 {
 	return cpu;
-}
-
-/*
- * Return true if task @p can run on NUMA node @node, false otherwise.
- */
-static bool can_use_node(const struct task_struct *p, int node)
-{
-	struct node_ctx *nctx;
-
-	if (!numa_enabled)
-		return true;
-
-	if (p->nr_cpus_allowed == nr_cpu_ids)
-		return true;
-
-	nctx = try_lookup_node_ctx(node);
-	if (!nctx || !nctx->cpumask ||
-	    !bpf_cpumask_intersects(cast_mask(nctx->cpumask), p->cpus_ptr))
-		return false;
-
-	return true;
-}
-
-/*
- * If the task's thread group is in gpu_pid_map and should run on a different
- * node, pick a CPU on the preferred GPU node. Returns the CPU id (>= 0) on
- * success, or a negative value if the task is not GPU-bound, is already on
- * the right node, or no suitable CPU was found.
- */
-static s32 pick_cpu_on_gpu_node(const struct task_struct *p, int node,
-				struct task_ctx *tctx)
-{
-	struct node_ctx *nctx;
-	struct bpf_cpumask *mask;
-	int target_node;
-
-	target_node = gpu_node_by_tgid(p->tgid);
-	if (target_node < 0 || target_node == node || !can_use_node(p, target_node))
-		return -ENOENT;
-
-	nctx = try_lookup_node_ctx(target_node);
-	if (!nctx || !nctx->cpumask)
-		return -ENOENT;
-
-	mask = tctx->cpumask;
-	if (!mask || !bpf_cpumask_and(mask, cast_mask(nctx->cpumask), p->cpus_ptr))
-		return -ENOENT;
-
-	return __COMPAT_scx_bpf_pick_idle_cpu_node(cast_mask(mask), target_node, 0);
 }
 
 /*
@@ -640,6 +424,16 @@ static __always_inline u64 cpu_llc_of(s32 cpu)
 	return cpu_llc[(u32)cpu & (MAX_CPUS - 1)];
 }
 
+static __always_inline int cpu_node(s32 cpu)
+{
+	if (!numa_enabled)
+		return 0;
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return -ENOENT;
+
+	return cpu_nodes[(u32)cpu & (MAX_CPUS - 1)];
+}
+
 static inline bool is_cpu_idle(s32 cpu)
 {
 	struct task_struct *p;
@@ -765,8 +559,8 @@ static void cpu_idle_set(s32 cpu)
 }
 
 /*
- * Pick an idle CPU for @p in @preferred_cpus order (capacity descending),
- * ignoring the CPUs slower than @min_cap. Only fully idle cores are
+ * Pick an idle CPU for @p in @preferred_cpus order (capacity descending).
+ * Only fully idle cores are
  * considered if @whole_core is set, any idle CPU otherwise: the caller runs
  * the whole core pass first, across every tier, since sharing a core costs
  * more than the step down to the next tier, the way select_idle_core()
@@ -783,7 +577,7 @@ static void cpu_idle_set(s32 cpu)
  */
 static __always_inline s32
 pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
-		     bool whole_core, u64 min_cap)
+		     bool whole_core)
 {
 	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), best_cap = 0;
 	u64 prev_llc = cpu_llc_of(prev_cpu);
@@ -797,8 +591,6 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 		u64 cap = cpu_cap(cpu);
 		int score;
 
-		if (cap < min_cap)
-			break;
 		/*
 		 * A candidate was found in a faster tier: done.
 		 */
@@ -845,11 +637,11 @@ pick_idle_cpu_ranked(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 
 /*
  * Scan for an idle CPU: fully idle cores first, then any idle CPU, in
- * @preferred_cpus order. CPUs slower than @min_cap are never considered.
+ * @preferred_cpus order.
  *
  * Return the CPU id or -EBUSY if no idle CPU is found.
  */
-static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu, u64 min_cap)
+static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 {
 	bool is_prev_allowed = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
 	s32 cpu;
@@ -870,17 +662,17 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu, u64 min_cap)
 		return -EBUSY;
 
 	if (READ_ONCE(nr_idle_cores) > 0) {
-		cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, true, min_cap);
+		cpu = pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, true);
 		if (cpu >= 0)
 			return cpu;
 	}
 
-	return pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, false, min_cap);
+	return pick_idle_cpu_ranked(p, prev_cpu, is_prev_allowed, false);
 }
 
 /*
- * Pick an idle CPU for task @p, never slower than @min_cap. @this_cpu is
- * the waker's CPU on a wakeup, -1 otherwise.
+ * Pick an idle CPU for task @p. @this_cpu is the waker's CPU on a wakeup,
+ * -1 otherwise.
  *
  * On a synchronous wakeup the waker is about to sleep: when nothing else
  * is waiting for its CPU and the wakee shares the LLC with it, the wakee
@@ -890,17 +682,16 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu, u64 min_cap)
  * Return the CPU id or a negative value if an idle CPU can't be found.
  */
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
-			 u64 wake_flags, u64 min_cap)
+			 u64 wake_flags)
 {
 	if (!no_wake_sync && (wake_flags & SCX_WAKE_SYNC) && this_cpu >= 0 &&
 	    !is_pcpu_task(p) && bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr) &&
 	    cpu_llc_of(this_cpu) == cpu_llc_of(prev_cpu) &&
-	    cpu_cap(this_cpu) >= min_cap &&
 	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) &&
 	    !scx_bpf_dsq_nr_queued(cpu_dsq(this_cpu)))
 		return this_cpu;
 
-	return pick_idle_cpu_scan(p, prev_cpu, min_cap);
+	return pick_idle_cpu_scan(p, prev_cpu);
 }
 
 /*
@@ -1245,19 +1036,6 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 		prev_cpu = is_this_cpu_allowed ? this_cpu : bpf_cpumask_first(p->cpus_ptr);
 
 	/*
-	 * If GPU affinity is enabled and the task's TGID is in gpu_pid_map
-	 * but not on the GPU's node, try to pick a CPU on the GPU node.
-	 */
-	if (gpu_enabled && numa_enabled) {
-		cpu = pick_cpu_on_gpu_node(p, cpu_node(prev_cpu), tctx);
-		if (cpu >= 0) {
-			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
-			direct_dispatch_local(p, tctx, cpu);
-			return cpu;
-		}
-	}
-
-	/*
 	 * Try to find an idle CPU and dispatch the task directly to the
 	 * target CPU.
 	 *
@@ -1265,7 +1043,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 * task to ops.enqueue(). Dispatching directly from here, even if
 	 * we can't find an idle CPU, allows to save some locking overhead.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu, this_cpu, wake_flags, 0);
+	cpu = pick_idle_cpu(p, prev_cpu, this_cpu, wake_flags);
 	if (cpu >= 0 || !is_busy)
 		direct_dispatch_local(p, tctx, cpu >= 0 ? cpu : prev_cpu);
 
@@ -1318,7 +1096,6 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
-	int node = cpu_node(prev_cpu);
 	struct task_ctx *tctx;
 
 	/*
@@ -1328,42 +1105,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-
-	/*
-	 * If the task's TGID is in gpu_pid_map (GPU workload process), prefer the
-	 * GPU NUMA node. If we're on a different node, migrate to the GPU
-	 * node.
-	 */
-	if (gpu_enabled && numa_enabled && !is_pcpu_task(p) &&
-	    task_should_migrate(p, enq_flags)) {
-		cpu = pick_cpu_on_gpu_node(p, node, tctx);
-		if (cpu >= 0) {
-			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
-			place_task(cpu, p, tctx);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					   slice_ns, enq_flags);
-			return;
-		}
-	}
-
-	/*
-	 * Attempt to immediately dispatch sticky event-heavy tasks to the
-	 * same CPU.
-	 */
-	if (is_sticky_event_heavy(tctx)) {
-		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(prev_cpu));
-
-		/*
-		 * If a per-CPU task is waiting to acquire the CPU, skip
-		 * direct dispatch to prevent starvation.
-		 */
-		if (!q || q->nr_cpus_allowed > 1) {
-			place_task(prev_cpu, p, tctx);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
-			return;
-		}
-	}
 
 	/*
 	 * Attempt to dispatch directly to an idle CPU if the task can
@@ -1384,28 +1125,18 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * and @prev_cpu is taken for an unknown amount of time, so an idle
 	 * CPU is the better option.
 	 *
-	 * A task that leaves for its perf events may only go to a CPU at
-	 * least as fast as the one it is on.
-	 *
 	 * A busy SMT sibling is not a reason to leave. Sharing a core is
 	 * avoided when a task is placed, the idle scan prefers a fully idle
 	 * core, and never by moving a running task: EEVDF does the same in
 	 * select_idle_core(), and leaves a running task where it is.
 	 */
 	if (task_should_migrate(p, enq_flags) ||
-	    (!is_cpu_idle(prev_cpu) && (!scx_bpf_task_running(p) || p->scx.slice)))
-		cpu = pick_idle_cpu(p, prev_cpu, -1, 0, 0);
-	else if (!is_pcpu_task(p) && is_event_heavy(tctx))
-		cpu = pick_idle_cpu(p, prev_cpu, -1, 0, cpu_cap(prev_cpu));
-	else
-		cpu = -EBUSY;
-	{
+	    (!is_cpu_idle(prev_cpu) && (!scx_bpf_task_running(p) || p->scx.slice))) {
+		cpu = pick_idle_cpu(p, prev_cpu, -1, 0);
 		if (cpu >= 0) {
 			place_task(cpu, p, tctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
 					   slice_ns, enq_flags | SCX_ENQ_IMMED);
-			if (is_event_heavy(tctx) && cpu != prev_cpu)
-				__sync_fetch_and_add(&nr_event_dispatches, 1);
 			return;
 		}
 	}
@@ -1760,11 +1491,6 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	 */
 	update_cpufreq(scx_bpf_task_cpu(p));
 
-	/*
-	 * Capture performance counter baseline when task starts running.
-	 */
-	if (perf_config || perf_sticky)
-		scx_pmu_event_start(p, false);
 }
 
 void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
@@ -1778,10 +1504,6 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	/* Update task's performance counters */
-	if (perf_config || perf_sticky) {
-		scx_pmu_event_stop(p);
-		update_counters(p, tctx, cpu);
-	}
 
 	/*
 	 * Charge the user time accumulated on this CPU before the task
@@ -1886,9 +1608,6 @@ s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
 	if (!tctx)
 		return -ENOMEM;
 
-	if ((ret = scx_pmu_task_init(p)))
-		return ret;
-
 	ret = init_cpumask(&tctx->cpumask);
 	if (ret)
 		return ret;
@@ -1896,73 +1615,12 @@ s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
 	return 0;
 }
 
-void BPF_STRUCT_OPS(cosmos_exit_task, struct task_struct *p,
-		   struct scx_exit_task_args *args)
-{
-	scx_pmu_task_fini(p);
-}
-
-/*
- * Initialize a NUMA node context.
- *
- * Return 0 if @node contains at least one CPU, -ENODEV if it is CPU-less, or
- * another negative errno on failure.
- */
-static int init_node(int node)
-{
-	struct bpf_cpumask *cpumask;
-	struct node_ctx *nctx;
-	bool has_cpus = false;
-	u32 cpu;
-	int ret;
-
-	nctx = try_lookup_node_ctx(node);
-	if (!nctx)
-		return -ENOENT;
-
-	ret = init_cpumask(&nctx->cpumask);
-	if (ret)
-		return ret;
-
-	bpf_rcu_read_lock();
-	cpumask = nctx->cpumask;
-	if (!cpumask) {
-		ret = -EINVAL;
-		goto out_unlock;
-	}
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (cpu_node(cpu) == node) {
-			bpf_cpumask_set_cpu(cpu, cpumask);
-			has_cpus = true;
-		}
-	}
-out_unlock:
-	bpf_rcu_read_unlock();
-
-	if (ret)
-		return ret;
-	return has_cpus ? 0 : -ENODEV;
-}
-
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 {
 	int err;
 	int cpu;
-	struct cpu_ctx *cctx;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
-
-	if (numa_enabled) {
-		int node;
-
-		/*
-		 * Nodes that fail to initialize, including CPU-less NUMA
-		 * nodes (e.g., GPU-memory or CXL-memory nodes), are simply
-		 * skipped.
-		 */
-		bpf_for(node, 0, nr_node_ids)
-			init_node(node);
-	}
 
 	/*
 	 * Create the per-CPU DSQs.
@@ -1977,36 +1635,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		}
 	}
 
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		cctx = try_lookup_cpu_ctx(cpu);
-		if (!cctx)
-			continue;
-		cctx->perf_events = 0;
-	}
-
-	if (perf_config) {
-		err = scx_pmu_install(perf_config);
-		if (err)
-			return err;
-	}
-
-	if (perf_sticky) {
-		err = scx_pmu_install(perf_sticky);
-		if (err)
-			return err;
-	}
-
 	return 0;
 }
 
 void BPF_STRUCT_OPS(cosmos_exit, struct scx_exit_info *ei)
 {
-	if (perf_config)
-		scx_pmu_uninstall(perf_config);
-
-	if (perf_sticky)
-		scx_pmu_uninstall(perf_sticky);
-
 	UEI_RECORD(uei, ei);
 }
 
@@ -2022,7 +1655,6 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .update_idle		= (void *)cosmos_update_idle,
 	       .enable			= (void *)cosmos_enable,
 	       .init_task		= (void *)cosmos_init_task,
-	       .exit_task		= (void *)cosmos_exit_task,
 	       .init			= (void *)cosmos_init,
 	       .exit			= (void *)cosmos_exit,
 	       .timeout_ms		= 5000,

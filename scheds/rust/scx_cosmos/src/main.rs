@@ -10,47 +10,33 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
-mod cgroup;
-mod gpu;
 mod stats;
-use cgroup::CgroupReader;
 
-use std::collections::{HashMap, HashSet};
 use std::ffi::c_ulong;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::MapCore;
-use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use log::{debug, info, warn};
-use nvml_wrapper::bitmasks::InitFlags;
-use nvml_wrapper::Nvml;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
-use scx_utils::perf::parse_perf_event;
-use scx_utils::perf::setup_perf_events;
-use scx_utils::perf::PerfEventSpec;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::GpuIndex;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cosmos";
@@ -106,44 +92,6 @@ struct Opts {
     /// mode) with no tracking overhead.
     #[clap(short = 'c', long, default_value = "0")]
     cpu_busy_thresh: u64,
-
-    /// Polling time (ms) to refresh the dynamic perf event thresholds (options -E / -Y in
-    /// dynamic mode).
-    ///
-    /// Value is clamped to the range [10 .. 1000].
-    ///
-    /// 0 = disabled.
-    #[clap(short = 'p', long, default_value = "0")]
-    polling_ms: u64,
-
-    /// Hardware perf event to monitor (0x0 = disabled). Accepts hex (0xN) or symbolic names
-    /// (e.g. cache-misses, LLC-load-misses, page-faults, branch-misses).
-    #[clap(short = 'e', long, default_value = "0x0", value_parser = parse_perf_event)]
-    perf_config: PerfEventSpec,
-
-    /// Threshold (perf events/msec) to classify a task as event heavy; exceeding it triggers migration.
-    #[clap(short = 'E', default_value = "0", long)]
-    perf_threshold: u64,
-
-    /// Sticky perf event (0x0 = disabled). When a task exceeds -Y for this event, keep it on the same CPU.
-    /// Accepts hex (0xN) or symbolic names (e.g. cache-misses, LLC-load-misses).
-    #[clap(short = 'y', long, default_value = "0x0", value_parser = parse_perf_event)]
-    perf_sticky: PerfEventSpec,
-
-    /// Sticky perf threshold; task is kept on same CPU when its count for -y event exceeds this.
-    #[clap(short = 'Y', default_value = "0", long)]
-    perf_sticky_threshold: u64,
-
-    /// Enable GPU-aware scheduling.
-    #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
-    gpu: bool,
-
-    /// Only treat a process as GPU-bound if its GPU utilization is at least this percentage (0–100).
-    ///
-    /// Uses NVML process utilization (SM + memory). 0 = no filter (all processes on the GPU are
-    /// considered GPU-bound). Requires driver support (Maxwell or newer).
-    #[clap(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..=100))]
-    gpu_util_threshold: u32,
 
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
@@ -203,217 +151,10 @@ struct Opts {
     pub libbpf: LibbpfOpts,
 }
 
-/// Initial value for the dynamic threshold (in BPF units).
-const DYNAMIC_THRESHOLD_INIT_VALUE: u64 = 1000;
-
-/// Minimum value for the dynamic threshold (in BPF units).
-const DYNAMIC_THRESHOLD_MIN_VALUE: u64 = 10;
-
-/// Target event rate (per second) above which we consider migrations/sticky dispatches too high.
-const DYNAMIC_THRESHOLD_RATE_HIGH: f64 = 4000.0;
-
-/// Target event rate (per second) below which we consider migrations/sticky dispatches too low.
-const DYNAMIC_THRESHOLD_RATE_LOW: f64 = 2000.0;
-
-/// Hysteresis band: rate must move by this fraction beyond the target bounds before we act.
-/// This prevents oscillation when the rate hovers near the threshold boundaries.
-const DYNAMIC_THRESHOLD_HYSTERESIS: f64 = 0.1;
-
-/// EMA smoothing factor (alpha). Higher values give more weight to recent samples.
-/// 0.3 provides good balance between responsiveness and stability.
-const DYNAMIC_THRESHOLD_EMA_ALPHA: f64 = 0.3;
-
-/// Minimum scale factor when just outside the target band (slow convergence near optimal).
-const DYNAMIC_THRESHOLD_SCALE_MIN: f64 = 0.0001;
-
-/// Maximum scale factor when far from target (fast convergence when initial threshold is way off).
-const DYNAMIC_THRESHOLD_SCALE_MAX: f64 = 1000.0;
-
-/// Slope for "too high" case: scale grows with (rate/HIGH - 1) so we step much harder when rate is
-/// many times over target.
-const DYNAMIC_THRESHOLD_SLOPE_HIGH: f64 = 0.35;
-
-/// Slope for "too low" case: scale grows with deficit so we step harder when rate is near zero.
-const DYNAMIC_THRESHOLD_SLOPE_LOW: f64 = 0.58;
-
-/// Minimum interval between NVML GPU PID syncs. Kept separate from CPU polling so that fast
-/// polling (e.g. 100 ms) does not trigger expensive NVML calls every tick.
-const GPU_SYNC_INTERVAL: Duration = Duration::from_secs(1);
-
-/// State for EMA-based dynamic threshold adjustment with hysteresis.
-///
-/// This struct maintains the smoothed rate estimate and tracks whether we're
-/// currently in an adjustment state (raising or lowering threshold) to implement
-/// hysteresis and prevent oscillation.
-#[derive(Debug, Clone)]
-struct DynamicThresholdState {
-    /// Current threshold value.
-    threshold: u64,
-    /// EMA-smoothed rate estimate.
-    smoothed_rate: f64,
-    /// Previous raw counter value for delta calculation.
-    prev_counter: u64,
-    /// Whether the EMA has been initialized with a valid sample.
-    initialized: bool,
-    /// Current adjustment direction: None (stable), Some(true) = raising, Some(false) = lowering.
-    /// Used for hysteresis: once we start adjusting in a direction, we continue until
-    /// the rate crosses back into the stable band with hysteresis margin.
-    adjustment_direction: Option<bool>,
-}
-
-impl DynamicThresholdState {
-    /// Create a new dynamic threshold state with the given initial threshold.
-    fn new(initial_threshold: u64) -> Self {
-        Self {
-            threshold: initial_threshold,
-            smoothed_rate: 0.0,
-            prev_counter: 0,
-            initialized: false,
-            adjustment_direction: None,
-        }
-    }
-
-    /// Update the state with a new counter sample and elapsed time.
-    /// Returns the new threshold if it changed, or None if unchanged.
-    fn update(
-        &mut self,
-        counter: u64,
-        elapsed_secs: f64,
-        verbose: bool,
-        name: &str,
-    ) -> Option<u64> {
-        if elapsed_secs <= 0.0 {
-            return None;
-        }
-
-        // Calculate instantaneous rate.
-        let delta = counter.saturating_sub(self.prev_counter);
-        self.prev_counter = counter;
-        let raw_rate = delta as f64 / elapsed_secs;
-
-        // Update EMA.
-        if self.initialized {
-            self.smoothed_rate = DYNAMIC_THRESHOLD_EMA_ALPHA * raw_rate
-                + (1.0 - DYNAMIC_THRESHOLD_EMA_ALPHA) * self.smoothed_rate;
-        } else {
-            // First sample: initialize EMA directly.
-            self.smoothed_rate = raw_rate;
-            self.initialized = true;
-        }
-
-        // Determine if we should adjust the threshold using hysteresis.
-        let rate = self.smoothed_rate;
-        let old_threshold = self.threshold;
-
-        // Calculate hysteresis-adjusted bounds based on current state.
-        let (effective_high, effective_low) = match self.adjustment_direction {
-            Some(true) => {
-                // Currently raising threshold: need rate to drop below LOW - hysteresis to stop.
-                (
-                    DYNAMIC_THRESHOLD_RATE_HIGH,
-                    DYNAMIC_THRESHOLD_RATE_LOW * (1.0 - DYNAMIC_THRESHOLD_HYSTERESIS),
-                )
-            }
-            Some(false) => {
-                // Currently lowering threshold: need rate to rise above HIGH + hysteresis to stop.
-                (
-                    DYNAMIC_THRESHOLD_RATE_HIGH * (1.0 + DYNAMIC_THRESHOLD_HYSTERESIS),
-                    DYNAMIC_THRESHOLD_RATE_LOW,
-                )
-            }
-            None => {
-                // Stable state: need rate to exceed bounds + hysteresis to start adjusting.
-                (
-                    DYNAMIC_THRESHOLD_RATE_HIGH * (1.0 + DYNAMIC_THRESHOLD_HYSTERESIS),
-                    DYNAMIC_THRESHOLD_RATE_LOW * (1.0 - DYNAMIC_THRESHOLD_HYSTERESIS),
-                )
-            }
-        };
-
-        // Determine new adjustment direction.
-        let new_direction = if rate > effective_high {
-            Some(true) // Rate too high, raise threshold.
-        } else if rate < effective_low && rate >= 0.0 {
-            Some(false) // Rate too low, lower threshold.
-        } else {
-            // Rate in stable band (considering hysteresis).
-            if self.adjustment_direction.is_some() {
-                // We were adjusting; check if we should stop.
-                if rate >= DYNAMIC_THRESHOLD_RATE_LOW && rate <= DYNAMIC_THRESHOLD_RATE_HIGH {
-                    None // Back in target band, stop adjusting.
-                } else {
-                    self.adjustment_direction // Continue current direction.
-                }
-            } else {
-                None // Already stable.
-            }
-        };
-
-        // Apply adjustment if we have a direction.
-        if let Some(raising) = new_direction {
-            let scale = Self::compute_scale(rate, raising);
-            let factor = if raising { 1.0 + scale } else { 1.0 - scale };
-            let new_threshold = ((self.threshold as f64) * factor).round() as u64;
-            self.threshold = new_threshold.clamp(DYNAMIC_THRESHOLD_MIN_VALUE, u64::MAX);
-        }
-
-        self.adjustment_direction = new_direction;
-
-        // Return new threshold only if it changed.
-        if self.threshold != old_threshold {
-            if verbose {
-                info!(
-                    "{}: {} -> {} (smoothed rate {:.1}/s, raw {:.1}/s, dir {:?})",
-                    name,
-                    old_threshold,
-                    self.threshold,
-                    self.smoothed_rate,
-                    raw_rate,
-                    self.adjustment_direction
-                );
-            }
-            Some(self.threshold)
-        } else {
-            None
-        }
-    }
-
-    /// Compute the scale factor for threshold adjustment based on how far the rate
-    /// is from the target band.
-    fn compute_scale(rate: f64, too_high: bool) -> f64 {
-        if too_high {
-            let excess = ((rate / DYNAMIC_THRESHOLD_RATE_HIGH) - 1.0).max(0.0);
-            let scale =
-                DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_HIGH * excess.min(4.0);
-            scale.min(DYNAMIC_THRESHOLD_SCALE_MAX)
-        } else {
-            if rate <= 0.0 {
-                return DYNAMIC_THRESHOLD_SCALE_MAX;
-            }
-            let deficit = (DYNAMIC_THRESHOLD_RATE_LOW - rate) / DYNAMIC_THRESHOLD_RATE_LOW;
-            let t = deficit.clamp(0.0, 1.0);
-            DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_LOW * t
-        }
-    }
-}
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
-    opts: &'a Opts,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
-    /// GPU device index -> NUMA node (for NVML PID sync). Only set when --gpu and NUMA enabled.
-    gpu_index_to_node: Option<HashMap<u32, u32>>,
-    /// Previous (TGID, node) set so we can remove processes that stopped using the GPU.
-    previous_gpu_pids: Option<HashMap<u32, u32>>,
-    /// Reused NVML handle to avoid re-initializing on every sync (expensive).
-    nvml: Option<Nvml>,
-    /// Host cgroup v2 reader used to discover peer processes of NVML GPU processes.
-    gpu_cgroup_reader: Option<CgroupReader>,
-    /// Dynamic threshold state for perf event migrations (when --perf-threshold is 0/dynamic).
-    perf_threshold_state: Option<DynamicThresholdState>,
-    /// Dynamic threshold state for sticky perf events (when --perf-sticky-threshold is 0/dynamic).
-    perf_sticky_threshold_state: Option<DynamicThresholdState>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -467,13 +208,8 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.numa_enabled = numa_enabled;
-        rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.time_preemption = opts.time_preemption;
-
-        // Enable perf event scheduling settings.
-        rodata.perf_config = opts.perf_config.event_id;
-        rodata.perf_sticky = opts.perf_sticky.event_id;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
@@ -505,53 +241,6 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        // Enable GPU support and build GPU index -> node for NVML PID sync. Init NVML once here
-        // so we reuse the handle in the run loop (re-initing every sync is very expensive).
-        let (gpu_index_to_node, previous_gpu_pids, nvml) = if opts.gpu && numa_enabled {
-            match Nvml::init_with_flags(InitFlags::NO_GPUS) {
-                Ok(nvml) => {
-                    info!("NVIDIA GPU-aware scheduling enabled (NVML PID sync)");
-                    rodata.gpu_enabled = true;
-                    let mut idx_to_node = HashMap::new();
-                    for (id, gpu) in topo.gpus() {
-                        let GpuIndex::Nvidia { nvml_id } = id;
-                        idx_to_node.insert(nvml_id, gpu.node_id as u32);
-                    }
-                    (Some(idx_to_node), Some(HashMap::new()), Some(nvml))
-                }
-                Err(e) => {
-                    warn!("NVML init failed, disabling GPU-aware scheduling: {}", e);
-                    rodata.gpu_enabled = false;
-                    (None, None, None)
-                }
-            }
-        } else {
-            rodata.gpu_enabled = false;
-            (None, None, None)
-        };
-
-        let gpu_cgroup_reader = if nvml.is_some() && opts.gpu_util_threshold == 0 {
-            match CgroupReader::discover() {
-                Ok(reader) => {
-                    info!("NVIDIA GPU workload discovery enabled (cgroup v2)");
-                    Some(reader)
-                }
-                Err(error) => {
-                    warn!(
-                        "GPU workload discovery unavailable, using NVML process scope: {error:#}"
-                    );
-                    None
-                }
-            }
-        } else if nvml.is_some() {
-            info!(
-                "NVIDIA GPU workload discovery requires --gpu-util-threshold=0; using NVML process scope"
-            );
-            None
-        } else {
-            None
-        };
-
         // Set scheduler flags.
         skel.struct_ops.cosmos_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
@@ -571,304 +260,21 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, cosmos_ops, uei)?;
 
-        // Initial perf thresholds in bss. When threshold is 0 we use dynamic logic; when user
-        // specifies a value > 0 we use it as a static threshold.
-        let bss = skel.maps.bss_data.as_mut().unwrap();
-        if opts.perf_config.event_id > 0 {
-            bss.perf_threshold = if opts.perf_threshold == 0 {
-                DYNAMIC_THRESHOLD_INIT_VALUE
-            } else {
-                opts.perf_threshold
-            };
-        }
-        if opts.perf_sticky.event_id > 0 {
-            bss.perf_sticky_threshold = if opts.perf_sticky_threshold == 0 {
-                DYNAMIC_THRESHOLD_INIT_VALUE
-            } else {
-                opts.perf_sticky_threshold
-            };
-        }
-
-        // Setup performance events for all CPUs.
-        // Counter indices must match PMU library install order: migration first (0), then sticky (1).
-        // When only sticky is used, it gets index 0; when both are used, sticky gets index 1.
-        let nr_cpus = *NR_CPU_IDS;
-        info!("Setting up performance counters for {} CPUs...", nr_cpus);
-        let mut perf_available = true;
-        let sticky_counter_idx = if opts.perf_config.event_id > 0 { 1 } else { 0 };
-        for cpu in 0..nr_cpus {
-            if opts.perf_config.event_id > 0 {
-                if let Err(e) =
-                    setup_perf_events(&skel.maps.scx_pmu_map, cpu as i32, &opts.perf_config, 0)
-                {
-                    if cpu == 0 {
-                        let err_str = e.to_string();
-                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
-                            warn!("Performance counters not available on this CPU architecture");
-                            warn!("PMU event '{}' not supported - scheduler will run without perf monitoring", opts.perf_config.display_name);
-                        } else {
-                            warn!("Failed to setup perf events: {}", e);
-                        }
-                        perf_available = false;
-                        break;
-                    }
-                }
-            }
-            if opts.perf_sticky.event_id > 0 {
-                if let Err(e) = setup_perf_events(
-                    &skel.maps.scx_pmu_map,
-                    cpu as i32,
-                    &opts.perf_sticky,
-                    sticky_counter_idx,
-                ) {
-                    if cpu == 0 {
-                        let err_str = e.to_string();
-                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
-                            warn!("Performance counters not available on this CPU architecture");
-                            warn!("PMU event '{}' not supported - scheduler will run without perf monitoring", opts.perf_sticky.display_name);
-                        } else {
-                            warn!("Failed to setup perf events: {}", e);
-                        }
-                        perf_available = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if perf_available {
-            info!("Performance counters configured successfully for all CPUs");
-        }
-
-        // Configure GPU->node mapping.
-        if opts.gpu && numa_enabled {
-            for (id, gpu) in topo.gpus() {
-                let GpuIndex::Nvidia { nvml_id } = id;
-                if opts.verbose {
-                    info!("GPU{} -> node{}", nvml_id, gpu.node_id);
-                }
-                skel.maps.gpu_node_map.update(
-                    &(nvml_id as u32).to_ne_bytes(),
-                    &(gpu.node_id as u32).to_ne_bytes(),
-                    MapFlags::ANY,
-                )?;
-            }
-        }
-
         // Attach the scheduler.
         let struct_ops = Some(scx_ops_attach!(skel, cosmos_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
-        // Initialize dynamic threshold states for perf events (only when using dynamic mode).
-        let perf_threshold_state = if opts.perf_config.event_id > 0 && opts.perf_threshold == 0 {
-            Some(DynamicThresholdState::new(DYNAMIC_THRESHOLD_INIT_VALUE))
-        } else {
-            None
-        };
-        let perf_sticky_threshold_state =
-            if opts.perf_sticky.event_id > 0 && opts.perf_sticky_threshold == 0 {
-                Some(DynamicThresholdState::new(DYNAMIC_THRESHOLD_INIT_VALUE))
-            } else {
-                None
-            };
-
         Ok(Self {
             skel,
-            opts,
             struct_ops,
             stats_server,
-            gpu_index_to_node,
-            previous_gpu_pids,
-            nvml,
-            gpu_cgroup_reader,
-            perf_threshold_state,
-            perf_sticky_threshold_state,
         })
-    }
-
-    /// Sync process TGID -> GPU (node) hints from NVML. Peer processes in the same exact,
-    /// non-root cgroup inherit the hint when all observed GPUs resolve to one NUMA node.
-    /// gpu_util_threshold > 0 retains process-only behavior because its NVML snapshot is
-    /// intentionally filtered.
-    fn sync_gpu_pids(&mut self) -> Result<()> {
-        let gpu_index_to_node = match &self.gpu_index_to_node {
-            Some(m) => m,
-            None => return Ok(()),
-        };
-        let nvml = match &self.nvml {
-            Some(n) => n,
-            None => return Ok(()),
-        };
-        let threshold = self.opts.gpu_util_threshold;
-        // First collect TGID -> set of nodes (GPUs) per process.
-        let mut pid_to_nodes: HashMap<u32, HashSet<u32>> = HashMap::new();
-        let mut snapshot_complete = true;
-
-        // A failed NVML query is not an empty snapshot. Keep the last applied
-        // hints instead of deleting processes we simply failed to observe.
-        let count = nvml.device_count().context("NVML device count")?;
-        for i in 0..count {
-            let node = match gpu_index_to_node.get(&i) {
-                Some(&n) => n,
-                None => {
-                    snapshot_complete = false;
-                    continue;
-                }
-            };
-            let device = match nvml.device_by_index(i) {
-                Ok(device) => device,
-                Err(error) => {
-                    debug!("NVML device {i} lookup failed: {error:#}");
-                    return Err(error).context(format!("NVML device {i} lookup failed"));
-                }
-            };
-
-            if threshold > 0 {
-                // Use process utilization; only add PIDs above threshold.
-                match device.process_utilization_stats(None::<u64>) {
-                    Ok(samples) => {
-                        for sample in samples {
-                            let util = sample.sm_util.max(sample.mem_util);
-                            if util >= threshold {
-                                pid_to_nodes.entry(sample.pid).or_default().insert(node);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // NotSupported or other: fall back to all running processes.
-                        Self::add_running_gpu_processes_to_set(&device, node, &mut pid_to_nodes)
-                            .with_context(|| {
-                                format!("NVML device {i} process snapshot is incomplete")
-                            })?;
-                    }
-                }
-            } else {
-                Self::add_running_gpu_processes_to_set(&device, node, &mut pid_to_nodes)
-                    .with_context(|| format!("NVML device {i} process snapshot is incomplete"))?;
-            }
-        }
-
-        let mut direct = gpu::direct_gpu_processes(&pid_to_nodes);
-        direct.remove(&std::process::id());
-        let mut current = if snapshot_complete {
-            self.gpu_cgroup_reader
-                .as_ref()
-                .map(|reader| gpu::expand_gpu_processes(&pid_to_nodes, reader))
-                .unwrap_or_else(|| direct.clone())
-        } else {
-            direct.clone()
-        };
-        current.remove(&std::process::id());
-        let max_entries = self.skel.maps.gpu_pid_map.max_entries() as usize;
-
-        // Workload discovery can include many peer processes. Fall back to
-        // direct NVML processes rather than partially populating the map.
-        if current.len() > max_entries {
-            warn!(
-                "GPU workload has {} processes, exceeding gpu_pid_map capacity {}; using {} direct NVML processes",
-                current.len(),
-                max_entries,
-                direct.len()
-            );
-        }
-        if direct.len() > max_entries {
-            warn!(
-                "{} direct NVML processes exceed gpu_pid_map capacity {}; clearing GPU process hints",
-                direct.len(),
-                max_entries
-            );
-        }
-        current = gpu::fit_gpu_processes(current, &direct, max_entries);
-
-        self.reconcile_gpu_pid_hints(&current)
-    }
-
-    /// Reconcile the desired GPU workload hints with the BPF map.
-    fn reconcile_gpu_pid_hints(&mut self, desired: &HashMap<u32, u32>) -> Result<()> {
-        let previous = self.previous_gpu_pids.as_ref().unwrap().clone();
-        let map = &self.skel.maps.gpu_pid_map;
-
-        // Track the state actually applied to BPF so a partial map operation
-        // is retried and cleaned up on the next synchronization.
-        let mut applied = previous.clone();
-        let mut first_error = None;
-
-        // Delete stale entries first so replacements cannot temporarily run
-        // out of map capacity.
-        for pid in previous.keys() {
-            if desired.contains_key(pid) {
-                continue;
-            }
-            match map.delete(&pid.to_ne_bytes()).context("gpu_pid_map delete") {
-                Ok(()) => {
-                    applied.remove(pid);
-                }
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
-        }
-        for (pid, node) in desired {
-            match map
-                .update(&pid.to_ne_bytes(), &node.to_ne_bytes(), MapFlags::ANY)
-                .context("gpu_pid_map update")
-            {
-                Ok(()) => {
-                    applied.insert(*pid, *node);
-                }
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
-        }
-        *self.previous_gpu_pids.as_mut().unwrap() = applied;
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    /// Record running compute/graphics process TGIDs and the GPU node in pid_to_nodes.
-    fn add_running_gpu_processes_to_set(
-        device: &nvml_wrapper::Device<'_>,
-        node: u32,
-        pid_to_nodes: &mut HashMap<u32, HashSet<u32>>,
-    ) -> Result<()> {
-        let mut errors = Vec::new();
-
-        match device.running_compute_processes() {
-            Ok(processes) => {
-                for process in processes {
-                    pid_to_nodes.entry(process.pid).or_default().insert(node);
-                }
-            }
-            Err(error) => errors.push(format!("compute process query failed: {error}")),
-        }
-        match device.running_graphics_processes() {
-            Ok(processes) => {
-                for process in processes {
-                    pid_to_nodes.entry(process.pid).or_default().insert(node);
-                }
-            }
-            Err(error) => errors.push(format!("graphics process query failed: {error}")),
-        }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            bail!(errors.join("; "))
-        }
     }
 
     fn get_metrics(&self) -> Metrics {
         let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
-            nr_event_dispatches: bss_data.nr_event_dispatches,
-            nr_ev_sticky_dispatches: bss_data.nr_ev_sticky_dispatches,
-            nr_gpu_dispatches: bss_data.nr_gpu_dispatches,
+            nr_steals: bss_data.nr_steals,
         }
     }
 
@@ -879,74 +285,9 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
-        // Periodic (option -p) updates of the dynamic perf thresholds.
-        let polling_time = Duration::from_millis(self.opts.polling_ms).min(Duration::from_secs(1));
-        let mut last_update = Instant::now();
-        let mut last_gpu_sync = Instant::now();
-
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
-                // Update dynamic perf thresholds using EMA + hysteresis.
-                let elapsed_secs = last_update.elapsed().as_secs_f64();
-
-                // Update migration threshold state if dynamic mode is enabled.
-                if let Some(ref mut state) = self.perf_threshold_state {
-                    let nr_event = self
-                        .skel
-                        .maps
-                        .bss_data
-                        .as_ref()
-                        .unwrap()
-                        .nr_event_dispatches;
-                    if let Some(new_thresh) =
-                        state.update(nr_event, elapsed_secs, self.opts.verbose, "perf_threshold")
-                    {
-                        self.skel.maps.bss_data.as_mut().unwrap().perf_threshold = new_thresh;
-                    }
-                }
-
-                // Update sticky threshold state if dynamic mode is enabled.
-                if let Some(ref mut state) = self.perf_sticky_threshold_state {
-                    let nr_sticky = self
-                        .skel
-                        .maps
-                        .bss_data
-                        .as_ref()
-                        .unwrap()
-                        .nr_ev_sticky_dispatches;
-                    if let Some(new_thresh) = state.update(
-                        nr_sticky,
-                        elapsed_secs,
-                        self.opts.verbose,
-                        "perf_sticky_threshold",
-                    ) {
-                        self.skel
-                            .maps
-                            .bss_data
-                            .as_mut()
-                            .unwrap()
-                            .perf_sticky_threshold = new_thresh;
-                    }
-                }
-
-                last_update = Instant::now();
-            }
-
-            // GPU PID sync is throttled to GPU_SYNC_INTERVAL.
-            if self.gpu_index_to_node.is_some() && last_gpu_sync.elapsed() >= GPU_SYNC_INTERVAL {
-                if let Err(e) = self.sync_gpu_pids() {
-                    debug!("GPU PID sync: {}", e);
-                }
-                last_gpu_sync = Instant::now();
-            }
-
             // Update statistics and check for exit condition.
-            let timeout = if polling_time.is_zero() {
-                Duration::from_secs(1)
-            } else {
-                polling_time
-            };
-            match req_ch.recv_timeout(timeout) {
+            match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,
