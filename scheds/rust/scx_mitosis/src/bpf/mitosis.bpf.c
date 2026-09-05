@@ -1391,8 +1391,23 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init_task, struct task_struct *p, struct sc
 	 */
 	cgrp = bpf_cgroup_from_id(args->cgroup->kn->id);
 	if (!cgrp) {
-		scx_bpf_error("bpf_cgroup_from_id() failed");
-		return -ENOENT;
+		/*
+		 * An exiting task drops out of its cgroup in cgroup_exit() before
+		 * it becomes a zombie, so the cgroup can be removed while the task
+		 * still exists. Loading the scheduler walks every task, including
+		 * such zombies, and their cgroup id no longer resolves. They never
+		 * run again; charge them to the root cell instead of failing the
+		 * whole load.
+		 */
+		if (!(p->flags & PF_EXITING)) {
+			scx_bpf_error("bpf_cgroup_from_id() failed");
+			return -ENOENT;
+		}
+		cgrp = bpf_cgroup_from_id(root_cgid);
+		if (!cgrp) {
+			scx_bpf_error("bpf_cgroup_from_id() failed for root cgroup");
+			return -ENOENT;
+		}
 	}
 	ret = init_task_impl(p, cgrp);
 	if (ret) {
