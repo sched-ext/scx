@@ -323,10 +323,9 @@ struct cpu_ctx {
 	u64 busy_eval_at;
 	u64 acc_utime;
 	u64 vtime_rem;
-	u64 last_run_at;
+	u64 last_balance_at;
 	u32 steal_cursor;
 	bool busy;
-	struct bpf_cpumask __kptr *smt;
 };
 
 struct {
@@ -632,25 +631,6 @@ static inline bool is_cpu_busy(s32 cpu)
 }
 
 /*
- * Return the SMT sibling CPU of a @cpu.
- */
-static s32 smt_sibling(s32 cpu)
-{
-	const struct cpumask *smt;
-	struct cpu_ctx *cctx;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return cpu;
-
-	smt = cast_mask(cctx->smt);
-	if (!smt)
-		return cpu;
-
-	return bpf_cpumask_first(smt);
-}
-
-/*
  * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
  *
  * If NUMA support is disabled, @cpu is ignored.
@@ -727,87 +707,6 @@ static inline bool is_cpu_idle(s32 cpu)
 	p = __COMPAT_scx_bpf_cpu_curr(cpu);
 
 	return p ? p->flags & PF_IDLE : false;
-}
-
-/*
- * Return true if the CPU is part of a fully busy SMT core, false
- * otherwise.
- *
- * If SMT is disabled or SMT contention avoidance is disabled, always
- * return false (since there's no SMT contention or it's ignored).
- */
-static bool is_smt_contended(s32 cpu)
-{
-	const struct cpumask *idle_smt, *idle_mask;
-	struct cpu_ctx *cctx;
-	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS), cap;
-	bool is_contended = false;
-	s32 sibling;
-	int i;
-
-	if (!smt_enabled)
-		return false;
-
-	/*
-	 * A CPU without an SMT sibling (e.g. an E-core on a hybrid part)
-	 * has nothing to be contended by. Its sibling mask is empty, so
-	 * smt_sibling() returns an out-of-range CPU that never tests idle,
-	 * which would otherwise report the CPU as contended whenever any
-	 * other CPU in the system is idle.
-	 */
-	sibling = smt_sibling(cpu);
-	if (sibling == cpu || sibling < 0 || sibling >= nr_cpu_ids)
-		return false;
-
-	idle_mask = get_idle_cpumask(cpu);
-	if (bpf_cpumask_test_cpu(sibling, idle_mask)) {
-		scx_bpf_put_cpumask(idle_mask);
-		return false;
-	}
-	scx_bpf_put_cpumask(idle_mask);
-
-	/*
-	 * The sibling counts as busy only once its task has held it for a
-	 * full slice. A task that flickers on the sibling for a few
-	 * microseconds, a kworker or a wakeup, is gone before a migration
-	 * pays off, and reacting to it moves a CPU-bound task back and forth
-	 * between cores that are fully idle one moment and not the next.
-	 * The load balancer acts on sustained load for the same reason.
-	 */
-	cctx = try_lookup_cpu_ctx(sibling);
-	if (!cctx || time_before(bpf_ktime_get_ns(), cctx->last_run_at + slice_ns))
-		return false;
-
-	/*
-	 * The sibling is busy: the CPU is contended if there is a fully idle
-	 * core the task could move to without losing capacity. A slower core
-	 * does not count: a P-core thread sharing its core still beats an
-	 * E-core, and moving down for a busy sibling is how a hog would end
-	 * up parked on an E-core for good.
-	 */
-	idle_smt = get_idle_smtmask(cpu);
-	if (all_cpus_same_capacity) {
-		is_contended = !bpf_cpumask_empty(idle_smt);
-		goto out;
-	}
-
-	cap = cpu_cap(cpu);
-	bpf_for(i, 0, max_cpus) {
-		s32 other = preferred_cpus[i];
-
-		if (cpu_cap(other) < cap)
-			break;
-		if (other == cpu || other == sibling)
-			continue;
-		if (bpf_cpumask_test_cpu(other, idle_smt)) {
-			is_contended = true;
-			break;
-		}
-	}
-out:
-	scx_bpf_put_cpumask(idle_smt);
-
-	return is_contended;
 }
 
 /*
@@ -1035,6 +934,62 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 }
 
 /*
+ * Return the CPU of @node with the fewest tasks queued that @p can run on,
+ * the fastest one on ties, or -EBUSY.
+ *
+ * A new task that finds no idle CPU would otherwise be queued behind its
+ * parent, and a parent forking a hundred workers on a busy system would
+ * stack them all on one queue. find_idlest_cpu() spreads forks by load for
+ * the same reason.
+ */
+static s32 shallowest_queue_cpu(const struct task_struct *p, int node)
+{
+	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS);
+	s32 best = -EBUSY, best_nr = 0;
+	int i;
+
+	bpf_for(i, 0, max_cpus) {
+		s32 cpu = preferred_cpus[i], nr;
+
+		if (cpu < 0 || cpu >= nr_cpu_ids)
+			continue;
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+		if (numa_enabled && cpu_node(cpu) != node)
+			continue;
+
+		nr = scx_bpf_dsq_nr_queued(cpu_dsq(cpu));
+		if (best < 0 || nr < best_nr) {
+			best = cpu;
+			best_nr = nr;
+			if (!nr)
+				break;
+		}
+	}
+
+	return best;
+}
+
+/*
+ * Return true if the whole core of @cpu is idle, i.e. @cpu is idle and so
+ * are its SMT siblings, if any.
+ */
+static bool core_is_idle(s32 cpu)
+{
+	const struct cpumask *smt;
+	bool idle;
+
+	if (!smt_enabled)
+		return true;
+
+	smt = get_idle_smtmask(cpu);
+	idle = bpf_cpumask_test_cpu(cpu, smt);
+	scx_bpf_put_cpumask(smt);
+
+	return idle;
+}
+
+/*
  * Return an idle CPU faster than @cpu whose whole core is idle, or
  * -ENOENT. The idle state is not claimed: the caller is expected to kick
  * it.
@@ -1156,31 +1111,6 @@ static int init_cpumask(struct bpf_cpumask **p_cpumask)
 		bpf_cpumask_release(mask);
 
 	return *p_cpumask ? 0 : -ENOMEM;
-}
-
-SEC("syscall")
-int enable_sibling_cpu(struct domain_arg *input)
-{
-	struct cpu_ctx *cctx;
-	struct bpf_cpumask *mask, **pmask;
-	int err = 0;
-
-	cctx = try_lookup_cpu_ctx(input->cpu_id);
-	if (!cctx)
-		return -ENOENT;
-
-	pmask = &cctx->smt;
-	err = init_cpumask(pmask);
-	if (err)
-		return err;
-
-	bpf_rcu_read_lock();
-	mask = *pmask;
-	if (mask)
-		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
-	bpf_rcu_read_unlock();
-
-	return err;
 }
 
 /*
@@ -1307,6 +1237,16 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	if (cpu >= 0 || !is_busy)
 		direct_dispatch_local(p, cpu >= 0 ? cpu : prev_cpu);
 
+	/*
+	 * A new task with no idle CPU to go to is queued on the CPU with the
+	 * shortest queue rather than behind its parent.
+	 */
+	if (cpu < 0 && (wake_flags & SCX_WAKE_FORK)) {
+		cpu = shallowest_queue_cpu(p, cpu_node(prev_cpu));
+		if (cpu >= 0)
+			return cpu;
+	}
+
 	return cpu >= 0 ? cpu : prev_cpu;
 }
 
@@ -1329,20 +1269,16 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 		return;
 
 	/*
-	 * Force preemption if the task has exceeded its time slice and
-	 * either:
-	 * - SMT contention has changed since we started running
-	 *   (sibling went busy or idle), triggering rescheduling so
-	 *   select_cpu can make a better placement decision, or
-	 * - the system is busy and there are tasks waiting in the
-	 *   local or shared DSQ.
+	 * Force preemption if the task has exceeded its time slice, the
+	 * system is busy and there are tasks waiting in the local DSQ or in
+	 * this CPU's DSQ.
 	 */
 	if (time_delta(bpf_ktime_get_ns(), tctx->last_run_at) > slice_ns) {
 		s32 cpu = scx_bpf_task_cpu(p);
 		bool cpu_busy = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
 				scx_bpf_dsq_nr_queued(cpu_dsq(cpu));
 
-		if (is_smt_contended(cpu) || (is_cpu_busy(cpu) && cpu_busy))
+		if (is_cpu_busy(cpu) && cpu_busy)
 			scx_bpf_task_set_slice(p, 0);
 	}
 }
@@ -1381,7 +1317,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to immediately dispatch sticky event-heavy tasks to the
 	 * same CPU.
 	 */
-	if (is_sticky_event_heavy(tctx) && !is_smt_contended(prev_cpu)) {
+	if (is_sticky_event_heavy(tctx)) {
 		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(prev_cpu));
 
 		/*
@@ -1414,14 +1350,18 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * and @prev_cpu is taken for an unknown amount of time, so an idle
 	 * CPU is the better option.
 	 *
-	 * A task that leaves for a contended sibling or for its perf events
-	 * may only go to a CPU at least as fast as the one it is on: a busy
-	 * sibling is not worth a slower core.
+	 * A task that leaves for its perf events may only go to a CPU at
+	 * least as fast as the one it is on.
+	 *
+	 * A busy SMT sibling is not a reason to leave. Sharing a core is
+	 * avoided when a task is placed, the idle scan prefers a fully idle
+	 * core, and never by moving a running task: EEVDF does the same in
+	 * select_idle_core(), and leaves a running task where it is.
 	 */
 	if (task_should_migrate(p, enq_flags) ||
 	    (!is_cpu_idle(prev_cpu) && (!scx_bpf_task_running(p) || p->scx.slice)))
 		cpu = pick_idle_cpu(p, prev_cpu, 0, true, 0);
-	else if (!is_pcpu_task(p) && (is_smt_contended(prev_cpu) || is_event_heavy(tctx)))
+	else if (!is_pcpu_task(p) && is_event_heavy(tctx))
 		cpu = pick_idle_cpu(p, prev_cpu, 0, true, cpu_cap(prev_cpu));
 	else
 		cpu = -EBUSY;
@@ -1478,28 +1418,8 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	if (!is_task_queued(p))
 		return false;
 
-	/*
-	* If the task can only run on this CPU, keep it running.
-	*/
-	if (is_pcpu_task(p))
-		return true;
-
-	/*
-	 * If the task is not running in a full-idle SMT core and there are
-	 * full-idle SMT cores available in the system, give it a chance to
-	 * migrate elsewhere.
-	 */
-	if (is_smt_contended(cpu))
-		return false;
-
 	return true;
 }
-
-/*
- * Number of other CPUs' DSQs sampled at each dispatch while this CPU has
- * work of its own. 0 = a busy CPU never steals, only an idle one pulls.
- */
-const volatile u64 steal_sample;
 
 /*
  * A task that ran within this long on its CPU is still cache hot there and
@@ -1515,26 +1435,41 @@ static bool task_hot(struct task_struct *p, u64 now)
 }
 
 /*
- * Dispatch on @dst_cpu the task with the earliest deadline among the head
- * of its own DSQ and the heads of the DSQs of other CPUs on the node.
+ * Number of other CPUs' queues a busy CPU looks at on each dispatch for a
+ * queue deeper than its own.
+ */
+#define BALANCE_SAMPLE	2
+
+/*
+ * Dispatch on @dst_cpu a task from its own DSQ or from the DSQ of another
+ * CPU of the node.
  *
- * With the per-CPU keys all built on the same system-wide vruntime
- * reference, the earliest head across the queues is the task a single
- * node-wide queue would hand out. Peeking every queue at every dispatch
- * costs as much as the single queue's lock did, though, so the scan is
- * bounded: a CPU with work of its own samples @steal_sample other queues,
- * rotating through them across dispatches, and takes a remote head only
- * when it is at least a full request ahead of its own; a task with real
- * lag to spend is found within a few dispatches, while under a balanced
- * load nothing clears the bar and every CPU drains its own queue, as its
- * own runqueue would be drained by EEVDF. A CPU with nothing of its own
- * takes the first task it finds instead of the earliest, the way the idle
- * balancer pulls whatever is available.
+ * A CPU with nothing queued pulls the first task it finds: from the slower
+ * CPUs first, hot or not, since a task is better off on a faster core than
+ * with a warm cache on a slow one (this is what carries the load up the
+ * capacity ladder, the way asym packing does), but only when its whole
+ * core is idle, as a fast thread sharing its core is no better than a
+ * whole slow one and asym_smt_can_pull_tasks() refuses that move too;
+ * then from its own LLC,
+ * then from the rest of the node, leaving alone a task that ran on its CPU
+ * a moment ago, see task_hot(): its home CPU takes it back within a slice,
+ * while moving it costs its cache.
  *
- * A task that ran on its CPU a moment ago is left there in both cases:
- * its home CPU takes it back within a slice, while moving it costs its
- * cache, see task_hot(). This is what keeps a wakeup-heavy load from
- * migrating on every idle transition.
+ * A CPU with work of its own samples BALANCE_SAMPLE other queues, rotating
+ * through them across dispatches, and takes the head of one that is more
+ * than twice as deep as its own and at least two tasks deeper. Every queue
+ * is fed by the wakeups of its own CPU, so this is the only way a pile-up
+ * gets spread out, e.g. a hundred children forked on one CPU while every
+ * other CPU was busy with a task of its own, the way the load balancer
+ * moves tasks off the busiest runqueue. The margin is what keeps CPUs
+ * under an even load from trading tasks back and forth (the balancer has
+ * its imbalance_pct), and a CPU samples at most once per slice, the way the load
+ * balancer runs on the tick rather than on every pick: sampling on every
+ * dispatch under a wakeup storm moved tasks around faster than they could
+ * warm a cache. Otherwise the CPU takes its own head: waiting for the
+ * owning CPU's slice end is what EEVDF does under RUN_TO_PARITY, and
+ * sampling the queues for an earlier deadline instead measured worse on
+ * every load.
  *
  * Only the heads are considered, a queue whose head cannot run on @dst_cpu
  * (or is still hot there) is skipped as a whole.
@@ -1546,25 +1481,22 @@ static bool try_steal_task(s32 dst_cpu)
 	struct cpu_ctx *cctx = try_lookup_cpu_ctx(dst_cpu);
 	struct task_struct *own = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(dst_cpu));
 	int node = cpu_node(dst_cpu);
-	u64 min_dl = 0, now = bpf_ktime_get_ns(), dst_llc = cpu_llc_of(dst_cpu);
-	u32 limit, start, cpu, i;
-	s32 min_cpu = -1;
+	u64 now = bpf_ktime_get_ns(), dst_llc = cpu_llc_of(dst_cpu);
+	u32 limit, start, cpu, i, own_nr = 0;
+	s32 src = -1;
 
-	/*
-	 * One extra slot covers @dst_cpu itself falling in the sample.
-	 */
-	limit = own ? (steal_sample ? steal_sample + 1 : 0) : nr_cpu_ids;
+	if (own) {
+		if (!cctx || time_before(now, cctx->last_balance_at + slice_ns))
+			goto own;
+		cctx->last_balance_at = now;
+		own_nr = scx_bpf_dsq_nr_queued(cpu_dsq(dst_cpu));
+	}
+
 	start = cctx ? cctx->steal_cursor : dst_cpu;
 	if (start >= nr_cpu_ids)
 		start = 0;
 
-	/*
-	 * A CPU with nothing to do looks at the slower CPUs first, and takes
-	 * their tasks hot or not: a task is better off on a faster core than
-	 * with a warm cache on a slow one. This is what pulls the load up the
-	 * capacity ladder, the way asym packing does.
-	 */
-	if (!own && !all_cpus_same_capacity) {
+	if (!own && !all_cpus_same_capacity && core_is_idle(dst_cpu)) {
 		u64 dst_cap = cpu_cap(dst_cpu);
 
 		bpf_for(i, 0, nr_cpu_ids) {
@@ -1583,20 +1515,19 @@ static bool try_steal_task(s32 dst_cpu)
 			if (!p || !bpf_cpumask_test_cpu(dst_cpu, p->cpus_ptr))
 				continue;
 
-			min_dl = p->scx.dsq_vtime;
-			min_cpu = cpu;
+			src = cpu;
 			break;
 		}
-		if (min_cpu >= 0)
+		if (src >= 0)
 			goto pick;
 	}
 
 	/*
-	 * An idle CPU looks in its own LLC before the rest of the node, the
-	 * way the idle balancer walks the domains bottom up. A busy CPU
-	 * sampling for an earlier deadline scans a couple of queues wherever
-	 * they are, so it does a single pass.
+	 * One extra slot covers @dst_cpu itself falling in the sample. An
+	 * idle CPU walks its own LLC before the rest of the node, so it does
+	 * two passes.
 	 */
+	limit = own ? BALANCE_SAMPLE + 1 : nr_cpu_ids;
 	bpf_for(i, 0, own ? limit : 2 * limit) {
 		struct task_struct *p;
 		bool local_pass = !own && i < limit;
@@ -1610,42 +1541,40 @@ static bool try_steal_task(s32 dst_cpu)
 			continue;
 		if (!own && (cpu_llc_of(cpu) == dst_llc) != local_pass)
 			continue;
+		if (own) {
+			u32 nr = scx_bpf_dsq_nr_queued(cpu_dsq(cpu));
+
+			if (nr < own_nr + 2 || nr <= 2 * own_nr)
+				continue;
+		}
 
 		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(cpu));
 		if (!p || !bpf_cpumask_test_cpu(dst_cpu, p->cpus_ptr) ||
 		    task_hot(p, now))
 			continue;
 
-		if (min_cpu < 0 || time_before(p->scx.dsq_vtime, min_dl)) {
-			min_dl = p->scx.dsq_vtime;
-			min_cpu = cpu;
-		}
-
-		/*
-		 * Nothing to compare against: take the first task found.
-		 */
-		if (!own)
-			break;
+		src = cpu;
+		break;
 	}
-	if (cctx && limit) {
+	if (cctx) {
 		start += limit;
 		if (start >= nr_cpu_ids)
 			start -= nr_cpu_ids;
 		cctx->steal_cursor = start;
 	}
 
-	if (own && (min_cpu < 0 ||
-		    !time_before(min_dl + slice_ns, own->scx.dsq_vtime)))
-		min_cpu = dst_cpu;
+own:
+	if (src < 0 && own)
+		src = dst_cpu;
 
 pick:
-	if (min_cpu < 0)
+	if (src < 0)
 		return false;
 
-	if (!scx_bpf_dsq_move_to_local(cpu_dsq(min_cpu), 0))
+	if (!scx_bpf_dsq_move_to_local(cpu_dsq(src), 0))
 		return false;
 
-	if (min_cpu != dst_cpu)
+	if (src != dst_cpu)
 		__sync_fetch_and_add(&nr_steals, 1);
 
 	return true;
@@ -1654,8 +1583,9 @@ pick:
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * Take the earliest deadline waiting on this node, then fall back
-	 * to this CPU's own DSQ in case the pick raced with another CPU.
+	 * Take a task from this CPU's queue or from a deeper one on the
+	 * node, then fall back to this CPU's own DSQ in case the pick raced
+	 * with another CPU.
 	 */
 	if (try_steal_task(cpu) || scx_bpf_dsq_move_to_local(cpu_dsq(cpu), 0))
 		return;
@@ -1725,7 +1655,6 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 {
 	struct task_ctx *tctx;
-	struct cpu_ctx *cctx;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1733,13 +1662,9 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 
 	/*
 	 * Save a timestamp when the task begins to run (used to evaluate
-	 * the used time slice), in the task and in the CPU, where
-	 * is_smt_contended() reads it for the sibling.
+	 * the used time slice).
 	 */
 	tctx->last_run_at = bpf_ktime_get_ns();
-	cctx = try_lookup_cpu_ctx(scx_bpf_task_cpu(p));
-	if (cctx)
-		cctx->last_run_at = tctx->last_run_at;
 
 	/*
 	 * Snapshot the task's user time, so that only the user time

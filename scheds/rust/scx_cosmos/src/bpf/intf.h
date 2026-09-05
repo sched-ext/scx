@@ -28,13 +28,4 @@ typedef signed long s64;
 typedef int pid_t;
 #endif /* __VMLINUX_H__ */
 
-struct cpu_arg {
-	s32 cpu_id;
-};
-
-struct domain_arg {
-	s32 cpu_id;
-	s32 sibling_cpu_id;
-};
-
 #endif /* __INTF_H */

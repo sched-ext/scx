@@ -16,7 +16,7 @@ mod stats;
 use cgroup::CgroupReader;
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_int, c_ulong};
+use std::ffi::c_ulong;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -31,7 +31,6 @@ use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
-use libbpf_rs::ProgramInput;
 use log::{debug, info, warn};
 use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::Nvml;
@@ -80,13 +79,6 @@ struct Opts {
     /// moves slowly. EEVDF bounds the lag to twice the base slice (max(2 * slice, tick)).
     #[clap(short = 'l', long, default_value = "2000")]
     slice_lag_us: u64,
-
-    /// Number of other CPUs' dispatch queues sampled at each dispatch while the CPU has work
-    /// of its own, looking for an earlier deadline to steal.
-    ///
-    /// 0 = a busy CPU never steals, only an idle CPU pulls from the others.
-    #[clap(long, default_value = "0")]
-    steal_sample: u64,
 
     /// CPU busy threshold.
     ///
@@ -501,7 +493,6 @@ impl<'a> Scheduler<'a> {
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
-        rodata.steal_sample = opts.steal_sample;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.flat_idle_scan = opts.flat_idle_scan;
         rodata.smt_enabled = smt_enabled;
@@ -699,11 +690,6 @@ impl<'a> Scheduler<'a> {
                     MapFlags::ANY,
                 )?;
             }
-        }
-
-        // Initialize SMT domains.
-        if smt_enabled {
-            Self::init_smt_domains(&mut skel, &topo)?;
         }
 
         // Attach the scheduler.
@@ -913,44 +899,6 @@ impl<'a> Scheduler<'a> {
         } else {
             bail!(errors.join("; "))
         }
-    }
-
-    fn enable_sibling_cpu(
-        skel: &mut BpfSkel<'_>,
-        cpu: usize,
-        sibling_cpu: usize,
-    ) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_sibling_cpu;
-        let mut args = domain_arg {
-            cpu_id: cpu as c_int,
-            sibling_cpu_id: sibling_cpu as c_int,
-        };
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let out = prog.test_run(input).unwrap();
-        if out.return_value != 0 {
-            return Err(out.return_value);
-        }
-
-        Ok(())
-    }
-
-    fn init_smt_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
-        let smt_siblings = topo.sibling_cpus();
-
-        info!("SMT sibling CPUs: {:?}", smt_siblings);
-        for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
-            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize).unwrap();
-        }
-
-        Ok(())
     }
 
     fn get_metrics(&self) -> Metrics {
