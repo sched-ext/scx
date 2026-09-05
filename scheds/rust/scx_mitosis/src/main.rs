@@ -281,6 +281,13 @@ impl Subcell {
     }
 }
 
+/// Where the scheduler's cells come from.
+enum CellSource {
+    /// Direct children of the cgroup passed via --cell-parent-cgroup,
+    /// tracked through inotify.
+    Parent(CellManager),
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     monitor_interval: Duration,
@@ -297,8 +304,8 @@ struct Scheduler<'a> {
     last_configuration_seq: Option<u32>,
     /// Last observed cpuset_seq for cpuset change detection
     last_cpuset_seq: u32,
-    /// Cell manager for the cgroup passed via --cell-parent-cgroup.
-    cell_manager: CellManager,
+    /// Where the scheduler's cells come from.
+    cell_source: CellSource,
     /// Whether CPU borrowing is enabled
     enable_borrowing: bool,
     /// Whether demand-based rebalancing is enabled
@@ -455,17 +462,23 @@ impl<'a> Scheduler<'a> {
             .launch()
             .context("launching stats server")?;
 
-        let parent_cgroup = Self::managed_cell_parent(opts)?;
-        let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
-        let cell_manager = CellManager::new(
-            parent_cgroup,
-            MAX_CELLS as u32,
-            topology.span.clone(),
-            exclude,
-            opts.cell0_min_cpus,
-            mitosis_topology.cpu_to_llc.into_iter().collect(),
-        )
-        .with_context(|| format!("initializing cell manager for cgroup {}", parent_cgroup))?;
+        let cell_source = {
+            let parent_cgroup = Self::managed_cell_parent(opts)?;
+            let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
+            CellSource::Parent(
+                CellManager::new(
+                    parent_cgroup,
+                    MAX_CELLS as u32,
+                    topology.span.clone(),
+                    exclude,
+                    opts.cell0_min_cpus,
+                    mitosis_topology.cpu_to_llc.into_iter().collect(),
+                )
+                .with_context(|| {
+                    format!("initializing cell manager for cgroup {}", parent_cgroup)
+                })?,
+            )
+        };
 
         // Create epoll instance for event-driven main loop
         let epoll = Epoll::new(EpollCreateFlags::empty()).context("creating epoll instance")?;
@@ -485,12 +498,16 @@ impl<'a> Scheduler<'a> {
             )
             .context("registering stats-waker with epoll")?;
 
-        epoll
-            .add(
-                &cell_manager,
-                EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
-            )
-            .context("registering cell manager inotify with epoll")?;
+        match &cell_source {
+            CellSource::Parent(cell_manager) => {
+                epoll
+                    .add(
+                        cell_manager,
+                        EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
+                    )
+                    .context("registering cell manager inotify with epoll")?;
+            }
+        }
 
         Ok(Self {
             skel,
@@ -504,7 +521,7 @@ impl<'a> Scheduler<'a> {
             stats_server: Some(stats_server),
             last_configuration_seq: None,
             last_cpuset_seq: 0,
-            cell_manager,
+            cell_source,
             enable_borrowing: opts.enable_borrowing,
             enable_rebalancing: opts.enable_rebalancing,
             rebalance_threshold: opts.rebalance_threshold,
@@ -602,15 +619,34 @@ impl<'a> Scheduler<'a> {
         uei_report!(&self.skel, uei)
     }
 
+    /// Cell manager backing parent-cgroup mode.
+    fn cell_manager(&self) -> Result<&CellManager> {
+        match &self.cell_source {
+            CellSource::Parent(cell_manager) => Ok(cell_manager),
+        }
+    }
+
+    fn cell_manager_mut(&mut self) -> Result<&mut CellManager> {
+        match &mut self.cell_source {
+            CellSource::Parent(cell_manager) => Ok(cell_manager),
+        }
+    }
+
     /// Apply initial cell assignments discovered at startup
     fn apply_initial_cells(&mut self) -> Result<()> {
+        match self.cell_source {
+            CellSource::Parent(_) => self.apply_initial_parent_cells(),
+        }
+    }
+
+    fn apply_initial_parent_cells(&mut self) -> Result<()> {
         let cpu_assignments = self
             .compute_and_apply_cell_config(&[])
             .context("computing initial cell configuration")?;
 
         info!(
             "Applied initial cell configuration: {}",
-            self.cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager()?.format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -620,7 +656,7 @@ impl<'a> Scheduler<'a> {
     fn process_cell_events(&mut self) -> Result<()> {
         let (num_new, num_destroyed, new_cell_ids, destroyed_cell_ids) = {
             let (new_cells, destroyed_cells) = self
-                .cell_manager
+                .cell_manager_mut()?
                 .process_events()
                 .context("processing inotify events")?;
 
@@ -651,7 +687,7 @@ impl<'a> Scheduler<'a> {
             "Cell config updated ({} new, {} destroyed): {}",
             num_new,
             num_destroyed,
-            self.cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager()?.format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -671,7 +707,7 @@ impl<'a> Scheduler<'a> {
     ) -> Result<Vec<CpuAssignment>> {
         let (cell_assignments, cpu_assignments) = {
             let active_cell_ids: Vec<u32> = self
-                .cell_manager
+                .cell_manager()?
                 .get_cell_assignments()
                 .iter()
                 .map(|(_, cell_id)| *cell_id)
@@ -710,22 +746,22 @@ impl<'a> Scheduler<'a> {
                         .map(|&id| (id, self.smoothed_util[id as usize]))
                         .collect();
 
-                    self.cell_manager
+                    self.cell_manager()?
                         .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
                         .context("computing demand-weighted CPU assignments")?
                 } else {
                     // No utilization data yet (e.g., initial startup) — equal weight
-                    self.cell_manager
+                    self.cell_manager()?
                         .compute_cpu_assignments(self.enable_borrowing)
                         .context("computing equal-weight CPU assignments (no utilization data)")?
                 }
             } else {
-                self.cell_manager
+                self.cell_manager()?
                     .compute_cpu_assignments(self.enable_borrowing)
                     .context("computing equal-weight CPU assignments (rebalancing disabled)")?
             };
 
-            (self.cell_manager.get_cell_assignments(), cpu_assignments)
+            (self.cell_manager()?.get_cell_assignments(), cpu_assignments)
         };
 
         // TODO(kkd): Plug in demand weighted subcell assignments once
@@ -768,6 +804,13 @@ impl<'a> Scheduler<'a> {
             return Ok(());
         }
 
+        match self.cell_source {
+            CellSource::Parent(_) => self.rebalance_parent_cells(spread, &active_cells),
+        }
+    }
+
+    /// Recompute demand-weighted CPU assignments for parent-cgroup cells.
+    fn rebalance_parent_cells(&mut self, spread: f64, active_cells: &[u32]) -> Result<()> {
         // Build demand map from smoothed utilization
         let cell_demands: HashMap<u32, f64> = active_cells
             .iter()
@@ -777,7 +820,7 @@ impl<'a> Scheduler<'a> {
         // Compute new assignments and check if they differ from current
         let (cell_assignments, cpu_assignments) = {
             let cpu_assignments = self
-                .cell_manager
+                .cell_manager()?
                 .compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)
                 .context("computing demand-weighted CPU assignments for rebalance")?;
 
@@ -794,7 +837,7 @@ impl<'a> Scheduler<'a> {
                 return Ok(());
             }
 
-            (self.cell_manager.get_cell_assignments(), cpu_assignments)
+            (self.cell_manager()?.get_cell_assignments(), cpu_assignments)
         };
 
         let subcell_assignments = self.compute_subcell_assignments(&cpu_assignments)?;
@@ -810,7 +853,7 @@ impl<'a> Scheduler<'a> {
             "Rebalanced CPUs (spread={:.1}%, count={}): {}",
             spread,
             self.rebalance_count,
-            self.cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager()?.format_cell_config(&cpu_assignments)
         );
 
         Ok(())
@@ -1292,6 +1335,13 @@ impl<'a> Scheduler<'a> {
         Ok(cell_stats_delta)
     }
 
+    /// Cgroup path backing `cell_id` in the active cell source.
+    fn cgroup_path_for_cell(&self, cell_id: u32) -> String {
+        match &self.cell_source {
+            CellSource::Parent(cell_manager) => cell_manager.cgroup_path_for_cell(cell_id),
+        }
+    }
+
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
         let cpu_ctxs = read_cpu_ctxs(&self.skel).context("reading per-CPU contexts for metrics")?;
@@ -1305,7 +1355,10 @@ impl<'a> Scheduler<'a> {
 
         // Mirror the sticky holdout flag on every collection, independent of the
         // zero-decisions early return inside log_all_queue_stats above.
-        self.metrics.enforced_holdout = self.cell_manager.enforced_holdout() as u64;
+        let enforced_holdout = match &self.cell_source {
+            CellSource::Parent(cell_manager) => cell_manager.enforced_holdout(),
+        };
+        self.metrics.enforced_holdout = enforced_holdout as u64;
 
         self.collect_demand_metrics(&cpu_ctxs)
             .context("collecting demand metrics")?;
@@ -1315,13 +1368,14 @@ impl<'a> Scheduler<'a> {
         }
 
         for (cell_id, cell) in self.cells.iter() {
+            let cgroup_path = self.cgroup_path_for_cell(*cell_id);
             // Assume we have a CellMetrics entry if we have a known cell
             self.metrics
                 .cells
                 .entry(*cell_id)
                 .and_modify(|cell_metrics| {
                     cell_metrics.num_cpus = cell.cpus.weight() as u32;
-                    cell_metrics.cgroup_path = self.cell_manager.cgroup_path_for_cell(*cell_id);
+                    cell_metrics.cgroup_path = cgroup_path;
                 });
         }
         self.metrics.num_cells = self.cells.len() as u32;
@@ -1496,8 +1550,14 @@ impl<'a> Scheduler<'a> {
         }
         self.last_cpuset_seq = current_seq;
 
+        match self.cell_source {
+            CellSource::Parent(_) => self.recompute_parent_cells_after_cpuset_change(),
+        }
+    }
+
+    fn recompute_parent_cells_after_cpuset_change(&mut self) -> Result<()> {
         if !self
-            .cell_manager
+            .cell_manager_mut()?
             .refresh_cpusets()
             .context("refreshing cell cpusets")?
         {
@@ -1512,7 +1572,7 @@ impl<'a> Scheduler<'a> {
         self.update_applied_cpuset_seq();
         info!(
             "Cpuset change detected, recomputed config: {}",
-            self.cell_manager.format_cell_config(&cpu_assignments)
+            self.cell_manager()?.format_cell_config(&cpu_assignments)
         );
         Ok(())
     }
