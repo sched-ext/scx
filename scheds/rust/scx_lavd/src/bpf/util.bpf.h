@@ -55,6 +55,211 @@ static __always_inline bool is_rt_or_dl_task_running(s32 cpu)
 	return curr && rt_or_dl_task(curr);
 }
 
+static __always_inline
+void __arena * __arena_memset(void __arena *ptr, int value, size_t num)
+{
+	for (int i = 0; i < num && can_loop; i++)
+		((char __arena *)ptr)[i] = value;
+
+	return ptr;
+}
+
+/*
+ * Extrapolate @anchor_cpu's clock_pelt from its last reading @val_at, taken at
+ * wall time @val_at_wall, to wall time @now, for an update that runs off-rq
+ * and cannot read it. The kernel advances clock_pelt scaled by capacity and
+ * frequency while the CPU is busy and at wall rate while it is idle, where it
+ * is synced to clock_task. Per unit wall time, in LAVD_SCALE fixed point:
+ *
+ *   rate = avg_perf_factor * avg_util_wall / LAVD_SCALE    (busy fraction)
+ *        + (LAVD_SCALE - avg_util_wall)                     (idle fraction)
+ *
+ * Returns 0 with nothing to extrapolate from: no anchor, an unpaired stamp,
+ * or no context for the anchor.
+ */
+static __always_inline u64
+ravg_invr_extrapolate(u16 anchor_cpu, u64 val_at, u64 val_at_wall, u64 now)
+{
+	struct cpu_ctx *ac;
+	u64 avg_util_wall, avg_perf_factor;
+	u64 busy_ft, idle_ft, rate;
+
+	if (unlikely(anchor_cpu == LAVD_CPU_ID_NONE || !val_at_wall)) {
+		return 0;
+	}
+
+	ac = get_cpu_ctx_id(anchor_cpu);
+	if (unlikely(!ac)) {
+		return 0;
+	}
+
+	/* The rate at which the anchor's clock_pelt advances per wall time. */
+	avg_util_wall = min(READ_ONCE(ac->avg_util_wall), LAVD_SCALE);
+	avg_perf_factor = min(READ_ONCE(ac->avg_perf_factor), LAVD_SCALE);
+	busy_ft = (avg_util_wall * avg_perf_factor) >> LAVD_SHIFT;
+	idle_ft = LAVD_SCALE - avg_util_wall;
+	rate = busy_ft + idle_ft;
+
+	return val_at + ((time_delta(now, val_at_wall) * rate) >> LAVD_SHIFT);
+}
+
+/*
+ * @cpu's invariant clock, the kernel's rq_clock_pelt(): it advances slower
+ * when @cpu runs below its maximum capacity or frequency. Returns 0 when the
+ * read would be remote, since clock_pelt is per-rq and a NO_HZ-idle rq's is
+ * stale.
+ */
+static __always_inline u64 local_clock_pelt(s32 cpu)
+{
+	if (unlikely(bpf_get_smp_processor_id() != cpu))
+		return 0;
+	return scx_clock_pelt(cpu);
+}
+
+/*
+ * Accumulate @val into @ri against @cpu's invariant clock at wall time @now
+ * and anchor it to @cpu. Returns the clock @ri was brought up to, or 0 when
+ * nothing could be accumulated; @ri is then left unanchored so the next update
+ * rebases instead of folding a stale value across the unmeasured gap.
+ *
+ * Off-rq @cpu's clock cannot be read: settle up on the current anchor's
+ * extrapolated clock and stay there. When @ri is anchored to another CPU,
+ * first settle up the gap on that CPU's extrapolated clock, as the kernel
+ * syncs a blocked entity against its old rq before attaching it elsewhere;
+ * without this a task that migrates on wakeup would neither accumulate nor
+ * decay its sleep. Then move only the timestamp, as attach_entity_load_avg()
+ * does; old and cur are normalized sums and stay.
+ *
+ * @ri is in plain memory; the task path bounces its arena copy through the
+ * stack.
+ */
+static __always_inline u64
+ravg_invr_accumulate(struct ravg_data_invr *ri, u64 val, s32 cpu, u64 now)
+{
+	struct ravg_data *rd = &ri->rd;
+	u64 pelt_now = local_clock_pelt(cpu);
+	u16 anchor_cpu = cpu;
+	u64 pelt_prev;
+
+	if (unlikely(!pelt_now)) {
+		/*
+		 * Cannot read @cpu's pelt clock since the current CPU != @cpu.
+		 * Hence, extrapolate pelt clock using the wall clock time.
+		 */
+		anchor_cpu = ri->anchor_cpu;
+		pelt_now = ravg_invr_extrapolate(anchor_cpu, rd->val_at,
+						 ri->val_at_wall, now);
+		if (unlikely(!pelt_now)) {
+			ri->anchor_cpu = LAVD_CPU_ID_NONE;
+			return 0;
+		}
+	}
+
+	if (unlikely(anchor_cpu != ri->anchor_cpu || !rd->val_at)) {
+		/*
+		 * @cpu is not the ravg's anchor CPU, or @ri has never been
+		 * accumulated. clock_pelt readings of different CPUs are not
+		 * comparable, so settle up the gap on the anchor's extrapolated
+		 * clock, then start a new period with the new value on @cpu's.
+		 */
+		pelt_prev = ravg_invr_extrapolate(ri->anchor_cpu, rd->val_at,
+						  ri->val_at_wall, now);
+		if (pelt_prev) {
+			ravg_accumulate(rd, rd->val, pelt_prev,
+					LAVD_RAVG_HALFLIFE_NS);
+		}
+		rd->val_at = pelt_now;
+		rd->val = val;
+	} else {
+		/* Everything is aligned; just accumulate @cpu's pelt clock. */
+		ravg_accumulate(rd, val, pelt_now, LAVD_RAVG_HALFLIFE_NS);
+	}
+
+	ri->val_at_wall = now;
+	ri->anchor_cpu = anchor_cpu;
+
+	return pelt_now;
+}
+
+/*
+ * ravg_invr_accumulate() plus the resulting average in @avg (RAVG_FRAC_BITS
+ * fixed point). Returns false when nothing could be accumulated, so the caller
+ * can keep its last reading; 0 is a valid average.
+ */
+static __always_inline bool
+ravg_invr_accumulate_read(struct ravg_data_invr *ri, u64 val, s32 cpu, u64 now,
+			  u64 *avg)
+{
+	u64 pelt_now = ravg_invr_accumulate(ri, val, cpu, now);
+
+	if (unlikely(!pelt_now)) {
+		return false;
+	}
+
+	*avg = ravg_read(&ri->rd, pelt_now, LAVD_RAVG_HALFLIFE_NS);
+	return true;
+}
+
+/*
+ * The two above on an arena-resident @ri, bounced through a stack copy. The
+ * average is written back only when something was accumulated; the anchor and
+ * wall stamp always are, so a dropped anchor sticks. @avg may be NULL.
+ */
+static __always_inline bool
+__ravg_invr_accumulate_arena(struct ravg_data_invr __arena *ri, u64 val,
+			     s32 cpu, u64 now, u64 *avg)
+{
+	struct ravg_data_invr li;
+	bool ok;
+
+	ravg_from_arena(&li.rd, &ri->rd);
+	li.val_at_wall = ri->val_at_wall;
+	li.anchor_cpu = ri->anchor_cpu;
+
+	if (avg) {
+		ok = ravg_invr_accumulate_read(&li, val, cpu, now, avg);
+	} else {
+		ok = ravg_invr_accumulate(&li, val, cpu, now) != 0;
+	}
+
+	if (likely(ok)) {
+		ravg_to_arena(&ri->rd, &li.rd);
+	}
+	ri->val_at_wall = li.val_at_wall;
+	ri->anchor_cpu = li.anchor_cpu;
+
+	return ok;
+}
+
+static __always_inline void
+ravg_invr_accumulate_arena(struct ravg_data_invr __arena *ri, u64 val, s32 cpu,
+			   u64 now)
+{
+	__ravg_invr_accumulate_arena(ri, val, cpu, now, NULL);
+}
+
+static __always_inline bool
+ravg_invr_accumulate_read_arena(struct ravg_data_invr __arena *ri, u64 val,
+				s32 cpu, u64 now, u64 *avg)
+{
+	return __ravg_invr_accumulate_arena(ri, val, cpu, now, avg);
+}
+
+/*
+ * Update @cpuc's duty-cycle ravg and util_est. @val is LAVD_SCALE when the CPU
+ * picks up a task and 0 when it drops one.
+ */
+static __always_inline void
+cpu_util_ravg_update(struct cpu_ctx *cpuc, u64 val, u64 now)
+{
+	u64 avg_util_fp;
+
+	if (ravg_invr_accumulate_read(&cpuc->avg_util_ravg, val, cpuc->cpu_id,
+				      now, &avg_util_fp)) {
+		cpuc->util_est = (u32)(avg_util_fp >> RAVG_FRAC_BITS);
+	}
+}
+
 /*
  * Two lookups, chosen by which task a program is asking about.
  *
