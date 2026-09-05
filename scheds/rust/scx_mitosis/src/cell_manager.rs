@@ -1156,7 +1156,37 @@ impl CellManager {
         subcells: &[CpuRecipient],
         compute_borrowable: bool,
     ) -> Result<Vec<CpuAssignment>> {
-        CpuManager::new(domain).compute_assignments(subcells, compute_borrowable)
+        Self::compute_cpu_assignments_for(domain, subcells, compute_borrowable)
+    }
+
+    /// Compute CPU assignments over `domain` for an explicit recipient list.
+    pub(crate) fn compute_cpu_assignments_for(
+        domain: &Cpumask,
+        recipients: &[CpuRecipient],
+        compute_borrowable: bool,
+    ) -> Result<Vec<CpuAssignment>> {
+        CpuManager::new(domain).compute_assignments(recipients, compute_borrowable)
+    }
+
+    fn requested_minimum_displaced_claim(
+        recipients: &[CpuRecipient],
+        assignments: &[CpuAssignment],
+    ) -> bool {
+        recipients
+            .iter()
+            .filter(|recipient| recipient.minimum.requested > 0)
+            .any(|recipient| {
+                let mut other_claims = Cpumask::new();
+                for other in recipients.iter().filter(|other| other.id != recipient.id) {
+                    if let Some(claimed) = &other.claimed {
+                        other_claims = other_claims.or(claimed);
+                    }
+                }
+                assignments
+                    .iter()
+                    .find(|assignment| assignment.id == recipient.id)
+                    .is_some_and(|assignment| assignment.primary.and(&other_claims).weight() > 0)
+            })
     }
 
     /// Internal implementation shared by equal-weight and demand-weighted assignment.
@@ -1213,20 +1243,8 @@ impl CellManager {
 
         // The sticky statistic records when satisfying cell 0's requested
         // minimum displaced any CPU preferentially claimed by a workload cell.
-        if self.cell0_min_cpus > 0 {
-            let mut workload_claims = Cpumask::new();
-            for recipient in recipients.iter().filter(|recipient| recipient.id != 0) {
-                if let Some(claimed) = &recipient.claimed {
-                    workload_claims = workload_claims.or(claimed);
-                }
-            }
-            if assignments
-                .iter()
-                .find(|assignment| assignment.id == 0)
-                .is_some_and(|assignment| assignment.primary.and(&workload_claims).weight() > 0)
-            {
-                self.enforced_holdout.store(true, Ordering::Relaxed);
-            }
+        if Self::requested_minimum_displaced_claim(&recipients, &assignments) {
+            self.enforced_holdout.store(true, Ordering::Relaxed);
         }
 
         Ok(assignments)
